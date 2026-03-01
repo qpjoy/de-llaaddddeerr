@@ -1,0 +1,5 @@
+# 配置文件（包含敏感 IP）
+config.env
+
+# 备份文件
+*.backup
