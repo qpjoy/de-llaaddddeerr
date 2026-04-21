@@ -284,6 +284,20 @@ WG_EXPORT_BASE_URL=https://vpn.example.com
 docker compose up -d wireguard
 ```
 
+如果你的服务器还是 `docker-compose 1.x`，把上面的命令替换成：
+
+```bash
+docker-compose up -d wireguard
+```
+
+这里的 `wireguard` 服务使用了 `host network`。在这种模式下，Docker 不允许再给容器单独设置 `net.ipv4.conf.all.src_valid_mark` 这类 `sysctl`，否则就会出现：
+
+```bash
+sysctl "net.ipv4.conf.all.src_valid_mark" not allowed in host network namespace
+```
+
+这套服务端用的是 WireGuard **server mode**，按 LinuxServer 的镜像说明，`src_valid_mark` 主要是 client mode 场景需要；所以这里已经从 compose 里去掉了，不影响当前这套服务端方案。
+
 LinuxServer 的 WireGuard 镜像会把每个 peer 的标准配置生成到：
 
 ```bash
@@ -300,6 +314,12 @@ bash ./scripts/export-wg-mihomo-stack.sh
 
 ```bash
 docker compose up -d subscriptions
+```
+
+老版环境同理可用：
+
+```bash
+docker-compose up -d subscriptions
 ```
 
 用户实际拿到的链接类似：
