@@ -252,7 +252,29 @@ WG_SERVER_PORT=51820
 WG_PEERS=user01,user02,user03,user04,user05,user06,user07,user08,user09,user10
 ```
 
-如果你没有域名，`WG_SERVER_HOST` 直接填公网 IP 即可。
+订阅分发这层有两种模式：
+
+1. 没有域名，先用 IP：
+
+```bash
+WG_EXPORT_SITE_ADDRESS=:8080
+WG_EXPORT_BASE_URL=http://你的公网IP:8080
+```
+
+2. 有域名，直接自动 HTTPS：
+
+```bash
+WG_EXPORT_SITE_ADDRESS=vpn.example.com
+WG_EXPORT_BASE_URL=https://vpn.example.com
+```
+
+如果你走域名模式，还需要：
+
+- 把域名的 `A` 记录指到这台服务器公网 IP
+- 放通服务器的 `80/tcp` 和 `443/tcp`
+- 首次启动 `subscriptions` 容器时让 Caddy 可以正常连外网申请证书
+
+这种情况下你不需要手动写证书，Caddy 会自动签发和续期 HTTPS 证书。
 
 `WG_KEEPALIVE_PEERS=all` 默认已经开着，这个设置对移动网络和 NAT 场景更稳，适合“隔一段时间断开”的场景先作为默认值。
 
@@ -268,13 +290,10 @@ LinuxServer 的 WireGuard 镜像会把每个 peer 的标准配置生成到：
 docker/wg-mihomo-stack/data/wireguard/
 ```
 
-接着把这些标准 `.conf` 翻译成每用户独立的 Mihomo 订阅文件：
+接着把这些标准 `.conf` 翻译成每用户独立的 Mihomo 订阅文件。推荐直接用包装脚本，它会自动读取 `.env` 里的 `WG_EXPORT_BASE_URL`：
 
 ```bash
-bash ./scripts/export-lsio-wireguard-mihomo.sh \
-  --input-dir ./docker/wg-mihomo-stack/data/wireguard \
-  --output-dir ./docker/wg-mihomo-stack/data/subscriptions \
-  --base-url http://你的公网IP:8080
+bash ./scripts/export-wg-mihomo-stack.sh
 ```
 
 最后启动订阅分发服务：
@@ -287,6 +306,8 @@ docker compose up -d subscriptions
 
 ```bash
 http://你的公网IP:8080/user01.mihomo.yaml
+# 或者
+https://vpn.example.com/user01.mihomo.yaml
 ```
 
 为了避免把私钥裸露在公网，订阅服务默认带 Basic Auth。你需要先生成一个密码哈希，填进 `.env` 的 `WG_EXPORT_PASSWORD_HASH`：
@@ -303,7 +324,7 @@ http://用户名:密码@你的公网IP:8080/user01.mihomo.yaml
 
 更稳妥的做法是把“URL”和“账号密码”分开发，不把密码直接写在链接里。
 
-如果你现在只有 `IP:端口`，没有域名和证书，这个订阅分发就是 `HTTP` 而不是 `HTTPS`。这种情况下 Basic Auth 只能做访问控制，不能提供传输加密；更适合临时分发或受控环境，不适合长期把带私钥的订阅暴露在公网。
+如果你现在只有 `IP:端口`，没有域名和证书，这个订阅分发就是 `HTTP` 而不是 `HTTPS`。这种情况下 Basic Auth 只能做访问控制，不能提供传输加密；更适合临时分发或受控环境，不适合长期把带私钥的订阅暴露在公网。有域名时，优先走 `https://你的域名/...`。
 
 ### 1.8 WireGuard 用户限速
 
@@ -456,6 +477,7 @@ de-llaaddddeerr/
 ├── scripts/
 │   ├── fix-routes.sh      # 修复路由（主脚本）
 │   ├── export-lsio-wireguard-mihomo.sh # 把标准 WG 配置转换成 Mihomo 订阅
+│   ├── export-wg-mihomo-stack.sh # 读取 stack .env 并批量导出 Mihomo 订阅
 │   ├── restore-routes.sh  # 恢复网络
 │   ├── wg-tc-limit.sh     # 按 WireGuard peer IP 做 tc 限速
 │   ├── wireguard.sh       # WireGuard 服务器安装脚本

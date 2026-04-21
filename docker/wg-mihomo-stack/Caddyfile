@@ -1,4 +1,4 @@
-:8080 {
+{$WG_EXPORT_SITE_ADDRESS} {
 	root * /srv/wg
 
 	@health path /healthz
