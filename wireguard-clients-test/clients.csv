@@ -1,0 +1,2 @@
+name,ipv4,conf,mihomo_provider,mihomo_profile,conf_url,mihomo_provider_url,mihomo_profile_url
+test01,10.7.0.3,/root/wireguard-clients-test/test01.conf,/root/wireguard-clients-test/test01.mihomo-provider.yaml,/root/wireguard-clients-test/test01.mihomo.yaml,,,

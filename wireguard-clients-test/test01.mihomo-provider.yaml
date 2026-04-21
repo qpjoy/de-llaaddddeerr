@@ -1,0 +1,14 @@
+proxies:
+  - name: "test01"
+    type: wireguard
+    server: 23.225.161.60
+    port: 51239
+    ip: 10.7.0.3
+    private-key: 8OUXAo9+VaBQPYXNTGjOcGolgzB5YEXF1LjX44pB3k4=
+    public-key: z9e7TF3/xhtUg+ISwlX5UjC/9yly540UrvW0xQ1goTo=
+    pre-shared-key: lANp1JwrklEQpBJ8T8JAu6PmYjdlp7QS23VHXESuTu8=
+    allowed-ips: ['0.0.0.0/0']
+    udp: true
+    persistent-keepalive: 25
+    remote-dns-resolve: true
+    dns: ["8.8.8.8", "8.8.4.4"]

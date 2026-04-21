@@ -1,0 +1,39 @@
+services:
+  wireguard:
+    image: lscr.io/linuxserver/wireguard:latest
+    container_name: wg-mihomo-wireguard
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      SERVERURL: ${WG_SERVER_HOST}
+      SERVERPORT: ${WG_SERVER_PORT}
+      PEERS: ${WG_PEERS}
+      PEERDNS: ${WG_PEER_DNS}
+      INTERNAL_SUBNET: ${WG_INTERNAL_SUBNET}
+      ALLOWEDIPS: ${WG_ALLOWEDIPS}
+      PERSISTENTKEEPALIVE_PEERS: ${WG_KEEPALIVE_PEERS}
+      LOG_CONFS: ${WG_LOG_CONFS}
+    volumes:
+      - ./data/wireguard:/config
+      - /lib/modules:/lib/modules:ro
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    restart: unless-stopped
+
+  subscriptions:
+    image: caddy:2-alpine
+    container_name: wg-mihomo-subscriptions
+    restart: unless-stopped
+    ports:
+      - "${WG_EXPORT_PORT}:8080"
+    environment:
+      WG_EXPORT_USER: ${WG_EXPORT_USER}
+      WG_EXPORT_PASSWORD_HASH: ${WG_EXPORT_PASSWORD_HASH}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/subscriptions:/srv/wg:ro

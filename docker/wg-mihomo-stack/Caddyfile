@@ -1,0 +1,18 @@
+:8080 {
+	root * /srv/wg
+
+	@health path /healthz
+	respond @health 200
+
+	@protected not path /healthz
+	basicauth @protected {
+		{$WG_EXPORT_USER} {$WG_EXPORT_PASSWORD_HASH}
+	}
+
+	header {
+		Cache-Control "private, no-store"
+		X-Content-Type-Options "nosniff"
+	}
+
+	file_server
+}

@@ -1,0 +1,23 @@
+# Common domestic sites that should prefer the local/mobile network.
+# One domain per line. These are resolved to IPv4 host routes when the client profile is generated.
+
+baidu.com
+qq.com
+weixin.qq.com
+tencent.com
+gtimg.com
+taobao.com
+tmall.com
+jd.com
+alipay.com
+bilibili.com
+zhihu.com
+weibo.com
+douyin.com
+xiaohongshu.com
+meituan.com
+ele.me
+amap.com
+163.com
+csdn.net
+aliyun.com

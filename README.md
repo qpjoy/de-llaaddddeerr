@@ -117,20 +117,232 @@ HOME_NETWORK="192.168.1.0/24"  # 家庭网络
 
 ### 1. 配置 OpenVPN（可选但推荐）
 
-在 OpenVPN 配置文件中添加以下内容，避免服务器推送的路由与本方案冲突：
+如果你希望“只让部分网段走 VPN”，可以在客户端配置里使用以下模式：
 
 ```bash
-# ===== 关键：不接受服务器推送的路由 =====
-route-nopull
-
-# 只路由公司内网
-route 10.0.0.0 255.0.0.0 vpn_gateway
-route 172.16.0.0 255.240.0.0 vpn_gateway
-route 192.168.0.0 255.255.0.0 vpn_gateway
-
-# 家庭 Wi-Fi 网段走本地
-route 192.168.1.0 255.255.255.0 net_gateway
+1. 全局 VPN：所有流量走 VPN
+2. 自定义 CIDR 分流：只让指定网段走 VPN
+3. 中国直连 / 国外走 VPN：保留默认 VPN 路由，在客户端内嵌一份粗粒度中国 IPv4 直连路由表
 ```
+
+仓库里的 `scripts/ovpn-install.sh` 已经支持这三种模式。
+其中模式 3 还会额外加载 [scripts/local-direct-domains.txt](/Users/qpjoy/workspace/qpjoy/de/de-llaaddddeerr/scripts/local-direct-domains.txt:1) 里的常用国内域名白名单，并在生成客户端时解析成本地直连的 `/32` 主机路由。
+
+如果你要更新“中国 IP 段”列表，可以运行：
+
+```bash
+./scripts/update-cn-routes.sh
+```
+
+它会从 APNIC 官方数据生成两份文件：
+
+```bash
+scripts/china-ipv4.txt          # 精确版
+scripts/china-ipv4-coarse.txt   # 粗粒度客户端版
+```
+
+默认粗粒度前缀是 `/10`，你也可以在更新时调整：
+
+```bash
+CHINA_COARSE_PREFIX=9 ./scripts/update-cn-routes.sh
+```
+
+前缀越小，客户端里的路由越少，但会有更多“其实不在中国、也被当成直连”的 IP。
+
+域名白名单是“生成客户端时解析一次”的快照，不是实时动态更新。
+如果某些站点切换了 CDN IP，重新运行一次 `./scripts/update-cn-routes.sh` 和 `./scripts/ovpn-install.sh` 生成客户端即可。
+
+### 1.5 批量生成 WireGuard 客户端
+
+如果服务器上的 WireGuard 已经通过 [scripts/wireguard.sh](/Users/qpjoy/workspace/qpjoy/de/de-llaaddddeerr/scripts/wireguard.sh:1) 部署好了，可以直接批量生成客户端，不需要改动现有 OpenVPN 服务，也不需要把 WireGuard 迁到 Docker。
+
+```bash
+sudo bash ./scripts/wg-batch-clients.sh \
+  --count 10 \
+  --prefix team \
+  --output-dir /root/wireguard-clients
+```
+
+脚本会在服务器上做两件事：
+
+1. 直接往对应的 WireGuard 配置文件追加 10 个新 peer，并用 `wg addconf` 立即生效
+2. 在输出目录里生成每个客户端的文件：
+
+```bash
+team01.conf                   # 标准 WireGuard 客户端
+team01.mihomo.yaml            # 可直接导入 Clash/Mihomo 的完整配置
+team01.mihomo-provider.yaml   # 仅节点内容，适合高级用法
+clients.csv                   # 客户端和导出文件汇总
+```
+
+如果你后面要把这些文件挂到一个受保护的下载地址，也可以在生成时带上 `--base-url`：
+
+```bash
+sudo bash ./scripts/wg-batch-clients.sh \
+  --count 10 \
+  --prefix team \
+  --output-dir /root/wireguard-clients \
+  --base-url https://vpn.example.com/wg
+```
+
+这样 `clients.csv` 里会额外写出每个客户端的导入 URL。由于这些文件包含私钥，不要直接暴露到公开静态站点，至少要放在鉴权后面。
+
+如果你想直接用 Docker 托管这些客户端文件，仓库里带了一个只读的 Caddy 示例：
+
+```bash
+cd docker/wg-client-files
+cp .env.example .env
+```
+
+把 `.env` 里的 `WG_EXPORT_DIR` 改成你实际生成客户端文件的目录，按需调整端口和用户名。
+
+先生成一个 Basic Auth 密码哈希：
+
+```bash
+docker run --rm caddy:2-alpine caddy hash-password --plaintext 'ChangeMe123!'
+```
+
+把输出结果填到 `.env` 的 `WG_EXPORT_PASSWORD_HASH`，然后启动：
+
+```bash
+docker compose up -d
+```
+
+这个容器只负责受保护地分发 `/root/wireguard-clients` 里的文件，不参与 WireGuard 转发，也不会影响现有 OpenVPN/WireGuard 服务。
+
+### 1.6 10 个客户端要不要限速
+
+通常不用。
+
+- 如果只是 10 个员工或设备共用一台 VPS，先直接跑，通常 WireGuard 本身就够轻，没必要一开始就上 `tc`
+- 只有在你明确需要“每人固定上限”“防止单个客户端下载把带宽跑满”“做计费/配额”时，才值得加 `tc`
+- 真要做限速，建议按每个 peer 的隧道 IP 做，例如 `10.7.0.2`、`10.7.0.3` 这种，在 `wg0` 上按 IP 分类；这属于后置优化，不是生成 10 个可用客户端的前置条件
+
+这次仓库里先没有把 WireGuard 改成 Docker 版，是因为你已经有在线运行的宿主机部署。直接在现有 `wg0` 上追加 peer 的风险最小，也不会影响 OpenVPN。后面如果你只是想“分发配置文件”，可以单独再加一个 Docker 静态文件服务去托管 `/root/wireguard-clients`，但 WireGuard 服务本身不建议为了这个目的迁移。
+
+### 1.7 Docker WireGuard + Mihomo 订阅 URL
+
+如果你准备切到“Docker 里的 WireGuard 服务端 + 每个用户一个 Mihomo 订阅 URL”，仓库里已经补了一套独立栈：
+
+```bash
+docker/wg-mihomo-stack/
+```
+
+这套方案的定位是：
+
+- 服务端协议仍然是 `WireGuard`
+- 用户端仍然用 `Clash/Mihomo`
+- 每个用户拿到的是自己的 `xxx.mihomo.yaml` 订阅 URL
+- 不需要在宿主机安装 `wireguard-tools` 包，但宿主机内核仍然要支持 WireGuard
+
+需要特别说明的是：`mihomo` 官方文档里，`WireGuard` 出现在 `Proxies`，而不是 `listeners/inbounds`。也就是说，`mihomo` 本身并不是一个“WireGuard 入站服务端”。如果你坚持用户侧用 `WG` 协议，服务端仍然需要一个真正的 WireGuard 端点；这里用的就是 Docker 里的 WireGuard 容器。
+
+初始化步骤：
+
+```bash
+cd docker/wg-mihomo-stack
+cp .env.example .env
+```
+
+先把 `.env` 里的这些值改掉：
+
+```bash
+WG_SERVER_HOST=你的公网IP
+WG_SERVER_PORT=51820
+WG_PEERS=user01,user02,user03,user04,user05,user06,user07,user08,user09,user10
+```
+
+如果你没有域名，`WG_SERVER_HOST` 直接填公网 IP 即可。
+
+`WG_KEEPALIVE_PEERS=all` 默认已经开着，这个设置对移动网络和 NAT 场景更稳，适合“隔一段时间断开”的场景先作为默认值。
+
+然后启动：
+
+```bash
+docker compose up -d wireguard
+```
+
+LinuxServer 的 WireGuard 镜像会把每个 peer 的标准配置生成到：
+
+```bash
+docker/wg-mihomo-stack/data/wireguard/
+```
+
+接着把这些标准 `.conf` 翻译成每用户独立的 Mihomo 订阅文件：
+
+```bash
+bash ./scripts/export-lsio-wireguard-mihomo.sh \
+  --input-dir ./docker/wg-mihomo-stack/data/wireguard \
+  --output-dir ./docker/wg-mihomo-stack/data/subscriptions \
+  --base-url http://你的公网IP:8080
+```
+
+最后启动订阅分发服务：
+
+```bash
+docker compose up -d subscriptions
+```
+
+用户实际拿到的链接类似：
+
+```bash
+http://你的公网IP:8080/user01.mihomo.yaml
+```
+
+为了避免把私钥裸露在公网，订阅服务默认带 Basic Auth。你需要先生成一个密码哈希，填进 `.env` 的 `WG_EXPORT_PASSWORD_HASH`：
+
+```bash
+docker run --rm caddy:2-alpine caddy hash-password --plaintext 'ChangeMe123!'
+```
+
+然后用户访问时：
+
+```bash
+http://用户名:密码@你的公网IP:8080/user01.mihomo.yaml
+```
+
+更稳妥的做法是把“URL”和“账号密码”分开发，不把密码直接写在链接里。
+
+如果你现在只有 `IP:端口`，没有域名和证书，这个订阅分发就是 `HTTP` 而不是 `HTTPS`。这种情况下 Basic Auth 只能做访问控制，不能提供传输加密；更适合临时分发或受控环境，不适合长期把带私钥的订阅暴露在公网。
+
+### 1.8 WireGuard 用户限速
+
+仓库里新增了：
+
+```bash
+scripts/wg-tc-limit.sh
+docker/wg-mihomo-stack/peer-limits.csv.example
+```
+
+它沿用了 [scripts/iptables_tc.sh](/Users/qpjoy/workspace/qpjoy/de/de-llaaddddeerr/scripts/iptables_tc.sh:1) 现在的思路：
+
+- 使用 `HTB`
+- 按 peer 的隧道 IP `/32` 分类
+- 用 `u32 match ip dst` 把不同用户流量分到不同 class
+
+示例：
+
+```bash
+sudo bash ./scripts/wg-tc-limit.sh apply \
+  --if wg0 \
+  --limits-file ./docker/wg-mihomo-stack/peer-limits.csv.example \
+  --total-rate 100mbit \
+  --base-rate 1mbit
+```
+
+查看当前规则：
+
+```bash
+sudo bash ./scripts/wg-tc-limit.sh show --if wg0
+```
+
+清理：
+
+```bash
+sudo bash ./scripts/wg-tc-limit.sh clean --if wg0
+```
+
+这版和 `iptables_tc.sh` 一样，先做的是 **egress 出口整形**，也就是从服务器发往各 peer 的流量控制；如果你后面还想精确控“用户上传到服务器”的方向，再单独加 `ifb/ingress` 会更完整。
 
 ### 2. 连接流程
 
@@ -238,10 +450,16 @@ VPS_IP="x.x.x.x"          # 改成你的 VPS IP
 de-llaaddddeerr/
 ├── README.md              # 本文档
 ├── config.env             # 配置文件（包含实际 IP，不要提交到公开仓库）
+├── docker/
+│   ├── wg-client-files/   # 用 Caddy 受保护分发 WireGuard 客户端文件
+│   └── wg-mihomo-stack/   # Docker WireGuard + Mihomo 订阅分发
 ├── scripts/
 │   ├── fix-routes.sh      # 修复路由（主脚本）
+│   ├── export-lsio-wireguard-mihomo.sh # 把标准 WG 配置转换成 Mihomo 订阅
 │   ├── restore-routes.sh  # 恢复网络
-│   └── wireguard.sh       # WireGuard 服务器安装脚本
+│   ├── wg-tc-limit.sh     # 按 WireGuard peer IP 做 tc 限速
+│   ├── wireguard.sh       # WireGuard 服务器安装脚本
+│   └── wg-batch-clients.sh # 批量生成 WireGuard / Mihomo 客户端
 └── network.restore.md     # 网络恢复笔记
 ```
 
