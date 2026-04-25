@@ -1,0 +1,28 @@
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+
+proxies:
+  - name: "peer"
+    type: wireguard
+    server: ${SERVERURL}
+    port: ${SERVERPORT}
+    ip: ${CLIENT_IP}
+    private-key: $(cat /config/${PEER_ID}/privatekey-${PEER_ID})
+    public-key: $(cat /config/server/publickey-server)
+    pre-shared-key: $(cat /config/${PEER_ID}/presharedkey-${PEER_ID})
+    allowed-ips: ["${ALLOWEDIPS}"]
+    udp: true
+    remote-dns-resolve: true
+    dns: ["${PEERDNS}"]
+
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - "peer"
+      - DIRECT
+
+rules:
+  - MATCH,PROXY

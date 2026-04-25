@@ -584,12 +584,12 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 	esac
 	echo
 	echo "What port should OpenVPN listen to?"
-	read -p "Port [1194]: " port
+	read -p "Port [334]: " port
 	until [[ -z "$port" || "$port" =~ ^[0-9]+$ && "$port" -le 65535 ]]; do
 		echo "$port: invalid port."
-		read -p "Port [1194]: " port
+		read -p "Port [334]: " port
 	done
-	[[ -z "$port" ]] && port="1194"
+	[[ -z "$port" ]] && port="334"
 	echo
 	echo "Select a DNS server for the clients:"
 	echo "   1) Current system resolvers"

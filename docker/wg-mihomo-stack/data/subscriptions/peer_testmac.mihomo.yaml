@@ -1,0 +1,28 @@
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+
+proxies:
+  - name: "peer_testmac"
+    type: wireguard
+    server: 192.168.1.7
+    port: 52080
+    ip: 10.13.13.2
+    private-key: yPFR1dcZ9x7KYkfZG1+vE/giEqUtveuGHHbqsmpELHA=
+    public-key: +O6fx8rbgIiWd4XXJo6DgKpc6rFuB4d0AggMm71g0U0=
+    pre-shared-key: b7g15OZBoKXCQMH5CqL8B2Z5FGr1EbHtBc+GucyQrJ4=
+    allowed-ips: ["0.0.0.0/0"]
+    udp: true
+    remote-dns-resolve: true
+    dns: ["1.1.1.1", "8.8.8.8"]
+
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - "peer_testmac"
+      - DIRECT
+
+rules:
+  - MATCH,PROXY

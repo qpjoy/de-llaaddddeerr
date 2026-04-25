@@ -15,7 +15,7 @@ Usage:
   bash ./scripts/export-lsio-wireguard-mihomo.sh [options]
 
 Options:
-  --input-dir DIR      LinuxServer WireGuard config directory.
+  --input-dir DIR      Directory containing standard WireGuard client .conf files.
                        Default: ./docker/wg-mihomo-stack/data/wireguard
   --output-dir DIR     Output directory for per-user Mihomo YAML files.
                        Default: ./docker/wg-mihomo-stack/data/subscriptions
@@ -24,15 +24,17 @@ Options:
   --mtu N              Optional MTU override
   --help               Show this help
 
-Expected input layout:
+Supported input layout examples:
+  /root/wireguard-clients/user01.conf
+  /root/wireguard-clients/user02.conf
   <input-dir>/peer_<name>/<name>.conf
   <input-dir>/peer1/peer1.conf
 
 Example:
   bash ./scripts/export-lsio-wireguard-mihomo.sh \
-    --input-dir ./docker/wg-mihomo-stack/data/wireguard \
+    --input-dir /root/wireguard-clients \
     --output-dir ./docker/wg-mihomo-stack/data/subscriptions \
-    --base-url http://203.0.113.10:8080
+    --base-url https://vpn.example.com
 EOF
 }
 
@@ -208,7 +210,10 @@ fi
 SUMMARY_FILE="$OUTPUT_DIR/clients.csv"
 echo "name,ipv4,source_conf,mihomo_yaml,subscription_url" > "$SUMMARY_FILE"
 
-mapfile -t peer_confs < <(find "$INPUT_DIR" -type f -name '*.conf' ! -path '*/wg_confs/*' | sort)
+peer_confs=()
+while IFS= read -r conf_path; do
+	peer_confs+=("$conf_path")
+done < <(find "$INPUT_DIR" -type f -name '*.conf' ! -path '*/wg_confs/*' ! -path '*/templates/*' ! -path '*/server/*' | sort)
 
 if [[ "${#peer_confs[@]}" -eq 0 ]]; then
 	echo "No peer .conf files found under: $INPUT_DIR" >&2

@@ -235,7 +235,60 @@ docker/wg-mihomo-stack/
 - 每个用户拿到的是自己的 `xxx.mihomo.yaml` 订阅 URL
 - 不需要在宿主机安装 `wireguard-tools` 包，但宿主机内核仍然要支持 WireGuard
 
+这里有两个完全不同的端口，不要混在一起：
+
+- `WG_SERVER_PORT`：给客户端实际连接的 WireGuard `UDP` 端口，例如 `52080`
+- `WG_EXPORT_SITE_ADDRESS` 对应的 `443/3434`：只是下载 `user01.mihomo.yaml` 的订阅分发端口
+
+也就是说，如果用户侧走的是 `WG` 协议，真正承载 VPN 流量的是 WireGuard 端口，不是 Mihomo/Caddy 的端口。
+这套服务端也不需要对外开放 `7890` 这类 Mihomo 本地代理端口。
+
 需要特别说明的是：`mihomo` 官方文档里，`WireGuard` 出现在 `Proxies`，而不是 `listeners/inbounds`。也就是说，`mihomo` 本身并不是一个“WireGuard 入站服务端”。如果你坚持用户侧用 `WG` 协议，服务端仍然需要一个真正的 WireGuard 端点；这里用的就是 Docker 里的 WireGuard 容器。
+
+如果你的服务器已经像你现在这样，直接用 [scripts/wireguard.sh](/Users/qpjoy/workspace/qpjoy/de/de-llaaddddeerr/scripts/wireguard.sh:1) 在宿主机上稳定跑起来了，那我更推荐：
+
+- 继续保留宿主机 WireGuard
+- 不再启动 Docker 里的 `wireguard` 服务
+- 只使用“把标准 `.conf` 转成 Mihomo YAML”这一层
+- 再单独启动 `subscriptions` 服务做 HTTPS / Basic Auth 分发
+
+这是当前更稳、更贴近你现网验证结果的路径。
+
+宿主机稳定版的最短流程是：
+
+1. 继续用 `scripts/wireguard.sh` 添加客户端，拿到生成的标准 `.conf`
+2. 把这些 `.conf` 放到一个目录，例如 `/root/wireguard-clients`
+3. 运行转换：
+
+```bash
+bash ./scripts/export-lsio-wireguard-mihomo.sh \
+  --input-dir /root/wireguard-clients \
+  --output-dir ./docker/wg-mihomo-stack/data/subscriptions \
+  --base-url https://vpn.example.com
+```
+
+4. 只启动订阅分发：
+
+```bash
+cd docker/wg-mihomo-stack
+docker compose up -d subscriptions
+```
+
+如果你的服务器还是 `docker-compose 1.x`：
+
+```bash
+docker-compose up -d subscriptions
+```
+
+也就是说，对你现在这台机子，更推荐的实际架构是：
+
+```text
+宿主机 WireGuard (稳定)
+        +
+Mihomo YAML 导出脚本
+        +
+Caddy 订阅分发容器
+```
 
 初始化步骤：
 
@@ -248,9 +301,24 @@ cp .env.example .env
 
 ```bash
 WG_SERVER_HOST=你的公网IP
-WG_SERVER_PORT=51820
+WG_SERVER_PORT=52080
+WG_STACK_SUBNET=10.253.0.0/24
+WG_STACK_GATEWAY=10.253.0.1
 WG_PEERS=user01,user02,user03,user04,user05,user06,user07,user08,user09,user10
 ```
+
+如果你继续测试 Docker 版 WireGuard，建议优先用 `52000-53000` 之间的高位 UDP 端口，例如 `52080`、`52123`、`52888`。如果宿主机上原来的 `wg0` 还在跑，要么先停掉它，要么保证两个实例不要占同一个 UDP 端口。
+
+另外，建议把 Docker 这套栈自己的 bridge 子网固定下来，不要让 Docker 自动挑一个新的 `172.x` 网段。`WG_STACK_SUBNET` / `WG_STACK_GATEWAY` 就是干这个的。更稳的默认值是：
+
+- `WG_STACK_SUBNET=10.253.0.0/24`
+- `WG_STACK_GATEWAY=10.253.0.1`
+
+这样至少能明确避开：
+
+- OpenVPN 默认服务端网段 `10.8.0.0/24`
+- 这套 Docker WG 客户端网段 `10.13.13.0/24`
+- Docker 自动分配的随机桥接网段
 
 订阅分发这层有两种模式：
 
@@ -258,7 +326,8 @@ WG_PEERS=user01,user02,user03,user04,user05,user06,user07,user08,user09,user10
 
 ```bash
 WG_EXPORT_SITE_ADDRESS=:8080
-WG_EXPORT_BASE_URL=http://你的公网IP:8080
+WG_EXPORT_BASE_URL=http://你的公网IP:3434
+WG_EXPORT_FALLBACK_PORT=3434
 ```
 
 2. 有域名，直接自动 HTTPS：
@@ -271,6 +340,7 @@ WG_EXPORT_BASE_URL=https://vpn.example.com
 如果你走域名模式，还需要：
 
 - 把域名的 `A` 记录指到这台服务器公网 IP
+- 在 `docker-compose.yml` 里把 `subscriptions` 的 `80/443` 端口映射加回来
 - 放通服务器的 `80/tcp` 和 `443/tcp`
 - 首次启动 `subscriptions` 容器时让 Caddy 可以正常连外网申请证书
 
@@ -278,7 +348,61 @@ WG_EXPORT_BASE_URL=https://vpn.example.com
 
 `WG_KEEPALIVE_PEERS=all` 默认已经开着，这个设置对移动网络和 NAT 场景更稳，适合“隔一段时间断开”的场景先作为默认值。
 
-然后启动：
+Docker 版 WireGuard 现在也已经改成了更保守的方式：
+
+- 不再使用 `host network`
+- 通过 `宿主机 ${WG_SERVER_PORT}/udp -> 容器 51820/udp` 显式映射
+
+这样即使容器里的 WireGuard 出问题，也比直接共享宿主机网络命名空间更容易隔离。
+
+为了兼容更多环境，这份 compose 现在默认只保留了 `NET_ADMIN`。`SYS_MODULE` 和 `/lib/modules` 挂载在 LinuxServer 文档里本来就是可选项；对 macOS 的 Docker Desktop 来说，去掉它们通常更省事。
+
+如果你非常担心再次触发 IDC 风控，我建议先按下面的灰度顺序做，而不是先删宿主机 WG：
+
+1. 先保留宿主机 WG，当作回退
+2. Docker WG 只开一个新端口，例如 `52080/udp`
+3. 先只生成 1 个测试用户，连续观察一段时间
+4. 确认稳定后，再迁移更多用户
+5. 最后再决定是否删除宿主机 WG
+
+如果你有 IDC 控制台 / KVM / 带外登录，那再做“先删宿主机 WG”会更安全；如果没有，建议不要把唯一的回退路径先砍掉。
+
+在远程 Ubuntu 上，推荐先跑一遍只读检查，不动现网服务：
+
+```bash
+bash ./scripts/check-vpn-stack.sh
+```
+
+更稳的顺序是：
+
+1. 先跑一次 `check-vpn-stack.sh` 记基线
+2. 只启动 `subscriptions`
+3. 再跑一次 `check-vpn-stack.sh`
+4. 如果宿主机 WireGuard 已经稳定，优先停在这里，不要再启 Docker WireGuard
+5. 只有在带外控制台可用时，才继续灰度测试 Docker WireGuard
+
+`7890`、`7897` 这类端口是 Mihomo / Clash 客户端本地监听端口，不是服务器公网暴露的 WireGuard 端口。IDC 真正能看到的，通常是你对外开放的 `WG_SERVER_PORT/udp`，以及订阅分发用的 `3434` 或 `443`。
+
+如果你的服务器上仍然保留 OpenVPN，这套 Docker WG 可以共存，但要同时满足下面 3 个条件：
+
+1. 公开监听端口不能撞车  
+   例如 OpenVPN 用 `334/udp`，Docker WG 用 `52080/udp`
+2. 隧道内网网段不能重叠  
+   OpenVPN 默认 `10.8.0.0/24`，Docker WG 默认 `10.13.13.0/24`
+3. Docker bridge 子网也不能和上面两个重复  
+   推荐单独固定成 `10.253.0.0/24`
+
+如果 OpenVPN 正在占用 `443/tcp`，那你就不能同时让 `subscriptions` 容器绑定 `443/tcp`。这种情况下，先用：
+
+```bash
+WG_EXPORT_SITE_ADDRESS=:8080
+WG_EXPORT_BASE_URL=http://你的公网IP:3434
+WG_EXPORT_FALLBACK_PORT=3434
+```
+
+等 WireGuard 部分稳定了，再考虑单独给订阅分发切域名和 HTTPS。
+
+如果你仍然想继续试“Docker 里的 WireGuard 服务端”，再启动：
 
 ```bash
 docker compose up -d wireguard
@@ -290,13 +414,20 @@ docker compose up -d wireguard
 docker-compose up -d wireguard
 ```
 
-这里的 `wireguard` 服务使用了 `host network`。在这种模式下，Docker 不允许再给容器单独设置 `net.ipv4.conf.all.src_valid_mark` 这类 `sysctl`，否则就会出现：
+这份 compose 现在已经不是 `host network`，而是：
+
+- 宿主机 `WG_SERVER_PORT/udp`
+- 映射到容器里的 `51820/udp`
+
+也就是说，Docker WireGuard 现在走的是更保守的 `bridge + 端口映射`。它比早期的 `host network` 更容易隔离问题，也更适合做灰度。
+
+如果你看到过下面这个报错：
 
 ```bash
 sysctl "net.ipv4.conf.all.src_valid_mark" not allowed in host network namespace
 ```
 
-这套服务端用的是 WireGuard **server mode**，按 LinuxServer 的镜像说明，`src_valid_mark` 主要是 client mode 场景需要；所以这里已经从 compose 里去掉了，不影响当前这套服务端方案。
+那是更早一版 `host network` 配置下的现象，不是当前这版 compose 的行为。
 
 LinuxServer 的 WireGuard 镜像会把每个 peer 的标准配置生成到：
 
@@ -325,7 +456,7 @@ docker-compose up -d subscriptions
 用户实际拿到的链接类似：
 
 ```bash
-http://你的公网IP:8080/user01.mihomo.yaml
+http://你的公网IP:3434/user01.mihomo.yaml
 # 或者
 https://vpn.example.com/user01.mihomo.yaml
 ```
@@ -339,7 +470,7 @@ docker run --rm caddy:2-alpine caddy hash-password --plaintext 'ChangeMe123!'
 然后用户访问时：
 
 ```bash
-http://用户名:密码@你的公网IP:8080/user01.mihomo.yaml
+http://用户名:密码@你的公网IP:3434/user01.mihomo.yaml
 ```
 
 更稳妥的做法是把“URL”和“账号密码”分开发，不把密码直接写在链接里。
