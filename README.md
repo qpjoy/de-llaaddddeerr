@@ -467,6 +467,14 @@ https://vpn.example.com/user01.mihomo.yaml
 docker run --rm caddy:2-alpine caddy hash-password --plaintext 'ChangeMe123!'
 ```
 
+把输出写进 `.env` 时，建议这样保存：
+
+```bash
+WG_EXPORT_PASSWORD_HASH='$2a$14$...'
+```
+
+这里外层的单引号很重要。因为 bcrypt 哈希里本身带很多 `$`，如果你把它原样写进 Compose 的 `.env`，这些 `$` 很容易被插值机制吃掉，最后 Caddy 启动时就会报类似 `base64-decoding password` 的错误。
+
 然后用户访问时：
 
 ```bash

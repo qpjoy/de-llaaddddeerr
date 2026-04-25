@@ -5,7 +5,7 @@
 	respond @health 200
 
 	@protected not path /healthz
-	basicauth @protected {
+	basic_auth @protected {
 		{$WG_EXPORT_USER} {$WG_EXPORT_PASSWORD_HASH}
 	}
 
