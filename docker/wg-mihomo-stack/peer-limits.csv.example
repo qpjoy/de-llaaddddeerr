@@ -1,4 +1,4 @@
-# name,cidr,rate,ceil
-user01,10.13.13.2/32,5mbit,20mbit
-user02,10.13.13.3/32,5mbit,20mbit
-user03,10.13.13.4/32,5mbit,20mbit
+# name,cidr,down_rate,down_ceil,up_rate,up_ceil
+user01,10.13.13.2/32,5mbit,20mbit,2mbit,8mbit
+user02,10.13.13.3/32,5mbit,20mbit,2mbit,8mbit
+user03,10.13.13.4/32,5mbit,20mbit,2mbit,8mbit

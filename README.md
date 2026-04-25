@@ -453,6 +453,23 @@ docker compose up -d subscriptions
 docker-compose up -d subscriptions
 ```
 
+如果老版本 `docker-compose 1.x` 在这里报：
+
+```bash
+ERROR: for <container> 'ContainerConfig'
+```
+
+这通常不是 `Caddyfile` 配错，而是 `docker-compose` 在“重建旧容器”时踩到了自己的兼容性问题。最稳的做法是只删除 `subscriptions` 这个旧容器，然后重新拉起：
+
+```bash
+docker-compose stop subscriptions || true
+docker-compose rm -f subscriptions || true
+docker rm -f wg-mihomo-subscriptions 2>/dev/null || true
+docker-compose up -d subscriptions
+```
+
+这组命令只动订阅分发容器，不会碰现有 OpenVPN，也不会影响还没启动的 Docker WireGuard。
+
 用户实际拿到的链接类似：
 
 ```bash
@@ -498,7 +515,8 @@ docker/wg-mihomo-stack/peer-limits.csv.example
 
 - 使用 `HTB`
 - 按 peer 的隧道 IP `/32` 分类
-- 用 `u32 match ip dst` 把不同用户流量分到不同 class
+- 下载方向用 `u32 match ip dst` 做 `wg0` egress 整形
+- 上传方向可选通过 `ifb` + `u32 match ip src` 做 ingress 整形
 
 示例：
 
@@ -510,10 +528,48 @@ sudo bash ./scripts/wg-tc-limit.sh apply \
   --base-rate 1mbit
 ```
 
+如果你现在跑的是 Docker 版 WireGuard，`wg0` 在容器里，不在宿主机网络命名空间里。此时推荐直接加：
+
+```bash
+sudo bash ./scripts/wg-tc-limit.sh apply \
+  --docker-container wg-mihomo-wireguard \
+  --if wg0 \
+  --limits-file ./docker/wg-mihomo-stack/peer-limits.csv.example \
+  --total-rate 100mbit \
+  --base-rate 1mbit
+```
+
+如果你要上下行都限速，加上 `--ingress` 即可：
+
+```bash
+sudo bash ./scripts/wg-tc-limit.sh apply \
+  --docker-container wg-mihomo-wireguard \
+  --if wg0 \
+  --ingress \
+  --limits-file ./docker/wg-mihomo-stack/peer-limits.csv.example \
+  --total-rate 9mbit \
+  --ingress-total-rate 9mbit \
+  --base-rate 1mbit
+```
+
+对“服务器总带宽 10M、单用户最高给 9M”这类场景，比较稳的建议是：
+
+- 把 `--total-rate` 设成 `9mbit`
+- 把 `--ingress-total-rate` 也设成 `9mbit`
+- 单用户 CSV 里把 `down_ceil` / `up_ceil` 都设成 `9mbit`
+
+这样会给 WireGuard 封装、NAT、TCP/UDP 开销留一点余量。真实业务层看到的有效吞吐通常会略低于 9M，这属于正常现象。
+
 查看当前规则：
 
 ```bash
 sudo bash ./scripts/wg-tc-limit.sh show --if wg0
+```
+
+Docker 版对应：
+
+```bash
+sudo bash ./scripts/wg-tc-limit.sh show --docker-container wg-mihomo-wireguard --if wg0
 ```
 
 清理：
@@ -522,7 +578,25 @@ sudo bash ./scripts/wg-tc-limit.sh show --if wg0
 sudo bash ./scripts/wg-tc-limit.sh clean --if wg0
 ```
 
-这版和 `iptables_tc.sh` 一样，先做的是 **egress 出口整形**，也就是从服务器发往各 peer 的流量控制；如果你后面还想精确控“用户上传到服务器”的方向，再单独加 `ifb/ingress` 会更完整。
+Docker 版对应：
+
+```bash
+sudo bash ./scripts/wg-tc-limit.sh clean --docker-container wg-mihomo-wireguard --if wg0
+```
+
+如果 CSV 只有 4 列：
+
+```bash
+name,cidr,rate,ceil
+```
+
+脚本会把这个速率同时用于上下行。
+
+如果你想给上下行不同的值，用 6 列：
+
+```bash
+name,cidr,down_rate,down_ceil,up_rate,up_ceil
+```
 
 ### 2. 连接流程
 
