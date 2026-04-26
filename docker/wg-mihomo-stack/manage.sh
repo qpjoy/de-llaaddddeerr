@@ -301,6 +301,10 @@ safe_recreate_service() {
 	compose stop "$service" >/dev/null 2>&1 || true
 	compose rm -f "$service" >/dev/null 2>&1 || true
 	docker rm -f "$container_name" >/dev/null 2>&1 || true
+	if [[ "$service" == "subscriptions" ]]; then
+		rm -f "$STACK_DIR/config/caddy/autosave.json" >/dev/null 2>&1 || true
+		rm -f "$STACK_DIR/config/caddy/caddy/autosave.json" >/dev/null 2>&1 || true
+	fi
 	compose up -d "$service"
 }
 

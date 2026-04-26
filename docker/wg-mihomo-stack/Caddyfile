@@ -5,7 +5,7 @@
 	respond @health 200
 
 	@protected not path /healthz
-	basic_auth @protected {
+	basic_auth @protected bcrypt {
 		{$WG_EXPORT_USER} {$WG_EXPORT_PASSWORD_HASH}
 	}
 
