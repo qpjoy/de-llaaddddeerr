@@ -21,6 +21,7 @@ Usage:
 Commands:
   setup             Initialize .env, start subscriptions + wireguard, export profiles
   reconfigure       Update ports/auth/bandwidth defaults, then recreate the stack safely
+  reset-auth        Reset subscription username/password and recreate subscriptions only
   start             Start services: all|wireguard|subscriptions
   stop              Stop services: all|wireguard|subscriptions
   restart           Restart services: all|wireguard|subscriptions
@@ -39,6 +40,7 @@ Commands:
 Examples:
   sudo bash ./docker/wg-mihomo-stack/manage.sh setup
   sudo bash ./docker/wg-mihomo-stack/manage.sh reconfigure
+  sudo bash ./docker/wg-mihomo-stack/manage.sh reset-auth
   sudo bash ./docker/wg-mihomo-stack/manage.sh destroy --wipe-data --wipe-env --yes
   sudo bash ./docker/wg-mihomo-stack/manage.sh reinstall
   sudo bash ./docker/wg-mihomo-stack/manage.sh add-user --names test01,test02
@@ -384,6 +386,10 @@ write_summary_header() {
 	mkdir -p "$STACK_DIR/data/subscriptions"
 	chmod 700 "$STACK_DIR/data/subscriptions"
 	echo "name,ipv4,source_conf,mihomo_yaml,subscription_url" > "$STACK_DIR/data/subscriptions/clients.csv"
+}
+
+first_subscription_yaml() {
+	find "$STACK_DIR/data/subscriptions" -maxdepth 1 -type f -name '*.mihomo.yaml' | sort | head -n 1
 }
 
 refresh_subscriptions() {
@@ -905,6 +911,42 @@ reconfigure_command() {
 	echo "Reconfigured stack and recreated subscriptions + wireguard."
 }
 
+reset_auth_command() {
+	local auth_user="${1:-}"
+	local auth_pass="${2:-}"
+	local hash sample_yaml sample_name
+
+	load_env
+
+	if [[ -z "$auth_user" ]]; then
+		auth_user="$(prompt_default "Subscription username" "${WG_EXPORT_USER:-download}")"
+	fi
+	if [[ -z "$auth_pass" ]]; then
+		auth_pass="$(prompt_password "New subscription password")"
+	fi
+
+	hash="$(docker run --rm caddy:2-alpine caddy hash-password --plaintext "$auth_pass" | tr -d '\r\n')"
+	set_env_value WG_EXPORT_USER "$auth_user"
+	set_env_value WG_EXPORT_PASSWORD_HASH "'$hash'"
+	load_env
+
+	safe_recreate_service subscriptions
+	wait_for_container "$SUBSCRIPTIONS_CONTAINER"
+
+	sample_yaml="$(first_subscription_yaml || true)"
+	if [[ -n "$sample_yaml" && -f "$sample_yaml" ]] && command -v curl >/dev/null 2>&1; then
+		sample_name="$(basename "$sample_yaml")"
+		if curl -fsS -u "${WG_EXPORT_USER}:${auth_pass}" "http://127.0.0.1:${WG_EXPORT_FALLBACK_PORT}/${sample_name}" >/dev/null; then
+			echo "Subscription auth reset succeeded."
+			echo "Verified locally with: http://${WG_EXPORT_USER}:<password>@127.0.0.1:${WG_EXPORT_FALLBACK_PORT}/${sample_name}"
+			return 0
+		fi
+		die "Subscription auth was updated, but local verification still failed for ${sample_name}."
+	fi
+
+	echo "Subscription auth reset succeeded. No local Mihomo YAML file was available for verification."
+}
+
 add_user_command() {
 	local names_csv="${1:-}"
 	local skip_limit="${SKIP_LIMIT:-false}"
@@ -1099,6 +1141,18 @@ main() {
 		;;
 		reconfigure)
 			reconfigure_command "$@"
+		;;
+		reset-auth)
+			local auth_user=""
+			local auth_pass=""
+			while [[ $# -gt 0 ]]; do
+				case "$1" in
+					--user) auth_user="$2"; shift 2 ;;
+					--password) auth_pass="$2"; shift 2 ;;
+					*) die "Unknown reset-auth option: $1" ;;
+				esac
+			done
+			reset_auth_command "$auth_user" "$auth_pass"
 		;;
 		start)
 			start_command "${1:-all}"

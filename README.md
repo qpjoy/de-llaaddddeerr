@@ -249,6 +249,7 @@ docker/wg-mihomo-stack/manage.sh
 ```bash
 sudo bash ./docker/wg-mihomo-stack/manage.sh setup
 sudo bash ./docker/wg-mihomo-stack/manage.sh reconfigure
+sudo bash ./docker/wg-mihomo-stack/manage.sh reset-auth
 sudo bash ./docker/wg-mihomo-stack/manage.sh stop all
 sudo bash ./docker/wg-mihomo-stack/manage.sh destroy --wipe-data --wipe-env --yes
 sudo bash ./docker/wg-mihomo-stack/manage.sh reinstall
@@ -264,6 +265,7 @@ sudo bash ./docker/wg-mihomo-stack/manage.sh status
 - `destroy --wipe-data --wipe-env --yes`：删除容器并清掉当前栈生成的配置、订阅、限速文件
 - `reinstall`：先完整清空当前 `wg-mihomo-stack`，再重新执行交互式 `setup`
 - `reconfigure`：不用手改 `.env` 或 `peer-limits.env`，直接交互式修改端口、订阅账号密码和全局带宽默认值，再由脚本重建栈
+- `reset-auth`：只重置订阅用户名 / 密码，重建 `subscriptions`，并尝试在本机用新的明文密码校验一个现有的 `.mihomo.yaml`
 
 如果你现在想把服务器上这套 `wg-mihomo-stack` 完全交给 `manage.sh` 接管，最直接的迁移方式就是：
 

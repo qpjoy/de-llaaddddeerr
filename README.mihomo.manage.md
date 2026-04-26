@@ -10,4 +10,6 @@ sudo bash ./docker/wg-mihomo-stack/manage.sh set-limit --names user02 --down-cei
 sudo bash ./docker/wg-mihomo-stack/manage.sh reconfigure
 sudo bash ./docker/wg-mihomo-stack/manage.sh restart wireguard
 sudo bash ./docker/wg-mihomo-stack/manage.sh status
+
+bash ./docker/wg-mihomo-stack/manage.sh add-user --names intelligent02,intelligent03,intelligent04,intelligent05,intelligent06,intelligent07,intelligent08,intelligent09
 ```
