@@ -163,6 +163,11 @@ load_limits_env() {
 	set +a
 }
 
+reload_runtime_state() {
+	load_env
+	load_limits_env
+}
+
 set_env_value() {
 	local key="$1"
 	local value="$2"
@@ -794,6 +799,7 @@ setup_command() {
 	cat > "$LIMITS_FILE" <<'EOF'
 # name,cidr,down_rate,down_ceil,up_rate,up_ceil
 EOF
+	reload_runtime_state
 
 	echo "Bootstrapping stack with first user: $primary_user"
 	start_target all
@@ -866,6 +872,7 @@ reconfigure_command() {
 	TC_IFB_IFACE="ifb-wg0"
 	TC_ENABLE_INGRESS="true"
 	save_limits_env
+	reload_runtime_state
 
 	recreate_full_stack
 	refresh_limit_targets_for_current_users
@@ -918,6 +925,7 @@ add_user_command() {
 	}
 
 	set_env_value WG_PEERS "$(array_join_csv "${current[@]}")"
+	load_env
 	start_target wireguard
 	refresh_subscriptions
 
@@ -964,6 +972,7 @@ del_user_command() {
 		delete_user_artifacts "$name"
 	done
 
+	reload_runtime_state
 	start_target wireguard
 	refresh_subscriptions
 	apply_limits
