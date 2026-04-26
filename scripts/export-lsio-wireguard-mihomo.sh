@@ -8,6 +8,7 @@ BASE_URL="${BASE_URL:-}"
 REMOTE_DNS_RESOLVE="${REMOTE_DNS_RESOLVE:-true}"
 DEFAULT_DNS="${DEFAULT_DNS:-}"
 DEFAULT_MTU="${DEFAULT_MTU:-}"
+ROUTING_MODE="${ROUTING_MODE:-cn-direct}"
 
 usage() {
 	cat <<'EOF'
@@ -22,6 +23,7 @@ Options:
   --base-url URL       Optional base URL used to write subscription links to clients.csv
   --dns LIST           Optional DNS override, comma-separated
   --mtu N              Optional MTU override
+  --routing-mode MODE  One of: cn-direct, global. Default: cn-direct
   --help               Show this help
 
 Supported input layout examples:
@@ -60,6 +62,10 @@ while [[ $# -gt 0 ]]; do
 			DEFAULT_MTU="$2"
 			shift 2
 		;;
+		--routing-mode)
+			ROUTING_MODE="$2"
+			shift 2
+		;;
 		--help|-h)
 			usage
 			exit 0
@@ -74,6 +80,16 @@ done
 
 trim_spaces() {
 	sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<< "$1"
+}
+
+validate_routing_mode() {
+	case "$ROUTING_MODE" in
+		cn-direct|global) ;;
+		*)
+			echo "Unsupported routing mode: $ROUTING_MODE" >&2
+			exit 1
+		;;
+	esac
 }
 
 csv_to_yaml_list() {
@@ -155,6 +171,11 @@ write_mihomo_profile() {
 		echo "allow-lan: false"
 		echo "mode: rule"
 		echo "log-level: info"
+		if [[ "$ROUTING_MODE" == "cn-direct" ]]; then
+			echo "geodata-mode: true"
+			echo "geo-auto-update: true"
+			echo "geo-update-interval: 24"
+		fi
 		echo
 		echo "proxies:"
 		echo "  - name: \"$profile_name\""
@@ -191,6 +212,19 @@ write_mihomo_profile() {
 		echo "      - DIRECT"
 		echo
 		echo "rules:"
+		if [[ "$ROUTING_MODE" == "cn-direct" ]]; then
+			echo "  - DOMAIN-SUFFIX,local,DIRECT"
+			echo "  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve"
+			echo "  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve"
+			echo "  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve"
+			echo "  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve"
+			echo "  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve"
+			echo "  - IP-CIDR6,::1/128,DIRECT,no-resolve"
+			echo "  - IP-CIDR6,fc00::/7,DIRECT,no-resolve"
+			echo "  - IP-CIDR6,fe80::/10,DIRECT,no-resolve"
+			echo "  - GEOSITE,CN,DIRECT"
+			echo "  - GEOIP,CN,DIRECT"
+		fi
 		echo "  - MATCH,PROXY"
 	} > "$output_path"
 }
@@ -199,6 +233,8 @@ if [[ ! -d "$INPUT_DIR" ]]; then
 	echo "Input directory not found: $INPUT_DIR" >&2
 	exit 1
 fi
+
+validate_routing_mode
 
 mkdir -p "$OUTPUT_DIR"
 chmod 700 "$OUTPUT_DIR"

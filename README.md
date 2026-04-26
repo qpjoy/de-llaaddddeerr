@@ -239,6 +239,7 @@ docker/wg-mihomo-stack/manage.sh
 - 初始化 `.env`
 - 生成订阅 Basic Auth 哈希
 - 修改 `WG` / 订阅端口、认证和带宽默认值
+- 选择 Mihomo 路由模式：`cn-direct` 或 `global`
 - 启动 / 重启 `subscriptions` 和 `wireguard`
 - 批量新增 / 删除用户
 - 自动重新导出 Mihomo YAML
@@ -266,6 +267,11 @@ sudo bash ./docker/wg-mihomo-stack/manage.sh status
 - `reinstall`：先完整清空当前 `wg-mihomo-stack`，再重新执行交互式 `setup`
 - `reconfigure`：不用手改 `.env` 或 `peer-limits.env`，直接交互式修改端口、订阅账号密码和全局带宽默认值，再由脚本重建栈
 - `reset-auth`：只重置订阅用户名 / 密码，重建 `subscriptions`，并尝试在本机用新的明文密码校验一个现有的 `.mihomo.yaml`
+
+当前默认路由模式建议用：
+
+- `cn-direct`：国内直连，国外走 WireGuard peer
+- `global`：所有代理流量都走 WireGuard peer
 
 如果你现在想把服务器上这套 `wg-mihomo-stack` 完全交给 `manage.sh` 接管，最直接的迁移方式就是：
 

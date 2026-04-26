@@ -114,6 +114,21 @@ normalize_password_hash_quotes() {
 	set_env_value WG_EXPORT_PASSWORD_HASH "'$normalized'"
 }
 
+normalize_routing_mode_value() {
+	local value="$1"
+	case "$value" in
+		cn-direct|global)
+			echo "$value"
+		;;
+		"" )
+			echo "cn-direct"
+		;;
+		*)
+			die "Unsupported Mihomo routing mode: $value (expected: cn-direct or global)"
+		;;
+	esac
+}
+
 load_env() {
 	ensure_env_file
 	normalize_password_hash_quotes
@@ -767,7 +782,7 @@ list_users_command() {
 
 setup_command() {
 	local host wg_port sub_port auth_user auth_pass initial_users_csv peer_dns
-	local wg_subnet stack_subnet stack_gateway tz puid pgid
+	local routing_mode wg_subnet stack_subnet stack_gateway tz puid pgid
 	local total_rate ingress_total_rate base_rate down_ceil up_ceil hash
 	local primary_user
 	local -a initial_names=()
@@ -784,6 +799,7 @@ setup_command() {
 	auth_pass="$(prompt_password "Subscription password")"
 	initial_users_csv="$(prompt_default "Initial users (comma-separated)" "${WG_PEERS:-test01}")"
 	peer_dns="$(prompt_default "Peer DNS servers" "${WG_PEER_DNS:-1.1.1.1,8.8.8.8}")"
+	routing_mode="$(normalize_routing_mode_value "$(prompt_default "Mihomo routing mode (cn-direct/global)" "${WG_MIHOMO_ROUTING_MODE:-cn-direct}")")"
 	wg_subnet="$(prompt_default "WireGuard client subnet" "${WG_INTERNAL_SUBNET:-10.13.13.0}")"
 	stack_subnet="$(prompt_default "Docker stack subnet" "${WG_STACK_SUBNET:-10.253.0.0/24}")"
 	stack_gateway="$(prompt_default "Docker stack gateway" "${WG_STACK_GATEWAY:-10.253.0.1}")"
@@ -811,6 +827,7 @@ setup_command() {
 	set_env_value WG_STACK_GATEWAY "$stack_gateway"
 	set_env_value WG_PEERS "$primary_user"
 	set_env_value WG_PEER_DNS "$peer_dns"
+	set_env_value WG_MIHOMO_ROUTING_MODE "$routing_mode"
 	set_env_value WG_INTERNAL_SUBNET "$wg_subnet"
 	set_env_value WG_ALLOWEDIPS "0.0.0.0/0"
 	set_env_value WG_KEEPALIVE_PEERS "all"
@@ -859,7 +876,7 @@ EOF
 }
 
 reconfigure_command() {
-	local host wg_port sub_port auth_user rotate_auth auth_pass peer_dns
+	local host wg_port sub_port auth_user rotate_auth auth_pass peer_dns routing_mode
 	local wg_subnet stack_subnet stack_gateway total_rate ingress_total_rate
 	local base_rate down_ceil up_ceil hash
 
@@ -877,6 +894,7 @@ reconfigure_command() {
 		set_env_value WG_EXPORT_PASSWORD_HASH "'$hash'"
 	fi
 	peer_dns="$(prompt_default "Peer DNS servers" "${WG_PEER_DNS:-1.1.1.1,8.8.8.8}")"
+	routing_mode="$(normalize_routing_mode_value "$(prompt_default "Mihomo routing mode (cn-direct/global)" "${WG_MIHOMO_ROUTING_MODE:-cn-direct}")")"
 	wg_subnet="$(prompt_default "WireGuard client subnet" "${WG_INTERNAL_SUBNET:-10.13.13.0}")"
 	stack_subnet="$(prompt_default "Docker stack subnet" "${WG_STACK_SUBNET:-10.253.0.0/24}")"
 	stack_gateway="$(prompt_default "Docker stack gateway" "${WG_STACK_GATEWAY:-10.253.0.1}")"
@@ -891,6 +909,7 @@ reconfigure_command() {
 	set_env_value WG_STACK_SUBNET "$stack_subnet"
 	set_env_value WG_STACK_GATEWAY "$stack_gateway"
 	set_env_value WG_PEER_DNS "$peer_dns"
+	set_env_value WG_MIHOMO_ROUTING_MODE "$routing_mode"
 	set_env_value WG_INTERNAL_SUBNET "$wg_subnet"
 	set_env_value WG_EXPORT_SITE_ADDRESS ":8080"
 	set_env_value WG_EXPORT_BASE_URL "http://${host}:${sub_port}"

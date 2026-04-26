@@ -75,4 +75,8 @@ if [[ -n "${WG_PEER_DNS:-}" ]]; then
 	cmd+=(--dns "$WG_PEER_DNS")
 fi
 
+if [[ -n "${WG_MIHOMO_ROUTING_MODE:-}" ]]; then
+	cmd+=(--routing-mode "$WG_MIHOMO_ROUTING_MODE")
+fi
+
 "${cmd[@]}"
