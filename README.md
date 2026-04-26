@@ -228,6 +228,61 @@ docker compose up -d
 docker/wg-mihomo-stack/
 ```
 
+如果你不想再手工改 `.env`、重启容器、导出订阅、重挂限速，现在优先推荐直接用：
+
+```bash
+docker/wg-mihomo-stack/manage.sh
+```
+
+这个脚本会统一处理：
+
+- 初始化 `.env`
+- 生成订阅 Basic Auth 哈希
+- 修改 `WG` / 订阅端口、认证和带宽默认值
+- 启动 / 重启 `subscriptions` 和 `wireguard`
+- 批量新增 / 删除用户
+- 自动重新导出 Mihomo YAML
+- 自动重挂 `tc/ifb` 上下行限速
+
+最常用的命令是：
+
+```bash
+sudo bash ./docker/wg-mihomo-stack/manage.sh setup
+sudo bash ./docker/wg-mihomo-stack/manage.sh reconfigure
+sudo bash ./docker/wg-mihomo-stack/manage.sh stop all
+sudo bash ./docker/wg-mihomo-stack/manage.sh destroy --wipe-data --wipe-env --yes
+sudo bash ./docker/wg-mihomo-stack/manage.sh reinstall
+sudo bash ./docker/wg-mihomo-stack/manage.sh add-user --names test01,test02
+sudo bash ./docker/wg-mihomo-stack/manage.sh del-user --names test02
+sudo bash ./docker/wg-mihomo-stack/manage.sh set-limit --names test01 --down-ceil 9mbit --up-ceil 9mbit
+sudo bash ./docker/wg-mihomo-stack/manage.sh status
+```
+
+其中：
+
+- `stop all`：只停容器，不删数据
+- `destroy --wipe-data --wipe-env --yes`：删除容器并清掉当前栈生成的配置、订阅、限速文件
+- `reinstall`：先完整清空当前 `wg-mihomo-stack`，再重新执行交互式 `setup`
+- `reconfigure`：不用手改 `.env` 或 `peer-limits.env`，直接交互式修改端口、订阅账号密码和全局带宽默认值，再由脚本重建栈
+
+如果你现在想把服务器上这套 `wg-mihomo-stack` 完全交给 `manage.sh` 接管，最直接的迁移方式就是：
+
+```bash
+sudo bash ./docker/wg-mihomo-stack/manage.sh destroy --wipe-data --wipe-env --yes
+sudo bash ./docker/wg-mihomo-stack/manage.sh setup
+```
+
+后面再做任何管理，都尽量走：
+
+```bash
+sudo bash ./docker/wg-mihomo-stack/manage.sh add-user --names user02,user03
+sudo bash ./docker/wg-mihomo-stack/manage.sh del-user --names user03
+sudo bash ./docker/wg-mihomo-stack/manage.sh set-limit --names user02 --down-ceil 9mbit --up-ceil 9mbit
+sudo bash ./docker/wg-mihomo-stack/manage.sh reconfigure
+sudo bash ./docker/wg-mihomo-stack/manage.sh restart wireguard
+sudo bash ./docker/wg-mihomo-stack/manage.sh status
+```
+
 这套方案的定位是：
 
 - 服务端协议仍然是 `WireGuard`

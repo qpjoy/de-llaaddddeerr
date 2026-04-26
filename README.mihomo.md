@@ -64,3 +64,45 @@ docker-compose up -d wireguard
 cd /你的项目目录
 bash ./scripts/export-wg-mihomo-stack.sh
 ```
+
+
+# 限速
+```bash
+cd /root/workspace/qpjoy/de-lader-formal
+
+cat > ./docker/wg-mihomo-stack/peer-limits.csv <<'EOF'
+# name,cidr,down_rate,down_ceil,up_rate,up_ceil
+test01,10.13.13.3/32,1mbit,9mbit,1mbit,9mbit
+EOF
+
+sudo bash ./scripts/wg-tc-limit.sh apply \
+  --docker-container wg-mihomo-wireguard \
+  --if wg0 \
+  --ingress \
+  --limits-file ./docker/wg-mihomo-stack/peer-limits.csv \
+  --total-rate 9mbit \
+  --ingress-total-rate 9mbit \
+  --base-rate 1mbit
+
+# 查看规则：
+sudo bash ./scripts/wg-tc-limit.sh show \
+  --docker-container wg-mihomo-wireguard \
+  --if wg0
+
+# 清理规则：
+sudo bash ./scripts/wg-tc-limit.sh clean \
+  --docker-container wg-mihomo-wireguard \
+  --if wg0
+```
+
+# 新建用户
+```bash
+# 1. 新增用户时
+## 改 .env 里的 WG_PEERS=...
+# 2. 重建 WG 容器
+cd /root/workspace/qpjoy/de-lader-formal/docker/wg-mihomo-stack
+docker-compose up -d wireguard
+# 3. 重新导出订阅
+cd /root/workspace/qpjoy/de-lader-formal
+bash ./scripts/export-wg-mihomo-stack.sh
+```
