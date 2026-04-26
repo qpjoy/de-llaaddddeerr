@@ -316,6 +316,26 @@ wait_for_container() {
 	die "Container did not become ready in time: $container_name"
 }
 
+wait_for_interface_ready() {
+	local iface="$1"
+	local deadline=$((SECONDS + 60))
+
+	while (( SECONDS < deadline )); do
+		if [[ -n "${TC_DOCKER_CONTAINER:-}" ]]; then
+			if docker exec "$TC_DOCKER_CONTAINER" ip link show dev "$iface" >/dev/null 2>&1; then
+				return 0
+			fi
+		else
+			if ip link show dev "$iface" >/dev/null 2>&1; then
+				return 0
+			fi
+		fi
+		sleep 1
+	done
+
+	return 1
+}
+
 find_peer_conf() {
 	local name="$1"
 	find "$STACK_DIR/data/wireguard" -type f -name '*.conf' \
@@ -447,6 +467,10 @@ apply_limits() {
 		bash "$ROOT_DIR/scripts/wg-tc-limit.sh" clean --docker-container "$WIREGUARD_CONTAINER" --if "${TC_IFACE}" >/dev/null 2>&1 || true
 		echo "No limit rows configured, cleared existing tc rules if present."
 		return 0
+	fi
+
+	if ! wait_for_interface_ready "${TC_IFACE}"; then
+		die "WireGuard interface ${TC_IFACE} did not become ready in time for tc shaping."
 	fi
 
 	local -a cmd=(
