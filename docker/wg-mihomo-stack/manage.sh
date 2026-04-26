@@ -92,8 +92,29 @@ ensure_env_file() {
 	fi
 }
 
+normalize_password_hash_quotes() {
+	local raw_value normalized
+
+	[[ -f "$ENV_FILE" ]] || return 0
+	raw_value="$(awk -F= '/^WG_EXPORT_PASSWORD_HASH=/{sub(/^WG_EXPORT_PASSWORD_HASH=/, "", $0); print $0; exit}' "$ENV_FILE")"
+	[[ -n "$raw_value" ]] || return 0
+
+	normalized="$(echo "$raw_value" | sed "s/^[[:space:]]*//;s/[[:space:]]*$//")"
+	if [[ "$normalized" == \'*\' ]]; then
+		return 0
+	fi
+
+	if [[ "$normalized" == \"*\" ]]; then
+		normalized="${normalized#\"}"
+		normalized="${normalized%\"}"
+	fi
+
+	set_env_value WG_EXPORT_PASSWORD_HASH "'$normalized'"
+}
+
 load_env() {
 	ensure_env_file
+	normalize_password_hash_quotes
 	set -a
 	# shellcheck disable=SC1090
 	source "$ENV_FILE"
@@ -709,6 +730,8 @@ setup_command() {
 	local host wg_port sub_port auth_user auth_pass initial_users_csv peer_dns
 	local wg_subnet stack_subnet stack_gateway tz puid pgid
 	local total_rate ingress_total_rate base_rate down_ceil up_ceil hash
+	local primary_user
+	local -a initial_names=()
 
 	ensure_stack_dirs
 	ensure_env_file
@@ -730,6 +753,9 @@ setup_command() {
 	base_rate="$(prompt_default "Per-user guaranteed rate" "${TC_BASE_RATE:-1mbit}")"
 	down_ceil="$(prompt_default "Default per-user download ceiling" "${TC_DEFAULT_CEIL:-9mbit}")"
 	up_ceil="$(prompt_default "Default per-user upload ceiling" "${TC_INGRESS_DEFAULT_CEIL:-9mbit}")"
+	mapfile -t initial_names < <(parse_names_csv "$initial_users_csv")
+	[[ "${#initial_names[@]}" -gt 0 ]] || die "Please provide at least one valid initial user."
+	primary_user="${initial_names[0]}"
 
 	tz="${TZ:-$(cat /etc/timezone 2>/dev/null || echo Asia/Shanghai)}"
 	puid="${PUID:-$(id -u)}"
@@ -744,7 +770,7 @@ setup_command() {
 	set_env_value WG_SERVER_PORT "$wg_port"
 	set_env_value WG_STACK_SUBNET "$stack_subnet"
 	set_env_value WG_STACK_GATEWAY "$stack_gateway"
-	set_env_value WG_PEERS "$(array_join_csv $(parse_names_csv "$initial_users_csv"))"
+	set_env_value WG_PEERS "$primary_user"
 	set_env_value WG_PEER_DNS "$peer_dns"
 	set_env_value WG_INTERNAL_SUBNET "$wg_subnet"
 	set_env_value WG_ALLOWEDIPS "0.0.0.0/0"
@@ -769,12 +795,22 @@ setup_command() {
 # name,cidr,down_rate,down_ceil,up_rate,up_ceil
 EOF
 
+	echo "Bootstrapping stack with first user: $primary_user"
 	start_target all
 
-	mapfile -t initial_names < <(parse_names_csv "$initial_users_csv")
-	if [[ "${#initial_names[@]}" -gt 0 ]]; then
-		sync_limits_for_users "$TC_BASE_RATE" "$TC_DEFAULT_CEIL" "$TC_BASE_RATE" "$TC_INGRESS_DEFAULT_CEIL" "${initial_names[@]}"
-		apply_limits
+	sync_limits_for_users "$TC_BASE_RATE" "$TC_DEFAULT_CEIL" "$TC_BASE_RATE" "$TC_INGRESS_DEFAULT_CEIL" "$primary_user"
+	apply_limits
+
+	if (( ${#initial_names[@]} > 1 )); then
+		echo "Adding remaining users one by one: $(array_join_csv "${initial_names[@]:1}")"
+		local remaining_user
+		for remaining_user in "${initial_names[@]:1}"; do
+			DOWN_RATE="$TC_BASE_RATE" \
+			DOWN_CEIL="$TC_DEFAULT_CEIL" \
+			UP_RATE="$TC_BASE_RATE" \
+			UP_CEIL="$TC_INGRESS_DEFAULT_CEIL" \
+			add_user_command "$remaining_user"
+		done
 	fi
 
 	echo
