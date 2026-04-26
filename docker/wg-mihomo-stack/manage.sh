@@ -11,6 +11,7 @@ LIMITS_ENV_FILE="$STACK_DIR/peer-limits.env"
 WIREGUARD_CONTAINER="wg-mihomo-wireguard"
 SUBSCRIPTIONS_CONTAINER="wg-mihomo-subscriptions"
 COMPOSE_BIN=""
+PEER_GEN_TIMEOUT_SECONDS="${PEER_GEN_TIMEOUT_SECONDS:-300}"
 
 usage() {
 	cat <<'EOF'
@@ -496,21 +497,31 @@ delete_user_artifacts() {
 }
 
 wait_for_peer_confs() {
-	local deadline=$((SECONDS + 90))
+	local deadline=$((SECONDS + PEER_GEN_TIMEOUT_SECONDS))
 	local all_ready name
+	local -a missing=()
 
 	while (( SECONDS < deadline )); do
 		all_ready="true"
+		missing=()
 		for name in "$@"; do
 			if [[ -z "$(find_peer_conf "$name")" ]]; then
 				all_ready="false"
-				break
+				missing+=("$name")
 			fi
 		done
 		[[ "$all_ready" == "true" ]] && return 0
 		sleep 1
 	done
 
+	echo "Timed out waiting for peer config generation after ${PEER_GEN_TIMEOUT_SECONDS}s." >&2
+	if [[ "${#missing[@]}" -gt 0 ]]; then
+		echo "Still missing peer configs for: $(array_join_csv "${missing[@]}")" >&2
+	fi
+	echo "Current generated peer files:" >&2
+	find "$STACK_DIR/data/wireguard" -type f -name '*.conf' ! -path '*/wg_confs/*' ! -path '*/templates/*' ! -path '*/server/*' | sort >&2 || true
+	echo "Recent wireguard container logs:" >&2
+	docker logs --tail=80 "$WIREGUARD_CONTAINER" >&2 || true
 	die "Timed out waiting for peer config generation."
 }
 
@@ -762,7 +773,6 @@ EOF
 
 	mapfile -t initial_names < <(parse_names_csv "$initial_users_csv")
 	if [[ "${#initial_names[@]}" -gt 0 ]]; then
-		wait_for_peer_confs "${initial_names[@]}"
 		sync_limits_for_users "$TC_BASE_RATE" "$TC_DEFAULT_CEIL" "$TC_BASE_RATE" "$TC_INGRESS_DEFAULT_CEIL" "${initial_names[@]}"
 		apply_limits
 	fi
@@ -873,7 +883,6 @@ add_user_command() {
 
 	set_env_value WG_PEERS "$(array_join_csv "${current[@]}")"
 	start_target wireguard
-	wait_for_peer_confs "${updated[@]}"
 	refresh_subscriptions
 
 	if [[ "$skip_limit" != "true" ]]; then
