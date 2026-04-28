@@ -661,6 +661,78 @@ name,cidr,rate,ceil
 name,cidr,down_rate,down_ceil,up_rate,up_ceil
 ```
 
+### 1.9 Hysteria2 + Mihomo 迁移栈
+
+如果你已经确认 `WireGuard/UDP` 端口会被上游间歇性限制，仓库里现在多了一套并行的：
+
+```bash
+docker/hysteria2-mihomo-stack/
+```
+
+这套栈的目标是：
+
+- 保持原来“每个用户一个 Mihomo 订阅 URL”的用法
+- 订阅文件名继续用 `peer_<user>.mihomo.yaml`
+- 客户端刷新同一个订阅链接后，直接从 `type: wireguard` 切到 `type: hysteria2`
+- 服务端支持 `Hysteria 2` 端口范围和 Mihomo 客户端 `hop-interval`
+
+最常用的命令：
+
+```bash
+sudo bash ./docker/hysteria2-mihomo-stack/manage.sh setup
+sudo bash ./docker/hysteria2-mihomo-stack/manage.sh reconfigure
+sudo bash ./docker/hysteria2-mihomo-stack/manage.sh reset-auth
+sudo bash ./docker/hysteria2-mihomo-stack/manage.sh add-user --names intelligent01,intelligent02
+sudo bash ./docker/hysteria2-mihomo-stack/manage.sh del-user --names intelligent02
+sudo bash ./docker/hysteria2-mihomo-stack/manage.sh export
+sudo bash ./docker/hysteria2-mihomo-stack/manage.sh status
+```
+
+`setup` 会自动完成这些事：
+
+- 初始化 `.env`
+- 生成订阅 Basic Auth 哈希
+- 生成自签名 TLS 证书和指纹
+- 生成 `Hysteria 2` 服务端配置
+- 生成每个用户的独立认证 token
+- 启动 `subscriptions + hysteria`
+- 导出 `peer_<user>.mihomo.yaml`
+
+当前导出的 Mihomo 节点默认就是：
+
+- `type: hysteria2`
+- `ports: 52120-52159` 这类范围端口
+- `hop-interval: 30`
+- `GEOSITE,CN,DIRECT`
+- `GEOIP,CN,DIRECT`
+- `MATCH,PROXY`
+
+也就是说，如果你沿用原来的订阅 URL，比如：
+
+```bash
+http://download:密码@你的IP:3434/peer_intelligent01.mihomo.yaml
+```
+
+只要：
+
+- 新栈继续使用相同的订阅用户名 / 密码
+- 新栈继续使用相同的 `3434` 和相同文件名
+
+客户端刷新订阅后，就会直接拿到新的 `Hysteria 2` 配置，不需要重新发一个新链接。
+
+和 `wg-mihomo-stack` 不同的是，这套 `hysteria2` 栈里的：
+
+```bash
+set-limit / clear-limit
+```
+
+现在更新的是每个订阅里 `Hysteria 2` 的 `up/down` 字段，用来给客户端提供带宽提示；它不是宿主机 `tc` 那种强制的服务端整形。也就是说：
+
+- `wg-mihomo-stack` 的限速是服务端 `tc/ifb`
+- `hysteria2-mihomo-stack` 的限速是客户端配置级别的 `up/down`
+
+如果你后面拿到了域名和正式证书，可以再把这套栈从“自签名 + 指纹”切成“域名 + 正式 TLS”，订阅 URL 本身也不必改变，只需要刷新内容。
+
 ### 2. 连接流程
 
 ```bash

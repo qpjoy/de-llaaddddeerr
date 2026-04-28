@@ -1,0 +1,18 @@
+{$HY2_EXPORT_SITE_ADDRESS} {
+	root * /srv/hy2
+
+	@health path /healthz
+	respond @health 200
+
+	@protected not path /healthz
+	basic_auth @protected bcrypt {
+		{$HY2_EXPORT_USER} {$HY2_EXPORT_PASSWORD_HASH}
+	}
+
+	header {
+		Cache-Control "private, no-store"
+		X-Content-Type-Options "nosniff"
+	}
+
+	file_server
+}
