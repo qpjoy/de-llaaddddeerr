@@ -3,3 +3,14 @@ config.env
 
 # 备份文件
 *.backup
+
+# Docker VPN runtime artifacts
+docker/wg-mihomo-stack/.env
+docker/wg-mihomo-stack/data/
+docker/wg-mihomo-stack/config/caddy/
+!docker/wg-mihomo-stack/peer-limits.csv.example
+
+docker/hysteria2-mihomo-stack/.env
+docker/hysteria2-mihomo-stack/data/
+docker/hysteria2-mihomo-stack/config/caddy/
+docker/hysteria2-mihomo-stack/config/hysteria/certs/

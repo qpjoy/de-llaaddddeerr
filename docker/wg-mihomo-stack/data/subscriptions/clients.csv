@@ -1,2 +1,0 @@
-name,ipv4,source_conf,mihomo_yaml,subscription_url
-peer_testmac,10.13.13.2,./docker/wg-mihomo-stack/data/wireguard/peer_testmac/peer_testmac.conf,./docker/wg-mihomo-stack/data/subscriptions/peer_testmac.mihomo.yaml,http://127.0.0.1:18081/peer_testmac.mihomo.yaml
