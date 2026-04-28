@@ -144,7 +144,10 @@ default_users_from_old_wg_stack() {
 set_env_value() {
 	local key="$1"
 	local value="$2"
-	local tmp
+	local tmp escaped
+
+	escaped="$(printf "%s" "$value" | sed "s/'/'\\\\''/g")"
+	value="'$escaped'"
 
 	tmp="$(mktemp)"
 	awk -v key="$key" -v value="$value" '
@@ -181,7 +184,7 @@ normalize_password_hash_quotes() {
 		normalized="${normalized%\"}"
 	fi
 
-	set_env_value HY2_EXPORT_PASSWORD_HASH "'$normalized'"
+	set_env_value HY2_EXPORT_PASSWORD_HASH "$normalized"
 }
 
 normalize_routing_mode_value() {
@@ -822,7 +825,7 @@ setup_command() {
 	set_env_value HY2_EXPORT_BASE_URL "http://${host}:${sub_port}"
 	set_env_value HY2_EXPORT_FALLBACK_PORT "$sub_port"
 	set_env_value HY2_EXPORT_USER "$auth_user"
-	set_env_value HY2_EXPORT_PASSWORD_HASH "'$hash'"
+	set_env_value HY2_EXPORT_PASSWORD_HASH "$hash"
 
 	echo "$USER_HEADER" > "$USERS_FILE"
 	for name in "${initial_names[@]}"; do
@@ -856,7 +859,7 @@ reconfigure_command() {
 	if [[ "$rotate_auth" == "y" || "$rotate_auth" == "yes" ]]; then
 		auth_pass="$(prompt_password "New subscription password")"
 		hash="$(hash_password "$auth_pass")"
-		set_env_value HY2_EXPORT_PASSWORD_HASH "'$hash'"
+		set_env_value HY2_EXPORT_PASSWORD_HASH "$hash"
 	fi
 	peer_dns="$(prompt_default "Peer DNS servers" "${HY2_PEER_DNS:-1.1.1.1,8.8.8.8}")"
 	routing_mode="$(normalize_routing_mode_value "$(prompt_default "Mihomo routing mode (cn-direct/global)" "${HY2_MIHOMO_ROUTING_MODE:-cn-direct}")")"
@@ -911,7 +914,7 @@ reset_auth_command() {
 
 	hash="$(hash_password "$auth_pass")"
 	set_env_value HY2_EXPORT_USER "$auth_user"
-	set_env_value HY2_EXPORT_PASSWORD_HASH "'$hash'"
+	set_env_value HY2_EXPORT_PASSWORD_HASH "$hash"
 	load_env
 
 	safe_recreate_service subscriptions
