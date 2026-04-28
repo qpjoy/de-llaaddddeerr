@@ -332,6 +332,8 @@ safe_recreate_service() {
 	compose rm -f "$service" >/dev/null 2>&1 || true
 	docker rm -f "$container_name" >/dev/null 2>&1 || true
 	if [[ "$service" == "subscriptions" ]]; then
+		rm -rf "$STACK_DIR/data/caddy/"* >/dev/null 2>&1 || true
+		rm -rf "$STACK_DIR/config/caddy/"* >/dev/null 2>&1 || true
 		rm -f "$STACK_DIR/config/caddy/autosave.json" >/dev/null 2>&1 || true
 		rm -f "$STACK_DIR/config/caddy/caddy/autosave.json" >/dev/null 2>&1 || true
 	fi
@@ -571,6 +573,20 @@ delete_user_artifacts() {
 
 first_subscription_yaml() {
 	find "$STACK_DIR/data/subscriptions" -maxdepth 1 -type f -name '*.mihomo.yaml' | sort | head -n 1
+}
+
+verify_subscription_auth() {
+	local auth_user="$1"
+	local auth_pass="$2"
+	local sample_yaml sample_name
+
+	sample_yaml="$(first_subscription_yaml || true)"
+	[[ -n "$sample_yaml" && -f "$sample_yaml" ]] || die "No Mihomo YAML file found for subscription auth verification."
+	sample_name="$(basename "$sample_yaml")"
+
+	if ! curl -fsS -u "${auth_user}:${auth_pass}" "http://127.0.0.1:${HY2_EXPORT_FALLBACK_PORT}/${sample_name}" >/dev/null; then
+		die "Subscription auth verification failed for ${sample_name}. Please re-run reset-auth with a known password."
+	fi
 }
 
 refresh_subscriptions() {
@@ -838,6 +854,7 @@ setup_command() {
 	load_env
 	render_runtime_files
 	start_target all
+	verify_subscription_auth "$auth_user" "$auth_pass"
 
 	echo
 	echo "Setup complete."
@@ -919,19 +936,11 @@ reset_auth_command() {
 
 	safe_recreate_service subscriptions
 	wait_for_container "$SUBSCRIPTIONS_CONTAINER"
-
+	verify_subscription_auth "$HY2_EXPORT_USER" "$auth_pass"
 	sample_yaml="$(first_subscription_yaml || true)"
-	if [[ -n "$sample_yaml" && -f "$sample_yaml" ]] && command -v curl >/dev/null 2>&1; then
-		sample_name="$(basename "$sample_yaml")"
-		if curl -fsS -u "${HY2_EXPORT_USER}:${auth_pass}" "http://127.0.0.1:${HY2_EXPORT_FALLBACK_PORT}/${sample_name}" >/dev/null; then
-			echo "Subscription auth reset succeeded."
-			echo "Verified locally with: http://${HY2_EXPORT_USER}:<password>@127.0.0.1:${HY2_EXPORT_FALLBACK_PORT}/${sample_name}"
-			return 0
-		fi
-		die "Subscription auth was updated, but local verification still failed for ${sample_name}."
-	fi
-
-	echo "Subscription auth reset succeeded. No local Mihomo YAML file was available for verification."
+	sample_name="$(basename "$sample_yaml")"
+	echo "Subscription auth reset succeeded."
+	echo "Verified locally with: http://${HY2_EXPORT_USER}:<password>@127.0.0.1:${HY2_EXPORT_FALLBACK_PORT}/${sample_name}"
 }
 
 add_user_command() {
