@@ -374,6 +374,22 @@ is_ip_value() {
 	[[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$value" =~ : ]]
 }
 
+default_tls_sni_for_host() {
+	local host="$1"
+	local current="${2:-}"
+
+	if [[ -n "$current" ]]; then
+		echo "$current"
+		return 0
+	fi
+
+	if is_ip_value "$host"; then
+		echo ""
+	else
+		echo "$host"
+	fi
+}
+
 generate_self_signed_cert() {
 	local host="$1"
 	local sni="$2"
@@ -808,7 +824,7 @@ setup_command() {
 	initial_users_csv="$(prompt_default "Initial users (comma-separated)" "$users_default")"
 	peer_dns="$(prompt_default "Peer DNS servers" "${HY2_PEER_DNS:-1.1.1.1,8.8.8.8}")"
 	routing_mode="$(normalize_routing_mode_value "$(prompt_default "Mihomo routing mode (cn-direct/global)" "${HY2_MIHOMO_ROUTING_MODE:-cn-direct}")")"
-	tls_sni="$(prompt_default "TLS server name / SNI" "${HY2_TLS_SERVER_NAME:-$host}")"
+	tls_sni="$(normalize_optional_value "$(prompt_default "TLS server name / SNI ('-' to disable)" "$(default_tls_sni_for_host "$host" "${HY2_TLS_SERVER_NAME:-}")")")"
 	hop_interval="$(prompt_default "Port hop interval seconds" "${HY2_HOP_INTERVAL_SECONDS:-30}")"
 	initial_down="$(prompt_default "Default per-user download hint" "${HY2_DEFAULT_DOWN:-9 Mbps}")"
 	initial_up="$(prompt_default "Default per-user upload hint" "${HY2_DEFAULT_UP:-9 Mbps}")"
@@ -880,7 +896,7 @@ reconfigure_command() {
 	fi
 	peer_dns="$(prompt_default "Peer DNS servers" "${HY2_PEER_DNS:-1.1.1.1,8.8.8.8}")"
 	routing_mode="$(normalize_routing_mode_value "$(prompt_default "Mihomo routing mode (cn-direct/global)" "${HY2_MIHOMO_ROUTING_MODE:-cn-direct}")")"
-	tls_sni="$(prompt_default "TLS server name / SNI" "${HY2_TLS_SERVER_NAME:-$host}")"
+	tls_sni="$(normalize_optional_value "$(prompt_default "TLS server name / SNI ('-' to disable)" "$(default_tls_sni_for_host "$host" "${HY2_TLS_SERVER_NAME:-}")")")"
 	hop_interval="$(prompt_default "Port hop interval seconds" "${HY2_HOP_INTERVAL_SECONDS:-30}")"
 	down_default="$(prompt_default "Default per-user download hint" "${HY2_DEFAULT_DOWN:-9 Mbps}")"
 	up_default="$(prompt_default "Default per-user upload hint" "${HY2_DEFAULT_UP:-9 Mbps}")"
