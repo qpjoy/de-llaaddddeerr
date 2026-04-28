@@ -698,6 +698,13 @@ sudo bash ./docker/hysteria2-mihomo-stack/manage.sh status
 - 启动 `subscriptions + hysteria`
 - 导出 `peer_<user>.mihomo.yaml`
 
+当前这套 `hysteria2` 栈默认会同时做两层带宽控制：
+
+- 服务端默认限制为每客户端 `下载 3 Mbps / 上传 30 Mbps`
+- 导出的 Mihomo 节点默认也写入 `down = 3 Mbps`、`up = 30 Mbps`
+
+这意味着即使 3 台或 10 台客户端同时在线，也不会有单个客户端轻易把整台 VPS 下载带宽抢满；但客户端上传会相对宽松。代价是人少时下载也不会自动冲到满速；如果你确实想临时放宽，只需要用 `reconfigure` 调整全局服务端上限，或用 `set-limit` 调整某个客户端的 `up/down` 提示值。
+
 当前导出的 Mihomo 节点默认就是：
 
 - `type: hysteria2`
@@ -726,10 +733,16 @@ http://download:密码@你的IP:3434/peer_intelligent01.mihomo.yaml
 set-limit / clear-limit
 ```
 
-现在更新的是每个订阅里 `Hysteria 2` 的 `up/down` 字段，用来给客户端提供带宽提示；它不是宿主机 `tc` 那种强制的服务端整形。也就是说：
+现在更新的是每个订阅里 `Hysteria 2` 的 `up/down` 字段，用来给客户端提供带宽提示；真正的硬上限来自服务端配置里的 `HY2_SERVER_BANDWIDTH_DOWN / HY2_SERVER_BANDWIDTH_UP`。这里要注意一个方向问题：
+
+- `HY2_SERVER_BANDWIDTH_DOWN` 表示“客户端下载上限”
+- `HY2_SERVER_BANDWIDTH_UP` 表示“客户端上传上限”
+
+也就是说：
 
 - `wg-mihomo-stack` 的限速是服务端 `tc/ifb`
-- `hysteria2-mihomo-stack` 的限速是客户端配置级别的 `up/down`
+- `hysteria2-mihomo-stack` 的默认硬上限是服务端每客户端 `下载 3 Mbps / 上传 30 Mbps`
+- `hysteria2-mihomo-stack` 的 `set-limit` 仍然主要是在客户端配置级别调整 `up/down`
 
 如果你后面拿到了域名和正式证书，可以再把这套栈从“自签名 + 指纹”切成“域名 + 正式 TLS”，订阅 URL 本身也不必改变，只需要刷新内容。
 

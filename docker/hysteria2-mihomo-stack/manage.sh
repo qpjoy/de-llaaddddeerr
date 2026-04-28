@@ -49,7 +49,7 @@ Examples:
   sudo bash ./docker/hysteria2-mihomo-stack/manage.sh reset-auth --user download --password pass
   sudo bash ./docker/hysteria2-mihomo-stack/manage.sh add-user --names intelligent01,intelligent02
   sudo bash ./docker/hysteria2-mihomo-stack/manage.sh del-user --names intelligent02
-  sudo bash ./docker/hysteria2-mihomo-stack/manage.sh set-limit --names intelligent01 --down-ceil "9 Mbps" --up-ceil "3 Mbps"
+  sudo bash ./docker/hysteria2-mihomo-stack/manage.sh set-limit --names intelligent01 --down-ceil "3 Mbps" --up-ceil "30 Mbps"
 EOF
 }
 
@@ -200,6 +200,14 @@ normalize_routing_mode_value() {
 			die "Unsupported Mihomo routing mode: $value (expected: cn-direct or global)"
 		;;
 	esac
+}
+
+default_hy2_download_rate() {
+	echo "3 Mbps"
+}
+
+default_hy2_upload_rate() {
+	echo "30 Mbps"
 }
 
 load_env() {
@@ -481,6 +489,18 @@ render_server_config() {
 		echo "auth:"
 		echo "  type: command"
 		echo "  command: /etc/hysteria/auth.sh"
+		if [[ -n "${HY2_SERVER_BANDWIDTH_UP:-}" || -n "${HY2_SERVER_BANDWIDTH_DOWN:-}" ]]; then
+			echo
+			echo "bandwidth:"
+			if [[ -n "${HY2_SERVER_BANDWIDTH_UP:-}" ]]; then
+				# Server "up" is the client's download direction.
+				echo "  down: ${HY2_SERVER_BANDWIDTH_UP}"
+			fi
+			if [[ -n "${HY2_SERVER_BANDWIDTH_DOWN:-}" ]]; then
+				# Server "down" is the client's upload direction.
+				echo "  up: ${HY2_SERVER_BANDWIDTH_DOWN}"
+			fi
+		fi
 		if [[ -n "${HY2_OBFS_PASSWORD:-}" ]]; then
 			echo
 			echo "obfs:"
@@ -778,6 +798,8 @@ status_command() {
 	echo "TLS server name: ${HY2_TLS_SERVER_NAME:-unset}"
 	echo "TLS fingerprint: ${HY2_TLS_FINGERPRINT:-unset}"
 	echo "Port hop interval: ${HY2_HOP_INTERVAL_SECONDS:-unset}s"
+	echo "Per-client download cap: ${HY2_SERVER_BANDWIDTH_DOWN:-unset}"
+	echo "Per-client upload cap: ${HY2_SERVER_BANDWIDTH_UP:-unset}"
 	echo
 	compose ps
 	echo
@@ -804,7 +826,7 @@ list_users_command() {
 setup_command() {
 	local host port_spec sub_port auth_user auth_pass initial_users_csv peer_dns
 	local routing_mode tls_sni stack_subnet stack_gateway tz initial_down initial_up
-	local hash users_default hop_interval masq_url obfs_password
+	local server_down server_up hash users_default hop_interval masq_url obfs_password
 	local -a initial_names=()
 	local name
 
@@ -826,8 +848,10 @@ setup_command() {
 	routing_mode="$(normalize_routing_mode_value "$(prompt_default "Mihomo routing mode (cn-direct/global)" "${HY2_MIHOMO_ROUTING_MODE:-cn-direct}")")"
 	tls_sni="$(normalize_optional_value "$(prompt_default "TLS server name / SNI ('-' to disable)" "$(default_tls_sni_for_host "$host" "${HY2_TLS_SERVER_NAME:-}")")")"
 	hop_interval="$(prompt_default "Port hop interval seconds" "${HY2_HOP_INTERVAL_SECONDS:-30}")"
-	initial_down="$(prompt_default "Default per-user download hint" "${HY2_DEFAULT_DOWN:-9 Mbps}")"
-	initial_up="$(prompt_default "Default per-user upload hint" "${HY2_DEFAULT_UP:-9 Mbps}")"
+	server_down="$(prompt_default "Server-side per-client download cap" "${HY2_SERVER_BANDWIDTH_DOWN:-$(default_hy2_download_rate)}")"
+	server_up="$(prompt_default "Server-side per-client upload cap" "${HY2_SERVER_BANDWIDTH_UP:-$(default_hy2_upload_rate)}")"
+	initial_down="$(prompt_default "Default per-user download hint" "${HY2_DEFAULT_DOWN:-${server_down:-$(default_hy2_download_rate)}}")"
+	initial_up="$(prompt_default "Default per-user upload hint" "${HY2_DEFAULT_UP:-${server_up:-$(default_hy2_upload_rate)}}")"
 	masq_url="$(normalize_optional_value "$(prompt_default "Masquerade URL ('-' to disable)" "${HY2_MASQUERADE_URL:-https://news.ycombinator.com/}")")"
 	obfs_password="$(normalize_optional_value "$(prompt_default "Salamander obfs password ('-' to disable)" "${HY2_OBFS_PASSWORD:-}")")"
 	stack_subnet="$(prompt_default "Docker stack subnet" "${HY2_STACK_SUBNET:-10.254.0.0/24}")"
@@ -849,6 +873,8 @@ setup_command() {
 	set_env_value HY2_TLS_SERVER_NAME "$tls_sni"
 	set_env_value HY2_TLS_SELF_SIGNED_DAYS "${HY2_TLS_SELF_SIGNED_DAYS:-3650}"
 	set_env_value HY2_TLS_SKIP_CERT_VERIFY "true"
+	set_env_value HY2_SERVER_BANDWIDTH_DOWN "$server_down"
+	set_env_value HY2_SERVER_BANDWIDTH_UP "$server_up"
 	set_env_value HY2_DEFAULT_DOWN "$initial_down"
 	set_env_value HY2_DEFAULT_UP "$initial_up"
 	set_env_value HY2_MASQUERADE_URL "$masq_url"
@@ -880,7 +906,7 @@ setup_command() {
 reconfigure_command() {
 	local host port_spec sub_port auth_user rotate_auth auth_pass peer_dns routing_mode
 	local tls_sni hop_interval masq_url obfs_password stack_subnet stack_gateway
-	local down_default up_default hash
+	local server_down server_up down_default up_default hash
 
 	load_env
 
@@ -898,8 +924,10 @@ reconfigure_command() {
 	routing_mode="$(normalize_routing_mode_value "$(prompt_default "Mihomo routing mode (cn-direct/global)" "${HY2_MIHOMO_ROUTING_MODE:-cn-direct}")")"
 	tls_sni="$(normalize_optional_value "$(prompt_default "TLS server name / SNI ('-' to disable)" "$(default_tls_sni_for_host "$host" "${HY2_TLS_SERVER_NAME:-}")")")"
 	hop_interval="$(prompt_default "Port hop interval seconds" "${HY2_HOP_INTERVAL_SECONDS:-30}")"
-	down_default="$(prompt_default "Default per-user download hint" "${HY2_DEFAULT_DOWN:-9 Mbps}")"
-	up_default="$(prompt_default "Default per-user upload hint" "${HY2_DEFAULT_UP:-9 Mbps}")"
+	server_down="$(prompt_default "Server-side per-client download cap" "${HY2_SERVER_BANDWIDTH_DOWN:-$(default_hy2_download_rate)}")"
+	server_up="$(prompt_default "Server-side per-client upload cap" "${HY2_SERVER_BANDWIDTH_UP:-$(default_hy2_upload_rate)}")"
+	down_default="$(prompt_default "Default per-user download hint" "${HY2_DEFAULT_DOWN:-${server_down:-$(default_hy2_download_rate)}}")"
+	up_default="$(prompt_default "Default per-user upload hint" "${HY2_DEFAULT_UP:-${server_up:-$(default_hy2_upload_rate)}}")"
 	masq_url="$(normalize_optional_value "$(prompt_default "Masquerade URL ('-' to disable)" "${HY2_MASQUERADE_URL:-https://news.ycombinator.com/}")")"
 	obfs_password="$(normalize_optional_value "$(prompt_default "Salamander obfs password ('-' to disable)" "${HY2_OBFS_PASSWORD:-}")")"
 	stack_subnet="$(prompt_default "Docker stack subnet" "${HY2_STACK_SUBNET:-10.254.0.0/24}")"
@@ -913,6 +941,8 @@ reconfigure_command() {
 	set_env_value HY2_PEER_DNS "$peer_dns"
 	set_env_value HY2_MIHOMO_ROUTING_MODE "$routing_mode"
 	set_env_value HY2_TLS_SERVER_NAME "$tls_sni"
+	set_env_value HY2_SERVER_BANDWIDTH_DOWN "$server_down"
+	set_env_value HY2_SERVER_BANDWIDTH_UP "$server_up"
 	set_env_value HY2_DEFAULT_DOWN "$down_default"
 	set_env_value HY2_DEFAULT_UP "$up_default"
 	set_env_value HY2_MASQUERADE_URL "$masq_url"
@@ -983,7 +1013,7 @@ add_user_command() {
 			continue
 		fi
 		auth_token="$(random_token)"
-		upsert_user_record "$name" "$auth_token" "${up_value:-${HY2_DEFAULT_UP:-9 Mbps}}" "${down_value:-${HY2_DEFAULT_DOWN:-9 Mbps}}"
+		upsert_user_record "$name" "$auth_token" "${up_value:-${HY2_DEFAULT_UP:-$(default_hy2_upload_rate)}}" "${down_value:-${HY2_DEFAULT_DOWN:-$(default_hy2_download_rate)}}"
 	done
 
 	sync_env_user_list_from_file
@@ -1056,7 +1086,7 @@ clear_limit_command() {
 		record="$(user_record "$name" || true)"
 		[[ -n "$record" ]] || die "User not found: $name"
 		IFS=$'\t' read -r auth_token current_up current_down <<< "$record"
-		upsert_user_record "$name" "$auth_token" "${HY2_DEFAULT_UP:-9 Mbps}" "${HY2_DEFAULT_DOWN:-9 Mbps}"
+		upsert_user_record "$name" "$auth_token" "${HY2_DEFAULT_UP:-$(default_hy2_upload_rate)}" "${HY2_DEFAULT_DOWN:-$(default_hy2_download_rate)}"
 	done
 
 	refresh_subscriptions
