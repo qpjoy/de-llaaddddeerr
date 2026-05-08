@@ -362,6 +362,20 @@ wait_for_container() {
 	die "Container did not become ready in time: $container_name"
 }
 
+wait_for_subscription_http_ready() {
+	local port="${1:-$HY2_EXPORT_FALLBACK_PORT}"
+	local deadline=$((SECONDS + 60))
+
+	while (( SECONDS < deadline )); do
+		if curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep 1
+	done
+
+	die "Subscription HTTP endpoint did not become ready in time on port ${port}."
+}
+
 hash_password() {
 	local plaintext="$1"
 	docker run --rm caddy:2-alpine caddy hash-password --plaintext "$plaintext" | tr -d '\r\n'
@@ -614,15 +628,22 @@ first_subscription_yaml() {
 verify_subscription_auth() {
 	local auth_user="$1"
 	local auth_pass="$2"
-	local sample_yaml sample_name
+	local sample_yaml sample_name deadline=$((SECONDS + 45))
 
 	sample_yaml="$(first_subscription_yaml || true)"
 	[[ -n "$sample_yaml" && -f "$sample_yaml" ]] || die "No Mihomo YAML file found for subscription auth verification."
 	sample_name="$(basename "$sample_yaml")"
 
-	if ! curl -fsS -u "${auth_user}:${auth_pass}" "http://127.0.0.1:${HY2_EXPORT_FALLBACK_PORT}/${sample_name}" >/dev/null; then
-		die "Subscription auth verification failed for ${sample_name}. Please re-run reset-auth with a known password."
-	fi
+	wait_for_subscription_http_ready "$HY2_EXPORT_FALLBACK_PORT"
+
+	while (( SECONDS < deadline )); do
+		if curl -fsS -u "${auth_user}:${auth_pass}" "http://127.0.0.1:${HY2_EXPORT_FALLBACK_PORT}/${sample_name}" >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep 1
+	done
+
+	die "Subscription auth verification failed for ${sample_name}. Please re-run reset-auth with a known password."
 }
 
 refresh_subscriptions() {
