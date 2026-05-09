@@ -783,6 +783,27 @@ sudo bash ./scripts/mihomo-client.sh install \
   --password 你的密码
 ```
 
+如果你更习惯把认证信息直接写进 URL，也可以这样：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh setup
+```
+
+然后把订阅地址填成：
+
+```bash
+http://download:你的密码@你的IP:3434/peer_user01.mihomo.yaml
+```
+
+现在脚本会自动把 URL 里的账号密码拆出来保存；后面的：
+
+```bash
+Subscription username (empty if none):
+Subscription password (empty if none):
+```
+
+直接回车即可，不是卡住。
+
 安装完成后，`mihomo` 会按订阅里的配置在本机打开 `mixed-port`。如果订阅里默认是：
 
 ```bash

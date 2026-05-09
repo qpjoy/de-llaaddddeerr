@@ -149,6 +149,56 @@ prompt_password() {
 	echo "$value"
 }
 
+extract_auth_from_url() {
+	local raw_url="$1"
+	python3 - "$raw_url" <<'PY'
+import sys
+from urllib.parse import urlsplit, urlunsplit, unquote
+
+raw = sys.argv[1]
+parts = urlsplit(raw)
+
+username = parts.username or ""
+password = parts.password or ""
+
+hostname = parts.hostname or ""
+netloc = hostname
+if parts.port:
+    netloc = f"{netloc}:{parts.port}"
+
+sanitized = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+print(sanitized)
+print(unquote(username))
+print(unquote(password))
+PY
+}
+
+normalize_subscription_inputs() {
+	local url="$1"
+	local username="$2"
+	local password="$3"
+	local sanitized_url parsed_user parsed_pass
+	local -a parsed=()
+
+	if [[ "$url" == *"@"* ]] && [[ "$url" == http://* || "$url" == https://* ]]; then
+		mapfile -t parsed < <(extract_auth_from_url "$url")
+		if [[ "${#parsed[@]}" -ge 3 ]]; then
+			sanitized_url="${parsed[0]}"
+			parsed_user="${parsed[1]}"
+			parsed_pass="${parsed[2]}"
+			url="$sanitized_url"
+			if [[ -z "$username" && -n "$parsed_user" ]]; then
+				username="$parsed_user"
+			fi
+			if [[ -z "$password" && -n "$parsed_pass" ]]; then
+				password="$parsed_pass"
+			fi
+		fi
+	fi
+
+	printf "%s\n%s\n%s\n" "$url" "$username" "$password"
+}
+
 detect_asset_selector() {
 	case "$(uname -m)" in
 		x86_64|amd64) echo "linux-amd64-v1" ;;
@@ -390,12 +440,17 @@ update_subscription_command() {
 	local url="${1:-}"
 	local username="${2:-}"
 	local password="${3:-}"
+	local -a normalized=()
 
 	load_env
 
 	url="${url:-${MIHOMO_SUBSCRIPTION_URL:-}}"
 	username="${username:-${MIHOMO_SUBSCRIPTION_USER:-}}"
 	password="${password:-${MIHOMO_SUBSCRIPTION_PASSWORD:-}}"
+	mapfile -t normalized < <(normalize_subscription_inputs "$url" "$username" "$password")
+	url="${normalized[0]}"
+	username="${normalized[1]}"
+	password="${normalized[2]}"
 
 	[[ -n "$url" ]] || die "No subscription URL configured. Use install or pass --url."
 
@@ -485,6 +540,7 @@ install_command() {
 	local password="${3:-}"
 	local version="${4:-latest}"
 	local autostart="${5:-true}"
+	local -a normalized=()
 
 	ensure_dirs
 	load_env
@@ -492,6 +548,10 @@ install_command() {
 	if [[ -z "$url" ]]; then
 		url="$(prompt_default "Subscription URL" "${MIHOMO_SUBSCRIPTION_URL:-}")"
 	fi
+	mapfile -t normalized < <(normalize_subscription_inputs "$url" "$username" "$password")
+	url="${normalized[0]}"
+	username="${normalized[1]}"
+	password="${normalized[2]}"
 	if [[ -z "$username" ]]; then
 		username="$(prompt_default "Subscription username (empty if none)" "${MIHOMO_SUBSCRIPTION_USER:-}")"
 	fi
