@@ -781,6 +781,10 @@ sudo bash ./scripts/mihomo-client.sh install \
   --url http://你的IP:3434/peer_user01.mihomo.yaml \
   --user download \
   --password 你的密码
+
+sudo bash ./scripts/mihomo-client.sh install \
+  --url http://你的IP:3434/peer_user01.mihomo.yaml \
+  --binary-path /tmp/mihomo
 ```
 
 如果你更习惯把认证信息直接写进 URL，也可以这样：
@@ -803,6 +807,16 @@ Subscription password (empty if none):
 ```
 
 直接回车即可，不是卡住。
+
+如果目标 Ubuntu 机器本身访问不了 GitHub，可以先把 `mihomo` 二进制传上去，然后用：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh install \
+  --url http://download:你的密码@你的IP:3434/peer_user01.mihomo.yaml \
+  --binary-path /tmp/mihomo
+```
+
+这样脚本就不会再去 GitHub 拉 release。
 
 安装完成后，`mihomo` 会按订阅里的配置在本机打开 `mixed-port`。如果订阅里默认是：
 

@@ -46,6 +46,7 @@ Install options:
   --user USER          Basic Auth username for subscription
   --password PASS      Basic Auth password for subscription
   --version TAG        Mihomo version tag. Default: latest stable release
+  --binary-path PATH   Use an existing Mihomo binary instead of downloading from GitHub
   --no-start           Install/update files but do not start the service
 
 Update options:
@@ -62,6 +63,10 @@ Examples:
     --user download \
     --password pass
 
+  sudo bash ./scripts/mihomo-client.sh install \
+    --url http://IP:3434/peer_user01.mihomo.yaml \
+    --binary-path /tmp/mihomo
+
   sudo bash ./scripts/mihomo-client.sh update-subscription
   sudo bash ./scripts/mihomo-client.sh start
   sudo bash ./scripts/mihomo-client.sh proxy-on
@@ -77,7 +82,7 @@ die() {
 }
 
 log() {
-	echo "[mihomo-client] $*"
+	echo "[mihomo-client] $*" >&2
 }
 
 enable_verbose() {
@@ -310,6 +315,17 @@ install_binary() {
 	set_env_value MIHOMO_VERSION "$tag"
 	echo "Installed Mihomo $tag to $MIHOMO_BIN"
 	rm -rf "$tmpdir"
+}
+
+install_binary_from_path() {
+	local source_path="$1"
+	[[ -n "$source_path" ]] || die "Binary path is required."
+	[[ -f "$source_path" ]] || die "Mihomo binary not found: $source_path"
+	[[ -x "$source_path" ]] || die "Mihomo binary is not executable: $source_path"
+	cp "$source_path" "$MIHOMO_BIN"
+	chmod 755 "$MIHOMO_BIN"
+	set_env_value MIHOMO_VERSION "local"
+	echo "Installed Mihomo local binary to $MIHOMO_BIN"
 }
 
 write_service_file() {
@@ -557,6 +573,7 @@ install_command() {
 	local password="${3:-}"
 	local version="${4:-latest}"
 	local autostart="${5:-true}"
+	local binary_path="${6:-}"
 	local -a normalized=()
 
 	ensure_dirs
@@ -577,8 +594,13 @@ install_command() {
 		password="$(prompt_password "Subscription password (empty if none)")"
 	fi
 
-	log "Installing Mihomo core binary"
-	install_binary "$version"
+	if [[ -n "$binary_path" ]]; then
+		log "Installing Mihomo core from local binary path"
+		install_binary_from_path "$binary_path"
+	else
+		log "Installing Mihomo core binary"
+		install_binary "$version"
+	fi
 	log "Writing systemd service file"
 	write_service_file
 	systemd_reload
@@ -668,17 +690,19 @@ main() {
 			local password=""
 			local version="latest"
 			local autostart="true"
+			local binary_path=""
 			while [[ $# -gt 0 ]]; do
 				case "$1" in
 					--url) url="$2"; shift 2 ;;
 					--user) username="$2"; shift 2 ;;
 					--password) password="$2"; shift 2 ;;
 					--version) version="$2"; shift 2 ;;
+					--binary-path) binary_path="$2"; shift 2 ;;
 					--no-start) autostart="false"; shift ;;
 					*) die "Unknown install option: $1" ;;
 				esac
 			done
-			install_command "$url" "$username" "$password" "$version" "$autostart"
+			install_command "$url" "$username" "$password" "$version" "$autostart" "$binary_path"
 		;;
 		update-subscription)
 			local url=""
