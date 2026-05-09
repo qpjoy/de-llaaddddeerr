@@ -15,6 +15,10 @@ MIHOMO_SERVICE_FILE="${MIHOMO_SERVICE_FILE:-/etc/systemd/system/$MIHOMO_SERVICE_
 MIHOMO_PROFILE_PROXY_FILE="${MIHOMO_PROFILE_PROXY_FILE:-/etc/profile.d/mihomo-client-proxy.sh}"
 MIHOMO_DAEMON_PROXY_SERVICES="${MIHOMO_DAEMON_PROXY_SERVICES:-docker.service containerd.service buildkit.service}"
 MIHOMO_DAEMON_PROXY_DROPIN_NAME="${MIHOMO_DAEMON_PROXY_DROPIN_NAME:-mihomo-proxy.conf}"
+MIHOMO_SSH_PROXY_HELPER="${MIHOMO_SSH_PROXY_HELPER:-/usr/local/bin/mihomo-ssh-proxy}"
+MIHOMO_SSH_CONFIG_DIR="${MIHOMO_SSH_CONFIG_DIR:-/etc/ssh/ssh_config.d}"
+MIHOMO_SSH_CONFIG_FILE="${MIHOMO_SSH_CONFIG_FILE:-$MIHOMO_SSH_CONFIG_DIR/99-mihomo-proxy.conf}"
+MIHOMO_SSH_PROXY_HOSTS="${MIHOMO_SSH_PROXY_HOSTS:-github.com gitlab.com bitbucket.org ssh.dev.azure.com}"
 GITHUB_API_ROOT="${GITHUB_API_ROOT:-https://api.github.com/repos/MetaCubeX/mihomo/releases}"
 MIHOMO_GEOX_GEOIP_URL="${MIHOMO_GEOX_GEOIP_URL:-https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat}"
 MIHOMO_GEOX_GEOSITE_URL="${MIHOMO_GEOX_GEOSITE_URL:-https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat}"
@@ -40,6 +44,8 @@ Commands:
   proxy-off            Remove /etc/profile.d proxy exports
   tun-on               Enable Mihomo TUN mode and also turn proxy-on on
   tun-off              Disable Mihomo TUN mode and also turn proxy-on off
+  ssh-proxy-on         Configure OpenSSH client to use local Mihomo SOCKS for common Git hosts
+  ssh-proxy-off        Remove OpenSSH proxy override
   daemon-proxy-on      Configure common daemon services to use local Mihomo proxy
   daemon-proxy-off     Remove daemon proxy overrides
   docker-proxy-on      Backward-compatible alias for daemon-proxy-on
@@ -80,6 +86,7 @@ Examples:
   sudo bash ./scripts/mihomo-client.sh start
   sudo bash ./scripts/mihomo-client.sh proxy-on
   sudo bash ./scripts/mihomo-client.sh tun-on
+  sudo bash ./scripts/mihomo-client.sh ssh-proxy-on
   sudo bash ./scripts/mihomo-client.sh daemon-proxy-on
   sudo bash ./scripts/mihomo-client.sh run curl -I https://www.google.com/generate_204
   sudo bash ./scripts/mihomo-client.sh print-env
@@ -526,6 +533,10 @@ managed_daemon_services_with_proxy() {
 	done
 }
 
+ssh_proxy_enabled() {
+	[[ -f "$MIHOMO_SSH_CONFIG_FILE" ]]
+}
+
 status_command() {
 	local port version daemon_services
 	load_env
@@ -541,6 +552,7 @@ status_command() {
 	echo "Mixed port: ${port:-unknown}"
 	echo "Shell proxy profile: $([[ -f "$MIHOMO_PROFILE_PROXY_FILE" ]] && echo enabled || echo disabled)"
 	echo "TUN mode: $([[ -f "$MIHOMO_TUN_OVERLAY_FILE" ]] && echo enabled || echo disabled)"
+	echo "SSH proxy config: $([[ -f "$MIHOMO_SSH_CONFIG_FILE" ]] && echo enabled || echo disabled)"
 	echo "Managed daemon proxy services: ${daemon_services:-none}"
 	echo
 	systemctl status "$MIHOMO_SERVICE_NAME" --no-pager || true
@@ -600,6 +612,53 @@ proxy_off_command() {
 	echo "Shell proxy exports removed."
 }
 
+write_ssh_proxy_helper() {
+	cat > "$MIHOMO_SSH_PROXY_HELPER" <<'EOF'
+#!/bin/sh
+set -eu
+
+HOST="${1:?host required}"
+PORT="${2:?port required}"
+PROXY_ADDR="${MIHOMO_SSH_PROXY_ADDR:-127.0.0.1:7890}"
+
+if command -v nc >/dev/null 2>&1; then
+	exec nc -x "$PROXY_ADDR" -X 5 "$HOST" "$PORT"
+fi
+
+if command -v ncat >/dev/null 2>&1; then
+	exec ncat --proxy "$PROXY_ADDR" --proxy-type socks5 "$HOST" "$PORT"
+fi
+
+if command -v connect-proxy >/dev/null 2>&1; then
+	exec connect-proxy -S "$PROXY_ADDR" "$HOST" "$PORT"
+fi
+
+echo "No SOCKS-capable helper found (need nc, ncat, or connect-proxy)." >&2
+exit 1
+EOF
+	chmod 755 "$MIHOMO_SSH_PROXY_HELPER"
+}
+
+ssh_proxy_on_command() {
+	local port
+	port="$(mixed_port_from_config)"
+	[[ -n "$port" ]] || die "Could not detect mixed-port from $MIHOMO_CONFIG_FILE"
+	mkdir -p "$MIHOMO_SSH_CONFIG_DIR"
+	write_ssh_proxy_helper
+	cat > "$MIHOMO_SSH_CONFIG_FILE" <<EOF
+Host $MIHOMO_SSH_PROXY_HOSTS
+    ProxyCommand env MIHOMO_SSH_PROXY_ADDR=127.0.0.1:$port $MIHOMO_SSH_PROXY_HELPER %h %p
+EOF
+	chmod 644 "$MIHOMO_SSH_CONFIG_FILE"
+	echo "OpenSSH proxy config enabled at $MIHOMO_SSH_CONFIG_FILE"
+}
+
+ssh_proxy_off_command() {
+	rm -f "$MIHOMO_SSH_CONFIG_FILE"
+	rm -f "$MIHOMO_SSH_PROXY_HELPER"
+	echo "OpenSSH proxy config removed."
+}
+
 daemon_proxy_on_command() {
 	local port
 	local service file dir
@@ -652,6 +711,7 @@ tun_on_command() {
 	write_tun_overlay
 	render_runtime_config
 	proxy_on_command
+	ssh_proxy_on_command
 	daemon_proxy_on_command
 	if service_is_active; then
 		systemctl restart "$MIHOMO_SERVICE_NAME"
@@ -666,6 +726,7 @@ tun_off_command() {
 	remove_tun_overlay
 	render_runtime_config
 	proxy_off_command
+	ssh_proxy_off_command
 	daemon_proxy_off_command
 	if service_is_active; then
 		systemctl restart "$MIHOMO_SERVICE_NAME"
@@ -780,6 +841,8 @@ uninstall_command() {
 	rm -f "$MIHOMO_SERVICE_FILE"
 	rm -f "$MIHOMO_PROFILE_PROXY_FILE"
 	rm -f "$MIHOMO_TUN_OVERLAY_FILE"
+	rm -f "$MIHOMO_SSH_CONFIG_FILE"
+	rm -f "$MIHOMO_SSH_PROXY_HELPER"
 	systemd_reload
 
 	if [[ "$purge" == "true" ]]; then
@@ -882,6 +945,12 @@ main() {
 		;;
 		tun-off)
 			tun_off_command
+		;;
+		ssh-proxy-on)
+			ssh_proxy_on_command
+		;;
+		ssh-proxy-off)
+			ssh_proxy_off_command
 		;;
 		daemon-proxy-on)
 			daemon_proxy_on_command

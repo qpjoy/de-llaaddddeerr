@@ -904,6 +904,7 @@ sudo bash ./scripts/mihomo-client.sh tun-on
 
 - 在本地运行时配置里追加 Mihomo `tun` 配置
 - 同时执行 `proxy-on`
+- 同时给常见 `ssh/git` 主机写入 OpenSSH 代理配置
 - 同时给常见守护进程写入代理配置，例如 `docker.service`、`containerd.service`、`buildkit.service`（如果这些服务存在）
 
 也就是你后面既可以整机走 TUN，也可以继续让 shell 工具显式继承代理环境。
@@ -915,6 +916,25 @@ sudo bash ./scripts/mihomo-client.sh tun-off
 ```
 
 这套 TUN 开关是客户端本地行为，不会改远程订阅内容；远程订阅更新后，脚本会继续保留你本机的 TUN 开关状态。
+
+如果你只想单独让 `git@github.com:...` 这类 SSH remote 走 Mihomo，本地也提供了单独开关：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh ssh-proxy-on
+sudo bash ./scripts/mihomo-client.sh ssh-proxy-off
+```
+
+它会写入：
+
+```bash
+/etc/ssh/ssh_config.d/99-mihomo-proxy.conf
+```
+
+默认会代理这些常见 Git 主机：
+
+```bash
+github.com gitlab.com bitbucket.org ssh.dev.azure.com
+```
 
 如果你不想全局开 shell 代理，只想让某一条命令临时走这条网络：
 
