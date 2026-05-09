@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+MIHOMO_VERBOSE="${MIHOMO_VERBOSE:-false}"
+
 MIHOMO_HOME="${MIHOMO_HOME:-/etc/mihomo-client}"
 MIHOMO_ENV_FILE="${MIHOMO_ENV_FILE:-$MIHOMO_HOME/client.env}"
 MIHOMO_SUBSCRIPTION_FILE="${MIHOMO_SUBSCRIPTION_FILE:-$MIHOMO_HOME/subscription.yaml}"
@@ -16,7 +18,7 @@ GITHUB_API_ROOT="${GITHUB_API_ROOT:-https://api.github.com/repos/MetaCubeX/mihom
 usage() {
 	cat <<'EOF'
 Usage:
-  sudo bash ./scripts/mihomo-client.sh <command> [options]
+  sudo bash ./scripts/mihomo-client.sh [--verbose] <command> [options]
 
 Commands:
   setup                Interactive install wizard (same as install without flags)
@@ -72,6 +74,15 @@ EOF
 die() {
 	echo "Error: $*" >&2
 	exit 1
+}
+
+log() {
+	echo "[mihomo-client] $*"
+}
+
+enable_verbose() {
+	MIHOMO_VERBOSE="true"
+	set -x
 }
 
 require_root() {
@@ -187,6 +198,7 @@ normalize_subscription_inputs() {
 			parsed_user="${parsed[1]}"
 			parsed_pass="${parsed[2]}"
 			url="$sanitized_url"
+			log "Detected Basic Auth inside subscription URL. Credentials will be stored separately."
 			if [[ -z "$username" && -n "$parsed_user" ]]; then
 				username="$parsed_user"
 			fi
@@ -220,8 +232,10 @@ resolve_release_asset() {
 	json_file="$(mktemp)"
 	if [[ "$version" == "latest" ]]; then
 		api_url="$GITHUB_API_ROOT"
+		log "Querying latest stable Mihomo release metadata for $selector"
 	else
 		api_url="$GITHUB_API_ROOT/tags/$version"
+		log "Querying Mihomo release metadata for tag $version ($selector)"
 	fi
 
 	if [[ "$version" == "latest" ]]; then
@@ -287,6 +301,7 @@ install_binary() {
 	archive="$tmpdir/mihomo.gz"
 	tmpbin="$tmpdir/mihomo"
 
+	log "Downloading Mihomo $tag from GitHub"
 	curl -fsSL "$download_url" -o "$archive"
 	gzip -dc "$archive" > "$tmpbin"
 	chmod 755 "$tmpbin"
@@ -382,6 +397,7 @@ fetch_subscription() {
 		curl_args+=(-u "${username}:${password}")
 	fi
 
+	log "Fetching remote subscription: $url"
 	curl "${curl_args[@]}" "$url" -o "$tmp_file"
 	[[ -s "$tmp_file" ]] || die "Downloaded subscription is empty."
 	mv "$tmp_file" "$MIHOMO_SUBSCRIPTION_FILE"
@@ -460,6 +476,7 @@ update_subscription_command() {
 	set_env_value MIHOMO_SUBSCRIPTION_PASSWORD "$password"
 
 	if service_is_active; then
+		log "Restarting Mihomo service after subscription update"
 		systemctl restart "$MIHOMO_SERVICE_NAME"
 		echo "Subscription updated and service restarted."
 	else
@@ -544,6 +561,7 @@ install_command() {
 
 	ensure_dirs
 	load_env
+	log "Starting Mihomo client install/setup"
 
 	if [[ -z "$url" ]]; then
 		url="$(prompt_default "Subscription URL" "${MIHOMO_SUBSCRIPTION_URL:-}")"
@@ -559,7 +577,9 @@ install_command() {
 		password="$(prompt_password "Subscription password (empty if none)")"
 	fi
 
+	log "Installing Mihomo core binary"
 	install_binary "$version"
+	log "Writing systemd service file"
 	write_service_file
 	systemd_reload
 
@@ -567,10 +587,12 @@ install_command() {
 	set_env_value MIHOMO_SUBSCRIPTION_USER "$username"
 	set_env_value MIHOMO_SUBSCRIPTION_PASSWORD "$password"
 
+	log "Downloading initial subscription and rendering runtime config"
 	update_subscription_command "$url" "$username" "$password"
 
 	systemctl enable "$MIHOMO_SERVICE_NAME" >/dev/null 2>&1 || true
 	if [[ "$autostart" == "true" ]]; then
+		log "Starting Mihomo client service"
 		systemctl restart "$MIHOMO_SERVICE_NAME"
 		echo "Mihomo client installed and started."
 	else
@@ -619,6 +641,13 @@ uninstall_command() {
 
 main() {
 	local command="${1:-help}"
+
+	if [[ "${1:-}" == "--verbose" ]]; then
+		enable_verbose
+		shift
+		command="${1:-help}"
+	fi
+
 	shift || true
 
 	if [[ "$command" == "help" || "$command" == "-h" || "$command" == "--help" ]]; then
