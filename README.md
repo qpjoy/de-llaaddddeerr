@@ -818,6 +818,15 @@ sudo bash ./scripts/mihomo-client.sh install \
 
 这样脚本就不会再去 GitHub 拉 release。
 
+另外，如果订阅里启用了：
+
+```bash
+GEOSITE,CN
+GEOIP,CN
+```
+
+而目标 Ubuntu 又访问不了 GitHub，`mihomo` 启动时默认拉取 `geosite.dat` 也可能失败。现在客户端脚本会自动给运行时配置补上 `geox-url` 镜像地址，优先使用 `testingcf.jsdelivr.net` 拉取 GEO 数据，减少这类机器启动失败的概率。
+
 安装完成后，`mihomo` 会按订阅里的配置在本机打开 `mixed-port`。如果订阅里默认是：
 
 ```bash

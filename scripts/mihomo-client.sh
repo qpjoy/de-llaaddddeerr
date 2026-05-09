@@ -14,6 +14,9 @@ MIHOMO_SERVICE_NAME="${MIHOMO_SERVICE_NAME:-mihomo-client.service}"
 MIHOMO_SERVICE_FILE="${MIHOMO_SERVICE_FILE:-/etc/systemd/system/$MIHOMO_SERVICE_NAME}"
 MIHOMO_PROFILE_PROXY_FILE="${MIHOMO_PROFILE_PROXY_FILE:-/etc/profile.d/mihomo-client-proxy.sh}"
 GITHUB_API_ROOT="${GITHUB_API_ROOT:-https://api.github.com/repos/MetaCubeX/mihomo/releases}"
+MIHOMO_GEOX_GEOIP_URL="${MIHOMO_GEOX_GEOIP_URL:-https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat}"
+MIHOMO_GEOX_GEOSITE_URL="${MIHOMO_GEOX_GEOSITE_URL:-https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat}"
+MIHOMO_GEOX_MMDB_URL="${MIHOMO_GEOX_MMDB_URL:-https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb}"
 
 usage() {
 	cat <<'EOF'
@@ -388,9 +391,31 @@ tun_enabled() {
 	[[ -f "$MIHOMO_TUN_OVERLAY_FILE" ]]
 }
 
+config_uses_geodata() {
+	grep -Eq '^[[:space:]]*geodata-mode:[[:space:]]*true([[:space:]]|$)' "$MIHOMO_SUBSCRIPTION_FILE"
+}
+
+config_has_geox_url() {
+	grep -Eq '^[[:space:]]*geox-url:[[:space:]]*$' "$MIHOMO_SUBSCRIPTION_FILE"
+}
+
+append_geox_overlay_if_needed() {
+	if config_uses_geodata && ! config_has_geox_url; then
+		log "Injecting geox-url mirror overrides for geo data downloads"
+		cat >> "$MIHOMO_CONFIG_FILE" <<EOF
+
+geox-url:
+  geoip: "$MIHOMO_GEOX_GEOIP_URL"
+  geosite: "$MIHOMO_GEOX_GEOSITE_URL"
+  mmdb: "$MIHOMO_GEOX_MMDB_URL"
+EOF
+	fi
+}
+
 render_runtime_config() {
 	ensure_subscription_source
 	cat "$MIHOMO_SUBSCRIPTION_FILE" > "$MIHOMO_CONFIG_FILE"
+	append_geox_overlay_if_needed
 	if tun_enabled; then
 		printf "\n" >> "$MIHOMO_CONFIG_FILE"
 		cat "$MIHOMO_TUN_OVERLAY_FILE" >> "$MIHOMO_CONFIG_FILE"
