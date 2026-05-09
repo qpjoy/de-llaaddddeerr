@@ -13,6 +13,8 @@ MIHOMO_BIN="${MIHOMO_BIN:-/usr/local/bin/mihomo}"
 MIHOMO_SERVICE_NAME="${MIHOMO_SERVICE_NAME:-mihomo-client.service}"
 MIHOMO_SERVICE_FILE="${MIHOMO_SERVICE_FILE:-/etc/systemd/system/$MIHOMO_SERVICE_NAME}"
 MIHOMO_PROFILE_PROXY_FILE="${MIHOMO_PROFILE_PROXY_FILE:-/etc/profile.d/mihomo-client-proxy.sh}"
+MIHOMO_DAEMON_PROXY_SERVICES="${MIHOMO_DAEMON_PROXY_SERVICES:-docker.service containerd.service buildkit.service}"
+MIHOMO_DAEMON_PROXY_DROPIN_NAME="${MIHOMO_DAEMON_PROXY_DROPIN_NAME:-mihomo-proxy.conf}"
 GITHUB_API_ROOT="${GITHUB_API_ROOT:-https://api.github.com/repos/MetaCubeX/mihomo/releases}"
 MIHOMO_GEOX_GEOIP_URL="${MIHOMO_GEOX_GEOIP_URL:-https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat}"
 MIHOMO_GEOX_GEOSITE_URL="${MIHOMO_GEOX_GEOSITE_URL:-https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat}"
@@ -38,6 +40,10 @@ Commands:
   proxy-off            Remove /etc/profile.d proxy exports
   tun-on               Enable Mihomo TUN mode and also turn proxy-on on
   tun-off              Disable Mihomo TUN mode and also turn proxy-on off
+  daemon-proxy-on      Configure common daemon services to use local Mihomo proxy
+  daemon-proxy-off     Remove daemon proxy overrides
+  docker-proxy-on      Backward-compatible alias for daemon-proxy-on
+  docker-proxy-off     Backward-compatible alias for daemon-proxy-off
   run                  Run one command with Mihomo proxy env injected
   test                 Test outbound access through the local mixed-port
   print-env            Print proxy env exports for the current local mixed-port
@@ -74,6 +80,7 @@ Examples:
   sudo bash ./scripts/mihomo-client.sh start
   sudo bash ./scripts/mihomo-client.sh proxy-on
   sudo bash ./scripts/mihomo-client.sh tun-on
+  sudo bash ./scripts/mihomo-client.sh daemon-proxy-on
   sudo bash ./scripts/mihomo-client.sh run curl -I https://www.google.com/generate_204
   sudo bash ./scripts/mihomo-client.sh print-env
 EOF
@@ -471,11 +478,60 @@ print_env_command() {
 	proxy_env_lines "$port"
 }
 
+docker_proxy_env_lines() {
+	local port="$1"
+	cat <<EOF
+HTTP_PROXY=http://127.0.0.1:$port
+HTTPS_PROXY=http://127.0.0.1:$port
+NO_PROXY=localhost,127.0.0.1,::1
+http_proxy=http://127.0.0.1:$port
+https_proxy=http://127.0.0.1:$port
+no_proxy=localhost,127.0.0.1,::1
+EOF
+}
+
+service_dropin_dir() {
+	local service="$1"
+	echo "/etc/systemd/system/${service}.d"
+}
+
+service_dropin_file() {
+	local service="$1"
+	echo "$(service_dropin_dir "$service")/$MIHOMO_DAEMON_PROXY_DROPIN_NAME"
+}
+
+service_exists() {
+	local service="$1"
+	local state
+	state="$(systemctl show -p LoadState --value "$service" 2>/dev/null || true)"
+	[[ -n "$state" && "$state" != "not-found" ]]
+}
+
+managed_daemon_services() {
+	local service
+	for service in $MIHOMO_DAEMON_PROXY_SERVICES; do
+		if service_exists "$service"; then
+			echo "$service"
+		fi
+	done
+}
+
+managed_daemon_services_with_proxy() {
+	local service file
+	for service in $MIHOMO_DAEMON_PROXY_SERVICES; do
+		file="$(service_dropin_file "$service")"
+		if [[ -f "$file" ]]; then
+			echo "$service"
+		fi
+	done
+}
+
 status_command() {
-	local port version
+	local port version daemon_services
 	load_env
 	version="${MIHOMO_VERSION:-unknown}"
 	port="$(mixed_port_from_config || true)"
+	daemon_services="$(managed_daemon_services_with_proxy | paste -sd ',' - 2>/dev/null || true)"
 
 	echo "Mihomo binary: $MIHOMO_BIN"
 	echo "Mihomo version: $version"
@@ -485,6 +541,7 @@ status_command() {
 	echo "Mixed port: ${port:-unknown}"
 	echo "Shell proxy profile: $([[ -f "$MIHOMO_PROFILE_PROXY_FILE" ]] && echo enabled || echo disabled)"
 	echo "TUN mode: $([[ -f "$MIHOMO_TUN_OVERLAY_FILE" ]] && echo enabled || echo disabled)"
+	echo "Managed daemon proxy services: ${daemon_services:-none}"
 	echo
 	systemctl status "$MIHOMO_SERVICE_NAME" --no-pager || true
 }
@@ -543,10 +600,59 @@ proxy_off_command() {
 	echo "Shell proxy exports removed."
 }
 
+daemon_proxy_on_command() {
+	local port
+	local service file dir
+	require_cmd systemctl
+	port="$(mixed_port_from_config)"
+	[[ -n "$port" ]] || die "Could not detect mixed-port from $MIHOMO_CONFIG_FILE"
+	if [[ -z "$(managed_daemon_services)" ]]; then
+		log "No known daemon services found for proxy integration."
+	fi
+	for service in $(managed_daemon_services); do
+		dir="$(service_dropin_dir "$service")"
+		file="$(service_dropin_file "$service")"
+		mkdir -p "$dir"
+		cat > "$file" <<EOF
+[Service]
+Environment="HTTP_PROXY=http://127.0.0.1:$port"
+Environment="HTTPS_PROXY=http://127.0.0.1:$port"
+Environment="NO_PROXY=localhost,127.0.0.1,::1"
+Environment="http_proxy=http://127.0.0.1:$port"
+Environment="https_proxy=http://127.0.0.1:$port"
+Environment="no_proxy=localhost,127.0.0.1,::1"
+EOF
+	done
+	systemd_reload
+	for service in $(managed_daemon_services); do
+		systemctl restart "$service"
+	done
+	echo "Daemon proxy enabled for: $(managed_daemon_services | paste -sd ',' - 2>/dev/null || true)"
+}
+
+daemon_proxy_off_command() {
+	local service dir file
+	require_cmd systemctl
+	for service in $MIHOMO_DAEMON_PROXY_SERVICES; do
+		file="$(service_dropin_file "$service")"
+		dir="$(service_dropin_dir "$service")"
+		rm -f "$file"
+		if [[ -d "$dir" ]] && [[ -z "$(ls -A "$dir" 2>/dev/null)" ]]; then
+			rmdir "$dir" 2>/dev/null || true
+		fi
+	done
+	systemd_reload
+	for service in $(managed_daemon_services); do
+		systemctl restart "$service"
+	done
+	echo "Daemon proxy disabled."
+}
+
 tun_on_command() {
 	write_tun_overlay
 	render_runtime_config
 	proxy_on_command
+	daemon_proxy_on_command
 	if service_is_active; then
 		systemctl restart "$MIHOMO_SERVICE_NAME"
 		echo "Mihomo TUN mode enabled and service restarted."
@@ -560,6 +666,7 @@ tun_off_command() {
 	remove_tun_overlay
 	render_runtime_config
 	proxy_off_command
+	daemon_proxy_off_command
 	if service_is_active; then
 		systemctl restart "$MIHOMO_SERVICE_NAME"
 		echo "Mihomo TUN mode disabled and service restarted."
@@ -775,6 +882,18 @@ main() {
 		;;
 		tun-off)
 			tun_off_command
+		;;
+		daemon-proxy-on)
+			daemon_proxy_on_command
+		;;
+		daemon-proxy-off)
+			daemon_proxy_off_command
+		;;
+		docker-proxy-on)
+			daemon_proxy_on_command
+		;;
+		docker-proxy-off)
+			daemon_proxy_off_command
 		;;
 		run)
 			run_command "$@"

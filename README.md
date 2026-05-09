@@ -904,6 +904,7 @@ sudo bash ./scripts/mihomo-client.sh tun-on
 
 - 在本地运行时配置里追加 Mihomo `tun` 配置
 - 同时执行 `proxy-on`
+- 同时给常见守护进程写入代理配置，例如 `docker.service`、`containerd.service`、`buildkit.service`（如果这些服务存在）
 
 也就是你后面既可以整机走 TUN，也可以继续让 shell 工具显式继承代理环境。
 
@@ -921,6 +922,33 @@ sudo bash ./scripts/mihomo-client.sh tun-off
 sudo bash ./scripts/mihomo-client.sh run curl -I https://www.google.com/generate_204
 sudo bash ./scripts/mihomo-client.sh run git ls-remote https://github.com/MetaCubeX/mihomo.git
 ```
+
+如果是 `docker pull`、`docker compose up` 这类操作，要注意它们实际走的是 `dockerd` 或其他系统守护进程，不会继承你当前 shell 的 `http_proxy`。这时要单独执行：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh daemon-proxy-on
+```
+
+这会给：
+
+```bash
+/etc/systemd/system/<service>.d/mihomo-proxy.conf
+```
+
+给常见守护进程写入代理配置，并自动重启这些服务。关闭这层代理：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh daemon-proxy-off
+```
+
+兼容起见，旧名字：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh docker-proxy-on
+sudo bash ./scripts/mihomo-client.sh docker-proxy-off
+```
+
+也还能继续用。
 
 如果你想直接验证当前本地 `mixed-port` 是否能出网：
 
