@@ -763,6 +763,7 @@ scripts/mihomo-client.sh
 它负责：
 
 - 安装 `mihomo` core 到 `/usr/local/bin/mihomo`
+- 安装全局客户端入口到 `/usr/local/bin/mihomo-client`
 - 保存订阅 URL 和 Basic Auth 到 `/etc/mihomo-client/client.env`
 - 拉取远程 `peer_*.mihomo.yaml` 到 `/etc/mihomo-client/config.yaml`
 - 创建并管理 `systemd` 服务 `mihomo-client.service`
@@ -831,6 +832,20 @@ GEOIP,CN
 
 ```bash
 mixed-port: 7890
+```
+
+并且脚本自己也会被注册成全局命令：
+
+```bash
+/usr/local/bin/mihomo-client
+```
+
+也就是后面你不需要再进入仓库目录，可以直接：
+
+```bash
+sudo mihomo-client status
+sudo mihomo-client tun-on
+sudo mihomo-client tun-off
 ```
 
 那 Ubuntu 上常用命令会是：

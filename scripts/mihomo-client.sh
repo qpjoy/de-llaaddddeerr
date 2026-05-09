@@ -10,6 +10,7 @@ MIHOMO_SUBSCRIPTION_FILE="${MIHOMO_SUBSCRIPTION_FILE:-$MIHOMO_HOME/subscription.
 MIHOMO_CONFIG_FILE="${MIHOMO_CONFIG_FILE:-$MIHOMO_HOME/config.yaml}"
 MIHOMO_TUN_OVERLAY_FILE="${MIHOMO_TUN_OVERLAY_FILE:-$MIHOMO_HOME/tun-overlay.yaml}"
 MIHOMO_BIN="${MIHOMO_BIN:-/usr/local/bin/mihomo}"
+MIHOMO_CLIENT_LAUNCHER="${MIHOMO_CLIENT_LAUNCHER:-/usr/local/bin/mihomo-client}"
 MIHOMO_SERVICE_NAME="${MIHOMO_SERVICE_NAME:-mihomo-client.service}"
 MIHOMO_SERVICE_FILE="${MIHOMO_SERVICE_FILE:-/etc/systemd/system/$MIHOMO_SERVICE_NAME}"
 MIHOMO_PROFILE_PROXY_FILE="${MIHOMO_PROFILE_PROXY_FILE:-/etc/profile.d/mihomo-client-proxy.sh}"
@@ -343,6 +344,15 @@ install_binary_from_path() {
 	chmod 755 "$MIHOMO_BIN"
 	set_env_value MIHOMO_VERSION "local"
 	echo "Installed Mihomo local binary to $MIHOMO_BIN"
+}
+
+install_client_launcher() {
+	local source_script
+	source_script="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+	[[ -f "$source_script" ]] || die "Could not locate current mihomo-client script: $source_script"
+	cp "$source_script" "$MIHOMO_CLIENT_LAUNCHER"
+	chmod 755 "$MIHOMO_CLIENT_LAUNCHER"
+	log "Installed global launcher to $MIHOMO_CLIENT_LAUNCHER"
 }
 
 write_service_file() {
@@ -819,6 +829,8 @@ install_command() {
 		log "Installing Mihomo core binary"
 		install_binary "$version"
 	fi
+	log "Installing global mihomo-client launcher"
+	install_client_launcher
 	log "Writing systemd service file"
 	write_service_file
 	systemd_reload
@@ -868,6 +880,7 @@ uninstall_command() {
 	rm -f "$MIHOMO_TUN_OVERLAY_FILE"
 	rm -f "$MIHOMO_SSH_CONFIG_FILE"
 	rm -f "$MIHOMO_SSH_PROXY_HELPER"
+	rm -f "$MIHOMO_CLIENT_LAUNCHER"
 	systemd_reload
 
 	if [[ "$purge" == "true" ]]; then
