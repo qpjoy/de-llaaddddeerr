@@ -746,6 +746,165 @@ set-limit / clear-limit
 
 如果你后面拿到了域名和正式证书，可以再把这套栈从“自签名 + 指纹”切成“域名 + 正式 TLS”，订阅 URL 本身也不必改变，只需要刷新内容。
 
+### 1.10 Ubuntu 直接运行 Mihomo Core
+
+如果你有另一台 Ubuntu 机器，想直接复用当前导出的：
+
+```bash
+peer_user01.mihomo.yaml
+```
+
+最省心的做法是直接跑 `mihomo` core，而不是自己手工转成别的客户端格式。仓库里新增了：
+
+```bash
+scripts/mihomo-client.sh
+```
+
+它负责：
+
+- 安装 `mihomo` core 到 `/usr/local/bin/mihomo`
+- 保存订阅 URL 和 Basic Auth 到 `/etc/mihomo-client/client.env`
+- 拉取远程 `peer_*.mihomo.yaml` 到 `/etc/mihomo-client/config.yaml`
+- 创建并管理 `systemd` 服务 `mihomo-client.service`
+- 启停、更新订阅、卸载
+- 给 shell 开关代理环境
+- 给整机开关 Mihomo TUN 模式
+- 临时让单条命令走代理
+- 直接测试当前本地 `mixed-port` 是否能出网
+
+常见用法：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh setup
+
+sudo bash ./scripts/mihomo-client.sh install \
+  --url http://你的IP:3434/peer_user01.mihomo.yaml \
+  --user download \
+  --password 你的密码
+```
+
+安装完成后，`mihomo` 会按订阅里的配置在本机打开 `mixed-port`。如果订阅里默认是：
+
+```bash
+mixed-port: 7890
+```
+
+那 Ubuntu 上常用命令会是：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh status
+sudo bash ./scripts/mihomo-client.sh start
+sudo bash ./scripts/mihomo-client.sh stop
+sudo bash ./scripts/mihomo-client.sh restart
+sudo bash ./scripts/mihomo-client.sh logs
+sudo bash ./scripts/mihomo-client.sh tun-on
+sudo bash ./scripts/mihomo-client.sh tun-off
+```
+
+更新远程订阅：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh update-subscription
+```
+
+如果你换了订阅地址或密码，也可以直接覆盖：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh update-subscription \
+  --url http://新的IP:3434/peer_user01.mihomo.yaml \
+  --user download \
+  --password 新密码
+```
+
+如果你希望 Ubuntu 上的命令行工具直接走这条网络，可以输出代理环境变量：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh print-env
+```
+
+然后执行它打印出来的这些变量：
+
+```bash
+export http_proxy=http://127.0.0.1:7890
+export https_proxy=http://127.0.0.1:7890
+export all_proxy=socks5://127.0.0.1:7890
+```
+
+这样像 `curl`、`git`、`pip` 之类的工具都能直接复用这条线路。
+
+如果你希望登录 shell 自动带上这些代理环境，可以直接：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh proxy-on
+```
+
+它会写入：
+
+```bash
+/etc/profile.d/mihomo-client-proxy.sh
+```
+
+关闭这层 shell 代理：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh proxy-off
+```
+
+如果你希望 Ubuntu 整机都尽量走这条网络，而不只是命令行工具走本地代理，可以直接：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh tun-on
+```
+
+这会做两件事：
+
+- 在本地运行时配置里追加 Mihomo `tun` 配置
+- 同时执行 `proxy-on`
+
+也就是你后面既可以整机走 TUN，也可以继续让 shell 工具显式继承代理环境。
+
+关闭整机 TUN，并同时关闭 shell 代理：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh tun-off
+```
+
+这套 TUN 开关是客户端本地行为，不会改远程订阅内容；远程订阅更新后，脚本会继续保留你本机的 TUN 开关状态。
+
+如果你不想全局开 shell 代理，只想让某一条命令临时走这条网络：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh run curl -I https://www.google.com/generate_204
+sudo bash ./scripts/mihomo-client.sh run git ls-remote https://github.com/MetaCubeX/mihomo.git
+```
+
+如果你想直接验证当前本地 `mixed-port` 是否能出网：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh test
+```
+
+也可以指定测试地址：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh test --url https://www.youtube.com
+```
+
+如果要卸载：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh uninstall
+```
+
+如果连二进制和订阅配置都一起删掉：
+
+```bash
+sudo bash ./scripts/mihomo-client.sh uninstall --purge
+```
+
+这条客户端脚本默认通过 GitHub Release 下载 `mihomo` 最新稳定版二进制。由于 Mihomo 发布资产名称会按 CPU 架构区分，脚本会自动检测常见的 Ubuntu 架构并选择对应 Linux 版本。发布页参考：
+[MetaCubeX/mihomo Releases](https://github.com/MetaCubeX/mihomo/releases)
+
 ### 2. 连接流程
 
 ```bash
