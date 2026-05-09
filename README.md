@@ -903,6 +903,7 @@ sudo bash ./scripts/mihomo-client.sh tun-on
 这会做两件事：
 
 - 在本地运行时配置里追加 Mihomo `tun` 配置
+- 同时追加本地 `dns:` 配置，让 TUN 模式下的域名解析更接近 Clash 的 `cn-direct / 海外走代理`
 - 同时执行 `proxy-on`
 - 同时给常见 `ssh/git` 主机写入 OpenSSH 代理配置
 - 同时给常见守护进程写入代理配置，例如 `docker.service`、`containerd.service`、`buildkit.service`（如果这些服务存在）
