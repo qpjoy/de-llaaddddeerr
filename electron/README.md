@@ -24,6 +24,10 @@ same package from its main process and expose the same browser admin backend.
 
 The mixed/DNS ports are configurable in the Proxy page. The defaults avoid the
 common Clash Verge `7890` mixed-port so both tools can be open at the same time.
+Only one full-system TUN should be enabled at a time, though: Clash Verge TUN and
+QPJoy `system-tun` both try to own default routes, DNS hijack, fake-ip routing,
+and a `utun` interface on macOS. Keep Clash in app/proxy-only mode, or turn its
+TUN off, when testing QPJoy virtual NIC mode.
 
 Default admin login is `admin/admin`.
 
@@ -32,7 +36,10 @@ Default admin login is `admin/admin`.
 - `system-tun`: enables mihomo TUN in the generated runtime config so the
   machine can route through the virtual interface when the core has enough
   privilege. On macOS the dev app asks for administrator approval and launches
-  the core with elevated privileges; Linux uses `pkexec` when available.
+  the core with elevated privileges; Linux uses `pkexec` when available. Runtime
+  config changes are hot reloaded so network changes and mode switches do not
+  repeatedly ask for administrator approval. The next service-mode milestone will
+  move this to a first-install-only privileged helper.
 - `app-global`: Electron app traffic uses the local mixed proxy and the runtime
   config sends matched traffic to the proxy policy.
 - `app-rule`: Electron app traffic uses the local mixed proxy; CN/local traffic

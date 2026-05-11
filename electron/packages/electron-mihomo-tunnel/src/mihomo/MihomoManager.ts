@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { basename, join } from 'path';
 import { gunzipSync } from 'zlib';
 import { parse } from 'yaml';
@@ -28,6 +28,10 @@ interface ManagerPaths {
   runtime: string;
   config: string;
   core: string;
+}
+
+interface StopOptions {
+  allowElevatedPrompt?: boolean;
 }
 
 function pathsFromOptions(options: TunnelManagerOptions): ManagerPaths {
@@ -568,10 +572,10 @@ export class MihomoManager extends EventEmitter {
     }
 
     this.child = null;
-    this.elevatedPid = pid;
+    this.rememberElevatedPid(pid);
     await delay(900);
     if (!isProcessAlive(pid)) {
-      this.elevatedPid = null;
+      this.clearElevatedPid();
       const details = this.readElevatedLogTail(logPath);
       throw new Error(`Privileged mihomo exited immediately.${details ? ` ${details}` : ''}`);
     }
@@ -594,21 +598,57 @@ export class MihomoManager extends EventEmitter {
     }
   }
 
+  private elevatedPidPath(): string {
+    return join(this.paths.runtime, 'mihomo-elevated.pid');
+  }
+
+  private readElevatedPid(): number | null {
+    if (this.elevatedPid && isProcessAlive(this.elevatedPid)) {
+      return this.elevatedPid;
+    }
+
+    try {
+      const pid = Number(readFileSync(this.elevatedPidPath(), 'utf8').trim());
+      if (Number.isInteger(pid) && pid > 0 && isProcessAlive(pid)) {
+        this.elevatedPid = pid;
+        return pid;
+      }
+    } catch {
+      // Missing or stale pid files are cleaned up by clearElevatedPid().
+    }
+
+    this.clearElevatedPid();
+    return null;
+  }
+
+  private rememberElevatedPid(pid: number): void {
+    this.elevatedPid = pid;
+    writeFileSync(this.elevatedPidPath(), `${pid}\n`, 'utf8');
+  }
+
+  private clearElevatedPid(): void {
+    this.elevatedPid = null;
+    try {
+      unlinkSync(this.elevatedPidPath());
+    } catch {
+      // It is fine when the pid file does not exist.
+    }
+  }
+
   private isRunning(): boolean {
     if (this.child && !this.child.killed) {
       return true;
     }
 
-    if (this.elevatedPid && isProcessAlive(this.elevatedPid)) {
+    if (this.readElevatedPid()) {
       return true;
     }
 
-    this.elevatedPid = null;
     return false;
   }
 
   private isElevatedRunning(): boolean {
-    return Boolean(this.elevatedPid && isProcessAlive(this.elevatedPid));
+    return Boolean(this.readElevatedPid());
   }
 
   private async reloadRuntimeConfig(): Promise<boolean> {
@@ -624,20 +664,26 @@ export class MihomoManager extends EventEmitter {
   }
 
   async stop(): Promise<void> {
-    await this.runExclusive(() => this.stopUnlocked());
+    await this.runExclusive(() => this.stopUnlocked({ allowElevatedPrompt: true }));
   }
 
-  private async stopUnlocked(): Promise<void> {
-    if (this.elevatedPid) {
-      const pid = this.elevatedPid;
+  private async stopUnlocked(options: StopOptions = {}): Promise<void> {
+    const elevatedPid = this.readElevatedPid();
+    if (elevatedPid) {
+      const pid = elevatedPid;
       if (!isProcessAlive(pid)) {
-        this.elevatedPid = null;
+        this.clearElevatedPid();
         this.log('info', 'Privileged Mihomo was already stopped');
         return;
       }
 
+      if (!options.allowElevatedPrompt) {
+        this.log('info', 'Privileged Mihomo is still running; skipped elevated stop to avoid another administrator prompt');
+        return;
+      }
+
       await this.runElevatedShell(`kill ${pid} 2>/dev/null || true`);
-      this.elevatedPid = null;
+      this.clearElevatedPid();
       this.log('info', 'Privileged Mihomo stop requested');
       return;
     }
@@ -651,6 +697,16 @@ export class MihomoManager extends EventEmitter {
 
   async restart(): Promise<void> {
     await this.runExclusive(async () => {
+      if (this.isElevatedRunning()) {
+        const reloaded = await this.reloadRuntimeConfig();
+        if (reloaded) {
+          return;
+        }
+
+        this.log('warn', 'Privileged Mihomo restart skipped because it would require another administrator prompt');
+        return;
+      }
+
       await this.stopUnlocked();
       await delay(400);
       await this.startUnlocked();
@@ -691,7 +747,10 @@ export class MihomoManager extends EventEmitter {
   }
 
   close(): void {
-    void this.stop();
+    if (this.child && !this.child.killed) {
+      this.child.kill('SIGTERM');
+      this.child = null;
+    }
     this.db.close();
   }
 
