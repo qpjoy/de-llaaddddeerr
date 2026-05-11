@@ -10,68 +10,94 @@ async function changed(options?: RegisterTunnelIpcOptions): Promise<void> {
   await options?.afterSettingsChange?.();
 }
 
+async function runtimeChanged(manager: MihomoManager, options?: RegisterTunnelIpcOptions): Promise<void> {
+  await manager.applyRuntimeConfigChange();
+  await changed(options);
+}
+
 export function registerTunnelIpc(ipcMain: IpcMain, manager: MihomoManager, options?: RegisterTunnelIpcOptions): void {
   ipcMain.handle('tunnel:snapshot', () => manager.snapshot());
 
-  ipcMain.handle('tunnel:create-subscription', (_event, input) => manager.createSubscription(input));
+  ipcMain.handle('tunnel:create-subscription', async (_event, input) => {
+    const subscription = await manager.createSubscription(input);
+    if (subscription.active) {
+      await runtimeChanged(manager, options);
+    } else {
+      await changed(options);
+    }
+    return subscription;
+  });
   ipcMain.handle('tunnel:delete-subscription', async (_event, id: number) => {
     manager.deleteSubscription(id);
-    await manager.applyRuntimeConfigChange();
+    await runtimeChanged(manager, options);
   });
   ipcMain.handle('tunnel:set-active-subscription', async (_event, id: number) => {
     const subscription = manager.setActiveSubscription(id);
-    await manager.applyRuntimeConfigChange();
+    await runtimeChanged(manager, options);
     return subscription;
   });
   ipcMain.handle('tunnel:update-subscription', async (_event, id: number) => {
     const subscription = await manager.updateSubscription(id);
     if (subscription.active) {
-      await manager.applyRuntimeConfigChange();
+      await runtimeChanged(manager, options);
+    } else {
+      await changed(options);
     }
     return subscription;
   });
   ipcMain.handle('tunnel:update-active-subscription', async () => {
     const subscription = await manager.updateActiveSubscription();
-    await manager.applyRuntimeConfigChange();
+    await runtimeChanged(manager, options);
     return subscription;
   });
   ipcMain.handle('tunnel:set-mode', async (_event, mode) => {
     const changedMode = manager.setMode(mode);
     if (changedMode) {
-      await manager.applyRuntimeConfigChange();
+      await runtimeChanged(manager, options);
+    } else {
+      await changed(options);
     }
+  });
+  ipcMain.handle('tunnel:set-core-path', async (_event, corePath: string) => {
+    manager.setCorePath(corePath);
     await changed(options);
   });
-  ipcMain.handle('tunnel:set-core-path', (_event, corePath: string) => manager.setCorePath(corePath));
   ipcMain.handle('tunnel:set-local-ports', async (_event, ports) => {
     await manager.setLocalPorts(ports);
     await changed(options);
   });
   ipcMain.handle('tunnel:install-tun', async () => {
     manager.installTunFeature();
-    await manager.applyRuntimeConfigChange();
-    await changed(options);
+    await runtimeChanged(manager, options);
   });
   ipcMain.handle('tunnel:uninstall-tun', async () => {
     manager.uninstallTunFeature();
-    await manager.applyRuntimeConfigChange();
+    await runtimeChanged(manager, options);
+  });
+  ipcMain.handle('tunnel:start', async () => {
+    await manager.start();
     await changed(options);
   });
-  ipcMain.handle('tunnel:start', () => manager.start());
-  ipcMain.handle('tunnel:stop', () => manager.stop());
-  ipcMain.handle('tunnel:restart', () => manager.restart());
+  ipcMain.handle('tunnel:stop', async () => {
+    await manager.stop();
+    await changed(options);
+  });
+  ipcMain.handle('tunnel:restart', async () => {
+    await manager.restart();
+    await changed(options);
+  });
   ipcMain.handle('tunnel:add-rule', async (_event, input) => {
     const rule = manager.addDomainRule(input.kind, input.domain);
-    await manager.applyRuntimeConfigChange();
+    await runtimeChanged(manager, options);
     return rule;
   });
   ipcMain.handle('tunnel:remove-rule', async (_event, id: number) => {
     manager.removeDomainRule(id);
-    await manager.applyRuntimeConfigChange();
+    await runtimeChanged(manager, options);
   });
   ipcMain.handle('tunnel:add-preset', async (_event, preset) => {
     const rules = manager.addPreset(preset);
-    await manager.applyRuntimeConfigChange();
+    await runtimeChanged(manager, options);
     return rules;
   });
 }

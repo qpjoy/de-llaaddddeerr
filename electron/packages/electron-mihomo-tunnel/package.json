@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-tunnel",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": false,
   "description": "Reusable QPJoy tunnel runtime and CLI for Electron apps on macOS and Linux.",
   "license": "UNLICENSED",
@@ -18,6 +18,8 @@
     "qpjoy-tunnel": "dist/cli.js"
   },
   "files": [
+    "README.md",
+    "THIRD_PARTY_NOTICES.md",
     "dist",
     "resources/engine"
   ],

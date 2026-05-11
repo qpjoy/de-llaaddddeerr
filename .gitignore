@@ -21,3 +21,8 @@ electron/**/node_modules/
 electron/**/dist/
 electron/**/.quasar/
 electron/**/*.iconset/
+
+# Standalone Electron npm-package smoke test
+electron-test/node_modules/
+electron-test/out/
+electron-test/dist/

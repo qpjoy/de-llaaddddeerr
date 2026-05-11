@@ -7,6 +7,10 @@ import type { MihomoManager } from '../mihomo/MihomoManager';
 
 type RouteHandler = (req: IncomingMessage, res: ServerResponse, body: unknown) => Promise<void> | void;
 
+interface AdminServerOptions {
+  afterSettingsChange?: () => Promise<void> | void;
+}
+
 const sessions = new Set<string>();
 
 function sendJson(res: ServerResponse, status: number, data: unknown): void {
@@ -196,7 +200,7 @@ function isAuthed(req: IncomingMessage): boolean {
 export class AdminServer {
   private server: Server | null = null;
 
-  constructor(private readonly manager: MihomoManager) {}
+  constructor(private readonly manager: MihomoManager, private readonly options: AdminServerOptions = {}) {}
 
   start(): void {
     if (this.server) {
@@ -256,6 +260,15 @@ export class AdminServer {
     await route(req, res, body);
   }
 
+  private async applyRuntimeConfigChange(): Promise<void> {
+    await this.manager.applyRuntimeConfigChange();
+    await this.options.afterSettingsChange?.();
+  }
+
+  private async notifySettingsChange(): Promise<void> {
+    await this.options.afterSettingsChange?.();
+  }
+
   private route(method: string, pathname: string): RouteHandler | null {
     if (method === 'GET' && pathname === '/api/snapshot') {
       return async (_req, res) => sendJson(res, 200, await this.manager.snapshot());
@@ -265,7 +278,9 @@ export class AdminServer {
         const { mode } = body as { mode: never };
         const changedMode = this.manager.setMode(mode);
         if (changedMode) {
-          await this.manager.applyRuntimeConfigChange();
+          await this.applyRuntimeConfigChange();
+        } else {
+          await this.notifySettingsChange();
         }
         sendJson(res, 200, this.manager.status());
       };
@@ -274,51 +289,61 @@ export class AdminServer {
       return async (_req, res, body) => {
         const { mixed, dns } = body as { mixed: number; dns: number };
         await this.manager.setLocalPorts({ mixed, dns });
+        await this.notifySettingsChange();
         sendJson(res, 200, this.manager.status());
       };
     }
     if (method === 'POST' && pathname === '/api/tun/install') {
       return async (_req, res) => {
         this.manager.installTunFeature();
-        await this.manager.applyRuntimeConfigChange();
+        await this.applyRuntimeConfigChange();
         sendJson(res, 200, this.manager.status());
       };
     }
     if (method === 'POST' && pathname === '/api/tun/uninstall') {
       return async (_req, res) => {
         this.manager.uninstallTunFeature();
-        await this.manager.applyRuntimeConfigChange();
+        await this.applyRuntimeConfigChange();
         sendJson(res, 200, this.manager.status());
       };
     }
     if (method === 'POST' && pathname === '/api/core/start') {
       return async (_req, res) => {
         await this.manager.start();
+        await this.notifySettingsChange();
         sendJson(res, 200, this.manager.status());
       };
     }
     if (method === 'POST' && pathname === '/api/core/stop') {
       return async (_req, res) => {
         await this.manager.stop();
+        await this.notifySettingsChange();
         sendJson(res, 200, this.manager.status());
       };
     }
     if (method === 'POST' && pathname === '/api/core/path') {
-      return (_req, res, body) => {
+      return async (_req, res, body) => {
         const { corePath } = body as { corePath: string };
         this.manager.setCorePath(corePath);
+        await this.notifySettingsChange();
         sendJson(res, 200, this.manager.status());
       };
     }
     if (method === 'POST' && pathname === '/api/subscriptions') {
       return async (_req, res, body) => {
-        sendJson(res, 200, await this.manager.createSubscription(body as never));
+        const subscription = await this.manager.createSubscription(body as never);
+        if (subscription.active) {
+          await this.applyRuntimeConfigChange();
+        } else {
+          await this.notifySettingsChange();
+        }
+        sendJson(res, 200, subscription);
       };
     }
     if (method === 'POST' && pathname === '/api/subscriptions/active/update') {
       return async (_req, res) => {
         const subscription = await this.manager.updateActiveSubscription();
-        await this.manager.applyRuntimeConfigChange();
+        await this.applyRuntimeConfigChange();
         sendJson(res, 200, subscription);
       };
     }
@@ -327,7 +352,7 @@ export class AdminServer {
     if (method === 'POST' && activeMatch) {
       return async (_req, res) => {
         const subscription = this.manager.setActiveSubscription(Number(activeMatch[1]));
-        await this.manager.applyRuntimeConfigChange();
+        await this.applyRuntimeConfigChange();
         sendJson(res, 200, subscription);
       };
     }
@@ -336,7 +361,7 @@ export class AdminServer {
       return async (_req, res) => {
         const subscription = await this.manager.updateSubscription(Number(updateMatch[1]));
         if (subscription.active) {
-          await this.manager.applyRuntimeConfigChange();
+          await this.applyRuntimeConfigChange();
         }
         sendJson(res, 200, subscription);
       };
@@ -345,7 +370,7 @@ export class AdminServer {
     if (method === 'DELETE' && deleteSubscriptionMatch) {
       return async (_req, res) => {
         this.manager.deleteSubscription(Number(deleteSubscriptionMatch[1]));
-        await this.manager.applyRuntimeConfigChange();
+        await this.applyRuntimeConfigChange();
         sendJson(res, 200, { ok: true });
       };
     }
@@ -353,7 +378,7 @@ export class AdminServer {
       return async (_req, res, body) => {
         const { kind, domain } = body as { kind: 'allow' | 'block'; domain: string };
         const rule = this.manager.addDomainRule(kind, domain);
-        await this.manager.applyRuntimeConfigChange();
+        await this.applyRuntimeConfigChange();
         sendJson(res, 200, rule);
       };
     }
@@ -361,7 +386,7 @@ export class AdminServer {
     if (method === 'DELETE' && ruleDeleteMatch) {
       return async (_req, res) => {
         this.manager.removeDomainRule(Number(ruleDeleteMatch[1]));
-        await this.manager.applyRuntimeConfigChange();
+        await this.applyRuntimeConfigChange();
         sendJson(res, 200, { ok: true });
       };
     }
@@ -369,7 +394,7 @@ export class AdminServer {
     if (method === 'POST' && presetMatch) {
       return async (_req, res) => {
         const rules = this.manager.addPreset(presetMatch[1] as DomainPresetId);
-        await this.manager.applyRuntimeConfigChange();
+        await this.applyRuntimeConfigChange();
         sendJson(res, 200, rules);
       };
     }

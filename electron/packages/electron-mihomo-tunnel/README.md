@@ -26,6 +26,20 @@ app.on('before-quit', () => {
 });
 ```
 
+The package starts a browser admin backend by default. Keep mode switching,
+subscription management, local ports, start/stop, and TUN install/uninstall in
+that admin UI so the host Electron app does not need tunnel-specific screens:
+
+```text
+http://127.0.0.1:23456
+admin/admin
+```
+
+When the admin changes runtime settings, the SDK reapplies the Electron session
+proxy automatically. If the admin switches to virtual NIC mode and TUN is
+installed, the package can request the required system privilege from the host
+app process.
+
 The package also installs a CLI:
 
 ```bash
@@ -45,9 +59,5 @@ extraResources: [
 ]
 ```
 
-Default admin backend:
-
-```text
-http://127.0.0.1:23456
-admin/admin
-```
+This package redistributes third-party tunnel engine binaries. See
+`THIRD_PARTY_NOTICES.md` before publishing apps that include those resources.

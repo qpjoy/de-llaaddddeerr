@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QPJoy Tunnel NPM Test</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="header">
+        <div>
+          <p class="eyebrow">NPM PACKAGE TEST</p>
+          <h1>QPJoy Electron Tunnel</h1>
+        </div>
+        <button id="refresh" class="icon-button" title="刷新状态">↻</button>
+      </header>
+
+      <section class="metrics">
+        <article>
+          <span>运行状态</span>
+          <strong id="running">读取中</strong>
+        </article>
+        <article>
+          <span>当前模式</span>
+          <strong id="mode">-</strong>
+        </article>
+        <article>
+          <span>本地代理</span>
+          <strong id="proxy">-</strong>
+        </article>
+        <article>
+          <span>管理后台</span>
+          <strong id="admin">-</strong>
+        </article>
+        <article>
+          <span>TUN 状态</span>
+          <strong id="tun">-</strong>
+        </article>
+      </section>
+
+      <section class="actions">
+        <button id="adminButton" class="secondary">浏览器后台</button>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <h2>规则配置</h2>
+        </div>
+
+        <div class="preset-grid">
+          <button data-preset="google" class="secondary">Google</button>
+          <button data-preset="youtube" class="secondary">YouTube</button>
+          <button data-preset="x" class="secondary">X / Twitter</button>
+          <button data-preset="telegram" class="secondary">Telegram</button>
+        </div>
+
+        <form id="ruleForm" class="form-row">
+          <select id="ruleKind" aria-label="规则类型">
+            <option value="allow">白名单</option>
+            <option value="block">黑名单</option>
+          </select>
+          <input id="ruleDomain" type="text" placeholder="example.com" autocomplete="off">
+          <button type="submit">添加规则</button>
+        </form>
+
+        <div id="ruleList" class="rule-list"></div>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <h2>访问测试</h2>
+        </div>
+        <form id="testForm" class="form-row">
+          <input id="testUrl" type="text" value="https://www.google.com" autocomplete="off">
+          <button type="submit">打开测试窗口</button>
+        </form>
+      </section>
+
+      <section class="output">
+        <h2>状态快照</h2>
+        <pre id="snapshot">{}</pre>
+      </section>
+    </main>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

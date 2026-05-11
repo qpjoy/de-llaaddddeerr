@@ -47,12 +47,14 @@ export function createElectronTunnel(host: CreateElectronTunnelHost, options: Cr
     userDataPath: options.userDataPath ?? host.app.getPath('userData'),
     bundledEngineDir: options.bundledEngineDir ?? defaultBundledEngineDir()
   });
-  const admin = new AdminServer(manager);
-
   async function applyProxy(): Promise<void> {
     const status = manager.status();
     await applyElectronProxy(host.session, status.mode, status.ports);
   }
+
+  const admin = new AdminServer(manager, {
+    afterSettingsChange: applyProxy
+  });
 
   if (options.startAdminServer !== false) {
     admin.start();
