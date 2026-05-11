@@ -123,13 +123,15 @@ function buildRules(mode: string, proxyPolicyName: string, rules: DomainRule[]):
     ];
   }
 
+  const appModeTail = allowRules.length > 0 ? 'MATCH,REJECT' : `MATCH,${proxyPolicyName}`;
+
   return [
     ...PRIVATE_DIRECT_RULES,
     ...blockRules,
     ...allowRules,
     'GEOSITE,CN,DIRECT',
     'GEOIP,CN,DIRECT',
-    'MATCH,REJECT'
+    appModeTail
   ];
 }
 

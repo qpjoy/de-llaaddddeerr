@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 contextBridge.exposeInMainWorld('tunnel', {
   snapshot: () => ipcRenderer.invoke('tunnel:snapshot'),
   createSubscription: (input: unknown) => ipcRenderer.invoke('tunnel:create-subscription', input),
+  deleteSubscription: (id: number) => ipcRenderer.invoke('tunnel:delete-subscription', id),
   setActiveSubscription: (id: number) => ipcRenderer.invoke('tunnel:set-active-subscription', id),
   updateSubscription: (id: number) => ipcRenderer.invoke('tunnel:update-subscription', id),
   updateActiveSubscription: () => ipcRenderer.invoke('tunnel:update-active-subscription'),

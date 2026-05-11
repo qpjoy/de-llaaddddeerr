@@ -37,6 +37,13 @@ export default configure(() => ({
         '**/better-sqlite3/**',
         '**/mihomo*'
       ],
+      extraResources: [
+        {
+          from: '../../resources/mihomo',
+          to: 'mihomo',
+          filter: ['**/*']
+        }
+      ],
       mac: {
         target: ['dmg'],
         icon: 'src-electron/icons/icon-source.png'

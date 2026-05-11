@@ -1,7 +1,9 @@
 import { EventEmitter } from 'events';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
-import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { basename, join } from 'path';
+import { gunzipSync } from 'zlib';
+import { parse } from 'yaml';
 
 import { TunnelDatabase } from '../db/TunnelDatabase';
 import { DOMAIN_PRESETS, type DomainPresetId } from '../defaults';
@@ -39,17 +41,37 @@ function pathsFromOptions(options: TunnelManagerOptions): ManagerPaths {
   };
 }
 
+function platformArchKey(): string {
+  const arch = process.arch === 'x64' ? 'x64' : process.arch;
+  return `${process.platform}-${arch}`;
+}
+
 function basicAuthHeader(username: string, password: string): string {
   return `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function normalizeSubscriptionInput(input: SubscriptionInput): SubscriptionInput {
-  if (!input.url) {
+  const rawUrl = input.url?.trim();
+  if (!rawUrl) {
     throw new Error('subscription url is required');
   }
 
-  const parsed = new URL(input.url);
-  const username = input.username || decodeURIComponent(parsed.username);
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error('subscription url is invalid');
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('subscription url must use http or https');
+  }
+
+  const username = input.username?.trim() || decodeURIComponent(parsed.username);
   const password = input.password || decodeURIComponent(parsed.password);
   parsed.username = '';
   parsed.password = '';
@@ -65,6 +87,27 @@ function normalizeSubscriptionInput(input: SubscriptionInput): SubscriptionInput
     username,
     password
   };
+}
+
+function validateSubscriptionYaml(content: string): void {
+  let parsed: unknown;
+  try {
+    parsed = parse(content);
+  } catch {
+    throw new Error('subscription yaml is invalid');
+  }
+
+  if (!isRecord(parsed)) {
+    throw new Error('subscription yaml is invalid');
+  }
+
+  if (
+    !Array.isArray(parsed.proxies)
+    && !Array.isArray(parsed['proxy-groups'])
+    && !isRecord(parsed['proxy-providers'])
+  ) {
+    throw new Error('subscription yaml has no proxy definitions');
+  }
 }
 
 function normalizePort(value: number, label: string): number {
@@ -98,6 +141,7 @@ export class MihomoManager extends EventEmitter {
 
   status(): TunnelStatus {
     const settings = this.db.getSettings();
+    const corePath = settings.corePath ?? (existsSync(this.paths.core) ? this.paths.core : null);
     return {
       running: Boolean(this.child && !this.child.killed),
       pid: this.child?.pid ?? null,
@@ -105,7 +149,7 @@ export class MihomoManager extends EventEmitter {
       tunInstalled: settings.tunInstalled,
       ports: settings.ports,
       activeSubscription: this.db.getActiveSubscription(),
-      corePath: settings.corePath,
+      corePath,
       adminUrl: `http://127.0.0.1:${settings.ports.admin}`,
       controllerUrl: `http://127.0.0.1:${settings.ports.controller}`
     };
@@ -167,10 +211,46 @@ export class MihomoManager extends EventEmitter {
     return this.db.listEvents();
   }
 
-  createSubscription(input: SubscriptionInput): SubscriptionRecord {
-    const subscription = this.db.createSubscription(normalizeSubscriptionInput(input));
-    this.log('info', `Subscription created: ${subscription.name}`);
-    return subscription;
+  async createSubscription(input: SubscriptionInput): Promise<SubscriptionRecord> {
+    const normalized = normalizeSubscriptionInput(input);
+    const content = await this.fetchSubscriptionContent(normalized);
+    const subscription = this.db.createSubscription(normalized);
+
+    try {
+      const localPath = this.localSubscriptionPath(subscription.id);
+      writeFileSync(localPath, content, 'utf8');
+      const updated = this.db.updateSubscriptionContent(subscription.id, content, localPath);
+      this.log('info', `Subscription created: ${updated.name}`);
+      return updated;
+    } catch (error) {
+      this.db.deleteSubscription(subscription.id);
+      throw error;
+    }
+  }
+
+  private localSubscriptionPath(id: number): string {
+    return join(this.paths.profiles, `subscription-${id}.yaml`);
+  }
+
+  private async fetchSubscriptionContent(subscription: SubscriptionInput): Promise<string> {
+    const headers: Record<string, string> = {};
+    if (subscription.username || subscription.password) {
+      headers.Authorization = basicAuthHeader(subscription.username ?? '', subscription.password ?? '');
+    }
+
+    this.log('info', `Fetching subscription: ${subscription.url}`);
+    const response = await fetch(subscription.url, { headers });
+    if (!response.ok) {
+      throw new Error(`subscription update failed: HTTP ${response.status}`);
+    }
+
+    const content = await response.text();
+    if (!content.trim()) {
+      throw new Error('subscription update failed: empty body');
+    }
+
+    validateSubscriptionYaml(content);
+    return content;
   }
 
   deleteSubscription(id: number): void {
@@ -228,8 +308,9 @@ export class MihomoManager extends EventEmitter {
   }
 
   setCorePath(corePath: string): void {
-    this.db.updateSettings({ corePath });
-    this.log('info', `Mihomo core path set: ${corePath}`);
+    const normalized = corePath.trim() || null;
+    this.db.updateSettings({ corePath: normalized });
+    this.log('info', `Mihomo core path set: ${normalized ?? 'bundled/default'}`);
   }
 
   async updateSubscription(id: number): Promise<SubscriptionRecord> {
@@ -238,22 +319,9 @@ export class MihomoManager extends EventEmitter {
       throw new Error(`subscription not found: ${id}`);
     }
 
-    const headers: Record<string, string> = {};
-    if (subscription.username || subscription.password) {
-      headers.Authorization = basicAuthHeader(subscription.username, subscription.password);
-    }
+    const content = await this.fetchSubscriptionContent(subscription);
 
-    this.log('info', `Fetching subscription: ${subscription.url}`);
-    const response = await fetch(subscription.url, { headers });
-    if (!response.ok) {
-      throw new Error(`subscription update failed: HTTP ${response.status}`);
-    }
-    const content = await response.text();
-    if (!content.trim()) {
-      throw new Error('subscription update failed: empty body');
-    }
-
-    const localPath = join(this.paths.profiles, `subscription-${subscription.id}.yaml`);
+    const localPath = this.localSubscriptionPath(subscription.id);
     writeFileSync(localPath, content, 'utf8');
     const updated = this.db.updateSubscriptionContent(subscription.id, content, localPath);
     this.log('info', `Subscription updated: ${subscription.name}`);
@@ -308,10 +376,9 @@ export class MihomoManager extends EventEmitter {
       return;
     }
 
-    const settings = this.db.getSettings();
-    const corePath = settings.corePath ?? this.paths.core;
+    const corePath = this.resolveCorePath();
     if (!existsSync(corePath)) {
-      throw new Error(`mihomo core is not installed: ${corePath}`);
+      throw new Error(`mihomo core is not installed: ${corePath}. Put bundled core under ${this.options.bundledCoreDir ?? 'app resources/mihomo'} or set a valid core path.`);
     }
 
     const configPath = this.renderConfig();
@@ -333,6 +400,58 @@ export class MihomoManager extends EventEmitter {
     this.log('info', `Mihomo started pid=${this.child.pid ?? 'unknown'}`);
   }
 
+  private resolveCorePath(): string {
+    const settings = this.db.getSettings();
+    if (settings.corePath && existsSync(settings.corePath)) {
+      return settings.corePath;
+    }
+
+    if (existsSync(this.paths.core)) {
+      return this.paths.core;
+    }
+
+    const bundled = this.findBundledCore();
+    if (bundled) {
+      this.installBundledCore(bundled);
+      return this.paths.core;
+    }
+
+    return settings.corePath || this.paths.core;
+  }
+
+  private findBundledCore(): string | null {
+    if (!this.options.bundledCoreDir) {
+      return null;
+    }
+
+    const key = platformArchKey();
+    const aliases = key.endsWith('-x64') ? [key, key.replace('-x64', '-amd64')] : [key];
+    const names = ['mihomo', 'mihomo.gz'];
+    const candidates = aliases.flatMap((alias) => names.map((name) => join(this.options.bundledCoreDir as string, alias, name)));
+
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
+  private installBundledCore(sourcePath: string): void {
+    mkdirSync(join(this.paths.root, 'bin'), { recursive: true });
+
+    if (sourcePath.endsWith('.gz')) {
+      writeFileSync(this.paths.core, gunzipSync(readFileSync(sourcePath)));
+    } else {
+      copyFileSync(sourcePath, this.paths.core);
+    }
+
+    chmodSync(this.paths.core, 0o755);
+    this.db.updateSettings({ corePath: this.paths.core });
+    this.log('info', `Bundled Mihomo core installed: ${this.paths.core}`);
+  }
+
   async stop(): Promise<void> {
     if (!this.child || this.child.killed) {
       return;
@@ -345,6 +464,14 @@ export class MihomoManager extends EventEmitter {
     await this.stop();
     await new Promise((resolve) => setTimeout(resolve, 400));
     await this.start();
+  }
+
+  async applyRuntimeConfigChange(): Promise<void> {
+    if (!this.child || this.child.killed) {
+      return;
+    }
+
+    await this.restart();
   }
 
   async handleNetworkChanged(reason: string): Promise<void> {

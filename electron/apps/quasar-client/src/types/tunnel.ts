@@ -65,6 +65,7 @@ export interface TunnelSnapshot {
 export interface TunnelBridge {
   snapshot(): Promise<TunnelSnapshot>;
   createSubscription(input: { name: string; url: string; username?: string; password?: string }): Promise<SubscriptionRecord>;
+  deleteSubscription(id: number): Promise<void>;
   setActiveSubscription(id: number): Promise<SubscriptionRecord>;
   updateSubscription(id: number): Promise<SubscriptionRecord>;
   updateActiveSubscription(): Promise<SubscriptionRecord>;

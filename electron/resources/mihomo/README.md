@@ -1,0 +1,15 @@
+# Bundled Mihomo Core
+
+Put pre-downloaded Mihomo core files here before packaging the Electron app.
+The runtime looks for one of these files and installs it into the user's app
+data directory on first start:
+
+```text
+electron/resources/mihomo/darwin-arm64/mihomo.gz
+electron/resources/mihomo/darwin-x64/mihomo.gz
+electron/resources/mihomo/linux-x64/mihomo.gz
+electron/resources/mihomo/linux-arm64/mihomo.gz
+```
+
+An uncompressed executable named `mihomo` works too. The `.gz` form is preferred
+because it keeps the application package smaller.

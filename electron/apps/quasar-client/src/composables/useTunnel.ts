@@ -1,7 +1,7 @@
 import { computed, ref } from 'vue';
 import { Notify } from 'quasar';
 
-import type { RuntimeMode, TunnelSnapshot } from 'src/types/tunnel';
+import type { RuntimeMode, TunnelBridge, TunnelSnapshot } from 'src/types/tunnel';
 
 const snapshot = ref<TunnelSnapshot | null>(null);
 const selectedMode = ref<RuntimeMode>('app-rule');
@@ -23,11 +23,71 @@ export const ruleKindOptions = [
 ] as const;
 
 function toast(message: string, color = 'positive'): void {
-  Notify.create({ message, color, timeout: 1400, position: 'top-right' });
+  Notify.create({ message, color, timeout: 2200, position: 'top-right' });
+}
+
+function getTunnelBridge(): TunnelBridge {
+  if (!window.tunnel) {
+    throw new Error('Electron 隧道接口未加载，请重启开发服务后再试。');
+  }
+  return window.tunnel;
+}
+
+function friendlyErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+
+  if (/Cannot read properties of undefined|Electron 隧道接口未加载|window\.tunnel/i.test(message)) {
+    return 'Electron 隧道接口未加载，请重启 pnpm dev:quasar 后再试。';
+  }
+  if (/subscription url is required/i.test(message)) {
+    return '请先填写订阅链接。';
+  }
+  if (/Invalid URL|Failed to construct 'URL'|subscription url is invalid/i.test(message)) {
+    return '订阅链接格式不正确，请使用 http:// 或 https:// 开头的完整地址。';
+  }
+  if (/subscription url must use http or https/i.test(message)) {
+    return '订阅链接只支持 http:// 或 https://。';
+  }
+  if (/subscription yaml is invalid|subscription yaml has no proxy definitions/i.test(message)) {
+    return '订阅内容不是有效的 Mihomo YAML，已取消保存。';
+  }
+  if (/subscription update failed: empty body/i.test(message)) {
+    return '订阅内容为空，已取消保存。';
+  }
+  if (/subscription update failed: HTTP 401|subscription update failed: HTTP 403/i.test(message)) {
+    return '订阅拉取失败：用户名或密码不正确，或服务器拒绝访问。';
+  }
+  const httpStatus = message.match(/subscription update failed: HTTP (\d+)/i);
+  if (httpStatus) {
+    return `订阅拉取失败：服务器返回 HTTP ${httpStatus[1]}。`;
+  }
+  if (/fetch failed|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|network/i.test(message)) {
+    return '订阅拉取失败：当前网络无法连接订阅服务器。';
+  }
+  if (/no active subscription configured/i.test(message)) {
+    return '还没有启用订阅，请先创建并启用一个订阅。';
+  }
+  if (/active subscription has no downloaded content/i.test(message)) {
+    return '当前订阅还没有下载内容，请先更新订阅。';
+  }
+  if (/mihomo 未运行/i.test(message)) {
+    return message;
+  }
+  if (/ERR_PROXY_CONNECTION_FAILED|本地代理连接失败/i.test(message)) {
+    return '本地代理连接失败，请确认 mihomo 已启动，并且代理端口没有被其他应用占用。';
+  }
+  if (/ERR_TUNNEL_CONNECTION_FAILED|隧道连接失败/i.test(message)) {
+    return '隧道连接失败，请检查当前节点是否可用，以及 App 模式白名单是否允许该域名。';
+  }
+  if (/ERR_CONNECTION_CLOSED|连接被关闭/i.test(message)) {
+    return '连接被关闭。App 模式下海外域名必须在白名单内；如果已添加白名单，请稍等 core 重载后再试。';
+  }
+
+  return message || '操作失败，请查看日志。';
 }
 
 async function refresh(): Promise<void> {
-  snapshot.value = await window.tunnel.snapshot();
+  snapshot.value = await getTunnelBridge().snapshot();
   selectedMode.value = snapshot.value.status.mode;
   corePath.value = snapshot.value.status.corePath ?? '';
   localPorts.value = {
@@ -42,7 +102,7 @@ async function run(action: () => Promise<unknown>, message: string): Promise<voi
     await refresh();
     toast(message);
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 'negative');
+    toast(friendlyErrorMessage(error), 'negative');
   }
 }
 

@@ -30,6 +30,7 @@
             <div class="text-h6 ellipsis">{{ subscription.name }}</div>
             <q-space />
             <q-btn flat round dense icon="refresh" @click="updateSubscription(subscription.id)" />
+            <q-btn flat round dense color="negative" icon="delete" @click="deleteSubscription(subscription.id)" />
           </div>
           <div class="text-grey-7 ellipsis q-mt-xs">{{ redactedUrl(subscription.url) }}</div>
           <div class="row items-center q-mt-md">
@@ -79,6 +80,10 @@ async function setActive(id: number): Promise<void> {
 
 async function updateSubscription(id: number): Promise<void> {
   await run(() => window.tunnel.updateSubscription(id), '订阅已更新');
+}
+
+async function deleteSubscription(id: number): Promise<void> {
+  await run(() => window.tunnel.deleteSubscription(id), '订阅已删除');
 }
 
 async function updateActiveSubscription(): Promise<void> {

@@ -35,8 +35,10 @@ Default admin login is `admin/admin`.
 - `app-global`: Electron app traffic uses the local mixed proxy and the runtime
   config sends matched traffic to the proxy policy.
 - `app-rule`: Electron app traffic uses the local mixed proxy; CN/local traffic
-  is `DIRECT`, allowlisted overseas domains go through the proxy policy, and
-  remaining overseas traffic is `REJECT`.
+  is `DIRECT`. When no allowlist exists, remaining overseas traffic goes through
+  the proxy policy. Once one or more allowlist rules exist, only allowlisted
+  overseas domains go through the proxy policy and other overseas traffic is
+  `REJECT`.
 
 The first version supports saving multiple subscriptions and manually switching
 the active one. Automatic failover across multiple subscriptions is intentionally
@@ -53,11 +55,28 @@ pnpm install
 pnpm dev:quasar
 ```
 
-Before starting mihomo from the UI, provide a local core path such as:
+Before starting mihomo from the UI in development, either provide a local core
+path such as:
 
 ```text
 /usr/local/bin/mihomo
 ```
+
+or download a bundled core once:
+
+```bash
+pnpm core:install
+```
+
+Packaged Electron builds include anything under `electron/resources/mihomo`.
+On first start the runtime copies the matching `mihomo.gz` or `mihomo`
+executable into:
+
+```text
+<userData>/mihomo-tunnel/bin/mihomo
+```
+
+This makes end-user startup independent of network availability.
 
 Then add a subscription URL like:
 

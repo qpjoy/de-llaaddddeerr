@@ -137,7 +137,7 @@ function adminHtml(): string {
       document.querySelector('#corePath').value = data.status.corePath || '';
       document.querySelector('#mixedPort').value = data.status.ports.mixed;
       document.querySelector('#dnsPort').value = data.status.ports.dns;
-      document.querySelector('#subs').innerHTML = data.subscriptions.map(s => '<div class="card"><strong>'+s.name+'</strong><p class="muted">'+s.url+'</p><p>'+(s.active?'当前':'')+' '+(s.lastUpdatedAt||'未更新')+'</p><button data-active="'+s.id+'">启用</button> <button class="secondary" data-refresh="'+s.id+'">刷新</button></div>').join('');
+      document.querySelector('#subs').innerHTML = data.subscriptions.map(s => '<div class="card"><strong>'+s.name+'</strong><p class="muted">'+s.url+'</p><p>'+(s.active?'当前':'')+' '+(s.lastUpdatedAt||'未更新')+'</p><button data-active="'+s.id+'">启用</button> <button class="secondary" data-refresh="'+s.id+'">刷新</button> <button class="secondary" data-sub-remove="'+s.id+'">删除</button></div>').join('');
       document.querySelector('#rules').innerHTML = data.rules.map(r => '<div class="card"><strong>'+r.kind+'</strong> '+r.domain+'<p class="muted">'+r.source+'</p><button class="secondary" data-rule-remove="'+r.id+'">删除</button></div>').join('');
       document.querySelector('#events').textContent = data.events.map(e => '['+e.level+'] '+e.createdAt+' '+e.message).join('\\n');
     }
@@ -164,8 +164,9 @@ function adminHtml(): string {
       if (target.dataset.preset) await api('/api/presets/'+target.dataset.preset, { method:'POST' });
       if (target.dataset.active) await api('/api/subscriptions/'+target.dataset.active+'/active', { method:'POST' });
       if (target.dataset.refresh) await api('/api/subscriptions/'+target.dataset.refresh+'/update', { method:'POST' });
+      if (target.dataset.subRemove) await api('/api/subscriptions/'+target.dataset.subRemove, { method:'DELETE' });
       if (target.dataset.ruleRemove) await api('/api/rules/'+target.dataset.ruleRemove, { method:'DELETE' });
-      if (target.dataset.preset || target.dataset.active || target.dataset.refresh || target.dataset.ruleRemove) refresh();
+      if (target.dataset.preset || target.dataset.active || target.dataset.refresh || target.dataset.subRemove || target.dataset.ruleRemove) refresh();
     };
   </script>
 </body>
@@ -260,9 +261,10 @@ export class AdminServer {
       return async (_req, res) => sendJson(res, 200, await this.manager.snapshot());
     }
     if (method === 'POST' && pathname === '/api/mode') {
-      return (_req, res, body) => {
+      return async (_req, res, body) => {
         const { mode } = body as { mode: never };
         this.manager.setMode(mode);
+        await this.manager.applyRuntimeConfigChange();
         sendJson(res, 200, this.manager.status());
       };
     }
@@ -274,14 +276,16 @@ export class AdminServer {
       };
     }
     if (method === 'POST' && pathname === '/api/tun/install') {
-      return (_req, res) => {
+      return async (_req, res) => {
         this.manager.installTunFeature();
+        await this.manager.applyRuntimeConfigChange();
         sendJson(res, 200, this.manager.status());
       };
     }
     if (method === 'POST' && pathname === '/api/tun/uninstall') {
-      return (_req, res) => {
+      return async (_req, res) => {
         this.manager.uninstallTunFeature();
+        await this.manager.applyRuntimeConfigChange();
         sendJson(res, 200, this.manager.status());
       };
     }
@@ -305,39 +309,66 @@ export class AdminServer {
       };
     }
     if (method === 'POST' && pathname === '/api/subscriptions') {
-      return (_req, res, body) => {
-        sendJson(res, 200, this.manager.createSubscription(body as never));
+      return async (_req, res, body) => {
+        sendJson(res, 200, await this.manager.createSubscription(body as never));
       };
     }
     if (method === 'POST' && pathname === '/api/subscriptions/active/update') {
-      return async (_req, res) => sendJson(res, 200, await this.manager.updateActiveSubscription());
+      return async (_req, res) => {
+        const subscription = await this.manager.updateActiveSubscription();
+        await this.manager.applyRuntimeConfigChange();
+        sendJson(res, 200, subscription);
+      };
     }
 
     const activeMatch = pathname.match(/^\/api\/subscriptions\/(\d+)\/active$/);
     if (method === 'POST' && activeMatch) {
-      return (_req, res) => sendJson(res, 200, this.manager.setActiveSubscription(Number(activeMatch[1])));
+      return async (_req, res) => {
+        const subscription = this.manager.setActiveSubscription(Number(activeMatch[1]));
+        await this.manager.applyRuntimeConfigChange();
+        sendJson(res, 200, subscription);
+      };
     }
     const updateMatch = pathname.match(/^\/api\/subscriptions\/(\d+)\/update$/);
     if (method === 'POST' && updateMatch) {
-      return async (_req, res) => sendJson(res, 200, await this.manager.updateSubscription(Number(updateMatch[1])));
+      return async (_req, res) => {
+        const subscription = await this.manager.updateSubscription(Number(updateMatch[1]));
+        if (subscription.active) {
+          await this.manager.applyRuntimeConfigChange();
+        }
+        sendJson(res, 200, subscription);
+      };
+    }
+    const deleteSubscriptionMatch = pathname.match(/^\/api\/subscriptions\/(\d+)$/);
+    if (method === 'DELETE' && deleteSubscriptionMatch) {
+      return async (_req, res) => {
+        this.manager.deleteSubscription(Number(deleteSubscriptionMatch[1]));
+        await this.manager.applyRuntimeConfigChange();
+        sendJson(res, 200, { ok: true });
+      };
     }
     if (method === 'POST' && pathname === '/api/rules') {
-      return (_req, res, body) => {
+      return async (_req, res, body) => {
         const { kind, domain } = body as { kind: 'allow' | 'block'; domain: string };
-        sendJson(res, 200, this.manager.addDomainRule(kind, domain));
+        const rule = this.manager.addDomainRule(kind, domain);
+        await this.manager.applyRuntimeConfigChange();
+        sendJson(res, 200, rule);
       };
     }
     const ruleDeleteMatch = pathname.match(/^\/api\/rules\/(\d+)$/);
     if (method === 'DELETE' && ruleDeleteMatch) {
-      return (_req, res) => {
+      return async (_req, res) => {
         this.manager.removeDomainRule(Number(ruleDeleteMatch[1]));
+        await this.manager.applyRuntimeConfigChange();
         sendJson(res, 200, { ok: true });
       };
     }
     const presetMatch = pathname.match(/^\/api\/presets\/([a-z]+)$/);
     if (method === 'POST' && presetMatch) {
-      return (_req, res) => {
-        sendJson(res, 200, this.manager.addPreset(presetMatch[1] as DomainPresetId));
+      return async (_req, res) => {
+        const rules = this.manager.addPreset(presetMatch[1] as DomainPresetId);
+        await this.manager.applyRuntimeConfigChange();
+        sendJson(res, 200, rules);
       };
     }
 
