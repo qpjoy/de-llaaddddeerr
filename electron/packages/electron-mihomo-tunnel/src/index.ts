@@ -1,9 +1,11 @@
 export { AdminServer } from './admin/AdminServer';
+export { createElectronTunnel } from './createElectronTunnel';
 export { renderRuntimeConfig } from './config/renderRuntimeConfig';
 export { TunnelDatabase } from './db/TunnelDatabase';
 export { registerTunnelIpc } from './ipc/registerTunnelIpc';
-export { MihomoApi } from './mihomo/MihomoApi';
-export { MihomoManager } from './mihomo/MihomoManager';
+export { MihomoApi, MihomoApi as TunnelApi } from './mihomo/MihomoApi';
+export { MihomoManager, MihomoManager as TunnelManager } from './mihomo/MihomoManager';
 export { applyElectronProxy, proxyEnv } from './system/electronProxy';
 export { DEFAULT_PORTS, DOMAIN_PRESETS } from './defaults';
+export type { CreateElectronTunnelHost, CreateElectronTunnelOptions, ElectronTunnelHandle } from './createElectronTunnel';
 export type * from './types';

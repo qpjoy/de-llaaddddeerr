@@ -53,8 +53,8 @@
 
     <section class="section-surface q-pa-md q-mb-md">
       <div class="toolbar-row">
-        <q-input v-model="corePath" dense outlined placeholder="/usr/local/bin/mihomo" class="col" />
-        <q-btn color="primary" icon="save" label="保存 Core 路径" @click="saveCorePath" />
+        <q-input v-model="corePath" dense outlined placeholder="自动使用内置隧道引擎" class="col" />
+        <q-btn color="primary" icon="save" label="保存引擎路径" @click="saveCorePath" />
       </div>
     </section>
 
@@ -216,7 +216,7 @@ async function installTun(): Promise<void> {
 }
 
 async function saveCorePath(): Promise<void> {
-  await run(() => window.tunnel.setCorePath(corePath.value), 'Core 路径已保存');
+  await run(() => window.tunnel.setCorePath(corePath.value), '引擎路径已保存');
 }
 
 async function uninstallTun(): Promise<void> {
@@ -225,10 +225,10 @@ async function uninstallTun(): Promise<void> {
 
 async function toggleCore(): Promise<void> {
   if (snapshot.value?.status.running) {
-    await run(() => window.tunnel.stop(), 'mihomo 已停止');
+    await run(() => window.tunnel.stop(), '隧道已停止');
     return;
   }
-  await run(() => window.tunnel.start(), 'mihomo 已启动');
+  await run(() => window.tunnel.start(), '隧道已启动');
 }
 
 async function createSubscription(): Promise<void> {

@@ -79,7 +79,7 @@ const {
 } = useTunnel();
 
 async function restartCore(): Promise<void> {
-  await run(() => window.tunnel.restart(), 'mihomo 已重启');
+  await run(() => window.tunnel.restart(), '隧道已重启');
 }
 
 async function updateActiveSubscription(): Promise<void> {

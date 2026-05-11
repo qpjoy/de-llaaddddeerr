@@ -78,10 +78,10 @@ function adminHtml(): string {
         </div>
       </section>
       <section>
-        <h3>Mihomo Core</h3>
+        <h3>高级设置</h3>
         <div class="row">
-          <input id="corePath" placeholder="/usr/local/bin/mihomo" style="flex:1;min-width:320px">
-          <button id="saveCorePath">保存路径</button>
+          <input id="corePath" placeholder="自动使用内置隧道引擎" style="flex:1;min-width:320px">
+          <button id="saveCorePath">保存引擎路径</button>
         </div>
       </section>
       <section>

@@ -338,7 +338,7 @@ export class MihomoManager extends EventEmitter {
 
   installCoreFromPath(sourcePath: string): string {
     if (!existsSync(sourcePath)) {
-      throw new Error(`mihomo core not found: ${sourcePath}`);
+      throw new Error(`Tunnel engine not found: ${sourcePath}`);
     }
     const target = join(this.paths.root, 'bin', basename(sourcePath));
     copyFileSync(sourcePath, target);
@@ -429,7 +429,7 @@ export class MihomoManager extends EventEmitter {
     const settings = this.db.getSettings();
     const corePath = this.resolveCorePath();
     if (!existsSync(corePath)) {
-      throw new Error(`mihomo core is not installed: ${corePath}. Put bundled core under ${this.options.bundledCoreDir ?? 'app resources/mihomo'} or set a valid core path.`);
+      throw new Error(`Tunnel engine is not installed: ${corePath}. Package the QPJoy tunnel engine resources with your Electron app.`);
     }
 
     const configPath = this.renderConfig();
@@ -476,14 +476,15 @@ export class MihomoManager extends EventEmitter {
   }
 
   private findBundledCore(): string | null {
-    if (!this.options.bundledCoreDir) {
+    const bundledEngineDir = this.options.bundledEngineDir ?? this.options.bundledCoreDir;
+    if (!bundledEngineDir) {
       return null;
     }
 
     const key = platformArchKey();
     const aliases = key.endsWith('-x64') ? [key, key.replace('-x64', '-amd64')] : [key];
     const names = ['mihomo', 'mihomo.gz'];
-    const candidates = aliases.flatMap((alias) => names.map((name) => join(this.options.bundledCoreDir as string, alias, name)));
+    const candidates = aliases.flatMap((alias) => names.map((name) => join(bundledEngineDir, alias, name)));
 
     for (const candidate of candidates) {
       if (existsSync(candidate)) {
@@ -568,7 +569,7 @@ export class MihomoManager extends EventEmitter {
     const pid = Number(output.split(/\s+/).at(-1));
 
     if (!Number.isInteger(pid) || pid <= 0) {
-      throw new Error(`Failed to start privileged mihomo core: ${output || 'empty pid'}`);
+      throw new Error(`Failed to start privileged tunnel engine: ${output || 'empty pid'}`);
     }
 
     this.child = null;

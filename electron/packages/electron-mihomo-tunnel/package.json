@@ -1,17 +1,42 @@
 {
-  "name": "@qpjoy/electron-mihomo-tunnel",
+  "name": "@qpjoy/electron-tunnel",
   "version": "0.1.0",
-  "private": true,
-  "description": "Reusable Electron Mihomo tunnel runtime for macOS and Linux.",
+  "private": false,
+  "description": "Reusable QPJoy tunnel runtime and CLI for Electron apps on macOS and Linux.",
+  "license": "UNLICENSED",
   "type": "commonjs",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "qpjoy-tunnel": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "resources/engine"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepack": "pnpm build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit"
   },
+  "keywords": [
+    "electron",
+    "tunnel",
+    "proxy",
+    "tun",
+    "qpjoy"
+  ],
   "dependencies": {
     "better-sqlite3": "^11.8.1",
     "yaml": "^2.7.0"

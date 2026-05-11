@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-import { createWriteStream, mkdirSync } from 'node:fs';
+import { copyFileSync, createWriteStream, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 
 const rootDir = resolve(new URL('..', import.meta.url).pathname);
-const outputRoot = join(rootDir, 'resources/mihomo');
+const appOutputRoot = join(rootDir, 'resources/mihomo');
+const packageOutputRoot = join(rootDir, 'packages/electron-mihomo-tunnel/resources/engine');
 
 function argValue(name, fallback) {
   const index = process.argv.indexOf(name);
@@ -16,7 +17,8 @@ const arch = argValue('--arch', process.arch);
 const version = argValue('--version', process.env.MIHOMO_VERSION || 'latest');
 const outputArch = arch === 'x64' ? 'x64' : arch;
 const releaseArch = arch === 'x64' ? 'amd64' : arch;
-const outputPath = join(outputRoot, `${platform}-${outputArch}`, 'mihomo.gz');
+const appOutputPath = join(appOutputRoot, `${platform}-${outputArch}`, 'mihomo.gz');
+const packageOutputPath = join(packageOutputRoot, `${platform}-${outputArch}`, 'mihomo.gz');
 
 const assetPatterns = {
   'darwin-arm64': [/^mihomo-darwin-arm64-v[\d.]+\.gz$/],
@@ -37,7 +39,7 @@ async function githubJson(url) {
   const response = await fetch(url, {
     headers: {
       accept: 'application/vnd.github+json',
-      'user-agent': 'qpjoy-tunnel-core-installer'
+      'user-agent': 'qpjoy-tunnel-engine-installer'
     }
   });
 
@@ -52,7 +54,7 @@ function selectAsset(release) {
   const key = `${platform}-${releaseArch}`;
   const patterns = assetPatterns[key];
   if (!patterns) {
-    throw new Error(`Unsupported mihomo target: ${platform}-${arch}`);
+    throw new Error(`Unsupported tunnel engine target: ${platform}-${arch}`);
   }
 
   for (const pattern of patterns) {
@@ -62,7 +64,7 @@ function selectAsset(release) {
     }
   }
 
-  throw new Error(`No mihomo asset matched ${key} in ${release.tag_name}`);
+  throw new Error(`No tunnel engine asset matched ${key} in ${release.tag_name}`);
 }
 
 async function main() {
@@ -72,17 +74,20 @@ async function main() {
   const release = await githubJson(releaseUrl);
   const asset = selectAsset(release);
 
-  mkdirSync(dirname(outputPath), { recursive: true });
+  mkdirSync(dirname(appOutputPath), { recursive: true });
+  mkdirSync(dirname(packageOutputPath), { recursive: true });
   const response = await fetch(asset.browser_download_url, {
-    headers: { 'user-agent': 'qpjoy-tunnel-core-installer' }
+    headers: { 'user-agent': 'qpjoy-tunnel-engine-installer' }
   });
   if (!response.ok || !response.body) {
     throw new Error(`Download failed: HTTP ${response.status}`);
   }
 
-  await pipeline(response.body, createWriteStream(outputPath));
+  await pipeline(response.body, createWriteStream(appOutputPath));
+  copyFileSync(appOutputPath, packageOutputPath);
   console.log(`Downloaded ${asset.name}`);
-  console.log(`Saved ${outputPath}`);
+  console.log(`Saved ${appOutputPath}`);
+  console.log(`Saved ${packageOutputPath}`);
 }
 
 main().catch((error) => {

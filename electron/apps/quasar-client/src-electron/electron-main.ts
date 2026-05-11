@@ -5,15 +5,14 @@ import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
 
 import {
-  AdminServer,
-  MihomoManager,
-  applyElectronProxy,
-  registerTunnelIpc
-} from '@qpjoy/electron-mihomo-tunnel';
+  createElectronTunnel,
+  type ElectronTunnelHandle,
+  type TunnelManager
+} from '@qpjoy/electron-tunnel';
 
 let mainWindow: BrowserWindow | null = null;
-let tunnelManager: MihomoManager | null = null;
-let adminServer: AdminServer | null = null;
+let tunnel: ElectronTunnelHandle | null = null;
+let tunnelManager: TunnelManager | null = null;
 let networkGuardTimer: NodeJS.Timeout | null = null;
 let lastNetworkSignature = '';
 
@@ -37,13 +36,19 @@ function resolvePreloadPath(): string {
   return candidates[0] ?? path.resolve(currentDir, 'preload/electron-preload.cjs');
 }
 
-function resolveBundledCoreDir(): string {
+function resolveBundledEngineDir(): string {
   const candidates = [
+    path.resolve(process.resourcesPath, 'qpjoy-tunnel-engine'),
     path.resolve(process.resourcesPath, 'mihomo'),
+    path.resolve(currentDir, 'resources/qpjoy-tunnel-engine'),
     path.resolve(currentDir, 'resources/mihomo'),
+    path.resolve(currentDir, '../resources/qpjoy-tunnel-engine'),
     path.resolve(currentDir, '../resources/mihomo'),
+    path.resolve(currentDir, '../../resources/qpjoy-tunnel-engine'),
     path.resolve(currentDir, '../../resources/mihomo'),
+    path.resolve(currentDir, '../../../resources/qpjoy-tunnel-engine'),
     path.resolve(currentDir, '../../../resources/mihomo'),
+    path.resolve(currentDir, '../../../../resources/qpjoy-tunnel-engine'),
     path.resolve(currentDir, '../../../../resources/mihomo')
   ];
 
@@ -54,8 +59,7 @@ async function applyProxyForCurrentMode(): Promise<void> {
   if (!tunnelManager) {
     return;
   }
-  const status = tunnelManager.status();
-  await applyElectronProxy(session.defaultSession, status.mode, status.ports);
+  await tunnel?.applyProxy();
 }
 
 async function createWindow(): Promise<void> {
@@ -118,13 +122,13 @@ function friendlyLoadError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
 
   if (message.includes('ERR_PROXY_CONNECTION_FAILED')) {
-    return '本地代理连接失败，请确认 mihomo 已启动，并且代理端口没有被其他应用占用。';
+    return '本地代理连接失败，请确认隧道已启动，并且代理端口没有被其他应用占用。';
   }
   if (message.includes('ERR_TUNNEL_CONNECTION_FAILED')) {
     return '隧道连接失败，请检查当前节点是否可用，以及 App 模式白名单是否允许该域名。';
   }
   if (message.includes('ERR_CONNECTION_CLOSED')) {
-    return '连接被关闭。App 模式下海外域名必须在白名单内；如果已添加白名单，请稍等 core 重载后再试。';
+    return '连接被关闭。App 模式下海外域名必须在白名单内；如果已添加白名单，请稍等隧道重载后再试。';
   }
   if (message.includes('ERR_NAME_NOT_RESOLVED')) {
     return '域名解析失败，请检查 DNS 配置或当前网络。';
@@ -221,7 +225,7 @@ async function openTestWindow(rawUrl: string): Promise<void> {
   const targetUrl = normalizeUrl(rawUrl);
   const status = tunnelManager?.status();
   if (!status?.running) {
-    throw new Error('mihomo 未运行，请先在首页启动后再打开测试窗口。');
+    throw new Error('隧道未运行，请先在首页启动后再打开测试窗口。');
   }
 
   await applyProxyForCurrentMode();
@@ -252,17 +256,17 @@ app.whenReady().then(async () => {
     throw new Error(`Unsupported platform for this tunnel MVP: ${platform}`);
   }
 
-  tunnelManager = new MihomoManager({
+  tunnel = createElectronTunnel({
+    app,
+    ipcMain,
+    session: session.defaultSession
+  }, {
     userDataPath: app.getPath('userData'),
-    bundledCoreDir: resolveBundledCoreDir(),
+    bundledEngineDir: resolveBundledEngineDir(),
     adminPort: 23456,
     controllerPort: 23457
   });
-  adminServer = new AdminServer(tunnelManager);
-  adminServer.start();
-  registerTunnelIpc(ipcMain, tunnelManager, {
-    afterSettingsChange: applyProxyForCurrentMode
-  });
+  tunnelManager = tunnel.manager;
   ipcMain.handle('tunnel:open-admin', () => shell.openExternal(tunnelManager?.status().adminUrl ?? 'http://127.0.0.1:23456'));
   ipcMain.handle('tunnel:open-test-window', (_event, url: string) => openTestWindow(url));
 
@@ -293,6 +297,5 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   stopNetworkGuard();
-  adminServer?.stop();
-  tunnelManager?.close();
+  tunnel?.close();
 });

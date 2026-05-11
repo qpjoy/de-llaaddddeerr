@@ -85,6 +85,8 @@ export interface TunnelSnapshot {
 export interface TunnelManagerOptions {
   appName?: string;
   userDataPath: string;
+  bundledEngineDir?: string;
+  /** @deprecated Use bundledEngineDir. */
   bundledCoreDir?: string;
   adminPort?: number;
   controllerPort?: number;

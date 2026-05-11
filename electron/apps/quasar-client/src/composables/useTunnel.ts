@@ -49,7 +49,7 @@ function friendlyErrorMessage(error: unknown): string {
     return '订阅链接只支持 http:// 或 https://。';
   }
   if (/subscription yaml is invalid|subscription yaml has no proxy definitions/i.test(message)) {
-    return '订阅内容不是有效的 Mihomo YAML，已取消保存。';
+    return '订阅内容不是有效的隧道配置，已取消保存。';
   }
   if (/subscription update failed: empty body/i.test(message)) {
     return '订阅内容为空，已取消保存。';
@@ -70,22 +70,22 @@ function friendlyErrorMessage(error: unknown): string {
   if (/active subscription has no downloaded content/i.test(message)) {
     return '当前订阅还没有下载内容，请先更新订阅。';
   }
-  if (/mihomo 未运行/i.test(message)) {
+  if (/mihomo 未运行|隧道未运行/i.test(message)) {
     return message;
   }
   if (/ERR_PROXY_CONNECTION_FAILED|本地代理连接失败/i.test(message)) {
-    return '本地代理连接失败，请确认 mihomo 已启动，并且代理端口没有被其他应用占用。';
+    return '本地代理连接失败，请确认隧道已启动，并且代理端口没有被其他应用占用。';
   }
   if (/ERR_TUNNEL_CONNECTION_FAILED|隧道连接失败/i.test(message)) {
     return '隧道连接失败，请检查当前节点是否可用，以及 App 模式白名单是否允许该域名。';
   }
   if (/ERR_CONNECTION_CLOSED|连接被关闭/i.test(message)) {
-    return '连接被关闭。App 模式下海外域名必须在白名单内；如果已添加白名单，请稍等 core 重载后再试。';
+    return '连接被关闭。App 模式下海外域名必须在白名单内；如果已添加白名单，请稍等隧道重载后再试。';
   }
   if (/TUN mode requires administrator|administrator approval|User canceled|privilege helper/i.test(message)) {
     return '虚拟网卡模式需要管理员授权；如果取消授权，Chrome 等外部应用流量不会被接管。';
   }
-  if (/Privileged mihomo exited immediately/i.test(message)) {
+  if (/Privileged (mihomo|tunnel engine) exited immediately/i.test(message)) {
     return `虚拟网卡启动后立即退出：${message.replace(/^Error invoking remote method '[^']+': Error:\s*/i, '')}`;
   }
 
@@ -144,10 +144,10 @@ function relativeTime(value: string): string {
 
 async function toggleCore(): Promise<void> {
   if (snapshot.value?.status.running) {
-    await run(() => window.tunnel.stop(), 'mihomo 已停止');
+    await run(() => window.tunnel.stop(), '隧道已停止');
     return;
   }
-  await run(() => window.tunnel.start(), 'mihomo 已启动');
+  await run(() => window.tunnel.start(), '隧道已启动');
 }
 
 export function useTunnel() {

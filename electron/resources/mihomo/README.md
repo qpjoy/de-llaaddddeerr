@@ -1,6 +1,6 @@
-# Bundled Mihomo Core
+# Bundled QPJoy Tunnel Engine
 
-Put pre-downloaded Mihomo core files here before packaging the Electron app.
+Put pre-downloaded tunnel engine files here before packaging the Electron app.
 The runtime looks for one of these files and installs it into the user's app
 data directory on first start:
 

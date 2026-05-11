@@ -9,33 +9,28 @@ Usage:
   qpjoy-tunnel help
   qpjoy-tunnel snippet
 
-The current MVP ships the reusable runtime as @qpjoy/electron-mihomo-tunnel.
+The published SDK ships the reusable runtime as @qpjoy/electron-tunnel.
 Use "snippet" to print the minimal Electron main-process integration.
 `);
 }
 
 function snippet(): void {
-  process.stdout.write(`import {
-  AdminServer,
-  MihomoManager,
-  applyElectronProxy,
-  registerTunnelIpc
-} from '@qpjoy/electron-mihomo-tunnel'
+  process.stdout.write(`import { app, ipcMain, session } from 'electron'
+import { createElectronTunnel } from '@qpjoy/electron-tunnel'
 
-const manager = new MihomoManager({
-  userDataPath: app.getPath('userData'),
+const tunnel = createElectronTunnel({ app, ipcMain, session: session.defaultSession }, {
   adminPort: 23456,
-  controllerPort: 23457
+  controllerPort: 23457,
+  mixedPort: 23458,
+  dnsPort: 23459
 })
 
-const admin = new AdminServer(manager)
-admin.start()
+app.whenReady().then(async () => {
+  await tunnel.applyProxy()
+})
 
-registerTunnelIpc(ipcMain, manager, {
-  afterSettingsChange: () => {
-    const status = manager.status()
-    return applyElectronProxy(session.defaultSession, status.mode, status.ports)
-  }
+app.on('before-quit', () => {
+  tunnel.close()
 })
 `);
 }

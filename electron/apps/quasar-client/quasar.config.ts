@@ -10,7 +10,7 @@ export default configure(() => ({
   build: {
     vueRouterMode: 'hash',
     alias: {
-      '@qpjoy/electron-mihomo-tunnel': tunnelRuntimeEntry
+      '@qpjoy/electron-tunnel': tunnelRuntimeEntry
     }
   },
   framework: {
@@ -25,10 +25,10 @@ export default configure(() => ({
     bundler: 'builder',
     preloadScripts: ['electron-preload'],
     extendElectronMainConf(config) {
-      config.external = (config.external ?? []).filter((dependency) => dependency !== '@qpjoy/electron-mihomo-tunnel');
+      config.external = (config.external ?? []).filter((dependency) => dependency !== '@qpjoy/electron-tunnel');
     },
     builder: {
-      appId: 'dev.qpjoy.mihomo-tunnel',
+      appId: 'dev.qpjoy.electron-tunnel',
       productName: 'QPJoy Tunnel',
       directories: {
         output: 'dist/electron'
@@ -40,7 +40,7 @@ export default configure(() => ({
       extraResources: [
         {
           from: '../../resources/mihomo',
-          to: 'mihomo',
+          to: 'qpjoy-tunnel-engine',
           filter: ['**/*']
         }
       ],

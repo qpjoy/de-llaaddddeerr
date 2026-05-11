@@ -1,4 +1,4 @@
-# QPJoy Electron Mihomo Tunnel
+# QPJoy Electron Tunnel
 
 This folder contains the first Electron client MVP for the existing
 `docker/hysteria2-mihomo-stack` server deployment.
@@ -8,8 +8,8 @@ This folder contains the first Electron client MVP for the existing
 ```text
 electron/
   apps/quasar-client/              # Quasar Vue 3 Electron test app
-  packages/electron-mihomo-tunnel/ # reusable Electron tunnel runtime
-  packages/tunnel-cli/             # small integration helper
+  packages/electron-mihomo-tunnel/ # published as @qpjoy/electron-tunnel
+  packages/tunnel-cli/             # legacy dev helper
 ```
 
 The tunnel runtime is not coupled to Quasar. A native Electron app can use the
@@ -18,7 +18,7 @@ same package from its main process and expose the same browser admin backend.
 ## Ports
 
 - Admin browser backend: `http://127.0.0.1:23456`
-- Mihomo external controller: `127.0.0.1:23457`
+- Tunnel controller: `127.0.0.1:23457`
 - Local mixed proxy: `127.0.0.1:23458`
 - Local DNS listener: `127.0.0.1:23459`
 
@@ -33,10 +33,10 @@ Default admin login is `admin/admin`.
 
 ## Modes
 
-- `system-tun`: enables mihomo TUN in the generated runtime config so the
-  machine can route through the virtual interface when the core has enough
+- `system-tun`: enables the tunnel engine TUN in the generated runtime config so
+  the machine can route through the virtual interface when the engine has enough
   privilege. On macOS the dev app asks for administrator approval and launches
-  the core with elevated privileges; Linux uses `pkexec` when available. Runtime
+  the engine with elevated privileges; Linux uses `pkexec` when available. Runtime
   config changes are hot reloaded so network changes and mode switches do not
   repeatedly ask for administrator approval. The next service-mode milestone will
   move this to a first-install-only privileged helper.
@@ -51,7 +51,7 @@ Default admin login is `admin/admin`.
 The first version supports saving multiple subscriptions and manually switching
 the active one. Automatic failover across multiple subscriptions is intentionally
 left for the next phase, because it requires merging and normalizing multiple
-remote YAML files into one safe mihomo config.
+remote YAML files into one safe runtime config.
 
 ## Development
 
@@ -63,22 +63,17 @@ pnpm install
 pnpm dev:quasar
 ```
 
-Before starting mihomo from the UI in development, either provide a local core
-path such as:
-
-```text
-/usr/local/bin/mihomo
-```
-
-or download a bundled core once:
+Download bundled tunnel engine resources once before packaging:
 
 ```bash
 pnpm core:install
 ```
 
-Packaged Electron builds include anything under `electron/resources/mihomo`.
-On first start the runtime copies the matching `mihomo.gz` or `mihomo`
-executable into:
+Packaged Electron builds include tunnel engine resources under
+`electron/resources/mihomo` for the dev app and under
+`packages/electron-mihomo-tunnel/resources/engine` for the npm package. On first
+start the runtime installs the matching executable into the app user-data
+directory:
 
 ```text
 <userData>/mihomo-tunnel/bin/mihomo
@@ -97,39 +92,51 @@ SQLite fields, mirroring the existing shell client behavior.
 
 ## Reusing In Another Electron App
 
-After building the package, a host Electron app can wire the runtime in its main
-process:
+Install the package in a host Electron app:
+
+```bash
+pnpm add @qpjoy/electron-tunnel
+```
+
+Then wire the runtime once in the Electron main process:
 
 ```ts
-import {
-  AdminServer,
-  MihomoManager,
-  applyElectronProxy,
-  registerTunnelIpc
-} from '@qpjoy/electron-mihomo-tunnel';
+import { app, ipcMain, session } from 'electron';
+import { createElectronTunnel } from '@qpjoy/electron-tunnel';
 
-const manager = new MihomoManager({
-  userDataPath: app.getPath('userData'),
+const tunnel = createElectronTunnel({ app, ipcMain, session: session.defaultSession }, {
   adminPort: 23456,
-  controllerPort: 23457
+  controllerPort: 23457,
+  mixedPort: 23458,
+  dnsPort: 23459
 });
 
-const admin = new AdminServer(manager);
-admin.start();
+app.whenReady().then(async () => {
+  await tunnel.applyProxy();
+});
 
-registerTunnelIpc(ipcMain, manager, {
-  afterSettingsChange: () => {
-    const status = manager.status();
-    return applyElectronProxy(session.defaultSession, status.mode, status.ports);
-  }
+app.on('before-quit', () => {
+  tunnel.close();
 });
 ```
 
-You can also print this snippet with:
+The npm package also ships `qpjoy-tunnel`:
 
 ```bash
-pnpm --filter @qpjoy/tunnel-cli build
-node packages/tunnel-cli/dist/index.js snippet
+pnpm exec qpjoy-tunnel snippet
+pnpm exec qpjoy-tunnel init --out src-electron/qpjoy-tunnel.ts
+```
+
+For `electron-builder`, include the packaged engine resources:
+
+```ts
+extraResources: [
+  {
+    from: 'node_modules/@qpjoy/electron-tunnel/resources/engine',
+    to: 'qpjoy-tunnel-engine',
+    filter: ['**/*']
+  }
+]
 ```
 
 ## Local State
@@ -140,6 +147,6 @@ SQLite is stored below the Electron app user-data directory:
 <userData>/mihomo-tunnel/tunnel.sqlite
 ```
 
-It currently tracks subscriptions, runtime settings, domain rules, core version
+It currently tracks subscriptions, runtime settings, domain rules, engine version
 records, traffic snapshots, and event logs. The schema is intentionally ready for
 future server-version rollout metadata.
