@@ -1,0 +1,21 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "types": ["node", "vite/client"],
+    "paths": {
+      "@qpjoy/electron-mihomo-tunnel": ["../../packages/electron-mihomo-tunnel/src/index.ts"],
+      "src/*": ["src/*"],
+      "app/*": ["*"],
+      "components/*": ["src/components/*"],
+      "layouts/*": ["src/layouts/*"],
+      "pages/*": ["src/pages/*"]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.vue",
+    "src-electron/**/*.ts",
+    "quasar.config.ts"
+  ]
+}

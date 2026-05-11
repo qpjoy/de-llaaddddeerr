@@ -1,0 +1,19 @@
+import { contextBridge, ipcRenderer } from 'electron';
+
+contextBridge.exposeInMainWorld('tunnel', {
+  snapshot: () => ipcRenderer.invoke('tunnel:snapshot'),
+  createSubscription: (input: unknown) => ipcRenderer.invoke('tunnel:create-subscription', input),
+  setActiveSubscription: (id: number) => ipcRenderer.invoke('tunnel:set-active-subscription', id),
+  updateSubscription: (id: number) => ipcRenderer.invoke('tunnel:update-subscription', id),
+  updateActiveSubscription: () => ipcRenderer.invoke('tunnel:update-active-subscription'),
+  setMode: (mode: string) => ipcRenderer.invoke('tunnel:set-mode', mode),
+  setCorePath: (corePath: string) => ipcRenderer.invoke('tunnel:set-core-path', corePath),
+  installTun: () => ipcRenderer.invoke('tunnel:install-tun'),
+  uninstallTun: () => ipcRenderer.invoke('tunnel:uninstall-tun'),
+  start: () => ipcRenderer.invoke('tunnel:start'),
+  stop: () => ipcRenderer.invoke('tunnel:stop'),
+  restart: () => ipcRenderer.invoke('tunnel:restart'),
+  addRule: (input: unknown) => ipcRenderer.invoke('tunnel:add-rule', input),
+  removeRule: (id: number) => ipcRenderer.invoke('tunnel:remove-rule', id),
+  addPreset: (preset: string) => ipcRenderer.invoke('tunnel:add-preset', preset)
+});

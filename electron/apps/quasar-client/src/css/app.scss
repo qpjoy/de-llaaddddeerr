@@ -1,0 +1,106 @@
+body {
+  background: #f3f5f7;
+  color: #101418;
+}
+
+.app-shell {
+  min-height: 100vh;
+}
+
+.side-panel {
+  background: #fbfcfd;
+  border-right: 1px solid #dfe4ea;
+}
+
+.brand-lockup {
+  height: 72px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 22px;
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.nav-item {
+  height: 54px;
+  border-radius: 8px;
+  margin: 6px 12px;
+  color: #111827;
+  font-weight: 700;
+}
+
+.nav-item.q-item--active {
+  background: #dce9ff;
+  color: #0f62d0;
+}
+
+.content-panel {
+  padding: 22px;
+}
+
+.toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.section-surface {
+  background: #ffffff;
+  border: 1px solid #dfe4ea;
+  border-radius: 8px;
+}
+
+.subscription-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.subscription-card {
+  min-height: 118px;
+  border: 1px solid #dfe4ea;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.subscription-card.active {
+  border-color: #1578ff;
+  box-shadow: inset 4px 0 0 #1578ff;
+}
+
+.mono-log {
+  height: 280px;
+  overflow: auto;
+  border-radius: 8px;
+  background: #101418;
+  color: #dbeafe;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 12px;
+}
+
+.status-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+}
+
+.metric-cell {
+  border: 1px solid #dfe4ea;
+  border-radius: 8px;
+  padding: 12px;
+  background: #ffffff;
+}
+
+.metric-label {
+  color: #697386;
+  font-size: 12px;
+}
+
+.metric-value {
+  font-size: 18px;
+  font-weight: 800;
+}

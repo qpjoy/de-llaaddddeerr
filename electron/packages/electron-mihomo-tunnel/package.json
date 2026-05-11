@@ -1,0 +1,27 @@
+{
+  "name": "@qpjoy/electron-mihomo-tunnel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reusable Electron Mihomo tunnel runtime for macOS and Linux.",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "yaml": "^2.7.0"
+  },
+  "peerDependencies": {
+    "electron": ">=28"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.7",
+    "electron": "^34.0.0"
+  }
+}

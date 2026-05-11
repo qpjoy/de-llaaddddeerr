@@ -14,3 +14,10 @@ docker/hysteria2-mihomo-stack/.env
 docker/hysteria2-mihomo-stack/data/
 docker/hysteria2-mihomo-stack/config/caddy/
 docker/hysteria2-mihomo-stack/config/hysteria/certs/
+
+# Electron workspace runtime/build artifacts
+electron/node_modules/
+electron/**/node_modules/
+electron/**/dist/
+electron/**/.quasar/
+electron/**/*.iconset/

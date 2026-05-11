@@ -1,0 +1,49 @@
+import { configure } from 'quasar/wrappers';
+import { fileURLToPath } from 'node:url';
+
+const tunnelRuntimeEntry = fileURLToPath(new URL('../../packages/electron-mihomo-tunnel/src/index.ts', import.meta.url));
+
+export default configure(() => ({
+  supportTS: true,
+  css: ['app.scss'],
+  extras: ['material-icons'],
+  build: {
+    vueRouterMode: 'hash',
+    alias: {
+      '@qpjoy/electron-mihomo-tunnel': tunnelRuntimeEntry
+    }
+  },
+  framework: {
+    config: {},
+    plugins: ['Notify']
+  },
+  devServer: {
+    open: false
+  },
+  electron: {
+    bundler: 'builder',
+    preloadScripts: ['electron-preload'],
+    extendElectronMainConf(config) {
+      config.external = (config.external ?? []).filter((dependency) => dependency !== '@qpjoy/electron-mihomo-tunnel');
+    },
+    builder: {
+      appId: 'dev.qpjoy.mihomo-tunnel',
+      productName: 'QPJoy Tunnel',
+      directories: {
+        output: 'dist/electron'
+      },
+      asarUnpack: [
+        '**/better-sqlite3/**',
+        '**/mihomo*'
+      ],
+      mac: {
+        target: ['dmg'],
+        icon: 'src-electron/icons/icon-source.png'
+      },
+      linux: {
+        target: ['AppImage'],
+        icon: 'src-electron/icons/icon-source.png'
+      }
+    }
+  }
+}));
