@@ -67,6 +67,21 @@ export interface TunnelStatus {
   controllerUrl: string;
 }
 
+export interface TrafficSummary {
+  available: boolean;
+  connections: number;
+  uploadTotal: number;
+  downloadTotal: number;
+}
+
+export interface TunnelSnapshot {
+  status: TunnelStatus;
+  subscriptions: SubscriptionRecord[];
+  rules: DomainRule[];
+  events: EventRecord[];
+  traffic: TrafficSummary;
+}
+
 export interface TunnelManagerOptions {
   appName?: string;
   userDataPath: string;

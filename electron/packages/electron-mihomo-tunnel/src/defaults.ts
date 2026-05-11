@@ -5,8 +5,8 @@ import type { RuntimeMode, TunnelPorts } from './types';
 export const DEFAULT_PORTS: TunnelPorts = {
   admin: 23456,
   controller: 23457,
-  mixed: 7890,
-  dns: 1053
+  mixed: 23458,
+  dns: 23459
 };
 
 export const DEFAULT_MODE: RuntimeMode = 'app-rule';

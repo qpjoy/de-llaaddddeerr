@@ -18,6 +18,7 @@ export default configure(() => ({
     plugins: ['Notify']
   },
   devServer: {
+    host: '127.0.0.1',
     open: false
   },
   electron: {

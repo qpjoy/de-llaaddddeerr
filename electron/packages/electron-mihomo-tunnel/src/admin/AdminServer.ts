@@ -85,6 +85,14 @@ function adminHtml(): string {
         </div>
       </section>
       <section>
+        <h3>本地端口</h3>
+        <div class="row">
+          <input id="mixedPort" placeholder="23458">
+          <input id="dnsPort" placeholder="23459">
+          <button id="savePorts">保存端口</button>
+        </div>
+      </section>
+      <section>
         <h3>订阅</h3>
         <div class="row">
           <input id="subName" placeholder="名称">
@@ -127,6 +135,8 @@ function adminHtml(): string {
       document.querySelector('#status').textContent = data.status.running ? '运行中' : '已停止';
       document.querySelector('#mode').value = data.status.mode;
       document.querySelector('#corePath').value = data.status.corePath || '';
+      document.querySelector('#mixedPort').value = data.status.ports.mixed;
+      document.querySelector('#dnsPort').value = data.status.ports.dns;
       document.querySelector('#subs').innerHTML = data.subscriptions.map(s => '<div class="card"><strong>'+s.name+'</strong><p class="muted">'+s.url+'</p><p>'+(s.active?'当前':'')+' '+(s.lastUpdatedAt||'未更新')+'</p><button data-active="'+s.id+'">启用</button> <button class="secondary" data-refresh="'+s.id+'">刷新</button></div>').join('');
       document.querySelector('#rules').innerHTML = data.rules.map(r => '<div class="card"><strong>'+r.kind+'</strong> '+r.domain+'<p class="muted">'+r.source+'</p><button class="secondary" data-rule-remove="'+r.id+'">删除</button></div>').join('');
       document.querySelector('#events').textContent = data.events.map(e => '['+e.level+'] '+e.createdAt+' '+e.message).join('\\n');
@@ -140,6 +150,7 @@ function adminHtml(): string {
     };
     document.querySelector('#saveMode').onclick = async () => { await api('/api/mode', { method:'POST', body: JSON.stringify({ mode: mode.value }) }); refresh(); };
     document.querySelector('#saveCorePath').onclick = async () => { await api('/api/core/path', { method:'POST', body: JSON.stringify({ corePath: corePath.value }) }); refresh(); };
+    document.querySelector('#savePorts').onclick = async () => { await api('/api/ports', { method:'POST', body: JSON.stringify({ mixed: Number(mixedPort.value), dns: Number(dnsPort.value) }) }); refresh(); };
     document.querySelector('#installTun').onclick = async () => { await api('/api/tun/install', { method:'POST' }); refresh(); };
     document.querySelector('#uninstallTun').onclick = async () => { await api('/api/tun/uninstall', { method:'POST' }); refresh(); };
     document.querySelector('#start').onclick = async () => { await api('/api/core/start', { method:'POST' }); refresh(); };
@@ -246,17 +257,19 @@ export class AdminServer {
 
   private route(method: string, pathname: string): RouteHandler | null {
     if (method === 'GET' && pathname === '/api/snapshot') {
-      return (_req, res) => sendJson(res, 200, {
-        status: this.manager.status(),
-        subscriptions: this.manager.listSubscriptions(),
-        rules: this.manager.listRules(),
-        events: this.manager.listEvents()
-      });
+      return async (_req, res) => sendJson(res, 200, await this.manager.snapshot());
     }
     if (method === 'POST' && pathname === '/api/mode') {
       return (_req, res, body) => {
         const { mode } = body as { mode: never };
         this.manager.setMode(mode);
+        sendJson(res, 200, this.manager.status());
+      };
+    }
+    if (method === 'POST' && pathname === '/api/ports') {
+      return async (_req, res, body) => {
+        const { mixed, dns } = body as { mixed: number; dns: number };
+        await this.manager.setLocalPorts({ mixed, dns });
         sendJson(res, 200, this.manager.status());
       };
     }

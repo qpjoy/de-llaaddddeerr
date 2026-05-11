@@ -135,6 +135,26 @@ export class TunnelDatabase {
     return this.getSettings();
   }
 
+  updatePorts(patch: Partial<Pick<TunnelPorts, 'mixed' | 'dns'>>): RuntimeSettings {
+    const current = this.getSettings();
+    const mixedPort = patch.mixed ?? current.ports.mixed;
+    const dnsPort = patch.dns ?? current.ports.dns;
+
+    this.db.prepare(`
+      UPDATE runtime_settings
+      SET mixed_port = @mixedPort,
+          dns_port = @dnsPort,
+          updated_at = @updatedAt
+      WHERE id = 1
+    `).run({
+      mixedPort,
+      dnsPort,
+      updatedAt: nowIso()
+    });
+
+    return this.getSettings();
+  }
+
   updateAdminPassword(username: string, password: string): RuntimeSettings {
     this.db.prepare(`
       UPDATE runtime_settings

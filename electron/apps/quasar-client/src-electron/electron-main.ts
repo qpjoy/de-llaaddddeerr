@@ -1,6 +1,7 @@
-import { app, BrowserWindow, ipcMain, nativeTheme, session, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, nativeTheme, powerMonitor, session, shell } from 'electron';
 import path from 'path';
-import os from 'os';
+import os, { type NetworkInterfaceInfo } from 'os';
+import { fileURLToPath } from 'url';
 
 import {
   AdminServer,
@@ -12,6 +13,10 @@ import {
 let mainWindow: BrowserWindow | null = null;
 let tunnelManager: MihomoManager | null = null;
 let adminServer: AdminServer | null = null;
+let networkGuardTimer: NodeJS.Timeout | null = null;
+let lastNetworkSignature = '';
+
+const currentDir = path.dirname(fileURLToPath(import.meta.url));
 
 async function applyProxyForCurrentMode(): Promise<void> {
   if (!tunnelManager) {
@@ -34,7 +39,7 @@ async function createWindow(): Promise<void> {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
-      preload: path.resolve(__dirname, process.env.QUASAR_ELECTRON_PRELOAD ?? 'electron-preload.js')
+      preload: path.resolve(currentDir, process.env.QUASAR_ELECTRON_PRELOAD ?? 'electron-preload.js')
     }
   });
 
@@ -56,6 +61,96 @@ async function createWindow(): Promise<void> {
   }
 }
 
+function normalizeUrl(input: string): string {
+  const value = input.trim();
+  if (!value) {
+    throw new Error('测试网址不能为空');
+  }
+
+  if (/^https?:\/\//i.test(value)) {
+    return value;
+  }
+
+  return `https://${value}`;
+}
+
+function interfaceKey(name: string, item: NetworkInterfaceInfo): string {
+  return [
+    name,
+    item.family,
+    item.address,
+    item.netmask,
+    item.mac,
+    item.internal ? 'internal' : 'external'
+  ].join('/');
+}
+
+function networkSignature(): string {
+  const rows: string[] = [];
+  const interfaces = os.networkInterfaces();
+
+  for (const [name, values] of Object.entries(interfaces)) {
+    for (const item of values ?? []) {
+      if (!item.internal) {
+        rows.push(interfaceKey(name, item));
+      }
+    }
+  }
+
+  return rows.sort().join('|');
+}
+
+async function handleNetworkChange(reason: string): Promise<void> {
+  if (!tunnelManager) {
+    return;
+  }
+
+  await applyProxyForCurrentMode();
+  await tunnelManager.handleNetworkChanged(reason);
+  await applyProxyForCurrentMode();
+  mainWindow?.webContents.send('tunnel:event');
+}
+
+function startNetworkGuard(): void {
+  lastNetworkSignature = networkSignature();
+  networkGuardTimer = setInterval(() => {
+    const next = networkSignature();
+    if (next !== lastNetworkSignature) {
+      lastNetworkSignature = next;
+      void handleNetworkChange('network interfaces changed');
+    }
+  }, 8000);
+
+  powerMonitor.on('resume', () => {
+    void handleNetworkChange('system resumed');
+  });
+}
+
+function stopNetworkGuard(): void {
+  if (networkGuardTimer) {
+    clearInterval(networkGuardTimer);
+    networkGuardTimer = null;
+  }
+}
+
+async function openTestWindow(rawUrl: string): Promise<void> {
+  await applyProxyForCurrentMode();
+
+  const targetUrl = normalizeUrl(rawUrl);
+  const testWindow = new BrowserWindow({
+    width: 1080,
+    height: 760,
+    title: targetUrl,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+
+  await testWindow.loadURL(targetUrl);
+}
+
 app.whenReady().then(async () => {
   const platform = os.platform();
   if (platform !== 'darwin' && platform !== 'linux') {
@@ -72,6 +167,8 @@ app.whenReady().then(async () => {
   registerTunnelIpc(ipcMain, tunnelManager, {
     afterSettingsChange: applyProxyForCurrentMode
   });
+  ipcMain.handle('tunnel:open-admin', () => shell.openExternal(tunnelManager?.status().adminUrl ?? 'http://127.0.0.1:23456'));
+  ipcMain.handle('tunnel:open-test-window', (_event, url: string) => openTestWindow(url));
 
   tunnelManager.on('event', () => {
     void applyProxyForCurrentMode();
@@ -79,6 +176,7 @@ app.whenReady().then(async () => {
   });
 
   await applyProxyForCurrentMode();
+  startNetworkGuard();
   await createWindow();
 
   app.on('activate', () => {
@@ -98,6 +196,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  stopNetworkGuard();
   adminServer?.stop();
   tunnelManager?.close();
 });

@@ -7,39 +7,18 @@
       </div>
 
       <q-list padding>
-        <q-item active clickable class="nav-item">
+        <q-item
+          v-for="item in navItems"
+          :key="item.to"
+          :to="item.to"
+          exact
+          clickable
+          class="nav-item"
+        >
           <q-item-section avatar>
-            <q-icon name="dashboard" />
+            <q-icon :name="item.icon" />
           </q-item-section>
-          <q-item-section>首页</q-item-section>
-        </q-item>
-
-        <q-item clickable class="nav-item">
-          <q-item-section avatar>
-            <q-icon name="lan" />
-          </q-item-section>
-          <q-item-section>代理</q-item-section>
-        </q-item>
-
-        <q-item clickable class="nav-item">
-          <q-item-section avatar>
-            <q-icon name="dns" />
-          </q-item-section>
-          <q-item-section>订阅</q-item-section>
-        </q-item>
-
-        <q-item clickable class="nav-item">
-          <q-item-section avatar>
-            <q-icon name="rule" />
-          </q-item-section>
-          <q-item-section>规则</q-item-section>
-        </q-item>
-
-        <q-item clickable class="nav-item">
-          <q-item-section avatar>
-            <q-icon name="article" />
-          </q-item-section>
-          <q-item-section>日志</q-item-section>
+          <q-item-section>{{ item.label }}</q-item-section>
         </q-item>
       </q-list>
     </q-drawer>
@@ -49,3 +28,14 @@
     </q-page-container>
   </q-layout>
 </template>
+
+<script setup lang="ts">
+const navItems = [
+  { label: '首页', icon: 'dashboard', to: '/' },
+  { label: '代理', icon: 'lan', to: '/proxy' },
+  { label: '订阅', icon: 'dns', to: '/subscriptions' },
+  { label: '规则', icon: 'rule', to: '/rules' },
+  { label: '测试', icon: 'lock_open', to: '/test' },
+  { label: '日志', icon: 'article', to: '/logs' }
+];
+</script>

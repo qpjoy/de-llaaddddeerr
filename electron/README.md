@@ -19,8 +19,11 @@ same package from its main process and expose the same browser admin backend.
 
 - Admin browser backend: `http://127.0.0.1:23456`
 - Mihomo external controller: `127.0.0.1:23457`
-- Local mixed proxy: `127.0.0.1:7890`
-- Local DNS listener: `127.0.0.1:1053`
+- Local mixed proxy: `127.0.0.1:23458`
+- Local DNS listener: `127.0.0.1:23459`
+
+The mixed/DNS ports are configurable in the Proxy page. The defaults avoid the
+common Clash Verge `7890` mixed-port so both tools can be open at the same time.
 
 Default admin login is `admin/admin`.
 

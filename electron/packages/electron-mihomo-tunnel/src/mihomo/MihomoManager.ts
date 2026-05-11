@@ -13,6 +13,8 @@ import type {
   SubscriptionInput,
   SubscriptionRecord,
   TunnelManagerOptions,
+  TunnelSnapshot,
+  TunnelPorts,
   TunnelStatus
 } from '../types';
 
@@ -65,6 +67,13 @@ function normalizeSubscriptionInput(input: SubscriptionInput): SubscriptionInput
   };
 }
 
+function normalizePort(value: number, label: string): number {
+  if (!Number.isInteger(value) || value < 1024 || value > 65535) {
+    throw new Error(`${label} must be an integer between 1024 and 65535`);
+  }
+  return value;
+}
+
 export class MihomoManager extends EventEmitter {
   readonly db: TunnelDatabase;
   readonly api: MihomoApi;
@@ -102,6 +111,50 @@ export class MihomoManager extends EventEmitter {
     };
   }
 
+  async snapshot(): Promise<TunnelSnapshot> {
+    return {
+      status: this.status(),
+      subscriptions: this.listSubscriptions(),
+      rules: this.listRules(),
+      events: this.listEvents(),
+      traffic: await this.trafficSummary()
+    };
+  }
+
+  async trafficSummary() {
+    if (!this.child || this.child.killed) {
+      return {
+        available: false,
+        connections: 0,
+        uploadTotal: 0,
+        downloadTotal: 0
+      };
+    }
+
+    try {
+      const response = await this.api.connections();
+      const data = response.data as {
+        connections?: unknown[];
+        uploadTotal?: number;
+        downloadTotal?: number;
+      } | null;
+
+      return {
+        available: response.ok,
+        connections: Array.isArray(data?.connections) ? data.connections.length : 0,
+        uploadTotal: Number(data?.uploadTotal ?? 0),
+        downloadTotal: Number(data?.downloadTotal ?? 0)
+      };
+    } catch {
+      return {
+        available: false,
+        connections: 0,
+        uploadTotal: 0,
+        downloadTotal: 0
+      };
+    }
+  }
+
   listSubscriptions(): SubscriptionRecord[] {
     return this.db.listSubscriptions();
   }
@@ -134,6 +187,19 @@ export class MihomoManager extends EventEmitter {
   setMode(mode: RuntimeMode): void {
     this.db.updateSettings({ mode });
     this.log('info', `Runtime mode switched: ${mode}`);
+  }
+
+  async setLocalPorts(ports: Partial<Pick<TunnelPorts, 'mixed' | 'dns'>>): Promise<void> {
+    const mixed = ports.mixed === undefined ? undefined : normalizePort(ports.mixed, 'mixed port');
+    const dns = ports.dns === undefined ? undefined : normalizePort(ports.dns, 'dns port');
+    const before = this.db.getSettings().ports;
+    const after = this.db.updatePorts({ mixed, dns }).ports;
+
+    this.log('info', `Local ports updated: mixed ${before.mixed}->${after.mixed}, dns ${before.dns}->${after.dns}`);
+
+    if (this.child && !this.child.killed) {
+      await this.restart();
+    }
   }
 
   installTunFeature(): void {
@@ -279,6 +345,23 @@ export class MihomoManager extends EventEmitter {
     await this.stop();
     await new Promise((resolve) => setTimeout(resolve, 400));
     await this.start();
+  }
+
+  async handleNetworkChanged(reason: string): Promise<void> {
+    const settings = this.db.getSettings();
+    this.log('info', `Network change detected: ${reason}`);
+
+    if (!this.child || this.child.killed) {
+      return;
+    }
+
+    if (settings.mode === 'system-tun' && settings.tunInstalled) {
+      this.log('info', 'Reapplying TUN routing after network change');
+      await this.restart();
+      return;
+    }
+
+    this.renderConfig();
   }
 
   close(): void {

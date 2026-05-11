@@ -47,11 +47,19 @@ export interface TunnelStatus {
   controllerUrl: string;
 }
 
+export interface TrafficSummary {
+  available: boolean;
+  connections: number;
+  uploadTotal: number;
+  downloadTotal: number;
+}
+
 export interface TunnelSnapshot {
   status: TunnelStatus;
   subscriptions: SubscriptionRecord[];
   rules: DomainRule[];
   events: EventRecord[];
+  traffic: TrafficSummary;
 }
 
 export interface TunnelBridge {
@@ -62,11 +70,14 @@ export interface TunnelBridge {
   updateActiveSubscription(): Promise<SubscriptionRecord>;
   setMode(mode: RuntimeMode): Promise<void>;
   setCorePath(corePath: string): Promise<void>;
+  setLocalPorts(ports: { mixed?: number; dns?: number }): Promise<void>;
   installTun(): Promise<void>;
   uninstallTun(): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
   restart(): Promise<void>;
+  openAdmin(): Promise<void>;
+  openTestWindow(url: string): Promise<void>;
   addRule(input: { kind: 'allow' | 'block'; domain: string }): Promise<DomainRule>;
   removeRule(id: number): Promise<void>;
   addPreset(preset: 'google' | 'youtube' | 'x' | 'telegram'): Promise<DomainRule[]>;

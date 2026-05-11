@@ -39,6 +39,17 @@ body {
   padding: 22px;
 }
 
+.page-title {
+  font-size: 30px;
+  line-height: 1.2;
+  font-weight: 800;
+}
+
+.content-stack {
+  display: grid;
+  gap: 18px;
+}
+
 .toolbar-row {
   display: flex;
   align-items: center;

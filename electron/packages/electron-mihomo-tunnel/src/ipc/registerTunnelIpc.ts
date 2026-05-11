@@ -11,12 +11,7 @@ async function changed(options?: RegisterTunnelIpcOptions): Promise<void> {
 }
 
 export function registerTunnelIpc(ipcMain: IpcMain, manager: MihomoManager, options?: RegisterTunnelIpcOptions): void {
-  ipcMain.handle('tunnel:snapshot', () => ({
-    status: manager.status(),
-    subscriptions: manager.listSubscriptions(),
-    rules: manager.listRules(),
-    events: manager.listEvents()
-  }));
+  ipcMain.handle('tunnel:snapshot', () => manager.snapshot());
 
   ipcMain.handle('tunnel:create-subscription', (_event, input) => manager.createSubscription(input));
   ipcMain.handle('tunnel:set-active-subscription', (_event, id: number) => manager.setActiveSubscription(id));
@@ -27,6 +22,10 @@ export function registerTunnelIpc(ipcMain: IpcMain, manager: MihomoManager, opti
     await changed(options);
   });
   ipcMain.handle('tunnel:set-core-path', (_event, corePath: string) => manager.setCorePath(corePath));
+  ipcMain.handle('tunnel:set-local-ports', async (_event, ports) => {
+    await manager.setLocalPorts(ports);
+    await changed(options);
+  });
   ipcMain.handle('tunnel:install-tun', async () => {
     manager.installTunFeature();
     await changed(options);
