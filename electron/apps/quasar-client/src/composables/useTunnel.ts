@@ -85,6 +85,9 @@ function friendlyErrorMessage(error: unknown): string {
   if (/TUN mode requires administrator|administrator approval|User canceled|privilege helper/i.test(message)) {
     return '虚拟网卡模式需要管理员授权；如果取消授权，Chrome 等外部应用流量不会被接管。';
   }
+  if (/Privileged mihomo exited immediately/i.test(message)) {
+    return `虚拟网卡启动后立即退出：${message.replace(/^Error invoking remote method '[^']+': Error:\s*/i, '')}`;
+  }
 
   return message || '操作失败，请查看日志。';
 }

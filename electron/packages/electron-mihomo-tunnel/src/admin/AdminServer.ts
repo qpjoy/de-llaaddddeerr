@@ -263,8 +263,10 @@ export class AdminServer {
     if (method === 'POST' && pathname === '/api/mode') {
       return async (_req, res, body) => {
         const { mode } = body as { mode: never };
-        this.manager.setMode(mode);
-        await this.manager.applyRuntimeConfigChange();
+        const changedMode = this.manager.setMode(mode);
+        if (changedMode) {
+          await this.manager.applyRuntimeConfigChange();
+        }
         sendJson(res, 200, this.manager.status());
       };
     }

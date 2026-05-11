@@ -36,8 +36,10 @@ export function registerTunnelIpc(ipcMain: IpcMain, manager: MihomoManager, opti
     return subscription;
   });
   ipcMain.handle('tunnel:set-mode', async (_event, mode) => {
-    manager.setMode(mode);
-    await manager.applyRuntimeConfigChange();
+    const changedMode = manager.setMode(mode);
+    if (changedMode) {
+      await manager.applyRuntimeConfigChange();
+    }
     await changed(options);
   });
   ipcMain.handle('tunnel:set-core-path', (_event, corePath: string) => manager.setCorePath(corePath));

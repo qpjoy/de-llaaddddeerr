@@ -71,6 +71,10 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function basicAuthHeader(username: string, password: string): string {
   return `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
 }
@@ -148,6 +152,7 @@ export class MihomoManager extends EventEmitter {
   readonly paths: ManagerPaths;
   private child: ChildProcessWithoutNullStreams | null = null;
   private elevatedPid: number | null = null;
+  private operation: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: TunnelManagerOptions) {
     super();
@@ -291,9 +296,15 @@ export class MihomoManager extends EventEmitter {
     return subscription;
   }
 
-  setMode(mode: RuntimeMode): void {
+  setMode(mode: RuntimeMode): boolean {
+    const current = this.db.getSettings().mode;
+    if (current === mode) {
+      return false;
+    }
+
     this.db.updateSettings({ mode });
     this.log('info', `Runtime mode switched: ${mode}`);
+    return true;
   }
 
   async setLocalPorts(ports: Partial<Pick<TunnelPorts, 'mixed' | 'dns'>>): Promise<void> {
@@ -304,9 +315,7 @@ export class MihomoManager extends EventEmitter {
 
     this.log('info', `Local ports updated: mixed ${before.mixed}->${after.mixed}, dns ${before.dns}->${after.dns}`);
 
-    if (this.isRunning()) {
-      await this.restart();
-    }
+    await this.applyRuntimeConfigChange();
   }
 
   installTunFeature(): void {
@@ -398,7 +407,17 @@ export class MihomoManager extends EventEmitter {
     return this.paths.config;
   }
 
+  private runExclusive<T>(task: () => Promise<T>): Promise<T> {
+    const next = this.operation.then(task, task);
+    this.operation = next.catch(() => undefined);
+    return next;
+  }
+
   async start(): Promise<void> {
+    await this.runExclusive(() => this.startUnlocked());
+  }
+
+  private async startUnlocked(): Promise<void> {
     if (this.isRunning()) {
       return;
     }
@@ -526,7 +545,10 @@ export class MihomoManager extends EventEmitter {
   private async startElevated(corePath: string, configPath: string): Promise<void> {
     const logPath = join(this.paths.runtime, 'mihomo-elevated.log');
     const command = [
-      'nohup',
+      ':',
+      '>',
+      shellQuote(logPath),
+      ';',
       shellQuote(corePath),
       '-d',
       shellQuote(this.paths.runtime),
@@ -547,8 +569,29 @@ export class MihomoManager extends EventEmitter {
 
     this.child = null;
     this.elevatedPid = pid;
+    await delay(900);
+    if (!isProcessAlive(pid)) {
+      this.elevatedPid = null;
+      const details = this.readElevatedLogTail(logPath);
+      throw new Error(`Privileged mihomo exited immediately.${details ? ` ${details}` : ''}`);
+    }
+
     this.log('info', `Mihomo started with administrator privileges pid=${pid}`);
     this.log('info', `Privileged Mihomo log file: ${logPath}`);
+  }
+
+  private readElevatedLogTail(logPath: string): string {
+    try {
+      const lines = readFileSync(logPath, 'utf8')
+        .trim()
+        .split('\n')
+        .slice(-12)
+        .join('\n');
+
+      return lines ? `Recent log:\n${lines}` : '';
+    } catch {
+      return '';
+    }
   }
 
   private isRunning(): boolean {
@@ -564,9 +607,35 @@ export class MihomoManager extends EventEmitter {
     return false;
   }
 
+  private isElevatedRunning(): boolean {
+    return Boolean(this.elevatedPid && isProcessAlive(this.elevatedPid));
+  }
+
+  private async reloadRuntimeConfig(): Promise<boolean> {
+    const configPath = this.renderConfig();
+    const response = await this.api.reloadConfig(configPath);
+    if (response.ok) {
+      this.log('info', 'Runtime config hot reloaded');
+      return true;
+    }
+
+    this.log('warn', `Runtime config hot reload failed: HTTP ${response.status}`);
+    return false;
+  }
+
   async stop(): Promise<void> {
+    await this.runExclusive(() => this.stopUnlocked());
+  }
+
+  private async stopUnlocked(): Promise<void> {
     if (this.elevatedPid) {
       const pid = this.elevatedPid;
+      if (!isProcessAlive(pid)) {
+        this.elevatedPid = null;
+        this.log('info', 'Privileged Mihomo was already stopped');
+        return;
+      }
+
       await this.runElevatedShell(`kill ${pid} 2>/dev/null || true`);
       this.elevatedPid = null;
       this.log('info', 'Privileged Mihomo stop requested');
@@ -581,34 +650,44 @@ export class MihomoManager extends EventEmitter {
   }
 
   async restart(): Promise<void> {
-    await this.stop();
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    await this.start();
+    await this.runExclusive(async () => {
+      await this.stopUnlocked();
+      await delay(400);
+      await this.startUnlocked();
+    });
   }
 
   async applyRuntimeConfigChange(): Promise<void> {
-    if (!this.isRunning()) {
-      return;
-    }
+    await this.runExclusive(async () => {
+      if (!this.isRunning()) {
+        return;
+      }
 
-    await this.restart();
+      const settings = this.db.getSettings();
+      if (needsElevatedTun(settings) && !this.isElevatedRunning()) {
+        await this.stopUnlocked();
+        await delay(400);
+        await this.startUnlocked();
+        return;
+      }
+
+      const reloaded = await this.reloadRuntimeConfig();
+      if (!reloaded && !this.isElevatedRunning()) {
+        await this.stopUnlocked();
+        await delay(400);
+        await this.startUnlocked();
+      }
+    });
   }
 
   async handleNetworkChanged(reason: string): Promise<void> {
-    const settings = this.db.getSettings();
     this.log('info', `Network change detected: ${reason}`);
 
     if (!this.isRunning()) {
       return;
     }
 
-    if (settings.mode === 'system-tun' && settings.tunInstalled) {
-      this.log('info', 'Reapplying TUN routing after network change');
-      await this.restart();
-      return;
-    }
-
-    this.renderConfig();
+    await this.applyRuntimeConfigChange();
   }
 
   close(): void {

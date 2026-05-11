@@ -38,6 +38,16 @@ export class MihomoApi {
     return this.request('/connections');
   }
 
+  reloadConfig(configPath: string): Promise<MihomoApiResponse> {
+    return this.request('/configs?force=true', {
+      method: 'PUT',
+      body: JSON.stringify({ path: configPath }),
+      headers: {
+        'content-type': 'application/json'
+      }
+    });
+  }
+
   async selectProxy(groupName: string, proxyName: string): Promise<MihomoApiResponse> {
     return this.request(`/proxies/${encodeURIComponent(groupName)}`, {
       method: 'PUT',
