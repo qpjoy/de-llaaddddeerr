@@ -31,7 +31,8 @@ Default admin login is `admin/admin`.
 
 - `system-tun`: enables mihomo TUN in the generated runtime config so the
   machine can route through the virtual interface when the core has enough
-  privilege.
+  privilege. On macOS the dev app asks for administrator approval and launches
+  the core with elevated privileges; Linux uses `pkexec` when available.
 - `app-global`: Electron app traffic uses the local mixed proxy and the runtime
   config sends matched traffic to the proxy policy.
 - `app-rule`: Electron app traffic uses the local mixed proxy; CN/local traffic

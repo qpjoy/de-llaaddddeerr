@@ -11,6 +11,7 @@ import { renderRuntimeConfig } from '../config/renderRuntimeConfig';
 import { MihomoApi } from './MihomoApi';
 import type {
   DomainRule,
+  RuntimeSettings,
   RuntimeMode,
   SubscriptionInput,
   SubscriptionRecord,
@@ -44,6 +45,30 @@ function pathsFromOptions(options: TunnelManagerOptions): ManagerPaths {
 function platformArchKey(): string {
   const arch = process.arch === 'x64' ? 'x64' : process.arch;
   return `${process.platform}-${arch}`;
+}
+
+function isRootUser(): boolean {
+  return typeof process.getuid === 'function' && process.getuid() === 0;
+}
+
+function needsElevatedTun(settings: RuntimeSettings): boolean {
+  return settings.mode === 'system-tun'
+    && settings.tunInstalled
+    && !isRootUser()
+    && (process.platform === 'darwin' || process.platform === 'linux');
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return isRecord(error) && error.code === 'EPERM';
+  }
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function basicAuthHeader(username: string, password: string): string {
@@ -122,6 +147,7 @@ export class MihomoManager extends EventEmitter {
   readonly api: MihomoApi;
   readonly paths: ManagerPaths;
   private child: ChildProcessWithoutNullStreams | null = null;
+  private elevatedPid: number | null = null;
 
   constructor(private readonly options: TunnelManagerOptions) {
     super();
@@ -142,9 +168,10 @@ export class MihomoManager extends EventEmitter {
   status(): TunnelStatus {
     const settings = this.db.getSettings();
     const corePath = settings.corePath ?? (existsSync(this.paths.core) ? this.paths.core : null);
+    const running = this.isRunning();
     return {
-      running: Boolean(this.child && !this.child.killed),
-      pid: this.child?.pid ?? null,
+      running,
+      pid: running ? this.child?.pid ?? this.elevatedPid : null,
       mode: settings.mode,
       tunInstalled: settings.tunInstalled,
       ports: settings.ports,
@@ -166,7 +193,7 @@ export class MihomoManager extends EventEmitter {
   }
 
   async trafficSummary() {
-    if (!this.child || this.child.killed) {
+    if (!this.isRunning()) {
       return {
         available: false,
         connections: 0,
@@ -277,7 +304,7 @@ export class MihomoManager extends EventEmitter {
 
     this.log('info', `Local ports updated: mixed ${before.mixed}->${after.mixed}, dns ${before.dns}->${after.dns}`);
 
-    if (this.child && !this.child.killed) {
+    if (this.isRunning()) {
       await this.restart();
     }
   }
@@ -372,16 +399,22 @@ export class MihomoManager extends EventEmitter {
   }
 
   async start(): Promise<void> {
-    if (this.child && !this.child.killed) {
+    if (this.isRunning()) {
       return;
     }
 
+    const settings = this.db.getSettings();
     const corePath = this.resolveCorePath();
     if (!existsSync(corePath)) {
       throw new Error(`mihomo core is not installed: ${corePath}. Put bundled core under ${this.options.bundledCoreDir ?? 'app resources/mihomo'} or set a valid core path.`);
     }
 
     const configPath = this.renderConfig();
+    if (needsElevatedTun(settings)) {
+      await this.startElevated(corePath, configPath);
+      return;
+    }
+
     this.child = spawn(corePath, ['-d', this.paths.runtime, '-f', configPath], {
       cwd: this.paths.runtime,
       env: {
@@ -452,7 +485,94 @@ export class MihomoManager extends EventEmitter {
     this.log('info', `Bundled Mihomo core installed: ${this.paths.core}`);
   }
 
+  private runElevatedShell(command: string): Promise<string> {
+    const launcher = process.platform === 'darwin'
+      ? {
+          command: '/usr/bin/osascript',
+          args: ['-e', `do shell script ${JSON.stringify(command)} with administrator privileges`]
+        }
+      : {
+          command: existsSync('/usr/bin/pkexec') ? '/usr/bin/pkexec' : '/bin/pkexec',
+          args: ['/bin/sh', '-lc', command]
+        };
+
+    if (!existsSync(launcher.command)) {
+      throw new Error('TUN mode requires administrator privileges, but no supported privilege helper was found.');
+    }
+
+    return new Promise((resolve, reject) => {
+      const child = spawn(launcher.command, launcher.args);
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.on('error', reject);
+      child.on('exit', (code) => {
+        if (code === 0) {
+          resolve(stdout.trim());
+          return;
+        }
+
+        reject(new Error(stderr.trim() || stdout.trim() || 'TUN mode requires administrator approval.'));
+      });
+    });
+  }
+
+  private async startElevated(corePath: string, configPath: string): Promise<void> {
+    const logPath = join(this.paths.runtime, 'mihomo-elevated.log');
+    const command = [
+      'nohup',
+      shellQuote(corePath),
+      '-d',
+      shellQuote(this.paths.runtime),
+      '-f',
+      shellQuote(configPath),
+      '>>',
+      shellQuote(logPath),
+      '2>&1',
+      '&',
+      'echo $!'
+    ].join(' ');
+    const output = await this.runElevatedShell(command);
+    const pid = Number(output.split(/\s+/).at(-1));
+
+    if (!Number.isInteger(pid) || pid <= 0) {
+      throw new Error(`Failed to start privileged mihomo core: ${output || 'empty pid'}`);
+    }
+
+    this.child = null;
+    this.elevatedPid = pid;
+    this.log('info', `Mihomo started with administrator privileges pid=${pid}`);
+    this.log('info', `Privileged Mihomo log file: ${logPath}`);
+  }
+
+  private isRunning(): boolean {
+    if (this.child && !this.child.killed) {
+      return true;
+    }
+
+    if (this.elevatedPid && isProcessAlive(this.elevatedPid)) {
+      return true;
+    }
+
+    this.elevatedPid = null;
+    return false;
+  }
+
   async stop(): Promise<void> {
+    if (this.elevatedPid) {
+      const pid = this.elevatedPid;
+      await this.runElevatedShell(`kill ${pid} 2>/dev/null || true`);
+      this.elevatedPid = null;
+      this.log('info', 'Privileged Mihomo stop requested');
+      return;
+    }
+
     if (!this.child || this.child.killed) {
       return;
     }
@@ -467,7 +587,7 @@ export class MihomoManager extends EventEmitter {
   }
 
   async applyRuntimeConfigChange(): Promise<void> {
-    if (!this.child || this.child.killed) {
+    if (!this.isRunning()) {
       return;
     }
 
@@ -478,7 +598,7 @@ export class MihomoManager extends EventEmitter {
     const settings = this.db.getSettings();
     this.log('info', `Network change detected: ${reason}`);
 
-    if (!this.child || this.child.killed) {
+    if (!this.isRunning()) {
       return;
     }
 

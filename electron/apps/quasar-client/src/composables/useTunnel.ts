@@ -82,6 +82,9 @@ function friendlyErrorMessage(error: unknown): string {
   if (/ERR_CONNECTION_CLOSED|连接被关闭/i.test(message)) {
     return '连接被关闭。App 模式下海外域名必须在白名单内；如果已添加白名单，请稍等 core 重载后再试。';
   }
+  if (/TUN mode requires administrator|administrator approval|User canceled|privilege helper/i.test(message)) {
+    return '虚拟网卡模式需要管理员授权；如果取消授权，Chrome 等外部应用流量不会被接管。';
+  }
 
   return message || '操作失败，请查看日志。';
 }
