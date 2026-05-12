@@ -95,6 +95,11 @@ function renderSnapshot(snapshot) {
   elements.tun.textContent = status.tunInstalled ? '已安装' : '未安装';
   elements.snapshot.textContent = JSON.stringify(snapshot, null, 2);
   renderRules(snapshot.rules ?? []);
+  for (const button of elements.presetButtons) {
+    const active = (snapshot.rules ?? []).some((rule) => rule.source === `preset:${button.dataset.preset}`);
+    button.classList.toggle('active', active);
+    button.title = active ? '再次点击移除这一组白名单' : '点击加入这一组白名单';
+  }
 }
 
 async function refresh() {
@@ -142,7 +147,11 @@ elements.ruleList.addEventListener('click', (event) => {
 
 for (const button of elements.presetButtons) {
   button.addEventListener('click', () => {
-    void run(() => window.qpjoyTunnelTest.addPreset(button.dataset.preset));
+    const active = [...elements.ruleList.querySelectorAll('.rule-item small')]
+      .some((source) => source.textContent === `preset:${button.dataset.preset}`);
+    void run(() => active
+      ? window.qpjoyTunnelTest.removePreset(button.dataset.preset)
+      : window.qpjoyTunnelTest.addPreset(button.dataset.preset));
   });
 }
 

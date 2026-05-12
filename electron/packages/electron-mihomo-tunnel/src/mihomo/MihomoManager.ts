@@ -14,6 +14,7 @@ import type {
   RuntimeSettings,
   RuntimeMode,
   SubscriptionInput,
+  SubscriptionUpdateInput,
   SubscriptionRecord,
   TunnelManagerOptions,
   TunnelSnapshot,
@@ -264,6 +265,22 @@ export class MihomoManager extends EventEmitter {
     }
   }
 
+  async editSubscription(input: SubscriptionUpdateInput): Promise<SubscriptionRecord> {
+    const current = this.db.getSubscription(input.id);
+    if (!current) {
+      throw new Error(`subscription not found: ${input.id}`);
+    }
+
+    const normalized = normalizeSubscriptionInput(input);
+    const content = await this.fetchSubscriptionContent(normalized);
+    const subscription = this.db.updateSubscription(input.id, normalized);
+    const localPath = this.localSubscriptionPath(subscription.id);
+    writeFileSync(localPath, content, 'utf8');
+    const updated = this.db.updateSubscriptionContent(subscription.id, content, localPath);
+    this.log('info', `Subscription edited: ${updated.name}`);
+    return updated;
+  }
+
   private localSubscriptionPath(id: number): string {
     return join(this.paths.profiles, `subscription-${id}.yaml`);
   }
@@ -387,6 +404,12 @@ export class MihomoManager extends EventEmitter {
     const rules = domains.map((domain) => this.db.upsertRule('allow', domain, `preset:${preset}`));
     this.log('info', `Preset allowlist added: ${preset}`);
     return rules;
+  }
+
+  removePreset(preset: DomainPresetId): number {
+    const changes = this.db.removeRulesBySource(`preset:${preset}`);
+    this.log('info', `Preset allowlist removed: ${preset} (${changes} rules)`);
+    return changes;
   }
 
   removeDomainRule(id: number): void {

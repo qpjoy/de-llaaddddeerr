@@ -211,6 +211,36 @@ export class TunnelDatabase {
     return this.getSubscription(created.id) ?? created;
   }
 
+  updateSubscription(id: number, input: SubscriptionInput): SubscriptionRecord {
+    const current = this.getSubscription(id);
+    if (!current) {
+      throw new Error(`subscription not found: ${id}`);
+    }
+
+    this.db.prepare(`
+      UPDATE subscriptions
+      SET name = @name,
+          url = @url,
+          username = @username,
+          password = @password,
+          updated_at = @updatedAt
+      WHERE id = @id
+    `).run({
+      id,
+      name: input.name,
+      url: input.url,
+      username: input.username ?? '',
+      password: input.password ?? '',
+      updatedAt: nowIso()
+    });
+
+    const updated = this.getSubscription(id);
+    if (!updated) {
+      throw new Error(`subscription not found after update: ${id}`);
+    }
+    return updated;
+  }
+
   deleteSubscription(id: number): void {
     this.db.prepare('DELETE FROM subscriptions WHERE id = ?').run(id);
     const active = this.getActiveSubscription();
@@ -290,6 +320,11 @@ export class TunnelDatabase {
 
   removeRule(id: number): void {
     this.db.prepare('DELETE FROM domain_rules WHERE id = ?').run(id);
+  }
+
+  removeRulesBySource(source: string): number {
+    const result = this.db.prepare('DELETE FROM domain_rules WHERE source = ?').run(source);
+    return Number(result.changes);
   }
 
   addEvent(level: EventRecord['level'], message: string): void {

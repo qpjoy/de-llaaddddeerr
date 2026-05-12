@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 contextBridge.exposeInMainWorld('tunnel', {
   snapshot: () => ipcRenderer.invoke('tunnel:snapshot'),
   createSubscription: (input: unknown) => ipcRenderer.invoke('tunnel:create-subscription', input),
+  editSubscription: (input: unknown) => ipcRenderer.invoke('tunnel:edit-subscription', input),
   deleteSubscription: (id: number) => ipcRenderer.invoke('tunnel:delete-subscription', id),
   setActiveSubscription: (id: number) => ipcRenderer.invoke('tunnel:set-active-subscription', id),
   updateSubscription: (id: number) => ipcRenderer.invoke('tunnel:update-subscription', id),
@@ -19,5 +20,6 @@ contextBridge.exposeInMainWorld('tunnel', {
   openTestWindow: (url: string) => ipcRenderer.invoke('tunnel:open-test-window', url),
   addRule: (input: unknown) => ipcRenderer.invoke('tunnel:add-rule', input),
   removeRule: (id: number) => ipcRenderer.invoke('tunnel:remove-rule', id),
-  addPreset: (preset: string) => ipcRenderer.invoke('tunnel:add-preset', preset)
+  addPreset: (preset: string) => ipcRenderer.invoke('tunnel:add-preset', preset),
+  removePreset: (preset: string) => ipcRenderer.invoke('tunnel:remove-preset', preset)
 });

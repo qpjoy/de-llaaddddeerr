@@ -93,10 +93,10 @@
 
     <section class="section-surface q-pa-md q-mb-md">
       <div class="toolbar-row q-mb-md">
-        <q-btn outline color="primary" icon="public" label="Google" @click="addPreset('google')" />
-        <q-btn outline color="primary" icon="smart_display" label="YouTube" @click="addPreset('youtube')" />
-        <q-btn outline color="primary" icon="alternate_email" label="X / Twitter" @click="addPreset('x')" />
-        <q-btn outline color="primary" icon="send" label="Telegram" @click="addPreset('telegram')" />
+        <q-btn :outline="!presetActive('google')" color="primary" icon="public" label="Google" @click="togglePreset('google')" />
+        <q-btn :outline="!presetActive('youtube')" color="primary" icon="smart_display" label="YouTube" @click="togglePreset('youtube')" />
+        <q-btn :outline="!presetActive('x')" color="primary" icon="alternate_email" label="X / Twitter" @click="togglePreset('x')" />
+        <q-btn :outline="!presetActive('telegram')" color="primary" icon="send" label="Telegram" @click="togglePreset('telegram')" />
         <q-space />
         <q-input v-model="ruleForm.domain" dense outlined placeholder="example.com" style="width: 220px" />
         <q-select v-model="ruleForm.kind" dense outlined emit-value map-options :options="ruleKindOptions" style="width: 130px" />
@@ -253,8 +253,16 @@ async function updateActiveSubscription(): Promise<void> {
   await run(() => window.tunnel.updateActiveSubscription(), '当前订阅已更新');
 }
 
-async function addPreset(preset: Preset): Promise<void> {
-  await run(() => window.tunnel.addPreset(preset), '白名单集合已加入');
+function presetActive(preset: Preset): boolean {
+  return Boolean(snapshot.value?.rules.some((rule) => rule.source === `preset:${preset}`));
+}
+
+async function togglePreset(preset: Preset): Promise<void> {
+  const active = presetActive(preset);
+  await run(
+    () => active ? window.tunnel.removePreset(preset) : window.tunnel.addPreset(preset),
+    active ? '白名单集合已移除' : '白名单集合已加入'
+  );
 }
 
 async function addRule(): Promise<void> {

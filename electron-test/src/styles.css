@@ -57,6 +57,11 @@ button.secondary,
   color: #1f6fd1;
 }
 
+button.secondary.active {
+  background: #dce9ff;
+  color: #0f62d0;
+}
+
 .shell {
   width: min(860px, calc(100vw - 48px));
   margin: 32px auto;

@@ -29,6 +29,10 @@ export interface SubscriptionInput {
   password?: string;
 }
 
+export interface SubscriptionUpdateInput extends SubscriptionInput {
+  id: number;
+}
+
 export interface SubscriptionRecord extends Required<SubscriptionInput> {
   id: number;
   localPath: string | null;

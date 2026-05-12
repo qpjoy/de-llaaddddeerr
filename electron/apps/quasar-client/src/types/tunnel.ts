@@ -65,6 +65,7 @@ export interface TunnelSnapshot {
 export interface TunnelBridge {
   snapshot(): Promise<TunnelSnapshot>;
   createSubscription(input: { name: string; url: string; username?: string; password?: string }): Promise<SubscriptionRecord>;
+  editSubscription(input: { id: number; name: string; url: string; username?: string; password?: string }): Promise<SubscriptionRecord>;
   deleteSubscription(id: number): Promise<void>;
   setActiveSubscription(id: number): Promise<SubscriptionRecord>;
   updateSubscription(id: number): Promise<SubscriptionRecord>;
@@ -82,6 +83,7 @@ export interface TunnelBridge {
   addRule(input: { kind: 'allow' | 'block'; domain: string }): Promise<DomainRule>;
   removeRule(id: number): Promise<void>;
   addPreset(preset: 'google' | 'youtube' | 'x' | 'telegram'): Promise<DomainRule[]>;
+  removePreset(preset: 'google' | 'youtube' | 'x' | 'telegram'): Promise<number>;
 }
 
 declare global {

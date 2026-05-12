@@ -29,6 +29,7 @@
             <q-icon name="drag_indicator" size="24px" />
             <div class="text-h6 ellipsis">{{ subscription.name }}</div>
             <q-space />
+            <q-btn flat round dense icon="edit" @click="openEditSubscription(subscription)" />
             <q-btn flat round dense icon="refresh" @click="updateSubscription(subscription.id)" />
             <q-btn flat round dense color="negative" icon="delete" @click="deleteSubscription(subscription.id)" />
           </div>
@@ -41,13 +42,40 @@
         </div>
       </div>
     </div>
+
+    <q-dialog v-model="editDialog">
+      <q-card style="width: min(720px, 92vw)">
+        <q-card-section>
+          <div class="text-h6">编辑订阅</div>
+        </q-card-section>
+
+        <q-card-section class="q-gutter-md">
+          <q-input v-model="editForm.url" dense outlined label="订阅文件链接" />
+          <div class="row q-col-gutter-md">
+            <div class="col-12 col-sm-6">
+              <q-input v-model="editForm.name" dense outlined label="名称" />
+            </div>
+            <div class="col-12 col-sm-6">
+              <q-input v-model="editForm.username" dense outlined label="用户" />
+            </div>
+          </div>
+          <q-input v-model="editForm.password" dense outlined type="password" label="密码" />
+        </q-card-section>
+
+        <q-card-actions align="right">
+          <q-btn flat label="取消" v-close-popup />
+          <q-btn color="primary" icon="save" label="保存" @click="saveEditedSubscription" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </q-page>
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive } from 'vue';
+import { onMounted, reactive, ref } from 'vue';
 
 import { useTunnel } from 'src/composables/useTunnel';
+import type { SubscriptionRecord } from 'src/types/tunnel';
 
 const {
   snapshot,
@@ -63,6 +91,14 @@ const subscriptionForm = reactive({
   username: '',
   password: ''
 });
+const editDialog = ref(false);
+const editForm = reactive({
+  id: 0,
+  name: '',
+  url: '',
+  username: '',
+  password: ''
+});
 
 async function createSubscription(): Promise<void> {
   await run(async () => {
@@ -71,6 +107,22 @@ async function createSubscription(): Promise<void> {
     subscriptionForm.url = '';
     subscriptionForm.username = '';
     subscriptionForm.password = '';
+  }, '订阅已保存');
+}
+
+function openEditSubscription(subscription: SubscriptionRecord): void {
+  editForm.id = subscription.id;
+  editForm.name = subscription.name;
+  editForm.url = subscription.url;
+  editForm.username = subscription.username;
+  editForm.password = subscription.password;
+  editDialog.value = true;
+}
+
+async function saveEditedSubscription(): Promise<void> {
+  await run(async () => {
+    await window.tunnel.editSubscription({ ...editForm });
+    editDialog.value = false;
   }, '订阅已保存');
 }
 

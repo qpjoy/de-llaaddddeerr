@@ -78,6 +78,11 @@ function registerAppIpc() {
     await tunnel.manager.applyRuntimeConfigChange();
     return rules;
   });
+  ipcMain.handle('tunnel-test:remove-preset', async (_event, preset) => {
+    const count = tunnel.manager.removePreset(preset);
+    await tunnel.manager.applyRuntimeConfigChange();
+    return count;
+  });
   ipcMain.handle('tunnel-test:open-test-window', async (_event, url) => {
     await openTestWindow(url);
   });

@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@qpjoy/electron-tunnel':
-        specifier: ^0.1.1
-        version: 0.1.1(electron@34.5.8)
+        specifier: ^0.1.3
+        version: 0.1.3(electron@34.5.8)
     devDependencies:
       '@electron-forge/cli':
         specifier: ^7.8.1
@@ -263,8 +263,8 @@ packages:
     engines: {node: ^12.13.0 || ^14.15.0 || >=16.0.0}
     deprecated: This functionality has been moved to @npmcli/fs
 
-  '@qpjoy/electron-tunnel@0.1.1':
-    resolution: {integrity: sha512-PB8MjemrYjJN/S1uV94Ez79hbn/G66GTKBxcw6xKgq0r5CQAX/BSy+jEzFURGS0lyWaGCBCHAvQJmPMeJSQQMQ==}
+  '@qpjoy/electron-tunnel@0.1.3':
+    resolution: {integrity: sha512-+bXv6aEcnxDd4EYLHRae3bEk0HsyFYnFxxc3dUQNYuYiWw+Q5cXtF5Bd5ltJoUFhya+yz/seg3c7Dmbt0VvEvQ==}
     hasBin: true
     peerDependencies:
       electron: '>=28'
@@ -2575,7 +2575,7 @@ snapshots:
       mkdirp: 1.0.4
       rimraf: 3.0.2
 
-  '@qpjoy/electron-tunnel@0.1.1(electron@34.5.8)':
+  '@qpjoy/electron-tunnel@0.1.3(electron@34.5.8)':
     dependencies:
       better-sqlite3: 11.10.0
       electron: 34.5.8

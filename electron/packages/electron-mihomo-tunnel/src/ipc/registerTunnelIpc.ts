@@ -27,6 +27,15 @@ export function registerTunnelIpc(ipcMain: IpcMain, manager: MihomoManager, opti
     }
     return subscription;
   });
+  ipcMain.handle('tunnel:edit-subscription', async (_event, input) => {
+    const subscription = await manager.editSubscription(input);
+    if (subscription.active) {
+      await runtimeChanged(manager, options);
+    } else {
+      await changed(options);
+    }
+    return subscription;
+  });
   ipcMain.handle('tunnel:delete-subscription', async (_event, id: number) => {
     manager.deleteSubscription(id);
     await runtimeChanged(manager, options);
@@ -99,5 +108,10 @@ export function registerTunnelIpc(ipcMain: IpcMain, manager: MihomoManager, opti
     const rules = manager.addPreset(preset);
     await runtimeChanged(manager, options);
     return rules;
+  });
+  ipcMain.handle('tunnel:remove-preset', async (_event, preset) => {
+    const count = manager.removePreset(preset);
+    await runtimeChanged(manager, options);
+    return count;
   });
 }

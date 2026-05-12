@@ -60,6 +60,10 @@ package and install that tarball here:
 cd ../electron/packages/electron-mihomo-tunnel
 npm_config_cache=/private/tmp/qpjoy-npm-cache npm pack
 cd ../../../electron-test
-pnpm add ../electron/packages/electron-mihomo-tunnel/qpjoy-electron-tunnel-0.1.1.tgz
+pnpm add ../electron/packages/electron-mihomo-tunnel/qpjoy-electron-tunnel-0.1.3.tgz
 pnpm dev
 ```
+
+The admin backend is served by the Electron main process. After changing or
+reinstalling `@qpjoy/electron-tunnel`, stop the running Forge app and start it
+again; browser refresh alone will keep talking to the old `23456` process.
