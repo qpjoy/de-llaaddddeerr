@@ -1,0 +1,66 @@
+{
+  "name": "@qpjoy/electron-tunnel",
+  "version": "0.1.4",
+  "private": false,
+  "description": "Reusable QPJoy tunnel runtime and CLI for Electron apps on macOS and Linux.",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./plugin": {
+      "types": "./dist/plugin.d.ts",
+      "default": "./dist/plugin.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "qpjoy-tunnel": "dist/cli.js"
+  },
+  "files": [
+    "README.md",
+    "THIRD_PARTY_NOTICES.md",
+    "dist",
+    "resources/engine"
+  ],
+  "qpjoyPlugin": {
+    "specVersion": 1,
+    "entry": "dist/plugin.js",
+    "manifest": "dist/plugin.manifest.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/sync-manifest.mjs",
+    "prepack": "pnpm build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "electron",
+    "tunnel",
+    "proxy",
+    "tun",
+    "qpjoy"
+  ],
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "yaml": "^2.7.0"
+  },
+  "optionalDependencies": {
+    "@qpjoy/marketplace-db": ">=0.1.0"
+  },
+  "peerDependencies": {
+    "electron": ">=28"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.7",
+    "electron": "^34.0.0"
+  }
+}

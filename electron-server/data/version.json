@@ -1,0 +1,9 @@
+{
+  "release": "20260515T144249Z",
+  "minClientRelease": null,
+  "marketSpecVersion": 1,
+  "supportedSpecRange": ">=1 <=1",
+  "migrationsHead": 0,
+  "manifestEtag": "sha256:1e0a0da563d1763aadae0cac0a440ca0",
+  "publishedAt": "2026-05-15T14:42:49.170Z"
+}

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src data:; font-src data:; connect-src 'self';" />
+  <title>NotYet Ball Overlay</title>
+  <link rel="stylesheet" href="ball.css" />
+</head>
+<body>
+  <!-- Idle particle sparks. Position is centered on the ball via CSS vars
+       set by ball.js (so they follow drags). -->
+  <div class="sparks is-on" aria-hidden="true">
+    <i class="spark spark--1"></i>
+    <i class="spark spark--2"></i>
+    <i class="spark spark--3"></i>
+    <i class="spark spark--4"></i>
+    <i class="spark spark--5"></i>
+    <i class="spark spark--6"></i>
+  </div>
+
+  <!-- The orbit is centered on the ball position. Ball at the geometric
+       center; petals at N/E/S/W; corner ornaments at NE/SE/SW/NW. -->
+  <div class="orbit" id="orbit" data-state="collapsed">
+    <!-- 4 corner ornaments — non-interactive, fan diagonally on expand. -->
+    <span class="corner corner--nw" aria-hidden="true"></span>
+    <span class="corner corner--ne" aria-hidden="true"></span>
+    <span class="corner corner--sw" aria-hidden="true"></span>
+    <span class="corner corner--se" aria-hidden="true"></span>
+
+    <!-- 4 cardinal petals. Fixed compass positions — user's design intent. -->
+    <button class="petal petal--top" data-action="chat" type="button">
+      <span class="petal-icon" aria-hidden="true">咨</span>
+      <span class="petal-label">咨询</span>
+    </button>
+    <button class="petal petal--right" data-action="hide" type="button">
+      <span class="petal-icon" aria-hidden="true">隐</span>
+      <span class="petal-label">隐藏</span>
+    </button>
+    <button class="petal petal--bottom" data-action="back" type="button" disabled>
+      <span class="petal-icon" aria-hidden="true">返</span>
+      <span class="petal-label">返回</span>
+    </button>
+    <button class="petal petal--left" data-action="more" type="button" disabled>
+      <span class="petal-icon" aria-hidden="true">⌘</span>
+      <span class="petal-label">更多</span>
+    </button>
+
+    <!-- The ball, at the geometric center of the orbit. -->
+    <button class="ball" id="ball" type="button" aria-label="NotYet 咨询">
+      <span class="ball-shimmer" aria-hidden="true"></span>
+      <span class="ball-body" aria-hidden="true"></span>
+      <svg class="ball-rune" viewBox="0 0 64 64" aria-hidden="true">
+        <defs>
+          <filter id="rune-rough" x="-10%" y="-10%" width="120%" height="120%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="3" />
+            <feDisplacementMap in="SourceGraphic" scale="1.2" />
+          </filter>
+        </defs>
+        <g filter="url(#rune-rough)">
+          <path class="enso-stroke enso-stroke--ghost"
+                d="M 50,32 C 50,17 38,8 30,8 C 14,8 8,22 8,32 C 8,46 22,56 32,56 C 42,56 50,48 50,40"
+                stroke-linecap="round" fill="none" />
+          <path class="enso-stroke enso-stroke--main"
+                d="M 50,32 C 50,17 38,8 30,8 C 14,8 8,22 8,32 C 8,46 22,56 32,56 C 42,56 50,48 50,40"
+                stroke-linecap="round" fill="none" />
+        </g>
+      </svg>
+      <span class="ball-aura" aria-hidden="true"></span>
+      <span class="ball-text">NotYet</span>
+      <span class="ball-glow" aria-hidden="true"></span>
+    </button>
+  </div>
+  <script src="ball.js"></script>
+</body>
+</html>

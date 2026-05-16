@@ -7,7 +7,23 @@
     <link rel="stylesheet" href="./styles.css">
   </head>
   <body>
-    <main class="shell">
+    <nav class="tabbar">
+      <button class="tab is-active" data-tab="tunnel">隧道测试</button>
+      <button class="tab" data-tab="market">插件市场</button>
+      <span class="tab-spacer"></span>
+      <span class="tab-hint" id="marketBreadcrumb"></span>
+    </nav>
+
+    <section id="marketPanel" class="market-panel" hidden>
+      <iframe
+        id="marketFrame"
+        title="QPJoy Plugin Market"
+        src="http://127.0.0.1:23455/?embed=1&theme=light&primary=%231578ff&returnUrl=tunnel"
+        loading="lazy"
+      ></iframe>
+    </section>
+
+    <main id="tunnelPanel" class="shell">
       <header class="header">
         <div>
           <p class="eyebrow">NPM PACKAGE TEST</p>

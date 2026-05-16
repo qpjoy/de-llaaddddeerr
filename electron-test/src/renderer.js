@@ -19,8 +19,63 @@ const elements = {
   ruleList: document.querySelector('#ruleList'),
   testForm: document.querySelector('#testForm'),
   testUrl: document.querySelector('#testUrl'),
-  presetButtons: [...document.querySelectorAll('[data-preset]')]
+  presetButtons: [...document.querySelectorAll('[data-preset]')],
+  tabs: [...document.querySelectorAll('.tabbar .tab')],
+  marketPanel: document.querySelector('#marketPanel'),
+  marketFrame: document.querySelector('#marketFrame'),
+  tunnelPanel: document.querySelector('#tunnelPanel'),
+  marketBreadcrumb: document.querySelector('#marketBreadcrumb')
 };
+
+/* ── tab switching ──────────────────────────────────────────────────────── */
+
+function activateTab(name) {
+  elements.tabs.forEach((tab) => {
+    tab.classList.toggle('is-active', tab.dataset.tab === name);
+  });
+  const isMarket = name === 'market';
+  elements.marketPanel.hidden = !isMarket;
+  elements.tunnelPanel.hidden = isMarket;
+}
+
+elements.tabs.forEach((tab) => {
+  tab.addEventListener('click', () => activateTab(tab.dataset.tab));
+});
+
+/* ── plugin-market postMessage bridge ───────────────────────────────────── */
+// Protocol: see electron-market/docs/EMBED_PROTOCOL.md
+function sendToMarket(type, payload) {
+  if (!elements.marketFrame?.contentWindow) return;
+  elements.marketFrame.contentWindow.postMessage(
+    { source: 'qpjoy-plugin-market', type, payload },
+    '*'
+  );
+}
+
+window.addEventListener('message', (ev) => {
+  if (ev.data?.source !== 'qpjoy-plugin-market') return;
+  switch (ev.data.type) {
+    case 'ready':
+      // The SPA already read URL params for theme on first load; this is
+      // where we could push runtime overrides.
+      sendToMarket('set-theme', { mode: 'light', primary: '#1578ff' });
+      break;
+    case 'route-change': {
+      const path = ev.data.payload?.path ?? '/';
+      elements.marketBreadcrumb.textContent = `market ${path}`;
+      break;
+    }
+    case 'request-close':
+      // Back arrow at the top level → switch back to the tunnel tab.
+      activateTab('tunnel');
+      break;
+    case 'notify':
+      // Forward to the host's own console for now.
+      // eslint-disable-next-line no-console
+      console.log('[market notify]', ev.data.payload);
+      break;
+  }
+});
 
 function setBusy(busy) {
   for (const button of [
@@ -75,18 +130,39 @@ function renderRules(rules = []) {
   }
 }
 
+// Set globally by `setInactive` / `setActive` to gate the controls.
+let tunnelActive = false;
+
+function setInactive() {
+  tunnelActive = false;
+  elements.running.textContent = '插件未激活';
+  elements.mode.textContent = '-';
+  elements.proxy.textContent = '-';
+  elements.admin.textContent = '-';
+  elements.tun.textContent = '-';
+  elements.snapshot.textContent =
+    '// QPJoy Tunnel 当前未运行。\n// 切到「插件市场」标签 → 在已安装/市场里启用或重新预装即可。\n';
+  renderRules([]);
+  for (const button of elements.presetButtons) {
+    button.classList.remove('active');
+    button.title = '插件未激活';
+  }
+  setControlsEnabled(false);
+}
+
 function renderSnapshot(snapshot) {
-  const status = snapshot?.status ?? snapshot;
-  if (!status) {
-    elements.running.textContent = '未初始化';
-    elements.mode.textContent = '-';
-    elements.proxy.textContent = '-';
-    elements.admin.textContent = '-';
-    elements.tun.textContent = '-';
-    elements.snapshot.textContent = '{}';
-    renderRules([]);
+  if (!snapshot) {
+    // tunnel inactive — IPC returned null, NOT an error.
+    setInactive();
     return;
   }
+  const status = snapshot.status ?? snapshot;
+  if (!status) {
+    setInactive();
+    return;
+  }
+  tunnelActive = true;
+  setControlsEnabled(true);
 
   elements.running.textContent = status.running ? '运行中' : '已停止';
   elements.mode.textContent = modeLabels[status.mode] ?? status.mode;
@@ -102,11 +178,40 @@ function renderSnapshot(snapshot) {
   }
 }
 
+/**
+ * Toggle interactive controls based on tunnel availability. Read-only
+ * elements (refresh button, plugin-market open button) stay enabled.
+ */
+function setControlsEnabled(enabled) {
+  for (const button of [
+    elements.adminButton,
+    ...elements.presetButtons,
+    ...document.querySelectorAll('button[type="submit"]')
+  ]) {
+    button.disabled = !enabled;
+  }
+  elements.ruleKind.disabled = !enabled;
+  elements.ruleDomain.disabled = !enabled;
+  elements.testUrl.disabled = !enabled;
+}
+
 async function refresh() {
-  renderSnapshot(await window.qpjoyTunnelTest.snapshot());
+  try {
+    const snap = await window.qpjoyTunnelTest.snapshot();
+    renderSnapshot(snap);
+  } catch (err) {
+    // The host CAN throw for non-tunnel reasons (e.g. host shutting down).
+    // We surface that into the snapshot pane and stop further polling
+    // for this tick instead of letting the error percolate to the console.
+    elements.snapshot.textContent = err instanceof Error ? err.message : String(err);
+  }
 }
 
 async function run(action) {
+  if (!tunnelActive) {
+    elements.snapshot.textContent = '插件未激活，请先在插件市场启用。';
+    return;
+  }
   setBusy(true);
   try {
     await action();
@@ -128,13 +233,31 @@ elements.adminButton.addEventListener('click', () => {
 
 elements.ruleForm.addEventListener('submit', (event) => {
   event.preventDefault();
+  // Guard empty input — the tunnel IPC handler validates strictly and would
+  // otherwise reject with `Error: domain is required`, surfacing in the
+  // terminal as an unhelpful "error occurred in handler" trace.
+  const domain = elements.ruleDomain.value.trim();
+  if (!domain) {
+    elements.ruleDomain.focus();
+    elements.ruleDomain.setCustomValidity('请输入域名');
+    elements.ruleDomain.reportValidity();
+    return;
+  }
+  elements.ruleDomain.setCustomValidity('');
   void run(async () => {
     await window.qpjoyTunnelTest.addRule({
       kind: elements.ruleKind.value,
-      domain: elements.ruleDomain.value
+      domain
     });
     elements.ruleDomain.value = '';
   });
+});
+
+// Clear the custom validity message as soon as the user starts typing again.
+elements.ruleDomain.addEventListener('input', () => {
+  if (elements.ruleDomain.validationMessage) {
+    elements.ruleDomain.setCustomValidity('');
+  }
 });
 
 elements.ruleList.addEventListener('click', (event) => {
@@ -161,6 +284,13 @@ elements.testForm.addEventListener('submit', (event) => {
 });
 
 window.qpjoyTunnelTest.onEvent(() => {
+  void refresh();
+});
+
+// React to plugin lifecycle changes pushed from main.cjs. Refresh
+// immediately on flip so the UI doesn't lag the 3-second poll.
+window.qpjoyTunnelTest.onActiveChange((active) => {
+  tunnelActive = active;
   void refresh();
 });
 

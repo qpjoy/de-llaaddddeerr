@@ -1,0 +1,321 @@
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import { readFile, rm, mkdir, cp, rename, writeFile, symlink, lstat } from 'fs/promises';
+import { existsSync } from 'fs';
+import { join, isAbsolute, resolve } from 'path';
+
+import type { PluginManifest } from '@qpjoy/plugin-sdk';
+import type { PluginRegistry } from '../registry/PluginRegistry';
+
+const exec = promisify(execFile);
+
+/**
+ * Where the plugin tarball / source comes from.
+ *
+ *  - `registry` — `npm install <pkg>@<ver>` from the public npm registry.
+ *  - `tarball`  — `npm install <path-to-tgz>`; works fully offline.
+ *  - `local-dir` — copy a directory we already have on disk into the
+ *    plugin's `node_modules/<npm>/`. This is the seed path: ship the
+ *    bundled tunnel inside your app's `resources/` so the host can
+ *    bootstrap it without any network at all.
+ */
+export type PluginSource =
+  | { type: 'registry'; version: string }
+  | { type: 'tarball'; path: string }
+  | { type: 'local-dir'; path: string };
+
+/**
+ * Filter passed to `fs.cp` when seeding from a local dev directory. We
+ * intentionally drop things that would either bloat the seed or, worse,
+ * make the copy itself fail:
+ *
+ *  - `node_modules/electron/...` ships a giant binary distribution plus
+ *    `default_app.asar`. When this code runs *inside Electron*, the
+ *    monkey-patched fs refuses to lstat into the asar with an "Invalid
+ *    package" error. We never need the tunnel's own copy of electron at
+ *    runtime — it's a peer dep, the host provides it.
+ *  - `node_modules/.pnpm/...` is pnpm's content-addressed store, full of
+ *    symlinks pointing back into itself. Copying it explodes in size and
+ *    is useless once flattened.
+ *  - `node_modules/@types/...` are TS compile-time types only.
+ *  - dot-dirs like `.git`, `.cache` are dev-only.
+ *  - `dist` for nested packages (we already copied the top-level dist).
+ *    Not strictly needed but keeps the seed lean.
+ */
+function shouldCopyPath(src: string): boolean {
+  const normalized = src.replace(/\\/g, '/');
+  if (/\/node_modules\/electron(\/|$)/.test(normalized)) return false;
+  if (/\/node_modules\/\.pnpm(\/|$)/.test(normalized)) return false;
+  if (/\/node_modules\/@types(\/|$)/.test(normalized)) return false;
+  if (/\/node_modules\/typescript(\/|$)/.test(normalized)) return false;
+  if (/\/\.git(\/|$)/.test(normalized)) return false;
+  if (/\/\.cache(\/|$)/.test(normalized)) return false;
+  if (/\.asar$/.test(normalized)) return false;
+  return true;
+}
+
+export interface PluginStoreOptions {
+  pluginsRoot: string;
+  registry: PluginRegistry;
+  /** Package manager binary. Defaults to `npm`. */
+  packageManager?: 'npm' | 'pnpm';
+}
+
+/**
+ * Filesystem layer: install / uninstall npm packages into
+ * `userData/plugins/<id>@<version>/` and read their manifests.
+ *
+ * Strict rules:
+ *  - `--ignore-scripts` always passed; plugins MUST NOT rely on
+ *    `postinstall`. (Anything they need at install-time goes into the
+ *    activate path with explicit permission grants.)
+ *  - Each plugin gets its own dir with its own `node_modules` — no hoisting,
+ *    no cross-talk.
+ */
+export class PluginStore {
+  constructor(private readonly opts: PluginStoreOptions) {}
+
+  pluginDir(id: string, version: string): string {
+    return join(this.opts.pluginsRoot, `${id}@${version}`);
+  }
+
+  /**
+   * Install from the public registry. Requires network.
+   * Equivalent to `install({ id, npm, source: { type:'registry', version }})`.
+   */
+  async install(input: { id: string; npm: string; version: string }): Promise<PluginManifest> {
+    return this.installFrom({
+      id: input.id,
+      npm: input.npm,
+      source: { type: 'registry', version: input.version }
+    });
+  }
+
+  /**
+   * Generic install. Picks the path based on `source.type`. The end state is
+   * always the same: `<pluginsRoot>/<id>@<version>/node_modules/<npm>/` exists
+   * and a record is upserted into the registry in `awaitingGrant` state.
+   */
+  async installFrom(input: { id: string; npm: string; source: PluginSource }): Promise<PluginManifest> {
+    const pm = this.opts.packageManager ?? 'npm';
+
+    // We need a version up-front to compute the install dir. For local-dir we
+    // read it from the source's package.json; for tarball we install first
+    // into a scratch dir and then re-read. The simplest unified scheme is to
+    // stage in a temp dir, learn the version, then move/rename.
+    //
+    // Two subtleties:
+    //   1. The staging dir name must NOT start with `.` — `npm init -y`
+    //      would refuse, and even our hand-rolled package.json would make
+    //      `npm install <path>` (the tarball + local-dir paths) unhappy.
+    //   2. We write a minimal package.json directly instead of running
+    //      `npm init -y`, which is faster and avoids npm's package-name
+    //      validation against the staging dir basename.
+    const slug = input.id.replace(/[^a-z0-9-]+/gi, '-').toLowerCase();
+    const stagingDir = join(this.opts.pluginsRoot, `_staging-${Date.now()}-${slug}`);
+    await mkdir(stagingDir, { recursive: true });
+    await writeFile(
+      join(stagingDir, 'package.json'),
+      JSON.stringify({ name: 'qpjoy-plugin-staging', version: '0.0.0', private: true }) + '\n',
+      'utf8'
+    );
+
+    try {
+      switch (input.source.type) {
+        case 'registry':
+          await exec(
+            pm,
+            ['install', '--ignore-scripts', '--no-audit', '--no-fund', `${input.npm}@${input.source.version}`],
+            { cwd: stagingDir }
+          );
+          break;
+
+        case 'tarball': {
+          const tgz = isAbsolute(input.source.path) ? input.source.path : resolve(input.source.path);
+          if (!existsSync(tgz)) throw new Error(`Tarball not found: ${tgz}`);
+          await exec(
+            pm,
+            ['install', '--ignore-scripts', '--no-audit', '--no-fund', tgz],
+            { cwd: stagingDir }
+          );
+          break;
+        }
+
+        case 'local-dir': {
+          // Symlink the source dir into `node_modules/<npm>/` rather than
+          // copying. Two big reasons:
+          //
+          //  1. The source's node_modules is usually pnpm-managed, where
+          //     transitive deps live under a `.pnpm/` content-addressed
+          //     store with symlinks. `cp --dereference` flattens those
+          //     symlinks and loses the resolver semantics — Node walks up
+          //     `node_modules/` chains but never enters `.pnpm/`, so deps
+          //     like `bindings` (transitive of better-sqlite3) become
+          //     unfindable in the dest.
+          //
+          //  2. For dev workflows it's just nicer — edit the source and the
+          //     next plugin restart picks it up, no re-seed needed.
+          //
+          // Node `require()` calls `fs.realpath()` on each resolved file,
+          // so requires from inside the seeded plugin walk through the
+          // symlink back to the source tree and resolve correctly against
+          // pnpm's structure.
+          const sourceDir = isAbsolute(input.source.path)
+            ? input.source.path
+            : resolve(input.source.path);
+          if (!existsSync(sourceDir)) throw new Error(`Local source not found: ${sourceDir}`);
+
+          // Sanity: make sure it really is a directory (not a file or broken link).
+          const stat = await lstat(sourceDir);
+          if (!stat.isDirectory()) throw new Error(`Local source is not a directory: ${sourceDir}`);
+
+          const targetDir = join(stagingDir, 'node_modules', input.npm);
+          // mkdir the PARENT (e.g. node_modules/@qpjoy), not the target itself.
+          await mkdir(join(targetDir, '..'), { recursive: true });
+          await symlink(sourceDir, targetDir, 'dir');
+          break;
+        }
+      }
+
+      const manifest = await this.readManifest(stagingDir, input.npm);
+      if (manifest.id !== input.id) {
+        throw new Error(
+          `Manifest id mismatch: caller said "${input.id}", package ships "${manifest.id}"`
+        );
+      }
+
+      const finalDir = this.pluginDir(manifest.id, manifest.version);
+      if (existsSync(finalDir)) {
+        await rm(finalDir, { recursive: true, force: true });
+      }
+      // Rename atomically (within the same filesystem).
+      await mkdir(this.opts.pluginsRoot, { recursive: true });
+      await this.renameOrFallback(stagingDir, finalDir);
+
+      this.opts.registry.upsert(
+        {
+          id: manifest.id,
+          npm: input.npm,
+          version: manifest.version,
+          installPath: finalDir,
+          manifest,
+          grantedPermissions: [],
+          state: 'awaitingGrant',
+          errorMessage: null
+        },
+        // Carry the actual install source through to the DB.
+        input.source.type === 'registry'
+          ? 'registry'
+          : input.source.type === 'tarball'
+          ? 'tarball'
+          : 'local-dir'
+      );
+
+      return manifest;
+    } catch (err) {
+      // Best-effort cleanup of the staging dir on failure.
+      await rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+      throw err;
+    }
+  }
+
+  private async renameOrFallback(from: string, to: string): Promise<void> {
+    try {
+      await rename(from, to);
+    } catch {
+      // Cross-device or permission issue → fall back to copy+delete.
+      await cp(from, to, { recursive: true });
+      await rm(from, { recursive: true, force: true });
+    }
+  }
+
+  async uninstall(id: string): Promise<void> {
+    const record = this.opts.registry.get(id);
+    if (!record) return;
+    if (existsSync(record.installPath)) {
+      await rm(record.installPath, { recursive: true, force: true });
+    }
+    this.opts.registry.remove(id);
+  }
+
+  /**
+   * Install a new version side-by-side, then delete the previous install
+   * directory. Caller is responsible for deactivating + re-activating the
+   * plugin around the swap (PluginRuntime exposes that).
+   *
+   * Preserves the registry row's grants by passing through `upsert` —
+   * the row's `version` and `installPath` change, but `grantedPermissions`
+   * is left alone (the caller can intersect with the new manifest's
+   * permissions if it changed).
+   */
+  async upgrade(id: string, source: PluginSource): Promise<PluginManifest> {
+    const existing = this.opts.registry.get(id);
+    if (!existing) {
+      throw new Error(`cannot upgrade: ${id} is not installed`);
+    }
+    const oldPath = existing.installPath;
+    const oldGrants = existing.grantedPermissions;
+
+    // installFrom upserts the row with the new path/version AND resets
+    // grants to []. Re-apply the previous grants intersected with the new
+    // manifest's permission set so we don't silently widen privileges.
+    const manifest = await this.installFrom({
+      id,
+      npm: existing.npm,
+      source
+    });
+    const allowed = new Set(manifest.permissions);
+    const preserved = oldGrants.filter((p) => allowed.has(p));
+    this.opts.registry.grant(id, preserved);
+
+    // Mark "installed" instead of "awaitingGrant" if the previous grants
+    // already cover the new manifest. Else surface that the user has new
+    // permissions to review (any permission added in the new version).
+    const fullyGranted = manifest.permissions.every((p) => preserved.includes(p));
+    this.opts.registry.setState(id, fullyGranted ? 'installed' : 'awaitingGrant');
+
+    // Clean up old install dir if it's different.
+    const newPath = this.pluginDir(id, manifest.version);
+    if (oldPath !== newPath && existsSync(oldPath)) {
+      await rm(oldPath, { recursive: true, force: true });
+    }
+    return manifest;
+  }
+
+  /**
+   * Read `<dir>/node_modules/<npm>/package.json` plus the manifest file it
+   * points at via `qpjoyPlugin.manifest`.
+   */
+  async readManifest(dir: string, npm: string): Promise<PluginManifest> {
+    const pkgPath = join(dir, 'node_modules', npm, 'package.json');
+    const pkg = JSON.parse(await readFile(pkgPath, 'utf8')) as {
+      version?: string;
+      qpjoyPlugin?: { specVersion: number; manifest: string; entry?: string };
+    };
+    if (!pkg.qpjoyPlugin) {
+      throw new Error(`Package ${npm} is not a QPJoy plugin (missing qpjoyPlugin field).`);
+    }
+    if (pkg.qpjoyPlugin.specVersion !== 1) {
+      throw new Error(`Unsupported plugin spec version: ${pkg.qpjoyPlugin.specVersion}`);
+    }
+    const manifestPath = join(dir, 'node_modules', npm, pkg.qpjoyPlugin.manifest);
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as PluginManifest;
+
+    // `package.json#version` is the source of truth — npm tracks it, the
+    // marketplace tracks it, and the install path uses it. The plugin's
+    // `manifest.version` field is meant to mirror it, but in practice it
+    // drifts (publishers forget to bump the manifest copy). Defensively
+    // override the manifest to match the package so the marketplace UI
+    // never shows a stale version label.
+    if (pkg.version && pkg.version !== manifest.version) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[plugin-store] ${npm} manifest.version (${manifest.version}) differs from ` +
+          `package.json#version (${pkg.version}); using package.json as authoritative.`
+      );
+      manifest.version = pkg.version;
+    }
+
+    return manifest;
+  }
+}

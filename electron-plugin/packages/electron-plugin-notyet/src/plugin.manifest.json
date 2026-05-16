@@ -1,0 +1,15 @@
+{
+  "id": "qpjoy.electron-plugin-notyet",
+  "name": "NotYet 悬浮咨询球",
+  "version": "0.1.0",
+  "author": "qpjoy",
+  "description": "在每个应用窗口右下角投放一颗带古风纹饰、科技 3D 高光的悬浮咨询球。点击展开十字花瓣菜单：一键打开 NotYet 聊天页（覆盖式 BrowserWindow，返回不会丢失底层应用状态）、隐藏球体、返回主界面。3 秒无交互自动收起。",
+  "homepage": "https://www.notyet.chat",
+  "engines": { "electronMarket": ">=0.2.0", "electron": ">=28" },
+  "permissions": [
+    "fs:userData",
+    "net:fetch:www.notyet.chat",
+    "ui:adminPanel"
+  ],
+  "activationEvents": ["onStartup"]
+}

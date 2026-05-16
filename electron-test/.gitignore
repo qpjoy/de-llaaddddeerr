@@ -2,3 +2,11 @@ node_modules/
 out/
 dist/
 *.log
+
+# Dev workflow:
+#   .dev-mode      — sentinel: scripts/dev-mode.mjs remembers if package.json
+#                     is currently in `local` or `npm` shape, so repeated
+#                     `pnpm dev` doesn't reinstall.
+#   .local-packs/  — workspace tarballs written by `pnpm dev` (local mode).
+.dev-mode
+.local-packs/

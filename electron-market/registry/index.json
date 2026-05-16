@@ -1,0 +1,31 @@
+{
+  "generatedAt": "2026-05-16T00:00:00Z",
+  "entries": [
+    {
+      "id": "qpjoy.electron-tunnel",
+      "npm": "@qpjoy/electron-tunnel",
+      "name": "QPJoy Tunnel",
+      "description": "Mihomo-based tunnel runtime with TUN / system-proxy / rule modes.",
+      "versions": ["0.1.4"],
+      "latest": "0.1.4",
+      "manifestUrl": "https://unpkg.com/@qpjoy/electron-tunnel@0.1.4/dist/plugin.manifest.json",
+      "tarballUrl": "https://registry.npmjs.org/@qpjoy/electron-tunnel/-/electron-tunnel-0.1.4.tgz",
+      "homepage": "https://github.com/qpjoy/electron-tunnel",
+      "verified": true,
+      "bootstrap": true
+    },
+    {
+      "id": "qpjoy.electron-plugin-notyet",
+      "npm": "@qpjoy/electron-plugin-notyet",
+      "name": "NotYet 悬浮咨询球",
+      "description": "在每个应用窗口右下角投放一颗古风 + 科技 3D 悬浮咨询球，一键打开 NotYet 聊天页。覆盖式 BrowserWindow 设计，返回不丢底层应用状态。",
+      "versions": ["0.1.1"],
+      "latest": "0.1.1",
+      "manifestUrl": "https://unpkg.com/@qpjoy/electron-plugin-notyet@0.1.1/dist/plugin.manifest.json",
+      "tarballUrl": "https://registry.npmjs.org/@qpjoy/electron-plugin-notyet/-/electron-plugin-notyet-0.1.1.tgz",
+      "homepage": "https://www.notyet.chat",
+      "verified": true,
+      "bootstrap": false
+    }
+  ]
+}

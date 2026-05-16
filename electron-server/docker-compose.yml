@@ -1,0 +1,64 @@
+# QPJoy marketplace stack.
+#
+#   scripts/manage.sh up        → start both services in the background
+#   scripts/manage.sh status    → docker compose ps
+#   scripts/manage.sh logs      → tail server logs
+#   scripts/manage.sh psql      → open psql against the local Postgres
+#   scripts/manage.sh redeploy  → rebuild + restart the market container
+#
+# Everything writes into named volumes (qpjoy_pgdata, qpjoy_market_data) so
+# the host workspace files stay untouched.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: qpjoy-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-qpjoy}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-qpjoy}
+      POSTGRES_DB: ${PG_DB:-qpjoy_market}
+    ports:
+      - "${PG_PORT:-5433}:5432"
+    volumes:
+      - qpjoy_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-qpjoy} -d ${PG_DB:-qpjoy_market}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  market:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qpjoy/market-server:dev
+    container_name: qpjoy-market
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${PG_USER:-qpjoy}:${PG_PASSWORD:-qpjoy}@postgres:5432/${PG_DB:-qpjoy_market}
+      JWT_SECRET: ${JWT_SECRET:-dev-only-secret-replace-in-production}
+      NODE_ENV: ${NODE_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      NPM_SCOPE: ${NPM_SCOPE:-@qpjoy}
+      NPM_PREFIX: ${NPM_PREFIX:-electron-}
+      REQUIRE_VERIFICATION: ${REQUIRE_VERIFICATION:-0}
+      SPA_DIST: /app/data/spa-dist
+      # In-container sync scheduler (no system cron needed).
+      SYNC_ENABLED: ${SYNC_ENABLED:-1}
+      SYNC_ON_BOOT: ${SYNC_ON_BOOT:-1}
+      SYNC_INTERVAL_MS: ${SYNC_INTERVAL_MS:-3600000}
+      SYNC_JITTER_MS: ${SYNC_JITTER_MS:-30000}
+    ports:
+      - "${MARKET_PORT:-8080}:8080"
+    volumes:
+      - qpjoy_market_data:/app/data
+
+volumes:
+  qpjoy_pgdata:
+    name: qpjoy_pgdata
+  qpjoy_market_data:
+    name: qpjoy_market_data

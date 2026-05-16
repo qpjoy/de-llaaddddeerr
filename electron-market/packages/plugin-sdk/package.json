@@ -1,0 +1,37 @@
+{
+  "name": "@qpjoy/plugin-sdk",
+  "version": "0.1.0",
+  "description": "Types and helpers for authoring QPJoy electron plugins (definePlugin, Permission catalog, PluginContext).",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "README.md"],
+  "keywords": ["electron", "plugin", "sdk", "qpjoy", "marketplace"],
+  "homepage": "https://github.com/qpjoy/electron-plugin",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qpjoy/electron-plugin.git",
+    "directory": "packages/plugin-sdk"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "pnpm build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "peerDependencies": {
+    "electron": ">=28"
+  },
+  "peerDependenciesMeta": {
+    "electron": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "electron": "^34.0.0",
+    "typescript": "^5.7.3"
+  }
+}

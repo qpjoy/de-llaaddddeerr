@@ -12,6 +12,49 @@ body {
   margin: 0;
 }
 
+.tabbar {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0 18px;
+  height: 44px;
+  background: #ffffff;
+  border-bottom: 1px solid #e3e8ef;
+}
+.tabbar .tab {
+  height: 44px;
+  border: 0;
+  background: transparent;
+  color: #4b5563;
+  font-weight: 700;
+  font-size: 14px;
+  padding: 0 16px;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  cursor: pointer;
+}
+.tabbar .tab.is-active {
+  color: #1578ff;
+  border-bottom-color: #1578ff;
+}
+.tab-spacer { flex: 1; }
+.tab-hint {
+  color: #6d7280;
+  font-size: 12px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.market-panel {
+  position: fixed;
+  inset: 44px 0 0 0;
+  background: #f3f5f7;
+}
+.market-panel iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
 button {
   height: 40px;
   border: 1px solid #1f6fd1;

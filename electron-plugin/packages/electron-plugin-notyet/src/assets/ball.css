@@ -1,0 +1,403 @@
+/* NotYet floating ball — phase 2.1 (compass layout, fixed petal positions).
+ *
+ * Layout invariant: orbit is centered on the ball position; the ball sits at
+ * the geometric center of the orbit. Cardinal petals fan N/E/S/W at
+ * `--petal-radius`; corner ornaments fan NE/SE/SW/NW at `--corner-radius`.
+ *
+ * Drag math (ball.js): orbit's `left` / `top` is set so its center == ball
+ * center == saved `(fx * windowW, fy * windowH)`. Position is clamped so the
+ * outermost petals always stay on-screen with `--menu-margin` to spare.
+ */
+:root {
+  --ball-size: 68px;
+  --petal-size: 56px;
+  --petal-radius: 92px;
+  --corner-size: 12px;
+  --corner-radius: 70px;
+  --orbit-size: 240px;
+  --menu-margin: 16px;
+
+  /* Earth palette ─────────────────────────────────────────────────────
+   * The ball reads as a stylised planet: ocean blues + continent greens,
+   * white specular for clouds / atmosphere, deep navy at the rim shadow.
+   * Gold + ink stay for the petals & decorations, keeping the 古风 frame
+   * around a clearly 科技 / 地球 core. */
+  --ocean-light: #a8d4f0;
+  --ocean-mid:   #3a8bce;
+  --ocean-deep:  #15407a;
+  --ocean-night: #0a2540;
+  --land-green:  rgba(108, 167, 92, 0.32);
+  --land-deep:   rgba(86, 130, 75, 0.28);
+  --cloud:       rgba(255, 255, 255, 0.18);
+  --atmosphere:  rgba(74, 168, 230, 0.5);
+
+  --gold: #d4a548;
+  --gold-light: #f3d27a;
+  --gold-deep: #8c6924;
+  --ink: #1f2734;
+  --ink-soft: #4a5160;
+  --paper: rgba(255, 247, 230, 0.96);
+
+  --ease-pop: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0;
+  background: transparent;
+  width: 100%; height: 100%;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC",
+               "Source Han Serif SC", "Noto Serif SC", "STKaiti", "KaiTi", serif;
+  -webkit-user-select: none; user-select: none;
+  -webkit-font-smoothing: antialiased;
+  cursor: default;
+}
+
+/* ── Orbit: centered on the ball position ─────────────────────────────── */
+
+.orbit {
+  position: fixed;
+  width: var(--orbit-size);
+  height: var(--orbit-size);
+  /* ball.js sets left/top once a position is loaded. Fallback positions the
+     orbit so the ball lands in the bottom-right corner for first paint. */
+  left: calc(100% - var(--orbit-size) / 2 - 50px);
+  top:  calc(100% - var(--orbit-size) / 2 - 50px);
+  pointer-events: none;
+  z-index: 1;
+}
+.orbit.is-dragging { cursor: grabbing; }
+
+/* ── The ball: geometric center of the orbit ──────────────────────────── */
+
+.ball {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: var(--ball-size); height: var(--ball-size);
+  margin: calc(var(--ball-size) / -2) 0 0 calc(var(--ball-size) / -2);
+  border: none; padding: 0;
+  border-radius: 50%;
+  cursor: grab;
+  pointer-events: auto;
+  background: transparent;
+  overflow: visible;
+  transition: transform 220ms var(--ease-pop);
+  z-index: 5;
+  touch-action: none;             /* enables pointer events without scroll */
+  outline: none;
+}
+.ball.is-dragging { cursor: grabbing; transform: scale(1.05); transition: none; }
+.ball:hover { transform: scale(1.05); }
+.ball:active { transform: scale(0.94); }
+
+/* Layer: rotating rim shimmer — a cool atmospheric glint around the planet. */
+.ball-shimmer {
+  position: absolute; inset: -2px;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 22%,
+    rgba(180, 220, 250, 0.6) 30%,
+    rgba(255, 255, 255, 0.95) 33%,
+    rgba(180, 220, 250, 0.6) 36%,
+    rgba(255, 255, 255, 0) 44%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  -webkit-mask: radial-gradient(circle at center, transparent calc(50% - 2.5px), black calc(50% - 1.5px));
+          mask: radial-gradient(circle at center, transparent calc(50% - 2.5px), black calc(50% - 1.5px));
+  animation: shimmer-spin 4.4s linear infinite;
+  pointer-events: none;
+  opacity: 0.85;
+  z-index: 1;
+}
+@keyframes shimmer-spin { to { transform: rotate(360deg); } }
+
+/* Layer: sphere body. Earth — ocean base + continent hints + cloud wisps.
+ * Built as a stack of `radial-gradient`s (top of stack draws first).
+ *   1. clouds  — soft white ellipses, low alpha
+ *   2. lands   — green-brown ellipses, low alpha
+ *   3. ocean   — main spherical gradient: highlight → mid → deep → night
+ */
+.ball-body {
+  position: absolute; inset: 0;
+  border-radius: 50%;
+  background:
+    /* clouds */
+    radial-gradient(ellipse 52% 22% at 28% 36%, var(--cloud) 0%, transparent 60%),
+    radial-gradient(ellipse 38% 18% at 72% 68%, rgba(255,255,255,0.12) 0%, transparent 55%),
+    /* continents (rough Africa-ish + Asia-ish silhouettes) */
+    radial-gradient(ellipse 30% 38% at 62% 38%, var(--land-green) 0%, transparent 65%),
+    radial-gradient(ellipse 22% 30% at 38% 64%, var(--land-deep)  0%, transparent 60%),
+    radial-gradient(ellipse 16% 18% at 78% 52%, var(--land-green) 0%, transparent 55%),
+    /* ocean sphere */
+    radial-gradient(
+      circle at 32% 28%,
+      var(--ocean-light) 0%,
+      var(--ocean-mid)   28%,
+      var(--ocean-deep)  68%,
+      var(--ocean-night) 100%
+    );
+  box-shadow:
+    0 0 22px rgba(58, 139, 206, 0.4),
+    0 8px 22px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4),
+    inset 0 -6px 14px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* Layer: enso brush circle. */
+.ball-rune {
+  position: absolute;
+  inset: 6px;
+  width: calc(var(--ball-size) - 12px);
+  height: calc(var(--ball-size) - 12px);
+  pointer-events: none;
+  z-index: 3;
+  opacity: 0.78;
+}
+.enso-stroke {
+  stroke: rgba(255, 247, 230, 0.92);
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.4));
+}
+.enso-stroke--main {
+  stroke-width: 3;
+  animation: enso-breathe 6s var(--ease-soft) infinite;
+}
+.enso-stroke--ghost {
+  stroke-width: 7;
+  stroke: rgba(255, 247, 230, 0.18);
+}
+@keyframes enso-breathe {
+  0%, 100% { opacity: 0.9;  stroke-width: 3;   }
+  50%      { opacity: 1.0;  stroke-width: 3.4; }
+}
+
+/* Layer: pulsing outer aura — the planet's atmosphere */
+.ball-aura {
+  position: absolute; inset: -8px;
+  border-radius: 50%;
+  border: 1px solid var(--atmosphere);
+  box-shadow:
+    0 0 18px rgba(74, 168, 230, 0.3) inset,
+    0 0 22px rgba(74, 168, 230, 0.18);
+  pointer-events: none;
+  animation: aura-pulse 3.2s ease-in-out infinite;
+  z-index: 0;
+}
+@keyframes aura-pulse {
+  0%, 100% { opacity: 0.55; transform: scale(1); }
+  50%      { opacity: 0.95; transform: scale(1.08); }
+}
+
+/* Layer: wordmark */
+.ball-text {
+  position: absolute;
+  inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  z-index: 5;
+  color: var(--paper);
+  font-family: "STKaiti", "KaiTi", "Source Han Serif SC", serif;
+  font-size: 11px; font-weight: 700;
+  letter-spacing: 0.4px;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.6), 0 0 4px rgba(212, 165, 72, 0.4);
+  pointer-events: none;
+}
+
+/* Layer: glossy highlight on top */
+.ball-glow {
+  position: absolute; inset: 4px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 30% 22%,
+    rgba(255, 255, 255, 0.55) 0%,
+    rgba(255, 255, 255, 0.18) 25%,
+    transparent 55%
+  );
+  pointer-events: none;
+  z-index: 4;
+}
+
+/* ── Petals: cardinal compass positions ───────────────────────────────── */
+
+.petal {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: var(--petal-size); height: var(--petal-size);
+  margin: calc(var(--petal-size) / -2) 0 0 calc(var(--petal-size) / -2);
+  padding: 0;
+  /* Border + shadow / accent recoloured to the Earth-blue palette so the
+     petals visually belong to the same composition as the planet. Paper
+     interior is kept — gives the menu a "古卷" feel while the rim sits in
+     the same blue family as the ball. */
+  border: 1px solid rgba(74, 168, 230, 0.42);
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 30%, var(--paper), rgba(225, 240, 252, 0.92) 70%);
+  color: var(--ink);
+  cursor: pointer;
+  font-family: "STKaiti", "KaiTi", "Source Han Serif SC", serif;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 1px;
+  box-shadow:
+    0 6px 14px rgba(15, 64, 122, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.75),
+    inset 0 -1px 0 rgba(58, 139, 206, 0.3);
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(0, 0) scale(0.4);
+  transition:
+    opacity 200ms var(--ease-soft),
+    transform 320ms var(--ease-pop),
+    box-shadow 180ms var(--ease-soft),
+    background 180ms var(--ease-soft);
+  z-index: 3;
+}
+.petal:hover:not(:disabled) {
+  background: radial-gradient(circle at 50% 30%, #ffffff, rgba(220, 235, 250, 0.96) 70%);
+  box-shadow:
+    0 8px 20px rgba(15, 64, 122, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    inset 0 -1px 0 rgba(58, 139, 206, 0.35),
+    0 0 0 2px rgba(74, 168, 230, 0.5);
+}
+
+.petal-icon {
+  font-size: 18px; line-height: 1;
+  color: var(--ocean-deep);
+  font-weight: 700;
+  text-shadow: 0 1px 1px rgba(255, 255, 255, 0.6);
+}
+.petal-label {
+  font-size: 10px;
+  color: var(--ink-soft);
+  letter-spacing: 1.5px;
+  margin-top: 2px;
+}
+
+.orbit[data-state="expanded"] { pointer-events: auto; }
+.orbit[data-state="expanded"] .petal {
+  pointer-events: auto;
+  opacity: 1;
+}
+.orbit[data-state="expanded"] .petal:disabled { opacity: 0.45; cursor: not-allowed; filter: grayscale(0.4); }
+
+/* Compass placements. Stagger the entry via transition-delay so they don't
+   all snap into place at once. */
+.orbit[data-state="expanded"] .petal--top    { transform: translate(0, calc(var(--petal-radius) * -1)) scale(1); transition-delay: 0ms; }
+.orbit[data-state="expanded"] .petal--right  { transform: translate(var(--petal-radius), 0) scale(1);             transition-delay: 50ms; }
+.orbit[data-state="expanded"] .petal--bottom { transform: translate(0, var(--petal-radius)) scale(1);             transition-delay: 100ms; }
+.orbit[data-state="expanded"] .petal--left   { transform: translate(calc(var(--petal-radius) * -1), 0) scale(1);  transition-delay: 150ms; }
+
+/* ── Corner ornaments: diagonal compass points (decorative) ───────────── */
+
+.corner {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: var(--corner-size); height: var(--corner-size);
+  margin: calc(var(--corner-size) / -2) 0 0 calc(var(--corner-size) / -2);
+  /* Diagonal "compass spike" — recoloured from gold to cyan-blue so it
+     reads as a refracted shard of the planet's atmosphere rather than a
+     foreign ornament. */
+  background: linear-gradient(135deg, rgba(220, 245, 255, 0.95), rgba(74, 168, 230, 0.75));
+  border-radius: 1px;
+  transform: translate(0, 0) rotate(45deg) scale(0);
+  opacity: 0;
+  pointer-events: none;
+  box-shadow:
+    0 0 12px rgba(74, 168, 230, 0.65),
+    inset 0 0 4px rgba(255, 255, 255, 0.5);
+  transition:
+    opacity 240ms var(--ease-soft) 90ms,
+    transform 360ms var(--ease-pop) 90ms;
+  z-index: 2;
+}
+.orbit[data-state="expanded"] .corner { opacity: 0.85; }
+
+/* Diagonals at ~45° offsets. Using `calc(var(--corner-radius) * 0.7071)`
+   for the trig component (cos 45° = sin 45° ≈ 0.7071). */
+.orbit[data-state="expanded"] .corner--nw {
+  transform: translate(calc(var(--corner-radius) * -0.707), calc(var(--corner-radius) * -0.707)) rotate(45deg) scale(1);
+}
+.orbit[data-state="expanded"] .corner--ne {
+  transform: translate(calc(var(--corner-radius) *  0.707), calc(var(--corner-radius) * -0.707)) rotate(45deg) scale(1);
+}
+.orbit[data-state="expanded"] .corner--sw {
+  transform: translate(calc(var(--corner-radius) * -0.707), calc(var(--corner-radius) *  0.707)) rotate(45deg) scale(1);
+}
+.orbit[data-state="expanded"] .corner--se {
+  transform: translate(calc(var(--corner-radius) *  0.707), calc(var(--corner-radius) *  0.707)) rotate(45deg) scale(1);
+}
+
+/* ── Idle particle drift around the ball center ───────────────────────── */
+
+.sparks {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0;
+  transition: opacity 600ms var(--ease-soft);
+}
+.sparks.is-on { opacity: 1; }
+/* Hide sparks while the orbit is expanded — focus on the petals. */
+body:has(.orbit[data-state="expanded"]) .sparks { opacity: 0; }
+
+.spark {
+  position: absolute;
+  /* ball.js continuously updates --spark-cx / --spark-cy to follow the ball
+     during drags. Defaults near bottom-right for first paint. */
+  left: var(--spark-cx, calc(100% - 50px));
+  top:  var(--spark-cy, calc(100% - 50px));
+  width: 5px; height: 5px;
+  margin: -2.5px 0 0 -2.5px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(220, 245, 255, 0.95) 0%, rgba(74, 168, 230, 0.45) 60%, transparent 100%);
+  filter: blur(0.4px);
+  --spark-radius: 60px;
+  --spark-angle: 0deg;
+  --spark-shift: 0px;
+  animation:
+    spark-orbit  var(--spark-duration, 9s) linear infinite,
+    spark-fade   var(--spark-fade-dur, 4s) ease-in-out infinite;
+}
+.spark--1 { --spark-duration: 10s; --spark-fade-dur: 4.4s; --spark-radius: 56px; animation-delay: 0s, -1s; }
+.spark--2 { --spark-duration: 14s; --spark-fade-dur: 5.2s; --spark-radius: 68px; animation-delay: -3s, -2.4s; }
+.spark--3 { --spark-duration: 11s; --spark-fade-dur: 3.6s; --spark-radius: 74px; animation-delay: -6s, -1.4s; }
+.spark--4 { --spark-duration: 13s; --spark-fade-dur: 4.0s; --spark-radius: 62px; animation-delay: -2s, -3.0s; }
+.spark--5 { --spark-duration: 9s;  --spark-fade-dur: 5.8s; --spark-radius: 80px; animation-delay: -8s, -0.6s; }
+.spark--6 { --spark-duration: 15s; --spark-fade-dur: 4.6s; --spark-radius: 50px; animation-delay: -5s, -3.4s; }
+
+@property --spark-angle {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+@property --spark-shift {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
+@keyframes spark-orbit {
+  to { --spark-angle: 360deg; }
+}
+@keyframes spark-fade {
+  0%, 100% { opacity: 0;    --spark-shift: -4px; }
+  20%, 80% { opacity: 0.85;                      }
+  50%      { opacity: 1;    --spark-shift: 6px;  }
+}
+.spark {
+  transform: translate(
+    calc(cos(var(--spark-angle)) * (var(--spark-radius) + var(--spark-shift))),
+    calc(sin(var(--spark-angle)) * (var(--spark-radius) + var(--spark-shift)))
+  );
+}
+
+/* Respect prefers-reduced-motion: kill the rotating/pulsing animations. */
+@media (prefers-reduced-motion: reduce) {
+  .ball-shimmer, .ball-aura, .enso-stroke--main, .spark { animation: none; }
+  .sparks { display: none; }
+}

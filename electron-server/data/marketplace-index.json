@@ -1,0 +1,26 @@
+{
+  "generatedAt": "2026-05-15T14:42:49.170Z",
+  "release": "20260515T144249Z",
+  "entries": [
+    {
+      "id": "qpjoy.electron-tunnel",
+      "npm": "@qpjoy/electron-tunnel",
+      "name": "Tunnel",
+      "description": "Reusable QPJoy tunnel runtime and CLI for Electron apps on macOS and Linux.",
+      "latestVersion": "0.1.3",
+      "manifestUrl": "https://registry.npmjs.org/@qpjoy%2Felectron-tunnel/-/electron-tunnel-0.1.3.tgz",
+      "tarballUrl": "https://registry.npmjs.org/@qpjoy/electron-tunnel/-/electron-tunnel-0.1.3.tgz",
+      "homepage": null,
+      "author": null,
+      "category": null,
+      "verified": false,
+      "bootstrap": true,
+      "visibility": "public",
+      "specVersion": 0,
+      "metadata": {
+        "soft": true,
+        "reason": "no qpjoyPlugin field in published package.json"
+      }
+    }
+  ]
+}

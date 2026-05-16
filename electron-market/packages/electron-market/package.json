@@ -1,0 +1,50 @@
+{
+  "name": "@qpjoy/electron-market",
+  "version": "0.2.1",
+  "description": "Marketplace host runtime + admin panel for QPJoy electron apps. Embed in your Electron main process to install, sandbox, and update plugins from a local SPA on 127.0.0.1:23455. Formerly published as @qpjoy/electron-plugin.",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "README.md"],
+  "keywords": ["electron", "plugin", "marketplace", "qpjoy", "plugin-host"],
+  "homepage": "https://github.com/qpjoy/electron-plugin",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qpjoy/electron-plugin.git",
+    "directory": "packages/electron-market"
+  },
+  "qpjoyPlugin": {
+    "specVersion": 1,
+    "self": true,
+    "manifest": "dist/plugin.manifest.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node ../../scripts/copy-admin-ui.mjs && node -e \"require('fs').copyFileSync('src/plugin.manifest.json','dist/plugin.manifest.json')\"",
+    "build:host-only": "tsc -p tsconfig.json && node -e \"require('fs').copyFileSync('src/plugin.manifest.json','dist/plugin.manifest.json')\"",
+    "prepack": "pnpm build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@qpjoy/marketplace-db": "workspace:^",
+    "better-sqlite3": "^11.8.1",
+    "semver": "^7.6.3"
+  },
+  "peerDependencies": {
+    "@qpjoy/plugin-sdk": ">=0.1.0",
+    "electron": ">=28"
+  },
+  "devDependencies": {
+    "@qpjoy/plugin-sdk": "workspace:*",
+    "@qpjoy/electron-market-admin-ui": "workspace:*",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.7",
+    "@types/semver": "^7.5.8",
+    "electron": "^34.0.0",
+    "typescript": "^5.7.3"
+  }
+}
