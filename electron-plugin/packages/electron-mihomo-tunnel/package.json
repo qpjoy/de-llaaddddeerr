@@ -4,6 +4,7 @@
   "private": false,
   "description": "Reusable QPJoy tunnel runtime and CLI for Electron apps on macOS and Linux.",
   "license": "UNLICENSED",
+  "homepage": "https://www.npmjs.com/package/@qpjoy/electron-tunnel",
   "type": "commonjs",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

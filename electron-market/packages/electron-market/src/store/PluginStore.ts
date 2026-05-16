@@ -54,6 +54,42 @@ function shouldCopyPath(src: string): boolean {
   return true;
 }
 
+/**
+ * Best-effort directory link from `sourceDir` to `targetDir`.
+ *
+ * Strategy:
+ *   1. On Windows: use a **junction** (`fs.symlink(..., 'junction')`). NTFS
+ *      junctions don't require `SeCreateSymbolicLinkPrivilege` so they
+ *      work for unprivileged users. Limitation: same-volume only.
+ *   2. On macOS / Linux: a regular directory symlink.
+ *   3. If either fails (e.g. Windows cross-volume, sandboxed FS, etc.),
+ *      fall back to a recursive copy. Copies are slower and lose the
+ *      "edit source → see change immediately" dev workflow, but every
+ *      Electron `require()` path keeps working because the destination
+ *      tree is self-contained.
+ */
+async function linkOrCopy(sourceDir: string, targetDir: string): Promise<void> {
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+  try {
+    await symlink(sourceDir, targetDir, linkType);
+    return;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    // EPERM: e.g. Windows without admin AND junction unavailable (rare).
+    // ENOTSUP / EXDEV: cross-volume junctions.
+    if (code !== 'EPERM' && code !== 'ENOTSUP' && code !== 'EXDEV') {
+      throw err;
+    }
+  }
+  // Fallback: deep copy. cpSync via `cp` from fs/promises supports
+  // recursive copying since Node 16.7.
+  await cp(sourceDir, targetDir, {
+    recursive: true,
+    dereference: true,
+    filter: (src) => shouldCopyPath(src)
+  });
+}
+
 export interface PluginStoreOptions {
   pluginsRoot: string;
   registry: PluginRegistry;
@@ -172,7 +208,7 @@ export class PluginStore {
           const targetDir = join(stagingDir, 'node_modules', input.npm);
           // mkdir the PARENT (e.g. node_modules/@qpjoy), not the target itself.
           await mkdir(join(targetDir, '..'), { recursive: true });
-          await symlink(sourceDir, targetDir, 'dir');
+          await linkOrCopy(sourceDir, targetDir);
           break;
         }
       }
