@@ -29,12 +29,13 @@ export async function spaRoutes(app: FastifyInstance): Promise<void> {
   const root = process.env.SPA_DIST
     ? resolve(process.env.SPA_DIST)
     : DEFAULT_DIST;
+  const indexPath = resolve(root, 'index.html');
 
-  if (!existsSync(root)) {
+  if (!existsSync(root) || !existsSync(indexPath)) {
     app.log.warn(
-      { spaDist: root },
-      '[spa] SPA dist not found — skipping /admin/* mount. ' +
-        'Symlink electron-market/packages/admin-ui/dist here to enable.'
+      { spaDist: root, indexPath },
+      '[spa] SPA dist is missing index.html — skipping /admin/* mount. ' +
+        'Build admin-ui and copy its dist here to enable.'
     );
     return;
   }
@@ -50,7 +51,7 @@ export async function spaRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // Cache the index for SPA fallback.
-  const indexHtml = readFileSync(resolve(root, 'index.html'), 'utf8');
+  const indexHtml = readFileSync(indexPath, 'utf8');
 
   app.setNotFoundHandler((req, reply) => {
     if (req.url.startsWith('/admin/')) {

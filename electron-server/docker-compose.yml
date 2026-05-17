@@ -46,7 +46,7 @@ services:
       NPM_SCOPE: ${NPM_SCOPE:-@qpjoy}
       NPM_PREFIX: ${NPM_PREFIX:-electron-}
       REQUIRE_VERIFICATION: ${REQUIRE_VERIFICATION:-0}
-      SPA_DIST: /app/data/spa-dist
+      SPA_DIST: /app/spa-dist
       # In-container sync scheduler (no system cron needed).
       SYNC_ENABLED: ${SYNC_ENABLED:-1}
       SYNC_ON_BOOT: ${SYNC_ON_BOOT:-1}

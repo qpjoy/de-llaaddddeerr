@@ -123,7 +123,7 @@ The data volume persists `version.json`, `marketplace-index.json`, the
 | `NODE_ENV` | pretty logger off when `production` | unset |
 | `DATABASE_URL` | switch to Postgres backend; runs migrations at boot | unset → JSON file backend |
 | `PG_POOL_MAX` | pg pool size | `8` |
-| `SPA_DIST` | path to admin-ui dist served at `/admin/*` | `data/spa-dist` |
+| `SPA_DIST` | path to admin-ui dist served at `/admin/*` | `data/spa-dist` locally, `/app/spa-dist` in Docker |
 | `SYNC_ENABLED` | run the in-process npm sync scheduler | `1` |
 | `SYNC_ON_BOOT` | trigger one sync ~3s after server start | `1` |
 | `SYNC_INTERVAL_MS` | interval between scheduled syncs (min 60s, default 1h) | `3600000` |

@@ -3,7 +3,7 @@
 # The image bundles:
 #   - the compiled Fastify server (dist/)
 #   - the SQL migration files (db/migrations/)  → run by pg pool at boot
-#   - the prebuilt admin SPA            (data/spa-dist/)  → served at /admin/
+#   - the prebuilt admin SPA            (/app/spa-dist/)  → served at /admin/
 #
 # The SPA lives in a sibling workspace (electron-plugin/packages/admin-ui).
 # `scripts/manage.sh build` copies its dist into ./data/spa-dist before
@@ -22,7 +22,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=8080
 ENV HOST=0.0.0.0
-ENV SPA_DIST=/app/data/spa-dist
+ENV SPA_DIST=/app/spa-dist
 
 # Runtime deps only (no devDeps, no source).
 COPY --from=build /app/node_modules ./node_modules
@@ -33,8 +33,9 @@ COPY --from=build /app/dist          ./dist
 COPY --from=build /app/db/migrations ./dist/db/migrations
 COPY --from=build /app/package.json  ./package.json
 # SPA bundle (may be empty if not built yet — server logs a warning and
-# falls back to JSON API only).
-COPY --from=build /app/data/spa-dist ./data/spa-dist
+# falls back to JSON API only). Keep this outside /app/data because that path
+# is a runtime volume in docker-compose.
+COPY --from=build /app/data/spa-dist ./spa-dist
 
 VOLUME ["/app/data"]
 EXPOSE 8080
