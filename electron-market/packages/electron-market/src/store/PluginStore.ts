@@ -23,7 +23,7 @@ const execFileAsync = promisify(execFile);
  * On macOS / Linux the no-shell `execFile` fast path is fine and avoids
  * any sh quoting concerns.
  */
-async function exec(file: string, args: string[], opts: { cwd: string }): Promise<void> {
+async function exec(file: string, args: string[], opts: { cwd: string; env?: NodeJS.ProcessEnv }): Promise<void> {
   if (process.platform !== 'win32') {
     await execFileAsync(file, args, opts);
     return;
@@ -36,6 +36,7 @@ async function exec(file: string, args: string[], opts: { cwd: string }): Promis
     );
     const child = spawn(file, quoted, {
       cwd: opts.cwd,
+      env: opts.env ? { ...process.env, ...opts.env } : process.env,
       stdio: 'pipe',
       shell: true,
       windowsHide: true
@@ -170,6 +171,19 @@ function installArgs(target: string, allowScripts: boolean): string[] {
   return args;
 }
 
+function electronNativeBuildEnv(): NodeJS.ProcessEnv | null {
+  const electronVersion = process.versions.electron;
+  if (!electronVersion) return null;
+
+  return {
+    npm_config_runtime: 'electron',
+    npm_config_target: electronVersion,
+    npm_config_disturl: 'https://electronjs.org/headers',
+    npm_config_build_from_source: 'true',
+    npm_config_force: 'true'
+  };
+}
+
 /**
  * Filesystem layer: install / uninstall npm packages into
  * `userData/plugins/<id>@<version>/` and read their manifests.
@@ -225,6 +239,42 @@ export class PluginStore {
     // better-sqlite3 database for standalone mode. Installing it with
     // --ignore-scripts leaves the native .node binding absent on Windows.
     return npm === '@qpjoy/electron-plugin-tunnel';
+  }
+
+  private nativeRebuildPackages(npm: string): string[] {
+    return npm === '@qpjoy/electron-plugin-tunnel' ? ['better-sqlite3'] : [];
+  }
+
+  private async rebuildNativeDependencies(input: { id: string; npm: string; stagingDir: string; packageManager: 'npm' | 'pnpm' }): Promise<void> {
+    const packages = this.nativeRebuildPackages(input.npm);
+    if (packages.length === 0) return;
+
+    const env = electronNativeBuildEnv();
+    if (!env) return;
+
+    this.setProgress(input.id, {
+      stage: 'installing',
+      message: '正在为 Electron 准备原生依赖',
+      error: null
+    });
+
+    for (const pkg of packages) {
+      const args = input.packageManager === 'pnpm'
+        ? ['rebuild', pkg]
+        : [
+            'rebuild',
+            pkg,
+            '--build-from-source',
+            '--runtime=electron',
+            `--target=${process.versions.electron}`,
+            '--disturl=https://electronjs.org/headers'
+          ];
+      await exec(
+        input.packageManager,
+        args,
+        { cwd: input.stagingDir, env }
+      );
+    }
   }
 
   private async downloadTarball(url: string, dest: string, id: string): Promise<void> {
@@ -416,6 +466,13 @@ export class PluginStore {
           break;
         }
       }
+
+      await this.rebuildNativeDependencies({
+        id: input.id,
+        npm: input.npm,
+        stagingDir,
+        packageManager: pm
+      });
 
       this.setProgress(input.id, {
         stage: 'finalizing',

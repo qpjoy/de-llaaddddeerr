@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { basename, join } from 'path';
 import { gunzipSync } from 'zlib';
@@ -67,21 +67,8 @@ function needsElevatedTun(settings: RuntimeSettings): boolean {
     && (process.platform === 'darwin' || process.platform === 'linux');
 }
 
-function isWindowsAdministrator(): boolean {
-  if (process.platform !== 'win32') {
-    return false;
-  }
-
-  try {
-    const result = spawnSync('net', ['session'], { stdio: 'ignore', windowsHide: true });
-    return result.status === 0;
-  } catch {
-    return false;
-  }
-}
-
 function tunAdministratorMessage(): string {
-  return '虚拟网卡模式需要管理员权限。请退出应用后右键选择“以管理员身份运行”，或切回 App 模式。';
+  return '虚拟网卡启动失败：Windows 拒绝配置 TUN。请确认应用是“以管理员身份运行”，或切回 App 模式。';
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -516,6 +503,15 @@ export class MihomoManager extends EventEmitter {
     });
 
     this.log('info', `Mihomo started pid=${this.child.pid ?? 'unknown'}`);
+
+    if (this.shouldWatchWindowsTun(settings)) {
+      await delay(1200);
+      if (this.lastRuntimeError) {
+        const errorMessage = this.lastRuntimeError;
+        await this.stopUnlocked();
+        throw new Error(errorMessage);
+      }
+    }
   }
 
   private resolveCorePath(): string {
@@ -779,6 +775,8 @@ export class MihomoManager extends EventEmitter {
   }
 
   private async reloadRuntimeConfig(): Promise<boolean> {
+    const settings = this.db.getSettings();
+    this.lastRuntimeError = null;
     const configPath = this.renderConfig();
     let response;
     try {
@@ -788,6 +786,13 @@ export class MihomoManager extends EventEmitter {
       return false;
     }
     if (response.ok) {
+      if (this.shouldWatchWindowsTun(settings)) {
+        await delay(1200);
+        if (this.lastRuntimeError) {
+          this.log('warn', `Runtime config hot reload failed: ${this.lastRuntimeError}`);
+          return false;
+        }
+      }
       this.log('info', 'Runtime config hot reloaded');
       return true;
     }
@@ -906,10 +911,6 @@ export class MihomoManager extends EventEmitter {
     if (!settings.tunInstalled) {
       throw new Error('虚拟网卡模式还没有启用 TUN 配置。请先在「代理」页点击「安装 TUN」，或切回 App 模式。');
     }
-
-    if (process.platform === 'win32' && !isWindowsAdministrator()) {
-      throw new Error(tunAdministratorMessage());
-    }
   }
 
   private runtimeHealth(settings: RuntimeSettings, running: boolean): TunnelStatus['health'] {
@@ -918,14 +919,6 @@ export class MihomoManager extends EventEmitter {
         ok: false,
         level: 'error',
         message: this.lastRuntimeError
-      };
-    }
-
-    if (running && settings.mode === 'system-tun' && settings.tunInstalled && process.platform === 'win32' && !isWindowsAdministrator()) {
-      return {
-        ok: false,
-        level: 'error',
-        message: tunAdministratorMessage()
       };
     }
 
@@ -960,5 +953,9 @@ export class MihomoManager extends EventEmitter {
     }
 
     return null;
+  }
+
+  private shouldWatchWindowsTun(settings: RuntimeSettings): boolean {
+    return process.platform === 'win32' && settings.mode === 'system-tun' && settings.tunInstalled;
   }
 }
