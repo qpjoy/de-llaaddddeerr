@@ -43,6 +43,17 @@ export interface SyncResult {
   error: string | null;
 }
 
+export interface InstallProgress {
+  id: string;
+  stage: 'queued' | 'downloading' | 'installing' | 'finalizing' | 'done' | 'failed';
+  message: string;
+  receivedBytes: number;
+  totalBytes: number | null;
+  percent: number | null;
+  updatedAt: string;
+  error: string | null;
+}
+
 /* ────────────────────────────────────────────────────────────────────────── */
 /* Shared reactive state                                                      */
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -53,6 +64,7 @@ const sync = ref<SyncStatus | null>(null);
 const busy = ref(false);
 const syncing = ref(false);
 const seedIds = ref<string[]>([]);
+const installProgress = ref<Record<string, InstallProgress>>({});
 
 /* ────────────────────────────────────────────────────────────────────────── */
 /* Fetch helpers                                                              */
@@ -202,6 +214,33 @@ export function usePluginHost() {
     }
   }
 
+  async function refreshInstallProgress(id?: string): Promise<void> {
+    if (MODE === 'server') return;
+    try {
+      const qs = id ? `?id=${encodeURIComponent(id)}` : '';
+      const out = await get<{ items: InstallProgress[] }>(`/api/install-progress${qs}`);
+      installProgress.value = {
+        ...installProgress.value,
+        ...Object.fromEntries(out.items.map((item) => [item.id, item]))
+      };
+    } catch {
+      // Progress is best-effort; install/upgrade still reports its final error.
+    }
+  }
+
+  async function trackInstallProgress<T>(id: string, work: () => Promise<T>): Promise<T> {
+    await refreshInstallProgress(id);
+    const timer = window.setInterval(() => {
+      void refreshInstallProgress(id);
+    }, 500);
+    try {
+      return await work();
+    } finally {
+      window.clearInterval(timer);
+      await refreshInstallProgress(id);
+    }
+  }
+
   async function syncNow(): Promise<SyncResult | null> {
     if (syncing.value) return null;
     syncing.value = true;
@@ -253,7 +292,9 @@ export function usePluginHost() {
     busy.value = true;
     lastInstallError.value = null;
     try {
-      await post<{ ok: boolean }>(`/api/plugins/${encodeURIComponent(id)}/reseed`);
+      await trackInstallProgress(id, () =>
+        post<{ ok: boolean }>(`/api/plugins/${encodeURIComponent(id)}/reseed`)
+      );
       toast(`已重新预装 ${id}`);
       await refreshInstalled();
       return true;
@@ -271,9 +312,11 @@ export function usePluginHost() {
     busy.value = true;
     lastInstallError.value = null;
     try {
-      await post<{ ok: boolean }>(
-        `/api/plugins/${encodeURIComponent(id)}/upgrade`,
-        version ? { version } : undefined
+      await trackInstallProgress(id, () =>
+        post<{ ok: boolean }>(
+          `/api/plugins/${encodeURIComponent(id)}/upgrade`,
+          version ? { version } : undefined
+        )
       );
       toast(`${id} 已升级${version ? ` 到 ${version}` : ''}`);
       await refreshInstalled();
@@ -347,7 +390,7 @@ export function usePluginHost() {
     busy.value = true;
     lastInstallError.value = null;
     try {
-      await post('/api/plugins/install', { id, version });
+      await trackInstallProgress(id, () => post('/api/plugins/install', { id, version }));
       toast(`已下载 ${id}@${version ?? 'latest'}，请审核权限并激活`);
       await refreshInstalled();
     } catch (err) {
@@ -370,7 +413,7 @@ export function usePluginHost() {
   }) {
     busy.value = true;
     try {
-      await post('/api/plugins/install-local', payload);
+      await trackInstallProgress(payload.id, () => post('/api/plugins/install-local', payload));
       toast('本地安装完成');
       await refreshInstalled();
     } catch (err) {
@@ -420,11 +463,13 @@ export function usePluginHost() {
     busy,
     syncing,
     seedIds,
+    installProgress,
     lastInstallError,
     refreshAll,
     refreshInstalled,
     refreshMarketplace,
     refreshSync,
+    refreshInstallProgress,
     refreshSeedConfig,
     findInstalled,
     isSeedable,
@@ -437,6 +482,7 @@ export function usePluginHost() {
     reseed,
     upgrade,
     hasUpgrade,
+    progressFor: (id: string) => installProgress.value[id] ?? null,
     logs,
     syncNow,
     clearInstallError,

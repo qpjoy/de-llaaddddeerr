@@ -285,9 +285,8 @@
               v-if="host.hasUpgrade(entry.id, entry.latest)"
               color="primary"
               icon="upgrade"
-              :label="`升级到 ${entry.latest}`"
+              :label="actionLabel(entry.id, `升级到 ${entry.latest}`)"
               :disable="host.busy.value"
-              :loading="host.busy.value"
               @click="host.upgrade(entry.id, entry.latest)"
             />
             <q-btn
@@ -328,9 +327,8 @@
             v-else-if="host.isSeedable(entry.id)"
             color="primary"
             icon="restart_alt"
-            label="重新预装"
+            :label="actionLabel(entry.id, '重新预装')"
             :disable="host.busy.value"
-            :loading="host.busy.value"
             @click="host.reseed(entry.id)"
           >
             <q-tooltip>从客户端内置源恢复，绕过 npm 市场流程。</q-tooltip>
@@ -339,9 +337,8 @@
             v-else
             color="primary"
             icon="cloud_download"
-            :label="isGame(entry) ? '安装游戏' : '安装'"
+            :label="actionLabel(entry.id, isGame(entry) ? '安装游戏' : '安装')"
             :disable="host.busy.value"
-            :loading="host.busy.value"
             @click="host.install(entry.id, entry.latest)"
           />
           <q-btn
@@ -355,6 +352,19 @@
           <span v-if="entry.tarballUrl" class="text-caption text-grey-7">
             支持 tarball 直链
           </span>
+        </div>
+
+        <div v-if="activeProgress(entry.id)" class="q-mt-sm">
+          <q-linear-progress
+            rounded
+            size="8px"
+            :indeterminate="progressIndeterminate(entry.id)"
+            :value="progressValue(entry.id)"
+            :color="progressColor(entry.id)"
+          />
+          <div class="text-caption text-grey-7 q-mt-xs">
+            {{ progressCaption(entry.id) }}
+          </div>
         </div>
       </div>
     </div>
@@ -508,6 +518,60 @@ function isGame(entry: { category?: string | null; metadata?: Record<string, unk
   return entryKind(entry) === 'game';
 }
 
+function activeProgress(id: string) {
+  const progress = host.progressFor(id);
+  if (!progress) return null;
+  if (progress.stage === 'done') return null;
+  return progress;
+}
+
+function progressValue(id: string): number {
+  const percent = host.progressFor(id)?.percent;
+  return typeof percent === 'number' ? percent / 100 : 0;
+}
+
+function progressIndeterminate(id: string): boolean {
+  const progress = host.progressFor(id);
+  return !progress || progress.percent === null || progress.stage === 'installing' || progress.stage === 'finalizing';
+}
+
+function progressColor(id: string): string {
+  return host.progressFor(id)?.stage === 'failed' ? 'negative' : 'primary';
+}
+
+function actionLabel(id: string, fallback: string): string {
+  const progress = activeProgress(id);
+  if (!progress) return fallback;
+  if (progress.stage === 'downloading' && progress.percent !== null) return `${progress.percent}%`;
+  if (progress.stage === 'installing') return '安装中';
+  if (progress.stage === 'finalizing') return '收尾中';
+  if (progress.stage === 'failed') return '失败';
+  return '准备中';
+}
+
+function progressCaption(id: string): string {
+  const progress = host.progressFor(id);
+  if (!progress) return '';
+  if (progress.stage === 'failed') return progress.error ? `失败：${progress.error}` : '安装失败';
+  if (progress.totalBytes && progress.totalBytes > 0) {
+    const percent = progress.percent ?? 0;
+    return `${progress.message}：${formatBytes(progress.receivedBytes)} / ${formatBytes(progress.totalBytes)} (${percent}%)`;
+  }
+  return progress.message;
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
+
 function entryIcon(entry: { category?: string | null; metadata?: Record<string, unknown> | null }): string {
   return isGame(entry) ? 'sports_esports' : 'extension';
 }
@@ -536,6 +600,9 @@ const installErrorHint = computed(() => {
   }
   if (/Cannot find module/i.test(err)) {
     return '插件依赖未完整安装。重启 host 再试。';
+  }
+  if (/better_sqlite3|Could not locate the bindings file/i.test(err)) {
+    return 'Tunnel 需要 SQLite 原生依赖。请发布并升级到修复后的 tunnel + market 版本，安装器会允许官方 Tunnel 准备 native binding。';
   }
   if (/ENOENT/i.test(err) || /tarball not found/i.test(err)) {
     return '本地源文件路径不存在。';

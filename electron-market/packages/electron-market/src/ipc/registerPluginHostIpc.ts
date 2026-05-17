@@ -45,13 +45,14 @@ function toLegacyEntry(row: DbEntry): LegacyEntry & { visibility?: string } {
 async function resolveMarketplaceEntry(
   deps: Deps,
   id: string
-): Promise<Pick<LegacyEntry, 'id' | 'npm' | 'latest'> | null> {
+): Promise<(Pick<LegacyEntry, 'id' | 'npm' | 'latest'> & { tarballUrl?: string }) | null> {
   const dbEntry = deps.registry.marketplaceDb().getEntry(id);
   if (dbEntry) {
     return {
       id: dbEntry.id,
       npm: dbEntry.npm,
-      latest: dbEntry.latestVersion
+      latest: dbEntry.latestVersion,
+      tarballUrl: dbEntry.tarballUrl ?? undefined
     };
   }
 
@@ -60,7 +61,8 @@ async function resolveMarketplaceEntry(
     ? {
         id: legacyEntry.id,
         npm: legacyEntry.npm,
-        latest: legacyEntry.latest
+        latest: legacyEntry.latest,
+        tarballUrl: legacyEntry.tarballUrl
       }
     : null;
 }
@@ -89,8 +91,14 @@ export function registerPluginHostIpc(ipc: IpcMain, deps: Deps): void {
   ipc.handle('plugin-host:install', async (_e, payload: { id: string; version: string }) => {
     const entry = await resolveMarketplaceEntry(deps, payload.id);
     if (!entry) throw new Error(`Unknown plugin: ${payload.id}`);
-    return deps.store.install({ id: entry.id, npm: entry.npm, version: payload.version ?? entry.latest });
+    return deps.store.install({
+      id: entry.id,
+      npm: entry.npm,
+      version: payload.version ?? entry.latest,
+      tarballUrl: entry.tarballUrl
+    });
   });
+  ipc.handle('plugin-host:install-progress', (_e, id?: string) => deps.store.getInstallProgress(id));
   ipc.handle(
     'plugin-host:install-local',
     (_e, payload: { id: string; npm: string; source: { type: 'tarball' | 'local-dir'; path: string } }) =>

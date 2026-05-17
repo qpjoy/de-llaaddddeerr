@@ -67,6 +67,10 @@ const MIME: Record<string, string> = {
   '.map': 'application/json; charset=utf-8'
 };
 
+type InstallEntry = Pick<LegacyEntry, 'id' | 'npm' | 'latest'> & {
+  tarballUrl?: string;
+};
+
 export interface AdminServerOptions {
   port: number;
   registry: PluginRegistry;
@@ -142,6 +146,11 @@ export class AdminServer {
     if (method === 'GET' && pathname === '/api/plugins') {
       return this.json(res, 200, this.opts.registry.list());
     }
+    if (method === 'GET' && pathname === '/api/install-progress') {
+      const query = parseUrl(req.url ?? '/', true).query;
+      const id = typeof query.id === 'string' ? query.id : undefined;
+      return this.json(res, 200, { items: this.opts.store.getInstallProgress(id) });
+    }
     if (method === 'GET' && pathname === '/api/marketplace') {
       // Marketplace state is now sourced from the DB (seeded at first run +
       // refreshed by remote sync). The MarketplaceClient is still consulted
@@ -167,7 +176,8 @@ export class AdminServer {
       const manifest = await this.opts.store.install({
         id: entry.id,
         npm: entry.npm,
-        version: body.version ?? entry.latest
+        version: body.version ?? entry.latest,
+        tarballUrl: entry.tarballUrl
       });
       return this.json(res, 200, manifest);
     }
@@ -514,13 +524,14 @@ export class AdminServer {
     return true;
   }
 
-  private async resolveMarketplaceEntry(id: string): Promise<Pick<LegacyEntry, 'id' | 'npm' | 'latest'> | null> {
+  private async resolveMarketplaceEntry(id: string): Promise<InstallEntry | null> {
     const dbEntry = this.opts.registry.marketplaceDb().getEntry(id);
     if (dbEntry) {
       return {
         id: dbEntry.id,
         npm: dbEntry.npm,
-        latest: dbEntry.latestVersion
+        latest: dbEntry.latestVersion,
+        tarballUrl: dbEntry.tarballUrl ?? undefined
       };
     }
 
@@ -529,7 +540,8 @@ export class AdminServer {
       ? {
           id: legacyEntry.id,
           npm: legacyEntry.npm,
-          latest: legacyEntry.latest
+          latest: legacyEntry.latest,
+          tarballUrl: legacyEntry.tarballUrl
         }
       : null;
   }

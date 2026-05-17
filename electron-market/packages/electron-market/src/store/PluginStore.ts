@@ -1,7 +1,7 @@
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import { readFile, rm, mkdir, cp, rename, writeFile, symlink, lstat } from 'fs/promises';
-import { existsSync } from 'fs';
+import { createWriteStream, existsSync } from 'fs';
 import { join, isAbsolute, resolve } from 'path';
 
 import type { PluginManifest } from '@qpjoy/electron-plugin-sdk';
@@ -67,7 +67,7 @@ async function exec(file: string, args: string[], opts: { cwd: string }): Promis
  *    bootstrap it without any network at all.
  */
 export type PluginSource =
-  | { type: 'registry'; version: string }
+  | { type: 'registry'; version: string; tarballUrl?: string | null }
   | { type: 'tarball'; path: string }
   | { type: 'local-dir'; path: string };
 
@@ -144,33 +144,154 @@ export interface PluginStoreOptions {
   packageManager?: 'npm' | 'pnpm';
 }
 
+export type InstallProgressStage =
+  | 'queued'
+  | 'downloading'
+  | 'installing'
+  | 'finalizing'
+  | 'done'
+  | 'failed';
+
+export interface InstallProgress {
+  id: string;
+  stage: InstallProgressStage;
+  message: string;
+  receivedBytes: number;
+  totalBytes: number | null;
+  percent: number | null;
+  updatedAt: string;
+  error: string | null;
+}
+
+function installArgs(target: string, allowScripts: boolean): string[] {
+  const args = ['install', '--no-audit', '--no-fund'];
+  if (!allowScripts) args.push('--ignore-scripts');
+  args.push(target);
+  return args;
+}
+
 /**
  * Filesystem layer: install / uninstall npm packages into
  * `userData/plugins/<id>@<version>/` and read their manifests.
  *
  * Strict rules:
- *  - `--ignore-scripts` always passed; plugins MUST NOT rely on
- *    `postinstall`. (Anything they need at install-time goes into the
- *    activate path with explicit permission grants.)
+ *  - `--ignore-scripts` is the default. First-party bootstrap packages that
+ *    intentionally ship native storage (currently Tunnel + better-sqlite3)
+ *    are allowed to run install scripts so their native binding exists.
  *  - Each plugin gets its own dir with its own `node_modules` — no hoisting,
  *    no cross-talk.
  */
 export class PluginStore {
+  private readonly progress = new Map<string, InstallProgress>();
+
   constructor(private readonly opts: PluginStoreOptions) {}
 
   pluginDir(id: string, version: string): string {
     return join(this.opts.pluginsRoot, `${id}@${version}`);
   }
 
+  getInstallProgress(id?: string): InstallProgress[] {
+    const values = [...this.progress.values()];
+    return id ? values.filter((p) => p.id === id) : values;
+  }
+
+  private setProgress(
+    id: string,
+    patch: Partial<Omit<InstallProgress, 'id' | 'updatedAt'>>
+  ): void {
+    const prev = this.progress.get(id) ?? {
+      id,
+      stage: 'queued' as InstallProgressStage,
+      message: '等待安装',
+      receivedBytes: 0,
+      totalBytes: null,
+      percent: null,
+      updatedAt: new Date().toISOString(),
+      error: null
+    };
+    const next = {
+      ...prev,
+      ...patch,
+      updatedAt: new Date().toISOString()
+    };
+    next.percent = next.totalBytes && next.totalBytes > 0
+      ? Math.max(0, Math.min(100, Math.round((next.receivedBytes / next.totalBytes) * 100)))
+      : patch.percent ?? next.percent;
+    this.progress.set(id, next);
+  }
+
+  private allowInstallScripts(npm: string): boolean {
+    // Tunnel is a first-party bootstrap plugin and intentionally owns a
+    // better-sqlite3 database for standalone mode. Installing it with
+    // --ignore-scripts leaves the native .node binding absent on Windows.
+    return npm === '@qpjoy/electron-plugin-tunnel';
+  }
+
+  private async downloadTarball(url: string, dest: string, id: string): Promise<void> {
+    this.setProgress(id, {
+      stage: 'downloading',
+      message: '正在下载安装包',
+      receivedBytes: 0,
+      totalBytes: null,
+      percent: 0,
+      error: null
+    });
+
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new Error(`download failed: ${res.status} ${res.statusText}`);
+    }
+
+    const totalRaw = res.headers.get('content-length');
+    const totalBytes = totalRaw ? Number(totalRaw) : null;
+    if (!res.body) {
+      throw new Error('download failed: empty response body');
+    }
+
+    const out = createWriteStream(dest);
+    const reader = res.body.getReader();
+    let receivedBytes = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        receivedBytes += value.byteLength;
+        await new Promise<void>((resolveWrite, rejectWrite) => {
+          out.write(Buffer.from(value), (err) => {
+            if (err) rejectWrite(err);
+            else resolveWrite();
+          });
+        });
+        this.setProgress(id, {
+          stage: 'downloading',
+          message: totalBytes ? '正在下载安装包' : `已下载 ${receivedBytes} bytes`,
+          receivedBytes,
+          totalBytes,
+          error: null
+        });
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    await new Promise<void>((resolveEnd, rejectEnd) => {
+      out.end((err?: Error | null) => {
+        if (err) rejectEnd(err);
+        else resolveEnd();
+      });
+    });
+  }
+
   /**
    * Install from the public registry. Requires network.
    * Equivalent to `install({ id, npm, source: { type:'registry', version }})`.
    */
-  async install(input: { id: string; npm: string; version: string }): Promise<PluginManifest> {
+  async install(input: { id: string; npm: string; version: string; tarballUrl?: string | null }): Promise<PluginManifest> {
     return this.installFrom({
       id: input.id,
       npm: input.npm,
-      source: { type: 'registry', version: input.version }
+      source: { type: 'registry', version: input.version, tarballUrl: input.tarballUrl }
     });
   }
 
@@ -181,6 +302,15 @@ export class PluginStore {
    */
   async installFrom(input: { id: string; npm: string; source: PluginSource }): Promise<PluginManifest> {
     const pm = this.opts.packageManager ?? 'npm';
+    const allowScripts = this.allowInstallScripts(input.npm);
+    this.setProgress(input.id, {
+      stage: 'queued',
+      message: '准备安装',
+      receivedBytes: 0,
+      totalBytes: null,
+      percent: 0,
+      error: null
+    });
 
     // We need a version up-front to compute the install dir. For local-dir we
     // read it from the source's package.json; for tarball we install first
@@ -205,26 +335,53 @@ export class PluginStore {
 
     try {
       switch (input.source.type) {
-        case 'registry':
+        case 'registry': {
+          if (input.source.tarballUrl) {
+            const tgz = join(stagingDir, `${slug}.tgz`);
+            await this.downloadTarball(input.source.tarballUrl, tgz, input.id);
+            this.setProgress(input.id, {
+              stage: 'installing',
+              message: allowScripts ? '正在安装并准备原生依赖' : '正在安装依赖',
+              error: null
+            });
+            await exec(pm, installArgs(tgz, allowScripts), { cwd: stagingDir });
+            break;
+          }
+          this.setProgress(input.id, {
+            stage: 'installing',
+            message: allowScripts ? '正在从 npm 安装并准备原生依赖' : '正在从 npm 安装',
+            error: null
+          });
           await exec(
             pm,
-            ['install', '--ignore-scripts', '--no-audit', '--no-fund', `${input.npm}@${input.source.version}`],
+            installArgs(`${input.npm}@${input.source.version}`, allowScripts),
             { cwd: stagingDir }
           );
           break;
+        }
 
         case 'tarball': {
           const tgz = isAbsolute(input.source.path) ? input.source.path : resolve(input.source.path);
           if (!existsSync(tgz)) throw new Error(`Tarball not found: ${tgz}`);
+          this.setProgress(input.id, {
+            stage: 'installing',
+            message: allowScripts ? '正在安装并准备原生依赖' : '正在安装本地包',
+            error: null
+          });
           await exec(
             pm,
-            ['install', '--ignore-scripts', '--no-audit', '--no-fund', tgz],
+            installArgs(tgz, allowScripts),
             { cwd: stagingDir }
           );
           break;
         }
 
         case 'local-dir': {
+          this.setProgress(input.id, {
+            stage: 'installing',
+            message: '正在使用内置插件源',
+            error: null
+          });
           // Symlink the source dir into `node_modules/<npm>/` rather than
           // copying. Two big reasons:
           //
@@ -260,6 +417,11 @@ export class PluginStore {
         }
       }
 
+      this.setProgress(input.id, {
+        stage: 'finalizing',
+        message: '正在读取插件清单',
+        error: null
+      });
       const manifest = await this.readManifest(stagingDir, input.npm);
       if (manifest.id !== input.id) {
         throw new Error(
@@ -294,8 +456,21 @@ export class PluginStore {
           : 'local-dir'
       );
 
+      this.setProgress(input.id, {
+        stage: 'done',
+        message: '安装完成',
+        receivedBytes: 0,
+        totalBytes: null,
+        percent: 100,
+        error: null
+      });
       return manifest;
     } catch (err) {
+      this.setProgress(input.id, {
+        stage: 'failed',
+        message: '安装失败',
+        error: err instanceof Error ? err.message : String(err)
+      });
       // Best-effort cleanup of the staging dir on failure.
       await rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
       throw err;

@@ -515,8 +515,8 @@ export function createElectronPluginHost(
 
     // Resolve target version from the marketplace if not specified.
     let target = version;
+    const entry = marketplaceDb.getEntry(id);
     if (!target) {
-      const entry = marketplaceDb.getEntry(id);
       if (!entry) throw new Error(`no marketplace entry for ${id}`);
       target = entry.latestVersion;
     }
@@ -530,7 +530,11 @@ export function createElectronPluginHost(
       await runtime.deactivate(id).catch(() => undefined);
     }
 
-    await store.upgrade(id, { type: 'registry', version: target });
+    await store.upgrade(id, {
+      type: 'registry',
+      version: target,
+      tarballUrl: entry && target === entry.latestVersion ? entry.tarballUrl : null
+    });
 
     // Re-activate if we tore it down AND grants survived; if the new
     // manifest demanded new permissions we leave it `awaitingGrant`.
