@@ -121,6 +121,11 @@ cmd_redeploy() {
   ensure_spa
   say "rebuilding + restarting market (postgres untouched)"
   "${DC[@]}" build market
+  # docker-compose v1.29.x can crash with KeyError: 'ContainerConfig' while
+  # recreating a container in-place. Removing the service container first keeps
+  # named volumes intact and forces a clean create path on both v1 and v2.
+  say "removing old market container (volumes preserved)"
+  "${DC[@]}" rm -f -s market >/dev/null 2>&1 || true
   "${DC[@]}" up -d market
   ok "redeployed. Tail logs with: $0 logs"
 }
