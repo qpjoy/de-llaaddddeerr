@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { basename, join } from 'path';
 import { gunzipSync } from 'zlib';
@@ -65,6 +65,23 @@ function needsElevatedTun(settings: RuntimeSettings): boolean {
     && settings.tunInstalled
     && !isRootUser()
     && (process.platform === 'darwin' || process.platform === 'linux');
+}
+
+function isWindowsAdministrator(): boolean {
+  if (process.platform !== 'win32') {
+    return false;
+  }
+
+  try {
+    const result = spawnSync('net', ['session'], { stdio: 'ignore', windowsHide: true });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+function tunAdministratorMessage(): string {
+  return '虚拟网卡模式需要管理员权限。请退出应用后右键选择“以管理员身份运行”，或切回 App 模式。';
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -162,6 +179,7 @@ export class MihomoManager extends EventEmitter {
   private child: ChildProcessWithoutNullStreams | null = null;
   private elevatedPid: number | null = null;
   private operation: Promise<unknown> = Promise.resolve();
+  private lastRuntimeError: string | null = null;
 
   constructor(private readonly options: TunnelManagerOptions) {
     super();
@@ -189,6 +207,7 @@ export class MihomoManager extends EventEmitter {
       pid: running ? this.child?.pid ?? this.elevatedPid : null,
       mode: settings.mode,
       tunInstalled: settings.tunInstalled,
+      health: this.runtimeHealth(settings, running),
       ports: settings.ports,
       activeSubscription: this.db.getActiveSubscription(),
       corePath,
@@ -324,7 +343,9 @@ export class MihomoManager extends EventEmitter {
   }
 
   setMode(mode: RuntimeMode): boolean {
-    const current = this.db.getSettings().mode;
+    const settings = this.db.getSettings();
+    this.assertRuntimeModeAvailable({ ...settings, mode });
+    const current = settings.mode;
     if (current === mode) {
       return false;
     }
@@ -346,6 +367,8 @@ export class MihomoManager extends EventEmitter {
   }
 
   installTunFeature(): void {
+    const settings = this.db.getSettings();
+    this.assertRuntimeModeAvailable({ ...settings, tunInstalled: true });
     this.db.updateSettings({ tunInstalled: true });
     this.log('info', 'TUN feature enabled for generated runtime config');
   }
@@ -425,6 +448,7 @@ export class MihomoManager extends EventEmitter {
 
   renderConfig(): string {
     const settings = this.db.getSettings();
+    this.assertRuntimeModeAvailable(settings);
     const active = this.db.getActiveSubscription();
     if (!active?.content) {
       throw new Error('active subscription has no downloaded content');
@@ -470,6 +494,7 @@ export class MihomoManager extends EventEmitter {
     }
 
     const configPath = this.renderConfig();
+    this.lastRuntimeError = null;
     if (needsElevatedTun(settings)) {
       await this.startElevated(corePath, configPath);
       return;
@@ -483,8 +508,8 @@ export class MihomoManager extends EventEmitter {
       }
     });
 
-    this.child.stdout.on('data', (chunk) => this.log('info', chunk.toString().trim()));
-    this.child.stderr.on('data', (chunk) => this.log('warn', chunk.toString().trim()));
+    this.child.stdout.on('data', (chunk) => this.handleCoreOutput('info', chunk.toString()));
+    this.child.stderr.on('data', (chunk) => this.handleCoreOutput('warn', chunk.toString()));
     this.child.on('exit', (code, signal) => {
       this.log(code === 0 ? 'info' : 'warn', `Mihomo exited code=${code ?? 'null'} signal=${signal ?? 'null'}`);
       this.child = null;
@@ -755,7 +780,13 @@ export class MihomoManager extends EventEmitter {
 
   private async reloadRuntimeConfig(): Promise<boolean> {
     const configPath = this.renderConfig();
-    const response = await this.api.reloadConfig(configPath);
+    let response;
+    try {
+      response = await this.api.reloadConfig(configPath);
+    } catch (error) {
+      this.log('warn', `Runtime config hot reload failed: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
     if (response.ok) {
       this.log('info', 'Runtime config hot reloaded');
       return true;
@@ -794,6 +825,7 @@ export class MihomoManager extends EventEmitter {
       return;
     }
     this.child.kill('SIGTERM');
+    this.lastRuntimeError = null;
     this.log('info', 'Mihomo stop requested');
   }
 
@@ -822,6 +854,7 @@ export class MihomoManager extends EventEmitter {
       }
 
       const settings = this.db.getSettings();
+      this.assertRuntimeModeAvailable(settings);
       if (needsElevatedTun(settings) && !this.isElevatedRunning()) {
         await this.stopUnlocked();
         await delay(400);
@@ -863,5 +896,69 @@ export class MihomoManager extends EventEmitter {
     }
     this.db.addEvent(level, clean);
     this.emit('event', { level, message: clean });
+  }
+
+  private assertRuntimeModeAvailable(settings: RuntimeSettings): void {
+    if (settings.mode !== 'system-tun') {
+      return;
+    }
+
+    if (!settings.tunInstalled) {
+      throw new Error('虚拟网卡模式还没有启用 TUN 配置。请先在「代理」页点击「安装 TUN」，或切回 App 模式。');
+    }
+
+    if (process.platform === 'win32' && !isWindowsAdministrator()) {
+      throw new Error(tunAdministratorMessage());
+    }
+  }
+
+  private runtimeHealth(settings: RuntimeSettings, running: boolean): TunnelStatus['health'] {
+    if (running && this.lastRuntimeError) {
+      return {
+        ok: false,
+        level: 'error',
+        message: this.lastRuntimeError
+      };
+    }
+
+    if (running && settings.mode === 'system-tun' && settings.tunInstalled && process.platform === 'win32' && !isWindowsAdministrator()) {
+      return {
+        ok: false,
+        level: 'error',
+        message: tunAdministratorMessage()
+      };
+    }
+
+    return {
+      ok: true,
+      level: 'ok',
+      message: null
+    };
+  }
+
+  private handleCoreOutput(defaultLevel: 'info' | 'warn' | 'error', message: string): void {
+    const clean = message.trim();
+    if (!clean) {
+      return;
+    }
+
+    const runtimeError = this.detectRuntimeError(clean);
+    if (runtimeError) {
+      if (this.lastRuntimeError !== runtimeError) {
+        this.log('error', runtimeError);
+      }
+      this.lastRuntimeError = runtimeError;
+    }
+
+    const level = /level=error|\berror\b/i.test(clean) ? 'error' : defaultLevel;
+    this.log(level, clean);
+  }
+
+  private detectRuntimeError(message: string): string | null {
+    if (/Start TUN listening error|configure tun interface|Access is denied/i.test(message)) {
+      return tunAdministratorMessage();
+    }
+
+    return null;
   }
 }

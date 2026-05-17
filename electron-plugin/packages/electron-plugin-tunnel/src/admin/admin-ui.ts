@@ -212,6 +212,9 @@ export function adminHtml(): string {
       if (/Tunnel engine is not installed|缺少适配 .* 隧道引擎|tunnel engine resources/i.test(text)) {
         return text.indexOf('缺少适配') >= 0 ? text : '当前安装包缺少适配本机系统的隧道引擎。请重新安装包含本机引擎资源的版本，或在「代理」页填写本机 mihomo 可执行文件路径。';
       }
+      if (/Access is denied|configure tun interface|administrator|管理员|虚拟网卡/i.test(text)) {
+        return text.indexOf('管理员') >= 0 ? text : '虚拟网卡模式需要管理员权限。请退出应用后右键选择“以管理员身份运行”，或切回 App 模式。';
+      }
       return text || '请求失败';
     }
     async function api(path, options) {
@@ -305,6 +308,19 @@ export function adminHtml(): string {
       if (!raw) throw new Error('测试网址不能为空');
       return /^https?:\\/\\//i.test(raw) ? raw : 'https://' + raw;
     }
+    function runtimeStatusText(s) {
+      if (!s) return '检测中';
+      if (!s.running) return '已停止';
+      if (s.health && !s.health.ok) return s.health.level === 'error' ? '异常' : '警告';
+      return '运行中';
+    }
+    function runtimeHealthChip(s) {
+      if (!s || !s.health || !s.health.message || s.health.ok) return '';
+      return compactStatusChip(s.health.message, false);
+    }
+    function openTestWindow(url) {
+      return api('/api/test/window', { method: 'POST', body: JSON.stringify({ url: normalizeUrl(url) }) });
+    }
     function status() {
       return snapshot ? snapshot.status : null;
     }
@@ -328,7 +344,7 @@ export function adminHtml(): string {
       var s = status();
       var traffic = snapshot ? snapshot.traffic : {};
       return '<div class="status-strip">' +
-        metric('运行状态', s && s.running ? '运行中' : '已停止') +
+        metric('运行状态', runtimeStatusText(s)) +
         metric('当前模式', modeLabels[s ? s.mode : 'app-rule'] || 'App 模式') +
         metric('当前订阅', s && s.activeSubscription ? s.activeSubscription.name : '未选择') +
         metric('连接数', traffic.connections || 0) +
@@ -344,6 +360,7 @@ export function adminHtml(): string {
         '<button id="openAdminTab" class="btn outline">${icon('open')}<span>浏览器后台</span></button>' +
         statusChip('TUN ' + (s && s.tunInstalled ? '已安装' : '未安装'), !!(s && s.tunInstalled)) +
         statusChip('流量 ' + (traffic.available ? '可读' : '未连接'), !!traffic.available) +
+        runtimeHealthChip(s) +
         '</div></section>';
     }
     function renderProxy() {
@@ -376,7 +393,8 @@ export function adminHtml(): string {
         metric('本地代理', ':' + (s ? s.ports.mixed : 23458)) +
         metric('DNS', ':' + (s ? s.ports.dns : 23459)) +
         metric('控制接口', ':' + (s ? s.ports.controller : 23457)) +
-        '</div>';
+        '</div>' +
+        (runtimeHealthChip(s) ? '<section class="section-surface"><div class="toolbar-row">' + runtimeHealthChip(s) + '</div></section>' : '');
     }
     function renderSubscriptions() {
       var items = snapshot ? snapshot.subscriptions : [];
@@ -436,7 +454,7 @@ export function adminHtml(): string {
         '<div class="status-strip">' +
         metric('当前模式', modeLabels[s ? s.mode : 'app-rule'] || 'App 模式') +
         metric('本地代理', ':' + (s ? s.ports.mixed : 23458)) +
-        metric('运行状态', s && s.running ? '运行中' : '已停止') +
+        metric('运行状态', runtimeStatusText(s)) +
         '</div>';
     }
     function renderLogs() {
@@ -530,7 +548,7 @@ export function adminHtml(): string {
         run(function () { return api('/api/rules', { method: 'POST', body: JSON.stringify({ kind: byId('ruleKind').value, domain: byId('ruleDomain').value }) }); }, '规则已添加');
       };
       var openTest = byId('openTest');
-      if (openTest) openTest.onclick = function () { try { window.open(normalizeUrl(byId('testUrl').value), '_blank'); } catch (error) { toast(error.message, true); } };
+      if (openTest) openTest.onclick = function () { run(function () { return openTestWindow(byId('testUrl').value); }, '测试窗口已打开'); };
     }
     async function refresh() {
       snapshot = await api('/api/snapshot');
@@ -583,7 +601,7 @@ export function adminHtml(): string {
       if (element.dataset.testUrl) {
         var testInput = byId('testUrl');
         if (testInput) testInput.value = element.dataset.testUrl;
-        window.open(element.dataset.testUrl, '_blank');
+        run(function () { return openTestWindow(element.dataset.testUrl); }, '测试窗口已打开');
       }
     };
     byId('loginBtn').onclick = async function () {

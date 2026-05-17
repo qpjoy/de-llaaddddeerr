@@ -63,8 +63,8 @@ const WORKSPACE_PACKS = [
 
 /** Versions used by npm mode. Bump in lockstep with what's on the registry. */
 const NPM_VERSIONS = {
-  '@qpjoy/electron-market': '^0.3.2',
-  '@qpjoy/electron-plugin-tunnel': '^0.1.6',
+  '@qpjoy/electron-market': '^0.3.3',
+  '@qpjoy/electron-plugin-tunnel': '^0.1.7',
   '@qpjoy/electron-plugin-tunnel-engine-darwin-arm64': '^0.1.5',
   '@qpjoy/electron-plugin-tunnel-engine-darwin-x64': '^0.1.5',
   '@qpjoy/electron-plugin-tunnel-engine-linux-arm64': '^0.1.5',

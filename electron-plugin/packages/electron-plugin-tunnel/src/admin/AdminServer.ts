@@ -10,6 +10,7 @@ type RouteHandler = (req: IncomingMessage, res: ServerResponse, body: unknown) =
 
 interface AdminServerOptions {
   afterSettingsChange?: () => Promise<void> | void;
+  openTestWindow?: (url: string) => Promise<void> | void;
 }
 
 const sessions = new Set<string>();
@@ -49,6 +50,27 @@ function isAuthed(req: IncomingMessage): boolean {
     return false;
   }
   return sessions.has(header.slice('Bearer '.length));
+}
+
+function normalizeHttpUrl(value: unknown): string {
+  const raw = String(value ?? '').trim();
+  if (!raw) {
+    throw new Error('测试网址不能为空');
+  }
+
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  let parsed: URL;
+  try {
+    parsed = new URL(withProtocol);
+  } catch {
+    throw new Error('测试网址格式不正确');
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('测试网址必须使用 http 或 https');
+  }
+
+  return parsed.toString();
 }
 
 export class AdminServer {
@@ -199,6 +221,16 @@ export class AdminServer {
         this.manager.setCorePath(corePath);
         await this.notifySettingsChange();
         sendJson(res, 200, this.manager.status());
+      };
+    }
+    if (method === 'POST' && pathname === '/api/test/window') {
+      return async (_req, res, body) => {
+        if (!this.options.openTestWindow) {
+          throw new Error('当前宿主不支持打开测试窗口');
+        }
+        const url = normalizeHttpUrl((body as { url?: unknown }).url);
+        await this.options.openTestWindow(url);
+        sendJson(res, 200, { ok: true, url });
       };
     }
     if (method === 'POST' && pathname === '/api/subscriptions') {

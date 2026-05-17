@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'fs';
 import { join, resolve } from 'path';
+import { BrowserWindow } from 'electron';
 import type { App, IpcMain, Session } from 'electron';
 
 import { AdminServer } from './admin/AdminServer';
@@ -59,8 +60,35 @@ export function createElectronTunnel(host: CreateElectronTunnelHost, options: Cr
     await applyElectronProxy(host.session, status.mode, status.ports);
   }
 
+  async function openTestWindow(url: string): Promise<void> {
+    const win = new BrowserWindow({
+      width: 1180,
+      height: 780,
+      minWidth: 720,
+      minHeight: 520,
+      title: 'QPJoy Tunnel Test',
+      autoHideMenuBar: true,
+      webPreferences: {
+        session: host.session,
+        contextIsolation: true,
+        sandbox: true,
+        nodeIntegration: false
+      }
+    });
+
+    win.webContents.setWindowOpenHandler(({ url: childUrl }) => {
+      if (/^https?:\/\//i.test(childUrl)) {
+        void win.loadURL(childUrl);
+      }
+      return { action: 'deny' };
+    });
+
+    await win.loadURL(url);
+  }
+
   const admin = new AdminServer(manager, {
-    afterSettingsChange: applyProxy
+    afterSettingsChange: applyProxy,
+    openTestWindow
   });
 
   if (options.startAdminServer !== false) {

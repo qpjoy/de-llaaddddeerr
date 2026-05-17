@@ -64,6 +64,11 @@ export interface TunnelStatus {
   pid: number | null;
   mode: RuntimeMode;
   tunInstalled: boolean;
+  health: {
+    ok: boolean;
+    level: 'ok' | 'warning' | 'error';
+    message: string | null;
+  };
   ports: TunnelPorts;
   activeSubscription: SubscriptionRecord | null;
   corePath: string | null;
