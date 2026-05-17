@@ -5,5 +5,6 @@
  */
 import type { Migration } from '../Migrator';
 import migration001 from './001_initial';
+import migration002 from './002_game_activity';
 
-export const bundledMigrations: Migration[] = [migration001];
+export const bundledMigrations: Migration[] = [migration001, migration002];

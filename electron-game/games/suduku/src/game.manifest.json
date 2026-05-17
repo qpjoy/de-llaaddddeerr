@@ -4,7 +4,7 @@
   "name": "Suduku",
   "version": "0.1.0",
   "author": "QPJoy",
-  "description": "A local-first Sudoku game with 7x7 and 9x9 modes, completion scoring, SQLite history, and optional Postgres ranking sync.",
+  "description": "A local-first Sudoku game with 7x7 and 9x9 modes, completion scoring, and marketplace SQLite history.",
   "category": "puzzle",
   "entry": {
     "plugin": "src/plugin.js",
@@ -12,8 +12,8 @@
     "renderer": "renderer/index.html"
   },
   "score": {
-    "storage": "sqlite",
-    "sync": "postgres-optional"
+    "storage": "marketplace-sqlite",
+    "sync": "local"
   },
   "modes": [
     {

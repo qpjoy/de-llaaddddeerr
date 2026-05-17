@@ -165,7 +165,7 @@ async function maybeComplete() {
   });
 
   setStatus(`Completed for ${score} points in ${formatTime(state.lastElapsed)}.`, "good");
-  syncText.textContent = result.sync.ok ? `Synced ${result.sync.synced}` : "Saved locally";
+  syncText.textContent = result.sync.ok ? "Saved to marketplace SQLite" : "Saved locally";
   await refreshLeaderboard();
 }
 
@@ -192,7 +192,7 @@ function startNewRound(mode = state.mode) {
 
 async function refreshLeaderboard() {
   const result = await window.suduku.getLeaderboard(state.mode);
-  leaderboardSource.textContent = result.source === "postgres" ? "Postgres ranking" : "Local SQLite";
+  leaderboardSource.textContent = result.source === "marketplace-sqlite" ? "Marketplace SQLite" : "Local SQLite";
   leaderboard.innerHTML = "";
 
   if (!result.rows.length) {
@@ -215,7 +215,7 @@ async function refreshLeaderboard() {
 
 async function ensurePlayer() {
   const result = await window.suduku.getPlayer();
-  syncText.textContent = result.syncConfigured ? "Postgres sync available" : "Offline-ready";
+  syncText.textContent = result.syncConfigured ? "Marketplace SQLite ready" : "Offline-ready";
 
   if (result.player) {
     state.player = result.player;

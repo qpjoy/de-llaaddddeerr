@@ -77,6 +77,17 @@ export interface PluginHostBridge {
   app: import('electron').App;
   ipcMain: import('electron').IpcMain;
   session: import('electron').Session;
+  /**
+   * Shared marketplace SQLite facade. First-party plugins and games can
+   * extend this database with their own tables so local behavior remains
+   * queryable alongside `installed_plugins`, `marketplace_entries`, and logs.
+   *
+   * Kept structural on purpose: plugin authors should not need to depend on
+   * `@qpjoy/marketplace-db` just to compile against the SDK.
+   */
+  marketplaceDb?: {
+    raw(): unknown;
+  };
   /** Ask the host to re-apply session proxy. Requires `system:proxy`. */
   applyProxy(): Promise<void>;
 }

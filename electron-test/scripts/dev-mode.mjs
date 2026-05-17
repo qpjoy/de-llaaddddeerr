@@ -63,15 +63,15 @@ const WORKSPACE_PACKS = [
 
 /** Versions used by npm mode. Bump in lockstep with what's on the registry. */
 const NPM_VERSIONS = {
-  '@qpjoy/electron-market': '^0.3.5',
-  '@qpjoy/electron-plugin-tunnel': '^0.1.9',
+  '@qpjoy/electron-market': '^0.3.14',
+  '@qpjoy/electron-plugin-tunnel': '^0.1.14',
   '@qpjoy/electron-plugin-tunnel-engine-darwin-arm64': '^0.1.5',
   '@qpjoy/electron-plugin-tunnel-engine-darwin-x64': '^0.1.5',
   '@qpjoy/electron-plugin-tunnel-engine-linux-arm64': '^0.1.5',
   '@qpjoy/electron-plugin-tunnel-engine-linux-x64': '^0.1.5',
   '@qpjoy/electron-plugin-tunnel-engine-win32-x64': '^0.1.5',
-  '@qpjoy/electron-plugin-sdk':      '^0.1.0',
-  '@qpjoy/marketplace-db':  '^0.1.0'
+  '@qpjoy/electron-plugin-sdk':      '^0.1.1',
+  '@qpjoy/marketplace-db':  '^0.1.1'
 };
 
 /** Direct deps electron-test declares (subset — marketplace-db only via override). */

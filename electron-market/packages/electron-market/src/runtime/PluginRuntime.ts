@@ -9,14 +9,17 @@ import type {
   PluginModule,
   Permission
 } from '@qpjoy/electron-plugin-sdk';
+import type { MarketplaceDB } from '@qpjoy/marketplace-db';
 import { PermissionDeniedError } from '@qpjoy/electron-plugin-sdk';
 
 import type { PluginRegistry } from '../registry/PluginRegistry';
 import type { InstalledPluginRecord } from '../types';
 import { PermissionGate } from './PermissionGate';
+import type { PolicyDecision } from './TunnelPolicyGuard';
 
 interface PluginRuntimeOptions {
   host: { app: App; ipcMain: IpcMain; session: Session };
+  marketplaceDb: MarketplaceDB;
   registry: PluginRegistry;
   pluginsRoot: string;
 }
@@ -37,8 +40,13 @@ interface LiveInstance {
  */
 export class PluginRuntime {
   private live = new Map<string, LiveInstance>();
+  private networkPolicy: ((url: string) => Promise<PolicyDecision>) | null = null;
 
   constructor(private readonly opts: PluginRuntimeOptions) {}
+
+  setNetworkPolicyEvaluator(evaluate: ((url: string) => Promise<PolicyDecision>) | null): void {
+    this.networkPolicy = evaluate;
+  }
 
   async activateAllOnStartup(): Promise<void> {
     for (const record of this.opts.registry.list()) {
@@ -173,6 +181,7 @@ export class PluginRuntime {
         app: this.opts.host.app,
         ipcMain: this.opts.host.ipcMain,
         session: this.opts.host.session,
+        marketplaceDb: this.opts.marketplaceDb,
         applyProxy: async () => {
           gate.require('system:proxy');
           // No-op here; real impl coordinates with whichever plugin owns proxy.
@@ -203,9 +212,13 @@ export class PluginRuntime {
         gate.require(`system:exec:${bin}` as Permission);
         return childSpawn(bin, args, { cwd: opts?.cwd, stdio: 'pipe' });
       },
-      fetch: (url, init) => {
+      fetch: async (url, init) => {
         const host = new URL(url).host;
         gate.require(`net:fetch:${host}` as Permission);
+        const decision = this.networkPolicy ? await this.networkPolicy(url) : null;
+        if (decision && !decision.allowed) {
+          throw new Error(`Tunnel policy blocked ${url}: ${decision.reason}`);
+        }
         return fetch(url, init);
       },
       log: {

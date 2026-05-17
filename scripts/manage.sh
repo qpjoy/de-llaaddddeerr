@@ -46,7 +46,7 @@ header() { printf '\n%s%s%s\n' "$C_CYAN$C_BOLD" "$*" "$C_RESET"; hr; }
 # Format: "<npm-name>|<workspace-path>|<category>|<display-name>"
 # Category: host = marketplace runtime, plugin = installable plugin,
 #           engine = platform-specific tunnel engine resource package,
-#           tool = npm CLI/helper, game = installable game (none yet).
+#           tool = npm CLI/helper, game = installable game.
 #
 # When you add a new publishable package, add a row here. Anything not in
 # this list won't show up in `status` / `prepare-*` menus.
@@ -62,7 +62,7 @@ PACKAGES=(
   "@qpjoy/electron-plugin-tunnel|electron-plugin/packages/electron-plugin-tunnel|plugin|QPJoy Tunnel"
   "@qpjoy/electron-plugin-notyet|electron-plugin/packages/electron-plugin-notyet|plugin|NotYet 悬浮咨询球"
   "@qpjoy/tunnel-cli|electron-plugin/packages/tunnel-cli|tool|Tunnel CLI (服务器脚本分发器)"
-  # "@qpjoy/electron-plugin-FOO|electron-plugin/packages/electron-plugin-FOO|game|样例游戏"
+  "@qpjoy/electron-game-suduku|electron-game/games/suduku|game|Suduku 数独游戏"
 )
 
 # Filter PACKAGES by category. Outputs each matching row.
@@ -301,6 +301,16 @@ prepare_one() {
       "
       ok "同步了 src/plugin.manifest.json 版本"
     fi
+    local game_mf="$ROOT/$path/src/game.manifest.json"
+    if [ -f "$game_mf" ]; then
+      node -e "
+        const fs = require('fs');
+        const m = JSON.parse(fs.readFileSync('$game_mf','utf8'));
+        m.version = '$new_ver';
+        fs.writeFileSync('$game_mf', JSON.stringify(m,null,2)+'\n');
+      "
+      ok "同步了 src/game.manifest.json 版本"
+    fi
     ok "package.json 版本已更新"
   fi
 
@@ -426,7 +436,7 @@ Subcommands:
   ${C_BOLD}prepare-engine${C_RESET}    选择平台引擎资源包做同样操作
   ${C_BOLD}prepare-host${C_RESET}      选择宿主组件（electron-market 等）做同样操作
   ${C_BOLD}prepare-tool${C_RESET}      选择命令行工具做同样操作
-  ${C_BOLD}prepare-game${C_RESET}      选择游戏（未启用，待添加）
+  ${C_BOLD}prepare-game${C_RESET}      选择游戏 → bump 版本 + build + pack 预览
   ${C_BOLD}sync-apps${C_RESET}         同步 electron-demo / electron-test 到最新本地包
   ${C_BOLD}server [...] ${C_RESET}     转发到 electron-server/scripts/manage.sh
   ${C_BOLD}help${C_RESET}              本帮助
@@ -440,7 +450,7 @@ Examples:
   scripts/manage.sh server sync
 
 发布流程（每次手动 OTP）:
-  1. scripts/manage.sh prepare-plugin     # 或 prepare-engine / prepare-host / prepare-tool
+  1. scripts/manage.sh prepare-plugin     # 或 prepare-engine / prepare-host / prepare-tool / prepare-game
   2. 脚本会打印手动 publish 命令；也可输入 OTP 让脚本直接发布
      cd <package-dir> && pnpm publish --otp=XXXXXX --no-git-checks
   3. scripts/manage.sh sync-apps          # （可选）让 demo/test 也用上新版本
@@ -458,7 +468,7 @@ cmd_menu() {
     "prepare-engine 准备发布: Tunnel 引擎资源包"
     "prepare-host   准备发布: 市场宿主组件"
     "prepare-tool   准备发布: 命令行工具"
-    "prepare-game   准备发布: 游戏 (待启用)"
+    "prepare-game   准备发布: 游戏"
     "sync-apps      同步 demo/test 到本地最新包"
     "server         进入服务器 (docker) 管理菜单"
     "help           帮助"

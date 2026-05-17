@@ -3,7 +3,7 @@
   "name": "Suduku",
   "version": "0.1.0",
   "author": "QPJoy",
-  "description": "Suduku puzzle game with 7x7 and 9x9 modes, local scoring, and optional ranking sync.",
+  "description": "Suduku puzzle game with 7x7 and 9x9 modes plus marketplace SQLite scoring.",
   "homepage": "https://www.npmjs.com/package/@qpjoy/electron-game-suduku",
   "engines": {
     "electronMarket": ">=0.3.0",

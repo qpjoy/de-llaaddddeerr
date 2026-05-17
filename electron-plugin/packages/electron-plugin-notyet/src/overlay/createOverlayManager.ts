@@ -9,10 +9,10 @@
  * the ball/petal hot zone — that's how "non-ball clicks reach the underlying
  * app" works.
  *
- * The "open chat" action spawns a separate child BrowserWindow loading
- * `https://www.notyet.chat`, sized to fully cover the parent. "Return" just
- * closes that window — the underlying app's state was never touched, so it
- * reappears exactly as the user left it.
+ * The "open chat" action shows a prewarmed child BrowserWindow and navigates
+ * it to `https://www.notyet.chat`, sized to fully cover the parent. "Return"
+ * just hides that window — the underlying app's state was never touched, so
+ * it reappears exactly as the user left it.
  *
  * Visibility (show/hide ball) is persisted to `<userDataDir>/settings.json`
  * so the choice survives across restarts. The admin panel can flip it via
@@ -22,9 +22,7 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import {
   BrowserWindow,
-  WebContentsView,
   screen,
-  session as electronSession,
   type App,
   type IpcMain,
   type Session,
@@ -36,6 +34,8 @@ const SETTINGS_FILENAME = 'settings.json';
 export interface CreateOverlayManagerOptions {
   app: App;
   ipcMain: IpcMain;
+  /** Host session, already configured by tunnel/system proxy plugins. */
+  session: Session;
   /** Where to navigate when the user taps "咨询". */
   chatUrl: string;
   /**
@@ -87,7 +87,7 @@ function renderLoadErrorPage(url: string, errorCode: number, errorDescription: s
   const esc = (s: string) => s.replace(/[&<>"]/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
   const hint = errorDescription.includes('PROXY')
-    ? '检测到 host 设置了代理但代理无法连接。NotYet 咨询窗口已配置为直连，但底层 OS 代理仍可能影响。请检查系统代理或停用 tunnel 插件后重试。'
+    ? '检测到代理无法连接。NotYet 会跟随当前应用的 tunnel/代理设置，请检查 tunnel 是否正在运行，或切换到可用的代理模式后重试。'
     : '网络连接失败。请检查互联网连接后再点击「重试」。';
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>NotYet - 无法连接</title>
@@ -123,25 +123,48 @@ function renderLoadErrorPage(url: string, errorCode: number, errorDescription: s
 </div></body></html>`;
 }
 
+function renderLoadingPage(url: string): string {
+  const esc = (s: string) => s.replace(/[&<>"]/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>NotYet - 正在连接</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0c0e16; color: #e8eef7;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Source Han Serif SC", serif; }
+  .wrap { display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; padding: 40px; text-align: center; }
+  .planet { width: 92px; height: 92px; border-radius: 50%;
+    background: radial-gradient(circle at 32% 28%, #a8d4f0, #3a8bce 28%, #15407a 68%, #0a2540);
+    box-shadow: 0 0 28px rgba(58,139,206,0.45), 0 12px 28px rgba(0,0,0,0.5);
+    margin-bottom: 26px; animation: pulse 1.4s ease-in-out infinite; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 12px; color: #f3d27a; }
+  .url { font-family: ui-monospace, "SF Mono", monospace; font-size: 13px; color: #8fb3d9; }
+  @keyframes pulse { 0%, 100% { transform: scale(1); opacity: 0.72; }
+    50% { transform: scale(1.05); opacity: 1; } }
+</style></head>
+<body><div class="wrap">
+  <div class="planet"></div>
+  <h1>正在连接 NotYet</h1>
+  <div class="url">${esc(url)}</div>
+</div></body></html>`;
+}
+
 const DEFAULT_SETTINGS: PersistedSettings = { visible: true, positions: {} };
 
 export function createOverlayManager(opts: CreateOverlayManagerOptions): OverlayManagerHandle {
   // parent BrowserWindow id → its associated overlay window
   const overlays = new Map<number, BrowserWindow>();
-  // parent BrowserWindow id → cover window currently showing notyet.chat
-  /**
-   * Active "cover" views per parent. We use `WebContentsView` rather than a
-   * separate BrowserWindow so the chat is **embedded inside the parent's
-   * content area** — the parent's main webContents is never navigated, so
-   * "return" simply removes the view and the underlying page reappears in
-   * its exact prior state (scroll, form values, in-progress xhrs all intact).
-   *
-   * Bookkeeping stored alongside so close() can clean up the resize/move
-   * listeners we registered on the parent specifically for this cover.
-   */
+  // parent BrowserWindow id → hidden/prewarmed cover window for notyet.chat.
   interface CoverEntry {
-    view: WebContentsView;
-    onParentResize: () => void;
+    window: BrowserWindow;
+    onParentGeometry: () => void;
+    onParentClosed: () => void;
+    warmPromise: Promise<void> | null;
+    loadPromise: Promise<void> | null;
+    loadedOk: boolean;
+    loadFailed: boolean;
+    open: boolean;
   }
   const covers = new Map<number, CoverEntry>();
   // Our own windows — `app.on('browser-window-created')` fires for them too,
@@ -168,6 +191,10 @@ export function createOverlayManager(opts: CreateOverlayManagerOptions): Overlay
   // Hold strong refs to per-parent listener fns so we can remove them on
   // close() without ripping unrelated listeners off the parent.
   const parentListeners = new Map<number, Array<{ event: string; fn: () => void }>>();
+  // NotYet is an app-level assistant surface, not a BrowserWindow decorator.
+  // Keep it on the primary host window; login popups, tunnel test windows,
+  // and other transient windows should not receive their own ball.
+  let primaryParentId: number | null = null;
 
   /**
    * Hot-zone state for cursor polling.
@@ -310,6 +337,16 @@ export function createOverlayManager(opts: CreateOverlayManagerOptions): Overlay
     return ourWindows.has(win);
   }
 
+  function canAttachToHostWindow(win: BrowserWindow): boolean {
+    if (disposed) return false;
+    if (creatingOurWindow > 0) return false;
+    if (isOurWindow(win)) return false;
+    if (win.isDestroyed()) return false;
+    if (win.getParentWindow()) return false;
+    if (primaryParentId !== null && primaryParentId !== win.id) return false;
+    return true;
+  }
+
   /**
    * Create-and-attach the overlay window for a host BrowserWindow.
    * Idempotent: skips if we already attached or if `win` is one of our own.
@@ -324,7 +361,8 @@ export function createOverlayManager(opts: CreateOverlayManagerOptions): Overlay
     if (creatingOurWindow > 0) return;
     if (isOurWindow(win)) return;
     if (overlays.has(win.id)) return;
-    if (win.isDestroyed()) return;
+    if (!canAttachToHostWindow(win)) return;
+    primaryParentId = win.id;
 
     const overlay = withOurConstruction(() => new BrowserWindow({
       parent: win,
@@ -373,7 +411,8 @@ export function createOverlayManager(opts: CreateOverlayManagerOptions): Overlay
         });
       });
 
-    // Keep the overlay bounds glued to the parent's. Cheap to call.
+    // Keep the overlay size glued to the parent's. Child BrowserWindows move
+    // with their parent natively; resyncing on every move makes drag jittery.
     const syncBounds = (): void => {
       if (overlay.isDestroyed() || win.isDestroyed()) return;
       try {
@@ -390,11 +429,11 @@ export function createOverlayManager(opts: CreateOverlayManagerOptions): Overlay
       capturing.delete(overlay.id);
       if (!overlay.isDestroyed()) overlay.destroy();
       overlays.delete(win.id);
+      if (primaryParentId === win.id) primaryParentId = null;
       parentListeners.delete(win.id);
     };
 
     const events: Array<{ event: string; fn: () => void }> = [
-      { event: 'move', fn: syncBounds },
       { event: 'resize', fn: syncBounds },
       { event: 'restore', fn: syncBounds },
       { event: 'maximize', fn: syncBounds },
@@ -406,6 +445,7 @@ export function createOverlayManager(opts: CreateOverlayManagerOptions): Overlay
 
     overlays.set(win.id, overlay);
     syncBounds();
+    void ensureCoverForParent(win);
   }
 
   /** Resolve the host BrowserWindow whose overlay's webContents sent this IPC. */
@@ -420,79 +460,119 @@ export function createOverlayManager(opts: CreateOverlayManagerOptions): Overlay
 
   /* ─── Cover window (notyet.chat) ─────────────────────────────────────── */
 
-  // Dedicated session for the chat cover. Two reasons it can't share the
-  // host's default session:
-  //   1. The host might have a system proxy / tunnel set (e.g. via
-  //      `@qpjoy/electron-plugin-tunnel`). If notyet.chat isn't in that proxy's
-  //      route, the cover fails with `ERR_PROXY_CONNECTION_FAILED`.
-  //   2. We want notyet.chat's cookies / localStorage isolated from anything
-  //      else the host loads — both for cleanliness and to keep the chat
-  //      login state stable across host upgrades.
-  //
-  // `persist:` prefix on the partition makes cookies survive restarts.
-  // `setProxy({ mode: 'direct' })` forces direct routing irrespective of
-  // what the OS / other plugins configured.
-  let chatSession: Session | null = null;
+  // Use the host session so NotYet follows the same app-level proxy/tunnel
+  // policy as the rest of the Electron app. A dedicated direct session would
+  // bypass `@qpjoy/electron-plugin-tunnel` and fail on networks that require it.
   async function getChatSession(): Promise<Session> {
-    if (chatSession) return chatSession;
-    chatSession = electronSession.fromPartition('persist:qpjoy-notyet-chat');
-    try {
-      await chatSession.setProxy({ mode: 'direct' });
-    } catch (err) {
-      opts.log.error('failed to set direct proxy on chat session', {
-        error: err instanceof Error ? err.message : String(err)
-      });
-    }
-    return chatSession;
+    return opts.session;
   }
 
-  async function openChatForParent(parent: BrowserWindow): Promise<void> {
-    if (parent.isDestroyed()) return;
-    if (covers.has(parent.id)) {
-      // Already open — just bring focus to it.
-      const entry = covers.get(parent.id)!;
-      entry.view.webContents.focus();
-      return;
+  const COVER_PARENT_EVENTS = ['resize', 'restore', 'maximize', 'unmaximize'] as const;
+
+  function fitCoverToParent(parent: BrowserWindow, cover: BrowserWindow): void {
+    if (parent.isDestroyed() || cover.isDestroyed()) return;
+    try {
+      cover.setBounds(parent.getContentBounds());
+    } catch {
+      /* parent in transition; next event re-syncs */
     }
+  }
 
-    // Resolve the dedicated chat session first (sets `direct` proxy).
+  function showLoadingPage(entry: CoverEntry): Promise<void> {
+    if (entry.warmPromise) return entry.warmPromise;
+    entry.loadedOk = false;
+    entry.loadFailed = false;
+    const html = renderLoadingPage(opts.chatUrl);
+    entry.warmPromise = entry.window.webContents
+      .loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
+      .catch((err) => {
+        opts.log.error('failed to load chat loading page', {
+          error: err instanceof Error ? err.message : String(err)
+        });
+      })
+      .finally(() => {
+        entry.warmPromise = null;
+      });
+    return entry.warmPromise;
+  }
+
+  function loadCover(entry: CoverEntry, force = false): Promise<void> {
+    if (entry.loadPromise && !entry.loadedOk && !entry.loadFailed) return entry.loadPromise;
+    if (!force && entry.loadedOk && !entry.loadFailed) return Promise.resolve();
+    entry.loadedOk = false;
+    entry.loadFailed = false;
+    entry.loadPromise = (async () => {
+      if (entry.warmPromise) await entry.warmPromise;
+      await entry.window.webContents.loadURL(opts.chatUrl);
+    })()
+      .then(() => {
+        entry.loadedOk = true;
+      })
+      .catch((err) => {
+        entry.loadFailed = true;
+        const message = err instanceof Error ? err.message : String(err);
+        if (message.includes('ERR_ABORTED')) return;
+        opts.log.error('failed to load chat URL', {
+          url: opts.chatUrl,
+          error: message
+        });
+      })
+      .finally(() => {
+        entry.loadPromise = null;
+      });
+    return entry.loadPromise;
+  }
+
+  async function ensureCoverForParent(parent: BrowserWindow): Promise<CoverEntry | null> {
+    if (parent.isDestroyed() || isOurWindow(parent)) return null;
+    const existing = covers.get(parent.id);
+    if (existing && !existing.window.isDestroyed()) return existing;
+
     const ses = await getChatSession();
-
-    // The chat lives in a child WebContentsView attached to the parent
-    // window's contentView. The parent's main webContents is NEVER
-    // navigated, so closing the chat (= removing this view) brings the
-    // original page back exactly as the user left it.
-    const view = new WebContentsView({
+    const cover = withOurConstruction(() => new BrowserWindow({
+      parent,
+      frame: false,
+      show: false,
+      resizable: false,
+      movable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      skipTaskbar: true,
+      backgroundColor: '#0c0e16',
       webPreferences: {
         contextIsolation: true,
         sandbox: true,
         nodeIntegration: false,
         session: ses
       }
-    });
-    view.setBackgroundColor('#0c0e16');
+    }));
+    ourWindows.add(cover);
 
-    // Stack the chat view on top of the parent's existing content.
-    parent.contentView.addChildView(view);
-
-    const fitToParent = (): void => {
-      if (parent.isDestroyed()) return;
-      const cb = parent.getContentBounds();
-      // Bounds are window-relative for child views of contentView.
-      view.setBounds({ x: 0, y: 0, width: cb.width, height: cb.height });
+    const onParentGeometry = (): void => fitCoverToParent(parent, cover);
+    const onParentClosed = (): void => {
+      covers.delete(parent.id);
+      if (!cover.isDestroyed()) cover.destroy();
     };
-    fitToParent();
-    parent.on('resize', fitToParent);
+    const entry: CoverEntry = {
+      window: cover,
+      onParentGeometry,
+      onParentClosed,
+      warmPromise: null,
+      loadPromise: null,
+      loadedOk: false,
+      loadFailed: false,
+      open: false
+    };
+    covers.set(parent.id, entry);
 
-    covers.set(parent.id, { view, onParentResize: fitToParent });
-
-    // Surface load failures (proxy unreachable, DNS, offline, …) so the
-    // user sees a styled error page instead of a blank embedded view.
-    view.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    cover.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
       if (!isMainFrame) return;
-      if (parent.isDestroyed()) return;
+      if (parent.isDestroyed() || cover.isDestroyed()) return;
+      entry.loadFailed = true;
+      entry.loadedOk = false;
       const html = renderLoadErrorPage(validatedURL || opts.chatUrl, errorCode, errorDescription);
-      void view.webContents.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+      void cover.webContents.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
       opts.log.error('chat cover failed to load', {
         url: validatedURL,
         errorCode,
@@ -500,36 +580,57 @@ export function createOverlayManager(opts: CreateOverlayManagerOptions): Overlay
       });
     });
 
-    try {
-      await view.webContents.loadURL(opts.chatUrl);
-      view.webContents.focus();
-    } catch (err) {
-      opts.log.error('failed to load chat URL', {
-        url: opts.chatUrl,
-        error: err instanceof Error ? err.message : String(err)
-      });
+    cover.on('closed', () => {
+      covers.delete(parent.id);
+    });
+    for (const event of COVER_PARENT_EVENTS) {
+      parent.on(event as 'move', onParentGeometry);
+    }
+    parent.once('closed', onParentClosed);
+
+    fitCoverToParent(parent, cover);
+    void showLoadingPage(entry);
+    return entry;
+  }
+
+  async function openChatForParent(parent: BrowserWindow): Promise<void> {
+    if (parent.isDestroyed()) return;
+    const entry = await ensureCoverForParent(parent);
+    if (!entry || entry.window.isDestroyed()) return;
+
+    entry.open = true;
+    fitCoverToParent(parent, entry.window);
+    await showLoadingPage(entry);
+    void loadCover(entry, true);
+    entry.window.show();
+    entry.window.focus();
+
+    const overlay = overlays.get(parent.id);
+    if (overlay && !overlay.isDestroyed() && settings.visible) {
+      overlay.showInactive();
+      overlay.setAlwaysOnTop(true);
     }
   }
 
   function closeChatForParent(parent: BrowserWindow): void {
     const entry = covers.get(parent.id);
     if (!entry) return;
-    covers.delete(parent.id);
-    parent.off('resize', entry.onParentResize);
-    if (!parent.isDestroyed()) {
-      // Detach the view and release its webContents. The parent's main
-      // webContents — which was never touched — becomes the topmost view
-      // again, with all its prior state intact.
-      try { parent.contentView.removeChildView(entry.view); } catch { /* already detached */ }
+    entry.open = false;
+    if (!entry.window.isDestroyed()) entry.window.hide();
+  }
+
+  function destroyCoverForParent(parentId: number): void {
+    const entry = covers.get(parentId);
+    if (!entry) return;
+    covers.delete(parentId);
+    const parent = BrowserWindow.fromId(parentId);
+    if (parent && !parent.isDestroyed()) {
+      for (const event of COVER_PARENT_EVENTS) {
+        parent.off(event as 'move', entry.onParentGeometry);
+      }
+      parent.off('closed', entry.onParentClosed);
     }
-    // Destroy the chat webContents so we don't leak background pages.
-    try {
-      const wc = entry.view.webContents as WebContents & { destroy?: () => void };
-      if (typeof wc.destroy === 'function') wc.destroy();
-      else if (typeof wc.close === 'function') wc.close();
-    } catch {
-      /* already torn down */
-    }
+    if (!entry.window.isDestroyed()) entry.window.destroy();
   }
 
   /* ─── IPC wiring ─────────────────────────────────────────────────────── */
@@ -602,7 +703,7 @@ export function createOverlayManager(opts: CreateOverlayManagerOptions): Overlay
   // now? — affects whether "返回" petal is enabled).
   opts.ipcMain.handle(IPC_STATE, (ev) => {
     const parent = parentForSender(ev.sender);
-    const coverOpen = parent ? covers.has(parent.id) : false;
+    const coverOpen = parent ? covers.get(parent.id)?.open === true : false;
     return { visible: settings.visible, coverOpen };
   });
 
@@ -646,19 +747,6 @@ export function createOverlayManager(opts: CreateOverlayManagerOptions): Overlay
   async function openChatForParentWithNotify(parent: BrowserWindow): Promise<void> {
     await openChatOrig(parent);
     notifyCoverState(parent, true);
-    // The chat view is now an embedded WebContentsView — it only goes away
-    // when we explicitly call closeChatForParentWithNotify, which already
-    // fires `notifyCoverState(parent, false)`. We do additionally listen
-    // for the case where the parent window itself is closed, so the
-    // observer-state Set stays clean.
-    const entry = covers.get(parent.id);
-    if (entry) {
-      const onParentClosed = (): void => {
-        covers.delete(parent.id);
-        notifyCoverState(parent, false);
-      };
-      parent.once('closed', onParentClosed);
-    }
   }
   function closeChatForParentWithNotify(parent: BrowserWindow): void {
     closeChatOrig(parent);
@@ -685,7 +773,10 @@ export function createOverlayManager(opts: CreateOverlayManagerOptions): Overlay
 
   void loadSettings().then(() => {
     opts.app.on('browser-window-created', (_event, win) => attach(win));
-    for (const w of BrowserWindow.getAllWindows()) attach(w);
+    const focused = BrowserWindow.getFocusedWindow();
+    const windows = BrowserWindow.getAllWindows();
+    if (focused) attach(focused);
+    for (const w of windows) attach(w);
     startCursorPolling();
   });
 
@@ -742,19 +833,9 @@ export function createOverlayManager(opts: CreateOverlayManagerOptions): Overlay
         if (!ovr.isDestroyed()) ovr.destroy();
       }
       overlays.clear();
-      // Tear down active chat covers: detach from their parents' contentView
-      // and destroy the webContents to release the renderer process.
-      for (const [parentId, entry] of covers) {
-        const parent = BrowserWindow.fromId(parentId);
-        if (parent && !parent.isDestroyed()) {
-          try { parent.contentView.removeChildView(entry.view); } catch { /* */ }
-          parent.off('resize', entry.onParentResize);
-        }
-        try {
-          const wc = entry.view.webContents as WebContents & { destroy?: () => void };
-          if (typeof wc.destroy === 'function') wc.destroy();
-          else if (typeof wc.close === 'function') wc.close();
-        } catch { /* */ }
+      // Tear down hidden/prewarmed chat covers.
+      for (const parentId of Array.from(covers.keys())) {
+        destroyCoverForParent(parentId);
       }
       covers.clear();
     }

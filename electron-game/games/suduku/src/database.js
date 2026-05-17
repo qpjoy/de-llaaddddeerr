@@ -10,6 +10,7 @@ const {
 } = require("./player");
 
 const GAME_ID = "suduku";
+const PLUGIN_ID = "qpjoy.electron-game-suduku";
 
 function loadSqlite() {
   try {
@@ -21,40 +22,129 @@ function loadSqlite() {
 }
 
 class SudukuDatabase {
-  constructor(userDataPath, env = process.env) {
-    const Database = loadSqlite();
-    this.db = new Database(path.join(userDataPath, "suduku.sqlite"));
+  constructor(input, env = process.env) {
+    const opts = typeof input === "string" ? { userDataDir: input } : (input || {});
+    const marketplaceDb = opts.marketplaceDb;
+    const sharedDb = marketplaceDb && typeof marketplaceDb.raw === "function"
+      ? marketplaceDb.raw()
+      : null;
+
     this.env = env;
-    this.db.pragma("journal_mode = WAL");
+    this.pluginId = opts.pluginId || PLUGIN_ID;
+    this.marketplaceEntryId = opts.marketplaceEntryId || PLUGIN_ID;
+    this.ownsDb = !sharedDb;
+
+    if (sharedDb) {
+      this.db = sharedDb;
+    } else {
+      const Database = loadSqlite();
+      const userDataDir = opts.userDataDir || opts.userDataPath;
+      if (!userDataDir) {
+        throw new Error("SudukuDatabase requires userDataDir when marketplaceDb is unavailable");
+      }
+      this.db = new Database(path.join(userDataDir, "suduku.sqlite"));
+      this.db.pragma("journal_mode = WAL");
+    }
+
     this.migrate();
   }
 
   migrate() {
     this.db.exec(`
-      create table if not exists players (
+      create table if not exists electron_game_players (
         id text primary key,
         display_name text not null,
         source text not null,
-        created_at text not null,
-        updated_at text not null
+        created_at text not null default (datetime('now')),
+        updated_at text not null default (datetime('now'))
       );
 
-      create table if not exists scores (
+      create table if not exists electron_game_scores (
         id text primary key,
         game_id text not null,
+        plugin_id text not null,
+        marketplace_entry_id text,
         player_id text not null,
         player_name text not null,
         mode text not null,
         elapsed_seconds integer not null,
         score integer not null,
         completed_at text not null,
-        synced_at text
+        synced_at text,
+        metadata_json text,
+        created_at text not null default (datetime('now')),
+        foreign key (plugin_id) references installed_plugins(id) on delete cascade,
+        foreign key (marketplace_entry_id) references marketplace_entries(id) on delete set null,
+        foreign key (player_id) references electron_game_players(id) on delete cascade
       );
 
-      create index if not exists scores_game_mode_idx on scores (game_id, mode);
-      create index if not exists scores_player_idx on scores (player_id);
-      create index if not exists scores_unsynced_idx on scores (synced_at) where synced_at is null;
+      create index if not exists electron_game_scores_game_mode_idx
+        on electron_game_scores (game_id, mode);
+      create index if not exists electron_game_scores_plugin_idx
+        on electron_game_scores (plugin_id);
+      create index if not exists electron_game_scores_player_idx
+        on electron_game_scores (player_id);
+      create index if not exists electron_game_scores_unsynced_idx
+        on electron_game_scores (synced_at)
+        where synced_at is null;
     `);
+    this.migrateLegacyTables();
+  }
+
+  migrateLegacyTables() {
+    const hasLegacyPlayers = this.db
+      .prepare("select name from sqlite_master where type = 'table' and name = 'players'")
+      .get();
+    const hasLegacyScores = this.db
+      .prepare("select name from sqlite_master where type = 'table' and name = 'scores'")
+      .get();
+
+    if (hasLegacyPlayers) {
+      this.db.exec(`
+        insert or ignore into electron_game_players (id, display_name, source, created_at, updated_at)
+        select id, display_name, source, created_at, updated_at from players;
+      `);
+    }
+
+    if (hasLegacyScores) {
+      this.db
+        .prepare(`
+          insert or ignore into electron_game_scores (
+            id,
+            game_id,
+            plugin_id,
+            marketplace_entry_id,
+            player_id,
+            player_name,
+            mode,
+            elapsed_seconds,
+            score,
+            completed_at,
+            synced_at,
+            metadata_json,
+            created_at
+          )
+          select
+            id,
+            game_id,
+            @pluginId,
+            @marketplaceEntryId,
+            player_id,
+            player_name,
+            mode,
+            elapsed_seconds,
+            score,
+            completed_at,
+            synced_at,
+            null,
+            completed_at
+          from scores
+        `)
+        .run({
+          pluginId: this.pluginId,
+          marketplaceEntryId: this.marketplaceEntryId
+        });
+    }
   }
 
   getPlayer() {
@@ -64,7 +154,12 @@ class SudukuDatabase {
     }
 
     const existing = this.db
-      .prepare("select id, display_name as displayName, source from players order by updated_at desc limit 1")
+      .prepare(`
+        select id, display_name as displayName, source
+        from electron_game_players
+        order by updated_at desc
+        limit 1
+      `)
       .get();
 
     if (existing) {
@@ -98,7 +193,7 @@ class SudukuDatabase {
 
     this.db
       .prepare(`
-        insert into players (id, display_name, source, created_at, updated_at)
+        insert into electron_game_players (id, display_name, source, created_at, updated_at)
         values (@id, @displayName, @source, @now, @now)
         on conflict(id) do update set
           display_name = excluded.display_name,
@@ -134,36 +229,45 @@ class SudukuDatabase {
     const row = {
       id: randomUUID(),
       gameId: GAME_ID,
+      pluginId: this.pluginId,
+      marketplaceEntryId: this.marketplaceEntryId,
       playerId: player.id,
       playerName: player.displayName,
       mode: scoreInput.mode,
       elapsedSeconds: Number(scoreInput.elapsedSeconds),
       score: Number(scoreInput.score),
-      completedAt: new Date().toISOString()
+      completedAt: new Date().toISOString(),
+      metadataJson: scoreInput.metadata ? JSON.stringify(scoreInput.metadata) : null
     };
 
     this.db
       .prepare(`
-        insert into scores (
+        insert into electron_game_scores (
           id,
           game_id,
+          plugin_id,
+          marketplace_entry_id,
           player_id,
           player_name,
           mode,
           elapsed_seconds,
           score,
           completed_at,
-          synced_at
+          synced_at,
+          metadata_json
         ) values (
           @id,
           @gameId,
+          @pluginId,
+          @marketplaceEntryId,
           @playerId,
           @playerName,
           @mode,
           @elapsedSeconds,
           @score,
           @completedAt,
-          null
+          null,
+          @metadataJson
         )
       `)
       .run(row);
@@ -177,18 +281,19 @@ class SudukuDatabase {
         select
           id,
           game_id as gameId,
+          plugin_id as pluginId,
           player_id as playerId,
           player_name as playerName,
           mode,
           elapsed_seconds as elapsedSeconds,
           score,
           completed_at as completedAt
-        from scores
-        where synced_at is null
+        from electron_game_scores
+        where plugin_id = ? and game_id = ? and synced_at is null
         order by completed_at asc
         limit ?
       `)
-      .all(limit);
+      .all(this.pluginId, GAME_ID, limit);
   }
 
   markScoresSynced(ids) {
@@ -197,10 +302,14 @@ class SudukuDatabase {
     }
 
     const now = new Date().toISOString();
-    const update = this.db.prepare("update scores set synced_at = ? where id = ?");
+    const update = this.db.prepare(`
+      update electron_game_scores
+      set synced_at = ?
+      where id = ? and plugin_id = ?
+    `);
     const transaction = this.db.transaction((scoreIds) => {
       for (const id of scoreIds) {
-        update.run(now, id);
+        update.run(now, id, this.pluginId);
       }
     });
     transaction(ids);
@@ -216,18 +325,25 @@ class SudukuDatabase {
           sum(score) as totalScore,
           min(elapsed_seconds) as bestTime,
           max(completed_at) as lastCompletedAt
-        from scores
-        where game_id = ? and mode = ?
+        from electron_game_scores
+        where plugin_id = ? and game_id = ? and mode = ?
         group by player_id, player_name
         order by totalScore desc, bestTime asc, lastCompletedAt asc
         limit ?
       `)
-      .all(GAME_ID, mode, limit)
+      .all(this.pluginId, GAME_ID, mode, limit)
       .map((row, index) => ({ rank: index + 1, ...row }));
+  }
+
+  close() {
+    if (this.ownsDb && this.db && typeof this.db.close === "function") {
+      this.db.close();
+    }
   }
 }
 
 module.exports = {
   GAME_ID,
+  PLUGIN_ID,
   SudukuDatabase
 };

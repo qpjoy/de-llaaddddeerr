@@ -8,7 +8,7 @@
       "displayName": "Suduku",
       "version": "0.1.0",
       "category": "puzzle",
-      "description": "A local-first Sudoku game with 7x7 and 9x9 modes, completion scoring, SQLite history, and optional Postgres ranking sync.",
+      "description": "A local-first Sudoku game with 7x7 and 9x9 modes, completion scoring, and marketplace SQLite history.",
       "entry": {
         "electronMain": "src/main.js",
         "renderer": "renderer/index.html"

@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-plugin-notyet",
-  "version": "0.1.1",
+  "version": "0.1.5",
   "description": "NotYet floating consultation ball for QPJoy marketplace. Renders a 古风 + 科技 3D-style action ball on every host window with one-tap access to https://www.notyet.chat and a cover-not-replace navigation model (return preserves underlying app state).",
   "license": "UNLICENSED",
   "type": "commonjs",
@@ -36,6 +36,11 @@
   "homepage": "https://www.notyet.chat",
   "peerDependencies": {
     "electron": ">=28"
+  },
+  "peerDependenciesMeta": {
+    "electron": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^22.10.7",

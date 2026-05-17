@@ -38,7 +38,7 @@ app.whenReady().then(async () => {
 })
 
 app.on('before-quit', () => {
-  tunnel.close()
+  void tunnel.close()
 })
 `;
 }

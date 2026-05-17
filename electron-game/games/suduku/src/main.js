@@ -3,7 +3,7 @@
 const path = require("node:path");
 const { app, BrowserWindow, ipcMain } = require("electron");
 const { SudukuDatabase } = require("./database");
-const { PostgresScoreSync } = require("./sync");
+const { LocalScoreSync } = require("./sync");
 
 let database;
 let syncService;
@@ -50,10 +50,9 @@ function registerIpc() {
   });
 
   ipcMain.handle("suduku:get-leaderboard", async (_event, mode) => {
-    const remote = await syncService.getRemoteLeaderboard(mode);
     return {
-      source: remote.length ? "postgres" : "sqlite",
-      rows: remote.length ? remote : database.getLocalLeaderboard(mode)
+      source: "sqlite",
+      rows: await syncService.getRemoteLeaderboard(mode)
     };
   });
 
@@ -63,8 +62,8 @@ function registerIpc() {
 }
 
 app.whenReady().then(() => {
-  database = new SudukuDatabase(app.getPath("userData"));
-  syncService = new PostgresScoreSync(database);
+  database = new SudukuDatabase({ userDataDir: app.getPath("userData") });
+  syncService = new LocalScoreSync(database);
   registerIpc();
   createWindow();
 

@@ -10,6 +10,7 @@ import { PluginRegistry } from './registry/PluginRegistry';
 import { MarketplaceClient } from './registry/MarketplaceClient';
 import { PluginStore, type PluginSource } from './store/PluginStore';
 import { PluginRuntime } from './runtime/PluginRuntime';
+import { TunnelPolicyGuard } from './runtime/TunnelPolicyGuard';
 import { AdminServer } from './admin/AdminServer';
 import { registerPluginHostIpc } from './ipc/registerPluginHostIpc';
 import { RemoteClient } from './sync/RemoteClient';
@@ -229,9 +230,13 @@ export function createElectronPluginHost(
   });
   const runtime = new PluginRuntime({
     host,
+    marketplaceDb,
     registry,
     pluginsRoot
   });
+  const tunnelPolicyGuard = new TunnelPolicyGuard(host.session, runtime);
+  runtime.setNetworkPolicyEvaluator((url) => tunnelPolicyGuard.evaluate(url));
+  tunnelPolicyGuard.start();
 
   // Resolve the marketplace server URL once, applying built-in defaults so
   // consumers don't have to think about this. `null` means offline. The
@@ -590,7 +595,9 @@ export function createElectronPluginHost(
     ready,
     async close() {
       remoteSync?.stop();
-      admin.stop();
+      tunnelPolicyGuard.stop();
+      runtime.setNetworkPolicyEvaluator(null);
+      await admin.stop();
       await runtime.deactivateAll();
       registry.close();
       marketplaceDb.close();

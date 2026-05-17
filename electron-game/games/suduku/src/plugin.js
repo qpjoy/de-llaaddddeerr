@@ -3,7 +3,7 @@
 const path = require("node:path");
 const { BrowserWindow } = require("electron");
 const { SudukuDatabase } = require("./database");
-const { PostgresScoreSync } = require("./sync");
+const { LocalScoreSync } = require("./sync");
 
 const CHANNELS = [
   "suduku:get-player",
@@ -13,7 +13,7 @@ const CHANNELS = [
   "suduku:sync-now"
 ];
 
-function createSudukuWindow() {
+function createSudukuWindow(ctx) {
   const window = new BrowserWindow({
     width: 1100,
     height: 820,
@@ -23,6 +23,7 @@ function createSudukuWindow() {
     backgroundColor: "#f8f5ef",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
+      session: ctx.host.session,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false
@@ -35,8 +36,11 @@ function createSudukuWindow() {
 
 module.exports = {
   activate(ctx) {
-    const database = new SudukuDatabase(ctx.userDataDir);
-    const syncService = new PostgresScoreSync(database);
+    const database = new SudukuDatabase({
+      marketplaceDb: ctx.host.marketplaceDb,
+      userDataDir: ctx.userDataDir
+    });
+    const syncService = new LocalScoreSync(database);
     const ipcMain = ctx.host.ipcMain;
     let gameWindow = null;
 
@@ -47,7 +51,7 @@ module.exports = {
         return { ok: true, reused: true };
       }
 
-      gameWindow = createSudukuWindow();
+      gameWindow = createSudukuWindow(ctx);
       gameWindow.on("closed", () => {
         gameWindow = null;
       });
@@ -76,10 +80,9 @@ module.exports = {
     });
 
     ipcMain.handle("suduku:get-leaderboard", async (_event, mode) => {
-      const remote = await syncService.getRemoteLeaderboard(mode);
       return {
-        source: remote.length ? "postgres" : "sqlite",
-        rows: remote.length ? remote : database.getLocalLeaderboard(mode)
+        source: "marketplace-sqlite",
+        rows: await syncService.getRemoteLeaderboard(mode)
       };
     });
 
@@ -105,6 +108,7 @@ module.exports = {
         gameWindow.close();
       }
       gameWindow = null;
+      database.close();
       ctx.log.info("Suduku game plugin deactivated");
     };
   }

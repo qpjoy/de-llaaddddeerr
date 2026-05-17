@@ -129,9 +129,14 @@ export class AdminServer {
     this.server.listen(this.opts.port, '127.0.0.1');
   }
 
-  stop(): void {
-    this.server?.close();
+  async stop(): Promise<void> {
+    if (!this.server) return;
+    const server = this.server;
     this.server = null;
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve, reject) => {
+      server.close((err) => (err ? reject(err) : resolve()));
+    });
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {

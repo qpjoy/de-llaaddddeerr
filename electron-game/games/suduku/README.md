@@ -36,7 +36,7 @@ Identity resolution order:
 
 Local scores are stored in SQLite under Electron's `app.getPath("userData")`.
 
-If `QPJOY_GAME_POSTGRES_URL` or `DATABASE_URL` is present, the game tries to sync unsynced local scores to Postgres and can display remote rankings. If Postgres is unavailable, play continues offline and scores remain queued locally.
+When launched by `@qpjoy/electron-market`, scores are written into the shared marketplace SQLite database (`electron_game_players` / `electron_game_scores`) so they can be queried together with installed plugins, marketplace entries, and plugin logs. Standalone development still falls back to a local `suduku.sqlite` file.
 
 ## Development
 

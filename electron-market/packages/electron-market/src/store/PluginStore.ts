@@ -1,6 +1,6 @@
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
-import { readFile, rm, mkdir, cp, rename, writeFile, symlink, lstat } from 'fs/promises';
+import { readFile, rm, mkdir, cp, rename, writeFile, symlink, lstat, readdir } from 'fs/promises';
 import { createWriteStream, existsSync } from 'fs';
 import { join, isAbsolute, resolve } from 'path';
 
@@ -25,7 +25,10 @@ const execFileAsync = promisify(execFile);
  */
 async function exec(file: string, args: string[], opts: { cwd: string; env?: NodeJS.ProcessEnv }): Promise<void> {
   if (process.platform !== 'win32') {
-    await execFileAsync(file, args, opts);
+    await execFileAsync(file, args, {
+      ...opts,
+      env: opts.env ? { ...process.env, ...opts.env } : process.env
+    });
     return;
   }
   return new Promise((resolve, reject) => {
@@ -164,11 +167,65 @@ export interface InstallProgress {
   error: string | null;
 }
 
-function installArgs(target: string, allowScripts: boolean): string[] {
+type PackageManager = NonNullable<PluginStoreOptions['packageManager']>;
+
+function installArgs(target: string, allowScripts: boolean, packageManager: PackageManager): string[] {
   const args = ['install', '--no-audit', '--no-fund'];
+  // Plugins run inside the host Electron process. Installing peer deps would
+  // put a second `electron` package under userData/plugins, which is huge and
+  // makes Windows cleanup brittle when Electron's resources are still touched.
+  if (packageManager === 'npm') {
+    args.push('--omit=peer');
+  } else {
+    args.push('--config.auto-install-peers=false');
+  }
   if (!allowScripts) args.push('--ignore-scripts');
   args.push(target);
   return args;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
+function isRetryableRemoveError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException).code;
+  return code === 'ENOTEMPTY' || code === 'EBUSY' || code === 'EPERM' || code === 'EMFILE' || code === 'ENFILE';
+}
+
+async function removePath(target: string): Promise<void> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      await rm(target, {
+        recursive: true,
+        force: true,
+        maxRetries: 3,
+        retryDelay: 150
+      });
+      return;
+    } catch (err) {
+      if (!isRetryableRemoveError(err) || attempt === 7) {
+        throw err;
+      }
+      await delay(150 * (attempt + 1));
+    }
+  }
+}
+
+async function retirePath(target: string): Promise<void> {
+  if (!existsSync(target)) return;
+  try {
+    await removePath(target);
+    return;
+  } catch (err) {
+    const retired = `${target}.__delete-${Date.now()}`;
+    try {
+      await rename(target, retired);
+    } catch {
+      throw err;
+    }
+    void removePath(retired).catch(() => undefined);
+  }
 }
 
 function electronNativeBuildEnv(): NodeJS.ProcessEnv | null {
@@ -178,9 +235,7 @@ function electronNativeBuildEnv(): NodeJS.ProcessEnv | null {
   return {
     npm_config_runtime: 'electron',
     npm_config_target: electronVersion,
-    npm_config_disturl: 'https://electronjs.org/headers',
-    npm_config_build_from_source: 'true',
-    npm_config_force: 'true'
+    npm_config_disturl: 'https://electronjs.org/headers'
   };
 }
 
@@ -241,40 +296,14 @@ export class PluginStore {
     return npm === '@qpjoy/electron-plugin-tunnel';
   }
 
-  private nativeRebuildPackages(npm: string): string[] {
+  private nativeElectronPackages(npm: string): string[] {
     return npm === '@qpjoy/electron-plugin-tunnel' ? ['better-sqlite3'] : [];
   }
 
-  private async rebuildNativeDependencies(input: { id: string; npm: string; stagingDir: string; packageManager: 'npm' | 'pnpm' }): Promise<void> {
-    const packages = this.nativeRebuildPackages(input.npm);
-    if (packages.length === 0) return;
-
-    const env = electronNativeBuildEnv();
-    if (!env) return;
-
-    this.setProgress(input.id, {
-      stage: 'installing',
-      message: '正在为 Electron 准备原生依赖',
-      error: null
-    });
-
-    for (const pkg of packages) {
-      const args = input.packageManager === 'pnpm'
-        ? ['rebuild', pkg]
-        : [
-            'rebuild',
-            pkg,
-            '--build-from-source',
-            '--runtime=electron',
-            `--target=${process.versions.electron}`,
-            '--disturl=https://electronjs.org/headers'
-          ];
-      await exec(
-        input.packageManager,
-        args,
-        { cwd: input.stagingDir, env }
-      );
-    }
+  private nativeInstallEnv(npm: string): NodeJS.ProcessEnv | undefined {
+    return this.nativeElectronPackages(npm).length > 0
+      ? electronNativeBuildEnv() ?? undefined
+      : undefined;
   }
 
   private async downloadTarball(url: string, dest: string, id: string): Promise<void> {
@@ -353,6 +382,7 @@ export class PluginStore {
   async installFrom(input: { id: string; npm: string; source: PluginSource }): Promise<PluginManifest> {
     const pm = this.opts.packageManager ?? 'npm';
     const allowScripts = this.allowInstallScripts(input.npm);
+    const installEnv = this.nativeInstallEnv(input.npm);
     this.setProgress(input.id, {
       stage: 'queued',
       message: '准备安装',
@@ -394,7 +424,7 @@ export class PluginStore {
               message: allowScripts ? '正在安装并准备原生依赖' : '正在安装依赖',
               error: null
             });
-            await exec(pm, installArgs(tgz, allowScripts), { cwd: stagingDir });
+            await exec(pm, installArgs(tgz, allowScripts, pm), { cwd: stagingDir, env: installEnv });
             break;
           }
           this.setProgress(input.id, {
@@ -404,8 +434,8 @@ export class PluginStore {
           });
           await exec(
             pm,
-            installArgs(`${input.npm}@${input.source.version}`, allowScripts),
-            { cwd: stagingDir }
+            installArgs(`${input.npm}@${input.source.version}`, allowScripts, pm),
+            { cwd: stagingDir, env: installEnv }
           );
           break;
         }
@@ -420,8 +450,8 @@ export class PluginStore {
           });
           await exec(
             pm,
-            installArgs(tgz, allowScripts),
-            { cwd: stagingDir }
+            installArgs(tgz, allowScripts, pm),
+            { cwd: stagingDir, env: installEnv }
           );
           break;
         }
@@ -467,13 +497,6 @@ export class PluginStore {
         }
       }
 
-      await this.rebuildNativeDependencies({
-        id: input.id,
-        npm: input.npm,
-        stagingDir,
-        packageManager: pm
-      });
-
       this.setProgress(input.id, {
         stage: 'finalizing',
         message: '正在读取插件清单',
@@ -488,7 +511,7 @@ export class PluginStore {
 
       const finalDir = this.pluginDir(manifest.id, manifest.version);
       if (existsSync(finalDir)) {
-        await rm(finalDir, { recursive: true, force: true });
+        await retirePath(finalDir);
       }
       // Rename atomically (within the same filesystem).
       await mkdir(this.opts.pluginsRoot, { recursive: true });
@@ -529,7 +552,7 @@ export class PluginStore {
         error: err instanceof Error ? err.message : String(err)
       });
       // Best-effort cleanup of the staging dir on failure.
-      await rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+      await removePath(stagingDir).catch(() => undefined);
       throw err;
     }
   }
@@ -540,7 +563,19 @@ export class PluginStore {
     } catch {
       // Cross-device or permission issue → fall back to copy+delete.
       await cp(from, to, { recursive: true });
-      await rm(from, { recursive: true, force: true });
+      await retirePath(from);
+    }
+  }
+
+  private async cleanupPluginDirs(id: string, keepPath?: string): Promise<void> {
+    const entries = await readdir(this.opts.pluginsRoot, { withFileTypes: true }).catch(() => []);
+    const prefix = `${id}@`;
+    const keep = keepPath ? resolve(keepPath) : null;
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.startsWith(prefix)) continue;
+      const fullPath = join(this.opts.pluginsRoot, entry.name);
+      if (keep && resolve(fullPath) === keep) continue;
+      await retirePath(fullPath).catch(() => undefined);
     }
   }
 
@@ -548,8 +583,9 @@ export class PluginStore {
     const record = this.opts.registry.get(id);
     if (!record) return;
     if (existsSync(record.installPath)) {
-      await rm(record.installPath, { recursive: true, force: true });
+      await retirePath(record.installPath).catch(() => undefined);
     }
+    await this.cleanupPluginDirs(id);
     this.opts.registry.remove(id);
   }
 
@@ -592,8 +628,9 @@ export class PluginStore {
     // Clean up old install dir if it's different.
     const newPath = this.pluginDir(id, manifest.version);
     if (oldPath !== newPath && existsSync(oldPath)) {
-      await rm(oldPath, { recursive: true, force: true });
+      await retirePath(oldPath).catch(() => undefined);
     }
+    await this.cleanupPluginDirs(id, newPath);
     return manifest;
   }
 

@@ -62,6 +62,10 @@ const tunnelPlugin = {
     // intentionally private — bump the surface explicitly when needed.
     ctx.expose({
       status: () => handle.status(),
+      policySnapshot: () => ({
+        status: handle.status(),
+        rules: handle.manager.listRules()
+      }),
       snapshot: () => handle.manager.snapshot(),
       applyProxy: () => handle.applyProxy(),
       addDomainRule: async (kind: 'allow' | 'block', domain: string) => {

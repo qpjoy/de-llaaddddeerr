@@ -119,7 +119,7 @@ export function createElectronTunnel(host: CreateElectronTunnelHost, options: Cr
       //   3. Tear down the mihomo child process.
       disposeIpc();
       await admin.stop();
-      manager.close();
+      await manager.close();
     }
   };
 }

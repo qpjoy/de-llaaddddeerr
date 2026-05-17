@@ -63,6 +63,7 @@ const notyetPlugin = {
     const handle: OverlayManagerHandle = createOverlayManager({
       app: ctx.host.app,
       ipcMain: ctx.host.ipcMain,
+      session: ctx.host.session,
       chatUrl,
       assetsDir,
       userDataDir: ctx.userDataDir,

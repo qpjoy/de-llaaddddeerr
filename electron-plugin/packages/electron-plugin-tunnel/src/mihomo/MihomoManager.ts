@@ -64,11 +64,11 @@ function needsElevatedTun(settings: RuntimeSettings): boolean {
   return settings.mode === 'system-tun'
     && settings.tunInstalled
     && !isRootUser()
-    && (process.platform === 'darwin' || process.platform === 'linux');
+    && (process.platform === 'darwin' || process.platform === 'linux' || process.platform === 'win32');
 }
 
 function tunAdministratorMessage(): string {
-  return '虚拟网卡启动失败：Windows 拒绝配置 TUN。请确认应用是“以管理员身份运行”，或切回 App 模式。';
+  return '虚拟网卡启动失败：Windows 拒绝配置 TUN。请确认 UAC 授权窗口已点击“是”，或切回 App 模式。';
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -82,6 +82,18 @@ function isProcessAlive(pid: number): boolean {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function cmdQuote(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function psQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function encodePowerShell(script: string): string {
+  return Buffer.from(script, 'utf16le').toString('base64');
 }
 
 function delay(ms: number): Promise<void> {
@@ -632,6 +644,10 @@ export class MihomoManager extends EventEmitter {
   }
 
   private runElevatedShell(command: string): Promise<string> {
+    if (process.platform === 'win32') {
+      throw new Error('Windows elevated shell uses PowerShell Start-Process instead.');
+    }
+
     const launcher = process.platform === 'darwin'
       ? {
           command: '/usr/bin/osascript',
@@ -669,7 +685,46 @@ export class MihomoManager extends EventEmitter {
     });
   }
 
+  private runWindowsElevatedScript(script: string): Promise<string> {
+    const powershell = process.env.SystemRoot
+      ? join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+      : 'powershell.exe';
+
+    return new Promise((resolve, reject) => {
+      const child = spawn(powershell, [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-EncodedCommand',
+        encodePowerShell(script)
+      ], { windowsHide: true });
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.on('error', reject);
+      child.on('exit', (code) => {
+        if (code === 0) {
+          resolve(stdout.trim());
+          return;
+        }
+
+        reject(new Error(stderr.trim() || stdout.trim() || 'TUN mode requires administrator approval.'));
+      });
+    });
+  }
+
   private async startElevated(corePath: string, configPath: string): Promise<void> {
+    if (process.platform === 'win32') {
+      await this.startElevatedWindows(corePath, configPath);
+      return;
+    }
+
     const logPath = join(this.paths.runtime, 'mihomo-elevated.log');
     const command = [
       ':',
@@ -701,6 +756,51 @@ export class MihomoManager extends EventEmitter {
       this.clearElevatedPid();
       const details = this.readElevatedLogTail(logPath);
       throw new Error(`Privileged mihomo exited immediately.${details ? ` ${details}` : ''}`);
+    }
+
+    this.log('info', `Mihomo started with administrator privileges pid=${pid}`);
+    this.log('info', `Privileged Mihomo log file: ${logPath}`);
+  }
+
+  private async startElevatedWindows(corePath: string, configPath: string): Promise<void> {
+    const logPath = join(this.paths.runtime, 'mihomo-elevated.log');
+    const commandPath = join(this.paths.runtime, 'mihomo-elevated.cmd');
+    writeFileSync(logPath, '', 'utf8');
+    writeFileSync(
+      commandPath,
+      [
+        '@echo off',
+        `${cmdQuote(corePath)} -d ${cmdQuote(this.paths.runtime)} -f ${cmdQuote(configPath)} >> ${cmdQuote(logPath)} 2>&1`
+      ].join('\r\n') + '\r\n',
+      'utf8'
+    );
+
+    const output = await this.runWindowsElevatedScript([
+      "$ErrorActionPreference = 'Stop'",
+      `$p = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d','/s','/c',${psQuote(`call "${commandPath}"`)}) -Verb RunAs -WindowStyle Hidden -PassThru`,
+      '[Console]::Out.WriteLine($p.Id)'
+    ].join('\n'));
+    const pid = Number(output.split(/\s+/).at(-1));
+
+    if (!Number.isInteger(pid) || pid <= 0) {
+      throw new Error(`Failed to start privileged tunnel engine: ${output || 'empty pid'}`);
+    }
+
+    this.child = null;
+    this.rememberElevatedPid(pid);
+    await delay(1500);
+    if (!isProcessAlive(pid)) {
+      this.clearElevatedPid();
+      const details = this.readElevatedLogTail(logPath);
+      throw new Error(`Privileged mihomo exited immediately.${details ? ` ${details}` : ''}`);
+    }
+
+    const details = this.readElevatedLogTail(logPath);
+    const runtimeError = this.detectRuntimeError(details);
+    if (runtimeError) {
+      await this.stopElevatedProcess(pid, { allowElevatedPrompt: true }).catch(() => undefined);
+      this.clearElevatedPid();
+      throw new Error(runtimeError);
     }
 
     this.log('info', `Mihomo started with administrator privileges pid=${pid}`);
@@ -774,6 +874,25 @@ export class MihomoManager extends EventEmitter {
     return Boolean(this.readElevatedPid());
   }
 
+  private async stopElevatedProcess(pid: number, options: StopOptions = {}): Promise<void> {
+    if (!options.allowElevatedPrompt) {
+      this.log('info', 'Privileged Mihomo is still running; skipped elevated stop to avoid another administrator prompt');
+      return;
+    }
+
+    if (process.platform === 'win32') {
+      await this.runWindowsElevatedScript([
+        "$ErrorActionPreference = 'Stop'",
+        `Start-Process -FilePath 'taskkill.exe' -ArgumentList @('/PID','${pid}','/T','/F') -Verb RunAs -WindowStyle Hidden -Wait`
+      ].join('\n'));
+    } else {
+      await this.runElevatedShell(`kill ${pid} 2>/dev/null || true`);
+    }
+
+    this.clearElevatedPid();
+    this.log('info', 'Privileged Mihomo stop requested');
+  }
+
   private async reloadRuntimeConfig(): Promise<boolean> {
     const settings = this.db.getSettings();
     this.lastRuntimeError = null;
@@ -815,14 +934,7 @@ export class MihomoManager extends EventEmitter {
         return;
       }
 
-      if (!options.allowElevatedPrompt) {
-        this.log('info', 'Privileged Mihomo is still running; skipped elevated stop to avoid another administrator prompt');
-        return;
-      }
-
-      await this.runElevatedShell(`kill ${pid} 2>/dev/null || true`);
-      this.clearElevatedPid();
-      this.log('info', 'Privileged Mihomo stop requested');
+      await this.stopElevatedProcess(pid, options);
       return;
     }
 
@@ -886,11 +998,11 @@ export class MihomoManager extends EventEmitter {
     await this.applyRuntimeConfigChange();
   }
 
-  close(): void {
-    if (this.child && !this.child.killed) {
-      this.child.kill('SIGTERM');
-      this.child = null;
-    }
+  async close(): Promise<void> {
+    await this.stopUnlocked({ allowElevatedPrompt: true }).catch((err) => {
+      this.log('warn', `Mihomo close stop failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
+    await delay(300);
     this.db.close();
   }
 

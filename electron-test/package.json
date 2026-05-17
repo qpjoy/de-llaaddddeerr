@@ -15,8 +15,8 @@
     "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check forge.config.cjs"
   },
   "dependencies": {
-    "@qpjoy/electron-market": "file:./.local-packs/qpjoy-electron-market-0.3.5.tgz",
-    "@qpjoy/electron-plugin-tunnel": "file:./.local-packs/qpjoy-electron-plugin-tunnel-0.1.9.tgz",
+    "@qpjoy/electron-market": "file:./.local-packs/qpjoy-electron-market-0.3.13.tgz",
+    "@qpjoy/electron-plugin-tunnel": "file:./.local-packs/qpjoy-electron-plugin-tunnel-0.1.14.tgz",
     "@qpjoy/electron-plugin-sdk": "file:./.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz"
   },
   "devDependencies": {
@@ -31,8 +31,8 @@
     "overrides": {
       "@qpjoy/electron-plugin-sdk": "file:./.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz",
       "@qpjoy/marketplace-db": "file:./.local-packs/qpjoy-marketplace-db-0.1.0.tgz",
-      "@qpjoy/electron-market": "file:./.local-packs/qpjoy-electron-market-0.3.5.tgz",
-      "@qpjoy/electron-plugin-tunnel": "file:./.local-packs/qpjoy-electron-plugin-tunnel-0.1.9.tgz",
+      "@qpjoy/electron-market": "file:./.local-packs/qpjoy-electron-market-0.3.13.tgz",
+      "@qpjoy/electron-plugin-tunnel": "file:./.local-packs/qpjoy-electron-plugin-tunnel-0.1.14.tgz",
       "@qpjoy/electron-plugin-tunnel-engine-darwin-arm64": "file:./.local-packs/qpjoy-electron-plugin-tunnel-engine-darwin-arm64-0.1.5.tgz",
       "@qpjoy/electron-plugin-tunnel-engine-darwin-x64": "file:./.local-packs/qpjoy-electron-plugin-tunnel-engine-darwin-x64-0.1.5.tgz",
       "@qpjoy/electron-plugin-tunnel-engine-linux-arm64": "file:./.local-packs/qpjoy-electron-plugin-tunnel-engine-linux-arm64-0.1.5.tgz",
