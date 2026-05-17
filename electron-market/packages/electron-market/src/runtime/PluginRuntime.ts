@@ -8,8 +8,8 @@ import type {
   PluginDispose,
   PluginModule,
   Permission
-} from '@qpjoy/plugin-sdk';
-import { PermissionDeniedError } from '@qpjoy/plugin-sdk';
+} from '@qpjoy/electron-plugin-sdk';
+import { PermissionDeniedError } from '@qpjoy/electron-plugin-sdk';
 
 import type { PluginRegistry } from '../registry/PluginRegistry';
 import type { InstalledPluginRecord } from '../types';

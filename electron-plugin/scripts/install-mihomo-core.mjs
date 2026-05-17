@@ -5,7 +5,7 @@ import { pipeline } from 'node:stream/promises';
 
 const rootDir = resolve(new URL('..', import.meta.url).pathname);
 const appOutputRoot = join(rootDir, 'resources/mihomo');
-const packageOutputRoot = join(rootDir, 'packages/electron-mihomo-tunnel/resources/engine');
+const packageOutputRoot = join(rootDir, 'packages/electron-plugin-tunnel/resources/engine');
 
 function argValue(name, fallback) {
   const index = process.argv.indexOf(name);

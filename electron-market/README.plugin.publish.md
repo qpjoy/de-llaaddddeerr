@@ -11,7 +11,7 @@ pnpm -r build               # 4 个包都构建：sdk, db, admin-ui, electron-pl
 
 # 2. 干跑预览（强烈推荐）
 mkdir -p /tmp/qpjoy-publish-preview && rm -f /tmp/qpjoy-publish-preview/*.tgz
-for pkg in plugin-sdk marketplace-db electron-plugin; do
+for pkg in electron-plugin-sdk marketplace-db electron-plugin; do
   (cd packages/$pkg && pnpm pack --pack-destination /tmp/qpjoy-publish-preview)
 done
 
@@ -20,20 +20,20 @@ ls -lah /tmp/qpjoy-publish-preview/
 tar -xzOf /tmp/qpjoy-publish-preview/qpjoy-electron-market-*.tgz package/package.json | jq .dependencies
 
 # 3. 按依赖顺序发布
-cd packages/plugin-sdk     && pnpm publish
+cd packages/electron-plugin-sdk     && pnpm publish
 cd ../marketplace-db       && pnpm publish
 cd ../electron-plugin      && pnpm publish
 
 # 4. 验证 + 打 git tag
 # npm 上看一下
-npm view @qpjoy/plugin-sdk version
+npm view @qpjoy/electron-plugin-sdk version
 npm view @qpjoy/marketplace-db version
 npm view @qpjoy/electron-market version
 
 # 各打一个 tag
 cd ../..   # 回到 electron-market workspace 根
 git tag electron-market-v0.1.0
-git tag plugin-sdk-v0.1.0
+git tag electron-plugin-sdk-v0.1.0
 git tag marketplace-db-v0.1.0
 git push --tags
 
@@ -52,7 +52,7 @@ cd electron-market
 pnpm -r build
 
 # 3. 按依赖底→上发：
-cd packages/plugin-sdk      && pnpm version patch && pnpm publish --no-git-checks
+cd packages/electron-plugin-sdk      && pnpm version patch && pnpm publish --no-git-checks
 cd ../marketplace-db        && pnpm version patch && pnpm publish --no-git-checks
 cd ../electron-plugin       && pnpm version patch && pnpm publish --no-git-checks
 

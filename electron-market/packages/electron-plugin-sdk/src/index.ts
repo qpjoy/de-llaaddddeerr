@@ -1,5 +1,5 @@
 /**
- * @qpjoy/plugin-sdk
+ * @qpjoy/electron-plugin-sdk
  *
  * Public surface for plugin authors. Importing anything else from
  * `@qpjoy/electron-market` directly is **not** part of the contract and may

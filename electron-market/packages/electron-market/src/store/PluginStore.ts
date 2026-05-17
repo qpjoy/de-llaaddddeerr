@@ -4,7 +4,7 @@ import { readFile, rm, mkdir, cp, rename, writeFile, symlink, lstat } from 'fs/p
 import { existsSync } from 'fs';
 import { join, isAbsolute, resolve } from 'path';
 
-import type { PluginManifest } from '@qpjoy/plugin-sdk';
+import type { PluginManifest } from '@qpjoy/electron-plugin-sdk';
 import type { PluginRegistry } from '../registry/PluginRegistry';
 
 const execFileAsync = promisify(execFile);

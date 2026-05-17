@@ -3,7 +3,7 @@ import { rm } from 'fs/promises';
 import { join, resolve } from 'path';
 import type { App, IpcMain, Session } from 'electron';
 
-import type { Permission } from '@qpjoy/plugin-sdk';
+import type { Permission } from '@qpjoy/electron-plugin-sdk';
 import { MarketplaceDB, resolveMarketplaceDbPath } from '@qpjoy/marketplace-db';
 
 import { PluginRegistry } from './registry/PluginRegistry';
@@ -121,7 +121,7 @@ export const MARKET_SERVER_DEFAULTS = {
  * Description of a plugin that the host wants to make sure is present on
  * disk before the marketplace ever does a network call.
  *
- * The classic case is `@qpjoy/electron-tunnel` itself: the user might not
+ * The classic case is `@qpjoy/electron-plugin-tunnel` itself: the user might not
  * have any outbound connectivity yet, so we install the tunnel offline from
  * a bundled tarball / dir, activate it, and *then* the marketplace can
  * download anything else through the tunnel.

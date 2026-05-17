@@ -4,10 +4,10 @@
  *
  * What it does (without booting Electron):
  *   1. Spins up a fake marketplace HTTP server that serves a registry
- *      pointing at `@qpjoy/electron-tunnel`.
+ *      pointing at `@qpjoy/electron-plugin-tunnel`.
  *   2. Constructs a PluginStore + PluginRegistry against a temp `userData`.
  *   3. Runs `PluginStore.installFrom({ source: { type: 'local-dir',
- *      path: <repo>/electron-plugin/packages/electron-mihomo-tunnel } })`
+ *      path: <repo>/electron-plugin/packages/electron-plugin-tunnel } })`
  *      — i.e. seeds the tunnel offline.
  *   4. Verifies the registry row exists in `awaitingGrant`.
  *   5. Grants every permission the manifest asks for.
@@ -32,12 +32,12 @@ import { PluginStore } from '../packages/electron-market/dist/store/PluginStore.
 
 const TUNNEL_SRC = resolve(
   new URL('.', import.meta.url).pathname,
-  '../../electron-plugin/packages/electron-mihomo-tunnel'
+  '../../electron-plugin/packages/electron-plugin-tunnel'
 );
 
 if (!existsSync(join(TUNNEL_SRC, 'dist', 'plugin.js'))) {
   console.error('!! Build the tunnel first:');
-  console.error('   (cd electron-plugin && pnpm --filter @qpjoy/electron-tunnel build)');
+  console.error('   (cd electron-plugin && pnpm --filter @qpjoy/electron-plugin-tunnel build)');
   process.exit(1);
 }
 

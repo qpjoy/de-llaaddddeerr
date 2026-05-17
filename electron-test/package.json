@@ -1,8 +1,8 @@
 {
-  "name": "qpjoy-electron-tunnel-npm-test",
+  "name": "qpjoy-electron-plugin-tunnel-npm-test",
   "version": "0.1.0",
   "private": true,
-  "description": "End-to-end demo: Electron Forge app installing @qpjoy/electron-market + @qpjoy/electron-tunnel from npm.",
+  "description": "End-to-end demo: Electron Forge app installing @qpjoy/electron-market + @qpjoy/electron-plugin-tunnel from npm.",
   "main": "src/main.cjs",
   "scripts": {
     "dev": "node scripts/dev-mode.mjs local && electron-forge start",
@@ -15,9 +15,9 @@
     "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check forge.config.cjs"
   },
   "dependencies": {
-    "@qpjoy/electron-market": "file:./.local-packs/qpjoy-electron-market-0.2.1.tgz",
-    "@qpjoy/electron-tunnel": "file:./.local-packs/qpjoy-electron-tunnel-0.1.4.tgz",
-    "@qpjoy/plugin-sdk": "file:./.local-packs/qpjoy-plugin-sdk-0.1.0.tgz"
+    "@qpjoy/electron-market": "file:./.local-packs/qpjoy-electron-market-0.2.2.tgz",
+    "@qpjoy/electron-plugin-tunnel": "file:./.local-packs/qpjoy-electron-plugin-tunnel-0.1.4.tgz",
+    "@qpjoy/electron-plugin-sdk": "file:./.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.8.1",
@@ -29,10 +29,10 @@
   },
   "pnpm": {
     "overrides": {
-      "@qpjoy/plugin-sdk": "file:./.local-packs/qpjoy-plugin-sdk-0.1.0.tgz",
+      "@qpjoy/electron-plugin-sdk": "file:./.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz",
       "@qpjoy/marketplace-db": "file:./.local-packs/qpjoy-marketplace-db-0.1.0.tgz",
-      "@qpjoy/electron-market": "file:./.local-packs/qpjoy-electron-market-0.2.1.tgz",
-      "@qpjoy/electron-tunnel": "file:./.local-packs/qpjoy-electron-tunnel-0.1.4.tgz"
+      "@qpjoy/electron-market": "file:./.local-packs/qpjoy-electron-market-0.2.2.tgz",
+      "@qpjoy/electron-plugin-tunnel": "file:./.local-packs/qpjoy-electron-plugin-tunnel-0.1.4.tgz"
     }
   }
 }

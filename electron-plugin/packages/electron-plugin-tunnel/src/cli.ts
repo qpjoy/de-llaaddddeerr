@@ -21,7 +21,7 @@ Commands:
 
 function snippet(): string {
   return `import { app, ipcMain, session } from 'electron'
-import { createElectronTunnel } from '@qpjoy/electron-tunnel'
+import { createElectronTunnel } from '@qpjoy/electron-plugin-tunnel'
 
 const tunnel = createElectronTunnel(
   { app, ipcMain, session: session.defaultSession },
@@ -68,7 +68,7 @@ Next steps:
 electron-builder example:
   extraResources: [
     {
-      from: 'node_modules/@qpjoy/electron-tunnel/resources/engine',
+      from: 'node_modules/@qpjoy/electron-plugin-tunnel/resources/engine',
       to: 'qpjoy-tunnel-engine',
       filter: ['**/*']
     }

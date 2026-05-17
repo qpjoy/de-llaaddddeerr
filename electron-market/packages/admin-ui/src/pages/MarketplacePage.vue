@@ -465,7 +465,7 @@ const installErrorHint = computed(() => {
   const err = host.lastInstallError.value;
   if (!err) return null;
   if (/not a QPJoy plugin/i.test(err) || /missing qpjoyPlugin/i.test(err)) {
-    return '该 npm 包还没发布带 qpjoyPlugin 字段的版本，市场暂时无法安装。如果是 @qpjoy/electron-tunnel，本机已经通过 seed 装好了，可以直接在「已安装」里使用。';
+    return '该 npm 包还没发布带 qpjoyPlugin 字段的版本，市场暂时无法安装。如果是 @qpjoy/electron-plugin-tunnel，本机已经通过 seed 装好了，可以直接在「已安装」里使用。';
   }
   if (/Cannot find module/i.test(err)) {
     return '插件依赖未完整安装。重启 host 再试。';

@@ -8,7 +8,7 @@ import {
   createElectronTunnel,
   type ElectronTunnelHandle,
   type TunnelManager
-} from '@qpjoy/electron-tunnel';
+} from '@qpjoy/electron-plugin-tunnel';
 
 let mainWindow: BrowserWindow | null = null;
 let tunnel: ElectronTunnelHandle | null = null;

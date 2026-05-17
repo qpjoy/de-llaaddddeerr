@@ -4,7 +4,7 @@
     "baseUrl": ".",
     "types": ["node", "vite/client"],
     "paths": {
-      "@qpjoy/electron-tunnel": ["../../packages/electron-mihomo-tunnel/src/index.ts"],
+      "@qpjoy/electron-plugin-tunnel": ["../../packages/electron-plugin-tunnel/src/index.ts"],
       "src/*": ["src/*"],
       "app/*": ["*"],
       "components/*": ["src/components/*"],

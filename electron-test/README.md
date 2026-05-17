@@ -1,6 +1,6 @@
 # QPJoy Electron Test (plugin host demo)
 
-End-to-end harness for `@qpjoy/electron-market` + `@qpjoy/electron-tunnel`.
+End-to-end harness for `@qpjoy/electron-market` + `@qpjoy/electron-plugin-tunnel`.
 Runs in **two modes** so you can either iterate on local source or
 validate the real "user installs from npm" path.
 
@@ -68,5 +68,5 @@ pnpm package
 pnpm make
 ```
 
-`forge.config.cjs` ships the `electron-mihomo-tunnel/` package under
+`forge.config.cjs` ships the `electron-plugin-tunnel/` package under
 `Resources/`, so the seed step still works after the app is bundled.

@@ -8,8 +8,8 @@ This folder contains the first Electron client MVP for the existing
 ```text
 electron/
   apps/quasar-client/              # Quasar Vue 3 Electron test app
-  packages/electron-mihomo-tunnel/ # published as @qpjoy/electron-tunnel
-  packages/tunnel-cli/             # legacy dev helper
+  packages/electron-plugin-tunnel/ # published as @qpjoy/electron-plugin-tunnel
+  packages/tunnel-cli/             # published as @qpjoy/tunnel-cli
 ```
 
 The tunnel runtime is not coupled to Quasar. A native Electron app can use the
@@ -71,7 +71,7 @@ pnpm core:install
 
 Packaged Electron builds include tunnel engine resources under
 `electron/resources/mihomo` for the dev app and under
-`packages/electron-mihomo-tunnel/resources/engine` for the npm package. On first
+`packages/electron-plugin-tunnel/resources/engine` for the npm package. On first
 start the runtime installs the matching executable into the app user-data
 directory:
 
@@ -95,14 +95,14 @@ SQLite fields, mirroring the existing shell client behavior.
 Install the package in a host Electron app:
 
 ```bash
-pnpm add @qpjoy/electron-tunnel
+pnpm add @qpjoy/electron-plugin-tunnel
 ```
 
 Then wire the runtime once in the Electron main process:
 
 ```ts
 import { app, ipcMain, session } from 'electron';
-import { createElectronTunnel } from '@qpjoy/electron-tunnel';
+import { createElectronTunnel } from '@qpjoy/electron-plugin-tunnel';
 
 const tunnel = createElectronTunnel({ app, ipcMain, session: session.defaultSession }, {
   adminPort: 23456,
@@ -120,11 +120,20 @@ app.on('before-quit', () => {
 });
 ```
 
-The npm package also ships `qpjoy-tunnel`:
+The Electron runtime package also ships `qpjoy-tunnel` for snippet output:
 
 ```bash
 pnpm exec qpjoy-tunnel snippet
-pnpm exec qpjoy-tunnel init --out src-electron/qpjoy-tunnel.ts
+```
+
+The separate `@qpjoy/tunnel-cli` package ships the Linux server
+`mihomo-client` script as an npm-installable CLI:
+
+```bash
+npm i -g @qpjoy/tunnel-cli
+qp-tunnel-cli tun-on
+qp-tunnel-cli tun-off
+sudo qp-tunnel-cli install-script
 ```
 
 For `electron-builder`, include the packaged engine resources:
@@ -132,7 +141,7 @@ For `electron-builder`, include the packaged engine resources:
 ```ts
 extraResources: [
   {
-    from: 'node_modules/@qpjoy/electron-tunnel/resources/engine',
+    from: 'node_modules/@qpjoy/electron-plugin-tunnel/resources/engine',
     to: 'qpjoy-tunnel-engine',
     filter: ['**/*']
   }

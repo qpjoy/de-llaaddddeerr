@@ -25,7 +25,7 @@ interface PluginHostBridge {
   session: Session;
 }
 
-// Mirrors the SDK's ExposedApi shape without a build-time dep on plugin-sdk
+// Mirrors the SDK's ExposedApi shape without a build-time dep on electron-plugin-sdk
 // (this package can be installed without the marketplace host present).
 type ExposedApi = Record<string, (...args: any[]) => any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 

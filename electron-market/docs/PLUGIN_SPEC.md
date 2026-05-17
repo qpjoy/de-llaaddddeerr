@@ -51,7 +51,7 @@ Packages without `qpjoyPlugin` are rejected by the marketplace at install time.
 The entry module must `export default` a `PluginModule`:
 
 ```ts
-import { definePlugin } from '@qpjoy/plugin-sdk';
+import { definePlugin } from '@qpjoy/electron-plugin-sdk';
 
 export default definePlugin({
   async activate(ctx) {
@@ -64,7 +64,7 @@ export default definePlugin({
 ```
 
 `activate` receives a `PluginContext`. Anything beyond the published surface
-of `@qpjoy/plugin-sdk` is **not** part of the contract and may break across
+of `@qpjoy/electron-plugin-sdk` is **not** part of the contract and may break across
 host versions.
 
 ## 4. Lifecycle

@@ -1,7 +1,7 @@
 {
   "name": "@qpjoy/marketplace-db",
   "version": "0.1.0",
-  "description": "SQLite-backed marketplace data layer shared by @qpjoy/electron-market and standalone plugins like @qpjoy/electron-tunnel.",
+  "description": "SQLite-backed marketplace data layer shared by @qpjoy/electron-market and standalone plugins like @qpjoy/electron-plugin-tunnel.",
   "license": "UNLICENSED",
   "type": "commonjs",
   "main": "dist/index.js",

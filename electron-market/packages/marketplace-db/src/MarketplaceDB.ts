@@ -35,7 +35,7 @@ export interface OpenOptions {
  * Facade over the marketplace SQLite. Single source of truth shared by:
  *
  *  - `@qpjoy/electron-market` — its `PluginRegistry` delegates here
- *  - `@qpjoy/electron-tunnel` (standalone) — self-registers a row in
+ *  - `@qpjoy/electron-plugin-tunnel` (standalone) — self-registers a row in
  *    `installed_plugins` so the marketplace knows about it before
  *    electron-market is ever loaded
  *

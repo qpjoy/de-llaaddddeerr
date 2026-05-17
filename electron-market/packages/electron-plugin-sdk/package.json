@@ -1,5 +1,5 @@
 {
-  "name": "@qpjoy/plugin-sdk",
+  "name": "@qpjoy/electron-plugin-sdk",
   "version": "0.1.0",
   "description": "Types and helpers for authoring QPJoy electron plugins (definePlugin, Permission catalog, PluginContext).",
   "license": "UNLICENSED",
@@ -12,7 +12,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/qpjoy/electron-plugin.git",
-    "directory": "packages/plugin-sdk"
+    "directory": "packages/electron-plugin-sdk"
   },
   "publishConfig": {
     "access": "public"

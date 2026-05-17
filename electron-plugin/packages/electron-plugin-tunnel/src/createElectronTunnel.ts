@@ -152,7 +152,7 @@ async function registerSelfInMarketplaceDb(
     const version = packageJson?.version ?? '0.0.0';
     db.upsertInstalled({
       id: TUNNEL_PLUGIN_ID,
-      npm: '@qpjoy/electron-tunnel',
+      npm: '@qpjoy/electron-plugin-tunnel',
       version,
       installPath: resolveTunnelPackageRoot(),
       installSource: 'standalone',

@@ -1,5 +1,5 @@
-import type { Permission } from '@qpjoy/plugin-sdk';
-import { PermissionDeniedError } from '@qpjoy/plugin-sdk';
+import type { Permission } from '@qpjoy/electron-plugin-sdk';
+import { PermissionDeniedError } from '@qpjoy/electron-plugin-sdk';
 
 /**
  * Static check: are the requested permissions a subset of the granted ones?

@@ -52,7 +52,7 @@ The full plugin catalog. Supports `If-None-Match` for ETag conditional fetch.
   "entries": [
     {
       "id": "qpjoy.electron-tunnel",
-      "npm": "@qpjoy/electron-tunnel",
+      "npm": "@qpjoy/electron-plugin-tunnel",
       "name": "QPJoy Tunnel",
       "description": "...",
       "latestVersion": "0.1.3",
@@ -82,7 +82,7 @@ Full plugin detail — versions list + latest manifest + screenshots, etc.
 ```jsonc
 {
   "id": "qpjoy.electron-tunnel",
-  "npm": "@qpjoy/electron-tunnel",
+  "npm": "@qpjoy/electron-plugin-tunnel",
   "name": "...",
   // ...all index fields...
   "versions": [
@@ -96,7 +96,7 @@ Full plugin detail — versions list + latest manifest + screenshots, etc.
       "yanked": false,
       "manifestChecksum": "sha256:...",
       "tarballChecksum": "sha1:...",
-      "tarballUrl": "https://registry.npmjs.org/.../-/electron-tunnel-0.1.3.tgz"
+      "tarballUrl": "https://registry.npmjs.org/.../-/electron-plugin-tunnel-0.1.3.tgz"
     }
   ],
   "latestManifest": { /* the actual plugin.manifest.json */ },

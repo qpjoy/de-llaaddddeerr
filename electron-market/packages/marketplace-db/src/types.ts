@@ -52,7 +52,7 @@ export interface MarketplaceVersion {
 }
 
 /**
- * Manifest as it appears on disk. Mirrored from `@qpjoy/plugin-sdk`
+ * Manifest as it appears on disk. Mirrored from `@qpjoy/electron-plugin-sdk`
  * intentionally (we don't want a runtime dep on the SDK in this package).
  */
 export interface PluginManifest {

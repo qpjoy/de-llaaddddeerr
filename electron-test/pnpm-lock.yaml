@@ -5,24 +5,24 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@qpjoy/plugin-sdk': file:./.local-packs/qpjoy-plugin-sdk-0.1.0.tgz
+  '@qpjoy/electron-plugin-sdk': file:./.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz
   '@qpjoy/marketplace-db': file:./.local-packs/qpjoy-marketplace-db-0.1.0.tgz
-  '@qpjoy/electron-market': file:./.local-packs/qpjoy-electron-market-0.2.1.tgz
-  '@qpjoy/electron-tunnel': file:./.local-packs/qpjoy-electron-tunnel-0.1.4.tgz
+  '@qpjoy/electron-market': file:./.local-packs/qpjoy-electron-market-0.2.2.tgz
+  '@qpjoy/electron-plugin-tunnel': file:./.local-packs/qpjoy-electron-plugin-tunnel-0.1.4.tgz
 
 importers:
 
   .:
     dependencies:
       '@qpjoy/electron-market':
-        specifier: file:.local-packs/qpjoy-electron-market-0.2.1.tgz
-        version: file:.local-packs/qpjoy-electron-market-0.2.1.tgz(@qpjoy/plugin-sdk@file:.local-packs/qpjoy-plugin-sdk-0.1.0.tgz(electron@34.5.8))(electron@34.5.8)
-      '@qpjoy/electron-tunnel':
-        specifier: file:.local-packs/qpjoy-electron-tunnel-0.1.4.tgz
-        version: file:.local-packs/qpjoy-electron-tunnel-0.1.4.tgz(electron@34.5.8)
-      '@qpjoy/plugin-sdk':
-        specifier: file:.local-packs/qpjoy-plugin-sdk-0.1.0.tgz
-        version: file:.local-packs/qpjoy-plugin-sdk-0.1.0.tgz(electron@34.5.8)
+        specifier: file:.local-packs/qpjoy-electron-market-0.2.2.tgz
+        version: file:.local-packs/qpjoy-electron-market-0.2.2.tgz(@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz(electron@34.5.8))(electron@34.5.8)
+      '@qpjoy/electron-plugin-sdk':
+        specifier: file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz
+        version: file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz(electron@34.5.8)
+      '@qpjoy/electron-plugin-tunnel':
+        specifier: file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.4.tgz
+        version: file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.4.tgz(electron@34.5.8)
     devDependencies:
       '@electron-forge/cli':
         specifier: ^7.8.1
@@ -275,32 +275,32 @@ packages:
     engines: {node: ^12.13.0 || ^14.15.0 || >=16.0.0}
     deprecated: This functionality has been moved to @npmcli/fs
 
-  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.2.1.tgz':
-    resolution: {integrity: sha512-6fabkjOi5nF95xTbosaPmHvChtONCVocDhP7hzRVmLuez4bIFUXQ0fmnkvW3WimvpQU42ftrZn+Uu3r2yTTfHA==, tarball: file:.local-packs/qpjoy-electron-market-0.2.1.tgz}
-    version: 0.2.1
+  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.2.2.tgz':
+    resolution: {integrity: sha512-NZBmELRONvRdjBqYt6rmnpCSAA7lR/BQWxl1y3P/7p31ZsVRNulyqlABt1oVX1f6msqgXWJFiNevJyVcmtoYZA==, tarball: file:.local-packs/qpjoy-electron-market-0.2.2.tgz}
+    version: 0.2.2
     peerDependencies:
-      '@qpjoy/plugin-sdk': '>=0.1.0'
+      '@qpjoy/electron-plugin-sdk': '>=0.1.0'
       electron: '>=28'
 
-  '@qpjoy/electron-tunnel@file:.local-packs/qpjoy-electron-tunnel-0.1.4.tgz':
-    resolution: {integrity: sha512-Of0jLD2LvOedkgB/mwSpgkQUPDkq5GF1HD5byiCwat6ge+IfJd7mVHt+66ThduWgmSOUzGookjDt5EfUFGnj+w==, tarball: file:.local-packs/qpjoy-electron-tunnel-0.1.4.tgz}
-    version: 0.1.4
-    hasBin: true
-    peerDependencies:
-      electron: '>=28'
-
-  '@qpjoy/marketplace-db@file:.local-packs/qpjoy-marketplace-db-0.1.0.tgz':
-    resolution: {integrity: sha512-ls1JxF+KHV6wWZi29QEheYDmCXiMFH5J8G4MvMAUT2fYrKBp6bzkQs6ZRQ1fuW5vEKiBD424HmhiGHmlAN01CA==, tarball: file:.local-packs/qpjoy-marketplace-db-0.1.0.tgz}
-    version: 0.1.0
-
-  '@qpjoy/plugin-sdk@file:.local-packs/qpjoy-plugin-sdk-0.1.0.tgz':
-    resolution: {integrity: sha512-QLRYuEX8hYaSvqACT8maafuMhfazzDicXq2JJwaSoCNjDaqNLPxxMZBL6fY9fnEL9VjdJ4ybU2KLEm9nXWKYLQ==, tarball: file:.local-packs/qpjoy-plugin-sdk-0.1.0.tgz}
+  '@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz':
+    resolution: {integrity: sha512-vM9wAwoqMQWQW957HW1606nTn5A65RRgIvbNgWXC2zyhibPQZElWCCPkiYMiU9MZxF4nVwR6DCQbiPO9EabuYQ==, tarball: file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz}
     version: 0.1.0
     peerDependencies:
       electron: '>=28'
     peerDependenciesMeta:
       electron:
         optional: true
+
+  '@qpjoy/electron-plugin-tunnel@file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.4.tgz':
+    resolution: {integrity: sha512-dQUDpeGR763RGPoj34zPpIssseRSAizoNHZ2qNv5Kd4KY70iPrc0HQVhsnBdhsCj1765KPVcjDcRrq4OO5V0sA==, tarball: file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.4.tgz}
+    version: 0.1.4
+    hasBin: true
+    peerDependencies:
+      electron: '>=28'
+
+  '@qpjoy/marketplace-db@file:.local-packs/qpjoy-marketplace-db-0.1.0.tgz':
+    resolution: {integrity: sha512-R3+tJxXz1q7qsVXuEi+yRRUwhEY1uk1FdeP+UTeIHffLfK0oPDfwD3kgnWRQQOOUsyrqF9Q53qxYnAyTwwn+sA==, tarball: file:.local-packs/qpjoy-marketplace-db-0.1.0.tgz}
+    version: 0.1.0
 
   '@sindresorhus/is@4.6.0':
     resolution: {integrity: sha512-t09vSN3MdfsyCHoFcTRCH/iUtG7OJ0CsjzB8cjAmKc/va/kIgeDI/TxsigdncE/4be734m0cvIYwNaV4i2XqAw==}
@@ -2608,15 +2608,19 @@ snapshots:
       mkdirp: 1.0.4
       rimraf: 3.0.2
 
-  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.2.1.tgz(@qpjoy/plugin-sdk@file:.local-packs/qpjoy-plugin-sdk-0.1.0.tgz(electron@34.5.8))(electron@34.5.8)':
+  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.2.2.tgz(@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz(electron@34.5.8))(electron@34.5.8)':
     dependencies:
+      '@qpjoy/electron-plugin-sdk': file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz(electron@34.5.8)
       '@qpjoy/marketplace-db': file:.local-packs/qpjoy-marketplace-db-0.1.0.tgz
-      '@qpjoy/plugin-sdk': file:.local-packs/qpjoy-plugin-sdk-0.1.0.tgz(electron@34.5.8)
       better-sqlite3: 11.10.0
       electron: 34.5.8
       semver: 7.8.0
 
-  '@qpjoy/electron-tunnel@file:.local-packs/qpjoy-electron-tunnel-0.1.4.tgz(electron@34.5.8)':
+  '@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz(electron@34.5.8)':
+    optionalDependencies:
+      electron: 34.5.8
+
+  '@qpjoy/electron-plugin-tunnel@file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.4.tgz(electron@34.5.8)':
     dependencies:
       better-sqlite3: 11.10.0
       electron: 34.5.8
@@ -2627,10 +2631,6 @@ snapshots:
   '@qpjoy/marketplace-db@file:.local-packs/qpjoy-marketplace-db-0.1.0.tgz':
     dependencies:
       better-sqlite3: 11.10.0
-
-  '@qpjoy/plugin-sdk@file:.local-packs/qpjoy-plugin-sdk-0.1.0.tgz(electron@34.5.8)':
-    optionalDependencies:
-      electron: 34.5.8
 
   '@sindresorhus/is@4.6.0': {}
 

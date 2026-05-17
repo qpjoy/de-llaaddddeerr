@@ -13,7 +13,7 @@ export const MARKETPLACE_DB_RELATIVE_PATH = 'qpjoy-plugin-host/marketplace.db';
 
 /**
  * Compose the canonical marketplace DB path from an Electron app's userData
- * directory. Both `@qpjoy/electron-market` and `@qpjoy/electron-tunnel`
+ * directory. Both `@qpjoy/electron-market` and `@qpjoy/electron-plugin-tunnel`
  * (standalone) call this so they hit the same file.
  */
 export function resolveMarketplaceDbPath(userDataPath: string): string {

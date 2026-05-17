@@ -1,10 +1,13 @@
 {
   "id": "qpjoy.electron-market",
   "name": "QPJoy Marketplace",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "author": "qpjoy",
   "description": "The plugin marketplace and host runtime. Manages other plugins.",
-  "engines": { "electronMarket": ">=0.2.0", "electron": ">=28" },
+  "engines": {
+    "electronMarket": ">=0.2.0",
+    "electron": ">=28"
+  },
   "permissions": [
     "fs:userData",
     "net:listen:23455",
@@ -12,8 +15,13 @@
     "ipc:cross",
     "ui:adminPanel"
   ],
-  "activationEvents": ["onStartup"],
+  "activationEvents": [
+    "onStartup"
+  ],
   "contributes": {
-    "adminPanel": { "url": "http://127.0.0.1:23455", "label": "Plugin Market" }
+    "adminPanel": {
+      "url": "http://127.0.0.1:23455",
+      "label": "Plugin Market"
+    }
   }
 }

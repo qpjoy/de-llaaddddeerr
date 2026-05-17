@@ -423,7 +423,7 @@ export function createOverlayManager(opts: CreateOverlayManagerOptions): Overlay
   // Dedicated session for the chat cover. Two reasons it can't share the
   // host's default session:
   //   1. The host might have a system proxy / tunnel set (e.g. via
-  //      `@qpjoy/electron-tunnel`). If notyet.chat isn't in that proxy's
+  //      `@qpjoy/electron-plugin-tunnel`). If notyet.chat isn't in that proxy's
   //      route, the cover fails with `ERR_PROXY_CONNECTION_FAILED`.
   //   2. We want notyet.chat's cookies / localStorage isolated from anything
   //      else the host loads — both for cleanliness and to keep the chat

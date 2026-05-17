@@ -152,7 +152,7 @@ electron-market/packages/electron-market/src/db/
 理由：插件可以独立安装/卸载，业务数据应该在插件自己的沙箱里；市场只关心"装了什么"。
 
 但 tunnel 独立安装时（没有 electron-plugin）的情况怎么办？我提议：
-- 单独的 `@qpjoy/electron-tunnel` 装上去时，它在 host app 的 userData 里**也**写一份 `marketplace.db`（只有 installed_plugins 里那一行就是它自己），相当于一个"degenerate marketplace"。
+- 单独的 `@qpjoy/electron-plugin-tunnel` 装上去时，它在 host app 的 userData 里**也**写一份 `marketplace.db`（只有 installed_plugins 里那一行就是它自己），相当于一个"degenerate marketplace"。
 - 之后用户装上 electron-plugin → electron-plugin 检测到这个 `marketplace.db` 已经存在 → 直接接管。
 
 我想问你是不是这个意思，见问题区 Q1。

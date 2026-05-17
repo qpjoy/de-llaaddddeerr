@@ -4,7 +4,7 @@ Three packages get published; one (`@qpjoy/electron-market-admin-ui`) stays
 private and ships baked into `@qpjoy/electron-market`'s `dist/admin-ui/`.
 
 ```
-@qpjoy/plugin-sdk          types + definePlugin       no workspace deps
+@qpjoy/electron-plugin-sdk          types + definePlugin       no workspace deps
 @qpjoy/marketplace-db      SQLite data layer          no workspace deps
 @qpjoy/electron-market     host runtime + admin SPA   depends on marketplace-db
 ```
@@ -43,7 +43,7 @@ pnpm -r build
 
 # 2. dry-run pack to inspect what would ship
 mkdir -p /tmp/qpjoy-pub-preview && rm -f /tmp/qpjoy-pub-preview/*.tgz
-for p in plugin-sdk marketplace-db electron-plugin; do
+for p in electron-plugin-sdk marketplace-db electron-plugin; do
   (cd packages/$p && pnpm pack --pack-destination /tmp/qpjoy-pub-preview)
 done
 
@@ -52,12 +52,12 @@ tar -xzOf /tmp/qpjoy-pub-preview/qpjoy-electron-market-*.tgz package/package.jso
   | jq '.dependencies."@qpjoy/marketplace-db"'
 
 # 3. publish in dep order (npm 2FA prompts each time if enabled)
-cd packages/plugin-sdk     && pnpm publish && cd ../..
+cd packages/electron-plugin-sdk     && pnpm publish && cd ../..
 cd packages/marketplace-db && pnpm publish && cd ../..
 cd packages/electron-plugin && pnpm publish && cd ../..
 
 # 4. tag
-git tag plugin-sdk-v$(cat packages/plugin-sdk/package.json | jq -r .version)
+git tag electron-plugin-sdk-v$(cat packages/electron-plugin-sdk/package.json | jq -r .version)
 git tag marketplace-db-v$(cat packages/marketplace-db/package.json | jq -r .version)
 git tag electron-market-v$(cat packages/electron-plugin/package.json | jq -r .version)
 git push --tags
@@ -88,7 +88,7 @@ forward.
 
 ## Special considerations per package
 
-### `@qpjoy/plugin-sdk` (2.4 KB)
+### `@qpjoy/electron-plugin-sdk` (2.4 KB)
 
 - No runtime deps. `electron` is an optional peer (types only).
 - Pure types + a `definePlugin` identity helper + a `PermissionDeniedError` class.
@@ -107,7 +107,7 @@ forward.
   - The bundled marketplace seed (`dist/seed-index.json`)
 - Runtime dep on `@qpjoy/marketplace-db` (which `workspace:^` only resolves
   via `pnpm publish` — see warning above).
-- Peer deps: `@qpjoy/plugin-sdk` (must be installed by the consumer
+- Peer deps: `@qpjoy/electron-plugin-sdk` (must be installed by the consumer
   alongside) + `electron >= 28`.
 - `qpjoyPlugin.self: true` — the host package itself ships a manifest
   (`dist/plugin.manifest.json`) for spec compatibility, but the `self`
@@ -126,13 +126,13 @@ out of node_modules without ever installing admin-ui.
 
 ```bash
 # Application that hosts plugins (e.g. electron-test):
-pnpm add @qpjoy/electron-market @qpjoy/plugin-sdk
+pnpm add @qpjoy/electron-market @qpjoy/electron-plugin-sdk
 
 # Optional: also bundle a plugin like the tunnel as a seed
-pnpm add @qpjoy/electron-tunnel
+pnpm add @qpjoy/electron-plugin-tunnel
 ```
 
-The `@qpjoy/plugin-sdk` peer must be installed explicitly — it's a peer
+The `@qpjoy/electron-plugin-sdk` peer must be installed explicitly — it's a peer
 so plugin authors and host integrators can pin different versions if
 needed.
 
@@ -160,7 +160,7 @@ For your package to appear in the marketplace SPA, **all three** must hold:
    - npm name matches `@qpjoy/electron-*` (the default scope + prefix the
      server's `sync-npm.ts` uses with `text=` search), **or**
    - the package name is in the server's `MARKETPLACE_ALLOWLIST` env var
-     (comma-separated). The default allowlist is `@qpjoy/electron-tunnel`
+     (comma-separated). The default allowlist is `@qpjoy/electron-plugin-tunnel`
      — historical name predating the `electron-plugin-*` convention; new
      QPJoy plugins should just match the prefix.
 2. **Has a `qpjoyPlugin` field** in published `package.json`:
@@ -190,5 +190,5 @@ plugin manifest, or you're absent from the marketplace.
 
 The `electron-plugin-` prefix is a convention, not enforcement. It makes
 intent obvious in `package.json` and the npm UI. Existing packages
-(`@qpjoy/electron-tunnel`) keep their names via the allowlist; new ones
+(`@qpjoy/electron-plugin-tunnel`) keep their names via the allowlist; new ones
 should pick the prefixed form unless there's a good reason not to.

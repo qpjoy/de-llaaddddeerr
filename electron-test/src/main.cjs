@@ -52,7 +52,7 @@ function tunnelSeedDir() {
   if (process.env.QPJOY_TUNNEL_SOURCE) {
     return path.resolve(process.env.QPJOY_TUNNEL_SOURCE);
   }
-  return path.join(app.getAppPath(), 'node_modules', '@qpjoy', 'electron-tunnel');
+  return path.join(app.getAppPath(), 'node_modules', '@qpjoy', 'electron-plugin-tunnel');
 }
 
 /**
@@ -221,7 +221,7 @@ app
           // marketplace pipeline from npm.
           {
             id: TUNNEL_ID,
-            npm: '@qpjoy/electron-tunnel',
+            npm: '@qpjoy/electron-plugin-tunnel',
             source: { type: 'local-dir', path: tunnelSeedDir() },
             autoGrant: 'manifest'
           }

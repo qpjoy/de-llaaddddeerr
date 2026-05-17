@@ -1,13 +1,22 @@
 {
   "name": "@qpjoy/electron-market",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Marketplace host runtime + admin panel for QPJoy electron apps. Embed in your Electron main process to install, sandbox, and update plugins from a local SPA on 127.0.0.1:23455. Formerly published as @qpjoy/electron-plugin.",
   "license": "UNLICENSED",
   "type": "commonjs",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist", "README.md"],
-  "keywords": ["electron", "plugin", "marketplace", "qpjoy", "plugin-host"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "electron",
+    "plugin",
+    "marketplace",
+    "qpjoy",
+    "plugin-host"
+  ],
   "homepage": "https://github.com/qpjoy/electron-plugin",
   "repository": {
     "type": "git",
@@ -35,11 +44,11 @@
     "semver": "^7.6.3"
   },
   "peerDependencies": {
-    "@qpjoy/plugin-sdk": ">=0.1.0",
+    "@qpjoy/electron-plugin-sdk": ">=0.1.0",
     "electron": ">=28"
   },
   "devDependencies": {
-    "@qpjoy/plugin-sdk": "workspace:*",
+    "@qpjoy/electron-plugin-sdk": "workspace:*",
     "@qpjoy/electron-market-admin-ui": "workspace:*",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.7",

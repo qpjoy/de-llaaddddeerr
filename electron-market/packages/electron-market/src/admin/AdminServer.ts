@@ -108,7 +108,7 @@ export interface AdminServerOptions {
  *
  * Bound to 127.0.0.1 only. Auth is intentionally omitted in this skeleton;
  * the production version reuses the same bearer-token pattern as
- * `@qpjoy/electron-tunnel`'s AdminServer.
+ * `@qpjoy/electron-plugin-tunnel`'s AdminServer.
  */
 export class AdminServer {
   private server: Server | null = null;

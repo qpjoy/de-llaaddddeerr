@@ -1,7 +1,7 @@
 import { configure } from 'quasar/wrappers';
 import { fileURLToPath } from 'node:url';
 
-const tunnelRuntimeEntry = fileURLToPath(new URL('../../packages/electron-mihomo-tunnel/src/index.ts', import.meta.url));
+const tunnelRuntimeEntry = fileURLToPath(new URL('../../packages/electron-plugin-tunnel/src/index.ts', import.meta.url));
 
 export default configure(() => ({
   supportTS: true,
@@ -10,7 +10,7 @@ export default configure(() => ({
   build: {
     vueRouterMode: 'hash',
     alias: {
-      '@qpjoy/electron-tunnel': tunnelRuntimeEntry
+      '@qpjoy/electron-plugin-tunnel': tunnelRuntimeEntry
     }
   },
   framework: {
@@ -25,7 +25,7 @@ export default configure(() => ({
     bundler: 'builder',
     preloadScripts: ['electron-preload'],
     extendElectronMainConf(config) {
-      config.external = (config.external ?? []).filter((dependency) => dependency !== '@qpjoy/electron-tunnel');
+      config.external = (config.external ?? []).filter((dependency) => dependency !== '@qpjoy/electron-plugin-tunnel');
     },
     builder: {
       appId: 'dev.qpjoy.electron-tunnel',

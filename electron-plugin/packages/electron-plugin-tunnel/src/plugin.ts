@@ -15,7 +15,7 @@ import { createElectronTunnel, type ElectronTunnelHandle } from './createElectro
 
 /**
  * Subset of the SDK types — re-declared structurally so this file does not
- * take a build-time dependency on `@qpjoy/plugin-sdk`. (Tunnel still ships
+ * take a build-time dependency on `@qpjoy/electron-plugin-sdk`. (Tunnel still ships
  * fine when installed without the plugin host present.)
  */
 interface PluginHostBridge {

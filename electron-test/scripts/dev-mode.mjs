@@ -50,25 +50,25 @@ if (desired !== 'local' && desired !== 'npm') {
  * app's `node_modules/`.
  */
 const WORKSPACE_PACKS = [
-  { name: '@qpjoy/plugin-sdk',      dir: 'electron-market/packages/plugin-sdk' },
+  { name: '@qpjoy/electron-plugin-sdk',      dir: 'electron-market/packages/electron-plugin-sdk' },
   { name: '@qpjoy/marketplace-db',  dir: 'electron-market/packages/marketplace-db' },
   { name: '@qpjoy/electron-market', dir: 'electron-market/packages/electron-market' },
-  { name: '@qpjoy/electron-tunnel', dir: 'electron-plugin/packages/electron-mihomo-tunnel' }
+  { name: '@qpjoy/electron-plugin-tunnel', dir: 'electron-plugin/packages/electron-plugin-tunnel' }
 ];
 
 /** Versions used by npm mode. Bump in lockstep with what's on the registry. */
 const NPM_VERSIONS = {
   '@qpjoy/electron-market': '^0.2.1',
-  '@qpjoy/electron-tunnel': '^0.1.4',
-  '@qpjoy/plugin-sdk':      '^0.1.0',
+  '@qpjoy/electron-plugin-tunnel': '^0.1.4',
+  '@qpjoy/electron-plugin-sdk':      '^0.1.0',
   '@qpjoy/marketplace-db':  '^0.1.0'
 };
 
 /** Direct deps electron-test declares (subset — marketplace-db only via override). */
 const DIRECT_DEP_NAMES = [
   '@qpjoy/electron-market',
-  '@qpjoy/electron-tunnel',
-  '@qpjoy/plugin-sdk'
+  '@qpjoy/electron-plugin-tunnel',
+  '@qpjoy/electron-plugin-sdk'
 ];
 
 const pkg = JSON.parse(readFileSync(PKG_PATH, 'utf8'));
@@ -85,7 +85,7 @@ function buildWorkspaces() {
   // pnpm -r build in each workspace (electron-plugin/ and electron-market/) so the
   // tarballs we pack include up-to-date dists.
   shell('pnpm install --prefer-offline --frozen-lockfile=false', resolve(REPO_ROOT, 'electron-plugin'));
-  shell('pnpm --filter @qpjoy/electron-tunnel build', resolve(REPO_ROOT, 'electron-plugin'));
+  shell('pnpm --filter @qpjoy/electron-plugin-tunnel build', resolve(REPO_ROOT, 'electron-plugin'));
   shell('pnpm install --prefer-offline --frozen-lockfile=false', resolve(REPO_ROOT, 'electron-market'));
   shell('pnpm -r build', resolve(REPO_ROOT, 'electron-market'));
 }

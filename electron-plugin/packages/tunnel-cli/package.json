@@ -1,13 +1,29 @@
 {
   "name": "@qpjoy/tunnel-cli",
   "version": "0.1.0",
-  "private": true,
+  "description": "Global QPJoy Tunnel CLI for installing and running the Linux mihomo-client script.",
+  "private": false,
   "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "bin": {
-    "qpjoy-tunnel": "dist/index.js"
+    "qp-tunnel-cli": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "resources",
+    "scripts",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepack": "tsc -p tsconfig.json && node scripts/prepare-package.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit"
   },

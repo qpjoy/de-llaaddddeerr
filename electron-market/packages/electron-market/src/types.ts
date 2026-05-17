@@ -1,4 +1,4 @@
-import type { PluginManifest, Permission } from '@qpjoy/plugin-sdk';
+import type { PluginManifest, Permission } from '@qpjoy/electron-plugin-sdk';
 
 export type { PluginManifest, Permission };
 

@@ -1,4 +1,4 @@
-import type { Permission } from '@qpjoy/plugin-sdk';
+import type { Permission } from '@qpjoy/electron-plugin-sdk';
 import {
   MarketplaceDB,
   type InstalledPlugin,

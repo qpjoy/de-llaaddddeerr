@@ -22,8 +22,8 @@
  *   1. (cheap pre-filter) name matches `<NPM_SCOPE>/<NPM_PREFIX>*`. Default
  *      `@qpjoy/electron-*`. Plus any names in `MARKETPLACE_ALLOWLIST` are
  *      force-included even if they don't match the prefix (so packages with
- *      historical names like `@qpjoy/electron-tunnel` still surface after we
- *      establish a stricter naming convention).
+ *      bootstrap packages like `@qpjoy/electron-plugin-tunnel` still surface
+ *      even before npm search has indexed them.
  *   2. (authoritative) latest version's `package.json` carries a
  *      `qpjoyPlugin: { specVersion, manifest, ... }` field pointing at a
  *      real plugin manifest.
@@ -66,8 +66,8 @@ const NPM_PREFIX = process.env.NPM_PREFIX ?? 'electron-';
  * in marketplace discovery even when they fail the prefix pre-filter.
  *
  * Two reasons this exists:
- *   1. Historical names: `@qpjoy/electron-tunnel` predates the
- *      `electron-plugin-*` naming convention but is a legitimate plugin.
+ *   1. Bootstrap packages: `@qpjoy/electron-plugin-tunnel` should remain
+ *      visible even if discovery rules or registry indexing lag behind.
  *   2. npm search index lag: a freshly-published package may not appear in
  *      `/-/v1/search` results for hours. Force-fetching by name bypasses that.
  *
@@ -75,7 +75,7 @@ const NPM_PREFIX = process.env.NPM_PREFIX ?? 'electron-';
  * (`qpjoyPlugin` field present, `self !== true`); allowlisting only
  * controls *discovery*, not *legitimacy*.
  */
-const MARKETPLACE_ALLOWLIST = (process.env.MARKETPLACE_ALLOWLIST ?? '@qpjoy/electron-tunnel')
+const MARKETPLACE_ALLOWLIST = (process.env.MARKETPLACE_ALLOWLIST ?? '@qpjoy/electron-plugin-tunnel')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);

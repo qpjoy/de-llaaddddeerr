@@ -2,7 +2,7 @@
 
 The QPJoy plugin marketplace + host runtime, embedded inside your Electron
 app's main process. Once the app depends on `@qpjoy/electron-market`, every
-plugin (including `@qpjoy/electron-tunnel`) is installed / uninstalled /
+plugin (including `@qpjoy/electron-plugin-tunnel`) is installed / uninstalled /
 permission-managed through the in-process admin panel on
 `http://127.0.0.1:23455`.
 
@@ -18,7 +18,7 @@ permission-managed through the in-process admin panel on
 ```
 packages/
 ├─ electron-market/   @qpjoy/electron-market             host runtime + admin server
-├─ plugin-sdk/        @qpjoy/plugin-sdk                  types/helpers for plugin authors
+├─ electron-plugin-sdk/        @qpjoy/electron-plugin-sdk                  types/helpers for plugin authors
 ├─ marketplace-db/    @qpjoy/marketplace-db              shared SQLite + migration layer
 └─ admin-ui/          @qpjoy/electron-market-admin-ui    Vue + Quasar SPA served on 23455
 docs/
@@ -34,7 +34,7 @@ scripts/
 
 ## Three install paths
 
-The same plugin (e.g. `@qpjoy/electron-tunnel`) can be installed in three
+The same plugin (e.g. `@qpjoy/electron-plugin-tunnel`) can be installed in three
 ways; the end-state on disk and in the registry is identical:
 
 1. **Standalone** — `createElectronTunnel(...)` directly, no plugin host involved.
@@ -62,7 +62,7 @@ app.whenReady().then(() => {
         // Make sure the tunnel is present before any marketplace traffic.
         {
           id: 'qpjoy.electron-tunnel',
-          npm: '@qpjoy/electron-tunnel',
+          npm: '@qpjoy/electron-plugin-tunnel',
           source: {
             type: 'local-dir',
             path: path.join(process.resourcesPath, 'seeds', 'electron-tunnel')
@@ -89,8 +89,8 @@ That's the entire host integration. Everything else happens through
 
 ```ts
 // dist/plugin.js
-import { definePlugin } from '@qpjoy/plugin-sdk';
-import { createElectronTunnel } from '@qpjoy/electron-tunnel';
+import { definePlugin } from '@qpjoy/electron-plugin-sdk';
+import { createElectronTunnel } from '@qpjoy/electron-plugin-tunnel';
 
 export default definePlugin({
   async activate(ctx) {
@@ -118,4 +118,4 @@ and `docs/PERMISSIONS.md` for the permission catalogue.
 | In-process plugin runtime | done |
 | `utilityProcess` isolation | deferred to v2 (see PLUGIN_SPEC §8) |
 | Code signing of plugin tarballs | deferred — the `verified` flag is index-only for now |
-| Bearer-token auth on admin port | deferred — reuse pattern from `@qpjoy/electron-tunnel`'s AdminServer |
+| Bearer-token auth on admin port | deferred — reuse pattern from `@qpjoy/electron-plugin-tunnel`'s AdminServer |

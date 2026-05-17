@@ -1,6 +1,6 @@
 # Bootstrap & Install Walkthrough
 
-This document walks the full lifecycle of `@qpjoy/electron-tunnel` going
+This document walks the full lifecycle of `@qpjoy/electron-plugin-tunnel` going
 through the marketplace, including the chicken-and-egg case where the
 network itself depends on the tunnel.
 
@@ -15,7 +15,7 @@ network itself depends on the tunnel.
 Whichever path is taken, the on-disk layout is identical:
 
 ```
-<userData>/plugins/qpjoy.electron-tunnel@0.1.3/node_modules/@qpjoy/electron-tunnel/
+<userData>/plugins/qpjoy.electron-tunnel@0.1.3/node_modules/@qpjoy/electron-plugin-tunnel/
 <userData>/plugin-data/qpjoy.electron-tunnel/
 marketplace.db       ← record + permission grants + logs (under qpjoy-plugin-host/)
 ```
@@ -25,11 +25,11 @@ marketplace.db       ← record + permission grants + logs (under qpjoy-plugin-h
 ## A. Standalone (unchanged from today)
 
 Nothing about the plugin-host work breaks this. The package still publishes
-the same `createElectronTunnel` named export from `@qpjoy/electron-tunnel`,
+the same `createElectronTunnel` named export from `@qpjoy/electron-plugin-tunnel`,
 so apps that integrate the tunnel directly keep doing:
 
 ```ts
-import { createElectronTunnel } from '@qpjoy/electron-tunnel';
+import { createElectronTunnel } from '@qpjoy/electron-plugin-tunnel';
 
 const tunnel = createElectronTunnel(
   { app, ipcMain, session: session.defaultSession },
@@ -37,7 +37,7 @@ const tunnel = createElectronTunnel(
 );
 ```
 
-The new plugin contract lives at `@qpjoy/electron-tunnel/plugin` (a separate
+The new plugin contract lives at `@qpjoy/electron-plugin-tunnel/plugin` (a separate
 exports subpath) so standalone consumers never even pull it in.
 
 ## B. Seed install (offline, the bootstrap path)
@@ -65,12 +65,12 @@ const host = createElectronMarket(
     seedPlugins: [
       {
         id: 'qpjoy.electron-tunnel',
-        npm: '@qpjoy/electron-tunnel',
+        npm: '@qpjoy/electron-plugin-tunnel',
         source: {
           type: 'local-dir',
           path: app.isPackaged
             ? path.join(process.resourcesPath, 'seeds', 'electron-tunnel')
-            : path.resolve(__dirname, '../../electron-plugin/packages/electron-mihomo-tunnel')
+            : path.resolve(__dirname, '../../electron-plugin/packages/electron-plugin-tunnel')
         },
         // First-party seed: pre-approve every permission its manifest asks for.
         autoGrant: 'manifest'
@@ -85,7 +85,7 @@ What `createElectronMarket` does on first launch:
 1. Check the registry. No record for `qpjoy.electron-tunnel` → call
    `PluginStore.installFrom({ source: { type: 'local-dir', path } })`.
 2. Stage in a temp dir, copy the seed into
-   `node_modules/@qpjoy/electron-tunnel/`, read `plugin.manifest.json`,
+   `node_modules/@qpjoy/electron-plugin-tunnel/`, read `plugin.manifest.json`,
    atomically rename into `<userData>/plugins/qpjoy.electron-tunnel@0.1.3/`.
 3. Upsert into the registry with `awaitingGrant`, then immediately apply
    the `autoGrant: 'manifest'` list → state becomes `installed`.
@@ -97,13 +97,13 @@ From there the network is up and the marketplace can do its job.
 
 ### B.2 — Bundled tarball
 
-If you'd rather ship `electron-tunnel-0.1.3.tgz` instead of an exploded
+If you'd rather ship `electron-plugin-tunnel-0.1.3.tgz` instead of an exploded
 directory, swap the source:
 
 ```ts
 source: {
   type: 'tarball',
-  path: path.join(process.resourcesPath, 'seeds', 'electron-tunnel-0.1.3.tgz')
+  path: path.join(process.resourcesPath, 'seeds', 'electron-plugin-tunnel-0.1.3.tgz')
 }
 ```
 
@@ -127,7 +127,7 @@ The server:
 
 1. `MarketplaceClient.resolve(id)` finds the entry.
 2. `PluginStore.install({ id, npm, version })` runs
-   `npm install --ignore-scripts @qpjoy/electron-tunnel@0.1.3` inside a
+   `npm install --ignore-scripts @qpjoy/electron-plugin-tunnel@0.1.3` inside a
    staging dir, reads the manifest, asserts `manifest.id === entry.id`,
    moves the dir into place, and writes the registry row in `awaitingGrant`.
 
