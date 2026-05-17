@@ -36,6 +36,12 @@ function createSudukuWindow(ctx) {
 
 module.exports = {
   activate(ctx) {
+    if (!ctx.host.marketplaceDb || typeof ctx.host.marketplaceDb.raw !== "function") {
+      throw new Error(
+        "Suduku requires @qpjoy/electron-market >=0.3.14 so game scores can use the shared marketplace SQLite database. Please upgrade the market host, then reinstall or upgrade Suduku."
+      );
+    }
+
     const database = new SudukuDatabase({
       marketplaceDb: ctx.host.marketplaceDb,
       userDataDir: ctx.userDataDir

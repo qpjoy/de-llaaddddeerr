@@ -121,8 +121,10 @@ export async function runSync(opts: { dryRun?: boolean } = {}): Promise<SyncRepo
   const rejected: SyncReport['rejected'] = [];
   const accepted: PluginDetailDTO[] = [];
 
-  // 1. Find packages.
-  const candidates = await searchScope();
+  // 1. Find packages. Besides npm search, refresh anything already present
+  // in the server catalogue so existing games/plugins continue to update
+  // even when npm search indexing lags behind a fresh publish.
+  const candidates = await discoverCandidates();
 
   // 2. For each, fetch metadata + extract manifest.
   for (const name of candidates) {
@@ -177,6 +179,26 @@ export async function runSync(opts: { dryRun?: boolean } = {}): Promise<SyncRepo
 /* ────────────────────────────────────────────────────────────────────── */
 /* Internals                                                              */
 /* ────────────────────────────────────────────────────────────────────── */
+
+async function discoverCandidates(): Promise<string[]> {
+  const candidates = new Set(await searchScope());
+  for (const name of existingMarketplacePackages()) {
+    candidates.add(name);
+  }
+  return Array.from(candidates).sort();
+}
+
+function existingMarketplacePackages(): string[] {
+  const names = new Set<string>();
+  const index = storage.getIndex();
+  for (const entry of index?.entries ?? []) {
+    if (entry.npm) names.add(entry.npm);
+  }
+  for (const detail of storage.listPlugins()) {
+    if (detail.npm) names.add(detail.npm);
+  }
+  return Array.from(names);
+}
 
 async function searchScope(): Promise<string[]> {
   // npm's `scope:` search filter is unreliable for some scopes (returns 0

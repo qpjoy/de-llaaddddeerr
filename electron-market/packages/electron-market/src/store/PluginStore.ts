@@ -1,13 +1,48 @@
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import { readFile, rm, mkdir, cp, rename, writeFile, symlink, lstat, readdir } from 'fs/promises';
-import { createWriteStream, existsSync } from 'fs';
+import { createWriteStream, existsSync, readFileSync } from 'fs';
 import { join, isAbsolute, resolve } from 'path';
+import semver from 'semver';
 
 import type { PluginManifest } from '@qpjoy/electron-plugin-sdk';
 import type { PluginRegistry } from '../registry/PluginRegistry';
 
 const execFileAsync = promisify(execFile);
+let cachedHostVersion: string | null = null;
+
+function hostMarketVersion(): string {
+  if (cachedHostVersion) return cachedHostVersion;
+  try {
+    const pkg = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8')) as {
+      version?: string;
+    };
+    cachedHostVersion = pkg.version ?? '0.0.0';
+  } catch {
+    cachedHostVersion = '0.0.0';
+  }
+  return cachedHostVersion;
+}
+
+function assertEngineCompatibility(manifest: PluginManifest): void {
+  const marketRange = manifest.engines.electronMarket ?? manifest.engines.electronPlugin;
+  if (marketRange && !semver.satisfies(hostMarketVersion(), marketRange, { includePrerelease: true })) {
+    throw new Error(
+      `${manifest.name} requires @qpjoy/electron-market ${marketRange}; current host is ${hostMarketVersion()}.`
+    );
+  }
+
+  const electronVersion = process.versions.electron;
+  if (
+    manifest.engines.electron &&
+    electronVersion &&
+    !semver.satisfies(electronVersion, manifest.engines.electron, { includePrerelease: true })
+  ) {
+    throw new Error(
+      `${manifest.name} requires Electron ${manifest.engines.electron}; current Electron is ${electronVersion}.`
+    );
+  }
+}
 
 /**
  * Cross-platform wrapper around `npm install` / `pnpm install`.
@@ -667,6 +702,8 @@ export class PluginStore {
       );
       manifest.version = pkg.version;
     }
+
+    assertEngineCompatibility(manifest);
 
     return manifest;
   }

@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-game-suduku",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Suduku game for the Qpjoy Electron game marketplace.",
   "main": "src/main.js",
   "type": "commonjs",
@@ -23,7 +23,7 @@
     "build": "npm run check",
     "check": "node --check src/main.js && node --check src/plugin.js && node --check src/preload.js && node --check src/player.js && node --check src/database.js && node --check src/sync.js && node --check renderer/app.js && node --check renderer/game.js"
   },
-  "dependencies": {
+  "optionalDependencies": {
     "better-sqlite3": "^11.9.1"
   },
   "devDependencies": {
