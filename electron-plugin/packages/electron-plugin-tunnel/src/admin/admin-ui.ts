@@ -118,6 +118,7 @@ export function adminHtml(): string {
     .icon-button.primary{background:#1976d2;color:#fff;box-shadow:0 3px 8px rgba(16,24,40,.18)}
     .chip{min-height:34px;border-radius:999px;padding:6px 16px;display:inline-flex;align-items:center;color:#fff;background:#8b929a;font-weight:700}
     .chip.positive{background:#21ba45}
+    .chip.compact{min-height:30px;padding:5px 12px;font-size:13px}
     .subscription-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
     .subscription-card{min-height:118px;padding:16px}
     .subscription-card.active{border-color:#1578ff;box-shadow:inset 4px 0 0 #1578ff}
@@ -203,6 +204,16 @@ export function adminHtml(): string {
         return text || '请求失败';
       }
     }
+    function friendlyErrorMessage(message) {
+      var text = String(message || '');
+      if (/active subscription has no downloaded content|no active subscription configured|还没有启用订阅|当前订阅还没有下载/i.test(text)) {
+        return '还没有可用订阅。请先在「订阅」里新建并启用一个订阅，确认订阅文件已下载后再启动。';
+      }
+      if (/Tunnel engine is not installed|缺少适配 .* 隧道引擎|tunnel engine resources/i.test(text)) {
+        return text.indexOf('缺少适配') >= 0 ? text : '当前安装包缺少适配本机系统的隧道引擎。请重新安装包含本机引擎资源的版本，或在「代理」页填写本机 mihomo 可执行文件路径。';
+      }
+      return text || '请求失败';
+    }
     async function api(path, options) {
       var res = await fetch(path, {
         method: options && options.method ? options.method : 'GET',
@@ -229,7 +240,7 @@ export function adminHtml(): string {
       el.className = negative ? 'toast negative' : 'toast';
       el.hidden = false;
       window.clearTimeout(toast.timer);
-      toast.timer = window.setTimeout(function () { el.hidden = true; }, 1800);
+      toast.timer = window.setTimeout(function () { el.hidden = true; }, negative ? 5200 : 1800);
     }
     async function run(action, message) {
       if (busy) return false;
@@ -240,7 +251,7 @@ export function adminHtml(): string {
         if (message) toast(message, false);
         return true;
       } catch (error) {
-        toast(error instanceof Error ? error.message : String(error), true);
+        toast(friendlyErrorMessage(error instanceof Error ? error.message : String(error)), true);
         return false;
       } finally {
         setBusy(false);
@@ -274,6 +285,20 @@ export function adminHtml(): string {
     }
     function statusChip(text, positive) {
       return '<span class="chip ' + (positive ? 'positive' : '') + '">' + escapeHtml(text) + '</span>';
+    }
+    function compactStatusChip(text, positive) {
+      return '<span class="chip compact ' + (positive ? 'positive' : '') + '">' + escapeHtml(text) + '</span>';
+    }
+    function engineSourceLabel(source) {
+      return ({ custom: '自定义路径', installed: '已安装到本机', bundled: '内置引擎', missing: '缺少引擎' })[source || 'missing'] || '缺少引擎';
+    }
+    function engineSummary(s) {
+      var engine = s && s.engine ? s.engine : null;
+      if (!engine) return '检测中';
+      if (engine.source === 'custom') return '自定义 mihomo';
+      if (engine.source === 'installed') return '已自动安装到本机';
+      if (engine.source === 'bundled') return '将自动使用内置引擎';
+      return '当前安装包缺少 ' + engine.target + ' 引擎';
     }
     function normalizeUrl(value) {
       var raw = String(value || '').trim();
@@ -323,6 +348,7 @@ export function adminHtml(): string {
     }
     function renderProxy() {
       var s = status();
+      var engine = s && s.engine ? s.engine : null;
       return '<section class="section-surface"><div class="toolbar-row">' +
         '<select id="modeSelect" class="field field-short" style="width:220px">' +
         '<option value="app-rule">App 模式</option><option value="app-global">全局模式</option><option value="system-tun">虚拟网卡</option>' +
@@ -333,8 +359,9 @@ export function adminHtml(): string {
         statusChip('TUN ' + (s && s.tunInstalled ? '已安装' : '未安装'), !!(s && s.tunInstalled)) +
         '</div></section>' +
         '<section class="section-surface"><div class="toolbar-row">' +
-        '<input id="corePath" class="field field-grow" placeholder="自动使用内置隧道引擎" value="' + escapeHtml(s && s.corePath ? s.corePath : '') + '">' +
+        '<input id="corePath" class="field field-grow" placeholder="留空则自动使用当前系统的内置隧道引擎" value="' + escapeHtml(engine && engine.customPath ? engine.customPath : '') + '">' +
         '<button id="saveCorePath" class="btn">${icon('save')}<span>保存引擎路径</span></button>' +
+        compactStatusChip(engineSummary(s), !!(engine && engine.available)) +
         '</div></section>' +
         '<section class="section-surface"><div class="toolbar-row">' +
         '<input id="mixedPort" class="field field-short" type="number" placeholder="本地代理端口" value="' + escapeHtml(s ? s.ports.mixed : 23458) + '">' +
@@ -344,6 +371,8 @@ export function adminHtml(): string {
         '</div></section>' +
         '<div class="status-strip">' +
         metric('当前模式', modeLabels[s ? s.mode : 'app-rule'] || 'App 模式') +
+        metric('引擎目标', engine ? engine.target : '检测中') +
+        metric('引擎来源', engineSourceLabel(engine ? engine.source : 'missing')) +
         metric('本地代理', ':' + (s ? s.ports.mixed : 23458)) +
         metric('DNS', ':' + (s ? s.ports.dns : 23459)) +
         metric('控制接口', ':' + (s ? s.ports.controller : 23457)) +
@@ -352,14 +381,16 @@ export function adminHtml(): string {
     function renderSubscriptions() {
       var items = snapshot ? snapshot.subscriptions : [];
       var cards = items.length ? items.map(function (sub) {
-        return '<article class="subscription-card ' + (sub.active ? 'active' : '') + '">' +
+        var activeId = snapshot && snapshot.status && snapshot.status.activeSubscription ? snapshot.status.activeSubscription.id : null;
+        var active = !!(sub.active || sub.id === activeId);
+        return '<article class="subscription-card ' + (active ? 'active' : '') + '">' +
           '<div class="card-head"><span>${icon('subscriptions')}</span><div class="card-title">' + escapeHtml(sub.name) + '</div><div class="spacer"></div>' +
           '<button class="icon-button" data-edit-sub="' + sub.id + '" title="编辑">${icon('save')}</button>' +
           '<button class="icon-button" data-refresh-sub="' + sub.id + '" title="刷新">${icon('refresh')}</button>' +
           '<button class="icon-button" data-delete-sub="' + sub.id + '" title="删除">${icon('delete')}</button></div>' +
           '<div class="muted ellipsis">' + escapeHtml(redactedUrl(sub.url)) + '</div>' +
           '<div class="toolbar-row" style="margin-top:14px"><span class="muted">' + escapeHtml(relativeTime(sub.lastUpdatedAt)) + '</span><div class="spacer"></div>' +
-          '<button class="btn outline" data-active-sub="' + sub.id + '">启用</button></div>' +
+          (active ? compactStatusChip('当前启用', true) : '<button class="btn outline" data-active-sub="' + sub.id + '">启用</button>') + '</div>' +
           '</article>';
       }).join('') : '<div class="empty">暂无订阅</div>';
       return '<section class="section-surface"><div class="toolbar-row">' +
@@ -516,6 +547,23 @@ export function adminHtml(): string {
     byId('restartBtn').onclick = function () { run(function () { return api('/api/core/restart', { method: 'POST' }); }, '隧道已重载'); };
     byId('toggleCoreBtn').onclick = function () {
       var running = status() && status().running;
+      if (!running) {
+        var s = status();
+        if (!s || !s.activeSubscription) {
+          toast('还没有启用订阅。请先在「订阅」里新建并启用一个订阅，然后再启动隧道。', true);
+          currentPage = 'subscriptions';
+          window.localStorage.setItem('qpjoyTunnelAdminPage', currentPage);
+          renderPage();
+          return;
+        }
+        if (s.engine && !s.engine.available) {
+          toast('当前安装包缺少适配 ' + s.engine.target + ' 的隧道引擎。请安装对应平台的引擎包，或在「代理」页填写本机 mihomo 路径。', true);
+          currentPage = 'proxy';
+          window.localStorage.setItem('qpjoyTunnelAdminPage', currentPage);
+          renderPage();
+          return;
+        }
+      }
       run(function () { return api(running ? '/api/core/stop' : '/api/core/start', { method: 'POST' }); }, running ? '隧道已停止' : '隧道已启动');
     };
     document.body.onclick = function (event) {

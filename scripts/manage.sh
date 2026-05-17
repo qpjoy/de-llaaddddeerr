@@ -45,6 +45,7 @@ header() { printf '\n%s%s%s\n' "$C_CYAN$C_BOLD" "$*" "$C_RESET"; hr; }
 # ── Package catalogue ─────────────────────────────────────────────────
 # Format: "<npm-name>|<workspace-path>|<category>|<display-name>"
 # Category: host = marketplace runtime, plugin = installable plugin,
+#           engine = platform-specific tunnel engine resource package,
 #           tool = npm CLI/helper, game = installable game (none yet).
 #
 # When you add a new publishable package, add a row here. Anything not in
@@ -53,6 +54,11 @@ PACKAGES=(
   "@qpjoy/electron-plugin-sdk|electron-market/packages/electron-plugin-sdk|host|Plugin SDK (类型定义)"
   "@qpjoy/marketplace-db|electron-market/packages/marketplace-db|host|Marketplace DB (SQLite 层)"
   "@qpjoy/electron-market|electron-market/packages/electron-market|host|Electron Market (宿主运行时)"
+  "@qpjoy/electron-plugin-tunnel-engine-darwin-arm64|electron-plugin/packages/tunnel-engines/darwin-arm64|engine|Tunnel Engine macOS arm64"
+  "@qpjoy/electron-plugin-tunnel-engine-darwin-x64|electron-plugin/packages/tunnel-engines/darwin-x64|engine|Tunnel Engine macOS x64"
+  "@qpjoy/electron-plugin-tunnel-engine-linux-arm64|electron-plugin/packages/tunnel-engines/linux-arm64|engine|Tunnel Engine Linux arm64"
+  "@qpjoy/electron-plugin-tunnel-engine-linux-x64|electron-plugin/packages/tunnel-engines/linux-x64|engine|Tunnel Engine Linux x64"
+  "@qpjoy/electron-plugin-tunnel-engine-win32-x64|electron-plugin/packages/tunnel-engines/win32-x64|engine|Tunnel Engine Windows x64"
   "@qpjoy/electron-plugin-tunnel|electron-plugin/packages/electron-plugin-tunnel|plugin|QPJoy Tunnel"
   "@qpjoy/electron-plugin-notyet|electron-plugin/packages/electron-plugin-notyet|plugin|NotYet 悬浮咨询球"
   "@qpjoy/tunnel-cli|electron-plugin/packages/tunnel-cli|tool|Tunnel CLI (服务器脚本分发器)"
@@ -159,6 +165,9 @@ cmd_status() {
   header "市场上架插件 (plugins)"
   while IFS= read -r row; do pkg_status_line "$row"; done < <(pkgs_by_category plugin)
 
+  header "Tunnel 引擎资源包 (platform engines)"
+  while IFS= read -r row; do pkg_status_line "$row"; done < <(pkgs_by_category engine)
+
   header "命令行工具 (tools)"
   while IFS= read -r row; do pkg_status_line "$row"; done < <(pkgs_by_category tool)
 
@@ -170,7 +179,7 @@ cmd_status() {
   fi
 
   echo
-  echo "${C_DIM}Tip: 'prepare-host' / 'prepare-plugin' / 'prepare-tool' / 'prepare-game' 准备发布；'sync-apps' 让 demo/test 用上本地最新包${C_RESET}"
+  echo "${C_DIM}Tip: 'prepare-host' / 'prepare-plugin' / 'prepare-engine' / 'prepare-tool' / 'prepare-game' 准备发布；'sync-apps' 让 demo/test 用上本地最新包${C_RESET}"
 }
 
 cmd_market() {
@@ -358,6 +367,7 @@ pick_pkg_then_prepare() {
 }
 
 cmd_prepare_plugin() { pick_pkg_then_prepare plugin "插件"; }
+cmd_prepare_engine() { pick_pkg_then_prepare engine "引擎资源包"; }
 cmd_prepare_host()   { pick_pkg_then_prepare host   "宿主组件"; }
 cmd_prepare_tool()   { pick_pkg_then_prepare tool   "命令行工具"; }
 cmd_prepare_game()   { pick_pkg_then_prepare game   "游戏"; }
@@ -411,6 +421,7 @@ Subcommands:
   ${C_BOLD}status${C_RESET}            服务器 + 所有可发布包的本地/npm 版本一览
   ${C_BOLD}market${C_RESET}            浏览市场内置目录（seed-index 卡片）
   ${C_BOLD}prepare-plugin${C_RESET}    选择插件 → bump 版本 + build + pack 预览
+  ${C_BOLD}prepare-engine${C_RESET}    选择平台引擎资源包做同样操作
   ${C_BOLD}prepare-host${C_RESET}      选择宿主组件（electron-market 等）做同样操作
   ${C_BOLD}prepare-tool${C_RESET}      选择命令行工具做同样操作
   ${C_BOLD}prepare-game${C_RESET}      选择游戏（未启用，待添加）
@@ -427,7 +438,7 @@ Examples:
   scripts/manage.sh server sync
 
 发布流程（每次手动 OTP）:
-  1. scripts/manage.sh prepare-plugin     # 或 prepare-host / prepare-tool
+  1. scripts/manage.sh prepare-plugin     # 或 prepare-engine / prepare-host / prepare-tool
   2. 脚本会打印手动 publish 命令；也可输入 OTP 让脚本直接发布
      cd <package-dir> && pnpm publish --otp=XXXXXX --no-git-checks
   3. scripts/manage.sh sync-apps          # （可选）让 demo/test 也用上新版本
@@ -442,6 +453,7 @@ cmd_menu() {
     "status         市场 + 包版本一览"
     "market         查看市场卡片列表 (seed-index)"
     "prepare-plugin 准备发布: 插件"
+    "prepare-engine 准备发布: Tunnel 引擎资源包"
     "prepare-host   准备发布: 市场宿主组件"
     "prepare-tool   准备发布: 命令行工具"
     "prepare-game   准备发布: 游戏 (待启用)"
@@ -458,6 +470,7 @@ cmd_menu() {
       status)         cmd_status ;;
       market)         cmd_market ;;
       prepare-plugin) cmd_prepare_plugin ;;
+      prepare-engine) cmd_prepare_engine ;;
       prepare-host)   cmd_prepare_host ;;
       prepare-tool)   cmd_prepare_tool ;;
       prepare-game)   cmd_prepare_game ;;
@@ -478,6 +491,7 @@ case "$sub" in
   status|st)                    cmd_status "$@" ;;
   market|cards|catalog)         cmd_market "$@" ;;
   prepare-plugin|plugin)        cmd_prepare_plugin "$@" ;;
+  prepare-engine|engine)        cmd_prepare_engine "$@" ;;
   prepare-host|host)            cmd_prepare_host "$@" ;;
   prepare-tool|tool)            cmd_prepare_tool "$@" ;;
   prepare-game|game)            cmd_prepare_game "$@" ;;

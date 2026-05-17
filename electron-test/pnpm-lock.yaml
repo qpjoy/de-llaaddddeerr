@@ -7,22 +7,27 @@ settings:
 overrides:
   '@qpjoy/electron-plugin-sdk': file:./.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz
   '@qpjoy/marketplace-db': file:./.local-packs/qpjoy-marketplace-db-0.1.0.tgz
-  '@qpjoy/electron-market': file:./.local-packs/qpjoy-electron-market-0.2.2.tgz
-  '@qpjoy/electron-plugin-tunnel': file:./.local-packs/qpjoy-electron-plugin-tunnel-0.1.4.tgz
+  '@qpjoy/electron-market': file:./.local-packs/qpjoy-electron-market-0.3.1.tgz
+  '@qpjoy/electron-plugin-tunnel': file:./.local-packs/qpjoy-electron-plugin-tunnel-0.1.5.tgz
+  '@qpjoy/electron-plugin-tunnel-engine-darwin-arm64': file:./.local-packs/qpjoy-electron-plugin-tunnel-engine-darwin-arm64-0.1.5.tgz
+  '@qpjoy/electron-plugin-tunnel-engine-darwin-x64': file:./.local-packs/qpjoy-electron-plugin-tunnel-engine-darwin-x64-0.1.5.tgz
+  '@qpjoy/electron-plugin-tunnel-engine-linux-arm64': file:./.local-packs/qpjoy-electron-plugin-tunnel-engine-linux-arm64-0.1.5.tgz
+  '@qpjoy/electron-plugin-tunnel-engine-linux-x64': file:./.local-packs/qpjoy-electron-plugin-tunnel-engine-linux-x64-0.1.5.tgz
+  '@qpjoy/electron-plugin-tunnel-engine-win32-x64': file:./.local-packs/qpjoy-electron-plugin-tunnel-engine-win32-x64-0.1.5.tgz
 
 importers:
 
   .:
     dependencies:
       '@qpjoy/electron-market':
-        specifier: file:.local-packs/qpjoy-electron-market-0.2.2.tgz
-        version: file:.local-packs/qpjoy-electron-market-0.2.2.tgz(@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz(electron@34.5.8))(electron@34.5.8)
+        specifier: file:.local-packs/qpjoy-electron-market-0.3.1.tgz
+        version: file:.local-packs/qpjoy-electron-market-0.3.1.tgz(@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz(electron@34.5.8))(electron@34.5.8)
       '@qpjoy/electron-plugin-sdk':
         specifier: file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz
         version: file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz(electron@34.5.8)
       '@qpjoy/electron-plugin-tunnel':
-        specifier: file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.4.tgz
-        version: file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.4.tgz(electron@34.5.8)
+        specifier: file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.5.tgz
+        version: file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.5.tgz(electron@34.5.8)
     devDependencies:
       '@electron-forge/cli':
         specifier: ^7.8.1
@@ -275,9 +280,9 @@ packages:
     engines: {node: ^12.13.0 || ^14.15.0 || >=16.0.0}
     deprecated: This functionality has been moved to @npmcli/fs
 
-  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.2.2.tgz':
-    resolution: {integrity: sha512-NZBmELRONvRdjBqYt6rmnpCSAA7lR/BQWxl1y3P/7p31ZsVRNulyqlABt1oVX1f6msqgXWJFiNevJyVcmtoYZA==, tarball: file:.local-packs/qpjoy-electron-market-0.2.2.tgz}
-    version: 0.2.2
+  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.3.1.tgz':
+    resolution: {integrity: sha512-zr3VogQxYG/r1EjNxhY9zi6/rufnO3uGtM/WWBYdVKAzqttRqQHwuqQ+Dum7qeBBoGl0JKh6UYW1Leh9MHlXbg==, tarball: file:.local-packs/qpjoy-electron-market-0.3.1.tgz}
+    version: 0.3.1
     peerDependencies:
       '@qpjoy/electron-plugin-sdk': '>=0.1.0'
       electron: '>=28'
@@ -291,9 +296,39 @@ packages:
       electron:
         optional: true
 
-  '@qpjoy/electron-plugin-tunnel@file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.4.tgz':
-    resolution: {integrity: sha512-dQUDpeGR763RGPoj34zPpIssseRSAizoNHZ2qNv5Kd4KY70iPrc0HQVhsnBdhsCj1765KPVcjDcRrq4OO5V0sA==, tarball: file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.4.tgz}
-    version: 0.1.4
+  '@qpjoy/electron-plugin-tunnel-engine-darwin-arm64@file:.local-packs/qpjoy-electron-plugin-tunnel-engine-darwin-arm64-0.1.5.tgz':
+    resolution: {integrity: sha512-Rofs219cKhgrwfRhpFPjsOPv9BjMvaKzb4w+7iHPJsrqVfYShl6ZKmAzPsrhVmAySEpgBmWdncYodXC0C7mlNw==, tarball: file:.local-packs/qpjoy-electron-plugin-tunnel-engine-darwin-arm64-0.1.5.tgz}
+    version: 0.1.5
+    cpu: [arm64]
+    os: [darwin]
+
+  '@qpjoy/electron-plugin-tunnel-engine-darwin-x64@file:.local-packs/qpjoy-electron-plugin-tunnel-engine-darwin-x64-0.1.5.tgz':
+    resolution: {integrity: sha512-Tfv1n5T5d+X/DDronU/wWx2kGZvyP2zVKkfLkuOWtZEIS2jldqyzR5rZ3s541/sw16PE8kY6QPdEh1y5xbwuMA==, tarball: file:.local-packs/qpjoy-electron-plugin-tunnel-engine-darwin-x64-0.1.5.tgz}
+    version: 0.1.5
+    cpu: [x64]
+    os: [darwin]
+
+  '@qpjoy/electron-plugin-tunnel-engine-linux-arm64@file:.local-packs/qpjoy-electron-plugin-tunnel-engine-linux-arm64-0.1.5.tgz':
+    resolution: {integrity: sha512-p9cGova+nw4ECMqlTWe5zQNVh2x/OS79YdAjeO7k3CajsyR/phZXPBxge43tcGrOxcRPmVOpESojXqRcEJae2Q==, tarball: file:.local-packs/qpjoy-electron-plugin-tunnel-engine-linux-arm64-0.1.5.tgz}
+    version: 0.1.5
+    cpu: [arm64]
+    os: [linux]
+
+  '@qpjoy/electron-plugin-tunnel-engine-linux-x64@file:.local-packs/qpjoy-electron-plugin-tunnel-engine-linux-x64-0.1.5.tgz':
+    resolution: {integrity: sha512-tCTfmmtwfjwAa8yFwI/MwkcqDnwX3cFe4t6E7I/AHqPIcGlNJHT/uXW71aeCvUzlTW0LhTeyB9M3j+UaQNVpCA==, tarball: file:.local-packs/qpjoy-electron-plugin-tunnel-engine-linux-x64-0.1.5.tgz}
+    version: 0.1.5
+    cpu: [x64]
+    os: [linux]
+
+  '@qpjoy/electron-plugin-tunnel-engine-win32-x64@file:.local-packs/qpjoy-electron-plugin-tunnel-engine-win32-x64-0.1.5.tgz':
+    resolution: {integrity: sha512-IdV6c2X2f3Ai7drGL7IfFkIy/o9SMoiqYY5vZKcxyEr0UcUlis8JRg8Fc41TQkyxvFSavd9izsWdmyCrYfRHtg==, tarball: file:.local-packs/qpjoy-electron-plugin-tunnel-engine-win32-x64-0.1.5.tgz}
+    version: 0.1.5
+    cpu: [x64]
+    os: [win32]
+
+  '@qpjoy/electron-plugin-tunnel@file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.5.tgz':
+    resolution: {integrity: sha512-gn/VQOpyrc5xJ2FWNYtUSRngps3QfwW+jRj1LBKVDb2XO5HMBf44WCh3jRE2YDjaUqEDGlzkeFCoqlmC++P6Hw==, tarball: file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.5.tgz}
+    version: 0.1.5
     hasBin: true
     peerDependencies:
       electron: '>=28'
@@ -2608,7 +2643,7 @@ snapshots:
       mkdirp: 1.0.4
       rimraf: 3.0.2
 
-  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.2.2.tgz(@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz(electron@34.5.8))(electron@34.5.8)':
+  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.3.1.tgz(@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz(electron@34.5.8))(electron@34.5.8)':
     dependencies:
       '@qpjoy/electron-plugin-sdk': file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz(electron@34.5.8)
       '@qpjoy/marketplace-db': file:.local-packs/qpjoy-marketplace-db-0.1.0.tgz
@@ -2620,12 +2655,32 @@ snapshots:
     optionalDependencies:
       electron: 34.5.8
 
-  '@qpjoy/electron-plugin-tunnel@file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.4.tgz(electron@34.5.8)':
+  '@qpjoy/electron-plugin-tunnel-engine-darwin-arm64@file:.local-packs/qpjoy-electron-plugin-tunnel-engine-darwin-arm64-0.1.5.tgz':
+    optional: true
+
+  '@qpjoy/electron-plugin-tunnel-engine-darwin-x64@file:.local-packs/qpjoy-electron-plugin-tunnel-engine-darwin-x64-0.1.5.tgz':
+    optional: true
+
+  '@qpjoy/electron-plugin-tunnel-engine-linux-arm64@file:.local-packs/qpjoy-electron-plugin-tunnel-engine-linux-arm64-0.1.5.tgz':
+    optional: true
+
+  '@qpjoy/electron-plugin-tunnel-engine-linux-x64@file:.local-packs/qpjoy-electron-plugin-tunnel-engine-linux-x64-0.1.5.tgz':
+    optional: true
+
+  '@qpjoy/electron-plugin-tunnel-engine-win32-x64@file:.local-packs/qpjoy-electron-plugin-tunnel-engine-win32-x64-0.1.5.tgz':
+    optional: true
+
+  '@qpjoy/electron-plugin-tunnel@file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.5.tgz(electron@34.5.8)':
     dependencies:
       better-sqlite3: 11.10.0
       electron: 34.5.8
       yaml: 2.9.0
     optionalDependencies:
+      '@qpjoy/electron-plugin-tunnel-engine-darwin-arm64': file:.local-packs/qpjoy-electron-plugin-tunnel-engine-darwin-arm64-0.1.5.tgz
+      '@qpjoy/electron-plugin-tunnel-engine-darwin-x64': file:.local-packs/qpjoy-electron-plugin-tunnel-engine-darwin-x64-0.1.5.tgz
+      '@qpjoy/electron-plugin-tunnel-engine-linux-arm64': file:.local-packs/qpjoy-electron-plugin-tunnel-engine-linux-arm64-0.1.5.tgz
+      '@qpjoy/electron-plugin-tunnel-engine-linux-x64': file:.local-packs/qpjoy-electron-plugin-tunnel-engine-linux-x64-0.1.5.tgz
+      '@qpjoy/electron-plugin-tunnel-engine-win32-x64': file:.local-packs/qpjoy-electron-plugin-tunnel-engine-win32-x64-0.1.5.tgz
       '@qpjoy/marketplace-db': file:.local-packs/qpjoy-marketplace-db-0.1.0.tgz
 
   '@qpjoy/marketplace-db@file:.local-packs/qpjoy-marketplace-db-0.1.0.tgz':

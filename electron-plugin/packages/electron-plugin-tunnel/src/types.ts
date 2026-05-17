@@ -67,6 +67,14 @@ export interface TunnelStatus {
   ports: TunnelPorts;
   activeSubscription: SubscriptionRecord | null;
   corePath: string | null;
+  engine: {
+    target: string;
+    available: boolean;
+    source: 'custom' | 'installed' | 'bundled' | 'missing';
+    customPath: string | null;
+    installedPath: string | null;
+    bundledPath: string | null;
+  };
   adminUrl: string;
   controllerUrl: string;
 }

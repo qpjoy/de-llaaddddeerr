@@ -1,6 +1,6 @@
 # QPJoy Electron Tunnel
 
-Reusable tunnel runtime for Electron apps on macOS and Linux.
+Reusable tunnel runtime for Electron apps on macOS, Windows, and Linux.
 
 ```bash
 pnpm add @qpjoy/electron-plugin-tunnel
@@ -47,17 +47,27 @@ pnpm exec qpjoy-tunnel snippet
 pnpm exec qpjoy-tunnel init --out src-electron/qpjoy-tunnel.ts
 ```
 
-For `electron-builder`, package the bundled engine resources:
+Tunnel engine binaries are split into platform-specific optional packages such
+as `@qpjoy/electron-plugin-tunnel-engine-win32-x64`. npm/pnpm installs only the
+package matching the current OS/CPU, so end users do not download every engine.
+
+For `electron-builder`, package the installed engine resources if you do not
+ship `node_modules` as part of the app bundle:
 
 ```ts
 extraResources: [
   {
-    from: 'node_modules/@qpjoy/electron-plugin-tunnel/resources/engine',
+    from: 'node_modules/@qpjoy/electron-plugin-tunnel-engine-win32-x64/resources/engine',
     to: 'qpjoy-tunnel-engine',
     filter: ['**/*']
   }
 ]
 ```
 
-This package redistributes third-party tunnel engine binaries. See
-`THIRD_PARTY_NOTICES.md` before publishing apps that include those resources.
+Choose the engine package name for the platform you are building on. Apps that
+package from the target OS with normal `npm install` / `pnpm install` usually
+do not need this extra resource rule.
+
+The platform engine packages redistribute third-party tunnel engine binaries.
+See their package contents and `THIRD_PARTY_NOTICES.md` before publishing apps
+that include those resources.

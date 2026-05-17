@@ -1,0 +1,23 @@
+{
+  "name": "@qpjoy/electron-plugin-tunnel-engine-linux-x64",
+  "version": "0.1.5",
+  "private": false,
+  "description": "Linux x64 mihomo engine resources for @qpjoy/electron-plugin-tunnel.",
+  "license": "UNLICENSED",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "README.md",
+    "resources/engine"
+  ],
+  "scripts": {
+    "build": "node -e \"\""
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

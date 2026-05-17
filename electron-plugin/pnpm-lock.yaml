@@ -76,6 +76,21 @@ importers:
         specifier: ^2.7.0
         version: 2.9.0
     optionalDependencies:
+      '@qpjoy/electron-plugin-tunnel-engine-darwin-arm64':
+        specifier: workspace:^
+        version: link:../tunnel-engines/darwin-arm64
+      '@qpjoy/electron-plugin-tunnel-engine-darwin-x64':
+        specifier: workspace:^
+        version: link:../tunnel-engines/darwin-x64
+      '@qpjoy/electron-plugin-tunnel-engine-linux-arm64':
+        specifier: workspace:^
+        version: link:../tunnel-engines/linux-arm64
+      '@qpjoy/electron-plugin-tunnel-engine-linux-x64':
+        specifier: workspace:^
+        version: link:../tunnel-engines/linux-x64
+      '@qpjoy/electron-plugin-tunnel-engine-win32-x64':
+        specifier: workspace:^
+        version: link:../tunnel-engines/win32-x64
       '@qpjoy/marketplace-db':
         specifier: '>=0.1.0'
         version: 0.1.0
@@ -95,6 +110,16 @@ importers:
       '@types/node':
         specifier: ^22.10.7
         version: 22.19.19
+
+  packages/tunnel-engines/darwin-arm64: {}
+
+  packages/tunnel-engines/darwin-x64: {}
+
+  packages/tunnel-engines/linux-arm64: {}
+
+  packages/tunnel-engines/linux-x64: {}
+
+  packages/tunnel-engines/win32-x64: {}
 
 packages:
 

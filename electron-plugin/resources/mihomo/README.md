@@ -9,7 +9,9 @@ electron/resources/mihomo/darwin-arm64/mihomo.gz
 electron/resources/mihomo/darwin-x64/mihomo.gz
 electron/resources/mihomo/linux-x64/mihomo.gz
 electron/resources/mihomo/linux-arm64/mihomo.gz
+electron/resources/mihomo/win32-x64/mihomo.exe.gz
 ```
 
-An uncompressed executable named `mihomo` works too. The `.gz` form is preferred
-because it keeps the application package smaller.
+An uncompressed executable named `mihomo` (or `mihomo.exe` on Windows) works
+too. The `.gz` form is preferred because it keeps the application package
+smaller.

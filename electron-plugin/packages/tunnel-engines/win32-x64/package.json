@@ -1,0 +1,23 @@
+{
+  "name": "@qpjoy/electron-plugin-tunnel-engine-win32-x64",
+  "version": "0.1.5",
+  "private": false,
+  "description": "Windows x64 mihomo engine resources for @qpjoy/electron-plugin-tunnel.",
+  "license": "UNLICENSED",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "README.md",
+    "resources/engine"
+  ],
+  "scripts": {
+    "build": "node -e \"\""
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

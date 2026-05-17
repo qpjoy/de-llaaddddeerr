@@ -1,8 +1,8 @@
 {
   "name": "@qpjoy/electron-plugin-tunnel",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": false,
-  "description": "Reusable QPJoy tunnel runtime and CLI for Electron apps on macOS and Linux.",
+  "description": "Reusable QPJoy tunnel runtime and CLI for Electron apps on macOS, Windows, and Linux.",
   "license": "UNLICENSED",
   "homepage": "https://www.npmjs.com/package/@qpjoy/electron-plugin-tunnel",
   "type": "commonjs",
@@ -25,8 +25,7 @@
   "files": [
     "README.md",
     "THIRD_PARTY_NOTICES.md",
-    "dist",
-    "resources/engine"
+    "dist"
   ],
   "qpjoyPlugin": {
     "specVersion": 1,
@@ -54,6 +53,11 @@
     "yaml": "^2.7.0"
   },
   "optionalDependencies": {
+    "@qpjoy/electron-plugin-tunnel-engine-darwin-arm64": "workspace:^",
+    "@qpjoy/electron-plugin-tunnel-engine-darwin-x64": "workspace:^",
+    "@qpjoy/electron-plugin-tunnel-engine-linux-arm64": "workspace:^",
+    "@qpjoy/electron-plugin-tunnel-engine-linux-x64": "workspace:^",
+    "@qpjoy/electron-plugin-tunnel-engine-win32-x64": "workspace:^",
     "@qpjoy/marketplace-db": ">=0.1.0"
   },
   "peerDependencies": {

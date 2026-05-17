@@ -70,13 +70,14 @@ pnpm core:install
 ```
 
 Packaged Electron builds include tunnel engine resources under
-`electron/resources/mihomo` for the dev app and under
-`packages/electron-plugin-tunnel/resources/engine` for the npm package. On first
-start the runtime installs the matching executable into the app user-data
-directory:
+`electron/resources/mihomo` for the dev app and under platform-specific npm
+packages such as `@qpjoy/electron-plugin-tunnel-engine-win32-x64` for consumer
+apps. On first start the runtime installs the matching executable into the app
+user-data directory:
 
 ```text
 <userData>/mihomo-tunnel/bin/mihomo
+<userData>/mihomo-tunnel/bin/mihomo.exe  # Windows
 ```
 
 This makes end-user startup independent of network availability.
@@ -136,12 +137,13 @@ qp-tunnel-cli tun-off
 sudo qp-tunnel-cli install-script
 ```
 
-For `electron-builder`, include the packaged engine resources:
+For `electron-builder`, include the installed platform engine resources when
+your bundler does not copy `node_modules` directly:
 
 ```ts
 extraResources: [
   {
-    from: 'node_modules/@qpjoy/electron-plugin-tunnel/resources/engine',
+    from: 'node_modules/@qpjoy/electron-plugin-tunnel-engine-win32-x64/resources/engine',
     to: 'qpjoy-tunnel-engine',
     filter: ['**/*']
   }

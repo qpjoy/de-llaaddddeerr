@@ -63,12 +63,12 @@ function init(): void {
 
 Next steps:
   1. Import this module from your Electron main process.
-  2. Add the QPJoy tunnel engine resources to your Electron package config.
+  2. Make sure the platform engine optional package is installed.
 
 electron-builder example:
   extraResources: [
     {
-      from: 'node_modules/@qpjoy/electron-plugin-tunnel/resources/engine',
+      from: 'node_modules/@qpjoy/electron-plugin-tunnel-engine-win32-x64/resources/engine',
       to: 'qpjoy-tunnel-engine',
       filter: ['**/*']
     }

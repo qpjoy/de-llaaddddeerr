@@ -43,8 +43,12 @@ function pathsFromOptions(options: TunnelManagerOptions): ManagerPaths {
     profiles: join(root, 'profiles'),
     runtime: join(root, 'runtime'),
     config: join(root, 'runtime', 'config.yaml'),
-    core: join(root, 'bin', 'mihomo')
+    core: join(root, 'bin', coreExecutableName())
   };
+}
+
+function coreExecutableName(): string {
+  return process.platform === 'win32' ? 'mihomo.exe' : 'mihomo';
 }
 
 function platformArchKey(): string {
@@ -177,7 +181,8 @@ export class MihomoManager extends EventEmitter {
 
   status(): TunnelStatus {
     const settings = this.db.getSettings();
-    const corePath = settings.corePath ?? (existsSync(this.paths.core) ? this.paths.core : null);
+    const engine = this.engineStatus(settings);
+    const corePath = engine.customPath ?? engine.installedPath ?? engine.bundledPath;
     const running = this.isRunning();
     return {
       running,
@@ -187,6 +192,7 @@ export class MihomoManager extends EventEmitter {
       ports: settings.ports,
       activeSubscription: this.db.getActiveSubscription(),
       corePath,
+      engine,
       adminUrl: `http://127.0.0.1:${settings.ports.admin}`,
       controllerUrl: `http://127.0.0.1:${settings.ports.controller}`
     };
@@ -450,9 +456,17 @@ export class MihomoManager extends EventEmitter {
     }
 
     const settings = this.db.getSettings();
+    const active = this.db.getActiveSubscription();
+    if (!active) {
+      throw new Error('还没有启用订阅。请先在「订阅」里新建并启用一个订阅，然后再启动隧道。');
+    }
+    if (!active.content) {
+      throw new Error('当前订阅还没有下载到本地。请先点击「更新当前订阅」或重新启用这个订阅，然后再启动隧道。');
+    }
+
     const corePath = this.resolveCorePath();
     if (!existsSync(corePath)) {
-      throw new Error(`Tunnel engine is not installed: ${corePath}. Package the QPJoy tunnel engine resources with your Electron app.`);
+      throw new Error(`当前安装包缺少适配 ${platformArchKey()} 的隧道引擎。请安装对应平台的 @qpjoy/electron-plugin-tunnel-engine 包，或在「代理」页填写本机 mihomo 可执行文件路径。`);
     }
 
     const configPath = this.renderConfig();
@@ -481,33 +495,86 @@ export class MihomoManager extends EventEmitter {
 
   private resolveCorePath(): string {
     const settings = this.db.getSettings();
-    if (settings.corePath && existsSync(settings.corePath)) {
-      return settings.corePath;
+    const engine = this.engineStatus(settings);
+
+    if (engine.source === 'custom' && engine.customPath) {
+      return engine.customPath;
     }
 
-    if (existsSync(this.paths.core)) {
+    if (engine.source === 'installed' && engine.installedPath) {
       return this.paths.core;
     }
 
-    const bundled = this.findBundledCore();
-    if (bundled) {
-      this.installBundledCore(bundled);
+    if (engine.source === 'bundled' && engine.bundledPath) {
+      this.installBundledCore(engine.bundledPath);
       return this.paths.core;
     }
 
     return settings.corePath || this.paths.core;
   }
 
+  private engineStatus(settings = this.db.getSettings()): TunnelStatus['engine'] {
+    const customPath = settings.corePath && settings.corePath !== this.paths.core
+      ? settings.corePath
+      : null;
+    const customAvailable = customPath ? existsSync(customPath) : false;
+    const installedPath = existsSync(this.paths.core) ? this.paths.core : null;
+    const bundledPath = this.findBundledCore();
+
+    if (customAvailable) {
+      return {
+        target: platformArchKey(),
+        available: true,
+        source: 'custom',
+        customPath,
+        installedPath,
+        bundledPath
+      };
+    }
+
+    if (installedPath) {
+      return {
+        target: platformArchKey(),
+        available: true,
+        source: 'installed',
+        customPath,
+        installedPath,
+        bundledPath
+      };
+    }
+
+    if (bundledPath) {
+      return {
+        target: platformArchKey(),
+        available: true,
+        source: 'bundled',
+        customPath,
+        installedPath,
+        bundledPath
+      };
+    }
+
+    return {
+      target: platformArchKey(),
+      available: false,
+      source: 'missing',
+      customPath,
+      installedPath,
+      bundledPath
+    };
+  }
+
   private findBundledCore(): string | null {
     const bundledEngineDir = this.options.bundledEngineDir ?? this.options.bundledCoreDir;
-    if (!bundledEngineDir) {
-      return null;
-    }
+    const packageEngineDir = this.optionalEnginePackageDir();
 
     const key = platformArchKey();
     const aliases = key.endsWith('-x64') ? [key, key.replace('-x64', '-amd64')] : [key];
-    const names = ['mihomo', 'mihomo.gz'];
-    const candidates = aliases.flatMap((alias) => names.map((name) => join(bundledEngineDir, alias, name)));
+    const names = process.platform === 'win32'
+      ? ['mihomo.exe', 'mihomo.exe.gz', 'mihomo', 'mihomo.gz']
+      : ['mihomo', 'mihomo.gz'];
+    const roots = [bundledEngineDir, packageEngineDir].filter(Boolean) as string[];
+    const candidates = roots.flatMap((root) => aliases.flatMap((alias) => names.map((name) => join(root, alias, name))));
 
     for (const candidate of candidates) {
       if (existsSync(candidate)) {
@@ -516,6 +583,17 @@ export class MihomoManager extends EventEmitter {
     }
 
     return null;
+  }
+
+  private optionalEnginePackageDir(): string | null {
+    const packageName = `@qpjoy/electron-plugin-tunnel-engine-${platformArchKey()}`;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval, @typescript-eslint/no-var-requires
+      const packageJsonPath = require.resolve(`${packageName}/package.json`);
+      return join(packageJsonPath, '..', 'resources', 'engine');
+    } catch {
+      return null;
+    }
   }
 
   private installBundledCore(sourcePath: string): void {

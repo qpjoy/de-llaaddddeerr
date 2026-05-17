@@ -1,0 +1,23 @@
+{
+  "name": "@qpjoy/electron-plugin-tunnel-engine-darwin-x64",
+  "version": "0.1.5",
+  "private": false,
+  "description": "macOS x64 mihomo engine resources for @qpjoy/electron-plugin-tunnel.",
+  "license": "UNLICENSED",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "README.md",
+    "resources/engine"
+  ],
+  "scripts": {
+    "build": "node -e \"\""
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

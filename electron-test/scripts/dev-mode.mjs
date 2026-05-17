@@ -53,13 +53,23 @@ const WORKSPACE_PACKS = [
   { name: '@qpjoy/electron-plugin-sdk',      dir: 'electron-market/packages/electron-plugin-sdk' },
   { name: '@qpjoy/marketplace-db',  dir: 'electron-market/packages/marketplace-db' },
   { name: '@qpjoy/electron-market', dir: 'electron-market/packages/electron-market' },
+  { name: '@qpjoy/electron-plugin-tunnel-engine-darwin-arm64', dir: 'electron-plugin/packages/tunnel-engines/darwin-arm64' },
+  { name: '@qpjoy/electron-plugin-tunnel-engine-darwin-x64', dir: 'electron-plugin/packages/tunnel-engines/darwin-x64' },
+  { name: '@qpjoy/electron-plugin-tunnel-engine-linux-arm64', dir: 'electron-plugin/packages/tunnel-engines/linux-arm64' },
+  { name: '@qpjoy/electron-plugin-tunnel-engine-linux-x64', dir: 'electron-plugin/packages/tunnel-engines/linux-x64' },
+  { name: '@qpjoy/electron-plugin-tunnel-engine-win32-x64', dir: 'electron-plugin/packages/tunnel-engines/win32-x64' },
   { name: '@qpjoy/electron-plugin-tunnel', dir: 'electron-plugin/packages/electron-plugin-tunnel' }
 ];
 
 /** Versions used by npm mode. Bump in lockstep with what's on the registry. */
 const NPM_VERSIONS = {
-  '@qpjoy/electron-market': '^0.2.1',
-  '@qpjoy/electron-plugin-tunnel': '^0.1.4',
+  '@qpjoy/electron-market': '^0.3.1',
+  '@qpjoy/electron-plugin-tunnel': '^0.1.5',
+  '@qpjoy/electron-plugin-tunnel-engine-darwin-arm64': '^0.1.5',
+  '@qpjoy/electron-plugin-tunnel-engine-darwin-x64': '^0.1.5',
+  '@qpjoy/electron-plugin-tunnel-engine-linux-arm64': '^0.1.5',
+  '@qpjoy/electron-plugin-tunnel-engine-linux-x64': '^0.1.5',
+  '@qpjoy/electron-plugin-tunnel-engine-win32-x64': '^0.1.5',
   '@qpjoy/electron-plugin-sdk':      '^0.1.0',
   '@qpjoy/marketplace-db':  '^0.1.0'
 };
