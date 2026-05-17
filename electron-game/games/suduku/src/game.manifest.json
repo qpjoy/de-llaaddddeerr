@@ -1,0 +1,32 @@
+{
+  "kind": "electron-game",
+  "id": "qpjoy.electron-game-suduku",
+  "name": "Suduku",
+  "version": "0.1.0",
+  "author": "QPJoy",
+  "description": "A local-first Sudoku game with 7x7 and 9x9 modes, completion scoring, SQLite history, and optional Postgres ranking sync.",
+  "category": "puzzle",
+  "entry": {
+    "plugin": "src/plugin.js",
+    "standaloneElectronMain": "src/main.js",
+    "renderer": "renderer/index.html"
+  },
+  "score": {
+    "storage": "sqlite",
+    "sync": "postgres-optional"
+  },
+  "modes": [
+    {
+      "id": "7x7",
+      "label": "7x7",
+      "gridSize": 7,
+      "rules": "Rows and columns must each contain 1-7 once."
+    },
+    {
+      "id": "9x9",
+      "label": "9x9",
+      "gridSize": 9,
+      "rules": "Rows, columns, and 3x3 boxes must each contain 1-9 once."
+    }
+  ]
+}

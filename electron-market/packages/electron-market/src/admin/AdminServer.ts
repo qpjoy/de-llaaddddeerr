@@ -33,8 +33,10 @@ function toLegacyEntry(row: DbEntry): LegacyEntry & { visibility?: string } {
     manifestUrl: row.manifestUrl ?? '',
     tarballUrl: row.tarballUrl ?? undefined,
     homepage: row.homepage ?? undefined,
+    category: row.category,
     verified: row.verified,
     bootstrap: row.bootstrap,
+    metadata: row.metadata,
     visibility: row.visibility
   };
 }
@@ -160,7 +162,7 @@ export class AdminServer {
     }
     if (method === 'POST' && pathname === '/api/plugins/install') {
       const body = (await this.readJson(req)) as { id: string; version?: string };
-      const entry = await this.opts.marketplace.resolve(body.id);
+      const entry = await this.resolveMarketplaceEntry(body.id);
       if (!entry) return this.json(res, 404, { error: 'unknown plugin id' });
       const manifest = await this.opts.store.install({
         id: entry.id,
@@ -510,6 +512,26 @@ export class AdminServer {
     res.writeHead(200, { 'content-type': mime, 'cache-control': 'no-cache' });
     createReadStream(target).pipe(res);
     return true;
+  }
+
+  private async resolveMarketplaceEntry(id: string): Promise<Pick<LegacyEntry, 'id' | 'npm' | 'latest'> | null> {
+    const dbEntry = this.opts.registry.marketplaceDb().getEntry(id);
+    if (dbEntry) {
+      return {
+        id: dbEntry.id,
+        npm: dbEntry.npm,
+        latest: dbEntry.latestVersion
+      };
+    }
+
+    const legacyEntry = await this.opts.marketplace.resolve(id);
+    return legacyEntry
+      ? {
+          id: legacyEntry.id,
+          npm: legacyEntry.npm,
+          latest: legacyEntry.latest
+        }
+      : null;
   }
 
   private json(res: ServerResponse, status: number, body: unknown): void {

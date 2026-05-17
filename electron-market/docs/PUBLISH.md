@@ -192,3 +192,16 @@ The `electron-plugin-` prefix is a convention, not enforcement. It makes
 intent obvious in `package.json` and the npm UI. Existing packages
 (`@qpjoy/electron-plugin-tunnel`) keep their names via the allowlist; new ones
 should pick the prefixed form unless there's a good reason not to.
+
+## Marketplace inclusion convention (for game authors)
+
+Game packages use the parallel `qpjoyGame` field and still include
+`qpjoyPlugin` in v1, so they can be installed through the current market
+runtime while appearing under the 游戏 board. See
+[`GAME_SPEC.md`](GAME_SPEC.md).
+
+Recommended naming:
+
+```
+@qpjoy/electron-game-<name>           # e.g. @qpjoy/electron-game-suduku
+```

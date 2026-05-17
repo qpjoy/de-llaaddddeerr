@@ -1,0 +1,15 @@
+{
+  "name": "@qpjoy/electron-game-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Marketplace game workspace and local game package registry.",
+  "type": "commonjs",
+  "workspaces": [
+    "packages/*",
+    "games/*"
+  ],
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "discover": "node scripts/discover-local.mjs"
+  }
+}

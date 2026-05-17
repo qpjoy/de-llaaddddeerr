@@ -139,9 +139,11 @@ export function usePluginHost() {
           manifestUrl: string | null;
           tarballUrl: string | null;
           homepage: string | null;
+          category: string | null;
           verified: boolean;
           bootstrap: boolean;
           visibility: 'public' | 'free' | 'paid' | 'private';
+          metadata: Record<string, unknown> | null;
         };
         type ServerIndex = { generatedAt: string; release: string; entries: ServerEntry[] };
         const raw = await get<ServerIndex>('/api/v1/marketplace/index.json');
@@ -157,9 +159,11 @@ export function usePluginHost() {
             manifestUrl: e.manifestUrl ?? '',
             tarballUrl: e.tarballUrl ?? undefined,
             homepage: e.homepage ?? undefined,
+            category: e.category,
             verified: e.verified,
             bootstrap: e.bootstrap,
-            visibility: e.visibility
+            visibility: e.visibility,
+            metadata: e.metadata
           })),
           source: 'remote',
           remoteFetchedAt: new Date().toISOString(),

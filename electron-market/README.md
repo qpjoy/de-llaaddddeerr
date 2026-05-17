@@ -23,6 +23,7 @@ packages/
 └─ admin-ui/          @qpjoy/electron-market-admin-ui    Vue + Quasar SPA served on 23455
 docs/
 ├─ PLUGIN_SPEC.md            access standard (manifest, lifecycle, contracts)
+├─ GAME_SPEC.md              game-board package convention on the plugin runtime
 ├─ PERMISSIONS.md            permission catalogue + enforcement rules
 └─ BOOTSTRAP_AND_INSTALL.md  three install paths + end-to-end walkthrough
 registry/

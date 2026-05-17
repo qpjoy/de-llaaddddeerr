@@ -1,9 +1,12 @@
 import type { IpcMain } from 'electron';
 
+import type { MarketplaceEntry as DbEntry } from '@qpjoy/marketplace-db';
+
 import type { PluginRegistry } from '../registry/PluginRegistry';
 import type { MarketplaceClient } from '../registry/MarketplaceClient';
 import type { PluginStore } from '../store/PluginStore';
 import type { PluginRuntime } from '../runtime/PluginRuntime';
+import type { MarketplaceEntry as LegacyEntry } from '../types';
 import { readSyncStatus, type RemoteSyncJob } from '../sync/RemoteSyncJob';
 import type { AuthService } from '../sync/AuthService';
 
@@ -20,6 +23,48 @@ interface Deps {
   serverBaseUrl: string | null;
 }
 
+function toLegacyEntry(row: DbEntry): LegacyEntry & { visibility?: string } {
+  return {
+    id: row.id,
+    npm: row.npm,
+    name: row.name,
+    description: row.description ?? '',
+    versions: [row.latestVersion],
+    latest: row.latestVersion,
+    manifestUrl: row.manifestUrl ?? '',
+    tarballUrl: row.tarballUrl ?? undefined,
+    homepage: row.homepage ?? undefined,
+    category: row.category,
+    verified: row.verified,
+    bootstrap: row.bootstrap,
+    metadata: row.metadata,
+    visibility: row.visibility
+  };
+}
+
+async function resolveMarketplaceEntry(
+  deps: Deps,
+  id: string
+): Promise<Pick<LegacyEntry, 'id' | 'npm' | 'latest'> | null> {
+  const dbEntry = deps.registry.marketplaceDb().getEntry(id);
+  if (dbEntry) {
+    return {
+      id: dbEntry.id,
+      npm: dbEntry.npm,
+      latest: dbEntry.latestVersion
+    };
+  }
+
+  const legacyEntry = await deps.marketplace.resolve(id);
+  return legacyEntry
+    ? {
+        id: legacyEntry.id,
+        npm: legacyEntry.npm,
+        latest: legacyEntry.latest
+      }
+    : null;
+}
+
 /**
  * Exposes the same surface as `AdminServer` but over IPC, so the host's own
  * renderer can build a native UI without going through localhost.
@@ -30,15 +75,19 @@ export function registerPluginHostIpc(ipc: IpcMain, deps: Deps): void {
   ipc.handle('plugin-host:list', () => deps.registry.list());
   ipc.handle('plugin-host:marketplace', async () => {
     const result = await deps.marketplace.fetch();
+    const dbEntries = deps.registry.marketplaceDb().listEntries();
     return {
       ...result.index,
+      entries: dbEntries.length > 0
+        ? dbEntries.map(toLegacyEntry)
+        : result.index.entries,
       source: result.source,
       remoteFetchedAt: result.remoteFetchedAt,
       remoteError: result.remoteError
     };
   });
   ipc.handle('plugin-host:install', async (_e, payload: { id: string; version: string }) => {
-    const entry = await deps.marketplace.resolve(payload.id);
+    const entry = await resolveMarketplaceEntry(deps, payload.id);
     if (!entry) throw new Error(`Unknown plugin: ${payload.id}`);
     return deps.store.install({ id: entry.id, npm: entry.npm, version: payload.version ?? entry.latest });
   });

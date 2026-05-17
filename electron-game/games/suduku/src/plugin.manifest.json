@@ -1,0 +1,24 @@
+{
+  "id": "qpjoy.electron-game-suduku",
+  "name": "Suduku",
+  "version": "0.1.0",
+  "author": "QPJoy",
+  "description": "Suduku puzzle game with 7x7 and 9x9 modes, local scoring, and optional ranking sync.",
+  "homepage": "https://www.npmjs.com/package/@qpjoy/electron-game-suduku",
+  "engines": {
+    "electronMarket": ">=0.3.0",
+    "electron": ">=28"
+  },
+  "permissions": [],
+  "activationEvents": [
+    "onStartup"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "id": "suduku.launch",
+        "title": "Play Suduku"
+      }
+    ]
+  }
+}

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Suduku</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="play-area" aria-label="Suduku board">
+        <header class="topbar">
+          <div>
+            <h1>Suduku</h1>
+            <p id="playerLine" class="muted">Player pending</p>
+          </div>
+          <div class="stats">
+            <div>
+              <span class="stat-label">Time</span>
+              <strong id="timer">00:00</strong>
+            </div>
+            <div>
+              <span class="stat-label">Best pace</span>
+              <strong id="scorePreview">0</strong>
+            </div>
+          </div>
+        </header>
+
+        <div class="toolbar" aria-label="Game controls">
+          <div class="segmented" role="group" aria-label="Grid size">
+            <button id="mode7" class="mode-button" type="button" data-mode="7x7">7x7</button>
+            <button id="mode9" class="mode-button active" type="button" data-mode="9x9">9x9</button>
+          </div>
+          <button id="newGameButton" type="button">New Round</button>
+          <button id="checkButton" type="button">Check</button>
+          <button id="syncButton" type="button">Sync</button>
+        </div>
+
+        <div id="board" class="board board-9" aria-label="Puzzle grid"></div>
+
+        <footer class="status-row">
+          <p id="statusText">Complete the grid to score this round.</p>
+          <p id="syncText" class="muted">Offline-ready</p>
+        </footer>
+      </section>
+
+      <aside class="side-panel" aria-label="Ranking">
+        <h2>Ranking</h2>
+        <p id="leaderboardSource" class="muted">Local SQLite</p>
+        <ol id="leaderboard" class="leaderboard"></ol>
+      </aside>
+    </main>
+
+    <dialog id="playerDialog">
+      <form method="dialog" id="playerForm">
+        <h2>Choose Player Name</h2>
+        <p class="muted">A four-digit suffix will be added before your first round.</p>
+        <input id="playerNameInput" name="playerName" autocomplete="name" maxlength="32" required>
+        <menu>
+          <button id="confirmPlayerButton" value="confirm">Start</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script src="./game.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

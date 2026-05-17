@@ -21,6 +21,29 @@
         "soft": true,
         "reason": "no qpjoyPlugin field in published package.json"
       }
+    },
+    {
+      "id": "qpjoy.electron-game-suduku",
+      "npm": "@qpjoy/electron-game-suduku",
+      "name": "Suduku",
+      "description": "7x7 / 9x9 数独小游戏，完成小局后按耗时计分，支持本地 SQLite 分数和可选联网排行榜。",
+      "latestVersion": "0.1.0",
+      "manifestUrl": "https://unpkg.com/@qpjoy/electron-game-suduku@0.1.0/src/game.manifest.json",
+      "tarballUrl": "https://registry.npmjs.org/@qpjoy/electron-game-suduku/-/electron-game-suduku-0.1.0.tgz",
+      "homepage": "https://www.npmjs.com/package/@qpjoy/electron-game-suduku",
+      "author": "QPJoy",
+      "category": "game:puzzle",
+      "verified": true,
+      "bootstrap": false,
+      "visibility": "public",
+      "specVersion": 1,
+      "metadata": {
+        "kind": "game",
+        "gameId": "suduku",
+        "modes": ["7x7", "9x9"],
+        "installRuntime": "qpjoyPlugin",
+        "launchRpc": "launch"
+      }
     }
   ]
 }

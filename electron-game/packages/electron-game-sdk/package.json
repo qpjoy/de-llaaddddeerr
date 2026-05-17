@@ -1,0 +1,11 @@
+{
+  "name": "@qpjoy/electron-game-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Small shared helpers for Qpjoy Electron game packages.",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "keywords": [
+    "qpjoy-electron-game"
+  ]
+}

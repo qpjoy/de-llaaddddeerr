@@ -622,8 +622,13 @@ function mergeBundledMarketplaceSeed(db: MarketplaceDB): void {
     manifestUrl?: string;
     tarballUrl?: string;
     homepage?: string;
+    author?: string;
+    category?: string;
     verified?: boolean;
     bootstrap?: boolean;
+    visibility?: 'public' | 'free' | 'paid' | 'private';
+    specVersion?: number;
+    metadata?: Record<string, unknown> | null;
   }> = [];
 
   try {
@@ -653,13 +658,13 @@ function mergeBundledMarketplaceSeed(db: MarketplaceDB): void {
         manifestUrl: e.manifestUrl ?? null,
         tarballUrl: e.tarballUrl ?? null,
         homepage: e.homepage ?? null,
-        author: null,
-        category: null,
+        author: e.author ?? null,
+        category: e.category ?? null,
         verified: Boolean(e.verified),
         bootstrap: Boolean(e.bootstrap),
-        visibility: 'public',
-        specVersion: 1,
-        metadata: null,
+        visibility: e.visibility ?? 'public',
+        specVersion: e.specVersion ?? 1,
+        metadata: e.metadata ?? null,
         source: 'seed',
         fetchedAt: null
       }))

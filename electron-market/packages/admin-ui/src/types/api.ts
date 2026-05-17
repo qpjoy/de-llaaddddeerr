@@ -54,10 +54,12 @@ export interface MarketplaceEntry {
   manifestUrl: string;
   tarballUrl?: string;
   homepage?: string;
+  category?: string | null;
   verified: boolean;
   signature?: string;
   bootstrap?: boolean;
   visibility?: Visibility;
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface MarketplaceIndex {

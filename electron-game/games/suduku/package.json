@@ -1,0 +1,36 @@
+{
+  "name": "@qpjoy/electron-game-suduku",
+  "version": "0.1.0",
+  "description": "Suduku game for the Qpjoy Electron game marketplace.",
+  "main": "src/main.js",
+  "type": "commonjs",
+  "license": "UNLICENSED",
+  "keywords": [
+    "qpjoy-electron-game",
+    "electron-game",
+    "suduku",
+    "sudoku",
+    "puzzle"
+  ],
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check src/main.js && node --check src/plugin.js && node --check src/preload.js && node --check src/player.js && node --check src/database.js && node --check src/sync.js && node --check renderer/app.js && node --check renderer/game.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.9.1",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0"
+  },
+  "qpjoyPlugin": {
+    "specVersion": 1,
+    "entry": "src/plugin.js",
+    "manifest": "src/plugin.manifest.json"
+  },
+  "qpjoyGame": {
+    "specVersion": 1,
+    "entry": "src/plugin.js",
+    "manifest": "src/game.manifest.json"
+  }
+}

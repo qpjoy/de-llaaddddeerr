@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qpjoy.dev/schemas/electron-game.package.schema.json",
+  "title": "Qpjoy Electron Game Package Manifest",
+  "type": "object",
+  "required": ["kind", "id", "name", "category", "entry"],
+  "properties": {
+    "specVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "kind": {
+      "const": "electron-game"
+    },
+    "id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string"
+    },
+    "entry": {
+      "type": "object",
+      "required": ["electronMain", "renderer"],
+      "properties": {
+        "electronMain": {
+          "type": "string"
+        },
+        "renderer": {
+          "type": "string"
+        },
+        "plugin": {
+          "type": "string"
+        },
+        "standaloneElectronMain": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "score": {
+      "type": "object",
+      "properties": {
+        "storage": {
+          "enum": ["sqlite"]
+        },
+        "sync": {
+          "enum": ["postgres-optional"]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

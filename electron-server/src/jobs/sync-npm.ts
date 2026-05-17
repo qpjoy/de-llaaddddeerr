@@ -1,6 +1,6 @@
 /**
- * Scans the npm registry for QPJoy marketplace plugins, extracts each
- * latest version's `qpjoyPlugin` manifest, and writes:
+ * Scans the npm registry for QPJoy marketplace plugins and games, extracts
+ * each latest version's marketplace manifest, and writes:
  *
  *   data/version.json
  *   data/marketplace-index.json
@@ -17,7 +17,7 @@
  *
  * ## Inclusion rule (post-rename, see docs/PUBLISH.md)
  *
- * A package shows up in the marketplace iff **all** of:
+ * A plugin package shows up in the marketplace iff **all** of:
  *
  *   1. (cheap pre-filter) name matches `<NPM_SCOPE>/<NPM_PREFIX>*`. Default
  *      `@qpjoy/electron-*`. Plus any names in `MARKETPLACE_ALLOWLIST` are
@@ -31,7 +31,12 @@
  *      electron-market`) carries the field for plugin-spec compatibility,
  *      but it's not an installable plugin in *its own* marketplace.
  *
- * Packages that match the name filter but lack `qpjoyPlugin` are quietly
+ * Game packages use the parallel `qpjoyGame: { specVersion, manifest, ... }`
+ * field. During this phase they must also carry `qpjoyPlugin`, so the current
+ * desktop market can install and activate them through the existing plugin
+ * runtime while rendering them in the game board via `metadata.kind = "game"`.
+ *
+ * Packages that match the name filter but lack both fields are quietly
  * dropped (recorded in `rejected[]` for diagnostics). No more "soft" entries
  * cluttering the UI with non-installable cards.
  */
@@ -97,6 +102,7 @@ interface NpmPackageMetadata {
       homepage?: string;
       dist: { tarball: string; shasum: string };
       qpjoyPlugin?: { specVersion: number; manifest: string; entry?: string; self?: boolean };
+      qpjoyGame?: { specVersion: number; manifest: string; entry?: string };
     }
   >;
   time?: Record<string, string>;
@@ -230,14 +236,20 @@ async function syncOne(name: string): Promise<SyncOutcome> {
   const v = meta.versions[latestVer];
   if (!v) return { kind: 'rejected', reason: `no version data for ${latestVer}` };
 
-  // Authoritative inclusion check: a real `qpjoyPlugin` field must point at
-  // a manifest inside the tarball. Packages that match the name filter but
-  // forgot the field used to become "soft" entries; we no longer surface
-  // those — they just get recorded in `rejected[]` for diagnostics.
-  if (!v.qpjoyPlugin) {
+  // Authoritative inclusion check: a real qpjoyPlugin or qpjoyGame field must
+  // point at a manifest inside the tarball. Game packages also need qpjoyPlugin
+  // during this phase because the desktop installer still uses PluginStore.
+  if (!v.qpjoyPlugin && !v.qpjoyGame) {
     return {
       kind: 'rejected',
-      reason: 'missing qpjoyPlugin field in package.json (not an installable plugin)'
+      reason: 'missing qpjoyPlugin/qpjoyGame field in package.json (not a marketplace package)'
+    };
+  }
+
+  if (v.qpjoyGame && !v.qpjoyPlugin) {
+    return {
+      kind: 'rejected',
+      reason: 'qpjoyGame package is missing qpjoyPlugin compatibility field'
     };
   }
 
@@ -245,8 +257,14 @@ async function syncOne(name: string): Promise<SyncOutcome> {
   // for spec-compatibility (it ships a manifest, it has the same shape) but
   // its `self: true` marks it as the runtime — not an installable plugin in
   // its own marketplace. Skip silently.
-  if (v.qpjoyPlugin.self === true) {
+  if (v.qpjoyPlugin?.self === true) {
     return { kind: 'rejected', reason: 'qpjoyPlugin.self=true (host package, not a plugin)' };
+  }
+
+  const packageKind = v.qpjoyGame ? 'game' : 'plugin';
+  const marketplaceSpec = v.qpjoyGame ?? v.qpjoyPlugin;
+  if (!marketplaceSpec) {
+    return { kind: 'rejected', reason: 'missing marketplace spec' };
   }
 
   // Pull the manifest out of the published tarball.
@@ -259,7 +277,7 @@ async function syncOne(name: string): Promise<SyncOutcome> {
     await downloadTo(tarball, tgz);
     await exec('tar', ['-xzf', tgz, '-C', tmp]);
     // npm publishes inside a "package/" prefix.
-    const manifestRel = v.qpjoyPlugin.manifest;
+    const manifestRel = marketplaceSpec.manifest;
     const raw = await readFile(join(tmp, 'package', manifestRel), 'utf8');
     manifest = JSON.parse(raw) as Record<string, unknown>;
     manifestChecksum = 'sha256:' + createHash('sha256').update(raw).digest('hex');
@@ -307,13 +325,31 @@ async function syncOne(name: string): Promise<SyncOutcome> {
     tarballUrl: v.dist.tarball,
     homepage: v?.homepage ?? null,
     author: typeof v?.author === 'string' ? v.author : v?.author?.name ?? null,
-    category: null,
+    category: packageKind === 'game'
+      ? `game:${typeof manifest.category === 'string' ? manifest.category : 'uncategorized'}`
+      : null,
     // `@qpjoy/*` is the first-party scope. Anything outside it is verified=false.
     verified: name.startsWith('@qpjoy/'),
     bootstrap: id === 'qpjoy.electron-tunnel',
     visibility: 'public',
-    specVersion: Number(v.qpjoyPlugin.specVersion ?? 1),
-    metadata: null,
+    specVersion: Number(marketplaceSpec.specVersion ?? 1),
+    metadata: packageKind === 'game'
+      ? {
+          kind: 'game',
+          gameId: String(manifest.gameId ?? id),
+          modes: Array.isArray(manifest.modes)
+            ? manifest.modes
+                .map((mode) => (
+                  mode && typeof mode === 'object' && 'id' in mode
+                    ? String((mode as { id: unknown }).id)
+                    : null
+                ))
+                .filter(Boolean)
+            : [],
+          installRuntime: 'qpjoyPlugin',
+          launchRpc: 'launch'
+        }
+      : null,
     versions,
     latestManifest: manifest,
     extra: null

@@ -34,12 +34,14 @@ export interface MarketplaceEntry {
    *  npm metadata API — handy on locked-down networks. */
   tarballUrl?: string;
   homepage?: string;
+  category?: string | null;
   verified: boolean;
   signature?: string;
   /** True for the small set of plugins that the host treats as bootstrap
    *  candidates: they may need to be installed offline before the network
    *  exists. The tunnel is the canonical example. */
   bootstrap?: boolean;
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface MarketplaceIndex {

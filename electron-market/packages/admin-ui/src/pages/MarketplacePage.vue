@@ -1,7 +1,17 @@
 <template>
   <q-page class="content-panel">
     <div class="toolbar-row q-mb-md">
-      <div class="page-title">插件市场</div>
+      <div class="page-title">应用市场</div>
+      <q-tabs
+        v-model="section"
+        dense
+        class="text-primary"
+        active-color="primary"
+        indicator-color="primary"
+      >
+        <q-tab name="plugin" icon="extension" label="插件" />
+        <q-tab name="game" icon="sports_esports" label="游戏" />
+      </q-tabs>
       <q-chip
         v-if="sourceLabel"
         :icon="sourceIcon"
@@ -171,7 +181,7 @@
       v-else-if="filtered.length === 0"
       class="section-surface q-pa-xl text-center text-grey-7"
     >
-      {{ host.marketplace.value.entries.length === 0 ? '市场暂无条目' : '没有匹配的结果' }}
+      {{ emptyMessage }}
     </div>
 
     <div class="plugin-grid">
@@ -183,7 +193,7 @@
       >
         <div class="plugin-card-header">
           <q-icon
-            :name="isLocked(entry) ? 'lock' : 'extension'"
+            :name="isLocked(entry) ? 'lock' : entryIcon(entry)"
             :color="isLocked(entry) ? 'warning' : 'primary'"
             size="22px"
           />
@@ -243,6 +253,31 @@
           <!-- Server-mode panel is read-only: no host to install into. -->
           <template v-if="host.mode === 'server'">
             <q-chip dense color="grey-7" text-color="white" icon="info" label="桌面客户端可安装" />
+          </template>
+          <template v-else-if="installed(entry.id) && isGame(entry)">
+            <q-btn
+              v-if="installedState(entry.id) === 'active'"
+              color="primary"
+              icon="sports_esports"
+              label="试玩"
+              :disable="host.busy.value"
+              @click="launchGame(entry.id)"
+            />
+            <q-btn
+              v-else
+              color="primary"
+              icon="play_arrow"
+              label="激活"
+              :disable="host.busy.value"
+              @click="host.activate(entry.id)"
+            />
+            <q-btn
+              outline
+              color="primary"
+              icon="settings"
+              label="管理"
+              :to="`/plugin/${encodeURIComponent(entry.id)}`"
+            />
           </template>
           <template v-else-if="installed(entry.id)">
             <!-- Newer version available? Highlight the upgrade. -->
@@ -304,7 +339,7 @@
             v-else
             color="primary"
             icon="cloud_download"
-            label="安装"
+            :label="isGame(entry) ? '安装游戏' : '安装'"
             :disable="host.busy.value"
             :loading="host.busy.value"
             @click="host.install(entry.id, entry.latest)"
@@ -337,6 +372,7 @@ const host = usePluginHost();
 const auth = useAuth();
 const serverAdmin = useServerAdmin();
 const query = ref('');
+const section = ref<'plugin' | 'game'>('plugin');
 
 /* ── NotYet ball visibility quick-toggle ──────────────────────────────── */
 
@@ -428,14 +464,25 @@ onUnmounted(() => {
 const filtered = computed(() => {
   const entries = host.marketplace.value?.entries ?? [];
   const q = query.value.trim().toLowerCase();
-  if (!q) return entries;
-  return entries.filter(
+  const scoped = entries.filter((entry) => entryKind(entry) === section.value);
+  if (!q) return scoped;
+  return scoped.filter(
     (e) =>
       e.id.toLowerCase().includes(q) ||
       e.npm.toLowerCase().includes(q) ||
       e.name.toLowerCase().includes(q) ||
       e.description.toLowerCase().includes(q)
   );
+});
+
+const sectionEntries = computed(() =>
+  (host.marketplace.value?.entries ?? []).filter((entry) => entryKind(entry) === section.value)
+);
+
+const emptyMessage = computed(() => {
+  if ((host.marketplace.value?.entries.length ?? 0) === 0) return '市场暂无条目';
+  if (sectionEntries.value.length === 0) return section.value === 'game' ? '游戏板块暂无条目' : '插件板块暂无条目';
+  return '没有匹配的结果';
 });
 
 function installed(id: string): boolean {
@@ -448,6 +495,26 @@ function installedState(id: string): string | null {
 
 // Alias used inline in the template (shorter than `installedState`).
 const state = installedState;
+
+type MarketplaceSection = 'plugin' | 'game';
+
+function entryKind(entry: { category?: string | null; metadata?: Record<string, unknown> | null }): MarketplaceSection {
+  if (entry.metadata?.kind === 'game') return 'game';
+  if (entry.category?.startsWith('game')) return 'game';
+  return 'plugin';
+}
+
+function isGame(entry: { category?: string | null; metadata?: Record<string, unknown> | null }): boolean {
+  return entryKind(entry) === 'game';
+}
+
+function entryIcon(entry: { category?: string | null; metadata?: Record<string, unknown> | null }): string {
+  return isGame(entry) ? 'sports_esports' : 'extension';
+}
+
+async function launchGame(id: string): Promise<void> {
+  await host.rpc(id, 'launch');
+}
 
 const legacyOfflineBannerVisible = computed(() => {
   if (host.mode !== 'local') return false;

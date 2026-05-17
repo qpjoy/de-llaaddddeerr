@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qpjoy.dev/schemas/electron-game.registry.schema.json",
+  "title": "Qpjoy Electron Game Registry",
+  "type": "object",
+  "required": ["version", "games"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "games": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/game"
+      }
+    }
+  },
+  "$defs": {
+    "game": {
+      "type": "object",
+      "required": ["id", "packageName", "displayName", "version", "category", "description", "entry", "install"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "packageName": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "entry": {
+          "type": "object",
+          "required": ["electronMain", "renderer"],
+          "properties": {
+            "electronMain": {
+              "type": "string"
+            },
+            "renderer": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "modes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "label", "gridSize"],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "gridSize": {
+                "type": "integer",
+                "minimum": 2
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "install": {
+          "type": "object",
+          "required": ["source", "packageName"],
+          "properties": {
+            "source": {
+              "enum": ["npm", "local"]
+            },
+            "packageName": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
