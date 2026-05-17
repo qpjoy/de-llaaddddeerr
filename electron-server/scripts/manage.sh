@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # QPJoy marketplace — docker compose helper.
 #
-# All operations route through `docker compose` against
+# All operations route through Docker Compose against
 # electron-server/docker-compose.yml. Run without arguments for an
 # interactive menu, or pass a subcommand directly:
 #
@@ -23,7 +23,7 @@ ADMIN_UI_DIST="$ROOT/../electron-market/packages/admin-ui/dist"
 SPA_TARGET="$ROOT/data/spa-dist"
 
 cd "$ROOT"
-DC=(docker compose -f "$ROOT/docker-compose.yml")
+DC=()
 
 # ── Pretty printing ────────────────────────────────────────────────────
 if [ -t 1 ]; then
@@ -39,8 +39,17 @@ die()  { printf '%s✗%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 
 # ── Preconditions ──────────────────────────────────────────────────────
 check_docker() {
-  command -v docker >/dev/null 2>&1 || die "docker is not installed."
-  docker compose version >/dev/null 2>&1 || die "docker compose plugin missing."
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    DC=(docker compose -f "$ROOT/docker-compose.yml")
+    return
+  fi
+
+  if command -v docker-compose >/dev/null 2>&1 && docker-compose version >/dev/null 2>&1; then
+    DC=(docker-compose -f "$ROOT/docker-compose.yml")
+    return
+  fi
+
+  die "Docker Compose is required. Install either the 'docker compose' plugin or the legacy 'docker-compose' command."
 }
 
 ensure_spa() {
@@ -204,7 +213,7 @@ Usage:
 Commands:
   up                          start postgres + market (background)
   down                        stop everything (volumes kept)
-  status                      docker compose ps
+  status                      compose ps
   logs [service]              tail logs (default: market)
   restart [service]           restart all or one (postgres|market)
   build                       (re)build the market image

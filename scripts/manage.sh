@@ -150,9 +150,11 @@ cmd_status() {
   header "Server 状态"
   if [ -f "$ROOT/electron-server/docker-compose.yml" ]; then
     if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-      (cd "$ROOT/electron-server" && docker compose ps 2>/dev/null || warn "docker compose 失败")
+      (cd "$ROOT/electron-server" && docker compose -f docker-compose.yml ps 2>/dev/null || warn "docker compose 失败")
+    elif command -v docker-compose >/dev/null 2>&1 && docker-compose version >/dev/null 2>&1; then
+      (cd "$ROOT/electron-server" && docker-compose -f docker-compose.yml ps 2>/dev/null || warn "docker-compose 失败")
     else
-      warn "docker / docker compose 未安装，跳过 server 状态"
+      warn "docker compose / docker-compose 未安装，跳过 server 状态"
     fi
   else
     warn "未找到 electron-server/docker-compose.yml"
