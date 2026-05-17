@@ -1,4 +1,4 @@
-import { execFile } from 'child_process';
+import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import { readFile, rm, mkdir, cp, rename, writeFile, symlink, lstat } from 'fs/promises';
 import { existsSync } from 'fs';
@@ -7,7 +7,54 @@ import { join, isAbsolute, resolve } from 'path';
 import type { PluginManifest } from '@qpjoy/plugin-sdk';
 import type { PluginRegistry } from '../registry/PluginRegistry';
 
-const exec = promisify(execFile);
+const execFileAsync = promisify(execFile);
+
+/**
+ * Cross-platform wrapper around `npm install` / `pnpm install`.
+ *
+ * The motivating Windows quirk: `npm` and `pnpm` ship as `.cmd` batch
+ * wrappers around the actual Node entry. `child_process.execFile` on
+ * Windows doesn't consult PATHEXT, so `execFile('npm', …)` fails with
+ * `spawn npm ENOENT` even though `where npm` works fine. The standard
+ * workaround is to route through the system shell so `cmd.exe` does the
+ * lookup; that needs `shell: true`, which in turn requires us to quote
+ * args ourselves because shell-mode disables Node's argv quoting.
+ *
+ * On macOS / Linux the no-shell `execFile` fast path is fine and avoids
+ * any sh quoting concerns.
+ */
+async function exec(file: string, args: string[], opts: { cwd: string }): Promise<void> {
+  if (process.platform !== 'win32') {
+    await execFileAsync(file, args, opts);
+    return;
+  }
+  return new Promise((resolve, reject) => {
+    // Windows shell quoting: wrap any arg that contains a space / quote /
+    // cmd metachar in double quotes and escape inner double quotes.
+    const quoted = args.map((a) =>
+      /[\s"&<>|^()]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a
+    );
+    const child = spawn(file, quoted, {
+      cwd: opts.cwd,
+      stdio: 'pipe',
+      shell: true,
+      windowsHide: true
+    });
+    let stderr = '';
+    let stdout = '';
+    child.stdout?.on('data', (d) => { stdout += d.toString(); });
+    child.stderr?.on('data', (d) => { stderr += d.toString(); });
+    child.on('error', (err) => reject(err));
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        const tail = (stderr || stdout).split('\n').slice(-20).join('\n');
+        reject(new Error(`${file} ${args.join(' ')} exited with code ${code}\n${tail}`));
+      }
+    });
+  });
+}
 
 /**
  * Where the plugin tarball / source comes from.
