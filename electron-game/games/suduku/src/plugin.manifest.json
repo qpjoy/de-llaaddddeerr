@@ -1,7 +1,7 @@
 {
   "id": "qpjoy.electron-game-suduku",
   "name": "Suduku",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": "QPJoy",
   "description": "Suduku puzzle game with 7x7 and 9x9 modes plus local and server high-score ranking.",
   "homepage": "https://www.npmjs.com/package/@qpjoy/electron-game-suduku",

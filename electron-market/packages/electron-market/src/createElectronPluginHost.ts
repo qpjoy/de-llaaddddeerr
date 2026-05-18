@@ -262,15 +262,6 @@ export function createElectronPluginHost(
   const marketplace = new MarketplaceClient({
     indexUrl: options.marketplaceUrl
   });
-  const runtime = new PluginRuntime({
-    host,
-    marketplaceDb,
-    registry,
-    pluginsRoot
-  });
-  const tunnelPolicyGuard = new TunnelPolicyGuard(host.session, runtime);
-  runtime.setNetworkPolicyEvaluator((url) => tunnelPolicyGuard.evaluate(url));
-  tunnelPolicyGuard.start();
 
   // Resolve the marketplace server URL once, applying built-in defaults so
   // consumers don't have to think about this. `null` means offline. The
@@ -289,6 +280,17 @@ export function createElectronPluginHost(
       `[electron-market] using marketplace URL from user settings: ${serverBaseUrl}`
     );
   }
+
+  const runtime = new PluginRuntime({
+    host,
+    marketplaceDb,
+    registry,
+    pluginsRoot,
+    serverBaseUrl
+  });
+  const tunnelPolicyGuard = new TunnelPolicyGuard(host.session, runtime);
+  runtime.setNetworkPolicyEvaluator((url) => tunnelPolicyGuard.evaluate(url));
+  tunnelPolicyGuard.start();
 
   // Phase 4 remote sync + Phase 5 auth. Only spun up when a server URL is
   // resolved (either via caller / env override or via the package default).

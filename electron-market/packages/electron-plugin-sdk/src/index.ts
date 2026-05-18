@@ -87,7 +87,27 @@ export interface PluginHostBridge {
    */
   marketplaceDb?: {
     raw(): unknown;
+    getMeta?(key: string): string | null;
+    setMeta?(key: string, value: string): void;
+    getActiveSession?(): {
+      accessToken: string | null;
+      refreshToken: string | null;
+      expiresAt: string | null;
+      user: Record<string, unknown> | null;
+    } | null;
+    setSession?(session: {
+      accessToken: string | null;
+      refreshToken: string | null;
+      expiresAt: string | null;
+      user: Record<string, unknown> | null;
+    }): void;
   };
+  /**
+   * Resolved marketplace server URL from the host, or null when the host is
+   * intentionally offline. Plugins should prefer this over hard-coded
+   * endpoints so packaged apps do not accidentally talk to dev defaults.
+   */
+  serverBaseUrl?: string | null;
   /** Ask the host to re-apply session proxy. Requires `system:proxy`. */
   applyProxy(): Promise<void>;
 }

@@ -32,7 +32,8 @@ function registerIpc() {
     return {
       player: database.getPlayer(),
       suggestedName: database.getSuggestedPlayerName(),
-      syncConfigured: syncService.isConfigured()
+      syncConfigured: syncService.isConfigured(),
+      syncStatus: syncService.getStatus()
     };
   });
 
@@ -40,12 +41,10 @@ function registerIpc() {
     return database.setLocalPlayer(name);
   });
 
-  ipcMain.handle("suduku:save-score", async (_event, score) => {
+  ipcMain.handle("suduku:save-score", (_event, score) => {
     const saved = database.saveScore(score);
-    const sync = await syncService.syncNow();
     return {
-      saved,
-      sync
+      saved
     };
   });
 

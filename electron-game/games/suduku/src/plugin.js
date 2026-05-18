@@ -48,6 +48,7 @@ module.exports = {
     });
     const syncService = new LocalScoreSync(database, {
       marketplaceDb: ctx.host.marketplaceDb,
+      serverBaseUrl: ctx.host.serverBaseUrl ?? null,
       fetch: ctx.fetch
     });
     const ipcMain = ctx.host.ipcMain;
@@ -71,7 +72,8 @@ module.exports = {
       return {
         player: database.getPlayer(),
         suggestedName: database.getSuggestedPlayerName(),
-        syncConfigured: syncService.isConfigured()
+        syncConfigured: syncService.isConfigured(),
+        syncStatus: syncService.getStatus()
       };
     });
 
@@ -79,12 +81,10 @@ module.exports = {
       return database.setLocalPlayer(name);
     });
 
-    ipcMain.handle("suduku:save-score", async (_event, score) => {
+    ipcMain.handle("suduku:save-score", (_event, score) => {
       const saved = database.saveScore(score);
-      const sync = await syncService.syncNow();
       return {
-        saved,
-        sync
+        saved
       };
     });
 
@@ -100,7 +100,8 @@ module.exports = {
       launch,
       status: () => ({
         ready: true,
-        syncConfigured: syncService.isConfigured()
+        syncConfigured: syncService.isConfigured(),
+        syncStatus: syncService.getStatus()
       })
     });
 

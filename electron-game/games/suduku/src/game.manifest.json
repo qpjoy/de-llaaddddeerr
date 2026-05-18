@@ -2,7 +2,7 @@
   "kind": "electron-game",
   "id": "qpjoy.electron-game-suduku",
   "name": "Suduku",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": "QPJoy",
   "description": "A local-first Sudoku game with 7x7 and 9x9 modes, completion scoring, and marketplace SQLite history.",
   "category": "puzzle",

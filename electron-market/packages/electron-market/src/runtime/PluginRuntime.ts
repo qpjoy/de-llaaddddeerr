@@ -22,6 +22,7 @@ interface PluginRuntimeOptions {
   marketplaceDb: MarketplaceDB;
   registry: PluginRegistry;
   pluginsRoot: string;
+  serverBaseUrl?: string | null;
 }
 
 interface LiveInstance {
@@ -182,6 +183,7 @@ export class PluginRuntime {
         ipcMain: this.opts.host.ipcMain,
         session: this.opts.host.session,
         marketplaceDb: this.opts.marketplaceDb,
+        serverBaseUrl: this.opts.serverBaseUrl ?? null,
         applyProxy: async () => {
           gate.require('system:proxy');
           // No-op here; real impl coordinates with whichever plugin owns proxy.

@@ -9,21 +9,46 @@ class LocalScoreSync {
   constructor(localDatabase, opts = {}, env = process.env) {
     this.localDatabase = localDatabase;
     this.marketplaceDb = opts.marketplaceDb || localDatabase.marketplaceDb || null;
-    this.serverBaseUrl = opts.serverBaseUrl || null;
+    this.hasExplicitServerBaseUrl = Object.prototype.hasOwnProperty.call(opts, "serverBaseUrl");
+    this.serverBaseUrl = this.hasExplicitServerBaseUrl ? opts.serverBaseUrl || null : null;
+    this.useDevDefault = opts.useDevDefault ?? !this.hasExplicitServerBaseUrl;
     this.env = env;
     this.timeoutMs = opts.timeoutMs || 8000;
     this.fetch = opts.fetch || fetch;
   }
 
+  hasRemoteServer() {
+    return Boolean(this.resolveServerBaseUrl());
+  }
+
   isConfigured() {
-    return Boolean(this.resolveServerBaseUrl() && this.getAccessToken());
+    return Boolean(this.hasRemoteServer() && this.getAccessToken());
+  }
+
+  getStatus() {
+    return {
+      serverConfigured: this.hasRemoteServer(),
+      authenticated: Boolean(this.getAccessToken()),
+      canSubmit: this.isConfigured(),
+      pending: this.localDatabase.getUnsyncedScores(100).length,
+      leaderboardSource: this.hasRemoteServer()
+        ? "remote-postgres"
+        : (this.localDatabase.ownsDb ? "local-sqlite" : "marketplace-sqlite")
+    };
   }
 
   async syncNow() {
-    if (!this.isConfigured()) {
+    if (!this.hasRemoteServer()) {
       return {
         ok: false,
         reason: "remote_not_configured",
+        synced: 0
+      };
+    }
+    if (!this.getAccessToken()) {
+      return {
+        ok: false,
+        reason: "auth_required",
         synced: 0
       };
     }
@@ -61,7 +86,7 @@ class LocalScoreSync {
   }
 
   async getLeaderboard(mode = "9x9", limit = 20) {
-    if (this.isConfigured()) {
+    if (this.hasRemoteServer()) {
       try {
         const result = await this.requestJson(
           `/api/v1/games/${encodeURIComponent(GAME_ID)}/leaderboard?mode=${encodeURIComponent(mode)}&limit=${encodeURIComponent(String(limit))}`
@@ -186,9 +211,11 @@ class LocalScoreSync {
       this.serverBaseUrl,
       this.env.QPJOY_GAME_SERVER,
       this.env.QPJOY_MARKET_SERVER,
-      this.getMarketServerOverride(),
-      DEFAULT_DEV_SERVER
+      this.getMarketServerOverride()
     ];
+    if (this.useDevDefault) {
+      candidates.push(DEFAULT_DEV_SERVER);
+    }
 
     for (const candidate of candidates) {
       const normalized = normalizeBaseUrl(candidate);

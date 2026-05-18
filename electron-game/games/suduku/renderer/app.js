@@ -185,15 +185,15 @@ async function maybeComplete() {
   updateTimer();
 
   const score = calculateScore(state.mode, state.lastElapsed);
-  const result = await window.suduku.saveScore({
+  await window.suduku.saveScore({
     mode: state.mode,
     elapsedSeconds: state.lastElapsed,
     score
   });
 
   setStatus(`Correct. +${score} points in ${formatTime(state.lastElapsed)}. Next round starts shortly.`, "good");
-  syncText.textContent = result.sync.ok ? "Score synced" : "Saved locally";
-  await refreshLeaderboard();
+  syncText.textContent = "Saved locally";
+  void syncAndRefresh("auto");
   state.nextRoundTimer = setTimeout(() => {
     startNewRound(state.mode);
   }, 1600);
@@ -252,9 +252,35 @@ async function refreshLeaderboard() {
   }
 }
 
+function describeSyncResult(result) {
+  if (result.ok) {
+    return result.synced ? `Synced ${result.synced}` : "Server ranking refreshed";
+  }
+  const labels = {
+    remote_not_configured: "No server configured",
+    auth_required: "Login required to sync",
+    remote_sync_failed: "Sync failed"
+  };
+  return labels[result.reason] || "Sync unavailable";
+}
+
+async function syncAndRefresh(reason = "manual") {
+  const result = await window.suduku.syncNow();
+  syncText.textContent = describeSyncResult(result);
+  await refreshLeaderboard();
+  if (reason === "manual" && result.error) {
+    setStatus(result.error, "bad");
+  }
+  return result;
+}
+
 async function ensurePlayer() {
   const result = await window.suduku.getPlayer();
-  syncText.textContent = result.syncConfigured ? "Server ranking ready" : "Offline-ready";
+  if (result.syncStatus?.serverConfigured) {
+    syncText.textContent = result.syncStatus.authenticated ? "Server sync ready" : "Server ranking ready";
+  } else {
+    syncText.textContent = "Offline-ready";
+  }
 
   if (result.player) {
     state.player = result.player;
@@ -308,9 +334,7 @@ document.querySelector("#checkButton").addEventListener("click", () => {
 });
 
 document.querySelector("#syncButton").addEventListener("click", async () => {
-  const result = await window.suduku.syncNow();
-  syncText.textContent = result.ok ? `Synced ${result.synced}` : "Sync unavailable";
-  await refreshLeaderboard();
+  await syncAndRefresh("manual");
 });
 
 ensurePlayer().then(() => {
