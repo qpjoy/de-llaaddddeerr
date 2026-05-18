@@ -6,6 +6,7 @@ const state = {
   values: [],
   startedAt: 0,
   timerId: null,
+  nextRoundTimer: null,
   player: null,
   completed: false
 };
@@ -67,9 +68,18 @@ function applyConflicts() {
   board.querySelectorAll(".cell").forEach((cell) => {
     const key = `${cell.dataset.row}:${cell.dataset.col}`;
     cell.classList.toggle("invalid", conflicts.has(key));
+    cell.classList.remove("wrong");
   });
 
   return conflicts;
+}
+
+function applyBoardMarks(conflicts, wrong = new Set()) {
+  board.querySelectorAll(".cell").forEach((cell) => {
+    const key = `${cell.dataset.row}:${cell.dataset.col}`;
+    cell.classList.toggle("invalid", conflicts.has(key));
+    cell.classList.toggle("wrong", wrong.has(key) && !conflicts.has(key));
+  });
 }
 
 function renderBoard() {
@@ -146,15 +156,32 @@ function highlightPeers(activeRow, activeCol) {
 }
 
 async function maybeComplete() {
-  const values = readBoardValues();
+  if (state.completed) {
+    return;
+  }
 
-  if (!isComplete(state.mode, values, state.puzzle.solution) || state.completed) {
+  const values = readBoardValues();
+  const conflicts = getConflicts(state.mode, values);
+  const filled = isFilled(state.mode, values);
+
+  if (!filled) {
+    return;
+  }
+
+  const wrong = getWrongCells(state.mode, values, state.puzzle.solution);
+  applyBoardMarks(conflicts, wrong);
+
+  if (conflicts.size || wrong.size || !isComplete(state.mode, values, state.puzzle.solution)) {
+    setStatus("The grid is full, but some cells need another look.", "bad");
     return;
   }
 
   state.lastElapsed = elapsedSeconds();
   state.completed = true;
   clearInterval(state.timerId);
+  board.querySelectorAll("input").forEach((input) => {
+    input.disabled = true;
+  });
   updateTimer();
 
   const score = calculateScore(state.mode, state.lastElapsed);
@@ -164,9 +191,12 @@ async function maybeComplete() {
     score
   });
 
-  setStatus(`Completed for ${score} points in ${formatTime(state.lastElapsed)}.`, "good");
-  syncText.textContent = result.sync.ok ? "Saved to marketplace SQLite" : "Saved locally";
+  setStatus(`Correct. +${score} points in ${formatTime(state.lastElapsed)}. Next round starts shortly.`, "good");
+  syncText.textContent = result.sync.ok ? "Score synced" : "Saved locally";
   await refreshLeaderboard();
+  state.nextRoundTimer = setTimeout(() => {
+    startNewRound(state.mode);
+  }, 1600);
 }
 
 function startNewRound(mode = state.mode) {
@@ -178,7 +208,9 @@ function startNewRound(mode = state.mode) {
   state.completed = false;
 
   clearInterval(state.timerId);
+  clearTimeout(state.nextRoundTimer);
   state.timerId = setInterval(updateTimer, 1000);
+  state.nextRoundTimer = null;
 
   document.querySelectorAll(".mode-button").forEach((button) => {
     button.classList.toggle("active", button.dataset.mode === mode);
@@ -192,7 +224,13 @@ function startNewRound(mode = state.mode) {
 
 async function refreshLeaderboard() {
   const result = await window.suduku.getLeaderboard(state.mode);
-  leaderboardSource.textContent = result.source === "marketplace-sqlite" ? "Marketplace SQLite" : "Local SQLite";
+  const sourceLabels = {
+    "remote-postgres": "Server ranking",
+    "marketplace-sqlite": "Marketplace SQLite",
+    "local-sqlite": "Local SQLite",
+    sqlite: "Local SQLite"
+  };
+  leaderboardSource.textContent = sourceLabels[result.source] || "Local SQLite";
   leaderboard.innerHTML = "";
 
   if (!result.rows.length) {
@@ -204,9 +242,10 @@ async function refreshLeaderboard() {
 
   for (const row of result.rows) {
     const item = document.createElement("li");
+    const points = row.bestScore ?? row.totalScore ?? row.score;
     item.innerHTML = `
       <span class="leader-name"></span>
-      <span class="leader-meta">${row.totalScore} pts · ${row.rounds} rounds · best ${formatTime(row.bestTime)}</span>
+      <span class="leader-meta">${points} pts · ${row.rounds} rounds · best ${formatTime(row.bestTime)}</span>
     `;
     item.querySelector(".leader-name").textContent = `${row.rank}. ${row.playerName}`;
     leaderboard.append(item);
@@ -215,7 +254,7 @@ async function refreshLeaderboard() {
 
 async function ensurePlayer() {
   const result = await window.suduku.getPlayer();
-  syncText.textContent = result.syncConfigured ? "Marketplace SQLite ready" : "Offline-ready";
+  syncText.textContent = result.syncConfigured ? "Server ranking ready" : "Offline-ready";
 
   if (result.player) {
     state.player = result.player;
@@ -247,9 +286,22 @@ document.querySelector("#newGameButton").addEventListener("click", () => {
 });
 
 document.querySelector("#checkButton").addEventListener("click", () => {
-  const conflicts = applyConflicts();
+  const values = readBoardValues();
+  const conflicts = getConflicts(state.mode, values);
+  const wrong = isFilled(state.mode, values)
+    ? getWrongCells(state.mode, values, state.puzzle.solution)
+    : new Set();
+  applyBoardMarks(conflicts, wrong);
   if (conflicts.size) {
     setStatus("There are duplicate numbers to fix.", "bad");
+    return;
+  }
+  if (wrong.size) {
+    setStatus("No duplicates, but at least one number is incorrect.", "bad");
+    return;
+  }
+  if (isFilled(state.mode, values)) {
+    void maybeComplete();
     return;
   }
   setStatus("No duplicate numbers found.");

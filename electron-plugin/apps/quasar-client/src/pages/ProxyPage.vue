@@ -54,7 +54,7 @@
           />
           <q-btn color="primary" icon="save" label="保存端口" @click="saveLocalPorts" />
           <q-chip color="grey-7" text-color="white">
-            推荐 23458 / 23459，避开 Clash 7890
+            推荐 23458 / 1053，DNS 由 TUN 劫持，不占用系统 53
           </q-chip>
         </div>
       </section>
@@ -70,7 +70,7 @@
         </div>
         <div class="metric-cell">
           <div class="metric-label">DNS</div>
-          <div class="metric-value">:{{ snapshot?.status.ports.dns ?? 23459 }}</div>
+          <div class="metric-value">:{{ snapshot?.status.ports.dns ?? 1053 }}</div>
         </div>
         <div class="metric-cell">
           <div class="metric-label">控制接口</div>
@@ -93,15 +93,20 @@ const {
   localPorts,
   modeLabel,
   refresh,
-  run
+  run,
+  modeLabelFor,
+  preflightInstallTun,
+  preflightModeChange
 } = useTunnel();
 
 async function saveMode(): Promise<void> {
-  await run(() => window.tunnel.setMode(selectedMode.value), '模式已切换');
+  if (!preflightModeChange(selectedMode.value)) return;
+  await run(() => window.tunnel.setMode(selectedMode.value), `模式已切换：${modeLabelFor(selectedMode.value)}`);
 }
 
 async function installTun(): Promise<void> {
-  await run(() => window.tunnel.installTun(), 'TUN 已安装');
+  if (!preflightInstallTun()) return;
+  await run(() => window.tunnel.installTun(), 'TUN 已安装。下一步切换到「虚拟网卡」；该模式会对所有 App 生效。');
 }
 
 async function uninstallTun(): Promise<void> {

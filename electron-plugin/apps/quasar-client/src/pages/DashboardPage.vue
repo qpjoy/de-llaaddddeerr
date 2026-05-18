@@ -170,8 +170,63 @@ const eventText = computed(() => (snapshot.value?.events ?? [])
   .map((event) => `[${event.level}] ${new Date(event.createdAt).toLocaleString()} ${event.message}`)
   .join('\n'));
 
-function toast(message: string, color = 'positive'): void {
-  Notify.create({ message, color, timeout: 1400, position: 'top-right' });
+function toast(message: string, color = 'positive', timeout = 1400): void {
+  Notify.create({ message, color, timeout, position: 'top-right' });
+}
+
+function goRoute(path: string): void {
+  window.location.hash = `#${path}`;
+}
+
+function hasUsableSubscription(): boolean {
+  return Boolean(snapshot.value?.status.activeSubscription?.content);
+}
+
+function guideSubscriptionFirst(): boolean {
+  toast('第一步：请先在「订阅」导入并启用订阅，确认订阅已更新后再继续。', 'warning', 5200);
+  goRoute('/subscriptions');
+  return false;
+}
+
+function modeLabelFor(mode: RuntimeMode): string {
+  return modeOptions.find((item) => item.value === mode)?.label ?? mode;
+}
+
+function modeGuidance(mode: RuntimeMode): string {
+  if (mode === 'system-tun') {
+    return '虚拟网卡模式会接管所有 App 流量；首次使用请先安装 TUN，DNS 由 QPJoy Tunnel 劫持到本地 1053，不依赖 Clash 的 53。';
+  }
+  if (mode === 'app-global') {
+    return '全局模式只影响当前 App：默认全部走代理，只有黑名单会被拒绝。';
+  }
+  return 'App 模式只影响当前 App；如果配置了白名单，则仅白名单域名走代理，其他海外域名会被拒绝。';
+}
+
+function preflightInstallTun(): boolean {
+  if (!hasUsableSubscription()) return guideSubscriptionFirst();
+  toast('第二步：安装 TUN 后再切换到「虚拟网卡」；虚拟网卡模式会对所有 App 生效。', 'info', 5200);
+  return true;
+}
+
+function preflightModeChange(mode: RuntimeMode): boolean {
+  if (!hasUsableSubscription()) return guideSubscriptionFirst();
+  if (mode === 'system-tun' && !snapshot.value?.status.tunInstalled) {
+    toast('第二步：切换虚拟网卡前请先点击「安装 TUN」；安装后再切换，所有 App 都会生效。', 'warning', 5200);
+    goRoute('/proxy');
+    return false;
+  }
+  toast(modeGuidance(mode), 'info', 5200);
+  return true;
+}
+
+function preflightStart(): boolean {
+  if (!hasUsableSubscription()) return guideSubscriptionFirst();
+  if (snapshot.value?.status.mode === 'system-tun' && !snapshot.value.status.tunInstalled) {
+    toast('第二步：当前是虚拟网卡模式，请先在「代理」页安装 TUN 后再启动。', 'warning', 5200);
+    goRoute('/proxy');
+    return false;
+  }
+  return true;
 }
 
 function redactedUrl(url: string): string {
@@ -208,11 +263,13 @@ async function refresh(): Promise<void> {
 }
 
 async function saveMode(): Promise<void> {
-  await run(() => window.tunnel.setMode(selectedMode.value), '模式已切换');
+  if (!preflightModeChange(selectedMode.value)) return;
+  await run(() => window.tunnel.setMode(selectedMode.value), `模式已切换：${modeLabelFor(selectedMode.value)}`);
 }
 
 async function installTun(): Promise<void> {
-  await run(() => window.tunnel.installTun(), 'TUN 已安装');
+  if (!preflightInstallTun()) return;
+  await run(() => window.tunnel.installTun(), 'TUN 已安装。下一步切换到「虚拟网卡」；该模式会对所有 App 生效。');
 }
 
 async function saveCorePath(): Promise<void> {
@@ -228,6 +285,7 @@ async function toggleCore(): Promise<void> {
     await run(() => window.tunnel.stop(), '隧道已停止');
     return;
   }
+  if (!preflightStart()) return;
   await run(() => window.tunnel.start(), '隧道已启动');
 }
 

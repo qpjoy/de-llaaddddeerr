@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'fs';
 import { rm } from 'fs/promises';
 import { join, resolve } from 'path';
 import type { App, IpcMain, Session } from 'electron';
+import semver from 'semver';
 
 import type { Permission } from '@qpjoy/electron-plugin-sdk';
 import { MarketplaceDB, resolveMarketplaceDbPath } from '@qpjoy/marketplace-db';
@@ -117,6 +118,39 @@ export const MARKET_SERVER_DEFAULTS = {
   dev: DEV_MARKET_SERVER,
   prod: PROD_MARKET_SERVER
 } as const;
+
+function normalizedVersion(version: string | null | undefined): string | null {
+  if (!version) return null;
+  const valid = semver.valid(version);
+  if (valid) return valid;
+  return semver.coerce(version)?.version ?? null;
+}
+
+function compareVersions(a: string, b: string): number {
+  const aa = normalizedVersion(a);
+  const bb = normalizedVersion(b);
+  if (aa && bb) return semver.compare(aa, bb);
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function sourcePath(source: PluginSource): string | null {
+  if (source.type !== 'local-dir') return null;
+  return resolve(source.path);
+}
+
+function sourceVersion(source: PluginSource): string | null {
+  if (source.type === 'registry') return source.version;
+  const dir = sourcePath(source);
+  if (!dir) return null;
+  try {
+    const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as {
+      version?: string;
+    };
+    return pkg.version ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Description of a plugin that the host wants to make sure is present on
@@ -374,6 +408,7 @@ export function createElectronPluginHost(
   async function runSeed(seed: SeedPlugin, opts: { force?: boolean } = {}): Promise<void> {
     try {
       const existing = registry.get(seed.id);
+      const bundledVersion = sourceVersion(seed.source);
 
       // Backfill: if there's an existing install but no marker yet (legacy
       // user from before this change), set the marker so a future uninstall
@@ -383,10 +418,21 @@ export function createElectronPluginHost(
       }
 
       if (!opts.force) {
-        if (existing && existing.state !== 'errored' && seedInstallReachable(existing)) {
+        const seedIsNewer =
+          existing &&
+          bundledVersion &&
+          compareVersions(bundledVersion, existing.version) > 0;
+        if (existing && existing.state !== 'errored' && seedInstallReachable(existing) && !seedIsNewer) {
           // Already installed, healthy, and the files are still reachable —
           // nothing to do.
           return;
+        }
+        if (seedIsNewer) {
+          registry.log(seed.id, 'info', 'seed package newer than installed — re-seeding', {
+            installedVersion: existing.version,
+            bundledVersion,
+            source: seed.source.type
+          });
         }
         if (existing && existing.state !== 'errored' && !seedInstallReachable(existing)) {
           // State says "active" but the install is gone (dev/packaged userData
@@ -449,7 +495,14 @@ export function createElectronPluginHost(
       // Now we have real manifest data — backfill the catalogue row so the
       // marketplace card shows the right name / version / description.
       const currentEntry = marketplaceDb.getEntry(seed.id);
-      if (currentEntry && (currentEntry.name === seed.id || currentEntry.latestVersion === '0.0.0')) {
+      if (
+        currentEntry &&
+        (
+          currentEntry.name === seed.id ||
+          currentEntry.latestVersion === '0.0.0' ||
+          compareVersions(manifest.version, currentEntry.latestVersion) > 0
+        )
+      ) {
         marketplaceDb.bulkUpsertEntries([
           {
             ...currentEntry,
@@ -525,21 +578,35 @@ export function createElectronPluginHost(
       if (!entry) throw new Error(`no marketplace entry for ${id}`);
       target = entry.latestVersion;
     }
-    if (target === existing.version) {
-      registry.log(id, 'info', 'upgrade skipped: already on target version', { version: target });
+    if (compareVersions(target, existing.version) <= 0) {
+      registry.log(id, 'info', 'upgrade skipped: target is not newer than installed version', {
+        installedVersion: existing.version,
+        targetVersion: target
+      });
       return;
     }
+
+    const seed = options.seedPlugins?.find((s) => s.id === id);
+    const bundledVersion = seed ? sourceVersion(seed.source) : null;
+    const source: PluginSource =
+      seed &&
+      bundledVersion &&
+      compareVersions(bundledVersion, existing.version) > 0 &&
+      compareVersions(bundledVersion, target) >= 0
+        ? seed.source
+        : {
+            type: 'registry',
+            version: target,
+            tarballUrl: entry && target === entry.latestVersion ? entry.tarballUrl : null
+          };
+    const resolvedTarget = source === seed?.source && bundledVersion ? bundledVersion : target;
 
     const wasActive = existing.state === 'active';
     if (wasActive) {
       await runtime.deactivate(id).catch(() => undefined);
     }
 
-    await store.upgrade(id, {
-      type: 'registry',
-      version: target,
-      tarballUrl: entry && target === entry.latestVersion ? entry.tarballUrl : null
-    });
+    await store.upgrade(id, source);
 
     // Re-activate if we tore it down AND grants survived; if the new
     // manifest demanded new permissions we leave it `awaitingGrant`.
@@ -550,7 +617,8 @@ export function createElectronPluginHost(
 
     registry.log(id, 'info', 'upgrade complete', {
       from: existing.version,
-      to: target
+      to: resolvedTarget,
+      source: source.type
     });
   }
 

@@ -604,6 +604,9 @@ const installErrorHint = computed(() => {
   if (/better_sqlite3|Could not locate the bindings file/i.test(err)) {
     return 'Tunnel 需要 SQLite 原生依赖。请发布并升级到修复后的 tunnel + market 版本，安装器会允许官方 Tunnel 准备 native binding。';
   }
+  if (/spawn npm ENOENT|npm ENOENT/i.test(err)) {
+    return '当前 macOS 打包环境找不到 npm。请升级到修复后的 market 版本；支持 tarball 的插件会直接解包安装，不再依赖系统 npm。';
+  }
   if (/ENOENT/i.test(err) || /tarball not found/i.test(err)) {
     return '本地源文件路径不存在。';
   }

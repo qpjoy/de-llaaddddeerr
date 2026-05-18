@@ -21,7 +21,7 @@ Scores are awarded only when a round is completed.
 | `7x7` | 700 | 120 | 5 minutes |
 | `9x9` | 1200 | 250 | 15 minutes |
 
-The score linearly decreases between the max score and minimum completed score. Once elapsed time is greater than the cap, every completed round receives the minimum score.
+The score linearly decreases between the max score and minimum completed score. Once elapsed time is greater than the cap, every completed round receives the minimum score. A filled but incorrect board is highlighted and receives no score; a correct board saves the score and starts the next round automatically.
 
 ## Player Identity
 
@@ -37,6 +37,8 @@ Identity resolution order:
 Local scores are stored in SQLite under Electron's `app.getPath("userData")`.
 
 When launched by `@qpjoy/electron-market`, scores are written into the shared marketplace SQLite database (`electron_game_players` / `electron_game_scores`) so they can be queried together with installed plugins, marketplace entries, and plugin logs. Standalone development still falls back to a local `suduku.sqlite` file.
+
+When the marketplace host is logged in and a marketplace server is configured, completed rounds are also synced to `electron-server` as per-user high scores. The server stores the best score per user/game/mode in Postgres when `DATABASE_URL` is enabled, and the game shows the server ranking when it is reachable.
 
 ## Development
 

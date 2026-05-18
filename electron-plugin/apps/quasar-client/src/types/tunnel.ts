@@ -31,6 +31,7 @@ export interface EventRecord {
 }
 
 export interface TunnelStatus {
+  platform: NodeJS.Platform;
   running: boolean;
   pid: number | null;
   mode: RuntimeMode;

@@ -50,10 +50,7 @@ function registerIpc() {
   });
 
   ipcMain.handle("suduku:get-leaderboard", async (_event, mode) => {
-    return {
-      source: "sqlite",
-      rows: await syncService.getRemoteLeaderboard(mode)
-    };
+    return syncService.getLeaderboard(mode);
   });
 
   ipcMain.handle("suduku:sync-now", async () => {

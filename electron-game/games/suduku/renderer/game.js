@@ -131,6 +131,35 @@ function getConflicts(mode, values) {
   return conflicts;
 }
 
+function isFilled(mode, values) {
+  const config = MODE_CONFIG[mode];
+
+  for (let row = 0; row < config.size; row += 1) {
+    for (let col = 0; col < config.size; col += 1) {
+      if (!values[row][col]) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+function getWrongCells(mode, values, solution) {
+  const config = MODE_CONFIG[mode];
+  const wrong = new Set();
+
+  for (let row = 0; row < config.size; row += 1) {
+    for (let col = 0; col < config.size; col += 1) {
+      if (values[row][col] && values[row][col] !== solution[row][col]) {
+        wrong.add(`${row}:${col}`);
+      }
+    }
+  }
+
+  return wrong;
+}
+
 function isComplete(mode, values, solution) {
   const config = MODE_CONFIG[mode];
 

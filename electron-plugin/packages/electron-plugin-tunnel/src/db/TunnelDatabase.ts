@@ -7,6 +7,7 @@ import {
   DEFAULT_ADMIN_USER,
   DEFAULT_MODE,
   DEFAULT_PORTS,
+  LEGACY_DEFAULT_DNS_PORT,
   createControllerSecret
 } from '../defaults';
 import type {
@@ -94,7 +95,9 @@ export class TunnelDatabase {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
     this.db.exec(SCHEMA_SQL);
-    this.ensureDefaultSettings(mergePorts(ports));
+    const mergedPorts = mergePorts(ports);
+    this.ensureDefaultSettings(mergedPorts);
+    this.migrateLegacyDefaultDnsPort(mergedPorts.dns);
   }
 
   close(): void {
@@ -375,6 +378,24 @@ export class TunnelDatabase {
       adminUser: DEFAULT_ADMIN_USER,
       adminPasswordHash: hashPassword(DEFAULT_ADMIN_PASSWORD),
       controllerSecret: createControllerSecret(),
+      updatedAt: nowIso()
+    });
+  }
+
+  private migrateLegacyDefaultDnsPort(dnsPort: number): void {
+    if (dnsPort === LEGACY_DEFAULT_DNS_PORT) {
+      return;
+    }
+
+    this.db.prepare(`
+      UPDATE runtime_settings
+      SET dns_port = @dnsPort,
+          updated_at = @updatedAt
+      WHERE id = 1
+        AND dns_port = @legacyDnsPort
+    `).run({
+      dnsPort,
+      legacyDnsPort: LEGACY_DEFAULT_DNS_PORT,
       updatedAt: nowIso()
     });
   }

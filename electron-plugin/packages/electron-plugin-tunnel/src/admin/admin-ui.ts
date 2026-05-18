@@ -191,6 +191,27 @@ export function adminHtml(): string {
     var pageTitles = { home: '首页', proxy: '代理', subscriptions: '订阅', rules: '规则', test: '测试', logs: '日志' };
 
     function byId(id) { return document.getElementById(id); }
+    function hostPlatform() {
+      if (snapshot && snapshot.status && snapshot.status.platform) return snapshot.status.platform;
+      var ua = navigator.userAgent || '';
+      if (/Windows/i.test(ua)) return 'win32';
+      if (/Macintosh|Mac OS X/i.test(ua)) return 'darwin';
+      if (/Linux/i.test(ua)) return 'linux';
+      return 'unknown';
+    }
+    function tunPermissionMessage() {
+      var platform = hostPlatform();
+      if (platform === 'darwin') {
+        return '虚拟网卡模式需要 macOS 管理员授权。请在应用弹出的系统授权窗口中输入本机管理员账号密码；不要用 sudo 或全局管理员身份启动整个 App。取消授权时请切回 App 模式。';
+      }
+      if (platform === 'win32') {
+        return '虚拟网卡模式需要 Windows 管理员权限。应用会自动弹出 UAC/脚本授权窗口，请点击“是”；取消授权时请切回 App 模式。';
+      }
+      if (platform === 'linux') {
+        return '虚拟网卡模式需要系统授权。请确认 pkexec 授权窗口已通过，或切回 App 模式。';
+      }
+      return '虚拟网卡模式需要系统授权；如果取消授权，请切回 App 模式。';
+    }
     function escapeHtml(value) {
       return String(value == null ? '' : value).replace(/[&<>"']/g, function (char) {
         return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char];
@@ -207,13 +228,14 @@ export function adminHtml(): string {
     function friendlyErrorMessage(message) {
       var text = String(message || '');
       if (/active subscription has no downloaded content|no active subscription configured|还没有启用订阅|当前订阅还没有下载/i.test(text)) {
-        return '还没有可用订阅。请先在「订阅」里新建并启用一个订阅，确认订阅文件已下载后再启动。';
+        return '第一步：请先在「订阅」导入并启用订阅，确认订阅已更新后再继续。';
       }
       if (/Tunnel engine is not installed|缺少适配 .* 隧道引擎|tunnel engine resources/i.test(text)) {
         return text.indexOf('缺少适配') >= 0 ? text : '当前安装包缺少适配本机系统的隧道引擎。请重新安装包含本机引擎资源的版本，或在「代理」页填写本机 mihomo 可执行文件路径。';
       }
-      if (/Access is denied|configure tun interface|administrator|管理员|虚拟网卡/i.test(text)) {
-        return text.indexOf('管理员') >= 0 ? text : '虚拟网卡模式需要管理员权限。请退出应用后右键选择“以管理员身份运行”，或切回 App 模式。';
+      if (/Access is denied|configure tun interface|administrator|管理员|UAC|pkexec|osascript|虚拟网卡/i.test(text)) {
+        if (/macOS|Windows|pkexec|UAC/.test(text) && text.indexOf('管理员') >= 0) return text;
+        return tunPermissionMessage();
       }
       return text || '请求失败';
     }
@@ -237,13 +259,13 @@ export function adminHtml(): string {
         }
       });
     }
-    function toast(message, negative) {
+    function toast(message, negative, timeout) {
       var el = byId('toast');
       el.textContent = message;
       el.className = negative ? 'toast negative' : 'toast';
       el.hidden = false;
       window.clearTimeout(toast.timer);
-      toast.timer = window.setTimeout(function () { el.hidden = true; }, negative ? 5200 : 1800);
+      toast.timer = window.setTimeout(function () { el.hidden = true; }, timeout || (negative ? 5200 : 1800));
     }
     async function run(action, message) {
       if (busy) return false;
@@ -324,6 +346,54 @@ export function adminHtml(): string {
     function status() {
       return snapshot ? snapshot.status : null;
     }
+    function goPage(page) {
+      currentPage = page;
+      window.localStorage.setItem('qpjoyTunnelAdminPage', currentPage);
+      renderPage();
+    }
+    function hasUsableSubscription(s) {
+      return !!(s && s.activeSubscription && s.activeSubscription.content);
+    }
+    function guideSubscriptionFirst() {
+      toast('第一步：请先在「订阅」导入并启用订阅，确认订阅已更新后再继续。', true);
+      goPage('subscriptions');
+      return false;
+    }
+    function modeGuidance(mode) {
+      if (mode === 'system-tun') {
+        return '虚拟网卡模式会接管所有 App 流量；首次使用请先安装 TUN，DNS 由 QPJoy Tunnel 劫持到本地 1053，不依赖 Clash 的 53。';
+      }
+      if (mode === 'app-global') {
+        return '全局模式只影响当前 App：默认全部走代理，只有黑名单会被拒绝。';
+      }
+      return 'App 模式只影响当前 App；如果配置了白名单，则仅白名单域名走代理，其他海外域名会被拒绝。';
+    }
+    function preflightInstallTun() {
+      if (!hasUsableSubscription(status())) return guideSubscriptionFirst();
+      toast('第二步：安装 TUN 后再切换到「虚拟网卡」；虚拟网卡模式会对所有 App 生效。', false, 5200);
+      return true;
+    }
+    function preflightModeChange(mode) {
+      var s = status();
+      if (!hasUsableSubscription(s)) return guideSubscriptionFirst();
+      if (mode === 'system-tun' && !(s && s.tunInstalled)) {
+        toast('第二步：切换虚拟网卡前请先点击「安装 TUN」；安装后再切换，所有 App 都会生效。', true);
+        goPage('proxy');
+        return false;
+      }
+      toast(modeGuidance(mode), false, 5200);
+      return true;
+    }
+    function preflightStart() {
+      var s = status();
+      if (!hasUsableSubscription(s)) return guideSubscriptionFirst();
+      if (s && s.mode === 'system-tun' && !s.tunInstalled) {
+        toast('第二步：当前是虚拟网卡模式，请先在「代理」页安装 TUN 后再启动。', true);
+        goPage('proxy');
+        return false;
+      }
+      return true;
+    }
     function presetActive(preset) {
       return !!((snapshot && snapshot.rules) || []).some(function (rule) { return rule.source === 'preset:' + preset; });
     }
@@ -382,16 +452,16 @@ export function adminHtml(): string {
         '</div></section>' +
         '<section class="section-surface"><div class="toolbar-row">' +
         '<input id="mixedPort" class="field field-short" type="number" placeholder="本地代理端口" value="' + escapeHtml(s ? s.ports.mixed : 23458) + '">' +
-        '<input id="dnsPort" class="field field-short" type="number" placeholder="DNS 端口" value="' + escapeHtml(s ? s.ports.dns : 23459) + '">' +
+        '<input id="dnsPort" class="field field-short" type="number" placeholder="DNS 端口" value="' + escapeHtml(s ? s.ports.dns : 1053) + '">' +
         '<button id="savePorts" class="btn">${icon('save')}<span>保存端口</span></button>' +
-        statusChip('推荐 23458 / 23459，避开 Clash 7890', false) +
+        statusChip('推荐 23458 / 1053，DNS 由 TUN 劫持，不占用系统 53', false) +
         '</div></section>' +
         '<div class="status-strip">' +
         metric('当前模式', modeLabels[s ? s.mode : 'app-rule'] || 'App 模式') +
         metric('引擎目标', engine ? engine.target : '检测中') +
         metric('引擎来源', engineSourceLabel(engine ? engine.source : 'missing')) +
         metric('本地代理', ':' + (s ? s.ports.mixed : 23458)) +
-        metric('DNS', ':' + (s ? s.ports.dns : 23459)) +
+        metric('DNS', ':' + (s ? s.ports.dns : 1053)) +
         metric('控制接口', ':' + (s ? s.ports.controller : 23457)) +
         '</div>' +
         (runtimeHealthChip(s) ? '<section class="section-surface"><div class="toolbar-row">' + runtimeHealthChip(s) + '</div></section>' : '');
@@ -524,9 +594,16 @@ export function adminHtml(): string {
       var modeSelect = byId('modeSelect');
       if (modeSelect && status()) modeSelect.value = status().mode;
       var saveMode = byId('saveMode');
-      if (saveMode) saveMode.onclick = function () { run(function () { return api('/api/mode', { method: 'POST', body: JSON.stringify({ mode: byId('modeSelect').value }) }); }, '模式已切换'); };
+      if (saveMode) saveMode.onclick = function () {
+        var mode = byId('modeSelect').value;
+        if (!preflightModeChange(mode)) return;
+        run(function () { return api('/api/mode', { method: 'POST', body: JSON.stringify({ mode: mode }) }); }, '模式已切换：' + (modeLabels[mode] || mode));
+      };
       var installTun = byId('installTun');
-      if (installTun) installTun.onclick = function () { run(function () { return api('/api/tun/install', { method: 'POST' }); }, 'TUN 已安装'); };
+      if (installTun) installTun.onclick = function () {
+        if (!preflightInstallTun()) return;
+        run(function () { return api('/api/tun/install', { method: 'POST' }); }, 'TUN 已安装。下一步切换到「虚拟网卡」；该模式会对所有 App 生效。');
+      };
       var uninstallTun = byId('uninstallTun');
       if (uninstallTun) uninstallTun.onclick = function () { run(function () { return api('/api/tun/uninstall', { method: 'POST' }); }, 'TUN 已卸载'); };
       var saveCorePath = byId('saveCorePath');
@@ -567,18 +644,10 @@ export function adminHtml(): string {
       var running = status() && status().running;
       if (!running) {
         var s = status();
-        if (!s || !s.activeSubscription) {
-          toast('还没有启用订阅。请先在「订阅」里新建并启用一个订阅，然后再启动隧道。', true);
-          currentPage = 'subscriptions';
-          window.localStorage.setItem('qpjoyTunnelAdminPage', currentPage);
-          renderPage();
-          return;
-        }
+        if (!preflightStart()) return;
         if (s.engine && !s.engine.available) {
           toast('当前安装包缺少适配 ' + s.engine.target + ' 的隧道引擎。请安装对应平台的引擎包，或在「代理」页填写本机 mihomo 路径。', true);
-          currentPage = 'proxy';
-          window.localStorage.setItem('qpjoyTunnelAdminPage', currentPage);
-          renderPage();
+          goPage('proxy');
           return;
         }
       }

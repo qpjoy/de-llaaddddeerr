@@ -36,7 +36,7 @@ It supports:
 - Faster completion receives a higher score.
 - After the score time cap is exceeded, completed rounds receive the same minimum score.
 - Local scores are stored in SQLite.
-- If `QPJOY_GAME_POSTGRES_URL` or `DATABASE_URL` is available, unsynced local scores can be mirrored to Postgres and ranked.
+- If the marketplace host is logged in and a marketplace server is configured, unsynced local scores are mirrored to the server high-score API and ranked from Postgres.
 - Player identity prefers marketplace user context. Without it, the game asks for a display name and appends a four-digit suffix.
 
 ## Local Play
@@ -47,13 +47,13 @@ npm install
 npm start
 ```
 
-Optional direct Postgres sync:
+Optional server sync for standalone play:
 
 ```bash
-QPJOY_GAME_POSTGRES_URL="postgres://user:pass@localhost:5432/qpjoy_game" npm start
+QPJOY_GAME_SERVER="http://127.0.0.1:8080" QPJOY_GAME_ACCESS_TOKEN="..." npm start
 ```
 
-The direct Postgres path is a branch-local bridge for the standalone game. A future marketplace/server integration can replace it with an API while preserving the local SQLite score contract.
+Marketplace-hosted play reads the logged-in user session from marketplace SQLite and syncs through `electron-server` automatically.
 
 ## Branch Boundary
 

@@ -1,10 +1,25 @@
 import type { MarketplaceDB } from '@qpjoy/marketplace-db';
+import semver from 'semver';
 
 import { RemoteClient, RemoteApiError, type VersionManifest } from './RemoteClient';
 
 const META_RELEASE = 'marketplace.release';
 const META_ETAG = 'marketplace.etag';
 const META_MIGRATIONS_HEAD = 'marketplace.migrationsHead';
+
+function normalizedVersion(version: string | null | undefined): string | null {
+  if (!version) return null;
+  const valid = semver.valid(version);
+  if (valid) return valid;
+  return semver.coerce(version)?.version ?? null;
+}
+
+function compareVersions(a: string, b: string): number {
+  const aa = normalizedVersion(a);
+  const bb = normalizedVersion(b);
+  if (aa && bb) return semver.compare(aa, bb);
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+}
 
 export interface RemoteSyncJobOptions {
   db: MarketplaceDB;
@@ -108,26 +123,49 @@ export class RemoteSyncJob {
       const { index, etag } = await client.getMarketplaceIndex(prevEtag);
 
       if (index) {
+        const fetchedAt = new Date().toISOString();
         db.bulkUpsertEntries(
-          index.entries.map((e) => ({
-            id: e.id,
-            npm: e.npm,
-            name: e.name,
-            description: e.description,
-            latestVersion: e.latestVersion,
-            manifestUrl: e.manifestUrl,
-            tarballUrl: e.tarballUrl,
-            homepage: e.homepage,
-            author: e.author,
-            category: e.category,
-            verified: e.verified,
-            bootstrap: e.bootstrap,
-            visibility: e.visibility,
-            specVersion: e.specVersion,
-            metadata: e.metadata,
-            source: 'remote',
-            fetchedAt: new Date().toISOString()
-          }))
+          index.entries.map((e) => {
+            const existing = db.getEntry(e.id);
+            const installed = db.getInstalled(e.id);
+            let latestVersion = e.latestVersion;
+            let manifestUrl = e.manifestUrl;
+            let tarballUrl = e.tarballUrl;
+            let source: 'remote' | 'seed' = 'remote';
+
+            if (existing && compareVersions(existing.latestVersion, latestVersion) > 0) {
+              latestVersion = existing.latestVersion;
+              manifestUrl = existing.manifestUrl;
+              tarballUrl = existing.tarballUrl;
+              source = existing.source === 'seed' ? 'seed' : 'remote';
+            }
+            if (installed && compareVersions(installed.version, latestVersion) > 0) {
+              latestVersion = installed.version;
+              manifestUrl = existing?.manifestUrl ?? null;
+              tarballUrl = existing?.tarballUrl ?? null;
+              source = existing?.source === 'remote' ? 'remote' : 'seed';
+            }
+
+            return {
+              id: e.id,
+              npm: e.npm,
+              name: e.name,
+              description: e.description,
+              latestVersion,
+              manifestUrl,
+              tarballUrl,
+              homepage: e.homepage,
+              author: e.author,
+              category: e.category,
+              verified: e.verified,
+              bootstrap: e.bootstrap,
+              visibility: e.visibility,
+              specVersion: e.specVersion,
+              metadata: e.metadata,
+              source,
+              fetchedAt
+            };
+          })
         );
         result.entriesSynced = index.entries.length;
         if (etag) db.setMeta(META_ETAG, etag);

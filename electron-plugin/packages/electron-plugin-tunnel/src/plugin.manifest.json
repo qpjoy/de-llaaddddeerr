@@ -1,22 +1,30 @@
 {
   "id": "qpjoy.electron-tunnel",
   "name": "QPJoy Tunnel",
-  "version": "0.1.14",
+  "version": "0.1.16",
   "author": "qpjoy",
   "description": "Mihomo-based tunnel runtime with TUN / system-proxy / rule modes. Provides outbound networking for other plugins.",
-  "engines": { "electronMarket": ">=0.2.0", "electron": ">=28" },
+  "engines": {
+    "electronMarket": ">=0.2.0",
+    "electron": ">=28"
+  },
   "permissions": [
     "fs:userData",
     "net:listen:23456",
     "net:listen:23457",
     "net:listen:23458",
-    "net:listen:23459",
+    "net:listen:1053",
     "system:proxy",
     "system:exec:mihomo",
     "ui:adminPanel"
   ],
-  "activationEvents": ["onStartup"],
+  "activationEvents": [
+    "onStartup"
+  ],
   "contributes": {
-    "adminPanel": { "url": "http://127.0.0.1:23456", "label": "Tunnel" }
+    "adminPanel": {
+      "url": "http://127.0.0.1:23456",
+      "label": "Tunnel"
+    }
   }
 }

@@ -1,14 +1,16 @@
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
+import { gunzip } from 'zlib';
 import { readFile, rm, mkdir, cp, rename, writeFile, symlink, lstat, readdir } from 'fs/promises';
 import { createWriteStream, existsSync, readFileSync } from 'fs';
-import { join, isAbsolute, resolve } from 'path';
+import { join, isAbsolute, resolve, sep } from 'path';
 import semver from 'semver';
 
 import type { PluginManifest } from '@qpjoy/electron-plugin-sdk';
 import type { PluginRegistry } from '../registry/PluginRegistry';
 
 const execFileAsync = promisify(execFile);
+const gunzipAsync = promisify(gunzip);
 let cachedHostVersion: string | null = null;
 
 function hostMarketVersion(): string {
@@ -59,10 +61,11 @@ function assertEngineCompatibility(manifest: PluginManifest): void {
  * any sh quoting concerns.
  */
 async function exec(file: string, args: string[], opts: { cwd: string; env?: NodeJS.ProcessEnv }): Promise<void> {
+  const env = mergedProcessEnv(opts.env);
   if (process.platform !== 'win32') {
     await execFileAsync(file, args, {
       ...opts,
-      env: opts.env ? { ...process.env, ...opts.env } : process.env
+      env
     });
     return;
   }
@@ -74,7 +77,7 @@ async function exec(file: string, args: string[], opts: { cwd: string; env?: Nod
     );
     const child = spawn(file, quoted, {
       cwd: opts.cwd,
-      env: opts.env ? { ...process.env, ...opts.env } : process.env,
+      env,
       stdio: 'pipe',
       shell: true,
       windowsHide: true
@@ -93,6 +96,16 @@ async function exec(file: string, args: string[], opts: { cwd: string; env?: Nod
       }
     });
   });
+}
+
+function mergedProcessEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = { ...process.env, ...extra };
+  if (process.platform === 'darwin') {
+    const current = env.PATH || '';
+    const commonPaths = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'];
+    env.PATH = [...commonPaths, current].filter(Boolean).join(':');
+  }
+  return env;
 }
 
 /**
@@ -274,6 +287,55 @@ function electronNativeBuildEnv(): NodeJS.ProcessEnv | null {
   };
 }
 
+function tarString(block: Buffer, start: number, length: number): string {
+  const end = block.indexOf(0, start);
+  const sliceEnd = end >= start && end < start + length ? end : start + length;
+  return block.toString('utf8', start, sliceEnd).trim();
+}
+
+function tarOctal(block: Buffer, start: number, length: number): number {
+  const raw = tarString(block, start, length).replace(/\0.*$/, '').trim();
+  return raw ? parseInt(raw, 8) || 0 : 0;
+}
+
+function safePackagePath(root: string, entryName: string): string | null {
+  const normalized = entryName.replace(/\\/g, '/').replace(/^package\/?/, '');
+  if (!normalized || normalized.startsWith('/') || normalized.includes('../')) {
+    return null;
+  }
+  const resolved = resolve(root, normalized);
+  const rootResolved = resolve(root);
+  return resolved === rootResolved || resolved.startsWith(rootResolved + sep) ? resolved : null;
+}
+
+async function unpackNpmTarball(tgzPath: string, targetDir: string): Promise<void> {
+  await mkdir(targetDir, { recursive: true });
+  const data = await gunzipAsync(await readFile(tgzPath));
+  let offset = 0;
+
+  while (offset + 512 <= data.length) {
+    const header = data.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) break;
+
+    const name = tarString(header, 0, 100);
+    const prefix = tarString(header, 345, 155);
+    const fullName = prefix ? `${prefix}/${name}` : name;
+    const size = tarOctal(header, 124, 12);
+    const type = header.toString('utf8', 156, 157);
+    offset += 512;
+
+    const dest = safePackagePath(targetDir, fullName);
+    if (dest && (type === '0' || type === '\0' || type === '')) {
+      await mkdir(resolve(dest, '..'), { recursive: true });
+      await writeFile(dest, data.subarray(offset, offset + size));
+    } else if (dest && type === '5') {
+      await mkdir(dest, { recursive: true });
+    }
+
+    offset += Math.ceil(size / 512) * 512;
+  }
+}
+
 /**
  * Filesystem layer: install / uninstall npm packages into
  * `userData/plugins/<id>@<version>/` and read their manifests.
@@ -339,6 +401,10 @@ export class PluginStore {
     return this.nativeElectronPackages(npm).length > 0
       ? electronNativeBuildEnv() ?? undefined
       : undefined;
+  }
+
+  private canInstallTarballWithoutPackageManager(allowScripts: boolean): boolean {
+    return process.platform === 'darwin' && !allowScripts;
   }
 
   private async downloadTarball(url: string, dest: string, id: string): Promise<void> {
@@ -456,10 +522,18 @@ export class PluginStore {
             await this.downloadTarball(input.source.tarballUrl, tgz, input.id);
             this.setProgress(input.id, {
               stage: 'installing',
-              message: allowScripts ? '正在安装并准备原生依赖' : '正在安装依赖',
+              message: this.canInstallTarballWithoutPackageManager(allowScripts)
+                ? '正在安装本地包'
+                : allowScripts
+                ? '正在安装并准备原生依赖'
+                : '正在安装依赖',
               error: null
             });
-            await exec(pm, installArgs(tgz, allowScripts, pm), { cwd: stagingDir, env: installEnv });
+            if (this.canInstallTarballWithoutPackageManager(allowScripts)) {
+              await unpackNpmTarball(tgz, join(stagingDir, 'node_modules', input.npm));
+            } else {
+              await exec(pm, installArgs(tgz, allowScripts, pm), { cwd: stagingDir, env: installEnv });
+            }
             break;
           }
           this.setProgress(input.id, {
@@ -483,11 +557,15 @@ export class PluginStore {
             message: allowScripts ? '正在安装并准备原生依赖' : '正在安装本地包',
             error: null
           });
-          await exec(
-            pm,
-            installArgs(tgz, allowScripts, pm),
-            { cwd: stagingDir, env: installEnv }
-          );
+          if (this.canInstallTarballWithoutPackageManager(allowScripts)) {
+            await unpackNpmTarball(tgz, join(stagingDir, 'node_modules', input.npm));
+          } else {
+            await exec(
+              pm,
+              installArgs(tgz, allowScripts, pm),
+              { cwd: stagingDir, env: installEnv }
+            );
+          }
           break;
         }
 

@@ -15,6 +15,8 @@ import type {
   AuditStore,
   CodesStore,
   EntitlementsStore,
+  GameHighScoreRow,
+  GameScoresStore,
   RefreshStore,
   Storage,
   UsersStore
@@ -298,6 +300,108 @@ const audit: AuditStore = {
   }
 };
 
+const gameScores: GameScoresStore = {
+  async submit(input) {
+    const { rows } = await getPool().query(
+      `INSERT INTO game_high_scores (
+         game_id,
+         plugin_id,
+         mode,
+         user_id,
+         player_name,
+         best_score,
+         best_elapsed_seconds,
+         rounds,
+         metadata,
+         completed_at,
+         updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $9, now())
+       ON CONFLICT (game_id, mode, user_id) DO UPDATE SET
+         plugin_id = excluded.plugin_id,
+         player_name = excluded.player_name,
+         rounds = game_high_scores.rounds + 1,
+         best_score = CASE
+           WHEN excluded.best_score > game_high_scores.best_score
+             OR (
+               excluded.best_score = game_high_scores.best_score
+               AND excluded.best_elapsed_seconds < game_high_scores.best_elapsed_seconds
+             )
+           THEN excluded.best_score
+           ELSE game_high_scores.best_score
+         END,
+         best_elapsed_seconds = CASE
+           WHEN excluded.best_score > game_high_scores.best_score
+             OR (
+               excluded.best_score = game_high_scores.best_score
+               AND excluded.best_elapsed_seconds < game_high_scores.best_elapsed_seconds
+             )
+           THEN excluded.best_elapsed_seconds
+           ELSE game_high_scores.best_elapsed_seconds
+         END,
+         completed_at = CASE
+           WHEN excluded.best_score > game_high_scores.best_score
+             OR (
+               excluded.best_score = game_high_scores.best_score
+               AND excluded.best_elapsed_seconds < game_high_scores.best_elapsed_seconds
+             )
+           THEN excluded.completed_at
+           ELSE game_high_scores.completed_at
+         END,
+         metadata = CASE
+           WHEN excluded.best_score > game_high_scores.best_score
+             OR (
+               excluded.best_score = game_high_scores.best_score
+               AND excluded.best_elapsed_seconds < game_high_scores.best_elapsed_seconds
+             )
+           THEN excluded.metadata
+           ELSE game_high_scores.metadata
+         END,
+         updated_at = now()
+       RETURNING *`,
+      [
+        input.gameId,
+        input.pluginId,
+        input.mode,
+        input.userId,
+        input.playerName,
+        input.score,
+        input.elapsedSeconds,
+        input.metadata ?? null,
+        input.completedAt
+      ]
+    );
+    return rowToGameScore(rows[0]);
+  },
+  async leaderboard(opts) {
+    const limit = Math.min(Math.max(1, Math.floor(opts.limit ?? 20)), 100);
+    const { rows } = await getPool().query(
+      `SELECT *
+       FROM game_high_scores
+       WHERE game_id = $1 AND mode = $2
+       ORDER BY best_score DESC, best_elapsed_seconds ASC, completed_at ASC
+       LIMIT $3`,
+      [opts.gameId, opts.mode, limit]
+    );
+    return rows.map((row, index) => ({ ...rowToGameScore(row), rank: index + 1 }));
+  }
+};
+
+function rowToGameScore(r: Record<string, unknown>): GameHighScoreRow {
+  return {
+    userId: String(r.user_id),
+    playerName: String(r.player_name),
+    gameId: String(r.game_id),
+    pluginId: String(r.plugin_id),
+    mode: String(r.mode),
+    bestScore: Number(r.best_score),
+    bestElapsedSeconds: Number(r.best_elapsed_seconds),
+    rounds: Number(r.rounds),
+    completedAt: new Date(String(r.completed_at)).toISOString(),
+    updatedAt: new Date(String(r.updated_at)).toISOString(),
+    metadata: (r.metadata as Record<string, unknown> | null) ?? null
+  };
+}
+
 function rowToAudit(r: Record<string, unknown>): AuditEntry {
   return {
     id: Number(r.id),
@@ -317,6 +421,7 @@ export const pgStorage: Storage = {
   entitlements,
   codes,
   audit,
+  gameScores,
   backend: 'postgres',
   async close() {
     await closePg();

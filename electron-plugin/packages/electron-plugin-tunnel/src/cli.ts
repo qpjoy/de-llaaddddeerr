@@ -29,7 +29,7 @@ const tunnel = createElectronTunnel(
     adminPort: 23456,
     controllerPort: 23457,
     mixedPort: 23458,
-    dnsPort: 23459
+    dnsPort: 1053
   }
 )
 

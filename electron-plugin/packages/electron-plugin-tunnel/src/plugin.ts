@@ -52,7 +52,7 @@ const tunnelPlugin = {
         adminPort: settings.adminPort ?? 23456,
         controllerPort: settings.controllerPort ?? 23457,
         mixedPort: settings.mixedPort ?? 23458,
-        dnsPort: settings.dnsPort ?? 23459,
+        dnsPort: settings.dnsPort ?? 1053,
         bundledEngineDir: settings.bundledEngineDir
       }
     );

@@ -144,6 +144,7 @@ export function renderRuntimeConfig(input: RenderRuntimeConfigInput): RenderedRu
 
   config['mixed-port'] = input.settings.ports.mixed;
   config['allow-lan'] = false;
+  config.ipv6 = false;
   config.mode = 'rule';
   config['log-level'] = 'info';
   config['external-controller'] = `127.0.0.1:${input.settings.ports.controller}`;

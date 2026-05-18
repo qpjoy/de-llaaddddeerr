@@ -55,4 +55,4 @@ The admin UI uses `metadata.kind = "game"` to render the entry in the 游戏 tab
 
 Games should prefer the host-provided marketplace SQLite facade at `ctx.host.marketplaceDb`. That keeps game behavior queryable with marketplace state, for example joining `electron_game_scores` with `installed_plugins`, `marketplace_entries`, and `plugin_logs`.
 
-Standalone development may fall back to a private SQLite file, but the market runtime path should write to shared tables instead of creating a separate product database such as Postgres.
+Standalone development may fall back to a private SQLite file. Server-wide rankings should sync through `electron-server` APIs using the marketplace login session; when `electron-server` runs with `DATABASE_URL`, that high-score API is backed by Postgres.

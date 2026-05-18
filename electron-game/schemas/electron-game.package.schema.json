@@ -44,10 +44,10 @@
       "type": "object",
       "properties": {
         "storage": {
-          "enum": ["sqlite"]
+          "enum": ["sqlite", "marketplace-sqlite"]
         },
         "sync": {
-          "enum": ["postgres-optional"]
+          "enum": ["local", "postgres-optional", "remote-postgres"]
         }
       },
       "additionalProperties": false

@@ -16,6 +16,7 @@ import { migrationRoutes } from './api/v1/migrations.js';
 import { authRoutes } from './api/v1/auth.js';
 import { adminRoutes } from './api/v1/admin.js';
 import { downloadRoutes } from './api/v1/download.js';
+import { gameRoutes } from './api/v1/games.js';
 import { spaRoutes } from './api/spa.js';
 import { initStorage } from './data/index.js';
 import { initScheduler } from './jobs/scheduler.js';
@@ -57,6 +58,7 @@ await app.register(pluginRoutes);
 await app.register(migrationRoutes);
 await app.register(authRoutes);
 await app.register(adminRoutes);
+await app.register(gameRoutes);
 await app.register(downloadRoutes);
 await app.register(spaRoutes);
 

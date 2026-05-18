@@ -8,7 +8,7 @@ const selectedMode = ref<RuntimeMode>('app-rule');
 const corePath = ref('');
 const localPorts = ref({
   mixed: 23458,
-  dns: 23459
+  dns: 1053
 });
 
 export const modeOptions = [
@@ -22,8 +22,8 @@ export const ruleKindOptions = [
   { label: '黑名单', value: 'block' }
 ] as const;
 
-function toast(message: string, color = 'positive'): void {
-  Notify.create({ message, color, timeout: 2200, position: 'top-right' });
+function toast(message: string, color = 'positive', timeout = 2200): void {
+  Notify.create({ message, color, timeout, position: 'top-right' });
 }
 
 function getTunnelBridge(): TunnelBridge {
@@ -31,6 +31,84 @@ function getTunnelBridge(): TunnelBridge {
     throw new Error('Electron 隧道接口未加载，请重启开发服务后再试。');
   }
   return window.tunnel;
+}
+
+function hostPlatform(): string {
+  if (snapshot.value?.status.platform) return snapshot.value.status.platform;
+  const ua = navigator.userAgent || '';
+  if (/Windows/i.test(ua)) return 'win32';
+  if (/Macintosh|Mac OS X/i.test(ua)) return 'darwin';
+  if (/Linux/i.test(ua)) return 'linux';
+  return 'unknown';
+}
+
+function tunPermissionMessage(): string {
+  const platform = hostPlatform();
+  if (platform === 'darwin') {
+    return '虚拟网卡模式需要 macOS 管理员授权。请在应用弹出的系统授权窗口中输入本机管理员账号密码；不要用 sudo 或全局管理员身份启动整个 App。';
+  }
+  if (platform === 'win32') {
+    return '虚拟网卡模式需要 Windows 管理员权限。应用会自动弹出 UAC/脚本授权窗口，请点击“是”。';
+  }
+  if (platform === 'linux') {
+    return '虚拟网卡模式需要系统授权。请确认 pkexec 授权窗口已通过。';
+  }
+  return '虚拟网卡模式需要系统授权；如果取消授权，外部应用流量不会被接管。';
+}
+
+function goRoute(path: string): void {
+  window.location.hash = `#${path}`;
+}
+
+function hasUsableSubscription(): boolean {
+  return Boolean(snapshot.value?.status.activeSubscription?.content);
+}
+
+function guideSubscriptionFirst(): boolean {
+  toast('第一步：请先在「订阅」导入并启用订阅，确认订阅已更新后再继续。', 'warning', 5200);
+  goRoute('/subscriptions');
+  return false;
+}
+
+function modeLabelFor(mode: RuntimeMode): string {
+  return modeOptions.find((item) => item.value === mode)?.label ?? mode;
+}
+
+function modeGuidance(mode: RuntimeMode): string {
+  if (mode === 'system-tun') {
+    return '虚拟网卡模式会接管所有 App 流量；首次使用请先安装 TUN，DNS 由 QPJoy Tunnel 劫持到本地 1053，不依赖 Clash 的 53。';
+  }
+  if (mode === 'app-global') {
+    return '全局模式只影响当前 App：默认全部走代理，只有黑名单会被拒绝。';
+  }
+  return 'App 模式只影响当前 App；如果配置了白名单，则仅白名单域名走代理，其他海外域名会被拒绝。';
+}
+
+function preflightInstallTun(): boolean {
+  if (!hasUsableSubscription()) return guideSubscriptionFirst();
+  toast('第二步：安装 TUN 后再切换到「虚拟网卡」；虚拟网卡模式会对所有 App 生效。', 'info', 5200);
+  return true;
+}
+
+function preflightModeChange(mode: RuntimeMode): boolean {
+  if (!hasUsableSubscription()) return guideSubscriptionFirst();
+  if (mode === 'system-tun' && !snapshot.value?.status.tunInstalled) {
+    toast('第二步：切换虚拟网卡前请先点击「安装 TUN」；安装后再切换，所有 App 都会生效。', 'warning', 5200);
+    goRoute('/proxy');
+    return false;
+  }
+  toast(modeGuidance(mode), 'info', 5200);
+  return true;
+}
+
+function preflightStart(): boolean {
+  if (!hasUsableSubscription()) return guideSubscriptionFirst();
+  if (snapshot.value?.status.mode === 'system-tun' && !snapshot.value.status.tunInstalled) {
+    toast('第二步：当前是虚拟网卡模式，请先在「代理」页安装 TUN 后再启动。', 'warning', 5200);
+    goRoute('/proxy');
+    return false;
+  }
+  return true;
 }
 
 function friendlyErrorMessage(error: unknown): string {
@@ -65,10 +143,10 @@ function friendlyErrorMessage(error: unknown): string {
     return '订阅拉取失败：当前网络无法连接订阅服务器。';
   }
   if (/no active subscription configured/i.test(message)) {
-    return '还没有启用订阅，请先创建并启用一个订阅。';
+    return '第一步：请先在「订阅」导入并启用订阅，确认订阅已更新后再继续。';
   }
   if (/active subscription has no downloaded content/i.test(message)) {
-    return '当前订阅还没有下载内容，请先更新订阅。';
+    return '第一步：当前订阅还没有下载内容，请先更新订阅后再继续。';
   }
   if (/mihomo 未运行|隧道未运行/i.test(message)) {
     return message;
@@ -82,8 +160,9 @@ function friendlyErrorMessage(error: unknown): string {
   if (/ERR_CONNECTION_CLOSED|连接被关闭/i.test(message)) {
     return '连接被关闭。App 模式下海外域名必须在白名单内；如果已添加白名单，请稍等隧道重载后再试。';
   }
-  if (/TUN mode requires administrator|administrator approval|User canceled|privilege helper/i.test(message)) {
-    return '虚拟网卡模式需要管理员授权；如果取消授权，Chrome 等外部应用流量不会被接管。';
+  if (/TUN mode requires administrator|administrator approval|User canceled|privilege helper|管理员授权|管理员权限|UAC|pkexec|osascript/i.test(message)) {
+    if (/macOS|Windows|pkexec|UAC/.test(message) && message.includes('管理员')) return message;
+    return tunPermissionMessage();
   }
   if (/Privileged (mihomo|tunnel engine) exited immediately/i.test(message)) {
     return `虚拟网卡启动后立即退出：${message.replace(/^Error invoking remote method '[^']+': Error:\s*/i, '')}`;
@@ -147,6 +226,7 @@ async function toggleCore(): Promise<void> {
     await run(() => window.tunnel.stop(), '隧道已停止');
     return;
   }
+  if (!preflightStart()) return;
   await run(() => window.tunnel.start(), '隧道已启动');
 }
 
@@ -169,6 +249,10 @@ export function useTunnel() {
     formatBytes,
     redactedUrl,
     relativeTime,
+    modeLabelFor,
+    preflightInstallTun,
+    preflightModeChange,
+    preflightStart,
     toggleCore
   };
 }

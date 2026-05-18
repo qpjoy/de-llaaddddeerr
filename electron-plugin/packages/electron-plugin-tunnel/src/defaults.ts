@@ -6,8 +6,10 @@ export const DEFAULT_PORTS: TunnelPorts = {
   admin: 23456,
   controller: 23457,
   mixed: 23458,
-  dns: 23459
+  dns: 1053
 };
+
+export const LEGACY_DEFAULT_DNS_PORT = 23459;
 
 export const DEFAULT_MODE: RuntimeMode = 'app-rule';
 

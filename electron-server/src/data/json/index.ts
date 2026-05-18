@@ -21,6 +21,8 @@ import type {
   AuditStore,
   CodesStore,
   EntitlementsStore,
+  GameHighScoreRow,
+  GameScoresStore,
   RefreshStore,
   Storage,
   UsersStore
@@ -35,6 +37,7 @@ interface RefreshFile { tokens: RefreshTokenRow[]; }
 interface EntitlementsFile { entitlements: EntitlementRow[]; }
 interface CodesFile { codes: VerificationCodeRow[]; }
 interface AuditFile { nextId: number; entries: AuditEntry[]; }
+interface GameScoresFile { scores: GameHighScoreRow[]; }
 
 function readJson<T>(name: string, fallback: T): T {
   const path = join(ROOT, name);
@@ -273,12 +276,79 @@ const audit: AuditStore = {
   }
 };
 
+const gameScores: GameScoresStore = {
+  async submit(input) {
+    const file = readJson<GameScoresFile>('game-scores.json', { scores: [] });
+    const now = new Date().toISOString();
+    const completedAt = input.completedAt || now;
+    const score = Math.max(0, Math.floor(input.score));
+    const elapsedSeconds = Math.max(0, Math.floor(input.elapsedSeconds));
+    const existing = file.scores.find(
+      (row) =>
+        row.userId === input.userId &&
+        row.gameId === input.gameId &&
+        row.mode === input.mode
+    );
+
+    if (existing) {
+      const isBetter =
+        score > existing.bestScore ||
+        (score === existing.bestScore && elapsedSeconds < existing.bestElapsedSeconds);
+      existing.playerName = input.playerName;
+      existing.pluginId = input.pluginId;
+      existing.rounds += 1;
+      existing.updatedAt = now;
+      if (isBetter) {
+        existing.bestScore = score;
+        existing.bestElapsedSeconds = elapsedSeconds;
+        existing.completedAt = completedAt;
+        existing.metadata = input.metadata ?? null;
+      }
+      writeJson('game-scores.json', file);
+      return existing;
+    }
+
+    const row: GameHighScoreRow = {
+      userId: input.userId,
+      playerName: input.playerName,
+      gameId: input.gameId,
+      pluginId: input.pluginId,
+      mode: input.mode,
+      bestScore: score,
+      bestElapsedSeconds: elapsedSeconds,
+      rounds: 1,
+      completedAt,
+      updatedAt: now,
+      metadata: input.metadata ?? null
+    };
+    file.scores.push(row);
+    writeJson('game-scores.json', file);
+    return row;
+  },
+  async leaderboard(opts) {
+    const limit = Math.min(Math.max(1, Math.floor(opts.limit ?? 20)), 100);
+    return readJson<GameScoresFile>('game-scores.json', { scores: [] })
+      .scores
+      .filter((row) => row.gameId === opts.gameId && row.mode === opts.mode)
+      .sort((a, b) => {
+        if (b.bestScore !== a.bestScore) return b.bestScore - a.bestScore;
+        if (a.bestElapsedSeconds !== b.bestElapsedSeconds) {
+          return a.bestElapsedSeconds - b.bestElapsedSeconds;
+        }
+        return a.completedAt.localeCompare(b.completedAt);
+      })
+      .slice(0, limit)
+      .map((row, index) => ({ ...row, rank: index + 1 }));
+  }
+};
+
 export const jsonStorage: Storage = {
   users,
   refresh,
   entitlements,
   codes,
   audit,
+  gameScores,
   backend: 'json',
   async close() {
     // nothing to close

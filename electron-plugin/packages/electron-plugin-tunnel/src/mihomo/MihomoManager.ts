@@ -68,7 +68,33 @@ function needsElevatedTun(settings: RuntimeSettings): boolean {
 }
 
 function tunAdministratorMessage(): string {
-  return '虚拟网卡启动失败：Windows 拒绝配置 TUN。请确认 UAC 授权窗口已点击“是”，或切回 App 模式。';
+  if (process.platform === 'darwin') {
+    return '虚拟网卡启动失败：macOS 需要管理员授权。请在应用弹出的系统授权窗口中输入本机管理员账号密码；不要用 sudo 或全局管理员身份启动整个 App。取消授权时请切回 App 模式。';
+  }
+  if (process.platform === 'win32') {
+    return '虚拟网卡启动失败：Windows 拒绝配置 TUN。请确认自动弹出的 UAC/脚本授权窗口已点击“是”，或切回 App 模式。';
+  }
+  return '虚拟网卡启动失败：当前系统需要通过 pkexec 获取管理员授权。请确认授权窗口已通过，或切回 App 模式。';
+}
+
+function tunApprovalRequiredMessage(): string {
+  if (process.platform === 'darwin') {
+    return 'macOS 虚拟网卡模式需要管理员授权。请在应用弹出的系统授权窗口中输入本机管理员账号密码。';
+  }
+  if (process.platform === 'win32') {
+    return 'Windows 虚拟网卡模式需要管理员授权。应用会自动弹出 UAC/脚本授权窗口，请点击“是”。';
+  }
+  return '虚拟网卡模式需要管理员授权。请确认 pkexec 授权窗口已通过。';
+}
+
+function missingPrivilegeHelperMessage(): string {
+  if (process.platform === 'darwin') {
+    return 'macOS 缺少 /usr/bin/osascript，无法在应用内请求管理员授权。';
+  }
+  if (process.platform === 'linux') {
+    return '当前系统缺少 pkexec，无法请求虚拟网卡所需的管理员授权。';
+  }
+  return 'TUN mode requires administrator privileges, but no supported privilege helper was found.';
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -202,6 +228,7 @@ export class MihomoManager extends EventEmitter {
     const corePath = engine.customPath ?? engine.installedPath ?? engine.bundledPath;
     const running = this.isRunning();
     return {
+      platform: process.platform,
       running,
       pid: running ? this.child?.pid ?? this.elevatedPid : null,
       mode: settings.mode,
@@ -659,7 +686,7 @@ export class MihomoManager extends EventEmitter {
         };
 
     if (!existsSync(launcher.command)) {
-      throw new Error('TUN mode requires administrator privileges, but no supported privilege helper was found.');
+      throw new Error(missingPrivilegeHelperMessage());
     }
 
     return new Promise((resolve, reject) => {
@@ -680,7 +707,7 @@ export class MihomoManager extends EventEmitter {
           return;
         }
 
-        reject(new Error(stderr.trim() || stdout.trim() || 'TUN mode requires administrator approval.'));
+        reject(new Error(stderr.trim() || stdout.trim() || tunApprovalRequiredMessage()));
       });
     });
   }
@@ -714,7 +741,7 @@ export class MihomoManager extends EventEmitter {
           return;
         }
 
-        reject(new Error(stderr.trim() || stdout.trim() || 'TUN mode requires administrator approval.'));
+        reject(new Error(stderr.trim() || stdout.trim() || tunApprovalRequiredMessage()));
       });
     });
   }

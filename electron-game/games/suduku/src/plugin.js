@@ -46,7 +46,10 @@ module.exports = {
       marketplaceDb: ctx.host.marketplaceDb,
       userDataDir: ctx.userDataDir
     });
-    const syncService = new LocalScoreSync(database);
+    const syncService = new LocalScoreSync(database, {
+      marketplaceDb: ctx.host.marketplaceDb,
+      fetch: ctx.fetch
+    });
     const ipcMain = ctx.host.ipcMain;
     let gameWindow = null;
 
@@ -86,10 +89,7 @@ module.exports = {
     });
 
     ipcMain.handle("suduku:get-leaderboard", async (_event, mode) => {
-      return {
-        source: "marketplace-sqlite",
-        rows: await syncService.getRemoteLeaderboard(mode)
-      };
+      return syncService.getLeaderboard(mode);
     });
 
     ipcMain.handle("suduku:sync-now", async () => {

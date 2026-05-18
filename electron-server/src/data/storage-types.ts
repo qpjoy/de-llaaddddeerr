@@ -107,6 +107,43 @@ export interface AuditStore {
 }
 
 /* ────────────────────────────────────────────────────────────────────── */
+/* Game high scores                                                       */
+/* ────────────────────────────────────────────────────────────────────── */
+
+export interface GameHighScoreRow {
+  userId: string;
+  playerName: string;
+  gameId: string;
+  pluginId: string;
+  mode: string;
+  bestScore: number;
+  bestElapsedSeconds: number;
+  rounds: number;
+  completedAt: string;
+  updatedAt: string;
+  metadata: Record<string, unknown> | null;
+}
+
+export interface GameScoresStore {
+  submit(input: {
+    userId: string;
+    playerName: string;
+    gameId: string;
+    pluginId: string;
+    mode: string;
+    score: number;
+    elapsedSeconds: number;
+    completedAt: string;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<GameHighScoreRow>;
+  leaderboard(opts: {
+    gameId: string;
+    mode: string;
+    limit?: number;
+  }): Promise<Array<GameHighScoreRow & { rank: number }>>;
+}
+
+/* ────────────────────────────────────────────────────────────────────── */
 /* Bundle                                                                 */
 /* ────────────────────────────────────────────────────────────────────── */
 
@@ -116,6 +153,7 @@ export interface Storage {
   entitlements: EntitlementsStore;
   codes: CodesStore;
   audit: AuditStore;
+  gameScores: GameScoresStore;
   backend: 'json' | 'postgres';
   /** Best-effort close; harmless when called multiple times. */
   close(): Promise<void>;

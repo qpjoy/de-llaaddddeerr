@@ -11,6 +11,10 @@ const {
 
 const GAME_ID = "suduku";
 const PLUGIN_ID = "qpjoy.electron-game-suduku";
+const SCORE_LIMITS = {
+  "7x7": { maxScore: 700 },
+  "9x9": { maxScore: 1200 }
+};
 
 function loadSqlite() {
   try {
@@ -30,6 +34,7 @@ class SudukuDatabase {
       : null;
 
     this.env = env;
+    this.marketplaceDb = marketplaceDb || null;
     this.pluginId = opts.pluginId || PLUGIN_ID;
     this.marketplaceEntryId = opts.marketplaceEntryId || PLUGIN_ID;
     this.ownsDb = !sharedDb;
@@ -207,7 +212,10 @@ class SudukuDatabase {
 
   getMarketPlayer() {
     const context = readLaunchContext(this.env);
-    const user = context.user;
+    const contextUser = context.user;
+    const user = contextUser && (contextUser.id || contextUser.displayName)
+      ? contextUser
+      : this.getMarketplaceSessionUser();
 
     if (!user || (!user.id && !user.displayName)) {
       return null;
@@ -220,11 +228,32 @@ class SudukuDatabase {
     };
   }
 
+  getMarketplaceSessionUser() {
+    if (!this.marketplaceDb || typeof this.marketplaceDb.getActiveSession !== "function") {
+      return null;
+    }
+
+    const session = this.marketplaceDb.getActiveSession();
+    const user = session && session.user && typeof session.user === "object"
+      ? session.user
+      : null;
+    if (!user) {
+      return null;
+    }
+
+    return {
+      id: user.id || user.username || user.email || user.displayName,
+      displayName: user.displayName || user.username || user.email || user.id,
+      source: "market"
+    };
+  }
+
   saveScore(scoreInput) {
     const player = this.getPlayer();
     if (!player) {
       throw new Error("Cannot save a score before player identity is set");
     }
+    const score = normalizeScoreInput(scoreInput);
 
     const row = {
       id: randomUUID(),
@@ -233,9 +262,9 @@ class SudukuDatabase {
       marketplaceEntryId: this.marketplaceEntryId,
       playerId: player.id,
       playerName: player.displayName,
-      mode: scoreInput.mode,
-      elapsedSeconds: Number(scoreInput.elapsedSeconds),
-      score: Number(scoreInput.score),
+      mode: score.mode,
+      elapsedSeconds: score.elapsedSeconds,
+      score: score.score,
       completedAt: new Date().toISOString(),
       metadataJson: scoreInput.metadata ? JSON.stringify(scoreInput.metadata) : null
     };
@@ -318,17 +347,44 @@ class SudukuDatabase {
   getLocalLeaderboard(mode = "9x9", limit = 20) {
     return this.db
       .prepare(`
+        with scoped as (
+          select
+            player_id,
+            player_name,
+            elapsed_seconds,
+            score,
+            completed_at
+          from electron_game_scores
+          where plugin_id = ? and game_id = ? and mode = ?
+        ),
+        ranked as (
+          select
+            player_id as playerId,
+            player_name as playerName,
+            score as bestScore,
+            elapsed_seconds as bestTime,
+            completed_at as bestCompletedAt,
+            count(*) over (partition by player_id, player_name) as rounds,
+            sum(score) over (partition by player_id, player_name) as totalScore,
+            max(completed_at) over (partition by player_id, player_name) as lastCompletedAt,
+            row_number() over (
+              partition by player_id, player_name
+              order by score desc, elapsed_seconds asc, completed_at asc
+            ) as scoreRank
+          from scoped
+        )
         select
-          player_id as playerId,
-          player_name as playerName,
-          count(*) as rounds,
-          sum(score) as totalScore,
-          min(elapsed_seconds) as bestTime,
-          max(completed_at) as lastCompletedAt
-        from electron_game_scores
-        where plugin_id = ? and game_id = ? and mode = ?
-        group by player_id, player_name
-        order by totalScore desc, bestTime asc, lastCompletedAt asc
+          playerId,
+          playerName,
+          rounds,
+          totalScore,
+          bestScore,
+          bestTime,
+          bestCompletedAt,
+          lastCompletedAt
+        from ranked
+        where scoreRank = 1
+        order by bestScore desc, bestTime asc, bestCompletedAt asc
         limit ?
       `)
       .all(this.pluginId, GAME_ID, mode, limit)
@@ -340,6 +396,27 @@ class SudukuDatabase {
       this.db.close();
     }
   }
+}
+
+function normalizeScoreInput(scoreInput) {
+  const input = scoreInput || {};
+  const mode = String(input.mode || "");
+  const limits = SCORE_LIMITS[mode];
+  if (!limits) {
+    throw new Error(`Unsupported Suduku mode: ${mode}`);
+  }
+
+  const elapsedSeconds = Math.max(0, Math.floor(Number(input.elapsedSeconds)));
+  const score = Math.max(0, Math.min(limits.maxScore, Math.floor(Number(input.score))));
+  if (!Number.isFinite(elapsedSeconds) || !Number.isFinite(score)) {
+    throw new Error("Score and elapsed time must be finite numbers");
+  }
+
+  return {
+    mode,
+    elapsedSeconds,
+    score
+  };
 }
 
 module.exports = {

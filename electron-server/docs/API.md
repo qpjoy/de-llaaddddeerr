@@ -137,6 +137,44 @@ Single migration body. The client applies it through
 mutate. (Re-publishing a different body under the same version is
 a server bug and will trip the client's checksum drift detection.)
 
+## `POST /api/v1/games/:gameId/scores`
+
+Authenticated. Submits one completed game score for the logged-in marketplace
+user. For `suduku`, the server keeps the best score per user and mode.
+
+```json
+{
+  "pluginId": "qpjoy.electron-game-suduku",
+  "mode": "9x9",
+  "score": 1180,
+  "elapsedSeconds": 18,
+  "completedAt": "2026-05-18T00:00:00.000Z"
+}
+```
+
+## `GET /api/v1/games/:gameId/leaderboard?mode=9x9&limit=20`
+
+Returns the server high-score ranking. With `DATABASE_URL` set, the backing
+store is Postgres.
+
+```json
+{
+  "source": "remote-postgres",
+  "gameId": "suduku",
+  "mode": "9x9",
+  "rows": [
+    {
+      "rank": 1,
+      "userId": "…",
+      "playerName": "Joy",
+      "bestScore": 1180,
+      "bestTime": 18,
+      "rounds": 3
+    }
+  ]
+}
+```
+
 ## Sync flow (client side)
 
 1. `GET /api/v1/version.json` (cheap, every interval).

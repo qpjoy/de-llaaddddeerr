@@ -14,7 +14,7 @@ const tunnel = createElectronTunnel({ app, ipcMain, session: session.defaultSess
   adminPort: 23456,
   controllerPort: 23457,
   mixedPort: 23458,
-  dnsPort: 23459
+  dnsPort: 1053
 });
 
 app.whenReady().then(async () => {
@@ -39,6 +39,10 @@ When the admin changes runtime settings, the SDK reapplies the Electron session
 proxy automatically. If the admin switches to virtual NIC mode and TUN is
 installed, the package can request the required system privilege from the host
 app process.
+
+The built-in DNS listener defaults to `:1053`. Virtual NIC mode uses
+Mihomo TUN DNS hijack for app DNS traffic, so the tunnel does not need to bind
+the system `:53` port or rely on another Clash instance.
 
 The package also installs a CLI:
 
