@@ -146,8 +146,10 @@ cmd_sync() {
   # would race against it on the data files. Use the scheduler's own
   # runNow() via the internal admin API or, if no admin token is handy,
   # fall through to the CLI which is fine for one-offs.
-  "${DC[@]}" exec market node dist/src/jobs/sync-npm.js \
-    || warn "if you get 'no such file', the image needs rebuilding: $0 redeploy"
+  if ! "${DC[@]}" exec market node dist/src/jobs/sync-npm.js; then
+    warn "sync failed. If you get 'no such file', the image needs rebuilding: $0 redeploy"
+    return 1
+  fi
   ok "sync complete"
 }
 

@@ -80,7 +80,12 @@ const NPM_PREFIX = process.env.NPM_PREFIX ?? 'electron-';
  * (`qpjoyPlugin` field present, `self !== true`); allowlisting only
  * controls *discovery*, not *legitimacy*.
  */
-const MARKETPLACE_ALLOWLIST = (process.env.MARKETPLACE_ALLOWLIST ?? '@qpjoy/electron-plugin-tunnel')
+const DEFAULT_MARKETPLACE_ALLOWLIST = [
+  '@qpjoy/electron-plugin-tunnel',
+  '@qpjoy/electron-plugin-notyet',
+  '@qpjoy/electron-game-suduku'
+];
+const MARKETPLACE_ALLOWLIST = (process.env.MARKETPLACE_ALLOWLIST ?? DEFAULT_MARKETPLACE_ALLOWLIST.join(','))
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
@@ -181,8 +186,26 @@ export async function runSync(opts: { dryRun?: boolean } = {}): Promise<SyncRepo
 /* ────────────────────────────────────────────────────────────────────── */
 
 async function discoverCandidates(): Promise<string[]> {
-  const candidates = new Set(await searchScope());
+  const candidates = new Set<string>();
+  try {
+    for (const name of await searchScope()) {
+      candidates.add(name);
+    }
+  } catch (err) {
+    // npm search is aggressively rate-limited. Treat it as discovery-only:
+    // sync can still refresh allowlisted packages and anything already in
+    // the server catalogue.
+    console.warn(
+      `[sync-npm] npm search unavailable, falling back to allowlist + existing catalogue: ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    );
+  }
+
   for (const name of existingMarketplacePackages()) {
+    candidates.add(name);
+  }
+  for (const name of await discoverAllowlistedPackages(candidates)) {
     candidates.add(name);
   }
   return Array.from(candidates).sort();
@@ -225,13 +248,19 @@ async function searchScope(): Promise<string[]> {
     from += size;
   }
 
+  return Array.from(seen).sort();
+}
+
+async function discoverAllowlistedPackages(existing: Set<string>): Promise<string[]> {
+  const seen = new Set<string>();
+
   // Allowlist fallback. Force-includes packages that either (a) don't match
   // the prefix at all (legacy names) or (b) match but haven't propagated
   // into npm's search index yet. We just probe the registry for the name —
   // if it 200s, the package exists and `syncOne` will decide whether it's
   // a legitimate plugin via its `qpjoyPlugin` field.
   for (const allowed of MARKETPLACE_ALLOWLIST) {
-    if (seen.has(allowed)) continue;
+    if (existing.has(allowed)) continue;
     try {
       const probeUrl = `${NPM_REGISTRY}/${encodeURIComponent(allowed).replace('%40', '@')}`;
       const res = await fetch(probeUrl, { method: 'HEAD' });

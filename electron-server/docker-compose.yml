@@ -45,7 +45,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       NPM_SCOPE: ${NPM_SCOPE:-@qpjoy}
       NPM_PREFIX: ${NPM_PREFIX:-electron-}
-      MARKETPLACE_ALLOWLIST: ${MARKETPLACE_ALLOWLIST:-@qpjoy/electron-plugin-tunnel}
+      MARKETPLACE_ALLOWLIST: ${MARKETPLACE_ALLOWLIST:-@qpjoy/electron-plugin-tunnel,@qpjoy/electron-plugin-notyet,@qpjoy/electron-game-suduku}
       REQUIRE_VERIFICATION: ${REQUIRE_VERIFICATION:-0}
       SPA_DIST: /app/spa-dist
       # In-container sync scheduler (no system cron needed).
