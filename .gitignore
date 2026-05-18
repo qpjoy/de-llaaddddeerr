@@ -4,6 +4,7 @@ config.env
 # 备份文件
 *.backup
 
+.DS_Store
 .pnpm-store/
 node_modules/
 dist/
