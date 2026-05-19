@@ -60,6 +60,17 @@ ensure_spa() {
   # the build boundary are unreliable). If not built, leave an empty dir so
   # the Dockerfile's COPY doesn't fail; the server logs a warning and
   # skips the /admin/* mount.
+  if [ ! -f "$ADMIN_UI_DIST/index.html" ] && command -v pnpm >/dev/null 2>&1; then
+    say "admin-ui dist missing; building electron-market admin-ui"
+    (
+      cd "$ROOT/../electron-market"
+      if [ ! -d node_modules ]; then
+        pnpm install --frozen-lockfile=false
+      fi
+      pnpm --filter @qpjoy/electron-market-admin-ui build
+    ) || warn "admin-ui build failed; server API will still deploy, but /admin/ will stay unavailable."
+  fi
+
   if [ -d "$ADMIN_UI_DIST" ]; then
     say "syncing admin-ui dist → data/spa-dist"
     rm -rf "$SPA_TARGET"
