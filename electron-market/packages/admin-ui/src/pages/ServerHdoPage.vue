@@ -47,6 +47,10 @@
       >
         <q-tab name="mesh" icon="hub" label="Mesh" />
         <q-tab name="licenses" icon="verified_user" label="许可" />
+        <q-tab name="nodes" icon="lan" label="节点" />
+        <q-tab name="services" icon="dns" label="服务" />
+        <q-tab name="profiles" icon="route" label="Profile" />
+        <q-tab name="limits" icon="speed" label="限速" />
         <q-tab name="devices" icon="devices" label="设备" />
         <q-tab name="tasks" icon="send_to_mobile" label="任务" />
       </q-tabs>
@@ -197,6 +201,299 @@
           </div>
         </q-tab-panel>
 
+        <q-tab-panel name="nodes" class="q-pa-none">
+          <div class="split-layout">
+            <section class="section-surface q-pa-md">
+              <div class="section-title">保存节点</div>
+              <q-input v-model="nodeName" outlined dense label="名称" class="q-mb-sm" />
+              <q-select
+                v-model="nodeKind"
+                outlined
+                dense
+                :options="nodeKindOptions"
+                label="类型"
+                class="q-mb-sm"
+              />
+              <q-select
+                v-model="nodeStatus"
+                outlined
+                dense
+                :options="nodeStatusOptions"
+                label="状态"
+                class="q-mb-sm"
+              />
+              <q-input
+                v-model="nodePublicHost"
+                outlined
+                dense
+                label="公网地址 / endpoint host"
+                placeholder="121.43.253.179 或 example.com"
+                class="q-mb-sm"
+              />
+              <q-input
+                v-model="nodeOverlayIp"
+                outlined
+                dense
+                label="Overlay IP"
+                placeholder="100.88.0.1"
+                class="q-mb-sm"
+              />
+              <q-input
+                v-model="nodeWireGuardPublicKey"
+                outlined
+                dense
+                label="WireGuard 公钥"
+                class="q-mb-sm"
+              />
+              <div class="two-col q-mb-sm">
+                <q-input
+                  v-model="nodeWireGuardEndpointHost"
+                  outlined
+                  dense
+                  label="WG endpoint host（可空）"
+                  placeholder="默认取公网地址去端口"
+                />
+                <q-input
+                  v-model="nodeWireGuardListenPort"
+                  outlined
+                  dense
+                  type="number"
+                  label="WG UDP 端口"
+                  placeholder="51888"
+                />
+              </div>
+              <div class="toolbar-row">
+                <q-btn flat icon="restart_alt" label="清空" @click="resetNodeForm" />
+                <q-space />
+                <q-btn color="primary" icon="save" label="保存节点" @click="saveNode" />
+              </div>
+            </section>
+
+            <section class="section-surface q-pa-md">
+              <div class="section-title q-mb-sm">节点列表</div>
+              <q-table
+                :rows="nodeRows"
+                :columns="nodeColumns"
+                row-key="id"
+                flat
+                bordered
+                dense
+                :pagination="{ rowsPerPage: 12 }"
+              >
+                <template #body-cell-status="props">
+                  <q-td :props="props">
+                    <q-badge :color="nodeStatusColor(props.value)" :label="props.value" />
+                  </q-td>
+                </template>
+                <template #body-cell-actions="props">
+                  <q-td :props="props">
+                    <q-btn flat dense round icon="edit" @click="editNode(props.row)">
+                      <q-tooltip>编辑</q-tooltip>
+                    </q-btn>
+                    <q-btn flat dense round icon="favorite" @click="heartbeatNode(props.row)">
+                      <q-tooltip>标记在线</q-tooltip>
+                    </q-btn>
+                  </q-td>
+                </template>
+              </q-table>
+            </section>
+          </div>
+        </q-tab-panel>
+
+        <q-tab-panel name="services" class="q-pa-none">
+          <div class="split-layout">
+            <section class="section-surface q-pa-md">
+              <div class="section-title">保存服务</div>
+              <q-input v-model="serviceName" outlined dense label="名称" class="q-mb-sm" />
+              <q-select
+                v-model="serviceNodeId"
+                outlined
+                dense
+                emit-value
+                map-options
+                clearable
+                :options="nodeOptions"
+                label="节点"
+                class="q-mb-sm"
+              />
+              <div class="two-col q-mb-sm">
+                <q-input v-model="serviceTargetHost" outlined dense label="目标地址" placeholder="100.88.0.10" />
+                <q-input v-model="serviceTargetPort" outlined dense type="number" label="端口" placeholder="8080" />
+              </div>
+              <q-select
+                v-model="serviceProtocol"
+                outlined
+                dense
+                :options="serviceProtocolOptions"
+                label="协议"
+                class="q-mb-sm"
+              />
+              <q-input
+                v-model="serviceDomains"
+                outlined
+                dense
+                label="域名，逗号分隔"
+                placeholder="home.example.com, db.example.com"
+                class="q-mb-sm"
+              />
+              <div class="toolbar-row">
+                <q-toggle v-model="serviceEnabled" label="启用" />
+                <q-space />
+                <q-btn flat icon="restart_alt" label="清空" @click="resetServiceForm" />
+                <q-btn color="primary" icon="save" label="保存服务" @click="saveService" />
+              </div>
+            </section>
+
+            <section class="section-surface q-pa-md">
+              <div class="section-title q-mb-sm">服务列表</div>
+              <q-table
+                :rows="serviceRows"
+                :columns="serviceColumns"
+                row-key="id"
+                flat
+                bordered
+                dense
+                :pagination="{ rowsPerPage: 12 }"
+              >
+                <template #body-cell-enabled="props">
+                  <q-td :props="props">
+                    <q-badge :color="props.value ? 'positive' : 'grey-6'" :label="props.value ? '启用' : '停用'" />
+                  </q-td>
+                </template>
+                <template #body-cell-actions="props">
+                  <q-td :props="props">
+                    <q-btn flat dense round icon="edit" @click="editService(props.row)">
+                      <q-tooltip>编辑</q-tooltip>
+                    </q-btn>
+                  </q-td>
+                </template>
+              </q-table>
+            </section>
+          </div>
+        </q-tab-panel>
+
+        <q-tab-panel name="profiles" class="q-pa-none">
+          <div class="split-layout">
+            <section class="section-surface q-pa-md">
+              <div class="section-title">保存路由 Profile</div>
+              <q-input v-model="profileName" outlined dense label="名称" class="q-mb-sm" />
+              <q-select
+                v-model="profileMode"
+                outlined
+                dense
+                :options="profileModeOptions"
+                label="模式"
+                class="q-mb-sm"
+              />
+              <q-input
+                v-model="profileRulesText"
+                outlined
+                dense
+                type="textarea"
+                label="rules JSON（可空）"
+                placeholder='{"domains":["example.com"]}'
+                class="q-mb-sm"
+              />
+              <div class="toolbar-row">
+                <q-toggle v-model="profileEnabled" label="启用" />
+                <q-space />
+                <q-btn flat icon="restart_alt" label="清空" @click="resetProfileForm" />
+                <q-btn color="primary" icon="save" label="保存 Profile" @click="saveProfile" />
+              </div>
+            </section>
+
+            <section class="section-surface q-pa-md">
+              <div class="section-title q-mb-sm">Profile 列表</div>
+              <q-table
+                :rows="overview.profiles"
+                :columns="profileColumns"
+                row-key="id"
+                flat
+                bordered
+                dense
+                :pagination="{ rowsPerPage: 12 }"
+              >
+                <template #body-cell-enabled="props">
+                  <q-td :props="props">
+                    <q-badge :color="props.value ? 'positive' : 'grey-6'" :label="props.value ? '启用' : '停用'" />
+                  </q-td>
+                </template>
+                <template #body-cell-actions="props">
+                  <q-td :props="props">
+                    <q-btn flat dense round icon="edit" @click="editProfile(props.row)">
+                      <q-tooltip>编辑</q-tooltip>
+                    </q-btn>
+                  </q-td>
+                </template>
+              </q-table>
+            </section>
+          </div>
+        </q-tab-panel>
+
+        <q-tab-panel name="limits" class="q-pa-none">
+          <div class="split-layout">
+            <section class="section-surface q-pa-md">
+              <div class="section-title">保存限速</div>
+              <q-select
+                v-model="rateSubjectType"
+                outlined
+                dense
+                :options="rateSubjectTypeOptions"
+                label="对象类型"
+                class="q-mb-sm"
+                @update:model-value="rateSubjectId = null"
+              />
+              <q-select
+                v-model="rateSubjectId"
+                outlined
+                dense
+                emit-value
+                map-options
+                use-input
+                fill-input
+                clearable
+                :options="rateSubjectOptions"
+                label="对象 ID"
+                class="q-mb-sm"
+              />
+              <div class="two-col q-mb-sm">
+                <q-input v-model="rateDownRate" outlined dense label="下载 rate" placeholder="3mbit" />
+                <q-input v-model="rateDownCeil" outlined dense label="下载 ceil" placeholder="30mbit" />
+              </div>
+              <div class="two-col q-mb-sm">
+                <q-input v-model="rateUpRate" outlined dense label="上传 rate" placeholder="3mbit" />
+                <q-input v-model="rateUpCeil" outlined dense label="上传 ceil" placeholder="30mbit" />
+              </div>
+              <div class="toolbar-row">
+                <q-btn flat icon="restart_alt" label="清空" @click="resetRateLimitForm" />
+                <q-space />
+                <q-btn color="primary" icon="save" label="保存限速" @click="saveRateLimit" />
+              </div>
+            </section>
+
+            <section class="section-surface q-pa-md">
+              <div class="section-title q-mb-sm">限速列表</div>
+              <q-table
+                :rows="rateLimitRows"
+                :columns="rateLimitColumns"
+                row-key="id"
+                flat
+                bordered
+                dense
+                :pagination="{ rowsPerPage: 12 }"
+              >
+                <template #body-cell-actions="props">
+                  <q-td :props="props">
+                    <q-btn flat dense round icon="edit" @click="editRateLimit(props.row)">
+                      <q-tooltip>编辑</q-tooltip>
+                    </q-btn>
+                  </q-td>
+                </template>
+              </q-table>
+            </section>
+          </div>
+        </q-tab-panel>
+
         <q-tab-panel name="devices" class="q-pa-none">
           <div class="section-surface q-pa-md q-mb-md">
             <div class="section-title q-mb-sm">设备</div>
@@ -304,7 +601,11 @@ import {
   type HdoDeviceRow,
   type HdoDeviceTaskRow,
   type HdoMeshGroupRow,
-  type HdoOverview
+  type HdoNodeRow,
+  type HdoOverview,
+  type HdoProfileRow,
+  type HdoRateLimitRow,
+  type HdoServiceRow
 } from 'src/composables/useServerAdmin';
 
 const admin = useServerAdmin();
@@ -326,6 +627,44 @@ const membershipMeshGroupId = ref<string | null>(null);
 const membershipRole = ref<'member' | 'admin' | 'support'>('member');
 const membershipStatus = ref<'active' | 'suspended' | 'revoked'>('active');
 const membershipProfileId = ref<string | null>(null);
+
+const editingNodeId = ref<string | null>(null);
+const nodeName = ref('domestic-vps');
+const nodeKind = ref<HdoNodeRow['kind']>('domestic');
+const nodeStatus = ref<HdoNodeRow['status']>('pending');
+const nodePublicHost = ref('');
+const nodeOverlayIp = ref('100.88.0.1');
+const nodeWireGuardPublicKey = ref('');
+const nodeWireGuardEndpointHost = ref('');
+const nodeWireGuardListenPort = ref('51888');
+const nodeKindOptions: HdoNodeRow['kind'][] = ['domestic', 'home', 'oversea'];
+const nodeStatusOptions: HdoNodeRow['status'][] = ['pending', 'online', 'offline', 'error'];
+
+const editingServiceId = ref<string | null>(null);
+const serviceName = ref('home-web');
+const serviceNodeId = ref<string | null>(null);
+const serviceTargetHost = ref('100.88.0.10');
+const serviceTargetPort = ref('8080');
+const serviceProtocol = ref<HdoServiceRow['protocol']>('tcp');
+const serviceDomains = ref('');
+const serviceEnabled = ref(true);
+const serviceProtocolOptions: HdoServiceRow['protocol'][] = ['tcp', 'udp', 'http', 'https'];
+
+const editingProfileId = ref<string | null>(null);
+const profileName = ref('');
+const profileMode = ref<HdoProfileRow['mode']>('home-only');
+const profileEnabled = ref(true);
+const profileRulesText = ref('');
+const profileModeOptions: HdoProfileRow['mode'][] = ['home-only', 'home-foreign', 'domestic-global'];
+
+const editingRateLimitId = ref<string | null>(null);
+const rateSubjectType = ref<HdoRateLimitRow['subjectType']>('user');
+const rateSubjectId = ref<string | null>(null);
+const rateDownRate = ref('');
+const rateDownCeil = ref('');
+const rateUpRate = ref('');
+const rateUpCeil = ref('');
+const rateSubjectTypeOptions: HdoRateLimitRow['subjectType'][] = ['user', 'device', 'profile', 'node'];
 
 const taskUserId = ref<string | null>(null);
 const taskDeviceId = ref<string | null>(null);
@@ -355,6 +694,43 @@ const membershipColumns = [
   { name: 'status', label: '状态', field: 'status', align: 'left' as const },
   { name: 'profileId', label: 'profile', field: 'profileId', align: 'left' as const },
   { name: 'updatedAt', label: '更新时间', field: 'updatedAt', align: 'left' as const }
+];
+
+const nodeColumns = [
+  { name: 'kind', label: '类型', field: 'kind', align: 'left' as const },
+  { name: 'name', label: '名称', field: 'name', align: 'left' as const },
+  { name: 'publicHost', label: '公网地址', field: 'publicHost', align: 'left' as const },
+  { name: 'overlayIp', label: 'Overlay IP', field: 'overlayIp', align: 'left' as const },
+  { name: 'wg', label: 'WireGuard', field: 'wireGuardLabel', align: 'left' as const },
+  { name: 'status', label: '状态', field: 'status', align: 'left' as const },
+  { name: 'actions', label: '', field: 'id', align: 'right' as const }
+];
+
+const serviceColumns = [
+  { name: 'name', label: '名称', field: 'name', align: 'left' as const },
+  { name: 'node', label: '节点', field: 'nodeLabel', align: 'left' as const },
+  { name: 'target', label: '目标', field: 'targetLabel', align: 'left' as const },
+  { name: 'protocol', label: '协议', field: 'protocol', align: 'left' as const },
+  { name: 'domains', label: '域名', field: 'domainsLabel', align: 'left' as const },
+  { name: 'enabled', label: '状态', field: 'enabled', align: 'left' as const },
+  { name: 'actions', label: '', field: 'id', align: 'right' as const }
+];
+
+const profileColumns = [
+  { name: 'name', label: '名称', field: 'name', align: 'left' as const },
+  { name: 'mode', label: '模式', field: 'mode', align: 'left' as const },
+  { name: 'enabled', label: '状态', field: 'enabled', align: 'left' as const },
+  { name: 'updatedAt', label: '更新时间', field: 'updatedAt', align: 'left' as const },
+  { name: 'actions', label: '', field: 'id', align: 'right' as const }
+];
+
+const rateLimitColumns = [
+  { name: 'subjectType', label: '对象', field: 'subjectType', align: 'left' as const },
+  { name: 'subject', label: '对象 ID', field: 'subjectLabel', align: 'left' as const },
+  { name: 'down', label: '下载', field: 'downLabel', align: 'left' as const },
+  { name: 'up', label: '上传', field: 'upLabel', align: 'left' as const },
+  { name: 'updatedAt', label: '更新时间', field: 'updatedAt', align: 'left' as const },
+  { name: 'actions', label: '', field: 'id', align: 'right' as const }
 ];
 
 const deviceColumns = [
@@ -388,6 +764,8 @@ const taskColumns = [
 const usersById = computed(() => new Map((overview.value?.users ?? []).map((row) => [row.id, row])));
 const meshById = computed(() => new Map((overview.value?.meshGroups ?? []).map((row) => [row.id, row])));
 const devicesById = computed(() => new Map((overview.value?.devices ?? []).map((row) => [row.id, row])));
+const nodesById = computed(() => new Map((overview.value?.nodes ?? []).map((row) => [row.id, row])));
+const profilesById = computed(() => new Map((overview.value?.profiles ?? []).map((row) => [row.id, row])));
 
 const userOptions = computed(() =>
   (overview.value?.users ?? []).map((row) => ({
@@ -404,6 +782,10 @@ const profileOptions = computed(() =>
   (overview.value?.profiles ?? []).map((row) => ({ label: `${row.name} / ${row.mode}`, value: row.id }))
 );
 
+const nodeOptions = computed(() =>
+  (overview.value?.nodes ?? []).map((row) => ({ label: `${row.kind} / ${row.name}`, value: row.id }))
+);
+
 const activeMemberships = computed(() =>
   (overview.value?.memberships ?? []).filter((row) => row.status === 'active')
 );
@@ -417,6 +799,38 @@ const membershipRows = computed(() =>
     ...row,
     userLabel: userLabel(row.userId),
     meshLabel: meshById.value.get(row.meshGroupId)?.name ?? row.meshGroupId
+  }))
+);
+
+const nodeRows = computed(() =>
+  (overview.value?.nodes ?? []).map((row) => {
+    const wireGuard = wireGuardMetadata(row);
+    const publicKey = stringValue(wireGuard?.publicKey);
+    const listenPort = wireGuard?.listenPort ?? wireGuard?.port ?? '51888';
+    return {
+      ...row,
+      wireGuardLabel: publicKey
+        ? `${publicKey.slice(0, 10)}… / ${listenPort}`
+        : ''
+    };
+  })
+);
+
+const serviceRows = computed(() =>
+  (overview.value?.services ?? []).map((row) => ({
+    ...row,
+    nodeLabel: row.nodeId ? nodesById.value.get(row.nodeId)?.name ?? row.nodeId : '不绑定',
+    targetLabel: `${row.targetHost}:${row.targetPort}`,
+    domainsLabel: row.domains.join(', ')
+  }))
+);
+
+const rateLimitRows = computed(() =>
+  (overview.value?.rateLimits ?? []).map((row) => ({
+    ...row,
+    subjectLabel: subjectLabel(row.subjectType, row.subjectId),
+    downLabel: [row.downRate, row.downCeil].filter(Boolean).join(' / '),
+    upLabel: [row.upRate, row.upCeil].filter(Boolean).join(' / ')
   }))
 );
 
@@ -453,6 +867,33 @@ const taskDeviceOptions = computed(() =>
     .map((row) => ({ label: `${row.label} / ${row.platform ?? row.id}`, value: row.id }))
 );
 
+const rateSubjectOptions = computed(() => {
+  switch (rateSubjectType.value) {
+    case 'user':
+      return (overview.value?.users ?? []).map((row) => ({
+        label: userLabel(row.id),
+        value: row.id
+      }));
+    case 'device':
+      return (overview.value?.devices ?? []).map((row) => ({
+        label: `${row.label} / ${row.platform ?? row.id}`,
+        value: row.id
+      }));
+    case 'profile':
+      return (overview.value?.profiles ?? []).map((row) => ({
+        label: `${row.name} / ${row.mode}`,
+        value: row.id
+      }));
+    case 'node':
+      return (overview.value?.nodes ?? []).map((row) => ({
+        label: `${row.kind} / ${row.name}`,
+        value: row.id
+      }));
+    default:
+      return [];
+  }
+});
+
 async function reload(): Promise<void> {
   loading.value = true;
   error.value = null;
@@ -461,6 +902,8 @@ async function reload(): Promise<void> {
     if (!membershipUserId.value) membershipUserId.value = overview.value.users[0]?.id ?? null;
     if (!taskUserId.value) taskUserId.value = overview.value.users[0]?.id ?? null;
     if (!membershipMeshGroupId.value) membershipMeshGroupId.value = overview.value.meshGroups[0]?.id ?? null;
+    if (!serviceNodeId.value) serviceNodeId.value = overview.value.nodes[0]?.id ?? null;
+    if (!rateSubjectId.value) rateSubjectId.value = overview.value.users[0]?.id ?? null;
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -534,6 +977,175 @@ async function saveMembership(): Promise<void> {
   }
 }
 
+async function saveNode(): Promise<void> {
+  if (!nodeName.value.trim()) return;
+  try {
+    await admin.upsertHdoNode({
+      id: editingNodeId.value ?? undefined,
+      name: nodeName.value.trim(),
+      kind: nodeKind.value,
+      publicHost: nodePublicHost.value.trim() || null,
+      overlayIp: nodeOverlayIp.value.trim() || null,
+      status: nodeStatus.value,
+      metadata: buildNodeMetadata()
+    });
+    resetNodeForm();
+    await reload();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function heartbeatNode(row: HdoNodeRow): Promise<void> {
+  try {
+    await admin.heartbeatHdoNode(row.id);
+    await reload();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+function editNode(row: HdoNodeRow): void {
+  const wireGuard = wireGuardMetadata(row);
+  editingNodeId.value = row.id;
+  nodeName.value = row.name;
+  nodeKind.value = row.kind;
+  nodeStatus.value = row.status;
+  nodePublicHost.value = row.publicHost ?? '';
+  nodeOverlayIp.value = row.overlayIp ?? '';
+  nodeWireGuardPublicKey.value = stringValue(wireGuard?.publicKey) ?? '';
+  nodeWireGuardEndpointHost.value =
+    stringValue(wireGuard?.endpointHost) ?? stringValue(wireGuard?.host) ?? '';
+  nodeWireGuardListenPort.value = String(wireGuard?.listenPort ?? wireGuard?.port ?? '');
+}
+
+function resetNodeForm(): void {
+  editingNodeId.value = null;
+  nodeName.value = 'domestic-vps';
+  nodeKind.value = 'domestic';
+  nodeStatus.value = 'pending';
+  nodePublicHost.value = '';
+  nodeOverlayIp.value = '100.88.0.1';
+  nodeWireGuardPublicKey.value = '';
+  nodeWireGuardEndpointHost.value = '';
+  nodeWireGuardListenPort.value = '51888';
+}
+
+async function saveService(): Promise<void> {
+  const targetPort = Number(serviceTargetPort.value);
+  if (!serviceName.value.trim() || !serviceTargetHost.value.trim() || !Number.isInteger(targetPort)) return;
+  try {
+    await admin.upsertHdoService({
+      id: editingServiceId.value ?? undefined,
+      name: serviceName.value.trim(),
+      nodeId: serviceNodeId.value,
+      targetHost: serviceTargetHost.value.trim(),
+      targetPort,
+      protocol: serviceProtocol.value,
+      domains: splitCsv(serviceDomains.value),
+      enabled: serviceEnabled.value
+    });
+    resetServiceForm();
+    await reload();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+function editService(row: HdoServiceRow): void {
+  editingServiceId.value = row.id;
+  serviceName.value = row.name;
+  serviceNodeId.value = row.nodeId;
+  serviceTargetHost.value = row.targetHost;
+  serviceTargetPort.value = String(row.targetPort);
+  serviceProtocol.value = row.protocol;
+  serviceDomains.value = row.domains.join(', ');
+  serviceEnabled.value = row.enabled;
+}
+
+function resetServiceForm(): void {
+  editingServiceId.value = null;
+  serviceName.value = 'home-web';
+  serviceNodeId.value = null;
+  serviceTargetHost.value = '100.88.0.10';
+  serviceTargetPort.value = '8080';
+  serviceProtocol.value = 'tcp';
+  serviceDomains.value = '';
+  serviceEnabled.value = true;
+}
+
+async function saveProfile(): Promise<void> {
+  if (!profileName.value.trim()) return;
+  try {
+    await admin.upsertHdoProfile({
+      id: editingProfileId.value ?? undefined,
+      name: profileName.value.trim(),
+      mode: profileMode.value,
+      enabled: profileEnabled.value,
+      rules: parseJsonObject(profileRulesText.value)
+    });
+    resetProfileForm();
+    await reload();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+function editProfile(row: HdoProfileRow): void {
+  editingProfileId.value = row.id;
+  profileName.value = row.name;
+  profileMode.value = row.mode;
+  profileEnabled.value = row.enabled;
+  profileRulesText.value = row.rules ? JSON.stringify(row.rules, null, 2) : '';
+}
+
+function resetProfileForm(): void {
+  editingProfileId.value = null;
+  profileName.value = '';
+  profileMode.value = 'home-only';
+  profileEnabled.value = true;
+  profileRulesText.value = '';
+}
+
+async function saveRateLimit(): Promise<void> {
+  if (!rateSubjectId.value) return;
+  try {
+    await admin.upsertHdoRateLimit({
+      id: editingRateLimitId.value ?? undefined,
+      subjectType: rateSubjectType.value,
+      subjectId: rateSubjectId.value,
+      downRate: rateDownRate.value.trim() || null,
+      downCeil: rateDownCeil.value.trim() || null,
+      upRate: rateUpRate.value.trim() || null,
+      upCeil: rateUpCeil.value.trim() || null
+    });
+    resetRateLimitForm();
+    await reload();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+function editRateLimit(row: HdoRateLimitRow): void {
+  editingRateLimitId.value = row.id;
+  rateSubjectType.value = row.subjectType;
+  rateSubjectId.value = row.subjectId;
+  rateDownRate.value = row.downRate ?? '';
+  rateDownCeil.value = row.downCeil ?? '';
+  rateUpRate.value = row.upRate ?? '';
+  rateUpCeil.value = row.upCeil ?? '';
+}
+
+function resetRateLimitForm(): void {
+  editingRateLimitId.value = null;
+  rateSubjectType.value = 'user';
+  rateSubjectId.value = null;
+  rateDownRate.value = '';
+  rateDownCeil.value = '';
+  rateUpRate.value = '';
+  rateUpCeil.value = '';
+}
+
 async function createTask(): Promise<void> {
   if (!taskUserId.value) return;
   try {
@@ -562,13 +1174,82 @@ function parsePayload(): Record<string, unknown> | null {
   return parsed as Record<string, unknown>;
 }
 
+function parseJsonObject(text: string): Record<string, unknown> | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const parsed = JSON.parse(trimmed) as unknown;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('JSON 必须是 object');
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function buildNodeMetadata(): Record<string, unknown> | null {
+  const existing = editingNodeId.value
+    ? (nodesById.value.get(editingNodeId.value)?.metadata ?? {})
+    : {};
+  const metadata: Record<string, unknown> = { ...existing };
+  const publicKey = nodeWireGuardPublicKey.value.trim();
+  const endpointHost = nodeWireGuardEndpointHost.value.trim();
+  const listenPort = Number(nodeWireGuardListenPort.value);
+
+  if (publicKey || endpointHost || Number.isInteger(listenPort)) {
+    metadata.wireGuard = {
+      ...(plainObject(metadata.wireGuard) ?? plainObject(metadata.wg) ?? {}),
+      publicKey: publicKey || null,
+      endpointHost: endpointHost || null,
+      listenPort: Number.isInteger(listenPort) ? listenPort : null
+    };
+  }
+
+  return Object.keys(metadata).length ? metadata : null;
+}
+
+function wireGuardMetadata(row: HdoNodeRow | { metadata: HdoNodeRow['metadata'] }): Record<string, unknown> | null {
+  const metadata = plainObject(row.metadata);
+  return plainObject(metadata?.wireGuard) ?? plainObject(metadata?.wg);
+}
+
+function plainObject(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function splitCsv(value: string): string[] {
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function userLabel(userId: string): string {
   const user = usersById.value.get(userId);
   return user?.displayName || user?.username || user?.email || userId;
 }
 
+function subjectLabel(subjectType: HdoRateLimitRow['subjectType'], subjectId: string): string {
+  if (subjectType === 'user') return userLabel(subjectId);
+  if (subjectType === 'device') return devicesById.value.get(subjectId)?.label ?? subjectId;
+  if (subjectType === 'profile') return profilesById.value.get(subjectId)?.name ?? subjectId;
+  if (subjectType === 'node') return nodesById.value.get(subjectId)?.name ?? subjectId;
+  return subjectId;
+}
+
 function statusColor(status: string): string {
   return { active: 'positive', suspended: 'warning', revoked: 'negative' }[status] ?? 'grey-7';
+}
+
+function nodeStatusColor(status: string): string {
+  return {
+    online: 'positive',
+    pending: 'warning',
+    offline: 'grey-7',
+    error: 'negative'
+  }[status] ?? 'grey-7';
 }
 
 function taskStatusColor(status: string): string {
@@ -618,9 +1299,16 @@ onMounted(reload);
     gap: 16px;
   }
 
+  .two-col {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
   @media (max-width: 980px) {
     .metric-grid,
-    .split-layout {
+    .split-layout,
+    .two-col {
       grid-template-columns: 1fr;
     }
   }

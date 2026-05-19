@@ -314,6 +314,85 @@ export function useServerAdmin() {
       return out;
     },
 
+    async upsertHdoNode(input: {
+      id?: string;
+      name: string;
+      kind: HdoNodeRow['kind'];
+      publicHost?: string | null;
+      overlayIp?: string | null;
+      status?: HdoNodeRow['status'];
+      metadata?: Record<string, unknown> | null;
+    }): Promise<HdoNodeRow> {
+      const out = await api<HdoNodeRow>('/hdo/admin/nodes', {
+        method: 'POST',
+        body: JSON.stringify(input)
+      });
+      toast(`已保存节点：${out.name}`);
+      return out;
+    },
+
+    async heartbeatHdoNode(id: string): Promise<HdoNodeRow> {
+      const out = await api<HdoNodeRow>(`/hdo/admin/nodes/${encodeURIComponent(id)}/heartbeat`, {
+        method: 'POST',
+        body: JSON.stringify({ status: 'online' })
+      });
+      toast(`已更新节点在线状态：${out.name}`);
+      return out;
+    },
+
+    async upsertHdoService(input: {
+      id?: string;
+      name: string;
+      nodeId?: string | null;
+      targetHost: string;
+      targetPort: number;
+      protocol?: HdoServiceRow['protocol'];
+      domains?: string[];
+      enabled?: boolean;
+      metadata?: Record<string, unknown> | null;
+    }): Promise<HdoServiceRow> {
+      const out = await api<HdoServiceRow>('/hdo/admin/services', {
+        method: 'POST',
+        body: JSON.stringify(input)
+      });
+      toast(`已保存服务：${out.name}`);
+      return out;
+    },
+
+    async upsertHdoProfile(input: {
+      id?: string;
+      name: string;
+      mode: HdoProfileRow['mode'];
+      enabled?: boolean;
+      rules?: Record<string, unknown> | null;
+      metadata?: Record<string, unknown> | null;
+    }): Promise<HdoProfileRow> {
+      const out = await api<HdoProfileRow>('/hdo/admin/profiles', {
+        method: 'POST',
+        body: JSON.stringify(input)
+      });
+      toast(`已保存 profile：${out.name}`);
+      return out;
+    },
+
+    async upsertHdoRateLimit(input: {
+      id?: string;
+      subjectType: HdoRateLimitRow['subjectType'];
+      subjectId: string;
+      downRate?: string | null;
+      downCeil?: string | null;
+      upRate?: string | null;
+      upCeil?: string | null;
+      metadata?: Record<string, unknown> | null;
+    }): Promise<HdoRateLimitRow> {
+      const out = await api<HdoRateLimitRow>('/hdo/admin/rate-limits', {
+        method: 'POST',
+        body: JSON.stringify(input)
+      });
+      toast('HDO 限速已保存');
+      return out;
+    },
+
     async createHdoDeviceTask(input: {
       userId: string;
       deviceId?: string | null;

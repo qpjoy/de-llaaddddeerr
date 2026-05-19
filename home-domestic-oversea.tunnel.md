@@ -1902,6 +1902,10 @@ electron-plugin/packages/wireguard-engines/win32-x64
 - 如果服务端给的是 HDO tarball URL，插件市场也必须用 npm 安装而不能只解包 tarball；否则 HDO 的 `@qpjoy/electron-core-wireguard` 和平台 optional engine 不会进入插件目录。
 - `PluginStore` 已把 `@qpjoy/electron-plugin-hdo` 标记为需要 package-manager 安装的插件。
 - HDO 插件调用服务端 API 时复用插件市场本地登录态。access JWT 默认 7 天过期，refresh token 默认 30 天过期，可通过 `JWT_ACCESS_TTL_SECONDS` / `JWT_REFRESH_TTL_SECONDS` 调整；插件必须在 access 即将过期或收到 401 时用 refresh token 调 `/api/v1/auth/refresh` 静默续期，并把新 token 写回 marketplace session。只有 refresh token 失效、被吊销或服务器数据被清空时才要求用户重新登录。
+- `@qpjoy/electron-plugin-hdo@0.1.3` 增强内嵌管理页操作反馈：保存节点、保存服务、注册设备、拉取订阅等按钮都会显示处理中、成功或失败原因，避免请求失败时只在 iframe 控制台里报错。
+- Web 后台 `/admin/#/server/hdo` 已承接组织级 HDO 配置：Mesh、许可、节点、服务、Profile、限速、设备和任务都在服务端后台统一管理。Electron HDO 插件里的“服务器”页保留为本机辅助入口，长期应退到只做当前客户端视角和跳转提示。
+- Web 后台节点表单比插件内嵌页更完整：支持 `metadata.wireGuard.publicKey`、`endpointHost`、`listenPort`，domestic 节点保存这些字段后，客户端 `prepareWireGuardPeer()` 才能从 manifest 生成有效 WireGuard 配置。
+- Home 节点接入分两层：先在 D 上生成 Home peer 配置并在 H 机器导入/启用 WireGuard，确认 `D -> H overlay IP` 可 ping/ssh；再到 Web 后台 `HDO -> 节点` 登记 Home 节点，到 `HDO -> 服务` 添加 `home-ssh` 等服务。D 作为 hub 支持 H/H/User 互访时需要开启 IP forwarding，`hdo apply-domestic` 会写入 `/etc/sysctl.d/99-hdo-forwarding.conf`。
 
 发布顺序：
 

@@ -331,16 +331,16 @@ cmd_deploy_domestic() {
     ok "kept existing $WG_DIR/wg-home.conf"
   fi
 
-  if [ "$apply_now" -eq 1 ]; then
-    sudo_apply_domestic || true
-  fi
-
   if [ "$create_home" -eq 1 ]; then
     local peer_args=(--name "$HDO_PEER_NAME")
     if [ -n "${HDO_PEER_IP:-}" ]; then
       peer_args+=(--peer-ip "$HDO_PEER_IP")
     fi
     cmd_add_home "${peer_args[@]}"
+  fi
+
+  if [ "$apply_now" -eq 1 ]; then
+    sudo_apply_domestic || true
   fi
 
   if [ "$setup_egress" -eq 1 ]; then
@@ -454,6 +454,11 @@ cmd_apply_domestic() {
   [ -f "$WG_DIR/wg-home.conf" ] || die "run setup-domestic first"
   ensure_wireguard_tools
   require_cmd systemctl
+  cat > /etc/sysctl.d/99-hdo-forwarding.conf <<'EOF'
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+EOF
+  sysctl -p /etc/sysctl.d/99-hdo-forwarding.conf >/dev/null || true
   install -d -m 700 /etc/wireguard
   install -m 600 "$WG_DIR/wg-home.conf" /etc/wireguard/hdo-home.conf
   systemctl enable --now wg-quick@hdo-home

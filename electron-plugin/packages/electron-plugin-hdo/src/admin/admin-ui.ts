@@ -614,9 +614,26 @@ export function adminHtml(): string {
       const type = res.headers.get('content-type') || '';
       const body = type.includes('application/json') ? await res.json() : await res.text();
       if (!res.ok) {
-        throw new Error(typeof body === 'object' && body && body.error ? body.error : String(body));
+        throw new Error(
+          typeof body === 'object' && body
+            ? (body.error || body.message || JSON.stringify(body))
+            : String(body)
+        );
       }
       return body;
+    }
+
+    async function runAction(label, task) {
+      showMessage(label + '中…', 'info');
+      try {
+        const result = await task();
+        await load();
+        showMessage(label + '成功', 'info');
+        return result;
+      } catch (err) {
+        showMessage(label + '失败：' + (err.message || String(err)), 'error');
+        throw err;
+      }
     }
 
     async function load() {
@@ -983,72 +1000,64 @@ export function adminHtml(): string {
     });
 
     $('refresh').addEventListener('click', () => load());
-    $('saveSettings').addEventListener('click', async () => {
+    $('saveSettings').addEventListener('click', () => runAction('保存控制面', async () => {
       await request('/api/settings', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ hdoControlBaseUrl: formValue('baseUrl') })
       });
-      await load();
-    });
-    $('registerDevice').addEventListener('click', async () => {
+    }).catch(() => undefined));
+    $('registerDevice').addEventListener('click', () => runAction('注册设备', async () => {
       await request('/api/client/register', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ id: formValue('deviceId'), label: formValue('deviceLabel') })
       });
-      await load();
-    });
-    $('reportPlugins').addEventListener('click', async () => {
+    }).catch(() => undefined));
+    $('reportPlugins').addEventListener('click', () => runAction('上报插件清单', async () => {
       await request('/api/client/plugin-states', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ deviceId: formValue('deviceId') })
       });
-      await load();
-    });
-    $('prepareWireGuard').addEventListener('click', async () => {
+    }).catch(() => undefined));
+    $('prepareWireGuard').addEventListener('click', () => runAction('生成 WireGuard peer', async () => {
       await request('/api/client/wireguard/prepare', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ rotate: false })
       });
-      await load();
-    });
-    $('rotateWireGuard').addEventListener('click', async () => {
+    }).catch(() => undefined));
+    $('rotateWireGuard').addEventListener('click', () => runAction('轮换 WireGuard 密钥', async () => {
       await request('/api/client/wireguard/prepare', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ rotate: true })
       });
-      await load();
-    });
-    $('runTasks').addEventListener('click', async () => {
+    }).catch(() => undefined));
+    $('runTasks').addEventListener('click', () => runAction('执行待处理任务', async () => {
       await request('/api/client/tasks/run', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({})
       });
-      await load();
-    });
-    $('fetchManifest').addEventListener('click', async () => {
+    }).catch(() => undefined));
+    $('fetchManifest').addEventListener('click', () => runAction('拉取 manifest', async () => {
       await request('/api/client/manifest', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ deviceId: formValue('deviceId') })
       });
-      await load();
-    });
-    $('fetchSubscription').addEventListener('click', async () => {
+    }).catch(() => undefined));
+    $('fetchSubscription').addEventListener('click', () => runAction('拉取订阅', async () => {
       const text = await request('/api/client/subscription', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ deviceId: formValue('deviceId') })
       });
       $('subscriptionOut').value = text;
-      await load();
-    });
-    $('saveNode').addEventListener('click', async () => {
+    }).catch(() => undefined));
+    $('saveNode').addEventListener('click', () => runAction('保存节点', async () => {
       await request('/api/admin/nodes', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -1060,9 +1069,8 @@ export function adminHtml(): string {
           status: 'pending'
         })
       });
-      await load();
-    });
-    $('saveService').addEventListener('click', async () => {
+    }).catch(() => undefined));
+    $('saveService').addEventListener('click', () => runAction('保存服务', async () => {
       await request('/api/admin/services', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -1076,9 +1084,8 @@ export function adminHtml(): string {
           enabled: true
         })
       });
-      await load();
-    });
-    $('saveLimit').addEventListener('click', async () => {
+    }).catch(() => undefined));
+    $('saveLimit').addEventListener('click', () => runAction('保存限速', async () => {
       await request('/api/admin/rate-limits', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -1089,8 +1096,7 @@ export function adminHtml(): string {
           upRate: formValue('limitUp')
         })
       });
-      await load();
-    });
+    }).catch(() => undefined));
 
     load();
   <\/script>
