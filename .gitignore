@@ -20,6 +20,8 @@ docker/hysteria2-mihomo-stack/data/
 docker/hysteria2-mihomo-stack/config/caddy/
 docker/hysteria2-mihomo-stack/config/hysteria/certs/
 
+electron-server/.env
+
 # Electron workspace runtime/build artifacts
 electron-plugin/node_modules/
 electron-plugin/**/node_modules/

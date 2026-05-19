@@ -174,8 +174,9 @@ export class HdoController {
     const base = this.serverBaseUrl() ?? 'https://your-domestic-server';
     return {
       domestic: [
-        `./scripts/manage.sh hdo setup-domestic --server-url ${shellQuote(base)} --public-host <domestic-domain-or-ip>`,
-        'sudo ./scripts/manage.sh hdo apply-domestic'
+        './scripts/manage.sh deploy hdo',
+        '# Non-interactive fallback:',
+        `./scripts/manage.sh deploy hdo --yes --server-url ${shellQuote(base)} --public-host <domestic-domain-or-ip>`
       ].join('\n'),
       home: `./scripts/manage.sh hdo add-home --name home-main --server-url ${shellQuote(base)}`,
       oversea: `./scripts/manage.sh hdo setup-oversea-egress --server-url ${shellQuote(base)}`

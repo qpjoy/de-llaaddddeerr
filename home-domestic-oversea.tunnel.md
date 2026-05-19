@@ -1444,6 +1444,69 @@ domestic 角色下应禁用或强警告：
 
 这些是客户端或临时运维能力，不是 domestic 公网入口的常驻能力。
 
+## Home 机器 tunnel-cli 与 HDO 连接模型
+
+可以让家里的 H 机器也安装 `@qpjoy/tunnel-cli`，用 `mihomo-client tun-on`
+获得和普通用户机器一致的全局出站体验；但这不能替代 H 到 domestic 的
+WireGuard 反向可达链路。
+
+原因：
+
+- `tunnel-cli` / Mihomo TUN 主要控制 H 机器的出站流量。
+- HDO 需要 domestic 能稳定访问 H 机器上的服务，仍然需要 H 主动连到
+  domestic 的 WireGuard peer，例如 `100.88.0.10`。
+- domestic-vps 是公网入口和控制面，用户机器不应直接依赖 H 机器公网可达。
+
+推荐模型：
+
+```text
+H 机器:
+  WireGuard peer -> domestic wg-home        # 提供 domestic -> H 的稳定内网路径
+  tunnel-cli/mihomo TUN -> HDO subscription # 提供 H 自己的全局出站体验
+
+用户机器:
+  HDO 插件 -> domestic electron-server      # 注册设备、拉 manifest/subscription
+  electron-plugin-tunnel/mihomo -> HDO rules # 访问 home 服务时走 domestic/HDO overlay
+
+domestic-vps:
+  electron-server + HDO API
+  wg-home server
+  public ingress direct
+  scoped oversea egress only
+```
+
+因此 HDO 插件不应“直接连 H 机器公网”。它应连接 domestic 控制面，拿到：
+
+- H 节点 overlay IP，例如 `100.88.0.10`
+- 可访问服务列表，例如 `home-web -> 100.88.0.10:8080`
+- Mihomo 规则，把 HDO service domain/IP 路由到 domestic/HDO overlay
+
+如果未来要做 P2P/直连 H：
+
+- manifest 可增加 `homePeerCandidates`。
+- HDO 插件为用户设备生成独立 WireGuard peer。
+- domestic 仍作为 rendezvous/control plane。
+- 但 NAT、权限、撤销和审计复杂度明显更高；当前阶段优先 domestic 中继模型。
+
+## HDO 部署菜单
+
+根 `scripts/manage.sh` 新增单独部署入口：
+
+```text
+scripts/manage.sh deploy
+scripts/manage.sh deploy hdo
+scripts/manage.sh hdo
+```
+
+`deploy hdo` 会进入 `docker/hdo-gateway-stack/manage.sh deploy-domestic`：
+
+- 从 `docker port qpjoy-market 8080/tcp`、`docker ps`、`electron-server/.env`
+  推断 server 端口。
+- 从 `ip route`、`hostname -I`、`ifconfig` 推断 domestic 公网/出口 IP。
+- 交互确认 `server-url`、`public-host`、WireGuard 端口和 domestic overlay IP。
+- 生成 `wg-home.conf`，可直接调用 `sudo` 启用 `wg-quick@hdo-home`。
+- 可生成首个 home peer 和 scoped egress 模板。
+
 ## 编码起点
 
 推荐先写最小闭环：

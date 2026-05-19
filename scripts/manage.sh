@@ -16,6 +16,7 @@
 #   scripts/manage.sh market
 #   scripts/manage.sh prepare-plugin
 #   scripts/manage.sh sync-apps
+#   scripts/manage.sh deploy                 # 部署菜单
 #   scripts/manage.sh server <subcommand>   # → electron-server/scripts/manage.sh
 #   scripts/manage.sh hdo <subcommand>      # → docker/hdo-gateway-stack/manage.sh
 #
@@ -431,6 +432,57 @@ cmd_hdo() {
   "$ROOT/docker/hdo-gateway-stack/manage.sh" "$@"
 }
 
+cmd_deploy() {
+  local sub="${1:-}"
+  if [ -n "$sub" ]; then
+    shift || true
+    case "$sub" in
+      server|electron-server)
+        cmd_server redeploy "$@"
+        ;;
+      hdo|hdo-domestic|domestic)
+        cmd_hdo deploy-domestic "$@"
+        ;;
+      hdo-home|home-peer)
+        cmd_hdo add-home "$@"
+        ;;
+      hdo-wireguard|wireguard|wg)
+        cmd_hdo menu
+        ;;
+      *)
+        die "未知 deploy 子命令: $sub"
+        ;;
+    esac
+    return
+  fi
+
+  echo "${C_CYAN}${C_BOLD}QPJoy Deploy Manager${C_RESET}"
+  echo
+  local options=(
+    "server        部署/重启 electron-server"
+    "hdo          部署 HDO domestic + WireGuard"
+    "hdo-home     生成 Home WireGuard peer"
+    "hdo-wg       进入 HDO WireGuard 菜单"
+    "status       查看状态"
+    "quit         返回"
+  )
+  PS3=$'\n选择部署项 > '
+  select opt in "${options[@]}"; do
+    [ -z "$opt" ] && continue
+    local cmd="${opt%% *}"
+    case "$cmd" in
+      server)   cmd_server redeploy ;;
+      hdo)      cmd_hdo deploy-domestic ;;
+      hdo-home) cmd_hdo add-home ;;
+      hdo-wg)   cmd_hdo menu ;;
+      status)   cmd_status ;;
+      quit|exit) break ;;
+      *) warn "未知选项";;
+    esac
+    echo
+  done
+}
+
 cmd_help() {
   cat <<EOF
 ${C_BOLD}QPJoy Marketplace 管理脚本${C_RESET}
@@ -447,6 +499,7 @@ Subcommands:
   ${C_BOLD}prepare-tool${C_RESET}      选择命令行工具做同样操作
   ${C_BOLD}prepare-game${C_RESET}      选择游戏 → bump 版本 + build + pack 预览
   ${C_BOLD}sync-apps${C_RESET}         同步 electron-demo / electron-test 到最新本地包
+  ${C_BOLD}deploy${C_RESET}            单独部署菜单（server / HDO domestic / WireGuard）
   ${C_BOLD}server [...] ${C_RESET}     转发到 electron-server/scripts/manage.sh
   ${C_BOLD}hdo [...] ${C_RESET}        转发到 docker/hdo-gateway-stack/manage.sh
   ${C_BOLD}help${C_RESET}              本帮助
@@ -456,6 +509,7 @@ Examples:
   scripts/manage.sh status
   scripts/manage.sh prepare-plugin
   scripts/manage.sh prepare-tool
+  scripts/manage.sh deploy hdo
   scripts/manage.sh server status
   scripts/manage.sh server sync
   scripts/manage.sh hdo setup-domestic --server-url http://domestic:8080 --public-host domestic.example.com
@@ -481,6 +535,7 @@ cmd_menu() {
     "prepare-tool   准备发布: 命令行工具"
     "prepare-game   准备发布: 游戏"
     "sync-apps      同步 demo/test 到本地最新包"
+    "deploy         部署 server / HDO / WireGuard"
     "server         进入服务器 (docker) 管理菜单"
     "hdo            HDO gateway 安装/配置"
     "help           帮助"
@@ -499,6 +554,7 @@ cmd_menu() {
       prepare-tool)   cmd_prepare_tool ;;
       prepare-game)   cmd_prepare_game ;;
       sync-apps)      cmd_sync_apps ;;
+      deploy)         cmd_deploy ;;
       server)         cmd_server ;;
       hdo)            cmd_hdo ;;
       help)           cmd_help ;;
@@ -521,6 +577,7 @@ case "$sub" in
   prepare-tool|tool)            cmd_prepare_tool "$@" ;;
   prepare-game|game)            cmd_prepare_game "$@" ;;
   sync-apps|sync|apps)          cmd_sync_apps "$@" ;;
+  deploy|deployment)            cmd_deploy "$@" ;;
   server|srv)                   cmd_server "$@" ;;
   hdo)                          cmd_hdo "$@" ;;
   help|-h|--help)               cmd_help ;;

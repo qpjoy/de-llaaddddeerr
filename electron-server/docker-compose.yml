@@ -41,11 +41,13 @@ services:
     environment:
       DATABASE_URL: postgres://${PG_USER:-qpjoy}:${PG_PASSWORD:-qpjoy}@postgres:5432/${PG_DB:-qpjoy_market}
       JWT_SECRET: ${JWT_SECRET:-dev-only-secret-replace-in-production}
+      PG_POOL_MAX: ${PG_POOL_MAX:-8}
       NODE_ENV: ${NODE_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
       NPM_SCOPE: ${NPM_SCOPE:-@qpjoy}
       NPM_PREFIX: ${NPM_PREFIX:-electron-}
-      MARKETPLACE_ALLOWLIST: ${MARKETPLACE_ALLOWLIST:-@qpjoy/electron-plugin-tunnel,@qpjoy/electron-plugin-notyet,@qpjoy/electron-game-suduku}
+      MARKETPLACE_ALLOWLIST: ${MARKETPLACE_ALLOWLIST:-@qpjoy/electron-plugin-tunnel,@qpjoy/electron-plugin-notyet,@qpjoy/electron-game-suduku,@qpjoy/electron-plugin-hdo}
       REQUIRE_VERIFICATION: ${REQUIRE_VERIFICATION:-0}
       SPA_DIST: /app/spa-dist
       # In-container sync scheduler (no system cron needed).
