@@ -53,6 +53,10 @@ export async function spaRoutes(app: FastifyInstance): Promise<void> {
   // Cache the index for SPA fallback.
   const indexHtml = readFileSync(indexPath, 'utf8');
 
+  app.get('/admin', async (_req, reply) => {
+    reply.redirect('/admin/', 302);
+  });
+
   app.setNotFoundHandler((req, reply) => {
     if (req.url.startsWith('/admin/')) {
       reply.code(200).type('text/html').send(indexHtml);
