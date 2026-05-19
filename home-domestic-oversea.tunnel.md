@@ -671,6 +671,26 @@ wg-business-direct:
 
 如果用户选择“全局 WireGuard”，可以生成 `AllowedIPs = 0.0.0.0/0, ::/0`；但这应是显式高级开关，不能作为默认。
 
+### 2026-05-20 客户端与一键安装口径
+
+客户端 UI 分成两层：
+
+- 普通客户端页只保留控制面 URL、连接/更新 HDO、运行状态、下一步。用户最小配置应能在有 mesh 许可时自动注册设备、准备 WireGuard profile、拉取 manifest 和订阅。
+- 高级页保留完整能力：设备 ID、公钥/Overlay IP、AllowedIPs、手动拉 manifest、手动拉订阅、上报插件清单、执行服务端任务、轮换密钥和查看生成物。
+
+WireGuard peer 的“服务端生成”应理解为控制面生成 peer 记录和 profile artifact：
+
+- `electron-server` 负责分配 overlay IP、选择 domestic endpoint、下发 peer public key、DNS、AllowedIPs、generation。
+- 客户端拿到 manifest/profile 后先探测本机路由，把本地 LAN/VPN 网段从 `AllowedIPs` 中切出去，再写入最终 conf。
+- 默认安全模型仍推荐设备私钥在本机生成，只把公钥上报给服务端。若产品上必须支持“服务端生成完整 conf（含 PrivateKey）”，应做成高级/一次性下发模式：短 TTL、审计、加密存储或下载后即删，不能作为普通默认。
+- WG 主模式可以由服务端下发 `AllowedIPs = 0.0.0.0/0, ::/0`，但必须经过客户端本地路由避让；业务级分流仍应优先由 mihomo TUN/规则处理。
+
+管理后台“一键安装”可以成立，但必须补齐执行面：
+
+- 只把 `docker/wg-mihomo-stack`、`docker/hysteria2-mihomo-stack` 和 `scripts/wireguard.sh` 放进 `docker/hdo-gateway-stack`，还只能做到“后台生成命令/脚本”。
+- 真正点击安装需要 `hdo-agent` 或 SSH/SCP runner。`electron-server` 负责创建安装任务、保存节点状态和审计；agent/runner 在 D/O/H 机器上执行 docker compose、WireGuard、mihomo、Hysteria2、Caddy 配置。
+- `docker/hdo-gateway-stack` 应成为统一执行包，内部包含 domestic 的 Mihomo+WireGuard、oversea 的 Mihomo+Hysteria2、legacy `wireguard.sh` 兼容入口，以及幂等 `install domestic|oversea|home` 命令。
+
 ### Claude/Codex 这类软件的“直连 WG”问题
 
 P0 优先验证方案：`mihomo TUN + wireguard outbound`。

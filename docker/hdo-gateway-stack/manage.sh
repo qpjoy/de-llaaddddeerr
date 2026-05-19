@@ -522,14 +522,20 @@ cmd_menu() {
 
 maybe_register_node() {
   local kind="$1" name="$2" public_host="$3" overlay_ip="$4"
+  local metadata="null"
   [ -n "${HDO_SERVER_URL:-}" ] || return 0
   [ -n "${HDO_TOKEN:-}" ] || return 0
   require_cmd curl
+
+  if [ "$kind" = "domestic" ] && [ -n "${HDO_DOMESTIC_PUBLIC_KEY:-}" ]; then
+    metadata="{\"wireGuard\":{\"publicKey\":\"${HDO_DOMESTIC_PUBLIC_KEY}\",\"listenPort\":${HDO_WG_PORT:-51888},\"endpointHost\":\"${public_host}\"}}"
+  fi
+
   curl -fsS \
     -H "authorization: Bearer ${HDO_TOKEN}" \
     -H "content-type: application/json" \
     -X POST \
-    --data "{\"name\":\"${name}\",\"kind\":\"${kind}\",\"publicHost\":\"${public_host}\",\"overlayIp\":\"${overlay_ip}\",\"status\":\"pending\"}" \
+    --data "{\"name\":\"${name}\",\"kind\":\"${kind}\",\"publicHost\":\"${public_host}\",\"overlayIp\":\"${overlay_ip}\",\"status\":\"pending\",\"metadata\":${metadata}}" \
     "${HDO_SERVER_URL%/}/api/v1/hdo/admin/nodes" >/dev/null \
     && ok "registered ${kind} node in HDO control plane" \
     || echo "hdo: node registration failed; generated local config anyway" >&2

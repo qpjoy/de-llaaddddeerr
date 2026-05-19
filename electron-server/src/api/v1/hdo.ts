@@ -425,8 +425,11 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       reply.code(400);
       return { error: 'name and valid kind required' };
     }
+    const id =
+      asOptionalString(body.id) ??
+      (await hdoStore.listNodes()).find((row) => row.kind === kind && row.name === name)?.id;
     const row = await hdoStore.upsertNode({
-      id: asOptionalString(body.id) ?? undefined,
+      id: id ?? undefined,
       name,
       kind,
       publicHost: asOptionalString(body.publicHost),
@@ -730,7 +733,7 @@ async function buildManifest(device: HdoDeviceRow) {
         overlayIp: device.overlayIp,
         address: device.overlayIp ? wireGuardAddress(device.overlayIp) : null
       },
-      domestic: wireGuardNodeSummary(visibleNodes.find((row) => row.kind === 'domestic'))
+      domestic: wireGuardNodeSummary(pickDomesticNode(visibleNodes))
     },
     nodes: visibleNodes,
     services: visibleServices,
@@ -1004,6 +1007,17 @@ function wireGuardNodeSummary(node: HdoNodeRow | undefined) {
     endpoint: publicKey && host ? `${host}:${port}` : null,
     overlayIp: node.overlayIp
   };
+}
+
+function pickDomesticNode(nodes: HdoNodeRow[]): HdoNodeRow | undefined {
+  const domesticNodes = nodes.filter((row) => row.kind === 'domestic');
+  return (
+    domesticNodes.find((row) => {
+      const metadata = asPlainObject(row.metadata);
+      const wireGuard = asPlainObject(metadata?.wireGuard) ?? asPlainObject(metadata?.wg);
+      return Boolean(asOptionalString(wireGuard?.publicKey));
+    }) ?? domesticNodes[0]
+  );
 }
 
 function publicHostWithoutPort(value: string | null): string | null {

@@ -264,6 +264,11 @@ export function adminHtml(): string {
       border-color: var(--warn);
       background: var(--warn);
     }
+    .step-mark.optional {
+      color: var(--muted);
+      border-color: var(--line);
+      background: #eef2f6;
+    }
     .step-title {
       font-weight: 700;
     }
@@ -375,6 +380,7 @@ export function adminHtml(): string {
       <nav class="nav">
         <button class="active" data-tab="overview">总览</button>
         <button data-tab="client">客户端</button>
+        <button data-tab="advanced">高级</button>
         <button data-tab="server">服务器</button>
         <button data-tab="install">安装</button>
         <button data-tab="egress">出站</button>
@@ -420,6 +426,7 @@ export function adminHtml(): string {
             </label>
             <div class="row">
               <button class="btn primary" id="saveSettings">保存</button>
+              <button class="btn good" id="quickStart">连接 / 更新 HDO</button>
               <span class="status"><span class="dot ok"></span><span id="serverText">未配置</span></span>
             </div>
           </div>
@@ -427,6 +434,15 @@ export function adminHtml(): string {
           <div class="panel span-3 metric"><strong id="mNodes">0</strong><span>节点</span></div>
           <div class="panel span-3 metric"><strong id="mDevices">0</strong><span>本用户设备</span></div>
           <div class="panel span-3 metric"><strong id="mTasks">0</strong><span>待处理任务</span></div>
+
+          <div class="panel span-12">
+            <h3>运行状态</h3>
+            <p class="sub" id="wgStatus">未生成</p>
+            <ul class="list" id="wgRouteWarnings"></ul>
+            <div class="row" style="margin-top: 12px;">
+              <button class="btn" data-jump-tab="advanced">打开高级工具</button>
+            </div>
+          </div>
 
           <div class="panel span-6">
             <h3>还需要完成</h3>
@@ -436,7 +452,11 @@ export function adminHtml(): string {
             <h3>已完成</h3>
             <ul class="list" id="completed"></ul>
           </div>
+        </div>
+      </section>
 
+      <section class="tab" id="tab-advanced">
+        <div class="grid">
           <div class="panel span-6">
             <h3>客户端设备</h3>
             <label>设备 ID
@@ -456,18 +476,22 @@ export function adminHtml(): string {
           </div>
           <div class="panel span-6">
             <h3>WireGuard Peer</h3>
-            <p class="sub" id="wgStatus">未生成</p>
             <label>公钥
               <input id="wgPublicKey" readonly />
             </label>
             <label>Overlay IP
               <input id="wgOverlayIp" readonly />
             </label>
+            <label>AllowedIPs
+              <textarea id="wgAllowedIps" readonly></textarea>
+            </label>
+            <label>配置文件
+              <input id="wgConfigPath" readonly />
+            </label>
             <div class="row">
               <button class="btn primary" id="prepareWireGuard">生成 / 更新本机 Peer</button>
               <button class="btn" id="rotateWireGuard">轮换密钥</button>
             </div>
-            <ul class="list" id="wgRouteWarnings"></ul>
           </div>
           <div class="panel span-6">
             <h3>本地生成物</h3>
@@ -515,6 +539,10 @@ export function adminHtml(): string {
             </div>
             <label>公网地址<input id="nodePublicHost" placeholder="domestic.example.com:8080" /></label>
             <label>Overlay IP<input id="nodeOverlayIp" placeholder="100.88.0.1" /></label>
+            <div class="grid">
+              <label class="span-8">WG 公钥<input id="nodeWgPublicKey" placeholder="domestic wg public key" /></label>
+              <label class="span-4">WG 端口<input id="nodeWgListenPort" type="number" min="1" max="65535" placeholder="51888" /></label>
+            </div>
             <button class="btn primary" id="saveNode">保存节点</button>
           </div>
           <div class="panel span-6">
@@ -752,7 +780,7 @@ export function adminHtml(): string {
         },
         {
           label: '注册当前客户端',
-          detail: deviceReady ? '当前客户端已有设备记录。' : '到客户端页注册本机设备。',
+          detail: deviceReady ? '当前客户端已有设备记录。' : '在客户端页点“连接 / 更新 HDO”会自动注册；高级页可手动填写设备 ID。',
           done: deviceReady,
           tab: 'client'
         },
@@ -760,19 +788,19 @@ export function adminHtml(): string {
           label: '生成本机 WireGuard peer',
           detail: wireGuardReady
             ? (wireGuardConfigReady ? '本机已生成密钥并保存 WireGuard 配置。' : '本机密钥已生成；等待 domestic 节点下发 WireGuard 公钥和 endpoint。')
-            : '在客户端页生成本机 peer；私钥只保存在本机，服务端只接收公钥、本地路由探测结果和 overlay IP。',
+            : '客户端页会自动准备 peer；需要手动轮换密钥或查看公钥时再进高级页。',
           done: wireGuardReady,
           tab: 'client'
         },
         {
           label: '生成 manifest 与 Mihomo 订阅',
-          detail: subscriptionReady ? '本地已保存最近一次 manifest 和 Mihomo 订阅。' : '节点与服务就绪后，在客户端页拉取 manifest 和订阅。',
+          detail: subscriptionReady ? '本地已保存最近一次 manifest 和 Mihomo 订阅。' : '节点与服务就绪后，客户端页会一并拉取 manifest 和订阅；高级页可单独刷新。',
           done: subscriptionReady,
           tab: 'client'
         },
         {
           label: '配置 oversea 显式出站',
-          detail: overseaReady ? '已登记 oversea 节点。' : '需要访问 npm/GitHub/Docker 时再配置，不应开启 domestic 全局代理。',
+          detail: overseaReady ? '已登记 oversea 节点。' : '可选项。需要访问 npm/GitHub/Docker 时再配置，不影响 Home overlay 和 SSH 测试。',
           done: overseaReady,
           tab: 'egress',
           optional: true
@@ -885,13 +913,15 @@ export function adminHtml(): string {
         (actions ? '<div class="row">' + actions + '</div>' : '') +
         '</div>';
 
-      $('deployChecklist').innerHTML = state.steps.map((step) => (
-        '<li>' +
-        '<span class="step-mark ' + (step.done ? 'ok' : 'warn') + '">' + (step.done ? '&#10003;' : '!') + '</span>' +
-        '<div><div class="step-title">' + escapeHtml(step.label + (step.optional ? '（可选）' : '')) + '</div>' +
-        '<div class="step-detail">' + escapeHtml(step.detail) + '</div></div>' +
-        '</li>'
-      )).join('');
+      $('deployChecklist').innerHTML = state.steps.map((step) => {
+        const markClass = step.done ? 'ok' : (step.optional ? 'optional' : 'warn');
+        const markText = step.done ? '&#10003;' : (step.optional ? '可' : '!');
+        return '<li>' +
+          '<span class="step-mark ' + markClass + '">' + markText + '</span>' +
+          '<div><div class="step-title">' + escapeHtml(step.label + (step.optional ? '（可选）' : '')) + '</div>' +
+          '<div class="step-detail">' + escapeHtml(step.detail) + '</div></div>' +
+          '</li>';
+      }).join('');
       renderList('overviewNextActions', state.nextActions.length ? state.nextActions : ['暂无，基础流程已经完成']);
     }
 
@@ -942,6 +972,8 @@ export function adminHtml(): string {
       }
       $('wgPublicKey').value = peer && peer.publicKey ? peer.publicKey : '';
       $('wgOverlayIp').value = peer && peer.overlayIp ? peer.overlayIp : '';
+      $('wgAllowedIps').value = peer && Array.isArray(peer.allowedIps) ? peer.allowedIps.join(', ') : '';
+      $('wgConfigPath').value = peer && peer.configPath ? peer.configPath : '';
       $('wgConfigOut').value = peer && peer.config ? peer.config : '';
       $('wgStatus').textContent = peer && peer.publicKey
         ? (peer.config ? '已生成本机 peer 与 WireGuard 配置。' : '已生成本机 peer，等待 domestic 节点补齐 WireGuard endpoint。')
@@ -971,6 +1003,7 @@ export function adminHtml(): string {
       const titles = {
         overview: ['总览', '查看 HDO 从服务端部署到客户端订阅的完成状态。'],
         client: ['客户端', '注册本机设备，拉取 HDO manifest 与 Mihomo 订阅。'],
+        advanced: ['高级', '手动管理设备、WireGuard peer、生成物和服务端待处理任务。'],
         server: ['服务器', '维护 domestic/home/oversea 节点、服务目录和限速记录。'],
         install: ['安装', '按角色生成安装命令，先完成 domestic-vps，再接入 home 和 oversea。'],
         egress: ['出站', '保留 domestic 公网入口，只让指定任务走 oversea。']
@@ -1005,6 +1038,26 @@ export function adminHtml(): string {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ hdoControlBaseUrl: formValue('baseUrl') })
+      });
+    }).catch(() => undefined));
+    $('quickStart').addEventListener('click', () => runAction('连接 HDO', async () => {
+      await request('/api/settings', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ hdoControlBaseUrl: formValue('baseUrl') })
+      });
+      const prepared = await request('/api/client/wireguard/prepare', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ rotate: false })
+      });
+      if (prepared && prepared.ok === false) {
+        throw new Error(prepared.message || 'WireGuard 配置尚未就绪');
+      }
+      await request('/api/client/subscription', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({})
       });
     }).catch(() => undefined));
     $('registerDevice').addEventListener('click', () => runAction('注册设备', async () => {
@@ -1066,7 +1119,8 @@ export function adminHtml(): string {
           kind: $('nodeKind').value,
           publicHost: formValue('nodePublicHost'),
           overlayIp: formValue('nodeOverlayIp'),
-          status: 'pending'
+          status: 'pending',
+          metadata: nodeMetadata()
         })
       });
     }).catch(() => undefined));
@@ -1099,6 +1153,20 @@ export function adminHtml(): string {
     }).catch(() => undefined));
 
     load();
+
+    function nodeMetadata() {
+      const publicKey = formValue('nodeWgPublicKey');
+      const listenPort = Number(formValue('nodeWgListenPort') || 0);
+      const publicHost = formValue('nodePublicHost');
+      if (!publicKey && !listenPort) return null;
+      return {
+        wireGuard: {
+          publicKey,
+          listenPort: listenPort || 51888,
+          endpointHost: publicHost ? publicHost.replace(/^https?:\\/\\//, '').replace(/:.*/, '') : null
+        }
+      };
+    }
   <\/script>
 </body>
 </html>`;

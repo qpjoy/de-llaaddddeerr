@@ -18,6 +18,8 @@ export interface HdoWireGuardPeerSettings {
   overlayIp?: string | null;
   address?: string | null;
   config?: string | null;
+  configPath?: string | null;
+  allowedIps?: string[] | null;
   routeProbe?: unknown | null;
   canUseDefaultMesh?: boolean | null;
   lastError?: string | null;

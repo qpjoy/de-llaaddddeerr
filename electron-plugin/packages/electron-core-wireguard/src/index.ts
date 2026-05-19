@@ -202,6 +202,38 @@ export function renderHdoClientWireGuardConfig(input: {
   });
 }
 
+export function excludeLocalRoutesFromAllowedIps(
+  allowedIps: string[],
+  localCidrs: string[]
+): string[] {
+  const exclusions = localCidrs
+    .map((cidr) => normalizeCidr(cidr))
+    .filter((cidr): cidr is string => Boolean(cidr) && cidr !== '0.0.0.0/0')
+    .map((cidr) => cidrRange(cidr))
+    .filter((range): range is { start: number; end: number } => Boolean(range));
+  if (exclusions.length === 0) return [...allowedIps];
+
+  const out: string[] = [];
+  for (const allowedIp of allowedIps) {
+    const normalized = normalizeCidr(allowedIp);
+    const baseRange = normalized ? cidrRange(normalized) : null;
+    if (!normalized || !baseRange) {
+      out.push(allowedIp);
+      continue;
+    }
+
+    let ranges = [baseRange];
+    for (const exclusion of exclusions) {
+      ranges = ranges.flatMap((range) => subtractRange(range, exclusion));
+      if (ranges.length === 0) break;
+    }
+    for (const range of ranges) {
+      out.push(...rangeToCidrs(range.start, range.end));
+    }
+  }
+  return uniqueStrings(out);
+}
+
 export function detectWireGuardCli(command = 'wg'): WireGuardCliStatus {
   try {
     const version = execFileSync(command, ['--version'], {
@@ -530,6 +562,36 @@ function cidrRange(value: string): { start: number; end: number } | null {
     start: parsed.network,
     end: (parsed.network + size - 1) >>> 0
   };
+}
+
+function subtractRange(
+  base: { start: number; end: number },
+  exclusion: { start: number; end: number }
+): Array<{ start: number; end: number }> {
+  if (exclusion.end < base.start || exclusion.start > base.end) return [base];
+  const out: Array<{ start: number; end: number }> = [];
+  if (exclusion.start > base.start) {
+    out.push({ start: base.start, end: Math.min(base.end, exclusion.start - 1) });
+  }
+  if (exclusion.end < base.end) {
+    out.push({ start: Math.max(base.start, exclusion.end + 1), end: base.end });
+  }
+  return out;
+}
+
+function rangeToCidrs(start: number, end: number): string[] {
+  const out: string[] = [];
+  let cursor = start;
+  while (cursor <= end) {
+    let blockSize = cursor === 0 ? 2 ** 32 : ((cursor & -cursor) >>> 0);
+    if (blockSize === 0) blockSize = 2 ** 32;
+    const remaining = end - cursor + 1;
+    while (blockSize > remaining) blockSize /= 2;
+    const prefix = 32 - Math.log2(blockSize);
+    out.push(`${intToIpv4(cursor)}/${prefix}`);
+    cursor += blockSize;
+  }
+  return out;
 }
 
 function ipv4ToInt(value: string): number | null {
