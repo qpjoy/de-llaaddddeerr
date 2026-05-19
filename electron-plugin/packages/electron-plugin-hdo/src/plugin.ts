@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import type { App, IpcMain, Session } from 'electron';
 
 import { HdoAdminServer } from './admin/AdminServer';
@@ -23,6 +25,22 @@ interface PluginHostBridge {
       expiresAt: string | null;
       user: Record<string, unknown> | null;
     } | null;
+    listInstalled?(): unknown[];
+  };
+  pluginManager?: {
+    install?(input: {
+      id?: string | null;
+      npm?: string | null;
+      version?: string | null;
+      tarballUrl?: string | null;
+      autoGrant?: boolean | 'manifest' | string[] | null;
+      activate?: boolean | null;
+    }): Promise<unknown>;
+    uninstall?(id: string): Promise<unknown>;
+    activate?(id: string): Promise<unknown>;
+    deactivate?(id: string): Promise<unknown>;
+    upgrade?(id: string, version?: string | null): Promise<unknown>;
+    listInstalled?(): unknown[];
   };
   serverBaseUrl?: string | null;
 }
@@ -51,7 +69,9 @@ const hdoPlugin = {
     const controller = new HdoController({
       userDataDir: ctx.userDataDir,
       marketServerBaseUrl: ctx.host.serverBaseUrl ?? null,
+      bundledWireGuardDir: defaultBundledWireGuardDir(),
       marketplaceDb: ctx.host.marketplaceDb,
+      pluginManager: ctx.host.pluginManager,
       log: ctx.log
     });
     const admin = new HdoAdminServer(controller, {
@@ -63,6 +83,9 @@ const hdoPlugin = {
       snapshot: () => controller.snapshot(),
       updateSettings: (patch: Record<string, unknown>) => controller.updateSettings(patch),
       registerDevice: (input: HdoDeviceRegistrationInput) => controller.registerDevice(input),
+      reportPluginStates: (deviceId?: string | null) => controller.reportPluginStates(deviceId),
+      prepareWireGuardPeer: (input?: { rotate?: boolean | null }) => controller.prepareWireGuardPeer(input),
+      executePendingTasks: () => controller.executePendingTasks(),
       refreshManifest: (deviceId?: string | null) => controller.refreshManifest(deviceId),
       refreshSubscription: (deviceId?: string | null) => controller.refreshSubscription(deviceId),
       upsertNode: (input: HdoNodeInput) => controller.upsertNode(input),
@@ -82,3 +105,16 @@ const hdoPlugin = {
 };
 
 export default hdoPlugin;
+
+function defaultBundledWireGuardDir(): string {
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath ?? process.cwd();
+  const packageDir = typeof __dirname === 'undefined' ? process.cwd() : __dirname;
+  const candidates = [
+    join(resourcesPath, 'qpjoy-wireguard-engine'),
+    join(resourcesPath, 'wireguard'),
+    resolve(packageDir, '../resources/wireguard'),
+    resolve(process.cwd(), 'resources/qpjoy-wireguard-engine'),
+    resolve(process.cwd(), 'resources/wireguard')
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
+}

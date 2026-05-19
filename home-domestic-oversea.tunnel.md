@@ -1598,7 +1598,7 @@ scripts/manage.sh hdo
      - 客户端面板支持 HDO 控制面 URL、设备注册、readiness、manifest 和 Mihomo 订阅拉取。
      - 服务器面板支持节点、服务、限速记录写入 `electron-server` HDO API。
      - 安装面板集中展示 Domestic/Home/Oversea 命令；出站面板只保留 domestic scoped egress 规则，避免用户误开 host 全局代理。
-     - `@qpjoy/electron-plugin-hdo@0.1.0` 已发布到 npm；下一次包含总览提醒与左侧 tabs 的版本建议发布 `0.1.1`。
+     - `@qpjoy/electron-plugin-hdo@0.1.1` 已可在 `electron-demo/hdo` 开发态启用；下一次包含组织级控制面、mesh 许可、插件清单上报和任务模型的版本建议发布 `0.1.2`。
      - `electron-demo` 开发态从 workspace seed HDO；打包态从 `node_modules/@qpjoy/electron-plugin-hdo` seed HDO。
      - `electron-server` 默认 `MARKETPLACE_ALLOWLIST` 已包含 `@qpjoy/electron-plugin-hdo`，发布后可绕过 npm search 延迟。
      - `pnpm --dir electron-demo package` 已验证 packaged app 内包含 HDO 插件。
@@ -1623,3 +1623,374 @@ scripts/manage.sh hdo
    - OpenVPN 仍运行时，`172.16/17/18/19` 不受影响。
    - Claude profile 走海外出口，CN profile 直连。
    - tokens relay 流式响应不被代理层缓冲。
+
+## 2026-05-19：HDO 组织级控制面与统一插件后台
+
+本轮把 HDO 从“单用户设备订阅”推进到“组织/企业网络控制面”的第一版。新的原则是：
+
+- `electron-server` 是 HDO mesh 的权威控制面；用户是否能入网、能拿哪些 profile、能收到哪些订阅，由登录账号和 mesh 许可决定。
+- HDO 客户端只持有本机运行所需的配置和私有材料；服务端只保存用户、设备、公开状态、插件清单、profile/订阅生成物和管理任务，不应要求用户把本机私钥上传到服务端。
+- 管理员通过服务器后台创建 mesh group，把用户加入 mesh group，设置角色和状态；用户登录插件市场后，HDO 插件自动复用市场 token 拉取 readiness、manifest、mihomo 订阅和待处理任务。
+- 多个 mesh group 可以共用同一套 `electron-server`。节点、服务、profile 后续可通过 `metadata.meshGroupIds` 或 `metadata.meshGroups` 限定可见范围；未配置该 metadata 时默认对所有已授权 mesh 可见。
+- 远程“帮用户安装/启停插件”先以设备任务模型落地：服务端创建任务，客户端拉取并展示。实际执行任务必须再接入插件市场 host 的安装/启停 API，并在客户端本地做确认、执行日志和回执。
+
+### 新增服务端数据模型
+
+新增迁移：
+
+```text
+electron-server/db/migrations/0006_hdo_org_control.sql
+```
+
+新增表：
+
+- `hdo_mesh_groups`
+  - 组织网络分组，字段包括 `name`、`slug`、`default_profile_id`、`enabled`、`metadata`。
+  - 一个 server 可以承载多个 mesh 组。
+- `hdo_mesh_memberships`
+  - 用户入网许可，字段包括 `mesh_group_id`、`user_id`、`role`、`status`、`profile_id`。
+  - `role`: `member | admin | support`。
+  - `status`: `active | suspended | revoked`。
+  - 只有 `active` 且所属 mesh group `enabled=true` 的 membership 才能生成有效 manifest/订阅。
+- `hdo_device_plugin_states`
+  - 客户端上报的本机插件清单，字段包括 `device_id`、`plugin_id`、`npm`、`version`、`state`、`manifest`、`health`。
+  - 用于服务器后台查看某个用户/设备安装了哪些插件。
+- `hdo_device_tasks`
+  - 管理端下发给用户或设备的任务。
+  - `kind`: `install-plugin | uninstall-plugin | activate-plugin | deactivate-plugin | apply-hdo-profile`。
+  - `status`: `pending | claimed | done | failed | cancelled`。
+
+JSON 存储同步扩展了 `hdo.json` 的 `meshGroups`、`memberships`、`pluginStates`、`deviceTasks` 字段，旧文件缺字段时会自动按空数组兼容。
+
+### 新增/调整 HDO API
+
+客户端 API：
+
+```text
+POST /api/v1/hdo/devices/register
+POST /api/v1/hdo/devices/:deviceId/plugin-states
+GET  /api/v1/hdo/device-tasks?status=pending
+POST /api/v1/hdo/device-tasks/:id/complete
+GET  /api/v1/hdo/readiness
+GET  /api/v1/hdo/manifest/:deviceId
+GET  /api/v1/hdo/subscriptions/:deviceId/mihomo.yaml
+```
+
+管理端 API：
+
+```text
+GET  /api/v1/hdo/admin/overview
+GET  /api/v1/hdo/admin/mesh-groups
+POST /api/v1/hdo/admin/mesh-groups
+GET  /api/v1/hdo/admin/memberships
+POST /api/v1/hdo/admin/memberships
+GET  /api/v1/hdo/admin/device-plugin-states
+GET  /api/v1/hdo/admin/device-tasks
+POST /api/v1/hdo/admin/device-tasks
+```
+
+`readiness` 现在会返回 mesh 许可状态。没有有效 mesh 许可时，`blockers` 包含 `No active HDO mesh license`，HDO 客户端总览会提示“缺 mesh 许可”。
+
+`manifest` 现在按 mesh 许可过滤：
+
+- 没有有效 membership：`license.active=false`，`nodes/services/profiles` 为空，仍返回设备和许可状态，方便 UI 解释原因。
+- 有有效 membership：返回该用户可见的 nodes/services/profiles/rateLimits，并包含 `license` 和 `mesh` 摘要。
+- `metadata.meshGroupIds` 或 `metadata.meshGroups` 存在时，只对对应 mesh group 可见。
+
+### 新增服务器后台页面
+
+新增页面：
+
+```text
+electron-market/packages/admin-ui/src/pages/ServerHdoPage.vue
+```
+
+入口：
+
+```text
+/admin/#/server/hdo
+```
+
+左侧服务器导航新增 `HDO`。当前页面包含四个 tab：
+
+- `Mesh`
+  - 创建/更新 mesh group。
+  - 快速创建默认组织网络。
+  - 选择默认 HDO profile。
+- `许可`
+  - 把用户加入 mesh group。
+  - 设置 `member/admin/support` 角色。
+  - 设置 `active/suspended/revoked` 状态。
+- `设备`
+  - 查看所有已注册 HDO 设备。
+  - 查看设备上报的插件清单。
+- `任务`
+  - 给用户或指定设备创建远程任务。
+  - 当前只创建任务，不自动执行安装；客户端执行器后续接入插件 host API。
+
+这页是 HDO “服务端和客户端同一管理界面”的第一步：服务器后台能看到用户、设备、插件、许可、任务；客户端 HDO 面板也能显示自己的许可和任务状态。后续可把其他官方插件的管理 UI 作为 server-side admin panel 注册到这里，实现“管理员从服务器后台进入某个用户/某个插件的管理视图”。
+
+### HDO 插件客户端改动
+
+`@qpjoy/electron-plugin-hdo` 新增能力：
+
+- `HdoController.snapshot()` 返回：
+  - `localPlugins`: 本机已安装插件清单。
+  - `deviceTasks`: 当前用户待处理 HDO 任务。
+  - 管理员登录时的 `admin.overview` 摘要，包括 users、meshGroups、memberships、devices、pluginStates、tasks。
+- `registerDevice()` 会把 `localPlugins` 一并提交给服务端。
+- `snapshot()` 在已注册设备时会尽力上报插件清单，失败只写日志，不阻塞页面。
+- 本地 HDO 面板新增：
+  - mesh 许可状态。
+  - 待处理任务数量。
+  - “上报插件清单”按钮。
+  - 本机插件清单表。
+  - 服务端待处理任务表。
+
+上一阶段只完成了任务的控制面和展示面；下面的“远程任务执行器”已继续补上客户端执行闭环。执行器仍依赖这些前提：
+
+- 插件市场 host 暴露安全的安装/启停 API。
+- HDO 插件按任务 `kind` 调用 host API。
+- 客户端显示任务执行日志、失败原因、用户确认。
+- 完成后调用 `/api/v1/hdo/device-tasks/:id/complete` 回写结果。
+
+### 2026-05-19 续：HDO 远程任务执行器
+
+已补齐“服务端创建任务，HDO 客户端领取并执行”的第一版闭环。
+
+插件市场 host 新增受控能力：
+
+- `PluginHostBridge.pluginManager`
+  - `listInstalled()`
+  - `install({ id, npm, version, tarballUrl, autoGrant, activate })`
+  - `uninstall(id)`
+  - `activate(id)`
+  - `deactivate(id)`
+  - `upgrade(id, version)`
+- 新增权限 `marketplace:plugins`。该权限是高危权限，代表插件可以安装、卸载、启停或升级市场插件。
+- `@qpjoy/electron-plugin-hdo` 从 `0.1.1` 升到 `0.1.2`，manifest 增加 `marketplace:plugins`。已有安装需要重新授权该权限后，HDO 才会执行服务端下发的插件任务。
+
+服务端任务状态流：
+
+```text
+pending -> claimed -> done
+                   \-> failed
+                   \-> cancelled
+```
+
+新增客户端 API：
+
+```text
+POST /api/v1/hdo/device-tasks/:id/claim
+POST /api/v1/hdo/device-tasks/:id/complete
+```
+
+`claim` 解决多客户端并发问题：
+
+- HDO 客户端只执行 `pending` 任务。
+- 执行前先调用 `claim`。
+- 如果任务指定了 `deviceId`，只有对应设备可以领取。
+- 如果任务是用户级任务且没有 `deviceId`，第一台领取成功的客户端会把任务变为 `claimed`。
+- 执行完成后客户端调用 `complete` 写回 `done/failed` 和执行结果。
+
+HDO 客户端新增：
+
+- `executePendingTasks()`
+  - 拉取当前用户 `pending` 任务。
+  - 过滤当前设备可执行任务。
+  - 逐个 claim。
+  - 按 `kind` 调用 `host.pluginManager`。
+  - 执行后回写 `done/failed`。
+  - 最后重新上报本机插件清单。
+- `snapshot()` 在 `autoRunDeviceTasks !== false` 且存在可执行任务时，会后台触发执行器；不会阻塞 UI。
+- 本地 HDO 面板新增“执行待处理任务”按钮，并显示 `lastTaskRun` 摘要。
+
+当前支持的任务 payload：
+
+```json
+{
+  "kind": "install-plugin",
+  "pluginId": "qpjoy.electron-plugin-tunnel",
+  "payload": {
+    "version": "0.1.16",
+    "autoGrant": "manifest",
+    "activate": true
+  }
+}
+```
+
+`install-plugin` 规则：
+
+- `pluginId` 优先按 marketplace entry id 查找。
+- 如果 `payload.npm` 存在，则按 npm 包名查找。
+- `autoGrant: "manifest"` 或 `autoGrant: true` 会授予目标插件 manifest 中声明的全部权限。
+- `activate: true` 会在安装/授权后立即激活。
+- 默认不自动授权、不自动激活，除非 payload 明确要求。
+
+其他任务：
+
+- `activate-plugin`: 激活指定插件。
+- `deactivate-plugin`: 停用指定插件。
+- `uninstall-plugin`: 停用后卸载指定插件。
+- `apply-hdo-profile`: 写入 HDO 本地 `activeProfileId`，后续接入本地 profile 渲染。
+
+安全边界：
+
+- 远程任务执行依赖用户本地已经授权 HDO 的 `marketplace:plugins` 权限；没有该权限时，任务会失败并回写错误。
+- 服务端只下发 intent，不直接拿到用户本机文件系统或私钥。
+- `autoGrant` 必须由服务端 payload 显式给出；默认安装不会静默授予目标插件权限。
+- 管理后台创建任务时应优先给指定设备创建任务；用户级任务适合“任选一台在线设备执行一次”的场景，不适合“所有设备都执行一次”。
+
+### 2026-05-19 续：客户端 WireGuard peer 与本地路由探测
+
+旧 `scripts/wireguard.sh` 的模型是服务端生成完整客户端配置，用户下载后导入 WireGuard 客户端。HDO 新模型改成：
+
+- 客户端本机生成 WireGuard 私钥/公钥。
+- 服务端只保存公钥、设备信息、本地路由探测摘要和 overlay IP。
+- 私钥不上传到 `electron-server`，也不进入 manifest。
+- manifest 只下发 domestic peer、公钥、endpoint、HDO route CIDR 和服务列表。
+
+这带来两个好处：
+
+1. 安全边界更清楚：服务端可以禁用用户、吊销 mesh 许可、停止下发新配置，但不会持有用户设备私钥。
+2. 客户端能看到本机真实网络：可以探测 macOS/Linux/Windows 本地 IPv4 route，提前发现与 HDO 默认 `100.88/100.89/100.90` 网段冲突，给出“切换 mesh overlay 网段”的提示。
+
+实现边界：
+
+- `@qpjoy/electron-core-wireguard` 新增：
+  - WireGuard 配置渲染 `renderHdoClientWireGuardConfig()`。
+  - 本地路由探测 `buildHdoRouteProbe()`。
+  - CIDR overlap 检测。
+  - WireGuard runtime 解析 `resolveWireGuardRuntime()`。
+- WireGuard CLI 不依赖用户本地环境。HDO 默认只使用：
+  - 插件资源目录里的 `resources/wireguard/<platform-arch>/wg(.exe|.gz)`。
+  - 或平台 engine 包 `@qpjoy/electron-core-wireguard-engine-<platform-arch>`。
+  - 复制/解压到插件 `userData/bin` 后再执行。
+- 系统 PATH 里的 `wg` 只允许作为显式开发兜底；正式插件流程不能要求 Windows/macOS/Linux 用户预装命令行工具。
+
+HDO 不是内置插件，因此 WG 引擎不打进 `@qpjoy/electron-market` 主体。正确分发链路是：
+
+```text
+用户安装 @qpjoy/electron-plugin-hdo
+  -> npm 安装 @qpjoy/electron-core-wireguard
+  -> npm 按 os/cpu 自动选择一个 @qpjoy/electron-core-wireguard-engine-<platform-arch>
+  -> HDO 启动时把 engine 包中的 wg/wg.exe 复制/解压到 userData/bin
+```
+
+平台包目录：
+
+```text
+electron-plugin/packages/wireguard-engines/darwin-arm64
+electron-plugin/packages/wireguard-engines/darwin-x64
+electron-plugin/packages/wireguard-engines/linux-arm64
+electron-plugin/packages/wireguard-engines/linux-x64
+electron-plugin/packages/wireguard-engines/win32-x64
+```
+
+这些包已有发布骨架、真实 `wg`/`wg.exe` 资源和 `prepack` 校验；缺少二进制时不能打包发布，避免发出空 engine 包。
+
+当前已填入的 WG 资源来源：
+
+- `darwin-arm64` / `darwin-x64`：从 Homebrew `wireguard-tools` bottle `1.0.20260223` 提取 `wg`。
+- `linux-arm64` / `linux-x64`：从官方 `wireguard-tools-1.0.20260223.tar.xz` 在 Alpine 容器中静态编译 `wg`。不要直接使用 Homebrew Linux bottle，因为其 ELF interpreter 指向 Linuxbrew 环境，不适合作为普通 Linux 发行包。
+- `win32-x64`：从官方 WireGuard Windows MSI `wireguard-amd64-1.1.msi` 提取 `wg.exe`。
+- 每个 engine 包都带 `COPYING`，license 为 `GPL-2.0-only`。
+
+插件市场安装注意：
+
+- HDO 通过 npm/下载安装，不作为 host seed 内置。
+- 如果服务端给的是 HDO tarball URL，插件市场也必须用 npm 安装而不能只解包 tarball；否则 HDO 的 `@qpjoy/electron-core-wireguard` 和平台 optional engine 不会进入插件目录。
+- `PluginStore` 已把 `@qpjoy/electron-plugin-hdo` 标记为需要 package-manager 安装的插件。
+
+发布顺序：
+
+1. `prepare-engine`：先发布五个 `@qpjoy/electron-core-wireguard-engine-<platform-arch>` 包。
+2. `prepare-core`：发布 `@qpjoy/electron-core-mihomo`，供 `@qpjoy/electron-plugin-tunnel` 和 HDO 复用 Mihomo 路由编译能力。
+3. `prepare-core`：发布 `@qpjoy/electron-core-wireguard`，它的 optionalDependencies 指向平台 engine 包。
+4. `prepare-host`：发布 `@qpjoy/electron-plugin-sdk` 与 `@qpjoy/electron-market`。
+5. `prepare-plugin`：最后发布 `@qpjoy/electron-plugin-hdo`，确保安装时能解析到 core 与 engine 依赖。
+
+HDO 客户端新增本地 API：
+
+```text
+POST /api/client/wireguard/prepare
+```
+
+该 API 做这些事：
+
+1. 运行本地 route probe。
+2. 使用内置 WG CLI 生成或轮换 key pair。
+3. 调用 `/api/v1/hdo/devices/register` 注册设备，只上传 public key 和 route probe。
+4. 服务端按用户设备分配默认 `100.89.0.x` overlay IP。
+5. 拉取 manifest。
+6. 如果 manifest 已包含 domestic WireGuard 公钥和 endpoint，则渲染本机 WireGuard profile。
+
+服务端设备注册变化：
+
+- `/api/v1/hdo/devices/register` 如果收到 `publicKey` 且设备还没有 `overlayIp`，会从默认 user CIDR 中分配 `100.89.0.10+`。
+- 注册时如果同一个 device id 已属于其他用户，会返回 `409`，避免设备 id 被抢占。
+- `buildManifest()` 新增 `wireGuard` 段：
+
+```json
+{
+  "wireGuard": {
+    "routeCidrs": ["100.88.0.0/16", "100.89.0.0/16", "100.90.0.0/16"],
+    "client": {
+      "publicKey": "...",
+      "overlayIp": "100.89.0.10",
+      "address": "100.89.0.10/32"
+    },
+    "domestic": {
+      "nodeId": "domestic-main",
+      "publicKey": "...",
+      "endpointHost": "121.43.253.179",
+      "listenPort": 51888,
+      "endpoint": "121.43.253.179:51888",
+      "overlayIp": "100.88.0.1"
+    }
+  }
+}
+```
+
+domestic 节点需要在 `metadata.wireGuard` 中保存：
+
+```json
+{
+  "wireGuard": {
+    "publicKey": "<domestic wg public key>",
+    "listenPort": 51888
+  }
+}
+```
+
+如果 domestic 节点还没有这段 metadata，客户端仍能生成本机 key pair 并注册公钥，但只显示“等待 domestic 节点补齐 WireGuard endpoint”，不会生成可导入的 profile。
+
+路由规则原则：
+
+- 默认 WireGuard `AllowedIPs` 只包含 HDO overlay/service 网段，不使用 `0.0.0.0/0`。
+- 外网访问仍优先交给 Mihomo/Hysteria2/显式 egress；“全局 WG”必须是高级显式开关。
+- 如果用户本机 LAN/VPN 与 HDO overlay 冲突，客户端只告警，不静默覆盖本机路由。
+- 后续可以根据 route probe 为不同客户端生成更细的服务路由，例如避开用户本地 `192.168.x.0/24`，或在 home LAN 冲突时提示改用 service VIP/NAT 模式。
+
+### 安全边界
+
+- mesh 许可由服务端统一管理，比把 WireGuard peer/订阅直接手工分发给用户更可控。
+- 禁用用户账号或把 membership 改为 `suspended/revoked` 后，新的 manifest/订阅不会再下发有效 nodes/services。
+- 已经下载到客户端本地的旧配置仍可能短时间可用；后续需要在 gateway/mihomo/WireGuard 层增加短 TTL、generation 校验和服务端撤销同步。
+- 插件清单上报只应保存管理必要信息：plugin id、npm、version、state、manifest 摘要和 health。不要上传插件私有数据、用户文件路径、token 或本机私钥。
+- 服务端创建“远程安装插件”任务只是 intent。真正执行必须在客户端本地经过 host 权限校验，并限制为官方/已允许插件来源。
+
+### 兼容性
+
+- 旧 HDO 表 `hdo_nodes`、`hdo_devices`、`hdo_services`、`hdo_profiles`、`hdo_rate_limits`、`hdo_subscription_artifacts` 保持不变。
+- 新增 mesh 许可后，已有用户如果没有 membership，会看到“缺 mesh 许可”，manifest/订阅不会再包含有效服务。部署后管理员需要先在 `/admin/#/server/hdo` 创建默认 mesh 并给用户发放 active membership。
+- JSON 存储旧 `hdo.json` 可继续读；缺少的新数组会自动补空。
+- Postgres 通过 `0006_hdo_org_control.sql` 迁移新增表，不改历史 migration checksum。
+
+### 下一步实现顺序
+
+1. 在 `electron-server/scripts/manage.sh deploy hdo` 成功后可选自动调用 admin API 创建默认 mesh、domestic node 和管理员 membership。
+2. 按 `prepare-engine -> prepare-core -> prepare-host -> prepare-plugin` 顺序发布 npm 包，并在 `electron-server` 执行 sync/精确同步。
+3. 为 `metadata.meshGroupIds` 做服务器后台表单支持，让节点、服务、profile 可以明确归属某些 mesh group。
+4. 增加短 TTL/撤销策略，避免用户被禁用后旧订阅长期可用。
+5. 把 HDO `activeProfileId` 接入本地 mihomo/WireGuard 渲染，让 `apply-hdo-profile` 不只是记状态，而是实际切换本机网络策略。

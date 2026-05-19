@@ -423,9 +423,10 @@ export function adminHtml(): string {
               <span class="status"><span class="dot ok"></span><span id="serverText">未配置</span></span>
             </div>
           </div>
-          <div class="panel span-4 metric"><strong id="mNodes">0</strong><span>节点</span></div>
-          <div class="panel span-4 metric"><strong id="mDevices">0</strong><span>本用户设备</span></div>
-          <div class="panel span-4 metric"><strong id="mServices">0</strong><span>服务</span></div>
+          <div class="panel span-3 metric"><strong id="mLicense">未授权</strong><span>Mesh 许可</span></div>
+          <div class="panel span-3 metric"><strong id="mNodes">0</strong><span>节点</span></div>
+          <div class="panel span-3 metric"><strong id="mDevices">0</strong><span>本用户设备</span></div>
+          <div class="panel span-3 metric"><strong id="mTasks">0</strong><span>待处理任务</span></div>
 
           <div class="panel span-6">
             <h3>还需要完成</h3>
@@ -446,9 +447,27 @@ export function adminHtml(): string {
             </label>
             <div class="row">
               <button class="btn primary" id="registerDevice">注册 / 更新设备</button>
+              <button class="btn" id="reportPlugins">上报插件清单</button>
+              <button class="btn good" id="runTasks">执行待处理任务</button>
               <button class="btn" id="fetchManifest">拉取 manifest</button>
               <button class="btn" id="fetchSubscription">拉取订阅</button>
             </div>
+            <p class="sub" id="taskRunnerText"></p>
+          </div>
+          <div class="panel span-6">
+            <h3>WireGuard Peer</h3>
+            <p class="sub" id="wgStatus">未生成</p>
+            <label>公钥
+              <input id="wgPublicKey" readonly />
+            </label>
+            <label>Overlay IP
+              <input id="wgOverlayIp" readonly />
+            </label>
+            <div class="row">
+              <button class="btn primary" id="prepareWireGuard">生成 / 更新本机 Peer</button>
+              <button class="btn" id="rotateWireGuard">轮换密钥</button>
+            </div>
+            <ul class="list" id="wgRouteWarnings"></ul>
           </div>
           <div class="panel span-6">
             <h3>本地生成物</h3>
@@ -458,6 +477,23 @@ export function adminHtml(): string {
             <label>Mihomo 订阅
               <textarea id="subscriptionOut" readonly></textarea>
             </label>
+            <label>WireGuard 配置
+              <textarea id="wgConfigOut" readonly></textarea>
+            </label>
+          </div>
+          <div class="panel span-6">
+            <h3>本机插件清单</h3>
+            <table class="table">
+              <thead><tr><th>插件</th><th>版本</th><th>状态</th></tr></thead>
+              <tbody id="localPluginsTable"></tbody>
+            </table>
+          </div>
+          <div class="panel span-6">
+            <h3>服务端待处理任务</h3>
+            <table class="table">
+              <thead><tr><th>类型</th><th>插件</th><th>状态</th></tr></thead>
+              <tbody id="deviceTasksTable"></tbody>
+            </table>
           </div>
         </div>
       </section>
@@ -604,17 +640,23 @@ export function adminHtml(): string {
       $('serverText').textContent = s.serverBaseUrl || '未配置';
       $('manifestOut').value = settings.lastManifest ? JSON.stringify(settings.lastManifest, null, 2) : '';
       $('subscriptionOut').value = settings.lastSubscription || '';
+      renderWireGuardPeer(settings.wireGuardPeer || null);
       $('cmdDomestic').textContent = safeCommands.domestic || '';
       $('cmdHome').textContent = safeCommands.home || '';
       $('cmdOversea').textContent = safeCommands.oversea || '';
 
       const ready = s.readiness || {};
       const summary = ready.summary || {};
+      const mesh = summary.mesh || {};
       $('mNodes').textContent = String((summary.nodes && summary.nodes.total) || 0);
       $('mDevices').textContent = String(summary.devices || 0);
-      $('mServices').textContent = String(summary.services || 0);
+      $('mLicense').textContent = mesh.licensed ? '已授权' : '未授权';
+      $('mTasks').textContent = String((s.deviceTasks || []).length || 0);
+      $('taskRunnerText').textContent = taskRunnerText(s);
       renderList('nextActions', ready.nextActions || ['等待连接 HDO 控制面']);
       renderList('completed', ready.completed || []);
+      renderLocalPlugins(s.localPlugins || []);
+      renderDeviceTasks(s.deviceTasks || []);
 
       const deployment = deploymentState(s);
       renderDeployment(deployment);
@@ -641,12 +683,16 @@ export function adminHtml(): string {
       const adminServices = s.admin && Array.isArray(s.admin.services) ? s.admin.services : [];
       const hasNode = (kind) => Number(summaryNodes[kind] || 0) > 0 || adminNodes.some((node) => node && node.kind === kind);
       const serviceCount = Number(summary.services || 0) || adminServices.filter((svc) => svc && svc.enabled !== false).length;
+      const mesh = summary.mesh || {};
       const hasServer = Boolean(s.serverBaseUrl);
       const loggedIn = Boolean(s.session && s.session.loggedIn);
+      const licenseReady = Boolean(mesh.licensed);
       const domesticReady = hasNode('domestic');
       const homeReady = hasNode('home');
       const overseaReady = hasNode('oversea');
       const deviceReady = Number(summary.devices || 0) > 0 || (Array.isArray(s.devices) && s.devices.length > 0) || Boolean(settings.deviceId);
+      const wireGuardReady = Boolean(settings.wireGuardPeer && settings.wireGuardPeer.publicKey);
+      const wireGuardConfigReady = Boolean(settings.wireGuardPeer && settings.wireGuardPeer.config);
       const subscriptionReady = Boolean(settings.lastManifest && settings.lastSubscription);
       const controlReachable = Boolean(ready.summary);
 
@@ -661,6 +707,12 @@ export function adminHtml(): string {
           label: '登录插件市场',
           detail: loggedIn ? '已复用插件市场登录态调用 HDO API。' : '先在插件市场登录 / 注册，HDO 客户端才能读取服务端配置。',
           done: loggedIn,
+          tab: 'client'
+        },
+        {
+          label: '获得 mesh 许可',
+          detail: licenseReady ? '服务端已给当前用户发放有效 HDO mesh 许可。' : '请管理员在服务器 HDO 控制面把当前用户加入一个启用中的 mesh 组。',
+          done: licenseReady,
           tab: 'client'
         },
         {
@@ -685,6 +737,14 @@ export function adminHtml(): string {
           label: '注册当前客户端',
           detail: deviceReady ? '当前客户端已有设备记录。' : '到客户端页注册本机设备。',
           done: deviceReady,
+          tab: 'client'
+        },
+        {
+          label: '生成本机 WireGuard peer',
+          detail: wireGuardReady
+            ? (wireGuardConfigReady ? '本机已生成密钥并保存 WireGuard 配置。' : '本机密钥已生成；等待 domestic 节点下发 WireGuard 公钥和 endpoint。')
+            : '在客户端页生成本机 peer；私钥只保存在本机，服务端只接收公钥、本地路由探测结果和 overlay IP。',
+          done: wireGuardReady,
           tab: 'client'
         },
         {
@@ -725,6 +785,11 @@ export function adminHtml(): string {
         shortLabel = '控制面不可达';
         actions.push({ tab: 'install', label: '查看安装命令', primary: true });
         actions.push({ tab: 'server', label: '登记服务器' });
+      } else if (!licenseReady) {
+        title = 'HDO 服务端可达，但当前用户还没有 mesh 许可';
+        detail = '管理员需要在服务器 HDO 控制面创建 mesh 组，并把当前登录用户加入该组；之后客户端才能生成有效 manifest 和订阅。';
+        shortLabel = '缺 mesh 许可';
+        actions.push({ tab: 'client', label: '查看客户端', primary: true });
       } else if (!domesticReady) {
         title = 'Domestic 服务端尚未完成登记';
         detail = 'HDO 插件已经就绪，下一步是在 domestic-vps 部署服务端，并在服务器页保存 domestic 节点。';
@@ -746,6 +811,11 @@ export function adminHtml(): string {
         detail = '注册本机设备后，服务端会按用户和设备生成 manifest 与 Mihomo 订阅。';
         shortLabel = '待注册设备';
         actions.push({ tab: 'client', label: '注册设备', primary: true });
+      } else if (!wireGuardReady) {
+        title = '当前客户端还没有本机 WireGuard peer';
+        detail = 'HDO 会用内置 WireGuard CLI 在本机生成密钥，并把公钥和本地路由探测结果注册到服务端；私钥不会上传。';
+        shortLabel = '待生成 WG peer';
+        actions.push({ tab: 'client', label: '生成 WG peer', primary: true });
       } else if (!subscriptionReady) {
         title = '客户端已注册，继续拉取订阅';
         detail = '在客户端页拉取 manifest 与 Mihomo 订阅，本地会保存最近一次生成物。';
@@ -775,6 +845,7 @@ export function adminHtml(): string {
         domesticReady,
         homeReady,
         deviceReady,
+        wireGuardReady,
         subscriptionReady
       };
     }
@@ -826,6 +897,46 @@ export function adminHtml(): string {
         '</td><td>' + escapeHtml(svc.protocol || '') + '</td><td>' +
         escapeHtml((svc.domains || []).join(', ')) + '</td></tr>'
       )).join('') : '<tr><td colspan="4" class="muted">暂无服务</td></tr>';
+    }
+
+    function renderLocalPlugins(plugins) {
+      $('localPluginsTable').innerHTML = plugins.length ? plugins.map((plugin) => (
+        '<tr><td>' + escapeHtml(plugin.pluginId || '') + '</td><td>' +
+        escapeHtml(plugin.version || '') + '</td><td>' +
+        escapeHtml(plugin.state || '') + '</td></tr>'
+      )).join('') : '<tr><td colspan="3" class="muted">暂无本机插件记录</td></tr>';
+    }
+
+    function renderDeviceTasks(tasks) {
+      $('deviceTasksTable').innerHTML = tasks.length ? tasks.map((task) => (
+        '<tr><td>' + escapeHtml(task.kind || '') + '</td><td>' +
+        escapeHtml(task.pluginId || '') + '</td><td>' +
+        escapeHtml(task.status || '') + '</td></tr>'
+      )).join('') : '<tr><td colspan="3" class="muted">暂无待处理任务</td></tr>';
+    }
+
+    function renderWireGuardPeer(peer) {
+      const routeProbe = peer && peer.routeProbe ? peer.routeProbe : {};
+      const warnings = [];
+      if (peer && peer.lastError) warnings.push(peer.lastError);
+      if (routeProbe && Array.isArray(routeProbe.warnings)) warnings.push(...routeProbe.warnings);
+      if (routeProbe && Array.isArray(routeProbe.conflicts) && routeProbe.conflicts.length) {
+        warnings.push('重叠网段：' + routeProbe.conflicts.map((row) => row.localCidr + ' ↔ ' + row.hdoCidr).join(', '));
+      }
+      $('wgPublicKey').value = peer && peer.publicKey ? peer.publicKey : '';
+      $('wgOverlayIp').value = peer && peer.overlayIp ? peer.overlayIp : '';
+      $('wgConfigOut').value = peer && peer.config ? peer.config : '';
+      $('wgStatus').textContent = peer && peer.publicKey
+        ? (peer.config ? '已生成本机 peer 与 WireGuard 配置。' : '已生成本机 peer，等待 domestic 节点补齐 WireGuard endpoint。')
+        : '未生成。HDO 会使用插件自带 WireGuard CLI，本机无需预装 wg 命令。';
+      renderList('wgRouteWarnings', warnings.length ? warnings : ['本机路由未发现与 HDO 默认网段冲突']);
+    }
+
+    function taskRunnerText(s) {
+      if (s.taskRunnerBusy) return '任务执行器正在运行。';
+      const last = s.settings && s.settings.lastTaskRun;
+      if (!last) return '默认会自动执行可领取的 pending 任务；也可以手动点击执行。';
+      return '上次执行：done ' + (last.done || 0) + ' / failed ' + (last.failed || 0) + ' / skipped ' + (last.skipped || 0);
     }
 
     function renderServiceNodeOptions(nodes) {
@@ -885,6 +996,38 @@ export function adminHtml(): string {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ id: formValue('deviceId'), label: formValue('deviceLabel') })
+      });
+      await load();
+    });
+    $('reportPlugins').addEventListener('click', async () => {
+      await request('/api/client/plugin-states', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ deviceId: formValue('deviceId') })
+      });
+      await load();
+    });
+    $('prepareWireGuard').addEventListener('click', async () => {
+      await request('/api/client/wireguard/prepare', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ rotate: false })
+      });
+      await load();
+    });
+    $('rotateWireGuard').addEventListener('click', async () => {
+      await request('/api/client/wireguard/prepare', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ rotate: true })
+      });
+      await load();
+    });
+    $('runTasks').addEventListener('click', async () => {
+      await request('/api/client/tasks/run', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({})
       });
       await load();
     });

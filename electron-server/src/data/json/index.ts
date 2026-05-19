@@ -23,8 +23,16 @@ import type {
   EntitlementsStore,
   GameHighScoreRow,
   GameScoresStore,
+  HdoDevicePluginStateRow,
   HdoDeviceRow,
   HdoDeviceStatus,
+  HdoDeviceTaskKind,
+  HdoDeviceTaskRow,
+  HdoDeviceTaskStatus,
+  HdoMeshGroupRow,
+  HdoMeshMembershipRole,
+  HdoMeshMembershipRow,
+  HdoMeshMembershipStatus,
   HdoNodeKind,
   HdoNodeRow,
   HdoNodeStatus,
@@ -52,12 +60,16 @@ interface AuditFile { nextId: number; entries: AuditEntry[]; }
 interface GameScoresFile { scores: GameHighScoreRow[]; }
 interface HdoFile {
   state: { generation: number; updatedAt: string };
+  meshGroups: HdoMeshGroupRow[];
+  memberships: HdoMeshMembershipRow[];
   nodes: HdoNodeRow[];
   devices: HdoDeviceRow[];
   services: HdoServiceRow[];
   profiles: HdoProfileRow[];
   rateLimits: HdoRateLimitRow[];
   artifacts: HdoSubscriptionArtifactRow[];
+  pluginStates: HdoDevicePluginStateRow[];
+  deviceTasks: HdoDeviceTaskRow[];
 }
 
 function readJson<T>(name: string, fallback: T): T {
@@ -90,17 +102,36 @@ function nowIso(): string {
 function emptyHdoFile(): HdoFile {
   return {
     state: { generation: 1, updatedAt: nowIso() },
+    meshGroups: [],
+    memberships: [],
     nodes: [],
     devices: [],
     services: [],
     profiles: [],
     rateLimits: [],
-    artifacts: []
+    artifacts: [],
+    pluginStates: [],
+    deviceTasks: []
   };
 }
 
 function readHdo(): HdoFile {
-  return readJson<HdoFile>('hdo.json', emptyHdoFile());
+  const file = readJson<Partial<HdoFile>>('hdo.json', emptyHdoFile());
+  return {
+    ...emptyHdoFile(),
+    ...file,
+    state: file.state ?? { generation: 1, updatedAt: nowIso() },
+    meshGroups: file.meshGroups ?? [],
+    memberships: file.memberships ?? [],
+    nodes: file.nodes ?? [],
+    devices: file.devices ?? [],
+    services: file.services ?? [],
+    profiles: file.profiles ?? [],
+    rateLimits: file.rateLimits ?? [],
+    artifacts: file.artifacts ?? [],
+    pluginStates: file.pluginStates ?? [],
+    deviceTasks: file.deviceTasks ?? []
+  };
 }
 
 function writeHdo(file: HdoFile): void {
@@ -433,6 +464,92 @@ const hdo: HdoStore = {
     writeHdo(file);
     return generation;
   },
+  async listMeshGroups() {
+    return readHdo().meshGroups;
+  },
+  async upsertMeshGroup(input) {
+    const file = readHdo();
+    const now = nowIso();
+    const idx = input.id
+      ? file.meshGroups.findIndex((row) => row.id === input.id)
+      : file.meshGroups.findIndex((row) => row.slug === input.slug);
+    if (idx >= 0) {
+      const existing = file.meshGroups[idx];
+      file.meshGroups[idx] = {
+        ...existing,
+        name: input.name,
+        slug: input.slug,
+        description: input.description === undefined ? existing.description : input.description,
+        defaultProfileId:
+          input.defaultProfileId === undefined ? existing.defaultProfileId : input.defaultProfileId,
+        enabled: input.enabled ?? existing.enabled,
+        metadata: input.metadata === undefined ? existing.metadata : input.metadata,
+        updatedAt: now
+      };
+      bumpHdoGeneration(file);
+      writeHdo(file);
+      return file.meshGroups[idx];
+    }
+    const row: HdoMeshGroupRow = {
+      id: input.id ?? randomUUID(),
+      name: input.name,
+      slug: input.slug,
+      description: input.description ?? null,
+      defaultProfileId: input.defaultProfileId ?? null,
+      enabled: input.enabled ?? true,
+      metadata: input.metadata ?? null,
+      createdAt: now,
+      updatedAt: now
+    };
+    file.meshGroups.push(row);
+    bumpHdoGeneration(file);
+    writeHdo(file);
+    return row;
+  },
+  async listMeshMemberships(meshGroupId) {
+    const rows = readHdo().memberships;
+    return meshGroupId ? rows.filter((row) => row.meshGroupId === meshGroupId) : rows;
+  },
+  async upsertMeshMembership(input) {
+    const file = readHdo();
+    const now = nowIso();
+    const idx = input.id
+      ? file.memberships.findIndex((row) => row.id === input.id)
+      : file.memberships.findIndex(
+          (row) => row.meshGroupId === input.meshGroupId && row.userId === input.userId
+        );
+    if (idx >= 0) {
+      const existing = file.memberships[idx];
+      file.memberships[idx] = {
+        ...existing,
+        meshGroupId: input.meshGroupId,
+        userId: input.userId,
+        role: input.role ?? existing.role,
+        status: input.status ?? existing.status,
+        profileId: input.profileId === undefined ? existing.profileId : input.profileId,
+        metadata: input.metadata === undefined ? existing.metadata : input.metadata,
+        updatedAt: now
+      };
+      bumpHdoGeneration(file);
+      writeHdo(file);
+      return file.memberships[idx];
+    }
+    const row: HdoMeshMembershipRow = {
+      id: input.id ?? randomUUID(),
+      meshGroupId: input.meshGroupId,
+      userId: input.userId,
+      role: input.role ?? 'member',
+      status: input.status ?? 'active',
+      profileId: input.profileId ?? null,
+      metadata: input.metadata ?? null,
+      createdAt: now,
+      updatedAt: now
+    };
+    file.memberships.push(row);
+    bumpHdoGeneration(file);
+    writeHdo(file);
+    return row;
+  },
   async listNodes() {
     return readHdo().nodes;
   },
@@ -489,6 +606,9 @@ const hdo: HdoStore = {
     };
     writeHdo(file);
     return file.nodes[idx];
+  },
+  async listAllDevices() {
+    return readHdo().devices;
   },
   async listDevicesForUser(userId) {
     return readHdo().devices.filter((row) => row.userId === userId);
@@ -737,6 +857,113 @@ const hdo: HdoStore = {
     file.artifacts.push(row);
     writeHdo(file);
     return row;
+  },
+  async listDevicePluginStates(deviceId) {
+    const rows = readHdo().pluginStates;
+    return deviceId ? rows.filter((row) => row.deviceId === deviceId) : rows;
+  },
+  async upsertDevicePluginStates(deviceId, plugins) {
+    const file = readHdo();
+    const now = nowIso();
+    const out: HdoDevicePluginStateRow[] = [];
+    for (const plugin of plugins) {
+      const idx = file.pluginStates.findIndex(
+        (row) => row.deviceId === deviceId && row.pluginId === plugin.pluginId
+      );
+      if (idx >= 0) {
+        const existing = file.pluginStates[idx];
+        file.pluginStates[idx] = {
+          ...existing,
+          npm: plugin.npm === undefined ? existing.npm : plugin.npm,
+          name: plugin.name === undefined ? existing.name : plugin.name,
+          version: plugin.version === undefined ? existing.version : plugin.version,
+          state: plugin.state,
+          manifest: plugin.manifest === undefined ? existing.manifest : plugin.manifest,
+          health: plugin.health === undefined ? existing.health : plugin.health,
+          lastSeenAt: now,
+          updatedAt: now
+        };
+        out.push(file.pluginStates[idx]);
+      } else {
+        const row: HdoDevicePluginStateRow = {
+          id: randomUUID(),
+          deviceId,
+          pluginId: plugin.pluginId,
+          npm: plugin.npm ?? null,
+          name: plugin.name ?? null,
+          version: plugin.version ?? null,
+          state: plugin.state,
+          manifest: plugin.manifest ?? null,
+          health: plugin.health ?? null,
+          lastSeenAt: now,
+          createdAt: now,
+          updatedAt: now
+        };
+        file.pluginStates.push(row);
+        out.push(row);
+      }
+    }
+    writeHdo(file);
+    return out;
+  },
+  async listDeviceTasks(filter = {}) {
+    let rows = readHdo().deviceTasks;
+    if (filter.userId) rows = rows.filter((row) => row.userId === filter.userId);
+    if (filter.deviceId) rows = rows.filter((row) => row.deviceId === filter.deviceId);
+    if (filter.status) rows = rows.filter((row) => row.status === filter.status);
+    return rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  },
+  async createDeviceTask(input) {
+    const file = readHdo();
+    const now = nowIso();
+    const row: HdoDeviceTaskRow = {
+      id: randomUUID(),
+      userId: input.userId,
+      deviceId: input.deviceId ?? null,
+      pluginId: input.pluginId ?? null,
+      kind: input.kind,
+      status: input.status ?? 'pending',
+      payload: input.payload ?? null,
+      result: null,
+      createdByUserId: input.createdByUserId ?? null,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null
+    };
+    file.deviceTasks.push(row);
+    writeHdo(file);
+    return row;
+  },
+  async claimDeviceTask(id, input) {
+    const file = readHdo();
+    const idx = file.deviceTasks.findIndex((row) => row.id === id);
+    if (idx === -1 || file.deviceTasks[idx].status !== 'pending') return null;
+    const existing = file.deviceTasks[idx];
+    const now = nowIso();
+    file.deviceTasks[idx] = {
+      ...existing,
+      deviceId: existing.deviceId ?? input.deviceId ?? null,
+      status: 'claimed',
+      result: input.result ?? existing.result,
+      updatedAt: now,
+      completedAt: null
+    };
+    writeHdo(file);
+    return file.deviceTasks[idx];
+  },
+  async completeDeviceTask(id, input) {
+    const file = readHdo();
+    const idx = file.deviceTasks.findIndex((row) => row.id === id);
+    if (idx === -1) return null;
+    file.deviceTasks[idx] = {
+      ...file.deviceTasks[idx],
+      status: input.status,
+      result: input.result ?? null,
+      updatedAt: nowIso(),
+      completedAt: ['done', 'failed', 'cancelled'].includes(input.status) ? nowIso() : null
+    };
+    writeHdo(file);
+    return file.deviceTasks[idx];
   }
 };
 

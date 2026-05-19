@@ -23,6 +23,7 @@ interface PluginRuntimeOptions {
   registry: PluginRegistry;
   pluginsRoot: string;
   serverBaseUrl?: string | null;
+  pluginManager?: NonNullable<PluginContext['host']['pluginManager']>;
 }
 
 interface LiveInstance {
@@ -184,6 +185,31 @@ export class PluginRuntime {
         session: this.opts.host.session,
         marketplaceDb: this.opts.marketplaceDb,
         serverBaseUrl: this.opts.serverBaseUrl ?? null,
+        pluginManager: this.opts.pluginManager
+          ? {
+              listInstalled: () => this.opts.pluginManager?.listInstalled?.() ?? [],
+              install: async (input) => {
+                gate.require('marketplace:plugins');
+                return this.opts.pluginManager?.install?.(input);
+              },
+              uninstall: async (id) => {
+                gate.require('marketplace:plugins');
+                return this.opts.pluginManager?.uninstall?.(id);
+              },
+              activate: async (id) => {
+                gate.require('marketplace:plugins');
+                return this.opts.pluginManager?.activate?.(id);
+              },
+              deactivate: async (id) => {
+                gate.require('marketplace:plugins');
+                return this.opts.pluginManager?.deactivate?.(id);
+              },
+              upgrade: async (id, version) => {
+                gate.require('marketplace:plugins');
+                return this.opts.pluginManager?.upgrade?.(id, version);
+              }
+            }
+          : undefined,
         applyProxy: async () => {
           gate.require('system:proxy');
           // No-op here; real impl coordinates with whichever plugin owns proxy.

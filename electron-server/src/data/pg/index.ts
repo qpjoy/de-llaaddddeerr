@@ -18,8 +18,16 @@ import type {
   GameHighScoreRow,
   GameScoresStore,
   HdoArtifactKind,
+  HdoDevicePluginStateRow,
   HdoDeviceRow,
   HdoDeviceStatus,
+  HdoDeviceTaskKind,
+  HdoDeviceTaskRow,
+  HdoDeviceTaskStatus,
+  HdoMeshGroupRow,
+  HdoMeshMembershipRole,
+  HdoMeshMembershipRow,
+  HdoMeshMembershipStatus,
   HdoNodeKind,
   HdoNodeRow,
   HdoNodeStatus,
@@ -431,6 +439,108 @@ const hdo: HdoStore = {
     );
     return Number(rows[0].generation);
   },
+  async listMeshGroups() {
+    const { rows } = await getPool().query(
+      `SELECT * FROM hdo_mesh_groups ORDER BY enabled DESC, name ASC`
+    );
+    return rows.map(rowToHdoMeshGroup);
+  },
+  async upsertMeshGroup(input) {
+    const params = [
+      input.name,
+      input.slug,
+      input.description ?? null,
+      input.defaultProfileId ?? null,
+      input.enabled ?? true,
+      input.metadata ?? null
+    ];
+    const { rows } = input.id
+      ? await getPool().query(
+          `INSERT INTO hdo_mesh_groups (
+             id, name, slug, description, default_profile_id, enabled, metadata
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+           ON CONFLICT (id) DO UPDATE SET
+             name = excluded.name,
+             slug = excluded.slug,
+             description = excluded.description,
+             default_profile_id = excluded.default_profile_id,
+             enabled = excluded.enabled,
+             metadata = excluded.metadata,
+             updated_at = now()
+           RETURNING *`,
+          [input.id, ...params]
+        )
+      : await getPool().query(
+          `INSERT INTO hdo_mesh_groups (
+             name, slug, description, default_profile_id, enabled, metadata
+           ) VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (slug) DO UPDATE SET
+             name = excluded.name,
+             description = excluded.description,
+             default_profile_id = excluded.default_profile_id,
+             enabled = excluded.enabled,
+             metadata = excluded.metadata,
+             updated_at = now()
+           RETURNING *`,
+          params
+        );
+    await hdo.bumpGeneration();
+    return rowToHdoMeshGroup(rows[0]);
+  },
+  async listMeshMemberships(meshGroupId) {
+    const { rows } = meshGroupId
+      ? await getPool().query(
+          `SELECT * FROM hdo_mesh_memberships
+           WHERE mesh_group_id = $1
+           ORDER BY updated_at DESC`,
+          [meshGroupId]
+        )
+      : await getPool().query(
+          `SELECT * FROM hdo_mesh_memberships ORDER BY updated_at DESC`
+        );
+    return rows.map(rowToHdoMeshMembership);
+  },
+  async upsertMeshMembership(input) {
+    const params = [
+      input.meshGroupId,
+      input.userId,
+      input.role ?? 'member',
+      input.status ?? 'active',
+      input.profileId ?? null,
+      input.metadata ?? null
+    ];
+    const { rows } = input.id
+      ? await getPool().query(
+          `INSERT INTO hdo_mesh_memberships (
+             id, mesh_group_id, user_id, role, status, profile_id, metadata
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+           ON CONFLICT (id) DO UPDATE SET
+             mesh_group_id = excluded.mesh_group_id,
+             user_id = excluded.user_id,
+             role = excluded.role,
+             status = excluded.status,
+             profile_id = excluded.profile_id,
+             metadata = excluded.metadata,
+             updated_at = now()
+           RETURNING *`,
+          [input.id, ...params]
+        )
+      : await getPool().query(
+          `INSERT INTO hdo_mesh_memberships (
+             mesh_group_id, user_id, role, status, profile_id, metadata
+           ) VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (mesh_group_id, user_id) DO UPDATE SET
+             role = excluded.role,
+             status = excluded.status,
+             profile_id = excluded.profile_id,
+             metadata = excluded.metadata,
+             updated_at = now()
+           RETURNING *`,
+          params
+        );
+    await hdo.bumpGeneration();
+    return rowToHdoMeshMembership(rows[0]);
+  },
   async listNodes() {
     const { rows } = await getPool().query(
       `SELECT * FROM hdo_nodes ORDER BY kind ASC, name ASC`
@@ -489,6 +599,12 @@ const hdo: HdoStore = {
       [id, input.status ?? 'online', input.metadata ?? null]
     );
     return rows[0] ? rowToHdoNode(rows[0]) : null;
+  },
+  async listAllDevices() {
+    const { rows } = await getPool().query(
+      `SELECT * FROM hdo_devices ORDER BY updated_at DESC`
+    );
+    return rows.map(rowToHdoDevice);
   },
   async listDevicesForUser(userId) {
     const { rows } = await getPool().query(
@@ -727,6 +843,120 @@ const hdo: HdoStore = {
       ]
     );
     return rowToHdoArtifact(rows[0]);
+  },
+  async listDevicePluginStates(deviceId) {
+    const { rows } = deviceId
+      ? await getPool().query(
+          `SELECT * FROM hdo_device_plugin_states
+           WHERE device_id = $1
+           ORDER BY plugin_id ASC`,
+          [deviceId]
+        )
+      : await getPool().query(
+          `SELECT * FROM hdo_device_plugin_states ORDER BY updated_at DESC`
+        );
+    return rows.map(rowToHdoDevicePluginState);
+  },
+  async upsertDevicePluginStates(deviceId, plugins) {
+    const out: HdoDevicePluginStateRow[] = [];
+    for (const plugin of plugins) {
+      const { rows } = await getPool().query(
+        `INSERT INTO hdo_device_plugin_states (
+           device_id, plugin_id, npm, name, version, state, manifest, health, last_seen_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+         ON CONFLICT (device_id, plugin_id) DO UPDATE SET
+           npm = excluded.npm,
+           name = excluded.name,
+           version = excluded.version,
+           state = excluded.state,
+           manifest = excluded.manifest,
+           health = excluded.health,
+           last_seen_at = now(),
+           updated_at = now()
+         RETURNING *`,
+        [
+          deviceId,
+          plugin.pluginId,
+          plugin.npm ?? null,
+          plugin.name ?? null,
+          plugin.version ?? null,
+          plugin.state,
+          plugin.manifest ?? null,
+          plugin.health ?? null
+        ]
+      );
+      out.push(rowToHdoDevicePluginState(rows[0]));
+    }
+    return out;
+  },
+  async listDeviceTasks(filter = {}) {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (filter.userId) {
+      params.push(filter.userId);
+      where.push(`user_id = $${params.length}`);
+    }
+    if (filter.deviceId) {
+      params.push(filter.deviceId);
+      where.push(`device_id = $${params.length}`);
+    }
+    if (filter.status) {
+      params.push(filter.status);
+      where.push(`status = $${params.length}`);
+    }
+    const sql = `SELECT * FROM hdo_device_tasks${
+      where.length ? ` WHERE ${where.join(' AND ')}` : ''
+    } ORDER BY created_at DESC`;
+    const { rows } = await getPool().query(sql, params);
+    return rows.map(rowToHdoDeviceTask);
+  },
+  async createDeviceTask(input) {
+    const { rows } = await getPool().query(
+      `INSERT INTO hdo_device_tasks (
+         user_id, device_id, plugin_id, kind, status, payload, created_by_user_id
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [
+        input.userId,
+        input.deviceId ?? null,
+        input.pluginId ?? null,
+        input.kind,
+        input.status ?? 'pending',
+        input.payload ?? null,
+        input.createdByUserId ?? null
+      ]
+    );
+    return rowToHdoDeviceTask(rows[0]);
+  },
+  async claimDeviceTask(id, input) {
+    const { rows } = await getPool().query(
+      `UPDATE hdo_device_tasks
+         SET status = 'claimed',
+             device_id = COALESCE(device_id, $2),
+             result = COALESCE($3::jsonb, result),
+             updated_at = now(),
+             completed_at = NULL
+       WHERE id = $1 AND status = 'pending'
+       RETURNING *`,
+      [id, input.deviceId ?? null, input.result ?? null]
+    );
+    return rows[0] ? rowToHdoDeviceTask(rows[0]) : null;
+  },
+  async completeDeviceTask(id, input) {
+    const { rows } = await getPool().query(
+      `UPDATE hdo_device_tasks
+         SET status = $2,
+             result = $3,
+             updated_at = now(),
+             completed_at = CASE
+               WHEN $2 IN ('done', 'failed', 'cancelled') THEN now()
+               ELSE completed_at
+             END
+       WHERE id = $1
+       RETURNING *`,
+      [id, input.status, input.result ?? null]
+    );
+    return rows[0] ? rowToHdoDeviceTask(rows[0]) : null;
   }
 };
 
@@ -758,6 +988,34 @@ function defaultHdoProfiles(): Array<{
       }
     }
   ];
+}
+
+function rowToHdoMeshGroup(r: Record<string, unknown>): HdoMeshGroupRow {
+  return {
+    id: String(r.id),
+    name: String(r.name),
+    slug: String(r.slug),
+    description: r.description ? String(r.description) : null,
+    defaultProfileId: r.default_profile_id ? String(r.default_profile_id) : null,
+    enabled: Boolean(r.enabled),
+    metadata: (r.metadata as Record<string, unknown> | null) ?? null,
+    createdAt: new Date(String(r.created_at)).toISOString(),
+    updatedAt: new Date(String(r.updated_at)).toISOString()
+  };
+}
+
+function rowToHdoMeshMembership(r: Record<string, unknown>): HdoMeshMembershipRow {
+  return {
+    id: String(r.id),
+    meshGroupId: String(r.mesh_group_id),
+    userId: String(r.user_id),
+    role: String(r.role) as HdoMeshMembershipRole,
+    status: String(r.status) as HdoMeshMembershipStatus,
+    profileId: r.profile_id ? String(r.profile_id) : null,
+    metadata: (r.metadata as Record<string, unknown> | null) ?? null,
+    createdAt: new Date(String(r.created_at)).toISOString(),
+    updatedAt: new Date(String(r.updated_at)).toISOString()
+  };
 }
 
 function rowToHdoNode(r: Record<string, unknown>): HdoNodeRow {
@@ -847,6 +1105,40 @@ function rowToHdoArtifact(r: Record<string, unknown>): HdoSubscriptionArtifactRo
     expiresAt: r.expires_at ? new Date(String(r.expires_at)).toISOString() : null,
     createdAt: new Date(String(r.created_at)).toISOString(),
     updatedAt: new Date(String(r.updated_at)).toISOString()
+  };
+}
+
+function rowToHdoDevicePluginState(r: Record<string, unknown>): HdoDevicePluginStateRow {
+  return {
+    id: String(r.id),
+    deviceId: String(r.device_id),
+    pluginId: String(r.plugin_id),
+    npm: r.npm ? String(r.npm) : null,
+    name: r.name ? String(r.name) : null,
+    version: r.version ? String(r.version) : null,
+    state: String(r.state),
+    manifest: (r.manifest as Record<string, unknown> | null) ?? null,
+    health: (r.health as Record<string, unknown> | null) ?? null,
+    lastSeenAt: new Date(String(r.last_seen_at)).toISOString(),
+    createdAt: new Date(String(r.created_at)).toISOString(),
+    updatedAt: new Date(String(r.updated_at)).toISOString()
+  };
+}
+
+function rowToHdoDeviceTask(r: Record<string, unknown>): HdoDeviceTaskRow {
+  return {
+    id: String(r.id),
+    userId: String(r.user_id),
+    deviceId: r.device_id ? String(r.device_id) : null,
+    pluginId: r.plugin_id ? String(r.plugin_id) : null,
+    kind: String(r.kind) as HdoDeviceTaskKind,
+    status: String(r.status) as HdoDeviceTaskStatus,
+    payload: (r.payload as Record<string, unknown> | null) ?? null,
+    result: (r.result as Record<string, unknown> | null) ?? null,
+    createdByUserId: r.created_by_user_id ? String(r.created_by_user_id) : null,
+    createdAt: new Date(String(r.created_at)).toISOString(),
+    updatedAt: new Date(String(r.updated_at)).toISOString(),
+    completedAt: r.completed_at ? new Date(String(r.completed_at)).toISOString() : null
   };
 }
 

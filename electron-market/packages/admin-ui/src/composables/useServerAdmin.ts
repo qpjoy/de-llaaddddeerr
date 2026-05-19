@@ -48,6 +48,143 @@ export interface SchedulerStatus {
   nextRunAt: string | null;
 }
 
+export interface HdoMeshGroupRow {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  defaultProfileId: string | null;
+  enabled: boolean;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HdoMeshMembershipRow {
+  id: string;
+  meshGroupId: string;
+  userId: string;
+  role: 'member' | 'admin' | 'support';
+  status: 'active' | 'suspended' | 'revoked';
+  profileId: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HdoNodeRow {
+  id: string;
+  name: string;
+  kind: 'domestic' | 'home' | 'oversea';
+  publicHost: string | null;
+  overlayIp: string | null;
+  status: 'pending' | 'online' | 'offline' | 'error';
+  metadata: Record<string, unknown> | null;
+  lastSeenAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HdoDeviceRow {
+  id: string;
+  userId: string;
+  label: string;
+  platform: string | null;
+  publicKey: string | null;
+  overlayIp: string | null;
+  status: 'pending' | 'online' | 'offline' | 'error';
+  metadata: Record<string, unknown> | null;
+  lastSeenAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HdoServiceRow {
+  id: string;
+  name: string;
+  nodeId: string | null;
+  targetHost: string;
+  targetPort: number;
+  protocol: 'tcp' | 'udp' | 'http' | 'https';
+  domains: string[];
+  enabled: boolean;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HdoProfileRow {
+  id: string;
+  name: string;
+  mode: 'home-only' | 'home-foreign' | 'domestic-global';
+  enabled: boolean;
+  rules: Record<string, unknown> | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HdoRateLimitRow {
+  id: string;
+  subjectType: 'user' | 'device' | 'profile' | 'node';
+  subjectId: string;
+  downRate: string | null;
+  downCeil: string | null;
+  upRate: string | null;
+  upCeil: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HdoDevicePluginStateRow {
+  id: string;
+  deviceId: string;
+  pluginId: string;
+  npm: string | null;
+  name: string | null;
+  version: string | null;
+  state: string;
+  manifest: Record<string, unknown> | null;
+  health: Record<string, unknown> | null;
+  lastSeenAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HdoDeviceTaskRow {
+  id: string;
+  userId: string;
+  deviceId: string | null;
+  pluginId: string | null;
+  kind:
+    | 'install-plugin'
+    | 'uninstall-plugin'
+    | 'activate-plugin'
+    | 'deactivate-plugin'
+    | 'apply-hdo-profile';
+  status: 'pending' | 'claimed' | 'done' | 'failed' | 'cancelled';
+  payload: Record<string, unknown> | null;
+  result: Record<string, unknown> | null;
+  createdByUserId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
+export interface HdoOverview {
+  users: PublicUser[];
+  meshGroups: HdoMeshGroupRow[];
+  memberships: HdoMeshMembershipRow[];
+  nodes: HdoNodeRow[];
+  devices: HdoDeviceRow[];
+  services: HdoServiceRow[];
+  profiles: HdoProfileRow[];
+  rateLimits: HdoRateLimitRow[];
+  pluginStates: HdoDevicePluginStateRow[];
+  tasks: HdoDeviceTaskRow[];
+}
+
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const { apiBase } = useMode();
   const headers: Record<string, string> = {
@@ -137,6 +274,59 @@ export function useServerAdmin() {
       if (params.targetId) qs.set('targetId', params.targetId);
       const suffix = qs.toString() ? '?' + qs.toString() : '';
       return api<AuditEntry[]>('/admin/audit' + suffix);
+    },
+
+    async getHdoOverview(): Promise<HdoOverview> {
+      return api<HdoOverview>('/hdo/admin/overview');
+    },
+
+    async upsertHdoMeshGroup(input: {
+      id?: string;
+      name: string;
+      slug?: string | null;
+      description?: string | null;
+      defaultProfileId?: string | null;
+      enabled?: boolean;
+      metadata?: Record<string, unknown> | null;
+    }): Promise<HdoMeshGroupRow> {
+      const out = await api<HdoMeshGroupRow>('/hdo/admin/mesh-groups', {
+        method: 'POST',
+        body: JSON.stringify(input)
+      });
+      toast(`已保存 mesh：${out.name}`);
+      return out;
+    },
+
+    async upsertHdoMembership(input: {
+      id?: string;
+      meshGroupId: string;
+      userId: string;
+      role?: HdoMeshMembershipRow['role'];
+      status?: HdoMeshMembershipRow['status'];
+      profileId?: string | null;
+      metadata?: Record<string, unknown> | null;
+    }): Promise<HdoMeshMembershipRow> {
+      const out = await api<HdoMeshMembershipRow>('/hdo/admin/memberships', {
+        method: 'POST',
+        body: JSON.stringify(input)
+      });
+      toast('HDO mesh 许可已保存');
+      return out;
+    },
+
+    async createHdoDeviceTask(input: {
+      userId: string;
+      deviceId?: string | null;
+      pluginId?: string | null;
+      kind: HdoDeviceTaskRow['kind'];
+      payload?: Record<string, unknown> | null;
+    }): Promise<HdoDeviceTaskRow> {
+      const out = await api<HdoDeviceTaskRow>('/hdo/admin/device-tasks', {
+        method: 'POST',
+        body: JSON.stringify(input)
+      });
+      toast('已创建 HDO 设备任务');
+      return out;
     }
   };
 }

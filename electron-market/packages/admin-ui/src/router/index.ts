@@ -7,6 +7,7 @@ import PluginDetailPage from 'src/pages/PluginDetailPage.vue';
 import LogsPage from 'src/pages/LogsPage.vue';
 import LoginPage from 'src/pages/LoginPage.vue';
 import SettingsPage from 'src/pages/SettingsPage.vue';
+import ServerHdoPage from 'src/pages/ServerHdoPage.vue';
 import ServerUsersPage from 'src/pages/ServerUsersPage.vue';
 import ServerAuditPage from 'src/pages/ServerAuditPage.vue';
 
@@ -23,6 +24,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'settings', name: 'settings', component: SettingsPage },
       // Server-only pages: hidden from local-mode navigation but still reachable
       // by URL — useful when the same bundle is iframed from elsewhere too.
+      { path: 'server/hdo', name: 'server-hdo', component: ServerHdoPage },
       { path: 'server/users', name: 'server-users', component: ServerUsersPage },
       { path: 'server/audit', name: 'server-audit', component: ServerAuditPage }
     ]

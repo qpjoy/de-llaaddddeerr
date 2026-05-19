@@ -23,6 +23,7 @@ export type Permission =
   | `net:listen:${number}`
   | `net:listen:${number}-${number}`
   | `net:fetch:${string}`
+  | 'marketplace:plugins'
   | 'system:proxy'
   | `system:exec:${string}`
   | `ipc:${string}`
@@ -108,6 +109,26 @@ export interface PluginHostBridge {
    * endpoints so packaged apps do not accidentally talk to dev defaults.
    */
   serverBaseUrl?: string | null;
+  /**
+   * Host-controlled plugin lifecycle operations. These are intentionally
+   * permission-gated by the host (`marketplace:plugins`) because they can
+   * install code and change what is running inside the Electron process.
+   */
+  pluginManager?: {
+    listInstalled?(): unknown[];
+    install?(input: {
+      id?: string | null;
+      npm?: string | null;
+      version?: string | null;
+      tarballUrl?: string | null;
+      autoGrant?: boolean | 'manifest' | Permission[] | null;
+      activate?: boolean | null;
+    }): Promise<unknown>;
+    uninstall?(id: string): Promise<unknown>;
+    activate?(id: string): Promise<unknown>;
+    deactivate?(id: string): Promise<unknown>;
+    upgrade?(id: string, version?: string | null): Promise<unknown>;
+  };
   /** Ask the host to re-apply session proxy. Requires `system:proxy`. */
   applyProxy(): Promise<void>;
 }

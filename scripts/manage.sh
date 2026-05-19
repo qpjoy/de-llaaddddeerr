@@ -64,6 +64,11 @@ PACKAGES=(
   "@qpjoy/electron-plugin-tunnel-engine-linux-arm64|electron-plugin/packages/tunnel-engines/linux-arm64|engine|Tunnel Engine Linux arm64"
   "@qpjoy/electron-plugin-tunnel-engine-linux-x64|electron-plugin/packages/tunnel-engines/linux-x64|engine|Tunnel Engine Linux x64"
   "@qpjoy/electron-plugin-tunnel-engine-win32-x64|electron-plugin/packages/tunnel-engines/win32-x64|engine|Tunnel Engine Windows x64"
+  "@qpjoy/electron-core-wireguard-engine-darwin-arm64|electron-plugin/packages/wireguard-engines/darwin-arm64|engine|WireGuard Engine macOS arm64"
+  "@qpjoy/electron-core-wireguard-engine-darwin-x64|electron-plugin/packages/wireguard-engines/darwin-x64|engine|WireGuard Engine macOS x64"
+  "@qpjoy/electron-core-wireguard-engine-linux-arm64|electron-plugin/packages/wireguard-engines/linux-arm64|engine|WireGuard Engine Linux arm64"
+  "@qpjoy/electron-core-wireguard-engine-linux-x64|electron-plugin/packages/wireguard-engines/linux-x64|engine|WireGuard Engine Linux x64"
+  "@qpjoy/electron-core-wireguard-engine-win32-x64|electron-plugin/packages/wireguard-engines/win32-x64|engine|WireGuard Engine Windows x64"
   "@qpjoy/electron-plugin-tunnel|electron-plugin/packages/electron-plugin-tunnel|plugin|QPJoy Tunnel"
   "@qpjoy/electron-plugin-hdo|electron-plugin/packages/electron-plugin-hdo|plugin|QPJoy HDO"
   "@qpjoy/electron-plugin-notyet|electron-plugin/packages/electron-plugin-notyet|plugin|NotYet 悬浮咨询球"
@@ -176,7 +181,7 @@ cmd_status() {
   header "市场上架插件 (plugins)"
   while IFS= read -r row; do pkg_status_line "$row"; done < <(pkgs_by_category plugin)
 
-  header "Tunnel 引擎资源包 (platform engines)"
+  header "平台引擎资源包 (platform engines)"
   while IFS= read -r row; do pkg_status_line "$row"; done < <(pkgs_by_category engine)
 
   header "命令行工具 (tools)"

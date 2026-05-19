@@ -37,5 +37,12 @@
   "devDependencies": {
     "@types/node": "^22.10.7",
     "typescript": "^5.7.3"
+  },
+  "optionalDependencies": {
+    "@qpjoy/electron-core-wireguard-engine-darwin-arm64": "workspace:^",
+    "@qpjoy/electron-core-wireguard-engine-darwin-x64": "workspace:^",
+    "@qpjoy/electron-core-wireguard-engine-linux-arm64": "workspace:^",
+    "@qpjoy/electron-core-wireguard-engine-linux-x64": "workspace:^",
+    "@qpjoy/electron-core-wireguard-engine-win32-x64": "workspace:^"
   }
 }

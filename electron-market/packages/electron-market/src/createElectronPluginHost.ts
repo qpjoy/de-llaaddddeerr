@@ -281,12 +281,58 @@ export function createElectronPluginHost(
     );
   }
 
-  const runtime = new PluginRuntime({
+  let runtime: PluginRuntime;
+  const pluginManager: NonNullable<ConstructorParameters<typeof PluginRuntime>[0]['pluginManager']> = {
+    listInstalled: () => registry.list(),
+    install: async (input) => {
+      const requestedId = cleanString(input.id);
+      const requestedNpm = cleanString(input.npm);
+      const entry = resolvePluginEntry(requestedId, requestedNpm);
+      const existing = registry.get(entry.id);
+      const targetVersion = cleanString(input.version) ?? entry.latestVersion;
+
+      if (existing && compareVersions(existing.version, targetVersion) >= 0) {
+        applyAutoGrant(existing.id, existing.manifest, input.autoGrant);
+        if (input.activate) await runtime.activate(existing.id);
+        return registry.get(existing.id) ?? existing;
+      }
+
+      const manifest = await store.install({
+        id: entry.id,
+        npm: entry.npm,
+        version: targetVersion,
+        tarballUrl: cleanString(input.tarballUrl) ?? (targetVersion === entry.latestVersion ? entry.tarballUrl : null)
+      });
+      applyAutoGrant(manifest.id, manifest, input.autoGrant);
+      if (input.activate) await runtime.activate(manifest.id);
+      return registry.get(manifest.id) ?? manifest;
+    },
+    uninstall: async (id) => {
+      await runtime.deactivate(id).catch(() => undefined);
+      await store.uninstall(id);
+      return { ok: true };
+    },
+    activate: async (id) => {
+      await runtime.activate(id);
+      return registry.get(id) ?? { ok: true };
+    },
+    deactivate: async (id) => {
+      await runtime.deactivate(id);
+      return registry.get(id) ?? { ok: true };
+    },
+    upgrade: async (id, version) => {
+      await upgradePlugin(id, version ?? undefined);
+      return registry.get(id) ?? { ok: true };
+    }
+  };
+
+  runtime = new PluginRuntime({
     host,
     marketplaceDb,
     registry,
     pluginsRoot,
-    serverBaseUrl
+    serverBaseUrl,
+    pluginManager
   });
   const tunnelPolicyGuard = new TunnelPolicyGuard(host.session, runtime);
   runtime.setNetworkPolicyEvaluator((url) => tunnelPolicyGuard.evaluate(url));
@@ -377,6 +423,48 @@ export function createElectronPluginHost(
   // Force mode (the "重新预装" button) always runs and refreshes the marker.
   function seedMarkerKey(id: string): string {
     return `seed.${id}.installed_at`;
+  }
+
+  function cleanString(value: unknown): string | null {
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
+  }
+
+  function resolvePluginEntry(id: string | null, npm: string | null) {
+    if (id) {
+      const byId = marketplaceDb.getEntry(id);
+      if (byId) return byId;
+      const installed = registry.get(id);
+      if (installed) {
+        const row = marketplaceDb.getEntry(installed.id);
+        if (row) return row;
+      }
+    }
+    if (npm) {
+      const byNpm = marketplaceDb.listEntries().find((entry) => entry.npm === npm);
+      if (byNpm) return byNpm;
+      const installed = registry.list().find((row) => row.npm === npm);
+      if (installed) {
+        const row = marketplaceDb.getEntry(installed.id);
+        if (row) return row;
+      }
+    }
+    throw new Error(`unknown plugin: ${id ?? npm ?? '<empty>'}`);
+  }
+
+  function applyAutoGrant(
+    id: string,
+    manifest: { permissions: Permission[] },
+    autoGrant: boolean | 'manifest' | Permission[] | null | undefined
+  ): void {
+    const permissions =
+      autoGrant === true || autoGrant === 'manifest'
+        ? manifest.permissions
+        : Array.isArray(autoGrant)
+        ? autoGrant
+        : [];
+    if (permissions.length === 0) return;
+    registry.grant(id, permissions);
+    registry.setState(id, 'installed');
   }
 
   /**

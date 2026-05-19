@@ -1,10 +1,18 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { HDO_MESH_DEFAULTS } from '@qpjoy/electron-core-wireguard';
+import {
+  buildHdoRouteProbe,
+  generateWireGuardKeyPairWithCli,
+  HDO_MESH_DEFAULTS,
+  HDO_MESH_ROUTE_CIDRS,
+  renderHdoClientWireGuardConfig,
+  resolveWireGuardRuntime
+} from '@qpjoy/electron-core-wireguard';
 
 import type {
   HdoDeviceRegistrationInput,
+  HdoLocalPluginState,
   HdoNodeInput,
   HdoPluginSettings,
   HdoRateLimitInput,
@@ -19,12 +27,48 @@ interface MarketplaceDbLike {
     expiresAt: string | null;
     user: Record<string, unknown> | null;
   } | null;
+  listInstalled?(): unknown[];
+}
+
+interface PluginManagerLike {
+  install?(input: {
+    id?: string | null;
+    npm?: string | null;
+    version?: string | null;
+    tarballUrl?: string | null;
+    autoGrant?: boolean | 'manifest' | string[] | null;
+    activate?: boolean | null;
+  }): Promise<unknown>;
+  uninstall?(id: string): Promise<unknown>;
+  activate?(id: string): Promise<unknown>;
+  deactivate?(id: string): Promise<unknown>;
+  upgrade?(id: string, version?: string | null): Promise<unknown>;
+  listInstalled?(): unknown[];
+}
+
+interface HdoDeviceTaskRecord {
+  id: string;
+  deviceId: string | null;
+  pluginId: string | null;
+  kind: string;
+  status: string;
+  payload: Record<string, unknown> | null;
+}
+
+interface HdoTaskRunSummary {
+  attempted: number;
+  done: number;
+  failed: number;
+  skipped: number;
+  results: Array<Record<string, unknown>>;
 }
 
 export interface HdoControllerContext {
   userDataDir: string;
   marketServerBaseUrl?: string | null;
+  bundledWireGuardDir?: string | null;
   marketplaceDb?: MarketplaceDbLike;
+  pluginManager?: PluginManagerLike;
   log: {
     info(msg: string, meta?: Record<string, unknown>): void;
     warn(msg: string, meta?: Record<string, unknown>): void;
@@ -36,6 +80,7 @@ export class HdoController {
   private readonly settingsPath: string;
   private settings: HdoPluginSettings;
   private lastError: string | null = null;
+  private taskRunner: Promise<HdoTaskRunSummary> | null = null;
 
   constructor(private readonly ctx: HdoControllerContext) {
     mkdirSync(ctx.userDataDir, { recursive: true });
@@ -65,7 +110,9 @@ export class HdoController {
     const session = this.sessionSnapshot();
     let readiness: unknown | null = null;
     let devices: unknown[] = [];
+    let deviceTasks: unknown[] = [];
     let admin: HdoSnapshot['admin'] = null;
+    const localPlugins = this.localPluginStates();
     this.lastError = null;
 
     if (this.serverBaseUrl() && session.hasAccessToken) {
@@ -76,25 +123,57 @@ export class HdoController {
         ]);
         readiness = readinessResult;
         devices = Array.isArray(devicesResult) ? devicesResult : [];
+        const deviceId = this.settings.deviceId || stringField(devices[0], 'id');
+        if (deviceId) {
+          await this.reportPluginStates(deviceId).catch((err) => {
+            this.ctx.log.warn('failed to report HDO plugin states', {
+              error: errorMessage(err)
+            });
+          });
+        }
+        const tasksResult = await this.apiGet('/api/v1/hdo/device-tasks?status=pending');
+        deviceTasks = Array.isArray(tasksResult) ? tasksResult : [];
+        if (this.settings.autoRunDeviceTasks !== false && deviceTasks.length > 0) {
+          this.runTasksInBackground(deviceTasks, deviceId);
+        }
       } catch (err) {
         this.lastError = errorMessage(err);
       }
 
       try {
-        const [nodes, services, profiles, rateLimits] = await Promise.all([
-          this.apiGet('/api/v1/hdo/admin/nodes'),
-          this.apiGet('/api/v1/hdo/admin/services'),
-          this.apiGet('/api/v1/hdo/admin/profiles'),
-          this.apiGet('/api/v1/hdo/admin/rate-limits')
-        ]);
-        admin = {
-          nodes: Array.isArray(nodes) ? nodes : [],
-          services: Array.isArray(services) ? services : [],
-          profiles: Array.isArray(profiles) ? profiles : [],
-          rateLimits: Array.isArray(rateLimits) ? rateLimits : []
-        };
+        const overview = await this.apiGet('/api/v1/hdo/admin/overview');
+        if (overview && typeof overview === 'object' && !Array.isArray(overview)) {
+          const data = overview as Record<string, unknown>;
+          admin = {
+            users: arrayField(data.users),
+            meshGroups: arrayField(data.meshGroups),
+            memberships: arrayField(data.memberships),
+            nodes: arrayField(data.nodes),
+            devices: arrayField(data.devices),
+            services: arrayField(data.services),
+            profiles: arrayField(data.profiles),
+            rateLimits: arrayField(data.rateLimits),
+            pluginStates: arrayField(data.pluginStates),
+            tasks: arrayField(data.tasks)
+          };
+        }
       } catch {
-        admin = null;
+        try {
+          const [nodes, services, profiles, rateLimits] = await Promise.all([
+            this.apiGet('/api/v1/hdo/admin/nodes'),
+            this.apiGet('/api/v1/hdo/admin/services'),
+            this.apiGet('/api/v1/hdo/admin/profiles'),
+            this.apiGet('/api/v1/hdo/admin/rate-limits')
+          ]);
+          admin = {
+            nodes: Array.isArray(nodes) ? nodes : [],
+            services: Array.isArray(services) ? services : [],
+            profiles: Array.isArray(profiles) ? profiles : [],
+            rateLimits: Array.isArray(rateLimits) ? rateLimits : []
+          };
+        } catch {
+          admin = null;
+        }
       }
     }
 
@@ -105,6 +184,9 @@ export class HdoController {
       session,
       readiness,
       devices,
+      deviceTasks,
+      localPlugins,
+      taskRunnerBusy: Boolean(this.taskRunner),
       admin,
       lastError: this.lastError
     };
@@ -120,7 +202,8 @@ export class HdoController {
       metadata: input.metadata ?? {
         source: '@qpjoy/electron-plugin-hdo',
         arch: process.arch
-      }
+      },
+      plugins: this.localPluginStates()
     };
     const device = await this.apiPost('/api/v1/hdo/devices/register', body);
     const deviceId = stringField(device, 'id') ?? body.id;
@@ -130,6 +213,23 @@ export class HdoController {
       devicePlatform: body.platform
     });
     return device;
+  }
+
+  async reportPluginStates(deviceId?: string | null): Promise<unknown[]> {
+    const id = deviceId || this.settings.deviceId;
+    if (!id) return [];
+    const result = await this.apiPost(`/api/v1/hdo/devices/${encodeURIComponent(id)}/plugin-states`, {
+      plugins: this.localPluginStates()
+    });
+    return Array.isArray(result) ? result : [];
+  }
+
+  async executePendingTasks(): Promise<HdoTaskRunSummary> {
+    if (this.taskRunner) return this.taskRunner;
+    this.taskRunner = this.executePendingTasksInner().finally(() => {
+      this.taskRunner = null;
+    });
+    return this.taskRunner;
   }
 
   async refreshManifest(deviceId?: string | null): Promise<Record<string, unknown>> {
@@ -151,6 +251,133 @@ export class HdoController {
     );
     this.updateSettings({ lastSubscription: content });
     return content;
+  }
+
+  async prepareWireGuardPeer(input: { rotate?: boolean | null } = {}): Promise<Record<string, unknown>> {
+    const routeProbe = buildHdoRouteProbe();
+    const now = new Date().toISOString();
+    const previous = this.settings.wireGuardPeer ?? {};
+    let privateKey = stringValue(previous.privateKey);
+    let publicKey = stringValue(previous.publicKey);
+    let keySource = 'existing';
+    const runtime = resolveWireGuardRuntime({
+      installDir: join(this.ctx.userDataDir, 'bin'),
+      bundledDir: this.ctx.bundledWireGuardDir,
+      allowSystemFallback: false
+    });
+
+    if (input.rotate || !privateKey || !publicKey) {
+      if (!runtime.command) {
+        const lastError =
+          `当前 HDO 插件包缺少适配 ${runtime.target} 的 WireGuard CLI 引擎；需要随插件安装对应的 @qpjoy/electron-core-wireguard-engine-${runtime.target}，或把 wg 放入插件资源目录。`;
+        const peer = {
+          ...previous,
+          routeProbe,
+          canUseDefaultMesh: routeProbe.canUseDefaultMesh,
+          lastError,
+          updatedAt: now
+        };
+        this.updateSettings({ wireGuardPeer: peer });
+        return {
+          ok: false,
+          reason: 'bundled-wireguard-cli-missing',
+          message: lastError,
+          runtime,
+          routeProbe,
+          peer: publicWireGuardPeer(peer)
+        };
+      }
+
+      try {
+        const pair = generateWireGuardKeyPairWithCli(runtime.command);
+        privateKey = pair.privateKey;
+        publicKey = pair.publicKey;
+        keySource = runtime.source;
+      } catch (err) {
+        const lastError =
+          `内置 WireGuard CLI 无法生成密钥：${errorMessage(err)}。请重新安装包含 ${runtime.target} 引擎资源的 HDO 包。`;
+        const peer = {
+          ...previous,
+          routeProbe,
+          canUseDefaultMesh: routeProbe.canUseDefaultMesh,
+          lastError,
+          updatedAt: now
+        };
+        this.updateSettings({ wireGuardPeer: peer });
+        return {
+          ok: false,
+          reason: 'bundled-wireguard-cli-failed',
+          message: lastError,
+          runtime,
+          routeProbe,
+          peer: publicWireGuardPeer(peer)
+        };
+      }
+    }
+
+    const device = await this.registerDevice({
+      id: this.settings.deviceId,
+      label: this.settings.deviceLabel,
+      publicKey,
+      metadata: {
+        source: '@qpjoy/electron-plugin-hdo',
+        arch: process.arch,
+        wireGuard: {
+          publicKey,
+          routeProbe,
+          keySource,
+          updatedAt: now
+        }
+      }
+    });
+    const overlayIp = stringField(device, 'overlayIp') ?? stringValue(previous.overlayIp);
+    let manifest: Record<string, unknown> | null = null;
+    let config: string | null = null;
+    let lastError: string | null = null;
+
+    try {
+      manifest = await this.refreshManifest(stringField(device, 'id') ?? this.settings.deviceId);
+      const domestic = domesticWireGuardFromManifest(manifest);
+      if (!overlayIp) {
+        lastError = '服务端尚未给当前设备分配 overlay IP。';
+      } else if (!domestic.publicKey || !domestic.endpoint) {
+        lastError =
+          'manifest 中缺少 domestic WireGuard 公钥或 endpoint；请在服务器 HDO 管理页给 domestic 节点 metadata.wireGuard 填入 publicKey/listenPort。';
+      } else {
+        config = renderHdoClientWireGuardConfig({
+          privateKey,
+          address: wireGuardAddress(overlayIp),
+          domesticPublicKey: domestic.publicKey,
+          domesticEndpoint: domestic.endpoint,
+          allowedIps: domestic.routeCidrs,
+          persistentKeepalive: 25
+        });
+      }
+    } catch (err) {
+      lastError = errorMessage(err);
+    }
+
+    const peer = {
+      privateKey,
+      publicKey,
+      overlayIp,
+      address: overlayIp ? wireGuardAddress(overlayIp) : null,
+      config,
+      routeProbe,
+      canUseDefaultMesh: routeProbe.canUseDefaultMesh,
+      lastError,
+      updatedAt: now
+    };
+    this.updateSettings({ wireGuardPeer: peer });
+    return {
+      ok: Boolean(config),
+      message: config ? '已生成本机 WireGuard peer 与客户端配置。' : lastError,
+      routeProbe,
+      device,
+      manifest,
+      peer: publicWireGuardPeer(peer),
+      config
+    };
   }
 
   async upsertNode(input: HdoNodeInput): Promise<unknown> {
@@ -195,6 +422,164 @@ export class HdoController {
       user: session?.user ?? null,
       hasAccessToken: Boolean(session?.accessToken)
     };
+  }
+
+  private localPluginStates(): HdoLocalPluginState[] {
+    const rows = this.ctx.marketplaceDb?.listInstalled?.() ?? [];
+    return rows
+      .map((row) => normalizeInstalledPlugin(row))
+      .filter((row): row is HdoLocalPluginState => Boolean(row));
+  }
+
+  private runTasksInBackground(tasks: unknown[], deviceId?: string | null): void {
+    if (this.taskRunner) return;
+    if (!tasks.some((task) => this.canRunTask(task, deviceId))) return;
+    this.taskRunner = this.executePendingTasksInner()
+      .catch((err) => {
+        this.ctx.log.warn('HDO task runner failed', { error: errorMessage(err) });
+        return {
+          attempted: 0,
+          done: 0,
+          failed: 1,
+          skipped: 0,
+          results: [{ ok: false, error: errorMessage(err) }]
+        };
+      })
+      .finally(() => {
+        this.taskRunner = null;
+      });
+  }
+
+  private async executePendingTasksInner(): Promise<HdoTaskRunSummary> {
+    const deviceId = this.settings.deviceId;
+    const tasksRaw = await this.apiGet('/api/v1/hdo/device-tasks?status=pending');
+    const tasks = Array.isArray(tasksRaw) ? tasksRaw : [];
+    const summary: HdoTaskRunSummary = {
+      attempted: 0,
+      done: 0,
+      failed: 0,
+      skipped: 0,
+      results: []
+    };
+
+    for (const task of tasks) {
+      const row = taskRecord(task);
+      if (!row || !this.canRunTask(row, deviceId)) {
+        summary.skipped += 1;
+        continue;
+      }
+
+      summary.attempted += 1;
+      let claimed: HdoDeviceTaskRecord | null = null;
+      try {
+        const claimedRaw = await this.apiPost(`/api/v1/hdo/device-tasks/${encodeURIComponent(row.id)}/claim`, {
+          deviceId: deviceId ?? null
+        });
+        claimed = taskRecord(claimedRaw);
+        if (!claimed) throw new Error('invalid claim response');
+      } catch (err) {
+        summary.skipped += 1;
+        summary.results.push({
+          id: row.id,
+          kind: row.kind,
+          ok: false,
+          skipped: true,
+          error: errorMessage(err)
+        });
+        continue;
+      }
+
+      try {
+        const result = await this.executeClaimedTask(claimed);
+        await this.apiPost(`/api/v1/hdo/device-tasks/${encodeURIComponent(claimed.id)}/complete`, {
+          status: 'done',
+          result
+        });
+        summary.done += 1;
+        summary.results.push({ id: claimed.id, kind: claimed.kind, ok: true, result });
+      } catch (err) {
+        const result = { error: errorMessage(err) };
+        await this.apiPost(`/api/v1/hdo/device-tasks/${encodeURIComponent(claimed.id)}/complete`, {
+          status: 'failed',
+          result
+        }).catch((completeErr) => {
+          this.ctx.log.warn('failed to complete HDO task', {
+            taskId: claimed?.id,
+            error: errorMessage(completeErr)
+          });
+        });
+        summary.failed += 1;
+        summary.results.push({
+          id: claimed.id,
+          kind: claimed.kind,
+          ok: false,
+          error: result.error
+        });
+      }
+    }
+
+    await this.reportPluginStates(deviceId).catch(() => undefined);
+    this.updateSettings({
+      lastTaskRun: {
+        ...summary,
+        ranAt: new Date().toISOString()
+      }
+    });
+    return summary;
+  }
+
+  private canRunTask(task: unknown, deviceId?: string | null): boolean {
+    const row = taskRecord(task);
+    if (!row || row.status !== 'pending') return false;
+    return !row.deviceId || !deviceId || row.deviceId === deviceId;
+  }
+
+  private async executeClaimedTask(task: HdoDeviceTaskRecord): Promise<Record<string, unknown>> {
+    const manager = this.ctx.pluginManager;
+    if (!manager) throw new Error('当前插件市场 host 不支持 HDO 远程任务执行');
+    const payload = task.payload ?? {};
+    const pluginId = stringValue(payload.id) ?? stringValue(payload.pluginId) ?? task.pluginId;
+    const npm = stringValue(payload.npm) ?? (pluginId?.startsWith('@') ? pluginId : null);
+
+    switch (task.kind) {
+      case 'install-plugin': {
+        const installed = await manager.install?.({
+          id: npm ? stringValue(payload.id) : pluginId,
+          npm,
+          version: stringValue(payload.version),
+          tarballUrl: stringValue(payload.tarballUrl),
+          autoGrant: normalizeAutoGrant(payload.autoGrant ?? payload.grant),
+          activate: booleanValue(payload.activate) ?? false
+        });
+        if (!installed) throw new Error('host pluginManager.install unavailable');
+        return { installed };
+      }
+      case 'uninstall-plugin': {
+        const id = requireTaskPluginId(pluginId, task.kind);
+        const result = await manager.uninstall?.(id);
+        if (!result) throw new Error('host pluginManager.uninstall unavailable');
+        return { uninstalled: id, result };
+      }
+      case 'activate-plugin': {
+        const id = requireTaskPluginId(pluginId, task.kind);
+        const result = await manager.activate?.(id);
+        if (!result) throw new Error('host pluginManager.activate unavailable');
+        return { activated: id, result };
+      }
+      case 'deactivate-plugin': {
+        const id = requireTaskPluginId(pluginId, task.kind);
+        const result = await manager.deactivate?.(id);
+        if (!result) throw new Error('host pluginManager.deactivate unavailable');
+        return { deactivated: id, result };
+      }
+      case 'apply-hdo-profile': {
+        const activeProfileId = stringValue(payload.profileId) ?? stringValue(payload.activeProfileId);
+        this.updateSettings({ activeProfileId });
+        return { activeProfileId };
+      }
+      default:
+        throw new Error(`unsupported HDO task kind: ${task.kind}`);
+    }
   }
 
   private accessToken(): string {
@@ -252,6 +637,10 @@ export class HdoController {
         deviceId: null,
         deviceLabel: defaultDeviceLabel(),
         devicePlatform: process.platform,
+        autoRunDeviceTasks: true,
+        activeProfileId: null,
+        wireGuardPeer: null,
+        lastTaskRun: null,
         lastManifest: null,
         lastSubscription: null,
         updatedAt: null
@@ -261,7 +650,11 @@ export class HdoController {
       const parsed = JSON.parse(readFileSync(this.settingsPath, 'utf8')) as HdoPluginSettings;
       return {
         ...parsed,
-        hdoControlBaseUrl: normalizeBaseUrl(parsed.hdoControlBaseUrl) ?? null
+        hdoControlBaseUrl: normalizeBaseUrl(parsed.hdoControlBaseUrl) ?? null,
+        wireGuardPeer: parsed.wireGuardPeer ?? null,
+        autoRunDeviceTasks: parsed.autoRunDeviceTasks ?? true,
+        activeProfileId: parsed.activeProfileId ?? null,
+        lastTaskRun: parsed.lastTaskRun ?? null
       };
     } catch (err) {
       this.ctx.log.warn('failed to read HDO settings, using defaults', {
@@ -272,6 +665,10 @@ export class HdoController {
         deviceId: null,
         deviceLabel: defaultDeviceLabel(),
         devicePlatform: process.platform,
+        autoRunDeviceTasks: true,
+        activeProfileId: null,
+        wireGuardPeer: null,
+        lastTaskRun: null,
         lastManifest: null,
         lastSubscription: null,
         updatedAt: null
@@ -318,6 +715,112 @@ function stringField(value: unknown, field: string): string | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const raw = (value as Record<string, unknown>)[field];
   return typeof raw === 'string' && raw ? raw : null;
+}
+
+function arrayField(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function booleanValue(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
+function plainObject(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function taskRecord(value: unknown): HdoDeviceTaskRecord | null {
+  const row = plainObject(value);
+  if (!row) return null;
+  const id = stringValue(row.id);
+  const kind = stringValue(row.kind);
+  const status = stringValue(row.status);
+  if (!id || !kind || !status) return null;
+  return {
+    id,
+    kind,
+    status,
+    deviceId: stringValue(row.deviceId),
+    pluginId: stringValue(row.pluginId),
+    payload: plainObject(row.payload)
+  };
+}
+
+function normalizeAutoGrant(value: unknown): boolean | 'manifest' | string[] | null {
+  if (value === true || value === 'manifest') return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => stringValue(item)).filter((item): item is string => Boolean(item));
+  }
+  return null;
+}
+
+function requireTaskPluginId(value: string | null, kind: string): string {
+  if (!value) throw new Error(`${kind} requires pluginId`);
+  return value;
+}
+
+function publicWireGuardPeer(value: Record<string, unknown>): Record<string, unknown> {
+  const { privateKey: _privateKey, ...safe } = value;
+  return safe;
+}
+
+function domesticWireGuardFromManifest(manifest: Record<string, unknown>): {
+  publicKey: string | null;
+  endpoint: string | null;
+  routeCidrs: string[];
+} {
+  const wireGuard = plainObject(manifest.wireGuard);
+  const domestic = plainObject(wireGuard?.domestic);
+  const publicKey = stringValue(domestic?.publicKey);
+  const endpointFromManifest = stringValue(domestic?.endpoint);
+  const host = stringValue(domestic?.endpointHost);
+  const port = numberValue(domestic?.listenPort);
+  return {
+    publicKey,
+    endpoint: endpointFromManifest ?? (host && port ? `${host}:${port}` : null),
+    routeCidrs: stringArray(wireGuard?.routeCidrs).length
+      ? stringArray(wireGuard?.routeCidrs)
+      : HDO_MESH_ROUTE_CIDRS
+  };
+}
+
+function wireGuardAddress(value: string): string {
+  return value.includes('/') ? value : `${value}/32`;
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function stringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => stringValue(item)).filter((item): item is string => Boolean(item));
+}
+
+function normalizeInstalledPlugin(value: unknown): HdoLocalPluginState | null {
+  const row = plainObject(value);
+  if (!row) return null;
+  const manifest = plainObject(row.manifest);
+  const pluginId = stringField(row, 'id') || stringField(row, 'pluginId') || stringField(manifest, 'id');
+  if (!pluginId) return null;
+  return {
+    pluginId,
+    npm: stringField(row, 'npm'),
+    name: stringField(manifest, 'name') || stringField(row, 'name'),
+    version: stringField(row, 'version') || stringField(manifest, 'version'),
+    state: stringField(row, 'state') || 'unknown',
+    manifest,
+    health: {
+      errorMessage: stringField(row, 'errorMessage'),
+      updatedAt: stringField(row, 'updatedAt'),
+      installedAt: stringField(row, 'installedAt')
+    }
+  };
 }
 
 function shellQuote(value: string): string {

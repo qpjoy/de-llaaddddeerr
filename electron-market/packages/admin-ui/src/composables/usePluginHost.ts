@@ -511,6 +511,9 @@ export function describePermission(p: Permission): PermissionDescription {
   if (p.startsWith('net:fetch:')) {
     return { label: `访问外部主机 ${p.slice('net:fetch:'.length)}`, danger: false };
   }
+  if (p === 'marketplace:plugins') {
+    return { label: '安装、卸载、启停或升级市场插件', danger: true };
+  }
   if (p === 'system:proxy') return { label: '修改系统 / Electron 会话代理', danger: true };
   if (p === 'system:exec:*') return { label: '执行任意外部程序', danger: true };
   if (p.startsWith('system:exec:')) {

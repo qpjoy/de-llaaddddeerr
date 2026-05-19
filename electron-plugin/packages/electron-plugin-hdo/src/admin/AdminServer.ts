@@ -91,6 +91,22 @@ export class HdoAdminServer {
         sendText(res, 200, await this.controller.refreshSubscription(deviceId), 'text/yaml; charset=utf-8');
       };
     }
+    if (method === 'POST' && pathname === '/api/client/plugin-states') {
+      return async (_req, res, body) => {
+        const { deviceId } = body as { deviceId?: string | null };
+        sendJson(res, 200, await this.controller.reportPluginStates(deviceId));
+      };
+    }
+    if (method === 'POST' && pathname === '/api/client/wireguard/prepare') {
+      return async (_req, res, body) => {
+        sendJson(res, 200, await this.controller.prepareWireGuardPeer(body as never));
+      };
+    }
+    if (method === 'POST' && pathname === '/api/client/tasks/run') {
+      return async (_req, res) => {
+        sendJson(res, 200, await this.controller.executePendingTasks());
+      };
+    }
     if (method === 'POST' && pathname === '/api/admin/nodes') {
       return async (_req, res, body) => {
         sendJson(res, 200, await this.controller.upsertNode(body as never));

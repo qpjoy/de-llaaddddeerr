@@ -403,8 +403,12 @@ export class PluginStore {
       : undefined;
   }
 
-  private canInstallTarballWithoutPackageManager(allowScripts: boolean): boolean {
-    return process.platform === 'darwin' && !allowScripts;
+  private canInstallTarballWithoutPackageManager(npm: string, allowScripts: boolean): boolean {
+    return process.platform === 'darwin' && !allowScripts && !this.needsPackageManagerInstall(npm);
+  }
+
+  private needsPackageManagerInstall(npm: string): boolean {
+    return npm === '@qpjoy/electron-plugin-hdo';
   }
 
   private async downloadTarball(url: string, dest: string, id: string): Promise<void> {
@@ -522,14 +526,14 @@ export class PluginStore {
             await this.downloadTarball(input.source.tarballUrl, tgz, input.id);
             this.setProgress(input.id, {
               stage: 'installing',
-              message: this.canInstallTarballWithoutPackageManager(allowScripts)
+              message: this.canInstallTarballWithoutPackageManager(input.npm, allowScripts)
                 ? '正在安装本地包'
                 : allowScripts
                 ? '正在安装并准备原生依赖'
                 : '正在安装依赖',
               error: null
             });
-            if (this.canInstallTarballWithoutPackageManager(allowScripts)) {
+            if (this.canInstallTarballWithoutPackageManager(input.npm, allowScripts)) {
               await unpackNpmTarball(tgz, join(stagingDir, 'node_modules', input.npm));
             } else {
               await exec(pm, installArgs(tgz, allowScripts, pm), { cwd: stagingDir, env: installEnv });
@@ -557,7 +561,7 @@ export class PluginStore {
             message: allowScripts ? '正在安装并准备原生依赖' : '正在安装本地包',
             error: null
           });
-          if (this.canInstallTarballWithoutPackageManager(allowScripts)) {
+          if (this.canInstallTarballWithoutPackageManager(input.npm, allowScripts)) {
             await unpackNpmTarball(tgz, join(stagingDir, 'node_modules', input.npm));
           } else {
             await exec(

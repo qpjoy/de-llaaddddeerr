@@ -3,8 +3,24 @@ export interface HdoPluginSettings {
   deviceId?: string | null;
   deviceLabel?: string | null;
   devicePlatform?: string | null;
+  wireGuardPeer?: HdoWireGuardPeerSettings | null;
+  autoRunDeviceTasks?: boolean | null;
+  activeProfileId?: string | null;
+  lastTaskRun?: Record<string, unknown> | null;
   lastManifest?: Record<string, unknown> | null;
   lastSubscription?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface HdoWireGuardPeerSettings {
+  privateKey?: string | null;
+  publicKey?: string | null;
+  overlayIp?: string | null;
+  address?: string | null;
+  config?: string | null;
+  routeProbe?: unknown | null;
+  canUseDefaultMesh?: boolean | null;
+  lastError?: string | null;
   updatedAt?: string | null;
 }
 
@@ -14,6 +30,16 @@ export interface HdoSessionSnapshot {
   hasAccessToken: boolean;
 }
 
+export interface HdoLocalPluginState {
+  pluginId: string;
+  npm: string | null;
+  name: string | null;
+  version: string | null;
+  state: string;
+  manifest: Record<string, unknown> | null;
+  health: Record<string, unknown> | null;
+}
+
 export interface HdoSnapshot {
   serverBaseUrl: string | null;
   marketServerBaseUrl: string | null;
@@ -21,11 +47,20 @@ export interface HdoSnapshot {
   session: HdoSessionSnapshot;
   readiness: unknown | null;
   devices: unknown[];
+  deviceTasks: unknown[];
+  localPlugins: HdoLocalPluginState[];
+  taskRunnerBusy: boolean;
   admin: {
+    users?: unknown[];
+    meshGroups?: unknown[];
+    memberships?: unknown[];
     nodes: unknown[];
+    devices?: unknown[];
     services: unknown[];
     profiles: unknown[];
     rateLimits: unknown[];
+    pluginStates?: unknown[];
+    tasks?: unknown[];
   } | null;
   lastError: string | null;
 }

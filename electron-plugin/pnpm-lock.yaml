@@ -69,6 +69,22 @@ importers:
         version: 5.9.3
 
   packages/electron-core-wireguard:
+    optionalDependencies:
+      '@qpjoy/electron-core-wireguard-engine-darwin-arm64':
+        specifier: workspace:^
+        version: link:../wireguard-engines/darwin-arm64
+      '@qpjoy/electron-core-wireguard-engine-darwin-x64':
+        specifier: workspace:^
+        version: link:../wireguard-engines/darwin-x64
+      '@qpjoy/electron-core-wireguard-engine-linux-arm64':
+        specifier: workspace:^
+        version: link:../wireguard-engines/linux-arm64
+      '@qpjoy/electron-core-wireguard-engine-linux-x64':
+        specifier: workspace:^
+        version: link:../wireguard-engines/linux-x64
+      '@qpjoy/electron-core-wireguard-engine-win32-x64':
+        specifier: workspace:^
+        version: link:../wireguard-engines/win32-x64
     devDependencies:
       '@types/node':
         specifier: ^22.10.7
@@ -161,6 +177,16 @@ importers:
   packages/tunnel-engines/linux-x64: {}
 
   packages/tunnel-engines/win32-x64: {}
+
+  packages/wireguard-engines/darwin-arm64: {}
+
+  packages/wireguard-engines/darwin-x64: {}
+
+  packages/wireguard-engines/linux-arm64: {}
+
+  packages/wireguard-engines/linux-x64: {}
+
+  packages/wireguard-engines/win32-x64: {}
 
 packages:
 

@@ -1,0 +1,24 @@
+{
+  "name": "@qpjoy/electron-core-wireguard-engine-win32-x64",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Windows x64 WireGuard CLI resources for @qpjoy/electron-core-wireguard.",
+  "license": "GPL-2.0-only",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "README.md",
+    "resources/wireguard"
+  ],
+  "scripts": {
+    "build": "node -e \"\"",
+    "prepack": "node ../../../scripts/verify-wireguard-engine.mjs win32-x64"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
