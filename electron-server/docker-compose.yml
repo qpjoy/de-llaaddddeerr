@@ -41,6 +41,8 @@ services:
     environment:
       DATABASE_URL: postgres://${PG_USER:-qpjoy}:${PG_PASSWORD:-qpjoy}@postgres:5432/${PG_DB:-qpjoy_market}
       JWT_SECRET: ${JWT_SECRET:-dev-only-secret-replace-in-production}
+      JWT_ACCESS_TTL_SECONDS: ${JWT_ACCESS_TTL_SECONDS:-604800}
+      JWT_REFRESH_TTL_SECONDS: ${JWT_REFRESH_TTL_SECONDS:-2592000}
       PG_POOL_MAX: ${PG_POOL_MAX:-8}
       NODE_ENV: ${NODE_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-info}

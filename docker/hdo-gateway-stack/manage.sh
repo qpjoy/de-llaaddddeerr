@@ -49,13 +49,72 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
 }
 
+is_private_ipv4() {
+  case "$1" in
+    10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+detect_public_ipv4() {
+  local url ip
+  command -v curl >/dev/null 2>&1 || return 1
+  for url in \
+    "https://api.ipify.org" \
+    "https://ifconfig.me/ip" \
+    "http://ip1.dynupdate.no-ip.com/"; do
+    ip="$(curl -4fsS --max-time 4 "$url" 2>/dev/null | tr -d '[:space:]' || true)"
+    case "$ip" in
+      *.*.*.*)
+        if ! is_private_ipv4 "$ip"; then
+          echo "$ip"
+          return 0
+        fi
+        ;;
+    esac
+  done
+  return 1
+}
+
+install_wireguard_tools() {
+  [ "$(id -u)" -eq 0 ] || die "WireGuard tools are missing. Re-run as root or install wireguard-tools first."
+
+  say "installing WireGuard tools"
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard-tools
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y wireguard-tools
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y epel-release || true
+    yum install -y wireguard-tools
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache wireguard-tools
+  elif command -v zypper >/dev/null 2>&1; then
+    zypper --non-interactive install wireguard-tools
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm wireguard-tools
+  else
+    die "missing command: wg. Please install wireguard-tools with the OS package manager."
+  fi
+}
+
+ensure_wireguard_tools() {
+  if command -v wg >/dev/null 2>&1 && command -v wg-quick >/dev/null 2>&1; then
+    return 0
+  fi
+  install_wireguard_tools
+  command -v wg >/dev/null 2>&1 || die "WireGuard install finished but wg is still unavailable"
+  command -v wg-quick >/dev/null 2>&1 || die "WireGuard install finished but wg-quick is still unavailable"
+}
+
 gen_private_key() {
-  require_cmd wg
+  ensure_wireguard_tools
   wg genkey
 }
 
 public_key_of() {
-  require_cmd wg
+  ensure_wireguard_tools
   printf '%s' "$1" | wg pubkey
 }
 
@@ -140,6 +199,12 @@ detect_market_port() {
 
 detect_public_host() {
   local ip=""
+  ip="$(detect_public_ipv4 || true)"
+  if [ -n "$ip" ]; then
+    echo "$ip"
+    return 0
+  fi
+
   if command -v ip >/dev/null 2>&1; then
     ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
   fi
@@ -387,6 +452,7 @@ EOF
 cmd_apply_domestic() {
   [ "$(id -u)" -eq 0 ] || die "apply-domestic must run as root"
   [ -f "$WG_DIR/wg-home.conf" ] || die "run setup-domestic first"
+  ensure_wireguard_tools
   require_cmd systemctl
   install -d -m 700 /etc/wireguard
   install -m 600 "$WG_DIR/wg-home.conf" /etc/wireguard/hdo-home.conf

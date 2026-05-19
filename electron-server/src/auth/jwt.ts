@@ -10,10 +10,17 @@ import type { Role } from './types.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const SECRET_FILE = resolve(here, '..', '..', 'data', '.jwt-secret');
 
-const ACCESS_TTL_S = 15 * 60;          // 15 min
-const REFRESH_TTL_S = 30 * 24 * 60 * 60; // 30 days
+const ACCESS_TTL_S = envSeconds('JWT_ACCESS_TTL_SECONDS', 7 * 24 * 60 * 60);
+const REFRESH_TTL_S = envSeconds('JWT_REFRESH_TTL_SECONDS', 30 * 24 * 60 * 60);
 
 let cachedSecret: string | null = null;
+
+function envSeconds(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
 
 function loadSecret(): string {
   if (cachedSecret) return cachedSecret;

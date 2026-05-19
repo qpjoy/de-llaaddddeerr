@@ -27,6 +27,13 @@ interface MarketplaceDbLike {
     expiresAt: string | null;
     user: Record<string, unknown> | null;
   } | null;
+  setSession?(session: {
+    accessToken: string | null;
+    refreshToken: string | null;
+    expiresAt: string | null;
+    user: Record<string, unknown> | null;
+  }): void;
+  clearSession?(): void;
   listInstalled?(): unknown[];
 }
 
@@ -582,7 +589,11 @@ export class HdoController {
     }
   }
 
-  private accessToken(): string {
+  private async accessToken(): Promise<string> {
+    const session = this.ctx.marketplaceDb?.getActiveSession?.() ?? null;
+    if (session?.refreshToken && tokenNeedsRefresh(session.expiresAt)) {
+      await this.refreshAccessToken(session.refreshToken);
+    }
     const token = this.ctx.marketplaceDb?.getActiveSession?.()?.accessToken;
     if (!token) throw new Error('请先在插件市场登录 / 注册');
     return token;
@@ -617,17 +628,55 @@ export class HdoController {
     return text;
   }
 
-  private async fetch(path: string, init: RequestInit): Promise<Response> {
+  private async fetch(path: string, init: RequestInit, retried = false): Promise<Response> {
     const base = this.serverBaseUrl();
     if (!base) {
       throw new Error('未配置 HDO 控制面 URL');
     }
     const headers = new Headers(init.headers);
-    headers.set('authorization', `Bearer ${this.accessToken()}`);
-    return fetch(new URL(path, base).toString(), {
+    headers.set('authorization', `Bearer ${await this.accessToken()}`);
+    const res = await fetch(new URL(path, base).toString(), {
       ...init,
       headers
     });
+    if (res.status === 401 && !retried) {
+      const refreshToken = this.ctx.marketplaceDb?.getActiveSession?.()?.refreshToken;
+      if (refreshToken && (await this.refreshAccessToken(refreshToken).catch(() => false))) {
+        return this.fetch(path, init, true);
+      }
+    }
+    return res;
+  }
+
+  private async refreshAccessToken(refreshToken: string): Promise<boolean> {
+    const base = this.serverBaseUrl();
+    if (!base) return false;
+    const res = await fetch(new URL('/api/v1/auth/refresh', base).toString(), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ refreshToken })
+    });
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) this.ctx.marketplaceDb?.clearSession?.();
+      return false;
+    }
+    const tokens = (await res.json()) as {
+      accessToken?: string;
+      refreshToken?: string;
+      accessExpiresAt?: string;
+      refreshExpiresAt?: string;
+    };
+    if (!tokens.accessToken || !tokens.refreshToken || !tokens.accessExpiresAt) return false;
+    const session = this.ctx.marketplaceDb?.getActiveSession?.() ?? null;
+    this.ctx.marketplaceDb?.setSession?.({
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresAt: tokens.accessExpiresAt,
+      user: session?.user
+        ? { ...session.user, refreshExpiresAt: tokens.refreshExpiresAt ?? null }
+        : null
+    });
+    return true;
   }
 
   private loadSettings(): HdoPluginSettings {
@@ -698,6 +747,13 @@ function normalizeBaseUrl(value: unknown): string | null {
 
 function defaultDeviceLabel(): string {
   return `HDO ${process.platform}-${process.arch}`;
+}
+
+function tokenNeedsRefresh(expiresAt: string | null | undefined): boolean {
+  if (!expiresAt) return false;
+  const expiresMs = new Date(expiresAt).getTime();
+  if (!Number.isFinite(expiresMs)) return false;
+  return expiresMs - Date.now() <= 60_000;
 }
 
 function errorMessage(err: unknown): string {

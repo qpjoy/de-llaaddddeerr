@@ -1901,6 +1901,7 @@ electron-plugin/packages/wireguard-engines/win32-x64
 - HDO 通过 npm/下载安装，不作为 host seed 内置。
 - 如果服务端给的是 HDO tarball URL，插件市场也必须用 npm 安装而不能只解包 tarball；否则 HDO 的 `@qpjoy/electron-core-wireguard` 和平台 optional engine 不会进入插件目录。
 - `PluginStore` 已把 `@qpjoy/electron-plugin-hdo` 标记为需要 package-manager 安装的插件。
+- HDO 插件调用服务端 API 时复用插件市场本地登录态。access JWT 默认 7 天过期，refresh token 默认 30 天过期，可通过 `JWT_ACCESS_TTL_SECONDS` / `JWT_REFRESH_TTL_SECONDS` 调整；插件必须在 access 即将过期或收到 401 时用 refresh token 调 `/api/v1/auth/refresh` 静默续期，并把新 token 写回 marketplace session。只有 refresh token 失效、被吊销或服务器数据被清空时才要求用户重新登录。
 
 发布顺序：
 
