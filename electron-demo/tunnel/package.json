@@ -1,0 +1,38 @@
+{
+  "name": "qpjoy-electron-demo-tunnel",
+  "productName": "QPJoy Tunnel Demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pre-HDO Electron consumer demo for @qpjoy/electron-plugin-tunnel via published npm packages.",
+  "main": "src/main.cjs",
+  "scripts": {
+    "dev": "electron-forge start",
+    "start": "electron-forge start",
+    "package": "electron-forge package",
+    "make": "electron-forge make",
+    "make:mac": "electron-forge make --platform=darwin",
+    "make:win": "electron-forge make --platform=win32 --arch=x64",
+    "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check forge.config.cjs"
+  },
+  "dependencies": {
+    "@qpjoy/electron-market": "0.3.17",
+    "@qpjoy/electron-plugin-sdk": "0.1.2",
+    "@qpjoy/electron-plugin-tunnel": "0.1.16"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.8.1",
+    "@electron-forge/maker-dmg": "^7.8.1",
+    "@electron-forge/maker-zip": "^7.8.1",
+    "@electron-forge/maker-squirrel": "^7.8.1",
+    "electron": "^34.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "electron",
+      "electron-winstaller",
+      "fs-xattr",
+      "macos-alias"
+    ]
+  }
+}

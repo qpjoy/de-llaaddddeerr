@@ -47,6 +47,7 @@ header() { printf '\n%s%s%s\n' "$C_CYAN$C_BOLD" "$*" "$C_RESET"; hr; }
 # ── Package catalogue ─────────────────────────────────────────────────
 # Format: "<npm-name>|<workspace-path>|<category>|<display-name>"
 # Category: host = marketplace runtime, plugin = installable plugin,
+#           core = reusable runtime library,
 #           engine = platform-specific tunnel engine resource package,
 #           tool = npm CLI/helper, game = installable game.
 #
@@ -56,6 +57,8 @@ PACKAGES=(
   "@qpjoy/electron-plugin-sdk|electron-market/packages/electron-plugin-sdk|host|Plugin SDK (类型定义)"
   "@qpjoy/marketplace-db|electron-market/packages/marketplace-db|host|Marketplace DB (SQLite 层)"
   "@qpjoy/electron-market|electron-market/packages/electron-market|host|Electron Market (宿主运行时)"
+  "@qpjoy/electron-core-mihomo|electron-plugin/packages/electron-core-mihomo|core|Electron Core Mihomo (路由编译层)"
+  "@qpjoy/electron-core-wireguard|electron-plugin/packages/electron-core-wireguard|core|Electron Core WireGuard (HDO mesh 配置层)"
   "@qpjoy/electron-plugin-tunnel-engine-darwin-arm64|electron-plugin/packages/tunnel-engines/darwin-arm64|engine|Tunnel Engine macOS arm64"
   "@qpjoy/electron-plugin-tunnel-engine-darwin-x64|electron-plugin/packages/tunnel-engines/darwin-x64|engine|Tunnel Engine macOS x64"
   "@qpjoy/electron-plugin-tunnel-engine-linux-arm64|electron-plugin/packages/tunnel-engines/linux-arm64|engine|Tunnel Engine Linux arm64"
@@ -102,7 +105,7 @@ pkg_npm_version() {
   local v
   # `npm view ... version` exits non-zero if the package doesn't exist yet.
   # We treat that as "unpublished" instead of an error.
-  if v=$(npm view "$name" version 2>/dev/null); then
+  if v=$(npm_config_fetch_retries=0 npm_config_fetch_timeout=5000 npm view "$name" version 2>/dev/null); then
     echo "$v"
   else
     echo "(unpublished)"
@@ -167,6 +170,9 @@ cmd_status() {
   printf '  %-2s %-32s  %-10s  %-12s  %s\n' "" "包名" "本地" "npm" "状态"
   while IFS= read -r row; do pkg_status_line "$row"; done < <(pkgs_by_category host)
 
+  header "公共网络底座 (core libraries)"
+  while IFS= read -r row; do pkg_status_line "$row"; done < <(pkgs_by_category core)
+
   header "市场上架插件 (plugins)"
   while IFS= read -r row; do pkg_status_line "$row"; done < <(pkgs_by_category plugin)
 
@@ -184,7 +190,7 @@ cmd_status() {
   fi
 
   echo
-  echo "${C_DIM}Tip: 'prepare-host' / 'prepare-plugin' / 'prepare-engine' / 'prepare-tool' / 'prepare-game' 准备发布；'sync-apps' 让 demo/test 用上本地最新包${C_RESET}"
+  echo "${C_DIM}Tip: 'prepare-host' / 'prepare-core' / 'prepare-plugin' / 'prepare-engine' / 'prepare-tool' / 'prepare-game' 准备发布；'sync-apps' 让 demo/test 用上本地最新包${C_RESET}"
 }
 
 cmd_market() {
@@ -382,24 +388,28 @@ pick_pkg_then_prepare() {
 }
 
 cmd_prepare_plugin() { pick_pkg_then_prepare plugin "插件"; }
+cmd_prepare_core()   { pick_pkg_then_prepare core   "公共网络底座"; }
 cmd_prepare_engine() { pick_pkg_then_prepare engine "引擎资源包"; }
 cmd_prepare_host()   { pick_pkg_then_prepare host   "宿主组件"; }
 cmd_prepare_tool()   { pick_pkg_then_prepare tool   "命令行工具"; }
 cmd_prepare_game()   { pick_pkg_then_prepare game   "游戏"; }
 
 cmd_sync_apps() {
-  header "把 electron-demo / electron-test 同步到本地最新包"
-  # Both apps support `dev-mode.mjs local` — packs workspace tarballs and
-  # installs file: refs. For electron-demo this is the *opt-in* local mode
-  # (its committed default is npm semver); after this command runs, demo's
-  # package.json is in transient local state. Run `pnpm dev:reset` inside
-  # electron-demo before committing if you don't want the file: refs.
-  if [ -f "$ROOT/electron-demo/scripts/dev-mode.mjs" ]; then
-    say "electron-demo: pnpm setup:local"
-    rm -f "$ROOT/electron-demo/.dev-mode"
-    (cd "$ROOT/electron-demo" && pnpm setup:local) || warn "electron-demo setup:local 失败"
+  header "把 electron-demo/hdo / electron-test 同步到本地最新包"
+  # electron-demo/tunnel intentionally stays on published npm packages so it
+  # keeps testing the pre-HDO tunnel consumer flow. electron-demo/hdo links the
+  # current local HDO/market packages and is the app that should follow local
+  # HDO work.
+  if [ -f "$ROOT/electron-demo/hdo/package.json" ]; then
+    say "electron-demo/hdo: build local packages"
+    (cd "$ROOT/electron-demo/hdo" && pnpm build:local) || warn "electron-demo/hdo build:local 失败"
+    say "electron-demo/hdo: pnpm install"
+    (cd "$ROOT/electron-demo/hdo" && pnpm install) || warn "electron-demo/hdo install 失败"
   else
-    warn "electron-demo/scripts/dev-mode.mjs 不存在，跳过"
+    warn "electron-demo/hdo/package.json 不存在，跳过"
+  fi
+  if [ -f "$ROOT/electron-demo/tunnel/package.json" ]; then
+    ok "electron-demo/tunnel 保持发布版 npm 依赖，不自动切到本地 file: refs"
   fi
   if [ -f "$ROOT/electron-test/scripts/dev-mode.mjs" ]; then
     say "electron-test: dev-mode local (force re-pack)"
@@ -408,9 +418,7 @@ cmd_sync_apps() {
   else
     warn "electron-test/scripts/dev-mode.mjs 不存在，跳过"
   fi
-  ok "两个测试 app 都装好本地最新源 (local 模式)"
-  warn "提醒: electron-demo 的 package.json 现在有 file: refs (transient)。"
-  warn "      提交前在 electron-demo 跑 \`pnpm dev:reset\` 把它切回 npm semver。"
+  ok "测试 app 同步完成"
 }
 
 cmd_server() {
@@ -494,6 +502,7 @@ Subcommands:
   ${C_BOLD}status${C_RESET}            服务器 + 所有可发布包的本地/npm 版本一览
   ${C_BOLD}market${C_RESET}            浏览市场内置目录（seed-index 卡片）
   ${C_BOLD}prepare-plugin${C_RESET}    选择插件 → bump 版本 + build + pack 预览
+  ${C_BOLD}prepare-core${C_RESET}      选择公共网络底座做同样操作
   ${C_BOLD}prepare-engine${C_RESET}    选择平台引擎资源包做同样操作
   ${C_BOLD}prepare-host${C_RESET}      选择宿主组件（electron-market 等）做同样操作
   ${C_BOLD}prepare-tool${C_RESET}      选择命令行工具做同样操作
@@ -515,7 +524,7 @@ Examples:
   scripts/manage.sh hdo setup-domestic --server-url http://domestic:8080 --public-host domestic.example.com
 
 发布流程（每次手动 OTP）:
-  1. scripts/manage.sh prepare-plugin     # 或 prepare-engine / prepare-host / prepare-tool / prepare-game
+  1. scripts/manage.sh prepare-plugin     # 或 prepare-core / prepare-engine / prepare-host / prepare-tool / prepare-game
   2. 脚本会打印手动 publish 命令；也可输入 OTP 让脚本直接发布
      cd <package-dir> && pnpm publish --otp=XXXXXX --no-git-checks
   3. scripts/manage.sh sync-apps          # （可选）让 demo/test 也用上新版本
@@ -530,6 +539,7 @@ cmd_menu() {
     "status         市场 + 包版本一览"
     "market         查看市场卡片列表 (seed-index)"
     "prepare-plugin 准备发布: 插件"
+    "prepare-core   准备发布: 公共网络底座"
     "prepare-engine 准备发布: Tunnel 引擎资源包"
     "prepare-host   准备发布: 市场宿主组件"
     "prepare-tool   准备发布: 命令行工具"
@@ -549,6 +559,7 @@ cmd_menu() {
       status)         cmd_status ;;
       market)         cmd_market ;;
       prepare-plugin) cmd_prepare_plugin ;;
+      prepare-core)   cmd_prepare_core ;;
       prepare-engine) cmd_prepare_engine ;;
       prepare-host)   cmd_prepare_host ;;
       prepare-tool)   cmd_prepare_tool ;;
@@ -572,6 +583,7 @@ case "$sub" in
   status|st)                    cmd_status "$@" ;;
   market|cards|catalog)         cmd_market "$@" ;;
   prepare-plugin|plugin)        cmd_prepare_plugin "$@" ;;
+  prepare-core|core)            cmd_prepare_core "$@" ;;
   prepare-engine|engine)        cmd_prepare_engine "$@" ;;
   prepare-host|host)            cmd_prepare_host "$@" ;;
   prepare-tool|tool)            cmd_prepare_tool "$@" ;;

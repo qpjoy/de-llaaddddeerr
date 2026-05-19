@@ -34,4 +34,11 @@ electron-test/node_modules/
 electron-test/out/
 electron-test/dist/
 
-electron-demo/
+# Electron demo apps kept in git; runtime/build artifacts stay local.
+electron-demo/node_modules/
+electron-demo/out/
+electron-demo/dist/
+electron-demo/**/node_modules/
+electron-demo/**/out/
+electron-demo/**/dist/
+electron-demo/**/*.log

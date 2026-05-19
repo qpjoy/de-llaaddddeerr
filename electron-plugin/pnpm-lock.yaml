@@ -55,7 +55,33 @@ importers:
         specifier: ^2.2.0
         version: 2.2.12(typescript@5.9.3)
 
+  packages/electron-core-mihomo:
+    dependencies:
+      yaml:
+        specifier: ^2.7.0
+        version: 2.9.0
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.7
+        version: 22.19.19
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/electron-core-wireguard:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.7
+        version: 22.19.19
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
   packages/electron-plugin-hdo:
+    dependencies:
+      '@qpjoy/electron-core-wireguard':
+        specifier: workspace:^
+        version: link:../electron-core-wireguard
     devDependencies:
       '@types/node':
         specifier: ^22.10.7
@@ -81,6 +107,9 @@ importers:
 
   packages/electron-plugin-tunnel:
     dependencies:
+      '@qpjoy/electron-core-mihomo':
+        specifier: workspace:^
+        version: link:../electron-core-mihomo
       better-sqlite3:
         specifier: ^11.8.1
         version: 11.10.0

@@ -1,0 +1,41 @@
+{
+  "name": "@qpjoy/electron-core-wireguard",
+  "version": "0.1.0",
+  "private": false,
+  "description": "WireGuard mesh profile contracts and config rendering helpers for QPJoy HDO.",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "README.md",
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "pnpm build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "wireguard",
+    "mesh",
+    "vpn",
+    "hdo",
+    "qpjoy"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "typescript": "^5.7.3"
+  }
+}

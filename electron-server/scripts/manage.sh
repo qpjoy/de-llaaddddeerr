@@ -7,6 +7,7 @@
 #
 #   scripts/manage.sh up
 #   scripts/manage.sh redeploy
+#   scripts/manage.sh deploy
 #   scripts/manage.sh sync
 #   scripts/manage.sh bootstrap-admin --username root --password 'change-me'
 #
@@ -19,6 +20,7 @@ set -Eeuo pipefail
 # ── Locate compose root ────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$ROOT/.." && pwd)"
 ADMIN_UI_DIST="$ROOT/../electron-market/packages/admin-ui/dist"
 SPA_TARGET="$ROOT/data/spa-dist"
 
@@ -201,6 +203,63 @@ cmd_shell() {
   "${DC[@]}" exec "$svc" sh
 }
 
+run_hdo_manage() {
+  local hdo_script="$REPO_ROOT/docker/hdo-gateway-stack/manage.sh"
+  [ -f "$hdo_script" ] || die "HDO manage script not found: $hdo_script"
+  "$hdo_script" "$@"
+}
+
+cmd_deploy() {
+  local sub="${1:-}"
+  if [ -n "$sub" ]; then
+    shift || true
+    case "$sub" in
+      server|market|electron-server)
+        cmd_redeploy "$@"
+        ;;
+      hdo|domestic|hdo-domestic)
+        run_hdo_manage deploy-domestic "$@"
+        ;;
+      hdo-home|home-peer)
+        run_hdo_manage add-home "$@"
+        ;;
+      hdo-wg|wireguard|wg)
+        run_hdo_manage menu
+        ;;
+      *)
+        die "unknown deploy target: $sub"
+        ;;
+    esac
+    return
+  fi
+
+  local options=(
+    "server     部署/重启 electron-server"
+    "hdo        部署 HDO domestic + WireGuard"
+    "hdo-home   生成 Home WireGuard peer"
+    "hdo-wg     进入 HDO WireGuard 菜单"
+    "status     查看服务状态"
+    "quit       返回"
+  )
+  echo "${C_BLUE}QPJoy Deploy Manager${C_RESET}"
+  echo
+  PS3=$'\n选择部署项 > '
+  select opt in "${options[@]}"; do
+    [ -z "$opt" ] && continue
+    local cmd="${opt%% *}"
+    case "$cmd" in
+      server)   cmd_redeploy ;;
+      hdo)      run_hdo_manage deploy-domestic ;;
+      hdo-home) run_hdo_manage add-home ;;
+      hdo-wg)   run_hdo_manage menu ;;
+      status)   cmd_status ;;
+      quit|exit) break ;;
+      *)        warn "unknown option" ;;
+    esac
+    echo
+  done
+}
+
 cmd_nuke() {
   check_docker
   warn "this will delete the postgres volume AND market data volume."
@@ -225,6 +284,7 @@ Commands:
   restart [service]           restart all or one (postgres|market)
   build                       (re)build the market image
   redeploy                    rebuild market image and restart only market
+  deploy [target]             deploy menu; targets: server, hdo, hdo-home, hdo-wg
   migrate                     show current migration head
   sync                        run npm sync once inside the market container
   sync-status                 show recent sync history from audit_logs
@@ -252,6 +312,7 @@ cmd_menu() {
   local options=(
     "up         启动 postgres + market"
     "redeploy   重新构建并重启 market"
+    "deploy     部署 server / HDO / WireGuard"
     "logs       查看 market 日志"
     "status     查看服务状态"
     "migrate    查看 migration 状态"
@@ -273,6 +334,7 @@ cmd_menu() {
     case "$cmd" in
       up)        cmd_up ;;
       redeploy)  cmd_redeploy ;;
+      deploy)    cmd_deploy ;;
       logs)      cmd_logs ;;
       status)    cmd_status ;;
       migrate)   cmd_migrate ;;
@@ -300,7 +362,8 @@ case "$sub" in
   status|ps)        cmd_status "$@" ;;
   logs|log|tail)    cmd_logs "$@" ;;
   build)            cmd_build "$@" ;;
-  redeploy|deploy)  cmd_redeploy "$@" ;;
+  redeploy)         cmd_redeploy "$@" ;;
+  deploy|deployment) cmd_deploy "$@" ;;
   migrate|migrations) cmd_migrate "$@" ;;
   sync|sync-npm)    cmd_sync "$@" ;;
   sync-status|sync-log) cmd_sync_status "$@" ;;

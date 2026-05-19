@@ -45,6 +45,9 @@
     "mihomo",
     "qpjoy"
   ],
+  "dependencies": {
+    "@qpjoy/electron-core-wireguard": "workspace:^"
+  },
   "peerDependencies": {
     "electron": ">=28"
   },

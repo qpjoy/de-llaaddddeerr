@@ -1488,6 +1488,50 @@ domestic-vps:
 - domestic 仍作为 rendezvous/control plane。
 - 但 NAT、权限、撤销和审计复杂度明显更高；当前阶段优先 domestic 中继模型。
 
+## HDO Mesh 与公共网络底座包
+
+HDO 后续升级为 `HDO Mesh`：D 机器是控制面、WireGuard hub、订阅/路由编排
+和 ACL 强制点；H 机器、O 机器、User 机器都可以是 mesh peer。
+
+公共能力拆包：
+
+- `@qpjoy/electron-core-mihomo`
+  - 稳定的 Mihomo route compiler、订阅 YAML 校验、DNS/TUN/runtime 配置渲染。
+  - `@qpjoy/electron-plugin-tunnel` 依赖它，后续基本不再把 Mihomo 逻辑散在插件里。
+  - `@qpjoy/electron-plugin-hdo` 可用它编译 overlay、oversea、provider、cc 服务路由。
+- `@qpjoy/electron-core-wireguard`
+  - 稳定的 WireGuard peer/interface 配置渲染、HDO mesh 地址规划、常用端口/ACL 类型。
+  - HDO 插件可在客户端内置 WireGuard-like agent，先生成配置，后续自动启停 interface。
+  - 其他插件也可以依赖它加入 HDO mesh。
+
+HDO 插件职责：
+
+- 管理本机 mesh 身份：keypair、deviceId、overlay IP、角色、可见端口。
+- 图形化控制：加入/断开 mesh、开放/关闭本机端口、访问其他成员公开端口。
+- 统一路由编排：WireGuard overlay 负责 mesh 可达；Mihomo 负责本机出站、oversea、
+  provider、cc 服务等策略路由。
+- Three.js 可用于把 D/H/O/User 和连接状态画成可交互拓扑，让用户理解“现在谁能访问谁”。
+
+可信 mesh 端口策略：
+
+- User 之间不是完全公网隔离，而是 `trusted-mesh` 默认互信。
+- 仍然不建议全端口开放；用户可以打开常用端口组：
+  - dev: `3000, 5173, 8000, 8080`
+  - web: `80, 443`
+  - ssh: `22`
+  - database: `5432, 3306, 6379` 等需要显式开启
+- D 端用 nftables/iptables 强制 ACL：
+  - trusted-mesh 允许已公开端口互访。
+  - 默认拒绝未公开端口。
+  - User 不能访问 D 的内部管理端口，只能访问 HDO API/proxy/WireGuard 必需端口。
+
+O 机器部署：
+
+- 全局 `scripts/manage.sh deploy` 后续也要支持 `deploy oversea`。
+- O 机器可安装 WireGuard peer、mihomo/hysteria2 或其他 provider egress。
+- cc 服务即使在 wg 直连场景，也不应散落到脚本外；由 HDO 客户端拿 manifest
+  后统一编排：选择直连 WG、D 中继、O 出站或 provider-specific egress。
+
 ## HDO 部署菜单
 
 根 `scripts/manage.sh` 新增单独部署入口：

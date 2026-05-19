@@ -49,6 +49,7 @@
     "qpjoy"
   ],
   "dependencies": {
+    "@qpjoy/electron-core-mihomo": "workspace:^",
     "better-sqlite3": "^11.8.1",
     "yaml": "^2.7.0"
   },

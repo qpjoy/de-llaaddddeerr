@@ -1,0 +1,46 @@
+{
+  "name": "qpjoy-electron-demo-hdo",
+  "productName": "QPJoy HDO Demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Electron demo for current @qpjoy/electron-plugin-hdo development and packaging tests.",
+  "main": "src/main.cjs",
+  "scripts": {
+    "dev": "electron-forge start",
+    "start": "electron-forge start",
+    "package": "electron-forge package",
+    "make": "electron-forge make",
+    "make:mac": "electron-forge make --platform=darwin",
+    "make:win": "electron-forge make --platform=win32 --arch=x64",
+    "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check forge.config.cjs",
+    "build:local": "pnpm --dir ../../electron-market build && pnpm --dir ../../electron-plugin build:packages"
+  },
+  "dependencies": {
+    "@qpjoy/electron-core-wireguard": "file:../../electron-plugin/packages/electron-core-wireguard",
+    "@qpjoy/electron-market": "file:../../electron-market/packages/electron-market",
+    "@qpjoy/electron-plugin-hdo": "file:../../electron-plugin/packages/electron-plugin-hdo",
+    "@qpjoy/electron-plugin-sdk": "file:../../electron-market/packages/electron-plugin-sdk",
+    "@qpjoy/electron-plugin-tunnel": "0.1.16",
+    "@qpjoy/marketplace-db": "file:../../electron-market/packages/marketplace-db"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.8.1",
+    "@electron-forge/maker-dmg": "^7.8.1",
+    "@electron-forge/maker-zip": "^7.8.1",
+    "@electron-forge/maker-squirrel": "^7.8.1",
+    "electron": "^34.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "electron",
+      "electron-winstaller",
+      "fs-xattr",
+      "macos-alias"
+    ],
+    "overrides": {
+      "@qpjoy/electron-core-wireguard": "file:../../electron-plugin/packages/electron-core-wireguard",
+      "@qpjoy/marketplace-db": "file:../../electron-market/packages/marketplace-db"
+    }
+  }
+}

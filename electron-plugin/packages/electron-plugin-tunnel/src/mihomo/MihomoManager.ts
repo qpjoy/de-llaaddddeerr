@@ -3,7 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { basename, join } from 'path';
 import { gunzipSync } from 'zlib';
-import { parse } from 'yaml';
+import { validateSubscriptionYaml } from '@qpjoy/electron-core-mihomo';
 
 import { TunnelDatabase } from '../db/TunnelDatabase';
 import { DOMAIN_PRESETS, type DomainPresetId } from '../defaults';
@@ -167,27 +167,6 @@ function normalizeSubscriptionInput(input: SubscriptionInput): SubscriptionInput
     username,
     password
   };
-}
-
-function validateSubscriptionYaml(content: string): void {
-  let parsed: unknown;
-  try {
-    parsed = parse(content);
-  } catch {
-    throw new Error('subscription yaml is invalid');
-  }
-
-  if (!isRecord(parsed)) {
-    throw new Error('subscription yaml is invalid');
-  }
-
-  if (
-    !Array.isArray(parsed.proxies)
-    && !Array.isArray(parsed['proxy-groups'])
-    && !isRecord(parsed['proxy-providers'])
-  ) {
-    throw new Error('subscription yaml has no proxy definitions');
-  }
 }
 
 function normalizePort(value: number, label: string): number {

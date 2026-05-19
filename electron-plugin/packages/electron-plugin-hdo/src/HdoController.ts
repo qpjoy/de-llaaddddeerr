@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { HDO_MESH_DEFAULTS } from '@qpjoy/electron-core-wireguard';
 
 import type {
   HdoDeviceRegistrationInput,
@@ -176,7 +177,7 @@ export class HdoController {
       domestic: [
         './scripts/manage.sh deploy hdo',
         '# Non-interactive fallback:',
-        `./scripts/manage.sh deploy hdo --yes --server-url ${shellQuote(base)} --public-host <domestic-domain-or-ip>`
+        `./scripts/manage.sh deploy hdo --yes --server-url ${shellQuote(base)} --public-host <domestic-domain-or-ip> --port ${HDO_MESH_DEFAULTS.defaultListenPort}`
       ].join('\n'),
       home: `./scripts/manage.sh hdo add-home --name home-main --server-url ${shellQuote(base)}`,
       oversea: `./scripts/manage.sh hdo setup-oversea-egress --server-url ${shellQuote(base)}`
