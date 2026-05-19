@@ -144,6 +144,173 @@ export interface GameScoresStore {
 }
 
 /* ────────────────────────────────────────────────────────────────────── */
+/* HDO control plane                                                      */
+/* ────────────────────────────────────────────────────────────────────── */
+
+export type HdoNodeKind = 'domestic' | 'home' | 'oversea';
+export type HdoNodeStatus = 'pending' | 'online' | 'offline' | 'error';
+export type HdoDeviceStatus = HdoNodeStatus;
+export type HdoServiceProtocol = 'tcp' | 'udp' | 'http' | 'https';
+export type HdoProfileMode = 'home-only' | 'home-foreign' | 'domestic-global';
+export type HdoRateLimitSubjectType = 'user' | 'device' | 'profile' | 'node';
+export type HdoArtifactKind = 'manifest' | 'mihomo-yaml' | 'wg-profile';
+
+export interface HdoNodeRow {
+  id: string;
+  name: string;
+  kind: HdoNodeKind;
+  publicHost: string | null;
+  overlayIp: string | null;
+  status: HdoNodeStatus;
+  metadata: Record<string, unknown> | null;
+  lastSeenAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HdoDeviceRow {
+  id: string;
+  userId: string;
+  label: string;
+  platform: string | null;
+  publicKey: string | null;
+  overlayIp: string | null;
+  status: HdoDeviceStatus;
+  metadata: Record<string, unknown> | null;
+  lastSeenAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HdoServiceRow {
+  id: string;
+  name: string;
+  nodeId: string | null;
+  targetHost: string;
+  targetPort: number;
+  protocol: HdoServiceProtocol;
+  domains: string[];
+  enabled: boolean;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HdoProfileRow {
+  id: string;
+  name: string;
+  mode: HdoProfileMode;
+  enabled: boolean;
+  rules: Record<string, unknown> | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HdoRateLimitRow {
+  id: string;
+  subjectType: HdoRateLimitSubjectType;
+  subjectId: string;
+  downRate: string | null;
+  downCeil: string | null;
+  upRate: string | null;
+  upCeil: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HdoSubscriptionArtifactRow {
+  id: string;
+  deviceId: string;
+  kind: HdoArtifactKind;
+  generation: number;
+  checksum: string;
+  content: string;
+  contentType: string;
+  expiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HdoStore {
+  getGeneration(): Promise<number>;
+  bumpGeneration(): Promise<number>;
+  listNodes(): Promise<HdoNodeRow[]>;
+  upsertNode(input: {
+    id?: string;
+    name: string;
+    kind: HdoNodeKind;
+    publicHost?: string | null;
+    overlayIp?: string | null;
+    status?: HdoNodeStatus;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<HdoNodeRow>;
+  setNodeHeartbeat(
+    id: string,
+    input?: { status?: HdoNodeStatus; metadata?: Record<string, unknown> | null }
+  ): Promise<HdoNodeRow | null>;
+  listDevicesForUser(userId: string): Promise<HdoDeviceRow[]>;
+  findDevice(id: string): Promise<HdoDeviceRow | null>;
+  upsertDevice(input: {
+    id: string;
+    userId: string;
+    label: string;
+    platform?: string | null;
+    publicKey?: string | null;
+    overlayIp?: string | null;
+    status?: HdoDeviceStatus;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<HdoDeviceRow>;
+  listServices(): Promise<HdoServiceRow[]>;
+  upsertService(input: {
+    id?: string;
+    name: string;
+    nodeId?: string | null;
+    targetHost: string;
+    targetPort: number;
+    protocol?: HdoServiceProtocol;
+    domains?: string[];
+    enabled?: boolean;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<HdoServiceRow>;
+  listProfiles(): Promise<HdoProfileRow[]>;
+  ensureDefaultProfiles(): Promise<HdoProfileRow[]>;
+  upsertProfile(input: {
+    id?: string;
+    name: string;
+    mode: HdoProfileMode;
+    enabled?: boolean;
+    rules?: Record<string, unknown> | null;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<HdoProfileRow>;
+  listRateLimits(): Promise<HdoRateLimitRow[]>;
+  upsertRateLimit(input: {
+    id?: string;
+    subjectType: HdoRateLimitSubjectType;
+    subjectId: string;
+    downRate?: string | null;
+    downCeil?: string | null;
+    upRate?: string | null;
+    upCeil?: string | null;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<HdoRateLimitRow>;
+  latestArtifact(
+    deviceId: string,
+    kind: HdoArtifactKind
+  ): Promise<HdoSubscriptionArtifactRow | null>;
+  saveArtifact(input: {
+    deviceId: string;
+    kind: HdoArtifactKind;
+    generation: number;
+    checksum: string;
+    content: string;
+    contentType: string;
+    expiresAt?: string | null;
+  }): Promise<HdoSubscriptionArtifactRow>;
+}
+
+/* ────────────────────────────────────────────────────────────────────── */
 /* Bundle                                                                 */
 /* ────────────────────────────────────────────────────────────────────── */
 
@@ -154,6 +321,7 @@ export interface Storage {
   codes: CodesStore;
   audit: AuditStore;
   gameScores: GameScoresStore;
+  hdo: HdoStore;
   backend: 'json' | 'postgres';
   /** Best-effort close; harmless when called multiple times. */
   close(): Promise<void>;

@@ -17,6 +17,7 @@
 #   scripts/manage.sh prepare-plugin
 #   scripts/manage.sh sync-apps
 #   scripts/manage.sh server <subcommand>   # → electron-server/scripts/manage.sh
+#   scripts/manage.sh hdo <subcommand>      # → docker/hdo-gateway-stack/manage.sh
 #
 # Design note: publish stays operator-controlled. The script always prints the
 # manual command first, then only runs `pnpm publish` when an OTP is entered.
@@ -60,6 +61,7 @@ PACKAGES=(
   "@qpjoy/electron-plugin-tunnel-engine-linux-x64|electron-plugin/packages/tunnel-engines/linux-x64|engine|Tunnel Engine Linux x64"
   "@qpjoy/electron-plugin-tunnel-engine-win32-x64|electron-plugin/packages/tunnel-engines/win32-x64|engine|Tunnel Engine Windows x64"
   "@qpjoy/electron-plugin-tunnel|electron-plugin/packages/electron-plugin-tunnel|plugin|QPJoy Tunnel"
+  "@qpjoy/electron-plugin-hdo|electron-plugin/packages/electron-plugin-hdo|plugin|QPJoy HDO"
   "@qpjoy/electron-plugin-notyet|electron-plugin/packages/electron-plugin-notyet|plugin|NotYet 悬浮咨询球"
   "@qpjoy/tunnel-cli|electron-plugin/packages/tunnel-cli|tool|Tunnel CLI (服务器脚本分发器)"
   "@qpjoy/electron-game-suduku|electron-game/games/suduku|game|Suduku 数独游戏"
@@ -422,6 +424,13 @@ cmd_server() {
   fi
 }
 
+cmd_hdo() {
+  if [ ! -f "$ROOT/docker/hdo-gateway-stack/manage.sh" ]; then
+    die "未找到 docker/hdo-gateway-stack/manage.sh"
+  fi
+  "$ROOT/docker/hdo-gateway-stack/manage.sh" "$@"
+}
+
 cmd_help() {
   cat <<EOF
 ${C_BOLD}QPJoy Marketplace 管理脚本${C_RESET}
@@ -439,6 +448,7 @@ Subcommands:
   ${C_BOLD}prepare-game${C_RESET}      选择游戏 → bump 版本 + build + pack 预览
   ${C_BOLD}sync-apps${C_RESET}         同步 electron-demo / electron-test 到最新本地包
   ${C_BOLD}server [...] ${C_RESET}     转发到 electron-server/scripts/manage.sh
+  ${C_BOLD}hdo [...] ${C_RESET}        转发到 docker/hdo-gateway-stack/manage.sh
   ${C_BOLD}help${C_RESET}              本帮助
 
 Examples:
@@ -448,6 +458,7 @@ Examples:
   scripts/manage.sh prepare-tool
   scripts/manage.sh server status
   scripts/manage.sh server sync
+  scripts/manage.sh hdo setup-domestic --server-url http://domestic:8080 --public-host domestic.example.com
 
 发布流程（每次手动 OTP）:
   1. scripts/manage.sh prepare-plugin     # 或 prepare-engine / prepare-host / prepare-tool / prepare-game
@@ -471,6 +482,7 @@ cmd_menu() {
     "prepare-game   准备发布: 游戏"
     "sync-apps      同步 demo/test 到本地最新包"
     "server         进入服务器 (docker) 管理菜单"
+    "hdo            HDO gateway 安装/配置"
     "help           帮助"
     "quit           退出"
   )
@@ -488,6 +500,7 @@ cmd_menu() {
       prepare-game)   cmd_prepare_game ;;
       sync-apps)      cmd_sync_apps ;;
       server)         cmd_server ;;
+      hdo)            cmd_hdo ;;
       help)           cmd_help ;;
       quit|exit)      break ;;
       *) warn "未知选项";;
@@ -509,6 +522,7 @@ case "$sub" in
   prepare-game|game)            cmd_prepare_game "$@" ;;
   sync-apps|sync|apps)          cmd_sync_apps "$@" ;;
   server|srv)                   cmd_server "$@" ;;
+  hdo)                          cmd_hdo "$@" ;;
   help|-h|--help)               cmd_help ;;
   menu)                         cmd_menu ;;
   *) warn "未知命令: $sub"; cmd_help; exit 1 ;;

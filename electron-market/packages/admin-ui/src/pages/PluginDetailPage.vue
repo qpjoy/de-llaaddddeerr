@@ -47,48 +47,62 @@
       <div class="detail-grid">
         <!-- Left column: metadata + permissions -->
         <div class="detail-side">
-          <section class="section-surface q-pa-md">
-            <div class="text-subtitle2 text-weight-bold q-mb-sm">基本信息</div>
-            <div class="detail-row">
-              <span class="detail-label">作者</span>
-              <span>{{ plugin.manifest.author ?? '—' }}</span>
+          <q-expansion-item
+            v-model="infoOpen"
+            class="section-surface detail-expansion"
+            header-class="detail-expansion-header"
+            expand-icon-class="text-grey-7"
+            label="基本信息"
+          >
+            <div class="q-px-md q-pb-md">
+              <div class="detail-row">
+                <span class="detail-label">作者</span>
+                <span>{{ plugin.manifest.author ?? '—' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">版本</span>
+                <span>{{ plugin.version }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">引擎</span>
+                <span class="text-caption">
+                  electron-market {{ plugin.manifest.engines.electronMarket ?? plugin.manifest.engines.electronPlugin ?? '—' }}
+                </span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">安装路径</span>
+                <span class="text-caption ellipsis" :title="plugin.installPath">
+                  {{ plugin.installPath }}
+                </span>
+              </div>
+              <p class="q-mt-md text-body2">{{ plugin.manifest.description }}</p>
             </div>
-            <div class="detail-row">
-              <span class="detail-label">版本</span>
-              <span>{{ plugin.version }}</span>
-            </div>
-            <div class="detail-row">
-              <span class="detail-label">引擎</span>
-              <span class="text-caption">
-                electron-market {{ plugin.manifest.engines.electronMarket ?? plugin.manifest.engines.electronPlugin ?? '—' }}
-              </span>
-            </div>
-            <div class="detail-row">
-              <span class="detail-label">安装路径</span>
-              <span class="text-caption ellipsis" :title="plugin.installPath">
-                {{ plugin.installPath }}
-              </span>
-            </div>
-            <p class="q-mt-md text-body2">{{ plugin.manifest.description }}</p>
-          </section>
+          </q-expansion-item>
 
-          <section class="section-surface q-pa-md q-mt-md">
-            <div class="text-subtitle2 text-weight-bold q-mb-sm">权限</div>
-            <div
-              v-for="perm in plugin.manifest.permissions"
-              :key="perm"
-              class="permission-row q-mb-xs"
-            >
-              <q-icon
-                :name="plugin.grantedPermissions.includes(perm) ? 'check_circle' : 'cancel'"
-                :color="plugin.grantedPermissions.includes(perm) ? 'positive' : 'grey-6'"
-                size="18px"
-              />
-              <div class="col">
-                <div class="permission-name">{{ perm }}</div>
+          <q-expansion-item
+            v-model="permissionsOpen"
+            class="section-surface detail-expansion"
+            header-class="detail-expansion-header"
+            expand-icon-class="text-grey-7"
+            label="权限"
+          >
+            <div class="q-px-md q-pb-md">
+              <div
+                v-for="perm in plugin.manifest.permissions"
+                :key="perm"
+                class="permission-row q-mb-xs"
+              >
+                <q-icon
+                  :name="plugin.grantedPermissions.includes(perm) ? 'check_circle' : 'cancel'"
+                  :color="plugin.grantedPermissions.includes(perm) ? 'positive' : 'grey-6'"
+                  size="18px"
+                />
+                <div class="col">
+                  <div class="permission-name">{{ perm }}</div>
+                </div>
               </div>
             </div>
-          </section>
+          </q-expansion-item>
         </div>
 
         <!-- Right column: the plugin's own admin panel embedded in an iframe -->
@@ -151,6 +165,8 @@ const props = defineProps<{ id: string }>();
 const host = usePluginHost();
 
 const iframeEl = ref<HTMLIFrameElement | null>(null);
+const infoOpen = ref(localStorage.getItem('qpjoy.pluginDetail.infoOpen') !== '0');
+const permissionsOpen = ref(localStorage.getItem('qpjoy.pluginDetail.permissionsOpen') !== '0');
 
 onMounted(() => {
   host.refreshInstalled();
@@ -163,6 +179,8 @@ watch(
   () => props.id,
   () => host.refreshInstalled()
 );
+watch(infoOpen, (value) => localStorage.setItem('qpjoy.pluginDetail.infoOpen', value ? '1' : '0'));
+watch(permissionsOpen, (value) => localStorage.setItem('qpjoy.pluginDetail.permissionsOpen', value ? '1' : '0'));
 window.addEventListener('beforeunload', () => clearInterval(interval));
 
 const plugin = computed(() => host.findInstalled(props.id));
@@ -206,6 +224,9 @@ function openExternal(): void {
 
 .detail-side {
   min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 16px;
 }
 
 .detail-main {
@@ -224,6 +245,21 @@ function openExternal(): void {
   width: 70px;
   color: #6d7280;
   flex-shrink: 0;
+}
+
+.detail-expansion {
+  overflow: hidden;
+}
+
+.detail-expansion :deep(.q-item) {
+  min-height: 50px;
+  padding: 0 16px;
+}
+
+.detail-expansion :deep(.q-item__label) {
+  font-size: 14px;
+  font-weight: 700;
+  color: #111827;
 }
 
 .plugin-admin-frame-wrapper {

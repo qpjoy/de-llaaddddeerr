@@ -17,7 +17,7 @@
  *   SYNC_JITTER_MS    = 30000    (± 30s by default)
  */
 import { auditStore } from '../data/index.js';
-import { runSync, type SyncReport } from './sync-npm.js';
+import { runSync, type SyncOptions, type SyncReport } from './sync-npm.js';
 
 export type SchedulerStatus = {
   enabled: boolean;
@@ -87,14 +87,14 @@ export class SyncScheduler {
    * Manual one-shot. If a periodic run is in flight, returns the awaitable
    * for that run — never two parallel syncs touching the same data files.
    */
-  async runNow(reason: string = 'manual'): Promise<SyncReport> {
+  async runNow(reason: string = 'manual', opts: SyncOptions = {}): Promise<SyncReport> {
     if (this.running) {
       // Spin-wait briefly for the in-flight run, then return its report.
       while (this.running) await new Promise((r) => setTimeout(r, 250));
       if (this.lastReport) return this.lastReport;
       throw new Error('sync ended without a report');
     }
-    return this.runOnce(reason);
+    return this.runOnce(reason, opts);
   }
 
   /* ─── internals ─────────────────────────────────────────────────────── */
@@ -113,14 +113,14 @@ export class SyncScheduler {
     return Math.max(60_000, this.intervalMs + offset);
   }
 
-  private async runOnce(reason: string): Promise<SyncReport> {
+  private async runOnce(reason: string, opts: SyncOptions = {}): Promise<SyncReport> {
     this.running = true;
     this.lastStartedAt = new Date().toISOString();
     this.lastError = null;
     try {
       // eslint-disable-next-line no-console
       console.log(`[scheduler] sync start (reason=${reason})`);
-      const report = await runSync();
+      const report = await runSync(opts);
       this.lastReport = report;
       this.lastFinishedAt = new Date().toISOString();
       // eslint-disable-next-line no-console

@@ -44,6 +44,31 @@ body {
   color: #0f62d0;
 }
 
+.side-panel.q-drawer--mini {
+  .brand-lockup {
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    padding: 0 8px;
+  }
+
+  .nav-item {
+    justify-content: center;
+    margin: 6px 10px;
+  }
+
+  .nav-item .q-item__section--avatar {
+    min-width: 0;
+    padding-right: 0;
+    justify-content: center;
+  }
+
+  .side-panel-footer {
+    padding: 12px 8px;
+    text-align: center;
+  }
+}
+
 .content-panel {
   padding: 22px;
 }

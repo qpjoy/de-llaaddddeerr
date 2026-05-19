@@ -23,6 +23,18 @@ import type {
   EntitlementsStore,
   GameHighScoreRow,
   GameScoresStore,
+  HdoDeviceRow,
+  HdoDeviceStatus,
+  HdoNodeKind,
+  HdoNodeRow,
+  HdoNodeStatus,
+  HdoProfileMode,
+  HdoProfileRow,
+  HdoRateLimitRow,
+  HdoServiceProtocol,
+  HdoServiceRow,
+  HdoStore,
+  HdoSubscriptionArtifactRow,
   RefreshStore,
   Storage,
   UsersStore
@@ -38,6 +50,15 @@ interface EntitlementsFile { entitlements: EntitlementRow[]; }
 interface CodesFile { codes: VerificationCodeRow[]; }
 interface AuditFile { nextId: number; entries: AuditEntry[]; }
 interface GameScoresFile { scores: GameHighScoreRow[]; }
+interface HdoFile {
+  state: { generation: number; updatedAt: string };
+  nodes: HdoNodeRow[];
+  devices: HdoDeviceRow[];
+  services: HdoServiceRow[];
+  profiles: HdoProfileRow[];
+  rateLimits: HdoRateLimitRow[];
+  artifacts: HdoSubscriptionArtifactRow[];
+}
 
 function readJson<T>(name: string, fallback: T): T {
   const path = join(ROOT, name);
@@ -60,6 +81,66 @@ function writeJson(name: string, value: unknown): void {
 
 function hashToken(plain: string): string {
   return 'sha256:' + createHash('sha256').update(plain).digest('hex');
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function emptyHdoFile(): HdoFile {
+  return {
+    state: { generation: 1, updatedAt: nowIso() },
+    nodes: [],
+    devices: [],
+    services: [],
+    profiles: [],
+    rateLimits: [],
+    artifacts: []
+  };
+}
+
+function readHdo(): HdoFile {
+  return readJson<HdoFile>('hdo.json', emptyHdoFile());
+}
+
+function writeHdo(file: HdoFile): void {
+  writeJson('hdo.json', file);
+}
+
+function bumpHdoGeneration(file: HdoFile): number {
+  file.state.generation += 1;
+  file.state.updatedAt = nowIso();
+  return file.state.generation;
+}
+
+function defaultHdoProfiles(): Array<{
+  name: string;
+  mode: HdoProfileMode;
+  rules: Record<string, unknown>;
+}> {
+  return [
+    {
+      name: 'home-only',
+      mode: 'home-only',
+      rules: {
+        description: 'Only route home overlay and configured home services through HDO.'
+      }
+    },
+    {
+      name: 'home-foreign',
+      mode: 'home-foreign',
+      rules: {
+        description: 'Route home overlay plus foreign destinations through oversea egress.'
+      }
+    },
+    {
+      name: 'domestic-global',
+      mode: 'domestic-global',
+      rules: {
+        description: 'Route client traffic to domestic entry, then apply server-side policy.'
+      }
+    }
+  ];
 }
 
 /* ────────────────────────────────────────────────────────────────────── */
@@ -342,6 +423,323 @@ const gameScores: GameScoresStore = {
   }
 };
 
+const hdo: HdoStore = {
+  async getGeneration() {
+    return readHdo().state.generation;
+  },
+  async bumpGeneration() {
+    const file = readHdo();
+    const generation = bumpHdoGeneration(file);
+    writeHdo(file);
+    return generation;
+  },
+  async listNodes() {
+    return readHdo().nodes;
+  },
+  async upsertNode(input) {
+    const file = readHdo();
+    const now = nowIso();
+    const idx = input.id ? file.nodes.findIndex((row) => row.id === input.id) : -1;
+    if (idx >= 0) {
+      const existing = file.nodes[idx];
+      file.nodes[idx] = {
+        ...existing,
+        name: input.name,
+        kind: input.kind,
+        publicHost: input.publicHost === undefined ? existing.publicHost : input.publicHost,
+        overlayIp: input.overlayIp === undefined ? existing.overlayIp : input.overlayIp,
+        status: input.status ?? existing.status,
+        metadata: input.metadata === undefined ? existing.metadata : input.metadata,
+        updatedAt: now
+      };
+      bumpHdoGeneration(file);
+      writeHdo(file);
+      return file.nodes[idx];
+    }
+
+    const row: HdoNodeRow = {
+      id: input.id ?? randomUUID(),
+      name: input.name,
+      kind: input.kind,
+      publicHost: input.publicHost ?? null,
+      overlayIp: input.overlayIp ?? null,
+      status: input.status ?? 'pending',
+      metadata: input.metadata ?? null,
+      lastSeenAt: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    file.nodes.push(row);
+    bumpHdoGeneration(file);
+    writeHdo(file);
+    return row;
+  },
+  async setNodeHeartbeat(id, input = {}) {
+    const file = readHdo();
+    const idx = file.nodes.findIndex((row) => row.id === id);
+    if (idx === -1) return null;
+    const now = nowIso();
+    const existing = file.nodes[idx];
+    file.nodes[idx] = {
+      ...existing,
+      status: input.status ?? 'online',
+      metadata: input.metadata === undefined ? existing.metadata : input.metadata,
+      lastSeenAt: now,
+      updatedAt: now
+    };
+    writeHdo(file);
+    return file.nodes[idx];
+  },
+  async listDevicesForUser(userId) {
+    return readHdo().devices.filter((row) => row.userId === userId);
+  },
+  async findDevice(id) {
+    return readHdo().devices.find((row) => row.id === id) ?? null;
+  },
+  async upsertDevice(input) {
+    const file = readHdo();
+    const now = nowIso();
+    const idx = file.devices.findIndex((row) => row.id === input.id);
+    if (idx >= 0) {
+      const existing = file.devices[idx];
+      file.devices[idx] = {
+        ...existing,
+        userId: input.userId,
+        label: input.label,
+        platform: input.platform === undefined ? existing.platform : input.platform,
+        publicKey: input.publicKey === undefined ? existing.publicKey : input.publicKey,
+        overlayIp: input.overlayIp === undefined ? existing.overlayIp : input.overlayIp,
+        status: input.status ?? existing.status,
+        metadata: input.metadata === undefined ? existing.metadata : input.metadata,
+        lastSeenAt: now,
+        updatedAt: now
+      };
+      bumpHdoGeneration(file);
+      writeHdo(file);
+      return file.devices[idx];
+    }
+
+    const row: HdoDeviceRow = {
+      id: input.id,
+      userId: input.userId,
+      label: input.label,
+      platform: input.platform ?? null,
+      publicKey: input.publicKey ?? null,
+      overlayIp: input.overlayIp ?? null,
+      status: input.status ?? 'online',
+      metadata: input.metadata ?? null,
+      lastSeenAt: now,
+      createdAt: now,
+      updatedAt: now
+    };
+    file.devices.push(row);
+    bumpHdoGeneration(file);
+    writeHdo(file);
+    return row;
+  },
+  async listServices() {
+    return readHdo().services;
+  },
+  async upsertService(input) {
+    const file = readHdo();
+    const now = nowIso();
+    const idx = input.id
+      ? file.services.findIndex((row) => row.id === input.id)
+      : file.services.findIndex((row) => row.name === input.name);
+    if (idx >= 0) {
+      const existing = file.services[idx];
+      file.services[idx] = {
+        ...existing,
+        name: input.name,
+        nodeId: input.nodeId === undefined ? existing.nodeId : input.nodeId,
+        targetHost: input.targetHost,
+        targetPort: input.targetPort,
+        protocol: input.protocol ?? existing.protocol,
+        domains: input.domains ?? existing.domains,
+        enabled: input.enabled ?? existing.enabled,
+        metadata: input.metadata === undefined ? existing.metadata : input.metadata,
+        updatedAt: now
+      };
+      bumpHdoGeneration(file);
+      writeHdo(file);
+      return file.services[idx];
+    }
+
+    const row: HdoServiceRow = {
+      id: input.id ?? randomUUID(),
+      name: input.name,
+      nodeId: input.nodeId ?? null,
+      targetHost: input.targetHost,
+      targetPort: input.targetPort,
+      protocol: input.protocol ?? 'tcp',
+      domains: input.domains ?? [],
+      enabled: input.enabled ?? true,
+      metadata: input.metadata ?? null,
+      createdAt: now,
+      updatedAt: now
+    };
+    file.services.push(row);
+    bumpHdoGeneration(file);
+    writeHdo(file);
+    return row;
+  },
+  async listProfiles() {
+    return readHdo().profiles;
+  },
+  async ensureDefaultProfiles() {
+    const file = readHdo();
+    const now = nowIso();
+    let changed = false;
+    for (const profile of defaultHdoProfiles()) {
+      if (file.profiles.some((row) => row.name === profile.name)) continue;
+      file.profiles.push({
+        id: randomUUID(),
+        name: profile.name,
+        mode: profile.mode,
+        enabled: true,
+        rules: profile.rules,
+        metadata: null,
+        createdAt: now,
+        updatedAt: now
+      });
+      changed = true;
+    }
+    if (changed) {
+      bumpHdoGeneration(file);
+      writeHdo(file);
+    }
+    return file.profiles;
+  },
+  async upsertProfile(input) {
+    const file = readHdo();
+    const now = nowIso();
+    const idx = input.id
+      ? file.profiles.findIndex((row) => row.id === input.id)
+      : file.profiles.findIndex((row) => row.name === input.name);
+    if (idx >= 0) {
+      const existing = file.profiles[idx];
+      file.profiles[idx] = {
+        ...existing,
+        name: input.name,
+        mode: input.mode,
+        enabled: input.enabled ?? existing.enabled,
+        rules: input.rules === undefined ? existing.rules : input.rules,
+        metadata: input.metadata === undefined ? existing.metadata : input.metadata,
+        updatedAt: now
+      };
+      bumpHdoGeneration(file);
+      writeHdo(file);
+      return file.profiles[idx];
+    }
+
+    const row: HdoProfileRow = {
+      id: input.id ?? randomUUID(),
+      name: input.name,
+      mode: input.mode,
+      enabled: input.enabled ?? true,
+      rules: input.rules ?? null,
+      metadata: input.metadata ?? null,
+      createdAt: now,
+      updatedAt: now
+    };
+    file.profiles.push(row);
+    bumpHdoGeneration(file);
+    writeHdo(file);
+    return row;
+  },
+  async listRateLimits() {
+    return readHdo().rateLimits;
+  },
+  async upsertRateLimit(input) {
+    const file = readHdo();
+    const now = nowIso();
+    const idx = input.id
+      ? file.rateLimits.findIndex((row) => row.id === input.id)
+      : file.rateLimits.findIndex(
+          (row) => row.subjectType === input.subjectType && row.subjectId === input.subjectId
+        );
+    if (idx >= 0) {
+      const existing = file.rateLimits[idx];
+      file.rateLimits[idx] = {
+        ...existing,
+        subjectType: input.subjectType,
+        subjectId: input.subjectId,
+        downRate: input.downRate === undefined ? existing.downRate : input.downRate,
+        downCeil: input.downCeil === undefined ? existing.downCeil : input.downCeil,
+        upRate: input.upRate === undefined ? existing.upRate : input.upRate,
+        upCeil: input.upCeil === undefined ? existing.upCeil : input.upCeil,
+        metadata: input.metadata === undefined ? existing.metadata : input.metadata,
+        updatedAt: now
+      };
+      bumpHdoGeneration(file);
+      writeHdo(file);
+      return file.rateLimits[idx];
+    }
+
+    const row: HdoRateLimitRow = {
+      id: input.id ?? randomUUID(),
+      subjectType: input.subjectType,
+      subjectId: input.subjectId,
+      downRate: input.downRate ?? null,
+      downCeil: input.downCeil ?? null,
+      upRate: input.upRate ?? null,
+      upCeil: input.upCeil ?? null,
+      metadata: input.metadata ?? null,
+      createdAt: now,
+      updatedAt: now
+    };
+    file.rateLimits.push(row);
+    bumpHdoGeneration(file);
+    writeHdo(file);
+    return row;
+  },
+  async latestArtifact(deviceId, kind) {
+    return (
+      readHdo()
+        .artifacts
+        .filter((row) => row.deviceId === deviceId && row.kind === kind)
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? null
+    );
+  },
+  async saveArtifact(input) {
+    const file = readHdo();
+    const now = nowIso();
+    const idx = file.artifacts.findIndex(
+      (row) => row.deviceId === input.deviceId && row.kind === input.kind
+    );
+    if (idx >= 0) {
+      const existing = file.artifacts[idx];
+      file.artifacts[idx] = {
+        ...existing,
+        generation: input.generation,
+        checksum: input.checksum,
+        content: input.content,
+        contentType: input.contentType,
+        expiresAt: input.expiresAt ?? null,
+        updatedAt: now
+      };
+      writeHdo(file);
+      return file.artifacts[idx];
+    }
+
+    const row: HdoSubscriptionArtifactRow = {
+      id: randomUUID(),
+      deviceId: input.deviceId,
+      kind: input.kind,
+      generation: input.generation,
+      checksum: input.checksum,
+      content: input.content,
+      contentType: input.contentType,
+      expiresAt: input.expiresAt ?? null,
+      createdAt: now,
+      updatedAt: now
+    };
+    file.artifacts.push(row);
+    writeHdo(file);
+    return row;
+  }
+};
+
 export const jsonStorage: Storage = {
   users,
   refresh,
@@ -349,6 +747,7 @@ export const jsonStorage: Storage = {
   codes,
   audit,
   gameScores,
+  hdo,
   backend: 'json',
   async close() {
     // nothing to close

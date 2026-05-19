@@ -17,6 +17,19 @@ import type {
   EntitlementsStore,
   GameHighScoreRow,
   GameScoresStore,
+  HdoArtifactKind,
+  HdoDeviceRow,
+  HdoDeviceStatus,
+  HdoNodeKind,
+  HdoNodeRow,
+  HdoNodeStatus,
+  HdoProfileMode,
+  HdoProfileRow,
+  HdoRateLimitRow,
+  HdoServiceProtocol,
+  HdoServiceRow,
+  HdoStore,
+  HdoSubscriptionArtifactRow,
   RefreshStore,
   Storage,
   UsersStore
@@ -402,6 +415,441 @@ function rowToGameScore(r: Record<string, unknown>): GameHighScoreRow {
   };
 }
 
+const hdo: HdoStore = {
+  async getGeneration() {
+    const { rows } = await getPool().query<{ generation: string }>(
+      `SELECT generation FROM hdo_control_state WHERE id = 1`
+    );
+    return Number(rows[0]?.generation ?? 1);
+  },
+  async bumpGeneration() {
+    const { rows } = await getPool().query<{ generation: string }>(
+      `UPDATE hdo_control_state
+         SET generation = generation + 1, updated_at = now()
+       WHERE id = 1
+       RETURNING generation`
+    );
+    return Number(rows[0].generation);
+  },
+  async listNodes() {
+    const { rows } = await getPool().query(
+      `SELECT * FROM hdo_nodes ORDER BY kind ASC, name ASC`
+    );
+    return rows.map(rowToHdoNode);
+  },
+  async upsertNode(input) {
+    const { rows } = input.id
+      ? await getPool().query(
+          `INSERT INTO hdo_nodes (id, name, kind, public_host, overlay_ip, status, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           ON CONFLICT (id) DO UPDATE SET
+             name = excluded.name,
+             kind = excluded.kind,
+             public_host = excluded.public_host,
+             overlay_ip = excluded.overlay_ip,
+             status = excluded.status,
+             metadata = excluded.metadata,
+             updated_at = now()
+           RETURNING *`,
+          [
+            input.id,
+            input.name,
+            input.kind,
+            input.publicHost ?? null,
+            input.overlayIp ?? null,
+            input.status ?? 'pending',
+            input.metadata ?? null
+          ]
+        )
+      : await getPool().query(
+          `INSERT INTO hdo_nodes (name, kind, public_host, overlay_ip, status, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING *`,
+          [
+            input.name,
+            input.kind,
+            input.publicHost ?? null,
+            input.overlayIp ?? null,
+            input.status ?? 'pending',
+            input.metadata ?? null
+          ]
+        );
+    await hdo.bumpGeneration();
+    return rowToHdoNode(rows[0]);
+  },
+  async setNodeHeartbeat(id, input = {}) {
+    const { rows } = await getPool().query(
+      `UPDATE hdo_nodes
+         SET status = $2,
+             metadata = COALESCE($3::jsonb, metadata),
+             last_seen_at = now(),
+             updated_at = now()
+       WHERE id = $1
+       RETURNING *`,
+      [id, input.status ?? 'online', input.metadata ?? null]
+    );
+    return rows[0] ? rowToHdoNode(rows[0]) : null;
+  },
+  async listDevicesForUser(userId) {
+    const { rows } = await getPool().query(
+      `SELECT * FROM hdo_devices WHERE user_id = $1 ORDER BY updated_at DESC`,
+      [userId]
+    );
+    return rows.map(rowToHdoDevice);
+  },
+  async findDevice(id) {
+    const { rows } = await getPool().query(`SELECT * FROM hdo_devices WHERE id = $1`, [id]);
+    return rows[0] ? rowToHdoDevice(rows[0]) : null;
+  },
+  async upsertDevice(input) {
+    const { rows } = await getPool().query(
+      `INSERT INTO hdo_devices (
+         id, user_id, label, platform, public_key, overlay_ip, status, metadata, last_seen_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+       ON CONFLICT (id) DO UPDATE SET
+         user_id = excluded.user_id,
+         label = excluded.label,
+         platform = excluded.platform,
+         public_key = excluded.public_key,
+         overlay_ip = excluded.overlay_ip,
+         status = excluded.status,
+         metadata = excluded.metadata,
+         last_seen_at = now(),
+         updated_at = now()
+       RETURNING *`,
+      [
+        input.id,
+        input.userId,
+        input.label,
+        input.platform ?? null,
+        input.publicKey ?? null,
+        input.overlayIp ?? null,
+        input.status ?? 'online',
+        input.metadata ?? null
+      ]
+    );
+    await hdo.bumpGeneration();
+    return rowToHdoDevice(rows[0]);
+  },
+  async listServices() {
+    const { rows } = await getPool().query(
+      `SELECT * FROM hdo_services ORDER BY enabled DESC, name ASC`
+    );
+    return rows.map(rowToHdoService);
+  },
+  async upsertService(input) {
+    const params = [
+      input.name,
+      input.nodeId ?? null,
+      input.targetHost,
+      input.targetPort,
+      input.protocol ?? 'tcp',
+      input.domains ?? [],
+      input.enabled ?? true,
+      input.metadata ?? null
+    ];
+    const { rows } = input.id
+      ? await getPool().query(
+          `INSERT INTO hdo_services (
+             id, name, node_id, target_host, target_port, protocol, domains, enabled, metadata
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           ON CONFLICT (id) DO UPDATE SET
+             name = excluded.name,
+             node_id = excluded.node_id,
+             target_host = excluded.target_host,
+             target_port = excluded.target_port,
+             protocol = excluded.protocol,
+             domains = excluded.domains,
+             enabled = excluded.enabled,
+             metadata = excluded.metadata,
+             updated_at = now()
+           RETURNING *`,
+          [input.id, ...params]
+        )
+      : await getPool().query(
+          `INSERT INTO hdo_services (
+             name, node_id, target_host, target_port, protocol, domains, enabled, metadata
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (name) DO UPDATE SET
+             node_id = excluded.node_id,
+             target_host = excluded.target_host,
+             target_port = excluded.target_port,
+             protocol = excluded.protocol,
+             domains = excluded.domains,
+             enabled = excluded.enabled,
+             metadata = excluded.metadata,
+             updated_at = now()
+           RETURNING *`,
+          params
+        );
+    await hdo.bumpGeneration();
+    return rowToHdoService(rows[0]);
+  },
+  async listProfiles() {
+    const { rows } = await getPool().query(
+      `SELECT * FROM hdo_profiles ORDER BY name ASC`
+    );
+    return rows.map(rowToHdoProfile);
+  },
+  async ensureDefaultProfiles() {
+    let changed = false;
+    for (const profile of defaultHdoProfiles()) {
+      const result = await getPool().query(
+        `INSERT INTO hdo_profiles (name, mode, enabled, rules, metadata)
+         VALUES ($1, $2, true, $3, NULL)
+         ON CONFLICT (name) DO NOTHING`,
+        [profile.name, profile.mode, profile.rules]
+      );
+      if ((result.rowCount ?? 0) > 0) changed = true;
+    }
+    if (changed) await hdo.bumpGeneration();
+    return this.listProfiles();
+  },
+  async upsertProfile(input) {
+    const params = [
+      input.name,
+      input.mode,
+      input.enabled ?? true,
+      input.rules ?? null,
+      input.metadata ?? null
+    ];
+    const { rows } = input.id
+      ? await getPool().query(
+          `INSERT INTO hdo_profiles (id, name, mode, enabled, rules, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (id) DO UPDATE SET
+             name = excluded.name,
+             mode = excluded.mode,
+             enabled = excluded.enabled,
+             rules = excluded.rules,
+             metadata = excluded.metadata,
+             updated_at = now()
+           RETURNING *`,
+          [input.id, ...params]
+        )
+      : await getPool().query(
+          `INSERT INTO hdo_profiles (name, mode, enabled, rules, metadata)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (name) DO UPDATE SET
+             mode = excluded.mode,
+             enabled = excluded.enabled,
+             rules = excluded.rules,
+             metadata = excluded.metadata,
+             updated_at = now()
+           RETURNING *`,
+          params
+        );
+    await hdo.bumpGeneration();
+    return rowToHdoProfile(rows[0]);
+  },
+  async listRateLimits() {
+    const { rows } = await getPool().query(
+      `SELECT * FROM hdo_rate_limits ORDER BY subject_type ASC, subject_id ASC`
+    );
+    return rows.map(rowToHdoRateLimit);
+  },
+  async upsertRateLimit(input) {
+    const params = [
+      input.subjectType,
+      input.subjectId,
+      input.downRate ?? null,
+      input.downCeil ?? null,
+      input.upRate ?? null,
+      input.upCeil ?? null,
+      input.metadata ?? null
+    ];
+    const { rows } = input.id
+      ? await getPool().query(
+          `INSERT INTO hdo_rate_limits (
+             id, subject_type, subject_id, down_rate, down_ceil, up_rate, up_ceil, metadata
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (id) DO UPDATE SET
+             subject_type = excluded.subject_type,
+             subject_id = excluded.subject_id,
+             down_rate = excluded.down_rate,
+             down_ceil = excluded.down_ceil,
+             up_rate = excluded.up_rate,
+             up_ceil = excluded.up_ceil,
+             metadata = excluded.metadata,
+             updated_at = now()
+           RETURNING *`,
+          [input.id, ...params]
+        )
+      : await getPool().query(
+          `INSERT INTO hdo_rate_limits (
+             subject_type, subject_id, down_rate, down_ceil, up_rate, up_ceil, metadata
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+           ON CONFLICT (subject_type, subject_id) DO UPDATE SET
+             down_rate = excluded.down_rate,
+             down_ceil = excluded.down_ceil,
+             up_rate = excluded.up_rate,
+             up_ceil = excluded.up_ceil,
+             metadata = excluded.metadata,
+             updated_at = now()
+           RETURNING *`,
+          params
+        );
+    await hdo.bumpGeneration();
+    return rowToHdoRateLimit(rows[0]);
+  },
+  async latestArtifact(deviceId, kind) {
+    const { rows } = await getPool().query(
+      `SELECT *
+       FROM hdo_subscription_artifacts
+       WHERE device_id = $1 AND kind = $2
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [deviceId, kind]
+    );
+    return rows[0] ? rowToHdoArtifact(rows[0]) : null;
+  },
+  async saveArtifact(input) {
+    const { rows } = await getPool().query(
+      `INSERT INTO hdo_subscription_artifacts (
+         device_id, kind, generation, checksum, content, content_type, expires_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (device_id, kind) DO UPDATE SET
+         generation = excluded.generation,
+         checksum = excluded.checksum,
+         content = excluded.content,
+         content_type = excluded.content_type,
+         expires_at = excluded.expires_at,
+         updated_at = now()
+       RETURNING *`,
+      [
+        input.deviceId,
+        input.kind,
+        input.generation,
+        input.checksum,
+        input.content,
+        input.contentType,
+        input.expiresAt ?? null
+      ]
+    );
+    return rowToHdoArtifact(rows[0]);
+  }
+};
+
+function defaultHdoProfiles(): Array<{
+  name: string;
+  mode: HdoProfileMode;
+  rules: Record<string, unknown>;
+}> {
+  return [
+    {
+      name: 'home-only',
+      mode: 'home-only',
+      rules: {
+        description: 'Only route home overlay and configured home services through HDO.'
+      }
+    },
+    {
+      name: 'home-foreign',
+      mode: 'home-foreign',
+      rules: {
+        description: 'Route home overlay plus foreign destinations through oversea egress.'
+      }
+    },
+    {
+      name: 'domestic-global',
+      mode: 'domestic-global',
+      rules: {
+        description: 'Route client traffic to domestic entry, then apply server-side policy.'
+      }
+    }
+  ];
+}
+
+function rowToHdoNode(r: Record<string, unknown>): HdoNodeRow {
+  return {
+    id: String(r.id),
+    name: String(r.name),
+    kind: String(r.kind) as HdoNodeKind,
+    publicHost: r.public_host ? String(r.public_host) : null,
+    overlayIp: r.overlay_ip ? String(r.overlay_ip) : null,
+    status: String(r.status) as HdoNodeStatus,
+    metadata: (r.metadata as Record<string, unknown> | null) ?? null,
+    lastSeenAt: r.last_seen_at ? new Date(String(r.last_seen_at)).toISOString() : null,
+    createdAt: new Date(String(r.created_at)).toISOString(),
+    updatedAt: new Date(String(r.updated_at)).toISOString()
+  };
+}
+
+function rowToHdoDevice(r: Record<string, unknown>): HdoDeviceRow {
+  return {
+    id: String(r.id),
+    userId: String(r.user_id),
+    label: String(r.label),
+    platform: r.platform ? String(r.platform) : null,
+    publicKey: r.public_key ? String(r.public_key) : null,
+    overlayIp: r.overlay_ip ? String(r.overlay_ip) : null,
+    status: String(r.status) as HdoDeviceStatus,
+    metadata: (r.metadata as Record<string, unknown> | null) ?? null,
+    lastSeenAt: r.last_seen_at ? new Date(String(r.last_seen_at)).toISOString() : null,
+    createdAt: new Date(String(r.created_at)).toISOString(),
+    updatedAt: new Date(String(r.updated_at)).toISOString()
+  };
+}
+
+function rowToHdoService(r: Record<string, unknown>): HdoServiceRow {
+  return {
+    id: String(r.id),
+    name: String(r.name),
+    nodeId: r.node_id ? String(r.node_id) : null,
+    targetHost: String(r.target_host),
+    targetPort: Number(r.target_port),
+    protocol: String(r.protocol) as HdoServiceProtocol,
+    domains: Array.isArray(r.domains) ? r.domains.map(String) : [],
+    enabled: Boolean(r.enabled),
+    metadata: (r.metadata as Record<string, unknown> | null) ?? null,
+    createdAt: new Date(String(r.created_at)).toISOString(),
+    updatedAt: new Date(String(r.updated_at)).toISOString()
+  };
+}
+
+function rowToHdoProfile(r: Record<string, unknown>): HdoProfileRow {
+  return {
+    id: String(r.id),
+    name: String(r.name),
+    mode: String(r.mode) as HdoProfileMode,
+    enabled: Boolean(r.enabled),
+    rules: (r.rules as Record<string, unknown> | null) ?? null,
+    metadata: (r.metadata as Record<string, unknown> | null) ?? null,
+    createdAt: new Date(String(r.created_at)).toISOString(),
+    updatedAt: new Date(String(r.updated_at)).toISOString()
+  };
+}
+
+function rowToHdoRateLimit(r: Record<string, unknown>): HdoRateLimitRow {
+  return {
+    id: String(r.id),
+    subjectType: String(r.subject_type) as HdoRateLimitRow['subjectType'],
+    subjectId: String(r.subject_id),
+    downRate: r.down_rate ? String(r.down_rate) : null,
+    downCeil: r.down_ceil ? String(r.down_ceil) : null,
+    upRate: r.up_rate ? String(r.up_rate) : null,
+    upCeil: r.up_ceil ? String(r.up_ceil) : null,
+    metadata: (r.metadata as Record<string, unknown> | null) ?? null,
+    createdAt: new Date(String(r.created_at)).toISOString(),
+    updatedAt: new Date(String(r.updated_at)).toISOString()
+  };
+}
+
+function rowToHdoArtifact(r: Record<string, unknown>): HdoSubscriptionArtifactRow {
+  return {
+    id: String(r.id),
+    deviceId: String(r.device_id),
+    kind: String(r.kind) as HdoArtifactKind,
+    generation: Number(r.generation),
+    checksum: String(r.checksum),
+    content: String(r.content),
+    contentType: String(r.content_type),
+    expiresAt: r.expires_at ? new Date(String(r.expires_at)).toISOString() : null,
+    createdAt: new Date(String(r.created_at)).toISOString(),
+    updatedAt: new Date(String(r.updated_at)).toISOString()
+  };
+}
+
 function rowToAudit(r: Record<string, unknown>): AuditEntry {
   return {
     id: Number(r.id),
@@ -422,6 +870,7 @@ export const pgStorage: Storage = {
   codes,
   audit,
   gameScores,
+  hdo,
   backend: 'postgres',
   async close() {
     await closePg();

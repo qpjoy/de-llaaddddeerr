@@ -60,6 +60,9 @@ export const auditStore = new Proxy({} as Storage['audit'], {
 export const gameScoresStore = new Proxy({} as Storage['gameScores'], {
   get: (_t, prop) => Reflect.get(active.gameScores, prop, active.gameScores)
 });
+export const hdoStore = new Proxy({} as Storage['hdo'], {
+  get: (_t, prop) => Reflect.get(active.hdo, prop, active.hdo)
+});
 
 export type { Storage } from './storage-types.js';
 export * from './storage-types.js';

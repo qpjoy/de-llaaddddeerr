@@ -144,4 +144,39 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       return { error: err instanceof Error ? err.message : String(err) };
     }
   });
+
+  app.post('/api/v1/admin/sync/package', adminOnly, async (req, reply) => {
+    const body = (req.body ?? {}) as { name?: string };
+    const name = body.name?.trim();
+    if (!name) {
+      reply.code(400);
+      return { error: 'name required' };
+    }
+    const s = getScheduler();
+    if (!s) {
+      reply.code(503);
+      return { error: 'scheduler not initialised' };
+    }
+    try {
+      const report = await s.runNow(`admin-package:${req.currentUser?.id ?? 'unknown'}`, {
+        packages: [name]
+      });
+      await auditStore.insert({
+        actorUserId: req.currentUser?.id ?? null,
+        actorIp: req.ip,
+        action: 'admin.sync.package',
+        targetKind: 'npm_package',
+        targetId: name,
+        meta: {
+          release: report.release,
+          acceptedPlugins: report.acceptedPlugins,
+          rejected: report.rejected
+        }
+      });
+      return report;
+    } catch (err) {
+      reply.code(500);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
 }

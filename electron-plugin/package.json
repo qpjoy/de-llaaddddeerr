@@ -4,7 +4,7 @@
   "packageManager": "pnpm@9.15.4",
   "scripts": {
     "build": "pnpm -r build",
-    "build:packages": "pnpm --filter @qpjoy/electron-plugin-tunnel build",
+    "build:packages": "pnpm --filter @qpjoy/electron-plugin-tunnel build && pnpm --filter @qpjoy/electron-plugin-hdo build",
     "core:install": "node scripts/install-mihomo-core.mjs",
     "dev:quasar": "pnpm build:packages && pnpm --filter @qpjoy/tunnel-quasar-client dev",
     "lint": "pnpm -r lint",

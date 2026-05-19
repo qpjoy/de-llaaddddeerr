@@ -1,0 +1,61 @@
+{
+  "name": "@qpjoy/electron-plugin-hdo",
+  "version": "0.1.1",
+  "private": false,
+  "description": "Home-Domestic-Oversea control panel plugin for QPJoy Marketplace.",
+  "license": "UNLICENSED",
+  "homepage": "https://www.npmjs.com/package/@qpjoy/electron-plugin-hdo",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./plugin": {
+      "types": "./dist/plugin.d.ts",
+      "default": "./dist/plugin.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "README.md",
+    "dist"
+  ],
+  "qpjoyPlugin": {
+    "specVersion": 1,
+    "entry": "dist/plugin.js",
+    "manifest": "dist/plugin.manifest.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/sync-manifest.mjs",
+    "prepack": "pnpm build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "electron",
+    "plugin",
+    "hdo",
+    "wireguard",
+    "mihomo",
+    "qpjoy"
+  ],
+  "peerDependencies": {
+    "electron": ">=28"
+  },
+  "peerDependenciesMeta": {
+    "electron": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "electron": "^34.0.0",
+    "typescript": "^5.7.3"
+  }
+}

@@ -82,6 +82,7 @@ const NPM_PREFIX = process.env.NPM_PREFIX ?? 'electron-';
  */
 const DEFAULT_MARKETPLACE_ALLOWLIST = [
   '@qpjoy/electron-plugin-tunnel',
+  '@qpjoy/electron-plugin-hdo',
   '@qpjoy/electron-plugin-notyet',
   '@qpjoy/electron-game-suduku'
 ];
@@ -121,15 +122,22 @@ export interface SyncReport {
   durationMs: number;
 }
 
-export async function runSync(opts: { dryRun?: boolean } = {}): Promise<SyncReport> {
+export interface SyncOptions {
+  dryRun?: boolean;
+  packages?: string[];
+}
+
+export async function runSync(opts: SyncOptions = {}): Promise<SyncReport> {
   const started = Date.now();
   const rejected: SyncReport['rejected'] = [];
   const accepted: PluginDetailDTO[] = [];
+  const exactPackages = normalizePackageNames(opts.packages ?? []);
+  const targeted = exactPackages.length > 0;
 
   // 1. Find packages. Besides npm search, refresh anything already present
   // in the server catalogue so existing games/plugins continue to update
   // even when npm search indexing lags behind a fresh publish.
-  const candidates = await discoverCandidates();
+  const candidates = targeted ? exactPackages : await discoverCandidates();
 
   // 2. For each, fetch metadata + extract manifest.
   for (const name of candidates) {
@@ -148,7 +156,8 @@ export async function runSync(opts: { dryRun?: boolean } = {}): Promise<SyncRepo
   // 3. Build the index + version manifest.
   const generatedAt = new Date().toISOString();
   const release = generatedAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
-  const indexEntries: MarketplaceEntryDTO[] = accepted.map(stripDetailToEntry);
+  const catalog = targeted ? mergeIntoExistingCatalog(accepted) : accepted;
+  const indexEntries: MarketplaceEntryDTO[] = catalog.map(stripDetailToEntry);
 
   const index: MarketplaceIndexDTO = {
     generatedAt,
@@ -167,7 +176,7 @@ export async function runSync(opts: { dryRun?: boolean } = {}): Promise<SyncRepo
   };
 
   if (!opts.dryRun) {
-    for (const plugin of accepted) storage.setPlugin(plugin);
+    for (const plugin of catalog) storage.setPlugin(plugin);
     storage.setIndex(index);
     storage.setVersion(version);
   }
@@ -221,6 +230,35 @@ function existingMarketplacePackages(): string[] {
     if (detail.npm) names.add(detail.npm);
   }
   return Array.from(names);
+}
+
+function normalizePackageNames(names: string[]): string[] {
+  const out = new Set<string>();
+  for (const name of names) {
+    const trimmed = name.trim();
+    if (!trimmed) continue;
+    if (!/^(@[a-z0-9._-]+\/)?[a-z0-9._-]+$/i.test(trimmed)) {
+      throw new Error(`invalid npm package name: ${name}`);
+    }
+    out.add(trimmed);
+  }
+  return Array.from(out).sort();
+}
+
+function mergeIntoExistingCatalog(synced: PluginDetailDTO[]): PluginDetailDTO[] {
+  const byId = new Map<string, PluginDetailDTO>();
+  for (const plugin of storage.listPlugins()) {
+    byId.set(plugin.id, plugin);
+  }
+  for (const plugin of synced) {
+    for (const [id, existing] of byId) {
+      if (existing.npm && plugin.npm && existing.npm === plugin.npm) {
+        byId.delete(id);
+      }
+    }
+    byId.set(plugin.id, plugin);
+  }
+  return Array.from(byId.values());
 }
 
 async function searchScope(): Promise<string[]> {
