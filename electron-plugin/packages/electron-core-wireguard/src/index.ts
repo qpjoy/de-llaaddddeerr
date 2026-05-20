@@ -504,16 +504,17 @@ export function buildWireGuardTunnelCommand(input: {
     const command = runtime.windowsWireGuard?.command;
     if (!command) throw new Error(runtime.error ?? 'wireguard.exe unavailable');
     const tunnelName = basename(configPath).replace(/\.[^.]+$/, '');
-    const args = action === 'up'
+    const wireGuardArgs = action === 'up'
       ? ['/installtunnelservice', configPath]
       : ['/uninstalltunnelservice', tunnelName];
+    const script = windowsElevatedStartProcessScript(command, wireGuardArgs);
     return {
       action,
       platform: runtime.platform,
       configPath,
-      command,
-      args,
-      displayCommand: [shellQuote(command), ...args.map(shellQuote)].join(' '),
+      command: 'powershell.exe',
+      args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      displayCommand: `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ${shellQuote(script)}`,
       needsAdmin: true,
       runtime
     };
@@ -607,9 +608,22 @@ export async function setWireGuardTunnelState(input: {
     };
   }
 
-  const result = await execFileAsync(command.command, command.args, {
-    env: command.env ? { ...process.env, ...command.env } : process.env
-  });
+  let result: { stdout: string; stderr: string };
+  try {
+    result = await execFileAsync(command.command, command.args, {
+      env: command.env ? { ...process.env, ...command.env } : process.env
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      action: input.action,
+      mode: command.runtime.method,
+      configPath: input.configPath,
+      command: command.displayCommand,
+      message: wireGuardCommandErrorMessage(command, err),
+      runtime: command.runtime
+    };
+  }
   return {
     ok: true,
     action: input.action,
@@ -1315,6 +1329,49 @@ function defaultWireGuardPathDirs(): string[] {
 
 function appleScriptString(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function powerShellString(value: string): string {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function windowsElevatedStartProcessScript(command: string, args: string[]): string {
+  const argumentList = args.map(windowsCommandLineArg).join(' ');
+  return [
+    `$p = Start-Process -FilePath ${powerShellString(command)} -ArgumentList ${powerShellString(argumentList)} -Verb RunAs -Wait -PassThru`,
+    'if ($null -ne $p.ExitCode) { exit $p.ExitCode }'
+  ].join('; ');
+}
+
+function windowsCommandLineArg(value: string): string {
+  if (value.length === 0) return '""';
+  if (!/[ \t\n\v"]/.test(value)) return value;
+  let out = '"';
+  let backslashes = 0;
+  for (const ch of value) {
+    if (ch === '\\') {
+      backslashes += 1;
+    } else if (ch === '"') {
+      out += '\\'.repeat(backslashes * 2 + 1) + '"';
+      backslashes = 0;
+    } else {
+      out += '\\'.repeat(backslashes) + ch;
+      backslashes = 0;
+    }
+  }
+  return out + '\\'.repeat(backslashes * 2) + '"';
+}
+
+function wireGuardCommandErrorMessage(command: WireGuardTunnelCommand, err: unknown): string {
+  const detail = errorMessage(err);
+  if (command.platform === 'win32') {
+    return [
+      'Windows 启停 WireGuard 需要管理员授权。',
+      '请在弹出的 UAC 窗口点击“是”；如果没有弹窗，请用“以管理员身份运行”启动 QPJoy 后重试。',
+      detail
+    ].filter(Boolean).join(' ');
+  }
+  return detail;
 }
 
 function isPathLike(value: string): boolean {

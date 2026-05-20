@@ -47,11 +47,11 @@ const LOCAL_DIRECT_DEP_NAMES = [
 
 const NPM_VERSIONS = {
   '@qpjoy/electron-market': '^0.3.18',
-  '@qpjoy/electron-plugin-hdo': '^0.1.11',
+  '@qpjoy/electron-plugin-hdo': '^0.1.12',
   '@qpjoy/electron-plugin-sdk': '^0.1.3',
   '@qpjoy/electron-plugin-tunnel': '^0.1.16',
   '@qpjoy/marketplace-db': '^0.1.1',
-  '@qpjoy/electron-core-wireguard': '^0.1.3',
+  '@qpjoy/electron-core-wireguard': '^0.1.4',
   '@qpjoy/electron-core-wireguard-engine-darwin-arm64': '^0.1.2',
   '@qpjoy/electron-core-wireguard-engine-darwin-x64': '^0.1.2',
   '@qpjoy/electron-core-wireguard-engine-linux-arm64': '^0.1.2',
