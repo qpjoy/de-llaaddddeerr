@@ -1,5 +1,4 @@
-# WireGuard Runtime Placeholder
+# WireGuard Runtime
 
-Place the macOS arm64 `wg` and `wireguard-go` executables here before
-publishing this package. `wg-quick` and Bash 4+ can also be included as an
-alternate launcher.
+This directory ships the macOS arm64 `wg` and `wireguard-go` executables.
+`wg-quick` is included only as an alternate launcher.

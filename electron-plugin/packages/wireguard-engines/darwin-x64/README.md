@@ -12,4 +12,5 @@ should ship:
 
 Current binary source: Homebrew `wireguard-tools` bottle `1.0.20260223`.
 WireGuard tools are GPL-2.0-only; the bundled `COPYING` file is included next
-to the executable.
+to the executable. `wireguard-go` is MIT licensed; the bundled
+`WIREGUARD_GO_LICENSE` file is included beside it.

@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-core-wireguard-engine-linux-x64",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": false,
   "description": "Linux x64 WireGuard CLI resources for @qpjoy/electron-core-wireguard.",
   "license": "GPL-2.0-only",

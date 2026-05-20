@@ -1,4 +1,4 @@
-# WireGuard Runtime Placeholder
+# WireGuard Runtime
 
-Place the Linux x64 `wg` and `wg-quick` executables here before publishing
-this package. `wireguard-go` can also be included as a userspace fallback.
+This directory ships the Linux x64 `wg` executable and `wg-quick` script.
+`wireguard-go` can also be included as a userspace fallback.

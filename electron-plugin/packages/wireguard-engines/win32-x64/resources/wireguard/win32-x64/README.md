@@ -1,4 +1,4 @@
-# WireGuard Runtime Placeholder
+# WireGuard Runtime
 
-Place the Windows x64 `wg.exe` and `wireguard.exe` executables here before
-publishing this package.
+This directory ships the Windows x64 `wg.exe` CLI and `wireguard.exe` tunnel
+service manager.
