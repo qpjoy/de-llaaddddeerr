@@ -1126,9 +1126,22 @@ function routeLooksLikeExistingHdoRoute(
   hdoRanges: Array<{ start: number; end: number }>
 ): boolean {
   if (route.source !== 'windows-route-print') return false;
+  const routeRange = cidrRange(route.cidr);
+  if (!routeRange) return false;
   const interfaceIp = route.interfaceName ? ipv4ToInt(route.interfaceName) : null;
-  if (interfaceIp === null) return false;
-  return hdoRanges.some((range) => interfaceIp >= range.start && interfaceIp <= range.end);
+  if (interfaceIp !== null && hdoRanges.some((range) => interfaceIp >= range.start && interfaceIp <= range.end)) {
+    return true;
+  }
+  if (!rangeIsCoveredByAny(routeRange, hdoRanges)) return false;
+  const gateway = (route.gateway ?? '').trim().toLowerCase();
+  return !gateway || gateway === 'on-link' || gateway === '在链路上' || !isIpv4(gateway);
+}
+
+function rangeIsCoveredByAny(
+  target: { start: number; end: number },
+  ranges: Array<{ start: number; end: number }>
+): boolean {
+  return ranges.some((range) => target.start >= range.start && target.end <= range.end);
 }
 
 function safeExecFile(command: string, args: string[]): string | null {
