@@ -5,10 +5,10 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@qpjoy/electron-plugin-sdk': file:./.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz
-  '@qpjoy/marketplace-db': file:./.local-packs/qpjoy-marketplace-db-0.1.0.tgz
-  '@qpjoy/electron-market': file:./.local-packs/qpjoy-electron-market-0.3.1.tgz
-  '@qpjoy/electron-plugin-tunnel': file:./.local-packs/qpjoy-electron-plugin-tunnel-0.1.5.tgz
+  '@qpjoy/electron-plugin-sdk': file:./.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz
+  '@qpjoy/marketplace-db': file:./.local-packs/qpjoy-marketplace-db-0.1.1.tgz
+  '@qpjoy/electron-market': file:./.local-packs/qpjoy-electron-market-0.3.18.tgz
+  '@qpjoy/electron-plugin-tunnel': file:./.local-packs/qpjoy-electron-plugin-tunnel-0.1.16.tgz
   '@qpjoy/electron-plugin-tunnel-engine-darwin-arm64': file:./.local-packs/qpjoy-electron-plugin-tunnel-engine-darwin-arm64-0.1.5.tgz
   '@qpjoy/electron-plugin-tunnel-engine-darwin-x64': file:./.local-packs/qpjoy-electron-plugin-tunnel-engine-darwin-x64-0.1.5.tgz
   '@qpjoy/electron-plugin-tunnel-engine-linux-arm64': file:./.local-packs/qpjoy-electron-plugin-tunnel-engine-linux-arm64-0.1.5.tgz
@@ -20,14 +20,14 @@ importers:
   .:
     dependencies:
       '@qpjoy/electron-market':
-        specifier: file:.local-packs/qpjoy-electron-market-0.3.1.tgz
-        version: file:.local-packs/qpjoy-electron-market-0.3.1.tgz(@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz(electron@34.5.8))(electron@34.5.8)
+        specifier: file:.local-packs/qpjoy-electron-market-0.3.18.tgz
+        version: file:.local-packs/qpjoy-electron-market-0.3.18.tgz(@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz(electron@34.5.8))(electron@34.5.8)
       '@qpjoy/electron-plugin-sdk':
-        specifier: file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz
-        version: file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz(electron@34.5.8)
+        specifier: file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz
+        version: file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz(electron@34.5.8)
       '@qpjoy/electron-plugin-tunnel':
-        specifier: file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.5.tgz
-        version: file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.5.tgz(electron@34.5.8)
+        specifier: file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.16.tgz
+        version: file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.16.tgz(electron@34.5.8)
     devDependencies:
       '@electron-forge/cli':
         specifier: ^7.8.1
@@ -280,16 +280,19 @@ packages:
     engines: {node: ^12.13.0 || ^14.15.0 || >=16.0.0}
     deprecated: This functionality has been moved to @npmcli/fs
 
-  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.3.1.tgz':
-    resolution: {integrity: sha512-zr3VogQxYG/r1EjNxhY9zi6/rufnO3uGtM/WWBYdVKAzqttRqQHwuqQ+Dum7qeBBoGl0JKh6UYW1Leh9MHlXbg==, tarball: file:.local-packs/qpjoy-electron-market-0.3.1.tgz}
-    version: 0.3.1
+  '@qpjoy/electron-core-mihomo@0.1.0':
+    resolution: {integrity: sha512-Tjk16GuB9Go7oOVqHigA+QwQ7IjIvxeZJsqaA6S8lDRRlwjRPxO91cEI3jszuWQDG5hoUZ5o+nEYYFiqa3Bqog==}
+
+  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.3.18.tgz':
+    resolution: {integrity: sha512-WCfnWQTmK4cS8TZH6LM4mt/+/uQFVxnrJ83swEhAq6MYmAswU5KvGUW5VrRXM6rkqJvfNZYUYaMFbL9WHnCQwQ==, tarball: file:.local-packs/qpjoy-electron-market-0.3.18.tgz}
+    version: 0.3.18
     peerDependencies:
       '@qpjoy/electron-plugin-sdk': '>=0.1.0'
       electron: '>=28'
 
-  '@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz':
-    resolution: {integrity: sha512-vM9wAwoqMQWQW957HW1606nTn5A65RRgIvbNgWXC2zyhibPQZElWCCPkiYMiU9MZxF4nVwR6DCQbiPO9EabuYQ==, tarball: file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz}
-    version: 0.1.0
+  '@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz':
+    resolution: {integrity: sha512-r0Oby4ayBM+1vav3Tj5SAOVCSs0zvcAzlNC2Wuni7f4OT8A36G8JhE82C8tsU1Z7qtPVMiY8BMQQ38pir/6hxA==, tarball: file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz}
+    version: 0.1.3
     peerDependencies:
       electron: '>=28'
     peerDependenciesMeta:
@@ -326,16 +329,16 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@qpjoy/electron-plugin-tunnel@file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.5.tgz':
-    resolution: {integrity: sha512-gn/VQOpyrc5xJ2FWNYtUSRngps3QfwW+jRj1LBKVDb2XO5HMBf44WCh3jRE2YDjaUqEDGlzkeFCoqlmC++P6Hw==, tarball: file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.5.tgz}
-    version: 0.1.5
+  '@qpjoy/electron-plugin-tunnel@file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.16.tgz':
+    resolution: {integrity: sha512-ya6vJC1Gsj2SP5pdtWgsYkYieApG5iK0HWTfMfUDlmncseWxOT/Cx8m9ZvxsL9vePKNEQTiO9Zkt7yJlHK3zBA==, tarball: file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.16.tgz}
+    version: 0.1.16
     hasBin: true
     peerDependencies:
       electron: '>=28'
 
-  '@qpjoy/marketplace-db@file:.local-packs/qpjoy-marketplace-db-0.1.0.tgz':
-    resolution: {integrity: sha512-R3+tJxXz1q7qsVXuEi+yRRUwhEY1uk1FdeP+UTeIHffLfK0oPDfwD3kgnWRQQOOUsyrqF9Q53qxYnAyTwwn+sA==, tarball: file:.local-packs/qpjoy-marketplace-db-0.1.0.tgz}
-    version: 0.1.0
+  '@qpjoy/marketplace-db@file:.local-packs/qpjoy-marketplace-db-0.1.1.tgz':
+    resolution: {integrity: sha512-3eL0XkHVe3zaEH97z0hL88OZDIT30/k5LOI5bhgZ6M9xfIVeP+L5CahjAZ/DAoVTfH4vb7ZjjXIzHTJMrnbqPA==, tarball: file:.local-packs/qpjoy-marketplace-db-0.1.1.tgz}
+    version: 0.1.1
 
   '@sindresorhus/is@4.6.0':
     resolution: {integrity: sha512-t09vSN3MdfsyCHoFcTRCH/iUtG7OJ0CsjzB8cjAmKc/va/kIgeDI/TxsigdncE/4be734m0cvIYwNaV4i2XqAw==}
@@ -385,8 +388,8 @@ packages:
   '@types/node@22.19.19':
     resolution: {integrity: sha512-dyh/xO2Fh5bYrfWaaqGrRQQGkNdmYw6AmaAUvYeUMNTWQtvb796ikLdmTchRmOlOiIJ1TDXfWgVx1QkUlQ6Hew==}
 
-  '@types/node@25.8.0':
-    resolution: {integrity: sha512-TCFSk8IZh+iLX1xtksoBVtdmgL+1IX0fC9BeU4QqFSuNdN/K+HUlhqOzEmSYYpZUVsLYcPqc9KX+60iDuninSQ==}
+  '@types/node@25.9.0':
+    resolution: {integrity: sha512-AOQwYUNolgy3VosiRqXrACUXTN8nJUtPl7FJXMqZVyxiiCLhQuG3jXKvCS1ALr+Y2OmZhzzLVlYPEqJaiqkaJQ==}
 
   '@types/responselike@1.0.3':
     resolution: {integrity: sha512-H/+L+UkTV33uf49PH5pCAUBVPNj2nDBXTN+qS1dOwyyg24l3CcicicCA7ca+HMvJBZcFgl5r8e+RR6elsb4Lyw==}
@@ -547,8 +550,8 @@ packages:
   base64-js@1.5.1:
     resolution: {integrity: sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA==}
 
-  baseline-browser-mapping@2.10.29:
-    resolution: {integrity: sha512-Asa2krT+XTPZINCS+2QcyS8WTkObE77RwkydwF7h6DmnKqbvlalz93m/dnphUyCa6SWSP51VgtEUf2FN+gelFQ==}
+  baseline-browser-mapping@2.10.31:
+    resolution: {integrity: sha512-MujYO3eP72uvmSE0i4wltsodRfIpZATP3jvzRNRGGxgzId7aVocVJJV3nf01qnzzKFGxQVC9bpWxl5cjxTr/7Q==}
     engines: {node: '>=6.0.0'}
     hasBin: true
 
@@ -607,8 +610,8 @@ packages:
     resolution: {integrity: sha512-v+p6ongsrp0yTGbJXjgxPow2+DL93DASP4kXCDKb8/bwRtt9OEF3whggkkDkGNzgcWy2XaF4a8nZglC7uElscg==}
     engines: {node: '>=8'}
 
-  caniuse-lite@1.0.30001792:
-    resolution: {integrity: sha512-hVLMUZFgR4JJ6ACt1uEESvQN1/dBVqPAKY0hgrV70eN3391K6juAfTjKZLKvOMsx8PxA7gsY1/tLMMTcfFLLpw==}
+  caniuse-lite@1.0.30001793:
+    resolution: {integrity: sha512-iwSsYWaCOoh26cV8NwNRViHlrfUvYsHDfRVcbtmw0Kg6PJIZZXwMkj1442FYLBGkeUf1juAsU3DTfxW579mrPA==}
 
   chalk@4.1.2:
     resolution: {integrity: sha512-oKnbhFyRIXpUuez8iBMmyEa4nbj4IOQyuhc/wy9kY7/WVPcwIO9VA668Pu8RkO7+0G76SLROeyw9CpQ061i4mA==}
@@ -787,8 +790,8 @@ packages:
     engines: {node: '>= 16'}
     hasBin: true
 
-  electron-to-chromium@1.5.356:
-    resolution: {integrity: sha512-9NgFd7m5t5MCJ5rUSjJITUXAH9mEGlrlofnMf4YEr+pz6JlP7cWmTAH+JFmbPnaSW8koVTkuW7pacORWAnA5Yw==}
+  electron-to-chromium@1.5.359:
+    resolution: {integrity: sha512-8lPELWuYZIWk7NDvCNthtmMw/7Q5Wu25NpM4djFMHBmk8DubPAtL4YTOp7ou0e7HyJtwkVlWv8XMLURnrtgJQw==}
 
   electron@34.5.8:
     resolution: {integrity: sha512-vxLD65mabTzYmEVa9KceMHM0+zO+vqgrhcyNVlmTd0IGV5J7XZ8v/qElm0o4YQ4wPeq7olZkUjZkBQQEdr23/g==}
@@ -810,8 +813,8 @@ packages:
   end-of-stream@1.4.5:
     resolution: {integrity: sha512-ooEGc6HP26xXq/N+GCGOT0JKCLDGrq2bQUZrQ7gyrJiZANJ/8YDTxTpQBXGMn+WbIQXNVpyWymm7KYVICQnyOg==}
 
-  enhanced-resolve@5.21.3:
-    resolution: {integrity: sha512-QyL119InA+XXEkNLNTPCXPugSvOfhwv0JOlGNzvxs0hZaiHLNvXSpudUWsOlsXGWJh8G6ckCScEkVHfX3kw/2Q==}
+  enhanced-resolve@5.21.4:
+    resolution: {integrity: sha512-wE4fDO8OjJhrPFH69HUQStq5oKvGRTNXEyW+k5C/pUQLASSsTu7obd2V3GvCDgPcY9AWjhJ4jz9Kh7iRvrxhJg==}
     engines: {node: '>=10.13.0'}
 
   env-paths@2.2.1:
@@ -2643,15 +2646,19 @@ snapshots:
       mkdirp: 1.0.4
       rimraf: 3.0.2
 
-  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.3.1.tgz(@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz(electron@34.5.8))(electron@34.5.8)':
+  '@qpjoy/electron-core-mihomo@0.1.0':
     dependencies:
-      '@qpjoy/electron-plugin-sdk': file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz(electron@34.5.8)
-      '@qpjoy/marketplace-db': file:.local-packs/qpjoy-marketplace-db-0.1.0.tgz
+      yaml: 2.9.0
+
+  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.3.18.tgz(@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz(electron@34.5.8))(electron@34.5.8)':
+    dependencies:
+      '@qpjoy/electron-plugin-sdk': file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz(electron@34.5.8)
+      '@qpjoy/marketplace-db': file:.local-packs/qpjoy-marketplace-db-0.1.1.tgz
       better-sqlite3: 11.10.0
       electron: 34.5.8
       semver: 7.8.0
 
-  '@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.0.tgz(electron@34.5.8)':
+  '@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz(electron@34.5.8)':
     optionalDependencies:
       electron: 34.5.8
 
@@ -2670,8 +2677,9 @@ snapshots:
   '@qpjoy/electron-plugin-tunnel-engine-win32-x64@file:.local-packs/qpjoy-electron-plugin-tunnel-engine-win32-x64-0.1.5.tgz':
     optional: true
 
-  '@qpjoy/electron-plugin-tunnel@file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.5.tgz(electron@34.5.8)':
+  '@qpjoy/electron-plugin-tunnel@file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.16.tgz(electron@34.5.8)':
     dependencies:
+      '@qpjoy/electron-core-mihomo': 0.1.0
       better-sqlite3: 11.10.0
       electron: 34.5.8
       yaml: 2.9.0
@@ -2681,9 +2689,9 @@ snapshots:
       '@qpjoy/electron-plugin-tunnel-engine-linux-arm64': file:.local-packs/qpjoy-electron-plugin-tunnel-engine-linux-arm64-0.1.5.tgz
       '@qpjoy/electron-plugin-tunnel-engine-linux-x64': file:.local-packs/qpjoy-electron-plugin-tunnel-engine-linux-x64-0.1.5.tgz
       '@qpjoy/electron-plugin-tunnel-engine-win32-x64': file:.local-packs/qpjoy-electron-plugin-tunnel-engine-win32-x64-0.1.5.tgz
-      '@qpjoy/marketplace-db': file:.local-packs/qpjoy-marketplace-db-0.1.0.tgz
+      '@qpjoy/marketplace-db': file:.local-packs/qpjoy-marketplace-db-0.1.1.tgz
 
-  '@qpjoy/marketplace-db@file:.local-packs/qpjoy-marketplace-db-0.1.0.tgz':
+  '@qpjoy/marketplace-db@file:.local-packs/qpjoy-marketplace-db-0.1.1.tgz':
     dependencies:
       better-sqlite3: 11.10.0
 
@@ -2697,14 +2705,14 @@ snapshots:
 
   '@types/appdmg@0.5.5':
     dependencies:
-      '@types/node': 25.8.0
+      '@types/node': 25.9.0
     optional: true
 
   '@types/cacheable-request@6.0.3':
     dependencies:
       '@types/http-cache-semantics': 4.2.0
       '@types/keyv': 3.1.4
-      '@types/node': 25.8.0
+      '@types/node': 25.9.0
       '@types/responselike': 1.0.3
 
   '@types/eslint-scope@3.7.7':
@@ -2721,7 +2729,7 @@ snapshots:
 
   '@types/fs-extra@9.0.13':
     dependencies:
-      '@types/node': 25.8.0
+      '@types/node': 25.9.0
     optional: true
 
   '@types/http-cache-semantics@4.2.0': {}
@@ -2730,7 +2738,7 @@ snapshots:
 
   '@types/keyv@3.1.4':
     dependencies:
-      '@types/node': 25.8.0
+      '@types/node': 25.9.0
 
   '@types/mute-stream@0.0.4':
     dependencies:
@@ -2744,13 +2752,13 @@ snapshots:
     dependencies:
       undici-types: 6.21.0
 
-  '@types/node@25.8.0':
+  '@types/node@25.9.0':
     dependencies:
       undici-types: 7.24.6
 
   '@types/responselike@1.0.3':
     dependencies:
-      '@types/node': 25.8.0
+      '@types/node': 25.9.0
 
   '@types/wrap-ansi@3.0.0': {}
 
@@ -2931,7 +2939,7 @@ snapshots:
 
   base64-js@1.5.1: {}
 
-  baseline-browser-mapping@2.10.29: {}
+  baseline-browser-mapping@2.10.31: {}
 
   better-sqlite3@11.10.0:
     dependencies:
@@ -2973,9 +2981,9 @@ snapshots:
 
   browserslist@4.28.2:
     dependencies:
-      baseline-browser-mapping: 2.10.29
-      caniuse-lite: 1.0.30001792
-      electron-to-chromium: 1.5.356
+      baseline-browser-mapping: 2.10.31
+      caniuse-lite: 1.0.30001793
+      electron-to-chromium: 1.5.359
       node-releases: 2.0.44
       update-browserslist-db: 1.2.3(browserslist@4.28.2)
 
@@ -3023,7 +3031,7 @@ snapshots:
       normalize-url: 6.1.0
       responselike: 2.0.1
 
-  caniuse-lite@1.0.30001792: {}
+  caniuse-lite@1.0.30001793: {}
 
   chalk@4.1.2:
     dependencies:
@@ -3212,7 +3220,7 @@ snapshots:
       - supports-color
     optional: true
 
-  electron-to-chromium@1.5.356: {}
+  electron-to-chromium@1.5.359: {}
 
   electron@34.5.8:
     dependencies:
@@ -3238,7 +3246,7 @@ snapshots:
     dependencies:
       once: 1.4.0
 
-  enhanced-resolve@5.21.3:
+  enhanced-resolve@5.21.4:
     dependencies:
       graceful-fs: 4.2.11
       tapable: 2.3.3
@@ -3647,7 +3655,7 @@ snapshots:
 
   jest-worker@27.5.1:
     dependencies:
-      '@types/node': 25.8.0
+      '@types/node': 25.9.0
       merge-stream: 2.0.0
       supports-color: 8.1.1
 
@@ -4434,7 +4442,7 @@ snapshots:
       acorn-import-phases: 1.0.4(acorn@8.16.0)
       browserslist: 4.28.2
       chrome-trace-event: 1.0.4
-      enhanced-resolve: 5.21.3
+      enhanced-resolve: 5.21.4
       es-module-lexer: 2.1.0
       eslint-scope: 5.1.1
       events: 3.3.0

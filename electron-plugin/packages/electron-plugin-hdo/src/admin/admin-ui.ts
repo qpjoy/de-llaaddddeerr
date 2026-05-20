@@ -488,6 +488,9 @@ export function adminHtml(): string {
             <label>配置文件
               <input id="wgConfigPath" readonly />
             </label>
+            <label>Shell 命令
+              <textarea id="wgShellCommands" readonly></textarea>
+            </label>
             <div class="row">
               <button class="btn primary" id="prepareWireGuard">生成 / 更新本机 Peer</button>
               <button class="btn" id="rotateWireGuard">轮换密钥</button>
@@ -974,6 +977,7 @@ export function adminHtml(): string {
       $('wgOverlayIp').value = peer && peer.overlayIp ? peer.overlayIp : '';
       $('wgAllowedIps').value = peer && Array.isArray(peer.allowedIps) ? peer.allowedIps.join(', ') : '';
       $('wgConfigPath').value = peer && peer.configPath ? peer.configPath : '';
+      $('wgShellCommands').value = peer && peer.configPath ? wireGuardShellCommands(peer.configPath, snapshot) : '';
       $('wgConfigOut').value = peer && peer.config ? peer.config : '';
       $('wgStatus').textContent = peer && peer.publicKey
         ? (peer.config ? '已生成本机 peer 与 WireGuard 配置。' : '已生成本机 peer，等待 domestic 节点补齐 WireGuard endpoint。')
@@ -1022,6 +1026,22 @@ export function adminHtml(): string {
 
     function escapeAttr(value) {
       return escapeHtml(value).replace(/"/g, '&quot;');
+    }
+
+    function wireGuardShellCommands(configPath, s) {
+      const platform = s && s.settings && s.settings.devicePlatform;
+      if (platform === 'win32') {
+        const quoted = "'" + String(configPath).replace(/'/g, "''") + "'";
+        return [
+          'Get-Content ' + quoted,
+          'wireguard /installtunnelservice ' + quoted
+        ].join('\\n');
+      }
+      const quoted = "'" + String(configPath).replace(/'/g, "'\\\\''") + "'";
+      return [
+        'cat ' + quoted,
+        'sudo wg-quick up ' + quoted
+      ].join('\\n');
     }
 
     document.querySelectorAll('.nav button').forEach((btn) => {

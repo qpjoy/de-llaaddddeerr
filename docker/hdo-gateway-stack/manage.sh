@@ -25,6 +25,7 @@ Commands:
   deploy-domestic     Guided domestic-vps + WireGuard setup
   setup-domestic      Generate domestic wg-home server config
   add-home            Generate one home peer config and append it to wg-home
+  sync-domestic-peers Pull managed Home/Client peers from electron-server
   apply-domestic      Install generated wg-home config into /etc/wireguard
   setup-oversea-egress Write scoped egress env template for npm/GitHub/Docker
   status              Show generated files
@@ -33,6 +34,7 @@ Examples:
   ./scripts/manage.sh hdo deploy-domestic
   ./scripts/manage.sh hdo setup-domestic --server-url http://domestic:8080 --public-host domestic.example.com
   ./scripts/manage.sh hdo add-home --name home-main
+  HDO_TOKEN=<admin bearer token> ./scripts/manage.sh hdo sync-domestic-peers --server-url http://domestic:8080
   sudo ./scripts/manage.sh hdo apply-domestic
 
 Optional API registration:
@@ -385,7 +387,7 @@ PrivateKey = ${HDO_DOMESTIC_PRIVATE_KEY}
 EOF
 
   ok "generated $WG_DIR/wg-home.conf"
-  maybe_register_node "domestic" "domestic-vps" "$HDO_PUBLIC_HOST" "$HDO_DOMESTIC_IP"
+  maybe_register_node "domestic" "domestic-vps" "$HDO_PUBLIC_HOST" "$HDO_DOMESTIC_IP" "$HDO_DOMESTIC_PUBLIC_KEY"
   echo
   echo "Next:"
   echo "  sudo ./scripts/manage.sh hdo apply-domestic"
@@ -443,10 +445,52 @@ EOF
   save_env
 
   ok "generated home peer $conf"
-  maybe_register_node "home" "$HDO_PEER_NAME" "" "$peer_ip"
+  maybe_register_node "home" "$HDO_PEER_NAME" "" "$peer_ip" "$public"
   echo
   echo "Install this file on the home node:"
   echo "  $conf"
+}
+
+cmd_sync_domestic_peers() {
+  load_env
+  parse_common "$@"
+  [ -f "$WG_DIR/wg-home.conf" ] || die "run setup-domestic first"
+  [ -n "${HDO_SERVER_URL:-}" ] || die "--server-url or HDO_SERVER_URL required"
+  [ -n "${HDO_TOKEN:-}" ] || die "HDO_TOKEN=<admin bearer token> required"
+  require_cmd curl
+
+  local fetched stripped
+  fetched="$(mktemp)"
+  stripped="$(mktemp)"
+  curl -fsS \
+    -H "authorization: Bearer ${HDO_TOKEN}" \
+    "${HDO_SERVER_URL%/}/api/v1/hdo/admin/wireguard/domestic-peers.conf" \
+    -o "$fetched"
+
+  awk '
+    /^# BEGIN_HDO_MANAGED_PEERS$/ { skip = 1; next }
+    /^# END_HDO_MANAGED_PEERS$/ { skip = 0; next }
+    skip != 1 { print }
+  ' "$WG_DIR/wg-home.conf" > "$stripped"
+  printf '\n' >> "$stripped"
+  cat "$fetched" >> "$stripped"
+  install -m 600 "$stripped" "$WG_DIR/wg-home.conf"
+  rm -f "$fetched" "$stripped"
+  ok "synced managed peers into $WG_DIR/wg-home.conf"
+
+  if [ "$(id -u)" -eq 0 ] && [ -f /etc/wireguard/hdo-home.conf ]; then
+    install -m 600 "$WG_DIR/wg-home.conf" /etc/wireguard/hdo-home.conf
+    if command -v wg >/dev/null 2>&1 && wg show hdo-home >/dev/null 2>&1; then
+      wg syncconf hdo-home <(wg-quick strip hdo-home)
+      ok "reloaded live hdo-home WireGuard peers"
+    else
+      systemctl restart wg-quick@hdo-home || true
+      ok "restarted wg-quick@hdo-home"
+    fi
+  else
+    echo "Next:"
+    echo "  sudo ./scripts/manage.sh hdo apply-domestic"
+  fi
 }
 
 cmd_apply_domestic() {
@@ -494,6 +538,7 @@ cmd_menu() {
   local options=(
     "deploy-domestic    部署 domestic-vps + WireGuard"
     "add-home           生成 Home WireGuard peer"
+    "sync-peers         同步服务端 Home/Client peers 到 domestic"
     "apply-domestic     启用 wg-quick@hdo-home"
     "setup-egress       生成 oversea scoped egress 模板"
     "status             查看 HDO 状态"
@@ -509,6 +554,7 @@ cmd_menu() {
     case "$cmd" in
       deploy-domestic) cmd_deploy_domestic ;;
       add-home)        cmd_add_home ;;
+      sync-peers)      cmd_sync_domestic_peers ;;
       apply-domestic)  sudo_apply_domestic ;;
       setup-egress)    cmd_setup_oversea_egress ;;
       status)          cmd_status ;;
@@ -522,13 +568,17 @@ cmd_menu() {
 
 maybe_register_node() {
   local kind="$1" name="$2" public_host="$3" overlay_ip="$4"
+  local public_key="${5:-}"
   local metadata="null"
   [ -n "${HDO_SERVER_URL:-}" ] || return 0
   [ -n "${HDO_TOKEN:-}" ] || return 0
   require_cmd curl
 
-  if [ "$kind" = "domestic" ] && [ -n "${HDO_DOMESTIC_PUBLIC_KEY:-}" ]; then
-    metadata="{\"wireGuard\":{\"publicKey\":\"${HDO_DOMESTIC_PUBLIC_KEY}\",\"listenPort\":${HDO_WG_PORT:-51888},\"endpointHost\":\"${public_host}\"}}"
+  if [ "$kind" = "domestic" ] && [ -n "${public_key:-${HDO_DOMESTIC_PUBLIC_KEY:-}}" ]; then
+    public_key="${public_key:-${HDO_DOMESTIC_PUBLIC_KEY:-}}"
+    metadata="{\"wireGuard\":{\"publicKey\":\"${public_key}\",\"listenPort\":${HDO_WG_PORT:-51888},\"endpointHost\":\"${public_host}\"}}"
+  elif [ "$kind" = "home" ] && [ -n "$public_key" ]; then
+    metadata="{\"wireGuard\":{\"publicKey\":\"${public_key}\"}}"
   fi
 
   curl -fsS \
@@ -548,6 +598,7 @@ case "$command" in
   deploy-domestic|deploy) cmd_deploy_domestic "$@" ;;
   setup-domestic) cmd_setup_domestic "$@" ;;
   add-home) cmd_add_home "$@" ;;
+  sync-domestic-peers|sync-peers) cmd_sync_domestic_peers "$@" ;;
   apply-domestic) cmd_apply_domestic "$@" ;;
   setup-oversea-egress) cmd_setup_oversea_egress "$@" ;;
   status) cmd_status "$@" ;;

@@ -691,6 +691,65 @@ WireGuard peer 的“服务端生成”应理解为控制面生成 peer 记录�
 - 真正点击安装需要 `hdo-agent` 或 SSH/SCP runner。`electron-server` 负责创建安装任务、保存节点状态和审计；agent/runner 在 D/O/H 机器上执行 docker compose、WireGuard、mihomo、Hysteria2、Caddy 配置。
 - `docker/hdo-gateway-stack` 应成为统一执行包，内部包含 domestic 的 Mihomo+WireGuard、oversea 的 Mihomo+Hysteria2、legacy `wireguard.sh` 兼容入口，以及幂等 `install domestic|oversea|home` 命令。
 
+### 2026-05-20 O 是 D 的出口能力，不是所有节点的必选 peer
+
+HDO 应拆成两个可独立工作的层级：
+
+- `HD`：多个 Home 节点和 Client 都连 Domestic。D 是 WireGuard hub，负责 H/H/Client 的 overlay 互联。没有 O 时仍应完整可用。
+- `HDO`：Oversea 是 Domestic 的外网出口能力。默认只有 D 感知 O，H 不直连 O，H 只通过 D 享用 O 的外网能力。
+
+这样做的原因：
+
+- O 的 WireGuard 端口可能隔几天失效，需要由控制面和 O/D agent 协调 `activePort + 1`，不应让每台 H 都跟着感知和更新。
+- D 必须保留自己的公网 IP、国内入口和本机服务，不能把 host 默认路由全局翻到 O。
+- 外网普通能力应优先走 O 上的 Mihomo+Hysteria2 稳定订阅；只有 CC/某个明确服务需要“WG peer 出口”时，才走 O 的 WireGuard peer。
+
+推荐 D 上的出口模型：
+
+```text
+D host public ingress      -> main table / direct, never via O
+HDO overlay 100.88/100.89  -> wg-home / hub
+CN traffic                 -> direct
+foreign general            -> D mihomo -> O Hysteria2
+CC / special service       -> D mihomo TUN/rule -> O WireGuard outbound
+```
+
+D 更新 O 出口不应依赖静态 `.conf` 手工改文件，而应消费 HDO manifest：
+
+```text
+O agent:
+  - 监听 activePort
+  - 上报 publicHost, hy2 subscription, wg publicKey, activePort, generation
+  - 端口不可用时按控制面指令切换 activePort + 1
+
+electron-server:
+  - 记录 oversea egress capability
+  - 生成 D 专用 manifest / mihomo.yaml / wg-exit profile
+  - generation 增加时通知或等待 D 拉取
+
+D agent:
+  - 拉取 manifest
+  - 渲染并 reload D 上的 mihomo gateway config
+  - 如果使用 kernel WireGuard，只执行 wg set peer endpoint 更新，不改 host 默认路由
+  - 如果使用 mihomo wireguard outbound，只刷新 mihomo 订阅并 reload
+```
+
+实现优先级：
+
+1. `HD` hub 模式：Client/H 只连 D，多 H 互联。
+2. `D -> O` Hysteria2 egress：D 上 mihomo 通过 O 订阅出外网。
+3. `D -> O` WireGuard special egress：只给 CC/特定服务使用，优先做成 mihomo `type: wireguard` outbound，fallback 才是 kernel WireGuard `Table = off` + policy routing。
+4. Client 侧直接连 O peer 只作为高级模式，不是默认 HDO。
+
+`HD` 也应叫 mesh。准确说它是 `domestic-hub mesh`：D 是 hub，多个 H 和 Client 是 spokes。它不是纯 peer-to-peer mesh，但对产品和权限模型来说仍是 HDO mesh 的基础形态。
+
+H 连上 D 后，不会自动具备 O 外网能力，除非额外配置路由/代理：
+
+- 默认 Home peer 的 `AllowedIPs` 只包含 HDO overlay/service 网段，因此 H 只具备 HD mesh 互联能力。
+- 如果想让 H 通过 D 使用 O 出口，H 侧必须把目标流量发给 D，例如 `AllowedIPs = 0.0.0.0/0` 或 non-CN CIDR。
+- D 侧也必须把来自 `wg-home` 的 forwarded traffic 接进出口策略。仅仅在 D 上运行 mihomo mixed-port 不够；需要 D 上的 mihomo TUN/TProxy/policy routing，或让 H 显式使用 D overlay IP 上的代理端口。
+- 推荐产品模式：默认 HD mesh 不接管 H 外网；`Home uses Domestic egress` 作为显式高级开关，打开后才给 H 下发 non-CN/default route，并在 D 上开启对应 gateway policy。
+
 ### Claude/Codex 这类软件的“直连 WG”问题
 
 P0 优先验证方案：`mihomo TUN + wireguard outbound`。
