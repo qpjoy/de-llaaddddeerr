@@ -27,6 +27,10 @@ Commands:
   add-home            Generate one home peer config and append it to wg-home
   sync-domestic-peers Pull managed Home/Client peers from electron-server
   apply-domestic      Install generated wg-home config into /etc/wireguard
+  deploy-domestic-mihomo-wireguard
+                      Run docker/wg-mihomo-stack setup from this HDO entrypoint
+  deploy-oversea-mihomo-hysteria2
+                      Run docker/hysteria2-mihomo-stack setup from this HDO entrypoint
   setup-oversea-egress Write scoped egress env template for npm/GitHub/Docker
   status              Show generated files
 
@@ -36,6 +40,8 @@ Examples:
   ./scripts/manage.sh hdo add-home --name home-main
   HDO_TOKEN=<admin bearer token> ./scripts/manage.sh hdo sync-domestic-peers --server-url http://domestic:8080
   sudo ./scripts/manage.sh hdo apply-domestic
+  sudo ./scripts/manage.sh hdo deploy-domestic-mihomo-wireguard
+  sudo ./scripts/manage.sh hdo deploy-oversea-mihomo-hysteria2
 
 Optional API registration:
   HDO_TOKEN=<admin bearer token> ./scripts/manage.sh hdo setup-domestic --server-url http://domestic:8080
@@ -571,6 +577,8 @@ cmd_status() {
 cmd_menu() {
   local options=(
     "deploy-domestic    部署 domestic-vps + WireGuard"
+    "deploy-domestic-mihomo-wireguard  部署 domestic Docker Mihomo + WireGuard"
+    "deploy-oversea-mihomo-hysteria2   部署 oversea Docker Mihomo + Hysteria2"
     "add-home           生成 Home WireGuard peer"
     "sync-peers         同步服务端 Home/Client peers 到 domestic"
     "apply-domestic     启用 wg-quick@hdo-home"
@@ -587,6 +595,8 @@ cmd_menu() {
     local cmd="${opt%% *}"
     case "$cmd" in
       deploy-domestic) cmd_deploy_domestic ;;
+      deploy-domestic-mihomo-wireguard) cmd_stack_delegate "$ROOT_DIR/docker/wg-mihomo-stack/manage.sh" setup ;;
+      deploy-oversea-mihomo-hysteria2) cmd_stack_delegate "$ROOT_DIR/docker/hysteria2-mihomo-stack/manage.sh" setup ;;
       add-home)        cmd_add_home ;;
       sync-peers)      cmd_sync_domestic_peers ;;
       apply-domestic)  sudo_apply_domestic ;;
@@ -598,6 +608,13 @@ cmd_menu() {
     esac
     echo
   done
+}
+
+cmd_stack_delegate() {
+  local script="$1"
+  shift
+  [ -f "$script" ] || die "missing stack script: $script"
+  bash "$script" "$@"
 }
 
 maybe_register_node() {
@@ -634,6 +651,8 @@ fi
 case "$command" in
   menu) cmd_menu ;;
   deploy-domestic|deploy) cmd_deploy_domestic "$@" ;;
+  deploy-domestic-mihomo-wireguard|domestic-mihomo-wireguard) cmd_stack_delegate "$ROOT_DIR/docker/wg-mihomo-stack/manage.sh" setup "$@" ;;
+  deploy-oversea-mihomo-hysteria2|oversea-mihomo-hysteria2) cmd_stack_delegate "$ROOT_DIR/docker/hysteria2-mihomo-stack/manage.sh" setup "$@" ;;
   setup-domestic) cmd_setup_domestic "$@" ;;
   add-home) cmd_add_home "$@" ;;
   sync-domestic-peers|sync-peers) cmd_sync_domestic_peers "$@" ;;

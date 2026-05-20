@@ -19,6 +19,8 @@ RUN pnpm build
 
 FROM node:22-alpine AS runtime
 WORKDIR /app
+RUN apk add --no-cache bash curl docker-cli \
+  && (apk add --no-cache docker-cli-compose || apk add --no-cache docker-compose)
 ENV NODE_ENV=production
 ENV PORT=8080
 ENV HOST=0.0.0.0

@@ -378,7 +378,8 @@ export function adminHtml(): string {
         </div>
       </div>
       <nav class="nav">
-        <button class="active" data-tab="overview">总览</button>
+        <button class="active" data-tab="mesh">我的 Mesh</button>
+        <button data-tab="overview">总览</button>
         <button data-tab="client">客户端</button>
         <button data-tab="advanced">高级</button>
         <button data-tab="server">服务器</button>
@@ -389,8 +390,8 @@ export function adminHtml(): string {
     <main class="main">
       <div class="topbar">
         <div>
-          <h2 id="title">总览</h2>
-          <p class="sub" id="subtitle">查看 HDO 从服务端部署到客户端订阅的完成状态。</p>
+          <h2 id="title">我的 Mesh</h2>
+          <p class="sub" id="subtitle">查看当前入网状态、可访问服务和必要操作。</p>
         </div>
         <div class="row">
           <span class="status"><span id="status-dot" class="dot"></span><span id="status-text">加载中</span></span>
@@ -399,7 +400,48 @@ export function adminHtml(): string {
       </div>
       <div id="message"></div>
 
-      <section class="tab active" id="tab-overview">
+      <section class="tab active" id="tab-mesh">
+        <div class="grid">
+          <div class="panel span-12" id="meshHomeBanner"></div>
+          <div class="panel span-3 metric"><strong id="meshHomeGroup">未入网</strong><span>当前 Mesh</span></div>
+          <div class="panel span-3 metric"><strong id="meshHomeTunnel">未连接</strong><span>WireGuard</span></div>
+          <div class="panel span-3 metric"><strong id="meshHomeServiceCount">0</strong><span>可见服务</span></div>
+          <div class="panel span-3 metric"><strong id="meshHomeNodeCount">0</strong><span>可见节点</span></div>
+          <div class="panel span-12">
+            <h3>常用操作</h3>
+            <div class="row">
+              <button class="btn primary" id="meshQuickStart">连接 / 更新 HDO</button>
+              <button class="btn good" id="meshConnectWireGuard">启动 WireGuard</button>
+              <button class="btn" id="meshDisconnectWireGuard">停止 WireGuard</button>
+              <button class="btn" id="meshRefreshSubscription">更新订阅</button>
+            </div>
+          </div>
+          <div class="panel span-6">
+            <h3>我的设备</h3>
+            <ul class="list" id="meshHomeDeviceList"></ul>
+          </div>
+          <div class="panel span-6">
+            <h3>状态与任务</h3>
+            <ul class="list" id="meshHomeStatusList"></ul>
+          </div>
+          <div class="panel span-12">
+            <h3>可访问服务</h3>
+            <table class="table">
+              <thead><tr><th>名称</th><th>目标</th><th>协议</th><th>域名</th></tr></thead>
+              <tbody id="meshHomeServicesTable"></tbody>
+            </table>
+          </div>
+          <div class="panel span-12">
+            <h3>Mesh 节点</h3>
+            <table class="table">
+              <thead><tr><th>类型</th><th>名称</th><th>Overlay</th><th>状态</th></tr></thead>
+              <tbody id="meshHomeNodesTable"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab" id="tab-overview">
         <div class="grid">
           <div class="panel span-12" id="deployBanner"></div>
           <div class="panel span-3 metric"><strong id="oDomestic">未完成</strong><span>Domestic 服务端</span></div>
@@ -657,7 +699,7 @@ export function adminHtml(): string {
   <script>
     const $ = (id) => document.getElementById(id);
     let snapshot = null;
-    let tab = 'overview';
+    let tab = 'mesh';
 
     function showMessage(text, kind) {
       const el = $('message');
@@ -734,6 +776,7 @@ export function adminHtml(): string {
 
       const deployment = deploymentState(s);
       renderDeployment(deployment);
+      renderMeshHome(s, deployment);
 
       const dot = $('status-dot');
       dot.className = 'dot ' + (deployment.level === 'good' ? 'ok' : deployment.level === 'bad' ? 'bad' : 'warn');
@@ -956,6 +999,61 @@ export function adminHtml(): string {
       renderList('overviewNextActions', state.nextActions.length ? state.nextActions : ['暂无，基础流程已经完成']);
     }
 
+    function renderMeshHome(s, deployment) {
+      const settings = s.settings || {};
+      const manifest = settings.lastManifest || {};
+      const license = manifest.license || {};
+      const groups = Array.isArray(license.groups) ? license.groups : [];
+      const services = Array.isArray(manifest.services) ? manifest.services : [];
+      const nodes = Array.isArray(manifest.nodes) ? manifest.nodes : [];
+      const device = manifest.device || (Array.isArray(s.devices) && s.devices[0]) || {};
+      const peer = settings.wireGuardPeer || {};
+      const runtime = s.wireGuardStatus || {};
+      const tasks = Array.isArray(s.deviceTasks) ? s.deviceTasks : [];
+      const groupsLabel = groups.length ? groups.map((row) => row.name || row.slug || row.id).join(', ') : '未入网';
+      const tunnelLabel = runtime.active ? '已连接' : (peer.publicKey ? '已配置' : '未配置');
+
+      $('meshHomeGroup').textContent = groupsLabel;
+      $('meshHomeTunnel').textContent = tunnelLabel;
+      $('meshHomeServiceCount').textContent = String(services.length);
+      $('meshHomeNodeCount').textContent = String(nodes.length);
+      $('meshHomeBanner').innerHTML =
+        '<div class="banner ' + escapeAttr(deployment.level) + '">' +
+        '<h3>' + escapeHtml(deployment.title) + '</h3>' +
+        '<p>' + escapeHtml(deployment.detail) + '</p>' +
+        '</div>';
+
+      renderList('meshHomeDeviceList', [
+        '设备：' + (device.label || settings.deviceLabel || settings.deviceId || '未注册'),
+        'Overlay IP：' + (device.overlayIp || peer.overlayIp || '未分配'),
+        '公钥：' + shortKey(device.publicKey || peer.publicKey || ''),
+        'Profile：' + currentProfileLabel(manifest)
+      ]);
+
+      const statusItems = [
+        '控制面：' + (s.serverBaseUrl || '未配置'),
+        'WireGuard：' + (runtime.active ? ((runtime.realInterfaceName || runtime.interfaceName || '接口') + ' 运行中') : tunnelLabel),
+        '订阅 generation：' + (manifest.generation || '未生成'),
+        '待处理任务：' + tasks.length
+      ];
+      if (s.lastError) statusItems.unshift('错误：' + s.lastError);
+      renderList('meshHomeStatusList', statusItems);
+
+      $('meshHomeServicesTable').innerHTML = services.length ? services.map((svc) => (
+        '<tr><td>' + escapeHtml(svc.name || '') + '</td><td>' +
+        escapeHtml((svc.targetHost || svc.host || '') + ':' + (svc.targetPort || svc.port || '')) + '</td><td>' +
+        escapeHtml(svc.protocol || '') + '</td><td>' +
+        escapeHtml((svc.domains || []).join(', ')) + '</td></tr>'
+      )).join('') : '<tr><td colspan="4" class="muted">暂无服务；等待服务端下发可见服务</td></tr>';
+
+      $('meshHomeNodesTable').innerHTML = nodes.length ? nodes.map((node) => (
+        '<tr><td>' + escapeHtml(node.kind || '') + '</td><td>' +
+        escapeHtml(node.name || node.id || '') + '</td><td>' +
+        escapeHtml(node.overlayIp || node.publicHost || '') + '</td><td>' +
+        escapeHtml(node.status || '') + '</td></tr>'
+      )).join('') : '<tr><td colspan="4" class="muted">暂无节点；等待服务端下发 mesh 节点</td></tr>';
+    }
+
     function renderList(id, items) {
       const rows = items.length ? items : ['暂无'];
       $(id).innerHTML = rows.map((item) => '<li>' + escapeHtml(String(item)) + '</li>').join('');
@@ -1095,6 +1193,17 @@ export function adminHtml(): string {
       )).join('');
     }
 
+    function currentProfileLabel(manifest) {
+      const profiles = Array.isArray(manifest.profiles) ? manifest.profiles : [];
+      const memberships = manifest.license && Array.isArray(manifest.license.memberships) ? manifest.license.memberships : [];
+      const profileId = memberships.map((row) => row.profileId).find(Boolean);
+      if (profileId) {
+        const profile = profiles.find((row) => row.id === profileId);
+        return profile ? (profile.name || profile.mode || profile.id) : profileId;
+      }
+      return profiles[0] ? (profiles[0].name || profiles[0].mode || profiles[0].id) : '默认';
+    }
+
     function formValue(id) {
       const v = $(id).value.trim();
       return v || null;
@@ -1102,6 +1211,7 @@ export function adminHtml(): string {
 
     function setTab(next) {
       const titles = {
+        mesh: ['我的 Mesh', '查看当前入网状态、可访问服务和必要操作。'],
         overview: ['总览', '查看 HDO 从服务端部署到客户端订阅的完成状态。'],
         client: ['客户端', '注册本机设备，拉取 HDO manifest 与 Mihomo 订阅。'],
         advanced: ['高级', '手动管理设备、WireGuard peer、生成物和服务端待处理任务。'],
@@ -1184,6 +1294,10 @@ export function adminHtml(): string {
     });
 
     $('refresh').addEventListener('click', () => load());
+    $('meshQuickStart').addEventListener('click', () => $('quickStart').click());
+    $('meshConnectWireGuard').addEventListener('click', () => $('connectWireGuard').click());
+    $('meshDisconnectWireGuard').addEventListener('click', () => $('disconnectWireGuard').click());
+    $('meshRefreshSubscription').addEventListener('click', () => $('fetchSubscription').click());
     $('saveSettings').addEventListener('click', () => runAction('保存控制面', async () => {
       await request('/api/settings', {
         method: 'POST',
@@ -1210,6 +1324,14 @@ export function adminHtml(): string {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({})
       });
+      const connected = await request('/api/client/wireguard/connect', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'up' })
+      });
+      if (connected && connected.ok === false) {
+        throw new Error(connected.message || connected.command || 'WireGuard 未启动');
+      }
     }).catch(() => undefined));
     $('registerDevice').addEventListener('click', () => runAction('注册设备', async () => {
       await request('/api/client/register', {

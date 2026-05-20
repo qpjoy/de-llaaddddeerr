@@ -172,6 +172,41 @@ export interface HdoDeviceTaskRow {
   completedAt: string | null;
 }
 
+export type HdoDeploymentKind =
+  | 'deploy-domestic'
+  | 'sync-domestic-peers'
+  | 'deploy-domestic-mihomo-wireguard'
+  | 'deploy-oversea-mihomo-hysteria2'
+  | 'status';
+
+export interface HdoDeploymentJob {
+  id: string;
+  kind: HdoDeploymentKind;
+  status: 'running' | 'succeeded' | 'failed';
+  command: string;
+  args: string[];
+  scriptPath: string;
+  cwd: string;
+  output: string;
+  startedAt: string;
+  finishedAt: string | null;
+  exitCode: number | null;
+  error: string | null;
+}
+
+export interface HdoDeploymentRunner {
+  available: boolean;
+  scriptPath: string | null;
+  cwd: string | null;
+  kinds: HdoDeploymentKind[];
+  note: string;
+}
+
+export interface HdoDeploymentState {
+  runner: HdoDeploymentRunner;
+  jobs: HdoDeploymentJob[];
+}
+
 export interface HdoOverview {
   users: PublicUser[];
   meshGroups: HdoMeshGroupRow[];
@@ -278,6 +313,24 @@ export function useServerAdmin() {
 
     async getHdoOverview(): Promise<HdoOverview> {
       return api<HdoOverview>('/hdo/admin/overview');
+    },
+
+    async getHdoDeployments(): Promise<HdoDeploymentState> {
+      return api<HdoDeploymentState>('/hdo/admin/deployments');
+    },
+
+    async runHdoDeployment(input: {
+      kind: HdoDeploymentKind;
+      serverUrl?: string | null;
+      publicHost?: string | null;
+      port?: number | null;
+    }): Promise<HdoDeploymentJob> {
+      const out = await api<HdoDeploymentJob>('/hdo/admin/deployments', {
+        method: 'POST',
+        body: JSON.stringify(input)
+      });
+      toast('HDO 部署任务已启动');
+      return out;
     },
 
     async upsertHdoMeshGroup(input: {

@@ -27,6 +27,10 @@ SPA_TARGET="$ROOT/data/spa-dist"
 cd "$ROOT"
 DC=()
 
+export HDO_HOST_REPO_ROOT="${HDO_HOST_REPO_ROOT:-$REPO_ROOT}"
+export HDO_GATEWAY_SCRIPT="${HDO_GATEWAY_SCRIPT:-$REPO_ROOT/docker/hdo-gateway-stack/manage.sh}"
+export HDO_SERVER_URL="${HDO_SERVER_URL:-http://127.0.0.1:${MARKET_PORT:-8080}}"
+
 # ── Pretty printing ────────────────────────────────────────────────────
 if [ -t 1 ]; then
   C_RED=$'\033[1;31m'; C_GREEN=$'\033[1;32m'; C_YELLOW=$'\033[1;33m'

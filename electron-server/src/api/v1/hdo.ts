@@ -1,4 +1,7 @@
+import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
@@ -57,9 +60,37 @@ const DEVICE_TASK_STATUSES: readonly HdoDeviceTaskStatus[] = [
   'failed',
   'cancelled'
 ];
+const HDO_DEPLOYMENT_KINDS = [
+  'deploy-domestic',
+  'sync-domestic-peers',
+  'deploy-domestic-mihomo-wireguard',
+  'deploy-oversea-mihomo-hysteria2',
+  'status'
+] as const;
 const HDO_MESH_ROUTE_CIDRS = ['100.88.0.0/16', '100.89.0.0/16', '100.90.0.0/16'];
 const HDO_DEFAULT_DEVICE_PREFIX = '100.89.0.';
 const HDO_DEFAULT_WG_PORT = 51888;
+const HDO_DEPLOYMENT_OUTPUT_LIMIT = 80_000;
+
+type HdoDeploymentKind = (typeof HDO_DEPLOYMENT_KINDS)[number];
+type HdoDeploymentStatus = 'running' | 'succeeded' | 'failed';
+
+interface HdoDeploymentJob {
+  id: string;
+  kind: HdoDeploymentKind;
+  status: HdoDeploymentStatus;
+  command: string;
+  args: string[];
+  scriptPath: string;
+  cwd: string;
+  output: string;
+  startedAt: string;
+  finishedAt: string | null;
+  exitCode: number | null;
+  error: string | null;
+}
+
+const hdoDeploymentJobs = new Map<string, HdoDeploymentJob>();
 
 export async function hdoRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', attachUser);
@@ -284,6 +315,47 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       pluginStates,
       tasks
     };
+  });
+
+  app.get('/api/v1/hdo/admin/deployments', adminOnly, async () => {
+    return {
+      runner: inspectHdoDeploymentRunner(),
+      jobs: listHdoDeploymentJobs()
+    };
+  });
+
+  app.post('/api/v1/hdo/admin/deployments', adminOnly, async (req, reply) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const kind = pick(body.kind, HDO_DEPLOYMENT_KINDS);
+    if (!kind) {
+      reply.code(400);
+      return { error: 'valid HDO deployment kind required' };
+    }
+    const script = resolveHdoGatewayScript();
+    if (!script) {
+      reply.code(409);
+      return {
+        error: 'HDO gateway script is not available to electron-server',
+        detail:
+          'Set HDO_GATEWAY_SCRIPT to docker/hdo-gateway-stack/manage.sh or run the server from the repository host.'
+      };
+    }
+    const job = startHdoDeploymentJob({
+      kind,
+      body,
+      scriptPath: script,
+      bearerToken: bearerTokenFromRequest(req)
+    });
+    await auditStore.insert({
+      actorUserId: req.currentUser?.id ?? null,
+      actorIp: req.ip,
+      action: 'hdo.deployment.start',
+      targetKind: 'hdo_deployment',
+      targetId: job.id,
+      meta: { kind: job.kind, command: job.command }
+    });
+    reply.code(202);
+    return job;
   });
 
   app.get('/api/v1/hdo/admin/mesh-groups', adminOnly, async () => hdoStore.listMeshGroups());
@@ -588,6 +660,155 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       return row;
     }
   );
+}
+
+function inspectHdoDeploymentRunner() {
+  const scriptPath = resolveHdoGatewayScript();
+  return {
+    available: Boolean(scriptPath),
+    scriptPath,
+    cwd: scriptPath ? resolve(dirname(scriptPath), '../..') : null,
+    kinds: HDO_DEPLOYMENT_KINDS,
+    note: scriptPath
+      ? 'HDO deployment runner can execute whitelisted gateway actions.'
+      : 'HDO gateway script is not visible from electron-server. Set HDO_GATEWAY_SCRIPT or run the server from the repository host.'
+  };
+}
+
+function listHdoDeploymentJobs(): HdoDeploymentJob[] {
+  return [...hdoDeploymentJobs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+}
+
+function resolveHdoGatewayScript(): string | null {
+  const configured = asOptionalString(process.env.HDO_GATEWAY_SCRIPT);
+  const candidates = configured
+    ? [configured]
+    : [
+        resolve(process.cwd(), '../docker/hdo-gateway-stack/manage.sh'),
+        resolve(process.cwd(), 'docker/hdo-gateway-stack/manage.sh'),
+        resolve(process.cwd(), '../../docker/hdo-gateway-stack/manage.sh')
+      ];
+  for (const candidate of candidates) {
+    const scriptPath = resolve(candidate);
+    if (existsSync(scriptPath)) return scriptPath;
+  }
+  return null;
+}
+
+function startHdoDeploymentJob(input: {
+  kind: HdoDeploymentKind;
+  body: Record<string, unknown>;
+  scriptPath: string;
+  bearerToken: string | null;
+}): HdoDeploymentJob {
+  const invocation = buildHdoDeploymentInvocation(input.kind, input.body);
+  const cwd = resolve(dirname(input.scriptPath), '../..');
+  const id = `hdo-deploy-${randomUUID()}`;
+  const job: HdoDeploymentJob = {
+    id,
+    kind: input.kind,
+    status: 'running',
+    command: formatCommand(['bash', input.scriptPath, ...invocation.args]),
+    args: invocation.args,
+    scriptPath: input.scriptPath,
+    cwd,
+    output: '',
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    exitCode: null,
+    error: null
+  };
+  hdoDeploymentJobs.set(job.id, job);
+  pruneHdoDeploymentJobs();
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HDO_SERVER_URL: invocation.serverUrl
+  };
+  if (input.bearerToken) {
+    env.HDO_TOKEN = input.bearerToken;
+  }
+
+  const child = spawn('bash', [input.scriptPath, ...invocation.args], {
+    cwd,
+    env,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  const append = (chunk: Buffer | string) => {
+    const next = job.output + chunk.toString();
+    job.output =
+      next.length > HDO_DEPLOYMENT_OUTPUT_LIMIT
+        ? next.slice(next.length - HDO_DEPLOYMENT_OUTPUT_LIMIT)
+        : next;
+  };
+
+  child.stdout.on('data', append);
+  child.stderr.on('data', append);
+  child.on('error', (err) => {
+    job.status = 'failed';
+    job.error = err.message;
+    job.finishedAt = new Date().toISOString();
+  });
+  child.on('close', (code) => {
+    if (job.finishedAt) return;
+    job.exitCode = code;
+    job.status = code === 0 ? 'succeeded' : 'failed';
+    job.finishedAt = new Date().toISOString();
+    if (code !== 0 && !job.error) job.error = `command exited with ${code ?? 'unknown status'}`;
+  });
+
+  return job;
+}
+
+function buildHdoDeploymentInvocation(
+  kind: HdoDeploymentKind,
+  body: Record<string, unknown>
+): { args: string[]; serverUrl: string } {
+  const serverUrl =
+    asOptionalString(body.serverUrl) ??
+    asOptionalString(process.env.HDO_SERVER_URL) ??
+    `http://127.0.0.1:${asOptionalString(process.env.PORT) ?? '8080'}`;
+  if (kind === 'deploy-domestic') {
+    const args = ['deploy-domestic', '--yes', '--server-url', serverUrl];
+    const publicHost = asOptionalString(body.publicHost);
+    const port = toPort(body.port) ?? toPort(body.listenPort) ?? HDO_DEFAULT_WG_PORT;
+    if (publicHost) args.push('--public-host', publicHost);
+    args.push('--port', String(port));
+    if (asOptionalBoolean(body.noApply)) args.push('--no-apply');
+    if (asOptionalBoolean(body.noEgress)) args.push('--no-egress');
+    return { args, serverUrl };
+  }
+  if (kind === 'sync-domestic-peers') {
+    return { args: ['sync-peers', '--server-url', serverUrl], serverUrl };
+  }
+  if (kind === 'status') {
+    return { args: ['status'], serverUrl };
+  }
+  return { args: [kind], serverUrl };
+}
+
+function pruneHdoDeploymentJobs(): void {
+  const jobs = listHdoDeploymentJobs();
+  for (const job of jobs.slice(20)) {
+    if (job.status !== 'running') hdoDeploymentJobs.delete(job.id);
+  }
+}
+
+function formatCommand(parts: string[]): string {
+  return parts.map(shellQuote).join(' ');
+}
+
+function shellQuote(value: string): string {
+  if (/^[a-zA-Z0-9_./:=@+-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function bearerTokenFromRequest(req: FastifyRequest): string | null {
+  const header = req.headers.authorization;
+  if (typeof header !== 'string') return null;
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  return match?.[1] ?? null;
 }
 
 async function renderDomesticWireGuardPeers(): Promise<string> {

@@ -3,7 +3,7 @@
     <div class="toolbar-row q-mb-md">
       <div>
         <div class="page-title">HDO 控制面</div>
-        <div class="text-caption text-grey-7">Mesh 许可、设备插件清单和远程任务</div>
+        <div class="text-caption text-grey-7">服务部署、Mesh 许可、设备插件清单和远程任务</div>
       </div>
       <q-space />
       <q-btn flat round icon="refresh" :loading="loading" @click="reload">
@@ -45,6 +45,7 @@
         indicator-color="primary"
         class="section-surface q-mb-md"
       >
+        <q-tab name="deploy" icon="construction" label="部署" />
         <q-tab name="mesh" icon="hub" label="Mesh" />
         <q-tab name="licenses" icon="verified_user" label="许可" />
         <q-tab name="nodes" icon="lan" label="节点" />
@@ -56,6 +57,79 @@
       </q-tabs>
 
       <q-tab-panels v-model="tab" animated class="bg-transparent">
+        <q-tab-panel name="deploy" class="q-pa-none">
+          <div class="section-surface q-pa-md q-mb-md">
+            <div class="toolbar-row q-mb-sm">
+              <div>
+                <div class="section-title">推荐流程</div>
+                <div class="text-caption text-grey-7">
+                  Runner：{{ deployments?.runner.available ? deployments.runner.scriptPath : deployments?.runner.note ?? '加载中' }}
+                </div>
+              </div>
+              <q-space />
+              <q-btn flat round icon="refresh" :loading="deploymentLoading" @click="loadDeployments" />
+            </div>
+            <div class="deploy-flow">
+              <div v-for="step in deploymentSteps" :key="step.label" class="deploy-step">
+                <q-icon :name="step.done ? 'check_circle' : 'radio_button_unchecked'" :color="step.done ? 'positive' : 'grey-6'" size="22px" />
+                <div>
+                  <div class="text-weight-medium">{{ step.label }}</div>
+                  <div class="text-caption text-grey-7">{{ step.detail }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="deploy-card-grid">
+            <section v-for="card in deploymentCards" :key="card.key" class="section-surface q-pa-md">
+              <div class="toolbar-row q-mb-sm">
+                <div>
+                  <div class="section-title q-mb-xs">{{ card.title }}</div>
+                  <div class="text-caption text-grey-7">{{ card.subtitle }}</div>
+                </div>
+                <q-space />
+                <q-badge :color="card.done ? 'positive' : 'warning'" :label="card.done ? '已登记' : '待处理'" />
+              </div>
+              <q-input
+                :model-value="card.command"
+                outlined
+                dense
+                readonly
+                autogrow
+                type="textarea"
+                class="mono-command q-mb-sm"
+              />
+              <div class="toolbar-row">
+                <q-btn flat icon="content_copy" label="复制命令" @click="copyInstallCommand(card.command)" />
+                <q-btn
+                  color="positive"
+                  icon="play_arrow"
+                  label="执行"
+                  :disable="!deployments?.runner.available"
+                  :loading="deployingKind === card.runKind"
+                  @click="runDeployment(card)"
+                />
+                <q-space />
+                <q-btn color="primary" :icon="card.actionIcon" :label="card.actionLabel" @click="tab = card.targetTab" />
+              </div>
+            </section>
+          </div>
+          <div class="section-surface q-pa-md q-mt-md">
+            <div class="section-title q-mb-sm">最近部署任务</div>
+            <div v-if="!deploymentJobs.length" class="text-grey-7">暂无任务。点击上方“执行”后会显示脚本输出。</div>
+            <q-expansion-item
+              v-for="job in deploymentJobs"
+              :key="job.id"
+              dense
+              expand-separator
+              :label="`${job.kind} · ${job.status}`"
+              :caption="job.error ?? job.command"
+            >
+              <q-badge class="q-mb-sm" :color="deploymentStatusColor(job.status)" :label="job.status" />
+              <pre class="deploy-output">{{ job.output || '等待脚本输出...' }}</pre>
+            </q-expansion-item>
+          </div>
+        </q-tab-panel>
+
         <q-tab-panel name="mesh" class="q-pa-none">
           <div class="split-layout">
             <section class="section-surface q-pa-md">
@@ -600,6 +674,9 @@ import {
   useServerAdmin,
   type HdoDeviceRow,
   type HdoDeviceTaskRow,
+  type HdoDeploymentJob,
+  type HdoDeploymentKind,
+  type HdoDeploymentState,
   type HdoMeshGroupRow,
   type HdoNodeRow,
   type HdoOverview,
@@ -611,9 +688,12 @@ import {
 const admin = useServerAdmin();
 
 const overview = ref<HdoOverview | null>(null);
+const deployments = ref<HdoDeploymentState | null>(null);
 const loading = ref(true);
+const deploymentLoading = ref(false);
+const deployingKind = ref<HdoDeploymentKind | null>(null);
 const error = ref<string | null>(null);
-const tab = ref('mesh');
+const tab = ref('deploy');
 
 const editingMeshId = ref<string | null>(null);
 const meshName = ref('');
@@ -794,6 +874,94 @@ const pendingTasks = computed(() =>
   (overview.value?.tasks ?? []).filter((row) => row.status === 'pending' || row.status === 'claimed')
 );
 
+const deploymentJobs = computed(() => deployments.value?.jobs ?? []);
+
+const deploymentSteps = computed(() => {
+  const hasMesh = (overview.value?.meshGroups ?? []).some((row) => row.enabled);
+  const hasLicense = activeMemberships.value.length > 0;
+  const hasDomestic = hasNodeKind('domestic');
+  const hasHome = hasNodeKind('home');
+  const hasService = (overview.value?.services ?? []).some((row) => row.enabled);
+  const hasDevice = (overview.value?.devices ?? []).length > 0;
+  return [
+    {
+      label: '启动 electron-server',
+      detail: '服务器上通过 ./scripts/manage.sh server up / deploy 启动控制面。',
+      done: true
+    },
+    {
+      label: '部署 Domestic gateway',
+      detail: '在本机或 domestic-vps 安装 WireGuard gateway，并把 domestic 节点登记到控制面。',
+      done: hasDomestic
+    },
+    {
+      label: '创建 Mesh 并发放许可',
+      detail: '创建启用中的 mesh 组，把用户加入 mesh；客户端只有拿到许可才会收到 peer 和订阅。',
+      done: hasMesh && hasLicense
+    },
+    {
+      label: '接入 Home / 服务',
+      detail: '登记 Home 节点和可见服务，服务端会按 mesh 可见性下发到客户端。',
+      done: hasHome && hasService
+    },
+    {
+      label: '客户端入网',
+      detail: '用户打开 HDO 插件，在“我的 Mesh”里连接 / 更新 HDO。',
+      done: hasDevice
+    }
+  ];
+});
+
+const deploymentCards = computed(() => [
+  {
+    key: 'domestic-wireguard',
+    title: 'Domestic WireGuard gateway',
+    subtitle: 'H/D mesh 基础能力；没有 Oversea 也可以让多个 Home 互联。',
+    command: [
+      "HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo deploy-domestic --yes --server-url http://127.0.0.1:8080 --public-host <domestic-public-ip-or-domain> --port 51888",
+      "HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo sync-peers --server-url http://127.0.0.1:8080"
+    ].join('\n'),
+    runKind: 'deploy-domestic' as HdoDeploymentKind,
+    done: hasNodeKind('domestic'),
+    targetTab: 'nodes',
+    actionIcon: 'dns',
+    actionLabel: '登记节点'
+  },
+  {
+    key: 'domestic-mihomo-wireguard',
+    title: 'Domestic Docker Mihomo + WireGuard',
+    subtitle: '复用现有 wg-mihomo-stack；通过 HDO gateway 统一入口调用。',
+    command: 'sudo ./scripts/manage.sh hdo deploy-domestic-mihomo-wireguard',
+    runKind: 'deploy-domestic-mihomo-wireguard' as HdoDeploymentKind,
+    done: hasNodeKind('domestic') && (overview.value?.services ?? []).some((row) => row.enabled),
+    targetTab: 'services',
+    actionIcon: 'dns',
+    actionLabel: '登记服务'
+  },
+  {
+    key: 'oversea-mihomo-hysteria2',
+    title: 'Oversea Docker Mihomo + Hysteria2',
+    subtitle: '给 D 提供显式外网出站能力；H 客户端无需感知 O。',
+    command: 'sudo ./scripts/manage.sh hdo deploy-oversea-mihomo-hysteria2',
+    runKind: 'deploy-oversea-mihomo-hysteria2' as HdoDeploymentKind,
+    done: hasNodeKind('oversea'),
+    targetTab: 'nodes',
+    actionIcon: 'public',
+    actionLabel: '登记 O 节点'
+  },
+  {
+    key: 'sync-domestic-peers',
+    title: '同步 Domestic peers',
+    subtitle: '把服务端管理的 Home / Client peers 下发到 D，并热更新 hdo-home。',
+    command: "HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo sync-peers --server-url http://127.0.0.1:8080",
+    runKind: 'sync-domestic-peers' as HdoDeploymentKind,
+    done: (overview.value?.devices ?? []).some((row) => Boolean(row.publicKey && row.overlayIp)),
+    targetTab: 'devices',
+    actionIcon: 'devices',
+    actionLabel: '查看设备'
+  }
+]);
+
 const membershipRows = computed(() =>
   (overview.value?.memberships ?? []).map((row) => ({
     ...row,
@@ -898,7 +1066,12 @@ async function reload(): Promise<void> {
   loading.value = true;
   error.value = null;
   try {
-    overview.value = await admin.getHdoOverview();
+    const [nextOverview, nextDeployments] = await Promise.all([
+      admin.getHdoOverview(),
+      admin.getHdoDeployments()
+    ]);
+    overview.value = nextOverview;
+    deployments.value = nextDeployments;
     if (!membershipUserId.value) membershipUserId.value = overview.value.users[0]?.id ?? null;
     if (!taskUserId.value) taskUserId.value = overview.value.users[0]?.id ?? null;
     if (!membershipMeshGroupId.value) membershipMeshGroupId.value = overview.value.meshGroups[0]?.id ?? null;
@@ -908,6 +1081,33 @@ async function reload(): Promise<void> {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
     loading.value = false;
+  }
+}
+
+async function loadDeployments(): Promise<void> {
+  deploymentLoading.value = true;
+  try {
+    deployments.value = await admin.getHdoDeployments();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    deploymentLoading.value = false;
+  }
+}
+
+async function runDeployment(card: { runKind: HdoDeploymentKind }): Promise<void> {
+  deployingKind.value = card.runKind;
+  error.value = null;
+  try {
+    await admin.runHdoDeployment({ kind: card.runKind });
+    await loadDeployments();
+    window.setTimeout(() => {
+      void loadDeployments();
+    }, 1800);
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    deployingKind.value = null;
   }
 }
 
@@ -1164,6 +1364,15 @@ async function createTask(): Promise<void> {
   }
 }
 
+async function copyInstallCommand(command: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(command);
+    error.value = null;
+  } catch {
+    error.value = '浏览器未允许复制，请手动选中命令复制。';
+  }
+}
+
 function parsePayload(): Record<string, unknown> | null {
   const text = taskPayloadText.value.trim();
   if (!text) return null;
@@ -1231,6 +1440,10 @@ function userLabel(userId: string): string {
   return user?.displayName || user?.username || user?.email || userId;
 }
 
+function hasNodeKind(kind: HdoNodeRow['kind']): boolean {
+  return (overview.value?.nodes ?? []).some((row) => row.kind === kind);
+}
+
 function subjectLabel(subjectType: HdoRateLimitRow['subjectType'], subjectId: string): string {
   if (subjectType === 'user') return userLabel(subjectId);
   if (subjectType === 'device') return devicesById.value.get(subjectId)?.label ?? subjectId;
@@ -1260,6 +1473,14 @@ function taskStatusColor(status: string): string {
     failed: 'negative',
     cancelled: 'grey-7'
   }[status] ?? 'grey-7';
+}
+
+function deploymentStatusColor(status: HdoDeploymentJob['status']): string {
+  return {
+    running: 'info',
+    succeeded: 'positive',
+    failed: 'negative'
+  }[status];
 }
 
 onMounted(reload);
@@ -1299,6 +1520,42 @@ onMounted(reload);
     gap: 16px;
   }
 
+  .deploy-flow {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .deploy-step {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+    min-width: 0;
+  }
+
+  .deploy-card-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 16px;
+  }
+
+  .mono-command :deep(textarea) {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+  }
+
+  .deploy-output {
+    max-height: 280px;
+    overflow: auto;
+    padding: 12px;
+    border-radius: 8px;
+    background: #111827;
+    color: #e5e7eb;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
   .two-col {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1308,6 +1565,8 @@ onMounted(reload);
   @media (max-width: 980px) {
     .metric-grid,
     .split-layout,
+    .deploy-flow,
+    .deploy-card-grid,
     .two-col {
       grid-template-columns: 1fr;
     }
