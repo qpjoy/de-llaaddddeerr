@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, win32 as pathWin32 } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 
 export type HdoMeshRole = 'domestic' | 'home' | 'user' | 'oversea' | 'service';
@@ -524,11 +524,11 @@ export function buildWireGuardTunnelCommand(input: {
   if (runtime.platform === 'win32') {
     const command = runtime.windowsWireGuard?.command;
     if (!command) throw new Error(runtime.error ?? 'wireguard.exe unavailable');
-    const tunnelName = basename(configPath).replace(/\.[^.]+$/, '');
+    const tunnelName = pathWin32.basename(configPath).replace(/\.[^.]+$/, '');
     const wireGuardArgs = action === 'up'
       ? ['/installtunnelservice', configPath]
       : ['/uninstalltunnelservice', tunnelName];
-    const script = windowsElevatedStartProcessScript(command, wireGuardArgs);
+    const script = windowsElevatedStartProcessScript(command, wireGuardArgs, action, tunnelName);
     const powershell = windowsPowerShellCommand();
     return {
       action,
@@ -1380,32 +1380,46 @@ function powerShellString(value: string): string {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-function windowsElevatedStartProcessScript(command: string, args: string[]): string {
-  const argumentList = args.map(windowsCommandLineArg).join(' ');
+function windowsElevatedStartProcessScript(
+  command: string,
+  args: string[],
+  action: WireGuardTunnelAction,
+  tunnelName: string
+): string {
+  const serviceName = `WireGuardTunnel$${tunnelName}`;
+  const serviceLookup = `$svc = Get-Service -Name ${powerShellString(serviceName)} -ErrorAction SilentlyContinue`;
+  const preflightLines = action === 'up'
+    ? [
+        serviceLookup,
+        "if ($null -ne $svc -and $svc.Status -eq 'Running') { exit 0 }"
+      ]
+    : [
+        serviceLookup,
+        'if ($null -eq $svc) { exit 0 }'
+      ];
+  const elevatedLines = [
+    "$ErrorActionPreference = 'Stop'",
+    `$svc = Get-Service -Name ${powerShellString(serviceName)} -ErrorAction SilentlyContinue`,
+    ...(action === 'up'
+      ? [
+          "if ($null -ne $svc -and $svc.Status -eq 'Running') { exit 0 }",
+          `if ($null -ne $svc) { Start-Service -Name ${powerShellString(serviceName)}; exit 0 }`
+        ]
+      : [
+          'if ($null -eq $svc) { exit 0 }'
+        ]),
+    `& ${powerShellString(command)} ${args.map(powerShellString).join(' ')}`,
+    'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
+    'exit 0'
+  ];
+  const elevatedEncoded = encodePowerShell(elevatedLines.join('\n'));
   return [
     "$ErrorActionPreference = 'Stop'",
-    `$p = Start-Process -FilePath ${powerShellString(command)} -ArgumentList ${powerShellString(argumentList)} -Verb RunAs -Wait -PassThru`,
+    ...preflightLines,
+    "$pwsh = Join-Path $PSHOME 'powershell.exe'",
+    `$p = Start-Process -FilePath $pwsh -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', ${powerShellString(elevatedEncoded)}) -Verb RunAs -Wait -PassThru`,
     'if ($null -ne $p.ExitCode) { exit $p.ExitCode }'
   ].join('\n');
-}
-
-function windowsCommandLineArg(value: string): string {
-  if (value.length === 0) return '""';
-  if (!/[ \t\n\v"]/.test(value)) return value;
-  let out = '"';
-  let backslashes = 0;
-  for (const ch of value) {
-    if (ch === '\\') {
-      backslashes += 1;
-    } else if (ch === '"') {
-      out += '\\'.repeat(backslashes * 2 + 1) + '"';
-      backslashes = 0;
-    } else {
-      out += '\\'.repeat(backslashes) + ch;
-      backslashes = 0;
-    }
-  }
-  return out + '\\'.repeat(backslashes * 2) + '"';
 }
 
 function windowsPowerShellCommand(): string {
