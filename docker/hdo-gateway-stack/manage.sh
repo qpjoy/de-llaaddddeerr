@@ -28,7 +28,7 @@ Commands:
   sync-domestic-peers Pull managed H member/client peers from electron-server
   apply-domestic      Install generated wg-home config into /etc/wireguard
   repair-domestic-routes
-                      Re-apply domestic peer routes and forwarding rules
+                      Reload live domestic peers, routes and forwarding rules
   deploy-domestic-mihomo-wireguard
                       Run docker/wg-mihomo-stack setup from this HDO entrypoint
   deploy-oversea-mihomo-hysteria2
@@ -590,6 +590,13 @@ cmd_repair_domestic_routes() {
   require_cmd ip
   [ -f /etc/wireguard/hdo-home.conf ] || die "missing /etc/wireguard/hdo-home.conf; run apply-domestic first"
 
+  if wg show hdo-home >/dev/null 2>&1; then
+    wg syncconf hdo-home <(wg-quick strip hdo-home)
+    ok "reloaded live hdo-home WireGuard peers from /etc/wireguard/hdo-home.conf"
+  else
+    systemctl restart wg-quick@hdo-home || true
+    ok "restarted wg-quick@hdo-home"
+  fi
   ensure_domestic_forwarding hdo-home
   sync_domestic_peer_routes hdo-home /etc/wireguard/hdo-home.conf
   ok "repaired hdo-home peer routes and forwarding"

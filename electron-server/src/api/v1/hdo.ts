@@ -63,6 +63,7 @@ const DEVICE_TASK_STATUSES: readonly HdoDeviceTaskStatus[] = [
 const HDO_DEPLOYMENT_KINDS = [
   'deploy-domestic',
   'sync-domestic-peers',
+  'repair-domestic-routes',
   'deploy-domestic-mihomo-wireguard',
   'deploy-oversea-mihomo-hysteria2',
   'status'

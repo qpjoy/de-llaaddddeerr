@@ -103,6 +103,7 @@ export class HdoController {
   }
 
   getSettings(): HdoPluginSettings {
+    this.ensureSettingsForCurrentSession();
     return { ...this.settings };
   }
 
@@ -121,6 +122,7 @@ export class HdoController {
   }
 
   async snapshot(): Promise<HdoSnapshot> {
+    this.ensureSettingsForCurrentSession();
     const session = this.sessionSnapshot();
     let readiness: unknown | null = null;
     let devices: unknown[] = [];
@@ -209,6 +211,7 @@ export class HdoController {
   }
 
   async registerDevice(input: HdoDeviceRegistrationInput): Promise<unknown> {
+    this.ensureSettingsForCurrentSession();
     const body = {
       id: input.id || this.settings.deviceId || `hdo-dev-${randomUUID()}`,
       label: input.label || this.settings.deviceLabel || defaultDeviceLabel(),
@@ -221,8 +224,25 @@ export class HdoController {
       },
       plugins: this.localPluginStates()
     };
-    const device = await this.apiPost('/api/v1/hdo/devices/register', body);
-    const deviceId = stringField(device, 'id') ?? body.id;
+    let device: unknown;
+    let submittedDeviceId = body.id;
+    try {
+      device = await this.apiPost('/api/v1/hdo/devices/register', body);
+    } catch (err) {
+      if (!isDeviceOwnershipError(err)) throw err;
+      const retryBody = {
+        ...body,
+        id: `hdo-dev-${randomUUID()}`,
+        overlayIp: null
+      };
+      submittedDeviceId = retryBody.id;
+      this.ctx.log.warn('HDO device id belongs to another user; retrying with a fresh device id', {
+        staleDeviceId: body.id,
+        nextDeviceId: retryBody.id
+      });
+      device = await this.apiPost('/api/v1/hdo/devices/register', retryBody);
+    }
+    const deviceId = stringField(device, 'id') ?? submittedDeviceId;
     this.updateSettings({
       deviceId,
       deviceLabel: body.label,
@@ -232,6 +252,7 @@ export class HdoController {
   }
 
   async reportPluginStates(deviceId?: string | null): Promise<unknown[]> {
+    this.ensureSettingsForCurrentSession();
     const id = deviceId || this.settings.deviceId;
     if (!id) return [];
     const result = await this.apiPost(`/api/v1/hdo/devices/${encodeURIComponent(id)}/plugin-states`, {
@@ -249,6 +270,7 @@ export class HdoController {
   }
 
   async refreshManifest(deviceId?: string | null): Promise<Record<string, unknown>> {
+    this.ensureSettingsForCurrentSession();
     const id = deviceId || this.settings.deviceId;
     if (!id) throw new Error('deviceId required');
     const manifest = await this.apiGet(`/api/v1/hdo/manifest/${encodeURIComponent(id)}`);
@@ -260,6 +282,7 @@ export class HdoController {
   }
 
   async refreshSubscription(deviceId?: string | null): Promise<string> {
+    this.ensureSettingsForCurrentSession();
     const id = deviceId || this.settings.deviceId;
     if (!id) throw new Error('deviceId required');
     const content = await this.apiText(
@@ -270,6 +293,7 @@ export class HdoController {
   }
 
   async prepareWireGuardPeer(input: { rotate?: boolean | null } = {}): Promise<Record<string, unknown>> {
+    this.ensureSettingsForCurrentSession();
     const routeProbe = buildHdoRouteProbe();
     const now = new Date().toISOString();
     const previous = this.settings.wireGuardPeer ?? {};
@@ -450,6 +474,7 @@ export class HdoController {
   }
 
   async connectWireGuardPeer(input: { action?: 'up' | 'down' | 'restart' | null } = {}): Promise<Record<string, unknown>> {
+    this.ensureSettingsForCurrentSession();
     const peer = this.settings.wireGuardPeer;
     const configPath = stringValue(peer?.configPath);
     if (!configPath || !existsSync(configPath)) {
@@ -461,12 +486,47 @@ export class HdoController {
       bundledDir: this.ctx.bundledWireGuardDir,
       allowSystemFallback: true
     });
-    if (action === 'restart' && runtime.platform !== 'win32') {
-      await setWireGuardTunnelState({
+    if (action === 'up' && runtime.platform === 'darwin' && runtime.method === 'darwin-userspace') {
+      const restarted = await setWireGuardTunnelState({
         runtime,
         configPath,
-        action: 'down'
+        action: 'restart'
       });
+      return {
+        ...restarted,
+        action,
+        message: restarted.ok ? '已启动 WireGuard peer。' : restarted.message,
+        runtime: publicWireGuardRuntime(restarted.runtime)
+      };
+    }
+    if (action === 'restart' && runtime.platform === 'darwin' && runtime.method === 'darwin-userspace') {
+      const restarted = await setWireGuardTunnelState({
+        runtime,
+        configPath,
+        action
+      });
+      return {
+        ...restarted,
+        message: restarted.ok ? '已更新并启动 WireGuard peer。' : restarted.message,
+        runtime: publicWireGuardRuntime(restarted.runtime)
+      };
+    }
+    if (action === 'restart' && runtime.platform !== 'win32') {
+      const status = safeWireGuardStatus(runtime, configPath);
+      if (status?.active) {
+        const stopped = await setWireGuardTunnelState({
+          runtime,
+          configPath,
+          action: 'down'
+        });
+        if (!stopped.ok) {
+          return {
+            ...stopped,
+            action,
+            runtime: publicWireGuardRuntime(stopped.runtime)
+          };
+        }
+      }
       const restarted = await setWireGuardTunnelState({
         runtime,
         configPath,
@@ -492,6 +552,7 @@ export class HdoController {
   }
 
   wireGuardStatus(): Record<string, unknown> | null {
+    this.ensureSettingsForCurrentSession();
     const peer = this.settings.wireGuardPeer;
     const configPath = stringValue(peer?.configPath);
     if (!configPath || !existsSync(configPath)) return null;
@@ -809,10 +870,51 @@ export class HdoController {
     return true;
   }
 
+  private ensureSettingsForCurrentSession(): void {
+    const currentUserId = this.currentSessionUserId();
+    if (!currentUserId) return;
+
+    const previousUserId =
+      this.settings.sessionUserId ?? stringField(plainObject(this.settings.lastManifest)?.device, 'userId');
+    if (previousUserId && previousUserId !== currentUserId) {
+      this.settings = {
+        ...this.settings,
+        sessionUserId: currentUserId,
+        deviceId: null,
+        wireGuardPeer: null,
+        activeProfileId: null,
+        lastManifest: null,
+        lastSubscription: null,
+        updatedAt: new Date().toISOString()
+      };
+      this.saveSettings();
+      this.ctx.log.info('reset HDO local device settings after account switch', {
+        previousUserId,
+        currentUserId
+      });
+      return;
+    }
+
+    if (this.settings.sessionUserId !== currentUserId) {
+      this.settings = {
+        ...this.settings,
+        sessionUserId: currentUserId,
+        updatedAt: new Date().toISOString()
+      };
+      this.saveSettings();
+    }
+  }
+
+  private currentSessionUserId(): string | null {
+    const user = this.ctx.marketplaceDb?.getActiveSession?.()?.user;
+    return stringField(user, 'id') ?? stringField(user, 'userId') ?? stringField(user, 'sub');
+  }
+
   private loadSettings(): HdoPluginSettings {
     if (!existsSync(this.settingsPath)) {
       return {
         hdoControlBaseUrl: normalizeBaseUrl(process.env.QPJOY_HDO_SERVER) ?? null,
+        sessionUserId: null,
         deviceId: null,
         deviceLabel: defaultDeviceLabel(),
         devicePlatform: process.platform,
@@ -830,6 +932,7 @@ export class HdoController {
       return {
         ...parsed,
         hdoControlBaseUrl: normalizeBaseUrl(parsed.hdoControlBaseUrl) ?? null,
+        sessionUserId: parsed.sessionUserId ?? null,
         wireGuardPeer: parsed.wireGuardPeer ?? null,
         autoRunDeviceTasks: parsed.autoRunDeviceTasks ?? true,
         activeProfileId: parsed.activeProfileId ?? null,
@@ -841,6 +944,7 @@ export class HdoController {
       });
       return {
         hdoControlBaseUrl: null,
+        sessionUserId: null,
         deviceId: null,
         deviceLabel: defaultDeviceLabel(),
         devicePlatform: process.platform,
@@ -896,6 +1000,10 @@ function tokenNeedsRefresh(expiresAt: string | null | undefined): boolean {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function isDeviceOwnershipError(err: unknown): boolean {
+  return errorMessage(err).toLowerCase().includes('device id already belongs to another user');
 }
 
 function execFileAsync(command: string, args: string[]): Promise<void> {
@@ -983,6 +1091,17 @@ function publicWireGuardPeer(value: Record<string, unknown>): Record<string, unk
 function publicWireGuardRuntime(value: unknown): Record<string, unknown> {
   const runtime = plainObject(value);
   return runtime ? { ...runtime } : {};
+}
+
+function safeWireGuardStatus(
+  runtime: ReturnType<typeof resolveWireGuardConnectionRuntime>,
+  configPath: string
+): ReturnType<typeof getWireGuardTunnelStatus> | null {
+  try {
+    return getWireGuardTunnelStatus({ runtime, configPath });
+  } catch {
+    return null;
+  }
 }
 
 function domesticWireGuardFromManifest(manifest: Record<string, unknown>): {

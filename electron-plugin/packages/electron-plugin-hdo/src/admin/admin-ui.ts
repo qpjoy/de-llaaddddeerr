@@ -767,6 +767,7 @@ export function adminHtml(): string {
     const $ = (id) => document.getElementById(id);
     let snapshot = null;
     let tab = 'mesh';
+    let wireGuardActionBusy = false;
 
     function showMessage(text, kind) {
       const el = $('message');
@@ -788,7 +789,33 @@ export function adminHtml(): string {
       return body;
     }
 
-    async function runAction(label, task) {
+    function isAuthorizationCancelled(err) {
+      const text = err && err.message ? String(err.message) : String(err || '');
+      return text.includes('已取消 WireGuard 管理员授权')
+        || text.includes('用户已取消')
+        || text.includes('(-128)')
+        || /user canceled/i.test(text)
+        || /cancelled/i.test(text);
+    }
+
+    function updateWireGuardBusyControls() {
+      ['meshQuickStart', 'quickStart'].forEach((id) => {
+        const el = $(id);
+        if (el) el.disabled = wireGuardActionBusy;
+      });
+      const s = snapshot || {};
+      renderWireGuardSwitches(s.wireGuardStatus || null, (s.settings && s.settings.wireGuardPeer) || null);
+    }
+
+    async function runAction(label, task, options = {}) {
+      if (options.wireGuard && wireGuardActionBusy) {
+        showMessage('WireGuard 操作进行中，请先完成系统授权。', 'info');
+        return null;
+      }
+      if (options.wireGuard) {
+        wireGuardActionBusy = true;
+        updateWireGuardBusyControls();
+      }
       showMessage(label + '中…', 'info');
       try {
         const result = await task();
@@ -796,8 +823,18 @@ export function adminHtml(): string {
         showMessage(label + '成功', 'info');
         return result;
       } catch (err) {
+        if (options.treatCancelAsInfo && isAuthorizationCancelled(err)) {
+          await load().catch(() => undefined);
+          showMessage(label + '已取消', 'info');
+          return null;
+        }
         showMessage(label + '失败：' + (err.message || String(err)), 'error');
         throw err;
+      } finally {
+        if (options.wireGuard) {
+          wireGuardActionBusy = false;
+          updateWireGuardBusyControls();
+        }
       }
     }
 
@@ -1221,7 +1258,9 @@ export function adminHtml(): string {
     function renderWireGuardSwitches(status, peer) {
       const active = Boolean(status && status.active);
       const hasConfig = Boolean(peer && peer.configPath);
-      const label = active ? 'WireGuard 运行中' : (hasConfig ? 'WireGuard 已停止' : 'WireGuard 未配置');
+      const label = wireGuardActionBusy
+        ? 'WireGuard 操作中…'
+        : (active ? 'WireGuard 运行中' : (hasConfig ? 'WireGuard 已停止' : 'WireGuard 未配置'));
       [
         ['meshWireGuardSwitch', 'meshWireGuardSwitchText'],
         ['wireGuardSwitch', 'wireGuardSwitchText']
@@ -1230,8 +1269,12 @@ export function adminHtml(): string {
         const text = $(textId);
         if (!input || !text) return;
         input.checked = active;
-        input.disabled = !hasConfig;
+        input.disabled = wireGuardActionBusy || !hasConfig;
         text.textContent = label;
+      });
+      ['meshQuickStart', 'quickStart'].forEach((id) => {
+        const button = $(id);
+        if (button) button.disabled = wireGuardActionBusy;
       });
     }
 
@@ -1401,7 +1444,7 @@ export function adminHtml(): string {
           if (result && result.ok === false) {
             throw new Error(result.message || result.command || (shouldRun ? 'WireGuard 未启动' : 'WireGuard 未停止'));
           }
-        });
+        }, { wireGuard: true, treatCancelAsInfo: true });
       } catch {
         const s = snapshot || {};
         renderWireGuardSwitches(s.wireGuardStatus || null, (s.settings && s.settings.wireGuardPeer) || null);
@@ -1455,7 +1498,7 @@ export function adminHtml(): string {
       if (connected && connected.ok === false) {
         throw new Error(connected.message || connected.command || 'WireGuard 未启动');
       }
-    }).catch(() => undefined));
+    }, { wireGuard: true, treatCancelAsInfo: true }).catch(() => undefined));
     $('registerDevice').addEventListener('click', () => runAction('注册设备', async () => {
       await request('/api/client/register', {
         method: 'POST',

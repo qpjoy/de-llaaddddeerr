@@ -1,5 +1,6 @@
 export interface HdoPluginSettings {
   hdoControlBaseUrl?: string | null;
+  sessionUserId?: string | null;
   deviceId?: string | null;
   deviceLabel?: string | null;
   devicePlatform?: string | null;

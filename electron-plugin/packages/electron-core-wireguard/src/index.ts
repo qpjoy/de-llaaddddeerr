@@ -666,7 +666,11 @@ export function getWireGuardTunnelStatus(input: {
   configPath: string;
 }): WireGuardTunnelStatus {
   const profile = parseWireGuardProfile(input.configPath);
-  const realInterfaceName = resolveWireGuardRealInterface(input.runtime, profile.interfaceName);
+  const realInterfaceName = resolveWireGuardRealInterface(
+    input.runtime,
+    profile.interfaceName,
+    profile.addresses
+  );
   const status: WireGuardTunnelStatus = {
     ok: true,
     active: false,
@@ -734,12 +738,24 @@ export function getWireGuardTunnelStatus(input: {
       ifconfig: readInterfaceState(realInterfaceName)
     };
   } catch (err) {
+    const routes = detectInterfaceRoutes(realInterfaceName);
+    const ifconfig = readInterfaceState(realInterfaceName);
+    if (ifconfig && profile.addresses.some((address) => ifconfig.includes(`inet ${address.split('/')[0]}`))) {
+      return {
+        ...status,
+        active: true,
+        peers: [],
+        rawDump: null,
+        routes,
+        ifconfig
+      };
+    }
     return {
       ...status,
       ok: false,
       error: errorMessage(err),
-      routes: detectInterfaceRoutes(realInterfaceName),
-      ifconfig: readInterfaceState(realInterfaceName)
+      routes,
+      ifconfig
     };
   }
 }
@@ -844,14 +860,20 @@ export function buildHdoRouteProbe(input: {
       warnings.push(`本地路由探测失败：${errorMessage(err)}`);
     }
   }
-  const routeCidrs = routes.map((row) => normalizeCidr(row.cidr)).filter(isString);
+  const hdoCidrs = uniqueStrings(
+    (input.hdoCidrs ?? HDO_MESH_ROUTE_CIDRS).map((cidr) => normalizeCidr(cidr)).filter(isString)
+  );
+  const hdoRanges = hdoCidrs
+    .map((cidr) => cidrRange(cidr))
+    .filter((range): range is { start: number; end: number } => Boolean(range));
+  const routeCidrs = routes
+    .filter((row) => !routeLooksLikeExistingHdoRoute(row, hdoRanges))
+    .map((row) => normalizeCidr(row.cidr))
+    .filter(isString);
   const localCidrs = uniqueStrings([
     ...routeCidrs,
     ...(input.localCidrs ?? []).map((cidr) => normalizeCidr(cidr)).filter(isString)
   ]).filter((cidr) => cidr !== '0.0.0.0/0');
-  const hdoCidrs = uniqueStrings(
-    (input.hdoCidrs ?? HDO_MESH_ROUTE_CIDRS).map((cidr) => normalizeCidr(cidr)).filter(isString)
-  );
   const conflicts = findCidrConflicts(localCidrs, hdoCidrs);
   if (conflicts.length > 0) {
     warnings.push('本机已有路由与 HDO 默认网段重叠，建议在服务端为该 mesh 切换 overlay 网段后再下发配置。');
@@ -905,7 +927,7 @@ export function parseDarwinNetstatRoutes(raw: string): HdoLocalRoute[] {
       cidr,
       source: 'darwin-netstat',
       gateway: columns[1] ?? null,
-      interfaceName: columns[5] ?? null,
+      interfaceName: columns[3] ?? null,
       raw: trimmed
     });
   }
@@ -964,46 +986,69 @@ function buildDarwinUserspaceTunnelCommand(
 
   const profile = prepareDarwinUserspaceProfile(configPath);
   const nameFile = `/var/run/wireguard/${profile.interfaceName}.name`;
-  const routeCommands = profile.allowedIps
+  const pidFile = `/var/run/wireguard/${profile.interfaceName}.pid`;
+  const logFile = `/var/run/wireguard/${profile.interfaceName}.log`;
+  const routeUpCommands = profile.allowedIps
     .filter((cidr) => cidr.includes('/'))
     .map((cidr) => {
       const family = cidr.includes(':') ? '-inet6 -net' : '-net';
-      return action === 'up'
-        ? `route -q -n delete ${family} ${shellQuote(cidr)} >/dev/null 2>&1 || true\nroute -q -n add ${family} ${shellQuote(cidr)} -interface "$REAL_INTERFACE"`
-        : `route -q -n delete ${family} ${shellQuote(cidr)} >/dev/null 2>&1 || true`;
+      return `route -q -n delete ${family} ${shellQuote(cidr)} >/dev/null 2>&1 || true\nroute -q -n add ${family} ${shellQuote(cidr)} -interface "$REAL_INTERFACE"`;
+    });
+  const routeDownCommands = profile.allowedIps
+    .filter((cidr) => cidr.includes('/'))
+    .map((cidr) => {
+      const family = cidr.includes(':') ? '-inet6 -net' : '-net';
+      return `route -q -n delete ${family} ${shellQuote(cidr)} >/dev/null 2>&1 || true`;
     });
   const addressCommands = profile.addresses.map((address) => {
     if (address.includes(':')) return `ifconfig "$REAL_INTERFACE" inet6 ${shellQuote(address)} alias`;
     return `ifconfig "$REAL_INTERFACE" inet ${shellQuote(address)} ${shellQuote(address.split('/')[0])} alias`;
   });
   const primaryAddress = profile.addresses[0]?.split('/')[0] ?? '';
+  const stopLines = [
+    'mkdir -p /var/run/wireguard',
+    `REAL_INTERFACE="$(cat ${shellQuote(nameFile)} 2>/dev/null || true)"`,
+    `if [ -z "$REAL_INTERFACE" ] && [ -n ${shellQuote(primaryAddress)} ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q ${shellQuote(`inet ${primaryAddress}`)}; then REAL_INTERFACE="$candidate"; break; fi; done; fi`,
+    `if [ -n "$REAL_INTERFACE" ]; then`,
+    ...routeDownCommands.map((line) => `  ${line}`),
+    '  ifconfig "$REAL_INTERFACE" down >/dev/null 2>&1 || true',
+    '  rm -f "/var/run/wireguard/$REAL_INTERFACE.sock"',
+    'fi',
+    `if [ -s ${shellQuote(pidFile)} ]; then`,
+    `  WIREGUARD_GO_PID="$(cat ${shellQuote(pidFile)} 2>/dev/null || true)"`,
+    '  if [ -n "$WIREGUARD_GO_PID" ]; then',
+    '    kill "$WIREGUARD_GO_PID" >/dev/null 2>&1 || true',
+    '    i=0; while kill -0 "$WIREGUARD_GO_PID" >/dev/null 2>&1 && [ "$i" -lt 20 ]; do sleep 0.1; i=$((i + 1)); done',
+    '    kill -9 "$WIREGUARD_GO_PID" >/dev/null 2>&1 || true',
+    '  fi',
+    'fi',
+    `if [ -n ${shellQuote(primaryAddress)} ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q ${shellQuote(`inet ${primaryAddress}`)}; then ifconfig "$candidate" down >/dev/null 2>&1 || true; rm -f "/var/run/wireguard/$candidate.sock"; fi; done; fi`,
+    `if command -v pgrep >/dev/null 2>&1; then for stale_pid in $(pgrep -x wireguard-go 2>/dev/null || true); do stale_command="$(ps -p "$stale_pid" -o command= 2>/dev/null || true)"; printf '%s\\n' "$stale_command" | grep -F ${shellQuote(wireGuardGo)} >/dev/null 2>&1 && kill "$stale_pid" >/dev/null 2>&1 || true; done; fi`,
+    `rm -f ${shellQuote(nameFile)} ${shellQuote(pidFile)}`
+  ];
+  const startLines = [
+    'mkdir -p /var/run/wireguard',
+    `rm -f ${shellQuote(nameFile)} ${shellQuote(pidFile)}`,
+    `BEFORE_INTERFACES="$(${shellQuote(wg)} show interfaces 2>/dev/null || true)"`,
+    `WG_PROCESS_FOREGROUND=1 WG_TUN_NAME_FILE=${shellQuote(nameFile)} ${shellQuote(wireGuardGo)} utun >${shellQuote(logFile)} 2>&1 &`,
+    `echo "$!" > ${shellQuote(pidFile)}`,
+    `chmod 644 ${shellQuote(pidFile)} >/dev/null 2>&1 || true`,
+    `i=0; while [ ! -s ${shellQuote(nameFile)} ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done`,
+    `REAL_INTERFACE="$(cat ${shellQuote(nameFile)} 2>/dev/null || true)"`,
+    `if [ -z "$REAL_INTERFACE" ]; then AFTER_INTERFACES="$(${shellQuote(wg)} show interfaces 2>/dev/null || true)"; for candidate in $AFTER_INTERFACES; do case " $BEFORE_INTERFACES " in *" $candidate "*) ;; *) REAL_INTERFACE="$candidate"; break ;; esac; done; fi`,
+    '[ -n "$REAL_INTERFACE" ]',
+    `echo "$REAL_INTERFACE" > ${shellQuote(nameFile)}`,
+    `chmod 644 ${shellQuote(nameFile)} >/dev/null 2>&1 || true`,
+    `${shellQuote(wg)} setconf "$REAL_INTERFACE" ${shellQuote(profile.setConfigPath)}`,
+    'ifconfig "$REAL_INTERFACE" up',
+    ...addressCommands,
+    ...routeUpCommands
+  ];
   const scriptLines = action === 'up'
-    ? [
-        'set -e',
-        'mkdir -p /var/run/wireguard',
-        `rm -f ${shellQuote(nameFile)}`,
-        `BEFORE_INTERFACES="$(${shellQuote(wg)} show interfaces 2>/dev/null || true)"`,
-        `WG_TUN_NAME_FILE=${shellQuote(nameFile)} ${shellQuote(wireGuardGo)} utun`,
-        `i=0; while [ ! -s ${shellQuote(nameFile)} ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done`,
-        `REAL_INTERFACE="$(cat ${shellQuote(nameFile)} 2>/dev/null || true)"`,
-        `if [ -z "$REAL_INTERFACE" ]; then AFTER_INTERFACES="$(${shellQuote(wg)} show interfaces 2>/dev/null || true)"; for candidate in $AFTER_INTERFACES; do case " $BEFORE_INTERFACES " in *" $candidate "*) ;; *) REAL_INTERFACE="$candidate"; break ;; esac; done; fi`,
-        '[ -n "$REAL_INTERFACE" ]',
-        `echo "$REAL_INTERFACE" > ${shellQuote(nameFile)}`,
-        `${shellQuote(wg)} setconf "$REAL_INTERFACE" ${shellQuote(profile.setConfigPath)}`,
-        'ifconfig "$REAL_INTERFACE" up',
-        ...addressCommands,
-        ...routeCommands
-      ]
-    : [
-        'set -e',
-        `REAL_INTERFACE="$(cat ${shellQuote(nameFile)} 2>/dev/null || true)"`,
-        `if [ -z "$REAL_INTERFACE" ] && [ -n ${shellQuote(primaryAddress)} ]; then for candidate in $(${shellQuote(wg)} show interfaces 2>/dev/null || true); do if ifconfig "$candidate" 2>/dev/null | grep -q ${shellQuote(primaryAddress)}; then REAL_INTERFACE="$candidate"; break; fi; done; fi`,
-        `if [ -n "$REAL_INTERFACE" ]; then`,
-        ...routeCommands.map((line) => `  ${line}`),
-        '  rm -f "/var/run/wireguard/$REAL_INTERFACE.sock"',
-        `  rm -f ${shellQuote(nameFile)}`,
-        'fi'
-      ];
+    ? ['set -e', ...startLines]
+    : action === 'down'
+      ? ['set -e', ...stopLines]
+      : ['set -e', ...stopLines, 'REAL_INTERFACE=""', ...startLines];
   const shellCommand = scriptLines.join('\n');
   const script = `do shell script ${appleScriptString(shellCommand)} with administrator privileges`;
   return {
@@ -1087,7 +1132,11 @@ function valueList(line: string): string[] {
     .filter(Boolean);
 }
 
-function resolveWireGuardRealInterface(runtime: WireGuardConnectionRuntimeStatus, interfaceName: string): string | null {
+function resolveWireGuardRealInterface(
+  runtime: WireGuardConnectionRuntimeStatus,
+  interfaceName: string,
+  addresses: string[] = []
+): string | null {
   if (runtime.platform === 'darwin') {
     const nameFile = `/var/run/wireguard/${interfaceName}.name`;
     try {
@@ -1096,11 +1145,30 @@ function resolveWireGuardRealInterface(runtime: WireGuardConnectionRuntimeStatus
         return value || null;
       }
     } catch {
-      return null;
+      // Older launches wrote this file as root-only; discover the utun by address instead.
     }
-    return null;
+    return findDarwinInterfaceByAddress(addresses);
   }
   return interfaceName;
+}
+
+function findDarwinInterfaceByAddress(addresses: string[]): string | null {
+  const ips = addresses
+    .map((address) => address.split('/')[0])
+    .filter((address) => Boolean(address && !address.includes(':')));
+  if (ips.length === 0) return null;
+
+  const raw = safeExecFile('ifconfig', ['-l']);
+  if (!raw) return null;
+  const matches = raw
+    .split(/\s+/)
+    .filter((name) => isWireGuardLikeInterface(name))
+    .filter((name) => {
+      const state = readInterfaceState(name);
+      return Boolean(state && ips.some((ip) => state.includes(`inet ${ip}`)));
+    });
+  if (matches.length === 0) return null;
+  return matches.sort((a, b) => detectInterfaceRoutes(b).length - detectInterfaceRoutes(a).length)[0] ?? null;
 }
 
 function parseWireGuardDump(raw: string): WireGuardPeerRuntimeStatus[] {
@@ -1160,16 +1228,30 @@ function routeLooksLikeExistingHdoRoute(
   route: HdoLocalRoute,
   hdoRanges: Array<{ start: number; end: number }>
 ): boolean {
-  if (route.source !== 'windows-route-print') return false;
   const routeRange = cidrRange(route.cidr);
   if (!routeRange) return false;
+  if (!rangeOverlapsAny(routeRange, hdoRanges)) return false;
+
+  if (route.source === 'darwin-netstat') {
+    return isWireGuardLikeInterface(route.interfaceName) || isWireGuardLikeInterface(route.gateway);
+  }
+
+  if (route.source === 'linux-ip-route') {
+    return isWireGuardLikeInterface(route.interfaceName);
+  }
+
+  if (route.source !== 'windows-route-print') return false;
   const interfaceIp = route.interfaceName ? ipv4ToInt(route.interfaceName) : null;
   if (interfaceIp !== null && hdoRanges.some((range) => interfaceIp >= range.start && interfaceIp <= range.end)) {
     return true;
   }
-  if (!rangeOverlapsAny(routeRange, hdoRanges)) return false;
   const gateway = (route.gateway ?? '').trim().toLowerCase();
   return !gateway || gateway === 'on-link' || gateway === '在链路上' || !isIpv4(gateway);
+}
+
+function isWireGuardLikeInterface(value: string | null | undefined): boolean {
+  const normalized = (value ?? '').trim().toLowerCase();
+  return /^(utun\d+|wg\d*|wg-.+|hdo[-_].*)$/.test(normalized) || normalized.includes('wireguard');
 }
 
 function rangeOverlapsAny(
@@ -1485,6 +1567,9 @@ function encodePowerShell(script: string): string {
 
 function wireGuardCommandErrorMessage(command: WireGuardTunnelCommand, err: unknown): string {
   const detail = errorMessage(err);
+  if (command.platform === 'darwin' && isAppleScriptAuthorizationCancelled(detail)) {
+    return '已取消 WireGuard 管理员授权。';
+  }
   if (command.platform === 'win32') {
     return [
       'Windows 启停 WireGuard 需要管理员授权。',
@@ -1493,6 +1578,13 @@ function wireGuardCommandErrorMessage(command: WireGuardTunnelCommand, err: unkn
     ].filter(Boolean).join(' ');
   }
   return detail;
+}
+
+function isAppleScriptAuthorizationCancelled(message: string): boolean {
+  return message.includes('(-128)')
+    || message.includes('用户已取消')
+    || /user canceled/i.test(message)
+    || /cancelled/i.test(message);
 }
 
 function isPathLike(value: string): boolean {
