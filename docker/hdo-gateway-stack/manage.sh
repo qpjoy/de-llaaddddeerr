@@ -451,6 +451,37 @@ EOF
   echo "  $conf"
 }
 
+sync_domestic_peer_routes() {
+  local iface="${1:-hdo-home}"
+  local config="${2:-/etc/wireguard/hdo-home.conf}"
+  local cidr
+
+  [ "$(id -u)" -eq 0 ] || return 0
+  [ -f "$config" ] || return 0
+  require_cmd ip
+
+  while IFS= read -r cidr; do
+    [ -n "$cidr" ] || continue
+    case "$cidr" in
+      0.0.0.0/0|::/0|*:*) continue ;;
+    esac
+    ip -4 route replace "$cidr" dev "$iface" || warn "failed to route $cidr via $iface"
+  done < <(
+    awk '
+      /^\[Peer\]$/ { in_peer = 1; next }
+      /^\[/ { in_peer = 0; next }
+      in_peer == 1 && /^[[:space:]]*AllowedIPs[[:space:]]*=/ {
+        sub(/^[^=]*=/, "")
+        gsub(/[[:space:]]/, "")
+        n = split($0, cidrs, ",")
+        for (i = 1; i <= n; i++) {
+          if (cidrs[i] ~ /^[0-9]+\./) print cidrs[i]
+        }
+      }
+    ' "$config" | sort -u
+  )
+}
+
 cmd_sync_domestic_peers() {
   load_env
   parse_common "$@"
@@ -482,9 +513,11 @@ cmd_sync_domestic_peers() {
     install -m 600 "$WG_DIR/wg-home.conf" /etc/wireguard/hdo-home.conf
     if command -v wg >/dev/null 2>&1 && wg show hdo-home >/dev/null 2>&1; then
       wg syncconf hdo-home <(wg-quick strip hdo-home)
+      sync_domestic_peer_routes hdo-home /etc/wireguard/hdo-home.conf
       ok "reloaded live hdo-home WireGuard peers"
     else
       systemctl restart wg-quick@hdo-home || true
+      sync_domestic_peer_routes hdo-home /etc/wireguard/hdo-home.conf
       ok "restarted wg-quick@hdo-home"
     fi
   else
@@ -506,6 +539,7 @@ EOF
   install -d -m 700 /etc/wireguard
   install -m 600 "$WG_DIR/wg-home.conf" /etc/wireguard/hdo-home.conf
   systemctl enable --now wg-quick@hdo-home
+  sync_domestic_peer_routes hdo-home /etc/wireguard/hdo-home.conf
   ok "enabled wg-quick@hdo-home"
 }
 
