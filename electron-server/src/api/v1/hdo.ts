@@ -67,13 +67,28 @@ const HDO_DEPLOYMENT_KINDS = [
   'deploy-oversea-mihomo-hysteria2',
   'status'
 ] as const;
-const HDO_MESH_ROUTE_CIDRS = ['100.88.0.0/16', '100.89.0.0/16', '100.90.0.0/16'];
-const HDO_DEFAULT_DEVICE_PREFIX = '100.89.0.';
+const HDO_DEFAULT_ADDRESS_PLAN = {
+  homeCidr: '100.88.0.0/16',
+  userCidr: '100.89.0.0/16',
+  serviceCidr: '100.90.0.0/16',
+  domesticIp: '100.88.0.1',
+  routeCidrs: ['100.88.0.0/16', '100.89.0.0/16', '100.90.0.0/16']
+} as const;
+const HDO_ADDRESS_PLAN_MIN = ipv4ToNumber('100.80.0.0') ?? 0;
+const HDO_ADDRESS_PLAN_MAX = ipv4ToNumber('100.99.255.255') ?? 0;
 const HDO_DEFAULT_WG_PORT = 51888;
 const HDO_DEPLOYMENT_OUTPUT_LIMIT = 80_000;
 
 type HdoDeploymentKind = (typeof HDO_DEPLOYMENT_KINDS)[number];
 type HdoDeploymentStatus = 'running' | 'succeeded' | 'failed';
+
+interface HdoMeshAddressPlan {
+  homeCidr: string;
+  userCidr: string;
+  serviceCidr: string;
+  domesticIp: string;
+  routeCidrs: string[];
+}
 
 interface HdoDeploymentJob {
   id: string;
@@ -114,10 +129,16 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
     }
     const label = asOptionalString(body.label) ?? 'HDO client';
     const publicKey = asOptionalString(body.publicKey) ?? existing?.publicKey ?? null;
-    const overlayIp =
-      asOptionalString(body.overlayIp) ??
-      existing?.overlayIp ??
-      (publicKey ? allocateDeviceOverlayIp(await hdoStore.listAllDevices(), id) : null);
+    let overlayIp = asOptionalString(body.overlayIp) ?? existing?.overlayIp ?? null;
+    if (!overlayIp && publicKey) {
+      const [devices, meshGroups, memberships] = await Promise.all([
+        hdoStore.listAllDevices(),
+        hdoStore.listMeshGroups(),
+        hdoStore.listMeshMemberships()
+      ]);
+      const meshAccess = resolveMeshAccess(req.currentUser!.id, meshGroups, memberships);
+      overlayIp = allocateDeviceOverlayIp(devices, id, addressPlanForMeshAccess(meshAccess).userCidr);
+    }
     const metadataInput = asPlainObject(body.metadata);
     const metadata = metadataInput ? { ...(existing?.metadata ?? {}), ...metadataInput } : existing?.metadata ?? null;
     const device = await hdoStore.upsertDevice({
@@ -368,6 +389,13 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       reply.code(400);
       return { error: 'name and slug required' };
     }
+    let metadata: Record<string, unknown> | null = null;
+    try {
+      metadata = normalizeMeshMetadata(asPlainObject(body.metadata));
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
     const row = await hdoStore.upsertMeshGroup({
       id: asOptionalString(body.id) ?? undefined,
       name,
@@ -375,7 +403,7 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       description: asOptionalString(body.description),
       defaultProfileId: asOptionalString(body.defaultProfileId),
       enabled: asOptionalBoolean(body.enabled) ?? true,
-      metadata: asPlainObject(body.metadata)
+      metadata
     });
     await auditStore.insert({
       actorUserId: req.currentUser?.id ?? null,
@@ -953,6 +981,7 @@ async function buildManifest(device: HdoDeviceRow) {
     hdoStore.listMeshMemberships()
   ]);
   const meshAccess = resolveMeshAccess(device.userId, meshGroups, memberships);
+  const addressPlan = addressPlanForMeshAccess(meshAccess);
   const visibleNodes = meshAccess.active
     ? nodes.filter((row) => isVisibleForMesh(row.metadata, meshAccess.groupIds))
     : [];
@@ -1002,7 +1031,8 @@ async function buildManifest(device: HdoDeviceRow) {
       memberships: meshAccess.memberships
     },
     wireGuard: {
-      routeCidrs: HDO_MESH_ROUTE_CIDRS,
+      addressPlan,
+      routeCidrs: addressPlan.routeCidrs,
       client: {
         publicKey: device.publicKey,
         overlayIp: device.overlayIp,
@@ -1252,18 +1282,130 @@ function metadataMeshGroupIds(metadata: Record<string, unknown> | null): string[
   return asStringArray(metadata.meshGroupIds ?? metadata.meshGroups);
 }
 
-function allocateDeviceOverlayIp(devices: HdoDeviceRow[], currentId: string): string {
+function addressPlanForMeshAccess(meshAccess: ReturnType<typeof resolveMeshAccess>): HdoMeshAddressPlan {
+  for (const group of meshAccess.groups) {
+    return addressPlanFromMeshGroup(group);
+  }
+  return defaultAddressPlan();
+}
+
+function addressPlanFromMeshGroup(group: HdoMeshGroupRow | null | undefined): HdoMeshAddressPlan {
+  const metadata = asPlainObject(group?.metadata);
+  return normalizeMeshAddressPlan(meshAddressPlanInput(metadata), false);
+}
+
+function normalizeMeshMetadata(metadata: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!metadata) return null;
+  const addressPlanInput = meshAddressPlanInput(metadata);
+  if (!addressPlanInput) return metadata;
+  return {
+    ...metadata,
+    addressPlan: meshAddressPlanToMetadata(normalizeMeshAddressPlan(addressPlanInput, true))
+  };
+}
+
+function meshAddressPlanInput(metadata: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!metadata) return null;
+  const wireGuard = asPlainObject(metadata.wireGuard);
+  return asPlainObject(metadata.addressPlan) ?? asPlainObject(wireGuard?.addressPlan);
+}
+
+function defaultAddressPlan(): HdoMeshAddressPlan {
+  return {
+    homeCidr: HDO_DEFAULT_ADDRESS_PLAN.homeCidr,
+    userCidr: HDO_DEFAULT_ADDRESS_PLAN.userCidr,
+    serviceCidr: HDO_DEFAULT_ADDRESS_PLAN.serviceCidr,
+    domesticIp: HDO_DEFAULT_ADDRESS_PLAN.domesticIp,
+    routeCidrs: [...HDO_DEFAULT_ADDRESS_PLAN.routeCidrs]
+  };
+}
+
+function normalizeMeshAddressPlan(
+  input: Record<string, unknown> | null,
+  strict: boolean
+): HdoMeshAddressPlan {
+  const defaults = defaultAddressPlan();
+  if (!input) return defaults;
+  const homeCidr = normalizePlanCidr(input.homeCidr, defaults.homeCidr, 'homeCidr', strict);
+  const userCidr = normalizePlanCidr(input.userCidr, defaults.userCidr, 'userCidr', strict);
+  const serviceCidr = normalizePlanCidr(input.serviceCidr, defaults.serviceCidr, 'serviceCidr', strict);
+  const domesticIp = normalizePlanIp(input.domesticIp, defaults.domesticIp, 'domesticIp', strict);
+  const routeCidrsInput = asStringArray(input.routeCidrs ?? input.routes);
+  const routeCidrs = routeCidrsInput.length
+    ? routeCidrsInput
+        .map((cidr) => normalizePlanCidr(cidr, '', 'routeCidrs', strict))
+        .filter((cidr): cidr is string => Boolean(cidr))
+    : [homeCidr, userCidr, serviceCidr];
+
+  return {
+    homeCidr,
+    userCidr,
+    serviceCidr,
+    domesticIp,
+    routeCidrs: uniqueStrings(routeCidrs.length ? routeCidrs : defaults.routeCidrs)
+  };
+}
+
+function meshAddressPlanToMetadata(plan: HdoMeshAddressPlan): Record<string, unknown> {
+  return {
+    homeCidr: plan.homeCidr,
+    userCidr: plan.userCidr,
+    serviceCidr: plan.serviceCidr,
+    domesticIp: plan.domesticIp,
+    routeCidrs: plan.routeCidrs
+  };
+}
+
+function normalizePlanCidr(
+  value: unknown,
+  fallback: string,
+  label: string,
+  strict: boolean
+): string {
+  const text = asOptionalString(value);
+  if (!text) return fallback;
+  const normalized = normalizeIpv4Cidr(text);
+  if (normalized && cidrIsInAddressPlanRange(normalized)) return normalized;
+  if (strict) {
+    throw new Error(`${label} must be an IPv4 CIDR within 100.80.0.0 - 100.99.255.255`);
+  }
+  return fallback;
+}
+
+function normalizePlanIp(
+  value: unknown,
+  fallback: string,
+  label: string,
+  strict: boolean
+): string {
+  const text = asOptionalString(value);
+  if (!text) return fallback;
+  const number = ipv4ToNumber(text);
+  if (number !== null && number >= HDO_ADDRESS_PLAN_MIN && number <= HDO_ADDRESS_PLAN_MAX) {
+    return numberToIpv4(number);
+  }
+  if (strict) {
+    throw new Error(`${label} must be an IPv4 address within 100.80.0.0 - 100.99.255.255`);
+  }
+  return fallback;
+}
+
+function allocateDeviceOverlayIp(devices: HdoDeviceRow[], currentId: string, userCidr: string): string {
+  const range = cidrRange(userCidr) ?? cidrRange(HDO_DEFAULT_ADDRESS_PLAN.userCidr);
+  if (!range) return '100.89.0.10';
   const used = new Set(
     devices
       .filter((row) => row.id !== currentId)
       .map((row) => normalizeOverlayIp(row.overlayIp))
       .filter((row): row is string => Boolean(row))
   );
-  for (let n = 10; n < 250; n += 1) {
-    const candidate = `${HDO_DEFAULT_DEVICE_PREFIX}${n}`;
+  const start = Math.min(range.end, range.start + 10);
+  const end = Math.max(start, range.end - 1);
+  for (let value = start; value <= end; value += 1) {
+    const candidate = numberToIpv4(value);
     if (!used.has(candidate)) return candidate;
   }
-  return `${HDO_DEFAULT_DEVICE_PREFIX}${250 + Math.floor(Math.random() * 5)}`;
+  return numberToIpv4(start);
 }
 
 function wireGuardAddress(value: string): string {
@@ -1273,6 +1415,55 @@ function wireGuardAddress(value: string): string {
 function normalizeOverlayIp(value: string | null): string | null {
   if (!value) return null;
   return value.split('/')[0] || null;
+}
+
+function normalizeIpv4Cidr(value: string): string | null {
+  const [address, prefixText] = value.trim().split('/');
+  const prefix = prefixText === undefined ? 32 : Number(prefixText);
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) return null;
+  const addressNumber = ipv4ToNumber(address);
+  if (addressNumber === null) return null;
+  const size = 2 ** (32 - prefix);
+  const start = Math.floor(addressNumber / size) * size;
+  return `${numberToIpv4(start)}/${prefix}`;
+}
+
+function cidrRange(value: string): { start: number; end: number } | null {
+  const normalized = normalizeIpv4Cidr(value);
+  if (!normalized) return null;
+  const [address, prefixText] = normalized.split('/');
+  const prefix = Number(prefixText);
+  const start = ipv4ToNumber(address);
+  if (start === null) return null;
+  return { start, end: start + 2 ** (32 - prefix) - 1 };
+}
+
+function cidrIsInAddressPlanRange(value: string): boolean {
+  const range = cidrRange(value);
+  return Boolean(range && range.start >= HDO_ADDRESS_PLAN_MIN && range.end <= HDO_ADDRESS_PLAN_MAX);
+}
+
+function ipv4ToNumber(value: string | undefined): number | null {
+  if (!value) return null;
+  const parts = value.trim().split('.');
+  if (parts.length !== 4) return null;
+  const octets = parts.map((part) => Number(part));
+  if (octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+  return ((octets[0] * 256 + octets[1]) * 256 + octets[2]) * 256 + octets[3];
+}
+
+function numberToIpv4(value: number): string {
+  const safe = Math.max(0, Math.min(0xffffffff, Math.floor(value)));
+  return [
+    Math.floor(safe / 16777216) % 256,
+    Math.floor(safe / 65536) % 256,
+    Math.floor(safe / 256) % 256,
+    safe % 256
+  ].join('.');
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
 }
 
 function wireGuardNodeSummary(node: HdoNodeRow | undefined) {

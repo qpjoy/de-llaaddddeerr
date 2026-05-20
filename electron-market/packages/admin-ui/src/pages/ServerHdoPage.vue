@@ -147,6 +147,13 @@
                 label="默认路由 profile"
                 class="q-mb-sm"
               />
+              <div class="section-subtitle">地址规划</div>
+              <div class="two-col q-mb-sm">
+                <q-input v-model="meshHomeCidr" outlined dense label="H/Home CIDR" />
+                <q-input v-model="meshUserCidr" outlined dense label="客户端 CIDR" />
+                <q-input v-model="meshServiceCidr" outlined dense label="服务 CIDR" />
+                <q-input v-model="meshDomesticIp" outlined dense label="Domestic IP" />
+              </div>
               <q-input
                 v-model="meshDescription"
                 outlined
@@ -701,6 +708,16 @@ const meshSlug = ref('');
 const meshDescription = ref('');
 const meshDefaultProfileId = ref<string | null>(null);
 const meshEnabled = ref(true);
+const defaultMeshAddressPlan = {
+  homeCidr: '100.88.0.0/16',
+  userCidr: '100.89.0.0/16',
+  serviceCidr: '100.90.0.0/16',
+  domesticIp: '100.88.0.1'
+};
+const meshHomeCidr = ref(defaultMeshAddressPlan.homeCidr);
+const meshUserCidr = ref(defaultMeshAddressPlan.userCidr);
+const meshServiceCidr = ref(defaultMeshAddressPlan.serviceCidr);
+const meshDomesticIp = ref(defaultMeshAddressPlan.domesticIp);
 
 const membershipUserId = ref<string | null>(null);
 const membershipMeshGroupId = ref<string | null>(null);
@@ -762,6 +779,12 @@ const taskKinds: HdoDeviceTaskRow['kind'][] = [
 const meshColumns = [
   { name: 'name', label: '名称', field: 'name', align: 'left' as const },
   { name: 'slug', label: 'slug', field: 'slug', align: 'left' as const },
+  {
+    name: 'addressPlan',
+    label: '地址规划',
+    field: (row: HdoMeshGroupRow) => meshAddressPlanLabel(row),
+    align: 'left' as const
+  },
   { name: 'enabled', label: '状态', field: 'enabled', align: 'left' as const },
   { name: 'defaultProfileId', label: '默认 profile', field: 'defaultProfileId', align: 'left' as const },
   { name: 'actions', label: '', field: 'id', align: 'right' as const }
@@ -1117,7 +1140,10 @@ async function createDefaultMesh(): Promise<void> {
       name: '默认组织网络',
       slug: 'default',
       description: '默认 HDO mesh 组，用于给普通用户发放入网许可。',
-      enabled: true
+      enabled: true,
+      metadata: {
+        addressPlan: defaultMeshAddressPlanPayload()
+      }
     });
     await reload();
   } catch (err) {
@@ -1134,7 +1160,8 @@ async function saveMeshGroup(): Promise<void> {
       slug: meshSlug.value.trim() || null,
       description: meshDescription.value.trim() || null,
       defaultProfileId: meshDefaultProfileId.value,
-      enabled: meshEnabled.value
+      enabled: meshEnabled.value,
+      metadata: buildMeshMetadata()
     });
     resetMeshForm();
     await reload();
@@ -1150,6 +1177,11 @@ function editMesh(row: HdoMeshGroupRow): void {
   meshDescription.value = row.description ?? '';
   meshDefaultProfileId.value = row.defaultProfileId;
   meshEnabled.value = row.enabled;
+  const addressPlan = meshAddressPlan(row);
+  meshHomeCidr.value = addressPlan.homeCidr;
+  meshUserCidr.value = addressPlan.userCidr;
+  meshServiceCidr.value = addressPlan.serviceCidr;
+  meshDomesticIp.value = addressPlan.domesticIp;
 }
 
 function resetMeshForm(): void {
@@ -1159,6 +1191,10 @@ function resetMeshForm(): void {
   meshDescription.value = '';
   meshDefaultProfileId.value = null;
   meshEnabled.value = true;
+  meshHomeCidr.value = defaultMeshAddressPlan.homeCidr;
+  meshUserCidr.value = defaultMeshAddressPlan.userCidr;
+  meshServiceCidr.value = defaultMeshAddressPlan.serviceCidr;
+  meshDomesticIp.value = defaultMeshAddressPlan.domesticIp;
 }
 
 async function saveMembership(): Promise<void> {
@@ -1393,6 +1429,37 @@ function parseJsonObject(text: string): Record<string, unknown> | null {
   return parsed as Record<string, unknown>;
 }
 
+function buildMeshMetadata(): Record<string, unknown> {
+  const existing = editingMeshId.value
+    ? (meshById.value.get(editingMeshId.value)?.metadata ?? {})
+    : {};
+  return {
+    ...existing,
+    addressPlan: defaultMeshAddressPlanPayload({
+      homeCidr: meshHomeCidr.value,
+      userCidr: meshUserCidr.value,
+      serviceCidr: meshServiceCidr.value,
+      domesticIp: meshDomesticIp.value
+    })
+  };
+}
+
+function defaultMeshAddressPlanPayload(
+  input: Partial<typeof defaultMeshAddressPlan> = {}
+): Record<string, unknown> {
+  const homeCidr = input.homeCidr?.trim() || defaultMeshAddressPlan.homeCidr;
+  const userCidr = input.userCidr?.trim() || defaultMeshAddressPlan.userCidr;
+  const serviceCidr = input.serviceCidr?.trim() || defaultMeshAddressPlan.serviceCidr;
+  const domesticIp = input.domesticIp?.trim() || defaultMeshAddressPlan.domesticIp;
+  return {
+    homeCidr,
+    userCidr,
+    serviceCidr,
+    domesticIp,
+    routeCidrs: [homeCidr, userCidr, serviceCidr]
+  };
+}
+
 function buildNodeMetadata(): Record<string, unknown> | null {
   const existing = editingNodeId.value
     ? (nodesById.value.get(editingNodeId.value)?.metadata ?? {})
@@ -1417,6 +1484,23 @@ function buildNodeMetadata(): Record<string, unknown> | null {
 function wireGuardMetadata(row: HdoNodeRow | { metadata: HdoNodeRow['metadata'] }): Record<string, unknown> | null {
   const metadata = plainObject(row.metadata);
   return plainObject(metadata?.wireGuard) ?? plainObject(metadata?.wg);
+}
+
+function meshAddressPlan(row: HdoMeshGroupRow): typeof defaultMeshAddressPlan {
+  const metadata = plainObject(row.metadata);
+  const wireGuard = plainObject(metadata?.wireGuard);
+  const plan = plainObject(metadata?.addressPlan) ?? plainObject(wireGuard?.addressPlan);
+  return {
+    homeCidr: stringValue(plan?.homeCidr) ?? defaultMeshAddressPlan.homeCidr,
+    userCidr: stringValue(plan?.userCidr) ?? defaultMeshAddressPlan.userCidr,
+    serviceCidr: stringValue(plan?.serviceCidr) ?? defaultMeshAddressPlan.serviceCidr,
+    domesticIp: stringValue(plan?.domesticIp) ?? defaultMeshAddressPlan.domesticIp
+  };
+}
+
+function meshAddressPlanLabel(row: HdoMeshGroupRow): string {
+  const plan = meshAddressPlan(row);
+  return `${plan.homeCidr} / ${plan.userCidr} / ${plan.serviceCidr}`;
 }
 
 function plainObject(value: unknown): Record<string, unknown> | null {
@@ -1512,6 +1596,13 @@ onMounted(reload);
     font-weight: 700;
     font-size: 16px;
     margin-bottom: 12px;
+  }
+
+  .section-subtitle {
+    color: #667085;
+    font-size: 13px;
+    font-weight: 600;
+    margin: 4px 0 8px;
   }
 
   .split-layout {

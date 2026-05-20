@@ -9,6 +9,7 @@ import {
   getWireGuardTunnelStatus,
   HDO_MESH_DEFAULTS,
   HDO_MESH_ROUTE_CIDRS,
+  localCidrsForAllowedIpExclusion,
   renderHdoClientWireGuardConfig,
   resolveWireGuardConnectionRuntime,
   resolveWireGuardRuntime,
@@ -362,7 +363,7 @@ export class HdoController {
       } else {
         const allowedIps = excludeLocalRoutesFromAllowedIps(
           domestic.routeCidrs,
-          routeProbe.localCidrs
+          localCidrsForAllowedIpExclusion(routeProbe, domestic.routeCidrs)
         );
         if (allowedIps.length === 0) {
           throw new Error('服务端下发的 WireGuard AllowedIPs 与本机路由完全重叠，已拒绝生成会覆盖本地网络的配置。');

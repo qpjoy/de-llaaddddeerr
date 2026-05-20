@@ -191,9 +191,9 @@ export interface HdoMeshAclRule {
 }
 
 export const HDO_MESH_DEFAULTS: HdoMeshAddressPlan = {
-  homeCidr: '100.88.0.0/24',
-  userCidr: '100.89.0.0/24',
-  serviceCidr: '100.90.0.0/24',
+  homeCidr: '100.88.0.0/16',
+  userCidr: '100.89.0.0/16',
+  serviceCidr: '100.90.0.0/16',
   domesticIp: '100.88.0.1',
   defaultListenPort: 51888
 };
@@ -318,6 +318,27 @@ export function excludeLocalRoutesFromAllowedIps(
     }
   }
   return uniqueStrings(out);
+}
+
+export function localCidrsForAllowedIpExclusion(
+  routeProbe: Pick<HdoRouteProbe, 'localCidrs' | 'routes'>,
+  hdoCidrs = HDO_MESH_ROUTE_CIDRS
+): string[] {
+  const hdoRanges = hdoCidrs
+    .map((cidr) => normalizeCidr(cidr))
+    .filter((cidr): cidr is string => Boolean(cidr))
+    .map((cidr) => cidrRange(cidr))
+    .filter((range): range is { start: number; end: number } => Boolean(range));
+  const existingHdoRouteCidrs = new Set(
+    routeProbe.routes
+      .filter((route) => routeLooksLikeExistingHdoRoute(route, hdoRanges))
+      .map((route) => normalizeCidr(route.cidr))
+      .filter((cidr): cidr is string => Boolean(cidr))
+  );
+  return routeProbe.localCidrs.filter((cidr) => {
+    const normalized = normalizeCidr(cidr);
+    return Boolean(normalized && !existingHdoRouteCidrs.has(normalized));
+  });
 }
 
 export function detectWireGuardCli(command = 'wg'): WireGuardCliStatus {
@@ -1098,6 +1119,16 @@ function detectInterfaceRoutes(interfaceName: string): string[] {
 function readInterfaceState(interfaceName: string): string | null {
   if (process.platform === 'win32') return null;
   return safeExecFile('ifconfig', [interfaceName]);
+}
+
+function routeLooksLikeExistingHdoRoute(
+  route: HdoLocalRoute,
+  hdoRanges: Array<{ start: number; end: number }>
+): boolean {
+  if (route.source !== 'windows-route-print') return false;
+  const interfaceIp = route.interfaceName ? ipv4ToInt(route.interfaceName) : null;
+  if (interfaceIp === null) return false;
+  return hdoRanges.some((range) => interfaceIp >= range.start && interfaceIp <= range.end);
 }
 
 function safeExecFile(command: string, args: string[]): string | null {
