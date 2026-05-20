@@ -69,4 +69,12 @@ pnpm --filter @qpjoy/electron-plugin-notyet build
 # 接下来两个 publish 必须手动跑（OTP 交互）
 cd electron-market/packages/electron-market && pnpm publish --no-git-checks
 cd ../../../electron-plugin/packages/electron-plugin-notyet && pnpm publish --no-git-checks
+
+
+# publish market
+pnpm --filter @qpjoy/electron-market-admin-ui build
+pnpm --filter @qpjoy/electron-market build
+
+# bump market -> 0.3.19 后
+pnpm --filter @qpjoy/electron-market publish --access public
 ```
