@@ -529,13 +529,14 @@ export function buildWireGuardTunnelCommand(input: {
       ? ['/installtunnelservice', configPath]
       : ['/uninstalltunnelservice', tunnelName];
     const script = windowsElevatedStartProcessScript(command, wireGuardArgs);
+    const powershell = windowsPowerShellCommand();
     return {
       action,
       platform: runtime.platform,
       configPath,
-      command: 'powershell.exe',
-      args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
-      displayCommand: `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ${shellQuote(script)}`,
+      command: powershell,
+      args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShell(script)],
+      displayCommand: `${powershell} -NoProfile -ExecutionPolicy Bypass -EncodedCommand <wireguard-uac-script>`,
       needsAdmin: true,
       runtime
     };
@@ -1380,30 +1381,28 @@ function powerShellString(value: string): string {
 }
 
 function windowsElevatedStartProcessScript(command: string, args: string[]): string {
-  const argumentList = args.map(windowsCommandLineArg).join(' ');
+  const argumentList = args.map(powerShellString).join(', ');
   return [
-    `$p = Start-Process -FilePath ${powerShellString(command)} -ArgumentList ${powerShellString(argumentList)} -Verb RunAs -Wait -PassThru`,
+    "$ErrorActionPreference = 'Stop'",
+    `$p = Start-Process -FilePath ${powerShellString(command)} -ArgumentList @(${argumentList}) -Verb RunAs -Wait -PassThru`,
     'if ($null -ne $p.ExitCode) { exit $p.ExitCode }'
-  ].join('; ');
+  ].join('\n');
 }
 
-function windowsCommandLineArg(value: string): string {
-  if (value.length === 0) return '""';
-  if (!/[ \t\n\v"]/.test(value)) return value;
-  let out = '"';
-  let backslashes = 0;
-  for (const ch of value) {
-    if (ch === '\\') {
-      backslashes += 1;
-    } else if (ch === '"') {
-      out += '\\'.repeat(backslashes * 2 + 1) + '"';
-      backslashes = 0;
-    } else {
-      out += '\\'.repeat(backslashes) + ch;
-      backslashes = 0;
-    }
-  }
-  return out + '\\'.repeat(backslashes * 2) + '"';
+function windowsPowerShellCommand(): string {
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR;
+  const candidates = systemRoot
+    ? [
+        join(systemRoot, 'Sysnative', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+        join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+        join(systemRoot, 'SysWOW64', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+      ]
+    : [];
+  return candidates.find((candidate) => existsSync(candidate)) ?? 'powershell.exe';
+}
+
+function encodePowerShell(script: string): string {
+  return Buffer.from(script, 'utf16le').toString('base64');
 }
 
 function wireGuardCommandErrorMessage(command: WireGuardTunnelCommand, err: unknown): string {
