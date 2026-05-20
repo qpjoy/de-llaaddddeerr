@@ -4,32 +4,22 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-overrides:
-  '@qpjoy/electron-core-wireguard': file:../../electron-plugin/packages/electron-core-wireguard
-  '@qpjoy/marketplace-db': file:../../electron-market/packages/marketplace-db
-
 importers:
 
   .:
     dependencies:
-      '@qpjoy/electron-core-wireguard':
-        specifier: file:../../electron-plugin/packages/electron-core-wireguard
-        version: file:../../electron-plugin/packages/electron-core-wireguard
       '@qpjoy/electron-market':
-        specifier: file:../../electron-market/packages/electron-market
-        version: file:../../electron-market/packages/electron-market(@qpjoy/electron-plugin-sdk@file:../../electron-market/packages/electron-plugin-sdk(electron@34.5.8))(electron@34.5.8)
+        specifier: ^0.3.18
+        version: 0.3.18(@qpjoy/electron-plugin-sdk@0.1.3(electron@34.5.8))(electron@34.5.8)
       '@qpjoy/electron-plugin-hdo':
-        specifier: file:../../electron-plugin/packages/electron-plugin-hdo
-        version: file:../../electron-plugin/packages/electron-plugin-hdo(electron@34.5.8)
+        specifier: ^0.1.11
+        version: 0.1.11(electron@34.5.8)
       '@qpjoy/electron-plugin-sdk':
-        specifier: file:../../electron-market/packages/electron-plugin-sdk
-        version: file:../../electron-market/packages/electron-plugin-sdk(electron@34.5.8)
+        specifier: ^0.1.3
+        version: 0.1.3(electron@34.5.8)
       '@qpjoy/electron-plugin-tunnel':
-        specifier: 0.1.16
+        specifier: ^0.1.16
         version: 0.1.16(electron@34.5.8)
-      '@qpjoy/marketplace-db':
-        specifier: file:../../electron-market/packages/marketplace-db
-        version: file:../../electron-market/packages/marketplace-db
     devDependencies:
       '@electron-forge/cli':
         specifier: ^7.8.1
@@ -271,25 +261,50 @@ packages:
     engines: {node: ^12.13.0 || ^14.15.0 || >=16.0.0}
     deprecated: This functionality has been moved to @npmcli/fs
 
-  '@qpjoy/electron-core-wireguard@file:../../electron-plugin/packages/electron-core-wireguard':
-    resolution: {directory: ../../electron-plugin/packages/electron-core-wireguard, type: directory}
+  '@qpjoy/electron-core-wireguard-engine-darwin-arm64@0.1.2':
+    resolution: {integrity: sha512-D2/GaoWFyaozILsu7BExHZ1qlKB7m9k2eKVsdNU5Fuw2BR9r2kjAR1f1aN8Q7Iaa+pUaXIP3uTWujaPU4Btlow==}
+    cpu: [arm64]
+    os: [darwin]
 
-  '@qpjoy/electron-market@file:../../electron-market/packages/electron-market':
-    resolution: {directory: ../../electron-market/packages/electron-market, type: directory}
+  '@qpjoy/electron-core-wireguard-engine-darwin-x64@0.1.2':
+    resolution: {integrity: sha512-WtofFiEYgvQUl13kzIAy76Qy8XeUXG8EPTh61t7hgsii4slwtkjEzOhQ360M1nT2EtRmzWoVBpRBLIBo8Q6HmA==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@qpjoy/electron-core-wireguard-engine-linux-arm64@0.1.2':
+    resolution: {integrity: sha512-OrDGG4bXF82CE+bvf2k14zq/V2jvM+t1MzEj6EsvcPoWdQiSb9lEbkNxWGtv/+qhNMrQL9caB6hSgCI6tGGkhw==}
+    cpu: [arm64]
+    os: [linux]
+
+  '@qpjoy/electron-core-wireguard-engine-linux-x64@0.1.2':
+    resolution: {integrity: sha512-zymy+plOzywPmApTxryQFN5MmnPpddxFTP/hDVrJgKmTuC1eA2QWlGt24v1AxhK5ZIBdO1mMzpaRBJYep8owFQ==}
+    cpu: [x64]
+    os: [linux]
+
+  '@qpjoy/electron-core-wireguard-engine-win32-x64@0.1.2':
+    resolution: {integrity: sha512-UpXqxSaAoA3b56svZitSpdXG0RfwGnrC5dqmfLfSe6gBWc7hZiNJbEaS66zjQEGRLl6hEcyAehz3ACd6ysRZ7Q==}
+    cpu: [x64]
+    os: [win32]
+
+  '@qpjoy/electron-core-wireguard@0.1.3':
+    resolution: {integrity: sha512-ze75AfMTn/DObfpKtq1MPfBZWGHeCFJvJech6dByYGTyb6mtwiegbMPpCLt/DAwBgsuU4gA2ehoLhCv9RTxvgA==}
+
+  '@qpjoy/electron-market@0.3.18':
+    resolution: {integrity: sha512-/yQvHcmyOq3eMCd+Qt8rDtUC6X2Cot6Nd9BxkG5cHucYxo8cLT31c2AQSitquUFc71wcdZI7pQn1g6xL57gIJg==}
     peerDependencies:
       '@qpjoy/electron-plugin-sdk': '>=0.1.0'
       electron: '>=28'
 
-  '@qpjoy/electron-plugin-hdo@file:../../electron-plugin/packages/electron-plugin-hdo':
-    resolution: {directory: ../../electron-plugin/packages/electron-plugin-hdo, type: directory}
+  '@qpjoy/electron-plugin-hdo@0.1.11':
+    resolution: {integrity: sha512-oA8P2n4xK4jQAYISvcZt8Xs6vEyxIq498k0FMBsa8KTkPhkJa+Ko5DosMYnqWidXW2dk4PwsdUFploZbE0mcwQ==}
     peerDependencies:
       electron: '>=28'
     peerDependenciesMeta:
       electron:
         optional: true
 
-  '@qpjoy/electron-plugin-sdk@file:../../electron-market/packages/electron-plugin-sdk':
-    resolution: {directory: ../../electron-market/packages/electron-plugin-sdk, type: directory}
+  '@qpjoy/electron-plugin-sdk@0.1.3':
+    resolution: {integrity: sha512-r0Oby4ayBM+1vav3Tj5SAOVCSs0zvcAzlNC2Wuni7f4OT8A36G8JhE82C8tsU1Z7qtPVMiY8BMQQ38pir/6hxA==}
     peerDependencies:
       electron: '>=28'
     peerDependenciesMeta:
@@ -327,8 +342,8 @@ packages:
     peerDependencies:
       electron: '>=28'
 
-  '@qpjoy/marketplace-db@file:../../electron-market/packages/marketplace-db':
-    resolution: {directory: ../../electron-market/packages/marketplace-db, type: directory}
+  '@qpjoy/marketplace-db@0.1.1':
+    resolution: {integrity: sha512-3eL0XkHVe3zaEH97z0hL88OZDIT30/k5LOI5bhgZ6M9xfIVeP+L5CahjAZ/DAoVTfH4vb7ZjjXIzHTJMrnbqPA==}
 
   '@sindresorhus/is@4.6.0':
     resolution: {integrity: sha512-t09vSN3MdfsyCHoFcTRCH/iUtG7OJ0CsjzB8cjAmKc/va/kIgeDI/TxsigdncE/4be734m0cvIYwNaV4i2XqAw==}
@@ -375,8 +390,8 @@ packages:
   '@types/node@22.19.19':
     resolution: {integrity: sha512-dyh/xO2Fh5bYrfWaaqGrRQQGkNdmYw6AmaAUvYeUMNTWQtvb796ikLdmTchRmOlOiIJ1TDXfWgVx1QkUlQ6Hew==}
 
-  '@types/node@25.8.0':
-    resolution: {integrity: sha512-TCFSk8IZh+iLX1xtksoBVtdmgL+1IX0fC9BeU4QqFSuNdN/K+HUlhqOzEmSYYpZUVsLYcPqc9KX+60iDuninSQ==}
+  '@types/node@25.9.0':
+    resolution: {integrity: sha512-AOQwYUNolgy3VosiRqXrACUXTN8nJUtPl7FJXMqZVyxiiCLhQuG3jXKvCS1ALr+Y2OmZhzzLVlYPEqJaiqkaJQ==}
 
   '@types/responselike@1.0.3':
     resolution: {integrity: sha512-H/+L+UkTV33uf49PH5pCAUBVPNj2nDBXTN+qS1dOwyyg24l3CcicicCA7ca+HMvJBZcFgl5r8e+RR6elsb4Lyw==}
@@ -537,8 +552,8 @@ packages:
   base64-js@1.5.1:
     resolution: {integrity: sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA==}
 
-  baseline-browser-mapping@2.10.29:
-    resolution: {integrity: sha512-Asa2krT+XTPZINCS+2QcyS8WTkObE77RwkydwF7h6DmnKqbvlalz93m/dnphUyCa6SWSP51VgtEUf2FN+gelFQ==}
+  baseline-browser-mapping@2.10.31:
+    resolution: {integrity: sha512-MujYO3eP72uvmSE0i4wltsodRfIpZATP3jvzRNRGGxgzId7aVocVJJV3nf01qnzzKFGxQVC9bpWxl5cjxTr/7Q==}
     engines: {node: '>=6.0.0'}
     hasBin: true
 
@@ -597,8 +612,8 @@ packages:
     resolution: {integrity: sha512-v+p6ongsrp0yTGbJXjgxPow2+DL93DASP4kXCDKb8/bwRtt9OEF3whggkkDkGNzgcWy2XaF4a8nZglC7uElscg==}
     engines: {node: '>=8'}
 
-  caniuse-lite@1.0.30001792:
-    resolution: {integrity: sha512-hVLMUZFgR4JJ6ACt1uEESvQN1/dBVqPAKY0hgrV70eN3391K6juAfTjKZLKvOMsx8PxA7gsY1/tLMMTcfFLLpw==}
+  caniuse-lite@1.0.30001793:
+    resolution: {integrity: sha512-iwSsYWaCOoh26cV8NwNRViHlrfUvYsHDfRVcbtmw0Kg6PJIZZXwMkj1442FYLBGkeUf1juAsU3DTfxW579mrPA==}
 
   chalk@4.1.2:
     resolution: {integrity: sha512-oKnbhFyRIXpUuez8iBMmyEa4nbj4IOQyuhc/wy9kY7/WVPcwIO9VA668Pu8RkO7+0G76SLROeyw9CpQ061i4mA==}
@@ -764,8 +779,8 @@ packages:
     engines: {node: '>= 16'}
     hasBin: true
 
-  electron-to-chromium@1.5.356:
-    resolution: {integrity: sha512-9NgFd7m5t5MCJ5rUSjJITUXAH9mEGlrlofnMf4YEr+pz6JlP7cWmTAH+JFmbPnaSW8koVTkuW7pacORWAnA5Yw==}
+  electron-to-chromium@1.5.359:
+    resolution: {integrity: sha512-8lPELWuYZIWk7NDvCNthtmMw/7Q5Wu25NpM4djFMHBmk8DubPAtL4YTOp7ou0e7HyJtwkVlWv8XMLURnrtgJQw==}
 
   electron-winstaller@5.4.0:
     resolution: {integrity: sha512-bO3y10YikuUwUuDUQRM4KfwNkKhnpVO7IPdbsrejwN9/AABJzzTQ4GeHwyzNSrVO+tEH3/Np255a3sVZpZDjvg==}
@@ -791,8 +806,8 @@ packages:
   end-of-stream@1.4.5:
     resolution: {integrity: sha512-ooEGc6HP26xXq/N+GCGOT0JKCLDGrq2bQUZrQ7gyrJiZANJ/8YDTxTpQBXGMn+WbIQXNVpyWymm7KYVICQnyOg==}
 
-  enhanced-resolve@5.21.3:
-    resolution: {integrity: sha512-QyL119InA+XXEkNLNTPCXPugSvOfhwv0JOlGNzvxs0hZaiHLNvXSpudUWsOlsXGWJh8G6ckCScEkVHfX3kw/2Q==}
+  enhanced-resolve@5.21.4:
+    resolution: {integrity: sha512-wE4fDO8OjJhrPFH69HUQStq5oKvGRTNXEyW+k5C/pUQLASSsTu7obd2V3GvCDgPcY9AWjhJ4jz9Kh7iRvrxhJg==}
     engines: {node: '>=10.13.0'}
 
   env-paths@2.2.1:
@@ -2599,23 +2614,44 @@ snapshots:
       mkdirp: 1.0.4
       rimraf: 3.0.2
 
-  '@qpjoy/electron-core-wireguard@file:../../electron-plugin/packages/electron-core-wireguard': {}
+  '@qpjoy/electron-core-wireguard-engine-darwin-arm64@0.1.2':
+    optional: true
 
-  '@qpjoy/electron-market@file:../../electron-market/packages/electron-market(@qpjoy/electron-plugin-sdk@file:../../electron-market/packages/electron-plugin-sdk(electron@34.5.8))(electron@34.5.8)':
+  '@qpjoy/electron-core-wireguard-engine-darwin-x64@0.1.2':
+    optional: true
+
+  '@qpjoy/electron-core-wireguard-engine-linux-arm64@0.1.2':
+    optional: true
+
+  '@qpjoy/electron-core-wireguard-engine-linux-x64@0.1.2':
+    optional: true
+
+  '@qpjoy/electron-core-wireguard-engine-win32-x64@0.1.2':
+    optional: true
+
+  '@qpjoy/electron-core-wireguard@0.1.3':
+    optionalDependencies:
+      '@qpjoy/electron-core-wireguard-engine-darwin-arm64': 0.1.2
+      '@qpjoy/electron-core-wireguard-engine-darwin-x64': 0.1.2
+      '@qpjoy/electron-core-wireguard-engine-linux-arm64': 0.1.2
+      '@qpjoy/electron-core-wireguard-engine-linux-x64': 0.1.2
+      '@qpjoy/electron-core-wireguard-engine-win32-x64': 0.1.2
+
+  '@qpjoy/electron-market@0.3.18(@qpjoy/electron-plugin-sdk@0.1.3(electron@34.5.8))(electron@34.5.8)':
     dependencies:
-      '@qpjoy/electron-plugin-sdk': file:../../electron-market/packages/electron-plugin-sdk(electron@34.5.8)
-      '@qpjoy/marketplace-db': file:../../electron-market/packages/marketplace-db
+      '@qpjoy/electron-plugin-sdk': 0.1.3(electron@34.5.8)
+      '@qpjoy/marketplace-db': 0.1.1
       better-sqlite3: 11.10.0
       electron: 34.5.8
       semver: 7.8.0
 
-  '@qpjoy/electron-plugin-hdo@file:../../electron-plugin/packages/electron-plugin-hdo(electron@34.5.8)':
+  '@qpjoy/electron-plugin-hdo@0.1.11(electron@34.5.8)':
     dependencies:
-      '@qpjoy/electron-core-wireguard': file:../../electron-plugin/packages/electron-core-wireguard
+      '@qpjoy/electron-core-wireguard': 0.1.3
     optionalDependencies:
       electron: 34.5.8
 
-  '@qpjoy/electron-plugin-sdk@file:../../electron-market/packages/electron-plugin-sdk(electron@34.5.8)':
+  '@qpjoy/electron-plugin-sdk@0.1.3(electron@34.5.8)':
     optionalDependencies:
       electron: 34.5.8
 
@@ -2645,9 +2681,9 @@ snapshots:
       '@qpjoy/electron-plugin-tunnel-engine-linux-arm64': 0.1.5
       '@qpjoy/electron-plugin-tunnel-engine-linux-x64': 0.1.5
       '@qpjoy/electron-plugin-tunnel-engine-win32-x64': 0.1.5
-      '@qpjoy/marketplace-db': file:../../electron-market/packages/marketplace-db
+      '@qpjoy/marketplace-db': 0.1.1
 
-  '@qpjoy/marketplace-db@file:../../electron-market/packages/marketplace-db':
+  '@qpjoy/marketplace-db@0.1.1':
     dependencies:
       better-sqlite3: 11.10.0
 
@@ -2661,14 +2697,14 @@ snapshots:
 
   '@types/appdmg@0.5.5':
     dependencies:
-      '@types/node': 25.8.0
+      '@types/node': 25.9.0
     optional: true
 
   '@types/cacheable-request@6.0.3':
     dependencies:
       '@types/http-cache-semantics': 4.2.0
       '@types/keyv': 3.1.4
-      '@types/node': 25.8.0
+      '@types/node': 25.9.0
       '@types/responselike': 1.0.3
 
   '@types/eslint-scope@3.7.7':
@@ -2689,7 +2725,7 @@ snapshots:
 
   '@types/keyv@3.1.4':
     dependencies:
-      '@types/node': 25.8.0
+      '@types/node': 25.9.0
 
   '@types/mute-stream@0.0.4':
     dependencies:
@@ -2703,13 +2739,13 @@ snapshots:
     dependencies:
       undici-types: 6.21.0
 
-  '@types/node@25.8.0':
+  '@types/node@25.9.0':
     dependencies:
       undici-types: 7.24.6
 
   '@types/responselike@1.0.3':
     dependencies:
-      '@types/node': 25.8.0
+      '@types/node': 25.9.0
 
   '@types/wrap-ansi@3.0.0': {}
 
@@ -2890,7 +2926,7 @@ snapshots:
 
   base64-js@1.5.1: {}
 
-  baseline-browser-mapping@2.10.29: {}
+  baseline-browser-mapping@2.10.31: {}
 
   better-sqlite3@11.10.0:
     dependencies:
@@ -2932,9 +2968,9 @@ snapshots:
 
   browserslist@4.28.2:
     dependencies:
-      baseline-browser-mapping: 2.10.29
-      caniuse-lite: 1.0.30001792
-      electron-to-chromium: 1.5.356
+      baseline-browser-mapping: 2.10.31
+      caniuse-lite: 1.0.30001793
+      electron-to-chromium: 1.5.359
       node-releases: 2.0.44
       update-browserslist-db: 1.2.3(browserslist@4.28.2)
 
@@ -2982,7 +3018,7 @@ snapshots:
       normalize-url: 6.1.0
       responselike: 2.0.1
 
-  caniuse-lite@1.0.30001792: {}
+  caniuse-lite@1.0.30001793: {}
 
   chalk@4.1.2:
     dependencies:
@@ -3133,7 +3169,7 @@ snapshots:
       - supports-color
     optional: true
 
-  electron-to-chromium@1.5.356: {}
+  electron-to-chromium@1.5.359: {}
 
   electron-winstaller@5.4.0:
     dependencies:
@@ -3172,7 +3208,7 @@ snapshots:
     dependencies:
       once: 1.4.0
 
-  enhanced-resolve@5.21.3:
+  enhanced-resolve@5.21.4:
     dependencies:
       graceful-fs: 4.2.11
       tapable: 2.3.3
@@ -3579,7 +3615,7 @@ snapshots:
 
   jest-worker@27.5.1:
     dependencies:
-      '@types/node': 25.8.0
+      '@types/node': 25.9.0
       merge-stream: 2.0.0
       supports-color: 8.1.1
 
@@ -4371,7 +4407,7 @@ snapshots:
       acorn-import-phases: 1.0.4(acorn@8.16.0)
       browserslist: 4.28.2
       chrome-trace-event: 1.0.4
-      enhanced-resolve: 5.21.3
+      enhanced-resolve: 5.21.4
       es-module-lexer: 2.1.0
       eslint-scope: 5.1.1
       events: 3.3.0

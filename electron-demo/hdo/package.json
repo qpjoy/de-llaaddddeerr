@@ -6,22 +6,24 @@
   "description": "Local Electron demo for current @qpjoy/electron-plugin-hdo development and packaging tests.",
   "main": "src/main.cjs",
   "scripts": {
-    "dev": "electron-forge start",
-    "start": "electron-forge start",
-    "package": "electron-forge package",
-    "make": "electron-forge make",
-    "make:mac": "electron-forge make --platform=darwin",
-    "make:win": "electron-forge make --platform=win32 --arch=x64",
+    "dev": "node scripts/dev-mode.mjs local && electron-forge start",
+    "dev:npm": "node scripts/dev-mode.mjs npm && electron-forge start",
+    "dev:reset": "node scripts/dev-mode.mjs npm",
+    "start": "pnpm dev",
+    "setup": "node scripts/dev-mode.mjs local",
+    "setup:npm": "node scripts/dev-mode.mjs npm",
+    "package": "node scripts/dev-mode.mjs npm && electron-forge package",
+    "make": "node scripts/dev-mode.mjs npm && electron-forge make",
+    "make:mac": "node scripts/dev-mode.mjs npm && electron-forge make --platform=darwin",
+    "make:win": "node scripts/dev-mode.mjs npm && electron-forge make --platform=win32 --arch=x64",
     "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check forge.config.cjs",
     "build:local": "pnpm --dir ../../electron-market build && pnpm --dir ../../electron-plugin build:packages"
   },
   "dependencies": {
-    "@qpjoy/electron-core-wireguard": "file:../../electron-plugin/packages/electron-core-wireguard",
-    "@qpjoy/electron-market": "file:../../electron-market/packages/electron-market",
-    "@qpjoy/electron-plugin-hdo": "file:../../electron-plugin/packages/electron-plugin-hdo",
-    "@qpjoy/electron-plugin-sdk": "file:../../electron-market/packages/electron-plugin-sdk",
-    "@qpjoy/electron-plugin-tunnel": "0.1.16",
-    "@qpjoy/marketplace-db": "file:../../electron-market/packages/marketplace-db"
+    "@qpjoy/electron-market": "^0.3.18",
+    "@qpjoy/electron-plugin-hdo": "^0.1.11",
+    "@qpjoy/electron-plugin-sdk": "^0.1.3",
+    "@qpjoy/electron-plugin-tunnel": "^0.1.16"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.8.1",
@@ -37,10 +39,6 @@
       "electron-winstaller",
       "fs-xattr",
       "macos-alias"
-    ],
-    "overrides": {
-      "@qpjoy/electron-core-wireguard": "file:../../electron-plugin/packages/electron-core-wireguard",
-      "@qpjoy/marketplace-db": "file:../../electron-market/packages/marketplace-db"
-    }
+    ]
   }
 }

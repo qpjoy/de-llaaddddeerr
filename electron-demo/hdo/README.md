@@ -1,8 +1,12 @@
 # electron-demo/hdo
 
-Local Electron consumer app for current HDO development. It links the local
-marketplace and HDO packages so UI/server-install changes can be tested before
-publishing.
+Electron consumer app for HDO development and packaging. It supports two
+dependency layouts:
+
+- `local`: used by `pnpm dev`; packs current workspace packages into
+  `.local-packs/` so HDO and marketplace edits can be tested before publishing.
+- `npm`: used by `pnpm package` / `pnpm make:*`; installs published packages
+  from npm so packaged builds match the normal plugin-market user path.
 
 ## Dependencies
 
@@ -10,15 +14,15 @@ publishing.
 pnpm install
 ```
 
-Installed QPJoy packages:
+Installed QPJoy packages in npm mode:
 
 | Package | Purpose |
 | --- | --- |
-| `@qpjoy/electron-market` | Local marketplace host and admin UI |
-| `@qpjoy/electron-plugin-sdk` | Local plugin protocol/types used by the market runtime |
+| `@qpjoy/electron-market` | Published marketplace host and admin UI |
+| `@qpjoy/electron-plugin-sdk` | Published plugin protocol/types used by the market runtime |
 | `@qpjoy/electron-plugin-tunnel` | Published tunnel seed plugin, installed offline on first app start |
-| `@qpjoy/electron-plugin-hdo` | Local HDO plugin for client/server panels |
-| `@qpjoy/electron-core-wireguard` | Local WireGuard config layer used by HDO |
+| `@qpjoy/electron-plugin-hdo` | Published HDO plugin for client/server panels |
+| `@qpjoy/electron-core-wireguard` | Transitive WireGuard config layer used by HDO |
 
 The tunnel package depends on platform-specific optional engine packages. On
 Windows x64, `pnpm install` should also install
@@ -34,15 +38,25 @@ marketplace UI at runtime. They are not bundled into this demo app.
 pnpm dev
 ```
 
-Rebuild local packages after changing `electron-market` or `electron-plugin`:
+`pnpm dev` switches to local mode, builds the relevant workspace packages,
+packs them to `.local-packs/`, reinstalls, and then starts Electron. Re-running
+`pnpm dev` is fast until you reset the mode.
+
+Repack local packages after changing `electron-market` or `electron-plugin`:
 
 ```bash
-pnpm build:local
+pnpm dev:reset
+pnpm dev
 ```
 
-The app seeds directly from `../../electron-plugin/packages/electron-plugin-hdo`
-when running unpackaged. Packaged builds use `node_modules`, so run
-`pnpm install` before `pnpm package` or `pnpm make:*`.
+To test the published npm flow during development:
+
+```bash
+pnpm dev:npm
+```
+
+Packaged builds always run npm mode first, so they use `node_modules` installed
+from the registry rather than workspace file links.
 
 ## Package On macOS
 
@@ -62,13 +76,18 @@ open "out/QPJoy HDO Demo-darwin-arm64/QPJoy HDO Demo.app"
 
 ## Package On Windows
 
-Copy this `electron-demo/hdo` directory together with the repo packages it links
-to Windows, then run:
+Copy only this `electron-demo/hdo` directory to Windows, then run:
 
 ```powershell
 pnpm install
 pnpm make:win
 ```
+
+`make:win` switches to npm mode before packaging. It should download
+`@qpjoy/electron-market`, `@qpjoy/electron-plugin-hdo`,
+`@qpjoy/electron-plugin-tunnel`, and their transitive runtime packages directly
+from npm. Publish the HDO package version referenced in `package.json` before
+running this on a clean Windows machine.
 
 Expected installer output:
 
@@ -84,7 +103,8 @@ target OS.
 
 - `forge.config.cjs` keeps `asar: false` so the marketplace seed plugin can be
   installed from a real filesystem directory.
-- `pnpm-lock.yaml` should be committed for reproducible npm installs.
+- `pnpm-lock.yaml` should be committed in npm mode for reproducible installs.
+- `.dev-mode` and `.local-packs/` are local-only and ignored by git.
 - User data lives under:
   - macOS: `~/Library/Application Support/QPJoy HDO Demo/`
   - Windows: `%APPDATA%\QPJoy HDO Demo\`

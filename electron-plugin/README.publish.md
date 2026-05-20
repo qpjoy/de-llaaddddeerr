@@ -8,4 +8,8 @@ npm view @qpjoy/electron-plugin-tunnel bin
 
 pnpm add @qpjoy/electron-plugin-tunnel
 pnpm exec qpjoy-tunnel snippet
+
+# 更新HDO客户端
+pnpm --dir electron-plugin --filter @qpjoy/electron-plugin-hdo build
+./scripts/manage.sh sync-apps
 ```

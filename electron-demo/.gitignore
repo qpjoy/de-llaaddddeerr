@@ -4,5 +4,7 @@ dist/
 **/node_modules/
 **/out/
 **/dist/
+**/.dev-mode
+**/.local-packs/
 **/*.log
 .DS_Store
