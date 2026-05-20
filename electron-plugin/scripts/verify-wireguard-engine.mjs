@@ -8,19 +8,40 @@ if (!target) {
   process.exit(2);
 }
 
-const names = target.startsWith('win32-')
-  ? ['wg.exe', 'wg.exe.gz', 'wg', 'wg.gz']
-  : ['wg', 'wg.gz'];
 const root = join(process.cwd(), 'resources', 'wireguard', target);
-const found = names
-  .map((name) => join(root, name))
-  .find((path) => existsSync(path) && statSync(path).isFile() && statSync(path).size > 0);
+const requiredGroups = target.startsWith('win32-')
+  ? [
+      ['wg.exe', 'wg.exe.gz', 'wg', 'wg.gz'],
+      ['wireguard.exe', 'wireguard.exe.gz']
+    ]
+  : target.startsWith('darwin-')
+    ? [
+        ['wg', 'wg.gz'],
+        ['wireguard-go', 'wireguard-go.gz']
+      ]
+    : [
+        ['wg', 'wg.gz'],
+        ['wg-quick', 'wg-quick.gz']
+      ];
 
-if (!found) {
-  console.error(`Missing WireGuard CLI for ${target}.`);
-  console.error(`Expected one of: ${names.map((name) => join('resources', 'wireguard', target, name)).join(', ')}`);
-  console.error('Add the real wg/wg.exe binary before packing or publishing this engine package.');
+const found = [];
+const missing = [];
+for (const group of requiredGroups) {
+  const match = group
+    .map((name) => join(root, name))
+    .find((path) => existsSync(path) && statSync(path).isFile() && statSync(path).size > 0);
+  if (match) found.push(match);
+  else missing.push(group);
+}
+
+if (missing.length > 0) {
+  console.error(`Missing WireGuard runtime tools for ${target}.`);
+  for (const group of missing) {
+    console.error(`Expected one of: ${group.map((name) => join('resources', 'wireguard', target, name)).join(', ')}`);
+  }
+  console.error('Add real WireGuard runtime binaries before packing or publishing this engine package.');
   process.exit(1);
 }
 
-console.log(`WireGuard CLI found for ${target}: ${found}`);
+console.log(`WireGuard runtime tools found for ${target}:`);
+for (const path of found) console.log(`- ${path}`);

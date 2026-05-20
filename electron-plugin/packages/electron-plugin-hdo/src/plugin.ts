@@ -85,6 +85,7 @@ const hdoPlugin = {
       registerDevice: (input: HdoDeviceRegistrationInput) => controller.registerDevice(input),
       reportPluginStates: (deviceId?: string | null) => controller.reportPluginStates(deviceId),
       prepareWireGuardPeer: (input?: { rotate?: boolean | null }) => controller.prepareWireGuardPeer(input),
+      connectWireGuardPeer: (input?: { action?: 'up' | 'down' | null }) => controller.connectWireGuardPeer(input),
       executePendingTasks: () => controller.executePendingTasks(),
       refreshManifest: (deviceId?: string | null) => controller.refreshManifest(deviceId),
       refreshSubscription: (deviceId?: string | null) => controller.refreshSubscription(deviceId),

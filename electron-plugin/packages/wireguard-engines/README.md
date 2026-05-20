@@ -20,18 +20,30 @@ Expected runtime resource path:
 ```text
 resources/wireguard/<platform-arch>/wg
 resources/wireguard/<platform-arch>/wg.gz
+resources/wireguard/<platform-arch>/wg-quick
+resources/wireguard/<platform-arch>/wg-quick.gz
+resources/wireguard/<platform-arch>/wireguard-go
+resources/wireguard/<platform-arch>/wireguard-go.gz
+resources/wireguard/<platform-arch>/bash
+resources/wireguard/<platform-arch>/bash.gz
 resources/wireguard/<platform-arch>/wg.exe
 resources/wireguard/<platform-arch>/wg.exe.gz
+resources/wireguard/<platform-arch>/wireguard.exe
+resources/wireguard/<platform-arch>/wireguard.exe.gz
 ```
 
 Current bundled artifacts:
 
-- macOS arm64/x64: extracted from Homebrew `wireguard-tools` bottle
-  `1.0.20260223`.
-- Linux arm64/x64: statically built from the official `wireguard-tools`
-  source tarball `1.0.20260223` in Alpine Linux containers.
-- Windows x64: `wg.exe` extracted from the official WireGuard Windows MSI
-  `wireguard-amd64-1.1.msi`.
+- macOS arm64/x64: `wg` from Homebrew `wireguard-tools` bottle
+  `1.0.20260223`; `wireguard-go` from the matching userspace engine.
+  `wg-quick` and Bash 4+ may be packaged as an alternate launcher, but HDO can
+  use its built-in userspace launcher without relying on macOS Bash 3.2.
+- Linux arm64/x64: `wg` and `wg-quick` built from the official
+  `wireguard-tools` source tarball `1.0.20260223`; `wireguard-go` may be
+  included as a userspace fallback.
+- Windows x64: `wg.exe` and `wireguard.exe` extracted from the official
+  WireGuard Windows MSI `wireguard-amd64-1.1.msi`.
 
 All packages include the WireGuard tools GPL-2.0-only `COPYING` file beside
-the executable.
+the executable. Packages that include `wireguard-go` should also include its
+MIT license file beside the runtime.

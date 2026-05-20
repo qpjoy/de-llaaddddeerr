@@ -1,14 +1,19 @@
+import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   buildHdoRouteProbe,
   excludeLocalRoutesFromAllowedIps,
   generateWireGuardKeyPairWithCli,
+  getWireGuardTunnelStatus,
   HDO_MESH_DEFAULTS,
   HDO_MESH_ROUTE_CIDRS,
   renderHdoClientWireGuardConfig,
-  resolveWireGuardRuntime
+  resolveWireGuardConnectionRuntime,
+  resolveWireGuardRuntime,
+  setWireGuardTunnelState,
+  shellQuote
 } from '@qpjoy/electron-core-wireguard';
 
 import type {
@@ -120,6 +125,7 @@ export class HdoController {
     let devices: unknown[] = [];
     let deviceTasks: unknown[] = [];
     let admin: HdoSnapshot['admin'] = null;
+    const wireGuardStatus = this.wireGuardStatus();
     const localPlugins = this.localPluginStates();
     this.lastError = null;
 
@@ -194,6 +200,7 @@ export class HdoController {
       devices,
       deviceTasks,
       localPlugins,
+      wireGuardStatus,
       taskRunnerBusy: Boolean(this.taskRunner),
       admin,
       lastError: this.lastError
@@ -397,6 +404,95 @@ export class HdoController {
       peer: publicWireGuardPeer(peer),
       config
     };
+  }
+
+  async openWireGuardProfile(): Promise<Record<string, unknown>> {
+    const peer = this.settings.wireGuardPeer;
+    const configPath = stringValue(peer?.configPath);
+    if (!configPath || !existsSync(configPath)) {
+      throw new Error('WireGuard 配置文件不存在，请先点击“连接 / 更新 HDO”或“生成 / 更新本机 Peer”。');
+    }
+
+    if (process.platform === 'darwin') {
+      await execFileAsync('open', ['-a', 'WireGuard']);
+      await execFileAsync('open', ['-R', configPath]).catch(() => undefined);
+      await copyTextToClipboard(configPath).catch(() => undefined);
+      return {
+        ok: true,
+        mode: 'macos-wireguard-app',
+        configPath,
+        message:
+          '已打开 macOS WireGuard App，并在 Finder 里定位配置文件；配置路径也已复制到剪贴板。请在 WireGuard 中导入该 conf 后启用。'
+      };
+    }
+
+    if (process.platform === 'win32') {
+      await execFileAsync('explorer.exe', [`/select,${configPath}`]).catch(() => undefined);
+      return {
+        ok: true,
+        mode: 'windows-reveal-config',
+        configPath,
+        message: '已在 Explorer 中定位 WireGuard 配置文件。'
+      };
+    }
+
+    await execFileAsync('xdg-open', [dirname(configPath)]).catch(() => undefined);
+    return {
+      ok: true,
+      mode: 'linux-reveal-config',
+      configPath,
+      message: '已尝试打开配置文件目录。'
+    };
+  }
+
+  async connectWireGuardPeer(input: { action?: 'up' | 'down' | null } = {}): Promise<Record<string, unknown>> {
+    const peer = this.settings.wireGuardPeer;
+    const configPath = stringValue(peer?.configPath);
+    if (!configPath || !existsSync(configPath)) {
+      throw new Error('WireGuard 配置文件不存在，请先点击“连接 / 更新 HDO”或“生成 / 更新本机 Peer”。');
+    }
+    const action = input.action === 'down' ? 'down' : 'up';
+    const runtime = resolveWireGuardConnectionRuntime({
+      installDir: join(this.ctx.userDataDir, 'bin'),
+      bundledDir: this.ctx.bundledWireGuardDir,
+      allowSystemFallback: true
+    });
+    const result = await setWireGuardTunnelState({
+      runtime,
+      configPath,
+      action
+    });
+    return {
+      ...result,
+      message: result.message,
+      runtime: publicWireGuardRuntime(result.runtime)
+    };
+  }
+
+  wireGuardStatus(): Record<string, unknown> | null {
+    const peer = this.settings.wireGuardPeer;
+    const configPath = stringValue(peer?.configPath);
+    if (!configPath || !existsSync(configPath)) return null;
+    const runtime = resolveWireGuardConnectionRuntime({
+      installDir: join(this.ctx.userDataDir, 'bin'),
+      bundledDir: this.ctx.bundledWireGuardDir,
+      allowSystemFallback: true
+    });
+    try {
+      const status = getWireGuardTunnelStatus({ runtime, configPath });
+      return {
+        ...status,
+        runtime: publicWireGuardRuntime(status.runtime)
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        active: false,
+        configPath,
+        error: errorMessage(err),
+        runtime: publicWireGuardRuntime(runtime)
+      };
+    }
   }
 
   async upsertNode(input: HdoNodeInput): Promise<unknown> {
@@ -780,6 +876,23 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+function execFileAsync(command: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { windowsHide: true }, (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+}
+
+function copyTextToClipboard(value: string): Promise<void> {
+  return execFileAsync('osascript', ['-e', `set the clipboard to ${appleScriptString(value)}`]);
+}
+
+function appleScriptString(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
 function errorFromResponse(value: unknown): string | null {
   if (value && typeof value === 'object' && !Array.isArray(value) && 'error' in value) {
     return String((value as { error: unknown }).error);
@@ -843,6 +956,11 @@ function requireTaskPluginId(value: string | null, kind: string): string {
 function publicWireGuardPeer(value: Record<string, unknown>): Record<string, unknown> {
   const { privateKey: _privateKey, ...safe } = value;
   return safe;
+}
+
+function publicWireGuardRuntime(value: unknown): Record<string, unknown> {
+  const runtime = plainObject(value);
+  return runtime ? { ...runtime } : {};
 }
 
 function domesticWireGuardFromManifest(manifest: Record<string, unknown>): {
@@ -909,8 +1027,4 @@ function normalizeInstalledPlugin(value: unknown): HdoLocalPluginState | null {
       installedAt: stringField(row, 'installedAt')
     }
   };
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }

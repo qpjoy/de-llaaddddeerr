@@ -102,6 +102,21 @@ export class HdoAdminServer {
         sendJson(res, 200, await this.controller.prepareWireGuardPeer(body as never));
       };
     }
+    if (method === 'POST' && pathname === '/api/client/wireguard/open') {
+      return async (_req, res) => {
+        sendJson(res, 200, await this.controller.openWireGuardProfile());
+      };
+    }
+    if (method === 'POST' && pathname === '/api/client/wireguard/connect') {
+      return async (_req, res, body) => {
+        sendJson(res, 200, await this.controller.connectWireGuardPeer(body as never));
+      };
+    }
+    if (method === 'GET' && pathname === '/api/client/wireguard/status') {
+      return (_req, res) => {
+        sendJson(res, 200, this.controller.wireGuardStatus());
+      };
+    }
     if (method === 'POST' && pathname === '/api/client/tasks/run') {
       return async (_req, res) => {
         sendJson(res, 200, await this.controller.executePendingTasks());

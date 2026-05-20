@@ -12,4 +12,7 @@ pnpm --dir electron-market --filter @qpjoy/electron-market-admin-ui build
 
 wg show hdo-home
 systemctl status wg-quick@hdo-home --no-pager
+
+# sync domestic peers
+./docker/hdo-gateway-stack/manage.sh sync-domestic-peers --server-url http://127.0.0.1:8080
 ```

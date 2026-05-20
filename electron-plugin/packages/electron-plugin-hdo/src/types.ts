@@ -51,6 +51,7 @@ export interface HdoSnapshot {
   devices: unknown[];
   deviceTasks: unknown[];
   localPlugins: HdoLocalPluginState[];
+  wireGuardStatus?: unknown | null;
   taskRunnerBusy: boolean;
   admin: {
     users?: unknown[];

@@ -284,7 +284,7 @@ packages:
     resolution: {integrity: sha512-Tjk16GuB9Go7oOVqHigA+QwQ7IjIvxeZJsqaA6S8lDRRlwjRPxO91cEI3jszuWQDG5hoUZ5o+nEYYFiqa3Bqog==}
 
   '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.3.18.tgz':
-    resolution: {integrity: sha512-WCfnWQTmK4cS8TZH6LM4mt/+/uQFVxnrJ83swEhAq6MYmAswU5KvGUW5VrRXM6rkqJvfNZYUYaMFbL9WHnCQwQ==, tarball: file:.local-packs/qpjoy-electron-market-0.3.18.tgz}
+    resolution: {integrity: sha512-tTKaq3BWDPAezCmRva0cW8uV28u/KoSlSl6MziMHZGp320142dDggRT+5fFZidGY9Tu8X5smknaO2wdhCtJJeQ==, tarball: file:.local-packs/qpjoy-electron-market-0.3.18.tgz}
     version: 0.3.18
     peerDependencies:
       '@qpjoy/electron-plugin-sdk': '>=0.1.0'
@@ -330,7 +330,7 @@ packages:
     os: [win32]
 
   '@qpjoy/electron-plugin-tunnel@file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.16.tgz':
-    resolution: {integrity: sha512-ya6vJC1Gsj2SP5pdtWgsYkYieApG5iK0HWTfMfUDlmncseWxOT/Cx8m9ZvxsL9vePKNEQTiO9Zkt7yJlHK3zBA==, tarball: file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.16.tgz}
+    resolution: {integrity: sha512-2ZdbblXE3ZQmTdijldVdmaJl6mb6ksdJ8Th8Nsj44mWSCCZRt1NalPkKfHn7I6XnKRjB9L1ae88vHX5kyHClxQ==, tarball: file:.local-packs/qpjoy-electron-plugin-tunnel-0.1.16.tgz}
     version: 0.1.16
     hasBin: true
     peerDependencies:

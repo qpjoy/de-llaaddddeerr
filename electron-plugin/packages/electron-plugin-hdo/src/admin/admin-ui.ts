@@ -493,8 +493,33 @@ export function adminHtml(): string {
             </label>
             <div class="row">
               <button class="btn primary" id="prepareWireGuard">生成 / 更新本机 Peer</button>
+              <button class="btn good" id="connectWireGuard">启动 WireGuard peer</button>
+              <button class="btn" id="disconnectWireGuard">停止 WireGuard peer</button>
+              <button class="btn" id="openWireGuard">定位配置</button>
               <button class="btn" id="rotateWireGuard">轮换密钥</button>
             </div>
+          </div>
+          <div class="panel span-6">
+            <h3>WireGuard 运行状态</h3>
+            <p class="sub" id="wgRuntimeText">未检测</p>
+            <table class="table">
+              <thead><tr><th>Peer</th><th>Endpoint</th><th>Handshake</th><th>流量</th></tr></thead>
+              <tbody id="wgRuntimePeersTable"></tbody>
+            </table>
+          </div>
+          <div class="panel span-6">
+            <h3>Mesh 节点与设备</h3>
+            <table class="table">
+              <thead><tr><th>类型</th><th>名称</th><th>Overlay</th><th>状态</th></tr></thead>
+              <tbody id="meshPeersTable"></tbody>
+            </table>
+          </div>
+          <div class="panel span-12">
+            <h3>Mesh 服务</h3>
+            <table class="table">
+              <thead><tr><th>名称</th><th>目标</th><th>协议</th><th>域名</th></tr></thead>
+              <tbody id="meshServicesTable"></tbody>
+            </table>
           </div>
           <div class="panel span-6">
             <h3>本地生成物</h3>
@@ -689,6 +714,7 @@ export function adminHtml(): string {
       $('manifestOut').value = settings.lastManifest ? JSON.stringify(settings.lastManifest, null, 2) : '';
       $('subscriptionOut').value = settings.lastSubscription || '';
       renderWireGuardPeer(settings.wireGuardPeer || null);
+      renderWireGuardRuntimeStatus(s.wireGuardStatus || null);
       $('cmdDomestic').textContent = safeCommands.domestic || '';
       $('cmdHome').textContent = safeCommands.home || '';
       $('cmdOversea').textContent = safeCommands.oversea || '';
@@ -720,6 +746,8 @@ export function adminHtml(): string {
       renderNodes(admin ? admin.nodes : []);
       renderServices(admin ? admin.services : []);
       renderServiceNodeOptions(admin ? admin.nodes : []);
+      renderMeshPeers(s);
+      renderMeshServices(s);
     }
 
     function deploymentState(s) {
@@ -985,6 +1013,75 @@ export function adminHtml(): string {
       renderList('wgRouteWarnings', warnings.length ? warnings : ['本机路由未发现与 HDO 默认网段冲突']);
     }
 
+    function renderWireGuardRuntimeStatus(status) {
+      if (!status) {
+        $('wgRuntimeText').textContent = '未生成配置或尚未检测到运行状态。';
+        $('wgRuntimePeersTable').innerHTML = '<tr><td colspan="4" class="muted">暂无运行中的 peer</td></tr>';
+        return;
+      }
+      const label = status.active
+        ? '已运行：' + (status.realInterfaceName || status.interfaceName || '未知接口')
+        : '未运行';
+      const detail = status.error ? '；' + status.error : '';
+      const routes = Array.isArray(status.routes) && status.routes.length
+        ? '；路由 ' + status.routes.length + ' 条'
+        : '';
+      $('wgRuntimeText').textContent = label + '；模式 ' + (status.mode || 'unknown') + routes + detail;
+      const peers = Array.isArray(status.peers) ? status.peers : [];
+      $('wgRuntimePeersTable').innerHTML = peers.length ? peers.map((peer) => (
+        '<tr><td>' + escapeHtml(shortKey(peer.publicKey)) + '</td><td>' +
+        escapeHtml(peer.endpoint || '') + '</td><td>' +
+        escapeHtml(handshakeText(peer.latestHandshakeSeconds)) + '</td><td>' +
+        escapeHtml(formatBytes(peer.transferRxBytes || 0) + ' / ' + formatBytes(peer.transferTxBytes || 0)) +
+        '</td></tr>'
+      )).join('') : '<tr><td colspan="4" class="muted">暂无运行中的 peer；若刚启动失败，先看上方错误。</td></tr>';
+    }
+
+    function renderMeshPeers(s) {
+      const admin = s.admin || {};
+      const rows = [];
+      const seen = new Set();
+      const addRow = (kind, name, overlay, status) => {
+        const key = [kind, name, overlay].join(':');
+        if (seen.has(key)) return;
+        seen.add(key);
+        rows.push({ kind, name, overlay, status });
+      };
+      (Array.isArray(admin.nodes) ? admin.nodes : []).forEach((node) => {
+        addRow(node.kind || 'node', node.name || node.id || '', node.overlayIp || node.publicHost || '', node.status || '');
+      });
+      (Array.isArray(admin.devices) ? admin.devices : []).forEach((device) => {
+        addRow('device', device.label || device.name || device.id || '', device.overlayIp || '', device.status || device.platform || '');
+      });
+      (Array.isArray(s.devices) ? s.devices : []).forEach((device) => {
+        addRow('device', device.label || device.name || device.id || '', device.overlayIp || '', device.status || device.platform || '');
+      });
+      const manifest = s.settings && s.settings.lastManifest ? s.settings.lastManifest : {};
+      const manifestNodes = Array.isArray(manifest.nodes) ? manifest.nodes : [];
+      manifestNodes.forEach((node) => {
+        addRow(node.kind || 'manifest', node.name || node.id || '', node.overlayIp || node.publicHost || '', node.status || '');
+      });
+      $('meshPeersTable').innerHTML = rows.length ? rows.map((row) => (
+        '<tr><td>' + escapeHtml(row.kind) + '</td><td>' +
+        escapeHtml(row.name) + '</td><td>' +
+        escapeHtml(row.overlay) + '</td><td>' +
+        escapeHtml(row.status) + '</td></tr>'
+      )).join('') : '<tr><td colspan="4" class="muted">暂无 mesh 节点或设备清单</td></tr>';
+    }
+
+    function renderMeshServices(s) {
+      const adminServices = s.admin && Array.isArray(s.admin.services) ? s.admin.services : [];
+      const manifest = s.settings && s.settings.lastManifest ? s.settings.lastManifest : {};
+      const manifestServices = Array.isArray(manifest.services) ? manifest.services : [];
+      const rows = adminServices.length ? adminServices : manifestServices;
+      $('meshServicesTable').innerHTML = rows.length ? rows.map((svc) => (
+        '<tr><td>' + escapeHtml(svc.name || '') + '</td><td>' +
+        escapeHtml((svc.targetHost || svc.host || '') + ':' + (svc.targetPort || svc.port || '')) + '</td><td>' +
+        escapeHtml(svc.protocol || '') + '</td><td>' +
+        escapeHtml((svc.domains || []).join(', ')) + '</td></tr>'
+      )).join('') : '<tr><td colspan="4" class="muted">暂无服务</td></tr>';
+    }
+
     function taskRunnerText(s) {
       if (s.taskRunnerBusy) return '任务执行器正在运行。';
       const last = s.settings && s.settings.lastTaskRun;
@@ -1028,6 +1125,33 @@ export function adminHtml(): string {
       return escapeHtml(value).replace(/"/g, '&quot;');
     }
 
+    function shortKey(value) {
+      const text = String(value || '');
+      return text.length > 14 ? text.slice(0, 8) + '…' + text.slice(-6) : text;
+    }
+
+    function handshakeText(seconds) {
+      if (seconds === null || seconds === undefined || seconds === '') return '未握手';
+      const n = Number(seconds);
+      if (!Number.isFinite(n)) return '未知';
+      if (n < 60) return Math.round(n) + ' 秒前';
+      if (n < 3600) return Math.round(n / 60) + ' 分钟前';
+      return Math.round(n / 3600) + ' 小时前';
+    }
+
+    function formatBytes(value) {
+      const n = Number(value || 0);
+      if (!Number.isFinite(n) || n <= 0) return '0 B';
+      const units = ['B', 'KiB', 'MiB', 'GiB'];
+      let size = n;
+      let index = 0;
+      while (size >= 1024 && index < units.length - 1) {
+        size /= 1024;
+        index += 1;
+      }
+      return (index === 0 ? String(Math.round(size)) : size.toFixed(1)) + ' ' + units[index];
+    }
+
     function wireGuardShellCommands(configPath, s) {
       const platform = s && s.settings && s.settings.devicePlatform;
       if (platform === 'win32') {
@@ -1038,9 +1162,16 @@ export function adminHtml(): string {
         ].join('\\n');
       }
       const quoted = "'" + String(configPath).replace(/'/g, "'\\\\''") + "'";
+      if (platform === 'darwin') {
+        return [
+          'cat ' + quoted,
+          '# 启动/停止请使用上方按钮；HDO 会调用内置 wireguard-go + wg。'
+        ].join('\\n');
+      }
       return [
         'cat ' + quoted,
-        'sudo wg-quick up ' + quoted
+        'sudo wg-quick up ' + quoted,
+        'sudo wg-quick down ' + quoted
       ].join('\\n');
     }
 
@@ -1107,6 +1238,36 @@ export function adminHtml(): string {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ rotate: true })
       });
+    }).catch(() => undefined));
+    $('connectWireGuard').addEventListener('click', () => runAction('启动 WireGuard peer', async () => {
+      const result = await request('/api/client/wireguard/connect', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'up' })
+      });
+      if (result && result.ok === false) {
+        throw new Error(result.message || result.command || 'WireGuard 未启动');
+      }
+    }).catch(() => undefined));
+    $('disconnectWireGuard').addEventListener('click', () => runAction('停止 WireGuard peer', async () => {
+      const result = await request('/api/client/wireguard/connect', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'down' })
+      });
+      if (result && result.ok === false) {
+        throw new Error(result.message || result.command || 'WireGuard 未停止');
+      }
+    }).catch(() => undefined));
+    $('openWireGuard').addEventListener('click', () => runAction('定位 WireGuard 配置', async () => {
+      const result = await request('/api/client/wireguard/open', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      if (result && result.ok === false) {
+        throw new Error(result.message || result.command || 'WireGuard 未启动');
+      }
     }).catch(() => undefined));
     $('runTasks').addEventListener('click', () => runAction('执行待处理任务', async () => {
       await request('/api/client/tasks/run', {

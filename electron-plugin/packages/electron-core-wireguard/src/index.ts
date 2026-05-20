@@ -1,6 +1,6 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 
 export type HdoMeshRole = 'domestic' | 'home' | 'user' | 'oversea' | 'service';
@@ -45,6 +45,10 @@ export interface WireGuardCliStatus {
 
 export type WireGuardCliSource = 'installed' | 'bundled' | 'system' | 'missing';
 
+export type WireGuardToolName = 'wg' | 'wg-quick' | 'wireguard-go' | 'wireguard' | 'bash';
+
+export type WireGuardTunnelAction = 'up' | 'down';
+
 export interface WireGuardRuntimeStatus {
   target: string;
   available: boolean;
@@ -61,6 +65,88 @@ export interface WireGuardRuntimeOptions {
   bundledDir?: string | null;
   commandName?: string;
   allowSystemFallback?: boolean;
+}
+
+export interface WireGuardToolStatus {
+  target: string;
+  name: WireGuardToolName;
+  available: boolean;
+  source: WireGuardCliSource;
+  command: string | null;
+  bundledPath: string | null;
+  installedPath: string | null;
+  systemPath: string | null;
+  error?: string | null;
+}
+
+export interface WireGuardConnectionRuntimeOptions extends WireGuardRuntimeOptions {
+  platform?: NodeJS.Platform;
+}
+
+export interface WireGuardConnectionRuntimeStatus {
+  target: string;
+  platform: NodeJS.Platform;
+  available: boolean;
+  method: 'wg-quick' | 'darwin-userspace' | 'windows-service' | 'missing';
+  wg: WireGuardRuntimeStatus;
+  wgQuick: WireGuardToolStatus | null;
+  wireGuardGo: WireGuardToolStatus | null;
+  bash: WireGuardToolStatus | null;
+  windowsWireGuard: WireGuardToolStatus | null;
+  warnings: string[];
+  error?: string | null;
+}
+
+export interface WireGuardTunnelCommand {
+  action: WireGuardTunnelAction;
+  platform: NodeJS.Platform;
+  configPath: string;
+  command: string;
+  args: string[];
+  displayCommand: string;
+  needsAdmin: boolean;
+  runtime: WireGuardConnectionRuntimeStatus;
+  env?: Record<string, string>;
+}
+
+export interface WireGuardTunnelResult {
+  ok: boolean;
+  action: WireGuardTunnelAction;
+  mode: string;
+  configPath: string;
+  command: string;
+  stdout?: string;
+  stderr?: string;
+  message: string;
+  runtime: WireGuardConnectionRuntimeStatus;
+}
+
+export interface WireGuardPeerRuntimeStatus {
+  publicKey: string;
+  endpoint: string | null;
+  allowedIps: string[];
+  latestHandshakeAt: string | null;
+  latestHandshakeSeconds: number | null;
+  transferRxBytes: number;
+  transferTxBytes: number;
+  persistentKeepalive: number | null;
+}
+
+export interface WireGuardTunnelStatus {
+  ok: boolean;
+  active: boolean;
+  mode: WireGuardConnectionRuntimeStatus['method'];
+  interfaceName: string | null;
+  realInterfaceName: string | null;
+  configPath: string;
+  addresses: string[];
+  allowedIps: string[];
+  peers: WireGuardPeerRuntimeStatus[];
+  routes: string[];
+  ifconfig: string | null;
+  rawDump: string | null;
+  runtime: WireGuardConnectionRuntimeStatus;
+  error?: string | null;
 }
 
 export interface HdoLocalRoute {
@@ -291,16 +377,16 @@ export function resolveWireGuardRuntime(options: WireGuardRuntimeOptions): WireG
   }
 
   if (options.allowSystemFallback) {
-    const system = detectWireGuardCli('wg');
-    if (system.available) {
+    const systemPath = findSystemWireGuardTool('wg', commandName);
+    if (systemPath) {
       return {
         target,
         available: true,
         source: 'system',
-        command: 'wg',
+        command: systemPath,
         bundledPath: null,
         installedPath: null,
-        systemPath: 'wg'
+        systemPath
       };
     }
   }
@@ -317,19 +403,305 @@ export function resolveWireGuardRuntime(options: WireGuardRuntimeOptions): WireG
   };
 }
 
+export function resolveWireGuardConnectionRuntime(
+  options: WireGuardConnectionRuntimeOptions
+): WireGuardConnectionRuntimeStatus {
+  const platform = options.platform ?? process.platform;
+  const target = platformArchKey();
+  const warnings: string[] = [];
+  const wg = resolveWireGuardRuntime(options);
+
+  if (platform === 'win32') {
+    const windowsWireGuard = resolveWireGuardTool({
+      name: 'wireguard',
+      commandName: 'wireguard.exe',
+      installDir: options.installDir,
+      bundledDir: options.bundledDir,
+      allowSystemFallback: options.allowSystemFallback
+    });
+    if (!windowsWireGuard.available) {
+      warnings.push('缺少 wireguard.exe，无法安装 Windows WireGuard tunnel service。');
+    }
+    return {
+      target,
+      platform,
+      available: windowsWireGuard.available,
+      method: windowsWireGuard.available ? 'windows-service' : 'missing',
+      wg,
+      wgQuick: null,
+      wireGuardGo: null,
+      bash: null,
+      windowsWireGuard,
+      warnings,
+      error: windowsWireGuard.available ? null : windowsWireGuard.error
+    };
+  }
+
+  const wgQuick = resolveWireGuardTool({
+    name: 'wg-quick',
+    commandName: 'wg-quick',
+    installDir: options.installDir,
+    bundledDir: options.bundledDir,
+    allowSystemFallback: options.allowSystemFallback
+  });
+  const wireGuardGo = resolveWireGuardTool({
+    name: 'wireguard-go',
+    commandName: 'wireguard-go',
+    installDir: options.installDir,
+    bundledDir: options.bundledDir,
+    allowSystemFallback: options.allowSystemFallback
+  });
+  const bash = platform === 'darwin'
+    ? resolveWireGuardTool({
+        name: 'bash',
+        commandName: 'bash',
+        installDir: options.installDir,
+        bundledDir: options.bundledDir,
+        allowSystemFallback: options.allowSystemFallback
+      })
+    : null;
+
+  if (!wg.available) warnings.push('缺少 wg，无法给 WireGuard 接口下发 peer 配置。');
+  if (!wgQuick.available) warnings.push('缺少 wg-quick，无法从 conf 自动创建和启停 WireGuard 接口。');
+  if (platform === 'darwin' && !wireGuardGo.available) {
+    warnings.push('macOS 需要 wireguard-go 用户态引擎来创建 utun 隧道。');
+  }
+  if (platform === 'darwin' && !bash?.available) {
+    warnings.push('macOS wg-quick 需要 Bash 4+；客户机不能依赖系统自带 Bash 3.2。');
+  }
+
+  const wgQuickAvailable = Boolean(
+    wg.available &&
+    wgQuick.available &&
+    (platform !== 'darwin' || (wireGuardGo.available && bash?.available))
+  );
+  const darwinUserspaceAvailable = Boolean(platform === 'darwin' && wg.available && wireGuardGo.available);
+  const available = wgQuickAvailable || darwinUserspaceAvailable;
+  return {
+    target,
+    platform,
+    available,
+    method: wgQuickAvailable ? 'wg-quick' : (darwinUserspaceAvailable ? 'darwin-userspace' : 'missing'),
+    wg,
+    wgQuick,
+    wireGuardGo,
+    bash,
+    windowsWireGuard: null,
+    warnings,
+    error: available ? null : warnings[0] ?? 'WireGuard runtime unavailable'
+  };
+}
+
+export function buildWireGuardTunnelCommand(input: {
+  runtime: WireGuardConnectionRuntimeStatus;
+  configPath: string;
+  action: WireGuardTunnelAction;
+}): WireGuardTunnelCommand {
+  const { runtime, configPath, action } = input;
+  if (!configPath.trim()) throw new Error('configPath is required');
+
+  if (runtime.platform === 'win32') {
+    const command = runtime.windowsWireGuard?.command;
+    if (!command) throw new Error(runtime.error ?? 'wireguard.exe unavailable');
+    const tunnelName = basename(configPath).replace(/\.[^.]+$/, '');
+    const args = action === 'up'
+      ? ['/installtunnelservice', configPath]
+      : ['/uninstalltunnelservice', tunnelName];
+    return {
+      action,
+      platform: runtime.platform,
+      configPath,
+      command,
+      args,
+      displayCommand: [shellQuote(command), ...args.map(shellQuote)].join(' '),
+      needsAdmin: true,
+      runtime
+    };
+  }
+
+  if (runtime.platform === 'darwin' && runtime.method === 'darwin-userspace') {
+    return buildDarwinUserspaceTunnelCommand(runtime, configPath, action);
+  }
+
+  const wgQuick = runtime.wgQuick?.command;
+  if (!wgQuick) throw new Error(runtime.error ?? 'wg-quick unavailable');
+  const env = wireGuardQuickEnv(runtime);
+  const shellCommand = [
+    ...Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`),
+    shellQuote(wgQuick),
+    action,
+    shellQuote(configPath)
+  ].join(' ');
+
+  if (runtime.platform === 'darwin') {
+    const script = `do shell script ${appleScriptString(shellCommand)} with administrator privileges`;
+    return {
+      action,
+      platform: runtime.platform,
+      configPath,
+      command: 'osascript',
+      args: ['-e', script],
+      displayCommand: `osascript -e ${shellQuote(script)}`,
+      needsAdmin: true,
+      runtime,
+      env
+    };
+  }
+
+  const needsAdmin = typeof process.getuid === 'function' && process.getuid() !== 0;
+  const displayCommand = needsAdmin
+    ? ['sudo', 'env', ...Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`), shellQuote(wgQuick), action, shellQuote(configPath)].join(' ')
+    : shellCommand;
+  return {
+    action,
+    platform: runtime.platform,
+    configPath,
+    command: wgQuick,
+    args: [action, configPath],
+    displayCommand,
+    needsAdmin,
+    runtime,
+    env
+  };
+}
+
+export async function setWireGuardTunnelState(input: {
+  runtime: WireGuardConnectionRuntimeStatus;
+  configPath: string;
+  action: WireGuardTunnelAction;
+}): Promise<WireGuardTunnelResult> {
+  let command: WireGuardTunnelCommand;
+  try {
+    command = buildWireGuardTunnelCommand(input);
+  } catch (err) {
+    return {
+      ok: false,
+      action: input.action,
+      mode: input.runtime.method,
+      configPath: input.configPath,
+      command: '',
+      message: errorMessage(err),
+      runtime: input.runtime
+    };
+  }
+  if (!command.runtime.available) {
+    return {
+      ok: false,
+      action: input.action,
+      mode: command.runtime.method,
+      configPath: input.configPath,
+      command: command.displayCommand,
+      message: command.runtime.error ?? 'WireGuard runtime unavailable',
+      runtime: command.runtime
+    };
+  }
+  if (command.needsAdmin && command.platform !== 'darwin' && command.platform !== 'win32') {
+    return {
+      ok: false,
+      action: input.action,
+      mode: 'needs-root',
+      configPath: input.configPath,
+      command: command.displayCommand,
+      message: '启停 WireGuard 需要 root 权限，请复制命令执行。',
+      runtime: command.runtime
+    };
+  }
+
+  const result = await execFileAsync(command.command, command.args, {
+    env: command.env ? { ...process.env, ...command.env } : process.env
+  });
+  return {
+    ok: true,
+    action: input.action,
+    mode: command.runtime.method,
+    configPath: input.configPath,
+    command: command.displayCommand,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    message: input.action === 'up' ? '已启动 WireGuard peer。' : '已停止 WireGuard peer。',
+    runtime: command.runtime
+  };
+}
+
+export function getWireGuardTunnelStatus(input: {
+  runtime: WireGuardConnectionRuntimeStatus;
+  configPath: string;
+}): WireGuardTunnelStatus {
+  const profile = parseWireGuardProfile(input.configPath);
+  const realInterfaceName = resolveWireGuardRealInterface(input.runtime, profile.interfaceName);
+  const status: WireGuardTunnelStatus = {
+    ok: true,
+    active: false,
+    mode: input.runtime.method,
+    interfaceName: profile.interfaceName,
+    realInterfaceName,
+    configPath: input.configPath,
+    addresses: profile.addresses,
+    allowedIps: uniqueStrings(profile.allowedIps),
+    peers: [],
+    routes: [],
+    ifconfig: null,
+    rawDump: null,
+    runtime: input.runtime
+  };
+  if (!input.runtime.available) {
+    return {
+      ...status,
+      ok: false,
+      error: input.runtime.error ?? input.runtime.warnings[0] ?? 'WireGuard runtime unavailable'
+    };
+  }
+  if (!realInterfaceName) return status;
+  const wg = input.runtime.wg.command;
+  if (!wg) return { ...status, ok: false, error: 'wg unavailable' };
+
+  try {
+    const rawDump = execFileSync(wg, ['show', realInterfaceName, 'dump'], {
+      encoding: 'utf8',
+      timeout: 3000,
+      windowsHide: true
+    }).trim();
+    const peers = parseWireGuardDump(rawDump);
+    return {
+      ...status,
+      active: true,
+      peers,
+      rawDump,
+      routes: detectInterfaceRoutes(realInterfaceName),
+      ifconfig: readInterfaceState(realInterfaceName)
+    };
+  } catch (err) {
+    return {
+      ...status,
+      ok: false,
+      error: errorMessage(err),
+      routes: detectInterfaceRoutes(realInterfaceName),
+      ifconfig: readInterfaceState(realInterfaceName)
+    };
+  }
+}
+
 export function findBundledWireGuardCli(bundledDir?: string | null): string | null {
+  return findBundledWireGuardTool('wg', bundledDir);
+}
+
+export function installBundledWireGuardCli(sourcePath: string, installDir: string, commandName = defaultWireGuardCommandName()): string {
+  return installBundledWireGuardTool(sourcePath, installDir, commandName);
+}
+
+export function findBundledWireGuardTool(name: WireGuardToolName, bundledDir?: string | null): string | null {
   const packageDir = optionalWireGuardEnginePackageDir();
   const roots = [bundledDir, packageDir].filter((row): row is string => Boolean(row));
   const key = platformArchKey();
   const aliases = key.endsWith('-x64') ? [key, key.replace('-x64', '-amd64')] : [key];
-  const names = process.platform === 'win32' ? ['wg.exe', 'wg.exe.gz', 'wg', 'wg.gz'] : ['wg', 'wg.gz'];
+  const names = bundledToolNames(name);
   const candidates = roots.flatMap((root) =>
-    aliases.flatMap((alias) => names.map((name) => join(root, alias, name)))
+    aliases.flatMap((alias) => names.map((candidateName) => join(root, alias, candidateName)))
   );
   return candidates.find((candidate) => existsSync(candidate)) ?? null;
 }
 
-export function installBundledWireGuardCli(sourcePath: string, installDir: string, commandName = defaultWireGuardCommandName()): string {
+export function installBundledWireGuardTool(sourcePath: string, installDir: string, commandName: string): string {
   mkdirSync(installDir, { recursive: true });
   const target = join(installDir, commandName);
   if (sourcePath.endsWith('.gz')) {
@@ -358,6 +730,10 @@ export function generateWireGuardKeyPairWithCli(command = 'wg'): WireGuardKeyPai
     windowsHide: true
   }).trim();
   return { privateKey, publicKey };
+}
+
+export function shellQuote(value: string): string {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
 export function detectLocalRoutes(platform = process.platform): HdoLocalRoute[] {
@@ -512,6 +888,460 @@ export function parseWindowsRoutePrint(raw: string): HdoLocalRoute[] {
     });
   }
   return uniqueRoutes(routes);
+}
+
+function buildDarwinUserspaceTunnelCommand(
+  runtime: WireGuardConnectionRuntimeStatus,
+  configPath: string,
+  action: WireGuardTunnelAction
+): WireGuardTunnelCommand {
+  const wg = runtime.wg.command;
+  const wireGuardGo = runtime.wireGuardGo?.command;
+  if (!wg || !wireGuardGo) throw new Error(runtime.error ?? 'darwin userspace WireGuard runtime unavailable');
+
+  const profile = prepareDarwinUserspaceProfile(configPath);
+  const nameFile = `/var/run/wireguard/${profile.interfaceName}.name`;
+  const routeCommands = profile.allowedIps
+    .filter((cidr) => cidr.includes('/'))
+    .map((cidr) => {
+      const family = cidr.includes(':') ? '-inet6 -net' : '-net';
+      return action === 'up'
+        ? `route -q -n delete ${family} ${shellQuote(cidr)} >/dev/null 2>&1 || true\nroute -q -n add ${family} ${shellQuote(cidr)} -interface "$REAL_INTERFACE"`
+        : `route -q -n delete ${family} ${shellQuote(cidr)} >/dev/null 2>&1 || true`;
+    });
+  const addressCommands = profile.addresses.map((address) => {
+    if (address.includes(':')) return `ifconfig "$REAL_INTERFACE" inet6 ${shellQuote(address)} alias`;
+    return `ifconfig "$REAL_INTERFACE" inet ${shellQuote(address)} ${shellQuote(address.split('/')[0])} alias`;
+  });
+  const primaryAddress = profile.addresses[0]?.split('/')[0] ?? '';
+  const scriptLines = action === 'up'
+    ? [
+        'set -e',
+        'mkdir -p /var/run/wireguard',
+        `rm -f ${shellQuote(nameFile)}`,
+        `BEFORE_INTERFACES="$(${shellQuote(wg)} show interfaces 2>/dev/null || true)"`,
+        `WG_TUN_NAME_FILE=${shellQuote(nameFile)} ${shellQuote(wireGuardGo)} utun`,
+        `i=0; while [ ! -s ${shellQuote(nameFile)} ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done`,
+        `REAL_INTERFACE="$(cat ${shellQuote(nameFile)} 2>/dev/null || true)"`,
+        `if [ -z "$REAL_INTERFACE" ]; then AFTER_INTERFACES="$(${shellQuote(wg)} show interfaces 2>/dev/null || true)"; for candidate in $AFTER_INTERFACES; do case " $BEFORE_INTERFACES " in *" $candidate "*) ;; *) REAL_INTERFACE="$candidate"; break ;; esac; done; fi`,
+        '[ -n "$REAL_INTERFACE" ]',
+        `echo "$REAL_INTERFACE" > ${shellQuote(nameFile)}`,
+        `${shellQuote(wg)} setconf "$REAL_INTERFACE" ${shellQuote(profile.setConfigPath)}`,
+        'ifconfig "$REAL_INTERFACE" up',
+        ...addressCommands,
+        ...routeCommands
+      ]
+    : [
+        'set -e',
+        `REAL_INTERFACE="$(cat ${shellQuote(nameFile)} 2>/dev/null || true)"`,
+        `if [ -z "$REAL_INTERFACE" ] && [ -n ${shellQuote(primaryAddress)} ]; then for candidate in $(${shellQuote(wg)} show interfaces 2>/dev/null || true); do if ifconfig "$candidate" 2>/dev/null | grep -q ${shellQuote(primaryAddress)}; then REAL_INTERFACE="$candidate"; break; fi; done; fi`,
+        `if [ -n "$REAL_INTERFACE" ]; then`,
+        ...routeCommands.map((line) => `  ${line}`),
+        '  rm -f "/var/run/wireguard/$REAL_INTERFACE.sock"',
+        `  rm -f ${shellQuote(nameFile)}`,
+        'fi'
+      ];
+  const shellCommand = scriptLines.join('\n');
+  const script = `do shell script ${appleScriptString(shellCommand)} with administrator privileges`;
+  return {
+    action,
+    platform: runtime.platform,
+    configPath,
+    command: 'osascript',
+    args: ['-e', script],
+    displayCommand: `osascript -e ${shellQuote(script)}`,
+    needsAdmin: true,
+    runtime
+  };
+}
+
+function prepareDarwinUserspaceProfile(configPath: string): {
+  interfaceName: string;
+  addresses: string[];
+  allowedIps: string[];
+  setConfigPath: string;
+} {
+  const parsed = parseWireGuardProfile(configPath);
+  const setConfigPath = join(dirname(configPath), `${parsed.interfaceName}.setconf`);
+  writeFileSync(setConfigPath, parsed.setConfigLines.join('\n').trimEnd() + '\n', { mode: 0o600 });
+  return {
+    interfaceName: parsed.interfaceName,
+    addresses: parsed.addresses,
+    allowedIps: parsed.allowedIps,
+    setConfigPath
+  };
+}
+
+function parseWireGuardProfile(configPath: string): {
+  interfaceName: string;
+  addresses: string[];
+  allowedIps: string[];
+  setConfigLines: string[];
+} {
+  const raw = readFileSync(configPath, 'utf8');
+  const interfaceName = wireGuardInterfaceName(configPath);
+  const addresses: string[] = [];
+  const allowedIps: string[] = [];
+  const setConfigLines: string[] = [];
+  let section = '';
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const sectionMatch = trimmed.match(/^\[(.+)]$/);
+    if (sectionMatch) section = sectionMatch[1].toLowerCase();
+    const key = trimmed.split('=', 1)[0]?.trim().toLowerCase();
+    if (section === 'interface' && key === 'address') {
+      addresses.push(...valueList(line));
+      continue;
+    }
+    if (section === 'peer' && key === 'allowedips') {
+      allowedIps.push(...valueList(line));
+    }
+    if (section === 'interface' && ['address', 'dns', 'mtu', 'table', 'preup', 'predown', 'postup', 'postdown', 'saveconfig'].includes(key)) {
+      continue;
+    }
+    setConfigLines.push(line);
+  }
+  if (addresses.length === 0) throw new Error('WireGuard config missing Interface Address');
+  if (allowedIps.length === 0) throw new Error('WireGuard config missing Peer AllowedIPs');
+  return {
+    interfaceName,
+    addresses,
+    allowedIps: uniqueStrings(allowedIps),
+    setConfigLines
+  };
+}
+
+function wireGuardInterfaceName(configPath: string): string {
+  const name = basename(configPath).replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_=+.-]/g, '-').slice(0, 15);
+  return name || 'hdo';
+}
+
+function valueList(line: string): string[] {
+  return line
+    .replace(/^[^=]+=/, '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function resolveWireGuardRealInterface(runtime: WireGuardConnectionRuntimeStatus, interfaceName: string): string | null {
+  if (runtime.platform === 'darwin') {
+    const nameFile = `/var/run/wireguard/${interfaceName}.name`;
+    try {
+      if (existsSync(nameFile)) {
+        const value = readFileSync(nameFile, 'utf8').trim();
+        return value || null;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+  return interfaceName;
+}
+
+function parseWireGuardDump(raw: string): WireGuardPeerRuntimeStatus[] {
+  const lines = raw.split(/\r?\n/).filter(Boolean);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  return lines.slice(1).map((line) => {
+    const columns = line.split('\t');
+    const latestHandshakeSeconds = numberOrNull(columns[4]);
+    return {
+      publicKey: columns[0] ?? '',
+      endpoint: emptyToNull(columns[2]),
+      allowedIps: (columns[3] ?? '').split(',').map((item) => item.trim()).filter(Boolean),
+      latestHandshakeAt:
+        latestHandshakeSeconds && latestHandshakeSeconds > 0
+          ? new Date(latestHandshakeSeconds * 1000).toISOString()
+          : null,
+      latestHandshakeSeconds:
+        latestHandshakeSeconds && latestHandshakeSeconds > 0
+          ? Math.max(0, nowSeconds - latestHandshakeSeconds)
+          : null,
+      transferRxBytes: numberOrNull(columns[5]) ?? 0,
+      transferTxBytes: numberOrNull(columns[6]) ?? 0,
+      persistentKeepalive: numberOrNull(columns[7])
+    };
+  }).filter((peer) => Boolean(peer.publicKey));
+}
+
+function detectInterfaceRoutes(interfaceName: string): string[] {
+  if (process.platform === 'darwin') {
+    const raw = safeExecFile('netstat', ['-rn', '-f', 'inet']);
+    if (!raw) return [];
+    return raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.endsWith(` ${interfaceName}`) || line.includes(` ${interfaceName} `));
+  }
+  if (process.platform === 'linux') {
+    const raw = safeExecFile('ip', ['route', 'show', 'dev', interfaceName]);
+    return raw ? raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) : [];
+  }
+  return [];
+}
+
+function readInterfaceState(interfaceName: string): string | null {
+  if (process.platform === 'win32') return null;
+  return safeExecFile('ifconfig', [interfaceName]);
+}
+
+function safeExecFile(command: string, args: string[]): string | null {
+  try {
+    return execFileSync(command, args, {
+      encoding: 'utf8',
+      timeout: 3000,
+      windowsHide: true
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function numberOrNull(value: string | undefined): number | null {
+  if (!value) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function emptyToNull(value: string | undefined): string | null {
+  if (!value || value === '(none)') return null;
+  return value;
+}
+
+function resolveWireGuardTool(input: {
+  name: WireGuardToolName;
+  commandName: string;
+  installDir: string;
+  bundledDir?: string | null;
+  allowSystemFallback?: boolean;
+}): WireGuardToolStatus {
+  const target = platformArchKey();
+  const installedPath = join(input.installDir, input.commandName);
+  if (existsSync(installedPath)) {
+    const error = validateWireGuardTool(input.name, installedPath);
+    if (error) {
+      return {
+        target,
+        name: input.name,
+        available: false,
+        source: 'installed',
+        command: null,
+        bundledPath: null,
+        installedPath,
+        systemPath: null,
+        error
+      };
+    }
+    return {
+      target,
+      name: input.name,
+      available: true,
+      source: 'installed',
+      command: installedPath,
+      bundledPath: null,
+      installedPath,
+      systemPath: null
+    };
+  }
+
+  const bundledPath = findBundledWireGuardTool(input.name, input.bundledDir ?? null);
+  if (bundledPath) {
+    try {
+      const command = installBundledWireGuardTool(bundledPath, input.installDir, input.commandName);
+      const error = validateWireGuardTool(input.name, command);
+      if (error) {
+        return {
+          target,
+          name: input.name,
+          available: false,
+          source: 'bundled',
+          command: null,
+          bundledPath,
+          installedPath: command,
+          systemPath: null,
+          error
+        };
+      }
+      return {
+        target,
+        name: input.name,
+        available: true,
+        source: 'bundled',
+        command,
+        bundledPath,
+        installedPath: command,
+        systemPath: null
+      };
+    } catch (err) {
+      return {
+        target,
+        name: input.name,
+        available: false,
+        source: 'missing',
+        command: null,
+        bundledPath,
+        installedPath,
+        systemPath: null,
+        error: errorMessage(err)
+      };
+    }
+  }
+
+  if (input.allowSystemFallback) {
+    const systemPath = findSystemWireGuardTool(input.name, input.commandName);
+    if (systemPath) {
+      return {
+        target,
+        name: input.name,
+        available: true,
+        source: 'system',
+        command: systemPath,
+        bundledPath: null,
+        installedPath: null,
+        systemPath
+      };
+    }
+  }
+
+  return {
+    target,
+    name: input.name,
+    available: false,
+    source: 'missing',
+    command: null,
+    bundledPath: null,
+    installedPath,
+    systemPath: null,
+    error: `missing ${input.commandName} for ${target}`
+  };
+}
+
+function findSystemWireGuardTool(name: WireGuardToolName, commandName: string): string | null {
+  for (const candidate of systemToolCandidates(name, commandName)) {
+    if (isPathLike(candidate)) {
+      if (existsSync(candidate) && !validateWireGuardTool(name, candidate)) return candidate;
+      continue;
+    }
+    const resolved = which(candidate);
+    if (resolved && !validateWireGuardTool(name, resolved)) return resolved;
+  }
+  return null;
+}
+
+function validateWireGuardTool(name: WireGuardToolName, command: string): string | null {
+  if (name !== 'bash') return null;
+  try {
+    const raw = execFileSync(command, ['--version'], {
+      encoding: 'utf8',
+      timeout: 3000,
+      windowsHide: true
+    });
+    const match = raw.match(/version\s+(\d+)\./i);
+    if (!match || Number(match[1]) < 4) {
+      return 'macOS wg-quick requires Bash 4+';
+    }
+    return null;
+  } catch (err) {
+    return errorMessage(err);
+  }
+}
+
+function systemToolCandidates(name: WireGuardToolName, commandName: string): string[] {
+  if (process.platform === 'win32') {
+    const programFiles = process.env.ProgramFiles ?? 'C:\\Program Files';
+    const programFilesX86 = process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)';
+    const wireGuardName = name === 'wireguard' ? 'wireguard.exe' : commandName;
+    return [
+      wireGuardName,
+      join(programFiles, 'WireGuard', wireGuardName),
+      join(programFilesX86, 'WireGuard', wireGuardName)
+    ];
+  }
+  return [
+    commandName,
+    join('/opt/homebrew/bin', commandName),
+    join('/usr/local/bin', commandName),
+    join('/usr/bin', commandName),
+    join('/bin', commandName),
+    join('/usr/sbin', commandName),
+    join('/sbin', commandName)
+  ];
+}
+
+function which(commandName: string): string | null {
+  try {
+    const command = process.platform === 'win32' ? 'where.exe' : 'which';
+    const raw = execFileSync(command, [commandName], {
+      encoding: 'utf8',
+      timeout: 3000,
+      windowsHide: true
+    }).trim();
+    return raw.split(/\r?\n/).find(Boolean) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function bundledToolNames(name: WireGuardToolName): string[] {
+  if (process.platform === 'win32') {
+    if (name === 'wireguard') return ['wireguard.exe', 'wireguard.exe.gz'];
+    if (name === 'wg') return ['wg.exe', 'wg.exe.gz', 'wg', 'wg.gz'];
+  }
+  return [`${name}`, `${name}.gz`];
+}
+
+function wireGuardQuickEnv(runtime: WireGuardConnectionRuntimeStatus): Record<string, string> {
+  const dirs = uniqueStrings([
+    runtime.wg.command ? dirname(runtime.wg.command) : null,
+    runtime.wgQuick?.command ? dirname(runtime.wgQuick.command) : null,
+    runtime.wireGuardGo?.command ? dirname(runtime.wireGuardGo.command) : null,
+    runtime.bash?.command ? dirname(runtime.bash.command) : null,
+    ...defaultWireGuardPathDirs()
+  ].filter(isString));
+  const env: Record<string, string> = {
+    PATH: dirs.join(':')
+  };
+  if (runtime.wireGuardGo?.command) {
+    env.WG_QUICK_USERSPACE_IMPLEMENTATION = runtime.wireGuardGo.command;
+  }
+  return env;
+}
+
+function defaultWireGuardPathDirs(): string[] {
+  if (process.platform === 'win32') return [];
+  return ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
+}
+
+function appleScriptString(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function isPathLike(value: string): boolean {
+  return value.includes('/') || value.includes('\\') || /^[A-Za-z]:/.test(value);
+}
+
+function execFileAsync(
+  command: string,
+  args: string[],
+  options: { env?: NodeJS.ProcessEnv } = {}
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, {
+      encoding: 'utf8',
+      env: options.env,
+      windowsHide: true
+    }, (err, stdout, stderr) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve({
+        stdout: typeof stdout === 'string' ? stdout : String(stdout ?? ''),
+        stderr: typeof stderr === 'string' ? stderr : String(stderr ?? '')
+      });
+    });
+  });
 }
 
 function assertNonEmpty(value: string, label: string): void {
