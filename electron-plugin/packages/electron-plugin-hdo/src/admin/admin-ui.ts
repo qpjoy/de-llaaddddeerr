@@ -180,6 +180,67 @@ export function adminHtml(): string {
     .dot.ok { background: var(--accent-2); }
     .dot.warn { background: var(--warn); }
     .dot.bad { background: var(--bad); }
+    label.switch-control {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 40px;
+      padding: 7px 11px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--muted);
+      cursor: pointer;
+      user-select: none;
+      margin-bottom: 0;
+      font-size: inherit;
+    }
+    .switch-control input {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+      width: 1px;
+      height: 1px;
+      min-height: 0;
+      margin: 0;
+      padding: 0;
+    }
+    .switch-track {
+      position: relative;
+      width: 48px;
+      height: 26px;
+      border-radius: 999px;
+      border: 1px solid #cbd5df;
+      background: #dbe2ea;
+      transition: background 120ms ease, border-color 120ms ease;
+      flex: none;
+    }
+    .switch-thumb {
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.26);
+      transition: transform 120ms ease;
+    }
+    .switch-control input:checked + .switch-track {
+      border-color: var(--accent-2);
+      background: var(--accent-2);
+    }
+    .switch-control input:checked + .switch-track .switch-thumb {
+      transform: translateX(22px);
+    }
+    .switch-control input:disabled + .switch-track,
+    .switch-control input:disabled ~ .switch-text {
+      opacity: 0.55;
+    }
+    .switch-text {
+      color: var(--ink);
+      white-space: nowrap;
+    }
     label {
       display: grid;
       gap: 6px;
@@ -411,8 +472,11 @@ export function adminHtml(): string {
             <h3>常用操作</h3>
             <div class="row">
               <button class="btn primary" id="meshQuickStart">连接 / 更新 HDO</button>
-              <button class="btn good" id="meshConnectWireGuard">启动 WireGuard</button>
-              <button class="btn" id="meshDisconnectWireGuard">停止 WireGuard</button>
+              <label class="switch-control" title="启动或停止当前 WireGuard peer">
+                <input id="meshWireGuardSwitch" type="checkbox" />
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+                <span class="switch-text" id="meshWireGuardSwitchText">WireGuard 未运行</span>
+              </label>
               <button class="btn" id="meshRefreshSubscription">更新订阅</button>
             </div>
           </div>
@@ -535,8 +599,11 @@ export function adminHtml(): string {
             </label>
             <div class="row">
               <button class="btn primary" id="prepareWireGuard">生成 / 更新本机 Peer</button>
-              <button class="btn good" id="connectWireGuard">启动 WireGuard peer</button>
-              <button class="btn" id="disconnectWireGuard">停止 WireGuard peer</button>
+              <label class="switch-control" title="启动或停止当前 WireGuard peer">
+                <input id="wireGuardSwitch" type="checkbox" />
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+                <span class="switch-text" id="wireGuardSwitchText">WireGuard 未运行</span>
+              </label>
               <button class="btn" id="openWireGuard">定位配置</button>
               <button class="btn" id="rotateWireGuard">轮换密钥</button>
             </div>
@@ -757,6 +824,7 @@ export function adminHtml(): string {
       $('subscriptionOut').value = settings.lastSubscription || '';
       renderWireGuardPeer(settings.wireGuardPeer || null);
       renderWireGuardRuntimeStatus(s.wireGuardStatus || null);
+      renderWireGuardSwitches(s.wireGuardStatus || null, settings.wireGuardPeer || null);
       $('cmdDomestic').textContent = safeCommands.domestic || '';
       $('cmdHome').textContent = safeCommands.home || '';
       $('cmdOversea').textContent = safeCommands.oversea || '';
@@ -1150,6 +1218,23 @@ export function adminHtml(): string {
       )).join('') : '<tr><td colspan="4" class="muted">暂无运行中的 peer；若刚启动失败，先看上方错误。</td></tr>';
     }
 
+    function renderWireGuardSwitches(status, peer) {
+      const active = Boolean(status && status.active);
+      const hasConfig = Boolean(peer && peer.configPath);
+      const label = active ? 'WireGuard 运行中' : (hasConfig ? 'WireGuard 已停止' : 'WireGuard 未配置');
+      [
+        ['meshWireGuardSwitch', 'meshWireGuardSwitchText'],
+        ['wireGuardSwitch', 'wireGuardSwitchText']
+      ].forEach(([inputId, textId]) => {
+        const input = $(inputId);
+        const text = $(textId);
+        if (!input || !text) return;
+        input.checked = active;
+        input.disabled = !hasConfig;
+        text.textContent = label;
+      });
+    }
+
     function renderMeshPeers(s) {
       const admin = s.admin || {};
       const rows = [];
@@ -1304,6 +1389,25 @@ export function adminHtml(): string {
       ].join('\\n');
     }
 
+    async function setWireGuardRunning(shouldRun) {
+      const label = shouldRun ? '启动 WireGuard peer' : '停止 WireGuard peer';
+      try {
+        await runAction(label, async () => {
+          const result = await request('/api/client/wireguard/connect', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ action: shouldRun ? 'up' : 'down' })
+          });
+          if (result && result.ok === false) {
+            throw new Error(result.message || result.command || (shouldRun ? 'WireGuard 未启动' : 'WireGuard 未停止'));
+          }
+        });
+      } catch {
+        const s = snapshot || {};
+        renderWireGuardSwitches(s.wireGuardStatus || null, (s.settings && s.settings.wireGuardPeer) || null);
+      }
+    }
+
     document.querySelectorAll('.nav button').forEach((btn) => {
       btn.addEventListener('click', () => setTab(btn.dataset.tab));
     });
@@ -1314,9 +1418,9 @@ export function adminHtml(): string {
 
     $('refresh').addEventListener('click', () => load());
     $('meshQuickStart').addEventListener('click', () => $('quickStart').click());
-    $('meshConnectWireGuard').addEventListener('click', () => $('connectWireGuard').click());
-    $('meshDisconnectWireGuard').addEventListener('click', () => $('disconnectWireGuard').click());
     $('meshRefreshSubscription').addEventListener('click', () => $('fetchSubscription').click());
+    $('meshWireGuardSwitch').addEventListener('change', (event) => setWireGuardRunning(event.currentTarget.checked));
+    $('wireGuardSwitch').addEventListener('change', (event) => setWireGuardRunning(event.currentTarget.checked));
     $('saveSettings').addEventListener('click', () => runAction('保存控制面', async () => {
       await request('/api/settings', {
         method: 'POST',
@@ -1346,7 +1450,7 @@ export function adminHtml(): string {
       const connected = await request('/api/client/wireguard/connect', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action: 'up' })
+        body: JSON.stringify({ action: 'restart' })
       });
       if (connected && connected.ok === false) {
         throw new Error(connected.message || connected.command || 'WireGuard 未启动');
@@ -1379,26 +1483,6 @@ export function adminHtml(): string {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ rotate: true })
       });
-    }).catch(() => undefined));
-    $('connectWireGuard').addEventListener('click', () => runAction('启动 WireGuard peer', async () => {
-      const result = await request('/api/client/wireguard/connect', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action: 'up' })
-      });
-      if (result && result.ok === false) {
-        throw new Error(result.message || result.command || 'WireGuard 未启动');
-      }
-    }).catch(() => undefined));
-    $('disconnectWireGuard').addEventListener('click', () => runAction('停止 WireGuard peer', async () => {
-      const result = await request('/api/client/wireguard/connect', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action: 'down' })
-      });
-      if (result && result.ok === false) {
-        throw new Error(result.message || result.command || 'WireGuard 未停止');
-      }
     }).catch(() => undefined));
     $('openWireGuard').addEventListener('click', () => runAction('定位 WireGuard 配置', async () => {
       const result = await request('/api/client/wireguard/open', {

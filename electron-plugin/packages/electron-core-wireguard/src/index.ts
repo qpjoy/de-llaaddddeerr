@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, win32 as pathWin32 } from 'node:path';
 import { gunzipSync } from 'node:zlib';
@@ -47,7 +47,7 @@ export type WireGuardCliSource = 'installed' | 'bundled' | 'system' | 'missing';
 
 export type WireGuardToolName = 'wg' | 'wg-quick' | 'wireguard-go' | 'wireguard' | 'bash';
 
-export type WireGuardTunnelAction = 'up' | 'down';
+export type WireGuardTunnelAction = 'up' | 'down' | 'restart';
 
 export interface WireGuardRuntimeStatus {
   target: string;
@@ -525,9 +525,9 @@ export function buildWireGuardTunnelCommand(input: {
     const command = runtime.windowsWireGuard?.command;
     if (!command) throw new Error(runtime.error ?? 'wireguard.exe unavailable');
     const tunnelName = pathWin32.basename(configPath).replace(/\.[^.]+$/, '');
-    const wireGuardArgs = action === 'up'
-      ? ['/installtunnelservice', configPath]
-      : ['/uninstalltunnelservice', tunnelName];
+    const wireGuardArgs = action === 'down'
+      ? ['/uninstalltunnelservice', tunnelName]
+      : ['/installtunnelservice', configPath];
     const script = windowsElevatedStartProcessScript(command, wireGuardArgs, action, tunnelName);
     const powershell = windowsPowerShellCommand();
     return {
@@ -654,7 +654,9 @@ export async function setWireGuardTunnelState(input: {
     command: command.displayCommand,
     stdout: result.stdout,
     stderr: result.stderr,
-    message: input.action === 'up' ? '已启动 WireGuard peer。' : '已停止 WireGuard peer。',
+    message: input.action === 'down'
+      ? '已停止 WireGuard peer。'
+      : (input.action === 'restart' ? '已更新并启动 WireGuard peer。' : '已启动 WireGuard peer。'),
     runtime: command.runtime
   };
 }
@@ -685,6 +687,31 @@ export function getWireGuardTunnelStatus(input: {
       ...status,
       ok: false,
       error: input.runtime.error ?? input.runtime.warnings[0] ?? 'WireGuard runtime unavailable'
+    };
+  }
+  if (input.runtime.platform === 'win32') {
+    const wg = input.runtime.wg.command;
+    if (wg) {
+      const dump = tryExecFile(wg, ['show', profile.interfaceName, 'dump']);
+      if (dump.ok) {
+        const rawDump = dump.stdout.trim();
+        return {
+          ...status,
+          active: true,
+          peers: parseWireGuardDump(rawDump),
+          rawDump,
+          routes: detectInterfaceRoutes(profile.interfaceName),
+          ifconfig: readInterfaceState(profile.interfaceName)
+        };
+      }
+    }
+    const serviceState = readWindowsTunnelServiceState(profile.interfaceName);
+    return {
+      ...status,
+      active: serviceState === 'RUNNING',
+      routes: detectInterfaceRoutes(profile.interfaceName),
+      ifconfig: readInterfaceState(profile.interfaceName),
+      error: serviceState ? null : `WireGuard tunnel service WireGuardTunnel$${profile.interfaceName} 未安装`
     };
   }
   if (!realInterfaceName) return status;
@@ -1122,6 +1149,13 @@ function readInterfaceState(interfaceName: string): string | null {
   return safeExecFile('ifconfig', [interfaceName]);
 }
 
+function readWindowsTunnelServiceState(interfaceName: string): string | null {
+  const raw = tryExecFile('sc.exe', ['query', `WireGuardTunnel$${interfaceName}`]).stdout
+    || tryExecFile('sc', ['query', `WireGuardTunnel$${interfaceName}`]).stdout;
+  const match = raw?.match(/STATE\s*:\s*\d+\s+([A-Z_]+)/i);
+  return match?.[1]?.toUpperCase() ?? null;
+}
+
 function routeLooksLikeExistingHdoRoute(
   route: HdoLocalRoute,
   hdoRanges: Array<{ start: number; end: number }>
@@ -1146,14 +1180,26 @@ function rangeOverlapsAny(
 }
 
 function safeExecFile(command: string, args: string[]): string | null {
+  const result = tryExecFile(command, args);
+  return result.ok ? result.stdout.trim() : null;
+}
+
+function tryExecFile(command: string, args: string[]): { ok: boolean; stdout: string; stderr: string; error?: string } {
   try {
-    return execFileSync(command, args, {
+    const result = spawnSync(command, args, {
       encoding: 'utf8',
       timeout: 3000,
-      windowsHide: true
-    }).trim();
-  } catch {
-    return null;
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    return {
+      ok: result.status === 0 && !result.error,
+      stdout: String(result.stdout ?? ''),
+      stderr: String(result.stderr ?? ''),
+      error: result.error ? errorMessage(result.error) : undefined
+    };
+  } catch (err) {
+    return { ok: false, stdout: '', stderr: '', error: errorMessage(err) };
   }
 }
 
@@ -1389,14 +1435,9 @@ function windowsElevatedStartProcessScript(
   const serviceName = `WireGuardTunnel$${tunnelName}`;
   const serviceLookup = `$svc = Get-Service -Name ${powerShellString(serviceName)} -ErrorAction SilentlyContinue`;
   const preflightLines = action === 'up'
-    ? [
-        serviceLookup,
-        "if ($null -ne $svc -and $svc.Status -eq 'Running') { exit 0 }"
-      ]
-    : [
-        serviceLookup,
-        'if ($null -eq $svc) { exit 0 }'
-      ];
+    ? [serviceLookup, "if ($null -ne $svc -and $svc.Status -eq 'Running') { exit 0 }"]
+    : (action === 'down' ? [serviceLookup, 'if ($null -eq $svc) { exit 0 }'] : []);
+  const runWireGuard = (wireGuardArgs: string[]) => `& ${powerShellString(command)} ${wireGuardArgs.map(powerShellString).join(' ')}`;
   const elevatedLines = [
     "$ErrorActionPreference = 'Stop'",
     `$svc = Get-Service -Name ${powerShellString(serviceName)} -ErrorAction SilentlyContinue`,
@@ -1405,10 +1446,14 @@ function windowsElevatedStartProcessScript(
           "if ($null -ne $svc -and $svc.Status -eq 'Running') { exit 0 }",
           `if ($null -ne $svc) { Start-Service -Name ${powerShellString(serviceName)}; exit 0 }`
         ]
-      : [
+      : (action === 'down'
+        ? [
           'if ($null -eq $svc) { exit 0 }'
-        ]),
-    `& ${powerShellString(command)} ${args.map(powerShellString).join(' ')}`,
+          ]
+        : [
+            `if ($null -ne $svc) { ${runWireGuard(['/uninstalltunnelservice', tunnelName])}; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }`
+          ])),
+    runWireGuard(args),
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
     'exit 0'
   ];

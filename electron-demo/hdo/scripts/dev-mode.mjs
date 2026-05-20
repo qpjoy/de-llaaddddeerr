@@ -9,7 +9,7 @@
  *        demo behaves like a normal marketplace consumer app.
  */
 import { execSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -47,11 +47,11 @@ const LOCAL_DIRECT_DEP_NAMES = [
 
 const NPM_VERSIONS = {
   '@qpjoy/electron-market': '^0.3.19',
-  '@qpjoy/electron-plugin-hdo': '^0.1.18',
+  '@qpjoy/electron-plugin-hdo': '^0.1.19',
   '@qpjoy/electron-plugin-sdk': '^0.1.3',
   '@qpjoy/electron-plugin-tunnel': '^0.1.16',
   '@qpjoy/marketplace-db': '^0.1.1',
-  '@qpjoy/electron-core-wireguard': '^0.1.10',
+  '@qpjoy/electron-core-wireguard': '^0.1.11',
   '@qpjoy/electron-core-wireguard-engine-darwin-arm64': '^0.1.2',
   '@qpjoy/electron-core-wireguard-engine-darwin-x64': '^0.1.2',
   '@qpjoy/electron-core-wireguard-engine-linux-arm64': '^0.1.2',
@@ -126,6 +126,29 @@ function removeQpjoyDepsExcept(allowed) {
   }
 }
 
+function newestMtimeMs(root) {
+  if (!existsSync(root)) return 0;
+  const stat = statSync(root);
+  if (stat.isFile()) return stat.mtimeMs;
+  let newest = stat.mtimeMs;
+  for (const name of readdirSync(root)) {
+    if (['node_modules', '.local-packs', '.turbo'].includes(name)) continue;
+    newest = Math.max(newest, newestMtimeMs(resolve(root, name)));
+  }
+  return newest;
+}
+
+function localPacksAreFresh(tarballs) {
+  const tarballTimes = new Map(tarballs.map((file) => [file, statSync(resolve(PACKS_DIR, file)).mtimeMs]));
+  for (const entry of WORKSPACE_PACKS) {
+    const prefix = entry.name.replace(/^@/, '').replace('/', '-');
+    const tarball = tarballs.find((file) => file.startsWith(`${prefix}-`));
+    if (!tarball) return false;
+    if (newestMtimeMs(resolve(REPO_ROOT, entry.dir)) > (tarballTimes.get(tarball) ?? 0)) return false;
+  }
+  return true;
+}
+
 function existingLocalSetupIsValid() {
   if (sentinel !== 'local') return false;
   if (!existsSync(PACKS_DIR)) return false;
@@ -145,6 +168,7 @@ function existingLocalSetupIsValid() {
     const value = pkg.pnpm?.overrides?.[entry.name];
     if (typeof value !== 'string' || !value.startsWith('file:./.local-packs/')) return false;
   }
+  if (!localPacksAreFresh(tarballs)) return false;
   return existsSync(resolve(APP_DIR, 'node_modules', '@qpjoy', 'electron-market'));
 }
 
@@ -184,7 +208,6 @@ if (desired === 'npm') {
 
 if (existingLocalSetupIsValid()) {
   console.log('OK already in local mode');
-  console.log('   run `pnpm dev:reset && pnpm dev` to repack after source edits');
   process.exit(0);
 }
 

@@ -449,18 +449,36 @@ export class HdoController {
     };
   }
 
-  async connectWireGuardPeer(input: { action?: 'up' | 'down' | null } = {}): Promise<Record<string, unknown>> {
+  async connectWireGuardPeer(input: { action?: 'up' | 'down' | 'restart' | null } = {}): Promise<Record<string, unknown>> {
     const peer = this.settings.wireGuardPeer;
     const configPath = stringValue(peer?.configPath);
     if (!configPath || !existsSync(configPath)) {
       throw new Error('WireGuard 配置文件不存在，请先点击“连接 / 更新 HDO”或“生成 / 更新本机 Peer”。');
     }
-    const action = input.action === 'down' ? 'down' : 'up';
+    const action = input.action === 'down' ? 'down' : (input.action === 'restart' ? 'restart' : 'up');
     const runtime = resolveWireGuardConnectionRuntime({
       installDir: join(this.ctx.userDataDir, 'bin'),
       bundledDir: this.ctx.bundledWireGuardDir,
       allowSystemFallback: true
     });
+    if (action === 'restart' && runtime.platform !== 'win32') {
+      await setWireGuardTunnelState({
+        runtime,
+        configPath,
+        action: 'down'
+      });
+      const restarted = await setWireGuardTunnelState({
+        runtime,
+        configPath,
+        action: 'up'
+      });
+      return {
+        ...restarted,
+        action,
+        message: restarted.ok ? '已更新并启动 WireGuard peer。' : restarted.message,
+        runtime: publicWireGuardRuntime(restarted.runtime)
+      };
+    }
     const result = await setWireGuardTunnelState({
       runtime,
       configPath,
