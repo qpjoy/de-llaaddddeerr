@@ -361,11 +361,14 @@ export class HdoController {
         lastError =
           'manifest 中缺少 domestic WireGuard 公钥或 endpoint；请在服务器 HDO 管理页给 domestic 节点 metadata.wireGuard 填入 publicKey/listenPort。';
       } else {
-        const allowedIps = excludeLocalRoutesFromAllowedIps(
+        const exclusionCidrs = localCidrsForAllowedIpExclusion(routeProbe, domestic.routeCidrs);
+        let allowedIps = excludeLocalRoutesFromAllowedIps(
           domestic.routeCidrs,
-          localCidrsForAllowedIpExclusion(routeProbe, domestic.routeCidrs)
+          exclusionCidrs
         );
-        if (allowedIps.length === 0) {
+        if (allowedIps.length === 0 && process.platform === 'win32') {
+          allowedIps = domestic.routeCidrs;
+        } else if (allowedIps.length === 0) {
           throw new Error('服务端下发的 WireGuard AllowedIPs 与本机路由完全重叠，已拒绝生成会覆盖本地网络的配置。');
         }
         config = renderHdoClientWireGuardConfig({

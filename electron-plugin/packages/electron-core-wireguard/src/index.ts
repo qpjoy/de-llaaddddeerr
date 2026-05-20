@@ -1132,16 +1132,16 @@ function routeLooksLikeExistingHdoRoute(
   if (interfaceIp !== null && hdoRanges.some((range) => interfaceIp >= range.start && interfaceIp <= range.end)) {
     return true;
   }
-  if (!rangeIsCoveredByAny(routeRange, hdoRanges)) return false;
+  if (!rangeOverlapsAny(routeRange, hdoRanges)) return false;
   const gateway = (route.gateway ?? '').trim().toLowerCase();
   return !gateway || gateway === 'on-link' || gateway === '在链路上' || !isIpv4(gateway);
 }
 
-function rangeIsCoveredByAny(
+function rangeOverlapsAny(
   target: { start: number; end: number },
   ranges: Array<{ start: number; end: number }>
 ): boolean {
-  return ranges.some((range) => target.start >= range.start && target.end <= range.end);
+  return ranges.some((range) => target.start <= range.end && range.start <= target.end);
 }
 
 function safeExecFile(command: string, args: string[]): string | null {
