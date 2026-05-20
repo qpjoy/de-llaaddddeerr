@@ -250,6 +250,21 @@ export function useServerAdmin() {
     async listUsers(): Promise<PublicUser[]> {
       return api<PublicUser[]>('/admin/users');
     },
+    async createUser(input: {
+      username?: string | null;
+      email?: string | null;
+      phone?: string | null;
+      password: string;
+      displayName?: string | null;
+      role?: 'user' | 'admin' | 'banned';
+    }): Promise<PublicUser> {
+      const out = await api<PublicUser>('/admin/users', {
+        method: 'POST',
+        body: JSON.stringify(input)
+      });
+      toast(`已创建用户：${out.username ?? out.email ?? out.id}`);
+      return out;
+    },
     async setUserRole(id: string, role: 'user' | 'admin' | 'banned'): Promise<PublicUser> {
       const out = await api<PublicUser>(`/admin/users/${encodeURIComponent(id)}/role`, {
         method: 'POST',

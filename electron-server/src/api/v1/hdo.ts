@@ -829,7 +829,7 @@ async function renderDomesticWireGuardPeers(): Promise<string> {
     const overlayIp = normalizeOverlayIp(node.overlayIp);
     if (!publicKey || !overlayIp || seen.has(publicKey)) continue;
     seen.add(publicKey);
-    lines.push('', `# HDO home ${node.name}`, '[Peer]');
+    lines.push('', `# HDO member ${node.name}`, '[Peer]');
     lines.push(`PublicKey = ${publicKey}`);
     lines.push(`AllowedIPs = ${overlayIp}/32`);
     lines.push('PersistentKeepalive = 25');
@@ -897,7 +897,7 @@ async function buildReadiness(userId: string) {
   }
 
   if (enabledServices.length) completed.push('At least one HDO service configured');
-  else nextActions.push('Add home or oversea services that clients should receive');
+  else nextActions.push('Add H member or oversea services that clients should receive');
 
   if (profiles.some((row) => row.enabled)) completed.push('Routing profiles are ready');
   else blockers.push('No enabled routing profile');
@@ -942,9 +942,10 @@ async function buildReadiness(userId: string) {
 
 async function buildManifest(device: HdoDeviceRow) {
   await hdoStore.ensureDefaultProfiles();
-  const [generation, nodes, services, profiles, rateLimits, meshGroups, memberships] = await Promise.all([
+  const [generation, nodes, devices, services, profiles, rateLimits, meshGroups, memberships] = await Promise.all([
     hdoStore.getGeneration(),
     hdoStore.listNodes(),
+    hdoStore.listAllDevices(),
     hdoStore.listServices(),
     hdoStore.ensureDefaultProfiles(),
     hdoStore.listRateLimits(),
@@ -954,6 +955,13 @@ async function buildManifest(device: HdoDeviceRow) {
   const meshAccess = resolveMeshAccess(device.userId, meshGroups, memberships);
   const visibleNodes = meshAccess.active
     ? nodes.filter((row) => isVisibleForMesh(row.metadata, meshAccess.groupIds))
+    : [];
+  const visibleDevices = meshAccess.active
+    ? devices.filter((row) => {
+        if (row.id === device.id) return true;
+        const otherAccess = resolveMeshAccess(row.userId, meshGroups, memberships);
+        return otherAccess.groups.some((group) => meshAccess.groupIds.has(group.id));
+      })
     : [];
   const visibleNodeIds = new Set(visibleNodes.map((row) => row.id));
   const visibleServices = meshAccess.active
@@ -1003,6 +1011,17 @@ async function buildManifest(device: HdoDeviceRow) {
       domestic: wireGuardNodeSummary(pickDomesticNode(visibleNodes))
     },
     nodes: visibleNodes,
+    devices: visibleDevices.map((row) => ({
+      id: row.id,
+      userId: row.userId,
+      label: row.label,
+      platform: row.platform,
+      publicKey: row.publicKey,
+      overlayIp: row.overlayIp,
+      status: row.status,
+      lastSeenAt: row.lastSeenAt,
+      createdAt: row.createdAt
+    })),
     services: visibleServices,
     profiles: visibleProfiles,
     rateLimits: rateLimits.filter(

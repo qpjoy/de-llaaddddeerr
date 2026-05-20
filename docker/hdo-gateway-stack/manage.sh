@@ -25,7 +25,7 @@ Commands:
   deploy-domestic     Guided domestic-vps + WireGuard setup
   setup-domestic      Generate domestic wg-home server config
   add-home            Generate one home peer config and append it to wg-home
-  sync-domestic-peers Pull managed Home/Client peers from electron-server
+  sync-domestic-peers Pull managed H member/client peers from electron-server
   apply-domestic      Install generated wg-home config into /etc/wireguard
   deploy-domestic-mihomo-wireguard
                       Run docker/wg-mihomo-stack setup from this HDO entrypoint
@@ -580,7 +580,7 @@ cmd_menu() {
     "deploy-domestic-mihomo-wireguard  部署 domestic Docker Mihomo + WireGuard"
     "deploy-oversea-mihomo-hysteria2   部署 oversea Docker Mihomo + Hysteria2"
     "add-home           生成 Home WireGuard peer"
-    "sync-peers         同步服务端 Home/Client peers 到 domestic"
+    "sync-peers         同步服务端 H 成员/client peers 到 domestic"
     "apply-domestic     启用 wg-quick@hdo-home"
     "setup-egress       生成 oversea scoped egress 模板"
     "status             查看 HDO 状态"

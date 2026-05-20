@@ -900,8 +900,8 @@ const deploymentSteps = computed(() => {
       done: hasMesh && hasLicense
     },
     {
-      label: '接入 Home / 服务',
-      detail: '登记 Home 节点和可见服务，服务端会按 mesh 可见性下发到客户端。',
+      label: '接入 H 成员 / 服务',
+      detail: '登记 H 成员节点、客户端和可见服务，服务端会按 mesh 可见性下发到客户端。',
       done: hasHome && hasService
     },
     {
@@ -916,7 +916,7 @@ const deploymentCards = computed(() => [
   {
     key: 'domestic-wireguard',
     title: 'Domestic WireGuard gateway',
-    subtitle: 'H/D mesh 基础能力；没有 Oversea 也可以让多个 Home 互联。',
+    subtitle: 'H/D mesh 基础能力；没有 Oversea 也可以让多个 H 成员互联。',
     command: [
       "HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo deploy-domestic --yes --server-url http://127.0.0.1:8080 --public-host <domestic-public-ip-or-domain> --port 51888",
       "HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo sync-peers --server-url http://127.0.0.1:8080"
@@ -951,8 +951,8 @@ const deploymentCards = computed(() => [
   },
   {
     key: 'sync-domestic-peers',
-    title: '同步 Domestic peers',
-    subtitle: '把服务端管理的 Home / Client peers 下发到 D，并热更新 hdo-home。',
+    title: '同步 D 汇聚 peers',
+    subtitle: '把服务端管理的 H 成员节点 / 客户端 peer 写入 D 的 hdo-home，并热更新。',
     command: "HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo sync-peers --server-url http://127.0.0.1:8080",
     runKind: 'sync-domestic-peers' as HdoDeploymentKind,
     done: (overview.value?.devices ?? []).some((row) => Boolean(row.publicKey && row.overlayIp)),

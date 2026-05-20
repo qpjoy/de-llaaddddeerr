@@ -3,6 +3,7 @@
     <div class="toolbar-row q-mb-md">
       <div class="page-title">用户管理</div>
       <q-space />
+      <q-btn color="primary" icon="person_add" label="新建用户" @click="createOpen = true" />
       <q-btn flat round icon="refresh" @click="reload" />
     </div>
 
@@ -48,6 +49,26 @@
         </q-td>
       </template>
     </q-table>
+
+    <q-dialog v-model="createOpen">
+      <q-card style="min-width: 460px">
+        <q-card-section>
+          <div class="text-h6">新建用户</div>
+          <div class="text-caption text-grey-7">可用于预先创建 HWindows / HMac 等账号，再在 HDO 许可页加入 mesh。</div>
+        </q-card-section>
+        <q-card-section class="q-gutter-md">
+          <q-input v-model="createUsername" outlined dense label="用户名" />
+          <q-input v-model="createEmail" outlined dense label="邮箱（可空）" />
+          <q-input v-model="createDisplayName" outlined dense label="显示名（可空）" />
+          <q-input v-model="createPassword" outlined dense label="初始密码" type="password" />
+          <q-select v-model="createRole" outlined dense :options="['user', 'admin']" label="角色" />
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat label="取消" v-close-popup />
+          <q-btn color="primary" label="创建" :loading="creating" @click="submitCreate" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
 
     <q-dialog v-model="grantOpen">
       <q-card style="min-width: 420px">
@@ -110,6 +131,13 @@ const grantKind = ref<'free' | 'paid' | 'trial'>('paid');
 const grantExpiresAt = ref('');
 const grantExisting = ref<EntitlementRow[]>([]);
 const granting = ref(false);
+const createOpen = ref(false);
+const createUsername = ref('');
+const createEmail = ref('');
+const createDisplayName = ref('');
+const createPassword = ref('');
+const createRole = ref<'user' | 'admin'>('user');
+const creating = ref(false);
 
 async function reload(): Promise<void> {
   loading.value = true;
@@ -129,6 +157,31 @@ async function setRole(user: PublicUser, role: 'user' | 'admin' | 'banned'): Pro
     await reload();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function submitCreate(): Promise<void> {
+  if (!createPassword.value.trim() || (!createUsername.value.trim() && !createEmail.value.trim())) return;
+  creating.value = true;
+  try {
+    await admin.createUser({
+      username: createUsername.value || null,
+      email: createEmail.value || null,
+      displayName: createDisplayName.value || null,
+      password: createPassword.value,
+      role: createRole.value
+    });
+    createOpen.value = false;
+    createUsername.value = '';
+    createEmail.value = '';
+    createDisplayName.value = '';
+    createPassword.value = '';
+    createRole.value = 'user';
+    await reload();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    creating.value = false;
   }
 }
 

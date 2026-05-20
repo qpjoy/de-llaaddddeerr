@@ -1006,6 +1006,7 @@ export function adminHtml(): string {
       const groups = Array.isArray(license.groups) ? license.groups : [];
       const services = Array.isArray(manifest.services) ? manifest.services : [];
       const nodes = Array.isArray(manifest.nodes) ? manifest.nodes : [];
+      const meshDevices = Array.isArray(manifest.devices) ? manifest.devices : [];
       const device = manifest.device || (Array.isArray(s.devices) && s.devices[0]) || {};
       const peer = settings.wireGuardPeer || {};
       const runtime = s.wireGuardStatus || {};
@@ -1016,7 +1017,7 @@ export function adminHtml(): string {
       $('meshHomeGroup').textContent = groupsLabel;
       $('meshHomeTunnel').textContent = tunnelLabel;
       $('meshHomeServiceCount').textContent = String(services.length);
-      $('meshHomeNodeCount').textContent = String(nodes.length);
+      $('meshHomeNodeCount').textContent = String(nodes.length + meshDevices.length);
       $('meshHomeBanner').innerHTML =
         '<div class="banner ' + escapeAttr(deployment.level) + '">' +
         '<h3>' + escapeHtml(deployment.title) + '</h3>' +
@@ -1046,10 +1047,24 @@ export function adminHtml(): string {
         escapeHtml((svc.domains || []).join(', ')) + '</td></tr>'
       )).join('') : '<tr><td colspan="4" class="muted">暂无服务；等待服务端下发可见服务</td></tr>';
 
-      $('meshHomeNodesTable').innerHTML = nodes.length ? nodes.map((node) => (
+      const meshRows = [
+        ...nodes.map((node) => ({
+          kind: node.kind || 'node',
+          name: node.name || node.id || '',
+          overlay: node.overlayIp || node.publicHost || '',
+          status: node.status || ''
+        })),
+        ...meshDevices.map((row) => ({
+          kind: 'device',
+          name: row.label || row.id || '',
+          overlay: row.overlayIp || '',
+          status: row.status || row.platform || ''
+        }))
+      ];
+      $('meshHomeNodesTable').innerHTML = meshRows.length ? meshRows.map((node) => (
         '<tr><td>' + escapeHtml(node.kind || '') + '</td><td>' +
-        escapeHtml(node.name || node.id || '') + '</td><td>' +
-        escapeHtml(node.overlayIp || node.publicHost || '') + '</td><td>' +
+        escapeHtml(node.name || '') + '</td><td>' +
+        escapeHtml(node.overlay || '') + '</td><td>' +
         escapeHtml(node.status || '') + '</td></tr>'
       )).join('') : '<tr><td colspan="4" class="muted">暂无节点；等待服务端下发 mesh 节点</td></tr>';
     }
@@ -1158,6 +1173,10 @@ export function adminHtml(): string {
       const manifestNodes = Array.isArray(manifest.nodes) ? manifest.nodes : [];
       manifestNodes.forEach((node) => {
         addRow(node.kind || 'manifest', node.name || node.id || '', node.overlayIp || node.publicHost || '', node.status || '');
+      });
+      const manifestDevices = Array.isArray(manifest.devices) ? manifest.devices : [];
+      manifestDevices.forEach((device) => {
+        addRow('device', device.label || device.name || device.id || '', device.overlayIp || '', device.status || device.platform || '');
       });
       $('meshPeersTable').innerHTML = rows.length ? rows.map((row) => (
         '<tr><td>' + escapeHtml(row.kind) + '</td><td>' +
