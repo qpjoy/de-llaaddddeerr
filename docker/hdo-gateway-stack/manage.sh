@@ -27,6 +27,8 @@ Commands:
   add-home            Generate one home peer config and append it to wg-home
   sync-domestic-peers Pull managed H member/client peers from electron-server
   apply-domestic      Install generated wg-home config into /etc/wireguard
+  repair-domestic-routes
+                      Re-apply domestic peer routes and forwarding rules
   deploy-domestic-mihomo-wireguard
                       Run docker/wg-mihomo-stack setup from this HDO entrypoint
   deploy-oversea-mihomo-hysteria2
@@ -40,6 +42,7 @@ Examples:
   ./scripts/manage.sh hdo add-home --name home-main
   HDO_TOKEN=<admin bearer token> ./scripts/manage.sh hdo sync-domestic-peers --server-url http://domestic:8080
   sudo ./scripts/manage.sh hdo apply-domestic
+  sudo ./scripts/manage.sh hdo repair-domestic-routes
   sudo ./scripts/manage.sh hdo deploy-domestic-mihomo-wireguard
   sudo ./scripts/manage.sh hdo deploy-oversea-mihomo-hysteria2
 
@@ -268,6 +271,19 @@ sudo_apply_domestic() {
   fi
 }
 
+sudo_repair_domestic_routes() {
+  if [ "$(id -u)" -eq 0 ]; then
+    cmd_repair_domestic_routes
+    return
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo bash "$SCRIPT_DIR/manage.sh" repair-domestic-routes
+  else
+    warn "sudo not found; run as root later: ./scripts/manage.sh hdo repair-domestic-routes"
+    return 1
+  fi
+}
+
 cmd_deploy_domestic() {
   load_env
   local assume_yes=0 apply_now=1 create_home=1 setup_egress=1 force_setup=0
@@ -488,6 +504,22 @@ sync_domestic_peer_routes() {
   )
 }
 
+ensure_domestic_forwarding() {
+  local iface="${1:-hdo-home}"
+
+  [ "$(id -u)" -eq 0 ] || return 0
+
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+  sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+
+  if command -v iptables >/dev/null 2>&1; then
+    if ! iptables -C FORWARD -i "$iface" -o "$iface" -j ACCEPT >/dev/null 2>&1; then
+      iptables -I FORWARD -i "$iface" -o "$iface" -j ACCEPT \
+        || warn "failed to allow forwarding on $iface"
+    fi
+  fi
+}
+
 cmd_sync_domestic_peers() {
   load_env
   parse_common "$@"
@@ -519,10 +551,12 @@ cmd_sync_domestic_peers() {
     install -m 600 "$WG_DIR/wg-home.conf" /etc/wireguard/hdo-home.conf
     if command -v wg >/dev/null 2>&1 && wg show hdo-home >/dev/null 2>&1; then
       wg syncconf hdo-home <(wg-quick strip hdo-home)
+      ensure_domestic_forwarding hdo-home
       sync_domestic_peer_routes hdo-home /etc/wireguard/hdo-home.conf
       ok "reloaded live hdo-home WireGuard peers"
     else
       systemctl restart wg-quick@hdo-home || true
+      ensure_domestic_forwarding hdo-home
       sync_domestic_peer_routes hdo-home /etc/wireguard/hdo-home.conf
       ok "restarted wg-quick@hdo-home"
     fi
@@ -545,8 +579,21 @@ EOF
   install -d -m 700 /etc/wireguard
   install -m 600 "$WG_DIR/wg-home.conf" /etc/wireguard/hdo-home.conf
   systemctl enable --now wg-quick@hdo-home
+  ensure_domestic_forwarding hdo-home
   sync_domestic_peer_routes hdo-home /etc/wireguard/hdo-home.conf
   ok "enabled wg-quick@hdo-home"
+}
+
+cmd_repair_domestic_routes() {
+  [ "$(id -u)" -eq 0 ] || die "repair-domestic-routes must run as root"
+  ensure_wireguard_tools
+  require_cmd ip
+  [ -f /etc/wireguard/hdo-home.conf ] || die "missing /etc/wireguard/hdo-home.conf; run apply-domestic first"
+
+  ensure_domestic_forwarding hdo-home
+  sync_domestic_peer_routes hdo-home /etc/wireguard/hdo-home.conf
+  ok "repaired hdo-home peer routes and forwarding"
+  ip route show dev hdo-home || true
 }
 
 cmd_setup_oversea_egress() {
@@ -582,6 +629,7 @@ cmd_menu() {
     "add-home           生成 Home WireGuard peer"
     "sync-peers         同步服务端 H 成员/client peers 到 domestic"
     "apply-domestic     启用 wg-quick@hdo-home"
+    "repair-routes      修复 hdo-home peer 路由和转发"
     "setup-egress       生成 oversea scoped egress 模板"
     "status             查看 HDO 状态"
     "help               帮助"
@@ -600,6 +648,7 @@ cmd_menu() {
       add-home)        cmd_add_home ;;
       sync-peers)      cmd_sync_domestic_peers ;;
       apply-domestic)  sudo_apply_domestic ;;
+      repair-routes)   sudo_repair_domestic_routes ;;
       setup-egress)    cmd_setup_oversea_egress ;;
       status)          cmd_status ;;
       help)            usage ;;
@@ -657,6 +706,7 @@ case "$command" in
   add-home) cmd_add_home "$@" ;;
   sync-domestic-peers|sync-peers) cmd_sync_domestic_peers "$@" ;;
   apply-domestic) cmd_apply_domestic "$@" ;;
+  repair-domestic-routes|repair-routes) cmd_repair_domestic_routes "$@" ;;
   setup-oversea-egress) cmd_setup_oversea_egress "$@" ;;
   status) cmd_status "$@" ;;
   help|-h|--help) usage ;;
