@@ -1381,12 +1381,31 @@ function powerShellString(value: string): string {
 }
 
 function windowsElevatedStartProcessScript(command: string, args: string[]): string {
-  const argumentList = args.map(powerShellString).join(', ');
+  const argumentList = args.map(windowsCommandLineArg).join(' ');
   return [
     "$ErrorActionPreference = 'Stop'",
-    `$p = Start-Process -FilePath ${powerShellString(command)} -ArgumentList @(${argumentList}) -Verb RunAs -Wait -PassThru`,
+    `$p = Start-Process -FilePath ${powerShellString(command)} -ArgumentList ${powerShellString(argumentList)} -Verb RunAs -Wait -PassThru`,
     'if ($null -ne $p.ExitCode) { exit $p.ExitCode }'
   ].join('\n');
+}
+
+function windowsCommandLineArg(value: string): string {
+  if (value.length === 0) return '""';
+  if (!/[ \t\n\v"]/.test(value)) return value;
+  let out = '"';
+  let backslashes = 0;
+  for (const ch of value) {
+    if (ch === '\\') {
+      backslashes += 1;
+    } else if (ch === '"') {
+      out += '\\'.repeat(backslashes * 2 + 1) + '"';
+      backslashes = 0;
+    } else {
+      out += '\\'.repeat(backslashes) + ch;
+      backslashes = 0;
+    }
+  }
+  return out + '\\'.repeat(backslashes * 2) + '"';
 }
 
 function windowsPowerShellCommand(): string {
