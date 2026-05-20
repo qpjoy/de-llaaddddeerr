@@ -593,6 +593,10 @@ maybe_register_node() {
 
 command="${1:-menu}"
 shift || true
+if [ "$command" = "hdo" ]; then
+  command="${1:-menu}"
+  shift || true
+fi
 case "$command" in
   menu) cmd_menu ;;
   deploy-domestic|deploy) cmd_deploy_domestic "$@" ;;
