@@ -4,19 +4,31 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  '@qpjoy/electron-plugin-sdk': file:./.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz
+  '@qpjoy/marketplace-db': file:./.local-packs/qpjoy-marketplace-db-0.1.1.tgz
+  '@qpjoy/electron-market': file:./.local-packs/qpjoy-electron-market-0.3.19.tgz
+  '@qpjoy/electron-core-wireguard-engine-darwin-arm64': file:./.local-packs/qpjoy-electron-core-wireguard-engine-darwin-arm64-0.1.2.tgz
+  '@qpjoy/electron-core-wireguard-engine-darwin-x64': file:./.local-packs/qpjoy-electron-core-wireguard-engine-darwin-x64-0.1.2.tgz
+  '@qpjoy/electron-core-wireguard-engine-linux-arm64': file:./.local-packs/qpjoy-electron-core-wireguard-engine-linux-arm64-0.1.2.tgz
+  '@qpjoy/electron-core-wireguard-engine-linux-x64': file:./.local-packs/qpjoy-electron-core-wireguard-engine-linux-x64-0.1.2.tgz
+  '@qpjoy/electron-core-wireguard-engine-win32-x64': file:./.local-packs/qpjoy-electron-core-wireguard-engine-win32-x64-0.1.2.tgz
+  '@qpjoy/electron-core-wireguard': file:./.local-packs/qpjoy-electron-core-wireguard-0.1.10.tgz
+  '@qpjoy/electron-plugin-hdo': file:./.local-packs/qpjoy-electron-plugin-hdo-0.1.18.tgz
+
 importers:
 
   .:
     dependencies:
       '@qpjoy/electron-market':
-        specifier: ^0.3.18
-        version: 0.3.18(@qpjoy/electron-plugin-sdk@0.1.3(electron@34.5.8))(electron@34.5.8)
+        specifier: file:.local-packs/qpjoy-electron-market-0.3.19.tgz
+        version: file:.local-packs/qpjoy-electron-market-0.3.19.tgz(@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz(electron@34.5.8))(electron@34.5.8)
       '@qpjoy/electron-plugin-hdo':
-        specifier: ^0.1.11
-        version: 0.1.11(electron@34.5.8)
+        specifier: file:.local-packs/qpjoy-electron-plugin-hdo-0.1.18.tgz
+        version: file:.local-packs/qpjoy-electron-plugin-hdo-0.1.18.tgz(electron@34.5.8)
       '@qpjoy/electron-plugin-sdk':
-        specifier: ^0.1.3
-        version: 0.1.3(electron@34.5.8)
+        specifier: file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz
+        version: file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz(electron@34.5.8)
       '@qpjoy/electron-plugin-tunnel':
         specifier: ^0.1.16
         version: 0.1.16(electron@34.5.8)
@@ -261,50 +273,59 @@ packages:
     engines: {node: ^12.13.0 || ^14.15.0 || >=16.0.0}
     deprecated: This functionality has been moved to @npmcli/fs
 
-  '@qpjoy/electron-core-wireguard-engine-darwin-arm64@0.1.2':
-    resolution: {integrity: sha512-D2/GaoWFyaozILsu7BExHZ1qlKB7m9k2eKVsdNU5Fuw2BR9r2kjAR1f1aN8Q7Iaa+pUaXIP3uTWujaPU4Btlow==}
+  '@qpjoy/electron-core-wireguard-engine-darwin-arm64@file:.local-packs/qpjoy-electron-core-wireguard-engine-darwin-arm64-0.1.2.tgz':
+    resolution: {integrity: sha512-D2/GaoWFyaozILsu7BExHZ1qlKB7m9k2eKVsdNU5Fuw2BR9r2kjAR1f1aN8Q7Iaa+pUaXIP3uTWujaPU4Btlow==, tarball: file:.local-packs/qpjoy-electron-core-wireguard-engine-darwin-arm64-0.1.2.tgz}
+    version: 0.1.2
     cpu: [arm64]
     os: [darwin]
 
-  '@qpjoy/electron-core-wireguard-engine-darwin-x64@0.1.2':
-    resolution: {integrity: sha512-WtofFiEYgvQUl13kzIAy76Qy8XeUXG8EPTh61t7hgsii4slwtkjEzOhQ360M1nT2EtRmzWoVBpRBLIBo8Q6HmA==}
+  '@qpjoy/electron-core-wireguard-engine-darwin-x64@file:.local-packs/qpjoy-electron-core-wireguard-engine-darwin-x64-0.1.2.tgz':
+    resolution: {integrity: sha512-WtofFiEYgvQUl13kzIAy76Qy8XeUXG8EPTh61t7hgsii4slwtkjEzOhQ360M1nT2EtRmzWoVBpRBLIBo8Q6HmA==, tarball: file:.local-packs/qpjoy-electron-core-wireguard-engine-darwin-x64-0.1.2.tgz}
+    version: 0.1.2
     cpu: [x64]
     os: [darwin]
 
-  '@qpjoy/electron-core-wireguard-engine-linux-arm64@0.1.2':
-    resolution: {integrity: sha512-OrDGG4bXF82CE+bvf2k14zq/V2jvM+t1MzEj6EsvcPoWdQiSb9lEbkNxWGtv/+qhNMrQL9caB6hSgCI6tGGkhw==}
+  '@qpjoy/electron-core-wireguard-engine-linux-arm64@file:.local-packs/qpjoy-electron-core-wireguard-engine-linux-arm64-0.1.2.tgz':
+    resolution: {integrity: sha512-OrDGG4bXF82CE+bvf2k14zq/V2jvM+t1MzEj6EsvcPoWdQiSb9lEbkNxWGtv/+qhNMrQL9caB6hSgCI6tGGkhw==, tarball: file:.local-packs/qpjoy-electron-core-wireguard-engine-linux-arm64-0.1.2.tgz}
+    version: 0.1.2
     cpu: [arm64]
     os: [linux]
 
-  '@qpjoy/electron-core-wireguard-engine-linux-x64@0.1.2':
-    resolution: {integrity: sha512-zymy+plOzywPmApTxryQFN5MmnPpddxFTP/hDVrJgKmTuC1eA2QWlGt24v1AxhK5ZIBdO1mMzpaRBJYep8owFQ==}
+  '@qpjoy/electron-core-wireguard-engine-linux-x64@file:.local-packs/qpjoy-electron-core-wireguard-engine-linux-x64-0.1.2.tgz':
+    resolution: {integrity: sha512-zymy+plOzywPmApTxryQFN5MmnPpddxFTP/hDVrJgKmTuC1eA2QWlGt24v1AxhK5ZIBdO1mMzpaRBJYep8owFQ==, tarball: file:.local-packs/qpjoy-electron-core-wireguard-engine-linux-x64-0.1.2.tgz}
+    version: 0.1.2
     cpu: [x64]
     os: [linux]
 
-  '@qpjoy/electron-core-wireguard-engine-win32-x64@0.1.2':
-    resolution: {integrity: sha512-UpXqxSaAoA3b56svZitSpdXG0RfwGnrC5dqmfLfSe6gBWc7hZiNJbEaS66zjQEGRLl6hEcyAehz3ACd6ysRZ7Q==}
+  '@qpjoy/electron-core-wireguard-engine-win32-x64@file:.local-packs/qpjoy-electron-core-wireguard-engine-win32-x64-0.1.2.tgz':
+    resolution: {integrity: sha512-UpXqxSaAoA3b56svZitSpdXG0RfwGnrC5dqmfLfSe6gBWc7hZiNJbEaS66zjQEGRLl6hEcyAehz3ACd6ysRZ7Q==, tarball: file:.local-packs/qpjoy-electron-core-wireguard-engine-win32-x64-0.1.2.tgz}
+    version: 0.1.2
     cpu: [x64]
     os: [win32]
 
-  '@qpjoy/electron-core-wireguard@0.1.3':
-    resolution: {integrity: sha512-ze75AfMTn/DObfpKtq1MPfBZWGHeCFJvJech6dByYGTyb6mtwiegbMPpCLt/DAwBgsuU4gA2ehoLhCv9RTxvgA==}
+  '@qpjoy/electron-core-wireguard@file:.local-packs/qpjoy-electron-core-wireguard-0.1.10.tgz':
+    resolution: {integrity: sha512-q1my9ARoZo3u8BwSVrKPbJlJD0rHtlhuE4HNGUQIsmrzCpw15dxILvQQEUiY3yPIedBQkKgtrsst0iKEzZYalA==, tarball: file:.local-packs/qpjoy-electron-core-wireguard-0.1.10.tgz}
+    version: 0.1.10
 
-  '@qpjoy/electron-market@0.3.18':
-    resolution: {integrity: sha512-/yQvHcmyOq3eMCd+Qt8rDtUC6X2Cot6Nd9BxkG5cHucYxo8cLT31c2AQSitquUFc71wcdZI7pQn1g6xL57gIJg==}
+  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.3.19.tgz':
+    resolution: {integrity: sha512-pTc9D3+zihr0YolvANeXDzvWZ649tcruvu3CI0Pms5claC5xBLGboqiV5nMnARmygZzgG0Ihj9ukXACjXhewWQ==, tarball: file:.local-packs/qpjoy-electron-market-0.3.19.tgz}
+    version: 0.3.19
     peerDependencies:
       '@qpjoy/electron-plugin-sdk': '>=0.1.0'
       electron: '>=28'
 
-  '@qpjoy/electron-plugin-hdo@0.1.11':
-    resolution: {integrity: sha512-oA8P2n4xK4jQAYISvcZt8Xs6vEyxIq498k0FMBsa8KTkPhkJa+Ko5DosMYnqWidXW2dk4PwsdUFploZbE0mcwQ==}
+  '@qpjoy/electron-plugin-hdo@file:.local-packs/qpjoy-electron-plugin-hdo-0.1.18.tgz':
+    resolution: {integrity: sha512-PUSx3O11KTBORvZksERUXMu1s3Fej+evVcFxxJuSSrV0vinuJhBSb9vBso6o4ChnkCZjECPZFqs7UD9QfkiDPA==, tarball: file:.local-packs/qpjoy-electron-plugin-hdo-0.1.18.tgz}
+    version: 0.1.18
     peerDependencies:
       electron: '>=28'
     peerDependenciesMeta:
       electron:
         optional: true
 
-  '@qpjoy/electron-plugin-sdk@0.1.3':
-    resolution: {integrity: sha512-r0Oby4ayBM+1vav3Tj5SAOVCSs0zvcAzlNC2Wuni7f4OT8A36G8JhE82C8tsU1Z7qtPVMiY8BMQQ38pir/6hxA==}
+  '@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz':
+    resolution: {integrity: sha512-r0Oby4ayBM+1vav3Tj5SAOVCSs0zvcAzlNC2Wuni7f4OT8A36G8JhE82C8tsU1Z7qtPVMiY8BMQQ38pir/6hxA==, tarball: file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz}
+    version: 0.1.3
     peerDependencies:
       electron: '>=28'
     peerDependenciesMeta:
@@ -342,8 +363,9 @@ packages:
     peerDependencies:
       electron: '>=28'
 
-  '@qpjoy/marketplace-db@0.1.1':
-    resolution: {integrity: sha512-3eL0XkHVe3zaEH97z0hL88OZDIT30/k5LOI5bhgZ6M9xfIVeP+L5CahjAZ/DAoVTfH4vb7ZjjXIzHTJMrnbqPA==}
+  '@qpjoy/marketplace-db@file:.local-packs/qpjoy-marketplace-db-0.1.1.tgz':
+    resolution: {integrity: sha512-3eL0XkHVe3zaEH97z0hL88OZDIT30/k5LOI5bhgZ6M9xfIVeP+L5CahjAZ/DAoVTfH4vb7ZjjXIzHTJMrnbqPA==, tarball: file:.local-packs/qpjoy-marketplace-db-0.1.1.tgz}
+    version: 0.1.1
 
   '@sindresorhus/is@4.6.0':
     resolution: {integrity: sha512-t09vSN3MdfsyCHoFcTRCH/iUtG7OJ0CsjzB8cjAmKc/va/kIgeDI/TxsigdncE/4be734m0cvIYwNaV4i2XqAw==}
@@ -2614,44 +2636,44 @@ snapshots:
       mkdirp: 1.0.4
       rimraf: 3.0.2
 
-  '@qpjoy/electron-core-wireguard-engine-darwin-arm64@0.1.2':
+  '@qpjoy/electron-core-wireguard-engine-darwin-arm64@file:.local-packs/qpjoy-electron-core-wireguard-engine-darwin-arm64-0.1.2.tgz':
     optional: true
 
-  '@qpjoy/electron-core-wireguard-engine-darwin-x64@0.1.2':
+  '@qpjoy/electron-core-wireguard-engine-darwin-x64@file:.local-packs/qpjoy-electron-core-wireguard-engine-darwin-x64-0.1.2.tgz':
     optional: true
 
-  '@qpjoy/electron-core-wireguard-engine-linux-arm64@0.1.2':
+  '@qpjoy/electron-core-wireguard-engine-linux-arm64@file:.local-packs/qpjoy-electron-core-wireguard-engine-linux-arm64-0.1.2.tgz':
     optional: true
 
-  '@qpjoy/electron-core-wireguard-engine-linux-x64@0.1.2':
+  '@qpjoy/electron-core-wireguard-engine-linux-x64@file:.local-packs/qpjoy-electron-core-wireguard-engine-linux-x64-0.1.2.tgz':
     optional: true
 
-  '@qpjoy/electron-core-wireguard-engine-win32-x64@0.1.2':
+  '@qpjoy/electron-core-wireguard-engine-win32-x64@file:.local-packs/qpjoy-electron-core-wireguard-engine-win32-x64-0.1.2.tgz':
     optional: true
 
-  '@qpjoy/electron-core-wireguard@0.1.3':
+  '@qpjoy/electron-core-wireguard@file:.local-packs/qpjoy-electron-core-wireguard-0.1.10.tgz':
     optionalDependencies:
-      '@qpjoy/electron-core-wireguard-engine-darwin-arm64': 0.1.2
-      '@qpjoy/electron-core-wireguard-engine-darwin-x64': 0.1.2
-      '@qpjoy/electron-core-wireguard-engine-linux-arm64': 0.1.2
-      '@qpjoy/electron-core-wireguard-engine-linux-x64': 0.1.2
-      '@qpjoy/electron-core-wireguard-engine-win32-x64': 0.1.2
+      '@qpjoy/electron-core-wireguard-engine-darwin-arm64': file:.local-packs/qpjoy-electron-core-wireguard-engine-darwin-arm64-0.1.2.tgz
+      '@qpjoy/electron-core-wireguard-engine-darwin-x64': file:.local-packs/qpjoy-electron-core-wireguard-engine-darwin-x64-0.1.2.tgz
+      '@qpjoy/electron-core-wireguard-engine-linux-arm64': file:.local-packs/qpjoy-electron-core-wireguard-engine-linux-arm64-0.1.2.tgz
+      '@qpjoy/electron-core-wireguard-engine-linux-x64': file:.local-packs/qpjoy-electron-core-wireguard-engine-linux-x64-0.1.2.tgz
+      '@qpjoy/electron-core-wireguard-engine-win32-x64': file:.local-packs/qpjoy-electron-core-wireguard-engine-win32-x64-0.1.2.tgz
 
-  '@qpjoy/electron-market@0.3.18(@qpjoy/electron-plugin-sdk@0.1.3(electron@34.5.8))(electron@34.5.8)':
+  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.3.19.tgz(@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz(electron@34.5.8))(electron@34.5.8)':
     dependencies:
-      '@qpjoy/electron-plugin-sdk': 0.1.3(electron@34.5.8)
-      '@qpjoy/marketplace-db': 0.1.1
+      '@qpjoy/electron-plugin-sdk': file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz(electron@34.5.8)
+      '@qpjoy/marketplace-db': file:.local-packs/qpjoy-marketplace-db-0.1.1.tgz
       better-sqlite3: 11.10.0
       electron: 34.5.8
       semver: 7.8.0
 
-  '@qpjoy/electron-plugin-hdo@0.1.11(electron@34.5.8)':
+  '@qpjoy/electron-plugin-hdo@file:.local-packs/qpjoy-electron-plugin-hdo-0.1.18.tgz(electron@34.5.8)':
     dependencies:
-      '@qpjoy/electron-core-wireguard': 0.1.3
+      '@qpjoy/electron-core-wireguard': file:.local-packs/qpjoy-electron-core-wireguard-0.1.10.tgz
     optionalDependencies:
       electron: 34.5.8
 
-  '@qpjoy/electron-plugin-sdk@0.1.3(electron@34.5.8)':
+  '@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz(electron@34.5.8)':
     optionalDependencies:
       electron: 34.5.8
 
@@ -2681,9 +2703,9 @@ snapshots:
       '@qpjoy/electron-plugin-tunnel-engine-linux-arm64': 0.1.5
       '@qpjoy/electron-plugin-tunnel-engine-linux-x64': 0.1.5
       '@qpjoy/electron-plugin-tunnel-engine-win32-x64': 0.1.5
-      '@qpjoy/marketplace-db': 0.1.1
+      '@qpjoy/marketplace-db': file:.local-packs/qpjoy-marketplace-db-0.1.1.tgz
 
-  '@qpjoy/marketplace-db@0.1.1':
+  '@qpjoy/marketplace-db@file:.local-packs/qpjoy-marketplace-db-0.1.1.tgz':
     dependencies:
       better-sqlite3: 11.10.0
 

@@ -20,9 +20,9 @@
     "build:local": "pnpm --dir ../../electron-market build && pnpm --dir ../../electron-plugin build:packages"
   },
   "dependencies": {
-    "@qpjoy/electron-market": "^0.3.19",
-    "@qpjoy/electron-plugin-hdo": "^0.1.18",
-    "@qpjoy/electron-plugin-sdk": "^0.1.3",
+    "@qpjoy/electron-market": "file:./.local-packs/qpjoy-electron-market-0.3.19.tgz",
+    "@qpjoy/electron-plugin-hdo": "file:./.local-packs/qpjoy-electron-plugin-hdo-0.1.18.tgz",
+    "@qpjoy/electron-plugin-sdk": "file:./.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz",
     "@qpjoy/electron-plugin-tunnel": "^0.1.16"
   },
   "devDependencies": {
@@ -39,6 +39,18 @@
       "electron-winstaller",
       "fs-xattr",
       "macos-alias"
-    ]
+    ],
+    "overrides": {
+      "@qpjoy/electron-plugin-sdk": "file:./.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz",
+      "@qpjoy/marketplace-db": "file:./.local-packs/qpjoy-marketplace-db-0.1.1.tgz",
+      "@qpjoy/electron-market": "file:./.local-packs/qpjoy-electron-market-0.3.19.tgz",
+      "@qpjoy/electron-core-wireguard-engine-darwin-arm64": "file:./.local-packs/qpjoy-electron-core-wireguard-engine-darwin-arm64-0.1.2.tgz",
+      "@qpjoy/electron-core-wireguard-engine-darwin-x64": "file:./.local-packs/qpjoy-electron-core-wireguard-engine-darwin-x64-0.1.2.tgz",
+      "@qpjoy/electron-core-wireguard-engine-linux-arm64": "file:./.local-packs/qpjoy-electron-core-wireguard-engine-linux-arm64-0.1.2.tgz",
+      "@qpjoy/electron-core-wireguard-engine-linux-x64": "file:./.local-packs/qpjoy-electron-core-wireguard-engine-linux-x64-0.1.2.tgz",
+      "@qpjoy/electron-core-wireguard-engine-win32-x64": "file:./.local-packs/qpjoy-electron-core-wireguard-engine-win32-x64-0.1.2.tgz",
+      "@qpjoy/electron-core-wireguard": "file:./.local-packs/qpjoy-electron-core-wireguard-0.1.10.tgz",
+      "@qpjoy/electron-plugin-hdo": "file:./.local-packs/qpjoy-electron-plugin-hdo-0.1.18.tgz"
+    }
   }
 }
