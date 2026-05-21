@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { createConnection } from 'node:net';
 import { dirname, resolve } from 'node:path';
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -10,6 +11,8 @@ import { toPublic } from '../../auth/types.js';
 import { auditStore, hdoStore, usersStore } from '../../data/index.js';
 import type {
   HdoArtifactKind,
+  HdoDeviceMeshStateRow,
+  HdoDeviceMeshStateStatus,
   HdoDeviceRow,
   HdoDeviceTaskKind,
   HdoDeviceTaskStatus,
@@ -22,12 +25,29 @@ import type {
   HdoNodeStatus,
   HdoProfileMode,
   HdoRateLimitSubjectType,
+  HdoServiceRow,
   HdoServiceProtocol
 } from '../../data/storage-types.js';
 
 const NODE_KINDS: readonly HdoNodeKind[] = ['domestic', 'home', 'oversea'];
 const NODE_STATUSES: readonly HdoNodeStatus[] = ['pending', 'online', 'offline', 'error'];
 const SERVICE_PROTOCOLS: readonly HdoServiceProtocol[] = ['tcp', 'udp', 'http', 'https'];
+const HDO_SERVICE_PROBE_PORTS = [
+  22,
+  80,
+  443,
+  3000,
+  3306,
+  5173,
+  5432,
+  6379,
+  8000,
+  8080,
+  8443,
+  9000,
+  9090
+] as const;
+const HDO_SERVICE_PROBE_TIMEOUT_MS = 700;
 const PROFILE_MODES: readonly HdoProfileMode[] = [
   'home-only',
   'home-foreign',
@@ -46,12 +66,18 @@ const MEMBERSHIP_STATUSES: readonly HdoMeshMembershipStatus[] = [
   'suspended',
   'revoked'
 ];
+const DEVICE_MESH_STATE_STATUSES: readonly HdoDeviceMeshStateStatus[] = [
+  'active',
+  'disabled',
+  'kicked'
+];
 const DEVICE_TASK_KINDS: readonly HdoDeviceTaskKind[] = [
   'install-plugin',
   'uninstall-plugin',
   'activate-plugin',
   'deactivate-plugin',
-  'apply-hdo-profile'
+  'apply-hdo-profile',
+  'notify'
 ];
 const DEVICE_TASK_STATUSES: readonly HdoDeviceTaskStatus[] = [
   'pending',
@@ -137,15 +163,27 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
     }
     const label = asOptionalString(body.label) ?? 'HDO client';
     const publicKey = asOptionalString(body.publicKey) ?? existing?.publicKey ?? null;
+    const [devices, meshGroups, memberships, deviceMeshStates] = await Promise.all([
+      hdoStore.listAllDevices(),
+      hdoStore.listMeshGroups(),
+      hdoStore.listMeshMemberships(),
+      hdoStore.listDeviceMeshStates()
+    ]);
+    const baseMeshAccess = resolveMeshAccess(req.currentUser!.id, meshGroups, memberships);
+    const deviceMeshAccess = resolveMeshAccess(
+      req.currentUser!.id,
+      meshGroups,
+      memberships,
+      deviceMeshStates,
+      id
+    );
+    if (existing && baseMeshAccess.active && !deviceMeshAccess.active) {
+      reply.code(403);
+      return { error: 'device is disabled or kicked from all active mesh groups' };
+    }
     let overlayIp = asOptionalString(body.overlayIp) ?? existing?.overlayIp ?? null;
     if (!overlayIp && publicKey) {
-      const [devices, meshGroups, memberships] = await Promise.all([
-        hdoStore.listAllDevices(),
-        hdoStore.listMeshGroups(),
-        hdoStore.listMeshMemberships()
-      ]);
-      const meshAccess = resolveMeshAccess(req.currentUser!.id, meshGroups, memberships);
-      overlayIp = allocateDeviceOverlayIp(devices, id, addressPlanForMeshAccess(meshAccess).userCidr);
+      overlayIp = allocateDeviceOverlayIp(devices, id, addressPlanForMeshAccess(deviceMeshAccess).userCidr);
     }
     const metadataInput = asPlainObject(body.metadata);
     const metadata = metadataInput ? { ...(existing?.metadata ?? {}), ...metadataInput } : existing?.metadata ?? null;
@@ -158,6 +196,9 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       overlayIp,
       status: pick(body.status, NODE_STATUSES) ?? 'online',
       metadata
+    });
+    await ensureDeviceMeshStatesForDevice(device, meshGroups, memberships, deviceMeshStates, {
+      touch: true
     });
     await auditStore.insert({
       actorUserId: req.currentUser!.id,
@@ -185,6 +226,77 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       const plugins = asPluginStates(body.plugins);
       const rows = await hdoStore.upsertDevicePluginStates(device.id, plugins);
       return rows;
+    }
+  );
+
+  app.post<{ Params: { deviceId: string } }>(
+    '/api/v1/hdo/devices/:deviceId/services',
+    { preHandler: requireAuth },
+    async (req, reply) => {
+      const device = await requireReadableDevice(req, reply, req.params.deviceId);
+      if (!device) return;
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const targetPort = toPort(body.targetPort ?? body.port);
+      if (!targetPort) {
+        reply.code(400);
+        return { error: 'valid targetPort required' };
+      }
+      const targetHost = normalizeOverlayIp(device.overlayIp);
+      if (!targetHost) {
+        reply.code(409);
+        return { error: 'device overlayIp is required before publishing services' };
+      }
+      const [meshGroups, memberships, deviceMeshStates, services] = await Promise.all([
+        hdoStore.listMeshGroups(),
+        hdoStore.listMeshMemberships(),
+        hdoStore.listDeviceMeshStates(),
+        hdoStore.listServices()
+      ]);
+      const meshAccess = resolveMeshAccess(
+        device.userId,
+        meshGroups,
+        memberships,
+        deviceMeshStates,
+        device.id
+      );
+      if (!meshAccess.active) {
+        reply.code(403);
+        return { error: 'device is not active in any mesh group' };
+      }
+      const existing = services.find((row) => isDevicePublishedService(row, device.id, targetPort));
+      const existingNames = new Set(services.map((row) => row.name));
+      const name = existing?.name ?? uniqueServiceName(
+        serviceNameFromInput(body.name, `${device.label}-${targetPort}`),
+        existingNames
+      );
+      const row = await hdoStore.upsertService({
+        id: existing?.id ?? asOptionalString(body.id) ?? undefined,
+        name,
+        nodeId: null,
+        targetHost,
+        targetPort,
+        protocol: pick(body.protocol, SERVICE_PROTOCOLS) ?? serviceProtocolForPort(targetPort),
+        domains: asStringArray(body.domains),
+        enabled: asOptionalBoolean(body.enabled) ?? true,
+        metadata: {
+          ...(existing?.metadata ?? {}),
+          ...(asPlainObject(body.metadata) ?? {}),
+          source: 'device-published',
+          deviceId: device.id,
+          userId: device.userId,
+          meshGroupIds: [...meshAccess.groupIds],
+          publishedAt: new Date().toISOString()
+        }
+      });
+      await auditStore.insert({
+        actorUserId: req.currentUser?.id ?? null,
+        actorIp: req.ip,
+        action: 'hdo.device_service.publish',
+        targetKind: 'hdo_service',
+        targetId: row.id,
+        meta: { deviceId: device.id, targetHost: row.targetHost, targetPort: row.targetPort }
+      });
+      return row;
     }
   );
 
@@ -315,6 +427,7 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       memberships,
       nodes,
       devices,
+      deviceMeshStates,
       services,
       profiles,
       rateLimits,
@@ -326,6 +439,7 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       hdoStore.listMeshMemberships(),
       hdoStore.listNodes(),
       hdoStore.listAllDevices(),
+      hdoStore.listDeviceMeshStates(),
       hdoStore.listServices(),
       hdoStore.ensureDefaultProfiles(),
       hdoStore.listRateLimits(),
@@ -338,6 +452,7 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       memberships,
       nodes,
       devices,
+      deviceMeshStates,
       services,
       profiles,
       rateLimits,
@@ -487,6 +602,57 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
     return row;
   });
 
+  app.get('/api/v1/hdo/admin/device-mesh-states', adminOnly, async (req) => {
+    const url = new URL(req.url, 'http://localhost');
+    return hdoStore.listDeviceMeshStates({
+      meshGroupId: url.searchParams.get('meshGroupId') || undefined,
+      deviceId: url.searchParams.get('deviceId') || undefined,
+      userId: url.searchParams.get('userId') || undefined
+    });
+  });
+
+  app.post('/api/v1/hdo/admin/device-mesh-states', adminOnly, async (req, reply) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const meshGroupId = asRequiredString(body.meshGroupId);
+    const deviceId = asRequiredString(body.deviceId);
+    const status = pick(body.status, DEVICE_MESH_STATE_STATUSES);
+    if (!meshGroupId || !deviceId || !status) {
+      reply.code(400);
+      return { error: 'meshGroupId, deviceId and valid status required' };
+    }
+    const [groups, device] = await Promise.all([
+      hdoStore.listMeshGroups(),
+      hdoStore.findDevice(deviceId)
+    ]);
+    if (!groups.some((row) => row.id === meshGroupId)) {
+      reply.code(404);
+      return { error: 'mesh group not found' };
+    }
+    if (!device) {
+      reply.code(404);
+      return { error: 'device not found' };
+    }
+    const row = await hdoStore.upsertDeviceMeshState({
+      id: asOptionalString(body.id) ?? undefined,
+      meshGroupId,
+      deviceId,
+      userId: device.userId,
+      status,
+      note: asOptionalString(body.note),
+      metadata: asPlainObject(body.metadata),
+      createdByUserId: req.currentUser?.id ?? null
+    });
+    await auditStore.insert({
+      actorUserId: req.currentUser?.id ?? null,
+      actorIp: req.ip,
+      action: 'hdo.device_mesh_state.upsert',
+      targetKind: 'hdo_device_mesh_state',
+      targetId: row.id,
+      meta: { meshGroupId: row.meshGroupId, deviceId: row.deviceId, status: row.status }
+    });
+    return row;
+  });
+
   app.get('/api/v1/hdo/admin/device-plugin-states', adminOnly, async (req) => {
     const url = new URL(req.url, 'http://localhost');
     return hdoStore.listDevicePluginStates(url.searchParams.get('deviceId') || undefined);
@@ -628,6 +794,107 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       meta: { name: row.name, targetHost: row.targetHost, targetPort: row.targetPort }
     });
     return row;
+  });
+
+  app.post('/api/v1/hdo/admin/services/probe', adminOnly, async (req, reply) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const ports = asPortArray(body.ports);
+    const probePorts = ports.length ? ports : [...HDO_SERVICE_PROBE_PORTS];
+    const timeoutMs = clampNumber(
+      Number(body.timeoutMs ?? HDO_SERVICE_PROBE_TIMEOUT_MS),
+      200,
+      3000,
+      HDO_SERVICE_PROBE_TIMEOUT_MS
+    );
+    const meshGroupId = asOptionalString(body.meshGroupId);
+    const [nodes, devices, services, meshGroups, memberships, deviceMeshStates] = await Promise.all([
+      hdoStore.listNodes(),
+      hdoStore.listAllDevices(),
+      hdoStore.listServices(),
+      hdoStore.listMeshGroups(),
+      hdoStore.listMeshMemberships(),
+      hdoStore.listDeviceMeshStates()
+    ]);
+    const enabledGroups = meshGroups.filter((row) => row.enabled);
+    const targetMeshGroupIds = meshGroupId
+      ? new Set(enabledGroups.filter((row) => row.id === meshGroupId).map((row) => row.id))
+      : new Set(enabledGroups.map((row) => row.id));
+    if (meshGroupId && targetMeshGroupIds.size === 0) {
+      reply.code(404);
+      return { error: 'mesh group not found or disabled' };
+    }
+
+    const targets = serviceProbeTargets(
+      nodes,
+      devices,
+      meshGroups,
+      memberships,
+      deviceMeshStates,
+      targetMeshGroupIds
+    );
+    const existingNames = new Set(services.map((row) => row.name));
+    const checked = await Promise.all(
+      targets.flatMap((target) =>
+        probePorts.map(async (port) => ({
+          target,
+          port,
+          open: await probeTcpPort(target.host, port, timeoutMs)
+        }))
+      )
+    );
+    const openChecks = checked.filter((row) => row.open);
+    const upserted: HdoServiceRow[] = [];
+    for (const check of openChecks) {
+      const existing = services.find((row) => isServerProbedService(row, check.target.host, check.port));
+      const name = existing?.name ?? uniqueServiceName(
+        serviceNameFromInput(null, `${check.target.label}-${check.port}`),
+        existingNames
+      );
+      const row = await hdoStore.upsertService({
+        id: existing?.id,
+        name,
+        nodeId: check.target.type === 'node' ? check.target.id : null,
+        targetHost: check.target.host,
+        targetPort: check.port,
+        protocol: serviceProtocolForPort(check.port),
+        domains: existing?.domains ?? [],
+        enabled: true,
+        metadata: {
+          ...(existing?.metadata ?? {}),
+          source: 'server-probe',
+          targetType: check.target.type,
+          targetId: check.target.id,
+          deviceId: check.target.type === 'device' ? check.target.id : undefined,
+          userId: check.target.userId ?? undefined,
+          meshGroupIds: check.target.meshGroupIds,
+          probedAt: new Date().toISOString()
+        }
+      });
+      upserted.push(row);
+      existingNames.add(row.name);
+    }
+    await auditStore.insert({
+      actorUserId: req.currentUser?.id ?? null,
+      actorIp: req.ip,
+      action: 'hdo.service.probe',
+      targetKind: 'hdo_service',
+      targetId: null,
+      meta: {
+        ports: probePorts,
+        timeoutMs,
+        meshGroupId: meshGroupId ?? null,
+        checked: checked.length,
+        open: upserted.length
+      }
+    });
+    return {
+      ports: probePorts,
+      timeoutMs,
+      targetCount: targets.length,
+      checked: checked.length,
+      open: openChecks.length,
+      services: upserted
+    };
   });
 
   app.get('/api/v1/hdo/admin/profiles', adminOnly, async () => {
@@ -990,11 +1257,12 @@ function bearerTokenFromRequest(req: FastifyRequest): string | null {
 }
 
 async function renderDomesticWireGuardPeers(): Promise<string> {
-  const [devices, nodes, meshGroups, memberships] = await Promise.all([
+  const [devices, nodes, meshGroups, memberships, deviceMeshStates] = await Promise.all([
     hdoStore.listAllDevices(),
     hdoStore.listNodes(),
     hdoStore.listMeshGroups(),
-    hdoStore.listMeshMemberships()
+    hdoStore.listMeshMemberships(),
+    hdoStore.listDeviceMeshStates()
   ]);
   const lines = [
     '# BEGIN_HDO_MANAGED_PEERS',
@@ -1016,7 +1284,7 @@ async function renderDomesticWireGuardPeers(): Promise<string> {
   for (const device of devices) {
     const overlayIp = normalizeOverlayIp(device.overlayIp);
     if (!device.publicKey || !overlayIp || seen.has(device.publicKey)) continue;
-    const meshAccess = resolveMeshAccess(device.userId, meshGroups, memberships);
+    const meshAccess = resolveMeshAccess(device.userId, meshGroups, memberships, deviceMeshStates, device.id);
     if (!meshAccess.active) continue;
     seen.add(device.publicKey);
     lines.push('', `# HDO client ${device.label} (${device.id})`, '[Peer]');
@@ -1030,7 +1298,7 @@ async function renderDomesticWireGuardPeers(): Promise<string> {
 }
 
 async function buildReadiness(userId: string) {
-  const [
+  let [
     generation,
     nodes,
     devices,
@@ -1120,7 +1388,17 @@ async function buildReadiness(userId: string) {
 
 async function buildManifest(device: HdoDeviceRow) {
   await hdoStore.ensureDefaultProfiles();
-  const [generation, nodes, devices, services, profiles, rateLimits, meshGroups, memberships] = await Promise.all([
+  let [
+    generation,
+    nodes,
+    devices,
+    services,
+    profiles,
+    rateLimits,
+    meshGroups,
+    memberships,
+    initialDeviceMeshStates
+  ] = await Promise.all([
     hdoStore.getGeneration(),
     hdoStore.listNodes(),
     hdoStore.listAllDevices(),
@@ -1128,9 +1406,17 @@ async function buildManifest(device: HdoDeviceRow) {
     hdoStore.ensureDefaultProfiles(),
     hdoStore.listRateLimits(),
     hdoStore.listMeshGroups(),
-    hdoStore.listMeshMemberships()
+    hdoStore.listMeshMemberships(),
+    hdoStore.listDeviceMeshStates()
   ]);
-  const meshAccess = resolveMeshAccess(device.userId, meshGroups, memberships);
+  const deviceMeshStates = await ensureDeviceMeshStatesForDevice(
+    device,
+    meshGroups,
+    memberships,
+    initialDeviceMeshStates
+  );
+  generation = await hdoStore.getGeneration();
+  const meshAccess = resolveMeshAccess(device.userId, meshGroups, memberships, deviceMeshStates, device.id);
   const addressPlan = addressPlanForMeshAccess(meshAccess);
   const visibleNodes = meshAccess.active
     ? nodes.filter((row) => isVisibleForMesh(row.metadata, meshAccess.groupIds))
@@ -1138,7 +1424,7 @@ async function buildManifest(device: HdoDeviceRow) {
   const visibleDevices = meshAccess.active
     ? devices.filter((row) => {
         if (row.id === device.id) return true;
-        const otherAccess = resolveMeshAccess(row.userId, meshGroups, memberships);
+        const otherAccess = resolveMeshAccess(row.userId, meshGroups, memberships, deviceMeshStates, row.id);
         return otherAccess.groups.some((group) => meshAccess.groupIds.has(group.id));
       })
     : [];
@@ -1178,7 +1464,8 @@ async function buildManifest(device: HdoDeviceRow) {
     },
     mesh: {
       groups: meshAccess.groups,
-      memberships: meshAccess.memberships
+      memberships: meshAccess.memberships,
+      deviceStates: deviceMeshStates.filter((row) => row.deviceId === device.id)
     },
     wireGuard: {
       addressPlan,
@@ -1314,6 +1601,16 @@ function asStringArray(value: unknown): string[] {
     .filter((item): item is string => Boolean(item));
 }
 
+function asPortArray(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return uniqueStrings(
+    value
+      .map((item) => toPort(item))
+      .filter((item): item is number => Boolean(item))
+      .map((item) => String(item))
+  ).map((item) => Number(item));
+}
+
 function asPlainObject(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
@@ -1401,11 +1698,17 @@ function asPluginStates(value: unknown): Array<{
 function resolveMeshAccess(
   userId: string,
   meshGroups: HdoMeshGroupRow[],
-  memberships: HdoMeshMembershipRow[]
+  memberships: HdoMeshMembershipRow[],
+  deviceMeshStates: HdoDeviceMeshStateRow[] = [],
+  deviceId?: string
 ) {
   const enabledGroups = new Map(meshGroups.filter((row) => row.enabled).map((row) => [row.id, row]));
   const activeMemberships = memberships.filter(
-    (row) => row.userId === userId && row.status === 'active' && enabledGroups.has(row.meshGroupId)
+    (row) =>
+      row.userId === userId &&
+      row.status === 'active' &&
+      enabledGroups.has(row.meshGroupId) &&
+      deviceMeshStateAllows(deviceMeshStates, row.meshGroupId, deviceId)
   );
   const groupMap = new Map<string, HdoMeshGroupRow>();
   for (const membership of activeMemberships) {
@@ -1428,6 +1731,51 @@ function resolveMeshAccess(
   };
 }
 
+async function ensureDeviceMeshStatesForDevice(
+  device: HdoDeviceRow,
+  meshGroups: HdoMeshGroupRow[],
+  memberships: HdoMeshMembershipRow[],
+  existingStates: HdoDeviceMeshStateRow[],
+  options: { touch?: boolean } = {}
+): Promise<HdoDeviceMeshStateRow[]> {
+  const enabledGroupIds = new Set(meshGroups.filter((row) => row.enabled).map((row) => row.id));
+  const out = [...existingStates];
+  const stateKey = (meshGroupId: string) => `${meshGroupId}:${device.id}`;
+  const known = new Set(out.map((row) => `${row.meshGroupId}:${row.deviceId}`));
+  const now = options.touch ? new Date().toISOString() : null;
+  for (const membership of memberships) {
+    if (
+      membership.userId !== device.userId ||
+      membership.status !== 'active' ||
+      !enabledGroupIds.has(membership.meshGroupId) ||
+      known.has(stateKey(membership.meshGroupId))
+    ) {
+      continue;
+    }
+    const row = await hdoStore.upsertDeviceMeshState({
+      meshGroupId: membership.meshGroupId,
+      deviceId: device.id,
+      userId: device.userId,
+      status: 'active',
+      metadata: { createdFrom: 'device-register' },
+      lastSeenAt: now
+    });
+    out.push(row);
+    known.add(stateKey(membership.meshGroupId));
+  }
+  return out;
+}
+
+function deviceMeshStateAllows(
+  states: HdoDeviceMeshStateRow[],
+  meshGroupId: string,
+  deviceId?: string
+): boolean {
+  if (!deviceId) return true;
+  const state = states.find((row) => row.meshGroupId === meshGroupId && row.deviceId === deviceId);
+  return !state || state.status === 'active';
+}
+
 function isVisibleForMesh(
   metadata: Record<string, unknown> | null,
   activeMeshGroupIds: Set<string>
@@ -1439,6 +1787,145 @@ function isVisibleForMesh(
 function metadataMeshGroupIds(metadata: Record<string, unknown> | null): string[] {
   if (!metadata) return [];
   return asStringArray(metadata.meshGroupIds ?? metadata.meshGroups);
+}
+
+interface HdoServiceProbeTarget {
+  id: string;
+  type: 'node' | 'device';
+  label: string;
+  host: string;
+  userId: string | null;
+  meshGroupIds: string[];
+}
+
+function serviceProbeTargets(
+  nodes: HdoNodeRow[],
+  devices: HdoDeviceRow[],
+  meshGroups: HdoMeshGroupRow[],
+  memberships: HdoMeshMembershipRow[],
+  deviceMeshStates: HdoDeviceMeshStateRow[],
+  targetMeshGroupIds: Set<string>
+): HdoServiceProbeTarget[] {
+  const targets: HdoServiceProbeTarget[] = [];
+  const seen = new Set<string>();
+  const pushTarget = (target: HdoServiceProbeTarget) => {
+    const key = `${target.type}:${target.id}:${target.host}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    targets.push(target);
+  };
+
+  for (const node of nodes) {
+    const host = normalizeOverlayIp(node.overlayIp);
+    if (!host) continue;
+    const meshGroupIds = targetMeshIdsForMetadata(node.metadata, targetMeshGroupIds);
+    if (meshGroupIds.length === 0) continue;
+    pushTarget({
+      id: node.id,
+      type: 'node',
+      label: node.name,
+      host,
+      userId: null,
+      meshGroupIds
+    });
+  }
+
+  for (const device of devices) {
+    const host = normalizeOverlayIp(device.overlayIp);
+    if (!host) continue;
+    const access = resolveMeshAccess(device.userId, meshGroups, memberships, deviceMeshStates, device.id);
+    const meshGroupIds = [...access.groupIds].filter((id) => targetMeshGroupIds.has(id));
+    if (meshGroupIds.length === 0) continue;
+    pushTarget({
+      id: device.id,
+      type: 'device',
+      label: device.label,
+      host,
+      userId: device.userId,
+      meshGroupIds
+    });
+  }
+
+  return targets;
+}
+
+function targetMeshIdsForMetadata(
+  metadata: Record<string, unknown> | null,
+  targetMeshGroupIds: Set<string>
+): string[] {
+  const explicitIds = metadataMeshGroupIds(metadata).filter((id) => targetMeshGroupIds.has(id));
+  return explicitIds.length ? explicitIds : [...targetMeshGroupIds];
+}
+
+function isServerProbedService(service: HdoServiceRow, targetHost: string, targetPort: number): boolean {
+  return (
+    service.targetHost === targetHost &&
+    service.targetPort === targetPort &&
+    asOptionalString(service.metadata?.source) === 'server-probe'
+  );
+}
+
+function isDevicePublishedService(
+  service: HdoServiceRow,
+  deviceId: string,
+  targetPort: number
+): boolean {
+  return (
+    service.targetPort === targetPort &&
+    asOptionalString(service.metadata?.source) === 'device-published' &&
+    asOptionalString(service.metadata?.deviceId) === deviceId
+  );
+}
+
+function serviceNameFromInput(value: unknown, fallback: string): string {
+  const raw = asOptionalString(value) ?? fallback;
+  const normalized = raw.replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._:-]+/g, '-');
+  return normalized.replace(/^-+|-+$/g, '').slice(0, 80) || 'hdo-service';
+}
+
+function uniqueServiceName(base: string, existingNames: Set<string>): string {
+  if (!existingNames.has(base)) {
+    existingNames.add(base);
+    return base;
+  }
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${base}-${index}`;
+    if (!existingNames.has(candidate)) {
+      existingNames.add(candidate);
+      return candidate;
+    }
+  }
+  const candidate = `${base}-${randomUUID().slice(0, 8)}`;
+  existingNames.add(candidate);
+  return candidate;
+}
+
+function serviceProtocolForPort(port: number): HdoServiceProtocol {
+  if (port === 443 || port === 8443) return 'https';
+  if ([80, 3000, 5173, 8000, 8080, 9000, 9090].includes(port)) return 'http';
+  return 'tcp';
+}
+
+async function probeTcpPort(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createConnection({ host, port });
+    let done = false;
+    const finish = (open: boolean) => {
+      if (done) return;
+      done = true;
+      socket.destroy();
+      resolve(open);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
+}
+
+function clampNumber(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(value)));
 }
 
 function addressPlanForMeshAccess(meshAccess: ReturnType<typeof resolveMeshAccess>): HdoMeshAddressPlan {

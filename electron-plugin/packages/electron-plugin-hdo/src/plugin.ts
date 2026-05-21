@@ -7,6 +7,7 @@ import { HdoController } from './HdoController';
 import type {
   HdoDeviceRegistrationInput,
   HdoNodeInput,
+  HdoPublishedServiceInput,
   HdoRateLimitInput,
   HdoServiceInput
 } from './types';
@@ -91,6 +92,7 @@ const hdoPlugin = {
       refreshSubscription: (deviceId?: string | null) => controller.refreshSubscription(deviceId),
       upsertNode: (input: HdoNodeInput) => controller.upsertNode(input),
       upsertService: (input: HdoServiceInput) => controller.upsertService(input),
+      publishService: (input: HdoPublishedServiceInput) => controller.publishService(input),
       upsertRateLimit: (input: HdoRateLimitInput) => controller.upsertRateLimit(input)
     });
 

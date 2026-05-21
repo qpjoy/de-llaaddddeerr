@@ -18,6 +18,8 @@ import type {
   GameHighScoreRow,
   GameScoresStore,
   HdoArtifactKind,
+  HdoDeviceMeshStateRow,
+  HdoDeviceMeshStateStatus,
   HdoDevicePluginStateRow,
   HdoDeviceRow,
   HdoDeviceStatus,
@@ -647,6 +649,72 @@ const hdo: HdoStore = {
     await hdo.bumpGeneration();
     return rowToHdoDevice(rows[0]);
   },
+  async listDeviceMeshStates(filter = {}) {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (filter.meshGroupId) {
+      params.push(filter.meshGroupId);
+      where.push(`mesh_group_id = $${params.length}`);
+    }
+    if (filter.deviceId) {
+      params.push(filter.deviceId);
+      where.push(`device_id = $${params.length}`);
+    }
+    if (filter.userId) {
+      params.push(filter.userId);
+      where.push(`user_id = $${params.length}`);
+    }
+    const sql = `SELECT * FROM hdo_device_mesh_states${
+      where.length ? ` WHERE ${where.join(' AND ')}` : ''
+    } ORDER BY updated_at DESC`;
+    const { rows } = await getPool().query(sql, params);
+    return rows.map(rowToHdoDeviceMeshState);
+  },
+  async upsertDeviceMeshState(input) {
+    const params = [
+      input.meshGroupId,
+      input.deviceId,
+      input.userId,
+      input.status ?? null,
+      input.note ?? null,
+      input.metadata ?? null,
+      input.lastSeenAt ?? null,
+      input.createdByUserId ?? null
+    ];
+    const { rows } = input.id
+      ? await getPool().query(
+          `INSERT INTO hdo_device_mesh_states (
+             id, mesh_group_id, device_id, user_id, status, note, metadata, last_seen_at, created_by_user_id
+           ) VALUES ($1, $2, $3, $4, COALESCE($5::text, 'active'), $6, $7, COALESCE($8::timestamptz, now()), $9)
+           ON CONFLICT (id) DO UPDATE SET
+             mesh_group_id = excluded.mesh_group_id,
+             device_id = excluded.device_id,
+             user_id = excluded.user_id,
+             status = COALESCE($5::text, hdo_device_mesh_states.status),
+             note = CASE WHEN $6::text IS NULL THEN hdo_device_mesh_states.note ELSE $6 END,
+             metadata = COALESCE($7::jsonb, hdo_device_mesh_states.metadata),
+             last_seen_at = COALESCE($8::timestamptz, hdo_device_mesh_states.last_seen_at),
+             updated_at = now()
+           RETURNING *`,
+          [input.id, ...params]
+        )
+      : await getPool().query(
+          `INSERT INTO hdo_device_mesh_states (
+             mesh_group_id, device_id, user_id, status, note, metadata, last_seen_at, created_by_user_id
+           ) VALUES ($1, $2, $3, COALESCE($4::text, 'active'), $5, $6, COALESCE($7::timestamptz, now()), $8)
+           ON CONFLICT (mesh_group_id, device_id) DO UPDATE SET
+             user_id = excluded.user_id,
+             status = COALESCE($4::text, hdo_device_mesh_states.status),
+             note = CASE WHEN $5::text IS NULL THEN hdo_device_mesh_states.note ELSE $5 END,
+             metadata = COALESCE($6::jsonb, hdo_device_mesh_states.metadata),
+             last_seen_at = COALESCE($7::timestamptz, hdo_device_mesh_states.last_seen_at),
+             updated_at = now()
+           RETURNING *`,
+          params
+        );
+    await hdo.bumpGeneration();
+    return rowToHdoDeviceMeshState(rows[0]);
+  },
   async listServices() {
     const { rows } = await getPool().query(
       `SELECT * FROM hdo_services ORDER BY enabled DESC, name ASC`
@@ -1044,6 +1112,22 @@ function rowToHdoDevice(r: Record<string, unknown>): HdoDeviceRow {
     status: String(r.status) as HdoDeviceStatus,
     metadata: (r.metadata as Record<string, unknown> | null) ?? null,
     lastSeenAt: r.last_seen_at ? new Date(String(r.last_seen_at)).toISOString() : null,
+    createdAt: new Date(String(r.created_at)).toISOString(),
+    updatedAt: new Date(String(r.updated_at)).toISOString()
+  };
+}
+
+function rowToHdoDeviceMeshState(r: Record<string, unknown>): HdoDeviceMeshStateRow {
+  return {
+    id: String(r.id),
+    meshGroupId: String(r.mesh_group_id),
+    deviceId: String(r.device_id),
+    userId: String(r.user_id),
+    status: String(r.status) as HdoDeviceMeshStateStatus,
+    note: r.note ? String(r.note) : null,
+    metadata: (r.metadata as Record<string, unknown> | null) ?? null,
+    lastSeenAt: r.last_seen_at ? new Date(String(r.last_seen_at)).toISOString() : null,
+    createdByUserId: r.created_by_user_id ? String(r.created_by_user_id) : null,
     createdAt: new Date(String(r.created_at)).toISOString(),
     updatedAt: new Date(String(r.updated_at)).toISOString()
   };

@@ -22,6 +22,7 @@ import type {
   HdoLocalPluginState,
   HdoNodeInput,
   HdoPluginSettings,
+  HdoPublishedServiceInput,
   HdoRateLimitInput,
   HdoServiceInput,
   HdoSnapshot
@@ -592,6 +593,15 @@ export class HdoController {
     return this.apiPost('/api/v1/hdo/admin/services', input);
   }
 
+  async publishService(input: HdoPublishedServiceInput): Promise<unknown> {
+    this.ensureSettingsForCurrentSession();
+    const deviceId = this.settings.deviceId;
+    if (!deviceId) {
+      throw new Error('Register this device before publishing a service');
+    }
+    return this.apiPost(`/api/v1/hdo/devices/${encodeURIComponent(deviceId)}/services`, input);
+  }
+
   async upsertRateLimit(input: HdoRateLimitInput): Promise<unknown> {
     return this.apiPost('/api/v1/hdo/admin/rate-limits', input);
   }
@@ -775,6 +785,23 @@ export class HdoController {
         this.updateSettings({ activeProfileId });
         return { activeProfileId };
       }
+      case 'notify': {
+        const notification = {
+          title: stringValue(payload.title) ?? 'HDO 通知',
+          body: stringValue(payload.body) ?? stringValue(payload.message) ?? '',
+          level: stringValue(payload.level) ?? 'info',
+          meshGroupId: stringValue(payload.meshGroupId),
+          taskId: task.id,
+          receivedAt: new Date().toISOString()
+        };
+        this.updateSettings({ lastNotification: notification });
+        this.ctx.log.info(notification.title, {
+          body: notification.body,
+          level: notification.level,
+          meshGroupId: notification.meshGroupId ?? null
+        });
+        return notification;
+      }
       default:
         throw new Error(`unsupported HDO task kind: ${task.kind}`);
     }
@@ -922,6 +949,7 @@ export class HdoController {
         activeProfileId: null,
         wireGuardPeer: null,
         lastTaskRun: null,
+        lastNotification: null,
         lastManifest: null,
         lastSubscription: null,
         updatedAt: null
@@ -936,7 +964,8 @@ export class HdoController {
         wireGuardPeer: parsed.wireGuardPeer ?? null,
         autoRunDeviceTasks: parsed.autoRunDeviceTasks ?? true,
         activeProfileId: parsed.activeProfileId ?? null,
-        lastTaskRun: parsed.lastTaskRun ?? null
+        lastTaskRun: parsed.lastTaskRun ?? null,
+        lastNotification: parsed.lastNotification ?? null
       };
     } catch (err) {
       this.ctx.log.warn('failed to read HDO settings, using defaults', {
@@ -952,6 +981,7 @@ export class HdoController {
         activeProfileId: null,
         wireGuardPeer: null,
         lastTaskRun: null,
+        lastNotification: null,
         lastManifest: null,
         lastSubscription: null,
         updatedAt: null

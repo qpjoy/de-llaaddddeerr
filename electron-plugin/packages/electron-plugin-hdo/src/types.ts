@@ -8,6 +8,7 @@ export interface HdoPluginSettings {
   autoRunDeviceTasks?: boolean | null;
   activeProfileId?: string | null;
   lastTaskRun?: Record<string, unknown> | null;
+  lastNotification?: Record<string, unknown> | null;
   lastManifest?: Record<string, unknown> | null;
   lastSubscription?: string | null;
   updatedAt?: string | null;
@@ -93,6 +94,15 @@ export interface HdoServiceInput {
   name: string;
   nodeId?: string | null;
   targetHost: string;
+  targetPort: number;
+  protocol?: 'tcp' | 'udp' | 'http' | 'https';
+  domains?: string[];
+  enabled?: boolean;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface HdoPublishedServiceInput {
+  name?: string | null;
   targetPort: number;
   protocol?: 'tcp' | 'udp' | 'http' | 'https';
   domains?: string[];

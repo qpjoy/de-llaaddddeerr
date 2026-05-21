@@ -122,6 +122,11 @@ export class HdoAdminServer {
         sendJson(res, 200, await this.controller.executePendingTasks());
       };
     }
+    if (method === 'POST' && pathname === '/api/client/services/publish') {
+      return async (_req, res, body) => {
+        sendJson(res, 200, await this.controller.publishService(body as never));
+      };
+    }
     if (method === 'POST' && pathname === '/api/admin/nodes') {
       return async (_req, res, body) => {
         sendJson(res, 200, await this.controller.upsertNode(body as never));

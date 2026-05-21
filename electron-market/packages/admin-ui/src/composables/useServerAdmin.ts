@@ -99,6 +99,20 @@ export interface HdoDeviceRow {
   updatedAt: string;
 }
 
+export interface HdoDeviceMeshStateRow {
+  id: string;
+  meshGroupId: string;
+  deviceId: string;
+  userId: string;
+  status: 'active' | 'disabled' | 'kicked';
+  note: string | null;
+  metadata: Record<string, unknown> | null;
+  lastSeenAt: string | null;
+  createdByUserId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface HdoServiceRow {
   id: string;
   name: string;
@@ -111,6 +125,15 @@ export interface HdoServiceRow {
   metadata: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface HdoServiceProbeReport {
+  ports: number[];
+  timeoutMs: number;
+  targetCount: number;
+  checked: number;
+  open: number;
+  services: HdoServiceRow[];
 }
 
 export interface HdoProfileRow {
@@ -162,7 +185,8 @@ export interface HdoDeviceTaskRow {
     | 'uninstall-plugin'
     | 'activate-plugin'
     | 'deactivate-plugin'
-    | 'apply-hdo-profile';
+    | 'apply-hdo-profile'
+    | 'notify';
   status: 'pending' | 'claimed' | 'done' | 'failed' | 'cancelled';
   payload: Record<string, unknown> | null;
   result: Record<string, unknown> | null;
@@ -215,6 +239,7 @@ export interface HdoOverview {
   memberships: HdoMeshMembershipRow[];
   nodes: HdoNodeRow[];
   devices: HdoDeviceRow[];
+  deviceMeshStates: HdoDeviceMeshStateRow[];
   services: HdoServiceRow[];
   profiles: HdoProfileRow[];
   rateLimits: HdoRateLimitRow[];
@@ -384,6 +409,22 @@ export function useServerAdmin() {
       return out;
     },
 
+    async upsertHdoDeviceMeshState(input: {
+      id?: string;
+      meshGroupId: string;
+      deviceId: string;
+      status: HdoDeviceMeshStateRow['status'];
+      note?: string | null;
+      metadata?: Record<string, unknown> | null;
+    }): Promise<HdoDeviceMeshStateRow> {
+      const out = await api<HdoDeviceMeshStateRow>('/hdo/admin/device-mesh-states', {
+        method: 'POST',
+        body: JSON.stringify(input)
+      });
+      toast('HDO 设备 Mesh 状态已更新');
+      return out;
+    },
+
     async upsertHdoNode(input: {
       id?: string;
       name: string;
@@ -426,6 +467,19 @@ export function useServerAdmin() {
         body: JSON.stringify(input)
       });
       toast(`已保存服务：${out.name}`);
+      return out;
+    },
+
+    async probeHdoServices(input: {
+      meshGroupId?: string | null;
+      ports?: number[];
+      timeoutMs?: number;
+    } = {}): Promise<HdoServiceProbeReport> {
+      const out = await api<HdoServiceProbeReport>('/hdo/admin/services/probe', {
+        method: 'POST',
+        body: JSON.stringify(input)
+      });
+      toast(`服务探测完成：${out.open}/${out.checked} 个端口开放`);
       return out;
     },
 

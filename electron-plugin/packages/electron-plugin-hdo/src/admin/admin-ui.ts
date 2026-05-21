@@ -598,7 +598,7 @@ export function adminHtml(): string {
           <div class="panel span-12">
             <h3>可访问服务</h3>
             <table class="table">
-              <thead><tr><th>名称</th><th>目标</th><th>协议</th><th>域名</th></tr></thead>
+              <thead><tr><th>名称</th><th>目标</th><th>协议</th><th>来源</th><th>域名</th></tr></thead>
               <tbody id="meshHomeServicesTable"></tbody>
             </table>
           </div>
@@ -635,7 +635,7 @@ export function adminHtml(): string {
           <div class="panel span-12">
             <h3>拓扑服务</h3>
             <table class="table">
-              <thead><tr><th>名称</th><th>目标</th><th>协议</th><th>域名</th></tr></thead>
+              <thead><tr><th>名称</th><th>目标</th><th>协议</th><th>来源</th><th>域名</th></tr></thead>
               <tbody id="clientTopologyServicesTable"></tbody>
             </table>
           </div>
@@ -677,6 +677,26 @@ export function adminHtml(): string {
           <div class="panel span-3 metric"><strong id="mNodes">0</strong><span>节点</span></div>
           <div class="panel span-3 metric"><strong id="mDevices">0</strong><span>本用户设备</span></div>
           <div class="panel span-3 metric"><strong id="mTasks">0</strong><span>待处理任务</span></div>
+
+          <div class="panel span-12">
+            <h3>公开本机服务</h3>
+            <div class="grid">
+              <label class="span-3">名称<input id="publishedServiceName" placeholder="mac-ssh" /></label>
+              <label class="span-3">端口<input id="publishedServicePort" type="number" min="1" max="65535" placeholder="22" /></label>
+              <label class="span-3">协议
+                <select id="publishedServiceProtocol">
+                  <option value="tcp">tcp</option>
+                  <option value="http">http</option>
+                  <option value="https">https</option>
+                  <option value="udp">udp</option>
+                </select>
+              </label>
+              <label class="span-3">域名<input id="publishedServiceDomains" placeholder="mac.local" /></label>
+            </div>
+            <div class="row">
+              <button class="btn primary" id="publishService">公开服务</button>
+            </div>
+          </div>
 
           <div class="panel span-12">
             <h3>运行状态</h3>
@@ -763,7 +783,7 @@ export function adminHtml(): string {
           <div class="panel span-12">
             <h3>Mesh 服务</h3>
             <table class="table">
-              <thead><tr><th>名称</th><th>目标</th><th>协议</th><th>域名</th></tr></thead>
+              <thead><tr><th>名称</th><th>目标</th><th>协议</th><th>来源</th><th>域名</th></tr></thead>
               <tbody id="meshServicesTable"></tbody>
             </table>
           </div>
@@ -855,7 +875,7 @@ export function adminHtml(): string {
           <div class="panel span-12">
             <h3>服务列表</h3>
             <table class="table">
-              <thead><tr><th>名称</th><th>目标</th><th>协议</th><th>域名</th></tr></thead>
+              <thead><tr><th>名称</th><th>目标</th><th>协议</th><th>来源</th><th>域名</th></tr></thead>
               <tbody id="servicesTable"></tbody>
             </table>
           </div>
@@ -1255,6 +1275,7 @@ export function adminHtml(): string {
       const peer = settings.wireGuardPeer || {};
       const runtime = s.wireGuardStatus || {};
       const tasks = Array.isArray(s.deviceTasks) ? s.deviceTasks : [];
+      const notification = settings.lastNotification || null;
       const groupsLabel = groups.length ? groups.map((row) => row.name || row.slug || row.id).join(', ') : '未入网';
       const tunnelLabel = runtime.active ? '已连接' : (peer.publicKey ? '已配置' : '未配置');
 
@@ -1281,6 +1302,9 @@ export function adminHtml(): string {
         '订阅 generation：' + (manifest.generation || '未生成'),
         '待处理任务：' + tasks.length
       ];
+      if (notification) {
+        statusItems.push('通知：' + (notification.title || 'HDO 通知') + ' - ' + (notification.body || ''));
+      }
       if (s.lastError) statusItems.unshift('错误：' + s.lastError);
       renderList('meshHomeStatusList', statusItems);
 
@@ -1288,8 +1312,9 @@ export function adminHtml(): string {
         '<tr><td>' + escapeHtml(svc.name || '') + '</td><td>' +
         escapeHtml((svc.targetHost || svc.host || '') + ':' + (svc.targetPort || svc.port || '')) + '</td><td>' +
         escapeHtml(svc.protocol || '') + '</td><td>' +
+        escapeHtml(serviceSourceLabel(svc)) + '</td><td>' +
         escapeHtml((svc.domains || []).join(', ')) + '</td></tr>'
-      )).join('') : '<tr><td colspan="4" class="muted">暂无服务；等待服务端下发可见服务</td></tr>';
+      )).join('') : '<tr><td colspan="5" class="muted">暂无服务；等待服务端下发可见服务</td></tr>';
 
       const meshRows = [
         ...nodes.map((node) => ({
@@ -1318,7 +1343,7 @@ export function adminHtml(): string {
       if (!model.items.length) {
         $('clientTopologyMap').innerHTML = '<text x="480" y="260" text-anchor="middle" fill="#637083">暂无拓扑数据；先连接 / 更新 HDO</text>';
         $('clientTopologyDetail').innerHTML = '<div class="notice">暂无拓扑数据。</div>';
-        $('clientTopologyServicesTable').innerHTML = '<tr><td colspan="4" class="muted">暂无服务</td></tr>';
+        $('clientTopologyServicesTable').innerHTML = '<tr><td colspan="5" class="muted">暂无服务</td></tr>';
         return;
       }
       if (!selectedClientTopologyKey || !model.items.some((item) => item.key === selectedClientTopologyKey)) {
@@ -1532,8 +1557,9 @@ export function adminHtml(): string {
         '<tr><td>' + escapeHtml(svc.name || '') + '</td><td>' +
         escapeHtml((svc.targetHost || svc.host || '') + ':' + (svc.targetPort || svc.port || '')) + '</td><td>' +
         escapeHtml(svc.protocol || '') + '</td><td>' +
+        escapeHtml(serviceSourceLabel(svc)) + '</td><td>' +
         escapeHtml((svc.domains || []).join(', ')) + '</td></tr>'
-      )).join('') : '<tr><td colspan="4" class="muted">当前选择没有直接关联服务</td></tr>';
+      )).join('') : '<tr><td colspan="5" class="muted">当前选择没有直接关联服务</td></tr>';
     }
 
     function topologyServiceMatches(selected, service) {
@@ -1571,8 +1597,16 @@ export function adminHtml(): string {
       $('servicesTable').innerHTML = services.length ? services.map((svc) => (
         '<tr><td>' + escapeHtml(svc.name || '') + '</td><td>' + escapeHtml((svc.targetHost || '') + ':' + (svc.targetPort || '')) +
         '</td><td>' + escapeHtml(svc.protocol || '') + '</td><td>' +
+        escapeHtml(serviceSourceLabel(svc)) + '</td><td>' +
         escapeHtml((svc.domains || []).join(', ')) + '</td></tr>'
-      )).join('') : '<tr><td colspan="4" class="muted">暂无服务</td></tr>';
+      )).join('') : '<tr><td colspan="5" class="muted">暂无服务</td></tr>';
+    }
+
+    function serviceSourceLabel(service) {
+      const metadata = service && service.metadata && typeof service.metadata === 'object' ? service.metadata : {};
+      if (metadata.source === 'server-probe') return '服务端探测';
+      if (metadata.source === 'device-published') return '客户端公开';
+      return '管理员登记';
     }
 
     function renderLocalPlugins(plugins) {
@@ -1703,8 +1737,9 @@ export function adminHtml(): string {
         '<tr><td>' + escapeHtml(svc.name || '') + '</td><td>' +
         escapeHtml((svc.targetHost || svc.host || '') + ':' + (svc.targetPort || svc.port || '')) + '</td><td>' +
         escapeHtml(svc.protocol || '') + '</td><td>' +
+        escapeHtml(serviceSourceLabel(svc)) + '</td><td>' +
         escapeHtml((svc.domains || []).join(', ')) + '</td></tr>'
-      )).join('') : '<tr><td colspan="4" class="muted">暂无服务</td></tr>';
+      )).join('') : '<tr><td colspan="5" class="muted">暂无服务</td></tr>';
     }
 
     function taskRunnerText(s) {
@@ -2047,6 +2082,28 @@ export function adminHtml(): string {
         body: JSON.stringify({ deviceId: formValue('deviceId') })
       });
       $('subscriptionOut').value = text;
+    }).catch(() => undefined));
+    $('publishService').addEventListener('click', () => runAction('公开服务', async () => {
+      const targetPort = Number(formValue('publishedServicePort'));
+      if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) {
+        throw new Error('请输入 1-65535 的本机端口');
+      }
+      await request('/api/client/services/publish', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name: formValue('publishedServiceName'),
+          targetPort,
+          protocol: $('publishedServiceProtocol').value,
+          domains: (formValue('publishedServiceDomains') || '').split(',').map((s) => s.trim()).filter(Boolean),
+          enabled: true
+        })
+      });
+      await request('/api/client/manifest', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ deviceId: formValue('deviceId') })
+      });
     }).catch(() => undefined));
     $('saveNode').addEventListener('click', () => runAction('保存节点', async () => {
       await request('/api/admin/nodes', {

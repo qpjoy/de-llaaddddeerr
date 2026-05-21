@@ -156,12 +156,14 @@ export type HdoRateLimitSubjectType = 'user' | 'device' | 'profile' | 'node';
 export type HdoArtifactKind = 'manifest' | 'mihomo-yaml' | 'wg-profile';
 export type HdoMeshMembershipRole = 'member' | 'admin' | 'support';
 export type HdoMeshMembershipStatus = 'active' | 'suspended' | 'revoked';
+export type HdoDeviceMeshStateStatus = 'active' | 'disabled' | 'kicked';
 export type HdoDeviceTaskKind =
   | 'install-plugin'
   | 'uninstall-plugin'
   | 'activate-plugin'
   | 'deactivate-plugin'
-  | 'apply-hdo-profile';
+  | 'apply-hdo-profile'
+  | 'notify';
 export type HdoDeviceTaskStatus = 'pending' | 'claimed' | 'done' | 'failed' | 'cancelled';
 
 export interface HdoMeshGroupRow {
@@ -211,6 +213,20 @@ export interface HdoDeviceRow {
   status: HdoDeviceStatus;
   metadata: Record<string, unknown> | null;
   lastSeenAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HdoDeviceMeshStateRow {
+  id: string;
+  meshGroupId: string;
+  deviceId: string;
+  userId: string;
+  status: HdoDeviceMeshStateStatus;
+  note: string | null;
+  metadata: Record<string, unknown> | null;
+  lastSeenAt: string | null;
+  createdByUserId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -346,6 +362,22 @@ export interface HdoStore {
     status?: HdoDeviceStatus;
     metadata?: Record<string, unknown> | null;
   }): Promise<HdoDeviceRow>;
+  listDeviceMeshStates(filter?: {
+    meshGroupId?: string;
+    deviceId?: string;
+    userId?: string;
+  }): Promise<HdoDeviceMeshStateRow[]>;
+  upsertDeviceMeshState(input: {
+    id?: string;
+    meshGroupId: string;
+    deviceId: string;
+    userId: string;
+    status?: HdoDeviceMeshStateStatus;
+    note?: string | null;
+    metadata?: Record<string, unknown> | null;
+    lastSeenAt?: string | null;
+    createdByUserId?: string | null;
+  }): Promise<HdoDeviceMeshStateRow>;
   listServices(): Promise<HdoServiceRow[]>;
   upsertService(input: {
     id?: string;
