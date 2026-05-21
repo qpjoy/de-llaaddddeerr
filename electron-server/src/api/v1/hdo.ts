@@ -108,6 +108,7 @@ const HDO_ADDRESS_PLAN_MAX = ipv4ToNumber('100.99.255.255') ?? 0;
 const HDO_DEFAULT_WG_PORT = 51888;
 const HDO_DEPLOYMENT_OUTPUT_LIMIT = 80_000;
 const HDO_DEPLOYMENT_TIMEOUT_MS = 20 * 60 * 1000;
+const HDO_RUNNER_HEALTH_TIMEOUT_MS = 1200;
 
 type HdoDeploymentKind = (typeof HDO_DEPLOYMENT_KINDS)[number];
 type HdoDeploymentStatus = 'running' | 'succeeded' | 'failed';
@@ -476,7 +477,7 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/v1/hdo/admin/deployments', adminOnly, async () => {
     return {
-      runner: inspectHdoDeploymentRunner(),
+      runner: await inspectHdoDeploymentRunner(),
       jobs: listHdoDeploymentJobs()
     };
   });
@@ -513,6 +514,16 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
         detail:
           'Set HDO_GATEWAY_RUNNER_URL/HDO_GATEWAY_RUNNER_TOKEN for the host runner, or set HDO_GATEWAY_SCRIPT when running electron-server directly on the host.'
       };
+    }
+    if (runnerUrl && runnerToken) {
+      const runnerHealth = await probeHdoGatewayRunner(runnerUrl, runnerToken);
+      if (!runnerHealth.ok) {
+        reply.code(409);
+        return {
+          error: runnerHealth.error,
+          detail: runnerHealth.detail
+        };
+      }
     }
     const job = startHdoDeploymentJob({
       kind,
@@ -1007,19 +1018,30 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
   );
 }
 
-function inspectHdoDeploymentRunner() {
+async function inspectHdoDeploymentRunner() {
   const runnerUrl = resolveHdoGatewayRunnerUrl();
   const runnerToken = resolveHdoGatewayRunnerToken();
   if (runnerUrl) {
+    if (!runnerToken) {
+      return {
+        available: false,
+        mode: 'host-runner',
+        scriptPath: runnerUrl,
+        cwd: null,
+        kinds: HDO_DEPLOYMENT_KINDS,
+        note: 'HDO_GATEWAY_RUNNER_URL is set, but HDO_GATEWAY_RUNNER_TOKEN is missing. Start through electron-server/scripts/manage.sh.'
+      };
+    }
+    const health = await probeHdoGatewayRunner(runnerUrl, runnerToken);
     return {
-      available: Boolean(runnerToken),
+      available: health.ok,
       mode: 'host-runner',
       scriptPath: runnerUrl,
       cwd: null,
       kinds: HDO_DEPLOYMENT_KINDS,
-      note: runnerToken
+      note: health.ok
         ? 'HDO deployment runner calls the host gateway runner for whitelisted actions.'
-        : 'HDO_GATEWAY_RUNNER_URL is set, but HDO_GATEWAY_RUNNER_TOKEN is missing. Start through electron-server/scripts/manage.sh.'
+        : `${health.error}: ${health.detail}`
     };
   }
   const scriptPath = resolveHdoGatewayScript();
@@ -1130,6 +1152,55 @@ function resolveHdoGatewayRunnerUrl(): string | null {
 
 function resolveHdoGatewayRunnerToken(): string | null {
   return asOptionalString(process.env.HDO_GATEWAY_RUNNER_TOKEN);
+}
+
+async function probeHdoGatewayRunner(
+  runnerUrl: string,
+  runnerToken: string
+): Promise<{ ok: true } | { ok: false; error: string; detail: string }> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), HDO_RUNNER_HEALTH_TIMEOUT_MS);
+  try {
+    const response = await fetch(new URL('/healthz', runnerUrl), {
+      headers: {
+        authorization: `Bearer ${runnerToken}`
+      },
+      signal: controller.signal
+    });
+    const text = await response.text();
+    const payload = parseJsonObject(text);
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: 'HDO gateway runner health check failed',
+        detail: asOptionalString(payload.error) ?? `HTTP ${response.status}`
+      };
+    }
+    if (payload.ok !== true) {
+      return {
+        ok: false,
+        error: 'HDO gateway runner health check failed',
+        detail: text || 'healthz did not return ok=true'
+      };
+    }
+    return { ok: true };
+  } catch (err) {
+    const detail =
+      err instanceof Error && err.name === 'AbortError'
+        ? `timed out after ${HDO_RUNNER_HEALTH_TIMEOUT_MS}ms`
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    return {
+      ok: false,
+      error: 'HDO gateway runner is not reachable from electron-server',
+      detail:
+        `${detail}. Run ./scripts/manage.sh server gateway-runner-status on the host; ` +
+        'if electron-server runs in Docker, the runner must listen on an address reachable from host.docker.internal.'
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function startHdoDeploymentJob(input: {

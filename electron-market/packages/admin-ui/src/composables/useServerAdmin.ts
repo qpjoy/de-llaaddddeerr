@@ -259,7 +259,8 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!res.ok) {
     let msg = `${res.status} ${res.statusText}`;
     try {
-      msg = (await res.json()).error ?? msg;
+      const payload = await res.json();
+      msg = [payload.error, payload.detail].filter(Boolean).join(': ') || msg;
     } catch {
       /* ignore */
     }

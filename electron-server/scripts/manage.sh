@@ -144,6 +144,22 @@ hdo_gateway_runner_matches_config() {
   esac
 }
 
+launch_hdo_gateway_runner() {
+  say "starting HDO host runner on $(hdo_gateway_runner_health_url)"
+  mkdir -p "$(dirname "$HDO_GATEWAY_RUNNER_LOG")"
+  nohup env \
+    HDO_GATEWAY_RUNNER_HOST="$HDO_GATEWAY_RUNNER_HOST" \
+    HDO_GATEWAY_RUNNER_PORT="$HDO_GATEWAY_RUNNER_PORT" \
+    HDO_GATEWAY_RUNNER_TOKEN="$HDO_GATEWAY_RUNNER_TOKEN" \
+    HDO_GATEWAY_SCRIPT="$HDO_GATEWAY_SCRIPT" \
+    HDO_GATEWAY_CWD="$REPO_ROOT" \
+    HDO_SERVER_URL="$HDO_SERVER_URL" \
+    node "$HDO_GATEWAY_RUNNER_SCRIPT" >>"$HDO_GATEWAY_RUNNER_LOG" 2>&1 &
+  printf '%s\n' "$!" >"$HDO_GATEWAY_RUNNER_PID_FILE"
+  sleep 0.5
+  hdo_gateway_runner_alive
+}
+
 start_hdo_gateway_runner() {
   [ -f "$HDO_GATEWAY_RUNNER_SCRIPT" ] || {
     warn "HDO host runner script not found: $HDO_GATEWAY_RUNNER_SCRIPT"
@@ -180,38 +196,45 @@ start_hdo_gateway_runner() {
     warn "starting HDO host runner without root; WireGuard install/route repair may still require sudo/root."
   fi
 
-  say "starting HDO host runner on $(hdo_gateway_runner_health_url)"
-  mkdir -p "$(dirname "$HDO_GATEWAY_RUNNER_LOG")"
-  nohup env \
-    HDO_GATEWAY_RUNNER_HOST="$HDO_GATEWAY_RUNNER_HOST" \
-    HDO_GATEWAY_RUNNER_PORT="$HDO_GATEWAY_RUNNER_PORT" \
-    HDO_GATEWAY_RUNNER_TOKEN="$HDO_GATEWAY_RUNNER_TOKEN" \
-    HDO_GATEWAY_SCRIPT="$HDO_GATEWAY_SCRIPT" \
-    HDO_GATEWAY_CWD="$REPO_ROOT" \
-    HDO_SERVER_URL="$HDO_SERVER_URL" \
-    node "$HDO_GATEWAY_RUNNER_SCRIPT" >>"$HDO_GATEWAY_RUNNER_LOG" 2>&1 &
-  printf '%s\n' "$!" >"$HDO_GATEWAY_RUNNER_PID_FILE"
-  sleep 0.5
-  if hdo_gateway_runner_alive; then
+  if launch_hdo_gateway_runner; then
     ok "HDO host runner started"
   else
+    warn "HDO host runner did not become healthy; stopping stale runners and retrying once."
+    stop_hdo_gateway_runner >/dev/null 2>&1 || true
+    sleep 0.3
+    if launch_hdo_gateway_runner; then
+      ok "HDO host runner started"
+      return 0
+    fi
     warn "HDO host runner did not become healthy; check $HDO_GATEWAY_RUNNER_LOG"
+    return 1
   fi
 }
 
 stop_hdo_gateway_runner() {
-  if [ ! -s "$HDO_GATEWAY_RUNNER_PID_FILE" ]; then
-    warn "HDO host runner pid file is absent."
-    return 0
-  fi
-  local pid
-  pid="$(cat "$HDO_GATEWAY_RUNNER_PID_FILE")"
+  local pid stopped=0
+  pid="$(cat "$HDO_GATEWAY_RUNNER_PID_FILE" 2>/dev/null || true)"
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     say "stopping HDO host runner pid $pid"
-    kill "$pid"
+    kill "$pid" >/dev/null 2>&1 || true
+    stopped=1
+  fi
+  if command -v pgrep >/dev/null 2>&1; then
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      if kill -0 "$pid" 2>/dev/null; then
+        say "stopping stale HDO host runner pid $pid"
+        kill "$pid" >/dev/null 2>&1 || true
+        stopped=1
+      fi
+    done < <(pgrep -f "$HDO_GATEWAY_RUNNER_SCRIPT" 2>/dev/null || true)
   fi
   rm -f "$HDO_GATEWAY_RUNNER_PID_FILE"
-  ok "HDO host runner stopped"
+  if [ "$stopped" -eq 1 ]; then
+    ok "HDO host runner stopped"
+  else
+    warn "HDO host runner was not running."
+  fi
 }
 
 cmd_gateway_runner_status() {
