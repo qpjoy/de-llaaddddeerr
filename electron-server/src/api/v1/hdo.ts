@@ -906,13 +906,22 @@ async function runHdoGatewayRunnerJob(
         ? null
         : asOptionalString(payload.error) ?? `HDO gateway runner returned HTTP ${response.status}`;
   } catch (err) {
-    job.status = 'failed';
-    job.error =
+    const message =
       err instanceof Error && err.name === 'AbortError'
         ? `HDO gateway runner timed out after ${Math.round(HDO_DEPLOYMENT_TIMEOUT_MS / 60000)} minutes`
         : err instanceof Error
           ? err.message
           : String(err);
+    appendDeploymentOutput(
+      job,
+      [
+        `HDO gateway runner request failed: ${runnerUrl}`,
+        message,
+        'If electron-server runs in Docker, the host runner must listen on an address reachable from host.docker.internal.'
+      ].join('\n') + '\n'
+    );
+    job.status = 'failed';
+    job.error = message;
   } finally {
     clearTimeout(timeout);
     job.finishedAt = new Date().toISOString();

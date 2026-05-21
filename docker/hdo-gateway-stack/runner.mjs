@@ -50,6 +50,8 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/healthz') {
       sendJson(res, 200, {
         ok: true,
+        host,
+        port,
         scriptPath,
         cwd,
         running,

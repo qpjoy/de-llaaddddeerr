@@ -31,7 +31,7 @@ export HDO_HOST_REPO_ROOT="${HDO_HOST_REPO_ROOT:-$REPO_ROOT}"
 export HDO_GATEWAY_SCRIPT="${HDO_GATEWAY_SCRIPT:-$REPO_ROOT/docker/hdo-gateway-stack/manage.sh}"
 export HDO_SERVER_URL="${HDO_SERVER_URL:-http://127.0.0.1:${MARKET_PORT:-8080}}"
 export HDO_GATEWAY_RUNNER_PORT="${HDO_GATEWAY_RUNNER_PORT:-18081}"
-export HDO_GATEWAY_RUNNER_HOST="${HDO_GATEWAY_RUNNER_HOST:-127.0.0.1}"
+export HDO_GATEWAY_RUNNER_HOST="${HDO_GATEWAY_RUNNER_HOST:-0.0.0.0}"
 export HDO_GATEWAY_RUNNER_URL="${HDO_GATEWAY_RUNNER_URL:-http://host.docker.internal:${HDO_GATEWAY_RUNNER_PORT}}"
 HDO_GATEWAY_RUNNER_SCRIPT="${HDO_GATEWAY_RUNNER_SCRIPT:-$REPO_ROOT/docker/hdo-gateway-stack/runner.mjs}"
 HDO_GATEWAY_RUNNER_TOKEN_FILE="${HDO_GATEWAY_RUNNER_TOKEN_FILE:-$ROOT/data/hdo-gateway-runner.token}"
@@ -114,10 +114,12 @@ ensure_hdo_gateway_runner_token() {
 }
 
 hdo_gateway_runner_health_url() {
-  printf 'http://%s:%s/healthz' "$HDO_GATEWAY_RUNNER_HOST" "$HDO_GATEWAY_RUNNER_PORT"
+  local probe_host="$HDO_GATEWAY_RUNNER_HOST"
+  [ "$probe_host" = "0.0.0.0" ] && probe_host="127.0.0.1"
+  printf 'http://%s:%s/healthz' "$probe_host" "$HDO_GATEWAY_RUNNER_PORT"
 }
 
-hdo_gateway_runner_alive() {
+hdo_gateway_runner_health_json() {
   [ -n "${HDO_GATEWAY_RUNNER_TOKEN:-}" ] || [ -s "$HDO_GATEWAY_RUNNER_TOKEN_FILE" ] || return 1
   if [ -z "${HDO_GATEWAY_RUNNER_TOKEN:-}" ]; then
     HDO_GATEWAY_RUNNER_TOKEN="$(tr -d '\r\n' <"$HDO_GATEWAY_RUNNER_TOKEN_FILE")"
@@ -125,7 +127,21 @@ hdo_gateway_runner_alive() {
   fi
   command -v curl >/dev/null 2>&1 || return 1
   curl -fsS -H "Authorization: Bearer ${HDO_GATEWAY_RUNNER_TOKEN}" \
-    "$(hdo_gateway_runner_health_url)" >/dev/null 2>&1
+    "$(hdo_gateway_runner_health_url)" 2>/dev/null
+}
+
+hdo_gateway_runner_alive() {
+  hdo_gateway_runner_health_json >/dev/null
+}
+
+hdo_gateway_runner_matches_config() {
+  local json
+  json="$(hdo_gateway_runner_health_json 2>/dev/null || true)"
+  [ -n "$json" ] || return 1
+  case "$json" in
+    *"\"host\":\"${HDO_GATEWAY_RUNNER_HOST}\""*"\"port\":${HDO_GATEWAY_RUNNER_PORT}"*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 start_hdo_gateway_runner() {
@@ -144,8 +160,12 @@ start_hdo_gateway_runner() {
 
   ensure_hdo_gateway_runner_token
   if hdo_gateway_runner_alive; then
-    ok "HDO host runner is listening on $(hdo_gateway_runner_health_url)"
-    return 0
+    if hdo_gateway_runner_matches_config; then
+      ok "HDO host runner is listening on $(hdo_gateway_runner_health_url)"
+      return 0
+    fi
+    warn "HDO host runner is using an old bind address; restarting it."
+    stop_hdo_gateway_runner || true
   fi
 
   if [ -s "$HDO_GATEWAY_RUNNER_PID_FILE" ]; then
@@ -200,13 +220,13 @@ cmd_gateway_runner_status() {
     export HDO_GATEWAY_RUNNER_TOKEN
   fi
   echo "runner url from container: $HDO_GATEWAY_RUNNER_URL"
+  echo "runner bind address:       $HDO_GATEWAY_RUNNER_HOST:$HDO_GATEWAY_RUNNER_PORT"
   echo "runner health url:        $(hdo_gateway_runner_health_url)"
   echo "runner pid file:          $HDO_GATEWAY_RUNNER_PID_FILE"
   echo "runner log:               $HDO_GATEWAY_RUNNER_LOG"
   if hdo_gateway_runner_alive; then
     ok "HDO host runner is healthy"
-    curl -fsS -H "Authorization: Bearer ${HDO_GATEWAY_RUNNER_TOKEN}" \
-      "$(hdo_gateway_runner_health_url)" || true
+    hdo_gateway_runner_health_json || true
     echo
   else
     warn "HDO host runner is not reachable."
