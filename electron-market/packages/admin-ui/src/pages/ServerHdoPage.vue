@@ -870,6 +870,7 @@ const deployingKind = ref<HdoDeploymentKind | null>(null);
 const error = ref<string | null>(null);
 const tab = ref('deploy');
 let deploymentPollTimer: number | null = null;
+const DEPLOYMENT_POLL_INTERVAL_MS = 8000;
 
 const editingMeshId = ref<string | null>(null);
 const meshName = ref('');
@@ -1110,6 +1111,10 @@ const runningDeploymentJob = computed(() =>
 const latestFinishedDeploymentJob = computed(() =>
   deploymentJobs.value.find((job) => job.status !== 'running') ?? null
 );
+const browserPublicHost = computed(() => window.location.hostname || null);
+const domesticDeploymentPublicHost = computed(
+  () => overview.value?.nodes.find((row) => row.kind === 'domestic')?.publicHost ?? browserPublicHost.value
+);
 const deploymentNotice = computed(() => {
   const running = runningDeploymentJob.value;
   if (running) {
@@ -1182,7 +1187,7 @@ const deploymentCards = computed(() => [
     title: 'Domestic WireGuard gateway',
     subtitle: 'H/D mesh 基础能力；没有 Oversea 也可以让多个 H 成员互联。',
     command: [
-      "HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo deploy-domestic --yes --server-url http://127.0.0.1:8080 --public-host <domestic-public-ip-or-domain> --port 51888",
+      `HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo deploy-domestic --yes --server-url http://127.0.0.1:8080 --public-host ${domesticDeploymentPublicHost.value ?? '<domestic-public-ip-or-domain>'} --port 51888`,
       "HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo sync-peers --server-url http://127.0.0.1:8080"
     ].join('\n'),
     runKind: 'deploy-domestic' as HdoDeploymentKind,
@@ -1681,7 +1686,16 @@ async function runDeployment(card: { runKind: HdoDeploymentKind }): Promise<void
   deployingKind.value = card.runKind;
   error.value = null;
   try {
-    await admin.runHdoDeployment({ kind: card.runKind });
+    const input: {
+      kind: HdoDeploymentKind;
+      publicHost?: string | null;
+      port?: number | null;
+    } = { kind: card.runKind };
+    if (card.runKind === 'deploy-domestic') {
+      input.publicHost = domesticDeploymentPublicHost.value;
+      input.port = 51888;
+    }
+    await admin.runHdoDeployment(input);
     await loadDeployments();
     window.setTimeout(() => {
       void loadDeployments();
@@ -2264,10 +2278,10 @@ function deploymentStatusColor(status: HdoDeploymentJob['status']): string {
 onMounted(() => {
   void reload();
   deploymentPollTimer = window.setInterval(() => {
-    if (tab.value === 'deploy' || runningDeploymentJob.value) {
+    if (runningDeploymentJob.value || deployingKind.value) {
       void loadDeployments({ silent: true });
     }
-  }, 2500);
+  }, DEPLOYMENT_POLL_INTERVAL_MS);
 });
 
 onBeforeUnmount(() => {
