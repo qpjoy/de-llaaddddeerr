@@ -525,9 +525,13 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
         };
       }
     }
+    const deploymentBody = {
+      ...body,
+      serverUrl: asOptionalString(body.serverUrl) ?? requestBaseUrl(req) ?? undefined
+    };
     const job = startHdoDeploymentJob({
       kind,
-      body,
+      body: deploymentBody,
       scriptPath: script,
       runnerUrl,
       bearerToken: bearerTokenFromRequest(req)
@@ -1410,6 +1414,18 @@ function bearerTokenFromRequest(req: FastifyRequest): string | null {
   if (typeof header !== 'string') return null;
   const match = /^Bearer\s+(.+)$/i.exec(header.trim());
   return match?.[1] ?? null;
+}
+
+function requestBaseUrl(req: FastifyRequest): string | null {
+  const host = headerString(req.headers['x-forwarded-host']) ?? headerString(req.headers.host);
+  if (!host) return null;
+  const proto = headerString(req.headers['x-forwarded-proto']) ?? 'http';
+  return `${proto.split(',')[0]?.trim() || 'http'}://${host.split(',')[0]?.trim() || host}`;
+}
+
+function headerString(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value)) return asOptionalString(value[0]);
+  return asOptionalString(value);
 }
 
 async function renderDomesticWireGuardPeers(): Promise<string> {

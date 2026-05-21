@@ -1209,6 +1209,13 @@ const browserPublicHost = computed(() => window.location.hostname || null);
 const domesticDeploymentPublicHost = computed(
   () => overview.value?.nodes.find((row) => row.kind === 'domestic')?.publicHost ?? browserPublicHost.value
 );
+const deploymentServerUrl = computed(() => {
+  if (window.location.pathname.startsWith('/admin/') && window.location.origin) {
+    return window.location.origin;
+  }
+  const host = domesticDeploymentPublicHost.value ?? '<domestic-public-ip-or-domain>';
+  return `http://${host}:8080`;
+});
 const deploymentNotice = computed(() => {
   const running = runningDeploymentJob.value;
   if (running) {
@@ -1281,8 +1288,8 @@ const deploymentCards = computed(() => [
     title: 'Domestic WireGuard gateway',
     subtitle: 'H/D mesh 基础能力；没有 Oversea 也可以让多个 H 成员互联。',
     command: [
-      `HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo deploy-domestic --yes --server-url http://127.0.0.1:8080 --public-host ${domesticDeploymentPublicHost.value ?? '<domestic-public-ip-or-domain>'} --port 51888`,
-      "HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo sync-peers --server-url http://127.0.0.1:8080"
+      `HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo deploy-domestic --yes --server-url ${deploymentServerUrl.value} --public-host ${domesticDeploymentPublicHost.value ?? '<domestic-public-ip-or-domain>'} --port 51888`,
+      `HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo sync-peers --server-url ${deploymentServerUrl.value}`
     ].join('\n'),
     runKind: 'deploy-domestic' as HdoDeploymentKind,
     done: hasNodeKind('domestic'),
@@ -1316,7 +1323,7 @@ const deploymentCards = computed(() => [
     key: 'sync-and-repair-domestic',
     title: '同步并修复 D peers / routes',
     subtitle: '把服务端管理的 H 成员节点 / 客户端 peer 写入 D，并热更新 live WireGuard、路由和转发。',
-    command: "sudo HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo sync-and-repair-domestic --server-url http://127.0.0.1:8080",
+    command: `sudo HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo sync-and-repair-domestic --server-url ${deploymentServerUrl.value}`,
     runKind: 'sync-and-repair-domestic' as HdoDeploymentKind,
     done: (overview.value?.devices ?? []).some((row) => Boolean(row.publicKey && row.overlayIp)),
     targetTab: 'devices',
@@ -1888,9 +1895,17 @@ async function runDeployment(card: { runKind: HdoDeploymentKind }): Promise<void
   try {
     const input: {
       kind: HdoDeploymentKind;
+      serverUrl?: string | null;
       publicHost?: string | null;
       port?: number | null;
     } = { kind: card.runKind };
+    if (
+      card.runKind === 'deploy-domestic' ||
+      card.runKind === 'sync-domestic-peers' ||
+      card.runKind === 'sync-and-repair-domestic'
+    ) {
+      input.serverUrl = deploymentServerUrl.value;
+    }
     if (card.runKind === 'deploy-domestic') {
       input.publicHost = domesticDeploymentPublicHost.value;
       input.port = 51888;
