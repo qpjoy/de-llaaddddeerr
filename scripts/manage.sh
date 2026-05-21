@@ -19,6 +19,7 @@
 #   scripts/manage.sh deploy                 # 部署菜单
 #   scripts/manage.sh server <subcommand>   # → electron-server/scripts/manage.sh
 #   scripts/manage.sh hdo <subcommand>      # → docker/hdo-gateway-stack/manage.sh
+#   scripts/manage.sh nuke --all            # 清空 server/HDO 状态后重新部署
 #
 # Design note: publish stays operator-controlled. The script always prints the
 # manual command first, then only runs `pnpm publish` when an OTP is entered.
@@ -445,6 +446,10 @@ cmd_hdo() {
   "$ROOT/docker/hdo-gateway-stack/manage.sh" "$@"
 }
 
+cmd_nuke() {
+  cmd_server nuke "$@"
+}
+
 cmd_deploy() {
   local sub="${1:-}"
   if [ -n "$sub" ]; then
@@ -516,6 +521,7 @@ Subcommands:
   ${C_BOLD}deploy${C_RESET}            单独部署菜单（server / HDO domestic / WireGuard）
   ${C_BOLD}server [...] ${C_RESET}     转发到 electron-server/scripts/manage.sh
   ${C_BOLD}hdo [...] ${C_RESET}        转发到 docker/hdo-gateway-stack/manage.sh
+  ${C_BOLD}nuke [...] ${C_RESET}       清空 server/HDO 生成状态，转发到 server nuke
   ${C_BOLD}help${C_RESET}              本帮助
 
 Examples:
@@ -526,6 +532,7 @@ Examples:
   scripts/manage.sh deploy hdo
   scripts/manage.sh server status
   scripts/manage.sh server sync
+  sudo scripts/manage.sh nuke --all --yes
   scripts/manage.sh hdo setup-domestic --server-url http://domestic:8080 --public-host domestic.example.com
 
 发布流程（每次手动 OTP）:
@@ -553,6 +560,7 @@ cmd_menu() {
     "deploy         部署 server / HDO / WireGuard"
     "server         进入服务器 (docker) 管理菜单"
     "hdo            HDO gateway 安装/配置"
+    "nuke           清空 server/HDO 生成状态"
     "help           帮助"
     "quit           退出"
   )
@@ -573,6 +581,7 @@ cmd_menu() {
       deploy)         cmd_deploy ;;
       server)         cmd_server ;;
       hdo)            cmd_hdo ;;
+      nuke)           cmd_nuke ;;
       help)           cmd_help ;;
       quit|exit)      break ;;
       *) warn "未知选项";;
@@ -597,6 +606,7 @@ case "$sub" in
   deploy|deployment)            cmd_deploy "$@" ;;
   server|srv)                   cmd_server "$@" ;;
   hdo)                          cmd_hdo "$@" ;;
+  nuke|wipe)                    cmd_nuke "$@" ;;
   help|-h|--help)               cmd_help ;;
   menu)                         cmd_menu ;;
   *) warn "未知命令: $sub"; cmd_help; exit 1 ;;

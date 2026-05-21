@@ -2071,6 +2071,30 @@ domestic 节点需要在 `metadata.wireGuard` 中保存：
 - JSON 存储旧 `hdo.json` 可继续读；缺少的新数组会自动补空。
 - Postgres 通过 `0006_hdo_org_control.sql` 迁移新增表，不改历史 migration checksum。
 
+### Server Nuke 与从头部署
+
+`electron-server/scripts/manage.sh nuke` 现在是 HDO 从头验证的入口：
+
+- 默认清空 `electron-server` 的 Postgres/market Docker volumes、`electron-server/data` 和 `docker/hdo-gateway-stack` 生成状态。
+- `--all` 额外清理宿主机 `wg-quick@hdo-home`、`/etc/wireguard/hdo-home.conf`、HDO 转发规则，以及 domestic/oversea 旁路 stack 生成数据。
+- `--server-only` 只清 `electron-server` 自身，保留 HDO gateway 生成状态。
+- `--wipe-env` 才删除 `electron-server/.env`，默认保留端口、JWT、代理等部署配置。
+
+推荐完整重置命令：
+
+```bash
+sudo ./scripts/manage.sh nuke --all --yes
+```
+
+重置后从头实施：
+
+1. `./electron-server/scripts/manage.sh up`
+2. `./electron-server/scripts/manage.sh bootstrap-admin --username admin --password '<password>'`
+3. 打开 `/admin/#/server/hdo`，创建 mesh、给用户发放 membership。
+4. 在部署页执行 `Domestic WireGuard gateway`，再执行 `同步并修复 D peers / routes`。
+5. 客户端登录、安装/启动 HDO、点击 `连接 / 更新 HDO`。
+6. 每新增或重置客户端 peer 后，D 侧应自动同步；如果还未打通，可在后台手动执行一次 `同步并修复 D peers / routes` 作为 repair。
+
 ### 下一步实现顺序
 
 1. 在 `electron-server/scripts/manage.sh deploy hdo` 成功后可选自动调用 admin API 创建默认 mesh、domestic node 和管理员 membership。

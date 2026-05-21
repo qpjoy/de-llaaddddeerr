@@ -36,6 +36,7 @@ Commands:
   deploy-oversea-mihomo-hysteria2
                       Run docker/hysteria2-mihomo-stack setup from this HDO entrypoint
   setup-oversea-egress Write scoped egress env template for npm/GitHub/Docker
+  nuke                Wipe generated HDO gateway state; optional host WG cleanup
   status              Show generated files
 
 Examples:
@@ -48,6 +49,7 @@ Examples:
   sudo ./scripts/manage.sh hdo repair-domestic-routes
   sudo ./scripts/manage.sh hdo deploy-domestic-mihomo-wireguard
   sudo ./scripts/manage.sh hdo deploy-oversea-mihomo-hysteria2
+  sudo ./scripts/manage.sh hdo nuke --all --yes
 
 Optional API registration:
   HDO_TOKEN=<admin bearer token> ./scripts/manage.sh hdo setup-domestic --server-url http://domestic:8080
@@ -635,6 +637,99 @@ EOF
   ok "wrote $STACK_DIR/egress.env.example"
 }
 
+backup_gateway_state() {
+  local backup_dir stamp backup_file
+  backup_dir="$STACK_DIR/backups"
+  stamp="$(date '+%Y%m%d-%H%M%S')"
+  backup_file="$backup_dir/hdo-gateway-$stamp.tar.gz"
+
+  mkdir -p "$backup_dir"
+  tar -czf "$backup_file" \
+    -C "$STACK_DIR" \
+    --ignore-failed-read \
+    .env \
+    egress.env.example \
+    data >/dev/null 2>&1 || true
+
+  echo "$backup_file"
+}
+
+delete_iptables_rule_all() {
+  local chain="$1"
+  shift
+
+  command -v iptables >/dev/null 2>&1 || return 0
+  iptables -nL "$chain" >/dev/null 2>&1 || return 0
+
+  while iptables -C "$chain" "$@" >/dev/null 2>&1; do
+    iptables -D "$chain" "$@" >/dev/null 2>&1 || break
+  done
+}
+
+cmd_nuke() {
+  local assume_yes=0 wipe_host_wg=0 wipe_stacks=0 make_backup=1 confirm
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --yes|-y) assume_yes=1; shift ;;
+      --all) wipe_host_wg=1; wipe_stacks=1; shift ;;
+      --host-wg|--include-host-wg) wipe_host_wg=1; shift ;;
+      --no-host-wg) wipe_host_wg=0; shift ;;
+      --stacks|--include-stacks) wipe_stacks=1; shift ;;
+      --no-stacks) wipe_stacks=0; shift ;;
+      --no-backup) make_backup=0; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  warn "this will wipe generated HDO gateway state under $STACK_DIR."
+  warn "use --all or --host-wg to also remove live wg-quick@hdo-home and host routes."
+  if [ "$assume_yes" -ne 1 ]; then
+    read -r -p "Type 'HDO-NUKE' to confirm: " confirm
+    [ "$confirm" = "HDO-NUKE" ] || die "aborted"
+  fi
+
+  if [ "$make_backup" -eq 1 ]; then
+    ok "backup created: $(backup_gateway_state)"
+  fi
+
+  if [ "$wipe_stacks" -eq 1 ]; then
+    if [ -f "$ROOT_DIR/docker/wg-mihomo-stack/manage.sh" ]; then
+      say "destroying domestic Docker Mihomo + WireGuard stack"
+      bash "$ROOT_DIR/docker/wg-mihomo-stack/manage.sh" destroy --wipe-data --wipe-env --yes || true
+    fi
+    if [ -f "$ROOT_DIR/docker/hysteria2-mihomo-stack/manage.sh" ]; then
+      say "destroying oversea Docker Mihomo + Hysteria2 stack"
+      bash "$ROOT_DIR/docker/hysteria2-mihomo-stack/manage.sh" destroy --wipe-data --wipe-env --yes || true
+    fi
+  fi
+
+  if [ "$wipe_host_wg" -eq 1 ]; then
+    [ "$(id -u)" -eq 0 ] || die "--host-wg/--all must run as root"
+
+    say "removing live hdo-home WireGuard state"
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl disable --now wg-quick@hdo-home >/dev/null 2>&1 || true
+    fi
+    if command -v wg-quick >/dev/null 2>&1; then
+      wg-quick down hdo-home >/dev/null 2>&1 || true
+    fi
+    delete_iptables_rule_all FORWARD -i hdo-home -o hdo-home -j ACCEPT
+    delete_iptables_rule_all DOCKER-USER -i hdo-home -o hdo-home -j ACCEPT
+    if command -v ip >/dev/null 2>&1; then
+      ip -4 route flush dev hdo-home >/dev/null 2>&1 || true
+      ip link delete hdo-home >/dev/null 2>&1 || true
+    fi
+    rm -f /etc/wireguard/hdo-home.conf /etc/sysctl.d/99-hdo-forwarding.conf
+    ok "removed host hdo-home WireGuard config, routes and HDO forwarding rules"
+  fi
+
+  rm -rf "$DATA_DIR" "$ENV_FILE" "$STACK_DIR/egress.env.example"
+  mkdir -p "$WG_DIR" "$PEERS_DIR"
+  ok "HDO gateway generated state wiped"
+}
+
 cmd_status() {
   load_env
   echo "stack: $STACK_DIR"
@@ -684,6 +779,7 @@ cmd_menu() {
     "apply-domestic     启用 wg-quick@hdo-home"
     "repair-routes      修复 hdo-home peer 路由和转发"
     "setup-egress       生成 oversea scoped egress 模板"
+    "nuke               清空 HDO gateway 本地状态"
     "status             查看 HDO 状态"
     "help               帮助"
     "quit               退出"
@@ -704,6 +800,7 @@ cmd_menu() {
       apply-domestic)  sudo_apply_domestic ;;
       repair-routes)   sudo_repair_domestic_routes ;;
       setup-egress)    cmd_setup_oversea_egress ;;
+      nuke)            cmd_nuke ;;
       status)          cmd_status ;;
       help)            usage ;;
       quit|exit)       break ;;
@@ -763,6 +860,7 @@ case "$command" in
   apply-domestic) cmd_apply_domestic "$@" ;;
   repair-domestic-routes|repair-routes) cmd_repair_domestic_routes "$@" ;;
   setup-oversea-egress) cmd_setup_oversea_egress "$@" ;;
+  nuke|wipe|reset) cmd_nuke "$@" ;;
   status) cmd_status "$@" ;;
   help|-h|--help) usage ;;
   *) usage; die "unknown command: $command" ;;

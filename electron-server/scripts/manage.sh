@@ -425,11 +425,106 @@ cmd_deploy() {
 
 cmd_nuke() {
   check_docker
-  warn "this will delete the postgres volume AND market data volume."
-  read -rp "Type 'YES' to confirm: " confirm
-  [ "$confirm" = "YES" ] || die "aborted"
-  "${DC[@]}" down -v
-  ok "wiped. Re-run \`$0 up\` for a clean start."
+  local assume_yes=0 include_hdo=1 include_host_wg=0 include_stacks=0 wipe_env=0 make_backup=1 confirm
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --yes|-y) assume_yes=1; shift ;;
+      --all) include_hdo=1; include_host_wg=1; include_stacks=1; shift ;;
+      --server-only|--no-hdo) include_hdo=0; include_host_wg=0; include_stacks=0; shift ;;
+      --hdo|--include-hdo) include_hdo=1; shift ;;
+      --host-wg|--include-host-wg) include_hdo=1; include_host_wg=1; shift ;;
+      --stacks|--include-stacks) include_hdo=1; include_stacks=1; shift ;;
+      --wipe-env) wipe_env=1; shift ;;
+      --no-backup) make_backup=0; shift ;;
+      -h|--help)
+        cat <<EOF
+Usage:
+  $0 nuke [--yes] [--all] [--server-only] [--wipe-env] [--no-backup]
+
+By default this wipes electron-server Docker volumes, local data, and generated
+HDO gateway state under docker/hdo-gateway-stack. It does not remove the live
+host WireGuard interface unless --all or --host-wg is passed.
+
+Options:
+  --all            also remove host wg-quick@hdo-home and side stack data
+  --server-only    only wipe electron-server compose volumes and ./data
+  --host-wg        remove live hdo-home WireGuard config/routes/rules
+  --stacks         wipe domestic/oversea Docker gateway side stacks
+  --wipe-env       remove electron-server/.env as well
+  --yes            skip confirmation
+  --no-backup      do not create a tar.gz backup before wiping local state
+EOF
+        return 0
+        ;;
+      *) die "unknown nuke option: $1" ;;
+    esac
+  done
+
+  warn "this will delete electron-server postgres/market volumes and local ./data."
+  if [ "$include_hdo" -eq 1 ]; then
+    warn "this will also wipe generated HDO gateway state under docker/hdo-gateway-stack."
+  fi
+  if [ "$include_host_wg" -eq 1 ]; then
+    warn "this will also disable/remove live wg-quick@hdo-home, host routes and HDO forwarding rules."
+  fi
+  if [ "$include_stacks" -eq 1 ]; then
+    warn "this will also destroy generated domestic/oversea side stack state."
+  fi
+  if [ "$wipe_env" -eq 1 ]; then
+    warn "this will remove electron-server/.env."
+  fi
+  if [ "$assume_yes" -ne 1 ]; then
+    read -r -p "Type 'SERVER-NUKE' to confirm: " confirm
+    [ "$confirm" = "SERVER-NUKE" ] || die "aborted"
+  fi
+
+  if [ "$make_backup" -eq 1 ]; then
+    local backup_dir backup_file stamp
+    backup_dir="$ROOT/backups"
+    stamp="$(date '+%Y%m%d-%H%M%S')"
+    backup_file="$backup_dir/electron-server-$stamp.tar.gz"
+    mkdir -p "$backup_dir"
+    tar -czf "$backup_file" \
+      -C "$ROOT" \
+      --ignore-failed-read \
+      .env \
+      data >/dev/null 2>&1 || true
+    ok "backup created: $backup_file"
+  fi
+
+  stop_hdo_gateway_runner >/dev/null 2>&1 || true
+  if command -v pgrep >/dev/null 2>&1; then
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      kill "$pid" >/dev/null 2>&1 || true
+    done < <(pgrep -f "$HDO_GATEWAY_RUNNER_SCRIPT" 2>/dev/null || true)
+  fi
+
+  say "stopping compose stack and removing named volumes"
+  "${DC[@]}" down -v --remove-orphans
+  docker rm -f qpjoy-market qpjoy-postgres >/dev/null 2>&1 || true
+  docker volume rm qpjoy_pgdata qpjoy_market_data >/dev/null 2>&1 || true
+
+  rm -rf "$ROOT/data"
+  mkdir -p "$ROOT/data"
+  if [ "$wipe_env" -eq 1 ]; then
+    rm -f "$ROOT/.env"
+  fi
+
+  if [ "$include_hdo" -eq 1 ]; then
+    local hdo_args=(nuke --yes)
+    [ "$include_host_wg" -eq 1 ] && hdo_args+=(--host-wg)
+    [ "$include_stacks" -eq 1 ] && hdo_args+=(--stacks)
+    [ "$make_backup" -eq 0 ] && hdo_args+=(--no-backup)
+    if [ -f "$HDO_GATEWAY_SCRIPT" ]; then
+      bash "$HDO_GATEWAY_SCRIPT" "${hdo_args[@]}"
+    else
+      warn "HDO gateway script not found, skipped: $HDO_GATEWAY_SCRIPT"
+    fi
+  fi
+
+  ok "server wiped. Re-run \`$0 up\` for a clean start."
 }
 
 cmd_help() {
@@ -457,7 +552,7 @@ Commands:
   bootstrap-admin             create the first admin user (prompts for username/password)
   psql                        open psql shell
   shell [service]             open a shell in a container
-  nuke                        delete all volumes (asks for confirmation)
+  nuke [--all]                delete server volumes/data and HDO generated state
   menu                        interactive menu (default when no args given)
   help                        show this message
 
@@ -471,6 +566,11 @@ Files:
   Dockerfile                  market image
   data/spa-dist               admin SPA (symlinked from electron-market)
   data/hdo-gateway-runner.*   host runner token, pid and log
+
+Nuke examples:
+  $0 nuke                     clean electron-server and HDO generated state
+  sudo $0 nuke --all --yes    full reset including host hdo-home and side stacks
+  $0 nuke --server-only       only clean postgres/market volumes and server data
 EOF
 }
 
