@@ -76,5 +76,7 @@ pnpm --filter @qpjoy/electron-market-admin-ui build
 pnpm --filter @qpjoy/electron-market build
 
 # bump market -> 0.3.19 后
-pnpm --filter @qpjoy/electron-market publish --access public
+pnpm --filter @qpjoy/electron-market-admin-ui build
+pnpm --filter @qpjoy/electron-market build
+pnpm --filter @qpjoy/electron-market publish --access public --no-git-checks
 ```
