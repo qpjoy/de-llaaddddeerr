@@ -175,6 +175,7 @@ export interface HdoDeviceTaskRow {
 export type HdoDeploymentKind =
   | 'deploy-domestic'
   | 'sync-domestic-peers'
+  | 'repair-domestic-routes'
   | 'deploy-domestic-mihomo-wireguard'
   | 'deploy-oversea-mihomo-hysteria2'
   | 'status';

@@ -304,11 +304,11 @@ packages:
     os: [win32]
 
   '@qpjoy/electron-core-wireguard@file:.local-packs/qpjoy-electron-core-wireguard-0.1.13.tgz':
-    resolution: {integrity: sha512-kfBOCNgAm5hFnkExNiRZkA1puF2WkVXwR2x7CWcCGWfvFXC8w+vPm+9MMPzLG+5Unhqezpxw1cFfvrx8azy4ug==, tarball: file:.local-packs/qpjoy-electron-core-wireguard-0.1.13.tgz}
+    resolution: {integrity: sha512-0+cGUMSwLxYneyTDXLAKf3gN+YT2hJWlQNrxD2guecs5XbE6Ls8sOMHWXP88enS8auLvanbIlOJUOTw8ZnWQxg==, tarball: file:.local-packs/qpjoy-electron-core-wireguard-0.1.13.tgz}
     version: 0.1.13
 
   '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.3.19.tgz':
-    resolution: {integrity: sha512-EjwkqLkdUuFqlmVU2hZPTC+J24IatzGrlNYWQqn06wDDx9S74ZWNL8xHngpsCrc+UOj63LtAtCVD/jP8vOjoWA==, tarball: file:.local-packs/qpjoy-electron-market-0.3.19.tgz}
+    resolution: {integrity: sha512-twr0q7nzdh8PXMn4ba8PsSfVoLZmoiEful9ARCysOva55nWgBzmk49AdohVD+0o89mplqme9IAaaWcgVO7ypLA==, tarball: file:.local-packs/qpjoy-electron-market-0.3.19.tgz}
     version: 0.3.19
     peerDependencies:
       '@qpjoy/electron-plugin-sdk': '>=0.1.0'

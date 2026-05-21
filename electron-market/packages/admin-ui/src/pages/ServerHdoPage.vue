@@ -47,6 +47,7 @@
       >
         <q-tab name="deploy" icon="construction" label="部署" />
         <q-tab name="mesh" icon="hub" label="Mesh" />
+        <q-tab name="topology" icon="account_tree" label="拓扑" />
         <q-tab name="licenses" icon="verified_user" label="许可" />
         <q-tab name="nodes" icon="lan" label="节点" />
         <q-tab name="services" icon="dns" label="服务" />
@@ -154,6 +155,11 @@
                 <q-input v-model="meshServiceCidr" outlined dense label="服务 CIDR" />
                 <q-input v-model="meshDomesticIp" outlined dense label="Domestic IP" />
               </div>
+              <q-toggle
+                v-model="meshGatewayForwarding"
+                label="Domestic 网关转发"
+                class="q-mb-sm"
+              />
               <q-input
                 v-model="meshDescription"
                 outlined
@@ -203,6 +209,154 @@
                   </q-td>
                 </template>
               </q-table>
+            </section>
+          </div>
+        </q-tab-panel>
+
+        <q-tab-panel name="topology" class="q-pa-none">
+          <div class="topology-layout">
+            <section class="section-surface q-pa-md">
+              <div class="toolbar-row q-mb-sm">
+                <div>
+                  <div class="section-title q-mb-xs">HDO 拓扑</div>
+                  <div class="text-caption text-grey-7">把 Mesh、节点、设备、服务和 Profile 放在同一张操作图里。</div>
+                </div>
+                <q-space />
+                <div class="topology-legend">
+                  <span><i class="legend-dot bg-positive" />在线</span>
+                  <span><i class="legend-dot bg-grey-5" />离线</span>
+                  <span><i class="legend-dot bg-warning" />待处理</span>
+                </div>
+              </div>
+
+              <svg class="topology-map" viewBox="0 0 960 520" role="img" aria-label="HDO topology graph">
+                <line
+                  v-for="edge in topologyEdges"
+                  :key="edge.key"
+                  class="topology-edge"
+                  :x1="edge.x1"
+                  :y1="edge.y1"
+                  :x2="edge.x2"
+                  :y2="edge.y2"
+                />
+                <g
+                  v-for="item in topologyItems"
+                  :key="item.key"
+                  class="topology-node"
+                  :class="{ 'is-selected': selectedTopologyItem?.key === item.key }"
+                  :transform="`translate(${item.x} ${item.y})`"
+                  tabindex="0"
+                  @click="selectTopologyItem(item.key)"
+                  @keydown.enter="selectTopologyItem(item.key)"
+                >
+                  <title>{{ topologyTooltip(item) }}</title>
+                  <circle class="topology-node-ring" r="31" />
+                  <circle class="topology-node-fill" r="24" :class="`text-${item.color}`" />
+                  <text class="topology-node-glyph" y="7">{{ item.glyph }}</text>
+                  <circle class="topology-status" cx="22" cy="-20" r="7" :class="`text-${item.color}`" />
+                  <text class="topology-node-label" y="49">{{ item.shortLabel }}</text>
+                  <text class="topology-node-caption" y="66">{{ item.caption }}</text>
+                </g>
+              </svg>
+            </section>
+
+            <section class="section-surface q-pa-md">
+              <template v-if="selectedTopologyItem">
+                <div class="toolbar-row q-mb-sm">
+                  <div>
+                    <div class="section-title q-mb-xs">{{ selectedTopologyItem.label }}</div>
+                    <div class="text-caption text-grey-7">{{ selectedTopologyItem.description }}</div>
+                  </div>
+                  <q-space />
+                  <q-badge :color="selectedTopologyItem.color" :label="selectedTopologyItem.statusLabel" />
+                </div>
+
+                <div class="topology-detail-list q-mb-md">
+                  <div>
+                    <span>类型</span>
+                    <strong>{{ selectedTopologyItem.kindLabel }}</strong>
+                  </div>
+                  <div v-if="selectedTopologyItem.userLabel">
+                    <span>用户</span>
+                    <strong>{{ selectedTopologyItem.userLabel }}</strong>
+                  </div>
+                  <div v-if="selectedTopologyItem.overlayIp">
+                    <span>Overlay IP</span>
+                    <strong>{{ selectedTopologyItem.overlayIp }}</strong>
+                  </div>
+                  <div v-if="selectedTopologyItem.publicHost">
+                    <span>公网地址</span>
+                    <strong>{{ selectedTopologyItem.publicHost }}</strong>
+                  </div>
+                  <div v-if="selectedTopologyItem.profileLabel">
+                    <span>Profile</span>
+                    <strong>{{ selectedTopologyItem.profileLabel }}</strong>
+                  </div>
+                  <div v-if="selectedTopologyItem.rateLimitLabel">
+                    <span>限速</span>
+                    <strong>{{ selectedTopologyItem.rateLimitLabel }}</strong>
+                  </div>
+                </div>
+
+                <div class="section-subtitle">关联服务</div>
+                <q-list v-if="selectedTopologyServices.length" bordered dense class="q-mb-md">
+                  <q-item v-for="service in selectedTopologyServices" :key="service.id">
+                    <q-item-section>
+                      <q-item-label>{{ service.name }}</q-item-label>
+                      <q-item-label caption>{{ service.targetHost }}:{{ service.targetPort }} / {{ service.protocol }}</q-item-label>
+                    </q-item-section>
+                    <q-item-section side>
+                      <q-btn flat dense round icon="edit" @click="openService(service)">
+                        <q-tooltip>编辑服务</q-tooltip>
+                      </q-btn>
+                    </q-item-section>
+                  </q-item>
+                </q-list>
+                <div v-else class="text-caption text-grey-7 q-mb-md">暂无直接绑定或指向该对象的服务。</div>
+
+                <div class="topology-actions">
+                  <q-btn
+                    v-if="selectedTopologyItem.action === 'node'"
+                    color="primary"
+                    outline
+                    icon="edit"
+                    label="编辑节点"
+                    @click="openNode(selectedTopologyItem.id)"
+                  />
+                  <q-btn
+                    v-if="selectedTopologyItem.action === 'service'"
+                    color="primary"
+                    outline
+                    icon="edit"
+                    label="编辑服务"
+                    @click="openServiceById(selectedTopologyItem.id)"
+                  />
+                  <q-btn
+                    v-if="selectedTopologyItem.action === 'profile'"
+                    color="primary"
+                    outline
+                    icon="edit"
+                    label="编辑 Profile"
+                    @click="openProfile(selectedTopologyItem.id)"
+                  />
+                  <q-btn
+                    v-if="selectedTopologyItem.canRateLimit"
+                    color="primary"
+                    icon="speed"
+                    label="设置限速"
+                    @click="openRateLimit(selectedTopologyItem)"
+                  />
+                  <q-btn
+                    v-if="selectedTopologyItem.action === 'device'"
+                    color="primary"
+                    outline
+                    icon="send_to_mobile"
+                    label="创建任务"
+                    @click="openDeviceTask(selectedTopologyItem)"
+                  />
+                </div>
+              </template>
+              <div v-else class="text-grey-7">暂无拓扑数据。</div>
             </section>
           </div>
         </q-tab-panel>
@@ -685,6 +839,7 @@ import {
   type HdoDeploymentKind,
   type HdoDeploymentState,
   type HdoMeshGroupRow,
+  type HdoMeshMembershipRow,
   type HdoNodeRow,
   type HdoOverview,
   type HdoProfileRow,
@@ -708,6 +863,7 @@ const meshSlug = ref('');
 const meshDescription = ref('');
 const meshDefaultProfileId = ref<string | null>(null);
 const meshEnabled = ref(true);
+const meshGatewayForwarding = ref(true);
 const defaultMeshAddressPlan = {
   homeCidr: '100.88.0.0/16',
   userCidr: '100.89.0.0/16',
@@ -775,6 +931,42 @@ const taskKinds: HdoDeviceTaskRow['kind'][] = [
   'deactivate-plugin',
   'apply-hdo-profile'
 ];
+
+type TopologyAction = 'mesh' | 'node' | 'device' | 'service' | 'profile';
+
+interface TopologyItem {
+  key: string;
+  id: string;
+  action: TopologyAction;
+  label: string;
+  shortLabel: string;
+  caption: string;
+  description: string;
+  kindLabel: string;
+  statusLabel: string;
+  color: string;
+  glyph: string;
+  x: number;
+  y: number;
+  overlayIp: string | null;
+  publicHost: string | null;
+  userId: string | null;
+  userLabel: string | null;
+  profileLabel: string | null;
+  rateLimitLabel: string | null;
+  canRateLimit: boolean;
+  parentKey: string | null;
+}
+
+interface TopologyEdge {
+  key: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+const selectedTopologyKey = ref<string | null>(null);
 
 const meshColumns = [
   { name: 'name', label: '名称', field: 'name', align: 'left' as const },
@@ -982,6 +1174,17 @@ const deploymentCards = computed(() => [
     targetTab: 'devices',
     actionIcon: 'devices',
     actionLabel: '查看设备'
+  },
+  {
+    key: 'repair-domestic-routes',
+    title: '修复 D 路由 / 转发',
+    subtitle: '重载 live hdo-home peers，补齐 ip_forward、FORWARD 和 peer 路由。',
+    command: 'sudo ./scripts/manage.sh hdo repair-routes',
+    runKind: 'repair-domestic-routes' as HdoDeploymentKind,
+    done: hasNodeKind('domestic'),
+    targetTab: 'topology',
+    actionIcon: 'account_tree',
+    actionLabel: '查看拓扑'
   }
 ]);
 
@@ -1085,6 +1288,176 @@ const rateSubjectOptions = computed(() => {
   }
 });
 
+const activeMembershipByUserId = computed(() => {
+  const rows = new Map<string, HdoMeshMembershipRow>();
+  for (const row of activeMemberships.value) {
+    if (!rows.has(row.userId)) rows.set(row.userId, row);
+  }
+  return rows;
+});
+
+const topologyItems = computed<TopologyItem[]>(() => {
+  const data = overview.value;
+  if (!data) return [];
+
+  const items: TopologyItem[] = [];
+  const itemPositions = new Map<string, { x: number; y: number }>();
+  const meshRows = data.meshGroups;
+  const domesticRows = data.nodes.filter((row) => row.kind === 'domestic');
+  const homeRows = data.nodes.filter((row) => row.kind === 'home');
+  const overseaRows = data.nodes.filter((row) => row.kind === 'oversea');
+  const firstMeshKey = meshRows[0] ? topologyKey('mesh', meshRows[0].id) : null;
+  const firstDomesticKey = domesticRows[0] ? topologyKey('node', domesticRows[0].id) : firstMeshKey;
+
+  meshRows.forEach((row, index) => {
+    const visual = topologyStatus(row.enabled ? 'online' : 'offline');
+    pushTopologyItem(items, itemPositions, {
+      key: topologyKey('mesh', row.id),
+      id: row.id,
+      action: 'mesh',
+      label: row.name,
+      shortLabel: truncateLabel(row.name, 15),
+      caption: row.slug || 'mesh',
+      description: meshAddressPlanLabel(row),
+      kindLabel: 'Mesh 组',
+      statusLabel: row.enabled ? '启用' : '停用',
+      color: visual.color,
+      glyph: 'M',
+      x: spreadPosition(index, meshRows.length, 170, 790),
+      y: 74,
+      overlayIp: meshAddressPlan(row).domesticIp,
+      publicHost: null,
+      userId: null,
+      userLabel: null,
+      profileLabel: row.defaultProfileId ? profilesById.value.get(row.defaultProfileId)?.name ?? row.defaultProfileId : null,
+      rateLimitLabel: null,
+      canRateLimit: false,
+      parentKey: null
+    });
+  });
+
+  addNodeTopologyItems(items, itemPositions, domesticRows, 480, 188, firstMeshKey);
+  addNodeTopologyItems(items, itemPositions, homeRows, 235, 220, firstDomesticKey);
+  addNodeTopologyItems(items, itemPositions, overseaRows, 725, 220, firstDomesticKey);
+
+  data.devices.forEach((row, index) => {
+    const member = activeMembershipByUserId.value.get(row.userId);
+    const profileId = member?.profileId ?? (member ? meshById.value.get(member.meshGroupId)?.defaultProfileId : null);
+    const owner = userLabel(row.userId);
+    const visual = topologyStatus(row.status);
+    pushTopologyItem(items, itemPositions, {
+      key: topologyKey('device', row.id),
+      id: row.id,
+      action: 'device',
+      label: `${owner} / ${row.label}`,
+      shortLabel: truncateLabel(`${owner}/${row.label}`, 16),
+      caption: row.platform ?? 'device',
+      description: row.publicKey ? `WireGuard peer ${row.publicKey.slice(0, 10)}...` : '尚未登记 WireGuard 公钥',
+      kindLabel: '客户端设备',
+      statusLabel: visual.label,
+      color: visual.color,
+      glyph: 'D',
+      x: spreadPosition(index % 6, Math.min(data.devices.length, 6), 145, 815),
+      y: 350 + Math.floor(index / 6) * 82,
+      overlayIp: row.overlayIp,
+      publicHost: null,
+      userId: row.userId,
+      userLabel: owner,
+      profileLabel: profileId ? profilesById.value.get(profileId)?.name ?? profileId : null,
+      rateLimitLabel: rateLimitLabel('device', row.id) ?? rateLimitLabel('user', row.userId),
+      canRateLimit: true,
+      parentKey: firstDomesticKey
+    });
+  });
+
+  data.services.forEach((row, index) => {
+    const parentKey = serviceTopologyParentKey(row, itemPositions) ?? firstDomesticKey;
+    const parent = parentKey ? itemPositions.get(parentKey) : null;
+    const visual = topologyStatus(row.enabled ? 'online' : 'offline');
+    pushTopologyItem(items, itemPositions, {
+      key: topologyKey('service', row.id),
+      id: row.id,
+      action: 'service',
+      label: row.name,
+      shortLabel: truncateLabel(row.name, 15),
+      caption: `${row.protocol} ${row.targetPort}`,
+      description: `${row.targetHost}:${row.targetPort}`,
+      kindLabel: '可访问服务',
+      statusLabel: row.enabled ? '启用' : '停用',
+      color: visual.color,
+      glyph: 'S',
+      x: clamp((parent?.x ?? 480) + serviceOffset(index), 88, 872),
+      y: clamp((parent?.y ?? 280) + 92, 120, 492),
+      overlayIp: row.targetHost,
+      publicHost: row.domains[0] ?? null,
+      userId: null,
+      userLabel: null,
+      profileLabel: null,
+      rateLimitLabel: null,
+      canRateLimit: false,
+      parentKey
+    });
+  });
+
+  data.profiles.forEach((row, index) => {
+    const defaultMesh = meshRows.find((mesh) => mesh.defaultProfileId === row.id);
+    const parentKey = defaultMesh ? topologyKey('mesh', defaultMesh.id) : firstMeshKey;
+    const visual = topologyStatus(row.enabled ? 'online' : 'offline');
+    pushTopologyItem(items, itemPositions, {
+      key: topologyKey('profile', row.id),
+      id: row.id,
+      action: 'profile',
+      label: row.name,
+      shortLabel: truncateLabel(row.name, 15),
+      caption: row.mode,
+      description: '路由和出站策略',
+      kindLabel: '路由 Profile',
+      statusLabel: row.enabled ? '启用' : '停用',
+      color: visual.color,
+      glyph: 'P',
+      x: spreadPosition(index, data.profiles.length, 230, 730),
+      y: 145,
+      overlayIp: null,
+      publicHost: null,
+      userId: null,
+      userLabel: null,
+      profileLabel: row.mode,
+      rateLimitLabel: rateLimitLabel('profile', row.id),
+      canRateLimit: true,
+      parentKey
+    });
+  });
+
+  return items;
+});
+
+const topologyEdges = computed<TopologyEdge[]>(() => {
+  const byKey = new Map(topologyItems.value.map((item) => [item.key, item]));
+  return topologyItems.value
+    .filter((item) => item.parentKey && byKey.has(item.parentKey))
+    .map((item) => {
+      const parent = byKey.get(item.parentKey as string) as TopologyItem;
+      return {
+        key: `${parent.key}->${item.key}`,
+        x1: parent.x,
+        y1: parent.y,
+        x2: item.x,
+        y2: item.y
+      };
+    });
+});
+
+const selectedTopologyItem = computed(() => {
+  const items = topologyItems.value;
+  return items.find((item) => item.key === selectedTopologyKey.value) ?? items[0] ?? null;
+});
+
+const selectedTopologyServices = computed(() => {
+  const selected = selectedTopologyItem.value;
+  if (!selected) return [];
+  return (overview.value?.services ?? []).filter((service) => serviceBelongsToTopologyItem(service, selected));
+});
+
 async function reload(): Promise<void> {
   loading.value = true;
   error.value = null;
@@ -1118,6 +1491,99 @@ async function loadDeployments(): Promise<void> {
   }
 }
 
+function pushTopologyItem(
+  items: TopologyItem[],
+  positions: Map<string, { x: number; y: number }>,
+  item: TopologyItem
+): void {
+  items.push(item);
+  positions.set(item.key, { x: item.x, y: item.y });
+}
+
+function addNodeTopologyItems(
+  items: TopologyItem[],
+  positions: Map<string, { x: number; y: number }>,
+  rows: HdoNodeRow[],
+  x: number,
+  baseY: number,
+  parentKey: string | null
+): void {
+  rows.forEach((row, index) => {
+    const visual = topologyStatus(row.status);
+    const wireGuard = wireGuardMetadata(row);
+    const publicKey = stringValue(wireGuard?.publicKey);
+    pushTopologyItem(items, positions, {
+      key: topologyKey('node', row.id),
+      id: row.id,
+      action: 'node',
+      label: row.name,
+      shortLabel: truncateLabel(row.name, 15),
+      caption: row.kind,
+      description: publicKey ? `WireGuard ${publicKey.slice(0, 10)}...` : '尚未登记 WireGuard 公钥',
+      kindLabel: nodeKindLabel(row.kind),
+      statusLabel: visual.label,
+      color: visual.color,
+      glyph: nodeKindGlyph(row.kind),
+      x,
+      y: baseY + index * 76,
+      overlayIp: row.overlayIp,
+      publicHost: row.publicHost,
+      userId: null,
+      userLabel: null,
+      profileLabel: null,
+      rateLimitLabel: rateLimitLabel('node', row.id),
+      canRateLimit: true,
+      parentKey
+    });
+  });
+}
+
+function selectTopologyItem(key: string): void {
+  selectedTopologyKey.value = key;
+}
+
+function openNode(id: string): void {
+  const row = nodesById.value.get(id);
+  if (!row) return;
+  editNode(row);
+  tab.value = 'nodes';
+}
+
+function openService(row: HdoServiceRow): void {
+  editService(row);
+  tab.value = 'services';
+}
+
+function openServiceById(id: string): void {
+  const row = overview.value?.services.find((service) => service.id === id);
+  if (row) openService(row);
+}
+
+function openProfile(id: string): void {
+  const row = profilesById.value.get(id);
+  if (!row) return;
+  editProfile(row);
+  tab.value = 'profiles';
+}
+
+function openRateLimit(item: TopologyItem): void {
+  const subjectType =
+    item.action === 'device' || item.action === 'node' || item.action === 'profile'
+      ? item.action
+      : null;
+  if (!subjectType) return;
+  rateSubjectType.value = subjectType;
+  rateSubjectId.value = item.id;
+  tab.value = 'limits';
+}
+
+function openDeviceTask(item: TopologyItem): void {
+  if (item.action !== 'device' || !item.userId) return;
+  taskUserId.value = item.userId;
+  taskDeviceId.value = item.id;
+  tab.value = 'tasks';
+}
+
 async function runDeployment(card: { runKind: HdoDeploymentKind }): Promise<void> {
   deployingKind.value = card.runKind;
   error.value = null;
@@ -1142,7 +1608,8 @@ async function createDefaultMesh(): Promise<void> {
       description: '默认 HDO mesh 组，用于给普通用户发放入网许可。',
       enabled: true,
       metadata: {
-        addressPlan: defaultMeshAddressPlanPayload()
+        addressPlan: defaultMeshAddressPlanPayload(),
+        gatewayPolicy: defaultGatewayPolicyPayload()
       }
     });
     await reload();
@@ -1182,6 +1649,7 @@ function editMesh(row: HdoMeshGroupRow): void {
   meshUserCidr.value = addressPlan.userCidr;
   meshServiceCidr.value = addressPlan.serviceCidr;
   meshDomesticIp.value = addressPlan.domesticIp;
+  meshGatewayForwarding.value = meshGatewayPolicy(row).forwarding;
 }
 
 function resetMeshForm(): void {
@@ -1195,6 +1663,7 @@ function resetMeshForm(): void {
   meshUserCidr.value = defaultMeshAddressPlan.userCidr;
   meshServiceCidr.value = defaultMeshAddressPlan.serviceCidr;
   meshDomesticIp.value = defaultMeshAddressPlan.domesticIp;
+  meshGatewayForwarding.value = true;
 }
 
 async function saveMembership(): Promise<void> {
@@ -1440,7 +1909,11 @@ function buildMeshMetadata(): Record<string, unknown> {
       userCidr: meshUserCidr.value,
       serviceCidr: meshServiceCidr.value,
       domesticIp: meshDomesticIp.value
-    })
+    }),
+    gatewayPolicy: defaultGatewayPolicyPayload(
+      plainObject(existing.gatewayPolicy) ?? plainObject(plainObject(existing.wireGuard)?.gatewayPolicy),
+      meshGatewayForwarding.value
+    )
   };
 }
 
@@ -1457,6 +1930,18 @@ function defaultMeshAddressPlanPayload(
     serviceCidr,
     domesticIp,
     routeCidrs: [homeCidr, userCidr, serviceCidr]
+  };
+}
+
+function defaultGatewayPolicyPayload(
+  existing: Record<string, unknown> | null = null,
+  forwarding = true
+): Record<string, unknown> {
+  return {
+    ...(existing ?? {}),
+    forwarding,
+    interfaceName: stringValue(existing?.interfaceName) ?? 'hdo-home',
+    firewall: stringValue(existing?.firewall) ?? 'auto'
   };
 }
 
@@ -1498,6 +1983,15 @@ function meshAddressPlan(row: HdoMeshGroupRow): typeof defaultMeshAddressPlan {
   };
 }
 
+function meshGatewayPolicy(row: HdoMeshGroupRow): { forwarding: boolean } {
+  const metadata = plainObject(row.metadata);
+  const wireGuard = plainObject(metadata?.wireGuard);
+  const policy = plainObject(metadata?.gatewayPolicy) ?? plainObject(wireGuard?.gatewayPolicy);
+  return {
+    forwarding: typeof policy?.forwarding === 'boolean' ? policy.forwarding : true
+  };
+}
+
 function meshAddressPlanLabel(row: HdoMeshGroupRow): string {
   const plan = meshAddressPlan(row);
   return `${plan.homeCidr} / ${plan.userCidr} / ${plan.serviceCidr}`;
@@ -1517,6 +2011,104 @@ function splitCsv(value: string): string[] {
     .split(',')
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function topologyKey(action: TopologyAction, id: string): string {
+  return `${action}:${id}`;
+}
+
+function topologyTooltip(item: TopologyItem): string {
+  return [
+    item.label,
+    item.kindLabel,
+    item.overlayIp ? `Overlay: ${item.overlayIp}` : null,
+    item.publicHost ? `Public: ${item.publicHost}` : null,
+    `Status: ${item.statusLabel}`
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function topologyStatus(status: string): { color: string; label: string } {
+  if (status === 'online') return { color: 'positive', label: '在线' };
+  if (status === 'pending') return { color: 'warning', label: '待处理' };
+  if (status === 'error') return { color: 'negative', label: '异常' };
+  return { color: 'grey-5', label: '离线' };
+}
+
+function nodeKindLabel(kind: HdoNodeRow['kind']): string {
+  return {
+    domestic: 'Domestic 网关',
+    home: 'Home 节点',
+    oversea: 'Oversea 节点'
+  }[kind];
+}
+
+function nodeKindGlyph(kind: HdoNodeRow['kind']): string {
+  return {
+    domestic: 'G',
+    home: 'H',
+    oversea: 'O'
+  }[kind];
+}
+
+function serviceTopologyParentKey(
+  service: HdoServiceRow,
+  positions: Map<string, { x: number; y: number }>
+): string | null {
+  if (service.nodeId) {
+    const nodeKey = topologyKey('node', service.nodeId);
+    if (positions.has(nodeKey)) return nodeKey;
+  }
+  const device = overview.value?.devices.find((row) => row.overlayIp === service.targetHost);
+  if (device) return topologyKey('device', device.id);
+  const node = overview.value?.nodes.find((row) => row.overlayIp === service.targetHost);
+  return node ? topologyKey('node', node.id) : null;
+}
+
+function serviceBelongsToTopologyItem(service: HdoServiceRow, item: TopologyItem): boolean {
+  if (item.action === 'mesh') return true;
+  if (item.action === 'service') return service.id === item.id;
+  if (item.action === 'node') return service.nodeId === item.id || service.targetHost === item.overlayIp;
+  if (item.action === 'device') return service.targetHost === item.overlayIp;
+  return false;
+}
+
+function rateLimitLabel(subjectType: HdoRateLimitRow['subjectType'], subjectId: string): string | null {
+  const rows = (overview.value?.rateLimits ?? []).filter(
+    (row) => row.subjectType === subjectType && row.subjectId === subjectId
+  );
+  if (!rows.length) return null;
+  return rows
+    .map((row) => {
+      const down = [row.downRate, row.downCeil].filter(Boolean).join(' / ');
+      const up = [row.upRate, row.upCeil].filter(Boolean).join(' / ');
+      return [
+        down ? `下行 ${down}` : null,
+        up ? `上行 ${up}` : null
+      ]
+        .filter(Boolean)
+        .join('，');
+    })
+    .filter(Boolean)
+    .join('；');
+}
+
+function spreadPosition(index: number, total: number, start: number, end: number): number {
+  if (total <= 1) return (start + end) / 2;
+  return start + ((end - start) * index) / (total - 1);
+}
+
+function serviceOffset(index: number): number {
+  return ((index % 3) - 1) * 84;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function truncateLabel(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, Math.max(1, maxLength - 1))}…`;
 }
 
 function userLabel(userId: string): string {
@@ -1653,9 +2245,129 @@ onMounted(reload);
     gap: 8px;
   }
 
+  .topology-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
+    gap: 16px;
+  }
+
+  .topology-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    color: #667085;
+    font-size: 12px;
+  }
+
+  .topology-legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+
+  .topology-map {
+    width: 100%;
+    min-height: 420px;
+    border: 1px solid #e4e7ec;
+    border-radius: 8px;
+    background: #f8fafc;
+  }
+
+  .topology-edge {
+    stroke: #cbd5e1;
+    stroke-width: 2;
+  }
+
+  .topology-node {
+    cursor: pointer;
+    outline: none;
+  }
+
+  .topology-node-ring {
+    fill: #ffffff;
+    stroke: #d0d5dd;
+    stroke-width: 2;
+  }
+
+  .topology-node-fill,
+  .topology-status {
+    fill: currentColor;
+  }
+
+  .topology-node-glyph {
+    fill: #ffffff;
+    font-size: 18px;
+    font-weight: 700;
+    text-anchor: middle;
+    letter-spacing: 0;
+    pointer-events: none;
+  }
+
+  .topology-node-label,
+  .topology-node-caption {
+    text-anchor: middle;
+    letter-spacing: 0;
+    pointer-events: none;
+  }
+
+  .topology-node-label {
+    fill: #101828;
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .topology-node-caption {
+    fill: #667085;
+    font-size: 11px;
+  }
+
+  .topology-node.is-selected .topology-node-ring,
+  .topology-node:focus .topology-node-ring {
+    stroke: #1976d2;
+    stroke-width: 4;
+  }
+
+  .topology-detail-list {
+    display: grid;
+    gap: 8px;
+  }
+
+  .topology-detail-list > div {
+    display: grid;
+    grid-template-columns: 92px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+    padding: 8px 0;
+    border-bottom: 1px solid #eef2f6;
+  }
+
+  .topology-detail-list span {
+    color: #667085;
+    font-size: 12px;
+  }
+
+  .topology-detail-list strong {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .topology-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
   @media (max-width: 980px) {
     .metric-grid,
     .split-layout,
+    .topology-layout,
     .deploy-flow,
     .deploy-card-grid,
     .two-col {
