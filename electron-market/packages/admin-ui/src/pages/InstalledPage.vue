@@ -16,7 +16,7 @@
         v-for="plugin in host.installed.value"
         :key="plugin.id"
         class="plugin-card"
-        :class="{ active: plugin.state === 'active' }"
+        :class="{ active: plugin.state === 'active' || isSelfPlugin(plugin) }"
       >
         <div class="plugin-card-header">
           <q-icon
@@ -28,8 +28,8 @@
             <div class="text-subtitle1 text-weight-bold">{{ plugin.manifest.name }}</div>
             <div class="plugin-id">{{ plugin.id }}@{{ plugin.version }}</div>
           </div>
-          <q-chip :color="stateColor(plugin.state)" text-color="white" dense>
-            {{ stateLabel(plugin.state) }}
+          <q-chip :color="isSelfPlugin(plugin) ? 'positive' : stateColor(plugin.state)" text-color="white" dense>
+            {{ isSelfPlugin(plugin) ? '运行中' : stateLabel(plugin.state) }}
           </q-chip>
         </div>
 
@@ -52,31 +52,42 @@
         </div>
 
         <div class="toolbar-row q-mt-sm">
-          <q-btn
-            v-if="plugin.state === 'awaitingGrant'"
-            color="primary"
-            icon="lock_open"
-            label="审核权限"
-            @click="openGrant(plugin)"
-          />
-          <q-btn
-            v-else-if="plugin.state !== 'active'"
-            color="primary"
-            icon="play_arrow"
-            label="激活"
-            @click="host.activate(plugin.id)"
-          />
-          <q-btn
-            v-else
-            outline
-            color="secondary"
-            icon="pause"
-            label="停用"
-            @click="host.deactivate(plugin.id)"
-          />
+          <q-chip
+            v-if="isSelfPlugin(plugin)"
+            color="positive"
+            text-color="white"
+            icon="verified"
+            dense
+          >
+            内置运行中
+          </q-chip>
+          <template v-else>
+            <q-btn
+              v-if="plugin.state === 'awaitingGrant'"
+              color="primary"
+              icon="lock_open"
+              label="审核权限"
+              @click="openGrant(plugin)"
+            />
+            <q-btn
+              v-else-if="plugin.state !== 'active'"
+              color="primary"
+              icon="play_arrow"
+              label="激活"
+              @click="host.activate(plugin.id)"
+            />
+            <q-btn
+              v-else
+              outline
+              color="secondary"
+              icon="pause"
+              label="停用"
+              @click="host.deactivate(plugin.id)"
+            />
+          </template>
 
           <q-btn
-            v-if="plugin.manifest.contributes?.adminPanel"
+            v-if="plugin.manifest.contributes?.adminPanel && !isSelfPlugin(plugin)"
             flat
             icon="open_in_new"
             :label="plugin.manifest.contributes.adminPanel.label || '管理面板'"
@@ -89,7 +100,7 @@
 
           <!-- Newer version available on the marketplace? -->
           <q-btn
-            v-if="latestFor(plugin.id) && host.hasUpgrade(plugin.id, latestFor(plugin.id))"
+            v-if="!isSelfPlugin(plugin) && latestFor(plugin.id) && host.hasUpgrade(plugin.id, latestFor(plugin.id))"
             color="primary"
             icon="upgrade"
             :label="`升级到 ${latestFor(plugin.id)}`"
@@ -98,7 +109,7 @@
             @click="host.upgrade(plugin.id, latestFor(plugin.id))"
           />
 
-          <q-btn flat color="negative" icon="delete" @click="confirmUninstall(plugin.id)" />
+          <q-btn v-if="!isSelfPlugin(plugin)" flat color="negative" icon="delete" @click="confirmUninstall(plugin.id)" />
         </div>
       </div>
     </div>
@@ -114,6 +125,7 @@ import { usePluginHost } from 'src/composables/usePluginHost';
 import type { InstalledPluginRecord, PluginState } from 'src/types/api';
 
 const host = usePluginHost();
+const MARKETPLACE_SELF_PLUGIN_ID = 'qpjoy.electron-market';
 
 onMounted(() => {
   host.refreshInstalled();
@@ -127,6 +139,10 @@ onMounted(() => {
 /** Latest version on the marketplace for `id`, if any. */
 function latestFor(id: string): string | undefined {
   return host.marketplace.value?.entries.find((e) => e.id === id)?.latest;
+}
+
+function isSelfPlugin(plugin: InstalledPluginRecord): boolean {
+  return plugin.id === MARKETPLACE_SELF_PLUGIN_ID || plugin.npm === '@qpjoy/electron-market';
 }
 
 function stateLabel(s: PluginState): string {

@@ -14,6 +14,7 @@ import { PermissionDeniedError } from '@qpjoy/electron-plugin-sdk';
 
 import type { PluginRegistry } from '../registry/PluginRegistry';
 import type { InstalledPluginRecord } from '../types';
+import { MARKETPLACE_SELF_PLUGIN_ID } from '../constants';
 import { PermissionGate } from './PermissionGate';
 import type { PolicyDecision } from './TunnelPolicyGuard';
 
@@ -65,6 +66,10 @@ export class PluginRuntime {
   async activate(id: string): Promise<void> {
     const record = this.opts.registry.get(id);
     if (!record) throw new Error(`Plugin not installed: ${id}`);
+    if (id === MARKETPLACE_SELF_PLUGIN_ID) {
+      this.opts.registry.setState(id, 'active', null);
+      return;
+    }
     if (this.live.has(id)) return;
 
     const missing = PermissionGate.missing(record.manifest.permissions, record.grantedPermissions);
@@ -101,6 +106,10 @@ export class PluginRuntime {
   }
 
   async deactivate(id: string): Promise<void> {
+    if (id === MARKETPLACE_SELF_PLUGIN_ID) {
+      this.opts.registry.setState(id, 'active', null);
+      return;
+    }
     const inst = this.live.get(id);
     if (!inst) return;
     try {

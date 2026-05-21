@@ -10,15 +10,23 @@
 
       <q-chip
         v-if="plugin"
-        :color="stateColor(plugin.state)"
+        :color="isSelfPlugin(plugin) ? 'positive' : stateColor(plugin.state)"
         text-color="white"
-        :icon="stateIcon(plugin.state)"
+        :icon="isSelfPlugin(plugin) ? 'verified' : stateIcon(plugin.state)"
       >
-        {{ stateLabel(plugin.state) }}
+        {{ isSelfPlugin(plugin) ? '运行中' : stateLabel(plugin.state) }}
       </q-chip>
 
+      <q-chip
+        v-if="plugin && isSelfPlugin(plugin)"
+        color="positive"
+        text-color="white"
+        icon="verified"
+      >
+        内置运行中
+      </q-chip>
       <q-btn
-        v-if="plugin?.state === 'active'"
+        v-else-if="plugin?.state === 'active'"
         outline
         color="secondary"
         icon="pause"
@@ -159,10 +167,11 @@
 import { computed, onMounted, ref, watch } from 'vue';
 
 import { usePluginHost } from 'src/composables/usePluginHost';
-import type { PluginState } from 'src/types/api';
+import type { InstalledPluginRecord, PluginState } from 'src/types/api';
 
 const props = defineProps<{ id: string }>();
 const host = usePluginHost();
+const MARKETPLACE_SELF_PLUGIN_ID = 'qpjoy.electron-market';
 
 const iframeEl = ref<HTMLIFrameElement | null>(null);
 const infoOpen = ref(localStorage.getItem('qpjoy.pluginDetail.infoOpen') !== '0');
@@ -184,7 +193,15 @@ watch(permissionsOpen, (value) => localStorage.setItem('qpjoy.pluginDetail.permi
 window.addEventListener('beforeunload', () => clearInterval(interval));
 
 const plugin = computed(() => host.findInstalled(props.id));
-const adminUrl = computed(() => plugin.value?.manifest.contributes?.adminPanel?.url ?? null);
+const adminUrl = computed(() =>
+  plugin.value && !isSelfPlugin(plugin.value)
+    ? plugin.value.manifest.contributes?.adminPanel?.url ?? null
+    : null
+);
+
+function isSelfPlugin(record: InstalledPluginRecord): boolean {
+  return record.id === MARKETPLACE_SELF_PLUGIN_ID || record.npm === '@qpjoy/electron-market';
+}
 
 function stateLabel(s: PluginState): string {
   return { installed: '已安装', awaitingGrant: '待授权', active: '运行中', errored: '出错', disabled: '已停用' }[s];

@@ -154,7 +154,7 @@ function refreshMarketplaceSelfRecord() {
         installSource: 'standalone',
         manifest,
         grantedPermissions: manifest.permissions || [],
-        state: 'installed',
+        state: 'active',
         errorMessage: null,
         marketplaceEntryId: manifest.id
       });

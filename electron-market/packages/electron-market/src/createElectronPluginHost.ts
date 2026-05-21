@@ -855,7 +855,7 @@ function refreshSelfMarketplaceRecord(db: MarketplaceDB, registry: PluginRegistr
           activationEvents: []
         },
         grantedPermissions: manifest.permissions,
-        state: 'installed',
+        state: 'active',
         errorMessage: null
       },
       'standalone'

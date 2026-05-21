@@ -20,6 +20,7 @@ import {
   resolveMarketServer,
   type MarketServerSource
 } from '../createElectronPluginHost';
+import { MARKETPLACE_SELF_PLUGIN_ID } from '../constants';
 
 /** Map the DB row shape back to the legacy entry shape the admin UI expects. */
 function toLegacyEntry(row: DbEntry): LegacyEntry & { visibility?: string } {
@@ -216,6 +217,13 @@ export class AdminServer {
     if (method === 'POST' && lifecycleMatch) {
       const id = lifecycleMatch[1];
       const action = lifecycleMatch[2] as 'activate' | 'deactivate' | 'uninstall';
+      if (id === MARKETPLACE_SELF_PLUGIN_ID) {
+        this.opts.registry.setState(id, 'active', null);
+        if (action === 'uninstall') {
+          return this.json(res, 400, { error: 'QPJoy Marketplace 是当前插件宿主，不能卸载。' });
+        }
+        return this.json(res, 200, { ok: true, self: true });
+      }
       if (action === 'activate') {
         await this.opts.runtime.activate(id);
       } else if (action === 'deactivate') {
