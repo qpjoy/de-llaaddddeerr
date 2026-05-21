@@ -79,6 +79,17 @@ const hdoPlugin = {
       port: runtimeSettings.adminPort ?? 23459
     });
     admin.start();
+    const presenceTimer = setInterval(() => {
+      const status = controller.wireGuardStatus();
+      void controller.reportDevicePresence(status && status.active === true ? 'online' : 'offline', {
+        throttleMs: 10 * 60 * 1000
+      }).catch((err) => {
+        ctx.log.warn('failed to report HDO presence heartbeat', {
+          error: err instanceof Error ? err.message : String(err)
+        });
+      });
+    }, 10 * 60 * 1000);
+    presenceTimer.unref?.();
 
     ctx.expose({
       snapshot: () => controller.snapshot(),
@@ -102,6 +113,8 @@ const hdoPlugin = {
     });
 
     return async () => {
+      clearInterval(presenceTimer);
+      await controller.reportDevicePresence('offline').catch(() => undefined);
       await admin.stop();
     };
   }

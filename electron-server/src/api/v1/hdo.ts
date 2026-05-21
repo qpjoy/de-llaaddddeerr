@@ -48,6 +48,7 @@ const HDO_SERVICE_PROBE_PORTS = [
   9090
 ] as const;
 const HDO_SERVICE_PROBE_TIMEOUT_MS = 700;
+const HDO_DEVICE_ONLINE_WINDOW_MS = 10 * 60 * 1000;
 const PROFILE_MODES: readonly HdoProfileMode[] = [
   'home-only',
   'home-foreign',
@@ -456,12 +457,14 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       hdoStore.listDevicePluginStates(),
       hdoStore.listDeviceTasks()
     ]);
+    const now = Date.now();
+    const effectiveDevices = devices.map((row) => hdoDeviceWithOnlineWindow(row, now));
     return {
       users: users.map(toPublic),
       meshGroups,
       memberships,
       nodes,
-      devices,
+      devices: effectiveDevices,
       deviceMeshStates,
       services,
       profiles,
@@ -1560,7 +1563,7 @@ async function buildManifest(device: HdoDeviceRow) {
       domestic: wireGuardNodeSummary(pickDomesticNode(visibleNodes))
     },
     nodes: visibleNodes,
-    devices: visibleDevices.map((row) => ({
+    devices: visibleDevices.map((row) => hdoDeviceWithOnlineWindow(row)).map((row) => ({
       id: row.id,
       userId: row.userId,
       label: row.label,
@@ -1580,6 +1583,16 @@ async function buildManifest(device: HdoDeviceRow) {
         (row.subjectType === 'profile' && visibleProfileIds.has(row.subjectId)) ||
         (row.subjectType === 'node' && visibleNodeIds.has(row.subjectId))
     )
+  };
+}
+
+function hdoDeviceWithOnlineWindow(row: HdoDeviceRow, nowMs = Date.now()): HdoDeviceRow {
+  if (row.status !== 'online') return row;
+  const lastSeenMs = row.lastSeenAt ? Date.parse(row.lastSeenAt) : NaN;
+  if (Number.isFinite(lastSeenMs) && nowMs - lastSeenMs <= HDO_DEVICE_ONLINE_WINDOW_MS) return row;
+  return {
+    ...row,
+    status: 'offline'
   };
 }
 

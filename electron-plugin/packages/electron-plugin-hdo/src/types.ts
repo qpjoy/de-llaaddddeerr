@@ -76,6 +76,7 @@ export interface HdoDeviceRegistrationInput {
   platform?: string | null;
   publicKey?: string | null;
   overlayIp?: string | null;
+  status?: 'pending' | 'online' | 'offline' | 'error';
   metadata?: Record<string, unknown> | null;
 }
 

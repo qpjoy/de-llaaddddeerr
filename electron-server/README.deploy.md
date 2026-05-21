@@ -25,7 +25,6 @@ systemctl status wg-quick@hdo-home --no-pager
 # update
 pnpm --filter @qpjoy/electron-market-admin-ui build
 pnpm --filter @qpjoy/electron-market build
-pnpm --dir electron-server build
 ./electron-server/scripts/manage.sh redeploy
 
 # ReBorn

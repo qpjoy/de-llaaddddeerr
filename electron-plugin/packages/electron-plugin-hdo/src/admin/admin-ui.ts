@@ -761,6 +761,7 @@ export function adminHtml(): string {
                 <span class="switch-track"><span class="switch-thumb"></span></span>
                 <span class="switch-text" id="wireGuardSwitchText">WireGuard 未运行</span>
               </label>
+              <button class="btn" id="repairWireGuardRoutes">修复路由</button>
               <button class="btn" id="openWireGuard">定位配置</button>
               <button class="btn" id="rotateWireGuard">轮换密钥</button>
             </div>
@@ -925,6 +926,8 @@ export function adminHtml(): string {
     let snapshot = null;
     let tab = 'mesh';
     let wireGuardActionBusy = false;
+    let wireGuardActionStartedAt = 0;
+    let pendingLoadRetryTimer = null;
     let selectedClientTopologyKey = null;
 
     function showMessage(text, kind) {
@@ -969,6 +972,47 @@ export function adminHtml(): string {
         || /cancelled/i.test(text);
     }
 
+    function isTransientFetchError(err) {
+      const text = err && err.message ? String(err.message) : String(err || '');
+      return /fetch failed/i.test(text)
+        || /failed to fetch/i.test(text)
+        || /load failed/i.test(text)
+        || /networkerror/i.test(text);
+    }
+
+    function scheduleLoadRetry(successMessage) {
+      const delays = [900, 1800, 3500, 6000];
+      let index = 0;
+      if (pendingLoadRetryTimer) {
+        clearTimeout(pendingLoadRetryTimer);
+        pendingLoadRetryTimer = null;
+      }
+      const retry = async () => {
+        pendingLoadRetryTimer = null;
+        const ok = await load({ silent: true });
+        if (ok) {
+          showMessage(successMessage || '状态已刷新', 'info');
+          return;
+        }
+        if (index >= delays.length) return;
+        pendingLoadRetryTimer = setTimeout(retry, delays[index]);
+        index += 1;
+      };
+      pendingLoadRetryTimer = setTimeout(retry, delays[index]);
+      index += 1;
+    }
+
+    async function finishActionWithRefresh(label) {
+      const ok = await load({ silent: true });
+      if (ok) {
+        showMessage(label + '成功', 'info');
+        return true;
+      }
+      showMessage(label + '已完成，网络路由正在切换，稍后自动刷新状态…', 'info');
+      scheduleLoadRetry(label + '成功，状态已刷新');
+      return false;
+    }
+
     function updateWireGuardBusyControls() {
       ['meshQuickStart', 'quickStart'].forEach((id) => {
         const el = $(id);
@@ -985,18 +1029,37 @@ export function adminHtml(): string {
       }
       if (options.wireGuard) {
         wireGuardActionBusy = true;
+        wireGuardActionStartedAt = Date.now();
         updateWireGuardBusyControls();
       }
       showMessage(label + '中…', 'info');
       try {
         const result = await task();
-        await load();
-        showMessage(label + '成功', 'info');
+        await finishActionWithRefresh(label);
         return result;
       } catch (err) {
         if (options.treatCancelAsInfo && isAuthorizationCancelled(err)) {
-          await load().catch(() => undefined);
+          await load({ silent: true }).catch(() => undefined);
           showMessage(label + '已取消', 'info');
+          return null;
+        }
+        if (
+          options.wireGuard
+          && typeof options.recoverWireGuardActive === 'boolean'
+          && isTransientFetchError(err)
+        ) {
+          const recovered = await waitForWireGuardState(options.recoverWireGuardActive, 10);
+          if (recovered) {
+            snapshot = {
+              ...(snapshot || {}),
+              wireGuardStatus: recovered
+            };
+            showMessage(label + '已完成，网络路由正在切换，稍后自动刷新状态…', 'info');
+            scheduleLoadRetry(label + '成功，状态已刷新');
+            return null;
+          }
+          showMessage(label + '请求已发出，正在等待网络切换完成，稍后自动确认状态…', 'info');
+          scheduleLoadRetry(label + '状态已刷新');
           return null;
         }
         showMessage(label + '失败：' + (err.message || String(err)), 'error');
@@ -1004,19 +1067,30 @@ export function adminHtml(): string {
       } finally {
         if (options.wireGuard) {
           wireGuardActionBusy = false;
+          wireGuardActionStartedAt = 0;
           updateWireGuardBusyControls();
         }
       }
     }
 
-    async function load() {
+    async function load(options = {}) {
       try {
         snapshot = await request('/api/snapshot');
+        if (wireGuardActionBusy && wireGuardActionStartedAt && Date.now() - wireGuardActionStartedAt > 20000) {
+          wireGuardActionBusy = false;
+          wireGuardActionStartedAt = 0;
+        }
         const commands = await request('/api/install-commands');
         render(commands);
-        showMessage(snapshot.lastError, snapshot.lastError ? 'error' : 'info');
+        if (!options.silent) {
+          showMessage(snapshot.lastError, snapshot.lastError ? 'error' : 'info');
+        }
+        return true;
       } catch (err) {
-        showMessage(err.message || String(err), 'error');
+        if (!options.silent) {
+          showMessage(err.message || String(err), 'error');
+        }
+        return false;
       }
     }
 
@@ -1699,7 +1773,7 @@ export function adminHtml(): string {
         input.disabled = wireGuardActionBusy || !hasConfig;
         text.textContent = label;
       });
-      ['meshQuickStart', 'quickStart'].forEach((id) => {
+      ['meshQuickStart', 'quickStart', 'repairWireGuardRoutes'].forEach((id) => {
         const button = $(id);
         if (button) button.disabled = wireGuardActionBusy;
       });
@@ -1971,11 +2045,24 @@ export function adminHtml(): string {
             throw new Error(result.message || result.command || (shouldRun ? 'WireGuard 未启动' : 'WireGuard 未停止'));
           }
           await waitForWireGuardState(shouldRun);
-        }, { wireGuard: true, treatCancelAsInfo: true });
+        }, { wireGuard: true, treatCancelAsInfo: true, recoverWireGuardActive: shouldRun });
       } catch {
         const s = snapshot || {};
         renderWireGuardSwitches(s.wireGuardStatus || null, (s.settings && s.settings.wireGuardPeer) || null);
       }
+    }
+
+    async function repairWireGuardRoutes() {
+      await runAction('修复 HDO 路由', async () => {
+        const result = await request('/api/client/wireguard/repair-routes', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({})
+        });
+        if (result && result.ok === false) {
+          throw new Error(result.message || result.command || 'HDO 路由修复失败');
+        }
+      }, { wireGuard: true, treatCancelAsInfo: true, recoverWireGuardActive: true });
     }
 
     document.querySelectorAll('.nav button').forEach((btn) => {
@@ -1997,11 +2084,20 @@ export function adminHtml(): string {
       renderClientTopology(snapshot || {});
     });
 
-    $('refresh').addEventListener('click', () => load());
+    $('refresh').addEventListener('click', () => {
+      if (pendingLoadRetryTimer) {
+        clearTimeout(pendingLoadRetryTimer);
+        pendingLoadRetryTimer = null;
+      }
+      wireGuardActionBusy = false;
+      wireGuardActionStartedAt = 0;
+      load();
+    });
     $('meshQuickStart').addEventListener('click', () => $('quickStart').click());
     $('meshRefreshSubscription').addEventListener('click', () => $('fetchSubscription').click());
     $('meshWireGuardSwitch').addEventListener('change', (event) => setWireGuardRunning(event.currentTarget.checked));
     $('wireGuardSwitch').addEventListener('change', (event) => setWireGuardRunning(event.currentTarget.checked));
+    $('repairWireGuardRoutes').addEventListener('click', () => repairWireGuardRoutes().catch(() => undefined));
     $('saveSettings').addEventListener('click', () => runAction('保存控制面', async () => {
       await request('/api/settings', {
         method: 'POST',
@@ -2037,7 +2133,7 @@ export function adminHtml(): string {
         throw new Error(connected.message || connected.command || 'WireGuard 未启动');
       }
       await waitForWireGuardState(true);
-    }, { wireGuard: true, treatCancelAsInfo: true }).catch(() => undefined));
+    }, { wireGuard: true, treatCancelAsInfo: true, recoverWireGuardActive: true }).catch(() => undefined));
     $('registerDevice').addEventListener('click', () => runAction('注册设备', async () => {
       await request('/api/client/register', {
         method: 'POST',

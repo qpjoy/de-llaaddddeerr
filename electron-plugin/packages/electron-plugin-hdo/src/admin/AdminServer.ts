@@ -117,6 +117,11 @@ export class HdoAdminServer {
         sendJson(res, 200, this.controller.wireGuardStatus());
       };
     }
+    if (method === 'POST' && pathname === '/api/client/wireguard/repair-routes') {
+      return async (_req, res) => {
+        sendJson(res, 200, await this.controller.repairWireGuardRoutes());
+      };
+    }
     if (method === 'POST' && pathname === '/api/client/tasks/run') {
       return async (_req, res) => {
         sendJson(res, 200, await this.controller.executePendingTasks());

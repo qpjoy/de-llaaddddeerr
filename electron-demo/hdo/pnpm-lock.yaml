@@ -7,25 +7,25 @@ settings:
 overrides:
   '@qpjoy/electron-plugin-sdk': file:./.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz
   '@qpjoy/marketplace-db': file:./.local-packs/qpjoy-marketplace-db-0.1.1.tgz
-  '@qpjoy/electron-market': file:./.local-packs/qpjoy-electron-market-0.3.20.tgz
+  '@qpjoy/electron-market': file:./.local-packs/qpjoy-electron-market-0.3.21.tgz
   '@qpjoy/electron-core-wireguard-engine-darwin-arm64': file:./.local-packs/qpjoy-electron-core-wireguard-engine-darwin-arm64-0.1.2.tgz
   '@qpjoy/electron-core-wireguard-engine-darwin-x64': file:./.local-packs/qpjoy-electron-core-wireguard-engine-darwin-x64-0.1.2.tgz
   '@qpjoy/electron-core-wireguard-engine-linux-arm64': file:./.local-packs/qpjoy-electron-core-wireguard-engine-linux-arm64-0.1.2.tgz
   '@qpjoy/electron-core-wireguard-engine-linux-x64': file:./.local-packs/qpjoy-electron-core-wireguard-engine-linux-x64-0.1.2.tgz
   '@qpjoy/electron-core-wireguard-engine-win32-x64': file:./.local-packs/qpjoy-electron-core-wireguard-engine-win32-x64-0.1.2.tgz
-  '@qpjoy/electron-core-wireguard': file:./.local-packs/qpjoy-electron-core-wireguard-0.1.13.tgz
-  '@qpjoy/electron-plugin-hdo': file:./.local-packs/qpjoy-electron-plugin-hdo-0.1.21.tgz
+  '@qpjoy/electron-core-wireguard': file:./.local-packs/qpjoy-electron-core-wireguard-0.1.14.tgz
+  '@qpjoy/electron-plugin-hdo': file:./.local-packs/qpjoy-electron-plugin-hdo-0.1.22.tgz
 
 importers:
 
   .:
     dependencies:
       '@qpjoy/electron-market':
-        specifier: file:.local-packs/qpjoy-electron-market-0.3.20.tgz
-        version: file:.local-packs/qpjoy-electron-market-0.3.20.tgz(@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz(electron@34.5.8))(electron@34.5.8)
+        specifier: file:.local-packs/qpjoy-electron-market-0.3.21.tgz
+        version: file:.local-packs/qpjoy-electron-market-0.3.21.tgz(@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz(electron@34.5.8))(electron@34.5.8)
       '@qpjoy/electron-plugin-hdo':
-        specifier: file:.local-packs/qpjoy-electron-plugin-hdo-0.1.21.tgz
-        version: file:.local-packs/qpjoy-electron-plugin-hdo-0.1.21.tgz(electron@34.5.8)
+        specifier: file:.local-packs/qpjoy-electron-plugin-hdo-0.1.22.tgz
+        version: file:.local-packs/qpjoy-electron-plugin-hdo-0.1.22.tgz(electron@34.5.8)
       '@qpjoy/electron-plugin-sdk':
         specifier: file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz
         version: file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz(electron@34.5.8)
@@ -303,20 +303,20 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@qpjoy/electron-core-wireguard@file:.local-packs/qpjoy-electron-core-wireguard-0.1.13.tgz':
-    resolution: {integrity: sha512-M+yxcx4L+jH0ZX1G9TqVmLt5GyMbEmtDnenQ07NCVjO4ripeLnPca3Sp4D90MVathA+Ox7pFfhNU3jHcLwgvUw==, tarball: file:.local-packs/qpjoy-electron-core-wireguard-0.1.13.tgz}
-    version: 0.1.13
+  '@qpjoy/electron-core-wireguard@file:.local-packs/qpjoy-electron-core-wireguard-0.1.14.tgz':
+    resolution: {integrity: sha512-RLle292xETwKiaTgM46Ta1fcutiYOzZalaKY3oyskwvO5jXe/X1RIGdXMqsIfMSCTu9q6891DnnTgj21KAK/Dw==, tarball: file:.local-packs/qpjoy-electron-core-wireguard-0.1.14.tgz}
+    version: 0.1.14
 
-  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.3.20.tgz':
-    resolution: {integrity: sha512-UaXMpP9JZsbB7PMXVN8ChP/gWVzlznvp+JYvVWcNJZ+FCCUh4w2mdNzp3J+8Wlce/Y4ZaxNYo+bdUOxEs0V7YQ==, tarball: file:.local-packs/qpjoy-electron-market-0.3.20.tgz}
-    version: 0.3.20
+  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.3.21.tgz':
+    resolution: {integrity: sha512-yZIIgfOXGn3zIr3XOZQ+U1Ui39UOuo7D3I1FPbP4UZptdLeNX3KQfJz024fd5uIOacxffto6lZxcMVM/mXHK0w==, tarball: file:.local-packs/qpjoy-electron-market-0.3.21.tgz}
+    version: 0.3.21
     peerDependencies:
       '@qpjoy/electron-plugin-sdk': '>=0.1.0'
       electron: '>=28'
 
-  '@qpjoy/electron-plugin-hdo@file:.local-packs/qpjoy-electron-plugin-hdo-0.1.21.tgz':
-    resolution: {integrity: sha512-/bk9oYW7r7PO2IvB43WnfBdh072xuxHA0w7bYH4Ay+Q7y+qyNFsnicJNQAJ3Y7eEIKXOxlXZBYRemtXhaHfg+g==, tarball: file:.local-packs/qpjoy-electron-plugin-hdo-0.1.21.tgz}
-    version: 0.1.21
+  '@qpjoy/electron-plugin-hdo@file:.local-packs/qpjoy-electron-plugin-hdo-0.1.22.tgz':
+    resolution: {integrity: sha512-2PvWdIq4vFtCs4CoEUwzc7rwJB3Q/EWxExTD9kKWq2D7a8+R9T7X+5knqwhPFEAVNZoEyOvDzncHmQWRSWKpdg==, tarball: file:.local-packs/qpjoy-electron-plugin-hdo-0.1.22.tgz}
+    version: 0.1.22
     peerDependencies:
       electron: '>=28'
     peerDependenciesMeta:
@@ -2651,7 +2651,7 @@ snapshots:
   '@qpjoy/electron-core-wireguard-engine-win32-x64@file:.local-packs/qpjoy-electron-core-wireguard-engine-win32-x64-0.1.2.tgz':
     optional: true
 
-  '@qpjoy/electron-core-wireguard@file:.local-packs/qpjoy-electron-core-wireguard-0.1.13.tgz':
+  '@qpjoy/electron-core-wireguard@file:.local-packs/qpjoy-electron-core-wireguard-0.1.14.tgz':
     optionalDependencies:
       '@qpjoy/electron-core-wireguard-engine-darwin-arm64': file:.local-packs/qpjoy-electron-core-wireguard-engine-darwin-arm64-0.1.2.tgz
       '@qpjoy/electron-core-wireguard-engine-darwin-x64': file:.local-packs/qpjoy-electron-core-wireguard-engine-darwin-x64-0.1.2.tgz
@@ -2659,7 +2659,7 @@ snapshots:
       '@qpjoy/electron-core-wireguard-engine-linux-x64': file:.local-packs/qpjoy-electron-core-wireguard-engine-linux-x64-0.1.2.tgz
       '@qpjoy/electron-core-wireguard-engine-win32-x64': file:.local-packs/qpjoy-electron-core-wireguard-engine-win32-x64-0.1.2.tgz
 
-  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.3.20.tgz(@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz(electron@34.5.8))(electron@34.5.8)':
+  '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.3.21.tgz(@qpjoy/electron-plugin-sdk@file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz(electron@34.5.8))(electron@34.5.8)':
     dependencies:
       '@qpjoy/electron-plugin-sdk': file:.local-packs/qpjoy-electron-plugin-sdk-0.1.3.tgz(electron@34.5.8)
       '@qpjoy/marketplace-db': file:.local-packs/qpjoy-marketplace-db-0.1.1.tgz
@@ -2667,9 +2667,9 @@ snapshots:
       electron: 34.5.8
       semver: 7.8.0
 
-  '@qpjoy/electron-plugin-hdo@file:.local-packs/qpjoy-electron-plugin-hdo-0.1.21.tgz(electron@34.5.8)':
+  '@qpjoy/electron-plugin-hdo@file:.local-packs/qpjoy-electron-plugin-hdo-0.1.22.tgz(electron@34.5.8)':
     dependencies:
-      '@qpjoy/electron-core-wireguard': file:.local-packs/qpjoy-electron-core-wireguard-0.1.13.tgz
+      '@qpjoy/electron-core-wireguard': file:.local-packs/qpjoy-electron-core-wireguard-0.1.14.tgz
     optionalDependencies:
       electron: 34.5.8
 

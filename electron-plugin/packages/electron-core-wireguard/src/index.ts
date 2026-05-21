@@ -121,6 +121,19 @@ export interface WireGuardTunnelResult {
   runtime: WireGuardConnectionRuntimeStatus;
 }
 
+export interface WireGuardRouteRepairResult {
+  ok: boolean;
+  mode: string;
+  configPath: string;
+  interfaceName: string | null;
+  realInterfaceName: string | null;
+  command: string;
+  stdout?: string;
+  stderr?: string;
+  message: string;
+  runtime: WireGuardConnectionRuntimeStatus;
+}
+
 export interface WireGuardPeerRuntimeStatus {
   publicKey: string;
   endpoint: string | null;
@@ -661,6 +674,96 @@ export async function setWireGuardTunnelState(input: {
   };
 }
 
+export async function repairWireGuardTunnelRoutes(input: {
+  runtime: WireGuardConnectionRuntimeStatus;
+  configPath: string;
+}): Promise<WireGuardRouteRepairResult> {
+  const profile = parseWireGuardProfile(input.configPath);
+  const realInterfaceName = resolveWireGuardRealInterface(input.runtime, profile.interfaceName, profile.addresses);
+  const baseResult = {
+    mode: input.runtime.method,
+    configPath: input.configPath,
+    interfaceName: profile.interfaceName,
+    realInterfaceName,
+    command: '',
+    runtime: input.runtime
+  };
+  if (!input.runtime.available) {
+    return {
+      ...baseResult,
+      ok: false,
+      message: input.runtime.error ?? 'WireGuard runtime unavailable'
+    };
+  }
+  if (input.runtime.platform !== 'darwin' || input.runtime.method !== 'darwin-userspace') {
+    return {
+      ...baseResult,
+      ok: false,
+      message: '当前平台暂不需要 HDO 路由修复。'
+    };
+  }
+  if (!realInterfaceName) {
+    return {
+      ...baseResult,
+      ok: false,
+      message: '未找到当前 HDO WireGuard utun，请先启动 WireGuard。'
+    };
+  }
+
+  const routeInstallCidrs = darwinRouteInstallCidrs(profile.allowedIps);
+  const routeCleanupCidrs = uniqueStrings([
+    ...routeInstallCidrs,
+    ...darwinStalePriorityRouteCidrs(profile.allowedIps)
+  ]);
+  const routeDownCommands = routeCleanupCidrs
+    .filter((cidr) => cidr.includes('/'))
+    .map((cidr) => {
+      const family = cidr.includes(':') ? '-inet6 -net' : '-net';
+      return `while route -q -n delete ${family} ${shellQuote(cidr)} >/dev/null 2>&1; do :; done`;
+    });
+  const routeUpCommands = routeInstallCidrs
+    .filter((cidr) => cidr.includes('/'))
+    .map((cidr) => {
+      const family = cidr.includes(':') ? '-inet6 -net' : '-net';
+      return `route -q -n add ${family} ${shellQuote(cidr)} -interface ${shellQuote(realInterfaceName)} || route -q -n change ${family} ${shellQuote(cidr)} -interface ${shellQuote(realInterfaceName)}`;
+    });
+  const shellCommand = [
+    'set -e',
+    `ifconfig ${shellQuote(realInterfaceName)} >/dev/null`,
+    ...routeDownCommands,
+    ...routeUpCommands
+  ].join('\n');
+  const script = `do shell script ${appleScriptString(shellCommand)} with administrator privileges`;
+  const displayCommand = `osascript -e ${shellQuote(script)}`;
+  try {
+    const result = await execFileAsync('osascript', ['-e', script]);
+    return {
+      ...baseResult,
+      ok: true,
+      command: displayCommand,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      message: `已把 HDO 路由重新绑定到 ${realInterfaceName}。`
+    };
+  } catch (err) {
+    return {
+      ...baseResult,
+      ok: false,
+      command: displayCommand,
+      message: wireGuardCommandErrorMessage({
+        action: 'up',
+        platform: input.runtime.platform,
+        configPath: input.configPath,
+        command: 'osascript',
+        args: ['-e', script],
+        displayCommand,
+        needsAdmin: true,
+        runtime: input.runtime
+      }, err)
+    };
+  }
+}
+
 export function getWireGuardTunnelStatus(input: {
   runtime: WireGuardConnectionRuntimeStatus;
   configPath: string;
@@ -992,7 +1095,8 @@ function buildDarwinUserspaceTunnelCommand(
   const routeInstallCidrs = darwinRouteInstallCidrs(profile.allowedIps);
   const routeCleanupCidrs = uniqueStrings([
     ...profile.allowedIps.map((cidr) => normalizeCidr(cidr) ?? cidr),
-    ...routeInstallCidrs
+    ...routeInstallCidrs,
+    ...darwinStalePriorityRouteCidrs(profile.allowedIps)
   ]);
   const routeUpCommands = routeInstallCidrs
     .filter((cidr) => cidr.includes('/'))
@@ -1088,26 +1192,40 @@ function prepareDarwinUserspaceProfile(configPath: string): {
 }
 
 function darwinRouteInstallCidrs(allowedIps: string[]): string[] {
-  return uniqueStrings(allowedIps.flatMap((cidr) => {
-    const normalized = normalizeCidr(cidr);
-    if (!normalized) return [cidr];
-    const priorityCidrs = darwinPriorityRouteCidrs(normalized);
-    return priorityCidrs.length ? priorityCidrs : [normalized];
-  }));
+  return uniqueStrings([
+    ...allowedIps.map((cidr) => normalizeCidr(cidr) ?? cidr),
+    ...darwinCriticalHdoRouteCidrs(allowedIps)
+  ]);
 }
 
-function darwinPriorityRouteCidrs(cidr: string): string[] {
-  const parsed = parseIpv4Cidr(cidr);
-  if (!parsed || parsed.prefix < 8 || parsed.prefix >= 31) return [];
-  if (!rangeOverlapsAny(cidrRange(cidr)!, HDO_MESH_ROUTE_CIDRS.map((value) => cidrRange(value)!).filter(Boolean))) {
-    return [];
-  }
-  const childPrefix = parsed.prefix + 1;
-  const childSize = 2 ** (32 - childPrefix);
-  return [
-    `${intToIpv4(parsed.network)}/${childPrefix}`,
-    `${intToIpv4((parsed.network + childSize) >>> 0)}/${childPrefix}`
-  ];
+function darwinCriticalHdoRouteCidrs(allowedIps: string[]): string[] {
+  const homeRange = cidrRange(HDO_MESH_DEFAULTS.homeCidr);
+  if (!homeRange) return [];
+  return allowedIps.some((cidr) => {
+    const range = cidrRange(normalizeCidr(cidr) ?? cidr);
+    return Boolean(range && rangeOverlapsAny(range, [homeRange]));
+  })
+    ? ['100.88.0.0/24']
+    : [];
+}
+
+function darwinStalePriorityRouteCidrs(allowedIps: string[]): string[] {
+  const hdoRanges = HDO_MESH_ROUTE_CIDRS
+    .map((value) => cidrRange(value))
+    .filter((range): range is { start: number; end: number } => Boolean(range));
+  return uniqueStrings(allowedIps.flatMap((cidr) => {
+    const parsed = parseIpv4Cidr(normalizeCidr(cidr) ?? cidr);
+    const range = parsed ? cidrRange(`${intToIpv4(parsed.network)}/${parsed.prefix}`) : null;
+    if (!parsed || !range || parsed.prefix < 8 || parsed.prefix >= 31 || !rangeOverlapsAny(range, hdoRanges)) {
+      return [];
+    }
+    const childPrefix = parsed.prefix + 1;
+    const childSize = 2 ** (32 - childPrefix);
+    return [
+      `${intToIpv4(parsed.network)}/${childPrefix}`,
+      `${intToIpv4((parsed.network + childSize) >>> 0)}/${childPrefix}`
+    ];
+  }));
 }
 
 function parseWireGuardProfile(configPath: string): {

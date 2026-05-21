@@ -10,6 +10,7 @@ import {
   HDO_MESH_DEFAULTS,
   HDO_MESH_ROUTE_CIDRS,
   localCidrsForAllowedIpExclusion,
+  repairWireGuardTunnelRoutes,
   renderHdoClientWireGuardConfig,
   resolveWireGuardConnectionRuntime,
   resolveWireGuardRuntime,
@@ -96,6 +97,8 @@ export class HdoController {
   private settings: HdoPluginSettings;
   private lastError: string | null = null;
   private taskRunner: Promise<HdoTaskRunSummary> | null = null;
+  private lastPresenceReportAt = 0;
+  private lastPresenceStatus: HdoDeviceRegistrationInput['status'] | null = null;
 
   constructor(private readonly ctx: HdoControllerContext) {
     mkdirSync(ctx.userDataDir, { recursive: true });
@@ -145,6 +148,13 @@ export class HdoController {
         if (deviceId) {
           await this.reportPluginStates(deviceId).catch((err) => {
             this.ctx.log.warn('failed to report HDO plugin states', {
+              error: errorMessage(err)
+            });
+          });
+          void this.reportDevicePresence(wireGuardStatus && wireGuardStatus.active === true ? 'online' : 'offline', {
+            throttleMs: 10 * 60 * 1000
+          }).catch((err) => {
+            this.ctx.log.warn('failed to report HDO device presence', {
               error: errorMessage(err)
             });
           });
@@ -223,6 +233,7 @@ export class HdoController {
         source: '@qpjoy/electron-plugin-hdo',
         arch: process.arch
       },
+      status: input.status,
       plugins: this.localPluginStates()
     };
     let device: unknown;
@@ -260,6 +271,43 @@ export class HdoController {
       plugins: this.localPluginStates()
     });
     return Array.isArray(result) ? result : [];
+  }
+
+  async reportDevicePresence(
+    status: HdoDeviceRegistrationInput['status'],
+    options: { throttleMs?: number } = {}
+  ): Promise<unknown | null> {
+    if (!status) return null;
+    this.ensureSettingsForCurrentSession();
+    const now = Date.now();
+    const throttleMs = options.throttleMs ?? 0;
+    if (
+      throttleMs > 0 &&
+      this.lastPresenceStatus === status &&
+      now - this.lastPresenceReportAt < throttleMs
+    ) {
+      return null;
+    }
+    const peer = this.settings.wireGuardPeer ?? {};
+    const result = await this.registerDevice({
+      id: this.settings.deviceId,
+      label: this.settings.deviceLabel,
+      platform: this.settings.devicePlatform,
+      publicKey: stringValue(peer.publicKey),
+      overlayIp: stringValue(peer.overlayIp),
+      status,
+      metadata: {
+        source: '@qpjoy/electron-plugin-hdo',
+        arch: process.arch,
+        presence: {
+          status,
+          reportedAt: new Date(now).toISOString()
+        }
+      }
+    });
+    this.lastPresenceStatus = status;
+    this.lastPresenceReportAt = now;
+    return result;
   }
 
   async executePendingTasks(): Promise<HdoTaskRunSummary> {
@@ -495,6 +543,7 @@ export class HdoController {
         configPath,
         action: 'restart'
       });
+      if (restarted.ok) this.reportPresenceInBackground('online');
       return {
         ...restarted,
         action,
@@ -508,6 +557,7 @@ export class HdoController {
         configPath,
         action
       });
+      if (restarted.ok) this.reportPresenceInBackground('online');
       return {
         ...restarted,
         message: restarted.ok ? '已更新并启动 WireGuard peer。' : restarted.message,
@@ -535,6 +585,7 @@ export class HdoController {
         configPath,
         action: 'up'
       });
+      if (restarted.ok) this.reportPresenceInBackground('online');
       return {
         ...restarted,
         action,
@@ -547,11 +598,39 @@ export class HdoController {
       configPath,
       action
     });
+    if (result.ok) this.reportPresenceInBackground(action === 'down' ? 'offline' : 'online');
     return {
       ...result,
       message: result.message,
       runtime: publicWireGuardRuntime(result.runtime)
     };
+  }
+
+  async repairWireGuardRoutes(): Promise<Record<string, unknown>> {
+    this.ensureSettingsForCurrentSession();
+    const peer = this.settings.wireGuardPeer;
+    const configPath = stringValue(peer?.configPath);
+    if (!configPath || !existsSync(configPath)) {
+      throw new Error('WireGuard 配置文件不存在，请先点击“连接 / 更新 HDO”或“生成 / 更新本机 Peer”。');
+    }
+    const runtime = resolveWireGuardConnectionRuntime({
+      installDir: join(this.ctx.userDataDir, 'bin'),
+      bundledDir: this.ctx.bundledWireGuardDir,
+      allowSystemFallback: true
+    });
+    const result = await repairWireGuardTunnelRoutes({ runtime, configPath });
+    return {
+      ...result,
+      runtime: publicWireGuardRuntime(result.runtime)
+    };
+  }
+
+  private reportPresenceInBackground(status: HdoDeviceRegistrationInput['status']): void {
+    void this.reportDevicePresence(status).catch((err) => {
+      this.ctx.log.warn('failed to report HDO device presence', {
+        error: errorMessage(err)
+      });
+    });
   }
 
   wireGuardStatus(): Record<string, unknown> | null {
