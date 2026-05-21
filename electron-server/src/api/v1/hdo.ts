@@ -140,6 +140,9 @@ interface HdoDeploymentInvocation {
 }
 
 const hdoDeploymentJobs = new Map<string, HdoDeploymentJob>();
+let hdoDomesticSyncTimer: NodeJS.Timeout | null = null;
+let hdoDomesticSyncPendingReason: string | null = null;
+let hdoDomesticSyncBearerToken: string | null = null;
 
 export async function hdoRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', attachUser);
@@ -211,6 +214,13 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
     const plugins = asPluginStates(body.plugins);
     if (plugins.length > 0) {
       await hdoStore.upsertDevicePluginStates(device.id, plugins);
+    }
+    if (device.publicKey && device.overlayIp && deviceMeshAccess.active) {
+      scheduleHdoDomesticSync('device-register', bearerTokenFromRequest(req), {
+        deviceId: device.id,
+        userId: device.userId,
+        overlayIp: device.overlayIp
+      });
     }
     reply.code(201);
     return device;
@@ -599,6 +609,12 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       targetId: row.id,
       meta: { meshGroupId: row.meshGroupId, userId: row.userId, role: row.role, status: row.status }
     });
+    if (row.status === 'active') {
+      scheduleHdoDomesticSync('mesh-membership-active', bearerTokenFromRequest(req), {
+        meshGroupId: row.meshGroupId,
+        userId: row.userId
+      });
+    }
     return row;
   });
 
@@ -649,6 +665,11 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       targetKind: 'hdo_device_mesh_state',
       targetId: row.id,
       meta: { meshGroupId: row.meshGroupId, deviceId: row.deviceId, status: row.status }
+    });
+    scheduleHdoDomesticSync('device-mesh-state-change', bearerTokenFromRequest(req), {
+      meshGroupId: row.meshGroupId,
+      deviceId: row.deviceId,
+      status: row.status
     });
     return row;
   });
@@ -1013,6 +1034,67 @@ function inspectHdoDeploymentRunner() {
 
 function listHdoDeploymentJobs(): HdoDeploymentJob[] {
   return [...hdoDeploymentJobs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+}
+
+function scheduleHdoDomesticSync(
+  reason: string,
+  bearerToken: string | null,
+  meta: Record<string, unknown>
+): void {
+  if (process.env.HDO_AUTO_SYNC_DOMESTIC === 'false') return;
+  if (!hdoGatewayRunnerAvailable()) return;
+  hdoDomesticSyncPendingReason = reason;
+  hdoDomesticSyncBearerToken = bearerToken ?? hdoDomesticSyncBearerToken;
+  if (hdoDomesticSyncTimer) clearTimeout(hdoDomesticSyncTimer);
+  hdoDomesticSyncTimer = setTimeout(() => {
+    hdoDomesticSyncTimer = null;
+    startQueuedHdoDomesticSync(meta);
+  }, 1500);
+}
+
+function startQueuedHdoDomesticSync(meta: Record<string, unknown>): HdoDeploymentJob | null {
+  if (listHdoDeploymentJobs().some((job) => job.status === 'running')) {
+    if (!hdoDomesticSyncTimer) {
+      hdoDomesticSyncTimer = setTimeout(() => {
+        hdoDomesticSyncTimer = null;
+        startQueuedHdoDomesticSync({ ...meta, delayed: true });
+      }, 5000);
+    }
+    return null;
+  }
+  const runnerUrl = resolveHdoGatewayRunnerUrl();
+  const runnerToken = resolveHdoGatewayRunnerToken();
+  const script = runnerUrl ? null : resolveHdoGatewayScript();
+  if ((runnerUrl && !runnerToken) || (!runnerUrl && !script)) return null;
+  const reason = hdoDomesticSyncPendingReason ?? 'auto';
+  hdoDomesticSyncPendingReason = null;
+  const job = startHdoDeploymentJob({
+    kind: 'sync-and-repair-domestic',
+    body: {
+      reason,
+      auto: true,
+      meta
+    },
+    scriptPath: script,
+    runnerUrl,
+    bearerToken: hdoDomesticSyncBearerToken
+  });
+  hdoDomesticSyncBearerToken = null;
+  void auditStore.insert({
+    actorUserId: null,
+    actorIp: null,
+    action: 'hdo.deployment.auto_start',
+    targetKind: 'hdo_deployment',
+    targetId: job.id,
+    meta: { kind: job.kind, reason, ...meta }
+  });
+  return job;
+}
+
+function hdoGatewayRunnerAvailable(): boolean {
+  const runnerUrl = resolveHdoGatewayRunnerUrl();
+  if (runnerUrl) return Boolean(resolveHdoGatewayRunnerToken());
+  return Boolean(resolveHdoGatewayScript());
 }
 
 function resolveHdoGatewayScript(): string | null {

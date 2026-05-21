@@ -380,7 +380,9 @@ export class HdoController {
     try {
       manifest = await this.refreshManifest(stringField(device, 'id') ?? this.settings.deviceId);
       const domestic = domesticWireGuardFromManifest(manifest);
-      if (!overlayIp) {
+      if (!manifestHasMeshLicense(manifest)) {
+        lastError = '当前用户还没有 active mesh 许可；请管理员在服务器 HDO 控制面把该用户加入启用中的 mesh 组，然后重新连接 / 更新 HDO。';
+      } else if (!overlayIp) {
         lastError = '服务端尚未给当前设备分配 overlay IP。';
       } else if (!domestic.publicKey || !domestic.endpoint) {
         lastError =
@@ -1152,6 +1154,11 @@ function domesticWireGuardFromManifest(manifest: Record<string, unknown>): {
       ? stringArray(wireGuard?.routeCidrs)
       : HDO_MESH_ROUTE_CIDRS
   };
+}
+
+function manifestHasMeshLicense(manifest: Record<string, unknown>): boolean {
+  const license = plainObject(manifest.license);
+  return license?.active === true;
 }
 
 function wireGuardAddress(value: string): string {

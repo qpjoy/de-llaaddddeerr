@@ -947,6 +947,19 @@ export function adminHtml(): string {
       return body;
     }
 
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    async function waitForWireGuardState(active, attempts = 8) {
+      for (let i = 0; i < attempts; i += 1) {
+        await sleep(i === 0 ? 250 : 700);
+        const status = await request('/api/client/wireguard/status').catch(() => null);
+        if (status && Boolean(status.active) === active) return status;
+      }
+      return null;
+    }
+
     function isAuthorizationCancelled(err) {
       const text = err && err.message ? String(err.message) : String(err || '');
       return text.includes('已取消 WireGuard 管理员授权')
@@ -1957,6 +1970,7 @@ export function adminHtml(): string {
           if (result && result.ok === false) {
             throw new Error(result.message || result.command || (shouldRun ? 'WireGuard 未启动' : 'WireGuard 未停止'));
           }
+          await waitForWireGuardState(shouldRun);
         }, { wireGuard: true, treatCancelAsInfo: true });
       } catch {
         const s = snapshot || {};
@@ -2022,6 +2036,7 @@ export function adminHtml(): string {
       if (connected && connected.ok === false) {
         throw new Error(connected.message || connected.command || 'WireGuard 未启动');
       }
+      await waitForWireGuardState(true);
     }, { wireGuard: true, treatCancelAsInfo: true }).catch(() => undefined));
     $('registerDevice').addEventListener('click', () => runAction('注册设备', async () => {
       await request('/api/client/register', {

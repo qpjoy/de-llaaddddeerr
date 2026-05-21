@@ -868,6 +868,7 @@ export function buildHdoRouteProbe(input: {
     .filter((range): range is { start: number; end: number } => Boolean(range));
   const routeCidrs = routes
     .filter((row) => !routeLooksLikeExistingHdoRoute(row, hdoRanges))
+    .filter((row) => !routeLooksLikeProxyTunCaptureRoute(row))
     .map((row) => normalizeCidr(row.cidr))
     .filter(isString);
   const localCidrs = uniqueStrings([
@@ -988,17 +989,22 @@ function buildDarwinUserspaceTunnelCommand(
   const nameFile = `/var/run/wireguard/${profile.interfaceName}.name`;
   const pidFile = `/var/run/wireguard/${profile.interfaceName}.pid`;
   const logFile = `/var/run/wireguard/${profile.interfaceName}.log`;
-  const routeUpCommands = profile.allowedIps
+  const routeInstallCidrs = darwinRouteInstallCidrs(profile.allowedIps);
+  const routeCleanupCidrs = uniqueStrings([
+    ...profile.allowedIps.map((cidr) => normalizeCidr(cidr) ?? cidr),
+    ...routeInstallCidrs
+  ]);
+  const routeUpCommands = routeInstallCidrs
     .filter((cidr) => cidr.includes('/'))
     .map((cidr) => {
       const family = cidr.includes(':') ? '-inet6 -net' : '-net';
-      return `route -q -n delete ${family} ${shellQuote(cidr)} >/dev/null 2>&1 || true\nroute -q -n add ${family} ${shellQuote(cidr)} -interface "$REAL_INTERFACE"`;
+      return `while route -q -n delete ${family} ${shellQuote(cidr)} >/dev/null 2>&1; do :; done\nroute -q -n add ${family} ${shellQuote(cidr)} -interface "$REAL_INTERFACE" || route -q -n change ${family} ${shellQuote(cidr)} -interface "$REAL_INTERFACE"`;
     });
-  const routeDownCommands = profile.allowedIps
+  const routeDownCommands = routeCleanupCidrs
     .filter((cidr) => cidr.includes('/'))
     .map((cidr) => {
       const family = cidr.includes(':') ? '-inet6 -net' : '-net';
-      return `route -q -n delete ${family} ${shellQuote(cidr)} >/dev/null 2>&1 || true`;
+      return `while route -q -n delete ${family} ${shellQuote(cidr)} >/dev/null 2>&1; do :; done`;
     });
   const addressCommands = profile.addresses.map((address) => {
     if (address.includes(':')) return `ifconfig "$REAL_INTERFACE" inet6 ${shellQuote(address)} alias`;
@@ -1042,6 +1048,7 @@ function buildDarwinUserspaceTunnelCommand(
     `${shellQuote(wg)} setconf "$REAL_INTERFACE" ${shellQuote(profile.setConfigPath)}`,
     'ifconfig "$REAL_INTERFACE" up',
     ...addressCommands,
+    ...routeDownCommands,
     ...routeUpCommands
   ];
   const scriptLines = action === 'up'
@@ -1078,6 +1085,29 @@ function prepareDarwinUserspaceProfile(configPath: string): {
     allowedIps: parsed.allowedIps,
     setConfigPath
   };
+}
+
+function darwinRouteInstallCidrs(allowedIps: string[]): string[] {
+  return uniqueStrings(allowedIps.flatMap((cidr) => {
+    const normalized = normalizeCidr(cidr);
+    if (!normalized) return [cidr];
+    const priorityCidrs = darwinPriorityRouteCidrs(normalized);
+    return priorityCidrs.length ? priorityCidrs : [normalized];
+  }));
+}
+
+function darwinPriorityRouteCidrs(cidr: string): string[] {
+  const parsed = parseIpv4Cidr(cidr);
+  if (!parsed || parsed.prefix < 8 || parsed.prefix >= 31) return [];
+  if (!rangeOverlapsAny(cidrRange(cidr)!, HDO_MESH_ROUTE_CIDRS.map((value) => cidrRange(value)!).filter(Boolean))) {
+    return [];
+  }
+  const childPrefix = parsed.prefix + 1;
+  const childSize = 2 ** (32 - childPrefix);
+  return [
+    `${intToIpv4(parsed.network)}/${childPrefix}`,
+    `${intToIpv4((parsed.network + childSize) >>> 0)}/${childPrefix}`
+  ];
 }
 
 function parseWireGuardProfile(configPath: string): {
@@ -1249,6 +1279,18 @@ function routeLooksLikeExistingHdoRoute(
   return !gateway || gateway === 'on-link' || gateway === '在链路上' || !isIpv4(gateway);
 }
 
+function routeLooksLikeProxyTunCaptureRoute(route: HdoLocalRoute): boolean {
+  const range = cidrRange(route.cidr);
+  const gateway = route.gateway ? ipv4ToInt(route.gateway) : null;
+  if (!range || gateway === null) return false;
+  const proxyGatewayStart = ipv4ToInt('198.18.0.0');
+  const proxyGatewayEnd = ipv4ToInt('198.19.255.255');
+  if (proxyGatewayStart === null || proxyGatewayEnd === null) return false;
+  if (gateway < proxyGatewayStart || gateway > proxyGatewayEnd) return false;
+  const prefix = prefixFromRange(range);
+  return prefix !== null && prefix <= 8;
+}
+
 function isWireGuardLikeInterface(value: string | null | undefined): boolean {
   const normalized = (value ?? '').trim().toLowerCase();
   return /^(utun\d+|wg\d*|wg-.+|hdo[-_].*)$/.test(normalized) || normalized.includes('wireguard');
@@ -1259,6 +1301,13 @@ function rangeOverlapsAny(
   ranges: Array<{ start: number; end: number }>
 ): boolean {
   return ranges.some((range) => target.start <= range.end && range.start <= target.end);
+}
+
+function prefixFromRange(range: { start: number; end: number }): number | null {
+  const size = range.end - range.start + 1;
+  const hostBits = Math.log2(size);
+  if (size <= 0 || !Number.isInteger(hostBits)) return null;
+  return 32 - hostBits;
 }
 
 function safeExecFile(command: string, args: string[]): string | null {
