@@ -1123,6 +1123,11 @@ const deploymentSteps = computed(() => {
       label: '客户端入网',
       detail: '用户打开 HDO 插件，在“我的 Mesh”里连接 / 更新 HDO。',
       done: hasDevice
+    },
+    {
+      label: '同步并修复网关',
+      detail: '后台执行 sync-and-repair-domestic，把服务端 peer 写入 domestic，并补齐 live WireGuard、路由和转发。',
+      done: hasDevice && hasDomestic
     }
   ];
 });
@@ -1165,11 +1170,11 @@ const deploymentCards = computed(() => [
     actionLabel: '登记 O 节点'
   },
   {
-    key: 'sync-domestic-peers',
-    title: '同步 D 汇聚 peers',
-    subtitle: '把服务端管理的 H 成员节点 / 客户端 peer 写入 D 的 hdo-home，并热更新。',
-    command: "HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo sync-peers --server-url http://127.0.0.1:8080",
-    runKind: 'sync-domestic-peers' as HdoDeploymentKind,
+    key: 'sync-and-repair-domestic',
+    title: '同步并修复 D peers / routes',
+    subtitle: '把服务端管理的 H 成员节点 / 客户端 peer 写入 D，并热更新 live WireGuard、路由和转发。',
+    command: "sudo HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo sync-and-repair-domestic --server-url http://127.0.0.1:8080",
+    runKind: 'sync-and-repair-domestic' as HdoDeploymentKind,
     done: (overview.value?.devices ?? []).some((row) => Boolean(row.publicKey && row.overlayIp)),
     targetTab: 'devices',
     actionIcon: 'devices',
@@ -1178,13 +1183,24 @@ const deploymentCards = computed(() => [
   {
     key: 'repair-domestic-routes',
     title: '修复 D 路由 / 转发',
-    subtitle: '重载 live hdo-home peers，补齐 ip_forward、FORWARD 和 peer 路由。',
+    subtitle: '只重载已有 /etc/wireguard/hdo-home.conf，补齐 ip_forward、DOCKER-USER/FORWARD 和 peer 路由。',
     command: 'sudo ./scripts/manage.sh hdo repair-routes',
     runKind: 'repair-domestic-routes' as HdoDeploymentKind,
     done: hasNodeKind('domestic'),
     targetTab: 'topology',
     actionIcon: 'account_tree',
     actionLabel: '查看拓扑'
+  },
+  {
+    key: 'gateway-status',
+    title: '查看 D 网关状态',
+    subtitle: '输出生成文件、live WG allowed-ips、transfer、hdo-home routes 和 iptables 放行情况。',
+    command: 'sudo ./scripts/manage.sh hdo status',
+    runKind: 'status' as HdoDeploymentKind,
+    done: hasNodeKind('domestic'),
+    targetTab: 'deploy',
+    actionIcon: 'terminal',
+    actionLabel: '查看任务'
   }
 ]);
 
@@ -2205,7 +2221,7 @@ onMounted(reload);
 
   .deploy-flow {
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 12px;
   }
 

@@ -26,6 +26,8 @@ Commands:
   setup-domestic      Generate domestic wg-home server config
   add-home            Generate one home peer config and append it to wg-home
   sync-domestic-peers Pull managed H member/client peers from electron-server
+  sync-and-repair-domestic
+                      Pull peers, reload live WireGuard, routes and forwarding
   apply-domestic      Install generated wg-home config into /etc/wireguard
   repair-domestic-routes
                       Reload live domestic peers, routes and forwarding rules
@@ -41,6 +43,7 @@ Examples:
   ./scripts/manage.sh hdo setup-domestic --server-url http://domestic:8080 --public-host domestic.example.com
   ./scripts/manage.sh hdo add-home --name home-main
   HDO_TOKEN=<admin bearer token> ./scripts/manage.sh hdo sync-domestic-peers --server-url http://domestic:8080
+  sudo HDO_TOKEN=<admin bearer token> ./scripts/manage.sh hdo sync-and-repair-domestic --server-url http://domestic:8080
   sudo ./scripts/manage.sh hdo apply-domestic
   sudo ./scripts/manage.sh hdo repair-domestic-routes
   sudo ./scripts/manage.sh hdo deploy-domestic-mihomo-wireguard
@@ -517,6 +520,12 @@ ensure_domestic_forwarding() {
       iptables -I FORWARD -i "$iface" -o "$iface" -j ACCEPT \
         || warn "failed to allow forwarding on $iface"
     fi
+    if iptables -nL DOCKER-USER >/dev/null 2>&1; then
+      if ! iptables -C DOCKER-USER -i "$iface" -o "$iface" -j ACCEPT >/dev/null 2>&1; then
+        iptables -I DOCKER-USER 1 -i "$iface" -o "$iface" -j ACCEPT \
+          || warn "failed to allow Docker user forwarding on $iface"
+      fi
+    fi
   fi
 }
 
@@ -563,6 +572,16 @@ cmd_sync_domestic_peers() {
   else
     echo "Next:"
     echo "  sudo ./scripts/manage.sh hdo apply-domestic"
+  fi
+}
+
+cmd_sync_and_repair_domestic() {
+  cmd_sync_domestic_peers "$@"
+  if [ "$(id -u)" -eq 0 ] && [ -f /etc/wireguard/hdo-home.conf ]; then
+    cmd_repair_domestic_routes
+  else
+    echo "Next:"
+    echo "  sudo ./scripts/manage.sh hdo repair-domestic-routes"
   fi
 }
 
@@ -626,6 +645,32 @@ cmd_status() {
   echo
   echo "peers:"
   find "$PEERS_DIR" -maxdepth 1 -type f -name '*.conf' -print 2>/dev/null | sort
+  echo
+  echo "host state:"
+  if [ "$(id -u)" -eq 0 ]; then
+    sysctl net.ipv4.ip_forward 2>/dev/null || true
+    if command -v wg >/dev/null 2>&1 && wg show hdo-home >/dev/null 2>&1; then
+      echo
+      echo "wg allowed-ips:"
+      wg show hdo-home allowed-ips || true
+      echo
+      echo "wg transfer:"
+      wg show hdo-home transfer || true
+    fi
+    if command -v ip >/dev/null 2>&1; then
+      echo
+      echo "routes on hdo-home:"
+      ip route show dev hdo-home || true
+    fi
+    if command -v iptables >/dev/null 2>&1; then
+      echo
+      echo "iptables hdo-home forwarding:"
+      iptables -vnL FORWARD | awk 'NR == 1 || /hdo-home/' || true
+      iptables -vnL DOCKER-USER 2>/dev/null | awk 'NR == 1 || /hdo-home/' || true
+    fi
+  else
+    echo "run as root to include live wg, route and iptables state"
+  fi
 }
 
 cmd_menu() {
@@ -635,6 +680,7 @@ cmd_menu() {
     "deploy-oversea-mihomo-hysteria2   部署 oversea Docker Mihomo + Hysteria2"
     "add-home           生成 Home WireGuard peer"
     "sync-peers         同步服务端 H 成员/client peers 到 domestic"
+    "sync-repair        同步 peers 并修复 live 路由/转发"
     "apply-domestic     启用 wg-quick@hdo-home"
     "repair-routes      修复 hdo-home peer 路由和转发"
     "setup-egress       生成 oversea scoped egress 模板"
@@ -654,6 +700,7 @@ cmd_menu() {
       deploy-oversea-mihomo-hysteria2) cmd_stack_delegate "$ROOT_DIR/docker/hysteria2-mihomo-stack/manage.sh" setup ;;
       add-home)        cmd_add_home ;;
       sync-peers)      cmd_sync_domestic_peers ;;
+      sync-repair)     cmd_sync_and_repair_domestic ;;
       apply-domestic)  sudo_apply_domestic ;;
       repair-routes)   sudo_repair_domestic_routes ;;
       setup-egress)    cmd_setup_oversea_egress ;;
@@ -712,6 +759,7 @@ case "$command" in
   setup-domestic) cmd_setup_domestic "$@" ;;
   add-home) cmd_add_home "$@" ;;
   sync-domestic-peers|sync-peers) cmd_sync_domestic_peers "$@" ;;
+  sync-and-repair-domestic|sync-repair) cmd_sync_and_repair_domestic "$@" ;;
   apply-domestic) cmd_apply_domestic "$@" ;;
   repair-domestic-routes|repair-routes) cmd_repair_domestic_routes "$@" ;;
   setup-oversea-egress) cmd_setup_oversea_egress "$@" ;;

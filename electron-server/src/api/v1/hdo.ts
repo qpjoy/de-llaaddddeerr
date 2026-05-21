@@ -63,6 +63,7 @@ const DEVICE_TASK_STATUSES: readonly HdoDeviceTaskStatus[] = [
 const HDO_DEPLOYMENT_KINDS = [
   'deploy-domestic',
   'sync-domestic-peers',
+  'sync-and-repair-domestic',
   'repair-domestic-routes',
   'deploy-domestic-mihomo-wireguard',
   'deploy-oversea-mihomo-hysteria2',
@@ -810,6 +811,9 @@ function buildHdoDeploymentInvocation(
   }
   if (kind === 'sync-domestic-peers') {
     return { args: ['sync-peers', '--server-url', serverUrl], serverUrl };
+  }
+  if (kind === 'sync-and-repair-domestic') {
+    return { args: ['sync-and-repair-domestic', '--server-url', serverUrl], serverUrl };
   }
   if (kind === 'status') {
     return { args: ['status'], serverUrl };

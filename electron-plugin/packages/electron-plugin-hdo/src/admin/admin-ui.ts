@@ -354,6 +354,111 @@ export function adminHtml(): string {
       color: var(--muted);
       font-weight: 600;
     }
+    .topology-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
+      gap: 16px;
+    }
+    .topology-map {
+      width: 100%;
+      min-height: 420px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f8fafc;
+    }
+    .topology-edge {
+      stroke: #cbd5df;
+      stroke-width: 2;
+    }
+    .topology-node {
+      cursor: pointer;
+      outline: none;
+    }
+    .topology-node-ring {
+      fill: #fff;
+      stroke: #d0d7e2;
+      stroke-width: 2;
+    }
+    .topology-node.selected .topology-node-ring,
+    .topology-node:focus .topology-node-ring {
+      stroke: var(--accent);
+      stroke-width: 4;
+    }
+    .topology-node-fill,
+    .topology-status {
+      fill: #637083;
+    }
+    .topology-node.ok .topology-node-fill,
+    .topology-node.ok .topology-status { fill: var(--accent-2); }
+    .topology-node.warn .topology-node-fill,
+    .topology-node.warn .topology-status { fill: var(--warn); }
+    .topology-node.bad .topology-node-fill,
+    .topology-node.bad .topology-status { fill: var(--bad); }
+    .topology-node.off .topology-node-fill,
+    .topology-node.off .topology-status { fill: #98a2b3; }
+    .topology-glyph {
+      fill: #fff;
+      font-size: 18px;
+      font-weight: 700;
+      text-anchor: middle;
+      pointer-events: none;
+      letter-spacing: 0;
+    }
+    .topology-label,
+    .topology-caption {
+      text-anchor: middle;
+      pointer-events: none;
+      letter-spacing: 0;
+    }
+    .topology-label {
+      fill: var(--ink);
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .topology-caption {
+      fill: var(--muted);
+      font-size: 11px;
+    }
+    .topology-detail {
+      display: grid;
+      gap: 10px;
+    }
+    .topology-detail-row {
+      display: grid;
+      grid-template-columns: 78px minmax(0, 1fr);
+      gap: 8px;
+      border-bottom: 1px solid #eef2f6;
+      padding-bottom: 8px;
+    }
+    .topology-detail-row span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .topology-detail-row strong {
+      overflow-wrap: anywhere;
+    }
+    .topology-legend {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 8px;
+    }
+    .topology-legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .legend-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+      background: #98a2b3;
+    }
+    .legend-dot.ok { background: var(--accent-2); }
+    .legend-dot.warn { background: var(--warn); }
     pre {
       margin: 0;
       white-space: pre-wrap;
@@ -423,6 +528,7 @@ export function adminHtml(): string {
         border-bottom: 1px solid var(--line);
       }
       .nav { grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); }
+      .topology-grid { grid-template-columns: 1fr; }
       .span-8, .span-6, .span-4, .span-3 { grid-column: span 12; }
       .topbar { display: grid; }
     }
@@ -440,6 +546,7 @@ export function adminHtml(): string {
       </div>
       <nav class="nav">
         <button class="active" data-tab="mesh">我的 Mesh</button>
+        <button data-tab="topology">拓扑</button>
         <button data-tab="overview">总览</button>
         <button data-tab="client">客户端</button>
         <button data-tab="advanced">高级</button>
@@ -500,6 +607,36 @@ export function adminHtml(): string {
             <table class="table">
               <thead><tr><th>类型</th><th>名称</th><th>Overlay</th><th>状态</th></tr></thead>
               <tbody id="meshHomeNodesTable"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab" id="tab-topology">
+        <div class="grid">
+          <div class="panel span-12">
+            <div class="topology-grid">
+              <div>
+                <h3>客户端可见拓扑</h3>
+                <p class="sub">展示当前账号已授权可见的 Mesh、节点、设备、服务和 Profile。</p>
+                <div class="topology-legend">
+                  <span><i class="legend-dot ok"></i>在线</span>
+                  <span><i class="legend-dot"></i>离线</span>
+                  <span><i class="legend-dot warn"></i>待处理</span>
+                </div>
+                <svg id="clientTopologyMap" class="topology-map" viewBox="0 0 960 520" role="img" aria-label="HDO client topology"></svg>
+              </div>
+              <div>
+                <h3>详情</h3>
+                <div id="clientTopologyDetail" class="topology-detail"></div>
+              </div>
+            </div>
+          </div>
+          <div class="panel span-12">
+            <h3>拓扑服务</h3>
+            <table class="table">
+              <thead><tr><th>名称</th><th>目标</th><th>协议</th><th>域名</th></tr></thead>
+              <tbody id="clientTopologyServicesTable"></tbody>
             </table>
           </div>
         </div>
@@ -768,6 +905,7 @@ export function adminHtml(): string {
     let snapshot = null;
     let tab = 'mesh';
     let wireGuardActionBusy = false;
+    let selectedClientTopologyKey = null;
 
     function showMessage(text, kind) {
       const el = $('message');
@@ -882,6 +1020,7 @@ export function adminHtml(): string {
       const deployment = deploymentState(s);
       renderDeployment(deployment);
       renderMeshHome(s, deployment);
+      renderClientTopology(s);
 
       const dot = $('status-dot');
       dot.className = 'dot ' + (deployment.level === 'good' ? 'ok' : deployment.level === 'bad' ? 'bad' : 'warn');
@@ -1174,6 +1313,247 @@ export function adminHtml(): string {
       )).join('') : '<tr><td colspan="4" class="muted">暂无节点；等待服务端下发 mesh 节点</td></tr>';
     }
 
+    function renderClientTopology(s) {
+      const model = buildClientTopology(s || {});
+      if (!model.items.length) {
+        $('clientTopologyMap').innerHTML = '<text x="480" y="260" text-anchor="middle" fill="#637083">暂无拓扑数据；先连接 / 更新 HDO</text>';
+        $('clientTopologyDetail').innerHTML = '<div class="notice">暂无拓扑数据。</div>';
+        $('clientTopologyServicesTable').innerHTML = '<tr><td colspan="4" class="muted">暂无服务</td></tr>';
+        return;
+      }
+      if (!selectedClientTopologyKey || !model.items.some((item) => item.key === selectedClientTopologyKey)) {
+        selectedClientTopologyKey = model.items[0].key;
+      }
+      const selected = model.items.find((item) => item.key === selectedClientTopologyKey) || model.items[0];
+      const edges = model.edges.map((edge) => (
+        '<line class="topology-edge" x1="' + edge.x1 + '" y1="' + edge.y1 +
+        '" x2="' + edge.x2 + '" y2="' + edge.y2 + '"></line>'
+      )).join('');
+      const nodes = model.items.map((item) => {
+        const selectedClass = item.key === selected.key ? ' selected' : '';
+        return '<g class="topology-node ' + escapeAttr(item.level + selectedClass) +
+          '" data-topology-key="' + escapeAttr(item.key) +
+          '" tabindex="0" transform="translate(' + item.x + ' ' + item.y + ')">' +
+          '<title>' + escapeHtml(topologyTitle(item)) + '</title>' +
+          '<circle class="topology-node-ring" r="31"></circle>' +
+          '<circle class="topology-node-fill" r="24"></circle>' +
+          '<text class="topology-glyph" y="7">' + escapeHtml(item.glyph) + '</text>' +
+          '<circle class="topology-status" cx="22" cy="-20" r="7"></circle>' +
+          '<text class="topology-label" y="49">' + escapeHtml(item.shortLabel) + '</text>' +
+          '<text class="topology-caption" y="66">' + escapeHtml(item.caption) + '</text>' +
+          '</g>';
+      }).join('');
+      $('clientTopologyMap').innerHTML = edges + nodes;
+      $('clientTopologyDetail').innerHTML = renderTopologyDetail(selected);
+      renderTopologyServices(selected, model.services);
+    }
+
+    function buildClientTopology(s) {
+      const settings = s.settings || {};
+      const manifest = settings.lastManifest || {};
+      const license = manifest.license || {};
+      const groups = Array.isArray(license.groups) ? license.groups : [];
+      const nodes = Array.isArray(manifest.nodes) ? manifest.nodes : [];
+      const manifestDevices = Array.isArray(manifest.devices) ? manifest.devices : [];
+      const services = Array.isArray(manifest.services) ? manifest.services : [];
+      const profiles = Array.isArray(manifest.profiles) ? manifest.profiles : [];
+      const rateLimits = Array.isArray(manifest.rateLimits) ? manifest.rateLimits : [];
+      const currentDevice = manifest.device || (Array.isArray(s.devices) && s.devices[0]) || {};
+      const peer = settings.wireGuardPeer || {};
+      const runtime = s.wireGuardStatus || {};
+      const items = [];
+      const positions = new Map();
+      const meshName = groups.length ? groups.map((row) => row.name || row.slug || row.id).join(', ') : '当前 Mesh';
+      const meshKey = 'mesh:current';
+
+      pushTopology(items, positions, {
+        key: meshKey,
+        id: 'current',
+        type: 'mesh',
+        label: meshName,
+        shortLabel: truncateText(meshName, 16),
+        caption: license.active ? 'active' : 'no license',
+        description: license.active ? '当前账号已加入 Mesh' : '当前账号还没有 active mesh 许可',
+        kindLabel: 'Mesh',
+        statusLabel: license.active ? '在线' : '待处理',
+        level: license.active ? 'ok' : 'warn',
+        glyph: 'M',
+        x: 480,
+        y: 74,
+        overlayIp: manifest.wireGuard && manifest.wireGuard.addressPlan ? manifest.wireGuard.addressPlan.domesticIp : null,
+        publicHost: null,
+        profileLabel: currentProfileLabel(manifest),
+        rateLimitLabel: null,
+        parentKey: null
+      });
+
+      nodes.forEach((node, index) => {
+        const visual = topologyStatus(node.status || (node.kind === 'domestic' ? 'pending' : 'offline'));
+        pushTopology(items, positions, {
+          key: 'node:' + (node.id || index),
+          id: node.id || String(index),
+          type: 'node',
+          label: node.name || node.id || node.kind || 'node',
+          shortLabel: truncateText(node.name || node.id || node.kind || 'node', 15),
+          caption: node.kind || 'node',
+          description: node.publicKey ? 'WireGuard ' + shortKey(node.publicKey) : (node.publicHost || 'Mesh 节点'),
+          kindLabel: nodeKindLabel(node.kind || 'node'),
+          statusLabel: visual.label,
+          level: visual.level,
+          glyph: nodeGlyph(node.kind || 'node'),
+          x: nodeX(node, index, nodes.length),
+          y: nodeY(node, index),
+          overlayIp: node.overlayIp || null,
+          publicHost: node.publicHost || null,
+          profileLabel: null,
+          rateLimitLabel: rateLimitFor(rateLimits, 'node', node.id),
+          parentKey: meshKey
+        });
+      });
+
+      const deviceRows = dedupeDevices([
+        currentDevice,
+        ...manifestDevices
+      ]);
+      deviceRows.forEach((device, index) => {
+        const isCurrent = (device.id && currentDevice.id && device.id === currentDevice.id)
+          || (device.overlayIp && peer.overlayIp && device.overlayIp === peer.overlayIp);
+        const visual = isCurrent
+          ? topologyStatus('online')
+          : topologyStatus(device.status || 'offline');
+        const owner = shortUser(device.userId || currentDevice.userId || '');
+        const label = owner ? owner + '/' + (device.label || device.id || 'device') : (device.label || device.id || 'device');
+        pushTopology(items, positions, {
+          key: 'device:' + (device.id || device.overlayIp || index),
+          id: device.id || String(index),
+          type: 'device',
+          label: label,
+          shortLabel: truncateText(label, 16),
+          caption: isCurrent ? 'this device' : (device.platform || 'device'),
+          description: device.publicKey ? 'WireGuard ' + shortKey(device.publicKey) : '客户端设备',
+          kindLabel: isCurrent ? '当前设备' : '可见设备',
+          statusLabel: visual.label,
+          level: visual.level,
+          glyph: isCurrent ? '我' : 'D',
+          x: spread(index, deviceRows.length, 145, 815),
+          y: 350 + Math.floor(index / 6) * 78,
+          overlayIp: device.overlayIp || peer.overlayIp || null,
+          publicHost: null,
+          profileLabel: currentProfileLabel(manifest),
+          rateLimitLabel: rateLimitFor(rateLimits, 'device', device.id) || rateLimitFor(rateLimits, 'user', device.userId),
+          parentKey: domesticTopologyKey(nodes) || meshKey
+        });
+      });
+
+      profiles.forEach((profile, index) => {
+        if (index > 2) return;
+        const visual = topologyStatus(profile.enabled === false ? 'offline' : 'online');
+        pushTopology(items, positions, {
+          key: 'profile:' + (profile.id || index),
+          id: profile.id || String(index),
+          type: 'profile',
+          label: profile.name || profile.mode || profile.id || 'profile',
+          shortLabel: truncateText(profile.name || profile.mode || profile.id || 'profile', 15),
+          caption: profile.mode || 'profile',
+          description: '路由和出站策略',
+          kindLabel: 'Profile',
+          statusLabel: profile.enabled === false ? '停用' : '启用',
+          level: visual.level,
+          glyph: 'P',
+          x: spread(index, Math.min(profiles.length, 3), 250, 710),
+          y: 150,
+          overlayIp: null,
+          publicHost: null,
+          profileLabel: profile.mode || null,
+          rateLimitLabel: rateLimitFor(rateLimits, 'profile', profile.id),
+          parentKey: meshKey
+        });
+      });
+
+      services.forEach((service, index) => {
+        const parentKey = serviceParentKey(service, nodes, deviceRows) || meshKey;
+        const parent = positions.get(parentKey);
+        const visual = topologyStatus(service.enabled === false ? 'offline' : 'online');
+        pushTopology(items, positions, {
+          key: 'service:' + (service.id || service.name || index),
+          id: service.id || String(index),
+          type: 'service',
+          label: service.name || service.id || 'service',
+          shortLabel: truncateText(service.name || service.id || 'service', 15),
+          caption: (service.protocol || 'tcp') + ' ' + (service.targetPort || service.port || ''),
+          description: (service.targetHost || service.host || '') + ':' + (service.targetPort || service.port || ''),
+          kindLabel: '可访问服务',
+          statusLabel: service.enabled === false ? '停用' : '启用',
+          level: visual.level,
+          glyph: 'S',
+          x: clamp((parent ? parent.x : 480) + serviceOffset(index), 88, 872),
+          y: clamp((parent ? parent.y : 270) + 92, 115, 492),
+          overlayIp: service.targetHost || service.host || null,
+          publicHost: Array.isArray(service.domains) ? service.domains[0] || null : null,
+          profileLabel: null,
+          rateLimitLabel: null,
+          parentKey
+        });
+      });
+
+      const byKey = new Map(items.map((item) => [item.key, item]));
+      const edges = items
+        .filter((item) => item.parentKey && byKey.has(item.parentKey))
+        .map((item) => {
+          const parent = byKey.get(item.parentKey);
+          return { x1: parent.x, y1: parent.y, x2: item.x, y2: item.y };
+        });
+      return { items, edges, services };
+    }
+
+    function pushTopology(items, positions, item) {
+      items.push(item);
+      positions.set(item.key, { x: item.x, y: item.y });
+    }
+
+    function renderTopologyDetail(item) {
+      const rows = [
+        ['类型', item.kindLabel],
+        ['状态', item.statusLabel],
+        ['Overlay', item.overlayIp || ''],
+        ['公网/域名', item.publicHost || ''],
+        ['Profile', item.profileLabel || ''],
+        ['限速', item.rateLimitLabel || '']
+      ].filter((row) => row[1]);
+      return '<div class="topology-detail">' + rows.map((row) => (
+        '<div class="topology-detail-row"><span>' + escapeHtml(row[0]) + '</span><strong>' +
+        escapeHtml(row[1]) + '</strong></div>'
+      )).join('') + '<p class="sub">' + escapeHtml(item.description || '') + '</p></div>';
+    }
+
+    function renderTopologyServices(selected, services) {
+      const rows = services.filter((service) => topologyServiceMatches(selected, service));
+      $('clientTopologyServicesTable').innerHTML = rows.length ? rows.map((svc) => (
+        '<tr><td>' + escapeHtml(svc.name || '') + '</td><td>' +
+        escapeHtml((svc.targetHost || svc.host || '') + ':' + (svc.targetPort || svc.port || '')) + '</td><td>' +
+        escapeHtml(svc.protocol || '') + '</td><td>' +
+        escapeHtml((svc.domains || []).join(', ')) + '</td></tr>'
+      )).join('') : '<tr><td colspan="4" class="muted">当前选择没有直接关联服务</td></tr>';
+    }
+
+    function topologyServiceMatches(selected, service) {
+      if (!selected || selected.type === 'mesh') return true;
+      if (selected.type === 'service') return selected.id === (service.id || '');
+      if (selected.type === 'node') return selected.id === (service.nodeId || '') || selected.overlayIp === (service.targetHost || service.host || '');
+      if (selected.type === 'device') return selected.overlayIp && selected.overlayIp === (service.targetHost || service.host || '');
+      return false;
+    }
+
+    function topologyTitle(item) {
+      return [
+        item.label,
+        item.kindLabel,
+        item.overlayIp ? 'Overlay: ' + item.overlayIp : '',
+        item.publicHost ? 'Public: ' + item.publicHost : '',
+        'Status: ' + item.statusLabel
+      ].filter(Boolean).join('\\n');
+    }
+
     function renderList(id, items) {
       const rows = items.length ? items : ['暂无'];
       $(id).innerHTML = rows.map((item) => '<li>' + escapeHtml(String(item)) + '</li>').join('');
@@ -1351,6 +1731,103 @@ export function adminHtml(): string {
       return profiles[0] ? (profiles[0].name || profiles[0].mode || profiles[0].id) : '默认';
     }
 
+    function nodeKindLabel(kind) {
+      if (kind === 'domestic') return 'Domestic 网关';
+      if (kind === 'home') return 'Home 节点';
+      if (kind === 'oversea') return 'Oversea 节点';
+      return 'Mesh 节点';
+    }
+
+    function nodeGlyph(kind) {
+      if (kind === 'domestic') return 'G';
+      if (kind === 'home') return 'H';
+      if (kind === 'oversea') return 'O';
+      return 'N';
+    }
+
+    function topologyStatus(status) {
+      const value = String(status || '').toLowerCase();
+      if (value === 'online' || value === 'active' || value === 'enabled') return { level: 'ok', label: '在线' };
+      if (value === 'pending' || value === 'claimed') return { level: 'warn', label: '待处理' };
+      if (value === 'error' || value === 'failed') return { level: 'bad', label: '异常' };
+      return { level: 'off', label: '离线' };
+    }
+
+    function nodeX(node, index, total) {
+      if (node.kind === 'domestic') return 480;
+      if (node.kind === 'home') return 245;
+      if (node.kind === 'oversea') return 715;
+      return spread(index, total, 190, 770);
+    }
+
+    function nodeY(node, index) {
+      if (node.kind === 'domestic') return 185;
+      if (node.kind === 'home' || node.kind === 'oversea') return 230 + index * 34;
+      return 205 + index * 54;
+    }
+
+    function domesticTopologyKey(nodes) {
+      const domestic = nodes.find((node) => node && node.kind === 'domestic');
+      return domestic ? 'node:' + domestic.id : null;
+    }
+
+    function serviceParentKey(service, nodes, devices) {
+      if (service.nodeId) return 'node:' + service.nodeId;
+      const target = service.targetHost || service.host || '';
+      const device = devices.find((row) => row && row.overlayIp === target);
+      if (device) return 'device:' + (device.id || device.overlayIp);
+      const node = nodes.find((row) => row && row.overlayIp === target);
+      return node ? 'node:' + node.id : null;
+    }
+
+    function dedupeDevices(devices) {
+      const rows = [];
+      const seen = new Set();
+      devices.forEach((device) => {
+        if (!device || typeof device !== 'object') return;
+        if (!device.id && !device.overlayIp && !device.publicKey && !device.label) return;
+        const key = device.id || device.overlayIp || device.publicKey || device.label;
+        if (seen.has(key)) return;
+        seen.add(key);
+        rows.push(device);
+      });
+      return rows;
+    }
+
+    function rateLimitFor(rateLimits, subjectType, subjectId) {
+      if (!subjectId) return null;
+      const rows = rateLimits.filter((row) => row && row.subjectType === subjectType && row.subjectId === subjectId);
+      if (!rows.length) return null;
+      return rows.map((row) => {
+        const down = [row.downRate, row.downCeil].filter(Boolean).join(' / ');
+        const up = [row.upRate, row.upCeil].filter(Boolean).join(' / ');
+        return [down ? '下行 ' + down : '', up ? '上行 ' + up : ''].filter(Boolean).join('，');
+      }).filter(Boolean).join('；');
+    }
+
+    function shortUser(value) {
+      const text = String(value || '');
+      return text.length > 10 ? text.slice(0, 6) : text;
+    }
+
+    function truncateText(value, max) {
+      const text = String(value || '');
+      return text.length > max ? text.slice(0, Math.max(1, max - 1)) + '…' : text;
+    }
+
+    function spread(index, total, start, end) {
+      if (total <= 1) return (start + end) / 2;
+      return start + ((end - start) * index) / (total - 1);
+    }
+
+    function serviceOffset(index) {
+      return ((index % 3) - 1) * 84;
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
     function formValue(id) {
       const v = $(id).value.trim();
       return v || null;
@@ -1359,6 +1836,7 @@ export function adminHtml(): string {
     function setTab(next) {
       const titles = {
         mesh: ['我的 Mesh', '查看当前入网状态、可访问服务和必要操作。'],
+        topology: ['拓扑', '查看当前账号可见的 Mesh、节点、设备、服务和策略。'],
         overview: ['总览', '查看 HDO 从服务端部署到客户端订阅的完成状态。'],
         client: ['客户端', '注册本机设备，拉取 HDO manifest 与 Mihomo 订阅。'],
         advanced: ['高级', '手动管理设备、WireGuard peer、生成物和服务端待处理任务。'],
@@ -1457,6 +1935,17 @@ export function adminHtml(): string {
     document.addEventListener('click', (event) => {
       const target = event.target instanceof Element ? event.target.closest('[data-jump-tab]') : null;
       if (target) setTab(target.dataset.jumpTab);
+      const topologyTarget = event.target instanceof Element ? event.target.closest('[data-topology-key]') : null;
+      if (topologyTarget) {
+        selectedClientTopologyKey = topologyTarget.dataset.topologyKey;
+        renderClientTopology(snapshot || {});
+      }
+    });
+    document.addEventListener('keydown', (event) => {
+      const topologyTarget = event.target instanceof Element ? event.target.closest('[data-topology-key]') : null;
+      if (!topologyTarget || event.key !== 'Enter') return;
+      selectedClientTopologyKey = topologyTarget.dataset.topologyKey;
+      renderClientTopology(snapshot || {});
     });
 
     $('refresh').addEventListener('click', () => load());
