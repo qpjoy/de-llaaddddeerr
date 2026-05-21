@@ -80,6 +80,7 @@ const HDO_ADDRESS_PLAN_MIN = ipv4ToNumber('100.80.0.0') ?? 0;
 const HDO_ADDRESS_PLAN_MAX = ipv4ToNumber('100.99.255.255') ?? 0;
 const HDO_DEFAULT_WG_PORT = 51888;
 const HDO_DEPLOYMENT_OUTPUT_LIMIT = 80_000;
+const HDO_DEPLOYMENT_TIMEOUT_MS = 20 * 60 * 1000;
 
 type HdoDeploymentKind = (typeof HDO_DEPLOYMENT_KINDS)[number];
 type HdoDeploymentStatus = 'running' | 'succeeded' | 'failed';
@@ -105,6 +106,11 @@ interface HdoDeploymentJob {
   finishedAt: string | null;
   exitCode: number | null;
   error: string | null;
+}
+
+interface HdoDeploymentInvocation {
+  args: string[];
+  serverUrl: string;
 }
 
 const hdoDeploymentJobs = new Map<string, HdoDeploymentJob>();
@@ -354,19 +360,37 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       reply.code(400);
       return { error: 'valid HDO deployment kind required' };
     }
-    const script = resolveHdoGatewayScript();
-    if (!script) {
+    const runningJob = listHdoDeploymentJobs().find((job) => job.status === 'running');
+    if (runningJob) {
       reply.code(409);
       return {
-        error: 'HDO gateway script is not available to electron-server',
+        error: `HDO deployment already running: ${runningJob.kind}`,
+        job: runningJob
+      };
+    }
+    const runnerUrl = resolveHdoGatewayRunnerUrl();
+    const runnerToken = resolveHdoGatewayRunnerToken();
+    const script = runnerUrl ? null : resolveHdoGatewayScript();
+    if (runnerUrl && !runnerToken) {
+      reply.code(409);
+      return {
+        error: 'HDO gateway runner token is not configured',
+        detail: 'Start the stack with electron-server/scripts/manage.sh up or redeploy so the host runner token is exported into Docker Compose.'
+      };
+    }
+    if (!runnerUrl && !script) {
+      reply.code(409);
+      return {
+        error: 'HDO gateway runner is not available to electron-server',
         detail:
-          'Set HDO_GATEWAY_SCRIPT to docker/hdo-gateway-stack/manage.sh or run the server from the repository host.'
+          'Set HDO_GATEWAY_RUNNER_URL/HDO_GATEWAY_RUNNER_TOKEN for the host runner, or set HDO_GATEWAY_SCRIPT when running electron-server directly on the host.'
       };
     }
     const job = startHdoDeploymentJob({
       kind,
       body,
       scriptPath: script,
+      runnerUrl,
       bearerToken: bearerTokenFromRequest(req)
     });
     await auditStore.insert({
@@ -693,15 +717,30 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
 }
 
 function inspectHdoDeploymentRunner() {
+  const runnerUrl = resolveHdoGatewayRunnerUrl();
+  const runnerToken = resolveHdoGatewayRunnerToken();
+  if (runnerUrl) {
+    return {
+      available: Boolean(runnerToken),
+      mode: 'host-runner',
+      scriptPath: runnerUrl,
+      cwd: null,
+      kinds: HDO_DEPLOYMENT_KINDS,
+      note: runnerToken
+        ? 'HDO deployment runner calls the host gateway runner for whitelisted actions.'
+        : 'HDO_GATEWAY_RUNNER_URL is set, but HDO_GATEWAY_RUNNER_TOKEN is missing. Start through electron-server/scripts/manage.sh.'
+    };
+  }
   const scriptPath = resolveHdoGatewayScript();
   return {
     available: Boolean(scriptPath),
+    mode: 'local-script',
     scriptPath,
     cwd: scriptPath ? resolve(dirname(scriptPath), '../..') : null,
     kinds: HDO_DEPLOYMENT_KINDS,
     note: scriptPath
       ? 'HDO deployment runner can execute whitelisted gateway actions.'
-      : 'HDO gateway script is not visible from electron-server. Set HDO_GATEWAY_SCRIPT or run the server from the repository host.'
+      : 'HDO gateway script is not visible from electron-server. Set HDO_GATEWAY_RUNNER_URL/TOKEN for Docker, or HDO_GATEWAY_SCRIPT for direct host runs.'
   };
 }
 
@@ -725,22 +764,42 @@ function resolveHdoGatewayScript(): string | null {
   return null;
 }
 
+function resolveHdoGatewayRunnerUrl(): string | null {
+  const configured = asOptionalString(process.env.HDO_GATEWAY_RUNNER_URL);
+  if (!configured) return null;
+  try {
+    const url = new URL(configured);
+    if (!['http:', 'https:'].includes(url.protocol)) return null;
+    return url.toString().replace(/\/$/, '');
+  } catch {
+    return null;
+  }
+}
+
+function resolveHdoGatewayRunnerToken(): string | null {
+  return asOptionalString(process.env.HDO_GATEWAY_RUNNER_TOKEN);
+}
+
 function startHdoDeploymentJob(input: {
   kind: HdoDeploymentKind;
   body: Record<string, unknown>;
-  scriptPath: string;
+  scriptPath: string | null;
+  runnerUrl: string | null;
   bearerToken: string | null;
 }): HdoDeploymentJob {
   const invocation = buildHdoDeploymentInvocation(input.kind, input.body);
-  const cwd = resolve(dirname(input.scriptPath), '../..');
+  const cwd = input.scriptPath ? resolve(dirname(input.scriptPath), '../..') : 'host-gateway-runner';
+  const scriptPath = input.scriptPath ?? input.runnerUrl ?? '';
   const id = `hdo-deploy-${randomUUID()}`;
   const job: HdoDeploymentJob = {
     id,
     kind: input.kind,
     status: 'running',
-    command: formatCommand(['bash', input.scriptPath, ...invocation.args]),
+    command: input.runnerUrl
+      ? formatCommand(['hdo-gateway-runner', input.runnerUrl, ...invocation.args])
+      : formatCommand(['bash', scriptPath, ...invocation.args]),
     args: invocation.args,
-    scriptPath: input.scriptPath,
+    scriptPath,
     cwd,
     output: '',
     startedAt: new Date().toISOString(),
@@ -750,6 +809,18 @@ function startHdoDeploymentJob(input: {
   };
   hdoDeploymentJobs.set(job.id, job);
   pruneHdoDeploymentJobs();
+
+  if (input.runnerUrl) {
+    void runHdoGatewayRunnerJob(job, input.runnerUrl, invocation, input.bearerToken);
+    return job;
+  }
+
+  if (!input.scriptPath) {
+    job.status = 'failed';
+    job.error = 'HDO gateway script is not configured';
+    job.finishedAt = new Date().toISOString();
+    return job;
+  }
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -764,23 +835,24 @@ function startHdoDeploymentJob(input: {
     env,
     stdio: ['ignore', 'pipe', 'pipe']
   });
+  const timeout = setTimeout(() => {
+    if (job.finishedAt) return;
+    job.status = 'failed';
+    job.error = `command timed out after ${Math.round(HDO_DEPLOYMENT_TIMEOUT_MS / 60000)} minutes`;
+    job.finishedAt = new Date().toISOString();
+    child.kill('SIGTERM');
+  }, HDO_DEPLOYMENT_TIMEOUT_MS);
 
-  const append = (chunk: Buffer | string) => {
-    const next = job.output + chunk.toString();
-    job.output =
-      next.length > HDO_DEPLOYMENT_OUTPUT_LIMIT
-        ? next.slice(next.length - HDO_DEPLOYMENT_OUTPUT_LIMIT)
-        : next;
-  };
-
-  child.stdout.on('data', append);
-  child.stderr.on('data', append);
+  child.stdout.on('data', (chunk) => appendDeploymentOutput(job, chunk));
+  child.stderr.on('data', (chunk) => appendDeploymentOutput(job, chunk));
   child.on('error', (err) => {
+    clearTimeout(timeout);
     job.status = 'failed';
     job.error = err.message;
     job.finishedAt = new Date().toISOString();
   });
   child.on('close', (code) => {
+    clearTimeout(timeout);
     if (job.finishedAt) return;
     job.exitCode = code;
     job.status = code === 0 ? 'succeeded' : 'failed';
@@ -791,10 +863,74 @@ function startHdoDeploymentJob(input: {
   return job;
 }
 
+async function runHdoGatewayRunnerJob(
+  job: HdoDeploymentJob,
+  runnerUrl: string,
+  invocation: HdoDeploymentInvocation,
+  bearerToken: string | null
+): Promise<void> {
+  const runnerToken = resolveHdoGatewayRunnerToken();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), HDO_DEPLOYMENT_TIMEOUT_MS);
+  try {
+    if (!runnerToken) {
+      throw new Error('HDO_GATEWAY_RUNNER_TOKEN is not configured');
+    }
+    const response = await fetch(new URL('/run', runnerUrl), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${runnerToken}`
+      },
+      body: JSON.stringify({
+        args: invocation.args,
+        serverUrl: invocation.serverUrl,
+        bearerToken
+      }),
+      signal: controller.signal
+    });
+    const text = await response.text();
+    const payload = parseJsonObject(text);
+    const output = asOptionalString(payload.output) ?? text;
+    if (output) appendDeploymentOutput(job, output);
+    const exitCode =
+      typeof payload.exitCode === 'number' && Number.isFinite(payload.exitCode)
+        ? payload.exitCode
+        : response.ok
+          ? 0
+          : 1;
+    job.exitCode = exitCode;
+    job.status = response.ok && exitCode === 0 ? 'succeeded' : 'failed';
+    job.error =
+      job.status === 'succeeded'
+        ? null
+        : asOptionalString(payload.error) ?? `HDO gateway runner returned HTTP ${response.status}`;
+  } catch (err) {
+    job.status = 'failed';
+    job.error =
+      err instanceof Error && err.name === 'AbortError'
+        ? `HDO gateway runner timed out after ${Math.round(HDO_DEPLOYMENT_TIMEOUT_MS / 60000)} minutes`
+        : err instanceof Error
+          ? err.message
+          : String(err);
+  } finally {
+    clearTimeout(timeout);
+    job.finishedAt = new Date().toISOString();
+  }
+}
+
+function appendDeploymentOutput(job: HdoDeploymentJob, chunk: Buffer | string): void {
+  const next = job.output + chunk.toString();
+  job.output =
+    next.length > HDO_DEPLOYMENT_OUTPUT_LIMIT
+      ? next.slice(next.length - HDO_DEPLOYMENT_OUTPUT_LIMIT)
+      : next;
+}
+
 function buildHdoDeploymentInvocation(
   kind: HdoDeploymentKind,
   body: Record<string, unknown>
-): { args: string[]; serverUrl: string } {
+): HdoDeploymentInvocation {
   const serverUrl =
     asOptionalString(body.serverUrl) ??
     asOptionalString(process.env.HDO_SERVER_URL) ??
@@ -1172,6 +1308,15 @@ function asStringArray(value: unknown): string[] {
 function asPlainObject(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
+}
+
+function parseJsonObject(value: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return asPlainObject(parsed) ?? {};
+  } catch {
+    return {};
+  }
 }
 
 function pick<T extends string>(value: unknown, allowed: readonly T[]): T | null {

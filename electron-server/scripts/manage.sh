@@ -30,6 +30,13 @@ DC=()
 export HDO_HOST_REPO_ROOT="${HDO_HOST_REPO_ROOT:-$REPO_ROOT}"
 export HDO_GATEWAY_SCRIPT="${HDO_GATEWAY_SCRIPT:-$REPO_ROOT/docker/hdo-gateway-stack/manage.sh}"
 export HDO_SERVER_URL="${HDO_SERVER_URL:-http://127.0.0.1:${MARKET_PORT:-8080}}"
+export HDO_GATEWAY_RUNNER_PORT="${HDO_GATEWAY_RUNNER_PORT:-18081}"
+export HDO_GATEWAY_RUNNER_HOST="${HDO_GATEWAY_RUNNER_HOST:-127.0.0.1}"
+export HDO_GATEWAY_RUNNER_URL="${HDO_GATEWAY_RUNNER_URL:-http://host.docker.internal:${HDO_GATEWAY_RUNNER_PORT}}"
+HDO_GATEWAY_RUNNER_SCRIPT="${HDO_GATEWAY_RUNNER_SCRIPT:-$REPO_ROOT/docker/hdo-gateway-stack/runner.mjs}"
+HDO_GATEWAY_RUNNER_TOKEN_FILE="${HDO_GATEWAY_RUNNER_TOKEN_FILE:-$ROOT/data/hdo-gateway-runner.token}"
+HDO_GATEWAY_RUNNER_PID_FILE="${HDO_GATEWAY_RUNNER_PID_FILE:-$ROOT/data/hdo-gateway-runner.pid}"
+HDO_GATEWAY_RUNNER_LOG="${HDO_GATEWAY_RUNNER_LOG:-$ROOT/data/hdo-gateway-runner.log}"
 
 # ── Pretty printing ────────────────────────────────────────────────────
 if [ -t 1 ]; then
@@ -89,11 +96,129 @@ ensure_spa() {
   fi
 }
 
+ensure_hdo_gateway_runner_token() {
+  mkdir -p "$ROOT/data"
+  if [ ! -s "$HDO_GATEWAY_RUNNER_TOKEN_FILE" ]; then
+    say "creating HDO host runner token"
+    if command -v openssl >/dev/null 2>&1; then
+      openssl rand -hex 32 >"$HDO_GATEWAY_RUNNER_TOKEN_FILE"
+    elif command -v node >/dev/null 2>&1; then
+      node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))" >"$HDO_GATEWAY_RUNNER_TOKEN_FILE"
+    else
+      die "openssl or node is required to generate HDO gateway runner token"
+    fi
+    chmod 600 "$HDO_GATEWAY_RUNNER_TOKEN_FILE" 2>/dev/null || true
+  fi
+  export HDO_GATEWAY_RUNNER_TOKEN
+  HDO_GATEWAY_RUNNER_TOKEN="$(tr -d '\r\n' <"$HDO_GATEWAY_RUNNER_TOKEN_FILE")"
+}
+
+hdo_gateway_runner_health_url() {
+  printf 'http://%s:%s/healthz' "$HDO_GATEWAY_RUNNER_HOST" "$HDO_GATEWAY_RUNNER_PORT"
+}
+
+hdo_gateway_runner_alive() {
+  [ -n "${HDO_GATEWAY_RUNNER_TOKEN:-}" ] || [ -s "$HDO_GATEWAY_RUNNER_TOKEN_FILE" ] || return 1
+  if [ -z "${HDO_GATEWAY_RUNNER_TOKEN:-}" ]; then
+    HDO_GATEWAY_RUNNER_TOKEN="$(tr -d '\r\n' <"$HDO_GATEWAY_RUNNER_TOKEN_FILE")"
+    export HDO_GATEWAY_RUNNER_TOKEN
+  fi
+  command -v curl >/dev/null 2>&1 || return 1
+  curl -fsS -H "Authorization: Bearer ${HDO_GATEWAY_RUNNER_TOKEN}" \
+    "$(hdo_gateway_runner_health_url)" >/dev/null 2>&1
+}
+
+start_hdo_gateway_runner() {
+  [ -f "$HDO_GATEWAY_RUNNER_SCRIPT" ] || {
+    warn "HDO host runner script not found: $HDO_GATEWAY_RUNNER_SCRIPT"
+    return 0
+  }
+  [ -f "$HDO_GATEWAY_SCRIPT" ] || {
+    warn "HDO gateway script not found: $HDO_GATEWAY_SCRIPT"
+    return 0
+  }
+  command -v node >/dev/null 2>&1 || {
+    warn "node is not available; HDO host runner will not start."
+    return 0
+  }
+
+  ensure_hdo_gateway_runner_token
+  if hdo_gateway_runner_alive; then
+    ok "HDO host runner is listening on $(hdo_gateway_runner_health_url)"
+    return 0
+  fi
+
+  if [ -s "$HDO_GATEWAY_RUNNER_PID_FILE" ]; then
+    local old_pid
+    old_pid="$(cat "$HDO_GATEWAY_RUNNER_PID_FILE" 2>/dev/null || true)"
+    if [ -n "$old_pid" ] && ! kill -0 "$old_pid" 2>/dev/null; then
+      rm -f "$HDO_GATEWAY_RUNNER_PID_FILE"
+    fi
+  fi
+
+  if [ "$(id -u)" != "0" ]; then
+    warn "starting HDO host runner without root; WireGuard install/route repair may still require sudo/root."
+  fi
+
+  say "starting HDO host runner on $(hdo_gateway_runner_health_url)"
+  mkdir -p "$(dirname "$HDO_GATEWAY_RUNNER_LOG")"
+  nohup env \
+    HDO_GATEWAY_RUNNER_HOST="$HDO_GATEWAY_RUNNER_HOST" \
+    HDO_GATEWAY_RUNNER_PORT="$HDO_GATEWAY_RUNNER_PORT" \
+    HDO_GATEWAY_RUNNER_TOKEN="$HDO_GATEWAY_RUNNER_TOKEN" \
+    HDO_GATEWAY_SCRIPT="$HDO_GATEWAY_SCRIPT" \
+    HDO_GATEWAY_CWD="$REPO_ROOT" \
+    HDO_SERVER_URL="$HDO_SERVER_URL" \
+    node "$HDO_GATEWAY_RUNNER_SCRIPT" >>"$HDO_GATEWAY_RUNNER_LOG" 2>&1 &
+  printf '%s\n' "$!" >"$HDO_GATEWAY_RUNNER_PID_FILE"
+  sleep 0.5
+  if hdo_gateway_runner_alive; then
+    ok "HDO host runner started"
+  else
+    warn "HDO host runner did not become healthy; check $HDO_GATEWAY_RUNNER_LOG"
+  fi
+}
+
+stop_hdo_gateway_runner() {
+  if [ ! -s "$HDO_GATEWAY_RUNNER_PID_FILE" ]; then
+    warn "HDO host runner pid file is absent."
+    return 0
+  fi
+  local pid
+  pid="$(cat "$HDO_GATEWAY_RUNNER_PID_FILE")"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    say "stopping HDO host runner pid $pid"
+    kill "$pid"
+  fi
+  rm -f "$HDO_GATEWAY_RUNNER_PID_FILE"
+  ok "HDO host runner stopped"
+}
+
+cmd_gateway_runner_status() {
+  if [ -s "$HDO_GATEWAY_RUNNER_TOKEN_FILE" ]; then
+    HDO_GATEWAY_RUNNER_TOKEN="$(tr -d '\r\n' <"$HDO_GATEWAY_RUNNER_TOKEN_FILE")"
+    export HDO_GATEWAY_RUNNER_TOKEN
+  fi
+  echo "runner url from container: $HDO_GATEWAY_RUNNER_URL"
+  echo "runner health url:        $(hdo_gateway_runner_health_url)"
+  echo "runner pid file:          $HDO_GATEWAY_RUNNER_PID_FILE"
+  echo "runner log:               $HDO_GATEWAY_RUNNER_LOG"
+  if hdo_gateway_runner_alive; then
+    ok "HDO host runner is healthy"
+    curl -fsS -H "Authorization: Bearer ${HDO_GATEWAY_RUNNER_TOKEN}" \
+      "$(hdo_gateway_runner_health_url)" || true
+    echo
+  else
+    warn "HDO host runner is not reachable."
+  fi
+}
+
 # ── Commands ───────────────────────────────────────────────────────────
 
 cmd_up() {
   check_docker
   ensure_spa
+  start_hdo_gateway_runner
   say "starting postgres + market"
   "${DC[@]}" up -d
   ok "stack is up. Try: $0 status"
@@ -117,6 +242,8 @@ cmd_restart() {
 cmd_status() {
   check_docker
   "${DC[@]}" ps
+  echo
+  cmd_gateway_runner_status
 }
 
 cmd_logs() {
@@ -136,6 +263,7 @@ cmd_build() {
 cmd_redeploy() {
   check_docker
   ensure_spa
+  start_hdo_gateway_runner
   say "rebuilding + restarting market (postgres untouched)"
   "${DC[@]}" build market
   # docker-compose v1.29.x can crash with KeyError: 'ContainerConfig' while
@@ -303,6 +431,9 @@ Commands:
   migrate                     show current migration head
   sync                        run npm sync once inside the market container
   sync-status                 show recent sync history from audit_logs
+  gateway-runner-start        start the host HDO gateway runner
+  gateway-runner-status       show host HDO gateway runner health
+  gateway-runner-stop         stop the host HDO gateway runner
   bootstrap-admin             create the first admin user (prompts for username/password)
   psql                        open psql shell
   shell [service]             open a shell in a container
@@ -319,6 +450,7 @@ Files:
   docker-compose.yml          stack definition
   Dockerfile                  market image
   data/spa-dist               admin SPA (symlinked from electron-market)
+  data/hdo-gateway-runner.*   host runner token, pid and log
 EOF
 }
 
@@ -332,6 +464,7 @@ cmd_menu() {
     "status     查看服务状态"
     "migrate    查看 migration 状态"
     "sync       立即同步 npm 插件"
+    "gateway    查看 HDO 宿主机 runner"
     "bootstrap  创建首位 admin"
     "psql       打开 psql"
     "shell      进入 market 容器"
@@ -354,6 +487,7 @@ cmd_menu() {
       status)    cmd_status ;;
       migrate)   cmd_migrate ;;
       sync)      cmd_sync ;;
+      gateway)   cmd_gateway_runner_status ;;
       bootstrap) cmd_bootstrap_admin ;;
       psql)      cmd_psql ;;
       shell)     cmd_shell ;;
@@ -382,6 +516,9 @@ case "$sub" in
   migrate|migrations) cmd_migrate "$@" ;;
   sync|sync-npm)    cmd_sync "$@" ;;
   sync-status|sync-log) cmd_sync_status "$@" ;;
+  gateway-runner-start|hdo-runner-start) start_hdo_gateway_runner "$@" ;;
+  gateway-runner-status|hdo-runner-status) cmd_gateway_runner_status "$@" ;;
+  gateway-runner-stop|hdo-runner-stop) stop_hdo_gateway_runner "$@" ;;
   bootstrap-admin|bootstrap|admin) cmd_bootstrap_admin "$@" ;;
   psql)             cmd_psql "$@" ;;
   shell|sh)         cmd_shell "$@" ;;

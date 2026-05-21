@@ -57,13 +57,17 @@ services:
       SYNC_ON_BOOT: ${SYNC_ON_BOOT:-1}
       SYNC_INTERVAL_MS: ${SYNC_INTERVAL_MS:-3600000}
       SYNC_JITTER_MS: ${SYNC_JITTER_MS:-30000}
-      # Optional HDO deployment runner. scripts/manage.sh exports these so
-      # the container can execute whitelisted gateway scripts against the
-      # same absolute repo path the host Docker daemon sees.
+      # Optional HDO deployment runner. scripts/manage.sh starts a loopback
+      # host runner and passes its token into this container, so privileged
+      # WireGuard/iptables work happens on the host rather than in Docker.
+      HDO_GATEWAY_RUNNER_URL: ${HDO_GATEWAY_RUNNER_URL:-}
+      HDO_GATEWAY_RUNNER_TOKEN: ${HDO_GATEWAY_RUNNER_TOKEN:-}
       HDO_GATEWAY_SCRIPT: ${HDO_GATEWAY_SCRIPT:-}
       HDO_SERVER_URL: ${HDO_SERVER_URL:-http://127.0.0.1:8080}
     ports:
       - "${MARKET_PORT:-8080}:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - qpjoy_market_data:/app/data
       - ${HDO_HOST_REPO_ROOT:-..}:${HDO_HOST_REPO_ROOT:-/workspace}

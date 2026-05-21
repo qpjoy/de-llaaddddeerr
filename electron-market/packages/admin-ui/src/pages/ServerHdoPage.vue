@@ -68,7 +68,7 @@
                 </div>
               </div>
               <q-space />
-              <q-btn flat round icon="refresh" :loading="deploymentLoading" @click="loadDeployments" />
+              <q-btn flat round icon="refresh" :loading="deploymentLoading" @click="() => loadDeployments()" />
             </div>
             <div class="deploy-flow">
               <div v-for="step in deploymentSteps" :key="step.label" class="deploy-step">
@@ -79,6 +79,16 @@
                 </div>
               </div>
             </div>
+            <q-banner
+              v-if="deploymentNotice"
+              dense
+              rounded
+              class="q-mt-md"
+              :class="deploymentNotice.className"
+            >
+              <div class="text-weight-medium">{{ deploymentNotice.title }}</div>
+              <div class="text-caption">{{ deploymentNotice.detail }}</div>
+            </q-banner>
           </div>
           <div class="deploy-card-grid">
             <section v-for="card in deploymentCards" :key="card.key" class="section-surface q-pa-md">
@@ -88,7 +98,10 @@
                   <div class="text-caption text-grey-7">{{ card.subtitle }}</div>
                 </div>
                 <q-space />
-                <q-badge :color="card.done ? 'positive' : 'warning'" :label="card.done ? '已登记' : '待处理'" />
+                <q-badge
+                  :color="deploymentCardBadge(card).color"
+                  :label="deploymentCardBadge(card).label"
+                />
               </div>
               <q-input
                 :model-value="card.command"
@@ -103,10 +116,10 @@
                 <q-btn flat icon="content_copy" label="复制命令" @click="copyInstallCommand(card.command)" />
                 <q-btn
                   color="positive"
-                  icon="play_arrow"
-                  label="执行"
-                  :disable="!deployments?.runner.available"
-                  :loading="deployingKind === card.runKind"
+                  :icon="deploymentButtonIcon(card)"
+                  :label="deploymentButtonLabel(card)"
+                  :disable="deploymentButtonDisabled(card)"
+                  :loading="isDeploymentKindRunning(card.runKind) || deployingKind === card.runKind"
                   @click="runDeployment(card)"
                 />
                 <q-space />
@@ -829,7 +842,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 
 import {
   useServerAdmin,
@@ -856,6 +869,7 @@ const deploymentLoading = ref(false);
 const deployingKind = ref<HdoDeploymentKind | null>(null);
 const error = ref<string | null>(null);
 const tab = ref('deploy');
+let deploymentPollTimer: number | null = null;
 
 const editingMeshId = ref<string | null>(null);
 const meshName = ref('');
@@ -1090,6 +1104,36 @@ const pendingTasks = computed(() =>
 );
 
 const deploymentJobs = computed(() => deployments.value?.jobs ?? []);
+const runningDeploymentJob = computed(() =>
+  deploymentJobs.value.find((job) => job.status === 'running') ?? null
+);
+const latestFinishedDeploymentJob = computed(() =>
+  deploymentJobs.value.find((job) => job.status !== 'running') ?? null
+);
+const deploymentNotice = computed(() => {
+  const running = runningDeploymentJob.value;
+  if (running) {
+    return {
+      className: 'bg-info text-white',
+      title: `正在执行：${running.kind}`,
+      detail: running.output ? lastOutputLine(running.output) : '任务已提交，正在等待脚本输出。'
+    };
+  }
+  const latest = latestFinishedDeploymentJob.value;
+  if (!latest) return null;
+  if (latest.status === 'failed') {
+    return {
+      className: 'bg-negative text-white',
+      title: `执行失败：${latest.kind}`,
+      detail: latest.output ? lastOutputLine(latest.output) : latest.error ?? '脚本返回失败。'
+    };
+  }
+  return {
+    className: 'bg-positive text-white',
+    title: `执行完成：${latest.kind}`,
+    detail: latest.output ? lastOutputLine(latest.output) : '任务已成功完成。'
+  };
+});
 
 const deploymentSteps = computed(() => {
   const hasMesh = (overview.value?.meshGroups ?? []).some((row) => row.enabled);
@@ -1474,6 +1518,38 @@ const selectedTopologyServices = computed(() => {
   return (overview.value?.services ?? []).filter((service) => serviceBelongsToTopologyItem(service, selected));
 });
 
+function isDeploymentKindRunning(kind: HdoDeploymentKind): boolean {
+  return runningDeploymentJob.value?.kind === kind;
+}
+
+function hasAnyDeploymentRunning(): boolean {
+  return Boolean(runningDeploymentJob.value || deployingKind.value);
+}
+
+function deploymentButtonDisabled(card: { runKind: HdoDeploymentKind }): boolean {
+  return !deployments.value?.runner.available || hasAnyDeploymentRunning();
+}
+
+function deploymentButtonLabel(card: { runKind: HdoDeploymentKind }): string {
+  if (isDeploymentKindRunning(card.runKind) || deployingKind.value === card.runKind) return '运行中';
+  if (hasAnyDeploymentRunning()) return '等待中';
+  return '执行';
+}
+
+function deploymentButtonIcon(card: { runKind: HdoDeploymentKind }): string {
+  if (isDeploymentKindRunning(card.runKind) || deployingKind.value === card.runKind) return 'hourglass_top';
+  if (hasAnyDeploymentRunning()) return 'lock';
+  return 'play_arrow';
+}
+
+function deploymentCardBadge(card: { runKind: HdoDeploymentKind; done: boolean }): { color: string; label: string } {
+  const latestForKind = deploymentJobs.value.find((job) => job.kind === card.runKind);
+  if (latestForKind?.status === 'running') return { color: 'info', label: '运行中' };
+  if (latestForKind?.status === 'failed') return { color: 'negative', label: '失败' };
+  if (latestForKind?.status === 'succeeded') return { color: 'positive', label: '已执行' };
+  return { color: card.done ? 'positive' : 'warning', label: card.done ? '已登记' : '待处理' };
+}
+
 async function reload(): Promise<void> {
   loading.value = true;
   error.value = null;
@@ -1496,14 +1572,14 @@ async function reload(): Promise<void> {
   }
 }
 
-async function loadDeployments(): Promise<void> {
-  deploymentLoading.value = true;
+async function loadDeployments(options: { silent?: boolean } = {}): Promise<void> {
+  if (!options.silent) deploymentLoading.value = true;
   try {
     deployments.value = await admin.getHdoDeployments();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
-    deploymentLoading.value = false;
+    if (!options.silent) deploymentLoading.value = false;
   }
 }
 
@@ -1601,6 +1677,7 @@ function openDeviceTask(item: TopologyItem): void {
 }
 
 async function runDeployment(card: { runKind: HdoDeploymentKind }): Promise<void> {
+  if (hasAnyDeploymentRunning()) return;
   deployingKind.value = card.runKind;
   error.value = null;
   try {
@@ -1611,6 +1688,7 @@ async function runDeployment(card: { runKind: HdoDeploymentKind }): Promise<void
     }, 1800);
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
+    await loadDeployments({ silent: true });
   } finally {
     deployingKind.value = null;
   }
@@ -2029,6 +2107,14 @@ function splitCsv(value: string): string[] {
     .filter(Boolean);
 }
 
+function lastOutputLine(value: string): string {
+  const lines = value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines.at(-1) ?? value.trim();
+}
+
 function topologyKey(action: TopologyAction, id: string): string {
   return `${action}:${id}`;
 }
@@ -2175,7 +2261,21 @@ function deploymentStatusColor(status: HdoDeploymentJob['status']): string {
   }[status];
 }
 
-onMounted(reload);
+onMounted(() => {
+  void reload();
+  deploymentPollTimer = window.setInterval(() => {
+    if (tab.value === 'deploy' || runningDeploymentJob.value) {
+      void loadDeployments({ silent: true });
+    }
+  }, 2500);
+});
+
+onBeforeUnmount(() => {
+  if (deploymentPollTimer !== null) {
+    window.clearInterval(deploymentPollTimer);
+    deploymentPollTimer = null;
+  }
+});
 </script>
 
 <style scoped lang="scss">
