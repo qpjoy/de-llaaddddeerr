@@ -1,7 +1,7 @@
 {
   "id": "qpjoy.electron-market",
   "name": "QPJoy Marketplace",
-  "version": "0.3.22",
+  "version": "0.3.23",
   "author": "qpjoy",
   "description": "The plugin marketplace and host runtime. Manages other plugins.",
   "engines": {

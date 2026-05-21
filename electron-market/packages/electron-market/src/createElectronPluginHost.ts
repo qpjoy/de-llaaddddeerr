@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, realpathSync } from 'fs';
 import { rm } from 'fs/promises';
-import { join, resolve } from 'path';
+import { join, resolve, sep } from 'path';
 import type { App, IpcMain, Session } from 'electron';
 import semver from 'semver';
 
@@ -255,6 +255,7 @@ export function createElectronPluginHost(
   // populate from the package-bundled `seed-index.json`. That way the UI is
   // never empty even on an air-gapped device.
   mergeBundledMarketplaceSeed(marketplaceDb);
+  refreshSelfMarketplaceRecord(marketplaceDb, registry);
   const store = new PluginStore({ pluginsRoot, registry });
   // No default URL — without an explicit `marketplaceUrl` we serve only the
   // bundled seed. That keeps the app fully usable offline; consumers opt
@@ -495,6 +496,25 @@ export function createElectronPluginHost(
     }
   }
 
+  function seedInstallMatchesSource(record: { installPath: string; npm: string }, source: PluginSource): boolean {
+    const expected = sourcePath(source);
+    if (!expected) return true;
+    try {
+      const installedDir = realpathSync(join(record.installPath, 'node_modules', record.npm));
+      const expectedDir = realpathSync(expected);
+      if (installedDir === expectedDir) return true;
+
+      // If local-dir seeding had to fall back to a real copy instead of a
+      // symlink/junction, the installed package lives under userData. That is
+      // still healthy. What we must reject is an old symlink pointing back to a
+      // previous dev workspace while the packaged app now ships its own source.
+      const installRoot = realpathSync(record.installPath);
+      return installedDir === installRoot || installedDir.startsWith(installRoot + sep);
+    } catch {
+      return false;
+    }
+  }
+
   async function runSeed(seed: SeedPlugin, opts: { force?: boolean } = {}): Promise<void> {
     try {
       const existing = registry.get(seed.id);
@@ -512,7 +532,8 @@ export function createElectronPluginHost(
           existing &&
           bundledVersion &&
           compareVersions(bundledVersion, existing.version) > 0;
-        if (existing && existing.state !== 'errored' && seedInstallReachable(existing) && !seedIsNewer) {
+        const sourceMatches = existing ? seedInstallMatchesSource(existing, seed.source) : false;
+        if (existing && existing.state !== 'errored' && seedInstallReachable(existing) && sourceMatches && !seedIsNewer) {
           // Already installed, healthy, and the files are still reachable —
           // nothing to do.
           return;
@@ -529,6 +550,12 @@ export function createElectronPluginHost(
           // crossover, deleted source workspace, etc.). Fall through to re-seed.
           registry.log(seed.id, 'warn', 'seed install unreachable — re-seeding', {
             installPath: existing.installPath
+          });
+        }
+        if (existing && existing.state !== 'errored' && seedInstallReachable(existing) && !sourceMatches) {
+          registry.log(seed.id, 'warn', 'seed install points at a previous source — re-seeding', {
+            installPath: existing.installPath,
+            source: seed.source.type
           });
         }
         if (!existing && marketplaceDb.getMeta(seedMarkerKey(seed.id))) {
@@ -761,6 +788,82 @@ export function createElectronPluginHost(
       marketplaceDb.close();
     }
   };
+}
+
+function refreshSelfMarketplaceRecord(db: MarketplaceDB, registry: PluginRegistry): void {
+  const packageRoot = resolve(__dirname, '..');
+  const manifestPath = resolve(__dirname, 'plugin.manifest.json');
+  try {
+    const pkg = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) as {
+      name?: string;
+      version?: string;
+      homepage?: string;
+    };
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+      id: string;
+      name: string;
+      version: string;
+      author?: string;
+      description?: string;
+      homepage?: string;
+      engines: {
+        electronMarket?: string;
+        electronPlugin?: string;
+        electron?: string;
+      };
+      permissions: Permission[];
+      activationEvents: string[];
+      contributes?: Record<string, unknown>;
+    };
+    const version = pkg.version || manifest.version;
+    manifest.version = version;
+    const npm = pkg.name || '@qpjoy/electron-market';
+
+    db.bulkUpsertEntries([
+      {
+        id: manifest.id,
+        npm,
+        name: manifest.name,
+        description: manifest.description ?? null,
+        latestVersion: version,
+        manifestUrl: null,
+        tarballUrl: null,
+        homepage: manifest.homepage ?? pkg.homepage ?? null,
+        author: manifest.author ?? null,
+        category: 'host',
+        verified: true,
+        bootstrap: true,
+        visibility: 'public',
+        specVersion: 1,
+        metadata: { self: true },
+        source: 'seed',
+        fetchedAt: null
+      }
+    ]);
+
+    registry.upsert(
+      {
+        id: manifest.id,
+        npm,
+        version,
+        installPath: packageRoot,
+        manifest: {
+          ...manifest,
+          // The host is already running; keep the self row informational so
+          // runtime startup never tries to require @qpjoy/electron-market as a
+          // normal plugin.
+          activationEvents: []
+        },
+        grantedPermissions: manifest.permissions,
+        state: 'installed',
+        errorMessage: null
+      },
+      'standalone'
+    );
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[electron-market] failed to refresh self marketplace record:', err);
+  }
 }
 
 /**

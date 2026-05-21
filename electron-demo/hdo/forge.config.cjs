@@ -8,16 +8,43 @@
  * off, every file (incl. better-sqlite3.node and tunnel's runtime deps)
  * sits on the real filesystem and require resolution + symlinks just work.
  */
+const { spawnSync } = require('node:child_process');
+const { rmSync } = require('node:fs');
+const { tmpdir } = require('node:os');
+const { join } = require('node:path');
+
 const isWindowsHost = process.platform === 'win32';
+const isMacHost = process.platform === 'darwin';
 // Set FORGE_FORCE_SQUIRREL=1 to include the Squirrel maker even on macOS/Linux
 // (requires `mono` + `wine` to be installed; tested on the GitHub macos-latest
 // runner with `brew install wine-stable mono`).
 const wantsSquirrel = isWindowsHost || Boolean(process.env.FORGE_FORCE_SQUIRREL);
+const wantsDmg = Boolean(process.env.FORGE_INCLUDE_DMG);
+
+function canCreateDmg() {
+  if (!isMacHost) return false;
+  if (process.env.FORGE_SKIP_DMG) return false;
+  if (wantsDmg) return true;
+
+  const probePath = join(tmpdir(), `qpjoy-hdiutil-probe-${process.pid}.dmg`);
+  const result = spawnSync('hdiutil', ['create', probePath, '-ov', '-size', '1m'], {
+    encoding: 'utf8'
+  });
+  rmSync(probePath, { force: true });
+
+  if (result.status === 0) return true;
+  const message = (result.stderr || result.stdout || 'unknown error').trim();
+  console.warn(`[forge] skipping dmg maker because hdiutil create failed: ${message}`);
+  console.warn('[forge] zip output will still be produced. Set FORGE_INCLUDE_DMG=1 to force dmg creation.');
+  return false;
+}
+
+const includeDmg = canCreateDmg();
 
 const makers = [
   // ── macOS ────────────────────────────────────────────────────────
   { name: '@electron-forge/maker-zip', platforms: ['darwin'] },
-  { name: '@electron-forge/maker-dmg', platforms: ['darwin'] },
+  ...(includeDmg ? [{ name: '@electron-forge/maker-dmg', platforms: ['darwin'] }] : []),
 
   // ── Windows ──────────────────────────────────────────────────────
   // The .zip target shells out to `powershell.exe` for `Compress-Archive`

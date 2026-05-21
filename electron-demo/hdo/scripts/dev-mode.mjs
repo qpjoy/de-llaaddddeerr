@@ -45,13 +45,13 @@ const LOCAL_DIRECT_DEP_NAMES = [
   '@qpjoy/electron-plugin-hdo'
 ];
 
-const NPM_VERSIONS = {
-  '@qpjoy/electron-market': '^0.3.19',
-  '@qpjoy/electron-plugin-hdo': '^0.1.21',
+const FALLBACK_NPM_DEPENDENCIES = {
+  '@qpjoy/electron-market': '^0.3.22',
+  '@qpjoy/electron-plugin-hdo': '^0.1.23',
   '@qpjoy/electron-plugin-sdk': '^0.1.3',
   '@qpjoy/electron-plugin-tunnel': '^0.1.16',
   '@qpjoy/marketplace-db': '^0.1.1',
-  '@qpjoy/electron-core-wireguard': '^0.1.13',
+  '@qpjoy/electron-core-wireguard': '^0.1.15',
   '@qpjoy/electron-core-wireguard-engine-darwin-arm64': '^0.1.2',
   '@qpjoy/electron-core-wireguard-engine-darwin-x64': '^0.1.2',
   '@qpjoy/electron-core-wireguard-engine-linux-arm64': '^0.1.2',
@@ -68,6 +68,46 @@ const NPM_DIRECT_DEP_NAMES = [
 
 const pkg = JSON.parse(readFileSync(PKG_PATH, 'utf8'));
 const sentinel = existsSync(MODE_PATH) ? readFileSync(MODE_PATH, 'utf8').trim() : null;
+const desiredNpmDeps = Object.fromEntries(
+  Object.entries(FALLBACK_NPM_DEPENDENCIES).map(([name, fallback]) => [name, npmDependencySpec(name, fallback)])
+);
+
+function isFileSpec(value) {
+  return typeof value === 'string' && /^(file:|\.\.?\/|\/)/.test(value);
+}
+
+function isNpmSpec(value) {
+  return typeof value === 'string' && value.trim() !== '' && !isFileSpec(value);
+}
+
+function npmDependencySpec(name, fallback) {
+  const declared = pkg.dependencies?.[name];
+  return isNpmSpec(declared) ? declared : fallback;
+}
+
+function expectedVersionFromSpec(spec) {
+  const match = String(spec || '').match(/\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/);
+  return match ? match[0] : null;
+}
+
+function installedPackageVersion(name) {
+  try {
+    const pkgJson = resolve(APP_DIR, 'node_modules', ...name.split('/'), 'package.json');
+    return JSON.parse(readFileSync(pkgJson, 'utf8')).version ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function npmDepsInstalled() {
+  for (const name of NPM_DIRECT_DEP_NAMES) {
+    const wanted = expectedVersionFromSpec(desiredNpmDeps[name]);
+    const actual = installedPackageVersion(name);
+    if (!actual) return false;
+    if (wanted && actual !== wanted) return false;
+  }
+  return true;
+}
 
 function shell(cmd, cwd) {
   console.log(`  $ ${cmd}    (${cwd})`);
@@ -158,10 +198,9 @@ function existingLocalSetupIsValid() {
     if (!tarballs.some((file) => file.startsWith(`${prefix}-`))) return false;
   }
   for (const name of LOCAL_DIRECT_DEP_NAMES) {
-    const value = pkg.dependencies?.[name];
-    if (typeof value !== 'string' || !value.startsWith('file:./.local-packs/')) return false;
+    if (!isNpmSpec(pkg.dependencies?.[name])) return false;
   }
-  if (pkg.dependencies?.['@qpjoy/electron-plugin-tunnel'] !== NPM_VERSIONS['@qpjoy/electron-plugin-tunnel']) {
+  if (pkg.dependencies?.['@qpjoy/electron-plugin-tunnel'] !== desiredNpmDeps['@qpjoy/electron-plugin-tunnel']) {
     return false;
   }
   for (const entry of WORKSPACE_PACKS) {
@@ -174,10 +213,10 @@ function existingLocalSetupIsValid() {
 
 if (desired === 'npm') {
   const npmPackageShape =
-    NPM_DIRECT_DEP_NAMES.every((name) => pkg.dependencies?.[name] === NPM_VERSIONS[name]) &&
+    NPM_DIRECT_DEP_NAMES.every((name) => pkg.dependencies?.[name] === desiredNpmDeps[name]) &&
     !pkg.pnpm?.overrides;
   const alreadyNpm =
-    npmPackageShape && existsSync(resolve(APP_DIR, 'node_modules', '@qpjoy', 'electron-market'));
+    npmPackageShape && npmDepsInstalled();
 
   if (alreadyNpm) {
     if (sentinel !== 'npm') writeFileSync(MODE_PATH, 'npm\n');
@@ -196,7 +235,7 @@ if (desired === 'npm') {
   }
   pkg.dependencies = pkg.dependencies ?? {};
   for (const name of NPM_DIRECT_DEP_NAMES) {
-    pkg.dependencies[name] = NPM_VERSIONS[name];
+    pkg.dependencies[name] = desiredNpmDeps[name];
   }
   writePkg(pkg);
   writeFileSync(MODE_PATH, 'npm\n');
@@ -233,9 +272,9 @@ removeQpjoyDepsExcept(allowed);
 
 pkg.dependencies = pkg.dependencies ?? {};
 for (const name of LOCAL_DIRECT_DEP_NAMES) {
-  pkg.dependencies[name] = `file:${packMap[name]}`;
+  pkg.dependencies[name] = desiredNpmDeps[name];
 }
-pkg.dependencies['@qpjoy/electron-plugin-tunnel'] = NPM_VERSIONS['@qpjoy/electron-plugin-tunnel'];
+pkg.dependencies['@qpjoy/electron-plugin-tunnel'] = desiredNpmDeps['@qpjoy/electron-plugin-tunnel'];
 
 pkg.pnpm = pkg.pnpm ?? {};
 pkg.pnpm.overrides = pkg.pnpm.overrides ?? {};
