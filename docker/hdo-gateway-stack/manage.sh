@@ -536,14 +536,20 @@ cmd_sync_domestic_peers() {
   parse_common "$@"
   [ -f "$WG_DIR/wg-home.conf" ] || die "run setup-domestic first"
   [ -n "${HDO_SERVER_URL:-}" ] || die "--server-url or HDO_SERVER_URL required"
-  [ -n "${HDO_TOKEN:-}" ] || die "HDO_TOKEN=<admin bearer token> required"
+  [ -n "${HDO_TOKEN:-}" ] || [ -n "${HDO_GATEWAY_RUNNER_TOKEN:-}" ] || die "HDO_TOKEN=<admin bearer token> or HDO_GATEWAY_RUNNER_TOKEN required"
   require_cmd curl
 
-  local fetched stripped
+  local fetched stripped curl_headers=()
   fetched="$(mktemp)"
   stripped="$(mktemp)"
+  if [ -n "${HDO_TOKEN:-}" ]; then
+    curl_headers+=(-H "authorization: Bearer ${HDO_TOKEN}")
+  fi
+  if [ -n "${HDO_GATEWAY_RUNNER_TOKEN:-}" ]; then
+    curl_headers+=(-H "x-hdo-runner-token: ${HDO_GATEWAY_RUNNER_TOKEN}")
+  fi
   curl -fsS \
-    -H "authorization: Bearer ${HDO_TOKEN}" \
+    "${curl_headers[@]}" \
     "${HDO_SERVER_URL%/}/api/v1/hdo/admin/wireguard/domestic-peers.conf" \
     -o "$fetched"
 

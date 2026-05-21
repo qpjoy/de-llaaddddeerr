@@ -1114,6 +1114,11 @@ function buildDarwinUserspaceTunnelCommand(
     if (address.includes(':')) return `ifconfig "$REAL_INTERFACE" inet6 ${shellQuote(address)} alias`;
     return `ifconfig "$REAL_INTERFACE" inet ${shellQuote(address)} ${shellQuote(address.split('/')[0])} alias`;
   });
+  const addressDownCommands = profile.addresses.map((address) => {
+    const ip = address.split('/')[0] ?? address;
+    if (address.includes(':')) return `ifconfig "$REAL_INTERFACE" inet6 ${shellQuote(ip)} -alias >/dev/null 2>&1 || true`;
+    return `ifconfig "$REAL_INTERFACE" inet ${shellQuote(ip)} -alias >/dev/null 2>&1 || true`;
+  });
   const primaryAddress = profile.addresses[0]?.split('/')[0] ?? '';
   const stopLines = [
     'mkdir -p /var/run/wireguard',
@@ -1121,6 +1126,7 @@ function buildDarwinUserspaceTunnelCommand(
     `if [ -z "$REAL_INTERFACE" ] && [ -n ${shellQuote(primaryAddress)} ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q ${shellQuote(`inet ${primaryAddress}`)}; then REAL_INTERFACE="$candidate"; break; fi; done; fi`,
     `if [ -n "$REAL_INTERFACE" ]; then`,
     ...routeDownCommands.map((line) => `  ${line}`),
+    ...addressDownCommands.map((line) => `  ${line}`),
     '  ifconfig "$REAL_INTERFACE" down >/dev/null 2>&1 || true',
     '  rm -f "/var/run/wireguard/$REAL_INTERFACE.sock"',
     'fi',
@@ -1132,7 +1138,7 @@ function buildDarwinUserspaceTunnelCommand(
     '    kill -9 "$WIREGUARD_GO_PID" >/dev/null 2>&1 || true',
     '  fi',
     'fi',
-    `if [ -n ${shellQuote(primaryAddress)} ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q ${shellQuote(`inet ${primaryAddress}`)}; then ifconfig "$candidate" down >/dev/null 2>&1 || true; rm -f "/var/run/wireguard/$candidate.sock"; fi; done; fi`,
+    `if [ -n ${shellQuote(primaryAddress)} ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q ${shellQuote(`inet ${primaryAddress}`)}; then REAL_INTERFACE="$candidate"; ${addressDownCommands.join('; ')}; ifconfig "$candidate" down >/dev/null 2>&1 || true; rm -f "/var/run/wireguard/$candidate.sock"; fi; done; fi`,
     `if command -v pgrep >/dev/null 2>&1; then for stale_pid in $(pgrep -x wireguard-go 2>/dev/null || true); do stale_command="$(ps -p "$stale_pid" -o command= 2>/dev/null || true)"; printf '%s\\n' "$stale_command" | grep -F ${shellQuote(wireGuardGo)} >/dev/null 2>&1 && kill "$stale_pid" >/dev/null 2>&1 || true; done; fi`,
     `rm -f ${shellQuote(nameFile)} ${shellQuote(pidFile)}`
   ];
@@ -1313,10 +1319,16 @@ function findDarwinInterfaceByAddress(addresses: string[]): string | null {
     .filter((name) => isWireGuardLikeInterface(name))
     .filter((name) => {
       const state = readInterfaceState(name);
-      return Boolean(state && ips.some((ip) => state.includes(`inet ${ip}`)));
+      return Boolean(state && interfaceStateIsUp(state) && ips.some((ip) => state.includes(`inet ${ip}`)));
     });
   if (matches.length === 0) return null;
   return matches.sort((a, b) => detectInterfaceRoutes(b).length - detectInterfaceRoutes(a).length)[0] ?? null;
+}
+
+function interfaceStateIsUp(state: string): boolean {
+  const firstLine = state.split(/\r?\n/, 1)[0] ?? '';
+  const flags = firstLine.match(/<([^>]+)>/)?.[1] ?? '';
+  return flags.split(',').includes('UP');
 }
 
 function parseWireGuardDump(raw: string): WireGuardPeerRuntimeStatus[] {

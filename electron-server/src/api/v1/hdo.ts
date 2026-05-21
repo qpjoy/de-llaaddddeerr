@@ -218,7 +218,7 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       await hdoStore.upsertDevicePluginStates(device.id, plugins);
     }
     if (device.publicKey && device.overlayIp && deviceMeshAccess.active) {
-      scheduleHdoDomesticSync('device-register', bearerTokenFromRequest(req), {
+      scheduleHdoDomesticSync('device-register', adminBearerTokenFromRequest(req), {
         deviceId: device.id,
         userId: device.userId,
         overlayIp: device.overlayIp
@@ -628,7 +628,7 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       meta: { meshGroupId: row.meshGroupId, userId: row.userId, role: row.role, status: row.status }
     });
     if (row.status === 'active') {
-      scheduleHdoDomesticSync('mesh-membership-active', bearerTokenFromRequest(req), {
+      scheduleHdoDomesticSync('mesh-membership-active', adminBearerTokenFromRequest(req), {
         meshGroupId: row.meshGroupId,
         userId: row.userId
       });
@@ -684,7 +684,7 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       targetId: row.id,
       meta: { meshGroupId: row.meshGroupId, deviceId: row.deviceId, status: row.status }
     });
-    scheduleHdoDomesticSync('device-mesh-state-change', bearerTokenFromRequest(req), {
+    scheduleHdoDomesticSync('device-mesh-state-change', adminBearerTokenFromRequest(req), {
       meshGroupId: row.meshGroupId,
       deviceId: row.deviceId,
       status: row.status
@@ -748,7 +748,7 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/v1/hdo/admin/nodes', adminOnly, async () => hdoStore.listNodes());
 
-  app.get('/api/v1/hdo/admin/wireguard/domestic-peers.conf', adminOnly, async (req, reply) => {
+  app.get('/api/v1/hdo/admin/wireguard/domestic-peers.conf', { preHandler: requireHdoAdminOrRunner }, async (req, reply) => {
     const content = await renderDomesticWireGuardPeers();
     reply.type('text/plain; charset=utf-8');
     return content;
@@ -1095,6 +1095,8 @@ function startQueuedHdoDomesticSync(meta: Record<string, unknown>): HdoDeploymen
   const runnerToken = resolveHdoGatewayRunnerToken();
   const script = runnerUrl ? null : resolveHdoGatewayScript();
   if ((runnerUrl && !runnerToken) || (!runnerUrl && !script)) return null;
+  const bearerToken = hdoDomesticSyncBearerToken;
+  if (!bearerToken && !runnerToken) return null;
   const reason = hdoDomesticSyncPendingReason ?? 'auto';
   hdoDomesticSyncPendingReason = null;
   const job = startHdoDeploymentJob({
@@ -1106,7 +1108,7 @@ function startQueuedHdoDomesticSync(meta: Record<string, unknown>): HdoDeploymen
     },
     scriptPath: script,
     runnerUrl,
-    bearerToken: hdoDomesticSyncBearerToken
+    bearerToken
   });
   hdoDomesticSyncBearerToken = null;
   void auditStore.insert({
@@ -1414,6 +1416,19 @@ function bearerTokenFromRequest(req: FastifyRequest): string | null {
   if (typeof header !== 'string') return null;
   const match = /^Bearer\s+(.+)$/i.exec(header.trim());
   return match?.[1] ?? null;
+}
+
+function adminBearerTokenFromRequest(req: FastifyRequest): string | null {
+  return req.currentUser?.role === 'admin' ? bearerTokenFromRequest(req) : null;
+}
+
+async function requireHdoAdminOrRunner(req: FastifyRequest, reply: FastifyReply): Promise<void> {
+  if (req.currentUser?.role === 'admin') return;
+  const configured = resolveHdoGatewayRunnerToken();
+  const provided = headerString(req.headers['x-hdo-runner-token']);
+  if (configured && provided && configured === provided) return;
+  reply.code(req.currentUser ? 403 : 401);
+  throw new Error('admin or HDO runner token required');
 }
 
 function requestBaseUrl(req: FastifyRequest): string | null {
