@@ -17,6 +17,28 @@ const packageRoot = resolve(__dirname, '..');
 const bundledClientScript = resolve(packageRoot, 'resources/mihomo-client.sh');
 const repoClientScript = resolve(packageRoot, '../../../scripts/mihomo-client.sh');
 const defaultInstallTarget = '/usr/local/bin/mihomo-client';
+const defaultMihomoConfigFile = '/etc/mihomo-client/config.yaml';
+const defaultNoProxyEntries = [
+  'localhost',
+  '127.0.0.1',
+  '::1',
+  'postgres',
+  'market',
+  'db',
+  'redis',
+  'host.docker.internal',
+  'docker.for.mac.host.internal',
+  'docker.for.win.localhost',
+  'kubernetes.docker.internal',
+  '10.0.0.0/8',
+  '172.16.0.0/12',
+  '192.168.0.0/16',
+  '100.64.0.0/10',
+  '100.88.0.0/16',
+  '100.89.0.0/16',
+  '100.90.0.0/16',
+  '.local',
+];
 
 const clientCommands = new Set([
   'setup',
@@ -29,6 +51,11 @@ const clientCommands = new Set([
   'logs',
   'enable',
   'disable',
+  'upgrade-systemd',
+  'server-on',
+  'server-off',
+  'egress-on',
+  'egress-off',
   'proxy-on',
   'proxy-off',
   'tun-on',
@@ -54,18 +81,27 @@ Usage:
   qp-tunnel-cli script-path
   qp-tunnel-cli client-help
   qp-tunnel-cli <mihomo-client command> [options]
+  qp-tunnel-cli -- <command> [args...]
+  qp-tunnel-cli <command-path> [args...]
 
 Common commands:
   qp-tunnel-cli install --url http://IP:3434/peer_user01.mihomo.yaml --user download --password pass
   qp-tunnel-cli status
   qp-tunnel-cli start
+  qp-tunnel-cli server-on
   qp-tunnel-cli tun-on
   qp-tunnel-cli tun-off
   qp-tunnel-cli update-subscription
   qp-tunnel-cli uninstall --purge
+  qp-tunnel-cli ./electron-server/scripts/manage.sh redeploy
 
 The npm package is a thin distributor for the Linux mihomo-client script. Client
 commands re-run through sudo when needed, then execute the bundled shell script.
+
+Unknown commands are executed with QPJoy proxy variables injected. Host commands
+receive HTTP_PROXY=http://127.0.0.1:<mixed-port>; Docker/Compose build contexts
+also receive container-facing variables such as MARKET_CONTAINER_HTTP_PROXY and
+QP_TUNNEL_CONTAINER_HTTP_PROXY=http://host.docker.internal:<mixed-port>.
 
 Install the script as a normal server command:
   sudo qp-tunnel-cli install-script
@@ -152,6 +188,112 @@ function runClientCommand(scriptArgs: string[]): never {
   runScriptWithoutSudo(scriptArgs);
 }
 
+function mixedPortFromConfig(): string {
+  const explicit = process.env.QP_TUNNEL_MIXED_PORT || process.env.MIHOMO_MIXED_PORT;
+  if (explicit && /^\d+$/.test(explicit)) {
+    return explicit;
+  }
+
+  const configFile = process.env.MIHOMO_CONFIG_FILE || defaultMihomoConfigFile;
+  if (!existsSync(configFile)) {
+    process.stderr.write(
+      `Mihomo config not found: ${configFile}\nRun: sudo qp-tunnel-cli install ... && sudo qp-tunnel-cli server-on\n`,
+    );
+    process.exit(1);
+  }
+
+  const content = readFileSync(configFile, 'utf8');
+  const match = /^\s*mixed-port\s*:\s*(\d+)/m.exec(content);
+  if (!match) {
+    process.stderr.write(`Could not detect mixed-port from ${configFile}\n`);
+    process.exit(1);
+  }
+  return match[1];
+}
+
+function mergeCsvValues(...values: Array<string | undefined>): string {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const value of values) {
+    for (const item of (value || '').split(',')) {
+      const trimmed = item.trim();
+      if (!trimmed || seen.has(trimmed)) continue;
+      seen.add(trimmed);
+      merged.push(trimmed);
+    }
+  }
+  return merged.join(',');
+}
+
+function proxyEnvironment(): NodeJS.ProcessEnv {
+  const port = mixedPortFromConfig();
+  const hostProxy = `http://127.0.0.1:${port}`;
+  const hostSocksProxy = `socks5://127.0.0.1:${port}`;
+  const containerHost = process.env.QP_TUNNEL_CONTAINER_HOST || 'host.docker.internal';
+  const containerProxy = `http://${containerHost}:${port}`;
+  const noProxy = mergeCsvValues(
+    process.env.NO_PROXY,
+    process.env.no_proxy,
+    defaultNoProxyEntries.join(','),
+  );
+  const containerNoProxy = mergeCsvValues(
+    process.env.MARKET_CONTAINER_NO_PROXY,
+    process.env.QP_TUNNEL_CONTAINER_NO_PROXY,
+    noProxy,
+  );
+
+  return {
+    ...process.env,
+    HTTP_PROXY: hostProxy,
+    HTTPS_PROXY: hostProxy,
+    ALL_PROXY: hostSocksProxy,
+    http_proxy: hostProxy,
+    https_proxy: hostProxy,
+    all_proxy: hostSocksProxy,
+    NO_PROXY: noProxy,
+    no_proxy: noProxy,
+    npm_config_proxy: hostProxy,
+    npm_config_https_proxy: hostProxy,
+    npm_config_noproxy: noProxy,
+    pnpm_config_proxy: hostProxy,
+    pnpm_config_https_proxy: hostProxy,
+    pnpm_config_noproxy: noProxy,
+    QP_TUNNEL_MIXED_PORT: port,
+    QP_TUNNEL_HOST_HTTP_PROXY: hostProxy,
+    QP_TUNNEL_HOST_HTTPS_PROXY: hostProxy,
+    QP_TUNNEL_HOST_ALL_PROXY: hostSocksProxy,
+    QP_TUNNEL_CONTAINER_HTTP_PROXY: containerProxy,
+    QP_TUNNEL_CONTAINER_HTTPS_PROXY: containerProxy,
+    QP_TUNNEL_CONTAINER_NO_PROXY: containerNoProxy,
+    CONTAINER_HTTP_PROXY: containerProxy,
+    CONTAINER_HTTPS_PROXY: containerProxy,
+    CONTAINER_NO_PROXY: containerNoProxy,
+    BUILD_CONTAINER_HTTP_PROXY: containerProxy,
+    BUILD_CONTAINER_HTTPS_PROXY: containerProxy,
+    BUILD_CONTAINER_NO_PROXY: containerNoProxy,
+    MARKET_CONTAINER_HTTP_PROXY: process.env.MARKET_CONTAINER_HTTP_PROXY || containerProxy,
+    MARKET_CONTAINER_HTTPS_PROXY: process.env.MARKET_CONTAINER_HTTPS_PROXY || containerProxy,
+    MARKET_CONTAINER_NO_PROXY: containerNoProxy,
+  };
+}
+
+function runExternalCommand(commandArgs: string[]): never {
+  if (commandArgs.length === 0) {
+    process.stderr.write('Missing command after qp-tunnel-cli --\n');
+    process.exit(1);
+  }
+
+  const [rawCommand, ...rawArgs] = commandArgs;
+  const command = rawCommand === 'sudo' && !rawArgs.includes('-E') ? 'sudo' : rawCommand;
+  const commandArgsWithSudoEnv =
+    rawCommand === 'sudo' && !rawArgs.includes('-E') ? ['-E', ...rawArgs] : rawArgs;
+  const result = spawnSync(command, commandArgsWithSudoEnv, {
+    stdio: 'inherit',
+    env: proxyEnvironment(),
+  });
+  exitFromSpawn(result);
+}
+
 function parseInstallScriptArgs(scriptArgs: string[]): string {
   let target = defaultInstallTarget;
 
@@ -222,6 +364,10 @@ async function printScriptPath(): Promise<void> {
 async function main(): Promise<void> {
   const command = args[0] ?? 'help';
 
+  if (command === '--') {
+    runExternalCommand(args.slice(1));
+  }
+
   if (command === 'help' || command === '--help' || command === '-h') {
     help();
     return;
@@ -251,9 +397,11 @@ async function main(): Promise<void> {
     runClientCommand(args);
   }
 
-  process.stderr.write(`Unknown command: ${command}\n`);
+  if (args.length > 0) {
+    runExternalCommand(args);
+  }
+
   help();
-  process.exitCode = 1;
 }
 
 main().catch((error: unknown) => {

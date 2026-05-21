@@ -16,6 +16,7 @@ MIHOMO_SERVICE_FILE="${MIHOMO_SERVICE_FILE:-/etc/systemd/system/$MIHOMO_SERVICE_
 MIHOMO_PROFILE_PROXY_FILE="${MIHOMO_PROFILE_PROXY_FILE:-/etc/profile.d/mihomo-client-proxy.sh}"
 MIHOMO_DAEMON_PROXY_SERVICES="${MIHOMO_DAEMON_PROXY_SERVICES:-docker.service containerd.service buildkit.service}"
 MIHOMO_DAEMON_PROXY_DROPIN_NAME="${MIHOMO_DAEMON_PROXY_DROPIN_NAME:-mihomo-proxy.conf}"
+MIHOMO_NO_PROXY="${MIHOMO_NO_PROXY:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,100.88.0.0/16,100.89.0.0/16,100.90.0.0/16,host.docker.internal,.local}"
 MIHOMO_SSH_PROXY_HELPER="${MIHOMO_SSH_PROXY_HELPER:-/usr/local/bin/mihomo-ssh-proxy}"
 MIHOMO_SSH_CONFIG_DIR="${MIHOMO_SSH_CONFIG_DIR:-/etc/ssh/ssh_config.d}"
 MIHOMO_SSH_CONFIG_FILE="${MIHOMO_SSH_CONFIG_FILE:-$MIHOMO_SSH_CONFIG_DIR/99-mihomo-proxy.conf}"
@@ -41,6 +42,11 @@ Commands:
   logs                 Show recent service logs
   enable               Enable service on boot
   disable              Disable service on boot
+  upgrade-systemd      Refresh the installed systemd unit from this script
+  server-on            Enable persistent server-safe outbound proxy mode, without TUN
+  server-off           Disable server-safe proxy integrations, keeping the service installed
+  egress-on            Alias for server-on
+  egress-off           Alias for server-off
   proxy-on             Write /etc/profile.d proxy exports for login shells
   proxy-off            Remove /etc/profile.d proxy exports
   tun-on               Enable Mihomo TUN mode and also turn proxy-on on
@@ -85,11 +91,13 @@ Examples:
 
   sudo bash ./scripts/mihomo-client.sh update-subscription
   sudo bash ./scripts/mihomo-client.sh start
+  sudo bash ./scripts/mihomo-client.sh server-on
   sudo bash ./scripts/mihomo-client.sh proxy-on
   sudo bash ./scripts/mihomo-client.sh tun-on
   sudo bash ./scripts/mihomo-client.sh ssh-proxy-on
   sudo bash ./scripts/mihomo-client.sh daemon-proxy-on
   sudo bash ./scripts/mihomo-client.sh run curl -I https://www.google.com/generate_204
+  sudo bash ./scripts/mihomo-client.sh run ./electron-server/scripts/manage.sh redeploy
   sudo bash ./scripts/mihomo-client.sh print-env
 EOF
 }
@@ -525,10 +533,10 @@ docker_proxy_env_lines() {
 	cat <<EOF
 HTTP_PROXY=http://127.0.0.1:$port
 HTTPS_PROXY=http://127.0.0.1:$port
-NO_PROXY=localhost,127.0.0.1,::1
+NO_PROXY=$MIHOMO_NO_PROXY
 http_proxy=http://127.0.0.1:$port
 https_proxy=http://127.0.0.1:$port
-no_proxy=localhost,127.0.0.1,::1
+no_proxy=$MIHOMO_NO_PROXY
 EOF
 }
 
@@ -589,6 +597,7 @@ status_command() {
 	echo "TUN mode: $([[ -f "$MIHOMO_TUN_OVERLAY_FILE" ]] && echo enabled || echo disabled)"
 	echo "SSH proxy config: $([[ -f "$MIHOMO_SSH_CONFIG_FILE" ]] && echo enabled || echo disabled)"
 	echo "Managed daemon proxy services: ${daemon_services:-none}"
+	echo "NO_PROXY: $MIHOMO_NO_PROXY"
 	echo
 	systemctl status "$MIHOMO_SERVICE_NAME" --no-pager || true
 }
@@ -711,10 +720,10 @@ daemon_proxy_on_command() {
 [Service]
 Environment="HTTP_PROXY=http://127.0.0.1:$port"
 Environment="HTTPS_PROXY=http://127.0.0.1:$port"
-Environment="NO_PROXY=localhost,127.0.0.1,::1"
+Environment="NO_PROXY=$MIHOMO_NO_PROXY"
 Environment="http_proxy=http://127.0.0.1:$port"
 Environment="https_proxy=http://127.0.0.1:$port"
-Environment="no_proxy=localhost,127.0.0.1,::1"
+Environment="no_proxy=$MIHOMO_NO_PROXY"
 EOF
 	done
 	systemd_reload
@@ -771,17 +780,73 @@ tun_off_command() {
 	fi
 }
 
+server_on_command() {
+	local was_tun_enabled="false"
+	if tun_enabled; then
+		was_tun_enabled="true"
+		remove_tun_overlay
+		render_runtime_config
+	fi
+	if service_is_active; then
+		if [[ "$was_tun_enabled" == "true" ]]; then
+			systemctl restart "$MIHOMO_SERVICE_NAME"
+		fi
+	else
+		systemctl start "$MIHOMO_SERVICE_NAME"
+	fi
+	systemctl enable "$MIHOMO_SERVICE_NAME" >/dev/null 2>&1 || true
+	proxy_on_command
+	ssh_proxy_on_command
+	daemon_proxy_on_command
+	echo "Server-safe outbound proxy mode enabled."
+	echo "Mihomo stays resident as a local proxy; TUN mode is disabled so public inbound services keep their normal return path."
+}
+
+server_off_command() {
+	remove_tun_overlay
+	render_runtime_config
+	proxy_off_command
+	ssh_proxy_off_command
+	daemon_proxy_off_command
+	if service_is_active; then
+		systemctl restart "$MIHOMO_SERVICE_NAME"
+	fi
+	echo "Server-safe outbound proxy integrations disabled. Mihomo service remains installed."
+}
+
 run_command() {
-	local port
+	local port host_proxy host_socks_proxy container_host container_proxy
 	[[ $# -gt 0 ]] || die "Usage: sudo bash ./scripts/mihomo-client.sh run <command> [args...]"
 	port="$(mixed_port_from_config)"
 	[[ -n "$port" ]] || die "Could not detect mixed-port from $MIHOMO_CONFIG_FILE"
-	http_proxy="http://127.0.0.1:$port" \
-	https_proxy="http://127.0.0.1:$port" \
-	HTTP_PROXY="http://127.0.0.1:$port" \
-	HTTPS_PROXY="http://127.0.0.1:$port" \
-	all_proxy="socks5://127.0.0.1:$port" \
-	ALL_PROXY="socks5://127.0.0.1:$port" \
+	host_proxy="http://127.0.0.1:$port"
+	host_socks_proxy="socks5://127.0.0.1:$port"
+	container_host="${QP_TUNNEL_CONTAINER_HOST:-host.docker.internal}"
+	container_proxy="http://${container_host}:$port"
+	http_proxy="$host_proxy" \
+	https_proxy="$host_proxy" \
+	HTTP_PROXY="$host_proxy" \
+	HTTPS_PROXY="$host_proxy" \
+	all_proxy="$host_socks_proxy" \
+	ALL_PROXY="$host_socks_proxy" \
+	no_proxy="$MIHOMO_NO_PROXY" \
+	NO_PROXY="$MIHOMO_NO_PROXY" \
+	QP_TUNNEL_MIXED_PORT="$port" \
+	QP_TUNNEL_HOST_HTTP_PROXY="$host_proxy" \
+	QP_TUNNEL_HOST_HTTPS_PROXY="$host_proxy" \
+	QP_TUNNEL_HOST_ALL_PROXY="$host_socks_proxy" \
+	QP_TUNNEL_CONTAINER_HTTP_PROXY="$container_proxy" \
+	QP_TUNNEL_CONTAINER_HTTPS_PROXY="$container_proxy" \
+	QP_TUNNEL_CONTAINER_NO_PROXY="$MIHOMO_NO_PROXY" \
+	CONTAINER_HTTP_PROXY="$container_proxy" \
+	CONTAINER_HTTPS_PROXY="$container_proxy" \
+	CONTAINER_NO_PROXY="$MIHOMO_NO_PROXY" \
+	BUILD_CONTAINER_HTTP_PROXY="$container_proxy" \
+	BUILD_CONTAINER_HTTPS_PROXY="$container_proxy" \
+	BUILD_CONTAINER_NO_PROXY="$MIHOMO_NO_PROXY" \
+	MARKET_CONTAINER_HTTP_PROXY="${MARKET_CONTAINER_HTTP_PROXY:-$container_proxy}" \
+	MARKET_CONTAINER_HTTPS_PROXY="${MARKET_CONTAINER_HTTPS_PROXY:-$container_proxy}" \
+	MARKET_CONTAINER_NO_PROXY="${MARKET_CONTAINER_NO_PROXY:-$MIHOMO_NO_PROXY}" \
 	"$@"
 }
 
@@ -849,6 +914,23 @@ install_command() {
 		echo "Mihomo client installed and started."
 	else
 		echo "Mihomo client installed. Service not started because --no-start was used."
+	fi
+}
+
+upgrade_systemd_command() {
+	ensure_dirs
+	load_env
+	log "Installing current mihomo-client launcher"
+	install_client_launcher
+	log "Refreshing systemd service file"
+	write_service_file
+	systemd_reload
+	systemctl enable "$MIHOMO_SERVICE_NAME" >/dev/null 2>&1 || true
+	if service_is_active; then
+		systemctl restart "$MIHOMO_SERVICE_NAME"
+		echo "Mihomo client systemd unit updated and service restarted."
+	else
+		echo "Mihomo client systemd unit updated. Start it with: systemctl start $MIHOMO_SERVICE_NAME"
 	fi
 }
 
@@ -971,6 +1053,15 @@ main() {
 		;;
 		disable)
 			disable_command
+		;;
+		upgrade-systemd)
+			upgrade_systemd_command
+		;;
+		server-on|egress-on)
+			server_on_command
+		;;
+		server-off|egress-off)
+			server_off_command
 		;;
 		proxy-on)
 			proxy_on_command

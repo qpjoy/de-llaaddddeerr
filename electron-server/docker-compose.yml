@@ -32,6 +32,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${MARKET_CONTAINER_HTTP_PROXY:-}
+        HTTPS_PROXY: ${MARKET_CONTAINER_HTTPS_PROXY:-}
+        NO_PROXY: ${MARKET_CONTAINER_NO_PROXY:-}
+        http_proxy: ${MARKET_CONTAINER_HTTP_PROXY:-}
+        https_proxy: ${MARKET_CONTAINER_HTTPS_PROXY:-}
+        no_proxy: ${MARKET_CONTAINER_NO_PROXY:-}
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
     image: qpjoy/market-server:dev
     container_name: qpjoy-market
     restart: unless-stopped
@@ -64,6 +73,12 @@ services:
       HDO_GATEWAY_RUNNER_TOKEN: ${HDO_GATEWAY_RUNNER_TOKEN:-}
       HDO_GATEWAY_SCRIPT: ${HDO_GATEWAY_SCRIPT:-}
       HDO_SERVER_URL: ${HDO_SERVER_URL:-http://127.0.0.1:8080}
+      HTTP_PROXY: ${MARKET_CONTAINER_HTTP_PROXY:-}
+      HTTPS_PROXY: ${MARKET_CONTAINER_HTTPS_PROXY:-}
+      NO_PROXY: ${MARKET_CONTAINER_NO_PROXY:-}
+      http_proxy: ${MARKET_CONTAINER_HTTP_PROXY:-}
+      https_proxy: ${MARKET_CONTAINER_HTTPS_PROXY:-}
+      no_proxy: ${MARKET_CONTAINER_NO_PROXY:-}
     ports:
       - "${MARKET_PORT:-8080}:8080"
     extra_hosts:

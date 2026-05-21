@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/tunnel-cli",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Global QPJoy Tunnel CLI for installing and running the Linux mihomo-client script.",
   "private": false,
   "type": "commonjs",

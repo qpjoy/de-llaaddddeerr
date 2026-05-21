@@ -10,6 +10,12 @@
 # running `docker compose build` so the file is in the Docker build context.
 
 FROM node:22-alpine AS build
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
 WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 COPY package.json pnpm-lock.yaml* ./
@@ -18,6 +24,12 @@ COPY . .
 RUN pnpm build
 
 FROM node:22-alpine AS runtime
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
 WORKDIR /app
 RUN apk add --no-cache bash curl docker-cli \
   && (apk add --no-cache docker-cli-compose || apk add --no-cache docker-compose)

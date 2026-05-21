@@ -1538,12 +1538,16 @@ function deploymentButtonDisabled(card: { runKind: HdoDeploymentKind }): boolean
 function deploymentButtonLabel(card: { runKind: HdoDeploymentKind }): string {
   if (isDeploymentKindRunning(card.runKind) || deployingKind.value === card.runKind) return '运行中';
   if (hasAnyDeploymentRunning()) return '等待中';
+  const latestForKind = deploymentJobs.value.find((job) => job.kind === card.runKind);
+  if (latestForKind?.status === 'succeeded') return '重新执行';
   return '执行';
 }
 
 function deploymentButtonIcon(card: { runKind: HdoDeploymentKind }): string {
   if (isDeploymentKindRunning(card.runKind) || deployingKind.value === card.runKind) return 'hourglass_top';
   if (hasAnyDeploymentRunning()) return 'lock';
+  const latestForKind = deploymentJobs.value.find((job) => job.kind === card.runKind);
+  if (latestForKind?.status === 'succeeded') return 'replay';
   return 'play_arrow';
 }
 
