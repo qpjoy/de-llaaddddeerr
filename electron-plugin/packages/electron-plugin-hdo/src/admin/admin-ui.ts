@@ -958,9 +958,58 @@ export function adminHtml(): string {
       for (let i = 0; i < attempts; i += 1) {
         await sleep(i === 0 ? 250 : 700);
         const status = await request('/api/client/wireguard/status').catch(() => null);
+        if (status) {
+          snapshot = {
+            ...(snapshot || {}),
+            wireGuardStatus: status
+          };
+          renderWireGuardRuntimeStatus(status);
+          renderWireGuardSwitches(status, (snapshot.settings && snapshot.settings.wireGuardPeer) || null);
+        }
         if (status && Boolean(status.active) === active) return status;
       }
       return null;
+    }
+
+    function hasMissingWireGuardRoutes(status) {
+      return Boolean(status && Array.isArray(status.missingRoutes) && status.missingRoutes.length);
+    }
+
+    function routeListSummary(routes) {
+      if (!Array.isArray(routes) || routes.length === 0) return '';
+      if (routes.length <= 6) return routes.join(', ');
+      return routes.length + ' 条（' + routes.slice(0, 4).join(', ') + ' ...）';
+    }
+
+    async function waitForWireGuardRoutesReady(attempts = 8) {
+      let latest = null;
+      for (let i = 0; i < attempts; i += 1) {
+        await sleep(i === 0 ? 400 : 800);
+        const status = await request('/api/client/wireguard/status').catch(() => null);
+        if (!status) continue;
+        latest = status;
+        snapshot = {
+          ...(snapshot || {}),
+          wireGuardStatus: status
+        };
+        renderWireGuardRuntimeStatus(status);
+        renderWireGuardSwitches(status, (snapshot.settings && snapshot.settings.wireGuardPeer) || null);
+        if (status.active && !hasMissingWireGuardRoutes(status)) return status;
+      }
+      return latest;
+    }
+
+    async function repairWireGuardRoutesIfMissing(status) {
+      if (!hasMissingWireGuardRoutes(status)) return status;
+      const result = await request('/api/client/wireguard/repair-routes', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      if (result && result.ok === false) {
+        throw new Error(result.message || result.command || 'HDO 路由修复失败');
+      }
+      return await waitForWireGuardRoutesReady(10) || status;
     }
 
     function isAuthorizationCancelled(err) {
@@ -1048,13 +1097,21 @@ export function adminHtml(): string {
           && typeof options.recoverWireGuardActive === 'boolean'
           && isTransientFetchError(err)
         ) {
-          const recovered = await waitForWireGuardState(options.recoverWireGuardActive, 10);
+          let recovered = await waitForWireGuardState(options.recoverWireGuardActive, 10);
+          if (options.recoverWireGuardActive && hasMissingWireGuardRoutes(recovered)) {
+            recovered = await repairWireGuardRoutesIfMissing(recovered).catch(() => recovered);
+          }
           if (recovered) {
             snapshot = {
               ...(snapshot || {}),
               wireGuardStatus: recovered
             };
-            showMessage(label + '已完成，网络路由正在切换，稍后自动刷新状态…', 'info');
+            showMessage(
+              hasMissingWireGuardRoutes(recovered)
+                ? label + '已完成，但 HDO 路由仍缺失：' + routeListSummary(recovered.missingRoutes)
+                : label + '已完成，网络路由正在切换，稍后自动刷新状态…',
+              hasMissingWireGuardRoutes(recovered) ? 'error' : 'info'
+            );
             scheduleLoadRetry(label + '成功，状态已刷新');
             return null;
           }
@@ -1364,7 +1421,10 @@ export function adminHtml(): string {
       const tasks = Array.isArray(s.deviceTasks) ? s.deviceTasks : [];
       const notification = settings.lastNotification || null;
       const groupsLabel = groups.length ? groups.map((row) => row.name || row.slug || row.id).join(', ') : '未入网';
-      const tunnelLabel = runtime.active ? '已连接' : (peer.publicKey ? '已配置' : '未配置');
+      const routeMissing = Boolean(runtime.active && hasMissingWireGuardRoutes(runtime));
+      const tunnelLabel = runtime.active
+        ? (routeMissing ? '路由缺失' : '已连接')
+        : (peer.publicKey ? '已配置' : '未配置');
 
       $('meshHomeGroup').textContent = groupsLabel;
       $('meshHomeTunnel').textContent = tunnelLabel;
@@ -1385,7 +1445,9 @@ export function adminHtml(): string {
 
       const statusItems = [
         '控制面：' + (s.serverBaseUrl || '未配置'),
-        'WireGuard：' + (runtime.active ? ((runtime.realInterfaceName || runtime.interfaceName || '接口') + ' 运行中') : tunnelLabel),
+        'WireGuard：' + (runtime.active
+          ? ((runtime.realInterfaceName || runtime.interfaceName || '接口') + (routeMissing ? ' 路由缺失' : ' 运行中'))
+          : tunnelLabel),
         '订阅 generation：' + (manifest.generation || '未生成'),
         '待处理任务：' + tasks.length
       ];
@@ -1742,10 +1804,12 @@ export function adminHtml(): string {
         ? '已运行：' + (status.realInterfaceName || status.interfaceName || '未知接口')
         : '未运行';
       const detail = status.error ? '；' + status.error : '';
+      const missingRoutes = Array.isArray(status.missingRoutes) ? status.missingRoutes : [];
       const routes = Array.isArray(status.routes) && status.routes.length
         ? '；路由 ' + status.routes.length + ' 条'
         : '';
-      $('wgRuntimeText').textContent = label + '；模式 ' + (status.mode || 'unknown') + routes + detail;
+      const routeDetail = missingRoutes.length ? '；缺路由 ' + routeListSummary(missingRoutes) : routes;
+      $('wgRuntimeText').textContent = label + '；模式 ' + (status.mode || 'unknown') + routeDetail + detail;
       const peers = Array.isArray(status.peers) ? status.peers : [];
       $('wgRuntimePeersTable').innerHTML = peers.length ? peers.map((peer) => (
         '<tr><td>' + escapeHtml(shortKey(peer.publicKey)) + '</td><td>' +
@@ -1758,10 +1822,11 @@ export function adminHtml(): string {
 
     function renderWireGuardSwitches(status, peer) {
       const active = Boolean(status && status.active);
+      const routeMissing = active && hasMissingWireGuardRoutes(status);
       const hasConfig = Boolean(peer && peer.configPath);
       const label = wireGuardActionBusy
         ? 'WireGuard 操作中…'
-        : (active ? 'WireGuard 运行中' : (hasConfig ? 'WireGuard 已停止' : 'WireGuard 未配置'));
+        : (active ? (routeMissing ? 'WireGuard 路由缺失' : 'WireGuard 运行中') : (hasConfig ? 'WireGuard 已停止' : 'WireGuard 未配置'));
       [
         ['meshWireGuardSwitch', 'meshWireGuardSwitchText'],
         ['wireGuardSwitch', 'wireGuardSwitchText']
@@ -1769,8 +1834,9 @@ export function adminHtml(): string {
         const input = $(inputId);
         const text = $(textId);
         if (!input || !text) return;
-        input.checked = active;
+        input.checked = active && !routeMissing;
         input.disabled = wireGuardActionBusy || !hasConfig;
+        input.title = routeMissing ? 'WireGuard 已启动，但 HDO 路由缺失；打开开关会尝试修复路由。' : '';
         text.textContent = label;
       });
       ['meshQuickStart', 'quickStart', 'repairWireGuardRoutes'].forEach((id) => {
@@ -2036,6 +2102,16 @@ export function adminHtml(): string {
       const label = shouldRun ? '启动 WireGuard peer' : '停止 WireGuard peer';
       try {
         await runAction(label, async () => {
+          const current = await request('/api/client/wireguard/status').catch(() =>
+            (snapshot && snapshot.wireGuardStatus) || null
+          );
+          if (shouldRun && current && current.active && hasMissingWireGuardRoutes(current)) {
+            const repaired = await repairWireGuardRoutesIfMissing(current);
+            if (hasMissingWireGuardRoutes(repaired)) {
+              throw new Error('WireGuard 已启动，但 HDO 路由仍缺失：' + routeListSummary(repaired.missingRoutes));
+            }
+            return repaired;
+          }
           const result = await request('/api/client/wireguard/connect', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
@@ -2044,7 +2120,13 @@ export function adminHtml(): string {
           if (result && result.ok === false) {
             throw new Error(result.message || result.command || (shouldRun ? 'WireGuard 未启动' : 'WireGuard 未停止'));
           }
-          await waitForWireGuardState(shouldRun);
+          const status = await waitForWireGuardState(shouldRun, 16);
+          if (shouldRun) {
+            const repaired = await repairWireGuardRoutesIfMissing(status);
+            if (hasMissingWireGuardRoutes(repaired)) {
+              throw new Error('WireGuard 已启动，但 HDO 路由仍缺失：' + routeListSummary(repaired.missingRoutes));
+            }
+          }
         }, { wireGuard: true, treatCancelAsInfo: true, recoverWireGuardActive: shouldRun });
       } catch {
         const s = snapshot || {};
@@ -2061,6 +2143,10 @@ export function adminHtml(): string {
         });
         if (result && result.ok === false) {
           throw new Error(result.message || result.command || 'HDO 路由修复失败');
+        }
+        const status = await waitForWireGuardRoutesReady(10);
+        if (hasMissingWireGuardRoutes(status)) {
+          throw new Error('HDO 路由仍缺失：' + routeListSummary(status.missingRoutes));
         }
       }, { wireGuard: true, treatCancelAsInfo: true, recoverWireGuardActive: true });
     }
@@ -2132,7 +2218,11 @@ export function adminHtml(): string {
       if (connected && connected.ok === false) {
         throw new Error(connected.message || connected.command || 'WireGuard 未启动');
       }
-      await waitForWireGuardState(true);
+      const status = await waitForWireGuardState(true, 16);
+      const repaired = await repairWireGuardRoutesIfMissing(status);
+      if (hasMissingWireGuardRoutes(repaired)) {
+        throw new Error('WireGuard 已启动，但 HDO 路由仍缺失：' + routeListSummary(repaired.missingRoutes));
+      }
     }, { wireGuard: true, treatCancelAsInfo: true, recoverWireGuardActive: true }).catch(() => undefined));
     $('registerDevice').addEventListener('click', () => runAction('注册设备', async () => {
       await request('/api/client/register', {
