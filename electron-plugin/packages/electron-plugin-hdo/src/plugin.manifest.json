@@ -13,6 +13,7 @@
     "net:listen:23459",
     "net:fetch:*",
     "marketplace:plugins",
+    "system:exec:osascript",
     "ipc:cross",
     "ui:adminPanel"
   ],

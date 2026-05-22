@@ -754,6 +754,8 @@ export function adminHtml(): string {
             <label>Shell 命令
               <textarea id="wgShellCommands" readonly></textarea>
             </label>
+            <p class="sub" id="wgDaemonText">系统守护未检测</p>
+            <p class="sub" id="wgDaemonPath"></p>
             <div class="row">
               <button class="btn primary" id="prepareWireGuard">生成 / 更新本机 Peer</button>
               <label class="switch-control" title="启动或停止当前 WireGuard peer">
@@ -761,6 +763,8 @@ export function adminHtml(): string {
                 <span class="switch-track"><span class="switch-thumb"></span></span>
                 <span class="switch-text" id="wireGuardSwitchText">WireGuard 未运行</span>
               </label>
+              <button class="btn good" id="installWireGuardDaemon">安装系统守护</button>
+              <button class="btn" id="uninstallWireGuardDaemon">卸载系统守护</button>
               <button class="btn" id="repairWireGuardRoutes">修复路由</button>
               <button class="btn" id="openWireGuard">定位配置</button>
               <button class="btn" id="rotateWireGuard">轮换密钥</button>
@@ -769,6 +773,8 @@ export function adminHtml(): string {
           <div class="panel span-6">
             <h3>WireGuard 运行状态</h3>
             <p class="sub" id="wgRuntimeText">未检测</p>
+            <p class="sub" id="wgRouteLogPath"></p>
+            <pre id="wgRouteLogTail">暂无路由执行记录</pre>
             <table class="table">
               <thead><tr><th>Peer</th><th>Endpoint</th><th>Handshake</th><th>流量</th></tr></thead>
               <tbody id="wgRuntimePeersTable"></tbody>
@@ -1012,6 +1018,28 @@ export function adminHtml(): string {
       return await waitForWireGuardRoutesReady(10) || status;
     }
 
+    async function recoverLocalWireGuardIfDesired() {
+      const settings = snapshot && snapshot.settings ? snapshot.settings : {};
+      const peer = settings.wireGuardPeer || null;
+      if (!peer || !peer.configPath || settings.wireGuardDesiredActive === false) return null;
+      const current = await request('/api/client/wireguard/status').catch(() =>
+        (snapshot && snapshot.wireGuardStatus) || null
+      );
+      if (current && current.active && !hasMissingWireGuardRoutes(current)) return current;
+      const result = await request('/api/client/wireguard/recover', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: 'admin-quick-start', allowPrivileged: true })
+      });
+      if (result && result.ok === false && !result.skipped) {
+        throw new Error(result.message || result.command || '本地 WireGuard 恢复失败');
+      }
+      if (result && result.skipped) return null;
+      let status = await waitForWireGuardState(true, 10);
+      if (status) status = await repairWireGuardRoutesIfMissing(status);
+      return status && status.active ? status : null;
+    }
+
     function isAuthorizationCancelled(err) {
       const text = err && err.message ? String(err.message) : String(err || '');
       return text.includes('已取消 WireGuard 管理员授权')
@@ -1163,6 +1191,7 @@ export function adminHtml(): string {
       $('subscriptionOut').value = settings.lastSubscription || '';
       renderWireGuardPeer(settings.wireGuardPeer || null);
       renderWireGuardRuntimeStatus(s.wireGuardStatus || null);
+      renderWireGuardDaemonStatus(s.wireGuardDaemonStatus || null, settings.wireGuardPeer || null);
       renderWireGuardSwitches(s.wireGuardStatus || null, settings.wireGuardPeer || null);
       $('cmdDomestic').textContent = safeCommands.domestic || '';
       $('cmdHome').textContent = safeCommands.home || '';
@@ -1797,6 +1826,8 @@ export function adminHtml(): string {
     function renderWireGuardRuntimeStatus(status) {
       if (!status) {
         $('wgRuntimeText').textContent = '未生成配置或尚未检测到运行状态。';
+        $('wgRouteLogPath').textContent = '';
+        $('wgRouteLogTail').textContent = '暂无路由执行记录';
         $('wgRuntimePeersTable').innerHTML = '<tr><td colspan="4" class="muted">暂无运行中的 peer</td></tr>';
         return;
       }
@@ -1810,6 +1841,16 @@ export function adminHtml(): string {
         : '';
       const routeDetail = missingRoutes.length ? '；缺路由 ' + routeListSummary(missingRoutes) : routes;
       $('wgRuntimeText').textContent = label + '；模式 ' + (status.mode || 'unknown') + routeDetail + detail;
+      const routeProbes = Array.isArray(status.routeProbes) ? status.routeProbes : [];
+      const probeLines = routeProbes.map((probe) => (
+        (probe.ok ? 'OK ' : 'MISS ') + probe.target + ' -> ' +
+        (probe.actualInterface || 'unknown') + ' / expected ' + (probe.expectedInterface || '')
+      ));
+      $('wgRouteLogPath').textContent = status.routeLogPath ? ('路由执行日志：' + status.routeLogPath) : '';
+      $('wgRouteLogTail').textContent = [
+        probeLines.length ? ('Route probes:\\n' + probeLines.join('\\n')) : '',
+        status.routeLogTail || ''
+      ].filter(Boolean).join('\\n\\n') || '暂无路由执行记录';
       const peers = Array.isArray(status.peers) ? status.peers : [];
       $('wgRuntimePeersTable').innerHTML = peers.length ? peers.map((peer) => (
         '<tr><td>' + escapeHtml(shortKey(peer.publicKey)) + '</td><td>' +
@@ -1818,6 +1859,33 @@ export function adminHtml(): string {
         escapeHtml(formatBytes(peer.transferRxBytes || 0) + ' / ' + formatBytes(peer.transferTxBytes || 0)) +
         '</td></tr>'
       )).join('') : '<tr><td colspan="4" class="muted">暂无运行中的 peer；若刚启动失败，先看上方错误。</td></tr>';
+    }
+
+    function renderWireGuardDaemonStatus(status, peer) {
+      const hasConfig = Boolean(peer && peer.configPath);
+      const installButton = $('installWireGuardDaemon');
+      const uninstallButton = $('uninstallWireGuardDaemon');
+      if (!status) {
+        $('wgDaemonText').textContent = hasConfig ? '系统守护未安装。' : '系统守护等待 WireGuard 配置。';
+        $('wgDaemonPath').textContent = '';
+        if (installButton) installButton.disabled = wireGuardActionBusy || !hasConfig;
+        if (uninstallButton) uninstallButton.disabled = true;
+        return;
+      }
+      if (!status.supported) {
+        $('wgDaemonText').textContent = '系统守护仅支持 macOS userspace WireGuard。';
+        $('wgDaemonPath').textContent = '';
+        if (installButton) installButton.disabled = true;
+        if (uninstallButton) uninstallButton.disabled = true;
+        return;
+      }
+      const daemonState = status.running
+        ? '运行中'
+        : (status.loaded ? '已加载' : (status.installed ? '已安装未加载' : '未安装'));
+      $('wgDaemonText').textContent = '系统守护：' + daemonState + '；KeepAlive ' + (status.installed ? '可用' : '未启用');
+      $('wgDaemonPath').textContent = status.plistPath ? ('LaunchDaemon：' + status.plistPath) : '';
+      if (installButton) installButton.disabled = wireGuardActionBusy || !hasConfig;
+      if (uninstallButton) uninstallButton.disabled = wireGuardActionBusy || !hasConfig || !(status.installed || status.loaded);
     }
 
     function renderWireGuardSwitches(status, peer) {
@@ -1843,6 +1911,8 @@ export function adminHtml(): string {
         const button = $(id);
         if (button) button.disabled = wireGuardActionBusy;
       });
+      const installDaemon = $('installWireGuardDaemon');
+      if (installDaemon) installDaemon.disabled = wireGuardActionBusy || !hasConfig;
     }
 
     function renderMeshPeers(s) {
@@ -2184,6 +2254,32 @@ export function adminHtml(): string {
     $('meshWireGuardSwitch').addEventListener('change', (event) => setWireGuardRunning(event.currentTarget.checked));
     $('wireGuardSwitch').addEventListener('change', (event) => setWireGuardRunning(event.currentTarget.checked));
     $('repairWireGuardRoutes').addEventListener('click', () => repairWireGuardRoutes().catch(() => undefined));
+    $('installWireGuardDaemon').addEventListener('click', () => runAction('安装 WireGuard 系统守护', async () => {
+      const result = await request('/api/client/wireguard/daemon/install', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      if (result && result.ok === false) {
+        throw new Error(result.message || result.command || '系统守护安装失败');
+      }
+      const status = await waitForWireGuardState(true, 16);
+      const repaired = await repairWireGuardRoutesIfMissing(status);
+      if (hasMissingWireGuardRoutes(repaired)) {
+        throw new Error('系统守护已启动，但 HDO 路由仍缺失：' + routeListSummary(repaired.missingRoutes));
+      }
+    }, { wireGuard: true, treatCancelAsInfo: true, recoverWireGuardActive: true }).catch(() => undefined));
+    $('uninstallWireGuardDaemon').addEventListener('click', () => runAction('卸载 WireGuard 系统守护', async () => {
+      const result = await request('/api/client/wireguard/daemon/uninstall', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ stopTunnel: true })
+      });
+      if (result && result.ok === false) {
+        throw new Error(result.message || result.command || '系统守护卸载失败');
+      }
+      await waitForWireGuardState(false, 8);
+    }, { wireGuard: true, treatCancelAsInfo: true, recoverWireGuardActive: false }).catch(() => undefined));
     $('saveSettings').addEventListener('click', () => runAction('保存控制面', async () => {
       await request('/api/settings', {
         method: 'POST',
@@ -2197,26 +2293,42 @@ export function adminHtml(): string {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ hdoControlBaseUrl: formValue('baseUrl') })
       });
-      const prepared = await request('/api/client/wireguard/prepare', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ rotate: false })
-      });
-      if (prepared && prepared.ok === false) {
-        throw new Error(prepared.message || 'WireGuard 配置尚未就绪');
+      let locallyRecovered = null;
+      let localRecoveryError = null;
+      try {
+        locallyRecovered = await recoverLocalWireGuardIfDesired();
+      } catch (err) {
+        localRecoveryError = err;
       }
-      await request('/api/client/subscription', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({})
-      });
-      const connected = await request('/api/client/wireguard/connect', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action: 'restart' })
-      });
-      if (connected && connected.ok === false) {
-        throw new Error(connected.message || connected.command || 'WireGuard 未启动');
+      try {
+        const prepared = await request('/api/client/wireguard/prepare', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ rotate: false })
+        });
+        if (prepared && prepared.ok === false) {
+          throw new Error(prepared.message || 'WireGuard 配置尚未就绪');
+        }
+        await request('/api/client/subscription', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({})
+        });
+        const connected = await request('/api/client/wireguard/connect', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ action: 'restart' })
+        });
+        if (connected && connected.ok === false) {
+          throw new Error(connected.message || connected.command || 'WireGuard 未启动');
+        }
+      } catch (err) {
+        if (locallyRecovered && !hasMissingWireGuardRoutes(locallyRecovered)) {
+          showMessage('已先恢复本地 HDO 隧道；控制面暂不可达，网络恢复后再更新订阅。', 'info');
+          return locallyRecovered;
+        }
+        if (localRecoveryError) throw localRecoveryError;
+        throw err;
       }
       const status = await waitForWireGuardState(true, 16);
       const repaired = await repairWireGuardRoutesIfMissing(status);

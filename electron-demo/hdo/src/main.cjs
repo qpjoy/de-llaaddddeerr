@@ -208,6 +208,18 @@ async function closeAppResources() {
   await current.close();
 }
 
+async function quitGracefully(exitCode = 0) {
+  if (isClosing) return;
+  isClosing = true;
+  try {
+    await closeAppResources();
+  } catch (err) {
+    console.warn('[electron-demo] host close error:', err);
+  } finally {
+    app.exit(exitCode);
+  }
+}
+
 if (gotSingleInstanceLock) {
   app.on('second-instance', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -292,14 +304,14 @@ app.on('activate', () => {
 });
 
 app.on('before-quit', async (event) => {
-  if (isClosing) return;
-  isClosing = true;
   event.preventDefault();
-  try {
-    await closeAppResources();
-  } catch (err) {
-    console.warn('[electron-demo] host close error:', err);
-  } finally {
-    app.exit(0);
-  }
+  void quitGracefully(0);
+});
+
+process.once('SIGINT', () => {
+  void quitGracefully(130);
+});
+
+process.once('SIGTERM', () => {
+  void quitGracefully(143);
 });

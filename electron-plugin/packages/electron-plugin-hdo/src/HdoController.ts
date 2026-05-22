@@ -6,16 +6,20 @@ import {
   buildHdoRouteProbe,
   excludeLocalRoutesFromAllowedIps,
   generateWireGuardKeyPairWithCli,
+  getDarwinWireGuardLaunchDaemonStatus,
   getWireGuardTunnelStatus,
   HDO_MESH_DEFAULTS,
   HDO_MESH_ROUTE_CIDRS,
+  installDarwinWireGuardLaunchDaemon,
   localCidrsForAllowedIpExclusion,
+  normalizeCidr,
   repairWireGuardTunnelRoutes,
   renderHdoClientWireGuardConfig,
   resolveWireGuardConnectionRuntime,
   resolveWireGuardRuntime,
   setWireGuardTunnelState,
-  shellQuote
+  shellQuote,
+  uninstallDarwinWireGuardLaunchDaemon
 } from '@qpjoy/electron-core-wireguard';
 
 import type {
@@ -79,6 +83,14 @@ interface HdoTaskRunSummary {
   results: Array<Record<string, unknown>>;
 }
 
+type WireGuardRecoveryInput =
+  | string
+  | null
+  | {
+      reason?: string | null;
+      allowPrivileged?: boolean | null;
+    };
+
 export interface HdoControllerContext {
   userDataDir: string;
   marketServerBaseUrl?: string | null;
@@ -97,6 +109,7 @@ export class HdoController {
   private settings: HdoPluginSettings;
   private lastError: string | null = null;
   private taskRunner: Promise<HdoTaskRunSummary> | null = null;
+  private wireGuardRecovery: Promise<Record<string, unknown>> | null = null;
   private lastPresenceReportAt = 0;
   private lastPresenceStatus: HdoDeviceRegistrationInput['status'] | null = null;
 
@@ -133,6 +146,7 @@ export class HdoController {
     let deviceTasks: unknown[] = [];
     let admin: HdoSnapshot['admin'] = null;
     const wireGuardStatus = this.wireGuardStatus();
+    const wireGuardDaemonStatus = this.wireGuardLaunchDaemonStatus();
     const localPlugins = this.localPluginStates();
     this.lastError = null;
 
@@ -215,6 +229,7 @@ export class HdoController {
       deviceTasks,
       localPlugins,
       wireGuardStatus,
+      wireGuardDaemonStatus,
       taskRunnerBusy: Boolean(this.taskRunner),
       admin,
       lastError: this.lastError
@@ -436,13 +451,17 @@ export class HdoController {
         lastError =
           'manifest 中缺少 domestic WireGuard 公钥或 endpoint；请在服务器 HDO 管理页给 domestic 节点 metadata.wireGuard 填入 publicKey/listenPort。';
       } else {
-        const exclusionCidrs = localCidrsForAllowedIpExclusion(routeProbe, domestic.routeCidrs);
+        const routeCidrs = uniqueStrings([
+          ...domestic.routeCidrs,
+          ...manifestOverlayRouteCidrs(manifest, overlayIp)
+        ]);
+        const exclusionCidrs = localCidrsForAllowedIpExclusion(routeProbe, routeCidrs);
         let allowedIps = excludeLocalRoutesFromAllowedIps(
-          domestic.routeCidrs,
+          routeCidrs,
           exclusionCidrs
         );
         if (allowedIps.length === 0 && process.platform === 'win32') {
-          allowedIps = domestic.routeCidrs;
+          allowedIps = routeCidrs;
         } else if (allowedIps.length === 0) {
           throw new Error('服务端下发的 WireGuard AllowedIPs 与本机路由完全重叠，已拒绝生成会覆盖本地网络的配置。');
         }
@@ -537,13 +556,58 @@ export class HdoController {
       bundledDir: this.ctx.bundledWireGuardDir,
       allowSystemFallback: true
     });
+    if (action === 'down') {
+      await this.uninstallWireGuardLaunchDaemon({ stopTunnel: false, rememberDisabled: true }).catch((err) => {
+        this.ctx.log.warn('failed to uninstall HDO WireGuard LaunchDaemon before stopping peer', {
+          error: errorMessage(err)
+        });
+      });
+    }
+    if (
+      action !== 'down' &&
+      runtime.platform === 'darwin' &&
+      runtime.method === 'darwin-userspace' &&
+      this.settings.wireGuardLaunchDaemonEnabled !== false
+    ) {
+      const daemon = await this.installWireGuardLaunchDaemon();
+      if (daemon.ok) {
+        this.rememberWireGuardDesiredActive(true);
+        this.reportPresenceInBackground('online');
+        return {
+          ...daemon,
+          action,
+          mode: runtime.method,
+          message: action === 'restart'
+            ? '已安装系统守护并更新启动 WireGuard peer。'
+            : '已安装系统守护并启动 WireGuard peer。',
+          runtime: publicWireGuardRuntime(runtime),
+          launchDaemon: daemon
+        };
+      }
+      if (isAuthorizationCancelledMessage(daemon.message)) {
+        return {
+          ...daemon,
+          action,
+          mode: runtime.method,
+          runtime: publicWireGuardRuntime(runtime),
+          launchDaemon: daemon
+        };
+      }
+      this.ctx.log.warn('HDO WireGuard LaunchDaemon install failed; falling back to app-managed tunnel', {
+        message: daemon.message,
+        command: daemon.command
+      });
+    }
     if (action === 'up' && runtime.platform === 'darwin' && runtime.method === 'darwin-userspace') {
       const restarted = await setWireGuardTunnelState({
         runtime,
         configPath,
         action: 'restart'
       });
-      if (restarted.ok) this.reportPresenceInBackground('online');
+      if (restarted.ok) {
+        this.rememberWireGuardDesiredActive(true);
+        this.reportPresenceInBackground('online');
+      }
       return {
         ...restarted,
         action,
@@ -557,7 +621,10 @@ export class HdoController {
         configPath,
         action
       });
-      if (restarted.ok) this.reportPresenceInBackground('online');
+      if (restarted.ok) {
+        this.rememberWireGuardDesiredActive(true);
+        this.reportPresenceInBackground('online');
+      }
       return {
         ...restarted,
         message: restarted.ok ? '已更新并启动 WireGuard peer。' : restarted.message,
@@ -585,7 +652,10 @@ export class HdoController {
         configPath,
         action: 'up'
       });
-      if (restarted.ok) this.reportPresenceInBackground('online');
+      if (restarted.ok) {
+        this.rememberWireGuardDesiredActive(true);
+        this.reportPresenceInBackground('online');
+      }
       return {
         ...restarted,
         action,
@@ -598,11 +668,105 @@ export class HdoController {
       configPath,
       action
     });
-    if (result.ok) this.reportPresenceInBackground(action === 'down' ? 'offline' : 'online');
+    if (result.ok) {
+      this.rememberWireGuardDesiredActive(action !== 'down');
+      this.reportPresenceInBackground(action === 'down' ? 'offline' : 'online');
+    }
     return {
       ...result,
       message: result.message,
       runtime: publicWireGuardRuntime(result.runtime)
+    };
+  }
+
+  async recoverWireGuardPeer(input: WireGuardRecoveryInput = {}): Promise<Record<string, unknown>> {
+    if (this.wireGuardRecovery) return this.wireGuardRecovery;
+    const { reason, allowPrivileged } = this.normalizeWireGuardRecoveryInput(input);
+    this.wireGuardRecovery = this.recoverWireGuardPeerInner(reason, allowPrivileged).finally(() => {
+      this.wireGuardRecovery = null;
+    });
+    return this.wireGuardRecovery;
+  }
+
+  private normalizeWireGuardRecoveryInput(input: WireGuardRecoveryInput): { reason: string; allowPrivileged: boolean } {
+    if (typeof input === 'string') {
+      return { reason: input || 'manual', allowPrivileged: false };
+    }
+    if (!input) {
+      return { reason: 'manual', allowPrivileged: false };
+    }
+    return {
+      reason: input.reason || 'manual',
+      allowPrivileged: input.allowPrivileged === true
+    };
+  }
+
+  private async recoverWireGuardPeerInner(reason: string, allowPrivileged: boolean): Promise<Record<string, unknown>> {
+    this.ensureSettingsForCurrentSession();
+    if (this.settings.wireGuardAutoRecover === false) {
+      return { ok: true, skipped: true, reason: 'auto-recover-disabled' };
+    }
+    if (this.settings.wireGuardDesiredActive !== true) {
+      return { ok: true, skipped: true, reason: 'desired-inactive' };
+    }
+    const peer = this.settings.wireGuardPeer;
+    const configPath = stringValue(peer?.configPath);
+    if (!configPath || !existsSync(configPath)) {
+      return { ok: false, skipped: true, reason: 'missing-config', message: 'WireGuard 配置文件不存在。' };
+    }
+
+    const status = this.wireGuardStatus();
+    const active = status?.active === true;
+    const missingRoutes = arrayField(status?.missingRoutes);
+    if (active && missingRoutes.length === 0) {
+      return { ok: true, skipped: true, reason: 'already-active', status };
+    }
+    if (!allowPrivileged) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: 'privileged-recovery-disabled',
+        recoveryReason: reason,
+        active,
+        missingRoutes,
+        status
+      };
+    }
+
+    if (process.platform === 'darwin' && this.settings.wireGuardLaunchDaemonEnabled !== false) {
+      const daemonStatus = this.wireGuardLaunchDaemonStatus();
+      if (daemonStatus?.supported === true && daemonStatus.running !== true) {
+        const daemon = await this.installWireGuardLaunchDaemon();
+        if (daemon.ok || isAuthorizationCancelledMessage(daemon.message)) {
+          return {
+            ...daemon,
+            action: 'launchdaemon-recover',
+            reason
+          };
+        }
+      }
+    }
+
+    this.ctx.log.warn('recovering HDO WireGuard desired state', {
+      reason,
+      active,
+      missingRoutes
+    });
+
+    if (active && missingRoutes.length > 0) {
+      const repaired = await this.repairWireGuardRoutes();
+      return {
+        ...repaired,
+        action: 'repair-routes',
+        reason
+      };
+    }
+
+    const connected = await this.connectWireGuardPeer({ action: 'up' });
+    return {
+      ...connected,
+      action: 'recover-up',
+      reason
     };
   }
 
@@ -625,12 +789,124 @@ export class HdoController {
     };
   }
 
+  wireGuardLaunchDaemonStatus(): Record<string, unknown> | null {
+    this.ensureSettingsForCurrentSession();
+    const peer = this.settings.wireGuardPeer;
+    const configPath = stringValue(peer?.configPath);
+    if (!configPath || !existsSync(configPath)) return null;
+    const runtime = resolveWireGuardConnectionRuntime({
+      installDir: join(this.ctx.userDataDir, 'bin'),
+      bundledDir: this.ctx.bundledWireGuardDir,
+      allowSystemFallback: true
+    });
+    return {
+      ...getDarwinWireGuardLaunchDaemonStatus({ runtime, configPath }),
+      runtime: publicWireGuardRuntime(runtime)
+    };
+  }
+
+  async installWireGuardLaunchDaemon(): Promise<Record<string, unknown>> {
+    this.ensureSettingsForCurrentSession();
+    const peer = this.settings.wireGuardPeer;
+    const configPath = stringValue(peer?.configPath);
+    if (!configPath || !existsSync(configPath)) {
+      throw new Error('WireGuard 配置文件不存在，请先点击“连接 / 更新 HDO”或“生成 / 更新本机 Peer”。');
+    }
+    const runtime = resolveWireGuardConnectionRuntime({
+      installDir: join(this.ctx.userDataDir, 'bin'),
+      bundledDir: this.ctx.bundledWireGuardDir,
+      allowSystemFallback: true
+    });
+    const result = await installDarwinWireGuardLaunchDaemon({ runtime, configPath });
+    if (result.ok) {
+      this.updateSettings({
+        wireGuardDesiredActive: true,
+        wireGuardLaunchDaemonEnabled: true
+      });
+      this.reportPresenceInBackground('online');
+    }
+    return {
+      ...result,
+      runtime: publicWireGuardRuntime(result.runtime)
+    };
+  }
+
+  async uninstallWireGuardLaunchDaemon(
+    input: { stopTunnel?: boolean | null; rememberDisabled?: boolean | null } = {}
+  ): Promise<Record<string, unknown>> {
+    this.ensureSettingsForCurrentSession();
+    const peer = this.settings.wireGuardPeer;
+    const configPath = stringValue(peer?.configPath);
+    if (!configPath || !existsSync(configPath)) {
+      return { ok: true, skipped: true, reason: 'missing-config' };
+    }
+    const runtime = resolveWireGuardConnectionRuntime({
+      installDir: join(this.ctx.userDataDir, 'bin'),
+      bundledDir: this.ctx.bundledWireGuardDir,
+      allowSystemFallback: true
+    });
+    const result = await uninstallDarwinWireGuardLaunchDaemon({ runtime, configPath });
+    if (input.rememberDisabled !== false) {
+      this.updateSettings({ wireGuardLaunchDaemonEnabled: false });
+    }
+    if (input.stopTunnel !== false) {
+      await setWireGuardTunnelState({ runtime, configPath, action: 'down' }).catch((err) => {
+        this.ctx.log.warn('failed to stop HDO WireGuard after LaunchDaemon uninstall', {
+          error: errorMessage(err)
+        });
+      });
+      this.rememberWireGuardDesiredActive(false);
+      this.reportPresenceInBackground('offline');
+    }
+    return {
+      ...result,
+      runtime: publicWireGuardRuntime(result.runtime)
+    };
+  }
+
+  async shutdown(): Promise<void> {
+    const configPath = this.shutdownWireGuardConfigPath();
+    if (!configPath || !existsSync(configPath)) return;
+    if (this.settings.wireGuardDesiredActive === true && this.settings.wireGuardLaunchDaemonEnabled !== false) {
+      const daemon = this.wireGuardLaunchDaemonStatus();
+      if (daemon && (daemon.installed === true || daemon.loaded === true)) return;
+    }
+    const runtime = resolveWireGuardConnectionRuntime({
+      installDir: join(this.ctx.userDataDir, 'bin'),
+      bundledDir: this.ctx.bundledWireGuardDir,
+      allowSystemFallback: true
+    });
+    if (!runtime.available) {
+      this.ctx.log.warn('skip HDO WireGuard shutdown because runtime is unavailable', {
+        error: runtime.error ?? runtime.warnings[0] ?? null
+      });
+      return;
+    }
+    const result = await setWireGuardTunnelState({
+      runtime,
+      configPath,
+      action: 'down'
+    });
+    if (!result.ok) {
+      this.ctx.log.warn('failed to stop HDO WireGuard during plugin shutdown', {
+        message: result.message,
+        command: result.command,
+        routeLogPath: result.routeLogPath ?? null
+      });
+    }
+  }
+
   private reportPresenceInBackground(status: HdoDeviceRegistrationInput['status']): void {
     void this.reportDevicePresence(status).catch((err) => {
       this.ctx.log.warn('failed to report HDO device presence', {
         error: errorMessage(err)
       });
     });
+  }
+
+  private rememberWireGuardDesiredActive(active: boolean): void {
+    if (this.settings.wireGuardDesiredActive === active) return;
+    this.updateSettings({ wireGuardDesiredActive: active });
   }
 
   wireGuardStatus(): Record<string, unknown> | null {
@@ -990,6 +1266,8 @@ export class HdoController {
         sessionUserId: currentUserId,
         deviceId: null,
         wireGuardPeer: null,
+        wireGuardDesiredActive: false,
+        wireGuardLaunchDaemonEnabled: process.platform === 'darwin',
         activeProfileId: null,
         lastManifest: null,
         lastSubscription: null,
@@ -1026,6 +1304,9 @@ export class HdoController {
         deviceId: null,
         deviceLabel: defaultDeviceLabel(),
         devicePlatform: process.platform,
+        wireGuardDesiredActive: false,
+        wireGuardLaunchDaemonEnabled: process.platform === 'darwin',
+        wireGuardAutoRecover: true,
         autoRunDeviceTasks: true,
         activeProfileId: null,
         wireGuardPeer: null,
@@ -1043,6 +1324,9 @@ export class HdoController {
         hdoControlBaseUrl: normalizeBaseUrl(parsed.hdoControlBaseUrl) ?? null,
         sessionUserId: parsed.sessionUserId ?? null,
         wireGuardPeer: parsed.wireGuardPeer ?? null,
+        wireGuardDesiredActive: parsed.wireGuardDesiredActive ?? false,
+        wireGuardAutoRecover: parsed.wireGuardAutoRecover ?? true,
+        wireGuardLaunchDaemonEnabled: parsed.wireGuardLaunchDaemonEnabled ?? (process.platform === 'darwin'),
         autoRunDeviceTasks: parsed.autoRunDeviceTasks ?? true,
         activeProfileId: parsed.activeProfileId ?? null,
         lastTaskRun: parsed.lastTaskRun ?? null,
@@ -1058,6 +1342,9 @@ export class HdoController {
         deviceId: null,
         deviceLabel: defaultDeviceLabel(),
         devicePlatform: process.platform,
+        wireGuardDesiredActive: false,
+        wireGuardLaunchDaemonEnabled: process.platform === 'darwin',
+        wireGuardAutoRecover: true,
         autoRunDeviceTasks: true,
         activeProfileId: null,
         wireGuardPeer: null,
@@ -1082,6 +1369,13 @@ export class HdoController {
     const configPath = join(dir, 'hdo-client.conf');
     writeFileSync(configPath, config, { mode: 0o600 });
     return configPath;
+  }
+
+  private shutdownWireGuardConfigPath(): string | null {
+    const configured = stringValue(this.settings.wireGuardPeer?.configPath);
+    if (configured) return configured;
+    const fallback = join(this.ctx.userDataDir, 'wireguard', 'hdo-client.conf');
+    return existsSync(fallback) ? fallback : null;
   }
 }
 
@@ -1115,6 +1409,15 @@ function errorMessage(err: unknown): string {
 
 function isDeviceOwnershipError(err: unknown): boolean {
   return errorMessage(err).toLowerCase().includes('device id already belongs to another user');
+}
+
+function isAuthorizationCancelledMessage(value: unknown): boolean {
+  const text = String(value ?? '');
+  return text.includes('已取消 WireGuard 管理员授权')
+    || text.includes('用户已取消')
+    || text.includes('(-128)')
+    || /user canceled/i.test(text)
+    || /cancelled/i.test(text);
 }
 
 function execFileAsync(command: string, args: string[]): Promise<void> {
@@ -1235,6 +1538,23 @@ function domesticWireGuardFromManifest(manifest: Record<string, unknown>): {
   };
 }
 
+function manifestOverlayRouteCidrs(manifest: Record<string, unknown>, ownOverlayIp: string | null): string[] {
+  const out: string[] = [];
+  const ownIp = stringValue(ownOverlayIp);
+  const addOverlayIp = (value: unknown) => {
+    const ip = stringValue(value);
+    if (!ip || ip === ownIp || !ip.startsWith('100.')) return;
+    const normalized = normalizeCidr(`${ip}/32`);
+    if (normalized) out.push(normalized);
+  };
+
+  const wireGuard = plainObject(manifest.wireGuard);
+  addOverlayIp(plainObject(wireGuard?.domestic)?.overlayIp);
+  arrayField(manifest.nodes).forEach((item) => addOverlayIp(plainObject(item)?.overlayIp));
+  arrayField(manifest.devices).forEach((item) => addOverlayIp(plainObject(item)?.overlayIp));
+  return uniqueStrings(out);
+}
+
 function manifestHasMeshLicense(manifest: Record<string, unknown>): boolean {
   const license = plainObject(manifest.license);
   return license?.active === true;
@@ -1263,6 +1583,10 @@ function numberValue(value: unknown): number | null {
 function stringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map((item) => stringValue(item)).filter((item): item is string => Boolean(item));
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values));
 }
 
 function normalizeInstalledPlugin(value: unknown): HdoLocalPluginState | null {

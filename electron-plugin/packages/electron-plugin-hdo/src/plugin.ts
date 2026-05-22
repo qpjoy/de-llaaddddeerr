@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import type { App, IpcMain, Session } from 'electron';
+import { powerMonitor, type App, type IpcMain, type Session } from 'electron';
 
 import { HdoAdminServer } from './admin/AdminServer';
 import { HdoController } from './HdoController';
@@ -90,6 +90,34 @@ const hdoPlugin = {
       });
     }, 10 * 60 * 1000);
     presenceTimer.unref?.();
+    let lastWireGuardRecoveryFailureAt = 0;
+    const recoveryTimers: Array<ReturnType<typeof setTimeout>> = [];
+    const recoverWireGuard = (reason: string) => {
+      if (lastWireGuardRecoveryFailureAt && Date.now() - lastWireGuardRecoveryFailureAt < 5 * 60 * 1000) {
+        return;
+      }
+      void controller.recoverWireGuardPeer({ reason, allowPrivileged: false }).catch((err) => {
+        lastWireGuardRecoveryFailureAt = Date.now();
+        ctx.log.warn('failed to recover HDO WireGuard desired state', {
+          reason,
+          error: err instanceof Error ? err.message : String(err)
+        });
+      });
+    };
+    const scheduleWireGuardRecovery = (reason: string, delays = [2500, 12_000, 25_000]) => {
+      delays.forEach((delay) => {
+        const timer = setTimeout(() => recoverWireGuard(reason), delay);
+        timer.unref?.();
+        recoveryTimers.push(timer);
+      });
+    };
+    scheduleWireGuardRecovery('plugin-activate', [2500, 12_000]);
+    const wireGuardRecoveryTimer = setInterval(() => recoverWireGuard('interval'), 45_000);
+    wireGuardRecoveryTimer.unref?.();
+    const onPowerResume = () => scheduleWireGuardRecovery('power-resume');
+    const onUnlockScreen = () => scheduleWireGuardRecovery('unlock-screen', [1500, 10_000, 25_000]);
+    powerMonitor.on('resume', onPowerResume);
+    powerMonitor.on('unlock-screen', onUnlockScreen);
 
     ctx.expose({
       snapshot: () => controller.snapshot(),
@@ -98,6 +126,10 @@ const hdoPlugin = {
       reportPluginStates: (deviceId?: string | null) => controller.reportPluginStates(deviceId),
       prepareWireGuardPeer: (input?: { rotate?: boolean | null }) => controller.prepareWireGuardPeer(input),
       connectWireGuardPeer: (input?: { action?: 'up' | 'down' | 'restart' | null }) => controller.connectWireGuardPeer(input),
+      recoverWireGuardPeer: (reason?: string | null) =>
+        controller.recoverWireGuardPeer({ reason: reason || 'api', allowPrivileged: true }),
+      installWireGuardLaunchDaemon: () => controller.installWireGuardLaunchDaemon(),
+      uninstallWireGuardLaunchDaemon: (input?: { stopTunnel?: boolean | null }) => controller.uninstallWireGuardLaunchDaemon(input),
       executePendingTasks: () => controller.executePendingTasks(),
       refreshManifest: (deviceId?: string | null) => controller.refreshManifest(deviceId),
       refreshSubscription: (deviceId?: string | null) => controller.refreshSubscription(deviceId),
@@ -114,6 +146,15 @@ const hdoPlugin = {
 
     return async () => {
       clearInterval(presenceTimer);
+      clearInterval(wireGuardRecoveryTimer);
+      recoveryTimers.forEach((timer) => clearTimeout(timer));
+      powerMonitor.off('resume', onPowerResume);
+      powerMonitor.off('unlock-screen', onUnlockScreen);
+      await controller.shutdown().catch((err) => {
+        ctx.log.warn('failed to shutdown HDO WireGuard', {
+          error: err instanceof Error ? err.message : String(err)
+        });
+      });
       await controller.reportDevicePresence('offline').catch(() => undefined);
       await admin.stop();
     };

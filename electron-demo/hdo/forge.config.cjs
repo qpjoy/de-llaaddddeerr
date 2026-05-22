@@ -15,6 +15,9 @@ const { join } = require('node:path');
 
 const isWindowsHost = process.platform === 'win32';
 const isMacHost = process.platform === 'darwin';
+const isForgeStart = process.argv.some(
+  (arg) => arg === 'start' || /(?:^|[/\\])electron-forge-start(?:\.js)?$/.test(arg)
+);
 // Set FORGE_FORCE_SQUIRREL=1 to include the Squirrel maker even on macOS/Linux
 // (requires `mono` + `wine` to be installed; tested on the GitHub macos-latest
 // runner with `brew install wine-stable mono`).
@@ -23,17 +26,23 @@ const wantsDmg = Boolean(process.env.FORGE_INCLUDE_DMG);
 
 function canCreateDmg() {
   if (!isMacHost) return false;
+  if (isForgeStart) return false;
   if (process.env.FORGE_SKIP_DMG) return false;
   if (wantsDmg) return true;
 
   const probePath = join(tmpdir(), `qpjoy-hdiutil-probe-${process.pid}.dmg`);
   const result = spawnSync('hdiutil', ['create', probePath, '-ov', '-size', '1m'], {
-    encoding: 'utf8'
+    encoding: 'utf8',
+    killSignal: 'SIGKILL',
+    timeout: 5000
   });
   rmSync(probePath, { force: true });
 
   if (result.status === 0) return true;
-  const message = (result.stderr || result.stdout || 'unknown error').trim();
+  const message =
+    result.error?.code === 'ETIMEDOUT'
+      ? 'timed out after 5s'
+      : (result.stderr || result.stdout || result.error?.message || 'unknown error').trim();
   console.warn(`[forge] skipping dmg maker because hdiutil create failed: ${message}`);
   console.warn('[forge] zip output will still be produced. Set FORGE_INCLUDE_DMG=1 to force dmg creation.');
   return false;

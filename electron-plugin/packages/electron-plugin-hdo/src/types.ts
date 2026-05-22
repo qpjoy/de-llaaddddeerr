@@ -5,6 +5,9 @@ export interface HdoPluginSettings {
   deviceLabel?: string | null;
   devicePlatform?: string | null;
   wireGuardPeer?: HdoWireGuardPeerSettings | null;
+  wireGuardDesiredActive?: boolean | null;
+  wireGuardAutoRecover?: boolean | null;
+  wireGuardLaunchDaemonEnabled?: boolean | null;
   autoRunDeviceTasks?: boolean | null;
   activeProfileId?: string | null;
   lastTaskRun?: Record<string, unknown> | null;
@@ -54,6 +57,7 @@ export interface HdoSnapshot {
   deviceTasks: unknown[];
   localPlugins: HdoLocalPluginState[];
   wireGuardStatus?: unknown | null;
+  wireGuardDaemonStatus?: unknown | null;
   taskRunnerBusy: boolean;
   admin: {
     users?: unknown[];

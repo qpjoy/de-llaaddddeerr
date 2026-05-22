@@ -112,6 +112,19 @@ export class HdoAdminServer {
         sendJson(res, 200, await this.controller.connectWireGuardPeer(body as never));
       };
     }
+    if (method === 'POST' && pathname === '/api/client/wireguard/recover') {
+      return async (_req, res, body) => {
+        const { reason, allowPrivileged } = body as { reason?: string | null; allowPrivileged?: boolean | null };
+        sendJson(
+          res,
+          200,
+          await this.controller.recoverWireGuardPeer({
+            reason: reason || 'api',
+            allowPrivileged: allowPrivileged !== false
+          })
+        );
+      };
+    }
     if (method === 'GET' && pathname === '/api/client/wireguard/status') {
       return (_req, res) => {
         sendJson(res, 200, this.controller.wireGuardStatus());
@@ -120,6 +133,21 @@ export class HdoAdminServer {
     if (method === 'POST' && pathname === '/api/client/wireguard/repair-routes') {
       return async (_req, res) => {
         sendJson(res, 200, await this.controller.repairWireGuardRoutes());
+      };
+    }
+    if (method === 'GET' && pathname === '/api/client/wireguard/daemon/status') {
+      return (_req, res) => {
+        sendJson(res, 200, this.controller.wireGuardLaunchDaemonStatus());
+      };
+    }
+    if (method === 'POST' && pathname === '/api/client/wireguard/daemon/install') {
+      return async (_req, res) => {
+        sendJson(res, 200, await this.controller.installWireGuardLaunchDaemon());
+      };
+    }
+    if (method === 'POST' && pathname === '/api/client/wireguard/daemon/uninstall') {
+      return async (_req, res, body) => {
+        sendJson(res, 200, await this.controller.uninstallWireGuardLaunchDaemon(body as never));
       };
     }
     if (method === 'POST' && pathname === '/api/client/tasks/run') {
