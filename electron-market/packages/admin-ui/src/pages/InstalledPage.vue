@@ -100,11 +100,11 @@
 
           <!-- Newer version available on the marketplace? -->
           <q-btn
-            v-if="!isSelfPlugin(plugin) && host.isSeedable(plugin.id)"
+            v-if="canRepairSeed(plugin)"
             outline
             color="primary"
             icon="restart_alt"
-            label="重新预装"
+            label="修复预装"
             :loading="host.busy.value"
             :disable="host.busy.value"
             @click="host.reseed(plugin.id)"
@@ -155,6 +155,10 @@ function latestFor(id: string): string | undefined {
 
 function isSelfPlugin(plugin: InstalledPluginRecord): boolean {
   return plugin.id === MARKETPLACE_SELF_PLUGIN_ID || plugin.npm === '@qpjoy/electron-market';
+}
+
+function canRepairSeed(plugin: InstalledPluginRecord): boolean {
+  return !isSelfPlugin(plugin) && host.isSeedable(plugin.id) && plugin.state === 'errored';
 }
 
 function stateLabel(s: PluginState): string {

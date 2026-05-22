@@ -1,6 +1,5 @@
 import { existsSync, readFileSync, realpathSync } from 'fs';
 import { rm } from 'fs/promises';
-import { createRequire } from 'module';
 import { join, resolve, sep } from 'path';
 import type { App, IpcMain, Session } from 'electron';
 import semver from 'semver';
@@ -18,6 +17,7 @@ import { registerPluginHostIpc } from './ipc/registerPluginHostIpc';
 import { RemoteClient } from './sync/RemoteClient';
 import { RemoteSyncJob } from './sync/RemoteSyncJob';
 import { AuthService } from './sync/AuthService';
+import { missingPluginPackageDependencies } from './dependencyHealth';
 
 /**
  * Built-in marketplace server endpoints.
@@ -505,16 +505,7 @@ export function createElectronPluginHost(
       const pkg = JSON.parse(readFileSync(pkgJson, 'utf8')) as {
         dependencies?: Record<string, string>;
       };
-      const requireFromPlugin = createRequire(pkgJson);
-      const missing: string[] = [];
-      for (const dep of Object.keys(pkg.dependencies ?? {})) {
-        try {
-          requireFromPlugin.resolve(dep);
-        } catch {
-          missing.push(dep);
-        }
-      }
-      return missing;
+      return missingPluginPackageDependencies(pkgJson, pkg.dependencies ?? {});
     } catch {
       return ['<package.json>'];
     }
@@ -601,6 +592,9 @@ export function createElectronPluginHost(
         }
       }
 
+      if (existing) {
+        await runtime.deactivate(seed.id).catch(() => undefined);
+      }
       if (existing && existsSync(existing.installPath)) {
         await rm(existing.installPath, { recursive: true, force: true });
       }

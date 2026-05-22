@@ -309,7 +309,7 @@ NODE
 }
 
 sync_published_hdo_demo_direct_deps() {
-  local name path local_v
+  local name path local_v npm_v target_v
   for name in \
     @qpjoy/electron-market \
     @qpjoy/electron-plugin-sdk \
@@ -319,11 +319,18 @@ sync_published_hdo_demo_direct_deps() {
     path=$(hdo_demo_direct_dep_path "$name") || continue
     local_v=$(pkg_local_version "$path")
     if npm_config_fetch_retries=0 npm_config_fetch_timeout=5000 npm view "$name@$local_v" version >/dev/null 2>&1; then
-      set_hdo_demo_direct_dep "$name" "$local_v"
-      ok "electron-demo/hdo dependency: $name@^$local_v"
+      target_v="$local_v"
     else
-      warn "$name@$local_v 尚未能从 npm 确认，保留 electron-demo/hdo 当前依赖"
+      if npm_v=$(npm_config_fetch_retries=0 npm_config_fetch_timeout=5000 npm view "$name" version 2>/dev/null); then
+        target_v="$npm_v"
+        warn "$name@$local_v 尚未能从 npm 确认，electron-demo/hdo 改用 npm latest: $npm_v"
+      else
+        warn "$name@$local_v 尚未能从 npm 确认，且无法读取 npm latest，保留 electron-demo/hdo 当前依赖"
+        continue
+      fi
     fi
+    set_hdo_demo_direct_dep "$name" "$target_v"
+    ok "electron-demo/hdo dependency: $name@^$target_v"
   done
 }
 
@@ -336,9 +343,8 @@ sync_hdo_demo_npm_mode() {
   if [ -n "$published_name" ] && hdo_demo_direct_dep_path "$published_name" >/dev/null 2>&1; then
     set_hdo_demo_direct_dep "$published_name" "$published_version"
     ok "electron-demo/hdo dependency: $published_name@^$published_version"
-  elif [ -z "$published_name" ]; then
-    sync_published_hdo_demo_direct_deps
   fi
+  sync_published_hdo_demo_direct_deps
   say "electron-demo/hdo: 切到 npm mode 并刷新 lockfile"
   (cd "$ROOT/electron-demo/hdo" && node scripts/dev-mode.mjs npm --force)
 }

@@ -3,12 +3,12 @@ import { promisify } from 'util';
 import { gunzip } from 'zlib';
 import { readFile, rm, mkdir, cp, rename, writeFile, symlink, lstat, readdir } from 'fs/promises';
 import { createWriteStream, existsSync, readFileSync } from 'fs';
-import { createRequire } from 'module';
 import { join, isAbsolute, resolve, sep } from 'path';
 import semver from 'semver';
 
 import type { PluginManifest } from '@qpjoy/electron-plugin-sdk';
 import type { PluginRegistry } from '../registry/PluginRegistry';
+import { missingPluginPackageDependencies } from '../dependencyHealth';
 
 const execFileAsync = promisify(execFile);
 const gunzipAsync = promisify(gunzip);
@@ -794,15 +794,7 @@ export class PluginStore {
   }
 
   private assertPackageDependenciesReachable(pkgJsonPath: string, dependencies: Record<string, string>): void {
-    const requireFromPlugin = createRequire(pkgJsonPath);
-    const missing: string[] = [];
-    for (const dep of Object.keys(dependencies)) {
-      try {
-        requireFromPlugin.resolve(dep);
-      } catch {
-        missing.push(dep);
-      }
-    }
+    const missing = missingPluginPackageDependencies(pkgJsonPath, dependencies);
     if (missing.length > 0) {
       throw new Error(`Plugin package dependencies are missing: ${missing.join(', ')}`);
     }

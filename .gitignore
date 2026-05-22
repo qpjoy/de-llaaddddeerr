@@ -28,6 +28,7 @@ electron-plugin/**/node_modules/
 electron-plugin/**/dist/
 electron-plugin/**/.quasar/
 electron-plugin/**/*.iconset/
+electron-plugin/packages/electron-plugin-hdo/resources/
 
 # Standalone Electron npm-package smoke test
 electron-test/node_modules/

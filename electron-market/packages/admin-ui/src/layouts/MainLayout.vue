@@ -95,10 +95,11 @@
         </q-btn>
         <div class="text-caption text-grey-7 q-mt-sm">
           <template v-if="!drawerMini">
-            QPJoy Plugin Host<br />
+            QPJoy Plugin Host
+            <span v-if="marketVersion"> v{{ marketVersion }}</span><br />
             127.0.0.1:23455
           </template>
-          <template v-else>23455</template>
+          <template v-else>{{ marketVersion ? `v${marketVersion}` : '23455' }}</template>
         </div>
       </div>
     </q-drawer>
@@ -110,11 +111,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
 import { useEmbed } from 'src/composables/useEmbed';
 import { detectMode } from 'src/composables/useMode';
+import { useSettings } from 'src/composables/useSettings';
 import UserMenu from 'src/components/UserMenu.vue';
 
 const mode = detectMode();
@@ -139,7 +141,9 @@ const navItems = computed(() =>
 const route = useRoute();
 const router = useRouter();
 const { embed, requestClose } = useEmbed();
+const settings = useSettings();
 const drawerMini = ref(localStorage.getItem('qpjoy.market.drawerMini') === '1');
+const marketVersion = computed(() => settings.runtime.value?.market.currentVersion ?? null);
 
 const activeTab = ref<'installed' | 'marketplace'>(
   route.path.startsWith('/marketplace') ? 'marketplace' : 'installed'
@@ -159,6 +163,10 @@ const pageTitle = computed(() => {
   if (route.path.startsWith('/logs/')) return '插件日志';
   if (route.path.startsWith('/settings')) return '设置';
   return '插件市场';
+});
+
+onMounted(() => {
+  if (settings.available) void settings.refreshRuntime().catch(() => undefined);
 });
 
 function onTabChange(name: string | number | null): void {

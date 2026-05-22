@@ -47,9 +47,9 @@ const LOCAL_DIRECT_DEP_NAMES = [
 ];
 
 const FALLBACK_NPM_DEPENDENCIES = {
-  '@qpjoy/electron-market': '^0.3.25',
-  '@qpjoy/electron-plugin-hdo': '^0.1.25',
-  '@qpjoy/electron-plugin-sdk': '^0.1.3',
+  '@qpjoy/electron-market': '^0.3.27',
+  '@qpjoy/electron-plugin-hdo': '^0.1.28',
+  '@qpjoy/electron-plugin-sdk': '^0.1.4',
   '@qpjoy/electron-plugin-tunnel': '^0.1.16',
   '@qpjoy/marketplace-db': '^0.1.1',
   '@qpjoy/electron-core-wireguard': '^0.1.17',

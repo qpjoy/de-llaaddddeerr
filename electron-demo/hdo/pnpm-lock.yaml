@@ -9,11 +9,11 @@ importers:
   .:
     dependencies:
       '@qpjoy/electron-market':
-        specifier: ^0.3.26
-        version: 0.3.26(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)
+        specifier: ^0.3.29
+        version: 0.3.29(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)
       '@qpjoy/electron-plugin-hdo':
-        specifier: ^0.1.26
-        version: 0.1.26(electron@34.5.8)
+        specifier: ^0.1.28
+        version: 0.1.28(electron@34.5.8)
       '@qpjoy/electron-plugin-sdk':
         specifier: ^0.1.4
         version: 0.1.4(electron@34.5.8)
@@ -261,42 +261,14 @@ packages:
     engines: {node: ^12.13.0 || ^14.15.0 || >=16.0.0}
     deprecated: This functionality has been moved to @npmcli/fs
 
-  '@qpjoy/electron-core-wireguard-engine-darwin-arm64@0.1.2':
-    resolution: {integrity: sha512-D2/GaoWFyaozILsu7BExHZ1qlKB7m9k2eKVsdNU5Fuw2BR9r2kjAR1f1aN8Q7Iaa+pUaXIP3uTWujaPU4Btlow==}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@qpjoy/electron-core-wireguard-engine-darwin-x64@0.1.2':
-    resolution: {integrity: sha512-WtofFiEYgvQUl13kzIAy76Qy8XeUXG8EPTh61t7hgsii4slwtkjEzOhQ360M1nT2EtRmzWoVBpRBLIBo8Q6HmA==}
-    cpu: [x64]
-    os: [darwin]
-
-  '@qpjoy/electron-core-wireguard-engine-linux-arm64@0.1.2':
-    resolution: {integrity: sha512-OrDGG4bXF82CE+bvf2k14zq/V2jvM+t1MzEj6EsvcPoWdQiSb9lEbkNxWGtv/+qhNMrQL9caB6hSgCI6tGGkhw==}
-    cpu: [arm64]
-    os: [linux]
-
-  '@qpjoy/electron-core-wireguard-engine-linux-x64@0.1.2':
-    resolution: {integrity: sha512-zymy+plOzywPmApTxryQFN5MmnPpddxFTP/hDVrJgKmTuC1eA2QWlGt24v1AxhK5ZIBdO1mMzpaRBJYep8owFQ==}
-    cpu: [x64]
-    os: [linux]
-
-  '@qpjoy/electron-core-wireguard-engine-win32-x64@0.1.2':
-    resolution: {integrity: sha512-UpXqxSaAoA3b56svZitSpdXG0RfwGnrC5dqmfLfSe6gBWc7hZiNJbEaS66zjQEGRLl6hEcyAehz3ACd6ysRZ7Q==}
-    cpu: [x64]
-    os: [win32]
-
-  '@qpjoy/electron-core-wireguard@0.1.17':
-    resolution: {integrity: sha512-6XrHLve0euzKE1HRTxF1NM/PURzX+Wf4SfMhvDjKjlJasGLpUCwr9utDT0cLozFrDpZ9NZKbwVSqdxXfqiaKoQ==}
-
-  '@qpjoy/electron-market@0.3.26':
-    resolution: {integrity: sha512-LPL2Tdl8ovOmtanyT77vbXso5pPOIAABubGWUeLho+qPxRKtfSwngntVtXT6Trbe8jKOR9yot/0//zVOkCWDpQ==}
+  '@qpjoy/electron-market@0.3.29':
+    resolution: {integrity: sha512-HRFwIww5c/J4pe9MuLB65jbka1Mq3D9DjnvY52Wjn7oyVIn90PM0QPLmRTeBMXO1lVqKwTuSP1oEVLQQQLuibw==}
     peerDependencies:
       '@qpjoy/electron-plugin-sdk': '>=0.1.0'
       electron: '>=28'
 
-  '@qpjoy/electron-plugin-hdo@0.1.26':
-    resolution: {integrity: sha512-eZiJqKDEUvxiPNqwYlwZMzPka8Eh6FyJnSZkarnTjfg/FjD6fGqK/adtZ0Fz/WJoxCWb3DY4ecRYC1mo4SOdOg==}
+  '@qpjoy/electron-plugin-hdo@0.1.28':
+    resolution: {integrity: sha512-6LfBZUN3jkaEozl6zOGyxHHGmA2iAbv5hnBAJdRX3Jr4GF+i+zYYO8f9ijkeshRWCkbFDoUtjRKic4+9B6pLuQ==}
     peerDependencies:
       electron: '>=28'
     peerDependenciesMeta:
@@ -2614,30 +2586,7 @@ snapshots:
       mkdirp: 1.0.4
       rimraf: 3.0.2
 
-  '@qpjoy/electron-core-wireguard-engine-darwin-arm64@0.1.2':
-    optional: true
-
-  '@qpjoy/electron-core-wireguard-engine-darwin-x64@0.1.2':
-    optional: true
-
-  '@qpjoy/electron-core-wireguard-engine-linux-arm64@0.1.2':
-    optional: true
-
-  '@qpjoy/electron-core-wireguard-engine-linux-x64@0.1.2':
-    optional: true
-
-  '@qpjoy/electron-core-wireguard-engine-win32-x64@0.1.2':
-    optional: true
-
-  '@qpjoy/electron-core-wireguard@0.1.17':
-    optionalDependencies:
-      '@qpjoy/electron-core-wireguard-engine-darwin-arm64': 0.1.2
-      '@qpjoy/electron-core-wireguard-engine-darwin-x64': 0.1.2
-      '@qpjoy/electron-core-wireguard-engine-linux-arm64': 0.1.2
-      '@qpjoy/electron-core-wireguard-engine-linux-x64': 0.1.2
-      '@qpjoy/electron-core-wireguard-engine-win32-x64': 0.1.2
-
-  '@qpjoy/electron-market@0.3.26(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)':
+  '@qpjoy/electron-market@0.3.29(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)':
     dependencies:
       '@qpjoy/electron-plugin-sdk': 0.1.4(electron@34.5.8)
       '@qpjoy/marketplace-db': 0.1.1
@@ -2645,9 +2594,7 @@ snapshots:
       electron: 34.5.8
       semver: 7.8.0
 
-  '@qpjoy/electron-plugin-hdo@0.1.26(electron@34.5.8)':
-    dependencies:
-      '@qpjoy/electron-core-wireguard': 0.1.17
+  '@qpjoy/electron-plugin-hdo@0.1.28(electron@34.5.8)':
     optionalDependencies:
       electron: 34.5.8
 

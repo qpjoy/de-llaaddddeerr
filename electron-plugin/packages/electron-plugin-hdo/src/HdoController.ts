@@ -20,7 +20,7 @@ import {
   setWireGuardTunnelState,
   shellQuote,
   uninstallDarwinWireGuardLaunchDaemon
-} from '@qpjoy/electron-core-wireguard';
+} from './wireguard-core';
 
 import type {
   HdoDeviceRegistrationInput,

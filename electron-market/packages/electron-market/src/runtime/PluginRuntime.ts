@@ -1,6 +1,5 @@
 import { spawn as childSpawn } from 'child_process';
 import { mkdirSync, readFileSync, realpathSync } from 'fs';
-import { createRequire } from 'module';
 import { join } from 'path';
 import type { App, IpcMain, Session } from 'electron';
 
@@ -16,6 +15,7 @@ import { PermissionDeniedError } from '@qpjoy/electron-plugin-sdk';
 import type { PluginRegistry } from '../registry/PluginRegistry';
 import type { InstalledPluginRecord } from '../types';
 import { MARKETPLACE_SELF_PLUGIN_ID } from '../constants';
+import { missingPluginPackageDependencies } from '../dependencyHealth';
 import { PermissionGate } from './PermissionGate';
 import type { PolicyDecision } from './TunnelPolicyGuard';
 
@@ -192,15 +192,7 @@ export class PluginRuntime {
       const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as {
         dependencies?: Record<string, string>;
       };
-      const requireFromPlugin = createRequire(pkgJsonPath);
-      const missing: string[] = [];
-      for (const dep of Object.keys(pkg.dependencies ?? {})) {
-        try {
-          requireFromPlugin.resolve(dep);
-        } catch {
-          missing.push(dep);
-        }
-      }
+      const missing = missingPluginPackageDependencies(pkgJsonPath, pkg.dependencies ?? {});
       if (missing.length > 0) {
         throw new Error(
           `插件安装不完整，缺少依赖：${missing.join(', ')}。请重新预装或卸载后重新安装 ${record.manifest.name}。`
