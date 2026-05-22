@@ -21,8 +21,9 @@ const MODE_PATH = resolve(APP_DIR, '.dev-mode');
 const PACKS_DIR = resolve(APP_DIR, '.local-packs');
 
 const desired = process.argv[2];
+const force = process.argv.slice(3).includes('--force') || process.env.QPJOY_FORCE_DEV_MODE === '1';
 if (desired !== 'local' && desired !== 'npm') {
-  console.error('usage: node scripts/dev-mode.mjs <local|npm>');
+  console.error('usage: node scripts/dev-mode.mjs <local|npm> [--force]');
   process.exit(2);
 }
 
@@ -46,12 +47,12 @@ const LOCAL_DIRECT_DEP_NAMES = [
 ];
 
 const FALLBACK_NPM_DEPENDENCIES = {
-  '@qpjoy/electron-market': '^0.3.24',
-  '@qpjoy/electron-plugin-hdo': '^0.1.23',
+  '@qpjoy/electron-market': '^0.3.25',
+  '@qpjoy/electron-plugin-hdo': '^0.1.25',
   '@qpjoy/electron-plugin-sdk': '^0.1.3',
   '@qpjoy/electron-plugin-tunnel': '^0.1.16',
   '@qpjoy/marketplace-db': '^0.1.1',
-  '@qpjoy/electron-core-wireguard': '^0.1.15',
+  '@qpjoy/electron-core-wireguard': '^0.1.17',
   '@qpjoy/electron-core-wireguard-engine-darwin-arm64': '^0.1.2',
   '@qpjoy/electron-core-wireguard-engine-darwin-x64': '^0.1.2',
   '@qpjoy/electron-core-wireguard-engine-linux-arm64': '^0.1.2',
@@ -218,7 +219,7 @@ if (desired === 'npm') {
   const alreadyNpm =
     npmPackageShape && npmDepsInstalled();
 
-  if (alreadyNpm) {
+  if (alreadyNpm && !force) {
     if (sentinel !== 'npm') writeFileSync(MODE_PATH, 'npm\n');
     console.log('OK already in npm mode');
     process.exit(0);
@@ -245,7 +246,7 @@ if (desired === 'npm') {
   process.exit(0);
 }
 
-if (existingLocalSetupIsValid()) {
+if (existingLocalSetupIsValid() && !force) {
   console.log('OK already in local mode');
   process.exit(0);
 }

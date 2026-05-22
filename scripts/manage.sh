@@ -275,6 +275,80 @@ publish_one_with_otp() {
   return 1
 }
 
+hdo_demo_tracks_package() {
+  case "$1" in
+    @qpjoy/electron-plugin-sdk|@qpjoy/marketplace-db|@qpjoy/electron-market|@qpjoy/electron-core-mihomo|@qpjoy/electron-core-wireguard|@qpjoy/electron-plugin-tunnel|@qpjoy/electron-plugin-hdo|@qpjoy/electron-plugin-tunnel-engine-*|@qpjoy/electron-core-wireguard-engine-*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+hdo_demo_direct_dep_path() {
+  case "$1" in
+    @qpjoy/electron-market) echo "electron-market/packages/electron-market";;
+    @qpjoy/electron-plugin-sdk) echo "electron-market/packages/electron-plugin-sdk";;
+    @qpjoy/electron-plugin-hdo) echo "electron-plugin/packages/electron-plugin-hdo";;
+    @qpjoy/electron-plugin-tunnel) echo "electron-plugin/packages/electron-plugin-tunnel";;
+    *) return 1;;
+  esac
+}
+
+set_hdo_demo_direct_dep() {
+  local name="$1" version="$2"
+  node - "$ROOT/electron-demo/hdo/package.json" "$name" "^$version" <<'NODE'
+const fs = require('fs');
+const [pkgPath, name, spec] = process.argv.slice(2);
+const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+pkg.dependencies = pkg.dependencies || {};
+pkg.dependencies[name] = spec;
+fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+NODE
+}
+
+sync_published_hdo_demo_direct_deps() {
+  local name path local_v
+  for name in \
+    @qpjoy/electron-market \
+    @qpjoy/electron-plugin-sdk \
+    @qpjoy/electron-plugin-hdo \
+    @qpjoy/electron-plugin-tunnel
+  do
+    path=$(hdo_demo_direct_dep_path "$name") || continue
+    local_v=$(pkg_local_version "$path")
+    if npm_config_fetch_retries=0 npm_config_fetch_timeout=5000 npm view "$name@$local_v" version >/dev/null 2>&1; then
+      set_hdo_demo_direct_dep "$name" "$local_v"
+      ok "electron-demo/hdo dependency: $name@^$local_v"
+    else
+      warn "$name@$local_v 尚未能从 npm 确认，保留 electron-demo/hdo 当前依赖"
+    fi
+  done
+}
+
+sync_hdo_demo_npm_mode() {
+  local published_name="${1:-}" published_version="${2:-}"
+  if [ ! -f "$ROOT/electron-demo/hdo/scripts/dev-mode.mjs" ]; then
+    warn "electron-demo/hdo/scripts/dev-mode.mjs 不存在，跳过 HDO demo npm 同步"
+    return 1
+  fi
+  if [ -n "$published_name" ] && hdo_demo_direct_dep_path "$published_name" >/dev/null 2>&1; then
+    set_hdo_demo_direct_dep "$published_name" "$published_version"
+    ok "electron-demo/hdo dependency: $published_name@^$published_version"
+  elif [ -z "$published_name" ]; then
+    sync_published_hdo_demo_direct_deps
+  fi
+  say "electron-demo/hdo: 切到 npm mode 并刷新 lockfile"
+  (cd "$ROOT/electron-demo/hdo" && node scripts/dev-mode.mjs npm --force)
+}
+
+cmd_sync_hdo_npm() {
+  header "把 electron-demo/hdo 同步到已发布 npm 包"
+  sync_hdo_demo_npm_mode
+  ok "electron-demo/hdo npm 依赖同步完成"
+}
+
 # Common preparation step: build a single workspace package and pack a
 # tarball into /tmp/qpjoy-publish-preview/ for inspection.
 prepare_one() {
@@ -350,14 +424,24 @@ prepare_one() {
   echo "${C_DIM}  - 重新 build electron-market 让 seed-index 同步：${C_RESET}"
   echo "${C_DIM}    pnpm --filter @qpjoy/electron-market build${C_RESET}"
   echo "${C_DIM}  - 同步到 demo / test 测试：scripts/manage.sh sync-apps${C_RESET}"
+  if hdo_demo_tracks_package "$name"; then
+    echo "${C_DIM}  - 发布到 npm 后刷新正式 HDO demo 依赖：scripts/manage.sh sync-hdo-npm${C_RESET}"
+  fi
 
   echo
   local publish_otp
   publish_otp="$(prompt_secret "输入 npm OTP 直接发布（回车 = 只保留手动步骤）: ")"
   if [ -n "$publish_otp" ]; then
-    publish_one_with_otp "$name" "$path" "$publish_otp" || true
+    if publish_one_with_otp "$name" "$path" "$publish_otp"; then
+      if hdo_demo_tracks_package "$name"; then
+        sync_hdo_demo_npm_mode "$name" "$(pkg_local_version "$path")" || warn "electron-demo/hdo npm 同步失败；包发布成功后可手动运行 scripts/manage.sh sync-hdo-npm"
+      fi
+    fi
   else
     echo "${C_DIM}已跳过自动发布，保留上面的手动发布命令。${C_RESET}"
+    if hdo_demo_tracks_package "$name"; then
+      echo "${C_DIM}手动发布成功后运行：scripts/manage.sh sync-hdo-npm${C_RESET}"
+    fi
   fi
 }
 
@@ -406,13 +490,11 @@ cmd_sync_apps() {
   # keeps testing the pre-HDO tunnel consumer flow. electron-demo/hdo links the
   # current local HDO/market packages and is the app that should follow local
   # HDO work.
-  if [ -f "$ROOT/electron-demo/hdo/package.json" ]; then
-    say "electron-demo/hdo: build local packages"
-    (cd "$ROOT/electron-demo/hdo" && pnpm build:local) || warn "electron-demo/hdo build:local 失败"
-    say "electron-demo/hdo: pnpm install"
-    (cd "$ROOT/electron-demo/hdo" && pnpm install) || warn "electron-demo/hdo install 失败"
+  if [ -f "$ROOT/electron-demo/hdo/scripts/dev-mode.mjs" ]; then
+    say "electron-demo/hdo: dev-mode local (force re-pack)"
+    (cd "$ROOT/electron-demo/hdo" && node scripts/dev-mode.mjs local --force) || warn "electron-demo/hdo dev-mode local 失败"
   else
-    warn "electron-demo/hdo/package.json 不存在，跳过"
+    warn "electron-demo/hdo/scripts/dev-mode.mjs 不存在，跳过"
   fi
   if [ -f "$ROOT/electron-demo/tunnel/package.json" ]; then
     ok "electron-demo/tunnel 保持发布版 npm 依赖，不自动切到本地 file: refs"
@@ -518,6 +600,7 @@ Subcommands:
   ${C_BOLD}prepare-tool${C_RESET}      选择命令行工具做同样操作
   ${C_BOLD}prepare-game${C_RESET}      选择游戏 → bump 版本 + build + pack 预览
   ${C_BOLD}sync-apps${C_RESET}         同步 electron-demo / electron-test 到最新本地包
+  ${C_BOLD}sync-hdo-npm${C_RESET}      把 electron-demo/hdo 切回已发布 npm 包并刷新 lockfile
   ${C_BOLD}deploy${C_RESET}            单独部署菜单（server / HDO domestic / WireGuard）
   ${C_BOLD}server [...] ${C_RESET}     转发到 electron-server/scripts/manage.sh
   ${C_BOLD}hdo [...] ${C_RESET}        转发到 docker/hdo-gateway-stack/manage.sh
@@ -539,7 +622,8 @@ Examples:
   1. scripts/manage.sh prepare-plugin     # 或 prepare-core / prepare-engine / prepare-host / prepare-tool / prepare-game
   2. 脚本会打印手动 publish 命令；也可输入 OTP 让脚本直接发布
      cd <package-dir> && pnpm publish --otp=XXXXXX --no-git-checks
-  3. scripts/manage.sh sync-apps          # （可选）让 demo/test 也用上新版本
+  3. scripts/manage.sh sync-hdo-npm       # 发布后让 electron-demo/hdo 回到 npm 正式依赖
+     scripts/manage.sh sync-apps          # （可选）让 demo/test 用本地开发包
 
 EOF
 }
@@ -557,6 +641,7 @@ cmd_menu() {
     "prepare-tool   准备发布: 命令行工具"
     "prepare-game   准备发布: 游戏"
     "sync-apps      同步 demo/test 到本地最新包"
+    "sync-hdo-npm   同步 HDO demo 到已发布 npm 包"
     "deploy         部署 server / HDO / WireGuard"
     "server         进入服务器 (docker) 管理菜单"
     "hdo            HDO gateway 安装/配置"
@@ -578,6 +663,7 @@ cmd_menu() {
       prepare-tool)   cmd_prepare_tool ;;
       prepare-game)   cmd_prepare_game ;;
       sync-apps)      cmd_sync_apps ;;
+      sync-hdo-npm)   cmd_sync_hdo_npm ;;
       deploy)         cmd_deploy ;;
       server)         cmd_server ;;
       hdo)            cmd_hdo ;;
@@ -603,6 +689,7 @@ case "$sub" in
   prepare-tool|tool)            cmd_prepare_tool "$@" ;;
   prepare-game|game)            cmd_prepare_game "$@" ;;
   sync-apps|sync|apps)          cmd_sync_apps "$@" ;;
+  sync-hdo-npm|hdo-npm)         cmd_sync_hdo_npm "$@" ;;
   deploy|deployment)            cmd_deploy "$@" ;;
   server|srv)                   cmd_server "$@" ;;
   hdo)                          cmd_hdo "$@" ;;
