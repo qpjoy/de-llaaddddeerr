@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-core-wireguard",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "private": false,
   "description": "WireGuard mesh profile contracts and config rendering helpers for QPJoy HDO.",
   "license": "UNLICENSED",
