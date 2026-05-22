@@ -1160,6 +1160,18 @@ function resolveHdoGatewayRunnerToken(): string | null {
   return asOptionalString(process.env.HDO_GATEWAY_RUNNER_TOKEN);
 }
 
+function resolveHdoGatewayServerUrl(): string | null {
+  const configured = asOptionalString(process.env.HDO_GATEWAY_SERVER_URL);
+  if (!configured) return null;
+  try {
+    const url = new URL(configured);
+    if (!['http:', 'https:'].includes(url.protocol)) return null;
+    return url.toString().replace(/\/$/, '');
+  } catch {
+    return null;
+  }
+}
+
 async function probeHdoGatewayRunner(
   runnerUrl: string,
   runnerToken: string
@@ -1369,7 +1381,9 @@ function buildHdoDeploymentInvocation(
   kind: HdoDeploymentKind,
   body: Record<string, unknown>
 ): HdoDeploymentInvocation {
+  // The browser-facing control-plane URL can be unroutable from the host runner.
   const serverUrl =
+    resolveHdoGatewayServerUrl() ??
     asOptionalString(body.serverUrl) ??
     asOptionalString(process.env.HDO_SERVER_URL) ??
     `http://127.0.0.1:${asOptionalString(process.env.PORT) ?? '8080'}`;
