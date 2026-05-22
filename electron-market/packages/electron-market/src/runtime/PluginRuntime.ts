@@ -1,5 +1,6 @@
 import { spawn as childSpawn } from 'child_process';
-import { mkdirSync } from 'fs';
+import { mkdirSync, readFileSync, realpathSync } from 'fs';
+import { createRequire } from 'module';
 import { join } from 'path';
 import type { App, IpcMain, Session } from 'electron';
 
@@ -71,6 +72,12 @@ export class PluginRuntime {
       return;
     }
     if (this.live.has(id)) return;
+    try {
+      this.assertInstallHealthy(record);
+    } catch (err) {
+      this.opts.registry.setState(id, 'errored', err instanceof Error ? err.message : String(err));
+      throw err;
+    }
 
     const missing = PermissionGate.missing(record.manifest.permissions, record.grantedPermissions);
     if (missing.length > 0) {
@@ -176,6 +183,34 @@ export class PluginRuntime {
       throw new Error(`Plugin ${record.id} entry has no activate()`);
     }
     return resolved;
+  }
+
+  private assertInstallHealthy(record: InstalledPluginRecord): void {
+    try {
+      const packageDir = realpathSync(join(record.installPath, 'node_modules', record.npm));
+      const pkgJsonPath = join(packageDir, 'package.json');
+      const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as {
+        dependencies?: Record<string, string>;
+      };
+      const requireFromPlugin = createRequire(pkgJsonPath);
+      const missing: string[] = [];
+      for (const dep of Object.keys(pkg.dependencies ?? {})) {
+        try {
+          requireFromPlugin.resolve(dep);
+        } catch {
+          missing.push(dep);
+        }
+      }
+      if (missing.length > 0) {
+        throw new Error(
+          `插件安装不完整，缺少依赖：${missing.join(', ')}。请重新预装或卸载后重新安装 ${record.manifest.name}。`
+        );
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.startsWith('插件安装不完整')) throw err;
+      throw new Error(`插件安装不完整，无法读取 ${record.npm}：${message}`);
+    }
   }
 
   private buildContext(record: InstalledPluginRecord): PluginContext {

@@ -16,7 +16,70 @@
         加载中…
       </div>
 
-      <div v-else-if="data" class="section-surface q-pa-lg">
+      <div v-if="runtime" class="section-surface q-pa-lg q-mb-md">
+        <div class="toolbar-row q-mb-sm">
+          <div>
+            <div class="text-h6 q-mb-xs">宿主运行时</div>
+            <div class="text-caption text-grey-8">
+              插件市场运行在宿主应用内，更新它需要更新宿主应用包后重启。
+            </div>
+          </div>
+          <q-space />
+          <q-btn
+            flat
+            round
+            icon="refresh"
+            :loading="loading"
+            @click="settings.refreshRuntime()"
+          >
+            <q-tooltip>刷新版本信息</q-tooltip>
+          </q-btn>
+        </div>
+
+        <q-list bordered class="rounded-borders">
+          <q-item>
+            <q-item-section>
+              <q-item-label caption>应用</q-item-label>
+              <q-item-label class="text-weight-medium">
+                {{ runtime.app.name }}@{{ runtime.app.version }}
+              </q-item-label>
+              <q-item-label caption>{{ runtime.app.isPackaged ? '已打包应用' : '开发模式' }}</q-item-label>
+            </q-item-section>
+          </q-item>
+
+          <q-separator />
+
+          <q-item>
+            <q-item-section>
+              <q-item-label caption>{{ runtime.market.npm }}</q-item-label>
+              <q-item-label class="text-weight-medium">
+                当前 {{ runtime.market.currentVersion || '未知' }}
+                <span v-if="runtime.market.latestVersion">
+                  · 最新 {{ runtime.market.latestVersion }}
+                </span>
+              </q-item-label>
+              <q-item-label caption>{{ runtime.market.message }}</q-item-label>
+            </q-item-section>
+            <q-item-section side>
+              <q-chip
+                :color="runtime.market.updateAvailable ? 'warning' : 'positive'"
+                text-color="white"
+                dense
+                :icon="runtime.market.updateAvailable ? 'upgrade' : 'verified'"
+              >
+                {{ runtime.market.updateAvailable ? '有更新' : '已是最新' }}
+              </q-chip>
+            </q-item-section>
+          </q-item>
+        </q-list>
+
+        <q-banner v-if="runtime.market.updateAvailable" class="bg-orange-1 text-orange-10 q-mt-md" rounded>
+          <template #avatar><q-icon name="system_update" color="orange" /></template>
+          当前宿主无法热替换自己的 market runtime。请发布新版本并重新打包安装宿主应用。
+        </q-banner>
+      </div>
+
+      <div v-if="data" class="section-surface q-pa-lg">
         <div class="text-h6 q-mb-xs">插件市场服务器</div>
         <div class="text-caption text-grey-8 q-mb-md">
           host 启动时按以下优先级决定使用哪个 URL：宿主显式 → 环境变量 → 本页设置 → 内置默认。
@@ -159,6 +222,7 @@ import { useSettings, describeMarketServerSource } from 'src/composables/useSett
 
 const settings = useSettings();
 const data = computed(() => settings.settings.value);
+const runtime = computed(() => settings.runtime.value);
 const loading = computed(() => settings.loading.value);
 const saving = computed(() => settings.saving.value);
 

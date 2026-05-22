@@ -9,11 +9,11 @@ importers:
   .:
     dependencies:
       '@qpjoy/electron-market':
-        specifier: ^0.3.25
-        version: 0.3.25(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)
+        specifier: ^0.3.26
+        version: 0.3.26(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)
       '@qpjoy/electron-plugin-hdo':
-        specifier: ^0.1.25
-        version: 0.1.25(electron@34.5.8)
+        specifier: ^0.1.26
+        version: 0.1.26(electron@34.5.8)
       '@qpjoy/electron-plugin-sdk':
         specifier: ^0.1.4
         version: 0.1.4(electron@34.5.8)
@@ -289,14 +289,14 @@ packages:
   '@qpjoy/electron-core-wireguard@0.1.17':
     resolution: {integrity: sha512-6XrHLve0euzKE1HRTxF1NM/PURzX+Wf4SfMhvDjKjlJasGLpUCwr9utDT0cLozFrDpZ9NZKbwVSqdxXfqiaKoQ==}
 
-  '@qpjoy/electron-market@0.3.25':
-    resolution: {integrity: sha512-/3sMBcGx7tY0so2gpWmkYpJ457Mehw3Nqs93l+WUdPwcbHFirTAoEUpQ4Ws+C91RU8y1MAXCj2XbPqJ141jgvQ==}
+  '@qpjoy/electron-market@0.3.26':
+    resolution: {integrity: sha512-LPL2Tdl8ovOmtanyT77vbXso5pPOIAABubGWUeLho+qPxRKtfSwngntVtXT6Trbe8jKOR9yot/0//zVOkCWDpQ==}
     peerDependencies:
       '@qpjoy/electron-plugin-sdk': '>=0.1.0'
       electron: '>=28'
 
-  '@qpjoy/electron-plugin-hdo@0.1.25':
-    resolution: {integrity: sha512-tbpc5zfOxqVv0efm3o9A1XwMoA3++IBR33KPVZFpwUOf1QPUcNhVo5LGVXC0Ha8U3TTLURg2VQEDnjUIJb3Krg==}
+  '@qpjoy/electron-plugin-hdo@0.1.26':
+    resolution: {integrity: sha512-eZiJqKDEUvxiPNqwYlwZMzPka8Eh6FyJnSZkarnTjfg/FjD6fGqK/adtZ0Fz/WJoxCWb3DY4ecRYC1mo4SOdOg==}
     peerDependencies:
       electron: '>=28'
     peerDependenciesMeta:
@@ -2637,7 +2637,7 @@ snapshots:
       '@qpjoy/electron-core-wireguard-engine-linux-x64': 0.1.2
       '@qpjoy/electron-core-wireguard-engine-win32-x64': 0.1.2
 
-  '@qpjoy/electron-market@0.3.25(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)':
+  '@qpjoy/electron-market@0.3.26(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)':
     dependencies:
       '@qpjoy/electron-plugin-sdk': 0.1.4(electron@34.5.8)
       '@qpjoy/marketplace-db': 0.1.1
@@ -2645,7 +2645,7 @@ snapshots:
       electron: 34.5.8
       semver: 7.8.0
 
-  '@qpjoy/electron-plugin-hdo@0.1.25(electron@34.5.8)':
+  '@qpjoy/electron-plugin-hdo@0.1.26(electron@34.5.8)':
     dependencies:
       '@qpjoy/electron-core-wireguard': 0.1.17
     optionalDependencies:

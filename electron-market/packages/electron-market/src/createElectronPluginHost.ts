@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, realpathSync } from 'fs';
 import { rm } from 'fs/promises';
+import { createRequire } from 'module';
 import { join, resolve, sep } from 'path';
 import type { App, IpcMain, Session } from 'electron';
 import semver from 'semver';
@@ -373,6 +374,7 @@ export function createElectronPluginHost(
 
   const admin = new AdminServer({
     port: adminPort,
+    app: host.app,
     registry,
     marketplace,
     store,
@@ -496,6 +498,28 @@ export function createElectronPluginHost(
     }
   }
 
+  function seedInstallMissingDependencies(record: { installPath: string; npm: string }): string[] {
+    try {
+      const packageDir = realpathSync(join(record.installPath, 'node_modules', record.npm));
+      const pkgJson = join(packageDir, 'package.json');
+      const pkg = JSON.parse(readFileSync(pkgJson, 'utf8')) as {
+        dependencies?: Record<string, string>;
+      };
+      const requireFromPlugin = createRequire(pkgJson);
+      const missing: string[] = [];
+      for (const dep of Object.keys(pkg.dependencies ?? {})) {
+        try {
+          requireFromPlugin.resolve(dep);
+        } catch {
+          missing.push(dep);
+        }
+      }
+      return missing;
+    } catch {
+      return ['<package.json>'];
+    }
+  }
+
   function seedInstallMatchesSource(record: { installPath: string; npm: string }, source: PluginSource): boolean {
     const expected = sourcePath(source);
     if (!expected) return true;
@@ -532,8 +556,11 @@ export function createElectronPluginHost(
           existing &&
           bundledVersion &&
           compareVersions(bundledVersion, existing.version) > 0;
-        const sourceMatches = existing ? seedInstallMatchesSource(existing, seed.source) : false;
-        if (existing && existing.state !== 'errored' && seedInstallReachable(existing) && sourceMatches && !seedIsNewer) {
+        const installReachable = existing ? seedInstallReachable(existing) : false;
+        const missingDependencies = existing && installReachable ? seedInstallMissingDependencies(existing) : [];
+        const installHealthy = installReachable && missingDependencies.length === 0;
+        const sourceMatches = existing && installHealthy ? seedInstallMatchesSource(existing, seed.source) : false;
+        if (existing && existing.state !== 'errored' && installHealthy && sourceMatches && !seedIsNewer) {
           // Already installed, healthy, and the files are still reachable —
           // nothing to do.
           return;
@@ -545,14 +572,20 @@ export function createElectronPluginHost(
             source: seed.source.type
           });
         }
-        if (existing && existing.state !== 'errored' && !seedInstallReachable(existing)) {
+        if (existing && existing.state !== 'errored' && !installReachable) {
           // State says "active" but the install is gone (dev/packaged userData
           // crossover, deleted source workspace, etc.). Fall through to re-seed.
           registry.log(seed.id, 'warn', 'seed install unreachable — re-seeding', {
             installPath: existing.installPath
           });
         }
-        if (existing && existing.state !== 'errored' && seedInstallReachable(existing) && !sourceMatches) {
+        if (existing && existing.state !== 'errored' && installReachable && missingDependencies.length > 0) {
+          registry.log(seed.id, 'warn', 'seed install has missing dependencies — re-seeding', {
+            installPath: existing.installPath,
+            missingDependencies
+          });
+        }
+        if (existing && existing.state !== 'errored' && installHealthy && !sourceMatches) {
           registry.log(seed.id, 'warn', 'seed install points at a previous source — re-seeding', {
             installPath: existing.installPath,
             source: seed.source.type
@@ -818,6 +851,11 @@ function refreshSelfMarketplaceRecord(db: MarketplaceDB, registry: PluginRegistr
     const version = pkg.version || manifest.version;
     manifest.version = version;
     const npm = pkg.name || '@qpjoy/electron-market';
+    const existingEntry = db.getEntry(manifest.id);
+    const latestVersion =
+      existingEntry && compareVersions(existingEntry.latestVersion, version) > 0
+        ? existingEntry.latestVersion
+        : version;
 
     db.bulkUpsertEntries([
       {
@@ -825,9 +863,9 @@ function refreshSelfMarketplaceRecord(db: MarketplaceDB, registry: PluginRegistr
         npm,
         name: manifest.name,
         description: manifest.description ?? null,
-        latestVersion: version,
-        manifestUrl: null,
-        tarballUrl: null,
+        latestVersion,
+        manifestUrl: existingEntry?.manifestUrl ?? null,
+        tarballUrl: existingEntry?.tarballUrl ?? null,
         homepage: manifest.homepage ?? pkg.homepage ?? null,
         author: manifest.author ?? null,
         category: 'host',
@@ -835,9 +873,9 @@ function refreshSelfMarketplaceRecord(db: MarketplaceDB, registry: PluginRegistr
         bootstrap: true,
         visibility: 'public',
         specVersion: 1,
-        metadata: { self: true },
-        source: 'seed',
-        fetchedAt: null
+        metadata: { ...(existingEntry?.metadata ?? {}), self: true },
+        source: existingEntry?.source ?? 'seed',
+        fetchedAt: existingEntry?.fetchedAt ?? null
       }
     ]);
 

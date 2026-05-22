@@ -7,13 +7,13 @@
       <q-btn color="primary" icon="add" label="安装本地包…" @click="openLocalInstall" />
     </div>
 
-    <div v-if="host.installed.value.length === 0" class="section-surface q-pa-xl text-center text-grey-7">
+    <div v-if="visibleInstalled.length === 0" class="section-surface q-pa-xl text-center text-grey-7">
       还没有任何插件。打开 <router-link to="/marketplace">市场</router-link> 浏览，或安装本地 tarball / 目录。
     </div>
 
     <div class="plugin-grid">
       <div
-        v-for="plugin in host.installed.value"
+        v-for="plugin in visibleInstalled"
         :key="plugin.id"
         class="plugin-card"
         :class="{ active: plugin.state === 'active' || isSelfPlugin(plugin) }"
@@ -100,6 +100,17 @@
 
           <!-- Newer version available on the marketplace? -->
           <q-btn
+            v-if="!isSelfPlugin(plugin) && host.isSeedable(plugin.id)"
+            outline
+            color="primary"
+            icon="restart_alt"
+            label="重新预装"
+            :loading="host.busy.value"
+            :disable="host.busy.value"
+            @click="host.reseed(plugin.id)"
+          />
+
+          <q-btn
             v-if="!isSelfPlugin(plugin) && latestFor(plugin.id) && host.hasUpgrade(plugin.id, latestFor(plugin.id))"
             color="primary"
             icon="upgrade"
@@ -117,7 +128,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue';
+import { computed, onMounted } from 'vue';
 import { Dialog } from 'quasar';
 
 import PermissionGrantDialog from 'src/components/PermissionGrantDialog.vue';
@@ -126,6 +137,7 @@ import type { InstalledPluginRecord, PluginState } from 'src/types/api';
 
 const host = usePluginHost();
 const MARKETPLACE_SELF_PLUGIN_ID = 'qpjoy.electron-market';
+const visibleInstalled = computed(() => host.installed.value.filter((plugin) => !isSelfPlugin(plugin)));
 
 onMounted(() => {
   host.refreshInstalled();

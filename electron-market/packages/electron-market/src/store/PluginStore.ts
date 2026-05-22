@@ -3,6 +3,7 @@ import { promisify } from 'util';
 import { gunzip } from 'zlib';
 import { readFile, rm, mkdir, cp, rename, writeFile, symlink, lstat, readdir } from 'fs/promises';
 import { createWriteStream, existsSync, readFileSync } from 'fs';
+import { createRequire } from 'module';
 import { join, isAbsolute, resolve, sep } from 'path';
 import semver from 'semver';
 
@@ -760,6 +761,7 @@ export class PluginStore {
     const pkg = JSON.parse(await readFile(pkgPath, 'utf8')) as {
       version?: string;
       qpjoyPlugin?: { specVersion: number; manifest: string; entry?: string };
+      dependencies?: Record<string, string>;
     };
     if (!pkg.qpjoyPlugin) {
       throw new Error(`Package ${npm} is not a QPJoy plugin (missing qpjoyPlugin field).`);
@@ -786,7 +788,23 @@ export class PluginStore {
     }
 
     assertEngineCompatibility(manifest);
+    this.assertPackageDependenciesReachable(pkgPath, pkg.dependencies ?? {});
 
     return manifest;
+  }
+
+  private assertPackageDependenciesReachable(pkgJsonPath: string, dependencies: Record<string, string>): void {
+    const requireFromPlugin = createRequire(pkgJsonPath);
+    const missing: string[] = [];
+    for (const dep of Object.keys(dependencies)) {
+      try {
+        requireFromPlugin.resolve(dep);
+      } catch {
+        missing.push(dep);
+      }
+    }
+    if (missing.length > 0) {
+      throw new Error(`Plugin package dependencies are missing: ${missing.join(', ')}`);
+    }
   }
 }

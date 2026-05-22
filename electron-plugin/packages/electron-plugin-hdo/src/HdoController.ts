@@ -557,11 +557,22 @@ export class HdoController {
       allowSystemFallback: true
     });
     if (action === 'down') {
-      await this.uninstallWireGuardLaunchDaemon({ stopTunnel: false, rememberDisabled: true }).catch((err) => {
-        this.ctx.log.warn('failed to uninstall HDO WireGuard LaunchDaemon before stopping peer', {
-          error: errorMessage(err)
-        });
-      });
+      const daemonStatus = getDarwinWireGuardLaunchDaemonStatus({ runtime, configPath });
+      if (hasWireGuardLaunchDaemon(daemonStatus)) {
+        const daemon = await this.uninstallWireGuardLaunchDaemon({ stopTunnel: false, rememberDisabled: false });
+        if (daemon.ok) {
+          this.rememberWireGuardDesiredActive(false);
+          this.reportPresenceInBackground('offline');
+        }
+        return {
+          ...daemon,
+          action,
+          mode: runtime.method,
+          message: daemon.ok ? '已停止 WireGuard peer。' : daemon.message,
+          runtime: publicWireGuardRuntime(runtime),
+          launchDaemon: daemon
+        };
+      }
     }
     if (
       action !== 'down' &&
@@ -845,11 +856,22 @@ export class HdoController {
       bundledDir: this.ctx.bundledWireGuardDir,
       allowSystemFallback: true
     });
-    const result = await uninstallDarwinWireGuardLaunchDaemon({ runtime, configPath });
+    const daemonStatus = getDarwinWireGuardLaunchDaemonStatus({ runtime, configPath });
+    const hadDaemon = hasWireGuardLaunchDaemon(daemonStatus);
+    const result = hadDaemon
+      ? await uninstallDarwinWireGuardLaunchDaemon({ runtime, configPath })
+      : {
+          ...daemonStatus,
+          ok: true,
+          skipped: true,
+          reason: 'launchdaemon-not-installed',
+          message: 'HDO WireGuard 系统守护未安装。'
+        };
     if (input.rememberDisabled !== false) {
       this.updateSettings({ wireGuardLaunchDaemonEnabled: false });
     }
-    if (input.stopTunnel !== false) {
+    const launchDaemonStoppedTunnel = hadDaemon && result.ok && runtime.platform === 'darwin' && runtime.method === 'darwin-userspace';
+    if (input.stopTunnel !== false && !launchDaemonStoppedTunnel) {
       await setWireGuardTunnelState({ runtime, configPath, action: 'down' }).catch((err) => {
         this.ctx.log.warn('failed to stop HDO WireGuard after LaunchDaemon uninstall', {
           error: errorMessage(err)
@@ -882,6 +904,8 @@ export class HdoController {
       });
       return;
     }
+    const status = safeWireGuardStatus(runtime, configPath);
+    if (!status?.active) return;
     const result = await setWireGuardTunnelState({
       runtime,
       configPath,
@@ -1505,6 +1529,10 @@ function publicWireGuardPeer(value: Record<string, unknown>): Record<string, unk
 function publicWireGuardRuntime(value: unknown): Record<string, unknown> {
   const runtime = plainObject(value);
   return runtime ? { ...runtime } : {};
+}
+
+function hasWireGuardLaunchDaemon(status: { installed?: boolean; loaded?: boolean; running?: boolean } | null): boolean {
+  return Boolean(status && (status.installed === true || status.loaded === true || status.running === true));
 }
 
 function safeWireGuardStatus(

@@ -2,7 +2,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { parse as parseUrl } from 'url';
 import { createReadStream, existsSync, statSync } from 'fs';
 import { extname, join, normalize, resolve } from 'path';
-import { shell } from 'electron';
+import { shell, type App } from 'electron';
+import semver from 'semver';
 
 import type { MarketplaceEntry as DbEntry } from '@qpjoy/marketplace-db';
 
@@ -74,6 +75,7 @@ type InstallEntry = Pick<LegacyEntry, 'id' | 'npm' | 'latest'> & {
 
 export interface AdminServerOptions {
   port: number;
+  app: App;
   registry: PluginRegistry;
   marketplace: MarketplaceClient;
   store: PluginStore;
@@ -156,6 +158,9 @@ export class AdminServer {
       const query = parseUrl(req.url ?? '/', true).query;
       const id = typeof query.id === 'string' ? query.id : undefined;
       return this.json(res, 200, { items: this.opts.store.getInstallProgress(id) });
+    }
+    if (method === 'GET' && pathname === '/api/host/runtime') {
+      return this.json(res, 200, this.hostRuntimeStatus());
     }
     if (method === 'GET' && pathname === '/api/marketplace') {
       // Marketplace state is now sourced from the DB (seeded at first run +
@@ -497,6 +502,42 @@ export class AdminServer {
     }
 
     this.json(res, 404, { error: 'not found', path: pathname });
+  }
+
+  private hostRuntimeStatus(): Record<string, unknown> {
+    const self = this.opts.registry.get(MARKETPLACE_SELF_PLUGIN_ID);
+    const entry = this.opts.registry.marketplaceDb().getEntry(MARKETPLACE_SELF_PLUGIN_ID);
+    const currentVersion = self?.version ?? null;
+    const latestVersion = entry?.latestVersion ?? currentVersion;
+    const updateAvailable = Boolean(
+      currentVersion &&
+      latestVersion &&
+      semver.valid(currentVersion) &&
+      semver.valid(latestVersion) &&
+      semver.gt(latestVersion, currentVersion)
+    );
+    return {
+      app: {
+        name: this.opts.app.getName(),
+        version: this.opts.app.getVersion(),
+        isPackaged: this.opts.isPackaged,
+        appPath: this.opts.app.getAppPath()
+      },
+      market: {
+        id: MARKETPLACE_SELF_PLUGIN_ID,
+        npm: self?.npm ?? entry?.npm ?? '@qpjoy/electron-market',
+        currentVersion,
+        latestVersion,
+        updateAvailable,
+        installPath: self?.installPath ?? null,
+        homepage: entry?.homepage ?? self?.manifest.homepage ?? null,
+        canSelfUpgrade: false,
+        upgradeMode: 'host-app',
+        message: updateAvailable
+          ? 'QPJoy Marketplace 是当前宿主运行时，不能像普通插件一样热替换；请更新宿主应用包后重启。'
+          : 'QPJoy Marketplace 运行时已是当前缓存中的最新版本。'
+      }
+    };
   }
 
   /**

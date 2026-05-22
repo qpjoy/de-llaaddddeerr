@@ -44,8 +44,30 @@ export interface MarketServerSettings {
   isPackaged: boolean;
 }
 
+export interface HostRuntimeStatus {
+  app: {
+    name: string;
+    version: string;
+    isPackaged: boolean;
+    appPath: string;
+  };
+  market: {
+    id: string;
+    npm: string;
+    currentVersion: string | null;
+    latestVersion: string | null;
+    updateAvailable: boolean;
+    installPath: string | null;
+    homepage: string | null;
+    canSelfUpgrade: boolean;
+    upgradeMode: 'host-app';
+    message: string;
+  };
+}
+
 const MODE = detectMode();
 const settings = ref<MarketServerSettings | null>(null);
+const runtime = ref<HostRuntimeStatus | null>(null);
 const loading = ref(false);
 const saving = ref(false);
 
@@ -61,17 +83,28 @@ export function useSettings() {
     if (!available) return;
     loading.value = true;
     try {
-      const res = await fetch('/api/settings/market-server', {
-        headers: { accept: 'application/json' }
-      });
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-      settings.value = (await res.json()) as MarketServerSettings;
+      await Promise.all([refreshMarketServer(), refreshRuntime()]);
     } catch (err) {
       toast(`读取设置失败：${err instanceof Error ? err.message : String(err)}`, 'negative');
-      settings.value = null;
     } finally {
       loading.value = false;
     }
+  }
+
+  async function refreshMarketServer(): Promise<void> {
+    const res = await fetch('/api/settings/market-server', {
+      headers: { accept: 'application/json' }
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    settings.value = (await res.json()) as MarketServerSettings;
+  }
+
+  async function refreshRuntime(): Promise<void> {
+    const res = await fetch('/api/host/runtime', {
+      headers: { accept: 'application/json' }
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    runtime.value = (await res.json()) as HostRuntimeStatus;
   }
 
   /**
@@ -97,7 +130,7 @@ export function useSettings() {
         const msg = 'error' in data ? data.error : `${res.status} ${res.statusText}`;
         throw new Error(msg);
       }
-      await refresh();
+      await refreshMarketServer();
       if (data.restartRequired) {
         toast('设置已保存，重启 app 后生效', 'warning');
       } else {
@@ -115,9 +148,11 @@ export function useSettings() {
   return {
     available,
     settings,
+    runtime,
     loading,
     saving,
     refresh,
+    refreshRuntime,
     saveMarketServer
   };
 }

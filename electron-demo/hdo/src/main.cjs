@@ -90,15 +90,47 @@ function safeRealpath(target) {
   }
 }
 
+function missingPackageDependencies(packageDir) {
+  const realPackageDir = safeRealpath(packageDir);
+  if (!realPackageDir) return ['<package>'];
+  try {
+    const pkgJson = path.join(realPackageDir, 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgJson, 'utf8'));
+    const dependencies = Object.keys(pkg.dependencies || {});
+    const missing = [];
+    for (const dep of dependencies) {
+      try {
+        require.resolve(dep, { paths: [realPackageDir] });
+      } catch {
+        missing.push(dep);
+      }
+    }
+    return missing;
+  } catch {
+    return ['<package.json>'];
+  }
+}
+
 function pruneStaleSeedInstall(id, npm, expectedSourceDir) {
   const pluginsRoot = path.join(app.getPath('userData'), 'plugins');
   const expected = safeRealpath(expectedSourceDir);
-  if (!expected || !fs.existsSync(pluginsRoot)) return;
+  if (!fs.existsSync(pluginsRoot)) return;
   for (const name of fs.readdirSync(pluginsRoot)) {
     if (!name.startsWith(`${id}@`)) continue;
     const installPath = path.join(pluginsRoot, name);
     const installedPackageDir = path.join(installPath, 'node_modules', ...npm.split('/'));
+    const missingDependencies = missingPackageDependencies(installedPackageDir);
+    if (missingDependencies.length > 0) {
+      fs.rmSync(installPath, { recursive: true, force: true });
+      console.warn('[electron-demo] removed incomplete seed install:', {
+        id,
+        installPath,
+        missingDependencies
+      });
+      continue;
+    }
     const installed = safeRealpath(installedPackageDir);
+    if (!expected) continue;
     if (!installed || installed === expected) continue;
     const installRoot = safeRealpath(installPath);
     const ownedCopy = installRoot && (installed === installRoot || installed.startsWith(installRoot + path.sep));
