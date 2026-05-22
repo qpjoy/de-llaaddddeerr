@@ -1021,7 +1021,6 @@ export function adminHtml(): string {
     async function recoverLocalWireGuardIfDesired() {
       const settings = snapshot && snapshot.settings ? snapshot.settings : {};
       const peer = settings.wireGuardPeer || null;
-      if (settings.devicePlatform === 'win32') return null;
       if (!peer || !peer.configPath || settings.wireGuardDesiredActive === false) return null;
       const current = await request('/api/client/wireguard/status').catch(() =>
         (snapshot && snapshot.wireGuardStatus) || null
@@ -2294,13 +2293,7 @@ export function adminHtml(): string {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ hdoControlBaseUrl: formValue('baseUrl') })
       });
-      let locallyRecovered = null;
-      let localRecoveryError = null;
-      try {
-        locallyRecovered = await recoverLocalWireGuardIfDesired();
-      } catch (err) {
-        localRecoveryError = err;
-      }
+      let connectAttempted = false;
       try {
         const prepared = await request('/api/client/wireguard/prepare', {
           method: 'POST',
@@ -2315,6 +2308,7 @@ export function adminHtml(): string {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({})
         });
+        connectAttempted = true;
         const connected = await request('/api/client/wireguard/connect', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -2324,11 +2318,13 @@ export function adminHtml(): string {
           throw new Error(connected.message || connected.command || 'WireGuard 未启动');
         }
       } catch (err) {
-        if (locallyRecovered && !hasMissingWireGuardRoutes(locallyRecovered)) {
-          showMessage('已先恢复本地 HDO 隧道；控制面暂不可达，网络恢复后再更新订阅。', 'info');
-          return locallyRecovered;
+        if (!connectAttempted && isTransientFetchError(err)) {
+          const locallyRecovered = await recoverLocalWireGuardIfDesired().catch(() => null);
+          if (locallyRecovered && !hasMissingWireGuardRoutes(locallyRecovered)) {
+            showMessage('已先恢复本地 HDO 隧道；控制面暂不可达，网络恢复后再更新订阅。', 'info');
+            return locallyRecovered;
+          }
         }
-        if (localRecoveryError) throw localRecoveryError;
         throw err;
       }
       const status = await waitForWireGuardState(true, 16);

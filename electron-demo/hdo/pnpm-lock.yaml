@@ -9,11 +9,11 @@ importers:
   .:
     dependencies:
       '@qpjoy/electron-market':
-        specifier: ^0.3.29
-        version: 0.3.29(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)
+        specifier: ^0.3.30
+        version: 0.3.30(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)
       '@qpjoy/electron-plugin-hdo':
-        specifier: ^0.1.28
-        version: 0.1.28(electron@34.5.8)
+        specifier: ^0.1.29
+        version: 0.1.29(electron@34.5.8)
       '@qpjoy/electron-plugin-sdk':
         specifier: ^0.1.4
         version: 0.1.4(electron@34.5.8)
@@ -261,14 +261,14 @@ packages:
     engines: {node: ^12.13.0 || ^14.15.0 || >=16.0.0}
     deprecated: This functionality has been moved to @npmcli/fs
 
-  '@qpjoy/electron-market@0.3.29':
-    resolution: {integrity: sha512-HRFwIww5c/J4pe9MuLB65jbka1Mq3D9DjnvY52Wjn7oyVIn90PM0QPLmRTeBMXO1lVqKwTuSP1oEVLQQQLuibw==}
+  '@qpjoy/electron-market@0.3.30':
+    resolution: {integrity: sha512-r9CtTJCEp7k4OGwftg95kzvMsh/7KXoC9qJ73IHiQhJRIR3R5cWCEh7DQhv7uGnr9jm+fdVOVLYwZfpv6k8Hiw==}
     peerDependencies:
       '@qpjoy/electron-plugin-sdk': '>=0.1.0'
       electron: '>=28'
 
-  '@qpjoy/electron-plugin-hdo@0.1.28':
-    resolution: {integrity: sha512-6LfBZUN3jkaEozl6zOGyxHHGmA2iAbv5hnBAJdRX3Jr4GF+i+zYYO8f9ijkeshRWCkbFDoUtjRKic4+9B6pLuQ==}
+  '@qpjoy/electron-plugin-hdo@0.1.29':
+    resolution: {integrity: sha512-yzpx+r/v31hGBE79GcLx/kxoalaUdTdShmy9hVi1cgH+e1QpEXMSH9zF+Z1UsFILtD9bNQlqJ2b5qYlkC/eJDQ==}
     peerDependencies:
       electron: '>=28'
     peerDependenciesMeta:
@@ -2586,7 +2586,7 @@ snapshots:
       mkdirp: 1.0.4
       rimraf: 3.0.2
 
-  '@qpjoy/electron-market@0.3.29(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)':
+  '@qpjoy/electron-market@0.3.30(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)':
     dependencies:
       '@qpjoy/electron-plugin-sdk': 0.1.4(electron@34.5.8)
       '@qpjoy/marketplace-db': 0.1.1
@@ -2594,7 +2594,7 @@ snapshots:
       electron: 34.5.8
       semver: 7.8.0
 
-  '@qpjoy/electron-plugin-hdo@0.1.28(electron@34.5.8)':
+  '@qpjoy/electron-plugin-hdo@0.1.29(electron@34.5.8)':
     optionalDependencies:
       electron: 34.5.8
 

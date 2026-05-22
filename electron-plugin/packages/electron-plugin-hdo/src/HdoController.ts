@@ -33,6 +33,9 @@ import type {
   HdoSnapshot
 } from './types';
 
+type WireGuardPeerAction = 'up' | 'down' | 'restart';
+type WireGuardConnectionRuntime = ReturnType<typeof resolveWireGuardConnectionRuntime>;
+
 interface MarketplaceDbLike {
   getActiveSession?(): {
     accessToken: string | null;
@@ -550,12 +553,27 @@ export class HdoController {
     if (!configPath || !existsSync(configPath)) {
       throw new Error('WireGuard 配置文件不存在，请先点击“连接 / 更新 HDO”或“生成 / 更新本机 Peer”。');
     }
-    const action = input.action === 'down' ? 'down' : (input.action === 'restart' ? 'restart' : 'up');
+    const action: WireGuardPeerAction = input.action === 'down' ? 'down' : (input.action === 'restart' ? 'restart' : 'up');
     const runtime = resolveWireGuardConnectionRuntime({
       installDir: join(this.ctx.userDataDir, 'bin'),
       bundledDir: this.ctx.bundledWireGuardDir,
       allowSystemFallback: true
     });
+
+    if (runtime.platform === 'darwin') {
+      return this.connectWireGuardPeerDarwin(action, runtime, configPath);
+    }
+    if (runtime.platform === 'win32') {
+      return this.connectWireGuardPeerWindows(action, runtime, configPath);
+    }
+    return this.connectWireGuardPeerWgQuick(action, runtime, configPath);
+  }
+
+  private async connectWireGuardPeerDarwin(
+    action: WireGuardPeerAction,
+    runtime: WireGuardConnectionRuntime,
+    configPath: string
+  ): Promise<Record<string, unknown>> {
     if (action === 'down') {
       const daemonStatus = getDarwinWireGuardLaunchDaemonStatus({ runtime, configPath });
       if (hasWireGuardLaunchDaemon(daemonStatus)) {
@@ -642,7 +660,36 @@ export class HdoController {
         runtime: publicWireGuardRuntime(restarted.runtime)
       };
     }
-    if (action === 'restart' && runtime.platform !== 'win32') {
+    return this.connectWireGuardPeerWgQuick(action, runtime, configPath);
+  }
+
+  private async connectWireGuardPeerWindows(
+    action: WireGuardPeerAction,
+    runtime: WireGuardConnectionRuntime,
+    configPath: string
+  ): Promise<Record<string, unknown>> {
+    const result = await setWireGuardTunnelState({
+      runtime,
+      configPath,
+      action
+    });
+    if (result.ok) {
+      this.rememberWireGuardDesiredActive(action !== 'down');
+      this.reportPresenceInBackground(action === 'down' ? 'offline' : 'online');
+    }
+    return {
+      ...result,
+      message: result.ok && action === 'restart' ? '已更新并启动 WireGuard peer。' : result.message,
+      runtime: publicWireGuardRuntime(result.runtime)
+    };
+  }
+
+  private async connectWireGuardPeerWgQuick(
+    action: WireGuardPeerAction,
+    runtime: WireGuardConnectionRuntime,
+    configPath: string
+  ): Promise<Record<string, unknown>> {
+    if (action === 'restart') {
       const status = safeWireGuardStatus(runtime, configPath);
       if (status?.active) {
         const stopped = await setWireGuardTunnelState({
@@ -674,6 +721,7 @@ export class HdoController {
         runtime: publicWireGuardRuntime(restarted.runtime)
       };
     }
+
     const result = await setWireGuardTunnelState({
       runtime,
       configPath,
