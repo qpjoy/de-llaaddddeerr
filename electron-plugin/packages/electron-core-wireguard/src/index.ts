@@ -2442,30 +2442,62 @@ function windowsElevatedStartProcessScript(
   tunnelName: string
 ): string {
   const serviceName = `WireGuardTunnel$${tunnelName}`;
-  const serviceLookup = `$svc = Get-Service -Name ${powerShellString(serviceName)} -ErrorAction SilentlyContinue`;
+  const serviceArg = powerShellString(serviceName);
+  const serviceLookup = `$svc = Get-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`;
   const preflightLines = action === 'up'
     ? [serviceLookup, "if ($null -ne $svc -and $svc.Status -eq 'Running') { exit 0 }"]
     : (action === 'down' ? [serviceLookup, 'if ($null -eq $svc) { exit 0 }'] : []);
   const runWireGuard = (wireGuardArgs: string[]) => `& ${powerShellString(command)} ${wireGuardArgs.map(powerShellString).join(' ')}`;
-  const elevatedLines = [
+  const waitForServiceAbsent = () => [
+    '$deadline = (Get-Date).AddSeconds(12)',
+    'while ($true) {',
+    `  $svc = Get-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`,
+    '  if ($null -eq $svc) { break }',
+    `  if ((Get-Date) -gt $deadline) { throw ${powerShellString(`Timed out waiting for ${serviceName} to be removed`)} }`,
+    '  Start-Sleep -Milliseconds 250',
+    '}'
+  ];
+  const waitForServiceRunning = () => [
+    '$deadline = (Get-Date).AddSeconds(20)',
+    'while ($true) {',
+    `  $svc = Get-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`,
+    "  if ($null -ne $svc -and $svc.Status -eq 'Running') { break }",
+    `  if ($null -ne $svc -and $svc.Status -eq 'Stopped') { Start-Service -Name ${serviceArg} -ErrorAction SilentlyContinue }`,
+    `  if ((Get-Date) -gt $deadline) { throw ${powerShellString(`Timed out waiting for ${serviceName} to be running`)} }`,
+    '  Start-Sleep -Milliseconds 500',
+    '}'
+  ];
+  const elevatedLines: string[] = [
     "$ErrorActionPreference = 'Stop'",
-    `$svc = Get-Service -Name ${powerShellString(serviceName)} -ErrorAction SilentlyContinue`,
-    ...(action === 'up'
-      ? [
-          "if ($null -ne $svc -and $svc.Status -eq 'Running') { exit 0 }",
-          `if ($null -ne $svc) { Start-Service -Name ${powerShellString(serviceName)}; exit 0 }`
-        ]
-      : (action === 'down'
-        ? [
-          'if ($null -eq $svc) { exit 0 }'
-          ]
-        : [
-            `if ($null -ne $svc) { ${runWireGuard(['/uninstalltunnelservice', tunnelName])}; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }`
-          ])),
+    serviceLookup
+  ];
+  if (action === 'up') {
+    elevatedLines.push(
+      "if ($null -ne $svc -and $svc.Status -eq 'Running') { exit 0 }",
+      `if ($null -ne $svc) {`,
+      `  Start-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`,
+      ...waitForServiceRunning(),
+      '  exit 0',
+      '}'
+    );
+  } else if (action === 'down') {
+    elevatedLines.push('if ($null -eq $svc) { exit 0 }');
+  } else {
+    elevatedLines.push(
+      'if ($null -ne $svc) {',
+      `  if ($svc.Status -ne 'Stopped') { Stop-Service -Name ${serviceArg} -Force -ErrorAction SilentlyContinue }`,
+      `  ${runWireGuard(['/uninstalltunnelservice', tunnelName])}`,
+      '  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
+      ...waitForServiceAbsent(),
+      '}'
+    );
+  }
+  elevatedLines.push(
     runWireGuard(args),
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
+    ...(action === 'down' ? waitForServiceAbsent() : waitForServiceRunning()),
     'exit 0'
-  ];
+  );
   const elevatedEncoded = encodePowerShell(elevatedLines.join('\n'));
   return [
     "$ErrorActionPreference = 'Stop'",

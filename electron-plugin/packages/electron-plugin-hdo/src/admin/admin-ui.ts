@@ -1021,6 +1021,7 @@ export function adminHtml(): string {
     async function recoverLocalWireGuardIfDesired() {
       const settings = snapshot && snapshot.settings ? snapshot.settings : {};
       const peer = settings.wireGuardPeer || null;
+      if (settings.devicePlatform === 'win32') return null;
       if (!peer || !peer.configPath || settings.wireGuardDesiredActive === false) return null;
       const current = await request('/api/client/wireguard/status').catch(() =>
         (snapshot && snapshot.wireGuardStatus) || null
