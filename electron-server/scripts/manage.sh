@@ -12,8 +12,9 @@
 #   scripts/manage.sh bootstrap-admin --username root --password 'change-me'
 #
 # Configuration via env vars (defaults shown in docker-compose.yml):
-#   MARKET_PORT, PG_PORT, PG_USER, PG_PASSWORD, PG_DB, JWT_SECRET,
-#   NPM_SCOPE, NPM_PREFIX, REQUIRE_VERIFICATION, LOG_LEVEL.
+#   MARKET_PORT, HDO_SERVER_URL, HDO_GATEWAY_SERVER_URL, PG_PORT, PG_USER,
+#   PG_PASSWORD, PG_DB, JWT_SECRET, NPM_SCOPE, NPM_PREFIX,
+#   REQUIRE_VERIFICATION, LOG_LEVEL.
 
 set -Eeuo pipefail
 
@@ -27,9 +28,41 @@ SPA_TARGET="$ROOT/data/spa-dist"
 cd "$ROOT"
 DC=()
 
+dotenv_value() {
+  local key="$1" file="$ROOT/.env" line value
+  [ -f "$file" ] || return 1
+  line="$(
+    awk -v key="$key" '
+      $0 ~ "^[[:space:]]*" key "=" {
+        sub(/^[[:space:]]*/, "", $0)
+        print
+      }
+    ' "$file" | tail -n 1
+  )"
+  [ -n "$line" ] || return 1
+  value="${line#*=}"
+  value="${value%$'\r'}"
+  case "$value" in
+    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+  esac
+  printf '%s' "$value"
+}
+
+dotenv_or_empty() {
+  dotenv_value "$1" 2>/dev/null || true
+}
+
+MARKET_PORT="${MARKET_PORT:-$(dotenv_or_empty MARKET_PORT)}"
+HDO_SERVER_URL="${HDO_SERVER_URL:-$(dotenv_or_empty HDO_SERVER_URL)}"
+HDO_GATEWAY_SERVER_URL="${HDO_GATEWAY_SERVER_URL:-$(dotenv_or_empty HDO_GATEWAY_SERVER_URL)}"
+HDO_GATEWAY_RUNNER_PORT="${HDO_GATEWAY_RUNNER_PORT:-$(dotenv_or_empty HDO_GATEWAY_RUNNER_PORT)}"
+HDO_GATEWAY_RUNNER_HOST="${HDO_GATEWAY_RUNNER_HOST:-$(dotenv_or_empty HDO_GATEWAY_RUNNER_HOST)}"
+
+export MARKET_PORT="${MARKET_PORT:-8080}"
 export HDO_HOST_REPO_ROOT="${HDO_HOST_REPO_ROOT:-$REPO_ROOT}"
 export HDO_GATEWAY_SCRIPT="${HDO_GATEWAY_SCRIPT:-$REPO_ROOT/docker/hdo-gateway-stack/manage.sh}"
-export HDO_SERVER_URL="${HDO_SERVER_URL:-http://127.0.0.1:${MARKET_PORT:-8080}}"
+export HDO_SERVER_URL="${HDO_SERVER_URL:-http://127.0.0.1:${MARKET_PORT}}"
 export HDO_GATEWAY_SERVER_URL="${HDO_GATEWAY_SERVER_URL:-$HDO_SERVER_URL}"
 export HDO_GATEWAY_RUNNER_PORT="${HDO_GATEWAY_RUNNER_PORT:-18081}"
 export HDO_GATEWAY_RUNNER_HOST="${HDO_GATEWAY_RUNNER_HOST:-0.0.0.0}"
@@ -155,6 +188,7 @@ launch_hdo_gateway_runner() {
     HDO_GATEWAY_SCRIPT="$HDO_GATEWAY_SCRIPT" \
     HDO_GATEWAY_CWD="$REPO_ROOT" \
     HDO_SERVER_URL="$HDO_SERVER_URL" \
+    HDO_GATEWAY_SERVER_URL="$HDO_GATEWAY_SERVER_URL" \
     node "$HDO_GATEWAY_RUNNER_SCRIPT" >>"$HDO_GATEWAY_RUNNER_LOG" 2>&1 &
   printf '%s\n' "$!" >"$HDO_GATEWAY_RUNNER_PID_FILE"
   sleep 0.5
@@ -581,8 +615,9 @@ Commands:
   help                        show this message
 
 Environment variables:
-  MARKET_PORT (default 8080), PG_PORT (5433), PG_USER (qpjoy),
-  PG_PASSWORD (qpjoy), PG_DB (qpjoy_market), JWT_SECRET,
+  MARKET_PORT (default 8080), HDO_SERVER_URL, HDO_GATEWAY_SERVER_URL,
+  PG_PORT (5433), PG_USER (qpjoy), PG_PASSWORD (qpjoy),
+  PG_DB (qpjoy_market), JWT_SECRET,
   NPM_SCOPE (@qpjoy), NPM_PREFIX (electron-), LOG_LEVEL (info)
 
 Files:
