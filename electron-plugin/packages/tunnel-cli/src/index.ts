@@ -12,6 +12,8 @@ import {
 import { access } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 
+import { runHdoCli } from './hdo';
+
 const args = process.argv.slice(2);
 const packageRoot = resolve(__dirname, '..');
 const bundledClientScript = resolve(packageRoot, 'resources/mihomo-client.sh');
@@ -80,6 +82,7 @@ Usage:
   qp-tunnel-cli install-script [--target /usr/local/bin/mihomo-client]
   qp-tunnel-cli script-path
   qp-tunnel-cli client-help
+  qp-tunnel-cli hdo enroll --server-url https://domestic.example.com --username user
   qp-tunnel-cli <mihomo-client command> [options]
   qp-tunnel-cli -- <command> [args...]
   qp-tunnel-cli <command-path> [args...]
@@ -92,11 +95,13 @@ Common commands:
   qp-tunnel-cli tun-on
   qp-tunnel-cli tun-off
   qp-tunnel-cli update-subscription
+  qp-tunnel-cli hdo status
   qp-tunnel-cli uninstall --purge
   qp-tunnel-cli ./electron-server/scripts/manage.sh redeploy
 
-The npm package is a thin distributor for the Linux mihomo-client script. Client
-commands re-run through sudo when needed, then execute the bundled shell script.
+The npm package distributes the Linux mihomo-client script and a cross-platform
+HDO WireGuard enrollment command. Linux mihomo-client commands re-run through
+sudo when needed, then execute the bundled shell script.
 
 Unknown commands are executed with QPJoy proxy variables injected. Host commands
 receive HTTP_PROXY=http://127.0.0.1:<mixed-port>; Docker/Compose build contexts
@@ -106,6 +111,9 @@ QP_TUNNEL_CONTAINER_HTTP_PROXY=http://host.docker.internal:<mixed-port>.
 Install the script as a normal server command:
   sudo qp-tunnel-cli install-script
   sudo mihomo-client status
+
+Enroll this machine into an HDO mesh:
+  HDO_PASSWORD=... qp-tunnel-cli hdo enroll --server-url https://domestic.example.com --username user
 `);
 }
 
@@ -389,6 +397,12 @@ async function main(): Promise<void> {
 
   if (command === 'install-script') {
     installClientScript(args.slice(1));
+    return;
+  }
+
+  if (command === 'hdo' || command === 'hdo-enroll' || command === 'hdo-refresh') {
+    const hdoArgs = command === 'hdo' ? args.slice(1) : [command.replace(/^hdo-/, ''), ...args.slice(1)];
+    await runHdoCli(hdoArgs, { isRoot, sudoSelf });
     return;
   }
 

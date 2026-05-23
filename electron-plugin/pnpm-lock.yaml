@@ -162,6 +162,10 @@ importers:
         version: 34.5.8
 
   packages/tunnel-cli:
+    dependencies:
+      '@qpjoy/electron-core-wireguard':
+        specifier: workspace:^
+        version: link:../electron-core-wireguard
     devDependencies:
       '@types/node':
         specifier: ^22.10.7

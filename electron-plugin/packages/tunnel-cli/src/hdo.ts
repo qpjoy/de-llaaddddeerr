@@ -1,0 +1,749 @@
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import { homedir, hostname } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+
+import {
+  generateWireGuardKeyPairWithCli,
+  getDarwinWireGuardLaunchDaemonStatus,
+  getWireGuardTunnelStatus,
+  installDarwinWireGuardLaunchDaemon,
+  renderHdoClientWireGuardConfig,
+  resolveWireGuardConnectionRuntime,
+  resolveWireGuardRuntime,
+  setWireGuardTunnelState,
+  uninstallDarwinWireGuardLaunchDaemon,
+} from '@qpjoy/electron-core-wireguard';
+
+interface HdoCliContext {
+  isRoot(): boolean;
+  sudoSelf(args: string[]): never;
+}
+
+interface HdoClientState {
+  serverUrl?: string;
+  bearerToken?: string;
+  refreshToken?: string;
+  accessExpiresAt?: string;
+  refreshExpiresAt?: string;
+  username?: string;
+  deviceId?: string;
+  label?: string;
+  interfaceName?: string;
+  configPath?: string;
+  installDir?: string;
+  privateKey?: string;
+  publicKey?: string;
+  overlayIp?: string;
+  lastManifestGeneration?: number;
+  enrolledAt?: string;
+  updatedAt?: string;
+}
+
+interface HdoEnrollOptions {
+  serverUrl?: string;
+  token?: string;
+  tokenFile?: string;
+  username?: string;
+  password?: string;
+  passwordFile?: string;
+  deviceId?: string;
+  label?: string;
+  interfaceName: string;
+  configPath?: string;
+  stateFile?: string;
+  installDir?: string;
+  role: string;
+  start: boolean;
+  rotateKey: boolean;
+}
+
+interface HdoAuthMaterial {
+  accessToken: string;
+  refreshToken?: string;
+  accessExpiresAt?: string;
+  refreshExpiresAt?: string;
+  username?: string;
+}
+
+const defaultInterfaceName = 'hdo-internal';
+
+export async function runHdoCli(args: string[], ctx: HdoCliContext): Promise<void> {
+  const command = args[0] ?? 'help';
+  const rest = args.slice(1);
+
+  if (command === 'help' || command === '--help' || command === '-h') {
+    hdoHelp();
+    return;
+  }
+
+  if (process.platform === 'linux' && !ctx.isRoot()) {
+    ctx.sudoSelf(['hdo', ...args]);
+  }
+
+  switch (command) {
+    case 'enroll':
+    case 'refresh':
+      await enrollCommand(rest, command === 'refresh');
+      return;
+    case 'status':
+      statusCommand(parseStateFileArg(rest));
+      return;
+    case 'down':
+      await downCommand(parseStateFileArg(rest));
+      return;
+    default:
+      process.stderr.write(`Unknown hdo command: ${command}\n\n`);
+      hdoHelp();
+      process.exitCode = 1;
+  }
+}
+
+function hdoHelp(): void {
+  process.stdout.write(`QPJoy HDO CLI
+
+Usage:
+  qp-tunnel-cli hdo enroll --server-url URL --username USER [options]
+  qp-tunnel-cli hdo enroll --server-url URL --token TOKEN [options]
+  qp-tunnel-cli hdo refresh [--server-url URL] [--username USER]
+  qp-tunnel-cli hdo status
+  qp-tunnel-cli hdo down
+
+Enroll options:
+  --server-url URL       HDO/electron-server base URL
+  --username USER        Login username/email/phone
+  --password PASS        Login password. Prefer HDO_PASSWORD or --password-file
+  --password-file PATH   Read login password from a file
+  --token TOKEN          Existing bearer token for the HDO API
+  --token-file PATH      Read bearer token from a file
+  --device-id ID         Stable device id. Default: hdo-<platform>-<hostname>
+  --label LABEL          Device label. Default: <platform> <hostname>
+  --interface NAME       WireGuard interface/config name. Default: hdo-internal
+  --config-path PATH     WireGuard config path
+  --install-dir PATH     WireGuard engine install/cache directory
+  --state-file PATH      HDO client state file
+  --role ROLE            Metadata role. Default: internal
+  --rotate-key           Generate a new WireGuard keypair
+  --no-start             Write config without starting the system tunnel
+
+Environment:
+  HDO_SERVER_URL / QPJOY_HDO_SERVER_URL
+  HDO_USERNAME / QPJOY_HDO_USERNAME
+  HDO_PASSWORD / QPJOY_HDO_PASSWORD
+  HDO_TOKEN / QPJOY_HDO_TOKEN
+
+Examples:
+  qp-tunnel-cli hdo enroll \\
+    --server-url https://domestic.example.com \\
+    --username user@example.com
+
+  HDO_PASSWORD='...' qp-tunnel-cli hdo enroll \\
+    --server-url https://domestic.example.com \\
+    --username internal-i
+
+Notes:
+  Linux writes /etc/wireguard and enables wg-quick@<interface>.
+  macOS installs a LaunchDaemon and may prompt for an administrator password.
+  Windows installs a WireGuard tunnel service and may show a UAC prompt.
+`);
+}
+
+async function enrollCommand(args: string[], refreshOnly: boolean): Promise<void> {
+  const options = parseEnrollOptions(args);
+  const stateFile = resolveStateFile(options.stateFile);
+  const previous = readState(stateFile);
+  const interfaceName = sanitizeInterfaceName(options.interfaceName || previous.interfaceName || defaultInterfaceName);
+  const configPath = resolveConfigPath(options.configPath || previous.configPath, interfaceName);
+  const installDir = resolveInstallDir(options.installDir || previous.installDir);
+  const serverUrl = normalizeBaseUrl(
+    options.serverUrl ??
+      process.env.HDO_SERVER_URL ??
+      process.env.QPJOY_HDO_SERVER_URL ??
+      previous.serverUrl,
+  );
+  const username =
+    options.username ??
+    process.env.HDO_USERNAME ??
+    process.env.QPJOY_HDO_USERNAME ??
+    previous.username;
+
+  if (!serverUrl) {
+    throw new Error('Missing --server-url or HDO_SERVER_URL.');
+  }
+
+  const auth = await resolveAuth(serverUrl, options, previous, username);
+  const deviceId =
+    options.deviceId ||
+    previous.deviceId ||
+    `hdo-${process.platform}-${sanitizeId(hostname())}`;
+  const label = options.label || previous.label || `${process.platform} ${hostname()}`;
+  const keys = resolveKeypair(options, previous, installDir);
+
+  const registered = await apiJson(serverUrl, auth.accessToken, '/api/v1/hdo/devices/register', {
+    method: 'POST',
+    body: {
+      id: deviceId,
+      label,
+      platform: `${process.platform}-${process.arch}`,
+      publicKey: keys.publicKey,
+      status: 'online',
+      metadata: {
+        source: '@qpjoy/tunnel-cli',
+        role: options.role,
+        hostname: hostname(),
+        wireGuard: {
+          publicKey: keys.publicKey,
+          interfaceName,
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    },
+  });
+  const manifest = await apiJson(serverUrl, auth.accessToken, `/api/v1/hdo/manifest/${encodeURIComponent(deviceId)}`, {
+    method: 'GET',
+  });
+  const runtime = hdoRuntimeFromManifest(manifest, registered, keys.privateKey);
+  writeWireGuardConfig(configPath, renderHdoClientWireGuardConfig({
+    privateKey: runtime.privateKey,
+    address: runtime.address,
+    domesticPublicKey: runtime.domesticPublicKey,
+    domesticEndpoint: runtime.domesticEndpoint,
+    allowedIps: runtime.allowedIps,
+    persistentKeepalive: 25,
+  }));
+
+  const now = new Date().toISOString();
+  writeState(stateFile, {
+    serverUrl,
+    bearerToken: auth.accessToken,
+    refreshToken: auth.refreshToken,
+    accessExpiresAt: auth.accessExpiresAt,
+    refreshExpiresAt: auth.refreshExpiresAt,
+    username: auth.username ?? username,
+    deviceId,
+    label,
+    interfaceName,
+    configPath,
+    installDir,
+    privateKey: keys.privateKey,
+    publicKey: keys.publicKey,
+    overlayIp: runtime.overlayIp,
+    lastManifestGeneration: runtime.generation,
+    enrolledAt: previous.enrolledAt || now,
+    updatedAt: now,
+  });
+
+  let startMessage = 'System tunnel not started (--no-start).';
+  if (options.start) {
+    startMessage = await startSystemTunnel(interfaceName, configPath, installDir);
+  }
+
+  process.stdout.write(
+    [
+      refreshOnly ? 'HDO config refreshed.' : 'HDO device enrolled.',
+      `Device: ${deviceId}`,
+      `Overlay IP: ${runtime.overlayIp}`,
+      `WireGuard config: ${configPath}`,
+      `State file: ${stateFile}`,
+      startMessage,
+      '',
+    ].join('\n'),
+  );
+}
+
+function statusCommand(stateFileInput: string | undefined): void {
+  const stateFile = resolveStateFile(stateFileInput);
+  const state = readState(stateFile);
+  const interfaceName = sanitizeInterfaceName(state.interfaceName || defaultInterfaceName);
+  const configPath = resolveConfigPath(state.configPath, interfaceName);
+  const installDir = resolveInstallDir(state.installDir);
+
+  process.stdout.write(`State file: ${stateFile}\n`);
+  process.stdout.write(`Server URL: ${state.serverUrl || 'unset'}\n`);
+  process.stdout.write(`Device: ${state.deviceId || 'unset'}\n`);
+  process.stdout.write(`Overlay IP: ${state.overlayIp || 'unset'}\n`);
+  process.stdout.write(`WireGuard config: ${configPath}\n\n`);
+
+  if (process.platform === 'linux') {
+    inherit('systemctl', ['status', `wg-quick@${interfaceName}`, '--no-pager']);
+    process.stdout.write('\n');
+    inherit('wg', ['show', interfaceName]);
+    return;
+  }
+
+  const runtime = resolveWireGuardConnectionRuntime({
+    installDir,
+    allowSystemFallback: true,
+  });
+  if (process.platform === 'darwin') {
+    const daemon = getDarwinWireGuardLaunchDaemonStatus({ runtime, configPath });
+    process.stdout.write(`LaunchDaemon: ${daemon.loaded ? 'loaded' : 'not loaded'}; running=${daemon.running}\n`);
+    if (daemon.plistPath) process.stdout.write(`plist: ${daemon.plistPath}\n`);
+  }
+  const tunnel = getWireGuardTunnelStatus({ runtime, configPath });
+  process.stdout.write(`WireGuard active: ${tunnel.active}\n`);
+  process.stdout.write(`Runtime: ${runtime.method}\n`);
+  if (tunnel.realInterfaceName) process.stdout.write(`Interface: ${tunnel.realInterfaceName}\n`);
+  if (tunnel.peers.length) process.stdout.write(`Peers: ${tunnel.peers.length}\n`);
+  if (tunnel.error) process.stdout.write(`Status detail: ${tunnel.error}\n`);
+}
+
+async function downCommand(stateFileInput: string | undefined): Promise<void> {
+  const stateFile = resolveStateFile(stateFileInput);
+  const state = readState(stateFile);
+  const interfaceName = sanitizeInterfaceName(state.interfaceName || defaultInterfaceName);
+  const configPath = resolveConfigPath(state.configPath, interfaceName);
+  const installDir = resolveInstallDir(state.installDir);
+
+  if (process.platform === 'linux') {
+    inheritRequired('systemctl', ['disable', '--now', `wg-quick@${interfaceName}`]);
+    return;
+  }
+
+  const runtime = resolveWireGuardConnectionRuntime({
+    installDir,
+    allowSystemFallback: true,
+  });
+  if (process.platform === 'darwin') {
+    const result = await uninstallDarwinWireGuardLaunchDaemon({ runtime, configPath });
+    if (!result.ok) throw new Error(result.message);
+    process.stdout.write(`${result.message}\n`);
+    return;
+  }
+  const result = await setWireGuardTunnelState({ runtime, configPath, action: 'down' });
+  if (!result.ok) throw new Error(result.message);
+  process.stdout.write(`${result.message}\n`);
+}
+
+function parseEnrollOptions(args: string[]): HdoEnrollOptions {
+  const options: HdoEnrollOptions = {
+    interfaceName: defaultInterfaceName,
+    role: 'internal',
+    start: true,
+    rotateKey: false,
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    const readValue = () => {
+      const value = args[index + 1];
+      if (!value) throw new Error(`Missing value for ${arg}`);
+      index += 1;
+      return value;
+    };
+    switch (arg) {
+      case '--server-url':
+        options.serverUrl = readValue();
+        break;
+      case '--token':
+        options.token = readValue();
+        break;
+      case '--token-file':
+        options.tokenFile = readValue();
+        break;
+      case '--username':
+      case '--user':
+        options.username = readValue();
+        break;
+      case '--password':
+        options.password = readValue();
+        break;
+      case '--password-file':
+        options.passwordFile = readValue();
+        break;
+      case '--device-id':
+        options.deviceId = readValue();
+        break;
+      case '--label':
+        options.label = readValue();
+        break;
+      case '--interface':
+        options.interfaceName = readValue();
+        break;
+      case '--config-path':
+        options.configPath = readValue();
+        break;
+      case '--state-file':
+        options.stateFile = readValue();
+        break;
+      case '--install-dir':
+        options.installDir = readValue();
+        break;
+      case '--role':
+        options.role = readValue();
+        break;
+      case '--rotate-key':
+        options.rotateKey = true;
+        break;
+      case '--no-start':
+        options.start = false;
+        break;
+      default:
+        throw new Error(`Unknown hdo enroll option: ${arg}`);
+    }
+  }
+
+  return options;
+}
+
+function parseStateFileArg(args: string[]): string | undefined {
+  let stateFile: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === '--state-file') {
+      const value = args[index + 1];
+      if (!value) throw new Error('Missing value for --state-file');
+      stateFile = value;
+      index += 1;
+    } else {
+      throw new Error(`Unknown hdo option: ${arg}`);
+    }
+  }
+  return stateFile;
+}
+
+async function resolveAuth(
+  serverUrl: string,
+  options: HdoEnrollOptions,
+  previous: HdoClientState,
+  username?: string,
+): Promise<HdoAuthMaterial> {
+  const token = resolveExplicitToken(options);
+  if (token) {
+    return {
+      accessToken: token,
+      refreshToken: previous.refreshToken,
+      accessExpiresAt: previous.accessExpiresAt,
+      refreshExpiresAt: previous.refreshExpiresAt,
+      username,
+    };
+  }
+
+  if (previous.refreshToken && !tokenExpired(previous.refreshExpiresAt)) {
+    try {
+      return await refreshAuth(serverUrl, previous.refreshToken, username ?? previous.username);
+    } catch {
+      // Fall through to username/password login.
+    }
+  }
+
+  const identifier = username;
+  const password = resolvePassword(options);
+  if (identifier && password) {
+    return loginAuth(serverUrl, identifier, password);
+  }
+  if (previous.bearerToken && !tokenExpired(previous.accessExpiresAt)) {
+    return {
+      accessToken: previous.bearerToken,
+      refreshToken: previous.refreshToken,
+      accessExpiresAt: previous.accessExpiresAt,
+      refreshExpiresAt: previous.refreshExpiresAt,
+      username: username ?? previous.username,
+    };
+  }
+  if (!identifier) {
+    throw new Error('Missing --username, HDO_USERNAME, or --token.');
+  }
+  throw new Error('Missing --password, --password-file, or HDO_PASSWORD.');
+}
+
+function resolveExplicitToken(options: HdoEnrollOptions): string | undefined {
+  if (options.token) return options.token;
+  if (options.tokenFile) return readFileSync(resolve(options.tokenFile), 'utf8').trim();
+  return process.env.HDO_TOKEN ?? process.env.QPJOY_HDO_TOKEN;
+}
+
+function resolvePassword(options: HdoEnrollOptions): string | undefined {
+  if (options.password) return options.password;
+  if (options.passwordFile) return readFileSync(resolve(options.passwordFile), 'utf8').trim();
+  return process.env.HDO_PASSWORD ?? process.env.QPJOY_HDO_PASSWORD;
+}
+
+async function loginAuth(serverUrl: string, identifier: string, password: string): Promise<HdoAuthMaterial> {
+  const raw = await apiJson(serverUrl, '', '/api/v1/auth/login', {
+    method: 'POST',
+    body: { identifier, password },
+    auth: false,
+  });
+  const root = requireRecord(raw, 'auth response');
+  const tokens = requireRecord(root.tokens, 'auth response tokens');
+  const accessToken = stringField(tokens.accessToken);
+  if (!accessToken) throw new Error('Auth response did not include accessToken.');
+  return {
+    accessToken,
+    refreshToken: stringField(tokens.refreshToken) ?? undefined,
+    accessExpiresAt: stringField(tokens.accessExpiresAt) ?? undefined,
+    refreshExpiresAt: stringField(tokens.refreshExpiresAt) ?? undefined,
+    username: identifier,
+  };
+}
+
+async function refreshAuth(serverUrl: string, refreshToken: string, username?: string): Promise<HdoAuthMaterial> {
+  const raw = await apiJson(serverUrl, '', '/api/v1/auth/refresh', {
+    method: 'POST',
+    body: { refreshToken },
+    auth: false,
+  });
+  const root = requireRecord(raw, 'refresh response');
+  const accessToken = stringField(root.accessToken);
+  if (!accessToken) throw new Error('Refresh response did not include accessToken.');
+  return {
+    accessToken,
+    refreshToken: stringField(root.refreshToken) ?? refreshToken,
+    accessExpiresAt: stringField(root.accessExpiresAt) ?? undefined,
+    refreshExpiresAt: stringField(root.refreshExpiresAt) ?? undefined,
+    username,
+  };
+}
+
+function resolveKeypair(
+  options: HdoEnrollOptions,
+  previous: HdoClientState,
+  installDir: string,
+): { privateKey: string; publicKey: string } {
+  if (!options.rotateKey && previous.privateKey && previous.publicKey) {
+    return { privateKey: previous.privateKey, publicKey: previous.publicKey };
+  }
+  const runtime = resolveWireGuardRuntime({
+    installDir,
+    allowSystemFallback: true,
+  });
+  if (!runtime.command) {
+    throw new Error(runtime.error ?? 'WireGuard wg command unavailable.');
+  }
+  return generateWireGuardKeyPairWithCli(runtime.command);
+}
+
+async function startSystemTunnel(interfaceName: string, configPath: string, installDir: string): Promise<string> {
+  if (process.platform === 'linux') {
+    inheritRequired('systemctl', ['enable', `wg-quick@${interfaceName}`]);
+    inheritRequired('systemctl', ['restart', `wg-quick@${interfaceName}`]);
+    return `Enabled and restarted wg-quick@${interfaceName}.`;
+  }
+
+  const runtime = resolveWireGuardConnectionRuntime({
+    installDir,
+    allowSystemFallback: true,
+  });
+  if (process.platform === 'darwin') {
+    const result = await installDarwinWireGuardLaunchDaemon({ runtime, configPath });
+    if (!result.ok) throw new Error(result.message);
+    return result.message;
+  }
+
+  if (process.platform === 'win32') {
+    const result = await setWireGuardTunnelState({ runtime, configPath, action: 'restart' });
+    if (!result.ok) throw new Error(result.message);
+    return result.message;
+  }
+
+  throw new Error(`Unsupported platform for HDO system tunnel: ${process.platform}`);
+}
+
+function readState(path: string): HdoClientState {
+  if (!existsSync(path)) return {};
+  const raw = readFileSync(path, 'utf8');
+  const parsed = JSON.parse(raw) as unknown;
+  if (!isRecord(parsed)) return {};
+  return parsed as HdoClientState;
+}
+
+function writeState(path: string, state: HdoClientState): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writeFileSync(path, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
+  chmodSyncSafe(path, 0o600);
+}
+
+function writeWireGuardConfig(path: string, content: string): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writeFileSync(path, content, { mode: 0o600 });
+  chmodSyncSafe(path, 0o600);
+}
+
+function hdoRuntimeFromManifest(
+  manifest: unknown,
+  registered: unknown,
+  privateKey: string,
+): {
+  privateKey: string;
+  address: string;
+  overlayIp: string;
+  domesticPublicKey: string;
+  domesticEndpoint: string;
+  allowedIps: string[];
+  generation?: number;
+} {
+  const root = requireRecord(manifest, 'manifest');
+  const license = requireRecord(root.license, 'manifest.license');
+  if (license.active !== true) {
+    throw new Error('HDO mesh license is not active for this user/device.');
+  }
+  const wireGuard = requireRecord(root.wireGuard, 'manifest.wireGuard');
+  const client = requireRecord(wireGuard.client, 'manifest.wireGuard.client');
+  const domestic = requireRecord(wireGuard.domestic, 'manifest.wireGuard.domestic');
+  const overlayIp =
+    stringField(client.overlayIp) ||
+    stringField(requireRecord(registered, 'registered device').overlayIp);
+  const domesticPublicKey = stringField(domestic.publicKey);
+  const domesticEndpoint = stringField(domestic.endpoint);
+  if (!overlayIp) throw new Error('HDO manifest did not assign an overlay IP.');
+  if (!domesticPublicKey || !domesticEndpoint) {
+    throw new Error('HDO manifest is missing domestic WireGuard publicKey/endpoint.');
+  }
+  const routeCidrs = stringArray(wireGuard.routeCidrs);
+  const domesticOverlay = stringField(domestic.overlayIp);
+  const allowedIps = uniqueStrings([
+    ...routeCidrs,
+    ...(domesticOverlay ? [`${domesticOverlay}/32`] : []),
+  ]).filter((value) => value.includes('/'));
+  if (allowedIps.length === 0) {
+    throw new Error('HDO manifest did not include WireGuard AllowedIPs.');
+  }
+  return {
+    privateKey,
+    address: overlayIp.includes('/') ? overlayIp : `${overlayIp}/32`,
+    overlayIp: overlayIp.split('/')[0] || overlayIp,
+    domesticPublicKey,
+    domesticEndpoint,
+    allowedIps,
+    generation: numberField(root.generation),
+  };
+}
+
+async function apiJson(
+  serverUrl: string,
+  token: string,
+  path: string,
+  input: { method: 'GET' | 'POST'; body?: unknown; auth?: boolean },
+): Promise<unknown> {
+  const headers: Record<string, string> = {};
+  if (input.auth !== false) headers.authorization = `Bearer ${token}`;
+  if (input.body !== undefined) headers['content-type'] = 'application/json';
+  const response = await fetch(`${serverUrl}${path}`, {
+    method: input.method,
+    headers,
+    body: input.body === undefined ? undefined : JSON.stringify(input.body),
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`HDO API ${input.method} ${path} failed: HTTP ${response.status} ${text}`);
+  }
+  return text ? JSON.parse(text) as unknown : null;
+}
+
+function resolveStateFile(input?: string): string {
+  return resolve(input || defaultStateFile());
+}
+
+function resolveConfigPath(input: string | undefined, interfaceName: string): string {
+  return resolve(input || defaultConfigPath(interfaceName));
+}
+
+function resolveInstallDir(input?: string): string {
+  return resolve(input || defaultInstallDir());
+}
+
+function defaultStateFile(): string {
+  if (process.platform === 'linux') return '/etc/qpjoy/hdo/client.json';
+  if (process.platform === 'win32') return join(windowsUserDataDir(), 'client.json');
+  return join(homedir(), '.qpjoy', 'hdo', 'client.json');
+}
+
+function defaultConfigPath(interfaceName: string): string {
+  if (process.platform === 'linux') return `/etc/wireguard/${interfaceName}.conf`;
+  if (process.platform === 'win32') return join(windowsUserDataDir(), `${interfaceName}.conf`);
+  return join(homedir(), '.qpjoy', 'hdo', `${interfaceName}.conf`);
+}
+
+function defaultInstallDir(): string {
+  if (process.platform === 'linux') return '/usr/local/lib/qpjoy/hdo/bin';
+  if (process.platform === 'win32') return join(windowsUserDataDir(), 'bin');
+  return join(homedir(), '.qpjoy', 'hdo', 'bin');
+}
+
+function windowsUserDataDir(): string {
+  return join(process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'QPJoy', 'HDO');
+}
+
+function inherit(command: string, args: string[]): void {
+  spawnSync(command, args, { stdio: 'inherit' });
+}
+
+function inheritRequired(command: string, args: string[]): void {
+  const result = spawnSync(command, args, { stdio: 'inherit' });
+  assertSpawnOk(command, args, result);
+}
+
+function assertSpawnOk(command: string, args: string[], result: SpawnSyncReturns<string | Buffer>): void {
+  if (result.error) {
+    throw new Error(`${command} failed: ${result.error.message}`);
+  }
+  if (result.status && result.status !== 0) {
+    const stderr = Buffer.isBuffer(result.stderr) ? result.stderr.toString('utf8') : result.stderr;
+    throw new Error(`${command} ${args.join(' ')} failed with exit ${result.status}${stderr ? `: ${stderr}` : ''}`);
+  }
+}
+
+function normalizeBaseUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  return value.replace(/\/+$/, '');
+}
+
+function sanitizeInterfaceName(value: string): string {
+  const safe = value.trim();
+  if (!/^[a-zA-Z0-9_.-]{1,64}$/.test(safe)) {
+    throw new Error(`Invalid WireGuard interface name: ${value}`);
+  }
+  return safe;
+}
+
+function sanitizeId(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9._:-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'device';
+}
+
+function tokenExpired(value: string | undefined): boolean {
+  if (!value) return false;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && Date.now() > time - 60_000;
+}
+
+function chmodSyncSafe(path: string, mode: number): void {
+  if (process.platform === 'win32') return;
+  chmodSync(path, mode);
+}
+
+function requireRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!isRecord(value)) throw new Error(`${label} is not an object.`);
+  return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stringField(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function numberField(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function stringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => stringField(item)).filter((item): item is string => Boolean(item));
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
+}

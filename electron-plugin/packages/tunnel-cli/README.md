@@ -1,6 +1,7 @@
 # @qpjoy/tunnel-cli
 
-Global CLI wrapper for the QPJoy Linux `mihomo-client` server script.
+Global CLI wrapper for the QPJoy Linux `mihomo-client` server script and
+cross-platform headless HDO mesh enrollment.
 
 ```bash
 npm i -g @qpjoy/tunnel-cli
@@ -8,8 +9,62 @@ qp-tunnel-cli help
 ```
 
 The package ships the existing `scripts/mihomo-client.sh` file in the npm
-tarball. It does not reimplement the Linux systemd, proxy, SSH, daemon, or TUN
-orchestration in Node.
+tarball. It also depends on `@qpjoy/electron-core-wireguard`, which resolves the
+matching platform engine package such as darwin-arm64, linux-x64, or win32-x64.
+The core WireGuard package is consumed as-is; this CLI does not modify its HDO
+plugin behavior.
+
+## HDO Mesh Enrollment
+
+For macOS, Windows, or a headless Linux machine such as an Internal/company
+server, enroll into the HDO mesh without installing Electron:
+
+```bash
+npm i -g @qpjoy/tunnel-cli
+HDO_PASSWORD='<password>' qp-tunnel-cli hdo enroll \
+  --server-url 'https://domestic.example.com' \
+  --username 'internal-i' \
+  --device-id internal-i \
+  --label 'Internal I'
+```
+
+On Linux, run the same command through `sudo -E` because it writes
+`/etc/wireguard` and enables `wg-quick@hdo-internal`:
+
+```bash
+HDO_PASSWORD='<password>' sudo -E qp-tunnel-cli hdo enroll \
+  --server-url 'https://domestic.example.com' \
+  --username 'internal-i'
+```
+
+The command:
+
+- logs in with username/password, or uses `--token` when provided
+- uses `@qpjoy/electron-core-wireguard` to find/install the platform WireGuard engine
+- registers the machine as an HDO device
+- downloads the HDO manifest from `electron-server`
+- writes a local WireGuard config
+- stores local HDO state and refresh credentials
+- starts a system-level tunnel at boot
+
+Useful follow-up commands:
+
+```bash
+qp-tunnel-cli hdo status
+qp-tunnel-cli hdo refresh
+qp-tunnel-cli hdo down
+```
+
+Platform behavior:
+
+- Linux: writes `/etc/wireguard/hdo-internal.conf` and enables `wg-quick@hdo-internal`
+- macOS: installs a LaunchDaemon and may prompt for an administrator password
+- Windows: installs a WireGuard tunnel service and may show a UAC prompt
+
+Current MVP authentication accepts either username/password or the same bearer
+token used by the HDO API. Production enrollment should move to short-lived
+enrollment tokens and durable service tokens so external systems do not need to
+handle user session JWTs.
 
 ## Server Usage
 
