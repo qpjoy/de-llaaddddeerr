@@ -151,6 +151,7 @@ HDO_DOMESTIC_IP=${HDO_DOMESTIC_IP:-100.88.0.1}
 HDO_NEXT_HOME_OCTET=${HDO_NEXT_HOME_OCTET:-10}
 HDO_DOMESTIC_PRIVATE_KEY=${HDO_DOMESTIC_PRIVATE_KEY:-}
 HDO_DOMESTIC_PUBLIC_KEY=${HDO_DOMESTIC_PUBLIC_KEY:-}
+HDO_TCP_MSS=${HDO_TCP_MSS:-1240}
 EOF
 }
 
@@ -463,7 +464,7 @@ PrivateKey = ${private}
 
 [Peer]
 PublicKey = ${HDO_DOMESTIC_PUBLIC_KEY}
-AllowedIPs = 100.88.0.0/16, 100.90.0.0/16
+AllowedIPs = 100.88.0.0/16, 100.89.0.0/16, 100.90.0.0/16
 Endpoint = ${HDO_PUBLIC_HOST}:${HDO_WG_PORT}
 PersistentKeepalive = 25
 EOF
@@ -511,11 +512,16 @@ sync_domestic_peer_routes() {
 
 ensure_domestic_forwarding() {
   local iface="${1:-hdo-home}"
+  local mss="${HDO_TCP_MSS:-1240}"
 
   [ "$(id -u)" -eq 0 ] || return 0
 
   sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
   sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+  sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
+  sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
+  sysctl -w "net.ipv4.conf.${iface}.rp_filter=0" >/dev/null 2>&1 || true
+  ip link set dev "$iface" txqueuelen 4096 >/dev/null 2>&1 || true
 
   if command -v iptables >/dev/null 2>&1; then
     if ! iptables -C FORWARD -i "$iface" -o "$iface" -j ACCEPT >/dev/null 2>&1; then
@@ -526,6 +532,12 @@ ensure_domestic_forwarding() {
       if ! iptables -C DOCKER-USER -i "$iface" -o "$iface" -j ACCEPT >/dev/null 2>&1; then
         iptables -I DOCKER-USER 1 -i "$iface" -o "$iface" -j ACCEPT \
           || warn "failed to allow Docker user forwarding on $iface"
+      fi
+    fi
+    if [ -n "$mss" ] && [ "$mss" -gt 0 ] 2>/dev/null; then
+      if ! iptables -t mangle -C FORWARD -o "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss" >/dev/null 2>&1; then
+        iptables -t mangle -I FORWARD 1 -o "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss" \
+          || warn "failed to install TCP MSS clamp on $iface"
       fi
     fi
   fi
@@ -601,6 +613,8 @@ cmd_apply_domestic() {
   cat > /etc/sysctl.d/99-hdo-forwarding.conf <<'EOF'
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
 EOF
   sysctl -p /etc/sysctl.d/99-hdo-forwarding.conf >/dev/null || true
   install -d -m 700 /etc/wireguard
@@ -760,6 +774,9 @@ cmd_status() {
     fi
     if command -v ip >/dev/null 2>&1; then
       echo
+      echo "link stats:"
+      ip -s link show dev hdo-home || true
+      echo
       echo "routes on hdo-home:"
       ip route show dev hdo-home || true
     fi
@@ -768,6 +785,7 @@ cmd_status() {
       echo "iptables hdo-home forwarding:"
       iptables -vnL FORWARD | awk 'NR == 1 || /hdo-home/' || true
       iptables -vnL DOCKER-USER 2>/dev/null | awk 'NR == 1 || /hdo-home/' || true
+      iptables -t mangle -vnL FORWARD | awk 'NR == 1 || /hdo-home|TCPMSS/' || true
     fi
   else
     echo "run as root to include live wg, route and iptables state"

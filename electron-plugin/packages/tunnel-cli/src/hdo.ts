@@ -18,6 +18,7 @@ import {
   resolveWireGuardConnectionRuntime,
   resolveWireGuardRuntime,
   setWireGuardTunnelState,
+  type WireGuardConnectionRuntimeStatus,
   uninstallDarwinWireGuardLaunchDaemon,
 } from '@qpjoy/electron-core-wireguard';
 
@@ -72,6 +73,13 @@ interface HdoAuthMaterial {
   username?: string;
 }
 
+interface HdoCommandOptions {
+  stateFile?: string;
+  interfaceName?: string;
+  configPath?: string;
+  installDir?: string;
+}
+
 const defaultInterfaceName = 'hdo-internal';
 
 export async function runHdoCli(args: string[], ctx: HdoCliContext): Promise<void> {
@@ -93,10 +101,10 @@ export async function runHdoCli(args: string[], ctx: HdoCliContext): Promise<voi
       await enrollCommand(rest, command === 'refresh');
       return;
     case 'status':
-      statusCommand(parseStateFileArg(rest));
+      statusCommand(parseCommandOptions(rest));
       return;
     case 'down':
-      await downCommand(parseStateFileArg(rest));
+      await downCommand(parseCommandOptions(rest));
       return;
     default:
       process.stderr.write(`Unknown hdo command: ${command}\n\n`);
@@ -112,8 +120,8 @@ Usage:
   qp-tunnel-cli hdo enroll --server-url URL --username USER [options]
   qp-tunnel-cli hdo enroll --server-url URL --token TOKEN [options]
   qp-tunnel-cli hdo refresh [--server-url URL] [--username USER]
-  qp-tunnel-cli hdo status
-  qp-tunnel-cli hdo down
+  qp-tunnel-cli hdo status [--interface NAME]
+  qp-tunnel-cli hdo down [--interface NAME]
 
 Enroll options:
   --server-url URL       HDO/electron-server base URL
@@ -149,8 +157,14 @@ Examples:
 
 Notes:
   Linux writes /etc/wireguard and enables wg-quick@<interface>.
+  If Linux does not provide wg-quick@.service, this CLI installs a compatible
+  systemd unit that uses the bundled WireGuard tools from npm.
   macOS installs a LaunchDaemon and may prompt for an administrator password.
   Windows installs a WireGuard tunnel service and may show a UAC prompt.
+
+Tip:
+  If the Electron HDO plugin created the tunnel, stop it with:
+  qp-tunnel-cli hdo down --interface hdo-client
 `);
 }
 
@@ -257,12 +271,16 @@ async function enrollCommand(args: string[], refreshOnly: boolean): Promise<void
   );
 }
 
-function statusCommand(stateFileInput: string | undefined): void {
-  const stateFile = resolveStateFile(stateFileInput);
+function statusCommand(input: HdoCommandOptions): void {
+  const stateFile = resolveStateFile(input.stateFile);
   const state = readState(stateFile);
-  const interfaceName = sanitizeInterfaceName(state.interfaceName || defaultInterfaceName);
-  const configPath = resolveConfigPath(state.configPath, interfaceName);
-  const installDir = resolveInstallDir(state.installDir);
+  const interfaceName = sanitizeInterfaceName(input.interfaceName || state.interfaceName || defaultInterfaceName);
+  const configPath = resolveConfigPath(input.configPath || state.configPath, interfaceName);
+  const installDir = resolveInstallDir(input.installDir || state.installDir);
+  const runtime = resolveWireGuardConnectionRuntime({
+    installDir,
+    allowSystemFallback: true,
+  });
 
   process.stdout.write(`State file: ${stateFile}\n`);
   process.stdout.write(`Server URL: ${state.serverUrl || 'unset'}\n`);
@@ -271,38 +289,52 @@ function statusCommand(stateFileInput: string | undefined): void {
   process.stdout.write(`WireGuard config: ${configPath}\n\n`);
 
   if (process.platform === 'linux') {
-    inherit('systemctl', ['status', `wg-quick@${interfaceName}`, '--no-pager']);
-    process.stdout.write('\n');
-    inherit('wg', ['show', interfaceName]);
+    if (commandAvailable('systemctl')) {
+      inherit('systemctl', ['status', `wg-quick@${interfaceName}`, '--no-pager']);
+      process.stdout.write('\n');
+    } else {
+      process.stdout.write('systemctl unavailable; showing WireGuard runtime status only.\n\n');
+    }
+    printWireGuardRuntimeStatus(runtime, configPath);
     return;
   }
 
-  const runtime = resolveWireGuardConnectionRuntime({
-    installDir,
-    allowSystemFallback: true,
-  });
   if (process.platform === 'darwin') {
     const daemon = getDarwinWireGuardLaunchDaemonStatus({ runtime, configPath });
     process.stdout.write(`LaunchDaemon: ${daemon.loaded ? 'loaded' : 'not loaded'}; running=${daemon.running}\n`);
     if (daemon.plistPath) process.stdout.write(`plist: ${daemon.plistPath}\n`);
   }
-  const tunnel = getWireGuardTunnelStatus({ runtime, configPath });
-  process.stdout.write(`WireGuard active: ${tunnel.active}\n`);
-  process.stdout.write(`Runtime: ${runtime.method}\n`);
-  if (tunnel.realInterfaceName) process.stdout.write(`Interface: ${tunnel.realInterfaceName}\n`);
-  if (tunnel.peers.length) process.stdout.write(`Peers: ${tunnel.peers.length}\n`);
-  if (tunnel.error) process.stdout.write(`Status detail: ${tunnel.error}\n`);
+  try {
+    const tunnel = getWireGuardTunnelStatus({ runtime, configPath });
+    process.stdout.write(`WireGuard active: ${tunnel.active}\n`);
+    process.stdout.write(`Runtime: ${runtime.method}\n`);
+    if (tunnel.realInterfaceName) process.stdout.write(`Interface: ${tunnel.realInterfaceName}\n`);
+    if (tunnel.peers.length) process.stdout.write(`Peers: ${tunnel.peers.length}\n`);
+    if (tunnel.error) process.stdout.write(`Status detail: ${tunnel.error}\n`);
+  } catch (err) {
+    process.stdout.write(`WireGuard status detail: ${errorMessage(err)}\n`);
+  }
 }
 
-async function downCommand(stateFileInput: string | undefined): Promise<void> {
-  const stateFile = resolveStateFile(stateFileInput);
+async function downCommand(input: HdoCommandOptions): Promise<void> {
+  const stateFile = resolveStateFile(input.stateFile);
   const state = readState(stateFile);
-  const interfaceName = sanitizeInterfaceName(state.interfaceName || defaultInterfaceName);
-  const configPath = resolveConfigPath(state.configPath, interfaceName);
-  const installDir = resolveInstallDir(state.installDir);
+  const interfaceName = sanitizeInterfaceName(input.interfaceName || state.interfaceName || defaultInterfaceName);
+  const configPath = resolveConfigPath(input.configPath || state.configPath, interfaceName);
+  const installDir = resolveInstallDir(input.installDir || state.installDir);
 
   if (process.platform === 'linux') {
-    inheritRequired('systemctl', ['disable', '--now', `wg-quick@${interfaceName}`]);
+    const runtime = resolveWireGuardConnectionRuntime({
+      installDir,
+      allowSystemFallback: true,
+    });
+    if (commandAvailable('systemctl') && systemdUnitExists('wg-quick@.service')) {
+      inheritRequired('systemctl', ['disable', '--now', `wg-quick@${interfaceName}`]);
+      return;
+    }
+    const result = await setWireGuardTunnelState({ runtime, configPath, action: 'down' });
+    if (!result.ok) throw new Error(result.message);
+    process.stdout.write(`${result.message}\n`);
     return;
   }
 
@@ -311,6 +343,10 @@ async function downCommand(stateFileInput: string | undefined): Promise<void> {
     allowSystemFallback: true,
   });
   if (process.platform === 'darwin') {
+    if (!canReadFile(configPath)) {
+      uninstallDarwinLaunchDaemonByInterface(interfaceName);
+      return;
+    }
     const result = await uninstallDarwinWireGuardLaunchDaemon({ runtime, configPath });
     if (!result.ok) throw new Error(result.message);
     process.stdout.write(`${result.message}\n`);
@@ -392,20 +428,34 @@ function parseEnrollOptions(args: string[]): HdoEnrollOptions {
   return options;
 }
 
-function parseStateFileArg(args: string[]): string | undefined {
-  let stateFile: string | undefined;
+function parseCommandOptions(args: string[]): HdoCommandOptions {
+  const options: HdoCommandOptions = {};
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
-    if (arg === '--state-file') {
+    const readValue = () => {
       const value = args[index + 1];
-      if (!value) throw new Error('Missing value for --state-file');
-      stateFile = value;
+      if (!value) throw new Error(`Missing value for ${arg}`);
       index += 1;
-    } else {
-      throw new Error(`Unknown hdo option: ${arg}`);
+      return value;
+    };
+    switch (arg) {
+      case '--state-file':
+        options.stateFile = readValue();
+        break;
+      case '--interface':
+        options.interfaceName = readValue();
+        break;
+      case '--config-path':
+        options.configPath = readValue();
+        break;
+      case '--install-dir':
+        options.installDir = readValue();
+        break;
+      default:
+        throw new Error(`Unknown hdo option: ${arg}`);
     }
   }
-  return stateFile;
+  return options;
 }
 
 async function resolveAuth(
@@ -522,6 +572,14 @@ function resolveKeypair(
 
 async function startSystemTunnel(interfaceName: string, configPath: string, installDir: string): Promise<string> {
   if (process.platform === 'linux') {
+    const runtime = await ensureLinuxWireGuardRuntime(installDir);
+    if (!commandAvailable('systemctl')) {
+      const result = await setWireGuardTunnelState({ runtime, configPath, action: 'restart' });
+      if (!result.ok) throw new Error(result.message);
+      return `${result.message} systemctl is unavailable, so this tunnel is not installed as a boot service.`;
+    }
+    ensureLinuxWgQuickSystemdUnit(runtime);
+    inheritRequired('systemctl', ['daemon-reload']);
     inheritRequired('systemctl', ['enable', `wg-quick@${interfaceName}`]);
     inheritRequired('systemctl', ['restart', `wg-quick@${interfaceName}`]);
     return `Enabled and restarted wg-quick@${interfaceName}.`;
@@ -642,7 +700,10 @@ function resolveStateFile(input?: string): string {
 }
 
 function resolveConfigPath(input: string | undefined, interfaceName: string): string {
-  return resolve(input || defaultConfigPath(interfaceName));
+  if (input) return resolve(input);
+  const launchDaemonConfig = darwinLaunchDaemonConfigPath(interfaceName);
+  if (launchDaemonConfig && existsSync(launchDaemonConfig)) return launchDaemonConfig;
+  return resolve(defaultConfigPath(interfaceName));
 }
 
 function resolveInstallDir(input?: string): string {
@@ -659,6 +720,11 @@ function defaultConfigPath(interfaceName: string): string {
   if (process.platform === 'linux') return `/etc/wireguard/${interfaceName}.conf`;
   if (process.platform === 'win32') return join(windowsUserDataDir(), `${interfaceName}.conf`);
   return join(homedir(), '.qpjoy', 'hdo', `${interfaceName}.conf`);
+}
+
+function darwinLaunchDaemonConfigPath(interfaceName: string): string | null {
+  if (process.platform !== 'darwin') return null;
+  return `/Library/Application Support/QPJoy/HDO/${interfaceName}/${interfaceName}.conf`;
 }
 
 function defaultInstallDir(): string {
@@ -678,6 +744,176 @@ function inherit(command: string, args: string[]): void {
 function inheritRequired(command: string, args: string[]): void {
   const result = spawnSync(command, args, { stdio: 'inherit' });
   assertSpawnOk(command, args, result);
+}
+
+function printWireGuardRuntimeStatus(runtime: WireGuardConnectionRuntimeStatus, configPath: string): void {
+  process.stdout.write(`Runtime: ${runtime.method}\n`);
+  if (runtime.warnings.length) {
+    process.stdout.write(`Runtime warnings: ${runtime.warnings.join('; ')}\n`);
+  }
+  try {
+    const tunnel = getWireGuardTunnelStatus({ runtime, configPath });
+    process.stdout.write(`WireGuard active: ${tunnel.active}\n`);
+    if (tunnel.realInterfaceName) process.stdout.write(`Interface: ${tunnel.realInterfaceName}\n`);
+    if (tunnel.peers.length) process.stdout.write(`Peers: ${tunnel.peers.length}\n`);
+    if (tunnel.error) process.stdout.write(`Status detail: ${tunnel.error}\n`);
+  } catch (err) {
+    process.stdout.write(`WireGuard status detail: ${errorMessage(err)}\n`);
+  }
+}
+
+async function ensureLinuxWireGuardRuntime(installDir: string): Promise<WireGuardConnectionRuntimeStatus> {
+  let runtime = resolveWireGuardConnectionRuntime({
+    installDir,
+    allowSystemFallback: true,
+  });
+  if (runtime.available) return runtime;
+
+  const installed = installLinuxWireGuardTools();
+  runtime = resolveWireGuardConnectionRuntime({
+    installDir,
+    allowSystemFallback: true,
+  });
+  if (runtime.available) return runtime;
+
+  throw new Error(
+    installed
+      ? runtime.error ?? 'WireGuard runtime unavailable after installing wireguard-tools.'
+      : `${runtime.error ?? 'WireGuard runtime unavailable'}. Install wireguard-tools or use an npm package with the matching @qpjoy/electron-core-wireguard-engine package.`,
+  );
+}
+
+function installLinuxWireGuardTools(): boolean {
+  const installers: Array<{ probe: string; commands: string[][]; label: string }> = [
+    { probe: 'apt-get', label: 'apt-get', commands: [['apt-get', 'update'], ['apt-get', 'install', '-y', 'wireguard-tools']] },
+    { probe: 'dnf', label: 'dnf', commands: [['dnf', 'install', '-y', 'wireguard-tools']] },
+    { probe: 'yum', label: 'yum', commands: [['yum', 'install', '-y', 'epel-release'], ['yum', 'install', '-y', 'wireguard-tools']] },
+    { probe: 'apk', label: 'apk', commands: [['apk', 'add', '--no-cache', 'wireguard-tools']] },
+    { probe: 'zypper', label: 'zypper', commands: [['zypper', '--non-interactive', 'install', 'wireguard-tools']] },
+    { probe: 'pacman', label: 'pacman', commands: [['pacman', '-Sy', '--noconfirm', 'wireguard-tools']] },
+  ];
+
+  for (const installer of installers) {
+    if (!commandAvailable(installer.probe)) continue;
+    process.stdout.write(`WireGuard tools are missing; installing wireguard-tools with ${installer.label}.\n`);
+    for (const command of installer.commands) {
+      const [name, ...args] = command;
+      const result = spawnSync(name, args, { stdio: 'inherit' });
+      if (result.status !== 0) {
+        process.stdout.write(`wireguard-tools install step failed: ${command.join(' ')}\n`);
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+function ensureLinuxWgQuickSystemdUnit(runtime: WireGuardConnectionRuntimeStatus): void {
+  if (systemdUnitUsable()) return;
+
+  const wgQuick = runtime.wgQuick?.command;
+  if (!wgQuick) {
+    throw new Error(runtime.error ?? 'wg-quick unavailable; cannot install systemd boot service.');
+  }
+
+  const unitPath = '/etc/systemd/system/wg-quick@.service';
+  if (existsSync(unitPath)) {
+    throw new Error(
+      `${unitPath} exists but wg/wg-quick is not available in PATH. Install wireguard-tools or fix the existing unit.`,
+    );
+  }
+
+  mkdirSync(dirname(unitPath), { recursive: true });
+  writeFileSync(unitPath, renderLinuxWgQuickSystemdUnit(runtime, wgQuick), { mode: 0o644 });
+  chmodSyncSafe(unitPath, 0o644);
+  process.stdout.write(`Installed ${unitPath} using bundled WireGuard tools.\n`);
+}
+
+function renderLinuxWgQuickSystemdUnit(
+  runtime: WireGuardConnectionRuntimeStatus,
+  wgQuick: string,
+): string {
+  const pathDirs = uniqueStrings([
+    runtime.wg.command ? dirname(runtime.wg.command) : '',
+    runtime.wgQuick?.command ? dirname(runtime.wgQuick.command) : '',
+    runtime.wireGuardGo?.command ? dirname(runtime.wireGuardGo.command) : '',
+    '/usr/local/sbin',
+    '/usr/local/bin',
+    '/usr/sbin',
+    '/usr/bin',
+    '/sbin',
+    '/bin',
+  ].filter(Boolean));
+  return `[Unit]
+Description=WireGuard via wg-quick(8) for %I
+Documentation=man:wg-quick(8) man:wg(8)
+Wants=network-online.target
+After=network-online.target nss-lookup.target
+ConditionPathExists=/etc/wireguard/%i.conf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=${systemdQuote(`PATH=${pathDirs.join(':')}`)}
+Environment=WG_ENDPOINT_RESOLUTION_RETRIES=infinity
+ExecStart=${systemdQuote(wgQuick)} up %i
+ExecStop=${systemdQuote(wgQuick)} down %i
+
+[Install]
+WantedBy=multi-user.target
+`;
+}
+
+function systemdUnitUsable(): boolean {
+  return systemdUnitExists('wg-quick@.service') && commandAvailable('wg') && commandAvailable('wg-quick');
+}
+
+function systemdUnitExists(unitName: string): boolean {
+  const paths = [
+    `/etc/systemd/system/${unitName}`,
+    `/run/systemd/system/${unitName}`,
+    `/lib/systemd/system/${unitName}`,
+    `/usr/lib/systemd/system/${unitName}`,
+  ];
+  if (paths.some((path) => existsSync(path))) return true;
+  if (!commandAvailable('systemctl')) return false;
+  const result = spawnSync('systemctl', ['cat', unitName], { stdio: 'ignore' });
+  return result.status === 0;
+}
+
+function commandAvailable(command: string): boolean {
+  const result = spawnSync('sh', ['-c', 'command -v "$1" >/dev/null 2>&1', 'sh', command], {
+    stdio: 'ignore',
+  });
+  return result.status === 0;
+}
+
+function uninstallDarwinLaunchDaemonByInterface(interfaceName: string): void {
+  const component = sanitizeLaunchDaemonComponent(interfaceName);
+  const label = `com.qpjoy.hdo.wireguard.${component}`;
+  const plist = `/Library/LaunchDaemons/${label}.plist`;
+  const supportDir = `/Library/Application Support/QPJoy/HDO/${component}`;
+  const script = [
+    'set -e',
+    `LABEL=${shellQuote(label)}`,
+    `PLIST=${shellQuote(plist)}`,
+    `SUPPORT_DIR=${shellQuote(supportDir)}`,
+    `PID_FILE=${shellQuote(`/var/run/wireguard/${interfaceName}.pid`)}`,
+    `NAME_FILE=${shellQuote(`/var/run/wireguard/${interfaceName}.name`)}`,
+    `WIREGUARD_GO=${shellQuote(`${supportDir}/bin/wireguard-go`)}`,
+    'launchctl bootout "system/$LABEL" >/dev/null 2>&1 || launchctl bootout system "$PLIST" >/dev/null 2>&1 || true',
+    'if [ -s "$PID_FILE" ]; then WG_PID="$(cat "$PID_FILE" 2>/dev/null || true)"; if [ -n "$WG_PID" ]; then kill "$WG_PID" >/dev/null 2>&1 || true; sleep 0.2; kill -9 "$WG_PID" >/dev/null 2>&1 || true; fi; fi',
+    'if command -v pgrep >/dev/null 2>&1; then for stale_pid in $(pgrep -x wireguard-go 2>/dev/null || true); do stale_command="$(ps -p "$stale_pid" -o command= 2>/dev/null || true)"; printf "%s\\n" "$stale_command" | grep -F "$WIREGUARD_GO" >/dev/null 2>&1 && kill "$stale_pid" >/dev/null 2>&1 || true; done; fi',
+    'rm -f "$PLIST" "$PID_FILE" "$NAME_FILE"',
+    'rm -rf "$SUPPORT_DIR"'
+  ].join('\n');
+  const appleScript = `do shell script ${appleScriptString(script)} with administrator privileges`;
+  const result = spawnSync('osascript', ['-e', appleScript], {
+    encoding: 'utf8'
+  });
+  assertSpawnOk('osascript', ['-e', '<uninstall-hdo-launchdaemon>'], result);
+  process.stdout.write(`Stopped and removed ${label}.\n`);
 }
 
 function assertSpawnOk(command: string, args: string[], result: SpawnSyncReturns<string | Buffer>): void {
@@ -717,9 +953,38 @@ function tokenExpired(value: string | undefined): boolean {
   return Number.isFinite(time) && Date.now() > time - 60_000;
 }
 
+function canReadFile(path: string): boolean {
+  try {
+    readFileSync(path, 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function chmodSyncSafe(path: string, mode: number): void {
   if (process.platform === 'win32') return;
   chmodSync(path, mode);
+}
+
+function sanitizeLaunchDaemonComponent(value: string): string {
+  return value.replace(/[^A-Za-z0-9.-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'hdo-client';
+}
+
+function shellQuote(value: string): string {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function systemdQuote(value: string): string {
+  return `"${String(value).replace(/%/g, '%%').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function appleScriptString(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {

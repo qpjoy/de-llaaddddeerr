@@ -45,7 +45,9 @@ The command:
 - downloads the HDO manifest from `electron-server`
 - writes a local WireGuard config
 - stores local HDO state and refresh credentials
-- starts a system-level tunnel at boot
+- starts a system-level tunnel at boot. On Linux, if `wg-quick@.service` is not
+  installed by the OS, the CLI writes a compatible systemd unit that uses the
+  bundled WireGuard tools from the npm package.
 
 Useful follow-up commands:
 
@@ -53,6 +55,13 @@ Useful follow-up commands:
 qp-tunnel-cli hdo status
 qp-tunnel-cli hdo refresh
 qp-tunnel-cli hdo down
+```
+
+If a tunnel was created by the Electron HDO plugin, its default interface is
+`hdo-client`, so stop it with:
+
+```bash
+qp-tunnel-cli hdo down --interface hdo-client
 ```
 
 Platform behavior:

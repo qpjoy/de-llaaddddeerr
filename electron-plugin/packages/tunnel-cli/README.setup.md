@@ -13,4 +13,7 @@ sudo qp-tunnel-cli server-on
 sudo qp-tunnel-cli status
 
 qp-tunnel-cli curl google.com
+
+# 删除mac的HDO进程
+qp-tunnel-cli hdo down --interface hdo-client
 ```
