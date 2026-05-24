@@ -237,6 +237,22 @@ try {
 '
 }
 
+hdo_gateway_runner_port_status() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp "sport = :${HDO_GATEWAY_RUNNER_PORT}" 2>/dev/null | sed '1d'
+    return 0
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -ltnp 2>/dev/null | awk -v port=":${HDO_GATEWAY_RUNNER_PORT}" '$4 ~ port "$"'
+    return 0
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"${HDO_GATEWAY_RUNNER_PORT}" -sTCP:LISTEN 2>/dev/null
+    return 0
+  fi
+  return 1
+}
+
 hdo_gateway_runner_matches_config() {
   local json
   json="$(hdo_gateway_runner_health_json 2>/dev/null || true)"
@@ -352,6 +368,32 @@ cmd_gateway_runner_status() {
   echo "runner health url:        $(hdo_gateway_runner_health_url)"
   echo "runner pid file:          $HDO_GATEWAY_RUNNER_PID_FILE"
   echo "runner log:               $HDO_GATEWAY_RUNNER_LOG"
+
+  if [ ! -s "$HDO_GATEWAY_RUNNER_TOKEN_FILE" ]; then
+    warn "HDO host runner token is missing. Start it with: $0 gateway-runner-start"
+  fi
+
+  if [ -s "$HDO_GATEWAY_RUNNER_PID_FILE" ]; then
+    local pid
+    pid="$(cat "$HDO_GATEWAY_RUNNER_PID_FILE" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      ok "HDO host runner pid $pid exists"
+    else
+      warn "HDO host runner pid file is stale: ${pid:-empty}"
+    fi
+  else
+    warn "HDO host runner pid file is missing."
+  fi
+
+  local listeners
+  listeners="$(hdo_gateway_runner_port_status 2>/dev/null || true)"
+  if [ -n "$listeners" ]; then
+    ok "port ${HDO_GATEWAY_RUNNER_PORT} has a listener"
+    printf '%s\n' "$listeners"
+  else
+    warn "no process is listening on port ${HDO_GATEWAY_RUNNER_PORT}."
+  fi
+
   if hdo_gateway_runner_alive; then
     ok "HDO host runner is healthy"
     hdo_gateway_runner_health_json || true
@@ -360,12 +402,18 @@ cmd_gateway_runner_status() {
     warn "HDO host runner is not reachable."
   fi
 
-  if json="$(hdo_gateway_runner_container_health_json 2>/dev/null)"; then
+  if json="$(hdo_gateway_runner_container_health_json 2>&1)"; then
     ok "HDO host runner is reachable from the market container"
     printf '%s\n' "$json"
   else
     warn "HDO host runner is not reachable from the market container."
+    [ -n "$json" ] && printf '%s\n' "$json" >&2
     warn "Do not open this port in the cloud security group; bind the runner to 0.0.0.0 or the Docker bridge and keep port 18081 private to the host."
+  fi
+
+  if ! hdo_gateway_runner_alive && [ -f "$HDO_GATEWAY_RUNNER_LOG" ]; then
+    say "recent HDO host runner log"
+    tail -n 40 "$HDO_GATEWAY_RUNNER_LOG" 2>/dev/null || true
   fi
 }
 

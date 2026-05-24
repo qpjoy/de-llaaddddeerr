@@ -89,6 +89,15 @@
               <div class="text-weight-medium">{{ deploymentNotice.title }}</div>
               <div class="text-caption">{{ deploymentNotice.detail }}</div>
             </q-banner>
+            <q-banner
+              v-if="deployments && !deployments.runner.available"
+              dense
+              rounded
+              class="bg-warning text-dark q-mt-md"
+            >
+              <div class="text-weight-medium">宿主机 Runner 不可达，执行按钮已暂停</div>
+              <div class="text-caption">{{ deployments.runner.note }}</div>
+            </q-banner>
           </div>
           <div class="deploy-card-grid">
             <section v-for="card in deploymentCards" :key="card.key" class="section-surface q-pa-md">
@@ -1680,6 +1689,8 @@ function deploymentButtonDisabled(card: { runKind: HdoDeploymentKind }): boolean
 }
 
 function deploymentButtonLabel(card: { runKind: HdoDeploymentKind }): string {
+  if (!deployments.value) return '检查中';
+  if (!deployments.value.runner.available) return 'Runner 不可达';
   if (isDeploymentKindRunning(card.runKind) || deployingKind.value === card.runKind) return '运行中';
   if (hasAnyDeploymentRunning()) return '等待中';
   const latestForKind = deploymentJobs.value.find((job) => job.kind === card.runKind);
@@ -1688,6 +1699,8 @@ function deploymentButtonLabel(card: { runKind: HdoDeploymentKind }): string {
 }
 
 function deploymentButtonIcon(card: { runKind: HdoDeploymentKind }): string {
+  if (!deployments.value) return 'sync';
+  if (!deployments.value.runner.available) return 'link_off';
   if (isDeploymentKindRunning(card.runKind) || deployingKind.value === card.runKind) return 'hourglass_top';
   if (hasAnyDeploymentRunning()) return 'lock';
   const latestForKind = deploymentJobs.value.find((job) => job.kind === card.runKind);
