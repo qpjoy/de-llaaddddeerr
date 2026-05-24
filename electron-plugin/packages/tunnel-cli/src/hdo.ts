@@ -19,6 +19,7 @@ import {
   resolveWireGuardRuntime,
   setWireGuardTunnelState,
   type WireGuardConnectionRuntimeStatus,
+  type WireGuardPeer,
   uninstallDarwinWireGuardLaunchDaemon,
 } from '@qpjoy/electron-core-wireguard';
 
@@ -42,6 +43,10 @@ interface HdoClientState {
   privateKey?: string;
   publicKey?: string;
   overlayIp?: string;
+  directListener?: boolean;
+  preferDirectPeers?: boolean;
+  endpointHost?: string;
+  listenPort?: number;
   lastManifestGeneration?: number;
   enrolledAt?: string;
   updatedAt?: string;
@@ -63,6 +68,11 @@ interface HdoEnrollOptions {
   role: string;
   start: boolean;
   rotateKey: boolean;
+  directListener: boolean;
+  preferDirectPeers: boolean;
+  publicEndpoint?: string;
+  endpointHost?: string;
+  listenPort?: number;
 }
 
 interface HdoAuthMaterial {
@@ -137,6 +147,12 @@ Enroll options:
   --install-dir PATH     WireGuard engine install/cache directory
   --state-file PATH      HDO client state file
   --role ROLE            Metadata role. Default: internal
+  --direct-listener      Accept direct WireGuard peers from other HDO devices
+  --try-direct-peers     Try direct HDO device peers from observed NAT endpoints
+  --public-endpoint HOST:PORT
+                         Publish this device as a direct peer endpoint
+  --endpoint-host HOST   Direct peer endpoint host
+  --listen-port PORT     Local WireGuard listen port for direct peers
   --rotate-key           Generate a new WireGuard keypair
   --no-start             Write config without starting the system tunnel
 
@@ -145,6 +161,7 @@ Environment:
   HDO_USERNAME / QPJOY_HDO_USERNAME
   HDO_PASSWORD / QPJOY_HDO_PASSWORD
   HDO_TOKEN / QPJOY_HDO_TOKEN
+  HDO_PUBLIC_ENDPOINT / QPJOY_HDO_PUBLIC_ENDPOINT
 
 Examples:
   qp-tunnel-cli hdo enroll \\
@@ -159,6 +176,9 @@ Notes:
   Linux writes /etc/wireguard and enables wg-quick@<interface>.
   If Linux does not provide wg-quick@.service, this CLI installs a compatible
   systemd unit that uses the bundled WireGuard tools from npm.
+  Use --direct-listener --public-endpoint HOST:PORT on reachable Internal
+  machines. Use --try-direct-peers only when both devices are managed by this
+  CLI/plugin and you accept NAT hole-punching fallback risk.
   macOS installs a LaunchDaemon and may prompt for an administrator password.
   Windows installs a WireGuard tunnel service and may show a UAC prompt.
 
@@ -198,6 +218,7 @@ async function enrollCommand(args: string[], refreshOnly: boolean): Promise<void
     `hdo-${process.platform}-${sanitizeId(hostname())}`;
   const label = options.label || previous.label || `${process.platform} ${hostname()}`;
   const keys = resolveKeypair(options, previous, installDir);
+  const direct = resolveDirectEndpoint(options, previous);
 
   const registered = await apiJson(serverUrl, auth.accessToken, '/api/v1/hdo/devices/register', {
     method: 'POST',
@@ -214,6 +235,12 @@ async function enrollCommand(args: string[], refreshOnly: boolean): Promise<void
         wireGuard: {
           publicKey: keys.publicKey,
           interfaceName,
+          preferDirectPeers: direct.preferDirectPeers,
+          acceptDirectPeers: direct.directListener,
+          directListener: direct.directListener,
+          endpointHost: direct.endpointHost,
+          listenPort: direct.listenPort,
+          endpoint: direct.endpoint,
           updatedAt: new Date().toISOString(),
         },
       },
@@ -226,9 +253,11 @@ async function enrollCommand(args: string[], refreshOnly: boolean): Promise<void
   writeWireGuardConfig(configPath, renderHdoClientWireGuardConfig({
     privateKey: runtime.privateKey,
     address: runtime.address,
+    listenPort: direct.listenPort,
     domesticPublicKey: runtime.domesticPublicKey,
     domesticEndpoint: runtime.domesticEndpoint,
     allowedIps: runtime.allowedIps,
+    directPeers: runtime.directPeers,
     persistentKeepalive: 25,
   }));
 
@@ -248,6 +277,10 @@ async function enrollCommand(args: string[], refreshOnly: boolean): Promise<void
     privateKey: keys.privateKey,
     publicKey: keys.publicKey,
     overlayIp: runtime.overlayIp,
+    directListener: direct.directListener,
+    preferDirectPeers: direct.preferDirectPeers,
+    endpointHost: direct.endpointHost,
+    listenPort: direct.listenPort,
     lastManifestGeneration: runtime.generation,
     enrolledAt: previous.enrolledAt || now,
     updatedAt: now,
@@ -363,6 +396,8 @@ function parseEnrollOptions(args: string[]): HdoEnrollOptions {
     role: 'internal',
     start: true,
     rotateKey: false,
+    directListener: false,
+    preferDirectPeers: false,
   };
 
   for (let index = 0; index < args.length; index += 1) {
@@ -413,6 +448,23 @@ function parseEnrollOptions(args: string[]): HdoEnrollOptions {
         break;
       case '--role':
         options.role = readValue();
+        break;
+      case '--direct-listener':
+        options.directListener = true;
+        break;
+      case '--try-direct-peers':
+      case '--prefer-direct-peers':
+        options.preferDirectPeers = true;
+        break;
+      case '--public-endpoint':
+        options.publicEndpoint = readValue();
+        break;
+      case '--endpoint-host':
+      case '--public-host':
+        options.endpointHost = readValue();
+        break;
+      case '--listen-port':
+        options.listenPort = parsePort(readValue(), arg);
         break;
       case '--rotate-key':
         options.rotateKey = true;
@@ -570,6 +622,64 @@ function resolveKeypair(
   return generateWireGuardKeyPairWithCli(runtime.command);
 }
 
+function resolveDirectEndpoint(
+  options: HdoEnrollOptions,
+  previous: HdoClientState,
+): { directListener: boolean; preferDirectPeers: boolean; endpointHost?: string; listenPort?: number; endpoint?: string } {
+  const publicEndpoint =
+    options.publicEndpoint ??
+    process.env.HDO_PUBLIC_ENDPOINT ??
+    process.env.QPJOY_HDO_PUBLIC_ENDPOINT;
+  const parsedEndpoint = publicEndpoint ? parseEndpoint(publicEndpoint) : {};
+  const endpointHost =
+    options.endpointHost ??
+    process.env.HDO_ENDPOINT_HOST ??
+    process.env.QPJOY_HDO_ENDPOINT_HOST ??
+    parsedEndpoint.host ??
+    previous.endpointHost;
+  const listenPort =
+    options.listenPort ??
+    parseOptionalPort(process.env.HDO_LISTEN_PORT ?? process.env.QPJOY_HDO_LISTEN_PORT) ??
+    parsedEndpoint.port ??
+    previous.listenPort;
+  const directListener = Boolean(
+    options.directListener ||
+    publicEndpoint ||
+    options.endpointHost ||
+    options.listenPort ||
+    previous.directListener,
+  );
+  const preferDirectPeers = Boolean(options.preferDirectPeers || previous.preferDirectPeers);
+  return {
+    directListener,
+    preferDirectPeers,
+    endpointHost,
+    listenPort,
+    endpoint: endpointHost && listenPort ? `${endpointHost}:${listenPort}` : undefined,
+  };
+}
+
+function directPeersFromManifest(wireGuard: Record<string, unknown>, ownOverlayIp: string): WireGuardPeer[] {
+  const ownIp = ownOverlayIp.split('/')[0] || ownOverlayIp;
+  const rows = Array.isArray(wireGuard.directPeers) ? wireGuard.directPeers : [];
+  return rows.flatMap((item) => {
+    const row = plainObject(item);
+    if (!row) return [];
+    const publicKey = stringField(row.publicKey);
+    const overlayIp = stringField(row.overlayIp);
+    if (!publicKey || !overlayIp || overlayIp === ownIp) return [];
+    const allowedIps = stringArray(row.allowedIps);
+    const peer: WireGuardPeer = {
+      name: `HDO Direct ${stringField(row.label) ?? stringField(row.id) ?? overlayIp}`,
+      publicKey,
+      allowedIps: allowedIps.length ? allowedIps : [`${overlayIp}/32`],
+      endpoint: stringField(row.endpoint),
+      persistentKeepalive: 25,
+    };
+    return [peer];
+  });
+}
+
 async function startSystemTunnel(interfaceName: string, configPath: string, installDir: string): Promise<string> {
   if (process.platform === 'linux') {
     const runtime = await ensureLinuxWireGuardRuntime(installDir);
@@ -635,6 +745,7 @@ function hdoRuntimeFromManifest(
   domesticPublicKey: string;
   domesticEndpoint: string;
   allowedIps: string[];
+  directPeers: WireGuardPeer[];
   generation?: number;
 } {
   const root = requireRecord(manifest, 'manifest');
@@ -670,6 +781,7 @@ function hdoRuntimeFromManifest(
     domesticPublicKey,
     domesticEndpoint,
     allowedIps,
+    directPeers: directPeersFromManifest(wireGuard, overlayIp),
     generation: numberField(root.generation),
   };
 }
@@ -947,6 +1059,30 @@ function sanitizeId(value: string): string {
     .slice(0, 80) || 'device';
 }
 
+function parseEndpoint(value: string): { host?: string; port?: number } {
+  const trimmed = value.trim();
+  const index = trimmed.lastIndexOf(':');
+  if (index <= 0 || index === trimmed.length - 1) {
+    throw new Error(`Invalid --public-endpoint, expected HOST:PORT: ${value}`);
+  }
+  const host = trimmed.slice(0, index).replace(/^\[|\]$/g, '');
+  const port = parsePort(trimmed.slice(index + 1), '--public-endpoint');
+  return { host, port };
+}
+
+function parsePort(value: string, label: string): number {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid ${label}: ${value}`);
+  }
+  return port;
+}
+
+function parseOptionalPort(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  return parsePort(value, 'listen port');
+}
+
 function tokenExpired(value: string | undefined): boolean {
   if (!value) return false;
   const time = Date.parse(value);
@@ -990,6 +1126,10 @@ function errorMessage(err: unknown): string {
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (!isRecord(value)) throw new Error(`${label} is not an object.`);
   return value;
+}
+
+function plainObject(value: unknown): Record<string, unknown> | null {
+  return isRecord(value) ? value : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

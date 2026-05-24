@@ -474,6 +474,7 @@ export class HdoController {
           domesticPublicKey: domestic.publicKey,
           domesticEndpoint: domestic.endpoint,
           allowedIps,
+          directPeers: directPeersFromManifest(manifest, overlayIp),
           persistentKeepalive: 25
         });
         configPath = this.writeWireGuardProfile(config);
@@ -1629,6 +1630,31 @@ function manifestOverlayRouteCidrs(manifest: Record<string, unknown>, ownOverlay
   arrayField(manifest.nodes).forEach((item) => addOverlayIp(plainObject(item)?.overlayIp));
   arrayField(manifest.devices).forEach((item) => addOverlayIp(plainObject(item)?.overlayIp));
   return uniqueStrings(out);
+}
+
+function directPeersFromManifest(manifest: Record<string, unknown>, ownOverlayIp: string | null): Array<{
+  name: string;
+  publicKey: string;
+  allowedIps: string[];
+  endpoint: string | null;
+  persistentKeepalive: number;
+}> {
+  const wireGuard = plainObject(manifest.wireGuard);
+  const ownIp = stringValue(ownOverlayIp);
+  return arrayField(wireGuard?.directPeers).flatMap((item) => {
+    const row = plainObject(item);
+    const publicKey = stringValue(row?.publicKey);
+    const overlayIp = stringValue(row?.overlayIp);
+    if (!publicKey || !overlayIp || overlayIp === ownIp) return [];
+    const allowedIps = stringArray(row?.allowedIps);
+    return [{
+      name: `HDO Direct ${stringValue(row?.label) ?? stringValue(row?.id) ?? overlayIp}`,
+      publicKey,
+      allowedIps: allowedIps.length ? allowedIps : [`${overlayIp}/32`],
+      endpoint: stringValue(row?.endpoint),
+      persistentKeepalive: 25
+    }];
+  });
 }
 
 function manifestHasMeshLicense(manifest: Record<string, unknown>): boolean {

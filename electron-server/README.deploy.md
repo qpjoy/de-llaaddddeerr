@@ -1,15 +1,16 @@
 ```bash
-cd electron-server
-MARKETPLACE_ALLOWLIST='@qpjoy/electron-plugin-tunnel,@qpjoy/electron-plugin-notyet,@qpjoy/electron-game-suduku' ./scripts/manage.sh redeploy
-./scripts/manage.sh sync
+cd /root/workspace/de-llaaddddeerr
+MARKETPLACE_ALLOWLIST='@qpjoy/electron-plugin-tunnel,@qpjoy/electron-plugin-notyet,@qpjoy/electron-game-suduku' ./electron-server/scripts/manage.sh redeploy
+./electron-server/scripts/manage.sh sync
 
 
 pnpm --dir electron-market install --frozen-lockfile=false
 pnpm --dir electron-market --filter @qpjoy/electron-market-admin-ui build
-./scripts/manage.sh server redeploy
+./electron-server/scripts/manage.sh redeploy
+./electron-server/scripts/manage.sh gateway-runner-status
 
 
-./scripts/manage.sh deploy hdo
+./electron-server/scripts/manage.sh deploy hdo
 # domestic 公网 IP/域名: 121.43.253.179
 # HDO / 插件市场 server URL: http://121.43.253.179:8080
 # WireGuard UDP 端口: 51888
@@ -23,9 +24,11 @@ systemctl status wg-quick@hdo-home --no-pager
 
 
 # update
-pnpm --filter @qpjoy/electron-market-admin-ui build
-pnpm --filter @qpjoy/electron-market build
+pnpm --dir electron-market install --frozen-lockfile=false
+pnpm --dir electron-market --filter @qpjoy/electron-market-admin-ui build
+pnpm --dir electron-market --filter @qpjoy/electron-market build
 ./electron-server/scripts/manage.sh redeploy
+./electron-server/scripts/manage.sh gateway-runner-status
 
 # ReBorn
 cd /root/workspace/de-llaaddddeerr
@@ -37,6 +40,10 @@ sudo iptables -D FORWARD -i hdo-home -o hdo-home -j ACCEPT 2>/dev/null || true
 rm -rf docker/hdo-gateway-stack/data/wireguard docker/hdo-gateway-stack/.env
 ./electron-server/scripts/manage.sh up
 ./electron-server/scripts/manage.sh bootstrap-admin
+
+
+# ENROLL
+HDO_PASSWORD='sqb123123' qp-tunnel-cli hdo enroll   --server-url 'http://121.43.253.179:8080'   --username 'qpjoy04'   --device-id "internal-$(hostname -s)"   --label "$(hostname -s)"
 ```
 ## 在 部署 tab 按顺序：
 

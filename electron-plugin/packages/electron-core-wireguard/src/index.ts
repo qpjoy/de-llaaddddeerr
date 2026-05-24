@@ -322,9 +322,11 @@ export function endpoint(host: string, port = HDO_MESH_DEFAULTS.defaultListenPor
 export function renderHdoClientWireGuardConfig(input: {
   privateKey: string;
   address: string;
+  listenPort?: number | null;
   domesticPublicKey: string;
   domesticEndpoint: string;
   allowedIps?: string[];
+  directPeers?: WireGuardPeer[];
   dns?: string[];
   mtu?: number | null;
   persistentKeepalive?: number | null;
@@ -332,6 +334,7 @@ export function renderHdoClientWireGuardConfig(input: {
   return renderWireGuardInterface({
     privateKey: input.privateKey,
     addresses: [input.address],
+    listenPort: input.listenPort,
     dns: input.dns,
     mtu: input.mtu,
     peers: [
@@ -341,7 +344,8 @@ export function renderHdoClientWireGuardConfig(input: {
         allowedIps: input.allowedIps?.length ? input.allowedIps : HDO_MESH_ROUTE_CIDRS,
         endpoint: input.domesticEndpoint,
         persistentKeepalive: input.persistentKeepalive ?? 25
-      }
+      },
+      ...(input.directPeers ?? [])
     ]
   });
 }

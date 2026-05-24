@@ -22,8 +22,10 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$ROOT/.." && pwd)"
+MARKET_ROOT="$REPO_ROOT/electron-market"
 ADMIN_UI_DIST="$ROOT/../electron-market/packages/admin-ui/dist"
 SPA_TARGET="$ROOT/data/spa-dist"
+ADMIN_UI_PKG="@qpjoy/electron-market-admin-ui"
 
 cd "$ROOT"
 DC=()
@@ -84,19 +86,61 @@ ok()   { printf '%s✓%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
 warn() { printf '%s!%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 die()  { printf '%s✗%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 
+normalize_hdo_gateway_runner_bind() {
+  case "$HDO_GATEWAY_RUNNER_URL" in
+    http://host.docker.internal|http://host.docker.internal:*|https://host.docker.internal|https://host.docker.internal:*)
+      case "$HDO_GATEWAY_RUNNER_HOST" in
+        127.*|localhost|::1)
+          warn "HDO_GATEWAY_RUNNER_HOST=$HDO_GATEWAY_RUNNER_HOST is loopback-only; Docker cannot reach it via host.docker.internal. Using 0.0.0.0."
+          export HDO_GATEWAY_RUNNER_HOST="0.0.0.0"
+          ;;
+      esac
+      ;;
+  esac
+}
+
+normalize_hdo_gateway_runner_bind
+
 # ── Preconditions ──────────────────────────────────────────────────────
-check_docker() {
+detect_docker_compose() {
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
     DC=(docker compose -f "$ROOT/docker-compose.yml")
-    return
+    return 0
   fi
 
   if command -v docker-compose >/dev/null 2>&1 && docker-compose version >/dev/null 2>&1; then
     DC=(docker-compose -f "$ROOT/docker-compose.yml")
-    return
+    return 0
   fi
 
+  return 1
+}
+
+check_docker() {
+  detect_docker_compose && return
   die "Docker Compose is required. Install either the 'docker compose' plugin or the legacy 'docker-compose' command."
+}
+
+ensure_admin_ui_deps() {
+  if [ ! -d "$MARKET_ROOT" ] || [ ! -f "$MARKET_ROOT/pnpm-workspace.yaml" ]; then
+    warn "electron-market workspace not found at $MARKET_ROOT"
+    return 1
+  fi
+
+  if [ ! -x "$MARKET_ROOT/packages/admin-ui/node_modules/.bin/vue-tsc" ] \
+    || [ ! -x "$MARKET_ROOT/packages/admin-ui/node_modules/.bin/vite" ]; then
+    say "installing electron-market dependencies"
+    pnpm --dir "$MARKET_ROOT" install --frozen-lockfile=false
+  fi
+}
+
+build_admin_ui() {
+  command -v pnpm >/dev/null 2>&1 || {
+    warn "pnpm not found; cannot build admin-ui."
+    return 1
+  }
+  ensure_admin_ui_deps || return 1
+  pnpm --dir "$MARKET_ROOT" --filter "$ADMIN_UI_PKG" build
 }
 
 ensure_spa() {
@@ -107,13 +151,7 @@ ensure_spa() {
   # skips the /admin/* mount.
   if [ ! -f "$ADMIN_UI_DIST/index.html" ] && command -v pnpm >/dev/null 2>&1; then
     say "admin-ui dist missing; building electron-market admin-ui"
-    (
-      cd "$ROOT/../electron-market"
-      if [ ! -d node_modules ]; then
-        pnpm install --frozen-lockfile=false
-      fi
-      pnpm --filter @qpjoy/electron-market-admin-ui build
-    ) || warn "admin-ui build failed; server API will still deploy, but /admin/ will stay unavailable."
+    build_admin_ui || warn "admin-ui build failed; server API will still deploy, but /admin/ will stay unavailable."
   fi
 
   if [ -d "$ADMIN_UI_DIST" ]; then
@@ -124,7 +162,7 @@ ensure_spa() {
   else
     if [ ! -d "$SPA_TARGET" ]; then
       warn "admin-ui dist not built — creating empty placeholder."
-      warn "Build it with: (cd ../electron-market && pnpm --filter @qpjoy/electron-market-admin-ui build)"
+      warn "Build it with: pnpm --dir ../electron-market --filter @qpjoy/electron-market-admin-ui build"
       mkdir -p "$SPA_TARGET"
     fi
   fi
@@ -166,6 +204,37 @@ hdo_gateway_runner_health_json() {
 
 hdo_gateway_runner_alive() {
   hdo_gateway_runner_health_json >/dev/null
+}
+
+hdo_gateway_runner_container_health_json() {
+  detect_docker_compose || return 1
+  "${DC[@]}" exec -T market node -e '
+const url = process.env.HDO_GATEWAY_RUNNER_URL;
+const token = process.env.HDO_GATEWAY_RUNNER_TOKEN;
+if (!url || !token) {
+  console.error("HDO_GATEWAY_RUNNER_URL/TOKEN is missing inside market container");
+  process.exit(2);
+}
+const controller = new AbortController();
+const timer = setTimeout(() => controller.abort(), 1500);
+try {
+  const response = await fetch(new URL("/healthz", url), {
+    headers: { authorization: `Bearer ${token}` },
+    signal: controller.signal
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    console.error(text || `HTTP ${response.status}`);
+    process.exit(1);
+  }
+  console.log(text);
+} catch (err) {
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exit(1);
+} finally {
+  clearTimeout(timer);
+}
+'
 }
 
 hdo_gateway_runner_matches_config() {
@@ -277,6 +346,7 @@ cmd_gateway_runner_status() {
     HDO_GATEWAY_RUNNER_TOKEN="$(tr -d '\r\n' <"$HDO_GATEWAY_RUNNER_TOKEN_FILE")"
     export HDO_GATEWAY_RUNNER_TOKEN
   fi
+  normalize_hdo_gateway_runner_bind
   echo "runner url from container: $HDO_GATEWAY_RUNNER_URL"
   echo "runner bind address:       $HDO_GATEWAY_RUNNER_HOST:$HDO_GATEWAY_RUNNER_PORT"
   echo "runner health url:        $(hdo_gateway_runner_health_url)"
@@ -288,6 +358,14 @@ cmd_gateway_runner_status() {
     echo
   else
     warn "HDO host runner is not reachable."
+  fi
+
+  if json="$(hdo_gateway_runner_container_health_json 2>/dev/null)"; then
+    ok "HDO host runner is reachable from the market container"
+    printf '%s\n' "$json"
+  else
+    warn "HDO host runner is not reachable from the market container."
+    warn "Do not open this port in the cloud security group; bind the runner to 0.0.0.0 or the Docker bridge and keep port 18081 private to the host."
   fi
 }
 

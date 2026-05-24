@@ -543,6 +543,45 @@ ensure_domestic_forwarding() {
   fi
 }
 
+report_domestic_peer_endpoints() {
+  local iface="${1:-hdo-home}"
+
+  [ -n "${HDO_SERVER_URL:-}" ] || return 0
+  [ -n "${HDO_TOKEN:-}" ] || [ -n "${HDO_GATEWAY_RUNNER_TOKEN:-}" ] || return 0
+  command -v wg >/dev/null 2>&1 || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  wg show "$iface" >/dev/null 2>&1 || return 0
+
+  local payload curl_headers=()
+  payload="$(mktemp)"
+  wg show "$iface" endpoints | awk '
+    function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+    BEGIN { printf "{\"endpoints\":["; first = 1 }
+    $2 != "(none)" {
+      if (!first) printf ","
+      first = 0
+      printf "{\"publicKey\":\"%s\",\"endpoint\":\"%s\"}", esc($1), esc($2)
+    }
+    END { print "]}" }
+  ' > "$payload"
+
+  if [ -n "${HDO_TOKEN:-}" ]; then
+    curl_headers+=(-H "authorization: Bearer ${HDO_TOKEN}")
+  fi
+  if [ -n "${HDO_GATEWAY_RUNNER_TOKEN:-}" ]; then
+    curl_headers+=(-H "x-hdo-runner-token: ${HDO_GATEWAY_RUNNER_TOKEN}")
+  fi
+  curl -fsS \
+    "${curl_headers[@]}" \
+    -H "content-type: application/json" \
+    -X POST \
+    --data-binary "@${payload}" \
+    "${HDO_SERVER_URL%/}/api/v1/hdo/admin/wireguard/peer-endpoints" >/dev/null \
+    && ok "reported observed WireGuard peer endpoints" \
+    || warn "failed to report observed WireGuard peer endpoints"
+  rm -f "$payload"
+}
+
 cmd_sync_domestic_peers() {
   load_env
   parse_common "$@"
@@ -582,11 +621,13 @@ cmd_sync_domestic_peers() {
       wg syncconf hdo-home <(wg-quick strip hdo-home)
       ensure_domestic_forwarding hdo-home
       sync_domestic_peer_routes hdo-home /etc/wireguard/hdo-home.conf
+      report_domestic_peer_endpoints hdo-home
       ok "reloaded live hdo-home WireGuard peers"
     else
       systemctl restart wg-quick@hdo-home || true
       ensure_domestic_forwarding hdo-home
       sync_domestic_peer_routes hdo-home /etc/wireguard/hdo-home.conf
+      report_domestic_peer_endpoints hdo-home
       ok "restarted wg-quick@hdo-home"
     fi
   else

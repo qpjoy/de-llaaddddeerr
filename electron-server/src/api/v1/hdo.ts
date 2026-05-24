@@ -49,6 +49,7 @@ const HDO_SERVICE_PROBE_PORTS = [
 ] as const;
 const HDO_SERVICE_PROBE_TIMEOUT_MS = 700;
 const HDO_DEVICE_ONLINE_WINDOW_MS = 10 * 60 * 1000;
+const HDO_WG_OBSERVED_ENDPOINT_TTL_MS = 10 * 60 * 1000;
 const PROFILE_MODES: readonly HdoProfileMode[] = [
   'home-only',
   'home-foreign',
@@ -109,6 +110,7 @@ const HDO_DEFAULT_WG_PORT = 51888;
 const HDO_DEPLOYMENT_OUTPUT_LIMIT = 80_000;
 const HDO_DEPLOYMENT_TIMEOUT_MS = 20 * 60 * 1000;
 const HDO_RUNNER_HEALTH_TIMEOUT_MS = 1200;
+const HDO_AUTO_SYNC_RETRY_MS = 30_000;
 
 type HdoDeploymentKind = (typeof HDO_DEPLOYMENT_KINDS)[number];
 type HdoDeploymentStatus = 'running' | 'succeeded' | 'failed';
@@ -754,6 +756,47 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
     return content;
   });
 
+  app.post('/api/v1/hdo/admin/wireguard/peer-endpoints', { preHandler: requireHdoAdminOrRunner }, async (req) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const endpoints = Array.isArray(body.endpoints) ? body.endpoints : [];
+    const devices = await hdoStore.listAllDevices();
+    const now = new Date().toISOString();
+    const updated: Array<{ deviceId: string; endpoint: string }> = [];
+
+    for (const item of endpoints) {
+      const row = asPlainObject(item);
+      const publicKey = asOptionalString(row?.publicKey);
+      const endpoint = normalizeWireGuardEndpoint(asOptionalString(row?.endpoint));
+      if (!publicKey || !endpoint) continue;
+      const device = devices.find((candidate) => candidate.publicKey === publicKey);
+      if (!device) continue;
+      const metadata = withObservedWireGuardEndpoint(device.metadata, endpoint, now);
+      await hdoStore.upsertDevice({
+        id: device.id,
+        userId: device.userId,
+        label: device.label,
+        platform: device.platform,
+        publicKey: device.publicKey,
+        overlayIp: device.overlayIp,
+        status: device.status,
+        metadata
+      });
+      updated.push({ deviceId: device.id, endpoint });
+    }
+
+    if (updated.length > 0) {
+      await auditStore.insert({
+        actorUserId: req.currentUser?.id ?? null,
+        actorIp: req.ip,
+        action: 'hdo.wireguard.peer_endpoints.observe',
+        targetKind: 'hdo_wireguard_peer_endpoints',
+        targetId: null,
+        meta: { updated: updated.length }
+      });
+    }
+    return { updated };
+  });
+
   app.post('/api/v1/hdo/admin/nodes', adminOnly, async (req, reply) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const name = asRequiredString(body.name);
@@ -1077,16 +1120,18 @@ function scheduleHdoDomesticSync(
   if (hdoDomesticSyncTimer) clearTimeout(hdoDomesticSyncTimer);
   hdoDomesticSyncTimer = setTimeout(() => {
     hdoDomesticSyncTimer = null;
-    startQueuedHdoDomesticSync(meta);
+    void startQueuedHdoDomesticSync(meta);
   }, 1500);
 }
 
-function startQueuedHdoDomesticSync(meta: Record<string, unknown>): HdoDeploymentJob | null {
+async function startQueuedHdoDomesticSync(
+  meta: Record<string, unknown>
+): Promise<HdoDeploymentJob | null> {
   if (listHdoDeploymentJobs().some((job) => job.status === 'running')) {
     if (!hdoDomesticSyncTimer) {
       hdoDomesticSyncTimer = setTimeout(() => {
         hdoDomesticSyncTimer = null;
-        startQueuedHdoDomesticSync({ ...meta, delayed: true });
+        void startQueuedHdoDomesticSync({ ...meta, delayed: true });
       }, 5000);
     }
     return null;
@@ -1098,6 +1143,24 @@ function startQueuedHdoDomesticSync(meta: Record<string, unknown>): HdoDeploymen
   const bearerToken = hdoDomesticSyncBearerToken;
   if (!bearerToken && !runnerToken) return null;
   const reason = hdoDomesticSyncPendingReason ?? 'auto';
+  if (runnerUrl && runnerToken) {
+    const runnerHealth = await probeHdoGatewayRunner(runnerUrl, runnerToken);
+    if (!runnerHealth.ok) {
+      hdoDomesticSyncPendingReason = reason;
+      hdoDomesticSyncBearerToken = bearerToken ?? hdoDomesticSyncBearerToken;
+      if (!hdoDomesticSyncTimer) {
+        hdoDomesticSyncTimer = setTimeout(() => {
+          hdoDomesticSyncTimer = null;
+          void startQueuedHdoDomesticSync({
+            ...meta,
+            delayed: true,
+            runnerUnavailable: true
+          });
+        }, HDO_AUTO_SYNC_RETRY_MS);
+      }
+      return null;
+    }
+  }
   hdoDomesticSyncPendingReason = null;
   const job = startHdoDeploymentJob({
     kind: 'sync-and-repair-domestic',
@@ -1358,7 +1421,9 @@ async function runHdoGatewayRunnerJob(
       [
         `HDO gateway runner request failed: ${runnerUrl}`,
         message,
-        'If electron-server runs in Docker, the host runner must listen on an address reachable from host.docker.internal.'
+        'If electron-server runs in Docker, the host runner must listen on an address reachable from host.docker.internal.',
+        'This is a private host/Docker control port; do not open port 18081 in the cloud security group.',
+        'On the host, run: ./electron-server/scripts/manage.sh gateway-runner-status'
       ].join('\n') + '\n'
     );
     job.status = 'failed';
@@ -1676,7 +1741,8 @@ async function buildManifest(device: HdoDeviceRow) {
         overlayIp: device.overlayIp,
         address: device.overlayIp ? wireGuardAddress(device.overlayIp) : null
       },
-      domestic: wireGuardNodeSummary(pickDomesticNode(visibleNodes))
+      domestic: wireGuardNodeSummary(pickDomesticNode(visibleNodes)),
+      directPeers: wireGuardDirectPeerSummaries(device, visibleDevices)
     },
     nodes: visibleNodes,
     devices: visibleDevices.map((row) => hdoDeviceWithOnlineWindow(row)).map((row) => ({
@@ -2343,10 +2409,91 @@ function wireGuardNodeSummary(node: HdoNodeRow | undefined) {
   };
 }
 
+function wireGuardDirectPeerSummaries(current: HdoDeviceRow, devices: HdoDeviceRow[]) {
+  const currentWireGuard = wireGuardMetadataFromDevice(current);
+  const currentPrefersDirect = asOptionalBoolean(currentWireGuard?.preferDirectPeers) === true;
+  if (!currentPrefersDirect) return [];
+
+  return devices
+    .filter((row) => row.id !== current.id)
+    .map((row) => {
+      const publicKey = row.publicKey;
+      const overlayIp = normalizeOverlayIp(row.overlayIp);
+      if (!publicKey || !overlayIp) return null;
+      const wireGuard = wireGuardMetadataFromDevice(row);
+      const endpoint = wireGuardEndpointFromMetadata(wireGuard);
+      const peerPrefersDirect = asOptionalBoolean(wireGuard?.preferDirectPeers) === true;
+      const peerCanDirect =
+        Boolean(endpoint) &&
+        (
+          peerPrefersDirect ||
+          asOptionalBoolean(wireGuard?.acceptDirectPeers) === true ||
+          asOptionalBoolean(wireGuard?.directListener) === true
+        );
+      if (!peerCanDirect) return null;
+      return {
+        id: row.id,
+        label: row.label,
+        publicKey,
+        overlayIp,
+        allowedIps: [`${overlayIp}/32`],
+        endpoint,
+        direct: true
+      };
+    })
+    .filter((row): row is NonNullable<typeof row> => Boolean(row));
+}
+
 function wireGuardPublicKeyFromMetadata(metadata: Record<string, unknown> | null): string | null {
   const data = asPlainObject(metadata);
   const wireGuard = asPlainObject(data?.wireGuard) ?? asPlainObject(data?.wg);
   return asOptionalString(wireGuard?.publicKey);
+}
+
+function wireGuardMetadataFromDevice(device: HdoDeviceRow): Record<string, unknown> | null {
+  const data = asPlainObject(device.metadata);
+  return asPlainObject(data?.wireGuard) ?? asPlainObject(data?.wg);
+}
+
+function wireGuardEndpointFromMetadata(wireGuard: Record<string, unknown> | null): string | null {
+  const explicit = asOptionalString(wireGuard?.endpoint);
+  if (explicit) return explicit;
+  const host =
+    asOptionalString(wireGuard?.endpointHost) ??
+    asOptionalString(wireGuard?.host) ??
+    asOptionalString(wireGuard?.publicHost);
+  const port = toPort(wireGuard?.listenPort) ?? toPort(wireGuard?.port);
+  if (host && port) return `${host}:${port}`;
+  const observedAt = asOptionalString(wireGuard?.observedEndpointAt);
+  const observedFresh = observedAt ? Date.now() - Date.parse(observedAt) <= HDO_WG_OBSERVED_ENDPOINT_TTL_MS : false;
+  return observedFresh ? normalizeWireGuardEndpoint(asOptionalString(wireGuard?.observedEndpoint)) : null;
+}
+
+function withObservedWireGuardEndpoint(
+  metadata: Record<string, unknown> | null,
+  endpoint: string,
+  observedAt: string
+): Record<string, unknown> {
+  const root = { ...(metadata ?? {}) };
+  const wireGuard = {
+    ...(asPlainObject(root.wireGuard) ?? asPlainObject(root.wg) ?? {}),
+    observedEndpoint: endpoint,
+    observedEndpointAt: observedAt,
+    observedEndpointSource: 'domestic-wg'
+  };
+  root.wireGuard = wireGuard;
+  return root;
+}
+
+function normalizeWireGuardEndpoint(value: string | null): string | null {
+  if (!value || value === '(none)') return null;
+  const trimmed = value.trim();
+  const index = trimmed.lastIndexOf(':');
+  if (index <= 0 || index === trimmed.length - 1) return null;
+  const host = trimmed.slice(0, index).replace(/^\[|\]$/g, '');
+  const port = toPort(trimmed.slice(index + 1));
+  if (!host || !port) return null;
+  return `${host}:${port}`;
 }
 
 function pickDomesticNode(nodes: HdoNodeRow[]): HdoNodeRow | undefined {
