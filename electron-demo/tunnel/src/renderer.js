@@ -12,7 +12,8 @@ document.getElementById('btn-market-new').addEventListener('click', () => {
 
 const state = {
   mode: localStorage.getItem('qpjoy.demo.connectionMode') || 'client-only',
-  busy: false
+  busy: false,
+  tunnelStatus: null
 };
 
 const el = {
@@ -24,9 +25,17 @@ const el = {
   password: document.getElementById('server-password'),
   saveServer: document.getElementById('btn-save-server'),
   applyBackend: document.getElementById('btn-apply-backend'),
+  toggleTunnel: document.getElementById('btn-toggle-tunnel'),
+  stopTunnel: document.getElementById('btn-stop-tunnel'),
   status: document.getElementById('demo-status'),
   pillServer: document.getElementById('pill-server'),
   pillServerText: document.getElementById('pill-server-text')
+};
+
+const modeLabels = {
+  'app-rule': 'App 模式',
+  'app-global': '全局模式',
+  'system-tun': '虚拟网卡'
 };
 
 function setStatus(message, tone = 'idle') {
@@ -43,6 +52,21 @@ function describeStatus(status) {
     `订阅: ${active}`,
     `管理端口: ${status.adminUrl || 'http://127.0.0.1:23456'}`
   ].join('\n');
+}
+
+function renderTunnelControls() {
+  const status = state.tunnelStatus;
+  const mode = status?.mode || 'app-global';
+  const label = modeLabels[mode] || mode;
+  const running = Boolean(status?.running);
+  if (el.toggleTunnel) {
+    el.toggleTunnel.textContent = running ? '停止 Tunnel' : `开启 ${label}`;
+    el.toggleTunnel.classList.toggle('mini-button--stop', running);
+    el.toggleTunnel.classList.toggle('mini-button--run', !running);
+  }
+  if (el.stopTunnel) {
+    el.stopTunnel.disabled = !running;
+  }
 }
 
 function setConnectionMode(mode) {
@@ -69,6 +93,8 @@ function saveForm() {
 async function refreshStatus() {
   try {
     const status = await api.status();
+    state.tunnelStatus = status?.tunnel ?? null;
+    renderTunnelControls();
     const server = status?.marketServer?.effective?.url || status?.marketServer?.nextRestart?.url || '';
     if (server && !el.serverUrl.value) {
       el.serverUrl.value = server;
@@ -86,7 +112,13 @@ async function runTask(label, task) {
   setStatus(`${label}...`, 'idle');
   try {
     const result = await task();
-    setStatus(`${label}完成。\n${JSON.stringify(result, null, 2)}`, 'ok');
+    const latest = await api.status().catch(() => null);
+    if (latest) {
+      state.tunnelStatus = latest.tunnel ?? null;
+      renderTunnelControls();
+    }
+    const current = latest?.tunnel ? `\n\n当前状态:\n${describeStatus(latest.tunnel)}` : '';
+    setStatus(`${label}完成。\n${JSON.stringify(result, null, 2)}${current}`, 'ok');
   } catch (err) {
     setStatus(`${label}失败：${err.message || String(err)}`, 'error');
   } finally {
@@ -119,13 +151,32 @@ el.applyBackend.addEventListener('click', () => {
   }));
 });
 
-for (const button of document.querySelectorAll('[data-tunnel-mode]')) {
+if (el.toggleTunnel) {
+  el.toggleTunnel.addEventListener('click', () => {
+    const status = state.tunnelStatus;
+    if (status?.running) {
+      void runTask('停止 Tunnel', () => api.stopTunnel());
+      return;
+    }
+    const mode = status?.mode || 'app-global';
+    void runTask(`开启 Tunnel ${modeLabels[mode] || mode}`, () => api.startTunnelMode(mode));
+  });
+}
+
+if (el.stopTunnel) {
+  el.stopTunnel.addEventListener('click', () => {
+    void runTask('停止 Tunnel', () => api.stopTunnel());
+  });
+}
+
+for (const button of document.querySelectorAll('[data-tunnel-start-mode]')) {
   button.addEventListener('click', () => {
-    const mode = button.getAttribute('data-tunnel-mode');
-    void runTask(`切换 Tunnel 到 ${button.textContent.trim()}`, () => api.setTunnelMode(mode));
+    const mode = button.getAttribute('data-tunnel-start-mode');
+    void runTask(`启动 Tunnel ${button.textContent.trim()}`, () => api.startTunnelMode(mode));
   });
 }
 
 loadSavedForm();
 setConnectionMode(state.mode);
+renderTunnelControls();
 void refreshStatus();

@@ -4,6 +4,7 @@ import { storage } from '../../data/storage.js';
 import { entitlementsStore } from '../../data/index.js';
 import { attachUser } from '../../auth/middleware.js';
 import type { MarketplaceEntryDTO } from '../../data/types.js';
+import { isUserInstallableMarketplaceEntry } from '../../marketplaceFilters.js';
 
 export async function marketplaceRoutes(app: FastifyInstance): Promise<void> {
   // Parse optional Bearer to filter by visibility.
@@ -61,6 +62,7 @@ function entryVisible(
   user: { role: 'user' | 'admin' | 'banned' } | null,
   owned: Set<string>
 ): boolean {
+  if (!isUserInstallableMarketplaceEntry(entry)) return false;
   switch (entry.visibility) {
     case 'public':
       return true;

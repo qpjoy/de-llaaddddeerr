@@ -120,6 +120,16 @@ export const MARKET_SERVER_DEFAULTS = {
   prod: PROD_MARKET_SERVER
 } as const;
 
+function hostnameFromHttpUrl(rawUrl: string | null): string | null {
+  if (!rawUrl) return null;
+  try {
+    const url = new URL(rawUrl);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.hostname : null;
+  } catch {
+    return null;
+  }
+}
+
 function normalizedVersion(version: string | null | undefined): string | null {
   if (!version) return null;
   const valid = semver.valid(version);
@@ -336,7 +346,10 @@ export function createElectronPluginHost(
     serverBaseUrl,
     pluginManager
   });
-  const tunnelPolicyGuard = new TunnelPolicyGuard(host.session, runtime);
+  const marketServerHost = hostnameFromHttpUrl(serverBaseUrl);
+  const tunnelPolicyGuard = new TunnelPolicyGuard(host.session, runtime, {
+    alwaysAllowHosts: marketServerHost ? [marketServerHost] : []
+  });
   runtime.setNetworkPolicyEvaluator((url) => tunnelPolicyGuard.evaluate(url));
   tunnelPolicyGuard.start();
 

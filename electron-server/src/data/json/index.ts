@@ -1138,11 +1138,13 @@ const tunnel: TunnelStore = {
     return this.upsertPolicy({
       name: 'default-cn-direct',
       routingMode: 'cn-direct',
-      runtimeMode: 'system-tun',
+      runtimeMode: 'app-global',
       enabled: true,
       isDefault: true,
       rules: {
-        description: 'CN/direct, foreign traffic through Oversea Hysteria2.'
+        description: 'CN/direct, foreign traffic through Oversea Hysteria2.',
+        autoStart: true,
+        autoUpdate: true
       }
     });
   },
@@ -1175,7 +1177,7 @@ const tunnel: TunnelStore = {
       id: input.id ?? randomUUID(),
       name: input.name,
       routingMode: input.routingMode ?? 'cn-direct',
-      runtimeMode: input.runtimeMode ?? 'system-tun',
+      runtimeMode: input.runtimeMode ?? 'app-global',
       enabled: input.enabled ?? true,
       isDefault: input.isDefault ?? file.policies.length === 0,
       rules: input.rules ?? null,

@@ -22,9 +22,9 @@
   },
   "dependencies": {
     "@qpjoy/electron-market": "^0.3.30",
-    "@qpjoy/electron-plugin-hdo": "^0.1.29",
+    "@qpjoy/electron-plugin-hdo": "^0.1.30",
     "@qpjoy/electron-plugin-sdk": "^0.1.4",
-    "@qpjoy/electron-plugin-tunnel": "^0.1.16"
+    "@qpjoy/electron-plugin-tunnel": "^0.1.17"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.8.1",

@@ -3,21 +3,26 @@
   "productName": "QPJoy Tunnel Demo",
   "version": "0.1.0",
   "private": true,
-  "description": "Pre-HDO Electron consumer demo for @qpjoy/electron-plugin-tunnel via published npm packages.",
+  "description": "Electron consumer demo for @qpjoy/electron-plugin-tunnel development and packaging tests.",
   "main": "src/main.cjs",
   "scripts": {
-    "dev": "electron-forge start",
-    "start": "electron-forge start",
-    "package": "electron-forge package",
-    "make": "electron-forge make",
-    "make:mac": "electron-forge make --platform=darwin",
-    "make:win": "electron-forge make --platform=win32 --arch=x64",
+    "dev": "node scripts/dev-mode.mjs local && electron-forge start",
+    "dev:npm": "node scripts/dev-mode.mjs npm && electron-forge start",
+    "dev:reset": "node scripts/dev-mode.mjs npm",
+    "start": "pnpm dev",
+    "setup": "node scripts/dev-mode.mjs local",
+    "setup:npm": "node scripts/dev-mode.mjs npm",
+    "package": "node scripts/dev-mode.mjs npm && electron-forge package",
+    "make": "node scripts/dev-mode.mjs npm && electron-forge make",
+    "make:mac": "node scripts/dev-mode.mjs npm && electron-forge make --platform=darwin",
+    "make:mac:dmg": "node scripts/dev-mode.mjs npm && FORGE_INCLUDE_DMG=1 electron-forge make --platform=darwin",
+    "make:win": "node scripts/dev-mode.mjs npm && electron-forge make --platform=win32 --arch=x64",
     "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check forge.config.cjs"
   },
   "dependencies": {
-    "@qpjoy/electron-market": "0.3.17",
-    "@qpjoy/electron-plugin-sdk": "0.1.2",
-    "@qpjoy/electron-plugin-tunnel": "0.1.16"
+    "@qpjoy/electron-market": "^0.3.30",
+    "@qpjoy/electron-plugin-sdk": "^0.1.4",
+    "@qpjoy/electron-plugin-tunnel": "^0.1.16"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.8.1",
@@ -33,6 +38,18 @@
       "electron-winstaller",
       "fs-xattr",
       "macos-alias"
-    ]
+    ],
+    "overrides": {
+      "@qpjoy/electron-plugin-sdk": "file:./.local-packs/qpjoy-electron-plugin-sdk-0.1.4.tgz",
+      "@qpjoy/marketplace-db": "file:./.local-packs/qpjoy-marketplace-db-0.1.1.tgz",
+      "@qpjoy/electron-market": "file:./.local-packs/qpjoy-electron-market-0.3.31.tgz",
+      "@qpjoy/electron-core-mihomo": "file:./.local-packs/qpjoy-electron-core-mihomo-0.1.1.tgz",
+      "@qpjoy/electron-plugin-tunnel-engine-darwin-arm64": "file:./.local-packs/qpjoy-electron-plugin-tunnel-engine-darwin-arm64-0.1.5.tgz",
+      "@qpjoy/electron-plugin-tunnel-engine-darwin-x64": "file:./.local-packs/qpjoy-electron-plugin-tunnel-engine-darwin-x64-0.1.5.tgz",
+      "@qpjoy/electron-plugin-tunnel-engine-linux-arm64": "file:./.local-packs/qpjoy-electron-plugin-tunnel-engine-linux-arm64-0.1.5.tgz",
+      "@qpjoy/electron-plugin-tunnel-engine-linux-x64": "file:./.local-packs/qpjoy-electron-plugin-tunnel-engine-linux-x64-0.1.5.tgz",
+      "@qpjoy/electron-plugin-tunnel-engine-win32-x64": "file:./.local-packs/qpjoy-electron-plugin-tunnel-engine-win32-x64-0.1.5.tgz",
+      "@qpjoy/electron-plugin-tunnel": "file:./.local-packs/qpjoy-electron-plugin-tunnel-0.1.17.tgz"
+    }
   }
 }

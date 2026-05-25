@@ -10,6 +10,7 @@ import type { MarketplaceEntry as LegacyEntry } from '../types';
 import { readSyncStatus, type RemoteSyncJob } from '../sync/RemoteSyncJob';
 import type { AuthService } from '../sync/AuthService';
 import { MARKETPLACE_SELF_PLUGIN_ID } from '../constants';
+import { isUserInstallableMarketplaceEntry } from '../marketplaceFilters';
 
 interface Deps {
   registry: PluginRegistry;
@@ -23,6 +24,10 @@ interface Deps {
   upgrade: (id: string, version?: string) => Promise<void>;
   serverBaseUrl: string | null;
 }
+
+type TunnelRuntimeMode = 'app-rule' | 'app-global' | 'system-tun';
+
+const TUNNEL_PLUGIN_ID = 'qpjoy.electron-tunnel';
 
 function toLegacyEntry(row: DbEntry): LegacyEntry & { visibility?: string } {
   return {
@@ -48,6 +53,7 @@ async function resolveMarketplaceEntry(
   id: string
 ): Promise<(Pick<LegacyEntry, 'id' | 'npm' | 'latest'> & { tarballUrl?: string }) | null> {
   const dbEntry = deps.registry.marketplaceDb().getEntry(id);
+  if (dbEntry && !isUserInstallableMarketplaceEntry(dbEntry)) return null;
   if (dbEntry) {
     return {
       id: dbEntry.id,
@@ -58,6 +64,7 @@ async function resolveMarketplaceEntry(
   }
 
   const legacyEntry = await deps.marketplace.resolve(id);
+  if (legacyEntry && !isUserInstallableMarketplaceEntry(legacyEntry)) return null;
   return legacyEntry
     ? {
         id: legacyEntry.id,
@@ -66,6 +73,36 @@ async function resolveMarketplaceEntry(
         tarballUrl: legacyEntry.tarballUrl
       }
     : null;
+}
+
+async function tunnelExposed(deps: Deps): Promise<Record<string, (...args: unknown[]) => unknown>> {
+  let exposed = deps.runtime.getExposed(TUNNEL_PLUGIN_ID);
+  if (!exposed && deps.registry.get(TUNNEL_PLUGIN_ID)) {
+    await deps.runtime.activate(TUNNEL_PLUGIN_ID);
+    exposed = deps.runtime.getExposed(TUNNEL_PLUGIN_ID);
+  }
+  if (!exposed) {
+    throw new Error('Tunnel plugin is not active. Install and activate @qpjoy/electron-plugin-tunnel first.');
+  }
+  return exposed;
+}
+
+async function tunnelCall<T = unknown>(deps: Deps, method: string, ...args: unknown[]): Promise<T> {
+  const exposed = await tunnelExposed(deps);
+  const fn = exposed[method];
+  if (typeof fn !== 'function') {
+    throw new Error(`Tunnel plugin did not expose "${method}"`);
+  }
+  return await fn(...args) as T;
+}
+
+async function startTunnelMode(deps: Deps, mode: TunnelRuntimeMode): Promise<unknown> {
+  if (mode === 'system-tun') {
+    await tunnelCall(deps, 'installTun');
+  }
+  await tunnelCall(deps, 'setMode', mode);
+  await tunnelCall(deps, 'start');
+  return tunnelCall(deps, 'status');
 }
 
 /**
@@ -81,9 +118,10 @@ export function registerPluginHostIpc(ipc: IpcMain, deps: Deps): void {
     const dbEntries = deps.registry.marketplaceDb().listEntries();
     return {
       ...result.index,
-      entries: dbEntries.length > 0
+      entries: (dbEntries.length > 0
         ? dbEntries.map(toLegacyEntry)
-        : result.index.entries,
+        : result.index.entries
+      ).filter(isUserInstallableMarketplaceEntry),
       source: result.source,
       remoteFetchedAt: result.remoteFetchedAt,
       remoteError: result.remoteError
@@ -152,6 +190,23 @@ export function registerPluginHostIpc(ipc: IpcMain, deps: Deps): void {
       return fn(...(Array.isArray(payload.args) ? payload.args : []));
     }
   );
+
+  // Host-app facade for the built-in Tunnel plugin. Consumer renderers can
+  // invoke these through their preload instead of knowing Tunnel's admin port
+  // or low-level RPC names. Only start_tun enters the OS privilege path.
+  ipc.handle('market:tunnel:status', () => tunnelCall(deps, 'status'));
+  ipc.handle('market:tunnel:start_app', () => startTunnelMode(deps, 'app-rule'));
+  ipc.handle('market:tunnel:start_global', () => startTunnelMode(deps, 'app-global'));
+  ipc.handle('market:tunnel:start_tun', () => startTunnelMode(deps, 'system-tun'));
+  ipc.handle('market:tunnel:stop', () => tunnelCall(deps, 'stop'));
+  ipc.handle('market:tunnel:set_mode', (_e, mode: TunnelRuntimeMode) => tunnelCall(deps, 'setMode', mode));
+  ipc.handle('market:tunnel:apply_managed_config', (_e, input: Record<string, unknown> | null | undefined) => {
+    const payload = input && typeof input === 'object' ? input : {};
+    return tunnelCall(deps, 'applyManagedConfig', {
+      ...payload,
+      allowSystemTunPrivilege: payload.allowSystemTunPrivilege === true
+    });
+  });
 
   ipc.handle('plugin-host:sync-status', () =>
     readSyncStatus(deps.registry.marketplaceDb(), deps.serverBaseUrl)

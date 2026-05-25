@@ -165,8 +165,6 @@ function buildRules(
     ];
   }
 
-  const appModeTail = allowRules.length > 0 ? 'MATCH,REJECT' : `MATCH,${proxyPolicyName}`;
-
   return [
     ...PRIVATE_DIRECT_RULES,
     ...meshRules,
@@ -174,7 +172,7 @@ function buildRules(
     ...allowRules,
     'GEOSITE,CN,DIRECT',
     'GEOIP,CN,DIRECT',
-    appModeTail
+    'MATCH,REJECT'
   ];
 }
 

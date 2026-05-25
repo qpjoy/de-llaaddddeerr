@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'fs';
+import { createConnection } from 'net';
 import { join, resolve } from 'path';
 import { BrowserWindow } from 'electron';
 import type { App, IpcMain, Session } from 'electron';
@@ -49,6 +50,61 @@ function defaultBundledEngineDir(): string {
   return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function waitForTcpPort(port: number, timeoutMs = 1200): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    const socket = createConnection({ host: '127.0.0.1', port });
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      reject(new Error(`timeout connecting to 127.0.0.1:${port}`));
+    }, timeoutMs);
+
+    socket.once('connect', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.end();
+      resolvePromise();
+    });
+    socket.once('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      reject(err);
+    });
+  });
+}
+
+function testErrorHtml(url: string, message: string): string {
+  return [
+    '<!doctype html><html><head><meta charset="utf-8">',
+    '<title>QPJoy Tunnel Test Error</title>',
+    '<style>',
+    'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#0b1020;color:#eef2ff;}',
+    '.wrap{max-width:820px;margin:72px auto;padding:32px;border:1px solid rgba(148,163,184,.28);border-radius:14px;background:rgba(15,23,42,.88);}',
+    'h1{font-size:24px;margin:0 0 14px;}',
+    'p{line-height:1.7;color:#cbd5e1;}',
+    'code{display:block;white-space:pre-wrap;padding:14px;border-radius:10px;background:#111827;color:#fca5a5;}',
+    '</style></head><body><main class="wrap">',
+    '<h1>测试页面加载失败</h1>',
+    `<p>目标地址：${escapeHtml(url)}</p>`,
+    `<code>${escapeHtml(message)}</code>`,
+    '</main></body></html>'
+  ].join('');
+}
+
 export function createElectronTunnel(host: CreateElectronTunnelHost, options: CreateElectronTunnelOptions = {}): ElectronTunnelHandle {
   const manager = new MihomoManager({
     ...options,
@@ -57,10 +113,26 @@ export function createElectronTunnel(host: CreateElectronTunnelHost, options: Cr
   });
   async function applyProxy(): Promise<void> {
     const status = manager.status();
+    if (!status.running) {
+      await host.session.setProxy({ mode: 'direct' });
+      return;
+    }
     await applyElectronProxy(host.session, status.mode, status.ports);
   }
 
   async function openTestWindow(url: string): Promise<void> {
+    const status = manager.status();
+    if (status.mode !== 'system-tun') {
+      if (!status.running) {
+        throw new Error('隧道核心未运行。请先启动 Tunnel，再打开测试窗口。');
+      }
+      try {
+        await waitForTcpPort(status.ports.mixed);
+      } catch {
+        throw new Error(`本地代理 127.0.0.1:${status.ports.mixed} 不可连接。请重启 Tunnel，或检查 mihomo 是否成功监听 mixed-port。`);
+      }
+    }
+
     const win = new BrowserWindow({
       width: 1180,
       height: 780,
@@ -83,7 +155,13 @@ export function createElectronTunnel(host: CreateElectronTunnelHost, options: Cr
       return { action: 'deny' };
     });
 
-    await win.loadURL(url);
+    try {
+      await win.loadURL(url);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(testErrorHtml(url, message))}`);
+      throw err;
+    }
   }
 
   const admin = new AdminServer(manager, {

@@ -89,14 +89,16 @@
         <div class="backend-actions">
           <button id="btn-save-server" class="mini-button" type="button">保存后端 URL</button>
           <button id="btn-apply-backend" class="mini-button mini-button--primary" type="button">拉取并应用</button>
+          <button id="btn-toggle-tunnel" class="mini-button mini-button--run" type="button">开启 Tunnel</button>
         </div>
       </div>
 
       <div class="quick-actions" aria-label="Tunnel 快捷操作">
-        <span class="quick-actions-label">宿主事件</span>
-        <button class="quick-button" type="button" data-tunnel-mode="app-rule">App 模式</button>
-        <button class="quick-button" type="button" data-tunnel-mode="app-global">全局模式</button>
-        <button class="quick-button" type="button" data-tunnel-mode="system-tun">虚拟网卡</button>
+        <span class="quick-actions-label">宿主事件：切换并启动</span>
+        <button class="quick-button" type="button" data-tunnel-start-mode="app-rule">App 模式</button>
+        <button class="quick-button" type="button" data-tunnel-start-mode="app-global">全局模式</button>
+        <button class="quick-button" type="button" data-tunnel-start-mode="system-tun">虚拟网卡</button>
+        <button id="btn-stop-tunnel" class="quick-button quick-button--stop" type="button">停止</button>
       </div>
 
       <pre id="demo-status" class="status-box" data-tone="idle">正在读取本机 Tunnel 状态...</pre>

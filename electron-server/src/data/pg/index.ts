@@ -1108,11 +1108,13 @@ const tunnel: TunnelStore = {
     return this.upsertPolicy({
       name: 'default-cn-direct',
       routingMode: 'cn-direct',
-      runtimeMode: 'system-tun',
+      runtimeMode: 'app-global',
       enabled: true,
       isDefault: true,
       rules: {
-        description: 'CN/direct, foreign traffic through Oversea Hysteria2.'
+        description: 'CN/direct, foreign traffic through Oversea Hysteria2.',
+        autoStart: true,
+        autoUpdate: true
       }
     });
   },
@@ -1125,7 +1127,7 @@ const tunnel: TunnelStore = {
          id, name, routing_mode, runtime_mode, enabled, is_default, rules, metadata
        )
        VALUES (
-         COALESCE($1::uuid, gen_random_uuid()), $2, COALESCE($3, 'cn-direct'), COALESCE($4, 'system-tun'),
+         COALESCE($1::uuid, gen_random_uuid()), $2, COALESCE($3, 'cn-direct'), COALESCE($4, 'app-global'),
          COALESCE($5, true), COALESCE($6, false), $7, $8
        )
        ON CONFLICT (name) DO UPDATE SET

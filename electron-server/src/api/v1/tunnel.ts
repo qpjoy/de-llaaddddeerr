@@ -474,7 +474,7 @@ function policyRules(policy: TunnelPolicyRow): string[] {
     base.push('GEOSITE,CN,DIRECT', 'GEOIP,CN,DIRECT');
   }
   base.push(...custom);
-  base.push(policy.runtimeMode === 'app-rule' && allowlist.length > 0 ? 'MATCH,REJECT' : 'MATCH,PROXY');
+  base.push(policy.runtimeMode === 'app-rule' ? 'MATCH,REJECT' : 'MATCH,PROXY');
   return base;
 }
 

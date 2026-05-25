@@ -19,6 +19,7 @@
  *     never block startup.
  */
 const path = require('node:path');
+const fs = require('node:fs');
 const { app, BrowserWindow, Menu, ipcMain, session, shell } = require('electron');
 
 let createElectronMarket;
@@ -57,6 +58,127 @@ function tunnelSeedDir() {
     return path.resolve(process.env.QPJOY_TUNNEL_SOURCE);
   }
   return path.join(app.getAppPath(), 'node_modules', '@qpjoy', 'electron-plugin-tunnel');
+}
+
+function safeRealpath(target) {
+  try {
+    return fs.realpathSync(target);
+  } catch {
+    return null;
+  }
+}
+
+function missingPackageDependencies(packageDir) {
+  const realPackageDir = safeRealpath(packageDir);
+  if (!realPackageDir) return ['<package>'];
+  try {
+    const pkgJson = path.join(realPackageDir, 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgJson, 'utf8'));
+    const dependencies = Object.keys(pkg.dependencies || {});
+    const missing = [];
+    for (const dep of dependencies) {
+      try {
+        require.resolve(dep, { paths: [realPackageDir] });
+      } catch {
+        missing.push(dep);
+      }
+    }
+    return missing;
+  } catch {
+    return ['<package.json>'];
+  }
+}
+
+function pruneStaleSeedInstall(id, npm, expectedSourceDir) {
+  const pluginsRoot = path.join(app.getPath('userData'), 'plugins');
+  const expected = safeRealpath(expectedSourceDir);
+  if (!fs.existsSync(pluginsRoot)) return;
+  for (const name of fs.readdirSync(pluginsRoot)) {
+    if (!name.startsWith(`${id}@`)) continue;
+    const installPath = path.join(pluginsRoot, name);
+    const installedPackageDir = path.join(installPath, 'node_modules', ...npm.split('/'));
+    const missingDependencies = missingPackageDependencies(installedPackageDir);
+    if (missingDependencies.length > 0) {
+      fs.rmSync(installPath, { recursive: true, force: true });
+      console.warn('[electron-demo] removed incomplete seed install:', {
+        id,
+        installPath,
+        missingDependencies
+      });
+      continue;
+    }
+    const installed = safeRealpath(installedPackageDir);
+    if (!expected) continue;
+    if (!installed || installed === expected) continue;
+    const installRoot = safeRealpath(installPath);
+    const ownedCopy = installRoot && (installed === installRoot || installed.startsWith(installRoot + path.sep));
+    if (ownedCopy) continue;
+    fs.rmSync(installPath, { recursive: true, force: true });
+    console.warn('[electron-demo] removed stale seed install:', {
+      id,
+      installPath,
+      installed,
+      expected
+    });
+  }
+}
+
+function refreshMarketplaceSelfRecord() {
+  try {
+    const { MarketplaceDB, resolveMarketplaceDbPath } = require('@qpjoy/marketplace-db');
+    const db = MarketplaceDB.open(resolveMarketplaceDbPath(app.getPath('userData')));
+    try {
+      const marketPkgPath = require.resolve('@qpjoy/electron-market/package.json');
+      const marketRoot = path.dirname(marketPkgPath);
+      const pkg = JSON.parse(fs.readFileSync(marketPkgPath, 'utf8'));
+      const manifestPath = path.join(marketRoot, 'dist', 'plugin.manifest.json');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      manifest.version = pkg.version || manifest.version;
+      manifest.activationEvents = [];
+      db.bulkUpsertEntries([
+        {
+          id: manifest.id,
+          npm: pkg.name || '@qpjoy/electron-market',
+          name: manifest.name,
+          description: manifest.description || null,
+          latestVersion: manifest.version,
+          manifestUrl: null,
+          tarballUrl: null,
+          homepage: manifest.homepage || pkg.homepage || null,
+          author: manifest.author || null,
+          category: 'host',
+          verified: true,
+          bootstrap: true,
+          visibility: 'public',
+          specVersion: 1,
+          metadata: { self: true },
+          source: 'seed',
+          fetchedAt: null
+        }
+      ]);
+      db.upsertInstalled({
+        id: manifest.id,
+        npm: pkg.name || '@qpjoy/electron-market',
+        version: manifest.version,
+        installPath: app.getAppPath(),
+        installSource: 'standalone',
+        manifest,
+        grantedPermissions: manifest.permissions || [],
+        state: 'active',
+        errorMessage: null,
+        marketplaceEntryId: manifest.id
+      });
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    console.warn('[electron-demo] failed to refresh marketplace self record:', err);
+  }
+}
+
+function preparePackagedSeeds() {
+  pruneStaleSeedInstall(TUNNEL_ID, '@qpjoy/electron-plugin-tunnel', tunnelSeedDir());
+  refreshMarketplaceSelfRecord();
 }
 
 function normalizeBaseUrl(input) {
@@ -152,7 +274,8 @@ function toManagedTunnelConfig(config) {
       url: subscriptionUrl
     },
     mode: normalizeMode(policy.runtimeMode ?? rules.runtimeMode ?? 'app-rule'),
-    autoStart: rules.autoStart === true,
+    autoStart: rules.autoStart !== false,
+    allowSystemTunPrivilege: false,
     autoUpdate: rules.autoUpdate !== false,
     rules: {
       allowlist: stringList(rules.allowlist),
@@ -213,7 +336,7 @@ async function applyManagedConfigViaAdmin(managed) {
     method: 'POST',
     body: JSON.stringify({ mode: managed.mode })
   });
-  if (managed.autoStart) {
+  if (managed.autoStart && managed.mode !== 'system-tun') {
     await tunnelAdminRequest('/api/core/start', token, { method: 'POST' });
   }
 
@@ -371,6 +494,7 @@ if (gotSingleInstanceLock) {
     .whenReady()
     .then(async () => {
       Menu.setApplicationMenu(null);
+      preparePackagedSeeds();
 
       host = createElectronMarket(
         { app, ipcMain, session: session.defaultSession },
@@ -392,6 +516,11 @@ if (gotSingleInstanceLock) {
       );
 
       await host.ready;
+      if (!app.isPackaged && process.env.QPJOY_DEMO_RESEED_TUNNEL !== '0' && typeof host.reseed === 'function') {
+        await host.reseed(TUNNEL_ID).catch((err) => {
+          console.warn('[electron-demo] dev reseed tunnel failed:', err);
+        });
+      }
 
       // Lightweight renderer-facing IPC: lets the landing page open the
       // marketplace in this window OR a new window.

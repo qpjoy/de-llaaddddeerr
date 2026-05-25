@@ -123,8 +123,14 @@ const tunnelPlugin = {
         await handle.manager.setLocalPorts(ports);
         await handle.applyProxy();
       },
-      start: () => handle.manager.start(),
-      stop: () => handle.manager.stop(),
+      start: async () => {
+        await handle.manager.start();
+        await handle.applyProxy();
+      },
+      stop: async () => {
+        await handle.manager.stop();
+        await handle.applyProxy();
+      },
       restart: async () => {
         await handle.manager.restart();
         await handle.applyProxy();

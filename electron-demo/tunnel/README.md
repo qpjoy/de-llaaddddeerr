@@ -1,8 +1,8 @@
 # electron-demo/tunnel
 
-Clean Electron consumer app for the pre-HDO tunnel flow. This project
-intentionally uses published npm packages, matching what a third-party app
-developer would install before the HDO mesh/core split.
+Clean Electron consumer app for the tunnel flow. It can run against the local
+workspace packages during development, or switch back to published npm packages
+for packaging so the output matches a third-party app.
 
 ## Dependencies
 
@@ -26,14 +26,49 @@ download every macOS/Linux/Windows engine.
 `@qpjoy/electron-plugin-hdo`, `@qpjoy/electron-plugin-notyet`, and other plugins are installed through the
 marketplace UI at runtime. They are not bundled into this demo app.
 
-## Development
+## Development With Local Source
 
 ```bash
 pnpm dev
 ```
 
-This demo should not depend on local `electron-core-*` packages. Keep it on the
-published tunnel package unless intentionally testing a new tunnel release.
+`pnpm dev` first runs `node scripts/dev-mode.mjs local`, which builds the local
+market/tunnel packages, packs them into `.local-packs/`, and installs the demo
+from those tarballs. This mirrors `electron-demo/hdo` and avoids symlinking into
+workspace `node_modules`, so native modules such as `better-sqlite3` resolve from
+the demo app install.
+
+To test the published npm path explicitly:
+
+```bash
+pnpm dev:npm
+```
+
+To reset the demo back to npm mode without launching Electron:
+
+```bash
+pnpm dev:reset
+```
+
+## Host App Tunnel Events
+
+Consumer apps can keep their integration thin by exposing marketplace-level
+Tunnel events from preload:
+
+```js
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('tunnel', {
+  status: () => ipcRenderer.invoke('market:tunnel:status'),
+  startApp: () => ipcRenderer.invoke('market:tunnel:start_app'),
+  startGlobal: () => ipcRenderer.invoke('market:tunnel:start_global'),
+  startTun: () => ipcRenderer.invoke('market:tunnel:start_tun'),
+  stop: () => ipcRenderer.invoke('market:tunnel:stop')
+});
+```
+
+`start_app` and `start_global` do not request OS privileges. `start_tun` is the
+only event that can enter the virtual-network-adapter privilege flow.
 
 ## Package On macOS
 
@@ -42,6 +77,9 @@ pnpm install
 pnpm package
 pnpm make:mac
 ```
+
+Packaging scripts run `node scripts/dev-mode.mjs npm` first, so release builds
+use published npm packages instead of local workspace tarballs.
 
 Outputs are written below `out/`. Unsigned local builds may need quarantine
 removed before opening:

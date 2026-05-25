@@ -20,6 +20,10 @@ interface PolicySnapshot {
   rules: DomainRule[];
 }
 
+export interface TunnelPolicyGuardOptions {
+  alwaysAllowHosts?: string[];
+}
+
 export interface PolicyDecision {
   allowed: boolean;
   mode: RuntimeMode | 'none';
@@ -109,7 +113,8 @@ export class TunnelPolicyGuard {
 
   constructor(
     private readonly session: Session,
-    private readonly runtime: Pick<PluginRuntime, 'getExposed'>
+    private readonly runtime: Pick<PluginRuntime, 'getExposed'>,
+    private readonly options: TunnelPolicyGuardOptions = {}
   ) {}
 
   start(): void {
@@ -146,6 +151,9 @@ export class TunnelPolicyGuard {
     if (!hostname || isLocalHostname(hostname)) {
       return { allowed: true, mode: 'none', reason: 'local' };
     }
+    if (this.alwaysAllowed(hostname)) {
+      return { allowed: true, mode: 'none', reason: 'allowed' };
+    }
 
     const snapshot = await this.getSnapshot();
     if (!snapshot) {
@@ -168,10 +176,6 @@ export class TunnelPolicyGuard {
     }
 
     const allowRules = enabled.filter((rule) => rule.kind === 'allow');
-    if (allowRules.length === 0) {
-      return { allowed: true, mode: snapshot.status.mode, reason: 'allowed' };
-    }
-
     const allow = allowRules.find((rule) => domainMatches(hostname, rule.domain));
     if (allow) {
       return {
@@ -219,6 +223,10 @@ export class TunnelPolicyGuard {
     }
 
     return null;
+  }
+
+  private alwaysAllowed(hostname: string): boolean {
+    return (this.options.alwaysAllowHosts ?? []).some((domain) => domainMatches(hostname, domain));
   }
 }
 

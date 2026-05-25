@@ -430,6 +430,22 @@ html, body {
   border-color: rgba(62, 196, 134, 0.42);
   background: rgba(62, 196, 134, 0.18);
 }
+.mini-button--run {
+  border-color: rgba(74, 168, 230, 0.48);
+  background: rgba(74, 168, 230, 0.16);
+}
+.mini-button--stop,
+.quick-button--stop {
+  border-color: rgba(255, 94, 94, 0.36);
+  background: rgba(255, 94, 94, 0.10);
+}
+.mini-button:disabled,
+.quick-button:disabled {
+  cursor: not-allowed;
+  color: var(--ink-mute);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
 .quick-actions {
   display: flex;
   align-items: center;

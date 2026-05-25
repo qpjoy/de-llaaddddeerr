@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-core-mihomo",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": false,
   "description": "Stable Mihomo route compiler and subscription utilities shared by QPJoy plugins.",
   "license": "UNLICENSED",

@@ -12,14 +12,14 @@ importers:
         specifier: ^0.3.30
         version: 0.3.30(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)
       '@qpjoy/electron-plugin-hdo':
-        specifier: ^0.1.29
-        version: 0.1.29(electron@34.5.8)
+        specifier: ^0.1.30
+        version: 0.1.30(electron@34.5.8)
       '@qpjoy/electron-plugin-sdk':
         specifier: ^0.1.4
         version: 0.1.4(electron@34.5.8)
       '@qpjoy/electron-plugin-tunnel':
-        specifier: ^0.1.16
-        version: 0.1.16(electron@34.5.8)
+        specifier: ^0.1.17
+        version: 0.1.17(electron@34.5.8)
     devDependencies:
       '@electron-forge/cli':
         specifier: ^7.8.1
@@ -261,14 +261,17 @@ packages:
     engines: {node: ^12.13.0 || ^14.15.0 || >=16.0.0}
     deprecated: This functionality has been moved to @npmcli/fs
 
+  '@qpjoy/electron-core-mihomo@0.1.0':
+    resolution: {integrity: sha512-Tjk16GuB9Go7oOVqHigA+QwQ7IjIvxeZJsqaA6S8lDRRlwjRPxO91cEI3jszuWQDG5hoUZ5o+nEYYFiqa3Bqog==}
+
   '@qpjoy/electron-market@0.3.30':
     resolution: {integrity: sha512-r9CtTJCEp7k4OGwftg95kzvMsh/7KXoC9qJ73IHiQhJRIR3R5cWCEh7DQhv7uGnr9jm+fdVOVLYwZfpv6k8Hiw==}
     peerDependencies:
       '@qpjoy/electron-plugin-sdk': '>=0.1.0'
       electron: '>=28'
 
-  '@qpjoy/electron-plugin-hdo@0.1.29':
-    resolution: {integrity: sha512-yzpx+r/v31hGBE79GcLx/kxoalaUdTdShmy9hVi1cgH+e1QpEXMSH9zF+Z1UsFILtD9bNQlqJ2b5qYlkC/eJDQ==}
+  '@qpjoy/electron-plugin-hdo@0.1.30':
+    resolution: {integrity: sha512-awEDQyZ1SxVYJVzqWyFeVK3JQO4Ekl+50nqKTEVt19Toy/XFRUUkCTGb+dVwn8tlv330FvLEtqjT8JcreWxO8Q==}
     peerDependencies:
       electron: '>=28'
     peerDependenciesMeta:
@@ -308,8 +311,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@qpjoy/electron-plugin-tunnel@0.1.16':
-    resolution: {integrity: sha512-Odzyyy6y65A1+oNtpzGc5vrbMDe8OGX8xHcZ3cDbFZC9EZnz3AJMpzvsJZnnCvGGjx7r4wA5bbxadM5W5xGaHg==}
+  '@qpjoy/electron-plugin-tunnel@0.1.17':
+    resolution: {integrity: sha512-7jjfuDFsTVCFO8V0ScHrRqoLeuURBNHy/Aw3+OYAWy+1Y2w69uighfAAvVNcxOPff4ZPCgqxwuLdBLixjyRo9g==}
     hasBin: true
     peerDependencies:
       electron: '>=28'
@@ -2586,6 +2589,10 @@ snapshots:
       mkdirp: 1.0.4
       rimraf: 3.0.2
 
+  '@qpjoy/electron-core-mihomo@0.1.0':
+    dependencies:
+      yaml: 2.9.0
+
   '@qpjoy/electron-market@0.3.30(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)':
     dependencies:
       '@qpjoy/electron-plugin-sdk': 0.1.4(electron@34.5.8)
@@ -2594,7 +2601,7 @@ snapshots:
       electron: 34.5.8
       semver: 7.8.0
 
-  '@qpjoy/electron-plugin-hdo@0.1.29(electron@34.5.8)':
+  '@qpjoy/electron-plugin-hdo@0.1.30(electron@34.5.8)':
     optionalDependencies:
       electron: 34.5.8
 
@@ -2617,8 +2624,9 @@ snapshots:
   '@qpjoy/electron-plugin-tunnel-engine-win32-x64@0.1.5':
     optional: true
 
-  '@qpjoy/electron-plugin-tunnel@0.1.16(electron@34.5.8)':
+  '@qpjoy/electron-plugin-tunnel@0.1.17(electron@34.5.8)':
     dependencies:
+      '@qpjoy/electron-core-mihomo': 0.1.0
       better-sqlite3: 11.10.0
       electron: 34.5.8
       yaml: 2.9.0

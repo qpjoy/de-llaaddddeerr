@@ -36,7 +36,14 @@ export interface SubscriptionUpdateInput extends SubscriptionInput {
 export interface ManagedTunnelConfigInput {
   subscription?: SubscriptionInput | null;
   mode?: RuntimeMode | null;
+  /** Defaults to true for managed backend profiles. Pass false to only save config. */
   autoStart?: boolean | null;
+  /**
+   * Managed backend pulls must not surprise users with OS privilege prompts.
+   * Pass true only from an explicit user action that is allowed to start
+   * system TUN immediately.
+   */
+  allowSystemTunPrivilege?: boolean | null;
   autoUpdate?: boolean | null;
   rules?: {
     allowlist?: string[];

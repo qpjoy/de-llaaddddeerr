@@ -490,9 +490,14 @@ export class MihomoManager extends EventEmitter {
     await this.applyRuntimeConfigChange();
 
     let started = false;
-    if (input.autoStart) {
-      await this.start();
-      started = true;
+    if (input.autoStart !== false) {
+      const settings = this.db.getSettings();
+      if (needsElevatedTun(settings) && input.allowSystemTunPrivilege !== true) {
+        this.log('warn', 'Managed config requested system TUN autostart; skipped to avoid an administrator prompt');
+      } else {
+        await this.start();
+        started = true;
+      }
     }
 
     return {
@@ -1003,7 +1008,10 @@ export class MihomoManager extends EventEmitter {
   }
 
   async stop(): Promise<void> {
-    await this.runExclusive(() => this.stopUnlocked({ allowElevatedPrompt: true }));
+    await this.runExclusive(() => {
+      const settings = this.db.getSettings();
+      return this.stopUnlocked({ allowElevatedPrompt: settings.mode === 'system-tun' });
+    });
   }
 
   private async stopUnlocked(options: StopOptions = {}): Promise<void> {
@@ -1081,7 +1089,7 @@ export class MihomoManager extends EventEmitter {
   }
 
   async close(): Promise<void> {
-    await this.stopUnlocked({ allowElevatedPrompt: true }).catch((err) => {
+    await this.stopUnlocked({ allowElevatedPrompt: false }).catch((err) => {
       this.log('warn', `Mihomo close stop failed: ${err instanceof Error ? err.message : String(err)}`);
     });
     await delay(300);

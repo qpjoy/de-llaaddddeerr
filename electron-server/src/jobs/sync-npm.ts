@@ -59,6 +59,7 @@ import type {
   PluginVersionDTO,
   VersionManifestDTO
 } from '../data/types.js';
+import { isUserInstallableMarketplaceEntry } from '../marketplaceFilters.js';
 
 const exec = promisify(execFile);
 
@@ -156,7 +157,8 @@ export async function runSync(opts: SyncOptions = {}): Promise<SyncReport> {
   // 3. Build the index + version manifest.
   const generatedAt = new Date().toISOString();
   const release = generatedAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
-  const catalog = targeted ? mergeIntoExistingCatalog(accepted) : accepted;
+  const catalog = (targeted ? mergeIntoExistingCatalog(accepted) : accepted)
+    .filter(isUserInstallableMarketplaceEntry);
   const indexEntries: MarketplaceEntryDTO[] = catalog.map(stripDetailToEntry);
 
   const index: MarketplaceIndexDTO = {
@@ -316,6 +318,10 @@ type SyncOutcome =
   | { kind: 'rejected'; reason: string };
 
 async function syncOne(name: string): Promise<SyncOutcome> {
+  if (!isUserInstallableMarketplaceEntry({ npm: name })) {
+    return { kind: 'rejected', reason: 'internal runtime package (hidden from marketplace)' };
+  }
+
   const meta = (await fetchJson(
     `${NPM_REGISTRY}/${encodeURIComponent(name).replace('%40', '@')}`
   )) as NpmPackageMetadata;

@@ -22,6 +22,7 @@ import {
   type MarketServerSource
 } from '../createElectronPluginHost';
 import { MARKETPLACE_SELF_PLUGIN_ID } from '../constants';
+import { isUserInstallableMarketplaceEntry } from '../marketplaceFilters';
 
 /** Map the DB row shape back to the legacy entry shape the admin UI expects. */
 function toLegacyEntry(row: DbEntry): LegacyEntry & { visibility?: string } {
@@ -172,9 +173,10 @@ export class AdminServer {
         generatedAt: result.index.generatedAt,
         // Prefer DB rows (richer / persisted); fall back to in-memory client
         // payload if the DB hasn't been migrated yet for some reason.
-        entries: dbEntries.length > 0
+        entries: (dbEntries.length > 0
           ? dbEntries.map(toLegacyEntry)
-          : result.index.entries,
+          : result.index.entries
+        ).filter(isUserInstallableMarketplaceEntry),
         source: result.source,
         remoteFetchedAt: result.remoteFetchedAt,
         remoteError: result.remoteError
@@ -580,6 +582,7 @@ export class AdminServer {
 
   private async resolveMarketplaceEntry(id: string): Promise<InstallEntry | null> {
     const dbEntry = this.opts.registry.marketplaceDb().getEntry(id);
+    if (dbEntry && !isUserInstallableMarketplaceEntry(dbEntry)) return null;
     if (dbEntry) {
       return {
         id: dbEntry.id,
@@ -590,6 +593,7 @@ export class AdminServer {
     }
 
     const legacyEntry = await this.opts.marketplace.resolve(id);
+    if (legacyEntry && !isUserInstallableMarketplaceEntry(legacyEntry)) return null;
     return legacyEntry
       ? {
           id: legacyEntry.id,

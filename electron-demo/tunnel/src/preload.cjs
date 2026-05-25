@@ -14,6 +14,15 @@ contextBridge.exposeInMainWorld('qpjoyDemo', {
   setMarketServer: (input) => ipcRenderer.invoke('demo:set-market-server', input),
   /** Log in to D, fetch the user's managed tunnel profile, and apply it locally. */
   applyBackendConfig: (input) => ipcRenderer.invoke('demo:apply-backend-config', input),
-  /** Let a consuming app drive tunnel mode directly through marketplace/plugin IPC. */
+  /** Let a consuming app drive tunnel mode directly through marketplace-level events. */
+  startTunnelMode: (mode) => {
+    if (mode === 'app-rule') return ipcRenderer.invoke('market:tunnel:start_app');
+    if (mode === 'app-global') return ipcRenderer.invoke('market:tunnel:start_global');
+    if (mode === 'system-tun') return ipcRenderer.invoke('market:tunnel:start_tun');
+    throw new Error(`unsupported tunnel mode: ${mode}`);
+  },
+  stopTunnel: () => ipcRenderer.invoke('market:tunnel:stop'),
+  tunnelStatus: () => ipcRenderer.invoke('market:tunnel:status'),
+  /** Lower-level compatibility path kept for tests that only switch mode. */
   setTunnelMode: (mode) => ipcRenderer.invoke('demo:set-tunnel-mode', mode)
 });
