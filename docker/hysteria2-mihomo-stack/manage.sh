@@ -34,6 +34,8 @@ Commands:
   destroy           Stop/remove stack containers; optionally wipe generated data/env
   reinstall         Destroy generated stack state and immediately run setup again
   status            Show stack status, users, ports, and defaults
+  check-subscription-auth
+                    Show subscription Basic Auth state; optionally verify with --password
   list-users        Show current configured users and their advertised up/down values
   add-user          Add one or more users, export profiles, no restart needed
   del-user          Delete one or more users and their generated profiles
@@ -49,6 +51,7 @@ Examples:
   sudo bash ./docker/hysteria2-mihomo-stack/manage.sh setup
   sudo bash ./docker/hysteria2-mihomo-stack/manage.sh reconfigure
   sudo bash ./docker/hysteria2-mihomo-stack/manage.sh reset-auth --user download --password pass
+  sudo bash ./docker/hysteria2-mihomo-stack/manage.sh check-subscription-auth --password pass
   sudo bash ./docker/hysteria2-mihomo-stack/manage.sh add-user --names intelligent01,intelligent02
   sudo bash ./docker/hysteria2-mihomo-stack/manage.sh del-user --names intelligent02
   sudo bash ./docker/hysteria2-mihomo-stack/manage.sh set-limit --names intelligent01 --down-ceil "3 Mbps" --up-ceil "30 Mbps"
@@ -654,6 +657,18 @@ verify_subscription_auth() {
 	die "Subscription auth verification failed for ${sample_name}. Please re-run reset-auth with a known password."
 }
 
+subscription_auth_hash_state() {
+	local hash="${HY2_EXPORT_PASSWORD_HASH:-}"
+
+	if [[ -z "$hash" ]]; then
+		echo "missing"
+	elif [[ "$hash" == "REPLACE_WITH_CADDY_HASH" ]]; then
+		echo "placeholder"
+	else
+		echo "configured"
+	fi
+}
+
 refresh_subscriptions() {
 	local user_count
 
@@ -823,6 +838,8 @@ status_command() {
 	echo "Hysteria server ports: ${HY2_SERVER_PORTS:-unset}"
 	echo "Subscription URL: ${HY2_EXPORT_BASE_URL:-unset}"
 	echo "Subscription listen port: ${HY2_EXPORT_FALLBACK_PORT:-unset}"
+	echo "Subscription auth user: ${HY2_EXPORT_USER:-unset}"
+	echo "Subscription auth hash: $(subscription_auth_hash_state)"
 	echo "Routing mode: ${HY2_MIHOMO_ROUTING_MODE:-unset}"
 	echo "TLS server name: ${HY2_TLS_SERVER_NAME:-unset}"
 	echo "TLS fingerprint: ${HY2_TLS_FINGERPRINT:-unset}"
@@ -841,6 +858,53 @@ status_command() {
 		[[ -n "$line" ]] || continue
 		echo "  $line"
 	done < <(awk -F, 'NR > 1 && $1 != "" { printf "- %s (up=%s, down=%s)\n", $1, $3, $4 }' "$USERS_FILE")
+}
+
+check_subscription_auth_command() {
+	local auth_pass="${1:-}"
+	local sample_yaml sample_name hash_state
+
+	load_env
+	hash_state="$(subscription_auth_hash_state)"
+	sample_yaml="$(first_subscription_yaml || true)"
+	sample_name=""
+	if [[ -n "$sample_yaml" && -f "$sample_yaml" ]]; then
+		sample_name="$(basename "$sample_yaml")"
+	fi
+
+	echo "Subscription URL: ${HY2_EXPORT_BASE_URL:-unset}"
+	echo "Subscription listen port: ${HY2_EXPORT_FALLBACK_PORT:-unset}"
+	echo "Subscription auth user: ${HY2_EXPORT_USER:-unset}"
+	echo "Subscription auth hash: $hash_state"
+	if [[ -n "$sample_name" ]]; then
+		echo "Sample profile: $sample_name"
+		echo "Local test URL: http://${HY2_EXPORT_USER:-user}:<password>@127.0.0.1:${HY2_EXPORT_FALLBACK_PORT:-3434}/${sample_name}"
+	else
+		echo "Sample profile: missing"
+	fi
+
+	if [[ "$hash_state" != "configured" ]]; then
+		echo
+		echo "Subscription password hash is not configured. Run reset-auth with a known user/password."
+		return 1
+	fi
+
+	if [[ -z "$sample_name" ]]; then
+		echo
+		echo "No exported Mihomo YAML profile was found. Run add-user or export first."
+		return 1
+	fi
+
+	if [[ -z "$auth_pass" ]]; then
+		echo
+		echo "To verify the password now:"
+		echo "  sudo bash $0 check-subscription-auth --password '<password>'"
+		return 0
+	fi
+
+	verify_subscription_auth "${HY2_EXPORT_USER:-}" "$auth_pass"
+	echo
+	echo "Subscription Basic Auth verified locally."
 }
 
 list_users_command() {
@@ -1279,6 +1343,16 @@ main() {
 		;;
 		status)
 			status_command
+		;;
+		check-subscription-auth|subscription-auth)
+			local auth_pass=""
+			while [[ $# -gt 0 ]]; do
+				case "$1" in
+					--password) auth_pass="$2"; shift 2 ;;
+					*) die "Unknown check-subscription-auth option: $1" ;;
+				esac
+			done
+			check_subscription_auth_command "$auth_pass"
 		;;
 		list-users)
 			list_users_command
