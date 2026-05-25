@@ -128,6 +128,7 @@ const navItems = computed(() =>
     ? [
         { label: '市场', icon: 'travel_explore', to: '/marketplace' },
         { label: 'HDO', icon: 'hub', to: '/server/hdo' },
+        { label: 'Tunnel', icon: 'route', to: '/server/tunnel' },
         { label: '用户', icon: 'group', to: '/server/users' },
         { label: '审计', icon: 'fact_check', to: '/server/audit' }
       ]

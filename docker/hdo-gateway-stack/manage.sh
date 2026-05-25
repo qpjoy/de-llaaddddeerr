@@ -35,6 +35,10 @@ Commands:
                       Run docker/wg-mihomo-stack setup from this HDO entrypoint
   deploy-oversea-mihomo-hysteria2
                       Run docker/hysteria2-mihomo-stack setup from this HDO entrypoint
+  tunnel-reconcile-oversea
+                      Apply D tunnel control-plane state to oversea Mihomo + Hysteria2
+  tunnel-status-oversea
+                      Show oversea Mihomo + Hysteria2 status from this entrypoint
   setup-oversea-egress Write scoped egress env template for npm/GitHub/Docker
   nuke                Wipe generated HDO gateway state; optional host WG cleanup
   status              Show generated files
@@ -49,6 +53,7 @@ Examples:
   sudo ./scripts/manage.sh hdo repair-domestic-routes
   sudo ./scripts/manage.sh hdo deploy-domestic-mihomo-wireguard
   sudo ./scripts/manage.sh hdo deploy-oversea-mihomo-hysteria2
+  sudo QPJOY_TUNNEL_STATE_FILE=/tmp/state.json ./scripts/manage.sh hdo tunnel-reconcile-oversea
   sudo ./scripts/manage.sh hdo nuke --all --yes
 
 Optional API registration:
@@ -838,6 +843,8 @@ cmd_menu() {
     "deploy-domestic    部署 domestic-vps + WireGuard"
     "deploy-domestic-mihomo-wireguard  部署 domestic Docker Mihomo + WireGuard"
     "deploy-oversea-mihomo-hysteria2   部署 oversea Docker Mihomo + Hysteria2"
+    "tunnel-reconcile  同步 D tunnel 控制面状态到 Oversea"
+    "tunnel-status     查看 Oversea tunnel 状态"
     "add-home           生成 Home WireGuard peer"
     "sync-peers         同步服务端 H 成员/client peers 到 domestic"
     "sync-repair        同步 peers 并修复 live 路由/转发"
@@ -859,6 +866,8 @@ cmd_menu() {
       deploy-domestic) cmd_deploy_domestic ;;
       deploy-domestic-mihomo-wireguard) cmd_stack_delegate "$ROOT_DIR/docker/wg-mihomo-stack/manage.sh" setup ;;
       deploy-oversea-mihomo-hysteria2) cmd_stack_delegate "$ROOT_DIR/docker/hysteria2-mihomo-stack/manage.sh" setup ;;
+      tunnel-reconcile) cmd_tunnel_reconcile_oversea ;;
+      tunnel-status)    cmd_tunnel_status_oversea ;;
       add-home)        cmd_add_home ;;
       sync-peers)      cmd_sync_domestic_peers ;;
       sync-repair)     cmd_sync_and_repair_domestic ;;
@@ -880,6 +889,23 @@ cmd_stack_delegate() {
   shift
   [ -f "$script" ] || die "missing stack script: $script"
   bash "$script" "$@"
+}
+
+cmd_tunnel_reconcile_oversea() {
+  local state_file="${QPJOY_TUNNEL_STATE_FILE:-}"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --state-file) state_file="${2:?}"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  [ -n "$state_file" ] || die "QPJOY_TUNNEL_STATE_FILE or --state-file is required"
+  cmd_stack_delegate "$ROOT_DIR/docker/hysteria2-mihomo-stack/manage.sh" reconcile-from-json --state-file "$state_file"
+}
+
+cmd_tunnel_status_oversea() {
+  cmd_stack_delegate "$ROOT_DIR/docker/hysteria2-mihomo-stack/manage.sh" status
 }
 
 maybe_register_node() {
@@ -918,6 +944,8 @@ case "$command" in
   deploy-domestic|deploy) cmd_deploy_domestic "$@" ;;
   deploy-domestic-mihomo-wireguard|domestic-mihomo-wireguard) cmd_stack_delegate "$ROOT_DIR/docker/wg-mihomo-stack/manage.sh" setup "$@" ;;
   deploy-oversea-mihomo-hysteria2|oversea-mihomo-hysteria2) cmd_stack_delegate "$ROOT_DIR/docker/hysteria2-mihomo-stack/manage.sh" setup "$@" ;;
+  tunnel-reconcile-oversea|tunnel-reconcile) cmd_tunnel_reconcile_oversea "$@" ;;
+  tunnel-status-oversea|tunnel-status) cmd_tunnel_status_oversea "$@" ;;
   setup-domestic) cmd_setup_domestic "$@" ;;
   add-home) cmd_add_home "$@" ;;
   sync-domestic-peers|sync-peers) cmd_sync_domestic_peers "$@" ;;

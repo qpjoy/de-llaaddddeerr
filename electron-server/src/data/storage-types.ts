@@ -462,6 +462,120 @@ export interface HdoStore {
 }
 
 /* ────────────────────────────────────────────────────────────────────── */
+/* Tunnel control plane                                                   */
+/* ────────────────────────────────────────────────────────────────────── */
+
+export type TunnelNodeStatus = 'pending' | 'online' | 'offline' | 'error';
+export type TunnelRoutingMode = 'cn-direct' | 'global';
+export type TunnelRuntimeMode = 'system-tun' | 'app-global' | 'app-rule';
+export type TunnelAccountStatus = 'active' | 'disabled' | 'revoked';
+
+export interface TunnelNodeRow {
+  id: string;
+  name: string;
+  publicHost: string;
+  runnerUrl: string | null;
+  runnerToken: string | null;
+  status: TunnelNodeStatus;
+  serverPorts: string | null;
+  subscriptionBaseUrl: string | null;
+  desiredRevision: number;
+  appliedRevision: number | null;
+  metadata: Record<string, unknown> | null;
+  lastSeenAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TunnelPolicyRow {
+  id: string;
+  name: string;
+  routingMode: TunnelRoutingMode;
+  runtimeMode: TunnelRuntimeMode;
+  enabled: boolean;
+  isDefault: boolean;
+  rules: Record<string, unknown> | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TunnelAccountRow {
+  id: string;
+  userId: string;
+  nodeId: string | null;
+  policyId: string | null;
+  username: string;
+  status: TunnelAccountStatus;
+  authToken: string;
+  subscriptionToken: string;
+  downRate: string | null;
+  upRate: string | null;
+  desiredRevision: number;
+  appliedRevision: number | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TunnelStore {
+  listNodes(): Promise<TunnelNodeRow[]>;
+  findNode(id: string): Promise<TunnelNodeRow | null>;
+  upsertNode(input: {
+    id?: string;
+    name: string;
+    publicHost: string;
+    runnerUrl?: string | null;
+    runnerToken?: string | null;
+    status?: TunnelNodeStatus;
+    serverPorts?: string | null;
+    subscriptionBaseUrl?: string | null;
+    desiredRevision?: number;
+    appliedRevision?: number | null;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<TunnelNodeRow>;
+  setNodeAppliedRevision(
+    id: string,
+    input: { appliedRevision: number; status?: TunnelNodeStatus; metadata?: Record<string, unknown> | null }
+  ): Promise<TunnelNodeRow | null>;
+  listPolicies(): Promise<TunnelPolicyRow[]>;
+  ensureDefaultPolicy(): Promise<TunnelPolicyRow>;
+  upsertPolicy(input: {
+    id?: string;
+    name: string;
+    routingMode?: TunnelRoutingMode;
+    runtimeMode?: TunnelRuntimeMode;
+    enabled?: boolean;
+    isDefault?: boolean;
+    rules?: Record<string, unknown> | null;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<TunnelPolicyRow>;
+  listAccounts(filter?: {
+    userId?: string;
+    nodeId?: string;
+    status?: TunnelAccountStatus;
+  }): Promise<TunnelAccountRow[]>;
+  findAccount(id: string): Promise<TunnelAccountRow | null>;
+  findAccountBySubscriptionToken(token: string): Promise<TunnelAccountRow | null>;
+  upsertAccount(input: {
+    id?: string;
+    userId: string;
+    nodeId?: string | null;
+    policyId?: string | null;
+    username: string;
+    status?: TunnelAccountStatus;
+    authToken?: string;
+    subscriptionToken?: string;
+    downRate?: string | null;
+    upRate?: string | null;
+    desiredRevision?: number;
+    appliedRevision?: number | null;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<TunnelAccountRow>;
+  setAccountAppliedRevision(id: string, appliedRevision: number): Promise<TunnelAccountRow | null>;
+}
+
+/* ────────────────────────────────────────────────────────────────────── */
 /* Bundle                                                                 */
 /* ────────────────────────────────────────────────────────────────────── */
 
@@ -473,6 +587,7 @@ export interface Storage {
   audit: AuditStore;
   gameScores: GameScoresStore;
   hdo: HdoStore;
+  tunnel: TunnelStore;
   backend: 'json' | 'postgres';
   /** Best-effort close; harmless when called multiple times. */
   close(): Promise<void>;

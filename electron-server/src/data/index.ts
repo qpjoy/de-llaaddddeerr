@@ -63,6 +63,9 @@ export const gameScoresStore = new Proxy({} as Storage['gameScores'], {
 export const hdoStore = new Proxy({} as Storage['hdo'], {
   get: (_t, prop) => Reflect.get(active.hdo, prop, active.hdo)
 });
+export const tunnelStore = new Proxy({} as Storage['tunnel'], {
+  get: (_t, prop) => Reflect.get(active.tunnel, prop, active.tunnel)
+});
 
 export type { Storage } from './storage-types.js';
 export * from './storage-types.js';

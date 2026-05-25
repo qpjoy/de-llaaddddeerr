@@ -46,6 +46,14 @@ import type {
   HdoSubscriptionArtifactRow,
   RefreshStore,
   Storage,
+  TunnelAccountRow,
+  TunnelAccountStatus,
+  TunnelNodeRow,
+  TunnelNodeStatus,
+  TunnelPolicyRow,
+  TunnelRoutingMode,
+  TunnelRuntimeMode,
+  TunnelStore,
   UsersStore
 } from '../storage-types.js';
 
@@ -72,6 +80,11 @@ interface HdoFile {
   artifacts: HdoSubscriptionArtifactRow[];
   pluginStates: HdoDevicePluginStateRow[];
   deviceTasks: HdoDeviceTaskRow[];
+}
+interface TunnelFile {
+  nodes: TunnelNodeRow[];
+  policies: TunnelPolicyRow[];
+  accounts: TunnelAccountRow[];
 }
 
 function readJson<T>(name: string, fallback: T): T {
@@ -140,6 +153,29 @@ function readHdo(): HdoFile {
 
 function writeHdo(file: HdoFile): void {
   writeJson('hdo.json', file);
+}
+
+function emptyTunnelFile(): TunnelFile {
+  return {
+    nodes: [],
+    policies: [],
+    accounts: []
+  };
+}
+
+function readTunnel(): TunnelFile {
+  const file = readJson<Partial<TunnelFile>>('tunnel.json', emptyTunnelFile());
+  return {
+    ...emptyTunnelFile(),
+    ...file,
+    nodes: file.nodes ?? [],
+    policies: file.policies ?? [],
+    accounts: file.accounts ?? []
+  };
+}
+
+function writeTunnel(file: TunnelFile): void {
+  writeJson('tunnel.json', file);
 }
 
 function bumpHdoGeneration(file: HdoFile): number {
@@ -1023,6 +1059,211 @@ const hdo: HdoStore = {
   }
 };
 
+const tunnel: TunnelStore = {
+  async listNodes() {
+    return readTunnel().nodes.sort((a, b) => a.name.localeCompare(b.name));
+  },
+  async findNode(id) {
+    return readTunnel().nodes.find((row) => row.id === id) ?? null;
+  },
+  async upsertNode(input) {
+    const file = readTunnel();
+    const now = nowIso();
+    const idx = input.id
+      ? file.nodes.findIndex((row) => row.id === input.id)
+      : file.nodes.findIndex((row) => row.name === input.name);
+    if (idx >= 0) {
+      const existing = file.nodes[idx];
+      const desiredRevision = input.desiredRevision ?? existing.desiredRevision + 1;
+      file.nodes[idx] = {
+        ...existing,
+        name: input.name,
+        publicHost: input.publicHost,
+        runnerUrl: input.runnerUrl === undefined ? existing.runnerUrl : input.runnerUrl,
+        runnerToken: input.runnerToken === undefined ? existing.runnerToken : input.runnerToken,
+        status: input.status ?? existing.status,
+        serverPorts: input.serverPorts === undefined ? existing.serverPorts : input.serverPorts,
+        subscriptionBaseUrl:
+          input.subscriptionBaseUrl === undefined ? existing.subscriptionBaseUrl : input.subscriptionBaseUrl,
+        desiredRevision,
+        appliedRevision: input.appliedRevision === undefined ? existing.appliedRevision : input.appliedRevision,
+        metadata: input.metadata === undefined ? existing.metadata : input.metadata,
+        updatedAt: now
+      };
+      writeTunnel(file);
+      return file.nodes[idx];
+    }
+    const row: TunnelNodeRow = {
+      id: input.id ?? randomUUID(),
+      name: input.name,
+      publicHost: input.publicHost,
+      runnerUrl: input.runnerUrl ?? null,
+      runnerToken: input.runnerToken ?? null,
+      status: input.status ?? 'pending',
+      serverPorts: input.serverPorts ?? null,
+      subscriptionBaseUrl: input.subscriptionBaseUrl ?? null,
+      desiredRevision: input.desiredRevision ?? 1,
+      appliedRevision: input.appliedRevision ?? null,
+      metadata: input.metadata ?? null,
+      lastSeenAt: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    file.nodes.push(row);
+    writeTunnel(file);
+    return row;
+  },
+  async setNodeAppliedRevision(id, input) {
+    const file = readTunnel();
+    const idx = file.nodes.findIndex((row) => row.id === id);
+    if (idx === -1) return null;
+    const now = nowIso();
+    file.nodes[idx] = {
+      ...file.nodes[idx],
+      appliedRevision: input.appliedRevision,
+      status: input.status ?? 'online',
+      metadata: input.metadata === undefined ? file.nodes[idx].metadata : input.metadata,
+      lastSeenAt: now,
+      updatedAt: now
+    };
+    writeTunnel(file);
+    return file.nodes[idx];
+  },
+  async listPolicies() {
+    return readTunnel().policies.sort((a, b) => Number(b.isDefault) - Number(a.isDefault) || a.name.localeCompare(b.name));
+  },
+  async ensureDefaultPolicy() {
+    const existing = readTunnel().policies.find((row) => row.isDefault);
+    if (existing) return existing;
+    return this.upsertPolicy({
+      name: 'default-cn-direct',
+      routingMode: 'cn-direct',
+      runtimeMode: 'system-tun',
+      enabled: true,
+      isDefault: true,
+      rules: {
+        description: 'CN/direct, foreign traffic through Oversea Hysteria2.'
+      }
+    });
+  },
+  async upsertPolicy(input) {
+    const file = readTunnel();
+    const now = nowIso();
+    const idx = input.id
+      ? file.policies.findIndex((row) => row.id === input.id)
+      : file.policies.findIndex((row) => row.name === input.name);
+    if (input.isDefault) {
+      file.policies = file.policies.map((row) => ({ ...row, isDefault: false }));
+    }
+    if (idx >= 0) {
+      const existing = file.policies[idx];
+      file.policies[idx] = {
+        ...existing,
+        name: input.name,
+        routingMode: input.routingMode ?? existing.routingMode,
+        runtimeMode: input.runtimeMode ?? existing.runtimeMode,
+        enabled: input.enabled ?? existing.enabled,
+        isDefault: input.isDefault ?? existing.isDefault,
+        rules: input.rules === undefined ? existing.rules : input.rules,
+        metadata: input.metadata === undefined ? existing.metadata : input.metadata,
+        updatedAt: now
+      };
+      writeTunnel(file);
+      return file.policies[idx];
+    }
+    const row: TunnelPolicyRow = {
+      id: input.id ?? randomUUID(),
+      name: input.name,
+      routingMode: input.routingMode ?? 'cn-direct',
+      runtimeMode: input.runtimeMode ?? 'system-tun',
+      enabled: input.enabled ?? true,
+      isDefault: input.isDefault ?? file.policies.length === 0,
+      rules: input.rules ?? null,
+      metadata: input.metadata ?? null,
+      createdAt: now,
+      updatedAt: now
+    };
+    if (row.isDefault) file.policies = file.policies.map((item) => ({ ...item, isDefault: false }));
+    file.policies.push(row);
+    writeTunnel(file);
+    return row;
+  },
+  async listAccounts(filter = {}) {
+    let rows = readTunnel().accounts;
+    if (filter.userId) rows = rows.filter((row) => row.userId === filter.userId);
+    if (filter.nodeId) rows = rows.filter((row) => row.nodeId === filter.nodeId);
+    if (filter.status) rows = rows.filter((row) => row.status === filter.status);
+    return rows.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  },
+  async findAccount(id) {
+    return readTunnel().accounts.find((row) => row.id === id) ?? null;
+  },
+  async findAccountBySubscriptionToken(token) {
+    return readTunnel().accounts.find((row) => row.subscriptionToken === token) ?? null;
+  },
+  async upsertAccount(input) {
+    const file = readTunnel();
+    const now = nowIso();
+    const idx = input.id
+      ? file.accounts.findIndex((row) => row.id === input.id)
+      : file.accounts.findIndex((row) => row.userId === input.userId && row.username === input.username);
+    if (idx >= 0) {
+      const existing = file.accounts[idx];
+      const desiredRevision = input.desiredRevision ?? existing.desiredRevision + 1;
+      file.accounts[idx] = {
+        ...existing,
+        userId: input.userId,
+        nodeId: input.nodeId === undefined ? existing.nodeId : input.nodeId,
+        policyId: input.policyId === undefined ? existing.policyId : input.policyId,
+        username: input.username,
+        status: input.status ?? existing.status,
+        authToken: input.authToken ?? existing.authToken,
+        subscriptionToken: input.subscriptionToken ?? existing.subscriptionToken,
+        downRate: input.downRate === undefined ? existing.downRate : input.downRate,
+        upRate: input.upRate === undefined ? existing.upRate : input.upRate,
+        desiredRevision,
+        appliedRevision: input.appliedRevision === undefined ? existing.appliedRevision : input.appliedRevision,
+        metadata: input.metadata === undefined ? existing.metadata : input.metadata,
+        updatedAt: now
+      };
+      writeTunnel(file);
+      return file.accounts[idx];
+    }
+    const row: TunnelAccountRow = {
+      id: input.id ?? randomUUID(),
+      userId: input.userId,
+      nodeId: input.nodeId ?? null,
+      policyId: input.policyId ?? null,
+      username: input.username,
+      status: input.status ?? 'active',
+      authToken: input.authToken ?? randomUUID().replace(/-/g, ''),
+      subscriptionToken: input.subscriptionToken ?? randomUUID().replace(/-/g, ''),
+      downRate: input.downRate ?? null,
+      upRate: input.upRate ?? null,
+      desiredRevision: input.desiredRevision ?? 1,
+      appliedRevision: input.appliedRevision ?? null,
+      metadata: input.metadata ?? null,
+      createdAt: now,
+      updatedAt: now
+    };
+    file.accounts.push(row);
+    writeTunnel(file);
+    return row;
+  },
+  async setAccountAppliedRevision(id, appliedRevision) {
+    const file = readTunnel();
+    const idx = file.accounts.findIndex((row) => row.id === id);
+    if (idx === -1) return null;
+    file.accounts[idx] = {
+      ...file.accounts[idx],
+      appliedRevision,
+      updatedAt: nowIso()
+    };
+    writeTunnel(file);
+    return file.accounts[idx];
+  }
+};
+
 export const jsonStorage: Storage = {
   users,
   refresh,
@@ -1031,6 +1272,7 @@ export const jsonStorage: Storage = {
   audit,
   gameScores,
   hdo,
+  tunnel,
   backend: 'json',
   async close() {
     // nothing to close

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -13,6 +14,7 @@ const scriptPath = resolve(process.env.HDO_GATEWAY_SCRIPT || resolve(here, 'mana
 const cwd = resolve(process.env.HDO_GATEWAY_CWD || resolve(here, '../..'));
 const timeoutMs = Number(process.env.HDO_GATEWAY_RUNNER_TIMEOUT_MS || String(20 * 60 * 1000));
 const outputLimit = Number(process.env.HDO_GATEWAY_RUNNER_OUTPUT_LIMIT || '80000');
+const bodyLimit = Number(process.env.HDO_GATEWAY_RUNNER_BODY_LIMIT || String(2 * 1024 * 1024));
 const allowedCommands = new Set([
   'deploy-domestic',
   'sync-peers',
@@ -20,6 +22,8 @@ const allowedCommands = new Set([
   'repair-domestic-routes',
   'deploy-domestic-mihomo-wireguard',
   'deploy-oversea-mihomo-hysteria2',
+  'tunnel-reconcile-oversea',
+  'tunnel-status-oversea',
   'status'
 ]);
 
@@ -65,7 +69,7 @@ const server = createServer(async (req, res) => {
         sendJson(res, 409, { error: 'HDO gateway runner already has a job running' });
         return;
       }
-      const body = await readJson(req);
+      const body = plainObject(await readJson(req)) || {};
       const args = normalizeArgs(body.args);
       if (!args.length || !allowedCommands.has(args[0])) {
         sendJson(res, 400, { error: 'unsupported HDO gateway command' });
@@ -110,7 +114,7 @@ function readJson(req) {
     req.setEncoding('utf8');
     req.on('data', (chunk) => {
       raw += chunk;
-      if (raw.length > 256 * 1024) {
+      if (raw.length > bodyLimit) {
         rejectBody(new Error('request body too large'));
         req.destroy();
       }
@@ -128,9 +132,16 @@ function readJson(req) {
 
 function runGateway(args, body) {
   const startedAt = new Date().toISOString();
+  const tunnelState = plainObject(body.tunnelState);
+  const stateDir = tunnelState ? mkdtempSync(resolve(tmpdir(), 'qpjoy-tunnel-state-')) : null;
+  const stateFile = stateDir ? resolve(stateDir, 'state.json') : null;
+  if (stateFile && tunnelState) {
+    writeFileSync(stateFile, JSON.stringify(tunnelState, null, 2) + '\n', { mode: 0o600 });
+  }
   const env = {
     ...process.env,
-    HDO_SERVER_URL: typeof body.serverUrl === 'string' ? body.serverUrl : process.env.HDO_SERVER_URL || ''
+    HDO_SERVER_URL: typeof body.serverUrl === 'string' ? body.serverUrl : process.env.HDO_SERVER_URL || '',
+    QPJOY_TUNNEL_STATE_FILE: stateFile || process.env.QPJOY_TUNNEL_STATE_FILE || ''
   };
   if (typeof body.bearerToken === 'string' && body.bearerToken) {
     env.HDO_TOKEN = body.bearerToken;
@@ -154,6 +165,7 @@ function runGateway(args, body) {
     child.stderr.on('data', append);
     child.on('error', (err) => {
       clearTimeout(timeout);
+      cleanupStateDir();
       resolveRun({
         status: 'failed',
         command: formatCommand(['bash', scriptPath, ...args]),
@@ -169,6 +181,7 @@ function runGateway(args, body) {
     });
     child.on('close', (code) => {
       clearTimeout(timeout);
+      cleanupStateDir();
       const exitCode = timedOut ? code ?? 124 : code ?? 1;
       resolveRun({
         status: exitCode === 0 ? 'succeeded' : 'failed',
@@ -193,7 +206,15 @@ function runGateway(args, body) {
       const next = output + chunk.toString();
       output = next.length > outputLimit ? next.slice(next.length - outputLimit) : next;
     }
+
+    function cleanupStateDir() {
+      if (stateDir) rmSync(stateDir, { recursive: true, force: true });
+    }
   });
+}
+
+function plainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
 }
 
 function sendJson(res, statusCode, payload) {

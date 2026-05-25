@@ -41,6 +41,8 @@ Commands:
   clear-limit       Reset one or more users' Hysteria2 up/down values to stack defaults
   reapply-limits    Re-export subscriptions using current user defaults
   export            Re-export Mihomo YAML subscriptions from current user registry
+  reconcile-from-json
+                    Apply D tunnel control-plane state JSON to users/env, then refresh
   help              Show this help
 
 Examples:
@@ -50,6 +52,7 @@ Examples:
   sudo bash ./docker/hysteria2-mihomo-stack/manage.sh add-user --names intelligent01,intelligent02
   sudo bash ./docker/hysteria2-mihomo-stack/manage.sh del-user --names intelligent02
   sudo bash ./docker/hysteria2-mihomo-stack/manage.sh set-limit --names intelligent01 --down-ceil "3 Mbps" --up-ceil "30 Mbps"
+  sudo bash ./docker/hysteria2-mihomo-stack/manage.sh reconcile-from-json --state-file /tmp/tunnel-state.json
 EOF
 }
 
@@ -360,6 +363,11 @@ wait_for_container() {
 	done
 
 	die "Container did not become ready in time: $container_name"
+}
+
+container_running() {
+	local container_name="$1"
+	[[ "$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || true)" == "true" ]]
 }
 
 wait_for_subscription_http_ready() {
@@ -1142,6 +1150,72 @@ export_command() {
 	echo "Exported subscriptions to $STACK_DIR/data/subscriptions"
 }
 
+reconcile_from_json_command() {
+	local state_file=""
+	local tmp_users tmp_env old_ports old_host old_routing
+
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+			--state-file) state_file="$2"; shift 2 ;;
+			*) die "Unknown reconcile-from-json option: $1" ;;
+		esac
+	done
+	[[ -n "$state_file" ]] || die "--state-file is required."
+	[[ -f "$state_file" ]] || die "State file not found: $state_file"
+	command -v node >/dev/null 2>&1 || die "node is required to parse tunnel state."
+
+	load_env
+	old_host="${HY2_SERVER_HOST:-}"
+	old_ports="${HY2_SERVER_PORTS:-}"
+	old_routing="${HY2_MIHOMO_ROUTING_MODE:-}"
+	tmp_users="$(mktemp)"
+	tmp_env="$(mktemp)"
+
+	node "$STACK_DIR/scripts/reconcile-tunnel-state.mjs" \
+		--state-file "$state_file" \
+		--users-file "$tmp_users" \
+		--output-env-file "$tmp_env"
+
+	# shellcheck disable=SC1090
+	source "$tmp_env"
+	rm -f "$tmp_env"
+
+	if [[ -n "${TUNNEL_NODE_PUBLIC_HOST:-}" ]]; then
+		set_env_value HY2_SERVER_HOST "$TUNNEL_NODE_PUBLIC_HOST"
+		if [[ "${HY2_TLS_SERVER_NAME:-}" == "$old_host" || -z "${HY2_TLS_SERVER_NAME:-}" ]]; then
+			set_env_value HY2_TLS_SERVER_NAME "$TUNNEL_NODE_PUBLIC_HOST"
+		fi
+	fi
+	if [[ -n "${TUNNEL_NODE_SERVER_PORTS:-}" ]]; then
+		set_env_value HY2_SERVER_PORTS "$TUNNEL_NODE_SERVER_PORTS"
+	fi
+	if [[ -n "${TUNNEL_ROUTING_MODE:-}" ]]; then
+		set_env_value HY2_MIHOMO_ROUTING_MODE "$TUNNEL_ROUTING_MODE"
+	fi
+
+	mv "$tmp_users" "$USERS_FILE"
+	chmod 600 "$USERS_FILE"
+	sync_env_user_list_from_file
+
+	load_env
+	render_runtime_files
+
+	if ! container_running "$HYSTERIA_CONTAINER" || ! container_running "$SUBSCRIPTIONS_CONTAINER"; then
+		start_target all
+	elif [[ "$old_ports" != "${HY2_SERVER_PORTS:-}" ]]; then
+		safe_recreate_service hysteria
+		wait_for_container "$HYSTERIA_CONTAINER"
+		refresh_subscriptions
+	else
+		refresh_subscriptions
+	fi
+
+	echo "Tunnel reconcile applied: revision=${TUNNEL_REVISION:-unknown}, users=${TUNNEL_ACCOUNT_COUNT:-0}, host=${HY2_SERVER_HOST:-unset}, ports=${HY2_SERVER_PORTS:-unset}, routing=${HY2_MIHOMO_ROUTING_MODE:-cn-direct}"
+	if [[ "$old_host" != "${HY2_SERVER_HOST:-}" || "$old_routing" != "${HY2_MIHOMO_ROUTING_MODE:-}" ]]; then
+		echo "Updated stack env from D control-plane state."
+	fi
+}
+
 main() {
 	local command="${1:-help}"
 	shift || true
@@ -1270,6 +1344,9 @@ main() {
 		;;
 		export)
 			export_command
+		;;
+		reconcile-from-json)
+			reconcile_from_json_command "$@"
 		;;
 		*)
 			die "Unknown command: $command"

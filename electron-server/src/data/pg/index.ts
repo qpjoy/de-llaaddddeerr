@@ -42,6 +42,14 @@ import type {
   HdoSubscriptionArtifactRow,
   RefreshStore,
   Storage,
+  TunnelAccountRow,
+  TunnelAccountStatus,
+  TunnelNodeRow,
+  TunnelNodeStatus,
+  TunnelPolicyRow,
+  TunnelRoutingMode,
+  TunnelRuntimeMode,
+  TunnelStore,
   UsersStore
 } from '../storage-types.js';
 import { closePg, getPool } from './pool.js';
@@ -1028,6 +1036,205 @@ const hdo: HdoStore = {
   }
 };
 
+const tunnel: TunnelStore = {
+  async listNodes() {
+    const { rows } = await getPool().query(`SELECT * FROM tunnel_nodes ORDER BY name ASC`);
+    return rows.map(rowToTunnelNode);
+  },
+  async findNode(id) {
+    const { rows } = await getPool().query(`SELECT * FROM tunnel_nodes WHERE id = $1`, [id]);
+    return rows[0] ? rowToTunnelNode(rows[0]) : null;
+  },
+  async upsertNode(input) {
+    const params = [
+      input.id ?? null,
+      input.name,
+      input.publicHost,
+      input.runnerUrl ?? null,
+      input.runnerToken ?? null,
+      input.status ?? 'pending',
+      input.serverPorts ?? null,
+      input.subscriptionBaseUrl ?? null,
+      input.desiredRevision ?? null,
+      input.appliedRevision ?? null,
+      input.metadata ?? null
+    ];
+    const { rows } = await getPool().query(
+      `INSERT INTO tunnel_nodes (
+         id, name, public_host, runner_url, runner_token, status, server_ports,
+         subscription_base_url, desired_revision, applied_revision, metadata
+       )
+       VALUES (
+         COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8,
+         COALESCE($9::bigint, 1), $10, $11
+       )
+       ON CONFLICT (name) DO UPDATE SET
+         public_host = excluded.public_host,
+         runner_url = COALESCE(excluded.runner_url, tunnel_nodes.runner_url),
+         runner_token = COALESCE(excluded.runner_token, tunnel_nodes.runner_token),
+         status = excluded.status,
+         server_ports = COALESCE(excluded.server_ports, tunnel_nodes.server_ports),
+         subscription_base_url = COALESCE(excluded.subscription_base_url, tunnel_nodes.subscription_base_url),
+         desired_revision = COALESCE($9::bigint, tunnel_nodes.desired_revision + 1),
+         applied_revision = COALESCE($10::bigint, tunnel_nodes.applied_revision),
+         metadata = COALESCE($11::jsonb, tunnel_nodes.metadata),
+         updated_at = now()
+       RETURNING *`,
+      params
+    );
+    return rowToTunnelNode(rows[0]);
+  },
+  async setNodeAppliedRevision(id, input) {
+    const { rows } = await getPool().query(
+      `UPDATE tunnel_nodes
+         SET applied_revision = $2,
+             status = COALESCE($3, 'online'),
+             metadata = COALESCE($4::jsonb, metadata),
+             last_seen_at = now(),
+             updated_at = now()
+       WHERE id = $1
+       RETURNING *`,
+      [id, input.appliedRevision, input.status ?? 'online', input.metadata ?? null]
+    );
+    return rows[0] ? rowToTunnelNode(rows[0]) : null;
+  },
+  async listPolicies() {
+    const { rows } = await getPool().query(`SELECT * FROM tunnel_policies ORDER BY is_default DESC, name ASC`);
+    return rows.map(rowToTunnelPolicy);
+  },
+  async ensureDefaultPolicy() {
+    const { rows } = await getPool().query(`SELECT * FROM tunnel_policies WHERE is_default = true LIMIT 1`);
+    if (rows[0]) return rowToTunnelPolicy(rows[0]);
+    return this.upsertPolicy({
+      name: 'default-cn-direct',
+      routingMode: 'cn-direct',
+      runtimeMode: 'system-tun',
+      enabled: true,
+      isDefault: true,
+      rules: {
+        description: 'CN/direct, foreign traffic through Oversea Hysteria2.'
+      }
+    });
+  },
+  async upsertPolicy(input) {
+    if (input.isDefault) {
+      await getPool().query(`UPDATE tunnel_policies SET is_default = false WHERE is_default = true`);
+    }
+    const { rows } = await getPool().query(
+      `INSERT INTO tunnel_policies (
+         id, name, routing_mode, runtime_mode, enabled, is_default, rules, metadata
+       )
+       VALUES (
+         COALESCE($1::uuid, gen_random_uuid()), $2, COALESCE($3, 'cn-direct'), COALESCE($4, 'system-tun'),
+         COALESCE($5, true), COALESCE($6, false), $7, $8
+       )
+       ON CONFLICT (name) DO UPDATE SET
+         routing_mode = COALESCE($3, tunnel_policies.routing_mode),
+         runtime_mode = COALESCE($4, tunnel_policies.runtime_mode),
+         enabled = COALESCE($5, tunnel_policies.enabled),
+         is_default = COALESCE($6, tunnel_policies.is_default),
+         rules = COALESCE($7::jsonb, tunnel_policies.rules),
+         metadata = COALESCE($8::jsonb, tunnel_policies.metadata),
+         updated_at = now()
+       RETURNING *`,
+      [
+        input.id ?? null,
+        input.name,
+        input.routingMode ?? null,
+        input.runtimeMode ?? null,
+        input.enabled ?? null,
+        input.isDefault ?? null,
+        input.rules ?? null,
+        input.metadata ?? null
+      ]
+    );
+    return rowToTunnelPolicy(rows[0]);
+  },
+  async listAccounts(filter = {}) {
+    const params: unknown[] = [];
+    const where: string[] = [];
+    if (filter.userId) {
+      params.push(filter.userId);
+      where.push(`user_id = $${params.length}`);
+    }
+    if (filter.nodeId) {
+      params.push(filter.nodeId);
+      where.push(`node_id = $${params.length}`);
+    }
+    if (filter.status) {
+      params.push(filter.status);
+      where.push(`status = $${params.length}`);
+    }
+    const sql = `SELECT * FROM tunnel_accounts${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY updated_at DESC`;
+    const { rows } = await getPool().query(sql, params);
+    return rows.map(rowToTunnelAccount);
+  },
+  async findAccount(id) {
+    const { rows } = await getPool().query(`SELECT * FROM tunnel_accounts WHERE id = $1`, [id]);
+    return rows[0] ? rowToTunnelAccount(rows[0]) : null;
+  },
+  async findAccountBySubscriptionToken(token) {
+    const { rows } = await getPool().query(
+      `SELECT * FROM tunnel_accounts WHERE subscription_token = $1`,
+      [token]
+    );
+    return rows[0] ? rowToTunnelAccount(rows[0]) : null;
+  },
+  async upsertAccount(input) {
+    const { rows } = await getPool().query(
+      `INSERT INTO tunnel_accounts (
+         id, user_id, node_id, policy_id, username, status, auth_token,
+         subscription_token, down_rate, up_rate, desired_revision, applied_revision, metadata
+       )
+       VALUES (
+         COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5, $6,
+         COALESCE($7, encode(gen_random_bytes(24), 'hex')),
+         COALESCE($8, encode(gen_random_bytes(24), 'hex')),
+         $9, $10, COALESCE($11::bigint, 1), $12, $13
+       )
+       ON CONFLICT (user_id, username) DO UPDATE SET
+         node_id = excluded.node_id,
+         policy_id = excluded.policy_id,
+         status = excluded.status,
+         auth_token = COALESCE($7, tunnel_accounts.auth_token),
+         subscription_token = COALESCE($8, tunnel_accounts.subscription_token),
+         down_rate = excluded.down_rate,
+         up_rate = excluded.up_rate,
+         desired_revision = COALESCE($11::bigint, tunnel_accounts.desired_revision + 1),
+         applied_revision = COALESCE($12::bigint, tunnel_accounts.applied_revision),
+         metadata = COALESCE($13::jsonb, tunnel_accounts.metadata),
+         updated_at = now()
+       RETURNING *`,
+      [
+        input.id ?? null,
+        input.userId,
+        input.nodeId ?? null,
+        input.policyId ?? null,
+        input.username,
+        input.status ?? 'active',
+        input.authToken ?? null,
+        input.subscriptionToken ?? null,
+        input.downRate ?? null,
+        input.upRate ?? null,
+        input.desiredRevision ?? null,
+        input.appliedRevision ?? null,
+        input.metadata ?? null
+      ]
+    );
+    return rowToTunnelAccount(rows[0]);
+  },
+  async setAccountAppliedRevision(id, appliedRevision) {
+    const { rows } = await getPool().query(
+      `UPDATE tunnel_accounts
+         SET applied_revision = $2, updated_at = now()
+       WHERE id = $1
+       RETURNING *`,
+      [id, appliedRevision]
+    );
+    return rows[0] ? rowToTunnelAccount(rows[0]) : null;
+  }
+};
+
 function defaultHdoProfiles(): Array<{
   name: string;
   mode: HdoProfileMode;
@@ -1226,6 +1433,60 @@ function rowToHdoDeviceTask(r: Record<string, unknown>): HdoDeviceTaskRow {
   };
 }
 
+function rowToTunnelNode(r: Record<string, unknown>): TunnelNodeRow {
+  return {
+    id: String(r.id),
+    name: String(r.name),
+    publicHost: String(r.public_host),
+    runnerUrl: r.runner_url ? String(r.runner_url) : null,
+    runnerToken: r.runner_token ? String(r.runner_token) : null,
+    status: String(r.status) as TunnelNodeStatus,
+    serverPorts: r.server_ports ? String(r.server_ports) : null,
+    subscriptionBaseUrl: r.subscription_base_url ? String(r.subscription_base_url) : null,
+    desiredRevision: Number(r.desired_revision),
+    appliedRevision: r.applied_revision === null || r.applied_revision === undefined ? null : Number(r.applied_revision),
+    metadata: (r.metadata as Record<string, unknown> | null) ?? null,
+    lastSeenAt: r.last_seen_at ? new Date(String(r.last_seen_at)).toISOString() : null,
+    createdAt: new Date(String(r.created_at)).toISOString(),
+    updatedAt: new Date(String(r.updated_at)).toISOString()
+  };
+}
+
+function rowToTunnelPolicy(r: Record<string, unknown>): TunnelPolicyRow {
+  return {
+    id: String(r.id),
+    name: String(r.name),
+    routingMode: String(r.routing_mode) as TunnelRoutingMode,
+    runtimeMode: String(r.runtime_mode) as TunnelRuntimeMode,
+    enabled: Boolean(r.enabled),
+    isDefault: Boolean(r.is_default),
+    rules: (r.rules as Record<string, unknown> | null) ?? null,
+    metadata: (r.metadata as Record<string, unknown> | null) ?? null,
+    createdAt: new Date(String(r.created_at)).toISOString(),
+    updatedAt: new Date(String(r.updated_at)).toISOString()
+  };
+}
+
+function rowToTunnelAccount(r: Record<string, unknown>): TunnelAccountRow {
+  return {
+    id: String(r.id),
+    userId: String(r.user_id),
+    nodeId: r.node_id ? String(r.node_id) : null,
+    policyId: r.policy_id ? String(r.policy_id) : null,
+    username: String(r.username),
+    status: String(r.status) as TunnelAccountStatus,
+    authToken: String(r.auth_token),
+    subscriptionToken: String(r.subscription_token),
+    downRate: r.down_rate ? String(r.down_rate) : null,
+    upRate: r.up_rate ? String(r.up_rate) : null,
+    desiredRevision: Number(r.desired_revision),
+    appliedRevision: r.applied_revision === null || r.applied_revision === undefined ? null : Number(r.applied_revision),
+    metadata: (r.metadata as Record<string, unknown> | null) ?? null,
+    createdAt: new Date(String(r.created_at)).toISOString(),
+    updatedAt: new Date(String(r.updated_at)).toISOString()
+  };
+}
+
 function rowToAudit(r: Record<string, unknown>): AuditEntry {
   return {
     id: Number(r.id),
@@ -1247,6 +1508,7 @@ export const pgStorage: Storage = {
   audit,
   gameScores,
   hdo,
+  tunnel,
   backend: 'postgres',
   async close() {
     await closePg();

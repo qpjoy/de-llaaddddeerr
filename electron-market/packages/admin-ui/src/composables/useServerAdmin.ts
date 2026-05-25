@@ -247,6 +247,69 @@ export interface HdoOverview {
   tasks: HdoDeviceTaskRow[];
 }
 
+export interface TunnelNodeRow {
+  id: string;
+  name: string;
+  publicHost: string;
+  runnerUrl: string | null;
+  runnerToken: string | null;
+  status: 'pending' | 'online' | 'offline' | 'error';
+  serverPorts: string | null;
+  subscriptionBaseUrl: string | null;
+  desiredRevision: number;
+  appliedRevision: number | null;
+  metadata: Record<string, unknown> | null;
+  lastSeenAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TunnelPolicyRow {
+  id: string;
+  name: string;
+  routingMode: 'cn-direct' | 'global';
+  runtimeMode: 'system-tun' | 'app-global' | 'app-rule';
+  enabled: boolean;
+  isDefault: boolean;
+  rules: Record<string, unknown> | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TunnelAccountRow {
+  id: string;
+  userId: string;
+  nodeId: string | null;
+  policyId: string | null;
+  username: string;
+  status: 'active' | 'disabled' | 'revoked';
+  authToken: string;
+  subscriptionToken: string;
+  subscriptionUrl: string;
+  downRate: string | null;
+  upRate: string | null;
+  desiredRevision: number;
+  appliedRevision: number | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TunnelOverview {
+  users: PublicUser[];
+  nodes: TunnelNodeRow[];
+  policies: TunnelPolicyRow[];
+  accounts: TunnelAccountRow[];
+}
+
+export interface TunnelReconcileResult {
+  node: TunnelNodeRow | null;
+  revision: number;
+  accounts: number;
+  runner: unknown;
+}
+
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const { apiBase } = useMode();
   const headers: Record<string, string> = {
@@ -356,6 +419,97 @@ export function useServerAdmin() {
 
     async getHdoOverview(): Promise<HdoOverview> {
       return api<HdoOverview>('/hdo/admin/overview');
+    },
+
+    async getTunnelOverview(): Promise<TunnelOverview> {
+      return api<TunnelOverview>('/tunnel/admin/overview');
+    },
+
+    async upsertTunnelNode(input: {
+      id?: string;
+      name: string;
+      publicHost: string;
+      runnerUrl?: string | null;
+      runnerToken?: string | null;
+      status?: TunnelNodeRow['status'];
+      serverPorts?: string | null;
+      subscriptionBaseUrl?: string | null;
+      metadata?: Record<string, unknown> | null;
+    }): Promise<TunnelNodeRow> {
+      const out = await api<TunnelNodeRow>('/tunnel/admin/nodes', {
+        method: 'POST',
+        body: JSON.stringify(input)
+      });
+      toast(`已保存 Tunnel 节点：${out.name}`);
+      return out;
+    },
+
+    async upsertTunnelPolicy(input: {
+      id?: string;
+      name: string;
+      routingMode?: TunnelPolicyRow['routingMode'];
+      runtimeMode?: TunnelPolicyRow['runtimeMode'];
+      enabled?: boolean;
+      isDefault?: boolean;
+      rules?: Record<string, unknown> | null;
+      metadata?: Record<string, unknown> | null;
+    }): Promise<TunnelPolicyRow> {
+      const out = await api<TunnelPolicyRow>('/tunnel/admin/policies', {
+        method: 'POST',
+        body: JSON.stringify(input)
+      });
+      toast(`已保存 Tunnel 策略：${out.name}`);
+      return out;
+    },
+
+    async provisionTunnelAccount(input: {
+      id?: string;
+      userId: string;
+      nodeId?: string | null;
+      policyId?: string | null;
+      username?: string | null;
+      status?: TunnelAccountRow['status'];
+      downRate?: string | null;
+      upRate?: string | null;
+      metadata?: Record<string, unknown> | null;
+    }): Promise<TunnelAccountRow> {
+      const out = await api<TunnelAccountRow>('/tunnel/admin/accounts/provision', {
+        method: 'POST',
+        body: JSON.stringify(input)
+      });
+      toast(`已发放 Tunnel：${out.username}`);
+      return out;
+    },
+
+    async listTunnelAccounts(filter: {
+      userId?: string;
+      nodeId?: string;
+      status?: TunnelAccountRow['status'];
+    } = {}): Promise<TunnelAccountRow[]> {
+      const qs = new URLSearchParams();
+      if (filter.userId) qs.set('userId', filter.userId);
+      if (filter.nodeId) qs.set('nodeId', filter.nodeId);
+      if (filter.status) qs.set('status', filter.status);
+      const suffix = qs.toString() ? '?' + qs.toString() : '';
+      return api<TunnelAccountRow[]>('/tunnel/admin/accounts' + suffix);
+    },
+
+    async rotateTunnelAccountToken(id: string): Promise<TunnelAccountRow> {
+      const out = await api<TunnelAccountRow>(`/tunnel/admin/accounts/${encodeURIComponent(id)}/rotate-token`, {
+        method: 'POST',
+        body: JSON.stringify({})
+      });
+      toast(`已轮换 Tunnel token：${out.username}`);
+      return out;
+    },
+
+    async reconcileTunnelNode(id: string): Promise<TunnelReconcileResult> {
+      const out = await api<TunnelReconcileResult>(`/tunnel/admin/nodes/${encodeURIComponent(id)}/reconcile`, {
+        method: 'POST',
+        body: JSON.stringify({})
+      });
+      toast(`Tunnel 已同步到 O：${out.accounts} 个账号`);
+      return out;
     },
 
     async getHdoDeployments(): Promise<HdoDeploymentState> {
