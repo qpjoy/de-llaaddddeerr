@@ -919,7 +919,7 @@ list_users_command() {
 setup_command() {
 	local host port_spec sub_port auth_user auth_pass initial_users_csv peer_dns
 	local routing_mode tls_sni stack_subnet stack_gateway tz initial_down initial_up
-	local server_down server_up hash users_default hop_interval masq_url obfs_password
+	local server_down server_up hash users_default hop_interval masq_url obfs_password default_auth_user
 	local -a initial_names=()
 	local name
 
@@ -934,9 +934,18 @@ setup_command() {
 	host="$(prompt_default "Hysteria public host/IP" "${HY2_SERVER_HOST:-$(old_wg_env_value WG_SERVER_HOST || echo 203.0.113.10)}")"
 	port_spec="$(prompt_default "Hysteria UDP port or range" "${HY2_SERVER_PORTS:-52120-52159}")"
 	sub_port="$(prompt_default "Subscription TCP port" "${HY2_EXPORT_FALLBACK_PORT:-$(old_wg_env_value WG_EXPORT_FALLBACK_PORT || echo 3434)}")"
-	auth_user="$(prompt_default "Subscription username" "${HY2_EXPORT_USER:-$(old_wg_env_value WG_EXPORT_USER || echo download)}")"
-	auth_pass="$(prompt_password "Subscription password")"
 	initial_users_csv="$(prompt_default "Initial users (comma-separated)" "$users_default")"
+	mapfile -t initial_names < <(parse_names_csv "$initial_users_csv")
+	[[ "${#initial_names[@]}" -gt 0 ]] || die "Please provide at least one valid initial user."
+
+	default_auth_user=""
+	if [[ -n "${HY2_EXPORT_USER:-}" && "${HY2_EXPORT_USER:-}" != "download" ]]; then
+		default_auth_user="$HY2_EXPORT_USER"
+	fi
+	[[ -n "$default_auth_user" ]] || default_auth_user="$(old_wg_env_value WG_EXPORT_USER || true)"
+	[[ -n "$default_auth_user" ]] || default_auth_user="${initial_names[0]}"
+	auth_user="$(prompt_default "Subscription username" "$default_auth_user")"
+	auth_pass="$(prompt_password "Subscription password")"
 	peer_dns="$(prompt_default "Peer DNS servers" "${HY2_PEER_DNS:-1.1.1.1,8.8.8.8}")"
 	routing_mode="$(normalize_routing_mode_value "$(prompt_default "Mihomo routing mode (cn-direct/global)" "${HY2_MIHOMO_ROUTING_MODE:-cn-direct}")")"
 	tls_sni="$(normalize_optional_value "$(prompt_default "TLS server name / SNI ('-' to disable)" "$(default_tls_sni_for_host "$host" "${HY2_TLS_SERVER_NAME:-}")")")"
@@ -949,8 +958,6 @@ setup_command() {
 	obfs_password="$(normalize_optional_value "$(prompt_default "Salamander obfs password ('-' to disable)" "${HY2_OBFS_PASSWORD:-}")")"
 	stack_subnet="$(prompt_default "Docker stack subnet" "${HY2_STACK_SUBNET:-10.254.0.0/24}")"
 	stack_gateway="$(prompt_default "Docker stack gateway" "${HY2_STACK_GATEWAY:-10.254.0.1}")"
-	mapfile -t initial_names < <(parse_names_csv "$initial_users_csv")
-	[[ "${#initial_names[@]}" -gt 0 ]] || die "Please provide at least one valid initial user."
 
 	tz="${TZ:-$(cat /etc/timezone 2>/dev/null || echo Asia/Shanghai)}"
 	hash="$(hash_password "$auth_pass")"
@@ -994,6 +1001,8 @@ setup_command() {
 	echo
 	echo "Setup complete."
 	echo "Subscriptions: http://${host}:${sub_port}/peer_<name>.mihomo.yaml"
+	echo "Subscription auth user: ${auth_user}"
+	echo "Example with auth: http://${auth_user}:<password>@${host}:${sub_port}/peer_${initial_names[0]}.mihomo.yaml"
 }
 
 reconfigure_command() {
