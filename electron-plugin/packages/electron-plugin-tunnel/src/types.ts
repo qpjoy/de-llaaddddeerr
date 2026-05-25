@@ -33,6 +33,25 @@ export interface SubscriptionUpdateInput extends SubscriptionInput {
   id: number;
 }
 
+export interface ManagedTunnelConfigInput {
+  subscription?: SubscriptionInput | null;
+  mode?: RuntimeMode | null;
+  autoStart?: boolean | null;
+  autoUpdate?: boolean | null;
+  rules?: {
+    allowlist?: string[];
+    blocklist?: string[];
+  } | null;
+  source?: string | null;
+}
+
+export interface ManagedTunnelConfigResult {
+  status: TunnelStatus;
+  subscription: SubscriptionRecord | null;
+  rules: DomainRule[];
+  started: boolean;
+}
+
 export interface SubscriptionRecord extends Required<SubscriptionInput> {
   id: number;
   localPath: string | null;

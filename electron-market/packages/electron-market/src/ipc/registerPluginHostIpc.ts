@@ -135,6 +135,23 @@ export function registerPluginHostIpc(ipc: IpcMain, deps: Deps): void {
     return { ok: true };
   });
   ipc.handle('plugin-host:logs', (_e, id: string) => deps.registry.recentLogs(id));
+  ipc.handle(
+    'plugin-host:rpc',
+    async (_e, payload: { id?: string; method?: string; args?: unknown[] }) => {
+      if (!payload?.id || !payload.method) {
+        throw new Error('id and method are required');
+      }
+      const exposed = deps.runtime.getExposed(payload.id);
+      if (!exposed) {
+        throw new Error(`plugin "${payload.id}" is not active or did not expose any methods`);
+      }
+      const fn = exposed[payload.method];
+      if (typeof fn !== 'function') {
+        throw new Error(`plugin "${payload.id}" did not expose "${payload.method}"`);
+      }
+      return fn(...(Array.isArray(payload.args) ? payload.args : []));
+    }
+  );
 
   ipc.handle('plugin-host:sync-status', () =>
     readSyncStatus(deps.registry.marketplaceDb(), deps.serverBaseUrl)

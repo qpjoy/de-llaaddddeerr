@@ -11,6 +11,8 @@ import { renderRuntimeConfig } from '../config/renderRuntimeConfig';
 import { MihomoApi } from './MihomoApi';
 import type {
   DomainRule,
+  ManagedTunnelConfigInput,
+  ManagedTunnelConfigResult,
   RuntimeSettings,
   RuntimeMode,
   SubscriptionInput,
@@ -167,6 +169,21 @@ function normalizeSubscriptionInput(input: SubscriptionInput): SubscriptionInput
     username,
     password
   };
+}
+
+function normalizeManagedSource(value: unknown): string {
+  const clean = String(value ?? 'server')
+    .trim()
+    .replace(/[^a-zA-Z0-9_.-]/g, '_')
+    .slice(0, 48);
+  return clean || 'server';
+}
+
+function normalizeDomainList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value
+    .map((item) => String(item).trim().toLowerCase().replace(/^\.+/, ''))
+    .filter(Boolean)));
 }
 
 function normalizePort(value: number, label: string): number {
@@ -425,6 +442,65 @@ export class MihomoManager extends EventEmitter {
       throw new Error('no active subscription configured');
     }
     return this.updateSubscription(active.id);
+  }
+
+  async applyManagedConfig(input: ManagedTunnelConfigInput = {}): Promise<ManagedTunnelConfigResult> {
+    const source = `managed:${normalizeManagedSource(input.source)}`;
+    let subscription: SubscriptionRecord | null = null;
+
+    if (input.subscription?.url) {
+      const normalized = normalizeSubscriptionInput(input.subscription);
+      const existing = this.listSubscriptions().find((row) => (
+        row.url === normalized.url || row.name === normalized.name
+      ));
+      subscription = existing
+        ? await this.editSubscription({
+            id: existing.id,
+            name: normalized.name,
+            url: normalized.url,
+            username: normalized.username ?? existing.username,
+            password: normalized.password ?? existing.password
+          })
+        : await this.createSubscription(normalized);
+      if (!subscription.active) {
+        subscription = this.setActiveSubscription(subscription.id);
+      }
+    } else if (input.autoUpdate !== false) {
+      const active = this.db.getActiveSubscription();
+      if (active) {
+        subscription = await this.updateSubscription(active.id);
+      }
+    }
+
+    this.db.removeRulesBySource(source);
+    for (const domain of normalizeDomainList(input.rules?.blocklist)) {
+      this.addDomainRule('block', domain, source);
+    }
+    for (const domain of normalizeDomainList(input.rules?.allowlist)) {
+      this.addDomainRule('allow', domain, source);
+    }
+
+    if (input.mode) {
+      if (input.mode === 'system-tun' && !this.db.getSettings().tunInstalled) {
+        this.installTunFeature();
+      }
+      this.setMode(input.mode);
+    }
+
+    await this.applyRuntimeConfigChange();
+
+    let started = false;
+    if (input.autoStart) {
+      await this.start();
+      started = true;
+    }
+
+    return {
+      status: this.status(),
+      subscription,
+      rules: this.listRules(),
+      started
+    };
   }
 
   addDomainRule(kind: 'allow' | 'block', domain: string, source = 'manual'): DomainRule {

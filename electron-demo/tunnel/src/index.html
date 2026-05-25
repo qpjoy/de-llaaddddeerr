@@ -61,6 +61,47 @@
       </button>
     </section>
 
+    <section class="demo-panel" aria-labelledby="demo-panel-title">
+      <div class="demo-panel-head">
+        <div>
+          <h2 id="demo-panel-title">Tunnel 接入模式</h2>
+          <p>同一个 demo 同时演示纯客户端能力，以及从 D 后端拉取订阅、规则和运行模式。</p>
+        </div>
+        <div class="mode-switch" role="group" aria-label="Tunnel 接入模式">
+          <button id="btn-mode-client" class="mode-button" type="button">客户端 only</button>
+          <button id="btn-mode-backend" class="mode-button" type="button">连接后端</button>
+        </div>
+      </div>
+
+      <div id="backend-panel" class="backend-panel is-hidden">
+        <label class="field field--wide" for="server-url">
+          <span>后端服务器</span>
+          <input id="server-url" type="url" placeholder="http://116.62.51.154:8080" autocomplete="url" />
+        </label>
+        <label class="field" for="server-identifier">
+          <span>用户</span>
+          <input id="server-identifier" type="text" placeholder="sqb_mac" autocomplete="username" />
+        </label>
+        <label class="field" for="server-password">
+          <span>密码</span>
+          <input id="server-password" type="password" placeholder="登录 D 后端的密码" autocomplete="current-password" />
+        </label>
+        <div class="backend-actions">
+          <button id="btn-save-server" class="mini-button" type="button">保存后端 URL</button>
+          <button id="btn-apply-backend" class="mini-button mini-button--primary" type="button">拉取并应用</button>
+        </div>
+      </div>
+
+      <div class="quick-actions" aria-label="Tunnel 快捷操作">
+        <span class="quick-actions-label">宿主事件</span>
+        <button class="quick-button" type="button" data-tunnel-mode="app-rule">App 模式</button>
+        <button class="quick-button" type="button" data-tunnel-mode="app-global">全局模式</button>
+        <button class="quick-button" type="button" data-tunnel-mode="system-tun">虚拟网卡</button>
+      </div>
+
+      <pre id="demo-status" class="status-box" data-tone="idle">正在读取本机 Tunnel 状态...</pre>
+    </section>
+
     <section class="info-grid">
       <article class="info-card">
         <div class="info-card-head">
@@ -101,8 +142,8 @@
           <h3>运行时切换</h3>
         </div>
         <p>
-          要启用远端同步，进 <em>市场 → 设置</em> 填入服务器 URL。
-          设置持久化于本地 DB，重启保留。
+          首页按钮模拟宿主客户端事件：切到 App、全局或虚拟网卡模式，
+          后端模式还会把用户策略同步到本机插件。
         </p>
       </article>
     </section>

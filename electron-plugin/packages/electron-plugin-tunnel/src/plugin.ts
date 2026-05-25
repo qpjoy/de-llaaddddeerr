@@ -68,23 +68,93 @@ const tunnelPlugin = {
       }),
       snapshot: () => handle.manager.snapshot(),
       applyProxy: () => handle.applyProxy(),
+      createSubscription: async (input) => {
+        const subscription = await handle.manager.createSubscription(input);
+        if (subscription.active) await handle.manager.applyRuntimeConfigChange();
+        await handle.applyProxy();
+        return subscription;
+      },
+      editSubscription: async (input) => {
+        const subscription = await handle.manager.editSubscription(input);
+        if (subscription.active) await handle.manager.applyRuntimeConfigChange();
+        await handle.applyProxy();
+        return subscription;
+      },
+      deleteSubscription: async (id: number) => {
+        handle.manager.deleteSubscription(id);
+        await handle.manager.applyRuntimeConfigChange();
+        await handle.applyProxy();
+      },
+      setActiveSubscription: async (id: number) => {
+        const subscription = handle.manager.setActiveSubscription(id);
+        await handle.manager.applyRuntimeConfigChange();
+        await handle.applyProxy();
+        return subscription;
+      },
+      updateSubscription: async (id: number) => {
+        const subscription = await handle.manager.updateSubscription(id);
+        if (subscription.active) await handle.manager.applyRuntimeConfigChange();
+        await handle.applyProxy();
+        return subscription;
+      },
+      updateActiveSubscription: async () => {
+        const subscription = await handle.manager.updateActiveSubscription();
+        await handle.manager.applyRuntimeConfigChange();
+        await handle.applyProxy();
+        return subscription;
+      },
+      setMode: async (mode) => {
+        const changed = handle.manager.setMode(mode);
+        if (changed) await handle.manager.applyRuntimeConfigChange();
+        await handle.applyProxy();
+      },
+      installTun: async () => {
+        handle.manager.installTunFeature();
+        await handle.manager.applyRuntimeConfigChange();
+        await handle.applyProxy();
+      },
+      uninstallTun: async () => {
+        handle.manager.uninstallTunFeature();
+        await handle.manager.applyRuntimeConfigChange();
+        await handle.applyProxy();
+      },
+      setCorePath: (corePath: string) => handle.manager.setCorePath(corePath),
+      setLocalPorts: async (ports) => {
+        await handle.manager.setLocalPorts(ports);
+        await handle.applyProxy();
+      },
+      start: () => handle.manager.start(),
+      stop: () => handle.manager.stop(),
+      restart: async () => {
+        await handle.manager.restart();
+        await handle.applyProxy();
+      },
+      applyManagedConfig: async (input) => {
+        const result = await handle.manager.applyManagedConfig(input);
+        await handle.applyProxy();
+        return result;
+      },
       addDomainRule: async (kind: 'allow' | 'block', domain: string) => {
         const rule = handle.manager.addDomainRule(kind, domain);
         await handle.manager.applyRuntimeConfigChange();
+        await handle.applyProxy();
         return rule;
       },
       removeDomainRule: async (id: number) => {
         handle.manager.removeDomainRule(id);
         await handle.manager.applyRuntimeConfigChange();
+        await handle.applyProxy();
       },
       addPreset: async (preset: string) => {
         const rules = handle.manager.addPreset(preset as never);
         await handle.manager.applyRuntimeConfigChange();
+        await handle.applyProxy();
         return rules;
       },
       removePreset: async (preset: string) => {
         const count = handle.manager.removePreset(preset as never);
         await handle.manager.applyRuntimeConfigChange();
+        await handle.applyProxy();
         return count;
       },
       onEvent: (listener: () => void) => {

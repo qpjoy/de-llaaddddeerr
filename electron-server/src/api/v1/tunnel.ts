@@ -451,8 +451,11 @@ function renderTunnelMihomoYaml(
 }
 
 function policyRules(policy: TunnelPolicyRow): string[] {
-  const custom = Array.isArray(policy.rules?.rules) ? policy.rules.rules.map(String) : [];
-  if (custom.length) return custom;
+  const override = stringList(policy.rules?.rules);
+  if (override.length) return override;
+  const custom = stringList(policy.rules?.customRules);
+  const allowlist = stringList(policy.rules?.allowlist);
+  const blocklist = stringList(policy.rules?.blocklist);
   const base = [
     'DOMAIN-SUFFIX,local,DIRECT',
     'IP-CIDR,127.0.0.0/8,DIRECT,no-resolve',
@@ -461,10 +464,17 @@ function policyRules(policy: TunnelPolicyRow): string[] {
     'IP-CIDR,192.168.0.0/16,DIRECT,no-resolve',
     'IP-CIDR,169.254.0.0/16,DIRECT,no-resolve'
   ];
+  for (const domain of blocklist) {
+    base.push(`DOMAIN-SUFFIX,${domain},REJECT`);
+  }
+  for (const domain of allowlist) {
+    base.push(`DOMAIN-SUFFIX,${domain},PROXY`);
+  }
   if (policy.routingMode === 'cn-direct') {
     base.push('GEOSITE,CN,DIRECT', 'GEOIP,CN,DIRECT');
   }
-  base.push('MATCH,PROXY');
+  base.push(...custom);
+  base.push(policy.runtimeMode === 'app-rule' && allowlist.length > 0 ? 'MATCH,REJECT' : 'MATCH,PROXY');
   return base;
 }
 
@@ -503,6 +513,13 @@ function plainObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => String(item).trim())
+    .filter(Boolean);
 }
 
 function plainObjectField(row: Record<string, unknown>, key: string): Record<string, unknown> | null | undefined {

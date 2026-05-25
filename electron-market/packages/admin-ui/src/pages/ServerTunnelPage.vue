@@ -72,8 +72,34 @@
               :options="runtimeModes"
               label="客户端模式"
             />
+            <div class="row q-col-gutter-sm">
+              <div class="col">
+                <q-toggle v-model="policyForm.autoStart" label="客户端默认自动启用" />
+              </div>
+              <div class="col">
+                <q-toggle v-model="policyForm.autoUpdate" label="启动时自动更新订阅" />
+              </div>
+            </div>
+            <q-input
+              v-model="policyForm.allowlistText"
+              outlined
+              dense
+              type="textarea"
+              autogrow
+              label="白名单域名"
+              placeholder="google.com&#10;youtube.com"
+            />
+            <q-input
+              v-model="policyForm.blocklistText"
+              outlined
+              dense
+              type="textarea"
+              autogrow
+              label="黑名单域名"
+              placeholder="example.com&#10;tracker.example"
+            />
             <q-toggle v-model="policyForm.isDefault" label="默认策略" />
-            <q-input v-model="policyForm.rulesJson" outlined dense type="textarea" autogrow label="规则 JSON" />
+            <q-input v-model="policyForm.customRulesText" outlined dense type="textarea" autogrow label="高级 Mihomo 规则" />
             <q-btn color="primary" icon="policy" label="保存策略" :loading="savingPolicy" @click="submitPolicy" />
           </q-card-section>
         </q-card>
@@ -120,6 +146,58 @@
               </div>
             </div>
             <q-btn color="primary" icon="vpn_key" label="发放 Tunnel" :loading="savingAccount" @click="submitAccount" />
+          </q-card-section>
+        </q-card>
+
+        <q-card flat bordered>
+          <q-card-section class="row items-center q-pb-sm">
+            <div class="section-title">用户 Tunnel 行为</div>
+          </q-card-section>
+          <q-card-section class="q-gutter-md">
+            <q-select
+              v-model="accountBehaviorForm.accountId"
+              outlined
+              dense
+              emit-value
+              map-options
+              :options="accountOptions"
+              label="Tunnel 账号"
+              @update:model-value="selectAccountBehavior"
+            />
+            <q-select
+              v-model="accountBehaviorForm.nodeId"
+              outlined
+              dense
+              emit-value
+              map-options
+              :options="nodeOptions"
+              label="O 节点"
+            />
+            <q-select
+              v-model="accountBehaviorForm.policyId"
+              outlined
+              dense
+              emit-value
+              map-options
+              :options="policyOptions"
+              label="策略"
+            />
+            <q-select
+              v-model="accountBehaviorForm.status"
+              outlined
+              dense
+              :options="accountStatuses"
+              label="账号状态"
+            />
+            <div class="row q-col-gutter-sm">
+              <div class="col">
+                <q-input v-model="accountBehaviorForm.downRate" outlined dense label="下载限速" />
+              </div>
+              <div class="col">
+                <q-input v-model="accountBehaviorForm.upRate" outlined dense label="上传限速" />
+              </div>
+            </div>
+            <q-btn color="primary" icon="manage_accounts" label="保存用户行为" :loading="savingAccountBehavior" @click="submitAccountBehavior" />
           </q-card-section>
         </q-card>
       </div>
@@ -204,6 +282,9 @@
             <q-btn dense flat icon="restart_alt" color="warning" @click="rotateAccount(props.row.id)">
               <q-tooltip>轮换 token</q-tooltip>
             </q-btn>
+            <q-btn dense flat icon="edit" @click="editAccountBehavior(props.row)">
+              <q-tooltip>编辑行为</q-tooltip>
+            </q-btn>
           </q-td>
         </template>
       </q-table>
@@ -245,6 +326,7 @@ import { Notify } from 'quasar';
 
 import {
   useServerAdmin,
+  type TunnelAccountRow,
   type TunnelNodeRow,
   type TunnelOverview,
   type TunnelPolicyRow
@@ -258,10 +340,12 @@ const error = ref<string | null>(null);
 const savingNode = ref(false);
 const savingPolicy = ref(false);
 const savingAccount = ref(false);
+const savingAccountBehavior = ref(false);
 const reconcilingNodeId = ref<string | null>(null);
 
 const routingModes = ['cn-direct', 'global'];
 const runtimeModes = ['system-tun', 'app-global', 'app-rule'];
+const accountStatuses = ['active', 'disabled', 'revoked'];
 
 const nodeForm = ref({
   id: '',
@@ -278,7 +362,11 @@ const policyForm = ref({
   routingMode: 'cn-direct' as TunnelPolicyRow['routingMode'],
   runtimeMode: 'system-tun' as TunnelPolicyRow['runtimeMode'],
   isDefault: true,
-  rulesJson: '{\n  "rules": []\n}'
+  autoStart: true,
+  autoUpdate: true,
+  allowlistText: '',
+  blocklistText: '',
+  customRulesText: ''
 });
 
 const accountForm = ref({
@@ -288,6 +376,17 @@ const accountForm = ref({
   username: '',
   downRate: '3 Mbps',
   upRate: '30 Mbps'
+});
+
+const accountBehaviorForm = ref({
+  accountId: '',
+  userId: '',
+  username: '',
+  nodeId: '',
+  policyId: '',
+  status: 'active' as TunnelAccountRow['status'],
+  downRate: '',
+  upRate: ''
 });
 
 const nodeColumns = [
@@ -332,6 +431,12 @@ const nodeOptions = computed(() =>
 const policyOptions = computed(() =>
   (overview.value?.policies ?? []).map((policy) => ({ label: policy.name, value: policy.id }))
 );
+const accountOptions = computed(() =>
+  (overview.value?.accounts ?? []).map((account) => ({
+    label: `${account.username} / ${userLabel(account.userId)}`,
+    value: account.id
+  }))
+);
 const pendingAccounts = computed(() =>
   (overview.value?.accounts ?? []).filter((row) => row.appliedRevision !== row.desiredRevision).length
 );
@@ -355,6 +460,7 @@ function hydrateDefaults(): void {
   if (!accountForm.value.userId && data.users[0]) accountForm.value.userId = data.users[0].id;
   if (!accountForm.value.nodeId && data.nodes[0]) accountForm.value.nodeId = data.nodes[0].id;
   if (!accountForm.value.policyId && data.policies[0]) accountForm.value.policyId = data.policies[0].id;
+  if (!accountBehaviorForm.value.accountId && data.accounts[0]) editAccountBehavior(data.accounts[0]);
   const defaultPolicy = data.policies.find((row) => row.isDefault) ?? data.policies[0];
   if (!policyForm.value.id && defaultPolicy) editPolicy(defaultPolicy);
   const firstNode = data.nodes[0];
@@ -411,18 +517,27 @@ function resetPolicyForm(): void {
     routingMode: 'cn-direct',
     runtimeMode: 'system-tun',
     isDefault: false,
-    rulesJson: '{\n  "rules": []\n}'
+    autoStart: true,
+    autoUpdate: true,
+    allowlistText: '',
+    blocklistText: '',
+    customRulesText: ''
   };
 }
 
 function editPolicy(row: TunnelPolicyRow): void {
+  const rules = row.rules ?? {};
   policyForm.value = {
     id: row.id,
     name: row.name,
     routingMode: row.routingMode,
     runtimeMode: row.runtimeMode,
     isDefault: row.isDefault,
-    rulesJson: JSON.stringify(row.rules ?? { rules: [] }, null, 2)
+    autoStart: rules.autoStart !== false,
+    autoUpdate: rules.autoUpdate !== false,
+    allowlistText: listToText(rules.allowlist),
+    blocklistText: listToText(rules.blocklist),
+    customRulesText: listToText(rules.customRules ?? rules.rules)
   };
 }
 
@@ -436,13 +551,52 @@ async function submitPolicy(): Promise<void> {
       routingMode: policyForm.value.routingMode,
       runtimeMode: policyForm.value.runtimeMode,
       isDefault: policyForm.value.isDefault,
-      rules: parseJson(policyForm.value.rulesJson)
+      rules: policyRulesFromForm()
     });
     await reload();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
     savingPolicy.value = false;
+  }
+}
+
+function selectAccountBehavior(accountId: string): void {
+  const account = overview.value?.accounts.find((row) => row.id === accountId);
+  if (account) editAccountBehavior(account);
+}
+
+function editAccountBehavior(row: TunnelAccountRow): void {
+  accountBehaviorForm.value = {
+    accountId: row.id,
+    userId: row.userId,
+    username: row.username,
+    nodeId: row.nodeId ?? '',
+    policyId: row.policyId ?? '',
+    status: row.status,
+    downRate: row.downRate ?? '',
+    upRate: row.upRate ?? ''
+  };
+}
+
+async function submitAccountBehavior(): Promise<void> {
+  if (!accountBehaviorForm.value.userId || !accountBehaviorForm.value.username) return;
+  savingAccountBehavior.value = true;
+  try {
+    await admin.provisionTunnelAccount({
+      userId: accountBehaviorForm.value.userId,
+      nodeId: accountBehaviorForm.value.nodeId || null,
+      policyId: accountBehaviorForm.value.policyId || null,
+      username: accountBehaviorForm.value.username,
+      status: accountBehaviorForm.value.status,
+      downRate: accountBehaviorForm.value.downRate || null,
+      upRate: accountBehaviorForm.value.upRate || null
+    });
+    await reload();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    savingAccountBehavior.value = false;
   }
 }
 
@@ -494,14 +648,32 @@ async function copySubscription(url: string): Promise<void> {
   Notify.create({ message: '订阅 URL 已复制', color: 'positive', position: 'top-right', timeout: 1600 });
 }
 
-function parseJson(value: string): Record<string, unknown> | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const parsed = JSON.parse(trimmed) as unknown;
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('规则 JSON 必须是对象');
-  }
-  return parsed as Record<string, unknown>;
+function policyRulesFromForm(): Record<string, unknown> {
+  return {
+    allowlist: parseList(policyForm.value.allowlistText),
+    blocklist: parseList(policyForm.value.blocklistText),
+    customRules: parseRuleLines(policyForm.value.customRulesText),
+    autoStart: policyForm.value.autoStart,
+    autoUpdate: policyForm.value.autoUpdate
+  };
+}
+
+function parseList(value: string): string[] {
+  return Array.from(new Set(value
+    .split(/[\n,，\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)));
+}
+
+function parseRuleLines(value: string): string[] {
+  return value
+    .split(/\n+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function listToText(value: unknown): string {
+  return Array.isArray(value) ? value.map(String).join('\n') : '';
 }
 
 function userLabel(id: string | null): string {
