@@ -1,9 +1,11 @@
 import { randomBytes } from 'node:crypto';
 
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 import { attachUser, requireAuth, requireRole } from '../../auth/middleware.js';
+import { hashPassword, validatePassword } from '../../auth/passwords.js';
 import { toPublic } from '../../auth/types.js';
+import type { UserRow } from '../../auth/types.js';
 import { auditStore, tunnelStore, usersStore } from '../../data/index.js';
 import type {
   TunnelAccountRow,
@@ -145,6 +147,12 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
     return accountWithSubscriptionUrl(req, row);
   });
 
+  const openProvisionHandler = (req: FastifyRequest, reply: FastifyReply) => {
+    return provisionOpenTunnelUser(req, reply);
+  };
+  app.post('/api/v1/tunnel/open/provision', adminOnly, openProvisionHandler);
+  app.post('/api/v1/tunnel/open/users/provision', adminOnly, openProvisionHandler);
+
   app.get('/api/v1/tunnel/admin/accounts', adminOnly, async (req) => {
     const query = (req.query ?? {}) as Record<string, unknown>;
     const accounts = await tunnelStore.listAccounts({
@@ -202,49 +210,12 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
         reply.code(409);
         return { error: 'node runnerUrl/runnerToken is not configured' };
       }
-      const [policies, accounts] = await Promise.all([
-        tunnelStore.listPolicies(),
-        tunnelStore.listAccounts({ nodeId: node.id })
-      ]);
-      const activeAccounts = accounts.filter((row) => row.status === 'active');
-      const revision = Math.max(
-        node.desiredRevision,
-        1,
-        ...activeAccounts.map((row) => row.desiredRevision)
-      );
-      const result = await runTunnelNodeReconcile(node, activeAccounts, policies, revision);
+      const result = await reconcileTunnelNodeForRequest(req, node);
       if (!result.ok) {
-        reply.code(502);
-        await auditStore.insert({
-          actorUserId: req.currentUser?.id ?? null,
-          actorIp: req.ip,
-          action: 'tunnel.node.reconcile_failed',
-          targetKind: 'tunnel_node',
-          targetId: node.id,
-          meta: { error: result.error, detail: result.detail }
-        });
+        reply.code(result.status);
         return { error: result.error, detail: result.detail };
       }
-      const updatedNode = await tunnelStore.setNodeAppliedRevision(node.id, {
-        appliedRevision: revision,
-        status: 'online',
-        metadata: { ...(node.metadata ?? {}), lastReconcile: result.payload }
-      });
-      await Promise.all(activeAccounts.map((row) => tunnelStore.setAccountAppliedRevision(row.id, revision)));
-      await auditStore.insert({
-        actorUserId: req.currentUser?.id ?? null,
-        actorIp: req.ip,
-        action: 'tunnel.node.reconcile',
-        targetKind: 'tunnel_node',
-        targetId: node.id,
-        meta: { revision, accounts: activeAccounts.length }
-      });
-      return {
-        node: updatedNode ? redactNodeToken(updatedNode) : null,
-        revision,
-        accounts: activeAccounts.length,
-        runner: result.payload
-      };
+      return result.payload;
     }
   );
 
@@ -321,6 +292,331 @@ function accountWithSubscriptionUrl(req: FastifyRequest, row: TunnelAccountRow) 
   return {
     ...row,
     subscriptionUrl: `${requestBaseUrl(req)}/api/v1/tunnel/subscriptions/${row.subscriptionToken}/mihomo.yaml`
+  };
+}
+
+async function provisionOpenTunnelUser(req: FastifyRequest, reply: FastifyReply) {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const provider = requiredString(body.provider);
+  const externalUserId = requiredString(body.externalUserId);
+  if (!provider || !externalUserId) {
+    reply.code(400);
+    return { error: 'provider and externalUserId required' };
+  }
+
+  const userInput = plainObject(body.user) ?? body;
+  const accountInput = plainObject(body.account) ?? body;
+  const providerSubject = `${provider}:${externalUserId}`;
+  const accounts = await tunnelStore.listAccounts();
+  const boundAccount = findProviderAccount(accounts, provider, externalUserId);
+  const userResult = await ensureProviderUser({ provider, externalUserId, userInput, boundAccount, req });
+  if (!userResult.ok) {
+    reply.code(userResult.status);
+    return { error: userResult.error, detail: userResult.detail };
+  }
+  if (userResult.user.role === 'banned') {
+    reply.code(403);
+    return { error: 'HDO user is banned' };
+  }
+
+  const userAccounts = accounts.filter((row) => row.userId === userResult.user.id);
+  const existingAccount =
+    boundAccount ??
+    userAccounts.find((row) => row.status === 'active') ??
+    userAccounts[0] ??
+    null;
+  const policy = await resolveProvisionPolicy(accountInput, existingAccount);
+  if (!policy) {
+    reply.code(404);
+    return { error: 'policy not found' };
+  }
+  const node = await resolveProvisionNode(accountInput, existingAccount);
+  if (!node) {
+    reply.code(409);
+    return { error: 'tunnel node is not configured' };
+  }
+  if (!node.runnerUrl || !node.runnerToken) {
+    reply.code(409);
+    return { error: 'node runnerUrl/runnerToken is not configured' };
+  }
+
+  const accountUsername =
+    existingAccount?.username ??
+    optionalString(accountInput.username) ??
+    userResult.user.username ??
+    safeAccountName(`${provider}_${externalUserId}`);
+  const accountMetadata = {
+    ...(existingAccount?.metadata ?? {}),
+    ...(plainObject(accountInput.metadata) ?? {}),
+    provider,
+    externalUserId,
+    providerSubject,
+    source: 'tunnel-open-provision'
+  };
+  const hasUsableAccount =
+    existingAccount?.status === 'active' &&
+    existingAccount.nodeId === node.id &&
+    existingAccount.policyId === policy.id &&
+    optionalString(plainObject(existingAccount.metadata)?.providerSubject) === providerSubject;
+  const row = hasUsableAccount
+    ? existingAccount
+    : await tunnelStore.upsertAccount({
+        id: existingAccount?.id,
+        userId: userResult.user.id,
+        nodeId: node.id,
+        policyId: policy.id,
+        username: safeAccountName(accountUsername),
+        status: 'active',
+        downRate: optionalString(accountInput.downRate) ?? existingAccount?.downRate ?? null,
+        upRate: optionalString(accountInput.upRate) ?? existingAccount?.upRate ?? null,
+        metadata: accountMetadata
+      });
+
+  if (!hasUsableAccount) {
+    await auditStore.insert({
+      actorUserId: req.currentUser?.id ?? null,
+      actorIp: req.ip,
+      action: 'tunnel.open.provision',
+      targetKind: 'tunnel_account',
+      targetId: row.id,
+      meta: {
+        provider,
+        externalUserId,
+        providerSubject,
+        userId: userResult.user.id,
+        username: row.username,
+        nodeId: row.nodeId,
+        createdUser: userResult.createdUser,
+        createdAccount: !existingAccount
+      }
+    });
+  }
+
+  const reconcile = await reconcileTunnelNodeForRequest(req, node);
+  if (!reconcile.ok) {
+    reply.code(reconcile.status);
+    return {
+      error: reconcile.error,
+      detail: reconcile.detail,
+      account: accountWithSubscriptionUrl(req, row)
+    };
+  }
+
+  const account = accountWithSubscriptionUrl(req, row);
+  const publicNode = reconcile.payload.node ?? redactNodeToken(node);
+  return {
+    ok: true,
+    provider,
+    externalUserId,
+    createdUser: userResult.createdUser,
+    createdAccount: !existingAccount,
+    existingAccount: Boolean(existingAccount),
+    user: toPublic(userResult.user),
+    account,
+    node: publicNode,
+    policy,
+    config: { account, node: publicNode, policy },
+    managedConfig: managedTunnelConfig(account, policy),
+    reconcile: reconcile.payload
+  };
+}
+
+function managedTunnelConfig(account: ReturnType<typeof accountWithSubscriptionUrl>, policy: TunnelPolicyRow) {
+  const rules = plainObject(policy.rules) ?? {};
+  return {
+    subscription: {
+      name: account.username,
+      url: account.subscriptionUrl
+    },
+    mode: policy.runtimeMode,
+    autoStart: rules.autoStart !== false,
+    autoUpdate: rules.autoUpdate !== false,
+    allowSystemTunPrivilege: false,
+    rules,
+    source: 'hdo-tunnel'
+  };
+}
+
+async function resolveProvisionPolicy(
+  input: Record<string, unknown>,
+  existingAccount: TunnelAccountRow | null
+): Promise<TunnelPolicyRow | null> {
+  const requestedPolicyId = optionalString(input.policyId);
+  const policies = await tunnelStore.listPolicies();
+  if (requestedPolicyId) return policies.find((row) => row.id === requestedPolicyId) ?? null;
+  if (existingAccount?.policyId) {
+    const existingPolicy = policies.find((row) => row.id === existingAccount.policyId);
+    if (existingPolicy) return existingPolicy;
+  }
+  return tunnelStore.ensureDefaultPolicy();
+}
+
+async function resolveProvisionNode(
+  input: Record<string, unknown>,
+  existingAccount: TunnelAccountRow | null
+): Promise<TunnelNodeRow | null> {
+  const requestedNodeId = optionalString(input.nodeId);
+  const nodes = await tunnelStore.listNodes();
+  if (requestedNodeId) return nodes.find((row) => row.id === requestedNodeId) ?? null;
+  if (existingAccount?.nodeId) {
+    const existingNode = nodes.find((row) => row.id === existingAccount.nodeId);
+    if (existingNode) return existingNode;
+  }
+  return nodes.find((row) => row.status !== 'error') ?? nodes[0] ?? null;
+}
+
+function findProviderAccount(
+  accounts: TunnelAccountRow[],
+  provider: string,
+  externalUserId: string
+): TunnelAccountRow | null {
+  const providerSubject = `${provider}:${externalUserId}`;
+  return (
+    accounts.find((row) => {
+      const metadata = plainObject(row.metadata);
+      return (
+        optionalString(metadata?.provider) === provider &&
+        optionalString(metadata?.externalUserId) === externalUserId
+      ) || optionalString(metadata?.providerSubject) === providerSubject;
+    }) ?? null
+  );
+}
+
+async function ensureProviderUser(input: {
+  provider: string;
+  externalUserId: string;
+  userInput: Record<string, unknown>;
+  boundAccount: TunnelAccountRow | null;
+  req: FastifyRequest;
+}): Promise<
+  | {
+      ok: true;
+      user: UserRow;
+      createdUser: boolean;
+    }
+  | { ok: false; status: number; error: string; detail?: unknown }
+> {
+  if (input.boundAccount) {
+    const user = await usersStore.findById(input.boundAccount.userId);
+    if (!user) {
+      return {
+        ok: false,
+        status: 409,
+        error: 'provider binding points to a missing HDO user',
+        detail: { userId: input.boundAccount.userId, accountId: input.boundAccount.id }
+      };
+    }
+    return { ok: true, user, createdUser: false };
+  }
+
+  const explicitUserId = optionalString(input.userInput.userId) ?? optionalString(input.userInput.hdoUserId);
+  if (explicitUserId) {
+    const user = await usersStore.findById(explicitUserId);
+    if (!user) return { ok: false, status: 404, error: 'HDO user not found', detail: { userId: explicitUserId } };
+    return { ok: true, user, createdUser: false };
+  }
+
+  const explicitUsername = optionalString(input.userInput.username);
+  const username = explicitUsername ?? safeAccountName(`${input.provider}_${input.externalUserId}`);
+  const email = optionalString(input.userInput.email);
+  const phone = optionalString(input.userInput.phone);
+  const displayName = optionalString(input.userInput.displayName);
+  const identifiers = [username, email, phone].filter(Boolean) as string[];
+  const matched = await uniqueUsersByIdentifiers(identifiers);
+  if (matched.length > 1) {
+    return { ok: false, status: 409, error: 'user identifiers match multiple HDO users' };
+  }
+  if (matched.length === 1) {
+    return { ok: true, user: matched[0]!, createdUser: false };
+  }
+
+  const password = optionalString(input.userInput.password) ?? randomHexToken();
+  const pw = validatePassword(password);
+  if (!pw.ok) {
+    return { ok: false, status: 400, error: pw.reason ?? 'invalid password' };
+  }
+  const user = await usersStore.insert({
+    username,
+    email,
+    phone,
+    passwordHash: await hashPassword(password),
+    role: 'user',
+    displayName: displayName ?? username
+  });
+  await auditStore.insert({
+    actorUserId: input.req.currentUser?.id ?? null,
+    actorIp: input.req.ip,
+    action: 'tunnel.open.user.create',
+    targetKind: 'user',
+    targetId: user.id,
+    meta: { provider: input.provider, externalUserId: input.externalUserId }
+  });
+  return { ok: true, user, createdUser: true };
+}
+
+async function uniqueUsersByIdentifiers(identifiers: string[]): Promise<UserRow[]> {
+  const rows: UserRow[] = [];
+  for (const identifier of identifiers) {
+    const user = await usersStore.findByIdentifier(identifier);
+    if (user && !rows.some((row) => row.id === user.id)) rows.push(user);
+  }
+  return rows;
+}
+
+async function reconcileTunnelNodeForRequest(
+  req: FastifyRequest,
+  node: TunnelNodeRow
+): Promise<
+  | { ok: true; payload: { node: ReturnType<typeof redactNodeToken> | null; revision: number; accounts: number; runner: unknown } }
+  | { ok: false; status: number; error: string; detail: string }
+> {
+  if (!node.runnerUrl || !node.runnerToken) {
+    return { ok: false, status: 409, error: 'node runnerUrl/runnerToken is not configured', detail: node.id };
+  }
+  const [policies, accounts] = await Promise.all([
+    tunnelStore.listPolicies(),
+    tunnelStore.listAccounts({ nodeId: node.id })
+  ]);
+  const activeAccounts = accounts.filter((row) => row.status === 'active');
+  const revision = Math.max(
+    node.desiredRevision,
+    1,
+    ...activeAccounts.map((row) => row.desiredRevision)
+  );
+  const result = await runTunnelNodeReconcile(node, activeAccounts, policies, revision);
+  if (!result.ok) {
+    await auditStore.insert({
+      actorUserId: req.currentUser?.id ?? null,
+      actorIp: req.ip,
+      action: 'tunnel.node.reconcile_failed',
+      targetKind: 'tunnel_node',
+      targetId: node.id,
+      meta: { error: result.error, detail: result.detail }
+    });
+    return { ok: false, status: 502, error: result.error, detail: result.detail };
+  }
+  const updatedNode = await tunnelStore.setNodeAppliedRevision(node.id, {
+    appliedRevision: revision,
+    status: 'online',
+    metadata: { ...(node.metadata ?? {}), lastReconcile: result.payload }
+  });
+  await Promise.all(activeAccounts.map((row) => tunnelStore.setAccountAppliedRevision(row.id, revision)));
+  await auditStore.insert({
+    actorUserId: req.currentUser?.id ?? null,
+    actorIp: req.ip,
+    action: 'tunnel.node.reconcile',
+    targetKind: 'tunnel_node',
+    targetId: node.id,
+    meta: { revision, accounts: activeAccounts.length }
+  });
+  return {
+    ok: true,
+    payload: {
+      node: updatedNode ? redactNodeToken(updatedNode) : null,
+      revision,
+      accounts: activeAccounts.length,
+      runner: result.payload
+    }
   };
 }
 
