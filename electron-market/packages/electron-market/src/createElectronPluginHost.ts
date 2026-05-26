@@ -417,7 +417,8 @@ export function createElectronPluginHost(
     seedIds,
     reseed: reseedOne,
     upgrade: upgradePlugin,
-    serverBaseUrl
+    serverBaseUrl,
+    session: host.session
   });
 
   // ── Seed bookkeeping ────────────────────────────────────────────────

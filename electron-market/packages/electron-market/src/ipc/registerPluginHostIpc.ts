@@ -1,4 +1,6 @@
-import type { IpcMain } from 'electron';
+import { Buffer } from 'node:buffer';
+
+import type { IpcMain, Session } from 'electron';
 
 import type { MarketplaceEntry as DbEntry } from '@qpjoy/marketplace-db';
 
@@ -23,11 +25,13 @@ interface Deps {
   reseed: (id: string) => Promise<void>;
   upgrade: (id: string, version?: string) => Promise<void>;
   serverBaseUrl: string | null;
+  session: Session;
 }
 
 type TunnelRuntimeMode = 'app-rule' | 'app-global' | 'system-tun';
 
 const TUNNEL_PLUGIN_ID = 'qpjoy.electron-tunnel';
+const HDO_PLUGIN_ID = 'qpjoy.electron-plugin-hdo';
 
 function toLegacyEntry(row: DbEntry): LegacyEntry & { visibility?: string } {
   return {
@@ -96,13 +100,142 @@ async function tunnelCall<T = unknown>(deps: Deps, method: string, ...args: unkn
   return await fn(...args) as T;
 }
 
+async function hdoExposed(deps: Deps): Promise<Record<string, (...args: unknown[]) => unknown>> {
+  let exposed = deps.runtime.getExposed(HDO_PLUGIN_ID);
+  if (!exposed && deps.registry.get(HDO_PLUGIN_ID)) {
+    await deps.runtime.activate(HDO_PLUGIN_ID);
+    exposed = deps.runtime.getExposed(HDO_PLUGIN_ID);
+  }
+  if (!exposed) {
+    throw new Error('HDO plugin is not active. Install and activate @qpjoy/electron-plugin-hdo first.');
+  }
+  return exposed;
+}
+
+async function hdoCall<T = unknown>(deps: Deps, method: string, ...args: unknown[]): Promise<T> {
+  const exposed = await hdoExposed(deps);
+  const fn = exposed[method];
+  if (typeof fn !== 'function') {
+    throw new Error(`HDO plugin did not expose "${method}"`);
+  }
+  return await fn(...args) as T;
+}
+
 async function startTunnelMode(deps: Deps, mode: TunnelRuntimeMode): Promise<unknown> {
   if (mode === 'system-tun') {
     await tunnelCall(deps, 'installTun');
   }
   await tunnelCall(deps, 'setMode', mode);
   await tunnelCall(deps, 'start');
-  return tunnelCall(deps, 'status');
+  const status = await tunnelCall<Record<string, unknown>>(deps, 'status');
+  return withSessionProxyMeta(status, await applyCoordinatedSessionProxy(deps, status));
+}
+
+async function stopTunnelMode(deps: Deps): Promise<unknown> {
+  await tunnelCall(deps, 'stop');
+  const status = await tunnelCall<Record<string, unknown>>(deps, 'status');
+  return withSessionProxyMeta(status, await applyCoordinatedSessionProxy(deps, status));
+}
+
+async function applyCoordinatedSessionProxy(
+  deps: Deps,
+  tunnelStatus?: Record<string, unknown> | null
+): Promise<Record<string, unknown> | null> {
+  const hdo = await prepareHdoDomainProxy(deps);
+  const hdoProxy = stringValue(hdo?.proxy);
+  const hdoDomains = stringArray(hdo?.domains);
+  if (!hdoProxy || hdoDomains.length === 0) return null;
+
+  const running = tunnelStatus?.running === true;
+  const mode = stringValue(tunnelStatus?.mode);
+  const ports = plainObject(tunnelStatus?.ports);
+  const mixed = numberValue(ports?.mixed);
+  const tunnelProxy = running && mode !== 'system-tun' && mixed ? `127.0.0.1:${mixed}` : null;
+  await deps.session.setProxy({
+    mode: 'pac_script',
+    pacScript: renderSessionProxyPacDataUrl({
+      hdoProxy,
+      hdoDomains,
+      tunnelProxy
+    })
+  });
+  return {
+    hdoDomainProxy: {
+      proxy: hdoProxy,
+      domains: hdoDomains
+    },
+    tunnelProxy,
+    mode: tunnelProxy ? 'hdo-priority+tunnel' : 'hdo-priority'
+  };
+}
+
+async function prepareHdoDomainProxy(deps: Deps): Promise<Record<string, unknown> | null> {
+  const exposed = deps.runtime.getExposed(HDO_PLUGIN_ID);
+  const fn = exposed?.prepareDomainProxyFromManifest;
+  if (typeof fn !== 'function') return null;
+  const result = await fn();
+  return plainObject(result);
+}
+
+async function tunnelStatusIfActive(deps: Deps): Promise<Record<string, unknown> | null> {
+  const exposed = deps.runtime.getExposed(TUNNEL_PLUGIN_ID);
+  const fn = exposed?.status;
+  if (typeof fn !== 'function') return null;
+  return plainObject(await fn());
+}
+
+function withSessionProxyMeta(value: unknown, sessionProxy: Record<string, unknown> | null): unknown {
+  if (!sessionProxy) return value;
+  const row = plainObject(value);
+  return row ? { ...row, sessionProxy } : { value, sessionProxy };
+}
+
+function renderSessionProxyPacDataUrl(input: {
+  hdoProxy: string;
+  hdoDomains: string[];
+  tunnelProxy: string | null;
+}): string {
+  const hdoReturn = `PROXY ${input.hdoProxy}`;
+  const tunnelReturn = input.tunnelProxy ? `PROXY ${input.tunnelProxy}` : 'DIRECT';
+  const script = `
+function FindProxyForURL(url, host) {
+  var h = String(host || '').toLowerCase();
+  var domains = ${JSON.stringify(input.hdoDomains)};
+  for (var i = 0; i < domains.length; i++) {
+    var d = domains[i];
+    if (h === d || h.slice(-(d.length + 1)) === '.' + d) {
+      return ${JSON.stringify(hdoReturn)};
+    }
+  }
+  if (isPlainHostName(h) || h === 'localhost' || h === '127.0.0.1' || h === '::1') {
+    return 'DIRECT';
+  }
+  if (/^100\\./.test(h)) {
+    return 'DIRECT';
+  }
+  return ${JSON.stringify(tunnelReturn)};
+}
+`;
+  return `data:application/x-ns-proxy-autoconfig;base64,${Buffer.from(script).toString('base64')}`;
+}
+
+function plainObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function stringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => stringValue(item)).filter((item): item is string => Boolean(item));
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 /**
@@ -198,14 +331,49 @@ export function registerPluginHostIpc(ipc: IpcMain, deps: Deps): void {
   ipc.handle('market:tunnel:start_app', () => startTunnelMode(deps, 'app-rule'));
   ipc.handle('market:tunnel:start_global', () => startTunnelMode(deps, 'app-global'));
   ipc.handle('market:tunnel:start_tun', () => startTunnelMode(deps, 'system-tun'));
-  ipc.handle('market:tunnel:stop', () => tunnelCall(deps, 'stop'));
-  ipc.handle('market:tunnel:set_mode', (_e, mode: TunnelRuntimeMode) => tunnelCall(deps, 'setMode', mode));
-  ipc.handle('market:tunnel:apply_managed_config', (_e, input: Record<string, unknown> | null | undefined) => {
+  ipc.handle('market:tunnel:stop', () => stopTunnelMode(deps));
+  ipc.handle('market:tunnel:set_mode', async (_e, mode: TunnelRuntimeMode) => {
+    const result = await tunnelCall(deps, 'setMode', mode);
+    const status = await tunnelStatusIfActive(deps);
+    if (status?.running === true) {
+      await applyCoordinatedSessionProxy(deps, status);
+    }
+    return result;
+  });
+  ipc.handle('market:tunnel:apply_managed_config', async (_e, input: Record<string, unknown> | null | undefined) => {
     const payload = input && typeof input === 'object' ? input : {};
-    return tunnelCall(deps, 'applyManagedConfig', {
+    const result = await tunnelCall(deps, 'applyManagedConfig', {
       ...payload,
       allowSystemTunPrivilege: payload.allowSystemTunPrivilege === true
     });
+    const status = await tunnelStatusIfActive(deps);
+    if (status?.running === true) {
+      await applyCoordinatedSessionProxy(deps, status);
+    }
+    return result;
+  });
+
+  // Host-app facade for the built-in HDO plugin. Anonymous connect is meant
+  // for apps that need to enter the relay before their own backend login.
+  ipc.handle('market:hdo:status', () => hdoCall(deps, 'snapshot'));
+  ipc.handle('market:hdo:anonymous_connect', async (_e, input: Record<string, unknown> | null | undefined) => {
+    const result = await hdoCall(deps, 'anonymousConnect', input ?? {});
+    const status = await tunnelStatusIfActive(deps);
+    if (status?.running !== true) return result;
+    return withSessionProxyMeta(result, await applyCoordinatedSessionProxy(deps, status));
+  });
+  ipc.handle('market:hdo:prepare', (_e, input: Record<string, unknown> | null | undefined) =>
+    hdoCall(deps, 'prepareWireGuardPeer', input ?? {})
+  );
+  ipc.handle('market:hdo:connect', (_e, input: Record<string, unknown> | null | undefined) =>
+    hdoCall(deps, 'connectWireGuardPeer', input ?? { action: 'up' })
+  );
+  ipc.handle('market:hdo:stop', () => hdoCall(deps, 'connectWireGuardPeer', { action: 'down' }));
+  ipc.handle('market:hdo:apply_domain_proxy', async (_e, manifest: Record<string, unknown> | null | undefined) => {
+    const result = await hdoCall(deps, 'applyDomainProxyFromManifest', manifest ?? null);
+    const status = await tunnelStatusIfActive(deps);
+    if (status?.running !== true) return result;
+    return withSessionProxyMeta(result, await applyCoordinatedSessionProxy(deps, status));
   });
 
   ipc.handle('plugin-host:sync-status', () =>

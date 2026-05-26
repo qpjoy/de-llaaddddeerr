@@ -649,6 +649,7 @@
               />
               <div class="toolbar-row">
                 <q-toggle v-model="serviceEnabled" label="启用" />
+                <q-toggle v-model="serviceAnonymousVisible" label="匿名可见" />
                 <q-space />
                 <q-btn flat icon="restart_alt" label="清空" @click="resetServiceForm" />
                 <q-btn color="primary" icon="save" label="保存服务" @click="saveService" />
@@ -680,6 +681,11 @@
                 <template #body-cell-enabled="props">
                   <q-td :props="props">
                     <q-badge :color="props.value ? 'positive' : 'grey-6'" :label="props.value ? '启用' : '停用'" />
+                  </q-td>
+                </template>
+                <template #body-cell-anonymous="props">
+                  <q-td :props="props">
+                    <q-badge :color="props.value ? 'primary' : 'grey-6'" :label="props.value ? '匿名' : '许可'" />
                   </q-td>
                 </template>
                 <template #body-cell-actions="props">
@@ -991,6 +997,7 @@ const serviceTargetPort = ref('8080');
 const serviceProtocol = ref<HdoServiceRow['protocol']>('tcp');
 const serviceDomains = ref('');
 const serviceEnabled = ref(true);
+const serviceAnonymousVisible = ref(false);
 const serviceProbeLoading = ref(false);
 const serviceProtocolOptions: HdoServiceRow['protocol'][] = ['tcp', 'udp', 'http', 'https'];
 
@@ -1116,6 +1123,7 @@ const serviceColumns = [
   { name: 'protocol', label: '协议', field: 'protocol', align: 'left' as const },
   { name: 'source', label: '来源', field: 'sourceLabel', align: 'left' as const },
   { name: 'domains', label: '域名', field: 'domainsLabel', align: 'left' as const },
+  { name: 'anonymous', label: '匿名', field: 'anonymousVisible', align: 'left' as const },
   { name: 'enabled', label: '状态', field: 'enabled', align: 'left' as const },
   { name: 'actions', label: '', field: 'id', align: 'right' as const }
 ];
@@ -1391,7 +1399,8 @@ const serviceRows = computed(() =>
     nodeLabel: row.nodeId ? nodesById.value.get(row.nodeId)?.name ?? row.nodeId : '不绑定',
     targetLabel: `${row.targetHost}:${row.targetPort}`,
     sourceLabel: serviceSourceLabel(row),
-    domainsLabel: row.domains.join(', ')
+    domainsLabel: row.domains.join(', '),
+    anonymousVisible: row.metadata?.anonymousVisible === true || row.metadata?.anonymous === true
   }))
 );
 
@@ -2088,7 +2097,10 @@ async function saveService(): Promise<void> {
       protocol: serviceProtocol.value,
       domains: splitCsv(serviceDomains.value),
       enabled: serviceEnabled.value,
-      metadata: existing?.metadata ?? null
+      metadata: {
+        ...(existing?.metadata ?? {}),
+        anonymousVisible: serviceAnonymousVisible.value
+      }
     });
     resetServiceForm();
     await reload();
@@ -2119,6 +2131,7 @@ function editService(row: HdoServiceRow): void {
   serviceProtocol.value = row.protocol;
   serviceDomains.value = row.domains.join(', ');
   serviceEnabled.value = row.enabled;
+  serviceAnonymousVisible.value = row.metadata?.anonymousVisible === true || row.metadata?.anonymous === true;
 }
 
 function serviceSourceLabel(row: HdoServiceRow): string {
@@ -2137,6 +2150,7 @@ function resetServiceForm(): void {
   serviceProtocol.value = 'tcp';
   serviceDomains.value = '';
   serviceEnabled.value = true;
+  serviceAnonymousVisible.value = false;
 }
 
 async function saveProfile(): Promise<void> {

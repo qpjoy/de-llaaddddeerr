@@ -7,6 +7,7 @@ import { dirname, resolve } from 'node:path';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 import { attachUser, requireAuth, requireRole } from '../../auth/middleware.js';
+import { hashPassword } from '../../auth/passwords.js';
 import { toPublic } from '../../auth/types.js';
 import { auditStore, hdoStore, usersStore } from '../../data/index.js';
 import type {
@@ -104,6 +105,14 @@ const HDO_DEFAULT_ADDRESS_PLAN = {
   domesticIp: '100.88.0.1',
   routeCidrs: ['100.88.0.0/16', '100.89.0.0/16', '100.90.0.0/16']
 } as const;
+const HDO_ANONYMOUS_MESH_SLUG = 'anonymous';
+const HDO_ANONYMOUS_ADDRESS_PLAN = {
+  homeCidr: HDO_DEFAULT_ADDRESS_PLAN.homeCidr,
+  userCidr: '100.91.0.0/16',
+  serviceCidr: HDO_DEFAULT_ADDRESS_PLAN.serviceCidr,
+  domesticIp: HDO_DEFAULT_ADDRESS_PLAN.domesticIp,
+  routeCidrs: ['100.88.0.0/16', '100.90.0.0/16', '100.91.0.0/16']
+} as const;
 const HDO_ADDRESS_PLAN_MIN = ipv4ToNumber('100.80.0.0') ?? 0;
 const HDO_ADDRESS_PLAN_MAX = ipv4ToNumber('100.99.255.255') ?? 0;
 const HDO_DEFAULT_WG_PORT = 51888;
@@ -154,6 +163,126 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/v1/hdo/readiness', { preHandler: requireAuth }, async (req) => {
     await hdoStore.ensureDefaultProfiles();
     return buildReadiness(req.currentUser!.id);
+  });
+
+  app.post('/api/v1/hdo/anonymous/bootstrap', async (req, reply) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const publicKey = asOptionalString(body.publicKey);
+    const installId = normalizeAnonymousInstallId(asOptionalString(body.installId));
+    if (!publicKey || !installId) {
+      reply.code(400);
+      return { error: 'publicKey and installId required' };
+    }
+
+    const appId = normalizeAnonymousAppId(asOptionalString(body.appId));
+    const subject = anonymousSubject(appId, installId);
+    const username = `anon_${subject}`;
+    const deviceId = `hdo-anon-${subject}`;
+    const label =
+      asOptionalString(body.deviceLabel) ??
+      asOptionalString(body.label) ??
+      `Anonymous ${appId}`;
+    const platform = asOptionalString(body.platform);
+    const now = new Date().toISOString();
+
+    const [initialGroups, devices] = await Promise.all([
+      hdoStore.listMeshGroups(),
+      hdoStore.listAllDevices()
+    ]);
+    const mesh = await ensureAnonymousMeshGroup(initialGroups);
+    const user = await ensureAnonymousUser(username, label);
+    const memberships = await hdoStore.listMeshMemberships(mesh.id);
+    let membership = memberships.find((row) => row.userId === user.id);
+    if (!membership || membership.status !== 'active') {
+      membership = await hdoStore.upsertMeshMembership({
+        id: membership?.id,
+        meshGroupId: mesh.id,
+        userId: user.id,
+        role: 'member',
+        status: 'active',
+        profileId: membership?.profileId ?? mesh.defaultProfileId ?? null,
+        metadata: {
+          ...(membership?.metadata ?? {}),
+          anonymous: true,
+          appId,
+          installId,
+          updatedAt: now
+        }
+      });
+    }
+
+    const existing = await hdoStore.findDevice(deviceId);
+    const overlayIp =
+      normalizeOverlayIp(asOptionalString(body.overlayIp)) ??
+      normalizeOverlayIp(existing?.overlayIp ?? null) ??
+      allocateDeviceOverlayIp(devices, deviceId, HDO_ANONYMOUS_ADDRESS_PLAN.userCidr);
+    const device = await hdoStore.upsertDevice({
+      id: deviceId,
+      userId: user.id,
+      label,
+      platform,
+      publicKey,
+      overlayIp,
+      status: 'online',
+      metadata: {
+        ...(existing?.metadata ?? {}),
+        anonymous: true,
+        appId,
+        installId,
+        source: 'hdo-anonymous-bootstrap',
+        updatedAt: now
+      }
+    });
+
+    const [meshGroups, allMemberships, initialDeviceMeshStates] = await Promise.all([
+      hdoStore.listMeshGroups(),
+      hdoStore.listMeshMemberships(),
+      hdoStore.listDeviceMeshStates()
+    ]);
+    await ensureDeviceMeshStatesForDevice(device, meshGroups, allMemberships, initialDeviceMeshStates, {
+      touch: true
+    });
+
+    const manifest = await buildManifest(device, { anonymous: true });
+    const content = JSON.stringify(manifest, null, 2) + '\n';
+    await hdoStore.saveArtifact({
+      deviceId: device.id,
+      kind: 'manifest',
+      generation: manifest.generation,
+      checksum: checksum(content),
+      content,
+      contentType: 'application/json'
+    });
+    await auditStore.insert({
+      actorUserId: null,
+      actorIp: req.ip,
+      action: 'hdo.anonymous.bootstrap',
+      targetKind: 'hdo_device',
+      targetId: device.id,
+      meta: { appId, overlayIp: device.overlayIp, meshGroupId: mesh.id }
+    });
+    if (device.publicKey && device.overlayIp) {
+      scheduleHdoDomesticSync('anonymous-bootstrap', null, {
+        deviceId: device.id,
+        userId: device.userId,
+        overlayIp: device.overlayIp
+      });
+    }
+    reply.code(existing ? 200 : 201);
+    return {
+      ok: true,
+      mode: 'anonymous',
+      user: toPublic(user),
+      mesh: {
+        id: mesh.id,
+        name: mesh.name,
+        slug: mesh.slug,
+        addressPlan: HDO_ANONYMOUS_ADDRESS_PLAN
+      },
+      device,
+      manifest,
+      domains: domainBindingsFromServices(manifest.services)
+    };
   });
 
   app.get('/api/v1/hdo/devices', { preHandler: requireAuth }, async (req) => {
@@ -1652,7 +1781,11 @@ async function buildReadiness(userId: string) {
   };
 }
 
-async function buildManifest(device: HdoDeviceRow) {
+interface HdoManifestOptions {
+  anonymous?: boolean;
+}
+
+async function buildManifest(device: HdoDeviceRow, options: HdoManifestOptions = {}) {
   await hdoStore.ensureDefaultProfiles();
   let [
     generation,
@@ -1684,12 +1817,18 @@ async function buildManifest(device: HdoDeviceRow) {
   generation = await hdoStore.getGeneration();
   const meshAccess = resolveMeshAccess(device.userId, meshGroups, memberships, deviceMeshStates, device.id);
   const addressPlan = addressPlanForMeshAccess(meshAccess);
-  const visibleNodes = meshAccess.active
+  let visibleNodes = meshAccess.active
     ? nodes.filter((row) => isVisibleForMesh(row.metadata, meshAccess.groupIds))
     : [];
+  if (options.anonymous) {
+    visibleNodes = visibleNodes.filter(
+      (row) => row.kind === 'domestic' || isAnonymousVisibleMetadata(row.metadata, meshAccess.groupIds)
+    );
+  }
   const visibleDevices = meshAccess.active
     ? devices.filter((row) => {
         if (row.id === device.id) return true;
+        if (options.anonymous) return false;
         const otherAccess = resolveMeshAccess(row.userId, meshGroups, memberships, deviceMeshStates, row.id);
         return otherAccess.groups.some((group) => meshAccess.groupIds.has(group.id));
       })
@@ -1699,6 +1838,7 @@ async function buildManifest(device: HdoDeviceRow) {
     ? services.filter(
         (row) =>
           row.enabled &&
+          (!options.anonymous || isAnonymousVisibleService(row, meshAccess.groupIds)) &&
           (!row.nodeId || visibleNodeIds.has(row.nodeId)) &&
           isVisibleForMesh(row.metadata, meshAccess.groupIds)
       )
@@ -1715,6 +1855,7 @@ async function buildManifest(device: HdoDeviceRow) {
     device,
     license: {
       active: meshAccess.active,
+      mode: options.anonymous ? 'anonymous' : 'licensed',
       groups: meshAccess.groups.map((row) => ({
         id: row.id,
         name: row.name,
@@ -1855,6 +1996,83 @@ async function requireReadableDevice(
 
 function checksum(content: string): string {
   return 'sha256:' + createHash('sha256').update(content).digest('hex');
+}
+
+function anonymousAddressPlan(): HdoMeshAddressPlan {
+  return {
+    homeCidr: HDO_ANONYMOUS_ADDRESS_PLAN.homeCidr,
+    userCidr: HDO_ANONYMOUS_ADDRESS_PLAN.userCidr,
+    serviceCidr: HDO_ANONYMOUS_ADDRESS_PLAN.serviceCidr,
+    domesticIp: HDO_ANONYMOUS_ADDRESS_PLAN.domesticIp,
+    routeCidrs: [...HDO_ANONYMOUS_ADDRESS_PLAN.routeCidrs]
+  };
+}
+
+async function ensureAnonymousMeshGroup(groups: HdoMeshGroupRow[]): Promise<HdoMeshGroupRow> {
+  const existing = groups.find(
+    (row) =>
+      row.slug === HDO_ANONYMOUS_MESH_SLUG ||
+      asOptionalBoolean(asPlainObject(row.metadata)?.anonymous) === true
+  );
+  const metadata = {
+    ...(existing?.metadata ?? {}),
+    anonymous: true,
+    addressPlan: meshAddressPlanToMetadata(anonymousAddressPlan())
+  };
+  return hdoStore.upsertMeshGroup({
+    id: existing?.id,
+    name: existing?.name ?? 'Anonymous Access',
+    slug: HDO_ANONYMOUS_MESH_SLUG,
+    description: existing?.description ?? 'Temporary anonymous relay access for Electron apps before user login.',
+    defaultProfileId: existing?.defaultProfileId ?? null,
+    enabled: true,
+    metadata
+  });
+}
+
+async function ensureAnonymousUser(username: string, displayName: string) {
+  const existing = await usersStore.findByIdentifier(username);
+  if (existing) return existing;
+  return usersStore.insert({
+    username,
+    email: null,
+    phone: null,
+    passwordHash: await hashPassword(randomUUID() + randomUUID()),
+    role: 'user',
+    displayName
+  });
+}
+
+function anonymousSubject(appId: string, installId: string): string {
+  return createHash('sha256').update(`${appId}:${installId}`).digest('hex').slice(0, 20);
+}
+
+function normalizeAnonymousAppId(value: string | null): string {
+  const normalized = value?.toLowerCase().replace(/[^a-z0-9._:-]+/g, '-').replace(/^-+|-+$/g, '');
+  return normalized?.slice(0, 80) || 'electron-app';
+}
+
+function normalizeAnonymousInstallId(value: string | null): string | null {
+  if (!value) return null;
+  const normalized = value.replace(/[^a-zA-Z0-9._:-]+/g, '-').replace(/^-+|-+$/g, '');
+  return normalized.slice(0, 128) || null;
+}
+
+function domainBindingsFromServices(services: HdoServiceRow[]): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const service of services) {
+    for (const domain of service.domains) {
+      out.push({
+        domain,
+        targetHost: service.targetHost,
+        targetPort: service.targetPort,
+        protocol: service.protocol,
+        serviceId: service.id,
+        serviceName: service.name
+      });
+    }
+  }
+  return out;
 }
 
 function asRequiredString(value: unknown): string {
@@ -2059,6 +2277,30 @@ function isVisibleForMesh(
 ): boolean {
   const allowed = metadataMeshGroupIds(metadata);
   return allowed.length === 0 || allowed.some((id) => activeMeshGroupIds.has(id));
+}
+
+function isAnonymousVisibleService(
+  service: HdoServiceRow,
+  activeMeshGroupIds: Set<string>
+): boolean {
+  return isAnonymousVisibleMetadata(service.metadata, activeMeshGroupIds);
+}
+
+function isAnonymousVisibleMetadata(
+  metadata: Record<string, unknown> | null,
+  activeMeshGroupIds: Set<string>
+): boolean {
+  const data = asPlainObject(metadata);
+  if (!data) return false;
+  if (
+    asOptionalBoolean(data.anonymousVisible) === true ||
+    asOptionalBoolean(data.anonymous) === true
+  ) {
+    return true;
+  }
+  const visibility = asOptionalString(data.visibility)?.toLowerCase();
+  if (visibility === 'anonymous' || visibility === 'public') return true;
+  return metadataMeshGroupIds(data).some((id) => activeMeshGroupIds.has(id));
 }
 
 function metadataMeshGroupIds(metadata: Record<string, unknown> | null): string[] {

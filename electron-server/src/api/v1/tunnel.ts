@@ -108,8 +108,9 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
       reply.code(404);
       return { error: 'user not found' };
     }
-    const policy = optionalString(body.policyId)
-      ? await tunnelStore.listPolicies().then((rows) => rows.find((row) => row.id === optionalString(body.policyId)) ?? null)
+    const policyRef = optionalString(body.policyId) ?? optionalString(body.policyName);
+    const policy = policyRef
+      ? await tunnelStore.listPolicies().then((rows) => findPolicyByRef(rows, policyRef))
       : await tunnelStore.ensureDefaultPolicy();
     if (!policy) {
       reply.code(404);
@@ -120,15 +121,18 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
       user.username ??
       user.email?.split('@')[0] ??
       `user-${user.id.slice(0, 8)}`;
-    const nodeId = optionalString(body.nodeId) ?? (await tunnelStore.listNodes())[0]?.id ?? null;
-    if (nodeId && !(await tunnelStore.findNode(nodeId))) {
+    const nodeRef = optionalString(body.nodeId) ?? optionalString(body.nodeName);
+    const node = nodeRef
+      ? findNodeByRef(await tunnelStore.listNodes(), nodeRef)
+      : (await tunnelStore.listNodes())[0] ?? null;
+    if (nodeRef && !node) {
       reply.code(404);
       return { error: 'node not found' };
     }
     const row = await tunnelStore.upsertAccount({
       id: optionalString(body.id) ?? undefined,
       userId: user.id,
-      nodeId,
+      nodeId: node?.id ?? null,
       policyId: policy.id,
       username: safeAccountName(username),
       status: (pick(body.status, ['active', 'disabled', 'revoked']) ?? 'active') as TunnelAccountStatus,
@@ -328,12 +332,12 @@ async function provisionOpenTunnelUser(req: FastifyRequest, reply: FastifyReply)
   const policy = await resolveProvisionPolicy(accountInput, existingAccount);
   if (!policy) {
     reply.code(404);
-    return { error: 'policy not found' };
+    return { error: 'policy not found', detail: { policy: provisionPolicyRef(accountInput) } };
   }
   const node = await resolveProvisionNode(accountInput, existingAccount);
   if (!node) {
     reply.code(409);
-    return { error: 'tunnel node is not configured' };
+    return { error: 'tunnel node is not configured', detail: { node: provisionNodeRef(accountInput) } };
   }
   if (!node.runnerUrl || !node.runnerToken) {
     reply.code(409);
@@ -441,9 +445,9 @@ async function resolveProvisionPolicy(
   input: Record<string, unknown>,
   existingAccount: TunnelAccountRow | null
 ): Promise<TunnelPolicyRow | null> {
-  const requestedPolicyId = optionalString(input.policyId);
+  const requestedPolicyId = provisionPolicyRef(input);
   const policies = await tunnelStore.listPolicies();
-  if (requestedPolicyId) return policies.find((row) => row.id === requestedPolicyId) ?? null;
+  if (requestedPolicyId) return findPolicyByRef(policies, requestedPolicyId);
   if (existingAccount?.policyId) {
     const existingPolicy = policies.find((row) => row.id === existingAccount.policyId);
     if (existingPolicy) return existingPolicy;
@@ -455,14 +459,30 @@ async function resolveProvisionNode(
   input: Record<string, unknown>,
   existingAccount: TunnelAccountRow | null
 ): Promise<TunnelNodeRow | null> {
-  const requestedNodeId = optionalString(input.nodeId);
+  const requestedNodeId = provisionNodeRef(input);
   const nodes = await tunnelStore.listNodes();
-  if (requestedNodeId) return nodes.find((row) => row.id === requestedNodeId) ?? null;
+  if (requestedNodeId) return findNodeByRef(nodes, requestedNodeId);
   if (existingAccount?.nodeId) {
     const existingNode = nodes.find((row) => row.id === existingAccount.nodeId);
     if (existingNode) return existingNode;
   }
   return nodes.find((row) => row.status !== 'error') ?? nodes[0] ?? null;
+}
+
+function provisionPolicyRef(input: Record<string, unknown>): string | null {
+  return optionalString(input.policyId) ?? optionalString(input.policyName) ?? optionalString(input.policy);
+}
+
+function provisionNodeRef(input: Record<string, unknown>): string | null {
+  return optionalString(input.nodeId) ?? optionalString(input.nodeName) ?? optionalString(input.node);
+}
+
+function findPolicyByRef(rows: TunnelPolicyRow[], ref: string): TunnelPolicyRow | null {
+  return rows.find((row) => row.id === ref || row.name === ref) ?? null;
+}
+
+function findNodeByRef(rows: TunnelNodeRow[], ref: string): TunnelNodeRow | null {
+  return rows.find((row) => row.id === ref || row.name === ref) ?? null;
 }
 
 function findProviderAccount(

@@ -71,6 +71,7 @@ const hdoPlugin = {
       userDataDir: ctx.userDataDir,
       marketServerBaseUrl: ctx.host.serverBaseUrl ?? null,
       bundledWireGuardDir: defaultBundledWireGuardDir(),
+      session: ctx.host.session,
       marketplaceDb: ctx.host.marketplaceDb,
       pluginManager: ctx.host.pluginManager,
       log: ctx.log
@@ -80,6 +81,8 @@ const hdoPlugin = {
     });
     admin.start();
     const presenceTimer = setInterval(() => {
+      const settings = controller.getSettings();
+      if (settings.anonymous?.mode === 'anonymous' && !settings.sessionUserId) return;
       const status = controller.wireGuardStatus();
       void controller.reportDevicePresence(status && status.active === true ? 'online' : 'offline', {
         throttleMs: 10 * 60 * 1000
@@ -124,8 +127,21 @@ const hdoPlugin = {
       updateSettings: (patch: Record<string, unknown>) => controller.updateSettings(patch),
       registerDevice: (input: HdoDeviceRegistrationInput) => controller.registerDevice(input),
       reportPluginStates: (deviceId?: string | null) => controller.reportPluginStates(deviceId),
+      anonymousConnect: (input?: {
+        serverUrl?: string | null;
+        appId?: string | null;
+        installId?: string | null;
+        deviceLabel?: string | null;
+        platform?: string | null;
+        rotate?: boolean | null;
+        autoConnect?: boolean | null;
+      }) => controller.anonymousConnect(input),
       prepareWireGuardPeer: (input?: { rotate?: boolean | null }) => controller.prepareWireGuardPeer(input),
       connectWireGuardPeer: (input?: { action?: 'up' | 'down' | 'restart' | null }) => controller.connectWireGuardPeer(input),
+      applyDomainProxyFromManifest: (manifest?: Record<string, unknown> | null) =>
+        controller.applyDomainProxyFromManifest(manifest),
+      prepareDomainProxyFromManifest: (manifest?: Record<string, unknown> | null) =>
+        controller.prepareDomainProxyFromManifest(manifest),
       recoverWireGuardPeer: (reason?: string | null) =>
         controller.recoverWireGuardPeer({ reason: reason || 'api', allowPrivileged: true }),
       installWireGuardLaunchDaemon: () => controller.installWireGuardLaunchDaemon(),

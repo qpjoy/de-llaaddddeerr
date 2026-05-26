@@ -21,6 +21,11 @@ import {
   shellQuote,
   uninstallDarwinWireGuardLaunchDaemon
 } from './wireguard-core';
+import {
+  HdoSessionDomainProxy,
+  type HdoDomainBinding,
+  type HdoSessionLike
+} from './domainProxy';
 
 import type {
   HdoDeviceRegistrationInput,
@@ -98,6 +103,7 @@ export interface HdoControllerContext {
   userDataDir: string;
   marketServerBaseUrl?: string | null;
   bundledWireGuardDir?: string | null;
+  session?: HdoSessionLike | null;
   marketplaceDb?: MarketplaceDbLike;
   pluginManager?: PluginManagerLike;
   log: {
@@ -113,6 +119,7 @@ export class HdoController {
   private lastError: string | null = null;
   private taskRunner: Promise<HdoTaskRunSummary> | null = null;
   private wireGuardRecovery: Promise<Record<string, unknown>> | null = null;
+  private readonly domainProxy: HdoSessionDomainProxy | null = null;
   private lastPresenceReportAt = 0;
   private lastPresenceStatus: HdoDeviceRegistrationInput['status'] | null = null;
 
@@ -120,6 +127,11 @@ export class HdoController {
     mkdirSync(ctx.userDataDir, { recursive: true });
     this.settingsPath = join(ctx.userDataDir, 'hdo-settings.json');
     this.settings = this.loadSettings();
+    this.domainProxy = ctx.session
+      ? new HdoSessionDomainProxy(ctx.session, {
+          warn: (msg, meta) => ctx.log.warn(msg, meta)
+        })
+      : null;
   }
 
   getSettings(): HdoPluginSettings {
@@ -326,6 +338,191 @@ export class HdoController {
     this.lastPresenceStatus = status;
     this.lastPresenceReportAt = now;
     return result;
+  }
+
+  async anonymousConnect(input: {
+    serverUrl?: string | null;
+    appId?: string | null;
+    installId?: string | null;
+    deviceLabel?: string | null;
+    platform?: string | null;
+    rotate?: boolean | null;
+    autoConnect?: boolean | null;
+  } = {}): Promise<Record<string, unknown>> {
+    const baseUrl = normalizeBaseUrl(input.serverUrl);
+    if (baseUrl) {
+      this.updateSettings({ hdoControlBaseUrl: baseUrl });
+    }
+
+    const routeProbe = buildHdoRouteProbe();
+    const now = new Date().toISOString();
+    const previous = this.settings.wireGuardPeer ?? {};
+    const anonymous = plainObject(this.settings.anonymous);
+    const appId = stringValue(input.appId) ?? stringValue(anonymous?.appId) ?? 'electron-app';
+    const installId = stringValue(input.installId) ?? stringValue(anonymous?.installId) ?? randomUUID();
+    const deviceLabel = stringValue(input.deviceLabel) ?? this.settings.deviceLabel ?? defaultDeviceLabel();
+    let privateKey = stringValue(previous.privateKey);
+    let publicKey = stringValue(previous.publicKey);
+    const runtime = resolveWireGuardRuntime({
+      installDir: join(this.ctx.userDataDir, 'bin'),
+      bundledDir: this.ctx.bundledWireGuardDir,
+      allowSystemFallback: false
+    });
+
+    if (input.rotate || !privateKey || !publicKey) {
+      if (!runtime.command) {
+        const lastError =
+          `当前 HDO 插件包缺少适配 ${runtime.target} 的 WireGuard CLI 引擎；需要随插件安装对应的 @qpjoy/electron-core-wireguard-engine-${runtime.target}。`;
+        const peer = {
+          ...previous,
+          routeProbe,
+          canUseDefaultMesh: routeProbe.canUseDefaultMesh,
+          lastError,
+          updatedAt: now
+        };
+        this.updateSettings({
+          anonymous: { ...anonymous, mode: 'anonymous', appId, installId, updatedAt: now },
+          wireGuardPeer: peer
+        });
+        return {
+          ok: false,
+          reason: 'bundled-wireguard-cli-missing',
+          message: lastError,
+          runtime,
+          routeProbe,
+          peer: publicWireGuardPeer(peer)
+        };
+      }
+      try {
+        const pair = generateWireGuardKeyPairWithCli(runtime.command);
+        privateKey = pair.privateKey;
+        publicKey = pair.publicKey;
+      } catch (err) {
+        const lastError =
+          `内置 WireGuard CLI 无法生成密钥：${errorMessage(err)}。请重新安装包含 ${runtime.target} 引擎资源的 HDO 包。`;
+        const peer = {
+          ...previous,
+          routeProbe,
+          canUseDefaultMesh: routeProbe.canUseDefaultMesh,
+          lastError,
+          updatedAt: now
+        };
+        this.updateSettings({
+          anonymous: { ...anonymous, mode: 'anonymous', appId, installId, updatedAt: now },
+          wireGuardPeer: peer
+        });
+        return {
+          ok: false,
+          reason: 'bundled-wireguard-cli-failed',
+          message: lastError,
+          runtime,
+          routeProbe,
+          peer: publicWireGuardPeer(peer)
+        };
+      }
+    }
+
+    const bootstrap = await this.apiPostPublic('/api/v1/hdo/anonymous/bootstrap', {
+      appId,
+      installId,
+      deviceLabel,
+      platform: stringValue(input.platform) ?? this.settings.devicePlatform ?? process.platform,
+      publicKey
+    });
+    const bootstrapRow = plainObject(bootstrap);
+    const manifest = plainObject(bootstrapRow?.manifest);
+    const device = plainObject(bootstrapRow?.device);
+    if (!manifest || !device) {
+      throw new Error('anonymous bootstrap response is invalid');
+    }
+
+    const overlayIp = stringField(device, 'overlayIp') ?? stringValue(previous.overlayIp);
+    let config: string | null = null;
+    let configPath: string | null = null;
+    let lastError: string | null = null;
+    try {
+      const domestic = domesticWireGuardFromManifest(manifest);
+      if (!manifestHasMeshLicense(manifest)) {
+        lastError = '匿名 mesh 尚未启用。';
+      } else if (!overlayIp) {
+        lastError = '服务端尚未给当前匿名设备分配 overlay IP。';
+      } else if (!domestic.publicKey || !domestic.endpoint) {
+        lastError =
+          'manifest 中缺少 domestic WireGuard 公钥或 endpoint；请在服务器 HDO 管理页给 domestic 节点 metadata.wireGuard 填入 publicKey/listenPort。';
+      } else {
+        const routeCidrs = uniqueStrings([
+          ...domestic.routeCidrs,
+          ...manifestOverlayRouteCidrs(manifest, overlayIp)
+        ]);
+        const exclusionCidrs = localCidrsForAllowedIpExclusion(routeProbe, routeCidrs);
+        let allowedIps = excludeLocalRoutesFromAllowedIps(routeCidrs, exclusionCidrs);
+        if (allowedIps.length === 0 && process.platform === 'win32') {
+          allowedIps = routeCidrs;
+        } else if (allowedIps.length === 0) {
+          throw new Error('服务端下发的 WireGuard AllowedIPs 与本机路由完全重叠，已拒绝生成会覆盖本地网络的配置。');
+        }
+        config = renderHdoClientWireGuardConfig({
+          privateKey,
+          address: wireGuardAddress(overlayIp),
+          domesticPublicKey: domestic.publicKey,
+          domesticEndpoint: domestic.endpoint,
+          allowedIps,
+          directPeers: directPeersFromManifest(manifest, overlayIp),
+          persistentKeepalive: 25
+        });
+        configPath = this.writeWireGuardProfile(config);
+      }
+    } catch (err) {
+      lastError = errorMessage(err);
+    }
+
+    const peer = {
+      privateKey,
+      publicKey,
+      overlayIp,
+      address: overlayIp ? wireGuardAddress(overlayIp) : null,
+      config,
+      configPath,
+      allowedIps: config ? wireGuardAllowedIps(config) : null,
+      routeProbe,
+      canUseDefaultMesh: routeProbe.canUseDefaultMesh,
+      lastError,
+      updatedAt: now
+    };
+    this.updateSettings({
+      anonymous: {
+        ...anonymous,
+        mode: 'anonymous',
+        appId,
+        installId,
+        updatedAt: now
+      },
+      deviceId: stringField(device, 'id') ?? this.settings.deviceId,
+      deviceLabel,
+      devicePlatform: stringValue(input.platform) ?? this.settings.devicePlatform ?? process.platform,
+      wireGuardPeer: peer,
+      lastManifest: manifest
+    });
+    const domainProxy = await this.applyDomainProxyFromManifest(manifest);
+    let connected: Record<string, unknown> | null = null;
+    if (config && input.autoConnect !== false) {
+      connected = await this.connectWireGuardPeer({ action: 'up' }).catch((err) => ({
+        ok: false,
+        error: errorMessage(err)
+      }));
+    }
+
+    return {
+      ok: Boolean(config),
+      mode: 'anonymous',
+      message: config ? '已获取匿名 HDO 配置。' : lastError,
+      bootstrap,
+      manifest,
+      domainProxy,
+      connected,
+      peer: publicWireGuardPeer(peer),
+      config
+    };
   }
 
   async executePendingTasks(): Promise<HdoTaskRunSummary> {
@@ -849,6 +1046,39 @@ export class HdoController {
     };
   }
 
+  async applyDomainProxyFromManifest(manifestInput?: Record<string, unknown> | null): Promise<Record<string, unknown>> {
+    const manifest = manifestInput ?? this.settings.lastManifest ?? null;
+    const bindings = manifest ? domainBindingsFromManifest(manifest) : [];
+    if (!this.domainProxy) {
+      return {
+        enabled: false,
+        unavailable: true,
+        domains: bindings.map((binding) => binding.domain)
+      };
+    }
+    const result = await this.domainProxy.apply(bindings);
+    this.updateSettings({
+      domainProxy: {
+        ...result,
+        updatedAt: new Date().toISOString()
+      }
+    });
+    return result;
+  }
+
+  async prepareDomainProxyFromManifest(manifestInput?: Record<string, unknown> | null): Promise<Record<string, unknown>> {
+    const manifest = manifestInput ?? this.settings.lastManifest ?? null;
+    const bindings = manifest ? domainBindingsFromManifest(manifest) : [];
+    if (!this.domainProxy) {
+      return {
+        enabled: false,
+        unavailable: true,
+        domains: bindings.map((binding) => binding.domain)
+      };
+    }
+    return this.domainProxy.prepare(bindings);
+  }
+
   wireGuardLaunchDaemonStatus(): Record<string, unknown> | null {
     this.ensureSettingsForCurrentSession();
     const peer = this.settings.wireGuardPeer;
@@ -936,6 +1166,11 @@ export class HdoController {
   }
 
   async shutdown(): Promise<void> {
+    await this.domainProxy?.close().catch((err) => {
+      this.ctx.log.warn('failed to stop HDO session domain proxy', {
+        error: errorMessage(err)
+      });
+    });
     const configPath = this.shutdownWireGuardConfigPath();
     if (!configPath || !existsSync(configPath)) return;
     if (this.settings.wireGuardDesiredActive === true && this.settings.wireGuardLaunchDaemonEnabled !== false) {
@@ -970,6 +1205,7 @@ export class HdoController {
   }
 
   private reportPresenceInBackground(status: HdoDeviceRegistrationInput['status']): void {
+    if (!this.currentSessionUserId() && this.settings.anonymous?.mode === 'anonymous') return;
     void this.reportDevicePresence(status).catch((err) => {
       this.ctx.log.warn('failed to report HDO device presence', {
         error: errorMessage(err)
@@ -1259,8 +1495,26 @@ export class HdoController {
     });
   }
 
+  private async apiPostPublic(path: string, body: unknown): Promise<unknown> {
+    return this.apiJsonPublic(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body ?? {})
+    });
+  }
+
   private async apiJson(path: string, init: RequestInit): Promise<unknown> {
     const res = await this.fetch(path, init);
+    const text = await res.text();
+    const parsed = text ? JSON.parse(text) : null;
+    if (!res.ok) {
+      throw new Error(errorFromResponse(parsed) || `${res.status} ${res.statusText}`);
+    }
+    return parsed;
+  }
+
+  private async apiJsonPublic(path: string, init: RequestInit): Promise<unknown> {
+    const res = await this.fetchPublic(path, init);
     const text = await res.text();
     const parsed = text ? JSON.parse(text) : null;
     if (!res.ok) {
@@ -1294,6 +1548,14 @@ export class HdoController {
       }
     }
     return res;
+  }
+
+  private async fetchPublic(path: string, init: RequestInit): Promise<Response> {
+    const base = this.serverBaseUrl();
+    if (!base) {
+      throw new Error('未配置 HDO 控制面 URL');
+    }
+    return fetch(new URL(path, base).toString(), init);
   }
 
   private async refreshAccessToken(refreshToken: string): Promise<boolean> {
@@ -1344,6 +1606,8 @@ export class HdoController {
         activeProfileId: null,
         lastManifest: null,
         lastSubscription: null,
+        anonymous: null,
+        domainProxy: null,
         updatedAt: new Date().toISOString()
       };
       this.saveSettings();
@@ -1387,6 +1651,8 @@ export class HdoController {
         lastNotification: null,
         lastManifest: null,
         lastSubscription: null,
+        anonymous: null,
+        domainProxy: null,
         updatedAt: null
       };
     }
@@ -1402,6 +1668,8 @@ export class HdoController {
         wireGuardLaunchDaemonEnabled: parsed.wireGuardLaunchDaemonEnabled ?? (process.platform === 'darwin'),
         autoRunDeviceTasks: parsed.autoRunDeviceTasks ?? true,
         activeProfileId: parsed.activeProfileId ?? null,
+        anonymous: parsed.anonymous ?? null,
+        domainProxy: parsed.domainProxy ?? null,
         lastTaskRun: parsed.lastTaskRun ?? null,
         lastNotification: parsed.lastNotification ?? null
       };
@@ -1425,6 +1693,8 @@ export class HdoController {
         lastNotification: null,
         lastManifest: null,
         lastSubscription: null,
+        anonymous: null,
+        domainProxy: null,
         updatedAt: null
       };
     }
@@ -1655,6 +1925,28 @@ function directPeersFromManifest(manifest: Record<string, unknown>, ownOverlayIp
       persistentKeepalive: 25
     }];
   });
+}
+
+function domainBindingsFromManifest(manifest: Record<string, unknown>): HdoDomainBinding[] {
+  const services = arrayField(manifest.services);
+  const out: HdoDomainBinding[] = [];
+  for (const item of services) {
+    const service = plainObject(item);
+    if (!service) continue;
+    const targetHost = stringValue(service.targetHost);
+    if (!targetHost) continue;
+    const targetPort = numberValue(service.targetPort);
+    const protocol = stringValue(service.protocol);
+    for (const domain of stringArray(service.domains)) {
+      out.push({
+        domain,
+        targetHost,
+        targetPort,
+        protocol
+      });
+    }
+  }
+  return out;
 }
 
 function manifestHasMeshLicense(manifest: Record<string, unknown>): boolean {

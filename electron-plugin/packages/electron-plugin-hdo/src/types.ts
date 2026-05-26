@@ -10,6 +10,13 @@ export interface HdoPluginSettings {
   wireGuardLaunchDaemonEnabled?: boolean | null;
   autoRunDeviceTasks?: boolean | null;
   activeProfileId?: string | null;
+  anonymous?: {
+    mode?: 'anonymous' | null;
+    appId?: string | null;
+    installId?: string | null;
+    updatedAt?: string | null;
+  } | null;
+  domainProxy?: Record<string, unknown> | null;
   lastTaskRun?: Record<string, unknown> | null;
   lastNotification?: Record<string, unknown> | null;
   lastManifest?: Record<string, unknown> | null;
