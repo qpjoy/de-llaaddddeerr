@@ -1,7 +1,7 @@
 {
   "id": "qpjoy.electron-plugin-hdo",
   "name": "QPJoy HDO",
-  "version": "0.1.30",
+  "version": "0.1.31",
   "author": "qpjoy",
   "description": "Home-Domestic-Oversea client and server control panel for QPJoy Marketplace.",
   "engines": {

@@ -39,6 +39,11 @@ import type {
 } from './types';
 
 type WireGuardPeerAction = 'up' | 'down' | 'restart';
+type WireGuardPeerConnectInput = {
+  action?: 'up' | 'down' | 'restart' | null;
+  skipIfActive?: boolean | null;
+  fallbackToAppManaged?: boolean | null;
+};
 type WireGuardConnectionRuntime = ReturnType<typeof resolveWireGuardConnectionRuntime>;
 
 interface MarketplaceDbLike {
@@ -506,7 +511,12 @@ export class HdoController {
     const domainProxy = await this.applyDomainProxyFromManifest(manifest);
     let connected: Record<string, unknown> | null = null;
     if (config && input.autoConnect !== false) {
-      connected = await this.connectWireGuardPeer({ action: 'up' }).catch((err) => ({
+      const configUnchanged = stringValue(previous.config) === config;
+      connected = await this.connectWireGuardPeer({
+        action: 'up',
+        skipIfActive: configUnchanged,
+        fallbackToAppManaged: false
+      }).catch((err) => ({
         ok: false,
         error: errorMessage(err)
       }));
@@ -744,7 +754,7 @@ export class HdoController {
     };
   }
 
-  async connectWireGuardPeer(input: { action?: 'up' | 'down' | 'restart' | null } = {}): Promise<Record<string, unknown>> {
+  async connectWireGuardPeer(input: WireGuardPeerConnectInput = {}): Promise<Record<string, unknown>> {
     this.ensureSettingsForCurrentSession();
     const peer = this.settings.wireGuardPeer;
     const configPath = stringValue(peer?.configPath);
@@ -757,9 +767,25 @@ export class HdoController {
       bundledDir: this.ctx.bundledWireGuardDir,
       allowSystemFallback: true
     });
+    if (input.skipIfActive === true && action === 'up') {
+      const status = safeWireGuardStatus(runtime, configPath);
+      if (status?.active === true && arrayField(status.missingRoutes).length === 0) {
+        this.rememberWireGuardDesiredActive(true);
+        this.reportPresenceInBackground('online');
+        return {
+          ok: true,
+          skipped: true,
+          reason: 'already-active',
+          action,
+          message: 'WireGuard peer 已在运行，配置未变化。',
+          status,
+          runtime: publicWireGuardRuntime(runtime)
+        };
+      }
+    }
 
     if (runtime.platform === 'darwin') {
-      return this.connectWireGuardPeerDarwin(action, runtime, configPath);
+      return this.connectWireGuardPeerDarwin(action, runtime, configPath, input);
     }
     if (runtime.platform === 'win32') {
       return this.connectWireGuardPeerWindows(action, runtime, configPath);
@@ -770,7 +796,8 @@ export class HdoController {
   private async connectWireGuardPeerDarwin(
     action: WireGuardPeerAction,
     runtime: WireGuardConnectionRuntime,
-    configPath: string
+    configPath: string,
+    input: WireGuardPeerConnectInput = {}
   ): Promise<Record<string, unknown>> {
     if (action === 'down') {
       const daemonStatus = getDarwinWireGuardLaunchDaemonStatus({ runtime, configPath });
@@ -812,6 +839,15 @@ export class HdoController {
         };
       }
       if (isAuthorizationCancelledMessage(daemon.message)) {
+        return {
+          ...daemon,
+          action,
+          mode: runtime.method,
+          runtime: publicWireGuardRuntime(runtime),
+          launchDaemon: daemon
+        };
+      }
+      if (input.fallbackToAppManaged === false) {
         return {
           ...daemon,
           action,
