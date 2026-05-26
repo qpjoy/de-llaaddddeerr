@@ -614,7 +614,7 @@
         <q-tab-panel name="services" class="q-pa-none">
           <div class="split-layout">
             <section class="section-surface q-pa-md">
-              <div class="section-title">保存服务</div>
+              <div class="section-title">保存内网服务 / 域名解析</div>
               <q-input v-model="serviceName" outlined dense label="名称" class="q-mb-sm" />
               <q-select
                 v-model="serviceNodeId"
@@ -628,8 +628,14 @@
                 class="q-mb-sm"
               />
               <div class="two-col q-mb-sm">
-                <q-input v-model="serviceTargetHost" outlined dense label="目标地址" placeholder="100.88.0.10" />
-                <q-input v-model="serviceTargetPort" outlined dense type="number" label="端口" placeholder="8080" />
+                <q-input
+                  v-model="serviceTargetHost"
+                  outlined
+                  dense
+                  label="解析到 Overlay IP / 目标地址"
+                  placeholder="100.89.0.12"
+                />
+                <q-input v-model="serviceTargetPort" outlined dense type="number" label="目标端口" placeholder="8080" />
               </div>
               <q-select
                 v-model="serviceProtocol"
@@ -643,8 +649,8 @@
                 v-model="serviceDomains"
                 outlined
                 dense
-                label="域名，逗号分隔"
-                placeholder="home.example.com, db.example.com"
+                label="内部域名，逗号分隔"
+                placeholder="internal.mingxi.com, api.internal.mingxi.com"
                 class="q-mb-sm"
               />
               <div class="toolbar-row">
@@ -2145,7 +2151,7 @@ function resetServiceForm(): void {
   editingServiceId.value = null;
   serviceName.value = 'home-web';
   serviceNodeId.value = null;
-  serviceTargetHost.value = '100.88.0.10';
+  serviceTargetHost.value = '100.89.0.12';
   serviceTargetPort.value = '8080';
   serviceProtocol.value = 'tcp';
   serviceDomains.value = '';

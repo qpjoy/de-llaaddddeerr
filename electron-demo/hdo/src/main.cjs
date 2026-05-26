@@ -233,6 +233,45 @@ function createMainWindow() {
   });
 }
 
+async function hdoExposed() {
+  if (!host) throw new Error('market host is not ready');
+  await host.ready;
+  let exposed = host.runtime.getExposed(HDO_ID);
+  if (!exposed) {
+    await host.runtime.activate(HDO_ID);
+    exposed = host.runtime.getExposed(HDO_ID);
+  }
+  if (!exposed) throw new Error('HDO plugin is not active');
+  return exposed;
+}
+
+async function hdoCall(method, ...args) {
+  const exposed = await hdoExposed();
+  const fn = exposed[method];
+  if (typeof fn !== 'function') throw new Error(`HDO plugin did not expose ${method}`);
+  return fn(...args);
+}
+
+function demoDefaultHdoServerUrl() {
+  return (
+    process.env.QPJOY_DEMO_HDO_SERVER ||
+    process.env.QPJOY_HDO_SERVER ||
+    process.env.QPJOY_MARKET_SERVER ||
+    ''
+  );
+}
+
+function normalizeTestUrl(value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) throw new Error('test URL is required');
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`;
+  const parsed = new URL(withScheme);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('only http/https test URLs are supported');
+  }
+  return parsed.toString();
+}
+
 async function closeAppResources() {
   if (!host) return;
   const current = host;
@@ -316,6 +355,44 @@ if (gotSingleInstanceLock) {
         if (mainWindow && !mainWindow.isDestroyed()) {
           void mainWindow.loadFile(path.join(__dirname, 'index.html'));
         }
+      });
+
+      ipcMain.handle('demo:hdo-status', async () => {
+        const snapshot = await hdoCall('snapshot');
+        return {
+          defaultServerUrl: demoDefaultHdoServerUrl(),
+          auth: host.auth ? host.auth.state() : null,
+          hdo: snapshot
+        };
+      });
+
+      ipcMain.handle('demo:hdo-anonymous-connect', async (_e, payload) => {
+        return hdoCall('anonymousConnect', {
+          ...(payload && typeof payload === 'object' ? payload : {}),
+          appId: 'qpjoy-hdo-demo',
+          deviceLabel: 'QPJoy HDO Demo'
+        });
+      });
+
+      ipcMain.handle('demo:hdo-open-test-url', async (_e, value) => {
+        const url = normalizeTestUrl(value);
+        const w = new BrowserWindow({
+          width: 1000,
+          height: 720,
+          backgroundColor: '#101827',
+          autoHideMenuBar: true,
+          title: 'HDO Internal Test',
+          webPreferences: {
+            contextIsolation: true,
+            sandbox: true
+          }
+        });
+        await w.loadURL(url);
+        return { ok: true, url };
+      });
+
+      ipcMain.handle('demo:hdo-stop', async () => {
+        return hdoCall('connectWireGuardPeer', { action: 'down' });
       });
 
       createMainWindow();

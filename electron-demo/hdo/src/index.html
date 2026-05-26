@@ -61,6 +61,52 @@
       </button>
     </section>
 
+    <section class="flow-panel">
+      <div class="flow-head">
+        <div>
+          <p class="kicker">匿名 Relay</p>
+          <h2>未登录先进入内网</h2>
+        </div>
+        <span class="status-chip" id="hdo-status-chip">检测中</span>
+      </div>
+
+      <div class="flow-grid">
+        <label class="field">
+          <span>Domestic 服务器</span>
+          <input id="hdo-server-url" type="url" placeholder="http://116.62.51.154:8080" />
+        </label>
+        <label class="field">
+          <span>测试域名</span>
+          <input id="hdo-test-url" type="text" placeholder="http://internal.mingxi.com" />
+        </label>
+      </div>
+
+      <div class="flow-actions">
+        <button id="btn-hdo-anon-connect" class="small-action small-action--primary">匿名连接 / 更新</button>
+        <button id="btn-hdo-anon-config" class="small-action">只拉匿名配置</button>
+        <button id="btn-hdo-open-test" class="small-action">打开测试域名</button>
+        <button id="btn-hdo-stop" class="small-action">停止 HDO</button>
+        <button id="btn-hdo-refresh" class="small-action small-action--quiet">刷新状态</button>
+      </div>
+
+      <div class="flow-status">
+        <div>
+          <span class="status-label">模式</span>
+          <strong id="hdo-mode">-</strong>
+        </div>
+        <div>
+          <span class="status-label">Overlay</span>
+          <strong id="hdo-overlay">-</strong>
+        </div>
+        <div>
+          <span class="status-label">WireGuard</span>
+          <strong id="hdo-wg">-</strong>
+        </div>
+      </div>
+
+      <pre id="hdo-output" class="console">等待操作...</pre>
+    </section>
+
     <section class="info-grid">
       <article class="info-card">
         <div class="info-card-head">
