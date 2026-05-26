@@ -1899,6 +1899,7 @@ function manifestOverlayRouteCidrs(manifest: Record<string, unknown>, ownOverlay
   addOverlayIp(plainObject(wireGuard?.domestic)?.overlayIp);
   arrayField(manifest.nodes).forEach((item) => addOverlayIp(plainObject(item)?.overlayIp));
   arrayField(manifest.devices).forEach((item) => addOverlayIp(plainObject(item)?.overlayIp));
+  arrayField(manifest.services).forEach((item) => addOverlayIp(plainObject(item)?.targetHost));
   return uniqueStrings(out);
 }
 

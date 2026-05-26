@@ -1847,6 +1847,9 @@ async function buildManifest(device: HdoDeviceRow, options: HdoManifestOptions =
     ? pickProfilesForMesh(profiles, meshAccess)
     : [];
   const visibleProfileIds = new Set(visibleProfiles.map((row) => row.id));
+  const routeCidrs = options.anonymous
+    ? addressPlan.routeCidrs
+    : uniqueStrings([...addressPlan.routeCidrs, HDO_ANONYMOUS_ADDRESS_PLAN.userCidr]);
 
   return {
     version: 1,
@@ -1876,7 +1879,7 @@ async function buildManifest(device: HdoDeviceRow, options: HdoManifestOptions =
     },
     wireGuard: {
       addressPlan,
-      routeCidrs: addressPlan.routeCidrs,
+      routeCidrs,
       client: {
         publicKey: device.publicKey,
         overlayIp: device.overlayIp,
