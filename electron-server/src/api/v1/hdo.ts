@@ -183,6 +183,7 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       asOptionalString(body.label) ??
       `Anonymous ${appId}`;
     const platform = asOptionalString(body.platform);
+    const relayMode = relayModeFromWireGuardMetadata(body);
     const now = new Date().toISOString();
 
     const [initialGroups, devices] = await Promise.all([
@@ -230,6 +231,11 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
         appId,
         installId,
         source: 'hdo-anonymous-bootstrap',
+        wireGuard: {
+          ...(asPlainObject(existing?.metadata?.wireGuard) ?? {}),
+          relayMode,
+          preferDirectPeers: relayMode !== 'mesh-server'
+        },
         updatedAt: now
       }
     });
@@ -1886,7 +1892,7 @@ async function buildManifest(device: HdoDeviceRow, options: HdoManifestOptions =
         address: device.overlayIp ? wireGuardAddress(device.overlayIp) : null
       },
       domestic: wireGuardNodeSummary(pickDomesticNode(visibleNodes)),
-      directPeers: wireGuardDirectPeerSummaries(device, visibleDevices)
+      directPeers: wireGuardDirectPeerSummaries(device, visibleDevices, visibleServices)
     },
     nodes: visibleNodes,
     devices: visibleDevices.map((row) => hdoDeviceWithOnlineWindow(row)).map((row) => ({
@@ -2654,10 +2660,26 @@ function wireGuardNodeSummary(node: HdoNodeRow | undefined) {
   };
 }
 
-function wireGuardDirectPeerSummaries(current: HdoDeviceRow, devices: HdoDeviceRow[]) {
+function wireGuardDirectPeerSummaries(
+  current: HdoDeviceRow,
+  devices: HdoDeviceRow[],
+  services: HdoServiceRow[] = []
+) {
   const currentWireGuard = wireGuardMetadataFromDevice(current);
-  const currentPrefersDirect = asOptionalBoolean(currentWireGuard?.preferDirectPeers) === true;
+  const relayMode = relayModeFromWireGuardMetadata(currentWireGuard);
+  const currentPrefersDirect =
+    relayMode !== 'mesh-server' ||
+    asOptionalBoolean(currentWireGuard?.preferDirectPeers) === true ||
+    asOptionalBoolean(currentWireGuard?.acceptDirectPeers) === true ||
+    asOptionalBoolean(currentWireGuard?.directListener) === true;
   if (!currentPrefersDirect) return [];
+  const currentOverlayIp = normalizeOverlayIp(current.overlayIp);
+  const serviceTargetHosts = new Set(
+    services
+      .map((row) => normalizeOverlayIp(row.targetHost))
+      .filter((value): value is string => Boolean(value))
+  );
+  const currentIsServiceTarget = Boolean(currentOverlayIp && serviceTargetHosts.has(currentOverlayIp));
 
   return devices
     .filter((row) => row.id !== current.id)
@@ -2665,12 +2687,16 @@ function wireGuardDirectPeerSummaries(current: HdoDeviceRow, devices: HdoDeviceR
       const publicKey = row.publicKey;
       const overlayIp = normalizeOverlayIp(row.overlayIp);
       if (!publicKey || !overlayIp) return null;
+      const peerIsServiceTarget = serviceTargetHosts.has(overlayIp);
+      if (relayMode === 'mesh-service-p2p' && !peerIsServiceTarget && !currentIsServiceTarget) return null;
       const wireGuard = wireGuardMetadataFromDevice(row);
       const endpoint = wireGuardEndpointFromMetadata(wireGuard);
       const peerPrefersDirect = asOptionalBoolean(wireGuard?.preferDirectPeers) === true;
       const peerCanDirect =
-        Boolean(endpoint) &&
+        (currentIsServiceTarget || Boolean(endpoint)) &&
         (
+          currentIsServiceTarget ||
+          peerIsServiceTarget ||
           peerPrefersDirect ||
           asOptionalBoolean(wireGuard?.acceptDirectPeers) === true ||
           asOptionalBoolean(wireGuard?.directListener) === true
@@ -2687,6 +2713,11 @@ function wireGuardDirectPeerSummaries(current: HdoDeviceRow, devices: HdoDeviceR
       };
     })
     .filter((row): row is NonNullable<typeof row> => Boolean(row));
+}
+
+function relayModeFromWireGuardMetadata(wireGuard: Record<string, unknown> | null): 'mesh-server' | 'mesh-service-p2p' | 'mesh-p2p' {
+  const value = asOptionalString(wireGuard?.relayMode ?? wireGuard?.routeMode);
+  return value === 'mesh-service-p2p' || value === 'mesh-p2p' ? value : 'mesh-server';
 }
 
 function wireGuardPublicKeyFromMetadata(metadata: Record<string, unknown> | null): string | null {

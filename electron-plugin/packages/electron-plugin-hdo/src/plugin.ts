@@ -133,6 +133,7 @@ const hdoPlugin = {
         installId?: string | null;
         deviceLabel?: string | null;
         platform?: string | null;
+        relayMode?: 'mesh-server' | 'mesh-service-p2p' | 'mesh-p2p' | null;
         rotate?: boolean | null;
         autoConnect?: boolean | null;
       }) => controller.anonymousConnect(input),

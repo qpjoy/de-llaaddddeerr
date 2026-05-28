@@ -1,5 +1,6 @@
 export interface HdoPluginSettings {
   hdoControlBaseUrl?: string | null;
+  relayMode?: HdoRelayMode | null;
   sessionUserId?: string | null;
   deviceId?: string | null;
   deviceLabel?: string | null;
@@ -23,6 +24,8 @@ export interface HdoPluginSettings {
   lastSubscription?: string | null;
   updatedAt?: string | null;
 }
+
+export type HdoRelayMode = 'mesh-server' | 'mesh-service-p2p' | 'mesh-p2p';
 
 export interface HdoWireGuardPeerSettings {
   privateKey?: string | null;

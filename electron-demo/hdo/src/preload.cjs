@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('qpjoyDemo', {
   hdoStatus: () => ipcRenderer.invoke('demo:hdo-status'),
   /** Enter the public anonymous relay flow. */
   hdoAnonymousConnect: (payload) => ipcRenderer.invoke('demo:hdo-anonymous-connect', payload),
+  /** Persist HDO plugin settings. */
+  hdoUpdateSettings: (patch) => ipcRenderer.invoke('demo:hdo-update-settings', patch),
   /** Open a URL inside Electron's default session so HDO domain proxy rules apply. */
   hdoOpenTestUrl: (url) => ipcRenderer.invoke('demo:hdo-open-test-url', url),
   /** Stop the current HDO WireGuard tunnel. */

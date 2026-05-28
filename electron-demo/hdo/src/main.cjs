@@ -389,6 +389,10 @@ if (gotSingleInstanceLock) {
         });
       });
 
+      ipcMain.handle('demo:hdo-update-settings', async (_e, patch) => {
+        return hdoCall('updateSettings', patch && typeof patch === 'object' ? patch : {});
+      });
+
       ipcMain.handle('demo:hdo-open-test-url', async (_e, value) => {
         const url = normalizeTestUrl(value);
         const w = trackChildWindow(new BrowserWindow({

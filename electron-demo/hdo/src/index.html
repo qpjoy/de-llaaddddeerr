@@ -81,6 +81,21 @@
         </label>
       </div>
 
+      <div class="flow-grid flow-grid--settings">
+        <label class="field">
+          <span>Relay 模式</span>
+          <select id="hdo-relay-mode">
+            <option value="mesh-server">Mesh Server</option>
+            <option value="mesh-service-p2p">Service P2P</option>
+            <option value="mesh-p2p">Mesh P2P</option>
+          </select>
+        </label>
+        <div class="field field--inline-action">
+          <span>配置</span>
+          <button id="btn-hdo-save-settings" class="small-action">保存配置</button>
+        </div>
+      </div>
+
       <div class="flow-actions">
         <button id="btn-hdo-anon-connect" class="small-action small-action--primary">匿名连接 / 更新</button>
         <button id="btn-hdo-anon-config" class="small-action">只拉匿名配置</button>

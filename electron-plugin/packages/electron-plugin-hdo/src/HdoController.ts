@@ -32,6 +32,7 @@ import type {
   HdoLocalPluginState,
   HdoNodeInput,
   HdoPluginSettings,
+  HdoRelayMode,
   HdoPublishedServiceInput,
   HdoRateLimitInput,
   HdoServiceInput,
@@ -148,6 +149,10 @@ export class HdoController {
     this.settings = {
       ...this.settings,
       ...patch,
+      relayMode:
+        patch.relayMode === undefined
+          ? normalizeRelayMode(this.settings.relayMode)
+          : normalizeRelayMode(patch.relayMode),
       hdoControlBaseUrl:
         patch.hdoControlBaseUrl === undefined
           ? this.settings.hdoControlBaseUrl
@@ -266,7 +271,8 @@ export class HdoController {
       overlayIp: input.overlayIp || null,
       metadata: input.metadata ?? {
         source: '@qpjoy/electron-plugin-hdo',
-        arch: process.arch
+        arch: process.arch,
+        wireGuard: wireGuardPreferenceMetadata(this.settings.relayMode)
       },
       status: input.status,
       plugins: this.localPluginStates()
@@ -334,6 +340,10 @@ export class HdoController {
       metadata: {
         source: '@qpjoy/electron-plugin-hdo',
         arch: process.arch,
+        wireGuard: {
+          publicKey: stringValue(peer.publicKey),
+          ...wireGuardPreferenceMetadata(this.settings.relayMode)
+        },
         presence: {
           status,
           reportedAt: new Date(now).toISOString()
@@ -351,12 +361,16 @@ export class HdoController {
     installId?: string | null;
     deviceLabel?: string | null;
     platform?: string | null;
+    relayMode?: HdoRelayMode | null;
     rotate?: boolean | null;
     autoConnect?: boolean | null;
   } = {}): Promise<Record<string, unknown>> {
     const baseUrl = normalizeBaseUrl(input.serverUrl);
+    const relayMode = normalizeRelayMode(input.relayMode) ?? normalizeRelayMode(this.settings.relayMode);
     if (baseUrl) {
-      this.updateSettings({ hdoControlBaseUrl: baseUrl });
+      this.updateSettings({ hdoControlBaseUrl: baseUrl, relayMode });
+    } else if (input.relayMode !== undefined) {
+      this.updateSettings({ relayMode });
     }
 
     const routeProbe = buildHdoRouteProbe();
@@ -432,7 +446,9 @@ export class HdoController {
       installId,
       deviceLabel,
       platform: stringValue(input.platform) ?? this.settings.devicePlatform ?? process.platform,
-      publicKey
+      publicKey,
+      relayMode,
+      preferDirectPeers: relayMode !== 'mesh-server'
     });
     const bootstrapRow = plainObject(bootstrap);
     const manifest = plainObject(bootstrapRow?.manifest);
@@ -640,6 +656,7 @@ export class HdoController {
           publicKey,
           routeProbe,
           keySource,
+          ...wireGuardPreferenceMetadata(this.settings.relayMode),
           updatedAt: now
         }
       }
@@ -1673,6 +1690,7 @@ export class HdoController {
     if (!existsSync(this.settingsPath)) {
       return {
         hdoControlBaseUrl: normalizeBaseUrl(process.env.QPJOY_HDO_SERVER) ?? null,
+        relayMode: 'mesh-server',
         sessionUserId: null,
         deviceId: null,
         deviceLabel: defaultDeviceLabel(),
@@ -1697,6 +1715,7 @@ export class HdoController {
       return {
         ...parsed,
         hdoControlBaseUrl: normalizeBaseUrl(parsed.hdoControlBaseUrl) ?? null,
+        relayMode: normalizeRelayMode(parsed.relayMode),
         sessionUserId: parsed.sessionUserId ?? null,
         wireGuardPeer: parsed.wireGuardPeer ?? null,
         wireGuardDesiredActive: parsed.wireGuardDesiredActive ?? false,
@@ -1715,6 +1734,7 @@ export class HdoController {
       });
       return {
         hdoControlBaseUrl: null,
+        relayMode: 'mesh-server',
         sessionUserId: null,
         deviceId: null,
         deviceLabel: defaultDeviceLabel(),
@@ -1788,6 +1808,18 @@ function errorMessage(err: unknown): string {
 
 function isDeviceOwnershipError(err: unknown): boolean {
   return errorMessage(err).toLowerCase().includes('device id already belongs to another user');
+}
+
+function normalizeRelayMode(value: unknown): HdoRelayMode {
+  return value === 'mesh-service-p2p' || value === 'mesh-p2p' ? value : 'mesh-server';
+}
+
+function wireGuardPreferenceMetadata(value: unknown): Record<string, unknown> {
+  const relayMode = normalizeRelayMode(value);
+  return {
+    relayMode,
+    preferDirectPeers: relayMode !== 'mesh-server'
+  };
 }
 
 function isAuthorizationCancelledMessage(value: unknown): boolean {

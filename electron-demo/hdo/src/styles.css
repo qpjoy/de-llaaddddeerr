@@ -376,7 +376,8 @@ html, body {
   color: var(--ink-soft);
   font-size: 12px;
 }
-.field input {
+.field input,
+.field select {
   width: 100%;
   height: 40px;
   border-radius: 8px;
@@ -388,9 +389,26 @@ html, body {
   padding: 0 12px;
   outline: none;
 }
-.field input:focus {
+.field select {
+  cursor: pointer;
+}
+.field input:focus,
+.field select:focus {
   border-color: rgba(108, 196, 255, 0.64);
   box-shadow: 0 0 0 3px rgba(74, 168, 230, 0.16);
+}
+.flow-grid--settings {
+  grid-template-columns: minmax(220px, 1fr) auto;
+}
+.field--inline-action {
+  min-width: 148px;
+}
+.field--inline-action .small-action {
+  height: 40px;
+}
+@media (max-width: 720px) {
+  .flow-grid--settings { grid-template-columns: 1fr; }
+  .field--inline-action { min-width: 0; }
 }
 .flow-actions {
   display: flex;
