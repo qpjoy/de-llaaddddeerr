@@ -185,14 +185,16 @@ function setBusy(busy) {
 }
 
 function normalizeRelayMode(value) {
-  return value === 'mesh-service-p2p' || value === 'mesh-p2p' ? value : 'mesh-server';
+  if (value === 'mesh-h2i' || value === 'mesh-service-p2p') return 'mesh-h2i';
+  if (value === 'mesh-h2h' || value === 'mesh-p2p') return 'mesh-h2h';
+  return 'mesh-hdi';
 }
 
 function relayModeLabel(value) {
   const mode = normalizeRelayMode(value);
-  if (mode === 'mesh-service-p2p') return 'Service P2P';
-  if (mode === 'mesh-p2p') return 'Mesh P2P';
-  return 'Mesh Server';
+  if (mode === 'mesh-h2i') return 'Mesh H2I';
+  if (mode === 'mesh-h2h') return 'Mesh H2H';
+  return 'Mesh HDI';
 }
 
 function writeOutput(value, isError = false) {

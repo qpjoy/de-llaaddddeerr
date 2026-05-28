@@ -25,7 +25,7 @@ export interface HdoPluginSettings {
   updatedAt?: string | null;
 }
 
-export type HdoRelayMode = 'mesh-server' | 'mesh-service-p2p' | 'mesh-p2p';
+export type HdoRelayMode = 'mesh-hdi' | 'mesh-h2i' | 'mesh-h2h';
 
 export interface HdoWireGuardPeerSettings {
   privateKey?: string | null;

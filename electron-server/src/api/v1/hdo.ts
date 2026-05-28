@@ -234,7 +234,7 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
         wireGuard: {
           ...(asPlainObject(existing?.metadata?.wireGuard) ?? {}),
           relayMode,
-          preferDirectPeers: relayMode !== 'mesh-server'
+          preferDirectPeers: relayMode !== 'mesh-hdi'
         },
         updatedAt: now
       }
@@ -2682,7 +2682,7 @@ function wireGuardDirectPeerSummaries(
   const currentWireGuard = wireGuardMetadataFromDevice(current);
   const relayMode = relayModeFromWireGuardMetadata(currentWireGuard);
   const currentPrefersDirect =
-    relayMode !== 'mesh-server' ||
+    relayMode !== 'mesh-hdi' ||
     asOptionalBoolean(currentWireGuard?.preferDirectPeers) === true ||
     asOptionalBoolean(currentWireGuard?.acceptDirectPeers) === true ||
     asOptionalBoolean(currentWireGuard?.directListener) === true;
@@ -2702,18 +2702,22 @@ function wireGuardDirectPeerSummaries(
       const overlayIp = normalizeOverlayIp(row.overlayIp);
       if (!publicKey || !overlayIp) return null;
       const peerIsServiceTarget = serviceTargetHosts.has(overlayIp);
-      if (relayMode === 'mesh-service-p2p' && !peerIsServiceTarget && !currentIsServiceTarget) return null;
+      if (relayMode === 'mesh-h2i' && !peerIsServiceTarget && !currentIsServiceTarget) return null;
       const wireGuard = wireGuardMetadataFromDevice(row);
-      const endpoint = wireGuardEndpointFromMetadata(wireGuard);
+      const explicitEndpoint = wireGuardExplicitEndpointFromMetadata(wireGuard);
+      const endpoint = explicitEndpoint ?? (relayMode === 'mesh-h2h' ? wireGuardObservedEndpointFromMetadata(wireGuard) : null);
       const peerPrefersDirect = asOptionalBoolean(wireGuard?.preferDirectPeers) === true;
+      const peerAcceptsDirect =
+        asOptionalBoolean(wireGuard?.acceptDirectPeers) === true ||
+        asOptionalBoolean(wireGuard?.directListener) === true ||
+        Boolean(explicitEndpoint);
       const peerCanDirect =
         (currentIsServiceTarget || Boolean(endpoint)) &&
         (
           currentIsServiceTarget ||
           peerIsServiceTarget ||
           peerPrefersDirect ||
-          asOptionalBoolean(wireGuard?.acceptDirectPeers) === true ||
-          asOptionalBoolean(wireGuard?.directListener) === true
+          peerAcceptsDirect
         );
       if (!peerCanDirect) return null;
       return {
@@ -2729,9 +2733,11 @@ function wireGuardDirectPeerSummaries(
     .filter((row): row is NonNullable<typeof row> => Boolean(row));
 }
 
-function relayModeFromWireGuardMetadata(wireGuard: Record<string, unknown> | null): 'mesh-server' | 'mesh-service-p2p' | 'mesh-p2p' {
+function relayModeFromWireGuardMetadata(wireGuard: Record<string, unknown> | null): 'mesh-hdi' | 'mesh-h2i' | 'mesh-h2h' {
   const value = asOptionalString(wireGuard?.relayMode ?? wireGuard?.routeMode);
-  return value === 'mesh-service-p2p' || value === 'mesh-p2p' ? value : 'mesh-server';
+  if (value === 'mesh-h2i' || value === 'mesh-service-p2p') return 'mesh-h2i';
+  if (value === 'mesh-h2h' || value === 'mesh-p2p') return 'mesh-h2h';
+  return 'mesh-hdi';
 }
 
 function wireGuardPublicKeyFromMetadata(metadata: Record<string, unknown> | null): string | null {
@@ -2746,6 +2752,10 @@ function wireGuardMetadataFromDevice(device: HdoDeviceRow): Record<string, unkno
 }
 
 function wireGuardEndpointFromMetadata(wireGuard: Record<string, unknown> | null): string | null {
+  return wireGuardExplicitEndpointFromMetadata(wireGuard) ?? wireGuardObservedEndpointFromMetadata(wireGuard);
+}
+
+function wireGuardExplicitEndpointFromMetadata(wireGuard: Record<string, unknown> | null): string | null {
   const explicit = asOptionalString(wireGuard?.endpoint);
   if (explicit) return explicit;
   const host =
@@ -2754,6 +2764,10 @@ function wireGuardEndpointFromMetadata(wireGuard: Record<string, unknown> | null
     asOptionalString(wireGuard?.publicHost);
   const port = toPort(wireGuard?.listenPort) ?? toPort(wireGuard?.port);
   if (host && port) return `${host}:${port}`;
+  return null;
+}
+
+function wireGuardObservedEndpointFromMetadata(wireGuard: Record<string, unknown> | null): string | null {
   const observedAt = asOptionalString(wireGuard?.observedEndpointAt);
   const observedFresh = observedAt ? Date.now() - Date.parse(observedAt) <= HDO_WG_OBSERVED_ENDPOINT_TTL_MS : false;
   return observedFresh ? normalizeWireGuardEndpoint(asOptionalString(wireGuard?.observedEndpoint)) : null;

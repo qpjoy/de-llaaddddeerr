@@ -133,7 +133,7 @@ const hdoPlugin = {
         installId?: string | null;
         deviceLabel?: string | null;
         platform?: string | null;
-        relayMode?: 'mesh-server' | 'mesh-service-p2p' | 'mesh-p2p' | null;
+        relayMode?: 'mesh-hdi' | 'mesh-h2i' | 'mesh-h2h' | 'mesh-server' | 'mesh-service-p2p' | 'mesh-p2p' | null;
         rotate?: boolean | null;
         autoConnect?: boolean | null;
       }) => controller.anonymousConnect(input),
@@ -146,7 +146,7 @@ const hdoPlugin = {
         serverUrl?: string | null;
         identifier?: string | null;
         password?: string | null;
-        relayMode?: 'mesh-server' | 'mesh-service-p2p' | 'mesh-p2p' | null;
+        relayMode?: 'mesh-hdi' | 'mesh-h2i' | 'mesh-h2h' | 'mesh-server' | 'mesh-service-p2p' | 'mesh-p2p' | null;
         rotate?: boolean | null;
         autoConnect?: boolean | null;
       }) => controller.accountConnect(input),

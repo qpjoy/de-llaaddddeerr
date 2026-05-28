@@ -361,12 +361,15 @@ export class HdoController {
     installId?: string | null;
     deviceLabel?: string | null;
     platform?: string | null;
-    relayMode?: HdoRelayMode | null;
+    relayMode?: HdoRelayMode | 'mesh-server' | 'mesh-service-p2p' | 'mesh-p2p' | null;
     rotate?: boolean | null;
     autoConnect?: boolean | null;
   } = {}): Promise<Record<string, unknown>> {
     const baseUrl = normalizeBaseUrl(input.serverUrl);
-    const relayMode = normalizeRelayMode(input.relayMode) ?? normalizeRelayMode(this.settings.relayMode);
+    const relayMode =
+      input.relayMode === undefined
+        ? normalizeRelayMode(this.settings.relayMode)
+        : normalizeRelayMode(input.relayMode);
     if (baseUrl) {
       this.updateSettings({ hdoControlBaseUrl: baseUrl, relayMode });
     } else if (input.relayMode !== undefined) {
@@ -452,7 +455,7 @@ export class HdoController {
       platform: stringValue(input.platform) ?? this.settings.devicePlatform ?? process.platform,
       publicKey,
       relayMode,
-      preferDirectPeers: relayMode !== 'mesh-server'
+      preferDirectPeers: relayMode !== 'mesh-hdi'
     });
     const bootstrapRow = plainObject(bootstrap);
     const manifest = plainObject(bootstrapRow?.manifest);
@@ -604,7 +607,7 @@ export class HdoController {
     serverUrl?: string | null;
     identifier?: string | null;
     password?: string | null;
-    relayMode?: HdoRelayMode | null;
+    relayMode?: HdoRelayMode | 'mesh-server' | 'mesh-service-p2p' | 'mesh-p2p' | null;
     rotate?: boolean | null;
     autoConnect?: boolean | null;
   } = {}): Promise<Record<string, unknown>> {
@@ -1814,7 +1817,7 @@ export class HdoController {
     if (!existsSync(this.settingsPath)) {
       return {
         hdoControlBaseUrl: normalizeBaseUrl(process.env.QPJOY_HDO_SERVER) ?? null,
-        relayMode: 'mesh-server',
+        relayMode: 'mesh-hdi',
         sessionUserId: null,
         deviceId: null,
         deviceLabel: defaultDeviceLabel(),
@@ -1858,7 +1861,7 @@ export class HdoController {
       });
       return {
         hdoControlBaseUrl: null,
-        relayMode: 'mesh-server',
+        relayMode: 'mesh-hdi',
         sessionUserId: null,
         deviceId: null,
         deviceLabel: defaultDeviceLabel(),
@@ -1943,14 +1946,16 @@ function isAnonymousOverlayIp(value: unknown): boolean {
 }
 
 function normalizeRelayMode(value: unknown): HdoRelayMode {
-  return value === 'mesh-service-p2p' || value === 'mesh-p2p' ? value : 'mesh-server';
+  if (value === 'mesh-h2i' || value === 'mesh-service-p2p') return 'mesh-h2i';
+  if (value === 'mesh-h2h' || value === 'mesh-p2p') return 'mesh-h2h';
+  return 'mesh-hdi';
 }
 
 function wireGuardPreferenceMetadata(value: unknown): Record<string, unknown> {
   const relayMode = normalizeRelayMode(value);
   return {
     relayMode,
-    preferDirectPeers: relayMode !== 'mesh-server'
+    preferDirectPeers: relayMode !== 'mesh-hdi'
   };
 }
 
