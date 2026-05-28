@@ -94,6 +94,10 @@ importers:
         version: 5.9.3
 
   packages/electron-plugin-hdo:
+    dependencies:
+      three:
+        specifier: ^0.176.0
+        version: 0.176.0
     devDependencies:
       '@qpjoy/electron-core-wireguard':
         specifier: workspace:^
@@ -3014,6 +3018,9 @@ packages:
 
   text-decoder@1.2.7:
     resolution: {integrity: sha512-vlLytXkeP4xvEq2otHeJfSQIRyWxo/oZGEbXrtEEF9Hnmrdly59sUbzZ/QgyWuLYHctCHxFF4tRQZNQ9k60ExQ==}
+
+  three@0.176.0:
+    resolution: {integrity: sha512-PWRKYWQo23ojf9oZSlRGH8K09q7nRSWx6LY/HF/UUrMdYgN9i1e2OwJYHoQjwc6HF/4lvvYLC5YC1X8UJL2ZpA==}
 
   tinyglobby@0.2.16:
     resolution: {integrity: sha512-pn99VhoACYR8nFHhxqix+uvsbXineAasWm5ojXoN8xEwK5Kd3/TrhNn1wByuD52UxWRLy8pu+kRMniEi6Eq9Zg==}
@@ -6328,6 +6335,8 @@ snapshots:
       b4a: 1.8.1
     transitivePeerDependencies:
       - react-native-b4a
+
+  three@0.176.0: {}
 
   tinyglobby@0.2.16:
     dependencies:

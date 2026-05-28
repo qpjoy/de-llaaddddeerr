@@ -360,64 +360,53 @@ export function adminHtml(): string {
       gap: 16px;
     }
     .topology-map {
+      position: relative;
       width: 100%;
+      height: clamp(420px, 58vh, 720px);
       min-height: 420px;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: #f8fafc;
+      overflow: hidden;
+      cursor: grab;
+      touch-action: none;
     }
-    .topology-edge {
-      stroke: #cbd5df;
-      stroke-width: 2;
+    .topology-map.is-dragging { cursor: grabbing; }
+    .topology-map canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
     }
-    .topology-node {
-      cursor: pointer;
-      outline: none;
-    }
-    .topology-node-ring {
-      fill: #fff;
-      stroke: #d0d7e2;
-      stroke-width: 2;
-    }
-    .topology-node.selected .topology-node-ring,
-    .topology-node:focus .topology-node-ring {
-      stroke: var(--accent);
-      stroke-width: 4;
-    }
-    .topology-node-fill,
-    .topology-status {
-      fill: #637083;
-    }
-    .topology-node.ok .topology-node-fill,
-    .topology-node.ok .topology-status { fill: var(--accent-2); }
-    .topology-node.warn .topology-node-fill,
-    .topology-node.warn .topology-status { fill: var(--warn); }
-    .topology-node.bad .topology-node-fill,
-    .topology-node.bad .topology-status { fill: var(--bad); }
-    .topology-node.off .topology-node-fill,
-    .topology-node.off .topology-status { fill: #98a2b3; }
-    .topology-glyph {
-      fill: #fff;
-      font-size: 18px;
-      font-weight: 700;
-      text-anchor: middle;
-      pointer-events: none;
-      letter-spacing: 0;
-    }
-    .topology-label,
-    .topology-caption {
-      text-anchor: middle;
-      pointer-events: none;
-      letter-spacing: 0;
-    }
-    .topology-label {
-      fill: var(--ink);
+    .topology-empty {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
       font-size: 13px;
-      font-weight: 700;
+      pointer-events: none;
     }
-    .topology-caption {
-      fill: var(--muted);
-      font-size: 11px;
+    .topology-pager {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 10px 0;
+    }
+    .topology-pager button {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 8px;
+      min-width: 34px;
+      min-height: 32px;
+      padding: 5px 8px;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .topology-pager button.active {
+      border-color: var(--accent);
+      background: #edf6ff;
+      color: var(--accent);
+      font-weight: 700;
     }
     .topology-detail {
       display: grid;
@@ -624,7 +613,8 @@ export function adminHtml(): string {
                   <span><i class="legend-dot"></i>离线</span>
                   <span><i class="legend-dot warn"></i>待处理</span>
                 </div>
-                <svg id="clientTopologyMap" class="topology-map" viewBox="0 0 960 520" role="img" aria-label="HDO client topology"></svg>
+                <div id="clientTopologyPager" class="topology-pager"></div>
+                <div id="clientTopologyMap" class="topology-map" role="img" aria-label="HDO client topology"></div>
               </div>
               <div>
                 <h3>详情</h3>
@@ -927,7 +917,9 @@ export function adminHtml(): string {
       </section>
     </main>
   </div>
-  <script>
+  <script type="module">
+    import * as THREE from '/vendor/three.module.js';
+
     const $ = (id) => document.getElementById(id);
     let snapshot = null;
     let tab = 'mesh';
@@ -935,6 +927,8 @@ export function adminHtml(): string {
     let wireGuardActionStartedAt = 0;
     let pendingLoadRetryTimer = null;
     let selectedClientTopologyKey = null;
+    let clientTopologyPage = 1;
+    let clientTopology3d = null;
 
     function showMessage(text, kind) {
       const el = $('message');
@@ -1519,7 +1513,9 @@ export function adminHtml(): string {
     function renderClientTopology(s) {
       const model = buildClientTopology(s || {});
       if (!model.items.length) {
-        $('clientTopologyMap').innerHTML = '<text x="480" y="260" text-anchor="middle" fill="#637083">暂无拓扑数据；先连接 / 更新 HDO</text>';
+        destroyClientTopologyScene();
+        $('clientTopologyPager').innerHTML = '';
+        $('clientTopologyMap').innerHTML = '<div class="topology-empty">暂无拓扑数据；先连接 / 更新 HDO</div>';
         $('clientTopologyDetail').innerHTML = '<div class="notice">暂无拓扑数据。</div>';
         $('clientTopologyServicesTable').innerHTML = '<tr><td colspan="5" class="muted">暂无服务</td></tr>';
         return;
@@ -1528,25 +1524,8 @@ export function adminHtml(): string {
         selectedClientTopologyKey = model.items[0].key;
       }
       const selected = model.items.find((item) => item.key === selectedClientTopologyKey) || model.items[0];
-      const edges = model.edges.map((edge) => (
-        '<line class="topology-edge" x1="' + edge.x1 + '" y1="' + edge.y1 +
-        '" x2="' + edge.x2 + '" y2="' + edge.y2 + '"></line>'
-      )).join('');
-      const nodes = model.items.map((item) => {
-        const selectedClass = item.key === selected.key ? ' selected' : '';
-        return '<g class="topology-node ' + escapeAttr(item.level + selectedClass) +
-          '" data-topology-key="' + escapeAttr(item.key) +
-          '" tabindex="0" transform="translate(' + item.x + ' ' + item.y + ')">' +
-          '<title>' + escapeHtml(topologyTitle(item)) + '</title>' +
-          '<circle class="topology-node-ring" r="31"></circle>' +
-          '<circle class="topology-node-fill" r="24"></circle>' +
-          '<text class="topology-glyph" y="7">' + escapeHtml(item.glyph) + '</text>' +
-          '<circle class="topology-status" cx="22" cy="-20" r="7"></circle>' +
-          '<text class="topology-label" y="49">' + escapeHtml(item.shortLabel) + '</text>' +
-          '<text class="topology-caption" y="66">' + escapeHtml(item.caption) + '</text>' +
-          '</g>';
-      }).join('');
-      $('clientTopologyMap').innerHTML = edges + nodes;
+      renderClientTopologyPager(model);
+      renderClientTopologyScene(model, selected.key);
       $('clientTopologyDetail').innerHTML = renderTopologyDetail(selected);
       renderTopologyServices(selected, model.services);
     }
@@ -1555,7 +1534,9 @@ export function adminHtml(): string {
       const settings = s.settings || {};
       const manifest = settings.lastManifest || {};
       const license = manifest.license || {};
-      const groups = Array.isArray(license.groups) ? license.groups : [];
+      const groups = Array.isArray(license.groups) && license.groups.length
+        ? license.groups
+        : [{ id: 'current', name: '当前 Mesh', slug: 'mesh' }];
       const nodes = Array.isArray(manifest.nodes) ? manifest.nodes : [];
       const manifestDevices = Array.isArray(manifest.devices) ? manifest.devices : [];
       const services = Array.isArray(manifest.services) ? manifest.services : [];
@@ -1566,34 +1547,177 @@ export function adminHtml(): string {
       const runtime = s.wireGuardStatus || {};
       const items = [];
       const positions = new Map();
-      const meshName = groups.length ? groups.map((row) => row.name || row.slug || row.id).join(', ') : '当前 Mesh';
-      const meshKey = 'mesh:current';
+      const bands = [];
+      const pageSize = 5;
+      const totalPages = Math.max(1, Math.ceil(groups.length / pageSize));
+      clientTopologyPage = Math.min(Math.max(1, clientTopologyPage), totalPages);
+      const visibleGroups = groups.slice((clientTopologyPage - 1) * pageSize, clientTopologyPage * pageSize);
+      const deviceRows = dedupeDevices([currentDevice, ...manifestDevices]);
 
-      pushTopology(items, positions, {
-        key: meshKey,
-        id: 'current',
-        type: 'mesh',
-        label: meshName,
-        shortLabel: truncateText(meshName, 16),
-        caption: license.active ? 'active' : 'no license',
-        description: license.active ? '当前账号已加入 Mesh' : '当前账号还没有 active mesh 许可',
-        kindLabel: 'Mesh',
-        statusLabel: license.active ? '在线' : '待处理',
-        level: license.active ? 'ok' : 'warn',
-        glyph: 'M',
-        x: 480,
-        y: 74,
-        overlayIp: manifest.wireGuard && manifest.wireGuard.addressPlan ? manifest.wireGuard.addressPlan.domesticIp : null,
-        publicHost: null,
-        profileLabel: currentProfileLabel(manifest),
-        rateLimitLabel: null,
-        parentKey: null
+      visibleGroups.forEach((mesh, meshIndex) => {
+        const meshId = meshRowId(mesh, meshIndex);
+        const meshKey = 'mesh:' + meshId;
+        const laneY = clientTopologyLaneY(meshIndex);
+        const groupNodes = nodes.filter((node) => rowVisibleForClientMesh(node, meshId));
+        const domesticNodes = groupNodes.filter((node) => node.kind === 'domestic');
+        const otherNodes = groupNodes.filter((node) => node.kind !== 'domestic');
+        const groupDevices = deviceRows.filter((device) => rowVisibleForClientMesh(device, meshId));
+        const groupServices = services.filter((service) => rowVisibleForClientMesh(service, meshId));
+        const meshName = mesh.name || mesh.slug || mesh.id || '当前 Mesh';
+        const meshCaption = [mesh.slug || 'mesh', meshAddressPlanText(mesh), license.active ? 'active' : 'no license']
+          .filter(Boolean)
+          .join(' · ');
+        bands.push({
+          key: meshKey,
+          label: meshName,
+          caption: meshCaption,
+          y: laneY,
+          height: 224
+        });
+
+        pushTopology(items, positions, {
+          key: meshKey,
+          id: meshId,
+          type: 'mesh',
+          label: meshName,
+          shortLabel: truncateText(meshName, 16),
+          caption: license.active ? 'active' : 'no license',
+          description: license.active ? '当前账号已加入 Mesh' : '当前账号还没有 active mesh 许可',
+          kindLabel: 'Mesh',
+          statusLabel: license.active ? '在线' : '待处理',
+          level: license.active ? 'ok' : 'warn',
+          glyph: 'M',
+          x: 96,
+          y: laneY + 76,
+          overlayIp: meshDomesticIp(mesh, manifest),
+          publicHost: null,
+          profileLabel: currentProfileLabel(manifest),
+          rateLimitLabel: null,
+          parentKey: null,
+          meshGroupId: meshId
+        });
+
+        const domesticKeys = addClientNodeTopology(
+          items,
+          positions,
+          domesticNodes.length ? domesticNodes : groupNodes.filter((node) => node.kind === 'home').slice(0, 1),
+          {
+            meshId,
+            parentKey: meshKey,
+            laneY,
+            xStart: 410,
+            xEnd: 540,
+            rateLimits
+          }
+        );
+        const domesticHubKey = domesticKeys[0] || meshKey;
+
+        addClientNodeTopology(items, positions, otherNodes, {
+          meshId,
+          parentKey: domesticHubKey,
+          laneY,
+          xStart: 710,
+          xEnd: 850,
+          rateLimits
+        });
+
+        groupDevices.forEach((device, index) => {
+          const isCurrent = (device.id && currentDevice.id && device.id === currentDevice.id)
+            || (device.overlayIp && peer.overlayIp && device.overlayIp === peer.overlayIp);
+          const visual = isCurrent
+            ? topologyStatus('online')
+            : topologyStatus(device.status || 'offline');
+          const owner = shortUser(device.userId || currentDevice.userId || '');
+          const label = owner ? owner + '/' + (device.label || device.id || 'device') : (device.label || device.id || 'device');
+          const deviceCount = Math.min(groupDevices.length, 6);
+          pushTopology(items, positions, {
+            key: scopedClientTopologyKey('device', meshId, device.id || device.overlayIp || index),
+            id: device.id || String(index),
+            type: 'device',
+            label,
+            shortLabel: truncateText(label, 16),
+            caption: isCurrent ? 'this device' : (device.platform || 'device'),
+            description: device.publicKey ? 'WireGuard ' + shortKey(device.publicKey) : '客户端设备',
+            kindLabel: isCurrent ? '当前设备' : '可见设备',
+            statusLabel: visual.label,
+            level: visual.level,
+            glyph: isCurrent ? '我' : 'D',
+            x: spread(index % 6, deviceCount, 165, 790),
+            y: laneY + 150 + Math.floor(index / 6) * 68,
+            overlayIp: device.overlayIp || peer.overlayIp || null,
+            publicHost: null,
+            profileLabel: currentProfileLabel(manifest),
+            rateLimitLabel: rateLimitFor(rateLimits, 'device', device.id) || rateLimitFor(rateLimits, 'user', device.userId),
+            parentKey: domesticHubKey,
+            meshGroupId: meshId
+          });
+        });
+
+        profiles.slice(0, 3).forEach((profile, index) => {
+          const visual = topologyStatus(profile.enabled === false ? 'offline' : 'online');
+          pushTopology(items, positions, {
+            key: scopedClientTopologyKey('profile', meshId, profile.id || index),
+            id: profile.id || String(index),
+            type: 'profile',
+            label: profile.name || profile.mode || profile.id || 'profile',
+            shortLabel: truncateText(profile.name || profile.mode || profile.id || 'profile', 15),
+            caption: profile.mode || 'profile',
+            description: '路由和出站策略',
+            kindLabel: 'Profile',
+            statusLabel: profile.enabled === false ? '停用' : '启用',
+            level: visual.level,
+            glyph: 'P',
+            x: spread(index, Math.min(profiles.length, 3), 240, 380),
+            y: laneY + 148,
+            overlayIp: null,
+            publicHost: null,
+            profileLabel: profile.mode || null,
+            rateLimitLabel: rateLimitFor(rateLimits, 'profile', profile.id),
+            parentKey: meshKey,
+            meshGroupId: meshId
+          });
+        });
+
+        groupServices.forEach((service, index) => {
+          const parentKey = serviceParentKeyForClientMesh(service, meshId, groupNodes, groupDevices, positions) || domesticHubKey;
+          const parent = positions.get(parentKey);
+          const visual = topologyStatus(service.enabled === false ? 'offline' : 'online');
+          pushTopology(items, positions, {
+            key: scopedClientTopologyKey('service', meshId, service.id || service.name || index),
+            id: service.id || String(index),
+            type: 'service',
+            label: service.name || service.id || 'service',
+            shortLabel: truncateText(service.name || service.id || 'service', 15),
+            caption: (service.protocol || 'tcp') + ' ' + (service.targetPort || service.port || ''),
+            description: (service.targetHost || service.host || '') + ':' + (service.targetPort || service.port || ''),
+            kindLabel: '可访问服务',
+            statusLabel: service.enabled === false ? '停用' : '启用',
+            level: visual.level,
+            glyph: 'S',
+            x: clamp((parent ? parent.x : 480) + serviceOffset(index), 88, 872),
+            y: clamp((parent ? parent.y : laneY + 120) + 72, laneY + 112, laneY + 214),
+            overlayIp: service.targetHost || service.host || null,
+            publicHost: Array.isArray(service.domains) ? service.domains[0] || null : null,
+            profileLabel: null,
+            rateLimitLabel: null,
+            parentKey,
+            meshGroupId: meshId
+          });
+        });
       });
 
-      nodes.forEach((node, index) => {
+      return { items, bands, services, page: clientTopologyPage, totalPages };
+    }
+
+    function addClientNodeTopology(items, positions, rows, options) {
+      const keys = [];
+      rows.forEach((node, index) => {
         const visual = topologyStatus(node.status || (node.kind === 'domestic' ? 'pending' : 'offline'));
+        const rawId = node.id || node.overlayIp || index;
+        const key = scopedClientTopologyKey('node', options.meshId, rawId);
+        keys.push(key);
         pushTopology(items, positions, {
-          key: 'node:' + (node.id || index),
+          key,
           id: node.id || String(index),
           type: 'node',
           label: node.name || node.id || node.kind || 'node',
@@ -1604,109 +1728,73 @@ export function adminHtml(): string {
           statusLabel: visual.label,
           level: visual.level,
           glyph: nodeGlyph(node.kind || 'node'),
-          x: nodeX(node, index, nodes.length),
-          y: nodeY(node, index),
+          x: spread(index, Math.max(1, rows.length), options.xStart, options.xEnd),
+          y: options.laneY + 76,
           overlayIp: node.overlayIp || null,
           publicHost: node.publicHost || null,
           profileLabel: null,
-          rateLimitLabel: rateLimitFor(rateLimits, 'node', node.id),
-          parentKey: meshKey
+          rateLimitLabel: rateLimitFor(options.rateLimits, 'node', node.id),
+          parentKey: options.parentKey,
+          meshGroupId: options.meshId
         });
       });
+      return keys;
+    }
 
-      const deviceRows = dedupeDevices([
-        currentDevice,
-        ...manifestDevices
-      ]);
-      deviceRows.forEach((device, index) => {
-        const isCurrent = (device.id && currentDevice.id && device.id === currentDevice.id)
-          || (device.overlayIp && peer.overlayIp && device.overlayIp === peer.overlayIp);
-        const visual = isCurrent
-          ? topologyStatus('online')
-          : topologyStatus(device.status || 'offline');
-        const owner = shortUser(device.userId || currentDevice.userId || '');
-        const label = owner ? owner + '/' + (device.label || device.id || 'device') : (device.label || device.id || 'device');
-        pushTopology(items, positions, {
-          key: 'device:' + (device.id || device.overlayIp || index),
-          id: device.id || String(index),
-          type: 'device',
-          label: label,
-          shortLabel: truncateText(label, 16),
-          caption: isCurrent ? 'this device' : (device.platform || 'device'),
-          description: device.publicKey ? 'WireGuard ' + shortKey(device.publicKey) : '客户端设备',
-          kindLabel: isCurrent ? '当前设备' : '可见设备',
-          statusLabel: visual.label,
-          level: visual.level,
-          glyph: isCurrent ? '我' : 'D',
-          x: spread(index, deviceRows.length, 145, 815),
-          y: 350 + Math.floor(index / 6) * 78,
-          overlayIp: device.overlayIp || peer.overlayIp || null,
-          publicHost: null,
-          profileLabel: currentProfileLabel(manifest),
-          rateLimitLabel: rateLimitFor(rateLimits, 'device', device.id) || rateLimitFor(rateLimits, 'user', device.userId),
-          parentKey: domesticTopologyKey(nodes) || meshKey
-        });
-      });
+    function meshRowId(mesh, index) {
+      return String(mesh.id || mesh.slug || ('mesh-' + index));
+    }
 
-      profiles.forEach((profile, index) => {
-        if (index > 2) return;
-        const visual = topologyStatus(profile.enabled === false ? 'offline' : 'online');
-        pushTopology(items, positions, {
-          key: 'profile:' + (profile.id || index),
-          id: profile.id || String(index),
-          type: 'profile',
-          label: profile.name || profile.mode || profile.id || 'profile',
-          shortLabel: truncateText(profile.name || profile.mode || profile.id || 'profile', 15),
-          caption: profile.mode || 'profile',
-          description: '路由和出站策略',
-          kindLabel: 'Profile',
-          statusLabel: profile.enabled === false ? '停用' : '启用',
-          level: visual.level,
-          glyph: 'P',
-          x: spread(index, Math.min(profiles.length, 3), 250, 710),
-          y: 150,
-          overlayIp: null,
-          publicHost: null,
-          profileLabel: profile.mode || null,
-          rateLimitLabel: rateLimitFor(rateLimits, 'profile', profile.id),
-          parentKey: meshKey
-        });
-      });
+    function scopedClientTopologyKey(type, meshId, id) {
+      return type + ':' + meshId + ':' + id;
+    }
 
-      services.forEach((service, index) => {
-        const parentKey = serviceParentKey(service, nodes, deviceRows) || meshKey;
-        const parent = positions.get(parentKey);
-        const visual = topologyStatus(service.enabled === false ? 'offline' : 'online');
-        pushTopology(items, positions, {
-          key: 'service:' + (service.id || service.name || index),
-          id: service.id || String(index),
-          type: 'service',
-          label: service.name || service.id || 'service',
-          shortLabel: truncateText(service.name || service.id || 'service', 15),
-          caption: (service.protocol || 'tcp') + ' ' + (service.targetPort || service.port || ''),
-          description: (service.targetHost || service.host || '') + ':' + (service.targetPort || service.port || ''),
-          kindLabel: '可访问服务',
-          statusLabel: service.enabled === false ? '停用' : '启用',
-          level: visual.level,
-          glyph: 'S',
-          x: clamp((parent ? parent.x : 480) + serviceOffset(index), 88, 872),
-          y: clamp((parent ? parent.y : 270) + 92, 115, 492),
-          overlayIp: service.targetHost || service.host || null,
-          publicHost: Array.isArray(service.domains) ? service.domains[0] || null : null,
-          profileLabel: null,
-          rateLimitLabel: null,
-          parentKey
-        });
-      });
+    function clientTopologyLaneY(index) {
+      return 24 + index * 240;
+    }
 
-      const byKey = new Map(items.map((item) => [item.key, item]));
-      const edges = items
-        .filter((item) => item.parentKey && byKey.has(item.parentKey))
-        .map((item) => {
-          const parent = byKey.get(item.parentKey);
-          return { x1: parent.x, y1: parent.y, x2: item.x, y2: item.y };
-        });
-      return { items, edges, services };
+    function meshDomesticIp(mesh, manifest) {
+      const plan = meshAddressPlanFromRow(mesh) || (manifest.wireGuard && manifest.wireGuard.addressPlan) || {};
+      return plan.domesticIp || null;
+    }
+
+    function meshAddressPlanText(mesh) {
+      const plan = meshAddressPlanFromRow(mesh);
+      if (!plan) return '';
+      return [plan.homeCidr, plan.userCidr, plan.serviceCidr].filter(Boolean).join(' / ');
+    }
+
+    function meshAddressPlanFromRow(mesh) {
+      const metadata = mesh && typeof mesh.metadata === 'object' ? mesh.metadata : null;
+      const wireGuard = metadata && typeof metadata.wireGuard === 'object' ? metadata.wireGuard : null;
+      return (metadata && typeof metadata.addressPlan === 'object' && metadata.addressPlan)
+        || (wireGuard && typeof wireGuard.addressPlan === 'object' && wireGuard.addressPlan)
+        || null;
+    }
+
+    function rowVisibleForClientMesh(row, meshId) {
+      const ids = metadataMeshIds(row && row.metadata);
+      return ids.length === 0 || ids.includes(meshId);
+    }
+
+    function metadataMeshIds(metadata) {
+      if (!metadata || typeof metadata !== 'object') return [];
+      const raw = metadata.meshGroupIds || metadata.meshGroups;
+      return Array.isArray(raw)
+        ? raw.map((value) => String(value || '')).filter(Boolean)
+        : [];
+    }
+
+    function serviceParentKeyForClientMesh(service, meshId, nodes, devices, positions) {
+      if (service.nodeId) {
+        const nodeKey = scopedClientTopologyKey('node', meshId, service.nodeId);
+        if (positions.has(nodeKey)) return nodeKey;
+      }
+      const host = service.targetHost || service.host;
+      const device = devices.find((row) => row.overlayIp && row.overlayIp === host);
+      if (device) return scopedClientTopologyKey('device', meshId, device.id || device.overlayIp);
+      const node = nodes.find((row) => row.overlayIp && row.overlayIp === host);
+      return node ? scopedClientTopologyKey('node', meshId, node.id || node.overlayIp) : null;
     }
 
     function pushTopology(items, positions, item) {
@@ -1756,6 +1844,425 @@ export function adminHtml(): string {
         item.publicHost ? 'Public: ' + item.publicHost : '',
         'Status: ' + item.statusLabel
       ].filter(Boolean).join('\\n');
+    }
+
+    function renderClientTopologyPager(model) {
+      if (!model.totalPages || model.totalPages <= 1) {
+        $('clientTopologyPager').innerHTML = '';
+        return;
+      }
+      $('clientTopologyPager').innerHTML = Array.from({ length: model.totalPages }, (_row, index) => {
+        const page = index + 1;
+        return '<button class="' + (page === model.page ? 'active' : '') +
+          '" data-client-topology-page="' + page + '">' + page + '</button>';
+      }).join('');
+    }
+
+    function renderClientTopologyScene(model, selectedKey) {
+      const container = $('clientTopologyMap');
+      if (!clientTopology3d) {
+        clientTopology3d = createClientTopology3d(container, (key) => {
+          selectedClientTopologyKey = key;
+          renderClientTopology(snapshot || {});
+        });
+      }
+      clientTopology3d.update(model.items, model.bands, selectedKey);
+    }
+
+    function destroyClientTopologyScene() {
+      if (!clientTopology3d) return;
+      clientTopology3d.destroy();
+      clientTopology3d = null;
+    }
+
+    function createClientTopology3d(container, onSelect) {
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0xf8fafc);
+      const camera = new THREE.PerspectiveCamera(42, 1, 1, 4000);
+      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      container.innerHTML = '';
+      container.appendChild(renderer.domElement);
+
+      const root = new THREE.Group();
+      scene.add(root);
+      scene.add(new THREE.AmbientLight(0xffffff, 0.72));
+      const keyLight = new THREE.DirectionalLight(0xffffff, 1.2);
+      keyLight.position.set(240, 380, 460);
+      scene.add(keyLight);
+      const fillLight = new THREE.DirectionalLight(0xb6d5ff, 0.55);
+      fillLight.position.set(-420, 220, -280);
+      scene.add(fillLight);
+
+      const raycaster = new THREE.Raycaster();
+      let pickables = [];
+      let yaw = 0;
+      let pitch = -0.08;
+      let distance = 1500;
+      let dragStart = null;
+      let dragMoved = false;
+      let animationId = 0;
+      let meshCountForCamera = 1;
+
+      const resizeObserver = new ResizeObserver(resize);
+      resizeObserver.observe(container);
+      container.addEventListener('pointerdown', onPointerDown);
+      container.addEventListener('pointermove', onPointerMove);
+      container.addEventListener('pointerup', onPointerUp);
+      container.addEventListener('pointercancel', onPointerCancel);
+      container.addEventListener('wheel', onWheel, { passive: false });
+
+      applyCamera();
+      resize();
+      animate();
+
+      return {
+        update(items, bands, selectedKey) {
+          clearRoot();
+          pickables = [];
+          const visibleBands = bands && bands.length
+            ? bands
+            : [{ key: 'mesh:fallback', label: 'HDO', caption: '', y: 24, height: 224 }];
+          meshCountForCamera = visibleBands.length;
+          applyCamera();
+          const centers = topologySceneCenters(visibleBands.length);
+          const bandByKey = new Map(visibleBands.map((band, index) => [band.key, { band, index }]));
+          const itemByKey = new Map(items.map((item) => [item.key, item]));
+          const pointByKey = new Map();
+
+          visibleBands.forEach((band, index) => addSceneDeck(root, band, centers[index]));
+          items.forEach((item) => {
+            const bandKey = item.type === 'mesh'
+              ? item.key
+              : (item.meshGroupId ? 'mesh:' + item.meshGroupId : visibleBands[0].key);
+            const row = bandByKey.get(bandKey) || { band: visibleBands[0], index: 0 };
+            pointByKey.set(item.key, topologyScenePoint(item, row.band, centers[row.index]));
+          });
+          items.forEach((item) => {
+            if (!item.parentKey || !itemByKey.has(item.parentKey)) return;
+            const from = pointByKey.get(item.parentKey);
+            const to = pointByKey.get(item.key);
+            if (!from || !to) return;
+            addSceneEdge(root, from, to, item.key === selectedKey || item.parentKey === selectedKey);
+          });
+          items.forEach((item) => {
+            const point = pointByKey.get(item.key);
+            if (point) addSceneNode(root, item, point, item.key === selectedKey, pickables);
+          });
+          const grid = new THREE.GridHelper(1320, 18, 0xd7dee8, 0xe7ecf3);
+          grid.position.y = -90;
+          root.add(grid);
+        },
+        destroy() {
+          cancelAnimationFrame(animationId);
+          resizeObserver.disconnect();
+          container.removeEventListener('pointerdown', onPointerDown);
+          container.removeEventListener('pointermove', onPointerMove);
+          container.removeEventListener('pointerup', onPointerUp);
+          container.removeEventListener('pointercancel', onPointerCancel);
+          container.removeEventListener('wheel', onWheel);
+          clearRoot();
+          renderer.dispose();
+          renderer.domElement.remove();
+        }
+      };
+
+      function animate() {
+        animationId = requestAnimationFrame(animate);
+        renderer.render(scene, camera);
+      }
+
+      function clearRoot() {
+        disposeThreeObject(root);
+        root.clear();
+      }
+
+      function resize() {
+        const rect = container.getBoundingClientRect();
+        const width = Math.max(320, rect.width);
+        const height = Math.max(420, rect.height);
+        renderer.setSize(width, height, false);
+        camera.aspect = width / height;
+        camera.updateProjectionMatrix();
+      }
+
+      function applyCamera() {
+        camera.position.set(0, 175, distance);
+        camera.lookAt(0, 0, 0);
+        root.position.set(meshCountForCamera >= 4 ? -140 : 0, 110, 0);
+        root.rotation.set(pitch, yaw, 0);
+      }
+
+      function onPointerDown(event) {
+        dragStart = { x: event.clientX, y: event.clientY, yaw, pitch };
+        dragMoved = false;
+        container.setPointerCapture(event.pointerId);
+        container.classList.add('is-dragging');
+      }
+
+      function onPointerMove(event) {
+        if (!dragStart) return;
+        const dx = event.clientX - dragStart.x;
+        const dy = event.clientY - dragStart.y;
+        if (Math.abs(dx) + Math.abs(dy) > 3) dragMoved = true;
+        yaw = dragStart.yaw + dx * 0.006;
+        pitch = clamp(dragStart.pitch + dy * 0.004, -0.72, 0.2);
+        applyCamera();
+      }
+
+      function onPointerUp(event) {
+        if (!dragStart) return;
+        container.releasePointerCapture(event.pointerId);
+        container.classList.remove('is-dragging');
+        const shouldPick = !dragMoved;
+        dragStart = null;
+        if (!shouldPick) return;
+        const rect = container.getBoundingClientRect();
+        const pointer = new THREE.Vector2(
+          ((event.clientX - rect.left) / rect.width) * 2 - 1,
+          -((event.clientY - rect.top) / rect.height) * 2 + 1
+        );
+        raycaster.setFromCamera(pointer, camera);
+        const hit = raycaster.intersectObjects(pickables, false)[0];
+        const key = hit && hit.object && hit.object.userData.key;
+        if (key) onSelect(key);
+      }
+
+      function onPointerCancel(event) {
+        container.releasePointerCapture(event.pointerId);
+        container.classList.remove('is-dragging');
+        dragStart = null;
+      }
+
+      function onWheel(event) {
+        event.preventDefault();
+        distance = clamp(distance + event.deltaY * 0.9, 820, 2600);
+        applyCamera();
+      }
+    }
+
+    function topologySceneCenters(count) {
+      const sceneWidth = $('clientTopologyMap') ? $('clientTopologyMap').clientWidth : 0;
+      const columns = sceneWidth < 640
+        ? 1
+        : (count <= 5 ? Math.max(1, count) : 3);
+      const rows = Math.ceil(count / columns);
+      const xGap = columns >= 4 ? 190 : 520;
+      const zGap = 300;
+      return Array.from({ length: count }, (_row, index) => {
+        const column = index % columns;
+        const row = Math.floor(index / columns);
+        return new THREE.Vector3(
+          (column - (columns - 1) / 2) * xGap,
+          0,
+          (row - (rows - 1) / 2) * zGap
+        );
+      });
+    }
+
+    function topologyScenePoint(item, band, center) {
+      const laneCenter = band.y + band.height / 2;
+      return new THREE.Vector3(
+        center.x + (item.x - 480) * 0.5,
+        topologySceneVertical(item.type),
+        center.z + (item.y - laneCenter) * 0.78
+      );
+    }
+
+    function topologySceneVertical(type) {
+      if (type === 'node') return 72;
+      if (type === 'mesh') return 42;
+      if (type === 'profile') return 28;
+      if (type === 'service') return -38;
+      return 6;
+    }
+
+    function addSceneDeck(group, band, center) {
+      const plane = new THREE.Mesh(
+        new THREE.PlaneGeometry(500, 210),
+        new THREE.MeshStandardMaterial({
+          color: 0xffffff,
+          roughness: 0.88,
+          transparent: true,
+          opacity: 0.82
+        })
+      );
+      plane.rotation.x = -Math.PI / 2;
+      plane.position.set(center.x, -82, center.z);
+      group.add(plane);
+
+      const border = new THREE.LineLoop(
+        new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(center.x - 250, -80, center.z - 105),
+          new THREE.Vector3(center.x + 250, -80, center.z - 105),
+          new THREE.Vector3(center.x + 250, -80, center.z + 105),
+          new THREE.Vector3(center.x - 250, -80, center.z + 105)
+        ]),
+        new THREE.LineBasicMaterial({ color: 0xd5dde8, transparent: true, opacity: 0.85 })
+      );
+      group.add(border);
+
+      const label = createTopologyLabelSprite(band.label, band.caption, {
+        width: 420,
+        height: 100,
+        fontSize: 30,
+        captionSize: 18,
+        background: 'rgba(255,255,255,0.92)'
+      });
+      label.position.set(center.x - 60, -34, center.z - 132);
+      label.scale.set(178, 42, 1);
+      group.add(label);
+    }
+
+    function addSceneEdge(group, from, to, selected) {
+      group.add(new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([from, to]),
+        new THREE.LineBasicMaterial({
+          color: selected ? 0x1267b1 : 0xa9b7c9,
+          transparent: true,
+          opacity: selected ? 0.95 : 0.62
+        })
+      ));
+    }
+
+    function addSceneNode(group, item, point, selected, pickables) {
+      const radius = topologySceneRadius(item.type);
+      const node = new THREE.Group();
+      node.position.copy(point);
+      const sphere = new THREE.Mesh(
+        new THREE.SphereGeometry(radius, 32, 20),
+        new THREE.MeshStandardMaterial({
+          color: topologySceneColor(item.level),
+          roughness: 0.52,
+          metalness: 0.12
+        })
+      );
+      sphere.userData.key = item.key;
+      pickables.push(sphere);
+      node.add(sphere);
+
+      const status = new THREE.Mesh(
+        new THREE.SphereGeometry(Math.max(5, radius * 0.28), 18, 12),
+        new THREE.MeshStandardMaterial({ color: topologySceneColor(item.level), roughness: 0.45 })
+      );
+      status.position.set(radius * 0.82, radius * 0.78, radius * 0.28);
+      node.add(status);
+
+      if (selected) {
+        const halo = new THREE.Mesh(
+          new THREE.SphereGeometry(radius * 1.22, 32, 16),
+          new THREE.MeshBasicMaterial({
+            color: 0x1267b1,
+            transparent: true,
+            opacity: 0.2,
+            wireframe: true
+          })
+        );
+        node.add(halo);
+      }
+
+      const glyph = createTopologyGlyphSprite(item.glyph);
+      glyph.position.set(0, radius + 7, 0);
+      glyph.scale.set(36, 24, 1);
+      node.add(glyph);
+
+      const label = createTopologyLabelSprite(item.shortLabel, item.caption, {
+        width: 300,
+        height: 94,
+        fontSize: 24,
+        captionSize: 18,
+        background: selected ? 'rgba(240,247,255,0.96)' : 'rgba(255,255,255,0.84)'
+      });
+      label.position.set(0, -radius - 28, 0);
+      label.scale.set(106, 34, 1);
+      node.add(label);
+      group.add(node);
+    }
+
+    function topologySceneRadius(type) {
+      if (type === 'mesh') return 18;
+      if (type === 'node') return 17;
+      if (type === 'service') return 13;
+      if (type === 'profile') return 13;
+      return 15;
+    }
+
+    function topologySceneColor(level) {
+      if (level === 'ok') return 0x1f9d5a;
+      if (level === 'warn') return 0xf2b832;
+      if (level === 'bad') return 0xd92d20;
+      return 0x9aa4b2;
+    }
+
+    function createTopologyGlyphSprite(glyph) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 128;
+      canvas.height = 80;
+      const ctx = canvas.getContext('2d');
+      ctx.font = '700 38px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(String(glyph || '').slice(0, 2), 64, 42);
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      return new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true }));
+    }
+
+    function createTopologyLabelSprite(title, caption, options) {
+      const canvas = document.createElement('canvas');
+      canvas.width = options.width;
+      canvas.height = options.height;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawRoundedRect(ctx, 8, 8, canvas.width - 16, canvas.height - 16, 14, options.background);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#101828';
+      ctx.font = '700 ' + options.fontSize + 'px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+      ctx.fillText(truncateText(title || '', 24), canvas.width / 2, canvas.height * 0.42);
+      if (caption) {
+        ctx.fillStyle = '#667085';
+        ctx.font = '500 ' + options.captionSize + 'px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+        ctx.fillText(truncateText(caption, 28), canvas.width / 2, canvas.height * 0.68);
+      }
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      return new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true }));
+    }
+
+    function drawRoundedRect(ctx, x, y, width, height, radius, fill) {
+      ctx.beginPath();
+      ctx.moveTo(x + radius, y);
+      ctx.lineTo(x + width - radius, y);
+      ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+      ctx.lineTo(x + width, y + height - radius);
+      ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+      ctx.lineTo(x + radius, y + height);
+      ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+      ctx.lineTo(x, y + radius);
+      ctx.quadraticCurveTo(x, y, x + radius, y);
+      ctx.closePath();
+      ctx.fillStyle = fill;
+      ctx.fill();
+    }
+
+    function disposeThreeObject(object) {
+      object.traverse((child) => {
+        if (child.geometry) child.geometry.dispose();
+        const material = child.material;
+        if (Array.isArray(material)) {
+          material.forEach(disposeThreeMaterial);
+        } else if (material) {
+          disposeThreeMaterial(material);
+        }
+      });
+    }
+
+    function disposeThreeMaterial(material) {
+      if (material.map) material.map.dispose();
+      material.dispose();
     }
 
     function renderList(id, items) {
@@ -2227,6 +2734,12 @@ export function adminHtml(): string {
     document.addEventListener('click', (event) => {
       const target = event.target instanceof Element ? event.target.closest('[data-jump-tab]') : null;
       if (target) setTab(target.dataset.jumpTab);
+      const pageTarget = event.target instanceof Element ? event.target.closest('[data-client-topology-page]') : null;
+      if (pageTarget) {
+        clientTopologyPage = Number(pageTarget.dataset.clientTopologyPage || '1') || 1;
+        selectedClientTopologyKey = null;
+        renderClientTopology(snapshot || {});
+      }
       const topologyTarget = event.target instanceof Element ? event.target.closest('[data-topology-key]') : null;
       if (topologyTarget) {
         selectedClientTopologyKey = topologyTarget.dataset.topologyKey;

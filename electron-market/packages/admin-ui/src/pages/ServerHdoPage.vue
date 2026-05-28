@@ -247,6 +247,15 @@
                   <div class="text-caption text-grey-7">按 Mesh 分组：Domestic 是中心网关，登录过的客户端设备会保留为 H 节点，服务挂到对应对象。</div>
                 </div>
                 <q-space />
+                <q-pagination
+                  v-if="topologyTotalPages > 1"
+                  v-model="topologyMeshPage"
+                  :max="topologyTotalPages"
+                  :max-pages="5"
+                  boundary-numbers
+                  dense
+                  size="sm"
+                />
                 <div class="topology-legend">
                   <span><i class="legend-dot bg-positive" />在线</span>
                   <span><i class="legend-dot bg-grey-5" />离线</span>
@@ -254,46 +263,12 @@
                 </div>
               </div>
 
-              <svg
-                class="topology-map"
-                :viewBox="`0 0 960 ${topologyViewBoxHeight}`"
-                :style="{ minHeight: topologyMapMinHeight }"
-                role="img"
-                aria-label="HDO topology graph"
-              >
-                <g v-for="band in topologyMeshBands" :key="band.key" class="topology-band-group">
-                  <rect class="topology-band" x="24" :y="band.y" width="912" :height="band.height" rx="14" />
-                  <text class="topology-band-title" x="44" :y="band.y + 28">{{ band.label }}</text>
-                  <text class="topology-band-caption" x="44" :y="band.y + 50">{{ band.caption }}</text>
-                </g>
-                <line
-                  v-for="edge in topologyEdges"
-                  :key="edge.key"
-                  class="topology-edge"
-                  :x1="edge.x1"
-                  :y1="edge.y1"
-                  :x2="edge.x2"
-                  :y2="edge.y2"
-                />
-                <g
-                  v-for="item in topologyItems"
-                  :key="item.key"
-                  class="topology-node"
-                  :class="{ 'is-selected': selectedTopologyItem?.key === item.key }"
-                  :transform="`translate(${item.x} ${item.y})`"
-                  tabindex="0"
-                  @click="selectTopologyItem(item.key)"
-                  @keydown.enter="selectTopologyItem(item.key)"
-                >
-                  <title>{{ topologyTooltip(item) }}</title>
-                  <circle class="topology-node-ring" r="31" />
-                  <circle class="topology-node-fill" r="24" :class="`text-${item.color}`" />
-                  <text class="topology-node-glyph" y="7">{{ item.glyph }}</text>
-                  <circle class="topology-status" cx="22" cy="-20" r="7" :class="`text-${item.color}`" />
-                  <text class="topology-node-label" y="49">{{ item.shortLabel }}</text>
-                  <text class="topology-node-caption" y="66">{{ item.caption }}</text>
-                </g>
-              </svg>
+              <HdoTopologyScene
+                :items="topologyItems"
+                :mesh-bands="topologyMeshBands"
+                :selected-key="selectedTopologyItem?.key ?? null"
+                @select="selectTopologyItem"
+              />
             </section>
 
             <section class="section-surface q-pa-md">
@@ -928,8 +903,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
+import HdoTopologyScene from 'src/components/HdoTopologyScene.vue';
 import {
   useServerAdmin,
   type HdoDeviceMeshStateRow,
@@ -1066,14 +1042,6 @@ interface TopologyItem {
   meshGroupId: string | null;
 }
 
-interface TopologyEdge {
-  key: string;
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-}
-
 interface TopologyBand {
   key: string;
   label: string;
@@ -1085,9 +1053,10 @@ interface TopologyBand {
 const TOPOLOGY_LANE_TOP = 24;
 const TOPOLOGY_LANE_HEIGHT = 240;
 const TOPOLOGY_LANE_GAP = 16;
-const TOPOLOGY_MIN_VIEWBOX_HEIGHT = 520;
+const TOPOLOGY_MESHES_PER_PAGE = 5;
 
 const selectedTopologyKey = ref<string | null>(null);
+const topologyMeshPage = ref(1);
 
 const meshColumns = [
   { name: 'name', label: '名称', field: 'name', align: 'left' as const },
@@ -1479,8 +1448,18 @@ const rateSubjectOptions = computed(() => {
   }
 });
 
+const topologyTotalPages = computed(() =>
+  Math.max(1, Math.ceil((overview.value?.meshGroups.length ?? 0) / TOPOLOGY_MESHES_PER_PAGE))
+);
+
+const topologyPagedMeshGroups = computed(() => {
+  const rows = overview.value?.meshGroups ?? [];
+  const start = (topologyMeshPage.value - 1) * TOPOLOGY_MESHES_PER_PAGE;
+  return rows.slice(start, start + TOPOLOGY_MESHES_PER_PAGE);
+});
+
 const topologyMeshBands = computed<TopologyBand[]>(() =>
-  (overview.value?.meshGroups ?? []).map((row, index) => {
+  topologyPagedMeshGroups.value.map((row, index) => {
     const defaultProfile = row.defaultProfileId ? profileLabelForId(row.defaultProfileId) : null;
     return {
       key: topologyKey('mesh', row.id),
@@ -1498,25 +1477,13 @@ const topologyMeshBands = computed<TopologyBand[]>(() =>
   })
 );
 
-const topologyViewBoxHeight = computed(() => {
-  const meshCount = Math.max(1, overview.value?.meshGroups.length ?? 0);
-  return Math.max(
-    TOPOLOGY_MIN_VIEWBOX_HEIGHT,
-    TOPOLOGY_LANE_TOP + meshCount * TOPOLOGY_LANE_HEIGHT + 18
-  );
-});
-
-const topologyMapMinHeight = computed(() =>
-  `${Math.max(420, Math.min(760, topologyViewBoxHeight.value * 0.72))}px`
-);
-
 const topologyItems = computed<TopologyItem[]>(() => {
   const data = overview.value;
   if (!data) return [];
 
   const items: TopologyItem[] = [];
   const itemPositions = new Map<string, { x: number; y: number }>();
-  const meshRows = data.meshGroups;
+  const meshRows = topologyPagedMeshGroups.value;
   const domesticRows = data.nodes.filter((row) => row.kind === 'domestic');
   const overseaRows = data.nodes.filter((row) => row.kind === 'oversea');
 
@@ -1664,22 +1631,6 @@ const topologyItems = computed<TopologyItem[]>(() => {
   return items;
 });
 
-const topologyEdges = computed<TopologyEdge[]>(() => {
-  const byKey = new Map(topologyItems.value.map((item) => [item.key, item]));
-  return topologyItems.value
-    .filter((item) => item.parentKey && byKey.has(item.parentKey))
-    .map((item) => {
-      const parent = byKey.get(item.parentKey as string) as TopologyItem;
-      return {
-        key: `${parent.key}->${item.key}`,
-        x1: parent.x,
-        y1: parent.y,
-        x2: item.x,
-        y2: item.y
-      };
-    });
-});
-
 const selectedTopologyItem = computed(() => {
   const items = topologyItems.value;
   return items.find((item) => item.key === selectedTopologyKey.value) ?? items[0] ?? null;
@@ -1690,6 +1641,24 @@ const selectedTopologyServices = computed(() => {
   if (!selected) return [];
   return (overview.value?.services ?? []).filter((service) => serviceBelongsToTopologyItem(service, selected));
 });
+
+watch(
+  topologyTotalPages,
+  (pages) => {
+    if (topologyMeshPage.value > pages) topologyMeshPage.value = pages;
+  },
+  { immediate: true }
+);
+
+watch(
+  topologyItems,
+  (items) => {
+    if (!items.some((item) => item.key === selectedTopologyKey.value)) {
+      selectedTopologyKey.value = items[0]?.key ?? null;
+    }
+  },
+  { immediate: true }
+);
 
 function isDeploymentKindRunning(kind: HdoDeploymentKind): boolean {
   return runningDeploymentJob.value?.kind === kind;
@@ -2428,18 +2397,6 @@ function topologyLaneY(index: number): number {
   return TOPOLOGY_LANE_TOP + index * TOPOLOGY_LANE_HEIGHT;
 }
 
-function topologyTooltip(item: TopologyItem): string {
-  return [
-    item.label,
-    item.kindLabel,
-    item.overlayIp ? `Overlay: ${item.overlayIp}` : null,
-    item.publicHost ? `Public: ${item.publicHost}` : null,
-    `Status: ${item.statusLabel}`
-  ]
-    .filter(Boolean)
-    .join('\n');
-}
-
 function topologyStatus(status: string): { color: string; label: string } {
   if (status === 'online') return { color: 'positive', label: '在线' };
   if (status === 'pending') return { color: 'warning', label: '待处理' };
@@ -2775,87 +2732,6 @@ onBeforeUnmount(() => {
     height: 8px;
     border-radius: 50%;
     display: inline-block;
-  }
-
-  .topology-map {
-    width: 100%;
-    min-height: 420px;
-    border: 1px solid #e4e7ec;
-    border-radius: 8px;
-    background: #f8fafc;
-  }
-
-  .topology-edge {
-    stroke: #cbd5e1;
-    stroke-width: 2;
-  }
-
-  .topology-band {
-    fill: #ffffff;
-    stroke: #e4e7ec;
-    stroke-width: 1.5;
-  }
-
-  .topology-band-title {
-    fill: #101828;
-    font-size: 15px;
-    font-weight: 700;
-    letter-spacing: 0;
-  }
-
-  .topology-band-caption {
-    fill: #667085;
-    font-size: 11px;
-    letter-spacing: 0;
-  }
-
-  .topology-node {
-    cursor: pointer;
-    outline: none;
-  }
-
-  .topology-node-ring {
-    fill: #ffffff;
-    stroke: #d0d5dd;
-    stroke-width: 2;
-  }
-
-  .topology-node-fill,
-  .topology-status {
-    fill: currentColor;
-  }
-
-  .topology-node-glyph {
-    fill: #ffffff;
-    font-size: 18px;
-    font-weight: 700;
-    text-anchor: middle;
-    letter-spacing: 0;
-    pointer-events: none;
-  }
-
-  .topology-node-label,
-  .topology-node-caption {
-    text-anchor: middle;
-    letter-spacing: 0;
-    pointer-events: none;
-  }
-
-  .topology-node-label {
-    fill: #101828;
-    font-size: 13px;
-    font-weight: 700;
-  }
-
-  .topology-node-caption {
-    fill: #667085;
-    font-size: 11px;
-  }
-
-  .topology-node.is-selected .topology-node-ring,
-  .topology-node:focus .topology-node-ring {
-    stroke: #1976d2;
-    stroke-width: 4;
   }
 
   .topology-detail-list {

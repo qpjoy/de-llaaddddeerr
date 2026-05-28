@@ -1,4 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createReadStream } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 import { parse as parseUrl } from 'node:url';
 
 import type { HdoController } from '../HdoController';
@@ -13,6 +16,9 @@ type RouteHandler = (
 export interface HdoAdminServerOptions {
   port: number;
 }
+
+const nodeRequire = createRequire(__filename);
+const THREE_MODULE_PATH = join(dirname(nodeRequire.resolve('three')), 'three.module.js');
 
 export class HdoAdminServer {
   private server: Server | null = null;
@@ -50,6 +56,11 @@ export class HdoAdminServer {
 
     if (method === 'GET' && pathname === '/') {
       sendText(res, 200, adminHtml(), 'text/html; charset=utf-8');
+      return;
+    }
+
+    if (method === 'GET' && pathname === '/vendor/three.module.js') {
+      sendFile(res, THREE_MODULE_PATH, 'application/javascript; charset=utf-8');
       return;
     }
 
@@ -210,4 +221,13 @@ function sendText(
     'access-control-allow-origin': '*'
   });
   res.end(data);
+}
+
+function sendFile(res: ServerResponse, path: string, contentType: string): void {
+  res.writeHead(200, {
+    'content-type': contentType,
+    'cache-control': 'public, max-age=3600',
+    'access-control-allow-origin': '*'
+  });
+  createReadStream(path).pipe(res);
 }
