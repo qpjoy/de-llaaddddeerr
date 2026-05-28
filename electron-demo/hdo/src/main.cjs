@@ -389,6 +389,12 @@ if (gotSingleInstanceLock) {
         });
       });
 
+      ipcMain.handle('demo:hdo-account-connect', async (_e, payload) => {
+        return hdoCall('accountConnect', {
+          ...(payload && typeof payload === 'object' ? payload : {})
+        });
+      });
+
       ipcMain.handle('demo:hdo-update-settings', async (_e, patch) => {
         return hdoCall('updateSettings', patch && typeof patch === 'object' ? patch : {});
       });

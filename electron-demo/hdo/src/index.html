@@ -64,8 +64,8 @@
     <section class="flow-panel">
       <div class="flow-head">
         <div>
-          <p class="kicker">匿名 Relay</p>
-          <h2>未登录先进入内网</h2>
+          <p class="kicker">HDO Relay</p>
+          <h2>账号或匿名进入内网</h2>
         </div>
         <span class="status-chip" id="hdo-status-chip">检测中</span>
       </div>
@@ -93,6 +93,23 @@
         <div class="field field--inline-action">
           <span>配置</span>
           <button id="btn-hdo-save-settings" class="small-action">保存配置</button>
+        </div>
+      </div>
+
+      <div class="account-box">
+        <div class="flow-grid flow-grid--account">
+          <label class="field">
+            <span>账号</span>
+            <input id="hdo-account-id" type="text" autocomplete="username" placeholder="username / email / phone" />
+          </label>
+          <label class="field">
+            <span>密码</span>
+            <input id="hdo-account-password" type="password" autocomplete="current-password" placeholder="password" />
+          </label>
+        </div>
+        <div class="flow-actions flow-actions--account">
+          <button id="btn-hdo-account-connect" class="small-action small-action--primary">账号连接 / 更新</button>
+          <button id="btn-hdo-account-config" class="small-action">只拉账号配置</button>
         </div>
       </div>
 

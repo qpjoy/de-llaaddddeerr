@@ -1682,7 +1682,7 @@ async function renderDomesticWireGuardPeers(): Promise<string> {
     lines.push('PersistentKeepalive = 25');
   }
 
-  for (const device of devices) {
+  for (const device of [...devices].sort(compareHdoDevicePeerFreshness)) {
     const overlayIp = normalizeOverlayIp(device.overlayIp);
     if (!device.publicKey || !overlayIp || seen.has(device.publicKey)) continue;
     const meshAccess = resolveMeshAccess(device.userId, meshGroups, memberships, deviceMeshStates, device.id);
@@ -1696,6 +1696,20 @@ async function renderDomesticWireGuardPeers(): Promise<string> {
 
   lines.push('', '# END_HDO_MANAGED_PEERS');
   return lines.join('\n') + '\n';
+}
+
+function compareHdoDevicePeerFreshness(a: HdoDeviceRow, b: HdoDeviceRow): number {
+  return (
+    timestampValue(b.lastSeenAt) - timestampValue(a.lastSeenAt) ||
+    timestampValue(b.updatedAt) - timestampValue(a.updatedAt) ||
+    b.id.localeCompare(a.id)
+  );
+}
+
+function timestampValue(value: string | null | undefined): number {
+  if (!value) return 0;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : 0;
 }
 
 async function buildReadiness(userId: string) {

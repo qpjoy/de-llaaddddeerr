@@ -12,12 +12,16 @@ document.getElementById('btn-market-new').addEventListener('click', () => {
 const serverInput = document.getElementById('hdo-server-url');
 const testUrlInput = document.getElementById('hdo-test-url');
 const relayModeSelect = document.getElementById('hdo-relay-mode');
+const accountInput = document.getElementById('hdo-account-id');
+const passwordInput = document.getElementById('hdo-account-password');
 const output = document.getElementById('hdo-output');
 const chip = document.getElementById('hdo-status-chip');
 const modeEl = document.getElementById('hdo-mode');
 const overlayEl = document.getElementById('hdo-overlay');
 const wgEl = document.getElementById('hdo-wg');
 const buttons = [
+  document.getElementById('btn-hdo-account-connect'),
+  document.getElementById('btn-hdo-account-config'),
   document.getElementById('btn-hdo-anon-connect'),
   document.getElementById('btn-hdo-anon-config'),
   document.getElementById('btn-hdo-save-settings'),
@@ -30,6 +34,7 @@ const savedServer = localStorage.getItem('qpjoy.hdoDemo.serverUrl');
 if (savedServer) serverInput.value = savedServer;
 testUrlInput.value = localStorage.getItem('qpjoy.hdoDemo.testUrl') || 'http://internal.mingxi.com';
 relayModeSelect.value = normalizeRelayMode(localStorage.getItem('qpjoy.hdoDemo.relayMode'));
+accountInput.value = localStorage.getItem('qpjoy.hdoDemo.accountId') || '';
 
 document.getElementById('btn-hdo-refresh').addEventListener('click', () => {
   void refreshStatus();
@@ -53,6 +58,14 @@ document.getElementById('btn-hdo-save-settings').addEventListener('click', () =>
   });
 });
 
+document.getElementById('btn-hdo-account-connect').addEventListener('click', () => {
+  void runAccount(true);
+});
+
+document.getElementById('btn-hdo-account-config').addEventListener('click', () => {
+  void runAccount(false);
+});
+
 document.getElementById('btn-hdo-open-test').addEventListener('click', () => {
   void runAction('打开测试域名', async () => {
     persistInputs();
@@ -67,6 +80,7 @@ document.getElementById('btn-hdo-stop').addEventListener('click', () => {
 serverInput.addEventListener('change', persistInputs);
 testUrlInput.addEventListener('change', persistInputs);
 relayModeSelect.addEventListener('change', persistInputs);
+accountInput.addEventListener('change', persistInputs);
 
 void refreshStatus();
 
@@ -77,6 +91,20 @@ async function runAnonymous(autoConnect) {
     api.hdoAnonymousConnect({
       serverUrl,
       relayMode: normalizeRelayMode(relayModeSelect.value),
+      autoConnect,
+      testUrl: testUrlInput.value.trim()
+    })
+  );
+}
+
+async function runAccount(autoConnect) {
+  persistInputs();
+  await runAction(autoConnect ? '账号连接 / 更新' : '只拉账号配置', async () =>
+    api.hdoAccountConnect({
+      serverUrl: serverInput.value.trim(),
+      relayMode: normalizeRelayMode(relayModeSelect.value),
+      identifier: accountInput.value.trim() || null,
+      password: passwordInput.value || null,
       autoConnect,
       testUrl: testUrlInput.value.trim()
     })
@@ -111,8 +139,9 @@ async function refreshStatus(showOutput = true) {
     const peer = settings.wireGuardPeer || {};
     const anonymous = settings.anonymous || {};
     const wgActive = hdo.wireGuardStatus && hdo.wireGuardStatus.active === true;
-    const loggedIn = Boolean(status.auth && status.auth.user);
-    const mode = anonymous.mode === 'anonymous' && !loggedIn ? '匿名' : (loggedIn ? '账号' : '未登录');
+    const session = status.auth || hdo.session || {};
+    const loggedIn = Boolean(session.user || session.loggedIn);
+    const mode = anonymous.mode === 'anonymous' ? '匿名' : (loggedIn ? '账号' : '未登录');
     modeEl.textContent = mode;
     overlayEl.textContent = peer.overlayIp || '-';
     wgEl.textContent = wgActive ? '运行中' : '未运行';
@@ -146,6 +175,7 @@ function persistInputs() {
   localStorage.setItem('qpjoy.hdoDemo.serverUrl', serverInput.value.trim());
   localStorage.setItem('qpjoy.hdoDemo.testUrl', testUrlInput.value.trim());
   localStorage.setItem('qpjoy.hdoDemo.relayMode', normalizeRelayMode(relayModeSelect.value));
+  localStorage.setItem('qpjoy.hdoDemo.accountId', accountInput.value.trim());
 }
 
 function setBusy(busy) {

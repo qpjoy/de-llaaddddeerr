@@ -382,13 +382,17 @@ export class HdoController {
     const deviceLabel = stringValue(input.deviceLabel) ?? this.settings.deviceLabel ?? defaultDeviceLabel();
     let privateKey = stringValue(previous.privateKey);
     let publicKey = stringValue(previous.publicKey);
+    const switchingFromAccountPeer =
+      Boolean(privateKey || publicKey) &&
+      !isAnonymousDeviceId(this.settings.deviceId) &&
+      plainObject(this.settings.anonymous)?.mode !== 'anonymous';
     const runtime = resolveWireGuardRuntime({
       installDir: join(this.ctx.userDataDir, 'bin'),
       bundledDir: this.ctx.bundledWireGuardDir,
       allowSystemFallback: false
     });
 
-    if (input.rotate || !privateKey || !publicKey) {
+    if (input.rotate || switchingFromAccountPeer || !privateKey || !publicKey) {
       if (!runtime.command) {
         const lastError =
           `当前 HDO 插件包缺少适配 ${runtime.target} 的 WireGuard CLI 引擎；需要随插件安装对应的 @qpjoy/electron-core-wireguard-engine-${runtime.target}。`;
@@ -548,6 +552,126 @@ export class HdoController {
       connected,
       peer: publicWireGuardPeer(peer),
       config
+    };
+  }
+
+  async login(input: {
+    serverUrl?: string | null;
+    identifier?: string | null;
+    password?: string | null;
+  }): Promise<Record<string, unknown>> {
+    const baseUrl = normalizeBaseUrl(input.serverUrl);
+    if (baseUrl) {
+      this.updateSettings({ hdoControlBaseUrl: baseUrl });
+    }
+    const identifier = stringValue(input.identifier);
+    const password = stringValue(input.password);
+    if (!identifier || !password) {
+      throw new Error('账号和密码必填');
+    }
+    if (!this.ctx.marketplaceDb?.setSession) {
+      throw new Error('当前 host 无法保存插件市场登录态');
+    }
+    const out = plainObject(await this.apiPostPublic('/api/v1/auth/login', { identifier, password }));
+    const user = plainObject(out?.user);
+    const tokens = plainObject(out?.tokens);
+    const accessToken = stringField(tokens, 'accessToken');
+    const refreshToken = stringField(tokens, 'refreshToken');
+    const accessExpiresAt = stringField(tokens, 'accessExpiresAt');
+    if (!user || !accessToken || !refreshToken || !accessExpiresAt) {
+      throw new Error('登录响应缺少 token 或用户信息');
+    }
+    const refreshExpiresAt = stringField(tokens, 'refreshExpiresAt');
+    this.ctx.marketplaceDb.setSession({
+      accessToken,
+      refreshToken,
+      expiresAt: accessExpiresAt,
+      user: {
+        ...user,
+        refreshExpiresAt
+      }
+    });
+    this.ensureSettingsForCurrentSession();
+    return {
+      ok: true,
+      user,
+      accessExpiresAt,
+      refreshExpiresAt
+    };
+  }
+
+  async accountConnect(input: {
+    serverUrl?: string | null;
+    identifier?: string | null;
+    password?: string | null;
+    relayMode?: HdoRelayMode | null;
+    rotate?: boolean | null;
+    autoConnect?: boolean | null;
+  } = {}): Promise<Record<string, unknown>> {
+    const baseUrl = normalizeBaseUrl(input.serverUrl);
+    const relayMode =
+      input.relayMode === undefined
+        ? normalizeRelayMode(this.settings.relayMode)
+        : normalizeRelayMode(input.relayMode);
+    if (baseUrl) {
+      this.updateSettings({ hdoControlBaseUrl: baseUrl, relayMode });
+    } else if (input.relayMode !== undefined) {
+      this.updateSettings({ relayMode });
+    }
+
+    const identifier = stringValue(input.identifier);
+    const password = stringValue(input.password);
+    let auth: Record<string, unknown> | null = null;
+    if (identifier || password) {
+      if (!identifier || !password) {
+        throw new Error('账号和密码必须一起填写，或先在插件市场登录');
+      }
+      auth = await this.login({ serverUrl: baseUrl, identifier, password });
+    } else {
+      this.ensureSettingsForCurrentSession();
+    }
+
+    const wasAnonymousPeer =
+      plainObject(this.settings.anonymous)?.mode === 'anonymous' ||
+      isAnonymousDeviceId(this.settings.deviceId) ||
+      isAnonymousOverlayIp(this.settings.wireGuardPeer?.overlayIp);
+    this.updateSettings({
+      anonymous: null,
+      deviceId: wasAnonymousPeer ? null : this.settings.deviceId
+    });
+    const prepared = await this.prepareWireGuardPeer({
+      rotate: input.rotate === true || wasAnonymousPeer
+    });
+    const preparedRow = plainObject(prepared);
+    const manifest = plainObject(preparedRow?.manifest);
+    const domainProxy = await this.applyDomainProxyFromManifest(manifest);
+    let subscription: Record<string, unknown> | null = null;
+    let connected: Record<string, unknown> | null = null;
+
+    if (preparedRow?.ok === true) {
+      subscription = await this.refreshSubscription().then(
+        (content) => ({ ok: true, bytes: Buffer.byteLength(content, 'utf8') }),
+        (err) => ({ ok: false, error: errorMessage(err) })
+      );
+      if (input.autoConnect !== false) {
+        connected = await this.connectWireGuardPeer({
+          action: 'restart',
+          fallbackToAppManaged: false
+        }).catch((err) => ({
+          ok: false,
+          error: errorMessage(err)
+        }));
+      }
+    }
+
+    return {
+      ok: preparedRow?.ok === true,
+      mode: 'account',
+      auth,
+      prepared,
+      domainProxy,
+      subscription,
+      connected
     };
   }
 
@@ -1808,6 +1932,14 @@ function errorMessage(err: unknown): string {
 
 function isDeviceOwnershipError(err: unknown): boolean {
   return errorMessage(err).toLowerCase().includes('device id already belongs to another user');
+}
+
+function isAnonymousDeviceId(value: unknown): boolean {
+  return stringValue(value)?.startsWith('hdo-anon-') === true;
+}
+
+function isAnonymousOverlayIp(value: unknown): boolean {
+  return stringValue(value)?.startsWith('100.91.') === true;
 }
 
 function normalizeRelayMode(value: unknown): HdoRelayMode {

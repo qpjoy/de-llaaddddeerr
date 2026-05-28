@@ -137,6 +137,19 @@ const hdoPlugin = {
         rotate?: boolean | null;
         autoConnect?: boolean | null;
       }) => controller.anonymousConnect(input),
+      login: (input?: {
+        serverUrl?: string | null;
+        identifier?: string | null;
+        password?: string | null;
+      }) => controller.login(input ?? {}),
+      accountConnect: (input?: {
+        serverUrl?: string | null;
+        identifier?: string | null;
+        password?: string | null;
+        relayMode?: 'mesh-server' | 'mesh-service-p2p' | 'mesh-p2p' | null;
+        rotate?: boolean | null;
+        autoConnect?: boolean | null;
+      }) => controller.accountConnect(input),
       prepareWireGuardPeer: (input?: { rotate?: boolean | null }) => controller.prepareWireGuardPeer(input),
       connectWireGuardPeer: (input?: { action?: 'up' | 'down' | 'restart' | null }) => controller.connectWireGuardPeer(input),
       applyDomainProxyFromManifest: (manifest?: Record<string, unknown> | null) =>

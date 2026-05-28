@@ -410,11 +410,22 @@ html, body {
   .flow-grid--settings { grid-template-columns: 1fr; }
   .field--inline-action { min-width: 0; }
 }
+.account-box {
+  margin: 0 0 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(164, 173, 194, 0.16);
+}
+.flow-grid--account {
+  margin-bottom: 10px;
+}
 .flow-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
   margin-bottom: 14px;
+}
+.flow-actions.flow-actions--account {
+  margin-bottom: 0;
 }
 .small-action {
   min-height: 36px;
