@@ -38,6 +38,7 @@ const HDO_ID = 'qpjoy.electron-plugin-hdo';
 let mainWindow = null;
 let host = null;
 let isClosing = false;
+const childWindows = new Set();
 
 app.setAppUserModelId('dev.qpjoy.demo.hdo');
 
@@ -220,6 +221,9 @@ function createMainWindow() {
       nodeIntegration: false
     }
   });
+  mainWindow.once('closed', () => {
+    mainWindow = null;
+  });
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
   // External links via host.openExternal — kept here for any landing-page
   // anchor that wants to open in the system browser instead of a new
@@ -231,6 +235,14 @@ function createMainWindow() {
     }
     return { action: 'allow' };
   });
+}
+
+function trackChildWindow(window) {
+  childWindows.add(window);
+  window.once('closed', () => {
+    childWindows.delete(window);
+  });
+  return window;
 }
 
 async function hdoExposed() {
@@ -275,8 +287,11 @@ function normalizeTestUrl(value) {
 async function closeAppResources() {
   if (!host) return;
   const current = host;
-  host = null;
-  await current.close();
+  try {
+    await current.close();
+  } finally {
+    if (host === current) host = null;
+  }
 }
 
 async function quitGracefully(exitCode = 0) {
@@ -340,11 +355,11 @@ if (gotSingleInstanceLock) {
       ipcMain.handle('demo:open-market', (_e, mode) => {
         const url = 'http://127.0.0.1:23455';
         if (mode === 'new-window') {
-          const w = new BrowserWindow({
+          const w = trackChildWindow(new BrowserWindow({
             width: 1100, height: 760, backgroundColor: '#f3f5f7',
             autoHideMenuBar: true,
             webPreferences: { contextIsolation: true, sandbox: true }
-          });
+          }));
           void w.loadURL(url);
         } else if (mainWindow && !mainWindow.isDestroyed()) {
           void mainWindow.loadURL(url);
@@ -376,7 +391,7 @@ if (gotSingleInstanceLock) {
 
       ipcMain.handle('demo:hdo-open-test-url', async (_e, value) => {
         const url = normalizeTestUrl(value);
-        const w = new BrowserWindow({
+        const w = trackChildWindow(new BrowserWindow({
           width: 1000,
           height: 720,
           backgroundColor: '#101827',
@@ -386,7 +401,7 @@ if (gotSingleInstanceLock) {
             contextIsolation: true,
             sandbox: true
           }
-        });
+        }));
         await w.loadURL(url);
         return { ok: true, url };
       });
@@ -413,6 +428,7 @@ app.on('activate', () => {
 });
 
 app.on('before-quit', async (event) => {
+  if (isClosing) return;
   event.preventDefault();
   void quitGracefully(0);
 });
