@@ -19,5 +19,12 @@ contextBridge.exposeInMainWorld('qpjoyDemo', {
   /** Open a URL inside Electron's default session so HDO domain proxy rules apply. */
   hdoOpenTestUrl: (url) => ipcRenderer.invoke('demo:hdo-open-test-url', url),
   /** Stop the current HDO WireGuard tunnel. */
-  hdoStop: () => ipcRenderer.invoke('demo:hdo-stop')
+  hdoStop: () => ipcRenderer.invoke('demo:hdo-stop'),
+  /** Subscribe to HDO state changes pushed by the plugin. */
+  onHdoEvent: (listener) => {
+    if (typeof listener !== 'function') return () => {};
+    const wrapped = (_event, payload) => listener(payload);
+    ipcRenderer.on('demo:hdo-event', wrapped);
+    return () => ipcRenderer.removeListener('demo:hdo-event', wrapped);
+  }
 });

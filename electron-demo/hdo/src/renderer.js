@@ -29,6 +29,7 @@ const buttons = [
   document.getElementById('btn-hdo-stop'),
   document.getElementById('btn-hdo-refresh')
 ];
+let pendingStatusRefresh = null;
 
 const savedServer = localStorage.getItem('qpjoy.hdoDemo.serverUrl');
 if (savedServer) serverInput.value = savedServer;
@@ -39,6 +40,12 @@ accountInput.value = localStorage.getItem('qpjoy.hdoDemo.accountId') || '';
 document.getElementById('btn-hdo-refresh').addEventListener('click', () => {
   void refreshStatus();
 });
+
+if (typeof api.onHdoEvent === 'function') {
+  api.onHdoEvent(() => {
+    scheduleStatusRefresh(false, 300);
+  });
+}
 
 document.getElementById('btn-hdo-anon-connect').addEventListener('click', () => {
   void runAnonymous(true);
@@ -83,6 +90,17 @@ relayModeSelect.addEventListener('change', persistInputs);
 accountInput.addEventListener('change', persistInputs);
 
 void refreshStatus();
+setInterval(() => {
+  if (!document.hidden) scheduleStatusRefresh(false, 0);
+}, 5000);
+
+function scheduleStatusRefresh(showOutput = false, delay = 400) {
+  if (pendingStatusRefresh) clearTimeout(pendingStatusRefresh);
+  pendingStatusRefresh = setTimeout(() => {
+    pendingStatusRefresh = null;
+    void refreshStatus(showOutput);
+  }, delay);
+}
 
 async function runAnonymous(autoConnect) {
   persistInputs();
@@ -113,11 +131,14 @@ async function runAccount(autoConnect) {
 
 async function runAction(label, fn) {
   setBusy(true);
+  chip.textContent = `${label}中`;
+  chip.className = 'status-chip';
   writeOutput(`${label}...`);
   try {
     const result = await fn();
     writeOutput(publicJson(result));
     await refreshStatus(false);
+    scheduleStatusRefresh(false, 1200);
   } catch (err) {
     writeOutput(err instanceof Error ? err.message : String(err), true);
     chip.textContent = '出错';

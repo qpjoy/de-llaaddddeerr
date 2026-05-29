@@ -38,6 +38,7 @@ const HDO_ID = 'qpjoy.electron-plugin-hdo';
 let mainWindow = null;
 let host = null;
 let isClosing = false;
+let hdoEventUnsubscribe = null;
 const childWindows = new Set();
 
 app.setAppUserModelId('dev.qpjoy.demo.hdo');
@@ -254,6 +255,7 @@ async function hdoExposed() {
     exposed = host.runtime.getExposed(HDO_ID);
   }
   if (!exposed) throw new Error('HDO plugin is not active');
+  ensureHdoEventSubscription(exposed);
   return exposed;
 }
 
@@ -262,6 +264,18 @@ async function hdoCall(method, ...args) {
   const fn = exposed[method];
   if (typeof fn !== 'function') throw new Error(`HDO plugin did not expose ${method}`);
   return fn(...args);
+}
+
+function ensureHdoEventSubscription(exposed) {
+  if (hdoEventUnsubscribe || !exposed || typeof exposed.onEvent !== 'function') return;
+  hdoEventUnsubscribe = exposed.onEvent((event) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('demo:hdo-event', event);
+    }
+    for (const window of childWindows) {
+      if (!window.isDestroyed()) window.webContents.send('demo:hdo-event', event);
+    }
+  });
 }
 
 function demoDefaultHdoServerUrl() {
@@ -285,6 +299,10 @@ function normalizeTestUrl(value) {
 }
 
 async function closeAppResources() {
+  if (hdoEventUnsubscribe) {
+    hdoEventUnsubscribe();
+    hdoEventUnsubscribe = null;
+  }
   if (!host) return;
   const current = host;
   try {

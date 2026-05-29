@@ -123,6 +123,7 @@ const hdoPlugin = {
     powerMonitor.on('unlock-screen', onUnlockScreen);
 
     ctx.expose({
+      onEvent: (listener: (event: Record<string, unknown>) => void) => controller.onEvent(listener),
       snapshot: () => controller.snapshot(),
       updateSettings: (patch: Record<string, unknown>) => controller.updateSettings(patch),
       registerDevice: (input: HdoDeviceRegistrationInput) => controller.registerDevice(input),

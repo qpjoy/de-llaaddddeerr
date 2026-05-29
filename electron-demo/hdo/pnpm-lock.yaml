@@ -12,8 +12,8 @@ importers:
         specifier: ^0.3.32
         version: 0.3.32(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)
       '@qpjoy/electron-plugin-hdo':
-        specifier: ^0.1.31
-        version: 0.1.31(electron@34.5.8)
+        specifier: ^0.1.32
+        version: 0.1.33(electron@34.5.8)
       '@qpjoy/electron-plugin-sdk':
         specifier: ^0.1.4
         version: 0.1.4(electron@34.5.8)
@@ -270,8 +270,8 @@ packages:
       '@qpjoy/electron-plugin-sdk': '>=0.1.0'
       electron: '>=28'
 
-  '@qpjoy/electron-plugin-hdo@0.1.31':
-    resolution: {integrity: sha512-jHF+eek6Tpptpqgmb9bSlDf1ASdoUGd1lBfzqrZRmO1G/zcZIcJ6OzoSKcrxmIqKrl5C+h0uH7kN2jPT6qqrKA==}
+  '@qpjoy/electron-plugin-hdo@0.1.33':
+    resolution: {integrity: sha512-43krIjqZHptKxoAkiewQAzIsLTnqzg7ZErLTzOraH7MvowoxlBs97XfJ/N55YW8Jc1eg3XnWp2OXtjGM0XuQXw==}
     peerDependencies:
       electron: '>=28'
     peerDependenciesMeta:
@@ -1887,6 +1887,9 @@ packages:
     engines: {node: '>=10'}
     hasBin: true
 
+  three@0.176.0:
+    resolution: {integrity: sha512-PWRKYWQo23ojf9oZSlRGH8K09q7nRSWx6LY/HF/UUrMdYgN9i1e2OwJYHoQjwc6HF/4lvvYLC5YC1X8UJL2ZpA==}
+
   tmp@0.0.33:
     resolution: {integrity: sha512-jRCJlojKnZ3addtTOjdIqoRuPEKBvNXcGYqzO6zWZX8KfKEpnGY5jfggJQ3EjKuu8D4bJRr0y+cYJFmYbImXGw==}
     engines: {node: '>=0.6.0'}
@@ -2601,7 +2604,9 @@ snapshots:
       electron: 34.5.8
       semver: 7.8.1
 
-  '@qpjoy/electron-plugin-hdo@0.1.31(electron@34.5.8)':
+  '@qpjoy/electron-plugin-hdo@0.1.33(electron@34.5.8)':
+    dependencies:
+      three: 0.176.0
     optionalDependencies:
       electron: 34.5.8
 
@@ -4264,6 +4269,8 @@ snapshots:
       acorn: 8.16.0
       commander: 2.20.3
       source-map-support: 0.5.21
+
+  three@0.176.0: {}
 
   tmp@0.0.33:
     dependencies:

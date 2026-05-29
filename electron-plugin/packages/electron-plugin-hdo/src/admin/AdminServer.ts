@@ -64,6 +64,11 @@ export class HdoAdminServer {
       return;
     }
 
+    if (method === 'GET' && pathname === '/api/events') {
+      this.streamEvents(req, res);
+      return;
+    }
+
     const route = this.route(method, pathname);
     if (!route) {
       sendJson(res, 404, { error: 'not found' });
@@ -71,6 +76,21 @@ export class HdoAdminServer {
     }
     const body = method === 'GET' ? {} : await readBody(req);
     await route(req, res, body);
+  }
+
+  private streamEvents(req: IncomingMessage, res: ServerResponse): void {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store',
+      'connection': 'keep-alive',
+      'access-control-allow-origin': '*'
+    });
+    const write = (event: Record<string, unknown>) => {
+      res.write(`event: hdo\n`);
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+    const unsubscribe = this.controller.onEvent(write);
+    req.on('close', unsubscribe);
   }
 
   private route(method: string, pathname: string): RouteHandler | null {

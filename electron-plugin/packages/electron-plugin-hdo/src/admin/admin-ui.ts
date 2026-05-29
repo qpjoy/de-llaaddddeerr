@@ -926,6 +926,7 @@ export function adminHtml(): string {
     let wireGuardActionBusy = false;
     let wireGuardActionStartedAt = 0;
     let pendingLoadRetryTimer = null;
+    let eventRefreshTimer = null;
     let selectedClientTopologyKey = null;
     let clientTopologyPage = 1;
     let clientTopology3d = null;
@@ -1071,6 +1072,24 @@ export function adminHtml(): string {
       };
       pendingLoadRetryTimer = setTimeout(retry, delays[index]);
       index += 1;
+    }
+
+    function scheduleEventRefresh() {
+      if (eventRefreshTimer) clearTimeout(eventRefreshTimer);
+      eventRefreshTimer = setTimeout(() => {
+        eventRefreshTimer = null;
+        load({ silent: true }).catch(() => undefined);
+      }, wireGuardActionBusy ? 900 : 250);
+    }
+
+    function subscribeEvents() {
+      if (typeof EventSource !== 'function') return;
+      const source = new EventSource('/api/events');
+      source.addEventListener('hdo', scheduleEventRefresh);
+      source.onerror = () => {
+        source.close();
+        setTimeout(subscribeEvents, 2500);
+      };
     }
 
     async function finishActionWithRefresh(label) {
@@ -2970,6 +2989,7 @@ export function adminHtml(): string {
       });
     }).catch(() => undefined));
 
+    subscribeEvents();
     load();
 
     function nodeMetadata() {

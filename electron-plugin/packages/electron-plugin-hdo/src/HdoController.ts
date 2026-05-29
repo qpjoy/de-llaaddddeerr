@@ -46,6 +46,7 @@ type WireGuardPeerConnectInput = {
   fallbackToAppManaged?: boolean | null;
 };
 type WireGuardConnectionRuntime = ReturnType<typeof resolveWireGuardConnectionRuntime>;
+type HdoEventListener = (event: Record<string, unknown>) => void;
 
 interface MarketplaceDbLike {
   getActiveSession?(): {
@@ -126,6 +127,7 @@ export class HdoController {
   private taskRunner: Promise<HdoTaskRunSummary> | null = null;
   private wireGuardRecovery: Promise<Record<string, unknown>> | null = null;
   private readonly domainProxy: HdoSessionDomainProxy | null = null;
+  private readonly eventListeners = new Set<HdoEventListener>();
   private lastPresenceReportAt = 0;
   private lastPresenceStatus: HdoDeviceRegistrationInput['status'] | null = null;
 
@@ -145,6 +147,24 @@ export class HdoController {
     return { ...this.settings };
   }
 
+  onEvent(listener: HdoEventListener): () => void {
+    if (typeof listener !== 'function') {
+      throw new Error('HDO event listener must be a function');
+    }
+    this.eventListeners.add(listener);
+    try {
+      listener(this.publicStateEvent('snapshot', { initial: true }));
+    } catch (err) {
+      this.ctx.log.warn('HDO event listener failed', {
+        event: 'snapshot',
+        error: errorMessage(err)
+      });
+    }
+    return () => {
+      this.eventListeners.delete(listener);
+    };
+  }
+
   updateSettings(patch: Partial<HdoPluginSettings>): HdoPluginSettings {
     this.settings = {
       ...this.settings,
@@ -160,7 +180,9 @@ export class HdoController {
       updatedAt: new Date().toISOString()
     };
     this.saveSettings();
-    return this.getSettings();
+    const next = this.getSettings();
+    this.emitEvent('settings-updated');
+    return next;
   }
 
   async snapshot(): Promise<HdoSnapshot> {
@@ -495,7 +517,7 @@ export class HdoController {
           domesticPublicKey: domestic.publicKey,
           domesticEndpoint: domestic.endpoint,
           allowedIps,
-          directPeers: directPeersFromManifest(manifest, overlayIp),
+          directPeers: relayMode === 'mesh-hdi' ? [] : directPeersFromManifest(manifest, overlayIp),
           persistentKeepalive: 25
         });
         configPath = this.writeWireGuardProfile(config);
@@ -533,6 +555,7 @@ export class HdoController {
     });
     const domainProxy = await this.applyDomainProxyFromManifest(manifest);
     let connected: Record<string, unknown> | null = null;
+    let wireGuardStatus: Record<string, unknown> | null = null;
     if (config && input.autoConnect !== false) {
       const configUnchanged = stringValue(previous.config) === config;
       connected = await this.connectWireGuardPeer({
@@ -543,7 +566,14 @@ export class HdoController {
         ok: false,
         error: errorMessage(err)
       }));
+      wireGuardStatus = await this.waitForWireGuardState(true);
     }
+    this.emitEvent('relay-connected', {
+      mode: 'anonymous',
+      ok: Boolean(config),
+      autoConnect: input.autoConnect !== false,
+      wireGuardActive: wireGuardStatus?.active === true
+    });
 
     return {
       ok: Boolean(config),
@@ -553,6 +583,7 @@ export class HdoController {
       manifest,
       domainProxy,
       connected,
+      wireGuardStatus,
       peer: publicWireGuardPeer(peer),
       config
     };
@@ -638,6 +669,7 @@ export class HdoController {
       plainObject(this.settings.anonymous)?.mode === 'anonymous' ||
       isAnonymousDeviceId(this.settings.deviceId) ||
       isAnonymousOverlayIp(this.settings.wireGuardPeer?.overlayIp);
+    const previousConfig = stringValue(this.settings.wireGuardPeer?.config);
     this.updateSettings({
       anonymous: null,
       deviceId: wasAnonymousPeer ? null : this.settings.deviceId
@@ -650,6 +682,7 @@ export class HdoController {
     const domainProxy = await this.applyDomainProxyFromManifest(manifest);
     let subscription: Record<string, unknown> | null = null;
     let connected: Record<string, unknown> | null = null;
+    let wireGuardStatus: Record<string, unknown> | null = null;
 
     if (preparedRow?.ok === true) {
       subscription = await this.refreshSubscription().then(
@@ -657,15 +690,29 @@ export class HdoController {
         (err) => ({ ok: false, error: errorMessage(err) })
       );
       if (input.autoConnect !== false) {
+        const preparedPeer = plainObject(preparedRow.peer);
+        const preparedConfig = stringValue(preparedRow.config);
+        const configUnchanged = Boolean(previousConfig && preparedConfig && previousConfig === preparedConfig);
         connected = await this.connectWireGuardPeer({
-          action: 'restart',
+          action: configUnchanged ? 'up' : 'restart',
+          skipIfActive: configUnchanged,
           fallbackToAppManaged: false
         }).catch((err) => ({
           ok: false,
           error: errorMessage(err)
         }));
+        wireGuardStatus = await this.waitForWireGuardState(true);
+        if (!wireGuardStatus && preparedPeer?.overlayIp) {
+          wireGuardStatus = this.wireGuardStatus();
+        }
       }
     }
+    this.emitEvent('relay-connected', {
+      mode: 'account',
+      ok: preparedRow?.ok === true,
+      autoConnect: input.autoConnect !== false,
+      wireGuardActive: wireGuardStatus?.active === true
+    });
 
     return {
       ok: preparedRow?.ok === true,
@@ -674,7 +721,8 @@ export class HdoController {
       prepared,
       domainProxy,
       subscription,
-      connected
+      connected,
+      wireGuardStatus
     };
   }
 
@@ -825,7 +873,9 @@ export class HdoController {
           domesticPublicKey: domestic.publicKey,
           domesticEndpoint: domestic.endpoint,
           allowedIps,
-          directPeers: directPeersFromManifest(manifest, overlayIp),
+          directPeers: normalizeRelayMode(this.settings.relayMode) === 'mesh-hdi'
+            ? []
+            : directPeersFromManifest(manifest, overlayIp),
           persistentKeepalive: 25
         });
         configPath = this.writeWireGuardProfile(config);
@@ -928,13 +978,17 @@ export class HdoController {
       }
     }
 
-    if (runtime.platform === 'darwin') {
-      return this.connectWireGuardPeerDarwin(action, runtime, configPath, input);
-    }
-    if (runtime.platform === 'win32') {
-      return this.connectWireGuardPeerWindows(action, runtime, configPath);
-    }
-    return this.connectWireGuardPeerWgQuick(action, runtime, configPath);
+    const result = runtime.platform === 'darwin'
+      ? await this.connectWireGuardPeerDarwin(action, runtime, configPath, input)
+      : (runtime.platform === 'win32'
+          ? await this.connectWireGuardPeerWindows(action, runtime, configPath)
+          : await this.connectWireGuardPeerWgQuick(action, runtime, configPath));
+    this.emitEvent('wireguard-status-changed', {
+      action,
+      ok: result.ok !== false,
+      message: stringValue(result.message)
+    });
+    return result;
   }
 
   private async connectWireGuardPeerDarwin(
@@ -1116,6 +1170,20 @@ export class HdoController {
     };
   }
 
+  private async waitForWireGuardState(
+    active: boolean,
+    attempts = 12,
+    delayMs = 550
+  ): Promise<Record<string, unknown> | null> {
+    let latest: Record<string, unknown> | null = null;
+    for (let i = 0; i < attempts; i += 1) {
+      await sleep(i === 0 ? 250 : delayMs);
+      latest = this.wireGuardStatus();
+      if (latest && Boolean(latest.active) === active) return latest;
+    }
+    return latest;
+  }
+
   async recoverWireGuardPeer(input: WireGuardRecoveryInput = {}): Promise<Record<string, unknown>> {
     if (this.wireGuardRecovery) return this.wireGuardRecovery;
     const { reason, allowPrivileged } = this.normalizeWireGuardRecoveryInput(input);
@@ -1220,10 +1288,16 @@ export class HdoController {
       allowSystemFallback: true
     });
     const result = await repairWireGuardTunnelRoutes({ runtime, configPath });
-    return {
+    const payload = {
       ...result,
       runtime: publicWireGuardRuntime(result.runtime)
     };
+    this.emitEvent('wireguard-status-changed', {
+      action: 'repair-routes',
+      ok: payload.ok !== false,
+      message: stringValue(payload.message)
+    });
+    return payload;
   }
 
   async applyDomainProxyFromManifest(manifestInput?: Record<string, unknown> | null): Promise<Record<string, unknown>> {
@@ -1295,10 +1369,16 @@ export class HdoController {
       });
       this.reportPresenceInBackground('online');
     }
-    return {
+    const payload = {
       ...result,
       runtime: publicWireGuardRuntime(result.runtime)
     };
+    this.emitEvent('wireguard-status-changed', {
+      action: 'launchdaemon-install',
+      ok: payload.ok !== false,
+      message: stringValue(payload.message)
+    });
+    return payload;
   }
 
   async uninstallWireGuardLaunchDaemon(
@@ -1339,10 +1419,16 @@ export class HdoController {
       this.rememberWireGuardDesiredActive(false);
       this.reportPresenceInBackground('offline');
     }
-    return {
+    const payload = {
       ...result,
       runtime: publicWireGuardRuntime(result.runtime)
     };
+    this.emitEvent('wireguard-status-changed', {
+      action: 'launchdaemon-uninstall',
+      ok: payload.ok !== false,
+      message: stringValue(payload.message)
+    });
+    return payload;
   }
 
   async shutdown(): Promise<void> {
@@ -1396,6 +1482,40 @@ export class HdoController {
   private rememberWireGuardDesiredActive(active: boolean): void {
     if (this.settings.wireGuardDesiredActive === active) return;
     this.updateSettings({ wireGuardDesiredActive: active });
+  }
+
+  private emitEvent(type: string, detail: Record<string, unknown> = {}): void {
+    if (this.eventListeners.size === 0) return;
+    const event = this.publicStateEvent(type, detail);
+    for (const listener of Array.from(this.eventListeners)) {
+      try {
+        listener(event);
+      } catch (err) {
+        this.ctx.log.warn('HDO event listener failed', {
+          event: type,
+          error: errorMessage(err)
+        });
+      }
+    }
+  }
+
+  private publicStateEvent(type: string, detail: Record<string, unknown> = {}): Record<string, unknown> {
+    const settings = this.settings;
+    const peer = plainObject(settings.wireGuardPeer);
+    return {
+      type,
+      at: new Date().toISOString(),
+      serverBaseUrl: this.serverBaseUrl(),
+      relayMode: normalizeRelayMode(settings.relayMode),
+      deviceId: settings.deviceId ?? null,
+      deviceLabel: settings.deviceLabel ?? null,
+      anonymous: publicAnonymousSettings(settings.anonymous),
+      domainProxy: settings.domainProxy ?? null,
+      wireGuardDesiredActive: settings.wireGuardDesiredActive === true,
+      wireGuardPeer: peer ? publicEventWireGuardPeer(peer) : null,
+      detail,
+      lastError: this.lastError || stringValue(peer?.lastError)
+    };
   }
 
   wireGuardStatus(): Record<string, unknown> | null {
@@ -1977,6 +2097,10 @@ function execFileAsync(command: string, args: string[]): Promise<void> {
   });
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function copyTextToClipboard(value: string): Promise<void> {
   return execFileAsync('osascript', ['-e', `set the clipboard to ${appleScriptString(value)}`]);
 }
@@ -2048,6 +2172,30 @@ function requireTaskPluginId(value: string | null, kind: string): string {
 function publicWireGuardPeer(value: Record<string, unknown>): Record<string, unknown> {
   const { privateKey: _privateKey, ...safe } = value;
   return safe;
+}
+
+function publicEventWireGuardPeer(value: Record<string, unknown>): Record<string, unknown> {
+  return {
+    publicKey: stringValue(value.publicKey),
+    overlayIp: stringValue(value.overlayIp),
+    address: stringValue(value.address),
+    allowedIps: Array.isArray(value.allowedIps) ? value.allowedIps : null,
+    configReady: Boolean(value.config && value.configPath),
+    canUseDefaultMesh: value.canUseDefaultMesh === true,
+    lastError: stringValue(value.lastError),
+    updatedAt: stringValue(value.updatedAt)
+  };
+}
+
+function publicAnonymousSettings(value: unknown): Record<string, unknown> | null {
+  const row = plainObject(value);
+  if (!row || row.mode !== 'anonymous') return null;
+  return {
+    mode: 'anonymous',
+    appId: stringValue(row.appId),
+    installId: stringValue(row.installId),
+    updatedAt: stringValue(row.updatedAt)
+  };
 }
 
 function publicWireGuardRuntime(value: unknown): Record<string, unknown> {
