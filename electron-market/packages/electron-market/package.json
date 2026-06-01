@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-market",
-  "version": "0.3.32",
+  "version": "0.3.33",
   "description": "Marketplace host runtime + admin panel for QPJoy electron apps. Embed in your Electron main process to install, sandbox, and update plugins from a local SPA on 127.0.0.1:23455. Formerly published as @qpjoy/electron-plugin.",
   "license": "UNLICENSED",
   "type": "commonjs",

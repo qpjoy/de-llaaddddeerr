@@ -892,18 +892,21 @@ export async function installDarwinWireGuardLaunchDaemon(input: {
     const script = `do shell script ${appleScriptString(shellCommand)} with administrator privileges`;
     const displayCommand = `osascript -e ${shellQuote(script)}`;
     const result = await execFileAsync('osascript', ['-e', script]);
-    const status = getDarwinWireGuardLaunchDaemonStatus(input);
+    const { status, tunnelStatus } = await waitForDarwinLaunchDaemonReady(input);
+    const tunnelActive = tunnelStatus?.active === true && (tunnelStatus.missingRoutes?.length ?? 0) === 0;
     return {
       ...status,
-      ok: status.loaded || status.installed,
+      ok: tunnelActive || status.running || status.loaded,
       command: displayCommand,
       routeLogPath: assets.routeLogPath,
       routeLogTail: readTextTail(assets.routeLogPath),
       stdout: result.stdout,
       stderr: result.stderr,
-      message: status.loaded
+      message: tunnelActive || status.running
         ? '已安装并启动 HDO WireGuard 系统守护。'
-        : '已安装 HDO WireGuard 系统守护，但 launchd 尚未报告运行状态。'
+        : (status.loaded
+            ? '已安装 HDO WireGuard 系统守护，正在等待 tunnel 就绪。'
+            : '已安装 HDO WireGuard 系统守护，但 launchd 尚未报告运行状态。')
     };
   } catch (err) {
     const status = getDarwinWireGuardLaunchDaemonStatus(input);
@@ -925,6 +928,32 @@ export async function installDarwinWireGuardLaunchDaemon(input: {
       }, err)
     };
   }
+}
+
+async function waitForDarwinLaunchDaemonReady(input: {
+  runtime: WireGuardConnectionRuntimeStatus;
+  configPath: string;
+}): Promise<{
+  status: WireGuardLaunchDaemonStatus;
+  tunnelStatus: WireGuardTunnelStatus | null;
+}> {
+  let status = getDarwinWireGuardLaunchDaemonStatus(input);
+  let tunnelStatus: WireGuardTunnelStatus | null = null;
+
+  for (let i = 0; i < 40; i += 1) {
+    status = getDarwinWireGuardLaunchDaemonStatus(input);
+    try {
+      tunnelStatus = getWireGuardTunnelStatus(input);
+    } catch {
+      tunnelStatus = null;
+    }
+    if (tunnelStatus?.active === true && (tunnelStatus.missingRoutes?.length ?? 0) === 0) {
+      return { status, tunnelStatus };
+    }
+    await sleep(i < 8 ? 250 : 500);
+  }
+
+  return { status, tunnelStatus };
 }
 
 export async function uninstallDarwinWireGuardLaunchDaemon(input: {
@@ -2728,6 +2757,10 @@ function isString(value: string | null): value is string {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function defaultWireGuardCommandName(): string {

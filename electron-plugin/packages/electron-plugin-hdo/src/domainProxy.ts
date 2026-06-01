@@ -8,6 +8,7 @@ export interface HdoSessionLike {
     proxyBypassRules?: string;
     pacScript?: string;
   }): Promise<void>;
+  forceReloadProxyConfig?(): Promise<void>;
 }
 
 export interface HdoDomainBinding {
@@ -44,6 +45,9 @@ export class HdoSessionDomainProxy {
     }
     const pacScript = renderPacDataUrl(this.port!, this.bindings.map((binding) => binding.domain));
     await this.session.setProxy({ mode: 'pac_script', pacScript });
+    await this.session.forceReloadProxyConfig?.().catch((err) => {
+      this.log?.warn('failed to reload HDO domain proxy config', { error: errorMessage(err) });
+    });
     this.applied = true;
     return result;
   }
@@ -67,6 +71,9 @@ export class HdoSessionDomainProxy {
     this.applied = false;
     await this.session.setProxy({ mode: 'direct' }).catch((err) => {
       this.log?.warn('failed to clear HDO domain proxy', { error: errorMessage(err) });
+    });
+    await this.session.forceReloadProxyConfig?.().catch((err) => {
+      this.log?.warn('failed to reload HDO domain proxy config after clear', { error: errorMessage(err) });
     });
   }
 

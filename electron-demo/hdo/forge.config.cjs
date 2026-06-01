@@ -12,6 +12,9 @@ const { spawnSync } = require('node:child_process');
 const { rmSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
+const { loadProjectEnv } = require('./src/env.cjs');
+
+loadProjectEnv({ appDir: __dirname });
 
 const isWindowsHost = process.platform === 'win32';
 const isMacHost = process.platform === 'darwin';

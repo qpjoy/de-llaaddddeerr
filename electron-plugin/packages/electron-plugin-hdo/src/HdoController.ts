@@ -390,7 +390,7 @@ export class HdoController {
     const baseUrl = normalizeBaseUrl(input.serverUrl);
     const relayMode =
       input.relayMode === undefined
-        ? normalizeRelayMode(this.settings.relayMode)
+        ? 'mesh-h2i'
         : normalizeRelayMode(input.relayMode);
     if (baseUrl) {
       this.updateSettings({ hdoControlBaseUrl: baseUrl, relayMode });
@@ -566,7 +566,7 @@ export class HdoController {
         ok: false,
         error: errorMessage(err)
       }));
-      wireGuardStatus = await this.waitForWireGuardState(true);
+      wireGuardStatus = await this.waitForWireGuardState(true, 32, 650);
     }
     this.emitEvent('relay-connected', {
       mode: 'anonymous',
@@ -701,7 +701,7 @@ export class HdoController {
           ok: false,
           error: errorMessage(err)
         }));
-        wireGuardStatus = await this.waitForWireGuardState(true);
+        wireGuardStatus = await this.waitForWireGuardState(true, 32, 650);
         if (!wireGuardStatus && preparedPeer?.overlayIp) {
           wireGuardStatus = this.wireGuardStatus();
         }

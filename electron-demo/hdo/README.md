@@ -62,8 +62,10 @@ from the registry rather than workspace file links.
 
 ```bash
 pnpm install
-QPJOY_HDO_SERVER=https://your-market-server.example.com pnpm package
-QPJOY_HDO_SERVER=https://your-market-server.example.com pnpm make:mac
+cp .env.example .env
+# edit .env, set QPJOY_HDO_SERVER
+pnpm package
+pnpm make:mac
 ```
 
 Outputs are written below `out/`. Unsigned local builds may need quarantine
@@ -80,7 +82,8 @@ Copy only this `electron-demo/hdo` directory to Windows, then run:
 
 ```powershell
 pnpm install
-$env:QPJOY_HDO_SERVER="https://your-market-server.example.com"
+copy .env.example .env
+# edit .env, set QPJOY_HDO_SERVER
 pnpm make:win
 ```
 
@@ -107,9 +110,10 @@ target OS.
 - App, market, and plugin releases are controlled by the release-plan API.
   For HDO app rollout, create a `game` target plan with `targetId=qpjoy-hdo`
   and the desired percentage or installId allowlist.
-- `QPJOY_HDO_SERVER` is written into `qpjoy-hdo.config.json` during packaging.
-  Use the same base URL as `electron-server` so the app can sync market data,
-  receive release plans, and report rollout status.
+- `QPJOY_HDO_SERVER` can be set in `electron-demo/hdo/.env` or as a process
+  env var. The `.env` value is written into `qpjoy-hdo.config.json` during
+  packaging. Use the same base URL as `electron-server` so the app can sync
+  market data, receive release plans, and report rollout status.
 - `pnpm-lock.yaml` should be committed in npm mode for reproducible installs.
 - `.dev-mode` and `.local-packs/` are local-only and ignored by git.
 - User data lives under:

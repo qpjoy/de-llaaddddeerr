@@ -146,7 +146,7 @@ async function ensureAnonymousConnected() {
   const wgActive = hdo.wireGuardStatus && hdo.wireGuardStatus.active === true;
   if (wgActive) return;
 
-  const serverUrl = serverInput.value.trim() || settings.hdoControlBaseUrl || status?.defaultServerUrl || '';
+  const serverUrl = serverInput.value.trim() || status?.defaultServerUrl || '';
   if (!serverUrl) {
     setConnectionCopy('需要配置服务地址', '请在高级功能中填写 HDO 服务地址，或使用已预置服务的安装包。');
     chip.textContent = '待配置';
@@ -171,7 +171,6 @@ async function runAnonymous(autoConnect, label = '重新连接') {
 }
 
 async function runAccount(autoConnect) {
-  persistInputs();
   const identifier = accountInput.value.trim();
   const password = passwordInput.value;
   if (!identifier || !password) {
@@ -181,10 +180,14 @@ async function runAccount(autoConnect) {
     return;
   }
 
+  const relayMode = accountPreferredRelayMode();
+  relayModeSelect.value = relayMode;
+  persistInputs();
+
   await runAction(autoConnect ? '登录并提速' : '同步账号配置', async () =>
     api.hdoAccountConnect({
       serverUrl: serverInput.value.trim(),
-      relayMode: normalizeRelayMode(relayModeSelect.value),
+      relayMode,
       identifier,
       password,
       autoConnect,
@@ -201,6 +204,12 @@ async function runAction(label, fn) {
   try {
     const result = await fn();
     writeOutput(publicJson(result));
+    if (shouldWaitForTunnel(result)) {
+      setConnectionCopy('正在完成连接', '已确认系统权限，正在等待线路启动。');
+      chip.textContent = '连接中';
+      chip.className = 'status-chip status-chip--warn';
+      await waitForTunnelReady();
+    }
     await refreshStatus(false);
     scheduleStatusRefresh(false, 1200);
   } catch (err) {
@@ -214,14 +223,47 @@ async function runAction(label, fn) {
   }
 }
 
+async function waitForTunnelReady(timeoutMs = 14_000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    await delay(900);
+    const status = await refreshStatus(false);
+    if (status?.hdo?.wireGuardStatus?.active === true) return true;
+  }
+  return false;
+}
+
+function shouldWaitForTunnel(result) {
+  if (!result || typeof result !== 'object') return false;
+  if (result.wireGuardStatus && result.wireGuardStatus.active === true) return false;
+  const connected = result.connected;
+  const peer = result.peer;
+  return Boolean(
+    result.ok !== false &&
+    peer &&
+    typeof peer === 'object' &&
+    peer.configPath &&
+    connected &&
+    typeof connected === 'object' &&
+    connected.ok !== false
+  );
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function refreshStatus(showOutput = true) {
   try {
     const status = await api.hdoStatus();
     lastStatus = status;
     const hdo = status.hdo || {};
     const settings = hdo.settings || {};
-    if (!serverInput.value && (settings.hdoControlBaseUrl || status.defaultServerUrl)) {
-      serverInput.value = settings.hdoControlBaseUrl || status.defaultServerUrl;
+    const configuredServerUrl = status.defaultServerUrl
+      ? (settings.hdoControlBaseUrl || status.defaultServerUrl)
+      : '';
+    if (!serverInput.value && configuredServerUrl) {
+      serverInput.value = configuredServerUrl;
     }
     relayModeSelect.value = normalizeRelayMode(settings.relayMode || relayModeSelect.value);
 
@@ -331,6 +373,11 @@ function normalizeRelayMode(value) {
   if (value === 'mesh-h2i' || value === 'mesh-service-p2p') return 'mesh-h2i';
   if (value === 'mesh-h2h' || value === 'mesh-p2p') return 'mesh-h2h';
   return 'mesh-hdi';
+}
+
+function accountPreferredRelayMode() {
+  const current = normalizeRelayMode(relayModeSelect.value);
+  return current === 'mesh-h2h' ? 'mesh-h2h' : 'mesh-h2i';
 }
 
 function relayModeLabel(value) {

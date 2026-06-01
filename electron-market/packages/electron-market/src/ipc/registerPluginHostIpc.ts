@@ -159,6 +159,7 @@ async function applyCoordinatedSessionProxy(
       tunnelProxy
     })
   });
+  await deps.session.forceReloadProxyConfig?.().catch(() => undefined);
   return {
     hdoDomainProxy: {
       proxy: hdoProxy,

@@ -18,6 +18,9 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const { app, BrowserWindow, Menu, ipcMain, session, shell } = require('electron');
+const { loadProjectEnv } = require('./env.cjs');
+
+loadProjectEnv({ appDir: path.resolve(__dirname, '..') });
 
 let createElectronMarket;
 try {
@@ -365,7 +368,7 @@ if (gotSingleInstanceLock) {
         { app, ipcMain, session: session.defaultSession },
         {
           adminPort: 23455,
-          serverBaseUrl: defaultHdoServerUrl() || undefined,
+          serverBaseUrl: defaultHdoServerUrl() || null,
           // Sync runs every 10 min once a server URL is configured. In a
           // fresh packaged build the host runs offline and the SettingsPage lets
           // the user point at their own server (local docker, prod, …).
@@ -443,6 +446,11 @@ if (gotSingleInstanceLock) {
 
       ipcMain.handle('demo:hdo-open-test-url', async (_e, value) => {
         const url = normalizeTestUrl(value);
+        const domainProxy = await hdoCall('applyDomainProxyFromManifest').catch((err) => ({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err)
+        }));
+        await session.defaultSession.forceReloadProxyConfig?.().catch(() => undefined);
         const w = trackChildWindow(new BrowserWindow({
           width: 1000,
           height: 720,
@@ -450,12 +458,13 @@ if (gotSingleInstanceLock) {
           autoHideMenuBar: true,
           title: 'HDO Internal Access',
           webPreferences: {
+            session: session.defaultSession,
             contextIsolation: true,
             sandbox: true
           }
         }));
         await w.loadURL(url);
-        return { ok: true, url };
+        return { ok: true, url, domainProxy };
       });
 
       ipcMain.handle('demo:hdo-stop', async () => {

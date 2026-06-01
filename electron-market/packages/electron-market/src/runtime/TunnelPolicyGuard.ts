@@ -4,6 +4,7 @@ import type { Session } from 'electron';
 import type { PluginRuntime } from './PluginRuntime';
 
 const TUNNEL_PLUGIN_ID = 'qpjoy.electron-tunnel';
+const HDO_PLUGIN_ID = 'qpjoy.electron-plugin-hdo';
 const HTTP_URLS = ['http://*/*', 'https://*/*'];
 const CACHE_TTL_MS = 500;
 
@@ -108,6 +109,7 @@ function renderBlockedPage(url: string, decision: PolicyDecision): string {
 
 export class TunnelPolicyGuard {
   private snapshotCache: { value: PolicySnapshot | null; expiresAt: number } | null = null;
+  private hdoDomainsCache: { value: string[]; expiresAt: number } | null = null;
   private refreshInFlight: Promise<PolicySnapshot | null> | null = null;
   private started = false;
 
@@ -153,6 +155,9 @@ export class TunnelPolicyGuard {
     }
     if (this.alwaysAllowed(hostname)) {
       return { allowed: true, mode: 'none', reason: 'allowed' };
+    }
+    if (await this.hdoDomainAllowed(hostname)) {
+      return { allowed: true, mode: 'none', reason: 'allowed', matchedDomain: hostname };
     }
 
     const snapshot = await this.getSnapshot();
@@ -228,6 +233,35 @@ export class TunnelPolicyGuard {
   private alwaysAllowed(hostname: string): boolean {
     return (this.options.alwaysAllowHosts ?? []).some((domain) => domainMatches(hostname, domain));
   }
+
+  private async hdoDomainAllowed(hostname: string): Promise<boolean> {
+    const domains = await this.getHdoDomains();
+    return domains.some((domain) => domainMatches(hostname, domain));
+  }
+
+  private async getHdoDomains(): Promise<string[]> {
+    const now = Date.now();
+    if (this.hdoDomainsCache && this.hdoDomainsCache.expiresAt > now) return this.hdoDomainsCache.value;
+    const exposed = this.runtime.getExposed(HDO_PLUGIN_ID);
+    const snapshot = exposed?.snapshot;
+    if (typeof snapshot !== 'function') {
+      this.hdoDomainsCache = { value: [], expiresAt: now + CACHE_TTL_MS };
+      return [];
+    }
+    try {
+      const value = await snapshot();
+      const settings = plainObject(plainObject(value)?.settings);
+      const domainProxy = plainObject(settings?.domainProxy);
+      const domains = stringArray(domainProxy?.domains)
+        .map(normalizeDomain)
+        .filter((domain): domain is string => Boolean(domain));
+      this.hdoDomainsCache = { value: domains, expiresAt: Date.now() + CACHE_TTL_MS };
+      return domains;
+    } catch {
+      this.hdoDomainsCache = { value: [], expiresAt: Date.now() + CACHE_TTL_MS };
+      return [];
+    }
+  }
 }
 
 function isPolicySnapshot(value: unknown): value is PolicySnapshot {
@@ -239,4 +273,14 @@ function isPolicySnapshot(value: unknown): value is PolicySnapshot {
     && (status.mode === 'system-tun' || status.mode === 'app-global' || status.mode === 'app-rule')
     && Array.isArray(record.rules)
   );
+}
+
+function plainObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim() !== '') : [];
 }
