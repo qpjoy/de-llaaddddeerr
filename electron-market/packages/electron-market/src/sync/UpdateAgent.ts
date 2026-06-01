@@ -30,6 +30,15 @@ function hostMarketVersion(): string | null {
   }
 }
 
+function appReleaseId(name: string): string {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || name;
+}
+
 function delayMs(base: number, jitter: number): number {
   const offset = (Math.random() * 2 - 1) * jitter;
   return Math.max(60_000, base + offset);
@@ -115,9 +124,11 @@ export class UpdateAgent {
           'updates:v1',
           'plugin:apply-version',
           'plugin:rollback',
+          'app:update-notify',
           'restart:plugin'
         ],
         app: {
+          id: appReleaseId(this.opts.app.getName()),
           name: this.opts.app.getName(),
           version: this.opts.app.getVersion(),
           isPackaged: this.opts.app.isPackaged
@@ -186,6 +197,12 @@ export class UpdateAgent {
 
     if (action.targetKind === 'market') {
       this.markRestartRequired(action, 'market self update requires host app restart');
+      await this.report(action, installId, 'restart_required', null, { reason });
+      return 'restart_required';
+    }
+
+    if (action.targetKind === 'game') {
+      this.markRestartRequired(action, 'host app update requires installer update');
       await this.report(action, installId, 'restart_required', null, { reason });
       return 'restart_required';
     }

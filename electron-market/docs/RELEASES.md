@@ -40,6 +40,12 @@ version every client should run.
 `restart_required` for market self updates; a future bootstrap loader can apply
 the selected market version on next app boot.
 
+Standalone Electron apps, such as the packaged HDO client, use
+`targetKind: "game"` with a target id derived from the app name
+(`QPJoy HDO` → `qpjoy-hdo`). These plans participate in the same canary bucket
+and report `restart_required`, so the app can show an update prompt while the
+installer/update-loader remains app-specific.
+
 ## Admin API
 
 Server admin SPA exposes **发版** under `/admin/#/server/releases`.
@@ -94,4 +100,6 @@ Current safe default:
 - official installed plugins can be remotely switched between versions;
 - active plugins with `restartPolicy: app|system` are not hot-swapped and are
   recorded as restart-required;
-- market self updates are recorded as restart-required.
+- market self updates are recorded as restart-required;
+- standalone app updates are matched by app id/name and recorded as
+  restart-required.

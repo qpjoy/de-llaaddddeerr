@@ -1,14 +1,11 @@
 /**
- * QPJoy Demo — minimal Electron app that embeds the marketplace host.
+ * QPJoy HDO desktop client that embeds the marketplace host.
  *
  * What it does:
  *   1. Bootstraps `@qpjoy/electron-market`, seeding published tunnel plus the
  *      current local HDO plugin. NotYet and any other plugin installs via the
  *      marketplace UI like a real user.
- *   2. Opens a main BrowserWindow with a landing page (`src/index.html`)
- *      that has a single button → opens the marketplace admin panel at
- *      `http://127.0.0.1:23455` either in this same window (default) or
- *      a new window if the user prefers.
+ *   2. Opens a main BrowserWindow with a simple HDO connection page.
  *   3. Cleans up the host on app quit.
  *
  * Offline-friendly by design:
@@ -26,7 +23,7 @@ let createElectronMarket;
 try {
   ({ createElectronMarket } = require('@qpjoy/electron-market'));
 } catch (err) {
-  console.error('\n[electron-demo] failed to require @qpjoy/electron-market:');
+  console.error('\n[hdo] failed to require @qpjoy/electron-market:');
   console.error(`  ${err.message}\n`);
   console.error('Run `pnpm install` from electron-demo/hdo/.\n');
   process.exit(1);
@@ -34,6 +31,7 @@ try {
 
 const TUNNEL_ID = 'qpjoy.electron-tunnel';
 const HDO_ID = 'qpjoy.electron-plugin-hdo';
+const UPDATE_RESTART_REQUIRED_META = 'updates.restartRequired';
 
 let mainWindow = null;
 let host = null;
@@ -41,7 +39,7 @@ let isClosing = false;
 let hdoEventUnsubscribe = null;
 const childWindows = new Set();
 
-app.setAppUserModelId('dev.qpjoy.demo.hdo');
+app.setAppUserModelId('dev.qpjoy.hdo');
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
@@ -124,7 +122,7 @@ function pruneStaleSeedInstall(id, npm, expectedSourceDir) {
     const missingDependencies = missingPackageDependencies(installedPackageDir);
     if (missingDependencies.length > 0) {
       fs.rmSync(installPath, { recursive: true, force: true });
-      console.warn('[electron-demo] removed incomplete seed install:', {
+      console.warn('[hdo] removed incomplete seed install:', {
         id,
         installPath,
         missingDependencies
@@ -138,7 +136,7 @@ function pruneStaleSeedInstall(id, npm, expectedSourceDir) {
     const ownedCopy = installRoot && (installed === installRoot || installed.startsWith(installRoot + path.sep));
     if (ownedCopy) continue;
     fs.rmSync(installPath, { recursive: true, force: true });
-    console.warn('[electron-demo] removed stale seed install:', {
+    console.warn('[hdo] removed stale seed install:', {
       id,
       installPath,
       installed,
@@ -196,7 +194,7 @@ function refreshMarketplaceSelfRecord() {
       db.close();
     }
   } catch (err) {
-    console.warn('[electron-demo] failed to refresh marketplace self record:', err);
+    console.warn('[hdo] failed to refresh marketplace self record:', err);
   }
 }
 
@@ -206,14 +204,24 @@ function preparePackagedSeeds() {
   refreshMarketplaceSelfRecord();
 }
 
+function readJsonMeta(key) {
+  try {
+    const raw = host?.registry?.marketplaceDb().getMeta(key);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 function createMainWindow() {
   mainWindow = new BrowserWindow({
     width: 1100,
     height: 760,
     minWidth: 760,
     minHeight: 520,
-    backgroundColor: '#0d111a',
-    title: 'QPJoy HDO Demo',
+    backgroundColor: '#f5f7fb',
+    title: 'QPJoy HDO',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -278,22 +286,34 @@ function ensureHdoEventSubscription(exposed) {
   });
 }
 
-function demoDefaultHdoServerUrl() {
+function defaultHdoServerUrl() {
   return (
-    process.env.QPJOY_DEMO_HDO_SERVER ||
     process.env.QPJOY_HDO_SERVER ||
+    process.env.QPJOY_DEMO_HDO_SERVER ||
     process.env.QPJOY_MARKET_SERVER ||
+    packagedServerBaseUrl() ||
     ''
   );
 }
 
+function packagedServerBaseUrl() {
+  try {
+    const configPath = path.join(app.getAppPath(), 'qpjoy-hdo.config.json');
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const value = typeof config.serverBaseUrl === 'string' ? config.serverBaseUrl.trim() : '';
+    return value ? value.replace(/\/+$/, '') : '';
+  } catch {
+    return '';
+  }
+}
+
 function normalizeTestUrl(value) {
   const raw = typeof value === 'string' ? value.trim() : '';
-  if (!raw) throw new Error('test URL is required');
+  if (!raw) throw new Error('URL is required');
   const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`;
   const parsed = new URL(withScheme);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error('only http/https test URLs are supported');
+    throw new Error('only http/https URLs are supported');
   }
   return parsed.toString();
 }
@@ -318,7 +338,7 @@ async function quitGracefully(exitCode = 0) {
   try {
     await closeAppResources();
   } catch (err) {
-    console.warn('[electron-demo] host close error:', err);
+    console.warn('[hdo] host close error:', err);
   } finally {
     app.exit(exitCode);
   }
@@ -345,8 +365,9 @@ if (gotSingleInstanceLock) {
         { app, ipcMain, session: session.defaultSession },
         {
           adminPort: 23455,
+          serverBaseUrl: defaultHdoServerUrl() || undefined,
           // Sync runs every 10 min once a server URL is configured. In a
-          // fresh demo build the host runs offline and the SettingsPage lets
+          // fresh packaged build the host runs offline and the SettingsPage lets
           // the user point at their own server (local docker, prod, …).
           syncIntervalMs: 600_000,
           seedPlugins: [
@@ -393,8 +414,11 @@ if (gotSingleInstanceLock) {
       ipcMain.handle('demo:hdo-status', async () => {
         const snapshot = await hdoCall('snapshot');
         return {
-          defaultServerUrl: demoDefaultHdoServerUrl(),
+          defaultServerUrl: defaultHdoServerUrl(),
           auth: host.auth ? host.auth.state() : null,
+          updates: {
+            restartRequired: readJsonMeta(UPDATE_RESTART_REQUIRED_META)
+          },
           hdo: snapshot
         };
       });
@@ -402,8 +426,8 @@ if (gotSingleInstanceLock) {
       ipcMain.handle('demo:hdo-anonymous-connect', async (_e, payload) => {
         return hdoCall('anonymousConnect', {
           ...(payload && typeof payload === 'object' ? payload : {}),
-          appId: 'qpjoy-hdo-demo',
-          deviceLabel: 'QPJoy HDO Demo'
+          appId: 'qpjoy-hdo',
+          deviceLabel: 'QPJoy HDO'
         });
       });
 
@@ -424,7 +448,7 @@ if (gotSingleInstanceLock) {
           height: 720,
           backgroundColor: '#101827',
           autoHideMenuBar: true,
-          title: 'HDO Internal Test',
+          title: 'HDO Internal Access',
           webPreferences: {
             contextIsolation: true,
             sandbox: true
@@ -438,10 +462,20 @@ if (gotSingleInstanceLock) {
         return hdoCall('connectWireGuardPeer', { action: 'down' });
       });
 
+      ipcMain.handle('demo:check-updates', async () => {
+        if (!host.updateAgent) {
+          return {
+            outcome: 'skipped',
+            error: 'release server is not configured'
+          };
+        }
+        return host.updateAgent.run('manual');
+      });
+
       createMainWindow();
     })
     .catch((err) => {
-      console.error('[electron-demo] startup failed:', err);
+      console.error('[hdo] startup failed:', err);
       app.exit(1);
     });
 }

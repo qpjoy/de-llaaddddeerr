@@ -1,6 +1,6 @@
 # electron-demo/hdo
 
-Electron consumer app for HDO development and packaging. It supports two
+Electron consumer app for HDO delivery and packaging. It supports two
 dependency layouts:
 
 - `local`: used by `pnpm dev`; packs current workspace packages into
@@ -30,7 +30,7 @@ Windows x64, `pnpm install` should also install
 download every macOS/Linux/Windows engine.
 
 `@qpjoy/electron-plugin-notyet` and other plugins are installed through the
-marketplace UI at runtime. They are not bundled into this demo app.
+marketplace UI at runtime. They are not bundled into this app.
 
 ## Development
 
@@ -62,16 +62,16 @@ from the registry rather than workspace file links.
 
 ```bash
 pnpm install
-pnpm package
-pnpm make:mac
+QPJOY_HDO_SERVER=https://your-market-server.example.com pnpm package
+QPJOY_HDO_SERVER=https://your-market-server.example.com pnpm make:mac
 ```
 
 Outputs are written below `out/`. Unsigned local builds may need quarantine
 removed before opening:
 
 ```bash
-xattr -cr "out/QPJoy HDO Demo-darwin-arm64/QPJoy HDO Demo.app"
-open "out/QPJoy HDO Demo-darwin-arm64/QPJoy HDO Demo.app"
+xattr -cr "out/QPJoy HDO-darwin-arm64/QPJoy HDO.app"
+open "out/QPJoy HDO-darwin-arm64/QPJoy HDO.app"
 ```
 
 ## Package On Windows
@@ -80,6 +80,7 @@ Copy only this `electron-demo/hdo` directory to Windows, then run:
 
 ```powershell
 pnpm install
+$env:QPJOY_HDO_SERVER="https://your-market-server.example.com"
 pnpm make:win
 ```
 
@@ -92,7 +93,7 @@ running this on a clean Windows machine.
 Expected installer output:
 
 ```text
-out\make\squirrel.windows\x64\QPJoy HDO Demo-0.1.0 Setup.exe
+out\make\squirrel.windows\x64\QPJoy HDO-0.1.0 Setup.exe
 ```
 
 Do not copy `node_modules/` or `out/` between macOS and Windows. Native modules
@@ -103,9 +104,15 @@ target OS.
 
 - `forge.config.cjs` keeps `asar: false` so the marketplace seed plugin can be
   installed from a real filesystem directory.
+- App, market, and plugin releases are controlled by the release-plan API.
+  For HDO app rollout, create a `game` target plan with `targetId=qpjoy-hdo`
+  and the desired percentage or installId allowlist.
+- `QPJOY_HDO_SERVER` is written into `qpjoy-hdo.config.json` during packaging.
+  Use the same base URL as `electron-server` so the app can sync market data,
+  receive release plans, and report rollout status.
 - `pnpm-lock.yaml` should be committed in npm mode for reproducible installs.
 - `.dev-mode` and `.local-packs/` are local-only and ignored by git.
 - User data lives under:
-  - macOS: `~/Library/Application Support/QPJoy HDO Demo/`
-  - Windows: `%APPDATA%\QPJoy HDO Demo\`
-  - Linux: `~/.config/QPJoy HDO Demo/`
+  - macOS: `~/Library/Application Support/QPJoy HDO/`
+  - Windows: `%APPDATA%\QPJoy HDO\`
+  - Linux: `~/.config/QPJoy HDO/`

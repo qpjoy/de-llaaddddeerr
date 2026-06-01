@@ -71,6 +71,7 @@ export interface UpdateCheckRequest {
   arch: string;
   capabilities: string[];
   app: {
+    id?: string | null;
     name: string;
     version: string;
     isPackaged: boolean;

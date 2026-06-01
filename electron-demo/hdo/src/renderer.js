@@ -1,5 +1,58 @@
-// Demo landing page logic. It drives the market host through a tiny app-level API.
-const api = window.qpjoyDemo;
+const api = window.qpjoyHdo || window.qpjoyDemo;
+
+const serverInput = document.getElementById('hdo-server-url');
+const internalUrlInput = document.getElementById('hdo-test-url');
+const relayModeSelect = document.getElementById('hdo-relay-mode');
+const accountInput = document.getElementById('hdo-account-id');
+const passwordInput = document.getElementById('hdo-account-password');
+const output = document.getElementById('hdo-output');
+const chip = document.getElementById('hdo-status-chip');
+const modeEl = document.getElementById('hdo-mode');
+const overlayEl = document.getElementById('hdo-overlay');
+const wgEl = document.getElementById('hdo-wg');
+const titleEl = document.getElementById('hdo-connection-title');
+const detailEl = document.getElementById('hdo-status-detail');
+const serverLabelEl = document.getElementById('hdo-server-label');
+const loginHintEl = document.getElementById('hdo-login-hint');
+const updateBannerEl = document.getElementById('hdo-update-banner');
+const updateTextEl = document.getElementById('hdo-update-text');
+
+const buttons = [
+  document.getElementById('btn-hdo-account-connect'),
+  document.getElementById('btn-hdo-account-config'),
+  document.getElementById('btn-hdo-anon-connect'),
+  document.getElementById('btn-hdo-anon-config'),
+  document.getElementById('btn-hdo-save-settings'),
+  document.getElementById('btn-hdo-open-test'),
+  document.getElementById('btn-hdo-stop'),
+  document.getElementById('btn-hdo-refresh'),
+  document.getElementById('btn-hdo-check-updates'),
+  document.getElementById('btn-market'),
+  document.getElementById('btn-market-new')
+].filter(Boolean);
+
+const storageKeys = {
+  serverUrl: 'qpjoy.hdo.serverUrl',
+  internalUrl: 'qpjoy.hdo.internalUrl',
+  relayMode: 'qpjoy.hdo.relayMode',
+  accountId: 'qpjoy.hdo.accountId'
+};
+
+const legacyStorageKeys = {
+  serverUrl: 'qpjoy.hdoDemo.serverUrl',
+  internalUrl: 'qpjoy.hdoDemo.testUrl',
+  relayMode: 'qpjoy.hdoDemo.relayMode',
+  accountId: 'qpjoy.hdoDemo.accountId'
+};
+
+let pendingStatusRefresh = null;
+let lastStatus = null;
+let autoAnonymousStarted = false;
+
+serverInput.value = readSaved('serverUrl') || '';
+internalUrlInput.value = readSaved('internalUrl') || 'http://internal.mingxi.com';
+relayModeSelect.value = normalizeRelayMode(readSaved('relayMode'));
+accountInput.value = readSaved('accountId') || '';
 
 document.getElementById('btn-market').addEventListener('click', () => {
   void api.openMarket();
@@ -9,50 +62,16 @@ document.getElementById('btn-market-new').addEventListener('click', () => {
   void api.openMarketInNewWindow();
 });
 
-const serverInput = document.getElementById('hdo-server-url');
-const testUrlInput = document.getElementById('hdo-test-url');
-const relayModeSelect = document.getElementById('hdo-relay-mode');
-const accountInput = document.getElementById('hdo-account-id');
-const passwordInput = document.getElementById('hdo-account-password');
-const output = document.getElementById('hdo-output');
-const chip = document.getElementById('hdo-status-chip');
-const modeEl = document.getElementById('hdo-mode');
-const overlayEl = document.getElementById('hdo-overlay');
-const wgEl = document.getElementById('hdo-wg');
-const buttons = [
-  document.getElementById('btn-hdo-account-connect'),
-  document.getElementById('btn-hdo-account-config'),
-  document.getElementById('btn-hdo-anon-connect'),
-  document.getElementById('btn-hdo-anon-config'),
-  document.getElementById('btn-hdo-save-settings'),
-  document.getElementById('btn-hdo-open-test'),
-  document.getElementById('btn-hdo-stop'),
-  document.getElementById('btn-hdo-refresh')
-];
-let pendingStatusRefresh = null;
-
-const savedServer = localStorage.getItem('qpjoy.hdoDemo.serverUrl');
-if (savedServer) serverInput.value = savedServer;
-testUrlInput.value = localStorage.getItem('qpjoy.hdoDemo.testUrl') || 'http://internal.mingxi.com';
-relayModeSelect.value = normalizeRelayMode(localStorage.getItem('qpjoy.hdoDemo.relayMode'));
-accountInput.value = localStorage.getItem('qpjoy.hdoDemo.accountId') || '';
-
 document.getElementById('btn-hdo-refresh').addEventListener('click', () => {
   void refreshStatus();
 });
 
-if (typeof api.onHdoEvent === 'function') {
-  api.onHdoEvent(() => {
-    scheduleStatusRefresh(false, 300);
-  });
-}
-
 document.getElementById('btn-hdo-anon-connect').addEventListener('click', () => {
-  void runAnonymous(true);
+  void runAnonymous(true, '重新连接');
 });
 
 document.getElementById('btn-hdo-anon-config').addEventListener('click', () => {
-  void runAnonymous(false);
+  void runAnonymous(false, '同步匿名配置');
 });
 
 document.getElementById('btn-hdo-save-settings').addEventListener('click', () => {
@@ -74,9 +93,9 @@ document.getElementById('btn-hdo-account-config').addEventListener('click', () =
 });
 
 document.getElementById('btn-hdo-open-test').addEventListener('click', () => {
-  void runAction('打开测试域名', async () => {
+  void runAction('打开内部地址', async () => {
     persistInputs();
-    return api.hdoOpenTestUrl(testUrlInput.value.trim());
+    return api.hdoOpenTestUrl(internalUrlInput.value.trim());
   });
 });
 
@@ -84,15 +103,31 @@ document.getElementById('btn-hdo-stop').addEventListener('click', () => {
   void runAction('停止 HDO', async () => api.hdoStop());
 });
 
+document.getElementById('btn-hdo-check-updates').addEventListener('click', () => {
+  void runAction('检查更新', async () => api.checkUpdates());
+});
+
 serverInput.addEventListener('change', persistInputs);
-testUrlInput.addEventListener('change', persistInputs);
+internalUrlInput.addEventListener('change', persistInputs);
 relayModeSelect.addEventListener('change', persistInputs);
 accountInput.addEventListener('change', persistInputs);
 
-void refreshStatus();
+if (typeof api.onHdoEvent === 'function') {
+  api.onHdoEvent(() => {
+    scheduleStatusRefresh(false, 300);
+  });
+}
+
+void boot();
 setInterval(() => {
   if (!document.hidden) scheduleStatusRefresh(false, 0);
 }, 5000);
+
+async function boot() {
+  await refreshStatus(false);
+  await ensureAnonymousConnected();
+  scheduleStatusRefresh(false, 1200);
+}
 
 function scheduleStatusRefresh(showOutput = false, delay = 400) {
   if (pendingStatusRefresh) clearTimeout(pendingStatusRefresh);
@@ -102,29 +137,58 @@ function scheduleStatusRefresh(showOutput = false, delay = 400) {
   }, delay);
 }
 
-async function runAnonymous(autoConnect) {
+async function ensureAnonymousConnected() {
+  if (autoAnonymousStarted) return;
+  autoAnonymousStarted = true;
+  const status = lastStatus || await refreshStatus(false);
+  const hdo = status?.hdo || {};
+  const settings = hdo.settings || {};
+  const wgActive = hdo.wireGuardStatus && hdo.wireGuardStatus.active === true;
+  if (wgActive) return;
+
+  const serverUrl = serverInput.value.trim() || settings.hdoControlBaseUrl || status?.defaultServerUrl || '';
+  if (!serverUrl) {
+    setConnectionCopy('需要配置服务地址', '请在高级功能中填写 HDO 服务地址，或使用已预置服务的安装包。');
+    chip.textContent = '待配置';
+    chip.className = 'status-chip status-chip--warn';
+    return;
+  }
+  serverInput.value = serverUrl;
+  await runAnonymous(true, '启用匿名访问');
+}
+
+async function runAnonymous(autoConnect, label = '重新连接') {
   persistInputs();
   const serverUrl = serverInput.value.trim();
-  await runAction(autoConnect ? '匿名连接 / 更新' : '只拉匿名配置', async () =>
+  await runAction(label, async () =>
     api.hdoAnonymousConnect({
       serverUrl,
       relayMode: normalizeRelayMode(relayModeSelect.value),
       autoConnect,
-      testUrl: testUrlInput.value.trim()
+      testUrl: internalUrlInput.value.trim()
     })
   );
 }
 
 async function runAccount(autoConnect) {
   persistInputs();
-  await runAction(autoConnect ? '账号连接 / 更新' : '只拉账号配置', async () =>
+  const identifier = accountInput.value.trim();
+  const password = passwordInput.value;
+  if (!identifier || !password) {
+    writeOutput('请输入用户名和密码。', true);
+    chip.textContent = '待登录';
+    chip.className = 'status-chip status-chip--warn';
+    return;
+  }
+
+  await runAction(autoConnect ? '登录并提速' : '同步账号配置', async () =>
     api.hdoAccountConnect({
       serverUrl: serverInput.value.trim(),
       relayMode: normalizeRelayMode(relayModeSelect.value),
-      identifier: accountInput.value.trim() || null,
-      password: passwordInput.value || null,
+      identifier,
+      password,
       autoConnect,
-      testUrl: testUrlInput.value.trim()
+      testUrl: internalUrlInput.value.trim()
     })
   );
 }
@@ -140,9 +204,11 @@ async function runAction(label, fn) {
     await refreshStatus(false);
     scheduleStatusRefresh(false, 1200);
   } catch (err) {
-    writeOutput(err instanceof Error ? err.message : String(err), true);
-    chip.textContent = '出错';
+    const message = err instanceof Error ? err.message : String(err);
+    writeOutput(message, true);
+    chip.textContent = '处理失败';
     chip.className = 'status-chip status-chip--bad';
+    setConnectionCopy('连接未完成', message);
   } finally {
     setBusy(false);
   }
@@ -151,23 +217,48 @@ async function runAction(label, fn) {
 async function refreshStatus(showOutput = true) {
   try {
     const status = await api.hdoStatus();
+    lastStatus = status;
     const hdo = status.hdo || {};
     const settings = hdo.settings || {};
     if (!serverInput.value && (settings.hdoControlBaseUrl || status.defaultServerUrl)) {
       serverInput.value = settings.hdoControlBaseUrl || status.defaultServerUrl;
     }
     relayModeSelect.value = normalizeRelayMode(settings.relayMode || relayModeSelect.value);
+
     const peer = settings.wireGuardPeer || {};
     const anonymous = settings.anonymous || {};
     const wgActive = hdo.wireGuardStatus && hdo.wireGuardStatus.active === true;
     const session = status.auth || hdo.session || {};
     const loggedIn = Boolean(session.user || session.loggedIn);
-    const mode = anonymous.mode === 'anonymous' ? '匿名' : (loggedIn ? '账号' : '未登录');
+    const mode = loggedIn ? '账号线路' : (anonymous.mode === 'anonymous' ? '匿名线路' : '准备中');
+    const lastError = hdo.lastError || peer.lastError || null;
+    renderUpdateBanner(status.updates?.restartRequired || null);
+
     modeEl.textContent = mode;
     overlayEl.textContent = peer.overlayIp || '-';
-    wgEl.textContent = wgActive ? '运行中' : '未运行';
-    chip.textContent = wgActive ? `${mode}已连接` : `${mode}待连接`;
-    chip.className = `status-chip ${wgActive ? 'status-chip--ok' : ''}`;
+    wgEl.textContent = wgActive ? '已连接' : '未连接';
+    serverLabelEl.textContent = serverInput.value ? '服务已配置' : '服务未配置';
+    loginHintEl.textContent = loggedIn
+      ? '已使用账号配置，后续会优先保持专属线路。'
+      : '未登录也可以使用匿名线路；登录后会自动切换到账号线路。';
+
+    if (wgActive) {
+      chip.textContent = '已连接';
+      chip.className = 'status-chip status-chip--ok';
+      setConnectionCopy(
+        loggedIn ? '专属线路已开启' : '匿名线路已开启',
+        loggedIn ? '已拉取账号配置，正在使用更稳定的访问路径。' : '当前可直接访问；登录后会切换到你的专属配置。'
+      );
+    } else if (lastError) {
+      chip.textContent = '需处理';
+      chip.className = 'status-chip status-chip--bad';
+      setConnectionCopy('连接未完成', String(lastError));
+    } else {
+      chip.textContent = '准备中';
+      chip.className = 'status-chip status-chip--warn';
+      setConnectionCopy('正在准备安全访问', '系统会优先尝试匿名线路，登录后可获得更快线路。');
+    }
+
     if (showOutput) {
       writeOutput(publicJson({
         loggedIn,
@@ -182,27 +273,58 @@ async function refreshStatus(showOutput = true) {
           updatedAt: anonymous.updatedAt
         } : null,
         domainProxy: settings.domainProxy || null,
-        lastError: hdo.lastError || peer.lastError || null
+        lastError
       }));
     }
+    return status;
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
     chip.textContent = '未就绪';
     chip.className = 'status-chip status-chip--bad';
-    writeOutput(err instanceof Error ? err.message : String(err), true);
+    setConnectionCopy('服务未就绪', message);
+    writeOutput(message, true);
+    return null;
   }
 }
 
+function renderUpdateBanner(update) {
+  if (!update || typeof update !== 'object') {
+    updateBannerEl.hidden = true;
+    updateTextEl.textContent = '';
+    return;
+  }
+  const targetKind = update.targetKind || 'app';
+  const target = update.targetId || 'QPJoy HDO';
+  const version = update.toVersion ? ` ${update.toVersion}` : '';
+  updateTextEl.textContent =
+    targetKind === 'game'
+      ? `QPJoy HDO${version} 已进入当前设备的发布范围，重启或安装新版后完成更新。`
+      : `${target}${version} 需要重启后完成更新。`;
+  updateBannerEl.hidden = false;
+}
+
 function persistInputs() {
-  localStorage.setItem('qpjoy.hdoDemo.serverUrl', serverInput.value.trim());
-  localStorage.setItem('qpjoy.hdoDemo.testUrl', testUrlInput.value.trim());
-  localStorage.setItem('qpjoy.hdoDemo.relayMode', normalizeRelayMode(relayModeSelect.value));
-  localStorage.setItem('qpjoy.hdoDemo.accountId', accountInput.value.trim());
+  localStorage.setItem(storageKeys.serverUrl, serverInput.value.trim());
+  localStorage.setItem(storageKeys.internalUrl, internalUrlInput.value.trim());
+  localStorage.setItem(storageKeys.relayMode, normalizeRelayMode(relayModeSelect.value));
+  localStorage.setItem(storageKeys.accountId, accountInput.value.trim());
+}
+
+function readSaved(key) {
+  const value = localStorage.getItem(storageKeys[key]);
+  if (value) return value;
+  return localStorage.getItem(legacyStorageKeys[key]);
 }
 
 function setBusy(busy) {
   buttons.forEach((button) => {
     button.disabled = busy;
   });
+}
+
+function setConnectionCopy(title, detail) {
+  titleEl.textContent = title;
+  detailEl.textContent = detail;
 }
 
 function normalizeRelayMode(value) {

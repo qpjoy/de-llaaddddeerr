@@ -3,197 +3,111 @@
 <head>
   <meta charset="utf-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';" />
-  <title>QPJoy HDO Demo</title>
+  <title>QPJoy HDO</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <div class="aurora" aria-hidden="true"></div>
-  <div class="grid-bg" aria-hidden="true"></div>
-
-  <main class="container">
-    <header class="hero">
-      <div class="logo" aria-hidden="true">
-        <span class="logo-ring"></span>
-        <span class="logo-planet"></span>
-        <span class="logo-shimmer"></span>
-        <span class="logo-glow"></span>
-      </div>
-      <h1 class="hero-title">
-        <span class="hero-title-main">QPJoy</span>
-        <span class="hero-title-sub">HDO Demo</span>
-      </h1>
-      <p class="hero-tagline">Electron · 插件即服务 · 离线优先</p>
-      <div class="hero-meta">
-        <span class="pill pill--ok">
-          <span class="pill-dot"></span>
-          <span>市场已就绪</span>
-        </span>
-        <span class="pill" id="pill-server">
-          <span class="pill-dot pill-dot--idle"></span>
-          <span id="pill-server-text">本机离线运行</span>
-        </span>
-      </div>
-    </header>
-
-    <section class="cta-row">
-      <button id="btn-market" class="cta cta--primary">
-        <span class="cta-icon">
-          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
-            <path fill="currentColor" d="M12 2 3 7v6c0 5.5 3.8 9.4 9 11 5.2-1.6 9-5.5 9-11V7l-9-5Zm0 2.3 7 3.9V13c0 4.4-3 7.7-7 9.1-4-1.4-7-4.7-7-9.1V8.2l7-3.9Zm-1 4.7v3h-3v2h3v3h2v-3h3v-2h-3V9h-2Z"/>
-          </svg>
-        </span>
-        <span class="cta-body">
-          <span class="cta-title">进入插件市场</span>
-          <span class="cta-hint">浏览、安装、管理已发布插件</span>
-        </span>
-        <span class="cta-arrow">→</span>
-      </button>
-      <button id="btn-market-new" class="cta cta--ghost">
-        <span class="cta-icon">
-          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
-            <path fill="currentColor" d="M14 3v2h3.6l-9.3 9.3 1.4 1.4L19 6.4V10h2V3h-7ZM5 5h6V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6h-2v6H5V5Z"/>
-          </svg>
-        </span>
-        <span class="cta-body">
-          <span class="cta-title">独立窗口打开</span>
-          <span class="cta-hint">不替换本页</span>
-        </span>
-      </button>
-    </section>
-
-    <section class="flow-panel">
-      <div class="flow-head">
+  <main class="app-shell">
+    <section class="status-panel">
+      <div class="topbar">
         <div>
-          <p class="kicker">HDO Relay</p>
-          <h2>账号或匿名进入内网</h2>
+          <div class="brand">QPJoy HDO</div>
+          <div class="brand-subtitle" id="hdo-server-label">正在准备服务</div>
         </div>
         <span class="status-chip" id="hdo-status-chip">检测中</span>
       </div>
 
-      <div class="flow-grid">
-        <label class="field">
-          <span>Domestic 服务器</span>
-          <input id="hdo-server-url" type="url" placeholder="http://116.62.51.154:8080" />
-        </label>
-        <label class="field">
-          <span>测试域名</span>
-          <input id="hdo-test-url" type="text" placeholder="http://internal.mingxi.com" />
-        </label>
-      </div>
-
-      <div class="flow-grid flow-grid--settings">
-        <label class="field">
-          <span>Relay 模式</span>
-          <select id="hdo-relay-mode">
-            <option value="mesh-hdi">Mesh HDI</option>
-            <option value="mesh-h2i">Mesh H2I</option>
-            <option value="mesh-h2h">Mesh H2H</option>
-          </select>
-        </label>
-        <div class="field field--inline-action">
-          <span>配置</span>
-          <button id="btn-hdo-save-settings" class="small-action">保存配置</button>
-        </div>
-      </div>
-
-      <div class="account-box">
-        <div class="flow-grid flow-grid--account">
-          <label class="field">
-            <span>账号</span>
-            <input id="hdo-account-id" type="text" autocomplete="username" placeholder="username / email / phone" />
-          </label>
-          <label class="field">
-            <span>密码</span>
-            <input id="hdo-account-password" type="password" autocomplete="current-password" placeholder="password" />
-          </label>
-        </div>
-        <div class="flow-actions flow-actions--account">
-          <button id="btn-hdo-account-connect" class="small-action small-action--primary">账号连接 / 更新</button>
-          <button id="btn-hdo-account-config" class="small-action">只拉账号配置</button>
-        </div>
-      </div>
-
-      <div class="flow-actions">
-        <button id="btn-hdo-anon-connect" class="small-action small-action--primary">匿名连接 / 更新</button>
-        <button id="btn-hdo-anon-config" class="small-action">只拉匿名配置</button>
-        <button id="btn-hdo-open-test" class="small-action">打开测试域名</button>
-        <button id="btn-hdo-stop" class="small-action">停止 HDO</button>
-        <button id="btn-hdo-refresh" class="small-action small-action--quiet">刷新状态</button>
-      </div>
-
-      <div class="flow-status">
+      <div class="connection">
         <div>
-          <span class="status-label">模式</span>
+          <h1 id="hdo-connection-title">正在启用安全访问</h1>
+          <p id="hdo-status-detail">打开后会自动进入匿名线路，无需先登录。</p>
+        </div>
+        <div class="connection-actions">
+          <button id="btn-hdo-anon-connect" class="button button--primary">重新连接</button>
+          <button id="btn-hdo-refresh" class="button">刷新</button>
+        </div>
+      </div>
+
+      <div class="metric-grid">
+        <div class="metric">
+          <span>当前线路</span>
           <strong id="hdo-mode">-</strong>
         </div>
-        <div>
-          <span class="status-label">Overlay</span>
+        <div class="metric">
+          <span>分配地址</span>
           <strong id="hdo-overlay">-</strong>
         </div>
-        <div>
-          <span class="status-label">WireGuard</span>
+        <div class="metric">
+          <span>连接状态</span>
           <strong id="hdo-wg">-</strong>
         </div>
       </div>
 
-      <pre id="hdo-output" class="console">等待操作...</pre>
+      <div class="update-banner" id="hdo-update-banner" hidden>
+        <strong>发现新版本</strong>
+        <span id="hdo-update-text">请按提示完成更新。</span>
+      </div>
     </section>
 
-    <section class="info-grid">
-      <article class="info-card">
-        <div class="info-card-head">
-          <div class="info-icon info-icon--bootstrap">🚀</div>
-          <h3>启动即用</h3>
+    <section class="login-panel">
+      <div class="section-head">
+        <div>
+          <h2>登录后速度提升</h2>
+          <p>登录会拉取你的专属配置，优先使用更稳定的线路和 H2I 加速。</p>
         </div>
-        <p>
-          App 启动时自动 bootstrap <code>tunnel</code> 和 <code>HDO</code>，
-          本地即可打开客户端与服务器面板。
-        </p>
-      </article>
+      </div>
 
-      <article class="info-card">
-        <div class="info-card-head">
-          <div class="info-icon info-icon--cloud">☁️</div>
-          <h3>离线优先</h3>
-        </div>
-        <p>
-          没配 marketplace 服务器也能跑：卡片列表由 host 包内置的
-          seed-index 驱动，全程本地，无错误日志。
-        </p>
-      </article>
+      <div class="login-grid">
+        <label class="field">
+          <span>用户名</span>
+          <input id="hdo-account-id" type="text" autocomplete="username" placeholder="用户名 / 邮箱 / 手机号" />
+        </label>
+        <label class="field">
+          <span>密码</span>
+          <input id="hdo-account-password" type="password" autocomplete="current-password" placeholder="请输入密码" />
+        </label>
+        <button id="btn-hdo-account-connect" class="button button--accent">登录并提速</button>
+      </div>
 
-      <article class="info-card">
-        <div class="info-card-head">
-          <div class="info-icon info-icon--shop">🛒</div>
-          <h3>自助安装</h3>
-        </div>
-        <p>
-          其它插件——如 <code>NotYet 悬浮咨询球</code>——仍通过
-          <em>插件市场 UI</em> 由用户自助安装，真实生产场景。
-        </p>
-      </article>
-
-      <article class="info-card">
-        <div class="info-card-head">
-          <div class="info-icon info-icon--setting">⚙️</div>
-          <h3>运行时切换</h3>
-        </div>
-        <p>
-          要启用远端同步，进 <em>市场 → 设置</em> 填入服务器 URL。
-          设置持久化于本地 DB，重启保留。
-        </p>
-      </article>
+      <p class="login-hint" id="hdo-login-hint">未登录也可以使用匿名线路；登录后会自动切换到账号线路。</p>
     </section>
 
-    <footer class="footnote">
-      <div class="footnote-row">
-        <span class="footnote-label">市场管理</span>
-        <code>http://127.0.0.1:23455</code>
+    <details class="advanced-panel">
+      <summary>高级功能</summary>
+      <div class="advanced-content">
+        <div class="advanced-grid">
+          <label class="field">
+            <span>HDO 服务地址</span>
+            <input id="hdo-server-url" type="url" placeholder="https://hdo.example.com" />
+          </label>
+          <label class="field">
+            <span>内部地址</span>
+            <input id="hdo-test-url" type="text" placeholder="http://internal.mingxi.com" />
+          </label>
+          <label class="field">
+            <span>Relay 模式</span>
+            <select id="hdo-relay-mode">
+              <option value="mesh-hdi">Mesh HDI</option>
+              <option value="mesh-h2i">Mesh H2I</option>
+              <option value="mesh-h2h">Mesh H2H</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="advanced-actions">
+          <button id="btn-hdo-save-settings" class="button">保存配置</button>
+          <button id="btn-hdo-anon-config" class="button">同步匿名配置</button>
+          <button id="btn-hdo-account-config" class="button">同步账号配置</button>
+          <button id="btn-hdo-open-test" class="button">打开内部地址</button>
+          <button id="btn-hdo-check-updates" class="button">检查更新</button>
+          <button id="btn-hdo-stop" class="button button--danger">停止 HDO</button>
+          <button id="btn-market-new" class="button">打开市场管理</button>
+          <button id="btn-market" class="button">进入市场页面</button>
+        </div>
+
+        <pre id="hdo-output" class="console">等待连接状态...</pre>
       </div>
-      <div class="footnote-row footnote-row--dim">
-        <span>hdo · electron-forge · asar:false · 离线 seed</span>
-      </div>
-    </footer>
+    </details>
   </main>
 
   <script src="renderer.js"></script>

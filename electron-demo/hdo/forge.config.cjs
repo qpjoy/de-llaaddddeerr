@@ -9,7 +9,7 @@
  * sits on the real filesystem and require resolution + symlinks just work.
  */
 const { spawnSync } = require('node:child_process');
-const { rmSync } = require('node:fs');
+const { rmSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 
@@ -49,6 +49,11 @@ function canCreateDmg() {
 }
 
 const includeDmg = canCreateDmg();
+const packagedServerBaseUrl = (
+  process.env.QPJOY_HDO_SERVER ||
+  process.env.QPJOY_MARKET_SERVER ||
+  ''
+).trim().replace(/\/+$/, '');
 
 const makers = [
   // ── macOS ────────────────────────────────────────────────────────
@@ -78,22 +83,30 @@ if (wantsSquirrel) {
     name: '@electron-forge/maker-squirrel',
     platforms: ['win32'],
     config: {
-      name: 'qpjoy-hdo-demo',
+      name: 'qpjoy-hdo',
       authors: 'QPJoy',
-      description: 'QPJoy HDO demo app'
+      description: 'QPJoy HDO desktop client'
     }
   });
 }
 
 module.exports = {
   packagerConfig: {
-    name: 'QPJoy HDO Demo',
-    executableName: 'qpjoy-hdo-demo',
+    name: 'QPJoy HDO',
+    executableName: 'qpjoy-hdo',
     asar: false,
-    appBundleId: 'dev.qpjoy.demo.hdo',
+    appBundleId: 'dev.qpjoy.hdo',
     win32metadata: {
       CompanyName: 'QPJoy',
-      ProductName: 'QPJoy HDO Demo'
+      ProductName: 'QPJoy HDO'
+    }
+  },
+  hooks: {
+    packageAfterCopy: async (_config, buildPath) => {
+      writeFileSync(
+        join(buildPath, 'qpjoy-hdo.config.json'),
+        JSON.stringify({ serverBaseUrl: packagedServerBaseUrl }, null, 2)
+      );
     }
   },
   rebuildConfig: {},

@@ -33,6 +33,7 @@ interface UpdateCheckBody {
   arch?: string | null;
   capabilities?: string[];
   app?: {
+    id?: string | null;
     name?: string | null;
     version?: string | null;
     isPackaged?: boolean | null;
@@ -203,13 +204,16 @@ async function resolveActionForPlan(
   if (!clientMatchesPlan(plan, body, user?.id ?? null, subject)) return null;
 
   const current = currentStateForPlan(plan, body);
+  if (plan.targetKind === 'game' && !gameTargetMatches(plan, body)) {
+    return null;
+  }
   if (current.version === plan.targetVersion) return null;
 
-  if (plan.targetKind !== 'market' && !canApplyPluginAction(plan, body)) {
+  if (plan.targetKind === 'plugin' && !canApplyPluginAction(plan, body)) {
     if (plan.mode !== 'manual') return null;
   }
 
-  const plugin = plan.targetKind === 'market' ? null : storage.getPlugin(plan.targetId);
+  const plugin = plan.targetKind === 'plugin' ? storage.getPlugin(plan.targetId) : null;
   if (plugin && !(await pluginVisible(plugin, user ?? null))) return null;
   const version = plugin ? findPluginVersion(plugin, plan.targetVersion) : null;
   if (plugin && !version) return null;
@@ -243,6 +247,12 @@ async function resolveActionForPlan(
       ? `switch ${plan.targetId} from ${current.version} to ${plan.targetVersion}`
       : `install ${plan.targetId}@${plan.targetVersion}`
   };
+}
+
+function gameTargetMatches(plan: ReleasePlan, body: UpdateCheckBody): boolean {
+  const appId = cleanString(body.app?.id);
+  const appName = cleanString(body.app?.name);
+  return plan.targetId === appId || plan.targetId === appName || plan.npm === appId || plan.npm === appName;
 }
 
 function clientMatchesPlan(
@@ -285,6 +295,9 @@ function clientMatchesPlan(
 function currentStateForPlan(plan: ReleasePlan, body: UpdateCheckBody): { version: string | null; npm: string | null } {
   if (plan.targetKind === 'market') {
     return { version: cleanString(body.market?.version), npm: plan.npm };
+  }
+  if (plan.targetKind === 'game') {
+    return { version: cleanString(body.app?.version), npm: plan.npm };
   }
   const plugins = Array.isArray(body.plugins) ? body.plugins : [];
   const row = plugins.find((plugin) =>
