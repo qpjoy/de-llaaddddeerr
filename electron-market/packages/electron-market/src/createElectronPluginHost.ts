@@ -17,6 +17,7 @@ import { registerPluginHostIpc } from './ipc/registerPluginHostIpc';
 import { RemoteClient } from './sync/RemoteClient';
 import { RemoteSyncJob } from './sync/RemoteSyncJob';
 import { AuthService } from './sync/AuthService';
+import { UpdateAgent } from './sync/UpdateAgent';
 import { missingPluginPackageDependencies } from './dependencyHealth';
 
 /**
@@ -230,6 +231,8 @@ export interface ElectronPluginHostHandle {
   /** Null if `serverBaseUrl` wasn't provided. */
   remoteSync: RemoteSyncJob | null;
   /** Null if `serverBaseUrl` wasn't provided. */
+  updateAgent: UpdateAgent | null;
+  /** Null if `serverBaseUrl` wasn't provided. */
   auth: AuthService | null;
   /** Plugin ids that were configured as seeds. Used by the UI to render
    * "重新预装" instead of "安装" for them. */
@@ -358,6 +361,7 @@ export function createElectronPluginHost(
   let remoteClient: RemoteClient | null = null;
   let auth: AuthService | null = null;
   let remoteSync: RemoteSyncJob | null = null;
+  let updateAgent: UpdateAgent | null = null;
   if (serverBaseUrl) {
     remoteClient = new RemoteClient({
       baseUrl: serverBaseUrl,
@@ -379,6 +383,15 @@ export function createElectronPluginHost(
     remoteSync = new RemoteSyncJob({
       db: marketplaceDb,
       client: remoteClient,
+      intervalMs: options.syncIntervalMs
+    });
+    updateAgent = new UpdateAgent({
+      db: marketplaceDb,
+      client: remoteClient,
+      registry,
+      store,
+      runtime,
+      app: host.app,
       intervalMs: options.syncIntervalMs
     });
   }
@@ -803,6 +816,7 @@ export function createElectronPluginHost(
     // Kick off remote sync *after* activation so a slow server can't block
     // user-visible boot. The job runs immediately then schedules itself.
     remoteSync?.start();
+    updateAgent?.start();
 
     resolveReady();
   });
@@ -814,6 +828,7 @@ export function createElectronPluginHost(
     runtime,
     admin,
     remoteSync,
+    updateAgent,
     auth,
     seedIds,
     reseed: reseedOne,
@@ -821,6 +836,7 @@ export function createElectronPluginHost(
     ready,
     async close() {
       remoteSync?.stop();
+      updateAgent?.stop();
       tunnelPolicyGuard.stop();
       runtime.setNetworkPolicyEvaluator(null);
       await admin.stop();

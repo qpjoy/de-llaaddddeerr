@@ -152,6 +152,45 @@ user. For `suduku`, the server keeps the best score per user and mode.
 }
 ```
 
+## `POST /api/v1/updates/check`
+
+Desktop hosts call this when `serverBaseUrl` is configured. The request carries
+the stable `installId`, platform/arch, app + market versions, capabilities, and
+installed plugin states. The server evaluates active release plans and returns
+only actions the client cohort should see.
+
+```json
+{
+  "serverTime": "2026-06-01T00:00:00.000Z",
+  "subject": "4b7c...",
+  "actions": [
+    {
+      "actionId": "plan-id:0.1.34",
+      "planId": "plan-id",
+      "targetKind": "plugin",
+      "targetId": "qpjoy.electron-plugin-hdo",
+      "pluginId": "qpjoy.electron-plugin-hdo",
+      "npm": "@qpjoy/electron-plugin-hdo",
+      "fromVersion": "0.1.33",
+      "toVersion": "0.1.34",
+      "mode": "auto",
+      "restartPolicy": "plugin",
+      "channel": "canary",
+      "tarballUrl": "https://registry.npmjs.org/...",
+      "autoGrant": "manifest",
+      "autoActivate": true,
+      "force": false
+    }
+  ]
+}
+```
+
+## `POST /api/v1/updates/report`
+
+Clients report `seen`, `applied`, `failed`, `skipped`,
+`restart_required`, or `awaiting_grant` for each returned action. Reports are
+stored server-side and shown in the admin release page.
+
 ## `GET /api/v1/games/:gameId/leaderboard?mode=9x9&limit=20`
 
 Returns the server high-score ranking. With `DATABASE_URL` set, the backing

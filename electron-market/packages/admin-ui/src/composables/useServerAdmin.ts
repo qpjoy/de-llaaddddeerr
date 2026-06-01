@@ -48,6 +48,65 @@ export interface SchedulerStatus {
   nextRunAt: string | null;
 }
 
+export type ReleaseTargetKind = 'market' | 'plugin' | 'game';
+export type ReleaseMode = 'manual' | 'notify' | 'auto' | 'force' | 'silent';
+export type RestartPolicy = 'none' | 'plugin' | 'app' | 'system';
+export type ReleasePlanState = 'draft' | 'active' | 'paused' | 'completed' | 'rolled_back';
+
+export interface ReleaseRolloutRule {
+  percentage: number;
+  seed?: string | null;
+  userIds?: string[];
+  deviceIds?: string[];
+  installIds?: string[];
+  platforms?: string[];
+  archs?: string[];
+  currentVersions?: string[];
+}
+
+export interface ReleasePlan {
+  id: string;
+  name: string;
+  targetKind: ReleaseTargetKind;
+  targetId: string;
+  npm: string | null;
+  targetVersion: string;
+  fallbackVersion: string | null;
+  channel: string;
+  mode: ReleaseMode;
+  restartPolicy: RestartPolicy;
+  state: ReleasePlanState;
+  rollout: ReleaseRolloutRule;
+  autoGrant: boolean | 'manifest' | string[] | null;
+  autoActivate: boolean;
+  notes: string | null;
+  createdByUserId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpdateReport {
+  id: string;
+  planId: string;
+  actionId: string | null;
+  targetId: string;
+  targetKind: ReleaseTargetKind;
+  installId: string | null;
+  deviceId: string | null;
+  userId: string | null;
+  fromVersion: string | null;
+  toVersion: string;
+  status: 'seen' | 'applied' | 'failed' | 'skipped' | 'restart_required' | 'awaiting_grant';
+  error: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface ReleasePlansPayload {
+  plans: ReleasePlan[];
+  reports: UpdateReport[];
+}
+
 export interface HdoMeshGroupRow {
   id: string;
   name: string;
@@ -415,6 +474,57 @@ export function useServerAdmin() {
       if (params.targetId) qs.set('targetId', params.targetId);
       const suffix = qs.toString() ? '?' + qs.toString() : '';
       return api<AuditEntry[]>('/admin/audit' + suffix);
+    },
+
+    async listReleasePlans(): Promise<ReleasePlansPayload> {
+      return api<ReleasePlansPayload>('/admin/release-plans');
+    },
+
+    async saveReleasePlan(input: {
+      id?: string;
+      name?: string;
+      targetKind: ReleaseTargetKind;
+      targetId: string;
+      npm?: string | null;
+      targetVersion: string;
+      fallbackVersion?: string | null;
+      channel?: string;
+      mode: ReleaseMode;
+      restartPolicy: RestartPolicy;
+      state?: ReleasePlanState;
+      rollout: ReleaseRolloutRule;
+      autoGrant?: boolean | 'manifest' | string[] | null;
+      autoActivate?: boolean;
+      notes?: string | null;
+    }): Promise<ReleasePlan> {
+      const out = await api<ReleasePlan>('/admin/release-plans', {
+        method: 'POST',
+        body: JSON.stringify(input)
+      });
+      toast(`已保存发版计划：${out.name}`);
+      return out;
+    },
+
+    async setReleasePlanState(id: string, state: ReleasePlanState): Promise<ReleasePlan> {
+      const out = await api<ReleasePlan>(`/admin/release-plans/${encodeURIComponent(id)}/state`, {
+        method: 'POST',
+        body: JSON.stringify({ state })
+      });
+      toast(`发版计划已${state === 'active' ? '激活' : '切换状态'}`);
+      return out;
+    },
+
+    async listUpdateReports(params: {
+      planId?: string;
+      targetId?: string;
+      limit?: number;
+    } = {}): Promise<UpdateReport[]> {
+      const qs = new URLSearchParams();
+      if (params.planId) qs.set('planId', params.planId);
+      if (params.targetId) qs.set('targetId', params.targetId);
+      if (params.limit) qs.set('limit', String(params.limit));
+      const suffix = qs.toString() ? '?' + qs.toString() : '';
+      return api<UpdateReport[]>('/admin/release-reports' + suffix);
     },
 
     async getHdoOverview(): Promise<HdoOverview> {

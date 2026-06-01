@@ -54,6 +54,85 @@ export interface AuthTokens {
   refreshExpiresAt: string;
 }
 
+export interface ClientPluginState {
+  id: string;
+  npm: string | null;
+  name: string | null;
+  version: string | null;
+  state: string;
+  manifest: Record<string, unknown> | null;
+  health?: Record<string, unknown> | null;
+}
+
+export interface UpdateCheckRequest {
+  installId: string;
+  deviceId?: string | null;
+  platform: string;
+  arch: string;
+  capabilities: string[];
+  app: {
+    name: string;
+    version: string;
+    isPackaged: boolean;
+  };
+  market: {
+    version: string | null;
+  };
+  plugins: ClientPluginState[];
+}
+
+export type UpdateActionMode = 'manual' | 'notify' | 'auto' | 'force' | 'silent';
+export type UpdateRestartPolicy = 'none' | 'plugin' | 'app' | 'system';
+export type UpdateTargetKind = 'market' | 'plugin' | 'game';
+export type UpdateReportStatus =
+  | 'seen'
+  | 'applied'
+  | 'failed'
+  | 'skipped'
+  | 'restart_required'
+  | 'awaiting_grant';
+
+export interface UpdateAction {
+  actionId: string;
+  planId: string;
+  targetKind: UpdateTargetKind;
+  targetId: string;
+  pluginId: string | null;
+  npm: string | null;
+  fromVersion: string | null;
+  toVersion: string;
+  mode: UpdateActionMode;
+  restartPolicy: UpdateRestartPolicy;
+  channel: string;
+  tarballUrl: string | null;
+  manifestChecksum: string | null;
+  tarballChecksum: string | null;
+  autoGrant: boolean | 'manifest' | string[] | null;
+  autoActivate: boolean;
+  force: boolean;
+  reason: string;
+}
+
+export interface UpdateCheckResponse {
+  serverTime: string;
+  subject: string;
+  actions: UpdateAction[];
+}
+
+export interface UpdateReportRequest {
+  planId: string;
+  actionId?: string | null;
+  targetId: string;
+  targetKind: UpdateTargetKind;
+  installId?: string | null;
+  deviceId?: string | null;
+  fromVersion?: string | null;
+  toVersion: string;
+  status: UpdateReportStatus;
+  error?: string | null;
+  metadata?: Record<string, unknown> | null;
+}
+
 export interface PublicUser {
   id: string;
   username: string | null;
@@ -148,6 +227,20 @@ export class RemoteClient {
       `/api/v1/plugins/${encodeURIComponent(input.pluginId)}/download`,
       { method: 'POST', body: JSON.stringify({ version: input.version }) }
     );
+  }
+
+  async checkUpdates(input: UpdateCheckRequest): Promise<UpdateCheckResponse> {
+    return this.json('/api/v1/updates/check', {
+      method: 'POST',
+      body: JSON.stringify(input)
+    });
+  }
+
+  async reportUpdate(input: UpdateReportRequest): Promise<void> {
+    await this.request('/api/v1/updates/report', {
+      method: 'POST',
+      body: JSON.stringify(input)
+    }).catch(() => undefined);
   }
 
   /* ─── auth ──────────────────────────────────────────────────────────── */

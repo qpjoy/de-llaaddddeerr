@@ -11,6 +11,7 @@ import ServerHdoPage from 'src/pages/ServerHdoPage.vue';
 import ServerTunnelPage from 'src/pages/ServerTunnelPage.vue';
 import ServerUsersPage from 'src/pages/ServerUsersPage.vue';
 import ServerAuditPage from 'src/pages/ServerAuditPage.vue';
+import ServerReleasesPage from 'src/pages/ServerReleasesPage.vue';
 
 const routes: RouteRecordRaw[] = [
   {
@@ -27,6 +28,7 @@ const routes: RouteRecordRaw[] = [
       // by URL — useful when the same bundle is iframed from elsewhere too.
       { path: 'server/hdo', name: 'server-hdo', component: ServerHdoPage },
       { path: 'server/tunnel', name: 'server-tunnel', component: ServerTunnelPage },
+      { path: 'server/releases', name: 'server-releases', component: ServerReleasesPage },
       { path: 'server/users', name: 'server-users', component: ServerUsersPage },
       { path: 'server/audit', name: 'server-audit', component: ServerAuditPage }
     ]
