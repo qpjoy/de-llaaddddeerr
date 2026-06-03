@@ -341,14 +341,34 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       reply.code(403);
       return { error: 'device is disabled or kicked from all active mesh groups' };
     }
-    const preferredOverlayIp =
-      normalizeOverlayIp(asOptionalString(body.overlayIp)) ??
-      normalizeOverlayIp(existing?.overlayIp ?? null);
+    const addressPlan = addressPlanForMeshAccess(deviceMeshAccess);
+    const existingOverlayIp = normalizeOverlayIp(existing?.overlayIp ?? null);
+    const requestedOverlayIp = normalizeOverlayIp(asOptionalString(body.overlayIp));
+    const publicKeyChanged = Boolean(existing?.publicKey && publicKey && existing.publicKey !== publicKey);
+    const preferredOverlayIp = publicKeyChanged ? null : (requestedOverlayIp ?? existingOverlayIp);
     const overlayIp = publicKey
-      ? allocateDeviceOverlayIp(devices, id, addressPlanForMeshAccess(deviceMeshAccess).userCidr, preferredOverlayIp)
+      ? allocateDeviceOverlayIp(devices, id, addressPlan.userCidr, preferredOverlayIp, overlayAllocationHistoryIps(
+          devices,
+          addressPlan.userCidr,
+          publicKeyChanged ? [existingOverlayIp, requestedOverlayIp] : []
+        ))
       : preferredOverlayIp;
     const metadataInput = asPlainObject(body.metadata);
-    const metadata = metadataInput ? { ...(existing?.metadata ?? {}), ...metadataInput } : existing?.metadata ?? null;
+    const overlayIpHistory = nextOverlayIpHistory(existing?.metadata ?? null, [
+      existingOverlayIp,
+      requestedOverlayIp,
+      overlayIp
+    ]);
+    const metadata = {
+      ...(existing?.metadata ?? {}),
+      ...(metadataInput ?? {}),
+      overlayIpHistory,
+      wireGuard: {
+        ...(asPlainObject(existing?.metadata?.wireGuard) ?? {}),
+        ...(asPlainObject(metadataInput?.wireGuard) ?? {}),
+        overlayIpHistory
+      }
+    };
     const device = await hdoStore.upsertDevice({
       id,
       userId: req.currentUser!.id,
