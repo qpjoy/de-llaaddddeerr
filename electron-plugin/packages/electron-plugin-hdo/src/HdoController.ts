@@ -552,9 +552,11 @@ export class HdoController {
         lastError =
           'manifest 中缺少 domestic WireGuard 公钥或 endpoint；请在服务器 HDO 管理页给 domestic 节点 metadata.wireGuard 填入 publicKey/listenPort。';
       } else {
+        const directPeers = directPeersFromManifest(manifest, overlayIp);
         const routeCidrs = uniqueStrings([
           ...domestic.routeCidrs,
-          ...manifestOverlayRouteCidrs(manifest, overlayIp)
+          ...manifestOverlayRouteCidrs(manifest, overlayIp),
+          ...windowsH2iDirectPeerAllowedIps(relayMode, directPeers)
         ]);
         const exclusionCidrs = localCidrsForAllowedIpExclusion(routeProbe, routeCidrs);
         let allowedIps = excludeLocalRoutesFromAllowedIps(routeCidrs, exclusionCidrs);
@@ -569,7 +571,7 @@ export class HdoController {
           domesticPublicKey: domestic.publicKey,
           domesticEndpoint: domestic.endpoint,
           allowedIps,
-          directPeers: relayMode === 'mesh-hdi' ? [] : directPeersFromManifest(manifest, overlayIp),
+          directPeers: clientDirectPeersForPlatform(relayMode, directPeers),
           persistentKeepalive: 25
         });
         configPath = this.writeWireGuardProfile(config);
@@ -907,9 +909,12 @@ export class HdoController {
         lastError =
           'manifest 中缺少 domestic WireGuard 公钥或 endpoint；请在服务器 HDO 管理页给 domestic 节点 metadata.wireGuard 填入 publicKey/listenPort。';
       } else {
+        const activeRelayMode = normalizeRelayMode(this.settings.relayMode);
+        const directPeers = directPeersFromManifest(manifest, overlayIp);
         const routeCidrs = uniqueStrings([
           ...domestic.routeCidrs,
-          ...manifestOverlayRouteCidrs(manifest, overlayIp)
+          ...manifestOverlayRouteCidrs(manifest, overlayIp),
+          ...windowsH2iDirectPeerAllowedIps(activeRelayMode, directPeers)
         ]);
         const exclusionCidrs = localCidrsForAllowedIpExclusion(routeProbe, routeCidrs);
         let allowedIps = excludeLocalRoutesFromAllowedIps(
@@ -927,9 +932,7 @@ export class HdoController {
           domesticPublicKey: domestic.publicKey,
           domesticEndpoint: domestic.endpoint,
           allowedIps,
-          directPeers: normalizeRelayMode(this.settings.relayMode) === 'mesh-hdi'
-            ? []
-            : directPeersFromManifest(manifest, overlayIp),
+          directPeers: clientDirectPeersForPlatform(activeRelayMode, directPeers),
           persistentKeepalive: 25
         });
         configPath = this.writeWireGuardProfile(config);
@@ -2442,6 +2445,30 @@ function directPeersFromManifest(manifest: Record<string, unknown>, ownOverlayIp
       persistentKeepalive: 25
     }];
   });
+}
+
+type HdoClientDirectPeer = ReturnType<typeof directPeersFromManifest>[number];
+
+function clientDirectPeersForPlatform(
+  relayMode: HdoRelayMode,
+  directPeers: HdoClientDirectPeer[]
+): HdoClientDirectPeer[] {
+  if (relayMode === 'mesh-hdi') return [];
+  if (process.platform === 'win32' && relayMode === 'mesh-h2i') return [];
+  return directPeers;
+}
+
+function windowsH2iDirectPeerAllowedIps(
+  relayMode: HdoRelayMode,
+  directPeers: HdoClientDirectPeer[]
+): string[] {
+  if (process.platform !== 'win32' || relayMode !== 'mesh-h2i') return [];
+  return uniqueStrings(
+    directPeers
+      .flatMap((peer) => peer.allowedIps)
+      .map((cidr) => normalizeCidr(cidr) ?? cidr)
+      .filter((cidr) => cidr.includes('/'))
+  );
 }
 
 function domainBindingsFromManifest(manifest: Record<string, unknown>): HdoDomainBinding[] {
