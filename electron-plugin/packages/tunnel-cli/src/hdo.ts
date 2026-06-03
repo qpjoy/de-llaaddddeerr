@@ -249,7 +249,9 @@ async function enrollCommand(args: string[], refreshOnly: boolean): Promise<void
   const manifest = await apiJson(serverUrl, auth.accessToken, `/api/v1/hdo/manifest/${encodeURIComponent(deviceId)}`, {
     method: 'GET',
   });
-  const runtime = hdoRuntimeFromManifest(manifest, registered, keys.privateKey);
+  const runtime = hdoRuntimeFromManifest(manifest, registered, keys.privateKey, {
+    allowEndpointlessDirectPeers: direct.directListener,
+  });
   writeWireGuardConfig(configPath, renderHdoClientWireGuardConfig({
     privateKey: runtime.privateKey,
     address: runtime.address,
@@ -659,7 +661,11 @@ function resolveDirectEndpoint(
   };
 }
 
-function directPeersFromManifest(wireGuard: Record<string, unknown>, ownOverlayIp: string): WireGuardPeer[] {
+function directPeersFromManifest(
+  wireGuard: Record<string, unknown>,
+  ownOverlayIp: string,
+  options: { allowEndpointlessDirectPeers?: boolean } = {},
+): WireGuardPeer[] {
   const ownIp = ownOverlayIp.split('/')[0] || ownOverlayIp;
   const rows = Array.isArray(wireGuard.directPeers) ? wireGuard.directPeers : [];
   return rows.flatMap((item) => {
@@ -669,11 +675,13 @@ function directPeersFromManifest(wireGuard: Record<string, unknown>, ownOverlayI
     const overlayIp = stringField(row.overlayIp);
     if (!publicKey || !overlayIp || overlayIp === ownIp) return [];
     const allowedIps = stringArray(row.allowedIps);
+    const endpoint = stringField(row.endpoint);
+    if (!endpoint && options.allowEndpointlessDirectPeers !== true) return [];
     const peer: WireGuardPeer = {
       name: `HDO Direct ${stringField(row.label) ?? stringField(row.id) ?? overlayIp}`,
       publicKey,
       allowedIps: allowedIps.length ? allowedIps : [`${overlayIp}/32`],
-      endpoint: stringField(row.endpoint),
+      endpoint,
       persistentKeepalive: 25,
     };
     return [peer];
@@ -738,6 +746,7 @@ function hdoRuntimeFromManifest(
   manifest: unknown,
   registered: unknown,
   privateKey: string,
+  options: { allowEndpointlessDirectPeers?: boolean } = {},
 ): {
   privateKey: string;
   address: string;
@@ -781,7 +790,7 @@ function hdoRuntimeFromManifest(
     domesticPublicKey,
     domesticEndpoint,
     allowedIps,
-    directPeers: directPeersFromManifest(wireGuard, overlayIp),
+    directPeers: directPeersFromManifest(wireGuard, overlayIp, options),
     generation: numberField(root.generation),
   };
 }

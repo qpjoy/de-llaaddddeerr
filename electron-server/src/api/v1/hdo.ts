@@ -2807,7 +2807,12 @@ function wireGuardDirectPeerSummaries(
     asOptionalBoolean(currentWireGuard?.directListener) === true;
   if (!currentPrefersDirect) return [];
   const currentOverlayIp = normalizeOverlayIp(current.overlayIp);
-  const currentExplicitEndpoint = wireGuardExplicitEndpointFromMetadata(currentWireGuard);
+  const currentDirectExplicitlyDisabled =
+    asOptionalBoolean(currentWireGuard?.directListener) === false &&
+    asOptionalBoolean(currentWireGuard?.acceptDirectPeers) === false;
+  const currentExplicitEndpoint = currentDirectExplicitlyDisabled
+    ? null
+    : wireGuardExplicitEndpointFromMetadata(currentWireGuard);
   const serviceTargetHosts = new Set(
     services
       .map((row) => normalizeOverlayIp(row.targetHost))
@@ -2817,6 +2822,13 @@ function wireGuardDirectPeerSummaries(
   const currentCanAcceptH2iDirect = relayMode === 'mesh-h2i' && currentIsServiceTarget
     ? Boolean(currentExplicitEndpoint)
     : currentIsServiceTarget;
+  const peerOverlayIpCounts = new Map<string, number>();
+  devices.forEach((row) => {
+    if (row.id === current.id || !row.publicKey) return;
+    const overlayIp = normalizeOverlayIp(row.overlayIp);
+    if (!overlayIp) return;
+    peerOverlayIpCounts.set(overlayIp, (peerOverlayIpCounts.get(overlayIp) ?? 0) + 1);
+  });
 
   return devices
     .filter((row) => row.id !== current.id)
@@ -2824,10 +2836,16 @@ function wireGuardDirectPeerSummaries(
       const publicKey = row.publicKey;
       const overlayIp = normalizeOverlayIp(row.overlayIp);
       if (!publicKey || !overlayIp) return null;
+      if ((peerOverlayIpCounts.get(overlayIp) ?? 0) > 1) return null;
       const peerIsServiceTarget = serviceTargetHosts.has(overlayIp);
       if (relayMode === 'mesh-h2i' && !peerIsServiceTarget && !currentIsServiceTarget) return null;
       const wireGuard = wireGuardMetadataFromDevice(row);
-      const explicitEndpoint = wireGuardExplicitEndpointFromMetadata(wireGuard);
+      const peerDirectExplicitlyDisabled =
+        asOptionalBoolean(wireGuard?.directListener) === false &&
+        asOptionalBoolean(wireGuard?.acceptDirectPeers) === false;
+      const explicitEndpoint = peerDirectExplicitlyDisabled
+        ? null
+        : wireGuardExplicitEndpointFromMetadata(wireGuard);
       const endpoint = explicitEndpoint ?? (relayMode === 'mesh-h2h' ? wireGuardObservedEndpointFromMetadata(wireGuard) : null);
       const peerPrefersDirect = asOptionalBoolean(wireGuard?.preferDirectPeers) === true;
       const peerAcceptsDirect =

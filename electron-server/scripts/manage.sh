@@ -544,6 +544,145 @@ cmd_psql() {
   "${DC[@]}" exec postgres psql -U "${PG_USER:-qpjoy}" -d "${PG_DB:-qpjoy_market}"
 }
 
+psql_market() {
+  check_docker
+  "${DC[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U "${PG_USER:-qpjoy}" -d "${PG_DB:-qpjoy_market}" "$@"
+}
+
+cmd_hdo_device_conflicts() {
+  say "checking duplicate HDO overlay IPs"
+  psql_market <<'SQL'
+SELECT
+  overlay_ip,
+  count(*) AS count,
+  array_agg(id ORDER BY updated_at DESC) AS devices
+FROM hdo_devices
+WHERE overlay_ip IS NOT NULL
+GROUP BY overlay_ip
+HAVING count(*) > 1
+ORDER BY overlay_ip;
+SQL
+}
+
+cmd_hdo_reset_devices() {
+  local keep_ip="${HDO_KEEP_INTERNAL_IP:-100.89.0.12}" assume_yes=0 sync_domestic=1 confirm
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --keep-ip|--keep-overlay-ip)
+        keep_ip="${2:-}"
+        [ -n "$keep_ip" ] || die "$1 requires an IP"
+        shift 2
+        ;;
+      --yes|-y)
+        assume_yes=1
+        shift
+        ;;
+      --no-sync-domestic)
+        sync_domestic=0
+        shift
+        ;;
+      -h|--help)
+        cat <<EOF
+Usage:
+  $0 hdo-reset-devices [--keep-ip 100.89.0.12] [--yes] [--no-sync-domestic]
+
+Deletes every HDO device except the device using --keep-ip, then bumps
+hdo_control_state.generation so manifests refresh. Server configuration tables
+such as hdo_nodes, hdo_services, hdo_profiles, mesh memberships, and users are
+left untouched. By default it also runs HDO domestic peer sync/repair so live
+hdo-home peers stop carrying stale /32 entries.
+
+Related:
+  $0 hdo-device-conflicts
+EOF
+        return 0
+        ;;
+      *) die "unknown hdo-reset-devices option: $1" ;;
+    esac
+  done
+
+  [[ "$keep_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid --keep-ip: $keep_ip"
+  warn "this will delete HDO devices except overlay_ip=$keep_ip."
+  warn "subscription artifacts, device mesh states, plugin states and device tasks will be cascade-deleted."
+  warn "hdo_nodes, hdo_services, hdo_profiles, mesh memberships and users are preserved."
+
+  say "current rows for keep IP"
+  psql_market -v keep_ip="$keep_ip" <<'SQL'
+SELECT id, label, platform, public_key, overlay_ip, status, updated_at
+FROM hdo_devices
+WHERE overlay_ip = :'keep_ip'::inet
+ORDER BY updated_at DESC;
+SQL
+
+  say "reset preview"
+  psql_market -v keep_ip="$keep_ip" <<'SQL'
+SELECT count(*) AS devices_to_delete
+FROM hdo_devices
+WHERE overlay_ip IS DISTINCT FROM :'keep_ip'::inet;
+
+SELECT overlay_ip, count(*) AS duplicate_count, array_agg(id ORDER BY updated_at DESC) AS devices
+FROM hdo_devices
+WHERE overlay_ip IS NOT NULL
+GROUP BY overlay_ip
+HAVING count(*) > 1
+ORDER BY overlay_ip;
+SQL
+
+  if [ "$assume_yes" -ne 1 ]; then
+    read -r -p "Type 'HDO-RESET-DEVICES' to confirm: " confirm
+    [ "$confirm" = "HDO-RESET-DEVICES" ] || die "aborted"
+  fi
+
+  say "deleting HDO devices except $keep_ip and bumping generation"
+  psql_market -v keep_ip="$keep_ip" <<'SQL'
+SELECT CASE
+  WHEN EXISTS (SELECT 1 FROM hdo_devices WHERE overlay_ip = :'keep_ip'::inet)
+  THEN 'true'
+  ELSE 'false'
+END AS keep_exists
+\gset
+
+\if :keep_exists
+\else
+\echo No hdo_devices row found for keep IP :keep_ip
+\quit 1
+\endif
+
+BEGIN;
+
+WITH deleted AS (
+  DELETE FROM hdo_devices
+  WHERE overlay_ip IS DISTINCT FROM :'keep_ip'::inet
+  RETURNING id
+)
+SELECT count(*) AS deleted_devices FROM deleted;
+
+UPDATE hdo_control_state
+SET generation = generation + 1,
+    updated_at = now()
+WHERE id = 1
+RETURNING generation, updated_at;
+
+COMMIT;
+SQL
+  ok "HDO devices reset."
+  if [ "$sync_domestic" -eq 1 ]; then
+    if [ -f "$HDO_GATEWAY_SCRIPT" ]; then
+      ensure_hdo_gateway_runner_token
+      say "syncing Domestic hdo-home peers after reset"
+      if bash "$HDO_GATEWAY_SCRIPT" sync-and-repair-domestic --server-url "$HDO_GATEWAY_SERVER_URL"; then
+        ok "Domestic hdo-home peers synced."
+      else
+        warn "Domestic sync failed. Run manually after fixing HDO runner/token:"
+        warn "  HDO_GATEWAY_RUNNER_TOKEN=<token> $HDO_GATEWAY_SCRIPT sync-and-repair-domestic --server-url '$HDO_GATEWAY_SERVER_URL'"
+      fi
+    else
+      warn "HDO gateway script not found, skipped Domestic peer sync: $HDO_GATEWAY_SCRIPT"
+    fi
+  fi
+  ok "Refresh/re-enroll Internal and clients to rebuild clean peers."
+}
+
 cmd_shell() {
   check_docker
   local svc="${1:-market}"
@@ -733,6 +872,8 @@ Commands:
   gateway-runner-start        start the host HDO gateway runner
   gateway-runner-status       show host HDO gateway runner health
   gateway-runner-stop         stop the host HDO gateway runner
+  hdo-device-conflicts        show duplicated HDO overlay IPs
+  hdo-reset-devices           delete all HDO devices except --keep-ip (default 100.89.0.12)
   bootstrap-admin             create the first admin user (prompts for username/password)
   psql                        open psql shell
   shell [service]             open a shell in a container
@@ -756,6 +897,8 @@ Nuke examples:
   $0 nuke                     clean electron-server and HDO generated state
   sudo $0 nuke --all --yes    full reset including host hdo-home and side stacks
   $0 nuke --server-only       only clean postgres/market volumes and server data
+  $0 hdo-device-conflicts
+  $0 hdo-reset-devices --keep-ip 100.89.0.12
 EOF
 }
 
@@ -770,6 +913,8 @@ cmd_menu() {
     "migrate    查看 migration 状态"
     "sync       立即同步 npm 插件"
     "gateway    查看 HDO 宿主机 runner"
+    "hdo-ip     查看 HDO IP 冲突"
+    "hdo-reset  清 HDO 设备态（保留 Internal）"
     "bootstrap  创建首位 admin"
     "psql       打开 psql"
     "shell      进入 market 容器"
@@ -793,6 +938,8 @@ cmd_menu() {
       migrate)   cmd_migrate ;;
       sync)      cmd_sync ;;
       gateway)   cmd_gateway_runner_status ;;
+      hdo-ip)    cmd_hdo_device_conflicts ;;
+      hdo-reset) cmd_hdo_reset_devices ;;
       bootstrap) cmd_bootstrap_admin ;;
       psql)      cmd_psql ;;
       shell)     cmd_shell ;;
@@ -824,6 +971,8 @@ case "$sub" in
   gateway-runner-start|hdo-runner-start) start_hdo_gateway_runner "$@" ;;
   gateway-runner-status|hdo-runner-status) cmd_gateway_runner_status "$@" ;;
   gateway-runner-stop|hdo-runner-stop) stop_hdo_gateway_runner "$@" ;;
+  hdo-device-conflicts|hdo-conflicts|hdo-ip-conflicts) cmd_hdo_device_conflicts "$@" ;;
+  hdo-reset-devices|hdo-clean-devices|hdo-device-reset) cmd_hdo_reset_devices "$@" ;;
   bootstrap-admin|bootstrap|admin) cmd_bootstrap_admin "$@" ;;
   psql)             cmd_psql "$@" ;;
   shell|sh)         cmd_shell "$@" ;;

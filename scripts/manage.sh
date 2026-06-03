@@ -18,6 +18,8 @@
 #   scripts/manage.sh sync-apps
 #   scripts/manage.sh deploy                 # 部署菜单
 #   scripts/manage.sh server <subcommand>   # → electron-server/scripts/manage.sh
+#   scripts/manage.sh hdo-device-conflicts  # 查看 HDO overlay IP 冲突
+#   scripts/manage.sh hdo-reset-devices     # 清 HDO 设备态，保留 Internal IP
 #   scripts/manage.sh hdo <subcommand>      # → docker/hdo-gateway-stack/manage.sh
 #   scripts/manage.sh nuke --all            # 清空 server/HDO 状态后重新部署
 #
@@ -608,6 +610,8 @@ Subcommands:
   ${C_BOLD}sync-apps${C_RESET}         同步 electron-demo / electron-test 到最新本地包
   ${C_BOLD}sync-hdo-npm${C_RESET}      把 electron-demo/hdo 切回已发布 npm 包并刷新 lockfile
   ${C_BOLD}deploy${C_RESET}            单独部署菜单（server / HDO domestic / WireGuard）
+  ${C_BOLD}hdo-device-conflicts${C_RESET} 查看 HDO overlay IP 冲突
+  ${C_BOLD}hdo-reset-devices${C_RESET}   清 HDO 设备态，默认保留 100.89.0.12
   ${C_BOLD}server [...] ${C_RESET}     转发到 electron-server/scripts/manage.sh
   ${C_BOLD}hdo [...] ${C_RESET}        转发到 docker/hdo-gateway-stack/manage.sh
   ${C_BOLD}nuke [...] ${C_RESET}       清空 server/HDO 生成状态，转发到 server nuke
@@ -619,6 +623,8 @@ Examples:
   scripts/manage.sh prepare-plugin
   scripts/manage.sh prepare-tool
   scripts/manage.sh deploy hdo
+  scripts/manage.sh hdo-device-conflicts
+  scripts/manage.sh hdo-reset-devices --keep-ip 100.89.0.12
   scripts/manage.sh server status
   scripts/manage.sh server sync
   sudo scripts/manage.sh nuke --all --yes
@@ -649,6 +655,8 @@ cmd_menu() {
     "sync-apps      同步 demo/test 到本地最新包"
     "sync-hdo-npm   同步 HDO demo 到已发布 npm 包"
     "deploy         部署 server / HDO / WireGuard"
+    "hdo-ip         查看 HDO IP 冲突"
+    "hdo-reset      清 HDO 设备态（保留 Internal）"
     "server         进入服务器 (docker) 管理菜单"
     "hdo            HDO gateway 安装/配置"
     "nuke           清空 server/HDO 生成状态"
@@ -671,6 +679,8 @@ cmd_menu() {
       sync-apps)      cmd_sync_apps ;;
       sync-hdo-npm)   cmd_sync_hdo_npm ;;
       deploy)         cmd_deploy ;;
+      hdo-ip)         cmd_server hdo-device-conflicts ;;
+      hdo-reset)      cmd_server hdo-reset-devices ;;
       server)         cmd_server ;;
       hdo)            cmd_hdo ;;
       nuke)           cmd_nuke ;;
@@ -697,6 +707,8 @@ case "$sub" in
   sync-apps|sync|apps)          cmd_sync_apps "$@" ;;
   sync-hdo-npm|hdo-npm)         cmd_sync_hdo_npm "$@" ;;
   deploy|deployment)            cmd_deploy "$@" ;;
+  hdo-device-conflicts|hdo-conflicts|hdo-ip-conflicts) cmd_server hdo-device-conflicts "$@" ;;
+  hdo-reset-devices|hdo-clean-devices|hdo-device-reset) cmd_server hdo-reset-devices "$@" ;;
   server|srv)                   cmd_server "$@" ;;
   hdo)                          cmd_hdo "$@" ;;
   nuke|wipe)                    cmd_nuke "$@" ;;
