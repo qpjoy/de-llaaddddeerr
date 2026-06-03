@@ -19,6 +19,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { app, BrowserWindow, Menu, ipcMain, session, shell } = require('electron');
 const { loadProjectEnv } = require('./env.cjs');
+const { createSystemDomainProxyManager } = require('./systemDomainProxy.cjs');
 
 loadProjectEnv({ appDir: path.resolve(__dirname, '..') });
 
@@ -40,6 +41,8 @@ let mainWindow = null;
 let host = null;
 let isClosing = false;
 let hdoEventUnsubscribe = null;
+let systemDomainProxy = null;
+let systemDomainProxyApplyInFlight = null;
 const childWindows = new Set();
 
 app.setAppUserModelId('dev.qpjoy.hdo');
@@ -277,6 +280,80 @@ async function hdoCall(method, ...args) {
   return fn(...args);
 }
 
+function systemDomainProxyStatus() {
+  if (!systemDomainProxy) {
+    return {
+      supported: false,
+      applied: false,
+      platform: process.platform,
+      reason: 'system-domain-proxy-not-ready'
+    };
+  }
+  return systemDomainProxy.status();
+}
+
+function shouldEnsureSystemDomainProxy(snapshot) {
+  if (!snapshot?.wireGuardStatus || snapshot.wireGuardStatus.active !== true) return false;
+  const current = systemDomainProxyStatus();
+  const configured = snapshot.settings && snapshot.settings.domainProxy;
+  if (
+    current.applied === true &&
+    configured &&
+    typeof configured === 'object' &&
+    typeof configured.pacUrl === 'string' &&
+    current.pacUrl === configured.pacUrl
+  ) {
+    return false;
+  }
+  return true;
+}
+
+async function safelyApplySystemDomainProxy(domainProxy, reason = 'manual') {
+  if (!systemDomainProxy) return systemDomainProxyStatus();
+  try {
+    return await systemDomainProxy.apply(domainProxy);
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    console.warn('[hdo] failed to apply system domain proxy:', { reason, error });
+    return {
+      supported: process.platform === 'darwin' || process.platform === 'win32',
+      applied: false,
+      platform: process.platform,
+      reason,
+      error
+    };
+  }
+}
+
+async function safelyDisableSystemDomainProxy(reason = 'manual') {
+  if (!systemDomainProxy) return systemDomainProxyStatus();
+  try {
+    return await systemDomainProxy.disable(reason);
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    console.warn('[hdo] failed to disable system domain proxy:', { reason, error });
+    return {
+      supported: process.platform === 'darwin' || process.platform === 'win32',
+      applied: true,
+      platform: process.platform,
+      reason,
+      error
+    };
+  }
+}
+
+async function ensureSystemDomainProxyFromManifest(reason = 'status') {
+  if (systemDomainProxyApplyInFlight) return systemDomainProxyApplyInFlight;
+  systemDomainProxyApplyInFlight = (async () => {
+    const domainProxy = await hdoCall('applyDomainProxyFromManifest');
+    const system = await safelyApplySystemDomainProxy(domainProxy, reason);
+    return { domainProxy, systemDomainProxy: system };
+  })().finally(() => {
+    systemDomainProxyApplyInFlight = null;
+  });
+  return systemDomainProxyApplyInFlight;
+}
+
 function ensureHdoEventSubscription(exposed) {
   if (hdoEventUnsubscribe || !exposed || typeof exposed.onEvent !== 'function') return;
   hdoEventUnsubscribe = exposed.onEvent((event) => {
@@ -322,6 +399,7 @@ function normalizeTestUrl(value) {
 }
 
 async function closeAppResources() {
+  await safelyDisableSystemDomainProxy('app-quit');
   if (hdoEventUnsubscribe) {
     hdoEventUnsubscribe();
     hdoEventUnsubscribe = null;
@@ -363,6 +441,11 @@ if (gotSingleInstanceLock) {
     .then(async () => {
       Menu.setApplicationMenu(null);
       preparePackagedSeeds();
+      systemDomainProxy = createSystemDomainProxyManager({
+        userDataDir: app.getPath('userData'),
+        log: console
+      });
+      await safelyDisableSystemDomainProxy('startup-cleanup');
 
       host = createElectronMarket(
         { app, ipcMain, session: session.defaultSession },
@@ -416,28 +499,50 @@ if (gotSingleInstanceLock) {
 
       ipcMain.handle('demo:hdo-status', async () => {
         const snapshot = await hdoCall('snapshot');
+        if (shouldEnsureSystemDomainProxy(snapshot)) {
+          void ensureSystemDomainProxyFromManifest('wireguard-active').catch((err) => {
+            console.warn('[hdo] failed to ensure system domain proxy:', err);
+          });
+        }
         return {
           defaultServerUrl: defaultHdoServerUrl(),
           auth: host.auth ? host.auth.state() : null,
           updates: {
             restartRequired: readJsonMeta(UPDATE_RESTART_REQUIRED_META)
           },
+          systemDomainProxy: systemDomainProxyStatus(),
           hdo: snapshot
         };
       });
 
       ipcMain.handle('demo:hdo-anonymous-connect', async (_e, payload) => {
-        return hdoCall('anonymousConnect', {
+        const result = await hdoCall('anonymousConnect', {
           ...(payload && typeof payload === 'object' ? payload : {}),
           appId: 'qpjoy-hdo',
           deviceLabel: 'QPJoy HDO'
         });
+        const autoConnect = !payload || typeof payload !== 'object' || payload.autoConnect !== false;
+        if (result && typeof result === 'object' && result.ok !== false && autoConnect) {
+          return {
+            ...result,
+            systemDomainProxy: await safelyApplySystemDomainProxy(result.domainProxy, 'anonymous-connect')
+          };
+        }
+        return result;
       });
 
       ipcMain.handle('demo:hdo-account-connect', async (_e, payload) => {
-        return hdoCall('accountConnect', {
+        const result = await hdoCall('accountConnect', {
           ...(payload && typeof payload === 'object' ? payload : {})
         });
+        const autoConnect = !payload || typeof payload !== 'object' || payload.autoConnect !== false;
+        if (result && typeof result === 'object' && result.ok !== false && autoConnect) {
+          return {
+            ...result,
+            systemDomainProxy: await safelyApplySystemDomainProxy(result.domainProxy, 'account-connect')
+          };
+        }
+        return result;
       });
 
       ipcMain.handle('demo:hdo-update-settings', async (_e, patch) => {
@@ -450,6 +555,7 @@ if (gotSingleInstanceLock) {
           ok: false,
           error: err instanceof Error ? err.message : String(err)
         }));
+        const systemDomainProxyResult = await safelyApplySystemDomainProxy(domainProxy, 'open-test-url');
         await session.defaultSession.forceReloadProxyConfig?.().catch(() => undefined);
         const w = trackChildWindow(new BrowserWindow({
           width: 1000,
@@ -464,11 +570,13 @@ if (gotSingleInstanceLock) {
           }
         }));
         await w.loadURL(url);
-        return { ok: true, url, domainProxy };
+        return { ok: true, url, domainProxy, systemDomainProxy: systemDomainProxyResult };
       });
 
       ipcMain.handle('demo:hdo-stop', async () => {
-        return hdoCall('connectWireGuardPeer', { action: 'down' });
+        const systemDomainProxyResult = await safelyDisableSystemDomainProxy('hdo-stop');
+        const stopped = await hdoCall('connectWireGuardPeer', { action: 'down' });
+        return { ...stopped, systemDomainProxy: systemDomainProxyResult };
       });
 
       ipcMain.handle('demo:check-updates', async () => {

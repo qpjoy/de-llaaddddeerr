@@ -61,6 +61,7 @@ export class HdoSessionDomainProxy {
     return {
       enabled: true,
       proxy: `127.0.0.1:${this.port}`,
+      pacUrl: `http://127.0.0.1:${this.port}/proxy.pac`,
       domains: this.bindings.map((binding) => binding.domain)
     };
   }
@@ -121,6 +122,8 @@ export class HdoSessionDomainProxy {
   }
 
   private forward(client: Socket, firstChunk: Buffer): void {
+    if (this.respondToPacRequest(client, firstChunk)) return;
+
     const request = parseProxyRequest(firstChunk);
     if (!request) {
       client.destroy();
@@ -145,6 +148,31 @@ export class HdoSessionDomainProxy {
       client.pipe(upstream);
       upstream.pipe(client);
     });
+  }
+
+  private respondToPacRequest(client: Socket, buffer: Buffer): boolean {
+    const request = parsePacRequest(buffer);
+    if (!request) return false;
+
+    if (!this.port) {
+      client.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      return true;
+    }
+
+    const body = request.method === 'HEAD'
+      ? ''
+      : renderPacScript(this.port, this.bindings.map((binding) => binding.domain));
+    const headers = [
+      'HTTP/1.1 200 OK',
+      'Content-Type: application/x-ns-proxy-autoconfig; charset=utf-8',
+      'Cache-Control: no-store',
+      `Content-Length: ${Buffer.byteLength(body, 'utf8')}`,
+      'Connection: close',
+      '',
+      ''
+    ].join('\r\n');
+    client.end(headers + body);
+    return true;
   }
 
   private findBinding(hostname: string): NormalizedBinding | null {
@@ -211,6 +239,27 @@ function parseProxyRequest(buffer: Buffer): {
   return host ? { connect: false, hostname: host, port, protocol } : null;
 }
 
+function parsePacRequest(buffer: Buffer): { method: 'GET' | 'HEAD' } | null {
+  const header = buffer.toString('latin1', 0, Math.min(buffer.length, 16_384));
+  const [requestLine, ...lines] = header.split(/\r?\n/);
+  const [rawMethod, rawTarget] = requestLine.split(/\s+/);
+  const method = rawMethod?.toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') return null;
+  if (!rawTarget || /^https?:\/\//i.test(rawTarget)) return null;
+
+  const hostHeader = lines.find((line) => /^host:/i.test(line));
+  const { host } = splitHostPort(hostHeader?.replace(/^host:\s*/i, '') ?? '');
+  const localHost = !host || host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  if (!localHost) return null;
+
+  try {
+    const url = new URL(rawTarget, 'http://127.0.0.1');
+    return url.pathname === '/proxy.pac' ? { method } : null;
+  } catch {
+    return null;
+  }
+}
+
 function rewriteHttpRequestForOrigin(buffer: Buffer): Buffer {
   const headerEnd = buffer.indexOf('\r\n\r\n');
   if (headerEnd < 0) return buffer;
@@ -249,7 +298,11 @@ function splitHostPort(value: string): { host: string | null; port: number | nul
 }
 
 function renderPacDataUrl(port: number, domains: string[]): string {
-  const body = `
+  return `data:application/x-ns-proxy-autoconfig;base64,${Buffer.from(renderPacScript(port, domains)).toString('base64')}`;
+}
+
+function renderPacScript(port: number, domains: string[]): string {
+  return `
 function FindProxyForURL(url, host) {
   var h = String(host || '').toLowerCase();
   var domains = ${JSON.stringify(domains)};
@@ -262,7 +315,6 @@ function FindProxyForURL(url, host) {
   return 'DIRECT';
 }
 `;
-  return `data:application/x-ns-proxy-autoconfig;base64,${Buffer.from(body).toString('base64')}`;
 }
 
 function defaultPort(protocol: string, connectRequest: boolean): number {

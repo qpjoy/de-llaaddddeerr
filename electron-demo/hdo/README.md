@@ -114,6 +114,11 @@ target OS.
   env var. The `.env` value is written into `qpjoy-hdo.config.json` during
   packaging. Use the same base URL as `electron-server` so the app can sync
   market data, receive release plans, and report rollout status.
+- When HDO is connected, the demo applies a system PAC URL for server-published
+  service domains so external browsers can resolve those HDO domains without
+  editing `hosts`. The previous macOS Auto Proxy URL or Windows WinINet PAC
+  setting is stored under user data and restored when HDO stops or the app
+  quits.
 - `pnpm-lock.yaml` should be committed in npm mode for reproducible installs.
 - `.dev-mode` and `.local-packs/` are local-only and ignored by git.
 - User data lives under:

@@ -10,6 +10,7 @@ const chip = document.getElementById('hdo-status-chip');
 const modeEl = document.getElementById('hdo-mode');
 const overlayEl = document.getElementById('hdo-overlay');
 const wgEl = document.getElementById('hdo-wg');
+const systemDomainEl = document.getElementById('hdo-system-domain');
 const titleEl = document.getElementById('hdo-connection-title');
 const detailEl = document.getElementById('hdo-status-detail');
 const serverLabelEl = document.getElementById('hdo-server-label');
@@ -270,6 +271,7 @@ async function refreshStatus(showOutput = true) {
     const peer = settings.wireGuardPeer || {};
     const anonymous = settings.anonymous || {};
     const wgActive = hdo.wireGuardStatus && hdo.wireGuardStatus.active === true;
+    const systemDomainProxy = status.systemDomainProxy || {};
     const session = status.auth || hdo.session || {};
     const loggedIn = Boolean(session.user || session.loggedIn);
     const mode = loggedIn ? '账号线路' : (anonymous.mode === 'anonymous' ? '匿名线路' : '准备中');
@@ -279,6 +281,9 @@ async function refreshStatus(showOutput = true) {
     modeEl.textContent = mode;
     overlayEl.textContent = peer.overlayIp || '-';
     wgEl.textContent = wgActive ? '已连接' : '未连接';
+    systemDomainEl.textContent = systemDomainProxy.applied
+      ? '已接管'
+      : (systemDomainProxy.supported === false ? '不支持' : '未启用');
     serverLabelEl.textContent = serverInput.value ? '服务已配置' : '服务未配置';
     loginHintEl.textContent = loggedIn
       ? '已使用账号配置，后续会优先保持专属线路。'
@@ -315,6 +320,7 @@ async function refreshStatus(showOutput = true) {
           updatedAt: anonymous.updatedAt
         } : null,
         domainProxy: settings.domainProxy || null,
+        systemDomainProxy,
         lastError
       }));
     }
