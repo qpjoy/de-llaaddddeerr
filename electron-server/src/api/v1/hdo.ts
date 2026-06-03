@@ -1845,14 +1845,6 @@ async function buildManifest(device: HdoDeviceRow, options: HdoManifestOptions =
       (row) => row.kind === 'domestic' || isAnonymousVisibleMetadata(row.metadata, meshAccess.groupIds)
     );
   }
-  const visibleDevices = meshAccess.active
-    ? devices.filter((row) => {
-        if (row.id === device.id) return true;
-        if (options.anonymous) return false;
-        const otherAccess = resolveMeshAccess(row.userId, meshGroups, memberships, deviceMeshStates, row.id);
-        return otherAccess.groups.some((group) => meshAccess.groupIds.has(group.id));
-      })
-    : [];
   const visibleNodeIds = new Set(visibleNodes.map((row) => row.id));
   const visibleServices = meshAccess.active
     ? services.filter(
@@ -1863,6 +1855,22 @@ async function buildManifest(device: HdoDeviceRow, options: HdoManifestOptions =
           isVisibleForMesh(row.metadata, meshAccess.groupIds)
       )
     : [];
+  const visibleDevices = meshAccess.active
+    ? devices.filter((row) => {
+        if (row.id === device.id) return true;
+        if (options.anonymous) return false;
+        const otherAccess = resolveMeshAccess(row.userId, meshGroups, memberships, deviceMeshStates, row.id);
+        return otherAccess.groups.some((group) => meshAccess.groupIds.has(group.id));
+      })
+    : [];
+  const visibleServiceTargetHosts = serviceTargetHosts(visibleServices);
+  const directPeerDevices = options.anonymous
+    ? devices.filter((row) => {
+        const overlayIp = normalizeOverlayIp(row.overlayIp);
+        if (!row.publicKey || !overlayIp || row.id === device.id) return false;
+        return visibleServiceTargetHosts.has(overlayIp);
+      })
+    : visibleDevices;
   const visibleProfiles = meshAccess.active
     ? pickProfilesForMesh(profiles, meshAccess)
     : [];
@@ -1906,7 +1914,7 @@ async function buildManifest(device: HdoDeviceRow, options: HdoManifestOptions =
         address: device.overlayIp ? wireGuardAddress(device.overlayIp) : null
       },
       domestic: wireGuardNodeSummary(pickDomesticNode(visibleNodes)),
-      directPeers: wireGuardDirectPeerSummaries(device, visibleDevices, visibleServices)
+      directPeers: wireGuardDirectPeerSummaries(device, directPeerDevices, visibleServices)
     },
     nodes: visibleNodes,
     devices: visibleDevices.map((row) => hdoDeviceWithOnlineWindow(row)).map((row) => ({
@@ -1961,6 +1969,7 @@ function renderMihomoYaml(manifest: Awaited<ReturnType<typeof buildManifest>>): 
   rules.add('IP-CIDR,100.88.0.0/16,HDO,no-resolve');
   rules.add('IP-CIDR,100.89.0.0/16,HDO,no-resolve');
   rules.add('IP-CIDR,100.90.0.0/16,HDO,no-resolve');
+  rules.add('IP-CIDR,100.91.0.0/16,HDO,no-resolve');
   rules.add('GEOIP,CN,DIRECT');
   rules.add('MATCH,DIRECT');
 
@@ -2672,6 +2681,14 @@ function wireGuardNodeSummary(node: HdoNodeRow | undefined) {
     endpoint: publicKey && host ? `${host}:${port}` : null,
     overlayIp: node.overlayIp
   };
+}
+
+function serviceTargetHosts(services: HdoServiceRow[]): Set<string> {
+  return new Set(
+    services
+      .map((row) => normalizeOverlayIp(row.targetHost))
+      .filter((value): value is string => Boolean(value))
+  );
 }
 
 function wireGuardDirectPeerSummaries(

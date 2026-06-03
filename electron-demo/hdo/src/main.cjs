@@ -36,6 +36,7 @@ try {
 const TUNNEL_ID = 'qpjoy.electron-tunnel';
 const HDO_ID = 'qpjoy.electron-plugin-hdo';
 const UPDATE_RESTART_REQUIRED_META = 'updates.restartRequired';
+const FAST_RELAY_MODE = 'mesh-h2i';
 
 let mainWindow = null;
 let host = null;
@@ -308,6 +309,40 @@ function shouldEnsureSystemDomainProxy(snapshot) {
   return true;
 }
 
+function isAnonymousHdoSnapshot(snapshot) {
+  const settings = snapshot?.settings || {};
+  const peer = settings.wireGuardPeer || {};
+  if (settings.anonymous && settings.anonymous.mode === 'anonymous') return true;
+  if (String(settings.deviceId || '').startsWith('hdo-anon-')) return true;
+  return String(peer.overlayIp || '').startsWith('100.91.');
+}
+
+async function resetAnonymousPeerBeforeAccountConnect() {
+  const snapshot = await hdoCall('snapshot').catch(() => null);
+  if (!isAnonymousHdoSnapshot(snapshot)) return { reset: false };
+
+  const stopped = await hdoCall('connectWireGuardPeer', { action: 'down' }).catch((err) => ({
+    ok: false,
+    error: err instanceof Error ? err.message : String(err)
+  }));
+  const systemDomainProxyResult = await safelyDisableSystemDomainProxy('account-switch');
+  await hdoCall('updateSettings', {
+    relayMode: FAST_RELAY_MODE,
+    anonymous: null,
+    deviceId: null,
+    wireGuardPeer: null,
+    wireGuardDesiredActive: false,
+    lastManifest: null,
+    lastSubscription: null,
+    domainProxy: null
+  });
+  return {
+    reset: true,
+    stopped,
+    systemDomainProxy: systemDomainProxyResult
+  };
+}
+
 async function safelyApplySystemDomainProxy(domainProxy, reason = 'manual') {
   if (!systemDomainProxy) return systemDomainProxyStatus();
   try {
@@ -518,6 +553,7 @@ if (gotSingleInstanceLock) {
       ipcMain.handle('demo:hdo-anonymous-connect', async (_e, payload) => {
         const result = await hdoCall('anonymousConnect', {
           ...(payload && typeof payload === 'object' ? payload : {}),
+          relayMode: FAST_RELAY_MODE,
           appId: 'qpjoy-hdo',
           deviceLabel: 'MX HDO'
         });
@@ -532,21 +568,28 @@ if (gotSingleInstanceLock) {
       });
 
       ipcMain.handle('demo:hdo-account-connect', async (_e, payload) => {
+        const accountSwitch = await resetAnonymousPeerBeforeAccountConnect();
         const result = await hdoCall('accountConnect', {
-          ...(payload && typeof payload === 'object' ? payload : {})
+          ...(payload && typeof payload === 'object' ? payload : {}),
+          relayMode: FAST_RELAY_MODE,
+          rotate: true
         });
         const autoConnect = !payload || typeof payload !== 'object' || payload.autoConnect !== false;
         if (result && typeof result === 'object' && result.ok !== false && autoConnect) {
           return {
             ...result,
+            accountSwitch,
             systemDomainProxy: await safelyApplySystemDomainProxy(result.domainProxy, 'account-connect')
           };
         }
-        return result;
+        return { ...result, accountSwitch };
       });
 
       ipcMain.handle('demo:hdo-update-settings', async (_e, patch) => {
-        return hdoCall('updateSettings', patch && typeof patch === 'object' ? patch : {});
+        return hdoCall('updateSettings', {
+          ...(patch && typeof patch === 'object' ? patch : {}),
+          relayMode: FAST_RELAY_MODE
+        });
       });
 
       ipcMain.handle('demo:hdo-open-test-url', async (_e, value) => {

@@ -5,6 +5,7 @@ const internalUrlInput = document.getElementById('hdo-test-url');
 const relayModeSelect = document.getElementById('hdo-relay-mode');
 const accountInput = document.getElementById('hdo-account-id');
 const passwordInput = document.getElementById('hdo-account-password');
+const passwordToggleButton = document.getElementById('btn-hdo-toggle-password');
 const output = document.getElementById('hdo-output');
 const chip = document.getElementById('hdo-status-chip');
 const modeEl = document.getElementById('hdo-mode');
@@ -32,11 +33,16 @@ const buttons = [
   document.getElementById('btn-market-new')
 ].filter(Boolean);
 
+const DEFAULT_INTERNAL_URL = 'http://delta.mxinfo-inc.cn';
+const LEGACY_DEFAULT_INTERNAL_URL = 'http://internal.mingxi.com';
+const FAST_RELAY_MODE = 'mesh-h2i';
+
 const storageKeys = {
   serverUrl: 'qpjoy.hdo.serverUrl',
   internalUrl: 'qpjoy.hdo.internalUrl',
   relayMode: 'qpjoy.hdo.relayMode',
-  accountId: 'qpjoy.hdo.accountId'
+  accountId: 'qpjoy.hdo.accountId',
+  accountPassword: 'qpjoy.hdo.accountPassword'
 };
 
 const legacyStorageKeys = {
@@ -51,9 +57,16 @@ let lastStatus = null;
 let autoAnonymousStarted = false;
 
 serverInput.value = readSaved('serverUrl') || '';
-internalUrlInput.value = readSaved('internalUrl') || 'http://internal.mingxi.com';
-relayModeSelect.value = normalizeRelayMode(readSaved('relayMode'));
+{
+  const savedInternalUrl = readSaved('internalUrl');
+  internalUrlInput.value = savedInternalUrl && savedInternalUrl !== LEGACY_DEFAULT_INTERNAL_URL
+    ? savedInternalUrl
+    : DEFAULT_INTERNAL_URL;
+}
+relayModeSelect.value = FAST_RELAY_MODE;
+relayModeSelect.disabled = true;
 accountInput.value = readSaved('accountId') || '';
+passwordInput.value = readSaved('accountPassword') || '';
 
 document.getElementById('btn-market').addEventListener('click', () => {
   void api.openMarket();
@@ -93,6 +106,12 @@ document.getElementById('btn-hdo-account-config').addEventListener('click', () =
   void runAccount(false);
 });
 
+passwordToggleButton.addEventListener('click', () => {
+  const showing = passwordInput.type === 'text';
+  passwordInput.type = showing ? 'password' : 'text';
+  passwordToggleButton.textContent = showing ? '显示' : '隐藏';
+});
+
 document.getElementById('btn-hdo-open-test').addEventListener('click', () => {
   void runAction('打开内部地址', async () => {
     persistInputs();
@@ -110,8 +129,13 @@ document.getElementById('btn-hdo-check-updates').addEventListener('click', () =>
 
 serverInput.addEventListener('change', persistInputs);
 internalUrlInput.addEventListener('change', persistInputs);
-relayModeSelect.addEventListener('change', persistInputs);
+relayModeSelect.addEventListener('change', () => {
+  relayModeSelect.value = FAST_RELAY_MODE;
+  persistInputs();
+});
 accountInput.addEventListener('change', persistInputs);
+passwordInput.addEventListener('change', persistInputs);
+passwordInput.addEventListener('input', persistInputs);
 
 if (typeof api.onHdoEvent === 'function') {
   api.onHdoEvent(() => {
@@ -145,7 +169,13 @@ async function ensureAnonymousConnected() {
   const hdo = status?.hdo || {};
   const settings = hdo.settings || {};
   const wgActive = hdo.wireGuardStatus && hdo.wireGuardStatus.active === true;
-  if (wgActive) return;
+  const peer = settings.wireGuardPeer || {};
+  if (wgActive) {
+    if (isAnonymousPeer(settings, peer) && accountInput.value.trim() && passwordInput.value) {
+      await runAccount(true, '切换账号线路');
+    }
+    return;
+  }
 
   const serverUrl = serverInput.value.trim() || status?.defaultServerUrl || '';
   if (!serverUrl) {
@@ -155,23 +185,28 @@ async function ensureAnonymousConnected() {
     return;
   }
   serverInput.value = serverUrl;
+  if (accountInput.value.trim() && passwordInput.value) {
+    await runAccount(true, '启用账号线路');
+    return;
+  }
   await runAnonymous(true, '启用匿名访问');
 }
 
 async function runAnonymous(autoConnect, label = '重新连接') {
   persistInputs();
   const serverUrl = serverInput.value.trim();
+  relayModeSelect.value = FAST_RELAY_MODE;
   await runAction(label, async () =>
     api.hdoAnonymousConnect({
       serverUrl,
-      relayMode: normalizeRelayMode(relayModeSelect.value),
+      relayMode: FAST_RELAY_MODE,
       autoConnect,
       testUrl: internalUrlInput.value.trim()
     })
   );
 }
 
-async function runAccount(autoConnect) {
+async function runAccount(autoConnect, label) {
   const identifier = accountInput.value.trim();
   const password = passwordInput.value;
   if (!identifier || !password) {
@@ -181,16 +216,17 @@ async function runAccount(autoConnect) {
     return;
   }
 
-  const relayMode = accountPreferredRelayMode();
-  relayModeSelect.value = relayMode;
+  const relayMode = FAST_RELAY_MODE;
+  relayModeSelect.value = FAST_RELAY_MODE;
   persistInputs();
 
-  await runAction(autoConnect ? '登录并提速' : '同步账号配置', async () =>
+  await runAction(label || (autoConnect ? '登录并提速' : '同步账号配置'), async () =>
     api.hdoAccountConnect({
       serverUrl: serverInput.value.trim(),
       relayMode,
       identifier,
       password,
+      rotate: true,
       autoConnect,
       testUrl: internalUrlInput.value.trim()
     })
@@ -266,7 +302,7 @@ async function refreshStatus(showOutput = true) {
     if (!serverInput.value && configuredServerUrl) {
       serverInput.value = configuredServerUrl;
     }
-    relayModeSelect.value = normalizeRelayMode(settings.relayMode || relayModeSelect.value);
+    relayModeSelect.value = FAST_RELAY_MODE;
 
     const peer = settings.wireGuardPeer || {};
     const anonymous = settings.anonymous || {};
@@ -274,7 +310,11 @@ async function refreshStatus(showOutput = true) {
     const systemDomainProxy = status.systemDomainProxy || {};
     const session = status.auth || hdo.session || {};
     const loggedIn = Boolean(session.user || session.loggedIn);
-    const mode = loggedIn ? '账号线路' : (anonymous.mode === 'anonymous' ? '匿名线路' : '准备中');
+    const anonymousPeer = isAnonymousPeer(settings, peer);
+    const accountConnected = loggedIn && !anonymousPeer;
+    const mode = accountConnected
+      ? '账号线路'
+      : (anonymousPeer ? '匿名线路' : (loggedIn ? '账号待切换' : '准备中'));
     const lastError = hdo.lastError || peer.lastError || null;
     renderUpdateBanner(status.updates?.restartRequired || null);
 
@@ -293,8 +333,8 @@ async function refreshStatus(showOutput = true) {
       chip.textContent = '已连接';
       chip.className = 'status-chip status-chip--ok';
       setConnectionCopy(
-        loggedIn ? '专属线路已开启' : '匿名线路已开启',
-        loggedIn ? '已拉取账号配置，正在使用更稳定的访问路径。' : '当前可直接访问；登录后会切换到你的专属配置。'
+        accountConnected ? '专属线路已开启' : '匿名线路已开启',
+        accountConnected ? '已拉取账号配置，正在使用更稳定的访问路径。' : '当前可直接访问；登录后会切换到你的专属配置。'
       );
     } else if (lastError) {
       chip.textContent = '需处理';
@@ -314,6 +354,8 @@ async function refreshStatus(showOutput = true) {
         relayMode: relayModeLabel(relayModeSelect.value),
         overlayIp: peer.overlayIp || null,
         wireGuardActive: wgActive,
+        accountConnected,
+        anonymousPeer,
         anonymous: anonymous.mode === 'anonymous' ? {
           appId: anonymous.appId,
           installId: anonymous.installId,
@@ -354,8 +396,9 @@ function renderUpdateBanner(update) {
 function persistInputs() {
   localStorage.setItem(storageKeys.serverUrl, serverInput.value.trim());
   localStorage.setItem(storageKeys.internalUrl, internalUrlInput.value.trim());
-  localStorage.setItem(storageKeys.relayMode, normalizeRelayMode(relayModeSelect.value));
+  localStorage.setItem(storageKeys.relayMode, FAST_RELAY_MODE);
   localStorage.setItem(storageKeys.accountId, accountInput.value.trim());
+  localStorage.setItem(storageKeys.accountPassword, passwordInput.value);
 }
 
 function readSaved(key) {
@@ -376,14 +419,11 @@ function setConnectionCopy(title, detail) {
 }
 
 function normalizeRelayMode(value) {
-  if (value === 'mesh-h2i' || value === 'mesh-service-p2p') return 'mesh-h2i';
-  if (value === 'mesh-h2h' || value === 'mesh-p2p') return 'mesh-h2h';
-  return 'mesh-hdi';
+  return FAST_RELAY_MODE;
 }
 
 function accountPreferredRelayMode() {
-  const current = normalizeRelayMode(relayModeSelect.value);
-  return current === 'mesh-h2h' ? 'mesh-h2h' : 'mesh-h2i';
+  return FAST_RELAY_MODE;
 }
 
 function relayModeLabel(value) {
@@ -391,6 +431,12 @@ function relayModeLabel(value) {
   if (mode === 'mesh-h2i') return 'Mesh H2I';
   if (mode === 'mesh-h2h') return 'Mesh H2H';
   return 'Mesh HDI';
+}
+
+function isAnonymousPeer(settings, peer) {
+  if (settings?.anonymous?.mode === 'anonymous') return true;
+  if (String(settings?.deviceId || '').startsWith('hdo-anon-')) return true;
+  return String(peer?.overlayIp || '').startsWith('100.91.');
 }
 
 function writeOutput(value, isError = false) {

@@ -68,7 +68,10 @@
         </label>
         <label class="field">
           <span>密码</span>
-          <input id="hdo-account-password" type="password" autocomplete="current-password" placeholder="请输入密码" />
+          <span class="password-control">
+            <input id="hdo-account-password" type="password" autocomplete="current-password" placeholder="请输入密码" />
+            <button id="btn-hdo-toggle-password" class="password-toggle" type="button">显示</button>
+          </span>
         </label>
         <button id="btn-hdo-account-connect" class="button button--accent">登录并提速</button>
       </div>
@@ -86,14 +89,12 @@
           </label>
           <label class="field">
             <span>内部地址</span>
-            <input id="hdo-test-url" type="text" placeholder="http://internal.mingxi.com" />
+            <input id="hdo-test-url" type="text" placeholder="http://delta.mxinfo-inc.cn" />
           </label>
           <label class="field">
             <span>Relay 模式</span>
             <select id="hdo-relay-mode">
-              <option value="mesh-hdi">Mesh HDI</option>
               <option value="mesh-h2i">Mesh H2I</option>
-              <option value="mesh-h2h">Mesh H2H</option>
             </select>
           </label>
         </div>
