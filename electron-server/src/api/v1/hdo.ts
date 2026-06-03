@@ -213,10 +213,15 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const existing = await hdoStore.findDevice(deviceId);
-    const overlayIp =
+    const preferredOverlayIp =
       normalizeOverlayIp(asOptionalString(body.overlayIp)) ??
-      normalizeOverlayIp(existing?.overlayIp ?? null) ??
-      allocateDeviceOverlayIp(devices, deviceId, HDO_ANONYMOUS_ADDRESS_PLAN.userCidr);
+      normalizeOverlayIp(existing?.overlayIp ?? null);
+    const overlayIp = allocateDeviceOverlayIp(
+      devices,
+      deviceId,
+      HDO_ANONYMOUS_ADDRESS_PLAN.userCidr,
+      preferredOverlayIp
+    );
     const device = await hdoStore.upsertDevice({
       id: deviceId,
       userId: user.id,
@@ -323,10 +328,12 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
       reply.code(403);
       return { error: 'device is disabled or kicked from all active mesh groups' };
     }
-    let overlayIp = asOptionalString(body.overlayIp) ?? existing?.overlayIp ?? null;
-    if (!overlayIp && publicKey) {
-      overlayIp = allocateDeviceOverlayIp(devices, id, addressPlanForMeshAccess(deviceMeshAccess).userCidr);
-    }
+    const preferredOverlayIp =
+      normalizeOverlayIp(asOptionalString(body.overlayIp)) ??
+      normalizeOverlayIp(existing?.overlayIp ?? null);
+    const overlayIp = publicKey
+      ? allocateDeviceOverlayIp(devices, id, addressPlanForMeshAccess(deviceMeshAccess).userCidr, preferredOverlayIp)
+      : preferredOverlayIp;
     const metadataInput = asPlainObject(body.metadata);
     const metadata = metadataInput ? { ...(existing?.metadata ?? {}), ...metadataInput } : existing?.metadata ?? null;
     const device = await hdoStore.upsertDevice({
@@ -2587,7 +2594,12 @@ function normalizePlanIp(
   return fallback;
 }
 
-function allocateDeviceOverlayIp(devices: HdoDeviceRow[], currentId: string, userCidr: string): string {
+function allocateDeviceOverlayIp(
+  devices: HdoDeviceRow[],
+  currentId: string,
+  userCidr: string,
+  preferredIp?: string | null
+): string {
   const range = cidrRange(userCidr) ?? cidrRange(HDO_DEFAULT_ADDRESS_PLAN.userCidr);
   if (!range) return '100.89.0.10';
   const used = new Set(
@@ -2596,6 +2608,8 @@ function allocateDeviceOverlayIp(devices: HdoDeviceRow[], currentId: string, use
       .map((row) => normalizeOverlayIp(row.overlayIp))
       .filter((row): row is string => Boolean(row))
   );
+  const preferred = normalizeOverlayIp(preferredIp ?? null);
+  if (preferred && ipIsInRange(preferred, range) && !used.has(preferred)) return preferred;
   const start = Math.min(range.end, range.start + 10);
   const end = Math.max(start, range.end - 1);
   for (let value = start; value <= end; value += 1) {
@@ -2603,6 +2617,11 @@ function allocateDeviceOverlayIp(devices: HdoDeviceRow[], currentId: string, use
     if (!used.has(candidate)) return candidate;
   }
   return numberToIpv4(start);
+}
+
+function ipIsInRange(value: string, range: { start: number; end: number }): boolean {
+  const number = ipv4ToNumber(value);
+  return number !== null && number >= range.start && number <= range.end;
 }
 
 function wireGuardAddress(value: string): string {

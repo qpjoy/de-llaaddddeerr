@@ -30,6 +30,8 @@ import {
 import type {
   HdoDeviceRegistrationInput,
   HdoLocalPluginState,
+  HdoNetworkLeaseSettings,
+  HdoNetworkLeasesSettings,
   HdoNodeInput,
   HdoPluginSettings,
   HdoRelayMode,
@@ -47,6 +49,7 @@ type WireGuardPeerConnectInput = {
 };
 type WireGuardConnectionRuntime = ReturnType<typeof resolveWireGuardConnectionRuntime>;
 type HdoEventListener = (event: Record<string, unknown>) => void;
+type HdoNetworkLeaseMode = 'anonymous' | 'account';
 
 interface MarketplaceDbLike {
   getActiveSession?(): {
@@ -398,6 +401,9 @@ export class HdoController {
       this.updateSettings({ relayMode });
     }
 
+    this.rememberCurrentNetworkLease();
+    this.restoreNetworkLease('anonymous');
+
     const routeProbe = buildHdoRouteProbe();
     const now = new Date().toISOString();
     const previous = this.settings.wireGuardPeer ?? {};
@@ -432,6 +438,7 @@ export class HdoController {
           anonymous: { ...anonymous, mode: 'anonymous', appId, installId, updatedAt: now },
           wireGuardPeer: peer
         });
+        this.rememberNetworkLease('anonymous');
         return {
           ok: false,
           reason: 'bundled-wireguard-cli-missing',
@@ -459,6 +466,7 @@ export class HdoController {
           anonymous: { ...anonymous, mode: 'anonymous', appId, installId, updatedAt: now },
           wireGuardPeer: peer
         });
+        this.rememberNetworkLease('anonymous');
         return {
           ok: false,
           reason: 'bundled-wireguard-cli-failed',
@@ -476,6 +484,7 @@ export class HdoController {
       deviceLabel,
       platform: stringValue(input.platform) ?? this.settings.devicePlatform ?? process.platform,
       publicKey,
+      overlayIp: stringValue(previous.overlayIp),
       relayMode,
       preferDirectPeers: relayMode !== 'mesh-hdi'
     });
@@ -553,6 +562,7 @@ export class HdoController {
       wireGuardPeer: peer,
       lastManifest: manifest
     });
+    this.rememberNetworkLease('anonymous');
     const domainProxy = await this.applyDomainProxyFromManifest(manifest);
     let connected: Record<string, unknown> | null = null;
     let wireGuardStatus: Record<string, unknown> | null = null;
@@ -665,6 +675,9 @@ export class HdoController {
       this.ensureSettingsForCurrentSession();
     }
 
+    this.rememberCurrentNetworkLease();
+    this.restoreNetworkLease('account');
+
     const wasAnonymousPeer =
       plainObject(this.settings.anonymous)?.mode === 'anonymous' ||
       isAnonymousDeviceId(this.settings.deviceId) ||
@@ -678,6 +691,7 @@ export class HdoController {
       rotate: input.rotate === true || wasAnonymousPeer
     });
     const preparedRow = plainObject(prepared);
+    this.rememberNetworkLease('account');
     const manifest = plainObject(preparedRow?.manifest);
     const domainProxy = await this.applyDomainProxyFromManifest(manifest);
     let subscription: Record<string, unknown> | null = null;
@@ -824,6 +838,7 @@ export class HdoController {
       id: this.settings.deviceId,
       label: this.settings.deviceLabel,
       publicKey,
+      overlayIp: stringValue(previous.overlayIp),
       metadata: {
         source: '@qpjoy/electron-plugin-hdo',
         arch: process.arch,
@@ -1484,6 +1499,96 @@ export class HdoController {
     this.updateSettings({ wireGuardDesiredActive: active });
   }
 
+  private rememberCurrentNetworkLease(): void {
+    const mode = this.currentNetworkLeaseMode();
+    if (mode) this.rememberNetworkLease(mode);
+  }
+
+  private rememberNetworkLease(mode: HdoNetworkLeaseMode): void {
+    const peer = this.settings.wireGuardPeer ?? null;
+    const anonymous = mode === 'anonymous' ? this.settings.anonymous ?? null : null;
+    if (!this.settings.deviceId && !peer?.publicKey && !peer?.overlayIp && !anonymous?.installId) return;
+    const now = new Date().toISOString();
+    const lease: HdoNetworkLeaseSettings = {
+      deviceId: this.settings.deviceId ?? null,
+      sessionUserId: mode === 'account'
+        ? this.settings.sessionUserId ?? this.currentSessionUserId()
+        : null,
+      anonymous,
+      wireGuardPeer: peer ? { ...peer } : null,
+      updatedAt: now
+    };
+    this.writeNetworkLease(mode, lease);
+  }
+
+  private restoreNetworkLease(mode: HdoNetworkLeaseMode): HdoNetworkLeaseSettings | null {
+    const lease = this.networkLease(mode);
+    if (!lease) return null;
+    const patch: Partial<HdoPluginSettings> = {};
+    if (lease.deviceId) patch.deviceId = lease.deviceId;
+    if (lease.wireGuardPeer) patch.wireGuardPeer = { ...lease.wireGuardPeer };
+    if (mode === 'anonymous') {
+      patch.anonymous = lease.anonymous ?? this.settings.anonymous ?? null;
+    } else {
+      patch.anonymous = null;
+      patch.sessionUserId = this.currentSessionUserId() ?? lease.sessionUserId ?? this.settings.sessionUserId ?? null;
+    }
+    this.updateSettings(patch);
+    return lease;
+  }
+
+  private networkLease(mode: HdoNetworkLeaseMode): HdoNetworkLeaseSettings | null {
+    const leases = plainObject(this.settings.networkLeases) as HdoNetworkLeasesSettings | null;
+    if (!leases) return null;
+    if (mode === 'anonymous') {
+      return plainObject(leases.anonymous) as HdoNetworkLeaseSettings | null;
+    }
+    const currentUserId = this.currentSessionUserId() ?? this.settings.sessionUserId ?? null;
+    const accounts = plainObject(leases.accounts) as Record<string, HdoNetworkLeaseSettings | null> | null;
+    const scoped = currentUserId ? plainObject(accounts?.[currentUserId]) : null;
+    if (scoped) return scoped as HdoNetworkLeaseSettings;
+    const fallback = plainObject(leases.account) as HdoNetworkLeaseSettings | null;
+    if (!fallback) return null;
+    const leaseUserId = stringValue(fallback.sessionUserId);
+    if (currentUserId && leaseUserId && leaseUserId !== currentUserId) return null;
+    return fallback;
+  }
+
+  private writeNetworkLease(mode: HdoNetworkLeaseMode, lease: HdoNetworkLeaseSettings): void {
+    const leases = (plainObject(this.settings.networkLeases) ?? {}) as HdoNetworkLeasesSettings;
+    const accounts = (plainObject(leases.accounts) ?? {}) as Record<string, HdoNetworkLeaseSettings | null>;
+    const nextLeases: HdoNetworkLeasesSettings = {
+      ...leases,
+      [mode]: lease,
+      accounts
+    };
+    if (mode === 'account' && lease.sessionUserId) {
+      nextLeases.accounts = {
+        ...accounts,
+        [lease.sessionUserId]: lease
+      };
+    }
+    this.settings = {
+      ...this.settings,
+      networkLeases: nextLeases,
+      updatedAt: new Date().toISOString()
+    };
+    this.saveSettings();
+  }
+
+  private currentNetworkLeaseMode(): HdoNetworkLeaseMode | null {
+    const peer = this.settings.wireGuardPeer;
+    if (
+      plainObject(this.settings.anonymous)?.mode === 'anonymous' ||
+      isAnonymousDeviceId(this.settings.deviceId) ||
+      isAnonymousOverlayIp(peer?.overlayIp)
+    ) {
+      return 'anonymous';
+    }
+    if (this.settings.deviceId || peer?.publicKey || peer?.overlayIp) return 'account';
+    return null;
+  }
+
   private emitEvent(type: string, detail: Record<string, unknown> = {}): void {
     if (this.eventListeners.size === 0) return;
     const event = this.publicStateEvent(type, detail);
@@ -1896,6 +2001,7 @@ export class HdoController {
     const previousUserId =
       this.settings.sessionUserId ?? stringField(plainObject(this.settings.lastManifest)?.device, 'userId');
     if (previousUserId && previousUserId !== currentUserId) {
+      this.rememberCurrentNetworkLease();
       this.settings = {
         ...this.settings,
         sessionUserId: currentUserId,
@@ -1954,6 +2060,7 @@ export class HdoController {
         lastSubscription: null,
         anonymous: null,
         domainProxy: null,
+        networkLeases: null,
         updatedAt: null
       };
     }
@@ -1972,6 +2079,7 @@ export class HdoController {
         activeProfileId: parsed.activeProfileId ?? null,
         anonymous: parsed.anonymous ?? null,
         domainProxy: parsed.domainProxy ?? null,
+        networkLeases: parsed.networkLeases ?? null,
         lastTaskRun: parsed.lastTaskRun ?? null,
         lastNotification: parsed.lastNotification ?? null
       };
@@ -1998,6 +2106,7 @@ export class HdoController {
         lastSubscription: null,
         anonymous: null,
         domainProxy: null,
+        networkLeases: null,
         updatedAt: null
       };
     }

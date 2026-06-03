@@ -12,6 +12,8 @@ const api = {
   hdoStatus: () => ipcRenderer.invoke('demo:hdo-status'),
   /** Enter the public anonymous relay flow. */
   hdoAnonymousConnect: (payload) => ipcRenderer.invoke('demo:hdo-anonymous-connect', payload),
+  /** Switch the current HDO connection into the anonymous network. */
+  hdoSwitchAnonymous: (payload) => ipcRenderer.invoke('demo:hdo-switch-anonymous', payload),
   /** Login with a marketplace account and connect with the account manifest. */
   hdoAccountConnect: (payload) => ipcRenderer.invoke('demo:hdo-account-connect', payload),
   /** Persist HDO plugin settings. */

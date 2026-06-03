@@ -22,6 +22,7 @@ export interface HdoPluginSettings {
   lastNotification?: Record<string, unknown> | null;
   lastManifest?: Record<string, unknown> | null;
   lastSubscription?: string | null;
+  networkLeases?: HdoNetworkLeasesSettings | null;
   updatedAt?: string | null;
 }
 
@@ -39,6 +40,20 @@ export interface HdoWireGuardPeerSettings {
   canUseDefaultMesh?: boolean | null;
   lastError?: string | null;
   updatedAt?: string | null;
+}
+
+export interface HdoNetworkLeaseSettings {
+  deviceId?: string | null;
+  sessionUserId?: string | null;
+  anonymous?: HdoPluginSettings['anonymous'];
+  wireGuardPeer?: HdoWireGuardPeerSettings | null;
+  updatedAt?: string | null;
+}
+
+export interface HdoNetworkLeasesSettings {
+  anonymous?: HdoNetworkLeaseSettings | null;
+  account?: HdoNetworkLeaseSettings | null;
+  accounts?: Record<string, HdoNetworkLeaseSettings | null> | null;
 }
 
 export interface HdoSessionSnapshot {

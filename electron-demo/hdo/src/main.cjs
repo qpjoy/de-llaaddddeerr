@@ -17,6 +17,7 @@
  */
 const path = require('node:path');
 const fs = require('node:fs');
+const { execFile } = require('node:child_process');
 const { app, BrowserWindow, Menu, ipcMain, session, shell } = require('electron');
 const { loadProjectEnv } = require('./env.cjs');
 const { createSystemDomainProxyManager } = require('./systemDomainProxy.cjs');
@@ -293,9 +294,14 @@ function systemDomainProxyStatus() {
   return systemDomainProxy.status();
 }
 
-function shouldEnsureSystemDomainProxy(snapshot) {
+async function verifiedSystemDomainProxyStatus() {
+  if (!systemDomainProxy) return systemDomainProxyStatus();
+  if (typeof systemDomainProxy.statusVerified !== 'function') return systemDomainProxyStatus();
+  return systemDomainProxy.statusVerified();
+}
+
+function shouldEnsureSystemDomainProxy(snapshot, current = systemDomainProxyStatus()) {
   if (!snapshot?.wireGuardStatus || snapshot.wireGuardStatus.active !== true) return false;
-  const current = systemDomainProxyStatus();
   const configured = snapshot.settings && snapshot.settings.domainProxy;
   if (
     current.applied === true &&
@@ -309,6 +315,60 @@ function shouldEnsureSystemDomainProxy(snapshot) {
   return true;
 }
 
+async function probeHdoNetwork(snapshot) {
+  if (!snapshot?.wireGuardStatus || snapshot.wireGuardStatus.active !== true) {
+    return { ok: false, skipped: true, reason: 'wireguard-inactive' };
+  }
+  const manifest = snapshot.settings && snapshot.settings.lastManifest;
+  const domestic = manifest && manifest.wireGuard && manifest.wireGuard.domestic;
+  const target = typeof domestic?.overlayIp === 'string' && domestic.overlayIp
+    ? domestic.overlayIp
+    : '100.88.0.1';
+  try {
+    const result = await pingHost(target, 1200);
+    return {
+      ok: true,
+      target,
+      method: 'ping',
+      stdout: result.stdout.trim()
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      target,
+      method: 'ping',
+      error: err instanceof Error ? err.message : String(err),
+      stdout: typeof err.stdout === 'string' ? err.stdout.trim() : '',
+      stderr: typeof err.stderr === 'string' ? err.stderr.trim() : ''
+    };
+  }
+}
+
+function pingHost(host, timeoutMs) {
+  const platform = process.platform;
+  const command = platform === 'win32' ? 'ping.exe' : '/sbin/ping';
+  const args = platform === 'win32'
+    ? ['-n', '1', '-w', String(timeoutMs), host]
+    : (platform === 'darwin'
+        ? ['-c', '1', '-W', String(timeoutMs), host]
+        : ['-c', '1', '-W', String(Math.max(1, Math.ceil(timeoutMs / 1000))), host]);
+  return execFileText(command, args, timeoutMs + 500);
+}
+
+function execFileText(command, args, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
+      if (err) {
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
 function isAnonymousHdoSnapshot(snapshot) {
   const settings = snapshot?.settings || {};
   const peer = settings.wireGuardPeer || {};
@@ -317,29 +377,23 @@ function isAnonymousHdoSnapshot(snapshot) {
   return String(peer.overlayIp || '').startsWith('100.91.');
 }
 
-async function resetAnonymousPeerBeforeAccountConnect() {
+async function accountNetworkSwitchHint() {
   const snapshot = await hdoCall('snapshot').catch(() => null);
-  if (!isAnonymousHdoSnapshot(snapshot)) return { reset: false };
-
-  const stopped = await hdoCall('connectWireGuardPeer', { action: 'down' }).catch((err) => ({
-    ok: false,
-    error: err instanceof Error ? err.message : String(err)
-  }));
-  const systemDomainProxyResult = await safelyDisableSystemDomainProxy('account-switch');
-  await hdoCall('updateSettings', {
-    relayMode: FAST_RELAY_MODE,
-    anonymous: null,
-    deviceId: null,
-    wireGuardPeer: null,
-    wireGuardDesiredActive: false,
-    lastManifest: null,
-    lastSubscription: null,
-    domainProxy: null
-  });
   return {
-    reset: true,
-    stopped,
-    systemDomainProxy: systemDomainProxyResult
+    fromAnonymous: isAnonymousHdoSnapshot(snapshot),
+    privilegedPreStop: false,
+    reason: 'account-connect-restarts-wireguard'
+  };
+}
+
+async function anonymousNetworkSwitchHint() {
+  const snapshot = await hdoCall('snapshot').catch(() => null);
+  const settings = snapshot?.settings || {};
+  const peer = settings.wireGuardPeer || {};
+  return {
+    fromAccount: Boolean(peer.overlayIp) && !isAnonymousHdoSnapshot(snapshot),
+    privilegedPreStop: false,
+    reason: 'anonymous-connect-restarts-wireguard'
   };
 }
 
@@ -480,7 +534,6 @@ if (gotSingleInstanceLock) {
         userDataDir: app.getPath('userData'),
         log: console
       });
-      await safelyDisableSystemDomainProxy('startup-cleanup');
 
       host = createElectronMarket(
         { app, ipcMain, session: session.defaultSession },
@@ -534,18 +587,25 @@ if (gotSingleInstanceLock) {
 
       ipcMain.handle('demo:hdo-status', async () => {
         const snapshot = await hdoCall('snapshot');
-        if (shouldEnsureSystemDomainProxy(snapshot)) {
-          void ensureSystemDomainProxyFromManifest('wireguard-active').catch((err) => {
+        let systemDomainProxyState = await verifiedSystemDomainProxyStatus();
+        if (shouldEnsureSystemDomainProxy(snapshot, systemDomainProxyState)) {
+          try {
+            const ensured = await ensureSystemDomainProxyFromManifest('wireguard-active');
+            systemDomainProxyState = ensured.systemDomainProxy || await verifiedSystemDomainProxyStatus();
+          } catch (err) {
             console.warn('[hdo] failed to ensure system domain proxy:', err);
-          });
+            systemDomainProxyState = await verifiedSystemDomainProxyStatus();
+          }
         }
+        const hdoNetworkProbe = await probeHdoNetwork(snapshot);
         return {
           defaultServerUrl: defaultHdoServerUrl(),
           auth: host.auth ? host.auth.state() : null,
           updates: {
             restartRequired: readJsonMeta(UPDATE_RESTART_REQUIRED_META)
           },
-          systemDomainProxy: systemDomainProxyStatus(),
+          systemDomainProxy: systemDomainProxyState,
+          hdoNetworkProbe,
           hdo: snapshot
         };
       });
@@ -567,8 +627,28 @@ if (gotSingleInstanceLock) {
         return result;
       });
 
+      ipcMain.handle('demo:hdo-switch-anonymous', async (_e, payload) => {
+        const networkSwitch = await anonymousNetworkSwitchHint();
+        const result = await hdoCall('anonymousConnect', {
+          ...(payload && typeof payload === 'object' ? payload : {}),
+          relayMode: FAST_RELAY_MODE,
+          rotate: true,
+          appId: 'qpjoy-hdo',
+          deviceLabel: 'MX HDO',
+          autoConnect: true
+        });
+        if (result && typeof result === 'object' && result.ok !== false) {
+          return {
+            ...result,
+            networkSwitch,
+            systemDomainProxy: await safelyApplySystemDomainProxy(result.domainProxy, 'anonymous-switch')
+          };
+        }
+        return { ...result, networkSwitch };
+      });
+
       ipcMain.handle('demo:hdo-account-connect', async (_e, payload) => {
-        const accountSwitch = await resetAnonymousPeerBeforeAccountConnect();
+        const accountSwitch = await accountNetworkSwitchHint();
         const result = await hdoCall('accountConnect', {
           ...(payload && typeof payload === 'object' ? payload : {}),
           relayMode: FAST_RELAY_MODE,
@@ -617,8 +697,8 @@ if (gotSingleInstanceLock) {
       });
 
       ipcMain.handle('demo:hdo-stop', async () => {
-        const systemDomainProxyResult = await safelyDisableSystemDomainProxy('hdo-stop');
         const stopped = await hdoCall('connectWireGuardPeer', { action: 'down' });
+        const systemDomainProxyResult = await safelyDisableSystemDomainProxy('hdo-stop');
         return { ...stopped, systemDomainProxy: systemDomainProxyResult };
       });
 

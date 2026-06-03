@@ -80,6 +80,33 @@ function createSystemDomainProxyManager(options = {}) {
         };
       }
       return publicState(state);
+    },
+
+    async statusVerified() {
+      if (!isSupportedPlatform()) return unsupportedStatus();
+      const state = readState(statePath);
+      if (!state || state.applied !== true || state.platform !== process.platform) {
+        return {
+          supported: true,
+          applied: false,
+          verified: true,
+          platform: process.platform
+        };
+      }
+      try {
+        const verification = await verifyPlatformPac(state.pacUrl, state.previous);
+        return publicState(state, {
+          applied: verification.applied,
+          verified: true,
+          actual: verification
+        });
+      } catch (err) {
+        return publicState(state, {
+          applied: false,
+          verified: false,
+          error: err instanceof Error ? err.message : String(err)
+        });
+      }
     }
   };
 
@@ -197,6 +224,12 @@ async function restorePlatformState(previous) {
   }
 }
 
+async function verifyPlatformPac(pacUrl, previous) {
+  if (process.platform === 'darwin') return verifyDarwinPac(pacUrl, previous);
+  if (process.platform === 'win32') return verifyWindowsPac(pacUrl);
+  return { applied: false, platform: process.platform };
+}
+
 async function captureDarwinState() {
   const services = await listDarwinNetworkServices();
   const out = [];
@@ -224,6 +257,36 @@ async function applyDarwinPac(pacUrl, previous) {
     commands.push(['-setautoproxystate', name, 'on']);
   }
   await runDarwinNetworksetupSetBatch(commands);
+}
+
+async function verifyDarwinPac(pacUrl, previous) {
+  let services = darwinServiceNames(previous);
+  if (services.length === 0) services = await listDarwinNetworkServices();
+  const rows = [];
+  for (const name of services) {
+    try {
+      const result = await execFileText('/usr/sbin/networksetup', ['-getautoproxyurl', name]);
+      const parsed = parseDarwinAutoProxy(result.stdout);
+      rows.push({
+        name,
+        url: parsed.url,
+        enabled: parsed.enabled,
+        applied: parsed.enabled === true && parsed.url === pacUrl
+      });
+    } catch (err) {
+      rows.push({
+        name,
+        applied: false,
+        error: err instanceof Error ? err.message : String(err)
+      });
+    }
+  }
+  return {
+    applied: rows.length > 0 && rows.every((row) => row.applied === true),
+    platform: process.platform,
+    pacUrl,
+    services: rows
+  };
 }
 
 async function restoreDarwinState(previous) {
@@ -295,6 +358,16 @@ async function applyWindowsPac(pacUrl) {
   await addWindowsRegistryValue('AutoConfigURL', 'REG_SZ', pacUrl);
   await addWindowsRegistryValue('ProxyEnable', 'REG_DWORD', '0');
   await notifyWindowsProxyChanged();
+}
+
+async function verifyWindowsPac(pacUrl) {
+  const autoConfigUrl = await queryWindowsRegistryValue('AutoConfigURL');
+  return {
+    applied: Boolean(autoConfigUrl && autoConfigUrl.exists && autoConfigUrl.value === pacUrl),
+    platform: process.platform,
+    pacUrl,
+    autoConfigUrl
+  };
 }
 
 async function restoreWindowsState(previous) {

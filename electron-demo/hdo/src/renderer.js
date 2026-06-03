@@ -6,6 +6,9 @@ const relayModeSelect = document.getElementById('hdo-relay-mode');
 const accountInput = document.getElementById('hdo-account-id');
 const passwordInput = document.getElementById('hdo-account-password');
 const passwordToggleButton = document.getElementById('btn-hdo-toggle-password');
+const reconnectButton = document.getElementById('btn-hdo-anon-connect');
+const disconnectButton = document.getElementById('btn-hdo-disconnect');
+const accountConnectButton = document.getElementById('btn-hdo-account-connect');
 const output = document.getElementById('hdo-output');
 const chip = document.getElementById('hdo-status-chip');
 const modeEl = document.getElementById('hdo-mode');
@@ -20,10 +23,12 @@ const updateBannerEl = document.getElementById('hdo-update-banner');
 const updateTextEl = document.getElementById('hdo-update-text');
 
 const buttons = [
-  document.getElementById('btn-hdo-account-connect'),
+  accountConnectButton,
   document.getElementById('btn-hdo-account-config'),
-  document.getElementById('btn-hdo-anon-connect'),
+  reconnectButton,
+  disconnectButton,
   document.getElementById('btn-hdo-anon-config'),
+  document.getElementById('btn-hdo-switch-anonymous'),
   document.getElementById('btn-hdo-save-settings'),
   document.getElementById('btn-hdo-open-test'),
   document.getElementById('btn-hdo-stop'),
@@ -36,13 +41,24 @@ const buttons = [
 const DEFAULT_INTERNAL_URL = 'http://delta.mxinfo-inc.cn';
 const LEGACY_DEFAULT_INTERNAL_URL = 'http://internal.mingxi.com';
 const FAST_RELAY_MODE = 'mesh-h2i';
+const NETWORK_ANONYMOUS = 'anonymous';
+const NETWORK_ACCOUNT = 'account';
+const CONNECT_PERMISSION_NOTE = [
+  '权限提示：',
+  '连接或重连 HDO 网络时，macOS 会请求管理员权限。'
+].join('\n');
+const DISCONNECT_PERMISSION_NOTE = [
+  '权限提示：',
+  '断开当前 HDO 网络时，macOS 会请求管理员权限。'
+].join('\n');
 
 const storageKeys = {
   serverUrl: 'qpjoy.hdo.serverUrl',
   internalUrl: 'qpjoy.hdo.internalUrl',
   relayMode: 'qpjoy.hdo.relayMode',
   accountId: 'qpjoy.hdo.accountId',
-  accountPassword: 'qpjoy.hdo.accountPassword'
+  accountPassword: 'qpjoy.hdo.accountPassword',
+  preferredNetwork: 'qpjoy.hdo.preferredNetwork'
 };
 
 const legacyStorageKeys = {
@@ -54,7 +70,6 @@ const legacyStorageKeys = {
 
 let pendingStatusRefresh = null;
 let lastStatus = null;
-let autoAnonymousStarted = false;
 
 serverInput.value = readSaved('serverUrl') || '';
 {
@@ -80,12 +95,20 @@ document.getElementById('btn-hdo-refresh').addEventListener('click', () => {
   void refreshStatus();
 });
 
-document.getElementById('btn-hdo-anon-connect').addEventListener('click', () => {
-  void runAnonymous(true, '重新连接');
+reconnectButton.addEventListener('click', () => {
+  void runReconnect();
+});
+
+disconnectButton.addEventListener('click', () => {
+  void runDisconnect('断开当前网络');
 });
 
 document.getElementById('btn-hdo-anon-config').addEventListener('click', () => {
   void runAnonymous(false, '同步匿名配置');
+});
+
+document.getElementById('btn-hdo-switch-anonymous').addEventListener('click', () => {
+  void switchToAnonymousNetwork();
 });
 
 document.getElementById('btn-hdo-save-settings').addEventListener('click', () => {
@@ -98,7 +121,7 @@ document.getElementById('btn-hdo-save-settings').addEventListener('click', () =>
   });
 });
 
-document.getElementById('btn-hdo-account-connect').addEventListener('click', () => {
+accountConnectButton.addEventListener('click', () => {
   void runAccount(true);
 });
 
@@ -120,7 +143,7 @@ document.getElementById('btn-hdo-open-test').addEventListener('click', () => {
 });
 
 document.getElementById('btn-hdo-stop').addEventListener('click', () => {
-  void runAction('停止 HDO', async () => api.hdoStop());
+  void runDisconnect('断开当前网络');
 });
 
 document.getElementById('btn-hdo-check-updates').addEventListener('click', () => {
@@ -150,7 +173,6 @@ setInterval(() => {
 
 async function boot() {
   await refreshStatus(false);
-  await ensureAnonymousConnected();
   scheduleStatusRefresh(false, 1200);
 }
 
@@ -162,54 +184,53 @@ function scheduleStatusRefresh(showOutput = false, delay = 400) {
   }, delay);
 }
 
-async function ensureAnonymousConnected() {
-  if (autoAnonymousStarted) return;
-  autoAnonymousStarted = true;
-  const status = lastStatus || await refreshStatus(false);
-  const hdo = status?.hdo || {};
-  const settings = hdo.settings || {};
-  const wgActive = hdo.wireGuardStatus && hdo.wireGuardStatus.active === true;
-  const peer = settings.wireGuardPeer || {};
-  if (wgActive) {
-    if (isAnonymousPeer(settings, peer) && accountInput.value.trim() && passwordInput.value) {
-      await runAccount(true, '切换账号线路');
-    }
-    return;
-  }
-
-  const serverUrl = serverInput.value.trim() || status?.defaultServerUrl || '';
-  if (!serverUrl) {
-    setConnectionCopy('需要配置服务地址', '请在高级功能中填写 HDO 服务地址，或使用已预置服务的安装包。');
-    chip.textContent = '待配置';
-    chip.className = 'status-chip status-chip--warn';
-    return;
-  }
-  serverInput.value = serverUrl;
-  if (accountInput.value.trim() && passwordInput.value) {
-    await runAccount(true, '启用账号线路');
-    return;
-  }
-  await runAnonymous(true, '启用匿名访问');
-}
-
 async function runAnonymous(autoConnect, label = '重新连接') {
+  if (!(await ensureNetworkActionAllowed(NETWORK_ANONYMOUS))) return;
   persistInputs();
+  if (autoConnect) setPreferredNetwork(NETWORK_ANONYMOUS);
   const serverUrl = serverInput.value.trim();
   relayModeSelect.value = FAST_RELAY_MODE;
-  await runAction(label, async () =>
-    api.hdoAnonymousConnect({
+  await runAction(label, async () => api.hdoAnonymousConnect({
       serverUrl,
       relayMode: FAST_RELAY_MODE,
       autoConnect,
       testUrl: internalUrlInput.value.trim()
-    })
-  );
+    }), autoConnect ? {
+      permissionNote: CONNECT_PERMISSION_NOTE,
+      detail: '接下来的系统权限用于连接或重启 HDO 网络。'
+    } : {});
 }
 
-async function runAccount(autoConnect, label) {
+async function switchToAnonymousNetwork() {
+  if (!(await ensureNetworkActionAllowed(NETWORK_ANONYMOUS))) return;
+  persistInputs();
+  setPreferredNetwork(NETWORK_ANONYMOUS);
+  relayModeSelect.value = FAST_RELAY_MODE;
+  await runAction('切回匿名网络', async () => api.hdoSwitchAnonymous({
+      serverUrl: serverInput.value.trim(),
+      relayMode: FAST_RELAY_MODE,
+      testUrl: internalUrlInput.value.trim()
+    }), {
+      permissionNote: CONNECT_PERMISSION_NOTE,
+      detail: '接下来的系统权限用于连接匿名 HDO 网络。'
+    });
+}
+
+async function runReconnect() {
+  const status = lastStatus || await refreshStatus(false);
+  const target = targetNetworkForConnect(status);
+  if (target === NETWORK_ACCOUNT && hasAccountAccess(status)) {
+    await runAccount(true, isWireGuardActive(status) ? '重连账号线路' : '连接账号线路', false);
+    return;
+  }
+  await runAnonymous(true, isWireGuardActive(status) ? '重连匿名线路' : '连接匿名线路');
+}
+
+async function runAccount(autoConnect, label, requireCredentials = true) {
+  if (!(await ensureNetworkActionAllowed(NETWORK_ACCOUNT))) return;
   const identifier = accountInput.value.trim();
   const password = passwordInput.value;
-  if (!identifier || !password) {
+  if ((identifier && !password) || (!identifier && password) || (requireCredentials && (!identifier || !password))) {
     writeOutput('请输入用户名和密码。', true);
     chip.textContent = '待登录';
     chip.className = 'status-chip status-chip--warn';
@@ -219,33 +240,69 @@ async function runAccount(autoConnect, label) {
   const relayMode = FAST_RELAY_MODE;
   relayModeSelect.value = FAST_RELAY_MODE;
   persistInputs();
+  if (autoConnect) setPreferredNetwork(NETWORK_ACCOUNT);
 
-  await runAction(label || (autoConnect ? '登录并提速' : '同步账号配置'), async () =>
-    api.hdoAccountConnect({
+  await runAction(label || (autoConnect ? '登录切换网段' : '同步账号配置'), async () => {
+    const payload = {
       serverUrl: serverInput.value.trim(),
       relayMode,
-      identifier,
-      password,
       rotate: true,
       autoConnect,
       testUrl: internalUrlInput.value.trim()
-    })
-  );
+    };
+    if (identifier && password) {
+      payload.identifier = identifier;
+      payload.password = password;
+    }
+    return api.hdoAccountConnect(payload);
+  }, autoConnect ? {
+    permissionNote: CONNECT_PERMISSION_NOTE,
+    detail: '接下来的系统权限用于连接或重启 HDO 网络。'
+  } : {});
 }
 
-async function runAction(label, fn) {
+async function runDisconnect(label) {
+  const status = lastStatus || await refreshStatus(false);
+  if (!isWireGuardActive(status)) {
+    writeOutput('当前没有已连接的 HDO 网络。');
+    setConnectionCopy('当前未连接', '需要访问内网时，请点击连接当前线路。');
+    chip.textContent = '未连接';
+    chip.className = 'status-chip status-chip--warn';
+    return;
+  }
+  const network = networkFromStatus(status);
+  if (network) setPreferredNetwork(network);
+  await runAction(label, async () => api.hdoStop(), {
+    permissionNote: DISCONNECT_PERMISSION_NOTE,
+    detail: '接下来的系统权限用于断开当前 HDO 网络。',
+    waitFor: 'down'
+  });
+}
+
+async function runAction(label, fn, options = {}) {
   setBusy(true);
   chip.textContent = `${label}中`;
   chip.className = 'status-chip';
-  writeOutput(`${label}...`);
+  if (options.detail) setConnectionCopy(label, options.detail);
+  writeOutput(options.permissionNote ? `${label}...\n\n${options.permissionNote}` : `${label}...`);
   try {
     const result = await fn();
     writeOutput(publicJson(result));
+    if (options.waitFor === 'down') {
+      setConnectionCopy('正在断开网络', '已确认系统权限，正在等待 HDO 网络停止。');
+      chip.textContent = '断开中';
+      chip.className = 'status-chip status-chip--warn';
+      await waitForTunnelDown();
+    }
     if (shouldWaitForTunnel(result)) {
       setConnectionCopy('正在完成连接', '已确认系统权限，正在等待线路启动。');
       chip.textContent = '连接中';
       chip.className = 'status-chip status-chip--warn';
-      await waitForTunnelReady();
+      const ready = await waitForTunnelReady();
+      if (!ready) {
+        setConnectionCopy('正在确认线路', '系统授权已完成，正在等待后台隧道进入可用状态。');
+        scheduleStatusRefresh(false, 1800);
+      }
     }
     await refreshStatus(false);
     scheduleStatusRefresh(false, 1200);
@@ -260,12 +317,22 @@ async function runAction(label, fn) {
   }
 }
 
-async function waitForTunnelReady(timeoutMs = 14_000) {
+async function waitForTunnelReady(timeoutMs = 45_000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    await delay(900);
+    await delay(1200);
     const status = await refreshStatus(false);
-    if (status?.hdo?.wireGuardStatus?.active === true) return true;
+    if (status?.hdo?.wireGuardStatus?.active === true && status?.hdoNetworkProbe?.ok === true) return true;
+  }
+  return false;
+}
+
+async function waitForTunnelDown(timeoutMs = 20_000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    await delay(800);
+    const status = await refreshStatus(false);
+    if (status?.hdo?.wireGuardStatus?.active !== true) return true;
   }
   return false;
 }
@@ -273,16 +340,15 @@ async function waitForTunnelReady(timeoutMs = 14_000) {
 function shouldWaitForTunnel(result) {
   if (!result || typeof result !== 'object') return false;
   if (result.wireGuardStatus && result.wireGuardStatus.active === true) return false;
-  const connected = result.connected;
+  if (isAuthorizationCancelResult(result.connected)) return false;
   const peer = result.peer;
   return Boolean(
     result.ok !== false &&
     peer &&
     typeof peer === 'object' &&
     peer.configPath &&
-    connected &&
-    typeof connected === 'object' &&
-    connected.ok !== false
+    result.connected !== null &&
+    result.connected !== undefined
   );
 }
 
@@ -307,43 +373,57 @@ async function refreshStatus(showOutput = true) {
     const peer = settings.wireGuardPeer || {};
     const anonymous = settings.anonymous || {};
     const wgActive = hdo.wireGuardStatus && hdo.wireGuardStatus.active === true;
+    const hdoNetworkProbe = status.hdoNetworkProbe || null;
+    const networkReady = wgActive && hdoNetworkProbe && hdoNetworkProbe.ok === true;
     const systemDomainProxy = status.systemDomainProxy || {};
     const session = status.auth || hdo.session || {};
     const loggedIn = Boolean(session.user || session.loggedIn);
-    const anonymousPeer = isAnonymousPeer(settings, peer);
-    const accountConnected = loggedIn && !anonymousPeer;
-    const mode = accountConnected
-      ? '账号线路'
-      : (anonymousPeer ? '匿名线路' : (loggedIn ? '账号待切换' : '准备中'));
+    const currentNetwork = networkFromStatus(status);
+    const configuredNetwork = currentNetwork || targetNetworkForConnect(status);
+    const anonymousPeer = currentNetwork === NETWORK_ANONYMOUS;
+    const accountConnected = currentNetwork === NETWORK_ACCOUNT;
+    const mode = currentNetwork ? networkLabel(currentNetwork) : networkLabel(configuredNetwork);
     const lastError = hdo.lastError || peer.lastError || null;
     renderUpdateBanner(status.updates?.restartRequired || null);
 
     modeEl.textContent = mode;
     overlayEl.textContent = peer.overlayIp || '-';
-    wgEl.textContent = wgActive ? '已连接' : '未连接';
+    wgEl.textContent = networkReady ? '已连接' : (wgActive ? '网络未通' : '未连接');
     systemDomainEl.textContent = systemDomainProxy.applied
       ? '已接管'
       : (systemDomainProxy.supported === false ? '不支持' : '未启用');
     serverLabelEl.textContent = serverInput.value ? '服务已配置' : '服务未配置';
-    loginHintEl.textContent = loggedIn
-      ? '已使用账号配置，后续会优先保持专属线路。'
-      : '未登录也可以使用匿名线路；登录后会自动切换到账号线路。';
+    disconnectButton.hidden = !wgActive;
+    reconnectButton.textContent = wgActive ? '重连当前线路' : `连接${networkLabel(configuredNetwork)}`;
+    accountConnectButton.textContent = accountConnected ? '重连账号线路' : (wgActive ? '先断开再切账号' : '登录切换网段');
+    loginHintEl.textContent = wgActive
+      ? `当前为${networkLabel(currentNetwork)}；切换线路前请先断开当前网络。`
+      : (configuredNetwork === NETWORK_ACCOUNT
+        ? '当前未连接账号线路；需要匿名段时可在高级功能切回匿名网络。'
+        : (loggedIn ? '当前未连接匿名线路；点击登录会在断开状态下切换到账号网段。' : '当前未连接匿名线路；登录后可切换到账号网段。'));
 
-    if (wgActive) {
+    if (networkReady) {
       chip.textContent = '已连接';
       chip.className = 'status-chip status-chip--ok';
       setConnectionCopy(
-        accountConnected ? '专属线路已开启' : '匿名线路已开启',
-        accountConnected ? '已拉取账号配置，正在使用更稳定的访问路径。' : '当前可直接访问；登录后会切换到你的专属配置。'
+        `${networkLabel(currentNetwork)}已连接`,
+        '需要切换账号/匿名线路时，请先断开当前网络，再连接目标线路。'
+      );
+    } else if (wgActive && hdoNetworkProbe && hdoNetworkProbe.ok === false) {
+      chip.textContent = '网络未通';
+      chip.className = 'status-chip status-chip--bad';
+      setConnectionCopy(
+        `${networkLabel(currentNetwork)}未连通`,
+        `WireGuard 已启动，但 ${hdoNetworkProbe.target || '100.88.0.1'} 暂不可达；请重连当前线路或断开后重新连接。`
       );
     } else if (lastError) {
       chip.textContent = '需处理';
       chip.className = 'status-chip status-chip--bad';
       setConnectionCopy('连接未完成', String(lastError));
     } else {
-      chip.textContent = '准备中';
+      chip.textContent = '未连接';
       chip.className = 'status-chip status-chip--warn';
-      setConnectionCopy('正在准备安全访问', '系统会优先尝试匿名线路，登录后可获得更快线路。');
+      setConnectionCopy(`${networkLabel(configuredNetwork)}未连接`, '点击连接当前线路；切换账号/匿名线路不再自动进行。');
     }
 
     if (showOutput) {
@@ -363,6 +443,7 @@ async function refreshStatus(showOutput = true) {
         } : null,
         domainProxy: settings.domainProxy || null,
         systemDomainProxy,
+        hdoNetworkProbe,
         lastError
       }));
     }
@@ -407,6 +488,11 @@ function readSaved(key) {
   return localStorage.getItem(legacyStorageKeys[key]);
 }
 
+function setPreferredNetwork(value) {
+  if (value !== NETWORK_ACCOUNT && value !== NETWORK_ANONYMOUS) return;
+  localStorage.setItem(storageKeys.preferredNetwork, value);
+}
+
 function setBusy(busy) {
   buttons.forEach((button) => {
     button.disabled = busy;
@@ -437,6 +523,64 @@ function isAnonymousPeer(settings, peer) {
   if (settings?.anonymous?.mode === 'anonymous') return true;
   if (String(settings?.deviceId || '').startsWith('hdo-anon-')) return true;
   return String(peer?.overlayIp || '').startsWith('100.91.');
+}
+
+function isWireGuardActive(status) {
+  return status?.hdo?.wireGuardStatus?.active === true;
+}
+
+function networkFromStatus(status) {
+  const hdo = status?.hdo || {};
+  const settings = hdo.settings || {};
+  const peer = settings.wireGuardPeer || {};
+  if (!peer.overlayIp) return null;
+  return isAnonymousPeer(settings, peer) ? NETWORK_ANONYMOUS : NETWORK_ACCOUNT;
+}
+
+function activeNetworkFromStatus(status) {
+  return isWireGuardActive(status) ? networkFromStatus(status) : null;
+}
+
+function targetNetworkForConnect(status) {
+  const target = networkFromStatus(status) || preferredNetworkFromStatus(status);
+  if (target === NETWORK_ACCOUNT && !hasAccountAccess(status)) return NETWORK_ANONYMOUS;
+  return target;
+}
+
+function preferredNetworkFromStatus(status) {
+  const saved = localStorage.getItem(storageKeys.preferredNetwork);
+  if (saved === NETWORK_ACCOUNT || saved === NETWORK_ANONYMOUS) return saved;
+  return networkFromStatus(status) || NETWORK_ANONYMOUS;
+}
+
+function hasAccountAccess(status) {
+  const hdo = status?.hdo || {};
+  const session = status?.auth || hdo.session || {};
+  return Boolean(session.user || session.loggedIn || (accountInput.value.trim() && passwordInput.value));
+}
+
+async function ensureNetworkActionAllowed(targetNetwork) {
+  const status = lastStatus || await refreshStatus(false);
+  const activeNetwork = activeNetworkFromStatus(status);
+  if (!activeNetwork || activeNetwork === targetNetwork) return true;
+  const currentLabel = networkLabel(activeNetwork);
+  const targetLabel = networkLabel(targetNetwork);
+  const message = `当前已连接${currentLabel}。切换到${targetLabel}前，请先点击“断开当前网络”。`;
+  writeOutput(message, true);
+  chip.textContent = '需先断开';
+  chip.className = 'status-chip status-chip--warn';
+  setConnectionCopy('请先断开当前网络', message);
+  return false;
+}
+
+function networkLabel(value) {
+  return value === NETWORK_ACCOUNT ? '账号线路' : '匿名线路';
+}
+
+function isAuthorizationCancelResult(value) {
+  if (!value || typeof value !== 'object' || value.ok !== false) return false;
+  const message = String(value.error || value.message || '');
+  return /cancel|取消|用户已取消|user canceled|-128/i.test(message);
 }
 
 function writeOutput(value, isError = false) {

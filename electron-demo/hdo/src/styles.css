@@ -335,6 +335,18 @@ body {
   color: #ffffff;
 }
 
+.button--secondary {
+  border-color: #a7c6f5;
+  background: #eef5ff;
+  color: #1e4f9c;
+}
+
+.button--secondary:hover {
+  border-color: var(--primary);
+  background: #e0ecff;
+  color: var(--primary-dark);
+}
+
 .button--danger {
   border-color: #f3b8ae;
   color: var(--red);

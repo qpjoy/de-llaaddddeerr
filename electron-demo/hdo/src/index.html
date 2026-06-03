@@ -19,11 +19,12 @@
 
       <div class="connection">
         <div>
-          <h1 id="hdo-connection-title">正在启用安全访问</h1>
-          <p id="hdo-status-detail">打开后会自动进入匿名线路，无需先登录。</p>
+          <h1 id="hdo-connection-title">正在检测安全访问</h1>
+          <p id="hdo-status-detail">点击连接当前线路后启用内网访问。</p>
         </div>
         <div class="connection-actions">
-          <button id="btn-hdo-anon-connect" class="button button--primary">重新连接</button>
+          <button id="btn-hdo-disconnect" class="button button--danger" hidden>断开当前网络</button>
+          <button id="btn-hdo-anon-connect" class="button button--primary">连接当前线路</button>
           <button id="btn-hdo-refresh" class="button">刷新</button>
         </div>
       </div>
@@ -56,8 +57,8 @@
     <section class="login-panel">
       <div class="section-head">
         <div>
-          <h2>登录后速度提升</h2>
-          <p>登录会拉取你的专属配置，优先使用更稳定的线路和 H2I 加速。</p>
+          <h2>登录切换账号网段</h2>
+          <p>登录会从匿名网段切换到账号网段，并优先使用 H2I 快速模式。</p>
         </div>
       </div>
 
@@ -73,10 +74,10 @@
             <button id="btn-hdo-toggle-password" class="password-toggle" type="button">显示</button>
           </span>
         </label>
-        <button id="btn-hdo-account-connect" class="button button--accent">登录并提速</button>
+        <button id="btn-hdo-account-connect" class="button button--accent">登录切换网段</button>
       </div>
 
-      <p class="login-hint" id="hdo-login-hint">未登录也可以使用匿名线路；登录后会自动切换到账号线路。</p>
+      <p class="login-hint" id="hdo-login-hint">未登录也可以使用匿名线路；登录会在断开状态下切换到账号网段。</p>
     </section>
 
     <details class="advanced-panel">
@@ -101,11 +102,12 @@
 
         <div class="advanced-actions">
           <button id="btn-hdo-save-settings" class="button">保存配置</button>
+          <button id="btn-hdo-switch-anonymous" class="button button--secondary">切回匿名网络</button>
           <button id="btn-hdo-anon-config" class="button">同步匿名配置</button>
           <button id="btn-hdo-account-config" class="button">同步账号配置</button>
           <button id="btn-hdo-open-test" class="button">打开内部地址</button>
           <button id="btn-hdo-check-updates" class="button">检查更新</button>
-          <button id="btn-hdo-stop" class="button button--danger">停止 HDO</button>
+          <button id="btn-hdo-stop" class="button button--danger">断开当前网络</button>
           <button id="btn-market-new" class="button">打开市场管理</button>
           <button id="btn-market" class="button">进入市场页面</button>
         </div>
