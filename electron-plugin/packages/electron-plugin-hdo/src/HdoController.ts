@@ -384,6 +384,102 @@ export class HdoController {
     return result;
   }
 
+  private async reportAnonymousH2iDirectReady(input: {
+    appId: string;
+    installId: string;
+    deviceLabel: string;
+    platform: string;
+    publicKey: string;
+    overlayIp: string;
+    relayMode: HdoRelayMode;
+    candidateIps: string[];
+  }): Promise<Record<string, unknown>> {
+    const readyIps = await this.probeH2iDirectReadyIps(input.candidateIps);
+    if (readyIps.length === 0) {
+      return {
+        ok: false,
+        skipped: true,
+        reason: 'h2i-direct-probe-failed',
+        candidateIps: input.candidateIps
+      };
+    }
+    const bootstrap = await this.apiPostPublic('/api/v1/hdo/anonymous/bootstrap', {
+      appId: input.appId,
+      installId: input.installId,
+      deviceLabel: input.deviceLabel,
+      platform: input.platform,
+      publicKey: input.publicKey,
+      overlayIp: input.overlayIp,
+      relayMode: input.relayMode,
+      preferDirectPeers: input.relayMode !== 'mesh-hdi',
+      h2iDirectReady: true,
+      h2iDirectReadyIps: readyIps
+    });
+    const manifest = plainObject(plainObject(bootstrap)?.manifest);
+    if (manifest) this.updateSettings({ lastManifest: manifest });
+    return {
+      ok: true,
+      mode: 'anonymous',
+      readyIps,
+      bootstrap
+    };
+  }
+
+  private async reportAccountH2iDirectReady(): Promise<Record<string, unknown>> {
+    const peer = this.settings.wireGuardPeer ?? {};
+    const candidateIps = stringArray(peer.h2iDirectCandidateIps);
+    if (candidateIps.length === 0) {
+      return { ok: false, skipped: true, reason: 'no-h2i-direct-candidates' };
+    }
+    const publicKey = stringValue(peer.publicKey);
+    const overlayIp = accountOverlayIp(peer.overlayIp);
+    if (!publicKey || !overlayIp) {
+      return { ok: false, skipped: true, reason: 'missing-account-peer' };
+    }
+    const readyIps = await this.probeH2iDirectReadyIps(candidateIps);
+    if (readyIps.length === 0) {
+      return {
+        ok: false,
+        skipped: true,
+        reason: 'h2i-direct-probe-failed',
+        candidateIps
+      };
+    }
+    const device = await this.registerDevice({
+      id: this.settings.deviceId,
+      label: this.settings.deviceLabel,
+      platform: this.settings.devicePlatform,
+      publicKey,
+      overlayIp,
+      status: 'online',
+      metadata: {
+        source: '@qpjoy/electron-plugin-hdo',
+        arch: process.arch,
+        wireGuard: {
+          publicKey,
+          h2iDirectReady: true,
+          h2iDirectReadyIps: readyIps,
+          ...wireGuardPreferenceMetadata(this.settings.relayMode),
+          updatedAt: new Date().toISOString()
+        }
+      }
+    });
+    return {
+      ok: true,
+      mode: 'account',
+      readyIps,
+      device
+    };
+  }
+
+  private async probeH2iDirectReadyIps(candidateIps: string[]): Promise<string[]> {
+    const ready: string[] = [];
+    for (const ip of uniqueStrings(candidateIps.map((value) => normalizeOverlayIp(value)).filter((value): value is string => Boolean(value)))) {
+      if (await pingOverlayIp(ip, 1800)) ready.push(ip);
+    }
+    return ready;
+  }
+
   async anonymousConnect(input: {
     serverUrl?: string | null;
     appId?: string | null;
@@ -490,7 +586,9 @@ export class HdoController {
       publicKey,
       overlayIp: anonymousOverlayIp(previous.overlayIp) ?? undefined,
       relayMode,
-      preferDirectPeers: relayMode !== 'mesh-hdi'
+      preferDirectPeers: relayMode !== 'mesh-hdi',
+      h2iDirectReady: false,
+      h2iDirectReadyIps: []
     });
     let bootstrapRow = plainObject(bootstrap);
     let manifest = plainObject(bootstrapRow?.manifest);
@@ -523,7 +621,9 @@ export class HdoController {
         platform: stringValue(input.platform) ?? this.settings.devicePlatform ?? process.platform,
         publicKey,
         relayMode,
-        preferDirectPeers: relayMode !== 'mesh-hdi'
+        preferDirectPeers: relayMode !== 'mesh-hdi',
+        h2iDirectReady: false,
+        h2iDirectReadyIps: []
       });
       bootstrapRow = plainObject(bootstrap);
       manifest = plainObject(bootstrapRow?.manifest);
@@ -540,6 +640,7 @@ export class HdoController {
     let config: string | null = null;
     let configPath: string | null = null;
     let lastError: string | null = null;
+    let h2iDirectCandidateIps: string[] = [];
     try {
       const domestic = domesticWireGuardFromManifest(manifest);
       if (!manifestHasMeshLicense(manifest)) {
@@ -553,6 +654,8 @@ export class HdoController {
           'manifest 中缺少 domestic WireGuard 公钥或 endpoint；请在服务器 HDO 管理页给 domestic 节点 metadata.wireGuard 填入 publicKey/listenPort。';
       } else {
         const directPeers = directPeersFromManifest(manifest, overlayIp);
+        const clientDirectPeers = clientDirectPeersForPlatform(relayMode, directPeers);
+        h2iDirectCandidateIps = directPeerOverlayIps(clientDirectPeers);
         const routeCidrs = uniqueStrings([
           ...domestic.routeCidrs,
           ...manifestOverlayRouteCidrs(manifest, overlayIp),
@@ -571,7 +674,7 @@ export class HdoController {
           domesticPublicKey: domestic.publicKey,
           domesticEndpoint: domestic.endpoint,
           allowedIps,
-          directPeers: clientDirectPeersForPlatform(relayMode, directPeers),
+          directPeers: clientDirectPeers,
           persistentKeepalive: 25
         });
         configPath = this.writeWireGuardProfile(config);
@@ -588,6 +691,7 @@ export class HdoController {
       config,
       configPath,
       allowedIps: config ? wireGuardAllowedIps(config) : null,
+      h2iDirectCandidateIps,
       routeProbe,
       canUseDefaultMesh: routeProbe.canUseDefaultMesh,
       lastError,
@@ -611,6 +715,7 @@ export class HdoController {
     const domainProxy = await this.applyDomainProxyFromManifest(manifest);
     let connected: Record<string, unknown> | null = null;
     let wireGuardStatus: Record<string, unknown> | null = null;
+    let h2iDirectReady: Record<string, unknown> | null = null;
     if (config && input.autoConnect !== false) {
       connected = await this.connectWireGuardPeer({
         action: 'restart',
@@ -621,6 +726,21 @@ export class HdoController {
         error: errorMessage(err)
       }));
       wireGuardStatus = await this.waitForWireGuardState(true, 32, 650);
+      if (wireGuardStatus?.active === true && overlayIp && h2iDirectCandidateIps.length > 0) {
+        h2iDirectReady = await this.reportAnonymousH2iDirectReady({
+          appId,
+          installId,
+          deviceLabel,
+          platform: stringValue(input.platform) ?? this.settings.devicePlatform ?? process.platform,
+          publicKey,
+          overlayIp,
+          relayMode,
+          candidateIps: h2iDirectCandidateIps
+        }).catch((err) => ({
+          ok: false,
+          error: errorMessage(err)
+        }));
+      }
     }
     this.emitEvent('relay-connected', {
       mode: 'anonymous',
@@ -638,6 +758,7 @@ export class HdoController {
       domainProxy,
       connected,
       wireGuardStatus,
+      h2iDirectReady,
       peer: publicWireGuardPeer(peer),
       config
     };
@@ -740,6 +861,7 @@ export class HdoController {
     let subscription: Record<string, unknown> | null = null;
     let connected: Record<string, unknown> | null = null;
     let wireGuardStatus: Record<string, unknown> | null = null;
+    let h2iDirectReady: Record<string, unknown> | null = null;
 
     if (preparedRow?.ok === true) {
       subscription = await this.refreshSubscription().then(
@@ -760,6 +882,12 @@ export class HdoController {
         if (!wireGuardStatus && preparedPeer?.overlayIp) {
           wireGuardStatus = this.wireGuardStatus();
         }
+        if (wireGuardStatus?.active === true) {
+          h2iDirectReady = await this.reportAccountH2iDirectReady().catch((err) => ({
+            ok: false,
+            error: errorMessage(err)
+          }));
+        }
       }
     }
     this.emitEvent('relay-connected', {
@@ -777,7 +905,8 @@ export class HdoController {
       domainProxy,
       subscription,
       connected,
-      wireGuardStatus
+      wireGuardStatus,
+      h2iDirectReady
     };
   }
 
@@ -885,6 +1014,8 @@ export class HdoController {
         arch: process.arch,
         wireGuard: {
           publicKey,
+          h2iDirectReady: false,
+          h2iDirectReadyIps: [],
           routeProbe,
           keySource,
           ...wireGuardPreferenceMetadata(this.settings.relayMode),
@@ -897,6 +1028,7 @@ export class HdoController {
     let config: string | null = null;
     let configPath: string | null = null;
     let lastError: string | null = null;
+    let h2iDirectCandidateIps: string[] = [];
 
     try {
       manifest = await this.refreshManifest(stringField(device, 'id') ?? this.settings.deviceId);
@@ -911,6 +1043,8 @@ export class HdoController {
       } else {
         const activeRelayMode = normalizeRelayMode(this.settings.relayMode);
         const directPeers = directPeersFromManifest(manifest, overlayIp);
+        const clientDirectPeers = clientDirectPeersForPlatform(activeRelayMode, directPeers);
+        h2iDirectCandidateIps = directPeerOverlayIps(clientDirectPeers);
         const routeCidrs = uniqueStrings([
           ...domestic.routeCidrs,
           ...manifestOverlayRouteCidrs(manifest, overlayIp),
@@ -932,7 +1066,7 @@ export class HdoController {
           domesticPublicKey: domestic.publicKey,
           domesticEndpoint: domestic.endpoint,
           allowedIps,
-          directPeers: clientDirectPeersForPlatform(activeRelayMode, directPeers),
+          directPeers: clientDirectPeers,
           persistentKeepalive: 25
         });
         configPath = this.writeWireGuardProfile(config);
@@ -949,6 +1083,7 @@ export class HdoController {
       config,
       configPath,
       allowedIps: config ? wireGuardAllowedIps(config) : null,
+      h2iDirectCandidateIps,
       routeProbe,
       canUseDefaultMesh: routeProbe.canUseDefaultMesh,
       lastError,
@@ -2231,6 +2366,12 @@ function accountOverlayIp(value: unknown): string | null {
   return overlayIp && !isAnonymousOverlayIp(overlayIp) ? overlayIp : null;
 }
 
+function normalizeOverlayIp(value: unknown): string | null {
+  const text = stringValue(value);
+  if (!text) return null;
+  return text.split('/')[0] || null;
+}
+
 function normalizeRelayMode(value: unknown): HdoRelayMode {
   if (value === 'mesh-h2i' || value === 'mesh-service-p2p') return 'mesh-h2i';
   if (value === 'mesh-h2h' || value === 'mesh-p2p') return 'mesh-h2h';
@@ -2265,6 +2406,22 @@ function execFileAsync(command: string, args: string[]): Promise<void> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function pingOverlayIp(host: string, timeoutMs: number): Promise<boolean> {
+  const command = process.platform === 'win32'
+    ? 'ping.exe'
+    : (process.platform === 'darwin' ? '/sbin/ping' : 'ping');
+  const args = process.platform === 'win32'
+    ? ['-n', '1', '-w', String(timeoutMs), host]
+    : (process.platform === 'darwin'
+        ? ['-c', '1', '-W', String(timeoutMs), host]
+        : ['-c', '1', '-W', String(Math.max(1, Math.ceil(timeoutMs / 1000))), host]);
+  return new Promise((resolve) => {
+    execFile(command, args, { timeout: timeoutMs + 800, windowsHide: true }, (err) => {
+      resolve(!err);
+    });
+  });
 }
 
 function copyTextToClipboard(value: string): Promise<void> {
@@ -2448,6 +2605,16 @@ function directPeersFromManifest(manifest: Record<string, unknown>, ownOverlayIp
 }
 
 type HdoClientDirectPeer = ReturnType<typeof directPeersFromManifest>[number];
+
+function directPeerOverlayIps(directPeers: HdoClientDirectPeer[]): string[] {
+  return uniqueStrings(
+    directPeers
+      .filter((peer) => Boolean(peer.endpoint))
+      .flatMap((peer) => peer.allowedIps)
+      .map((cidr) => normalizeOverlayIp(normalizeCidr(cidr) ?? cidr))
+      .filter((ip): ip is string => Boolean(ip && ip.startsWith('100.')))
+  );
+}
 
 function clientDirectPeersForPlatform(
   relayMode: HdoRelayMode,

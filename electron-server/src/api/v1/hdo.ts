@@ -217,6 +217,10 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
     const existingOverlayIp = normalizeOverlayIp(existing?.overlayIp ?? null);
     const requestedOverlayIp = normalizeOverlayIp(asOptionalString(body.overlayIp));
     const publicKeyChanged = Boolean(existing?.publicKey && existing.publicKey !== publicKey);
+    const h2iDirectReady = asOptionalBoolean(body.h2iDirectReady);
+    const h2iDirectReadyIps = asStringArray(body.h2iDirectReadyIps)
+      .map((ip) => normalizeOverlayIp(ip))
+      .filter((ip): ip is string => Boolean(ip));
     const preferredOverlayIp =
       publicKeyChanged ? null : (requestedOverlayIp ?? existingOverlayIp);
     const overlayIp = allocateDeviceOverlayIp(
@@ -252,6 +256,8 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
           ...(asPlainObject(existing?.metadata?.wireGuard) ?? {}),
           relayMode,
           preferDirectPeers: relayMode !== 'mesh-hdi',
+          ...(h2iDirectReady !== null ? { h2iDirectReady } : {}),
+          ...(h2iDirectReadyIps.length ? { h2iDirectReadyIps } : {}),
           overlayIpHistory
         },
         updatedAt: now
@@ -2840,6 +2846,15 @@ function wireGuardDirectPeerSummaries(
       const peerIsServiceTarget = serviceTargetHosts.has(overlayIp);
       if (relayMode === 'mesh-h2i' && !peerIsServiceTarget && !currentIsServiceTarget) return null;
       const wireGuard = wireGuardMetadataFromDevice(row);
+      if (
+        relayMode === 'mesh-h2i' &&
+        currentIsServiceTarget &&
+        !peerIsServiceTarget &&
+        currentOverlayIp &&
+        !wireGuardH2iDirectReadyForTarget(wireGuard, currentOverlayIp)
+      ) {
+        return null;
+      }
       const peerDirectExplicitlyDisabled =
         asOptionalBoolean(wireGuard?.directListener) === false &&
         asOptionalBoolean(wireGuard?.acceptDirectPeers) === false;
@@ -2872,6 +2887,22 @@ function wireGuardDirectPeerSummaries(
       };
     })
     .filter((row): row is NonNullable<typeof row> => Boolean(row));
+}
+
+function wireGuardH2iDirectReadyForTarget(
+  wireGuard: Record<string, unknown> | null,
+  targetOverlayIp: string
+): boolean {
+  if (asOptionalBoolean(wireGuard?.h2iDirectReady) !== true) return false;
+  const targets = uniqueStrings([
+    ...asStringArray(wireGuard?.h2iDirectReadyIps),
+    ...asStringArray(wireGuard?.h2iDirectReadyTargets),
+    ...asStringArray(wireGuard?.directReadyIps)
+  ]
+    .map((ip) => normalizeOverlayIp(ip))
+    .filter((ip): ip is string => Boolean(ip)));
+  if (targets.length === 0) return true;
+  return targets.includes(targetOverlayIp);
 }
 
 function relayModeFromWireGuardMetadata(wireGuard: Record<string, unknown> | null): 'mesh-hdi' | 'mesh-h2i' | 'mesh-h2h' {

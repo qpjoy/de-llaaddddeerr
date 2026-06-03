@@ -44,7 +44,20 @@ rm -rf docker/hdo-gateway-stack/data/wireguard docker/hdo-gateway-stack/.env
 
 # ENROLL
 HDO_PASSWORD='sqb123123' qp-tunnel-cli hdo enroll   --server-url 'http://121.43.253.179:8080'   --username 'qpjoy04'   --device-id "internal-$(hostname -s)"   --label "$(hostname -s)"
+
+
+# 查找文件 hdo-client.conf
+#  Get-ChildItem "$env:LOCALAPPDATA","$env:APPDATA" `
+#  -Recurse `
+#  -ErrorAction SilentlyContinue `
+#  -Filter "hdo-client.conf"
+
+# remove devices
+./scripts/manage.sh hdo-reset-devices --keep-ip 100.89.0.12
+./scripts/manage.sh hdo sync-and-repair-domestic --server-url http://116.62.51.154:8080
 ```
+
+
 ## 在 部署 tab 按顺序：
 
 1. 运行 Domestic WireGuard gateway
