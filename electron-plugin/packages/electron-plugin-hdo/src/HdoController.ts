@@ -2454,7 +2454,9 @@ function clientDirectPeersForPlatform(
   directPeers: HdoClientDirectPeer[]
 ): HdoClientDirectPeer[] {
   if (relayMode === 'mesh-hdi') return [];
-  if (process.platform === 'win32' && relayMode === 'mesh-h2i') return [];
+  if (process.platform === 'win32' && relayMode === 'mesh-h2i') {
+    return directPeers.filter((peer) => Boolean(peer.endpoint));
+  }
   return directPeers;
 }
 
@@ -2465,6 +2467,7 @@ function windowsH2iDirectPeerAllowedIps(
   if (process.platform !== 'win32' || relayMode !== 'mesh-h2i') return [];
   return uniqueStrings(
     directPeers
+      .filter((peer) => !peer.endpoint)
       .flatMap((peer) => peer.allowedIps)
       .map((cidr) => normalizeCidr(cidr) ?? cidr)
       .filter((cidr) => cidr.includes('/'))

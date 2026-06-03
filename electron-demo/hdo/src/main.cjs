@@ -632,7 +632,6 @@ if (gotSingleInstanceLock) {
         const result = await hdoCall('anonymousConnect', {
           ...(payload && typeof payload === 'object' ? payload : {}),
           relayMode: FAST_RELAY_MODE,
-          rotate: true,
           appId: 'qpjoy-hdo',
           deviceLabel: 'MX HDO',
           autoConnect: true
@@ -651,8 +650,7 @@ if (gotSingleInstanceLock) {
         const accountSwitch = await accountNetworkSwitchHint();
         const result = await hdoCall('accountConnect', {
           ...(payload && typeof payload === 'object' ? payload : {}),
-          relayMode: FAST_RELAY_MODE,
-          rotate: true
+          relayMode: FAST_RELAY_MODE
         });
         const autoConnect = !payload || typeof payload !== 'object' || payload.autoConnect !== false;
         if (result && typeof result === 'object' && result.ok !== false && autoConnect) {

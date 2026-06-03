@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-plugin-hdo",
-  "version": "0.1.36",
+  "version": "0.1.37",
   "private": false,
   "description": "Home-Domestic-Oversea control panel plugin for QPJoy Marketplace.",
   "license": "UNLICENSED",

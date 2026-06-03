@@ -116,6 +116,7 @@ const HDO_ANONYMOUS_ADDRESS_PLAN = {
 const HDO_ADDRESS_PLAN_MIN = ipv4ToNumber('100.80.0.0') ?? 0;
 const HDO_ADDRESS_PLAN_MAX = ipv4ToNumber('100.99.255.255') ?? 0;
 const HDO_DEFAULT_WG_PORT = 51888;
+const HDO_OVERLAY_IP_HISTORY_LIMIT = 1024;
 const HDO_DEPLOYMENT_OUTPUT_LIMIT = 80_000;
 const HDO_DEPLOYMENT_TIMEOUT_MS = 20 * 60 * 1000;
 const HDO_RUNNER_HEALTH_TIMEOUT_MS = 1200;
@@ -213,15 +214,25 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const existing = await hdoStore.findDevice(deviceId);
+    const existingOverlayIp = normalizeOverlayIp(existing?.overlayIp ?? null);
+    const requestedOverlayIp = normalizeOverlayIp(asOptionalString(body.overlayIp));
+    const publicKeyChanged = Boolean(existing?.publicKey && existing.publicKey !== publicKey);
     const preferredOverlayIp =
-      normalizeOverlayIp(asOptionalString(body.overlayIp)) ??
-      normalizeOverlayIp(existing?.overlayIp ?? null);
+      publicKeyChanged ? null : (requestedOverlayIp ?? existingOverlayIp);
     const overlayIp = allocateDeviceOverlayIp(
       devices,
       deviceId,
       HDO_ANONYMOUS_ADDRESS_PLAN.userCidr,
-      preferredOverlayIp
+      preferredOverlayIp,
+      overlayAllocationHistoryIps(devices, HDO_ANONYMOUS_ADDRESS_PLAN.userCidr, [
+        ...(publicKeyChanged ? [existingOverlayIp, requestedOverlayIp] : []),
+      ])
     );
+    const overlayIpHistory = nextOverlayIpHistory(existing?.metadata ?? null, [
+      existingOverlayIp,
+      requestedOverlayIp,
+      overlayIp
+    ]);
     const device = await hdoStore.upsertDevice({
       id: deviceId,
       userId: user.id,
@@ -235,11 +246,13 @@ export async function hdoRoutes(app: FastifyInstance): Promise<void> {
         anonymous: true,
         appId,
         installId,
+        overlayIpHistory,
         source: 'hdo-anonymous-bootstrap',
         wireGuard: {
           ...(asPlainObject(existing?.metadata?.wireGuard) ?? {}),
           relayMode,
-          preferDirectPeers: relayMode !== 'mesh-hdi'
+          preferDirectPeers: relayMode !== 'mesh-hdi',
+          overlayIpHistory
         },
         updatedAt: now
       }
@@ -2598,25 +2611,75 @@ function allocateDeviceOverlayIp(
   devices: HdoDeviceRow[],
   currentId: string,
   userCidr: string,
-  preferredIp?: string | null
+  preferredIp?: string | null,
+  blockedIps: Array<string | null | undefined> = []
 ): string {
   const range = cidrRange(userCidr) ?? cidrRange(HDO_DEFAULT_ADDRESS_PLAN.userCidr);
   if (!range) return '100.89.0.10';
-  const used = new Set(
+  const usedByOtherDevices = new Set(
     devices
       .filter((row) => row.id !== currentId)
       .map((row) => normalizeOverlayIp(row.overlayIp))
       .filter((row): row is string => Boolean(row))
   );
+  const blocked = new Set(
+    blockedIps
+      .map((ip) => normalizeOverlayIp(ip ?? null))
+      .filter((ip): ip is string => Boolean(ip && ipIsInRange(ip, range)))
+  );
   const preferred = normalizeOverlayIp(preferredIp ?? null);
-  if (preferred && ipIsInRange(preferred, range) && !used.has(preferred)) return preferred;
+  if (preferred && ipIsInRange(preferred, range) && !usedByOtherDevices.has(preferred)) return preferred;
   const start = Math.min(range.end, range.start + 10);
   const end = Math.max(start, range.end - 1);
   for (let value = start; value <= end; value += 1) {
     const candidate = numberToIpv4(value);
-    if (!used.has(candidate)) return candidate;
+    if (!usedByOtherDevices.has(candidate) && !blocked.has(candidate)) return candidate;
+  }
+  for (let value = start; value <= end; value += 1) {
+    const candidate = numberToIpv4(value);
+    if (!usedByOtherDevices.has(candidate)) return candidate;
   }
   return numberToIpv4(start);
+}
+
+function overlayAllocationHistoryIps(
+  devices: HdoDeviceRow[],
+  userCidr: string,
+  extraIps: Array<string | null | undefined> = []
+): string[] {
+  const range = cidrRange(userCidr);
+  return uniqueStrings(
+    [
+      ...devices.flatMap((row) => overlayIpHistoryFromMetadata(row.metadata)),
+      ...extraIps
+    ]
+      .map((ip) => normalizeOverlayIp(ip ?? null))
+      .filter((ip): ip is string => Boolean(ip && (!range || ipIsInRange(ip, range))))
+  );
+}
+
+function overlayIpHistoryFromMetadata(metadata: Record<string, unknown> | null): string[] {
+  const data = asPlainObject(metadata);
+  const wireGuard = asPlainObject(data?.wireGuard) ?? asPlainObject(data?.wg);
+  return uniqueStrings([
+    ...asStringArray(data?.overlayIpHistory),
+    ...asStringArray(data?.anonymousOverlayIpHistory),
+    ...asStringArray(wireGuard?.overlayIpHistory)
+  ]
+    .map((ip) => normalizeOverlayIp(ip))
+    .filter((ip): ip is string => Boolean(ip)));
+}
+
+function nextOverlayIpHistory(
+  metadata: Record<string, unknown> | null,
+  ips: Array<string | null | undefined>
+): string[] {
+  return uniqueStrings([
+    ...overlayIpHistoryFromMetadata(metadata),
+    ...ips
+      .map((ip) => normalizeOverlayIp(ip ?? null))
+      .filter((ip): ip is string => Boolean(ip))
+  ]).slice(-HDO_OVERLAY_IP_HISTORY_LIMIT);
 }
 
 function ipIsInRange(value: string, range: { start: number; end: number }): boolean {
@@ -2724,12 +2787,16 @@ function wireGuardDirectPeerSummaries(
     asOptionalBoolean(currentWireGuard?.directListener) === true;
   if (!currentPrefersDirect) return [];
   const currentOverlayIp = normalizeOverlayIp(current.overlayIp);
+  const currentExplicitEndpoint = wireGuardExplicitEndpointFromMetadata(currentWireGuard);
   const serviceTargetHosts = new Set(
     services
       .map((row) => normalizeOverlayIp(row.targetHost))
       .filter((value): value is string => Boolean(value))
   );
   const currentIsServiceTarget = Boolean(currentOverlayIp && serviceTargetHosts.has(currentOverlayIp));
+  const currentCanAcceptH2iDirect = relayMode === 'mesh-h2i' && currentIsServiceTarget
+    ? Boolean(currentExplicitEndpoint)
+    : currentIsServiceTarget;
 
   return devices
     .filter((row) => row.id !== current.id)
@@ -2748,9 +2815,9 @@ function wireGuardDirectPeerSummaries(
         asOptionalBoolean(wireGuard?.directListener) === true ||
         Boolean(explicitEndpoint);
       const peerCanDirect =
-        (currentIsServiceTarget || Boolean(endpoint)) &&
+        (currentCanAcceptH2iDirect || Boolean(endpoint)) &&
         (
-          currentIsServiceTarget ||
+          currentCanAcceptH2iDirect ||
           peerIsServiceTarget ||
           peerPrefersDirect ||
           peerAcceptsDirect

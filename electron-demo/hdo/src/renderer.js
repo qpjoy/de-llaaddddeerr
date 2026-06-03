@@ -246,7 +246,6 @@ async function runAccount(autoConnect, label, requireCredentials = true) {
     const payload = {
       serverUrl: serverInput.value.trim(),
       relayMode,
-      rotate: true,
       autoConnect,
       testUrl: internalUrlInput.value.trim()
     };
