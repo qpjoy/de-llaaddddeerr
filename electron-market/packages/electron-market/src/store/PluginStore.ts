@@ -101,12 +101,21 @@ async function exec(file: string, args: string[], opts: { cwd: string; env?: Nod
 
 function mergedProcessEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env = { ...process.env, ...extra };
+  stripHostRuntimeEnv(env);
   if (process.platform === 'darwin') {
     const current = env.PATH || '';
     const commonPaths = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'];
     env.PATH = [...commonPaths, current].filter(Boolean).join(':');
   }
   return env;
+}
+
+function stripHostRuntimeEnv(env: NodeJS.ProcessEnv): void {
+  delete env.NODE_OPTIONS;
+  delete env.npm_config_node_options;
+  delete env.NPM_CONFIG_NODE_OPTIONS;
+  delete env.ELECTRON_RUN_AS_NODE;
+  delete env.ELECTRON_NO_ATTACH_CONSOLE;
 }
 
 /**
