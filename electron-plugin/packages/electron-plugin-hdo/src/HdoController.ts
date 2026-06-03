@@ -200,6 +200,7 @@ export class HdoController {
     const localPlugins = this.localPluginStates();
     this.lastError = null;
 
+    const usingAnonymousNetwork = this.isAnonymousNetworkActive();
     if (this.serverBaseUrl() && session.hasAccessToken) {
       try {
         const [readinessResult, devicesResult] = await Promise.all([
@@ -208,7 +209,7 @@ export class HdoController {
         ]);
         readiness = readinessResult;
         devices = Array.isArray(devicesResult) ? devicesResult : [];
-        const deviceId = this.settings.deviceId || stringField(devices[0], 'id');
+        const deviceId = usingAnonymousNetwork ? null : (this.settings.deviceId || stringField(devices[0], 'id'));
         if (deviceId) {
           await this.reportPluginStates(deviceId).catch((err) => {
             this.ctx.log.warn('failed to report HDO plugin states', {
@@ -223,10 +224,12 @@ export class HdoController {
             });
           });
         }
-        const tasksResult = await this.apiGet('/api/v1/hdo/device-tasks?status=pending');
-        deviceTasks = Array.isArray(tasksResult) ? tasksResult : [];
-        if (this.settings.autoRunDeviceTasks !== false && deviceTasks.length > 0) {
-          this.runTasksInBackground(deviceTasks, deviceId);
+        if (!usingAnonymousNetwork) {
+          const tasksResult = await this.apiGet('/api/v1/hdo/device-tasks?status=pending');
+          deviceTasks = Array.isArray(tasksResult) ? tasksResult : [];
+          if (this.settings.autoRunDeviceTasks !== false && deviceTasks.length > 0) {
+            this.runTasksInBackground(deviceTasks, deviceId);
+          }
         }
       } catch (err) {
         this.lastError = errorMessage(err);
@@ -345,6 +348,7 @@ export class HdoController {
   ): Promise<unknown | null> {
     if (!status) return null;
     this.ensureSettingsForCurrentSession();
+    if (this.isAnonymousNetworkActive()) return null;
     const now = Date.now();
     const throttleMs = options.throttleMs ?? 0;
     if (
@@ -409,7 +413,7 @@ export class HdoController {
     const previous = this.settings.wireGuardPeer ?? {};
     const anonymous = plainObject(this.settings.anonymous);
     const appId = stringValue(input.appId) ?? stringValue(anonymous?.appId) ?? 'electron-app';
-    const installId = stringValue(input.installId) ?? stringValue(anonymous?.installId) ?? randomUUID();
+    let installId = stringValue(input.installId) ?? stringValue(anonymous?.installId) ?? randomUUID();
     const deviceLabel = stringValue(input.deviceLabel) ?? this.settings.deviceLabel ?? defaultDeviceLabel();
     let privateKey = stringValue(previous.privateKey);
     let publicKey = stringValue(previous.publicKey);
@@ -478,24 +482,61 @@ export class HdoController {
       }
     }
 
-    const bootstrap = await this.apiPostPublic('/api/v1/hdo/anonymous/bootstrap', {
+    let bootstrap = await this.apiPostPublic('/api/v1/hdo/anonymous/bootstrap', {
       appId,
       installId,
       deviceLabel,
       platform: stringValue(input.platform) ?? this.settings.devicePlatform ?? process.platform,
       publicKey,
-      overlayIp: stringValue(previous.overlayIp),
+      overlayIp: anonymousOverlayIp(previous.overlayIp) ?? undefined,
       relayMode,
       preferDirectPeers: relayMode !== 'mesh-hdi'
     });
-    const bootstrapRow = plainObject(bootstrap);
-    const manifest = plainObject(bootstrapRow?.manifest);
-    const device = plainObject(bootstrapRow?.device);
+    let bootstrapRow = plainObject(bootstrap);
+    let manifest = plainObject(bootstrapRow?.manifest);
+    let device = plainObject(bootstrapRow?.device);
     if (!manifest || !device) {
       throw new Error('anonymous bootstrap response is invalid');
     }
 
-    const overlayIp = stringField(device, 'overlayIp') ?? stringValue(previous.overlayIp);
+    let serverOverlayIp = stringField(device, 'overlayIp');
+    let rejectedAnonymousOverlayIp: string | null = null;
+    if (serverOverlayIp && !isAnonymousOverlayIp(serverOverlayIp)) {
+      rejectedAnonymousOverlayIp = serverOverlayIp;
+      installId = randomUUID();
+      if (runtime.command) {
+        try {
+          const pair = generateWireGuardKeyPairWithCli(runtime.command);
+          privateKey = pair.privateKey;
+          publicKey = pair.publicKey;
+        } catch (err) {
+          this.ctx.log.warn('failed to rotate anonymous WireGuard key after invalid overlay lease', {
+            overlayIp: serverOverlayIp,
+            error: errorMessage(err)
+          });
+        }
+      }
+      bootstrap = await this.apiPostPublic('/api/v1/hdo/anonymous/bootstrap', {
+        appId,
+        installId,
+        deviceLabel,
+        platform: stringValue(input.platform) ?? this.settings.devicePlatform ?? process.platform,
+        publicKey,
+        relayMode,
+        preferDirectPeers: relayMode !== 'mesh-hdi'
+      });
+      bootstrapRow = plainObject(bootstrap);
+      manifest = plainObject(bootstrapRow?.manifest);
+      device = plainObject(bootstrapRow?.device);
+      if (!manifest || !device) {
+        throw new Error('anonymous bootstrap retry response is invalid');
+      }
+      serverOverlayIp = stringField(device, 'overlayIp');
+      if (serverOverlayIp && !isAnonymousOverlayIp(serverOverlayIp)) {
+        rejectedAnonymousOverlayIp = serverOverlayIp;
+      }
+    }
+    const overlayIp = serverOverlayIp && isAnonymousOverlayIp(serverOverlayIp) ? serverOverlayIp : null;
     let config: string | null = null;
     let configPath: string | null = null;
     let lastError: string | null = null;
@@ -503,6 +544,8 @@ export class HdoController {
       const domestic = domesticWireGuardFromManifest(manifest);
       if (!manifestHasMeshLicense(manifest)) {
         lastError = '匿名 mesh 尚未启用。';
+      } else if (rejectedAnonymousOverlayIp && !overlayIp) {
+        lastError = `服务端返回了非匿名网段 ${rejectedAnonymousOverlayIp}，已拒绝作为匿名线路使用；请重新同步服务端 HDO 配置后再连接。`;
       } else if (!overlayIp) {
         lastError = '服务端尚未给当前匿名设备分配 overlay IP。';
       } else if (!domestic.publicKey || !domestic.endpoint) {
@@ -567,10 +610,9 @@ export class HdoController {
     let connected: Record<string, unknown> | null = null;
     let wireGuardStatus: Record<string, unknown> | null = null;
     if (config && input.autoConnect !== false) {
-      const configUnchanged = stringValue(previous.config) === config;
       connected = await this.connectWireGuardPeer({
-        action: 'up',
-        skipIfActive: configUnchanged,
+        action: 'restart',
+        skipIfActive: false,
         fallbackToAppManaged: false
       }).catch((err) => ({
         ok: false,
@@ -682,7 +724,6 @@ export class HdoController {
       plainObject(this.settings.anonymous)?.mode === 'anonymous' ||
       isAnonymousDeviceId(this.settings.deviceId) ||
       isAnonymousOverlayIp(this.settings.wireGuardPeer?.overlayIp);
-    const previousConfig = stringValue(this.settings.wireGuardPeer?.config);
     this.updateSettings({
       anonymous: null,
       deviceId: wasAnonymousPeer ? null : this.settings.deviceId
@@ -705,11 +746,9 @@ export class HdoController {
       );
       if (input.autoConnect !== false) {
         const preparedPeer = plainObject(preparedRow.peer);
-        const preparedConfig = stringValue(preparedRow.config);
-        const configUnchanged = Boolean(previousConfig && preparedConfig && previousConfig === preparedConfig);
         connected = await this.connectWireGuardPeer({
-          action: configUnchanged ? 'up' : 'restart',
-          skipIfActive: configUnchanged,
+          action: 'restart',
+          skipIfActive: false,
           fallbackToAppManaged: false
         }).catch((err) => ({
           ok: false,
@@ -838,7 +877,7 @@ export class HdoController {
       id: this.settings.deviceId,
       label: this.settings.deviceLabel,
       publicKey,
-      overlayIp: stringValue(previous.overlayIp),
+      overlayIp: accountOverlayIp(previous.overlayIp),
       metadata: {
         source: '@qpjoy/electron-plugin-hdo',
         arch: process.arch,
@@ -1579,14 +1618,19 @@ export class HdoController {
   private currentNetworkLeaseMode(): HdoNetworkLeaseMode | null {
     const peer = this.settings.wireGuardPeer;
     if (
-      plainObject(this.settings.anonymous)?.mode === 'anonymous' ||
-      isAnonymousDeviceId(this.settings.deviceId) ||
-      isAnonymousOverlayIp(peer?.overlayIp)
+      this.isAnonymousNetworkActive()
     ) {
       return 'anonymous';
     }
     if (this.settings.deviceId || peer?.publicKey || peer?.overlayIp) return 'account';
     return null;
+  }
+
+  private isAnonymousNetworkActive(): boolean {
+    const peer = this.settings.wireGuardPeer;
+    return plainObject(this.settings.anonymous)?.mode === 'anonymous'
+      || isAnonymousDeviceId(this.settings.deviceId)
+      || isAnonymousOverlayIp(peer?.overlayIp);
   }
 
   private emitEvent(type: string, detail: Record<string, unknown> = {}): void {
@@ -2172,6 +2216,16 @@ function isAnonymousDeviceId(value: unknown): boolean {
 
 function isAnonymousOverlayIp(value: unknown): boolean {
   return stringValue(value)?.startsWith('100.91.') === true;
+}
+
+function anonymousOverlayIp(value: unknown): string | null {
+  const overlayIp = stringValue(value);
+  return overlayIp && isAnonymousOverlayIp(overlayIp) ? overlayIp : null;
+}
+
+function accountOverlayIp(value: unknown): string | null {
+  const overlayIp = stringValue(value);
+  return overlayIp && !isAnonymousOverlayIp(overlayIp) ? overlayIp : null;
 }
 
 function normalizeRelayMode(value: unknown): HdoRelayMode {

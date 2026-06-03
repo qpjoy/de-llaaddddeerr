@@ -257,7 +257,8 @@ export const HDO_MESH_DEFAULTS: HdoMeshAddressPlan = {
 export const HDO_MESH_ROUTE_CIDRS = [
   '100.88.0.0/16',
   '100.89.0.0/16',
-  '100.90.0.0/16'
+  '100.90.0.0/16',
+  '100.91.0.0/16'
 ];
 
 const DARWIN_HDO_PRIORITY_ROUTE_PREFIX = 24;
@@ -611,12 +612,14 @@ export function buildWireGuardTunnelCommand(input: {
   const wgQuick = runtime.wgQuick?.command;
   if (!wgQuick) throw new Error(runtime.error ?? 'wg-quick unavailable');
   const env = wireGuardQuickEnv(runtime);
-  const shellCommand = [
-    ...Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`),
-    shellQuote(wgQuick),
-    action,
-    shellQuote(configPath)
-  ].join(' ');
+  const shellCommand = runtime.platform === 'darwin'
+    ? darwinWgQuickShellCommand(configPath, action, env, wgQuick)
+    : [
+        ...Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`),
+        shellQuote(wgQuick),
+        action,
+        shellQuote(configPath)
+      ].join(' ');
 
   if (runtime.platform === 'darwin') {
     const script = `do shell script ${appleScriptString(shellCommand)} with administrator privileges`;
@@ -791,6 +794,7 @@ export async function repairWireGuardTunnelRoutes(input: {
     ...darwinRouteLogSetupLines(input.configPath, profile.interfaceName, 'repair-routes'),
     `echo ${shellQuote('realInterface=')}${shellQuote(realInterfaceName)} >> "$ROUTE_LOG" 2>&1`,
     `ifconfig ${shellQuote(realInterfaceName)} >/dev/null`,
+    ...darwinEndpointBypassCommands(profile.endpointHosts, '"$ROUTE_LOG"'),
     ...routeDownCommands,
     ...routeUpCommands
   ].join('\n');
@@ -1413,9 +1417,9 @@ function buildDarwinUserspaceTunnelCommand(
     'for candidate in $(ifconfig -l 2>/dev/null); do',
     '  case "$candidate" in utun*) ;; *) continue ;; esac',
     '  candidate_state="$(ifconfig "$candidate" 2>/dev/null || true)"',
-    `  printf '%s\\n' "$candidate_state" | awk '/inet 100[.](88|89|90)[.]/{found=1} END{exit found?0:1}' >/dev/null 2>&1 || continue`,
+    `  printf '%s\\n' "$candidate_state" | awk '/inet 100[.](88|89|90|91)[.]/{found=1} END{exit found?0:1}' >/dev/null 2>&1 || continue`,
     ...routeDownCommands.map((line) => `  ${line.replaceAll('"$REAL_INTERFACE"', '"$candidate"')}`),
-    `  for hdo_ip in $(printf '%s\\n' "$candidate_state" | awk '/inet 100[.](88|89|90)[.]/{print $2}'); do ifconfig "$candidate" inet "$hdo_ip" "$hdo_ip" -alias >/dev/null 2>&1 || ifconfig "$candidate" inet "$hdo_ip" -alias >/dev/null 2>&1 || true; done`,
+    `  for hdo_ip in $(printf '%s\\n' "$candidate_state" | awk '/inet 100[.](88|89|90|91)[.]/{print $2}'); do ifconfig "$candidate" inet "$hdo_ip" "$hdo_ip" -alias >/dev/null 2>&1 || ifconfig "$candidate" inet "$hdo_ip" -alias >/dev/null 2>&1 || true; done`,
     '  ifconfig "$candidate" down >/dev/null 2>&1 || true',
     '  rm -f "/var/run/wireguard/$candidate.sock"',
     'done'
@@ -1449,6 +1453,7 @@ function buildDarwinUserspaceTunnelCommand(
   const startLines = [
     ...darwinRouteLogSetupLines(configPath, profile.interfaceName, action),
     'mkdir -p /var/run/wireguard',
+    ...darwinEndpointBypassCommands(profile.endpointHosts, '"$ROUTE_LOG"'),
     `rm -f ${shellQuote(nameFile)} ${shellQuote(pidFile)}`,
     `BEFORE_INTERFACES="$(${shellQuote(wg)} show interfaces 2>/dev/null || true)"`,
     `WG_PROCESS_FOREGROUND=1 WG_TUN_NAME_FILE=${shellQuote(nameFile)} ${shellQuote(wireGuardGo)} utun >${shellQuote(logFile)} 2>&1 &`,
@@ -1491,6 +1496,7 @@ type DarwinUserspaceProfile = {
   interfaceName: string;
   addresses: string[];
   allowedIps: string[];
+  endpointHosts: string[];
   setConfigPath: string;
 };
 
@@ -1512,6 +1518,7 @@ function darwinUserspaceProfile(configPath: string, writeSetConfig: boolean): Da
     interfaceName: parsed.interfaceName,
     addresses: parsed.addresses,
     allowedIps: parsed.allowedIps,
+    endpointHosts: parsed.endpointHosts,
     setConfigPath
   };
 }
@@ -1681,9 +1688,9 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     'for candidate in $(ifconfig -l 2>/dev/null); do',
     '  case "$candidate" in utun*) ;; *) continue ;; esac',
     '  candidate_state="$(ifconfig "$candidate" 2>/dev/null || true)"',
-    `  printf '%s\\n' "$candidate_state" | awk '/inet 100[.](88|89|90)[.]/{found=1} END{exit found?0:1}' >/dev/null 2>&1 || continue`,
+    `  printf '%s\\n' "$candidate_state" | awk '/inet 100[.](88|89|90|91)[.]/{found=1} END{exit found?0:1}' >/dev/null 2>&1 || continue`,
     ...routeDownCommands.map((line) => `  ${line.replaceAll('"$REAL_INTERFACE"', '"$candidate"')}`),
-    `  for hdo_ip in $(printf '%s\\n' "$candidate_state" | awk '/inet 100[.](88|89|90)[.]/{print $2}'); do ifconfig "$candidate" inet "$hdo_ip" "$hdo_ip" -alias >/dev/null 2>&1 || ifconfig "$candidate" inet "$hdo_ip" -alias >/dev/null 2>&1 || true; done`,
+    `  for hdo_ip in $(printf '%s\\n' "$candidate_state" | awk '/inet 100[.](88|89|90|91)[.]/{print $2}'); do ifconfig "$candidate" inet "$hdo_ip" "$hdo_ip" -alias >/dev/null 2>&1 || ifconfig "$candidate" inet "$hdo_ip" -alias >/dev/null 2>&1 || true; done`,
     '  ifconfig "$candidate" down >/dev/null 2>&1 || true',
     '  rm -f "/var/run/wireguard/$candidate.sock"',
     'done'
@@ -1727,6 +1734,7 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     'trap \'exit 0\' INT TERM HUP',
     'cleanup 0 >/dev/null 2>&1 || true',
     'log_action "launchdaemon-start"',
+    ...darwinEndpointBypassCommands(profile.endpointHosts, '"$ROUTE_LOG"'),
     'rm -f "$NAME_FILE" "$PID_FILE"',
     'BEFORE_INTERFACES="$("$WG" show interfaces 2>/dev/null || true)"',
     'WG_PROCESS_FOREGROUND=1 WG_TUN_NAME_FILE="$NAME_FILE" "$WIREGUARD_GO" utun >> "$WG_GO_LOG" 2>&1 &',
@@ -1849,6 +1857,52 @@ function darwinRouteProbeLogCommand(cidr: string, interfaceArg: string, logArg: 
   const target = darwinRouteProbeTarget(cidr);
   if (!target) return 'true';
   return `{ echo ${shellQuote(`route=${normalizeCidr(cidr) ?? cidr}`)}; echo ${shellQuote(`target=${target}`)}; echo ${shellQuote('expected=')}${interfaceArg}; route -n get ${shellQuote(target)} 2>&1; } >> ${logArg} 2>&1`;
+}
+
+function darwinEndpointBypassCommands(endpointHosts: string[], logArg: string): string[] {
+  const hosts = uniqueStrings(endpointHosts.filter(isIpv4));
+  if (hosts.length === 0) return [];
+  return [
+    '__hdo_endpoint_gateway="$(route -n get default 2>/dev/null | awk \'/gateway:/{print $2; exit}\')"',
+    '__hdo_endpoint_interface="$(route -n get default 2>/dev/null | awk \'/interface:/{print $2; exit}\')"',
+    'if [ -n "$__hdo_endpoint_gateway" ]; then',
+    `  for __hdo_endpoint_host in ${hosts.map(shellQuote).join(' ')}; do`,
+    `    { echo "endpointBypass=$__hdo_endpoint_host"; echo "gateway=$__hdo_endpoint_gateway"; echo "defaultInterface=$__hdo_endpoint_interface"; } >> ${logArg} 2>&1`,
+    '    route -q -n delete -host "$__hdo_endpoint_host" >/dev/null 2>&1 || true',
+    '    route -q -n add -host "$__hdo_endpoint_host" "$__hdo_endpoint_gateway" >/dev/null 2>&1 || route -q -n change -host "$__hdo_endpoint_host" "$__hdo_endpoint_gateway" >/dev/null 2>&1 || true',
+    `    route -n get "$__hdo_endpoint_host" >> ${logArg} 2>&1 || true`,
+    '  done',
+    'else',
+    `  echo "endpointBypass=skipped no default gateway" >> ${logArg} 2>&1`,
+    'fi'
+  ];
+}
+
+function darwinWgQuickShellCommand(
+  configPath: string,
+  action: WireGuardTunnelAction,
+  env: Record<string, string>,
+  wgQuick: string
+): string {
+  const profile = parseWireGuardProfile(configPath);
+  const envPrefix = Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`).join(' ');
+  const wgQuickCommand = [envPrefix, shellQuote(wgQuick)].filter(Boolean).join(' ');
+  if (action === 'down') {
+    return [wgQuickCommand, 'down', shellQuote(configPath)].join(' ');
+  }
+  const upCommand = [wgQuickCommand, 'up', shellQuote(configPath)].join(' ');
+  const lines = [
+    'set -e',
+    ...darwinRouteLogSetupLines(configPath, profile.interfaceName, action === 'restart' ? 'wg-quick-restart' : 'wg-quick-up')
+  ];
+  if (action === 'restart') {
+    lines.push([wgQuickCommand, 'down', shellQuote(configPath), '>/dev/null 2>&1 || true'].join(' '));
+  }
+  lines.push(
+    ...darwinEndpointBypassCommands(profile.endpointHosts, '"$ROUTE_LOG"'),
+    upCommand
+  );
+  return lines.join('\n');
 }
 
 function darwinRouteInterfaceCheckCommand(cidr: string, interfaceArg: string): string | null {
@@ -1986,12 +2040,14 @@ function parseWireGuardProfile(configPath: string): {
   interfaceName: string;
   addresses: string[];
   allowedIps: string[];
+  endpointHosts: string[];
   setConfigLines: string[];
 } {
   const raw = readFileSync(configPath, 'utf8');
   const interfaceName = wireGuardInterfaceName(configPath);
   const addresses: string[] = [];
   const allowedIps: string[] = [];
+  const endpoints: string[] = [];
   const setConfigLines: string[] = [];
   let section = '';
   for (const line of raw.split(/\r?\n/)) {
@@ -2006,6 +2062,9 @@ function parseWireGuardProfile(configPath: string): {
     if (section === 'peer' && key === 'allowedips') {
       allowedIps.push(...valueList(line));
     }
+    if (section === 'peer' && key === 'endpoint') {
+      endpoints.push(...valueList(line));
+    }
     if (section === 'interface' && ['address', 'dns', 'mtu', 'table', 'preup', 'predown', 'postup', 'postdown', 'saveconfig'].includes(key)) {
       continue;
     }
@@ -2017,6 +2076,7 @@ function parseWireGuardProfile(configPath: string): {
     interfaceName,
     addresses,
     allowedIps: uniqueStrings(allowedIps),
+    endpointHosts: uniqueStrings(endpoints.map(wireGuardEndpointIpv4Host).filter(isString)),
     setConfigLines
   };
 }
@@ -2032,6 +2092,15 @@ function valueList(line: string): string[] {
     .split(',')
     .map((value) => value.trim())
     .filter(Boolean);
+}
+
+function wireGuardEndpointIpv4Host(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('[')) return null;
+  const colonIndex = trimmed.lastIndexOf(':');
+  const host = colonIndex >= 0 ? trimmed.slice(0, colonIndex) : trimmed;
+  return isIpv4(host) ? host : null;
 }
 
 function resolveWireGuardRealInterface(

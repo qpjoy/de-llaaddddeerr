@@ -325,7 +325,7 @@ async function probeHdoNetwork(snapshot) {
     ? domestic.overlayIp
     : '100.88.0.1';
   try {
-    const result = await pingHost(target, 1200);
+    const result = await pingHost(target, 2200, 3);
     return {
       ok: true,
       target,
@@ -344,15 +344,15 @@ async function probeHdoNetwork(snapshot) {
   }
 }
 
-function pingHost(host, timeoutMs) {
+function pingHost(host, timeoutMs, count = 1) {
   const platform = process.platform;
   const command = platform === 'win32' ? 'ping.exe' : '/sbin/ping';
   const args = platform === 'win32'
-    ? ['-n', '1', '-w', String(timeoutMs), host]
+    ? ['-n', String(count), '-w', String(timeoutMs), host]
     : (platform === 'darwin'
-        ? ['-c', '1', '-W', String(timeoutMs), host]
-        : ['-c', '1', '-W', String(Math.max(1, Math.ceil(timeoutMs / 1000))), host]);
-  return execFileText(command, args, timeoutMs + 500);
+        ? ['-c', String(count), '-W', String(timeoutMs), host]
+        : ['-c', String(count), '-W', String(Math.max(1, Math.ceil(timeoutMs / 1000))), host]);
+  return execFileText(command, args, (timeoutMs + 500) * count);
 }
 
 function execFileText(command, args, timeoutMs) {
