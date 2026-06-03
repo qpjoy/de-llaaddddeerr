@@ -72,8 +72,8 @@ Outputs are written below `out/`. Unsigned local builds may need quarantine
 removed before opening:
 
 ```bash
-xattr -cr "out/QPJoy HDO-darwin-arm64/QPJoy HDO.app"
-open "out/QPJoy HDO-darwin-arm64/QPJoy HDO.app"
+xattr -cr "out/MX HDO-darwin-arm64/MX HDO.app"
+open "out/MX HDO-darwin-arm64/MX HDO.app"
 ```
 
 ## Package On Windows
@@ -96,7 +96,7 @@ running this on a clean Windows machine.
 Expected installer output:
 
 ```text
-out\make\squirrel.windows\x64\QPJoy HDO-0.1.0 Setup.exe
+out\make\squirrel.windows\x64\MX HDO-0.1.0 Setup.exe
 ```
 
 Do not copy `node_modules/` or `out/` between macOS and Windows. Native modules
@@ -122,6 +122,6 @@ target OS.
 - `pnpm-lock.yaml` should be committed in npm mode for reproducible installs.
 - `.dev-mode` and `.local-packs/` are local-only and ignored by git.
 - User data lives under:
-  - macOS: `~/Library/Application Support/QPJoy HDO/`
-  - Windows: `%APPDATA%\QPJoy HDO\`
-  - Linux: `~/.config/QPJoy HDO/`
+  - macOS: `~/Library/Application Support/MX HDO/`
+  - Windows: `%APPDATA%\MX HDO\`
+  - Linux: `~/.config/MX HDO/`

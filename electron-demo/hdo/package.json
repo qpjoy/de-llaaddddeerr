@@ -1,9 +1,9 @@
 {
   "name": "qpjoy-hdo-client",
-  "productName": "QPJoy HDO",
+  "productName": "MX HDO",
   "version": "0.1.0",
   "private": true,
-  "description": "QPJoy HDO desktop client.",
+  "description": "MX HDO desktop client.",
   "main": "src/main.cjs",
   "scripts": {
     "dev": "node scripts/dev-mode.mjs local && electron-forge start",

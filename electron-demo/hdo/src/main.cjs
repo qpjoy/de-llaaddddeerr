@@ -1,5 +1,5 @@
 /**
- * QPJoy HDO desktop client that embeds the marketplace host.
+ * MX HDO desktop client that embeds the marketplace host.
  *
  * What it does:
  *   1. Bootstraps `@qpjoy/electron-market`, seeding published tunnel plus the
@@ -227,7 +227,7 @@ function createMainWindow() {
     minWidth: 760,
     minHeight: 520,
     backgroundColor: '#f5f7fb',
-    title: 'QPJoy HDO',
+    title: 'MX HDO',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -519,7 +519,7 @@ if (gotSingleInstanceLock) {
         const result = await hdoCall('anonymousConnect', {
           ...(payload && typeof payload === 'object' ? payload : {}),
           appId: 'qpjoy-hdo',
-          deviceLabel: 'QPJoy HDO'
+          deviceLabel: 'MX HDO'
         });
         const autoConnect = !payload || typeof payload !== 'object' || payload.autoConnect !== false;
         if (result && typeof result === 'object' && result.ok !== false && autoConnect) {

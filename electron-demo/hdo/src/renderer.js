@@ -342,11 +342,11 @@ function renderUpdateBanner(update) {
     return;
   }
   const targetKind = update.targetKind || 'app';
-  const target = update.targetId || 'QPJoy HDO';
+  const target = update.targetId || 'MX HDO';
   const version = update.toVersion ? ` ${update.toVersion}` : '';
   updateTextEl.textContent =
     targetKind === 'game'
-      ? `QPJoy HDO${version} 已进入当前设备的发布范围，重启或安装新版后完成更新。`
+      ? `MX HDO${version} 已进入当前设备的发布范围，重启或安装新版后完成更新。`
       : `${target}${version} 需要重启后完成更新。`;
   updateBannerEl.hidden = false;
 }

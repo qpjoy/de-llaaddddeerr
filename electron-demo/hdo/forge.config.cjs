@@ -86,22 +86,22 @@ if (wantsSquirrel) {
     name: '@electron-forge/maker-squirrel',
     platforms: ['win32'],
     config: {
-      name: 'qpjoy-hdo',
+      name: 'mx-hdo',
       authors: 'QPJoy',
-      description: 'QPJoy HDO desktop client'
+      description: 'MX HDO desktop client'
     }
   });
 }
 
 module.exports = {
   packagerConfig: {
-    name: 'QPJoy HDO',
-    executableName: 'qpjoy-hdo',
+    name: 'MX HDO',
+    executableName: 'mx-hdo',
     asar: false,
     appBundleId: 'dev.qpjoy.hdo',
     win32metadata: {
       CompanyName: 'QPJoy',
-      ProductName: 'QPJoy HDO'
+      ProductName: 'MX HDO'
     }
   },
   hooks: {
