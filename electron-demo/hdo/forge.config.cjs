@@ -13,6 +13,7 @@ const { rmSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { loadProjectEnv } = require('./src/env.cjs');
+const NodeZipMaker = require('./scripts/node-zip-maker.cjs');
 
 loadProjectEnv({ appDir: __dirname });
 
@@ -66,12 +67,13 @@ const makers = [
   ...(includeDmg ? [{ name: '@electron-forge/maker-dmg', platforms: ['darwin'] }] : []),
 
   // ── Windows ──────────────────────────────────────────────────────
-  // The .zip target is the default Windows artifact. It avoids the Squirrel
-  // releasify step and works well with the intentionally asar=false app
-  // layout used by the embedded marketplace seed pipeline.
-  ...(isWindowsHost && process.env.FORGE_SKIP_ZIP
+  // The .zip target is the default Windows artifact. Use a local Node maker
+  // instead of @electron-forge/maker-zip because Forge's zip maker shells out
+  // to powershell.exe on Windows, which is not reliably available in every
+  // packaging terminal/PATH.
+  ...(process.env.FORGE_SKIP_ZIP
     ? []
-    : [{ name: '@electron-forge/maker-zip', platforms: ['win32'] }])
+    : [new NodeZipMaker({}, ['win32'])])
 ];
 
 // The Squirrel .exe installer maker links against `electron-winstaller`.
