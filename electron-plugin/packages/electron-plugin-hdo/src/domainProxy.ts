@@ -131,7 +131,7 @@ export class HdoSessionDomainProxy {
     }
     const binding = this.findBinding(request.hostname);
     const host = binding?.targetHost ?? request.hostname;
-    const port = binding?.targetPort ?? request.port ?? defaultPort(request.protocol, request.connect);
+    const port = request.port ?? binding?.targetPort ?? defaultPort(request.protocol, request.connect);
     const upstream = connect({ host, port });
     const closeBoth = () => {
       client.destroy();

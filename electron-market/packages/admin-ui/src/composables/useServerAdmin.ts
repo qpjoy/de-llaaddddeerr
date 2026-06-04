@@ -178,7 +178,37 @@ export interface HdoServiceRow {
   nodeId: string | null;
   targetHost: string;
   targetPort: number;
-  protocol: 'tcp' | 'udp' | 'http' | 'https';
+  protocol:
+    | 'tcp'
+    | 'udp'
+    | 'http'
+    | 'https'
+    | 'ws'
+    | 'wss'
+    | 'ssh'
+    | 'sftp'
+    | 'scp'
+    | 'ftp'
+    | 'ftps'
+    | 'mysql'
+    | 'postgresql'
+    | 'redis'
+    | 'mongodb'
+    | 'mssql'
+    | 'rdp'
+    | 'vnc'
+    | 'smb'
+    | 'ldap'
+    | 'ldaps'
+    | 'grpc'
+    | 'grpcs'
+    | 'mqtt'
+    | 'amqp'
+    | 'smtp'
+    | 'imap'
+    | 'pop3'
+    | 'dns'
+    | 'custom';
   domains: string[];
   enabled: boolean;
   metadata: Record<string, unknown> | null;

@@ -150,7 +150,37 @@ export interface GameScoresStore {
 export type HdoNodeKind = 'domestic' | 'home' | 'oversea';
 export type HdoNodeStatus = 'pending' | 'online' | 'offline' | 'error';
 export type HdoDeviceStatus = HdoNodeStatus;
-export type HdoServiceProtocol = 'tcp' | 'udp' | 'http' | 'https';
+export type HdoServiceProtocol =
+  | 'tcp'
+  | 'udp'
+  | 'http'
+  | 'https'
+  | 'ws'
+  | 'wss'
+  | 'ssh'
+  | 'sftp'
+  | 'scp'
+  | 'ftp'
+  | 'ftps'
+  | 'mysql'
+  | 'postgresql'
+  | 'redis'
+  | 'mongodb'
+  | 'mssql'
+  | 'rdp'
+  | 'vnc'
+  | 'smb'
+  | 'ldap'
+  | 'ldaps'
+  | 'grpc'
+  | 'grpcs'
+  | 'mqtt'
+  | 'amqp'
+  | 'smtp'
+  | 'imap'
+  | 'pop3'
+  | 'dns'
+  | 'custom';
 export type HdoProfileMode = 'home-only' | 'home-foreign' | 'domestic-global';
 export type HdoRateLimitSubjectType = 'user' | 'device' | 'profile' | 'node';
 export type HdoArtifactKind = 'manifest' | 'mihomo-yaml' | 'wg-profile';

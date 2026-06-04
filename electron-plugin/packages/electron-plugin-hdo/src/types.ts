@@ -28,6 +28,38 @@ export interface HdoPluginSettings {
 
 export type HdoRelayMode = 'mesh-hdi' | 'mesh-h2i' | 'mesh-h2h';
 
+export type HdoServiceProtocol =
+  | 'tcp'
+  | 'udp'
+  | 'http'
+  | 'https'
+  | 'ws'
+  | 'wss'
+  | 'ssh'
+  | 'sftp'
+  | 'scp'
+  | 'ftp'
+  | 'ftps'
+  | 'mysql'
+  | 'postgresql'
+  | 'redis'
+  | 'mongodb'
+  | 'mssql'
+  | 'rdp'
+  | 'vnc'
+  | 'smb'
+  | 'ldap'
+  | 'ldaps'
+  | 'grpc'
+  | 'grpcs'
+  | 'mqtt'
+  | 'amqp'
+  | 'smtp'
+  | 'imap'
+  | 'pop3'
+  | 'dns'
+  | 'custom';
+
 export interface HdoWireGuardPeerSettings {
   privateKey?: string | null;
   publicKey?: string | null;
@@ -126,7 +158,7 @@ export interface HdoServiceInput {
   nodeId?: string | null;
   targetHost: string;
   targetPort: number;
-  protocol?: 'tcp' | 'udp' | 'http' | 'https';
+  protocol?: HdoServiceProtocol;
   domains?: string[];
   enabled?: boolean;
   metadata?: Record<string, unknown> | null;
@@ -135,7 +167,7 @@ export interface HdoServiceInput {
 export interface HdoPublishedServiceInput {
   name?: string | null;
   targetPort: number;
-  protocol?: 'tcp' | 'udp' | 'http' | 'https';
+  protocol?: HdoServiceProtocol;
   domains?: string[];
   enabled?: boolean;
   metadata?: Record<string, unknown> | null;

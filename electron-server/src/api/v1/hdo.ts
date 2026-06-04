@@ -32,21 +32,68 @@ import type {
 
 const NODE_KINDS: readonly HdoNodeKind[] = ['domestic', 'home', 'oversea'];
 const NODE_STATUSES: readonly HdoNodeStatus[] = ['pending', 'online', 'offline', 'error'];
-const SERVICE_PROTOCOLS: readonly HdoServiceProtocol[] = ['tcp', 'udp', 'http', 'https'];
+const SERVICE_PROTOCOLS: readonly HdoServiceProtocol[] = [
+  'tcp',
+  'udp',
+  'http',
+  'https',
+  'ws',
+  'wss',
+  'ssh',
+  'sftp',
+  'scp',
+  'ftp',
+  'ftps',
+  'mysql',
+  'postgresql',
+  'redis',
+  'mongodb',
+  'mssql',
+  'rdp',
+  'vnc',
+  'smb',
+  'ldap',
+  'ldaps',
+  'grpc',
+  'grpcs',
+  'mqtt',
+  'amqp',
+  'smtp',
+  'imap',
+  'pop3',
+  'dns',
+  'custom'
+];
 const HDO_SERVICE_PROBE_PORTS = [
   22,
+  25,
+  53,
   80,
+  110,
+  143,
+  389,
   443,
+  445,
+  465,
+  587,
+  636,
+  993,
+  995,
+  1883,
   3000,
   3306,
+  3389,
   5173,
   5432,
+  5672,
+  5900,
   6379,
   8000,
   8080,
   8443,
   9000,
-  9090
+  9090,
+  27017
 ] as const;
 const HDO_SERVICE_PROBE_TIMEOUT_MS = 700;
 const HDO_DEVICE_ONLINE_WINDOW_MS = 10 * 60 * 1000;
@@ -2498,7 +2545,23 @@ function uniqueServiceName(base: string, existingNames: Set<string>): string {
 }
 
 function serviceProtocolForPort(port: number): HdoServiceProtocol {
+  if (port === 22) return 'ssh';
   if (port === 443 || port === 8443) return 'https';
+  if (port === 3306) return 'mysql';
+  if (port === 5432) return 'postgresql';
+  if (port === 6379) return 'redis';
+  if (port === 27017) return 'mongodb';
+  if (port === 3389) return 'rdp';
+  if (port === 5900) return 'vnc';
+  if (port === 445) return 'smb';
+  if (port === 389) return 'ldap';
+  if (port === 636) return 'ldaps';
+  if (port === 1883) return 'mqtt';
+  if (port === 5672) return 'amqp';
+  if (port === 25 || port === 587 || port === 465) return 'smtp';
+  if (port === 143 || port === 993) return 'imap';
+  if (port === 110 || port === 995) return 'pop3';
+  if (port === 53) return 'dns';
   if ([80, 3000, 5173, 8000, 8080, 9000, 9090].includes(port)) return 'http';
   return 'tcp';
 }

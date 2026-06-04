@@ -676,9 +676,35 @@ export function adminHtml(): string {
               <label class="span-3">协议
                 <select id="publishedServiceProtocol">
                   <option value="tcp">tcp</option>
+                  <option value="udp">udp</option>
                   <option value="http">http</option>
                   <option value="https">https</option>
-                  <option value="udp">udp</option>
+                  <option value="ws">ws</option>
+                  <option value="wss">wss</option>
+                  <option value="ssh">ssh</option>
+                  <option value="sftp">sftp</option>
+                  <option value="scp">scp</option>
+                  <option value="ftp">ftp</option>
+                  <option value="ftps">ftps</option>
+                  <option value="mysql">mysql</option>
+                  <option value="postgresql">postgresql</option>
+                  <option value="redis">redis</option>
+                  <option value="mongodb">mongodb</option>
+                  <option value="mssql">mssql</option>
+                  <option value="rdp">rdp</option>
+                  <option value="vnc">vnc</option>
+                  <option value="smb">smb</option>
+                  <option value="ldap">ldap</option>
+                  <option value="ldaps">ldaps</option>
+                  <option value="grpc">grpc</option>
+                  <option value="grpcs">grpcs</option>
+                  <option value="mqtt">mqtt</option>
+                  <option value="amqp">amqp</option>
+                  <option value="smtp">smtp</option>
+                  <option value="imap">imap</option>
+                  <option value="pop3">pop3</option>
+                  <option value="dns">dns</option>
+                  <option value="custom">custom</option>
                 </select>
               </label>
               <label class="span-3">域名<input id="publishedServiceDomains" placeholder="mac.local" /></label>
@@ -844,6 +870,40 @@ export function adminHtml(): string {
               <label class="span-8">目标地址<input id="serviceHost" placeholder="100.88.0.10" /></label>
               <label class="span-4">端口<input id="servicePort" type="number" min="1" max="65535" placeholder="8080" /></label>
             </div>
+            <label>协议
+              <select id="serviceProtocol">
+                <option value="tcp">tcp</option>
+                <option value="udp">udp</option>
+                <option value="http">http</option>
+                <option value="https">https</option>
+                <option value="ws">ws</option>
+                <option value="wss">wss</option>
+                <option value="ssh">ssh</option>
+                <option value="sftp">sftp</option>
+                <option value="scp">scp</option>
+                <option value="ftp">ftp</option>
+                <option value="ftps">ftps</option>
+                <option value="mysql">mysql</option>
+                <option value="postgresql">postgresql</option>
+                <option value="redis">redis</option>
+                <option value="mongodb">mongodb</option>
+                <option value="mssql">mssql</option>
+                <option value="rdp">rdp</option>
+                <option value="vnc">vnc</option>
+                <option value="smb">smb</option>
+                <option value="ldap">ldap</option>
+                <option value="ldaps">ldaps</option>
+                <option value="grpc">grpc</option>
+                <option value="grpcs">grpcs</option>
+                <option value="mqtt">mqtt</option>
+                <option value="amqp">amqp</option>
+                <option value="smtp">smtp</option>
+                <option value="imap">imap</option>
+                <option value="pop3">pop3</option>
+                <option value="dns">dns</option>
+                <option value="custom">custom</option>
+              </select>
+            </label>
             <label>域名，逗号分隔<input id="serviceDomains" placeholder="home.example.com" /></label>
             <button class="btn primary" id="saveService">保存服务</button>
           </div>
@@ -2970,7 +3030,7 @@ export function adminHtml(): string {
           nodeId: formValue('serviceNode'),
           targetHost: formValue('serviceHost'),
           targetPort: Number(formValue('servicePort')),
-          protocol: 'tcp',
+          protocol: formValue('serviceProtocol') || 'tcp',
           domains: (formValue('serviceDomains') || '').split(',').map((s) => s.trim()).filter(Boolean),
           enabled: true
         })

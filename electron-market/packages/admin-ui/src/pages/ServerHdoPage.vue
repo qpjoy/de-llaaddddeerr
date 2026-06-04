@@ -981,7 +981,38 @@ const serviceDomains = ref('');
 const serviceEnabled = ref(true);
 const serviceAnonymousVisible = ref(false);
 const serviceProbeLoading = ref(false);
-const serviceProtocolOptions: HdoServiceRow['protocol'][] = ['tcp', 'udp', 'http', 'https'];
+const serviceProtocolOptions: HdoServiceRow['protocol'][] = [
+  'tcp',
+  'udp',
+  'http',
+  'https',
+  'ws',
+  'wss',
+  'ssh',
+  'sftp',
+  'scp',
+  'ftp',
+  'ftps',
+  'mysql',
+  'postgresql',
+  'redis',
+  'mongodb',
+  'mssql',
+  'rdp',
+  'vnc',
+  'smb',
+  'ldap',
+  'ldaps',
+  'grpc',
+  'grpcs',
+  'mqtt',
+  'amqp',
+  'smtp',
+  'imap',
+  'pop3',
+  'dns',
+  'custom'
+];
 
 const editingProfileId = ref<string | null>(null);
 const profileName = ref('');
