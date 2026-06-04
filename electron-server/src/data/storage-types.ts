@@ -275,6 +275,17 @@ export interface HdoServiceRow {
   updatedAt: string;
 }
 
+export interface HdoDnsRecordRow {
+  id: string;
+  domain: string;
+  targetHost: string;
+  enabled: boolean;
+  note: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface HdoProfileRow {
   id: string;
   name: string;
@@ -420,6 +431,15 @@ export interface HdoStore {
     enabled?: boolean;
     metadata?: Record<string, unknown> | null;
   }): Promise<HdoServiceRow>;
+  listDnsRecords(): Promise<HdoDnsRecordRow[]>;
+  upsertDnsRecord(input: {
+    id?: string;
+    domain: string;
+    targetHost: string;
+    enabled?: boolean;
+    note?: string | null;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<HdoDnsRecordRow>;
   listProfiles(): Promise<HdoProfileRow[]>;
   ensureDefaultProfiles(): Promise<HdoProfileRow[]>;
   upsertProfile(input: {

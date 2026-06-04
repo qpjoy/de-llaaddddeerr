@@ -23,6 +23,7 @@ import type {
   EntitlementsStore,
   GameHighScoreRow,
   GameScoresStore,
+  HdoDnsRecordRow,
   HdoDeviceMeshStateRow,
   HdoDevicePluginStateRow,
   HdoDeviceRow,
@@ -75,6 +76,7 @@ interface HdoFile {
   devices: HdoDeviceRow[];
   deviceMeshStates: HdoDeviceMeshStateRow[];
   services: HdoServiceRow[];
+  dnsRecords: HdoDnsRecordRow[];
   profiles: HdoProfileRow[];
   rateLimits: HdoRateLimitRow[];
   artifacts: HdoSubscriptionArtifactRow[];
@@ -123,6 +125,7 @@ function emptyHdoFile(): HdoFile {
     devices: [],
     deviceMeshStates: [],
     services: [],
+    dnsRecords: [],
     profiles: [],
     rateLimits: [],
     artifacts: [],
@@ -143,6 +146,7 @@ function readHdo(): HdoFile {
     devices: file.devices ?? [],
     deviceMeshStates: file.deviceMeshStates ?? [],
     services: file.services ?? [],
+    dnsRecords: file.dnsRecords ?? [],
     profiles: file.profiles ?? [],
     rateLimits: file.rateLimits ?? [],
     artifacts: file.artifacts ?? [],
@@ -791,6 +795,47 @@ const hdo: HdoStore = {
       updatedAt: now
     };
     file.services.push(row);
+    bumpHdoGeneration(file);
+    writeHdo(file);
+    return row;
+  },
+  async listDnsRecords() {
+    return readHdo().dnsRecords;
+  },
+  async upsertDnsRecord(input) {
+    const file = readHdo();
+    const now = nowIso();
+    const domain = input.domain.trim().toLowerCase();
+    const idx = input.id
+      ? file.dnsRecords.findIndex((row) => row.id === input.id)
+      : file.dnsRecords.findIndex((row) => row.domain === domain);
+    if (idx >= 0) {
+      const existing = file.dnsRecords[idx];
+      file.dnsRecords[idx] = {
+        ...existing,
+        domain,
+        targetHost: input.targetHost,
+        enabled: input.enabled ?? existing.enabled,
+        note: input.note === undefined ? existing.note : input.note,
+        metadata: input.metadata === undefined ? existing.metadata : input.metadata,
+        updatedAt: now
+      };
+      bumpHdoGeneration(file);
+      writeHdo(file);
+      return file.dnsRecords[idx];
+    }
+
+    const row: HdoDnsRecordRow = {
+      id: input.id ?? randomUUID(),
+      domain,
+      targetHost: input.targetHost,
+      enabled: input.enabled ?? true,
+      note: input.note ?? null,
+      metadata: input.metadata ?? null,
+      createdAt: now,
+      updatedAt: now
+    };
+    file.dnsRecords.push(row);
     bumpHdoGeneration(file);
     writeHdo(file);
     return row;

@@ -17,6 +17,7 @@ import type {
   EntitlementsStore,
   GameHighScoreRow,
   GameScoresStore,
+  HdoDnsRecordRow,
   HdoArtifactKind,
   HdoDeviceMeshStateRow,
   HdoDeviceMeshStateStatus,
@@ -777,6 +778,51 @@ const hdo: HdoStore = {
     await hdo.bumpGeneration();
     return rowToHdoService(rows[0]);
   },
+  async listDnsRecords() {
+    const { rows } = await getPool().query(
+      `SELECT * FROM hdo_dns_records ORDER BY enabled DESC, domain ASC`
+    );
+    return rows.map(rowToHdoDnsRecord);
+  },
+  async upsertDnsRecord(input) {
+    const params = [
+      input.domain.trim().toLowerCase(),
+      input.targetHost,
+      input.enabled ?? true,
+      input.note ?? null,
+      input.metadata ?? null
+    ];
+    const { rows } = input.id
+      ? await getPool().query(
+          `INSERT INTO hdo_dns_records (
+             id, domain, target_host, enabled, note, metadata
+           ) VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (id) DO UPDATE SET
+             domain = excluded.domain,
+             target_host = excluded.target_host,
+             enabled = excluded.enabled,
+             note = excluded.note,
+             metadata = excluded.metadata,
+             updated_at = now()
+           RETURNING *`,
+          [input.id, ...params]
+        )
+      : await getPool().query(
+          `INSERT INTO hdo_dns_records (
+             domain, target_host, enabled, note, metadata
+           ) VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (domain) DO UPDATE SET
+             target_host = excluded.target_host,
+             enabled = excluded.enabled,
+             note = excluded.note,
+             metadata = excluded.metadata,
+             updated_at = now()
+           RETURNING *`,
+          params
+        );
+    await hdo.bumpGeneration();
+    return rowToHdoDnsRecord(rows[0]);
+  },
   async listProfiles() {
     const { rows } = await getPool().query(
       `SELECT * FROM hdo_profiles ORDER BY name ASC`
@@ -1352,6 +1398,19 @@ function rowToHdoService(r: Record<string, unknown>): HdoServiceRow {
     protocol: String(r.protocol) as HdoServiceProtocol,
     domains: Array.isArray(r.domains) ? r.domains.map(String) : [],
     enabled: Boolean(r.enabled),
+    metadata: (r.metadata as Record<string, unknown> | null) ?? null,
+    createdAt: new Date(String(r.created_at)).toISOString(),
+    updatedAt: new Date(String(r.updated_at)).toISOString()
+  };
+}
+
+function rowToHdoDnsRecord(r: Record<string, unknown>): HdoDnsRecordRow {
+  return {
+    id: String(r.id),
+    domain: String(r.domain),
+    targetHost: String(r.target_host),
+    enabled: Boolean(r.enabled),
+    note: r.note ? String(r.note) : null,
     metadata: (r.metadata as Record<string, unknown> | null) ?? null,
     createdAt: new Date(String(r.created_at)).toISOString(),
     updatedAt: new Date(String(r.updated_at)).toISOString()

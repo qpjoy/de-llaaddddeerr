@@ -2697,8 +2697,24 @@ function windowsH2iDirectPeerAllowedIps(
 }
 
 function domainBindingsFromManifest(manifest: Record<string, unknown>): HdoDomainBinding[] {
+  const dnsRecords = arrayField(manifest.dnsRecords);
   const services = arrayField(manifest.services);
   const out: HdoDomainBinding[] = [];
+  const seen = new Set<string>();
+  for (const item of dnsRecords) {
+    const record = plainObject(item);
+    if (!record || record.enabled === false) continue;
+    const domain = stringValue(record.domain);
+    const targetHost = stringValue(record.targetHost);
+    if (!domain || !targetHost || seen.has(domain)) continue;
+    seen.add(domain);
+    out.push({
+      domain,
+      targetHost,
+      targetPort: null,
+      protocol: 'dns'
+    });
+  }
   for (const item of services) {
     const service = plainObject(item);
     if (!service) continue;
@@ -2707,6 +2723,8 @@ function domainBindingsFromManifest(manifest: Record<string, unknown>): HdoDomai
     const targetPort = numberValue(service.targetPort);
     const protocol = stringValue(service.protocol);
     for (const domain of stringArray(service.domains)) {
+      if (seen.has(domain)) continue;
+      seen.add(domain);
       out.push({
         domain,
         targetHost,

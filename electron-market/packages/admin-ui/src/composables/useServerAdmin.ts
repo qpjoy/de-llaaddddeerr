@@ -225,6 +225,17 @@ export interface HdoServiceProbeReport {
   services: HdoServiceRow[];
 }
 
+export interface HdoDnsRecordRow {
+  id: string;
+  domain: string;
+  targetHost: string;
+  enabled: boolean;
+  note: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface HdoProfileRow {
   id: string;
   name: string;
@@ -289,6 +300,7 @@ export type HdoDeploymentKind =
   | 'deploy-domestic'
   | 'sync-domestic-peers'
   | 'sync-and-repair-domestic'
+  | 'sync-dns'
   | 'repair-domestic-routes'
   | 'deploy-domestic-mihomo-wireguard'
   | 'deploy-oversea-mihomo-hysteria2'
@@ -330,6 +342,7 @@ export interface HdoOverview {
   devices: HdoDeviceRow[];
   deviceMeshStates: HdoDeviceMeshStateRow[];
   services: HdoServiceRow[];
+  dnsRecords: HdoDnsRecordRow[];
   profiles: HdoProfileRow[];
   rateLimits: HdoRateLimitRow[];
   pluginStates: HdoDevicePluginStateRow[];
@@ -762,6 +775,22 @@ export function useServerAdmin() {
         body: JSON.stringify(input)
       });
       toast(`已保存服务：${out.name}`);
+      return out;
+    },
+
+    async upsertHdoDnsRecord(input: {
+      id?: string;
+      domain: string;
+      targetHost: string;
+      enabled?: boolean;
+      note?: string | null;
+      metadata?: Record<string, unknown> | null;
+    }): Promise<HdoDnsRecordRow> {
+      const out = await api<HdoDnsRecordRow>('/hdo/admin/dns', {
+        method: 'POST',
+        body: JSON.stringify(input)
+      });
+      toast(`已保存 DNS：${out.domain}`);
       return out;
     },
 

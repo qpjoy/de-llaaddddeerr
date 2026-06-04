@@ -50,6 +50,7 @@
         <q-tab name="topology" icon="account_tree" label="拓扑" />
         <q-tab name="licenses" icon="verified_user" label="许可" />
         <q-tab name="nodes" icon="lan" label="节点" />
+        <q-tab name="dns" icon="dns" label="DNS" />
         <q-tab name="services" icon="dns" label="服务" />
         <q-tab name="profiles" icon="route" label="Profile" />
         <q-tab name="limits" icon="speed" label="限速" />
@@ -594,6 +595,77 @@
           </div>
         </q-tab-panel>
 
+        <q-tab-panel name="dns" class="q-pa-none">
+          <div class="split-layout">
+            <section class="section-surface q-pa-md">
+              <div class="section-title">保存 DNS 解析</div>
+              <div class="text-caption text-grey-7 q-mb-sm">显式 DNS 会覆盖服务域名自动解析。</div>
+              <q-input
+                v-model="dnsDomain"
+                outlined
+                dense
+                label="域名"
+                placeholder="api.mxinfo-inc.cn"
+                class="q-mb-sm"
+              />
+              <q-input
+                v-model="dnsTargetHost"
+                outlined
+                dense
+                label="解析到 Overlay IP"
+                placeholder="100.89.0.12"
+                class="q-mb-sm"
+              />
+              <q-input
+                v-model="dnsNote"
+                outlined
+                dense
+                label="备注"
+                placeholder="可空"
+                class="q-mb-sm"
+              />
+              <div class="toolbar-row">
+                <q-toggle v-model="dnsEnabled" label="启用" />
+                <q-toggle v-model="dnsAnonymousVisible" label="匿名可见" />
+                <q-space />
+                <q-btn flat icon="restart_alt" label="清空" @click="resetDnsForm" />
+                <q-btn color="primary" icon="save" label="保存 DNS" @click="saveDnsRecord" />
+              </div>
+            </section>
+
+            <section class="section-surface q-pa-md">
+              <div class="section-title q-mb-sm">DNS 列表</div>
+              <q-table
+                :rows="dnsRows"
+                :columns="dnsColumns"
+                row-key="id"
+                flat
+                bordered
+                dense
+                :pagination="{ rowsPerPage: 12 }"
+              >
+                <template #body-cell-enabled="props">
+                  <q-td :props="props">
+                    <q-badge :color="props.value ? 'positive' : 'grey-6'" :label="props.value ? '启用' : '停用'" />
+                  </q-td>
+                </template>
+                <template #body-cell-anonymous="props">
+                  <q-td :props="props">
+                    <q-badge :color="props.value ? 'primary' : 'grey-6'" :label="props.value ? '匿名' : '许可'" />
+                  </q-td>
+                </template>
+                <template #body-cell-actions="props">
+                  <q-td :props="props">
+                    <q-btn flat dense round icon="edit" @click="editDnsRecord(props.row)">
+                      <q-tooltip>编辑</q-tooltip>
+                    </q-btn>
+                  </q-td>
+                </template>
+              </q-table>
+            </section>
+          </div>
+        </q-tab-panel>
+
         <q-tab-panel name="services" class="q-pa-none">
           <div class="split-layout">
             <section class="section-surface q-pa-md">
@@ -922,6 +994,7 @@ import {
   type HdoDeploymentJob,
   type HdoDeploymentKind,
   type HdoDeploymentState,
+  type HdoDnsRecordRow,
   type HdoMeshGroupRow,
   type HdoMeshMembershipRow,
   type HdoNodeRow,
@@ -979,6 +1052,13 @@ const nodeWireGuardListenPort = ref('51888');
 const nodeWireGuardDnsServers = ref('');
 const nodeKindOptions: HdoNodeRow['kind'][] = ['domestic', 'home', 'oversea'];
 const nodeStatusOptions: HdoNodeRow['status'][] = ['pending', 'online', 'offline', 'error'];
+
+const editingDnsId = ref<string | null>(null);
+const dnsDomain = ref('api.mxinfo-inc.cn');
+const dnsTargetHost = ref('100.89.0.12');
+const dnsNote = ref('');
+const dnsEnabled = ref(true);
+const dnsAnonymousVisible = ref(false);
 
 const editingServiceId = ref<string | null>(null);
 const serviceName = ref('home-web');
@@ -1131,6 +1211,16 @@ const nodeColumns = [
   { name: 'actions', label: '', field: 'id', align: 'right' as const }
 ];
 
+const dnsColumns = [
+  { name: 'domain', label: '域名', field: 'domain', align: 'left' as const },
+  { name: 'targetHost', label: '解析到', field: 'targetHost', align: 'left' as const },
+  { name: 'anonymous', label: '匿名', field: 'anonymousVisible', align: 'left' as const },
+  { name: 'enabled', label: '状态', field: 'enabled', align: 'left' as const },
+  { name: 'note', label: '备注', field: 'note', align: 'left' as const },
+  { name: 'updatedAt', label: '更新时间', field: 'updatedAt', align: 'left' as const },
+  { name: 'actions', label: '', field: 'id', align: 'right' as const }
+];
+
 const serviceColumns = [
   { name: 'name', label: '名称', field: 'name', align: 'left' as const },
   { name: 'node', label: '节点', field: 'nodeLabel', align: 'left' as const },
@@ -1279,6 +1369,7 @@ const deploymentSteps = computed(() => {
   const hasDomestic = hasNodeKind('domestic');
   const hasHome = hasNodeKind('home');
   const hasService = (overview.value?.services ?? []).some((row) => row.enabled);
+  const hasDns = (overview.value?.dnsRecords ?? []).some((row) => row.enabled);
   const hasDevice = (overview.value?.devices ?? []).length > 0;
   return [
     {
@@ -1302,6 +1393,11 @@ const deploymentSteps = computed(() => {
       done: hasHome && hasService
     },
     {
+      label: '启用 HDO DNS',
+      detail: '在 DNS 页登记域名解析，并把 Domestic 100.88.0.1:53 作为 WG DNS 下发给客户端。',
+      done: hasDns && hasDomestic
+    },
+    {
       label: '客户端入网',
       detail: '用户打开 HDO 插件，在“我的 Mesh”里连接 / 更新 HDO。',
       done: hasDevice
@@ -1314,77 +1410,91 @@ const deploymentSteps = computed(() => {
   ];
 });
 
-const deploymentCards = computed(() => [
-  {
-    key: 'domestic-wireguard',
-    title: 'Domestic WireGuard gateway',
-    subtitle: 'H/D mesh 基础能力；没有 Oversea 也可以让多个 H 成员互联。',
-    command: [
-      `HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo deploy-domestic --yes --server-url ${deploymentServerUrl.value} --public-host ${domesticDeploymentPublicHost.value ?? '<domestic-public-ip-or-domain>'} --port 51888`,
-      `HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo sync-peers --server-url ${deploymentServerUrl.value}`
-    ].join('\n'),
-    runKind: 'deploy-domestic' as HdoDeploymentKind,
-    done: hasNodeKind('domestic'),
-    targetTab: 'nodes',
-    actionIcon: 'dns',
-    actionLabel: '登记节点'
-  },
-  {
-    key: 'domestic-mihomo-wireguard',
-    title: 'Domestic Docker Mihomo + WireGuard',
-    subtitle: '复用现有 wg-mihomo-stack；通过 HDO gateway 统一入口调用。',
-    command: 'sudo ./scripts/manage.sh hdo deploy-domestic-mihomo-wireguard',
-    runKind: 'deploy-domestic-mihomo-wireguard' as HdoDeploymentKind,
-    done: hasNodeKind('domestic') && (overview.value?.services ?? []).some((row) => row.enabled),
-    targetTab: 'services',
-    actionIcon: 'dns',
-    actionLabel: '登记服务'
-  },
-  {
-    key: 'oversea-mihomo-hysteria2',
-    title: 'Oversea Docker Mihomo + Hysteria2',
-    subtitle: '给 D 提供显式外网出站能力；H 客户端无需感知 O。',
-    command: 'sudo ./scripts/manage.sh hdo deploy-oversea-mihomo-hysteria2',
-    runKind: 'deploy-oversea-mihomo-hysteria2' as HdoDeploymentKind,
-    done: hasNodeKind('oversea'),
-    targetTab: 'nodes',
-    actionIcon: 'public',
-    actionLabel: '登记 O 节点'
-  },
-  {
-    key: 'sync-and-repair-domestic',
-    title: '同步并修复 D peers / routes',
-    subtitle: '把服务端管理的 H 成员节点 / 客户端 peer 写入 D，并热更新 live WireGuard、路由和转发。',
-    command: `sudo HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo sync-and-repair-domestic --server-url ${deploymentServerUrl.value}`,
-    runKind: 'sync-and-repair-domestic' as HdoDeploymentKind,
-    done: (overview.value?.devices ?? []).some((row) => Boolean(row.publicKey && row.overlayIp)),
-    targetTab: 'devices',
-    actionIcon: 'devices',
-    actionLabel: '查看设备'
-  },
-  {
-    key: 'repair-domestic-routes',
-    title: '修复 D 路由 / 转发',
-    subtitle: '只重载已有 /etc/wireguard/hdo-home.conf，补齐 ip_forward、DOCKER-USER/FORWARD 和 peer 路由。',
-    command: 'sudo ./scripts/manage.sh hdo repair-routes',
-    runKind: 'repair-domestic-routes' as HdoDeploymentKind,
-    done: hasNodeKind('domestic'),
-    targetTab: 'topology',
-    actionIcon: 'account_tree',
-    actionLabel: '查看拓扑'
-  },
-  {
-    key: 'gateway-status',
-    title: '查看 D 网关状态',
-    subtitle: '输出生成文件、live WG allowed-ips、transfer、hdo-home routes 和 iptables 放行情况。',
-    command: 'sudo ./scripts/manage.sh hdo status',
-    runKind: 'status' as HdoDeploymentKind,
-    done: hasNodeKind('domestic'),
-    targetTab: 'deploy',
-    actionIcon: 'terminal',
-    actionLabel: '查看任务'
-  }
-]);
+const deploymentCards = computed(() => {
+  const hasDns = (overview.value?.dnsRecords ?? []).some((row) => row.enabled);
+  return [
+    {
+      key: 'domestic-wireguard',
+      title: 'Domestic WireGuard gateway',
+      subtitle: 'H/D mesh 基础能力；没有 Oversea 也可以让多个 H 成员互联。',
+      command: [
+        `HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo deploy-domestic --yes --server-url ${deploymentServerUrl.value} --public-host ${domesticDeploymentPublicHost.value ?? '<domestic-public-ip-or-domain>'} --port 51888`,
+        `HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo sync-peers --server-url ${deploymentServerUrl.value}`
+      ].join('\n'),
+      runKind: 'deploy-domestic' as HdoDeploymentKind,
+      done: hasNodeKind('domestic'),
+      targetTab: 'nodes',
+      actionIcon: 'dns',
+      actionLabel: '登记节点'
+    },
+    {
+      key: 'domestic-dns',
+      title: 'Domestic HDO DNS',
+      subtitle: '在 Domestic 100.88.0.1:53 运行 CoreDNS，并同步 DNS/服务域名 hosts。',
+      command: `sudo HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo sync-dns --server-url ${deploymentServerUrl.value}`,
+      runKind: 'sync-dns' as HdoDeploymentKind,
+      done: hasDns,
+      targetTab: 'dns',
+      actionIcon: 'dns',
+      actionLabel: '登记 DNS'
+    },
+    {
+      key: 'domestic-mihomo-wireguard',
+      title: 'Domestic Docker Mihomo + WireGuard',
+      subtitle: '复用现有 wg-mihomo-stack；通过 HDO gateway 统一入口调用。',
+      command: 'sudo ./scripts/manage.sh hdo deploy-domestic-mihomo-wireguard',
+      runKind: 'deploy-domestic-mihomo-wireguard' as HdoDeploymentKind,
+      done: hasNodeKind('domestic') && (overview.value?.services ?? []).some((row) => row.enabled),
+      targetTab: 'services',
+      actionIcon: 'dns',
+      actionLabel: '登记服务'
+    },
+    {
+      key: 'oversea-mihomo-hysteria2',
+      title: 'Oversea Docker Mihomo + Hysteria2',
+      subtitle: '给 D 提供显式外网出站能力；H 客户端无需感知 O。',
+      command: 'sudo ./scripts/manage.sh hdo deploy-oversea-mihomo-hysteria2',
+      runKind: 'deploy-oversea-mihomo-hysteria2' as HdoDeploymentKind,
+      done: hasNodeKind('oversea'),
+      targetTab: 'nodes',
+      actionIcon: 'public',
+      actionLabel: '登记 O 节点'
+    },
+    {
+      key: 'sync-and-repair-domestic',
+      title: '同步并修复 D peers / routes',
+      subtitle: '把服务端管理的 H 成员节点 / 客户端 peer 写入 D，并热更新 live WireGuard、路由和转发。',
+      command: `sudo HDO_TOKEN='<admin bearer token>' ./scripts/manage.sh hdo sync-and-repair-domestic --server-url ${deploymentServerUrl.value}`,
+      runKind: 'sync-and-repair-domestic' as HdoDeploymentKind,
+      done: (overview.value?.devices ?? []).some((row) => Boolean(row.publicKey && row.overlayIp)),
+      targetTab: 'devices',
+      actionIcon: 'devices',
+      actionLabel: '查看设备'
+    },
+    {
+      key: 'repair-domestic-routes',
+      title: '修复 D 路由 / 转发',
+      subtitle: '只重载已有 /etc/wireguard/hdo-home.conf，补齐 ip_forward、DOCKER-USER/FORWARD 和 peer 路由。',
+      command: 'sudo ./scripts/manage.sh hdo repair-routes',
+      runKind: 'repair-domestic-routes' as HdoDeploymentKind,
+      done: hasNodeKind('domestic'),
+      targetTab: 'topology',
+      actionIcon: 'account_tree',
+      actionLabel: '查看拓扑'
+    },
+    {
+      key: 'gateway-status',
+      title: '查看 D 网关状态',
+      subtitle: '输出生成文件、live WG allowed-ips、transfer、hdo-home routes 和 iptables 放行情况。',
+      command: 'sudo ./scripts/manage.sh hdo status',
+      runKind: 'status' as HdoDeploymentKind,
+      done: hasNodeKind('domestic'),
+      targetTab: 'deploy',
+      actionIcon: 'terminal',
+      actionLabel: '查看任务'
+    }
+  ];
+});
 
 const membershipRows = computed(() =>
   (overview.value?.memberships ?? []).map((row) => ({
@@ -1406,6 +1516,13 @@ const nodeRows = computed(() =>
         : ''
     };
   })
+);
+
+const dnsRows = computed(() =>
+  (overview.value?.dnsRecords ?? []).map((row) => ({
+    ...row,
+    anonymousVisible: row.metadata?.anonymousVisible === true || row.metadata?.anonymous === true
+  }))
 );
 
 const serviceRows = computed(() =>
@@ -2100,7 +2217,49 @@ function resetNodeForm(): void {
   nodeWireGuardPublicKey.value = '';
   nodeWireGuardEndpointHost.value = '';
   nodeWireGuardListenPort.value = '51888';
-  nodeWireGuardDnsServers.value = '';
+  nodeWireGuardDnsServers.value = '100.88.0.1';
+}
+
+async function saveDnsRecord(): Promise<void> {
+  if (!dnsDomain.value.trim() || !dnsTargetHost.value.trim()) return;
+  const existing = editingDnsId.value
+    ? overview.value?.dnsRecords.find((row) => row.id === editingDnsId.value)
+    : null;
+  try {
+    await admin.upsertHdoDnsRecord({
+      id: editingDnsId.value ?? undefined,
+      domain: dnsDomain.value.trim(),
+      targetHost: dnsTargetHost.value.trim(),
+      enabled: dnsEnabled.value,
+      note: dnsNote.value.trim() || null,
+      metadata: {
+        ...(existing?.metadata ?? {}),
+        anonymousVisible: dnsAnonymousVisible.value
+      }
+    });
+    resetDnsForm();
+    await reload();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+function editDnsRecord(row: HdoDnsRecordRow): void {
+  editingDnsId.value = row.id;
+  dnsDomain.value = row.domain;
+  dnsTargetHost.value = row.targetHost;
+  dnsNote.value = row.note ?? '';
+  dnsEnabled.value = row.enabled;
+  dnsAnonymousVisible.value = row.metadata?.anonymousVisible === true || row.metadata?.anonymous === true;
+}
+
+function resetDnsForm(): void {
+  editingDnsId.value = null;
+  dnsDomain.value = 'api.mxinfo-inc.cn';
+  dnsTargetHost.value = '100.89.0.12';
+  dnsNote.value = '';
+  dnsEnabled.value = true;
+  dnsAnonymousVisible.value = false;
 }
 
 async function saveService(): Promise<void> {

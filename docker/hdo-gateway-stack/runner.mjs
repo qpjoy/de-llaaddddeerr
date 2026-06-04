@@ -19,6 +19,7 @@ const allowedCommands = new Set([
   'deploy-domestic',
   'sync-peers',
   'sync-and-repair-domestic',
+  'sync-dns',
   'repair-domestic-routes',
   'deploy-domestic-mihomo-wireguard',
   'deploy-oversea-mihomo-hysteria2',

@@ -11,9 +11,16 @@ STACK_DIR="$SCRIPT_DIR"
 DATA_DIR="$STACK_DIR/data"
 WG_DIR="$DATA_DIR/wireguard"
 PEERS_DIR="$WG_DIR/peers"
+DNS_DIR="$DATA_DIR/dns"
+DNS_HOSTS_FILE="$DNS_DIR/hdo.hosts"
+DNS_COREFILE="$DNS_DIR/Corefile"
+DNS_CONTAINER="${HDO_DNS_CONTAINER:-hdo-coredns}"
+DNS_IMAGE="${HDO_DNS_IMAGE:-coredns/coredns:1.11.3}"
+DNS_BIND_IP="${HDO_DNS_BIND_IP:-100.88.0.1}"
+DNS_UPSTREAMS="${HDO_DNS_UPSTREAMS:-223.5.5.5 119.29.29.29 1.1.1.1}"
 ENV_FILE="$STACK_DIR/.env"
 
-mkdir -p "$WG_DIR" "$PEERS_DIR"
+mkdir -p "$WG_DIR" "$PEERS_DIR" "$DNS_DIR"
 
 usage() {
   cat <<'EOF'
@@ -28,6 +35,7 @@ Commands:
   sync-domestic-peers Pull managed H member/client peers from electron-server
   sync-and-repair-domestic
                       Pull peers, reload live WireGuard, routes and forwarding
+  sync-dns            Pull HDO DNS hosts and run CoreDNS on 100.88.0.1:53
   apply-domestic      Install generated wg-home config into /etc/wireguard
   repair-domestic-routes
                       Reload live domestic peers, routes and forwarding rules
@@ -49,6 +57,7 @@ Examples:
   ./scripts/manage.sh hdo add-home --name home-main
   HDO_TOKEN=<admin bearer token> ./scripts/manage.sh hdo sync-domestic-peers --server-url http://domestic:8080
   sudo HDO_TOKEN=<admin bearer token> ./scripts/manage.sh hdo sync-and-repair-domestic --server-url http://domestic:8080
+  sudo HDO_TOKEN=<admin bearer token> ./scripts/manage.sh hdo sync-dns --server-url http://domestic:8080
   sudo ./scripts/manage.sh hdo apply-domestic
   sudo ./scripts/manage.sh hdo repair-domestic-routes
   sudo ./scripts/manage.sh hdo deploy-domestic-mihomo-wireguard
@@ -641,8 +650,86 @@ cmd_sync_domestic_peers() {
   fi
 }
 
+write_hdo_dns_corefile() {
+  local bind_ip="${HDO_DNS_BIND_IP:-$DNS_BIND_IP}"
+  local upstreams="${HDO_DNS_UPSTREAMS:-$DNS_UPSTREAMS}"
+  cat > "$DNS_COREFILE" <<EOF
+.:53 {
+  bind ${bind_ip}
+  hosts /etc/coredns/hdo.hosts {
+    ttl 30
+    reload 5s
+    fallthrough
+  }
+  forward . ${upstreams}
+  cache 30
+  errors
+}
+EOF
+}
+
+ensure_hdo_dns_firewall() {
+  local iface="${1:-hdo-home}"
+
+  [ "$(id -u)" -eq 0 ] || return 0
+  command -v iptables >/dev/null 2>&1 || return 0
+
+  if ! iptables -C INPUT -i "$iface" -p udp --dport 53 -j ACCEPT >/dev/null 2>&1; then
+    iptables -I INPUT -i "$iface" -p udp --dport 53 -j ACCEPT \
+      || warn "failed to allow HDO DNS UDP traffic on $iface"
+  fi
+  if ! iptables -C INPUT -i "$iface" -p tcp --dport 53 -j ACCEPT >/dev/null 2>&1; then
+    iptables -I INPUT -i "$iface" -p tcp --dport 53 -j ACCEPT \
+      || warn "failed to allow HDO DNS TCP traffic on $iface"
+  fi
+}
+
+cmd_sync_dns() {
+  load_env
+  parse_common "$@"
+  [ -n "${HDO_SERVER_URL:-}" ] || die "--server-url or HDO_SERVER_URL required"
+  [ -n "${HDO_TOKEN:-}" ] || [ -n "${HDO_GATEWAY_RUNNER_TOKEN:-}" ] || die "HDO_TOKEN=<admin bearer token> or HDO_GATEWAY_RUNNER_TOKEN required"
+  require_cmd curl
+
+  local fetched curl_headers=()
+  mkdir -p "$DNS_DIR"
+  fetched="$(mktemp)"
+  if [ -n "${HDO_TOKEN:-}" ]; then
+    curl_headers+=(-H "authorization: Bearer ${HDO_TOKEN}")
+  fi
+  if [ -n "${HDO_GATEWAY_RUNNER_TOKEN:-}" ]; then
+    curl_headers+=(-H "x-hdo-runner-token: ${HDO_GATEWAY_RUNNER_TOKEN}")
+  fi
+  curl -fsS \
+    "${curl_headers[@]}" \
+    "${HDO_SERVER_URL%/}/api/v1/hdo/admin/dns/hosts" \
+    -o "$fetched"
+  install -m 644 "$fetched" "$DNS_HOSTS_FILE"
+  rm -f "$fetched"
+  write_hdo_dns_corefile
+  ok "synced HDO DNS hosts into $DNS_HOSTS_FILE"
+
+  if [ "$(id -u)" -eq 0 ] && command -v docker >/dev/null 2>&1; then
+    docker rm -f "$DNS_CONTAINER" >/dev/null 2>&1 || true
+    docker run -d \
+      --name "$DNS_CONTAINER" \
+      --restart unless-stopped \
+      --network host \
+      -v "$DNS_DIR:/etc/coredns:ro" \
+      "$DNS_IMAGE" \
+      -conf /etc/coredns/Corefile >/dev/null
+    ensure_hdo_dns_firewall hdo-home
+    ok "started CoreDNS container $DNS_CONTAINER on ${HDO_DNS_BIND_IP:-$DNS_BIND_IP}:53"
+  else
+    echo "Next:"
+    echo "  sudo docker rm -f $DNS_CONTAINER || true"
+    echo "  sudo docker run -d --name $DNS_CONTAINER --restart unless-stopped --network host -v '$DNS_DIR:/etc/coredns:ro' $DNS_IMAGE -conf /etc/coredns/Corefile"
+  fi
+}
+
 cmd_sync_and_repair_domestic() {
   cmd_sync_domestic_peers "$@"
+  cmd_sync_dns "$@" || warn "HDO DNS sync failed; peers/routes were still repaired"
   if [ "$(id -u)" -eq 0 ] && [ -f /etc/wireguard/hdo-home.conf ]; then
     cmd_repair_domestic_routes
   else
@@ -791,8 +878,11 @@ cmd_nuke() {
     ok "removed host hdo-home WireGuard config, routes and HDO forwarding rules"
   fi
 
+  if command -v docker >/dev/null 2>&1; then
+    docker rm -f "$DNS_CONTAINER" >/dev/null 2>&1 || true
+  fi
   rm -rf "$DATA_DIR" "$ENV_FILE" "$STACK_DIR/egress.env.example"
-  mkdir -p "$WG_DIR" "$PEERS_DIR"
+  mkdir -p "$WG_DIR" "$PEERS_DIR" "$DNS_DIR"
   ok "HDO gateway generated state wiped"
 }
 
@@ -802,7 +892,18 @@ cmd_status() {
   echo "server: ${HDO_SERVER_URL:-}"
   echo "public host: ${HDO_PUBLIC_HOST:-}"
   echo "wg config: $WG_DIR/wg-home.conf"
+  echo "dns hosts: $DNS_HOSTS_FILE"
   [ -f "$WG_DIR/wg-home.conf" ] && sed -n '1,120p' "$WG_DIR/wg-home.conf"
+  if [ -f "$DNS_HOSTS_FILE" ]; then
+    echo
+    echo "dns hosts:"
+    sed -n '1,120p' "$DNS_HOSTS_FILE"
+  fi
+  if command -v docker >/dev/null 2>&1; then
+    echo
+    echo "dns container:"
+    docker ps --filter "name=^/${DNS_CONTAINER}$" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' || true
+  fi
   echo
   echo "peers:"
   find "$PEERS_DIR" -maxdepth 1 -type f -name '*.conf' -print 2>/dev/null | sort
@@ -832,6 +933,9 @@ cmd_status() {
       iptables -vnL FORWARD | awk 'NR == 1 || /hdo-home/' || true
       iptables -vnL DOCKER-USER 2>/dev/null | awk 'NR == 1 || /hdo-home/' || true
       iptables -t mangle -vnL FORWARD | awk 'NR == 1 || /hdo-home|TCPMSS/' || true
+      echo
+      echo "iptables HDO DNS input:"
+      iptables -vnL INPUT | awk 'NR == 1 || /hdo-home.*dpt:53/' || true
     fi
   else
     echo "run as root to include live wg, route and iptables state"
@@ -848,6 +952,7 @@ cmd_menu() {
     "add-home           生成 Home WireGuard peer"
     "sync-peers         同步服务端 H 成员/client peers 到 domestic"
     "sync-repair        同步 peers 并修复 live 路由/转发"
+    "sync-dns           同步 HDO DNS hosts 并运行 CoreDNS"
     "apply-domestic     启用 wg-quick@hdo-home"
     "repair-routes      修复 hdo-home peer 路由和转发"
     "setup-egress       生成 oversea scoped egress 模板"
@@ -871,6 +976,7 @@ cmd_menu() {
       add-home)        cmd_add_home ;;
       sync-peers)      cmd_sync_domestic_peers ;;
       sync-repair)     cmd_sync_and_repair_domestic ;;
+      sync-dns)        cmd_sync_dns ;;
       apply-domestic)  sudo_apply_domestic ;;
       repair-routes)   sudo_repair_domestic_routes ;;
       setup-egress)    cmd_setup_oversea_egress ;;
@@ -918,7 +1024,7 @@ maybe_register_node() {
 
   if [ "$kind" = "domestic" ] && [ -n "${public_key:-${HDO_DOMESTIC_PUBLIC_KEY:-}}" ]; then
     public_key="${public_key:-${HDO_DOMESTIC_PUBLIC_KEY:-}}"
-    metadata="{\"wireGuard\":{\"publicKey\":\"${public_key}\",\"listenPort\":${HDO_WG_PORT:-51888},\"endpointHost\":\"${public_host}\"}}"
+    metadata="{\"wireGuard\":{\"publicKey\":\"${public_key}\",\"listenPort\":${HDO_WG_PORT:-51888},\"endpointHost\":\"${public_host}\",\"dnsServers\":[\"${HDO_DNS_BIND_IP:-$DNS_BIND_IP}\"]}}"
   elif [ "$kind" = "home" ] && [ -n "$public_key" ]; then
     metadata="{\"wireGuard\":{\"publicKey\":\"${public_key}\"}}"
   fi
@@ -950,6 +1056,7 @@ case "$command" in
   add-home) cmd_add_home "$@" ;;
   sync-domestic-peers|sync-peers) cmd_sync_domestic_peers "$@" ;;
   sync-and-repair-domestic|sync-repair) cmd_sync_and_repair_domestic "$@" ;;
+  sync-dns) cmd_sync_dns "$@" ;;
   apply-domestic) cmd_apply_domestic "$@" ;;
   repair-domestic-routes|repair-routes) cmd_repair_domestic_routes "$@" ;;
   setup-oversea-egress) cmd_setup_oversea_egress "$@" ;;
