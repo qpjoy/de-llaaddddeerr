@@ -21,10 +21,12 @@ const isMacHost = process.platform === 'darwin';
 const isForgeStart = process.argv.some(
   (arg) => arg === 'start' || /(?:^|[/\\])electron-forge-start(?:\.js)?$/.test(arg)
 );
-// Set FORGE_FORCE_SQUIRREL=1 to include the Squirrel maker even on macOS/Linux
-// (requires `mono` + `wine` to be installed; tested on the GitHub macos-latest
-// runner with `brew install wine-stable mono`).
-const wantsSquirrel = isWindowsHost || Boolean(process.env.FORGE_FORCE_SQUIRREL);
+// Set FORGE_INCLUDE_SQUIRREL=1 to include the Squirrel maker. It is opt-in
+// because electron-winstaller/Squirrel can fail while releasifying large
+// asar=false pnpm apps with SharpCompress errors such as:
+// "WriteEntryTo or OpenEntryStream can only be called once."
+// FORGE_FORCE_SQUIRREL is kept as a backward-compatible alias for CI jobs.
+const wantsSquirrel = Boolean(process.env.FORGE_INCLUDE_SQUIRREL || process.env.FORGE_FORCE_SQUIRREL);
 const wantsDmg = Boolean(process.env.FORGE_INCLUDE_DMG);
 
 function canCreateDmg() {
@@ -64,23 +66,17 @@ const makers = [
   ...(includeDmg ? [{ name: '@electron-forge/maker-dmg', platforms: ['darwin'] }] : []),
 
   // ── Windows ──────────────────────────────────────────────────────
-  // The .zip target shells out to `powershell.exe` for `Compress-Archive`
-  // on Windows hosts. Some Windows installs (especially trimmed Server
-  // SKUs, custom PATH setups, or hosts running through MINGW with a
-  // pruned env) don't expose `powershell.exe` on the spawn lookup path,
-  // and forge then bombs the whole `make` step. Set
-  // `FORGE_INCLUDE_ZIP=1` to add it back. On macOS / Linux cross-builds
-  // there's no powershell dependency, so we keep the zip target enabled
-  // unconditionally there.
-  ...(isWindowsHost && !process.env.FORGE_INCLUDE_ZIP
+  // The .zip target is the default Windows artifact. It avoids the Squirrel
+  // releasify step and works well with the intentionally asar=false app
+  // layout used by the embedded marketplace seed pipeline.
+  ...(isWindowsHost && process.env.FORGE_SKIP_ZIP
     ? []
     : [{ name: '@electron-forge/maker-zip', platforms: ['win32'] }])
 ];
 
-// The Squirrel .exe installer maker links against `electron-winstaller`,
-// which spawns mono+wine on non-Windows hosts. Push it onto the list only
-// when the host supports it so cross-builds from macOS still emit the .zip
-// target without aborting.
+// The Squirrel .exe installer maker links against `electron-winstaller`.
+// Keep it opt-in; this app ships many unpacked resources so Squirrel can hit
+// SharpCompress/NuGet extraction bugs even on native Windows hosts.
 if (wantsSquirrel) {
   makers.push({
     name: '@electron-forge/maker-squirrel',
@@ -88,7 +84,8 @@ if (wantsSquirrel) {
     config: {
       name: 'mx-hdo',
       authors: 'QPJoy',
-      description: 'MX HDO desktop client'
+      description: 'MX HDO desktop client',
+      noDelta: true
     }
   });
 }

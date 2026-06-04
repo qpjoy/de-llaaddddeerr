@@ -93,10 +93,20 @@ pnpm make:win
 from npm. Publish the HDO package version referenced in `package.json` before
 running this on a clean Windows machine.
 
-Expected installer output:
+Expected default output:
 
 ```text
-out\make\squirrel.windows\x64\MX HDO-0.1.0 Setup.exe
+out\make\zip\win32\x64\MX HDO-win32-x64-0.1.0.zip
+```
+
+Squirrel installer builds are optional because `electron-winstaller` can hit
+SharpCompress extraction failures with this intentionally unpacked
+`asar: false` app layout. If an installer is needed for a release test, opt in
+explicitly:
+
+```powershell
+$env:FORGE_INCLUDE_SQUIRREL='1'
+pnpm make:win
 ```
 
 Do not copy `node_modules/` or `out/` between macOS and Windows. Native modules
