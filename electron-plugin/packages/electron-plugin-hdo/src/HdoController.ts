@@ -681,6 +681,7 @@ export class HdoController {
           allowedIps,
           dns: dnsServers,
           dnsDomains,
+          splitDns: shouldUseWireGuardSplitDns(dnsServers, dnsDomains),
           directPeers: clientDirectPeers,
           persistentKeepalive: 25
         });
@@ -1082,6 +1083,7 @@ export class HdoController {
           allowedIps,
           dns: dnsServers,
           dnsDomains,
+          splitDns: shouldUseWireGuardSplitDns(dnsServers, dnsDomains),
           directPeers: clientDirectPeers,
           persistentKeepalive: 25
         });
@@ -2601,6 +2603,10 @@ function wireGuardDnsDomainsForPlatform(manifest: Record<string, unknown>): stri
       .map((binding) => normalizeWireGuardDnsDomain(binding.domain))
       .filter((domain): domain is string => Boolean(domain))
   );
+}
+
+function shouldUseWireGuardSplitDns(dnsServers: string[], dnsDomains: string[]): boolean {
+  return process.platform === 'win32' && dnsServers.length > 0 && dnsDomains.length > 0;
 }
 
 function dnsServerValues(value: unknown): string[] {

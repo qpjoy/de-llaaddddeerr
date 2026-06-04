@@ -27,7 +27,9 @@ export interface WireGuardInterface {
   addresses: string[];
   listenPort?: number | null;
   dns?: string[];
+  hdoDnsServers?: string[];
   hdoDnsDomains?: string[];
+  suppressInterfaceDns?: boolean;
   mtu?: number | null;
   peers: WireGuardPeer[];
 }
@@ -288,7 +290,8 @@ export function renderWireGuardInterface(config: WireGuardInterface): string {
     `PrivateKey = ${config.privateKey}`
   ];
   if (config.listenPort) lines.push(`ListenPort = ${config.listenPort}`);
-  if (config.dns?.length) lines.push(`DNS = ${config.dns.join(', ')}`);
+  if (config.dns?.length && !config.suppressInterfaceDns) lines.push(`DNS = ${config.dns.join(', ')}`);
+  if (config.hdoDnsServers?.length) lines.push(`# HDO DNS Servers = ${config.hdoDnsServers.join(', ')}`);
   if (config.hdoDnsDomains?.length) lines.push(`# HDO DNS Domains = ${config.hdoDnsDomains.join(', ')}`);
   if (config.mtu) lines.push(`MTU = ${config.mtu}`);
 
@@ -332,15 +335,19 @@ export function renderHdoClientWireGuardConfig(input: {
   directPeers?: WireGuardPeer[];
   dns?: string[];
   dnsDomains?: string[];
+  splitDns?: boolean;
   mtu?: number | null;
   persistentKeepalive?: number | null;
 }): string {
+  const splitDns = input.splitDns === true && Boolean(input.dns?.length && input.dnsDomains?.length);
   return renderWireGuardInterface({
     privateKey: input.privateKey,
     addresses: [input.address],
     listenPort: input.listenPort,
-    dns: input.dns,
+    dns: splitDns ? undefined : input.dns,
+    hdoDnsServers: splitDns ? input.dns : undefined,
     hdoDnsDomains: input.dnsDomains,
+    suppressInterfaceDns: splitDns,
     mtu: input.mtu,
     peers: [
       {
@@ -591,11 +598,18 @@ export function buildWireGuardTunnelCommand(input: {
   if (runtime.platform === 'win32') {
     const command = runtime.windowsWireGuard?.command;
     if (!command) throw new Error(runtime.error ?? 'wireguard.exe unavailable');
+    const profile = parseWireGuardProfile(configPath);
     const tunnelName = pathWin32.basename(configPath).replace(/\.[^.]+$/, '');
     const wireGuardArgs = action === 'down'
       ? ['/uninstalltunnelservice', tunnelName]
       : ['/installtunnelservice', configPath];
-    const script = windowsElevatedStartProcessScript(command, wireGuardArgs, action, tunnelName);
+    const script = windowsElevatedStartProcessScript(
+      command,
+      wireGuardArgs,
+      action,
+      tunnelName,
+      windowsNrptRulesFromProfile(profile)
+    );
     const powershell = windowsPowerShellCommand();
     return {
       action,
@@ -2218,6 +2232,10 @@ function parseWireGuardProfile(configPath: string): {
       dnsServers.push(...valueList(line));
       continue;
     }
+    if (section === 'interface' && /^#\s*HDO\s+DNS\s+Servers\s*=/i.test(trimmed)) {
+      dnsServers.push(...valueList(line));
+      continue;
+    }
     if (section === 'interface' && /^#\s*HDO\s+DNS\s+Domains\s*=/i.test(trimmed)) {
       dnsDomains.push(...valueList(line).map(normalizeDnsDomain).filter(isString));
       continue;
@@ -2702,19 +2720,38 @@ function powerShellString(value: string): string {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
+type WindowsNrptRule = {
+  namespace: string;
+  nameServers: string[];
+};
+
+function windowsNrptRulesFromProfile(profile: ReturnType<typeof parseWireGuardProfile>): WindowsNrptRule[] {
+  if (profile.dnsServers.length === 0 || profile.dnsDomains.length === 0) return [];
+  const servers = uniqueStrings(profile.dnsServers.filter(isIpv4));
+  if (servers.length === 0) return [];
+  const namespaces = uniqueStrings(profile.dnsDomains.flatMap((domain) => [domain, `.${domain}`]));
+  return namespaces.map((namespace) => ({
+    namespace,
+    nameServers: servers
+  }));
+}
+
 function windowsElevatedStartProcessScript(
   command: string,
   args: string[],
   action: WireGuardTunnelAction,
-  tunnelName: string
+  tunnelName: string,
+  nrptRules: WindowsNrptRule[] = []
 ): string {
   const serviceName = `WireGuardTunnel$${tunnelName}`;
   const serviceArg = powerShellString(serviceName);
   const serviceLookup = `$svc = Get-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`;
-  const preflightLines = action === 'up'
+  const canPreflight = nrptRules.length === 0;
+  const preflightLines = !canPreflight ? [] : (action === 'up'
     ? [serviceLookup, "if ($null -ne $svc -and $svc.Status -eq 'Running') { exit 0 }"]
-    : (action === 'down' ? [serviceLookup, 'if ($null -eq $svc) { exit 0 }'] : []);
+    : (action === 'down' ? [serviceLookup, 'if ($null -eq $svc) { exit 0 }'] : []));
   const runWireGuard = (wireGuardArgs: string[]) => `& ${powerShellString(command)} ${wireGuardArgs.map(powerShellString).join(' ')}`;
+  const nrptLines = windowsNrptPowerShellLines(nrptRules, tunnelName);
   const waitForServiceAbsent = () => [
     '$deadline = (Get-Date).AddSeconds(12)',
     'while ($true) {',
@@ -2736,20 +2773,24 @@ function windowsElevatedStartProcessScript(
   ];
   const elevatedLines: string[] = [
     "$ErrorActionPreference = 'Stop'",
+    ...nrptLines,
     serviceLookup
   ];
   if (action === 'up') {
     elevatedLines.push(
-      "if ($null -ne $svc -and $svc.Status -eq 'Running') { exit 0 }",
+      "if ($null -ne $svc -and $svc.Status -eq 'Running') { Add-HdoNrptRules; exit 0 }",
       `if ($null -ne $svc) {`,
       `  Start-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`,
       ...waitForServiceRunning(),
+      '  Add-HdoNrptRules',
       '  exit 0',
       '}'
     );
   } else if (action === 'down') {
+    elevatedLines.push('Remove-HdoNrptRules');
     elevatedLines.push('if ($null -eq $svc) { exit 0 }');
   } else {
+    elevatedLines.push('Remove-HdoNrptRules');
     elevatedLines.push(
       'if ($null -ne $svc) {',
       `  if ($svc.Status -ne 'Stopped') { Stop-Service -Name ${serviceArg} -Force -ErrorAction SilentlyContinue }`,
@@ -2763,6 +2804,7 @@ function windowsElevatedStartProcessScript(
     runWireGuard(args),
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
     ...(action === 'down' ? waitForServiceAbsent() : waitForServiceRunning()),
+    ...(action === 'down' ? [] : ['Add-HdoNrptRules']),
     'exit 0'
   );
   const elevatedEncoded = encodePowerShell(elevatedLines.join('\n'));
@@ -2773,6 +2815,41 @@ function windowsElevatedStartProcessScript(
     `$p = Start-Process -FilePath $pwsh -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', ${powerShellString(elevatedEncoded)}) -Verb RunAs -Wait -PassThru`,
     'if ($null -ne $p.ExitCode) { exit $p.ExitCode }'
   ].join('\n');
+}
+
+function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string): string[] {
+  if (rules.length === 0) {
+    return [
+      'function Add-HdoNrptRules { }',
+      'function Remove-HdoNrptRules { }'
+    ];
+  }
+  const entries = rules.map((rule) => {
+    const servers = rule.nameServers.map(powerShellString).join(',');
+    return `[pscustomobject]@{ Namespace = ${powerShellString(rule.namespace)}; NameServers = @(${servers}) }`;
+  });
+  const comment = `QPJoy HDO ${tunnelName}`;
+  return [
+    `$hdoNrptRules = @(${entries.join(', ')})`,
+    `$hdoNrptComment = ${powerShellString(comment)}`,
+    'function Remove-HdoNrptRules {',
+    '  foreach ($rule in $hdoNrptRules) {',
+    '    Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Namespace -eq $rule.Namespace } | ForEach-Object {',
+    '      Remove-DnsClientNrptRule -Name $_.Name -Force -ErrorAction SilentlyContinue',
+    '    }',
+    '  }',
+    '}',
+    'function Add-HdoNrptRules {',
+    '  Remove-HdoNrptRules',
+    '  foreach ($rule in $hdoNrptRules) {',
+    '    try {',
+    '      Add-DnsClientNrptRule -Namespace $rule.Namespace -NameServers $rule.NameServers -DisplayName $hdoNrptComment -Comment $hdoNrptComment -ErrorAction Stop | Out-Null',
+    '    } catch {',
+    '      Add-DnsClientNrptRule -Namespace $rule.Namespace -NameServers $rule.NameServers -ErrorAction Stop | Out-Null',
+    '    }',
+    '  }',
+    '}'
+  ];
 }
 
 function windowsPowerShellCommand(): string {
