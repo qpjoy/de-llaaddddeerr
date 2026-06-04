@@ -119,6 +119,26 @@ function missingPackageDependencies(packageDir) {
   }
 }
 
+function missingHdoSeedRuntimeFiles(packageDir) {
+  if (process.platform !== 'win32') return [];
+  const required = [
+    path.join('resources', 'wireguard', 'win32-x64', 'wireguard.exe'),
+    path.join('resources', 'wireguard', 'win32-x64', 'wg.exe'),
+    path.join('dist', 'vendor', 'electron-core-wireguard', 'dist', 'index.js')
+  ];
+  const missing = required.filter((relative) => !fs.existsSync(path.join(packageDir, relative)));
+  const corePath = path.join(packageDir, 'dist', 'vendor', 'electron-core-wireguard', 'dist', 'index.js');
+  if (fs.existsSync(corePath)) {
+    try {
+      const core = fs.readFileSync(corePath, 'utf8');
+      if (!core.includes('-Verb RunAs')) missing.push('dist/vendor/electron-core-wireguard/dist/index.js:<uac-script>');
+    } catch {
+      missing.push('dist/vendor/electron-core-wireguard/dist/index.js:<readable>');
+    }
+  }
+  return missing;
+}
+
 function pruneStaleSeedInstall(id, npm, expectedSourceDir) {
   const pluginsRoot = path.join(app.getPath('userData'), 'plugins');
   const expected = safeRealpath(expectedSourceDir);
@@ -138,6 +158,16 @@ function pruneStaleSeedInstall(id, npm, expectedSourceDir) {
       continue;
     }
     const installed = safeRealpath(installedPackageDir);
+    const missingRuntimeFiles = id === HDO_ID ? missingHdoSeedRuntimeFiles(installedPackageDir) : [];
+    if (missingRuntimeFiles.length > 0) {
+      fs.rmSync(installPath, { recursive: true, force: true });
+      console.warn('[hdo] removed HDO seed install with missing runtime files:', {
+        id,
+        installPath,
+        missingRuntimeFiles
+      });
+      continue;
+    }
     if (!expected) continue;
     if (!installed || installed === expected) continue;
     const installRoot = safeRealpath(installPath);

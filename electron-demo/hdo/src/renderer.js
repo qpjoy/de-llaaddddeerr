@@ -287,6 +287,8 @@ async function runAction(label, fn, options = {}) {
   try {
     const result = await fn();
     writeOutput(publicJson(result));
+    const failure = actionFailureMessage(result);
+    if (failure) throw new Error(failure);
     if (options.waitFor === 'down') {
       setConnectionCopy('正在断开网络', '已确认系统权限，正在等待 HDO 网络停止。');
       chip.textContent = '断开中';
@@ -340,7 +342,10 @@ function shouldWaitForTunnel(result) {
   if (!result || typeof result !== 'object') return false;
   if (result.wireGuardStatus && result.wireGuardStatus.active === true) return false;
   if (isAuthorizationCancelResult(result.connected)) return false;
-  const peer = result.peer;
+  const connected = result.connected;
+  const prepared = result.prepared && typeof result.prepared === 'object' ? result.prepared : null;
+  const peer = result.peer || (prepared && prepared.peer);
+  if (connected && typeof connected === 'object' && connected.ok === true) return true;
   return Boolean(
     result.ok !== false &&
     peer &&
@@ -349,6 +354,23 @@ function shouldWaitForTunnel(result) {
     result.connected !== null &&
     result.connected !== undefined
   );
+}
+
+function actionFailureMessage(result) {
+  if (!result || typeof result !== 'object') return null;
+  const connected = result.connected;
+  if (connected && typeof connected === 'object' && connected.ok === false) {
+    return String(connected.message || connected.error || 'WireGuard 启动失败');
+  }
+  const prepared = result.prepared;
+  if (prepared && typeof prepared === 'object' && prepared.ok === false) {
+    return String(prepared.message || prepared.error || 'WireGuard 配置生成失败');
+  }
+  const peer = result.peer || (prepared && typeof prepared === 'object' ? prepared.peer : null);
+  if (peer && typeof peer === 'object' && peer.lastError) {
+    return String(peer.lastError);
+  }
+  return null;
 }
 
 function delay(ms) {

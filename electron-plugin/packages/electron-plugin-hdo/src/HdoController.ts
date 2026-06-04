@@ -735,6 +735,12 @@ export class HdoController {
         ok: false,
         error: errorMessage(err)
       }));
+      const connectFailure = wireGuardConnectFailureMessage(connected);
+      if (connectFailure) {
+        peer.lastError = connectFailure;
+        peer.updatedAt = new Date().toISOString();
+        this.updateSettings({ wireGuardPeer: peer });
+      }
       wireGuardStatus = await this.waitForWireGuardState(true, 32, 650);
       if (wireGuardStatus?.active === true && overlayIp && h2iDirectCandidateIps.length > 0) {
         h2iDirectReady = await this.reportAnonymousH2iDirectReady({
@@ -888,6 +894,15 @@ export class HdoController {
           ok: false,
           error: errorMessage(err)
         }));
+        const connectFailure = wireGuardConnectFailureMessage(connected);
+        if (connectFailure) {
+          const failedPeer = {
+            ...(plainObject(this.settings.wireGuardPeer) ?? {}),
+            lastError: connectFailure,
+            updatedAt: new Date().toISOString()
+          };
+          this.updateSettings({ wireGuardPeer: failedPeer });
+        }
         wireGuardStatus = await this.waitForWireGuardState(true, 32, 650);
         if (!wireGuardStatus && preparedPeer?.overlayIp) {
           wireGuardStatus = this.wireGuardStatus();
@@ -2545,6 +2560,13 @@ function publicAnonymousSettings(value: unknown): Record<string, unknown> | null
 function publicWireGuardRuntime(value: unknown): Record<string, unknown> {
   const runtime = plainObject(value);
   return runtime ? { ...runtime } : {};
+}
+
+function wireGuardConnectFailureMessage(value: unknown): string | null {
+  const row = plainObject(value);
+  if (!row || row.ok !== false) return null;
+  const message = stringValue(row.message) || stringValue(row.error) || 'WireGuard 启动失败';
+  return message.startsWith('WireGuard ') ? message : `WireGuard 启动失败：${message}`;
 }
 
 function hasWireGuardLaunchDaemon(status: { installed?: boolean; loaded?: boolean; running?: boolean } | null): boolean {
