@@ -27,6 +27,7 @@ export interface WireGuardInterface {
   addresses: string[];
   listenPort?: number | null;
   dns?: string[];
+  hdoDnsDomains?: string[];
   mtu?: number | null;
   peers: WireGuardPeer[];
 }
@@ -288,6 +289,7 @@ export function renderWireGuardInterface(config: WireGuardInterface): string {
   ];
   if (config.listenPort) lines.push(`ListenPort = ${config.listenPort}`);
   if (config.dns?.length) lines.push(`DNS = ${config.dns.join(', ')}`);
+  if (config.hdoDnsDomains?.length) lines.push(`# HDO DNS Domains = ${config.hdoDnsDomains.join(', ')}`);
   if (config.mtu) lines.push(`MTU = ${config.mtu}`);
 
   for (const peer of config.peers) {
@@ -329,6 +331,7 @@ export function renderHdoClientWireGuardConfig(input: {
   allowedIps?: string[];
   directPeers?: WireGuardPeer[];
   dns?: string[];
+  dnsDomains?: string[];
   mtu?: number | null;
   persistentKeepalive?: number | null;
 }): string {
@@ -337,6 +340,7 @@ export function renderHdoClientWireGuardConfig(input: {
     addresses: [input.address],
     listenPort: input.listenPort,
     dns: input.dns,
+    hdoDnsDomains: input.dnsDomains,
     mtu: input.mtu,
     peers: [
       {
@@ -1427,7 +1431,7 @@ function buildDarwinUserspaceTunnelCommand(
   const primaryAddress = profile.addresses[0]?.split('/')[0] ?? '';
   const dnsStatePath = join(dirname(configPath), `${profile.interfaceName}.dns.state`);
   const dnsRestoreCommands = darwinDnsRestoreCommands(shellQuote(dnsStatePath), '"$ROUTE_LOG"');
-  const dnsSetCommands = darwinDnsSetCommands(profile.dnsServers, shellQuote(dnsStatePath), '"$ROUTE_LOG"');
+  const dnsSetCommands = darwinDnsSetCommands(profile.dnsServers, profile.dnsDomains, shellQuote(dnsStatePath), '"$ROUTE_LOG"');
   const stopLines = [
     ...darwinRouteLogSetupLines(configPath, profile.interfaceName, action === 'down' ? 'down' : 'restart-stop'),
     'mkdir -p /var/run/wireguard',
@@ -1502,6 +1506,7 @@ type DarwinUserspaceProfile = {
   addresses: string[];
   allowedIps: string[];
   dnsServers: string[];
+  dnsDomains: string[];
   endpointHosts: string[];
   setConfigPath: string;
 };
@@ -1525,6 +1530,7 @@ function darwinUserspaceProfile(configPath: string, writeSetConfig: boolean): Da
     addresses: parsed.addresses,
     allowedIps: parsed.allowedIps,
     dnsServers: parsed.dnsServers,
+    dnsDomains: parsed.dnsDomains,
     endpointHosts: parsed.endpointHosts,
     setConfigPath
   };
@@ -1694,7 +1700,7 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
   });
   const primaryAddress = profile.addresses[0]?.split('/')[0] ?? '';
   const dnsRestoreCommands = darwinDnsRestoreCommands('"$DNS_STATE_FILE"', '"$ROUTE_LOG"');
-  const dnsSetCommands = darwinDnsSetCommands(profile.dnsServers, '"$DNS_STATE_FILE"', '"$ROUTE_LOG"');
+  const dnsSetCommands = darwinDnsSetCommands(profile.dnsServers, profile.dnsDomains, '"$DNS_STATE_FILE"', '"$ROUTE_LOG"');
   const staleHdoInterfaceCleanupLines = [
     'for candidate in $(ifconfig -l 2>/dev/null); do',
     '  case "$candidate" in utun*) ;; *) continue ;; esac',
@@ -1893,9 +1899,13 @@ function darwinEndpointBypassCommands(endpointHosts: string[], logArg: string): 
   ];
 }
 
-function darwinDnsSetCommands(dnsServers: string[], statePathArg: string, logArg: string): string[] {
+function darwinDnsSetCommands(dnsServers: string[], dnsDomains: string[], statePathArg: string, logArg: string): string[] {
   const servers = uniqueStrings(dnsServers.filter((value) => Boolean(value.trim())));
   if (servers.length === 0) return [];
+  const domains = uniqueStrings(dnsDomains.map(normalizeDnsDomain).filter(isString));
+  if (domains.length > 0) {
+    return darwinDnsResolverSetCommands(servers, domains, statePathArg, logArg);
+  }
   return [
     `HDO_DNS_SERVERS=${shellQuote(servers.join(' '))}`,
     `DNS_STATE_FILE=${statePathArg}`,
@@ -1909,9 +1919,56 @@ function darwinDnsSetCommands(dnsServers: string[], statePathArg: string, logArg
     '  old_dns="$(networksetup -getdnsservers "$service" 2>/dev/null | dns_join_lines || printf Empty)"',
     '  old_search="$(networksetup -getsearchdomains "$service" 2>/dev/null | dns_join_lines || printf Empty)"',
     '  printf "%s\\t%s\\t%s\\n" "$service" "$old_dns" "$old_search" >> "$DNS_STATE_FILE"',
+    '  effective_dns="$HDO_DNS_SERVERS"',
+    '  if [ -n "$old_dns" ] && [ "$old_dns" != "Empty" ]; then',
+    '    for old_dns_server in $(printf "%s" "$old_dns" | tr "," " "); do',
+    '      case " $effective_dns " in *" $old_dns_server "*) ;; *) effective_dns="$effective_dns $old_dns_server" ;; esac',
+    '    done',
+    '  fi',
+    '  echo "dnsSet service=$service servers=$effective_dns" >> "$DNS_LOG" 2>&1 || true',
     '  # shellcheck disable=SC2086',
-    '  networksetup -setdnsservers "$service" $HDO_DNS_SERVERS >> "$DNS_LOG" 2>&1 || true',
+    '  networksetup -setdnsservers "$service" $effective_dns >> "$DNS_LOG" 2>&1 || true',
     '  networksetup -setsearchdomains "$service" Empty >> "$DNS_LOG" 2>&1 || true',
+    'done'
+  ];
+}
+
+function darwinDnsResolverSetCommands(
+  dnsServers: string[],
+  dnsDomains: string[],
+  statePathArg: string,
+  logArg: string
+): string[] {
+  return [
+    `HDO_DNS_SERVERS=${shellQuote(dnsServers.join(' '))}`,
+    `HDO_DNS_DOMAINS=${shellQuote(dnsDomains.join(' '))}`,
+    `DNS_STATE_FILE=${statePathArg}`,
+    `DNS_LOG=${logArg}`,
+    'mkdir -p "$(dirname "$DNS_STATE_FILE")" /etc/resolver >/dev/null 2>&1 || true',
+    ': > "$DNS_STATE_FILE"',
+    'for domain in $HDO_DNS_DOMAINS; do',
+    '  [ -n "$domain" ] || continue',
+    '  target="/etc/resolver/$domain"',
+    '  safe_domain="$(printf "%s" "$domain" | tr -c "A-Za-z0-9._-" "_")"',
+    '  backup="$DNS_STATE_FILE.resolver.$safe_domain.bak"',
+    '  if [ -f "$target" ]; then',
+    '    cp "$target" "$backup" >/dev/null 2>&1 || true',
+    '    existed=1',
+    '  else',
+    '    rm -f "$backup" >/dev/null 2>&1 || true',
+    '    existed=0',
+    '  fi',
+    '  printf "resolver\\t%s\\t%s\\t%s\\n" "$domain" "$backup" "$existed" >> "$DNS_STATE_FILE"',
+    '  {',
+    '    echo "# Generated by HDO; removed when HDO disconnects."',
+    '    for dns_server in $HDO_DNS_SERVERS; do',
+    '      echo "nameserver $dns_server"',
+    '    done',
+    '    echo "port 53"',
+    '    echo "timeout 2"',
+    '  } > "$target"',
+    '  chmod 644 "$target" >/dev/null 2>&1 || true',
+    '  echo "dnsResolverSet domain=$domain servers=$HDO_DNS_SERVERS" >> "$DNS_LOG" 2>&1 || true',
     'done'
   ];
 }
@@ -1922,8 +1979,8 @@ function darwinDnsRestoreCommands(statePathArg: string, logArg: string): string[
     `DNS_LOG=${logArg}`,
     '[ -f "$DNS_STATE_FILE" ] || true',
     'if [ -f "$DNS_STATE_FILE" ]; then',
-    '  while IFS="$(printf \'\\t\')" read -r service dns_csv search_csv; do',
-    '    [ -n "$service" ] || continue',
+    '  restore_service_dns() {',
+    '    [ -n "$service" ] || return 0',
     '    if [ -z "$dns_csv" ] || [ "$dns_csv" = "Empty" ]; then',
     '      networksetup -setdnsservers "$service" Empty >> "$DNS_LOG" 2>&1 || true',
     '    else',
@@ -1938,6 +1995,34 @@ function darwinDnsRestoreCommands(statePathArg: string, logArg: string): string[
     '      # shellcheck disable=SC2086',
     '      networksetup -setsearchdomains "$service" $search_args >> "$DNS_LOG" 2>&1 || true',
     '    fi',
+    '  }',
+    '  while IFS="$(printf \'\\t\')" read -r kind first second third; do',
+    '    [ -n "$kind" ] || continue',
+    '    if [ "$kind" = "resolver" ]; then',
+    '      domain="$first"',
+    '      backup="$second"',
+    '      existed="$third"',
+    '      [ -n "$domain" ] || continue',
+    '      target="/etc/resolver/$domain"',
+    '      if [ "$existed" = "1" ] && [ -f "$backup" ]; then',
+    '        cp "$backup" "$target" >> "$DNS_LOG" 2>&1 || true',
+    '      else',
+    '        rm -f "$target" >> "$DNS_LOG" 2>&1 || true',
+    '      fi',
+    '      rm -f "$backup" >> "$DNS_LOG" 2>&1 || true',
+    '      echo "dnsResolverRestore domain=$domain existed=$existed" >> "$DNS_LOG" 2>&1 || true',
+    '      continue',
+    '    fi',
+    '    if [ "$kind" = "service" ]; then',
+    '      service="$first"',
+    '      dns_csv="$second"',
+    '      search_csv="$third"',
+    '    else',
+    '      service="$kind"',
+    '      dns_csv="$first"',
+    '      search_csv="$second"',
+    '    fi',
+    '    restore_service_dns',
     '  done < "$DNS_STATE_FILE"',
     '  rm -f "$DNS_STATE_FILE"',
     'fi'
@@ -2107,6 +2192,7 @@ function parseWireGuardProfile(configPath: string): {
   addresses: string[];
   allowedIps: string[];
   dnsServers: string[];
+  dnsDomains: string[];
   endpointHosts: string[];
   setConfigLines: string[];
 } {
@@ -2115,6 +2201,7 @@ function parseWireGuardProfile(configPath: string): {
   const addresses: string[] = [];
   const allowedIps: string[] = [];
   const dnsServers: string[] = [];
+  const dnsDomains: string[] = [];
   const endpoints: string[] = [];
   const setConfigLines: string[] = [];
   let section = '';
@@ -2129,6 +2216,10 @@ function parseWireGuardProfile(configPath: string): {
     }
     if (section === 'interface' && key === 'dns') {
       dnsServers.push(...valueList(line));
+      continue;
+    }
+    if (section === 'interface' && /^#\s*HDO\s+DNS\s+Domains\s*=/i.test(trimmed)) {
+      dnsDomains.push(...valueList(line).map(normalizeDnsDomain).filter(isString));
       continue;
     }
     if (section === 'peer' && key === 'allowedips') {
@@ -2149,6 +2240,7 @@ function parseWireGuardProfile(configPath: string): {
     addresses,
     allowedIps: uniqueStrings(allowedIps),
     dnsServers: uniqueStrings(dnsServers),
+    dnsDomains: uniqueStrings(dnsDomains),
     endpointHosts: uniqueStrings(endpoints.map(wireGuardEndpointIpv4Host).filter(isString)),
     setConfigLines
   };
@@ -2877,6 +2969,17 @@ function maskToPrefix(mask: number): number | null {
 
 function isIpv4(value: string): boolean {
   return ipv4ToInt(value) !== null;
+}
+
+function normalizeDnsDomain(value: string | null): string | null {
+  const text = value?.trim().toLowerCase().replace(/\.+$/, '');
+  if (!text || text.length > 253 || text.includes('..')) return null;
+  const labels = text.split('.');
+  if (labels.length < 2) return null;
+  for (const label of labels) {
+    if (!label || label.length > 63 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)) return null;
+  }
+  return text;
 }
 
 function uniqueRoutes(routes: HdoLocalRoute[]): HdoLocalRoute[] {

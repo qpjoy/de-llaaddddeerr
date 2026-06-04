@@ -642,6 +642,7 @@ export class HdoController {
     let lastError: string | null = null;
     let h2iDirectCandidateIps: string[] = [];
     let dnsServers: string[] = [];
+    let dnsDomains: string[] = [];
     try {
       const domestic = domesticWireGuardFromManifest(manifest);
       if (!manifestHasMeshLicense(manifest)) {
@@ -658,6 +659,7 @@ export class HdoController {
         const clientDirectPeers = clientDirectPeersForPlatform(relayMode, directPeers);
         h2iDirectCandidateIps = directPeerOverlayIps(clientDirectPeers);
         dnsServers = wireGuardDnsServersForPlatform(manifest);
+        dnsDomains = wireGuardDnsDomainsForPlatform(manifest);
         const routeCidrs = uniqueStrings([
           ...domestic.routeCidrs,
           ...manifestOverlayRouteCidrs(manifest, overlayIp),
@@ -678,6 +680,7 @@ export class HdoController {
           domesticEndpoint: domestic.endpoint,
           allowedIps,
           dns: dnsServers,
+          dnsDomains,
           directPeers: clientDirectPeers,
           persistentKeepalive: 25
         });
@@ -696,6 +699,7 @@ export class HdoController {
       configPath,
       allowedIps: config ? wireGuardAllowedIps(config) : null,
       dns: dnsServers.length ? dnsServers : null,
+      dnsDomains: dnsDomains.length ? dnsDomains : null,
       h2iDirectCandidateIps,
       routeProbe,
       canUseDefaultMesh: routeProbe.canUseDefaultMesh,
@@ -1035,6 +1039,7 @@ export class HdoController {
     let lastError: string | null = null;
     let h2iDirectCandidateIps: string[] = [];
     let dnsServers: string[] = [];
+    let dnsDomains: string[] = [];
 
     try {
       manifest = await this.refreshManifest(stringField(device, 'id') ?? this.settings.deviceId);
@@ -1052,6 +1057,7 @@ export class HdoController {
         const clientDirectPeers = clientDirectPeersForPlatform(activeRelayMode, directPeers);
         h2iDirectCandidateIps = directPeerOverlayIps(clientDirectPeers);
         dnsServers = wireGuardDnsServersForPlatform(manifest);
+        dnsDomains = wireGuardDnsDomainsForPlatform(manifest);
         const routeCidrs = uniqueStrings([
           ...domestic.routeCidrs,
           ...manifestOverlayRouteCidrs(manifest, overlayIp),
@@ -1075,6 +1081,7 @@ export class HdoController {
           domesticEndpoint: domestic.endpoint,
           allowedIps,
           dns: dnsServers,
+          dnsDomains,
           directPeers: clientDirectPeers,
           persistentKeepalive: 25
         });
@@ -1093,6 +1100,7 @@ export class HdoController {
       configPath,
       allowedIps: config ? wireGuardAllowedIps(config) : null,
       dns: dnsServers.length ? dnsServers : null,
+      dnsDomains: dnsDomains.length ? dnsDomains : null,
       h2iDirectCandidateIps,
       routeProbe,
       canUseDefaultMesh: routeProbe.canUseDefaultMesh,
@@ -2586,6 +2594,15 @@ function wireGuardDnsServersForPlatform(manifest: Record<string, unknown>): stri
   ]);
 }
 
+function wireGuardDnsDomainsForPlatform(manifest: Record<string, unknown>): string[] {
+  if (process.platform !== 'win32' && process.platform !== 'linux' && process.platform !== 'darwin') return [];
+  return uniqueStrings(
+    domainBindingsFromManifest(manifest)
+      .map((binding) => normalizeWireGuardDnsDomain(binding.domain))
+      .filter((domain): domain is string => Boolean(domain))
+  );
+}
+
 function dnsServerValues(value: unknown): string[] {
   if (Array.isArray(value)) return stringArray(value);
   const text = stringValue(value);
@@ -2604,6 +2621,17 @@ function normalizeWireGuardDnsServer(value: string | null): string | null {
   const text = value?.trim();
   if (!text || /[\s,/]/.test(text) || /^[a-z][a-z\d+.-]*:\/\//i.test(text)) return null;
   if (/^\d+\.\d+\.\d+\.\d+:\d+$/.test(text)) return null;
+  return text;
+}
+
+function normalizeWireGuardDnsDomain(value: string | null): string | null {
+  const text = value?.trim().toLowerCase().replace(/\.+$/, '');
+  if (!text || text.length > 253 || text.includes('..')) return null;
+  const labels = text.split('.');
+  if (labels.length < 2) return null;
+  for (const label of labels) {
+    if (!label || label.length > 63 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)) return null;
+  }
   return text;
 }
 
