@@ -2838,6 +2838,7 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     '      Remove-DnsClientNrptRule -Name $_.Name -Force -ErrorAction SilentlyContinue',
     '    }',
     '  }',
+    '  Clear-DnsClientCache -ErrorAction SilentlyContinue',
     '}',
     'function Add-HdoNrptRules {',
     '  Remove-HdoNrptRules',
@@ -2848,6 +2849,7 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     '      Add-DnsClientNrptRule -Namespace $rule.Namespace -NameServers $rule.NameServers -ErrorAction Stop | Out-Null',
     '    }',
     '  }',
+    '  Clear-DnsClientCache -ErrorAction SilentlyContinue',
     '}'
   ];
 }

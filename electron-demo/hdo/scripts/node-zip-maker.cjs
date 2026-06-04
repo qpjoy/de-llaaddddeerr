@@ -58,12 +58,34 @@ function writeUInt32(value) {
 
 function writeAll(stream, buffer) {
   return new Promise((resolve, reject) => {
-    if (stream.write(buffer)) {
+    stream.write(buffer, (error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
       resolve();
-      return;
-    }
-    stream.once('drain', resolve);
-    stream.once('error', reject);
+    });
+  });
+}
+
+function closeWriteStream(stream) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      stream.off('finish', onFinish);
+      stream.off('error', onError);
+    };
+    const onFinish = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+
+    stream.once('finish', onFinish);
+    stream.once('error', onError);
+    stream.end();
   });
 }
 
@@ -209,10 +231,7 @@ async function createZipFromDirectory(sourceDir, zipPath) {
     ]);
     await writeAll(stream, end);
   } finally {
-    await new Promise((resolve, reject) => {
-      stream.end(resolve);
-      stream.once('error', reject);
-    });
+    await closeWriteStream(stream);
   }
 }
 
