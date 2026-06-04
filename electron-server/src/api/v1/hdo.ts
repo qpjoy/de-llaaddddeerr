@@ -2093,7 +2093,7 @@ async function buildManifest(device: HdoDeviceRow, options: HdoManifestOptions =
         address: device.overlayIp ? wireGuardAddress(device.overlayIp) : null
       },
       domestic: wireGuardNodeSummary(domesticNode),
-      dnsServers: wireGuardDnsServersFromNode(domesticNode),
+      dnsServers: wireGuardDnsServersFromNode(domesticNode, addressPlan),
       directPeers: wireGuardDirectPeerSummaries(device, directPeerDevices, visibleServices)
     },
     nodes: visibleNodes,
@@ -2966,15 +2966,25 @@ function uniqueStrings(values: string[]): string[] {
   return [...new Set(values)];
 }
 
-function wireGuardDnsServersFromNode(node: HdoNodeRow | undefined): string[] {
+function wireGuardDnsServersFromNode(
+  node: HdoNodeRow | undefined,
+  addressPlan?: HdoMeshAddressPlan
+): string[] {
   if (!node) return [];
   const metadata = asPlainObject(node.metadata);
   const wireGuard = asPlainObject(metadata?.wireGuard) ?? asPlainObject(metadata?.wg);
-  return normalizeWireGuardDnsServers([
+  const explicitServers = normalizeWireGuardDnsServers([
     ...asDnsStringArray(wireGuard?.dnsServers),
     ...asDnsStringArray(wireGuard?.dns),
     asOptionalString(wireGuard?.dnsServer)
   ]);
+  if (explicitServers.length) return explicitServers;
+  if (node.kind === 'domestic') {
+    return normalizeWireGuardDnsServers([
+      normalizeOverlayIp(node.overlayIp) ?? normalizeOverlayIp(addressPlan?.domesticIp ?? HDO_DEFAULT_ADDRESS_PLAN.domesticIp)
+    ]);
+  }
+  return [];
 }
 
 function asDnsStringArray(value: unknown): string[] {
