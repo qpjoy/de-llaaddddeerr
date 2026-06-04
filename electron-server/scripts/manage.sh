@@ -357,6 +357,11 @@ stop_hdo_gateway_runner() {
   fi
 }
 
+restart_hdo_gateway_runner() {
+  stop_hdo_gateway_runner || true
+  start_hdo_gateway_runner "$@"
+}
+
 cmd_gateway_runner_status() {
   if [ -s "$HDO_GATEWAY_RUNNER_TOKEN_FILE" ]; then
     HDO_GATEWAY_RUNNER_TOKEN="$(tr -d '\r\n' <"$HDO_GATEWAY_RUNNER_TOKEN_FILE")"
@@ -872,6 +877,7 @@ Commands:
   gateway-runner-start        start the host HDO gateway runner
   gateway-runner-status       show host HDO gateway runner health
   gateway-runner-stop         stop the host HDO gateway runner
+  gateway-runner-restart      restart the host HDO gateway runner
   hdo-device-conflicts        show duplicated HDO overlay IPs
   hdo-reset-devices           delete all HDO devices except --keep-ip (default 100.89.0.12)
   bootstrap-admin             create the first admin user (prompts for username/password)
@@ -913,6 +919,7 @@ cmd_menu() {
     "migrate    查看 migration 状态"
     "sync       立即同步 npm 插件"
     "gateway    查看 HDO 宿主机 runner"
+    "gateway-restart 重启 HDO 宿主机 runner"
     "hdo-ip     查看 HDO IP 冲突"
     "hdo-reset  清 HDO 设备态（保留 Internal）"
     "bootstrap  创建首位 admin"
@@ -938,6 +945,7 @@ cmd_menu() {
       migrate)   cmd_migrate ;;
       sync)      cmd_sync ;;
       gateway)   cmd_gateway_runner_status ;;
+      gateway-restart) restart_hdo_gateway_runner ;;
       hdo-ip)    cmd_hdo_device_conflicts ;;
       hdo-reset) cmd_hdo_reset_devices ;;
       bootstrap) cmd_bootstrap_admin ;;
@@ -971,6 +979,7 @@ case "$sub" in
   gateway-runner-start|hdo-runner-start) start_hdo_gateway_runner "$@" ;;
   gateway-runner-status|hdo-runner-status) cmd_gateway_runner_status "$@" ;;
   gateway-runner-stop|hdo-runner-stop) stop_hdo_gateway_runner "$@" ;;
+  gateway-runner-restart|hdo-runner-restart) restart_hdo_gateway_runner "$@" ;;
   hdo-device-conflicts|hdo-conflicts|hdo-ip-conflicts) cmd_hdo_device_conflicts "$@" ;;
   hdo-reset-devices|hdo-clean-devices|hdo-device-reset) cmd_hdo_reset_devices "$@" ;;
   bootstrap-admin|bootstrap|admin) cmd_bootstrap_admin "$@" ;;

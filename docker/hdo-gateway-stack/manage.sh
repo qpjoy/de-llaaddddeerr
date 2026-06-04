@@ -55,9 +55,9 @@ Examples:
   ./scripts/manage.sh hdo deploy-domestic
   ./scripts/manage.sh hdo setup-domestic --server-url http://domestic:8080 --public-host domestic.example.com
   ./scripts/manage.sh hdo add-home --name home-main
-  HDO_TOKEN=<admin bearer token> ./scripts/manage.sh hdo sync-domestic-peers --server-url http://domestic:8080
-  sudo HDO_TOKEN=<admin bearer token> ./scripts/manage.sh hdo sync-and-repair-domestic --server-url http://domestic:8080
-  sudo HDO_TOKEN=<admin bearer token> ./scripts/manage.sh hdo sync-dns --server-url http://domestic:8080
+  ./scripts/manage.sh hdo sync-domestic-peers --server-url http://domestic:8080
+  sudo ./scripts/manage.sh hdo sync-and-repair-domestic --server-url http://domestic:8080
+  sudo ./scripts/manage.sh hdo sync-dns --server-url http://domestic:8080
   sudo ./scripts/manage.sh hdo apply-domestic
   sudo ./scripts/manage.sh hdo repair-domestic-routes
   sudo ./scripts/manage.sh hdo deploy-domestic-mihomo-wireguard
@@ -67,6 +67,9 @@ Examples:
 
 Optional API registration:
   HDO_TOKEN=<admin bearer token> ./scripts/manage.sh hdo setup-domestic --server-url http://domestic:8080
+
+Direct sync commands reuse electron-server/data/hdo-gateway-runner.token when
+present. If the token file is missing, pass HDO_TOKEN or HDO_GATEWAY_RUNNER_TOKEN.
 EOF
 }
 
@@ -152,6 +155,22 @@ load_env() {
   if [ -f "$ENV_FILE" ]; then
     # shellcheck disable=SC1090
     set -a; . "$ENV_FILE"; set +a
+  fi
+}
+
+maybe_load_hdo_runner_token() {
+  if [ -n "${HDO_TOKEN:-}" ] || [ -n "${HDO_GATEWAY_RUNNER_TOKEN:-}" ]; then
+    return 0
+  fi
+
+  local token_file="${HDO_GATEWAY_RUNNER_TOKEN_FILE:-}"
+  if [ -z "$token_file" ]; then
+    token_file="$ROOT_DIR/electron-server/data/hdo-gateway-runner.token"
+  fi
+
+  if [ -s "$token_file" ]; then
+    HDO_GATEWAY_RUNNER_TOKEN="$(tr -d '\r\n' < "$token_file")"
+    export HDO_GATEWAY_RUNNER_TOKEN
   fi
 }
 
@@ -560,6 +579,7 @@ ensure_domestic_forwarding() {
 report_domestic_peer_endpoints() {
   local iface="${1:-hdo-home}"
 
+  maybe_load_hdo_runner_token
   [ -n "${HDO_SERVER_URL:-}" ] || return 0
   [ -n "${HDO_TOKEN:-}" ] || [ -n "${HDO_GATEWAY_RUNNER_TOKEN:-}" ] || return 0
   command -v wg >/dev/null 2>&1 || return 0
@@ -599,9 +619,10 @@ report_domestic_peer_endpoints() {
 cmd_sync_domestic_peers() {
   load_env
   parse_common "$@"
+  maybe_load_hdo_runner_token
   [ -f "$WG_DIR/wg-home.conf" ] || die "run setup-domestic first"
   [ -n "${HDO_SERVER_URL:-}" ] || die "--server-url or HDO_SERVER_URL required"
-  [ -n "${HDO_TOKEN:-}" ] || [ -n "${HDO_GATEWAY_RUNNER_TOKEN:-}" ] || die "HDO_TOKEN=<admin bearer token> or HDO_GATEWAY_RUNNER_TOKEN required"
+  [ -n "${HDO_TOKEN:-}" ] || [ -n "${HDO_GATEWAY_RUNNER_TOKEN:-}" ] || die "HDO_TOKEN=<admin bearer token> or HDO_GATEWAY_RUNNER_TOKEN required; start the server gateway runner once to create electron-server/data/hdo-gateway-runner.token"
   require_cmd curl
 
   local fetched stripped curl_headers=()
@@ -687,8 +708,9 @@ ensure_hdo_dns_firewall() {
 cmd_sync_dns() {
   load_env
   parse_common "$@"
+  maybe_load_hdo_runner_token
   [ -n "${HDO_SERVER_URL:-}" ] || die "--server-url or HDO_SERVER_URL required"
-  [ -n "${HDO_TOKEN:-}" ] || [ -n "${HDO_GATEWAY_RUNNER_TOKEN:-}" ] || die "HDO_TOKEN=<admin bearer token> or HDO_GATEWAY_RUNNER_TOKEN required"
+  [ -n "${HDO_TOKEN:-}" ] || [ -n "${HDO_GATEWAY_RUNNER_TOKEN:-}" ] || die "HDO_TOKEN=<admin bearer token> or HDO_GATEWAY_RUNNER_TOKEN required; start the server gateway runner once to create electron-server/data/hdo-gateway-runner.token"
   require_cmd curl
 
   local fetched curl_headers=()
