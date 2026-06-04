@@ -641,6 +641,7 @@ export class HdoController {
     let configPath: string | null = null;
     let lastError: string | null = null;
     let h2iDirectCandidateIps: string[] = [];
+    let dnsServers: string[] = [];
     try {
       const domestic = domesticWireGuardFromManifest(manifest);
       if (!manifestHasMeshLicense(manifest)) {
@@ -656,9 +657,11 @@ export class HdoController {
         const directPeers = directPeersFromManifest(manifest, overlayIp);
         const clientDirectPeers = clientDirectPeersForPlatform(relayMode, directPeers);
         h2iDirectCandidateIps = directPeerOverlayIps(clientDirectPeers);
+        dnsServers = wireGuardDnsServersForPlatform(manifest);
         const routeCidrs = uniqueStrings([
           ...domestic.routeCidrs,
           ...manifestOverlayRouteCidrs(manifest, overlayIp),
+          ...wireGuardDnsRouteCidrs(dnsServers),
           ...windowsH2iDirectPeerAllowedIps(relayMode, directPeers)
         ]);
         const exclusionCidrs = localCidrsForAllowedIpExclusion(routeProbe, routeCidrs);
@@ -674,6 +677,7 @@ export class HdoController {
           domesticPublicKey: domestic.publicKey,
           domesticEndpoint: domestic.endpoint,
           allowedIps,
+          dns: dnsServers,
           directPeers: clientDirectPeers,
           persistentKeepalive: 25
         });
@@ -691,6 +695,7 @@ export class HdoController {
       config,
       configPath,
       allowedIps: config ? wireGuardAllowedIps(config) : null,
+      dns: dnsServers.length ? dnsServers : null,
       h2iDirectCandidateIps,
       routeProbe,
       canUseDefaultMesh: routeProbe.canUseDefaultMesh,
@@ -1029,6 +1034,7 @@ export class HdoController {
     let configPath: string | null = null;
     let lastError: string | null = null;
     let h2iDirectCandidateIps: string[] = [];
+    let dnsServers: string[] = [];
 
     try {
       manifest = await this.refreshManifest(stringField(device, 'id') ?? this.settings.deviceId);
@@ -1045,9 +1051,11 @@ export class HdoController {
         const directPeers = directPeersFromManifest(manifest, overlayIp);
         const clientDirectPeers = clientDirectPeersForPlatform(activeRelayMode, directPeers);
         h2iDirectCandidateIps = directPeerOverlayIps(clientDirectPeers);
+        dnsServers = wireGuardDnsServersForPlatform(manifest);
         const routeCidrs = uniqueStrings([
           ...domestic.routeCidrs,
           ...manifestOverlayRouteCidrs(manifest, overlayIp),
+          ...wireGuardDnsRouteCidrs(dnsServers),
           ...windowsH2iDirectPeerAllowedIps(activeRelayMode, directPeers)
         ]);
         const exclusionCidrs = localCidrsForAllowedIpExclusion(routeProbe, routeCidrs);
@@ -1066,6 +1074,7 @@ export class HdoController {
           domesticPublicKey: domestic.publicKey,
           domesticEndpoint: domestic.endpoint,
           allowedIps,
+          dns: dnsServers,
           directPeers: clientDirectPeers,
           persistentKeepalive: 25
         });
@@ -1083,6 +1092,7 @@ export class HdoController {
       config,
       configPath,
       allowedIps: config ? wireGuardAllowedIps(config) : null,
+      dns: dnsServers.length ? dnsServers : null,
       h2iDirectCandidateIps,
       routeProbe,
       canUseDefaultMesh: routeProbe.canUseDefaultMesh,
@@ -2503,6 +2513,7 @@ function publicEventWireGuardPeer(value: Record<string, unknown>): Record<string
     overlayIp: stringValue(value.overlayIp),
     address: stringValue(value.address),
     allowedIps: Array.isArray(value.allowedIps) ? value.allowedIps : null,
+    dns: Array.isArray(value.dns) ? value.dns : null,
     configReady: Boolean(value.config && value.configPath),
     canUseDefaultMesh: value.canUseDefaultMesh === true,
     lastError: stringValue(value.lastError),
@@ -2559,6 +2570,50 @@ function domesticWireGuardFromManifest(manifest: Record<string, unknown>): {
       ? stringArray(wireGuard?.routeCidrs)
       : HDO_MESH_ROUTE_CIDRS
   };
+}
+
+function wireGuardDnsServersForPlatform(manifest: Record<string, unknown>): string[] {
+  if (process.platform !== 'win32' && process.platform !== 'linux') return [];
+  const wireGuard = plainObject(manifest.wireGuard);
+  const domestic = plainObject(wireGuard?.domestic);
+  return normalizeWireGuardDnsServers([
+    ...dnsServerValues(wireGuard?.dnsServers),
+    ...dnsServerValues(wireGuard?.dns),
+    stringValue(wireGuard?.dnsServer),
+    ...dnsServerValues(domestic?.dnsServers),
+    ...dnsServerValues(domestic?.dns),
+    stringValue(domestic?.dnsServer)
+  ]);
+}
+
+function dnsServerValues(value: unknown): string[] {
+  if (Array.isArray(value)) return stringArray(value);
+  const text = stringValue(value);
+  return text ? text.split(',').map((item) => item.trim()).filter(Boolean) : [];
+}
+
+function normalizeWireGuardDnsServers(values: Array<string | null>): string[] {
+  return uniqueStrings(
+    values
+      .map((value) => normalizeWireGuardDnsServer(value))
+      .filter((value): value is string => Boolean(value))
+  );
+}
+
+function normalizeWireGuardDnsServer(value: string | null): string | null {
+  const text = value?.trim();
+  if (!text || /[\s,/]/.test(text) || /^[a-z][a-z\d+.-]*:\/\//i.test(text)) return null;
+  if (/^\d+\.\d+\.\d+\.\d+:\d+$/.test(text)) return null;
+  return text;
+}
+
+function wireGuardDnsRouteCidrs(dnsServers: string[]): string[] {
+  return uniqueStrings(
+    dnsServers
+      .map((server) => normalizeOverlayIp(server))
+      .filter((server): server is string => Boolean(server && server.startsWith('100.')))
+      .map((server) => normalizeCidr(`${server}/32`) ?? `${server}/32`)
+  );
 }
 
 function manifestOverlayRouteCidrs(manifest: Record<string, unknown>, ownOverlayIp: string | null): string[] {

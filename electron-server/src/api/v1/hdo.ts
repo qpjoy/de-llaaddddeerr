@@ -1971,6 +1971,7 @@ async function buildManifest(device: HdoDeviceRow, options: HdoManifestOptions =
   const routeCidrs = options.anonymous
     ? addressPlan.routeCidrs
     : uniqueStrings([...addressPlan.routeCidrs, HDO_ANONYMOUS_ADDRESS_PLAN.userCidr]);
+  const domesticNode = pickDomesticNode(visibleNodes);
 
   return {
     version: 1,
@@ -2006,7 +2007,8 @@ async function buildManifest(device: HdoDeviceRow, options: HdoManifestOptions =
         overlayIp: device.overlayIp,
         address: device.overlayIp ? wireGuardAddress(device.overlayIp) : null
       },
-      domestic: wireGuardNodeSummary(pickDomesticNode(visibleNodes)),
+      domestic: wireGuardNodeSummary(domesticNode),
+      dnsServers: wireGuardDnsServersFromNode(domesticNode),
       directPeers: wireGuardDirectPeerSummaries(device, directPeerDevices, visibleServices)
     },
     nodes: visibleNodes,
@@ -2832,6 +2834,38 @@ function numberToIpv4(value: number): string {
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+function wireGuardDnsServersFromNode(node: HdoNodeRow | undefined): string[] {
+  if (!node) return [];
+  const metadata = asPlainObject(node.metadata);
+  const wireGuard = asPlainObject(metadata?.wireGuard) ?? asPlainObject(metadata?.wg);
+  return normalizeWireGuardDnsServers([
+    ...asDnsStringArray(wireGuard?.dnsServers),
+    ...asDnsStringArray(wireGuard?.dns),
+    asOptionalString(wireGuard?.dnsServer)
+  ]);
+}
+
+function asDnsStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return asStringArray(value);
+  const text = asOptionalString(value);
+  return text ? text.split(',').map((item) => item.trim()).filter(Boolean) : [];
+}
+
+function normalizeWireGuardDnsServers(values: Array<string | null>): string[] {
+  return uniqueStrings(
+    values
+      .map((value) => normalizeWireGuardDnsServer(value))
+      .filter((value): value is string => Boolean(value))
+  );
+}
+
+function normalizeWireGuardDnsServer(value: string | null): string | null {
+  const text = value?.trim();
+  if (!text || /[\s,/]/.test(text) || /^[a-z][a-z\d+.-]*:\/\//i.test(text)) return null;
+  if (/^\d+\.\d+\.\d+\.\d+:\d+$/.test(text)) return null;
+  return text;
 }
 
 function wireGuardNodeSummary(node: HdoNodeRow | undefined) {

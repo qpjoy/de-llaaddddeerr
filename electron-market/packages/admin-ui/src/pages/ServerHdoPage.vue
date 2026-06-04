@@ -548,6 +548,14 @@
                   placeholder="51888"
                 />
               </div>
+              <q-input
+                v-model="nodeWireGuardDnsServers"
+                outlined
+                dense
+                label="WG DNS 服务器（逗号分隔）"
+                placeholder="100.88.0.1"
+                class="q-mb-sm"
+              />
               <div class="toolbar-row">
                 <q-btn flat icon="restart_alt" label="清空" @click="resetNodeForm" />
                 <q-space />
@@ -968,6 +976,7 @@ const nodeOverlayIp = ref('100.88.0.1');
 const nodeWireGuardPublicKey = ref('');
 const nodeWireGuardEndpointHost = ref('');
 const nodeWireGuardListenPort = ref('51888');
+const nodeWireGuardDnsServers = ref('');
 const nodeKindOptions: HdoNodeRow['kind'][] = ['domestic', 'home', 'oversea'];
 const nodeStatusOptions: HdoNodeRow['status'][] = ['pending', 'online', 'offline', 'error'];
 
@@ -2073,6 +2082,12 @@ function editNode(row: HdoNodeRow): void {
   nodeWireGuardEndpointHost.value =
     stringValue(wireGuard?.endpointHost) ?? stringValue(wireGuard?.host) ?? '';
   nodeWireGuardListenPort.value = String(wireGuard?.listenPort ?? wireGuard?.port ?? '');
+  const dnsServer = stringValue(wireGuard?.dnsServer);
+  nodeWireGuardDnsServers.value = [
+    ...asStringArray(wireGuard?.dnsServers),
+    ...asStringArray(wireGuard?.dns),
+    ...(dnsServer ? [dnsServer] : [])
+  ].join(', ');
 }
 
 function resetNodeForm(): void {
@@ -2085,6 +2100,7 @@ function resetNodeForm(): void {
   nodeWireGuardPublicKey.value = '';
   nodeWireGuardEndpointHost.value = '';
   nodeWireGuardListenPort.value = '51888';
+  nodeWireGuardDnsServers.value = '';
 }
 
 async function saveService(): Promise<void> {
@@ -2333,14 +2349,23 @@ function buildNodeMetadata(): Record<string, unknown> | null {
   const publicKey = nodeWireGuardPublicKey.value.trim();
   const endpointHost = nodeWireGuardEndpointHost.value.trim();
   const listenPort = Number(nodeWireGuardListenPort.value);
+  const dnsServers = splitCsv(nodeWireGuardDnsServers.value);
 
-  if (publicKey || endpointHost || Number.isInteger(listenPort)) {
-    metadata.wireGuard = {
+  if (publicKey || endpointHost || Number.isInteger(listenPort) || dnsServers.length) {
+    const wireGuardMetadata: Record<string, unknown> = {
       ...(plainObject(metadata.wireGuard) ?? plainObject(metadata.wg) ?? {}),
       publicKey: publicKey || null,
       endpointHost: endpointHost || null,
       listenPort: Number.isInteger(listenPort) ? listenPort : null
     };
+    if (dnsServers.length) {
+      wireGuardMetadata.dnsServers = dnsServers;
+    } else {
+      delete wireGuardMetadata.dnsServers;
+      delete wireGuardMetadata.dns;
+      delete wireGuardMetadata.dnsServer;
+    }
+    metadata.wireGuard = wireGuardMetadata;
   }
 
   return Object.keys(metadata).length ? metadata : null;

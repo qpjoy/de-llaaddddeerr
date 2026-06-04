@@ -277,14 +277,14 @@ packages:
     resolution: {integrity: sha512-Tjk16GuB9Go7oOVqHigA+QwQ7IjIvxeZJsqaA6S8lDRRlwjRPxO91cEI3jszuWQDG5hoUZ5o+nEYYFiqa3Bqog==}
 
   '@qpjoy/electron-market@file:.local-packs/qpjoy-electron-market-0.4.1.tgz':
-    resolution: {integrity: sha512-aaaVu8vfTnzx3pKAu6TJGBZt2mE0myNDCwo6enFvAG9Z4x0nG2p/oM49eIyL0o4tTAPkXN8DwCJAqatoJAA6IA==, tarball: file:.local-packs/qpjoy-electron-market-0.4.1.tgz}
+    resolution: {integrity: sha512-gbrPhAj9KusVa2TRQSj+jPsrXayNIwR0tr3CNSJGTVDnCePU3KPP7VlbSnffCTdLjImtOlcOPB4M2LdxArtaNg==, tarball: file:.local-packs/qpjoy-electron-market-0.4.1.tgz}
     version: 0.4.1
     peerDependencies:
       '@qpjoy/electron-plugin-sdk': '>=0.1.0'
       electron: '>=28'
 
   '@qpjoy/electron-plugin-hdo@file:.local-packs/qpjoy-electron-plugin-hdo-0.2.1.tgz':
-    resolution: {integrity: sha512-mC8Or9Y7FGeDZMHUgyv/9heUYGUKATcdOulC3izBvkVxDcShub0CcxP0L07Wipj/MNJ/CAURNoJxQhQfVMKmpA==, tarball: file:.local-packs/qpjoy-electron-plugin-hdo-0.2.1.tgz}
+    resolution: {integrity: sha512-UuFVRTPT6kosyVUSPyGWOHMkTacGG35hShXGEsayDrif5fqiLyHMOAi8F95RprMrq2TlVKOP7Z7px/L9HHoFeQ==, tarball: file:.local-packs/qpjoy-electron-plugin-hdo-0.2.1.tgz}
     version: 0.2.1
     peerDependencies:
       electron: '>=28'
