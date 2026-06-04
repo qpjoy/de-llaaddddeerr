@@ -12,8 +12,8 @@ importers:
         specifier: ^0.4.2
         version: 0.4.2(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)
       '@qpjoy/electron-plugin-hdo':
-        specifier: ^0.2.3
-        version: 0.2.3(electron@34.5.8)
+        specifier: ^0.2.5
+        version: 0.2.5(electron@34.5.8)
       '@qpjoy/electron-plugin-sdk':
         specifier: ^0.1.4
         version: 0.1.4(electron@34.5.8)
@@ -270,8 +270,8 @@ packages:
       '@qpjoy/electron-plugin-sdk': '>=0.1.0'
       electron: '>=28'
 
-  '@qpjoy/electron-plugin-hdo@0.2.3':
-    resolution: {integrity: sha512-6M1NB+128/9o8PeBMJwpf6tZjJFSq+JBmE2lAR7hMA6OkFIiVLpxlNKMfuqjO5VFH3tY5spw3hWlnHmIvqekKg==}
+  '@qpjoy/electron-plugin-hdo@0.2.5':
+    resolution: {integrity: sha512-mWIgf2YeCfMmvNaHVBU5sm5Sqbc73sKv1BUhQRPhM7dh9ItV+0Rk2jiNxF8QraRBUVmvVe06122P5Tqn4M8o7w==}
     peerDependencies:
       electron: '>=28'
     peerDependenciesMeta:
@@ -2608,7 +2608,7 @@ snapshots:
       electron: 34.5.8
       semver: 7.8.1
 
-  '@qpjoy/electron-plugin-hdo@0.2.3(electron@34.5.8)':
+  '@qpjoy/electron-plugin-hdo@0.2.5(electron@34.5.8)':
     dependencies:
       three: 0.176.0
     optionalDependencies:
