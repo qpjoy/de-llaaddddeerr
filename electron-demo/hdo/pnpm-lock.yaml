@@ -284,7 +284,7 @@ packages:
       electron: '>=28'
 
   '@qpjoy/electron-plugin-hdo@file:.local-packs/qpjoy-electron-plugin-hdo-0.2.1.tgz':
-    resolution: {integrity: sha512-cY/jiaKa6KosHnAAwo0eaZSKdJmtFtj5qrpCrVgKUMrJ4RbaGJ5KZWLFOsaGTNoH6137RqOlyn7Prb4WYlMlfA==, tarball: file:.local-packs/qpjoy-electron-plugin-hdo-0.2.1.tgz}
+    resolution: {integrity: sha512-HzL3zwoHwHtiHTuF/ugN9UEeLgPnjJpKsnsVa2Yf+dskuFZbu9ai0n3DtDTP/Z8mC6V6gRzwgg6C7Ah5P1cmNA==, tarball: file:.local-packs/qpjoy-electron-plugin-hdo-0.2.1.tgz}
     version: 0.2.1
     peerDependencies:
       electron: '>=28'

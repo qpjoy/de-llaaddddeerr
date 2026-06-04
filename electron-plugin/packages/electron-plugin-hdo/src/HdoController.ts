@@ -2573,7 +2573,7 @@ function domesticWireGuardFromManifest(manifest: Record<string, unknown>): {
 }
 
 function wireGuardDnsServersForPlatform(manifest: Record<string, unknown>): string[] {
-  if (process.platform !== 'win32' && process.platform !== 'linux') return [];
+  if (process.platform !== 'win32' && process.platform !== 'linux' && process.platform !== 'darwin') return [];
   const wireGuard = plainObject(manifest.wireGuard);
   const domestic = plainObject(wireGuard?.domestic);
   return normalizeWireGuardDnsServers([

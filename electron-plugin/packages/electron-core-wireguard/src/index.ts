@@ -1425,12 +1425,16 @@ function buildDarwinUserspaceTunnelCommand(
     'done'
   ];
   const primaryAddress = profile.addresses[0]?.split('/')[0] ?? '';
+  const dnsStatePath = join(dirname(configPath), `${profile.interfaceName}.dns.state`);
+  const dnsRestoreCommands = darwinDnsRestoreCommands(shellQuote(dnsStatePath), '"$ROUTE_LOG"');
+  const dnsSetCommands = darwinDnsSetCommands(profile.dnsServers, shellQuote(dnsStatePath), '"$ROUTE_LOG"');
   const stopLines = [
     ...darwinRouteLogSetupLines(configPath, profile.interfaceName, action === 'down' ? 'down' : 'restart-stop'),
     'mkdir -p /var/run/wireguard',
     `REAL_INTERFACE="$(cat ${shellQuote(nameFile)} 2>/dev/null || true)"`,
     `if [ -z "$REAL_INTERFACE" ] && [ -n ${shellQuote(primaryAddress)} ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q ${shellQuote(`inet ${primaryAddress}`)}; then REAL_INTERFACE="$candidate"; break; fi; done; fi`,
     `echo ${shellQuote('realInterfaceBeforeStop=')}"$REAL_INTERFACE" >> "$ROUTE_LOG" 2>&1`,
+    ...dnsRestoreCommands,
     `if [ -n "$REAL_INTERFACE" ]; then`,
     ...routeDownCommands.map((line) => `  ${line}`),
     ...addressDownCommands.map((line) => `  ${line}`),
@@ -1470,7 +1474,8 @@ function buildDarwinUserspaceTunnelCommand(
     'ifconfig "$REAL_INTERFACE" up',
     ...addressCommands,
     ...routeDownCommands,
-    ...routeUpCommands
+    ...routeUpCommands,
+    ...dnsSetCommands
   ];
   const scriptLines = action === 'down'
     ? ['set -e', ...stopLines]
@@ -1496,6 +1501,7 @@ type DarwinUserspaceProfile = {
   interfaceName: string;
   addresses: string[];
   allowedIps: string[];
+  dnsServers: string[];
   endpointHosts: string[];
   setConfigPath: string;
 };
@@ -1518,6 +1524,7 @@ function darwinUserspaceProfile(configPath: string, writeSetConfig: boolean): Da
     interfaceName: parsed.interfaceName,
     addresses: parsed.addresses,
     allowedIps: parsed.allowedIps,
+    dnsServers: parsed.dnsServers,
     endpointHosts: parsed.endpointHosts,
     setConfigPath
   };
@@ -1544,6 +1551,7 @@ interface DarwinLaunchDaemonAssets {
   rootWireGuardGoPath: string;
   nameFile: string;
   pidFile: string;
+  dnsStatePath: string;
   profile: DarwinUserspaceProfile;
 }
 
@@ -1604,6 +1612,7 @@ function darwinLaunchDaemonAssets(
     rootWireGuardGoPath: `${binDir}/wireguard-go`,
     nameFile: `/var/run/wireguard/${profile.interfaceName}.name`,
     pidFile: `/var/run/wireguard/${profile.interfaceName}.pid`,
+    dnsStatePath: `${supportDir}/${profile.interfaceName}.dns.state`,
     profile
   };
 }
@@ -1684,6 +1693,8 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     return `ifconfig "$REAL_INTERFACE" inet ${shellQuote(ip)} ${shellQuote(ip)} -alias >/dev/null 2>&1 || ifconfig "$REAL_INTERFACE" inet ${shellQuote(ip)} -alias >/dev/null 2>&1 || true`;
   });
   const primaryAddress = profile.addresses[0]?.split('/')[0] ?? '';
+  const dnsRestoreCommands = darwinDnsRestoreCommands('"$DNS_STATE_FILE"', '"$ROUTE_LOG"');
+  const dnsSetCommands = darwinDnsSetCommands(profile.dnsServers, '"$DNS_STATE_FILE"', '"$ROUTE_LOG"');
   const staleHdoInterfaceCleanupLines = [
     'for candidate in $(ifconfig -l 2>/dev/null); do',
     '  case "$candidate" in utun*) ;; *) continue ;; esac',
@@ -1705,6 +1716,8 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     `SETCONF=${shellQuote(assets.rootSetConfigPath)}`,
     `NAME_FILE=${shellQuote(assets.nameFile)}`,
     `PID_FILE=${shellQuote(assets.pidFile)}`,
+    `DNS_STATE_FILE=${shellQuote(assets.dnsStatePath)}`,
+    `HDO_DNS_SERVERS=${shellQuote(profile.dnsServers.join(' '))}`,
     `ROUTE_LOG=${shellQuote(assets.routeLogPath)}`,
     `WG_GO_LOG=${shellQuote(assets.wireGuardGoLogPath)}`,
     `PRIMARY_ADDRESS=${shellQuote(primaryAddress)}`,
@@ -1719,6 +1732,7 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     '  log_route "exit=$code"',
     '  REAL_INTERFACE="$(cat "$NAME_FILE" 2>/dev/null || true)"',
     '  if [ -z "$REAL_INTERFACE" ] && [ -n "$PRIMARY_ADDRESS" ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q "inet $PRIMARY_ADDRESS"; then REAL_INTERFACE="$candidate"; break; fi; done; fi',
+    ...dnsRestoreCommands.map((line) => `  ${line}`),
     '  if [ -n "$REAL_INTERFACE" ]; then',
     ...routeDownCommands.map((line) => `    ${line}`),
     ...addressDownCommands.map((line) => `    ${line}`),
@@ -1753,6 +1767,7 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     ...addressCommands,
     ...routeDownCommands,
     ...routeUpCommands,
+    ...dnsSetCommands,
     'wait "$WG_PID"',
     'exit "$?"'
   ].join('\n') + '\n';
@@ -1874,6 +1889,57 @@ function darwinEndpointBypassCommands(endpointHosts: string[], logArg: string): 
     '  done',
     'else',
     `  echo "endpointBypass=skipped no default gateway" >> ${logArg} 2>&1`,
+    'fi'
+  ];
+}
+
+function darwinDnsSetCommands(dnsServers: string[], statePathArg: string, logArg: string): string[] {
+  const servers = uniqueStrings(dnsServers.filter((value) => Boolean(value.trim())));
+  if (servers.length === 0) return [];
+  return [
+    `HDO_DNS_SERVERS=${shellQuote(servers.join(' '))}`,
+    `DNS_STATE_FILE=${statePathArg}`,
+    `DNS_LOG=${logArg}`,
+    'dns_join_lines() { awk \'BEGIN{out=""; bad=0} {if ($0 ~ / / || $0 == "") {bad=1; print "Empty"; exit} if (out != "") out = out ","; out = out $0} END{if (!bad) {if (out == "") print "Empty"; else print out}}\'; }',
+    'mkdir -p "$(dirname "$DNS_STATE_FILE")" >/dev/null 2>&1 || true',
+    ': > "$DNS_STATE_FILE"',
+    'networksetup -listallnetworkservices 2>/dev/null | tail -n +2 | while IFS= read -r service; do',
+    '  case "$service" in \\**) service="${service#\\*}" ;; esac',
+    '  [ -n "$service" ] || continue',
+    '  old_dns="$(networksetup -getdnsservers "$service" 2>/dev/null | dns_join_lines || printf Empty)"',
+    '  old_search="$(networksetup -getsearchdomains "$service" 2>/dev/null | dns_join_lines || printf Empty)"',
+    '  printf "%s\\t%s\\t%s\\n" "$service" "$old_dns" "$old_search" >> "$DNS_STATE_FILE"',
+    '  # shellcheck disable=SC2086',
+    '  networksetup -setdnsservers "$service" $HDO_DNS_SERVERS >> "$DNS_LOG" 2>&1 || true',
+    '  networksetup -setsearchdomains "$service" Empty >> "$DNS_LOG" 2>&1 || true',
+    'done'
+  ];
+}
+
+function darwinDnsRestoreCommands(statePathArg: string, logArg: string): string[] {
+  return [
+    `DNS_STATE_FILE=${statePathArg}`,
+    `DNS_LOG=${logArg}`,
+    '[ -f "$DNS_STATE_FILE" ] || true',
+    'if [ -f "$DNS_STATE_FILE" ]; then',
+    '  while IFS="$(printf \'\\t\')" read -r service dns_csv search_csv; do',
+    '    [ -n "$service" ] || continue',
+    '    if [ -z "$dns_csv" ] || [ "$dns_csv" = "Empty" ]; then',
+    '      networksetup -setdnsservers "$service" Empty >> "$DNS_LOG" 2>&1 || true',
+    '    else',
+    '      dns_args="$(printf "%s" "$dns_csv" | tr "," " ")"',
+    '      # shellcheck disable=SC2086',
+    '      networksetup -setdnsservers "$service" $dns_args >> "$DNS_LOG" 2>&1 || true',
+    '    fi',
+    '    if [ -z "$search_csv" ] || [ "$search_csv" = "Empty" ]; then',
+    '      networksetup -setsearchdomains "$service" Empty >> "$DNS_LOG" 2>&1 || true',
+    '    else',
+    '      search_args="$(printf "%s" "$search_csv" | tr "," " ")"',
+    '      # shellcheck disable=SC2086',
+    '      networksetup -setsearchdomains "$service" $search_args >> "$DNS_LOG" 2>&1 || true',
+    '    fi',
+    '  done < "$DNS_STATE_FILE"',
+    '  rm -f "$DNS_STATE_FILE"',
     'fi'
   ];
 }
@@ -2040,6 +2106,7 @@ function parseWireGuardProfile(configPath: string): {
   interfaceName: string;
   addresses: string[];
   allowedIps: string[];
+  dnsServers: string[];
   endpointHosts: string[];
   setConfigLines: string[];
 } {
@@ -2047,6 +2114,7 @@ function parseWireGuardProfile(configPath: string): {
   const interfaceName = wireGuardInterfaceName(configPath);
   const addresses: string[] = [];
   const allowedIps: string[] = [];
+  const dnsServers: string[] = [];
   const endpoints: string[] = [];
   const setConfigLines: string[] = [];
   let section = '';
@@ -2057,6 +2125,10 @@ function parseWireGuardProfile(configPath: string): {
     const key = trimmed.split('=', 1)[0]?.trim().toLowerCase();
     if (section === 'interface' && key === 'address') {
       addresses.push(...valueList(line));
+      continue;
+    }
+    if (section === 'interface' && key === 'dns') {
+      dnsServers.push(...valueList(line));
       continue;
     }
     if (section === 'peer' && key === 'allowedips') {
@@ -2076,6 +2148,7 @@ function parseWireGuardProfile(configPath: string): {
     interfaceName,
     addresses,
     allowedIps: uniqueStrings(allowedIps),
+    dnsServers: uniqueStrings(dnsServers),
     endpointHosts: uniqueStrings(endpoints.map(wireGuardEndpointIpv4Host).filter(isString)),
     setConfigLines
   };
