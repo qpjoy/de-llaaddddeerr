@@ -603,21 +603,25 @@ export function buildWireGuardTunnelCommand(input: {
     const wireGuardArgs = action === 'down'
       ? ['/uninstalltunnelservice', tunnelName]
       : ['/installtunnelservice', configPath];
-    const script = windowsElevatedStartProcessScript(
+    const scriptPaths = windowsPowerShellScriptPaths(configPath, tunnelName, action);
+    const scripts = windowsElevatedStartProcessScripts(
       command,
       wireGuardArgs,
       action,
       tunnelName,
-      windowsNrptRulesFromProfile(profile)
+      windowsNrptRulesFromProfile(profile),
+      scriptPaths.elevated
     );
+    writePowerShellScriptFile(scriptPaths.elevated, scripts.elevated);
+    writePowerShellScriptFile(scriptPaths.wrapper, scripts.wrapper);
     const powershell = windowsPowerShellCommand();
     return {
       action,
       platform: runtime.platform,
       configPath,
       command: powershell,
-      args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShell(script)],
-      displayCommand: `${powershell} -NoProfile -ExecutionPolicy Bypass -EncodedCommand <wireguard-uac-script>`,
+      args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPaths.wrapper],
+      displayCommand: `${powershell} -NoProfile -ExecutionPolicy Bypass -File <wireguard-uac-wrapper.ps1>`,
       needsAdmin: true,
       runtime
     };
@@ -2736,13 +2740,14 @@ function windowsNrptRulesFromProfile(profile: ReturnType<typeof parseWireGuardPr
   }));
 }
 
-function windowsElevatedStartProcessScript(
+function windowsElevatedStartProcessScripts(
   command: string,
   args: string[],
   action: WireGuardTunnelAction,
   tunnelName: string,
-  nrptRules: WindowsNrptRule[] = []
-): string {
+  nrptRules: WindowsNrptRule[] = [],
+  elevatedScriptPath: string
+): { wrapper: string; elevated: string } {
   const serviceName = `WireGuardTunnel$${tunnelName}`;
   const serviceArg = powerShellString(serviceName);
   const serviceLookup = `$svc = Get-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`;
@@ -2807,14 +2812,18 @@ function windowsElevatedStartProcessScript(
     ...(action === 'down' ? [] : ['Add-HdoNrptRules']),
     'exit 0'
   );
-  const elevatedEncoded = encodePowerShell(elevatedLines.join('\n'));
-  return [
+  const wrapperLines = [
     "$ErrorActionPreference = 'Stop'",
     ...preflightLines,
     "$pwsh = Join-Path $PSHOME 'powershell.exe'",
-    `$p = Start-Process -FilePath $pwsh -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', ${powerShellString(elevatedEncoded)}) -Verb RunAs -Wait -PassThru`,
+    `$elevatedScript = ${powerShellString(elevatedScriptPath)}`,
+    `$p = Start-Process -FilePath $pwsh -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $elevatedScript) -Verb RunAs -Wait -PassThru`,
     'if ($null -ne $p.ExitCode) { exit $p.ExitCode }'
-  ].join('\n');
+  ];
+  return {
+    wrapper: wrapperLines.join('\n'),
+    elevated: elevatedLines.join('\n')
+  };
 }
 
 function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string): string[] {
@@ -2885,6 +2894,25 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
   ];
 }
 
+function windowsPowerShellScriptPaths(
+  configPath: string,
+  tunnelName: string,
+  action: WireGuardTunnelAction
+): { wrapper: string; elevated: string } {
+  const scriptDir = join(dirname(configPath), 'scripts');
+  const safeName = tunnelName.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 48) || 'hdo-client';
+  const stamp = `${process.pid}-${Date.now()}`;
+  return {
+    wrapper: join(scriptDir, `${safeName}.${action}.${stamp}.wrapper.ps1`),
+    elevated: join(scriptDir, `${safeName}.${action}.${stamp}.elevated.ps1`)
+  };
+}
+
+function writePowerShellScriptFile(scriptPath: string, script: string): void {
+  mkdirSync(dirname(scriptPath), { recursive: true });
+  writeFileSync(scriptPath, `\uFEFF${script.trimEnd()}\n`, 'utf8');
+}
+
 function windowsPowerShellCommand(): string {
   const systemRoot = process.env.SystemRoot || process.env.WINDIR;
   const candidates = systemRoot
@@ -2895,10 +2923,6 @@ function windowsPowerShellCommand(): string {
       ]
     : [];
   return candidates.find((candidate) => existsSync(candidate)) ?? 'powershell.exe';
-}
-
-function encodePowerShell(script: string): string {
-  return Buffer.from(script, 'utf16le').toString('base64');
 }
 
 function wireGuardCommandErrorMessage(command: WireGuardTunnelCommand, err: unknown): string {
