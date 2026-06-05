@@ -1361,11 +1361,69 @@ export class HdoController {
       this.rememberWireGuardDesiredActive(action !== 'down');
       this.reportPresenceInBackground(action === 'down' ? 'offline' : 'online');
     }
+    const dnsRepair = result.ok && action !== 'down'
+      ? await this.ensureWindowsDnsPriorityAfterConnect(runtime, configPath)
+      : null;
     return {
       ...result,
+      dnsRepair,
       message: result.ok && action === 'restart' ? '已更新并启动 WireGuard peer。' : result.message,
       runtime: publicWireGuardRuntime(result.runtime)
     };
+  }
+
+  private async ensureWindowsDnsPriorityAfterConnect(
+    runtime: WireGuardConnectionRuntime,
+    configPath: string
+  ): Promise<Record<string, unknown>> {
+    const before = await probeWindowsNrptStatus(configPath).catch((err) => ({
+      ok: false,
+      probeFailed: true,
+      error: errorMessage(err)
+    }));
+    if (before.ok === true) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: 'nrpt-ready',
+        before
+      };
+    }
+    const beforeRow = plainObject(before);
+    this.ctx.log.warn('repairing HDO Windows DNS priority after WireGuard connect', {
+      reason: stringValue(beforeRow?.reason) || stringValue(beforeRow?.error) || 'nrpt-not-ready',
+      configPath
+    });
+    const repaired = await repairWireGuardTunnelRoutes({ runtime, configPath }).then(
+      (result) => ({
+        ...result,
+        runtime: publicWireGuardRuntime(result.runtime)
+      }),
+      (err) => ({
+        ok: false,
+        error: errorMessage(err)
+      })
+    );
+    const after = await probeWindowsNrptStatus(configPath).catch((err) => ({
+      ok: false,
+      probeFailed: true,
+      error: errorMessage(err)
+    }));
+    const ok = plainObject(repaired)?.ok !== false && after.ok === true;
+    const payload = {
+      ok,
+      action: 'repair-dns-after-connect',
+      reason: 'nrpt-not-ready-after-connect',
+      before,
+      repaired,
+      after
+    };
+    this.emitEvent('wireguard-status-changed', {
+      action: 'repair-dns-after-connect',
+      ok,
+      message: ok ? '已自动修复 HDO DNS 优先级。' : 'HDO DNS 优先级自动修复失败。'
+    });
+    return payload;
   }
 
   private async connectWireGuardPeerWgQuick(
@@ -2501,6 +2559,174 @@ function execFileAsync(command: string, args: string[]): Promise<void> {
   });
 }
 
+function execFileTextAsync(
+  command: string,
+  args: string[],
+  timeoutMs = 6000
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, {
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      windowsHide: true
+    }, (err, stdout, stderr) => {
+      if (err) {
+        reject(Object.assign(err, { stdout, stderr }));
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+async function probeWindowsNrptStatus(configPath: string): Promise<Record<string, unknown>> {
+  if (process.platform !== 'win32') {
+    return { ok: true, skipped: true, reason: 'not-windows' };
+  }
+  const splitDns = hdoSplitDnsConfigFromFile(configPath);
+  if (splitDns.nameServers.length === 0 || splitDns.namespaces.length === 0) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: 'no-hdo-split-dns-config',
+      expectedNamespaces: splitDns.namespaces,
+      expectedNameServers: splitDns.nameServers
+    };
+  }
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    '$global = Get-DnsClientNrptGlobal -ErrorAction Stop',
+    '$rules = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | ForEach-Object {',
+    '  [pscustomobject]@{',
+    '    Namespace = @($_.Namespace)',
+    '    NameServers = @($_.NameServers)',
+    '    DisplayName = [string]$_.DisplayName',
+    '    Comment = [string]$_.Comment',
+    '  }',
+    '})',
+    '[pscustomobject]@{',
+    '  QueryPolicy = [string]$global.QueryPolicy',
+    '  EnableDAForAllNetworks = [string]$global.EnableDAForAllNetworks',
+    '  SecureNameQueryFallback = [string]$global.SecureNameQueryFallback',
+    '  Rules = $rules',
+    '} | ConvertTo-Json -Depth 8 -Compress'
+  ].join('\n');
+  const { stdout } = await execFileTextAsync(windowsPowerShellCommand(), [
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    script
+  ]);
+  const raw = JSON.parse(stdout.trim() || '{}');
+  const queryPolicy = stringValue(raw.QueryPolicy);
+  const enableAll = stringValue(raw.EnableDAForAllNetworks);
+  const installedRules = objectArray(raw.Rules)
+    .map((rule) => ({
+      namespaces: jsonStringList(plainObject(rule)?.Namespace),
+      nameServers: jsonStringList(plainObject(rule)?.NameServers),
+      displayName: stringValue(plainObject(rule)?.DisplayName),
+      comment: stringValue(plainObject(rule)?.Comment)
+    }))
+    .filter((rule) => rule.namespaces.length > 0);
+  const expectedNamespaces = splitDns.namespaces.map((item) => item.toLowerCase());
+  const expectedNameServers = splitDns.nameServers.map((item) => item.toLowerCase());
+  const relevantRules = installedRules.filter((rule) =>
+    rule.namespaces.some((namespace) => expectedNamespaces.includes(namespace.toLowerCase()))
+  );
+  const missingNamespaces = splitDns.namespaces.filter((namespace) => {
+    const wantedNamespace = namespace.toLowerCase();
+    return !installedRules.some((rule) => {
+      const namespaceOk = rule.namespaces.some((item) => item.toLowerCase() === wantedNamespace);
+      if (!namespaceOk) return false;
+      const servers = rule.nameServers.map((item) => item.toLowerCase());
+      return expectedNameServers.every((server) => servers.includes(server));
+    });
+  });
+  const globalOk = queryPolicy === 'QueryBoth' && /^(EnableAlways|EnableDA|True|Enable|Enabled)$/i.test(enableAll ?? '');
+  return {
+    ok: globalOk && missingNamespaces.length === 0,
+    reason: globalOk && missingNamespaces.length === 0 ? 'nrpt-ready' : 'nrpt-missing-or-disabled',
+    expectedNamespaces: splitDns.namespaces,
+    expectedNameServers: splitDns.nameServers,
+    missingNamespaces,
+    global: {
+      queryPolicy,
+      enableDAForAllNetworks: enableAll,
+      secureNameQueryFallback: stringValue(raw.SecureNameQueryFallback)
+    },
+    installedRules: relevantRules
+  };
+}
+
+function hdoSplitDnsConfigFromFile(configPath: string): { nameServers: string[]; domains: string[]; namespaces: string[] } {
+  const raw = readFileSync(configPath, 'utf8');
+  const nameServers: string[] = [];
+  const domains: string[] = [];
+  let section = '';
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const sectionMatch = trimmed.match(/^\[(.+)]$/);
+    if (sectionMatch) section = sectionMatch[1].toLowerCase();
+    if (section !== 'interface') continue;
+    const key = trimmed.split('=', 1)[0]?.trim().toLowerCase();
+    if (key === 'dns' || /^#\s*HDO\s+DNS\s+Servers\s*=/i.test(trimmed)) {
+      nameServers.push(...configValueList(line).filter(isIpv4Text));
+      continue;
+    }
+    if (/^#\s*HDO\s+DNS\s+Domains\s*=/i.test(trimmed)) {
+      domains.push(...configValueList(line).map(normalizeNrptDomain).filter((item): item is string => Boolean(item)));
+    }
+  }
+  const uniqueDomains = uniqueStrings(domains);
+  return {
+    nameServers: uniqueStrings(nameServers),
+    domains: uniqueDomains,
+    namespaces: uniqueStrings(uniqueDomains.flatMap((domain) => [domain, `.${domain}`]))
+  };
+}
+
+function configValueList(line: string): string[] {
+  return line
+    .replace(/^[^=]+=/, '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeNrptDomain(value: string): string | null {
+  const normalized = value.trim().replace(/^\.+/, '').replace(/\.+$/, '').toLowerCase();
+  return normalized || null;
+}
+
+function isIpv4Text(value: string): boolean {
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value.trim());
+}
+
+function objectArray(value: unknown): Record<string, unknown>[] {
+  if (Array.isArray(value)) return value.map(plainObject).filter((item): item is Record<string, unknown> => Boolean(item));
+  const row = plainObject(value);
+  return row ? [row] : [];
+}
+
+function jsonStringList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((item) => stringValue(item)).filter((item): item is string => Boolean(item));
+  const text = stringValue(value);
+  return text ? [text] : [];
+}
+
+function windowsPowerShellCommand(): string {
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR;
+  const candidates = systemRoot
+    ? [
+        join(systemRoot, 'Sysnative', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+        join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+        join(systemRoot, 'SysWOW64', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+      ]
+    : [];
+  return candidates.find((candidate) => existsSync(candidate)) ?? 'powershell.exe';
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -2601,6 +2827,7 @@ function publicEventWireGuardPeer(value: Record<string, unknown>): Record<string
     address: stringValue(value.address),
     allowedIps: Array.isArray(value.allowedIps) ? value.allowedIps : null,
     dns: Array.isArray(value.dns) ? value.dns : null,
+    dnsDomains: Array.isArray(value.dnsDomains) ? value.dnsDomains : null,
     configReady: Boolean(value.config && value.configPath),
     canUseDefaultMesh: value.canUseDefaultMesh === true,
     lastError: stringValue(value.lastError),

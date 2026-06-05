@@ -69,6 +69,7 @@ export interface HdoWireGuardPeerSettings {
   configPath?: string | null;
   allowedIps?: string[] | null;
   dns?: string[] | null;
+  dnsDomains?: string[] | null;
   h2iDirectCandidateIps?: string[] | null;
   routeProbe?: unknown | null;
   canUseDefaultMesh?: boolean | null;

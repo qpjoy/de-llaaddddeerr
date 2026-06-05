@@ -21,6 +21,11 @@ const serverLabelEl = document.getElementById('hdo-server-label');
 const loginHintEl = document.getElementById('hdo-login-hint');
 const updateBannerEl = document.getElementById('hdo-update-banner');
 const updateTextEl = document.getElementById('hdo-update-text');
+const repairDnsMainButton = document.getElementById('btn-hdo-repair-dns-main');
+const repairDnsButtons = [
+  repairDnsMainButton,
+  document.getElementById('btn-hdo-repair-dns')
+].filter(Boolean);
 
 const buttons = [
   accountConnectButton,
@@ -30,7 +35,7 @@ const buttons = [
   document.getElementById('btn-hdo-anon-config'),
   document.getElementById('btn-hdo-switch-anonymous'),
   document.getElementById('btn-hdo-save-settings'),
-  document.getElementById('btn-hdo-repair-dns'),
+  ...repairDnsButtons,
   document.getElementById('btn-hdo-open-test'),
   document.getElementById('btn-hdo-stop'),
   document.getElementById('btn-hdo-refresh'),
@@ -134,8 +139,10 @@ document.getElementById('btn-hdo-account-config').addEventListener('click', () =
   void runAccount(false);
 });
 
-document.getElementById('btn-hdo-repair-dns').addEventListener('click', () => {
-  void repairDnsPriority();
+repairDnsButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    void repairDnsPriority();
+  });
 });
 
 passwordToggleButton.addEventListener('click', () => {
@@ -432,6 +439,7 @@ async function refreshStatus(showOutput = true) {
       : (systemDomainProxy.supported === false ? '不支持' : '未启用');
     serverLabelEl.textContent = serverInput.value ? '服务已配置' : '服务未配置';
     disconnectButton.hidden = !wgActive;
+    if (repairDnsMainButton) repairDnsMainButton.hidden = !wgActive;
     reconnectButton.textContent = wgActive ? '重连当前线路' : `连接${networkLabel(configuredNetwork)}`;
     accountConnectButton.textContent = accountConnected ? '重连账号线路' : (wgActive ? '先断开再切账号' : '登录切换网段');
     loginHintEl.textContent = wgActive
