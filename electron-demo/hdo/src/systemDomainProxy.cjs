@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
 
-const STATE_VERSION = 1;
+const STATE_VERSION = 2;
 const WINDOWS_PROXY_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
 
 function createSystemDomainProxyManager(options = {}) {
@@ -66,6 +66,44 @@ function createSystemDomainProxyManager(options = {}) {
         platform: process.platform,
         reason,
         restored: true
+      };
+    },
+
+    async restoreStale(reason = 'startup') {
+      if (!isSupportedPlatform()) return unsupportedStatus({ reason });
+      const existing = readState(statePath);
+      if (existing && existing.applied === true && existing.platform === process.platform) {
+        await restorePlatformState(existing.previous);
+        await closeLocalPacServer();
+        removeState(statePath, log);
+        return {
+          supported: true,
+          applied: false,
+          platform: process.platform,
+          reason,
+          restored: true,
+          staleState: true
+        };
+      }
+      if (process.platform === 'win32') {
+        const stale = await clearStaleWindowsHdoPac();
+        if (stale.restored) {
+          return {
+            supported: true,
+            applied: false,
+            platform: process.platform,
+            reason,
+            ...stale
+          };
+        }
+      }
+      await closeLocalPacServer();
+      return {
+        supported: true,
+        applied: false,
+        platform: process.platform,
+        reason,
+        skipped: true
       };
     },
 
@@ -350,7 +388,10 @@ async function runDarwinNetworksetupSetBatch(commands) {
 async function captureWindowsState() {
   return {
     autoConfigUrl: await queryWindowsRegistryValue('AutoConfigURL'),
-    proxyEnable: await queryWindowsRegistryValue('ProxyEnable')
+    proxyEnable: await queryWindowsRegistryValue('ProxyEnable'),
+    proxyServer: await queryWindowsRegistryValue('ProxyServer'),
+    proxyOverride: await queryWindowsRegistryValue('ProxyOverride'),
+    autoDetect: await queryWindowsRegistryValue('AutoDetect')
   };
 }
 
@@ -373,11 +414,32 @@ async function verifyWindowsPac(pacUrl) {
 async function restoreWindowsState(previous) {
   const autoConfigUrl = previous && previous.autoConfigUrl;
   const proxyEnable = previous && previous.proxyEnable;
+  const proxyServer = previous && previous.proxyServer;
+  const proxyOverride = previous && previous.proxyOverride;
+  const autoDetect = previous && previous.autoDetect;
 
   if (autoConfigUrl && autoConfigUrl.exists) {
     await addWindowsRegistryValue('AutoConfigURL', autoConfigUrl.type || 'REG_SZ', autoConfigUrl.value || '');
   } else {
     await deleteWindowsRegistryValue('AutoConfigURL');
+  }
+
+  if (proxyServer && proxyServer.exists) {
+    await addWindowsRegistryValue('ProxyServer', proxyServer.type || 'REG_SZ', proxyServer.value || '');
+  } else {
+    await deleteWindowsRegistryValue('ProxyServer');
+  }
+
+  if (proxyOverride && proxyOverride.exists) {
+    await addWindowsRegistryValue('ProxyOverride', proxyOverride.type || 'REG_SZ', proxyOverride.value || '');
+  } else {
+    await deleteWindowsRegistryValue('ProxyOverride');
+  }
+
+  if (autoDetect && autoDetect.exists) {
+    await addWindowsRegistryValue('AutoDetect', autoDetect.type || 'REG_DWORD', autoDetect.value || '0');
+  } else {
+    await deleteWindowsRegistryValue('AutoDetect');
   }
 
   if (proxyEnable && proxyEnable.exists) {
@@ -387,6 +449,34 @@ async function restoreWindowsState(previous) {
   }
 
   await notifyWindowsProxyChanged();
+}
+
+async function clearStaleWindowsHdoPac() {
+  const autoConfigUrl = await queryWindowsRegistryValue('AutoConfigURL');
+  const value = autoConfigUrl && autoConfigUrl.exists ? autoConfigUrl.value : '';
+  if (!isHdoLocalPacUrl(value)) return { restored: false };
+  await deleteWindowsRegistryValue('AutoConfigURL');
+  const proxyServer = await queryWindowsRegistryValue('ProxyServer');
+  if (proxyServer && proxyServer.exists && proxyServer.value) {
+    await addWindowsRegistryValue('ProxyEnable', 'REG_DWORD', '1');
+  }
+  await notifyWindowsProxyChanged();
+  return {
+    restored: true,
+    stalePacUrl: value,
+    proxyServerRestored: Boolean(proxyServer && proxyServer.exists && proxyServer.value)
+  };
+}
+
+function isHdoLocalPacUrl(value) {
+  const text = stringValue(value);
+  if (!text) return false;
+  try {
+    const url = new URL(text);
+    return /^127\.0\.0\.1$|^localhost$/i.test(url.hostname) && url.pathname === '/proxy.pac';
+  } catch {
+    return /^https?:\/\/(?:127\.0\.0\.1|localhost):\d+\/proxy\.pac$/i.test(text);
+  }
 }
 
 async function queryWindowsRegistryValue(name) {
@@ -452,7 +542,7 @@ function execFileText(command, args) {
 function readState(statePath) {
   try {
     const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
-    return state && state.version === STATE_VERSION ? state : null;
+    return state && (state.version === STATE_VERSION || state.version === 1) ? state : null;
   } catch {
     return null;
   }

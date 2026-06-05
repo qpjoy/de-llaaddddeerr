@@ -3,6 +3,7 @@ const api = window.qpjoyHdo || window.qpjoyDemo;
 const serverInput = document.getElementById('hdo-server-url');
 const internalUrlInput = document.getElementById('hdo-test-url');
 const relayModeSelect = document.getElementById('hdo-relay-mode');
+const systemPacInput = document.getElementById('hdo-system-pac-enabled');
 const accountInput = document.getElementById('hdo-account-id');
 const passwordInput = document.getElementById('hdo-account-password');
 const passwordToggleButton = document.getElementById('btn-hdo-toggle-password');
@@ -35,6 +36,7 @@ const buttons = [
   document.getElementById('btn-hdo-anon-config'),
   document.getElementById('btn-hdo-switch-anonymous'),
   document.getElementById('btn-hdo-save-settings'),
+  systemPacInput,
   ...repairDnsButtons,
   document.getElementById('btn-hdo-open-test'),
   document.getElementById('btn-hdo-stop'),
@@ -129,6 +131,10 @@ document.getElementById('btn-hdo-save-settings').addEventListener('click', () =>
       relayMode: normalizeRelayMode(relayModeSelect.value)
     });
   });
+});
+
+systemPacInput.addEventListener('change', () => {
+  void setSystemPacEnabled(systemPacInput.checked);
 });
 
 accountConnectButton.addEventListener('click', () => {
@@ -301,6 +307,12 @@ async function repairDnsPriority() {
   });
 }
 
+async function setSystemPacEnabled(enabled) {
+  await runAction(enabled ? '启用系统 PAC' : '关闭系统 PAC', async () => api.setSystemPacEnabled(enabled), {
+    detail: enabled ? '正在启用系统 PAC。' : '正在关闭系统 PAC。'
+  });
+}
+
 async function runAction(label, fn, options = {}) {
   setBusy(true);
   chip.textContent = `${label}中`;
@@ -421,6 +433,7 @@ async function refreshStatus(showOutput = true) {
     const hdoNetworkProbe = status.hdoNetworkProbe || null;
     const networkReady = wgActive && hdoNetworkProbe && hdoNetworkProbe.ok === true;
     const systemDomainProxy = status.systemDomainProxy || {};
+    const systemPacEnabled = status.systemPacEnabled === true;
     const session = status.auth || hdo.session || {};
     const loggedIn = Boolean(session.user || session.loggedIn);
     const currentNetwork = networkFromStatus(status);
@@ -434,9 +447,12 @@ async function refreshStatus(showOutput = true) {
     modeEl.textContent = mode;
     overlayEl.textContent = peer.overlayIp || '-';
     wgEl.textContent = networkReady ? '已连接' : (wgActive ? '网络未通' : '未连接');
-    systemDomainEl.textContent = systemDomainProxy.applied
-      ? '已接管'
-      : (systemDomainProxy.supported === false ? '不支持' : '未启用');
+    systemPacInput.checked = systemPacEnabled;
+    systemDomainEl.textContent = systemPacEnabled
+      ? (systemDomainProxy.applied
+          ? 'PAC已接管'
+          : (systemDomainProxy.supported === false ? '不支持' : 'PAC未启用'))
+      : 'DNS优先';
     serverLabelEl.textContent = serverInput.value ? '服务已配置' : '服务未配置';
     disconnectButton.hidden = !wgActive;
     if (repairDnsMainButton) repairDnsMainButton.hidden = !wgActive;
@@ -480,6 +496,7 @@ async function refreshStatus(showOutput = true) {
         relayMode: relayModeLabel(relayModeSelect.value),
         overlayIp: peer.overlayIp || null,
         wireGuardActive: wgActive,
+        systemPacEnabled,
         wireGuardDiagnostics: wireGuardStatus ? {
           mode: wireGuardStatus.mode || null,
           interfaceName: wireGuardStatus.interfaceName || null,

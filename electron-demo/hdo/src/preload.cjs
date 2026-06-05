@@ -18,6 +18,8 @@ const api = {
   hdoAccountConnect: (payload) => ipcRenderer.invoke('demo:hdo-account-connect', payload),
   /** Persist HDO plugin settings. */
   hdoUpdateSettings: (patch) => ipcRenderer.invoke('demo:hdo-update-settings', patch),
+  /** Toggle OS-level PAC integration. */
+  setSystemPacEnabled: (enabled) => ipcRenderer.invoke('demo:set-system-pac-enabled', enabled === true),
   /** Open a URL inside Electron's default session so HDO domain proxy rules apply. */
   hdoOpenTestUrl: (url) => ipcRenderer.invoke('demo:hdo-open-test-url', url),
   /** Stop the current HDO WireGuard tunnel. */

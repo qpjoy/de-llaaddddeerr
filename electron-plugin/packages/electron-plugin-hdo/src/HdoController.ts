@@ -1772,7 +1772,11 @@ export class HdoController {
     });
     const configPath = this.shutdownWireGuardConfigPath();
     if (!configPath || !existsSync(configPath)) return;
-    if (this.settings.wireGuardDesiredActive === true && this.settings.wireGuardLaunchDaemonEnabled !== false) {
+    if (
+      process.platform === 'darwin' &&
+      this.settings.wireGuardDesiredActive === true &&
+      this.settings.wireGuardLaunchDaemonEnabled !== false
+    ) {
       const daemon = this.wireGuardLaunchDaemonStatus();
       if (daemon && (daemon.installed === true || daemon.loaded === true)) return;
     }
@@ -1800,7 +1804,10 @@ export class HdoController {
         command: result.command,
         routeLogPath: result.routeLogPath ?? null
       });
+      return;
     }
+    this.rememberWireGuardDesiredActive(false);
+    this.reportPresenceInBackground('offline');
   }
 
   private reportPresenceInBackground(status: HdoDeviceRegistrationInput['status']): void {

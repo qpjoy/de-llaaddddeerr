@@ -38,6 +38,7 @@ const TUNNEL_ID = 'qpjoy.electron-tunnel';
 const HDO_ID = 'qpjoy.electron-plugin-hdo';
 const UPDATE_RESTART_REQUIRED_META = 'updates.restartRequired';
 const FAST_RELAY_MODE = 'mesh-h2i';
+const CLIENT_SETTINGS_FILE = 'hdo-client-settings.json';
 
 let mainWindow = null;
 let host = null;
@@ -45,6 +46,7 @@ let isClosing = false;
 let hdoEventUnsubscribe = null;
 let systemDomainProxy = null;
 let systemDomainProxyApplyInFlight = null;
+let systemPacEnabled = false;
 const childWindows = new Set();
 
 app.setAppUserModelId('dev.qpjoy.hdo');
@@ -318,19 +320,27 @@ function systemDomainProxyStatus() {
       supported: false,
       applied: false,
       platform: process.platform,
+      enabled: systemPacEnabled,
       reason: 'system-domain-proxy-not-ready'
     };
   }
-  return systemDomainProxy.status();
+  return {
+    ...systemDomainProxy.status(),
+    enabled: systemPacEnabled
+  };
 }
 
 async function verifiedSystemDomainProxyStatus() {
   if (!systemDomainProxy) return systemDomainProxyStatus();
   if (typeof systemDomainProxy.statusVerified !== 'function') return systemDomainProxyStatus();
-  return systemDomainProxy.statusVerified();
+  return {
+    ...await systemDomainProxy.statusVerified(),
+    enabled: systemPacEnabled
+  };
 }
 
 function shouldEnsureSystemDomainProxy(snapshot, current = systemDomainProxyStatus()) {
+  if (systemPacEnabled !== true) return false;
   if (!snapshot?.wireGuardStatus || snapshot.wireGuardStatus.active !== true) return false;
   const configured = snapshot.settings && snapshot.settings.domainProxy;
   if (
@@ -429,8 +439,35 @@ async function anonymousNetworkSwitchHint() {
 
 async function safelyApplySystemDomainProxy(domainProxy, reason = 'manual') {
   if (!systemDomainProxy) return systemDomainProxyStatus();
+  if (isClosing) {
+    return {
+      supported: process.platform === 'darwin' || process.platform === 'win32',
+      applied: false,
+      platform: process.platform,
+      enabled: systemPacEnabled,
+      reason: 'app-closing',
+      skipped: true
+    };
+  }
+  if (systemPacEnabled !== true) {
+    const disabled = await systemDomainProxy.disable('system-pac-disabled').catch((err) => ({
+      supported: process.platform === 'darwin' || process.platform === 'win32',
+      applied: false,
+      platform: process.platform,
+      reason: 'system-pac-disabled',
+      error: err instanceof Error ? err.message : String(err)
+    }));
+    return {
+      ...disabled,
+      enabled: false,
+      skipped: true
+    };
+  }
   try {
-    return await systemDomainProxy.apply(domainProxy);
+    return {
+      ...await systemDomainProxy.apply(domainProxy),
+      enabled: true
+    };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     console.warn('[hdo] failed to apply system domain proxy:', { reason, error });
@@ -438,6 +475,7 @@ async function safelyApplySystemDomainProxy(domainProxy, reason = 'manual') {
       supported: process.platform === 'darwin' || process.platform === 'win32',
       applied: false,
       platform: process.platform,
+      enabled: systemPacEnabled,
       reason,
       error
     };
@@ -447,7 +485,12 @@ async function safelyApplySystemDomainProxy(domainProxy, reason = 'manual') {
 async function safelyDisableSystemDomainProxy(reason = 'manual') {
   if (!systemDomainProxy) return systemDomainProxyStatus();
   try {
-    return await systemDomainProxy.disable(reason);
+    const inFlight = systemDomainProxyApplyInFlight;
+    if (inFlight) await inFlight.catch(() => undefined);
+    return {
+      ...await systemDomainProxy.disable(reason),
+      enabled: systemPacEnabled
+    };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     console.warn('[hdo] failed to disable system domain proxy:', { reason, error });
@@ -455,6 +498,7 @@ async function safelyDisableSystemDomainProxy(reason = 'manual') {
       supported: process.platform === 'darwin' || process.platform === 'win32',
       applied: true,
       platform: process.platform,
+      enabled: systemPacEnabled,
       reason,
       error
     };
@@ -506,6 +550,29 @@ function packagedServerBaseUrl() {
   }
 }
 
+function clientSettingsPath() {
+  return path.join(app.getPath('userData'), CLIENT_SETTINGS_FILE);
+}
+
+function readClientSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(clientSettingsPath(), 'utf8')) || {};
+  } catch {
+    return {};
+  }
+}
+
+function writeClientSettings(patch) {
+  const next = {
+    ...readClientSettings(),
+    ...(patch && typeof patch === 'object' ? patch : {}),
+    updatedAt: new Date().toISOString()
+  };
+  fs.mkdirSync(path.dirname(clientSettingsPath()), { recursive: true });
+  fs.writeFileSync(clientSettingsPath(), JSON.stringify(next, null, 2));
+  return next;
+}
+
 function normalizeTestUrl(value) {
   const raw = typeof value === 'string' ? value.trim() : '';
   if (!raw) throw new Error('URL is required');
@@ -518,18 +585,20 @@ function normalizeTestUrl(value) {
 }
 
 async function closeAppResources() {
-  await safelyDisableSystemDomainProxy('app-quit');
+  await safelyDisableSystemDomainProxy('app-quit-before-host-close');
   if (hdoEventUnsubscribe) {
     hdoEventUnsubscribe();
     hdoEventUnsubscribe = null;
   }
-  if (!host) return;
-  const current = host;
-  try {
-    await current.close();
-  } finally {
-    if (host === current) host = null;
+  if (host) {
+    const current = host;
+    try {
+      await current.close();
+    } finally {
+      if (host === current) host = null;
+    }
   }
+  await safelyDisableSystemDomainProxy('app-quit-after-host-close');
 }
 
 async function quitGracefully(exitCode = 0) {
@@ -563,6 +632,10 @@ if (gotSingleInstanceLock) {
       systemDomainProxy = createSystemDomainProxyManager({
         userDataDir: app.getPath('userData'),
         log: console
+      });
+      systemPacEnabled = readClientSettings().systemPacEnabled === true;
+      await systemDomainProxy.restoreStale?.('app-startup').catch((err) => {
+        console.warn('[hdo] failed to restore stale system domain proxy:', err);
       });
 
       host = createElectronMarket(
@@ -635,8 +708,37 @@ if (gotSingleInstanceLock) {
             restartRequired: readJsonMeta(UPDATE_RESTART_REQUIRED_META)
           },
           systemDomainProxy: systemDomainProxyState,
+          systemPacEnabled,
           hdoNetworkProbe,
           hdo: snapshot
+        };
+      });
+
+      ipcMain.handle('demo:set-system-pac-enabled', async (_e, enabled) => {
+        systemPacEnabled = enabled === true;
+        writeClientSettings({ systemPacEnabled });
+        if (!systemPacEnabled) {
+          return {
+            ok: true,
+            systemPacEnabled,
+            systemDomainProxy: await safelyDisableSystemDomainProxy('system-pac-toggle-off')
+          };
+        }
+        const snapshot = await hdoCall('snapshot').catch(() => null);
+        let systemDomainProxyState = await verifiedSystemDomainProxyStatus();
+        if (shouldEnsureSystemDomainProxy(snapshot, systemDomainProxyState)) {
+          try {
+            const ensured = await ensureSystemDomainProxyFromManifest('system-pac-toggle-on');
+            systemDomainProxyState = ensured.systemDomainProxy || await verifiedSystemDomainProxyStatus();
+          } catch (err) {
+            console.warn('[hdo] failed to apply system PAC after enabling:', err);
+            systemDomainProxyState = await verifiedSystemDomainProxyStatus();
+          }
+        }
+        return {
+          ok: true,
+          systemPacEnabled,
+          systemDomainProxy: systemDomainProxyState
         };
       });
 
