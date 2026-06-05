@@ -2817,7 +2817,9 @@ function windowsElevatedStartProcessScripts(
     ...preflightLines,
     "$pwsh = Join-Path $PSHOME 'powershell.exe'",
     `$elevatedScript = ${powerShellString(elevatedScriptPath)}`,
-    `$p = Start-Process -FilePath $pwsh -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $elevatedScript) -Verb RunAs -Wait -PassThru`,
+    `$quotedElevatedScript = '"' + $elevatedScript.Replace('"', '\\"') + '"'`,
+    `$argLine = '-NoProfile -ExecutionPolicy Bypass -File ' + $quotedElevatedScript`,
+    `$p = Start-Process -FilePath $pwsh -ArgumentList $argLine -Verb RunAs -Wait -PassThru`,
     'if ($null -ne $p.ExitCode) { exit $p.ExitCode }'
   ];
   return {
@@ -2927,6 +2929,7 @@ function windowsPowerShellCommand(): string {
 
 function wireGuardCommandErrorMessage(command: WireGuardTunnelCommand, err: unknown): string {
   const detail = errorMessage(err);
+  const output = commandOutputMessage(err);
   if (command.platform === 'darwin' && isAppleScriptAuthorizationCancelled(detail)) {
     return '已取消 WireGuard 管理员授权。';
   }
@@ -2934,10 +2937,19 @@ function wireGuardCommandErrorMessage(command: WireGuardTunnelCommand, err: unkn
     return [
       'Windows 启停 WireGuard 需要管理员授权。',
       '请在弹出的 UAC 窗口点击“是”；如果没有弹窗，请用“以管理员身份运行”启动 QPJoy 后重试。',
-      detail
+      detail,
+      output
     ].filter(Boolean).join(' ');
   }
-  return detail;
+  return [detail, output].filter(Boolean).join(' ');
+}
+
+function commandOutputMessage(err: unknown): string | null {
+  if (!err || typeof err !== 'object') return null;
+  const row = err as { stdout?: unknown; stderr?: unknown };
+  const stderr = typeof row.stderr === 'string' ? row.stderr.trim() : '';
+  const stdout = typeof row.stdout === 'string' ? row.stdout.trim() : '';
+  return [stderr && `stderr: ${stderr}`, stdout && `stdout: ${stdout}`].filter(Boolean).join(' ');
 }
 
 function isAppleScriptAuthorizationCancelled(message: string): boolean {
@@ -2963,6 +2975,10 @@ function execFileAsync(
       windowsHide: true
     }, (err, stdout, stderr) => {
       if (err) {
+        (err as NodeJS.ErrnoException & { stdout?: string; stderr?: string }).stdout =
+          typeof stdout === 'string' ? stdout : String(stdout ?? '');
+        (err as NodeJS.ErrnoException & { stdout?: string; stderr?: string }).stderr =
+          typeof stderr === 'string' ? stderr : String(stderr ?? '');
         reject(err);
         return;
       }
