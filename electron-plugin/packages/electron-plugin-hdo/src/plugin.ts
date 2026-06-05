@@ -159,6 +159,7 @@ const hdoPlugin = {
         controller.prepareDomainProxyFromManifest(manifest),
       recoverWireGuardPeer: (reason?: string | null) =>
         controller.recoverWireGuardPeer({ reason: reason || 'api', allowPrivileged: true }),
+      repairWireGuardRoutes: () => controller.repairWireGuardRoutes(),
       installWireGuardLaunchDaemon: () => controller.installWireGuardLaunchDaemon(),
       uninstallWireGuardLaunchDaemon: (input?: { stopTunnel?: boolean | null }) => controller.uninstallWireGuardLaunchDaemon(input),
       executePendingTasks: () => controller.executePendingTasks(),

@@ -30,6 +30,7 @@ const buttons = [
   document.getElementById('btn-hdo-anon-config'),
   document.getElementById('btn-hdo-switch-anonymous'),
   document.getElementById('btn-hdo-save-settings'),
+  document.getElementById('btn-hdo-repair-dns'),
   document.getElementById('btn-hdo-open-test'),
   document.getElementById('btn-hdo-stop'),
   document.getElementById('btn-hdo-refresh'),
@@ -45,11 +46,15 @@ const NETWORK_ANONYMOUS = 'anonymous';
 const NETWORK_ACCOUNT = 'account';
 const CONNECT_PERMISSION_NOTE = [
   '权限提示：',
-  '连接或重连 HDO 网络时，macOS 会请求管理员权限。'
+  '连接或重连 HDO 网络时，系统可能会请求管理员权限。'
 ].join('\n');
 const DISCONNECT_PERMISSION_NOTE = [
   '权限提示：',
-  '断开当前 HDO 网络时，macOS 会请求管理员权限。'
+  '断开当前 HDO 网络时，系统可能会请求管理员权限。'
+].join('\n');
+const REPAIR_DNS_PERMISSION_NOTE = [
+  '权限提示：',
+  '修复 HDO DNS 优先级时，系统可能会请求管理员权限。'
 ].join('\n');
 
 const storageKeys = {
@@ -127,6 +132,10 @@ accountConnectButton.addEventListener('click', () => {
 
 document.getElementById('btn-hdo-account-config').addEventListener('click', () => {
   void runAccount(false);
+});
+
+document.getElementById('btn-hdo-repair-dns').addEventListener('click', () => {
+  void repairDnsPriority();
 });
 
 passwordToggleButton.addEventListener('click', () => {
@@ -275,6 +284,13 @@ async function runDisconnect(label) {
     permissionNote: DISCONNECT_PERMISSION_NOTE,
     detail: '接下来的系统权限用于断开当前 HDO 网络。',
     waitFor: 'down'
+  });
+}
+
+async function repairDnsPriority() {
+  await runAction('修复 DNS 优先级', async () => api.hdoRepairDns(), {
+    permissionNote: REPAIR_DNS_PERMISSION_NOTE,
+    detail: '接下来的系统权限用于重新写入 HDO DNS/NRPT 优先级规则。'
   });
 }
 

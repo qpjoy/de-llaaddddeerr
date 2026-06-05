@@ -730,6 +730,20 @@ if (gotSingleInstanceLock) {
         return { ...stopped, systemDomainProxy: systemDomainProxyResult };
       });
 
+      ipcMain.handle('demo:hdo-repair-dns', async () => {
+        const repaired = await hdoCall('repairWireGuardRoutes');
+        let systemDomainProxyState = await verifiedSystemDomainProxyStatus();
+        if (repaired && typeof repaired === 'object' && repaired.ok !== false) {
+          try {
+            const ensured = await ensureSystemDomainProxyFromManifest('repair-dns');
+            systemDomainProxyState = ensured.systemDomainProxy || systemDomainProxyState;
+          } catch (err) {
+            console.warn('[hdo] failed to ensure system domain proxy after DNS repair:', err);
+          }
+        }
+        return { ...repaired, systemDomainProxy: systemDomainProxyState };
+      });
+
       ipcMain.handle('demo:check-updates', async () => {
         if (!host.updateAgent) {
           return {

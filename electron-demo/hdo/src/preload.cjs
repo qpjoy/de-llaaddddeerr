@@ -22,6 +22,8 @@ const api = {
   hdoOpenTestUrl: (url) => ipcRenderer.invoke('demo:hdo-open-test-url', url),
   /** Stop the current HDO WireGuard tunnel. */
   hdoStop: () => ipcRenderer.invoke('demo:hdo-stop'),
+  /** Re-apply HDO DNS/route priority rules for the active tunnel. */
+  hdoRepairDns: () => ipcRenderer.invoke('demo:hdo-repair-dns'),
   /** Ask the embedded market host to check release policies now. */
   checkUpdates: () => ipcRenderer.invoke('demo:check-updates'),
   /** Subscribe to HDO state changes pushed by the plugin. */
