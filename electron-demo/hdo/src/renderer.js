@@ -516,6 +516,7 @@ async function refreshStatus(showOutput = true) {
           updatedAt: anonymous.updatedAt
         } : null,
         domainProxy: settings.domainProxy || null,
+        domainProxyDiagnostics: hdo.domainProxyDiagnostics || null,
         systemDomainProxy,
         hdoNetworkProbe,
         lastError

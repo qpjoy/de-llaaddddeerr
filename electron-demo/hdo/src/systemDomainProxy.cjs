@@ -16,16 +16,15 @@ function createSystemDomainProxyManager(options = {}) {
   return {
     async apply(domainProxy) {
       if (!isSupportedPlatform()) return unsupportedStatus();
-      const pac = await resolvePacSource(domainProxy);
-      if (!pac) {
-        await closeLocalPacServer();
-        return this.disable('domain-proxy-disabled');
-      }
-
       const existing = readState(statePath);
       const previous = existing && existing.applied === true && existing.platform === process.platform
         ? existing.previous
         : await capturePlatformState();
+      const pac = await resolvePacSource(domainProxy, previous);
+      if (!pac) {
+        await closeLocalPacServer();
+        return this.disable('domain-proxy-disabled');
+      }
 
       await applyPlatformPac(pac.pacUrl, previous);
       if (pac.usesLocalPac !== true) await closeLocalPacServer();
@@ -148,7 +147,7 @@ function createSystemDomainProxyManager(options = {}) {
     }
   };
 
-  async function resolvePacSource(domainProxy) {
+  async function resolvePacSource(domainProxy, previous) {
     if (!domainProxy || domainProxy.enabled !== true) return null;
     const domains = stringArray(domainProxy.domains);
     const pacUrl = stringValue(domainProxy.pacUrl);
@@ -158,15 +157,16 @@ function createSystemDomainProxyManager(options = {}) {
     const proxy = normalizeProxyAddress(domainProxy.proxy);
     if (!proxy || domains.length === 0) return null;
     return {
-      pacUrl: await ensureLocalPacServer(proxy, domains),
+      pacUrl: await ensureLocalPacServer(proxy, domains, previous),
       domains,
       proxy,
       usesLocalPac: true
     };
   }
 
-  async function ensureLocalPacServer(proxy, domains) {
-    const key = JSON.stringify({ proxy, domains });
+  async function ensureLocalPacServer(proxy, domains, previous) {
+    const fallbackProxy = fallbackProxyForPac(previous);
+    const key = JSON.stringify({ proxy, domains, fallbackProxy });
     if (localPacServer && localPacPort && localPacKey === key) {
       return `http://127.0.0.1:${localPacPort}/proxy.pac`;
     }
@@ -182,7 +182,7 @@ function createSystemDomainProxyManager(options = {}) {
         res.end();
         return;
       }
-      const body = req.method === 'HEAD' ? '' : renderPacScript(proxy, domains);
+      const body = req.method === 'HEAD' ? '' : renderPacScript(proxy, domains, fallbackProxy);
       res.writeHead(200, {
         'Content-Type': 'application/x-ns-proxy-autoconfig; charset=utf-8',
         'Cache-Control': 'no-store',
@@ -592,7 +592,37 @@ function normalizeProxyAddress(value) {
   return `${match[1]}:${port}`;
 }
 
-function renderPacScript(proxy, domains) {
+function fallbackProxyForPac(previous) {
+  if (process.platform !== 'win32') return null;
+  const enabled = previous && previous.proxyEnable;
+  if (!enabled || enabled.exists !== true || String(enabled.value || '').trim() === '0') return null;
+  const server = previous && previous.proxyServer;
+  if (!server || server.exists !== true || !server.value) return null;
+  return normalizeWindowsProxyServer(server.value);
+}
+
+function normalizeWindowsProxyServer(value) {
+  const text = stringValue(value);
+  if (!text) return null;
+  if (!text.includes('=')) return normalizeProxyAddress(text);
+
+  const entries = {};
+  for (const part of text.split(';')) {
+    const [rawKey, ...rawValue] = part.split('=');
+    const key = String(rawKey || '').trim().toLowerCase();
+    const candidate = rawValue.join('=').trim();
+    if (!key || !candidate) continue;
+    entries[key] = candidate;
+  }
+
+  return normalizeProxyAddress(entries.https)
+    || normalizeProxyAddress(entries.http)
+    || normalizeProxyAddress(entries.socks)
+    || normalizeProxyAddress(Object.values(entries).find(Boolean));
+}
+
+function renderPacScript(proxy, domains, fallbackProxy) {
+  const fallback = fallbackProxy ? `PROXY ${fallbackProxy}; DIRECT` : 'DIRECT';
   return `
 function FindProxyForURL(url, host) {
   var h = String(host || '').toLowerCase();
@@ -603,7 +633,7 @@ function FindProxyForURL(url, host) {
       return 'PROXY ${proxy}';
     }
   }
-  return 'DIRECT';
+  return ${JSON.stringify(fallback)};
 }
 `;
 }

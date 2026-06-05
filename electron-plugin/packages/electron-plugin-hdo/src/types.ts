@@ -116,6 +116,7 @@ export interface HdoSnapshot {
   devices: unknown[];
   deviceTasks: unknown[];
   localPlugins: HdoLocalPluginState[];
+  domainProxyDiagnostics?: unknown | null;
   wireGuardStatus?: unknown | null;
   wireGuardDaemonStatus?: unknown | null;
   taskRunnerBusy: boolean;

@@ -24,11 +24,30 @@ interface NormalizedBinding extends HdoDomainBinding {
   targetPort: number | null;
 }
 
+interface DomainProxyEvent {
+  at: string;
+  type: string;
+  hostname?: string;
+  requestPort?: number | null;
+  targetHost?: string;
+  targetPort?: number | null;
+  protocol?: string;
+  method?: string;
+  connect?: boolean;
+  matchedDomain?: string | null;
+  error?: string;
+}
+
 export class HdoSessionDomainProxy {
   private server: Server | null = null;
   private port: number | null = null;
   private bindings: NormalizedBinding[] = [];
   private applied = false;
+  private requestCount = 0;
+  private forwardedCount = 0;
+  private failureCount = 0;
+  private pacRequestCount = 0;
+  private recentEvents: DomainProxyEvent[] = [];
 
   constructor(
     private readonly session: HdoSessionLike,
@@ -63,6 +82,28 @@ export class HdoSessionDomainProxy {
       proxy: `127.0.0.1:${this.port}`,
       pacUrl: `http://127.0.0.1:${this.port}/proxy.pac`,
       domains: this.bindings.map((binding) => binding.domain)
+    };
+  }
+
+  diagnostics(): Record<string, unknown> {
+    return {
+      enabled: this.bindings.length > 0,
+      applied: this.applied,
+      listening: Boolean(this.server && this.port),
+      proxy: this.port ? `127.0.0.1:${this.port}` : null,
+      bindings: this.bindings.map((binding) => ({
+        domain: binding.domain,
+        targetHost: binding.targetHost,
+        targetPort: binding.targetPort,
+        protocol: binding.protocol ?? null
+      })),
+      counters: {
+        requests: this.requestCount,
+        forwarded: this.forwardedCount,
+        failures: this.failureCount,
+        pacRequests: this.pacRequestCount
+      },
+      recentEvents: this.recentEvents.slice()
     };
   }
 
@@ -124,8 +165,11 @@ export class HdoSessionDomainProxy {
   private forward(client: Socket, firstChunk: Buffer): void {
     if (this.respondToPacRequest(client, firstChunk)) return;
 
+    this.requestCount += 1;
     const request = parseProxyRequest(firstChunk);
     if (!request) {
+      this.failureCount += 1;
+      this.recordEvent({ type: 'invalid-request' });
       client.destroy();
       return;
     }
@@ -133,13 +177,55 @@ export class HdoSessionDomainProxy {
     const host = binding?.targetHost ?? request.hostname;
     const port = request.port ?? binding?.targetPort ?? defaultPort(request.protocol, request.connect);
     const upstream = connect({ host, port });
+    let connected = false;
     const closeBoth = () => {
       client.destroy();
       upstream.destroy();
     };
     client.once('error', closeBoth);
-    upstream.once('error', closeBoth);
+    upstream.once('error', (err) => {
+      this.failureCount += 1;
+      this.recordEvent({
+        type: connected ? 'upstream-error' : 'connect-error',
+        hostname: request.hostname,
+        requestPort: request.port,
+        targetHost: host,
+        targetPort: port,
+        protocol: request.protocol,
+        method: request.method,
+        connect: request.connect,
+        matchedDomain: binding?.domain ?? null,
+        error: errorMessage(err)
+      });
+      if (!connected && !client.destroyed) {
+        const body = `HDO domain proxy upstream error: ${errorMessage(err)}\n`;
+        client.end([
+          'HTTP/1.1 502 Bad Gateway',
+          'Content-Type: text/plain; charset=utf-8',
+          `Content-Length: ${Buffer.byteLength(body, 'utf8')}`,
+          'Connection: close',
+          '',
+          body
+        ].join('\r\n'));
+        upstream.destroy();
+        return;
+      }
+      closeBoth();
+    });
     upstream.once('connect', () => {
+      connected = true;
+      this.forwardedCount += 1;
+      this.recordEvent({
+        type: 'connected',
+        hostname: request.hostname,
+        requestPort: request.port,
+        targetHost: host,
+        targetPort: port,
+        protocol: request.protocol,
+        method: request.method,
+        connect: request.connect,
+        matchedDomain: binding?.domain ?? null
+      });
       if (request.connect) {
         client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       } else {
@@ -154,6 +240,8 @@ export class HdoSessionDomainProxy {
     const request = parsePacRequest(buffer);
     if (!request) return false;
 
+    this.pacRequestCount += 1;
+    this.recordEvent({ type: 'pac-request', method: request.method });
     if (!this.port) {
       client.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       return true;
@@ -178,6 +266,14 @@ export class HdoSessionDomainProxy {
   private findBinding(hostname: string): NormalizedBinding | null {
     const host = hostname.toLowerCase();
     return this.bindings.find((binding) => host === binding.domain || host.endsWith(`.${binding.domain}`)) ?? null;
+  }
+
+  private recordEvent(event: Omit<DomainProxyEvent, 'at'>): void {
+    this.recentEvents.push({
+      at: new Date().toISOString(),
+      ...event
+    });
+    if (this.recentEvents.length > 30) this.recentEvents.splice(0, this.recentEvents.length - 30);
   }
 }
 
@@ -205,6 +301,7 @@ function parseProxyRequest(buffer: Buffer): {
   hostname: string;
   port: number | null;
   protocol: string;
+  method: string;
 } | null {
   const header = buffer.toString('latin1', 0, Math.min(buffer.length, 16_384));
   const [requestLine, ...lines] = header.split(/\r?\n/);
@@ -214,7 +311,7 @@ function parseProxyRequest(buffer: Buffer): {
   if (method.toUpperCase() === 'CONNECT') {
     const { host, port } = splitHostPort(target);
     if (!host) return null;
-    return { connect: true, hostname: host, port, protocol: 'https' };
+    return { connect: true, hostname: host, port, protocol: 'https', method: method.toUpperCase() };
   }
 
   let host: string | null = null;
@@ -236,7 +333,7 @@ function parseProxyRequest(buffer: Buffer): {
     host = parsed.host;
     port = parsed.port;
   }
-  return host ? { connect: false, hostname: host, port, protocol } : null;
+  return host ? { connect: false, hostname: host, port, protocol, method: method.toUpperCase() } : null;
 }
 
 function parsePacRequest(buffer: Buffer): { method: 'GET' | 'HEAD' } | null {
