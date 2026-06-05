@@ -39,6 +39,7 @@ const HDO_ID = 'qpjoy.electron-plugin-hdo';
 const UPDATE_RESTART_REQUIRED_META = 'updates.restartRequired';
 const FAST_RELAY_MODE = 'mesh-h2i';
 const CLIENT_SETTINGS_FILE = 'hdo-client-settings.json';
+const DEFAULT_SYSTEM_PAC_ENABLED = true;
 
 let mainWindow = null;
 let host = null;
@@ -46,7 +47,7 @@ let isClosing = false;
 let hdoEventUnsubscribe = null;
 let systemDomainProxy = null;
 let systemDomainProxyApplyInFlight = null;
-let systemPacEnabled = false;
+let systemPacEnabled = DEFAULT_SYSTEM_PAC_ENABLED;
 const childWindows = new Set();
 
 app.setAppUserModelId('dev.qpjoy.hdo');
@@ -562,6 +563,13 @@ function readClientSettings() {
   }
 }
 
+function readSystemPacEnabled() {
+  const settings = readClientSettings();
+  return typeof settings.systemPacEnabled === 'boolean'
+    ? settings.systemPacEnabled
+    : DEFAULT_SYSTEM_PAC_ENABLED;
+}
+
 function writeClientSettings(patch) {
   const next = {
     ...readClientSettings(),
@@ -633,7 +641,7 @@ if (gotSingleInstanceLock) {
         userDataDir: app.getPath('userData'),
         log: console
       });
-      systemPacEnabled = readClientSettings().systemPacEnabled === true;
+      systemPacEnabled = readSystemPacEnabled();
       await systemDomainProxy.restoreStale?.('app-startup').catch((err) => {
         console.warn('[hdo] failed to restore stale system domain proxy:', err);
       });

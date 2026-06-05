@@ -26,8 +26,6 @@ function createSystemDomainProxyManager(options = {}) {
         return this.disable('domain-proxy-disabled');
       }
 
-      await applyPlatformPac(pac.pacUrl, previous);
-      if (pac.usesLocalPac !== true) await closeLocalPacServer();
       const next = {
         version: STATE_VERSION,
         applied: true,
@@ -38,6 +36,15 @@ function createSystemDomainProxyManager(options = {}) {
         previous,
         updatedAt: new Date().toISOString()
       };
+      writeState(statePath, {
+        ...next,
+        pending: true,
+        updatedAt: new Date().toISOString()
+      });
+      await applyPlatformPac(pac.pacUrl, previous);
+      if (pac.usesLocalPac !== true) await closeLocalPacServer();
+      delete next.pending;
+      next.updatedAt = new Date().toISOString();
       writeState(statePath, next);
       return publicState(next, { changed: !existing || existing.pacUrl !== pac.pacUrl });
     },
