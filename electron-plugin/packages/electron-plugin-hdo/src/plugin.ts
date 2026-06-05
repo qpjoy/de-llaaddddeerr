@@ -160,6 +160,7 @@ const hdoPlugin = {
       recoverWireGuardPeer: (reason?: string | null) =>
         controller.recoverWireGuardPeer({ reason: reason || 'api', allowPrivileged: true }),
       repairWireGuardRoutes: () => controller.repairWireGuardRoutes(),
+      ensureWireGuardDnsPriority: () => controller.ensureWireGuardDnsPriority(),
       installWireGuardLaunchDaemon: () => controller.installWireGuardLaunchDaemon(),
       uninstallWireGuardLaunchDaemon: (input?: { stopTunnel?: boolean | null }) => controller.uninstallWireGuardLaunchDaemon(input),
       executePendingTasks: () => controller.executePendingTasks(),

@@ -465,8 +465,13 @@ async function safelyApplySystemDomainProxy(domainProxy, reason = 'manual') {
     };
   }
   try {
+    const applied = await systemDomainProxy.apply(domainProxy);
+    const dnsPriority = applied.applied === true
+      ? await ensureHdoDnsPriority(`system-domain-proxy-${reason}`)
+      : null;
     return {
-      ...await systemDomainProxy.apply(domainProxy),
+      ...applied,
+      dnsPriority,
       enabled: true
     };
   } catch (err) {
@@ -477,6 +482,27 @@ async function safelyApplySystemDomainProxy(domainProxy, reason = 'manual') {
       applied: false,
       platform: process.platform,
       enabled: systemPacEnabled,
+      reason,
+      error
+    };
+  }
+}
+
+async function ensureHdoDnsPriority(reason = 'manual') {
+  if (process.platform !== 'win32' || isClosing) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: process.platform !== 'win32' ? 'non-windows-platform' : 'app-closing'
+    };
+  }
+  try {
+    return await hdoCall('ensureWireGuardDnsPriority');
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    console.warn('[hdo] failed to ensure DNS priority:', { reason, error });
+    return {
+      ok: false,
       reason,
       error
     };
@@ -593,20 +619,22 @@ function normalizeTestUrl(value) {
 }
 
 async function closeAppResources() {
-  await safelyDisableSystemDomainProxy('app-quit-before-host-close');
   if (hdoEventUnsubscribe) {
     hdoEventUnsubscribe();
     hdoEventUnsubscribe = null;
   }
-  if (host) {
-    const current = host;
-    try {
-      await current.close();
-    } finally {
-      if (host === current) host = null;
+  try {
+    if (host) {
+      const current = host;
+      try {
+        await current.close();
+      } finally {
+        if (host === current) host = null;
+      }
     }
+  } finally {
+    await safelyDisableSystemDomainProxy('app-quit-after-host-close');
   }
-  await safelyDisableSystemDomainProxy('app-quit-after-host-close');
 }
 
 async function quitGracefully(exitCode = 0) {

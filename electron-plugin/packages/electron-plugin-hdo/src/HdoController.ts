@@ -1611,6 +1611,43 @@ export class HdoController {
     return payload;
   }
 
+  async ensureWireGuardDnsPriority(): Promise<Record<string, unknown>> {
+    this.ensureSettingsForCurrentSession();
+    if (process.platform !== 'win32') {
+      return {
+        ok: true,
+        skipped: true,
+        reason: 'non-windows-platform',
+        platform: process.platform
+      };
+    }
+    const peer = this.settings.wireGuardPeer;
+    const configPath = stringValue(peer?.configPath);
+    if (!configPath || !existsSync(configPath)) {
+      return {
+        ok: false,
+        skipped: true,
+        reason: 'missing-wireguard-config'
+      };
+    }
+    const runtime = resolveWireGuardConnectionRuntime({
+      installDir: join(this.ctx.userDataDir, 'bin'),
+      bundledDir: this.ctx.bundledWireGuardDir,
+      allowSystemFallback: true
+    });
+    const status = safeWireGuardStatus(runtime, configPath);
+    if (status?.active !== true) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: 'wireguard-inactive',
+        status,
+        runtime: publicWireGuardRuntime(runtime)
+      };
+    }
+    return this.ensureWindowsDnsPriorityAfterConnect(runtime, configPath);
+  }
+
   private async stopWireGuardForControlPlaneRetry(reason: string): Promise<Record<string, unknown>> {
     const peer = this.settings.wireGuardPeer;
     const configPath = stringValue(peer?.configPath);
