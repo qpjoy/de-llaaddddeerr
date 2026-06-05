@@ -600,6 +600,7 @@ export function buildWireGuardTunnelCommand(input: {
     if (!command) throw new Error(runtime.error ?? 'wireguard.exe unavailable');
     const profile = parseWireGuardProfile(configPath);
     const tunnelName = pathWin32.basename(configPath).replace(/\.[^.]+$/, '');
+    const routeLogPath = wireGuardRouteLogPath(configPath, profile.interfaceName);
     const wireGuardArgs = action === 'down'
       ? ['/uninstalltunnelservice', tunnelName]
       : ['/installtunnelservice', configPath];
@@ -610,7 +611,8 @@ export function buildWireGuardTunnelCommand(input: {
       action,
       tunnelName,
       windowsNrptRulesFromProfile(profile),
-      scriptPaths.elevated
+      scriptPaths.elevated,
+      routeLogPath
     );
     writePowerShellScriptFile(scriptPaths.elevated, scripts.elevated);
     writePowerShellScriptFile(scriptPaths.wrapper, scripts.wrapper);
@@ -2787,7 +2789,8 @@ function windowsElevatedStartProcessScripts(
   action: WireGuardTunnelAction,
   tunnelName: string,
   nrptRules: WindowsNrptRule[] = [],
-  elevatedScriptPath: string
+  elevatedScriptPath: string,
+  auditLogPath?: string | null
 ): { wrapper: string; elevated: string } {
   const serviceName = `WireGuardTunnel$${tunnelName}`;
   const serviceArg = powerShellString(serviceName);
@@ -2819,13 +2822,16 @@ function windowsElevatedStartProcessScripts(
   ];
   const elevatedLines: string[] = [
     "$ErrorActionPreference = 'Stop'",
+    ...windowsAuditPowerShellLines(auditLogPath),
+    `Write-HdoAudit ${powerShellString(`elevated start action=${action} tunnel=${tunnelName} service=${serviceName} nrptRules=${nrptRules.length}`)}`,
     ...nrptLines,
     serviceLookup
   ];
   if (action === 'up') {
     elevatedLines.push(
-      "if ($null -ne $svc -and $svc.Status -eq 'Running') { Add-HdoNrptRules; exit 0 }",
+      "if ($null -ne $svc -and $svc.Status -eq 'Running') { Write-HdoAudit 'service already running; applying NRPT rules'; Add-HdoNrptRules; exit 0 }",
       `if ($null -ne $svc) {`,
+      `  Write-HdoAudit ${powerShellString(`service exists; ensuring ${serviceName} is running`)}`,
       `  Start-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`,
       ...waitForServiceRunning(),
       '  Add-HdoNrptRules',
@@ -2833,28 +2839,35 @@ function windowsElevatedStartProcessScripts(
       '}'
     );
   } else if (action === 'down') {
+    elevatedLines.push(`Write-HdoAudit ${powerShellString(`removing NRPT rules for ${serviceName}`)}`);
     elevatedLines.push('Remove-HdoNrptRules');
     elevatedLines.push('if ($null -eq $svc) { exit 0 }');
   } else {
+    elevatedLines.push(`Write-HdoAudit ${powerShellString(`restart removing NRPT rules for ${serviceName}`)}`);
     elevatedLines.push('Remove-HdoNrptRules');
     elevatedLines.push(
       'if ($null -ne $svc) {',
+      `  Write-HdoAudit ${powerShellString(`stopping and uninstalling ${serviceName}`)}`,
       `  if ($svc.Status -ne 'Stopped') { Stop-Service -Name ${serviceArg} -Force -ErrorAction SilentlyContinue }`,
       `  ${runWireGuard(['/uninstalltunnelservice', tunnelName])}`,
+      "  Write-HdoAudit ('wireguard uninstall exitCode=' + [string]$LASTEXITCODE)",
       '  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
       ...waitForServiceAbsent(),
       '}'
     );
   }
   elevatedLines.push(
+    `Write-HdoAudit ${powerShellString(`wireguard command action=${action}`)}`,
     runWireGuard(args),
+    "Write-HdoAudit ('wireguard exitCode=' + [string]$LASTEXITCODE)",
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
     ...(action === 'down' ? waitForServiceAbsent() : waitForServiceRunning()),
     ...(action === 'down' ? [] : ['Add-HdoNrptRules']),
+    `Write-HdoAudit ${powerShellString(`elevated complete action=${action} tunnel=${tunnelName}`)}`,
     'exit 0'
   );
   return {
-    wrapper: windowsElevatedPowerShellWrapperScript(elevatedScriptPath, preflightLines),
+    wrapper: windowsElevatedPowerShellWrapperScript(elevatedScriptPath, preflightLines, auditLogPath),
     elevated: elevatedLines.join('\n')
   };
 }
@@ -2865,15 +2878,20 @@ function buildWindowsNrptRepairCommand(
   nrptRules: WindowsNrptRule[]
 ): WireGuardTunnelCommand {
   const tunnelName = pathWin32.basename(configPath).replace(/\.[^.]+$/, '');
+  const profile = parseWireGuardProfile(configPath);
+  const routeLogPath = wireGuardRouteLogPath(configPath, profile.interfaceName);
   const scriptPaths = windowsPowerShellScriptPaths(configPath, tunnelName, 'repair-dns');
   const elevated = [
     "$ErrorActionPreference = 'Stop'",
+    ...windowsAuditPowerShellLines(routeLogPath),
+    `Write-HdoAudit ${powerShellString(`repair-dns start tunnel=${tunnelName} nrptRules=${nrptRules.length}`)}`,
     ...windowsNrptPowerShellLines(nrptRules, tunnelName),
     'Add-HdoNrptRules',
+    `Write-HdoAudit ${powerShellString(`repair-dns complete tunnel=${tunnelName}`)}`,
     'exit 0'
   ].join('\n');
   writePowerShellScriptFile(scriptPaths.elevated, elevated);
-  writePowerShellScriptFile(scriptPaths.wrapper, windowsElevatedPowerShellWrapperScript(scriptPaths.elevated));
+  writePowerShellScriptFile(scriptPaths.wrapper, windowsElevatedPowerShellWrapperScript(scriptPaths.elevated, [], routeLogPath));
   const powershell = windowsPowerShellCommand();
   return {
     action: 'up',
@@ -2889,52 +2907,85 @@ function buildWindowsNrptRepairCommand(
 
 function windowsElevatedPowerShellWrapperScript(
   elevatedScriptPath: string,
-  preflightLines: string[] = []
+  preflightLines: string[] = [],
+  auditLogPath?: string | null
 ): string {
   return [
     "$ErrorActionPreference = 'Stop'",
+    ...windowsAuditPowerShellLines(auditLogPath),
+    `Write-HdoAudit ${powerShellString('wrapper start')}`,
     ...preflightLines,
     "$pwsh = Join-Path $PSHOME 'powershell.exe'",
     `$elevatedScript = ${powerShellString(elevatedScriptPath)}`,
+    "Write-HdoAudit ('wrapper powershell=' + $pwsh)",
+    "Write-HdoAudit ('wrapper elevatedScript=' + $elevatedScript)",
     `$quotedElevatedScript = '"' + $elevatedScript.Replace('"', '\\"') + '"'`,
     `$argLine = '-NoProfile -ExecutionPolicy Bypass -File ' + $quotedElevatedScript`,
+    "Write-HdoAudit ('wrapper argLine=' + $argLine)",
     `$p = Start-Process -FilePath $pwsh -ArgumentList $argLine -Verb RunAs -Wait -PassThru`,
+    "Write-HdoAudit ('wrapper elevated exitCode=' + [string]$p.ExitCode)",
     'if ($null -ne $p.ExitCode) { exit $p.ExitCode }'
   ].join('\n');
+}
+
+function windowsAuditPowerShellLines(auditLogPath?: string | null): string[] {
+  return [
+    `$hdoAuditLogPath = ${auditLogPath ? powerShellString(auditLogPath) : '$null'}`,
+    'function Write-HdoAudit {',
+    '  param([string]$Message)',
+    '  if (-not $hdoAuditLogPath) { return }',
+    '  try {',
+    '    $parent = Split-Path -Parent $hdoAuditLogPath',
+    '    if ($parent) { New-Item -ItemType Directory -Path $parent -Force -ErrorAction SilentlyContinue | Out-Null }',
+    "    Add-Content -Path $hdoAuditLogPath -Value ((Get-Date -Format o) + ' ' + $Message) -Encoding UTF8 -ErrorAction SilentlyContinue",
+    '  } catch { }',
+    '}'
+  ];
 }
 
 function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string): string[] {
   if (rules.length === 0) {
     return [
-      'function Add-HdoNrptRules { }',
-      'function Remove-HdoNrptRules { }'
+      `Write-HdoAudit ${powerShellString(`nrpt skipped tunnel=${tunnelName} rules=0`)}`,
+      "function Add-HdoNrptRules { Write-HdoAudit 'nrpt add skipped rules=0' }",
+      "function Remove-HdoNrptRules { Write-HdoAudit 'nrpt remove skipped rules=0' }"
     ];
   }
   const entries = rules.map((rule) => {
     const servers = rule.nameServers.map(powerShellString).join(',');
     return `[pscustomobject]@{ Namespace = ${powerShellString(rule.namespace)}; NameServers = @(${servers}) }`;
   });
-  const comment = `QPJoy HDO ${tunnelName}`;
+  const comment = `MX HDO / QPJoy HDO ${tunnelName}`;
   const stateFileName = `nrpt-global-${tunnelName}.json`;
   return [
     `$hdoNrptRules = @(${entries.join(', ')})`,
     `$hdoNrptComment = ${powerShellString(comment)}`,
     `$hdoNrptStateDir = Join-Path $env:ProgramData ${powerShellString('QPJoy\\HDO')}`,
     `$hdoNrptGlobalStatePath = Join-Path $hdoNrptStateDir ${powerShellString(stateFileName)}`,
+    `$hdoNrptTunnelName = ${powerShellString(tunnelName)}`,
+    "$hdoNrptEnableAttempts = @('EnableAlways', 'EnableDA', 'Enable', $true)",
+    "Write-HdoAudit ('nrpt prepared tunnel=' + $hdoNrptTunnelName + ' rules=' + [string]$hdoNrptRules.Count + ' comment=' + $hdoNrptComment)",
+    'function Format-HdoNrptGlobalForLog {',
+    '  $global = Get-DnsClientNrptGlobal -ErrorAction SilentlyContinue',
+    "  if ($null -eq $global) { return '<null>' }",
+    "  return ('QueryPolicy={0}; EnableDAForAllNetworks={1}; SecureNameQueryFallback={2}' -f [string]$global.QueryPolicy, [string]$global.EnableDAForAllNetworks, [string]$global.SecureNameQueryFallback)",
+    '}',
     'function Save-HdoNrptGlobalState {',
+    "  Write-HdoAudit ('nrpt save global before=' + (Format-HdoNrptGlobalForLog))",
     '  New-Item -ItemType Directory -Path $hdoNrptStateDir -Force -ErrorAction SilentlyContinue | Out-Null',
     '  $global = Get-DnsClientNrptGlobal -ErrorAction SilentlyContinue',
-    '  if ($null -eq $global) { return }',
+    "  if ($null -eq $global) { Write-HdoAudit 'nrpt save global skipped: no global state'; return }",
     '  $queryPolicy = [string]$global.QueryPolicy',
     '  $enableAll = [string]$global.EnableDAForAllNetworks',
     '  if (Test-Path $hdoNrptGlobalStatePath) {',
     '    $existing = Get-Content -Path $hdoNrptGlobalStatePath -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json -ErrorAction SilentlyContinue',
     '    if ($null -ne $existing) {',
     '      if ([string]$existing.QueryPolicy) { $queryPolicy = [string]$existing.QueryPolicy }',
-    '      if ([string]$existing.EnableDAForAllNetworks) { return }',
+    "      if ([string]$existing.EnableDAForAllNetworks) { Write-HdoAudit 'nrpt save global kept existing state'; return }",
     '    }',
     '  }',
     '  [pscustomobject]@{ QueryPolicy = $queryPolicy; EnableDAForAllNetworks = $enableAll } | ConvertTo-Json -Compress | Set-Content -Path $hdoNrptGlobalStatePath -Encoding UTF8 -ErrorAction SilentlyContinue',
+    "  Write-HdoAudit ('nrpt saved global state path=' + $hdoNrptGlobalStatePath + ' queryPolicy=' + $queryPolicy + ' enableAll=' + $enableAll)",
     '}',
     'function Test-HdoNrptEnableAllNetworks {',
     '  param([object]$GlobalState)',
@@ -2945,17 +2996,32 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     '  Save-HdoNrptGlobalState',
     '  $global = Get-DnsClientNrptGlobal -ErrorAction SilentlyContinue',
     "  if ($null -eq $global -or [string]$global.QueryPolicy -ne 'QueryBoth' -or -not (Test-HdoNrptEnableAllNetworks $global)) {",
-    "    Set-DnsClientNrptGlobal -QueryPolicy 'QueryBoth' -EnableDAForAllNetworks 'EnableAlways' -ErrorAction Stop | Out-Null",
+    '    $setOk = $false',
+    '    $setErrors = @()',
+    '    foreach ($enableAll in $hdoNrptEnableAttempts) {',
+    '      try {',
+    "        Set-DnsClientNrptGlobal -QueryPolicy 'QueryBoth' -EnableDAForAllNetworks $enableAll -ErrorAction Stop | Out-Null",
+    "        Write-HdoAudit ('nrpt global set ok enable=' + [string]$enableAll)",
+    '        $setOk = $true',
+    '        break',
+    '      } catch {',
+    '        $msg = ($_ | Out-String).Trim()',
+    "        $setErrors += ('enable=' + [string]$enableAll + ' error=' + $msg)",
+    "        Write-HdoAudit ('nrpt global set failed enable=' + [string]$enableAll + ' error=' + $msg)",
+    '      }',
+    '    }',
+    "    if (-not $setOk) { throw ('HDO NRPT global policy failed: ' + ($setErrors -join ' | ')) }",
     '  }',
     '  $verified = Get-DnsClientNrptGlobal -ErrorAction SilentlyContinue',
+    "  Write-HdoAudit ('nrpt global verified=' + (Format-HdoNrptGlobalForLog))",
     "  if ($null -eq $verified -or [string]$verified.QueryPolicy -ne 'QueryBoth' -or -not (Test-HdoNrptEnableAllNetworks $verified)) {",
-    "    throw 'HDO NRPT global policy is not enabled'",
+    "    throw ('HDO NRPT global policy is not enabled: ' + (Format-HdoNrptGlobalForLog))",
     '  }',
     '}',
     'function Restore-HdoNrptGlobalQueryPolicy {',
     '  if (-not (Test-Path $hdoNrptGlobalStatePath)) { return }',
     '  $otherRules = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -ne $hdoNrptComment -and $_.Comment -ne $hdoNrptComment })',
-    '  if ($otherRules.Count -gt 0) { return }',
+    "  if ($otherRules.Count -gt 0) { Write-HdoAudit ('nrpt restore skipped otherRules=' + [string]$otherRules.Count); return }",
     '  $state = Get-Content -Path $hdoNrptGlobalStatePath -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json -ErrorAction SilentlyContinue',
     '  $queryPolicy = [string]$state.QueryPolicy',
     '  $enableAllText = [string]$state.EnableDAForAllNetworks',
@@ -2970,29 +3036,52 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     '    Set-DnsClientNrptGlobal -EnableDAForAllNetworks $enableAll -ErrorAction SilentlyContinue | Out-Null',
     '  }',
     '  Remove-Item -Path $hdoNrptGlobalStatePath -Force -ErrorAction SilentlyContinue',
+    "  Write-HdoAudit ('nrpt restored global queryPolicy=' + $queryPolicy + ' enableAll=' + [string]$enableAll)",
+    '}',
+    'function Assert-HdoNrptRules {',
+    "  Write-HdoAudit ('nrpt assert global=' + (Format-HdoNrptGlobalForLog))",
+    '  $missing = @()',
+    '  foreach ($rule in $hdoNrptRules) {',
+    '    $installed = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Namespace -eq $rule.Namespace })',
+    "    Write-HdoAudit ('nrpt assert namespace=' + $rule.Namespace + ' count=' + [string]$installed.Count)",
+    '    if ($installed.Count -eq 0) { $missing += $rule.Namespace }',
+    '  }',
+    "  if ($missing.Count -gt 0) { throw ('HDO NRPT rules missing after add: ' + ($missing -join ', ')) }",
     '}',
     'function Remove-HdoNrptRules {',
     '  param([bool]$RestoreGlobal = $true)',
+    "  Write-HdoAudit ('nrpt remove start restoreGlobal=' + [string]$RestoreGlobal)",
     '  foreach ($rule in $hdoNrptRules) {',
-    '    Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Namespace -eq $rule.Namespace } | ForEach-Object {',
+    '    $matches = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Namespace -eq $rule.Namespace })',
+    "    Write-HdoAudit ('nrpt remove namespace=' + $rule.Namespace + ' matches=' + [string]$matches.Count)",
+    '    $matches | ForEach-Object {',
     '      Remove-DnsClientNrptRule -Name $_.Name -Force -ErrorAction SilentlyContinue',
     '    }',
     '  }',
     '  if ($RestoreGlobal) { Restore-HdoNrptGlobalQueryPolicy }',
     '  Clear-DnsClientCache -ErrorAction SilentlyContinue',
+    "  Write-HdoAudit ('nrpt remove complete global=' + (Format-HdoNrptGlobalForLog))",
     '}',
     'function Add-HdoNrptRules {',
+    "  Write-HdoAudit ('nrpt add start rules=' + [string]$hdoNrptRules.Count)",
     '  Enable-HdoNrptGlobalQueryPolicy',
     '  Remove-HdoNrptRules -RestoreGlobal:$false',
     '  foreach ($rule in $hdoNrptRules) {',
+    "    Write-HdoAudit ('nrpt add namespace=' + $rule.Namespace + ' servers=' + ($rule.NameServers -join ','))",
     '    try {',
     '      Add-DnsClientNrptRule -Namespace $rule.Namespace -NameServers $rule.NameServers -DisplayName $hdoNrptComment -Comment $hdoNrptComment -ErrorAction Stop | Out-Null',
+    "      Write-HdoAudit ('nrpt add ok namespace=' + $rule.Namespace + ' metadata=true')",
     '    } catch {',
+    '      $msg = ($_ | Out-String).Trim()',
+    "      Write-HdoAudit ('nrpt add metadata failed namespace=' + $rule.Namespace + ' error=' + $msg)",
     '      Add-DnsClientNrptRule -Namespace $rule.Namespace -NameServers $rule.NameServers -ErrorAction Stop | Out-Null',
+    "      Write-HdoAudit ('nrpt add ok namespace=' + $rule.Namespace + ' metadata=false')",
     '    }',
     '  }',
     '  Enable-HdoNrptGlobalQueryPolicy',
+    '  Assert-HdoNrptRules',
     '  Clear-DnsClientCache -ErrorAction SilentlyContinue',
+    "  Write-HdoAudit ('nrpt add complete global=' + (Format-HdoNrptGlobalForLog))",
     '}'
   ];
 }

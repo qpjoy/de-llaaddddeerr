@@ -393,7 +393,8 @@ async function refreshStatus(showOutput = true) {
 
     const peer = settings.wireGuardPeer || {};
     const anonymous = settings.anonymous || {};
-    const wgActive = hdo.wireGuardStatus && hdo.wireGuardStatus.active === true;
+    const wireGuardStatus = hdo.wireGuardStatus || null;
+    const wgActive = wireGuardStatus && wireGuardStatus.active === true;
     const hdoNetworkProbe = status.hdoNetworkProbe || null;
     const networkReady = wgActive && hdoNetworkProbe && hdoNetworkProbe.ok === true;
     const systemDomainProxy = status.systemDomainProxy || {};
@@ -455,6 +456,17 @@ async function refreshStatus(showOutput = true) {
         relayMode: relayModeLabel(relayModeSelect.value),
         overlayIp: peer.overlayIp || null,
         wireGuardActive: wgActive,
+        wireGuardDiagnostics: wireGuardStatus ? {
+          mode: wireGuardStatus.mode || null,
+          interfaceName: wireGuardStatus.interfaceName || null,
+          realInterfaceName: wireGuardStatus.realInterfaceName || null,
+          addresses: wireGuardStatus.addresses || [],
+          allowedIps: wireGuardStatus.allowedIps || [],
+          missingRoutes: wireGuardStatus.missingRoutes || [],
+          routeLogPath: wireGuardStatus.routeLogPath || null,
+          routeLogTail: wireGuardStatus.routeLogTail || null,
+          error: wireGuardStatus.error || null
+        } : null,
         accountConnected,
         anonymousPeer,
         anonymous: anonymous.mode === 'anonymous' ? {
