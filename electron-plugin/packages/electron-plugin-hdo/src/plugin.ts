@@ -137,6 +137,7 @@ const hdoPlugin = {
         relayMode?: 'mesh-hdi' | 'mesh-h2i' | 'mesh-h2h' | 'mesh-server' | 'mesh-service-p2p' | 'mesh-p2p' | null;
         rotate?: boolean | null;
         autoConnect?: boolean | null;
+        skipDnsRepair?: boolean | null;
       }) => controller.anonymousConnect(input),
       login: (input?: {
         serverUrl?: string | null;
@@ -150,9 +151,10 @@ const hdoPlugin = {
         relayMode?: 'mesh-hdi' | 'mesh-h2i' | 'mesh-h2h' | 'mesh-server' | 'mesh-service-p2p' | 'mesh-p2p' | null;
         rotate?: boolean | null;
         autoConnect?: boolean | null;
+        skipDnsRepair?: boolean | null;
       }) => controller.accountConnect(input),
       prepareWireGuardPeer: (input?: { rotate?: boolean | null }) => controller.prepareWireGuardPeer(input),
-      connectWireGuardPeer: (input?: { action?: 'up' | 'down' | 'restart' | null }) => controller.connectWireGuardPeer(input),
+      connectWireGuardPeer: (input?: { action?: 'up' | 'down' | 'restart' | null; skipDnsRepair?: boolean | null }) => controller.connectWireGuardPeer(input),
       applyDomainProxyFromManifest: (manifest?: Record<string, unknown> | null) =>
         controller.applyDomainProxyFromManifest(manifest),
       prepareDomainProxyFromManifest: (manifest?: Record<string, unknown> | null) =>

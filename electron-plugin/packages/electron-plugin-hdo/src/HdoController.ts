@@ -46,6 +46,7 @@ type WireGuardPeerConnectInput = {
   action?: 'up' | 'down' | 'restart' | null;
   skipIfActive?: boolean | null;
   fallbackToAppManaged?: boolean | null;
+  skipDnsRepair?: boolean | null;
 };
 type WireGuardConnectionRuntime = ReturnType<typeof resolveWireGuardConnectionRuntime>;
 type HdoEventListener = (event: Record<string, unknown>) => void;
@@ -490,6 +491,7 @@ export class HdoController {
     relayMode?: HdoRelayMode | 'mesh-server' | 'mesh-service-p2p' | 'mesh-p2p' | null;
     rotate?: boolean | null;
     autoConnect?: boolean | null;
+    skipDnsRepair?: boolean | null;
   } = {}): Promise<Record<string, unknown>> {
     const baseUrl = normalizeBaseUrl(input.serverUrl);
     const relayMode =
@@ -731,7 +733,8 @@ export class HdoController {
       connected = await this.connectWireGuardPeer({
         action: 'restart',
         skipIfActive: false,
-        fallbackToAppManaged: false
+        fallbackToAppManaged: false,
+        skipDnsRepair: input.skipDnsRepair === true
       }).catch((err) => ({
         ok: false,
         error: errorMessage(err)
@@ -833,6 +836,7 @@ export class HdoController {
     relayMode?: HdoRelayMode | 'mesh-server' | 'mesh-service-p2p' | 'mesh-p2p' | null;
     rotate?: boolean | null;
     autoConnect?: boolean | null;
+    skipDnsRepair?: boolean | null;
   } = {}): Promise<Record<string, unknown>> {
     const baseUrl = normalizeBaseUrl(input.serverUrl);
     const relayMode =
@@ -914,7 +918,8 @@ export class HdoController {
         connected = await this.connectWireGuardPeer({
           action: 'restart',
           skipIfActive: false,
-          fallbackToAppManaged: false
+          fallbackToAppManaged: false,
+          skipDnsRepair: input.skipDnsRepair === true
         }).catch((err) => ({
           ok: false,
           error: errorMessage(err)
@@ -1234,7 +1239,7 @@ export class HdoController {
     const result = runtime.platform === 'darwin'
       ? await this.connectWireGuardPeerDarwin(action, runtime, configPath, input)
       : (runtime.platform === 'win32'
-          ? await this.connectWireGuardPeerWindows(action, runtime, configPath)
+          ? await this.connectWireGuardPeerWindows(action, runtime, configPath, input)
           : await this.connectWireGuardPeerWgQuick(action, runtime, configPath));
     this.emitEvent('wireguard-status-changed', {
       action,
@@ -1351,7 +1356,8 @@ export class HdoController {
   private async connectWireGuardPeerWindows(
     action: WireGuardPeerAction,
     runtime: WireGuardConnectionRuntime,
-    configPath: string
+    configPath: string,
+    input: WireGuardPeerConnectInput = {}
   ): Promise<Record<string, unknown>> {
     const result = await setWireGuardTunnelState({
       runtime,
@@ -1362,7 +1368,7 @@ export class HdoController {
       this.rememberWireGuardDesiredActive(action !== 'down');
       this.reportPresenceInBackground(action === 'down' ? 'offline' : 'online');
     }
-    const dnsRepair = result.ok && action !== 'down'
+    const dnsRepair = result.ok && action !== 'down' && input.skipDnsRepair !== true
       ? await this.ensureWindowsDnsPriorityAfterConnect(runtime, configPath)
       : null;
     return {

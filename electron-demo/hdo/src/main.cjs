@@ -783,7 +783,8 @@ if (gotSingleInstanceLock) {
           ...(payload && typeof payload === 'object' ? payload : {}),
           relayMode: FAST_RELAY_MODE,
           appId: 'qpjoy-hdo',
-          deviceLabel: 'MX HDO'
+          deviceLabel: 'MX HDO',
+          skipDnsRepair: systemPacEnabled === true
         });
         const autoConnect = !payload || typeof payload !== 'object' || payload.autoConnect !== false;
         if (result && typeof result === 'object' && result.ok !== false && autoConnect) {
@@ -802,7 +803,8 @@ if (gotSingleInstanceLock) {
           relayMode: FAST_RELAY_MODE,
           appId: 'qpjoy-hdo',
           deviceLabel: 'MX HDO',
-          autoConnect: true
+          autoConnect: true,
+          skipDnsRepair: systemPacEnabled === true
         });
         if (result && typeof result === 'object' && result.ok !== false) {
           return {
@@ -818,7 +820,8 @@ if (gotSingleInstanceLock) {
         const accountSwitch = await accountNetworkSwitchHint();
         const result = await hdoCall('accountConnect', {
           ...(payload && typeof payload === 'object' ? payload : {}),
-          relayMode: FAST_RELAY_MODE
+          relayMode: FAST_RELAY_MODE,
+          skipDnsRepair: systemPacEnabled === true
         });
         const autoConnect = !payload || typeof payload !== 'object' || payload.autoConnect !== false;
         if (result && typeof result === 'object' && result.ok !== false && autoConnect) {
