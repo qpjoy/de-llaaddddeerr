@@ -656,7 +656,7 @@ export class HdoController {
           'manifest 中缺少 domestic WireGuard 公钥或 endpoint；请在服务器 HDO 管理页给 domestic 节点 metadata.wireGuard 填入 publicKey/listenPort。';
       } else {
         const directPeers = directPeersFromManifest(manifest, overlayIp);
-        const clientDirectPeers = clientDirectPeersForPlatform(relayMode, directPeers);
+        const clientDirectPeers = clientDirectPeersForPlatform(relayMode, directPeers, manifest, overlayIp);
         h2iDirectCandidateIps = directPeerOverlayIps(clientDirectPeers);
         dnsServers = wireGuardDnsServersForPlatform(manifest);
         dnsDomains = wireGuardDnsDomainsForPlatform(manifest);
@@ -847,11 +847,27 @@ export class HdoController {
     const identifier = stringValue(input.identifier);
     const password = stringValue(input.password);
     let auth: Record<string, unknown> | null = null;
+    let controlPlaneRetry: Record<string, unknown> | null = null;
+    const retryAfterWireGuardDown = async (err: unknown, reason: string): Promise<boolean> => {
+      if (controlPlaneRetry || !isControlPlaneNetworkError(err)) return false;
+      controlPlaneRetry = await this.stopWireGuardForControlPlaneRetry(reason).catch((stopErr) => ({
+        ok: false,
+        reason,
+        error: errorMessage(stopErr)
+      }));
+      return true;
+    };
+
     if (identifier || password) {
       if (!identifier || !password) {
         throw new Error('账号和密码必须一起填写，或先在插件市场登录');
       }
-      auth = await this.login({ serverUrl: baseUrl, identifier, password });
+      try {
+        auth = await this.login({ serverUrl: baseUrl, identifier, password });
+      } catch (err) {
+        if (!(await retryAfterWireGuardDown(err, 'account-login-fetch-failed'))) throw err;
+        auth = await this.login({ serverUrl: baseUrl, identifier, password });
+      }
     } else {
       this.ensureSettingsForCurrentSession();
     }
@@ -867,9 +883,17 @@ export class HdoController {
       anonymous: null,
       deviceId: wasAnonymousPeer ? null : this.settings.deviceId
     });
-    const prepared = await this.prepareWireGuardPeer({
-      rotate: input.rotate === true || wasAnonymousPeer
-    });
+    let prepared: Record<string, unknown>;
+    try {
+      prepared = await this.prepareWireGuardPeer({
+        rotate: input.rotate === true || wasAnonymousPeer
+      });
+    } catch (err) {
+      if (!(await retryAfterWireGuardDown(err, 'account-prepare-fetch-failed'))) throw err;
+      prepared = await this.prepareWireGuardPeer({
+        rotate: input.rotate === true || wasAnonymousPeer
+      });
+    }
     const preparedRow = plainObject(prepared);
     this.rememberNetworkLease('account');
     const manifest = plainObject(preparedRow?.manifest);
@@ -931,7 +955,8 @@ export class HdoController {
       subscription,
       connected,
       wireGuardStatus,
-      h2iDirectReady
+      h2iDirectReady,
+      controlPlaneRetry
     };
   }
 
@@ -1070,7 +1095,7 @@ export class HdoController {
       } else {
         const activeRelayMode = normalizeRelayMode(this.settings.relayMode);
         const directPeers = directPeersFromManifest(manifest, overlayIp);
-        const clientDirectPeers = clientDirectPeersForPlatform(activeRelayMode, directPeers);
+        const clientDirectPeers = clientDirectPeersForPlatform(activeRelayMode, directPeers, manifest, overlayIp);
         h2iDirectCandidateIps = directPeerOverlayIps(clientDirectPeers);
         dnsServers = wireGuardDnsServersForPlatform(manifest);
         dnsDomains = wireGuardDnsDomainsForPlatform(manifest);
@@ -1525,6 +1550,29 @@ export class HdoController {
       message: stringValue(payload.message)
     });
     return payload;
+  }
+
+  private async stopWireGuardForControlPlaneRetry(reason: string): Promise<Record<string, unknown>> {
+    const peer = this.settings.wireGuardPeer;
+    const configPath = stringValue(peer?.configPath);
+    if (!configPath || !existsSync(configPath)) {
+      return { ok: true, skipped: true, reason: 'missing-wireguard-config', recoveryReason: reason };
+    }
+    const status = this.wireGuardStatus();
+    if (status?.active !== true) {
+      return { ok: true, skipped: true, reason: 'wireguard-inactive', recoveryReason: reason, status };
+    }
+    this.ctx.log.warn('stopping HDO WireGuard before retrying control-plane request', {
+      reason,
+      interfaceName: stringValue(status.interfaceName),
+      overlayIp: stringValue(peer?.overlayIp)
+    });
+    const stopped = await this.connectWireGuardPeer({ action: 'down' });
+    return {
+      ...stopped,
+      recoveryReason: reason,
+      statusBeforeStop: status
+    };
   }
 
   async applyDomainProxyFromManifest(manifestInput?: Record<string, unknown> | null): Promise<Record<string, unknown>> {
@@ -2383,6 +2431,20 @@ function isDeviceOwnershipError(err: unknown): boolean {
   return errorMessage(err).toLowerCase().includes('device id already belongs to another user');
 }
 
+function isControlPlaneNetworkError(err: unknown): boolean {
+  const text = errorMessage(err).toLowerCase();
+  return (
+    text.includes('fetch failed') ||
+    text.includes('network') ||
+    text.includes('enotfound') ||
+    text.includes('eai_again') ||
+    text.includes('enetunreach') ||
+    text.includes('ehostunreach') ||
+    text.includes('etimedout') ||
+    text.includes('econnreset')
+  );
+}
+
 function isAnonymousDeviceId(value: unknown): boolean {
   return stringValue(value)?.startsWith('hdo-anon-') === true;
 }
@@ -2729,13 +2791,25 @@ function directPeerOverlayIps(directPeers: HdoClientDirectPeer[]): string[] {
 
 function clientDirectPeersForPlatform(
   relayMode: HdoRelayMode,
-  directPeers: HdoClientDirectPeer[]
+  directPeers: HdoClientDirectPeer[],
+  manifest: Record<string, unknown>,
+  ownOverlayIp: string | null
 ): HdoClientDirectPeer[] {
   if (relayMode === 'mesh-hdi') return [];
-  if (process.platform === 'win32' && relayMode === 'mesh-h2i') {
+  if (relayMode === 'mesh-h2i') {
+    if (isOwnOverlayServiceTarget(manifest, ownOverlayIp)) return directPeers;
     return directPeers.filter((peer) => Boolean(peer.endpoint));
   }
   return directPeers;
+}
+
+function isOwnOverlayServiceTarget(manifest: Record<string, unknown>, ownOverlayIp: string | null): boolean {
+  const ownIp = normalizeOverlayIp(ownOverlayIp);
+  if (!ownIp) return false;
+  return arrayField(manifest.services).some((item) => {
+    const service = plainObject(item);
+    return normalizeOverlayIp(service?.targetHost) === ownIp;
+  });
 }
 
 function windowsH2iDirectPeerAllowedIps(
