@@ -781,6 +781,47 @@ export async function repairWireGuardTunnelRoutes(input: {
       message: input.runtime.error ?? 'WireGuard runtime unavailable'
     };
   }
+  if (input.runtime.platform === 'win32') {
+    const nrptRules = windowsNrptRulesFromProfile(profile);
+    if (nrptRules.length === 0) {
+      return {
+        ...baseResult,
+        ok: false,
+        message: '当前 WireGuard 配置没有 HDO split DNS 规则。'
+      };
+    }
+    const serviceState = readWindowsTunnelServiceState(profile.interfaceName);
+    if (serviceState !== 'RUNNING') {
+      return {
+        ...baseResult,
+        ok: false,
+        message: 'WireGuard 未运行，请先连接 HDO 网络。'
+      };
+    }
+    const command = buildWindowsNrptRepairCommand(input.runtime, input.configPath, nrptRules);
+    try {
+      const result = await execFileAsync(command.command, command.args, {
+        env: command.env ? { ...process.env, ...command.env } : process.env
+      });
+      return {
+        ...baseResult,
+        ok: true,
+        command: command.displayCommand,
+        routeLogTail: readTextTail(baseResult.routeLogPath),
+        stdout: result.stdout,
+        stderr: result.stderr,
+        message: '已修复 HDO split DNS 优先级。'
+      };
+    } catch (err) {
+      return {
+        ...baseResult,
+        ok: false,
+        command: command.displayCommand,
+        routeLogTail: readTextTail(baseResult.routeLogPath),
+        message: wireGuardCommandErrorMessage(command, err)
+      };
+    }
+  }
   if (input.runtime.platform !== 'darwin' || input.runtime.method !== 'darwin-userspace') {
     return {
       ...baseResult,
@@ -2812,7 +2853,45 @@ function windowsElevatedStartProcessScripts(
     ...(action === 'down' ? [] : ['Add-HdoNrptRules']),
     'exit 0'
   );
-  const wrapperLines = [
+  return {
+    wrapper: windowsElevatedPowerShellWrapperScript(elevatedScriptPath, preflightLines),
+    elevated: elevatedLines.join('\n')
+  };
+}
+
+function buildWindowsNrptRepairCommand(
+  runtime: WireGuardConnectionRuntimeStatus,
+  configPath: string,
+  nrptRules: WindowsNrptRule[]
+): WireGuardTunnelCommand {
+  const tunnelName = pathWin32.basename(configPath).replace(/\.[^.]+$/, '');
+  const scriptPaths = windowsPowerShellScriptPaths(configPath, tunnelName, 'repair-dns');
+  const elevated = [
+    "$ErrorActionPreference = 'Stop'",
+    ...windowsNrptPowerShellLines(nrptRules, tunnelName),
+    'Add-HdoNrptRules',
+    'exit 0'
+  ].join('\n');
+  writePowerShellScriptFile(scriptPaths.elevated, elevated);
+  writePowerShellScriptFile(scriptPaths.wrapper, windowsElevatedPowerShellWrapperScript(scriptPaths.elevated));
+  const powershell = windowsPowerShellCommand();
+  return {
+    action: 'up',
+    platform: runtime.platform,
+    configPath,
+    command: powershell,
+    args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPaths.wrapper],
+    displayCommand: `${powershell} -NoProfile -ExecutionPolicy Bypass -File <hdo-nrpt-repair-wrapper.ps1>`,
+    needsAdmin: true,
+    runtime
+  };
+}
+
+function windowsElevatedPowerShellWrapperScript(
+  elevatedScriptPath: string,
+  preflightLines: string[] = []
+): string {
+  return [
     "$ErrorActionPreference = 'Stop'",
     ...preflightLines,
     "$pwsh = Join-Path $PSHOME 'powershell.exe'",
@@ -2821,11 +2900,7 @@ function windowsElevatedStartProcessScripts(
     `$argLine = '-NoProfile -ExecutionPolicy Bypass -File ' + $quotedElevatedScript`,
     `$p = Start-Process -FilePath $pwsh -ArgumentList $argLine -Verb RunAs -Wait -PassThru`,
     'if ($null -ne $p.ExitCode) { exit $p.ExitCode }'
-  ];
-  return {
-    wrapper: wrapperLines.join('\n'),
-    elevated: elevatedLines.join('\n')
-  };
+  ].join('\n');
 }
 
 function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string): string[] {
@@ -2848,16 +2923,33 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     `$hdoNrptGlobalStatePath = Join-Path $hdoNrptStateDir ${powerShellString(stateFileName)}`,
     'function Save-HdoNrptGlobalState {',
     '  New-Item -ItemType Directory -Path $hdoNrptStateDir -Force -ErrorAction SilentlyContinue | Out-Null',
-    '  if (Test-Path $hdoNrptGlobalStatePath) { return }',
     '  $global = Get-DnsClientNrptGlobal -ErrorAction SilentlyContinue',
     '  if ($null -eq $global) { return }',
-    '  [pscustomobject]@{ QueryPolicy = [string]$global.QueryPolicy } | ConvertTo-Json -Compress | Set-Content -Path $hdoNrptGlobalStatePath -Encoding UTF8 -ErrorAction SilentlyContinue',
+    '  $queryPolicy = [string]$global.QueryPolicy',
+    '  $enableAll = [string]$global.EnableDAForAllNetworks',
+    '  if (Test-Path $hdoNrptGlobalStatePath) {',
+    '    $existing = Get-Content -Path $hdoNrptGlobalStatePath -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json -ErrorAction SilentlyContinue',
+    '    if ($null -ne $existing) {',
+    '      if ([string]$existing.QueryPolicy) { $queryPolicy = [string]$existing.QueryPolicy }',
+    '      if ([string]$existing.EnableDAForAllNetworks) { return }',
+    '    }',
+    '  }',
+    '  [pscustomobject]@{ QueryPolicy = $queryPolicy; EnableDAForAllNetworks = $enableAll } | ConvertTo-Json -Compress | Set-Content -Path $hdoNrptGlobalStatePath -Encoding UTF8 -ErrorAction SilentlyContinue',
+    '}',
+    'function Test-HdoNrptEnableAllNetworks {',
+    '  param([object]$GlobalState)',
+    '  $value = [string]$GlobalState.EnableDAForAllNetworks',
+    "  return $value -match '^(True|Enable|Enabled)$'",
     '}',
     'function Enable-HdoNrptGlobalQueryPolicy {',
     '  Save-HdoNrptGlobalState',
     '  $global = Get-DnsClientNrptGlobal -ErrorAction SilentlyContinue',
-    "  if ($null -eq $global -or [string]$global.QueryPolicy -ne 'QueryBoth') {",
-    "    Set-DnsClientNrptGlobal -QueryPolicy 'QueryBoth' -ErrorAction Stop | Out-Null",
+    "  if ($null -eq $global -or [string]$global.QueryPolicy -ne 'QueryBoth' -or -not (Test-HdoNrptEnableAllNetworks $global)) {",
+    "    Set-DnsClientNrptGlobal -QueryPolicy 'QueryBoth' -EnableDAForAllNetworks $true -ErrorAction Stop | Out-Null",
+    '  }',
+    '  $verified = Get-DnsClientNrptGlobal -ErrorAction SilentlyContinue',
+    "  if ($null -eq $verified -or [string]$verified.QueryPolicy -ne 'QueryBoth' -or -not (Test-HdoNrptEnableAllNetworks $verified)) {",
+    "    throw 'HDO NRPT global policy is not enabled'",
     '  }',
     '}',
     'function Restore-HdoNrptGlobalQueryPolicy {',
@@ -2866,8 +2958,15 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     '  if ($otherRules.Count -gt 0) { return }',
     '  $state = Get-Content -Path $hdoNrptGlobalStatePath -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json -ErrorAction SilentlyContinue',
     '  $queryPolicy = [string]$state.QueryPolicy',
+    '  $enableAll = $null',
+    '  $enableAllText = [string]$state.EnableDAForAllNetworks',
+    "  if ($enableAllText -match '^(True|Enable|Enabled)$') { $enableAll = $true }",
+    "  if ($enableAllText -match '^(False|Disable|Disabled)$') { $enableAll = $false }",
     "  if (@('Disable', 'QueryIPv6Only', 'QueryBoth') -contains $queryPolicy) {",
     '    Set-DnsClientNrptGlobal -QueryPolicy $queryPolicy -ErrorAction SilentlyContinue | Out-Null',
+    '  }',
+    '  if ($null -ne $enableAll) {',
+    '    Set-DnsClientNrptGlobal -EnableDAForAllNetworks $enableAll -ErrorAction SilentlyContinue | Out-Null',
     '  }',
     '  Remove-Item -Path $hdoNrptGlobalStatePath -Force -ErrorAction SilentlyContinue',
     '}',
@@ -2891,6 +2990,7 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     '      Add-DnsClientNrptRule -Namespace $rule.Namespace -NameServers $rule.NameServers -ErrorAction Stop | Out-Null',
     '    }',
     '  }',
+    '  Enable-HdoNrptGlobalQueryPolicy',
     '  Clear-DnsClientCache -ErrorAction SilentlyContinue',
     '}'
   ];
@@ -2899,7 +2999,7 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
 function windowsPowerShellScriptPaths(
   configPath: string,
   tunnelName: string,
-  action: WireGuardTunnelAction
+  action: WireGuardTunnelAction | 'repair-dns'
 ): { wrapper: string; elevated: string } {
   const scriptDir = join(dirname(configPath), 'scripts');
   const safeName = tunnelName.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 48) || 'hdo-client';
