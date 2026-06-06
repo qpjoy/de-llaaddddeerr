@@ -1,0 +1,79 @@
+# MX Launcher
+
+MX Launcher is the full-stack Launcher solution for MX products. It includes
+the desktop client, server/control plane, product catalog, configuration center,
+release/deployment operations, site profiles, admin console plans, and offline
+delivery kits. Launcher Network owns HDI/H2I connectivity, and H2O is the first
+built-in AppCenter app in this ecosystem.
+
+MX Launcher owns:
+
+- `desktop/` - signed, unelevated Electron desktop shell and product market UI;
+- `server/` - MX Launcher Server control-plane API for Internal, Domestic, and
+  Oversea site profiles;
+- `desktop/products/` - desktop product manifests and install/config/resource
+  contracts;
+- `desktop/src/` - desktop catalog, config, service, and package contracts;
+- `desktop/native/` - privileged launcher/service binaries once implemented;
+- `docs/` - delivery, backend, multi-site, and operations architecture;
+- future `admin/`, `deploy/`, `kits/`, `migrations/`, and `site-agent/`
+  directories under this same project boundary.
+
+The older `electron-server` remains a compatibility/current-production system
+while this project grows into the complete Launcher backend and delivery
+platform. New Launcher solution design and implementation should happen here.
+
+## Layout
+
+- `desktop/` - complete Electron desktop app packaged by electron-builder.
+- `server/` - server/backend package for MX Launcher control plane.
+- `desktop/products/hdo/product.json` - product manifest for HDO.
+- `desktop/src/catalog.ts` - multi-product catalog helpers.
+- `desktop/src/config/` - product config registry helpers.
+- `desktop/src/contracts/mx.ts` - platform-level product and config contracts.
+- `desktop/src/contracts/hdo.ts` - HDO-compatible launcher API types.
+- `desktop/src/launcher/` - launcher install/update decision model.
+- `desktop/src/service/` - native service IPC contract.
+- `desktop/src/security/` - package manifest contracts.
+- `desktop/scripts/` - desktop packaging checks, signing, and verification.
+- `scripts/manage.sh` - solution-level management entry.
+
+## Documents
+
+- `docs/00-delivery-plan.md` - executable implementation phases.
+- `docs/01-windows-uac-service-model.md` - UAC, service, signing, and update
+  model.
+- `docs/02-backend-contract.md` - backend contract and HDO compatibility policy.
+- `docs/03-macos-signing-notarization.md` - macOS signing, notarization, and
+  DMG delivery policy.
+- `docs/04-product-and-config-contract.md` - platform product and config
+  contract.
+- `docs/05-hdo-multi-site-platform-architecture.md` - Launcher Network / HDO
+  multi-site platform architecture for Internal, Domestic, Oversea, and H
+  endpoints.
+- `docs/06-server-shadow-control-plane.md` - MX Launcher Server shadow control
+  plane.
+- `docs/07-end-to-end-delivery-blueprint.md` - complete D/I/O/H delivery
+  blueprint, migration, operations, admin, and sales kit plan.
+- `docs/08-cdtr-platform-lessons.md` - useful CDTR/DRTC platform lessons folded
+  into MX Launcher.
+- `docs/09-observable-automation-test-platform.md` - observable automation,
+  online E2E, synthetic probes, release gates, and HDOI test-center design.
+- `docs/10-mx-3ks-appcenter-launcher-network-h2o-architecture.md` - MX-3ks
+  platform, AppCenter protocol, Launcher Network, H2O, Domestic minimization,
+  and SDK gateway architecture.
+- `docs/11-k8s-deployment-runbook.md` - K8s deployment order, Docker Compose
+  concept mapping, migration Job, and Admin action model.
+- `docs/12-local-ops-manage-guide.md` - beginner-friendly local operations
+  guide for `scripts/manage.sh`, Compose shadow, and K8s shadow.
+
+## Local Checks
+
+```bash
+bash electron-dock/mx-launcher/scripts/manage.sh check
+pnpm --dir electron-dock/mx-launcher/desktop check
+pnpm --dir electron-dock/mx-launcher/server typecheck
+```
+
+The package is intentionally standalone until the root workspace decides whether
+`electron-dock/*` should join a shared pnpm workspace.

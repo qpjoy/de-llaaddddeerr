@@ -1,0 +1,53 @@
+appId: dev.qpjoy.mx-launcher
+productName: MX Launcher
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+asar: true
+directories:
+  output: dist/electron
+files:
+  - index.html
+  - main.cjs
+  - preload.cjs
+  - renderer.js
+  - styles.css
+  - package.json
+extraResources:
+  - from: products
+    to: products
+    filter:
+      - "**/*"
+  - from: native
+    to: native
+    filter:
+      - "**/*"
+afterPack: scripts/check-package-contract.mjs
+afterSign: scripts/after-sign.mjs
+win:
+  target:
+    - target: dir
+      arch:
+        - x64
+    - target: zip
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  executableName: MX Launcher
+  requestedExecutionLevel: asInvoker
+  signAndEditExecutable: true
+mac:
+  target:
+    - dmg
+    - zip
+  category: public.app-category.business
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  notarize: true
+dmg:
+  sign: true
+linux:
+  target:
+    - dir

@@ -45,3 +45,5 @@ electron-demo/**/dist/
 electron-demo/**/*.log
 electron-demo/**/.env
 !electron-demo/**/.env.example
+
+deploy-demo/

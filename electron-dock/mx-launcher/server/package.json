@@ -1,0 +1,31 @@
+{
+  "name": "@qpjoy/mx-launcher-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MX Launcher server control-plane API for site profiles, config snapshots, audit, release, and runner orchestration.",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "migrate:up": "node dist/src/migrate.js",
+    "smoke:platform-kernel": "pnpm run build && node dist/scripts/platform-kernel-smoke.js",
+    "smoke:http": "node scripts/http-smoke.mjs"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.1.19",
+    "@nestjs/core": "^11.1.19",
+    "@nestjs/platform-express": "^11.1.19",
+    "pg": "^8.16.3",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "typeorm": "^0.3.28"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

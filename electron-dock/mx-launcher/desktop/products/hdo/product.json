@@ -1,0 +1,52 @@
+{
+  "id": "hdo",
+  "name": "HDO",
+  "legacyProductId": "hdo",
+  "displayName": "HDO",
+  "description": "MX Launcher-managed HDO desktop product compatible with the existing HDO backend APIs.",
+  "category": "network",
+  "channels": ["stable", "beta", "internal"],
+  "platforms": ["darwin", "win32"],
+  "capabilities": ["network.mesh", "wireguard", "dns", "route", "employee-login", "visitor-access"],
+  "backend": {
+    "mxLauncherAdminApi": "/api/v1/mx-launcher/admin/products/hdo",
+    "legacyApiBase": "/api/v1/hdo",
+    "configApi": "/api/v1/mx-launcher/admin/products/hdo/config"
+  },
+  "artifacts": {
+    "resourcesDirectory": "products/hdo",
+    "serviceProfile": "hdo-network"
+  },
+  "config": [
+    {
+      "key": "serverBaseUrl",
+      "label": "服务器地址",
+      "scope": "install",
+      "valueType": "string",
+      "required": false,
+      "defaultValue": ""
+    },
+    {
+      "key": "defaultMode",
+      "label": "默认模式",
+      "scope": "user",
+      "valueType": "string",
+      "required": true,
+      "defaultValue": "visitor"
+    },
+    {
+      "key": "relayMode",
+      "label": "中继模式",
+      "scope": "product",
+      "valueType": "string",
+      "required": true,
+      "defaultValue": "mesh-h2i"
+    }
+  ],
+  "compatibility": {
+    "bootstrapEndpoint": "/api/v1/hdo/anonymous/bootstrap",
+    "deviceRegistrationEndpoint": "/api/v1/hdo/devices/register",
+    "subscriptionManifestEndpoint": "/api/v1/hdo/subscriptions/:deviceId/manifest.json",
+    "mihomoYamlEndpoint": "/api/v1/hdo/subscriptions/:deviceId/mihomo.yaml"
+  }
+}

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src http: https:; script-src 'self'; style-src 'self';"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MX Launcher</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel">
+        <div class="title-row">
+          <div>
+            <h1>MX Launcher</h1>
+            <p>内部应用发布、安装、启动和配置管理</p>
+          </div>
+          <span id="connection-state" class="state-chip">就绪</span>
+        </div>
+
+        <section class="product-card" aria-labelledby="hdo-title">
+          <div>
+            <h2 id="hdo-title">HDO</h2>
+            <p>访客 / 员工网络连接、DNS、路由和内网服务访问</p>
+          </div>
+          <span id="hdo-status" class="product-state">未安装</span>
+          <button id="hdo-launch" class="primary-button" type="button">启动 HDO</button>
+          <button id="hdo-admin" class="secondary-button" type="button">管理 HDO</button>
+        </section>
+
+        <div class="server-row">
+          <label>
+            <span>MX 服务器</span>
+            <input id="server-input" placeholder="https://example.com" />
+          </label>
+        </div>
+
+        <div class="local-ip-row">
+          <span>平台状态：</span>
+          <strong id="platform-status">等待服务安装</strong>
+        </div>
+      </section>
+    </main>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

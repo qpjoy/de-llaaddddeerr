@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mx-internal-postgres-shadow
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-mx_internal}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-mx_internal}
+      POSTGRES_DB: ${PG_DB:-mx_internal_shadow}
+    ports:
+      - "${PG_PORT:-55432}:5432"
+    volumes:
+      - mx_internal_pgdata_shadow:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-mx_internal} -d ${PG_DB:-mx_internal_shadow}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  internal:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qpjoy/mx-launcher-server:shadow
+    container_name: mx-launcher-server-shadow
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      HOST: 0.0.0.0
+      PORT: 18090
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      MX_ENVIRONMENT: ${MX_ENVIRONMENT:-shadow}
+      MX_SITE_ID: ${MX_SITE_ID:-internal-main}
+      MX_SITE_ROLE: ${MX_SITE_ROLE:-internal}
+      MX_ENABLED_MODULES: ${MX_ENABLED_MODULES:-}
+      MX_PUBLIC_BASE_URL: ${MX_PUBLIC_BASE_URL:-https://shadow-d.example.com}
+      MX_INTERNAL_BASE_URL: ${MX_INTERNAL_BASE_URL:-https://10.70.0.2:8443}
+      INTERNAL_STORE_DRIVER: ${INTERNAL_STORE_DRIVER:-postgres}
+      DATABASE_URL: postgres://${PG_USER:-mx_internal}:${PG_PASSWORD:-mx_internal}@postgres:5432/${PG_DB:-mx_internal_shadow}
+      OBSERVABILITY_SINKS: ${OBSERVABILITY_SINKS:-[]}
+      RUNNER_DRY_RUN_DEFAULT: ${RUNNER_DRY_RUN_DEFAULT:-1}
+    ports:
+      - "${INTERNAL_PORT:-18090}:18090"
+
+volumes:
+  mx_internal_pgdata_shadow:
+    name: mx_internal_pgdata_shadow

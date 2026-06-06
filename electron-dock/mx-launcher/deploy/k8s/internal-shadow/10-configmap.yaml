@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mx-launcher-internal-config
+  namespace: mx-internal-shadow
+  labels:
+    app.kubernetes.io/name: mx-launcher-internal
+    app.kubernetes.io/part-of: mx-3ks
+data:
+  NODE_ENV: production
+  HOST: 0.0.0.0
+  PORT: "18090"
+  LOG_LEVEL: info
+  MX_ENVIRONMENT: shadow
+  MX_SITE_ID: internal-main
+  MX_SITE_ROLE: internal
+  MX_ENABLED_MODULES: iam,app-center,config-center,deploy-center,release-center,artifact-center,runner-controller,test-center,audit-center,observability,sdk-gateway,launcher-network-control,hdo-compat,dns-control,edge-sync
+  MX_PUBLIC_BASE_URL: https://shadow-d.example.com
+  MX_INTERNAL_BASE_URL: http://mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090
+  INTERNAL_STORE_DRIVER: postgres
+  OBSERVABILITY_SINKS: "[]"
+  RUNNER_DRY_RUN_DEFAULT: "1"
