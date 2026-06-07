@@ -140,6 +140,36 @@ flowchart LR
 - H 端只拿最终配置快照，不理解复杂控制面。
 - 所有跨站写入都必须幂等，有 `requestId`、`siteId`、`deviceId`、`version`。
 
+## User Center / Gateway 边界
+
+推荐采用“三层但同仓可运行”的形态：
+
+| 层 | 定位 | 对外稳定性 |
+| --- | --- | --- |
+| User Center | OAuth、JWT、token introspection、principal context、RBAC、组织和服务账号权威 | 身份协议稳定 |
+| Internal Modules | AppCenter、DNS、Release、Test、Audit、Observability 等领域服务 | 内部 API 可按领域演进 |
+| SDK Gateway | 给 Launcher、AppCenter 应用和其他系统调用的统一门面与 SDK 契约 | 对接契约最稳定 |
+
+结论：
+
+- 用户中心是认证和授权真相，不承担所有平台 API 聚合。
+- 各系统可以保留自己的内部 API，但外部系统优先接 SDK Gateway。
+- SDK Gateway 负责统一认证、限流、审计、trace、版本协商和路由聚合。
+- Launcher / AppCenter / H2O / 其他系统拿到的是 `mx-sdk` audience 的 token 或服务账号凭证。
+- 网关可以把 `/internal/v1/sdk/*` 聚合到 User Center、DNS Control、Audit、
+  Observability、Release 等内部模块。
+- Domestic 只代理或缓存网关请求，不保存用户、权限或 SDK 契约真相。
+
+当前 V0 接口：
+
+| API | 使用方 | 含义 |
+| --- | --- | --- |
+| `POST /internal/v1/user-center/token/introspect` | Internal modules | User Center 权威 token introspection |
+| `POST /internal/v1/user-center/principal/resolve` | Internal modules | 根据 token/install/user/service account 解析 principal context |
+| `GET /internal/v1/sdk/gateway/manifest` | SDK / 外部系统 | 读取统一网关能力、路由和 audience |
+| `POST /internal/v1/sdk/identity/introspect` | SDK / 外部系统 | 通过网关使用同一套 token introspection |
+| `POST /internal/v1/sdk/identity/context` | SDK / 外部系统 | 通过网关解析调用主体、绑定关系和可用路由 |
+
 ## 数据归属
 
 ### Postgres Schema 建议
@@ -294,6 +324,10 @@ flowchart LR
 - Launcher Network 从 signed snapshot 读取 split DNS 和 PAC policy。
 - 命中后台白名单的域名优先走 HDI/H2I 到 Internal CoreDNS。
 - 未命中白名单的域名走系统 DNS、系统代理、浏览器代理或 Clash/mihomo 等已有配置。
+- DNS policy 通过统一 API 暴露给 Launcher Network、H2O 和 SDK Gateway：
+  `/internal/v1/dns/*` 面向平台控制面，`/internal/v1/sdk/dns/*` 面向外部系统。
+- 命中 Internal 的域名可以选择性进入 Internal reverse proxy route，例如
+  `gateway.internal.mx` 反代到 Internal API/Gateway；反代规则仍由 Internal 管理。
 - Domestic DNS Edge 只作为可选 `dns-edge-cache`，用于 Internal 短暂不可达时的
   降级能力，不作为默认必需模块。
 - DNS 配置进入 `config.resources`，和 Launcher/AppCenter/HDI 配置一起版本化、

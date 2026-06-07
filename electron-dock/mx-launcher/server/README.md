@@ -36,6 +36,12 @@ PostgreSQL for deployable shadow checks:
 - Release update policy split between platform-critical and app-managed
   components.
 - Test Center run, step, and gate verdict.
+- User Center shadow contract for token introspection, principal context, RBAC
+  scopes, and service accounts.
+- SDK Gateway manifest that exposes the stable integration surface for peer
+  systems while internal modules keep their own APIs.
+- Split DNS policy with Internal CoreDNS routing, system/proxy fallback, SDK
+  entrypoints, and optional Internal reverse proxy routes.
 
 Checks:
 
@@ -50,8 +56,10 @@ For local HTTP checks:
 HOST=127.0.0.1 pnpm start
 ```
 
-Then call `/healthz`, `/internal/v1/app-center/apps`, or
-`/internal/v1/platform-kernel/smoke`.
+Then call `/healthz`, `/internal/v1/app-center/apps`,
+`/internal/v1/sdk/gateway/manifest`,
+`/internal/v1/sdk/identity/introspect`, `/internal/v1/dns/policies`,
+`/internal/v1/sdk/dns/evaluate`, or `/internal/v1/platform-kernel/smoke`.
 
 ## Shadow Docker Compose
 
@@ -70,7 +78,9 @@ bash ../scripts/manage.sh shadow down
 - `postgres`: a local PostgreSQL 16 instance for the future durable store.
 - `internal`: the NestJS Internal API image, exposed on `127.0.0.1:18090`.
 
-The current smoke checks `/healthz`, `/internal/v1/app-center/apps`, and
+The current smoke checks `/healthz`, `/internal/v1/app-center/apps`,
+`/internal/v1/sdk/gateway/manifest`, `/internal/v1/sdk/identity/introspect`,
+`/internal/v1/dns/policies`, `/internal/v1/sdk/dns/evaluate`, and
 `/internal/v1/platform-kernel/smoke`.
 
 ## Data and Migrations

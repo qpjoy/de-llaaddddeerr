@@ -758,6 +758,10 @@ MX-3ks 是 Internal K8s 为核心的整套平台能力。Domestic 和 Oversea �
 - Observability / Audit: logs、metrics、traces、告警和不可变审计。
 - SDK Gateway: 给同台或内网其他系统调用统一账号、权限、日志、发布等平台能力。
 
+集成原则：User Center 只做身份和权限权威；各平台模块保留 Internal API；SDK
+Gateway 聚合并稳定暴露 `/internal/v1/sdk/*`，给 Launcher、AppCenter 应用和其他系统
+作为统一调用面。
+
 ## 验收标准
 
 服务端：

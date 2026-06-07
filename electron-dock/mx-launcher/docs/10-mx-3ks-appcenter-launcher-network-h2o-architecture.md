@@ -243,6 +243,17 @@ CoreDNS authority 放 Internal K8s。H 端运行时由 Launcher Network 执行 s
 | DNS Policy | Internal Config Center | 下发 split DNS 白名单、fallback、优先级和版本 |
 | DNS Runtime | Launcher Network local resolver | 根据 snapshot 决定哪些域名走 HDI，哪些走系统 DNS 或代理 |
 
+当前 Internal API 先落地为统一策略入口：
+
+| API | 调用方 | 用途 |
+| --- | --- | --- |
+| `GET /internal/v1/dns/policies` | Admin / Config Center | 查看 split DNS policy |
+| `GET /internal/v1/dns/policies/effective` | Launcher Network / H2O | 获取当前有效 policy |
+| `POST /internal/v1/dns/evaluate` | Launcher Network / H2O | 判断单个域名走 Internal DNS 还是 fallback |
+| `GET /internal/v1/dns/reverse-proxy/routes` | Admin / Gateway | 查看 Internal 可选反代入口 |
+| `GET /internal/v1/sdk/dns/policy` | SDK Gateway / 外部系统 | 读取统一 DNS policy |
+| `POST /internal/v1/sdk/dns/evaluate` | SDK Gateway / 外部系统 | 复用同一套 split DNS 决策 |
+
 最小 Domestic 模式下，Domestic 不需要运行 CoreDNS：
 
 - H 未连上 H2I 前，只能解析公网 Domestic bootstrap 域名。
@@ -251,6 +262,9 @@ CoreDNS authority 放 Internal K8s。H 端运行时由 Launcher Network 执行 s
 - 未命中白名单的域名走系统 DNS、系统代理、浏览器代理或 Clash/mihomo 等已有配置。
 - 如果需要 Internal 短暂不可达时仍解析内部域名，可以给 Domestic 增加可选
   `dns-edge-cache`，但这不是业务真相。
+- 域名命中 Internal 后，可以继续由 Internal gateway 选择性反代，如
+  `gateway.internal.mx -> MX Internal API`；是否反代由 Internal reverse proxy routes
+  控制，不由 H 端硬编码。
 
 PAC 优先级：
 
@@ -398,6 +412,33 @@ MX-3ks 是 Internal K8s + 可插拔站点的总称。即使没有 Domestic/Overs
 | Audit Center | 登录、权限、配置、发版、runner、测试、回退审计 |
 | Runner Controller | Domestic/Oversea/Internal job 调度 |
 | SDK Gateway | 给同台或同网段其他系统调用用户、权限、日志、发布等平台能力 |
+
+### User Center 和 SDK Gateway 的关系
+
+User Center 是身份和权限权威，SDK Gateway 是统一集成出口。不要把 User Center 做成
+所有系统的万能网关，也不要让每个系统各自暴露一套外部 SDK。
+
+推荐边界：
+
+- User Center 负责 OAuth、JWT、token introspection、principal context、RBAC、
+  组织、服务账号和匿名 install 绑定。
+- AppCenter、DNS Control、Release、Test、Audit、Observability 等模块保留自己的
+  Internal API。
+- SDK Gateway 暴露 `/internal/v1/sdk/*` 稳定契约，负责统一认证、限流、trace、
+  audit、版本协商和路由聚合。
+- Launcher、AppCenter 应用和同网段外部系统优先接 SDK Gateway；只有 Internal
+  模块之间才直接调用领域 API。
+- Domestic 可以代理 `/internal/v1/sdk/*`，但不保存用户、权限和 SDK 契约真相。
+
+当前 V0 稳定面：
+
+| API | 说明 |
+| --- | --- |
+| `GET /internal/v1/sdk/gateway/manifest` | 获取 SDK Gateway routes、audience、auth authority |
+| `POST /internal/v1/sdk/identity/introspect` | SDK-facing token introspection |
+| `POST /internal/v1/sdk/identity/context` | 解析 user / anonymous install / service account 上下文 |
+| `GET /internal/v1/sdk/dns/policy` | 读取统一 split DNS policy |
+| `POST /internal/v1/sdk/dns/evaluate` | 复用 split DNS、fallback 和 Internal reverse proxy 决策 |
 
 可插拔原则：
 

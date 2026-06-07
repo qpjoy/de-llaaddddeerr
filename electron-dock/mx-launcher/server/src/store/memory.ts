@@ -2,10 +2,16 @@ import { createHash, randomUUID } from 'node:crypto';
 
 import {
   builtinAppCenterApps,
+  builtinDnsPolicies,
+  builtinDnsReverseProxyRoutes,
   createConfigSnapshot,
+  createSdkGatewayManifest,
+  evaluateDnsPolicy,
+  introspectShadowToken,
   normalizeTestStatus,
   normalizeUpdatePolicy,
   releasePolicyByKind,
+  resolvePrincipalContext,
   required
 } from './domain.js';
 import type { PlatformStore } from './platform-store.js';
@@ -16,22 +22,31 @@ import type {
   AuditEvent,
   AuditEventInput,
   ConfigSnapshot,
+  DnsPolicy,
+  DnsQueryInput,
+  DnsResolutionDecision,
+  DnsReverseProxyRoute,
   IdentityLinkRequest,
   LauncherNetworkSnapshot,
   LauncherNetworkSnapshotInput,
   LogEntryInput,
   PermissionGrant,
   PermissionRequestInput,
+  PrincipalContext,
+  PrincipalContextInput,
   PlatformKernelSmokeResult,
   ReleasePolicyDecision,
   ReleasePolicyInput,
   ReleaseReportInput,
   ReleaseTask,
   RuntimeConfig,
+  SdkGatewayManifest,
   SiteRole,
   SiteHeartbeat,
   TestGateInput,
   TestGateVerdict,
+  TokenIntrospectionInput,
+  TokenIntrospectionResult,
   TestRun,
   TestRunInput,
   TestStep,
@@ -44,6 +59,8 @@ export class MemoryStore implements PlatformStore {
   private readonly snapshots = new Map<string, ConfigSnapshot>();
   private readonly tasks = new Map<string, ReleaseTask[]>();
   private readonly appCatalog = new Map<string, AppCenterApp>();
+  private readonly dnsPolicies = new Map<string, DnsPolicy>();
+  private readonly dnsReverseProxyRoutes = new Map<string, DnsReverseProxyRoute>();
   private readonly permissionGrants = new Map<string, PermissionGrant>();
   private readonly testRuns = new Map<string, TestRun>();
   private readonly auditEvents: AuditEvent[] = [];
@@ -54,6 +71,7 @@ export class MemoryStore implements PlatformStore {
 
   constructor(private readonly config: RuntimeConfig) {
     this.registerBuiltinApps();
+    this.registerBuiltinDns();
   }
 
   overview() {
@@ -67,6 +85,8 @@ export class MemoryStore implements PlatformStore {
       enrollments: this.enrollments.size,
       snapshots: this.snapshots.size,
       appCenterApps: this.appCatalog.size,
+      dnsPolicies: this.dnsPolicies.size,
+      dnsReverseProxyRoutes: this.dnsReverseProxyRoutes.size,
       permissionGrants: this.permissionGrants.size,
       testRuns: this.testRuns.size,
       auditEvents: this.auditEvents.length,
@@ -168,6 +188,50 @@ export class MemoryStore implements PlatformStore {
     return { enrollment, snapshot, auditEvent };
   }
 
+  introspectToken(input: TokenIntrospectionInput): TokenIntrospectionResult {
+    const result = introspectShadowToken(this.config, input);
+    this.recordAudit({
+      eventType: 'auth.token.introspected',
+      actorKind: result.principal?.kind ?? 'unknown',
+      userId: result.principal?.userId ?? null,
+      anonymousPrincipalId: result.principal?.anonymousPrincipalId ?? null,
+      requestId: input.requestId ?? null,
+      metadata: {
+        active: result.active,
+        audience: result.audience,
+        subject: result.subject,
+        tokenKind: result.tokenKind,
+        reason: result.reason
+      }
+    });
+    return result;
+  }
+
+  resolvePrincipalContext(input: PrincipalContextInput): PrincipalContext {
+    const enrollment = input.installId ? this.enrollments.get(input.installId) ?? null : null;
+    const context = resolvePrincipalContext(this.config, input, enrollment);
+    this.recordAudit({
+      eventType: 'identity.context.resolved',
+      actorKind: context.principal.kind,
+      userId: context.principal.userId,
+      anonymousPrincipalId: context.principal.anonymousPrincipalId,
+      installId: context.bindings.installId,
+      deviceId: context.bindings.deviceId,
+      requestId: input.requestId ?? null,
+      metadata: {
+        source: context.source,
+        active: context.auth.active,
+        canUseSdkGateway: context.gateway.canUseSdkGateway,
+        allowedRoutes: context.gateway.allowedRoutes
+      }
+    });
+    return context;
+  }
+
+  sdkGatewayManifest(): SdkGatewayManifest {
+    return createSdkGatewayManifest(this.config);
+  }
+
   getSnapshot(installId: string): ConfigSnapshot | null {
     return this.snapshots.get(installId) ?? null;
   }
@@ -231,6 +295,42 @@ export class MemoryStore implements PlatformStore {
 
   getAppCenterApp(appId: string): AppCenterApp | null {
     return this.appCatalog.get(appId) ?? null;
+  }
+
+  listDnsPolicies(): DnsPolicy[] {
+    return [...this.dnsPolicies.values()].sort((a, b) => b.priority - a.priority);
+  }
+
+  getEffectiveDnsPolicy(appId?: string | null): DnsPolicy {
+    const policies = this.listDnsPolicies()
+      .filter((policy) => policy.enabled)
+      .filter((policy) => !appId || policy.owners.includes(appId) || policy.owners.includes('sdk-gateway'));
+    return required(policies[0] ?? null, 'effective DNS policy is registered');
+  }
+
+  evaluateDnsQuery(input: DnsQueryInput): DnsResolutionDecision {
+    const policy = this.getEffectiveDnsPolicy(input.appId);
+    const decision = evaluateDnsPolicy(policy, this.listDnsReverseProxyRoutes(), input);
+    this.recordAudit({
+      eventType: 'dns.query.evaluated',
+      actorKind: input.appId ? 'app' : 'sdk-gateway',
+      userId: input.userId ?? null,
+      installId: input.installId ?? null,
+      productId: input.appId ?? null,
+      requestId: input.requestId ?? null,
+      metadata: {
+        domain: decision.normalizedDomain,
+        route: decision.route,
+        resolver: decision.resolver,
+        matched: decision.matched,
+        reverseProxyRouteId: decision.reverseProxyRoute?.routeId ?? null
+      }
+    });
+    return decision;
+  }
+
+  listDnsReverseProxyRoutes(): DnsReverseProxyRoute[] {
+    return [...this.dnsReverseProxyRoutes.values()].sort((a, b) => a.host.localeCompare(b.host));
   }
 
   requestPermission(input: PermissionRequestInput): PermissionGrant {
@@ -500,6 +600,28 @@ export class MemoryStore implements PlatformStore {
       requestId: 'smoke-enroll'
     });
     checks.push('OK anonymous install enrolled');
+    const principalContext = this.resolvePrincipalContext({
+      installId: enrollment.installId,
+      requestId: 'smoke-principal-context'
+    });
+    if (principalContext.principal.kind !== 'anonymous' || !principalContext.gateway.canUseSdkGateway) {
+      throw new Error('anonymous install principal context was not resolved');
+    }
+    checks.push('OK User Center principal context resolved');
+    const sdkIntrospection = this.introspectToken({
+      token: 'mx-shadow-service:sdk-gateway',
+      audience: 'mx-sdk',
+      requestId: 'smoke-sdk-introspection'
+    });
+    if (!sdkIntrospection.active || sdkIntrospection.principal?.kind !== 'service-account') {
+      throw new Error('SDK Gateway service token was not accepted');
+    }
+    checks.push('OK SDK Gateway service token introspected');
+    const sdkGateway = this.sdkGatewayManifest();
+    if (!sdkGateway.routes.some((route) => route.routeId === 'sdk.identity.introspect')) {
+      throw new Error('SDK Gateway manifest did not expose identity introspection');
+    }
+    checks.push('OK SDK Gateway manifest published');
     const networkSnapshot = this.createLauncherNetworkSnapshot({
       installId: enrollment.installId,
       deviceId: enrollment.deviceId,
@@ -569,17 +691,34 @@ export class MemoryStore implements PlatformStore {
       throw new Error('h2o update was not skippable');
     }
     checks.push('OK h2o update skippable');
+    const dnsPolicy = this.getEffectiveDnsPolicy('h2o');
+    checks.push('OK split DNS policy registered');
+    const dnsDecision = this.evaluateDnsQuery({
+      domain: 'gateway.internal.mx',
+      appId: 'h2o',
+      installId: enrollment.installId,
+      requestId: 'smoke-dns'
+    });
+    if (dnsDecision.route !== 'internal-dns' || !dnsDecision.reverseProxyRoute) {
+      throw new Error('split DNS did not route gateway.internal.mx to Internal reverse proxy');
+    }
+    checks.push('OK split DNS internal reverse proxy decision');
     return {
       ok: true,
       checks,
       app,
       enrollment,
+      principalContext,
+      sdkIntrospection,
+      sdkGateway,
       networkSnapshot,
       permissionGrant,
       testRun: completedRun,
       gate,
       launcherUpdate,
-      h2oUpdate
+      h2oUpdate,
+      dnsPolicy,
+      dnsDecision
     };
   }
 
@@ -604,6 +743,15 @@ export class MemoryStore implements PlatformStore {
   private registerBuiltinApps(): void {
     for (const app of builtinAppCenterApps()) {
       this.appCatalog.set(app.appId, app);
+    }
+  }
+
+  private registerBuiltinDns(): void {
+    for (const policy of builtinDnsPolicies(this.config)) {
+      this.dnsPolicies.set(policy.policyId, policy);
+    }
+    for (const route of builtinDnsReverseProxyRoutes(this.config)) {
+      this.dnsReverseProxyRoutes.set(route.routeId, route);
     }
   }
 

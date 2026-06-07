@@ -32,7 +32,7 @@ Usage:
   bash scripts/manage.sh ops guide
   bash scripts/manage.sh ops doctor
   bash scripts/manage.sh ops local-shadow plan|cycle|build|up|status|smoke|logs|down
-  bash scripts/manage.sh ops k8s-shadow plan|dry-run|apply|status|smoke|logs|down
+  bash scripts/manage.sh ops k8s-shadow plan|dry-run|cycle|apply|status|smoke|logs|db-summary|down
   bash scripts/manage.sh k8s plan internal-shadow
   bash scripts/manage.sh k8s explain internal-shadow
   bash scripts/manage.sh k8s render internal-shadow
@@ -40,6 +40,7 @@ Usage:
   bash scripts/manage.sh k8s apply internal-shadow
   bash scripts/manage.sh k8s status internal-shadow
   bash scripts/manage.sh k8s logs internal-shadow
+  bash scripts/manage.sh k8s db-summary internal-shadow
   bash scripts/manage.sh k8s smoke internal-shadow [local-port]
   bash scripts/manage.sh k8s down internal-shadow
 
@@ -305,6 +306,21 @@ k8s_logs() {
   kubectl -n "$ns" logs deploy/mx-launcher-internal --tail=120
 }
 
+k8s_db_summary() {
+  local target="$1"
+  local ns
+  ns="$(k8s_namespace "$target")"
+  need_kubectl
+  say "schema migrations"
+  kubectl -n "$ns" exec statefulset/mx-internal-postgres -- \
+    psql -U "${PG_USER:-mx_internal}" -d "${PG_DB:-mx_internal_shadow}" \
+    -c "select count(*) as migration_rows from mx_schema_migrations;"
+  say "platform records by kind"
+  kubectl -n "$ns" exec statefulset/mx-internal-postgres -- \
+    psql -U "${PG_USER:-mx_internal}" -d "${PG_DB:-mx_internal_shadow}" \
+    -c "select kind, environment, count(*) from mx_platform_records group by kind, environment order by kind, environment;"
+}
+
 k8s_smoke() {
   local target="$1"
   local port="${2:-18090}"
@@ -358,9 +374,11 @@ Path B: K8s learning path, safe dry-run first.
   bash scripts/manage.sh ops k8s-shadow dry-run
 
 Path C: K8s deploy on Docker Desktop or a prepared Internal cluster.
+  bash scripts/manage.sh ops k8s-shadow cycle
   bash scripts/manage.sh ops k8s-shadow apply
   bash scripts/manage.sh ops k8s-shadow status
   bash scripts/manage.sh ops k8s-shadow smoke
+  bash scripts/manage.sh ops k8s-shadow db-summary
   bash scripts/manage.sh ops k8s-shadow logs
   bash scripts/manage.sh ops k8s-shadow down
 
@@ -464,6 +482,18 @@ ops_k8s_shadow() {
     dry-run)
       k8s_dry_run internal-shadow
       ;;
+    cycle)
+      ops_k8s_shadow_plan
+      say "apply"
+      k8s_apply internal-shadow
+      say "status"
+      k8s_status internal-shadow
+      say "smoke"
+      k8s_smoke internal-shadow "${2:-18090}"
+      say "db summary"
+      k8s_db_summary internal-shadow
+      say "k8s-shadow cycle OK. Run 'bash scripts/manage.sh ops k8s-shadow down' when done."
+      ;;
     apply)
       k8s_apply internal-shadow
       ;;
@@ -476,11 +506,14 @@ ops_k8s_shadow() {
     logs)
       k8s_logs internal-shadow
       ;;
+    db-summary)
+      k8s_db_summary internal-shadow
+      ;;
     down)
       k8s_down internal-shadow
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops k8s-shadow plan|dry-run|apply|status|smoke|logs|down"
+      die "Usage: bash scripts/manage.sh ops k8s-shadow plan|dry-run|cycle|apply|status|smoke|logs|db-summary|down"
       ;;
   esac
 }
@@ -584,7 +617,7 @@ case "$cmd" in
     esac
     ;;
   k8s)
-    [ "$#" -ge 2 ] || die "Usage: bash scripts/manage.sh k8s plan|explain|render|dry-run|apply|status|logs|smoke|down internal-shadow"
+    [ "$#" -ge 2 ] || die "Usage: bash scripts/manage.sh k8s plan|explain|render|dry-run|apply|status|logs|db-summary|smoke|down internal-shadow"
     action="$1"
     target="$2"
     shift 2 || true
@@ -616,6 +649,10 @@ case "$cmd" in
       logs)
         [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh k8s logs internal-shadow"
         k8s_logs "$target"
+        ;;
+      db-summary)
+        [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh k8s db-summary internal-shadow"
+        k8s_db_summary "$target"
         ;;
       smoke)
         [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh k8s smoke internal-shadow [local-port]"

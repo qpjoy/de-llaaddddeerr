@@ -138,6 +138,15 @@ PG_USER=mx_internal PG_PASSWORD=your-password PG_DB=mx_internal_shadow \
 
 不设置时使用 shadow 默认值，只适合本机测试。
 
+也可以一键跑完整 K8s 验证：
+
+```bash
+bash scripts/manage.sh ops k8s-shadow cycle
+```
+
+`cycle` 会执行 `apply -> status -> smoke -> db-summary`，最后保留环境运行，方便继续看
+日志或手动访问。确认完成后再执行 `down`。
+
 ## 5. 查看 K8s 状态、日志和 smoke
 
 查看资源：
@@ -160,6 +169,18 @@ bash scripts/manage.sh ops k8s-shadow smoke
 
 这个命令会临时执行 `kubectl port-forward`，把本机 `127.0.0.1:18090` 转发到 K8s 里的
 `mx-launcher-internal` Service，然后跑同一套 HTTP smoke。
+
+查看数据库迁移和平台记录：
+
+```bash
+bash scripts/manage.sh ops k8s-shadow db-summary
+```
+
+这个命令会显示：
+
+- `mx_schema_migrations` 中 migration 记录数量。
+- `mx_platform_records` 中不同平台对象的记录数量，例如 `test-run`、`audit-event`、
+  `launcher-network-snapshot`。
 
 ## 6. 停止 K8s shadow
 
@@ -206,6 +227,7 @@ bash scripts/manage.sh ops local-shadow status
 ```bash
 bash scripts/manage.sh ops k8s-shadow status
 bash scripts/manage.sh ops k8s-shadow logs
+bash scripts/manage.sh ops k8s-shadow db-summary
 ```
 
 常见原因：
@@ -214,6 +236,27 @@ bash scripts/manage.sh ops k8s-shadow logs
 - 集群拉不到 `qpjoy/mx-launcher-server:shadow` 镜像。
 - PostgreSQL PVC 创建失败。
 - Migration Job 没完成。
+
+### 已验证的本机 K8s 路径
+
+当前本机 Docker Desktop K8s 已验证：
+
+```bash
+bash scripts/manage.sh ops k8s-shadow apply
+bash scripts/manage.sh ops k8s-shadow status
+bash scripts/manage.sh ops k8s-shadow smoke
+bash scripts/manage.sh ops k8s-shadow db-summary
+bash scripts/manage.sh ops k8s-shadow down
+```
+
+验证结果：
+
+- Postgres StatefulSet `1/1 Running`。
+- Migration Job `Complete 1/1`。
+- Internal API Deployment `1/1 Available`。
+- HTTP smoke 通过 `healthz`、AppCenter apps、platform kernel smoke。
+- `mx_schema_migrations` 有 1 条记录。
+- `mx_platform_records` 有 smoke 写入的平台对象。
 
 ### 本地镜像和 K8s 镜像
 

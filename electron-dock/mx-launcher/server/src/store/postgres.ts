@@ -11,22 +11,31 @@ import type {
   AuditEvent,
   AuditEventInput,
   ConfigSnapshot,
+  DnsPolicy,
+  DnsQueryInput,
+  DnsResolutionDecision,
+  DnsReverseProxyRoute,
   IdentityLinkRequest,
   LauncherNetworkSnapshot,
   LauncherNetworkSnapshotInput,
   LogEntryInput,
   PermissionGrant,
   PermissionRequestInput,
+  PrincipalContext,
+  PrincipalContextInput,
   PlatformKernelSmokeResult,
   ReleasePolicyDecision,
   ReleasePolicyInput,
   ReleaseReportInput,
   ReleaseTask,
   RuntimeConfig,
+  SdkGatewayManifest,
   SiteHeartbeat,
   SiteRole,
   TestGateInput,
   TestGateVerdict,
+  TokenIntrospectionInput,
+  TokenIntrospectionResult,
   TestRun,
   TestRunInput,
   TestStep,
@@ -34,10 +43,16 @@ import type {
 } from '../types.js';
 import {
   builtinAppCenterApps,
+  builtinDnsPolicies,
+  builtinDnsReverseProxyRoutes,
   createConfigSnapshot,
+  createSdkGatewayManifest,
+  evaluateDnsPolicy,
+  introspectShadowToken,
   normalizeTestStatus,
   normalizeUpdatePolicy,
   releasePolicyByKind,
+  resolvePrincipalContext,
   required
 } from './domain.js';
 import type { PlatformOverview, PlatformStore } from './platform-store.js';
@@ -48,6 +63,8 @@ type RecordKind =
   | 'config-snapshot'
   | 'release-task'
   | 'release-policy-decision'
+  | 'dns-policy'
+  | 'dns-reverse-proxy-route'
   | 'app-center-app'
   | 'permission-grant'
   | 'launcher-network-snapshot'
@@ -71,6 +88,7 @@ export class PostgresStore implements PlatformStore {
     await dataSource.runMigrations({ transaction: 'all' });
     const store = new PostgresStore(config, dataSource, dataSource.getRepository(PlatformRecordEntity));
     await store.registerBuiltinApps();
+    await store.registerBuiltinDns();
     return store;
   }
 
@@ -80,6 +98,8 @@ export class PostgresStore implements PlatformStore {
       enrollments,
       snapshots,
       appCenterApps,
+      dnsPolicies,
+      dnsReverseProxyRoutes,
       permissionGrants,
       testRuns,
       auditEvents,
@@ -89,6 +109,8 @@ export class PostgresStore implements PlatformStore {
       this.countRecords('anonymous-enrollment'),
       this.countRecords('config-snapshot'),
       this.countRecords('app-center-app'),
+      this.countRecords('dns-policy'),
+      this.countRecords('dns-reverse-proxy-route'),
       this.countRecords('permission-grant'),
       this.countRecords('test-run'),
       this.countRecords('audit-event'),
@@ -104,6 +126,8 @@ export class PostgresStore implements PlatformStore {
       enrollments,
       snapshots,
       appCenterApps,
+      dnsPolicies,
+      dnsReverseProxyRoutes,
       permissionGrants,
       testRuns,
       auditEvents,
@@ -206,6 +230,52 @@ export class PostgresStore implements PlatformStore {
     return { enrollment, snapshot, auditEvent };
   }
 
+  async introspectToken(input: TokenIntrospectionInput): Promise<TokenIntrospectionResult> {
+    const result = introspectShadowToken(this.config, input);
+    await this.recordAudit({
+      eventType: 'auth.token.introspected',
+      actorKind: result.principal?.kind ?? 'unknown',
+      userId: result.principal?.userId ?? null,
+      anonymousPrincipalId: result.principal?.anonymousPrincipalId ?? null,
+      requestId: input.requestId ?? null,
+      metadata: {
+        active: result.active,
+        audience: result.audience,
+        subject: result.subject,
+        tokenKind: result.tokenKind,
+        reason: result.reason
+      }
+    });
+    return result;
+  }
+
+  async resolvePrincipalContext(input: PrincipalContextInput): Promise<PrincipalContext> {
+    const enrollment = input.installId
+      ? await this.getRecord<AnonymousEnrollment>('anonymous-enrollment', input.installId)
+      : null;
+    const context = resolvePrincipalContext(this.config, input, enrollment);
+    await this.recordAudit({
+      eventType: 'identity.context.resolved',
+      actorKind: context.principal.kind,
+      userId: context.principal.userId,
+      anonymousPrincipalId: context.principal.anonymousPrincipalId,
+      installId: context.bindings.installId,
+      deviceId: context.bindings.deviceId,
+      requestId: input.requestId ?? null,
+      metadata: {
+        source: context.source,
+        active: context.auth.active,
+        canUseSdkGateway: context.gateway.canUseSdkGateway,
+        allowedRoutes: context.gateway.allowedRoutes
+      }
+    });
+    return context;
+  }
+
+  sdkGatewayManifest(): SdkGatewayManifest {
+    return createSdkGatewayManifest(this.config);
+  }
+
   async getSnapshot(installId: string): Promise<ConfigSnapshot | null> {
     return this.getRecord<ConfigSnapshot>('config-snapshot', installId);
   }
@@ -272,6 +342,43 @@ export class PostgresStore implements PlatformStore {
 
   async getAppCenterApp(appId: string): Promise<AppCenterApp | null> {
     return this.getRecord<AppCenterApp>('app-center-app', appId);
+  }
+
+  async listDnsPolicies(): Promise<DnsPolicy[]> {
+    return (await this.listRecords<DnsPolicy>('dns-policy')).sort((a, b) => b.priority - a.priority);
+  }
+
+  async getEffectiveDnsPolicy(appId?: string | null): Promise<DnsPolicy> {
+    const policies = (await this.listDnsPolicies())
+      .filter((policy) => policy.enabled)
+      .filter((policy) => !appId || policy.owners.includes(appId) || policy.owners.includes('sdk-gateway'));
+    return required(policies[0] ?? null, 'effective DNS policy is registered');
+  }
+
+  async evaluateDnsQuery(input: DnsQueryInput): Promise<DnsResolutionDecision> {
+    const policy = await this.getEffectiveDnsPolicy(input.appId);
+    const decision = evaluateDnsPolicy(policy, await this.listDnsReverseProxyRoutes(), input);
+    await this.recordAudit({
+      eventType: 'dns.query.evaluated',
+      actorKind: input.appId ? 'app' : 'sdk-gateway',
+      userId: input.userId ?? null,
+      installId: input.installId ?? null,
+      productId: input.appId ?? null,
+      requestId: input.requestId ?? null,
+      metadata: {
+        domain: decision.normalizedDomain,
+        route: decision.route,
+        resolver: decision.resolver,
+        matched: decision.matched,
+        reverseProxyRouteId: decision.reverseProxyRoute?.routeId ?? null
+      }
+    });
+    return decision;
+  }
+
+  async listDnsReverseProxyRoutes(): Promise<DnsReverseProxyRoute[]> {
+    return (await this.listRecords<DnsReverseProxyRoute>('dns-reverse-proxy-route'))
+      .sort((a, b) => a.host.localeCompare(b.host));
   }
 
   async requestPermission(input: PermissionRequestInput): Promise<PermissionGrant> {
@@ -552,6 +659,28 @@ export class PostgresStore implements PlatformStore {
       requestId: 'smoke-enroll'
     });
     checks.push('OK anonymous install enrolled');
+    const principalContext = await this.resolvePrincipalContext({
+      installId: enrollment.installId,
+      requestId: 'smoke-principal-context'
+    });
+    if (principalContext.principal.kind !== 'anonymous' || !principalContext.gateway.canUseSdkGateway) {
+      throw new Error('anonymous install principal context was not resolved');
+    }
+    checks.push('OK User Center principal context resolved');
+    const sdkIntrospection = await this.introspectToken({
+      token: 'mx-shadow-service:sdk-gateway',
+      audience: 'mx-sdk',
+      requestId: 'smoke-sdk-introspection'
+    });
+    if (!sdkIntrospection.active || sdkIntrospection.principal?.kind !== 'service-account') {
+      throw new Error('SDK Gateway service token was not accepted');
+    }
+    checks.push('OK SDK Gateway service token introspected');
+    const sdkGateway = await this.sdkGatewayManifest();
+    if (!sdkGateway.routes.some((route) => route.routeId === 'sdk.identity.introspect')) {
+      throw new Error('SDK Gateway manifest did not expose identity introspection');
+    }
+    checks.push('OK SDK Gateway manifest published');
     const networkSnapshot = await this.createLauncherNetworkSnapshot({
       installId: enrollment.installId,
       deviceId: enrollment.deviceId,
@@ -621,17 +750,34 @@ export class PostgresStore implements PlatformStore {
       throw new Error('h2o update was not skippable');
     }
     checks.push('OK h2o update skippable');
+    const dnsPolicy = await this.getEffectiveDnsPolicy('h2o');
+    checks.push('OK split DNS policy registered');
+    const dnsDecision = await this.evaluateDnsQuery({
+      domain: 'gateway.internal.mx',
+      appId: 'h2o',
+      installId: enrollment.installId,
+      requestId: 'smoke-dns'
+    });
+    if (dnsDecision.route !== 'internal-dns' || !dnsDecision.reverseProxyRoute) {
+      throw new Error('split DNS did not route gateway.internal.mx to Internal reverse proxy');
+    }
+    checks.push('OK split DNS internal reverse proxy decision');
     return {
       ok: true,
       checks,
       app,
       enrollment,
+      principalContext,
+      sdkIntrospection,
+      sdkGateway,
       networkSnapshot,
       permissionGrant,
       testRun: completedRun,
       gate,
       launcherUpdate,
-      h2oUpdate
+      h2oUpdate,
+      dnsPolicy,
+      dnsDecision
     };
   }
 
@@ -639,6 +785,17 @@ export class PostgresStore implements PlatformStore {
     await Promise.all(
       builtinAppCenterApps().map((app) => this.saveRecord('app-center-app', app.appId, app, this.config.siteId))
     );
+  }
+
+  private async registerBuiltinDns(): Promise<void> {
+    await Promise.all([
+      ...builtinDnsPolicies(this.config).map((policy) => {
+        return this.saveRecord('dns-policy', policy.policyId, policy, policy.siteId);
+      }),
+      ...builtinDnsReverseProxyRoutes(this.config).map((route) => {
+        return this.saveRecord('dns-reverse-proxy-route', route.routeId, route, this.config.siteId);
+      })
+    ]);
   }
 
   private createSnapshot(

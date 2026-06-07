@@ -13,15 +13,59 @@ const checks = [
     assert: (body) => Array.isArray(body?.apps) && body.apps.some((app) => app.appId === 'h2o')
   },
   {
+    name: 'sdk gateway manifest',
+    path: '/internal/v1/sdk/gateway/manifest',
+    assert: (body) => Array.isArray(body?.gateway?.routes)
+      && body.gateway.routes.some((route) => route.routeId === 'sdk.identity.introspect')
+      && body.gateway.authAuthority === 'user-center'
+  },
+  {
+    name: 'sdk identity introspect',
+    path: '/internal/v1/sdk/identity/introspect',
+    method: 'POST',
+    body: {
+      token: 'mx-shadow-service:sdk-gateway',
+      audience: 'mx-sdk',
+      requestId: 'http-smoke-sdk-introspect'
+    },
+    assert: (body) => body?.introspection?.active === true
+      && body?.introspection?.principal?.kind === 'service-account'
+  },
+  {
+    name: 'dns policies',
+    path: '/internal/v1/dns/policies',
+    assert: (body) => Array.isArray(body?.policies)
+      && body.policies.some((policy) => policy.policyId === 'dns_default_internal_split')
+  },
+  {
+    name: 'sdk dns evaluate',
+    path: '/internal/v1/sdk/dns/evaluate',
+    method: 'POST',
+    body: { domain: 'gateway.internal.mx', requestId: 'http-smoke-dns' },
+    assert: (body) => body?.decision?.route === 'internal-dns'
+      && body?.decision?.resolver === 'internal-coredns'
+      && body?.decision?.reverseProxyRoute?.host === 'gateway.internal.mx'
+  },
+  {
     name: 'platform kernel smoke',
     path: '/internal/v1/platform-kernel/smoke',
-    assert: (body) => body && body.ok === true && body.gate?.verdict === 'passed' && body.h2oUpdate?.canSkip === true
+    assert: (body) => body
+      && body.ok === true
+      && body.gate?.verdict === 'passed'
+      && body.h2oUpdate?.canSkip === true
+      && body.sdkIntrospection?.active === true
+      && body.sdkGateway?.authAuthority === 'user-center'
+      && body.dnsDecision?.route === 'internal-dns'
   }
 ];
 
 for (const check of checks) {
   const url = `${baseUrl}${check.path}`;
-  const response = await fetch(url);
+  const response = await fetch(url, {
+    method: check.method ?? 'GET',
+    headers: check.body ? { 'content-type': 'application/json' } : undefined,
+    body: check.body ? JSON.stringify(check.body) : undefined
+  });
   const text = await response.text();
   if (!response.ok) {
     throw new Error(`${check.name} failed: HTTP ${response.status} ${text}`);

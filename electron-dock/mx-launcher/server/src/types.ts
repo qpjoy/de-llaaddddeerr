@@ -67,6 +67,95 @@ export interface IdentityLinkRequest {
   authProvider?: string;
 }
 
+export type PrincipalKind = 'anonymous' | 'user' | 'service-account' | 'unknown';
+
+export interface PlatformPrincipal {
+  principalId: string;
+  kind: PrincipalKind;
+  tenantId: string;
+  orgIds: string[];
+  displayName: string;
+  userId: string | null;
+  anonymousPrincipalId: string | null;
+  serviceAccountId: string | null;
+  roles: string[];
+  scopes: string[];
+}
+
+export interface TokenIntrospectionInput {
+  token?: string | null;
+  audience?: string | null;
+  requestId?: string | null;
+}
+
+export interface TokenIntrospectionResult {
+  active: boolean;
+  tokenKind: 'oauth2-access-token' | 'jwt' | 'service-token' | 'shadow-token' | 'unknown';
+  issuer: string;
+  audience: string | null;
+  subject: string | null;
+  principal: PlatformPrincipal | null;
+  scopes: string[];
+  expiresAt: string | null;
+  reason: string;
+}
+
+export interface PrincipalContextInput {
+  token?: string | null;
+  audience?: string | null;
+  userId?: string | null;
+  anonymousPrincipalId?: string | null;
+  serviceAccountId?: string | null;
+  installId?: string | null;
+  requestId?: string | null;
+}
+
+export interface PrincipalContext {
+  principal: PlatformPrincipal;
+  auth: TokenIntrospectionResult;
+  bindings: {
+    installId: string | null;
+    deviceId: string | null;
+    anonymousPrincipalId: string | null;
+    linkedUserId: string | null;
+  };
+  gateway: {
+    authority: 'sdk-gateway';
+    canUseSdkGateway: boolean;
+    allowedRoutes: string[];
+  };
+  source: 'token' | 'identity-binding' | 'service-account' | 'anonymous' | 'unknown';
+}
+
+export interface SdkGatewayRoute {
+  routeId: string;
+  path: string;
+  upstreamModule: string;
+  audience: string;
+  authRequired: boolean;
+  description: string;
+}
+
+export interface SdkGatewayManifest {
+  gatewayId: string;
+  environment: string;
+  siteId: string;
+  authority: 'sdk-gateway';
+  authAuthority: 'user-center';
+  basePath: '/internal/v1/sdk';
+  modules: string[];
+  routes: SdkGatewayRoute[];
+  sdk: {
+    audience: string;
+    tokenIntrospectionUrl: string;
+    principalContextUrl: string;
+    dnsPolicyUrl: string;
+    dnsEvaluateUrl: string;
+    auditUrl: string;
+    observabilityLogsUrl: string;
+  };
+}
+
 export interface ConfigSnapshot {
   snapshotId: string;
   environment: string;
@@ -253,6 +342,67 @@ export interface LauncherNetworkSnapshot {
   issuedAt: string;
 }
 
+export type DnsFallbackTarget = 'system-dns' | 'system-proxy' | 'h2o-proxy' | 'direct';
+
+export interface DnsPolicy {
+  policyId: string;
+  environment: string;
+  siteId: string;
+  name: string;
+  version: number;
+  enabled: boolean;
+  priority: number;
+  owners: string[];
+  whitelist: {
+    exactDomains: string[];
+    suffixes: string[];
+  };
+  internal: {
+    authority: 'internal-coredns';
+    serviceDns: string;
+    h2iRequired: boolean;
+  };
+  fallbackOrder: DnsFallbackTarget[];
+  proxyHints: {
+    pacPriority: string[];
+    allowSystemProxyFallback: boolean;
+  };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DnsQueryInput {
+  domain: string;
+  appId?: string | null;
+  installId?: string | null;
+  userId?: string | null;
+  requestId?: string | null;
+}
+
+export interface DnsResolutionDecision {
+  domain: string;
+  normalizedDomain: string;
+  matched: boolean;
+  policyId: string;
+  route: 'internal-dns' | 'fallback';
+  resolver: 'internal-coredns' | DnsFallbackTarget;
+  fallbackOrder: DnsFallbackTarget[];
+  reverseProxyRoute: DnsReverseProxyRoute | null;
+  reason: string;
+}
+
+export interface DnsReverseProxyRoute {
+  routeId: string;
+  environment: string;
+  host: string;
+  targetUrl: string;
+  enabled: boolean;
+  tlsMode: 'internal' | 'passthrough' | 'edge-terminated';
+  authRequired: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ReleasePolicyInput {
   componentKind: string;
   componentId: string;
@@ -342,10 +492,15 @@ export interface PlatformKernelSmokeResult {
   checks: string[];
   app: AppCenterApp;
   enrollment: AnonymousEnrollment;
+  principalContext: PrincipalContext;
+  sdkIntrospection: TokenIntrospectionResult;
+  sdkGateway: SdkGatewayManifest;
   networkSnapshot: LauncherNetworkSnapshot;
   permissionGrant: PermissionGrant;
   testRun: TestRun;
   gate: TestGateVerdict;
   launcherUpdate: ReleasePolicyDecision;
   h2oUpdate: ReleasePolicyDecision;
+  dnsPolicy: DnsPolicy;
+  dnsDecision: DnsResolutionDecision;
 }

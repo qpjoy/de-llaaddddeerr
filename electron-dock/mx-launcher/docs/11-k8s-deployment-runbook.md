@@ -92,7 +92,15 @@ bash scripts/manage.sh k8s render internal-shadow
 bash scripts/manage.sh k8s apply internal-shadow
 bash scripts/manage.sh k8s status internal-shadow
 bash scripts/manage.sh k8s smoke internal-shadow
+bash scripts/manage.sh k8s db-summary internal-shadow
 bash scripts/manage.sh k8s logs internal-shadow
+```
+
+面向本机运维的封装命令：
+
+```bash
+bash scripts/manage.sh ops k8s-shadow cycle
+bash scripts/manage.sh ops k8s-shadow db-summary
 ```
 
 停止工作负载：

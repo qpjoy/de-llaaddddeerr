@@ -5,22 +5,31 @@ import type {
   AuditEvent,
   AuditEventInput,
   ConfigSnapshot,
+  DnsPolicy,
+  DnsQueryInput,
+  DnsResolutionDecision,
+  DnsReverseProxyRoute,
   IdentityLinkRequest,
   LauncherNetworkSnapshot,
   LauncherNetworkSnapshotInput,
   LogEntryInput,
   PermissionGrant,
   PermissionRequestInput,
+  PrincipalContext,
+  PrincipalContextInput,
   PlatformKernelSmokeResult,
   ReleasePolicyDecision,
   ReleasePolicyInput,
   ReleaseReportInput,
   ReleaseTask,
   RuntimeConfig,
+  SdkGatewayManifest,
   SiteHeartbeat,
   SiteRole,
   TestGateInput,
   TestGateVerdict,
+  TokenIntrospectionInput,
+  TokenIntrospectionResult,
   TestRun,
   TestRunInput,
   TestStepInput
@@ -38,6 +47,8 @@ export interface PlatformOverview {
   enrollments: number;
   snapshots: number;
   appCenterApps: number;
+  dnsPolicies: number;
+  dnsReverseProxyRoutes: number;
   permissionGrants: number;
   testRuns: number;
   auditEvents: number;
@@ -59,6 +70,9 @@ export interface PlatformStore {
     snapshot: ConfigSnapshot;
     auditEvent: AuditEvent;
   }>;
+  introspectToken(input: TokenIntrospectionInput): MaybePromise<TokenIntrospectionResult>;
+  resolvePrincipalContext(input: PrincipalContextInput): MaybePromise<PrincipalContext>;
+  sdkGatewayManifest(): MaybePromise<SdkGatewayManifest>;
   getSnapshot(installId: string): MaybePromise<ConfigSnapshot | null>;
   listTasks(installId: string): MaybePromise<ReleaseTask[]>;
   recordReleaseReport(input: ReleaseReportInput): MaybePromise<AuditEvent>;
@@ -67,6 +81,10 @@ export interface PlatformStore {
   observabilitySinks(): MaybePromise<RuntimeConfig['observabilitySinks']>;
   listAppCenterApps(): MaybePromise<AppCenterApp[]>;
   getAppCenterApp(appId: string): MaybePromise<AppCenterApp | null>;
+  listDnsPolicies(): MaybePromise<DnsPolicy[]>;
+  getEffectiveDnsPolicy(appId?: string | null): MaybePromise<DnsPolicy>;
+  evaluateDnsQuery(input: DnsQueryInput): MaybePromise<DnsResolutionDecision>;
+  listDnsReverseProxyRoutes(): MaybePromise<DnsReverseProxyRoute[]>;
   requestPermission(input: PermissionRequestInput): MaybePromise<PermissionGrant>;
   createLauncherNetworkSnapshot(input: LauncherNetworkSnapshotInput): MaybePromise<LauncherNetworkSnapshot>;
   evaluateReleaseUpdate(input: ReleasePolicyInput): MaybePromise<ReleasePolicyDecision>;
