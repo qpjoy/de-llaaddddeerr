@@ -7,6 +7,7 @@
   "main": "main.cjs",
   "types": "dist/index.d.ts",
   "scripts": {
+    "dev": "electron .",
     "build": "pnpm run typecheck && pnpm run check",
     "check": "node --check main.cjs && node --check preload.cjs && node --check renderer.js && node --check scripts/after-sign.mjs && node --check scripts/check-package-contract.mjs && node --check scripts/verify-signatures.mjs && node scripts/check-package-contract.mjs",
     "desktop:check": "node --check main.cjs && node --check preload.cjs && node --check renderer.js",
@@ -18,7 +19,9 @@
     "package:win:portable": "pnpm run build && electron-builder --win portable --x64",
     "verify:signatures": "node scripts/verify-signatures.mjs dist/electron/win-unpacked/mx-launcher.package-manifest.json"
   },
-  "dependencies": {},
+  "dependencies": {
+    "three": "^0.179.1"
+  },
   "devDependencies": {
     "@types/node": "^22.10.7",
     "electron": "^34.0.0",

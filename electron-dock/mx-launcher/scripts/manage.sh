@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
 
-cmd="${1:-help}"
+cmd="${1:-menu}"
 shift || true
 
 say() { printf '▸ %s\n' "$*"; }
@@ -19,6 +19,8 @@ die() { printf '✗ %s\n' "$*" >&2; exit 1; }
 usage() {
   cat <<'EOF'
 Usage:
+  bash scripts/manage.sh
+  bash scripts/manage.sh menu
   bash scripts/manage.sh help
   bash scripts/manage.sh doctor [--role internal|domestic|oversea]
   bash scripts/manage.sh check
@@ -31,8 +33,34 @@ Usage:
   bash scripts/manage.sh shadow build|up|smoke|logs|down
   bash scripts/manage.sh ops guide
   bash scripts/manage.sh ops doctor
+  bash scripts/manage.sh ops config feature-list [feature-key]
+  bash scripts/manage.sh ops config feature-set <feature-key> <true|false> [plan-only|readonly-execute|remote-execute|disabled] [global|site|profile] [scope-id]
+  bash scripts/manage.sh ops admin dashboard
+  bash scripts/manage.sh ops admin actions [token]
+  bash scripts/manage.sh ops admin site-slot-pipelines [plan-id]
+  bash scripts/manage.sh ops site-slot domestic-plan <domestic-host|-> [oversea-host]
+  bash scripts/manage.sh ops site-slot oversea-plan <oversea-host|->
+  bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all]
+  bash scripts/manage.sh ops site-slot refresh-tunnel-cli [version|--from-local DIR]
+  bash scripts/manage.sh ops site-slot ssh-profiles
+  bash scripts/manage.sh ops site-slot ssh-profile-upsert <site-id> <domestic|oversea> [host]
+  bash scripts/manage.sh ops site-slot ssh-profile-readiness <profile-id> [plan-only|execute]
+  bash scripts/manage.sh ops site-slot oversea-readonly-test <site-id> <host>
+  bash scripts/manage.sh ops site-slot oversea-remote-test <site-id> <host> [pipeline|dry-run|plan-only|readonly|execute]
+  bash scripts/manage.sh ops site-slot preflight <plan-id> [dry-run|manual|ssh]
+  bash scripts/manage.sh ops site-slot apply <plan-id> [manual|dry-run|ssh]
+  bash scripts/manage.sh ops site-slot executions [plan-id]
+  bash scripts/manage.sh ops site-slot runner-start <run-id> [simulate|remote-ssh]
+  bash scripts/manage.sh ops site-slot runner-sessions [run-id]
+  bash scripts/manage.sh ops site-slot worker-job <session-id>
+  bash scripts/manage.sh ops site-slot worker-gate <job-id> [confirm]
+  bash scripts/manage.sh ops site-slot worker-handoff <job-id> [confirm]
+  bash scripts/manage.sh ops site-slot worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|local-exec]
+  bash scripts/manage.sh ops site-slot worker-report <job-id> [running|passed|failed|blocked]
+  bash scripts/manage.sh ops site-slot rollback-start <report-id> [simulate|manual]
+  bash scripts/manage.sh ops site-slot rollback-report <rollback-execution-id> [running|passed|failed|blocked]
   bash scripts/manage.sh ops local-shadow plan|cycle|build|up|status|smoke|logs|down
-  bash scripts/manage.sh ops k8s-shadow plan|dry-run|cycle|apply|status|smoke|logs|db-summary|down
+  bash scripts/manage.sh ops k8s-shadow plan|dry-run|cycle|build|apply|status|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|ssh-bootstrap enable|disable|down
   bash scripts/manage.sh k8s plan internal-shadow
   bash scripts/manage.sh k8s explain internal-shadow
   bash scripts/manage.sh k8s render internal-shadow
@@ -41,6 +69,11 @@ Usage:
   bash scripts/manage.sh k8s status internal-shadow
   bash scripts/manage.sh k8s logs internal-shadow
   bash scripts/manage.sh k8s db-summary internal-shadow
+  MX_K8S_SHADOW_CONFIRM_RESET=1 bash scripts/manage.sh k8s reset-data internal-shadow
+  bash scripts/manage.sh k8s remote-runner internal-shadow enable|disable
+  bash scripts/manage.sh k8s ssh-bootstrap internal-shadow enable|disable
+  bash scripts/manage.sh k8s gate internal-shadow [local-port]
+  bash scripts/manage.sh k8s gate-manual internal-shadow <evidence-json> [local-port]
   bash scripts/manage.sh k8s smoke internal-shadow [local-port]
   bash scripts/manage.sh k8s down internal-shadow
 
@@ -129,6 +162,56 @@ k8s_manifest_dir() {
   esac
 }
 
+shadow_image_artifacts() {
+  say "materialize site-slot artifacts for shadow image"
+  node server/scripts/site-slot-artifact-materializer.mjs all --out-dir server/artifacts/site-slots
+}
+
+shadow_image_build() {
+  shadow_image_artifacts
+  (cd server && docker compose -f docker-compose.shadow.yml build internal)
+}
+
+wait_http_ready() {
+  local url="$1"
+  local attempts="${2:-60}"
+  local i
+  for i in $(seq 1 "$attempts"); do
+    if node -e "fetch(process.argv[1]).then((r)=>process.exit(r.ok ? 0 : 1)).catch(()=>process.exit(1))" "$url"; then
+      return 0
+    fi
+    sleep 1
+  done
+  die "HTTP endpoint did not become ready: $url"
+}
+
+port_available() {
+  node -e '
+    const net = require("node:net");
+    const port = Number(process.argv[1]);
+    const server = net.createServer();
+    server.once("error", () => process.exit(1));
+    server.listen(port, "127.0.0.1", () => server.close(() => process.exit(0)));
+  ' "$1"
+}
+
+k8s_smoke_port() {
+  local requested="$1"
+  local candidate
+  if port_available "$requested"; then
+    echo "$requested"
+    return
+  fi
+  say "local port $requested is busy; trying fallback smoke ports" >&2
+  for candidate in 18190 18191 18192 18193; do
+    if port_available "$candidate"; then
+      echo "$candidate"
+      return
+    fi
+  done
+  die "No local port is available for k8s smoke"
+}
+
 k8s_plan() {
   local target="$1"
   local ns
@@ -140,20 +223,26 @@ Namespace: $ns
 
 Order:
   1. Apply namespace.
-  2. Apply non-secret config ConfigMap.
-  3. Create or update DB Secret from local env:
+  2. Apply Internal API ServiceAccount.
+  3. Apply non-secret config ConfigMap.
+  4. Apply DNS control target namespace and baseline CoreDNS ConfigMap.
+  5. Create or update DB Secret from local env:
      PG_USER, PG_PASSWORD, PG_DB, DATABASE_URL.
-  4. Apply PostgreSQL Service + StatefulSet.
-  5. Wait for PostgreSQL rollout.
-  6. Delete any previous migration Job, apply a fresh TypeORM migration Job,
+  6. Apply PostgreSQL Service + StatefulSet.
+  7. Apply CoreDNS ConfigMap writer RBAC.
+  8. Wait for PostgreSQL rollout.
+  9. Delete any previous migration Job, apply a fresh TypeORM migration Job,
      and wait for completion.
-  7. Apply Internal API Deployment + Service.
-  8. Wait for Internal API rollout.
-  9. Run HTTP smoke through a temporary kubectl port-forward.
+  10. Apply Internal API Deployment + Service.
+  11. Wait for Internal API rollout.
+  12. Run HTTP smoke through a temporary kubectl port-forward.
 
 Data policy:
   k8s down keeps the PostgreSQL PVC by default. Delete PVCs only with a
   deliberate future purge action.
+  k8s reset-data truncates mx_platform_records only. It keeps schema
+  migrations, the database, and the PVC, then restarts Internal API so
+  built-in App Center/DNS records are seeded again.
 EOF
 }
 
@@ -200,9 +289,15 @@ k8s_render() {
   [ -d "$dir" ] || die "missing k8s manifest directory: $dir"
   cat "$dir"/00-namespace.yaml
   printf '\n---\n'
+  cat "$dir"/05-serviceaccount.yaml
+  printf '\n---\n'
   cat "$dir"/10-configmap.yaml
   printf '\n---\n'
+  cat "$dir"/15-dns-control-target.yaml
+  printf '\n---\n'
   cat "$dir"/20-postgres.yaml
+  printf '\n---\n'
+  cat "$dir"/25-coredns-rbac.yaml
   printf '\n---\n'
   cat "$dir"/30-migration-job.yaml
   printf '\n---\n'
@@ -246,12 +341,18 @@ k8s_dry_run() {
   [ -d "$dir" ] || die "missing k8s manifest directory: $dir"
   say "dry-run namespace"
   kubectl apply --dry-run=client --validate=false -f "$dir/00-namespace.yaml"
+  say "dry-run serviceaccount"
+  kubectl apply --dry-run=client --validate=false -f "$dir/05-serviceaccount.yaml"
   say "dry-run configmap"
   kubectl apply --dry-run=client --validate=false -f "$dir/10-configmap.yaml"
+  say "dry-run dns control target"
+  kubectl apply --dry-run=client --validate=false -f "$dir/15-dns-control-target.yaml"
   say "dry-run generated db secret"
   k8s_secret_dry_run "$ns"
   say "dry-run postgres service/statefulset"
   kubectl apply --dry-run=client --validate=false -f "$dir/20-postgres.yaml"
+  say "dry-run coredns writer rbac"
+  kubectl apply --dry-run=client --validate=false -f "$dir/25-coredns-rbac.yaml"
   say "dry-run migration job"
   kubectl apply --dry-run=client --validate=false -f "$dir/30-migration-job.yaml"
   say "dry-run internal api service/deployment"
@@ -269,12 +370,18 @@ k8s_apply() {
 
   say "apply namespace"
   kubectl apply -f "$dir/00-namespace.yaml"
+  say "apply serviceaccount"
+  kubectl apply -f "$dir/05-serviceaccount.yaml"
   say "apply configmap"
   kubectl apply -f "$dir/10-configmap.yaml"
+  say "apply dns control target"
+  kubectl apply -f "$dir/15-dns-control-target.yaml"
   say "create/update db secret from local env"
   k8s_apply_db_secret "$ns"
   say "apply postgres service/statefulset"
   kubectl apply -f "$dir/20-postgres.yaml"
+  say "apply coredns writer rbac"
+  kubectl apply -f "$dir/25-coredns-rbac.yaml"
   say "wait postgres rollout"
   kubectl -n "$ns" rollout status statefulset/mx-internal-postgres --timeout=180s
 
@@ -306,6 +413,50 @@ k8s_logs() {
   kubectl -n "$ns" logs deploy/mx-launcher-internal --tail=120
 }
 
+k8s_remote_runner() {
+  local target="$1"
+  local state="$2"
+  local ns value
+  ns="$(k8s_namespace "$target")"
+  case "$state" in
+    enable|enabled|on|1)
+      value="1"
+      ;;
+    disable|disabled|off|0)
+      value="0"
+      ;;
+    *)
+      die "Usage: bash scripts/manage.sh ops k8s-shadow remote-runner enable|disable"
+      ;;
+  esac
+  need_kubectl
+  say "set SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=$value on Internal API deployment"
+  kubectl -n "$ns" set env deployment/mx-launcher-internal "SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=$value"
+  kubectl -n "$ns" rollout status deployment/mx-launcher-internal --timeout=180s
+}
+
+k8s_ssh_bootstrap() {
+  local target="$1"
+  local state="$2"
+  local ns value
+  ns="$(k8s_namespace "$target")"
+  case "$state" in
+    enable|enabled|on|1)
+      value="1"
+      ;;
+    disable|disabled|off|0)
+      value="0"
+      ;;
+    *)
+      die "Usage: bash scripts/manage.sh ops k8s-shadow ssh-bootstrap enable|disable"
+      ;;
+  esac
+  need_kubectl
+  say "set SITE_SLOT_SSH_PASSWORD_BOOTSTRAP_ENABLED=$value on Internal API deployment"
+  kubectl -n "$ns" set env deployment/mx-launcher-internal "SITE_SLOT_SSH_PASSWORD_BOOTSTRAP_ENABLED=$value"
+  kubectl -n "$ns" rollout status deployment/mx-launcher-internal --timeout=180s
+}
+
 k8s_db_summary() {
   local target="$1"
   local ns
@@ -321,22 +472,105 @@ k8s_db_summary() {
     -c "select kind, environment, count(*) from mx_platform_records group by kind, environment order by kind, environment;"
 }
 
+k8s_reset_data() {
+  local target="$1"
+  local ns
+  ns="$(k8s_namespace "$target")"
+  if [ "${MX_K8S_SHADOW_CONFIRM_RESET:-}" != "1" ]; then
+    die "Refusing to reset shadow data. Re-run with MX_K8S_SHADOW_CONFIRM_RESET=1 to truncate mx_platform_records."
+  fi
+  need_kubectl
+  say "before reset"
+  k8s_db_summary "$target"
+  say "truncate mx_platform_records in namespace $ns"
+  kubectl -n "$ns" exec statefulset/mx-internal-postgres -- \
+    psql -v ON_ERROR_STOP=1 -U "${PG_USER:-mx_internal}" -d "${PG_DB:-mx_internal_shadow}" \
+    -c "truncate table mx_platform_records;"
+  say "restart Internal API so built-in records are seeded again"
+  k8s_restart_internal_api "$target"
+  say "after reset"
+  k8s_db_summary "$target"
+}
+
 k8s_smoke() {
   local target="$1"
-  local port="${2:-18090}"
+  local requested_port="${2:-18090}"
+  local port
   local ns pf_pid
   ns="$(k8s_namespace "$target")"
+  port="$(k8s_smoke_port "$requested_port")"
   need_kubectl
+  say "port-forward mx-launcher-internal on 127.0.0.1:${port}"
   kubectl -n "$ns" port-forward svc/mx-launcher-internal "$port:18090" >/tmp/mx-launcher-k8s-port-forward.log 2>&1 &
   pf_pid="$!"
   sleep 2
-  if ! (cd server && pnpm run smoke:http -- "http://127.0.0.1:${port}"); then
+  if ! (cd server && MX_SMOKE_EXPECT_K8S_APPLY=1 pnpm run smoke:http -- "http://127.0.0.1:${port}"); then
     kill "$pf_pid" 2>/dev/null || true
     wait "$pf_pid" 2>/dev/null || true
     die "k8s smoke failed; see /tmp/mx-launcher-k8s-port-forward.log"
   fi
   kill "$pf_pid" 2>/dev/null || true
   wait "$pf_pid" 2>/dev/null || true
+}
+
+k8s_internal_shadow_gate() {
+  local target="$1"
+  local requested_port="${2:-18090}"
+  local ns port pf_pid gate_dir status_file db_file
+  ns="$(k8s_namespace "$target")"
+  port="$(k8s_smoke_port "$requested_port")"
+  gate_dir="$ROOT/server/artifacts/internal-shadow-gates/$(date -u +%Y%m%dT%H%M%SZ)"
+  status_file="$gate_dir/k8s-status.txt"
+  db_file="$gate_dir/db-summary.txt"
+  need_kubectl
+  mkdir -p "$gate_dir"
+  say "capture k8s rollout snapshot"
+  kubectl -n "$ns" get deploy,statefulset,pod,svc,job,pvc -o wide >"$status_file"
+  say "capture db summary"
+  k8s_db_summary "$target" >"$db_file"
+  say "port-forward mx-launcher-internal on 127.0.0.1:${port}"
+  kubectl -n "$ns" port-forward svc/mx-launcher-internal "$port:18090" >/tmp/mx-launcher-k8s-port-forward.log 2>&1 &
+  pf_pid="$!"
+  sleep 2
+  if ! (
+    cd server
+    MX_INTERNAL_SHADOW_GATE_OUTPUT_DIR="$gate_dir" \
+      MX_INTERNAL_SHADOW_GATE_K8S_STATUS_FILE="$status_file" \
+      MX_INTERNAL_SHADOW_GATE_DB_SUMMARY_FILE="$db_file" \
+      MX_INTERNAL_SHADOW_GATE_REQUIRE_K8S_FILES=1 \
+      MX_INTERNAL_SHADOW_GATE_EXPECT_K8S_APPLY=1 \
+      node scripts/internal-shadow-gate.mjs "http://127.0.0.1:${port}"
+  ); then
+    kill "$pf_pid" 2>/dev/null || true
+    wait "$pf_pid" 2>/dev/null || true
+    die "internal shadow gate failed; see $gate_dir and /tmp/mx-launcher-k8s-port-forward.log"
+  fi
+  kill "$pf_pid" 2>/dev/null || true
+  wait "$pf_pid" 2>/dev/null || true
+  say "internal shadow gate OK; evidence: $gate_dir"
+}
+
+k8s_internal_shadow_gate_manual() {
+  local target="$1"
+  local evidence_path="$2"
+  local port="${3:-18090}"
+  [ -n "$evidence_path" ] || die "Usage: bash scripts/manage.sh k8s gate-manual internal-shadow <evidence-json> [local-port]"
+  case "$evidence_path" in
+    /*)
+      ;;
+    *)
+      evidence_path="$ROOT/$evidence_path"
+      ;;
+  esac
+  MX_INTERNAL_SHADOW_MANUAL_EVIDENCE_PATH="$evidence_path" \
+    MX_INTERNAL_SHADOW_REQUIRE_MANUAL_EVIDENCE=1 \
+    k8s_internal_shadow_gate "$target" "$port"
+}
+
+internal_shadow_manual_evidence() {
+  local status="${1:-passed}"
+  shift || true
+  (cd server && node scripts/internal-shadow-manual-evidence.mjs "$status" "$@")
 }
 
 k8s_down() {
@@ -350,10 +584,15 @@ k8s_down() {
   kubectl delete -f "$dir/40-internal-api.yaml" --ignore-not-found
   say "delete migration job"
   kubectl -n "$ns" delete job mx-launcher-migrate --ignore-not-found
+  say "delete coredns writer rbac"
+  kubectl delete -f "$dir/25-coredns-rbac.yaml" --ignore-not-found
   say "delete postgres workload and service; PVC is kept"
   kubectl delete -f "$dir/20-postgres.yaml" --ignore-not-found
+  say "delete dns control target"
+  kubectl delete -f "$dir/15-dns-control-target.yaml" --ignore-not-found
   say "delete configmap and generated secret"
   kubectl delete -f "$dir/10-configmap.yaml" --ignore-not-found
+  kubectl delete -f "$dir/05-serviceaccount.yaml" --ignore-not-found
   kubectl -n "$ns" delete secret mx-launcher-db --ignore-not-found
   say "namespace and PVC are kept for safe restart"
 }
@@ -363,7 +602,26 @@ ops_guide() {
 MX Launcher local operator guide
 
 Start here:
+  cd electron-dock/mx-launcher
+  bash scripts/manage.sh
   bash scripts/manage.sh ops doctor
+
+Interactive local K8s/Internal test path:
+  1. status            confirm node/pnpm/docker/kubectl and current namespace state
+  3. k8s-plan          review the Internal K8s shadow rollout order
+  4. k8s-dry-run       validate manifests and generated DB Secret
+  7. k8s-cycle         build image, apply K8s, restart API, smoke, DB summary
+  8. k8s-gate          run Internal Shadow Gate and record Test Center evidence
+  9. k8s-smoke         rerun HTTP smoke through a temporary port-forward
+  10. k8s-db           inspect seeded Internal state
+  11. k8s-logs         inspect Internal API logs
+  12. browser          print the persistent port-forward + browser manual test steps
+  13. manual-evidence  write browser/Evidence Drawer evidence JSON after hand testing
+  17. reset-data       clear local shadow business records for a fresh manual test
+  18. remote-runner    temporarily enable/disable remote runner for true-host readonly tests
+      ssh-bootstrap    temporarily enable/disable one-time SSH password key bootstrap
+  19. oversea-readonly run a true Oversea read-only SSH probe and record worker evidence
+  20. down             stop workloads while keeping the PostgreSQL PVC
 
 Path A: Docker Compose shadow, no K8s knowledge required.
   bash scripts/manage.sh ops local-shadow plan
@@ -377,10 +635,63 @@ Path C: K8s deploy on Docker Desktop or a prepared Internal cluster.
   bash scripts/manage.sh ops k8s-shadow cycle
   bash scripts/manage.sh ops k8s-shadow apply
   bash scripts/manage.sh ops k8s-shadow status
+  bash scripts/manage.sh ops k8s-shadow gate
+  bash scripts/manage.sh ops k8s-shadow manual-evidence passed "browser manual path passed"
+  bash scripts/manage.sh ops k8s-shadow gate-manual server/artifacts/internal-shadow-gates/manual/manual-browser-evidence-xxx.json
   bash scripts/manage.sh ops k8s-shadow smoke
   bash scripts/manage.sh ops k8s-shadow db-summary
+  MX_K8S_SHADOW_CONFIRM_RESET=1 bash scripts/manage.sh ops k8s-shadow reset-data
+  bash scripts/manage.sh ops k8s-shadow remote-runner enable
+  bash scripts/manage.sh ops k8s-shadow ssh-bootstrap enable
   bash scripts/manage.sh ops k8s-shadow logs
   bash scripts/manage.sh ops k8s-shadow down
+
+Path D: Internal-owned site slot planning.
+  MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops site-slot ssh-profile-upsert oversea-main oversea oversea.example.com
+  MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops config feature-set site-slot.ssh-readonly-probe.execute true readonly-execute profile sshprof_oversea-main
+  MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops site-slot ssh-profile-readiness sshprof_oversea-main plan-only
+  SITE_SLOT_SSH_IDENTITY_FILE=/path/to/oversea_ed25519 \
+  SITE_SLOT_SSH_KNOWN_HOSTS_FILE=/path/to/known_hosts \
+  MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops site-slot oversea-readonly-test oversea-main oversea.example.com
+  SITE_SLOT_SSH_IDENTITY_FILE=/path/to/oversea_ed25519 \
+  SITE_SLOT_SSH_KNOWN_HOSTS_FILE=/path/to/known_hosts \
+  MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops site-slot oversea-remote-test oversea-main oversea.example.com pipeline
+  SITE_SLOT_CONFIRM_OVERSEA_EXECUTE=1 \
+  SITE_SLOT_SSH_IDENTITY_FILE=/path/to/oversea_ed25519 \
+  SITE_SLOT_SSH_KNOWN_HOSTS_FILE=/path/to/known_hosts \
+  MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops site-slot oversea-remote-test oversea-main oversea.example.com execute
+  MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops site-slot oversea-plan oversea.example.com
+  bash scripts/manage.sh ops site-slot materialize oversea
+  bash scripts/manage.sh ops site-slot refresh-tunnel-cli latest
+  MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops site-slot domestic-plan domestic.example.com oversea.example.com
+  MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops site-slot preflight slotplan_xxx
+  SITE_SLOT_CONFIRM_APPLY=1 MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops site-slot apply slotplan_xxx
+  MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops site-slot runner-start slotexec_xxx
+  MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops site-slot worker-job slotrunner_xxx
+  SITE_SLOT_CONFIRM_REMOTE_EXECUTION=1 MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops site-slot worker-gate slotjob_xxx confirm
+  SITE_SLOT_CONFIRM_REMOTE_EXECUTION=1 SITE_SLOT_CONFIRM_WORKER_HANDOFF=1 MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops site-slot worker-handoff slotjob_xxx confirm
+
+Path E: Admin management snapshots.
+  MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops admin dashboard
+  MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops admin actions
+  MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops admin site-slot-pipelines slotplan_xxx
 
 Mental model:
   Compose "service"      -> K8s Deployment/StatefulSet
@@ -392,6 +703,8 @@ Mental model:
 Safe cleanup:
   local-shadow down stops Compose containers and keeps the PG Docker volume.
   k8s-shadow down removes workloads and keeps the K8s PVC.
+  k8s-shadow reset-data truncates mx_platform_records, keeps migrations/PVC,
+  and restarts Internal API to re-seed built-in records.
 EOF
 }
 
@@ -405,6 +718,1011 @@ ops_doctor() {
   [ -f server/docker-compose.shadow.yml ] && say "shadow compose: OK" || say "shadow compose: missing"
   [ -d deploy/k8s/internal-shadow ] && say "k8s internal-shadow manifests: OK" || say "k8s internal-shadow manifests: missing"
   say "doctor finished. If docker/kubectl checks are missing, start Docker Desktop and enable Kubernetes before K8s apply."
+}
+
+ops_config() {
+  local action="$1"
+  shift || true
+  local base="${MX_INTERNAL_BASE_URL:-http://127.0.0.1:18090}"
+  case "$action" in
+    feature-list)
+      node -e '
+        const [base, featureKey = ""] = process.argv.slice(1);
+        const query = featureKey ? `?featureKey=${encodeURIComponent(featureKey)}` : "";
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/config-center/runtime-feature-policies${query}`);
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          console.log(JSON.stringify({
+            policies: payload.policies.map((policy) => ({
+              policyId: policy.policyId,
+              featureKey: policy.featureKey,
+              scopeKind: policy.scopeKind,
+              scopeId: policy.scopeId,
+              enabled: policy.enabled,
+              mode: policy.mode,
+              expiresAt: policy.expiresAt,
+              requiresApproval: policy.requiresApproval,
+              updatedBy: policy.updatedBy,
+              updatedAt: policy.updatedAt
+            }))
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "${1:-}"
+      ;;
+    feature-set)
+      [ "$#" -ge 2 ] || die "Usage: bash scripts/manage.sh ops config feature-set <feature-key> <true|false> [plan-only|readonly-execute|remote-execute|disabled] [global|site|profile] [scope-id]"
+      node -e '
+        const [base, featureKey, enabledRaw, mode = "plan-only", scopeKind = "global", scopeId = ""] = process.argv.slice(1);
+        const body = {
+          featureKey,
+          enabled: enabledRaw === "true" || enabledRaw === "1" || enabledRaw === "yes",
+          mode,
+          scopeKind,
+          scopeId: scopeKind === "global" ? null : scopeId || null,
+          requiresApproval: true,
+          reason: process.env.MX_RUNTIME_FEATURE_REASON || "manage.sh feature-set",
+          requestedBy: process.env.USER || "manage.sh",
+          requestId: "manage-config-feature-set"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/config-center/runtime-feature-policies`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          console.log(JSON.stringify({ policy: payload.policy }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$1" "$2" "${3:-plan-only}" "${4:-global}" "${5:-}"
+      ;;
+    *)
+      die "Usage: bash scripts/manage.sh ops config feature-list [feature-key] | feature-set <feature-key> <true|false> [plan-only|readonly-execute|remote-execute|disabled] [global|site|profile] [scope-id]"
+      ;;
+  esac
+}
+
+ops_admin() {
+  local action="$1"
+  shift || true
+  local base="${MX_INTERNAL_BASE_URL:-http://127.0.0.1:18090}"
+  case "$action" in
+    dashboard)
+      node -e '
+        const [base] = process.argv.slice(1);
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/admin/dashboard`);
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          console.log(JSON.stringify({
+            generatedAt: payload.generatedAt,
+            overview: {
+              environment: payload.overview.environment,
+              siteId: payload.overview.siteId,
+              storeDriver: payload.overview.storeDriver,
+              siteSlotPlans: payload.overview.siteSlotPlans,
+              siteSlotRollbackExecutions: payload.overview.siteSlotRollbackExecutions,
+              releaseManagementPlans: payload.overview.releaseManagementPlans,
+              testRuns: payload.overview.testRuns
+            },
+            actionPolicy: {
+              principal: payload.actionPolicy.principal,
+              warnings: payload.actionPolicy.warnings,
+              allowedActions: payload.actionPolicy.actions
+                .filter((action) => action.allowed)
+                .map((action) => action.actionId)
+            },
+            latestReleasePlans: payload.latestReleasePlans.map((plan) => ({
+              planId: plan.planId,
+              releaseId: plan.releaseId,
+              readyToPromote: plan.decisions.readyToPromote,
+              gate: plan.test.gate.verdict,
+              createdAt: plan.createdAt
+            })),
+            siteSlotPipelines: payload.siteSlotPipelines.map((pipeline) => ({
+              planId: pipeline.planId,
+              siteId: pipeline.siteId,
+              kind: pipeline.kind,
+              health: pipeline.health,
+              currentStage: pipeline.currentStage,
+              latestStatus: pipeline.latestStatus,
+              counts: pipeline.counts,
+              latestUpdatedAt: pipeline.latestUpdatedAt
+            })),
+            nextActions: payload.nextActions
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base"
+      ;;
+    actions)
+      node -e '
+        const [base, token = ""] = process.argv.slice(1);
+        const query = token ? `?token=${encodeURIComponent(token)}` : "";
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/admin/actions${query}`);
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          console.log(JSON.stringify({
+            principal: payload.actionPolicy.principal,
+            warnings: payload.actionPolicy.warnings,
+            actions: payload.actionPolicy.actions.map((action) => ({
+              actionId: action.actionId,
+              label: action.label,
+              category: action.category,
+              gate: action.gate,
+              risk: action.risk,
+              allowed: action.allowed,
+              reason: action.reason,
+              requiredScopes: action.requiredScopes
+            }))
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "${1:-}"
+      ;;
+    site-slot-pipelines)
+      node -e '
+        const [base, planId = ""] = process.argv.slice(1);
+        const path = planId
+          ? `/internal/v1/admin/site-slots/pipelines/${encodeURIComponent(planId)}`
+          : "/internal/v1/admin/site-slots/pipelines";
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}${path}`);
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          if (payload.pipeline) {
+            const pipeline = payload.pipeline;
+            console.log(JSON.stringify({
+              summary: pipeline.summary,
+              executions: pipeline.executions.map((execution) => ({
+                runId: execution.runId,
+                action: execution.action,
+                mode: execution.mode,
+                status: execution.status,
+                createdAt: execution.createdAt
+              })),
+              runnerSessions: pipeline.runnerSessions.map((session) => ({
+                sessionId: session.sessionId,
+                runId: session.runId,
+                mode: session.mode,
+                status: session.status,
+                startedAt: session.startedAt,
+                finishedAt: session.finishedAt
+              })),
+              workerJobs: pipeline.workerJobs.map((job) => ({
+                jobId: job.jobId,
+                sessionId: job.sessionId,
+                worker: job.worker,
+                status: job.status,
+                currentReportId: job.currentReportId
+              })),
+              workerReports: pipeline.workerReports.map((report) => ({
+                reportId: report.reportId,
+                jobId: report.jobId,
+                status: report.status,
+                rollbackPlanId: report.rollbackPlan?.rollbackPlanId || null
+              })),
+              rollbackExecutions: pipeline.rollbackExecutions.map((execution) => ({
+                rollbackExecutionId: execution.rollbackExecutionId,
+                sourceReportId: execution.sourceReportId,
+                status: execution.status,
+                currentRollbackReportId: execution.currentRollbackReportId
+              })),
+              rollbackReports: pipeline.rollbackReports.map((report) => ({
+                rollbackReportId: report.rollbackReportId,
+                rollbackExecutionId: report.rollbackExecutionId,
+                status: report.status
+              })),
+              timeline: pipeline.timeline
+            }, null, 2));
+            return;
+          }
+          console.log(JSON.stringify({
+            pipelines: payload.pipelines.map((pipeline) => ({
+              summary: pipeline.summary,
+              lastTimelineEntry: pipeline.timeline[pipeline.timeline.length - 1] || null
+            }))
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "${1:-}"
+      ;;
+    *)
+      die "Usage: bash scripts/manage.sh ops admin dashboard | actions [token] | site-slot-pipelines [plan-id]"
+      ;;
+  esac
+}
+
+ops_site_slot() {
+  local action="$1"
+  shift || true
+  local base="${MX_INTERNAL_BASE_URL:-http://127.0.0.1:18090}"
+  case "$action" in
+    materialize)
+      [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all]"
+      node server/scripts/site-slot-artifact-materializer.mjs "${1:-all}"
+      ;;
+    refresh-tunnel-cli)
+      node server/scripts/site-slot-refresh-tunnel-cli.mjs "$@"
+      ;;
+    ssh-profiles)
+      node -e '
+        const [base] = process.argv.slice(1);
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/config-center/site-slot-ssh-profiles`);
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          console.log(JSON.stringify({
+            profiles: payload.profiles.map((profile) => ({
+              profileId: profile.profileId,
+              siteId: profile.siteId,
+              kind: profile.kind,
+              host: profile.host,
+              sshUser: profile.sshUser,
+              sshPort: profile.sshPort,
+              identityFile: profile.identityFile,
+              knownHostsFile: profile.knownHostsFile,
+              hostKeyAlias: profile.hostKeyAlias,
+              strictHostKeyChecking: profile.strictHostKeyChecking,
+              connectTimeoutSeconds: profile.connectTimeoutSeconds,
+              batchMode: profile.batchMode,
+              status: profile.status,
+              warnings: profile.warnings,
+              updatedAt: profile.updatedAt
+            }))
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base"
+      ;;
+    ssh-profile-upsert)
+      [ "$#" -ge 2 ] || die "Usage: bash scripts/manage.sh ops site-slot ssh-profile-upsert <site-id> <domestic|oversea> [host]"
+      node -e '
+        const [base, siteId, kind, host = ""] = process.argv.slice(1);
+        const body = {
+          profileId: process.env.SITE_SLOT_SSH_PROFILE_ID || `sshprof_${siteId.replace(/[^a-zA-Z0-9._-]/g, "_")}`,
+          siteId,
+          kind,
+          host: host || process.env.SITE_SLOT_HOST || null,
+          sshUser: process.env.SLOT_SSH_USER || "root",
+          sshPort: Number(process.env.SLOT_SSH_PORT || "22"),
+          identityFile: process.env.SITE_SLOT_SSH_IDENTITY_FILE || null,
+          knownHostsFile: process.env.SITE_SLOT_SSH_KNOWN_HOSTS_FILE || null,
+          hostKeyAlias: process.env.SITE_SLOT_SSH_HOST_KEY_ALIAS || siteId,
+          strictHostKeyChecking: process.env.SITE_SLOT_SSH_STRICT_HOST_KEY_CHECKING || "yes",
+          connectTimeoutSeconds: Number(process.env.SITE_SLOT_SSH_CONNECT_TIMEOUT_SECONDS || "10"),
+          batchMode: process.env.SITE_SLOT_SSH_BATCH_MODE || "yes",
+          status: process.env.SITE_SLOT_SSH_PROFILE_STATUS || "active",
+          requestedBy: process.env.USER || "manage.sh",
+          requestId: "manage-site-slot-ssh-profile-upsert"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/config-center/site-slot-ssh-profiles`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          const profile = payload.profile;
+          console.log(JSON.stringify({
+            profileId: profile.profileId,
+            siteId: profile.siteId,
+            kind: profile.kind,
+            host: profile.host,
+            sshUser: profile.sshUser,
+            sshPort: profile.sshPort,
+            identityFile: profile.identityFile,
+            knownHostsFile: profile.knownHostsFile,
+            hostKeyAlias: profile.hostKeyAlias,
+            strictHostKeyChecking: profile.strictHostKeyChecking,
+            connectTimeoutSeconds: profile.connectTimeoutSeconds,
+            batchMode: profile.batchMode,
+            status: profile.status,
+            warnings: profile.warnings,
+            updatedAt: profile.updatedAt
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$1" "$2" "${3:-}"
+      ;;
+    ssh-profile-readiness)
+      [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot ssh-profile-readiness <profile-id> [plan-only|execute]"
+      node -e '
+        const [base, profileId, mode = "plan-only"] = process.argv.slice(1);
+        const body = {
+          confirmReadOnlyProbe: true,
+          executeReadOnlyProbe: mode === "execute",
+          requestedBy: process.env.USER || "manage.sh",
+          requestId: "manage-site-slot-ssh-profile-readiness"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/config-center/site-slot-ssh-profiles/${encodeURIComponent(profileId)}/readiness-probe`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          const readiness = payload.readiness;
+          console.log(JSON.stringify({
+            probeId: readiness.probeId,
+            profileId: readiness.profileId,
+            siteId: readiness.siteId,
+            kind: readiness.kind,
+            status: readiness.status,
+            verdict: readiness.verdict,
+            mode: readiness.mode,
+            execution: readiness.execution,
+            boundary: readiness.boundary,
+            sshProfile: readiness.sshProfile,
+            command: readiness.command,
+            env: readiness.env,
+            gates: readiness.gates,
+            gateFailures: readiness.gateFailures,
+            executionFailures: readiness.executionFailures,
+            executionResult: readiness.executionResult,
+            nextActions: readiness.nextActions
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$1" "${2:-plan-only}"
+      ;;
+    oversea-readonly-test)
+      [ "$#" -ge 2 ] || die "Usage: SITE_SLOT_SSH_IDENTITY_FILE=/path/key SITE_SLOT_SSH_KNOWN_HOSTS_FILE=/path/known_hosts bash scripts/manage.sh ops site-slot oversea-readonly-test <site-id> <host>"
+      node server/scripts/site-slot-oversea-readonly-test.mjs "$base" "$1" "$2"
+      ;;
+    oversea-remote-test)
+      [ "$#" -ge 2 ] || die "Usage: SITE_SLOT_SSH_IDENTITY_FILE=/path/key SITE_SLOT_SSH_KNOWN_HOSTS_FILE=/path/known_hosts bash scripts/manage.sh ops site-slot oversea-remote-test <site-id> <host> [pipeline|dry-run|plan-only|readonly|execute]"
+      node server/scripts/site-slot-oversea-remote-test.mjs "$base" "$1" "$2" "${3:-pipeline}"
+      ;;
+    domestic-plan)
+      [ "$#" -ge 1 ] || [ -n "${SITE_SLOT_SSH_PROFILE_ID:-}" ] || die "Usage: bash scripts/manage.sh ops site-slot domestic-plan <domestic-host|-> [oversea-host]"
+      local domestic_host="${1:-}"
+      local oversea_host="${2:-}"
+      [ "$domestic_host" = "-" ] && domestic_host=""
+      node -e '
+        const [base, host = "", overseaHost = ""] = process.argv.slice(1);
+        const body = {
+          kind: "domestic",
+          siteId: process.env.SLOT_SITE_ID || "domestic-main",
+          sshProfileId: process.env.SITE_SLOT_SSH_PROFILE_ID || null,
+          host: host || null,
+          sshUser: process.env.SLOT_SSH_USER || "root",
+          sshPort: Number(process.env.SLOT_SSH_PORT || "22"),
+          rootAccess: process.env.SLOT_ROOT_ACCESS !== "0",
+          hasDocker: process.env.SLOT_HAS_DOCKER !== "0",
+          hasOutboundInternet: process.env.DOMESTIC_HAS_OUTBOUND === "1",
+          overseaSiteId: process.env.OVERSEA_SITE_ID || (overseaHost ? "oversea-main" : null),
+          overseaHost: overseaHost || null,
+          internalBaseUrl: base.replace(/\/+$/, ""),
+          createdBy: process.env.USER || "manage.sh",
+          requestId: "manage-domestic-slot-plan"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/site-slots/plans`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          const plan = payload.plan;
+          console.log(JSON.stringify({
+            planId: plan.planId,
+            siteId: plan.siteId,
+            kind: plan.kind,
+            status: plan.status,
+            ssh: plan.ssh,
+            networkMode: plan.network.mode,
+            qpTunnelCliMode: plan.network.qpTunnelCliMode,
+            hostServices: plan.services.hostServices,
+            dockerStacks: plan.services.dockerStacks,
+            warnings: plan.warnings,
+            nextActions: plan.nextActions,
+            preflightChecks: plan.preflightChecks.map((row) => ({ checkId: row.checkId, severity: row.severity, command: row.command })),
+            deploymentPhases: plan.deploymentPhases.map((row) => ({ phaseId: row.phaseId, mode: row.mode, target: row.target }))
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$domestic_host" "$oversea_host"
+      ;;
+    oversea-plan)
+      [ "$#" -ge 1 ] || [ -n "${SITE_SLOT_SSH_PROFILE_ID:-}" ] || die "Usage: bash scripts/manage.sh ops site-slot oversea-plan <oversea-host|->"
+      local oversea_host="${1:-}"
+      [ "$oversea_host" = "-" ] && oversea_host=""
+      node -e '
+        const [base, host = ""] = process.argv.slice(1);
+        const body = {
+          kind: "oversea",
+          siteId: process.env.SLOT_SITE_ID || process.env.OVERSEA_SITE_ID || "oversea-main",
+          sshProfileId: process.env.SITE_SLOT_SSH_PROFILE_ID || null,
+          host: host || null,
+          sshUser: process.env.SLOT_SSH_USER || "root",
+          sshPort: Number(process.env.SLOT_SSH_PORT || "22"),
+          rootAccess: process.env.SLOT_ROOT_ACCESS !== "0",
+          hasDocker: process.env.SLOT_HAS_DOCKER !== "0",
+          hasOutboundInternet: true,
+          internalBaseUrl: base.replace(/\/+$/, ""),
+          createdBy: process.env.USER || "manage.sh",
+          requestId: "manage-oversea-slot-plan"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/site-slots/plans`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          const plan = payload.plan;
+          console.log(JSON.stringify({
+            planId: plan.planId,
+            siteId: plan.siteId,
+            kind: plan.kind,
+            status: plan.status,
+            ssh: plan.ssh,
+            qpTunnelCliMode: plan.network.qpTunnelCliMode,
+            dockerStacks: plan.services.dockerStacks,
+            warnings: plan.warnings,
+            nextActions: plan.nextActions,
+            preflightChecks: plan.preflightChecks.map((row) => ({ checkId: row.checkId, severity: row.severity, command: row.command })),
+            deploymentPhases: plan.deploymentPhases.map((row) => ({ phaseId: row.phaseId, mode: row.mode, target: row.target }))
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$oversea_host"
+      ;;
+    preflight)
+      [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot preflight <plan-id> [dry-run|manual|ssh]"
+      node -e '
+        const [base, planId, mode = "dry-run"] = process.argv.slice(1);
+        const body = {
+          mode,
+          requestedBy: process.env.USER || "manage.sh",
+          requestId: "manage-site-slot-preflight"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/site-slots/plans/${encodeURIComponent(planId)}/preflight`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          const run = payload.execution;
+          console.log(JSON.stringify({
+            runId: run.runId,
+            planId: run.planId,
+            siteId: run.siteId,
+            kind: run.kind,
+            action: run.action,
+            mode: run.mode,
+            status: run.status,
+            dryRun: run.dryRun,
+            remoteExecution: run.remoteExecution,
+            warnings: run.warnings,
+            nextActions: run.nextActions,
+            steps: run.steps.map((step) => ({
+              order: step.order,
+              sourceId: step.sourceId,
+              target: step.target,
+              requiresRoot: step.requiresRoot,
+              command: step.command,
+              expected: step.expected
+            }))
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$1" "${2:-dry-run}"
+      ;;
+    apply)
+      [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot apply <plan-id> [manual|dry-run|ssh]"
+      node -e '
+        const [base, planId, mode = "manual"] = process.argv.slice(1);
+        const body = {
+          mode,
+          confirmApply: process.env.SITE_SLOT_CONFIRM_APPLY === "1",
+          requestedBy: process.env.USER || "manage.sh",
+          requestId: "manage-site-slot-apply"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/site-slots/plans/${encodeURIComponent(planId)}/apply`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          const run = payload.execution;
+          console.log(JSON.stringify({
+            runId: run.runId,
+            planId: run.planId,
+            siteId: run.siteId,
+            kind: run.kind,
+            action: run.action,
+            mode: run.mode,
+            status: run.status,
+            dryRun: run.dryRun,
+            confirmApply: run.confirmApply,
+            remoteExecution: run.remoteExecution,
+            gates: run.gates,
+            warnings: run.warnings,
+            nextActions: run.nextActions,
+            steps: run.steps.map((step) => ({
+              order: step.order,
+              sourceId: step.sourceId,
+              target: step.target,
+              requiresRoot: step.requiresRoot,
+              command: step.command,
+              expected: step.expected
+            }))
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$1" "${2:-manual}"
+      ;;
+    executions)
+      node -e '
+        const [base, planId = ""] = process.argv.slice(1);
+        const query = planId ? `?planId=${encodeURIComponent(planId)}` : "";
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/site-slots/executions${query}`);
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          console.log(JSON.stringify({
+            executions: payload.executions.map((run) => ({
+              runId: run.runId,
+              planId: run.planId,
+              siteId: run.siteId,
+              kind: run.kind,
+              action: run.action,
+              mode: run.mode,
+              status: run.status,
+              stepCount: run.steps.length,
+              createdAt: run.createdAt
+            }))
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "${1:-}"
+      ;;
+    runner-start)
+      [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot runner-start <run-id> [simulate|remote-ssh]"
+      node -e '
+        const [base, runId, mode = "simulate"] = process.argv.slice(1);
+        const body = {
+          mode,
+          confirmRemoteExecution: process.env.SITE_SLOT_CONFIRM_REMOTE_EXECUTION === "1",
+          requestedBy: process.env.USER || "manage.sh",
+          requestId: "manage-site-slot-runner-start"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/site-slots/executions/${encodeURIComponent(runId)}/runner-sessions`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          const session = payload.session;
+          console.log(JSON.stringify({
+            sessionId: session.sessionId,
+            runId: session.runId,
+            planId: session.planId,
+            siteId: session.siteId,
+            kind: session.kind,
+            mode: session.mode,
+            status: session.status,
+            dryRun: session.dryRun,
+            confirmRemoteExecution: session.confirmRemoteExecution,
+            gates: session.gates,
+            warnings: session.warnings,
+            nextActions: session.nextActions,
+            stepResults: session.stepResults.map((step) => ({
+              order: step.order,
+              sourceId: step.sourceId,
+              target: step.target,
+              status: step.status,
+              exitCode: step.exitCode,
+              command: step.command,
+              output: step.output,
+              error: step.error
+            }))
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$1" "${2:-simulate}"
+      ;;
+    runner-sessions)
+      node -e '
+        const [base, runId = ""] = process.argv.slice(1);
+        const query = runId ? `?runId=${encodeURIComponent(runId)}` : "";
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/site-slots/runner-sessions${query}`);
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          console.log(JSON.stringify({
+            sessions: payload.sessions.map((session) => ({
+              sessionId: session.sessionId,
+              runId: session.runId,
+              planId: session.planId,
+              siteId: session.siteId,
+              kind: session.kind,
+              mode: session.mode,
+              status: session.status,
+              stepCount: session.stepResults.length,
+              startedAt: session.startedAt,
+              finishedAt: session.finishedAt
+            }))
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "${1:-}"
+      ;;
+    worker-job)
+      [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot worker-job <session-id>"
+      node -e '
+        const [base, sessionId] = process.argv.slice(1);
+        const body = {
+          workerId: process.env.SITE_SLOT_WORKER_ID || "worker-manage-shadow",
+          workerKind: process.env.SITE_SLOT_WORKER_KIND || "internal-runner",
+          approvalId: process.env.SITE_SLOT_APPROVAL_ID || null,
+          changeWindowStart: process.env.SITE_SLOT_CHANGE_WINDOW_START || null,
+          changeWindowEnd: process.env.SITE_SLOT_CHANGE_WINDOW_END || null,
+          retryLimit: Number(process.env.SITE_SLOT_RETRY_LIMIT || "1"),
+          rollbackStrategy: process.env.SITE_SLOT_ROLLBACK_STRATEGY || "no-op-simulated-rollback",
+          requestedBy: process.env.USER || "manage.sh",
+          requestId: "manage-site-slot-worker-job"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/site-slots/runner-sessions/${encodeURIComponent(sessionId)}/worker-jobs`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          const job = payload.job;
+          console.log(JSON.stringify({
+            jobId: job.jobId,
+            contractVersion: job.contractVersion,
+            sessionId: job.sessionId,
+            runId: job.runId,
+            planId: job.planId,
+            siteId: job.siteId,
+            kind: job.kind,
+            mode: job.mode,
+            status: job.status,
+            dryRun: job.dryRun,
+            worker: job.worker,
+            approval: job.approval,
+            changeWindow: job.changeWindow,
+            retryPolicy: job.retryPolicy,
+            rollbackPolicy: job.rollbackPolicy,
+            warnings: job.warnings,
+            nextActions: job.nextActions,
+            steps: job.steps.map((step) => ({
+              order: step.order,
+              stepId: step.stepId,
+              sourceId: step.sourceId,
+              target: step.target,
+              requiresRoot: step.requiresRoot,
+              timeoutSeconds: step.timeoutSeconds,
+              stopOnFailure: step.stopOnFailure,
+              redactOutput: step.redactOutput,
+              command: step.command
+            }))
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$1"
+      ;;
+    worker-gate)
+      [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot worker-gate <job-id> [confirm]"
+      node -e '
+        const [base, jobId, confirm = ""] = process.argv.slice(1);
+        const body = {
+          confirmRemoteExecution: process.env.SITE_SLOT_CONFIRM_REMOTE_EXECUTION === "1" || confirm === "confirm" || confirm === "true",
+          requestedBy: process.env.USER || "manage.sh",
+          requestId: "manage-site-slot-worker-gate"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/site-slots/worker-jobs/${encodeURIComponent(jobId)}/remote-ssh-gate`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          const gate = payload.gate;
+          console.log(JSON.stringify({
+            gateId: gate.gateId,
+            jobId: gate.jobId,
+            planId: gate.planId,
+            siteId: gate.siteId,
+            kind: gate.kind,
+            status: gate.status,
+            verdict: gate.verdict,
+            execution: gate.execution,
+            boundary: gate.boundary,
+            confirmRemoteExecution: gate.confirmRemoteExecution,
+            environmentGates: gate.environmentGates,
+            sshProfile: gate.sshProfile,
+            summary: gate.summary,
+            jobGateFailures: gate.jobGateFailures,
+            gateFailures: gate.gateFailures,
+            nextActions: gate.nextActions,
+            stepGates: gate.stepGates.map((step) => ({
+              order: step.order,
+              stepId: step.stepId,
+              sourceId: step.sourceId,
+              target: step.target,
+              commandKind: step.commandKind,
+              execution: step.execution,
+              status: step.status,
+              transport: step.transport,
+              artifactReferences: step.artifactReferences,
+              gateFailures: step.gateFailures
+            }))
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$1" "${2:-}"
+      ;;
+    worker-handoff)
+      [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot worker-handoff <job-id> [confirm]"
+      node -e '
+        const [base, jobId, confirm = ""] = process.argv.slice(1);
+        const confirmed = confirm === "confirm" || confirm === "true";
+        const body = {
+          confirmRemoteExecution: process.env.SITE_SLOT_CONFIRM_REMOTE_EXECUTION === "1" || confirmed,
+          confirmWorkerHandoff: process.env.SITE_SLOT_CONFIRM_WORKER_HANDOFF === "1" || confirmed,
+          internalBaseUrl: process.env.MX_INTERNAL_BASE_URL || base.replace(/\/+$/, ""),
+          requestedBy: process.env.USER || "manage.sh",
+          requestId: "manage-site-slot-worker-handoff"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/site-slots/worker-jobs/${encodeURIComponent(jobId)}/run-artifact-push-remote-ssh`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          const gate = payload.gate;
+          const handoff = payload.workerHandoff;
+          console.log(JSON.stringify({
+            gate: {
+              gateId: gate.gateId,
+              status: gate.status,
+              verdict: gate.verdict,
+              gateFailures: gate.gateFailures,
+              summary: gate.summary,
+              sshProfile: gate.sshProfile
+            },
+            workerHandoff: handoff
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$1" "${2:-}"
+      ;;
+    worker-run)
+      [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|local-exec]"
+      node server/scripts/site-slot-worker-run.mjs "$base" "$1" "${2:-simulate}"
+      ;;
+    worker-report)
+      [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot worker-report <job-id> [running|passed|failed|blocked]"
+      node -e '
+        const [base, jobId, status = "passed"] = process.argv.slice(1);
+        const body = {
+          workerId: process.env.SITE_SLOT_WORKER_ID || "worker-manage-shadow",
+          status,
+          message: process.env.SITE_SLOT_WORKER_MESSAGE || `manage.sh worker report ${status}`,
+          stepReports: process.env.SITE_SLOT_WORKER_STEP_ID ? [{
+            stepId: process.env.SITE_SLOT_WORKER_STEP_ID,
+            status,
+            exitCode: status === "passed" ? 0 : null,
+            stdout: process.env.SITE_SLOT_WORKER_STDOUT || null,
+            stderr: process.env.SITE_SLOT_WORKER_STDERR || null,
+            attempt: Number(process.env.SITE_SLOT_WORKER_ATTEMPT || "1")
+          }] : [],
+          requestId: "manage-site-slot-worker-report"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/site-slots/worker-jobs/${encodeURIComponent(jobId)}/reports`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          const report = payload.report;
+          console.log(JSON.stringify({
+            reportId: report.reportId,
+            jobId: report.jobId,
+            sessionId: report.sessionId,
+            runId: report.runId,
+            planId: report.planId,
+            siteId: report.siteId,
+            workerId: report.workerId,
+            status: report.status,
+            message: report.message,
+            rollbackPlan: report.rollbackPlan,
+            nextActions: report.nextActions,
+            stepReports: report.stepReports.map((step) => ({
+              order: step.order,
+              stepId: step.stepId,
+              sourceId: step.sourceId,
+              status: step.status,
+              exitCode: step.exitCode,
+              stdout: step.stdout,
+              stderr: step.stderr,
+              attempt: step.attempt
+            }))
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$1" "${2:-passed}"
+      ;;
+    rollback-start)
+      [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot rollback-start <report-id> [simulate|manual]"
+      node -e '
+        const [base, reportId, mode = "simulate"] = process.argv.slice(1);
+        const body = {
+          mode,
+          confirmRollback: process.env.SITE_SLOT_CONFIRM_ROLLBACK === "1",
+          requestedBy: process.env.USER || "manage.sh",
+          requestId: "manage-site-slot-rollback-start"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/site-slots/worker-reports/${encodeURIComponent(reportId)}/rollback-executions`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          const execution = payload.rollbackExecution;
+          console.log(JSON.stringify({
+            rollbackExecutionId: execution.rollbackExecutionId,
+            contractVersion: execution.contractVersion,
+            rollbackPlanId: execution.rollbackPlanId,
+            sourceReportId: execution.sourceReportId,
+            jobId: execution.jobId,
+            sessionId: execution.sessionId,
+            runId: execution.runId,
+            planId: execution.planId,
+            siteId: execution.siteId,
+            mode: execution.mode,
+            status: execution.status,
+            dryRun: execution.dryRun,
+            confirmRollback: execution.confirmRollback,
+            gates: execution.gates,
+            warnings: execution.warnings,
+            rollbackPlan: execution.rollbackPlan,
+            nextActions: execution.nextActions,
+            stepResults: execution.stepResults.map((step) => ({
+              order: step.order,
+              stepId: step.stepId,
+              target: step.target,
+              status: step.status,
+              exitCode: step.exitCode,
+              command: step.command,
+              output: step.output,
+              error: step.error
+            }))
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$1" "${2:-simulate}"
+      ;;
+    rollback-report)
+      [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot rollback-report <rollback-execution-id> [running|passed|failed|blocked]"
+      node -e '
+        const [base, rollbackExecutionId, status = "passed"] = process.argv.slice(1);
+        const body = {
+          workerId: process.env.SITE_SLOT_ROLLBACK_WORKER_ID || process.env.SITE_SLOT_WORKER_ID || "worker-manage-shadow",
+          status,
+          message: process.env.SITE_SLOT_ROLLBACK_MESSAGE || `manage.sh rollback report ${status}`,
+          stepReports: process.env.SITE_SLOT_ROLLBACK_STEP_ID ? [{
+            stepId: process.env.SITE_SLOT_ROLLBACK_STEP_ID,
+            status,
+            exitCode: status === "passed" ? 0 : null,
+            stdout: process.env.SITE_SLOT_ROLLBACK_STDOUT || null,
+            stderr: process.env.SITE_SLOT_ROLLBACK_STDERR || null,
+            attempt: Number(process.env.SITE_SLOT_ROLLBACK_ATTEMPT || "1")
+          }] : [],
+          requestId: "manage-site-slot-rollback-report"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/site-slots/rollback-executions/${encodeURIComponent(rollbackExecutionId)}/reports`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          const report = payload.rollbackReport;
+          console.log(JSON.stringify({
+            rollbackReportId: report.rollbackReportId,
+            rollbackExecutionId: report.rollbackExecutionId,
+            rollbackPlanId: report.rollbackPlanId,
+            sourceReportId: report.sourceReportId,
+            jobId: report.jobId,
+            sessionId: report.sessionId,
+            runId: report.runId,
+            planId: report.planId,
+            siteId: report.siteId,
+            workerId: report.workerId,
+            status: report.status,
+            message: report.message,
+            nextActions: report.nextActions,
+            stepReports: report.stepReports.map((step) => ({
+              order: step.order,
+              stepId: step.stepId,
+              target: step.target,
+              status: step.status,
+              exitCode: step.exitCode,
+              stdout: step.stdout,
+              stderr: step.stderr,
+              attempt: step.attempt
+            }))
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$1" "${2:-passed}"
+      ;;
+    *)
+      die "Usage: bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all] | refresh-tunnel-cli [version|--from-local DIR] | ssh-profiles | ssh-profile-upsert <site-id> <domestic|oversea> [host] | ssh-profile-readiness <profile-id> [plan-only|execute] | oversea-readonly-test <site-id> <host> | oversea-remote-test <site-id> <host> [pipeline|dry-run|plan-only|readonly|execute] | domestic-plan <domestic-host|-> [oversea-host] | oversea-plan <oversea-host|-> | preflight <plan-id> [dry-run|manual|ssh] | apply <plan-id> [manual|dry-run|ssh] | executions [plan-id] | runner-start <run-id> [simulate|remote-ssh] | runner-sessions [run-id] | worker-job <session-id> | worker-gate <job-id> [confirm] | worker-handoff <job-id> [confirm] | worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|local-exec] | worker-report <job-id> [running|passed|failed|blocked] | rollback-start <report-id> [simulate|manual] | rollback-report <rollback-execution-id> [running|passed|failed|blocked]"
+      ;;
+  esac
 }
 
 ops_local_shadow_plan() {
@@ -432,10 +1750,11 @@ ops_local_shadow() {
       ops_local_shadow_plan
       ;;
     build)
-      (cd server && docker compose -f docker-compose.shadow.yml build internal)
+      shadow_image_build
       ;;
     up)
       (cd server && docker compose -f docker-compose.shadow.yml up -d)
+      wait_http_ready "http://127.0.0.1:18090/readyz" 60
       ;;
     status)
       docker ps --filter name=mx- --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
@@ -471,6 +1790,22 @@ ops_k8s_shadow_plan() {
   k8s_plan internal-shadow
   printf '\n'
   k8s_explain internal-shadow
+  cat <<'EOF'
+
+Local shadow image flow
+  - ops k8s-shadow cycle builds qpjoy/mx-launcher-server:shadow before apply.
+  - The shadow tag is reused locally, so cycle restarts the Internal API
+    Deployment after apply. A new Pod then resolves the rebuilt local image.
+EOF
+}
+
+k8s_restart_internal_api() {
+  local target="$1"
+  local ns
+  ns="$(k8s_namespace "$target")"
+  need_kubectl
+  kubectl -n "$ns" rollout restart deployment/mx-launcher-internal
+  kubectl -n "$ns" rollout status deployment/mx-launcher-internal --timeout=180s
 }
 
 ops_k8s_shadow() {
@@ -482,10 +1817,17 @@ ops_k8s_shadow() {
     dry-run)
       k8s_dry_run internal-shadow
       ;;
+    build)
+      shadow_image_build
+      ;;
     cycle)
       ops_k8s_shadow_plan
+      say "build image"
+      shadow_image_build
       say "apply"
       k8s_apply internal-shadow
+      say "restart internal api for rebuilt local image"
+      k8s_restart_internal_api internal-shadow
       say "status"
       k8s_status internal-shadow
       say "smoke"
@@ -503,19 +1845,335 @@ ops_k8s_shadow() {
     smoke)
       k8s_smoke internal-shadow "${2:-18090}"
       ;;
+    gate)
+      k8s_internal_shadow_gate internal-shadow "${2:-18090}"
+      ;;
+    gate-manual)
+      [ "$#" -ge 2 ] && [ "$#" -le 3 ] || die "Usage: bash scripts/manage.sh ops k8s-shadow gate-manual <evidence-json> [local-port]"
+      k8s_internal_shadow_gate_manual internal-shadow "$2" "${3:-18090}"
+      ;;
+    manual-evidence)
+      shift || true
+      internal_shadow_manual_evidence "$@"
+      ;;
     logs)
       k8s_logs internal-shadow
       ;;
     db-summary)
       k8s_db_summary internal-shadow
       ;;
+    reset-data)
+      k8s_reset_data internal-shadow
+      ;;
+    remote-runner)
+      shift || true
+      [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh ops k8s-shadow remote-runner enable|disable"
+      k8s_remote_runner internal-shadow "$1"
+      ;;
+    ssh-bootstrap)
+      shift || true
+      [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh ops k8s-shadow ssh-bootstrap enable|disable"
+      k8s_ssh_bootstrap internal-shadow "$1"
+      ;;
     down)
       k8s_down internal-shadow
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops k8s-shadow plan|dry-run|cycle|apply|status|smoke|logs|db-summary|down"
+      die "Usage: bash scripts/manage.sh ops k8s-shadow plan|dry-run|cycle|build|apply|status|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|ssh-bootstrap enable|disable|down"
       ;;
   esac
+}
+
+menu_status() {
+  ops_doctor || true
+  printf '\n'
+
+  if command -v kubectl >/dev/null 2>&1; then
+    local ns
+    ns="$(k8s_namespace internal-shadow)"
+    say "k8s namespace: $ns"
+    kubectl -n "$ns" get deploy,statefulset,pod,svc,job,pvc 2>/dev/null || say "k8s shadow is not running yet"
+  else
+    say "kubectl is missing; start Docker Desktop Kubernetes or install kubectl before K8s tests"
+  fi
+}
+
+menu_browser_plan() {
+  cat <<'EOF'
+Browser manual test path for local K8s Internal:
+
+Terminal 1: keep the Internal API exposed while you test.
+  cd electron-dock/mx-launcher
+  kubectl -n mx-internal-shadow port-forward svc/mx-launcher-internal 18090:18090
+
+Terminal 2: serve the browser-friendly Launcher UI shell.
+  cd electron-dock/mx-launcher
+  python3 -m http.server 18110 --directory desktop
+
+Browser:
+  http://127.0.0.1:18110/index.html
+
+Manual checks:
+  1. Server URL is http://127.0.0.1:18090.
+  2. App Center loads HDO without console errors.
+  3. Switch to Admin and click Refresh.
+  4. Confirm dashboard metrics, topology, action list, and site-slot pipelines render.
+  5. Create or reuse an SSH Profile, then create a plan from it.
+  6. Run Preflight, Apply, Runner, Worker Job, and plan-only/dry-run worker actions.
+  7. Open Evidence Drawer and verify execution, runner, worker job, and report details.
+
+Record manual evidence after checks:
+  bash scripts/manage.sh ops k8s-shadow manual-evidence passed "browser manual path passed"
+
+Run gate with manual evidence required:
+  bash scripts/manage.sh ops k8s-shadow gate-manual server/artifacts/internal-shadow-gates/manual/manual-browser-evidence-xxx.json
+
+Non-interactive equivalents:
+  bash scripts/manage.sh ops k8s-shadow cycle
+  bash scripts/manage.sh ops k8s-shadow gate
+  bash scripts/manage.sh ops k8s-shadow manual-evidence passed "browser manual path passed"
+  bash scripts/manage.sh ops k8s-shadow smoke
+  bash scripts/manage.sh ops k8s-shadow db-summary
+  MX_K8S_SHADOW_CONFIRM_RESET=1 bash scripts/manage.sh ops k8s-shadow reset-data
+  bash scripts/manage.sh ops k8s-shadow logs
+EOF
+}
+
+menu_reset_data() {
+  cat <<'EOF'
+This will clear local K8s shadow business records:
+  table: mx_platform_records
+
+It keeps:
+  - mx_schema_migrations
+  - the PostgreSQL database and PVC
+  - K8s namespace/workloads
+
+After truncating records, Internal API is restarted so built-in App Center/DNS
+records are seeded again.
+EOF
+  printf '\nType reset to continue> '
+  local confirm
+  IFS= read -r confirm || return 0
+  if [ "$confirm" != "reset" ]; then
+    say "reset-data cancelled"
+    return 0
+  fi
+  MX_K8S_SHADOW_CONFIRM_RESET=1 k8s_reset_data internal-shadow
+}
+
+menu_manual_evidence() {
+  printf 'Manual evidence status [passed/failed/blocked] (default passed)> '
+  local status
+  IFS= read -r status || return 0
+  status="${status:-passed}"
+  case "$status" in
+    passed|failed|blocked)
+      ;;
+    *)
+      say "manual-evidence cancelled: invalid status $status"
+      return 0
+      ;;
+  esac
+  printf 'Notes (optional)> '
+  local notes
+  IFS= read -r notes || notes=""
+  internal_shadow_manual_evidence "$status" "$notes"
+}
+
+menu_oversea_readonly_test() {
+  cat <<'EOF'
+Oversea readonly true-host test requires local SSH files:
+  SITE_SLOT_SSH_IDENTITY_FILE=/path/to/oversea_ed25519
+  SITE_SLOT_SSH_KNOWN_HOSTS_FILE=/path/to/known_hosts
+
+For K8s shadow, run option remote-runner enable before this test.
+EOF
+  printf 'Oversea site id (default oversea-main)> '
+  local site_id
+  IFS= read -r site_id || return 0
+  site_id="${site_id:-oversea-main}"
+  printf 'Oversea host/IP> '
+  local host
+  IFS= read -r host || return 0
+  if [ -z "$host" ]; then
+    say "oversea-readonly-test cancelled: host is required"
+    return 0
+  fi
+  ops_site_slot oversea-readonly-test "$site_id" "$host"
+}
+
+menu_oversea_remote_test() {
+  cat <<'EOF'
+Oversea remote test uses the same gated worker path as Admin:
+  pipeline  = materialize + artifact dry-run + remote command plan + readonly SSH probe
+  execute   = real SSH/rsync/scp execution; requires SITE_SLOT_CONFIRM_OVERSEA_EXECUTE=1
+
+Required local SSH files:
+  SITE_SLOT_SSH_IDENTITY_FILE=/path/to/oversea_ed25519
+  SITE_SLOT_SSH_KNOWN_HOSTS_FILE=/path/to/known_hosts
+
+For K8s shadow, run option remote-runner enable before this test.
+EOF
+  printf 'Oversea site id (default oversea-main)> '
+  local site_id
+  IFS= read -r site_id || return 0
+  site_id="${site_id:-oversea-main}"
+  printf 'Oversea host/IP> '
+  local host
+  IFS= read -r host || return 0
+  if [ -z "$host" ]; then
+    say "oversea-remote-test cancelled: host is required"
+    return 0
+  fi
+  printf 'Mode [pipeline/dry-run/plan-only/readonly/execute] (default pipeline)> '
+  local mode
+  IFS= read -r mode || return 0
+  mode="${mode:-pipeline}"
+  ops_site_slot oversea-remote-test "$site_id" "$host" "$mode"
+}
+
+menu_remote_runner() {
+  printf 'Remote runner [enable/disable] (default enable)> '
+  local state
+  IFS= read -r state || return 0
+  state="${state:-enable}"
+  ops_k8s_shadow remote-runner "$state"
+}
+
+menu_show() {
+  printf '\n'
+  if [ -t 1 ]; then
+    printf '\033[36mQPJoy MX Launcher Manager\033[0m\n'
+  else
+    printf 'QPJoy MX Launcher Manager\n'
+  fi
+  cat <<'EOF'
+
+ 1) status            本机 Internal/K8s shadow 状态
+ 2) doctor            检查 Node / pnpm / Docker / kubectl
+ 3) k8s-plan          查看 Internal K8s shadow 部署计划
+ 4) k8s-dry-run       K8s manifests + Secret dry-run
+ 5) k8s-build         构建 Internal API shadow 镜像
+ 6) k8s-apply         启动/更新本机 K8s Internal
+ 7) k8s-cycle         build + apply + smoke + DB summary
+ 8) k8s-gate          Internal Shadow Gate + Test Center evidence
+ 9) k8s-smoke         port-forward 后跑 HTTP smoke
+10) k8s-db            查看 K8s PostgreSQL 数据摘要
+11) k8s-logs          查看 Internal API 日志
+12) browser           浏览器手测步骤
+13) manual-evidence   生成浏览器手测 evidence JSON
+14) desktop-check     检查桌面 Admin/Evidence UI 脚本
+15) server-typecheck  检查服务端 TypeScript
+16) artifacts         生成 Domestic/Oversea slot artifacts
+17) reset-data        清空 shadow 业务数据（保留 PVC/迁移记录）
+18) remote-runner     为真机只读测试临时启/停 remote runner
+19) oversea-readonly  跑 Oversea 真机只读 Probe 并写 worker evidence
+20) oversea-remote    跑 Oversea 真机 pipeline / gated 安装
+21) down              停掉 K8s workloads（保留 PVC）
+22) guide             查看本机测试方案
+23) help              查看 CLI 帮助
+24) quit              退出
+EOF
+}
+
+menu_pause() {
+  printf '\n按 Enter 返回菜单...'
+  IFS= read -r _ || true
+}
+
+menu_run() {
+  local choice="$1"
+  case "$choice" in
+    1|status)
+      menu_status
+      ;;
+    2|doctor)
+      ops_doctor
+      ;;
+    3|k8s-plan|plan)
+      ops_k8s_shadow plan
+      ;;
+    4|k8s-dry-run|dry-run)
+      ops_k8s_shadow dry-run
+      ;;
+    5|k8s-build|build)
+      ops_k8s_shadow build
+      ;;
+    6|k8s-apply|apply)
+      ops_k8s_shadow apply
+      ;;
+    7|k8s-cycle|cycle)
+      ops_k8s_shadow cycle
+      ;;
+    8|k8s-gate|gate)
+      ops_k8s_shadow gate
+      ;;
+    9|k8s-smoke|smoke)
+      ops_k8s_shadow smoke
+      ;;
+    10|k8s-db|db|db-summary)
+      ops_k8s_shadow db-summary
+      ;;
+    11|k8s-logs|logs)
+      ops_k8s_shadow logs
+      ;;
+    12|browser|manual)
+      menu_browser_plan
+      ;;
+    13|manual-evidence)
+      menu_manual_evidence
+      ;;
+    14|desktop-check)
+      (cd desktop && pnpm run check)
+      ;;
+    15|server-typecheck)
+      run_tsc -p server/tsconfig.json --noEmit
+      ;;
+    16|artifacts|materialize)
+      ops_site_slot materialize all
+      ;;
+    17|reset-data|reset)
+      menu_reset_data
+      ;;
+    18|remote-runner)
+      menu_remote_runner
+      ;;
+    19|oversea-readonly|oversea-readonly-test)
+      menu_oversea_readonly_test
+      ;;
+    20|oversea-remote|oversea-remote-test)
+      menu_oversea_remote_test
+      ;;
+    21|down)
+      ops_k8s_shadow down
+      ;;
+    22|guide)
+      ops_guide
+      ;;
+    23|help)
+      usage
+      ;;
+    24|quit|q|exit)
+      MENU_QUIT=1
+      return 0
+      ;;
+    *)
+      say "Unknown option: $choice"
+      ;;
+  esac
+}
+
+menu() {
+  while true; do
+    menu_show
+    printf '\n选择> '
+    IFS= read -r choice || return 0
+    MENU_QUIT=0
+    menu_run "$choice"
+    [ "${MENU_QUIT:-0}" -eq 1 ] && return 0
+    menu_pause
+  done
 }
 
 doctor() {
@@ -548,6 +2206,10 @@ doctor() {
 }
 
 case "$cmd" in
+  menu)
+    [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh menu"
+    menu
+    ;;
   help|-h|--help)
     usage
     ;;
@@ -595,11 +2257,12 @@ case "$cmd" in
     action="$1"
     shift || true
     case "$action" in
-      build)
-        (cd server && docker compose -f docker-compose.shadow.yml build internal)
-        ;;
+    build)
+      shadow_image_build
+      ;;
       up)
         (cd server && docker compose -f docker-compose.shadow.yml up -d)
+        wait_http_ready "http://127.0.0.1:18090/readyz" 60
         ;;
       smoke)
         [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh shadow smoke [base-url]"
@@ -617,7 +2280,7 @@ case "$cmd" in
     esac
     ;;
   k8s)
-    [ "$#" -ge 2 ] || die "Usage: bash scripts/manage.sh k8s plan|explain|render|dry-run|apply|status|logs|db-summary|smoke|down internal-shadow"
+    [ "$#" -ge 2 ] || die "Usage: bash scripts/manage.sh k8s plan|explain|render|dry-run|apply|status|logs|db-summary|reset-data|remote-runner|ssh-bootstrap|gate|gate-manual|smoke|down internal-shadow"
     action="$1"
     target="$2"
     shift 2 || true
@@ -654,6 +2317,26 @@ case "$cmd" in
         [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh k8s db-summary internal-shadow"
         k8s_db_summary "$target"
         ;;
+      reset-data)
+        [ "$#" -eq 0 ] || die "Usage: MX_K8S_SHADOW_CONFIRM_RESET=1 bash scripts/manage.sh k8s reset-data internal-shadow"
+        k8s_reset_data "$target"
+        ;;
+      remote-runner)
+        [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh k8s remote-runner internal-shadow enable|disable"
+        k8s_remote_runner "$target" "$1"
+        ;;
+      ssh-bootstrap)
+        [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh k8s ssh-bootstrap internal-shadow enable|disable"
+        k8s_ssh_bootstrap "$target" "$1"
+        ;;
+      gate)
+        [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh k8s gate internal-shadow [local-port]"
+        k8s_internal_shadow_gate "$target" "${1:-18090}"
+        ;;
+      gate-manual)
+        [ "$#" -ge 1 ] && [ "$#" -le 2 ] || die "Usage: bash scripts/manage.sh k8s gate-manual internal-shadow <evidence-json> [local-port]"
+        k8s_internal_shadow_gate_manual "$target" "$1" "${2:-18090}"
+        ;;
       smoke)
         [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh k8s smoke internal-shadow [local-port]"
         k8s_smoke "$target" "${1:-18090}"
@@ -668,7 +2351,7 @@ case "$cmd" in
     esac
     ;;
   ops)
-    [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops guide|doctor|local-shadow|k8s-shadow"
+    [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops guide|doctor|config|admin|site-slot|local-shadow|k8s-shadow"
     area="$1"
     shift || true
     case "$area" in
@@ -680,12 +2363,24 @@ case "$cmd" in
         [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops doctor"
         ops_doctor
         ;;
+      config)
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops config feature-list [feature-key] | feature-set <feature-key> <true|false> [plan-only|readonly-execute|remote-execute|disabled] [global|site|profile] [scope-id]"
+        ops_config "$@"
+        ;;
+      admin)
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops admin dashboard | actions [token] | site-slot-pipelines [plan-id]"
+        ops_admin "$@"
+        ;;
+      site-slot)
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all] | refresh-tunnel-cli [version|--from-local DIR] | ssh-profiles | ssh-profile-upsert <site-id> <domestic|oversea> [host] | ssh-profile-readiness <profile-id> [plan-only|execute] | oversea-readonly-test <site-id> <host> | oversea-remote-test <site-id> <host> [pipeline|dry-run|plan-only|readonly|execute] | domestic-plan <domestic-host|-> [oversea-host] | oversea-plan <oversea-host|-> | preflight <plan-id> [dry-run|manual|ssh] | apply <plan-id> [manual|dry-run|ssh] | executions [plan-id] | runner-start <run-id> [simulate|remote-ssh] | runner-sessions [run-id] | worker-job <session-id> | worker-gate <job-id> [confirm] | worker-handoff <job-id> [confirm] | worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|local-exec] | worker-report <job-id> [running|passed|failed|blocked] | rollback-start <report-id> [simulate|manual] | rollback-report <rollback-execution-id> [running|passed|failed|blocked]"
+        ops_site_slot "$@"
+        ;;
       local-shadow)
         [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops local-shadow plan|cycle|build|up|status|smoke|logs|down"
         ops_local_shadow "$@"
         ;;
       k8s-shadow)
-        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops k8s-shadow plan|dry-run|apply|status|smoke|logs|down"
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops k8s-shadow plan|dry-run|cycle|build|apply|status|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|ssh-bootstrap enable|disable|down"
         ops_k8s_shadow "$@"
         ;;
       *)

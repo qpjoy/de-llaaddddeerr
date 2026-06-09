@@ -88,6 +88,11 @@ export function loadConfig(): RuntimeConfig {
     storeDriver: storeDriverFromEnv(),
     databaseUrl: process.env.DATABASE_URL ?? null,
     observabilitySinks: parseSinks(),
-    runnerDryRunDefault: boolFromEnv('RUNNER_DRY_RUN_DEFAULT', true)
+    runnerDryRunDefault: boolFromEnv('RUNNER_DRY_RUN_DEFAULT', true),
+    siteSlotRunnerRemoteExecutionEnabled: boolFromEnv('SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED', false),
+    coreDnsK8sApplyEnabled: boolFromEnv('COREDNS_K8S_APPLY_ENABLED', false),
+    coreDnsK8sAllowedNamespace: process.env.COREDNS_K8S_ALLOWED_NAMESPACE ?? 'mx-dns',
+    coreDnsK8sAllowedConfigMapName: process.env.COREDNS_K8S_ALLOWED_CONFIGMAP_NAME ?? 'coredns',
+    siteSlotSshKeyRoot: process.env.MX_SITE_SLOT_SSH_KEY_DIR ?? 'artifacts/ssh'
   };
 }

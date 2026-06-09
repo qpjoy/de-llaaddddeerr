@@ -39,6 +39,7 @@ spec:
         app.kubernetes.io/name: mx-launcher-internal
         app.kubernetes.io/part-of: mx-3ks
     spec:
+      serviceAccountName: mx-launcher-internal
       containers:
         - name: internal-api
           image: qpjoy/mx-launcher-server:shadow

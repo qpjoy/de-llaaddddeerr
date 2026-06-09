@@ -1,0 +1,30 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mx-coredns-configmap-writer
+  namespace: mx-dns
+  labels:
+    app.kubernetes.io/name: mx-coredns-configmap-writer
+    app.kubernetes.io/part-of: mx-3ks
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["coredns"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mx-launcher-internal-coredns-writer
+  namespace: mx-dns
+  labels:
+    app.kubernetes.io/name: mx-launcher-internal-coredns-writer
+    app.kubernetes.io/part-of: mx-3ks
+subjects:
+  - kind: ServiceAccount
+    name: mx-launcher-internal
+    namespace: mx-internal-shadow
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mx-coredns-configmap-writer

@@ -353,6 +353,9 @@ Gate verdict 示例：
 - Release Center 调 `test-center` 计算 gate verdict。
 - shadow/beta 发版必须通过 HDOI E2E。
 - 支持 waiver，但 waiver 写审计并设置过期。
+- V1 已提供 `POST /internal/v1/release-management/plans`，把 release policy、E2E
+  run、gate verdict 和下一步动作聚合成管理面计划；真实 rollout executor 后续再接
+  Deploy Center / Runner。
 
 ### Phase 5: Continuous Synthetic
 

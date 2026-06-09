@@ -12,38 +12,226 @@
   </head>
   <body>
     <main class="shell">
-      <section class="panel">
-        <div class="title-row">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">MX</div>
           <div>
             <h1>MX Launcher</h1>
-            <p>内部应用发布、安装、启动和配置管理</p>
+            <p>Internal platform</p>
           </div>
-          <span id="connection-state" class="state-chip">就绪</span>
         </div>
 
-        <section class="product-card" aria-labelledby="hdo-title">
-          <div>
-            <h2 id="hdo-title">HDO</h2>
-            <p>访客 / 员工网络连接、DNS、路由和内网服务访问</p>
-          </div>
-          <span id="hdo-status" class="product-state">未安装</span>
-          <button id="hdo-launch" class="primary-button" type="button">启动 HDO</button>
-          <button id="hdo-admin" class="secondary-button" type="button">管理 HDO</button>
+        <nav class="nav-tabs" aria-label="Primary">
+          <button id="tab-app-center" class="nav-tab is-active" type="button" data-view="app-center">AppCenter</button>
+          <button id="tab-admin" class="nav-tab" type="button" data-view="admin">Admin</button>
+        </nav>
+
+        <label class="server-field">
+          <span>MX Server</span>
+          <input id="server-input" placeholder="http://127.0.0.1:18090" />
+        </label>
+
+        <div class="sidebar-status">
+          <span id="connection-state" class="state-chip">Ready</span>
+          <span id="platform-status">Waiting for service</span>
+        </div>
+      </aside>
+
+      <section class="workspace">
+        <section id="view-app-center" class="view is-active" aria-labelledby="app-center-heading">
+          <header class="view-header">
+            <div>
+              <h2 id="app-center-heading">AppCenter</h2>
+              <p>Installed applications and runtime access.</p>
+            </div>
+            <button id="app-refresh" class="secondary-button" type="button">Refresh</button>
+          </header>
+
+          <section class="app-grid" aria-label="Applications">
+            <article class="product-card" aria-labelledby="hdo-title">
+              <div>
+                <h3 id="hdo-title">H2O</h3>
+                <p>Network, split DNS, PAC, and Internal service access.</p>
+              </div>
+              <span id="hdo-status" class="product-state">Not installed</span>
+              <div class="action-row">
+                <button id="hdo-launch" class="primary-button" type="button">Launch</button>
+                <button id="hdo-admin" class="secondary-button" type="button">Open Admin</button>
+              </div>
+            </article>
+          </section>
         </section>
 
-        <div class="server-row">
-          <label>
-            <span>MX 服务器</span>
-            <input id="server-input" placeholder="https://example.com" />
-          </label>
-        </div>
+        <section id="view-admin" class="view" aria-labelledby="admin-heading">
+          <header class="view-header">
+            <div>
+              <h2 id="admin-heading">Admin</h2>
+              <p id="admin-generated">No snapshot loaded</p>
+            </div>
+            <button id="admin-refresh" class="primary-button" type="button">Refresh</button>
+          </header>
 
-        <div class="local-ip-row">
-          <span>平台状态：</span>
-          <strong id="platform-status">等待服务安装</strong>
-        </div>
+          <section class="topology-stage" aria-label="MX-3ks topology">
+            <canvas id="topology-canvas"></canvas>
+            <div class="topology-overlay" aria-hidden="true">
+              <span>H Endpoint</span>
+              <span>Domestic</span>
+              <span>Internal</span>
+              <span>Oversea</span>
+            </div>
+          </section>
+
+          <section class="metrics-grid" aria-label="Platform metrics">
+            <article class="metric">
+              <span>Site Slots</span>
+              <strong id="metric-site-slots">0</strong>
+            </article>
+            <article class="metric">
+              <span>Rollback Runs</span>
+              <strong id="metric-rollbacks">0</strong>
+            </article>
+            <article class="metric">
+              <span>Release Plans</span>
+              <strong id="metric-releases">0</strong>
+            </article>
+            <article class="metric">
+              <span>Test Runs</span>
+              <strong id="metric-tests">0</strong>
+            </article>
+          </section>
+
+          <section class="ssh-profile-panel" aria-labelledby="ssh-profiles-heading">
+            <div class="section-title">
+              <h3 id="ssh-profiles-heading">SSH Profiles</h3>
+              <span id="ssh-profile-count">0</span>
+            </div>
+            <form id="ssh-profile-form" class="ssh-profile-form">
+              <input id="ssh-profile-id" type="hidden" />
+              <label class="form-field">
+                <span>Site</span>
+                <input id="ssh-profile-site-id" autocomplete="off" placeholder="oversea-main" required />
+              </label>
+              <label class="form-field">
+                <span>Kind</span>
+                <select id="ssh-profile-kind">
+                  <option value="oversea">Oversea</option>
+                  <option value="domestic">Domestic</option>
+                </select>
+              </label>
+              <label class="form-field">
+                <span>Host</span>
+                <input id="ssh-profile-host" autocomplete="off" placeholder="203.0.113.10" required />
+              </label>
+              <label class="form-field">
+                <span>User</span>
+                <input id="ssh-profile-user" autocomplete="off" placeholder="root" />
+              </label>
+              <label class="form-field">
+                <span>Password</span>
+                <input id="ssh-profile-password" autocomplete="new-password" placeholder="one-time bootstrap" type="password" />
+              </label>
+              <label class="form-field compact-field checkbox-field">
+                <span>Rotate</span>
+                <input id="ssh-profile-rotate-key" type="checkbox" />
+              </label>
+              <label class="form-field compact-field">
+                <span>Port</span>
+                <input id="ssh-profile-port" inputmode="numeric" min="1" placeholder="22" type="number" />
+              </label>
+              <label class="form-field">
+                <span>Strict</span>
+                <select id="ssh-profile-strict">
+                  <option value="yes">yes</option>
+                  <option value="accept-new">accept-new</option>
+                  <option value="ask">ask</option>
+                  <option value="no">no</option>
+                </select>
+              </label>
+              <label class="form-field">
+                <span>Batch</span>
+                <select id="ssh-profile-batch-mode">
+                  <option value="yes">yes</option>
+                  <option value="no">no</option>
+                </select>
+              </label>
+              <label class="form-field compact-field">
+                <span>Timeout</span>
+                <input id="ssh-profile-timeout" inputmode="numeric" min="1" placeholder="10" type="number" />
+              </label>
+              <label class="form-field wide-field">
+                <span>Identity</span>
+                <input id="ssh-profile-identity" autocomplete="off" placeholder="/opt/mx/secrets/oversea_ed25519" />
+              </label>
+              <label class="form-field wide-field">
+                <span>Known Hosts</span>
+                <input id="ssh-profile-known-hosts" autocomplete="off" placeholder="/opt/mx/secrets/known_hosts" />
+              </label>
+              <label class="form-field wide-field">
+                <span>Host Alias</span>
+                <input id="ssh-profile-host-key-alias" autocomplete="off" placeholder="oversea-main" />
+              </label>
+              <div class="ssh-profile-actions">
+                <button id="ssh-profile-save" class="primary-button" type="submit">Save Profile</button>
+                <button id="ssh-profile-bootstrap" class="secondary-button" type="button">Bootstrap Key</button>
+                <button id="ssh-profile-create-plan" class="secondary-button" type="button">Create Plan</button>
+                <span id="ssh-profile-feedback" class="profile-feedback"></span>
+              </div>
+            </form>
+            <div id="ssh-profile-bootstrap-result" class="ssh-bootstrap-result"></div>
+            <section class="ssh-readiness-panel" aria-labelledby="ssh-readiness-heading">
+              <div class="section-title compact-title">
+                <h4 id="ssh-readiness-heading">Readiness Gates</h4>
+                <span id="ssh-readiness-status">idle</span>
+              </div>
+              <div class="ssh-readiness-actions">
+                <button id="ssh-profile-readiness-run" class="secondary-button" type="button">Check Readiness</button>
+                <button id="ssh-profile-policy-enable" class="secondary-button" type="button">Allow Readonly</button>
+              </div>
+              <div id="ssh-profile-readiness" class="ssh-readiness-body"></div>
+            </section>
+            <div id="ssh-profile-list" class="ssh-profile-items"></div>
+          </section>
+
+          <section class="admin-layout">
+            <section class="pipeline-list" aria-labelledby="pipelines-heading">
+              <div class="section-title">
+                <h3 id="pipelines-heading">Site Slot Pipelines</h3>
+                <span id="pipeline-count">0</span>
+              </div>
+              <div id="pipeline-list" class="pipeline-items"></div>
+            </section>
+
+            <section class="pipeline-detail" aria-labelledby="pipeline-detail-heading">
+              <div class="section-title">
+                <h3 id="pipeline-detail-heading">Timeline</h3>
+                <span id="pipeline-health" class="health-chip">Idle</span>
+              </div>
+              <div id="pipeline-summary" class="summary-strip"></div>
+              <div id="pipeline-stepper" class="pipeline-stepper"></div>
+              <div id="pipeline-actions" class="action-panel"></div>
+              <ol id="pipeline-timeline" class="timeline"></ol>
+            </section>
+          </section>
+        </section>
       </section>
     </main>
-    <script src="./renderer.js"></script>
+    <div id="evidence-backdrop" class="evidence-backdrop" hidden></div>
+    <aside id="evidence-drawer" class="evidence-drawer" aria-labelledby="evidence-title" hidden>
+      <header class="evidence-header">
+        <div>
+          <span id="evidence-kind" class="evidence-kind">Evidence</span>
+          <h2 id="evidence-title">Evidence</h2>
+          <p id="evidence-meta"></p>
+        </div>
+        <button id="evidence-close" class="secondary-button" type="button">Close</button>
+      </header>
+      <div id="evidence-summary" class="evidence-summary"></div>
+      <div id="evidence-steps" class="evidence-steps"></div>
+      <details class="evidence-json">
+        <summary>Object</summary>
+        <pre id="evidence-json"></pre>
+      </details>
+    </aside>
+    <script type="module" src="./renderer.js"></script>
   </body>
 </html>

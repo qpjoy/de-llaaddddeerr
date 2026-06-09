@@ -83,6 +83,12 @@ AppCenter exposes a stable runtime protocol to apps:
 
 ## Config Scopes
 
+`appCenter.getConfig(appId)` reads from the Config Center policy snapshot. The
+snapshot aggregates identity, AppCenter manifest, declared permissions,
+Launcher Network policy, DNS policy, release policy, and observability sinks.
+Apps should not call each control-plane module directly to build their own
+runtime config.
+
 MX Launcher separates config ownership by scope:
 
 - `global` - applies to the whole platform.

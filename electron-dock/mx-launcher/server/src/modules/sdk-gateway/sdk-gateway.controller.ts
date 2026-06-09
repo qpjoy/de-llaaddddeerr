@@ -1,8 +1,9 @@
 import { Body, Controller, Get, Inject, Post } from '@nestjs/common';
 
-import { asRecord } from '../../lib/http.js';
+import { asRecord, nullableString } from '../../lib/http.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
+import type { SdkGatewayAccessInput } from '../../types.js';
 import { toPrincipalInput, toTokenInput } from '../user-center/user-center.controller.js';
 
 @Controller()
@@ -23,4 +24,18 @@ export class SdkGatewayController {
   async context(@Body() rawBody: unknown) {
     return { context: await this.store.resolvePrincipalContext(toPrincipalInput(asRecord(rawBody))) };
   }
+
+  @Post('internal/v1/sdk/gateway/access/evaluate')
+  async access(@Body() rawBody: unknown) {
+    return { decision: await this.store.evaluateSdkGatewayAccess(toAccessInput(asRecord(rawBody))) };
+  }
+}
+
+function toAccessInput(body: Record<string, unknown>): SdkGatewayAccessInput {
+  return {
+    token: nullableString(body.token),
+    audience: nullableString(body.audience),
+    routeId: nullableString(body.routeId) ?? 'sdk.identity.context',
+    requestId: nullableString(body.requestId)
+  };
 }

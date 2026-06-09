@@ -99,6 +99,44 @@ Internal 是未来平台主站，建议先按 K8s 控制面布局。
 Internal 可以先跑同一个仓库、同一套 `./scripts/manage.sh`，但通过 role profile
 决定启用哪些模块。
 
+### Internal Site Slot 管理
+
+Domestic 和 Oversea 不再是配置真相源，而是 Internal 的可插拔 site slot：
+
+- Internal 通过 `POST /internal/v1/site-slots/plans` 生成 Domestic/Oversea slot plan。
+- slot plan 记录 host、SSH/root 策略、Docker 状态、外网可达性、Oversea 依赖、
+  preflight checks、部署阶段和远程命令草案。
+- Internal 通过 `POST /internal/v1/site-slots/plans/:planId/preflight` 生成 preflight
+  execution manifest，通过 `POST /internal/v1/site-slots/plans/:planId/apply` 生成 apply
+  execution manifest。
+- apply manifest 需要 `confirmApply=true` 才会进入 ready；未确认时返回
+  `requires-confirmation`，用于 Admin 审批、证据复核和变更窗口确认。
+- Internal 通过 `POST /internal/v1/site-slots/executions/:runId/runner-sessions` 启动
+  Runner V1.1 session。`simulate` 只记录模拟结果；`remote-ssh` 需要服务端
+  `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED` 和请求侧 `confirmRemoteExecution=true` 双门禁。
+- Internal 通过 `/runner-sessions/:sessionId/worker-jobs` 生成 Worker Contract V1 job，
+  通过 `/worker-jobs/:jobId/reports` 接收 worker/site-agent 回报。job 包含 approval、
+  change window、retry、rollback、step timeout、stop-on-failure 和 redaction policy。
+- Worker State Machine V1 由 report 驱动：`running` 持续收集 step report，`passed`
+  推进 job/session，`failed` 自动生成 rollback plan，`blocked` 保留变更等待人工处理。
+- Internal 通过 `/worker-reports/:reportId/rollback-executions` 创建 Rollback Contract V1
+  execution，通过 `/rollback-executions/:rollbackExecutionId/reports` 接收恢复证据并推进
+  rollback execution 状态；真实执行仍可由 Admin action、runner worker 或 site-agent 完成。
+- Admin Management API V1 通过 `/admin/dashboard` 和 `/admin/site-slots/pipelines`
+  把 plan、execution、runner、worker report、rollback execution/report 聚合成后台可视化
+  流水线，作为后续 Admin UI 的数据入口。
+- Domestic slot 默认把 WireGuard、转发、防火墙和必要的 `@qpjoy/tunnel-cli server-on`
+  / `egress-on` 放在宿主机；edge API、H2I proxy、snapshot cache、observability
+  forwarder 仍优先使用 Docker。公网 Domestic 不应长期 `tun-on`，否则默认路由会接管
+  入站服务回程，导致外部访问站点异常。
+- Oversea slot 默认参照 `docker/hysteria2-mihomo-stack`，提供 mihomo/hysteria2
+  访问能力；如果性能或系统集成需要，hysteria2 可进一步提升为 host systemd 服务。
+- 如果 Domestic 无外网，Internal 会先提示配置 Oversea，再用 Oversea 的 mihomo 订阅和
+  `@qpjoy/tunnel-cli server-on` 帮 Domestic 做常驻 outbound bootstrap：国内目标按
+  `cn-direct` 直连，外网目标经 Oversea；`tun-on` 只保留给非公网主机或短时排障。
+- Executor V1 只生成 plan、execution manifest、runner session、worker job 和 worker report，
+  不直接 SSH/SCP/root 执行；真实执行后续接 Admin action、runner worker 或 site-agent。
+
 ### Oversea Access Site
 
 Oversea 当前核心能力是 `docker/hysteria2-mihomo-stack`。
@@ -160,15 +198,27 @@ flowchart LR
   Observability、Release 等内部模块。
 - Domestic 只代理或缓存网关请求，不保存用户、权限或 SDK 契约真相。
 
-当前 V0 接口：
+当前 V1 shadow 接口：
 
 | API | 使用方 | 含义 |
 | --- | --- | --- |
+| `POST /internal/v1/user-center/bootstrap` | Internal modules / ops | 幂等初始化默认 tenant、org、roles、demo user 和 SDK service account |
+| `GET /internal/v1/user-center/roles` | Internal modules / ops | 查看 RBAC roles 和 scopes |
+| `GET /internal/v1/user-center/users` | Internal modules / ops | 查看用户 |
+| `POST /internal/v1/user-center/users` | Internal modules / ops | 创建或更新 shadow 用户 |
+| `GET /internal/v1/user-center/service-accounts` | Internal modules / ops | 查看服务账号 |
+| `POST /internal/v1/user-center/service-accounts` | Internal modules / ops | 创建或更新服务账号 |
+| `POST /internal/v1/user-center/tokens/issue` | Internal modules / ops | 为 user 或 service account 签发短期 token，服务端只存 token hash |
 | `POST /internal/v1/user-center/token/introspect` | Internal modules | User Center 权威 token introspection |
 | `POST /internal/v1/user-center/principal/resolve` | Internal modules | 根据 token/install/user/service account 解析 principal context |
 | `GET /internal/v1/sdk/gateway/manifest` | SDK / 外部系统 | 读取统一网关能力、路由和 audience |
 | `POST /internal/v1/sdk/identity/introspect` | SDK / 外部系统 | 通过网关使用同一套 token introspection |
 | `POST /internal/v1/sdk/identity/context` | SDK / 外部系统 | 通过网关解析调用主体、绑定关系和可用路由 |
+| `POST /internal/v1/sdk/gateway/access/evaluate` | SDK / 外部系统 | 判断 token principal 是否允许调用某条 SDK Gateway route |
+
+V1 shadow 仍保留 `mx-shadow-*` token 前缀兼容，但真实路径优先查 User Center token
+record。token 明文只在签发响应返回一次，数据库保存 `sha256` hash、subject、
+audience、scopes、过期时间和吊销状态。
 
 ## 数据归属
 
@@ -268,6 +318,14 @@ join hdo.devices d on d.install_id = i.id;
 
 H 端不应该自己合并多层配置。Internal 生成最终配置快照，Domestic 可以缓存。
 
+需要区分两类快照：
+
+- Enrollment config snapshot：匿名 enroll 或 identity link 后返回的轻量安装快照，
+  用于 bootstrap install/device、public/internal endpoint、基础 observability。
+- Config Center policy snapshot：登录态、AppCenter、Launcher Network、DNS、SDK
+  Gateway、release 和权限策略汇总后的最终策略快照，带签名 digest，供 Launcher
+  Network、AppCenter、H2O 和 SDK 使用。
+
 ```json
 {
   "snapshotId": "cfgsnap_...",
@@ -295,6 +353,28 @@ H 端不应该自己合并多层配置。Internal 生成最终配置快照，Dom
 }
 ```
 
+V1 shadow policy snapshot 聚合：
+
+| 字段 | 内容 |
+| --- | --- |
+| `principal` | anonymous / user / service-account 主体、roles、scopes |
+| `policies.app` | AppCenter 应用 manifest |
+| `policies.permissionPolicy` | 应用声明权限，默认仍需要 AppCenter grant |
+| `policies.launcherNetwork` | guest/user overlay、WG、DNS/PAC/TUN 能力 |
+| `policies.dns` | split DNS policy、fallback 顺序、Internal reverse proxy routes |
+| `policies.sdkGateway` | SDK Gateway manifest、routes、audience |
+| `policies.release` | Launcher 与 app 的更新/跳过/门禁策略 |
+| `policies.observability` | 日志/指标上报 sinks |
+| `signatures` | `sha256-dev-digest`，后续替换为正式签名 |
+
+当前 API：
+
+| API | 使用方 | 含义 |
+| --- | --- | --- |
+| `POST /internal/v1/config-center/snapshots/effective` | Internal / Admin / Launcher | 发行有效 policy snapshot |
+| `GET /internal/v1/config-center/snapshots/:snapshotId` | Internal / Admin | 读取已发行 policy snapshot |
+| `POST /internal/v1/sdk/config/snapshot` | SDK Gateway / 外部系统 | 通过 SDK 稳定面发行 policy snapshot |
+
 ## DNS 和 PAC 设计
 
 CoreDNS 可以放到 Internal K8s，并且这应该是目标控制面。Domestic 不必保存 DNS
@@ -307,6 +387,13 @@ CoreDNS 可以放到 Internal K8s，并且这应该是目标控制面。Domestic
 - Config Center DNS policy: 下发 split DNS 白名单、fallback、优先级和版本。
 - Launcher Network local resolver / PAC: H 端运行时根据 snapshot 决定哪些域名走
   HDI，哪些走系统 DNS、系统代理或其他代理。
+
+DNS policy 是“哪些域名命中 Internal、fallback 顺序是什么”；DNS zone snapshot 是
+“给 Internal CoreDNS/同步器的配置产物”。V1 shadow 先生成签名 zone snapshot，包含
+zoneNames、records、Corefile 片段、reverse proxy routes、fallbackOrder 和 digest；
+再渲染 `mx-dns/coredns` ConfigMap manifest。当前 shadow sync 只记录 dry-run 或
+shadow-apply 结果，不直接调用 Kubernetes API；真实写入走 Internal/Admin 专用的
+CoreDNS apply API，并受 ServiceAccount RBAC、目标白名单和 `confirmApply=true` 保护。
 
 ```mermaid
 flowchart LR
@@ -326,12 +413,38 @@ flowchart LR
 - 未命中白名单的域名走系统 DNS、系统代理、浏览器代理或 Clash/mihomo 等已有配置。
 - DNS policy 通过统一 API 暴露给 Launcher Network、H2O 和 SDK Gateway：
   `/internal/v1/dns/*` 面向平台控制面，`/internal/v1/sdk/dns/*` 面向外部系统。
+- Zone snapshot API：`POST /internal/v1/dns/zones/build` 给 Internal/Admin 使用，
+  `POST /internal/v1/sdk/dns/zone` 给 SDK Gateway 使用，
+  `GET /internal/v1/dns/zones/:snapshotId` 读取已生成快照。
+- CoreDNS ConfigMap sync API：
+  `POST /internal/v1/dns/coredns/configmap/sync` 给 Internal/Admin 使用，
+  `POST /internal/v1/sdk/dns/coredns-configmap` 给 SDK Gateway 使用。V1 shadow 只渲染
+  manifest 并记录 sync result。
+- CoreDNS ConfigMap apply API：
+  `POST /internal/v1/dns/coredns/configmap/apply` 只给 Internal/Admin 使用；它不会挂到
+  SDK Gateway。K8s shadow 中 Internal API 使用 `mx-launcher-internal` ServiceAccount
+  更新预创建的 `mx-dns/coredns` ConfigMap，RBAC 只允许 get/update/patch 这个对象。
 - 命中 Internal 的域名可以选择性进入 Internal reverse proxy route，例如
   `gateway.internal.mx` 反代到 Internal API/Gateway；反代规则仍由 Internal 管理。
 - Domestic DNS Edge 只作为可选 `dns-edge-cache`，用于 Internal 短暂不可达时的
   降级能力，不作为默认必需模块。
 - DNS 配置进入 `config.resources`，和 Launcher/AppCenter/HDI 配置一起版本化、
   审计、回滚。
+
+## Release / E2E Gate 管理面
+
+Internal 已经有 Release Center 和 Test Center 的 V1 管理面聚合能力：
+
+- `POST /internal/v1/release-management/plans` 创建一次 release management plan。
+- plan 聚合 Launcher 平台更新策略、AppCenter 应用更新策略、HDOI E2E test run、
+  gate verdict、rollback 要求和下一步动作。
+- `e2eResult=running` 时 plan 默认阻断；shadow smoke 可以显式传 `passed` 来验证 gate
+  通过后的推进状态。
+- `readyToPromote=true` 只表示管理面允许进入 shadow/canary rollout，不代表已经执行
+  rollout。真实执行仍应进入 Deploy Center / Runner / site-agent contract。
+
+这一步应该先于 Domestic thin relay/proxy 接入，因为 Domestic 接入后也需要这套
+Release/Test/Gate 管理面约束它能不能接收配置、发布和站点执行任务。
 
 ## Runner 和站点 Agent
 

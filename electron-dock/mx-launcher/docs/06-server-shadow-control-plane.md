@@ -478,6 +478,51 @@ H 端、Domestic Edge、Oversea agent 都只消费最终 snapshot。
 
 这些能力应该进入 `mx-launcher/server`，因为它们是平台通用能力，不属于单个 HDO。
 
+### Site Slot Plan 模型
+
+Domestic 和 Oversea 作为 Internal 的插槽纳入 Deploy/Runner 管理面：
+
+| 对象 | 说明 |
+| --- | --- |
+| `site-slot-plan` | Internal 为 Domestic/Oversea 生成的接入计划 |
+| `site-slot-execution` | 从 plan 派生的 preflight/apply 执行清单和审批门禁 |
+| `site-slot-runner-session` | 从 execution 派生的 runner 会话、step result 和远程执行门禁 |
+| `site-slot-worker-job` | 从 runner session 派生的 worker/site-agent 任务包 |
+| `site-slot-worker-report` | worker/site-agent 回写的 step 状态、stdout/stderr、exit code 和失败信息 |
+| `site-slot-rollback-execution` | 从 failed worker report 派生的回滚执行清单和确认门禁 |
+| `site-slot-rollback-report` | 回滚 worker/site-agent 回写的恢复证据和 step 状态 |
+| `preflightChecks` | SSH、root、Docker、WireGuard、外网、Internal reachability 等检查 |
+| `deploymentPhases` | scp bundle、host WireGuard、Docker stack、snapshot sync、slot smoke 等阶段 |
+| `network.mode` | `direct`、`oversea-assisted` 或 `offline-manual` |
+
+V1 API 包括 `POST /internal/v1/site-slots/plans`、
+`POST /internal/v1/site-slots/plans/:planId/preflight` 和
+`POST /internal/v1/site-slots/plans/:planId/apply`。Runner V1.1 增加
+`POST /internal/v1/site-slots/executions/:runId/runner-sessions`。它生成计划、执行清单、
+runner 会话和审计记录，不直接远程执行。`remote-ssh` 需要服务端开关和请求确认；真实命令
+执行应由 Admin action、runner worker 或 site-agent 承接。
+
+Worker Contract V1 增加 `/runner-sessions/:sessionId/worker-jobs` 和
+`/worker-jobs/:jobId/reports`。job 是执行器输入，report 是执行器输出；两者都写审计。
+Worker State Machine V1 会在 report 写入时推进 job/session 状态，并在 failed report 中
+生成 rollback plan。Rollback Contract V1 继续通过
+`/worker-reports/:reportId/rollback-executions` 固化回滚清单，并通过
+`/rollback-executions/:rollbackExecutionId/reports` 接收回滚结果，推进 rollback execution
+状态。
+
+Admin Management API V1 是 Internal 管理面的聚合层，不属于 SDK Gateway，也不直接执行
+远程命令。`GET /internal/v1/admin/dashboard` 返回平台 overview、release plan 和最近
+site-slot pipeline 摘要；`GET /internal/v1/admin/site-slots/pipelines` 返回流水线时间线；
+`GET /internal/v1/admin/site-slots/pipelines/:planId` 返回单条 plan、execution、runner、
+worker、rollback 的完整链路。
+`GET /internal/v1/admin/actions` 返回 Admin Action Policy V1：principal、required
+scopes、allowed、risk、gate、confirm fields 和 body template。Dashboard 和 pipeline
+summary 会附带 action hints，供 CLI/Desktop/Admin UI 展示下一步动作；真正修改远端机器、
+K8s 或发版状态时仍调用原领域 API，并继续经过确认、审计、变更窗口和 worker report。
+`POST /internal/v1/admin/actions/execute` 是 V1 执行桥接入口：先校验 RBAC 和确认字段，
+再把上下文 action 分发到 site-slot execution、runner session、worker job 或 rollback
+execution。它不新增远程 SSH 能力；`remote-ssh` 仍受服务端开关和确认字段门禁限制。
+
 ### Release Center 模型
 
 | 表/对象 | 说明 |
@@ -488,6 +533,15 @@ H 端、Domestic Edge、Oversea agent 都只消费最终 snapshot。
 | `release.tasks` | 下发给 H 端、Domestic、Oversea 的任务 |
 | `release.reports` | 客户端和站点执行结果 |
 | `release.rollbacks` | 回滚策略和记录 |
+
+V1 管理面先落到 `release-management-plan`：
+
+- `POST /internal/v1/release-management/plans` 聚合 Launcher/App 更新策略、E2E
+  test run、gate verdict、rollback 要求和下一步动作。
+- `GET /internal/v1/release-management/plans` 给 Admin 列表页使用。
+- `GET /internal/v1/release-management/plans/:planId` 给详情页和审计 drill-down 使用。
+- plan 只回答“是否允许进入 shadow/canary rollout”，不直接执行发布。真实执行仍要经过
+  Deploy Center、Runner 和 site-agent。
 
 ### 通知方式
 

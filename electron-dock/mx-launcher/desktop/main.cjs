@@ -43,10 +43,10 @@ app.on('activate', () => {
 
 function createMainWindow() {
   mainWindow = new BrowserWindow({
-    width: 540,
-    height: 620,
-    minWidth: 420,
-    minHeight: 520,
+    width: 1180,
+    height: 780,
+    minWidth: 900,
+    minHeight: 640,
     title: 'MX Launcher',
     backgroundColor: '#f3f5f7',
     webPreferences: {

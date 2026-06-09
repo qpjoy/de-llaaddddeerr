@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import type { DataSource, Repository } from 'typeorm';
 
@@ -10,12 +10,23 @@ import type {
   AppCenterApp,
   AuditEvent,
   AuditEventInput,
+  ConfigPolicySnapshot,
+  ConfigPolicySnapshotInput,
   ConfigSnapshot,
+  CoreDnsConfigMapApplyInput,
+  CoreDnsConfigMapApplyResult,
+  CoreDnsConfigMapSyncInput,
+  CoreDnsConfigMapSyncResult,
+  CreateServiceAccountInput,
+  CreateUserInput,
   DnsPolicy,
   DnsQueryInput,
   DnsResolutionDecision,
   DnsReverseProxyRoute,
+  DnsZoneSnapshot,
+  DnsZoneSnapshotInput,
   IdentityLinkRequest,
+  IssueTokenInput,
   LauncherNetworkSnapshot,
   LauncherNetworkSnapshotInput,
   LogEntryInput,
@@ -24,18 +35,48 @@ import type {
   PrincipalContext,
   PrincipalContextInput,
   PlatformKernelSmokeResult,
+  ReleaseManagementPlan,
+  ReleaseManagementPlanInput,
   ReleasePolicyDecision,
   ReleasePolicyInput,
   ReleaseReportInput,
   ReleaseTask,
   RuntimeConfig,
+  RuntimeFeaturePolicy,
+  RuntimeFeaturePolicyInput,
+  SdkGatewayAccessDecision,
+  SdkGatewayAccessInput,
   SdkGatewayManifest,
   SiteHeartbeat,
+  SiteSlotExecutionInput,
+  SiteSlotExecutionRun,
+  SiteSlotPlan,
+  SiteSlotPlanInput,
+  SiteSlotRollbackExecution,
+  SiteSlotRollbackExecutionInput,
+  SiteSlotRollbackReport,
+  SiteSlotRollbackReportInput,
+  SiteSlotRunnerSession,
+  SiteSlotRunnerStartInput,
+  SiteSlotSshProfile,
+  SiteSlotSshProfileInput,
+  SiteSlotWorkerJob,
+  SiteSlotWorkerJobInput,
+  SiteSlotWorkerReport,
+  SiteSlotWorkerReportInput,
   SiteRole,
   TestGateInput,
   TestGateVerdict,
   TokenIntrospectionInput,
   TokenIntrospectionResult,
+  UserCenterBootstrapResult,
+  UserCenterIssuedToken,
+  UserCenterOrg,
+  UserCenterRole,
+  UserCenterServiceAccount,
+  UserCenterTenant,
+  UserCenterTokenRecord,
+  UserCenterUser,
   TestRun,
   TestRunInput,
   TestStep,
@@ -43,28 +84,77 @@ import type {
 } from '../types.js';
 import {
   builtinAppCenterApps,
+  buildReleaseManagementPlan,
+  buildRuntimeFeaturePolicy,
+  buildSiteSlotExecutionRun,
+  buildSiteSlotPlan,
+  buildSiteSlotRunnerSession,
+  buildSiteSlotSshProfile,
+  buildSiteSlotRollbackExecution,
+  buildSiteSlotRollbackReport,
+  buildSiteSlotWorkerJob,
+  buildSiteSlotWorkerReport,
+  applySiteSlotRollbackReportState,
+  applySiteSlotWorkerReportState,
+  buildDnsZoneSnapshot,
   builtinDnsPolicies,
   builtinDnsReverseProxyRoutes,
+  builtinUserCenterOrg,
+  builtinUserCenterRoles,
+  builtinUserCenterTenant,
+  createBootstrapResult,
+  createConfigPolicySnapshot,
   createConfigSnapshot,
   createSdkGatewayManifest,
+  createServiceAccountPrincipalFromRecord,
+  createUserCenterServiceAccount,
+  createUserCenterTokenRecord,
+  createUserCenterUser,
+  createUserPrincipalFromRecord,
+  evaluateCoreDnsConfigMapApplyGate,
+  evaluateSdkGatewayRoute,
   evaluateDnsPolicy,
+  hashToken,
+  introspectUserCenterToken,
   introspectShadowToken,
   normalizeTestStatus,
   normalizeUpdatePolicy,
   releasePolicyByKind,
+  renderCoreDnsConfigMap,
   resolvePrincipalContext,
   required
 } from './domain.js';
+import { applyCoreDnsConfigMapToKubernetes } from './kubernetes.js';
 import type { PlatformOverview, PlatformStore } from './platform-store.js';
 
 type RecordKind =
   | 'site-heartbeat'
   | 'anonymous-enrollment'
   | 'config-snapshot'
+  | 'config-policy-snapshot'
   | 'release-task'
   | 'release-policy-decision'
+  | 'iam-tenant'
+  | 'iam-org'
+  | 'iam-role'
+  | 'iam-user'
+  | 'iam-service-account'
+  | 'iam-token'
   | 'dns-policy'
   | 'dns-reverse-proxy-route'
+  | 'dns-zone-snapshot'
+  | 'coredns-configmap-sync'
+  | 'coredns-configmap-apply'
+  | 'release-management-plan'
+  | 'site-slot-plan'
+  | 'site-slot-execution'
+  | 'site-slot-runner-session'
+  | 'site-slot-worker-job'
+  | 'site-slot-worker-report'
+  | 'site-slot-rollback-execution'
+  | 'site-slot-rollback-report'
+  | 'site-slot-ssh-profile'
+  | 'runtime-feature-policy'
   | 'app-center-app'
   | 'permission-grant'
   | 'launcher-network-snapshot'
@@ -97,9 +187,24 @@ export class PostgresStore implements PlatformStore {
       sites,
       enrollments,
       snapshots,
+      configPolicySnapshots,
       appCenterApps,
+      userCenterUsers,
+      userCenterServiceAccounts,
+      userCenterTokens,
+      siteSlotPlans,
+      siteSlotExecutions,
+      siteSlotRunnerSessions,
+      siteSlotWorkerJobs,
+      siteSlotWorkerReports,
+      siteSlotRollbackExecutions,
+      siteSlotRollbackReports,
       dnsPolicies,
       dnsReverseProxyRoutes,
+      dnsZoneSnapshots,
+      coreDnsConfigMapSyncs,
+      coreDnsConfigMapApplies,
+      releaseManagementPlans,
       permissionGrants,
       testRuns,
       auditEvents,
@@ -108,9 +213,24 @@ export class PostgresStore implements PlatformStore {
       this.countRecords('site-heartbeat'),
       this.countRecords('anonymous-enrollment'),
       this.countRecords('config-snapshot'),
+      this.countRecords('config-policy-snapshot'),
       this.countRecords('app-center-app'),
+      this.countRecords('iam-user'),
+      this.countRecords('iam-service-account'),
+      this.countRecords('iam-token'),
+      this.countRecords('site-slot-plan'),
+      this.countRecords('site-slot-execution'),
+      this.countRecords('site-slot-runner-session'),
+      this.countRecords('site-slot-worker-job'),
+      this.countRecords('site-slot-worker-report'),
+      this.countRecords('site-slot-rollback-execution'),
+      this.countRecords('site-slot-rollback-report'),
       this.countRecords('dns-policy'),
       this.countRecords('dns-reverse-proxy-route'),
+      this.countRecords('dns-zone-snapshot'),
+      this.countRecords('coredns-configmap-sync'),
+      this.countRecords('coredns-configmap-apply'),
+      this.countRecords('release-management-plan'),
       this.countRecords('permission-grant'),
       this.countRecords('test-run'),
       this.countRecords('audit-event'),
@@ -125,9 +245,24 @@ export class PostgresStore implements PlatformStore {
       sites,
       enrollments,
       snapshots,
+      configPolicySnapshots,
       appCenterApps,
+      userCenterUsers,
+      userCenterServiceAccounts,
+      userCenterTokens,
+      siteSlotPlans,
+      siteSlotExecutions,
+      siteSlotRunnerSessions,
+      siteSlotWorkerJobs,
+      siteSlotWorkerReports,
+      siteSlotRollbackExecutions,
+      siteSlotRollbackReports,
       dnsPolicies,
       dnsReverseProxyRoutes,
+      dnsZoneSnapshots,
+      coreDnsConfigMapSyncs,
+      coreDnsConfigMapApplies,
+      releaseManagementPlans,
       permissionGrants,
       testRuns,
       auditEvents,
@@ -150,6 +285,272 @@ export class PostgresStore implements PlatformStore {
 
   async listSites(): Promise<SiteHeartbeat[]> {
     return (await this.listRecords<SiteHeartbeat>('site-heartbeat')).sort((a, b) => a.siteId.localeCompare(b.siteId));
+  }
+
+  async createSiteSlotPlan(input: SiteSlotPlanInput): Promise<SiteSlotPlan> {
+    const planInput = await this.withSiteSlotSshProfile(input);
+    const plan = buildSiteSlotPlan(this.config, planInput, `slotplan_${randomUUID()}`);
+    await this.saveRecord('site-slot-plan', plan.planId, plan, plan.siteId);
+    await this.recordAudit({
+      eventType: 'site_slot.plan.created',
+      actorKind: 'deploy-center',
+      requestId: planInput.requestId ?? null,
+      metadata: {
+        planId: plan.planId,
+        siteId: plan.siteId,
+        kind: plan.kind,
+        status: plan.status,
+        networkMode: plan.network.mode,
+        requiresOversea: plan.network.requiresOversea,
+        nextActions: plan.nextActions
+      }
+    });
+    return plan;
+  }
+
+  async getSiteSlotPlan(planId: string): Promise<SiteSlotPlan | null> {
+    return this.getRecord<SiteSlotPlan>('site-slot-plan', planId);
+  }
+
+  async listSiteSlotPlans(): Promise<SiteSlotPlan[]> {
+    return (await this.listRecords<SiteSlotPlan>('site-slot-plan')).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async createSiteSlotExecution(input: SiteSlotExecutionInput): Promise<SiteSlotExecutionRun> {
+    const planId = input.planId?.trim();
+    const plan = planId ? await this.getRecord<SiteSlotPlan>('site-slot-plan', planId) : null;
+    if (!plan) throw new Error(`Unknown site slot plan: ${input.planId ?? '<empty>'}`);
+    const run = buildSiteSlotExecutionRun(this.config, plan, input, `slotexec_${randomUUID()}`);
+    await this.saveRecord('site-slot-execution', run.runId, run, run.siteId);
+    await this.recordAudit({
+      eventType: 'site_slot.execution.created',
+      actorKind: 'deploy-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        runId: run.runId,
+        planId: run.planId,
+        siteId: run.siteId,
+        kind: run.kind,
+        action: run.action,
+        mode: run.mode,
+        status: run.status,
+        stepCount: run.steps.length,
+        nextActions: run.nextActions
+      }
+    });
+    return run;
+  }
+
+  async getSiteSlotExecution(runId: string): Promise<SiteSlotExecutionRun | null> {
+    return this.getRecord<SiteSlotExecutionRun>('site-slot-execution', runId);
+  }
+
+  async listSiteSlotExecutions(planId?: string | null): Promise<SiteSlotExecutionRun[]> {
+    return (await this.listRecords<SiteSlotExecutionRun>('site-slot-execution'))
+      .filter((run) => !planId || run.planId === planId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async startSiteSlotRunnerSession(input: SiteSlotRunnerStartInput): Promise<SiteSlotRunnerSession> {
+    const runId = input.runId?.trim();
+    const execution = runId ? await this.getRecord<SiteSlotExecutionRun>('site-slot-execution', runId) : null;
+    if (!execution) throw new Error(`Unknown site slot execution: ${input.runId ?? '<empty>'}`);
+    const session = buildSiteSlotRunnerSession(this.config, execution, input, `slotrunner_${randomUUID()}`);
+    await this.saveRecord('site-slot-runner-session', session.sessionId, session, session.siteId);
+    await this.recordAudit({
+      eventType: 'site_slot.runner.started',
+      actorKind: 'runner-controller',
+      requestId: input.requestId ?? null,
+      metadata: {
+        sessionId: session.sessionId,
+        runId: session.runId,
+        planId: session.planId,
+        siteId: session.siteId,
+        kind: session.kind,
+        mode: session.mode,
+        status: session.status,
+        stepCount: session.stepResults.length,
+        nextActions: session.nextActions
+      }
+    });
+    return session;
+  }
+
+  async getSiteSlotRunnerSession(sessionId: string): Promise<SiteSlotRunnerSession | null> {
+    return this.getRecord<SiteSlotRunnerSession>('site-slot-runner-session', sessionId);
+  }
+
+  async listSiteSlotRunnerSessions(runId?: string | null): Promise<SiteSlotRunnerSession[]> {
+    return (await this.listRecords<SiteSlotRunnerSession>('site-slot-runner-session'))
+      .filter((session) => !runId || session.runId === runId)
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  }
+
+  async createSiteSlotWorkerJob(input: SiteSlotWorkerJobInput): Promise<SiteSlotWorkerJob> {
+    const sessionId = input.sessionId?.trim();
+    const session = sessionId ? await this.getRecord<SiteSlotRunnerSession>('site-slot-runner-session', sessionId) : null;
+    if (!session) throw new Error(`Unknown site slot runner session: ${input.sessionId ?? '<empty>'}`);
+    const job = buildSiteSlotWorkerJob(session, input, `slotjob_${randomUUID()}`);
+    await this.saveRecord('site-slot-worker-job', job.jobId, job, job.siteId);
+    await this.recordAudit({
+      eventType: 'site_slot.worker_job.created',
+      actorKind: 'runner-controller',
+      requestId: input.requestId ?? null,
+      metadata: {
+        jobId: job.jobId,
+        sessionId: job.sessionId,
+        runId: job.runId,
+        planId: job.planId,
+        siteId: job.siteId,
+        mode: job.mode,
+        status: job.status,
+        workerKind: job.worker.kind,
+        stepCount: job.steps.length,
+        nextActions: job.nextActions
+      }
+    });
+    return job;
+  }
+
+  async getSiteSlotWorkerJob(jobId: string): Promise<SiteSlotWorkerJob | null> {
+    return this.getRecord<SiteSlotWorkerJob>('site-slot-worker-job', jobId);
+  }
+
+  async listSiteSlotWorkerJobs(sessionId?: string | null): Promise<SiteSlotWorkerJob[]> {
+    return (await this.listRecords<SiteSlotWorkerJob>('site-slot-worker-job'))
+      .filter((job) => !sessionId || job.sessionId === sessionId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async recordSiteSlotWorkerReport(input: SiteSlotWorkerReportInput): Promise<SiteSlotWorkerReport> {
+    const jobId = input.jobId?.trim();
+    const job = jobId ? await this.getRecord<SiteSlotWorkerJob>('site-slot-worker-job', jobId) : null;
+    if (!job) throw new Error(`Unknown site slot worker job: ${input.jobId ?? '<empty>'}`);
+    const report = buildSiteSlotWorkerReport(job, input, `slotreport_${randomUUID()}`);
+    const session = await this.getRecord<SiteSlotRunnerSession>('site-slot-runner-session', job.sessionId);
+    if (session) {
+      const state = applySiteSlotWorkerReportState(job, session, report);
+      await this.saveRecord('site-slot-worker-job', state.job.jobId, state.job, state.job.siteId);
+      await this.saveRecord('site-slot-runner-session', state.session.sessionId, state.session, state.session.siteId);
+    }
+    await this.saveRecord('site-slot-worker-report', report.reportId, report, report.siteId);
+    await this.recordAudit({
+      eventType: 'site_slot.worker_report.recorded',
+      actorKind: 'runner-worker',
+      requestId: input.requestId ?? null,
+      metadata: {
+        reportId: report.reportId,
+        jobId: report.jobId,
+        sessionId: report.sessionId,
+        runId: report.runId,
+        planId: report.planId,
+        siteId: report.siteId,
+        workerId: report.workerId,
+        status: report.status,
+        stepReportCount: report.stepReports.length,
+        nextActions: report.nextActions
+      }
+    });
+    return report;
+  }
+
+  async getSiteSlotWorkerReport(reportId: string): Promise<SiteSlotWorkerReport | null> {
+    return this.getRecord<SiteSlotWorkerReport>('site-slot-worker-report', reportId);
+  }
+
+  async listSiteSlotWorkerReports(jobId?: string | null): Promise<SiteSlotWorkerReport[]> {
+    return (await this.listRecords<SiteSlotWorkerReport>('site-slot-worker-report'))
+      .filter((report) => !jobId || report.jobId === jobId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async createSiteSlotRollbackExecution(input: SiteSlotRollbackExecutionInput): Promise<SiteSlotRollbackExecution> {
+    const reportId = input.reportId?.trim();
+    const report = reportId ? await this.getRecord<SiteSlotWorkerReport>('site-slot-worker-report', reportId) : null;
+    if (!report) throw new Error(`Unknown site slot worker report: ${input.reportId ?? '<empty>'}`);
+    const rollbackExecution = buildSiteSlotRollbackExecution(report, input, `slotrollback_${randomUUID()}`);
+    await this.saveRecord(
+      'site-slot-rollback-execution',
+      rollbackExecution.rollbackExecutionId,
+      rollbackExecution,
+      rollbackExecution.siteId
+    );
+    await this.recordAudit({
+      eventType: 'site_slot.rollback_execution.created',
+      actorKind: 'runner-controller',
+      requestId: input.requestId ?? null,
+      metadata: {
+        rollbackExecutionId: rollbackExecution.rollbackExecutionId,
+        rollbackPlanId: rollbackExecution.rollbackPlanId,
+        sourceReportId: rollbackExecution.sourceReportId,
+        jobId: rollbackExecution.jobId,
+        sessionId: rollbackExecution.sessionId,
+        runId: rollbackExecution.runId,
+        planId: rollbackExecution.planId,
+        siteId: rollbackExecution.siteId,
+        mode: rollbackExecution.mode,
+        status: rollbackExecution.status,
+        dryRun: rollbackExecution.dryRun,
+        stepCount: rollbackExecution.stepResults.length,
+        nextActions: rollbackExecution.nextActions
+      }
+    });
+    return rollbackExecution;
+  }
+
+  async getSiteSlotRollbackExecution(rollbackExecutionId: string): Promise<SiteSlotRollbackExecution | null> {
+    return this.getRecord<SiteSlotRollbackExecution>('site-slot-rollback-execution', rollbackExecutionId);
+  }
+
+  async listSiteSlotRollbackExecutions(reportId?: string | null): Promise<SiteSlotRollbackExecution[]> {
+    return (await this.listRecords<SiteSlotRollbackExecution>('site-slot-rollback-execution'))
+      .filter((execution) => !reportId || execution.sourceReportId === reportId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async recordSiteSlotRollbackReport(input: SiteSlotRollbackReportInput): Promise<SiteSlotRollbackReport> {
+    const rollbackExecutionId = input.rollbackExecutionId?.trim();
+    const rollbackExecution = rollbackExecutionId
+      ? await this.getRecord<SiteSlotRollbackExecution>('site-slot-rollback-execution', rollbackExecutionId)
+      : null;
+    if (!rollbackExecution) {
+      throw new Error(`Unknown site slot rollback execution: ${input.rollbackExecutionId ?? '<empty>'}`);
+    }
+    const report = buildSiteSlotRollbackReport(rollbackExecution, input, `slotrollbackreport_${randomUUID()}`);
+    const executionState = applySiteSlotRollbackReportState(rollbackExecution, report);
+    await this.saveRecord('site-slot-rollback-execution', executionState.rollbackExecutionId, executionState, executionState.siteId);
+    await this.saveRecord('site-slot-rollback-report', report.rollbackReportId, report, report.siteId);
+    await this.recordAudit({
+      eventType: 'site_slot.rollback_report.recorded',
+      actorKind: 'runner-worker',
+      requestId: input.requestId ?? null,
+      metadata: {
+        rollbackReportId: report.rollbackReportId,
+        rollbackExecutionId: report.rollbackExecutionId,
+        rollbackPlanId: report.rollbackPlanId,
+        sourceReportId: report.sourceReportId,
+        jobId: report.jobId,
+        sessionId: report.sessionId,
+        runId: report.runId,
+        planId: report.planId,
+        siteId: report.siteId,
+        workerId: report.workerId,
+        status: report.status,
+        stepReportCount: report.stepReports.length,
+        nextActions: report.nextActions
+      }
+    });
+    return report;
+  }
+
+  async getSiteSlotRollbackReport(rollbackReportId: string): Promise<SiteSlotRollbackReport | null> {
+    return this.getRecord<SiteSlotRollbackReport>('site-slot-rollback-report', rollbackReportId);
+  }
+
+  async listSiteSlotRollbackReports(rollbackExecutionId?: string | null): Promise<SiteSlotRollbackReport[]> {
+    return (await this.listRecords<SiteSlotRollbackReport>('site-slot-rollback-report'))
+      .filter((report) => !rollbackExecutionId || report.rollbackExecutionId === rollbackExecutionId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   async enrollAnonymous(input: AnonymousEnrollmentRequest): Promise<{
@@ -230,8 +631,122 @@ export class PostgresStore implements PlatformStore {
     return { enrollment, snapshot, auditEvent };
   }
 
+  async bootstrapUserCenter(): Promise<UserCenterBootstrapResult> {
+    const tenant = await this.upsertRecord('iam-tenant', 'tenant_default', builtinUserCenterTenant(), this.config.siteId);
+    const org = await this.upsertRecord('iam-org', 'org_default', builtinUserCenterOrg(), this.config.siteId);
+    for (const role of builtinUserCenterRoles()) {
+      await this.upsertRecord('iam-role', role.roleId, role, this.config.siteId);
+    }
+    const admin = await this.createUserCenterUser({
+      userId: 'usr_demo_admin',
+      email: 'admin@mx.local',
+      displayName: 'MX Demo Admin',
+      roleIds: ['mx-admin'],
+      requestId: 'bootstrap-user-center'
+    });
+    const user = await this.createUserCenterUser({
+      userId: 'usr_demo_user',
+      email: 'user@mx.local',
+      displayName: 'MX Demo User',
+      roleIds: ['mx-user'],
+      requestId: 'bootstrap-user-center'
+    });
+    const serviceAccount = await this.createUserCenterServiceAccount({
+      serviceAccountId: 'svc_sdk_gateway',
+      displayName: 'SDK Gateway',
+      roleIds: ['mx-service-account'],
+      requestId: 'bootstrap-user-center'
+    });
+    return createBootstrapResult(
+      await this.listUserCenterRoles(),
+      [admin, user],
+      [serviceAccount]
+    );
+  }
+
+  async listUserCenterRoles(): Promise<UserCenterRole[]> {
+    return (await this.listRecords<UserCenterRole>('iam-role')).sort((a, b) => a.roleId.localeCompare(b.roleId));
+  }
+
+  async listUserCenterUsers(): Promise<UserCenterUser[]> {
+    return (await this.listRecords<UserCenterUser>('iam-user')).sort((a, b) => a.userId.localeCompare(b.userId));
+  }
+
+  async createUserCenterUser(input: CreateUserInput): Promise<UserCenterUser> {
+    const user = createUserCenterUser(input);
+    await this.upsertRecord('iam-user', user.userId, user, this.config.siteId);
+    await this.recordAudit({
+      eventType: 'iam.user.upserted',
+      actorKind: 'user-center',
+      userId: user.userId,
+      requestId: input.requestId ?? null,
+      metadata: {
+        email: user.email,
+        roleIds: user.roleIds,
+        status: user.status
+      }
+    });
+    return user;
+  }
+
+  async listUserCenterServiceAccounts(): Promise<UserCenterServiceAccount[]> {
+    return (await this.listRecords<UserCenterServiceAccount>('iam-service-account'))
+      .sort((a, b) => a.serviceAccountId.localeCompare(b.serviceAccountId));
+  }
+
+  async createUserCenterServiceAccount(input: CreateServiceAccountInput): Promise<UserCenterServiceAccount> {
+    const serviceAccount = createUserCenterServiceAccount(input);
+    await this.upsertRecord('iam-service-account', serviceAccount.serviceAccountId, serviceAccount, this.config.siteId);
+    await this.recordAudit({
+      eventType: 'iam.service_account.upserted',
+      actorKind: 'user-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        serviceAccountId: serviceAccount.serviceAccountId,
+        roleIds: serviceAccount.roleIds,
+        scopes: serviceAccount.scopes,
+        status: serviceAccount.status
+      }
+    });
+    return serviceAccount;
+  }
+
+  async issueUserCenterToken(input: IssueTokenInput): Promise<UserCenterIssuedToken> {
+    const principal = await this.principalForSubject(input.subjectKind, input.subjectId);
+    if (!principal) {
+      throw new Error(`Unknown token subject: ${input.subjectKind}:${input.subjectId}`);
+    }
+    const requestedScopes = input.scopes?.length ? input.scopes : principal.scopes;
+    const allowedScopes = requestedScopes.filter((scope) => principal.scopes.includes(scope));
+    const token = `mx-v1-${randomBytes(24).toString('base64url')}`;
+    const issued = createUserCenterTokenRecord(this.config, {
+      ...input,
+      scopes: allowedScopes
+    }, token);
+    await this.saveRecord('iam-token', issued.record.tokenHash, issued.record, this.config.siteId);
+    await this.recordAudit({
+      eventType: 'auth.token.issued',
+      actorKind: input.subjectKind,
+      userId: input.subjectKind === 'user' ? input.subjectId : null,
+      requestId: input.requestId ?? null,
+      metadata: {
+        tokenId: issued.record.tokenId,
+        subjectKind: input.subjectKind,
+        subjectId: input.subjectId,
+        audience: issued.record.audience,
+        scopes: issued.record.scopes,
+        expiresAt: issued.record.expiresAt
+      }
+    });
+    return issued;
+  }
+
   async introspectToken(input: TokenIntrospectionInput): Promise<TokenIntrospectionResult> {
-    const result = introspectShadowToken(this.config, input);
+    const token = input.token?.trim() ?? '';
+    const record = token ? await this.getRecord<UserCenterTokenRecord>('iam-token', hashToken(token)) : null;
+    const principal = record ? await this.principalForSubject(record.subjectKind, record.subjectId) : null;
+    const result = introspectUserCenterToken(this.config, input, record, principal)
+      ?? introspectShadowToken(this.config, input);
     await this.recordAudit({
       eventType: 'auth.token.introspected',
       actorKind: result.principal?.kind ?? 'unknown',
@@ -253,7 +768,13 @@ export class PostgresStore implements PlatformStore {
     const enrollment = input.installId
       ? await this.getRecord<AnonymousEnrollment>('anonymous-enrollment', input.installId)
       : null;
-    const context = resolvePrincipalContext(this.config, input, enrollment);
+    const auth = await this.introspectToken({
+      token: input.token,
+      audience: input.audience,
+      requestId: input.requestId
+    });
+    const boundPrincipal = input.userId ? await this.principalForSubject('user', input.userId) : null;
+    const context = resolvePrincipalContext(this.config, input, enrollment, auth, boundPrincipal);
     await this.recordAudit({
       eventType: 'identity.context.resolved',
       actorKind: context.principal.kind,
@@ -274,6 +795,185 @@ export class PostgresStore implements PlatformStore {
 
   sdkGatewayManifest(): SdkGatewayManifest {
     return createSdkGatewayManifest(this.config);
+  }
+
+  async evaluateSdkGatewayAccess(input: SdkGatewayAccessInput): Promise<SdkGatewayAccessDecision> {
+    const introspection = await this.introspectToken({
+      token: input.token,
+      audience: input.audience,
+      requestId: input.requestId
+    });
+    const decision = evaluateSdkGatewayRoute(introspection.principal, input.routeId);
+    await this.recordAudit({
+      eventType: 'sdk.gateway.access.evaluated',
+      actorKind: decision.principal?.kind ?? 'unknown',
+      userId: decision.principal?.userId ?? null,
+      requestId: input.requestId ?? null,
+      metadata: {
+        routeId: input.routeId,
+        allowed: decision.allowed,
+        matchedScopes: decision.matchedScopes,
+        missingScopes: decision.missingScopes,
+        reason: decision.reason
+      }
+    });
+    return decision;
+  }
+
+  async createConfigPolicySnapshot(input: ConfigPolicySnapshotInput): Promise<ConfigPolicySnapshot> {
+    const appId = input.appId?.trim() || 'h2o';
+    const enrollment = input.installId
+      ? await this.getRecord<AnonymousEnrollment>('anonymous-enrollment', input.installId)
+      : null;
+    const principalContext = await this.resolvePrincipalContext({
+      token: input.token,
+      audience: input.audience,
+      userId: input.userId,
+      installId: input.installId,
+      requestId: input.requestId
+    });
+    const app = await this.getAppCenterApp(appId);
+    const launcherNetwork = await this.createLauncherNetworkSnapshot({
+      installId: enrollment?.installId ?? input.installId ?? undefined,
+      deviceId: enrollment?.deviceId ?? input.deviceId ?? undefined,
+      userId: principalContext.principal.userId ?? enrollment?.userId ?? input.userId ?? null,
+      appId,
+      requestId: input.requestId ?? undefined
+    });
+    const launcherRelease = await this.evaluateReleaseUpdate({
+      componentKind: 'platform-critical',
+      componentId: 'launcher-network',
+      currentVersion: '0.1.0',
+      targetVersion: '0.1.1',
+      channel: input.channel ?? 'shadow',
+      installId: enrollment?.installId ?? input.installId ?? null,
+      userId: principalContext.principal.userId
+    });
+    const appRelease = await this.evaluateReleaseUpdate({
+      componentKind: app?.updatePolicy ?? 'app-managed',
+      componentId: appId,
+      currentVersion: app?.version ?? '0.1.0',
+      targetVersion: app?.version === '0.1.1' ? app.version : '0.1.1',
+      channel: input.channel ?? 'shadow',
+      installId: enrollment?.installId ?? input.installId ?? null,
+      userId: principalContext.principal.userId
+    });
+    const snapshot = createConfigPolicySnapshot(this.config, input, {
+      snapshotId: `polsnap_${randomUUID()}`,
+      version: await this.countRecords('config-policy-snapshot') + 1,
+      app,
+      principal: principalContext.principal,
+      enrollment,
+      launcherNetwork,
+      dnsPolicy: await this.getEffectiveDnsPolicy(appId),
+      reverseProxyRoutes: await this.listDnsReverseProxyRoutes(),
+      sdkGateway: await this.sdkGatewayManifest(),
+      launcherRelease,
+      appRelease
+    });
+    await this.saveRecord('config-policy-snapshot', snapshot.snapshotId, snapshot, this.config.siteId);
+    await this.recordAudit({
+      eventType: 'config.policy_snapshot.issued',
+      actorKind: 'config-center',
+      userId: snapshot.userId,
+      anonymousPrincipalId: snapshot.anonymousPrincipalId,
+      installId: snapshot.installId,
+      deviceId: snapshot.deviceId,
+      productId: snapshot.productId,
+      requestId: input.requestId ?? null,
+      configSnapshotId: snapshot.snapshotId,
+      metadata: {
+        appId: snapshot.appId,
+        version: snapshot.version,
+        digest: snapshot.signatures.digest,
+        dnsPolicyId: snapshot.policies.dns.policy.policyId,
+        launcherNetworkSnapshotId: snapshot.policies.launcherNetwork.snapshotId
+      }
+    });
+    return snapshot;
+  }
+
+  async getConfigPolicySnapshot(snapshotId: string): Promise<ConfigPolicySnapshot | null> {
+    return this.getRecord<ConfigPolicySnapshot>('config-policy-snapshot', snapshotId);
+  }
+
+  async listSiteSlotSshProfiles(): Promise<SiteSlotSshProfile[]> {
+    const profiles = await this.listRecords<SiteSlotSshProfile>('site-slot-ssh-profile');
+    return profiles.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  async getSiteSlotSshProfile(profileId: string): Promise<SiteSlotSshProfile | null> {
+    return this.getRecord<SiteSlotSshProfile>('site-slot-ssh-profile', profileId);
+  }
+
+  async getSiteSlotSshProfileForSite(siteId: string): Promise<SiteSlotSshProfile | null> {
+    const profiles = await this.listSiteSlotSshProfiles();
+    return profiles.find((profile) => profile.siteId === siteId && profile.status === 'active') ?? null;
+  }
+
+  async upsertSiteSlotSshProfile(input: SiteSlotSshProfileInput): Promise<SiteSlotSshProfile> {
+    const previous = input.profileId ? await this.getSiteSlotSshProfile(input.profileId) : null;
+    const profile = buildSiteSlotSshProfile(this.config, input, previous);
+    await this.saveRecord('site-slot-ssh-profile', profile.profileId, profile, profile.siteId);
+    await this.recordAudit({
+      eventType: 'config.site_slot_ssh_profile.upserted',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        profileId: profile.profileId,
+        siteId: profile.siteId,
+        kind: profile.kind,
+        status: profile.status,
+        warnings: profile.warnings
+      }
+    });
+    return profile;
+  }
+
+  async listRuntimeFeaturePolicies(featureKey?: string | null): Promise<RuntimeFeaturePolicy[]> {
+    const policies = await this.listRecords<RuntimeFeaturePolicy>('runtime-feature-policy');
+    return policies
+      .filter((policy) => !featureKey || policy.featureKey === featureKey)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  async getRuntimeFeaturePolicy(policyId: string): Promise<RuntimeFeaturePolicy | null> {
+    return this.getRecord<RuntimeFeaturePolicy>('runtime-feature-policy', policyId);
+  }
+
+  async upsertRuntimeFeaturePolicy(input: RuntimeFeaturePolicyInput): Promise<RuntimeFeaturePolicy> {
+    const candidate = buildRuntimeFeaturePolicy(this.config, input, null);
+    const previous = await this.getRuntimeFeaturePolicy(candidate.policyId);
+    const policy = buildRuntimeFeaturePolicy(this.config, input, previous);
+    await this.saveRecord('runtime-feature-policy', policy.policyId, policy, policy.scopeId ?? this.config.siteId);
+    await this.recordAudit({
+      eventType: 'config.runtime_feature_policy.upserted',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        policyId: policy.policyId,
+        featureKey: policy.featureKey,
+        scopeKind: policy.scopeKind,
+        scopeId: policy.scopeId,
+        enabled: policy.enabled,
+        mode: policy.mode,
+        expiresAt: policy.expiresAt
+      }
+    });
+    return policy;
+  }
+
+  private async withSiteSlotSshProfile(input: SiteSlotPlanInput): Promise<SiteSlotPlanInput> {
+    const profileId = input.sshProfileId?.trim();
+    if (!profileId) return input;
+    const profile = await this.getSiteSlotSshProfile(profileId);
+    if (!profile) return { ...input, sshProfileError: `SSH profile not found: ${profileId}` };
+    return {
+      ...input,
+      sshProfile: profile,
+      kind: input.kind ?? profile.kind,
+      siteId: input.siteId ?? profile.siteId
+    };
   }
 
   async getSnapshot(installId: string): Promise<ConfigSnapshot | null> {
@@ -381,6 +1081,112 @@ export class PostgresStore implements PlatformStore {
       .sort((a, b) => a.host.localeCompare(b.host));
   }
 
+  async buildDnsZoneSnapshot(input: DnsZoneSnapshotInput): Promise<DnsZoneSnapshot> {
+    const policy = input.policyId
+      ? required(await this.getRecord<DnsPolicy>('dns-policy', input.policyId), `DNS policy not found: ${input.policyId}`)
+      : await this.getEffectiveDnsPolicy(input.appId ?? 'sdk-gateway');
+    const snapshot = buildDnsZoneSnapshot(this.config, {
+      snapshotId: `dnszone_${randomUUID()}`,
+      version: await this.countRecords('dns-zone-snapshot') + 1,
+      policy,
+      reverseProxyRoutes: await this.listDnsReverseProxyRoutes(),
+      requestId: input.requestId ?? null
+    });
+    await this.saveRecord('dns-zone-snapshot', snapshot.snapshotId, snapshot, this.config.siteId);
+    await this.recordAudit({
+      eventType: 'dns.zone_snapshot.built',
+      actorKind: 'dns-control',
+      requestId: input.requestId ?? null,
+      metadata: {
+        snapshotId: snapshot.snapshotId,
+        policyId: snapshot.policyId,
+        zones: snapshot.zoneNames,
+        records: snapshot.records.length,
+        digest: snapshot.signatures.digest
+      }
+    });
+    return snapshot;
+  }
+
+  async getDnsZoneSnapshot(snapshotId: string): Promise<DnsZoneSnapshot | null> {
+    return this.getRecord<DnsZoneSnapshot>('dns-zone-snapshot', snapshotId);
+  }
+
+  async syncCoreDnsConfigMap(input: CoreDnsConfigMapSyncInput): Promise<CoreDnsConfigMapSyncResult> {
+    const snapshot = input.snapshotId
+      ? required(await this.getDnsZoneSnapshot(input.snapshotId), `DNS zone snapshot not found: ${input.snapshotId}`)
+      : await this.buildDnsZoneSnapshot(input);
+    const result = renderCoreDnsConfigMap(snapshot, input, `dnsync_${randomUUID()}`);
+    await this.saveRecord('coredns-configmap-sync', result.syncId, result, this.config.siteId);
+    await this.recordAudit({
+      eventType: 'dns.coredns_configmap.sync_recorded',
+      actorKind: 'dns-control',
+      requestId: input.requestId ?? null,
+      metadata: {
+        syncId: result.syncId,
+        mode: result.mode,
+        status: result.status,
+        applied: result.applied,
+        snapshotId: result.snapshotId,
+        namespace: result.namespace,
+        configMapName: result.configMapName,
+        digest: snapshot.signatures.digest
+      }
+    });
+    return result;
+  }
+
+  async applyCoreDnsConfigMap(input: CoreDnsConfigMapApplyInput): Promise<CoreDnsConfigMapApplyResult> {
+    const sync = await this.syncCoreDnsConfigMap({ ...input, mode: 'shadow-apply' });
+    const gate = evaluateCoreDnsConfigMapApplyGate(this.config, sync, input);
+    const issuedAt = new Date().toISOString();
+    const outcome = gate.allowed
+      ? await applyCoreDnsConfigMapToKubernetes(sync.manifest, gate.serverDryRun)
+      : {
+          status: 'failed' as const,
+          applied: false,
+          resourceVersion: null,
+          message: gate.blockedReason ?? 'CoreDNS apply blocked'
+        };
+    const result: CoreDnsConfigMapApplyResult = {
+      applyId: `dnsapply_${randomUUID()}`,
+      syncId: sync.syncId,
+      mode: gate.serverDryRun ? 'k8s-server-dry-run' : 'k8s-apply',
+      status: gate.allowed ? outcome.status : 'blocked',
+      allowed: gate.allowed,
+      applied: gate.allowed ? outcome.applied : false,
+      serverDryRun: gate.serverDryRun,
+      snapshotId: sync.snapshotId,
+      namespace: sync.namespace,
+      configMapName: sync.configMapName,
+      manifest: sync.manifest,
+      resourceVersion: gate.allowed ? outcome.resourceVersion : null,
+      blockedReason: gate.blockedReason,
+      message: gate.allowed ? outcome.message : (gate.blockedReason ?? 'CoreDNS apply blocked'),
+      issuedAt,
+      completedAt: new Date().toISOString()
+    };
+    await this.saveRecord('coredns-configmap-apply', result.applyId, result, this.config.siteId);
+    await this.recordAudit({
+      eventType: 'dns.coredns_configmap.apply_evaluated',
+      actorKind: 'dns-control',
+      requestId: input.requestId ?? null,
+      metadata: {
+        applyId: result.applyId,
+        syncId: result.syncId,
+        status: result.status,
+        allowed: result.allowed,
+        applied: result.applied,
+        serverDryRun: result.serverDryRun,
+        snapshotId: result.snapshotId,
+        namespace: result.namespace,
+        configMapName: result.configMapName,
+        blockedReason: result.blockedReason
+      }
+    });
+    return result;
+  }
+
   async requestPermission(input: PermissionRequestInput): Promise<PermissionGrant> {
     const app = await this.getAppCenterApp(input.appId);
     const requestedScopes = input.scopes.length > 0 ? input.scopes : [];
@@ -445,7 +1251,7 @@ export class PostgresStore implements PlatformStore {
       userId: unsigned.userId,
       mode,
       overlayPolicy: {
-        cidr: mode === 'user' ? '100.89.0.0/16' : '100.91.0.0/16',
+        cidr: mode === 'user' ? '10.89.0.0/16' : '10.91.0.0/16',
         leaseIp,
         relayMode: 'h2i'
       },
@@ -525,6 +1331,93 @@ export class PostgresStore implements PlatformStore {
       evaluatedAt: new Date().toISOString()
     }, this.config.siteId);
     return decision;
+  }
+
+  async createReleaseManagementPlan(input: ReleaseManagementPlanInput): Promise<ReleaseManagementPlan> {
+    const releaseId = input.releaseId?.trim() || `rel_${randomUUID()}`;
+    const channel = input.channel?.trim() || 'shadow';
+    const appId = input.appId?.trim() || 'h2o';
+    const productId = input.productId?.trim() || appId;
+    const launcherDecision = await this.evaluateReleaseUpdate({
+      componentKind: 'platform-critical',
+      componentId: 'mx-launcher',
+      currentVersion: input.launcherCurrentVersion?.trim() || '0.1.0',
+      targetVersion: input.launcherTargetVersion?.trim() || '0.1.1',
+      channel,
+      installId: input.installId,
+      userId: input.userId
+    });
+    const appDecision = await this.evaluateReleaseUpdate({
+      componentKind: 'app-managed',
+      componentId: appId,
+      currentVersion: input.appCurrentVersion?.trim() || '0.1.0',
+      targetVersion: input.appTargetVersion?.trim() || '0.1.1',
+      channel,
+      installId: input.installId,
+      userId: input.userId
+    });
+    const testRun = await this.createTestRun({
+      suiteId: input.suiteId?.trim() || 'hdo-shadow-e2e',
+      releaseId,
+      installId: input.installId,
+      productId,
+      topology: input.topology?.trim() || 'h-d-i-shadow',
+      sites: input.sites ?? ['internal-main', 'domestic-main']
+    });
+    const e2eResult = input.e2eResult ?? 'running';
+    const gatedRun = e2eResult === 'running'
+      ? testRun
+      : await this.recordTestStep(testRun.testRunId, {
+          caseId: 'release-gate:e2e',
+          status: e2eResult,
+          message: `release management E2E gate ${e2eResult}`,
+          evidence: {
+            releaseId,
+            channel,
+            source: 'release-management-v1'
+          }
+        });
+    const gate = await this.evaluateTestGate({
+      gateId: `gate_${releaseId}_e2e`,
+      releaseId,
+      runIds: [gatedRun.testRunId]
+    });
+    const plan = buildReleaseManagementPlan(this.config, { ...input, channel }, {
+      planId: `relplan_${randomUUID()}`,
+      releaseId,
+      launcherDecision,
+      appDecision,
+      testRun: gatedRun,
+      gate,
+      createdAt: new Date().toISOString()
+    });
+    await this.saveRecord('release-management-plan', plan.planId, plan, this.config.siteId);
+    await this.recordAudit({
+      eventType: 'release.management_plan.created',
+      actorKind: 'release-center',
+      requestId: input.requestId ?? null,
+      installId: plan.installId,
+      userId: plan.userId,
+      productId,
+      metadata: {
+        planId: plan.planId,
+        releaseId: plan.releaseId,
+        channel: plan.channel,
+        gateVerdict: plan.test.gate.verdict,
+        readyToPromote: plan.decisions.readyToPromote,
+        nextActions: plan.decisions.nextActions
+      }
+    });
+    return plan;
+  }
+
+  async getReleaseManagementPlan(planId: string): Promise<ReleaseManagementPlan | null> {
+    return this.getRecord<ReleaseManagementPlan>('release-management-plan', planId);
+  }
+
+  async listReleaseManagementPlans(): Promise<ReleaseManagementPlan[]> {
+    return (await this.listRecords<ReleaseManagementPlan>('release-management-plan'))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   async createTestRun(input: TestRunInput): Promise<TestRun> {
@@ -653,6 +1546,44 @@ export class PostgresStore implements PlatformStore {
     const checks: string[] = [];
     const app = required(await this.getAppCenterApp('h2o'), 'h2o app is registered');
     checks.push('OK app h2o registered');
+    const userCenter = await this.bootstrapUserCenter();
+    if (!userCenter.roles.some((role) => role.roleId === 'mx-service-account')) {
+      throw new Error('User Center bootstrap did not register service-account role');
+    }
+    checks.push('OK User Center bootstrap registered RBAC records');
+    const issuedServiceToken = await this.issueUserCenterToken({
+      subjectKind: 'service-account',
+      subjectId: 'svc_sdk_gateway',
+      audience: 'mx-sdk',
+      requestId: 'smoke-service-token'
+    });
+    checks.push('OK User Center issued service token');
+    const sdkAccess = await this.evaluateSdkGatewayAccess({
+      token: issuedServiceToken.token,
+      audience: 'mx-sdk',
+      routeId: 'sdk.dns.evaluate',
+      requestId: 'smoke-sdk-access'
+    });
+    if (!sdkAccess.allowed) {
+      throw new Error('SDK Gateway did not allow service account dns evaluate');
+    }
+    checks.push('OK SDK Gateway allowed scoped service account');
+    const issuedUserToken = await this.issueUserCenterToken({
+      subjectKind: 'user',
+      subjectId: 'usr_demo_user',
+      audience: 'mx-sdk',
+      requestId: 'smoke-user-token'
+    });
+    const deniedSdkAccess = await this.evaluateSdkGatewayAccess({
+      token: issuedUserToken.token,
+      audience: 'mx-sdk',
+      routeId: 'sdk.audit.write',
+      requestId: 'smoke-sdk-denied'
+    });
+    if (deniedSdkAccess.allowed) {
+      throw new Error('SDK Gateway allowed a user without sdk.audit.write');
+    }
+    checks.push('OK SDK Gateway denied missing scope');
     const { enrollment } = await this.enrollAnonymous({
       productId: 'h2o',
       platform: 'darwin',
@@ -668,7 +1599,7 @@ export class PostgresStore implements PlatformStore {
     }
     checks.push('OK User Center principal context resolved');
     const sdkIntrospection = await this.introspectToken({
-      token: 'mx-shadow-service:sdk-gateway',
+      token: issuedServiceToken.token,
       audience: 'mx-sdk',
       requestId: 'smoke-sdk-introspection'
     });
@@ -681,14 +1612,276 @@ export class PostgresStore implements PlatformStore {
       throw new Error('SDK Gateway manifest did not expose identity introspection');
     }
     checks.push('OK SDK Gateway manifest published');
+    const overseaSlotPlan = await this.createSiteSlotPlan({
+      kind: 'oversea',
+      siteId: 'oversea-sg-1',
+      host: 'oversea.example.com',
+      sshUser: 'root',
+      hasDocker: true,
+      hasOutboundInternet: true,
+      requestId: 'smoke-oversea-slot'
+    });
+    const overseaPackageArtifacts = overseaSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'package-slot-artifacts');
+    const overseaPrepareAccess = overseaSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'prepare-access-stack');
+    const overseaConfigureAccess = overseaSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'configure-oversea-access');
+    const overseaPublishSubscription = overseaSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'publish-internal-subscription');
+    const overseaDeployServices = overseaSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'deploy-slot-services');
+    const overseaDeploymentCommands = overseaSlotPlan.deploymentPhases.flatMap((phase) => phase.commands);
+    if (
+      overseaSlotPlan.kind !== 'oversea'
+      || !overseaSlotPlan.services.dockerStacks.includes('docker/hysteria2-access-stack')
+      || overseaPackageArtifacts?.mode !== 'admin-action'
+      || !overseaPackageArtifacts?.commands.some((command) => command.includes('modules=hysteria2-access-stack,site-agent,runner-worker,observability-forwarder'))
+      || !overseaPackageArtifacts?.commands.some((command) => command.includes('never sync the repository root'))
+      || overseaPrepareAccess?.mode !== 'artifact-push'
+      || !overseaPrepareAccess?.commands.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-access-stack.tar.gz'))
+      || !overseaPrepareAccess?.commands.some((command) => command.includes('scp -P') && command.includes('mx-oversea-access-stack.tar.gz'))
+      || !overseaPrepareAccess?.commands.some((command) => command.includes('/opt/mx/releases/oversea-access-stack/<release-revision>'))
+      || !overseaConfigureAccess?.commands.some((command) => command.includes('HY2_EXPORT_PASSWORD_HASH=<caddy-bcrypt-hash-from-internal-secret>'))
+      || !overseaConfigureAccess?.commands.some((command) => command.includes('HY2_MIHOMO_ROUTING_MODE=cn-direct') && command.includes('HY2_RESERVED_INTERNAL_CIDRS=10.88.0.0/16,10.89.0.0/16,10.90.0.0/16,10.91.0.0/16') && command.includes('HY2_DOMESTIC_GATEWAY_IP=10.88.0.1'))
+      || !overseaConfigureAccess?.commands.some((command) => command.includes('base64 -d') && command.includes('tunnel-state.json'))
+      || !overseaConfigureAccess?.commands.some((command) => command.includes('reconcile-from-json') && command.includes('--mode hysteria2-only'))
+      || !overseaConfigureAccess?.commands.some((command) => command.includes('@qpjoy/tunnel-cli') || command.includes('qp-tunnel-cli register'))
+      || !overseaPublishSubscription?.commands.some((command) => command.includes('domesticBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/domestic-bootstrap.yaml'))
+      || overseaDeployServices?.mode !== 'artifact-push'
+      || !overseaDeployServices?.commands.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-services.tar.gz'))
+      || !overseaDeployServices?.commands.some((command) => command.includes('/opt/mx/incoming/mx-oversea-services.tar.gz'))
+      || !overseaDeployServices?.commands.some((command) => command.includes('/opt/mx/current/oversea') && command.includes('LOCAL_STACK_PATH=/opt/mx/current/hysteria2-access-stack') && command.includes('MX_ACCESS_RUNTIME=hysteria2-only'))
+      || overseaDeploymentCommands.some((command) => command.includes('git pull') || command.includes('git clone') || command.includes('./docker/'))
+    ) {
+      throw new Error('Oversea slot plan did not include access stack');
+    }
+    checks.push('OK Oversea slot plan generated');
+    const domesticSlotPlan = await this.createSiteSlotPlan({
+      kind: 'domestic',
+      siteId: 'domestic-main',
+      host: 'domestic.example.com',
+      sshUser: 'root',
+      rootAccess: true,
+      hasDocker: true,
+      hasOutboundInternet: false,
+      overseaSiteId: overseaSlotPlan.siteId,
+      overseaHost: overseaSlotPlan.host,
+      internalBaseUrl: this.config.internalBaseUrl,
+      requestId: 'smoke-domestic-slot'
+    });
+    const domesticPackageArtifacts = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'package-slot-artifacts');
+    const domesticResolveSubscription = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'resolve-domestic-bootstrap-subscription');
+    const domesticBootstrapEgress = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'bootstrap-domestic-egress');
+    if (
+      domesticSlotPlan.network.mode !== 'oversea-assisted'
+      || domesticSlotPlan.network.qpTunnelCliMode !== 'server-on'
+      || !domesticSlotPlan.services.hostServices.includes('wg-quick@mx-domestic')
+      || !domesticPackageArtifacts?.commands.some((command) => command.includes('qp-tunnel-cli-offline-fallback'))
+      || !domesticPackageArtifacts?.commands.some((command) => command.includes('refresh-tunnel-cli latest'))
+      || domesticResolveSubscription?.mode !== 'admin-action'
+      || !domesticResolveSubscription?.commands.some((command) => command.includes('domesticBootstrapSubscription'))
+      || !domesticResolveSubscription?.commands.some((command) => command.includes('do not ask Domestic to npm install'))
+      || domesticBootstrapEgress?.mode !== 'artifact-push'
+      || !domesticBootstrapEgress?.commands.some((command) => command.includes('npm i -g @qpjoy/tunnel-cli'))
+      || !domesticBootstrapEgress?.commands.some((command) => command.includes('mx-domestic-qp-tunnel-cli-fallback.tar.gz'))
+      || !domesticBootstrapEgress?.commands.some((command) => command.includes('server-on'))
+      || domesticBootstrapEgress?.commands.some((command) => command.includes('tun-on'))
+    ) {
+      throw new Error('Domestic slot plan did not model host WireGuard and Oversea-assisted bootstrap');
+    }
+    checks.push('OK Domestic slot plan generated');
+    const domesticSlotPreflightExecution = await this.createSiteSlotExecution({
+      planId: domesticSlotPlan.planId,
+      action: 'preflight',
+      mode: 'dry-run',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-preflight'
+    });
+    if (
+      domesticSlotPreflightExecution.status !== 'ready'
+      || !domesticSlotPreflightExecution.steps.some((step) => step.sourceId === 'domestic.wireguard')
+    ) {
+      throw new Error('Domestic slot preflight execution did not produce a ready WireGuard check manifest');
+    }
+    checks.push('OK Domestic slot preflight execution manifest generated');
+    const domesticSlotApplyExecution = await this.createSiteSlotExecution({
+      planId: domesticSlotPlan.planId,
+      action: 'apply',
+      mode: 'manual',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-apply'
+    });
+    if (
+      domesticSlotApplyExecution.status !== 'requires-confirmation'
+      || !domesticSlotApplyExecution.nextActions.includes('rerun-apply-with-confirmApply-true')
+    ) {
+      throw new Error('Domestic slot apply execution did not require explicit confirmation');
+    }
+    checks.push('OK Domestic slot apply execution gate requires confirmation');
+    const domesticSlotPreflightRunnerSession = await this.startSiteSlotRunnerSession({
+      runId: domesticSlotPreflightExecution.runId,
+      mode: 'simulate',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-runner-simulate'
+    });
+    if (
+      domesticSlotPreflightRunnerSession.status !== 'completed'
+      || !domesticSlotPreflightRunnerSession.stepResults.every((step) => step.status === 'simulated')
+    ) {
+      throw new Error('Domestic slot simulated runner session did not complete every step');
+    }
+    checks.push('OK Domestic slot runner simulated preflight session completed');
+    const domesticSlotRemoteRunnerSession = await this.startSiteSlotRunnerSession({
+      runId: domesticSlotPreflightExecution.runId,
+      mode: 'remote-ssh',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-runner-remote'
+    });
+    if (
+      domesticSlotRemoteRunnerSession.status !== 'blocked'
+      || !domesticSlotRemoteRunnerSession.warnings.some((warning) => warning.includes('SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED'))
+    ) {
+      throw new Error('Domestic slot remote runner session was not blocked by remote execution gate');
+    }
+    checks.push('OK Domestic slot remote runner gate blocked by default');
+    const domesticSlotWorkerJob = await this.createSiteSlotWorkerJob({
+      sessionId: domesticSlotPreflightRunnerSession.sessionId,
+      workerId: 'worker-shadow-domestic',
+      workerKind: 'internal-runner',
+      retryLimit: 2,
+      rollbackStrategy: 'no-op-simulated-rollback',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-worker-job'
+    });
+    if (
+      domesticSlotWorkerJob.status !== 'ready'
+      || domesticSlotWorkerJob.contractVersion !== 'site-slot-worker-v1'
+      || domesticSlotWorkerJob.steps.length !== domesticSlotPreflightRunnerSession.stepResults.length
+    ) {
+      throw new Error('Domestic slot worker job contract was not ready');
+    }
+    checks.push('OK Domestic slot worker job contract created');
+    const domesticSlotWorkerReport = await this.recordSiteSlotWorkerReport({
+      jobId: domesticSlotWorkerJob.jobId,
+      workerId: domesticSlotWorkerJob.worker.workerId,
+      status: 'passed',
+      message: 'shadow worker contract passed',
+      stepReports: [
+        {
+          stepId: domesticSlotWorkerJob.steps[0]?.stepId,
+          status: 'passed',
+          exitCode: 0,
+          stdout: 'wireguard check simulated',
+          stderr: null,
+          attempt: 1
+        }
+      ],
+      requestId: 'smoke-domestic-slot-worker-report'
+    });
+    if (
+      domesticSlotWorkerReport.status !== 'passed'
+      || !domesticSlotWorkerReport.nextActions.includes('close-change-window')
+      || domesticSlotWorkerReport.stepReports[0]?.stdout !== 'wireguard check simulated'
+    ) {
+      throw new Error('Domestic slot worker report did not record passed evidence');
+    }
+    checks.push('OK Domestic slot worker report recorded passed evidence');
+    const domesticSlotWorkerJobState = required(await this.getSiteSlotWorkerJob(domesticSlotWorkerJob.jobId), 'worker job state exists');
+    const domesticSlotPreflightRunnerSessionState = required(await this.getSiteSlotRunnerSession(domesticSlotPreflightRunnerSession.sessionId), 'runner session state exists');
+    if (domesticSlotWorkerJobState.status !== 'passed' || domesticSlotPreflightRunnerSessionState.status !== 'passed') {
+      throw new Error('Worker report did not advance job and runner session to passed');
+    }
+    checks.push('OK Worker report advanced job/session state to passed');
+    const failedRunnerSession = await this.startSiteSlotRunnerSession({
+      runId: domesticSlotPreflightExecution.runId,
+      mode: 'simulate',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-runner-failed-simulate'
+    });
+    const failedWorkerJob = await this.createSiteSlotWorkerJob({
+      sessionId: failedRunnerSession.sessionId,
+      workerId: 'worker-shadow-domestic-failed',
+      workerKind: 'internal-runner',
+      rollbackStrategy: 'restore-failed-simulated-state',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-worker-failed-job'
+    });
+    const domesticSlotFailedWorkerReport = await this.recordSiteSlotWorkerReport({
+      jobId: failedWorkerJob.jobId,
+      workerId: failedWorkerJob.worker.workerId,
+      status: 'failed',
+      message: 'shadow worker contract failed',
+      stepReports: [
+        {
+          stepId: failedWorkerJob.steps[0]?.stepId,
+          status: 'failed',
+          exitCode: 2,
+          stdout: 'failure stdout',
+          stderr: 'failure stderr',
+          attempt: 1
+        }
+      ],
+      requestId: 'smoke-domestic-slot-worker-failed-report'
+    });
+    const domesticSlotFailedWorkerJob = required(await this.getSiteSlotWorkerJob(failedWorkerJob.jobId), 'failed worker job state exists');
+    if (
+      domesticSlotFailedWorkerJob.status !== 'failed'
+      || domesticSlotFailedWorkerReport.rollbackPlan?.status !== 'planned'
+      || domesticSlotFailedWorkerReport.rollbackPlan.strategy !== 'restore-failed-simulated-state'
+    ) {
+      throw new Error('Failed worker report did not produce rollback plan and failed state');
+    }
+    checks.push('OK Failed worker report generated rollback plan');
+    const domesticSlotFailedRollbackPlan = required(domesticSlotFailedWorkerReport.rollbackPlan, 'failed worker rollback plan exists');
+    const domesticSlotRollbackExecution = await this.createSiteSlotRollbackExecution({
+      reportId: domesticSlotFailedWorkerReport.reportId,
+      mode: 'simulate',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-rollback-execution'
+    });
+    if (
+      domesticSlotRollbackExecution.status !== 'ready'
+      || domesticSlotRollbackExecution.contractVersion !== 'site-slot-rollback-v1'
+      || domesticSlotRollbackExecution.rollbackPlanId !== domesticSlotFailedRollbackPlan.rollbackPlanId
+      || domesticSlotRollbackExecution.stepResults.length !== domesticSlotFailedRollbackPlan.steps.length
+    ) {
+      throw new Error('Rollback execution contract was not ready');
+    }
+    checks.push('OK Rollback execution contract created');
+    const domesticSlotRollbackReport = await this.recordSiteSlotRollbackReport({
+      rollbackExecutionId: domesticSlotRollbackExecution.rollbackExecutionId,
+      workerId: 'worker-shadow-domestic-rollback',
+      status: 'passed',
+      message: 'shadow rollback contract passed',
+      stepReports: [
+        {
+          stepId: domesticSlotRollbackExecution.stepResults[0]?.stepId,
+          status: 'passed',
+          exitCode: 0,
+          stdout: 'rollback evidence collected',
+          stderr: null,
+          attempt: 1
+        }
+      ],
+      requestId: 'smoke-domestic-slot-rollback-report'
+    });
+    const domesticSlotRollbackExecutionState = required(
+      await this.getSiteSlotRollbackExecution(domesticSlotRollbackExecution.rollbackExecutionId),
+      'rollback execution state exists'
+    );
+    if (
+      domesticSlotRollbackReport.status !== 'passed'
+      || !domesticSlotRollbackReport.nextActions.includes('close-rollback-window')
+      || domesticSlotRollbackExecutionState.status !== 'passed'
+      || domesticSlotRollbackExecutionState.currentRollbackReportId !== domesticSlotRollbackReport.rollbackReportId
+    ) {
+      throw new Error('Rollback report did not advance rollback execution to passed');
+    }
+    checks.push('OK Rollback report advanced rollback execution to passed');
     const networkSnapshot = await this.createLauncherNetworkSnapshot({
       installId: enrollment.installId,
       deviceId: enrollment.deviceId,
       appId: 'h2o',
       requestId: 'smoke-network'
     });
-    if (networkSnapshot.overlayPolicy.cidr !== '100.91.0.0/16') {
-      throw new Error('guest network snapshot did not use 100.91.0.0/16');
+    if (networkSnapshot.overlayPolicy.cidr !== '10.91.0.0/16') {
+      throw new Error('guest network snapshot did not use 10.91.0.0/16');
     }
     checks.push('OK guest network snapshot issued');
     const permissionGrant = await this.requestPermission({
@@ -750,6 +1943,22 @@ export class PostgresStore implements PlatformStore {
       throw new Error('h2o update was not skippable');
     }
     checks.push('OK h2o update skippable');
+    const releaseManagementPlan = await this.createReleaseManagementPlan({
+      releaseId: 'rel_smoke_management',
+      installId: enrollment.installId,
+      channel: 'shadow',
+      appId: 'h2o',
+      e2eResult: 'passed',
+      requestId: 'smoke-release-management'
+    });
+    if (
+      !releaseManagementPlan.decisions.readyToPromote
+      || releaseManagementPlan.test.gate.verdict !== 'passed'
+      || !releaseManagementPlan.decisions.nextActions.includes('open-canary-or-shadow-rollout')
+    ) {
+      throw new Error('release management plan did not pass E2E gate');
+    }
+    checks.push('OK Release Management plan passed E2E gate');
     const dnsPolicy = await this.getEffectiveDnsPolicy('h2o');
     checks.push('OK split DNS policy registered');
     const dnsDecision = await this.evaluateDnsQuery({
@@ -762,22 +1971,84 @@ export class PostgresStore implements PlatformStore {
       throw new Error('split DNS did not route gateway.internal.mx to Internal reverse proxy');
     }
     checks.push('OK split DNS internal reverse proxy decision');
+    const dnsZoneSnapshot = await this.buildDnsZoneSnapshot({
+      appId: 'h2o',
+      requestId: 'smoke-dns-zone'
+    });
+    if (
+      !dnsZoneSnapshot.signatures.digest
+      || !dnsZoneSnapshot.zoneNames.includes('internal.mx')
+      || !dnsZoneSnapshot.records.some((record) => record.name === 'gateway.internal.mx')
+    ) {
+      throw new Error('DNS zone snapshot did not include signed Internal CoreDNS records');
+    }
+    checks.push('OK DNS Control signed CoreDNS zone snapshot built');
+    const coreDnsSync = await this.syncCoreDnsConfigMap({
+      snapshotId: dnsZoneSnapshot.snapshotId,
+      mode: 'shadow-apply',
+      requestId: 'smoke-coredns-sync'
+    });
+    if (
+      coreDnsSync.applied
+      || coreDnsSync.namespace !== 'mx-dns'
+      || !coreDnsSync.manifest.yaml.includes('Corefile')
+      || !coreDnsSync.manifest.yaml.includes('gateway.internal.mx')
+      || !coreDnsSync.manifest.yaml.includes(dnsZoneSnapshot.signatures.digest)
+    ) {
+      throw new Error('CoreDNS ConfigMap sync did not render expected shadow manifest');
+    }
+    checks.push('OK CoreDNS ConfigMap shadow sync rendered');
+    const configPolicySnapshot = await this.createConfigPolicySnapshot({
+      installId: enrollment.installId,
+      appId: 'h2o',
+      channel: 'shadow',
+      requestId: 'smoke-config-policy'
+    });
+    if (
+      !configPolicySnapshot.signatures.digest
+      || configPolicySnapshot.policies.dns.policy.policyId !== dnsPolicy.policyId
+      || configPolicySnapshot.policies.permissionPolicy.declaredScopes.length === 0
+      || configPolicySnapshot.policies.launcherNetwork.overlayPolicy.cidr !== '10.91.0.0/16'
+    ) {
+      throw new Error('config policy snapshot did not aggregate signed platform policy');
+    }
+    checks.push('OK Config Center signed policy snapshot issued');
     return {
       ok: true,
       checks,
       app,
+      userCenter,
+      issuedServiceToken,
+      sdkAccess,
+      deniedSdkAccess,
+      configPolicySnapshot,
       enrollment,
       principalContext,
       sdkIntrospection,
       sdkGateway,
+      domesticSlotPlan,
+      overseaSlotPlan,
+      domesticSlotPreflightExecution,
+      domesticSlotApplyExecution,
+      domesticSlotPreflightRunnerSession: domesticSlotPreflightRunnerSessionState,
+      domesticSlotRemoteRunnerSession,
+      domesticSlotWorkerJob: domesticSlotWorkerJobState,
+      domesticSlotWorkerReport,
+      domesticSlotFailedWorkerJob,
+      domesticSlotFailedWorkerReport,
+      domesticSlotRollbackExecution: domesticSlotRollbackExecutionState,
+      domesticSlotRollbackReport,
       networkSnapshot,
       permissionGrant,
       testRun: completedRun,
       gate,
+      releaseManagementPlan,
       launcherUpdate,
       h2oUpdate,
       dnsPolicy,
-      dnsDecision
+      dnsDecision,
+      dnsZoneSnapshot,
+      coreDnsSync
     };
   }
 
@@ -811,11 +2082,11 @@ export class PostgresStore implements PlatformStore {
   }
 
   private async allocateGuestLeaseIp(): Promise<string> {
-    return `100.91.0.${await this.nextSequenceValue('mx_guest_ip_seq')}`;
+    return `10.91.0.${await this.nextSequenceValue('mx_guest_ip_seq')}`;
   }
 
   private async allocateUserLeaseIp(): Promise<string> {
-    return `100.89.0.${await this.nextSequenceValue('mx_user_ip_seq')}`;
+    return `10.89.0.${await this.nextSequenceValue('mx_user_ip_seq')}`;
   }
 
   private async nextSequenceValue(sequenceName: SequenceName): Promise<number> {
@@ -869,5 +2140,30 @@ export class PostgresStore implements PlatformStore {
       siteId,
       data: data as Record<string, unknown>
     });
+  }
+
+  private async upsertRecord<T extends object>(
+    kind: RecordKind,
+    id: string,
+    data: T,
+    siteId: string | null
+  ): Promise<T> {
+    await this.saveRecord(kind, id, data, siteId);
+    return data;
+  }
+
+  private async principalForSubject(
+    subjectKind: UserCenterTokenRecord['subjectKind'],
+    subjectId: string
+  ) {
+    const roles = await this.listUserCenterRoles();
+    if (subjectKind === 'user') {
+      const user = await this.getRecord<UserCenterUser>('iam-user', subjectId);
+      return user && user.status === 'active' ? createUserPrincipalFromRecord(user, roles) : null;
+    }
+    const serviceAccount = await this.getRecord<UserCenterServiceAccount>('iam-service-account', subjectId);
+    return serviceAccount && serviceAccount.status === 'active'
+      ? createServiceAccountPrincipalFromRecord(serviceAccount, roles)
+      : null;
   }
 }

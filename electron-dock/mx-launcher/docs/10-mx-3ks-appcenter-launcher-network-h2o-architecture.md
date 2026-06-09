@@ -95,7 +95,7 @@ sequenceDiagram
   L->>D: anonymous bootstrap
   D->>I: proxy enroll anonymous install
   I->>I: create anonymous principal / install / device
-  I->>I: allocate guest policy and 100.91.* lease
+  I->>I: allocate guest policy and 10.91.* lease
   I-->>D: signed relay lease + config snapshot
   D->>R: apply signed relay lease
   D-->>L: guest snapshot
@@ -106,7 +106,7 @@ sequenceDiagram
 游客能力：
 
 - 获得匿名 install/device 身份。
-- 获得 `100.91.*` 受限网段或等价 guest overlay policy。
+- 获得 `10.91.*` 受限网段或等价 guest overlay policy。
 - 可打开 AppCenter，查看公开或游客可见应用。
 - Launcher Network 负责本机权限、服务、网络保护和基础观测。
 - 所有游客行为以 `anonymousPrincipalId -> installId -> deviceId` 写审计。
@@ -127,7 +127,7 @@ sequenceDiagram
   L->>D: fallback login proxy if private API unavailable
   D->>I: proxy OAuth/JWT request
   I->>I: verify user / issue JWT / link anonymous install
-  I->>I: allocate user policy and 100.89.* lease
+  I->>I: allocate user policy and 10.89.* lease
   I-->>D: signed snapshot v2 + relay lease
   D->>R: apply signed relay lease
   D-->>L: session + network config
@@ -138,7 +138,7 @@ sequenceDiagram
 登录后能力：
 
 - User Center 提供 OAuth、登录、JWT、session、refresh、RBAC 和 token introspection。
-- Launcher Network 拿到用户态 `100.89.*` 或等价 user overlay policy。
+- Launcher Network 拿到用户态 `10.89.*` 或等价 user overlay policy。
 - 匿名 install 和登录用户绑定，登录前后的审计可追溯。
 - AppCenter 和应用通过短期 token 与权限声明访问平台能力。
 
@@ -430,15 +430,94 @@ User Center 是身份和权限权威，SDK Gateway 是统一集成出口。不�
   模块之间才直接调用领域 API。
 - Domestic 可以代理 `/internal/v1/sdk/*`，但不保存用户、权限和 SDK 契约真相。
 
-当前 V0 稳定面：
+当前 V1 shadow 稳定面：
 
 | API | 说明 |
 | --- | --- |
+| `POST /internal/v1/user-center/bootstrap` | 幂等初始化默认 tenant、org、roles、demo user、SDK service account |
+| `POST /internal/v1/user-center/tokens/issue` | 为 user 或 service account 签发短期 token，数据库只保存 token hash |
 | `GET /internal/v1/sdk/gateway/manifest` | 获取 SDK Gateway routes、audience、auth authority |
 | `POST /internal/v1/sdk/identity/introspect` | SDK-facing token introspection |
 | `POST /internal/v1/sdk/identity/context` | 解析 user / anonymous install / service account 上下文 |
+| `POST /internal/v1/sdk/gateway/access/evaluate` | 判断某个 token principal 是否允许访问指定 SDK Gateway route |
+| `POST /internal/v1/sdk/config/snapshot` | 发行签名 policy snapshot，聚合 AppCenter、DNS、Launcher Network、release 和 observability |
 | `GET /internal/v1/sdk/dns/policy` | 读取统一 split DNS policy |
 | `POST /internal/v1/sdk/dns/evaluate` | 复用 split DNS、fallback 和 Internal reverse proxy 决策 |
+| `POST /internal/v1/sdk/dns/zone` | 从 DNS policy 生成签名 Internal CoreDNS zone snapshot |
+| `POST /internal/v1/sdk/dns/coredns-configmap` | 渲染 `mx-dns/coredns` ConfigMap，并记录 dry-run / shadow-apply sync result |
+
+`POST /internal/v1/dns/coredns/configmap/apply` 是 Internal/Admin 变更接口，不属于 SDK
+Gateway。它需要显式确认和 K8s RBAC，只能更新允许目标里的 CoreDNS ConfigMap。
+`POST /internal/v1/release-management/plans` 也是 Internal/Admin 管理面接口，用来聚合
+release policy、HDOI E2E gate 和下一步动作；它不直接执行 rollout，也不属于 SDK
+Gateway。
+`POST /internal/v1/site-slots/plans` 用来把 Domestic/Oversea 规划成 Internal 的可插拔
+slot，生成 preflight、host service、Docker stack、Oversea-assisted bootstrap 和远程
+部署阶段；`/plans/:planId/preflight` 和 `/plans/:planId/apply` 生成执行清单与确认门禁。
+`/executions/:runId/runner-sessions` 生成 runner session、step results 和远程执行门禁。
+`/runner-sessions/:sessionId/worker-jobs` 和 `/worker-jobs/:jobId/reports` 负责
+worker/site-agent contract。worker report 同时推进 job/session 状态并生成失败回滚计划。
+`/worker-reports/:reportId/rollback-executions` 和
+`/rollback-executions/:rollbackExecutionId/reports` 负责 Rollback Contract V1，让失败恢复
+也能被 Admin、脚本、runner worker 和 observability 统一追踪。
+`/admin/dashboard` 和 `/admin/site-slots/pipelines` 将这些对象聚合成后台管理视图，
+用于展示 release gate、site slot health、变更时间线和下一步动作。
+这些同样是 Internal/Admin 管理面，不属于 SDK Gateway。
+
+### Launcher Desktop Admin UI V1
+
+Launcher Desktop 同时承载用户入口和运营入口：普通用户默认进入 AppCenter，查看 H2O
+和已授权应用；运营、管理员和现场交付人员进入 Admin 视图，观察 MX-3ks 的 H/D/I/O
+链路、发版门禁和 Domestic/Oversea 插槽流水线。
+
+Admin UI V1 先使用 Three.js 做一块实时拓扑舞台，表达四类核心节点：
+
+| 节点 | 管理含义 |
+| --- | --- |
+| H Endpoint | Launcher/Daemon/AppCenter/H2O 的用户侧运行时 |
+| Domestic | 轻量 relay/proxy/cache 插槽 |
+| Internal | MX-3ks 控制面、用户、配置、发布、测试、观测和 K8s 真相 |
+| Oversea | 可插拔 access site、mihomo/hysteria2 和 site-agent |
+
+这块 3D 视图不是装饰，而是运营态入口：节点颜色和链路粒子跟随
+`/internal/v1/admin/dashboard` 与 `/internal/v1/admin/site-slots/pipelines` 的健康状态
+变化，选择某个 pipeline 后聚焦对应站点，并在右侧时间线展示 plan、preflight、apply、
+runner、worker、rollback 的证据链。
+
+V1 边界：
+
+- 先展示 overview、release plans、site-slot pipelines、worker/rollback timeline。
+- 先复用 Internal Admin API，不新增独立桌面后端。
+- Admin Action Policy V1 通过 `/internal/v1/admin/actions` 返回 principal、allowed
+  actions、required scopes、risk、gate、confirm fields 和 body template。Dashboard 与
+  pipeline detail 也会附带 action hints，供 UI 展示下一步动作。
+- Admin Action Execution V1 通过 `/internal/v1/admin/actions/execute` 执行 UI 选中的
+  上下文 action。它先校验 action policy 和 confirm fields，再分发到已有 site-slot
+  execution、runner session、worker job 或 rollback execution API。
+- 所有会改变远端机器或 K8s 的动作，仍必须经过 confirm gate、RBAC、audit、change
+  window 和 worker report；桌面 UI 不绕过 site-slot/release/dns 原有执行 API。
+- AppCenter 面向用户，Admin 面向运营；两者共用 Launcher 身份和权限系统，后续由
+  User Center/RBAC 控制可见性。
+
+当前实现是真实 RBAC shadow，而不是完整 OAuth/OIDC：User Center 先查已签发 token
+record，再兼容旧 `mx-shadow-*` token；service account 可访问 `sdk.dns.evaluate`，
+普通 `mx-user` 缺少 `sdk.audit.write` 时会被 SDK Gateway 拒绝。
+
+### Config Center Policy Snapshot
+
+Launcher 不应该自己拼 User Center、AppCenter、DNS、Release 和 Launcher Network 的多层
+策略。Config Center 发行最终 policy snapshot：
+
+- Enrollment snapshot 只负责 install/device bootstrap。
+- Policy snapshot 负责运行时策略：principal、AppCenter manifest、声明权限、Launcher
+  Network lease、split DNS、SDK Gateway routes、release policy、observability sinks。
+- DNS zone snapshot 是 CoreDNS 同步产物：zoneNames、records、Corefile 片段、reverse
+  proxy routes、fallbackOrder 和 digest。当前 V1 shadow 会渲染 `mx-dns/coredns`
+  ConfigMap manifest 并记录 sync result；真实 K8s 写入只走 Internal/Admin 的
+  `/internal/v1/dns/coredns/configmap/apply`，不会作为 SDK Gateway route 暴露。
+- Snapshot 带 digest，Domestic 只缓存，不改写。
+- H2O 和其他 AppCenter 应用通过 AppCenter/Launcher 协议读取自己的最终配置，而不是直接
+  调多个控制面模块。
 
 可插拔原则：
 
@@ -478,7 +557,7 @@ Release Center 可以集成 Jenkins 和自建工具链，但 release 真相留�
 ## 还需要确认的问题
 
 1. H2O 首版是否只支持代理/TUN，还是同时接入 Oversea 订阅和节点 UI。
-2. 登录后是否一定切到 `100.89.*` 新 peer，还是允许同一 peer 从 `100.91.*` 升级策略。
+2. 登录后是否一定切到 `10.89.*` 新 peer，还是允许同一 peer 从 `10.91.*` 升级策略。Domestic 默认网关为 `10.88.0.1`。
 3. Domestic 是否需要离线 DNS cache。如果不要，Internal 不可达时内部域名解析直接降级。
 4. AppCenter 是 Launcher 内置页面，还是可以独立升级为单独应用包。
 5. MX-3ks SDK Gateway 第一批给哪些系统用：只给同台服务，还是也给内网其他服务。

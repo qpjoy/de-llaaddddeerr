@@ -1,19 +1,48 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import {
   builtinAppCenterApps,
+  buildReleaseManagementPlan,
+  buildRuntimeFeaturePolicy,
+  buildSiteSlotExecutionRun,
+  buildSiteSlotPlan,
+  buildSiteSlotRunnerSession,
+  buildSiteSlotSshProfile,
+  buildSiteSlotRollbackExecution,
+  buildSiteSlotRollbackReport,
+  buildSiteSlotWorkerJob,
+  buildSiteSlotWorkerReport,
+  applySiteSlotRollbackReportState,
+  applySiteSlotWorkerReportState,
+  buildDnsZoneSnapshot,
   builtinDnsPolicies,
   builtinDnsReverseProxyRoutes,
+  builtinUserCenterOrg,
+  builtinUserCenterRoles,
+  builtinUserCenterTenant,
+  createBootstrapResult,
   createConfigSnapshot,
+  createConfigPolicySnapshot,
   createSdkGatewayManifest,
+  createServiceAccountPrincipalFromRecord,
+  createUserCenterServiceAccount,
+  createUserCenterTokenRecord,
+  createUserCenterUser,
+  createUserPrincipalFromRecord,
+  evaluateCoreDnsConfigMapApplyGate,
+  evaluateSdkGatewayRoute,
   evaluateDnsPolicy,
+  hashToken,
+  introspectUserCenterToken,
   introspectShadowToken,
   normalizeTestStatus,
   normalizeUpdatePolicy,
   releasePolicyByKind,
+  renderCoreDnsConfigMap,
   resolvePrincipalContext,
   required
 } from './domain.js';
+import { applyCoreDnsConfigMapToKubernetes } from './kubernetes.js';
 import type { PlatformStore } from './platform-store.js';
 import type {
   AnonymousEnrollment,
@@ -21,12 +50,23 @@ import type {
   AppCenterApp,
   AuditEvent,
   AuditEventInput,
+  ConfigPolicySnapshot,
+  ConfigPolicySnapshotInput,
   ConfigSnapshot,
+  CoreDnsConfigMapApplyInput,
+  CoreDnsConfigMapApplyResult,
+  CoreDnsConfigMapSyncInput,
+  CoreDnsConfigMapSyncResult,
+  CreateServiceAccountInput,
+  CreateUserInput,
   DnsPolicy,
   DnsQueryInput,
   DnsResolutionDecision,
   DnsReverseProxyRoute,
+  DnsZoneSnapshot,
+  DnsZoneSnapshotInput,
   IdentityLinkRequest,
+  IssueTokenInput,
   LauncherNetworkSnapshot,
   LauncherNetworkSnapshotInput,
   LogEntryInput,
@@ -37,16 +77,46 @@ import type {
   PlatformKernelSmokeResult,
   ReleasePolicyDecision,
   ReleasePolicyInput,
+  ReleaseManagementPlan,
+  ReleaseManagementPlanInput,
   ReleaseReportInput,
   ReleaseTask,
   RuntimeConfig,
+  RuntimeFeaturePolicy,
+  RuntimeFeaturePolicyInput,
+  SdkGatewayAccessDecision,
+  SdkGatewayAccessInput,
   SdkGatewayManifest,
+  SiteSlotExecutionInput,
+  SiteSlotExecutionRun,
+  SiteSlotPlan,
+  SiteSlotPlanInput,
+  SiteSlotRollbackExecution,
+  SiteSlotRollbackExecutionInput,
+  SiteSlotRollbackReport,
+  SiteSlotRollbackReportInput,
+  SiteSlotRunnerSession,
+  SiteSlotRunnerStartInput,
+  SiteSlotSshProfile,
+  SiteSlotSshProfileInput,
+  SiteSlotWorkerJob,
+  SiteSlotWorkerJobInput,
+  SiteSlotWorkerReport,
+  SiteSlotWorkerReportInput,
   SiteRole,
   SiteHeartbeat,
   TestGateInput,
   TestGateVerdict,
   TokenIntrospectionInput,
   TokenIntrospectionResult,
+  UserCenterBootstrapResult,
+  UserCenterIssuedToken,
+  UserCenterOrg,
+  UserCenterRole,
+  UserCenterServiceAccount,
+  UserCenterTenant,
+  UserCenterTokenRecord,
+  UserCenterUser,
   TestRun,
   TestRunInput,
   TestStep,
@@ -57,10 +127,30 @@ export class MemoryStore implements PlatformStore {
   private readonly sites = new Map<string, SiteHeartbeat>();
   private readonly enrollments = new Map<string, AnonymousEnrollment>();
   private readonly snapshots = new Map<string, ConfigSnapshot>();
+  private readonly configPolicySnapshots = new Map<string, ConfigPolicySnapshot>();
   private readonly tasks = new Map<string, ReleaseTask[]>();
+  private readonly siteSlotPlans = new Map<string, SiteSlotPlan>();
+  private readonly siteSlotExecutions = new Map<string, SiteSlotExecutionRun>();
+  private readonly siteSlotRunnerSessions = new Map<string, SiteSlotRunnerSession>();
+  private readonly siteSlotWorkerJobs = new Map<string, SiteSlotWorkerJob>();
+  private readonly siteSlotWorkerReports = new Map<string, SiteSlotWorkerReport>();
+  private readonly siteSlotRollbackExecutions = new Map<string, SiteSlotRollbackExecution>();
+  private readonly siteSlotRollbackReports = new Map<string, SiteSlotRollbackReport>();
+  private readonly siteSlotSshProfiles = new Map<string, SiteSlotSshProfile>();
+  private readonly runtimeFeaturePolicies = new Map<string, RuntimeFeaturePolicy>();
   private readonly appCatalog = new Map<string, AppCenterApp>();
+  private readonly tenants = new Map<string, UserCenterTenant>();
+  private readonly orgs = new Map<string, UserCenterOrg>();
+  private readonly roles = new Map<string, UserCenterRole>();
+  private readonly users = new Map<string, UserCenterUser>();
+  private readonly serviceAccounts = new Map<string, UserCenterServiceAccount>();
+  private readonly tokens = new Map<string, UserCenterTokenRecord>();
   private readonly dnsPolicies = new Map<string, DnsPolicy>();
   private readonly dnsReverseProxyRoutes = new Map<string, DnsReverseProxyRoute>();
+  private readonly dnsZoneSnapshots = new Map<string, DnsZoneSnapshot>();
+  private readonly coreDnsConfigMapSyncs = new Map<string, CoreDnsConfigMapSyncResult>();
+  private readonly coreDnsConfigMapApplies = new Map<string, CoreDnsConfigMapApplyResult>();
+  private readonly releaseManagementPlans = new Map<string, ReleaseManagementPlan>();
   private readonly permissionGrants = new Map<string, PermissionGrant>();
   private readonly testRuns = new Map<string, TestRun>();
   private readonly auditEvents: AuditEvent[] = [];
@@ -84,9 +174,24 @@ export class MemoryStore implements PlatformStore {
       sites: this.sites.size,
       enrollments: this.enrollments.size,
       snapshots: this.snapshots.size,
+      configPolicySnapshots: this.configPolicySnapshots.size,
       appCenterApps: this.appCatalog.size,
+      userCenterUsers: this.users.size,
+      userCenterServiceAccounts: this.serviceAccounts.size,
+      userCenterTokens: this.tokens.size,
+      siteSlotPlans: this.siteSlotPlans.size,
+      siteSlotExecutions: this.siteSlotExecutions.size,
+      siteSlotRunnerSessions: this.siteSlotRunnerSessions.size,
+      siteSlotWorkerJobs: this.siteSlotWorkerJobs.size,
+      siteSlotWorkerReports: this.siteSlotWorkerReports.size,
+      siteSlotRollbackExecutions: this.siteSlotRollbackExecutions.size,
+      siteSlotRollbackReports: this.siteSlotRollbackReports.size,
       dnsPolicies: this.dnsPolicies.size,
       dnsReverseProxyRoutes: this.dnsReverseProxyRoutes.size,
+      dnsZoneSnapshots: this.dnsZoneSnapshots.size,
+      coreDnsConfigMapSyncs: this.coreDnsConfigMapSyncs.size,
+      coreDnsConfigMapApplies: this.coreDnsConfigMapApplies.size,
+      releaseManagementPlans: this.releaseManagementPlans.size,
       permissionGrants: this.permissionGrants.size,
       testRuns: this.testRuns.size,
       auditEvents: this.auditEvents.length,
@@ -109,6 +214,263 @@ export class MemoryStore implements PlatformStore {
 
   listSites(): SiteHeartbeat[] {
     return [...this.sites.values()].sort((a, b) => a.siteId.localeCompare(b.siteId));
+  }
+
+  createSiteSlotPlan(input: SiteSlotPlanInput): SiteSlotPlan {
+    const planInput = this.withSiteSlotSshProfile(input);
+    const plan = buildSiteSlotPlan(this.config, planInput, `slotplan_${randomUUID()}`);
+    this.siteSlotPlans.set(plan.planId, plan);
+    this.recordAudit({
+      eventType: 'site_slot.plan.created',
+      actorKind: 'deploy-center',
+      requestId: planInput.requestId ?? null,
+      metadata: {
+        planId: plan.planId,
+        siteId: plan.siteId,
+        kind: plan.kind,
+        status: plan.status,
+        networkMode: plan.network.mode,
+        requiresOversea: plan.network.requiresOversea,
+        nextActions: plan.nextActions
+      }
+    });
+    return plan;
+  }
+
+  getSiteSlotPlan(planId: string): SiteSlotPlan | null {
+    return this.siteSlotPlans.get(planId) ?? null;
+  }
+
+  listSiteSlotPlans(): SiteSlotPlan[] {
+    return [...this.siteSlotPlans.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  createSiteSlotExecution(input: SiteSlotExecutionInput): SiteSlotExecutionRun {
+    const planId = input.planId?.trim();
+    const plan = planId ? this.siteSlotPlans.get(planId) : null;
+    if (!plan) throw new Error(`Unknown site slot plan: ${input.planId ?? '<empty>'}`);
+    const run = buildSiteSlotExecutionRun(this.config, plan, input, `slotexec_${randomUUID()}`);
+    this.siteSlotExecutions.set(run.runId, run);
+    this.recordAudit({
+      eventType: 'site_slot.execution.created',
+      actorKind: 'deploy-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        runId: run.runId,
+        planId: run.planId,
+        siteId: run.siteId,
+        kind: run.kind,
+        action: run.action,
+        mode: run.mode,
+        status: run.status,
+        stepCount: run.steps.length,
+        nextActions: run.nextActions
+      }
+    });
+    return run;
+  }
+
+  getSiteSlotExecution(runId: string): SiteSlotExecutionRun | null {
+    return this.siteSlotExecutions.get(runId) ?? null;
+  }
+
+  listSiteSlotExecutions(planId?: string | null): SiteSlotExecutionRun[] {
+    return [...this.siteSlotExecutions.values()]
+      .filter((run) => !planId || run.planId === planId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  startSiteSlotRunnerSession(input: SiteSlotRunnerStartInput): SiteSlotRunnerSession {
+    const runId = input.runId?.trim();
+    const execution = runId ? this.siteSlotExecutions.get(runId) : null;
+    if (!execution) throw new Error(`Unknown site slot execution: ${input.runId ?? '<empty>'}`);
+    const session = buildSiteSlotRunnerSession(this.config, execution, input, `slotrunner_${randomUUID()}`);
+    this.siteSlotRunnerSessions.set(session.sessionId, session);
+    this.recordAudit({
+      eventType: 'site_slot.runner.started',
+      actorKind: 'runner-controller',
+      requestId: input.requestId ?? null,
+      metadata: {
+        sessionId: session.sessionId,
+        runId: session.runId,
+        planId: session.planId,
+        siteId: session.siteId,
+        kind: session.kind,
+        mode: session.mode,
+        status: session.status,
+        stepCount: session.stepResults.length,
+        nextActions: session.nextActions
+      }
+    });
+    return session;
+  }
+
+  getSiteSlotRunnerSession(sessionId: string): SiteSlotRunnerSession | null {
+    return this.siteSlotRunnerSessions.get(sessionId) ?? null;
+  }
+
+  listSiteSlotRunnerSessions(runId?: string | null): SiteSlotRunnerSession[] {
+    return [...this.siteSlotRunnerSessions.values()]
+      .filter((session) => !runId || session.runId === runId)
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  }
+
+  createSiteSlotWorkerJob(input: SiteSlotWorkerJobInput): SiteSlotWorkerJob {
+    const sessionId = input.sessionId?.trim();
+    const session = sessionId ? this.siteSlotRunnerSessions.get(sessionId) : null;
+    if (!session) throw new Error(`Unknown site slot runner session: ${input.sessionId ?? '<empty>'}`);
+    const job = buildSiteSlotWorkerJob(session, input, `slotjob_${randomUUID()}`);
+    this.siteSlotWorkerJobs.set(job.jobId, job);
+    this.recordAudit({
+      eventType: 'site_slot.worker_job.created',
+      actorKind: 'runner-controller',
+      requestId: input.requestId ?? null,
+      metadata: {
+        jobId: job.jobId,
+        sessionId: job.sessionId,
+        runId: job.runId,
+        planId: job.planId,
+        siteId: job.siteId,
+        mode: job.mode,
+        status: job.status,
+        workerKind: job.worker.kind,
+        stepCount: job.steps.length,
+        nextActions: job.nextActions
+      }
+    });
+    return job;
+  }
+
+  getSiteSlotWorkerJob(jobId: string): SiteSlotWorkerJob | null {
+    return this.siteSlotWorkerJobs.get(jobId) ?? null;
+  }
+
+  listSiteSlotWorkerJobs(sessionId?: string | null): SiteSlotWorkerJob[] {
+    return [...this.siteSlotWorkerJobs.values()]
+      .filter((job) => !sessionId || job.sessionId === sessionId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  recordSiteSlotWorkerReport(input: SiteSlotWorkerReportInput): SiteSlotWorkerReport {
+    const jobId = input.jobId?.trim();
+    const job = jobId ? this.siteSlotWorkerJobs.get(jobId) : null;
+    if (!job) throw new Error(`Unknown site slot worker job: ${input.jobId ?? '<empty>'}`);
+    const report = buildSiteSlotWorkerReport(job, input, `slotreport_${randomUUID()}`);
+    const session = this.siteSlotRunnerSessions.get(job.sessionId);
+    if (session) {
+      const state = applySiteSlotWorkerReportState(job, session, report);
+      this.siteSlotWorkerJobs.set(state.job.jobId, state.job);
+      this.siteSlotRunnerSessions.set(state.session.sessionId, state.session);
+    }
+    this.siteSlotWorkerReports.set(report.reportId, report);
+    this.recordAudit({
+      eventType: 'site_slot.worker_report.recorded',
+      actorKind: 'runner-worker',
+      requestId: input.requestId ?? null,
+      metadata: {
+        reportId: report.reportId,
+        jobId: report.jobId,
+        sessionId: report.sessionId,
+        runId: report.runId,
+        planId: report.planId,
+        siteId: report.siteId,
+        workerId: report.workerId,
+        status: report.status,
+        stepReportCount: report.stepReports.length,
+        nextActions: report.nextActions
+      }
+    });
+    return report;
+  }
+
+  getSiteSlotWorkerReport(reportId: string): SiteSlotWorkerReport | null {
+    return this.siteSlotWorkerReports.get(reportId) ?? null;
+  }
+
+  listSiteSlotWorkerReports(jobId?: string | null): SiteSlotWorkerReport[] {
+    return [...this.siteSlotWorkerReports.values()]
+      .filter((report) => !jobId || report.jobId === jobId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  createSiteSlotRollbackExecution(input: SiteSlotRollbackExecutionInput): SiteSlotRollbackExecution {
+    const reportId = input.reportId?.trim();
+    const report = reportId ? this.siteSlotWorkerReports.get(reportId) : null;
+    if (!report) throw new Error(`Unknown site slot worker report: ${input.reportId ?? '<empty>'}`);
+    const rollbackExecution = buildSiteSlotRollbackExecution(report, input, `slotrollback_${randomUUID()}`);
+    this.siteSlotRollbackExecutions.set(rollbackExecution.rollbackExecutionId, rollbackExecution);
+    this.recordAudit({
+      eventType: 'site_slot.rollback_execution.created',
+      actorKind: 'runner-controller',
+      requestId: input.requestId ?? null,
+      metadata: {
+        rollbackExecutionId: rollbackExecution.rollbackExecutionId,
+        rollbackPlanId: rollbackExecution.rollbackPlanId,
+        sourceReportId: rollbackExecution.sourceReportId,
+        jobId: rollbackExecution.jobId,
+        sessionId: rollbackExecution.sessionId,
+        runId: rollbackExecution.runId,
+        planId: rollbackExecution.planId,
+        siteId: rollbackExecution.siteId,
+        mode: rollbackExecution.mode,
+        status: rollbackExecution.status,
+        dryRun: rollbackExecution.dryRun,
+        stepCount: rollbackExecution.stepResults.length,
+        nextActions: rollbackExecution.nextActions
+      }
+    });
+    return rollbackExecution;
+  }
+
+  getSiteSlotRollbackExecution(rollbackExecutionId: string): SiteSlotRollbackExecution | null {
+    return this.siteSlotRollbackExecutions.get(rollbackExecutionId) ?? null;
+  }
+
+  listSiteSlotRollbackExecutions(reportId?: string | null): SiteSlotRollbackExecution[] {
+    return [...this.siteSlotRollbackExecutions.values()]
+      .filter((execution) => !reportId || execution.sourceReportId === reportId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  recordSiteSlotRollbackReport(input: SiteSlotRollbackReportInput): SiteSlotRollbackReport {
+    const rollbackExecutionId = input.rollbackExecutionId?.trim();
+    const rollbackExecution = rollbackExecutionId ? this.siteSlotRollbackExecutions.get(rollbackExecutionId) : null;
+    if (!rollbackExecution) throw new Error(`Unknown site slot rollback execution: ${input.rollbackExecutionId ?? '<empty>'}`);
+    const report = buildSiteSlotRollbackReport(rollbackExecution, input, `slotrollbackreport_${randomUUID()}`);
+    const executionState = applySiteSlotRollbackReportState(rollbackExecution, report);
+    this.siteSlotRollbackExecutions.set(executionState.rollbackExecutionId, executionState);
+    this.siteSlotRollbackReports.set(report.rollbackReportId, report);
+    this.recordAudit({
+      eventType: 'site_slot.rollback_report.recorded',
+      actorKind: 'runner-worker',
+      requestId: input.requestId ?? null,
+      metadata: {
+        rollbackReportId: report.rollbackReportId,
+        rollbackExecutionId: report.rollbackExecutionId,
+        rollbackPlanId: report.rollbackPlanId,
+        sourceReportId: report.sourceReportId,
+        jobId: report.jobId,
+        sessionId: report.sessionId,
+        runId: report.runId,
+        planId: report.planId,
+        siteId: report.siteId,
+        workerId: report.workerId,
+        status: report.status,
+        stepReportCount: report.stepReports.length,
+        nextActions: report.nextActions
+      }
+    });
+    return report;
+  }
+
+  getSiteSlotRollbackReport(rollbackReportId: string): SiteSlotRollbackReport | null {
+    return this.siteSlotRollbackReports.get(rollbackReportId) ?? null;
+  }
+
+  listSiteSlotRollbackReports(rollbackExecutionId?: string | null): SiteSlotRollbackReport[] {
+    return [...this.siteSlotRollbackReports.values()]
+      .filter((report) => !rollbackExecutionId || report.rollbackExecutionId === rollbackExecutionId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   enrollAnonymous(input: AnonymousEnrollmentRequest): {
@@ -188,8 +550,119 @@ export class MemoryStore implements PlatformStore {
     return { enrollment, snapshot, auditEvent };
   }
 
+  bootstrapUserCenter(): UserCenterBootstrapResult {
+    const tenant = builtinUserCenterTenant();
+    const org = builtinUserCenterOrg();
+    this.tenants.set(tenant.tenantId, tenant);
+    this.orgs.set(org.orgId, org);
+    for (const role of builtinUserCenterRoles()) {
+      this.roles.set(role.roleId, role);
+    }
+    const admin = this.createUserCenterUser({
+      userId: 'usr_demo_admin',
+      email: 'admin@mx.local',
+      displayName: 'MX Demo Admin',
+      roleIds: ['mx-admin'],
+      requestId: 'bootstrap-user-center'
+    });
+    const user = this.createUserCenterUser({
+      userId: 'usr_demo_user',
+      email: 'user@mx.local',
+      displayName: 'MX Demo User',
+      roleIds: ['mx-user'],
+      requestId: 'bootstrap-user-center'
+    });
+    const serviceAccount = this.createUserCenterServiceAccount({
+      serviceAccountId: 'svc_sdk_gateway',
+      displayName: 'SDK Gateway',
+      roleIds: ['mx-service-account'],
+      requestId: 'bootstrap-user-center'
+    });
+    return createBootstrapResult([...this.roles.values()], [admin, user], [serviceAccount]);
+  }
+
+  listUserCenterRoles(): UserCenterRole[] {
+    return [...this.roles.values()].sort((a, b) => a.roleId.localeCompare(b.roleId));
+  }
+
+  listUserCenterUsers(): UserCenterUser[] {
+    return [...this.users.values()].sort((a, b) => a.userId.localeCompare(b.userId));
+  }
+
+  createUserCenterUser(input: CreateUserInput): UserCenterUser {
+    const user = createUserCenterUser(input);
+    this.users.set(user.userId, user);
+    this.recordAudit({
+      eventType: 'iam.user.upserted',
+      actorKind: 'user-center',
+      userId: user.userId,
+      requestId: input.requestId ?? null,
+      metadata: {
+        email: user.email,
+        roleIds: user.roleIds,
+        status: user.status
+      }
+    });
+    return user;
+  }
+
+  listUserCenterServiceAccounts(): UserCenterServiceAccount[] {
+    return [...this.serviceAccounts.values()].sort((a, b) => a.serviceAccountId.localeCompare(b.serviceAccountId));
+  }
+
+  createUserCenterServiceAccount(input: CreateServiceAccountInput): UserCenterServiceAccount {
+    const serviceAccount = createUserCenterServiceAccount(input);
+    this.serviceAccounts.set(serviceAccount.serviceAccountId, serviceAccount);
+    this.recordAudit({
+      eventType: 'iam.service_account.upserted',
+      actorKind: 'user-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        serviceAccountId: serviceAccount.serviceAccountId,
+        roleIds: serviceAccount.roleIds,
+        scopes: serviceAccount.scopes,
+        status: serviceAccount.status
+      }
+    });
+    return serviceAccount;
+  }
+
+  issueUserCenterToken(input: IssueTokenInput): UserCenterIssuedToken {
+    const principal = this.principalForSubject(input.subjectKind, input.subjectId);
+    if (!principal) {
+      throw new Error(`Unknown token subject: ${input.subjectKind}:${input.subjectId}`);
+    }
+    const requestedScopes = input.scopes?.length ? input.scopes : principal.scopes;
+    const allowedScopes = requestedScopes.filter((scope) => principal.scopes.includes(scope));
+    const token = `mx-v1-${randomBytes(24).toString('base64url')}`;
+    const issued = createUserCenterTokenRecord(this.config, {
+      ...input,
+      scopes: allowedScopes
+    }, token);
+    this.tokens.set(issued.record.tokenHash, issued.record);
+    this.recordAudit({
+      eventType: 'auth.token.issued',
+      actorKind: input.subjectKind,
+      userId: input.subjectKind === 'user' ? input.subjectId : null,
+      requestId: input.requestId ?? null,
+      metadata: {
+        tokenId: issued.record.tokenId,
+        subjectKind: input.subjectKind,
+        subjectId: input.subjectId,
+        audience: issued.record.audience,
+        scopes: issued.record.scopes,
+        expiresAt: issued.record.expiresAt
+      }
+    });
+    return issued;
+  }
+
   introspectToken(input: TokenIntrospectionInput): TokenIntrospectionResult {
-    const result = introspectShadowToken(this.config, input);
+    const token = input.token?.trim() ?? '';
+    const record = token ? this.tokens.get(hashToken(token)) ?? null : null;
+    const principal = record ? this.principalForSubject(record.subjectKind, record.subjectId) : null;
+    const result = introspectUserCenterToken(this.config, input, record, principal)
+      ?? introspectShadowToken(this.config, input);
     this.recordAudit({
       eventType: 'auth.token.introspected',
       actorKind: result.principal?.kind ?? 'unknown',
@@ -209,7 +682,13 @@ export class MemoryStore implements PlatformStore {
 
   resolvePrincipalContext(input: PrincipalContextInput): PrincipalContext {
     const enrollment = input.installId ? this.enrollments.get(input.installId) ?? null : null;
-    const context = resolvePrincipalContext(this.config, input, enrollment);
+    const auth = this.introspectToken({
+      token: input.token,
+      audience: input.audience,
+      requestId: input.requestId
+    });
+    const boundPrincipal = input.userId ? this.principalForSubject('user', input.userId) : null;
+    const context = resolvePrincipalContext(this.config, input, enrollment, auth, boundPrincipal);
     this.recordAudit({
       eventType: 'identity.context.resolved',
       actorKind: context.principal.kind,
@@ -230,6 +709,180 @@ export class MemoryStore implements PlatformStore {
 
   sdkGatewayManifest(): SdkGatewayManifest {
     return createSdkGatewayManifest(this.config);
+  }
+
+  evaluateSdkGatewayAccess(input: SdkGatewayAccessInput): SdkGatewayAccessDecision {
+    const introspection = this.introspectToken({
+      token: input.token,
+      audience: input.audience,
+      requestId: input.requestId
+    });
+    const decision = evaluateSdkGatewayRoute(introspection.principal, input.routeId);
+    this.recordAudit({
+      eventType: 'sdk.gateway.access.evaluated',
+      actorKind: decision.principal?.kind ?? 'unknown',
+      userId: decision.principal?.userId ?? null,
+      requestId: input.requestId ?? null,
+      metadata: {
+        routeId: input.routeId,
+        allowed: decision.allowed,
+        matchedScopes: decision.matchedScopes,
+        missingScopes: decision.missingScopes,
+        reason: decision.reason
+      }
+    });
+    return decision;
+  }
+
+  createConfigPolicySnapshot(input: ConfigPolicySnapshotInput): ConfigPolicySnapshot {
+    const appId = input.appId?.trim() || 'h2o';
+    const enrollment = input.installId ? this.enrollments.get(input.installId) ?? null : null;
+    const principalContext = this.resolvePrincipalContext({
+      token: input.token,
+      audience: input.audience,
+      userId: input.userId,
+      installId: input.installId,
+      requestId: input.requestId
+    });
+    const app = this.getAppCenterApp(appId);
+    const launcherNetwork = this.createLauncherNetworkSnapshot({
+      installId: enrollment?.installId ?? input.installId ?? undefined,
+      deviceId: enrollment?.deviceId ?? input.deviceId ?? undefined,
+      userId: principalContext.principal.userId ?? enrollment?.userId ?? input.userId ?? null,
+      appId,
+      requestId: input.requestId ?? undefined
+    });
+    const launcherRelease = this.evaluateReleaseUpdate({
+      componentKind: 'platform-critical',
+      componentId: 'launcher-network',
+      currentVersion: '0.1.0',
+      targetVersion: '0.1.1',
+      channel: input.channel ?? 'shadow',
+      installId: enrollment?.installId ?? input.installId ?? null,
+      userId: principalContext.principal.userId
+    });
+    const appRelease = this.evaluateReleaseUpdate({
+      componentKind: app?.updatePolicy ?? 'app-managed',
+      componentId: appId,
+      currentVersion: app?.version ?? '0.1.0',
+      targetVersion: app?.version === '0.1.1' ? app.version : '0.1.1',
+      channel: input.channel ?? 'shadow',
+      installId: enrollment?.installId ?? input.installId ?? null,
+      userId: principalContext.principal.userId
+    });
+    const snapshot = createConfigPolicySnapshot(this.config, input, {
+      snapshotId: `polsnap_${randomUUID()}`,
+      version: this.configPolicySnapshots.size + 1,
+      app,
+      principal: principalContext.principal,
+      enrollment,
+      launcherNetwork,
+      dnsPolicy: this.getEffectiveDnsPolicy(appId),
+      reverseProxyRoutes: this.listDnsReverseProxyRoutes(),
+      sdkGateway: this.sdkGatewayManifest(),
+      launcherRelease,
+      appRelease
+    });
+    this.configPolicySnapshots.set(snapshot.snapshotId, snapshot);
+    this.recordAudit({
+      eventType: 'config.policy_snapshot.issued',
+      actorKind: 'config-center',
+      userId: snapshot.userId,
+      anonymousPrincipalId: snapshot.anonymousPrincipalId,
+      installId: snapshot.installId,
+      deviceId: snapshot.deviceId,
+      productId: snapshot.productId,
+      requestId: input.requestId ?? null,
+      configSnapshotId: snapshot.snapshotId,
+      metadata: {
+        appId: snapshot.appId,
+        version: snapshot.version,
+        digest: snapshot.signatures.digest,
+        dnsPolicyId: snapshot.policies.dns.policy.policyId,
+        launcherNetworkSnapshotId: snapshot.policies.launcherNetwork.snapshotId
+      }
+    });
+    return snapshot;
+  }
+
+  getConfigPolicySnapshot(snapshotId: string): ConfigPolicySnapshot | null {
+    return this.configPolicySnapshots.get(snapshotId) ?? null;
+  }
+
+  listSiteSlotSshProfiles(): SiteSlotSshProfile[] {
+    return [...this.siteSlotSshProfiles.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  getSiteSlotSshProfile(profileId: string): SiteSlotSshProfile | null {
+    return this.siteSlotSshProfiles.get(profileId) ?? null;
+  }
+
+  getSiteSlotSshProfileForSite(siteId: string): SiteSlotSshProfile | null {
+    return this.listSiteSlotSshProfiles().find((profile) => profile.siteId === siteId && profile.status === 'active') ?? null;
+  }
+
+  upsertSiteSlotSshProfile(input: SiteSlotSshProfileInput): SiteSlotSshProfile {
+    const previous = input.profileId ? this.siteSlotSshProfiles.get(input.profileId) ?? null : null;
+    const profile = buildSiteSlotSshProfile(this.config, input, previous);
+    this.siteSlotSshProfiles.set(profile.profileId, profile);
+    this.recordAudit({
+      eventType: 'config.site_slot_ssh_profile.upserted',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        profileId: profile.profileId,
+        siteId: profile.siteId,
+        kind: profile.kind,
+        status: profile.status,
+        warnings: profile.warnings
+      }
+    });
+    return profile;
+  }
+
+  listRuntimeFeaturePolicies(featureKey?: string | null): RuntimeFeaturePolicy[] {
+    return [...this.runtimeFeaturePolicies.values()]
+      .filter((policy) => !featureKey || policy.featureKey === featureKey)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  getRuntimeFeaturePolicy(policyId: string): RuntimeFeaturePolicy | null {
+    return this.runtimeFeaturePolicies.get(policyId) ?? null;
+  }
+
+  upsertRuntimeFeaturePolicy(input: RuntimeFeaturePolicyInput): RuntimeFeaturePolicy {
+    const candidate = buildRuntimeFeaturePolicy(this.config, input, null);
+    const previous = this.runtimeFeaturePolicies.get(candidate.policyId) ?? null;
+    const policy = buildRuntimeFeaturePolicy(this.config, input, previous);
+    this.runtimeFeaturePolicies.set(policy.policyId, policy);
+    this.recordAudit({
+      eventType: 'config.runtime_feature_policy.upserted',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        policyId: policy.policyId,
+        featureKey: policy.featureKey,
+        scopeKind: policy.scopeKind,
+        scopeId: policy.scopeId,
+        enabled: policy.enabled,
+        mode: policy.mode,
+        expiresAt: policy.expiresAt
+      }
+    });
+    return policy;
+  }
+
+  private withSiteSlotSshProfile(input: SiteSlotPlanInput): SiteSlotPlanInput {
+    const profileId = input.sshProfileId?.trim();
+    if (!profileId) return input;
+    const profile = this.siteSlotSshProfiles.get(profileId);
+    if (!profile) return { ...input, sshProfileError: `SSH profile not found: ${profileId}` };
+    return {
+      ...input,
+      sshProfile: profile,
+      kind: input.kind ?? profile.kind,
+      siteId: input.siteId ?? profile.siteId
+    };
   }
 
   getSnapshot(installId: string): ConfigSnapshot | null {
@@ -333,6 +986,112 @@ export class MemoryStore implements PlatformStore {
     return [...this.dnsReverseProxyRoutes.values()].sort((a, b) => a.host.localeCompare(b.host));
   }
 
+  buildDnsZoneSnapshot(input: DnsZoneSnapshotInput): DnsZoneSnapshot {
+    const policy = input.policyId
+      ? required(this.dnsPolicies.get(input.policyId) ?? null, `DNS policy not found: ${input.policyId}`)
+      : this.getEffectiveDnsPolicy(input.appId ?? 'sdk-gateway');
+    const snapshot = buildDnsZoneSnapshot(this.config, {
+      snapshotId: `dnszone_${randomUUID()}`,
+      version: this.dnsZoneSnapshots.size + 1,
+      policy,
+      reverseProxyRoutes: this.listDnsReverseProxyRoutes(),
+      requestId: input.requestId ?? null
+    });
+    this.dnsZoneSnapshots.set(snapshot.snapshotId, snapshot);
+    this.recordAudit({
+      eventType: 'dns.zone_snapshot.built',
+      actorKind: 'dns-control',
+      requestId: input.requestId ?? null,
+      metadata: {
+        snapshotId: snapshot.snapshotId,
+        policyId: snapshot.policyId,
+        zones: snapshot.zoneNames,
+        records: snapshot.records.length,
+        digest: snapshot.signatures.digest
+      }
+    });
+    return snapshot;
+  }
+
+  getDnsZoneSnapshot(snapshotId: string): DnsZoneSnapshot | null {
+    return this.dnsZoneSnapshots.get(snapshotId) ?? null;
+  }
+
+  syncCoreDnsConfigMap(input: CoreDnsConfigMapSyncInput): CoreDnsConfigMapSyncResult {
+    const snapshot = input.snapshotId
+      ? required(this.getDnsZoneSnapshot(input.snapshotId), `DNS zone snapshot not found: ${input.snapshotId}`)
+      : this.buildDnsZoneSnapshot(input);
+    const result = renderCoreDnsConfigMap(snapshot, input, `dnsync_${randomUUID()}`);
+    this.coreDnsConfigMapSyncs.set(result.syncId, result);
+    this.recordAudit({
+      eventType: 'dns.coredns_configmap.sync_recorded',
+      actorKind: 'dns-control',
+      requestId: input.requestId ?? null,
+      metadata: {
+        syncId: result.syncId,
+        mode: result.mode,
+        status: result.status,
+        applied: result.applied,
+        snapshotId: result.snapshotId,
+        namespace: result.namespace,
+        configMapName: result.configMapName,
+        digest: snapshot.signatures.digest
+      }
+    });
+    return result;
+  }
+
+  async applyCoreDnsConfigMap(input: CoreDnsConfigMapApplyInput): Promise<CoreDnsConfigMapApplyResult> {
+    const sync = this.syncCoreDnsConfigMap({ ...input, mode: 'shadow-apply' });
+    const gate = evaluateCoreDnsConfigMapApplyGate(this.config, sync, input);
+    const issuedAt = new Date().toISOString();
+    const outcome = gate.allowed
+      ? await applyCoreDnsConfigMapToKubernetes(sync.manifest, gate.serverDryRun)
+      : {
+          status: 'failed' as const,
+          applied: false,
+          resourceVersion: null,
+          message: gate.blockedReason ?? 'CoreDNS apply blocked'
+        };
+    const result: CoreDnsConfigMapApplyResult = {
+      applyId: `dnsapply_${randomUUID()}`,
+      syncId: sync.syncId,
+      mode: gate.serverDryRun ? 'k8s-server-dry-run' : 'k8s-apply',
+      status: gate.allowed ? outcome.status : 'blocked',
+      allowed: gate.allowed,
+      applied: gate.allowed ? outcome.applied : false,
+      serverDryRun: gate.serverDryRun,
+      snapshotId: sync.snapshotId,
+      namespace: sync.namespace,
+      configMapName: sync.configMapName,
+      manifest: sync.manifest,
+      resourceVersion: gate.allowed ? outcome.resourceVersion : null,
+      blockedReason: gate.blockedReason,
+      message: gate.allowed ? outcome.message : (gate.blockedReason ?? 'CoreDNS apply blocked'),
+      issuedAt,
+      completedAt: new Date().toISOString()
+    };
+    this.coreDnsConfigMapApplies.set(result.applyId, result);
+    this.recordAudit({
+      eventType: 'dns.coredns_configmap.apply_evaluated',
+      actorKind: 'dns-control',
+      requestId: input.requestId ?? null,
+      metadata: {
+        applyId: result.applyId,
+        syncId: result.syncId,
+        status: result.status,
+        allowed: result.allowed,
+        applied: result.applied,
+        serverDryRun: result.serverDryRun,
+        snapshotId: result.snapshotId,
+        namespace: result.namespace,
+        configMapName: result.configMapName,
+        blockedReason: result.blockedReason
+      }
+    });
+    return result;
+  }
+
   requestPermission(input: PermissionRequestInput): PermissionGrant {
     const app = this.appCatalog.get(input.appId);
     const requestedScopes = input.scopes.length > 0 ? input.scopes : [];
@@ -397,7 +1156,7 @@ export class MemoryStore implements PlatformStore {
       userId: unsigned.userId,
       mode,
       overlayPolicy: {
-        cidr: mode === 'user' ? '100.89.0.0/16' : '100.91.0.0/16',
+        cidr: mode === 'user' ? '10.89.0.0/16' : '10.91.0.0/16',
         leaseIp,
         relayMode: 'h2i'
       },
@@ -469,6 +1228,92 @@ export class MemoryStore implements PlatformStore {
       updateAvailable: true,
       ...policy
     };
+  }
+
+  createReleaseManagementPlan(input: ReleaseManagementPlanInput): ReleaseManagementPlan {
+    const releaseId = input.releaseId?.trim() || `rel_${randomUUID()}`;
+    const channel = input.channel?.trim() || 'shadow';
+    const appId = input.appId?.trim() || 'h2o';
+    const productId = input.productId?.trim() || appId;
+    const launcherDecision = this.evaluateReleaseUpdate({
+      componentKind: 'platform-critical',
+      componentId: 'mx-launcher',
+      currentVersion: input.launcherCurrentVersion?.trim() || '0.1.0',
+      targetVersion: input.launcherTargetVersion?.trim() || '0.1.1',
+      channel,
+      installId: input.installId,
+      userId: input.userId
+    });
+    const appDecision = this.evaluateReleaseUpdate({
+      componentKind: 'app-managed',
+      componentId: appId,
+      currentVersion: input.appCurrentVersion?.trim() || '0.1.0',
+      targetVersion: input.appTargetVersion?.trim() || '0.1.1',
+      channel,
+      installId: input.installId,
+      userId: input.userId
+    });
+    const testRun = this.createTestRun({
+      suiteId: input.suiteId?.trim() || 'hdo-shadow-e2e',
+      releaseId,
+      installId: input.installId,
+      productId,
+      topology: input.topology?.trim() || 'h-d-i-shadow',
+      sites: input.sites ?? ['internal-main', 'domestic-main']
+    });
+    const e2eResult = input.e2eResult ?? 'running';
+    const gatedRun = e2eResult === 'running'
+      ? testRun
+      : this.recordTestStep(testRun.testRunId, {
+          caseId: 'release-gate:e2e',
+          status: e2eResult,
+          message: `release management E2E gate ${e2eResult}`,
+          evidence: {
+            releaseId,
+            channel,
+            source: 'release-management-v1'
+          }
+        });
+    const gate = this.evaluateTestGate({
+      gateId: `gate_${releaseId}_e2e`,
+      releaseId,
+      runIds: [gatedRun.testRunId]
+    });
+    const plan = buildReleaseManagementPlan(this.config, { ...input, channel }, {
+      planId: `relplan_${randomUUID()}`,
+      releaseId,
+      launcherDecision,
+      appDecision,
+      testRun: gatedRun,
+      gate,
+      createdAt: new Date().toISOString()
+    });
+    this.releaseManagementPlans.set(plan.planId, plan);
+    this.recordAudit({
+      eventType: 'release.management_plan.created',
+      actorKind: 'release-center',
+      requestId: input.requestId ?? null,
+      installId: plan.installId,
+      userId: plan.userId,
+      productId,
+      metadata: {
+        planId: plan.planId,
+        releaseId: plan.releaseId,
+        channel: plan.channel,
+        gateVerdict: plan.test.gate.verdict,
+        readyToPromote: plan.decisions.readyToPromote,
+        nextActions: plan.decisions.nextActions
+      }
+    });
+    return plan;
+  }
+
+  getReleaseManagementPlan(planId: string): ReleaseManagementPlan | null {
+    return this.releaseManagementPlans.get(planId) ?? null;
+  }
+
+  listReleaseManagementPlans(): ReleaseManagementPlan[] {
+    return [...this.releaseManagementPlans.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   createTestRun(input: TestRunInput): TestRun {
@@ -594,6 +1439,44 @@ export class MemoryStore implements PlatformStore {
     const checks: string[] = [];
     const app = required(this.getAppCenterApp('h2o'), 'h2o app is registered');
     checks.push('OK app h2o registered');
+    const userCenter = this.bootstrapUserCenter();
+    if (!userCenter.roles.some((role) => role.roleId === 'mx-service-account')) {
+      throw new Error('User Center bootstrap did not register service-account role');
+    }
+    checks.push('OK User Center bootstrap registered RBAC records');
+    const issuedServiceToken = this.issueUserCenterToken({
+      subjectKind: 'service-account',
+      subjectId: 'svc_sdk_gateway',
+      audience: 'mx-sdk',
+      requestId: 'smoke-service-token'
+    });
+    checks.push('OK User Center issued service token');
+    const sdkAccess = this.evaluateSdkGatewayAccess({
+      token: issuedServiceToken.token,
+      audience: 'mx-sdk',
+      routeId: 'sdk.dns.evaluate',
+      requestId: 'smoke-sdk-access'
+    });
+    if (!sdkAccess.allowed) {
+      throw new Error('SDK Gateway did not allow service account dns evaluate');
+    }
+    checks.push('OK SDK Gateway allowed scoped service account');
+    const issuedUserToken = this.issueUserCenterToken({
+      subjectKind: 'user',
+      subjectId: 'usr_demo_user',
+      audience: 'mx-sdk',
+      requestId: 'smoke-user-token'
+    });
+    const deniedSdkAccess = this.evaluateSdkGatewayAccess({
+      token: issuedUserToken.token,
+      audience: 'mx-sdk',
+      routeId: 'sdk.audit.write',
+      requestId: 'smoke-sdk-denied'
+    });
+    if (deniedSdkAccess.allowed) {
+      throw new Error('SDK Gateway allowed a user without sdk.audit.write');
+    }
+    checks.push('OK SDK Gateway denied missing scope');
     const { enrollment } = this.enrollAnonymous({
       productId: 'h2o',
       platform: 'darwin',
@@ -609,7 +1492,7 @@ export class MemoryStore implements PlatformStore {
     }
     checks.push('OK User Center principal context resolved');
     const sdkIntrospection = this.introspectToken({
-      token: 'mx-shadow-service:sdk-gateway',
+      token: issuedServiceToken.token,
       audience: 'mx-sdk',
       requestId: 'smoke-sdk-introspection'
     });
@@ -622,14 +1505,276 @@ export class MemoryStore implements PlatformStore {
       throw new Error('SDK Gateway manifest did not expose identity introspection');
     }
     checks.push('OK SDK Gateway manifest published');
+    const overseaSlotPlan = this.createSiteSlotPlan({
+      kind: 'oversea',
+      siteId: 'oversea-sg-1',
+      host: 'oversea.example.com',
+      sshUser: 'root',
+      hasDocker: true,
+      hasOutboundInternet: true,
+      requestId: 'smoke-oversea-slot'
+    });
+    const overseaPackageArtifacts = overseaSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'package-slot-artifacts');
+    const overseaPrepareAccess = overseaSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'prepare-access-stack');
+    const overseaConfigureAccess = overseaSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'configure-oversea-access');
+    const overseaPublishSubscription = overseaSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'publish-internal-subscription');
+    const overseaDeployServices = overseaSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'deploy-slot-services');
+    const overseaDeploymentCommands = overseaSlotPlan.deploymentPhases.flatMap((phase) => phase.commands);
+    if (
+      overseaSlotPlan.kind !== 'oversea'
+      || !overseaSlotPlan.services.dockerStacks.includes('docker/hysteria2-access-stack')
+      || overseaPackageArtifacts?.mode !== 'admin-action'
+      || !overseaPackageArtifacts?.commands.some((command) => command.includes('modules=hysteria2-access-stack,site-agent,runner-worker,observability-forwarder'))
+      || !overseaPackageArtifacts?.commands.some((command) => command.includes('never sync the repository root'))
+      || overseaPrepareAccess?.mode !== 'artifact-push'
+      || !overseaPrepareAccess?.commands.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-access-stack.tar.gz'))
+      || !overseaPrepareAccess?.commands.some((command) => command.includes('scp -P') && command.includes('mx-oversea-access-stack.tar.gz'))
+      || !overseaPrepareAccess?.commands.some((command) => command.includes('/opt/mx/releases/oversea-access-stack/<release-revision>'))
+      || !overseaConfigureAccess?.commands.some((command) => command.includes('HY2_EXPORT_PASSWORD_HASH=<caddy-bcrypt-hash-from-internal-secret>'))
+      || !overseaConfigureAccess?.commands.some((command) => command.includes('HY2_MIHOMO_ROUTING_MODE=cn-direct') && command.includes('HY2_RESERVED_INTERNAL_CIDRS=10.88.0.0/16,10.89.0.0/16,10.90.0.0/16,10.91.0.0/16') && command.includes('HY2_DOMESTIC_GATEWAY_IP=10.88.0.1'))
+      || !overseaConfigureAccess?.commands.some((command) => command.includes('base64 -d') && command.includes('tunnel-state.json'))
+      || !overseaConfigureAccess?.commands.some((command) => command.includes('reconcile-from-json') && command.includes('--mode hysteria2-only'))
+      || !overseaConfigureAccess?.commands.some((command) => command.includes('@qpjoy/tunnel-cli') || command.includes('qp-tunnel-cli register'))
+      || !overseaPublishSubscription?.commands.some((command) => command.includes('domesticBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/domestic-bootstrap.yaml'))
+      || overseaDeployServices?.mode !== 'artifact-push'
+      || !overseaDeployServices?.commands.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-services.tar.gz'))
+      || !overseaDeployServices?.commands.some((command) => command.includes('/opt/mx/incoming/mx-oversea-services.tar.gz'))
+      || !overseaDeployServices?.commands.some((command) => command.includes('/opt/mx/current/oversea') && command.includes('LOCAL_STACK_PATH=/opt/mx/current/hysteria2-access-stack') && command.includes('MX_ACCESS_RUNTIME=hysteria2-only'))
+      || overseaDeploymentCommands.some((command) => command.includes('git pull') || command.includes('git clone') || command.includes('./docker/'))
+    ) {
+      throw new Error('Oversea slot plan did not include access stack');
+    }
+    checks.push('OK Oversea slot plan generated');
+    const domesticSlotPlan = this.createSiteSlotPlan({
+      kind: 'domestic',
+      siteId: 'domestic-main',
+      host: 'domestic.example.com',
+      sshUser: 'root',
+      rootAccess: true,
+      hasDocker: true,
+      hasOutboundInternet: false,
+      overseaSiteId: overseaSlotPlan.siteId,
+      overseaHost: overseaSlotPlan.host,
+      internalBaseUrl: this.config.internalBaseUrl,
+      requestId: 'smoke-domestic-slot'
+    });
+    const domesticPackageArtifacts = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'package-slot-artifacts');
+    const domesticResolveSubscription = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'resolve-domestic-bootstrap-subscription');
+    const domesticBootstrapEgress = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'bootstrap-domestic-egress');
+    if (
+      domesticSlotPlan.network.mode !== 'oversea-assisted'
+      || domesticSlotPlan.network.qpTunnelCliMode !== 'server-on'
+      || !domesticSlotPlan.services.hostServices.includes('wg-quick@mx-domestic')
+      || !domesticPackageArtifacts?.commands.some((command) => command.includes('qp-tunnel-cli-offline-fallback'))
+      || !domesticPackageArtifacts?.commands.some((command) => command.includes('refresh-tunnel-cli latest'))
+      || domesticResolveSubscription?.mode !== 'admin-action'
+      || !domesticResolveSubscription?.commands.some((command) => command.includes('domesticBootstrapSubscription'))
+      || !domesticResolveSubscription?.commands.some((command) => command.includes('do not ask Domestic to npm install'))
+      || domesticBootstrapEgress?.mode !== 'artifact-push'
+      || !domesticBootstrapEgress?.commands.some((command) => command.includes('npm i -g @qpjoy/tunnel-cli'))
+      || !domesticBootstrapEgress?.commands.some((command) => command.includes('mx-domestic-qp-tunnel-cli-fallback.tar.gz'))
+      || !domesticBootstrapEgress?.commands.some((command) => command.includes('server-on'))
+      || domesticBootstrapEgress?.commands.some((command) => command.includes('tun-on'))
+    ) {
+      throw new Error('Domestic slot plan did not model host WireGuard and Oversea-assisted bootstrap');
+    }
+    checks.push('OK Domestic slot plan generated');
+    const domesticSlotPreflightExecution = this.createSiteSlotExecution({
+      planId: domesticSlotPlan.planId,
+      action: 'preflight',
+      mode: 'dry-run',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-preflight'
+    });
+    if (
+      domesticSlotPreflightExecution.status !== 'ready'
+      || !domesticSlotPreflightExecution.steps.some((step) => step.sourceId === 'domestic.wireguard')
+    ) {
+      throw new Error('Domestic slot preflight execution did not produce a ready WireGuard check manifest');
+    }
+    checks.push('OK Domestic slot preflight execution manifest generated');
+    const domesticSlotApplyExecution = this.createSiteSlotExecution({
+      planId: domesticSlotPlan.planId,
+      action: 'apply',
+      mode: 'manual',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-apply'
+    });
+    if (
+      domesticSlotApplyExecution.status !== 'requires-confirmation'
+      || !domesticSlotApplyExecution.nextActions.includes('rerun-apply-with-confirmApply-true')
+    ) {
+      throw new Error('Domestic slot apply execution did not require explicit confirmation');
+    }
+    checks.push('OK Domestic slot apply execution gate requires confirmation');
+    const domesticSlotPreflightRunnerSession = this.startSiteSlotRunnerSession({
+      runId: domesticSlotPreflightExecution.runId,
+      mode: 'simulate',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-runner-simulate'
+    });
+    if (
+      domesticSlotPreflightRunnerSession.status !== 'completed'
+      || !domesticSlotPreflightRunnerSession.stepResults.every((step) => step.status === 'simulated')
+    ) {
+      throw new Error('Domestic slot simulated runner session did not complete every step');
+    }
+    checks.push('OK Domestic slot runner simulated preflight session completed');
+    const domesticSlotRemoteRunnerSession = this.startSiteSlotRunnerSession({
+      runId: domesticSlotPreflightExecution.runId,
+      mode: 'remote-ssh',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-runner-remote'
+    });
+    if (
+      domesticSlotRemoteRunnerSession.status !== 'blocked'
+      || !domesticSlotRemoteRunnerSession.warnings.some((warning) => warning.includes('SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED'))
+    ) {
+      throw new Error('Domestic slot remote runner session was not blocked by remote execution gate');
+    }
+    checks.push('OK Domestic slot remote runner gate blocked by default');
+    const domesticSlotWorkerJob = this.createSiteSlotWorkerJob({
+      sessionId: domesticSlotPreflightRunnerSession.sessionId,
+      workerId: 'worker-shadow-domestic',
+      workerKind: 'internal-runner',
+      retryLimit: 2,
+      rollbackStrategy: 'no-op-simulated-rollback',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-worker-job'
+    });
+    if (
+      domesticSlotWorkerJob.status !== 'ready'
+      || domesticSlotWorkerJob.contractVersion !== 'site-slot-worker-v1'
+      || domesticSlotWorkerJob.steps.length !== domesticSlotPreflightRunnerSession.stepResults.length
+    ) {
+      throw new Error('Domestic slot worker job contract was not ready');
+    }
+    checks.push('OK Domestic slot worker job contract created');
+    const domesticSlotWorkerReport = this.recordSiteSlotWorkerReport({
+      jobId: domesticSlotWorkerJob.jobId,
+      workerId: domesticSlotWorkerJob.worker.workerId,
+      status: 'passed',
+      message: 'shadow worker contract passed',
+      stepReports: [
+        {
+          stepId: domesticSlotWorkerJob.steps[0]?.stepId,
+          status: 'passed',
+          exitCode: 0,
+          stdout: 'wireguard check simulated',
+          stderr: null,
+          attempt: 1
+        }
+      ],
+      requestId: 'smoke-domestic-slot-worker-report'
+    });
+    if (
+      domesticSlotWorkerReport.status !== 'passed'
+      || !domesticSlotWorkerReport.nextActions.includes('close-change-window')
+      || domesticSlotWorkerReport.stepReports[0]?.stdout !== 'wireguard check simulated'
+    ) {
+      throw new Error('Domestic slot worker report did not record passed evidence');
+    }
+    checks.push('OK Domestic slot worker report recorded passed evidence');
+    const domesticSlotWorkerJobState = required(this.getSiteSlotWorkerJob(domesticSlotWorkerJob.jobId), 'worker job state exists');
+    const domesticSlotPreflightRunnerSessionState = required(this.getSiteSlotRunnerSession(domesticSlotPreflightRunnerSession.sessionId), 'runner session state exists');
+    if (domesticSlotWorkerJobState.status !== 'passed' || domesticSlotPreflightRunnerSessionState.status !== 'passed') {
+      throw new Error('Worker report did not advance job and runner session to passed');
+    }
+    checks.push('OK Worker report advanced job/session state to passed');
+    const failedRunnerSession = this.startSiteSlotRunnerSession({
+      runId: domesticSlotPreflightExecution.runId,
+      mode: 'simulate',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-runner-failed-simulate'
+    });
+    const failedWorkerJob = this.createSiteSlotWorkerJob({
+      sessionId: failedRunnerSession.sessionId,
+      workerId: 'worker-shadow-domestic-failed',
+      workerKind: 'internal-runner',
+      rollbackStrategy: 'restore-failed-simulated-state',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-worker-failed-job'
+    });
+    const domesticSlotFailedWorkerReport = this.recordSiteSlotWorkerReport({
+      jobId: failedWorkerJob.jobId,
+      workerId: failedWorkerJob.worker.workerId,
+      status: 'failed',
+      message: 'shadow worker contract failed',
+      stepReports: [
+        {
+          stepId: failedWorkerJob.steps[0]?.stepId,
+          status: 'failed',
+          exitCode: 2,
+          stdout: 'failure stdout',
+          stderr: 'failure stderr',
+          attempt: 1
+        }
+      ],
+      requestId: 'smoke-domestic-slot-worker-failed-report'
+    });
+    const domesticSlotFailedWorkerJob = required(this.getSiteSlotWorkerJob(failedWorkerJob.jobId), 'failed worker job state exists');
+    if (
+      domesticSlotFailedWorkerJob.status !== 'failed'
+      || domesticSlotFailedWorkerReport.rollbackPlan?.status !== 'planned'
+      || domesticSlotFailedWorkerReport.rollbackPlan.strategy !== 'restore-failed-simulated-state'
+    ) {
+      throw new Error('Failed worker report did not produce rollback plan and failed state');
+    }
+    checks.push('OK Failed worker report generated rollback plan');
+    const domesticSlotFailedRollbackPlan = required(domesticSlotFailedWorkerReport.rollbackPlan, 'failed worker rollback plan exists');
+    const domesticSlotRollbackExecution = this.createSiteSlotRollbackExecution({
+      reportId: domesticSlotFailedWorkerReport.reportId,
+      mode: 'simulate',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-rollback-execution'
+    });
+    if (
+      domesticSlotRollbackExecution.status !== 'ready'
+      || domesticSlotRollbackExecution.contractVersion !== 'site-slot-rollback-v1'
+      || domesticSlotRollbackExecution.rollbackPlanId !== domesticSlotFailedRollbackPlan.rollbackPlanId
+      || domesticSlotRollbackExecution.stepResults.length !== domesticSlotFailedRollbackPlan.steps.length
+    ) {
+      throw new Error('Rollback execution contract was not ready');
+    }
+    checks.push('OK Rollback execution contract created');
+    const domesticSlotRollbackReport = this.recordSiteSlotRollbackReport({
+      rollbackExecutionId: domesticSlotRollbackExecution.rollbackExecutionId,
+      workerId: 'worker-shadow-domestic-rollback',
+      status: 'passed',
+      message: 'shadow rollback contract passed',
+      stepReports: [
+        {
+          stepId: domesticSlotRollbackExecution.stepResults[0]?.stepId,
+          status: 'passed',
+          exitCode: 0,
+          stdout: 'rollback evidence collected',
+          stderr: null,
+          attempt: 1
+        }
+      ],
+      requestId: 'smoke-domestic-slot-rollback-report'
+    });
+    const domesticSlotRollbackExecutionState = required(
+      this.getSiteSlotRollbackExecution(domesticSlotRollbackExecution.rollbackExecutionId),
+      'rollback execution state exists'
+    );
+    if (
+      domesticSlotRollbackReport.status !== 'passed'
+      || !domesticSlotRollbackReport.nextActions.includes('close-rollback-window')
+      || domesticSlotRollbackExecutionState.status !== 'passed'
+      || domesticSlotRollbackExecutionState.currentRollbackReportId !== domesticSlotRollbackReport.rollbackReportId
+    ) {
+      throw new Error('Rollback report did not advance rollback execution to passed');
+    }
+    checks.push('OK Rollback report advanced rollback execution to passed');
     const networkSnapshot = this.createLauncherNetworkSnapshot({
       installId: enrollment.installId,
       deviceId: enrollment.deviceId,
       appId: 'h2o',
       requestId: 'smoke-network'
     });
-    if (networkSnapshot.overlayPolicy.cidr !== '100.91.0.0/16') {
-      throw new Error('guest network snapshot did not use 100.91.0.0/16');
+    if (networkSnapshot.overlayPolicy.cidr !== '10.91.0.0/16') {
+      throw new Error('guest network snapshot did not use 10.91.0.0/16');
     }
     checks.push('OK guest network snapshot issued');
     const permissionGrant = this.requestPermission({
@@ -691,6 +1836,22 @@ export class MemoryStore implements PlatformStore {
       throw new Error('h2o update was not skippable');
     }
     checks.push('OK h2o update skippable');
+    const releaseManagementPlan = this.createReleaseManagementPlan({
+      releaseId: 'rel_smoke_management',
+      installId: enrollment.installId,
+      channel: 'shadow',
+      appId: 'h2o',
+      e2eResult: 'passed',
+      requestId: 'smoke-release-management'
+    });
+    if (
+      !releaseManagementPlan.decisions.readyToPromote
+      || releaseManagementPlan.test.gate.verdict !== 'passed'
+      || !releaseManagementPlan.decisions.nextActions.includes('open-canary-or-shadow-rollout')
+    ) {
+      throw new Error('release management plan did not pass E2E gate');
+    }
+    checks.push('OK Release Management plan passed E2E gate');
     const dnsPolicy = this.getEffectiveDnsPolicy('h2o');
     checks.push('OK split DNS policy registered');
     const dnsDecision = this.evaluateDnsQuery({
@@ -703,22 +1864,84 @@ export class MemoryStore implements PlatformStore {
       throw new Error('split DNS did not route gateway.internal.mx to Internal reverse proxy');
     }
     checks.push('OK split DNS internal reverse proxy decision');
+    const dnsZoneSnapshot = this.buildDnsZoneSnapshot({
+      appId: 'h2o',
+      requestId: 'smoke-dns-zone'
+    });
+    if (
+      !dnsZoneSnapshot.signatures.digest
+      || !dnsZoneSnapshot.zoneNames.includes('internal.mx')
+      || !dnsZoneSnapshot.records.some((record) => record.name === 'gateway.internal.mx')
+    ) {
+      throw new Error('DNS zone snapshot did not include signed Internal CoreDNS records');
+    }
+    checks.push('OK DNS Control signed CoreDNS zone snapshot built');
+    const coreDnsSync = this.syncCoreDnsConfigMap({
+      snapshotId: dnsZoneSnapshot.snapshotId,
+      mode: 'shadow-apply',
+      requestId: 'smoke-coredns-sync'
+    });
+    if (
+      coreDnsSync.applied
+      || coreDnsSync.namespace !== 'mx-dns'
+      || !coreDnsSync.manifest.yaml.includes('Corefile')
+      || !coreDnsSync.manifest.yaml.includes('gateway.internal.mx')
+      || !coreDnsSync.manifest.yaml.includes(dnsZoneSnapshot.signatures.digest)
+    ) {
+      throw new Error('CoreDNS ConfigMap sync did not render expected shadow manifest');
+    }
+    checks.push('OK CoreDNS ConfigMap shadow sync rendered');
+    const configPolicySnapshot = this.createConfigPolicySnapshot({
+      installId: enrollment.installId,
+      appId: 'h2o',
+      channel: 'shadow',
+      requestId: 'smoke-config-policy'
+    });
+    if (
+      !configPolicySnapshot.signatures.digest
+      || configPolicySnapshot.policies.dns.policy.policyId !== dnsPolicy.policyId
+      || configPolicySnapshot.policies.permissionPolicy.declaredScopes.length === 0
+      || configPolicySnapshot.policies.launcherNetwork.overlayPolicy.cidr !== '10.91.0.0/16'
+    ) {
+      throw new Error('config policy snapshot did not aggregate signed platform policy');
+    }
+    checks.push('OK Config Center signed policy snapshot issued');
     return {
       ok: true,
       checks,
       app,
+      userCenter,
+      issuedServiceToken,
+      sdkAccess,
+      deniedSdkAccess,
+      configPolicySnapshot,
       enrollment,
       principalContext,
       sdkIntrospection,
       sdkGateway,
+      domesticSlotPlan,
+      overseaSlotPlan,
+      domesticSlotPreflightExecution,
+      domesticSlotApplyExecution,
+      domesticSlotPreflightRunnerSession: domesticSlotPreflightRunnerSessionState,
+      domesticSlotRemoteRunnerSession,
+      domesticSlotWorkerJob: domesticSlotWorkerJobState,
+      domesticSlotWorkerReport,
+      domesticSlotFailedWorkerJob,
+      domesticSlotFailedWorkerReport,
+      domesticSlotRollbackExecution: domesticSlotRollbackExecutionState,
+      domesticSlotRollbackReport,
       networkSnapshot,
       permissionGrant,
       testRun: completedRun,
       gate,
+      releaseManagementPlan,
       launcherUpdate,
       h2oUpdate,
       dnsPolicy,
-      dnsDecision
+      dnsDecision,
+      dnsZoneSnapshot,
+      coreDnsSync
     };
   }
 
@@ -731,13 +1954,13 @@ export class MemoryStore implements PlatformStore {
   private allocateGuestLeaseIp(): string {
     const host = this.nextGuestHost;
     this.nextGuestHost += 1;
-    return `100.91.0.${host}`;
+    return `10.91.0.${host}`;
   }
 
   private allocateUserLeaseIp(): string {
     const host = this.nextUserHost;
     this.nextUserHost += 1;
-    return `100.89.0.${host}`;
+    return `10.89.0.${host}`;
   }
 
   private registerBuiltinApps(): void {
@@ -753,6 +1976,21 @@ export class MemoryStore implements PlatformStore {
     for (const route of builtinDnsReverseProxyRoutes(this.config)) {
       this.dnsReverseProxyRoutes.set(route.routeId, route);
     }
+  }
+
+  private principalForSubject(
+    subjectKind: UserCenterTokenRecord['subjectKind'],
+    subjectId: string
+  ) {
+    const roles = this.listUserCenterRoles();
+    if (subjectKind === 'user') {
+      const user = this.users.get(subjectId);
+      return user && user.status === 'active' ? createUserPrincipalFromRecord(user, roles) : null;
+    }
+    const serviceAccount = this.serviceAccounts.get(subjectId);
+    return serviceAccount && serviceAccount.status === 'active'
+      ? createServiceAccountPrincipalFromRecord(serviceAccount, roles)
+      : null;
   }
 
   private createSnapshot(

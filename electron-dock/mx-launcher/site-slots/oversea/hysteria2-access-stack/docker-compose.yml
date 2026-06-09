@@ -1,0 +1,43 @@
+services:
+  hysteria:
+    image: tobyxdd/hysteria:latest
+    container_name: mx-oversea-hysteria2
+    cap_add:
+      - NET_ADMIN
+    environment:
+      TZ: ${TZ}
+    command: ["server", "-c", "/etc/hysteria/server.yaml"]
+    volumes:
+      - ./config/hysteria:/etc/hysteria
+      - ./data/hysteria:/var/lib/hysteria
+    ports:
+      - "${HY2_SERVER_PORTS}:${HY2_SERVER_PORTS}/udp"
+    networks:
+      - hy2_access
+    restart: unless-stopped
+
+  subscriptions:
+    image: caddy:2-alpine
+    container_name: mx-oversea-hysteria2-health
+    restart: unless-stopped
+    ports:
+      - "${HY2_EXPORT_FALLBACK_PORT}:8080"
+    environment:
+      HY2_EXPORT_SITE_ADDRESS: ${HY2_EXPORT_SITE_ADDRESS}
+      HY2_EXPORT_USER: ${HY2_EXPORT_USER}
+      HY2_EXPORT_PASSWORD_HASH: ${HY2_EXPORT_PASSWORD_HASH}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/subscriptions:/srv/hy2:ro
+      - ./data/caddy:/data
+      - ./config/caddy:/config
+    networks:
+      - hy2_access
+
+networks:
+  hy2_access:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${HY2_STACK_SUBNET}
+          gateway: ${HY2_STACK_GATEWAY}

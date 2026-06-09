@@ -24,7 +24,7 @@ Do not copy the whole `electron-server` implementation into this project. The
 preferred path is to extract shared platform modules or call existing
 compatibility APIs until the new boundaries are stable.
 
-## Platform Kernel V0
+## Platform Kernel V1 Shadow
 
 The first coded kernel proves the shared platform contracts without real WG/TUN.
 It can run either with the in-memory store for fast local checks or with
@@ -32,16 +32,21 @@ PostgreSQL for deployable shadow checks:
 
 - AppCenter registry with built-in `h2o`.
 - Permission registry and audit event recording.
-- Launcher Network guest snapshot with `100.91.0.0/16` policy.
+- Launcher Network guest snapshot with `10.91.0.0/16` policy.
 - Release update policy split between platform-critical and app-managed
   components.
 - Test Center run, step, and gate verdict.
-- User Center shadow contract for token introspection, principal context, RBAC
-  scopes, and service accounts.
+- User Center V1 shadow records for tenants, orgs, roles, users, service
+  accounts, hashed access tokens, token introspection, principal context, and
+  RBAC scopes.
 - SDK Gateway manifest that exposes the stable integration surface for peer
-  systems while internal modules keep their own APIs.
-- Split DNS policy with Internal CoreDNS routing, system/proxy fallback, SDK
-  entrypoints, and optional Internal reverse proxy routes.
+  systems while internal modules keep their own APIs, plus route access
+  evaluation.
+- Config Center signed policy snapshots that aggregate AppCenter permissions,
+  Launcher Network, DNS, SDK Gateway, release policy, and observability sinks.
+- Split DNS policy with Internal CoreDNS routing, signed zone snapshots,
+  system/proxy fallback, SDK entrypoints, and optional Internal reverse proxy
+  routes.
 
 Checks:
 
@@ -57,9 +62,82 @@ HOST=127.0.0.1 pnpm start
 ```
 
 Then call `/healthz`, `/internal/v1/app-center/apps`,
+`/internal/v1/user-center/bootstrap`, `/internal/v1/user-center/tokens/issue`,
 `/internal/v1/sdk/gateway/manifest`,
-`/internal/v1/sdk/identity/introspect`, `/internal/v1/dns/policies`,
+`/internal/v1/sdk/identity/introspect`,
+`/internal/v1/sdk/gateway/access/evaluate`,
+`/internal/v1/sdk/config/snapshot`, `/internal/v1/release-management/plans`,
+`/internal/v1/site-slots/plans`, `/internal/v1/site-slots/executions`,
+`/internal/v1/site-slots/runner-sessions`,
+`/internal/v1/site-slots/worker-jobs`,
+`/internal/v1/site-slots/worker-reports`,
+`/internal/v1/dns/policies`,
+`/internal/v1/sdk/dns/zone`, `/internal/v1/sdk/dns/coredns-configmap`,
+`/internal/v1/dns/coredns/configmap/apply`,
 `/internal/v1/sdk/dns/evaluate`, or `/internal/v1/platform-kernel/smoke`.
+
+`POST /internal/v1/config-center/snapshots/effective` and
+`POST /internal/v1/sdk/config/snapshot` issue the V1 signed policy snapshot.
+This is separate from the lightweight enrollment config snapshot: enrollment
+bootstraps the install, while Config Center aggregates platform policy after
+identity, DNS, AppCenter, release, and Launcher Network decisions are known.
+`POST /internal/v1/dns/zones/build` and `POST /internal/v1/sdk/dns/zone`
+build a signed DNS zone snapshot from the split DNS policy. The snapshot
+contains CoreDNS server blocks, records, fallback order, reverse proxy routes,
+and a digest. `POST /internal/v1/dns/coredns/configmap/sync` and
+`POST /internal/v1/sdk/dns/coredns-configmap` render the `mx-dns/coredns`
+ConfigMap manifest and record a dry-run or shadow-apply sync result without
+mutating the Kubernetes API. `POST /internal/v1/dns/coredns/configmap/apply`
+is the Internal/Admin mutation path: it requires `confirmApply=true`, checks
+`COREDNS_K8S_APPLY_ENABLED` and the allowed target namespace/name, then updates
+the pre-created `mx-dns/coredns` ConfigMap with the pod ServiceAccount. The SDK
+Gateway intentionally exposes render/sync, not K8s mutation.
+`POST /internal/v1/release-management/plans` creates the V1 Internal/Admin
+release management view. It evaluates Launcher and App update policy, creates
+or links an E2E test run, evaluates the release gate, and returns whether the
+release is ready for a shadow/canary rollout. It is a management plan, not the
+rollout executor.
+`POST /internal/v1/site-slots/plans` creates the V1 Internal-owned Domestic or
+Oversea slot plan. It turns a host into a pluggable execution slot with remote
+preflight checks, host-service requirements, Docker stacks, network bootstrap
+mode, and deployment phases. `POST /internal/v1/site-slots/plans/:planId/preflight`
+and `POST /internal/v1/site-slots/plans/:planId/apply` create the V1 execution
+manifest. Preflight emits check commands; apply emits deployment commands and
+requires `confirmApply=true` before it becomes ready. The current boundary is
+manifest-only: no SSH/SCP/root mutation is performed by this API.
+`POST /internal/v1/site-slots/executions/:runId/runner-sessions` creates a
+Runner V1.1 session. `simulate` mode records every step as simulated evidence.
+`remote-ssh` mode is disabled by default and requires both
+`SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=true` and
+`confirmRemoteExecution=true`; otherwise it is blocked before any remote work is
+queued.
+`POST /internal/v1/site-slots/runner-sessions/:sessionId/worker-jobs` creates
+the Worker Contract V1 job package consumed by a runner worker or site-agent.
+It carries approval, change-window, retry, rollback, step timeout, redaction,
+and stop-on-failure policy. `POST /internal/v1/site-slots/worker-jobs/:jobId/reports`
+records worker output including step status, exit code, stdout/stderr, attempt,
+and timestamps. Reports drive the Worker State Machine V1: `running` keeps the
+job/session open, `passed` advances both to passed, `failed` preserves evidence
+and creates a rollback plan, and `blocked` holds the change for manual review.
+Rollback Contract V1 then turns that failed report into
+`POST /internal/v1/site-slots/worker-reports/:reportId/rollback-executions`,
+and records recovery evidence through
+`POST /internal/v1/site-slots/rollback-executions/:rollbackExecutionId/reports`.
+Admin Management API V1 exposes those records as operator views:
+`GET /internal/v1/admin/dashboard` returns overview, release plans, and recent
+site-slot pipeline summaries; `GET /internal/v1/admin/site-slots/pipelines`
+lists pipeline timelines; `GET /internal/v1/admin/site-slots/pipelines/:planId`
+returns one full plan/execution/runner/worker/rollback chain.
+`GET /internal/v1/admin/actions` returns the shadow RBAC action policy for the
+current principal, including required scopes, risk, gate, confirmation fields,
+and request templates. Dashboard and pipeline responses also include action
+hints so the desktop Admin UI can show which preflight, apply, runner, worker,
+rollback, DNS, release, or RBAC actions are visible without bypassing the
+existing execution APIs.
+`POST /internal/v1/admin/actions/execute` is the V1 execution bridge for those
+UI actions. It validates the selected action, required scopes, and confirmation
+fields, then dispatches to the existing site-slot execution, runner session,
+worker job, or rollback execution store contract.
 
 ## Shadow Docker Compose
 
@@ -79,8 +157,18 @@ bash ../scripts/manage.sh shadow down
 - `internal`: the NestJS Internal API image, exposed on `127.0.0.1:18090`.
 
 The current smoke checks `/healthz`, `/internal/v1/app-center/apps`,
+`/internal/v1/user-center/bootstrap`, `/internal/v1/user-center/tokens/issue`,
 `/internal/v1/sdk/gateway/manifest`, `/internal/v1/sdk/identity/introspect`,
-`/internal/v1/dns/policies`, `/internal/v1/sdk/dns/evaluate`, and
+`/internal/v1/sdk/gateway/access/evaluate`, `/internal/v1/sdk/config/snapshot`,
+`/internal/v1/release-management/plans`,
+`/internal/v1/site-slots/plans`, `/internal/v1/site-slots/executions`,
+`/internal/v1/site-slots/runner-sessions`,
+`/internal/v1/site-slots/worker-jobs`,
+`/internal/v1/site-slots/worker-reports`,
+`/internal/v1/dns/policies`, `/internal/v1/sdk/dns/zone`,
+`/internal/v1/sdk/dns/coredns-configmap`,
+`/internal/v1/dns/coredns/configmap/apply`,
+`/internal/v1/sdk/dns/evaluate`, and
 `/internal/v1/platform-kernel/smoke`.
 
 ## Data and Migrations

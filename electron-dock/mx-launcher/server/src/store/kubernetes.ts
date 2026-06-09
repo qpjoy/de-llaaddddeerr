@@ -1,0 +1,175 @@
+import { readFile } from 'node:fs/promises';
+import { request as httpsRequest } from 'node:https';
+
+import type { CoreDnsConfigMapManifest } from '../types.js';
+
+interface KubernetesConfigMapObject {
+  apiVersion: 'v1';
+  kind: 'ConfigMap';
+  metadata: {
+    name: string;
+    namespace: string;
+    labels: Record<string, string>;
+    annotations: Record<string, string>;
+    resourceVersion?: string;
+  };
+  data: CoreDnsConfigMapManifest['data'];
+}
+
+interface KubernetesApplyOutcome {
+  status: 'server-dry-run' | 'applied' | 'failed';
+  applied: boolean;
+  resourceVersion: string | null;
+  message: string;
+}
+
+interface KubernetesResponse {
+  statusCode: number;
+  body: unknown;
+  text: string;
+}
+
+const tokenPath = '/var/run/secrets/kubernetes.io/serviceaccount/token';
+const caPath = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt';
+
+export async function applyCoreDnsConfigMapToKubernetes(
+  manifest: CoreDnsConfigMapManifest,
+  serverDryRun: boolean
+): Promise<KubernetesApplyOutcome> {
+  const host = process.env.KUBERNETES_SERVICE_HOST;
+  const port = process.env.KUBERNETES_SERVICE_PORT_HTTPS ?? process.env.KUBERNETES_SERVICE_PORT ?? '443';
+  if (!host) {
+    return {
+      status: 'failed',
+      applied: false,
+      resourceVersion: null,
+      message: 'not running inside a Kubernetes cluster'
+    };
+  }
+
+  const name = manifest.metadata.name;
+  const namespace = manifest.metadata.namespace;
+  const resourcePath = `/api/v1/namespaces/${encodeURIComponent(namespace)}/configmaps/${encodeURIComponent(name)}`;
+  const existing = await kubernetesRequest('GET', resourcePath);
+  if (existing.statusCode === 404) {
+    return {
+      status: 'failed',
+      applied: false,
+      resourceVersion: null,
+      message: `target ConfigMap ${namespace}/${name} does not exist; create the baseline object through RBAC-controlled manifests first`
+    };
+  }
+  if (existing.statusCode < 200 || existing.statusCode >= 300) {
+    return {
+      status: 'failed',
+      applied: false,
+      resourceVersion: null,
+      message: `failed to read target ConfigMap ${namespace}/${name}: HTTP ${existing.statusCode} ${existing.text}`
+    };
+  }
+
+  const resourceVersion = metadataString(existing.body, 'resourceVersion');
+  const query = serverDryRun ? '?dryRun=All' : '';
+  const updated = await kubernetesRequest(
+    'PUT',
+    `${resourcePath}${query}`,
+    toKubernetesConfigMapObject(manifest, resourceVersion)
+  );
+  if (updated.statusCode < 200 || updated.statusCode >= 300) {
+    return {
+      status: 'failed',
+      applied: false,
+      resourceVersion: null,
+      message: `failed to update target ConfigMap ${namespace}/${name}: HTTP ${updated.statusCode} ${updated.text}`
+    };
+  }
+
+  return {
+    status: serverDryRun ? 'server-dry-run' : 'applied',
+    applied: !serverDryRun,
+    resourceVersion: metadataString(updated.body, 'resourceVersion'),
+    message: serverDryRun
+      ? `Kubernetes server dry-run accepted ConfigMap ${namespace}/${name}`
+      : `Kubernetes ConfigMap ${namespace}/${name} updated`
+  };
+}
+
+async function kubernetesRequest(method: string, path: string, body?: unknown): Promise<KubernetesResponse> {
+  const host = process.env.KUBERNETES_SERVICE_HOST;
+  const port = Number(process.env.KUBERNETES_SERVICE_PORT_HTTPS ?? process.env.KUBERNETES_SERVICE_PORT ?? '443');
+  if (!host) {
+    return { statusCode: 0, body: null, text: 'not running inside a Kubernetes cluster' };
+  }
+  const [token, ca] = await Promise.all([
+    readFile(tokenPath, 'utf8'),
+    readFile(caPath)
+  ]);
+  const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
+
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest({
+      host,
+      port,
+      method,
+      path,
+      ca,
+      timeout: 8000,
+      headers: {
+        authorization: `Bearer ${token.trim()}`,
+        ...(payload ? {
+          'content-type': 'application/json',
+          'content-length': String(payload.byteLength)
+        } : {})
+      }
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer | string) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let parsed: unknown = null;
+        if (text.trim()) {
+          try {
+            parsed = JSON.parse(text) as unknown;
+          } catch {
+            parsed = null;
+          }
+        }
+        resolve({ statusCode: res.statusCode ?? 0, body: parsed, text });
+      });
+    });
+    req.on('timeout', () => {
+      req.destroy(new Error('Kubernetes API request timed out'));
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+function toKubernetesConfigMapObject(
+  manifest: CoreDnsConfigMapManifest,
+  resourceVersion: string | null
+): KubernetesConfigMapObject {
+  return {
+    apiVersion: 'v1',
+    kind: 'ConfigMap',
+    metadata: {
+      name: manifest.metadata.name,
+      namespace: manifest.metadata.namespace,
+      labels: manifest.metadata.labels,
+      annotations: manifest.metadata.annotations,
+      ...(resourceVersion ? { resourceVersion } : {})
+    },
+    data: manifest.data
+  };
+}
+
+function metadataString(value: unknown, key: string): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const metadata = (value as { metadata?: unknown }).metadata;
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+  const raw = (metadata as Record<string, unknown>)[key];
+  return typeof raw === 'string' && raw ? raw : null;
+}

@@ -46,4 +46,8 @@ electron-demo/**/*.log
 electron-demo/**/.env
 !electron-demo/**/.env.example
 
+# MX Launcher generated site-slot artifact evidence
+electron-dock/mx-launcher/artifacts/
+electron-dock/mx-launcher/server/artifacts/
+
 deploy-demo/

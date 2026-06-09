@@ -304,6 +304,17 @@ Domestic 不启动：
 - K8s。
 - 全量管理后台分析任务。
 
+Domestic outbound policy：
+
+- 公网 Domestic 服务器默认使用 `qp-tunnel-cli server-on` / `egress-on`，让 mihomo
+  作为常驻本地 outbound proxy，并写入 shell、SSH、Docker/containerd/buildkit proxy
+  drop-in。
+- 不在公网 Domestic 长期使用 `tun-on`。TUN 会改写默认路由，容易让网站/API/WG relay
+  的入站连接回程走代理，外部访问会变得不可预测。
+- Oversea 的 `hysteria2-mihomo-stack` 继续生成 `cn-direct` 订阅；Domestic 消费该订阅后，
+  国内目标直连，外网目标经 Oversea。需要全局 TUN 时，只用于非公网机器、临时 bootstrap
+  或后续带 policy routing/route exclude 的专门模式。
+
 ### Stage 4: Oversea Access
 
 Oversea 继续围绕 `hysteria2-mihomo-stack`。
@@ -761,6 +772,10 @@ MX-3ks 是 Internal K8s 为核心的整套平台能力。Domestic 和 Oversea �
 集成原则：User Center 只做身份和权限权威；各平台模块保留 Internal API；SDK
 Gateway 聚合并稳定暴露 `/internal/v1/sdk/*`，给 Launcher、AppCenter 应用和其他系统
 作为统一调用面。
+
+V1 shadow 阶段先用 Internal API 初始化默认 tenant、org、roles、demo users 和 service
+account，并用 hashed token records 做 introspection。后续接 OAuth/OIDC provider 时，
+保留 principal context、SDK Gateway manifest 和 route access evaluation 契约。
 
 ## 验收标准
 

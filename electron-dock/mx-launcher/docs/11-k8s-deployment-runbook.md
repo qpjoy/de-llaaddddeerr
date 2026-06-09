@@ -33,7 +33,8 @@ Namespace 类似一个逻辑隔离空间。`internal-shadow` 使用 `mx-internal
 
 Compose 里环境变量都写在一个 service 下。K8s 中要拆开：
 
-- ConfigMap 放 `MX_ENVIRONMENT`、`MX_SITE_ROLE`、`INTERNAL_STORE_DRIVER` 这类非敏感值。
+- ConfigMap 放 `MX_ENVIRONMENT`、`MX_SITE_ROLE`、`INTERNAL_STORE_DRIVER`、
+  `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED` 这类非敏感值。远程执行开关默认关闭。
 - Secret 放 `PG_PASSWORD`、`DATABASE_URL` 这类敏感值。
 
 `manage.sh k8s apply internal-shadow` 会从本地环境变量生成 Secret，不把密码写进 git：
@@ -109,8 +110,20 @@ bash scripts/manage.sh ops k8s-shadow db-summary
 bash scripts/manage.sh k8s down internal-shadow
 ```
 
-`down` 会删除 Internal API、migration Job、Postgres workload、ConfigMap 和 Secret，但
-默认保留 namespace 和 PVC。删除数据盘应该做成单独的 `purge` 动作，并要求二次确认。
+`down` 会删除 Internal API、migration Job、Postgres workload、CoreDNS writer RBAC、
+shadow DNS target、ConfigMap、ServiceAccount 和 Secret，但默认保留 Internal namespace
+和 PostgreSQL PVC。删除数据盘应该做成单独的 `purge` 动作，并要求二次确认。
+
+### CoreDNS apply 权限
+
+`internal-shadow` 会额外创建 `mx-dns` namespace 和一个 baseline `coredns` ConfigMap。
+Internal API 使用 `mx-launcher-internal` ServiceAccount，通过 `mx-dns` namespace 内的
+RoleBinding 更新这个固定 ConfigMap。RBAC 只允许 get/update/patch `coredns`，不授予
+创建任意 ConfigMap 的权限。
+
+HTTP smoke 在 K8s 模式下会设置 `MX_SMOKE_EXPECT_K8S_APPLY=1`，并调用
+`POST /internal/v1/dns/coredns/configmap/apply` 验证真实写入。Compose 本地模式不打开
+`COREDNS_K8S_APPLY_ENABLED`，因此只验证 apply gate 会被阻断。
 
 ## Admin 化方向
 

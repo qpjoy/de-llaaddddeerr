@@ -14,6 +14,11 @@ export interface RuntimeConfig {
   databaseUrl: string | null;
   observabilitySinks: ObservabilitySink[];
   runnerDryRunDefault: boolean;
+  siteSlotRunnerRemoteExecutionEnabled: boolean;
+  coreDnsK8sApplyEnabled: boolean;
+  coreDnsK8sAllowedNamespace: string;
+  coreDnsK8sAllowedConfigMapName: string;
+  siteSlotSshKeyRoot: string;
 }
 
 export interface ObservabilitySink {
@@ -33,6 +38,562 @@ export interface SiteHeartbeat {
   capabilities: string[];
   metrics: Record<string, number>;
   lastSeenAt: string;
+}
+
+export type SiteSlotKind = 'domestic' | 'oversea';
+export type SiteSlotNetworkMode = 'direct' | 'oversea-assisted' | 'offline-manual';
+
+export interface SiteSlotPlanInput {
+  siteId?: string | null;
+  kind?: SiteSlotKind | null;
+  sshProfileId?: string | null;
+  sshProfile?: SiteSlotSshProfile | null;
+  sshProfileError?: string | null;
+  host?: string | null;
+  sshUser?: string | null;
+  sshPort?: number | null;
+  rootAccess?: boolean | null;
+  hasDocker?: boolean | null;
+  hasOutboundInternet?: boolean | null;
+  overseaSiteId?: string | null;
+  overseaHost?: string | null;
+  internalBaseUrl?: string | null;
+  requestId?: string | null;
+  createdBy?: string | null;
+}
+
+export interface SiteSlotPreflightCheck {
+  checkId: string;
+  title: string;
+  stage: 'local' | 'remote' | 'network' | 'security';
+  severity: 'required' | 'recommended' | 'optional';
+  requiresRoot: boolean;
+  command: string;
+  expected: string;
+  remediation: string;
+}
+
+export interface SiteSlotDeploymentPhase {
+  phaseId: string;
+  title: string;
+  mode: 'manual' | 'remote-ssh' | 'artifact-push' | 'runner-job' | 'admin-action';
+  target: 'internal' | SiteSlotKind;
+  required: boolean;
+  commands: string[];
+  notes: string[];
+}
+
+export interface SiteSlotPlan {
+  planId: string;
+  siteId: string;
+  kind: SiteSlotKind;
+  environment: string;
+  status: 'planned' | 'blocked' | 'ready-for-preflight';
+  host: string | null;
+  ssh: {
+    user: string;
+    port: number;
+    rootAccess: boolean;
+    rootRequired: boolean;
+    profileId: string | null;
+    profileSource: 'config-center' | 'request-body' | 'none';
+    profileStatus: 'active' | 'paused' | null;
+    profileWarnings: string[];
+  };
+  network: {
+    mode: SiteSlotNetworkMode;
+    requiresOversea: boolean;
+    overseaSiteId: string | null;
+    overseaHost: string | null;
+    qpTunnelCliMode: 'not-required' | 'tun-on' | 'server-on' | 'egress-on' | 'manual';
+    notes: string[];
+  };
+  access: {
+    oversea: {
+      role: 'hysteria2-server' | 'not-required';
+      components: string[];
+      subscriptionSource: 'internal';
+      tunnelCliRegistration: '@qpjoy/tunnel-cli';
+    };
+    internal: {
+      mihomoDeployment: 'internal-managed';
+      dnsAuthority: 'internal-coredns';
+      wgRelayAccess: boolean;
+      subscriptionStore: 'config-center';
+      accountAuthority: 'internal';
+      dnsPath: 'wg-relay-internal-dns';
+      reservedInternalCidrs: string[];
+      domesticGatewayIp: '10.88.0.1';
+    };
+    hEndpoint: {
+      bootstrapPath: string[];
+      directPath: string[];
+      routingPolicy: 'cn-direct';
+      internalOnlyRoutes: string[];
+      externalPath: string[];
+    };
+  };
+  services: {
+    hostServices: string[];
+    dockerStacks: string[];
+    dockerPreferred: boolean;
+    hostServiceReason: string;
+  };
+  preflightChecks: SiteSlotPreflightCheck[];
+  deploymentPhases: SiteSlotDeploymentPhase[];
+  warnings: string[];
+  nextActions: string[];
+  createdBy: string;
+  createdAt: string;
+}
+
+export type SiteSlotExecutionAction = 'preflight' | 'apply';
+export type SiteSlotExecutionMode = 'dry-run' | 'manual' | 'ssh';
+export type SiteSlotExecutionStatus = 'ready' | 'blocked' | 'requires-confirmation';
+
+export interface SiteSlotExecutionInput {
+  planId?: string | null;
+  action?: SiteSlotExecutionAction | null;
+  mode?: SiteSlotExecutionMode | null;
+  confirmApply?: boolean | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface SiteSlotExecutionStep {
+  stepId: string;
+  sourceId: string;
+  title: string;
+  target: 'internal' | SiteSlotKind;
+  order: number;
+  requiresRoot: boolean;
+  command: string;
+  expected: string;
+  notes: string[];
+}
+
+export interface SiteSlotExecutionRun {
+  runId: string;
+  planId: string;
+  siteId: string;
+  kind: SiteSlotKind;
+  environment: string;
+  action: SiteSlotExecutionAction;
+  mode: SiteSlotExecutionMode;
+  status: SiteSlotExecutionStatus;
+  dryRun: boolean;
+  confirmApply: boolean;
+  remoteExecution: {
+    supported: boolean;
+    boundary: 'manifest-only' | 'future-ssh-runner';
+    reason: string;
+  };
+  gates: {
+    planStatus: SiteSlotPlan['status'];
+    applyConfirmed: boolean;
+    remoteExecutionSupported: boolean;
+    requiredStepCount: number;
+  };
+  warnings: string[];
+  steps: SiteSlotExecutionStep[];
+  nextActions: string[];
+  createdBy: string;
+  createdAt: string;
+}
+
+export type SiteSlotRunnerMode = 'simulate' | 'remote-ssh';
+export type SiteSlotRunnerSessionStatus = 'completed' | 'blocked' | 'queued' | 'running' | 'passed' | 'failed' | 'rollback-required';
+export type SiteSlotRunnerStepStatus = 'simulated' | 'blocked' | 'pending';
+
+export interface SiteSlotRunnerStartInput {
+  runId?: string | null;
+  mode?: SiteSlotRunnerMode | null;
+  confirmRemoteExecution?: boolean | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface SiteSlotRunnerStepResult {
+  stepId: string;
+  sourceId: string;
+  order: number;
+  target: 'internal' | SiteSlotKind;
+  status: SiteSlotRunnerStepStatus;
+  command: string;
+  exitCode: number | null;
+  output: string | null;
+  error: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export interface SiteSlotRunnerSession {
+  sessionId: string;
+  runId: string;
+  planId: string;
+  siteId: string;
+  kind: SiteSlotKind;
+  environment: string;
+  mode: SiteSlotRunnerMode;
+  status: SiteSlotRunnerSessionStatus;
+  dryRun: boolean;
+  confirmRemoteExecution: boolean;
+  gates: {
+    executionStatus: SiteSlotExecutionStatus;
+    remoteExecutionEnabled: boolean;
+    remoteExecutionConfirmed: boolean;
+    stepCount: number;
+  };
+  warnings: string[];
+  stepResults: SiteSlotRunnerStepResult[];
+  currentWorkerJobId: string | null;
+  currentReportId: string | null;
+  rollbackPlan: SiteSlotRollbackPlan | null;
+  nextActions: string[];
+  createdBy: string;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+export type SiteSlotWorkerKind = 'internal-runner' | 'domestic-runner' | 'oversea-site-agent' | 'admin-manual';
+export type SiteSlotWorkerJobStatus = 'ready' | 'blocked' | 'running' | 'passed' | 'failed' | 'rollback-required';
+export type SiteSlotWorkerReportStatus = 'running' | 'passed' | 'failed' | 'blocked';
+
+export interface SiteSlotWorkerJobInput {
+  sessionId?: string | null;
+  workerId?: string | null;
+  workerKind?: SiteSlotWorkerKind | null;
+  approvalId?: string | null;
+  changeWindowStart?: string | null;
+  changeWindowEnd?: string | null;
+  retryLimit?: number | null;
+  rollbackStrategy?: string | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface SiteSlotWorkerJobStep {
+  stepId: string;
+  sourceId: string;
+  order: number;
+  target: 'internal' | SiteSlotKind;
+  command: string;
+  requiresRoot: boolean;
+  timeoutSeconds: number;
+  stopOnFailure: boolean;
+  redactOutput: boolean;
+}
+
+export interface SiteSlotWorkerJob {
+  jobId: string;
+  contractVersion: 'site-slot-worker-v1';
+  sessionId: string;
+  runId: string;
+  planId: string;
+  siteId: string;
+  kind: SiteSlotKind;
+  environment: string;
+  mode: SiteSlotRunnerMode;
+  status: SiteSlotWorkerJobStatus;
+  dryRun: boolean;
+  worker: {
+    workerId: string;
+    kind: SiteSlotWorkerKind;
+  };
+  approval: {
+    required: boolean;
+    approvalId: string | null;
+    status: 'not-required' | 'recorded' | 'missing';
+  };
+  changeWindow: {
+    start: string | null;
+    end: string | null;
+    required: boolean;
+  };
+  retryPolicy: {
+    maxAttempts: number;
+    stopOnFailure: boolean;
+  };
+  rollbackPolicy: {
+    strategy: string;
+    requiredOnFailure: boolean;
+  };
+  steps: SiteSlotWorkerJobStep[];
+  warnings: string[];
+  currentReportId: string | null;
+  rollbackPlan: SiteSlotRollbackPlan | null;
+  updatedAt: string | null;
+  nextActions: string[];
+  createdBy: string;
+  createdAt: string;
+}
+
+export interface SiteSlotRollbackStep {
+  stepId: string;
+  order: number;
+  target: 'internal' | SiteSlotKind;
+  title: string;
+  command: string;
+  requiresApproval: boolean;
+}
+
+export interface SiteSlotRollbackPlan {
+  rollbackPlanId: string;
+  jobId: string;
+  sessionId: string;
+  runId: string;
+  planId: string;
+  siteId: string;
+  environment: string;
+  required: boolean;
+  status: 'not-required' | 'planned';
+  reason: string;
+  strategy: string;
+  steps: SiteSlotRollbackStep[];
+  createdAt: string;
+}
+
+export interface SiteSlotWorkerStepReportInput {
+  stepId?: string | null;
+  status?: SiteSlotWorkerReportStatus | null;
+  exitCode?: number | null;
+  stdout?: string | null;
+  stderr?: string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  attempt?: number | null;
+}
+
+export interface SiteSlotWorkerReportInput {
+  jobId?: string | null;
+  workerId?: string | null;
+  status?: SiteSlotWorkerReportStatus | null;
+  message?: string | null;
+  stepReports?: SiteSlotWorkerStepReportInput[];
+  requestId?: string | null;
+}
+
+export interface SiteSlotWorkerStepReport {
+  stepId: string;
+  sourceId: string;
+  order: number;
+  status: SiteSlotWorkerReportStatus;
+  exitCode: number | null;
+  stdout: string | null;
+  stderr: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  attempt: number;
+}
+
+export interface SiteSlotWorkerReport {
+  reportId: string;
+  jobId: string;
+  sessionId: string;
+  runId: string;
+  planId: string;
+  siteId: string;
+  environment: string;
+  workerId: string;
+  status: SiteSlotWorkerReportStatus;
+  message: string | null;
+  stepReports: SiteSlotWorkerStepReport[];
+  rollbackPlan: SiteSlotRollbackPlan | null;
+  nextActions: string[];
+  createdAt: string;
+}
+
+export type SiteSlotRollbackExecutionMode = 'simulate' | 'manual';
+export type SiteSlotRollbackExecutionStatus = 'ready' | 'blocked' | 'running' | 'passed' | 'failed';
+export type SiteSlotRollbackStepStatus = 'pending' | 'running' | 'passed' | 'failed' | 'blocked';
+export type SiteSlotRollbackReportStatus = 'running' | 'passed' | 'failed' | 'blocked';
+
+export interface SiteSlotRollbackExecutionInput {
+  reportId?: string | null;
+  mode?: SiteSlotRollbackExecutionMode | null;
+  confirmRollback?: boolean | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface SiteSlotRollbackExecutionStepResult {
+  stepId: string;
+  order: number;
+  target: 'internal' | SiteSlotKind;
+  status: SiteSlotRollbackStepStatus;
+  command: string;
+  exitCode: number | null;
+  output: string | null;
+  error: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export interface SiteSlotRollbackExecution {
+  rollbackExecutionId: string;
+  contractVersion: 'site-slot-rollback-v1';
+  rollbackPlanId: string | null;
+  sourceReportId: string;
+  jobId: string;
+  sessionId: string;
+  runId: string;
+  planId: string;
+  siteId: string;
+  environment: string;
+  mode: SiteSlotRollbackExecutionMode;
+  status: SiteSlotRollbackExecutionStatus;
+  dryRun: boolean;
+  confirmRollback: boolean;
+  rollbackPlan: SiteSlotRollbackPlan | null;
+  gates: {
+    workerReportStatus: SiteSlotWorkerReportStatus;
+    rollbackPlanStatus: SiteSlotRollbackPlan['status'] | null;
+    rollbackRequired: boolean;
+    rollbackConfirmed: boolean;
+    stepCount: number;
+  };
+  warnings: string[];
+  stepResults: SiteSlotRollbackExecutionStepResult[];
+  currentRollbackReportId: string | null;
+  nextActions: string[];
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string | null;
+}
+
+export interface SiteSlotRollbackStepReportInput {
+  stepId?: string | null;
+  status?: SiteSlotRollbackReportStatus | null;
+  exitCode?: number | null;
+  stdout?: string | null;
+  stderr?: string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  attempt?: number | null;
+}
+
+export interface SiteSlotRollbackReportInput {
+  rollbackExecutionId?: string | null;
+  workerId?: string | null;
+  status?: SiteSlotRollbackReportStatus | null;
+  message?: string | null;
+  stepReports?: SiteSlotRollbackStepReportInput[];
+  requestId?: string | null;
+}
+
+export interface SiteSlotRollbackStepReport {
+  stepId: string;
+  order: number;
+  target: 'internal' | SiteSlotKind;
+  status: SiteSlotRollbackReportStatus;
+  exitCode: number | null;
+  stdout: string | null;
+  stderr: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  attempt: number;
+}
+
+export interface SiteSlotRollbackReport {
+  rollbackReportId: string;
+  rollbackExecutionId: string;
+  rollbackPlanId: string | null;
+  sourceReportId: string;
+  jobId: string;
+  sessionId: string;
+  runId: string;
+  planId: string;
+  siteId: string;
+  environment: string;
+  workerId: string;
+  status: SiteSlotRollbackReportStatus;
+  message: string | null;
+  stepReports: SiteSlotRollbackStepReport[];
+  nextActions: string[];
+  createdAt: string;
+}
+
+export type AdminPipelineHealth = 'planned' | 'ready' | 'running' | 'passed' | 'failed' | 'blocked' | 'rollback';
+
+export interface AdminTimelineEntry {
+  id: string;
+  kind: 'plan' | 'execution' | 'runner-session' | 'worker-job' | 'worker-report' | 'rollback-execution' | 'rollback-report';
+  status: string;
+  title: string;
+  at: string;
+  parentId: string | null;
+  nextActions: string[];
+}
+
+export type AdminActionCategory = 'release' | 'site-slot' | 'dns' | 'observability' | 'rbac';
+export type AdminActionGate = 'none' | 'confirm-apply' | 'confirm-remote-execution' | 'confirm-fake-transport' | 'confirm-rollback' | 'manual-evidence' | 'change-window';
+export type AdminActionRisk = 'low' | 'medium' | 'high';
+
+export interface AdminActionDescriptor {
+  actionId: string;
+  label: string;
+  category: AdminActionCategory;
+  method: 'GET' | 'POST';
+  path: string;
+  requiredScopes: string[];
+  gate: AdminActionGate;
+  risk: AdminActionRisk;
+  allowed: boolean;
+  reason: string;
+  confirmFields: string[];
+  bodyTemplate: Record<string, unknown>;
+}
+
+export interface AdminActionPolicy {
+  authMode: 'shadow-rbac-v1';
+  principal: PlatformPrincipal;
+  warnings: string[];
+  actions: AdminActionDescriptor[];
+}
+
+export interface AdminSiteSlotPipelineSummary {
+  planId: string;
+  siteId: string;
+  kind: SiteSlotKind;
+  environment: string;
+  status: SiteSlotPlan['status'];
+  health: AdminPipelineHealth;
+  currentStage: string;
+  latestStatus: string;
+  latestUpdatedAt: string;
+  counts: {
+    executions: number;
+    runnerSessions: number;
+    workerJobs: number;
+    workerReports: number;
+    rollbackExecutions: number;
+    rollbackReports: number;
+  };
+  warnings: string[];
+  nextActions: string[];
+  actionHints: AdminActionDescriptor[];
+}
+
+export interface AdminSiteSlotPipeline {
+  summary: AdminSiteSlotPipelineSummary;
+  plan: SiteSlotPlan;
+  executions: SiteSlotExecutionRun[];
+  runnerSessions: SiteSlotRunnerSession[];
+  workerJobs: SiteSlotWorkerJob[];
+  workerReports: SiteSlotWorkerReport[];
+  rollbackExecutions: SiteSlotRollbackExecution[];
+  rollbackReports: SiteSlotRollbackReport[];
+  timeline: AdminTimelineEntry[];
+}
+
+export interface AdminDashboardSnapshot {
+  generatedAt: string;
+  overview: Record<string, unknown>;
+  actionPolicy: AdminActionPolicy;
+  sites: SiteHeartbeat[];
+  latestReleasePlans: ReleaseManagementPlan[];
+  siteSlotPipelines: AdminSiteSlotPipelineSummary[];
+  nextActions: string[];
 }
 
 export interface AnonymousEnrollmentRequest {
@@ -65,6 +626,101 @@ export interface IdentityLinkRequest {
   userId: string;
   requestId?: string;
   authProvider?: string;
+}
+
+export interface UserCenterTenant {
+  tenantId: string;
+  displayName: string;
+  status: 'active' | 'disabled';
+  createdAt: string;
+}
+
+export interface UserCenterOrg {
+  orgId: string;
+  tenantId: string;
+  displayName: string;
+  status: 'active' | 'disabled';
+  createdAt: string;
+}
+
+export interface UserCenterRole {
+  roleId: string;
+  displayName: string;
+  scopes: string[];
+  createdAt: string;
+}
+
+export interface UserCenterUser {
+  userId: string;
+  tenantId: string;
+  orgIds: string[];
+  email: string;
+  displayName: string;
+  roleIds: string[];
+  status: 'active' | 'disabled';
+  createdAt: string;
+}
+
+export interface UserCenterServiceAccount {
+  serviceAccountId: string;
+  tenantId: string;
+  displayName: string;
+  roleIds: string[];
+  scopes: string[];
+  status: 'active' | 'disabled';
+  createdAt: string;
+}
+
+export interface UserCenterTokenRecord {
+  tokenId: string;
+  tokenHash: string;
+  subjectKind: 'user' | 'service-account';
+  subjectId: string;
+  audience: string;
+  scopes: string[];
+  issuer: string;
+  issuedAt: string;
+  expiresAt: string;
+  revokedAt: string | null;
+}
+
+export interface UserCenterIssuedToken {
+  token: string;
+  record: UserCenterTokenRecord;
+}
+
+export interface UserCenterBootstrapResult {
+  tenant: UserCenterTenant;
+  org: UserCenterOrg;
+  roles: UserCenterRole[];
+  users: UserCenterUser[];
+  serviceAccounts: UserCenterServiceAccount[];
+}
+
+export interface CreateUserInput {
+  userId?: string | null;
+  email?: string | null;
+  displayName?: string | null;
+  roleIds?: string[];
+  orgIds?: string[];
+  requestId?: string | null;
+}
+
+export interface CreateServiceAccountInput {
+  serviceAccountId?: string | null;
+  displayName?: string | null;
+  roleIds?: string[];
+  scopes?: string[];
+  requestId?: string | null;
+}
+
+export interface IssueTokenInput {
+  subjectKind: 'user' | 'service-account';
+  subjectId: string;
+  audience?: string | null;
+  scopes?: string[];
+  ttlSeconds?: number | null;
+  requestId?: string | null;
 }
 
 export type PrincipalKind = 'anonymous' | 'user' | 'service-account' | 'unknown';
@@ -149,11 +805,30 @@ export interface SdkGatewayManifest {
     audience: string;
     tokenIntrospectionUrl: string;
     principalContextUrl: string;
+    configSnapshotUrl: string;
     dnsPolicyUrl: string;
     dnsEvaluateUrl: string;
+    dnsZoneUrl: string;
+    dnsCoreDnsConfigMapUrl: string;
     auditUrl: string;
     observabilityLogsUrl: string;
   };
+}
+
+export interface SdkGatewayAccessInput {
+  token?: string | null;
+  audience?: string | null;
+  routeId: string;
+  requestId?: string | null;
+}
+
+export interface SdkGatewayAccessDecision {
+  routeId: string;
+  allowed: boolean;
+  principal: PlatformPrincipal | null;
+  matchedScopes: string[];
+  missingScopes: string[];
+  reason: string;
 }
 
 export interface ConfigSnapshot {
@@ -190,6 +865,210 @@ export interface ConfigSnapshot {
   }>;
   signatures: {
     algorithm: string;
+    digest: string;
+    issuer: string;
+  };
+}
+
+export interface ConfigPolicySnapshotInput {
+  installId?: string | null;
+  deviceId?: string | null;
+  appId?: string | null;
+  productId?: string | null;
+  channel?: string | null;
+  userId?: string | null;
+  token?: string | null;
+  audience?: string | null;
+  requestId?: string | null;
+}
+
+export interface SiteSlotSshProfileInput {
+  profileId?: string | null;
+  siteId?: string | null;
+  kind?: SiteSlotKind | null;
+  host?: string | null;
+  sshUser?: string | null;
+  sshPort?: number | null;
+  identityFile?: string | null;
+  knownHostsFile?: string | null;
+  hostKeyAlias?: string | null;
+  strictHostKeyChecking?: 'yes' | 'no' | 'ask' | 'accept-new' | string | null;
+  connectTimeoutSeconds?: number | null;
+  batchMode?: 'yes' | 'no' | string | null;
+  status?: 'active' | 'paused' | string | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface SiteSlotSshProfileBootstrapInput {
+  profileId?: string | null;
+  siteId?: string | null;
+  kind?: SiteSlotKind | null;
+  host?: string | null;
+  sshUser?: string | null;
+  sshPort?: number | null;
+  password?: string | null;
+  hostKeyAlias?: string | null;
+  connectTimeoutSeconds?: number | null;
+  rotateKey?: boolean | null;
+  scanHostKey?: boolean | null;
+  executeBootstrap?: boolean | null;
+  confirmBootstrap?: boolean | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface SiteSlotSshProfileBootstrapResult {
+  status: 'planned' | 'blocked' | 'passed' | 'failed';
+  execution: 'not-started' | 'blocked' | 'completed' | 'failed';
+  boundary: 'ssh-password-bootstrap';
+  profileId: string;
+  siteId: string;
+  kind: SiteSlotKind;
+  host: string | null;
+  sshUser: string;
+  sshPort: number;
+  key: {
+    rootDir: string;
+    identityFile: string;
+    publicKeyFile: string;
+    generated: boolean;
+    rotated: boolean;
+  };
+  knownHosts: {
+    file: string;
+    scanned: boolean;
+    status: 'not-requested' | 'passed' | 'failed';
+    lineCount: number;
+  };
+  install: {
+    requested: boolean;
+    command: string;
+    verifyCommand: string;
+    status: 'not-requested' | 'blocked' | 'passed' | 'failed';
+    exitCode: number | null;
+    stdout: string | null;
+    stderr: string | null;
+  };
+  gates: {
+    envGate: {
+      status: 'passed' | 'blocked';
+      variable: 'SITE_SLOT_SSH_PASSWORD_BOOTSTRAP_ENABLED';
+    };
+    requestGate: {
+      status: 'passed' | 'blocked';
+      confirmBootstrap: boolean;
+      hasPassword: boolean;
+    };
+  };
+  warnings: string[];
+  nextActions: string[];
+}
+
+export interface SiteSlotSshProfile {
+  profileId: string;
+  siteId: string;
+  kind: SiteSlotKind;
+  environment: string;
+  host: string | null;
+  sshUser: string;
+  sshPort: number;
+  identityFile: string | null;
+  knownHostsFile: string | null;
+  hostKeyAlias: string | null;
+  strictHostKeyChecking: 'yes' | 'no' | 'ask' | 'accept-new';
+  connectTimeoutSeconds: number;
+  batchMode: 'yes' | 'no';
+  status: 'active' | 'paused';
+  source: 'config-center';
+  warnings: string[];
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export type RuntimeFeaturePolicyScopeKind = 'global' | 'site' | 'profile';
+export type RuntimeFeaturePolicyMode = 'disabled' | 'plan-only' | 'readonly-execute' | 'remote-execute';
+
+export interface RuntimeFeaturePolicyInput {
+  featureKey?: string | null;
+  scopeKind?: RuntimeFeaturePolicyScopeKind | string | null;
+  scopeId?: string | null;
+  enabled?: boolean | null;
+  mode?: RuntimeFeaturePolicyMode | string | null;
+  expiresAt?: string | null;
+  requiresApproval?: boolean | null;
+  reason?: string | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface RuntimeFeaturePolicy {
+  policyId: string;
+  featureKey: string;
+  environment: string;
+  scopeKind: RuntimeFeaturePolicyScopeKind;
+  scopeId: string | null;
+  enabled: boolean;
+  mode: RuntimeFeaturePolicyMode;
+  expiresAt: string | null;
+  requiresApproval: boolean;
+  reason: string | null;
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export interface ConfigPolicySnapshot {
+  snapshotId: string;
+  environment: string;
+  siteId: string;
+  version: number;
+  productId: string;
+  appId: string;
+  channel: string;
+  installId: string | null;
+  deviceId: string | null;
+  anonymousPrincipalId: string | null;
+  userId: string | null;
+  principal: PlatformPrincipal;
+  issuedAt: string;
+  expiresAt: string;
+  source: {
+    configCenter: 'v1-shadow';
+    requestId: string | null;
+  };
+  rollout: {
+    segmentId: string;
+    percentage: number;
+    reasons: string[];
+  };
+  policies: {
+    app: AppCenterApp | null;
+    permissionPolicy: {
+      appId: string;
+      declaredScopes: string[];
+      defaultDecision: 'requires-appcenter-grant';
+    };
+    launcherNetwork: LauncherNetworkSnapshot;
+    dns: {
+      policy: DnsPolicy;
+      reverseProxyRoutes: DnsReverseProxyRoute[];
+    };
+    sdkGateway: SdkGatewayManifest;
+    release: {
+      launcher: ReleasePolicyDecision;
+      app: ReleasePolicyDecision;
+    };
+    observability: {
+      level: string;
+      sinks: ObservabilitySink[];
+    };
+  };
+  signatures: {
+    algorithm: 'sha256-dev-digest';
     digest: string;
     issuer: string;
   };
@@ -315,7 +1194,7 @@ export interface LauncherNetworkSnapshot {
   userId: string | null;
   mode: 'guest' | 'user';
   overlayPolicy: {
-    cidr: '100.91.0.0/16' | '100.89.0.0/16';
+    cidr: '10.91.0.0/16' | '10.89.0.0/16';
     leaseIp: string;
     relayMode: 'h2i';
   };
@@ -403,6 +1282,111 @@ export interface DnsReverseProxyRoute {
   updatedAt: string;
 }
 
+export interface DnsZoneSnapshotInput {
+  policyId?: string | null;
+  appId?: string | null;
+  requestId?: string | null;
+}
+
+export interface DnsZoneRecord {
+  name: string;
+  type: 'A' | 'CNAME';
+  value: string;
+  ttlSeconds: number;
+  source: 'dns-policy' | 'reverse-proxy-route';
+}
+
+export interface DnsZoneSnapshot {
+  snapshotId: string;
+  environment: string;
+  siteId: string;
+  policyId: string;
+  version: number;
+  authority: 'internal-coredns';
+  zoneNames: string[];
+  serviceDns: string;
+  records: DnsZoneRecord[];
+  reverseProxyRoutes: DnsReverseProxyRoute[];
+  fallbackOrder: DnsFallbackTarget[];
+  corefile: {
+    targetServiceDns: string;
+    serverBlocks: Array<{
+      zone: string;
+      text: string;
+    }>;
+    combined: string;
+  };
+  issuedAt: string;
+  expiresAt: string;
+  signatures: {
+    algorithm: 'sha256-dev-digest';
+    digest: string;
+    issuer: string;
+  };
+}
+
+export interface CoreDnsConfigMapSyncInput extends DnsZoneSnapshotInput {
+  snapshotId?: string | null;
+  namespace?: string | null;
+  configMapName?: string | null;
+  mode?: 'dry-run' | 'shadow-apply' | null;
+  requestId?: string | null;
+}
+
+export interface CoreDnsConfigMapManifest {
+  apiVersion: 'v1';
+  kind: 'ConfigMap';
+  metadata: {
+    name: string;
+    namespace: string;
+    labels: Record<string, string>;
+    annotations: Record<string, string>;
+  };
+  data: {
+    Corefile: string;
+    'mx-zone-snapshot.json': string;
+  };
+  yaml: string;
+}
+
+export interface CoreDnsConfigMapSyncResult {
+  syncId: string;
+  mode: 'dry-run' | 'shadow-apply';
+  status: 'rendered' | 'recorded';
+  applied: boolean;
+  snapshotId: string;
+  namespace: string;
+  configMapName: string;
+  manifest: CoreDnsConfigMapManifest;
+  issuedAt: string;
+  message: string;
+}
+
+export interface CoreDnsConfigMapApplyInput extends CoreDnsConfigMapSyncInput {
+  confirmApply?: boolean | null;
+  serverDryRun?: boolean | null;
+  actor?: string | null;
+}
+
+export interface CoreDnsConfigMapApplyResult {
+  applyId: string;
+  syncId: string;
+  mode: 'k8s-server-dry-run' | 'k8s-apply';
+  status: 'blocked' | 'server-dry-run' | 'applied' | 'failed';
+  allowed: boolean;
+  applied: boolean;
+  serverDryRun: boolean;
+  snapshotId: string;
+  namespace: string;
+  configMapName: string;
+  manifest: CoreDnsConfigMapManifest;
+  resourceVersion: string | null;
+  blockedReason: string | null;
+  message: string;
+  issuedAt: string;
+  completedAt: string;
+}
+
 export interface ReleasePolicyInput {
   componentKind: string;
   componentId: string;
@@ -425,6 +1409,56 @@ export interface ReleasePolicyDecision {
   requiresGate: boolean;
   rollbackRequired: boolean;
   reason: string;
+}
+
+export type ReleaseManagementE2eResult = 'passed' | 'failed' | 'blocked' | 'running';
+
+export interface ReleaseManagementPlanInput {
+  releaseId?: string | null;
+  channel?: string | null;
+  installId?: string | null;
+  userId?: string | null;
+  productId?: string | null;
+  appId?: string | null;
+  launcherCurrentVersion?: string | null;
+  launcherTargetVersion?: string | null;
+  appCurrentVersion?: string | null;
+  appTargetVersion?: string | null;
+  suiteId?: string | null;
+  topology?: string | null;
+  sites?: string[];
+  e2eResult?: ReleaseManagementE2eResult | null;
+  createdBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface ReleaseManagementPlan {
+  planId: string;
+  releaseId: string;
+  environment: string;
+  channel: string;
+  installId: string | null;
+  userId: string | null;
+  createdBy: string;
+  components: {
+    launcher: ReleasePolicyDecision;
+    app: ReleasePolicyDecision;
+  };
+  test: {
+    suiteId: string;
+    topology: string;
+    sites: string[];
+    run: TestRun;
+    gate: TestGateVerdict;
+  };
+  decisions: {
+    readyToPromote: boolean;
+    requiresApproval: boolean;
+    canaryAllowed: boolean;
+    rollbackRequired: boolean;
+    nextActions: string[];
+  };
+  createdAt: string;
 }
 
 export interface TestRunInput {
@@ -491,16 +1525,36 @@ export interface PlatformKernelSmokeResult {
   ok: boolean;
   checks: string[];
   app: AppCenterApp;
+  userCenter: UserCenterBootstrapResult;
+  issuedServiceToken: UserCenterIssuedToken;
+  sdkAccess: SdkGatewayAccessDecision;
+  deniedSdkAccess: SdkGatewayAccessDecision;
+  configPolicySnapshot: ConfigPolicySnapshot;
   enrollment: AnonymousEnrollment;
   principalContext: PrincipalContext;
   sdkIntrospection: TokenIntrospectionResult;
   sdkGateway: SdkGatewayManifest;
+  domesticSlotPlan: SiteSlotPlan;
+  overseaSlotPlan: SiteSlotPlan;
+  domesticSlotPreflightExecution: SiteSlotExecutionRun;
+  domesticSlotApplyExecution: SiteSlotExecutionRun;
+  domesticSlotPreflightRunnerSession: SiteSlotRunnerSession;
+  domesticSlotRemoteRunnerSession: SiteSlotRunnerSession;
+  domesticSlotWorkerJob: SiteSlotWorkerJob;
+  domesticSlotWorkerReport: SiteSlotWorkerReport;
+  domesticSlotFailedWorkerJob: SiteSlotWorkerJob;
+  domesticSlotFailedWorkerReport: SiteSlotWorkerReport;
+  domesticSlotRollbackExecution: SiteSlotRollbackExecution;
+  domesticSlotRollbackReport: SiteSlotRollbackReport;
   networkSnapshot: LauncherNetworkSnapshot;
   permissionGrant: PermissionGrant;
   testRun: TestRun;
   gate: TestGateVerdict;
+  releaseManagementPlan: ReleaseManagementPlan;
   launcherUpdate: ReleasePolicyDecision;
   h2oUpdate: ReleasePolicyDecision;
   dnsPolicy: DnsPolicy;
   dnsDecision: DnsResolutionDecision;
+  dnsZoneSnapshot: DnsZoneSnapshot;
+  coreDnsSync: CoreDnsConfigMapSyncResult;
 }
