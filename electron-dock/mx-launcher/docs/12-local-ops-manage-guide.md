@@ -151,7 +151,102 @@ bash scripts/manage.sh ops k8s-shadow cycle
 最后保留环境运行，方便继续看日志或手动访问。K8s smoke 会真实调用 CoreDNS apply API，
 把签名 zone snapshot 写入 `mx-dns/coredns`。确认完成后再执行 `down`。
 
-## 5. Domestic / Oversea 插槽计划
+## 5. AWX shadow 执行平面
+
+AWX 作为 execution provider 部署在独立 namespace `mx-awx`，Internal 仍是唯一真相。
+AWX 不保存 MX 的 plan / worker job / evidence / rollback policy，只执行被 Internal
+授权的 job template。默认版本 pin 到 AWX Operator `2.19.1`，需要覆盖时设置
+`MX_AWX_OPERATOR_REF`。
+
+AWX shadow 不是 Docker Compose 服务；它是 Docker Desktop Kubernetes 或其他 K8s
+集群里的 AWX Operator、AWX web/task、Redis/Postgres 等容器 workload。平台差异主要在
+K8s 能否运行、默认 StorageClass 是否可用、镜像拉取是否通畅；MX 的调用边界保持一致。
+
+`bash scripts/manage.sh ops k8s-shadow cycle` 只接管 Internal，不会自动安装 AWX。
+这是刻意设计：Internal 快速迭代不应该每次都拖着较重的 AWX reconcile。需要完整本机平台栈
+时用一条显式命令：
+
+```bash
+bash scripts/manage.sh ops local-platform cycle
+```
+
+它会执行 `AWX shadow install -> Internal k8s cycle -> awx-provider upsert`。如果只是日常改
+Internal/API/Admin，继续跑 `bash scripts/manage.sh ops k8s-shadow cycle`；如果第一次准备
+真实 AWX launch，可以先跑 `awx-shadow install`，再跑 `k8s-shadow cycle`，或者直接跑
+`local-platform cycle`。
+
+```bash
+bash scripts/manage.sh ops awx-shadow plan
+bash scripts/manage.sh ops awx-shadow dry-run
+bash scripts/manage.sh ops awx-shadow install
+bash scripts/manage.sh ops awx-shadow status
+```
+
+本地访问 AWX UI：
+
+```bash
+bash scripts/manage.sh ops awx-shadow password
+bash scripts/manage.sh ops awx-shadow port-forward 18080
+```
+
+浏览器打开 `http://127.0.0.1:18080`，用户名默认是 `admin`，密码来自
+`mx-awx-admin-password` Secret。
+
+日常操作优先从 Admin 进入 `Internal 基础系统 -> AWX Provider`：
+
+1. 填写 Provider ID、Base URL、Organization、Project、Inventory/Credential/Template prefix。
+2. 保存 Provider。
+3. 输入一次 AWX API Token，点击 `Check Provider` 做只读检查。
+4. 回到 Oversea/Domestic 的 `Deployment Progress`，按 Next Gate 依次执行 `AWX Sync Plan`
+   -> `Sync AWX Credential` -> `Sync AWX Objects` -> `Launch AWX Job`。
+
+Admin 的 AWX Gate 会把当前 Provider、Token、Timeout、Wait 选项合并到请求里；token
+只作为本次请求使用，不写入 Config Center。CLI 只保留给首次 bootstrap、自动化 smoke
+或后台不可用时的 break-glass。等价 CLI 如下：
+
+同一页的 `Internal 基础系统` 现在也承担 User Center 和 Home relay bootstrap：
+
+1. `User Center` 面板先执行 `Bootstrap Users`，再按需创建真实用户并绑定
+   `mx-admin` / `mx-user` / `mx-guest` 等角色。
+2. `Home Relay Enrollment` 面板填入 Domestic site 和 Home WireGuard public key，创建匿名
+   HDO enrollment。Internal 会分配 `10.91.0.0/16` guest lease，登录用户后再走
+   `10.89.0.0/16` user lease；不要使用 `100.88.*`。
+3. Enrollment 返回的 lease IP 和 public key 会回填到 Domestic peer draft。切回 Domestic
+   `Deployment Progress` 后，`Home relay peer` quick fields 会自动带出这些值。
+4. Domestic 的默认后台路径是 `Prepare Domestic Relay AWX` -> `Domestic relay readonly probe`
+   -> `Domestic relay peer append` handoff -> `AWX Sync Plan` -> `Sync AWX Credential`
+   -> `Sync AWX Objects` -> `Launch AWX Job`。真实 WG mutation 由 AWX job 或 SSH fallback
+   执行，Admin API 只负责 gate、审计、evidence 和参数组装。
+
+```bash
+MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+  bash scripts/manage.sh ops awx-provider upsert awxprov_oversea
+
+SITE_SLOT_AWX_TOKEN="$AWX_TOKEN" \
+MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+  bash scripts/manage.sh ops awx-provider check awxprov_oversea
+```
+
+`awx-provider check` 会只读检查 `/api/v2/ping/`、organization、project、inventory 和
+job template。它不会替你创建 AWX object；真实写入由后面的
+`awx-credential-sync` / `awx-object-sync` gated action 负责。手动检查 AWX UI 时重点看：
+
+- organization：`MX Internal`
+- project：`mx-launcher-site-slots`
+- inventory：`mx-shadow-oversea`
+- credential：`mx-site-slot-<site>-machine`
+- job template：`mx-site-slot-oversea-worker-v1`
+
+停止 AWX shadow 时使用：
+
+```bash
+bash scripts/manage.sh ops awx-shadow down
+```
+
+`down` 只把 AWX web/task/Postgres/operator workload scale 到 0，保留 namespace、CR、
+Secret 和 PVC，方便下次 `install` 继续 reconcile。
+
+## 6. Domestic / Oversea 插槽计划
 
 Internal API 运行后，可以先让脚本生成 site slot plan。这个动作只调用 Internal 管理面，
 不会 SSH 到远端，也不会使用 root 改机器。Executor V1 也是这个边界：它生成可审计的
@@ -200,9 +295,12 @@ Confirm Apply -> Runner -> Worker Job -> Worker Run -> Evidence`。如果 key �
 bash scripts/manage.sh ops k8s-shadow ssh-bootstrap disable
 ```
 
-Domestic 的 artifact set 和 Oversea 不同，只包含 `mx-domestic-wg.conf`、
-H2I/API proxy、snapshot cache 和 observability forwarder 等薄模块。`@qpjoy/tunnel-cli`
-首选在目标机上通过 `npm i -g @qpjoy/tunnel-cli` 安装；Internal 只在 Domestic 无出站时推送
+Domestic 的 artifact set 和 Oversea 不同，只包含 Domestic relay/H2I/API proxy、
+snapshot cache 和 observability forwarder 等薄模块。WireGuard 产物拆成三类：
+`mx-domestic-wg-relay.conf` 安装到 Domestic 的 `/etc/wireguard/mx-domestic.conf`，
+`mx-domestic-relay.env` 放到 Domestic current dir，`mx-internal-service-peer.conf`
+只给 Internal runtime 使用，不能复制到 Domestic。`@qpjoy/tunnel-cli` 首选在目标机上通过
+`npm i -g @qpjoy/tunnel-cli` 安装；Internal 只在 Domestic 无出站时推送
 `mx-domestic-qp-tunnel-cli-fallback.tar.gz` 作为离线兜底。目标机不需要 `git clone` /
 `git pull`，也不需要保留完整 monorepo。
 
@@ -297,6 +395,19 @@ MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
   bash scripts/manage.sh ops site-slot worker-job slotrunner_xxx
 ```
 
+Domestic relay peer append 的真实 SSH 路径可以先从 apply execution 一键准备
+`remote-ssh` runner session 和 worker job。默认 shadow 仍会被
+`SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED` 挡住，只返回 blocked session；打开远程执行
+gate 后，才会生成可继续审阅和执行的 job：
+
+```bash
+SITE_SLOT_APPROVAL_ID=approval-domestic-relay-peer-append \
+SITE_SLOT_CHANGE_WINDOW_START=2026-06-11T20:00:00+08:00 \
+SITE_SLOT_CHANGE_WINDOW_END=2026-06-11T21:00:00+08:00 \
+MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+  bash scripts/manage.sh ops site-slot domestic-relay-append-ssh-prepare slotexec_xxx confirm
+```
+
 Worker Adapter V1 可以直接消费 job 并回写完整 step report。默认 `simulate` 只生成证据，
 不会执行命令：
 
@@ -357,6 +468,107 @@ MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
 MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
   bash scripts/manage.sh ops site-slot ssh-profiles
 ```
+
+后台 Admin 里可以直接使用 `Shadow Setup` 按钮完成当前 Oversea shadow 链路。对应 API：
+
+```bash
+curl -sS -X POST \
+  http://127.0.0.1:18090/internal/v1/admin/oversea/oversea-main/shadow-setup \
+  -H 'content-type: application/json' \
+  -d '{
+    "sshProfileId": "sshprof_oversea-main",
+    "host": "oversea.example.com",
+    "sshUser": "root",
+    "sshPort": 22,
+    "identityFile": "/opt/mx/ssh/oversea-main_ed25519",
+    "knownHostsFile": "/opt/mx/ssh/known_hosts.oversea-main",
+    "hostKeyAlias": "oversea-main",
+    "awxProviderId": "awxprov_oversea",
+    "internalBaseUrl": "http://127.0.0.1:18090",
+    "requestedBy": "operator"
+  }'
+```
+
+这个 API 会创建 SSH Profile、Internal mihomo/access accounts、plan、preflight、apply、
+`awx-shadow` runner、AWX worker job 和 shadow worker report。它不调用 AWX launch，
+不登录 Oversea，也不修改远端。准备真实执行时，在 ready AWX worker job 上优先通过
+Admin 的 Next Gate 按顺序同步 AWX credential、对象，再发起 AWX。下面 CLI 只是同一
+action 模型的等价 break-glass：
+
+```bash
+SITE_SLOT_CONFIRM_AWX_CREDENTIAL_SYNC=1 \
+SITE_SLOT_AWX_PROVIDER_ID=awxprov_oversea \
+SITE_SLOT_AWX_TOKEN="$AWX_TOKEN" \
+  bash scripts/manage.sh ops site-slot worker-run slotjob_xxx awx-credential-sync
+
+SITE_SLOT_CONFIRM_AWX_SYNC=1 \
+SITE_SLOT_AWX_PROVIDER_ID=awxprov_oversea \
+SITE_SLOT_AWX_TOKEN="$AWX_TOKEN" \
+  bash scripts/manage.sh ops site-slot worker-run slotjob_xxx awx-object-sync
+
+SITE_SLOT_CONFIRM_AWX_LAUNCH=1 \
+SITE_SLOT_AWX_PROVIDER_ID=awxprov_oversea \
+SITE_SLOT_AWX_TOKEN="$AWX_TOKEN" \
+  bash scripts/manage.sh ops site-slot worker-run slotjob_xxx awx-launch
+```
+
+真实 credential sync 调用 Internal 的 `site-slot.worker-run.awx-credential-sync` action。
+它需要 `AWX_API_CREDENTIAL_SYNC_ENABLED=true`，或 Admin 中
+`AWX Runtime Gates / Credential Sync` 打开的 `site-slot.awx.credential-sync`
+runtime policy；action 还需要 `confirmAwxCredentialSync=true`、active provider、AWX
+bearer token 和 active SSH Profile。它会读取 SSH Profile 的 `identityFile`，在 AWX
+中创建/更新 Machine Credential；返回证据不会回显私钥内容，token 也不会写入 Config
+Center。
+
+真实 object sync 调用 Internal 的 `site-slot.worker-run.awx-object-sync` action。
+它需要 `AWX_API_OBJECT_SYNC_ENABLED=true`，或 Admin 中
+`AWX Runtime Gates / Object Sync` 打开的 `site-slot.awx.object-sync` runtime policy；
+action 还需要 `confirmAwxSync=true`、active provider、AWX bearer token。它会创建/更新
+AWX organization、project、inventory、host、job template，并引用已同步的 Machine
+Credential；如果 credential 不存在会返回 blocked。
+
+真实 launch 调用 Internal 的 `site-slot.worker-run.awx-launch` action。Internal server
+需要 `AWX_API_LAUNCH_ENABLED=true`，或 Admin 中 `AWX Runtime Gates / AWX Launch`
+打开的 `site-slot.awx.launch` runtime policy；action 还需要 `confirmAwxLaunch=true`、
+active provider、AWX bearer token，并把 AWX job summary / events 回写成 worker
+report。token 只在请求或 Internal 环境变量 `AWX_API_TOKEN` 中使用，不写入 Config
+Center。
+
+在接真实 AWX / Oversea 前，可以先用本地 mock AWX API 做正向 contract smoke。先启动一个
+带 gate 的本地 Internal API：
+
+```bash
+HOST=127.0.0.1 \
+PORT=18133 \
+AWX_API_CREDENTIAL_SYNC_ENABLED=true \
+AWX_API_OBJECT_SYNC_ENABLED=true \
+AWX_API_LAUNCH_ENABLED=true \
+  pnpm --dir server dev
+```
+
+然后运行：
+
+```bash
+MX_INTERNAL_BASE_URL=http://127.0.0.1:18133 \
+  bash scripts/manage.sh ops awx-provider mock-smoke
+```
+
+这个 smoke 会在本机启动一个内存 mock AWX API，创建临时 SSH Profile key 文件，然后走
+`awx-sync-plan -> awx-credential-sync -> awx-object-sync -> awx-launch`。它不连接真实
+AWX，不登录 Oversea；失败时优先看返回的 blockedReasons，通常是 Internal 进程没有打开
+对应 `AWX_API_*_ENABLED` gate。
+
+Domestic relay peer append 也走同一套 AWX provider。Admin 的默认路径是
+`site-slot.domestic-relay-peer-append-awx.prepare`，它从已确认的 Domestic apply execution
+创建 `awx-shadow` runner 和 `awx-runner` worker job；随后先执行 readonly probe /
+peer append handoff，确认 `10.89/10.91` Home lease、WG public key 和
+`mx-internal-service-peer.conf` 安全边界，再运行 `site-slot.worker-run.awx-sync-plan`
+生成 AWX organization / project / inventory / host / credential / job template 的
+plan-only 清单。Sync Plan 不调用 AWX、不写 worker report；对象和 credential 引用 ready
+后，先由 `site-slot.worker-run.awx-credential-sync` 受控同步 AWX Machine Credential，
+再由 `site-slot.worker-run.awx-object-sync` 同步 AWX 对象，最后由
+`site-slot.worker-run.awx-launch` 提交 AWX job。`site-slot.domestic-relay-peer-append-ssh.prepare` 和
+`site-slot.worker-run.domestic-relay-peer-append-ssh` 只作为 fallback / break-glass。
 
 紧急覆盖可以继续用环境变量；环境变量优先级高于 `SITE_SLOT_SSH_PROFILE_FILE`，profile file
 又高于 Config Center managed profile：
@@ -467,7 +679,7 @@ H/D/I/O 拓扑、平台指标、Site Slot pipeline 列表、Action Gates 和 wor
 - `SITE_SLOT_RETRY_LIMIT=2`
 - `SITE_SLOT_ROLLBACK_STRATEGY=restore-previous-compose`
 
-## 6. 查看 K8s 状态、日志和 smoke
+## 7. 查看 K8s 状态、日志和 smoke
 
 查看资源：
 
@@ -502,7 +714,7 @@ bash scripts/manage.sh ops k8s-shadow db-summary
 - `mx_platform_records` 中不同平台对象的记录数量，例如 `test-run`、`audit-event`、
   `launcher-network-snapshot`。
 
-## 6. 停止 K8s shadow
+## 8. 停止 K8s shadow
 
 ```bash
 bash scripts/manage.sh ops k8s-shadow down
@@ -523,7 +735,7 @@ bash scripts/manage.sh ops k8s-shadow down
 
 保留 PVC 是为了安全。删除数据盘应该做成单独 purge 动作，并要求二次确认。
 
-## 7. 常见问题
+## 9. 常见问题
 
 ### Docker Compose smoke 失败
 

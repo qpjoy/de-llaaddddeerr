@@ -2,8 +2,13 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import {
   builtinAppCenterApps,
+  buildAwxProviderConfig,
   buildReleaseManagementPlan,
   buildRuntimeFeaturePolicy,
+  buildLauncherNetworkMihomoSite,
+  buildLauncherNetworkTopology,
+  buildLauncherNetworkReachabilityPlan,
+  buildSiteSlotAccessAccount,
   buildSiteSlotExecutionRun,
   buildSiteSlotPlan,
   buildSiteSlotRunnerSession,
@@ -24,6 +29,7 @@ import {
   createConfigSnapshot,
   createConfigPolicySnapshot,
   createSdkGatewayManifest,
+  defaultSiteSlotAccessAccountNames,
   createServiceAccountPrincipalFromRecord,
   createUserCenterServiceAccount,
   createUserCenterTokenRecord,
@@ -38,6 +44,7 @@ import {
   normalizeTestStatus,
   normalizeUpdatePolicy,
   releasePolicyByKind,
+  renderHysteria2MihomoSubscription,
   renderCoreDnsConfigMap,
   resolvePrincipalContext,
   required
@@ -50,6 +57,8 @@ import type {
   AppCenterApp,
   AuditEvent,
   AuditEventInput,
+  AwxProviderConfig,
+  AwxProviderConfigInput,
   ConfigPolicySnapshot,
   ConfigPolicySnapshotInput,
   ConfigSnapshot,
@@ -69,7 +78,11 @@ import type {
   IssueTokenInput,
   LauncherNetworkSnapshot,
   LauncherNetworkSnapshotInput,
+  LauncherNetworkMihomoSite,
+  LauncherNetworkMihomoSiteInput,
+  LauncherNetworkReachabilityPlan,
   LogEntryInput,
+  MihomoSubscriptionRender,
   PermissionGrant,
   PermissionRequestInput,
   PrincipalContext,
@@ -89,6 +102,10 @@ import type {
   SdkGatewayManifest,
   SiteSlotExecutionInput,
   SiteSlotExecutionRun,
+  SiteSlotAccessAccount,
+  SiteSlotAccessAccountIssueInput,
+  SiteSlotAccessAccountIssueResult,
+  SiteSlotKind,
   SiteSlotPlan,
   SiteSlotPlanInput,
   SiteSlotRollbackExecution,
@@ -137,7 +154,10 @@ export class MemoryStore implements PlatformStore {
   private readonly siteSlotRollbackExecutions = new Map<string, SiteSlotRollbackExecution>();
   private readonly siteSlotRollbackReports = new Map<string, SiteSlotRollbackReport>();
   private readonly siteSlotSshProfiles = new Map<string, SiteSlotSshProfile>();
+  private readonly siteSlotAccessAccounts = new Map<string, SiteSlotAccessAccount>();
+  private readonly launcherNetworkMihomoSites = new Map<string, LauncherNetworkMihomoSite>();
   private readonly runtimeFeaturePolicies = new Map<string, RuntimeFeaturePolicy>();
+  private readonly awxProviderConfigs = new Map<string, AwxProviderConfig>();
   private readonly appCatalog = new Map<string, AppCenterApp>();
   private readonly tenants = new Map<string, UserCenterTenant>();
   private readonly orgs = new Map<string, UserCenterOrg>();
@@ -155,7 +175,6 @@ export class MemoryStore implements PlatformStore {
   private readonly testRuns = new Map<string, TestRun>();
   private readonly auditEvents: AuditEvent[] = [];
   private readonly logs: LogEntryInput[] = [];
-  private nextOverlayHost = 20;
   private nextGuestHost = 20;
   private nextUserHost = 20;
 
@@ -186,6 +205,7 @@ export class MemoryStore implements PlatformStore {
       siteSlotWorkerReports: this.siteSlotWorkerReports.size,
       siteSlotRollbackExecutions: this.siteSlotRollbackExecutions.size,
       siteSlotRollbackReports: this.siteSlotRollbackReports.size,
+      awxProviderConfigs: this.awxProviderConfigs.size,
       dnsPolicies: this.dnsPolicies.size,
       dnsReverseProxyRoutes: this.dnsReverseProxyRoutes.size,
       dnsZoneSnapshots: this.dnsZoneSnapshots.size,
@@ -489,8 +509,9 @@ export class MemoryStore implements PlatformStore {
       productId,
       siteId,
       environment: this.config.environment,
-      overlayIp: this.allocateOverlayIp(),
+      overlayIp: this.allocateGuestLeaseIp(),
       relayMode: input.relayMode?.trim() || 'h2i',
+      publicKey: input.publicKey?.trim() || null,
       createdAt: now,
       userId: null
     };
@@ -527,6 +548,9 @@ export class MemoryStore implements PlatformStore {
       throw new Error(`Unknown installId: ${input.installId}`);
     }
     enrollment.userId = input.userId;
+    if (!enrollment.overlayIp.startsWith('10.89.')) {
+      enrollment.overlayIp = this.allocateUserLeaseIp();
+    }
     const previous = this.snapshots.get(input.installId);
     const nextVersion = (previous?.version ?? 1) + 1;
     const snapshot = this.createSnapshot(enrollment, nextVersion, 'employee');
@@ -748,7 +772,9 @@ export class MemoryStore implements PlatformStore {
     const launcherNetwork = this.createLauncherNetworkSnapshot({
       installId: enrollment?.installId ?? input.installId ?? undefined,
       deviceId: enrollment?.deviceId ?? input.deviceId ?? undefined,
+      siteId: enrollment?.siteId ?? undefined,
       userId: principalContext.principal.userId ?? enrollment?.userId ?? input.userId ?? null,
+      publicKey: enrollment?.publicKey ?? null,
       appId,
       requestId: input.requestId ?? undefined
     });
@@ -840,6 +866,88 @@ export class MemoryStore implements PlatformStore {
     return profile;
   }
 
+  issueSiteSlotAccessAccounts(input: SiteSlotAccessAccountIssueInput): SiteSlotAccessAccountIssueResult {
+    const siteId = input.siteId?.trim() || 'oversea-main';
+    const site = this.upsertLauncherNetworkMihomoSite({
+      siteId,
+      publicHost: input.publicHost,
+      serverPorts: input.serverPorts,
+      requestedBy: input.requestedBy,
+      requestId: input.requestId
+    });
+    const accountNames = resolveIssueAccountNames(input, siteId);
+    const accounts = accountNames.map((username) => {
+      const accountId = `slotacct_${siteId}_${username}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const previous = this.siteSlotAccessAccounts.get(accountId) ?? null;
+      const account = buildSiteSlotAccessAccount(this.config, {
+        siteId,
+        username,
+        authToken: previous?.authToken || randomBytes(24).toString('base64url'),
+        requestedBy: input.requestedBy
+      }, previous);
+      this.siteSlotAccessAccounts.set(account.accountId, account);
+      return account;
+    });
+    this.recordAudit({
+      eventType: 'config.site_slot_access_accounts.issued',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        siteId,
+        service: 'hysteria2',
+        accounts: accounts.map((account) => ({ username: account.username, role: account.role }))
+      }
+    });
+    return { site, accounts };
+  }
+
+  listSiteSlotAccessAccounts(siteId: string): SiteSlotAccessAccount[] {
+    return [...this.siteSlotAccessAccounts.values()]
+      .filter((account) => account.siteId === siteId)
+      .sort((a, b) => a.username.localeCompare(b.username));
+  }
+
+  getSiteSlotAccessAccount(siteId: string, username: string): SiteSlotAccessAccount | null {
+    return this.listSiteSlotAccessAccounts(siteId).find((account) => account.username === username) ?? null;
+  }
+
+  upsertLauncherNetworkMihomoSite(input: LauncherNetworkMihomoSiteInput): LauncherNetworkMihomoSite {
+    const siteId = input.siteId?.trim() || 'oversea-main';
+    const previous = this.launcherNetworkMihomoSites.get(siteId) ?? null;
+    const latestPlan = this.latestSiteSlotPlanForSite(siteId);
+    const site = buildLauncherNetworkMihomoSite(this.config, input, previous, latestPlan?.host ?? null);
+    this.launcherNetworkMihomoSites.set(site.siteId, site);
+    this.recordAudit({
+      eventType: 'launcher_network.mihomo_site.upserted',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        siteId: site.siteId,
+        publicHost: site.publicHost,
+        subscriptionBaseUrl: site.subscriptionBaseUrl,
+        reachability: site.reachability
+      }
+    });
+    return site;
+  }
+
+  getLauncherNetworkMihomoSite(siteId: string): LauncherNetworkMihomoSite | null {
+    return this.launcherNetworkMihomoSites.get(siteId) ?? null;
+  }
+
+  getLauncherNetworkMihomoReachability(siteId: string): LauncherNetworkReachabilityPlan | null {
+    const site = this.getLauncherNetworkMihomoSite(siteId);
+    if (!site) return null;
+    return buildLauncherNetworkReachabilityPlan(site, this.listSiteSlotAccessAccounts(siteId));
+  }
+
+  renderHysteria2MihomoSubscription(siteId: string, username: string): MihomoSubscriptionRender | null {
+    const site = this.getLauncherNetworkMihomoSite(siteId);
+    const account = this.getSiteSlotAccessAccount(siteId, username);
+    if (!site || !account || account.status !== 'active') return null;
+    return renderHysteria2MihomoSubscription(site, account);
+  }
+
   listRuntimeFeaturePolicies(featureKey?: string | null): RuntimeFeaturePolicy[] {
     return [...this.runtimeFeaturePolicies.values()]
       .filter((policy) => !featureKey || policy.featureKey === featureKey)
@@ -870,6 +978,37 @@ export class MemoryStore implements PlatformStore {
       }
     });
     return policy;
+  }
+
+  listAwxProviderConfigs(kind?: SiteSlotKind | 'all' | null): AwxProviderConfig[] {
+    return [...this.awxProviderConfigs.values()]
+      .filter((provider) => !kind || kind === 'all' || provider.defaultKind === kind || provider.defaultKind === 'all')
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  getAwxProviderConfig(providerId: string): AwxProviderConfig | null {
+    return this.awxProviderConfigs.get(providerId) ?? null;
+  }
+
+  upsertAwxProviderConfig(input: AwxProviderConfigInput): AwxProviderConfig {
+    const candidate = buildAwxProviderConfig(this.config, input, null);
+    const previous = this.awxProviderConfigs.get(candidate.providerId) ?? null;
+    const provider = buildAwxProviderConfig(this.config, input, previous);
+    this.awxProviderConfigs.set(provider.providerId, provider);
+    this.recordAudit({
+      eventType: 'config.awx_provider.upserted',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        providerId: provider.providerId,
+        status: provider.status,
+        defaultKind: provider.defaultKind,
+        baseUrl: provider.baseUrl,
+        organization: provider.organization,
+        project: provider.project
+      }
+    });
+    return provider;
   }
 
   private withSiteSlotSshProfile(input: SiteSlotPlanInput): SiteSlotPlanInput {
@@ -1135,6 +1274,12 @@ export class MemoryStore implements PlatformStore {
   createLauncherNetworkSnapshot(input: LauncherNetworkSnapshotInput): LauncherNetworkSnapshot {
     const mode = input.userId ? 'user' : 'guest';
     const leaseIp = mode === 'user' ? this.allocateUserLeaseIp() : this.allocateGuestLeaseIp();
+    const topology = buildLauncherNetworkTopology(this.config, {
+      mode,
+      leaseIp,
+      domesticSiteId: input.siteId,
+      publicKey: input.publicKey
+    });
     const issuedAt = new Date().toISOString();
     const unsigned = {
       environment: this.config.environment,
@@ -1144,6 +1289,7 @@ export class MemoryStore implements PlatformStore {
       userId: input.userId ?? null,
       mode,
       leaseIp,
+      topology,
       issuedAt
     };
     const digest = createHash('sha256').update(JSON.stringify(unsigned)).digest('hex');
@@ -1160,6 +1306,7 @@ export class MemoryStore implements PlatformStore {
         leaseIp,
         relayMode: 'h2i'
       },
+      topology,
       capabilities: {
         wireGuard: true,
         splitDns: true,
@@ -1194,6 +1341,7 @@ export class MemoryStore implements PlatformStore {
       metadata: {
         mode: snapshot.mode,
         cidr: snapshot.overlayPolicy.cidr,
+        topologyModel: snapshot.topology.model,
         capabilities: snapshot.capabilities
       }
     });
@@ -1477,11 +1625,16 @@ export class MemoryStore implements PlatformStore {
       throw new Error('SDK Gateway allowed a user without sdk.audit.write');
     }
     checks.push('OK SDK Gateway denied missing scope');
+    const smokeHomePublicKey = 'WvN2n3i6LXoJt1qX0lA2uP7cYy4rZs8mQb9dEfGhIjK=';
     const { enrollment } = this.enrollAnonymous({
       productId: 'h2o',
       platform: 'darwin',
+      publicKey: smokeHomePublicKey,
       requestId: 'smoke-enroll'
     });
+    if (enrollment.publicKey !== smokeHomePublicKey) {
+      throw new Error('anonymous enrollment did not preserve Home WG public key');
+    }
     checks.push('OK anonymous install enrolled');
     const principalContext = this.resolvePrincipalContext({
       installId: enrollment.installId,
@@ -1529,13 +1682,14 @@ export class MemoryStore implements PlatformStore {
       || overseaPrepareAccess?.mode !== 'artifact-push'
       || !overseaPrepareAccess?.commands.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-access-stack.tar.gz'))
       || !overseaPrepareAccess?.commands.some((command) => command.includes('scp -P') && command.includes('mx-oversea-access-stack.tar.gz'))
-      || !overseaPrepareAccess?.commands.some((command) => command.includes('/opt/mx/releases/oversea-access-stack/<release-revision>'))
-      || !overseaConfigureAccess?.commands.some((command) => command.includes('HY2_EXPORT_PASSWORD_HASH=<caddy-bcrypt-hash-from-internal-secret>'))
+      || !overseaPrepareAccess?.commands.some((command) => command.includes('/opt/mx/releases/oversea-access-stack/__release_revision__'))
+      || !overseaConfigureAccess?.commands.some((command) => command.includes('HY2_EXPORT_BASE_URL=http://oversea.example.com:3434') && command.includes('HY2_EXPORT_USER=download') && command.includes('HY2_EXPORT_PASSWORD_HASH='))
       || !overseaConfigureAccess?.commands.some((command) => command.includes('HY2_MIHOMO_ROUTING_MODE=cn-direct') && command.includes('HY2_RESERVED_INTERNAL_CIDRS=10.88.0.0/16,10.89.0.0/16,10.90.0.0/16,10.91.0.0/16') && command.includes('HY2_DOMESTIC_GATEWAY_IP=10.88.0.1'))
       || !overseaConfigureAccess?.commands.some((command) => command.includes('base64 -d') && command.includes('tunnel-state.json'))
       || !overseaConfigureAccess?.commands.some((command) => command.includes('reconcile-from-json') && command.includes('--mode hysteria2-only'))
       || !overseaConfigureAccess?.commands.some((command) => command.includes('@qpjoy/tunnel-cli') || command.includes('qp-tunnel-cli register'))
-      || !overseaPublishSubscription?.commands.some((command) => command.includes('domesticBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/domestic-bootstrap.yaml'))
+      || !overseaPublishSubscription?.commands.some((command) => command.includes('domesticBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/oversea-sg-1-domestic.yaml'))
+      || !overseaPublishSubscription?.commands.some((command) => command.includes('internalBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/oversea-sg-1-internal.yaml'))
       || overseaDeployServices?.mode !== 'artifact-push'
       || !overseaDeployServices?.commands.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-services.tar.gz'))
       || !overseaDeployServices?.commands.some((command) => command.includes('/opt/mx/incoming/mx-oversea-services.tar.gz'))
@@ -1545,6 +1699,39 @@ export class MemoryStore implements PlatformStore {
       throw new Error('Oversea slot plan did not include access stack');
     }
     checks.push('OK Oversea slot plan generated');
+    const overseaAccounts = this.issueSiteSlotAccessAccounts({
+      siteId: overseaSlotPlan.siteId,
+      publicHost: overseaSlotPlan.host,
+      serverPorts: '51288',
+      issueDefaults: true,
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-oversea-access-accounts'
+    });
+    const overseaDomesticSubscription = this.renderHysteria2MihomoSubscription(
+      overseaSlotPlan.siteId,
+      'oversea-sg-1-domestic'
+    );
+    if (
+      overseaAccounts.site.reachability.domesticWgRelayRequired !== true
+      || !overseaAccounts.accounts.some((account) => account.username === 'oversea-sg-1-internal09')
+      || !overseaDomesticSubscription?.yaml.includes('type: hysteria2')
+      || !overseaDomesticSubscription.yaml.includes('GEOIP,CN,DIRECT')
+      || !overseaDomesticSubscription.reachability.h2iRequired
+    ) {
+      throw new Error('Internal mihomo subscription authority was not issued for Oversea slot');
+    }
+    checks.push('OK Internal mihomo subscription issued');
+    const overseaReachability = this.getLauncherNetworkMihomoReachability(overseaSlotPlan.siteId);
+    if (
+      overseaReachability?.verdict !== 'h-endpoint-blocked'
+      || overseaReachability.currentBoundary !== 'internal-only'
+      || !overseaReachability.stages.some((stage) => stage.stageId === 'domestic-wg-relay' && stage.status === 'blocked')
+      || !overseaReachability.stages.some((stage) => stage.stageId === 'h2i-internal-dns' && stage.status === 'blocked')
+      || !overseaReachability.executionOrder.some((step) => step.includes('Domestic WG/H2I'))
+    ) {
+      throw new Error('Launcher Network reachability ordering did not preserve Domestic/H2I gates');
+    }
+    checks.push('OK Launcher Network reachability ordering gated');
     const domesticSlotPlan = this.createSiteSlotPlan({
       kind: 'domestic',
       siteId: 'domestic-main',
@@ -1559,14 +1746,21 @@ export class MemoryStore implements PlatformStore {
       requestId: 'smoke-domestic-slot'
     });
     const domesticPackageArtifacts = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'package-slot-artifacts');
+    const domesticRelayAuthority = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'prepare-domestic-relay-authority');
     const domesticResolveSubscription = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'resolve-domestic-bootstrap-subscription');
     const domesticBootstrapEgress = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'bootstrap-domestic-egress');
+    const domesticWireGuardInstall = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'install-host-wireguard');
     if (
       domesticSlotPlan.network.mode !== 'oversea-assisted'
       || domesticSlotPlan.network.qpTunnelCliMode !== 'server-on'
       || !domesticSlotPlan.services.hostServices.includes('wg-quick@mx-domestic')
       || !domesticPackageArtifacts?.commands.some((command) => command.includes('qp-tunnel-cli-offline-fallback'))
       || !domesticPackageArtifacts?.commands.some((command) => command.includes('refresh-tunnel-cli latest'))
+      || domesticRelayAuthority?.mode !== 'admin-action'
+      || !domesticRelayAuthority?.commands.some((command) => command.includes('Domestic WG gateway=10.88.0.1') && command.includes('Internal service peer=10.90.0.10'))
+      || !domesticRelayAuthority?.commands.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('10.90.0.0/16'))
+      || !domesticRelayAuthority?.commands.some((command) => command.includes('mx-internal-service-peer.conf') && command.includes('never copy the Internal private key to Domestic'))
+      || !domesticRelayAuthority?.commands.some((command) => command.includes('Internal has no public ingress'))
       || domesticResolveSubscription?.mode !== 'admin-action'
       || !domesticResolveSubscription?.commands.some((command) => command.includes('domesticBootstrapSubscription'))
       || !domesticResolveSubscription?.commands.some((command) => command.includes('do not ask Domestic to npm install'))
@@ -1574,6 +1768,10 @@ export class MemoryStore implements PlatformStore {
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('npm i -g @qpjoy/tunnel-cli'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('mx-domestic-qp-tunnel-cli-fallback.tar.gz'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('server-on'))
+      || !domesticWireGuardInstall?.commands.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))
+      || !domesticWireGuardInstall?.commands.some((command) => command.includes('mx-domestic-relay.env'))
+      || !domesticWireGuardInstall?.commands.some((command) => command.includes('internal service peer private key must not be copied to Domestic'))
+      || domesticWireGuardInstall?.commands.some((command) => command.includes('rsync') && command.includes('mx-internal-service-peer.conf'))
       || domesticBootstrapEgress?.commands.some((command) => command.includes('tun-on'))
     ) {
       throw new Error('Domestic slot plan did not model host WireGuard and Oversea-assisted bootstrap');
@@ -1628,11 +1826,14 @@ export class MemoryStore implements PlatformStore {
     });
     if (
       domesticSlotRemoteRunnerSession.status !== 'blocked'
-      || !domesticSlotRemoteRunnerSession.warnings.some((warning) => warning.includes('SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED'))
+      || !domesticSlotRemoteRunnerSession.warnings.some((warning) => (
+        warning.includes('SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED')
+        || warning.includes('remote-ssh requires confirmRemoteExecution=true')
+      ))
     ) {
       throw new Error('Domestic slot remote runner session was not blocked by remote execution gate');
     }
-    checks.push('OK Domestic slot remote runner gate blocked by default');
+    checks.push('OK Domestic slot remote runner gate blocked without confirmation');
     const domesticSlotWorkerJob = this.createSiteSlotWorkerJob({
       sessionId: domesticSlotPreflightRunnerSession.sessionId,
       workerId: 'worker-shadow-domestic',
@@ -1770,13 +1971,22 @@ export class MemoryStore implements PlatformStore {
     const networkSnapshot = this.createLauncherNetworkSnapshot({
       installId: enrollment.installId,
       deviceId: enrollment.deviceId,
+      publicKey: enrollment.publicKey,
       appId: 'h2o',
       requestId: 'smoke-network'
     });
-    if (networkSnapshot.overlayPolicy.cidr !== '10.91.0.0/16') {
-      throw new Error('guest network snapshot did not use 10.91.0.0/16');
+    if (
+      networkSnapshot.overlayPolicy.cidr !== '10.91.0.0/16'
+      || networkSnapshot.topology.relayPlan.homePeer.publicKey !== smokeHomePublicKey
+      || networkSnapshot.topology.relayPlan.homePeer.publicKeyStatus !== 'ready-to-append'
+      || networkSnapshot.topology.relayPlan.homePeer.allowedIps[0] !== `${networkSnapshot.overlayPolicy.leaseIp}/32`
+      || networkSnapshot.topology.relayPlan.internalServicePeer.privateKeyPlacement !== 'internal-only'
+      || networkSnapshot.topology.relayPlan.domesticRelay.configArtifact !== 'mx-domestic-wg-relay.conf'
+      || networkSnapshot.topology.relayPlan.routes.subscriptionReachability !== 'domestic-wg-relay+h2i-proxy'
+    ) {
+      throw new Error('guest network snapshot did not model Domestic relay peer lease');
     }
-    checks.push('OK guest network snapshot issued');
+    checks.push('OK guest network snapshot issued with Domestic relay lease');
     const permissionGrant = this.requestPermission({
       appId: 'h2o',
       installId: enrollment.installId,
@@ -1945,22 +2155,22 @@ export class MemoryStore implements PlatformStore {
     };
   }
 
-  private allocateOverlayIp(): string {
-    const host = this.nextOverlayHost;
-    this.nextOverlayHost += 1;
-    return `10.70.0.${host}`;
+  private latestSiteSlotPlanForSite(siteId: string): SiteSlotPlan | null {
+    return [...this.siteSlotPlans.values()]
+      .filter((plan) => plan.siteId === siteId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
   }
 
   private allocateGuestLeaseIp(): string {
     const host = this.nextGuestHost;
     this.nextGuestHost += 1;
-    return `10.91.0.${host}`;
+    return leaseIpFromSequence('10.91', host);
   }
 
   private allocateUserLeaseIp(): string {
     const host = this.nextUserHost;
     this.nextUserHost += 1;
-    return `10.89.0.${host}`;
+    return leaseIpFromSequence('10.89', host);
   }
 
   private registerBuiltinApps(): void {
@@ -2000,4 +2210,24 @@ export class MemoryStore implements PlatformStore {
   ): ConfigSnapshot {
     return createConfigSnapshot(this.config, enrollment, `cfgsnap_${randomUUID()}`, version, defaultMode);
   }
+}
+
+function leaseIpFromSequence(prefix: '10.89' | '10.91', sequence: number): string {
+  const capacity = 256 * 254;
+  const normalized = ((Math.max(1, Math.floor(sequence)) - 1) % capacity) + 1;
+  const thirdOctet = Math.floor((normalized - 1) / 254);
+  const fourthOctet = ((normalized - 1) % 254) + 1;
+  return `${prefix}.${thirdOctet}.${fourthOctet}`;
+}
+
+function resolveIssueAccountNames(input: SiteSlotAccessAccountIssueInput, siteId: string): string[] {
+  const requested = Array.isArray(input.accountNames)
+    ? input.accountNames
+    : typeof input.accountNames === 'string'
+      ? input.accountNames.split(',')
+      : [];
+  const names = (input.issueDefaults === false && requested.length > 0)
+    ? requested
+    : [...defaultSiteSlotAccessAccountNames(siteId), ...requested];
+  return [...new Set(names.map((name) => String(name).trim().toLowerCase()).filter(Boolean))];
 }

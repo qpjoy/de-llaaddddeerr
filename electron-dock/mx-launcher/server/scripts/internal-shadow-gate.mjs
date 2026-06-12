@@ -118,6 +118,9 @@ async function recordAdminApiStep() {
     const requiredActionIds = [
       'site-slot.worker-run.artifact-push-dry-run',
       'site-slot.worker-run.artifact-push-remote-ssh-plan',
+      'site-slot.worker-run.awx-sync-plan',
+      'site-slot.worker-run.awx-credential-sync',
+      'site-slot.worker-run.awx-object-sync',
       'site-slot.worker-run.remote-ssh-readonly-probe',
       'site-slot.worker-run.remote-ssh-execute'
     ];

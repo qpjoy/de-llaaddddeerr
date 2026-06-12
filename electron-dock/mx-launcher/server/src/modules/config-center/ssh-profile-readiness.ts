@@ -44,7 +44,7 @@ export async function buildSshProfileReadinessProbe(
   const execution = gateFailures.length > 0
     ? null
     : executionAllowed
-      ? await executeReadOnlyProbe(argv, profile.connectTimeoutSeconds ?? 10)
+      ? await executeReadOnlyProbe(argv, profile.connectTimeoutSeconds ?? 30)
       : null;
   const executionFailures = execution && execution.exitCode !== 0
     ? [`read-only SSH probe exited ${execution.exitCode}`]
@@ -113,6 +113,7 @@ function profileReadinessGateFailures(
     ...(profile.identityFile && !evidence.identityFileExists ? [`SSH identity file does not exist: ${profile.identityFile}`] : []),
     ...(!profile.knownHostsFile ? ['SSH known_hosts file is required'] : []),
     ...(profile.knownHostsFile && !evidence.knownHostsFileExists ? [`SSH known_hosts file does not exist: ${profile.knownHostsFile}`] : []),
+    ...(profile.sshConfigFile && !evidence.sshConfigFileExists ? [`SSH config file does not exist: ${profile.sshConfigFile}`] : []),
     ...(!profile.hostKeyAlias ? ['SSH host key alias is recommended before real probe'] : []),
     ...(profile.strictHostKeyChecking !== 'yes' ? ['StrictHostKeyChecking=yes is required for readiness'] : []),
     ...(profile.batchMode !== 'yes' ? ['BatchMode=yes is required for readiness'] : []),
@@ -189,6 +190,8 @@ function sshProfileEvidence(profile: SiteSlotSshProfile) {
     identityFileExists: profile.identityFile ? existsSync(profile.identityFile) : false,
     knownHostsFile: profile.knownHostsFile,
     knownHostsFileExists: profile.knownHostsFile ? existsSync(profile.knownHostsFile) : false,
+    sshConfigFile: profile.sshConfigFile,
+    sshConfigFileExists: profile.sshConfigFile ? existsSync(profile.sshConfigFile) : false,
     hostKeyAlias: profile.hostKeyAlias,
     strictHostKeyChecking: profile.strictHostKeyChecking,
     connectTimeoutSeconds: profile.connectTimeoutSeconds,
@@ -207,14 +210,27 @@ function readOnlyProbeCommand(profile: ReturnType<typeof sshProfileEvidence>): s
 function readOnlyProbeArgv(profile: ReturnType<typeof sshProfileEvidence>): string[] {
   const host = profile.host ?? '<host>';
   const user = profile.sshUser ?? 'root';
+  const configFile = internalSshConfigFile(profile);
   const args = [
+    '-F', configFile,
     '-o', `BatchMode=${profile.batchMode ?? 'yes'}`,
-    '-o', `ConnectTimeout=${profile.connectTimeoutSeconds ?? 10}`,
+    '-o', `ConnectTimeout=${profile.connectTimeoutSeconds ?? 30}`,
+    '-o', 'ConnectionAttempts=2',
+    '-o', 'AddressFamily=inet',
+    '-o', 'IPQoS=none',
+    '-o', 'ServerAliveInterval=5',
+    '-o', 'ServerAliveCountMax=2',
     '-o', `StrictHostKeyChecking=${profile.strictHostKeyChecking ?? 'yes'}`
   ];
+  if (internalSshUsesDefaultIsolatedConfig(profile)) {
+    args.push('-o', 'ProxyCommand=none', '-o', 'ProxyJump=none');
+  }
   if (profile.identityFile) args.push('-i', profile.identityFile);
   if (profile.knownHostsFile) args.push('-o', `UserKnownHostsFile=${profile.knownHostsFile}`);
-  if (profile.hostKeyAlias) args.push('-o', `HostKeyAlias=${profile.hostKeyAlias}`);
+  if (profile.hostKeyAlias) {
+    args.push('-o', `HostKeyAlias=${profile.hostKeyAlias}`);
+    args.push('-o', 'CheckHostIP=no');
+  }
   args.push('-p', String(profile.sshPort ?? 22), `${user}@${host}`, readOnlyProbeScript());
   return args;
 }
@@ -234,14 +250,37 @@ function readOnlyProbeScript(): string {
 
 function sshOptionFragment(profile: ReturnType<typeof sshProfileEvidence>): string {
   const parts = [
+    '-F', shellSingleQuote(internalSshConfigFile(profile)),
     '-o', shellSingleQuote(`BatchMode=${profile.batchMode ?? 'yes'}`),
-    '-o', shellSingleQuote(`ConnectTimeout=${profile.connectTimeoutSeconds ?? 10}`),
+    '-o', shellSingleQuote(`ConnectTimeout=${profile.connectTimeoutSeconds ?? 30}`),
+    '-o', shellSingleQuote('ConnectionAttempts=2'),
+    '-o', shellSingleQuote('AddressFamily=inet'),
+    '-o', shellSingleQuote('IPQoS=none'),
+    '-o', shellSingleQuote('ServerAliveInterval=5'),
+    '-o', shellSingleQuote('ServerAliveCountMax=2'),
     '-o', shellSingleQuote(`StrictHostKeyChecking=${profile.strictHostKeyChecking ?? 'yes'}`)
   ];
+  if (internalSshUsesDefaultIsolatedConfig(profile)) {
+    parts.push('-o', shellSingleQuote('ProxyCommand=none'), '-o', shellSingleQuote('ProxyJump=none'));
+  }
   if (profile.identityFile) parts.push('-i', shellSingleQuote(profile.identityFile));
   if (profile.knownHostsFile) parts.push('-o', shellSingleQuote(`UserKnownHostsFile=${profile.knownHostsFile}`));
-  if (profile.hostKeyAlias) parts.push('-o', shellSingleQuote(`HostKeyAlias=${profile.hostKeyAlias}`));
+  if (profile.hostKeyAlias) {
+    parts.push('-o', shellSingleQuote(`HostKeyAlias=${profile.hostKeyAlias}`));
+    parts.push('-o', shellSingleQuote('CheckHostIP=no'));
+  }
   return parts.join(' ');
+}
+
+function internalSshConfigFile(profile?: { sshConfigFile?: string | null }): string {
+  return profile?.sshConfigFile?.trim()
+    || process.env.MX_SITE_SLOT_SSH_CONFIG_FILE?.trim()
+    || process.env.SITE_SLOT_SSH_CONFIG_FILE?.trim()
+    || '/dev/null';
+}
+
+function internalSshUsesDefaultIsolatedConfig(profile?: { sshConfigFile?: string | null }): boolean {
+  return !profile?.sshConfigFile && !process.env.MX_SITE_SLOT_SSH_CONFIG_FILE && !process.env.SITE_SLOT_SSH_CONFIG_FILE;
 }
 
 async function executeReadOnlyProbe(args: string[], timeoutSeconds: number) {

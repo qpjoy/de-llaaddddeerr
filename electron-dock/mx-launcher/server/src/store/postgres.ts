@@ -10,6 +10,8 @@ import type {
   AppCenterApp,
   AuditEvent,
   AuditEventInput,
+  AwxProviderConfig,
+  AwxProviderConfigInput,
   ConfigPolicySnapshot,
   ConfigPolicySnapshotInput,
   ConfigSnapshot,
@@ -29,7 +31,11 @@ import type {
   IssueTokenInput,
   LauncherNetworkSnapshot,
   LauncherNetworkSnapshotInput,
+  LauncherNetworkMihomoSite,
+  LauncherNetworkMihomoSiteInput,
+  LauncherNetworkReachabilityPlan,
   LogEntryInput,
+  MihomoSubscriptionRender,
   PermissionGrant,
   PermissionRequestInput,
   PrincipalContext,
@@ -48,8 +54,12 @@ import type {
   SdkGatewayAccessInput,
   SdkGatewayManifest,
   SiteHeartbeat,
+  SiteSlotKind,
   SiteSlotExecutionInput,
   SiteSlotExecutionRun,
+  SiteSlotAccessAccount,
+  SiteSlotAccessAccountIssueInput,
+  SiteSlotAccessAccountIssueResult,
   SiteSlotPlan,
   SiteSlotPlanInput,
   SiteSlotRollbackExecution,
@@ -84,8 +94,13 @@ import type {
 } from '../types.js';
 import {
   builtinAppCenterApps,
+  buildAwxProviderConfig,
   buildReleaseManagementPlan,
   buildRuntimeFeaturePolicy,
+  buildLauncherNetworkMihomoSite,
+  buildLauncherNetworkTopology,
+  buildLauncherNetworkReachabilityPlan,
+  buildSiteSlotAccessAccount,
   buildSiteSlotExecutionRun,
   buildSiteSlotPlan,
   buildSiteSlotRunnerSession,
@@ -106,6 +121,7 @@ import {
   createConfigPolicySnapshot,
   createConfigSnapshot,
   createSdkGatewayManifest,
+  defaultSiteSlotAccessAccountNames,
   createServiceAccountPrincipalFromRecord,
   createUserCenterServiceAccount,
   createUserCenterTokenRecord,
@@ -120,6 +136,7 @@ import {
   normalizeTestStatus,
   normalizeUpdatePolicy,
   releasePolicyByKind,
+  renderHysteria2MihomoSubscription,
   renderCoreDnsConfigMap,
   resolvePrincipalContext,
   required
@@ -154,7 +171,10 @@ type RecordKind =
   | 'site-slot-rollback-execution'
   | 'site-slot-rollback-report'
   | 'site-slot-ssh-profile'
+  | 'site-slot-access-account'
+  | 'launcher-network-mihomo-site'
   | 'runtime-feature-policy'
+  | 'awx-provider-config'
   | 'app-center-app'
   | 'permission-grant'
   | 'launcher-network-snapshot'
@@ -163,7 +183,7 @@ type RecordKind =
   | 'audit-event'
   | 'log-entry';
 
-type SequenceName = 'mx_overlay_ip_seq' | 'mx_guest_ip_seq' | 'mx_user_ip_seq';
+type SequenceName = 'mx_guest_ip_seq' | 'mx_user_ip_seq';
 
 export class PostgresStore implements PlatformStore {
   private constructor(
@@ -199,6 +219,7 @@ export class PostgresStore implements PlatformStore {
       siteSlotWorkerReports,
       siteSlotRollbackExecutions,
       siteSlotRollbackReports,
+      awxProviderConfigs,
       dnsPolicies,
       dnsReverseProxyRoutes,
       dnsZoneSnapshots,
@@ -225,6 +246,7 @@ export class PostgresStore implements PlatformStore {
       this.countRecords('site-slot-worker-report'),
       this.countRecords('site-slot-rollback-execution'),
       this.countRecords('site-slot-rollback-report'),
+      this.countRecords('awx-provider-config'),
       this.countRecords('dns-policy'),
       this.countRecords('dns-reverse-proxy-route'),
       this.countRecords('dns-zone-snapshot'),
@@ -257,6 +279,7 @@ export class PostgresStore implements PlatformStore {
       siteSlotWorkerReports,
       siteSlotRollbackExecutions,
       siteSlotRollbackReports,
+      awxProviderConfigs,
       dnsPolicies,
       dnsReverseProxyRoutes,
       dnsZoneSnapshots,
@@ -569,8 +592,9 @@ export class PostgresStore implements PlatformStore {
       productId,
       siteId,
       environment: this.config.environment,
-      overlayIp: await this.allocateOverlayIp(),
+      overlayIp: await this.allocateGuestLeaseIp(),
       relayMode: input.relayMode?.trim() || 'h2i',
+      publicKey: input.publicKey?.trim() || null,
       createdAt: now,
       userId: null
     };
@@ -607,6 +631,9 @@ export class PostgresStore implements PlatformStore {
       throw new Error(`Unknown installId: ${input.installId}`);
     }
     enrollment.userId = input.userId;
+    if (!enrollment.overlayIp.startsWith('10.89.')) {
+      enrollment.overlayIp = await this.allocateUserLeaseIp();
+    }
     const previous = await this.getRecord<ConfigSnapshot>('config-snapshot', input.installId);
     const nextVersion = (previous?.version ?? 1) + 1;
     const snapshot = this.createSnapshot(enrollment, nextVersion, 'employee');
@@ -836,7 +863,9 @@ export class PostgresStore implements PlatformStore {
     const launcherNetwork = await this.createLauncherNetworkSnapshot({
       installId: enrollment?.installId ?? input.installId ?? undefined,
       deviceId: enrollment?.deviceId ?? input.deviceId ?? undefined,
+      siteId: enrollment?.siteId ?? undefined,
       userId: principalContext.principal.userId ?? enrollment?.userId ?? input.userId ?? null,
+      publicKey: enrollment?.publicKey ?? null,
       appId,
       requestId: input.requestId ?? undefined
     });
@@ -930,6 +959,90 @@ export class PostgresStore implements PlatformStore {
     return profile;
   }
 
+  async issueSiteSlotAccessAccounts(input: SiteSlotAccessAccountIssueInput): Promise<SiteSlotAccessAccountIssueResult> {
+    const siteId = input.siteId?.trim() || 'oversea-main';
+    const site = await this.upsertLauncherNetworkMihomoSite({
+      siteId,
+      publicHost: input.publicHost,
+      serverPorts: input.serverPorts,
+      requestedBy: input.requestedBy,
+      requestId: input.requestId
+    });
+    const accountNames = resolveIssueAccountNames(input, siteId);
+    const accounts: SiteSlotAccessAccount[] = [];
+    for (const username of accountNames) {
+      const accountId = `slotacct_${siteId}_${username}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const previous = await this.getRecord<SiteSlotAccessAccount>('site-slot-access-account', accountId);
+      const account = buildSiteSlotAccessAccount(this.config, {
+        siteId,
+        username,
+        authToken: previous?.authToken || randomBytes(24).toString('base64url'),
+        requestedBy: input.requestedBy
+      }, previous);
+      await this.saveRecord('site-slot-access-account', account.accountId, account, account.siteId);
+      accounts.push(account);
+    }
+    await this.recordAudit({
+      eventType: 'config.site_slot_access_accounts.issued',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        siteId,
+        service: 'hysteria2',
+        accounts: accounts.map((account) => ({ username: account.username, role: account.role }))
+      }
+    });
+    return { site, accounts };
+  }
+
+  async listSiteSlotAccessAccounts(siteId: string): Promise<SiteSlotAccessAccount[]> {
+    return (await this.listRecords<SiteSlotAccessAccount>('site-slot-access-account'))
+      .filter((account) => account.siteId === siteId)
+      .sort((a, b) => a.username.localeCompare(b.username));
+  }
+
+  async getSiteSlotAccessAccount(siteId: string, username: string): Promise<SiteSlotAccessAccount | null> {
+    const accounts = await this.listSiteSlotAccessAccounts(siteId);
+    return accounts.find((account) => account.username === username) ?? null;
+  }
+
+  async upsertLauncherNetworkMihomoSite(input: LauncherNetworkMihomoSiteInput): Promise<LauncherNetworkMihomoSite> {
+    const siteId = input.siteId?.trim() || 'oversea-main';
+    const previous = await this.getLauncherNetworkMihomoSite(siteId);
+    const latestPlan = await this.latestSiteSlotPlanForSite(siteId);
+    const site = buildLauncherNetworkMihomoSite(this.config, input, previous, latestPlan?.host ?? null);
+    await this.saveRecord('launcher-network-mihomo-site', site.siteId, site, site.siteId);
+    await this.recordAudit({
+      eventType: 'launcher_network.mihomo_site.upserted',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        siteId: site.siteId,
+        publicHost: site.publicHost,
+        subscriptionBaseUrl: site.subscriptionBaseUrl,
+        reachability: site.reachability
+      }
+    });
+    return site;
+  }
+
+  async getLauncherNetworkMihomoSite(siteId: string): Promise<LauncherNetworkMihomoSite | null> {
+    return this.getRecord<LauncherNetworkMihomoSite>('launcher-network-mihomo-site', siteId);
+  }
+
+  async getLauncherNetworkMihomoReachability(siteId: string): Promise<LauncherNetworkReachabilityPlan | null> {
+    const site = await this.getLauncherNetworkMihomoSite(siteId);
+    if (!site) return null;
+    return buildLauncherNetworkReachabilityPlan(site, await this.listSiteSlotAccessAccounts(siteId));
+  }
+
+  async renderHysteria2MihomoSubscription(siteId: string, username: string): Promise<MihomoSubscriptionRender | null> {
+    const site = await this.getLauncherNetworkMihomoSite(siteId);
+    const account = await this.getSiteSlotAccessAccount(siteId, username);
+    if (!site || !account || account.status !== 'active') return null;
+    return renderHysteria2MihomoSubscription(site, account);
+  }
+
   async listRuntimeFeaturePolicies(featureKey?: string | null): Promise<RuntimeFeaturePolicy[]> {
     const policies = await this.listRecords<RuntimeFeaturePolicy>('runtime-feature-policy');
     return policies
@@ -961,6 +1074,38 @@ export class PostgresStore implements PlatformStore {
       }
     });
     return policy;
+  }
+
+  async listAwxProviderConfigs(kind?: SiteSlotKind | 'all' | null): Promise<AwxProviderConfig[]> {
+    const providers = await this.listRecords<AwxProviderConfig>('awx-provider-config');
+    return providers
+      .filter((provider) => !kind || kind === 'all' || provider.defaultKind === kind || provider.defaultKind === 'all')
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  async getAwxProviderConfig(providerId: string): Promise<AwxProviderConfig | null> {
+    return this.getRecord<AwxProviderConfig>('awx-provider-config', providerId);
+  }
+
+  async upsertAwxProviderConfig(input: AwxProviderConfigInput): Promise<AwxProviderConfig> {
+    const candidate = buildAwxProviderConfig(this.config, input, null);
+    const previous = await this.getAwxProviderConfig(candidate.providerId);
+    const provider = buildAwxProviderConfig(this.config, input, previous);
+    await this.saveRecord('awx-provider-config', provider.providerId, provider, this.config.siteId);
+    await this.recordAudit({
+      eventType: 'config.awx_provider.upserted',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        providerId: provider.providerId,
+        status: provider.status,
+        defaultKind: provider.defaultKind,
+        baseUrl: provider.baseUrl,
+        organization: provider.organization,
+        project: provider.project
+      }
+    });
+    return provider;
   }
 
   private async withSiteSlotSshProfile(input: SiteSlotPlanInput): Promise<SiteSlotPlanInput> {
@@ -1230,6 +1375,12 @@ export class PostgresStore implements PlatformStore {
   async createLauncherNetworkSnapshot(input: LauncherNetworkSnapshotInput): Promise<LauncherNetworkSnapshot> {
     const mode = input.userId ? 'user' : 'guest';
     const leaseIp = mode === 'user' ? await this.allocateUserLeaseIp() : await this.allocateGuestLeaseIp();
+    const topology = buildLauncherNetworkTopology(this.config, {
+      mode,
+      leaseIp,
+      domesticSiteId: input.siteId,
+      publicKey: input.publicKey
+    });
     const issuedAt = new Date().toISOString();
     const unsigned = {
       environment: this.config.environment,
@@ -1239,6 +1390,7 @@ export class PostgresStore implements PlatformStore {
       userId: input.userId ?? null,
       mode,
       leaseIp,
+      topology,
       issuedAt
     };
     const digest = createHash('sha256').update(JSON.stringify(unsigned)).digest('hex');
@@ -1255,6 +1407,7 @@ export class PostgresStore implements PlatformStore {
         leaseIp,
         relayMode: 'h2i'
       },
+      topology,
       capabilities: {
         wireGuard: true,
         splitDns: true,
@@ -1290,6 +1443,7 @@ export class PostgresStore implements PlatformStore {
       metadata: {
         mode: snapshot.mode,
         cidr: snapshot.overlayPolicy.cidr,
+        topologyModel: snapshot.topology.model,
         capabilities: snapshot.capabilities
       }
     });
@@ -1584,11 +1738,16 @@ export class PostgresStore implements PlatformStore {
       throw new Error('SDK Gateway allowed a user without sdk.audit.write');
     }
     checks.push('OK SDK Gateway denied missing scope');
+    const smokeHomePublicKey = 'WvN2n3i6LXoJt1qX0lA2uP7cYy4rZs8mQb9dEfGhIjK=';
     const { enrollment } = await this.enrollAnonymous({
       productId: 'h2o',
       platform: 'darwin',
+      publicKey: smokeHomePublicKey,
       requestId: 'smoke-enroll'
     });
+    if (enrollment.publicKey !== smokeHomePublicKey) {
+      throw new Error('anonymous enrollment did not preserve Home WG public key');
+    }
     checks.push('OK anonymous install enrolled');
     const principalContext = await this.resolvePrincipalContext({
       installId: enrollment.installId,
@@ -1636,13 +1795,14 @@ export class PostgresStore implements PlatformStore {
       || overseaPrepareAccess?.mode !== 'artifact-push'
       || !overseaPrepareAccess?.commands.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-access-stack.tar.gz'))
       || !overseaPrepareAccess?.commands.some((command) => command.includes('scp -P') && command.includes('mx-oversea-access-stack.tar.gz'))
-      || !overseaPrepareAccess?.commands.some((command) => command.includes('/opt/mx/releases/oversea-access-stack/<release-revision>'))
-      || !overseaConfigureAccess?.commands.some((command) => command.includes('HY2_EXPORT_PASSWORD_HASH=<caddy-bcrypt-hash-from-internal-secret>'))
+      || !overseaPrepareAccess?.commands.some((command) => command.includes('/opt/mx/releases/oversea-access-stack/__release_revision__'))
+      || !overseaConfigureAccess?.commands.some((command) => command.includes('HY2_EXPORT_BASE_URL=http://oversea.example.com:3434') && command.includes('HY2_EXPORT_USER=download') && command.includes('HY2_EXPORT_PASSWORD_HASH='))
       || !overseaConfigureAccess?.commands.some((command) => command.includes('HY2_MIHOMO_ROUTING_MODE=cn-direct') && command.includes('HY2_RESERVED_INTERNAL_CIDRS=10.88.0.0/16,10.89.0.0/16,10.90.0.0/16,10.91.0.0/16') && command.includes('HY2_DOMESTIC_GATEWAY_IP=10.88.0.1'))
       || !overseaConfigureAccess?.commands.some((command) => command.includes('base64 -d') && command.includes('tunnel-state.json'))
       || !overseaConfigureAccess?.commands.some((command) => command.includes('reconcile-from-json') && command.includes('--mode hysteria2-only'))
       || !overseaConfigureAccess?.commands.some((command) => command.includes('@qpjoy/tunnel-cli') || command.includes('qp-tunnel-cli register'))
-      || !overseaPublishSubscription?.commands.some((command) => command.includes('domesticBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/domestic-bootstrap.yaml'))
+      || !overseaPublishSubscription?.commands.some((command) => command.includes('domesticBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/oversea-sg-1-domestic.yaml'))
+      || !overseaPublishSubscription?.commands.some((command) => command.includes('internalBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/oversea-sg-1-internal.yaml'))
       || overseaDeployServices?.mode !== 'artifact-push'
       || !overseaDeployServices?.commands.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-services.tar.gz'))
       || !overseaDeployServices?.commands.some((command) => command.includes('/opt/mx/incoming/mx-oversea-services.tar.gz'))
@@ -1652,6 +1812,39 @@ export class PostgresStore implements PlatformStore {
       throw new Error('Oversea slot plan did not include access stack');
     }
     checks.push('OK Oversea slot plan generated');
+    const overseaAccounts = await this.issueSiteSlotAccessAccounts({
+      siteId: overseaSlotPlan.siteId,
+      publicHost: overseaSlotPlan.host,
+      serverPorts: '51288',
+      issueDefaults: true,
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-oversea-access-accounts'
+    });
+    const overseaDomesticSubscription = await this.renderHysteria2MihomoSubscription(
+      overseaSlotPlan.siteId,
+      'oversea-sg-1-domestic'
+    );
+    if (
+      overseaAccounts.site.reachability.domesticWgRelayRequired !== true
+      || !overseaAccounts.accounts.some((account) => account.username === 'oversea-sg-1-internal09')
+      || !overseaDomesticSubscription?.yaml.includes('type: hysteria2')
+      || !overseaDomesticSubscription.yaml.includes('GEOIP,CN,DIRECT')
+      || !overseaDomesticSubscription.reachability.h2iRequired
+    ) {
+      throw new Error('Internal mihomo subscription authority was not issued for Oversea slot');
+    }
+    checks.push('OK Internal mihomo subscription issued');
+    const overseaReachability = await this.getLauncherNetworkMihomoReachability(overseaSlotPlan.siteId);
+    if (
+      overseaReachability?.verdict !== 'h-endpoint-blocked'
+      || overseaReachability.currentBoundary !== 'internal-only'
+      || !overseaReachability.stages.some((stage) => stage.stageId === 'domestic-wg-relay' && stage.status === 'blocked')
+      || !overseaReachability.stages.some((stage) => stage.stageId === 'h2i-internal-dns' && stage.status === 'blocked')
+      || !overseaReachability.executionOrder.some((step) => step.includes('Domestic WG/H2I'))
+    ) {
+      throw new Error('Launcher Network reachability ordering did not preserve Domestic/H2I gates');
+    }
+    checks.push('OK Launcher Network reachability ordering gated');
     const domesticSlotPlan = await this.createSiteSlotPlan({
       kind: 'domestic',
       siteId: 'domestic-main',
@@ -1666,14 +1859,21 @@ export class PostgresStore implements PlatformStore {
       requestId: 'smoke-domestic-slot'
     });
     const domesticPackageArtifacts = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'package-slot-artifacts');
+    const domesticRelayAuthority = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'prepare-domestic-relay-authority');
     const domesticResolveSubscription = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'resolve-domestic-bootstrap-subscription');
     const domesticBootstrapEgress = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'bootstrap-domestic-egress');
+    const domesticWireGuardInstall = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'install-host-wireguard');
     if (
       domesticSlotPlan.network.mode !== 'oversea-assisted'
       || domesticSlotPlan.network.qpTunnelCliMode !== 'server-on'
       || !domesticSlotPlan.services.hostServices.includes('wg-quick@mx-domestic')
       || !domesticPackageArtifacts?.commands.some((command) => command.includes('qp-tunnel-cli-offline-fallback'))
       || !domesticPackageArtifacts?.commands.some((command) => command.includes('refresh-tunnel-cli latest'))
+      || domesticRelayAuthority?.mode !== 'admin-action'
+      || !domesticRelayAuthority?.commands.some((command) => command.includes('Domestic WG gateway=10.88.0.1') && command.includes('Internal service peer=10.90.0.10'))
+      || !domesticRelayAuthority?.commands.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('10.90.0.0/16'))
+      || !domesticRelayAuthority?.commands.some((command) => command.includes('mx-internal-service-peer.conf') && command.includes('never copy the Internal private key to Domestic'))
+      || !domesticRelayAuthority?.commands.some((command) => command.includes('Internal has no public ingress'))
       || domesticResolveSubscription?.mode !== 'admin-action'
       || !domesticResolveSubscription?.commands.some((command) => command.includes('domesticBootstrapSubscription'))
       || !domesticResolveSubscription?.commands.some((command) => command.includes('do not ask Domestic to npm install'))
@@ -1681,6 +1881,10 @@ export class PostgresStore implements PlatformStore {
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('npm i -g @qpjoy/tunnel-cli'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('mx-domestic-qp-tunnel-cli-fallback.tar.gz'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('server-on'))
+      || !domesticWireGuardInstall?.commands.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))
+      || !domesticWireGuardInstall?.commands.some((command) => command.includes('mx-domestic-relay.env'))
+      || !domesticWireGuardInstall?.commands.some((command) => command.includes('internal service peer private key must not be copied to Domestic'))
+      || domesticWireGuardInstall?.commands.some((command) => command.includes('rsync') && command.includes('mx-internal-service-peer.conf'))
       || domesticBootstrapEgress?.commands.some((command) => command.includes('tun-on'))
     ) {
       throw new Error('Domestic slot plan did not model host WireGuard and Oversea-assisted bootstrap');
@@ -1735,11 +1939,14 @@ export class PostgresStore implements PlatformStore {
     });
     if (
       domesticSlotRemoteRunnerSession.status !== 'blocked'
-      || !domesticSlotRemoteRunnerSession.warnings.some((warning) => warning.includes('SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED'))
+      || !domesticSlotRemoteRunnerSession.warnings.some((warning) => (
+        warning.includes('SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED')
+        || warning.includes('remote-ssh requires confirmRemoteExecution=true')
+      ))
     ) {
       throw new Error('Domestic slot remote runner session was not blocked by remote execution gate');
     }
-    checks.push('OK Domestic slot remote runner gate blocked by default');
+    checks.push('OK Domestic slot remote runner gate blocked without confirmation');
     const domesticSlotWorkerJob = await this.createSiteSlotWorkerJob({
       sessionId: domesticSlotPreflightRunnerSession.sessionId,
       workerId: 'worker-shadow-domestic',
@@ -1877,13 +2084,22 @@ export class PostgresStore implements PlatformStore {
     const networkSnapshot = await this.createLauncherNetworkSnapshot({
       installId: enrollment.installId,
       deviceId: enrollment.deviceId,
+      publicKey: enrollment.publicKey,
       appId: 'h2o',
       requestId: 'smoke-network'
     });
-    if (networkSnapshot.overlayPolicy.cidr !== '10.91.0.0/16') {
-      throw new Error('guest network snapshot did not use 10.91.0.0/16');
+    if (
+      networkSnapshot.overlayPolicy.cidr !== '10.91.0.0/16'
+      || networkSnapshot.topology.relayPlan.homePeer.publicKey !== smokeHomePublicKey
+      || networkSnapshot.topology.relayPlan.homePeer.publicKeyStatus !== 'ready-to-append'
+      || networkSnapshot.topology.relayPlan.homePeer.allowedIps[0] !== `${networkSnapshot.overlayPolicy.leaseIp}/32`
+      || networkSnapshot.topology.relayPlan.internalServicePeer.privateKeyPlacement !== 'internal-only'
+      || networkSnapshot.topology.relayPlan.domesticRelay.configArtifact !== 'mx-domestic-wg-relay.conf'
+      || networkSnapshot.topology.relayPlan.routes.subscriptionReachability !== 'domestic-wg-relay+h2i-proxy'
+    ) {
+      throw new Error('guest network snapshot did not model Domestic relay peer lease');
     }
-    checks.push('OK guest network snapshot issued');
+    checks.push('OK guest network snapshot issued with Domestic relay lease');
     const permissionGrant = await this.requestPermission({
       appId: 'h2o',
       installId: enrollment.installId,
@@ -2077,16 +2293,12 @@ export class PostgresStore implements PlatformStore {
     return createConfigSnapshot(this.config, enrollment, `cfgsnap_${randomUUID()}`, version, defaultMode);
   }
 
-  private async allocateOverlayIp(): Promise<string> {
-    return `10.70.0.${await this.nextSequenceValue('mx_overlay_ip_seq')}`;
-  }
-
   private async allocateGuestLeaseIp(): Promise<string> {
-    return `10.91.0.${await this.nextSequenceValue('mx_guest_ip_seq')}`;
+    return leaseIpFromSequence('10.91', await this.nextSequenceValue('mx_guest_ip_seq'));
   }
 
   private async allocateUserLeaseIp(): Promise<string> {
-    return `10.89.0.${await this.nextSequenceValue('mx_user_ip_seq')}`;
+    return leaseIpFromSequence('10.89', await this.nextSequenceValue('mx_user_ip_seq'));
   }
 
   private async nextSequenceValue(sequenceName: SequenceName): Promise<number> {
@@ -2152,6 +2364,11 @@ export class PostgresStore implements PlatformStore {
     return data;
   }
 
+  private async latestSiteSlotPlanForSite(siteId: string): Promise<SiteSlotPlan | null> {
+    const plans = await this.listSiteSlotPlans();
+    return plans.find((plan) => plan.siteId === siteId) ?? null;
+  }
+
   private async principalForSubject(
     subjectKind: UserCenterTokenRecord['subjectKind'],
     subjectId: string
@@ -2166,4 +2383,24 @@ export class PostgresStore implements PlatformStore {
       ? createServiceAccountPrincipalFromRecord(serviceAccount, roles)
       : null;
   }
+}
+
+function leaseIpFromSequence(prefix: '10.89' | '10.91', sequence: number): string {
+  const capacity = 256 * 254;
+  const normalized = ((Math.max(1, Math.floor(sequence)) - 1) % capacity) + 1;
+  const thirdOctet = Math.floor((normalized - 1) / 254);
+  const fourthOctet = ((normalized - 1) % 254) + 1;
+  return `${prefix}.${thirdOctet}.${fourthOctet}`;
+}
+
+function resolveIssueAccountNames(input: SiteSlotAccessAccountIssueInput, siteId: string): string[] {
+  const requested = Array.isArray(input.accountNames)
+    ? input.accountNames
+    : typeof input.accountNames === 'string'
+      ? input.accountNames.split(',')
+      : [];
+  const names = (input.issueDefaults === false && requested.length > 0)
+    ? requested
+    : [...defaultSiteSlotAccessAccountNames(siteId), ...requested];
+  return [...new Set(names.map((name) => String(name).trim().toLowerCase()).filter(Boolean))];
 }

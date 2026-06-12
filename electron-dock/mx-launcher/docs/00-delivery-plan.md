@@ -232,3 +232,40 @@ bash electron-dock/mx-launcher/scripts/manage.sh profile domestic
 Exit criteria: future AppCenter apps can be added through manifests and runtime
 protocols without changing Launcher Shell or creating separate privileged
 network owners for ordinary product changes.
+
+## Phase 9 - Platform Operations and MX Console Design System
+
+Goal: turn Internal from a shadow control plane into an operations platform that
+uses mature K8s ecosystem capabilities while keeping MX as the source of truth.
+
+Deliverables:
+
+- AWX is introduced as an execution provider behind Worker Contract V1, not as a
+  replacement for Internal state, RBAC, gates, evidence, or release truth.
+- K8s ecosystem adoption is planned around GitOps, observability, secrets,
+  certificates, policy, backup, artifact storage, and optional workflow engines.
+- Config Center remains backed by Internal PostgreSQL; etcd is used only through
+  Kubernetes APIs such as ConfigMap, Secret, Lease, CRD, and watch projections.
+- Domestic and Oversea slot execution gains a Linux support contract for Ubuntu
+  and CentOS / RHEL-family hosts, including OS preflight, package manager
+  branching, firewall/security module detection, container runtime checks, and
+  rollback evidence.
+- Admin UI gets an MX Console design system: deep editor shell, Three.js
+  topology stage, action gates, inspector panels, evidence drawer, command
+  console, status tokens, and shared components.
+- shadcn/ui is the preferred basis for the future Admin component library if the
+  Admin surface moves to React; Quasar remains an option only if the Admin stack
+  deliberately moves to Vue.
+
+Checks:
+
+```bash
+bash electron-dock/mx-launcher/scripts/manage.sh check
+bash electron-dock/mx-launcher/scripts/manage.sh k8s explain internal-shadow
+bash electron-dock/mx-launcher/scripts/manage.sh ops admin dashboard
+```
+
+Exit criteria: platform operators can plan a Domestic/Oversea change from MX
+Admin, execute it through a provider such as AWX or the fallback runner, and
+inspect OS support, gates, logs, traces, task evidence, and rollback hints in a
+single MX Console experience.

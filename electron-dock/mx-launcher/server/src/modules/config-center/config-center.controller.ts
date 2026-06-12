@@ -4,14 +4,20 @@ import { asRecord, nullableString } from '../../lib/http.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE, RUNTIME_CONFIG } from '../../tokens.js';
 import type {
+  AwxProviderCheckInput,
+  AwxProviderConfigInput,
+  AwxProviderSyncPlanInput,
   ConfigPolicySnapshotInput,
   RuntimeConfig,
   RuntimeFeaturePolicy,
   RuntimeFeaturePolicyInput,
+  SiteSlotKind,
   SiteSlotSshProfile,
   SiteSlotSshProfileBootstrapInput,
   SiteSlotSshProfileInput
 } from '../../types.js';
+import { checkAwxProvider } from './awx-provider-check.js';
+import { buildAwxProviderSyncPlan } from './awx-provider-sync-plan.js';
 import { prepareSiteSlotSshProfileBootstrap } from './ssh-profile-bootstrap.js';
 import { SSH_READONLY_PROBE_FEATURE_KEY, buildSshProfileReadinessProbe } from './ssh-profile-readiness.js';
 
@@ -32,6 +38,9 @@ export class ConfigCenterController {
         'launcher-network.aggregate',
         'dns-policy.aggregate',
         'release-policy.aggregate',
+        'awx-provider.manage',
+        'awx-provider.check',
+        'awx-provider.sync-plan',
         'site-slot-ssh-profile.manage',
         'site-slot-ssh-profile.bootstrap',
         'runtime-feature-policy.manage'
@@ -54,6 +63,76 @@ export class ConfigCenterController {
     const policy = await this.store.getRuntimeFeaturePolicy(policyId);
     if (!policy) throw new NotFoundException('Runtime feature policy not found');
     return { policy };
+  }
+
+  @Get('internal/v1/config-center/awx-providers')
+  async listAwxProviderConfigs(@Query('kind') rawKind?: string) {
+    return { providers: await this.store.listAwxProviderConfigs(toAwxProviderKind(rawKind)) };
+  }
+
+  @Post('internal/v1/config-center/awx-providers')
+  async upsertAwxProviderConfig(@Body() rawBody: unknown) {
+    return { provider: await this.store.upsertAwxProviderConfig(toAwxProviderConfigInput(asRecord(rawBody))) };
+  }
+
+  @Post('internal/v1/config-center/awx-providers/:providerId/check')
+  async checkAwxProviderConfig(@Param('providerId') providerId: string, @Body() rawBody: unknown) {
+    const provider = await this.store.getAwxProviderConfig(providerId);
+    if (!provider) throw new NotFoundException('AWX provider config not found');
+    const input = toAwxProviderCheckInput(asRecord(rawBody));
+    const check = await checkAwxProvider(provider, input);
+    await this.store.recordAudit({
+      eventType: 'config.awx_provider.checked',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        providerId: provider.providerId,
+        status: check.status,
+        baseUrl: check.baseUrl,
+        targetKind: check.targetKind,
+        inventory: check.inventory,
+        jobTemplate: check.jobTemplate,
+        failures: check.failures,
+        endpoints: check.endpoints.map((endpoint) => ({
+          name: endpoint.name,
+          status: endpoint.status,
+          httpStatus: endpoint.httpStatus,
+          count: endpoint.count
+        }))
+      }
+    });
+    return { check };
+  }
+
+  @Post('internal/v1/config-center/awx-providers/:providerId/sync-plan')
+  async planAwxProviderSync(@Param('providerId') providerId: string, @Body() rawBody: unknown) {
+    const provider = await this.store.getAwxProviderConfig(providerId);
+    if (!provider) throw new NotFoundException('AWX provider config not found');
+    const input = toAwxProviderSyncPlanInput(asRecord(rawBody));
+    const syncPlan = buildAwxProviderSyncPlan(provider, input);
+    await this.store.recordAudit({
+      eventType: 'config.awx_provider.sync_plan_created',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        providerId: provider.providerId,
+        status: syncPlan.status,
+        targetKind: syncPlan.targetKind,
+        inventory: syncPlan.inventory,
+        inventoryHost: syncPlan.inventoryHost,
+        credential: syncPlan.credential,
+        jobTemplate: syncPlan.jobTemplate,
+        blockedReasons: syncPlan.blockedReasons
+      }
+    });
+    return { syncPlan };
+  }
+
+  @Get('internal/v1/config-center/awx-providers/:providerId')
+  async getAwxProviderConfig(@Param('providerId') providerId: string) {
+    const provider = await this.store.getAwxProviderConfig(providerId);
+    if (!provider) throw new NotFoundException('AWX provider config not found');
+    return { provider };
   }
 
   @Get('internal/v1/config-center/site-slot-ssh-profiles')
@@ -154,6 +233,7 @@ function toSshProfileInput(body: Record<string, unknown>): SiteSlotSshProfileInp
     sshPort: numberOrNull(body.sshPort),
     identityFile: nullableString(body.identityFile),
     knownHostsFile: nullableString(body.knownHostsFile),
+    sshConfigFile: nullableString(body.sshConfigFile),
     hostKeyAlias: nullableString(body.hostKeyAlias),
     strictHostKeyChecking: nullableString(body.strictHostKeyChecking),
     connectTimeoutSeconds: numberOrNull(body.connectTimeoutSeconds),
@@ -197,6 +277,57 @@ function toRuntimeFeaturePolicyInput(body: Record<string, unknown>): RuntimeFeat
     requestedBy: nullableString(body.requestedBy),
     requestId: nullableString(body.requestId)
   };
+}
+
+function toAwxProviderConfigInput(body: Record<string, unknown>): AwxProviderConfigInput {
+  return {
+    providerId: nullableString(body.providerId),
+    name: nullableString(body.name),
+    status: nullableString(body.status),
+    baseUrl: nullableString(body.baseUrl),
+    organization: nullableString(body.organization),
+    project: nullableString(body.project),
+    inventoryPrefix: nullableString(body.inventoryPrefix),
+    credentialPrefix: nullableString(body.credentialPrefix),
+    jobTemplatePrefix: nullableString(body.jobTemplatePrefix),
+    defaultKind: nullableString(body.defaultKind),
+    verifyTls: booleanOrNull(body.verifyTls),
+    requestTimeoutSeconds: numberOrNull(body.requestTimeoutSeconds),
+    requestedBy: nullableString(body.requestedBy),
+    requestId: nullableString(body.requestId)
+  };
+}
+
+function toAwxProviderCheckInput(body: Record<string, unknown>): AwxProviderCheckInput {
+  return {
+    kind: nullableString(body.kind),
+    token: nullableString(body.token),
+    requestTimeoutSeconds: numberOrNull(body.requestTimeoutSeconds),
+    requestedBy: nullableString(body.requestedBy),
+    requestId: nullableString(body.requestId)
+  };
+}
+
+function toAwxProviderSyncPlanInput(body: Record<string, unknown>): AwxProviderSyncPlanInput {
+  return {
+    kind: nullableString(body.kind),
+    siteId: nullableString(body.siteId),
+    host: nullableString(body.host),
+    sshUser: nullableString(body.sshUser),
+    sshPort: numberOrNull(body.sshPort),
+    sshProfileId: nullableString(body.sshProfileId),
+    planId: nullableString(body.planId),
+    jobId: nullableString(body.jobId),
+    sessionId: nullableString(body.sessionId),
+    runId: nullableString(body.runId),
+    requestId: nullableString(body.requestId)
+  };
+}
+
+function toAwxProviderKind(value: unknown): SiteSlotKind | 'all' | null {
+  const kind = typeof value === 'string' ? value.trim() : '';
+  if (kind === 'domestic' || kind === 'oversea' || kind === 'all') return kind;
+  return null;
 }
 
 function resolveRuntimeFeaturePolicy(

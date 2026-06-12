@@ -13,10 +13,11 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
 ENV PORT=18090
-RUN apk add --no-cache openssh-client sshpass
+RUN apk add --no-cache openssh-client sshpass rsync
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/artifacts ./artifacts
 EXPOSE 18090
 HEALTHCHECK --interval=30s --timeout=4s --retries=3 \

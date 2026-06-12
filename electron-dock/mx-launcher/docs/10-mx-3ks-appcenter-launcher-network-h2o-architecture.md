@@ -499,6 +499,13 @@ V1 边界：
 - AppCenter 面向用户，Admin 面向运营；两者共用 Launcher 身份和权限系统，后续由
   User Center/RBAC 控制可见性。
 
+Admin 后续升级为 MX Console 设计系统：深色 editor shell、Three.js 拓扑舞台、左侧
+资源树、右侧 inspector、底部 evidence/console、统一 action gate、状态色和密集型
+运维组件。Three.js 不是装饰背景，而是 H/D/I/O、release、AWX job、K8s、trace/log
+证据的操作入口。未来如果拆出独立 Admin 前端，优先考虑 React + Vite + shadcn/ui /
+Radix + Tailwind/CSS variables + lucide + Three.js；Quasar 仅在 Admin 明确转向 Vue
+技术栈时作为候选。
+
 当前实现是真实 RBAC shadow，而不是完整 OAuth/OIDC：User Center 先查已签发 token
 record，再兼容旧 `mx-shadow-*` token；service account 可访问 `sdk.dns.evaluate`，
 普通 `mx-user` 缺少 `sdk.audit.write` 时会被 SDK Gateway 拒绝。

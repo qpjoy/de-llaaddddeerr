@@ -4,6 +4,10 @@ import { createHash } from 'node:crypto';
 import type {
   AnonymousEnrollment,
   AppCenterApp,
+  AwxProviderConfig,
+  AwxProviderConfigInput,
+  AwxProviderKind,
+  AwxProviderStatus,
   ConfigPolicySnapshot,
   ConfigPolicySnapshotInput,
   ConfigSnapshot,
@@ -20,7 +24,12 @@ import type {
   DnsZoneRecord,
   DnsZoneSnapshot,
   IssueTokenInput,
+  LauncherNetworkMihomoSite,
+  LauncherNetworkMihomoSiteInput,
+  LauncherNetworkReachabilityPlan,
   LauncherNetworkSnapshot,
+  LauncherNetworkTopology,
+  MihomoSubscriptionRender,
   PrincipalContext,
   PrincipalContextInput,
   PlatformPrincipal,
@@ -36,6 +45,9 @@ import type {
   SdkGatewayManifest,
   SiteSlotExecutionInput,
   SiteSlotExecutionRun,
+  SiteSlotAccessAccount,
+  SiteSlotAccessAccountIssueInput,
+  SiteSlotAccessAccountRole,
   SiteSlotKind,
   SiteSlotNetworkMode,
   SiteSlotPlan,
@@ -1029,6 +1041,12 @@ export function createConfigSnapshot(
 ): ConfigSnapshot {
   const issuedAt = new Date();
   const expiresAt = new Date(issuedAt.getTime() + 6 * 60 * 60 * 1000);
+  const launcherNetwork = buildLauncherNetworkTopology(config, {
+    mode: enrollment.userId ? 'user' : 'guest',
+    leaseIp: enrollment.overlayIp,
+    domesticSiteId: enrollment.siteId,
+    publicKey: enrollment.publicKey
+  });
   const unsigned = {
     environment: config.environment,
     siteId: enrollment.siteId,
@@ -1044,7 +1062,8 @@ export function createConfigSnapshot(
       serverBaseUrl: config.publicBaseUrl,
       defaultMode,
       relayMode: enrollment.relayMode,
-      overlayIp: enrollment.overlayIp
+      overlayIp: enrollment.overlayIp,
+      launcherNetwork
     }
   };
   const digest = createHash('sha256').update(JSON.stringify(unsigned)).digest('hex');
@@ -1072,6 +1091,154 @@ export function createConfigSnapshot(
       issuer: 'mx-launcher-server-shadow'
     }
   };
+}
+
+export function buildLauncherNetworkTopology(
+  config: RuntimeConfig,
+  input: {
+    mode: 'guest' | 'user';
+    leaseIp: string;
+    domesticSiteId?: string | null;
+    overseaSiteId?: string | null;
+    publicKey?: string | null;
+  }
+): LauncherNetworkTopology {
+  const internalBaseUrl = trimTrailingSlash(config.internalBaseUrl);
+  const domesticSiteId = input.domesticSiteId?.trim() || 'domestic-main';
+  const overseaSiteId = input.overseaSiteId?.trim() || 'oversea-main';
+  const cidr = input.mode === 'user' ? '10.89.0.0/16' : '10.91.0.0/16';
+  const publicKey = input.publicKey?.trim() || null;
+  const subscriptionBaseUrl = `${internalBaseUrl}/internal/v1/site-slots/${overseaSiteId}/subscriptions/hysteria2`;
+  const internalCidrs = ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16', '10.91.0.0/16'];
+  return {
+    model: 'internal-authority-domestic-relay-oversea-access-v1',
+    bootstrap: {
+      order: [
+        'deploy-oversea-access-if-domestic-needs-egress',
+        'deploy-domestic-public-relay-foundation',
+        'internal-joins-domestic-relay-as-service-peer',
+        'home-enrolls-through-domestic-public-facade',
+        'promote-home-to-domestic-wg-relay-primary'
+      ],
+      hdiWithoutRelay: 'bootstrap-proxy-only',
+      steadyStateAccess: 'domestic-wg-relay-primary'
+    },
+    authority: {
+      users: 'internal-user-center',
+      config: 'internal-config-center',
+      mihomo: 'internal-mihomo',
+      dns: 'internal-coredns',
+      release: 'internal-release-center'
+    },
+    homePath: {
+      bootstrap: 'home-to-domestic-public-enroll-proxy',
+      afterEnroll: 'home-to-domestic-wg-relay-to-internal',
+      subscriptionFetch: 'home-through-domestic-h2i-to-internal-mihomo',
+      overseaTraffic: 'home-direct-to-oversea-hysteria2'
+    },
+    homeLease: {
+      mode: input.mode,
+      ip: input.leaseIp,
+      cidr
+    },
+    domestic: {
+      siteId: domesticSiteId,
+      role: 'relay-proxy-cache-forwarder',
+      publicIpRequired: true,
+      publicServices: ['api-facade', 'wg-relay', 'h2i-proxy', 'snapshot-cache', 'observability-forwarder'],
+      gatewayIp: '10.88.0.1',
+      overlayCidrs: ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16', '10.91.0.0/16'],
+      configSource: 'internal-signed-snapshot',
+      storesAuthority: false,
+      requiredFor: ['enroll-proxy', 'wg-relay', 'h2i-proxy', 'internal-dns', 'snapshot-cache']
+    },
+    internal: {
+      siteId: config.siteId,
+      publicIngress: false,
+      baseUrl: internalBaseUrl,
+      enrollUrl: `${internalBaseUrl}/internal/v1/enrollments/anonymous`,
+      configSnapshotUrl: `${internalBaseUrl}/internal/v1/config/snapshots/{installId}`,
+      mihomoSubscriptionBaseUrl: subscriptionBaseUrl,
+      requiresEnrollLease: true,
+      relayPeer: {
+        required: true,
+        fixedIp: '10.90.0.10',
+        initiatedBy: 'internal-outbound-to-domestic-public-wg',
+        purpose: 'make-internal-reachable-without-public-ip'
+      }
+    },
+    oversea: {
+      siteId: overseaSiteId,
+      role: 'hysteria2-access-site',
+      subscriptionAuthority: 'internal-mihomo',
+      trafficPath: 'direct-after-subscription'
+    },
+    subscriptions: {
+      mihomo: {
+        authority: 'internal-config-center',
+        siteId: overseaSiteId,
+        baseUrl: subscriptionBaseUrl,
+        fetchPath: `${subscriptionBaseUrl}/{username}.yaml`,
+        reachableVia: ['domestic-wg-relay', 'h2i-proxy', 'internal-dns'],
+        fallback: 'domestic-snapshot-cache'
+      }
+    },
+    relayPlan: {
+      authority: 'internal-config-center',
+      domesticRelay: {
+        siteId: domesticSiteId,
+        interfaceName: 'mx-domestic',
+        listenPort: 51820,
+        gatewayIp: '10.88.0.1',
+        configArtifact: 'mx-domestic-wg-relay.conf',
+        envArtifact: 'mx-domestic-relay.env'
+      },
+      internalServicePeer: {
+        role: 'internal-service',
+        fixedIp: '10.90.0.10',
+        allowedIps: ['10.90.0.10/32'],
+        configArtifact: 'mx-internal-service-peer.conf',
+        privateKeyPlacement: 'internal-only',
+        direction: 'internal-outbound-to-domestic-public-wg'
+      },
+      homePeer: {
+        role: input.mode,
+        leaseIp: input.leaseIp,
+        cidr,
+        allowedIps: [`${input.leaseIp}/32`],
+        publicKey,
+        publicKeyStatus: publicKey ? 'ready-to-append' : 'pending-public-key',
+        provisionedBy: 'internal-signed-relay-lease',
+        domesticMutation: 'append-peer-after-enroll'
+      },
+      routes: {
+        internalCidrs,
+        dnsServer: '10.88.0.1',
+        subscriptionReachability: 'domestic-wg-relay+h2i-proxy',
+        externalTraffic: 'direct-to-oversea-hysteria2-after-subscription'
+      },
+      gates: {
+        domesticConfigMustNotContainInternalPrivateKey: true,
+        homePublicKeyRequiredForRealPeer: true,
+        bootstrapFacadeOnlyBeforeLease: true,
+        steadyStateRequiresDomesticRelay: true
+      }
+    },
+    gates: {
+      anonymousEnrollBeforeInternalReachability: true,
+      domesticPublicFacadeOnlyBootstrapsEnroll: true,
+      fixedInternalIpAfterEnroll: true,
+      internalPublicIpRequired: false,
+      internalMustJoinDomesticRelayBeforeHomeCanReachInternal: true,
+      wgRelayBecomesPrimaryAfterEnroll: true,
+      domesticMustNotOwnUsersOrSubscriptions: true,
+      overseaMustNotOwnSubscriptionStore: true
+    }
+  };
+}
+
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, '');
 }
 
 export function createConfigPolicySnapshot(
@@ -1354,12 +1521,13 @@ export function buildSiteSlotSshProfile(
   const strictHostKeyChecking = siteSlotStrictHostKeyChecking(input.strictHostKeyChecking ?? previous?.strictHostKeyChecking);
   const connectTimeoutSeconds = input.connectTimeoutSeconds && input.connectTimeoutSeconds > 0
     ? Math.min(Math.floor(input.connectTimeoutSeconds), 120)
-    : previous?.connectTimeoutSeconds ?? 10;
+    : previous?.connectTimeoutSeconds ?? 30;
   const batchMode = input.batchMode === 'no' ? 'no' : previous?.batchMode ?? 'yes';
   const status = input.status === 'paused' ? 'paused' : 'active';
   const warnings: string[] = [];
   const identityFile = input.identityFile?.trim() || previous?.identityFile || null;
   const knownHostsFile = input.knownHostsFile?.trim() || previous?.knownHostsFile || null;
+  const sshConfigFile = input.sshConfigFile?.trim() || previous?.sshConfigFile || null;
   const hostKeyAlias = input.hostKeyAlias?.trim() || previous?.hostKeyAlias || null;
   if (!identityFile) warnings.push('missing: identityFile is required before artifact-push-remote-ssh can execute');
   if (!knownHostsFile) warnings.push('missing: knownHostsFile is required before artifact-push-remote-ssh can verify host keys');
@@ -1374,6 +1542,7 @@ export function buildSiteSlotSshProfile(
     sshPort,
     identityFile,
     knownHostsFile,
+    sshConfigFile,
     hostKeyAlias,
     strictHostKeyChecking,
     connectTimeoutSeconds,
@@ -1413,6 +1582,53 @@ export function buildRuntimeFeaturePolicy(
     expiresAt,
     requiresApproval,
     reason,
+    createdBy: previous?.createdBy || input.requestedBy?.trim() || 'config-center',
+    createdAt: previous?.createdAt || now,
+    updatedBy: input.requestedBy?.trim() || previous?.updatedBy || 'config-center',
+    updatedAt: now
+  };
+}
+
+export function buildAwxProviderConfig(
+  config: RuntimeConfig,
+  input: AwxProviderConfigInput,
+  previous: AwxProviderConfig | null,
+  now = new Date().toISOString()
+): AwxProviderConfig {
+  const defaultKind = awxProviderKind(input.defaultKind ?? previous?.defaultKind);
+  const name = input.name?.trim() || previous?.name || defaultAwxProviderName(defaultKind);
+  const providerId = input.providerId?.trim() || previous?.providerId || `awxprov_${safeIdPart(defaultKind)}`;
+  const baseUrl = input.baseUrl?.trim() || previous?.baseUrl || null;
+  const status = awxProviderStatus(input.status ?? previous?.status);
+  const organization = input.organization?.trim() || previous?.organization || 'MX Internal';
+  const project = input.project?.trim() || previous?.project || 'mx-launcher-site-slots';
+  const inventoryPrefix = input.inventoryPrefix?.trim() || previous?.inventoryPrefix || 'mx';
+  const credentialPrefix = input.credentialPrefix?.trim() || previous?.credentialPrefix || 'mx';
+  const jobTemplatePrefix = input.jobTemplatePrefix?.trim() || previous?.jobTemplatePrefix || 'mx-site-slot';
+  const verifyTls = typeof input.verifyTls === 'boolean' ? input.verifyTls : previous?.verifyTls ?? true;
+  const requestTimeoutSeconds = input.requestTimeoutSeconds && input.requestTimeoutSeconds > 0
+    ? Math.min(Math.floor(input.requestTimeoutSeconds), 300)
+    : previous?.requestTimeoutSeconds ?? 30;
+  const warnings: string[] = [];
+  if (!baseUrl) warnings.push('missing: baseUrl is required before awx-api provider can launch jobs');
+  if (status === 'paused') warnings.push('paused: provider will not be selected for new awx-shadow evidence');
+  if (defaultKind === 'all') warnings.push('scope: provider applies to all site-slot kinds unless a kind-specific provider exists');
+  return {
+    providerId,
+    name,
+    environment: config.environment,
+    status,
+    baseUrl,
+    organization,
+    project,
+    inventoryPrefix,
+    credentialPrefix,
+    jobTemplatePrefix,
+    defaultKind,
+    verifyTls,
+    requestTimeoutSeconds,
+    source: 'config-center',
+    warnings,
     createdBy: previous?.createdBy || input.requestedBy?.trim() || 'config-center',
     createdAt: previous?.createdAt || now,
     updatedBy: input.requestedBy?.trim() || previous?.updatedBy || 'config-center',
@@ -1472,7 +1688,11 @@ export function buildSiteSlotRunnerSession(
   sessionId: string,
   startedAt = new Date().toISOString()
 ): SiteSlotRunnerSession {
-  const mode = input.mode === 'remote-ssh' ? 'remote-ssh' : 'simulate';
+  const mode = input.mode === 'remote-ssh'
+    ? 'remote-ssh'
+    : input.mode === 'awx-shadow'
+      ? 'awx-shadow'
+      : 'simulate';
   const confirmRemoteExecution = input.confirmRemoteExecution === true;
   const warnings = siteSlotRunnerWarnings(config, execution, mode, confirmRemoteExecution);
   const status = siteSlotRunnerStatus(execution, mode, warnings);
@@ -1487,7 +1707,7 @@ export function buildSiteSlotRunnerSession(
     environment: execution.environment,
     mode,
     status,
-    dryRun: mode === 'simulate',
+    dryRun: mode !== 'remote-ssh',
     confirmRemoteExecution,
     gates: {
       executionStatus: execution.status,
@@ -1720,10 +1940,11 @@ function siteSlotWorkerKind(
   value: SiteSlotWorkerJobInput['workerKind'],
   session: SiteSlotRunnerSession
 ): SiteSlotWorkerJob['worker']['kind'] {
-  if (value === 'internal-runner' || value === 'domestic-runner' || value === 'oversea-site-agent' || value === 'admin-manual') {
+  if (value === 'internal-runner' || value === 'domestic-runner' || value === 'oversea-site-agent' || value === 'awx-runner' || value === 'admin-manual') {
     return value;
   }
   if (session.mode === 'simulate') return 'internal-runner';
+  if (session.mode === 'awx-shadow') return 'awx-runner';
   return session.kind === 'oversea' ? 'oversea-site-agent' : 'domestic-runner';
 }
 
@@ -1748,6 +1969,7 @@ function siteSlotWorkerJobNextActions(
 ): string[] {
   if (status === 'blocked') return ['review-worker-job-gates', 'provide-approval-or-create-ready-runner-session'];
   if (mode === 'simulate') return ['submit-simulated-worker-report', 'review-contract-before-remote-worker'];
+  if (mode === 'awx-shadow') return ['dispatch-to-awx-shadow-provider', 'record-awx-task-events', 'review-awx-evidence'];
   return ['dispatch-to-site-agent-or-ssh-worker', 'stream-step-reports', 'watch-change-window'];
 }
 
@@ -2015,7 +2237,7 @@ function siteSlotRunnerStatus(
   warnings: string[]
 ): SiteSlotRunnerSession['status'] {
   if (warnings.some((warning) => warning.startsWith('blocked:'))) return 'blocked';
-  if (mode === 'remote-ssh') return 'queued';
+  if (mode === 'remote-ssh' || mode === 'awx-shadow') return 'queued';
   return execution.status === 'ready' ? 'completed' : 'blocked';
 }
 
@@ -2077,6 +2299,7 @@ function siteSlotRunnerNextActions(
   mode: SiteSlotRunnerSession['mode']
 ): string[] {
   if (status === 'blocked') return ['review-runner-gates', 'fix-execution-or-enable-runner-remote-mode'];
+  if (status === 'queued' && mode === 'awx-shadow') return ['attach-awx-shadow-worker', 'record-awx-shadow-events'];
   if (status === 'queued') return ['attach-runner-worker', 'stream-step-logs', 'record-step-results'];
   if (mode === 'simulate') return ['review-simulated-steps', 'start-remote-runner-after-admin-approval'];
   return ['record-step-results'];
@@ -2334,6 +2557,7 @@ function siteSlotPreflightChecks(
   mode: SiteSlotNetworkMode
 ): SiteSlotPlan['preflightChecks'] {
   const remote = (command: string) => host ? `ssh -p ${sshPort} ${sshUser}@${host} '${command}'` : `ssh -p ${sshPort} ${sshUser}@<${kind}-host> '${command}'`;
+  const dockerReadonlyProbe = 'if command -v docker >/dev/null 2>&1; then docker version --format "{{.Server.Version}}" 2>/dev/null || docker version; else echo "docker: missing"; fi; if docker compose version >/dev/null 2>&1; then docker compose version; else echo "docker compose: missing"; fi';
   const checks: SiteSlotPlan['preflightChecks'] = [
     {
       checkId: `${kind}.ssh.root`,
@@ -2361,9 +2585,13 @@ function siteSlotPreflightChecks(
       stage: 'remote',
       severity: 'required',
       requiresRoot: false,
-      command: remote('docker version && docker compose version'),
-      expected: 'Docker Engine and docker compose are installed and usable',
-      remediation: 'Install Docker first or use an offline Docker package bundle when outbound internet is unavailable.'
+      command: remote(dockerReadonlyProbe),
+      expected: kind === 'oversea'
+        ? 'Docker Engine and docker compose are reported when present; missing Docker is acceptable before the Oversea installer step.'
+        : 'Docker Engine and docker compose are installed and usable, or the missing state is recorded before install.',
+      remediation: kind === 'oversea'
+        ? 'Keep SSH reachable; the Oversea install stage will install Docker before starting hysteria2.'
+        : 'Install Docker first or use an offline Docker package bundle when outbound internet is unavailable.'
     }
   ];
   if (kind === 'domestic') {
@@ -2449,7 +2677,7 @@ function siteSlotDeploymentPhases(
   const target = host ?? `<${kind}-host>`;
   const artifactRoot = `./artifacts/site-slots/${kind}`;
   const incomingDir = '/opt/mx/incoming';
-  const releaseRevision = '<release-revision>';
+  const releaseRevision = '__release_revision__';
   const releaseRoot = '/opt/mx/releases';
   const currentRoot = '/opt/mx/current';
   const slotServiceBundleName = `mx-${kind}-services.tar.gz`;
@@ -2464,8 +2692,11 @@ function siteSlotDeploymentPhases(
   const overseaAccessStackBundle = `${artifactRoot}/${overseaAccessStackBundleName}`;
   const overseaAccessStackReleaseDir = `${releaseRoot}/oversea-access-stack/${releaseRevision}`;
   const overseaAccessStackCurrentDir = `${currentRoot}/hysteria2-access-stack`;
-  const domesticWireGuardConfig = `${artifactRoot}/mx-domestic-wg.conf`;
+  const domesticWireGuardConfig = `${artifactRoot}/mx-domestic-wg-relay.conf`;
+  const domesticRelayEnv = `${artifactRoot}/mx-domestic-relay.env`;
+  const internalServicePeerConfig = `${artifactRoot}/mx-internal-service-peer.conf`;
   const ssh = (command: string) => `ssh -p ${sshPort} ${sshUser}@${target} '${command}'`;
+  const dockerReadonlyProbe = 'if command -v docker >/dev/null 2>&1; then docker version --format "{{.Server.Version}}" 2>/dev/null || docker version; else echo "docker: missing"; fi; if docker compose version >/dev/null 2>&1; then docker compose version; else echo "docker compose: missing"; fi';
   const scp = (source: string, dest: string) => `scp -P ${sshPort} ${source} ${sshUser}@${target}:${dest}`;
   const scpRecursive = (source: string, dest: string) => `scp -r -P ${sshPort} ${source} ${sshUser}@${target}:${dest}`;
   const rsyncOverSsh = (source: string, dest: string, deleteStale = false) => {
@@ -2474,43 +2705,71 @@ function siteSlotDeploymentPhases(
   };
   const internalBaseUrl = input.internalBaseUrl ?? '<internal-base-url>';
   const internalMihomoBaseUrl = `${internalBaseUrl}/internal/v1/launcher-network/mihomo`;
-  const overseaSubscriptionBaseUrl = `${internalBaseUrl}/internal/v1/site-slots/${input.siteId ?? 'oversea-main'}/subscriptions/hysteria2`;
+  const overseaSiteId = kind === 'domestic'
+    ? input.overseaSiteId?.trim() || 'oversea-main'
+    : input.siteId?.trim() || 'oversea-main';
+  const overseaSubscriptionBaseUrl = `${internalBaseUrl}/internal/v1/site-slots/${overseaSiteId}/subscriptions/hysteria2`;
+  const overseaExportBaseUrl = `http://${target}:3434`;
+  const overseaDefaultAccountNames = defaultSiteSlotAccessAccountNames(overseaSiteId);
+  const overseaInternalAccountName = `${safeAccountPrefix(overseaSiteId)}-internal`;
+  const overseaDomesticAccountName = `${safeAccountPrefix(overseaSiteId)}-domestic`;
+  const overseaReservedInternalCidrs = ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16', '10.91.0.0/16'];
+  const overseaReservedInternalCidrsCsv = overseaReservedInternalCidrs.join(',');
+  const overseaEnvLines = [
+    'TZ=Asia/Shanghai',
+    `HY2_SERVER_HOST=${target}`,
+    'HY2_SERVER_PORTS=51288',
+    'HY2_HOP_INTERVAL_SECONDS=0',
+    'HY2_STACK_SUBNET=10.254.0.0/24',
+    'HY2_STACK_GATEWAY=10.254.0.1',
+    `HY2_USERS=${overseaDefaultAccountNames.join(',')}`,
+    'HY2_PEER_DNS=223.5.5.5,119.29.29.29,1.1.1.1,8.8.8.8',
+    `HY2_INTERNAL_MIHOMO_BASE_URL=${internalMihomoBaseUrl}`,
+    'HY2_INTERNAL_SUBSCRIPTION_STORE=config-center',
+    'HY2_MIHOMO_ROUTING_MODE=cn-direct',
+    `HY2_RESERVED_INTERNAL_CIDRS=${overseaReservedInternalCidrsCsv}`,
+    'HY2_DOMESTIC_GATEWAY_IP=10.88.0.1',
+    `HY2_TLS_SERVER_NAME=${target}`,
+    'HY2_TLS_SELF_SIGNED_DAYS=3650',
+    'HY2_TLS_SKIP_CERT_VERIFY=true',
+    'HY2_SERVER_BANDWIDTH_DOWN="30 Mbps"',
+    'HY2_SERVER_BANDWIDTH_UP="30 Mbps"',
+    'HY2_DEFAULT_DOWN="30 Mbps"',
+    'HY2_DEFAULT_UP="30 Mbps"',
+    'HY2_MASQUERADE_URL=https://news.ycombinator.com/',
+    'HY2_OBFS_PASSWORD=',
+    'HY2_EXPORT_SITE_ADDRESS=:8080',
+    `HY2_EXPORT_BASE_URL=${overseaExportBaseUrl}`,
+    'HY2_EXPORT_FALLBACK_PORT=3434',
+    'HY2_EXPORT_USER=download',
+    'HY2_EXPORT_PASSWORD_HASH='
+  ];
+  const overseaEnvWriteCommand = `cd ${overseaAccessStackCurrentDir} && cp -n .env.example .env && printf "%s\\n" ${overseaEnvLines.map(shellDoubleQuote).join(' ')} >> .env`;
   const overseaTunnelStateJson = JSON.stringify({
     revision: 'internal-shadow-1',
     node: {
       publicHost: target,
-      serverPorts: '52120-52159'
+      serverPorts: '51288'
     },
     policies: [
       {
         id: 'cn-direct',
         routingMode: 'cn-direct',
         isDefault: true,
-        reservedInternalCidrs: ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16', '10.91.0.0/16'],
+        reservedInternalCidrs: overseaReservedInternalCidrs,
         domesticGatewayIp: '10.88.0.1',
         dnsPath: 'wg-relay-internal-dns'
       }
     ],
-    accounts: [
-      {
-        id: 'internal-bootstrap',
-        username: 'internal-bootstrap',
-        authToken: '<hy2-internal-token-from-internal-secret>',
+    accounts: overseaDefaultAccountNames.map((username) => ({
+        id: username,
+        username,
+        authToken: `<hy2-token:${username}:from-internal-config-center>`,
         status: 'active',
         policyId: 'cn-direct',
         upRate: '30 Mbps',
-        downRate: '3 Mbps'
-      },
-      {
-        id: 'domestic-bootstrap',
-        username: 'domestic-bootstrap',
-        authToken: '<hy2-domestic-token-from-internal-secret>',
-        status: 'active',
-        policyId: 'cn-direct',
-        upRate: '30 Mbps',
-        downRate: '3 Mbps'
-      }
-    ]
+        downRate: '30 Mbps'
+      }))
   });
   const overseaTunnelStateBase64 = Buffer.from(overseaTunnelStateJson, 'utf8').toString('base64');
   const phases: SiteSlotPlan['deploymentPhases'] = [
@@ -2551,12 +2810,35 @@ function siteSlotDeploymentPhases(
       target: kind,
       required: true,
       commands: [
-        ssh('id -u && uname -a && docker version && docker compose version'),
-        kind === 'domestic' ? ssh('command -v wg && command -v wg-quick && sysctl net.ipv4.ip_forward') : ssh('docker compose version')
+        ssh(`id -u && uname -a && df -h / && ${dockerReadonlyProbe}`),
+        kind === 'domestic'
+          ? ssh('command -v wg && command -v wg-quick && sysctl net.ipv4.ip_forward')
+          : ssh('test -d /opt/mx/current/hysteria2-access-stack || test -d /opt/mx/releases/oversea-access-stack || echo "oversea access stack: missing before install"')
       ],
       notes: ['Do not mutate the host in preflight; collect evidence first.']
     }
   ];
+  if (kind === 'domestic') {
+    phases.push({
+      phaseId: 'prepare-domestic-relay-authority',
+      title: 'Prepare Domestic public relay and Internal service peer',
+      mode: 'admin-action',
+      target: 'internal',
+      required: true,
+      commands: [
+        'Allocate Domestic WG gateway=10.88.0.1 and Internal service peer=10.90.0.10 in Internal Config Center.',
+        `Render Domestic WG relay config ${domesticWireGuardConfig} with peer classes: internal-service=10.90.0.0/16, users=10.89.0.0/16, guests=10.91.0.0/16.`,
+        `Render Internal service peer config ${internalServicePeerConfig}; never copy the Internal private key to Domestic.`,
+        `Record Domestic public endpoint host=${target} and keep public API facade limited to enroll/bootstrap/cache.`,
+        'Internal has no public ingress: Internal must initiate outbound WG to the Domestic public relay before Home can reach Internal services.',
+        'After Home enrolls through Domestic facade, Launcher Network promotes Internal access to Domestic WG relay primary; public facade remains bootstrap/fallback only.'
+      ],
+      notes: [
+        'There is no full HDI path without a relay when Internal has no public IP; before WG relay is ready, only enroll/bootstrap proxy is allowed.',
+        'Domestic does not own users, subscriptions, DNS authority, or release truth. It only relays and caches Internal-signed snapshots.'
+      ]
+    });
+  }
   if (kind === 'domestic' && mode === 'oversea-assisted') {
     phases.push({
       phaseId: 'resolve-domestic-bootstrap-subscription',
@@ -2565,7 +2847,7 @@ function siteSlotDeploymentPhases(
       target: 'internal',
       required: true,
       commands: [
-        `Read domesticBootstrapSubscription from Internal Config Center for Oversea siteId=${input.overseaSiteId ?? '<oversea-site-id>'} host=${input.overseaHost ?? '<oversea-host>'}`,
+        `Read domesticBootstrapSubscription=${overseaSubscriptionBaseUrl}/${overseaDomesticAccountName}.yaml from Internal Config Center for Oversea siteId=${overseaSiteId} host=${input.overseaHost ?? '<oversea-host>'}`,
         `Verify ${artifactRoot}/mx-domestic-qp-tunnel-cli-fallback.tar.gz exists in Internal before touching Domestic.`,
         'If subscription/account material is missing, stop here; do not ask Domestic to npm install or pull until Internal has issued the Oversea bootstrap account.'
       ],
@@ -2581,7 +2863,7 @@ function siteSlotDeploymentPhases(
         ssh(`install -d -m 0755 ${incomingDir} ${currentRoot} ${domesticTunnelCliReleaseDir}`),
         rsyncOverSsh(domesticTunnelCliBundle, `${incomingDir}/`),
         ssh(`tar -xzf ${incomingDir}/${domesticTunnelCliBundleName} -C ${domesticTunnelCliReleaseDir} && ln -sfn ${domesticTunnelCliReleaseDir} ${domesticTunnelCliCurrentDir}`),
-        ssh(`chmod +x ${domesticTunnelCliCurrentDir}/bin/qp-tunnel-cli && if command -v qp-tunnel-cli >/dev/null 2>&1; then QP_TUNNEL_CLI=qp-tunnel-cli; elif command -v npm >/dev/null 2>&1 && npm view @qpjoy/tunnel-cli version >/dev/null 2>&1; then npm i -g @qpjoy/tunnel-cli && QP_TUNNEL_CLI=qp-tunnel-cli; else QP_TUNNEL_CLI=${domesticTunnelCliCurrentDir}/bin/qp-tunnel-cli; fi; $QP_TUNNEL_CLI register --internal ${internalBaseUrl} --role domestic --site ${input.siteId ?? 'domestic-main'} --subscription <internal-issued-oversea-hysteria2-subscription> && $QP_TUNNEL_CLI server-on`)
+        ssh(`chmod +x ${domesticTunnelCliCurrentDir}/bin/qp-tunnel-cli && if command -v qp-tunnel-cli >/dev/null 2>&1; then QP_TUNNEL_CLI=qp-tunnel-cli; elif command -v npm >/dev/null 2>&1 && npm view @qpjoy/tunnel-cli version >/dev/null 2>&1; then npm i -g @qpjoy/tunnel-cli && QP_TUNNEL_CLI=qp-tunnel-cli; else QP_TUNNEL_CLI=${domesticTunnelCliCurrentDir}/bin/qp-tunnel-cli; fi; $QP_TUNNEL_CLI register --internal ${internalBaseUrl} --role domestic --site ${input.siteId ?? 'domestic-main'} --subscription ${overseaSubscriptionBaseUrl}/${overseaDomesticAccountName}.yaml && $QP_TUNNEL_CLI server-on`)
       ],
       notes: ['Prefer npm i -g @qpjoy/tunnel-cli when the target can reach npm; keep the Internal-pushed fallback bundle for no-outbound Domestic bootstrap.']
     });
@@ -2589,15 +2871,16 @@ function siteSlotDeploymentPhases(
   phases.push(
     {
       phaseId: kind === 'domestic' ? 'install-host-wireguard' : 'prepare-access-stack',
-        title: kind === 'domestic' ? 'Install Domestic host WireGuard service' : 'Prepare Oversea Docker hysteria2 access stack',
+      title: kind === 'domestic' ? 'Install Domestic host WireGuard service' : 'Prepare Oversea Docker hysteria2 access stack',
       mode: 'artifact-push',
       target: kind,
       required: true,
       commands: kind === 'domestic'
-        ? [
-            ssh('install -d -m 0700 /etc/wireguard'),
+          ? [
+            ssh(`install -d -m 0700 /etc/wireguard && install -d -m 0755 ${slotCurrentDir}`),
             rsyncOverSsh(domesticWireGuardConfig, '/etc/wireguard/mx-domestic.conf'),
-            ssh('systemctl enable --now wg-quick@mx-domestic')
+            rsyncOverSsh(domesticRelayEnv, `${slotCurrentDir}/mx-domestic-relay.env`),
+            ssh('if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi; systemctl enable --now wg-quick@mx-domestic')
           ]
         : [
             ssh(`install -d -m 0755 /opt/mx ${incomingDir} ${currentRoot} /opt/mx/site-agent ${overseaAccessStackReleaseDir}`),
@@ -2617,10 +2900,10 @@ function siteSlotDeploymentPhases(
         target: kind,
         required: true,
         commands: [
-          `POST /internal/v1/site-slots/${input.siteId ?? 'oversea-main'}/access-accounts issue=internal-bootstrap,domestic-bootstrap service=hysteria2 store=config-center`,
-          `POST /internal/v1/launcher-network/mihomo/sites/${input.siteId ?? 'oversea-main'} mode=internal-managed source=${overseaSubscriptionBaseUrl}`,
-          ssh(`if ! command -v docker >/dev/null 2>&1; then curl -fsSL https://get.docker.com | sh; fi; docker version && docker compose version`),
-          ssh(`cd ${overseaAccessStackCurrentDir} && cp -n .env.example .env && printf "\\nHY2_SERVER_HOST=${target}\\nHY2_TLS_SERVER_NAME=${target}\\nHY2_EXPORT_BASE_URL=${overseaSubscriptionBaseUrl}\\nHY2_INTERNAL_MIHOMO_BASE_URL=${internalMihomoBaseUrl}\\nHY2_INTERNAL_SUBSCRIPTION_STORE=config-center\\nHY2_MIHOMO_ROUTING_MODE=cn-direct\\nHY2_RESERVED_INTERNAL_CIDRS=10.88.0.0/16,10.89.0.0/16,10.90.0.0/16,10.91.0.0/16\\nHY2_DOMESTIC_GATEWAY_IP=10.88.0.1\\nHY2_USERS=internal-bootstrap,domestic-bootstrap\\nHY2_EXPORT_USER=<readonly-health-user-from-internal-secret>\\nHY2_EXPORT_PASSWORD_HASH=<caddy-bcrypt-hash-from-internal-secret>\\n" >> .env`),
+          `POST /internal/v1/site-slots/${overseaSiteId}/access-accounts issueDefaults=true service=hysteria2 store=config-center accounts=${overseaDefaultAccountNames.join(',')}`,
+          `POST /internal/v1/launcher-network/mihomo/sites/${overseaSiteId} mode=internal-managed source=${overseaSubscriptionBaseUrl} reachability=internal-url-requires-domestic-wg-relay`,
+          ssh(overseaDockerInstallScript()),
+          ssh(overseaEnvWriteCommand),
           ssh(`printf "%s" ${overseaTunnelStateBase64} | base64 -d > /opt/mx/site-agent/tunnel-state.json`),
           ssh(`cd ${overseaAccessStackCurrentDir} && ./manage.sh reconcile-from-json --state-file /opt/mx/site-agent/tunnel-state.json --mode hysteria2-only`),
           ssh(`if command -v qp-tunnel-cli >/dev/null 2>&1; then QP_TUNNEL_CLI=qp-tunnel-cli; elif command -v npm >/dev/null 2>&1; then npm i -g @qpjoy/tunnel-cli && QP_TUNNEL_CLI=qp-tunnel-cli; else QP_TUNNEL_CLI=${overseaAccessStackCurrentDir}/bin/qp-tunnel-cli; fi; $QP_TUNNEL_CLI register --internal ${internalBaseUrl} --role oversea --site ${input.siteId ?? 'oversea-main'} --service hysteria2`),
@@ -2640,8 +2923,9 @@ function siteSlotDeploymentPhases(
         commands: [
           `Record overseaSubscriptionBaseUrl=${overseaSubscriptionBaseUrl}`,
           `Record hEndpointBootstrapPath=WG relay for DNS and 10.88.0.0/16-10.91.0.0/16 -> Internal mihomo subscription -> cn-direct policy -> Oversea hysteria2 for external traffic`,
-          `Record domesticBootstrapSubscription=${overseaSubscriptionBaseUrl}/domestic-bootstrap.yaml`,
-          'Attach Internal subscription URL, account IDs, and tunnel-cli registration evidence to the worker report before Domestic oversea-assisted bootstrap.'
+          `Record internalBootstrapSubscription=${overseaSubscriptionBaseUrl}/${overseaInternalAccountName}.yaml`,
+          `Record domesticBootstrapSubscription=${overseaSubscriptionBaseUrl}/${overseaDomesticAccountName}.yaml`,
+          'Attach Internal subscription URL, account IDs, Domestic WG/H2I reachability note, and tunnel-cli registration evidence to the worker report before Domestic oversea-assisted bootstrap.'
         ],
         notes: [
           'Internal remains the source of truth for which Domestic slots can consume this Oversea access site.',
@@ -2719,6 +3003,25 @@ function runtimeFeaturePolicyId(
   return `rtfp_${featureKey.replace(/[^a-zA-Z0-9._-]/g, '_')}_${scopeKind}_${(scopeId ?? 'global').replace(/[^a-zA-Z0-9._-]/g, '_')}`;
 }
 
+function defaultAwxProviderName(kind: AwxProviderKind): string {
+  if (kind === 'domestic') return 'Domestic AWX Shadow';
+  if (kind === 'oversea') return 'Oversea AWX Shadow';
+  return 'Internal AWX Shadow';
+}
+
+function awxProviderKind(value: AwxProviderConfigInput['defaultKind']): AwxProviderKind {
+  if (value === 'domestic' || value === 'oversea' || value === 'all') return value;
+  return 'all';
+}
+
+function awxProviderStatus(value: AwxProviderConfigInput['status']): AwxProviderStatus {
+  return value === 'paused' ? 'paused' : 'active';
+}
+
+function safeIdPart(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/^_+|_+$/g, '') || 'default';
+}
+
 function runtimeFeatureScopeKind(value: RuntimeFeaturePolicyInput['scopeKind']): RuntimeFeaturePolicyScopeKind {
   if (value === 'site' || value === 'profile') return value;
   return 'global';
@@ -2727,6 +3030,340 @@ function runtimeFeatureScopeKind(value: RuntimeFeaturePolicyInput['scopeKind']):
 function runtimeFeatureMode(value: RuntimeFeaturePolicyInput['mode']): RuntimeFeaturePolicyMode {
   if (value === 'readonly-execute' || value === 'remote-execute' || value === 'plan-only' || value === 'disabled') return value;
   return 'plan-only';
+}
+
+function overseaDockerInstallScript(): string {
+  return [
+    'set -eu',
+    'printf "mx-docker-bootstrap\\n"',
+    '. /etc/os-release 2>/dev/null || true',
+    'echo "os=${ID:-unknown} version=${VERSION_ID:-unknown}"',
+    'if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then echo "docker: present"; else if command -v apt-get >/dev/null 2>&1; then export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y ca-certificates curl gnupg lsb-release; curl -fsSL https://get.docker.com | sh; elif command -v dnf >/dev/null 2>&1; then dnf install -y ca-certificates curl; curl -fsSL https://get.docker.com | sh; elif command -v yum >/dev/null 2>&1; then yum install -y ca-certificates curl; curl -fsSL https://get.docker.com | sh; elif command -v apk >/dev/null 2>&1; then apk add --no-cache docker docker-cli-compose; elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install docker docker-compose || curl -fsSL https://get.docker.com | sh; else curl -fsSL https://get.docker.com | sh; fi; fi',
+    'if command -v systemctl >/dev/null 2>&1; then systemctl enable --now docker || true; elif command -v service >/dev/null 2>&1; then service docker start || true; elif command -v rc-update >/dev/null 2>&1; then rc-update add docker default || true; service docker start || true; fi',
+    'docker version',
+    'docker compose version || docker-compose version'
+  ].join('; ');
+}
+
+function shellDoubleQuote(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`')}"`;
+}
+
+export function defaultSiteSlotAccessAccountNames(siteId: string): string[] {
+  const prefix = safeAccountPrefix(siteId);
+  return [
+    `${prefix}-internal`,
+    `${prefix}-domestic`,
+    ...Array.from({ length: 9 }, (_, index) => `${prefix}-internal${String(index + 1).padStart(2, '0')}`)
+  ];
+}
+
+export function buildLauncherNetworkMihomoSite(
+  config: RuntimeConfig,
+  input: LauncherNetworkMihomoSiteInput,
+  previous: LauncherNetworkMihomoSite | null,
+  fallbackPublicHost: string | null,
+  now = new Date().toISOString()
+): LauncherNetworkMihomoSite {
+  const siteId = input.siteId?.trim() || previous?.siteId || 'oversea-main';
+  const publicHost = input.publicHost?.trim() || previous?.publicHost || fallbackPublicHost;
+  const serverPorts = input.serverPorts?.trim() || previous?.serverPorts || '51288';
+  const subscriptionBaseUrl = input.subscriptionBaseUrl?.trim()
+    || previous?.subscriptionBaseUrl
+    || `${config.internalBaseUrl.replace(/\/+$/, '')}/internal/v1/site-slots/${siteId}/subscriptions/hysteria2`;
+  return {
+    siteId,
+    environment: config.environment,
+    mode: 'internal-managed',
+    source: 'site-slot-access-accounts',
+    service: 'hysteria2',
+    publicHost,
+    serverPorts,
+    subscriptionBaseUrl,
+    routingPolicy: 'cn-direct',
+    reservedInternalCidrs: ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16', '10.91.0.0/16'],
+    domesticGatewayIp: '10.88.0.1',
+    dnsPath: 'wg-relay-internal-dns',
+    reachability: {
+      internalUrlOnly: true,
+      domesticWgRelayRequired: true,
+      h2iRequired: true,
+      notes: [
+        'This Internal URL is authoritative but not directly reachable by H endpoints until Domestic WG relay and H2I/DNS are configured.',
+        'H endpoints should reach Internal DNS and this mihomo subscription through Domestic WG relay; external traffic then uses the Oversea hysteria2 proxy.'
+      ]
+    },
+    createdBy: previous?.createdBy ?? input.requestedBy ?? 'internal',
+    createdAt: previous?.createdAt ?? now,
+    updatedBy: input.requestedBy ?? previous?.updatedBy ?? 'internal',
+    updatedAt: now
+  };
+}
+
+export function buildLauncherNetworkReachabilityPlan(
+  site: LauncherNetworkMihomoSite,
+  accounts: SiteSlotAccessAccount[],
+  now = new Date().toISOString()
+): LauncherNetworkReachabilityPlan {
+  const internalAccounts = accounts.filter((account) => account.role === 'internal');
+  const domesticAccounts = accounts.filter((account) => account.role === 'domestic');
+  const reservedAccounts = accounts.filter((account) => account.role === 'internal-reserved');
+  const hEndpointAccounts = accounts.filter((account) => account.role === 'h-endpoint');
+  const hasBootstrapAccounts = internalAccounts.length > 0 && domesticAccounts.length > 0;
+  const internalStageStatus = hasBootstrapAccounts ? 'ready' : 'blocked';
+  return {
+    siteId: site.siteId,
+    environment: site.environment,
+    verdict: hasBootstrapAccounts ? 'h-endpoint-blocked' : 'blocked',
+    currentBoundary: 'internal-only',
+    subscriptionBaseUrl: site.subscriptionBaseUrl,
+    accountSummary: {
+      total: accounts.length,
+      internal: internalAccounts.length,
+      domestic: domesticAccounts.length,
+      internalReserved: reservedAccounts.length,
+      hEndpoint: hEndpointAccounts.length
+    },
+    executionOrder: [
+      'Internal issues hysteria2 accounts and publishes mihomo subscription YAML.',
+      'Internal installs Docker and hysteria2-only access stack on Oversea by remote SSH.',
+      'Internal records Oversea runtime evidence and tunnel-cli registration evidence.',
+      'Internal uses the Domestic bootstrap account/subscription to bring up Domestic outbound bootstrap.',
+      'Domestic brings up WG relay, H2I proxy, and Internal DNS reachability for H endpoints.',
+      'H endpoint fetches the Internal mihomo subscription through Domestic WG/H2I, then connects directly to Oversea hysteria2 for external traffic.'
+    ],
+    gates: {
+      domesticWgRelayRequired: true,
+      h2iRequired: true,
+      internalDnsRequired: true,
+      mihomoAuthority: 'internal-config-center',
+      overseaRuntime: 'hysteria2-only',
+      domesticGatewayIp: site.domesticGatewayIp,
+      reservedInternalCidrs: site.reservedInternalCidrs
+    },
+    stages: [
+      {
+        stageId: 'internal-subscription-authority',
+        order: 1,
+        owner: 'internal',
+        title: 'Internal subscription/account authority',
+        status: internalStageStatus,
+        dependsOn: [],
+        requiredEvidence: [
+          'Config Center access account records exist for internal and domestic bootstrap users.',
+          'GET subscription YAML returns cn-direct, reserved 10.88/10.89/10.90/10.91 DIRECT rules, and hysteria2 proxy metadata.'
+        ],
+        notes: [
+          'This is an Internal output only; it does not prove H endpoints can reach Internal yet.',
+          'mihomo authority lives on Internal Config Center. Oversea does not host the subscription store.'
+        ]
+      },
+      {
+        stageId: 'oversea-hysteria2-runtime',
+        order: 2,
+        owner: 'oversea',
+        title: 'Oversea Docker hysteria2 runtime',
+        status: 'pending-evidence',
+        dependsOn: ['internal-subscription-authority'],
+        requiredEvidence: [
+          'Remote SSH worker report shows docker version and docker compose are available.',
+          'Oversea access stack status and hysteria2 healthz pass.',
+          '@qpjoy/tunnel-cli register --role oversea --service hysteria2 evidence is attached.'
+        ],
+        notes: [
+          'Oversea should run hysteria2/site-agent only. It should not run Internal mihomo authority.',
+          'This stage can make Oversea reachable by clients that already have a subscription, but it still does not expose the Internal subscription URL to H endpoints.'
+        ]
+      },
+      {
+        stageId: 'domestic-wg-relay',
+        order: 3,
+        owner: 'domestic',
+        title: 'Domestic WG relay and 10.88.0.1 gateway',
+        status: 'blocked',
+        dependsOn: ['oversea-hysteria2-runtime'],
+        requiredEvidence: [
+          'Domestic WireGuard service is up and owns 10.88.0.1.',
+          'WG handshake and route evidence exist for 10.88.0.0/16 through 10.91.0.0/16.',
+          'Domestic outbound bootstrap consumed the Internal-issued Oversea domestic subscription.'
+        ],
+        notes: [
+          'Until this stage is ready, H endpoints cannot reliably reach Internal DNS or Internal subscription URLs from outside.',
+          'External Internet routing remains cn-direct plus Oversea subscription; WG is reserved for Internal DNS and internal CIDRs.'
+        ]
+      },
+      {
+        stageId: 'h2i-internal-dns',
+        order: 4,
+        owner: 'domestic',
+        title: 'H2I proxy and Internal DNS path',
+        status: 'blocked',
+        dependsOn: ['domestic-wg-relay'],
+        requiredEvidence: [
+          'H2I proxy health passes from Domestic.',
+          'Internal CoreDNS authority is reachable through Domestic relay.',
+          'DNS evaluation for internal.mx/h2i.mx resolves through Internal CoreDNS.'
+        ],
+        notes: [
+          'This is the gate that turns Internal-only subscription output into a fetchable H endpoint control-plane path.'
+        ]
+      },
+      {
+        stageId: 'h-endpoint-subscription-fetch',
+        order: 5,
+        owner: 'h-endpoint',
+        title: 'H endpoint subscription fetch through Domestic',
+        status: 'blocked',
+        dependsOn: ['h2i-internal-dns'],
+        requiredEvidence: [
+          'Launcher Network can fetch the Internal mihomo subscription over the Domestic WG/H2I path.',
+          'The fetched YAML includes cn-direct, reserved internal CIDRs, and Oversea hysteria2 proxy.'
+        ],
+        notes: [
+          'This is the first point where H endpoint behavior is end-to-end rather than Internal-only.'
+        ]
+      },
+      {
+        stageId: 'h-endpoint-direct-oversea',
+        order: 6,
+        owner: 'h-endpoint',
+        title: 'H endpoint direct Oversea hysteria2 traffic',
+        status: 'blocked',
+        dependsOn: ['h-endpoint-subscription-fetch'],
+        requiredEvidence: [
+          'H endpoint connects directly to Oversea hysteria2 for non-CN external traffic.',
+          'CN traffic remains DIRECT and reserved 10.88/10.89/10.90/10.91 routes remain internal.'
+        ],
+        notes: [
+          'This validates the final runtime split: Domestic for Internal reachability, Oversea for external proxy path.'
+        ]
+      }
+    ],
+    nextActions: [
+      'Attach remote Oversea worker evidence for Docker, hysteria2 health, and tunnel-cli registration.',
+      'Create or reuse the Domestic slot plan with the Internal-issued domestic bootstrap subscription.',
+      'Bring up Domestic WG relay/H2I/Internal DNS before treating H endpoint subscription fetch as passed.'
+    ],
+    generatedAt: now
+  };
+}
+
+export function buildSiteSlotAccessAccount(
+  config: RuntimeConfig,
+  input: {
+    siteId: string;
+    username: string;
+    authToken: string;
+    requestedBy?: string | null;
+  },
+  previous: SiteSlotAccessAccount | null,
+  now = new Date().toISOString()
+): SiteSlotAccessAccount {
+  const username = safeAccountName(input.username);
+  const siteId = input.siteId.trim() || 'oversea-main';
+  return {
+    accountId: `slotacct_${siteId}_${username}`.replace(/[^a-zA-Z0-9._-]/g, '_'),
+    siteId,
+    environment: config.environment,
+    service: 'hysteria2',
+    username,
+    role: inferAccessAccountRole(siteId, username),
+    authToken: previous?.authToken || input.authToken,
+    status: 'active',
+    routingPolicy: 'cn-direct',
+    subscriptionPath: `/internal/v1/site-slots/${siteId}/subscriptions/hysteria2/${username}.yaml`,
+    createdBy: previous?.createdBy ?? input.requestedBy ?? 'internal',
+    createdAt: previous?.createdAt ?? now,
+    updatedBy: input.requestedBy ?? previous?.updatedBy ?? 'internal',
+    updatedAt: now
+  };
+}
+
+export function renderHysteria2MihomoSubscription(
+  site: LauncherNetworkMihomoSite,
+  account: SiteSlotAccessAccount,
+  now = new Date().toISOString()
+): MihomoSubscriptionRender {
+  const proxyName = `${site.siteId}-hysteria2`;
+  const firstPort = firstHysteriaPort(site.serverPorts);
+  const server = site.publicHost || `${site.siteId}.oversea.invalid`;
+  const lines = [
+    `# Generated by MX Launcher Internal at ${now}`,
+    `# site=${site.siteId} account=${account.username}`,
+    '# Reachability: this Internal subscription URL requires Domestic WG relay/H2I before H endpoints can fetch it.',
+    'mixed-port: 7890',
+    'allow-lan: false',
+    'mode: rule',
+    'log-level: warning',
+    'dns:',
+    '  enable: true',
+    '  listen: 127.0.0.1:1053',
+    '  enhanced-mode: fake-ip',
+    '  nameserver:',
+    '    - 223.5.5.5',
+    '    - 119.29.29.29',
+    '    - 1.1.1.1',
+    '    - 8.8.8.8',
+    'proxies:',
+    `  - name: ${yamlQuote(proxyName)}`,
+    '    type: hysteria2',
+    `    server: ${yamlQuote(server)}`,
+    `    port: ${firstPort}`,
+    `    password: ${yamlQuote(account.authToken)}`,
+    `    sni: ${yamlQuote(site.publicHost || server)}`,
+    '    skip-cert-verify: true',
+    'proxy-groups:',
+    '  - name: Oversea',
+    '    type: select',
+    '    proxies:',
+    `      - ${yamlQuote(proxyName)}`,
+    '      - DIRECT',
+    'rules:',
+    ...site.reservedInternalCidrs.map((cidr) => `  - IP-CIDR,${cidr},DIRECT,no-resolve`),
+    '  - GEOIP,CN,DIRECT',
+    '  - MATCH,Oversea',
+    ''
+  ];
+  return {
+    siteId: site.siteId,
+    username: account.username,
+    accountId: account.accountId,
+    contentType: 'text/yaml',
+    yaml: lines.join('\n'),
+    reachability: site.reachability,
+    generatedAt: now
+  };
+}
+
+function safeAccountPrefix(siteId: string): string {
+  return safeAccountName(siteId || 'oversea-main');
+}
+
+function safeAccountName(value: string): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80) || 'account';
+}
+
+function inferAccessAccountRole(siteId: string, username: string): SiteSlotAccessAccountRole {
+  const prefix = safeAccountPrefix(siteId);
+  if (username === `${prefix}-internal`) return 'internal';
+  if (username === `${prefix}-domestic`) return 'domestic';
+  if (username.startsWith(`${prefix}-internal`)) return 'internal-reserved';
+  return 'h-endpoint';
+}
+
+function firstHysteriaPort(serverPorts: string): number {
+  const match = serverPorts.match(/\d+/);
+  return match ? Number(match[0]) : 51288;
+}
+
+function yamlQuote(value: string): string {
+  return JSON.stringify(value);
 }
 
 export function normalizeTestStatus(value: string): TestStep['status'] {

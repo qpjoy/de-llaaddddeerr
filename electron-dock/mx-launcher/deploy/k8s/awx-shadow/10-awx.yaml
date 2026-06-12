@@ -1,0 +1,60 @@
+apiVersion: awx.ansible.com/v1beta1
+kind: AWX
+metadata:
+  name: mx-awx
+  namespace: mx-awx
+  labels:
+    app.kubernetes.io/name: mx-awx
+    app.kubernetes.io/part-of: mx-3ks
+    mx.qpjoy.com/role: execution-provider
+spec:
+  service_type: clusterip
+  web_resource_requirements:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+  task_resource_requirements:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  ee_resource_requirements:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+  redis_resource_requirements:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  postgres_resource_requirements:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  rsyslog_resource_requirements:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  init_container_resource_requirements:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

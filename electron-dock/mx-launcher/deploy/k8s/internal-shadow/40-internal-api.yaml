@@ -1,4 +1,19 @@
 apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mx-launcher-internal-ssh
+  namespace: mx-internal-shadow
+  labels:
+    app.kubernetes.io/name: mx-launcher-internal
+    app.kubernetes.io/part-of: mx-3ks
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 256Mi
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: mx-launcher-internal
@@ -85,3 +100,10 @@ spec:
             limits:
               cpu: 1000m
               memory: 1Gi
+          volumeMounts:
+            - name: internal-ssh
+              mountPath: /app/artifacts/ssh
+      volumes:
+        - name: internal-ssh
+          persistentVolumeClaim:
+            claimName: mx-launcher-internal-ssh

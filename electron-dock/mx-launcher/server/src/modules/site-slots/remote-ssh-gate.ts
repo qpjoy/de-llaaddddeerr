@@ -197,6 +197,7 @@ function remoteSshJobGateFailures(
 ): string[] {
   const identityFileExists = sshProfile?.identityFile ? existsSync(sshProfile.identityFile) : null;
   const knownHostsFileExists = sshProfile?.knownHostsFile ? existsSync(sshProfile.knownHostsFile) : null;
+  const sshConfigFileExists = sshProfile?.sshConfigFile ? existsSync(sshProfile.sshConfigFile) : null;
   return [
     ...(job.status !== 'ready' ? [`worker job is not ready: ${job.status}`] : []),
     ...(job.currentReportId ? [`worker job already has report: ${job.currentReportId}`] : []),
@@ -214,7 +215,8 @@ function remoteSshJobGateFailures(
     ...(sshProfile?.identityFile ? [] : ['SSH identity file is required before artifact-push-remote-ssh can execute']),
     ...(sshProfile?.identityFile && identityFileExists === false ? [`SSH identity file does not exist: ${sshProfile.identityFile}`] : []),
     ...(sshProfile?.knownHostsFile ? [] : ['SSH known_hosts file is required before artifact-push-remote-ssh can verify host keys']),
-    ...(sshProfile?.knownHostsFile && knownHostsFileExists === false ? [`SSH known_hosts file does not exist: ${sshProfile.knownHostsFile}`] : [])
+    ...(sshProfile?.knownHostsFile && knownHostsFileExists === false ? [`SSH known_hosts file does not exist: ${sshProfile.knownHostsFile}`] : []),
+    ...(sshProfile?.sshConfigFile && sshConfigFileExists === false ? [`SSH config file does not exist: ${sshProfile.sshConfigFile}`] : [])
   ];
 }
 
@@ -267,13 +269,14 @@ function artifactReferenceEvidence(ref: string, artifactBaseDir: string, failure
   const exists = existsSync(resolvedPath);
   const kind = artifactKind(ref);
   const manifest = kind ? readArtifactManifest(kind, artifactBaseDir, failures) : null;
-  const module = manifest?.modules.find((item) => basename(stringValue(item.artifactPath) ?? stringValue(item.artifact) ?? '') === basename(resolvedPath)) ?? null;
+  const moduleMatch = artifactModuleMatch(manifest, resolvedPath, ref);
+  const module = moduleMatch?.module ?? null;
   const manifestSelfReference = basename(resolvedPath) === 'manifest.json';
   const sha256 = exists ? sha256File(resolvedPath) : null;
   if (!exists) failures.push(`missing artifact: ${ref} -> ${resolvedPath}`);
   if (exists && !manifest) failures.push(`missing artifact manifest for ${ref}`);
   if (exists && manifest && !module && !manifestSelfReference) failures.push(`artifact not listed in manifest: ${ref}`);
-  if (exists && module?.sha256 && sha256 !== module.sha256) {
+  if (exists && moduleMatch?.primary && module?.sha256 && sha256 !== module.sha256) {
     failures.push(`artifact sha256 mismatch for ${ref}: expected ${module.sha256}, got ${sha256}`);
   }
   return {
@@ -294,11 +297,28 @@ function artifactReferenceEvidence(ref: string, artifactBaseDir: string, failure
       status: module.status,
       targetPath: module.targetPath,
       manifestSha256: module.sha256,
-      sha256Status: module.sha256 === sha256 ? 'passed' : 'failed',
+      sha256Status: moduleMatch?.primary ? module.sha256 === sha256 ? 'passed' : 'failed' : 'module-file',
       bytes: module.bytes,
       metadata: module.metadata
     } : null
   };
+}
+
+function artifactModuleMatch(
+  manifest: ReturnType<typeof readArtifactManifest> | null,
+  resolvedPath: string,
+  ref: string
+) {
+  const resolvedBasename = basename(resolvedPath);
+  const refRelative = ref.replace(/^\.\/artifacts\/site-slots\/[^/]+\//, '');
+  for (const module of manifest?.modules ?? []) {
+    const primaryBasename = basename(stringValue(module.artifactPath) ?? stringValue(module.artifact) ?? '');
+    if (primaryBasename === resolvedBasename) return { module, primary: true };
+    if (module.files.some((file) => file === refRelative || basename(file) === resolvedBasename)) {
+      return { module, primary: false };
+    }
+  }
+  return null;
 }
 
 function readArtifactManifest(kind: string, artifactBaseDir: string, failures: string[]) {
@@ -334,7 +354,10 @@ function readArtifactManifest(kind: string, artifactBaseDir: string, failures: s
       targetPath: stringValue(module.targetPath),
       sha256: stringValue(module.sha256),
       bytes: typeof module.bytes === 'number' ? module.bytes : null,
-      metadata: asRecord(module.metadata)
+      metadata: asRecord(module.metadata),
+      files: Array.isArray(module.files)
+        ? module.files.map((file) => stringValue(file)).filter((file): file is string => Boolean(file))
+        : []
     }))
   };
 }
@@ -342,11 +365,13 @@ function readArtifactManifest(kind: string, artifactBaseDir: string, failures: s
 function siteSlotSshProfileEvidence(plan: SiteSlotPlan | null, profile: SiteSlotSshProfile | null) {
   const identityFileExists = profile?.identityFile ? existsSync(profile.identityFile) : null;
   const knownHostsFileExists = profile?.knownHostsFile ? existsSync(profile.knownHostsFile) : null;
+  const sshConfigFileExists = profile?.sshConfigFile ? existsSync(profile.sshConfigFile) : null;
   const gateWarnings = [
     ...(plan ? [] : ['plan not found while building dry-run SSH evidence']),
     ...(plan?.ssh.profileStatus === 'paused' || profile?.status === 'paused' ? ['managed SSH profile is paused'] : []),
     ...(profile?.identityFile && identityFileExists === false ? [`SSH identity file does not exist: ${profile.identityFile}`] : []),
-    ...(profile?.knownHostsFile && knownHostsFileExists === false ? [`SSH known_hosts file does not exist: ${profile.knownHostsFile}`] : [])
+    ...(profile?.knownHostsFile && knownHostsFileExists === false ? [`SSH known_hosts file does not exist: ${profile.knownHostsFile}`] : []),
+    ...(profile?.sshConfigFile && sshConfigFileExists === false ? [`SSH config file does not exist: ${profile.sshConfigFile}`] : [])
   ];
   return {
     gate: 'dry-run-warning-only',
@@ -361,6 +386,8 @@ function siteSlotSshProfileEvidence(plan: SiteSlotPlan | null, profile: SiteSlot
     identityFileExists,
     knownHostsFile: profile?.knownHostsFile ?? null,
     knownHostsFileExists,
+    sshConfigFile: profile?.sshConfigFile ?? null,
+    sshConfigFileExists,
     hostKeyAlias: profile?.hostKeyAlias ?? null,
     strictHostKeyChecking: profile?.strictHostKeyChecking ?? null,
     connectTimeoutSeconds: profile?.connectTimeoutSeconds ?? null,
@@ -389,14 +416,37 @@ function readOnlyProbeCommand(profile: ReturnType<typeof siteSlotSshProfileEvide
 
 function sshOptionFragment(profile: ReturnType<typeof siteSlotSshProfileEvidence>): string {
   const parts = [
+    '-F', shellSingleQuote(internalSshConfigFile(profile)),
     '-o', shellSingleQuote(`BatchMode=${profile.batchMode ?? 'yes'}`),
-    '-o', shellSingleQuote(`ConnectTimeout=${profile.connectTimeoutSeconds ?? 10}`),
+    '-o', shellSingleQuote(`ConnectTimeout=${profile.connectTimeoutSeconds ?? 30}`),
+    '-o', shellSingleQuote('ConnectionAttempts=2'),
+    '-o', shellSingleQuote('AddressFamily=inet'),
+    '-o', shellSingleQuote('IPQoS=none'),
+    '-o', shellSingleQuote('ServerAliveInterval=5'),
+    '-o', shellSingleQuote('ServerAliveCountMax=2'),
     '-o', shellSingleQuote(`StrictHostKeyChecking=${profile.strictHostKeyChecking ?? 'yes'}`)
   ];
+  if (internalSshUsesDefaultIsolatedConfig(profile)) {
+    parts.push('-o', shellSingleQuote('ProxyCommand=none'), '-o', shellSingleQuote('ProxyJump=none'));
+  }
   if (profile.identityFile) parts.push('-i', shellSingleQuote(profile.identityFile));
   if (profile.knownHostsFile) parts.push('-o', shellSingleQuote(`UserKnownHostsFile=${profile.knownHostsFile}`));
-  if (profile.hostKeyAlias) parts.push('-o', shellSingleQuote(`HostKeyAlias=${profile.hostKeyAlias}`));
+  if (profile.hostKeyAlias) {
+    parts.push('-o', shellSingleQuote(`HostKeyAlias=${profile.hostKeyAlias}`));
+    parts.push('-o', shellSingleQuote('CheckHostIP=no'));
+  }
   return parts.join(' ');
+}
+
+function internalSshConfigFile(profile?: { sshConfigFile?: string | null }): string {
+  return profile?.sshConfigFile?.trim()
+    || process.env.MX_SITE_SLOT_SSH_CONFIG_FILE?.trim()
+    || process.env.SITE_SLOT_SSH_CONFIG_FILE?.trim()
+    || '/dev/null';
+}
+
+function internalSshUsesDefaultIsolatedConfig(profile?: { sshConfigFile?: string | null }): boolean {
+  return !profile?.sshConfigFile && !process.env.MX_SITE_SLOT_SSH_CONFIG_FILE && !process.env.SITE_SLOT_SSH_CONFIG_FILE;
 }
 
 function resolveSiteSlotArtifactBaseDir(): string {

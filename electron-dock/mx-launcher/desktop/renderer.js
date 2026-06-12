@@ -28,29 +28,236 @@ const api = window.mxLauncher || {
 
 const state = {
   activeView: 'app-center',
+  sidebarCollapsed: false,
+  adminSubnavCollapsed: false,
+  hoverAdminMenu: null,
+  adminMenu: 'operations',
+  adminSection: 'dashboard',
+  adminSubsection: 'overview',
+  deploymentKind: 'oversea',
+  selectedSiteId: null,
   dashboard: null,
   selectedPlanId: null,
   currentActions: [],
   selectedAction: null,
+  selectedActionBody: null,
+  awxActionDraft: {
+    providerId: '',
+    token: '',
+    timeoutSeconds: '',
+    waitForCompletion: true
+  },
+  preferredActionFocus: null,
+  domesticPeerDraft: {
+    peerRole: 'guest',
+    leaseIp: '',
+    publicKey: ''
+  },
   actionBusy: false,
   actionFeedback: null,
+  setupRun: {
+    active: false,
+    status: 'idle',
+    message: '',
+    steps: []
+  },
   currentPipeline: null,
+  overseaOverview: null,
+  overseaOverviewError: null,
+  overseaEnsureBusy: false,
+  overseaEnsureFeedback: null,
+  overseaTerminalBusy: false,
+  overseaTerminalCommand: '',
+  overseaTerminalResult: null,
+  siteDraft: null,
+  mihomoReachability: null,
+  mihomoReachabilitySiteId: null,
+  mihomoReachabilityError: null,
   selectedTimelineEntryId: null,
   pendingEvidenceFocus: null,
   sshProfiles: [],
   selectedSshProfileId: null,
   sshProfileBusy: false,
+  sshHostKeyBusy: false,
   sshBootstrapBusy: false,
   sshPlanBusy: false,
+  sshShadowBusy: false,
   sshReadinessBusy: false,
   sshPolicyBusy: false,
   sshProfileBootstrap: null,
+  sshProfileShadowSetup: null,
   sshProfileReadiness: null,
   sshRuntimePolicy: null,
   sshProfileFeedback: null,
+  userCenter: {
+    users: [],
+    roles: [],
+    feedback: null,
+    busy: false
+  },
+  relayEnrollment: {
+    result: null,
+    feedback: null,
+    busy: false
+  },
+  awxProviders: [],
+  selectedAwxProviderId: null,
+  awxRuntimePolicies: [],
+  awxRuntimePolicyBusy: false,
+  awxRuntimePolicyFeedback: null,
+  awxProviderBusy: false,
+  awxProviderCheckBusy: false,
+  awxProviderCheck: null,
+  awxProviderFeedback: null,
   topology: null
 };
 
+let setupMonitorToken = 0;
+
+const overseaTerminalTemplates = {
+  inspect: [
+    'set -eu',
+    '. /etc/os-release 2>/dev/null || true',
+    'echo "mx-oversea-inspect"',
+    'echo "os=${ID:-unknown} version=${VERSION_ID:-unknown}"',
+    'uname -a',
+    'id',
+    'pwd',
+    'df -h /',
+    'if command -v docker >/dev/null 2>&1; then docker version --format "{{.Server.Version}}" 2>/dev/null || docker version; else echo "docker: missing"; fi',
+    'if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then docker compose version; else echo "docker compose: missing"; fi'
+  ].join('; '),
+  installDocker: [
+    'set -eu',
+    'printf "mx-docker-bootstrap\\n"',
+    '. /etc/os-release 2>/dev/null || true',
+    'echo "os=${ID:-unknown} version=${VERSION_ID:-unknown}"',
+    'if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then echo "docker: present"; else if command -v apt-get >/dev/null 2>&1; then export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y ca-certificates curl gnupg lsb-release; curl -fsSL https://get.docker.com | sh; elif command -v dnf >/dev/null 2>&1; then dnf install -y ca-certificates curl; curl -fsSL https://get.docker.com | sh; elif command -v yum >/dev/null 2>&1; then yum install -y ca-certificates curl; curl -fsSL https://get.docker.com | sh; elif command -v apk >/dev/null 2>&1; then apk add --no-cache docker docker-cli-compose; elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install docker docker-compose || curl -fsSL https://get.docker.com | sh; else curl -fsSL https://get.docker.com | sh; fi; fi',
+    'if command -v systemctl >/dev/null 2>&1; then systemctl enable --now docker || true; elif command -v service >/dev/null 2>&1; then service docker start || true; elif command -v rc-update >/dev/null 2>&1; then rc-update add docker default || true; service docker start || true; fi',
+    'docker version',
+    'docker compose version || docker-compose version'
+  ].join('; '),
+  stackStatus: [
+    'set -eu',
+    'echo "mx-oversea-stack-status"',
+    'cd /opt/mx/current/hysteria2-access-stack 2>/dev/null || cd /opt/mx/releases/oversea-access-stack 2>/dev/null || { echo "access stack missing"; exit 2; }',
+    './manage.sh status || true',
+    'docker ps --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}" || true'
+  ].join('; ')
+};
+
+const adminMenuMeta = {
+  operations: {
+    heading: 'I-HDO',
+    kicker: 'Operations',
+    title: 'H/D/I/O',
+    defaultSection: 'dashboard',
+    defaultSubsection: 'overview'
+  },
+  internal: {
+    heading: 'Internal 基础系统',
+    kicker: 'Internal',
+    title: 'Truth / control plane',
+    defaultSection: 'foundations',
+    defaultSubsection: 'overview'
+  },
+  evidence: {
+    heading: 'Evidence History',
+    kicker: 'Evidence',
+    title: 'Trace / log / gate',
+    defaultSection: 'evidence',
+    defaultSubsection: 'overview'
+  }
+};
+
+const internalSubsectionMeta = {
+  overview: {
+    title: 'Internal 基础系统',
+    subtitle: 'User Center、RBAC、Config、DNS、Release、E2E Gate、Observability、Admin、Runner、SDK Gateway 都在 Internal 控制面内规划。'
+  },
+  'user-center': {
+    title: 'User Center',
+    subtitle: '用户、服务账号、设备身份和初始 Internal01-09 账号都归 Internal 管理。'
+  },
+  rbac: {
+    title: 'RBAC',
+    subtitle: '角色、权限、审批确认和 Action Gate 边界在这里收敛，避免 Domestic / Oversea 持有权限真相。'
+  },
+  'config-center': {
+    title: 'Config Center',
+    subtitle: 'SSH Profile、runtime policy、订阅 authority、snapshot 和站点配置都从 Internal 下发。'
+  },
+  'awx-provider': {
+    title: 'AWX Provider',
+    subtitle: 'AWX API endpoint、inventory、credential、job template registry 是 Internal 远程执行能力的 provider 配置。'
+  },
+  dns: {
+    title: 'DNS',
+    subtitle: 'Internal CoreDNS authority 管理 split DNS；Domestic 只保留可选 edge cache。'
+  },
+  mihomo: {
+    title: 'Mihomo Authority',
+    subtitle: 'Internal 生成 Oversea hysteria2 / mihomo 订阅，Launcher Network 只消费配置快照。'
+  },
+  release: {
+    title: 'Release Center',
+    subtitle: '统一 artifact、版本、release notes、灰度、回滚和 Launcher / AppCenter 更新策略。'
+  },
+  'e2e-gate': {
+    title: 'E2E Gate',
+    subtitle: 'synthetic probe、runner output、截图和配置快照进入发布门禁。'
+  },
+  observability: {
+    title: 'Observability',
+    subtitle: 'H / D / I / O 链路的 trace、log、metric、evidence 都汇总到 Internal。'
+  },
+  'admin-runner': {
+    title: 'Admin / Runner',
+    subtitle: '三维拓扑、Action Gates、审批、worker job、rollback 和日志证据共用同一动作模型。'
+  },
+  'sdk-gateway': {
+    title: 'SDK Gateway',
+    subtitle: 'Launcher、AppCenter 应用和其他系统通过稳定 SDK 契约进入 Internal 能力。'
+  }
+};
+
+const evidenceSubsectionMeta = {
+  overview: {
+    title: 'Evidence History',
+    subtitle: '全部 plan、runner、worker、report、rollback 和 gate evidence 汇总在这里。'
+  },
+  executions: {
+    title: 'Execution Evidence',
+    subtitle: 'preflight、apply、rollback execution 的状态、确认和门禁结果。'
+  },
+  'runner-sessions': {
+    title: 'Runner Sessions',
+    subtitle: 'remote SSH / AWX runner session、命令上下文和边界声明。'
+  },
+  'worker-jobs': {
+    title: 'Worker Jobs',
+    subtitle: 'worker job handoff、queue、Action Gate 和后续动作提示。'
+  },
+  'worker-reports': {
+    title: 'Worker Reports',
+    subtitle: 'artifact push dry run、stdout / stderr、step reports 和报告状态。'
+  },
+  rollback: {
+    title: 'Rollback Evidence',
+    subtitle: '回滚执行、回滚报告和失败恢复链路证据。'
+  },
+  'audit-log': {
+    title: 'Audit / Logs',
+    subtitle: '审计、日志和操作历史先归档在 Evidence History，后续拆成独立查询。'
+  },
+  'release-gate': {
+    title: 'Release Gate Evidence',
+    subtitle: 'Release Center、E2E Gate、synthetic probe 和发布门禁证据。'
+  }
+};
+
+const sidebar = document.getElementById('sidebar');
+const sidebarCollapse = document.getElementById('sidebar-collapse');
 const stateChip = document.getElementById('connection-state');
 const hdoLaunch = document.getElementById('hdo-launch');
 const hdoAdmin = document.getElementById('hdo-admin');
@@ -59,6 +266,7 @@ const serverInput = document.getElementById('server-input');
 const platformStatus = document.getElementById('platform-status');
 const appRefresh = document.getElementById('app-refresh');
 const adminRefresh = document.getElementById('admin-refresh');
+const adminHeading = document.getElementById('admin-heading');
 const adminGenerated = document.getElementById('admin-generated');
 const pipelineList = document.getElementById('pipeline-list');
 const pipelineCount = document.getElementById('pipeline-count');
@@ -67,11 +275,46 @@ const pipelineSummary = document.getElementById('pipeline-summary');
 const pipelineStepper = document.getElementById('pipeline-stepper');
 const pipelineActions = document.getElementById('pipeline-actions');
 const pipelineHealth = document.getElementById('pipeline-health');
+const adminModuleTabs = Array.from(document.querySelectorAll('.admin-module-tab'));
+const adminSections = Array.from(document.querySelectorAll('.admin-section'));
+const adminSubnav = document.getElementById('admin-subnav');
+const adminSubnavToggle = document.getElementById('admin-subnav-toggle');
+const adminSubnavKicker = document.getElementById('admin-subnav-kicker');
+const adminSubnavTitle = document.getElementById('admin-subnav-title');
+const adminSubnavItems = document.getElementById('admin-subnav-items');
+const deploymentTitle = document.getElementById('deployment-title');
+const deploymentSubtitle = document.getElementById('deployment-subtitle');
+const deploymentSiteCount = document.getElementById('deployment-site-count');
+const setupGuide = document.getElementById('setup-guide');
+const dashboardGuidance = document.getElementById('dashboard-guidance');
+const siteWorkbench = document.getElementById('site-workbench');
+const foundationHeading = document.getElementById('foundation-heading');
+const foundationSubtitle = document.getElementById('foundation-subtitle');
+const foundationGrid = document.getElementById('foundation-grid');
+const evidenceHeading = document.getElementById('evidence-heading');
+const evidenceSubtitle = document.getElementById('evidence-subtitle');
+const evidenceHistory = document.getElementById('evidence-history');
+const inspectorKind = document.getElementById('inspector-kind');
+const inspectorTitle = document.getElementById('inspector-title');
+const inspectorMeta = document.getElementById('inspector-meta');
+const inspectorStatus = document.getElementById('inspector-status');
+const inspectorFacts = document.getElementById('inspector-facts');
+const inspectorNext = document.getElementById('inspector-next');
+const inspectorEvidence = document.getElementById('inspector-evidence');
+const consoleInternalState = document.getElementById('console-internal-state');
+const consoleStoreDriver = document.getElementById('console-store-driver');
+const consoleExecutionProvider = document.getElementById('console-execution-provider');
+const consoleGateState = document.getElementById('console-gate-state');
+const consoleEvidenceCount = document.getElementById('console-evidence-count');
+const consoleOsScope = document.getElementById('console-os-scope');
+const consolePrincipal = document.getElementById('console-principal');
+const consolePrincipalScope = document.getElementById('console-principal-scope');
 const metricSiteSlots = document.getElementById('metric-site-slots');
 const metricRollbacks = document.getElementById('metric-rollbacks');
 const metricReleases = document.getElementById('metric-releases');
 const metricTests = document.getElementById('metric-tests');
 const sshProfileCount = document.getElementById('ssh-profile-count');
+const sshProfilePanel = document.querySelector('.ssh-profile-panel');
 const sshProfileForm = document.getElementById('ssh-profile-form');
 const sshProfileId = document.getElementById('ssh-profile-id');
 const sshProfileSiteId = document.getElementById('ssh-profile-site-id');
@@ -86,17 +329,43 @@ const sshProfileBatchMode = document.getElementById('ssh-profile-batch-mode');
 const sshProfileTimeout = document.getElementById('ssh-profile-timeout');
 const sshProfileIdentity = document.getElementById('ssh-profile-identity');
 const sshProfileKnownHosts = document.getElementById('ssh-profile-known-hosts');
+const sshProfileConfigFile = document.getElementById('ssh-profile-config-file');
 const sshProfileHostKeyAlias = document.getElementById('ssh-profile-host-key-alias');
 const sshProfileSave = document.getElementById('ssh-profile-save');
+const sshProfileRefreshHostKey = document.getElementById('ssh-profile-refresh-host-key');
 const sshProfileBootstrap = document.getElementById('ssh-profile-bootstrap');
 const sshProfileCreatePlan = document.getElementById('ssh-profile-create-plan');
+const sshProfileShadowSetup = document.getElementById('ssh-profile-shadow-setup');
 const sshProfileFeedback = document.getElementById('ssh-profile-feedback');
 const sshProfileBootstrapResult = document.getElementById('ssh-profile-bootstrap-result');
+const sshProfileShadowResult = document.getElementById('ssh-profile-shadow-result');
 const sshProfileList = document.getElementById('ssh-profile-list');
 const sshReadinessStatus = document.getElementById('ssh-readiness-status');
 const sshProfileReadinessRun = document.getElementById('ssh-profile-readiness-run');
+const sshProfileReadinessExecute = document.getElementById('ssh-profile-readiness-execute');
 const sshProfilePolicyEnable = document.getElementById('ssh-profile-policy-enable');
 const sshProfileReadiness = document.getElementById('ssh-profile-readiness');
+const awxProviderCount = document.getElementById('awx-provider-count');
+const awxProviderForm = document.getElementById('awx-provider-form');
+const awxProviderId = document.getElementById('awx-provider-id');
+const awxProviderName = document.getElementById('awx-provider-name');
+const awxProviderStatus = document.getElementById('awx-provider-status');
+const awxProviderKind = document.getElementById('awx-provider-kind');
+const awxProviderBaseUrl = document.getElementById('awx-provider-base-url');
+const awxProviderOrganization = document.getElementById('awx-provider-organization');
+const awxProviderProject = document.getElementById('awx-provider-project');
+const awxProviderInventoryPrefix = document.getElementById('awx-provider-inventory-prefix');
+const awxProviderCredentialPrefix = document.getElementById('awx-provider-credential-prefix');
+const awxProviderTemplatePrefix = document.getElementById('awx-provider-template-prefix');
+const awxProviderVerifyTls = document.getElementById('awx-provider-verify-tls');
+const awxProviderTimeout = document.getElementById('awx-provider-timeout');
+const awxProviderToken = document.getElementById('awx-provider-token');
+const awxProviderSave = document.getElementById('awx-provider-save');
+const awxProviderCheckRun = document.getElementById('awx-provider-check-run');
+const awxProviderFeedback = document.getElementById('awx-provider-feedback');
+const awxProviderCheck = document.getElementById('awx-provider-check');
+const awxRuntimeGates = document.getElementById('awx-runtime-gates');
+const awxProviderList = document.getElementById('awx-provider-list');
 const topologyCanvas = document.getElementById('topology-canvas');
 const evidenceBackdrop = document.getElementById('evidence-backdrop');
 const evidenceDrawer = document.getElementById('evidence-drawer');
@@ -115,7 +384,14 @@ void boot();
 
 for (const tab of tabs) {
   tab.addEventListener('click', () => {
-    setActiveView(tab.dataset.view);
+    state.hoverAdminMenu = null;
+    setActiveView(tab.dataset.view, adminNavFromElement(tab));
+  });
+  tab.addEventListener('mouseenter', () => {
+    previewCollapsedAdminSubnav(tab);
+  });
+  tab.addEventListener('focus', () => {
+    previewCollapsedAdminSubnav(tab);
   });
 }
 
@@ -139,6 +415,47 @@ adminRefresh.addEventListener('click', () => {
   void refreshAdmin();
 });
 
+sidebarCollapse.addEventListener('click', () => {
+  state.sidebarCollapsed = !state.sidebarCollapsed;
+  state.hoverAdminMenu = null;
+  sidebar.classList.toggle('is-collapsed', state.sidebarCollapsed);
+  sidebar.classList.toggle('is-subnav-open', state.sidebarCollapsed && state.activeView === 'admin');
+  sidebarCollapse.setAttribute('aria-expanded', state.sidebarCollapsed ? 'false' : 'true');
+  sidebarCollapse.textContent = state.sidebarCollapsed ? '展开 →' : '收起 ←';
+  renderAdminSubnav();
+  requestAnimationFrame(() => resizeTopology());
+});
+
+sidebar.addEventListener('mouseleave', () => {
+  if (!state.sidebarCollapsed) return;
+  state.hoverAdminMenu = null;
+  sidebar.classList.toggle('is-subnav-open', state.activeView === 'admin');
+  renderAdminSubnav();
+});
+
+if (adminSubnavToggle) {
+  adminSubnavToggle.addEventListener('click', () => {
+    state.adminSubnavCollapsed = !state.adminSubnavCollapsed;
+    renderAdminSubnav();
+  });
+}
+
+for (const tab of adminModuleTabs) {
+  tab.addEventListener('click', () => {
+    applyAdminNavigation(adminNavFromElement(tab), { stopSetupMessage: 'Stopped because the operator changed sections.' });
+    renderAdminShell();
+    if (state.dashboard && state.adminSection === 'deployment') {
+      const active = activePipelineForCurrentDeployment(state.dashboard.siteSlotPipelines || []);
+      state.selectedPlanId = active?.planId || null;
+      state.selectedSiteId = active?.siteId || state.selectedSiteId;
+      renderAdminDashboard(state.dashboard);
+      if (state.selectedPlanId) void refreshPipelineDetail(state.selectedPlanId);
+    } else if (state.dashboard) {
+      renderAdminDashboard(state.dashboard);
+    }
+  });
+}
+
 sshProfileForm.addEventListener('submit', (event) => {
   event.preventDefault();
   void saveSshProfile();
@@ -148,17 +465,62 @@ sshProfileCreatePlan.addEventListener('click', () => {
   void createPlanFromSshProfile();
 });
 
+sshProfileShadowSetup.addEventListener('click', () => {
+  void runOverseaShadowSetupFromSshProfile();
+});
+
 sshProfileBootstrap.addEventListener('click', () => {
   void bootstrapSshProfile();
 });
 
+sshProfileRefreshHostKey.addEventListener('click', () => {
+  void refreshSshHostKey();
+});
+
 sshProfileReadinessRun.addEventListener('click', () => {
-  void checkSshProfileReadiness();
+  void checkSshProfileReadiness(false);
+});
+
+sshProfileReadinessExecute.addEventListener('click', () => {
+  void checkSshProfileReadiness(true);
 });
 
 sshProfilePolicyEnable.addEventListener('click', () => {
   void allowSshProfileReadonlyPolicy();
 });
+
+awxProviderForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  void saveAwxProvider();
+});
+
+awxProviderCheckRun.addEventListener('click', () => {
+  void checkAwxProviderFromForm();
+});
+
+for (const control of [
+  sshProfileSiteId,
+  sshProfileKind,
+  sshProfileHost,
+  sshProfileUser,
+  sshProfilePassword,
+  sshProfileRotateKey,
+  sshProfilePort,
+  sshProfileStrict,
+  sshProfileBatchMode,
+  sshProfileTimeout,
+  sshProfileIdentity,
+  sshProfileKnownHosts,
+  sshProfileConfigFile,
+  sshProfileHostKeyAlias
+]) {
+  control.addEventListener('input', () => {
+    renderSshProfileSaveState();
+  });
+  control.addEventListener('change', () => {
+    renderSshProfileSaveState();
+  });
+}
 
 evidenceClose.addEventListener('click', () => {
   closeEvidenceDrawer();
@@ -183,19 +545,79 @@ async function boot() {
   renderStatus(status);
 }
 
-function setActiveView(view) {
+function adminNavFromElement(element) {
+  return {
+    menu: element.dataset.adminMenu,
+    section: element.dataset.adminSection,
+    subsection: element.dataset.adminSubsection,
+    deploymentKind: element.dataset.deploymentKind
+  };
+}
+
+function previewCollapsedAdminSubnav(tab) {
+  if (!state.sidebarCollapsed || tab.dataset.view !== 'admin') return;
+  state.hoverAdminMenu = tab.dataset.adminMenu || 'operations';
+  sidebar.classList.add('is-subnav-open');
+  renderAdminSubnav();
+}
+
+function setActiveView(view, nav = {}) {
+  if (view !== 'admin' && state.setupRun.active) {
+    clearSetupRun('Stopped because the operator left I-HDO.', 'stopped');
+  }
+  if (view === 'admin') {
+    applyAdminNavigation(nav);
+  }
   state.activeView = view === 'admin' ? 'admin' : 'app-center';
+  if (state.activeView !== 'admin') {
+    state.hoverAdminMenu = null;
+    sidebar.classList.remove('is-subnav-open');
+  } else {
+    sidebar.classList.toggle('is-subnav-open', state.sidebarCollapsed);
+  }
   for (const tab of tabs) {
-    tab.classList.toggle('is-active', tab.dataset.view === state.activeView);
+    const active = state.activeView === 'app-center'
+      ? tab.dataset.view === 'app-center'
+      : tab.dataset.view === 'admin' && (tab.dataset.adminMenu || 'operations') === state.adminMenu;
+    tab.classList.toggle('is-active', active);
   }
   for (const item of views) {
     item.classList.toggle('is-active', item.id === `view-${state.activeView}`);
   }
+  renderAdminShell();
   if (state.activeView === 'admin' && !state.dashboard) {
     void refreshAdmin();
   }
+  if (state.activeView === 'admin' && state.dashboard) {
+    renderAdminDashboard(state.dashboard);
+  }
   if (state.activeView === 'admin') {
     requestAnimationFrame(() => resizeTopology());
+  }
+}
+
+function applyAdminNavigation(nav = {}, options = {}) {
+  const menu = adminMenuMeta[nav.menu] ? nav.menu : state.adminMenu;
+  const meta = adminMenuMeta[menu] || adminMenuMeta.operations;
+  const previousSection = state.adminSection;
+  const previousKind = state.deploymentKind;
+  state.adminMenu = menu;
+  state.adminSection = nav.section || meta.defaultSection;
+  state.adminSubsection = nav.subsection || meta.defaultSubsection;
+  if (nav.deploymentKind) {
+    state.deploymentKind = nav.deploymentKind === 'domestic' ? 'domestic' : 'oversea';
+  }
+  const changedDeployment = previousKind !== state.deploymentKind;
+  const changedSection = previousSection !== state.adminSection;
+  if ((changedDeployment || changedSection) && state.setupRun.active) {
+    clearSetupRun(options.stopSetupMessage || 'Stopped because the operator changed sections.', 'stopped');
+  }
+  if (changedDeployment) {
+    state.selectedSiteId = null;
+    state.selectedPlanId = null;
+    state.selectedAction = null;
+    state.actionFeedback = null;
+    closeEvidenceDrawer();
   }
 }
 
@@ -232,29 +654,68 @@ async function refreshAdmin() {
   await persistConfig();
   renderAdminLoading();
   try {
-    const [dashboard, profilePayload] = await Promise.all([
+    const [dashboard, profilePayload, overseaPayload, userCenterPayload] = await Promise.all([
       fetchJson('/internal/v1/admin/dashboard'),
-      loadSshProfiles()
+      loadSshProfiles(),
+      loadOverseaOverview(),
+      loadUserCenterOverview()
     ]);
     state.dashboard = dashboard;
     state.sshProfiles = asArray(profilePayload.profiles);
+    state.userCenter.users = asArray(userCenterPayload.users);
+    state.userCenter.roles = asArray(userCenterPayload.roles);
+    if (userCenterPayload.error) {
+      state.userCenter.feedback = { kind: 'error', message: userCenterPayload.error };
+    }
+    state.awxProviders = asArray(dashboard.awxProviders);
+    state.awxRuntimePolicies = asArray(dashboard.runtimeFeaturePolicies);
+    state.overseaOverview = overseaPayload.overview;
+    state.overseaOverviewError = overseaPayload.error;
     const pipelines = dashboard.siteSlotPipelines || [];
-    state.selectedPlanId = pipelines.some((item) => item.planId === state.selectedPlanId)
-      ? state.selectedPlanId
-      : pipelines[0]?.planId || null;
+    const active = activePipelineForCurrentDeployment(pipelines);
+    state.selectedPlanId = active?.planId || null;
+    state.selectedSiteId = selectedSiteFromOverseaOverview() || active?.siteId || state.selectedSiteId;
     primeSshProfileForm(pipelines);
+    primeAwxProviderForm(state.awxProviders);
     renderAdminDashboard(dashboard);
-    if (state.selectedPlanId) {
+    if (state.adminSection === 'deployment' && state.selectedPlanId) {
       await refreshPipelineDetail(state.selectedPlanId);
     } else {
       renderEmptyPipeline();
     }
     setConnection('connected', 'Connected', `${dashboard.overview.siteId} / ${dashboard.overview.storeDriver}`);
   } catch (error) {
+    if (state.setupRun.active) {
+      clearSetupRun(`Admin API unavailable: ${error.message}`, 'failed');
+    }
     state.dashboard = null;
+    state.overseaOverview = null;
+    state.overseaOverviewError = error.message;
     renderAdminError(error);
     setConnection('error', 'Offline', 'Admin API unavailable');
   }
+}
+
+async function loadOverseaOverview() {
+  try {
+    const overview = await fetchJson('/internal/v1/admin/oversea');
+    return { overview, error: null };
+  } catch (error) {
+    return { overview: null, error: error.message };
+  }
+}
+
+function selectedSiteFromOverseaOverview() {
+  if (state.deploymentKind !== 'oversea') return null;
+  if (state.siteDraft?.kind === 'oversea' && state.selectedSiteId === state.siteDraft.siteId) {
+    return state.selectedSiteId;
+  }
+  const sites = asArray(state.overseaOverview?.sites);
+  if (!sites.length) return null;
+  if (state.selectedSiteId && sites.some((site) => site.siteId === state.selectedSiteId)) {
+    return state.selectedSiteId;
+  }
+  return sites[0].siteId || null;
 }
 
 async function refreshPipelineDetail(planId) {
@@ -268,14 +729,41 @@ async function refreshPipelineDetail(planId) {
   renderPipelineSelection();
   try {
     const payload = await fetchJson(`/internal/v1/admin/site-slots/pipelines/${encodeURIComponent(planId)}`);
-    renderPipelineDetail(payload.pipeline);
-    consumePendingEvidenceFocus(payload.pipeline);
+    const pipeline = payload.pipeline;
+    state.selectedSiteId = pipeline?.summary?.siteId || state.selectedSiteId;
+    state.deploymentKind = pipeline?.summary?.kind === 'domestic' ? 'domestic' : pipeline?.summary?.kind === 'oversea' ? 'oversea' : state.deploymentKind;
+    state.mihomoReachability = null;
+    state.mihomoReachabilitySiteId = pipeline?.summary?.kind === 'oversea' ? pipeline.summary.siteId : null;
+    state.mihomoReachabilityError = null;
+    renderPipelineDetail(pipeline);
+    consumePendingEvidenceFocus(pipeline);
+    void refreshMihomoReachabilityForPipeline(pipeline);
+    return pipeline;
   } catch (error) {
     pipelineSummary.textContent = error.message;
     pipelineStepper.innerHTML = '';
     pipelineActions.innerHTML = '';
     pipelineTimeline.innerHTML = '';
+    return null;
   }
+}
+
+async function refreshMihomoReachabilityForPipeline(pipeline) {
+  const summary = pipeline?.summary || null;
+  if (!summary || summary.kind !== 'oversea' || !summary.siteId) return;
+  try {
+    const payload = await fetchJson(`/internal/v1/launcher-network/mihomo/sites/${encodeURIComponent(summary.siteId)}/reachability`);
+    if (state.selectedPlanId !== summary.planId || state.currentPipeline?.summary?.siteId !== summary.siteId) return;
+    state.mihomoReachability = payload.reachability || null;
+    state.mihomoReachabilitySiteId = summary.siteId;
+    state.mihomoReachabilityError = null;
+  } catch (error) {
+    if (state.selectedPlanId !== summary.planId || state.currentPipeline?.summary?.siteId !== summary.siteId) return;
+    state.mihomoReachability = null;
+    state.mihomoReachabilitySiteId = summary.siteId;
+    state.mihomoReachabilityError = error.message;
+  }
+  renderCurrentPipelineSummary();
 }
 
 async function loadSshProfiles() {
@@ -299,6 +787,93 @@ async function loadSshProfiles() {
   }
 }
 
+async function loadUserCenterOverview() {
+  try {
+    const [usersPayload, rolesPayload] = await Promise.all([
+      fetchJson('/internal/v1/user-center/users'),
+      fetchJson('/internal/v1/user-center/roles')
+    ]);
+    return {
+      users: asArray(usersPayload.users),
+      roles: asArray(rolesPayload.roles),
+      error: null
+    };
+  } catch (error) {
+    return { users: [], roles: [], error: error.message };
+  }
+}
+
+async function saveAwxProvider() {
+  if (state.awxProviderBusy) return;
+  const tokenForAction = blankToNull(awxProviderToken.value);
+  state.awxProviderBusy = true;
+  state.awxProviderFeedback = { kind: 'info', message: 'Saving AWX provider' };
+  state.awxProviderCheck = null;
+  renderAwxProviderFeedback();
+  renderAwxProviderSaveState();
+  renderAwxProviderCheck();
+  try {
+    const payload = await fetchJson('/internal/v1/config-center/awx-providers', {
+      method: 'POST',
+      body: awxProviderFormPayload()
+    });
+    const saved = payload.provider;
+    if (tokenForAction) state.awxActionDraft.token = tokenForAction;
+    state.selectedAwxProviderId = saved?.providerId || null;
+    state.awxProviderFeedback = {
+      kind: 'success',
+      message: saved ? `Saved ${saved.name} / ${saved.defaultKind}` : 'Saved AWX provider'
+    };
+    const dashboard = await fetchJson('/internal/v1/admin/dashboard');
+    state.dashboard = dashboard;
+    state.awxProviders = asArray(dashboard.awxProviders);
+    renderAdminDashboard(dashboard);
+    if (saved) fillAwxProviderForm(saved);
+  } catch (error) {
+    state.awxProviderFeedback = { kind: 'error', message: error.message };
+    renderAwxProviderFeedback();
+  } finally {
+    state.awxProviderBusy = false;
+    renderAwxProviderSaveState();
+  }
+}
+
+async function checkAwxProviderFromForm() {
+  if (state.awxProviderCheckBusy) return;
+  const providerId = blankToNull(awxProviderId.value) || state.selectedAwxProviderId;
+  if (!providerId) {
+    state.awxProviderFeedback = { kind: 'error', message: 'Save or select an AWX provider first' };
+    renderAwxProviderFeedback();
+    return;
+  }
+  state.awxProviderCheckBusy = true;
+  state.awxProviderFeedback = { kind: 'info', message: 'Checking AWX provider' };
+  renderAwxProviderFeedback();
+  renderAwxProviderSaveState();
+  try {
+    const payload = await fetchJson(`/internal/v1/config-center/awx-providers/${encodeURIComponent(providerId)}/check`, {
+      method: 'POST',
+      body: awxProviderCheckPayload()
+    });
+    state.awxActionDraft.token = blankToNull(awxProviderToken.value) || state.awxActionDraft.token;
+    state.awxProviderCheck = payload.check || null;
+    const status = state.awxProviderCheck?.status || 'unknown';
+    state.awxProviderFeedback = {
+      kind: status === 'failed' ? 'error' : status === 'passed' ? 'success' : 'info',
+      message: `AWX provider check ${status}`
+    };
+  } catch (error) {
+    state.awxProviderCheck = null;
+    state.awxProviderFeedback = { kind: 'error', message: error.message };
+  } finally {
+    awxProviderToken.value = '';
+    state.awxProviderCheckBusy = false;
+    renderAwxProviderFeedback();
+    renderAwxProviderSaveState();
+    renderAwxProviderCheck();
+  }
+}
+
 async function saveSshProfile() {
   if (state.sshProfileBusy) return;
   state.sshProfileBusy = true;
@@ -313,16 +888,19 @@ async function saveSshProfile() {
     const saved = payload.profile;
     state.selectedSshProfileId = saved?.profileId || null;
     state.sshProfileBootstrap = null;
+    state.sshProfileShadowSetup = null;
     state.sshProfileReadiness = null;
     state.sshRuntimePolicy = null;
     state.sshProfileFeedback = {
       kind: 'success',
       message: saved ? `Saved ${saved.siteId} / ${saved.sshUser}@${saved.host || '-'}` : 'Saved profile'
     };
-    const profilePayload = await loadSshProfiles();
-    state.sshProfiles = asArray(profilePayload.profiles);
-    renderSshProfiles(state.sshProfiles);
-    if (saved) fillSshProfileForm(saved);
+    if (saved) {
+      state.siteDraft = null;
+      state.selectedSiteId = saved.siteId || state.selectedSiteId;
+      fillSshProfileForm(saved);
+    }
+    await refreshAdmin();
   } catch (error) {
     state.sshProfileFeedback = { kind: 'error', message: error.message };
     renderSshProfileFeedback();
@@ -330,6 +908,7 @@ async function saveSshProfile() {
     state.sshProfileBusy = false;
     renderSshProfileSaveState();
     renderSshProfileBootstrap();
+    renderSshProfileShadowSetup();
     renderSshProfileReadiness();
   }
 }
@@ -368,6 +947,7 @@ async function bootstrapSshProfile() {
     sshProfileRotateKey.checked = false;
     state.selectedSshProfileId = saved?.profileId || null;
     state.sshProfileBootstrap = bootstrap;
+    state.sshProfileShadowSetup = null;
     state.sshProfileReadiness = null;
     state.sshRuntimePolicy = null;
     state.sshProfileFeedback = bootstrapFeedback(bootstrap, saved);
@@ -379,12 +959,59 @@ async function bootstrapSshProfile() {
     sshProfilePassword.value = '';
     sshProfileRotateKey.checked = false;
     state.sshProfileBootstrap = null;
+    state.sshProfileShadowSetup = null;
     state.sshProfileFeedback = { kind: 'error', message: error.message };
     renderSshProfileFeedback();
   } finally {
     state.sshBootstrapBusy = false;
     renderSshProfileSaveState();
     renderSshProfileBootstrap();
+    renderSshProfileShadowSetup();
+    renderSshProfileReadiness();
+  }
+}
+
+async function refreshSshHostKey() {
+  if (state.sshHostKeyBusy) return;
+  if (!blankToNull(sshProfileSiteId.value) || !blankToNull(sshProfileHost.value)) {
+    state.sshProfileFeedback = {
+      kind: 'error',
+      message: 'Site and host are required before refreshing host key'
+    };
+    renderSshProfileFeedback();
+    return;
+  }
+  state.sshHostKeyBusy = true;
+  state.sshProfileFeedback = { kind: 'info', message: 'Refreshing SSH host key pin' };
+  renderSshProfileFeedback();
+  renderSshProfileSaveState();
+  try {
+    const payload = await fetchJson('/internal/v1/config-center/site-slot-ssh-profiles/bootstrap', {
+      method: 'POST',
+      body: sshProfileHostKeyRefreshPayload()
+    });
+    const saved = payload.profile;
+    const bootstrap = payload.bootstrap || null;
+    state.selectedSshProfileId = saved?.profileId || null;
+    state.sshProfileBootstrap = bootstrap;
+    state.sshProfileShadowSetup = null;
+    state.sshProfileReadiness = null;
+    state.sshRuntimePolicy = null;
+    state.sshProfileFeedback = hostKeyRefreshFeedback(bootstrap, saved);
+    const profilePayload = await loadSshProfiles();
+    state.sshProfiles = asArray(profilePayload.profiles);
+    renderSshProfiles(state.sshProfiles);
+    if (saved) fillSshProfileForm(saved);
+  } catch (error) {
+    state.sshProfileBootstrap = null;
+    state.sshProfileShadowSetup = null;
+    state.sshProfileFeedback = { kind: 'error', message: error.message };
+    renderSshProfileFeedback();
+  } finally {
+    state.sshHostKeyBusy = false;
+    renderSshProfileSaveState();
+    renderSshProfileBootstrap();
+    renderSshProfileShadowSetup();
     renderSshProfileReadiness();
   }
 }
@@ -426,7 +1053,277 @@ async function createPlanFromSshProfile() {
   }
 }
 
-async function checkSshProfileReadiness() {
+async function runOverseaShadowSetupFromSshProfile() {
+  if (state.sshShadowBusy) return;
+  const siteId = blankToNull(sshProfileSiteId.value);
+  if (!siteId || !blankToNull(sshProfileHost.value)) {
+    state.sshProfileFeedback = {
+      kind: 'error',
+      message: 'Site and host are required before Oversea shadow setup'
+    };
+    renderSshProfileFeedback();
+    return;
+  }
+  if (sshProfileKind.value !== 'oversea') {
+    state.sshProfileFeedback = {
+      kind: 'error',
+      message: 'Shadow Setup is currently scoped to Oversea slots'
+    };
+    renderSshProfileFeedback();
+    return;
+  }
+  state.sshShadowBusy = true;
+  state.sshProfileShadowSetup = null;
+  state.sshProfileFeedback = { kind: 'info', message: 'Running Oversea shadow setup' };
+  renderSshProfileFeedback();
+  renderSshProfileSaveState();
+  renderSshProfileShadowSetup();
+  try {
+    const payload = await fetchJson(`/internal/v1/admin/oversea/${encodeURIComponent(siteId)}/shadow-setup`, {
+      method: 'POST',
+      body: sshProfileShadowSetupPayload()
+    });
+    const setup = payload.shadowSetup || null;
+    const profile = payload.profile || null;
+    if (profile) {
+      state.selectedSshProfileId = profile.profileId || null;
+      fillSshProfileForm(profile);
+    }
+    state.selectedSiteId = setup?.siteId || siteId;
+    state.selectedPlanId = setup?.planId || state.selectedPlanId;
+    state.sshProfileShadowSetup = setup;
+    state.overseaOverview = payload.oversea || state.overseaOverview;
+    state.overseaOverviewError = null;
+    state.pendingEvidenceFocus = setup?.reportId && setup?.planId
+      ? { planId: setup.planId, kind: 'worker-report', id: setup.reportId }
+      : setup?.planId
+        ? { planId: setup.planId, kind: 'plan', id: setup.planId }
+        : null;
+    state.sshProfileFeedback = {
+      kind: setup?.status === 'passed' ? 'success' : setup?.status === 'failed' || setup?.status === 'blocked' ? 'error' : 'info',
+      message: setup ? `Shadow setup ${setup.status} / ${setup.reportId || setup.jobId}` : 'Shadow setup completed'
+    };
+    awxProviderToken.value = '';
+    const [dashboard, profilePayload] = await Promise.all([
+      fetchJson('/internal/v1/admin/dashboard'),
+      loadSshProfiles()
+    ]);
+    state.dashboard = dashboard;
+    state.sshProfiles = asArray(profilePayload.profiles);
+    state.awxProviders = asArray(dashboard.awxProviders);
+    renderAdminDashboard(dashboard);
+    renderSshProfiles(state.sshProfiles);
+    if (state.selectedPlanId) await refreshPipelineDetail(state.selectedPlanId);
+  } catch (error) {
+    state.sshProfileFeedback = { kind: 'error', message: error.message };
+    renderSshProfileFeedback();
+  } finally {
+    state.sshShadowBusy = false;
+    renderSshProfileSaveState();
+    renderSshProfileShadowSetup();
+  }
+}
+
+async function ensureSelectedOversea() {
+  if (state.overseaEnsureBusy) return;
+  const overviewSite = selectedOverseaSite();
+  const siteId = overviewSite?.siteId || state.selectedSiteId || blankToNull(sshProfileSiteId.value);
+  if (!siteId) {
+    state.overseaEnsureFeedback = { kind: 'error', message: 'Select or create an Oversea site first' };
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
+    return;
+  }
+  state.overseaEnsureBusy = true;
+  state.overseaEnsureFeedback = { kind: 'info', message: overviewSite?.status === 'installed' ? 'Refreshing Oversea state' : 'Installing and syncing Oversea' };
+  state.overseaTerminalResult = {
+    status: 'running',
+    command: `Install / Sync ${siteId}`,
+    stdout: [
+      `site: ${siteId}`,
+      'starting Internal-controlled Oversea install/sync',
+      'waiting for remote worker output...'
+    ].join('\n'),
+    stderr: ''
+  };
+  renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
+  try {
+    const shouldExecute = overviewSite?.status !== 'installed';
+    const payload = await fetchJson(`/internal/v1/admin/oversea/${encodeURIComponent(siteId)}/ensure`, {
+      method: 'POST',
+      body: {
+        executeRemote: shouldExecute,
+        confirmInstall: shouldExecute,
+        internalBaseUrl: normalizedServerBase(),
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-oversea-ensure-${Date.now()}`
+      }
+    });
+    state.overseaOverview = payload.oversea || state.overseaOverview;
+    state.overseaOverviewError = null;
+    state.overseaEnsureFeedback = ensureFeedbackFromPayload(payload.ensure);
+    state.overseaTerminalResult = terminalResultFromEnsure(payload.ensure, siteId);
+    const dashboard = await fetchJson('/internal/v1/admin/dashboard');
+    state.dashboard = dashboard;
+    const active = activePipelineForCurrentDeployment(dashboard.siteSlotPipelines || []);
+    state.selectedPlanId = active?.planId || state.selectedPlanId;
+    renderAdminDashboard(dashboard);
+    if (state.selectedPlanId) await refreshPipelineDetail(state.selectedPlanId);
+  } catch (error) {
+    state.overseaEnsureFeedback = { kind: 'error', message: error.message };
+    state.overseaTerminalResult = {
+      status: 'failed',
+      command: `Install / Sync ${siteId}`,
+      stdout: '',
+      stderr: error.message
+    };
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
+  } finally {
+    state.overseaEnsureBusy = false;
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
+  }
+}
+
+function terminalResultFromEnsure(ensure, siteId) {
+  if (!ensure) {
+    return {
+      status: 'failed',
+      command: `Install / Sync ${siteId}`,
+      stdout: '',
+      stderr: 'Install / Sync response missing'
+    };
+  }
+  const workerRun = ensure.workerRun || null;
+  const workerSummary = summarizeWorkerRunStdout(workerRun?.stdout);
+  const workerDiagnosis = workerDiagnosisFromStdout(workerRun?.stdout);
+  const steps = asArray(ensure.steps)
+    .map((step) => `${step.stepId || 'step'}: ${step.status || 'unknown'}${step.objectId ? ` / ${step.objectId}` : ''}`)
+    .join('\n');
+  const blocked = asArray(ensure.blockedReasons).filter(Boolean).join('\n');
+  const status = ensure.status === 'installed' || ensure.status === 'passed' ? 'passed' : ensure.status || workerRun?.status || 'unknown';
+  return {
+    status,
+    exitCode: workerRun?.exitCode ?? null,
+    command: `Install / Sync ${siteId}`,
+    stdout: [
+      `ensure: ${ensure.status || 'unknown'}`,
+      ensure.reportId ? `report: ${ensure.reportId}` : '',
+      steps ? `steps:\n${steps}` : '',
+      workerSummary ? `worker summary:\n${workerSummary}` : '',
+      workerRun?.stdout && !workerSummary ? `worker stdout:\n${workerRun.stdout}` : ''
+    ].filter(Boolean).join('\n\n'),
+    stderr: [
+      blocked ? `blocked / failure:\n${blocked}` : '',
+      workerDiagnosis ? `diagnosis: ${workerDiagnosis.category} / ${workerDiagnosis.summary}` : '',
+      !workerDiagnosis && workerRun?.diagnosis ? `diagnosis: ${workerRun.diagnosis.category} / ${workerRun.diagnosis.summary}` : '',
+      workerRun?.stderr ? `worker stderr:\n${workerRun.stderr}` : ''
+    ].filter(Boolean).join('\n\n'),
+    diagnosis: workerDiagnosis || workerRun?.diagnosis || null
+  };
+}
+
+function summarizeWorkerRunStdout(stdout) {
+  const parsed = parseLooseJson(stdout);
+  if (!parsed || typeof parsed !== 'object') return null;
+  const stepReports = asArray(parsed.stepReports);
+  const failed = stepReports.find((step) => step.status === 'failed');
+  const blockedCount = stepReports.filter((step) => step.status === 'blocked').length;
+  const passedCount = stepReports.filter((step) => step.status === 'passed').length;
+  const failureEvidence = parseLooseJson(failed?.stdout);
+  const diagnosis = failureEvidence?.executionResult?.diagnosis || null;
+  return [
+    parsed.reportId ? `report: ${parsed.reportId}` : '',
+    `status: ${parsed.status || 'unknown'}`,
+    `steps: ${passedCount} passed / ${failed ? 1 : 0} failed / ${blockedCount} not executed`,
+    failed ? `failed: ${failed.sourceId || failed.stepId} / ${failed.stderr || 'remote step failed'}` : '',
+    diagnosis ? `diagnosis: ${diagnosis.category || 'unknown'} / ${diagnosis.summary || '-'}` : ''
+  ].filter(Boolean).join('\n');
+}
+
+function workerDiagnosisFromStdout(stdout) {
+  const parsed = parseLooseJson(stdout);
+  if (!parsed || typeof parsed !== 'object') return null;
+  const failed = asArray(parsed.stepReports).find((step) => step.status === 'failed');
+  const evidence = parseLooseJson(failed?.stdout);
+  return evidence?.executionResult?.diagnosis || null;
+}
+
+function parseLooseJson(value) {
+  if (!value || typeof value !== 'string') return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+async function runSelectedOverseaTerminal() {
+  if (state.overseaTerminalBusy) return;
+  const site = selectedOverseaSite();
+  const command = (state.overseaTerminalCommand || overseaTerminalTemplates.inspect).trim();
+  if (!site || !command) {
+    state.overseaTerminalResult = {
+      status: 'blocked',
+      command,
+      stdout: '',
+      stderr: 'Select an Oversea node and enter a command first'
+    };
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
+    return;
+  }
+  state.overseaTerminalBusy = true;
+  state.overseaTerminalResult = {
+    status: 'running',
+    command,
+    stdout: '',
+    stderr: 'waiting for remote output...'
+  };
+  renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
+  try {
+    const payload = await fetchJson(`/internal/v1/admin/oversea/${encodeURIComponent(site.siteId)}/terminal`, {
+      method: 'POST',
+      body: {
+        command,
+        timeoutSeconds: 300,
+        confirmRemoteExecution: true,
+        confirmManualCommand: true,
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-oversea-terminal-${Date.now()}`
+      }
+    });
+    state.overseaOverview = payload.oversea || state.overseaOverview;
+    state.overseaOverviewError = null;
+    state.overseaTerminalResult = payload.terminal || {
+      status: 'failed',
+      command,
+      stdout: '',
+      stderr: 'Terminal response missing'
+    };
+  } catch (error) {
+    state.overseaTerminalResult = {
+      status: 'failed',
+      command,
+      stdout: '',
+      stderr: error.message
+    };
+  } finally {
+    state.overseaTerminalBusy = false;
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
+  }
+}
+
+function ensureFeedbackFromPayload(ensure) {
+  if (!ensure) return { kind: 'success', message: 'Oversea state refreshed' };
+  const status = ensure.status || 'unknown';
+  const report = ensure.reportId ? ` / ${ensure.reportId}` : '';
+  const kind = status === 'installed' || status === 'passed' || status === 'ready-to-install' ? 'success' : status === 'blocked' || status === 'failed' ? 'error' : 'info';
+  const blockers = asArray(ensure.blockedReasons).filter(Boolean).slice(0, 2).join(' / ');
+  return {
+    kind,
+    message: blockers ? `${status}${report}: ${blockers}` : `${status}${report}`
+  };
+}
+
+async function checkSshProfileReadiness(executeReadOnlyProbe = false) {
   const profileId = selectedSshProfileId();
   if (state.sshReadinessBusy || !profileId) {
     state.sshProfileFeedback = {
@@ -437,7 +1334,7 @@ async function checkSshProfileReadiness() {
     return;
   }
   state.sshReadinessBusy = true;
-  state.sshProfileFeedback = { kind: 'info', message: 'Checking SSH profile readiness' };
+  state.sshProfileFeedback = { kind: 'info', message: executeReadOnlyProbe ? 'Running read-only SSH probe' : 'Checking SSH profile readiness' };
   renderSshProfileFeedback();
   renderSshProfileSaveState();
   try {
@@ -445,9 +1342,9 @@ async function checkSshProfileReadiness() {
       method: 'POST',
       body: {
         confirmReadOnlyProbe: true,
-        executeReadOnlyProbe: false,
+        executeReadOnlyProbe,
         requestedBy: 'desktop-admin',
-        requestId: `desktop-ssh-readiness-${Date.now()}`
+        requestId: `${executeReadOnlyProbe ? 'desktop-ssh-readonly-execute' : 'desktop-ssh-readiness'}-${Date.now()}`
       }
     });
     const readiness = payload.readiness || null;
@@ -455,7 +1352,7 @@ async function checkSshProfileReadiness() {
     state.sshRuntimePolicy = readiness?.gates?.configGate?.policy || null;
     state.sshProfileFeedback = {
       kind: readiness && (readiness.status === 'ready' || readiness.status === 'passed') ? 'success' : 'error',
-      message: readiness ? `Readiness ${readiness.status}` : 'Readiness unavailable'
+      message: readiness ? `${executeReadOnlyProbe ? 'Readonly probe' : 'Readiness'} ${readiness.status}` : 'Readiness unavailable'
     };
   } catch (error) {
     state.sshProfileReadiness = null;
@@ -523,9 +1420,10 @@ function sshProfileFormPayload() {
     sshPort: positiveNumberOrNull(sshProfilePort.value) || 22,
     identityFile: blankToNull(sshProfileIdentity.value),
     knownHostsFile: blankToNull(sshProfileKnownHosts.value),
+    sshConfigFile: blankToNull(sshProfileConfigFile.value),
     hostKeyAlias: blankToNull(sshProfileHostKeyAlias.value),
     strictHostKeyChecking: sshProfileStrict.value,
-    connectTimeoutSeconds: positiveNumberOrNull(sshProfileTimeout.value) || 10,
+    connectTimeoutSeconds: positiveNumberOrNull(sshProfileTimeout.value) || 30,
     batchMode: sshProfileBatchMode.value,
     status: 'active',
     requestedBy: 'desktop-admin',
@@ -551,6 +1449,29 @@ function sshProfilePlanPayload() {
   };
 }
 
+function sshProfileShadowSetupPayload() {
+  const provider = activeAwxProviderForKind('oversea');
+  return {
+    sshProfileId: blankToNull(sshProfileId.value),
+    host: blankToNull(sshProfileHost.value),
+    sshUser: blankToNull(sshProfileUser.value) || 'root',
+    sshPort: positiveNumberOrNull(sshProfilePort.value) || 22,
+    identityFile: blankToNull(sshProfileIdentity.value),
+    knownHostsFile: blankToNull(sshProfileKnownHosts.value),
+    sshConfigFile: blankToNull(sshProfileConfigFile.value),
+    hostKeyAlias: blankToNull(sshProfileHostKeyAlias.value) || blankToNull(sshProfileSiteId.value),
+    strictHostKeyChecking: sshProfileStrict.value,
+    connectTimeoutSeconds: positiveNumberOrNull(sshProfileTimeout.value) || 30,
+    batchMode: sshProfileBatchMode.value,
+    internalBaseUrl: normalizedServerBase(),
+    awxProviderId: blankToNull(awxProviderId.value) || state.selectedAwxProviderId || provider?.providerId || null,
+    awxToken: blankToNull(awxProviderToken.value),
+    awxRequestTimeoutSeconds: positiveNumberOrNull(awxProviderTimeout.value) || 30,
+    requestedBy: 'desktop-admin',
+    requestId: `desktop-oversea-shadow-setup-${Date.now()}`
+  };
+}
+
 function sshProfileBootstrapPayload(password) {
   return {
     profileId: blankToNull(sshProfileId.value),
@@ -561,13 +1482,32 @@ function sshProfileBootstrapPayload(password) {
     sshPort: positiveNumberOrNull(sshProfilePort.value) || 22,
     password,
     hostKeyAlias: blankToNull(sshProfileHostKeyAlias.value),
-    connectTimeoutSeconds: positiveNumberOrNull(sshProfileTimeout.value) || 20,
+    connectTimeoutSeconds: positiveNumberOrNull(sshProfileTimeout.value) || 30,
     rotateKey: sshProfileRotateKey.checked,
     scanHostKey: true,
     executeBootstrap: true,
     confirmBootstrap: true,
     requestedBy: 'desktop-admin',
     requestId: `desktop-ssh-bootstrap-${Date.now()}`
+  };
+}
+
+function sshProfileHostKeyRefreshPayload() {
+  return {
+    profileId: blankToNull(sshProfileId.value),
+    siteId: blankToNull(sshProfileSiteId.value),
+    kind: sshProfileKind.value,
+    host: blankToNull(sshProfileHost.value),
+    sshUser: blankToNull(sshProfileUser.value) || 'root',
+    sshPort: positiveNumberOrNull(sshProfilePort.value) || 22,
+    hostKeyAlias: blankToNull(sshProfileHostKeyAlias.value) || blankToNull(sshProfileSiteId.value),
+    connectTimeoutSeconds: positiveNumberOrNull(sshProfileTimeout.value) || 30,
+    rotateKey: false,
+    scanHostKey: true,
+    executeBootstrap: false,
+    confirmBootstrap: false,
+    requestedBy: 'desktop-admin',
+    requestId: `desktop-ssh-host-key-refresh-${Date.now()}`
   };
 }
 
@@ -586,12 +1526,453 @@ function bootstrapFeedback(bootstrap, profile) {
   return { kind: 'info', message: `Profile and key prepared for ${target}` };
 }
 
+function hostKeyRefreshFeedback(bootstrap, profile) {
+  if (!bootstrap) return { kind: 'error', message: 'Host key refresh returned no result' };
+  const target = profile ? `${profile.siteId} / ${profile.host || '-'}` : bootstrap.siteId || 'profile';
+  const knownHosts = bootstrap.knownHosts || {};
+  if (knownHosts.status === 'passed') {
+    return {
+      kind: 'success',
+      message: `Pinned SSH host key for ${target}; rerun Inspect`
+    };
+  }
+  return {
+    kind: 'error',
+    message: `Could not scan SSH host key for ${target}`
+  };
+}
+
+function awxProviderFormPayload() {
+  return {
+    providerId: blankToNull(awxProviderId.value),
+    name: blankToNull(awxProviderName.value),
+    status: awxProviderStatus.value === 'paused' ? 'paused' : 'active',
+    defaultKind: awxProviderKind.value === 'domestic' || awxProviderKind.value === 'all' ? awxProviderKind.value : 'oversea',
+    baseUrl: blankToNull(awxProviderBaseUrl.value),
+    organization: blankToNull(awxProviderOrganization.value) || 'MX Internal',
+    project: blankToNull(awxProviderProject.value) || 'mx-launcher-site-slots',
+    inventoryPrefix: blankToNull(awxProviderInventoryPrefix.value) || 'mx',
+    credentialPrefix: blankToNull(awxProviderCredentialPrefix.value) || 'mx',
+    jobTemplatePrefix: blankToNull(awxProviderTemplatePrefix.value) || 'mx-site-slot',
+    verifyTls: awxProviderVerifyTls.checked,
+    requestTimeoutSeconds: positiveNumberOrNull(awxProviderTimeout.value) || 30,
+    requestedBy: 'desktop-admin',
+    requestId: `desktop-awx-provider-${Date.now()}`
+  };
+}
+
+function awxProviderCheckPayload() {
+  return {
+    kind: awxProviderKind.value === 'domestic' ? 'domestic' : 'oversea',
+    token: blankToNull(awxProviderToken.value),
+    requestTimeoutSeconds: positiveNumberOrNull(awxProviderTimeout.value) || 30,
+    requestedBy: 'desktop-admin',
+    requestId: `desktop-awx-provider-check-${Date.now()}`
+  };
+}
+
+function renderAwxProviders(providers) {
+  const items = asArray(providers);
+  awxProviderCount.textContent = String(items.length);
+  renderAwxProviderFeedback();
+  renderAwxProviderSaveState();
+  renderAwxProviderCheck();
+  if (!items.length) {
+    awxProviderList.innerHTML = '<div class="empty-state">No AWX providers</div>';
+    return;
+  }
+  awxProviderList.innerHTML = items.map((provider) => `
+    <button
+      class="awx-provider-item ${provider.providerId === state.selectedAwxProviderId ? 'is-selected' : ''}"
+      type="button"
+      data-provider-id="${escapeHtml(provider.providerId)}"
+    >
+      <span class="ssh-profile-head">
+        <strong>${escapeHtml(provider.name || provider.providerId)}</strong>
+        <span class="profile-status" data-status="${escapeHtml(provider.status)}">${escapeHtml(provider.status)}</span>
+      </span>
+      <span class="ssh-profile-target">
+        <span>${escapeHtml(provider.defaultKind)} / ${escapeHtml(provider.organization || '-')}</span>
+        <span>${escapeHtml(provider.baseUrl || 'config-only')}</span>
+      </span>
+      <dl class="awx-provider-meta">
+        <div>
+          <dt>Inventory</dt>
+          <dd>${escapeHtml(`${provider.inventoryPrefix || 'mx'}-${provider.environment || 'env'}-${provider.defaultKind || 'kind'}`)}</dd>
+        </div>
+        <div>
+          <dt>Template</dt>
+          <dd>${escapeHtml(`${provider.jobTemplatePrefix || 'mx-site-slot'}-${provider.defaultKind || 'kind'}-worker-v1`)}</dd>
+        </div>
+        <div>
+          <dt>Project</dt>
+          <dd>${escapeHtml(provider.project || '-')}</dd>
+        </div>
+        <div>
+          <dt>Updated</dt>
+          <dd>${formatTime(provider.updatedAt)}</dd>
+        </div>
+      </dl>
+      ${provider.warnings && provider.warnings.length ? `<span class="awx-provider-warning">${escapeHtml(provider.warnings[0])}</span>` : ''}
+    </button>
+  `).join('');
+  for (const item of awxProviderList.querySelectorAll('.awx-provider-item')) {
+    item.addEventListener('click', () => {
+      const provider = items.find((candidate) => candidate.providerId === item.dataset.providerId);
+      if (!provider) return;
+      state.selectedAwxProviderId = provider.providerId;
+      state.awxProviderFeedback = null;
+      state.awxProviderCheck = null;
+      fillAwxProviderForm(provider);
+      renderAwxProviders(state.awxProviders);
+      renderInspector();
+    });
+  }
+}
+
+function fillAwxProviderForm(provider) {
+  awxProviderId.value = provider.providerId || '';
+  awxProviderName.value = provider.name || '';
+  awxProviderStatus.value = provider.status === 'paused' ? 'paused' : 'active';
+  awxProviderKind.value = provider.defaultKind === 'domestic' || provider.defaultKind === 'all' ? provider.defaultKind : 'oversea';
+  awxProviderBaseUrl.value = provider.baseUrl || '';
+  awxProviderOrganization.value = provider.organization || 'MX Internal';
+  awxProviderProject.value = provider.project || 'mx-launcher-site-slots';
+  awxProviderInventoryPrefix.value = provider.inventoryPrefix || 'mx';
+  awxProviderCredentialPrefix.value = provider.credentialPrefix || 'mx';
+  awxProviderTemplatePrefix.value = provider.jobTemplatePrefix || 'mx-site-slot';
+  awxProviderVerifyTls.checked = provider.verifyTls !== false;
+  awxProviderTimeout.value = String(provider.requestTimeoutSeconds || 30);
+  awxProviderToken.value = '';
+}
+
+function primeAwxProviderForm(providers) {
+  if (awxProviderId.value.trim() || awxProviderName.value.trim() || awxProviderBaseUrl.value.trim()) return;
+  const items = asArray(providers);
+  const provider = items.find((item) => item.status === 'active' && item.defaultKind === 'oversea')
+    || items.find((item) => item.status === 'active')
+    || items[0];
+  if (provider) {
+    state.selectedAwxProviderId = provider.providerId || null;
+    fillAwxProviderForm(provider);
+    return;
+  }
+  awxProviderId.value = '';
+  awxProviderName.value = 'Oversea AWX Shadow';
+  awxProviderStatus.value = 'active';
+  awxProviderKind.value = 'oversea';
+  awxProviderBaseUrl.value = '';
+  awxProviderOrganization.value = 'MX Internal';
+  awxProviderProject.value = 'mx-launcher-site-slots';
+  awxProviderInventoryPrefix.value = 'mx';
+  awxProviderCredentialPrefix.value = 'mx';
+  awxProviderTemplatePrefix.value = 'mx-site-slot';
+  awxProviderVerifyTls.checked = true;
+  awxProviderTimeout.value = '30';
+}
+
+function renderAwxProviderFeedback() {
+  const feedback = state.awxProviderFeedback;
+  awxProviderFeedback.textContent = feedback?.message || '';
+  if (feedback?.kind) {
+    awxProviderFeedback.dataset.kind = feedback.kind === 'success' ? 'success' : feedback.kind === 'error' ? 'error' : 'info';
+  } else {
+    awxProviderFeedback.removeAttribute('data-kind');
+  }
+}
+
+function renderAwxProviderSaveState() {
+  awxProviderSave.disabled = state.awxProviderBusy || state.awxProviderCheckBusy;
+  awxProviderSave.textContent = state.awxProviderBusy ? 'Saving' : 'Save Provider';
+  awxProviderCheckRun.disabled = state.awxProviderBusy || state.awxProviderCheckBusy || !blankToNull(awxProviderId.value);
+  awxProviderCheckRun.textContent = state.awxProviderCheckBusy ? 'Checking' : 'Check Provider';
+}
+
+function renderAwxProviderCheck() {
+  const check = state.awxProviderCheck;
+  if (!check) {
+    awxProviderCheck.innerHTML = '';
+    return;
+  }
+  const endpoints = asArray(check.endpoints);
+  const failures = asArray(check.failures);
+  const warnings = asArray(check.warnings);
+  awxProviderCheck.innerHTML = `
+    <section class="awx-check-card" data-status="${escapeHtml(normalizeStageStatus(check.status))}">
+      <div class="ssh-bootstrap-head">
+        <span>
+          <strong>AWX Readonly Check</strong>
+          <small>${escapeHtml(check.baseUrl || 'config-only')} / ${escapeHtml(check.targetKind || '-')}</small>
+        </span>
+        <span class="profile-status" data-status="${escapeHtml(check.status || 'planned')}">${escapeHtml(check.status || 'planned')}</span>
+      </div>
+      <dl class="awx-check-summary">
+        <div>
+          <dt>Organization</dt>
+          <dd>${escapeHtml(check.organization || '-')}</dd>
+        </div>
+        <div>
+          <dt>Project</dt>
+          <dd>${escapeHtml(check.project || '-')}</dd>
+        </div>
+        <div>
+          <dt>Inventory</dt>
+          <dd>${escapeHtml(check.inventory || '-')}</dd>
+        </div>
+        <div>
+          <dt>Job Template</dt>
+          <dd>${escapeHtml(check.jobTemplate || '-')}</dd>
+        </div>
+      </dl>
+      <div class="awx-endpoint-grid">
+        ${endpoints.length ? endpoints.map((endpoint) => `
+          <article data-status="${escapeHtml(normalizeStageStatus(endpoint.status))}">
+            <span>${escapeHtml(endpoint.name)}</span>
+            <strong>${escapeHtml(endpoint.status)}</strong>
+            <small>HTTP ${escapeHtml(endpoint.httpStatus ?? '-')} / count ${escapeHtml(endpoint.count ?? '-')} / ${escapeHtml(endpoint.durationMs ?? 0)}ms</small>
+            <small>${escapeHtml(endpoint.message || '-')}</small>
+          </article>
+        `).join('') : '<div class="empty-state">No AWX endpoint calls</div>'}
+      </div>
+      ${failures.length ? `<ul class="ssh-readiness-failures">${failures.map((failure) => `<li>${escapeHtml(failure)}</li>`).join('')}</ul>` : ''}
+      ${warnings.length ? `<p class="awx-provider-warning">${escapeHtml(warnings[0])}</p>` : ''}
+    </section>
+  `;
+}
+
+function renderAwxRuntimeGates() {
+  if (!awxRuntimeGates) return;
+  const allEnabled = awxRuntimeGateDescriptors.every((descriptor) => runtimePolicyAllowsAwx(descriptor.featureKey));
+  const feedback = state.awxRuntimePolicyFeedback;
+  awxRuntimeGates.innerHTML = `
+    <section class="awx-runtime-card">
+      <div class="ssh-bootstrap-head">
+        <span>
+          <strong>AWX Runtime Gates</strong>
+          <small>Config Center remote-execute policies</small>
+        </span>
+        <button class="secondary-button" type="button" data-awx-runtime-enable-all ${state.awxRuntimePolicyBusy || allEnabled ? 'disabled' : ''}>
+          ${state.awxRuntimePolicyBusy ? 'Saving' : allEnabled ? 'Enabled' : 'Enable All'}
+        </button>
+      </div>
+      <div class="awx-runtime-grid">
+        ${awxRuntimeGateDescriptors.map((descriptor) => renderAwxRuntimeGate(descriptor)).join('')}
+      </div>
+      ${feedback ? `<div class="profile-feedback" data-kind="${escapeHtml(feedback.kind)}">${escapeHtml(feedback.message)}</div>` : ''}
+    </section>
+  `;
+  const enableAll = awxRuntimeGates.querySelector('[data-awx-runtime-enable-all]');
+  if (enableAll) {
+    enableAll.addEventListener('click', () => {
+      void saveAwxRuntimeGates(awxRuntimeGateDescriptors.map((descriptor) => descriptor.featureKey), true);
+    });
+  }
+  for (const button of awxRuntimeGates.querySelectorAll('[data-awx-runtime-feature]')) {
+    button.addEventListener('click', () => {
+      const featureKey = button.dataset.awxRuntimeFeature;
+      if (!featureKey) return;
+      const enabled = button.dataset.nextEnabled === 'true';
+      void saveAwxRuntimeGates([featureKey], enabled);
+    });
+  }
+}
+
+function renderAwxRuntimeGate(descriptor) {
+  const policy = awxRuntimePolicyFor(descriptor.featureKey);
+  const enabled = runtimePolicyAllowsAwx(descriptor.featureKey);
+  const status = enabled ? 'passed' : policy ? 'blocked' : 'planned';
+  const nextEnabled = !enabled;
+  return `
+    <article class="awx-runtime-gate" data-status="${escapeHtml(status)}">
+      <span>${escapeHtml(descriptor.label)}</span>
+      <strong>${escapeHtml(enabled ? 'remote-execute' : policy?.mode || 'disabled')}</strong>
+      <small>${escapeHtml(policy?.policyId || descriptor.envKey)}</small>
+      <button
+        class="secondary-button"
+        type="button"
+        data-awx-runtime-feature="${escapeHtml(descriptor.featureKey)}"
+        data-next-enabled="${nextEnabled ? 'true' : 'false'}"
+        ${state.awxRuntimePolicyBusy ? 'disabled' : ''}
+      >${enabled ? 'Disable' : 'Enable'}</button>
+    </article>
+  `;
+}
+
+function awxRuntimePolicyFor(featureKey) {
+  return asArray(state.awxRuntimePolicies)
+    .find((policy) => policy.featureKey === featureKey && policy.scopeKind === 'global')
+    || asArray(state.awxRuntimePolicies).find((policy) => policy.featureKey === featureKey)
+    || null;
+}
+
+function runtimePolicyAllowsAwx(featureKey) {
+  const policy = awxRuntimePolicyFor(featureKey);
+  if (!policy || !policy.enabled || policy.mode !== 'remote-execute') return false;
+  return !policy.expiresAt || Date.parse(policy.expiresAt) > Date.now();
+}
+
+async function saveAwxRuntimeGates(featureKeys, enabled) {
+  if (state.awxRuntimePolicyBusy) return;
+  state.awxRuntimePolicyBusy = true;
+  state.awxRuntimePolicyFeedback = {
+    kind: 'info',
+    message: enabled ? 'Enabling AWX runtime gates' : 'Disabling AWX runtime gate'
+  };
+  renderAwxRuntimeGates();
+  try {
+    await Promise.all(featureKeys.map((featureKey) => fetchJson('/internal/v1/config-center/runtime-feature-policies', {
+      method: 'POST',
+      body: {
+        featureKey,
+        scopeKind: 'global',
+        scopeId: null,
+        enabled,
+        mode: enabled ? 'remote-execute' : 'disabled',
+        requiresApproval: true,
+        reason: 'desktop-admin awx runtime gate',
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-awx-runtime-${Date.now()}`
+      }
+    })));
+    state.awxRuntimePolicyFeedback = {
+      kind: 'success',
+      message: enabled ? 'AWX runtime gates enabled' : 'AWX runtime gate disabled'
+    };
+    const dashboard = await fetchJson('/internal/v1/admin/dashboard');
+    state.dashboard = dashboard;
+    renderAdminDashboard(dashboard);
+  } catch (error) {
+    state.awxRuntimePolicyFeedback = { kind: 'error', message: error.message };
+    renderAwxRuntimeGates();
+  } finally {
+    state.awxRuntimePolicyBusy = false;
+    renderAwxRuntimeGates();
+  }
+}
+
+async function refreshUserCenterPanels() {
+  const payload = await loadUserCenterOverview();
+  state.userCenter.users = asArray(payload.users);
+  state.userCenter.roles = asArray(payload.roles);
+  if (payload.error) state.userCenter.feedback = { kind: 'error', message: payload.error };
+  renderFoundationGrid(state.dashboard?.overview || {});
+}
+
+async function bootstrapUserCenterFromAdmin() {
+  if (state.userCenter.busy) return;
+  state.userCenter.busy = true;
+  state.userCenter.feedback = { kind: 'info', message: 'Bootstrapping User Center' };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    const payload = await fetchJson('/internal/v1/user-center/bootstrap', { method: 'POST', body: {} });
+    state.userCenter.feedback = {
+      kind: 'success',
+      message: `Bootstrapped ${asArray(payload.userCenter?.users).length} users`
+    };
+    await refreshUserCenterPanels();
+  } catch (error) {
+    state.userCenter.feedback = { kind: 'error', message: error.message };
+    renderFoundationGrid(state.dashboard?.overview || {});
+  } finally {
+    state.userCenter.busy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+  }
+}
+
+async function createUserFromAdmin() {
+  if (state.userCenter.busy) return;
+  const email = blankToNull(foundationGrid.querySelector('[data-user-field="email"]')?.value);
+  const displayName = blankToNull(foundationGrid.querySelector('[data-user-field="displayName"]')?.value);
+  const roleId = blankToNull(foundationGrid.querySelector('[data-user-field="roleId"]')?.value);
+  if (!email || !displayName) {
+    state.userCenter.feedback = { kind: 'error', message: 'Email and display name are required' };
+    renderFoundationGrid(state.dashboard?.overview || {});
+    return;
+  }
+  state.userCenter.busy = true;
+  state.userCenter.feedback = { kind: 'info', message: 'Creating user' };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    const payload = await fetchJson('/internal/v1/user-center/users', {
+      method: 'POST',
+      body: {
+        email,
+        displayName,
+        roleIds: roleId ? [roleId] : [],
+        orgIds: ['org_default'],
+        requestId: `desktop-user-${Date.now()}`
+      }
+    });
+    state.userCenter.feedback = {
+      kind: 'success',
+      message: `Created ${payload.user?.displayName || payload.user?.userId || email}`
+    };
+    await refreshUserCenterPanels();
+  } catch (error) {
+    state.userCenter.feedback = { kind: 'error', message: error.message };
+    renderFoundationGrid(state.dashboard?.overview || {});
+  } finally {
+    state.userCenter.busy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+  }
+}
+
+async function enrollHomeRelayFromAdmin() {
+  if (state.relayEnrollment.busy) return;
+  const siteId = blankToNull(foundationGrid.querySelector('[data-relay-field="siteId"]')?.value) || 'domestic-main';
+  const publicKey = blankToNull(foundationGrid.querySelector('[data-relay-field="publicKey"]')?.value);
+  const installId = blankToNull(foundationGrid.querySelector('[data-relay-field="installId"]')?.value);
+  const deviceId = blankToNull(foundationGrid.querySelector('[data-relay-field="deviceId"]')?.value);
+  if (!publicKey) {
+    state.relayEnrollment.feedback = { kind: 'error', message: 'Home WireGuard public key is required' };
+    renderFoundationGrid(state.dashboard?.overview || {});
+    return;
+  }
+  state.relayEnrollment.busy = true;
+  state.relayEnrollment.feedback = { kind: 'info', message: 'Creating relay enrollment' };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    const payload = await fetchJson('/internal/v1/enrollments/anonymous', {
+      method: 'POST',
+      body: {
+        productId: 'hdo',
+        siteId,
+        installId,
+        deviceId,
+        platform: 'desktop-admin',
+        publicKey,
+        relayMode: 'h2i',
+        requestId: `desktop-relay-enroll-${Date.now()}`
+      }
+    });
+    const enrollment = payload.enrollment || null;
+    state.relayEnrollment.result = enrollment;
+    state.relayEnrollment.feedback = {
+      kind: 'success',
+      message: enrollment ? `Relay lease ${enrollment.overlayIp}` : 'Relay enrollment created'
+    };
+    if (enrollment?.overlayIp) {
+      state.domesticPeerDraft = {
+        peerRole: 'guest',
+        leaseIp: enrollment.overlayIp,
+        publicKey
+      };
+    }
+  } catch (error) {
+    state.relayEnrollment.feedback = { kind: 'error', message: error.message };
+  } finally {
+    state.relayEnrollment.busy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+  }
+}
+
 function renderSshProfiles(profiles) {
   const items = asArray(profiles);
   sshProfileCount.textContent = String(items.length);
   renderSshProfileFeedback();
   renderSshProfileSaveState();
   renderSshProfileBootstrap();
+  renderSshProfileShadowSetup();
   renderSshProfileReadiness();
   if (!items.length) {
     sshProfileList.innerHTML = '<div class="empty-state">No SSH profiles</div>';
@@ -621,6 +2002,10 @@ function renderSshProfiles(profiles) {
           <dd>${escapeHtml(profile.knownHostsFile || '-')}</dd>
         </div>
         <div>
+          <dt>SSH Config</dt>
+          <dd>${escapeHtml(profile.sshConfigFile || '-')}</dd>
+        </div>
+        <div>
           <dt>Strict</dt>
           <dd>${escapeHtml(profile.strictHostKeyChecking)}</dd>
         </div>
@@ -639,6 +2024,7 @@ function renderSshProfiles(profiles) {
       state.selectedSshProfileId = profile.profileId;
       state.sshProfileFeedback = null;
       state.sshProfileBootstrap = null;
+      state.sshProfileShadowSetup = null;
       state.sshProfileReadiness = null;
       state.sshRuntimePolicy = null;
       fillSshProfileForm(profile);
@@ -659,9 +2045,10 @@ function fillSshProfileForm(profile) {
   sshProfilePort.value = String(profile.sshPort || 22);
   sshProfileStrict.value = profile.strictHostKeyChecking || 'yes';
   sshProfileBatchMode.value = profile.batchMode || 'yes';
-  sshProfileTimeout.value = String(profile.connectTimeoutSeconds || 10);
+  sshProfileTimeout.value = String(profile.connectTimeoutSeconds || 30);
   sshProfileIdentity.value = profile.identityFile || '';
   sshProfileKnownHosts.value = profile.knownHostsFile || '';
+  sshProfileConfigFile.value = profile.sshConfigFile || '';
   sshProfileHostKeyAlias.value = profile.hostKeyAlias || profile.siteId || '';
 }
 
@@ -680,7 +2067,10 @@ function primeSshProfileForm(pipelines) {
   sshProfilePort.value = '22';
   sshProfileStrict.value = 'yes';
   sshProfileBatchMode.value = 'yes';
-  sshProfileTimeout.value = '10';
+  sshProfileTimeout.value = '30';
+  sshProfileIdentity.value = '';
+  sshProfileKnownHosts.value = '';
+  sshProfileConfigFile.value = '';
 }
 
 function renderSshProfileFeedback() {
@@ -696,12 +2086,18 @@ function renderSshProfileFeedback() {
 function renderSshProfileSaveState() {
   sshProfileSave.disabled = state.sshProfileBusy;
   sshProfileSave.textContent = state.sshProfileBusy ? 'Saving' : 'Save Profile';
+  sshProfileRefreshHostKey.disabled = state.sshProfileBusy || state.sshHostKeyBusy || !blankToNull(sshProfileSiteId.value) || !blankToNull(sshProfileHost.value);
+  sshProfileRefreshHostKey.textContent = state.sshHostKeyBusy ? 'Refreshing' : 'Refresh Host Key';
   sshProfileBootstrap.disabled = state.sshProfileBusy || state.sshBootstrapBusy || !blankToNull(sshProfileSiteId.value) || !blankToNull(sshProfileHost.value);
   sshProfileBootstrap.textContent = state.sshBootstrapBusy ? 'Bootstrapping' : 'Bootstrap Key';
   sshProfileCreatePlan.disabled = state.sshProfileBusy || state.sshPlanBusy || !sshProfileId.value.trim();
   sshProfileCreatePlan.textContent = state.sshPlanBusy ? 'Creating' : 'Create Plan';
+  sshProfileShadowSetup.disabled = state.sshProfileBusy || state.sshShadowBusy || sshProfileKind.value !== 'oversea' || !blankToNull(sshProfileSiteId.value) || !blankToNull(sshProfileHost.value);
+  sshProfileShadowSetup.textContent = state.sshShadowBusy ? 'Setting up' : 'Shadow Setup';
   sshProfileReadinessRun.disabled = state.sshProfileBusy || state.sshReadinessBusy || !selectedSshProfileId();
   sshProfileReadinessRun.textContent = state.sshReadinessBusy ? 'Checking' : 'Check Readiness';
+  sshProfileReadinessExecute.disabled = state.sshProfileBusy || state.sshReadinessBusy || !selectedSshProfileId();
+  sshProfileReadinessExecute.textContent = state.sshReadinessBusy ? 'Running' : 'Run Readonly Probe';
   sshProfilePolicyEnable.disabled = state.sshProfileBusy || state.sshPolicyBusy || !selectedSshProfileId();
   sshProfilePolicyEnable.textContent = state.sshPolicyBusy ? 'Saving' : 'Allow Readonly';
 }
@@ -734,6 +2130,10 @@ function renderSshProfileBootstrap() {
           <dd>${escapeHtml(`${bootstrap.knownHosts?.status || '-'} / ${bootstrap.knownHosts?.lineCount ?? 0} lines`)}</dd>
         </div>
         <div>
+          <dt>SSH Config</dt>
+          <dd>${escapeHtml(bootstrap.key?.sshConfigFile || '-')}</dd>
+        </div>
+        <div>
           <dt>Env Gate</dt>
           <dd>${escapeHtml(`${gates.envGate?.status || '-'} / ${gates.envGate?.variable || '-'}`)}</dd>
         </div>
@@ -757,6 +2157,65 @@ function renderSshProfileBootstrap() {
           ${warnings.slice(0, 5).map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')}
         </ul>
       ` : ''}
+    </section>
+  `;
+}
+
+function renderSshProfileShadowSetup() {
+  const setup = state.sshProfileShadowSetup;
+  if (!setup) {
+    sshProfileShadowResult.innerHTML = '';
+    return;
+  }
+  const steps = asArray(setup.steps);
+  const blockedReasons = asArray(setup.blockedReasons);
+  const warnings = asArray(setup.warnings);
+  sshProfileShadowResult.innerHTML = `
+    <section class="ssh-bootstrap-card ssh-shadow-card" data-status="${escapeHtml(normalizeStageStatus(setup.status))}">
+      <div class="ssh-bootstrap-head">
+        <span>
+          <strong>Oversea Shadow Setup</strong>
+          <small>${escapeHtml(setup.boundary || 'internal-shadow-no-remote-mutation')}</small>
+        </span>
+        <span class="profile-status" data-status="${escapeHtml(setup.status || 'planned')}">${escapeHtml(setup.status || 'planned')}</span>
+      </div>
+      <dl class="ssh-readiness-meta">
+        <div>
+          <dt>Profile</dt>
+          <dd>${escapeHtml(setup.profileId || '-')}</dd>
+        </div>
+        <div>
+          <dt>Plan</dt>
+          <dd>${escapeHtml(setup.planId || '-')}</dd>
+        </div>
+        <div>
+          <dt>Runner</dt>
+          <dd>${escapeHtml(setup.runnerSessionId || '-')}</dd>
+        </div>
+        <div>
+          <dt>Job</dt>
+          <dd>${escapeHtml(setup.jobId || '-')}</dd>
+        </div>
+        <div>
+          <dt>Report</dt>
+          <dd>${escapeHtml(setup.reportId || '-')}</dd>
+        </div>
+        <div>
+          <dt>AWX</dt>
+          <dd>${escapeHtml(`${setup.providerId || 'env/default'} / ${setup.awxCheckStatus || 'not-checked'}`)}</dd>
+        </div>
+      </dl>
+      <div class="shadow-step-grid">
+        ${steps.map((step) => `
+          <article data-status="${escapeHtml(normalizeStageStatus(step.status))}">
+            <span>${escapeHtml(step.stepId || 'step')}</span>
+            <strong>${escapeHtml(step.status || 'unknown')}</strong>
+            <small>${escapeHtml(step.objectId || '-')}</small>
+          </article>
+        `).join('')}
+      </div>
+      ${blockedReasons.length ? `<ul class="ssh-readiness-failures">${blockedReasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join('')}</ul>` : ''}
+      ${warnings.length ? `<p class="awx-provider-warning">${escapeHtml(warnings[0])}</p>` : ''}
     </section>
   `;
 }
@@ -809,6 +2268,12 @@ function renderSshProfileReadiness() {
       </div>
     </dl>
     <pre class="ssh-readiness-command">${escapeHtml(readiness.command || '-')}</pre>
+    ${readiness.executionResult ? `
+      <div class="ssh-readiness-output">
+        <pre>${escapeHtml(readiness.executionResult.stdout || '')}</pre>
+        <pre>${escapeHtml(readiness.executionResult.stderr || '')}</pre>
+      </div>
+    ` : ''}
     ${failures.length ? `
       <ul class="ssh-readiness-failures">
         ${failures.slice(0, 5).map((failure) => `<li>${escapeHtml(failure)}</li>`).join('')}
@@ -856,6 +2321,124 @@ function selectedSshProfileId() {
   return sshProfileId.value.trim() || state.selectedSshProfileId || '';
 }
 
+function activeAwxProviderForKind(kind) {
+  const items = asArray(state.awxProviders);
+  return items.find((provider) => provider.status === 'active' && provider.defaultKind === kind)
+    || items.find((provider) => provider.status === 'active' && provider.defaultKind === 'all')
+    || items.find((provider) => provider.status === 'active')
+    || items[0]
+    || null;
+}
+
+const awxApiActionIds = new Set([
+  'site-slot.worker-run.awx-sync-plan',
+  'site-slot.worker-run.awx-credential-sync',
+  'site-slot.worker-run.awx-object-sync',
+  'site-slot.worker-run.awx-launch'
+]);
+
+const awxApiTokenActionIds = new Set([
+  'site-slot.worker-run.awx-credential-sync',
+  'site-slot.worker-run.awx-object-sync',
+  'site-slot.worker-run.awx-launch'
+]);
+
+const awxRuntimeGateDescriptors = [
+  {
+    featureKey: 'site-slot.awx.credential-sync',
+    label: 'Credential Sync',
+    envKey: 'AWX_API_CREDENTIAL_SYNC_ENABLED'
+  },
+  {
+    featureKey: 'site-slot.awx.object-sync',
+    label: 'Object Sync',
+    envKey: 'AWX_API_OBJECT_SYNC_ENABLED'
+  },
+  {
+    featureKey: 'site-slot.awx.launch',
+    label: 'AWX Launch',
+    envKey: 'AWX_API_LAUNCH_ENABLED'
+  }
+];
+
+function isAwxApiAction(action) {
+  return awxApiActionIds.has(action?.actionId);
+}
+
+function awxActionNeedsToken(action) {
+  return awxApiTokenActionIds.has(action?.actionId);
+}
+
+function awxActionKind() {
+  const kind = state.currentPipeline?.summary?.kind || state.currentPipeline?.plan?.kind || awxProviderKind.value;
+  return kind === 'domestic' ? 'domestic' : 'oversea';
+}
+
+function awxProviderById(providerId) {
+  if (!providerId) return null;
+  return asArray(state.awxProviders).find((provider) => provider.providerId === providerId) || null;
+}
+
+function selectedAwxProviderForAction(action) {
+  if (!isAwxApiAction(action)) return null;
+  const kind = awxActionKind();
+  const selected = awxProviderById(state.awxActionDraft.providerId)
+    || awxProviderById(state.selectedAwxProviderId);
+  if (selected && (selected.defaultKind === kind || selected.defaultKind === 'all')) return selected;
+  return activeAwxProviderForKind(kind);
+}
+
+function awxActionDefaultProviderId(action) {
+  return selectedAwxProviderForAction(action)?.providerId || blankToNull(awxProviderId.value) || '';
+}
+
+function awxActionDefaultTimeout(action, body = {}) {
+  const bodyTimeout = positiveNumberOrNull(body.timeoutSeconds);
+  if (bodyTimeout) return bodyTimeout;
+  const providerTimeout = positiveNumberOrNull(selectedAwxProviderForAction(action)?.requestTimeoutSeconds);
+  if (providerTimeout) return providerTimeout;
+  return action?.actionId === 'site-slot.worker-run.awx-launch' ? 180 : 120;
+}
+
+function prepareAwxActionDraft(action, body = {}) {
+  if (!isAwxApiAction(action)) return;
+  state.awxActionDraft = {
+    providerId: String(body.awxProviderId || body.providerId || awxActionDefaultProviderId(action) || ''),
+    token: state.awxActionDraft.token || blankToNull(awxProviderToken.value) || '',
+    timeoutSeconds: String(awxActionDefaultTimeout(action, body)),
+    waitForCompletion: body.waitForCompletion !== false
+  };
+}
+
+function awxActionBodyDefaults(action, body) {
+  if (!isAwxApiAction(action) || !body || typeof body !== 'object') return body;
+  const next = { ...body };
+  const providerId = next.awxProviderId || next.providerId || awxActionDefaultProviderId(action);
+  if (providerId) next.awxProviderId = providerId;
+  if (!positiveNumberOrNull(next.timeoutSeconds)) {
+    next.timeoutSeconds = awxActionDefaultTimeout(action, next);
+  }
+  if (action.actionId === 'site-slot.worker-run.awx-launch' && next.waitForCompletion === undefined) {
+    next.waitForCompletion = true;
+  }
+  return next;
+}
+
+function awxActionBodyForExecution(action, body) {
+  if (!isAwxApiAction(action)) return body;
+  const next = awxActionBodyDefaults(action, body);
+  const providerId = blankToNull(state.awxActionDraft.providerId) || awxActionDefaultProviderId(action);
+  const timeoutSeconds = positiveNumberOrNull(state.awxActionDraft.timeoutSeconds);
+  const token = state.awxActionDraft.token || blankToNull(awxProviderToken.value);
+  if (providerId) next.awxProviderId = providerId;
+  if (timeoutSeconds) next.timeoutSeconds = timeoutSeconds;
+  if (awxActionNeedsToken(action) && token) next.awxToken = token;
+  if (action.actionId === 'site-slot.worker-run.awx-launch') {
+    next.waitForCompletion = state.awxActionDraft.waitForCompletion !== false;
+  }
+  return next;
+}
+
 async function fetchJson(path, options = {}) {
   const base = normalizedServerBase();
   const body = options.body ? JSON.stringify(options.body) : undefined;
@@ -896,29 +2479,976 @@ function setConnection(stateName, label, description) {
   platformStatus.textContent = description;
 }
 
+function renderPrimaryNav() {
+  for (const tab of tabs) {
+    const active = state.activeView === 'app-center'
+      ? tab.dataset.view === 'app-center'
+      : tab.dataset.view === 'admin' && (tab.dataset.adminMenu || 'operations') === state.adminMenu;
+    tab.classList.toggle('is-active', active);
+  }
+}
+
+function renderAdminShell() {
+  renderPrimaryNav();
+  renderAdminSubnav();
+  const menu = adminMenuMeta[state.adminMenu] || adminMenuMeta.operations;
+  if (adminHeading) adminHeading.textContent = menu.heading;
+  renderAdminSectionHeadings();
+  for (const section of adminSections) {
+    const active = section.id === `admin-section-${state.adminSection}`;
+    section.classList.toggle('is-active', active);
+    section.hidden = !active;
+  }
+  if (state.adminSection === 'deployment') {
+    const label = state.deploymentKind === 'domestic' ? 'Domestic' : 'Oversea';
+    deploymentTitle.textContent = `${label} Deployment`;
+    deploymentSubtitle.textContent = state.deploymentKind === 'domestic'
+      ? 'Domestic 负责 WG relay、H2I proxy、Internal DNS 可达性和缓存/观测转发。'
+      : 'Oversea 负责 Docker hysteria2、site-agent、runner-worker；mihomo authority 留在 Internal。';
+    sshProfileKind.value = state.deploymentKind;
+  }
+}
+
+function renderAdminSubnav() {
+  if (!adminSubnav) return;
+  const displayMenuName = state.hoverAdminMenu || state.adminMenu;
+  const visible = state.activeView === 'admin' || Boolean(state.hoverAdminMenu);
+  const menu = adminMenuMeta[displayMenuName] || adminMenuMeta.operations;
+  const anchor = tabs.find((tab) => tab.dataset.view === 'admin' && (tab.dataset.adminMenu || 'operations') === displayMenuName);
+  if (anchor && adminSubnav.previousElementSibling !== anchor) {
+    anchor.insertAdjacentElement('afterend', adminSubnav);
+  }
+  if (anchor) {
+    adminSubnav.style.setProperty('--admin-subnav-top', `${anchor.offsetTop}px`);
+  }
+  adminSubnav.hidden = !visible;
+  adminSubnav.dataset.menu = displayMenuName;
+  adminSubnav.setAttribute('aria-label', `${menu.heading} modules`);
+  adminSubnav.classList.toggle('is-collapsed', state.adminSubnavCollapsed);
+  if (adminSubnavKicker) adminSubnavKicker.textContent = menu.kicker;
+  if (adminSubnavTitle) adminSubnavTitle.textContent = menu.title;
+  for (const tab of adminModuleTabs) {
+    const menuName = tab.dataset.adminMenu || 'operations';
+    const section = tab.dataset.adminSection || 'deployment';
+    const kind = tab.dataset.deploymentKind || '';
+    const subsection = tab.dataset.adminSubsection || 'overview';
+    tab.hidden = menuName !== displayMenuName;
+    tab.classList.toggle(
+      'is-active',
+      displayMenuName === state.adminMenu
+        && menuName === state.adminMenu
+        && section === state.adminSection
+        && (section !== 'deployment' || kind === state.deploymentKind)
+        && subsection === state.adminSubsection
+    );
+  }
+  if (adminSubnavItems) adminSubnavItems.hidden = state.adminSubnavCollapsed;
+  if (adminSubnavToggle) {
+    adminSubnavToggle.setAttribute('aria-expanded', state.adminSubnavCollapsed ? 'false' : 'true');
+    adminSubnavToggle.textContent = state.adminSubnavCollapsed ? '⌄' : '⌃';
+  }
+}
+
+function renderAdminSectionHeadings() {
+  const foundationMeta = internalSubsectionMeta[state.adminSubsection] || internalSubsectionMeta.overview;
+  if (foundationHeading) foundationHeading.textContent = foundationMeta.title;
+  if (foundationSubtitle) foundationSubtitle.textContent = foundationMeta.subtitle;
+  const evidenceMeta = evidenceSubsectionMeta[state.adminSubsection] || evidenceSubsectionMeta.overview;
+  if (evidenceHeading) evidenceHeading.textContent = evidenceMeta.title;
+  if (evidenceSubtitle) evidenceSubtitle.textContent = evidenceMeta.subtitle;
+}
+
+function activePipelineForCurrentDeployment(pipelines) {
+  const sites = deploymentSites(pipelines, state.deploymentKind);
+  if (state.selectedSiteId) {
+    return sites.find((site) => site.siteId === state.selectedSiteId)?.activePipeline || null;
+  }
+  return sites[0]?.activePipeline || null;
+}
+
+function deploymentSites(pipelines, kind) {
+  const bySite = new Map();
+  for (const pipeline of asArray(pipelines).filter((item) => item.kind === kind)) {
+    const site = bySite.get(pipeline.siteId) || {
+      siteId: pipeline.siteId,
+      kind,
+      pipelines: [],
+      activePipeline: null,
+      latestPipeline: null
+    };
+    site.pipelines.push(pipeline);
+    site.latestPipeline = latestPipeline([site.latestPipeline, pipeline].filter(Boolean));
+    site.activePipeline = chooseOperationalPipeline(site.pipelines);
+    bySite.set(site.siteId, site);
+  }
+  return [...bySite.values()].sort((left, right) => {
+    if (left.siteId === state.selectedSiteId) return -1;
+    if (right.siteId === state.selectedSiteId) return 1;
+    return String(right.latestPipeline?.latestUpdatedAt || '').localeCompare(String(left.latestPipeline?.latestUpdatedAt || ''));
+  });
+}
+
+function chooseOperationalPipeline(pipelines) {
+  const items = asArray(pipelines);
+  const open = items.filter((pipeline) => !['passed', 'failed', 'rollback'].includes(pipeline.health));
+  const preferred = open.length ? open : items;
+  return preferred
+    .slice()
+    .sort((left, right) => pipelineOperationalScore(right) - pipelineOperationalScore(left)
+      || String(right.latestUpdatedAt || '').localeCompare(String(left.latestUpdatedAt || '')))[0] || null;
+}
+
+function latestPipeline(pipelines) {
+  return asArray(pipelines)
+    .slice()
+    .sort((left, right) => String(left?.latestUpdatedAt || '').localeCompare(String(right?.latestUpdatedAt || '')))
+    .pop() || null;
+}
+
+function pipelineOperationalScore(pipeline) {
+  const stageScore = {
+    'worker-report': 70,
+    'worker-job': 90,
+    'runner-session': 80,
+    execution: 60,
+    plan: 40,
+    'rollback-report': 10,
+    'rollback-execution': 20
+  }[pipeline.currentStage] || 0;
+  return stageScore + Math.min(pipelineObjectCount(pipeline), 10);
+}
+
+function pipelineObjectCount(pipeline) {
+  const counts = pipeline?.counts || {};
+  return Number(counts.executions || 0)
+    + Number(counts.runnerSessions || 0)
+    + Number(counts.workerJobs || 0)
+    + Number(counts.workerReports || 0)
+    + Number(counts.rollbackExecutions || 0)
+    + Number(counts.rollbackReports || 0);
+}
+
+function renderDeploymentWorkbench(pipelines) {
+  if (state.deploymentKind === 'oversea') {
+    renderOverseaWorkbench(pipelines);
+    return;
+  }
+  const sites = deploymentSites(pipelines, state.deploymentKind);
+  deploymentSiteCount.textContent = `${sites.length} sites`;
+  if (!state.selectedSiteId && sites[0]) state.selectedSiteId = sites[0].siteId;
+  const site = sites.find((item) => item.siteId === state.selectedSiteId) || sites[0] || null;
+  if (!site?.activePipeline) {
+    siteWorkbench.innerHTML = `<div class="empty-state">No ${escapeHtml(state.deploymentKind)} site yet</div>`;
+    renderInspector();
+    return;
+  }
+  syncSshProfileFormToSelectedSite(site.siteId, site.kind);
+  const pipeline = site.activePipeline;
+  siteWorkbench.innerHTML = `
+    <section class="site-hero">
+      <div>
+        <span class="site-kind">${escapeHtml(site.kind)}</span>
+        <h4>${escapeHtml(site.siteId)}</h4>
+        <p>${escapeHtml(siteDescription(site.kind))}</p>
+      </div>
+      <span class="health-chip" data-health="${escapeHtml(pipeline.health)}">${escapeHtml(pipeline.health)}</span>
+    </section>
+    <div class="site-facts">
+      <span><strong>${escapeHtml(pipeline.currentStage)}</strong><small>stage</small></span>
+      <span><strong>${escapeHtml(pipeline.latestStatus)}</strong><small>status</small></span>
+      <span><strong>${pipelineObjectCount(pipeline)}</strong><small>active objects</small></span>
+      <span><strong>${site.pipelines.length}</strong><small>history runs</small></span>
+    </div>
+  `;
+  renderInspector();
+}
+
+function renderOverseaWorkbench(pipelines) {
+  const overview = state.overseaOverview;
+  const overviewSites = asArray(overview?.sites);
+  const sites = overseaSitesWithDraft(overviewSites);
+  deploymentSiteCount.textContent = overview ? `${sites.length || overview.counts?.overseaSites || 0} nodes` : '0 nodes';
+  if (state.overseaOverviewError) {
+    siteWorkbench.innerHTML = `<div class="empty-state">Oversea overview unavailable: ${escapeHtml(state.overseaOverviewError)}</div>`;
+    renderInspector();
+    return;
+  }
+  if (!overview) {
+    siteWorkbench.innerHTML = '<div class="empty-state">Loading Oversea overview</div>';
+    renderInspector({ mode: 'loading' });
+    return;
+  }
+  if (!state.selectedSiteId && sites[0]) state.selectedSiteId = sites[0].siteId;
+  const selected = selectedOverseaSite() || sites[0] || null;
+  if (selected) {
+    state.selectedSiteId = selected.siteId;
+    syncSshProfileFormToSelectedSite(selected.siteId, 'oversea');
+  }
+  const counts = overview.counts || {};
+  const mihomo = overview.mihomo || {};
+  const feedback = state.overseaEnsureFeedback
+    ? `<div class="profile-feedback oversea-feedback" data-kind="${escapeHtml(state.overseaEnsureFeedback.kind)}">${escapeHtml(state.overseaEnsureFeedback.message)}</div>`
+    : '';
+  siteWorkbench.innerHTML = `
+    <section class="oversea-summary-grid">
+      <article>
+        <span>Oversea Nodes</span>
+        <strong>${escapeHtml(sites.length || counts.overseaSites || 0)}</strong>
+        <small>${escapeHtml(counts.installed || 0)} installed / ${escapeHtml(counts.readyToInstall || 0)} ready</small>
+      </article>
+      <article>
+        <span>Internal mihomo</span>
+        <strong>${escapeHtml(mihomo.status || 'not-configured')}</strong>
+        <small>${escapeHtml(mihomo.routingPolicy || 'cn-direct')} / ${escapeHtml(mihomo.subscriptions || 0)} hysteria2 subscriptions</small>
+      </article>
+      <article>
+        <span>H Delivery</span>
+        <strong>Domestic gated</strong>
+        <small>${escapeHtml(mihomo.domesticGatewayIp || '10.88.0.1')} / DNS + H2I required</small>
+      </article>
+    </section>
+    ${feedback}
+    <section class="oversea-console">
+      <div class="oversea-node-list">
+        <div class="oversea-list-toolbar">
+          <span>
+            <strong>Site Registry</strong>
+            <small>${state.siteDraft?.kind === 'oversea' ? 'draft pending save' : 'active profiles + evidence'}</small>
+          </span>
+          <button class="secondary-button" type="button" data-oversea-new>New Oversea</button>
+        </div>
+        ${sites.length ? sites.map((site) => `
+          <button class="oversea-node-card ${site.siteId === state.selectedSiteId ? 'is-selected' : ''}" type="button" data-oversea-site="${escapeHtml(site.siteId)}">
+            <span>
+              <strong>${escapeHtml(site.siteId)}</strong>
+              <small>${escapeHtml(site.host || 'host pending')}</small>
+            </span>
+            <span class="health-chip" data-health="${escapeHtml(normalizeStageStatus(site.status))}">${escapeHtml(site.status || 'planned')}</span>
+          </button>
+        `).join('') : '<div class="empty-state">No Oversea nodes yet. Click New Oversea to start.</div>'}
+      </div>
+      <section class="oversea-detail">
+        ${selected ? renderOverseaSiteDetail(selected) : '<div class="empty-state">Select an Oversea node</div>'}
+      </section>
+    </section>
+  `;
+  renderInspector();
+  const newButton = siteWorkbench.querySelector('[data-oversea-new]');
+  if (newButton) {
+    newButton.addEventListener('click', () => {
+      startNewSiteProfile('oversea');
+    });
+  }
+  for (const button of siteWorkbench.querySelectorAll('[data-oversea-site]')) {
+    button.addEventListener('click', () => {
+      state.selectedSiteId = button.dataset.overseaSite || null;
+      state.overseaEnsureFeedback = null;
+      state.overseaTerminalCommand = '';
+      state.overseaTerminalResult = null;
+      renderDeploymentWorkbench(pipelines);
+      renderInspector();
+      const active = activePipelineForCurrentDeployment(pipelines);
+      if (active?.planId) {
+        void refreshPipelineDetail(active.planId);
+      } else {
+        state.selectedPlanId = null;
+        renderEmptyPipeline();
+      }
+    });
+  }
+  const ensureButton = siteWorkbench.querySelector('[data-oversea-ensure]');
+  if (ensureButton) {
+    ensureButton.addEventListener('click', () => {
+      void ensureSelectedOversea();
+    });
+  }
+  const refreshButton = siteWorkbench.querySelector('[data-oversea-refresh]');
+  if (refreshButton) {
+    refreshButton.addEventListener('click', () => {
+      void refreshAdmin();
+    });
+  }
+  const editProfileButton = siteWorkbench.querySelector('[data-oversea-edit-profile]');
+  if (editProfileButton) {
+    editProfileButton.addEventListener('click', () => {
+      const site = selectedOverseaSite();
+      if (site) focusSshProfileForSite(site);
+    });
+  }
+  const reuseHostSshButton = siteWorkbench.querySelector('[data-oversea-reuse-host-ssh]');
+  if (reuseHostSshButton) {
+    reuseHostSshButton.addEventListener('click', () => {
+      const site = selectedOverseaSite();
+      if (site) copyHostSshCredentialToSite(site);
+    });
+  }
+  const terminalInput = siteWorkbench.querySelector('[data-oversea-terminal-input]');
+  if (terminalInput) {
+    terminalInput.addEventListener('input', () => {
+      state.overseaTerminalCommand = terminalInput.value;
+    });
+  }
+  for (const button of siteWorkbench.querySelectorAll('[data-oversea-terminal-template]')) {
+    button.addEventListener('click', () => {
+      const template = overseaTerminalTemplates[button.dataset.overseaTerminalTemplate] || overseaTerminalTemplates.inspect;
+      state.overseaTerminalCommand = template;
+      state.overseaTerminalResult = null;
+      renderDeploymentWorkbench(pipelines);
+      renderInspector();
+    });
+  }
+  const terminalRunButton = siteWorkbench.querySelector('[data-oversea-terminal-run]');
+  if (terminalRunButton) {
+    terminalRunButton.addEventListener('click', () => {
+      void runSelectedOverseaTerminal();
+    });
+  }
+}
+
+function renderOverseaSiteDetail(site) {
+  const status = site.status || 'planned';
+  const installed = status === 'installed';
+  const installDisabled = state.overseaEnsureBusy || status === 'blocked' || status === 'draft' || status === 'needs-ssh-profile' || !site.sshProfile?.profileId;
+  const installLabel = state.overseaEnsureBusy
+    ? 'Running'
+    : status === 'blocked'
+      ? 'Blocked'
+      : status === 'draft' || !site.sshProfile?.profileId
+        ? 'Save Profile First'
+        : installed
+          ? 'Refresh State'
+          : 'Install / Sync';
+  const services = asArray(site.services);
+  const subscriptions = asArray(site.subscriptions);
+  const failure = site.runtime?.failure || null;
+  const hostPeer = sameHostPeerProfile(site);
+  return `
+    <div class="oversea-detail-head">
+      <div>
+        <span class="site-kind">Oversea</span>
+        <h4>${escapeHtml(site.siteId)}</h4>
+        <p>${escapeHtml(site.host || 'Host not configured')}</p>
+      </div>
+      <div class="oversea-actions">
+        ${hostPeer ? '<button class="secondary-button" type="button" data-oversea-reuse-host-ssh>Reuse Host SSH</button>' : ''}
+        <button class="secondary-button" type="button" data-oversea-edit-profile>Edit Profile</button>
+        <button class="secondary-button" type="button" disabled title="Site Registry archive will preserve evidence">Archive</button>
+        <button class="primary-button" type="button" data-oversea-ensure ${installDisabled ? 'disabled' : ''}>
+          ${escapeHtml(installLabel)}
+        </button>
+        <button class="secondary-button" type="button" data-oversea-refresh>Refresh</button>
+      </div>
+    </div>
+    <div class="oversea-service-grid">
+      ${services.map((service) => `
+        <article data-status="${escapeHtml(normalizeStageStatus(service.status))}">
+          <span>${escapeHtml(service.name)}</span>
+          <strong>${escapeHtml(service.status || 'unknown')}</strong>
+          <small>${escapeHtml(service.detail || '-')}</small>
+        </article>
+      `).join('')}
+    </div>
+    <dl class="oversea-runtime-meta">
+      <div><dt>SSH profile</dt><dd>${escapeHtml(site.sshProfile?.profileId || 'not linked')}</dd></div>
+      <div><dt>Identity</dt><dd>${escapeHtml(site.sshProfile?.identityFile || '-')}</dd></div>
+      <div><dt>SSH Config</dt><dd>${escapeHtml(site.sshProfile?.sshConfigFile || '-')}</dd></div>
+      <div><dt>Worker report</dt><dd>${escapeHtml(site.runtime?.workerReportStatus || '-')} ${escapeHtml(site.runtime?.workerReportId || '')}</dd></div>
+      <div><dt>Evidence</dt><dd>${escapeHtml(asArray(site.runtime?.evidenceMode).join(' / ') || '-')}</dd></div>
+    </dl>
+    ${renderSameHostNote(site, hostPeer)}
+    ${failure ? `
+      <div class="oversea-failure-summary">
+        <strong>${escapeHtml(failure.phase || failure.stepId || 'failed step')}</strong>
+        <span>${escapeHtml(failure.message || 'worker step failed')}</span>
+      </div>
+    ` : ''}
+    ${renderOverseaTerminal(site)}
+    <section class="subscription-panel">
+      <div class="section-title compact-title">
+        <h4>Internal mihomo -> hysteria2 subscriptions</h4>
+        <span>${subscriptions.length}</span>
+      </div>
+      ${subscriptions.length ? `
+        <div class="subscription-table">
+          ${subscriptions.map((subscription) => `
+            <div class="subscription-row">
+              <strong>${escapeHtml(subscription.username)}</strong>
+              <span>${escapeHtml(subscription.role)}</span>
+              <code>${escapeHtml(subscription.subscriptionUrl || subscription.subscriptionPath || '-')}</code>
+              <span>${escapeHtml(subscription.deliveryStatus || subscription.status || '-')}</span>
+            </div>
+          `).join('')}
+        </div>
+      ` : '<div class="empty-state">No subscriptions issued yet. Install / Sync will issue Internal and Domestic bootstrap accounts plus Internal01-09.</div>'}
+    </section>
+    <div class="oversea-boundary-note">
+      ${escapeHtml(site.reachability?.verdict || 'internal-output-pending')} / ${escapeHtml(site.reachability?.currentBoundary || 'internal-only')} / H endpoints still need Domestic WG + H2I DNS before fetching Internal mihomo.
+    </div>
+  `;
+}
+
+function renderSameHostNote(site, hostPeer) {
+  if (!hostPeer) return '';
+  return `
+    <div class="same-host-note">
+      <strong>Same physical host as ${escapeHtml(hostPeer.siteId)}</strong>
+      <span>Software probes hit ${escapeHtml(site.host || hostPeer.host || '-')}; Internal mihomo still publishes site-scoped hysteria2 subscriptions and evidence for ${escapeHtml(site.siteId)}.</span>
+    </div>
+  `;
+}
+
+function renderOverseaTerminal(site) {
+  const command = state.overseaTerminalCommand || overseaTerminalTemplates.inspect;
+  const terminal = state.overseaTerminalResult;
+  const status = terminal?.status || 'idle';
+  const terminalHint = terminalActionHint(terminal);
+  const output = terminal ? [
+    `status: ${terminal.status || 'unknown'}${terminal.exitCode !== undefined && terminal.exitCode !== null ? ` / exit ${terminal.exitCode}` : ''}`,
+    `site: ${site.siteId}`,
+    terminal.diagnosis ? `diagnosis: ${terminal.diagnosis.category || 'unknown'} / ${terminal.diagnosis.summary || '-'}` : '',
+    terminal.diagnosis?.tcpProbe ? `tcp: ${terminal.diagnosis.tcpProbe.status || 'unknown'} / ${terminal.diagnosis.tcpProbe.host || '-'}:${terminal.diagnosis.tcpProbe.port || '-'} / ${terminal.diagnosis.tcpProbe.durationMs ?? '-'}ms${terminal.diagnosis.tcpProbe.message ? ` / ${terminal.diagnosis.tcpProbe.message}` : ''}` : '',
+    '',
+    '$ ' + (terminal.command || command),
+    '',
+    terminal.stdout ? `stdout:\n${terminal.stdout}` : 'stdout:',
+    '',
+    terminal.stderr ? `stderr:\n${terminal.stderr}` : 'stderr:'
+  ].join('\n') : 'No terminal run yet.';
+  return `
+    <section class="oversea-terminal" data-status="${escapeHtml(normalizeStageStatus(status))}">
+      <div class="section-title compact-title">
+        <h4>Remote Terminal</h4>
+        <span>${escapeHtml(status)}</span>
+      </div>
+      <div class="terminal-toolbar">
+        <button class="secondary-button" type="button" data-oversea-terminal-template="inspect">Inspect</button>
+        <button class="secondary-button" type="button" data-oversea-terminal-template="installDocker">Install Docker</button>
+        <button class="secondary-button" type="button" data-oversea-terminal-template="stackStatus">Stack Status</button>
+      </div>
+      <textarea class="terminal-input" data-oversea-terminal-input spellcheck="false">${escapeHtml(command)}</textarea>
+      <div class="terminal-actions">
+        <button class="primary-button" type="button" data-oversea-terminal-run ${state.overseaTerminalBusy ? 'disabled' : ''}>
+          ${state.overseaTerminalBusy ? 'Running' : 'Run Command'}
+        </button>
+      </div>
+      ${terminalHint ? `<div class="terminal-action-hint">${escapeHtml(terminalHint)}</div>` : ''}
+      <pre class="terminal-screen">${escapeHtml(output)}</pre>
+    </section>
+  `;
+}
+
+function terminalActionHint(terminal) {
+  const category = terminal?.diagnosis?.category;
+  if (category === 'host-key') {
+    return 'Host key is not pinned for this site alias. Open SSH Access, click Refresh Host Key, then rerun Inspect.';
+  }
+  if (category === 'auth') {
+    return 'SSH reached the host but authentication failed. Open SSH Access, bootstrap the Internal-managed key with the one-time root password, or set an identity file that is already authorized on this host.';
+  }
+  return '';
+}
+
+function selectedOverseaSite() {
+  const sites = overseaSitesWithDraft(asArray(state.overseaOverview?.sites));
+  return sites.find((site) => site.siteId === state.selectedSiteId) || sites[0] || null;
+}
+
+function overseaSitesWithDraft(sites) {
+  const items = asArray(sites);
+  const draft = state.siteDraft?.kind === 'oversea' ? state.siteDraft : null;
+  if (!draft || items.some((site) => site.siteId === draft.siteId)) return items;
+  return [draft, ...items];
+}
+
+function startNewSiteProfile(kind = 'oversea') {
+  const siteKind = kind === 'domestic' ? 'domestic' : 'oversea';
+  const siteId = nextDraftSiteId(siteKind);
+  state.siteDraft = {
+    siteId,
+    kind: siteKind,
+    host: '',
+    status: 'draft',
+    services: [],
+    subscriptions: [],
+    runtime: null,
+    sshProfile: null,
+    reachability: {
+      verdict: 'profile-draft',
+      currentBoundary: 'config-center'
+    }
+  };
+  state.selectedSiteId = siteId;
+  state.selectedSshProfileId = null;
+  state.sshProfileBootstrap = null;
+  state.sshProfileShadowSetup = null;
+  state.sshProfileReadiness = null;
+  state.sshRuntimePolicy = null;
+  state.sshProfileFeedback = {
+    kind: 'info',
+    message: `Draft ${siteId}: enter host, save profile, then run Shadow Setup or Create Plan.`
+  };
+  fillNewSshProfileForm(siteKind, siteId);
+  renderSshProfiles(state.sshProfiles);
+  renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
+  renderInspector();
+  focusSshProfilePanel();
+}
+
+function fillNewSshProfileForm(kind, siteId) {
+  sshProfileId.value = '';
+  sshProfileSiteId.value = siteId;
+  sshProfileKind.value = kind;
+  sshProfileHost.value = '';
+  sshProfileUser.value = 'root';
+  sshProfilePassword.value = '';
+  sshProfileRotateKey.checked = false;
+  sshProfilePort.value = '22';
+  sshProfileStrict.value = 'yes';
+  sshProfileBatchMode.value = 'yes';
+  sshProfileTimeout.value = '30';
+  sshProfileIdentity.value = '';
+  sshProfileKnownHosts.value = '';
+  sshProfileConfigFile.value = '';
+  sshProfileHostKeyAlias.value = siteId;
+  renderSshProfileSaveState();
+}
+
+function nextDraftSiteId(kind) {
+  const prefix = kind === 'domestic' ? 'domestic' : 'oversea';
+  const existing = new Set([
+    ...asArray(state.overseaOverview?.sites).map((site) => site.siteId),
+    ...asArray(state.sshProfiles).filter((profile) => profile.kind === kind).map((profile) => profile.siteId)
+  ].filter(Boolean));
+  const first = `${prefix}-new`;
+  if (!existing.has(first)) return first;
+  for (let index = 2; index < 100; index += 1) {
+    const candidate = `${prefix}-new-${index}`;
+    if (!existing.has(candidate)) return candidate;
+  }
+  return `${prefix}-new-${Date.now()}`;
+}
+
+function focusSshProfilePanel() {
+  if (sshProfilePanel) sshProfilePanel.open = true;
+  sshProfilePanel?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function focusSshProfileForSite(site) {
+  if (!site?.siteId) return;
+  syncSshProfileFormToSelectedSite(site.siteId, site.kind || state.deploymentKind);
+  focusSshProfilePanel();
+}
+
+function sameHostPeerProfile(site) {
+  if (!site?.host) return null;
+  return asArray(state.sshProfiles)
+    .filter((profile) => profile.kind === (site.kind || 'oversea')
+      && profile.siteId !== site.siteId
+      && profile.host === site.host
+      && profile.status === 'active'
+      && profile.identityFile)
+    .sort((left, right) => String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')))[0] || null;
+}
+
+function copyHostSshCredentialToSite(site) {
+  const peer = sameHostPeerProfile(site);
+  if (!peer) return;
+  const existing = inspectorSshProfile(site.kind || 'oversea', site.siteId);
+  if (existing) {
+    fillSshProfileForm(existing);
+  } else {
+    fillNewSshProfileForm(site.kind || 'oversea', site.siteId);
+    sshProfileHost.value = site.host || peer.host || '';
+    sshProfileUser.value = site.sshProfile?.sshUser || peer.sshUser || 'root';
+    sshProfilePort.value = String(site.sshProfile?.sshPort || peer.sshPort || 22);
+  }
+  sshProfileIdentity.value = peer.identityFile || '';
+  sshProfileKnownHosts.value = peer.knownHostsFile || '';
+  sshProfileConfigFile.value = peer.sshConfigFile || '';
+  sshProfileStrict.value = peer.strictHostKeyChecking || 'yes';
+  sshProfileBatchMode.value = peer.batchMode || 'yes';
+  sshProfileTimeout.value = String(peer.connectTimeoutSeconds || 30);
+  state.sshProfileFeedback = {
+    kind: 'info',
+    message: `Copied SSH credential paths from ${peer.siteId}; save ${site.siteId} profile to continue.`
+  };
+  renderSshProfileFeedback();
+  renderSshProfileSaveState();
+  focusSshProfilePanel();
+}
+
+function syncSshProfileFormToSelectedSite(siteId, kind) {
+  const profile = asArray(state.sshProfiles)
+    .filter((item) => item.kind === kind && item.siteId === siteId)
+    .sort((left, right) => String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')))[0] || null;
+  if (profile && selectedSshProfileId() !== profile.profileId) {
+    state.selectedSshProfileId = profile.profileId;
+    fillSshProfileForm(profile);
+    state.sshProfileReadiness = null;
+    state.sshRuntimePolicy = null;
+    renderSshProfileSaveState();
+    renderSshProfileReadiness();
+  } else if (!profile && blankToNull(sshProfileSiteId.value) !== siteId) {
+    sshProfileKind.value = kind;
+    sshProfileSiteId.value = siteId;
+    sshProfileHostKeyAlias.value = siteId;
+    renderSshProfileSaveState();
+  }
+}
+
+function siteDescription(kind) {
+  return kind === 'domestic'
+    ? 'WG relay / H2I / Internal DNS path, normally a single active Domestic slot.'
+    : 'hysteria2 access stack on a remote Ubuntu host, managed by Internal.';
+}
+
+function renderFoundationGrid(overview) {
+  const cards = internalFoundationCards(overview || {});
+  const active = cards.find((card) => card.id === state.adminSubsection)
+    || cards.find((card) => card.id === 'overview')
+    || cards[0];
+  foundationGrid.innerHTML = `
+    <article class="foundation-scope-card">
+      <div>
+        <span class="site-kind">Internal</span>
+        <strong>${escapeHtml(active.title)}</strong>
+        <p>${escapeHtml(active.description)}</p>
+      </div>
+      <span>${escapeHtml(String(active.value))}</span>
+    </article>
+    ${cards.map((card) => `
+      <button class="foundation-card ${card.id === active.id ? 'is-selected' : ''}" type="button" data-internal-module="${escapeHtml(card.id)}">
+        <strong>${escapeHtml(card.title)}</strong>
+        <span>${escapeHtml(String(card.value))}</span>
+        <p>${escapeHtml(card.description)}</p>
+      </button>
+    `).join('')}
+  ` + renderUserCenterPanel() + renderRelayEnrollmentPanel();
+  for (const card of foundationGrid.querySelectorAll('[data-internal-module]')) {
+    card.addEventListener('click', () => {
+      state.adminMenu = 'internal';
+      state.adminSection = 'foundations';
+      state.adminSubsection = internalSubsectionMeta[card.dataset.internalModule] ? card.dataset.internalModule : 'overview';
+      renderAdminShell();
+      renderFoundationGrid(state.dashboard?.overview || overview || {});
+      renderInspector();
+    });
+  }
+  const bootstrapUsers = foundationGrid.querySelector('[data-user-bootstrap]');
+  if (bootstrapUsers) bootstrapUsers.addEventListener('click', () => void bootstrapUserCenterFromAdmin());
+  const createUser = foundationGrid.querySelector('[data-user-create]');
+  if (createUser) createUser.addEventListener('click', () => void createUserFromAdmin());
+  const enrollRelay = foundationGrid.querySelector('[data-relay-enroll]');
+  if (enrollRelay) enrollRelay.addEventListener('click', () => void enrollHomeRelayFromAdmin());
+}
+
+function internalFoundationCards(overview) {
+  return [
+    {
+      id: 'overview',
+      title: 'Control Plane',
+      value: overview.siteSlotPlans || 0,
+      description: 'Internal 是 User、RBAC、Config、DNS、Release、Runner 和 Evidence 的唯一真相。'
+    },
+    {
+      id: 'user-center',
+      title: 'User Center',
+      value: overview.userCenterUsers || 0,
+      description: '用户、服务账号、设备身份、初始 Internal01-09 预留。'
+    },
+    {
+      id: 'rbac',
+      title: 'RBAC',
+      value: overview.permissionGrants || 0,
+      description: 'Admin action scopes、角色授权、审批确认和门禁边界。'
+    },
+    {
+      id: 'config-center',
+      title: 'Config Center',
+      value: overview.configPolicySnapshots || 0,
+      description: 'SSH Profile、runtime policy、订阅 authority、配置快照。'
+    },
+    {
+      id: 'dns',
+      title: 'DNS',
+      value: overview.dnsZoneSnapshots || 0,
+      description: 'Internal CoreDNS authority、split DNS、Domestic edge cache。'
+    },
+    {
+      id: 'mihomo',
+      title: 'Mihomo Authority',
+      value: overview.siteSlotPlans || 0,
+      description: 'Oversea hysteria2 / mihomo 订阅源由 Internal 生成。'
+    },
+    {
+      id: 'release',
+      title: 'Release Center',
+      value: overview.releaseManagementPlans || 0,
+      description: 'artifact、版本、release notes、灰度、回滚。'
+    },
+    {
+      id: 'e2e-gate',
+      title: 'E2E Gate',
+      value: overview.testRuns || 0,
+      description: 'E2E、synthetic probe、runner output、截图和配置快照。'
+    },
+    {
+      id: 'observability',
+      title: 'Observability',
+      value: consoleEvidenceTotal(state.dashboard?.siteSlotPipelines || []),
+      description: 'H / D / I / O 链路 trace、log、metric、evidence。'
+    },
+    {
+      id: 'admin-runner',
+      title: 'Admin / Runner',
+      value: overview.siteSlotPlans || 0,
+      description: '三维拓扑、Action Gates、worker job、rollback 和日志证据。'
+    },
+    {
+      id: 'sdk-gateway',
+      title: 'SDK Gateway',
+      value: overview.sdkGatewayRoutes || 0,
+      description: 'Launcher、AppCenter 应用和其他系统的统一 SDK 契约。'
+    },
+    {
+      id: 'awx-provider',
+      title: 'AWX Provider',
+      value: overview.awxProviderConfigs || 0,
+      description: 'inventory、credential、job template registry。'
+    }
+  ];
+}
+
+function renderUserCenterPanel() {
+  const roles = asArray(state.userCenter.roles);
+  const users = asArray(state.userCenter.users);
+  const roleOptions = roles.map((role) => `
+    <option value="${escapeHtml(role.roleId)}">${escapeHtml(role.displayName || role.roleId)}</option>
+  `).join('');
+  const feedback = state.userCenter.feedback;
+  return `
+    <section class="foundation-operation-panel">
+      <div class="section-title compact-title">
+        <h4>User Center</h4>
+        <span>${escapeHtml(users.length)} users</span>
+      </div>
+      <div class="foundation-operation-grid">
+        <label class="form-field">
+          <span>Email</span>
+          <input data-user-field="email" autocomplete="off" placeholder="user@example.com" />
+        </label>
+        <label class="form-field">
+          <span>Display Name</span>
+          <input data-user-field="displayName" autocomplete="off" placeholder="MX User" />
+        </label>
+        <label class="form-field">
+          <span>Role</span>
+          <select data-user-field="roleId">
+            ${roleOptions || '<option value="">bootstrap roles first</option>'}
+          </select>
+        </label>
+      </div>
+      <div class="foundation-operation-actions">
+        <button class="secondary-button" type="button" data-user-bootstrap ${state.userCenter.busy ? 'disabled' : ''}>Bootstrap Users</button>
+        <button class="primary-button" type="button" data-user-create ${state.userCenter.busy ? 'disabled' : ''}>Create User</button>
+        ${feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(feedback.kind)}">${escapeHtml(feedback.message)}</span>` : ''}
+      </div>
+      <div class="foundation-list">
+        ${users.slice(0, 6).map((user) => `
+          <article>
+            <strong>${escapeHtml(user.displayName || user.userId)}</strong>
+            <span>${escapeHtml(user.email || user.userId)}</span>
+            <small>${escapeHtml(asArray(user.roleIds).join(' / ') || '-')}</small>
+          </article>
+        `).join('') || '<div class="empty-state">No users yet</div>'}
+      </div>
+    </section>
+  `;
+}
+
+function renderRelayEnrollmentPanel() {
+  const result = state.relayEnrollment.result;
+  const feedback = state.relayEnrollment.feedback;
+  const siteId = state.deploymentKind === 'domestic'
+    ? selectedDomesticSiteId()
+    : 'domestic-main';
+  return `
+    <section class="foundation-operation-panel">
+      <div class="section-title compact-title">
+        <h4>Home Relay Enrollment</h4>
+        <span>${escapeHtml(state.domesticPeerDraft.leaseIp || result?.overlayIp || '10.91')}</span>
+      </div>
+      <div class="foundation-operation-grid relay-operation-grid">
+        <label class="form-field">
+          <span>Domestic Site</span>
+          <input data-relay-field="siteId" autocomplete="off" value="${escapeHtml(siteId)}" />
+        </label>
+        <label class="form-field">
+          <span>Install ID</span>
+          <input data-relay-field="installId" autocomplete="off" placeholder="optional" />
+        </label>
+        <label class="form-field">
+          <span>Device ID</span>
+          <input data-relay-field="deviceId" autocomplete="off" placeholder="optional" />
+        </label>
+        <label class="form-field wide-field">
+          <span>Home WG Public Key</span>
+          <input data-relay-field="publicKey" autocomplete="off" value="${escapeHtml(state.domesticPeerDraft.publicKey)}" placeholder="base64 public key" />
+        </label>
+      </div>
+      <div class="foundation-operation-actions">
+        <button class="primary-button" type="button" data-relay-enroll ${state.relayEnrollment.busy ? 'disabled' : ''}>
+          ${state.relayEnrollment.busy ? 'Enrolling' : 'Create Relay Lease'}
+        </button>
+        ${feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(feedback.kind)}">${escapeHtml(feedback.message)}</span>` : ''}
+      </div>
+      <div class="foundation-list">
+        <article>
+          <strong>${escapeHtml(state.domesticPeerDraft.leaseIp || result?.overlayIp || '-')}</strong>
+          <span>${escapeHtml(result?.anonymousPrincipalId || 'guest relay peer')}</span>
+          <small>${escapeHtml(state.domesticPeerDraft.publicKey || result?.publicKey || '-')}</small>
+        </article>
+      </div>
+    </section>
+  `;
+}
+
+function selectedDomesticSiteId() {
+  const pipeline = asArray(state.dashboard?.siteSlotPipelines)
+    .find((item) => item.kind === 'domestic' && item.siteId === state.selectedSiteId)
+    || asArray(state.dashboard?.siteSlotPipelines).find((item) => item.kind === 'domestic');
+  return pipeline?.siteId || 'domestic-main';
+}
+
+function renderEvidenceHistory(pipelines) {
+  const allRows = asArray(pipelines)
+    .slice()
+    .sort((left, right) => String(right.latestUpdatedAt || '').localeCompare(String(left.latestUpdatedAt || '')));
+  const meta = evidenceSubsectionMeta[state.adminSubsection] || evidenceSubsectionMeta.overview;
+  const scopedRows = evidenceRowsForSubsection(allRows, state.adminSubsection);
+  const rows = scopedRows.slice(0, 24);
+  const scopeCard = `
+    <article class="history-scope-card">
+      <div>
+        <span class="site-kind">Evidence</span>
+        <strong>${escapeHtml(meta.title)}</strong>
+        <p>${escapeHtml(meta.subtitle)}</p>
+      </div>
+      <span>${escapeHtml(String(scopedRows.length))} / ${escapeHtml(String(allRows.length))}</span>
+    </article>
+  `;
+  if (!rows.length) {
+    evidenceHistory.innerHTML = `${scopeCard}<div class="empty-state">No history for this subsystem yet</div>`;
+    return;
+  }
+  evidenceHistory.innerHTML = scopeCard + rows.map((pipeline) => `
+    <button class="history-row" type="button" data-plan-id="${escapeHtml(pipeline.planId)}" data-kind="${escapeHtml(pipeline.kind)}">
+      <strong>${escapeHtml(pipeline.siteId)}</strong>
+      <span>${escapeHtml(pipeline.kind)}</span>
+      <span>${escapeHtml(pipeline.currentStage)}</span>
+      <span>${escapeHtml(pipeline.latestStatus)}</span>
+      <span>${formatTime(pipeline.latestUpdatedAt)}</span>
+    </button>
+  `).join('');
+  for (const row of evidenceHistory.querySelectorAll('.history-row')) {
+    row.addEventListener('click', () => {
+      state.adminMenu = 'operations';
+      state.adminSection = 'deployment';
+      state.deploymentKind = row.dataset.kind === 'domestic' ? 'domestic' : 'oversea';
+      state.adminSubsection = state.deploymentKind;
+      void refreshPipelineDetail(row.dataset.planId);
+      renderAdminShell();
+    });
+  }
+}
+
+function evidenceRowsForSubsection(rows, subsection) {
+  if (subsection === 'executions') {
+    return rows.filter((row) => row.currentStage === 'execution' || Number(row.counts?.executions || 0) > 0);
+  }
+  if (subsection === 'runner-sessions') {
+    return rows.filter((row) => row.currentStage === 'runner-session' || Number(row.counts?.runnerSessions || 0) > 0);
+  }
+  if (subsection === 'worker-jobs') {
+    return rows.filter((row) => row.currentStage === 'worker-job' || Number(row.counts?.workerJobs || 0) > 0);
+  }
+  if (subsection === 'worker-reports') {
+    return rows.filter((row) => row.currentStage === 'worker-report' || Number(row.counts?.workerReports || 0) > 0);
+  }
+  if (subsection === 'rollback') {
+    return rows.filter((row) => String(row.currentStage || '').includes('rollback')
+      || Number(row.counts?.rollbackExecutions || 0) > 0
+      || Number(row.counts?.rollbackReports || 0) > 0);
+  }
+  if (subsection === 'release-gate') {
+    return rows.filter((row) => asArray(row.actionHints).some((action) => String(action.actionId || action.label || '').includes('release'))
+      || String(row.currentStage || '').includes('gate')
+      || String(row.latestStatus || '').includes('gate'));
+  }
+  return rows;
+}
+
 function renderAdminLoading() {
   state.currentPipeline = null;
   state.sshProfileBootstrap = null;
+  state.awxProviders = [];
+  state.awxRuntimePolicies = [];
+  state.awxProviderCheck = null;
+  renderAdminShell();
   closeEvidenceDrawer();
   adminGenerated.textContent = 'Loading';
+  renderConsoleStatus({
+    internal: 'Loading',
+    store: 'connecting to Internal',
+    provider: 'Worker V1',
+    gate: 'loading gates',
+    evidence: '0',
+    osScope: 'Ubuntu + CentOS',
+    principal: 'Resolving operator',
+    principalScope: 'RBAC loading'
+  });
   sshProfileCount.textContent = '0';
   sshProfileList.innerHTML = '<div class="empty-state">Loading SSH profiles</div>';
   renderSshProfileFeedback();
   renderSshProfileSaveState();
   renderSshProfileBootstrap();
   renderSshProfileReadiness();
+  awxProviderCount.textContent = '0';
+  awxProviderList.innerHTML = '<div class="empty-state">Loading AWX providers</div>';
+  renderAwxProviderFeedback();
+  renderAwxProviderSaveState();
+  renderAwxProviderCheck();
+  renderAwxRuntimeGates();
   pipelineList.innerHTML = '<div class="empty-state">Loading pipelines</div>';
   pipelineTimeline.innerHTML = '';
   pipelineSummary.textContent = '';
   pipelineStepper.innerHTML = '';
   pipelineActions.innerHTML = '';
+  siteWorkbench.innerHTML = '<div class="empty-state">Loading site workspace</div>';
+  renderSetupGuidance(null, []);
+  renderDashboardGuidance();
+  renderInspector({ mode: 'loading' });
 }
 
 function renderAdminError(error) {
   state.currentPipeline = null;
   state.sshProfileBootstrap = null;
+  state.awxProviders = [];
+  state.awxRuntimePolicies = [];
+  state.awxProviderCheck = null;
+  renderAdminShell();
   closeEvidenceDrawer();
   adminGenerated.textContent = 'Admin API unavailable';
+  renderConsoleStatus({
+    internal: 'Offline',
+    store: error.message,
+    provider: 'Unavailable',
+    gate: 'blocked',
+    evidence: '0',
+    osScope: 'Ubuntu + CentOS',
+    principal: 'Unknown',
+    principalScope: 'Admin API unavailable'
+  });
   metricSiteSlots.textContent = '0';
   metricRollbacks.textContent = '0';
   metricReleases.textContent = '0';
@@ -930,6 +3460,13 @@ function renderAdminError(error) {
   renderSshProfileSaveState();
   renderSshProfileBootstrap();
   renderSshProfileReadiness();
+  awxProviderCount.textContent = '0';
+  awxProviderList.innerHTML = '<div class="empty-state">Admin API unavailable</div>';
+  awxProviderFeedback.textContent = '';
+  awxProviderFeedback.removeAttribute('data-kind');
+  renderAwxProviderSaveState();
+  renderAwxProviderCheck();
+  renderAwxRuntimeGates();
   pipelineCount.textContent = '0';
   pipelineHealth.textContent = 'Offline';
   pipelineHealth.dataset.health = 'failed';
@@ -938,11 +3475,30 @@ function renderAdminError(error) {
   pipelineStepper.innerHTML = '';
   pipelineActions.innerHTML = '';
   pipelineTimeline.innerHTML = '';
+  siteWorkbench.innerHTML = '';
+  foundationGrid.innerHTML = '';
+  evidenceHistory.innerHTML = '';
+  renderSetupGuidance(null, []);
+  renderDashboardGuidance();
+  renderInspector({ mode: 'error', message: error.message });
 }
 
 function renderAdminDashboard(dashboard) {
+  renderAdminShell();
   const overview = dashboard.overview || {};
   const principal = dashboard.actionPolicy?.principal;
+  state.awxProviders = asArray(dashboard.awxProviders);
+  state.awxRuntimePolicies = asArray(dashboard.runtimeFeaturePolicies);
+  renderConsoleStatus({
+    internal: overview.siteId || 'Internal',
+    store: `${overview.storeDriver || 'store'} / ${formatTime(dashboard.generatedAt)}`,
+    provider: consoleProviderLabel(dashboard),
+    gate: consoleGateLabel(dashboard),
+    evidence: String(consoleEvidenceTotal(dashboard.siteSlotPipelines || [])),
+    osScope: 'Ubuntu + CentOS/RHEL',
+    principal: principal?.displayName || principal?.principalId || 'Shadow operator',
+    principalScope: principal?.roles?.length ? principal.roles.join(' / ') : 'RBAC shadow'
+  });
   adminGenerated.textContent = principal
     ? `Snapshot ${formatTime(dashboard.generatedAt)} / ${principal.displayName}`
     : `Snapshot ${formatTime(dashboard.generatedAt)}`;
@@ -951,28 +3507,245 @@ function renderAdminDashboard(dashboard) {
   metricReleases.textContent = String(overview.releaseManagementPlans || 0);
   metricTests.textContent = String(overview.testRuns || 0);
   renderSshProfiles(state.sshProfiles);
+  renderAwxProviders(state.awxProviders);
+  renderAwxRuntimeGates();
+  renderDeploymentWorkbench(dashboard.siteSlotPipelines || []);
   renderPipelineList(dashboard.siteSlotPipelines || []);
+  renderFoundationGrid(overview);
+  renderEvidenceHistory(dashboard.siteSlotPipelines || []);
+  renderDashboardGuidance();
   updateTopologyFromPipelines(dashboard.siteSlotPipelines || []);
+  renderInspector();
+}
+
+function renderConsoleStatus(input) {
+  consoleInternalState.textContent = input.internal;
+  consoleStoreDriver.textContent = input.store;
+  consoleExecutionProvider.textContent = input.provider;
+  consoleGateState.textContent = input.gate;
+  consoleEvidenceCount.textContent = input.evidence;
+  consoleOsScope.textContent = input.osScope;
+  consolePrincipal.textContent = input.principal;
+  consolePrincipalScope.textContent = input.principalScope;
+}
+
+function consoleProviderLabel(dashboard) {
+  const providers = asArray(dashboard.awxProviders);
+  const activeAwx = providers.find((provider) => provider && provider.status === 'active');
+  if (activeAwx) {
+    const name = String(activeAwx.name || activeAwx.providerId || 'AWX provider');
+    return activeAwx.baseUrl ? `AWX shadow / ${name}` : 'AWX shadow / config-only';
+  }
+  const actions = asArray(dashboard.actionPolicy?.actions);
+  const hasAwxShadow = actions.some((action) => String(action.actionId || '').includes('awx-shadow'));
+  const hasRemoteSsh = actions.some((action) => String(action.actionId || '').includes('remote-ssh'));
+  if (hasAwxShadow) return 'AWX shadow / SSH fallback';
+  return hasRemoteSsh ? 'remote-ssh / AWX-ready' : 'Worker V1 / AWX-ready';
+}
+
+function consoleGateLabel(dashboard) {
+  const actions = asArray(dashboard.actionPolicy?.actions);
+  const allowed = actions.filter((action) => action.allowed).length;
+  const gated = actions.filter((action) => action.gate && action.gate !== 'none').length;
+  return `${allowed} allowed / ${gated} gated`;
+}
+
+function consoleEvidenceTotal(pipelines) {
+  return asArray(pipelines).reduce((sum, pipeline) => {
+    const counts = pipeline.counts || {};
+    return sum
+      + Number(counts.workerReports || 0)
+      + Number(counts.rollbackReports || 0)
+      + Number(counts.executions || 0)
+      + Number(counts.runnerSessions || 0);
+  }, 0);
+}
+
+function renderInspector(options = {}) {
+  if (options.mode === 'loading') {
+    inspectorKind.textContent = 'Inspector';
+    inspectorTitle.textContent = 'Loading Internal';
+    inspectorMeta.textContent = 'Waiting for dashboard, pipelines, and provider state.';
+    inspectorStatus.textContent = 'ready';
+    inspectorStatus.dataset.health = 'ready';
+    inspectorFacts.innerHTML = renderInspectorFacts([
+      ['Internal', 'loading'],
+      ['Provider', 'Worker V1'],
+      ['OS Scope', 'Ubuntu + CentOS/RHEL'],
+      ['Evidence', 'pending']
+    ]);
+    inspectorNext.innerHTML = '<div class="empty-state">Loading action gates.</div>';
+    inspectorEvidence.innerHTML = '<div class="empty-state">Loading timeline.</div>';
+    return;
+  }
+  if (options.mode === 'error') {
+    inspectorKind.textContent = 'Inspector';
+    inspectorTitle.textContent = 'Admin API unavailable';
+    inspectorMeta.textContent = options.message || 'Cannot load Internal state.';
+    inspectorStatus.textContent = 'failed';
+    inspectorStatus.dataset.health = 'failed';
+    inspectorFacts.innerHTML = renderInspectorFacts([
+      ['Internal', 'offline'],
+      ['Provider', 'unavailable'],
+      ['OS Scope', 'Ubuntu + CentOS/RHEL'],
+      ['Evidence', 'not loaded']
+    ]);
+    inspectorNext.innerHTML = '<div class="empty-state">Reconnect Internal before running gated actions.</div>';
+    inspectorEvidence.innerHTML = '<div class="empty-state">No evidence loaded.</div>';
+    return;
+  }
+
+  const dashboard = state.dashboard;
+  if (!dashboard) return renderInspector({ mode: 'loading' });
+
+  const selectedSite = state.deploymentKind === 'oversea' ? selectedOverseaSite() : null;
+  const currentSummary = state.currentPipeline?.summary || null;
+  const summary = currentSummary && (!state.selectedSiteId || currentSummary.siteId === state.selectedSiteId)
+    ? currentSummary
+    : activePipelineForCurrentDeployment(dashboard.siteSlotPipelines || []);
+  const profile = inspectorSshProfile(summary?.kind || state.deploymentKind, summary?.siteId || selectedSite?.siteId || state.selectedSiteId);
+  const kind = state.adminSection === 'deployment' ? (summary?.kind || state.deploymentKind) : state.adminSection;
+  const title = state.adminSection === 'deployment'
+    ? (selectedSite?.siteId || summary?.siteId || `${kind} slot`)
+    : state.adminSection === 'foundations'
+      ? (internalSubsectionMeta[state.adminSubsection]?.title || 'Internal foundations')
+      : state.adminSection === 'dashboard'
+        ? 'I-HDO Dashboard'
+        : (evidenceSubsectionMeta[state.adminSubsection]?.title || 'Evidence history');
+  const health = normalizeStageStatus(summary?.health || selectedSite?.status || 'ready');
+
+  inspectorKind.textContent = kind;
+  inspectorTitle.textContent = title;
+  inspectorMeta.textContent = inspectorMetaText(summary, selectedSite);
+  inspectorStatus.textContent = summary?.health || selectedSite?.status || 'ready';
+  inspectorStatus.dataset.health = health;
+  inspectorFacts.innerHTML = renderInspectorFacts([
+    ['Host', selectedSite?.host || profile?.host || '-'],
+    ['SSH Profile', selectedSite?.sshProfile?.profileId || profile?.profileId || '-'],
+    ['Provider', consoleProviderLabel(dashboard)],
+    ['OS Scope', 'Ubuntu + CentOS/RHEL'],
+    ['Stage', summary?.currentStage || '-'],
+    ['Latest', summary?.latestStatus || selectedSite?.status || '-'],
+    ['Updated', formatTime(summary?.latestUpdatedAt)],
+    ['Objects', summary ? String(pipelineObjectCount(summary)) : '-']
+  ]);
+  inspectorNext.innerHTML = renderInspectorNextAction(summary, selectedSite);
+  const timeline = summary && currentSummary?.siteId === summary.siteId ? state.currentPipeline?.timeline : [];
+  renderInspectorEvidence(timeline || []);
+}
+
+function inspectorMetaText(summary, site) {
+  if (state.adminSection === 'dashboard') return 'Topology, platform health, and next setup lanes.';
+  if (state.adminSection === 'foundations') {
+    return internalSubsectionMeta[state.adminSubsection]?.subtitle || 'Internal truth, platform services, and admin mutation boundaries.';
+  }
+  if (state.adminSection === 'evidence') {
+    return evidenceSubsectionMeta[state.adminSubsection]?.subtitle || 'Recent plan, runner, worker, rollback, and report evidence.';
+  }
+  if (summary) return `${summary.currentStage || 'stage pending'} / ${summary.latestStatus || 'status pending'} / ${formatTime(summary.latestUpdatedAt)}`;
+  if (site) return `${site.host || 'host pending'} / ${site.status || 'planned'}`;
+  return 'Select a site or pipeline to inspect.';
+}
+
+function inspectorSshProfile(kind, siteId) {
+  if (!siteId) return null;
+  return asArray(state.sshProfiles)
+    .filter((profile) => profile.kind === kind && profile.siteId === siteId)
+    .sort((left, right) => String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')))[0] || null;
+}
+
+function renderInspectorFacts(rows) {
+  return rows.map(([label, value]) => `
+    <div>
+      <dt>${escapeHtml(label)}</dt>
+      <dd>${escapeHtml(value || '-')}</dd>
+    </div>
+  `).join('');
+}
+
+function renderInspectorNextAction(summary, site = null) {
+  const actions = asArray(summary?.actionHints);
+  const action = state.selectedAction || preferredNextAction(actions) || null;
+  if (!action) {
+    if (site) return renderInspectorSiteNextAction(site);
+    return '<div class="empty-state">No gated action for the selected object.</div>';
+  }
+  return `
+    <article class="inspector-action" data-allowed="${action.allowed ? 'true' : 'false'}">
+      <span class="risk-chip" data-risk="${escapeHtml(action.risk || 'low')}">${escapeHtml(action.risk || 'low')}</span>
+      <strong>${escapeHtml(action.label || action.actionId || 'action')}</strong>
+      <small>${escapeHtml(action.gate || 'none')} / ${escapeHtml(action.allowed ? 'allowed' : 'locked')}</small>
+      ${action.reason ? `<p>${escapeHtml(action.reason)}</p>` : ''}
+    </article>
+  `;
+}
+
+function renderInspectorSiteNextAction(site) {
+  const profile = inspectorSshProfile(site.kind || state.deploymentKind, site.siteId);
+  const profileReady = Boolean(profile?.profileId && profile?.identityFile);
+  const label = !profile?.profileId
+    ? 'Save SSH Profile'
+    : profileReady
+      ? 'Shadow Setup'
+      : 'Complete SSH Access';
+  const detail = !profile?.profileId
+    ? 'Config Center profile required'
+    : profileReady
+      ? 'ready to create plan / runner / AWX job'
+      : 'identity file or bootstrap key required';
+  return `
+    <article class="inspector-action" data-allowed="${profileReady ? 'true' : 'false'}">
+      <span class="risk-chip" data-risk="${profileReady ? 'medium' : 'low'}">${profileReady ? 'medium' : 'low'}</span>
+      <strong>${escapeHtml(label)}</strong>
+      <small>${escapeHtml(site.status || 'planned')} / ${escapeHtml(detail)}</small>
+    </article>
+  `;
+}
+
+function renderInspectorEvidence(timeline) {
+  const entries = asArray(timeline).slice(-5).reverse();
+  if (!entries.length) {
+    inspectorEvidence.innerHTML = '<div class="empty-state">No timeline evidence loaded.</div>';
+    return;
+  }
+  inspectorEvidence.innerHTML = entries.map((entry, index) => `
+    <button class="inspector-evidence-row" type="button" data-inspector-evidence-index="${index}">
+      <span class="timeline-dot"></span>
+      <strong>${escapeHtml(entry.title)}</strong>
+      <small>${escapeHtml(entry.kind)} / ${escapeHtml(entry.status)} / ${formatTime(entry.at)}</small>
+    </button>
+  `).join('');
+  for (const button of inspectorEvidence.querySelectorAll('[data-inspector-evidence-index]')) {
+    button.addEventListener('click', () => {
+      const entry = entries[Number(button.dataset.inspectorEvidenceIndex)];
+      if (entry) openEvidenceDrawer(entry);
+    });
+  }
 }
 
 function renderPipelineList(pipelines) {
-  pipelineCount.textContent = String(pipelines.length);
-  if (pipelines.length === 0) {
-    pipelineList.innerHTML = '<div class="empty-state">No pipelines</div>';
+  const sites = deploymentSites(pipelines, state.deploymentKind);
+  pipelineCount.textContent = String(sites.length);
+  if (sites.length === 0) {
+    pipelineList.innerHTML = `<div class="empty-state">No ${escapeHtml(state.deploymentKind)} sites</div>`;
     return;
   }
-  pipelineList.innerHTML = pipelines.map((pipeline) => `
-    <button class="pipeline-item ${pipeline.planId === state.selectedPlanId ? 'is-selected' : ''}" type="button" data-plan-id="${escapeHtml(pipeline.planId)}">
+  pipelineList.innerHTML = sites.map((site) => {
+    const pipeline = site.activePipeline;
+    return `
+    <button class="pipeline-item ${site.siteId === state.selectedSiteId ? 'is-selected' : ''}" type="button" data-site-id="${escapeHtml(site.siteId)}" data-plan-id="${escapeHtml(pipeline.planId)}">
       <span class="pipeline-top">
-        <strong>${escapeHtml(pipeline.siteId)}</strong>
+        <strong>${escapeHtml(site.siteId)}</strong>
         <span class="health-chip" data-health="${escapeHtml(pipeline.health)}">${escapeHtml(pipeline.health)}</span>
       </span>
-      <span class="pipeline-meta">${escapeHtml(pipeline.kind)} / ${escapeHtml(pipeline.currentStage)} / ${escapeHtml(pipeline.latestStatus)}</span>
-      <span class="pipeline-counts">${formatCounts(pipeline.counts)}</span>
+      <span class="pipeline-meta">${escapeHtml(site.kind)} / ${escapeHtml(pipeline.currentStage)} / ${escapeHtml(pipeline.latestStatus)}</span>
+      <span class="pipeline-counts">${pipelineObjectCount(pipeline)} active objects / ${site.pipelines.length} history</span>
     </button>
-  `).join('');
+  `;
+  }).join('');
   for (const item of pipelineList.querySelectorAll('.pipeline-item')) {
     item.addEventListener('click', () => {
+      state.selectedSiteId = item.dataset.siteId || null;
       void refreshPipelineDetail(item.dataset.planId);
     });
   }
@@ -980,7 +3753,7 @@ function renderPipelineList(pipelines) {
 
 function renderPipelineSelection() {
   for (const item of pipelineList.querySelectorAll('.pipeline-item')) {
-    item.classList.toggle('is-selected', item.dataset.planId === state.selectedPlanId);
+    item.classList.toggle('is-selected', item.dataset.siteId === state.selectedSiteId);
   }
 }
 
@@ -994,15 +3767,10 @@ function renderPipelineDetail(pipeline) {
   if (state.selectedAction && !actions.some((action) => sameAction(action, state.selectedAction))) {
     state.selectedAction = null;
   }
-  pipelineSummary.innerHTML = `
-    <span><strong>${escapeHtml(summary.siteId)}</strong></span>
-    <span>${escapeHtml(summary.kind)}</span>
-    <span>${escapeHtml(summary.currentStage)}</span>
-    <span>${escapeHtml(summary.latestStatus)}</span>
-    <span>${formatTime(summary.latestUpdatedAt)}</span>
-  `;
+  renderCurrentPipelineSummary();
   const timeline = pipeline.timeline || [];
   pipelineStepper.innerHTML = renderPipelineStepper(pipeline);
+  renderSetupGuidance(pipeline, actions);
   renderPipelineActions(actions);
   pipelineTimeline.innerHTML = timeline.map((entry, index) => `
     <li
@@ -1032,6 +3800,56 @@ function renderPipelineDetail(pipeline) {
   if (!timeline.some((entry) => entry.id === state.selectedTimelineEntryId)) {
     closeEvidenceDrawer();
   }
+  renderInspector();
+}
+
+function renderCurrentPipelineSummary() {
+  if (!state.currentPipeline) {
+    pipelineSummary.textContent = '';
+    return;
+  }
+  const summary = state.currentPipeline.summary || {};
+  pipelineSummary.innerHTML = `
+    <span><strong>${escapeHtml(summary.siteId)}</strong></span>
+    <span>${escapeHtml(summary.kind)}</span>
+    <span>${escapeHtml(summary.currentStage)}</span>
+    <span>${escapeHtml(summary.latestStatus)}</span>
+    <span>${formatTime(summary.latestUpdatedAt)}</span>
+    ${renderMihomoReachabilityStrip(summary)}
+  `;
+}
+
+function renderMihomoReachabilityStrip(summary) {
+  if (summary.kind !== 'oversea') return '';
+  if (state.mihomoReachabilityError && state.mihomoReachabilitySiteId === summary.siteId) {
+    return `
+      <span class="reachability-strip" data-status="blocked">
+        <strong>Launcher Network</strong>
+        <span>${escapeHtml(state.mihomoReachabilityError)}</span>
+      </span>
+    `;
+  }
+  const reachability = state.mihomoReachabilitySiteId === summary.siteId ? state.mihomoReachability : null;
+  if (!reachability) {
+    return `
+      <span class="reachability-strip" data-status="planned">
+        <strong>Launcher Network</strong>
+        <span>loading reachability</span>
+      </span>
+    `;
+  }
+  const domesticRelay = asArray(reachability.stages).find((stage) => stage.stageId === 'domestic-wg-relay');
+  const h2iDns = asArray(reachability.stages).find((stage) => stage.stageId === 'h2i-internal-dns');
+  const status = reachability.verdict === 'h-endpoint-ready' ? 'passed' : reachability.verdict === 'blocked' ? 'blocked' : 'ready';
+  return `
+    <span class="reachability-strip" data-status="${escapeHtml(status)}">
+      <strong>${escapeHtml(reachability.verdict)}</strong>
+      <span>${escapeHtml(reachability.currentBoundary)}</span>
+      <span>Domestic WG ${escapeHtml(domesticRelay?.status || 'unknown')}</span>
+      <span>H2I DNS ${escapeHtml(h2iDns?.status || 'unknown')}</span>
+      <span>${escapeHtml(reachability.gates?.domesticGatewayIp || '10.88.0.1')}</span>
+    </span>
+  `;
 }
 
 function renderPipelineStepper(pipeline) {
@@ -1140,6 +3958,8 @@ function renderEmptyPipeline() {
   state.selectedAction = null;
   pipelineActions.innerHTML = '';
   pipelineTimeline.innerHTML = '<li class="empty-state">No pipeline selected</li>';
+  renderSetupGuidance(null, []);
+  renderInspector();
 }
 
 function openEvidenceDrawer(entry) {
@@ -1179,6 +3999,7 @@ function buildEvidenceView(pipeline, entry) {
     entry,
     object,
     steps,
+    awxSummary: awxSummaryForEvidence(object, steps),
     summary: evidenceSummaryFields(object, entry, steps)
   };
 }
@@ -1270,11 +4091,11 @@ function normalizeStep(step, metadata = {}) {
 }
 
 function renderEvidenceDrawer(evidence) {
-  const { entry, object, steps, summary } = evidence;
+  const { entry, object, steps, summary, awxSummary } = evidence;
   evidenceKind.textContent = entry.kind;
   evidenceTitle.textContent = entry.title;
   evidenceMeta.textContent = `${objectId(object, entry.kind)} / ${entry.status} / ${formatTime(entry.at)}`;
-  evidenceSummary.innerHTML = renderEvidenceSummary(summary);
+  evidenceSummary.innerHTML = `${renderEvidenceSummary(summary)}${renderAwxSummaryPanel(awxSummary, 'evidence')}`;
   evidenceSteps.innerHTML = renderEvidenceSteps(steps);
   evidenceJson.textContent = formatJson(object);
 }
@@ -1286,6 +4107,35 @@ function renderEvidenceSummary(fields) {
       <strong>${escapeHtml(formatSummaryValue(value))}</strong>
     </div>
   `).join('');
+}
+
+function renderAwxSummaryPanel(summary, variant = 'setup') {
+  if (!summary) return '';
+  const facts = [
+    ['Job', summary.awxJobId ? `#${summary.awxJobId}` : '-'],
+    ['AWX Status', summary.awxJobStatus || '-'],
+    ['Launch', summary.status || '-'],
+    ['Events', summary.eventsCaptured ? `${summary.eventsCount || 0} captured` : `${summary.eventsCount || 0}`],
+    ['Report', summary.reportId || '-'],
+    ['Template', summary.jobTemplateId || '-']
+  ];
+  return `
+    <section class="awx-summary-panel" data-variant="${escapeHtml(variant)}" data-status="${escapeHtml(normalizeStageStatus(summary.status || summary.awxJobStatus))}">
+      <div class="awx-summary-head">
+        <span>AWX Job</span>
+        <strong>${escapeHtml(summary.awxJobId ? `#${summary.awxJobId}` : summary.awxJobStatus || 'pending')}</strong>
+      </div>
+      <div class="awx-summary-grid">
+        ${facts.map(([label, value]) => `
+          <div>
+            <span>${escapeHtml(label)}</span>
+            <strong>${escapeHtml(formatSummaryValue(value))}</strong>
+          </div>
+        `).join('')}
+      </div>
+      ${summary.nextActions?.length ? `<p>${summary.nextActions.map(escapeHtml).join(' / ')}</p>` : ''}
+    </section>
+  `;
 }
 
 function renderEvidenceSteps(steps) {
@@ -1363,6 +4213,7 @@ function renderStepEvidenceInsight(evidence) {
         <div><span>sshProfile</span><strong>${escapeHtml(sshProfile.profileId || sshProfile.managedProfileId || sshProfile.source || '-')}</strong></div>
         <div><span>identity</span><strong>${escapeHtml(formatBoolean(sshProfile.identityFileExists))}</strong></div>
         <div><span>knownHosts</span><strong>${escapeHtml(formatBoolean(sshProfile.knownHostsFileExists))}</strong></div>
+        <div><span>sshConfig</span><strong>${escapeHtml(formatBoolean(sshProfile.sshConfigFileExists))}</strong></div>
         <div><span>strictHostKey</span><strong>${escapeHtml(formatStepValue(sshProfile.strictHostKeyChecking))}</strong></div>
       </div>
       ${evidence.effectiveCommand ? `
@@ -1430,6 +4281,62 @@ function workerReportEvidenceSummary(kind, steps) {
     })).join(' / ')],
     ['effectiveCommands', evidences.filter((evidence) => evidence.effectiveCommand).length]
   ];
+}
+
+function awxSummaryForEvidence(object, steps) {
+  const fromSteps = asArray(steps)
+    .map((step) => awxSummaryFromEvidence(step.evidence))
+    .find(Boolean);
+  if (fromSteps) {
+    return {
+      ...fromSteps,
+      reportId: fromSteps.reportId || object?.reportId || null
+    };
+  }
+  return awxSummaryFromLaunch(object?.awxLaunch || object?.awx);
+}
+
+function latestAwxSummaryFromPipeline(pipeline) {
+  const reports = asArray(pipeline?.workerReports).slice().sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || '')));
+  for (const report of reports) {
+    const steps = enrichStepReports(report.stepReports);
+    const summary = awxSummaryForEvidence(report, steps);
+    if (summary) return summary;
+  }
+  return null;
+}
+
+function awxSummaryFromEvidence(evidence) {
+  if (!evidence || typeof evidence !== 'object') return null;
+  const launch = evidence.awx?.launch || evidence.awx;
+  return awxSummaryFromLaunch(launch);
+}
+
+function awxSummaryFromPayload(payload) {
+  const summary = awxSummaryFromLaunch(payload?.awxLaunch);
+  if (!summary) return null;
+  return {
+    ...summary,
+    reportId: summary.reportId || payload?.report?.reportId || null
+  };
+}
+
+function awxSummaryFromLaunch(launch) {
+  if (!launch || typeof launch !== 'object') return null;
+  if (!('awxJobId' in launch) && !('awxJobStatus' in launch) && launch.provider !== 'awx-api') return null;
+  const events = launch.events || {};
+  return {
+    status: launch.status || null,
+    execution: launch.execution || null,
+    boundary: launch.boundary || null,
+    awxJobId: launch.awxJobId || null,
+    awxJobStatus: launch.awxJobStatus || null,
+    jobTemplateId: launch.jobTemplateId || null,
+    reportId: launch.reportId || null,
+    eventsCount: Number(events.count || 0),
+    eventsCaptured: events.captured === true,
+    nextActions: asArray(launch.nextActions)
+  };
 }
 
 function objectId(object, kind) {
@@ -1535,69 +4442,111 @@ function renderPipelineActions(actions) {
     return;
   }
   const selected = state.selectedAction;
-  const nextAction = actions.find((action) => action.allowed) || actions[0];
+  const nextAction = preferredNextAction(actions);
   const feedback = state.actionFeedback && state.actionFeedback.planId === state.selectedPlanId
-    ? `<div class="action-feedback" data-kind="${escapeHtml(state.actionFeedback.kind)}">${escapeHtml(state.actionFeedback.message)}</div>`
+    ? renderActionFeedback(state.actionFeedback)
     : '';
   pipelineActions.innerHTML = `
-    <div class="action-title">
-      <h4>Action Gates</h4>
-      <span>${actions.filter((action) => action.allowed).length}/${actions.length}</span>
-    </div>
-    ${renderNextGate(nextAction)}
-    <div class="action-grid">
-      ${actions.map((action, index) => `
-        <button
-          class="admin-action ${action.allowed ? 'is-allowed' : 'is-locked'} ${selected && sameAction(action, selected) ? 'is-selected' : ''}"
-          type="button"
-          title="${escapeHtml(action.reason)}"
-          data-action-index="${index}"
-          data-action-id="${escapeHtml(action.actionId)}"
-          ${action.allowed ? '' : 'disabled'}
-        >
-          <span class="action-main">
-            <strong>${escapeHtml(action.label)}</strong>
-            <span class="risk-chip" data-risk="${escapeHtml(action.risk)}">${escapeHtml(action.risk)}</span>
-          </span>
-          <span class="action-path">${escapeHtml(action.method)} ${escapeHtml(action.path)}</span>
-          <span class="action-meta">${escapeHtml(action.gate)} / ${escapeHtml(action.reason)}</span>
-        </button>
-      `).join('')}
-    </div>
-    ${feedback}
-    ${selected ? renderActionConfirm(selected) : ''}
+    <details class="advanced-actions" ${selected || feedback ? 'open' : ''}>
+      <summary>
+        <span>Advanced audit actions</span>
+        <strong>${actions.filter((action) => action.allowed).length}/${actions.length}</strong>
+      </summary>
+      ${renderNextGate(nextAction)}
+      <div class="action-grid">
+        ${actions.map((action, index) => `
+          <button
+            class="admin-action ${action.allowed ? 'is-allowed' : 'is-locked'} ${selected && sameAction(action, selected) ? 'is-selected' : ''} ${nextAction && sameAction(action, nextAction) ? 'is-recommended' : ''}"
+            type="button"
+            title="${escapeHtml(action.reason)}"
+            data-action-index="${index}"
+            data-action-id="${escapeHtml(action.actionId)}"
+            ${action.allowed ? '' : 'disabled'}
+          >
+            <span class="action-main">
+              <strong>${escapeHtml(action.label)}</strong>
+              <span class="risk-chip" data-risk="${escapeHtml(action.risk)}">${escapeHtml(action.risk)}</span>
+            </span>
+            <span class="action-path">${escapeHtml(action.method)} ${escapeHtml(action.path)}</span>
+            <span class="action-meta">${escapeHtml(action.gate)} / ${escapeHtml(action.reason)}</span>
+          </button>
+        `).join('')}
+      </div>
+      ${feedback}
+      ${selected ? renderActionConfirm(selected) : ''}
+    </details>
   `;
   for (const button of pipelineActions.querySelectorAll('.admin-action')) {
     button.addEventListener('click', () => {
       const action = actions[Number(button.dataset.actionIndex)];
       if (!action || !action.allowed) return;
-      state.selectedAction = action;
+      selectPipelineAction(action);
       state.actionFeedback = null;
       renderPipelineActions(actions);
+      renderInspector();
     });
   }
   const nextButton = pipelineActions.querySelector('[data-action-next]');
   if (nextButton) {
     nextButton.addEventListener('click', () => {
       if (!nextAction?.allowed) return;
-      state.selectedAction = nextAction;
+      selectPipelineAction(nextAction);
       state.actionFeedback = null;
       renderPipelineActions(actions);
+      renderInspector();
     });
   }
   const cancelButton = pipelineActions.querySelector('[data-action-cancel]');
   if (cancelButton) {
     cancelButton.addEventListener('click', () => {
       state.selectedAction = null;
+      state.selectedActionBody = null;
       renderPipelineActions(actions);
+      renderInspector();
     });
   }
   const executeButton = pipelineActions.querySelector('[data-action-execute]');
   if (executeButton) {
     const refreshExecuteState = () => {
       const checks = Array.from(pipelineActions.querySelectorAll('[data-confirm-field]'));
-      executeButton.disabled = state.actionBusy || checks.some((input) => !input.checked);
+      const bodyInput = pipelineActions.querySelector('[data-action-body]');
+      executeButton.disabled = state.actionBusy
+        || checks.some((input) => !input.checked)
+        || !isActionBodyExecutable(bodyInput?.value || '');
     };
+    const bodyInput = pipelineActions.querySelector('[data-action-body]');
+    if (bodyInput) {
+      bodyInput.addEventListener('input', () => {
+        state.selectedActionBody = bodyInput.value;
+        syncDomesticPeerDraftFromBodyText(bodyInput.value);
+        syncAwxActionDraftFromBodyText(bodyInput.value);
+        refreshExecuteState();
+      });
+    }
+    for (const input of pipelineActions.querySelectorAll('[data-home-peer-field]')) {
+      input.addEventListener('input', () => {
+        syncHomePeerField(input);
+        updateSelectedActionBodyFromHomePeer();
+        refreshExecuteState();
+      });
+      input.addEventListener('change', () => {
+        syncHomePeerField(input);
+        updateSelectedActionBodyFromHomePeer();
+        refreshExecuteState();
+      });
+    }
+    for (const input of pipelineActions.querySelectorAll('[data-awx-action-field]')) {
+      input.addEventListener('input', () => {
+        syncAwxActionField(input);
+        updateSelectedActionBodyFromAwxDraft();
+        refreshExecuteState();
+      });
+      input.addEventListener('change', () => {
+        syncAwxActionField(input);
+        updateSelectedActionBodyFromAwxDraft();
+        refreshExecuteState();
+      });
+    }
     for (const checkbox of pipelineActions.querySelectorAll('[data-confirm-field]')) {
       checkbox.addEventListener('change', refreshExecuteState);
     }
@@ -1606,6 +4555,602 @@ function renderPipelineActions(actions) {
     });
     refreshExecuteState();
   }
+}
+
+function renderActionFeedback(feedback) {
+  return `
+    <div class="action-feedback" data-kind="${escapeHtml(feedback.kind)}">
+      <strong>${escapeHtml(feedback.message)}</strong>
+      ${renderAwxSummaryPanel(feedback.awxSummary, 'action')}
+      ${feedback.detail ? `<pre>${escapeHtml(feedback.detail)}</pre>` : ''}
+    </div>
+  `;
+}
+
+function renderSetupGuidance(pipeline, actions) {
+  if (!setupGuide) return;
+  const summary = pipeline?.summary || null;
+  const nextAction = preferredNextAction(actions || []);
+  if (!summary) {
+    renderSelectedSiteSetupGuidance();
+    return;
+  }
+  const actionText = nextAction ? actionGuidanceText(nextAction) : '当前没有可执行 gate。可以刷新或查看 Evidence History。';
+  const runState = setupRunViewState(nextAction);
+  setupGuide.innerHTML = `
+    <section class="setup-guide-card" data-ready="${nextAction?.allowed ? 'true' : 'false'}">
+      <div>
+        <span class="site-kind">Setup Assistant</span>
+        <strong>${escapeHtml(runState.title || setupHeadline(summary, nextAction))}</strong>
+        <p>${escapeHtml(runState.message || actionText)}</p>
+        ${renderSetupRunProgress()}
+        ${renderAwxSummaryPanel(setupAwxSummary(), 'setup')}
+      </div>
+      <div class="setup-guide-actions">
+        <button class="primary-button" type="button" data-setup-continue ${nextAction?.allowed && !state.actionBusy && !state.setupRun.active ? '' : 'disabled'}>
+          ${escapeHtml(runState.buttonLabel)}
+        </button>
+        ${state.setupRun.active ? '<button class="secondary-button" type="button" data-setup-stop>Stop</button>' : ''}
+        <button class="secondary-button" type="button" data-setup-refresh>Refresh</button>
+      </div>
+    </section>
+  `;
+  const continueButton = setupGuide.querySelector('[data-setup-continue]');
+  if (continueButton && nextAction) {
+    continueButton.addEventListener('click', () => {
+      void startSetupRun();
+    });
+  }
+  const stopButton = setupGuide.querySelector('[data-setup-stop]');
+  if (stopButton) {
+    stopButton.addEventListener('click', () => {
+      stopSetupRun('Stopped by operator.');
+    });
+  }
+  const refreshButton = setupGuide.querySelector('[data-setup-refresh]');
+  if (refreshButton) refreshButton.addEventListener('click', () => void refreshAdmin());
+}
+
+function renderSelectedSiteSetupGuidance() {
+  const site = state.deploymentKind === 'oversea' ? selectedOverseaSite() : null;
+  if (!site) {
+    setupGuide.innerHTML = `
+      <section class="setup-guide-card">
+        <span class="site-kind">Setup Assistant</span>
+        <strong>Select a site to continue</strong>
+        <p>选择一个 Oversea 或 Domestic slot 后，这里会显示下一步建议动作。</p>
+      </section>
+    `;
+    return;
+  }
+  const profile = inspectorSshProfile(site.kind || state.deploymentKind, site.siteId);
+  const profileReady = Boolean(profile?.profileId && profile?.identityFile);
+  const hostPeer = sameHostPeerProfile(site);
+  const title = selectedSiteSetupTitle(site, profile, profileReady);
+  const message = selectedSiteSetupMessage(site, profile, profileReady, hostPeer);
+  const canShadowSetup = site.kind === 'oversea' && profileReady && !state.sshShadowBusy;
+  setupGuide.innerHTML = `
+    <section class="setup-guide-card" data-ready="${canShadowSetup ? 'true' : 'false'}">
+      <div>
+        <span class="site-kind">Setup Assistant</span>
+        <strong>${escapeHtml(title)}</strong>
+        <p>${escapeHtml(message)}</p>
+      </div>
+      <div class="setup-guide-actions">
+        ${canShadowSetup ? `
+          <button class="primary-button" type="button" data-setup-site-shadow>
+            ${state.sshShadowBusy ? 'Setting up' : 'Shadow Setup'}
+          </button>
+          <button class="secondary-button" type="button" data-setup-site-open-ssh>Edit SSH</button>
+        ` : `
+          <button class="primary-button" type="button" data-setup-site-open-ssh>Open SSH Access</button>
+        `}
+        <button class="secondary-button" type="button" data-setup-refresh>Refresh</button>
+      </div>
+    </section>
+  `;
+  const openSsh = setupGuide.querySelector('[data-setup-site-open-ssh]');
+  if (openSsh) {
+    openSsh.addEventListener('click', () => {
+      focusSshProfileForSite(site);
+    });
+  }
+  const shadowSetup = setupGuide.querySelector('[data-setup-site-shadow]');
+  if (shadowSetup) {
+    shadowSetup.addEventListener('click', () => {
+      focusSshProfileForSite(site);
+      void runOverseaShadowSetupFromSshProfile();
+    });
+  }
+  const refreshButton = setupGuide.querySelector('[data-setup-refresh]');
+  if (refreshButton) refreshButton.addEventListener('click', () => void refreshAdmin());
+}
+
+function selectedSiteSetupTitle(site, profile, profileReady) {
+  if (!profile?.profileId) return `${site.siteId}: Save SSH Profile`;
+  if (!profileReady) return `${site.siteId}: Complete SSH Access`;
+  return `${site.siteId}: Shadow Setup`;
+}
+
+function selectedSiteSetupMessage(site, profile, profileReady, hostPeer) {
+  if (!profile?.profileId) {
+    return '先保存 SSH Profile，Internal 才能把该 Oversea 作为独立 siteId 管理。';
+  }
+  if (!profileReady) {
+    return hostPeer
+      ? `这个 host 已有 ${hostPeer.siteId} 的 SSH 凭据，可复用路径后保存，再继续 Shadow Setup。`
+      : '该 profile 缺少 Internal-managed identity file。可以 Bootstrap Key，或填入已有 key/known_hosts 后保存。';
+  }
+  return 'SSH 凭据已就绪，可以生成 oversea-s1 自己的 plan、runner、AWX worker job 和 evidence。';
+}
+
+function setupRunViewState(nextAction) {
+  if (state.setupRun.active) {
+    return {
+      title: 'Setup is running',
+      message: state.setupRun.message || '正在执行低风险 gate，并同步最新 pipeline 状态。',
+      buttonLabel: 'Running...'
+    };
+  }
+  if (state.setupRun.status === 'waiting-confirm') {
+    return {
+      title: 'Review required before continuing',
+      message: state.setupRun.message || '下一步需要人工确认，已展开审计动作。',
+      buttonLabel: nextAction ? recommendedButtonLabel(nextAction) : 'Review'
+    };
+  }
+  if (state.setupRun.status === 'failed') {
+    return {
+      title: 'Setup stopped on an error',
+      message: state.setupRun.message || '请查看下方 action feedback 或 Evidence 后继续。',
+      buttonLabel: nextAction ? recommendedButtonLabel(nextAction) : 'Retry'
+    };
+  }
+  if (state.setupRun.status === 'complete') {
+    return {
+      title: 'Setup step completed',
+      message: state.setupRun.message || '当前步骤已完成，Evidence 已同步。',
+      buttonLabel: nextAction ? recommendedButtonLabel(nextAction) : 'Done'
+    };
+  }
+  if (state.setupRun.status === 'waiting' || state.setupRun.status === 'blocked') {
+    return {
+      title: 'Ready for operator review',
+      message: state.setupRun.message || '流水线已停在下一道 gate。',
+      buttonLabel: nextAction ? recommendedButtonLabel(nextAction) : 'Review'
+    };
+  }
+  return {
+    title: '',
+    message: '',
+    buttonLabel: nextAction ? recommendedButtonLabel(nextAction) : 'No Action'
+  };
+}
+
+function renderSetupRunProgress() {
+  const steps = asArray(state.setupRun.steps).slice(-4);
+  if (!steps.length && state.setupRun.status === 'idle') return '';
+  const items = steps.map((step) => `
+    <li data-status="${escapeHtml(step.status)}">
+      <span>${escapeHtml(step.status)}</span>
+      <strong>${escapeHtml(step.label)}</strong>
+      <small>${escapeHtml(step.message || '')}</small>
+    </li>
+  `).join('');
+  return `
+    <ol class="setup-run-progress" data-status="${escapeHtml(state.setupRun.status)}">
+      ${items || `<li data-status="${escapeHtml(state.setupRun.status)}"><span>${escapeHtml(state.setupRun.status)}</span><strong>${escapeHtml(state.setupRun.message || 'Waiting')}</strong><small></small></li>`}
+    </ol>
+  `;
+}
+
+function setupAwxSummary() {
+  if (state.actionFeedback?.planId === state.selectedPlanId && state.actionFeedback.awxSummary) {
+    return state.actionFeedback.awxSummary;
+  }
+  return latestAwxSummaryFromPipeline(state.currentPipeline);
+}
+
+function renderDashboardGuidance() {
+  if (!dashboardGuidance) return;
+  const dashboard = state.dashboard;
+  if (!dashboard) {
+    dashboardGuidance.innerHTML = `
+      <section class="setup-guide-card">
+        <span class="site-kind">Dashboard</span>
+        <strong>Waiting for Internal</strong>
+        <p>连接 18090 后，Dashboard 会汇总 Oversea、Domestic、Internal 和 Evidence 状态。</p>
+      </section>
+    `;
+    return;
+  }
+  const oversea = deploymentSites(dashboard.siteSlotPipelines || [], 'oversea')[0]?.activePipeline || null;
+  const domestic = deploymentSites(dashboard.siteSlotPipelines || [], 'domestic')[0]?.activePipeline || null;
+  const overseaAction = preferredNextAction(asArray(oversea?.actionHints));
+  const domesticAction = preferredNextAction(asArray(domestic?.actionHints));
+  dashboardGuidance.innerHTML = `
+    <section class="setup-guide-card dashboard-guide">
+      <div>
+        <span class="site-kind">Dashboard</span>
+        <strong>Choose a lane, then press Continue Setup</strong>
+        <p>Oversea 负责接入栈，Domestic 负责 WG relay。每条 lane 都会提示下一步 gate。</p>
+      </div>
+      <div class="dashboard-lanes">
+        ${renderDashboardLane('oversea', oversea, overseaAction)}
+        ${renderDashboardLane('domestic', domestic, domesticAction)}
+      </div>
+    </section>
+  `;
+  for (const button of dashboardGuidance.querySelectorAll('[data-dashboard-lane]')) {
+    button.addEventListener('click', () => {
+      state.adminSection = 'deployment';
+      state.deploymentKind = button.dataset.dashboardLane === 'domestic' ? 'domestic' : 'oversea';
+      const active = activePipelineForCurrentDeployment(state.dashboard?.siteSlotPipelines || []);
+      state.selectedPlanId = active?.planId || null;
+      state.selectedSiteId = active?.siteId || state.selectedSiteId;
+      renderAdminShell();
+      renderAdminDashboard(state.dashboard);
+      if (state.selectedPlanId) void refreshPipelineDetail(state.selectedPlanId);
+    });
+  }
+}
+
+function renderDashboardLane(kind, pipeline, action) {
+  const label = kind === 'domestic' ? 'Domestic' : 'Oversea';
+  return `
+    <button class="dashboard-lane" type="button" data-dashboard-lane="${escapeHtml(kind)}">
+      <strong>${escapeHtml(label)}</strong>
+      <span>${escapeHtml(pipeline?.siteId || `${kind}-main`)}</span>
+      <small>${escapeHtml(action?.label || pipeline?.latestStatus || 'open lane')}</small>
+    </button>
+  `;
+}
+
+async function runRecommendedAction(action) {
+  if (!action?.allowed || state.actionBusy) return;
+  selectPipelineAction(action);
+  state.actionFeedback = null;
+  renderSetupGuidance(state.currentPipeline, state.currentActions);
+  renderPipelineActions(state.currentActions);
+  renderInspector();
+  const requiresConfirm = asArray(action.confirmFields).length > 0 || action.risk === 'high';
+  if (requiresConfirm) {
+    pipelineActions.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return;
+  }
+  await executeSelectedAction();
+}
+
+async function startSetupRun() {
+  if (state.setupRun.active || state.actionBusy) return;
+  state.setupRun = {
+    active: true,
+    status: 'running',
+    message: 'Starting setup flow...',
+    steps: []
+  };
+  await continueSetupRun();
+}
+
+function stopSetupRun(message, status = 'stopped') {
+  setupMonitorToken += 1;
+  state.setupRun.active = false;
+  state.setupRun.status = status;
+  state.setupRun.message = message;
+  renderSetupGuidance(state.currentPipeline, state.currentActions);
+  renderPipelineActions(state.currentActions);
+  renderInspector();
+}
+
+function clearSetupRun(message = '', status = 'idle') {
+  setupMonitorToken += 1;
+  state.setupRun = {
+    active: false,
+    status,
+    message,
+    steps: []
+  };
+}
+
+async function monitorPipelineProgress({ planId, reason, maxTicks = 12, intervalMs = 2500 }) {
+  if (!planId) return;
+  const token = ++setupMonitorToken;
+  state.setupRun = {
+    active: true,
+    status: 'monitoring',
+    message: reason || 'Monitoring worker progress...',
+    steps: asArray(state.setupRun.steps)
+  };
+  pushSetupRunStep({ actionId: 'pipeline.monitor', path: planId, label: 'Monitor Pipeline' }, 'running', state.setupRun.message);
+  renderSetupGuidance(state.currentPipeline, state.currentActions);
+  renderPipelineActions(state.currentActions);
+  renderInspector();
+
+  for (let tick = 0; tick < maxTicks; tick += 1) {
+    if (token !== setupMonitorToken) return;
+    await delay(tick === 0 ? 900 : intervalMs);
+    if (token !== setupMonitorToken) return;
+    const pipeline = await refreshPipelineDetail(planId);
+    if (!pipeline) {
+      finishSetupMonitor(token, 'failed', 'Failed to refresh pipeline status.');
+      return;
+    }
+    const observation = setupPipelineObservation(pipeline);
+    state.setupRun.message = observation.message;
+    replaceLatestSetupRunStep('pipeline.monitor', observation.stepStatus, observation.message);
+    renderSetupGuidance(state.currentPipeline, state.currentActions);
+    if (observation.done) {
+      finishSetupMonitor(token, observation.status, observation.message);
+      return;
+    }
+  }
+  finishSetupMonitor(token, 'waiting', 'Still waiting for worker/AWX result. Refresh to continue watching.');
+}
+
+function finishSetupMonitor(token, status, message) {
+  if (token !== setupMonitorToken) return;
+  state.setupRun.active = false;
+  state.setupRun.status = status;
+  state.setupRun.message = message;
+  renderSetupGuidance(state.currentPipeline, state.currentActions);
+  renderPipelineActions(state.currentActions);
+  renderInspector();
+}
+
+function setupPipelineObservation(pipeline) {
+  const summary = pipeline?.summary || {};
+  const health = normalizeStageStatus(summary.health || summary.latestStatus);
+  const running = pipelineHasRunningWork(pipeline);
+  const nextAction = preferredNextAction(asArray(summary.actionHints));
+  if (health === 'failed') {
+    return {
+      done: true,
+      status: 'failed',
+      stepStatus: 'failed',
+      message: `${summary.siteId || 'slot'} failed at ${summary.currentStage || 'pipeline'}.`
+    };
+  }
+  if (health === 'blocked') {
+    return {
+      done: true,
+      status: 'waiting-confirm',
+      stepStatus: 'waiting',
+      message: nextAction ? `${nextAction.label} is waiting for approval or operator input.` : 'Pipeline is blocked by a gate.'
+    };
+  }
+  if (running) {
+    return {
+      done: false,
+      status: 'monitoring',
+      stepStatus: 'running',
+      message: `${summary.currentStage || 'worker'} is ${summary.latestStatus || 'running'}...`
+    };
+  }
+  if (health === 'passed') {
+    return {
+      done: true,
+      status: 'complete',
+      stepStatus: 'passed',
+      message: `${summary.siteId || 'slot'} completed with evidence recorded.`
+    };
+  }
+  return {
+    done: true,
+    status: 'waiting',
+    stepStatus: 'waiting',
+    message: nextAction ? `Ready for next gate: ${nextAction.label}.` : 'Pipeline is waiting for the next operator action.'
+  };
+}
+
+function pipelineHasRunningWork(pipeline) {
+  const runningStatuses = new Set(['queued', 'running']);
+  return asArray(pipeline?.runnerSessions).some((session) => runningStatuses.has(session.status))
+    || asArray(pipeline?.workerJobs).some((job) => runningStatuses.has(job.status))
+    || asArray(pipeline?.workerReports).some((report) => runningStatuses.has(report.status))
+    || runningStatuses.has(pipeline?.summary?.latestStatus);
+}
+
+function postActionMonitorReason(action, payload) {
+  const awxLaunch = payload?.awxLaunch;
+  if (awxLaunch) {
+    const awxId = awxLaunch.awxJobId ? ` #${awxLaunch.awxJobId}` : '';
+    return `Monitoring AWX job${awxId}: ${awxLaunch.awxJobStatus || awxLaunch.status || 'submitted'}.`;
+  }
+  const report = payload?.report;
+  if (report?.status === 'running') return `Monitoring worker report ${report.reportId || ''}.`;
+  const session = payload?.session;
+  if (session && ['queued', 'running'].includes(session.status)) return `Monitoring ${session.mode || 'runner'} session.`;
+  const job = payload?.job;
+  if (job && ['ready', 'running'].includes(job.status)) return `Worker job ${job.jobId || ''} is ready for execution.`;
+  if (String(action?.actionId || '').includes('awx')) return 'Monitoring AWX worker progress.';
+  return '';
+}
+
+async function continueSetupRun() {
+  const maxSteps = 8;
+  const seen = new Set();
+  for (let stepIndex = 0; stepIndex < maxSteps && state.setupRun.active; stepIndex += 1) {
+    const action = preferredNextAction(state.currentActions);
+    if (!action) {
+      stopSetupRun('No remaining action gates for this slot.', 'complete');
+      return;
+    }
+    if (!action.allowed) {
+      stopSetupRun(action.reason || 'Next action is locked by policy.', 'blocked');
+      return;
+    }
+
+    selectPipelineAction(action);
+    const manualReason = setupManualStopReason(action);
+    if (manualReason) {
+      state.setupRun.active = false;
+      state.setupRun.status = 'waiting-confirm';
+      state.setupRun.message = manualReason;
+      pushSetupRunStep(action, 'waiting', manualReason);
+      renderSetupGuidance(state.currentPipeline, state.currentActions);
+      renderPipelineActions(state.currentActions);
+      renderInspector();
+      pipelineActions.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+
+    const key = setupActionKey(action);
+    if (seen.has(key)) {
+      stopSetupRun('Pipeline state did not advance after refresh. Review evidence or retry after the worker reports back.', 'waiting');
+      return;
+    }
+    seen.add(key);
+    pushSetupRunStep(action, 'running', 'Executing low-risk gate.');
+    state.setupRun.message = `${action.label} is running...`;
+    renderSetupGuidance(state.currentPipeline, state.currentActions);
+    renderPipelineActions(state.currentActions);
+    renderInspector();
+
+    const result = await executeSelectedAction({ openEvidence: false, monitor: false });
+    if (!result?.ok) {
+      pushSetupRunStep(action, 'failed', result?.error?.message || 'Action failed.');
+      stopSetupRun(result?.error?.message || 'Action failed.', 'failed');
+      return;
+    }
+    pushSetupRunStep(action, 'passed', summarizeActionPayload(action, result.payload || {}));
+    state.setupRun.message = 'Refreshing pipeline state...';
+    renderSetupGuidance(state.currentPipeline, state.currentActions);
+    await delay(650);
+  }
+  if (state.setupRun.active) {
+    stopSetupRun('Paused after several automatic steps. Review the latest gate before continuing.', 'waiting');
+  }
+}
+
+function setupManualStopReason(action) {
+  if (asArray(action.confirmFields).length > 0 || action.risk === 'high') {
+    return `${action.label} requires approval before it can change remote state.`;
+  }
+  const body = formatJson(materializeActionBodyTemplate(action));
+  if (!isActionBodyExecutable(body)) {
+    return `${action.label} needs operator input before execution.`;
+  }
+  return '';
+}
+
+function pushSetupRunStep(action, status, message) {
+  const existing = asArray(state.setupRun.steps);
+  state.setupRun.steps = [
+    ...existing,
+    {
+      id: `${setupActionKey(action)}:${Date.now()}`,
+      actionId: action.actionId,
+      label: action.label || action.actionId,
+      status,
+      message
+    }
+  ].slice(-8);
+}
+
+function replaceLatestSetupRunStep(actionId, status, message) {
+  const steps = asArray(state.setupRun.steps);
+  const index = steps.map((step) => step.actionId).lastIndexOf(actionId);
+  if (index < 0) {
+    state.setupRun.steps = [
+      ...steps,
+      {
+        id: `${actionId}:${Date.now()}`,
+        actionId,
+        label: actionId,
+        status,
+        message
+      }
+    ].slice(-8);
+    return;
+  }
+  state.setupRun.steps = steps.map((step, stepIndex) => stepIndex === index
+    ? { ...step, status, message }
+    : step);
+}
+
+function setupActionKey(action) {
+  return `${action?.actionId || 'action'} ${action?.path || ''}`;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function setupHeadline(summary, action) {
+  if (!action) return `${summary.siteId} is waiting`;
+  return `${summary.siteId}: ${action.label}`;
+}
+
+function recommendedButtonLabel(action) {
+  const needsReview = asArray(action.confirmFields).length > 0 || action.risk === 'high';
+  return needsReview ? 'Review & Continue' : 'Run Setup';
+}
+
+function actionGuidanceText(action) {
+  const map = {
+    'site-slot.preflight.create': '先做 preflight：只创建检查执行，不会改远端主机。',
+    'site-slot.apply.confirm': '确认 apply manifest：这是进入部署/runner 前的审批点。',
+    'site-slot.runner.awx-shadow': '创建 AWX runner session，后续会挂 worker job 并同步 AWX objects。',
+    'site-slot.runner.simulate': '创建模拟 runner session，用于本机 shadow 验证。',
+    'site-slot.worker-job.create': '创建 worker job。job ready 后会出现 AWX Sync Plan / Credential / Objects / Launch。',
+    'site-slot.worker-run.awx-sync-plan': '生成 AWX 对象计划，先预览 inventory、credential、job template 名称。',
+    'site-slot.worker-run.awx-credential-sync': '把当前 SSH Profile 写成 AWX Machine Credential，需要确认和 API token。',
+    'site-slot.worker-run.awx-object-sync': '在 AWX 中创建/更新 organization、project、inventory、host 和 job template。',
+    'site-slot.worker-run.awx-launch': '提交 AWX job，真正执行 Ansible 并把结果回写成 worker report。',
+    'site-slot.domestic-relay-peer-append-awx.prepare': '为 Domestic relay peer append 准备 AWX worker job。',
+    'site-slot.worker-run.domestic-relay-readonly-probe': '先只读检查 Domestic WG relay 状态。',
+    'site-slot.worker-run.domestic-relay-peer-append': '生成 Home peer append handoff，确认 lease/public key 和安全边界。'
+  };
+  return map[action.actionId] || `${action.gate || 'gate'} / ${action.reason || 'review next action'}`;
+}
+
+function preferredNextAction(actions) {
+  const preferred = actionFromFocus(actions, state.preferredActionFocus);
+  return preferred || defaultPreferredAction(actions) || actions.find((action) => action.allowed) || actions[0];
+}
+
+function defaultPreferredAction(actions) {
+  const candidates = asArray(actions).filter((action) => action.allowed);
+  const priority = [
+    'site-slot.preflight.create',
+    'site-slot.apply.confirm',
+    'site-slot.runner.awx-shadow',
+    'site-slot.runner.simulate',
+    'site-slot.worker-job.create',
+    'site-slot.worker-run.awx-sync-plan',
+    'site-slot.worker-run.awx-credential-sync',
+    'site-slot.worker-run.awx-object-sync',
+    'site-slot.worker-run.awx-launch',
+    'site-slot.worker-run.awx-shadow',
+    'site-slot.domestic-relay-peer-append-awx.prepare',
+    'site-slot.domestic-relay-peer-append-ssh.prepare',
+    'site-slot.worker-run.remote-ssh-gate',
+    'site-slot.runner.remote-ssh',
+    'site-slot.worker-run.domestic-relay-readonly-probe',
+    'site-slot.worker-run.domestic-relay-peer-append',
+    'site-slot.worker-run.domestic-relay-peer-append-ssh'
+  ];
+  for (const actionId of priority) {
+    const action = candidates.find((item) => item.actionId === actionId);
+    if (action) return action;
+  }
+  return null;
+}
+
+function actionFromFocus(actions, focus) {
+  if (!focus) return null;
+  const candidates = asArray(actions).filter((action) => action.allowed);
+  if (focus.jobId) {
+    const pathNeedle = `/worker-jobs/${focus.jobId}/`;
+    const byJob = candidates.filter((action) => String(action.path || '').includes(pathNeedle));
+    for (const actionId of asArray(focus.actionIds)) {
+      const action = byJob.find((item) => item.actionId === actionId);
+      if (action) return action;
+    }
+    return byJob[0] || null;
+  }
+  if (focus.actionId) return candidates.find((action) => action.actionId === focus.actionId) || null;
+  return null;
 }
 
 function renderNextGate(action) {
@@ -1617,12 +5162,24 @@ function renderNextGate(action) {
         <strong>${escapeHtml(action.label)}</strong>
         <small>${escapeHtml(action.gate)} / ${escapeHtml(action.reason)}</small>
       </div>
-      <button class="secondary-button" type="button" data-action-next ${action.allowed ? '' : 'disabled'}>Select</button>
+      <button class="secondary-button" type="button" data-action-next ${action.allowed ? '' : 'disabled'}>Continue</button>
     </section>
   `;
 }
 
+function selectPipelineAction(action) {
+  const body = materializeActionBodyTemplate(action);
+  state.selectedAction = action;
+  state.selectedActionBody = formatJson(body);
+  prepareAwxActionDraft(action, body);
+}
+
 function renderActionConfirm(action) {
+  const body = state.selectedAction && sameAction(state.selectedAction, action) && state.selectedActionBody
+    ? state.selectedActionBody
+    : formatJson(materializeActionBodyTemplate(action));
+  const bodyObject = parseActionBodyObject(body);
+  if (bodyObject) prepareAwxActionDraft(action, bodyObject);
   return `
     <section class="action-confirm" aria-label="Action confirmation">
       <div class="action-confirm-head">
@@ -1642,7 +5199,13 @@ function renderActionConfirm(action) {
           `).join('')}
         </div>
       ` : ''}
-      <pre class="action-body">${escapeHtml(formatJson(action.bodyTemplate || {}))}</pre>
+      ${renderHomePeerQuickFields(body)}
+      ${renderAwxActionQuickFields(body, action)}
+      <label class="action-body-editor">
+        <span>Action Body</span>
+        <textarea class="action-body" data-action-body spellcheck="false">${escapeHtml(body)}</textarea>
+        <small>Replace angle-bracket placeholders before executing.</small>
+      </label>
       <div class="action-controls">
         <button class="secondary-button" type="button" data-action-cancel>Cancel</button>
         <button class="primary-button" type="button" data-action-execute>${state.actionBusy ? 'Running' : 'Execute'}</button>
@@ -1651,44 +5214,380 @@ function renderActionConfirm(action) {
   `;
 }
 
-async function executeSelectedAction() {
+async function executeSelectedAction(options = {}) {
   const action = state.selectedAction;
-  if (!action || !action.allowed || state.actionBusy) return;
+  if (!action || !action.allowed || state.actionBusy) return { ok: false, error: new Error('No executable action selected.') };
+  const resumeSetupAfterSuccess = state.setupRun.status === 'waiting-confirm';
   state.actionBusy = true;
   renderPipelineActions(state.currentActions);
+  renderInspector();
   try {
     const payload = await fetchJson('/internal/v1/admin/actions/execute', {
       method: 'POST',
       body: {
         actionId: action.actionId,
         path: action.path,
-        body: action.bodyTemplate || {}
+        body: actionBodyForExecution(action)
       }
     });
+    syncDomesticPeerDraftFromPayload(payload);
+    state.preferredActionFocus = nextActionFocusFromResult(action, payload);
     state.actionFeedback = {
       planId: state.selectedPlanId,
       kind: 'success',
-      message: summarizeActionPayload(action, payload)
+      message: summarizeActionPayload(action, payload),
+      detail: summarizeActionDetail(payload),
+      awxSummary: awxSummaryFromPayload(payload)
     };
-    state.pendingEvidenceFocus = evidenceFocusFromActionPayload(payload, state.selectedPlanId);
+    state.pendingEvidenceFocus = options.openEvidence === false ? null : evidenceFocusFromActionPayload(payload, state.selectedPlanId);
     if (state.pendingEvidenceFocus?.planId) state.selectedPlanId = state.pendingEvidenceFocus.planId;
     state.selectedAction = null;
+    state.selectedActionBody = null;
     await refreshAdmin();
+    if (resumeSetupAfterSuccess && options.resumeSetup !== false) {
+      state.setupRun = {
+        active: true,
+        status: 'running',
+        message: 'Approval recorded. Continuing setup...',
+        steps: asArray(state.setupRun.steps)
+      };
+      void continueSetupRun();
+      return { ok: true, payload };
+    }
+    const monitorReason = options.monitor === false ? '' : postActionMonitorReason(action, payload);
+    if (monitorReason) {
+      void monitorPipelineProgress({
+        planId: state.selectedPlanId,
+        reason: monitorReason
+      });
+    }
+    return { ok: true, payload };
   } catch (error) {
     state.pendingEvidenceFocus = null;
     state.actionFeedback = {
       planId: state.selectedPlanId,
       kind: 'error',
-      message: error.message
+      message: error.message,
+      detail: null
     };
     renderPipelineActions(state.currentActions);
+    renderInspector();
+    return { ok: false, error };
   } finally {
     state.actionBusy = false;
-    if (state.selectedAction) renderPipelineActions(state.currentActions);
+    renderSetupGuidance(state.currentPipeline, state.currentActions);
+    renderPipelineActions(state.currentActions);
+    renderInspector();
   }
 }
 
+function materializeActionBodyTemplate(action) {
+  const now = new Date();
+  const changeWindowStart = now.toISOString();
+  const changeWindowEnd = new Date(now.getTime() + 60 * 60 * 1000).toISOString();
+  const requestId = `desktop-${String(action?.actionId || 'admin-action').replace(/[^a-zA-Z0-9_-]+/g, '-')}`;
+  const body = replaceActionTemplateValue(action?.bodyTemplate || {}, {
+    '<change-window-start-iso>': changeWindowStart,
+    '<change-window-end-iso>': changeWindowEnd,
+    '<internal-base-url>': normalizedServerBase(),
+    '<home-lease-ip>': state.domesticPeerDraft.leaseIp || '<home-lease-ip>',
+    '<home-wg-public-key>': state.domesticPeerDraft.publicKey || '<home-wg-public-key>',
+    '<request-id>': requestId
+  });
+  return awxActionBodyDefaults(action, body);
+}
+
+function replaceActionTemplateValue(value, replacements) {
+  if (Array.isArray(value)) return value.map((item) => replaceActionTemplateValue(item, replacements));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, replaceActionTemplateValue(item, replacements)]));
+  }
+  if (typeof value !== 'string') return value;
+  return replacements[value] || value;
+}
+
+function actionBodyForExecution(action) {
+  const text = state.selectedAction && sameAction(state.selectedAction, action) && state.selectedActionBody
+    ? state.selectedActionBody
+    : formatJson(materializeActionBodyTemplate(action));
+  if (!isActionBodyExecutable(text)) {
+    throw new Error('Action body JSON is invalid or still contains placeholders.');
+  }
+  const body = JSON.parse(text);
+  syncDomesticPeerDraftFromObject(body);
+  return awxActionBodyForExecution(action, body);
+}
+
+function isActionBodyExecutable(text) {
+  if (!text.trim()) return false;
+  if (hasUnresolvedActionPlaceholder(text)) return false;
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasUnresolvedActionPlaceholder(text) {
+  return /<[^>\n]+>/.test(text);
+}
+
+function renderHomePeerQuickFields(bodyText) {
+  const body = parseActionBodyObject(bodyText);
+  const hasHomePeer = body && ('leaseIp' in body || 'publicKey' in body || 'peerRole' in body);
+  if (!hasHomePeer) return '';
+  const peerRole = body.peerRole === 'user' || body.peerRole === 'guest'
+    ? body.peerRole
+    : state.domesticPeerDraft.peerRole;
+  const leaseIp = typeof body.leaseIp === 'string' && !hasUnresolvedActionPlaceholder(body.leaseIp)
+    ? body.leaseIp
+    : state.domesticPeerDraft.leaseIp;
+  const publicKey = typeof body.publicKey === 'string' && !hasUnresolvedActionPlaceholder(body.publicKey)
+    ? body.publicKey
+    : state.domesticPeerDraft.publicKey;
+  return `
+    <section class="home-peer-fields" aria-label="Home relay peer">
+      <label>
+        <span>Peer Role</span>
+        <select data-home-peer-field="peerRole">
+          <option value="guest" ${peerRole === 'guest' ? 'selected' : ''}>guest / 10.91</option>
+          <option value="user" ${peerRole === 'user' ? 'selected' : ''}>user / 10.89</option>
+        </select>
+      </label>
+      <label>
+        <span>Lease IP</span>
+        <input data-home-peer-field="leaseIp" value="${escapeHtml(leaseIp)}" placeholder="10.91.x.y" />
+      </label>
+      <label>
+        <span>WG Public Key</span>
+        <input data-home-peer-field="publicKey" value="${escapeHtml(publicKey)}" placeholder="Home WireGuard public key" />
+      </label>
+    </section>
+  `;
+}
+
+function renderAwxActionQuickFields(bodyText, action) {
+  if (!isAwxApiAction(action)) return '';
+  const body = parseActionBodyObject(bodyText) || {};
+  prepareAwxActionDraft(action, body);
+  const providerId = state.awxActionDraft.providerId || awxActionDefaultProviderId(action);
+  const timeoutSeconds = state.awxActionDraft.timeoutSeconds || String(awxActionDefaultTimeout(action, body));
+  const providers = asArray(state.awxProviders);
+  const providerOptions = providers.map((provider) => `
+    <option value="${escapeHtml(provider.providerId)}" ${provider.providerId === providerId ? 'selected' : ''}>
+      ${escapeHtml(provider.name || provider.providerId)} / ${escapeHtml(provider.defaultKind || 'all')}
+    </option>
+  `).join('');
+  const missingSelectedProvider = providerId && !providers.some((provider) => provider.providerId === providerId)
+    ? `<option value="${escapeHtml(providerId)}" selected>${escapeHtml(providerId)}</option>`
+    : '';
+  const emptyProviderOption = !providerId && providers.length === 0
+    ? '<option value="">Save provider first</option>'
+    : '';
+  return `
+    <section class="awx-action-fields" aria-label="AWX execution">
+      <label>
+        <span>AWX Provider</span>
+        <select data-awx-action-field="providerId">
+          ${emptyProviderOption}
+          ${missingSelectedProvider}
+          ${providerOptions}
+        </select>
+      </label>
+      ${awxActionNeedsToken(action) ? `
+        <label>
+          <span>AWX Token</span>
+          <input data-awx-action-field="token" value="${escapeHtml(state.awxActionDraft.token)}" placeholder="bearer token" type="password" />
+        </label>
+      ` : ''}
+      <label>
+        <span>Timeout</span>
+        <input data-awx-action-field="timeoutSeconds" inputmode="numeric" min="1" type="number" value="${escapeHtml(timeoutSeconds)}" />
+      </label>
+      ${action.actionId === 'site-slot.worker-run.awx-launch' ? `
+        <label class="awx-action-toggle">
+          <span>Wait</span>
+          <input data-awx-action-field="waitForCompletion" type="checkbox" ${state.awxActionDraft.waitForCompletion !== false ? 'checked' : ''} />
+        </label>
+      ` : ''}
+    </section>
+  `;
+}
+
+function syncHomePeerField(input) {
+  const field = input.dataset.homePeerField;
+  if (field === 'peerRole') {
+    state.domesticPeerDraft.peerRole = input.value === 'user' ? 'user' : 'guest';
+  } else if (field === 'leaseIp') {
+    state.domesticPeerDraft.leaseIp = input.value.trim();
+    if (state.domesticPeerDraft.leaseIp.startsWith('10.89.')) state.domesticPeerDraft.peerRole = 'user';
+    if (state.domesticPeerDraft.leaseIp.startsWith('10.91.')) state.domesticPeerDraft.peerRole = 'guest';
+  } else if (field === 'publicKey') {
+    state.domesticPeerDraft.publicKey = input.value.trim();
+  }
+}
+
+function syncAwxActionField(input) {
+  const field = input.dataset.awxActionField;
+  if (field === 'providerId') {
+    state.awxActionDraft.providerId = input.value.trim();
+  } else if (field === 'token') {
+    state.awxActionDraft.token = input.value.trim();
+  } else if (field === 'timeoutSeconds') {
+    state.awxActionDraft.timeoutSeconds = input.value.trim();
+  } else if (field === 'waitForCompletion') {
+    state.awxActionDraft.waitForCompletion = input.checked;
+  }
+}
+
+function updateSelectedActionBodyFromHomePeer() {
+  const bodyInput = pipelineActions.querySelector('[data-action-body]');
+  if (!bodyInput) return;
+  const body = parseActionBodyObject(bodyInput.value);
+  if (!body) return;
+  if ('peerRole' in body) body.peerRole = state.domesticPeerDraft.peerRole;
+  if ('leaseIp' in body) body.leaseIp = state.domesticPeerDraft.leaseIp || '<home-lease-ip>';
+  if ('publicKey' in body) body.publicKey = state.domesticPeerDraft.publicKey || '<home-wg-public-key>';
+  state.selectedActionBody = formatJson(body);
+  bodyInput.value = state.selectedActionBody;
+  const roleSelect = pipelineActions.querySelector('[data-home-peer-field="peerRole"]');
+  if (roleSelect) roleSelect.value = state.domesticPeerDraft.peerRole;
+}
+
+function updateSelectedActionBodyFromAwxDraft() {
+  const bodyInput = pipelineActions.querySelector('[data-action-body]');
+  if (!bodyInput || !isAwxApiAction(state.selectedAction)) return;
+  const body = parseActionBodyObject(bodyInput.value);
+  if (!body) return;
+  const providerId = blankToNull(state.awxActionDraft.providerId);
+  const timeoutSeconds = positiveNumberOrNull(state.awxActionDraft.timeoutSeconds);
+  if (providerId) body.awxProviderId = providerId;
+  if (timeoutSeconds) body.timeoutSeconds = timeoutSeconds;
+  if (state.selectedAction.actionId === 'site-slot.worker-run.awx-launch') {
+    body.waitForCompletion = state.awxActionDraft.waitForCompletion !== false;
+  }
+  state.selectedActionBody = formatJson(body);
+  bodyInput.value = state.selectedActionBody;
+}
+
+function syncDomesticPeerDraftFromBodyText(text) {
+  const body = parseActionBodyObject(text);
+  if (body) syncDomesticPeerDraftFromObject(body);
+}
+
+function syncAwxActionDraftFromBodyText(text) {
+  const body = parseActionBodyObject(text);
+  if (body) prepareAwxActionDraft(state.selectedAction, body);
+}
+
+function syncDomesticPeerDraftFromPayload(payload) {
+  syncDomesticPeerDraftFromObject(payload?.relayPeerPlan?.homePeer);
+  syncDomesticPeerDraftFromObject(payload?.relayPeerAppend?.homePeer);
+  syncDomesticPeerDraftFromObject(payload?.relayPeerAppendSsh?.homePeer);
+  syncDomesticPeerDraftFromObject(payload?.report?.stepReports?.map((step) => parseActionBodyObject(step.stdout)).find((item) => item?.homePeer)?.homePeer);
+}
+
+function syncDomesticPeerDraftFromObject(value) {
+  if (!value || typeof value !== 'object') return;
+  const role = value.peerRole || value.role;
+  const leaseIp = typeof value.leaseIp === 'string' && !hasUnresolvedActionPlaceholder(value.leaseIp) ? value.leaseIp : null;
+  const publicKey = typeof value.publicKey === 'string' && !hasUnresolvedActionPlaceholder(value.publicKey) ? value.publicKey : null;
+  if (role === 'user' || role === 'guest') state.domesticPeerDraft.peerRole = role;
+  if (leaseIp) {
+    state.domesticPeerDraft.leaseIp = leaseIp;
+    if (leaseIp.startsWith('10.89.')) state.domesticPeerDraft.peerRole = 'user';
+    if (leaseIp.startsWith('10.91.')) state.domesticPeerDraft.peerRole = 'guest';
+  }
+  if (publicKey) state.domesticPeerDraft.publicKey = publicKey;
+}
+
+function parseActionBodyObject(text) {
+  try {
+    const value = typeof text === 'string' ? JSON.parse(text) : text;
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function nextActionFocusFromResult(action, payload) {
+  const preparedAwxJobId = payload?.relayPeerAppendAwxPrepare?.jobId;
+  if (preparedAwxJobId) {
+    return {
+      jobId: preparedAwxJobId,
+      actionIds: [
+        'site-slot.worker-run.domestic-relay-readonly-probe',
+        'site-slot.worker-run.domestic-relay-peer-append',
+        'site-slot.worker-run.awx-sync-plan',
+        'site-slot.worker-run.awx-credential-sync',
+        'site-slot.worker-run.awx-object-sync',
+        'site-slot.worker-run.awx-launch',
+        'site-slot.worker-run.awx-shadow'
+      ]
+    };
+  }
+  const preparedJobId = payload?.relayPeerAppendSshPrepare?.jobId;
+  if (preparedJobId) {
+    return {
+      jobId: preparedJobId,
+      actionIds: [
+        'site-slot.worker-run.remote-ssh-gate',
+        'site-slot.worker-run.domestic-relay-readonly-probe',
+        'site-slot.worker-run.domestic-relay-peer-append',
+        'site-slot.worker-run.domestic-relay-peer-append-ssh'
+      ]
+    };
+  }
+  const jobId = jobIdFromActionPath(action?.path);
+  if (!jobId) return state.preferredActionFocus;
+  if (action?.actionId === 'site-slot.worker-run.remote-ssh-gate' && payload?.gate?.verdict !== 'passed') {
+    return { jobId, actionIds: ['site-slot.worker-run.remote-ssh-gate'] };
+  }
+  if (action?.actionId === 'site-slot.worker-run.domestic-relay-readonly-probe'
+    && payload?.relayReadOnlyProbe?.status !== 'ready') {
+    return { jobId, actionIds: ['site-slot.worker-run.domestic-relay-readonly-probe'] };
+  }
+  if (action?.actionId === 'site-slot.worker-run.domestic-relay-peer-append'
+    && payload?.relayPeerAppend?.status !== 'ready') {
+    return { jobId, actionIds: ['site-slot.worker-run.domestic-relay-peer-append'] };
+  }
+  if (action?.actionId === 'site-slot.worker-run.awx-sync-plan'
+    && payload?.awxSyncPlan?.status !== 'ready') {
+    return { jobId, actionIds: ['site-slot.worker-run.awx-sync-plan', 'site-slot.worker-run.awx-shadow'] };
+  }
+  if (action?.actionId === 'site-slot.worker-run.awx-credential-sync'
+    && payload?.awxCredentialSync?.status !== 'passed') {
+    return { jobId, actionIds: ['site-slot.worker-run.awx-credential-sync', 'site-slot.worker-run.awx-sync-plan'] };
+  }
+  if (action?.actionId === 'site-slot.worker-run.awx-object-sync'
+    && payload?.awxObjectSync?.status !== 'passed') {
+    return { jobId, actionIds: ['site-slot.worker-run.awx-object-sync', 'site-slot.worker-run.awx-credential-sync', 'site-slot.worker-run.awx-sync-plan'] };
+  }
+  if (action?.actionId === 'site-slot.worker-run.awx-launch'
+    && payload?.awxLaunch?.status === 'blocked') {
+    return { jobId, actionIds: ['site-slot.worker-run.awx-launch'] };
+  }
+  const nextByActionId = {
+    'site-slot.worker-run.remote-ssh-gate': ['site-slot.worker-run.domestic-relay-readonly-probe', 'site-slot.worker-run.remote-ssh-readonly-probe'],
+    'site-slot.worker-run.domestic-relay-readonly-probe': ['site-slot.worker-run.domestic-relay-peer-append'],
+    'site-slot.worker-run.domestic-relay-peer-append': ['site-slot.worker-run.awx-sync-plan', 'site-slot.worker-run.awx-credential-sync', 'site-slot.worker-run.awx-object-sync', 'site-slot.worker-run.awx-launch', 'site-slot.worker-run.awx-shadow', 'site-slot.worker-run.domestic-relay-peer-append-ssh'],
+    'site-slot.worker-run.awx-sync-plan': ['site-slot.worker-run.awx-credential-sync', 'site-slot.worker-run.awx-object-sync', 'site-slot.worker-run.awx-launch', 'site-slot.worker-run.awx-shadow'],
+    'site-slot.worker-run.awx-credential-sync': ['site-slot.worker-run.awx-object-sync', 'site-slot.worker-run.awx-launch'],
+    'site-slot.worker-run.awx-object-sync': ['site-slot.worker-run.awx-launch', 'site-slot.worker-run.awx-sync-plan']
+  };
+  const actionIds = nextByActionId[action?.actionId];
+  return actionIds ? { jobId, actionIds } : state.preferredActionFocus;
+}
+
+function jobIdFromActionPath(path) {
+  const match = String(path || '').match(/\/worker-jobs\/([^/]+)\//);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
 function evidenceFocusFromActionPayload(payload, planId) {
+  if (payload?.relayPeerAppendAwxPrepare) return null;
+  if (payload?.relayPeerAppendSshPrepare) return null;
   const target = actionPayloadTarget(payload);
   if (target) return { planId: target.object.planId || planId || target.id, kind: target.kind, id: target.id };
   return null;
@@ -1696,10 +5595,191 @@ function evidenceFocusFromActionPayload(payload, planId) {
 
 function summarizeActionPayload(action, payload) {
   const target = actionPayloadTarget(payload);
-  const created = target?.object || payload.fakeTransport || payload.workerHandoff || payload.readOnlyProbe || payload.gate || payload.result;
-  const id = target?.id || created?.fakeTransportId || created?.handoffId || created?.probeId || created?.gateId || created?.snapshotId || created?.syncId || created?.applyId || action.actionId;
+  const created = target?.object
+    || payload.relayPeerAppendSsh
+    || payload.relayPeerAppend
+    || payload.relayReadOnlyProbe
+    || payload.awxSyncPlan
+    || payload.awxCredentialSync
+    || payload.awxObjectSync
+    || payload.awxLaunch
+    || payload.fakeTransport
+    || payload.workerHandoff
+    || payload.readOnlyProbe
+    || payload.gate
+    || payload.result;
+  const id = target?.id || created?.credentialSyncId || created?.objectSyncId || created?.syncPlanId || created?.awxLaunchId || created?.fakeTransportId || created?.handoffId || created?.probeId || created?.gateId || created?.snapshotId || created?.syncId || created?.applyId || action.actionId;
   const status = created?.status || created?.verdict || created?.allowed;
   return status ? `${action.label}: ${id} / ${status}` : `${action.label}: ${id}`;
+}
+
+function summarizeActionDetail(payload) {
+  const awxPrepare = payload?.relayPeerAppendAwxPrepare;
+  if (awxPrepare) {
+    return JSON.stringify({
+      status: awxPrepare.status,
+      execution: awxPrepare.execution,
+      boundary: awxPrepare.boundary,
+      sessionId: awxPrepare.sessionId,
+      jobId: awxPrepare.jobId,
+      runner: awxPrepare.runner,
+      workerJob: awxPrepare.workerJob,
+      blockedReasons: awxPrepare.blockedReasons || [],
+      nextActions: awxPrepare.nextActions || []
+    }, null, 2);
+  }
+  const prepare = payload?.relayPeerAppendSshPrepare;
+  if (prepare) {
+    return JSON.stringify({
+      status: prepare.status,
+      execution: prepare.execution,
+      boundary: prepare.boundary,
+      sessionId: prepare.sessionId,
+      jobId: prepare.jobId,
+      runner: prepare.runner,
+      workerJob: prepare.workerJob,
+      blockedReasons: prepare.blockedReasons || [],
+      nextActions: prepare.nextActions || []
+    }, null, 2);
+  }
+  const relayPeerAppendSsh = payload?.relayPeerAppendSsh;
+  if (relayPeerAppendSsh) {
+    return JSON.stringify({
+      status: relayPeerAppendSsh.status,
+      execution: relayPeerAppendSsh.execution,
+      boundary: relayPeerAppendSsh.boundary,
+      mode: relayPeerAppendSsh.mode,
+      command: relayPeerAppendSsh.command,
+      homePeer: relayPeerAppendSsh.homePeer,
+      domesticRelay: relayPeerAppendSsh.domesticRelay,
+      gates: relayPeerAppendSsh.gates,
+      blockedReasons: relayPeerAppendSsh.blockedReasons || [],
+      nextActions: relayPeerAppendSsh.nextActions || []
+    }, null, 2);
+  }
+  const relayPeerAppend = payload?.relayPeerAppend;
+  if (relayPeerAppend) {
+    return JSON.stringify({
+      status: relayPeerAppend.status,
+      execution: relayPeerAppend.execution,
+      boundary: relayPeerAppend.boundary,
+      mode: relayPeerAppend.mode,
+      command: relayPeerAppend.command,
+      homePeer: relayPeerAppend.homePeer,
+      domesticRelay: relayPeerAppend.domesticRelay,
+      gates: relayPeerAppend.gates,
+      blockedReasons: relayPeerAppend.blockedReasons || [],
+      nextActions: relayPeerAppend.nextActions || []
+    }, null, 2);
+  }
+  const relayReadOnlyProbe = payload?.relayReadOnlyProbe;
+  if (relayReadOnlyProbe) {
+    return JSON.stringify({
+      status: relayReadOnlyProbe.status,
+      execution: relayReadOnlyProbe.execution,
+      boundary: relayReadOnlyProbe.boundary,
+      command: relayReadOnlyProbe.command,
+      gates: relayReadOnlyProbe.gates,
+      blockedReasons: relayReadOnlyProbe.blockedReasons || [],
+      nextActions: relayReadOnlyProbe.nextActions || []
+    }, null, 2);
+  }
+  const awxSyncPlan = payload?.awxSyncPlan;
+  if (awxSyncPlan) {
+    return JSON.stringify({
+      status: awxSyncPlan.status,
+      execution: awxSyncPlan.execution,
+      boundary: awxSyncPlan.boundary,
+      providerId: awxSyncPlan.providerId,
+      inventory: awxSyncPlan.inventory,
+      inventoryHost: awxSyncPlan.inventoryHost,
+      credential: awxSyncPlan.credential,
+      jobTemplate: awxSyncPlan.jobTemplate,
+      requiredPlaybook: awxSyncPlan.requiredPlaybook,
+      objects: awxSyncPlan.objects,
+      blockedReasons: awxSyncPlan.blockedReasons || [],
+      warnings: awxSyncPlan.warnings || [],
+      nextActions: awxSyncPlan.nextActions || []
+    }, null, 2);
+  }
+  const awxCredentialSync = payload?.awxCredentialSync;
+  if (awxCredentialSync) {
+    return JSON.stringify({
+      status: awxCredentialSync.status,
+      execution: awxCredentialSync.execution,
+      boundary: awxCredentialSync.boundary,
+      providerId: awxCredentialSync.providerId,
+      targetKind: awxCredentialSync.targetKind,
+      organization: awxCredentialSync.organization,
+      credential: awxCredentialSync.credential,
+      sshProfileId: awxCredentialSync.sshProfileId,
+      sshUser: awxCredentialSync.sshUser,
+      identityFile: awxCredentialSync.identityFile,
+      operations: awxCredentialSync.operations || [],
+      blockedReasons: awxCredentialSync.blockedReasons || [],
+      warnings: awxCredentialSync.warnings || [],
+      nextActions: awxCredentialSync.nextActions || []
+    }, null, 2);
+  }
+  const awxObjectSync = payload?.awxObjectSync;
+  if (awxObjectSync) {
+    return JSON.stringify({
+      status: awxObjectSync.status,
+      execution: awxObjectSync.execution,
+      boundary: awxObjectSync.boundary,
+      providerId: awxObjectSync.providerId,
+      inventory: awxObjectSync.inventory,
+      inventoryHost: awxObjectSync.inventoryHost,
+      credential: awxObjectSync.credential,
+      jobTemplate: awxObjectSync.jobTemplate,
+      operations: awxObjectSync.operations || [],
+      blockedReasons: awxObjectSync.blockedReasons || [],
+      warnings: awxObjectSync.warnings || [],
+      nextActions: awxObjectSync.nextActions || []
+    }, null, 2);
+  }
+  const awxLaunch = payload?.awxLaunch;
+  if (awxLaunch) {
+    return JSON.stringify({
+      status: awxLaunch.status,
+      execution: awxLaunch.execution,
+      boundary: awxLaunch.boundary,
+      awxJobId: awxLaunch.awxJobId,
+      awxJobStatus: awxLaunch.awxJobStatus,
+      blockedReasons: awxLaunch.blockedReasons || [],
+      nextActions: awxLaunch.nextActions || []
+    }, null, 2);
+  }
+  const probe = payload?.readOnlyProbe;
+  if (probe) {
+    return JSON.stringify({
+      status: probe.status,
+      execution: probe.execution,
+      boundary: probe.boundary,
+      command: probe.command,
+      blockedReasons: probe.blockedReasons || [],
+      nextActions: probe.nextActions || []
+    }, null, 2);
+  }
+  const handoff = payload?.workerHandoff;
+  if (handoff) {
+    return JSON.stringify({
+      status: handoff.status,
+      execution: handoff.execution,
+      command: handoff.command,
+      blockedReasons: handoff.blockedReasons || [],
+      nextActions: handoff.nextActions || []
+    }, null, 2);
+  }
+  const gate = payload?.gate;
+  if (gate?.gateFailures?.length) {
+    return JSON.stringify({
+      verdict: gate.verdict,
+      gateFailures: gate.gateFailures,
+      sshProfile: gate.sshProfile
+    }, null, 2);
+  }
+  return null;
 }
 
 function actionPayloadTarget(payload) {
@@ -1730,6 +5810,7 @@ function formatJson(value) {
 function initTopologyScene() {
   if (!topologyCanvas || state.topology) return;
   try {
+    const theme = topologyTheme();
     const renderer = new THREE.WebGLRenderer({
       canvas: topologyCanvas,
       antialias: true,
@@ -1737,7 +5818,7 @@ function initTopologyScene() {
       preserveDrawingBuffer: true
     });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    renderer.setClearColor(0x000000, 0);
+    renderer.setClearColor(theme.canvas, 0);
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
@@ -1754,10 +5835,10 @@ function initTopologyScene() {
     scene.add(key);
 
     const nodeSpecs = [
-      { id: 'h', label: 'H', name: 'H Endpoint', position: [-5.2, -0.9, 0], color: 0x4b7dff },
-      { id: 'domestic', label: 'D', name: 'Domestic', position: [-2.0, 0.7, 0.4], color: 0x22c55e },
-      { id: 'internal', label: 'I', name: 'Internal', position: [1.4, 0.1, -0.2], color: 0x2dd4bf },
-      { id: 'oversea', label: 'O', name: 'Oversea', position: [4.9, 1.0, 0.2], color: 0xf97316 }
+      { id: 'h', label: 'H', name: 'H Endpoint', position: [-5.2, -0.9, 0], color: theme.info },
+      { id: 'domestic', label: 'D', name: 'Domestic', position: [-2.0, 0.7, 0.4], color: theme.success },
+      { id: 'internal', label: 'I', name: 'Internal', position: [1.4, 0.1, -0.2], color: theme.primary },
+      { id: 'oversea', label: 'O', name: 'Oversea', position: [4.9, 1.0, 0.2], color: theme.archetype }
     ];
 
     const nodes = new Map();
@@ -1783,7 +5864,7 @@ function initTopologyScene() {
           depthWrite: false
         })
       );
-      const label = createTopologyLabel(spec.label, spec.name);
+      const label = createTopologyLabel(spec.label, spec.name, theme);
       label.position.set(0, -0.9, 0);
       group.add(halo, sphere, label);
       group.userData = { id: spec.id, baseScale: 1, color: spec.color, sphere, halo };
@@ -1792,13 +5873,13 @@ function initTopologyScene() {
     }
 
     const links = [
-      createTopologyLink(nodes.get('h'), nodes.get('domestic'), 0x4b7dff),
-      createTopologyLink(nodes.get('domestic'), nodes.get('internal'), 0x2dd4bf),
-      createTopologyLink(nodes.get('internal'), nodes.get('oversea'), 0xf97316)
+      createTopologyLink(nodes.get('h'), nodes.get('domestic'), theme.info),
+      createTopologyLink(nodes.get('domestic'), nodes.get('internal'), theme.primary),
+      createTopologyLink(nodes.get('internal'), nodes.get('oversea'), theme.archetype)
     ];
     for (const link of links) root.add(link.group);
 
-    const starField = createStarField();
+    const starField = createStarField(theme);
     root.add(starField);
 
     state.topology = {
@@ -1853,17 +5934,17 @@ function createTopologyLink(fromNode, toNode, color) {
   return { group, line, particles, curve, color };
 }
 
-function createTopologyLabel(letter, name) {
+function createTopologyLabel(letter, name, theme = topologyTheme()) {
   const canvas = document.createElement('canvas');
   canvas.width = 256;
   canvas.height = 96;
   const context = canvas.getContext('2d');
   context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = 'rgba(255,255,255,0.94)';
+  context.fillStyle = theme.text;
   context.font = '700 34px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
   context.textAlign = 'center';
   context.fillText(letter, 128, 36);
-  context.fillStyle = 'rgba(226,232,240,0.86)';
+  context.fillStyle = theme.textSoft;
   context.font = '500 18px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif';
   context.fillText(name, 128, 68);
   const texture = new THREE.CanvasTexture(canvas);
@@ -1877,7 +5958,7 @@ function createTopologyLabel(letter, name) {
   return sprite;
 }
 
-function createStarField() {
+function createStarField(theme = topologyTheme()) {
   const positions = [];
   for (let index = 0; index < 140; index += 1) {
     positions.push(
@@ -1889,7 +5970,7 @@ function createStarField() {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   const material = new THREE.PointsMaterial({
-    color: 0x9ab6ff,
+    color: theme.info,
     size: 0.025,
     transparent: true,
     opacity: 0.55
@@ -1987,12 +6068,32 @@ function combinedHealth(pipelines) {
 }
 
 function healthColor(health) {
-  if (health === 'failed') return 0xef4444;
-  if (health === 'blocked') return 0xf59e0b;
-  if (health === 'rollback') return 0xd946ef;
-  if (health === 'running') return 0x38bdf8;
-  if (health === 'passed') return 0x22c55e;
-  return 0x2dd4bf;
+  const theme = topologyTheme();
+  if (health === 'failed') return theme.danger;
+  if (health === 'blocked') return theme.warning;
+  if (health === 'rollback') return theme.archetype;
+  if (health === 'running') return theme.info;
+  if (health === 'passed') return theme.success;
+  return theme.primary;
+}
+
+function topologyTheme() {
+  return {
+    canvas: cssColor('--mx-bg-workspace', '#1a1b23'),
+    primary: cssColor('--mx-primary', '#2bf6d2'),
+    info: cssColor('--mx-info', '#5e8eec'),
+    success: cssColor('--mx-success', '#48bc77'),
+    warning: cssColor('--mx-warning', '#f8d06c'),
+    danger: cssColor('--mx-danger', '#ee6067'),
+    archetype: cssColor('--mx-archetype', '#b974ff'),
+    text: cssColor('--mx-text', '#e2e2e2'),
+    textSoft: cssColor('--mx-text-soft', 'rgba(226,226,226,0.72)')
+  };
+}
+
+function cssColor(name, fallback) {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
 }
 
 function formatCounts(counts) {

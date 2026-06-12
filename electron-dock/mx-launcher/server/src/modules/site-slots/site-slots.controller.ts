@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Header, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
 
 import { asRecord, nullableString } from '../../lib/http.js';
 import type { PlatformStore } from '../../store/platform-store.js';
@@ -33,7 +33,8 @@ export class SiteSlotsController {
         model: 'internal-owned-slot-executor-v1',
         supportedKinds: ['domestic', 'oversea'],
         supportedActions: ['preflight', 'apply'],
-        runnerModes: ['simulate', 'remote-ssh'],
+        runnerModes: ['simulate', 'remote-ssh', 'awx-shadow'],
+        executionProviders: ['internal-simulate', 'remote-ssh', 'awx-shadow'],
         executionBoundary: 'runner-session-v1',
         remoteExecution: 'disabled-by-default',
         applyGate: 'confirmApply-required',
@@ -66,6 +67,38 @@ export class SiteSlotsController {
   @Get('internal/v1/site-slots/plans')
   async listPlans() {
     return { plans: await this.store.listSiteSlotPlans() };
+  }
+
+  @Post('internal/v1/site-slots/:siteId/access-accounts')
+  async issueAccessAccounts(@Param('siteId') siteId: string, @Body() rawBody: unknown) {
+    const body = asRecord(rawBody);
+    return this.store.issueSiteSlotAccessAccounts({
+      siteId,
+      service: nullableString(body.service) ?? 'hysteria2',
+      accountNames: accountNamesValue(body.accountNames ?? body.accounts),
+      issueDefaults: booleanValue(body.issueDefaults),
+      publicHost: nullableString(body.publicHost),
+      serverPorts: nullableString(body.serverPorts),
+      requestedBy: nullableString(body.requestedBy),
+      requestId: nullableString(body.requestId)
+    });
+  }
+
+  @Get('internal/v1/site-slots/:siteId/access-accounts')
+  async listAccessAccounts(@Param('siteId') siteId: string) {
+    const site = await this.store.getLauncherNetworkMihomoSite(siteId);
+    return {
+      site,
+      accounts: await this.store.listSiteSlotAccessAccounts(siteId)
+    };
+  }
+
+  @Get('internal/v1/site-slots/:siteId/subscriptions/hysteria2/:username.yaml')
+  @Header('content-type', 'text/yaml; charset=utf-8')
+  async getHysteria2MihomoSubscription(@Param('siteId') siteId: string, @Param('username') username: string) {
+    const subscription = await this.store.renderHysteria2MihomoSubscription(siteId, username);
+    if (!subscription) throw new NotFoundException('Hysteria2 mihomo subscription not found');
+    return subscription.yaml;
   }
 
   @Post('internal/v1/site-slots/plans')
@@ -456,7 +489,7 @@ function siteSlotExecutionMode(value: unknown): SiteSlotExecutionMode | null {
 }
 
 function siteSlotRunnerMode(value: unknown): SiteSlotRunnerMode | null {
-  if (value === 'simulate' || value === 'remote-ssh') return value;
+  if (value === 'simulate' || value === 'remote-ssh' || value === 'awx-shadow') return value;
   return null;
 }
 
@@ -466,7 +499,7 @@ function siteSlotRollbackExecutionMode(value: unknown): SiteSlotRollbackExecutio
 }
 
 function siteSlotWorkerKind(value: unknown): SiteSlotWorkerKind | null {
-  if (value === 'internal-runner' || value === 'domestic-runner' || value === 'oversea-site-agent' || value === 'admin-manual') return value;
+  if (value === 'internal-runner' || value === 'domestic-runner' || value === 'oversea-site-agent' || value === 'awx-runner' || value === 'admin-manual') return value;
   return null;
 }
 
@@ -495,6 +528,13 @@ function stepReportArray(value: unknown): SiteSlotWorkerReportInput['stepReports
       attempt: numberValue(row.attempt)
     };
   });
+}
+
+function accountNamesValue(value: unknown): string[] | string | null {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item ?? '').trim()).filter(Boolean);
+  }
+  return nullableString(value);
 }
 
 function rollbackStepReportArray(value: unknown): SiteSlotRollbackReportInput['stepReports'] {

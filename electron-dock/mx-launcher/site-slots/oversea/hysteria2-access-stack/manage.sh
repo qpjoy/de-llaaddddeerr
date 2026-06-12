@@ -54,7 +54,7 @@ Examples:
   sudo bash ./manage.sh check-subscription-auth --password pass
   sudo bash ./manage.sh add-user --names intelligent01,intelligent02
   sudo bash ./manage.sh del-user --names intelligent02
-  sudo bash ./manage.sh set-limit --names intelligent01 --down-ceil "3 Mbps" --up-ceil "30 Mbps"
+  sudo bash ./manage.sh set-limit --names intelligent01 --down-ceil "30 Mbps" --up-ceil "30 Mbps"
   sudo bash ./manage.sh reconcile-from-json --state-file /tmp/tunnel-state.json
 EOF
 }
@@ -147,13 +147,20 @@ default_users_from_old_wg_stack() {
 	old_wg_env_value WG_PEERS || true
 }
 
+quote_env_value() {
+	local value="$1"
+	local escaped
+
+	escaped="$(printf "%s" "$value" | sed "s/'/'\\\\''/g")"
+	printf "'%s'" "$escaped"
+}
+
 set_env_value() {
 	local key="$1"
 	local value="$2"
-	local tmp escaped
+	local tmp
 
-	escaped="$(printf "%s" "$value" | sed "s/'/'\\\\''/g")"
-	value="'$escaped'"
+	value="$(quote_env_value "$value")"
 
 	tmp="$(mktemp)"
 	awk -v key="$key" -v value="$value" '
@@ -171,6 +178,37 @@ set_env_value() {
 		}
 	' "$ENV_FILE" > "$tmp"
 	mv "$tmp" "$ENV_FILE"
+}
+
+sanitize_env_file_for_source() {
+	local tmp line key value trimmed first last
+
+	[[ -f "$ENV_FILE" ]] || return 0
+	tmp="$(mktemp)"
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		if [[ -z "$line" || "$line" == \#* ]]; then
+			printf "%s\n" "$line" >> "$tmp"
+			continue
+		fi
+
+		if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+			key="${BASH_REMATCH[1]}"
+			value="${BASH_REMATCH[2]}"
+			trimmed="$(printf "%s" "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+			first="${trimmed:0:1}"
+			last="${trimmed: -1}"
+			if [[ -z "$trimmed" || ( "$first" == "'" && "$last" == "'" ) || ( "$first" == '"' && "$last" == '"' ) ]]; then
+				printf "%s=%s\n" "$key" "$value" >> "$tmp"
+			else
+				printf "%s=%s\n" "$key" "$(quote_env_value "$trimmed")" >> "$tmp"
+			fi
+			continue
+		fi
+
+		printf "%s\n" "$line" >> "$tmp"
+	done < "$ENV_FILE"
+	mv "$tmp" "$ENV_FILE"
+	chmod 600 "$ENV_FILE" 2>/dev/null || true
 }
 
 normalize_password_hash_quotes() {
@@ -209,15 +247,73 @@ normalize_routing_mode_value() {
 }
 
 default_hy2_download_rate() {
-	echo "3 Mbps"
+	echo "30 Mbps"
 }
 
 default_hy2_upload_rate() {
 	echo "30 Mbps"
 }
 
+default_hy2_server_ports() {
+	echo "51288"
+}
+
+default_hy2_peer_dns() {
+	echo "223.5.5.5,119.29.29.29,1.1.1.1,8.8.8.8"
+}
+
+default_hy2_server_ports_value() {
+	case "${HY2_SERVER_PORTS:-}" in
+		""|"52120-52159") default_hy2_server_ports ;;
+		*) echo "$HY2_SERVER_PORTS" ;;
+	esac
+}
+
+default_hy2_peer_dns_value() {
+	case "${HY2_PEER_DNS:-}" in
+		""|"1.1.1.1,8.8.8.8") default_hy2_peer_dns ;;
+		*) echo "$HY2_PEER_DNS" ;;
+	esac
+}
+
+default_hy2_hop_interval_value() {
+	local selected_ports="${1:-${HY2_SERVER_PORTS:-}}"
+
+	if [[ "$selected_ports" != *-* ]]; then
+		echo "0"
+	elif [[ -z "${HY2_HOP_INTERVAL_SECONDS:-}" ]]; then
+		echo "0"
+	else
+		echo "$HY2_HOP_INTERVAL_SECONDS"
+	fi
+}
+
+default_hy2_server_download_rate_value() {
+	case "${HY2_SERVER_BANDWIDTH_DOWN:-}" in
+		""|"3 Mbps") default_hy2_download_rate ;;
+		*) echo "$HY2_SERVER_BANDWIDTH_DOWN" ;;
+	esac
+}
+
+default_hy2_user_download_rate_value() {
+	local fallback="${1:-$(default_hy2_download_rate)}"
+	case "${HY2_DEFAULT_DOWN:-}" in
+		""|"3 Mbps") echo "$fallback" ;;
+		*) echo "$HY2_DEFAULT_DOWN" ;;
+	esac
+}
+
+port_hop_status() {
+	if [[ "${HY2_SERVER_PORTS:-}" != *-* || -z "${HY2_HOP_INTERVAL_SECONDS:-}" || "${HY2_HOP_INTERVAL_SECONDS:-}" == "0" ]]; then
+		echo "disabled"
+	else
+		echo "${HY2_HOP_INTERVAL_SECONDS}s"
+	fi
+}
+
 load_env() {
 	ensure_env_file
+	sanitize_env_file_for_source
 	normalize_password_hash_quotes
 	set -a
 	# shellcheck disable=SC1090
@@ -402,6 +498,18 @@ random_token() {
 	fi
 }
 
+is_placeholder_value() {
+	local value="${1:-}"
+	case "$value" in
+		""|REPLACE_WITH_*|\<*\>|*from-internal-secret*)
+			return 0
+		;;
+		*)
+			return 1
+		;;
+	esac
+}
+
 is_ip_value() {
 	local value="$1"
 	[[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$value" =~ : ]]
@@ -555,6 +663,8 @@ ensure_cert_material() {
 render_runtime_files() {
 	load_env
 	ensure_users_file
+	ensure_export_auth_defaults
+	load_env
 	ensure_cert_material
 	render_auth_script
 	render_server_config
@@ -570,6 +680,163 @@ sync_env_user_list_from_file() {
 
 	mapfile -t names < <(current_users)
 	set_env_value HY2_USERS "$(array_join_csv "${names[@]}")"
+}
+
+ensure_export_auth_defaults() {
+	local first_user auth_user auth_hash generated_password
+
+	first_user="$(current_users | head -n 1 || true)"
+	auth_user="${HY2_EXPORT_USER:-}"
+	if is_placeholder_value "$auth_user"; then
+		auth_user="${first_user:-download}"
+		set_env_value HY2_EXPORT_USER "$auth_user"
+	fi
+
+	auth_hash="${HY2_EXPORT_PASSWORD_HASH:-}"
+	if is_placeholder_value "$auth_hash"; then
+		generated_password="$(random_token)"
+		set_env_value HY2_EXPORT_PASSWORD_HASH "$(hash_password "$generated_password")"
+		echo "Generated random health summary password hash for ${auth_user}; plaintext is intentionally not stored." >&2
+	fi
+}
+
+node_parser_command() {
+	if command -v node >/dev/null 2>&1; then
+		echo "node"
+		return 0
+	fi
+	return 1
+}
+
+python_parser_command() {
+	if command -v python3 >/dev/null 2>&1; then
+		echo "python3"
+		return 0
+	elif command -v python >/dev/null 2>&1; then
+		echo "python"
+		return 0
+	fi
+	return 1
+}
+
+json_parser_command() {
+	node_parser_command && return 0
+	python_parser_command && return 0
+	return 1
+}
+
+install_nvm_prerequisites() {
+	if command -v curl >/dev/null 2>&1; then
+		return 0
+	fi
+
+	if command -v apt-get >/dev/null 2>&1; then
+		export DEBIAN_FRONTEND=noninteractive
+		apt-get update
+		apt-get install -y ca-certificates curl
+	elif command -v dnf >/dev/null 2>&1; then
+		dnf install -y ca-certificates curl
+	elif command -v yum >/dev/null 2>&1; then
+		yum install -y ca-certificates curl
+	elif command -v apk >/dev/null 2>&1; then
+		apk add --no-cache ca-certificates curl
+	elif command -v zypper >/dev/null 2>&1; then
+		zypper --non-interactive install ca-certificates curl
+	else
+		return 1
+	fi
+}
+
+load_nvm_for_json_parser() {
+	export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+	[[ -s "$NVM_DIR/nvm.sh" ]] || return 1
+	# shellcheck disable=SC1090
+	source "$NVM_DIR/nvm.sh"
+}
+
+install_nvm_node_for_json_parser() {
+	local node_version="${MX_OVERSEA_NODE_VERSION:-22}"
+	local nvm_version="${MX_OVERSEA_NVM_VERSION:-v0.40.3}"
+
+	export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+	if ! load_nvm_for_json_parser; then
+		install_nvm_prerequisites || return 1
+		mkdir -p "$NVM_DIR" || return 1
+		curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${nvm_version}/install.sh" | PROFILE=/dev/null METHOD=script bash || return 1
+		load_nvm_for_json_parser || return 1
+	fi
+	nvm install "$node_version" || return 1
+	nvm alias default "$node_version" >/dev/null 2>&1 || true
+	nvm use "$node_version" || return 1
+	command -v node >/dev/null 2>&1 || return 1
+	node --version >&2 || true
+}
+
+install_python3_for_json_parser() {
+	if command -v apt-get >/dev/null 2>&1; then
+		export DEBIAN_FRONTEND=noninteractive
+		apt-get update
+		apt-get install -y python3
+	elif command -v dnf >/dev/null 2>&1; then
+		dnf install -y python3
+	elif command -v yum >/dev/null 2>&1; then
+		yum install -y python3
+	elif command -v apk >/dev/null 2>&1; then
+		apk add --no-cache python3
+	elif command -v zypper >/dev/null 2>&1; then
+		zypper --non-interactive install python3
+	else
+		die "node or python3 is required to parse tunnel state, and no supported package manager was found."
+	fi
+}
+
+ensure_json_parser() {
+	local parser
+
+	parser="$(node_parser_command || true)"
+	if [[ -n "$parser" ]]; then
+		echo "$parser"
+		return 0
+	fi
+
+	echo "Node is not installed; installing nvm and Node 22 for tunnel-state reconciliation." >&2
+	if install_nvm_node_for_json_parser >&2; then
+		parser="$(node_parser_command || true)"
+		[[ -n "$parser" ]] || die "nvm completed but node is still unavailable."
+		echo "$parser"
+		return 0
+	fi
+
+	echo "nvm/Node 22 install failed; trying python3 fallback for tunnel-state reconciliation." >&2
+	parser="$(python_parser_command || true)"
+	if [[ -n "$parser" ]]; then
+		echo "$parser"
+		return 0
+	fi
+
+	install_python3_for_json_parser >&2
+	parser="$(json_parser_command || true)"
+	[[ -n "$parser" ]] || die "node or python3 is required to parse tunnel state."
+	echo "$parser"
+}
+
+reconcile_tunnel_state_files() {
+	local parser="$1"
+	local state_file="$2"
+	local users_file="$3"
+	local env_file="$4"
+
+	if [[ "$parser" == "node" ]]; then
+		node "$STACK_DIR/scripts/reconcile-tunnel-state.mjs" \
+			--state-file "$state_file" \
+			--users-file "$users_file" \
+			--output-env-file "$env_file"
+	else
+		"$parser" "$STACK_DIR/scripts/reconcile-tunnel-state.py" \
+			--state-file "$state_file" \
+			--users-file "$users_file" \
+			--output-env-file "$env_file"
+	fi
 }
 
 user_record() {
@@ -661,7 +928,7 @@ subscription_auth_hash_state() {
 
 	if [[ -z "$hash" ]]; then
 		echo "missing"
-	elif [[ "$hash" == "REPLACE_WITH_CADDY_HASH" ]]; then
+	elif is_placeholder_value "$hash"; then
 		echo "placeholder"
 	else
 		echo "configured"
@@ -846,11 +1113,12 @@ status_command() {
 	echo "Internal mihomo URL: ${HY2_INTERNAL_MIHOMO_BASE_URL:-unset}"
 	echo "Subscription store: ${HY2_INTERNAL_SUBSCRIPTION_STORE:-unset}"
 	echo "Routing policy: ${HY2_MIHOMO_ROUTING_MODE:-cn-direct}"
+	echo "Peer DNS servers: ${HY2_PEER_DNS:-unset}"
 	echo "Reserved Internal CIDRs: ${HY2_RESERVED_INTERNAL_CIDRS:-10.88.0.0/16,10.89.0.0/16,10.90.0.0/16,10.91.0.0/16}"
 	echo "Domestic gateway IP: ${HY2_DOMESTIC_GATEWAY_IP:-10.88.0.1}"
 	echo "TLS server name: ${HY2_TLS_SERVER_NAME:-unset}"
 	echo "TLS fingerprint: ${HY2_TLS_FINGERPRINT:-unset}"
-	echo "Port hop interval: ${HY2_HOP_INTERVAL_SECONDS:-unset}s"
+	echo "Port hop interval: $(port_hop_status)"
 	echo "Per-client download cap: ${HY2_SERVER_BANDWIDTH_DOWN:-unset}"
 	echo "Per-client upload cap: ${HY2_SERVER_BANDWIDTH_UP:-unset}"
 	echo
@@ -939,7 +1207,7 @@ setup_command() {
 	users_default="${users_default:-user01,user02,user03}"
 
 	host="$(prompt_default "Hysteria public host/IP" "${HY2_SERVER_HOST:-$(old_wg_env_value WG_SERVER_HOST || echo 203.0.113.10)}")"
-	port_spec="$(prompt_default "Hysteria UDP port or range" "${HY2_SERVER_PORTS:-52120-52159}")"
+	port_spec="$(prompt_default "Hysteria UDP port" "$(default_hy2_server_ports_value)")"
 	sub_port="$(prompt_default "Health summary TCP port" "${HY2_EXPORT_FALLBACK_PORT:-$(old_wg_env_value WG_EXPORT_FALLBACK_PORT || echo 3434)}")"
 	initial_users_csv="$(prompt_default "Initial users (comma-separated)" "$users_default")"
 	mapfile -t initial_names < <(parse_names_csv "$initial_users_csv")
@@ -953,13 +1221,13 @@ setup_command() {
 	[[ -n "$default_auth_user" ]] || default_auth_user="${initial_names[0]}"
 	auth_user="$(prompt_default "Health summary username" "$default_auth_user")"
 	auth_pass="$(prompt_password "Health summary password")"
-	peer_dns="$(prompt_default "Peer DNS servers" "${HY2_PEER_DNS:-1.1.1.1,8.8.8.8}")"
+	peer_dns="$(prompt_default "Peer DNS servers" "$(default_hy2_peer_dns_value)")"
 	routing_mode="$(normalize_routing_mode_value "$(prompt_default "Routing policy (cn-direct/global)" "${HY2_MIHOMO_ROUTING_MODE:-cn-direct}")")"
 	tls_sni="$(normalize_optional_value "$(prompt_default "TLS server name / SNI ('-' to disable)" "$(default_tls_sni_for_host "$host" "${HY2_TLS_SERVER_NAME:-}")")")"
-	hop_interval="$(prompt_default "Port hop interval seconds" "${HY2_HOP_INTERVAL_SECONDS:-30}")"
-	server_down="$(prompt_default "Server-side per-client download cap" "${HY2_SERVER_BANDWIDTH_DOWN:-$(default_hy2_download_rate)}")"
+	hop_interval="$(prompt_default "Port hop interval seconds" "$(default_hy2_hop_interval_value "$port_spec")")"
+	server_down="$(prompt_default "Server-side per-client download cap" "$(default_hy2_server_download_rate_value)")"
 	server_up="$(prompt_default "Server-side per-client upload cap" "${HY2_SERVER_BANDWIDTH_UP:-$(default_hy2_upload_rate)}")"
-	initial_down="$(prompt_default "Default per-user download hint" "${HY2_DEFAULT_DOWN:-${server_down:-$(default_hy2_download_rate)}}")"
+	initial_down="$(prompt_default "Default per-user download hint" "$(default_hy2_user_download_rate_value "${server_down:-$(default_hy2_download_rate)}")")"
 	initial_up="$(prompt_default "Default per-user upload hint" "${HY2_DEFAULT_UP:-${server_up:-$(default_hy2_upload_rate)}}")"
 	masq_url="$(normalize_optional_value "$(prompt_default "Masquerade URL ('-' to disable)" "${HY2_MASQUERADE_URL:-https://news.ycombinator.com/}")")"
 	obfs_password="$(normalize_optional_value "$(prompt_default "Salamander obfs password ('-' to disable)" "${HY2_OBFS_PASSWORD:-}")")"
@@ -1024,7 +1292,7 @@ reconfigure_command() {
 	load_env
 
 	host="$(prompt_default "Hysteria public host/IP" "${HY2_SERVER_HOST:-}")"
-	port_spec="$(prompt_default "Hysteria UDP port or range" "${HY2_SERVER_PORTS:-52120-52159}")"
+	port_spec="$(prompt_default "Hysteria UDP port" "$(default_hy2_server_ports_value)")"
 	sub_port="$(prompt_default "Health summary TCP port" "${HY2_EXPORT_FALLBACK_PORT:-3434}")"
 	auth_user="$(prompt_default "Health summary username" "${HY2_EXPORT_USER:-download}")"
 	rotate_auth="$(prompt_yes_no "Rotate health summary password?" "no")"
@@ -1033,13 +1301,13 @@ reconfigure_command() {
 		hash="$(hash_password "$auth_pass")"
 		set_env_value HY2_EXPORT_PASSWORD_HASH "$hash"
 	fi
-	peer_dns="$(prompt_default "Peer DNS servers" "${HY2_PEER_DNS:-1.1.1.1,8.8.8.8}")"
+	peer_dns="$(prompt_default "Peer DNS servers" "$(default_hy2_peer_dns_value)")"
 	routing_mode="$(normalize_routing_mode_value "$(prompt_default "Routing policy (cn-direct/global)" "${HY2_MIHOMO_ROUTING_MODE:-cn-direct}")")"
 	tls_sni="$(normalize_optional_value "$(prompt_default "TLS server name / SNI ('-' to disable)" "$(default_tls_sni_for_host "$host" "${HY2_TLS_SERVER_NAME:-}")")")"
-	hop_interval="$(prompt_default "Port hop interval seconds" "${HY2_HOP_INTERVAL_SECONDS:-30}")"
-	server_down="$(prompt_default "Server-side per-client download cap" "${HY2_SERVER_BANDWIDTH_DOWN:-$(default_hy2_download_rate)}")"
+	hop_interval="$(prompt_default "Port hop interval seconds" "$(default_hy2_hop_interval_value "$port_spec")")"
+	server_down="$(prompt_default "Server-side per-client download cap" "$(default_hy2_server_download_rate_value)")"
 	server_up="$(prompt_default "Server-side per-client upload cap" "${HY2_SERVER_BANDWIDTH_UP:-$(default_hy2_upload_rate)}")"
-	down_default="$(prompt_default "Default per-user download hint" "${HY2_DEFAULT_DOWN:-${server_down:-$(default_hy2_download_rate)}}")"
+	down_default="$(prompt_default "Default per-user download hint" "$(default_hy2_user_download_rate_value "${server_down:-$(default_hy2_download_rate)}")")"
 	up_default="$(prompt_default "Default per-user upload hint" "${HY2_DEFAULT_UP:-${server_up:-$(default_hy2_upload_rate)}}")"
 	masq_url="$(normalize_optional_value "$(prompt_default "Masquerade URL ('-' to disable)" "${HY2_MASQUERADE_URL:-https://news.ycombinator.com/}")")"
 	obfs_password="$(normalize_optional_value "$(prompt_default "Salamander obfs password ('-' to disable)" "${HY2_OBFS_PASSWORD:-}")")"
@@ -1240,7 +1508,7 @@ export_command() {
 reconcile_from_json_command() {
 	local state_file=""
 	local mode="hysteria2-only"
-	local tmp_users tmp_env old_ports old_host old_routing
+	local tmp_users tmp_env old_ports old_host old_routing parser
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
@@ -1255,19 +1523,16 @@ reconcile_from_json_command() {
 		hysteria2-only|compat-subscription-export) ;;
 		*) die "Unsupported reconcile mode: $mode" ;;
 	esac
-	command -v node >/dev/null 2>&1 || die "node is required to parse tunnel state."
 
 	load_env
 	old_host="${HY2_SERVER_HOST:-}"
 	old_ports="${HY2_SERVER_PORTS:-}"
 	old_routing="${HY2_MIHOMO_ROUTING_MODE:-cn-direct}"
+	parser="$(ensure_json_parser)"
 	tmp_users="$(mktemp)"
 	tmp_env="$(mktemp)"
 
-	node "$STACK_DIR/scripts/reconcile-tunnel-state.mjs" \
-		--state-file "$state_file" \
-		--users-file "$tmp_users" \
-		--output-env-file "$tmp_env"
+	reconcile_tunnel_state_files "$parser" "$state_file" "$tmp_users" "$tmp_env"
 
 	# shellcheck disable=SC1090
 	source "$tmp_env"

@@ -4,6 +4,8 @@ import type {
   AppCenterApp,
   AuditEvent,
   AuditEventInput,
+  AwxProviderConfig,
+  AwxProviderConfigInput,
   ConfigPolicySnapshot,
   ConfigPolicySnapshotInput,
   ConfigSnapshot,
@@ -23,7 +25,11 @@ import type {
   IssueTokenInput,
   LauncherNetworkSnapshot,
   LauncherNetworkSnapshotInput,
+  LauncherNetworkMihomoSite,
+  LauncherNetworkMihomoSiteInput,
+  LauncherNetworkReachabilityPlan,
   LogEntryInput,
+  MihomoSubscriptionRender,
   PermissionGrant,
   PermissionRequestInput,
   PrincipalContext,
@@ -45,6 +51,9 @@ import type {
   SiteSlotExecutionRun,
   SiteSlotPlan,
   SiteSlotPlanInput,
+  SiteSlotAccessAccount,
+  SiteSlotAccessAccountIssueInput,
+  SiteSlotAccessAccountIssueResult,
   SiteSlotRollbackExecution,
   SiteSlotRollbackExecutionInput,
   SiteSlotRollbackReport,
@@ -53,6 +62,7 @@ import type {
   SiteSlotRunnerStartInput,
   SiteSlotSshProfile,
   SiteSlotSshProfileInput,
+  SiteSlotKind,
   SiteSlotWorkerJob,
   SiteSlotWorkerJobInput,
   SiteSlotWorkerReport,
@@ -96,6 +106,7 @@ export interface PlatformOverview {
   siteSlotWorkerReports: number;
   siteSlotRollbackExecutions: number;
   siteSlotRollbackReports: number;
+  awxProviderConfigs: number;
   dnsPolicies: number;
   dnsReverseProxyRoutes: number;
   dnsZoneSnapshots: number;
@@ -161,9 +172,19 @@ export interface PlatformStore {
   getSiteSlotSshProfile(profileId: string): MaybePromise<SiteSlotSshProfile | null>;
   getSiteSlotSshProfileForSite(siteId: string): MaybePromise<SiteSlotSshProfile | null>;
   upsertSiteSlotSshProfile(input: SiteSlotSshProfileInput): MaybePromise<SiteSlotSshProfile>;
+  issueSiteSlotAccessAccounts(input: SiteSlotAccessAccountIssueInput): MaybePromise<SiteSlotAccessAccountIssueResult>;
+  listSiteSlotAccessAccounts(siteId: string): MaybePromise<SiteSlotAccessAccount[]>;
+  getSiteSlotAccessAccount(siteId: string, username: string): MaybePromise<SiteSlotAccessAccount | null>;
+  upsertLauncherNetworkMihomoSite(input: LauncherNetworkMihomoSiteInput): MaybePromise<LauncherNetworkMihomoSite>;
+  getLauncherNetworkMihomoSite(siteId: string): MaybePromise<LauncherNetworkMihomoSite | null>;
+  getLauncherNetworkMihomoReachability(siteId: string): MaybePromise<LauncherNetworkReachabilityPlan | null>;
+  renderHysteria2MihomoSubscription(siteId: string, username: string): MaybePromise<MihomoSubscriptionRender | null>;
   listRuntimeFeaturePolicies(featureKey?: string | null): MaybePromise<RuntimeFeaturePolicy[]>;
   getRuntimeFeaturePolicy(policyId: string): MaybePromise<RuntimeFeaturePolicy | null>;
   upsertRuntimeFeaturePolicy(input: RuntimeFeaturePolicyInput): MaybePromise<RuntimeFeaturePolicy>;
+  listAwxProviderConfigs(kind?: SiteSlotKind | 'all' | null): MaybePromise<AwxProviderConfig[]>;
+  getAwxProviderConfig(providerId: string): MaybePromise<AwxProviderConfig | null>;
+  upsertAwxProviderConfig(input: AwxProviderConfigInput): MaybePromise<AwxProviderConfig>;
   getSnapshot(installId: string): MaybePromise<ConfigSnapshot | null>;
   listTasks(installId: string): MaybePromise<ReleaseTask[]>;
   recordReleaseReport(input: ReleaseReportInput): MaybePromise<AuditEvent>;

@@ -50,27 +50,34 @@ Usage:
   bash scripts/manage.sh ops site-slot preflight <plan-id> [dry-run|manual|ssh]
   bash scripts/manage.sh ops site-slot apply <plan-id> [manual|dry-run|ssh]
   bash scripts/manage.sh ops site-slot executions [plan-id]
-  bash scripts/manage.sh ops site-slot runner-start <run-id> [simulate|remote-ssh]
+  bash scripts/manage.sh ops site-slot runner-start <run-id> [simulate|remote-ssh|awx-shadow]
   bash scripts/manage.sh ops site-slot runner-sessions [run-id]
   bash scripts/manage.sh ops site-slot worker-job <session-id>
   bash scripts/manage.sh ops site-slot worker-gate <job-id> [confirm]
   bash scripts/manage.sh ops site-slot worker-handoff <job-id> [confirm]
-  bash scripts/manage.sh ops site-slot worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|local-exec]
+  bash scripts/manage.sh ops site-slot domestic-relay-append-ssh-prepare <apply-run-id> [confirm]
+  bash scripts/manage.sh ops site-slot worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|awx-shadow|awx-credential-sync|awx-object-sync|awx-launch|local-exec]
   bash scripts/manage.sh ops site-slot worker-report <job-id> [running|passed|failed|blocked]
   bash scripts/manage.sh ops site-slot rollback-start <report-id> [simulate|manual]
   bash scripts/manage.sh ops site-slot rollback-report <rollback-execution-id> [running|passed|failed|blocked]
   bash scripts/manage.sh ops local-shadow plan|cycle|build|up|status|smoke|logs|down
-  bash scripts/manage.sh ops k8s-shadow plan|dry-run|cycle|build|apply|status|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|ssh-bootstrap enable|disable|down
+  bash scripts/manage.sh ops internal-local plan|dry-run|cycle|build|apply|status|port-forward [local-port]|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down
+  bash scripts/manage.sh ops k8s-shadow plan|dry-run|cycle|build|apply|status|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down
+  bash scripts/manage.sh ops awx-shadow plan|dry-run|install|status|port-forward [local-port]|logs|password|down
+  bash scripts/manage.sh ops awx-provider list|upsert [provider-id] [base-url]|check <provider-id>
+  bash scripts/manage.sh ops local-platform plan|dry-run|cycle [local-port]|status|down
   bash scripts/manage.sh k8s plan internal-shadow
   bash scripts/manage.sh k8s explain internal-shadow
   bash scripts/manage.sh k8s render internal-shadow
   bash scripts/manage.sh k8s dry-run internal-shadow
   bash scripts/manage.sh k8s apply internal-shadow
   bash scripts/manage.sh k8s status internal-shadow
+  bash scripts/manage.sh k8s port-forward internal-local [local-port]
   bash scripts/manage.sh k8s logs internal-shadow
   bash scripts/manage.sh k8s db-summary internal-shadow
   MX_K8S_SHADOW_CONFIRM_RESET=1 bash scripts/manage.sh k8s reset-data internal-shadow
   bash scripts/manage.sh k8s remote-runner internal-shadow enable|disable
+  bash scripts/manage.sh k8s readonly-probe internal-shadow enable|disable
   bash scripts/manage.sh k8s ssh-bootstrap internal-shadow enable|disable
   bash scripts/manage.sh k8s gate internal-shadow [local-port]
   bash scripts/manage.sh k8s gate-manual internal-shadow <evidence-json> [local-port]
@@ -142,7 +149,7 @@ need_kubectl() {
 
 k8s_namespace() {
   case "$1" in
-    internal-shadow)
+    internal-local|internal-shadow)
       echo "mx-internal-shadow"
       ;;
     *)
@@ -153,7 +160,7 @@ k8s_namespace() {
 
 k8s_manifest_dir() {
   case "$1" in
-    internal-shadow)
+    internal-local|internal-shadow)
       echo "$ROOT/deploy/k8s/internal-shadow"
       ;;
     *)
@@ -426,12 +433,15 @@ k8s_remote_runner() {
       value="0"
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops k8s-shadow remote-runner enable|disable"
+      die "Usage: bash scripts/manage.sh ops internal-local remote-runner enable|disable"
       ;;
   esac
   need_kubectl
-  say "set SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=$value on Internal API deployment"
-  kubectl -n "$ns" set env deployment/mx-launcher-internal "SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=$value"
+  say "set remote runner gates=$value on Internal API deployment"
+  kubectl -n "$ns" set env deployment/mx-launcher-internal \
+    "SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=$value" \
+    "SITE_SLOT_WORKER_REMOTE_SSH=$value" \
+    "SITE_SLOT_CONFIRM_REMOTE_EXECUTION=$value"
   kubectl -n "$ns" rollout status deployment/mx-launcher-internal --timeout=180s
 }
 
@@ -448,12 +458,34 @@ k8s_ssh_bootstrap() {
       value="0"
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops k8s-shadow ssh-bootstrap enable|disable"
+      die "Usage: bash scripts/manage.sh ops internal-local ssh-bootstrap enable|disable"
       ;;
   esac
   need_kubectl
   say "set SITE_SLOT_SSH_PASSWORD_BOOTSTRAP_ENABLED=$value on Internal API deployment"
   kubectl -n "$ns" set env deployment/mx-launcher-internal "SITE_SLOT_SSH_PASSWORD_BOOTSTRAP_ENABLED=$value"
+  kubectl -n "$ns" rollout status deployment/mx-launcher-internal --timeout=180s
+}
+
+k8s_readonly_probe() {
+  local target="$1"
+  local state="$2"
+  local ns value
+  ns="$(k8s_namespace "$target")"
+  case "$state" in
+    enable|enabled|on|1)
+      value="1"
+      ;;
+    disable|disabled|off|0)
+      value="0"
+      ;;
+    *)
+      die "Usage: bash scripts/manage.sh ops internal-local readonly-probe enable|disable"
+      ;;
+  esac
+  need_kubectl
+  say "set SITE_SLOT_SSH_READONLY_PROBE_EXECUTE=$value on Internal API deployment"
+  kubectl -n "$ns" set env deployment/mx-launcher-internal "SITE_SLOT_SSH_READONLY_PROBE_EXECUTE=$value"
   kubectl -n "$ns" rollout status deployment/mx-launcher-internal --timeout=180s
 }
 
@@ -511,6 +543,18 @@ k8s_smoke() {
   fi
   kill "$pf_pid" 2>/dev/null || true
   wait "$pf_pid" 2>/dev/null || true
+}
+
+k8s_port_forward() {
+  local target="$1"
+  local local_port="${2:-18090}"
+  local ns
+  ns="$(k8s_namespace "$target")"
+  need_kubectl
+  say "keep Internal API exposed on http://127.0.0.1:${local_port}"
+  say "target namespace: $ns"
+  say "press Ctrl+C in this terminal when you are done"
+  kubectl -n "$ns" port-forward svc/mx-launcher-internal "${local_port}:18090"
 }
 
 k8s_internal_shadow_gate() {
@@ -597,6 +641,441 @@ k8s_down() {
   say "namespace and PVC are kept for safe restart"
 }
 
+awx_shadow_namespace() {
+  echo "mx-awx"
+}
+
+awx_shadow_name() {
+  echo "mx-awx"
+}
+
+awx_shadow_manifest_dir() {
+  echo "$ROOT/deploy/k8s/awx-shadow"
+}
+
+awx_shadow_operator_ref() {
+  echo "${MX_AWX_OPERATOR_REF:-2.19.1}"
+}
+
+awx_shadow_kustomize_dir() {
+  local dir ref safe_ref tmp
+  dir="$(awx_shadow_manifest_dir)"
+  ref="$(awx_shadow_operator_ref)"
+  [ -d "$dir" ] || die "missing AWX shadow manifest directory: $dir"
+  if [ "$ref" = "2.19.1" ]; then
+    echo "$dir"
+    return
+  fi
+  safe_ref="${ref//[^A-Za-z0-9._-]/_}"
+  tmp="${TMPDIR:-/tmp}/mx-awx-shadow-kustomize-$safe_ref"
+  rm -rf "$tmp"
+  mkdir -p "$tmp"
+  sed "s|ref=2.19.1|ref=$ref|g; s|newTag: 2.19.1|newTag: $ref|g" "$dir/kustomization.yaml" >"$tmp/kustomization.yaml"
+  echo "$tmp"
+}
+
+awx_shadow_plan() {
+  local ns name ref
+  ns="$(awx_shadow_namespace)"
+  name="$(awx_shadow_name)"
+  ref="$(awx_shadow_operator_ref)"
+  cat <<EOF
+MX Launcher AWX shadow plan
+
+Namespace: $ns
+AWX name:  $name
+Operator:  ansible/awx-operator $ref
+
+Order:
+  1. Apply namespace.
+  2. Apply pinned AWX Operator manifests through Kustomize.
+  3. Wait for AWX CRD to become Established.
+  4. Create AWX custom resource $name.
+  5. Wait for awx-operator-controller-manager rollout.
+  6. Watch AWX web/task/postgres pods until the instance is ready.
+  7. Read admin password from secret ${name}-admin-password.
+  8. Port-forward service ${name}-service when local browser/API access is needed.
+  9. Upsert an Internal awx-provider that points to:
+     http://${name}-service.${ns}.svc.cluster.local
+
+Boundary:
+  AWX is an execution provider. Internal remains the source of truth for
+  plans, worker jobs, evidence, audit, RBAC, rollback, and release gates.
+
+Resource note:
+  Docker Desktop Kubernetes should usually have about 6-8GB RAM, 4 CPUs,
+  and 20-40GB free disk for comfortable local AWX testing.
+EOF
+}
+
+awx_shadow_dry_run() {
+  local dir kdir
+  dir="$(awx_shadow_manifest_dir)"
+  kdir="$(awx_shadow_kustomize_dir)"
+  need_kubectl
+  say "dry-run AWX Operator manifests"
+  kubectl apply --dry-run=client --validate=false -k "$kdir"
+  if kubectl get crd awxs.awx.ansible.com >/dev/null 2>&1; then
+    say "dry-run mx-awx AWX custom resource"
+    kubectl apply --dry-run=client --validate=false -f "$dir/10-awx.yaml"
+  else
+    say "skip mx-awx AWX custom resource dry-run because awxs.awx.ansible.com CRD is not installed yet"
+  fi
+}
+
+awx_shadow_install() {
+  local ns name dir kdir operator_timeout awx_timeout i
+  ns="$(awx_shadow_namespace)"
+  name="$(awx_shadow_name)"
+  dir="$(awx_shadow_manifest_dir)"
+  kdir="$(awx_shadow_kustomize_dir)"
+  operator_timeout="${MX_AWX_OPERATOR_TIMEOUT:-180s}"
+  awx_timeout="${MX_AWX_READY_TIMEOUT_SECONDS:-900}"
+  need_kubectl
+  say "apply AWX Operator manifests"
+  kubectl apply -k "$kdir"
+  say "wait AWX CRD"
+  kubectl wait --for=condition=Established crd/awxs.awx.ansible.com --timeout="$operator_timeout"
+  say "apply mx-awx AWX custom resource"
+  kubectl apply -f "$dir/10-awx.yaml"
+  say "wait AWX Operator rollout"
+  kubectl -n "$ns" rollout status deployment/awx-operator-controller-manager --timeout="$operator_timeout"
+  say "wait for AWX workloads to appear"
+  for i in $(seq 1 "$awx_timeout"); do
+    if kubectl -n "$ns" get deployment "$name-web" >/dev/null 2>&1 \
+      && kubectl -n "$ns" get deployment "$name-task" >/dev/null 2>&1 \
+      && kubectl -n "$ns" get statefulset "$name-postgres-15" >/dev/null 2>&1; then
+      say "wait AWX web rollout"
+      kubectl -n "$ns" rollout status deployment/"$name-web" --timeout=900s
+      say "wait AWX task rollout"
+      kubectl -n "$ns" rollout status deployment/"$name-task" --timeout=900s
+      say "wait AWX postgres rollout"
+      kubectl -n "$ns" rollout status statefulset/"$name-postgres-15" --timeout=900s
+      awx_shadow_status
+      say "AWX shadow install OK"
+      return
+    fi
+    sleep 1
+  done
+  awx_shadow_status
+  die "AWX web/task/postgres workloads did not appear before timeout; inspect operator logs with ops awx-shadow logs"
+}
+
+awx_shadow_status() {
+  local ns
+  ns="$(awx_shadow_namespace)"
+  need_kubectl
+  kubectl -n "$ns" get awx,deploy,statefulset,pod,svc,pvc 2>/dev/null || kubectl -n "$ns" get all
+}
+
+awx_shadow_logs() {
+  local ns
+  ns="$(awx_shadow_namespace)"
+  need_kubectl
+  kubectl -n "$ns" logs deployment/awx-operator-controller-manager -c awx-manager --tail=200
+}
+
+awx_shadow_port_forward() {
+  local ns name local_port
+  ns="$(awx_shadow_namespace)"
+  name="$(awx_shadow_name)"
+  local_port="${1:-18080}"
+  need_kubectl
+  say "keep AWX exposed on http://127.0.0.1:${local_port}"
+  say "target service: ${name}-service.${ns}.svc.cluster.local:80"
+  say "press Ctrl+C in this terminal when you are done"
+  kubectl -n "$ns" port-forward svc/"$name-service" "${local_port}:80"
+}
+
+awx_shadow_password() {
+  local ns name encoded
+  ns="$(awx_shadow_namespace)"
+  name="$(awx_shadow_name)"
+  need_kubectl
+  encoded="$(kubectl -n "$ns" get secret "$name-admin-password" -o jsonpath='{.data.password}')"
+  [ -n "$encoded" ] || die "AWX admin password secret is empty or not ready: $name-admin-password"
+  node -e 'console.log(Buffer.from(process.argv[1], "base64").toString("utf8"))' "$encoded"
+}
+
+awx_shadow_down() {
+  local ns name
+  ns="$(awx_shadow_namespace)"
+  name="$(awx_shadow_name)"
+  need_kubectl
+  say "scale AWX workloads to zero; namespace, CR, Secret, and PVC are kept"
+  kubectl -n "$ns" scale deployment/"$name" --replicas=0 2>/dev/null || true
+  kubectl -n "$ns" scale statefulset/"$name-postgres" --replicas=0 2>/dev/null || true
+  kubectl -n "$ns" scale deployment/awx-operator-controller-manager --replicas=0 2>/dev/null || true
+  say "AWX shadow stopped. Re-run 'bash scripts/manage.sh ops awx-shadow install' to reconcile it again."
+}
+
+ops_awx_shadow() {
+  local action="$1"
+  shift || true
+  case "$action" in
+    plan)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops awx-shadow plan"
+      awx_shadow_plan
+      ;;
+    dry-run)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops awx-shadow dry-run"
+      awx_shadow_dry_run
+      ;;
+    install|apply|up)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops awx-shadow install"
+      awx_shadow_install
+      ;;
+    status)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops awx-shadow status"
+      awx_shadow_status
+      ;;
+    port-forward|forward)
+      [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops awx-shadow port-forward [local-port]"
+      awx_shadow_port_forward "${1:-18080}"
+      ;;
+    logs)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops awx-shadow logs"
+      awx_shadow_logs
+      ;;
+    password)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops awx-shadow password"
+      awx_shadow_password
+      ;;
+    down)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops awx-shadow down"
+      awx_shadow_down
+      ;;
+    *)
+      die "Usage: bash scripts/manage.sh ops awx-shadow plan|dry-run|install|status|port-forward [local-port]|logs|password|down"
+      ;;
+  esac
+}
+
+ops_awx_provider() {
+  local action="$1"
+  shift || true
+  local base="${MX_INTERNAL_BASE_URL:-http://127.0.0.1:18090}"
+  case "$action" in
+    list)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops awx-provider list"
+      node -e '
+        const [base] = process.argv.slice(1);
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/config-center/awx-providers`);
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          console.log(JSON.stringify({
+            providers: payload.providers.map((provider) => ({
+              providerId: provider.providerId,
+              name: provider.name,
+              baseUrl: provider.baseUrl,
+              organization: provider.organization,
+              project: provider.project,
+              defaultKind: provider.defaultKind,
+              status: provider.status,
+              inventoryPrefix: provider.inventoryPrefix,
+              credentialPrefix: provider.credentialPrefix,
+              jobTemplatePrefix: provider.jobTemplatePrefix,
+              updatedAt: provider.updatedAt
+            }))
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base"
+      ;;
+    upsert)
+      [ "$#" -le 2 ] || die "Usage: bash scripts/manage.sh ops awx-provider upsert [provider-id] [base-url]"
+      node -e '
+        const [base, providerId = "", baseUrl = ""] = process.argv.slice(1);
+        const body = {
+          providerId: providerId || process.env.SITE_SLOT_AWX_PROVIDER_ID || "awxprov_oversea",
+          name: process.env.SITE_SLOT_AWX_PROVIDER_NAME || "MX AWX Oversea",
+          baseUrl: baseUrl || process.env.AWX_BASE_URL || "http://mx-awx-service.mx-awx.svc.cluster.local",
+          organization: process.env.AWX_ORGANIZATION || "MX Internal",
+          project: process.env.AWX_PROJECT || "mx-launcher-site-slots",
+          inventoryPrefix: process.env.AWX_INVENTORY_PREFIX || "mx",
+          credentialPrefix: process.env.AWX_CREDENTIAL_PREFIX || "mx",
+          jobTemplatePrefix: process.env.AWX_JOB_TEMPLATE_PREFIX || "mx-site-slot",
+          defaultKind: process.env.AWX_DEFAULT_KIND || "oversea",
+          status: process.env.AWX_PROVIDER_STATUS || "active",
+          verifyTls: process.env.AWX_VERIFY_TLS === "0" ? false : true,
+          requestTimeoutSeconds: Number(process.env.AWX_REQUEST_TIMEOUT_SECONDS || "30"),
+          requestedBy: process.env.USER || "manage.sh",
+          requestId: "manage-awx-provider-upsert"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/config-center/awx-providers`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          console.log(JSON.stringify({ provider: payload.provider }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "${1:-}" "${2:-}"
+      ;;
+    check)
+      [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh ops awx-provider check <provider-id>"
+      node -e '
+        const [base, providerId] = process.argv.slice(1);
+        const body = {
+          token: process.env.SITE_SLOT_AWX_TOKEN || process.env.AWX_TOKEN || "",
+          kind: process.env.AWX_CHECK_KIND || "oversea",
+          requestTimeoutSeconds: Number(process.env.AWX_REQUEST_TIMEOUT_SECONDS || "30"),
+          requestedBy: process.env.USER || "manage.sh",
+          requestId: "manage-awx-provider-check"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/config-center/awx-providers/${encodeURIComponent(providerId)}/check`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          console.log(JSON.stringify({ check: payload.check }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$1"
+      ;;
+    mock-smoke)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops awx-provider mock-smoke"
+      MX_INTERNAL_BASE_URL="$base" node server/scripts/awx-api-mock-smoke.mjs
+      ;;
+    *)
+      die "Usage: bash scripts/manage.sh ops awx-provider list|upsert [provider-id] [base-url]|check <provider-id>|mock-smoke"
+      ;;
+  esac
+}
+
+ops_local_platform_plan() {
+  cat <<'EOF'
+MX Launcher local-platform plan
+
+This is the explicit one-command path for a full local platform stack.
+It keeps the lightweight Internal cycle separate from the heavier AWX install.
+
+Order:
+  1. Install or reconcile AWX shadow in namespace mx-awx.
+  2. Build and apply Internal K8s shadow in namespace mx-internal-shadow.
+  3. Run Internal HTTP smoke and DB summary.
+  4. Temporarily port-forward Internal API.
+  5. Upsert Config Center awx-provider awxprov_oversea:
+     http://mx-awx-service.mx-awx.svc.cluster.local
+
+Commands:
+  bash scripts/manage.sh ops local-platform dry-run
+  bash scripts/manage.sh ops local-platform cycle
+  bash scripts/manage.sh ops local-platform status
+  bash scripts/manage.sh ops local-platform down
+
+Notes:
+  - ops k8s-shadow cycle remains Internal-only and does not install AWX.
+  - Set MX_LOCAL_PLATFORM_CHECK_AWX=1 and SITE_SLOT_AWX_TOKEN or AWX_TOKEN to
+    run the readonly awx-provider check after provider upsert.
+EOF
+}
+
+local_platform_upsert_awx_provider() {
+  local requested_port="${1:-18090}"
+  local ns port pf_pid previous_base had_previous_base
+  ns="$(k8s_namespace internal-shadow)"
+  port="$(k8s_smoke_port "$requested_port")"
+  need_kubectl
+  say "port-forward Internal API on 127.0.0.1:${port} for provider upsert"
+  kubectl -n "$ns" port-forward svc/mx-launcher-internal "$port:18090" >/tmp/mx-launcher-local-platform-port-forward.log 2>&1 &
+  pf_pid="$!"
+  sleep 2
+
+  had_previous_base=0
+  previous_base=""
+  if [ "${MX_INTERNAL_BASE_URL+x}" = "x" ]; then
+    had_previous_base=1
+    previous_base="$MX_INTERNAL_BASE_URL"
+  fi
+  export MX_INTERNAL_BASE_URL="http://127.0.0.1:${port}"
+  if ! ops_awx_provider upsert awxprov_oversea; then
+    kill "$pf_pid" 2>/dev/null || true
+    wait "$pf_pid" 2>/dev/null || true
+    [ "$had_previous_base" -eq 1 ] && export MX_INTERNAL_BASE_URL="$previous_base" || unset MX_INTERNAL_BASE_URL
+    die "local-platform failed while upserting awx-provider; see /tmp/mx-launcher-local-platform-port-forward.log"
+  fi
+
+  if [ "${MX_LOCAL_PLATFORM_CHECK_AWX:-0}" = "1" ]; then
+    if [ -n "${SITE_SLOT_AWX_TOKEN:-${AWX_TOKEN:-}}" ]; then
+      say "run readonly AWX provider check"
+      if ! ops_awx_provider check awxprov_oversea; then
+        kill "$pf_pid" 2>/dev/null || true
+        wait "$pf_pid" 2>/dev/null || true
+        [ "$had_previous_base" -eq 1 ] && export MX_INTERNAL_BASE_URL="$previous_base" || unset MX_INTERNAL_BASE_URL
+        die "local-platform AWX provider check failed"
+      fi
+    else
+      say "skip AWX provider check: SITE_SLOT_AWX_TOKEN or AWX_TOKEN is required"
+    fi
+  else
+    say "skip AWX provider check; set MX_LOCAL_PLATFORM_CHECK_AWX=1 when AWX org/project/inventory/template are ready"
+  fi
+
+  kill "$pf_pid" 2>/dev/null || true
+  wait "$pf_pid" 2>/dev/null || true
+  [ "$had_previous_base" -eq 1 ] && export MX_INTERNAL_BASE_URL="$previous_base" || unset MX_INTERNAL_BASE_URL
+}
+
+ops_local_platform() {
+  local action="$1"
+  shift || true
+  case "$action" in
+    plan)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops local-platform plan"
+      ops_local_platform_plan
+      ;;
+    dry-run)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops local-platform dry-run"
+      say "dry-run AWX shadow"
+      awx_shadow_dry_run
+      say "dry-run Internal K8s shadow"
+      k8s_dry_run internal-shadow
+      ;;
+    cycle)
+      [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops local-platform cycle [local-port]"
+      ops_local_platform_plan
+      say "install/reconcile AWX shadow"
+      awx_shadow_install
+      say "cycle Internal K8s shadow"
+      ops_k8s_shadow cycle "${1:-18090}"
+      say "upsert Internal AWX provider"
+      local_platform_upsert_awx_provider "${1:-18090}"
+      say "local-platform cycle OK. Use 'bash scripts/manage.sh ops local-platform status' to inspect it."
+      ;;
+    status)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops local-platform status"
+      say "AWX shadow status"
+      awx_shadow_status
+      say "Internal K8s shadow status"
+      k8s_status internal-shadow
+      ;;
+    down)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops local-platform down"
+      say "stop Internal K8s shadow"
+      k8s_down internal-shadow
+      say "stop AWX shadow"
+      awx_shadow_down
+      ;;
+    *)
+      die "Usage: bash scripts/manage.sh ops local-platform plan|dry-run|cycle [local-port]|status|down"
+      ;;
+  esac
+}
+
 ops_guide() {
   cat <<'EOF'
 MX Launcher local operator guide
@@ -608,45 +1087,69 @@ Start here:
 
 Interactive local K8s/Internal test path:
   1. status            confirm node/pnpm/docker/kubectl and current namespace state
-  3. k8s-plan          review the Internal K8s shadow rollout order
+  3. k8s-plan          review the local Internal K8s rollout order
   4. k8s-dry-run       validate manifests and generated DB Secret
   7. k8s-cycle         build image, apply K8s, restart API, smoke, DB summary
-  8. k8s-gate          run Internal Shadow Gate and record Test Center evidence
+  8. k8s-gate          run Internal Local Gate and record Test Center evidence
   9. k8s-smoke         rerun HTTP smoke through a temporary port-forward
   10. k8s-db           inspect seeded Internal state
   11. k8s-logs         inspect Internal API logs
   12. browser          print the persistent port-forward + browser manual test steps
   13. manual-evidence  write browser/Evidence Drawer evidence JSON after hand testing
-  17. reset-data       clear local shadow business records for a fresh manual test
+  17. reset-data       clear local Internal business records for a fresh manual test
   18. remote-runner    temporarily enable/disable remote runner for true-host readonly tests
+      readonly-probe   temporarily enable/disable real readonly SSH probe execution
       ssh-bootstrap    temporarily enable/disable one-time SSH password key bootstrap
-  19. oversea-readonly run a true Oversea read-only SSH probe and record worker evidence
-  20. down             stop workloads while keeping the PostgreSQL PVC
+  21. oversea-readonly run a true Oversea read-only SSH probe and record worker evidence
+  22. oversea-remote   run a true Oversea gated pipeline or remote install
+  23. down             stop workloads while keeping the PostgreSQL PVC
 
 Path A: Docker Compose shadow, no K8s knowledge required.
   bash scripts/manage.sh ops local-shadow plan
   bash scripts/manage.sh ops local-shadow cycle
 
 Path B: K8s learning path, safe dry-run first.
-  bash scripts/manage.sh ops k8s-shadow plan
-  bash scripts/manage.sh ops k8s-shadow dry-run
+  bash scripts/manage.sh ops internal-local plan
+  bash scripts/manage.sh ops internal-local dry-run
 
 Path C: K8s deploy on Docker Desktop or a prepared Internal cluster.
-  bash scripts/manage.sh ops k8s-shadow cycle
-  bash scripts/manage.sh ops k8s-shadow apply
-  bash scripts/manage.sh ops k8s-shadow status
-  bash scripts/manage.sh ops k8s-shadow gate
-  bash scripts/manage.sh ops k8s-shadow manual-evidence passed "browser manual path passed"
-  bash scripts/manage.sh ops k8s-shadow gate-manual server/artifacts/internal-shadow-gates/manual/manual-browser-evidence-xxx.json
-  bash scripts/manage.sh ops k8s-shadow smoke
-  bash scripts/manage.sh ops k8s-shadow db-summary
-  MX_K8S_SHADOW_CONFIRM_RESET=1 bash scripts/manage.sh ops k8s-shadow reset-data
-  bash scripts/manage.sh ops k8s-shadow remote-runner enable
-  bash scripts/manage.sh ops k8s-shadow ssh-bootstrap enable
-  bash scripts/manage.sh ops k8s-shadow logs
-  bash scripts/manage.sh ops k8s-shadow down
+  # Internal-only; does not install or restart AWX.
+  bash scripts/manage.sh ops internal-local cycle
+  bash scripts/manage.sh ops internal-local apply
+  bash scripts/manage.sh ops internal-local status
+  bash scripts/manage.sh ops internal-local port-forward
+  bash scripts/manage.sh ops internal-local gate
+  bash scripts/manage.sh ops internal-local manual-evidence passed "browser manual path passed"
+  bash scripts/manage.sh ops internal-local gate-manual server/artifacts/internal-shadow-gates/manual/manual-browser-evidence-xxx.json
+  bash scripts/manage.sh ops internal-local smoke
+  bash scripts/manage.sh ops internal-local db-summary
+  MX_K8S_SHADOW_CONFIRM_RESET=1 bash scripts/manage.sh ops internal-local reset-data
+  bash scripts/manage.sh ops internal-local remote-runner enable
+  bash scripts/manage.sh ops internal-local readonly-probe enable
+  bash scripts/manage.sh ops internal-local ssh-bootstrap enable
+  bash scripts/manage.sh ops internal-local logs
+  bash scripts/manage.sh ops internal-local down
 
-Path D: Internal-owned site slot planning.
+Path D: AWX shadow execution provider.
+  bash scripts/manage.sh ops awx-shadow plan
+  bash scripts/manage.sh ops awx-shadow dry-run
+  bash scripts/manage.sh ops awx-shadow install
+  bash scripts/manage.sh ops awx-shadow status
+  bash scripts/manage.sh ops awx-shadow password
+  bash scripts/manage.sh ops awx-shadow port-forward 18080
+  MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops awx-provider upsert awxprov_oversea
+  SITE_SLOT_AWX_TOKEN="$AWX_TOKEN" MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
+    bash scripts/manage.sh ops awx-provider check awxprov_oversea
+  bash scripts/manage.sh ops awx-shadow down
+
+Path E: full local platform stack, explicit one-command path.
+  bash scripts/manage.sh ops local-platform plan
+  bash scripts/manage.sh ops local-platform cycle
+  bash scripts/manage.sh ops local-platform status
+  bash scripts/manage.sh ops local-platform down
+
+Path F: Internal-owned site slot planning.
   MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
     bash scripts/manage.sh ops site-slot ssh-profile-upsert oversea-main oversea oversea.example.com
   MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
@@ -685,7 +1188,7 @@ Path D: Internal-owned site slot planning.
   SITE_SLOT_CONFIRM_REMOTE_EXECUTION=1 SITE_SLOT_CONFIRM_WORKER_HANDOFF=1 MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
     bash scripts/manage.sh ops site-slot worker-handoff slotjob_xxx confirm
 
-Path E: Admin management snapshots.
+Path G: Admin management snapshots.
   MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
     bash scripts/manage.sh ops admin dashboard
   MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
@@ -702,8 +1205,8 @@ Mental model:
 
 Safe cleanup:
   local-shadow down stops Compose containers and keeps the PG Docker volume.
-  k8s-shadow down removes workloads and keeps the K8s PVC.
-  k8s-shadow reset-data truncates mx_platform_records, keeps migrations/PVC,
+  internal-local down removes workloads and keeps the K8s PVC.
+  internal-local reset-data truncates mx_platform_records, keeps migrations/PVC,
   and restarts Internal API to re-seed built-in records.
 EOF
 }
@@ -717,6 +1220,7 @@ ops_doctor() {
   [ -f server/package.json ] && say "server package: OK" || say "server package: missing"
   [ -f server/docker-compose.shadow.yml ] && say "shadow compose: OK" || say "shadow compose: missing"
   [ -d deploy/k8s/internal-shadow ] && say "k8s internal-shadow manifests: OK" || say "k8s internal-shadow manifests: missing"
+  [ -d deploy/k8s/awx-shadow ] && say "k8s awx-shadow manifests: OK" || say "k8s awx-shadow manifests: missing"
   say "doctor finished. If docker/kubectl checks are missing, start Docker Desktop and enable Kubernetes before K8s apply."
 }
 
@@ -1318,7 +1822,7 @@ ops_site_slot() {
       ' "$base" "${1:-}"
       ;;
     runner-start)
-      [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot runner-start <run-id> [simulate|remote-ssh]"
+      [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot runner-start <run-id> [simulate|remote-ssh|awx-shadow]"
       node -e '
         const [base, runId, mode = "simulate"] = process.argv.slice(1);
         const body = {
@@ -1547,8 +2051,67 @@ ops_site_slot() {
         });
       ' "$base" "$1" "${2:-}"
       ;;
+    domestic-relay-append-ssh-prepare)
+      [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot domestic-relay-append-ssh-prepare <apply-run-id> [confirm]"
+      node -e '
+        const [base, runId, confirm = ""] = process.argv.slice(1);
+        const confirmed = confirm === "confirm" || confirm === "true";
+        const now = new Date();
+        const body = {
+          actionId: "site-slot.domestic-relay-peer-append-ssh.prepare",
+          path: `/internal/v1/site-slots/executions/${encodeURIComponent(runId)}/prepare-domestic-relay-peer-append-ssh`,
+          body: {
+            confirmRemoteExecution: process.env.SITE_SLOT_CONFIRM_REMOTE_EXECUTION === "1" || confirmed,
+            confirmRelayPeerAppendSshPrepare: process.env.SITE_SLOT_CONFIRM_RELAY_PEER_APPEND_SSH_PREPARE === "1" || confirmed,
+            approvalId: process.env.SITE_SLOT_APPROVAL_ID || `approval-domestic-relay-peer-append-${runId}`,
+            changeWindowStart: process.env.SITE_SLOT_CHANGE_WINDOW_START || now.toISOString(),
+            changeWindowEnd: process.env.SITE_SLOT_CHANGE_WINDOW_END || new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+            workerId: process.env.SITE_SLOT_WORKER_ID || "worker-domestic-relay",
+            workerKind: process.env.SITE_SLOT_WORKER_KIND || "domestic-runner",
+            retryLimit: Number(process.env.SITE_SLOT_WORKER_RETRY_LIMIT || "1"),
+            rollbackStrategy: process.env.SITE_SLOT_ROLLBACK_STRATEGY || "restore-domestic-wg-peer-before-append",
+            requestedBy: process.env.USER || "manage.sh",
+            requestId: "manage-domestic-relay-peer-append-ssh-prepare"
+          }
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/admin/actions/execute`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          console.log(JSON.stringify({
+            prepare: payload.relayPeerAppendSshPrepare,
+            session: payload.session ? {
+              sessionId: payload.session.sessionId,
+              runId: payload.session.runId,
+              mode: payload.session.mode,
+              status: payload.session.status,
+              gates: payload.session.gates,
+              warnings: payload.session.warnings
+            } : null,
+            job: payload.job ? {
+              jobId: payload.job.jobId,
+              sessionId: payload.job.sessionId,
+              runId: payload.job.runId,
+              mode: payload.job.mode,
+              status: payload.job.status,
+              worker: payload.job.worker,
+              approval: payload.job.approval,
+              changeWindow: payload.job.changeWindow,
+              nextActions: payload.job.nextActions
+            } : null
+          }, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$1" "${2:-}"
+      ;;
     worker-run)
-      [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|local-exec]"
+      [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|awx-shadow|awx-credential-sync|awx-object-sync|awx-launch|local-exec]"
       node server/scripts/site-slot-worker-run.mjs "$base" "$1" "${2:-simulate}"
       ;;
     worker-report)
@@ -1720,7 +2283,7 @@ ops_site_slot() {
       ' "$base" "$1" "${2:-passed}"
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all] | refresh-tunnel-cli [version|--from-local DIR] | ssh-profiles | ssh-profile-upsert <site-id> <domestic|oversea> [host] | ssh-profile-readiness <profile-id> [plan-only|execute] | oversea-readonly-test <site-id> <host> | oversea-remote-test <site-id> <host> [pipeline|dry-run|plan-only|readonly|execute] | domestic-plan <domestic-host|-> [oversea-host] | oversea-plan <oversea-host|-> | preflight <plan-id> [dry-run|manual|ssh] | apply <plan-id> [manual|dry-run|ssh] | executions [plan-id] | runner-start <run-id> [simulate|remote-ssh] | runner-sessions [run-id] | worker-job <session-id> | worker-gate <job-id> [confirm] | worker-handoff <job-id> [confirm] | worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|local-exec] | worker-report <job-id> [running|passed|failed|blocked] | rollback-start <report-id> [simulate|manual] | rollback-report <rollback-execution-id> [running|passed|failed|blocked]"
+      die "Usage: bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all] | refresh-tunnel-cli [version|--from-local DIR] | ssh-profiles | ssh-profile-upsert <site-id> <domestic|oversea> [host] | ssh-profile-readiness <profile-id> [plan-only|execute] | oversea-readonly-test <site-id> <host> | oversea-remote-test <site-id> <host> [pipeline|dry-run|plan-only|readonly|execute] | domestic-plan <domestic-host|-> [oversea-host] | oversea-plan <oversea-host|-> | preflight <plan-id> [dry-run|manual|ssh] | apply <plan-id> [manual|dry-run|ssh] | executions [plan-id] | runner-start <run-id> [simulate|remote-ssh|awx-shadow] | runner-sessions [run-id] | worker-job <session-id> | worker-gate <job-id> [confirm] | worker-handoff <job-id> [confirm] | domestic-relay-append-ssh-prepare <apply-run-id> [confirm] | worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|awx-shadow|awx-credential-sync|awx-object-sync|awx-launch|local-exec] | worker-report <job-id> [running|passed|failed|blocked] | rollback-start <report-id> [simulate|manual] | rollback-report <rollback-execution-id> [running|passed|failed|blocked]"
       ;;
   esac
 }
@@ -1787,14 +2350,16 @@ ops_local_shadow() {
 }
 
 ops_k8s_shadow_plan() {
-  k8s_plan internal-shadow
+  local target="${1:-internal-shadow}"
+  local ops_area="${2:-k8s-shadow}"
+  k8s_plan "$target"
   printf '\n'
-  k8s_explain internal-shadow
-  cat <<'EOF'
+  k8s_explain "$target"
+  cat <<EOF
 
-Local shadow image flow
-  - ops k8s-shadow cycle builds qpjoy/mx-launcher-server:shadow before apply.
-  - The shadow tag is reused locally, so cycle restarts the Internal API
+Local Internal image flow
+  - ops $ops_area cycle builds qpjoy/mx-launcher-server:shadow before apply.
+  - The local image tag is reused, so cycle restarts the Internal API
     Deployment after apply. A new Pod then resolves the rebuilt local image.
 EOF
 }
@@ -1810,76 +2375,86 @@ k8s_restart_internal_api() {
 
 ops_k8s_shadow() {
   local action="$1"
+  local target="${OPS_K8S_TARGET:-internal-shadow}"
+  local ops_area="${OPS_K8S_AREA:-k8s-shadow}"
   case "$action" in
     plan)
-      ops_k8s_shadow_plan
+      ops_k8s_shadow_plan "$target" "$ops_area"
       ;;
     dry-run)
-      k8s_dry_run internal-shadow
+      k8s_dry_run "$target"
       ;;
     build)
       shadow_image_build
       ;;
     cycle)
-      ops_k8s_shadow_plan
+      ops_k8s_shadow_plan "$target" "$ops_area"
       say "build image"
       shadow_image_build
       say "apply"
-      k8s_apply internal-shadow
+      k8s_apply "$target"
       say "restart internal api for rebuilt local image"
-      k8s_restart_internal_api internal-shadow
+      k8s_restart_internal_api "$target"
       say "status"
-      k8s_status internal-shadow
+      k8s_status "$target"
       say "smoke"
-      k8s_smoke internal-shadow "${2:-18090}"
+      k8s_smoke "$target" "${2:-18090}"
       say "db summary"
-      k8s_db_summary internal-shadow
-      say "k8s-shadow cycle OK. Run 'bash scripts/manage.sh ops k8s-shadow down' when done."
+      k8s_db_summary "$target"
+      say "$ops_area cycle OK. Run 'bash scripts/manage.sh ops $ops_area down' when done."
       ;;
     apply)
-      k8s_apply internal-shadow
+      k8s_apply "$target"
       ;;
     status)
-      k8s_status internal-shadow
+      k8s_status "$target"
+      ;;
+    port-forward|forward)
+      k8s_port_forward "$target" "${2:-18090}"
       ;;
     smoke)
-      k8s_smoke internal-shadow "${2:-18090}"
+      k8s_smoke "$target" "${2:-18090}"
       ;;
     gate)
-      k8s_internal_shadow_gate internal-shadow "${2:-18090}"
+      k8s_internal_shadow_gate "$target" "${2:-18090}"
       ;;
     gate-manual)
-      [ "$#" -ge 2 ] && [ "$#" -le 3 ] || die "Usage: bash scripts/manage.sh ops k8s-shadow gate-manual <evidence-json> [local-port]"
-      k8s_internal_shadow_gate_manual internal-shadow "$2" "${3:-18090}"
+      [ "$#" -ge 2 ] && [ "$#" -le 3 ] || die "Usage: bash scripts/manage.sh ops $ops_area gate-manual <evidence-json> [local-port]"
+      k8s_internal_shadow_gate_manual "$target" "$2" "${3:-18090}"
       ;;
     manual-evidence)
       shift || true
       internal_shadow_manual_evidence "$@"
       ;;
     logs)
-      k8s_logs internal-shadow
+      k8s_logs "$target"
       ;;
     db-summary)
-      k8s_db_summary internal-shadow
+      k8s_db_summary "$target"
       ;;
     reset-data)
-      k8s_reset_data internal-shadow
+      k8s_reset_data "$target"
       ;;
     remote-runner)
       shift || true
-      [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh ops k8s-shadow remote-runner enable|disable"
-      k8s_remote_runner internal-shadow "$1"
+      [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh ops $ops_area remote-runner enable|disable"
+      k8s_remote_runner "$target" "$1"
+      ;;
+    readonly-probe)
+      shift || true
+      [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh ops $ops_area readonly-probe enable|disable"
+      k8s_readonly_probe "$target" "$1"
       ;;
     ssh-bootstrap)
       shift || true
-      [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh ops k8s-shadow ssh-bootstrap enable|disable"
-      k8s_ssh_bootstrap internal-shadow "$1"
+      [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh ops $ops_area ssh-bootstrap enable|disable"
+      k8s_ssh_bootstrap "$target" "$1"
       ;;
     down)
-      k8s_down internal-shadow
+      k8s_down "$target"
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops k8s-shadow plan|dry-run|cycle|build|apply|status|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|ssh-bootstrap enable|disable|down"
+      die "Usage: bash scripts/manage.sh ops internal-local plan|dry-run|cycle|build|apply|status|port-forward [local-port]|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down"
       ;;
   esac
 }
@@ -1890,9 +2465,9 @@ menu_status() {
 
   if command -v kubectl >/dev/null 2>&1; then
     local ns
-    ns="$(k8s_namespace internal-shadow)"
+    ns="$(k8s_namespace internal-local)"
     say "k8s namespace: $ns"
-    kubectl -n "$ns" get deploy,statefulset,pod,svc,job,pvc 2>/dev/null || say "k8s shadow is not running yet"
+    kubectl -n "$ns" get deploy,statefulset,pod,svc,job,pvc 2>/dev/null || say "local Internal K8s is not running yet"
   else
     say "kubectl is missing; start Docker Desktop Kubernetes or install kubectl before K8s tests"
   fi
@@ -1904,7 +2479,7 @@ Browser manual test path for local K8s Internal:
 
 Terminal 1: keep the Internal API exposed while you test.
   cd electron-dock/mx-launcher
-  kubectl -n mx-internal-shadow port-forward svc/mx-launcher-internal 18090:18090
+  bash scripts/manage.sh ops internal-local port-forward
 
 Terminal 2: serve the browser-friendly Launcher UI shell.
   cd electron-dock/mx-launcher
@@ -1923,19 +2498,19 @@ Manual checks:
   7. Open Evidence Drawer and verify execution, runner, worker job, and report details.
 
 Record manual evidence after checks:
-  bash scripts/manage.sh ops k8s-shadow manual-evidence passed "browser manual path passed"
+  bash scripts/manage.sh ops internal-local manual-evidence passed "browser manual path passed"
 
 Run gate with manual evidence required:
-  bash scripts/manage.sh ops k8s-shadow gate-manual server/artifacts/internal-shadow-gates/manual/manual-browser-evidence-xxx.json
+  bash scripts/manage.sh ops internal-local gate-manual server/artifacts/internal-shadow-gates/manual/manual-browser-evidence-xxx.json
 
 Non-interactive equivalents:
-  bash scripts/manage.sh ops k8s-shadow cycle
-  bash scripts/manage.sh ops k8s-shadow gate
-  bash scripts/manage.sh ops k8s-shadow manual-evidence passed "browser manual path passed"
-  bash scripts/manage.sh ops k8s-shadow smoke
-  bash scripts/manage.sh ops k8s-shadow db-summary
-  MX_K8S_SHADOW_CONFIRM_RESET=1 bash scripts/manage.sh ops k8s-shadow reset-data
-  bash scripts/manage.sh ops k8s-shadow logs
+  bash scripts/manage.sh ops internal-local cycle
+  bash scripts/manage.sh ops internal-local gate
+  bash scripts/manage.sh ops internal-local manual-evidence passed "browser manual path passed"
+  bash scripts/manage.sh ops internal-local smoke
+  bash scripts/manage.sh ops internal-local db-summary
+  MX_K8S_SHADOW_CONFIRM_RESET=1 bash scripts/manage.sh ops internal-local reset-data
+  bash scripts/manage.sh ops internal-local logs
 EOF
 }
 
@@ -1988,6 +2563,7 @@ Oversea readonly true-host test requires local SSH files:
   SITE_SLOT_SSH_KNOWN_HOSTS_FILE=/path/to/known_hosts
 
 For K8s shadow, run option remote-runner enable before this test.
+Run option readonly-probe enable before executing the true read-only SSH probe.
 EOF
   printf 'Oversea site id (default oversea-main)> '
   local site_id
@@ -2014,6 +2590,7 @@ Required local SSH files:
   SITE_SLOT_SSH_KNOWN_HOSTS_FILE=/path/to/known_hosts
 
 For K8s shadow, run option remote-runner enable before this test.
+Run option readonly-probe enable before executing the true read-only SSH probe.
 EOF
   printf 'Oversea site id (default oversea-main)> '
   local site_id
@@ -2041,6 +2618,22 @@ menu_remote_runner() {
   ops_k8s_shadow remote-runner "$state"
 }
 
+menu_readonly_probe() {
+  printf 'Readonly probe execution [enable/disable] (default enable)> '
+  local state
+  IFS= read -r state || return 0
+  state="${state:-enable}"
+  ops_k8s_shadow readonly-probe "$state"
+}
+
+menu_ssh_bootstrap() {
+  printf 'SSH password bootstrap [enable/disable] (default enable)> '
+  local state
+  IFS= read -r state || return 0
+  state="${state:-enable}"
+  ops_k8s_shadow ssh-bootstrap "$state"
+}
+
 menu_show() {
   printf '\n'
   if [ -t 1 ]; then
@@ -2050,14 +2643,14 @@ menu_show() {
   fi
   cat <<'EOF'
 
- 1) status            本机 Internal/K8s shadow 状态
+ 1) status            本机 Internal/K8s 状态
  2) doctor            检查 Node / pnpm / Docker / kubectl
- 3) k8s-plan          查看 Internal K8s shadow 部署计划
+ 3) k8s-plan          查看本机 Internal K8s 部署计划
  4) k8s-dry-run       K8s manifests + Secret dry-run
- 5) k8s-build         构建 Internal API shadow 镜像
+ 5) k8s-build         构建本机 Internal API 镜像
  6) k8s-apply         启动/更新本机 K8s Internal
  7) k8s-cycle         build + apply + smoke + DB summary
- 8) k8s-gate          Internal Shadow Gate + Test Center evidence
+ 8) k8s-gate          Internal Local Gate + Test Center evidence
  9) k8s-smoke         port-forward 后跑 HTTP smoke
 10) k8s-db            查看 K8s PostgreSQL 数据摘要
 11) k8s-logs          查看 Internal API 日志
@@ -2066,14 +2659,21 @@ menu_show() {
 14) desktop-check     检查桌面 Admin/Evidence UI 脚本
 15) server-typecheck  检查服务端 TypeScript
 16) artifacts         生成 Domestic/Oversea slot artifacts
-17) reset-data        清空 shadow 业务数据（保留 PVC/迁移记录）
+17) reset-data        清空本机 Internal 业务数据（保留 PVC/迁移记录）
 18) remote-runner     为真机只读测试临时启/停 remote runner
-19) oversea-readonly  跑 Oversea 真机只读 Probe 并写 worker evidence
-20) oversea-remote    跑 Oversea 真机 pipeline / gated 安装
-21) down              停掉 K8s workloads（保留 PVC）
-22) guide             查看本机测试方案
-23) help              查看 CLI 帮助
-24) quit              退出
+19) readonly-probe    为真机只读 Probe 临时启/停执行闸门
+20) ssh-bootstrap     为初次空 Ubuntu 临时启/停密码换 key
+21) oversea-readonly  跑 Oversea 真机只读 Probe 并写 worker evidence
+22) oversea-remote    跑 Oversea 真机 pipeline / gated 安装
+23) down              停掉 K8s workloads（保留 PVC）
+24) awx-plan          查看 AWX shadow 部署计划
+25) awx-install       部署/恢复本机 K8s AWX shadow
+26) awx-status        查看 AWX shadow 状态
+27) awx-password      输出 AWX admin 密码
+28) platform-cycle    一键 AWX + Internal + provider
+29) guide             查看本机测试方案
+30) help              查看 CLI 帮助
+31) quit              退出
 EOF
 }
 
@@ -2139,22 +2739,43 @@ menu_run() {
     18|remote-runner)
       menu_remote_runner
       ;;
-    19|oversea-readonly|oversea-readonly-test)
+    19|readonly-probe)
+      menu_readonly_probe
+      ;;
+    20|ssh-bootstrap|bootstrap)
+      menu_ssh_bootstrap
+      ;;
+    21|oversea-readonly|oversea-readonly-test)
       menu_oversea_readonly_test
       ;;
-    20|oversea-remote|oversea-remote-test)
+    22|oversea-remote|oversea-remote-test)
       menu_oversea_remote_test
       ;;
-    21|down)
+    23|down)
       ops_k8s_shadow down
       ;;
-    22|guide)
+    24|awx-plan)
+      ops_awx_shadow plan
+      ;;
+    25|awx-install)
+      ops_awx_shadow install
+      ;;
+    26|awx-status)
+      ops_awx_shadow status
+      ;;
+    27|awx-password)
+      ops_awx_shadow password
+      ;;
+    28|platform-cycle|local-platform)
+      ops_local_platform cycle
+      ;;
+    29|guide)
       ops_guide
       ;;
-    23|help)
+    30|help)
       usage
       ;;
-    24|quit|q|exit)
+    31|quit|q|exit)
       MENU_QUIT=1
       return 0
       ;;
@@ -2280,7 +2901,7 @@ case "$cmd" in
     esac
     ;;
   k8s)
-    [ "$#" -ge 2 ] || die "Usage: bash scripts/manage.sh k8s plan|explain|render|dry-run|apply|status|logs|db-summary|reset-data|remote-runner|ssh-bootstrap|gate|gate-manual|smoke|down internal-shadow"
+    [ "$#" -ge 2 ] || die "Usage: bash scripts/manage.sh k8s plan|explain|render|dry-run|apply|status|port-forward|logs|db-summary|reset-data|remote-runner|readonly-probe|ssh-bootstrap|gate|gate-manual|smoke|down internal-local"
     action="$1"
     target="$2"
     shift 2 || true
@@ -2309,6 +2930,10 @@ case "$cmd" in
         [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh k8s status internal-shadow"
         k8s_status "$target"
         ;;
+      port-forward|forward)
+        [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh k8s port-forward internal-local [local-port]"
+        k8s_port_forward "$target" "${1:-18090}"
+        ;;
       logs)
         [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh k8s logs internal-shadow"
         k8s_logs "$target"
@@ -2324,6 +2949,10 @@ case "$cmd" in
       remote-runner)
         [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh k8s remote-runner internal-shadow enable|disable"
         k8s_remote_runner "$target" "$1"
+        ;;
+      readonly-probe)
+        [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh k8s readonly-probe internal-shadow enable|disable"
+        k8s_readonly_probe "$target" "$1"
         ;;
       ssh-bootstrap)
         [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh k8s ssh-bootstrap internal-shadow enable|disable"
@@ -2351,7 +2980,7 @@ case "$cmd" in
     esac
     ;;
   ops)
-    [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops guide|doctor|config|admin|site-slot|local-shadow|k8s-shadow"
+    [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops guide|doctor|config|admin|site-slot|local-shadow|k8s-shadow|awx-shadow|awx-provider|local-platform"
     area="$1"
     shift || true
     case "$area" in
@@ -2372,16 +3001,32 @@ case "$cmd" in
         ops_admin "$@"
         ;;
       site-slot)
-        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all] | refresh-tunnel-cli [version|--from-local DIR] | ssh-profiles | ssh-profile-upsert <site-id> <domestic|oversea> [host] | ssh-profile-readiness <profile-id> [plan-only|execute] | oversea-readonly-test <site-id> <host> | oversea-remote-test <site-id> <host> [pipeline|dry-run|plan-only|readonly|execute] | domestic-plan <domestic-host|-> [oversea-host] | oversea-plan <oversea-host|-> | preflight <plan-id> [dry-run|manual|ssh] | apply <plan-id> [manual|dry-run|ssh] | executions [plan-id] | runner-start <run-id> [simulate|remote-ssh] | runner-sessions [run-id] | worker-job <session-id> | worker-gate <job-id> [confirm] | worker-handoff <job-id> [confirm] | worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|local-exec] | worker-report <job-id> [running|passed|failed|blocked] | rollback-start <report-id> [simulate|manual] | rollback-report <rollback-execution-id> [running|passed|failed|blocked]"
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all] | refresh-tunnel-cli [version|--from-local DIR] | ssh-profiles | ssh-profile-upsert <site-id> <domestic|oversea> [host] | ssh-profile-readiness <profile-id> [plan-only|execute] | oversea-readonly-test <site-id> <host> | oversea-remote-test <site-id> <host> [pipeline|dry-run|plan-only|readonly|execute] | domestic-plan <domestic-host|-> [oversea-host] | oversea-plan <oversea-host|-> | preflight <plan-id> [dry-run|manual|ssh] | apply <plan-id> [manual|dry-run|ssh] | executions [plan-id] | runner-start <run-id> [simulate|remote-ssh|awx-shadow] | runner-sessions [run-id] | worker-job <session-id> | worker-gate <job-id> [confirm] | worker-handoff <job-id> [confirm] | domestic-relay-append-ssh-prepare <apply-run-id> [confirm] | worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|awx-shadow|awx-credential-sync|awx-object-sync|awx-launch|local-exec] | worker-report <job-id> [running|passed|failed|blocked] | rollback-start <report-id> [simulate|manual] | rollback-report <rollback-execution-id> [running|passed|failed|blocked]"
         ops_site_slot "$@"
         ;;
       local-shadow)
         [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops local-shadow plan|cycle|build|up|status|smoke|logs|down"
         ops_local_shadow "$@"
         ;;
+      internal-local)
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-local plan|dry-run|cycle|build|apply|status|port-forward [local-port]|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down"
+        OPS_K8S_TARGET=internal-local OPS_K8S_AREA=internal-local ops_k8s_shadow "$@"
+        ;;
       k8s-shadow)
-        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops k8s-shadow plan|dry-run|cycle|build|apply|status|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|ssh-bootstrap enable|disable|down"
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops k8s-shadow plan|dry-run|cycle|build|apply|status|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down"
         ops_k8s_shadow "$@"
+        ;;
+      awx-shadow)
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops awx-shadow plan|dry-run|install|status|port-forward [local-port]|logs|password|down"
+        ops_awx_shadow "$@"
+        ;;
+      awx-provider)
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops awx-provider list|upsert [provider-id] [base-url]|check <provider-id>"
+        ops_awx_provider "$@"
+        ;;
+      local-platform)
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops local-platform plan|dry-run|cycle [local-port]|status|down"
+        ops_local_platform "$@"
         ;;
       *)
         die "Unknown ops area: $area"

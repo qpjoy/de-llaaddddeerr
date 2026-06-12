@@ -110,7 +110,39 @@ Runner V1.1 session. `simulate` mode records every step as simulated evidence.
 `remote-ssh` mode is disabled by default and requires both
 `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=true` and
 `confirmRemoteExecution=true`; otherwise it is blocked before any remote work is
-queued.
+queued. `awx-shadow` mode records a queued provider session without opening SSH
+or calling AWX; it lets Admin and CLI map Worker Contract V1 steps to AWX
+inventory, credential, job template, extra vars, and task-event evidence before
+real launch. `site-slot.worker-run.awx-launch` is the gated real provider action:
+Internal calls AWX, waits for the job when requested, pulls job events, maps them
+back into the existing worker report shape, and leaves `remote-ssh` as the
+fallback execution path.
+`GET /internal/v1/config-center/awx-providers`,
+`GET /internal/v1/config-center/awx-providers/:providerId`, and
+`POST /internal/v1/config-center/awx-providers` manage the Config Center AWX
+provider registry. The registry stores Internal-owned endpoint metadata,
+organization/project names, inventory/credential/job-template naming prefixes,
+slot kind scope, status, TLS policy, and request timeout; secrets stay outside
+this record and are referenced by later credential/Vault integration.
+`POST /internal/v1/config-center/awx-providers/:providerId/check` performs a
+readonly AWX API gate against `/api/v2/ping/`, organization, project, inventory,
+and job template list endpoints. A bearer token may be supplied for that single
+request, but it is never persisted in Config Center.
+`site-slot.worker-run.awx-launch` additionally requires
+`AWX_API_LAUNCH_ENABLED=true`, `confirmAwxLaunch=true`, an active provider, and a
+bearer token supplied either as the action body `awxToken` or the server process
+environment `AWX_API_TOKEN`. Tokens are not stored in Config Center or worker
+reports.
+`POST /internal/v1/admin/oversea/:siteId/shadow-setup` is the current one-shot
+Oversea setup path for Admin. It upserts the Internal SSH Profile, issues the
+Internal mihomo/access-account record, creates a fresh site-slot plan, preflight,
+apply execution, `awx-shadow` runner session, AWX worker job, and worker report
+without calling AWX launch, opening SSH, or mutating Oversea. If an AWX provider
+is configured, the endpoint also runs the readonly provider check and includes
+that result in the returned setup evidence. Use the resulting ready AWX worker job
+with the `Launch AWX Job` Admin action, or CLI
+`SITE_SLOT_CONFIRM_AWX_LAUNCH=1 bash scripts/manage.sh ops site-slot worker-run <job-id> awx-launch`,
+when the slot is ready for real AWX execution.
 `POST /internal/v1/site-slots/runner-sessions/:sessionId/worker-jobs` creates
 the Worker Contract V1 job package consumed by a runner worker or site-agent.
 It carries approval, change-window, retry, rollback, step timeout, redaction,
@@ -137,7 +169,7 @@ existing execution APIs.
 `POST /internal/v1/admin/actions/execute` is the V1 execution bridge for those
 UI actions. It validates the selected action, required scopes, and confirmation
 fields, then dispatches to the existing site-slot execution, runner session,
-worker job, or rollback execution store contract.
+worker job, provider-shadow report, or rollback execution store contract.
 
 ## Shadow Docker Compose
 

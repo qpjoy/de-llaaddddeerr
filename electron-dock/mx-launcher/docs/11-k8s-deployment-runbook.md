@@ -141,3 +141,95 @@ HTTP smoke 在 K8s 模式下会设置 `MX_SMOKE_EXPECT_K8S_APPLY=1`，并调用
 
 后续应该把每一步写入 `audit.events` 和 `test.runs`，并把 Job/rollout/smoke 输出作为
 evidence。
+
+## 从 K8s shadow 到平台运维底座
+
+当前 K8s runbook 只要求 Internal shadow 能稳定部署、迁移、smoke 和观察。下一阶段不
+做 AI 训练平台，而是借鉴 K8s 和成熟运维系统能力，把 MX Launcher 的 Internal 控制面
+强化成平台运维底座。
+
+### etcd 边界
+
+etcd 是 Kubernetes 控制面的状态存储，不直接作为 MX Config Center 的业务数据库。
+MX 的用户、RBAC、配置、release、site-slot、runner、evidence 和 audit truth 仍保存在
+Internal PostgreSQL。
+
+可以使用 K8s API 间接消费 etcd 能力：
+
+- ConfigMap / Secret：运行时配置和 Secret 投影。
+- Lease：leader election、短租约、协调锁。
+- CRD：把 `SiteSlotPlan`、`ReleasePlan`、`RunnerJob`、`EvidenceBundle` 投影成
+  K8s 原生对象。
+- watch：监听 K8s 状态变化并写回 Internal audit/evidence。
+
+### 第一批平台组件
+
+| 组件 | 在 MX Launcher 中的角色 |
+| --- | --- |
+| AWX | Ansible 执行平面，承接 Domestic/Oversea inventory、credential、job template 和 task event |
+| Argo CD / Flux | GitOps 发布 Internal K8s、CoreDNS、AWX、Observability、Admin 后端 |
+| Prometheus / Alertmanager / Grafana | 指标、告警、Release Gate 和 Admin topology health |
+| OpenTelemetry / Loki / Tempo | trace、log、runner/worker evidence 关联 |
+| cert-manager | Internal API、Admin、Ingress、mTLS、site-agent 证书生命周期 |
+| External Secrets / Vault / SOPS | SSH key、数据库密码、API key、Hysteria2 secret |
+| Cilium / Calico | NetworkPolicy、pod 隔离、网络观测和排障入口 |
+| Harbor / MinIO | 镜像、artifact、snapshot、evidence、截图和 release bundle |
+| Velero / Postgres Operator | K8s 资源和 Internal 数据备份恢复 |
+
+这些组件进入平台后仍由 Internal/Admin 统一建模：组件自身可以执行、观测或存储制品，
+但不替代 Internal 的审批、配置、证据和发布状态机。
+
+### AWX 接入位置
+
+AWX 应作为 Worker Contract V1 的一个 provider：
+
+```text
+Admin action -> Internal worker job -> awx-provider -> AWX job template
+  -> Ansible playbook / role -> slot host -> AWX event -> worker report
+```
+
+现有 `remote-ssh` runner 可以保留为 fallback。AWX job event 要映射为 worker report
+steps，使 Evidence Drawer 能展示 task、host、changed、failed、stdout/stderr、
+duration、job template 和 rollback hint。
+
+当前 shadow 实现先提供 `awx-shadow` runner/provider mode：Admin 或 CLI 可以创建
+AWX shadow runner，再记录包含 inventory、credential、job template、extra vars 和
+task event 的 worker report。这个阶段不调用 AWX API，也不登录或修改
+Domestic / Oversea。真实 provider 已通过 `site-slot.worker-run.awx-launch`
+接入同一份 Worker Contract：Internal 调用 AWX job template launch，按需等待 job
+完成，拉取 job events，再把 AWX summary/events 写回 worker report 和 Evidence Drawer。
+AWX provider endpoint、organization、project、inventory/credential/job-template
+命名前缀和启停状态由 Config Center `awx-provider` registry 保存；K8s 内的 AWX
+只作为执行面，不成为 MX 配置真相源。
+真实 launch 前先走 Config Center provider check：只读调用 AWX `/api/v2/ping/`、
+organization、project、inventory 和 job template list endpoint，把 HTTP status、
+count、matched name 和失败原因回写为 Admin 可见的 readiness evidence。检查请求可
+携带一次性 bearer token，但 token 不写入 Config Center。
+真实 launch 还必须满足四个 gate：Internal 环境变量 `AWX_API_LAUNCH_ENABLED=true`、
+Admin action body `confirmAwxLaunch=true`、active AWX provider、以及一次性 action
+token 或 Internal secret `AWX_API_TOKEN`。这些 gate 失败时 action 返回 blocked
+evidence，不创建 worker report；AWX API 调用后失败则创建 failed worker report，
+保证 Release Gate / Rollback 能看到失败原因。
+
+### Oversea shadow setup 入口
+
+当前 Admin 的推荐路径是先使用
+`POST /internal/v1/admin/oversea/:siteId/shadow-setup` 把一个 Oversea slot 的必要
+shadow 对象一次性做完：
+
+1. Upsert SSH Profile。
+2. Issue Internal mihomo / access accounts。
+3. Create site-slot plan。
+4. Create preflight execution。
+5. Create confirmed apply execution。
+6. Create `awx-shadow` runner session。
+7. Create AWX worker job。
+8. Record AWX shadow worker report。
+
+这个接口仍然是 shadow 边界：不登录 Oversea、不调用 AWX launch、不修改远端，只把
+Internal 编排对象、AWX readonly check 和 worker report evidence 补齐。真实执行时，
+在 ready AWX worker job 上执行 Admin action `site-slot.worker-run.awx-launch`；
+`remote-ssh` 继续保留为 fallback 和排障通道。
+
+完整路线见
+`docs/13-platform-ops-and-admin-design-system-roadmap.md`。

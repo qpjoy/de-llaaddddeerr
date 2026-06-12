@@ -12,6 +12,8 @@ const baseUrl = (cliBaseUrl || process.env.MX_SMOKE_BASE_URL || 'http://127.0.0.
 const expectK8sApply = process.env.MX_SMOKE_EXPECT_K8S_APPLY === '1';
 const remoteReadyOnly = process.env.MX_SMOKE_REMOTE_READY_ONLY === '1';
 const state = {};
+const shadowHomePublicKey = 'WvN2n3i6LXoJt1qX0lA2uP7cYy4rZs8mQb9dEfGhIjK=';
+const smokeHomePeerLeaseIp = '10.91.10.20';
 const mxLauncherRoot = resolve(scriptDir, '../..');
 const remoteReadyFixture = remoteReadyOnly ? prepareRemoteReadySshFixture() : null;
 
@@ -44,12 +46,56 @@ const checks = [
     body: {
       productId: 'h2o',
       platform: 'darwin',
+      publicKey: shadowHomePublicKey,
       requestId: 'http-smoke-enroll'
     },
     assert: (body) => {
       state.installId = body?.enrollment?.installId;
+      state.homeOverlayIp = body?.enrollment?.overlayIp;
+      const topology = body?.snapshot?.config?.launcherNetwork;
       return typeof state.installId === 'string'
-        && body?.snapshot?.config?.defaultMode === 'visitor';
+        && typeof state.homeOverlayIp === 'string'
+        && isRelayLeaseIp(state.homeOverlayIp, '10.91')
+        && body?.snapshot?.config?.defaultMode === 'visitor'
+        && body?.enrollment?.publicKey === shadowHomePublicKey
+        && topology?.model === 'internal-authority-domestic-relay-oversea-access-v1'
+        && topology?.bootstrap?.hdiWithoutRelay === 'bootstrap-proxy-only'
+        && topology?.bootstrap?.steadyStateAccess === 'domestic-wg-relay-primary'
+        && topology?.bootstrap?.order?.includes('internal-joins-domestic-relay-as-service-peer')
+        && topology?.authority?.users === 'internal-user-center'
+        && topology?.homePath?.bootstrap === 'home-to-domestic-public-enroll-proxy'
+        && topology?.homePath?.subscriptionFetch === 'home-through-domestic-h2i-to-internal-mihomo'
+        && topology?.homePath?.overseaTraffic === 'home-direct-to-oversea-hysteria2'
+        && topology?.homeLease?.cidr === '10.91.0.0/16'
+        && topology?.domestic?.publicIpRequired === true
+        && topology?.domestic?.publicServices?.includes('wg-relay')
+        && topology?.domestic?.gatewayIp === '10.88.0.1'
+        && topology?.domestic?.storesAuthority === false
+        && topology?.domestic?.overlayCidrs?.includes('10.89.0.0/16')
+        && topology?.internal?.publicIngress === false
+        && topology?.internal?.requiresEnrollLease === true
+        && topology?.internal?.relayPeer?.fixedIp === '10.90.0.10'
+        && topology?.internal?.relayPeer?.initiatedBy === 'internal-outbound-to-domestic-public-wg'
+        && topology?.subscriptions?.mihomo?.authority === 'internal-config-center'
+        && topology?.subscriptions?.mihomo?.reachableVia?.includes('h2i-proxy')
+        && topology?.relayPlan?.domesticRelay?.configArtifact === 'mx-domestic-wg-relay.conf'
+        && topology?.relayPlan?.domesticRelay?.envArtifact === 'mx-domestic-relay.env'
+        && topology?.relayPlan?.domesticRelay?.listenPort === 51820
+        && topology?.relayPlan?.internalServicePeer?.fixedIp === '10.90.0.10'
+        && topology?.relayPlan?.internalServicePeer?.configArtifact === 'mx-internal-service-peer.conf'
+        && topology?.relayPlan?.internalServicePeer?.privateKeyPlacement === 'internal-only'
+        && topology?.relayPlan?.homePeer?.leaseIp === state.homeOverlayIp
+        && topology?.relayPlan?.homePeer?.publicKey === shadowHomePublicKey
+        && topology?.relayPlan?.homePeer?.publicKeyStatus === 'ready-to-append'
+        && topology?.relayPlan?.homePeer?.allowedIps?.includes(`${state.homeOverlayIp}/32`)
+        && topology?.relayPlan?.routes?.internalCidrs?.includes('10.90.0.0/16')
+        && topology?.relayPlan?.routes?.subscriptionReachability === 'domestic-wg-relay+h2i-proxy'
+        && topology?.relayPlan?.gates?.domesticConfigMustNotContainInternalPrivateKey === true
+        && topology?.relayPlan?.gates?.homePublicKeyRequiredForRealPeer === true
+        && topology?.gates?.internalPublicIpRequired === false
+        && topology?.gates?.internalMustJoinDomesticRelayBeforeHomeCanReachInternal === true
+        && topology?.gates?.wgRelayBecomesPrimaryAfterEnroll === true
+        && topology?.oversea?.subscriptionAuthority === 'internal-mihomo';
     }
   },
   {
@@ -120,6 +166,18 @@ const checks = [
       && typeof body?.snapshot?.signatures?.digest === 'string'
       && body?.snapshot?.policies?.dns?.policy?.policyId === 'dns_default_internal_split'
       && body?.snapshot?.policies?.launcherNetwork?.overlayPolicy?.cidr === '10.91.0.0/16'
+      && body?.snapshot?.policies?.launcherNetwork?.topology?.model === 'internal-authority-domestic-relay-oversea-access-v1'
+      && body?.snapshot?.policies?.launcherNetwork?.topology?.domestic?.gatewayIp === '10.88.0.1'
+      && body?.snapshot?.policies?.launcherNetwork?.topology?.domestic?.storesAuthority === false
+      && body?.snapshot?.policies?.launcherNetwork?.topology?.internal?.publicIngress === false
+      && body?.snapshot?.policies?.launcherNetwork?.topology?.internal?.relayPeer?.fixedIp === '10.90.0.10'
+      && body?.snapshot?.policies?.launcherNetwork?.topology?.bootstrap?.steadyStateAccess === 'domestic-wg-relay-primary'
+      && body?.snapshot?.policies?.launcherNetwork?.topology?.internal?.mihomoSubscriptionBaseUrl?.includes('/internal/v1/site-slots/oversea-main/subscriptions/hysteria2')
+      && body?.snapshot?.policies?.launcherNetwork?.topology?.subscriptions?.mihomo?.fallback === 'domestic-snapshot-cache'
+      && body?.snapshot?.policies?.launcherNetwork?.topology?.relayPlan?.homePeer?.publicKey === shadowHomePublicKey
+      && body?.snapshot?.policies?.launcherNetwork?.topology?.relayPlan?.homePeer?.publicKeyStatus === 'ready-to-append'
+      && body?.snapshot?.policies?.launcherNetwork?.topology?.relayPlan?.internalServicePeer?.privateKeyPlacement === 'internal-only'
+      && body?.snapshot?.policies?.launcherNetwork?.topology?.relayPlan?.domesticRelay?.interfaceName === 'mx-domestic'
       && body?.snapshot?.policies?.permissionPolicy?.declaredScopes?.includes('network.dns.policy')
   },
   {
@@ -259,21 +317,31 @@ const checks = [
       requestedBy: 'http-smoke',
       requestId: 'http-smoke-ssh-profile-readiness'
     },
-    assert: (body) => body?.readiness?.status === 'blocked'
-      && body?.readiness?.execution === 'not-started'
-      && body?.readiness?.boundary === 'ssh-profile-readiness-readonly'
-      && body?.readiness?.command?.startsWith('ssh ')
-      && body?.readiness?.command?.includes('mx-readonly-profile-readiness')
-      && body?.readiness?.command?.includes('df -h /')
-      && body?.readiness?.sshProfile?.profileId === state.sshProfileId
-      && body?.readiness?.sshProfile?.identityFileExists === false
-      && body?.readiness?.sshProfile?.knownHostsFileExists === false
-      && body?.readiness?.gates?.envGate?.status === 'blocked'
-      && body?.readiness?.gates?.configGate?.status === 'blocked'
-      && body?.readiness?.gates?.requestGate?.status === 'blocked'
-      && body?.readiness?.gateFailures?.some((reason) => reason.includes('SSH identity file does not exist'))
-      && body?.readiness?.gateFailures?.some((reason) => reason.includes('SSH known_hosts file does not exist'))
-      && !body?.readiness?.executionResult
+    assert: (body) => {
+      const readiness = body?.readiness;
+      const sshProfile = readiness?.sshProfile;
+      const gateFailures = Array.isArray(readiness?.gateFailures) ? readiness.gateFailures : [];
+      const missingFilesBlocked = readiness?.status === 'blocked'
+        && sshProfile?.identityFileExists === false
+        && sshProfile?.knownHostsFileExists === false
+        && gateFailures.some((reason) => reason.includes('SSH identity file does not exist'))
+        && gateFailures.some((reason) => reason.includes('SSH known_hosts file does not exist'));
+      const filesReadyPlanOnly = readiness?.status === 'ready'
+        && sshProfile?.identityFileExists === true
+        && sshProfile?.knownHostsFileExists === true
+        && gateFailures.length === 0;
+      return (missingFilesBlocked || filesReadyPlanOnly)
+        && readiness?.execution === 'not-started'
+        && readiness?.boundary === 'ssh-profile-readiness-readonly'
+        && readiness?.command?.startsWith('ssh ')
+        && readiness?.command?.includes('mx-readonly-profile-readiness')
+        && readiness?.command?.includes('df -h /')
+        && sshProfile?.profileId === state.sshProfileId
+        && (readiness?.gates?.envGate?.status === 'blocked' || readiness?.gates?.envGate?.status === 'passed')
+        && readiness?.gates?.configGate?.status === 'blocked'
+        && readiness?.gates?.requestGate?.status === 'blocked'
+        && !readiness?.executionResult;
+    }
   },
   {
     name: 'user center issue user token',
@@ -363,6 +431,58 @@ const checks = [
         && action.allowed === true
         && action.gate === 'confirm-remote-execution'
         && action.confirmFields?.includes('confirmPlanOnly'))
+      && body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.worker-run.domestic-relay-peer-plan'
+        && action.allowed === true
+        && action.gate === 'manual-evidence'
+        && action.confirmFields?.includes('confirmRelayPeerPlan'))
+      && body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.worker-run.domestic-relay-readonly-probe'
+        && action.allowed === true
+        && action.gate === 'confirm-remote-execution'
+        && action.confirmFields?.includes('confirmRelayReadOnlyProbe'))
+      && body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.worker-run.domestic-relay-peer-append'
+        && action.allowed === true
+        && action.gate === 'confirm-remote-execution'
+        && action.risk === 'high'
+        && action.confirmFields?.includes('confirmRelayPeerAppend')
+        && action.confirmFields?.includes('confirmRelayReadOnlyProbeReviewed')
+        && action.confirmFields?.includes('confirmRelayPeerPlanReviewed'))
+      && body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.worker-run.domestic-relay-peer-append-ssh'
+        && action.allowed === true
+        && action.gate === 'confirm-remote-execution'
+        && action.risk === 'high'
+        && action.confirmFields?.includes('confirmRemoteExecution')
+        && action.confirmFields?.includes('confirmRelayPeerAppendSsh')
+        && action.confirmFields?.includes('confirmRelayPeerAppend')
+        && action.confirmFields?.includes('confirmRelayReadOnlyProbeReviewed')
+        && action.confirmFields?.includes('confirmRelayPeerPlanReviewed'))
+      && body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.domestic-relay-peer-append-awx.prepare'
+        && action.allowed === true
+        && action.gate === 'manual-evidence'
+        && action.risk === 'medium'
+        && action.confirmFields?.includes('confirmAwxLaunchPrepare'))
+      && body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.worker-run.awx-sync-plan'
+        && action.allowed === true
+        && action.gate === 'manual-evidence'
+        && action.risk === 'low')
+      && body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.worker-run.awx-credential-sync'
+        && action.allowed === true
+        && action.gate === 'confirm-remote-execution'
+        && action.risk === 'high'
+        && action.confirmFields?.includes('confirmAwxCredentialSync'))
+      && body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.worker-run.awx-object-sync'
+        && action.allowed === true
+        && action.gate === 'confirm-remote-execution'
+        && action.risk === 'medium'
+        && action.confirmFields?.includes('confirmAwxSync'))
+      && body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.domestic-relay-peer-append-ssh.prepare'
+        && action.allowed === true
+        && action.gate === 'confirm-remote-execution'
+        && action.risk === 'high'
+        && action.confirmFields?.includes('confirmRemoteExecution')
+        && action.confirmFields?.includes('confirmRelayPeerAppendSshPrepare')
+        && action.confirmFields?.includes('approvalId')
+        && action.confirmFields?.includes('changeWindowStart')
+        && action.confirmFields?.includes('changeWindowEnd'))
       && body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.worker-run.artifact-push-fake-transport'
         && action.allowed === true
         && action.gate === 'confirm-fake-transport')
@@ -455,19 +575,87 @@ const checks = [
         && prepareAccess?.mode === 'artifact-push'
         && prepareAccess?.commands?.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-access-stack.tar.gz'))
         && prepareAccess?.commands?.some((command) => command.includes('scp -P') && command.includes('mx-oversea-access-stack.tar.gz'))
-        && prepareAccess?.commands?.some((command) => command.includes('/opt/mx/releases/oversea-access-stack/<release-revision>'))
-        && configureAccess?.commands?.some((command) => command.includes('HY2_EXPORT_PASSWORD_HASH=<caddy-bcrypt-hash-from-internal-secret>'))
+        && prepareAccess?.commands?.some((command) => command.includes('/opt/mx/releases/oversea-access-stack/__release_revision__'))
+        && configureAccess?.commands?.some((command) => command.includes('HY2_EXPORT_BASE_URL=http://oversea.example.com:3434') && command.includes('HY2_EXPORT_USER=download') && command.includes('HY2_EXPORT_PASSWORD_HASH='))
         && configureAccess?.commands?.some((command) => command.includes('HY2_MIHOMO_ROUTING_MODE=cn-direct') && command.includes('HY2_RESERVED_INTERNAL_CIDRS=10.88.0.0/16,10.89.0.0/16,10.90.0.0/16,10.91.0.0/16') && command.includes('HY2_DOMESTIC_GATEWAY_IP=10.88.0.1'))
         && configureAccess?.commands?.some((command) => command.includes('base64 -d') && command.includes('tunnel-state.json'))
         && configureAccess?.commands?.some((command) => command.includes('reconcile-from-json') && command.includes('--mode hysteria2-only'))
         && configureAccess?.commands?.some((command) => command.includes('@qpjoy/tunnel-cli') || command.includes('qp-tunnel-cli register'))
-        && publishSubscription?.commands?.some((command) => command.includes('domesticBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/domestic-bootstrap.yaml'))
+        && publishSubscription?.commands?.some((command) => command.includes('domesticBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/oversea-main-domestic.yaml'))
+        && publishSubscription?.commands?.some((command) => command.includes('internalBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/oversea-main-internal.yaml'))
         && deployServices?.mode === 'artifact-push'
         && deployServices?.commands?.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-services.tar.gz'))
         && deployServices?.commands?.some((command) => command.includes('/opt/mx/incoming/mx-oversea-services.tar.gz'))
         && deployServices?.commands?.some((command) => command.includes('MX_SITE_ROLE=oversea') && command.includes('LOCAL_STACK_PATH=/opt/mx/current/hysteria2-access-stack') && command.includes('MX_ACCESS_RUNTIME=hysteria2-only'))
         && !deploymentCommands.some((command) => command.includes('git pull') || command.includes('git clone') || command.includes('./docker/'));
     }
+  },
+  {
+    name: 'oversea access accounts issue defaults',
+    path: '/internal/v1/site-slots/oversea-main/access-accounts',
+    method: 'POST',
+    body: () => ({
+      issueDefaults: true,
+      publicHost: state.overseaHost,
+      serverPorts: '51288',
+      requestedBy: 'http-smoke',
+      requestId: 'http-smoke-oversea-access-accounts'
+    }),
+    assert: (body) => {
+      state.overseaDomesticAccount = 'oversea-main-domestic';
+      return body?.site?.siteId === 'oversea-main'
+        && body?.site?.mode === 'internal-managed'
+        && body?.site?.reachability?.domesticWgRelayRequired === true
+        && Array.isArray(body?.accounts)
+        && body.accounts.length >= 11
+        && body.accounts.some((account) => account.username === 'oversea-main-internal' && account.role === 'internal')
+        && body.accounts.some((account) => account.username === state.overseaDomesticAccount && account.role === 'domestic')
+        && body.accounts.some((account) => account.username === 'oversea-main-internal09' && account.role === 'internal-reserved')
+        && body.accounts.every((account) => account.service === 'hysteria2' && typeof account.authToken === 'string');
+    }
+  },
+  {
+    name: 'oversea mihomo site get',
+    path: '/internal/v1/launcher-network/mihomo/sites/oversea-main',
+    assert: (body) => body?.site?.siteId === 'oversea-main'
+      && body?.site?.subscriptionBaseUrl?.endsWith('/internal/v1/site-slots/oversea-main/subscriptions/hysteria2')
+      && body?.site?.reachability?.internalUrlOnly === true
+      && body?.site?.reachability?.h2iRequired === true
+  },
+  {
+    name: 'oversea mihomo reachability ordering',
+    path: '/internal/v1/launcher-network/mihomo/sites/oversea-main/reachability',
+    assert: (body) => body?.reachability?.siteId === 'oversea-main'
+      && body?.reachability?.verdict === 'h-endpoint-blocked'
+      && body?.reachability?.currentBoundary === 'internal-only'
+      && body?.reachability?.gates?.domesticWgRelayRequired === true
+      && body?.reachability?.gates?.h2iRequired === true
+      && body?.reachability?.gates?.internalDnsRequired === true
+      && body?.reachability?.gates?.overseaRuntime === 'hysteria2-only'
+      && body?.reachability?.gates?.domesticGatewayIp === '10.88.0.1'
+      && body?.reachability?.gates?.reservedInternalCidrs?.includes('10.91.0.0/16')
+      && body?.reachability?.accountSummary?.domestic === 1
+      && body?.reachability?.accountSummary?.internalReserved === 9
+      && body?.reachability?.stages?.some((stage) => stage.stageId === 'internal-subscription-authority' && stage.status === 'ready')
+      && body?.reachability?.stages?.some((stage) => stage.stageId === 'domestic-wg-relay' && stage.status === 'blocked')
+      && body?.reachability?.stages?.some((stage) => stage.stageId === 'h2i-internal-dns' && stage.status === 'blocked')
+      && body?.reachability?.executionOrder?.some((step) => step.includes('Domestic WG/H2I'))
+  },
+  {
+    name: 'oversea domestic mihomo subscription yaml',
+    run: async () => {
+      const response = await fetch(`${baseUrl}/internal/v1/site-slots/oversea-main/subscriptions/hysteria2/${state.overseaDomesticAccount}.yaml`);
+      const text = await response.text();
+      if (!response.ok) throw new Error(`subscription yaml failed: HTTP ${response.status} ${text}`);
+      return { text, contentType: response.headers.get('content-type') };
+    },
+    assert: (body) => body.contentType?.includes('text/yaml')
+      && body.text.includes('type: hysteria2')
+      && body.text.includes('mode: rule')
+      && body.text.includes('GEOIP,CN,DIRECT')
+      && body.text.includes('10.88.0.0/16')
+      && body.text.includes('oversea-main-hysteria2')
+      && body.text.includes('Reachability: this Internal subscription URL requires Domestic WG relay/H2I')
   },
   {
     name: 'domestic slot plan',
@@ -489,8 +677,10 @@ const checks = [
     assert: (body) => {
       state.domesticSlotPlanId = body?.plan?.planId;
       const packageArtifacts = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'package-slot-artifacts');
+      const prepareRelayAuthority = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'prepare-domestic-relay-authority');
       const resolveSubscription = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'resolve-domestic-bootstrap-subscription');
       const bootstrapEgress = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'bootstrap-domestic-egress');
+      const installWireGuard = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'install-host-wireguard');
       return typeof state.domesticSlotPlanId === 'string'
         && body?.plan?.kind === 'domestic'
         && body?.plan?.network?.mode === 'oversea-assisted'
@@ -498,13 +688,25 @@ const checks = [
         && body?.plan?.services?.hostServices?.includes('wg-quick@mx-domestic')
         && packageArtifacts?.commands?.some((command) => command.includes('qp-tunnel-cli-offline-fallback'))
         && packageArtifacts?.commands?.some((command) => command.includes('refresh-tunnel-cli latest'))
+        && prepareRelayAuthority?.mode === 'admin-action'
+        && prepareRelayAuthority?.commands?.some((command) => command.includes('Domestic WG gateway=10.88.0.1') && command.includes('Internal service peer=10.90.0.10'))
+        && prepareRelayAuthority?.commands?.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('10.90.0.0/16'))
+        && prepareRelayAuthority?.commands?.some((command) => command.includes('mx-internal-service-peer.conf') && command.includes('never copy the Internal private key to Domestic'))
+        && prepareRelayAuthority?.commands?.some((command) => command.includes('Internal has no public ingress'))
+        && prepareRelayAuthority?.commands?.some((command) => command.includes('Domestic WG relay primary'))
         && resolveSubscription?.mode === 'admin-action'
-        && resolveSubscription?.commands?.some((command) => command.includes('domesticBootstrapSubscription'))
+        && resolveSubscription?.commands?.some((command) => command.includes('domesticBootstrapSubscription') && command.includes('/internal/v1/site-slots/oversea-main/subscriptions/hysteria2/oversea-main-domestic.yaml'))
         && resolveSubscription?.commands?.some((command) => command.includes('do not ask Domestic to npm install'))
         && bootstrapEgress?.mode === 'artifact-push'
         && bootstrapEgress?.commands?.some((command) => command.includes('npm i -g @qpjoy/tunnel-cli'))
         && bootstrapEgress?.commands?.some((command) => command.includes('mx-domestic-qp-tunnel-cli-fallback.tar.gz'))
+        && bootstrapEgress?.commands?.some((command) => command.includes(`--subscription ${baseUrl}/internal/v1/site-slots/oversea-main/subscriptions/hysteria2/oversea-main-domestic.yaml`))
         && bootstrapEgress?.commands?.some((command) => command.includes('server-on'))
+        && !bootstrapEgress?.commands?.some((command) => command.includes('<internal-issued-oversea-hysteria2-subscription>'))
+        && installWireGuard?.commands?.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))
+        && installWireGuard?.commands?.some((command) => command.includes('mx-domestic-relay.env') && command.includes('/opt/mx/current/domestic/mx-domestic-relay.env'))
+        && installWireGuard?.commands?.some((command) => command.includes('internal service peer private key must not be copied to Domestic'))
+        && !installWireGuard?.commands?.some((command) => command.includes('rsync') && command.includes('mx-internal-service-peer.conf'))
         && !bootstrapEgress?.commands?.some((command) => command.includes('tun-on'));
     }
   },
@@ -633,7 +835,11 @@ const checks = [
       requestId: 'http-smoke-domestic-slot-runner-remote-gate'
     },
     assert: (body) => body?.session?.status === 'blocked'
-      && body?.session?.warnings?.some((warning) => warning.includes('SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED'))
+      && body?.session?.gates?.remoteExecutionConfirmed === false
+      && body?.session?.warnings?.some((warning) => (
+        warning.includes('SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED')
+        || warning.includes('remote-ssh requires confirmRemoteExecution=true')
+      ))
       && body?.session?.stepResults?.every((step) => step.status === 'blocked')
   },
   {
@@ -719,9 +925,7 @@ const checks = [
       && body?.gate?.status === 'blocked'
       && body?.gate?.jobId === state.domesticSlotAdminWorkerJobId
       && body?.gate?.execution === 'not-executed'
-      && body?.gate?.environmentGates?.SITE_SLOT_WORKER_REMOTE_SSH === 'missing'
       && body?.gate?.gateFailures?.some((failure) => failure.includes('worker job mode must be remote-ssh'))
-      && body?.gate?.gateFailures?.some((failure) => failure.includes('SITE_SLOT_WORKER_REMOTE_SSH=1 is required'))
       && body?.gate?.stepGates?.some((step) => step.commandKind === 'artifact-transport'
         && step.transport?.repositoryRootSynced === false
         && step.artifactReferences?.some((artifact) => artifact?.manifest?.sha256Status === 'passed'
@@ -748,7 +952,6 @@ const checks = [
       && body?.workerHandoff?.env?.SITE_SLOT_WORKER_REMOTE_SSH === '1'
       && body?.workerHandoff?.env?.SITE_SLOT_CONFIRM_REMOTE_EXECUTION === '1'
       && body?.workerHandoff?.blockedReasons?.some((reason) => reason.includes('worker job mode must be remote-ssh'))
-      && body?.workerHandoff?.blockedReasons?.some((reason) => reason.includes('SITE_SLOT_WORKER_REMOTE_SSH=1 is required'))
   },
   {
     name: 'site-slot worker remote ssh readonly probe blocked',
@@ -768,34 +971,36 @@ const checks = [
       && body?.readOnlyProbe?.command?.includes('df -h /')
       && body?.readOnlyProbe?.env?.SITE_SLOT_READONLY_PROBE === '1'
       && body?.readOnlyProbe?.blockedReasons?.some((reason) => reason.includes('worker job mode must be remote-ssh'))
-      && body?.readOnlyProbe?.blockedReasons?.some((reason) => reason.includes('SITE_SLOT_WORKER_REMOTE_SSH=1 is required'))
       && !body.report
   },
   {
     name: 'admin worker-run action hint',
     path: () => `/internal/v1/admin/site-slots/pipelines/${encodeURIComponent(state.domesticSlotPlanId)}?token=${encodeURIComponent(state.adminToken)}`,
-    assert: (body) => body?.pipeline?.summary?.actionHints?.some((action) => action.actionId === 'site-slot.worker-run.remote-ssh-gate'
-      && action.allowed === true
-      && action.path === `/internal/v1/site-slots/worker-jobs/${state.domesticSlotAdminWorkerJobId}/remote-ssh-gate`)
-      && body?.pipeline?.summary?.actionHints?.some((action) => action.actionId === 'site-slot.worker-run.remote-ssh-readonly-probe'
-        && action.allowed === true
-        && action.path === `/internal/v1/site-slots/worker-jobs/${state.domesticSlotAdminWorkerJobId}/remote-ssh-readonly-probe`
-        && action.confirmFields?.includes('confirmReadOnlyProbe'))
-      && body?.pipeline?.summary?.actionHints?.some((action) => action.actionId === 'site-slot.worker-run.remote-ssh-execute'
-        && action.allowed === true
-        && action.path === `/internal/v1/site-slots/worker-jobs/${state.domesticSlotAdminWorkerJobId}/run-artifact-push-remote-ssh`
-        && action.confirmFields?.includes('confirmWorkerHandoff'))
-      && body?.pipeline?.summary?.actionHints?.some((action) => action.actionId === 'site-slot.worker-run.artifact-push-remote-ssh-plan'
-        && action.allowed === true
-        && action.path === `/internal/v1/site-slots/worker-jobs/${state.domesticSlotAdminWorkerJobId}/run-artifact-push-remote-ssh-plan`
-        && action.confirmFields?.includes('confirmPlanOnly'))
-      && body?.pipeline?.summary?.actionHints?.some((action) => action.actionId === 'site-slot.worker-run.artifact-push-dry-run'
-      && action.allowed === true
-      && action.path === `/internal/v1/site-slots/worker-jobs/${state.domesticSlotAdminWorkerJobId}/run-artifact-push-dry-run`)
-      && body?.pipeline?.summary?.actionHints?.some((action) => action.actionId === 'site-slot.worker-run.artifact-push-fake-transport'
-        && action.allowed === true
-        && action.path === `/internal/v1/site-slots/worker-jobs/${state.domesticSlotAdminWorkerJobId}/run-artifact-push-fake-transport`
-        && action.confirmFields?.includes('confirmFakeTransport'))
+    assert: (body) => {
+      const hintedJobId = selectWorkerActionHintJobId(body);
+      const hintedJob = body?.pipeline?.workerJobs?.find((job) => job.jobId === hintedJobId);
+      if (hintedJobId && hintedJob) {
+        state.domesticSlotAdminWorkerJobId = hintedJobId;
+        state.domesticSlotAdminWorkerStepId = hintedJob.steps?.[0]?.stepId;
+      }
+      const jobId = state.domesticSlotAdminWorkerJobId;
+      return typeof jobId === 'string'
+        && workerActionHintMatches(body, 'site-slot.worker-run.remote-ssh-gate', jobId, '/remote-ssh-gate')
+        && workerActionHintMatches(body, 'site-slot.worker-run.remote-ssh-readonly-probe', jobId, '/remote-ssh-readonly-probe', ['confirmReadOnlyProbe'])
+        && workerActionHintMatches(body, 'site-slot.worker-run.remote-ssh-execute', jobId, '/run-artifact-push-remote-ssh', ['confirmWorkerHandoff'])
+        && workerActionHintMatches(body, 'site-slot.worker-run.artifact-push-remote-ssh-plan', jobId, '/run-artifact-push-remote-ssh-plan', ['confirmPlanOnly'])
+        && workerActionHintMatches(body, 'site-slot.worker-run.artifact-push-dry-run', jobId, '/run-artifact-push-dry-run')
+        && workerActionHintMatches(body, 'site-slot.worker-run.domestic-relay-readonly-probe', jobId, '/domestic-relay-readonly-probe', ['confirmRelayReadOnlyProbe'])
+        && workerActionHintMatches(body, 'site-slot.worker-run.domestic-relay-peer-plan', jobId, '/run-domestic-relay-peer-plan', ['confirmRelayPeerPlan'])
+        && workerActionHintMatches(body, 'site-slot.worker-run.domestic-relay-peer-append', jobId, '/domestic-relay-peer-append', ['confirmRelayPeerAppend', 'confirmRelayReadOnlyProbeReviewed', 'confirmRelayPeerPlanReviewed'])
+        && workerActionHintMatches(body, 'site-slot.worker-run.domestic-relay-peer-append-ssh', jobId, '/run-domestic-relay-peer-append-ssh', ['confirmRemoteExecution', 'confirmRelayPeerAppendSsh', 'confirmRelayPeerAppend', 'confirmRelayReadOnlyProbeReviewed', 'confirmRelayPeerPlanReviewed'])
+        && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.artifact-push-fake-transport', jobId, '/run-artifact-push-fake-transport', ['confirmFakeTransport'])
+        && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-sync-plan', jobId, '/awx-sync-plan')
+        && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-credential-sync', jobId, '/run-awx-credential-sync', ['confirmAwxCredentialSync'])
+        && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-object-sync', jobId, '/run-awx-object-sync', ['confirmAwxSync'])
+        && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-shadow', jobId, '/run-awx-shadow')
+        && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-launch', jobId, '/run-awx-launch', ['confirmAwxLaunch']);
+    }
   },
   {
     name: 'admin action execute worker-run remote ssh gate',
@@ -815,9 +1020,7 @@ const checks = [
       && body?.gate?.status === 'blocked'
       && body?.gate?.jobId === state.domesticSlotAdminWorkerJobId
       && body?.gate?.execution === 'not-executed'
-      && body?.gate?.environmentGates?.SITE_SLOT_WORKER_REMOTE_SSH === 'missing'
       && body?.gate?.gateFailures?.some((failure) => failure.includes('worker job mode must be remote-ssh'))
-      && body?.gate?.gateFailures?.some((failure) => failure.includes('SITE_SLOT_WORKER_REMOTE_SSH=1 is required'))
       && body?.gate?.stepGates?.some((step) => step.commandKind === 'artifact-transport'
         && step.transport?.repositoryRootSynced === false
         && step.artifactReferences?.some((artifact) => artifact?.manifest?.sha256Status === 'passed'
@@ -848,7 +1051,6 @@ const checks = [
       && body?.workerHandoff?.env?.SITE_SLOT_WORKER_REMOTE_SSH === '1'
       && body?.workerHandoff?.env?.SITE_SLOT_CONFIRM_REMOTE_EXECUTION === '1'
       && body?.workerHandoff?.blockedReasons?.some((reason) => reason.includes('worker job mode must be remote-ssh'))
-      && body?.workerHandoff?.blockedReasons?.some((reason) => reason.includes('SITE_SLOT_WORKER_REMOTE_SSH=1 is required'))
   },
   {
     name: 'admin action execute worker-run remote ssh readonly probe blocked',
@@ -909,6 +1111,446 @@ const checks = [
     path: () => `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(state.domesticSlotAdminWorkerJobId)}`,
     assert: (body) => body?.job?.status === 'passed'
       && body?.job?.currentReportId === state.domesticSlotAdminWorkerRunReportId
+  },
+  {
+    name: 'domestic relay peer plan runner simulate',
+    path: () => `/internal/v1/site-slots/executions/${encodeURIComponent(state.domesticSlotAdminApplyRunId)}/runner-sessions`,
+    method: 'POST',
+    body: {
+      mode: 'simulate',
+      requestedBy: 'http-smoke',
+      requestId: 'http-smoke-domestic-relay-peer-runner'
+    },
+    assert: (body) => {
+      state.domesticRelayPeerRunnerSessionId = body?.session?.sessionId;
+      return typeof state.domesticRelayPeerRunnerSessionId === 'string'
+        && body?.session?.status === 'completed';
+    }
+  },
+  {
+    name: 'domestic relay peer plan worker job',
+    path: () => `/internal/v1/site-slots/runner-sessions/${encodeURIComponent(state.domesticRelayPeerRunnerSessionId)}/worker-jobs`,
+    method: 'POST',
+    body: {
+      workerId: 'worker-http-smoke-relay-peer',
+      workerKind: 'internal-runner',
+      rollbackStrategy: 'restore-domestic-relay-peer-plan',
+      requestedBy: 'http-smoke',
+      requestId: 'http-smoke-domestic-relay-peer-worker-job'
+    },
+    assert: (body) => {
+      state.domesticRelayPeerWorkerJobId = body?.job?.jobId;
+      return typeof state.domesticRelayPeerWorkerJobId === 'string'
+        && body?.job?.kind === 'domestic'
+        && body?.job?.status === 'ready';
+    }
+  },
+  {
+    name: 'domestic relay actions hint',
+    path: () => `/internal/v1/admin/site-slots/pipelines/${encodeURIComponent(state.domesticSlotPlanId)}?token=${encodeURIComponent(state.adminToken)}`,
+    assert: (body) => workerActionHintMatches(
+      body,
+      'site-slot.worker-run.domestic-relay-readonly-probe',
+      state.domesticRelayPeerWorkerJobId,
+      '/domestic-relay-readonly-probe',
+      ['confirmRelayReadOnlyProbe']
+    ) && workerActionHintMatches(
+      body,
+      'site-slot.worker-run.domestic-relay-peer-plan',
+      state.domesticRelayPeerWorkerJobId,
+      '/run-domestic-relay-peer-plan',
+      ['confirmRelayPeerPlan']
+    ) && workerActionHintMatches(
+      body,
+      'site-slot.worker-run.domestic-relay-peer-append',
+      state.domesticRelayPeerWorkerJobId,
+      '/domestic-relay-peer-append',
+      ['confirmRelayPeerAppend', 'confirmRelayReadOnlyProbeReviewed', 'confirmRelayPeerPlanReviewed']
+    ) && workerActionHintMatches(
+      body,
+      'site-slot.worker-run.domestic-relay-peer-append-ssh',
+      state.domesticRelayPeerWorkerJobId,
+      '/run-domestic-relay-peer-append-ssh',
+      ['confirmRemoteExecution', 'confirmRelayPeerAppendSsh', 'confirmRelayPeerAppend', 'confirmRelayReadOnlyProbeReviewed', 'confirmRelayPeerPlanReviewed']
+    ) && body?.pipeline?.summary?.actionHints?.some((action) => action.actionId === 'site-slot.domestic-relay-peer-append-awx.prepare'
+      && action.path === `/internal/v1/site-slots/executions/${state.domesticSlotAdminApplyRunId}/prepare-domestic-relay-peer-append-awx`
+      && action.allowed === true
+      && action.confirmFields?.includes('confirmAwxLaunchPrepare'))
+    && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-sync-plan', state.domesticRelayPeerWorkerJobId, '/awx-sync-plan')
+    && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-credential-sync', state.domesticRelayPeerWorkerJobId, '/run-awx-credential-sync', ['confirmAwxCredentialSync'])
+    && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-object-sync', state.domesticRelayPeerWorkerJobId, '/run-awx-object-sync', ['confirmAwxSync'])
+    && body?.pipeline?.summary?.actionHints?.some((action) => action.actionId === 'site-slot.domestic-relay-peer-append-ssh.prepare'
+      && action.path === `/internal/v1/site-slots/executions/${state.domesticSlotAdminApplyRunId}/prepare-domestic-relay-peer-append-ssh`
+      && action.allowed === true
+      && action.confirmFields?.includes('confirmRelayPeerAppendSshPrepare'))
+  },
+  {
+    name: 'domestic relay readonly probe handoff',
+    path: () => `/internal/v1/admin/actions/execute?token=${encodeURIComponent(state.adminToken)}`,
+    method: 'POST',
+    body: () => ({
+      actionId: 'site-slot.worker-run.domestic-relay-readonly-probe',
+      path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(state.domesticRelayPeerWorkerJobId)}/domestic-relay-readonly-probe`,
+      body: {
+        confirmRelayReadOnlyProbe: true,
+        requestedBy: 'http-smoke-admin-action',
+        requestId: 'http-smoke-domestic-relay-readonly-probe'
+      }
+    }),
+    assert: (body) => body?.actionResult?.actionId === 'site-slot.worker-run.domestic-relay-readonly-probe'
+      && body?.relayReadOnlyProbe?.status === 'ready'
+      && body?.relayReadOnlyProbe?.execution === 'not-started'
+      && body?.relayReadOnlyProbe?.boundary === 'readonly-ssh-handoff-only'
+      && body?.relayReadOnlyProbe?.readOnlyProbe?.remoteMutation === false
+      && body?.relayReadOnlyProbe?.readOnlyProbe?.commandExecuted === false
+      && body?.relayReadOnlyProbe?.domesticRelay?.interfaceName === 'mx-domestic'
+      && body?.relayReadOnlyProbe?.domesticRelay?.gatewayIp === '10.88.0.1'
+      && body?.relayReadOnlyProbe?.command?.startsWith('ssh ')
+      && body?.relayReadOnlyProbe?.command?.includes('wg show mx-domestic')
+      && body?.relayReadOnlyProbe?.command?.includes('ip route get 10.90.0.10')
+      && body?.relayReadOnlyProbe?.command?.includes('systemctl status wg-quick@mx-domestic')
+      && body?.relayReadOnlyProbe?.command?.includes('mx-internal-service-peer.conf')
+      && !body?.relayReadOnlyProbe?.command?.includes('wg set')
+      && body?.relayReadOnlyProbe?.gates?.remoteMutationAllowed === false
+      && body?.relayReadOnlyProbe?.gates?.internalPrivateKeyMustNotExistOnDomestic === true
+      && !body.report
+  },
+  {
+    name: 'domestic relay peer append handoff',
+    path: () => `/internal/v1/admin/actions/execute?token=${encodeURIComponent(state.adminToken)}`,
+    method: 'POST',
+    body: () => ({
+      actionId: 'site-slot.worker-run.domestic-relay-peer-append',
+      path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(state.domesticRelayPeerWorkerJobId)}/domestic-relay-peer-append`,
+      body: {
+        confirmRelayPeerAppend: true,
+        confirmRelayReadOnlyProbeReviewed: true,
+        confirmRelayPeerPlanReviewed: true,
+        peerRole: 'guest',
+        leaseIp: smokeHomePeerLeaseIp,
+        publicKey: shadowHomePublicKey,
+        requestedBy: 'http-smoke-admin-action',
+        requestId: 'http-smoke-domestic-relay-peer-append'
+      }
+    }),
+    assert: (body) => body?.actionResult?.actionId === 'site-slot.worker-run.domestic-relay-peer-append'
+      && body?.relayPeerAppend?.status === 'ready'
+      && body?.relayPeerAppend?.execution === 'not-started'
+      && body?.relayPeerAppend?.boundary === 'gated-ssh-handoff-only'
+      && body?.relayPeerAppend?.mode === 'domestic-relay-peer-append'
+      && body?.relayPeerAppend?.handoff?.commandExecuted === false
+      && body?.relayPeerAppend?.handoff?.remoteMutation === true
+      && body?.relayPeerAppend?.handoff?.mutation === 'wg-set-peer-allowed-ips'
+      && body?.relayPeerAppend?.homePeer?.leaseIp === smokeHomePeerLeaseIp
+      && body?.relayPeerAppend?.homePeer?.publicKey === shadowHomePublicKey
+      && body?.relayPeerAppend?.homePeer?.allowedIps?.includes(`${smokeHomePeerLeaseIp}/32`)
+      && body?.relayPeerAppend?.domesticRelay?.interfaceName === 'mx-domestic'
+      && body?.relayPeerAppend?.domesticRelay?.gatewayIp === '10.88.0.1'
+      && body?.relayPeerAppend?.command?.startsWith('ssh ')
+      && body?.relayPeerAppend?.command?.includes('mx-domestic-relay-peer-append')
+      && body?.relayPeerAppend?.command?.includes('wg set mx-domestic peer')
+      && body?.relayPeerAppend?.command?.includes('allowed-ips')
+      && body?.relayPeerAppend?.command?.includes(`${smokeHomePeerLeaseIp}/32`)
+      && body?.relayPeerAppend?.command?.includes('wg-quick save mx-domestic')
+      && body?.relayPeerAppend?.command?.includes('wg show mx-domestic')
+      && body?.relayPeerAppend?.command?.includes('mx-internal-service-peer.conf')
+      && body?.relayPeerAppend?.gates?.confirmRelayPeerAppend === true
+      && body?.relayPeerAppend?.gates?.confirmRelayReadOnlyProbeReviewed === true
+      && body?.relayPeerAppend?.gates?.confirmRelayPeerPlanReviewed === true
+      && body?.relayPeerAppend?.gates?.internalPrivateKeyMustNotExistOnDomestic === true
+      && body?.relayPeerAppend?.env?.SITE_SLOT_DOMESTIC_RELAY_APPEND === '1'
+      && !body.report
+  },
+  {
+    name: 'domestic relay peer append ssh blocked',
+    path: () => `/internal/v1/admin/actions/execute?token=${encodeURIComponent(state.adminToken)}`,
+    method: 'POST',
+    body: () => ({
+      actionId: 'site-slot.worker-run.domestic-relay-peer-append-ssh',
+      path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(state.domesticRelayPeerWorkerJobId)}/run-domestic-relay-peer-append-ssh`,
+      body: {
+        confirmRemoteExecution: true,
+        confirmRelayPeerAppendSsh: true,
+        confirmRelayPeerAppend: true,
+        confirmRelayReadOnlyProbeReviewed: true,
+        confirmRelayPeerPlanReviewed: true,
+        peerRole: 'guest',
+        leaseIp: smokeHomePeerLeaseIp,
+        publicKey: shadowHomePublicKey,
+        workerId: 'worker-http-smoke-relay-peer-ssh',
+        message: 'http smoke Domestic relay peer append SSH',
+        requestedBy: 'http-smoke-admin-action',
+        requestId: 'http-smoke-domestic-relay-peer-append-ssh'
+      }
+    }),
+    assert: (body) => body?.actionResult?.actionId === 'site-slot.worker-run.domestic-relay-peer-append-ssh'
+      && body?.gate?.verdict === 'blocked'
+      && body?.relayPeerAppend?.status === 'ready'
+      && body?.relayPeerAppendSsh?.status === 'blocked'
+      && body?.relayPeerAppendSsh?.execution === 'not-started'
+      && body?.relayPeerAppendSsh?.boundary === 'gated-ssh-worker'
+      && body?.relayPeerAppendSsh?.mode === 'domestic-relay-peer-append-ssh'
+      && body?.relayPeerAppendSsh?.command?.includes('wg set mx-domestic peer')
+      && body?.relayPeerAppendSsh?.command?.includes(`${smokeHomePeerLeaseIp}/32`)
+      && body?.relayPeerAppendSsh?.handoff?.commandExecuted === false
+      && body?.relayPeerAppendSsh?.handoff?.remoteMutation === true
+      && body?.relayPeerAppendSsh?.gates?.confirmRemoteExecution === true
+      && body?.relayPeerAppendSsh?.gates?.confirmRelayPeerAppendSsh === true
+      && body?.relayPeerAppendSsh?.blockedReasons?.some((reason) => reason.includes('worker job mode must be remote-ssh'))
+      && body?.relayPeerAppendSsh?.blockedReasons?.some((reason) => reason.includes('managed SSH profile is required'))
+      && !body.report
+  },
+  {
+    name: 'domestic relay peer append awx prepare',
+    path: () => `/internal/v1/admin/actions/execute?token=${encodeURIComponent(state.adminToken)}`,
+    method: 'POST',
+    body: () => ({
+      actionId: 'site-slot.domestic-relay-peer-append-awx.prepare',
+      path: `/internal/v1/site-slots/executions/${encodeURIComponent(state.domesticSlotAdminApplyRunId)}/prepare-domestic-relay-peer-append-awx`,
+      body: {
+        confirmAwxLaunchPrepare: true,
+        approvalId: 'approval-http-smoke-domestic-relay-peer-append-awx',
+        changeWindowStart: '2026-06-11T00:00:00.000Z',
+        changeWindowEnd: '2026-06-12T00:00:00.000Z',
+        workerId: 'worker-http-smoke-awx-domestic-relay-append',
+        workerKind: 'awx-runner',
+        retryLimit: 1,
+        rollbackStrategy: 'restore-domestic-wg-peer-before-append',
+        requestedBy: 'http-smoke-admin-action',
+        requestId: 'http-smoke-domestic-relay-peer-append-awx-prepare'
+      }
+    }),
+    assert: (body) => {
+      const prepare = body?.relayPeerAppendAwxPrepare;
+      state.domesticRelayPeerAppendAwxPrepareSessionId = body?.session?.sessionId;
+      state.domesticRelayPeerAppendAwxPrepareJobId = body?.job?.jobId;
+      return body?.actionResult?.actionId === 'site-slot.domestic-relay-peer-append-awx.prepare'
+        && prepare?.status === 'ready'
+        && prepare?.mode === 'domestic-relay-peer-append-awx-prepare'
+        && prepare?.boundary === 'awx-runner-job-preparation'
+        && prepare?.execution === 'not-started'
+        && prepare?.gates?.confirmAwxLaunchPrepare === true
+        && prepare?.gates?.domesticOnly === true
+        && prepare?.gates?.applyConfirmed === true
+        && body?.session?.mode === 'awx-shadow'
+        && body?.session?.status === 'queued'
+        && body?.job?.mode === 'awx-shadow'
+        && body?.job?.worker?.kind === 'awx-runner'
+        && body?.job?.status === 'ready'
+        && typeof state.domesticRelayPeerAppendAwxPrepareSessionId === 'string'
+        && typeof state.domesticRelayPeerAppendAwxPrepareJobId === 'string';
+    }
+  },
+  {
+    name: 'domestic relay peer append awx sync plan',
+    path: () => `/internal/v1/admin/actions/execute?token=${encodeURIComponent(state.adminToken)}`,
+    method: 'POST',
+    body: () => ({
+      actionId: 'site-slot.worker-run.awx-sync-plan',
+      path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(state.domesticRelayPeerAppendAwxPrepareJobId)}/awx-sync-plan`,
+      body: {
+        requestedBy: 'http-smoke-admin-action',
+        requestId: 'http-smoke-domestic-relay-peer-append-awx-sync-plan'
+      }
+    }),
+    assert: (body) => {
+      const syncPlan = body?.awxSyncPlan;
+      return body?.actionResult?.actionId === 'site-slot.worker-run.awx-sync-plan'
+        && syncPlan?.mode === 'awx-object-sync-plan'
+        && syncPlan?.execution === 'not-started'
+        && syncPlan?.boundary === 'awx-object-sync-plan-only'
+        && syncPlan?.targetKind === 'domestic'
+        && syncPlan?.siteId === 'domestic-main'
+        && syncPlan?.inventoryHost === 'domestic-main'
+        && typeof syncPlan?.inventory === 'string'
+        && syncPlan.inventory.includes('domestic')
+        && typeof syncPlan?.credential === 'string'
+        && typeof syncPlan?.jobTemplate === 'string'
+        && syncPlan.jobTemplate.includes('domestic-worker-v1')
+        && Array.isArray(syncPlan?.objects)
+        && syncPlan.objects.some((item) => item.objectType === 'inventory')
+        && syncPlan.objects.some((item) => item.objectType === 'credential')
+        && syncPlan.objects.some((item) => item.objectType === 'job-template')
+        && Array.isArray(syncPlan?.extraVarsContract)
+        && syncPlan.extraVarsContract.includes('mx_worker_steps')
+        && !body.report;
+    }
+  },
+  {
+    name: 'domestic relay peer append awx credential sync blocked',
+    path: () => `/internal/v1/admin/actions/execute?token=${encodeURIComponent(state.adminToken)}`,
+    method: 'POST',
+    body: () => ({
+      actionId: 'site-slot.worker-run.awx-credential-sync',
+      path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(state.domesticRelayPeerAppendAwxPrepareJobId)}/run-awx-credential-sync`,
+      body: {
+        confirmAwxCredentialSync: true,
+        requestedBy: 'http-smoke-admin-action',
+        requestId: 'http-smoke-domestic-relay-peer-append-awx-credential-sync'
+      }
+    }),
+    assert: (body) => {
+      const credentialSync = body?.awxCredentialSync;
+      return body?.actionResult?.actionId === 'site-slot.worker-run.awx-credential-sync'
+        && credentialSync?.mode === 'awx-credential-sync'
+        && credentialSync?.execution === 'blocked'
+        && credentialSync?.boundary === 'awx-api-credential-sync'
+        && credentialSync?.status === 'blocked'
+        && credentialSync?.targetKind === 'domestic'
+        && credentialSync?.siteId === 'domestic-main'
+        && Array.isArray(credentialSync?.operations)
+        && credentialSync.operations.length === 0
+        && credentialSync?.blockedReasons?.some((reason) => reason.includes('AWX_API_CREDENTIAL_SYNC_ENABLED=true'))
+        && credentialSync?.blockedReasons?.some((reason) => reason.includes('managed SSH profile is required'))
+        && !body.report;
+    }
+  },
+  {
+    name: 'domestic relay peer append awx object sync blocked',
+    path: () => `/internal/v1/admin/actions/execute?token=${encodeURIComponent(state.adminToken)}`,
+    method: 'POST',
+    body: () => ({
+      actionId: 'site-slot.worker-run.awx-object-sync',
+      path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(state.domesticRelayPeerAppendAwxPrepareJobId)}/run-awx-object-sync`,
+      body: {
+        confirmAwxSync: true,
+        requestedBy: 'http-smoke-admin-action',
+        requestId: 'http-smoke-domestic-relay-peer-append-awx-object-sync'
+      }
+    }),
+    assert: (body) => {
+      const objectSync = body?.awxObjectSync;
+      return body?.actionResult?.actionId === 'site-slot.worker-run.awx-object-sync'
+        && objectSync?.mode === 'awx-object-sync'
+        && objectSync?.execution === 'blocked'
+        && objectSync?.boundary === 'awx-api-object-sync'
+        && objectSync?.status === 'blocked'
+        && objectSync?.targetKind === 'domestic'
+        && Array.isArray(objectSync?.operations)
+        && objectSync.operations.length === 0
+        && objectSync?.blockedReasons?.some((reason) => reason.includes('AWX_API_OBJECT_SYNC_ENABLED=true'))
+        && objectSync?.blockedReasons?.some((reason) => reason.includes('sshProfileId is required'))
+        && !body.report;
+    }
+  },
+  {
+    name: 'domestic relay peer append ssh prepare',
+    path: () => `/internal/v1/admin/actions/execute?token=${encodeURIComponent(state.adminToken)}`,
+    method: 'POST',
+    body: () => ({
+      actionId: 'site-slot.domestic-relay-peer-append-ssh.prepare',
+      path: `/internal/v1/site-slots/executions/${encodeURIComponent(state.domesticSlotAdminApplyRunId)}/prepare-domestic-relay-peer-append-ssh`,
+      body: {
+        confirmRemoteExecution: true,
+        confirmRelayPeerAppendSshPrepare: true,
+        approvalId: 'approval-http-smoke-domestic-relay-peer-append',
+        changeWindowStart: '2026-06-11T00:00:00.000Z',
+        changeWindowEnd: '2026-06-12T00:00:00.000Z',
+        workerId: 'worker-http-smoke-domestic-relay-append',
+        workerKind: 'domestic-runner',
+        retryLimit: 1,
+        rollbackStrategy: 'restore-domestic-wg-peer-before-append',
+        requestedBy: 'http-smoke-admin-action',
+        requestId: 'http-smoke-domestic-relay-peer-append-ssh-prepare'
+      }
+    }),
+    assert: (body) => {
+      const prepare = body?.relayPeerAppendSshPrepare;
+      state.domesticRelayPeerAppendSshPrepareSessionId = body?.session?.sessionId;
+      state.domesticRelayPeerAppendSshPrepareJobId = body?.job?.jobId;
+      const blockedByRunnerGate = prepare?.status === 'blocked'
+        && body?.session?.mode === 'remote-ssh'
+        && body?.session?.status === 'blocked'
+        && prepare?.runner?.remoteExecutionConfirmed === true
+        && prepare?.blockedReasons?.some((reason) => reason.includes('SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED'))
+        && !body.job;
+      const preparedJob = prepare?.status === 'ready'
+        && body?.session?.mode === 'remote-ssh'
+        && body?.session?.status === 'queued'
+        && body?.job?.mode === 'remote-ssh'
+        && body?.job?.status === 'ready'
+        && body?.job?.approval?.status === 'recorded'
+        && body?.job?.changeWindow?.start === '2026-06-11T00:00:00.000Z'
+        && body?.job?.changeWindow?.end === '2026-06-12T00:00:00.000Z';
+      return body?.actionResult?.actionId === 'site-slot.domestic-relay-peer-append-ssh.prepare'
+        && prepare?.mode === 'domestic-relay-peer-append-ssh-prepare'
+        && prepare?.boundary === 'remote-ssh-runner-job-preparation'
+        && prepare?.execution === 'not-started'
+        && prepare?.gates?.confirmRemoteExecution === true
+        && prepare?.gates?.confirmRelayPeerAppendSshPrepare === true
+        && prepare?.gates?.domesticOnly === true
+        && prepare?.gates?.applyConfirmed === true
+        && typeof state.domesticRelayPeerAppendSshPrepareSessionId === 'string'
+        && (blockedByRunnerGate || preparedJob);
+    }
+  },
+  {
+    name: 'domestic relay peer plan worker report',
+    path: () => `/internal/v1/admin/actions/execute?token=${encodeURIComponent(state.adminToken)}`,
+    method: 'POST',
+    body: () => ({
+      actionId: 'site-slot.worker-run.domestic-relay-peer-plan',
+      path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(state.domesticRelayPeerWorkerJobId)}/run-domestic-relay-peer-plan`,
+      body: {
+        confirmRelayPeerPlan: true,
+        peerRole: 'guest',
+        leaseIp: smokeHomePeerLeaseIp,
+        publicKey: shadowHomePublicKey,
+        workerId: 'worker-http-smoke-relay-peer',
+        message: 'http smoke Domestic relay peer plan',
+        requestedBy: 'http-smoke-admin-action',
+        requestId: 'http-smoke-domestic-relay-peer-plan'
+      }
+    }),
+    assert: (body) => {
+      state.domesticRelayPeerReportId = body?.report?.reportId;
+      const relayPlanStep = body?.report?.stepReports?.find((step) => {
+        const evidence = parseWorkerEvidence(step?.stdout);
+        return evidence?.mode === 'domestic-relay-peer-plan'
+          && evidence?.execution === 'planned'
+          && evidence?.boundary === 'admin-domestic-relay-peer-plan-only'
+          && evidence?.planOnly?.commandExecuted === false
+          && evidence?.planOnly?.remoteMutation === false
+          && evidence?.homePeer?.leaseIp === smokeHomePeerLeaseIp
+          && evidence?.homePeer?.publicKey === shadowHomePublicKey
+          && evidence?.homePeer?.allowedIps?.includes(`${smokeHomePeerLeaseIp}/32`)
+          && evidence?.domesticRelay?.interfaceName === 'mx-domestic'
+          && evidence?.domesticRelay?.gatewayIp === '10.88.0.1'
+          && evidence?.internalServicePeer?.fixedIp === '10.90.0.10'
+          && evidence?.internalServicePeer?.privateKeyPlacement === 'internal-only'
+          && evidence?.internalServicePeer?.privateKeyCopiedToDomestic === false
+          && evidence?.plannedCommands?.some((command) => command.includes(`allowed-ips ${smokeHomePeerLeaseIp}/32`))
+          && evidence?.gates?.remoteMutationAllowed === false;
+      });
+      return body?.actionResult?.actionId === 'site-slot.worker-run.domestic-relay-peer-plan'
+        && body?.relayPeerPlan?.status === 'passed'
+        && body?.relayPeerPlan?.execution === 'recorded'
+        && body?.relayPeerPlan?.reportId === state.domesticRelayPeerReportId
+        && typeof state.domesticRelayPeerReportId === 'string'
+        && body?.report?.status === 'passed'
+        && body?.report?.workerId === 'worker-http-smoke-relay-peer'
+        && body?.report?.message === 'http smoke Domestic relay peer plan'
+        && relayPlanStep?.exitCode === 0;
+    }
+  },
+  {
+    name: 'domestic relay peer plan report get',
+    path: () => `/internal/v1/site-slots/worker-reports/${encodeURIComponent(state.domesticRelayPeerReportId)}`,
+    assert: (body) => body?.report?.reportId === state.domesticRelayPeerReportId
+      && body?.report?.jobId === state.domesticRelayPeerWorkerJobId
+      && body?.report?.status === 'passed'
+      && body?.report?.stepReports?.some((step) => {
+        const evidence = parseWorkerEvidence(step?.stdout);
+        return evidence?.mode === 'domestic-relay-peer-plan'
+          && evidence?.execution === 'planned'
+          && evidence?.internalServicePeer?.privateKeyCopiedToDomestic === false;
+      })
+  },
+  {
+    name: 'domestic relay peer plan worker job passed',
+    path: () => `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(state.domesticRelayPeerWorkerJobId)}`,
+    assert: (body) => body?.job?.status === 'passed'
+      && body?.job?.currentReportId === state.domesticRelayPeerReportId
   },
   {
     name: 'domestic slot worker report',
@@ -1349,7 +1991,7 @@ const remoteReadyChecks = [
       && body?.readiness?.sshProfile?.profileId === state.remoteReadySshProfileId
       && body?.readiness?.sshProfile?.identityFileExists === true
       && body?.readiness?.sshProfile?.knownHostsFileExists === true
-      && body?.readiness?.gates?.envGate?.status === 'blocked'
+      && (body?.readiness?.gates?.envGate?.status === 'blocked' || body?.readiness?.gates?.envGate?.status === 'passed')
       && body?.readiness?.gates?.configGate?.status === 'blocked'
       && body?.readiness?.gates?.requestGate?.status === 'blocked'
       && Array.isArray(body?.readiness?.gateFailures)
@@ -2077,6 +2719,50 @@ if (expectK8sApply && !remoteReadyOnly) {
   });
 }
 
+function findWorkerActionHint(body, actionId, pathSuffix) {
+  const hints = Array.isArray(body?.pipeline?.summary?.actionHints) ? body.pipeline.summary.actionHints : [];
+  return hints.find((action) => action?.actionId === actionId
+    && action?.allowed === true
+    && typeof action?.path === 'string'
+    && action.path.endsWith(pathSuffix)) ?? null;
+}
+
+function selectWorkerActionHintJobId(body) {
+  const hints = Array.isArray(body?.pipeline?.summary?.actionHints) ? body.pipeline.summary.actionHints : [];
+  const jobIds = Array.from(new Set(hints
+    .map((action) => actionHintWorkerJobId(action))
+    .filter((jobId) => typeof jobId === 'string' && jobId.length > 0)));
+  return jobIds.find((jobId) => workerActionHintMatches(body, 'site-slot.worker-run.remote-ssh-gate', jobId, '/remote-ssh-gate')
+    && workerActionHintMatches(body, 'site-slot.worker-run.remote-ssh-readonly-probe', jobId, '/remote-ssh-readonly-probe', ['confirmReadOnlyProbe'])
+    && workerActionHintMatches(body, 'site-slot.worker-run.remote-ssh-execute', jobId, '/run-artifact-push-remote-ssh', ['confirmWorkerHandoff'])
+    && workerActionHintMatches(body, 'site-slot.worker-run.artifact-push-remote-ssh-plan', jobId, '/run-artifact-push-remote-ssh-plan', ['confirmPlanOnly'])
+    && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-sync-plan', jobId, '/awx-sync-plan')
+    && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-credential-sync', jobId, '/run-awx-credential-sync', ['confirmAwxCredentialSync'])
+    && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-object-sync', jobId, '/run-awx-object-sync', ['confirmAwxSync'])
+    && workerActionHintMatches(body, 'site-slot.worker-run.artifact-push-dry-run', jobId, '/run-artifact-push-dry-run')) ?? null;
+}
+
+function workerActionHintMatches(body, actionId, jobId, pathSuffix, requiredConfirmFields = []) {
+  const hints = Array.isArray(body?.pipeline?.summary?.actionHints) ? body.pipeline.summary.actionHints : [];
+  const action = hints.find((item) => item?.actionId === actionId
+    && item?.allowed === true
+    && item?.path === `/internal/v1/site-slots/worker-jobs/${jobId}${pathSuffix}`) ?? null;
+  return Boolean(action)
+    && requiredConfirmFields.every((field) => Array.isArray(action.confirmFields) && action.confirmFields.includes(field));
+}
+
+function optionalWorkerActionHintMatches(body, actionId, jobId, pathSuffix, requiredConfirmFields = []) {
+  const hints = Array.isArray(body?.pipeline?.summary?.actionHints) ? body.pipeline.summary.actionHints : [];
+  const hasAction = hints.some((item) => item?.actionId === actionId);
+  return !hasAction || workerActionHintMatches(body, actionId, jobId, pathSuffix, requiredConfirmFields);
+}
+
+function actionHintWorkerJobId(action) {
+  if (!action?.path) return null;
+  const match = action.path.match(/\/internal\/v1\/site-slots\/worker-jobs\/([^/]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
 function parseWorkerEvidence(stdout) {
   if (typeof stdout !== 'string' || !stdout.trim().startsWith('{')) return null;
   try {
@@ -2127,6 +2813,17 @@ function hasManifestArtifactEvidence(step) {
     && artifact?.module?.sha256Status === 'passed'
     && typeof artifact?.module?.targetPath === 'string'
     && artifact.module.targetPath.startsWith('/opt/mx/'));
+}
+
+function isRelayLeaseIp(value, prefix) {
+  const parts = String(value || '').split('.');
+  return parts.length === 4
+    && `${parts[0]}.${parts[1]}` === prefix
+    && parts.slice(2).every((part) => /^\d+$/.test(part))
+    && Number(parts[2]) >= 0
+    && Number(parts[2]) <= 255
+    && Number(parts[3]) >= 1
+    && Number(parts[3]) <= 254;
 }
 
 for (const check of checks) {

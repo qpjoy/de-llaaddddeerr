@@ -66,6 +66,9 @@ platform. New Launcher solution design and implementation should happen here.
   concept mapping, migration Job, and Admin action model.
 - `docs/12-local-ops-manage-guide.md` - beginner-friendly local operations
   guide for `scripts/manage.sh`, Compose shadow, and K8s shadow.
+- `docs/13-platform-ops-and-admin-design-system-roadmap.md` - K8s operations
+  platform, AWX execution plane, Ubuntu/CentOS support contract, and Admin
+  design system roadmap.
 
 ## Local Checks
 

@@ -201,7 +201,7 @@ export interface SiteSlotExecutionRun {
   createdAt: string;
 }
 
-export type SiteSlotRunnerMode = 'simulate' | 'remote-ssh';
+export type SiteSlotRunnerMode = 'simulate' | 'remote-ssh' | 'awx-shadow';
 export type SiteSlotRunnerSessionStatus = 'completed' | 'blocked' | 'queued' | 'running' | 'passed' | 'failed' | 'rollback-required';
 export type SiteSlotRunnerStepStatus = 'simulated' | 'blocked' | 'pending';
 
@@ -255,7 +255,7 @@ export interface SiteSlotRunnerSession {
   finishedAt: string | null;
 }
 
-export type SiteSlotWorkerKind = 'internal-runner' | 'domestic-runner' | 'oversea-site-agent' | 'admin-manual';
+export type SiteSlotWorkerKind = 'internal-runner' | 'domestic-runner' | 'oversea-site-agent' | 'awx-runner' | 'admin-manual';
 export type SiteSlotWorkerJobStatus = 'ready' | 'blocked' | 'running' | 'passed' | 'failed' | 'rollback-required';
 export type SiteSlotWorkerReportStatus = 'running' | 'passed' | 'failed' | 'blocked';
 
@@ -593,6 +593,8 @@ export interface AdminDashboardSnapshot {
   sites: SiteHeartbeat[];
   latestReleasePlans: ReleaseManagementPlan[];
   siteSlotPipelines: AdminSiteSlotPipelineSummary[];
+  awxProviders: AwxProviderConfig[];
+  runtimeFeaturePolicies: RuntimeFeaturePolicy[];
   nextActions: string[];
 }
 
@@ -617,6 +619,7 @@ export interface AnonymousEnrollment {
   environment: string;
   overlayIp: string;
   relayMode: string;
+  publicKey: string | null;
   createdAt: string;
   userId: string | null;
 }
@@ -891,6 +894,7 @@ export interface SiteSlotSshProfileInput {
   sshPort?: number | null;
   identityFile?: string | null;
   knownHostsFile?: string | null;
+  sshConfigFile?: string | null;
   hostKeyAlias?: string | null;
   strictHostKeyChecking?: 'yes' | 'no' | 'ask' | 'accept-new' | string | null;
   connectTimeoutSeconds?: number | null;
@@ -932,6 +936,7 @@ export interface SiteSlotSshProfileBootstrapResult {
     rootDir: string;
     identityFile: string;
     publicKeyFile: string;
+    sshConfigFile: string;
     generated: boolean;
     rotated: boolean;
   };
@@ -975,6 +980,7 @@ export interface SiteSlotSshProfile {
   sshPort: number;
   identityFile: string | null;
   knownHostsFile: string | null;
+  sshConfigFile: string | null;
   hostKeyAlias: string | null;
   strictHostKeyChecking: 'yes' | 'no' | 'ask' | 'accept-new';
   connectTimeoutSeconds: number;
@@ -990,6 +996,139 @@ export interface SiteSlotSshProfile {
 
 export type RuntimeFeaturePolicyScopeKind = 'global' | 'site' | 'profile';
 export type RuntimeFeaturePolicyMode = 'disabled' | 'plan-only' | 'readonly-execute' | 'remote-execute';
+
+export type AwxProviderStatus = 'active' | 'paused';
+export type AwxProviderKind = SiteSlotKind | 'all';
+
+export interface AwxProviderConfigInput {
+  providerId?: string | null;
+  name?: string | null;
+  status?: AwxProviderStatus | string | null;
+  baseUrl?: string | null;
+  organization?: string | null;
+  project?: string | null;
+  inventoryPrefix?: string | null;
+  credentialPrefix?: string | null;
+  jobTemplatePrefix?: string | null;
+  defaultKind?: AwxProviderKind | string | null;
+  verifyTls?: boolean | null;
+  requestTimeoutSeconds?: number | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface AwxProviderConfig {
+  providerId: string;
+  name: string;
+  environment: string;
+  status: AwxProviderStatus;
+  baseUrl: string | null;
+  organization: string;
+  project: string;
+  inventoryPrefix: string;
+  credentialPrefix: string;
+  jobTemplatePrefix: string;
+  defaultKind: AwxProviderKind;
+  verifyTls: boolean;
+  requestTimeoutSeconds: number;
+  source: 'config-center';
+  warnings: string[];
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export interface AwxProviderCheckInput {
+  kind?: SiteSlotKind | string | null;
+  token?: string | null;
+  requestTimeoutSeconds?: number | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface AwxProviderCheckEndpoint {
+  name: string;
+  method: 'GET';
+  path: string;
+  status: 'passed' | 'blocked' | 'failed';
+  httpStatus: number | null;
+  durationMs: number;
+  count: number | null;
+  matchedNames: string[];
+  message: string;
+}
+
+export interface AwxProviderCheckResult {
+  providerId: string;
+  checkedAt: string;
+  mode: 'awx-api-readonly';
+  status: 'passed' | 'blocked' | 'failed';
+  baseUrl: string | null;
+  organization: string;
+  project: string;
+  inventory: string;
+  jobTemplate: string;
+  targetKind: SiteSlotKind;
+  endpoints: AwxProviderCheckEndpoint[];
+  failures: string[];
+  warnings: string[];
+  nextActions: string[];
+}
+
+export interface AwxProviderSyncPlanInput {
+  kind?: SiteSlotKind | string | null;
+  siteId?: string | null;
+  host?: string | null;
+  sshUser?: string | null;
+  sshPort?: number | null;
+  sshProfileId?: string | null;
+  planId?: string | null;
+  jobId?: string | null;
+  sessionId?: string | null;
+  runId?: string | null;
+  requestId?: string | null;
+}
+
+export interface AwxProviderSyncPlanObject {
+  objectType: 'organization' | 'project' | 'inventory' | 'host' | 'credential' | 'job-template';
+  name: string;
+  endpoint: string;
+  method: 'GET' | 'POST' | 'PATCH';
+  required: boolean;
+  status: 'planned' | 'blocked';
+  fields: Record<string, unknown>;
+  notes: string[];
+}
+
+export interface AwxProviderSyncPlan {
+  syncPlanId: string;
+  generatedAt: string;
+  mode: 'awx-object-sync-plan';
+  status: 'ready' | 'blocked';
+  execution: 'not-started';
+  boundary: 'awx-object-sync-plan-only';
+  providerId: string | null;
+  baseUrl: string | null;
+  organization: string;
+  project: string;
+  targetKind: SiteSlotKind;
+  siteId: string | null;
+  host: string | null;
+  sshUser: string | null;
+  sshPort: number | null;
+  sshProfileId: string | null;
+  inventory: string;
+  inventoryHost: string | null;
+  credential: string;
+  jobTemplate: string;
+  requiredPlaybook: string;
+  objects: AwxProviderSyncPlanObject[];
+  extraVarsContract: string[];
+  blockedReasons: string[];
+  warnings: string[];
+  nextActions: string[];
+}
 
 export interface RuntimeFeaturePolicyInput {
   featureKey?: string | null;
@@ -1180,7 +1319,9 @@ export interface PermissionGrant {
 export interface LauncherNetworkSnapshotInput {
   installId?: string;
   deviceId?: string;
+  siteId?: string | null;
   userId?: string | null;
+  publicKey?: string | null;
   appId?: string;
   requestId?: string;
 }
@@ -1198,6 +1339,7 @@ export interface LauncherNetworkSnapshot {
     leaseIp: string;
     relayMode: 'h2i';
   };
+  topology: LauncherNetworkTopology;
   capabilities: {
     wireGuard: boolean;
     splitDns: boolean;
@@ -1219,6 +1361,254 @@ export interface LauncherNetworkSnapshot {
     issuer: string;
   };
   issuedAt: string;
+}
+
+export interface LauncherNetworkTopology {
+  model: 'internal-authority-domestic-relay-oversea-access-v1';
+  bootstrap: {
+    order: Array<
+      | 'deploy-oversea-access-if-domestic-needs-egress'
+      | 'deploy-domestic-public-relay-foundation'
+      | 'internal-joins-domestic-relay-as-service-peer'
+      | 'home-enrolls-through-domestic-public-facade'
+      | 'promote-home-to-domestic-wg-relay-primary'
+    >;
+    hdiWithoutRelay: 'bootstrap-proxy-only';
+    steadyStateAccess: 'domestic-wg-relay-primary';
+  };
+  authority: {
+    users: 'internal-user-center';
+    config: 'internal-config-center';
+    mihomo: 'internal-mihomo';
+    dns: 'internal-coredns';
+    release: 'internal-release-center';
+  };
+  homePath: {
+    bootstrap: 'home-to-domestic-public-enroll-proxy';
+    afterEnroll: 'home-to-domestic-wg-relay-to-internal';
+    subscriptionFetch: 'home-through-domestic-h2i-to-internal-mihomo';
+    overseaTraffic: 'home-direct-to-oversea-hysteria2';
+  };
+  homeLease: {
+    mode: 'guest' | 'user';
+    ip: string;
+    cidr: '10.91.0.0/16' | '10.89.0.0/16';
+  };
+  domestic: {
+    siteId: string;
+    role: 'relay-proxy-cache-forwarder';
+    publicIpRequired: true;
+    publicServices: Array<'api-facade' | 'wg-relay' | 'h2i-proxy' | 'snapshot-cache' | 'observability-forwarder'>;
+    gatewayIp: '10.88.0.1';
+    overlayCidrs: string[];
+    configSource: 'internal-signed-snapshot';
+    storesAuthority: false;
+    requiredFor: Array<'enroll-proxy' | 'wg-relay' | 'h2i-proxy' | 'internal-dns' | 'snapshot-cache'>;
+  };
+  internal: {
+    siteId: string;
+    publicIngress: false;
+    baseUrl: string;
+    enrollUrl: string;
+    configSnapshotUrl: string;
+    mihomoSubscriptionBaseUrl: string;
+    requiresEnrollLease: true;
+    relayPeer: {
+      required: true;
+      fixedIp: '10.90.0.10';
+      initiatedBy: 'internal-outbound-to-domestic-public-wg';
+      purpose: 'make-internal-reachable-without-public-ip';
+    };
+  };
+  oversea: {
+    siteId: string;
+    role: 'hysteria2-access-site';
+    subscriptionAuthority: 'internal-mihomo';
+    trafficPath: 'direct-after-subscription';
+  };
+  subscriptions: {
+    mihomo: {
+      authority: 'internal-config-center';
+      siteId: string;
+      baseUrl: string;
+      fetchPath: string;
+      reachableVia: Array<'domestic-wg-relay' | 'h2i-proxy' | 'internal-dns'>;
+      fallback: 'domestic-snapshot-cache';
+    };
+  };
+  relayPlan: {
+    authority: 'internal-config-center';
+    domesticRelay: {
+      siteId: string;
+      interfaceName: 'mx-domestic';
+      listenPort: 51820;
+      gatewayIp: '10.88.0.1';
+      configArtifact: 'mx-domestic-wg-relay.conf';
+      envArtifact: 'mx-domestic-relay.env';
+    };
+    internalServicePeer: {
+      role: 'internal-service';
+      fixedIp: '10.90.0.10';
+      allowedIps: string[];
+      configArtifact: 'mx-internal-service-peer.conf';
+      privateKeyPlacement: 'internal-only';
+      direction: 'internal-outbound-to-domestic-public-wg';
+    };
+    homePeer: {
+      role: 'guest' | 'user';
+      leaseIp: string;
+      cidr: '10.91.0.0/16' | '10.89.0.0/16';
+      allowedIps: string[];
+      publicKey: string | null;
+      publicKeyStatus: 'ready-to-append' | 'pending-public-key';
+      provisionedBy: 'internal-signed-relay-lease';
+      domesticMutation: 'append-peer-after-enroll';
+    };
+    routes: {
+      internalCidrs: string[];
+      dnsServer: '10.88.0.1';
+      subscriptionReachability: 'domestic-wg-relay+h2i-proxy';
+      externalTraffic: 'direct-to-oversea-hysteria2-after-subscription';
+    };
+    gates: {
+      domesticConfigMustNotContainInternalPrivateKey: true;
+      homePublicKeyRequiredForRealPeer: true;
+      bootstrapFacadeOnlyBeforeLease: true;
+      steadyStateRequiresDomesticRelay: true;
+    };
+  };
+  gates: {
+    anonymousEnrollBeforeInternalReachability: true;
+    domesticPublicFacadeOnlyBootstrapsEnroll: true;
+    fixedInternalIpAfterEnroll: true;
+    internalPublicIpRequired: false;
+    internalMustJoinDomesticRelayBeforeHomeCanReachInternal: true;
+    wgRelayBecomesPrimaryAfterEnroll: true;
+    domesticMustNotOwnUsersOrSubscriptions: true;
+    overseaMustNotOwnSubscriptionStore: true;
+  };
+}
+
+export type SiteSlotAccessAccountRole = 'internal' | 'domestic' | 'internal-reserved' | 'h-endpoint' | 'operator';
+
+export interface SiteSlotAccessAccountIssueInput {
+  siteId?: string | null;
+  service?: 'hysteria2' | string | null;
+  accountNames?: string[] | string | null;
+  issueDefaults?: boolean | null;
+  publicHost?: string | null;
+  serverPorts?: string | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface SiteSlotAccessAccount {
+  accountId: string;
+  siteId: string;
+  environment: string;
+  service: 'hysteria2';
+  username: string;
+  role: SiteSlotAccessAccountRole;
+  authToken: string;
+  status: 'active' | 'paused';
+  routingPolicy: 'cn-direct';
+  subscriptionPath: string;
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export interface LauncherNetworkMihomoSiteInput {
+  siteId?: string | null;
+  publicHost?: string | null;
+  serverPorts?: string | null;
+  subscriptionBaseUrl?: string | null;
+  routingPolicy?: 'cn-direct' | string | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface LauncherNetworkMihomoSite {
+  siteId: string;
+  environment: string;
+  mode: 'internal-managed';
+  source: 'site-slot-access-accounts';
+  service: 'hysteria2';
+  publicHost: string | null;
+  serverPorts: string;
+  subscriptionBaseUrl: string;
+  routingPolicy: 'cn-direct';
+  reservedInternalCidrs: string[];
+  domesticGatewayIp: '10.88.0.1';
+  dnsPath: 'wg-relay-internal-dns';
+  reachability: {
+    internalUrlOnly: true;
+    domesticWgRelayRequired: true;
+    h2iRequired: true;
+    notes: string[];
+  };
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export type LauncherNetworkReachabilityStageStatus = 'ready' | 'pending-evidence' | 'blocked';
+export type LauncherNetworkReachabilityOwner = 'internal' | 'oversea' | 'domestic' | 'h-endpoint';
+
+export interface LauncherNetworkReachabilityStage {
+  stageId: string;
+  order: number;
+  owner: LauncherNetworkReachabilityOwner;
+  title: string;
+  status: LauncherNetworkReachabilityStageStatus;
+  dependsOn: string[];
+  requiredEvidence: string[];
+  notes: string[];
+}
+
+export interface LauncherNetworkReachabilityPlan {
+  siteId: string;
+  environment: string;
+  verdict: 'blocked' | 'internal-output-ready' | 'h-endpoint-blocked' | 'h-endpoint-ready';
+  currentBoundary: 'internal-only' | 'domestic-relay' | 'h-endpoint';
+  subscriptionBaseUrl: string;
+  accountSummary: {
+    total: number;
+    internal: number;
+    domestic: number;
+    internalReserved: number;
+    hEndpoint: number;
+  };
+  executionOrder: string[];
+  gates: {
+    domesticWgRelayRequired: true;
+    h2iRequired: true;
+    internalDnsRequired: true;
+    mihomoAuthority: 'internal-config-center';
+    overseaRuntime: 'hysteria2-only';
+    domesticGatewayIp: '10.88.0.1';
+    reservedInternalCidrs: string[];
+  };
+  stages: LauncherNetworkReachabilityStage[];
+  nextActions: string[];
+  generatedAt: string;
+}
+
+export interface SiteSlotAccessAccountIssueResult {
+  site: LauncherNetworkMihomoSite;
+  accounts: SiteSlotAccessAccount[];
+}
+
+export interface MihomoSubscriptionRender {
+  siteId: string;
+  username: string;
+  accountId: string;
+  contentType: 'text/yaml';
+  yaml: string;
+  reachability: LauncherNetworkMihomoSite['reachability'];
+  generatedAt: string;
 }
 
 export type DnsFallbackTarget = 'system-dns' | 'system-proxy' | 'h2o-proxy' | 'direct';

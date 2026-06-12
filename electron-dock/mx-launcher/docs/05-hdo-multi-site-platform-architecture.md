@@ -326,6 +326,99 @@ H 端不应该自己合并多层配置。Internal 生成最终配置快照，Dom
   Gateway、release 和权限策略汇总后的最终策略快照，带签名 digest，供 Launcher
   Network、AppCenter、H2O 和 SDK 使用。
 
+2026-06-11 细化：旧 `electron-server` 里的“创建用户即创建订阅 token、Domestic
+保存 tunnel account、Domestic mihomo 作为订阅 authority”要迁移到 Internal。新路径是：
+
+1. Home 首次只能访问 Domestic public facade，走匿名 enroll 或登录 enroll。
+2. Domestic 只 proxy 到 Internal `/internal/v1/enrollments/anonymous` / identity link，不创建用户、不生成订阅。
+3. Internal 分配 Home lease IP：匿名/访客走 `10.91.0.0/16`，登录用户走 `10.89.0.0/16`。
+4. Launcher Network 根据快照建立 Domestic WG/H2I 基础链路，Internal 固定在可达路径后，Home 才去 Internal 拉配置和 mihomo 订阅。
+5. Internal mihomo/Config Center 生成 Oversea hysteria2 订阅；Home 拿到订阅后，外网流量直接连 Oversea，Internal/Domestic 只负责控制面和内部路径。
+6. Domestic slot 只接收 Internal 下发的 WG relay、H2I proxy、API proxy、snapshot cache、observability forwarder 和必要的 Oversea bootstrap subscription。
+
+Internal 没有公网 IP 时的启动顺序：
+
+1. Internal 仍然可以管理公网 Domestic/Oversea，因为 SSH/AWX/API launch 都是 Internal 主动出站到它们的公网 IP。
+2. Oversea 可以先部署，主要用于外网 access 和 Domestic 无出站时的 bootstrap egress；但 Oversea 不解决 Home -> Internal。
+3. Domestic 必须尽早部署 public relay foundation：public API facade、WG relay、H2I proxy、snapshot cache、observability forwarder。
+4. Internal 作为 service peer 主动连到 Domestic public WG relay，拿固定 service IP，建议先用 `10.90.0.10`。这一步让“无公网 Internal”变成“可通过 Domestic relay 到达的 Internal”。
+5. Home 未 enroll 前只能走 Domestic public API facade 做匿名 enroll / 登录 / 拿 bootstrap snapshot；这个阶段不是完整 HDI，只是 bootstrap proxy。
+6. Home enroll 后拿到 `10.91.0.0/16` 或 `10.89.0.0/16` lease，Launcher Network 建立到 Domestic 的 WG，随后把 Internal 访问模式提升为 `domestic-wg-relay-primary`。
+7. Domestic public API facade 保留为 enroll、故障恢复和 snapshot cache fallback，不作为长期 Internal 主通道。
+
+因此：没有 relay 时没有完整 HDI。可以有短暂的 Domestic public facade bootstrap，但稳定态必须切到 WG relay。H2I 是跑在 Domestic relay 路径上的 Internal 应用访问层，不替代 WG relay 本身。
+
+这个模型在 API 中沉淀为 `LauncherNetworkSnapshot.topology.model =
+internal-authority-domestic-relay-oversea-access-v1`：
+
+| 字段 | 含义 |
+| --- | --- |
+| `authority.users/config/mihomo/dns/release` | 全部指向 Internal：User Center、Config Center、Internal mihomo、CoreDNS、Release Center |
+| `homePath.bootstrap` | `home-to-domestic-public-enroll-proxy`，Home 未入网前只碰 Domestic 门面 |
+| `homePath.afterEnroll` | `home-to-domestic-wg-relay-to-internal`，enroll 后用 Domestic WG/H2I 进入 Internal |
+| `homePath.subscriptionFetch` | `home-through-domestic-h2i-to-internal-mihomo`，订阅 authority 仍是 Internal |
+| `homePath.overseaTraffic` | `home-direct-to-oversea-hysteria2`，订阅拿到后外网流量直连 Oversea |
+| `domestic.gatewayIp` | `10.88.0.1`，Domestic 只作为 relay/proxy/cache/forwarder |
+| `domestic.storesAuthority` | 固定为 `false`，禁止把用户、订阅、权限真相放回 Domestic |
+| `subscriptions.mihomo.fallback` | `domestic-snapshot-cache`，只允许缓存 Internal 签名快照 |
+| `relayPlan.domesticRelay` | Domestic WG relay 的执行目标：`mx-domestic`、`10.88.0.1`、`51820`、`mx-domestic-wg-relay.conf` |
+| `relayPlan.internalServicePeer` | Internal 无公网 IP 时的固定 service peer：`10.90.0.10`，配置文件 `mx-internal-service-peer.conf` 只在 Internal 使用 |
+| `relayPlan.homePeer` | Home enroll 后的 Internal 签名 relay lease：guest 用 `10.91.0.0/16`，user 用 `10.89.0.0/16`，真实 peer append 前必须有 Home WG public key |
+| `relayPlan.gates` | 明确禁止把 Internal private key 下发到 Domestic；未建立 lease 前 Domestic public facade 只做 bootstrap/fallback |
+
+Admin/Worker 层先用 `site-slot.worker-run.domestic-relay-peer-plan` 固化这个边界：
+它只记录 plan-only worker report，验证 Home `publicKey`、`leaseIp`、`10.89/10.91`
+网段和 Domestic-only 约束，并生成将来真实执行用的 `wg set mx-domestic peer ... allowed-ips ...`
+命令证据。这个动作不打开 SSH、不调用 AWX、不写 `/etc/wireguard`，也不会把
+`mx-internal-service-peer.conf` 或 Internal private key 推到 Domestic。
+
+真实 peer append 前先走 `site-slot.worker-run.domestic-relay-readonly-probe`：
+Admin 只返回只读 SSH handoff，检查 `wg show mx-domestic`、`ip route get 10.90.0.10`、
+`wg-quick@mx-domestic` 状态，以及 Domestic 上不得存在
+`/etc/wireguard/mx-internal-service-peer.conf`。这个 probe 不生成 worker report，
+也不执行 SSH；它是后续 gated real append 的前置证据。
+
+只读 probe 和 plan-only report 都被审阅后，Admin 才暴露
+`site-slot.worker-run.domestic-relay-peer-append`。这个动作返回 gated SSH handoff：
+`wg set mx-domestic peer <home-public-key> allowed-ips <lease-ip>/32`，并要求
+`confirmRelayPeerAppend`、`confirmRelayReadOnlyProbeReviewed`、
+`confirmRelayPeerPlanReviewed` 三个确认字段。Internal API 仍不执行 SSH/AWX、不生成
+worker report；默认真实执行由 AWX 接同一条 command 完成，SSH worker 只保留为
+break-glass fallback。命令执行前仍会检查 Domestic 上不存在
+`mx-internal-service-peer.conf`，确保 Internal private key 不会被复制到 Domestic。
+
+默认 AWX 执行前，Admin 先调用
+`site-slot.domestic-relay-peer-append-awx.prepare`，从已确认的 Domestic apply execution
+创建 `awx-shadow` runner session 和 `awx-runner` worker job。这个 prepare 动作只排队和
+记录 gates：要求 `confirmAwxLaunchPrepare`，可记录 approval/change window，但不调用
+AWX launch、不执行 SSH、不写 worker report。之后同一个 job 先走 Domestic readonly probe
+和 peer append handoff，再通过 `site-slot.worker-run.awx-sync-plan` 生成 AWX organization /
+project / inventory / host / credential / job template 的 plan-only 清单。Sync Plan
+只做 Internal 证据和 gate，不修改 AWX。清单 ready 后，先由
+`site-slot.worker-run.awx-credential-sync` 在 `AWX_API_CREDENTIAL_SYNC_ENABLED=true`、
+`confirmAwxCredentialSync=true` 和 AWX token 都满足时，把 Internal 管理的 SSH Profile
+受控同步为 AWX Machine Credential；这个动作会读取 SSH Profile 的 `identityFile`，
+但返回证据只保留 profile、credential 名称和操作摘要，不回显私钥内容。随后
+`site-slot.worker-run.awx-object-sync` 在 `AWX_API_OBJECT_SYNC_ENABLED=true`、
+`confirmAwxSync=true` 和 AWX token 都满足时，才会调用 AWX API 创建/更新
+organization、project、inventory、host 和 job template，并引用已同步的 Machine
+Credential。对象同步完成后才通过 `site-slot.worker-run.awx-launch` 进入 AWX API launch。
+
+SSH fallback 仍可调用
+`site-slot.domestic-relay-peer-append-ssh.prepare`，从已确认的 Domestic apply execution
+创建 `remote-ssh` runner session 和 worker job。这个 prepare 动作只排队和记录 gates：
+要求 `confirmRemoteExecution`、`confirmRelayPeerAppendSshPrepare`、`approvalId` 和
+change window；默认 shadow 下如果 `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED` 未开启，
+它会返回 blocked runner session 且不会创建 job，也不会触发 SSH/AWX。
+
+真实 SSH 执行入口是 `site-slot.worker-run.domestic-relay-peer-append-ssh`。它复用
+remote SSH gate，并额外要求 `confirmRemoteExecution` 和
+`confirmRelayPeerAppendSsh`。只要 job 不是 `remote-ssh`、缺 managed SSH profile、缺
+identity/known_hosts，或远程执行 env gate 未开启，该动作都会返回 `blocked`，不打开
+SSH、不写 worker report。只有 Internal operator 显式开启远程执行 gate，并使用带 SSH
+profile 的 remote worker job 后，它才会执行同一条 `wg set` 命令，并把 stdout/stderr、
+diagnosis、tcp probe 和 post-append evidence 记录到 worker report。
+
 ```json
 {
   "snapshotId": "cfgsnap_...",
@@ -337,7 +430,37 @@ H 端不应该自己合并多层配置。Internal 生成最终配置快照，Dom
   "config": {
     "serverBaseUrl": "https://d.example.com",
     "defaultMode": "visitor",
-    "relayMode": "h2i"
+    "relayMode": "h2i",
+    "launcherNetwork": {
+      "model": "internal-authority-domestic-relay-oversea-access-v1",
+      "bootstrap": {
+        "hdiWithoutRelay": "bootstrap-proxy-only",
+        "steadyStateAccess": "domestic-wg-relay-primary"
+      },
+      "homeLease": {
+        "mode": "guest",
+        "ip": "10.91.x.y",
+        "cidr": "10.91.0.0/16"
+      },
+      "domestic": {
+        "siteId": "domestic-main",
+        "gatewayIp": "10.88.0.1",
+        "storesAuthority": false
+      },
+      "internal": {
+        "publicIngress": false,
+        "relayPeer": {
+          "fixedIp": "10.90.0.10",
+          "initiatedBy": "internal-outbound-to-domestic-public-wg"
+        },
+        "enrollUrl": "https://internal.example.com/internal/v1/enrollments/anonymous",
+        "mihomoSubscriptionBaseUrl": "https://internal.example.com/internal/v1/site-slots/oversea-main/subscriptions/hysteria2"
+      },
+      "oversea": {
+        "siteId": "oversea-main",
+        "trafficPath": "direct-after-subscription"
+      }
+    }
   },
   "resources": [
     {

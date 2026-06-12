@@ -425,6 +425,7 @@ dns:
     - 223.5.5.5
     - 119.29.29.29
     - 1.1.1.1
+    - 8.8.8.8
   nameserver:
     - https://dns.alidns.com/dns-query
     - https://doh.pub/dns-query
