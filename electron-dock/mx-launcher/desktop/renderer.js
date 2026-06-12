@@ -138,11 +138,10 @@ const overseaTerminalTemplates = {
     'docker compose version || docker-compose version'
   ].join('; '),
   stackStatus: [
-    'set -eu',
-    'echo "mx-oversea-stack-status"',
-    'cd /opt/mx/current/hysteria2-access-stack 2>/dev/null || cd /opt/mx/releases/oversea-access-stack 2>/dev/null || { echo "access stack missing"; exit 2; }',
-    './manage.sh status || true',
-    'docker ps --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}" || true'
+    'set -u',
+    'echo "mx-oversea-docker-hysteria2-status"',
+    'cd /opt/mx/current/hysteria2-access-stack 2>/dev/null || cd /opt/mx/releases/oversea-access-stack 2>/dev/null || { echo "access stack missing; run Install / Sync before Stack Status"; exit 0; }',
+    'if grep -q "docker-status" ./manage.sh; then ./manage.sh docker-status --soft || true; else echo "legacy access stack artifact; run Install / Sync before Stack Status"; ./manage.sh status || true; fi'
   ].join('; ')
 };
 
@@ -1134,7 +1133,7 @@ async function ensureSelectedOversea() {
     return;
   }
   state.overseaEnsureBusy = true;
-  state.overseaEnsureFeedback = { kind: 'info', message: overviewSite?.status === 'installed' ? 'Refreshing Oversea state' : 'Installing and syncing Oversea' };
+  state.overseaEnsureFeedback = { kind: 'info', message: overviewSite?.status === 'installed' ? 'Syncing Oversea remote state' : 'Installing and syncing Oversea' };
   state.overseaTerminalResult = {
     status: 'running',
     command: `Install / Sync ${siteId}`,
@@ -1147,12 +1146,12 @@ async function ensureSelectedOversea() {
   };
   renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
   try {
-    const shouldExecute = overviewSite?.status !== 'installed';
     const payload = await fetchJson(`/internal/v1/admin/oversea/${encodeURIComponent(siteId)}/ensure`, {
       method: 'POST',
       body: {
-        executeRemote: shouldExecute,
-        confirmInstall: shouldExecute,
+        executeRemote: true,
+        confirmInstall: true,
+        force: true,
         internalBaseUrl: normalizedServerBase(),
         requestedBy: 'desktop-admin',
         requestId: `desktop-oversea-ensure-${Date.now()}`
@@ -2816,7 +2815,7 @@ function renderOverseaSiteDetail(site) {
       : status === 'draft' || !site.sshProfile?.profileId
         ? 'Save Profile First'
         : installed
-          ? 'Refresh State'
+          ? 'Sync Remote'
           : 'Install / Sync';
   const services = asArray(site.services);
   const subscriptions = asArray(site.subscriptions);
@@ -5091,12 +5090,17 @@ function actionGuidanceText(action) {
     'site-slot.preflight.create': '先做 preflight：只创建检查执行，不会改远端主机。',
     'site-slot.apply.confirm': '确认 apply manifest：这是进入部署/runner 前的审批点。',
     'site-slot.runner.awx-shadow': '创建 AWX runner session，后续会挂 worker job 并同步 AWX objects。',
+    'site-slot.runner.remote-ssh': '创建 Remote SSH runner session，由 Internal 直接把 slot artifact 和配置下发到远端。',
     'site-slot.runner.simulate': '创建模拟 runner session，用于本机 shadow 验证。',
-    'site-slot.worker-job.create': '创建 worker job。job ready 后会出现 AWX Sync Plan / Credential / Objects / Launch。',
+    'site-slot.worker-job.create': '创建 worker job。Oversea 默认走 Remote SSH handoff；AWX 保留在高级 provider 面。',
     'site-slot.worker-run.awx-sync-plan': '生成 AWX 对象计划，先预览 inventory、credential、job template 名称。',
     'site-slot.worker-run.awx-credential-sync': '把当前 SSH Profile 写成 AWX Machine Credential，需要确认和 API token。',
     'site-slot.worker-run.awx-object-sync': '在 AWX 中创建/更新 organization、project、inventory、host 和 job template。',
     'site-slot.worker-run.awx-launch': '提交 AWX job，真正执行 Ansible 并把结果回写成 worker report。',
+    'site-slot.worker-run.remote-ssh-gate': '先检查 Remote SSH 执行边界和 SSH Profile，不会改远端主机。',
+    'site-slot.worker-run.remote-ssh-readonly-probe': '通过 SSH 做只读探测，收集 OS、Docker、磁盘和访问栈状态证据。',
+    'site-slot.worker-run.remote-ssh-execute': '通过 Remote SSH 执行 Internal-controlled artifact push 和远端 worker，同步 Oversea Docker hysteria2。',
+    'site-slot.worker-run.artifact-push-remote-ssh-plan': '生成 Remote SSH artifact push 计划报告，便于审计下发内容。',
     'site-slot.domestic-relay-peer-append-awx.prepare': '为 Domestic relay peer append 准备 AWX worker job。',
     'site-slot.worker-run.domestic-relay-readonly-probe': '先只读检查 Domestic WG relay 状态。',
     'site-slot.worker-run.domestic-relay-peer-append': '生成 Home peer append handoff，确认 lease/public key 和安全边界。'
@@ -5114,9 +5118,14 @@ function defaultPreferredAction(actions) {
   const priority = [
     'site-slot.preflight.create',
     'site-slot.apply.confirm',
+    'site-slot.runner.remote-ssh',
     'site-slot.runner.awx-shadow',
     'site-slot.runner.simulate',
     'site-slot.worker-job.create',
+    'site-slot.worker-run.remote-ssh-gate',
+    'site-slot.worker-run.remote-ssh-readonly-probe',
+    'site-slot.worker-run.remote-ssh-execute',
+    'site-slot.worker-run.artifact-push-remote-ssh-plan',
     'site-slot.worker-run.awx-sync-plan',
     'site-slot.worker-run.awx-credential-sync',
     'site-slot.worker-run.awx-object-sync',
@@ -5124,8 +5133,6 @@ function defaultPreferredAction(actions) {
     'site-slot.worker-run.awx-shadow',
     'site-slot.domestic-relay-peer-append-awx.prepare',
     'site-slot.domestic-relay-peer-append-ssh.prepare',
-    'site-slot.worker-run.remote-ssh-gate',
-    'site-slot.runner.remote-ssh',
     'site-slot.worker-run.domestic-relay-readonly-probe',
     'site-slot.worker-run.domestic-relay-peer-append',
     'site-slot.worker-run.domestic-relay-peer-append-ssh'
@@ -5569,7 +5576,8 @@ function nextActionFocusFromResult(action, payload) {
     return { jobId, actionIds: ['site-slot.worker-run.awx-launch'] };
   }
   const nextByActionId = {
-    'site-slot.worker-run.remote-ssh-gate': ['site-slot.worker-run.domestic-relay-readonly-probe', 'site-slot.worker-run.remote-ssh-readonly-probe'],
+    'site-slot.worker-run.remote-ssh-gate': ['site-slot.worker-run.domestic-relay-readonly-probe', 'site-slot.worker-run.remote-ssh-readonly-probe', 'site-slot.worker-run.remote-ssh-execute'],
+    'site-slot.worker-run.remote-ssh-readonly-probe': ['site-slot.worker-run.remote-ssh-execute', 'site-slot.worker-run.artifact-push-remote-ssh-plan'],
     'site-slot.worker-run.domestic-relay-readonly-probe': ['site-slot.worker-run.domestic-relay-peer-append'],
     'site-slot.worker-run.domestic-relay-peer-append': ['site-slot.worker-run.awx-sync-plan', 'site-slot.worker-run.awx-credential-sync', 'site-slot.worker-run.awx-object-sync', 'site-slot.worker-run.awx-launch', 'site-slot.worker-run.awx-shadow', 'site-slot.worker-run.domestic-relay-peer-append-ssh'],
     'site-slot.worker-run.awx-sync-plan': ['site-slot.worker-run.awx-credential-sync', 'site-slot.worker-run.awx-object-sync', 'site-slot.worker-run.awx-launch', 'site-slot.worker-run.awx-shadow'],

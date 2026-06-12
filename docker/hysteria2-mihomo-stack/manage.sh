@@ -54,7 +54,7 @@ Examples:
   sudo bash ./docker/hysteria2-mihomo-stack/manage.sh check-subscription-auth --password pass
   sudo bash ./docker/hysteria2-mihomo-stack/manage.sh add-user --names intelligent01,intelligent02
   sudo bash ./docker/hysteria2-mihomo-stack/manage.sh del-user --names intelligent02
-  sudo bash ./docker/hysteria2-mihomo-stack/manage.sh set-limit --names intelligent01 --down-ceil "3 Mbps" --up-ceil "30 Mbps"
+  sudo bash ./docker/hysteria2-mihomo-stack/manage.sh set-limit --names intelligent01 --down-ceil "30 Mbps" --up-ceil "30 Mbps"
   sudo bash ./docker/hysteria2-mihomo-stack/manage.sh reconcile-from-json --state-file /tmp/tunnel-state.json
 EOF
 }
@@ -209,11 +209,68 @@ normalize_routing_mode_value() {
 }
 
 default_hy2_download_rate() {
-	echo "3 Mbps"
+	echo "30 Mbps"
 }
 
 default_hy2_upload_rate() {
 	echo "30 Mbps"
+}
+
+default_hy2_server_ports() {
+	echo "51288"
+}
+
+default_hy2_peer_dns() {
+	echo "223.5.5.5,119.29.29.29,1.1.1.1,8.8.8.8"
+}
+
+default_hy2_server_ports_value() {
+	case "${HY2_SERVER_PORTS:-}" in
+		""|"52120-52159") default_hy2_server_ports ;;
+		*) echo "$HY2_SERVER_PORTS" ;;
+	esac
+}
+
+default_hy2_peer_dns_value() {
+	case "${HY2_PEER_DNS:-}" in
+		""|"1.1.1.1,8.8.8.8") default_hy2_peer_dns ;;
+		*) echo "$HY2_PEER_DNS" ;;
+	esac
+}
+
+default_hy2_hop_interval_value() {
+	local selected_ports="${1:-${HY2_SERVER_PORTS:-}}"
+
+	if [[ "$selected_ports" != *-* ]]; then
+		echo "0"
+	elif [[ -z "${HY2_HOP_INTERVAL_SECONDS:-}" ]]; then
+		echo "0"
+	else
+		echo "$HY2_HOP_INTERVAL_SECONDS"
+	fi
+}
+
+default_hy2_server_download_rate_value() {
+	case "${HY2_SERVER_BANDWIDTH_DOWN:-}" in
+		""|"3 Mbps") default_hy2_download_rate ;;
+		*) echo "$HY2_SERVER_BANDWIDTH_DOWN" ;;
+	esac
+}
+
+default_hy2_user_download_rate_value() {
+	local fallback="${1:-$(default_hy2_download_rate)}"
+	case "${HY2_DEFAULT_DOWN:-}" in
+		""|"3 Mbps") echo "$fallback" ;;
+		*) echo "$HY2_DEFAULT_DOWN" ;;
+	esac
+}
+
+port_hop_status() {
+	if [[ "${HY2_SERVER_PORTS:-}" != *-* || -z "${HY2_HOP_INTERVAL_SECONDS:-}" || "${HY2_HOP_INTERVAL_SECONDS:-}" == "0" ]]; then
+		echo "disabled"
+	else
+		echo "${HY2_HOP_INTERVAL_SECONDS}s"
+	fi
 }
 
 load_env() {
@@ -841,9 +898,10 @@ status_command() {
 	echo "Subscription auth user: ${HY2_EXPORT_USER:-unset}"
 	echo "Subscription auth hash: $(subscription_auth_hash_state)"
 	echo "Routing mode: ${HY2_MIHOMO_ROUTING_MODE:-unset}"
+	echo "Peer DNS servers: ${HY2_PEER_DNS:-unset}"
 	echo "TLS server name: ${HY2_TLS_SERVER_NAME:-unset}"
 	echo "TLS fingerprint: ${HY2_TLS_FINGERPRINT:-unset}"
-	echo "Port hop interval: ${HY2_HOP_INTERVAL_SECONDS:-unset}s"
+	echo "Port hop interval: $(port_hop_status)"
 	echo "Per-client download cap: ${HY2_SERVER_BANDWIDTH_DOWN:-unset}"
 	echo "Per-client upload cap: ${HY2_SERVER_BANDWIDTH_UP:-unset}"
 	echo
@@ -932,7 +990,7 @@ setup_command() {
 	users_default="${users_default:-user01,user02,user03}"
 
 	host="$(prompt_default "Hysteria public host/IP" "${HY2_SERVER_HOST:-$(old_wg_env_value WG_SERVER_HOST || echo 203.0.113.10)}")"
-	port_spec="$(prompt_default "Hysteria UDP port or range" "${HY2_SERVER_PORTS:-52120-52159}")"
+	port_spec="$(prompt_default "Hysteria UDP port" "$(default_hy2_server_ports_value)")"
 	sub_port="$(prompt_default "Subscription TCP port" "${HY2_EXPORT_FALLBACK_PORT:-$(old_wg_env_value WG_EXPORT_FALLBACK_PORT || echo 3434)}")"
 	initial_users_csv="$(prompt_default "Initial users (comma-separated)" "$users_default")"
 	mapfile -t initial_names < <(parse_names_csv "$initial_users_csv")
@@ -946,13 +1004,13 @@ setup_command() {
 	[[ -n "$default_auth_user" ]] || default_auth_user="${initial_names[0]}"
 	auth_user="$(prompt_default "Subscription username" "$default_auth_user")"
 	auth_pass="$(prompt_password "Subscription password")"
-	peer_dns="$(prompt_default "Peer DNS servers" "${HY2_PEER_DNS:-1.1.1.1,8.8.8.8}")"
+	peer_dns="$(prompt_default "Peer DNS servers" "$(default_hy2_peer_dns_value)")"
 	routing_mode="$(normalize_routing_mode_value "$(prompt_default "Mihomo routing mode (cn-direct/global)" "${HY2_MIHOMO_ROUTING_MODE:-cn-direct}")")"
 	tls_sni="$(normalize_optional_value "$(prompt_default "TLS server name / SNI ('-' to disable)" "$(default_tls_sni_for_host "$host" "${HY2_TLS_SERVER_NAME:-}")")")"
-	hop_interval="$(prompt_default "Port hop interval seconds" "${HY2_HOP_INTERVAL_SECONDS:-30}")"
-	server_down="$(prompt_default "Server-side per-client download cap" "${HY2_SERVER_BANDWIDTH_DOWN:-$(default_hy2_download_rate)}")"
+	hop_interval="$(prompt_default "Port hop interval seconds" "$(default_hy2_hop_interval_value "$port_spec")")"
+	server_down="$(prompt_default "Server-side per-client download cap" "$(default_hy2_server_download_rate_value)")"
 	server_up="$(prompt_default "Server-side per-client upload cap" "${HY2_SERVER_BANDWIDTH_UP:-$(default_hy2_upload_rate)}")"
-	initial_down="$(prompt_default "Default per-user download hint" "${HY2_DEFAULT_DOWN:-${server_down:-$(default_hy2_download_rate)}}")"
+	initial_down="$(prompt_default "Default per-user download hint" "$(default_hy2_user_download_rate_value "${server_down:-$(default_hy2_download_rate)}")")"
 	initial_up="$(prompt_default "Default per-user upload hint" "${HY2_DEFAULT_UP:-${server_up:-$(default_hy2_upload_rate)}}")"
 	masq_url="$(normalize_optional_value "$(prompt_default "Masquerade URL ('-' to disable)" "${HY2_MASQUERADE_URL:-https://news.ycombinator.com/}")")"
 	obfs_password="$(normalize_optional_value "$(prompt_default "Salamander obfs password ('-' to disable)" "${HY2_OBFS_PASSWORD:-}")")"
@@ -1013,7 +1071,7 @@ reconfigure_command() {
 	load_env
 
 	host="$(prompt_default "Hysteria public host/IP" "${HY2_SERVER_HOST:-}")"
-	port_spec="$(prompt_default "Hysteria UDP port or range" "${HY2_SERVER_PORTS:-52120-52159}")"
+	port_spec="$(prompt_default "Hysteria UDP port" "$(default_hy2_server_ports_value)")"
 	sub_port="$(prompt_default "Subscription TCP port" "${HY2_EXPORT_FALLBACK_PORT:-3434}")"
 	auth_user="$(prompt_default "Subscription username" "${HY2_EXPORT_USER:-download}")"
 	rotate_auth="$(prompt_yes_no "Rotate subscription password?" "no")"
@@ -1022,13 +1080,13 @@ reconfigure_command() {
 		hash="$(hash_password "$auth_pass")"
 		set_env_value HY2_EXPORT_PASSWORD_HASH "$hash"
 	fi
-	peer_dns="$(prompt_default "Peer DNS servers" "${HY2_PEER_DNS:-1.1.1.1,8.8.8.8}")"
+	peer_dns="$(prompt_default "Peer DNS servers" "$(default_hy2_peer_dns_value)")"
 	routing_mode="$(normalize_routing_mode_value "$(prompt_default "Mihomo routing mode (cn-direct/global)" "${HY2_MIHOMO_ROUTING_MODE:-cn-direct}")")"
 	tls_sni="$(normalize_optional_value "$(prompt_default "TLS server name / SNI ('-' to disable)" "$(default_tls_sni_for_host "$host" "${HY2_TLS_SERVER_NAME:-}")")")"
-	hop_interval="$(prompt_default "Port hop interval seconds" "${HY2_HOP_INTERVAL_SECONDS:-30}")"
-	server_down="$(prompt_default "Server-side per-client download cap" "${HY2_SERVER_BANDWIDTH_DOWN:-$(default_hy2_download_rate)}")"
+	hop_interval="$(prompt_default "Port hop interval seconds" "$(default_hy2_hop_interval_value "$port_spec")")"
+	server_down="$(prompt_default "Server-side per-client download cap" "$(default_hy2_server_download_rate_value)")"
 	server_up="$(prompt_default "Server-side per-client upload cap" "${HY2_SERVER_BANDWIDTH_UP:-$(default_hy2_upload_rate)}")"
-	down_default="$(prompt_default "Default per-user download hint" "${HY2_DEFAULT_DOWN:-${server_down:-$(default_hy2_download_rate)}}")"
+	down_default="$(prompt_default "Default per-user download hint" "$(default_hy2_user_download_rate_value "${server_down:-$(default_hy2_download_rate)}")")"
 	up_default="$(prompt_default "Default per-user upload hint" "${HY2_DEFAULT_UP:-${server_up:-$(default_hy2_upload_rate)}}")"
 	masq_url="$(normalize_optional_value "$(prompt_default "Masquerade URL ('-' to disable)" "${HY2_MASQUERADE_URL:-https://news.ycombinator.com/}")")"
 	obfs_password="$(normalize_optional_value "$(prompt_default "Salamander obfs password ('-' to disable)" "${HY2_OBFS_PASSWORD:-}")")"

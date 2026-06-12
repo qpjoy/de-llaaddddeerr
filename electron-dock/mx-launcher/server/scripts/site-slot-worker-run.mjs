@@ -1213,9 +1213,9 @@ function buildSshProfile(job, managedSshProfile) {
     strictHostKeyChecking: strictHostKeyCheckingValue(
       stringEnvOrProfile('SITE_SLOT_SSH_STRICT_HOST_KEY_CHECKING', raw.strictHostKeyChecking, 'yes')
     ),
-    connectTimeoutSeconds: positiveInt(
-      stringEnvOrProfile('SITE_SLOT_SSH_CONNECT_TIMEOUT_SECONDS', raw.connectTimeoutSeconds, '10'),
-      10
+    connectTimeoutSeconds: Math.max(
+      30,
+      positiveInt(stringEnvOrProfile('SITE_SLOT_SSH_CONNECT_TIMEOUT_SECONDS', raw.connectTimeoutSeconds, '30'), 30)
     ),
     batchMode: yesNoValue(stringEnvOrProfile('SITE_SLOT_SSH_BATCH_MODE', raw.batchMode, 'yes'))
   };

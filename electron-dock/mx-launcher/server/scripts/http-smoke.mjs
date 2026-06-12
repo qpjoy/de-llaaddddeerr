@@ -24,6 +24,20 @@ const checks = [
     assert: (body) => body && body.ok === true && body.service === 'mx-launcher-server'
   },
   {
+    name: 'large evidence body accepted',
+    path: '/internal/v1/observability/logs',
+    method: 'POST',
+    body: () => ({
+      entries: [{
+        timestamp: new Date().toISOString(),
+        level: 'info',
+        source: 'http-smoke-body-limit',
+        message: 'x'.repeat(160000)
+      }]
+    }),
+    assert: (body) => body?.accepted === 1
+  },
+  {
     name: 'app-center apps',
     path: '/internal/v1/app-center/apps',
     assert: (body) => Array.isArray(body?.apps) && body.apps.some((app) => app.appId === 'h2o')
@@ -95,7 +109,11 @@ const checks = [
         && topology?.gates?.internalPublicIpRequired === false
         && topology?.gates?.internalMustJoinDomesticRelayBeforeHomeCanReachInternal === true
         && topology?.gates?.wgRelayBecomesPrimaryAfterEnroll === true
-        && topology?.oversea?.subscriptionAuthority === 'internal-mihomo';
+        && topology?.oversea?.subscriptionAuthority === 'internal-mihomo'
+        && topology?.oversea?.healthEvidenceOutlet?.baseUrl === 'http://oversea.example.com:3434'
+        && topology?.oversea?.healthEvidenceOutlet?.healthPath === '/healthz'
+        && topology?.oversea?.healthEvidenceOutlet?.evidencePath === '/clients.csv'
+        && topology?.oversea?.healthEvidenceOutlet?.purpose === 'health-and-evidence';
     }
   },
   {
@@ -560,6 +578,7 @@ const checks = [
       const configureAccess = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'configure-oversea-access');
       const publishSubscription = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'publish-internal-subscription');
       const deployServices = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'deploy-slot-services');
+      const syncInternalConfig = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'sync-internal-config');
       const deploymentCommands = body?.plan?.deploymentPhases?.flatMap((phase) => phase.commands ?? []) ?? [];
       return body?.plan?.kind === 'oversea'
         && body?.plan?.ssh?.profileId === state.sshProfileId
@@ -580,6 +599,8 @@ const checks = [
         && configureAccess?.commands?.some((command) => command.includes('HY2_MIHOMO_ROUTING_MODE=cn-direct') && command.includes('HY2_RESERVED_INTERNAL_CIDRS=10.88.0.0/16,10.89.0.0/16,10.90.0.0/16,10.91.0.0/16') && command.includes('HY2_DOMESTIC_GATEWAY_IP=10.88.0.1'))
         && configureAccess?.commands?.some((command) => command.includes('base64 -d') && command.includes('tunnel-state.json'))
         && configureAccess?.commands?.some((command) => command.includes('reconcile-from-json') && command.includes('--mode hysteria2-only'))
+        && configureAccess?.commands?.some((command) => command.includes('./manage.sh sync-internal-defaults'))
+        && configureAccess?.commands?.some((command) => command.includes('./manage.sh docker-status'))
         && configureAccess?.commands?.some((command) => command.includes('@qpjoy/tunnel-cli') || command.includes('qp-tunnel-cli register'))
         && publishSubscription?.commands?.some((command) => command.includes('domesticBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/oversea-main-domestic.yaml'))
         && publishSubscription?.commands?.some((command) => command.includes('internalBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/oversea-main-internal.yaml'))
@@ -587,6 +608,9 @@ const checks = [
         && deployServices?.commands?.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-services.tar.gz'))
         && deployServices?.commands?.some((command) => command.includes('/opt/mx/incoming/mx-oversea-services.tar.gz'))
         && deployServices?.commands?.some((command) => command.includes('MX_SITE_ROLE=oversea') && command.includes('LOCAL_STACK_PATH=/opt/mx/current/hysteria2-access-stack') && command.includes('MX_ACCESS_RUNTIME=hysteria2-only'))
+        && deployServices?.commands?.some((command) => command.includes('slot services placeholder; no Docker services selected'))
+        && syncInternalConfig?.commands?.some((command) => command.includes('overseaConfigDelivery=internal-pushed') && command.includes('remoteCurl=skipped'))
+        && !syncInternalConfig?.commands?.some((command) => command.includes('ssh ') && command.includes('/healthz'))
         && !deploymentCommands.some((command) => command.includes('git pull') || command.includes('git clone') || command.includes('./docker/'));
     }
   },
@@ -598,6 +622,7 @@ const checks = [
       issueDefaults: true,
       publicHost: state.overseaHost,
       serverPorts: '51288',
+      tlsFingerprint: 'D6:55:9C:55:7C:BF:F7:F1:D1:EE:0C:65:18:8E:90:A1:50:66:1F:70:F8:71:1D:16:50:E9:D2:B2:48:DD:00:58',
       requestedBy: 'http-smoke',
       requestId: 'http-smoke-oversea-access-accounts'
     }),
@@ -605,6 +630,8 @@ const checks = [
       state.overseaDomesticAccount = 'oversea-main-domestic';
       return body?.site?.siteId === 'oversea-main'
         && body?.site?.mode === 'internal-managed'
+        && body?.site?.serverPorts === '51288'
+        && body?.site?.tlsFingerprint === 'D6:55:9C:55:7C:BF:F7:F1:D1:EE:0C:65:18:8E:90:A1:50:66:1F:70:F8:71:1D:16:50:E9:D2:B2:48:DD:00:58'
         && body?.site?.reachability?.domesticWgRelayRequired === true
         && Array.isArray(body?.accounts)
         && body.accounts.length >= 11
@@ -652,6 +679,18 @@ const checks = [
     assert: (body) => body.contentType?.includes('text/yaml')
       && body.text.includes('type: hysteria2')
       && body.text.includes('mode: rule')
+      && body.text.includes('log-level: info')
+      && body.text.includes('geodata-mode: true')
+      && body.text.includes('port: 51288')
+      && !body.text.includes('port: 52120')
+      && body.text.includes('down: "30 Mbps"')
+      && body.text.includes('up: "30 Mbps"')
+      && body.text.includes('fingerprint: "D6:55:9C:55:7C:BF:F7:F1:D1:EE:0C:65:18:8E:90:A1:50:66:1F:70:F8:71:1D:16:50:E9:D2:B2:48:DD:00:58"')
+      && body.text.includes('alpn:')
+      && body.text.includes('- h3')
+      && body.text.includes('DOMAIN-SUFFIX,local,DIRECT')
+      && body.text.includes('IP-CIDR,192.168.0.0/16,DIRECT,no-resolve')
+      && body.text.includes('GEOSITE,CN,DIRECT')
       && body.text.includes('GEOIP,CN,DIRECT')
       && body.text.includes('10.88.0.0/16')
       && body.text.includes('oversea-main-hysteria2')

@@ -1,13 +1,20 @@
 import 'reflect-metadata';
 
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 
 import { AppModule } from './app.module.js';
 import { RUNTIME_CONFIG } from './tokens.js';
 import type { RuntimeConfig } from './types.js';
 
-const app = await NestFactory.create(AppModule);
+const httpBodyLimit = process.env.MX_HTTP_BODY_LIMIT || '10mb';
+const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+  bodyParser: false
+});
 const config = app.get<RuntimeConfig>(RUNTIME_CONFIG);
+
+app.useBodyParser('json', { limit: httpBodyLimit });
+app.useBodyParser('urlencoded', { limit: httpBodyLimit, extended: true });
 
 app.enableCors({
   origin: '*',
@@ -26,5 +33,6 @@ console.log(JSON.stringify({
   siteId: config.siteId,
   siteRole: config.siteRole,
   enabledModules: config.enabledModules,
+  httpBodyLimit,
   address: `http://${config.host}:${config.port}`
 }));

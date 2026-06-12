@@ -134,6 +134,7 @@ import {
   introspectUserCenterToken,
   introspectShadowToken,
   normalizeTestStatus,
+  normalizeLauncherNetworkMihomoSite,
   normalizeUpdatePolicy,
   releasePolicyByKind,
   renderHysteria2MihomoSubscription,
@@ -965,6 +966,7 @@ export class PostgresStore implements PlatformStore {
       siteId,
       publicHost: input.publicHost,
       serverPorts: input.serverPorts,
+      tlsFingerprint: input.tlsFingerprint,
       requestedBy: input.requestedBy,
       requestId: input.requestId
     });
@@ -1027,7 +1029,8 @@ export class PostgresStore implements PlatformStore {
   }
 
   async getLauncherNetworkMihomoSite(siteId: string): Promise<LauncherNetworkMihomoSite | null> {
-    return this.getRecord<LauncherNetworkMihomoSite>('launcher-network-mihomo-site', siteId);
+    const site = await this.getRecord<LauncherNetworkMihomoSite>('launcher-network-mihomo-site', siteId);
+    return site ? normalizeLauncherNetworkMihomoSite(site) : null;
   }
 
   async getLauncherNetworkMihomoReachability(siteId: string): Promise<LauncherNetworkReachabilityPlan | null> {
@@ -1785,6 +1788,7 @@ export class PostgresStore implements PlatformStore {
     const overseaConfigureAccess = overseaSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'configure-oversea-access');
     const overseaPublishSubscription = overseaSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'publish-internal-subscription');
     const overseaDeployServices = overseaSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'deploy-slot-services');
+    const overseaSyncInternalConfig = overseaSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'sync-internal-config');
     const overseaDeploymentCommands = overseaSlotPlan.deploymentPhases.flatMap((phase) => phase.commands);
     if (
       overseaSlotPlan.kind !== 'oversea'
@@ -1800,6 +1804,8 @@ export class PostgresStore implements PlatformStore {
       || !overseaConfigureAccess?.commands.some((command) => command.includes('HY2_MIHOMO_ROUTING_MODE=cn-direct') && command.includes('HY2_RESERVED_INTERNAL_CIDRS=10.88.0.0/16,10.89.0.0/16,10.90.0.0/16,10.91.0.0/16') && command.includes('HY2_DOMESTIC_GATEWAY_IP=10.88.0.1'))
       || !overseaConfigureAccess?.commands.some((command) => command.includes('base64 -d') && command.includes('tunnel-state.json'))
       || !overseaConfigureAccess?.commands.some((command) => command.includes('reconcile-from-json') && command.includes('--mode hysteria2-only'))
+      || !overseaConfigureAccess?.commands.some((command) => command.includes('./manage.sh sync-internal-defaults'))
+      || !overseaConfigureAccess?.commands.some((command) => command.includes('./manage.sh docker-status'))
       || !overseaConfigureAccess?.commands.some((command) => command.includes('@qpjoy/tunnel-cli') || command.includes('qp-tunnel-cli register'))
       || !overseaPublishSubscription?.commands.some((command) => command.includes('domesticBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/oversea-sg-1-domestic.yaml'))
       || !overseaPublishSubscription?.commands.some((command) => command.includes('internalBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/oversea-sg-1-internal.yaml'))
@@ -1807,6 +1813,9 @@ export class PostgresStore implements PlatformStore {
       || !overseaDeployServices?.commands.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-services.tar.gz'))
       || !overseaDeployServices?.commands.some((command) => command.includes('/opt/mx/incoming/mx-oversea-services.tar.gz'))
       || !overseaDeployServices?.commands.some((command) => command.includes('/opt/mx/current/oversea') && command.includes('LOCAL_STACK_PATH=/opt/mx/current/hysteria2-access-stack') && command.includes('MX_ACCESS_RUNTIME=hysteria2-only'))
+      || !overseaDeployServices?.commands.some((command) => command.includes('slot services placeholder; no Docker services selected'))
+      || !overseaSyncInternalConfig?.commands.some((command) => command.includes('overseaConfigDelivery=internal-pushed') && command.includes('remoteCurl=skipped'))
+      || overseaSyncInternalConfig?.commands.some((command) => command.includes('ssh ') && command.includes('/healthz'))
       || overseaDeploymentCommands.some((command) => command.includes('git pull') || command.includes('git clone') || command.includes('./docker/'))
     ) {
       throw new Error('Oversea slot plan did not include access stack');
@@ -1816,6 +1825,7 @@ export class PostgresStore implements PlatformStore {
       siteId: overseaSlotPlan.siteId,
       publicHost: overseaSlotPlan.host,
       serverPorts: '51288',
+      tlsFingerprint: 'D6:55:9C:55:7C:BF:F7:F1:D1:EE:0C:65:18:8E:90:A1:50:66:1F:70:F8:71:1D:16:50:E9:D2:B2:48:DD:00:58',
       issueDefaults: true,
       requestedBy: 'platform-kernel-smoke',
       requestId: 'smoke-oversea-access-accounts'
@@ -1826,8 +1836,20 @@ export class PostgresStore implements PlatformStore {
     );
     if (
       overseaAccounts.site.reachability.domesticWgRelayRequired !== true
+      || overseaAccounts.site.serverPorts !== '51288'
+      || overseaAccounts.site.tlsFingerprint !== 'D6:55:9C:55:7C:BF:F7:F1:D1:EE:0C:65:18:8E:90:A1:50:66:1F:70:F8:71:1D:16:50:E9:D2:B2:48:DD:00:58'
       || !overseaAccounts.accounts.some((account) => account.username === 'oversea-sg-1-internal09')
       || !overseaDomesticSubscription?.yaml.includes('type: hysteria2')
+      || !overseaDomesticSubscription.yaml.includes('log-level: info')
+      || !overseaDomesticSubscription.yaml.includes('port: 51288')
+      || overseaDomesticSubscription.yaml.includes('port: 52120')
+      || !overseaDomesticSubscription.yaml.includes('down: "30 Mbps"')
+      || !overseaDomesticSubscription.yaml.includes('up: "30 Mbps"')
+      || !overseaDomesticSubscription.yaml.includes('fingerprint: "D6:55:9C:55:7C:BF:F7:F1:D1:EE:0C:65:18:8E:90:A1:50:66:1F:70:F8:71:1D:16:50:E9:D2:B2:48:DD:00:58"')
+      || !overseaDomesticSubscription.yaml.includes('alpn:')
+      || !overseaDomesticSubscription.yaml.includes('- h3')
+      || !overseaDomesticSubscription.yaml.includes('DOMAIN-SUFFIX,local,DIRECT')
+      || !overseaDomesticSubscription.yaml.includes('GEOSITE,CN,DIRECT')
       || !overseaDomesticSubscription.yaml.includes('GEOIP,CN,DIRECT')
       || !overseaDomesticSubscription.reachability.h2iRequired
     ) {

@@ -79,6 +79,7 @@ export class SiteSlotsController {
       issueDefaults: booleanValue(body.issueDefaults),
       publicHost: nullableString(body.publicHost),
       serverPorts: nullableString(body.serverPorts),
+      tlsFingerprint: nullableString(body.tlsFingerprint),
       requestedBy: nullableString(body.requestedBy),
       requestId: nullableString(body.requestId)
     });
@@ -400,6 +401,7 @@ function toSiteSlotPlanInput(body: Record<string, unknown>): SiteSlotPlanInput {
     overseaSiteId: nullableString(body.overseaSiteId),
     overseaHost: nullableString(body.overseaHost),
     internalBaseUrl: nullableString(body.internalBaseUrl),
+    accessAccounts: siteSlotPlanAccessAccountsValue(body.accessAccounts),
     requestId: nullableString(body.requestId),
     createdBy: nullableString(body.createdBy)
   };
@@ -535,6 +537,20 @@ function accountNamesValue(value: unknown): string[] | string | null {
     return value.map((item) => String(item ?? '').trim()).filter(Boolean);
   }
   return nullableString(value);
+}
+
+function siteSlotPlanAccessAccountsValue(value: unknown): SiteSlotPlanInput['accessAccounts'] {
+  if (!Array.isArray(value)) return null;
+  return value.map((item) => {
+    const row = asRecord(item);
+    return {
+      username: nullableString(row.username) ?? '',
+      authToken: nullableString(row.authToken) ?? '',
+      status: nullableString(row.status),
+      upRate: nullableString(row.upRate),
+      downRate: nullableString(row.downRate)
+    };
+  }).filter((account) => account.username && account.authToken);
 }
 
 function rollbackStepReportArray(value: unknown): SiteSlotRollbackReportInput['stepReports'] {

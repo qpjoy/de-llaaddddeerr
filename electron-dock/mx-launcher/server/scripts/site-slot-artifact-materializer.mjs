@@ -62,7 +62,12 @@ function materializeOversea() {
       reservedInternalCidrs: ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16', '10.91.0.0/16'],
       domesticGatewayIp: '10.88.0.1',
       subscriptionStore: 'config-center',
-      tunnelCliRegistration: '@qpjoy/tunnel-cli register'
+      healthEvidenceOutlet: {
+        port: 3434,
+        path: '/clients.csv',
+        purpose: 'protected health/evidence summary, not subscription authority'
+      },
+      tunnelCliRegistration: 'access-stack-fallback qp-tunnel-cli register'
     },
     notes: ['Real hysteria2 access stack module; mihomo/subscription storage stay on Internal, CN traffic stays direct, and the target host does not receive the repository root.'],
     buildStaging: (staging) => {
@@ -75,6 +80,7 @@ function materializeOversea() {
         'scripts/reconcile-tunnel-state.mjs',
         'scripts/reconcile-tunnel-state.py'
       ]);
+      writeOverseaTunnelCliShim(staging);
       chmodIfExists(join(staging, 'manage.sh'), 0o755);
     }
   }));
@@ -144,6 +150,95 @@ function createTunnelCliTar(artifactRoot) {
       chmodIfExists(join(staging, 'package/resources/mihomo-client.sh'), 0o755);
     }
   });
+}
+
+function writeOverseaTunnelCliShim(staging) {
+  const binDir = join(staging, 'bin');
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(binDir, 'qp-tunnel-cli'), [
+    '#!/usr/bin/env sh',
+    'set -eu',
+    '',
+    'usage() {',
+    '  cat <<\'EOF\'',
+    'Usage:',
+    '  qp-tunnel-cli register --internal URL --role ROLE --site SITE [--service SERVICE] [--subscription URL]',
+    '',
+    'This access-stack fallback records site-agent registration intent locally.',
+    'EOF',
+    '}',
+    '',
+    'json_escape() {',
+    '  printf "%s" "$1" | sed \'s/\\\\/\\\\\\\\/g; s/"/\\\\"/g\'',
+    '}',
+    '',
+    'cmd="${1:-help}"',
+    'if [ "$cmd" = "help" ] || [ "$cmd" = "--help" ] || [ "$cmd" = "-h" ]; then',
+    '  usage',
+    '  exit 0',
+    'fi',
+    'if [ "$cmd" != "register" ]; then',
+    '  echo "Error: unsupported qp-tunnel-cli fallback command: $cmd" >&2',
+    '  usage >&2',
+    '  exit 64',
+    'fi',
+    'shift',
+    '',
+    'internal=""',
+    'role=""',
+    'site=""',
+    'service=""',
+    'subscription=""',
+    'while [ "$#" -gt 0 ]; do',
+    '  case "$1" in',
+    '    --internal) internal="${2:-}"; shift 2 ;;',
+    '    --role) role="${2:-}"; shift 2 ;;',
+    '    --site) site="${2:-}"; shift 2 ;;',
+    '    --service) service="${2:-}"; shift 2 ;;',
+    '    --subscription) subscription="${2:-}"; shift 2 ;;',
+    '    *) echo "Error: unknown register option: $1" >&2; exit 64 ;;',
+    '  esac',
+    'done',
+    '',
+    '[ -n "$internal" ] || { echo "Error: --internal is required" >&2; exit 64; }',
+    '[ -n "$role" ] || { echo "Error: --role is required" >&2; exit 64; }',
+    '[ -n "$site" ] || { echo "Error: --site is required" >&2; exit 64; }',
+    '',
+    'agent_dir="${MX_SITE_AGENT_DIR:-/opt/mx/site-agent}"',
+    'mkdir -p "$agent_dir"',
+    'registered_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date)"',
+    'registration_file="$agent_dir/registration.json"',
+    'env_file="$agent_dir/registration.env"',
+    '',
+    '{',
+    '  printf "{\\n"',
+    '  printf "  \\"registeredAt\\": \\"%s\\",\\n" "$(json_escape "$registered_at")"',
+    '  printf "  \\"mode\\": \\"access-stack-fallback\\",\\n"',
+    '  printf "  \\"internalBaseUrl\\": \\"%s\\",\\n" "$(json_escape "$internal")"',
+    '  printf "  \\"role\\": \\"%s\\",\\n" "$(json_escape "$role")"',
+    '  printf "  \\"site\\": \\"%s\\",\\n" "$(json_escape "$site")"',
+    '  printf "  \\"service\\": \\"%s\\",\\n" "$(json_escape "$service")"',
+    '  printf "  \\"subscription\\": \\"%s\\"\\n" "$(json_escape "$subscription")"',
+    '  printf "}\\n"',
+    '} > "$registration_file"',
+    '',
+    '{',
+    '  printf "MX_INTERNAL_BASE_URL=%s\\n" "$internal"',
+    '  printf "MX_SITE_ROLE=%s\\n" "$role"',
+    '  printf "MX_SITE_ID=%s\\n" "$site"',
+    '  printf "MX_SITE_SERVICE=%s\\n" "$service"',
+    '  printf "MX_SITE_SUBSCRIPTION=%s\\n" "$subscription"',
+    '} > "$env_file"',
+    '',
+    'chmod 600 "$registration_file" "$env_file" 2>/dev/null || true',
+    'echo "mx-site-agent-register-shim"',
+    'echo "site: $site"',
+    'echo "role: $role"',
+    'echo "service: ${service:-none}"',
+    'echo "registration: $registration_file"',
+    ''
+  ].join('\n'));
+  chmodIfExists(join(binDir, 'qp-tunnel-cli'), 0o755);
 }
 
 function createWireGuardTemplate(artifactRoot) {

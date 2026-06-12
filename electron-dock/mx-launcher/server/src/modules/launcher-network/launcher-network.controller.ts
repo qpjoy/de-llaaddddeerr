@@ -46,6 +46,7 @@ export class LauncherNetworkController {
         siteId,
         publicHost: nullableString(body.publicHost),
         serverPorts: nullableString(body.serverPorts),
+        tlsFingerprint: nullableString(body.tlsFingerprint),
         subscriptionBaseUrl: nullableString(body.subscriptionBaseUrl),
         routingPolicy: nullableString(body.routingPolicy),
         requestedBy: nullableString(body.requestedBy),

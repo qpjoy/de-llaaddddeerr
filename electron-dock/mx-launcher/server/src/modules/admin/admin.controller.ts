@@ -237,6 +237,13 @@ export class AdminController {
       hasDocker: true,
       hasOutboundInternet: true,
       internalBaseUrl,
+      accessAccounts: access.accounts.map((account) => ({
+        username: account.username,
+        authToken: account.authToken,
+        status: account.status,
+        upRate: '30 Mbps',
+        downRate: '30 Mbps'
+      })),
       createdBy: requestedBy,
       requestId: `${requestId}-plan`
     });
@@ -372,6 +379,13 @@ export class AdminController {
         hasDocker: true,
         hasOutboundInternet: true,
         internalBaseUrl,
+        accessAccounts: access.accounts.map((account) => ({
+          username: account.username,
+          authToken: account.authToken,
+          status: account.status,
+          upRate: '30 Mbps',
+          downRate: '30 Mbps'
+        })),
         createdBy: requestedBy,
         requestId
       });
@@ -563,7 +577,7 @@ export class AdminController {
     } catch (error) {
       const execError = error as Error & { code?: number | string; stdout?: string; stderr?: string };
       const diagnosis = sshFailureDiagnosis(execError.stderr ?? execError.message, execError.code) as Record<string, unknown>;
-      diagnosis.tcpProbe = await tcpConnectProbe(profile.host, profile.sshPort, profile.connectTimeoutSeconds);
+      diagnosis.tcpProbe = await tcpConnectProbe(profile.host, profile.sshPort, effectiveSshConnectTimeoutSeconds(profile.connectTimeoutSeconds));
       const terminal = {
         ...terminalBase,
         status: 'failed',
@@ -586,6 +600,7 @@ export class AdminController {
       && plan.siteId === siteId
       && plan.ssh.profileId === profileId
       && plan.status !== 'blocked'
+      && reusableOverseaPlanContract(plan)
     )));
   }
 
@@ -1533,9 +1548,24 @@ function toSiteSlotPlanInput(body: Record<string, unknown>): SiteSlotPlanInput {
     overseaSiteId: stringValue(body.overseaSiteId),
     overseaHost: stringValue(body.overseaHost),
     internalBaseUrl: stringValue(body.internalBaseUrl),
+    accessAccounts: siteSlotPlanAccessAccountsValue(body.accessAccounts),
     requestId: stringValue(body.requestId),
     createdBy: stringValue(body.createdBy)
   };
+}
+
+function siteSlotPlanAccessAccountsValue(value: unknown): SiteSlotPlanInput['accessAccounts'] {
+  if (!Array.isArray(value)) return null;
+  return value.map((item) => {
+    const row = asRecord(item);
+    return {
+      username: stringValue(row.username) ?? '',
+      authToken: stringValue(row.authToken) ?? '',
+      status: stringValue(row.status),
+      upRate: stringValue(row.upRate),
+      downRate: stringValue(row.downRate)
+    };
+  }).filter((account) => account.username && account.authToken);
 }
 
 function booleanValue(value: unknown): boolean | null {
@@ -3178,6 +3208,16 @@ function executableAdminRemoteCommandKind(value: string): boolean {
   return value === 'artifact-transport' || value === 'remote-shell-intent';
 }
 
+function reusableOverseaPlanContract(plan: SiteSlotPlan): boolean {
+  const commands = plan.deploymentPhases.flatMap((phase) => phase.commands ?? []);
+  return commands.some((command) => command.includes('/bin/qp-tunnel-cli register --internal'))
+    && commands.some((command) => command.includes('./manage.sh sync-internal-defaults'))
+    && commands.some((command) => command.includes('./manage.sh docker-status'))
+    && commands.some((command) => command.includes('slot services placeholder; no Docker services selected'))
+    && commands.some((command) => command.includes('overseaConfigDelivery=internal-pushed'))
+    && commands.some((command) => command.includes('overseaAccessAccountMaterial=internal-issued accounts=11/11'));
+}
+
 function applyAdminSshProfile(command: string, profile: SiteSlotSshProfile | null): string {
   const options = adminSshOptionFragment(profile);
   let next = command.replace(/-e 'ssh -p ([0-9]+)'/g, (_match, port: string) => `-e ${shellQuote(`ssh ${options} -p ${port}`)}`);
@@ -3194,16 +3234,21 @@ function applyAdminSshProfile(command: string, profile: SiteSlotSshProfile | nul
 }
 
 function adminSshOptionFragment(profile: SiteSlotSshProfile | null): string {
+  const connectTimeoutSeconds = effectiveSshConnectTimeoutSeconds(profile?.connectTimeoutSeconds);
   const parts = [
     '-F', shellQuote(internalSshConfigFile(profile)),
     '-o', shellQuote(`BatchMode=${profile?.batchMode ?? 'yes'}`),
-    '-o', shellQuote(`ConnectTimeout=${profile?.connectTimeoutSeconds ?? 10}`),
+    '-o', shellQuote(`ConnectTimeout=${connectTimeoutSeconds}`),
     '-o', shellQuote(`StrictHostKeyChecking=${profile?.strictHostKeyChecking ?? 'yes'}`)
   ];
   if (profile?.identityFile) parts.push('-i', shellQuote(profile.identityFile));
   if (profile?.knownHostsFile) parts.push('-o', shellQuote(`UserKnownHostsFile=${profile.knownHostsFile}`));
   if (profile?.hostKeyAlias) parts.push('-o', shellQuote(`HostKeyAlias=${profile.hostKeyAlias}`));
   return parts.join(' ');
+}
+
+function effectiveSshConnectTimeoutSeconds(value: number | null | undefined): number {
+  return Math.max(30, value ?? 30);
 }
 
 function shellQuote(value: string): string {
@@ -3392,20 +3437,6 @@ function buildPipelineActionHints(
     if (!hasRunnerForExecution) {
       actions.push(contextualAction(
         actionPolicy,
-        'site-slot.runner.awx-shadow',
-        {
-          path: `/internal/v1/site-slots/executions/${encodeURIComponent(latestReadyExecution.runId)}/runner-sessions`,
-          bodyTemplate: {
-            mode: 'awx-shadow',
-            requestedBy: actionPolicy.principal.principalId,
-            requestId: 'admin-ui-runner-awx-shadow'
-          }
-        },
-        true,
-        'execution must be ready before AWX shadow runner session starts'
-      ));
-      actions.push(contextualAction(
-        actionPolicy,
         'site-slot.runner.remote-ssh',
         {
           path: `/internal/v1/site-slots/executions/${encodeURIComponent(latestReadyExecution.runId)}/runner-sessions`,
@@ -3419,6 +3450,22 @@ function buildPipelineActionHints(
         true,
         'execution must be ready before remote runner session starts'
       ));
+      if (plan.kind !== 'oversea') {
+        actions.push(contextualAction(
+          actionPolicy,
+          'site-slot.runner.awx-shadow',
+          {
+            path: `/internal/v1/site-slots/executions/${encodeURIComponent(latestReadyExecution.runId)}/runner-sessions`,
+            bodyTemplate: {
+              mode: 'awx-shadow',
+              requestedBy: actionPolicy.principal.principalId,
+              requestId: 'admin-ui-runner-awx-shadow'
+            }
+          },
+          true,
+          'execution must be ready before AWX shadow runner session starts'
+        ));
+      }
       actions.push(contextualAction(
         actionPolicy,
         'site-slot.runner.simulate',
@@ -3508,86 +3555,88 @@ function buildPipelineActionHints(
   }
 
   if (readyWorkerJob) {
-    actions.push(contextualAction(
-      actionPolicy,
-      'site-slot.worker-run.awx-sync-plan',
-      {
-        path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/awx-sync-plan`,
-        bodyTemplate: {
-          workerId: readyWorkerJob.worker.workerId,
-          requestedBy: actionPolicy.principal.principalId,
-          requestId: 'admin-ui-worker-run-awx-sync-plan'
-        }
-      },
-      true,
-      'worker job must be ready before AWX object sync planning'
-    ));
-    actions.push(contextualAction(
-      actionPolicy,
-      'site-slot.worker-run.awx-credential-sync',
-      {
-        path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/run-awx-credential-sync`,
-        bodyTemplate: {
-          confirmAwxCredentialSync: true,
-          timeoutSeconds: 120,
-          workerId: readyWorkerJob.worker.workerId,
-          requestedBy: actionPolicy.principal.principalId,
-          requestId: 'admin-ui-worker-run-awx-credential-sync'
-        }
-      },
-      true,
-      'worker job must be ready before AWX credential sync'
-    ));
-    actions.push(contextualAction(
-      actionPolicy,
-      'site-slot.worker-run.awx-object-sync',
-      {
-        path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/run-awx-object-sync`,
-        bodyTemplate: {
-          confirmAwxSync: true,
-          timeoutSeconds: 120,
-          workerId: readyWorkerJob.worker.workerId,
-          requestedBy: actionPolicy.principal.principalId,
-          requestId: 'admin-ui-worker-run-awx-object-sync'
-        }
-      },
-      true,
-      'worker job must be ready before AWX object sync'
-    ));
-    actions.push(contextualAction(
-      actionPolicy,
-      'site-slot.worker-run.awx-launch',
-      {
-        path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/run-awx-launch`,
-        bodyTemplate: {
-          confirmAwxLaunch: true,
-          waitForCompletion: true,
-          timeoutSeconds: 180,
-          pollIntervalMs: 2000,
-          workerId: readyWorkerJob.worker.workerId,
-          message: 'AWX API launch by admin-ui',
-          requestedBy: actionPolicy.principal.principalId,
-          requestId: 'admin-ui-worker-run-awx-launch'
-        }
-      },
-      true,
-      'worker job must be ready before AWX API launch'
-    ));
-    actions.push(contextualAction(
-      actionPolicy,
-      'site-slot.worker-run.awx-shadow',
-      {
-        path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/run-awx-shadow`,
-        bodyTemplate: {
-          workerId: readyWorkerJob.worker.workerId,
-          message: 'AWX shadow worker run by admin-ui',
-          requestedBy: actionPolicy.principal.principalId,
-          requestId: 'admin-ui-worker-run-awx-shadow'
-        }
-      },
-      true,
-      'worker job must be ready before AWX shadow report'
-    ));
+    if (readyWorkerJob.kind !== 'oversea') {
+      actions.push(contextualAction(
+        actionPolicy,
+        'site-slot.worker-run.awx-sync-plan',
+        {
+          path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/awx-sync-plan`,
+          bodyTemplate: {
+            workerId: readyWorkerJob.worker.workerId,
+            requestedBy: actionPolicy.principal.principalId,
+            requestId: 'admin-ui-worker-run-awx-sync-plan'
+          }
+        },
+        true,
+        'worker job must be ready before AWX object sync planning'
+      ));
+      actions.push(contextualAction(
+        actionPolicy,
+        'site-slot.worker-run.awx-credential-sync',
+        {
+          path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/run-awx-credential-sync`,
+          bodyTemplate: {
+            confirmAwxCredentialSync: true,
+            timeoutSeconds: 120,
+            workerId: readyWorkerJob.worker.workerId,
+            requestedBy: actionPolicy.principal.principalId,
+            requestId: 'admin-ui-worker-run-awx-credential-sync'
+          }
+        },
+        true,
+        'worker job must be ready before AWX credential sync'
+      ));
+      actions.push(contextualAction(
+        actionPolicy,
+        'site-slot.worker-run.awx-object-sync',
+        {
+          path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/run-awx-object-sync`,
+          bodyTemplate: {
+            confirmAwxSync: true,
+            timeoutSeconds: 120,
+            workerId: readyWorkerJob.worker.workerId,
+            requestedBy: actionPolicy.principal.principalId,
+            requestId: 'admin-ui-worker-run-awx-object-sync'
+          }
+        },
+        true,
+        'worker job must be ready before AWX object sync'
+      ));
+      actions.push(contextualAction(
+        actionPolicy,
+        'site-slot.worker-run.awx-launch',
+        {
+          path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/run-awx-launch`,
+          bodyTemplate: {
+            confirmAwxLaunch: true,
+            waitForCompletion: true,
+            timeoutSeconds: 180,
+            pollIntervalMs: 2000,
+            workerId: readyWorkerJob.worker.workerId,
+            message: 'AWX API launch by admin-ui',
+            requestedBy: actionPolicy.principal.principalId,
+            requestId: 'admin-ui-worker-run-awx-launch'
+          }
+        },
+        true,
+        'worker job must be ready before AWX API launch'
+      ));
+      actions.push(contextualAction(
+        actionPolicy,
+        'site-slot.worker-run.awx-shadow',
+        {
+          path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/run-awx-shadow`,
+          bodyTemplate: {
+            workerId: readyWorkerJob.worker.workerId,
+            message: 'AWX shadow worker run by admin-ui',
+            requestedBy: actionPolicy.principal.principalId,
+            requestId: 'admin-ui-worker-run-awx-shadow'
+          }
+        },
+        true,
+        'worker job must be ready before AWX shadow report'
+      ));
+    }
     actions.push(contextualAction(
       actionPolicy,
       'site-slot.worker-run.remote-ssh-gate',
@@ -3927,10 +3976,11 @@ function terminalTimeoutSeconds(value: unknown): number {
 }
 
 function overseaTerminalSshArgv(profile: SiteSlotSshProfile, command: string): string[] {
+  const connectTimeoutSeconds = effectiveSshConnectTimeoutSeconds(profile.connectTimeoutSeconds);
   const args = [
     '-F', internalSshConfigFile(profile),
     '-o', `BatchMode=${profile.batchMode ?? 'yes'}`,
-    '-o', `ConnectTimeout=${profile.connectTimeoutSeconds ?? 30}`,
+    '-o', `ConnectTimeout=${connectTimeoutSeconds}`,
     '-o', 'ConnectionAttempts=2',
     '-o', 'AddressFamily=inet',
     '-o', 'IPQoS=none',

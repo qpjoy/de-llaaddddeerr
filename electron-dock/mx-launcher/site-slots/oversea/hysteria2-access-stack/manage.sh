@@ -25,17 +25,20 @@ Usage:
   sudo bash ./manage.sh <command> [options]
 
 Commands:
-  setup             Initialize .env, users, certs, start health endpoint + hysteria
+  setup             Initialize .env, users, certs, start health/evidence outlet + hysteria
   reconfigure       Update ports/auth/defaults, then recreate the stack safely
-  reset-auth        Reset health endpoint username/password and recreate summary endpoint only
+  reset-auth        Reset health/evidence username/password and recreate outlet only
   start             Start services: all|hysteria|subscriptions
   stop              Stop services: all|hysteria|subscriptions
   restart           Restart services: all|hysteria|subscriptions
   destroy           Stop/remove stack containers; optionally wipe generated data/env
   reinstall         Destroy generated stack state and immediately run setup again
   status            Show stack status, users, ports, and defaults
+  docker-status     Show Docker hysteria2 runtime status; --soft keeps diagnostics exit 0
+  sync-internal-defaults
+                    Apply Internal-managed runtime defaults, render config, and reconcile containers
   check-subscription-auth
-                    Show health/summary Basic Auth state; optionally verify with --password
+                    Show health/evidence Basic Auth state; optionally verify with --password
   list-users        Show current configured Hysteria2 users and advertised up/down values
   add-user          Add one or more Hysteria2 users, no restart needed
   del-user          Delete one or more Hysteria2 users and refresh summary
@@ -260,6 +263,29 @@ default_hy2_server_ports() {
 
 default_hy2_peer_dns() {
 	echo "223.5.5.5,119.29.29.29,1.1.1.1,8.8.8.8"
+}
+
+apply_internal_managed_defaults() {
+	set_env_value HY2_SERVER_PORTS "$(default_hy2_server_ports)"
+	set_env_value HY2_HOP_INTERVAL_SECONDS "0"
+	set_env_value HY2_PEER_DNS "$(default_hy2_peer_dns)"
+	set_env_value HY2_SERVER_BANDWIDTH_DOWN "$(default_hy2_download_rate)"
+	set_env_value HY2_SERVER_BANDWIDTH_UP "$(default_hy2_upload_rate)"
+	set_env_value HY2_DEFAULT_DOWN "$(default_hy2_download_rate)"
+	set_env_value HY2_DEFAULT_UP "$(default_hy2_upload_rate)"
+	set_env_value HY2_INTERNAL_SUBSCRIPTION_STORE "config-center"
+}
+
+internal_managed_runtime_signature() {
+	printf "%s|%s|%s|%s|%s|%s|%s|%s\n" \
+		"${HY2_SERVER_PORTS:-}" \
+		"${HY2_HOP_INTERVAL_SECONDS:-}" \
+		"${HY2_PEER_DNS:-}" \
+		"${HY2_SERVER_BANDWIDTH_DOWN:-}" \
+		"${HY2_SERVER_BANDWIDTH_UP:-}" \
+		"${HY2_DEFAULT_DOWN:-}" \
+		"${HY2_DEFAULT_UP:-}" \
+		"${HY2_INTERNAL_SUBSCRIPTION_STORE:-}"
 }
 
 default_hy2_server_ports_value() {
@@ -675,9 +701,37 @@ current_users() {
 	awk -F, 'NR > 1 && $1 != "" { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print $1 }' "$USERS_FILE"
 }
 
+normalize_internal_managed_user_limits() {
+	local tmp default_up default_down
+
+	ensure_users_file
+	default_up="${HY2_DEFAULT_UP:-$(default_hy2_upload_rate)}"
+	default_down="${HY2_DEFAULT_DOWN:-$(default_hy2_download_rate)}"
+	tmp="$(mktemp)"
+	awk -F, -v default_up="$default_up" -v default_down="$default_down" '
+		BEGIN { OFS = "," }
+		NR == 1 {
+			print "name,auth,up,down"
+			next
+		}
+		{
+			for (i = 1; i <= 4; i++) {
+				gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
+			}
+			if ($1 == "" || $2 == "") next
+			if ($3 == "" || $3 == "3 Mbps") $3 = default_up
+			if ($4 == "" || $4 == "3 Mbps") $4 = default_down
+			print $1, $2, $3, $4
+		}
+	' "$USERS_FILE" > "$tmp"
+	mv "$tmp" "$USERS_FILE"
+	chmod 600 "$USERS_FILE"
+}
+
 sync_env_user_list_from_file() {
 	local -a names=()
 
+	normalize_internal_managed_user_limits
 	mapfile -t names < <(current_users)
 	set_env_value HY2_USERS "$(array_join_csv "${names[@]}")"
 }
@@ -696,13 +750,13 @@ ensure_export_auth_defaults() {
 	if is_placeholder_value "$auth_hash"; then
 		generated_password="$(random_token)"
 		set_env_value HY2_EXPORT_PASSWORD_HASH "$(hash_password "$generated_password")"
-		echo "Generated random health summary password hash for ${auth_user}; plaintext is intentionally not stored." >&2
+		echo "Generated random health/evidence password hash for ${auth_user}; plaintext is intentionally not stored." >&2
 	fi
 }
 
 node_parser_command() {
 	if command -v node >/dev/null 2>&1; then
-		echo "node"
+		command -v node
 		return 0
 	fi
 	return 1
@@ -710,10 +764,10 @@ node_parser_command() {
 
 python_parser_command() {
 	if command -v python3 >/dev/null 2>&1; then
-		echo "python3"
+		command -v python3
 		return 0
 	elif command -v python >/dev/null 2>&1; then
-		echo "python"
+		command -v python
 		return 0
 	fi
 	return 1
@@ -825,9 +879,11 @@ reconcile_tunnel_state_files() {
 	local state_file="$2"
 	local users_file="$3"
 	local env_file="$4"
+	local parser_name
 
-	if [[ "$parser" == "node" ]]; then
-		node "$STACK_DIR/scripts/reconcile-tunnel-state.mjs" \
+	parser_name="$(basename "$parser")"
+	if [[ "$parser_name" == "node" ]]; then
+		"$parser" "$STACK_DIR/scripts/reconcile-tunnel-state.mjs" \
 			--state-file "$state_file" \
 			--users-file "$users_file" \
 			--output-env-file "$env_file"
@@ -920,7 +976,7 @@ verify_subscription_auth() {
 		sleep 1
 	done
 
-	die "Health endpoint auth verification failed for clients.csv. Please re-run reset-auth with a known password."
+	die "Health/evidence auth verification failed for clients.csv. Please re-run reset-auth with a known password."
 }
 
 subscription_auth_hash_state() {
@@ -951,9 +1007,9 @@ refresh_subscriptions() {
 	) > "$STACK_DIR/data/subscriptions/clients.csv"
 	chmod 600 "$STACK_DIR/data/subscriptions/clients.csv"
 	if [[ "$user_count" == "0" ]]; then
-		echo "No users found, Internal subscription summary reset."
+		echo "No users found, health/evidence summary reset."
 	else
-		echo "Internal subscription summary refreshed for ${user_count} Hysteria2 users."
+		echo "Health/evidence summary refreshed for ${user_count} Hysteria2 users."
 	fi
 }
 
@@ -1106,12 +1162,12 @@ status_command() {
 	echo "Stack directory: $STACK_DIR"
 	echo "Hysteria server host: ${HY2_SERVER_HOST:-unset}"
 	echo "Hysteria server ports: ${HY2_SERVER_PORTS:-unset}"
-	echo "Health summary URL: ${HY2_EXPORT_BASE_URL:-unset}/clients.csv"
-	echo "Health summary listen port: ${HY2_EXPORT_FALLBACK_PORT:-unset}"
-	echo "Health summary auth user: ${HY2_EXPORT_USER:-unset}"
-	echo "Health summary auth hash: $(subscription_auth_hash_state)"
+	echo "Health/evidence outlet URL: ${HY2_EXPORT_BASE_URL:-unset}/clients.csv"
+	echo "Health/evidence outlet listen port: ${HY2_EXPORT_FALLBACK_PORT:-unset}"
+	echo "Health/evidence auth user: ${HY2_EXPORT_USER:-unset}"
+	echo "Health/evidence auth hash: $(subscription_auth_hash_state)"
 	echo "Internal mihomo URL: ${HY2_INTERNAL_MIHOMO_BASE_URL:-unset}"
-	echo "Subscription store: ${HY2_INTERNAL_SUBSCRIPTION_STORE:-unset}"
+	echo "Internal subscription authority: ${HY2_INTERNAL_SUBSCRIPTION_STORE:-unset}"
 	echo "Routing policy: ${HY2_MIHOMO_ROUTING_MODE:-cn-direct}"
 	echo "Peer DNS servers: ${HY2_PEER_DNS:-unset}"
 	echo "Reserved Internal CIDRs: ${HY2_RESERVED_INTERNAL_CIDRS:-10.88.0.0/16,10.89.0.0/16,10.90.0.0/16,10.91.0.0/16}"
@@ -1135,6 +1191,150 @@ status_command() {
 	done < <(awk -F, 'NR > 1 && $1 != "" { printf "- %s (up=%s, down=%s)\n", $1, $3, $4 }' "$USERS_FILE")
 }
 
+docker_container_summary() {
+	local container_name="$1"
+
+	docker inspect -f 'name={{.Name}} image={{.Config.Image}} status={{.State.Status}} running={{.State.Running}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_name"
+}
+
+internal_defaults_drift_report() {
+	local drift=0
+	local default_up default_down user_limit_drift
+
+	if [[ "${HY2_SERVER_PORTS:-}" != "$(default_hy2_server_ports)" ]]; then
+		echo "drift: HY2_SERVER_PORTS=${HY2_SERVER_PORTS:-unset} expected $(default_hy2_server_ports)"
+		drift=1
+	fi
+	if [[ "${HY2_HOP_INTERVAL_SECONDS:-}" != "0" ]]; then
+		echo "drift: HY2_HOP_INTERVAL_SECONDS=${HY2_HOP_INTERVAL_SECONDS:-unset} expected 0"
+		drift=1
+	fi
+	if [[ "${HY2_PEER_DNS:-}" != "$(default_hy2_peer_dns)" ]]; then
+		echo "drift: HY2_PEER_DNS=${HY2_PEER_DNS:-unset} expected $(default_hy2_peer_dns)"
+		drift=1
+	fi
+	if [[ "${HY2_SERVER_BANDWIDTH_DOWN:-}" != "$(default_hy2_download_rate)" ]]; then
+		echo "drift: HY2_SERVER_BANDWIDTH_DOWN=${HY2_SERVER_BANDWIDTH_DOWN:-unset} expected $(default_hy2_download_rate)"
+		drift=1
+	fi
+	if [[ "${HY2_SERVER_BANDWIDTH_UP:-}" != "$(default_hy2_upload_rate)" ]]; then
+		echo "drift: HY2_SERVER_BANDWIDTH_UP=${HY2_SERVER_BANDWIDTH_UP:-unset} expected $(default_hy2_upload_rate)"
+		drift=1
+	fi
+	if [[ "${HY2_DEFAULT_DOWN:-}" != "$(default_hy2_download_rate)" ]]; then
+		echo "drift: HY2_DEFAULT_DOWN=${HY2_DEFAULT_DOWN:-unset} expected $(default_hy2_download_rate)"
+		drift=1
+	fi
+	if [[ "${HY2_DEFAULT_UP:-}" != "$(default_hy2_upload_rate)" ]]; then
+		echo "drift: HY2_DEFAULT_UP=${HY2_DEFAULT_UP:-unset} expected $(default_hy2_upload_rate)"
+		drift=1
+	fi
+	if [[ "${HY2_INTERNAL_SUBSCRIPTION_STORE:-}" != "config-center" ]]; then
+		echo "drift: HY2_INTERNAL_SUBSCRIPTION_STORE=${HY2_INTERNAL_SUBSCRIPTION_STORE:-unset} expected config-center"
+		drift=1
+	fi
+	if [[ -f "$USERS_FILE" ]]; then
+		default_up="${HY2_DEFAULT_UP:-$(default_hy2_upload_rate)}"
+		default_down="${HY2_DEFAULT_DOWN:-$(default_hy2_download_rate)}"
+		user_limit_drift="$(awk -F, -v default_up="$default_up" -v default_down="$default_down" '
+			NR > 1 && $1 != "" {
+				for (i = 1; i <= 4; i++) {
+					gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
+				}
+				if ($3 != default_up || $4 != default_down) {
+					printf "%s up=%s down=%s expected up=%s down=%s\n", $1, $3, $4, default_up, default_down
+				}
+			}
+		' "$USERS_FILE")"
+		if [[ -n "$user_limit_drift" ]]; then
+			echo "$user_limit_drift" | sed 's/^/drift: user-limit /'
+			drift=1
+		fi
+	fi
+
+	if [[ "$drift" == "0" ]]; then
+		echo "passed"
+	fi
+	return "$drift"
+}
+
+docker_status_command() {
+	local soft="false"
+	local missing=0
+	local defaults_drift=0
+
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+			--soft|--allow-stopped) soft="true"; shift ;;
+			*) die "Unknown docker-status option: $1" ;;
+		esac
+	done
+
+	status_command
+	echo
+	echo "Internal-managed defaults:"
+	if ! internal_defaults_drift_report; then
+		defaults_drift=1
+	fi
+	echo
+	echo "Docker Hysteria2 runtime:"
+	if container_running "$HYSTERIA_CONTAINER"; then
+		docker_container_summary "$HYSTERIA_CONTAINER"
+		docker port "$HYSTERIA_CONTAINER" "${HY2_SERVER_PORTS:-51288}/udp" 2>/dev/null || true
+	else
+		echo "missing or stopped: $HYSTERIA_CONTAINER"
+		missing=1
+	fi
+	if container_running "$SUBSCRIPTIONS_CONTAINER"; then
+		docker_container_summary "$SUBSCRIPTIONS_CONTAINER"
+	else
+		echo "missing or stopped: $SUBSCRIPTIONS_CONTAINER"
+		missing=1
+	fi
+	echo
+	docker ps --filter "name=mx-oversea-hysteria2" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+	if [[ "$missing" != "0" ]]; then
+		if [[ "$soft" == "true" ]]; then
+			echo
+			echo "status: stopped"
+			echo "next action: run Internal Install / Sync to start Docker hysteria2 access stack."
+			return 0
+		fi
+		die "Docker hysteria2 access stack is not running; run setup or Internal Install / Sync."
+	fi
+	if [[ "$defaults_drift" != "0" ]]; then
+		if [[ "$soft" == "true" ]]; then
+			echo
+			echo "status: defaults-drift"
+			echo "next action: run Internal Install / Sync to apply Internal-managed defaults."
+			return 0
+		fi
+		die "Docker hysteria2 access stack defaults drift from Internal-managed values; run setup or Internal Install / Sync."
+	fi
+}
+
+sync_internal_defaults_command() {
+	local old_signature new_signature
+
+	load_env
+	old_signature="$(internal_managed_runtime_signature)"
+	apply_internal_managed_defaults
+	load_env
+	new_signature="$(internal_managed_runtime_signature)"
+	render_runtime_files
+
+	if ! container_running "$HYSTERIA_CONTAINER" || ! container_running "$SUBSCRIPTIONS_CONTAINER"; then
+		start_target all
+	elif [[ "$old_signature" != "$new_signature" ]]; then
+		recreate_full_stack
+	else
+		refresh_subscriptions
+	fi
+
+	echo "Internal-managed Docker hysteria2 defaults synced: ports=${HY2_SERVER_PORTS:-unset}, dns=${HY2_PEER_DNS:-unset}, down=${HY2_SERVER_BANDWIDTH_DOWN:-unset}"
+}
+
 check_subscription_auth_command() {
 	local auth_pass="${1:-}"
 	local sample_yaml sample_name hash_state
@@ -1147,10 +1347,10 @@ check_subscription_auth_command() {
 		sample_name="$(basename "$sample_yaml")"
 	fi
 
-	echo "Health summary URL: ${HY2_EXPORT_BASE_URL:-unset}/clients.csv"
-	echo "Health summary listen port: ${HY2_EXPORT_FALLBACK_PORT:-unset}"
-	echo "Health summary auth user: ${HY2_EXPORT_USER:-unset}"
-	echo "Health summary auth hash: $hash_state"
+	echo "Health/evidence outlet URL: ${HY2_EXPORT_BASE_URL:-unset}/clients.csv"
+	echo "Health/evidence outlet listen port: ${HY2_EXPORT_FALLBACK_PORT:-unset}"
+	echo "Health/evidence auth user: ${HY2_EXPORT_USER:-unset}"
+	echo "Health/evidence auth hash: $hash_state"
 	if [[ -n "$sample_name" ]]; then
 		echo "Protected summary: $sample_name"
 		echo "Local test URL: http://${HY2_EXPORT_USER:-user}:<password>@127.0.0.1:${HY2_EXPORT_FALLBACK_PORT:-3434}/${sample_name}"
@@ -1160,7 +1360,7 @@ check_subscription_auth_command() {
 
 	if [[ "$hash_state" != "configured" ]]; then
 		echo
-		echo "Health summary password hash is not configured. Run reset-auth with a known user/password."
+		echo "Health/evidence password hash is not configured. Run reset-auth with a known user/password."
 		return 1
 	fi
 
@@ -1179,7 +1379,7 @@ check_subscription_auth_command() {
 
 	verify_subscription_auth "${HY2_EXPORT_USER:-}" "$auth_pass"
 	echo
-	echo "Health summary Basic Auth verified locally."
+	echo "Health/evidence Basic Auth verified locally."
 }
 
 list_users_command() {
@@ -1208,7 +1408,7 @@ setup_command() {
 
 	host="$(prompt_default "Hysteria public host/IP" "${HY2_SERVER_HOST:-$(old_wg_env_value WG_SERVER_HOST || echo 203.0.113.10)}")"
 	port_spec="$(prompt_default "Hysteria UDP port" "$(default_hy2_server_ports_value)")"
-	sub_port="$(prompt_default "Health summary TCP port" "${HY2_EXPORT_FALLBACK_PORT:-$(old_wg_env_value WG_EXPORT_FALLBACK_PORT || echo 3434)}")"
+	sub_port="$(prompt_default "Health/evidence TCP port" "${HY2_EXPORT_FALLBACK_PORT:-$(old_wg_env_value WG_EXPORT_FALLBACK_PORT || echo 3434)}")"
 	initial_users_csv="$(prompt_default "Initial users (comma-separated)" "$users_default")"
 	mapfile -t initial_names < <(parse_names_csv "$initial_users_csv")
 	[[ "${#initial_names[@]}" -gt 0 ]] || die "Please provide at least one valid initial user."
@@ -1219,8 +1419,8 @@ setup_command() {
 	fi
 	[[ -n "$default_auth_user" ]] || default_auth_user="$(old_wg_env_value WG_EXPORT_USER || true)"
 	[[ -n "$default_auth_user" ]] || default_auth_user="${initial_names[0]}"
-	auth_user="$(prompt_default "Health summary username" "$default_auth_user")"
-	auth_pass="$(prompt_password "Health summary password")"
+	auth_user="$(prompt_default "Health/evidence username" "$default_auth_user")"
+	auth_pass="$(prompt_password "Health/evidence password")"
 	peer_dns="$(prompt_default "Peer DNS servers" "$(default_hy2_peer_dns_value)")"
 	routing_mode="$(normalize_routing_mode_value "$(prompt_default "Routing policy (cn-direct/global)" "${HY2_MIHOMO_ROUTING_MODE:-cn-direct}")")"
 	tls_sni="$(normalize_optional_value "$(prompt_default "TLS server name / SNI ('-' to disable)" "$(default_tls_sni_for_host "$host" "${HY2_TLS_SERVER_NAME:-}")")")"
@@ -1280,8 +1480,8 @@ setup_command() {
 	echo "Setup complete."
 	echo "Hysteria2 access endpoint: ${host}:${port_spec}/udp"
 	echo "Internal subscription authority: ${HY2_INTERNAL_MIHOMO_BASE_URL:-unset}"
-	echo "Health summary: http://${host}:${sub_port}/clients.csv"
-	echo "Health summary auth user: ${auth_user}"
+	echo "Health/evidence outlet: http://${host}:${sub_port}/clients.csv"
+	echo "Health/evidence auth user: ${auth_user}"
 }
 
 reconfigure_command() {
@@ -1293,11 +1493,11 @@ reconfigure_command() {
 
 	host="$(prompt_default "Hysteria public host/IP" "${HY2_SERVER_HOST:-}")"
 	port_spec="$(prompt_default "Hysteria UDP port" "$(default_hy2_server_ports_value)")"
-	sub_port="$(prompt_default "Health summary TCP port" "${HY2_EXPORT_FALLBACK_PORT:-3434}")"
-	auth_user="$(prompt_default "Health summary username" "${HY2_EXPORT_USER:-download}")"
-	rotate_auth="$(prompt_yes_no "Rotate health summary password?" "no")"
+	sub_port="$(prompt_default "Health/evidence TCP port" "${HY2_EXPORT_FALLBACK_PORT:-3434}")"
+	auth_user="$(prompt_default "Health/evidence username" "${HY2_EXPORT_USER:-download}")"
+	rotate_auth="$(prompt_yes_no "Rotate health/evidence password?" "no")"
 	if [[ "$rotate_auth" == "y" || "$rotate_auth" == "yes" ]]; then
-		auth_pass="$(prompt_password "New health summary password")"
+		auth_pass="$(prompt_password "New health/evidence password")"
 		hash="$(hash_password "$auth_pass")"
 		set_env_value HY2_EXPORT_PASSWORD_HASH "$hash"
 	fi
@@ -1342,7 +1542,7 @@ reconfigure_command() {
 	render_runtime_files
 	recreate_full_stack
 
-	echo "Reconfigured stack and recreated health summary + hysteria."
+	echo "Reconfigured stack and recreated health/evidence outlet + hysteria."
 }
 
 reset_auth_command() {
@@ -1353,10 +1553,10 @@ reset_auth_command() {
 	load_env
 
 	if [[ -z "$auth_user" ]]; then
-		auth_user="$(prompt_default "Health summary username" "${HY2_EXPORT_USER:-download}")"
+		auth_user="$(prompt_default "Health/evidence username" "${HY2_EXPORT_USER:-download}")"
 	fi
 	if [[ -z "$auth_pass" ]]; then
-		auth_pass="$(prompt_password "New health summary password")"
+		auth_pass="$(prompt_password "New health/evidence password")"
 	fi
 
 	hash="$(hash_password "$auth_pass")"
@@ -1369,7 +1569,7 @@ reset_auth_command() {
 	verify_subscription_auth "$HY2_EXPORT_USER" "$auth_pass"
 	sample_yaml="$(first_subscription_yaml || true)"
 	sample_name="$(basename "$sample_yaml")"
-	echo "Health summary auth reset succeeded."
+	echo "Health/evidence auth reset succeeded."
 	echo "Verified locally with: http://${HY2_EXPORT_USER}:<password>@127.0.0.1:${HY2_EXPORT_FALLBACK_PORT}/${sample_name}"
 }
 
@@ -1497,18 +1697,18 @@ stop_command() {
 
 reapply_limits_command() {
 	refresh_subscriptions
-	echo "Refreshed Internal subscription summary using current Hysteria2 up/down values."
+	echo "Refreshed health/evidence summary using current Hysteria2 up/down values."
 }
 
 export_command() {
 	refresh_subscriptions
-	echo "Refreshed Internal subscription summary at $STACK_DIR/data/subscriptions/clients.csv"
+	echo "Refreshed health/evidence summary at $STACK_DIR/data/subscriptions/clients.csv"
 }
 
 reconcile_from_json_command() {
 	local state_file=""
 	local mode="hysteria2-only"
-	local tmp_users tmp_env old_ports old_host old_routing parser
+	local tmp_users tmp_env old_host old_routing old_signature new_signature parser
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
@@ -1526,8 +1726,8 @@ reconcile_from_json_command() {
 
 	load_env
 	old_host="${HY2_SERVER_HOST:-}"
-	old_ports="${HY2_SERVER_PORTS:-}"
 	old_routing="${HY2_MIHOMO_ROUTING_MODE:-cn-direct}"
+	old_signature="$(internal_managed_runtime_signature)"
 	parser="$(ensure_json_parser)"
 	tmp_users="$(mktemp)"
 	tmp_env="$(mktemp)"
@@ -1559,20 +1759,20 @@ reconcile_from_json_command() {
 	if [[ -n "${TUNNEL_DOMESTIC_GATEWAY_IP:-}" ]]; then
 		set_env_value HY2_DOMESTIC_GATEWAY_IP "$TUNNEL_DOMESTIC_GATEWAY_IP"
 	fi
+	apply_internal_managed_defaults
 
 	mv "$tmp_users" "$USERS_FILE"
 	chmod 600 "$USERS_FILE"
 	sync_env_user_list_from_file
 
 	load_env
+	new_signature="$(internal_managed_runtime_signature)"
 	render_runtime_files
 
 	if ! container_running "$HYSTERIA_CONTAINER" || ! container_running "$SUBSCRIPTIONS_CONTAINER"; then
 		start_target all
-	elif [[ "$old_ports" != "${HY2_SERVER_PORTS:-}" ]]; then
-		safe_recreate_service hysteria
-		wait_for_container "$HYSTERIA_CONTAINER"
-		refresh_subscriptions
+	elif [[ "$old_signature" != "$new_signature" ]]; then
+		recreate_full_stack
 	else
 		refresh_subscriptions
 	fi
@@ -1646,6 +1846,12 @@ main() {
 		;;
 		status)
 			status_command
+		;;
+		docker-status)
+			docker_status_command
+		;;
+		sync-internal-defaults)
+			sync_internal_defaults_command
 		;;
 		check-subscription-auth|subscription-auth)
 			local auth_pass=""

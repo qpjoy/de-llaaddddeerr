@@ -93,6 +93,24 @@ const USER_SCOPES = [
 
 const GUEST_SCOPES = ['auth.read', 'network.dns.policy'];
 
+const HYSTERIA2_ACCESS_PORT = 51288;
+const HYSTERIA2_ACCESS_PORTS = String(HYSTERIA2_ACCESS_PORT);
+const HYSTERIA2_CLIENT_DOWNLOAD = '30 Mbps';
+const HYSTERIA2_CLIENT_UPLOAD = '30 Mbps';
+const HYSTERIA2_CLIENT_ALPN = 'h3';
+const HYSTERIA2_CLIENT_DNS = ['223.5.5.5', '119.29.29.29', '1.1.1.1', '8.8.8.8'];
+const HYSTERIA2_LOCAL_DIRECT_RULES = [
+  'DOMAIN-SUFFIX,local,DIRECT',
+  'IP-CIDR,127.0.0.0/8,DIRECT,no-resolve',
+  'IP-CIDR,10.0.0.0/8,DIRECT,no-resolve',
+  'IP-CIDR,172.16.0.0/12,DIRECT,no-resolve',
+  'IP-CIDR,192.168.0.0/16,DIRECT,no-resolve',
+  'IP-CIDR,169.254.0.0/16,DIRECT,no-resolve',
+  'IP-CIDR6,::1/128,DIRECT,no-resolve',
+  'IP-CIDR6,fc00::/7,DIRECT,no-resolve',
+  'IP-CIDR6,fe80::/10,DIRECT,no-resolve'
+];
+
 const SERVICE_ACCOUNT_SCOPES = [
   'sdk.identity.read',
   'sdk.config.snapshot',
@@ -1171,7 +1189,14 @@ export function buildLauncherNetworkTopology(
       siteId: overseaSiteId,
       role: 'hysteria2-access-site',
       subscriptionAuthority: 'internal-mihomo',
-      trafficPath: 'direct-after-subscription'
+      trafficPath: 'direct-after-subscription',
+      healthEvidenceOutlet: {
+        baseUrl: 'http://oversea.example.com:3434',
+        healthPath: '/healthz',
+        evidencePath: '/clients.csv',
+        authority: 'internal-config-center',
+        purpose: 'health-and-evidence'
+      }
     },
     subscriptions: {
       mihomo: {
@@ -2713,17 +2738,34 @@ function siteSlotDeploymentPhases(
   const overseaDefaultAccountNames = defaultSiteSlotAccessAccountNames(overseaSiteId);
   const overseaInternalAccountName = `${safeAccountPrefix(overseaSiteId)}-internal`;
   const overseaDomesticAccountName = `${safeAccountPrefix(overseaSiteId)}-domestic`;
+  const overseaAccessAccountMaterial = new Map(
+    (input.accessAccounts ?? [])
+      .filter((account) => account.status == null || account.status === 'active')
+      .map((account) => [safeAccountName(account.username), account])
+  );
+  const overseaAccountMaterialCount = overseaDefaultAccountNames
+    .filter((username) => overseaAccessAccountMaterial.has(safeAccountName(username))).length;
   const overseaReservedInternalCidrs = ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16', '10.91.0.0/16'];
   const overseaReservedInternalCidrsCsv = overseaReservedInternalCidrs.join(',');
+  const startSlotServicesCommand = 'if grep -q "\\"placeholder\\": true" enabled-modules.json 2>/dev/null; then echo "slot services placeholder; no Docker services selected"; else services="$(docker compose config --services)" && if [ -n "$services" ]; then docker compose up -d; else echo "slot services bundle has no Docker services selected"; fi; fi';
+  const syncInternalConfigCommands = kind === 'oversea'
+    ? [
+      `POST /internal/v1/config-center/snapshots/effective siteId=${input.siteId ?? 'oversea-main'}`,
+      `Record overseaConfigDelivery=internal-pushed siteId=${input.siteId ?? 'oversea-main'} internalHealth=${internalBaseUrl}/healthz remoteCurl=skipped loopback-not-routable-from-slot`
+    ]
+    : [
+      `POST /internal/v1/config-center/snapshots/effective siteId=${input.siteId ?? 'domestic-main'}`,
+      ssh(`curl -fsS ${input.internalBaseUrl ?? '<internal-base-url>'}/healthz`)
+    ];
   const overseaEnvLines = [
     'TZ=Asia/Shanghai',
     `HY2_SERVER_HOST=${target}`,
-    'HY2_SERVER_PORTS=51288',
+    `HY2_SERVER_PORTS=${HYSTERIA2_ACCESS_PORTS}`,
     'HY2_HOP_INTERVAL_SECONDS=0',
     'HY2_STACK_SUBNET=10.254.0.0/24',
     'HY2_STACK_GATEWAY=10.254.0.1',
     `HY2_USERS=${overseaDefaultAccountNames.join(',')}`,
-    'HY2_PEER_DNS=223.5.5.5,119.29.29.29,1.1.1.1,8.8.8.8',
+    `HY2_PEER_DNS=${HYSTERIA2_CLIENT_DNS.join(',')}`,
     `HY2_INTERNAL_MIHOMO_BASE_URL=${internalMihomoBaseUrl}`,
     'HY2_INTERNAL_SUBSCRIPTION_STORE=config-center',
     'HY2_MIHOMO_ROUTING_MODE=cn-direct',
@@ -2732,10 +2774,10 @@ function siteSlotDeploymentPhases(
     `HY2_TLS_SERVER_NAME=${target}`,
     'HY2_TLS_SELF_SIGNED_DAYS=3650',
     'HY2_TLS_SKIP_CERT_VERIFY=true',
-    'HY2_SERVER_BANDWIDTH_DOWN="30 Mbps"',
-    'HY2_SERVER_BANDWIDTH_UP="30 Mbps"',
-    'HY2_DEFAULT_DOWN="30 Mbps"',
-    'HY2_DEFAULT_UP="30 Mbps"',
+    `HY2_SERVER_BANDWIDTH_DOWN="${HYSTERIA2_CLIENT_DOWNLOAD}"`,
+    `HY2_SERVER_BANDWIDTH_UP="${HYSTERIA2_CLIENT_UPLOAD}"`,
+    `HY2_DEFAULT_DOWN="${HYSTERIA2_CLIENT_DOWNLOAD}"`,
+    `HY2_DEFAULT_UP="${HYSTERIA2_CLIENT_UPLOAD}"`,
     'HY2_MASQUERADE_URL=https://news.ycombinator.com/',
     'HY2_OBFS_PASSWORD=',
     'HY2_EXPORT_SITE_ADDRESS=:8080',
@@ -2749,7 +2791,7 @@ function siteSlotDeploymentPhases(
     revision: 'internal-shadow-1',
     node: {
       publicHost: target,
-      serverPorts: '51288'
+      serverPorts: HYSTERIA2_ACCESS_PORTS
     },
     policies: [
       {
@@ -2764,11 +2806,11 @@ function siteSlotDeploymentPhases(
     accounts: overseaDefaultAccountNames.map((username) => ({
         id: username,
         username,
-        authToken: `<hy2-token:${username}:from-internal-config-center>`,
+        authToken: overseaAccessAccountMaterial.get(safeAccountName(username))?.authToken ?? `<hy2-token:${username}:from-internal-config-center>`,
         status: 'active',
         policyId: 'cn-direct',
-        upRate: '30 Mbps',
-        downRate: '30 Mbps'
+        upRate: overseaAccessAccountMaterial.get(safeAccountName(username))?.upRate || HYSTERIA2_CLIENT_UPLOAD,
+        downRate: overseaAccessAccountMaterial.get(safeAccountName(username))?.downRate || HYSTERIA2_CLIENT_DOWNLOAD
       }))
   });
   const overseaTunnelStateBase64 = Buffer.from(overseaTunnelStateJson, 'utf8').toString('base64');
@@ -2902,15 +2944,17 @@ function siteSlotDeploymentPhases(
         commands: [
           `POST /internal/v1/site-slots/${overseaSiteId}/access-accounts issueDefaults=true service=hysteria2 store=config-center accounts=${overseaDefaultAccountNames.join(',')}`,
           `POST /internal/v1/launcher-network/mihomo/sites/${overseaSiteId} mode=internal-managed source=${overseaSubscriptionBaseUrl} reachability=internal-url-requires-domestic-wg-relay`,
+          `Record overseaAccessAccountMaterial=internal-issued accounts=${overseaAccountMaterialCount}/${overseaDefaultAccountNames.length} source=config-center`,
           ssh(overseaDockerInstallScript()),
           ssh(overseaEnvWriteCommand),
           ssh(`printf "%s" ${overseaTunnelStateBase64} | base64 -d > /opt/mx/site-agent/tunnel-state.json`),
           ssh(`cd ${overseaAccessStackCurrentDir} && ./manage.sh reconcile-from-json --state-file /opt/mx/site-agent/tunnel-state.json --mode hysteria2-only`),
-          ssh(`if command -v qp-tunnel-cli >/dev/null 2>&1; then QP_TUNNEL_CLI=qp-tunnel-cli; elif command -v npm >/dev/null 2>&1; then npm i -g @qpjoy/tunnel-cli && QP_TUNNEL_CLI=qp-tunnel-cli; else QP_TUNNEL_CLI=${overseaAccessStackCurrentDir}/bin/qp-tunnel-cli; fi; $QP_TUNNEL_CLI register --internal ${internalBaseUrl} --role oversea --site ${input.siteId ?? 'oversea-main'} --service hysteria2`),
-          ssh(`cd ${overseaAccessStackCurrentDir} && ./manage.sh status && curl -fsS http://127.0.0.1:3434/healthz`)
+          ssh(`chmod +x ${overseaAccessStackCurrentDir}/bin/qp-tunnel-cli && ${overseaAccessStackCurrentDir}/bin/qp-tunnel-cli register --internal ${internalBaseUrl} --role oversea --site ${input.siteId ?? 'oversea-main'} --service hysteria2`),
+          ssh(`cd ${overseaAccessStackCurrentDir} && ./manage.sh sync-internal-defaults && ./manage.sh docker-status && curl -fsS http://127.0.0.1:3434/healthz`)
         ],
         notes: [
           'Oversea runs hysteria2 only; Internal runs mihomo and stores subscription/account material.',
+          'Port 3434 on Oversea is a protected health/evidence outlet for clients.csv and healthz, not a subscription authority.',
           'H endpoints use WG relay only for Internal DNS and reserved 10.88.0.0/16-10.91.0.0/16 routes; Domestic defaults to 10.88.0.1, cn-direct stays direct, and external traffic uses the Oversea hysteria2 subscription.'
         ]
       },
@@ -2943,8 +2987,8 @@ function siteSlotDeploymentPhases(
         ssh(`install -d -m 0755 ${incomingDir} ${currentRoot} ${slotReleaseDir}`),
         rsyncOverSsh(slotServiceBundle, `${incomingDir}/`),
         kind === 'oversea'
-          ? ssh(`tar -xzf ${incomingDir}/${slotServiceBundleName} -C ${slotReleaseDir} && ln -sfn ${slotReleaseDir} ${slotCurrentDir} && printf "MX_SITE_ID=${input.siteId ?? 'oversea-main'}\\nMX_SITE_ROLE=oversea\\nMX_ENABLED_MODULES=access-node,site-agent,runner-worker,observability-forwarder\\nMX_INTERNAL_BASE_URL=${internalBaseUrl}\\nLOCAL_STACK_PATH=${overseaAccessStackCurrentDir}\\nMX_ACCESS_RUNTIME=hysteria2-only\\n" > ${slotCurrentDir}/.env && cd ${slotCurrentDir} && docker compose up -d`)
-          : ssh(`tar -xzf ${incomingDir}/${slotServiceBundleName} -C ${slotReleaseDir} && ln -sfn ${slotReleaseDir} ${slotCurrentDir} && cd ${slotCurrentDir} && docker compose up -d`)
+          ? ssh(`tar -xzf ${incomingDir}/${slotServiceBundleName} -C ${slotReleaseDir} && ln -sfn ${slotReleaseDir} ${slotCurrentDir} && printf "MX_SITE_ID=${input.siteId ?? 'oversea-main'}\\nMX_SITE_ROLE=oversea\\nMX_ENABLED_MODULES=access-node,site-agent,runner-worker,observability-forwarder\\nMX_INTERNAL_BASE_URL=${internalBaseUrl}\\nLOCAL_STACK_PATH=${overseaAccessStackCurrentDir}\\nMX_ACCESS_RUNTIME=hysteria2-only\\n" > ${slotCurrentDir}/.env && cd ${slotCurrentDir} && ${startSlotServicesCommand}`)
+          : ssh(`tar -xzf ${incomingDir}/${slotServiceBundleName} -C ${slotReleaseDir} && ln -sfn ${slotReleaseDir} ${slotCurrentDir} && cd ${slotCurrentDir} && ${startSlotServicesCommand}`)
       ],
       notes: ['Internal pushes Release Center bundles; slot hosts run the unpacked bundle and do not pull code from git.']
     },
@@ -2954,10 +2998,7 @@ function siteSlotDeploymentPhases(
       mode: 'runner-job',
       target: kind,
       required: true,
-      commands: [
-        `POST /internal/v1/config-center/snapshots/effective siteId=${input.siteId ?? `${kind}-main`}`,
-        ssh(`curl -fsS ${input.internalBaseUrl ?? '<internal-base-url>'}/healthz`)
-      ],
+      commands: syncInternalConfigCommands,
       notes: ['Domestic/Oversea cache signed snapshots; they do not become config truth.']
     },
     {
@@ -3067,7 +3108,8 @@ export function buildLauncherNetworkMihomoSite(
 ): LauncherNetworkMihomoSite {
   const siteId = input.siteId?.trim() || previous?.siteId || 'oversea-main';
   const publicHost = input.publicHost?.trim() || previous?.publicHost || fallbackPublicHost;
-  const serverPorts = input.serverPorts?.trim() || previous?.serverPorts || '51288';
+  const serverPorts = HYSTERIA2_ACCESS_PORTS;
+  const tlsFingerprint = normalizeTlsFingerprint(input.tlsFingerprint) ?? normalizeTlsFingerprint(previous?.tlsFingerprint);
   const subscriptionBaseUrl = input.subscriptionBaseUrl?.trim()
     || previous?.subscriptionBaseUrl
     || `${config.internalBaseUrl.replace(/\/+$/, '')}/internal/v1/site-slots/${siteId}/subscriptions/hysteria2`;
@@ -3079,6 +3121,7 @@ export function buildLauncherNetworkMihomoSite(
     service: 'hysteria2',
     publicHost,
     serverPorts,
+    tlsFingerprint,
     subscriptionBaseUrl,
     routingPolicy: 'cn-direct',
     reservedInternalCidrs: ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16', '10.91.0.0/16'],
@@ -3098,6 +3141,12 @@ export function buildLauncherNetworkMihomoSite(
     updatedBy: input.requestedBy ?? previous?.updatedBy ?? 'internal',
     updatedAt: now
   };
+}
+
+export function normalizeLauncherNetworkMihomoSite(site: LauncherNetworkMihomoSite): LauncherNetworkMihomoSite {
+  const tlsFingerprint = normalizeTlsFingerprint(site.tlsFingerprint);
+  if (site.serverPorts === HYSTERIA2_ACCESS_PORTS && site.tlsFingerprint === tlsFingerprint) return site;
+  return { ...site, serverPorts: HYSTERIA2_ACCESS_PORTS, tlsFingerprint };
 }
 
 export function buildLauncherNetworkReachabilityPlan(
@@ -3287,6 +3336,9 @@ export function renderHysteria2MihomoSubscription(
   const proxyName = `${site.siteId}-hysteria2`;
   const firstPort = firstHysteriaPort(site.serverPorts);
   const server = site.publicHost || `${site.siteId}.oversea.invalid`;
+  const proxyFingerprintLines = site.tlsFingerprint
+    ? [`    fingerprint: ${yamlQuote(site.tlsFingerprint)}`]
+    : [];
   const lines = [
     `# Generated by MX Launcher Internal at ${now}`,
     `# site=${site.siteId} account=${account.username}`,
@@ -3294,24 +3346,30 @@ export function renderHysteria2MihomoSubscription(
     'mixed-port: 7890',
     'allow-lan: false',
     'mode: rule',
-    'log-level: warning',
+    'log-level: info',
+    'geodata-mode: true',
+    'geo-auto-update: true',
+    'geo-update-interval: 24',
+    '',
     'dns:',
     '  enable: true',
     '  listen: 127.0.0.1:1053',
     '  enhanced-mode: fake-ip',
     '  nameserver:',
-    '    - 223.5.5.5',
-    '    - 119.29.29.29',
-    '    - 1.1.1.1',
-    '    - 8.8.8.8',
+    ...HYSTERIA2_CLIENT_DNS.map((server) => `    - ${server}`),
     'proxies:',
     `  - name: ${yamlQuote(proxyName)}`,
     '    type: hysteria2',
     `    server: ${yamlQuote(server)}`,
     `    port: ${firstPort}`,
     `    password: ${yamlQuote(account.authToken)}`,
+    `    down: ${yamlQuote(HYSTERIA2_CLIENT_DOWNLOAD)}`,
+    `    up: ${yamlQuote(HYSTERIA2_CLIENT_UPLOAD)}`,
     `    sni: ${yamlQuote(site.publicHost || server)}`,
     '    skip-cert-verify: true',
+    ...proxyFingerprintLines,
+    '    alpn:',
+    `      - ${HYSTERIA2_CLIENT_ALPN}`,
     'proxy-groups:',
     '  - name: Oversea',
     '    type: select',
@@ -3319,7 +3377,9 @@ export function renderHysteria2MihomoSubscription(
     `      - ${yamlQuote(proxyName)}`,
     '      - DIRECT',
     'rules:',
+    ...HYSTERIA2_LOCAL_DIRECT_RULES.map((rule) => `  - ${rule}`),
     ...site.reservedInternalCidrs.map((cidr) => `  - IP-CIDR,${cidr},DIRECT,no-resolve`),
+    '  - GEOSITE,CN,DIRECT',
     '  - GEOIP,CN,DIRECT',
     '  - MATCH,Oversea',
     ''
@@ -3357,9 +3417,14 @@ function inferAccessAccountRole(siteId: string, username: string): SiteSlotAcces
   return 'h-endpoint';
 }
 
-function firstHysteriaPort(serverPorts: string): number {
-  const match = serverPorts.match(/\d+/);
-  return match ? Number(match[0]) : 51288;
+function firstHysteriaPort(_serverPorts: string): number {
+  return HYSTERIA2_ACCESS_PORT;
+}
+
+function normalizeTlsFingerprint(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === 'unset' || trimmed === '-') return null;
+  return trimmed.toUpperCase();
 }
 
 function yamlQuote(value: string): string {

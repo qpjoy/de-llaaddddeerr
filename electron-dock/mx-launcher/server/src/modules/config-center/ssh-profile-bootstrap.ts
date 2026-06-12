@@ -36,6 +36,7 @@ export async function prepareSiteSlotSshProfileBootstrap(
   const scanHostKey = input.scanHostKey !== false;
   const executeBootstrap = input.executeBootstrap === true;
   const confirmBootstrap = input.confirmBootstrap === true;
+  const connectTimeoutSeconds = Math.max(30, input.connectTimeoutSeconds ?? 30);
   const warnings: string[] = [];
 
   mkdirSync(keyRoot, { recursive: true, mode: 0o700 });
@@ -54,13 +55,13 @@ export async function prepareSiteSlotSshProfileBootstrap(
     identityFile,
     knownHostsFile,
     strictHostKeyChecking: 'yes',
-    connectTimeoutSeconds: input.connectTimeoutSeconds ?? 30,
+    connectTimeoutSeconds,
     batchMode: 'yes'
   });
 
   const publicKey = readFileSync(publicKeyFile, 'utf8').trim();
-  const installCommand = redactedInstallCommand(sshUser, host, sshPort, knownHostsFile, sshConfigFile, publicKey);
-  const verifyCommand = verifySshCommand(sshUser, host, sshPort, identityFile, knownHostsFile, sshConfigFile, hostKeyAlias);
+  const installCommand = redactedInstallCommand(sshUser, host, sshPort, knownHostsFile, sshConfigFile, publicKey, connectTimeoutSeconds);
+  const verifyCommand = verifySshCommand(sshUser, host, sshPort, identityFile, knownHostsFile, sshConfigFile, hostKeyAlias, connectTimeoutSeconds);
   const envGate = {
     status: process.env.SITE_SLOT_SSH_PASSWORD_BOOTSTRAP_ENABLED === '1' ? 'passed' as const : 'blocked' as const,
     variable: 'SITE_SLOT_SSH_PASSWORD_BOOTSTRAP_ENABLED' as const
@@ -102,7 +103,7 @@ export async function prepareSiteSlotSshProfileBootstrap(
       sshConfigFile,
       publicKey,
       password: input.password,
-      timeoutSeconds: input.connectTimeoutSeconds ?? 30,
+      timeoutSeconds: connectTimeoutSeconds,
       verifyCommand
     });
   }
@@ -156,7 +157,7 @@ export async function prepareSiteSlotSshProfileBootstrap(
       sshConfigFile,
       hostKeyAlias,
       strictHostKeyChecking: 'yes',
-      connectTimeoutSeconds: input.connectTimeoutSeconds ?? 30,
+      connectTimeoutSeconds,
       batchMode: 'yes',
       status: 'active',
       requestedBy: input.requestedBy,
@@ -302,6 +303,7 @@ async function installPublicKey(input: {
       '-F', input.sshConfigFile,
       '-p', String(input.sshPort),
       '-o', 'BatchMode=no',
+      '-o', `ConnectTimeout=${input.timeoutSeconds}`,
       '-o', 'ConnectionAttempts=2',
       '-o', 'AddressFamily=inet',
       '-o', 'IPQoS=none',
@@ -318,7 +320,7 @@ async function installPublicKey(input: {
     });
     return {
       requested: true,
-      command: redactedInstallCommand(input.sshUser, input.host, input.sshPort, input.knownHostsFile, input.sshConfigFile, input.publicKey),
+      command: redactedInstallCommand(input.sshUser, input.host, input.sshPort, input.knownHostsFile, input.sshConfigFile, input.publicKey, input.timeoutSeconds),
       verifyCommand: input.verifyCommand,
       status: 'passed',
       exitCode: 0,
@@ -329,7 +331,7 @@ async function installPublicKey(input: {
     const details = error as { code?: number; stdout?: string; stderr?: string; message?: string };
     return {
       requested: true,
-      command: redactedInstallCommand(input.sshUser, input.host, input.sshPort, input.knownHostsFile, input.sshConfigFile, input.publicKey),
+      command: redactedInstallCommand(input.sshUser, input.host, input.sshPort, input.knownHostsFile, input.sshConfigFile, input.publicKey, input.timeoutSeconds),
       verifyCommand: input.verifyCommand,
       status: 'failed',
       exitCode: typeof details.code === 'number' ? details.code : null,
@@ -369,9 +371,10 @@ function redactedInstallCommand(
   sshPort: number,
   knownHostsFile: string,
   sshConfigFile: string,
-  publicKey: string
+  publicKey: string,
+  connectTimeoutSeconds: number
 ): string {
-  return `SSHPASS=*** sshpass -e ssh -F ${shellQuote(sshConfigFile)} -p ${sshPort} -o BatchMode=no -o PreferredAuthentications=password,keyboard-interactive -o PubkeyAuthentication=no -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${shellQuote(knownHostsFile)} ${sshUser}@${host ?? '<host>'} ${shellQuote(`install public key ${publicKey.slice(0, 24)}...`)}`;
+  return `SSHPASS=*** sshpass -e ssh -F ${shellQuote(sshConfigFile)} -p ${sshPort} -o BatchMode=no -o ConnectTimeout=${connectTimeoutSeconds} -o PreferredAuthentications=password,keyboard-interactive -o PubkeyAuthentication=no -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${shellQuote(knownHostsFile)} ${sshUser}@${host ?? '<host>'} ${shellQuote(`install public key ${publicKey.slice(0, 24)}...`)}`;
 }
 
 function verifySshCommand(
@@ -381,11 +384,12 @@ function verifySshCommand(
   identityFile: string,
   knownHostsFile: string,
   sshConfigFile: string,
-  hostKeyAlias: string | null
+  hostKeyAlias: string | null,
+  connectTimeoutSeconds: number
 ): string {
   const aliasOption = hostKeyAlias ? ` -o HostKeyAlias=${shellQuote(hostKeyAlias)} -o CheckHostIP=no` : '';
   const directOptions = internalSshUsesDefaultIsolatedConfig() ? ' -o ProxyCommand=none -o ProxyJump=none' : '';
-  return `ssh -F ${shellQuote(sshConfigFile || internalSshConfigFile())} -i ${shellQuote(identityFile)} -p ${sshPort} -o BatchMode=yes -o ConnectionAttempts=2 -o AddressFamily=inet${directOptions} -o IPQoS=none -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${shellQuote(knownHostsFile)}${aliasOption} ${sshUser}@${host ?? '<host>'} 'whoami && hostname && df -h /'`;
+  return `ssh -F ${shellQuote(sshConfigFile || internalSshConfigFile())} -i ${shellQuote(identityFile)} -p ${sshPort} -o BatchMode=yes -o ConnectTimeout=${connectTimeoutSeconds} -o ConnectionAttempts=2 -o AddressFamily=inet${directOptions} -o IPQoS=none -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${shellQuote(knownHostsFile)}${aliasOption} ${sshUser}@${host ?? '<host>'} 'whoami && hostname && df -h /'`;
 }
 
 function internalSshConfigFile(): string {

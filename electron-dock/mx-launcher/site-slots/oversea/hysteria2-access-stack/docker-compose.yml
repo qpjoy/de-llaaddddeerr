@@ -16,6 +16,7 @@ services:
       - hy2_access
     restart: unless-stopped
 
+  # Health/evidence outlet only. Internal remains the subscription/account authority.
   subscriptions:
     image: caddy:2-alpine
     container_name: mx-oversea-hysteria2-health

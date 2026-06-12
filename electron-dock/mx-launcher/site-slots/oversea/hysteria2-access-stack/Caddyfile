@@ -1,3 +1,4 @@
+# Protected health/evidence outlet. Internal remains the subscription/account authority.
 {$HY2_EXPORT_SITE_ADDRESS} {
 	root * /srv/hy2
 

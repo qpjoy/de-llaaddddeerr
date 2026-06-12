@@ -129,23 +129,24 @@ Domestic 和 Oversea 不再是配置真相源，而是 Internal 的可插拔 sit
   / `egress-on` 放在宿主机；edge API、H2I proxy、snapshot cache、observability
   forwarder 仍优先使用 Docker。公网 Domestic 不应长期 `tun-on`，否则默认路由会接管
   入站服务回程，导致外部访问站点异常。
-- Oversea slot 默认参照 `docker/hysteria2-mihomo-stack`，提供 mihomo/hysteria2
-  访问能力；如果性能或系统集成需要，hysteria2 可进一步提升为 host systemd 服务。
-- 如果 Domestic 无外网，Internal 会先提示配置 Oversea，再用 Oversea 的 mihomo 订阅和
-  `@qpjoy/tunnel-cli server-on` 帮 Domestic 做常驻 outbound bootstrap：国内目标按
+- Oversea slot 默认接收 Internal 推送的 Docker hysteria2 access stack，mihomo、
+  用户、权限和订阅 authority 留在 Internal。Oversea 暴露 `3434` 作为受保护的
+  health/evidence outlet，用于 `/healthz` 和 `/clients.csv` 摘要，不作为订阅控制面。
+- 如果 Domestic 无外网，Internal 会先提示配置 Oversea，再用 Internal 生成的 Oversea
+  hysteria2 订阅和 `@qpjoy/tunnel-cli server-on` 帮 Domestic 做常驻 outbound bootstrap：国内目标按
   `cn-direct` 直连，外网目标经 Oversea；`tun-on` 只保留给非公网主机或短时排障。
 - Executor V1 只生成 plan、execution manifest、runner session、worker job 和 worker report，
   不直接 SSH/SCP/root 执行；真实执行后续接 Admin action、runner worker 或 site-agent。
 
 ### Oversea Access Site
 
-Oversea 当前核心能力是 `docker/hysteria2-mihomo-stack`。
+Oversea 当前核心能力是 Internal 推送的 Docker `hysteria2-access-stack`。
 
 职责：
 
 - 提供 Hysteria2 访问能力。
 - 接收 signed snapshot 或 runner job 后生成节点本地配置。
-- 上报节点健康、用户限速、订阅导出结果。
+- 通过 `3434` 的 health/evidence outlet 上报节点健康、用户限速和受保护证据摘要。
 - 尽量以 site-agent outbound 方式连回控制面，减少 SSH 长连接和公网暴露。
 
 不应该保存：
@@ -358,6 +359,7 @@ internal-authority-domestic-relay-oversea-access-v1`：
 | `homePath.afterEnroll` | `home-to-domestic-wg-relay-to-internal`，enroll 后用 Domestic WG/H2I 进入 Internal |
 | `homePath.subscriptionFetch` | `home-through-domestic-h2i-to-internal-mihomo`，订阅 authority 仍是 Internal |
 | `homePath.overseaTraffic` | `home-direct-to-oversea-hysteria2`，订阅拿到后外网流量直连 Oversea |
+| `oversea.healthEvidenceOutlet` | Oversea `3434` 只作为 `/healthz` 和 `/clients.csv` 证据出口，authority 仍是 Internal Config Center |
 | `domestic.gatewayIp` | `10.88.0.1`，Domestic 只作为 relay/proxy/cache/forwarder |
 | `domestic.storesAuthority` | 固定为 `false`，禁止把用户、订阅、权限真相放回 Domestic |
 | `subscriptions.mihomo.fallback` | `domestic-snapshot-cache`，只允许缓存 Internal 签名快照 |
@@ -458,7 +460,14 @@ diagnosis、tcp probe 和 post-append evidence 记录到 worker report。
       },
       "oversea": {
         "siteId": "oversea-main",
-        "trafficPath": "direct-after-subscription"
+        "trafficPath": "direct-after-subscription",
+        "healthEvidenceOutlet": {
+          "baseUrl": "http://oversea.example.com:3434",
+          "healthPath": "/healthz",
+          "evidencePath": "/clients.csv",
+          "authority": "internal-config-center",
+          "purpose": "health-and-evidence"
+        }
       }
     }
   },

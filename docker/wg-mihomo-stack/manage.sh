@@ -798,7 +798,7 @@ setup_command() {
 	auth_user="$(prompt_default "Subscription username" "${WG_EXPORT_USER:-download}")"
 	auth_pass="$(prompt_password "Subscription password")"
 	initial_users_csv="$(prompt_default "Initial users (comma-separated)" "${WG_PEERS:-test01}")"
-	peer_dns="$(prompt_default "Peer DNS servers" "${WG_PEER_DNS:-1.1.1.1,8.8.8.8}")"
+	peer_dns="$(prompt_default "Peer DNS servers" "${WG_PEER_DNS:-223.5.5.5,119.29.29.29,1.1.1.1,8.8.8.8}")"
 	routing_mode="$(normalize_routing_mode_value "$(prompt_default "Mihomo routing mode (cn-direct/global)" "${WG_MIHOMO_ROUTING_MODE:-cn-direct}")")"
 	wg_subnet="$(prompt_default "WireGuard client subnet" "${WG_INTERNAL_SUBNET:-10.13.13.0}")"
 	stack_subnet="$(prompt_default "Docker stack subnet" "${WG_STACK_SUBNET:-10.253.0.0/24}")"
@@ -893,7 +893,7 @@ reconfigure_command() {
 		hash="$(docker run --rm caddy:2-alpine caddy hash-password --plaintext "$auth_pass" | tr -d '\r\n')"
 		set_env_value WG_EXPORT_PASSWORD_HASH "'$hash'"
 	fi
-	peer_dns="$(prompt_default "Peer DNS servers" "${WG_PEER_DNS:-1.1.1.1,8.8.8.8}")"
+	peer_dns="$(prompt_default "Peer DNS servers" "${WG_PEER_DNS:-223.5.5.5,119.29.29.29,1.1.1.1,8.8.8.8}")"
 	routing_mode="$(normalize_routing_mode_value "$(prompt_default "Mihomo routing mode (cn-direct/global)" "${WG_MIHOMO_ROUTING_MODE:-cn-direct}")")"
 	wg_subnet="$(prompt_default "WireGuard client subnet" "${WG_INTERNAL_SUBNET:-10.13.13.0}")"
 	stack_subnet="$(prompt_default "Docker stack subnet" "${WG_STACK_SUBNET:-10.253.0.0/24}")"

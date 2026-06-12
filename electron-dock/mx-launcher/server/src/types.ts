@@ -43,6 +43,14 @@ export interface SiteHeartbeat {
 export type SiteSlotKind = 'domestic' | 'oversea';
 export type SiteSlotNetworkMode = 'direct' | 'oversea-assisted' | 'offline-manual';
 
+export interface SiteSlotPlanAccessAccountInput {
+  username: string;
+  authToken: string;
+  status?: 'active' | 'paused' | string | null;
+  upRate?: string | null;
+  downRate?: string | null;
+}
+
 export interface SiteSlotPlanInput {
   siteId?: string | null;
   kind?: SiteSlotKind | null;
@@ -58,6 +66,7 @@ export interface SiteSlotPlanInput {
   overseaSiteId?: string | null;
   overseaHost?: string | null;
   internalBaseUrl?: string | null;
+  accessAccounts?: SiteSlotPlanAccessAccountInput[] | null;
   requestId?: string | null;
   createdBy?: string | null;
 }
@@ -1425,6 +1434,13 @@ export interface LauncherNetworkTopology {
     role: 'hysteria2-access-site';
     subscriptionAuthority: 'internal-mihomo';
     trafficPath: 'direct-after-subscription';
+    healthEvidenceOutlet: {
+      baseUrl: string;
+      healthPath: '/healthz';
+      evidencePath: '/clients.csv';
+      authority: 'internal-config-center';
+      purpose: 'health-and-evidence';
+    };
   };
   subscriptions: {
     mihomo: {
@@ -1498,6 +1514,7 @@ export interface SiteSlotAccessAccountIssueInput {
   issueDefaults?: boolean | null;
   publicHost?: string | null;
   serverPorts?: string | null;
+  tlsFingerprint?: string | null;
   requestedBy?: string | null;
   requestId?: string | null;
 }
@@ -1523,6 +1540,7 @@ export interface LauncherNetworkMihomoSiteInput {
   siteId?: string | null;
   publicHost?: string | null;
   serverPorts?: string | null;
+  tlsFingerprint?: string | null;
   subscriptionBaseUrl?: string | null;
   routingPolicy?: 'cn-direct' | string | null;
   requestedBy?: string | null;
@@ -1537,6 +1555,7 @@ export interface LauncherNetworkMihomoSite {
   service: 'hysteria2';
   publicHost: string | null;
   serverPorts: string;
+  tlsFingerprint: string | null;
   subscriptionBaseUrl: string;
   routingPolicy: 'cn-direct';
   reservedInternalCidrs: string[];
