@@ -92,6 +92,11 @@ const state = {
   userCenter: {
     users: [],
     roles: [],
+    overseaEntitlements: [],
+    selectedOverseaUserId: null,
+    overseaFeedback: null,
+    overseaBusy: false,
+    overseaSyncBusy: false,
     feedback: null,
     busy: false
   },
@@ -188,7 +193,7 @@ const internalSubsectionMeta = {
   },
   'awx-provider': {
     title: 'AWX Provider',
-    subtitle: 'AWX API endpoint、inventory、credential、job template registry 是 Internal 远程执行能力的 provider 配置。'
+    subtitle: 'AWX 是可选外部执行 Provider；Oversea 默认走 Internal Remote SSH，AWX 配置只在需要对接现有 AWX 时启用。'
   },
   dns: {
     title: 'DNS',
@@ -345,6 +350,7 @@ const sshProfileReadinessExecute = document.getElementById('ssh-profile-readines
 const sshProfilePolicyEnable = document.getElementById('ssh-profile-policy-enable');
 const sshProfileReadiness = document.getElementById('ssh-profile-readiness');
 const awxProviderCount = document.getElementById('awx-provider-count');
+const awxProviderPanel = document.querySelector('.awx-provider-panel');
 const awxProviderForm = document.getElementById('awx-provider-form');
 const awxProviderId = document.getElementById('awx-provider-id');
 const awxProviderName = document.getElementById('awx-provider-name');
@@ -663,6 +669,7 @@ async function refreshAdmin() {
     state.sshProfiles = asArray(profilePayload.profiles);
     state.userCenter.users = asArray(userCenterPayload.users);
     state.userCenter.roles = asArray(userCenterPayload.roles);
+    state.userCenter.overseaEntitlements = asArray(userCenterPayload.overseaEntitlements);
     if (userCenterPayload.error) {
       state.userCenter.feedback = { kind: 'error', message: userCenterPayload.error };
     }
@@ -788,17 +795,19 @@ async function loadSshProfiles() {
 
 async function loadUserCenterOverview() {
   try {
-    const [usersPayload, rolesPayload] = await Promise.all([
+    const [usersPayload, rolesPayload, entitlementPayload] = await Promise.all([
       fetchJson('/internal/v1/user-center/users'),
-      fetchJson('/internal/v1/user-center/roles')
+      fetchJson('/internal/v1/user-center/roles'),
+      fetchJson('/internal/v1/user-center/oversea-entitlements')
     ]);
     return {
       users: asArray(usersPayload.users),
       roles: asArray(rolesPayload.roles),
+      overseaEntitlements: asArray(entitlementPayload.entitlements),
       error: null
     };
   } catch (error) {
-    return { users: [], roles: [], error: error.message };
+    return { users: [], roles: [], overseaEntitlements: [], error: error.message };
   }
 }
 
@@ -1853,6 +1862,7 @@ async function refreshUserCenterPanels() {
   const payload = await loadUserCenterOverview();
   state.userCenter.users = asArray(payload.users);
   state.userCenter.roles = asArray(payload.roles);
+  state.userCenter.overseaEntitlements = asArray(payload.overseaEntitlements);
   if (payload.error) state.userCenter.feedback = { kind: 'error', message: payload.error };
   renderFoundationGrid(state.dashboard?.overview || {});
 }
@@ -1912,6 +1922,121 @@ async function createUserFromAdmin() {
     renderFoundationGrid(state.dashboard?.overview || {});
   } finally {
     state.userCenter.busy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+  }
+}
+
+async function assignUserOverseaFromAdmin() {
+  if (state.userCenter.overseaBusy) return;
+  const userId = blankToNull(foundationGrid.querySelector('[data-oversea-user]')?.value);
+  const siteIds = [...foundationGrid.querySelectorAll('[data-oversea-site]:checked')]
+    .map((item) => item.value)
+    .filter(Boolean);
+  if (!userId) {
+    state.userCenter.overseaFeedback = { kind: 'error', message: 'Select a user first' };
+    renderFoundationGrid(state.dashboard?.overview || {});
+    return;
+  }
+  state.userCenter.selectedOverseaUserId = userId;
+  state.userCenter.overseaBusy = true;
+  state.userCenter.overseaFeedback = {
+    kind: 'info',
+    message: siteIds.length ? 'Issuing user Oversea entitlement' : 'Disabling user Oversea access'
+  };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    const payload = await fetchJson(`/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea`, {
+      method: 'POST',
+      body: {
+        siteIds,
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-user-oversea-${Date.now()}`
+      }
+    });
+    const assignedCount = asArray(payload.entitlement?.siteIds).length;
+    let syncPayload = null;
+    if (assignedCount) {
+      state.userCenter.overseaFeedback = {
+        kind: 'info',
+        message: `Assigned ${assignedCount} site(s); syncing this user to remote`
+      };
+      renderFoundationGrid(state.dashboard?.overview || {});
+      try {
+        syncPayload = await runUserOverseaRuntimeSync(userId, siteIds, `desktop-user-oversea-sync-after-assign-${Date.now()}`);
+      } catch (syncError) {
+        syncPayload = { sync: { reports: [{ status: 'failed', stderr: syncError.message }] } };
+      }
+    }
+    const syncReports = asArray(syncPayload?.sync?.reports);
+    const syncPassed = syncReports.filter((report) => report.status === 'passed').length;
+    const syncBlocked = syncReports.filter((report) => report.status === 'blocked').length;
+    const syncFailed = syncReports.filter((report) => report.status === 'failed').length;
+    state.userCenter.overseaFeedback = {
+      kind: syncFailed ? 'error' : syncBlocked ? 'warning' : 'success',
+      message: assignedCount
+        ? `Assigned ${assignedCount} site(s); remote sync ${syncPassed} passed${syncBlocked ? ` / ${syncBlocked} blocked` : ''}${syncFailed ? ` / ${syncFailed} failed` : ''}`
+        : 'Disabled Oversea access'
+    };
+    await refreshUserCenterPanels();
+  } catch (error) {
+    state.userCenter.overseaFeedback = { kind: 'error', message: error.message };
+    renderFoundationGrid(state.dashboard?.overview || {});
+  } finally {
+    state.userCenter.overseaBusy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+  }
+}
+
+async function runUserOverseaRuntimeSync(userId, siteIds, requestId) {
+  return fetchJson(`/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea/sync-runtime`, {
+    method: 'POST',
+    body: {
+      siteIds,
+      confirmRemoteExecution: true,
+      requestedBy: 'desktop-admin',
+      requestId
+    }
+  });
+}
+
+async function syncUserOverseaRuntimeFromAdmin() {
+  if (state.userCenter.overseaSyncBusy || state.userCenter.overseaBusy) return;
+  const userId = blankToNull(foundationGrid.querySelector('[data-oversea-user]')?.value);
+  let siteIds = [...foundationGrid.querySelectorAll('[data-oversea-site]:checked')]
+    .map((item) => item.value)
+    .filter(Boolean);
+  if (!userId) {
+    state.userCenter.overseaFeedback = { kind: 'error', message: 'Select a user first' };
+    renderFoundationGrid(state.dashboard?.overview || {});
+    return;
+  }
+  const entitlement = entitlementForUser(userId);
+  if (!siteIds.length) siteIds = asArray(entitlement?.siteIds);
+  if (!siteIds.length) {
+    state.userCenter.overseaFeedback = { kind: 'error', message: 'Assign at least one Oversea site before syncing' };
+    renderFoundationGrid(state.dashboard?.overview || {});
+    return;
+  }
+  state.userCenter.selectedOverseaUserId = userId;
+  state.userCenter.overseaSyncBusy = true;
+  state.userCenter.overseaFeedback = { kind: 'info', message: 'Syncing this user to selected remote site(s)' };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    const payload = await runUserOverseaRuntimeSync(userId, siteIds, `desktop-user-oversea-sync-${Date.now()}`);
+    const reports = asArray(payload.sync?.reports);
+    const passed = reports.filter((report) => report.status === 'passed').length;
+    const blocked = reports.filter((report) => report.status === 'blocked').length;
+    const failed = reports.filter((report) => report.status === 'failed').length;
+    state.userCenter.overseaFeedback = {
+      kind: failed ? 'error' : blocked ? 'warning' : 'success',
+      message: `Remote sync ${passed} passed${blocked ? ` / ${blocked} blocked` : ''}${failed ? ` / ${failed} failed` : ''}`
+    };
+    await refreshUserCenterPanels();
+  } catch (error) {
+    state.userCenter.overseaFeedback = { kind: 'error', message: error.message };
+    renderFoundationGrid(state.dashboard?.overview || {});
+  } finally {
+    state.userCenter.overseaSyncBusy = false;
     renderFoundationGrid(state.dashboard?.overview || {});
   }
 }
@@ -3103,10 +3228,15 @@ function siteDescription(kind) {
 
 function renderFoundationGrid(overview) {
   const cards = internalFoundationCards(overview || {});
-  const active = cards.find((card) => card.id === state.adminSubsection)
+  const activeId = internalSubsectionMeta[state.adminSubsection] ? state.adminSubsection : 'overview';
+  const active = cards.find((card) => card.id === activeId)
     || cards.find((card) => card.id === 'overview')
     || cards[0];
-  foundationGrid.innerHTML = `
+  if (awxProviderPanel) {
+    awxProviderPanel.hidden = activeId !== 'awx-provider';
+    if (activeId === 'awx-provider') awxProviderPanel.open = true;
+  }
+  const scopeCard = `
     <article class="foundation-scope-card">
       <div>
         <span class="site-kind">Internal</span>
@@ -3115,14 +3245,22 @@ function renderFoundationGrid(overview) {
       </div>
       <span>${escapeHtml(String(active.value))}</span>
     </article>
-    ${cards.map((card) => `
-      <button class="foundation-card ${card.id === active.id ? 'is-selected' : ''}" type="button" data-internal-module="${escapeHtml(card.id)}">
-        <strong>${escapeHtml(card.title)}</strong>
-        <span>${escapeHtml(String(card.value))}</span>
-        <p>${escapeHtml(card.description)}</p>
-      </button>
-    `).join('')}
-  ` + renderUserCenterPanel() + renderRelayEnrollmentPanel();
+  `;
+  let body = '';
+  if (activeId === 'overview') {
+    body = renderInternalOverview(cards, overview || {});
+  } else if (activeId === 'user-center') {
+    body = renderUserCenterPanel() + renderUserOverseaSubscriptionPanel() + renderUserServiceAccessPanel() + renderOverseaEntitlementPanel() + renderUserIntegrationPanel();
+  } else if (activeId === 'rbac') {
+    body = renderRbacPanel() + renderPermissionRegistryPanel() + renderExternalSystemContractPanel();
+  } else if (activeId === 'config-center') {
+    body = renderConfigCenterPanel(overview || {});
+  } else if (activeId === 'awx-provider') {
+    body = renderOptionalAwxProviderPanel();
+  } else {
+    body = renderInternalModulePanel(activeId, overview || {});
+  }
+  foundationGrid.innerHTML = scopeCard + body;
   for (const card of foundationGrid.querySelectorAll('[data-internal-module]')) {
     card.addEventListener('click', () => {
       state.adminMenu = 'internal';
@@ -3137,6 +3275,17 @@ function renderFoundationGrid(overview) {
   if (bootstrapUsers) bootstrapUsers.addEventListener('click', () => void bootstrapUserCenterFromAdmin());
   const createUser = foundationGrid.querySelector('[data-user-create]');
   if (createUser) createUser.addEventListener('click', () => void createUserFromAdmin());
+  const overseaUserSelect = foundationGrid.querySelector('[data-oversea-user]');
+  if (overseaUserSelect) {
+    overseaUserSelect.addEventListener('change', () => {
+      state.userCenter.selectedOverseaUserId = overseaUserSelect.value || null;
+      renderFoundationGrid(state.dashboard?.overview || overview || {});
+    });
+  }
+  const assignOversea = foundationGrid.querySelector('[data-oversea-assign]');
+  if (assignOversea) assignOversea.addEventListener('click', () => void assignUserOverseaFromAdmin());
+  const syncOverseaUser = foundationGrid.querySelector('[data-oversea-sync-user]');
+  if (syncOverseaUser) syncOverseaUser.addEventListener('click', () => void syncUserOverseaRuntimeFromAdmin());
   const enrollRelay = foundationGrid.querySelector('[data-relay-enroll]');
   if (enrollRelay) enrollRelay.addEventListener('click', () => void enrollHomeRelayFromAdmin());
 }
@@ -3213,9 +3362,217 @@ function internalFoundationCards(overview) {
       id: 'awx-provider',
       title: 'AWX Provider',
       value: overview.awxProviderConfigs || 0,
-      description: 'inventory、credential、job template registry。'
+      description: '可选外部执行 provider；Oversea 默认不依赖 AWX。'
     }
   ];
+}
+
+function renderInternalOverview(cards, overview) {
+  const groups = [
+    {
+      title: 'Identity & Access',
+      summary: '用户、设备、服务账号、权限目录和 Action Gate 的入口。',
+      ids: ['user-center', 'rbac']
+    },
+    {
+      title: 'Runtime Authority',
+      summary: '配置、DNS、mihomo 订阅和 Launcher Network 消费的快照。',
+      ids: ['config-center', 'dns', 'mihomo']
+    },
+    {
+      title: 'Release & Evidence',
+      summary: '发版、灰度、回滚、E2E、观测证据和发布门禁。',
+      ids: ['release', 'e2e-gate', 'observability']
+    },
+    {
+      title: 'Execution & Integration',
+      summary: 'Admin/Runner、SDK Gateway，以及可选 AWX provider。',
+      ids: ['admin-runner', 'sdk-gateway', 'awx-provider']
+    }
+  ];
+  const byId = new Map(cards.map((card) => [card.id, card]));
+  return `
+    <section class="foundation-panel foundation-wide">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>Internal capability map</h4>
+          <p>左侧二级导航是运营入口；这里按控制面职责把子系统串成一张完整地图。</p>
+        </div>
+        <span>${escapeHtml(String(cards.length - 1))} modules</span>
+      </div>
+      <div class="foundation-module-groups">
+        ${groups.map((group) => `
+          <article class="foundation-module-group">
+            <div class="foundation-module-group-head">
+              <strong>${escapeHtml(group.title)}</strong>
+              <span>${escapeHtml(group.summary)}</span>
+            </div>
+            <div class="foundation-module-buttons">
+              ${group.ids.map((id) => {
+                const card = byId.get(id);
+                if (!card) return '';
+                return `
+                  <button class="foundation-card compact ${state.adminSubsection === id ? 'is-selected' : ''}" type="button" data-internal-module="${escapeHtml(id)}">
+                    <strong>${escapeHtml(card.title)}</strong>
+                    <span>${escapeHtml(String(card.value))}</span>
+                    <p>${escapeHtml(card.description)}</p>
+                  </button>
+                `;
+              }).join('')}
+            </div>
+          </article>
+        `).join('')}
+      </div>
+    </section>
+    <section class="foundation-panel">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>Source of truth</h4>
+          <p>Internal 统一保存结构化事实，Domestic / Oversea 只接收经过门禁的 artifact 和配置。</p>
+        </div>
+      </div>
+      <div class="foundation-kpi-grid">
+        ${renderFoundationKpi('Users', overview.userCenterUsers || 0, 'User Center subjects')}
+        ${renderFoundationKpi('Scopes', overview.permissionGrants || 0, 'RBAC grants')}
+        ${renderFoundationKpi('Configs', overview.configPolicySnapshots || 0, 'snapshot versions')}
+        ${renderFoundationKpi('Evidence', consoleEvidenceTotal(state.dashboard?.siteSlotPipelines || []), 'linked records')}
+      </div>
+    </section>
+    <section class="foundation-panel">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>Operating model</h4>
+          <p>每个接入系统都按同一模型暴露用户、权限、配置、测试、发布和证据。</p>
+        </div>
+      </div>
+      ${renderFoundationRows([
+        ['Register', '系统提交 manifest / SDK 契约 / 权限目录', 'Config Center'],
+        ['Authorize', 'User Center subject + RBAC scope + Action Gate', 'RBAC'],
+        ['Release', 'artifact、灰度策略、E2E gate 和回滚点', 'Release Center'],
+        ['Observe', 'trace、log、metric、截图、配置快照', 'Observability']
+      ])}
+    </section>
+  `;
+}
+
+function renderFoundationKpi(label, value, hint) {
+  return `
+    <article class="foundation-kpi">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(String(value))}</strong>
+      <small>${escapeHtml(hint)}</small>
+    </article>
+  `;
+}
+
+function renderFoundationRows(rows) {
+  return `
+    <div class="foundation-table">
+      ${rows.map((row) => `
+        <article class="foundation-table-row">
+          <strong>${escapeHtml(row[0])}</strong>
+          <span>${escapeHtml(row[1])}</span>
+          <small>${escapeHtml(row[2])}</small>
+        </article>
+      `).join('')}
+    </div>
+  `;
+}
+
+function roleById(roleId) {
+  return asArray(state.userCenter.roles).find((role) => role.roleId === roleId) || null;
+}
+
+function roleLabel(roleId) {
+  const role = roleById(roleId);
+  return role?.displayName || roleId;
+}
+
+function scopesForRoleIds(roleIds) {
+  return [...new Set(asArray(roleIds).flatMap((roleId) => asArray(roleById(roleId)?.scopes)))];
+}
+
+function userKind(user) {
+  const roles = asArray(user.roleIds);
+  if (roles.some((role) => role.includes('admin'))) return 'Admin';
+  if (roles.some((role) => role.includes('service'))) return 'Service';
+  return 'Human';
+}
+
+function userEnabledServices(user) {
+  const roleIds = asArray(user.roleIds);
+  if (roleIds.some((role) => role.includes('admin'))) {
+    return ['Launcher', 'AppCenter', 'H2O', 'Oversea', 'Release'];
+  }
+  if (roleIds.some((role) => role.includes('service'))) {
+    return ['SDK Gateway', 'Config API', 'Evidence API'];
+  }
+  return ['Launcher', 'AppCenter', 'H2O', 'Oversea'];
+}
+
+function userInternalUsage(user) {
+  const scopes = scopesForRoleIds(user.roleIds);
+  if (scopes.some((scope) => scope.includes('admin') || scope.includes('site-slot'))) return 'Admin / Runner / Release';
+  if (scopes.some((scope) => scope.includes('sdk') || scope.includes('config'))) return 'SDK Gateway / Config';
+  return 'Launcher Network / AppCenter';
+}
+
+function userOverseaAccess(user) {
+  const entitlement = entitlementForUser(user.userId);
+  if (entitlement?.status === 'active') {
+    const pending = asArray(entitlement.accounts).filter((account) => (
+      account.runtimeSync?.requiredAction === 'run-user-oversea-remote-sync'
+      || account.runtimeSync?.requiredAction === 'run-oversea-install-sync'
+    )).length;
+    return pending ? `${pending} pending sync` : `${asArray(entitlement.siteIds).length} assigned`;
+  }
+  const sites = overseaAuthoritySites();
+  const roleIds = asArray(user.roleIds);
+  if (!sites.length) return 'no site registered';
+  if (roleIds.some((role) => role.includes('admin') || role.includes('user'))) {
+    return `${sites.length} site group${sites.length > 1 ? 's' : ''} eligible`;
+  }
+  return 'policy gated';
+}
+
+function entitlementForUser(userId) {
+  return asArray(state.userCenter.overseaEntitlements)
+    .find((entitlement) => entitlement.userId === userId) || null;
+}
+
+function userOverseaSubscriptionUrl(userId) {
+  if (!userId) return '';
+  return `${normalizedServerBase()}/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea/subscription.yaml`;
+}
+
+function renderChipList(items, tone = 'neutral') {
+  const list = asArray(items).filter(Boolean);
+  if (!list.length) return '<span class="foundation-chip" data-tone="muted">-</span>';
+  return `
+    <span class="foundation-chip-row">
+      ${list.map((item) => `<span class="foundation-chip" data-tone="${escapeHtml(tone)}">${escapeHtml(item)}</span>`).join('')}
+    </span>
+  `;
+}
+
+function renderUserOverseaSyncChips(accounts) {
+  const list = asArray(accounts);
+  if (!list.length) return '<span class="foundation-chip" data-tone="muted">-</span>';
+  return `
+    <span class="foundation-chip-row">
+      ${list.map((account) => {
+        const status = account.runtimeSync?.status || 'unknown';
+        return `<span class="foundation-chip" data-tone="${escapeHtml(runtimeSyncTone(status))}" title="${escapeHtml(account.runtimeSync?.reason || account.username || status)}">${escapeHtml(`${account.siteId}: ${status}`)}</span>`;
+      }).join('')}
+    </span>
+  `;
+}
+
+function runtimeSyncTone(status) {
+  if (status === 'synced') return 'success';
+  if (status === 'pending-sync') return 'warning';
+  if (status === 'no-runtime-evidence') return 'danger';
+  return 'muted';
 }
 
 function renderUserCenterPanel() {
@@ -3226,9 +3583,12 @@ function renderUserCenterPanel() {
   `).join('');
   const feedback = state.userCenter.feedback;
   return `
-    <section class="foundation-operation-panel">
-      <div class="section-title compact-title">
-        <h4>User Center</h4>
+    <section class="foundation-panel foundation-wide">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>User registry</h4>
+          <p>用户、服务账号、设备身份和外部系统 token 都从这里拿到统一 subject，再进入 RBAC 和发布门禁。</p>
+        </div>
         <span>${escapeHtml(users.length)} users</span>
       </div>
       <div class="foundation-operation-grid">
@@ -3252,15 +3612,519 @@ function renderUserCenterPanel() {
         <button class="primary-button" type="button" data-user-create ${state.userCenter.busy ? 'disabled' : ''}>Create User</button>
         ${feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(feedback.kind)}">${escapeHtml(feedback.message)}</span>` : ''}
       </div>
-      <div class="foundation-list">
-        ${users.slice(0, 6).map((user) => `
-          <article>
+      <div class="foundation-table user-center-table">
+        <article class="foundation-table-row is-header">
+          <strong>User</strong>
+          <span>Identity</span>
+          <span>Roles</span>
+          <span>Enabled services</span>
+          <span>Internal usage</span>
+          <small>Oversea</small>
+        </article>
+        ${users.map((user) => `
+          <article class="foundation-table-row">
             <strong>${escapeHtml(user.displayName || user.userId)}</strong>
-            <span>${escapeHtml(user.email || user.userId)}</span>
-            <small>${escapeHtml(asArray(user.roleIds).join(' / ') || '-')}</small>
+            <span>${escapeHtml(`${user.email || user.userId} / ${userKind(user)} / ${user.status || 'active'}`)}</span>
+            <span>${renderChipList(asArray(user.roleIds).map(roleLabel), 'info')}</span>
+            <span>${renderChipList(userEnabledServices(user).slice(0, 4), 'success')}</span>
+            <span>${escapeHtml(userInternalUsage(user))}</span>
+            <small>${escapeHtml(userOverseaAccess(user))}</small>
           </article>
         `).join('') || '<div class="empty-state">No users yet</div>'}
       </div>
+    </section>
+  `;
+}
+
+function renderUserOverseaSubscriptionPanel() {
+  const users = asArray(state.userCenter.users);
+  const sites = overseaAuthoritySites();
+  const activeEntitlements = asArray(state.userCenter.overseaEntitlements).filter((item) => item.status === 'active');
+  const selectedUserId = state.userCenter.selectedOverseaUserId
+    || activeEntitlements[0]?.userId
+    || users[0]?.userId
+    || '';
+  const selectedEntitlement = entitlementForUser(selectedUserId);
+  const selectedSiteIds = new Set(asArray(selectedEntitlement?.siteIds));
+  const feedback = state.userCenter.overseaFeedback;
+  const subscriptionUrl = selectedEntitlement?.status === 'active'
+    ? userOverseaSubscriptionUrl(selectedUserId)
+    : '';
+  const selectedSyncAccounts = selectedEntitlement?.status === 'active'
+    ? asArray(selectedEntitlement.accounts)
+    : [];
+  return `
+    <section class="foundation-panel foundation-wide">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>User Oversea subscriptions</h4>
+          <p>创建用户后，在这里分配可用 Oversea site。Internal 会为每个 site 发行用户专属 hysteria2 account，并生成一个聚合 mihomo 订阅。</p>
+        </div>
+        <span>${escapeHtml(String(activeEntitlements.length))} active</span>
+      </div>
+      <div class="foundation-operation-grid user-oversea-grid">
+        <label class="form-field">
+          <span>User</span>
+          <select data-oversea-user ${users.length ? '' : 'disabled'}>
+            ${users.map((user) => `
+              <option value="${escapeHtml(user.userId)}" ${user.userId === selectedUserId ? 'selected' : ''}>
+                ${escapeHtml(user.displayName || user.email || user.userId)}
+              </option>
+            `).join('') || '<option value="">create a user first</option>'}
+          </select>
+        </label>
+        <div class="form-field wide-field">
+          <span>Allowed Oversea sites</span>
+          <div class="foundation-checkbox-grid">
+            ${sites.map((siteId) => `
+              <label class="foundation-checkbox-option">
+                <input type="checkbox" data-oversea-site value="${escapeHtml(siteId)}" ${selectedSiteIds.has(siteId) ? 'checked' : ''} />
+                <span>${escapeHtml(siteId)}</span>
+              </label>
+            `).join('') || '<span class="oversea-boundary-note">No Oversea mihomo site is ready yet. Install / Sync an Oversea first.</span>'}
+          </div>
+        </div>
+      </div>
+      <div class="foundation-operation-actions">
+        <button class="primary-button" type="button" data-oversea-assign ${state.userCenter.overseaBusy || !selectedUserId || !sites.length ? 'disabled' : ''}>
+          ${state.userCenter.overseaBusy ? 'Assigning' : selectedSiteIds.size ? 'Assign / Issue' : 'Disable Access'}
+        </button>
+        <button class="secondary-button" type="button" data-oversea-sync-user ${state.userCenter.overseaBusy || state.userCenter.overseaSyncBusy || !selectedUserId || !selectedSyncAccounts.length ? 'disabled' : ''}>
+          ${state.userCenter.overseaSyncBusy ? 'Syncing User' : 'Sync User Remote'}
+        </button>
+        ${feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(feedback.kind)}">${escapeHtml(feedback.message)}</span>` : ''}
+      </div>
+      <div class="foundation-subscription-url">
+        <span>Subscription URL</span>
+        <code>${escapeHtml(subscriptionUrl || 'Assign one or more Oversea sites to generate a user subscription URL')}</code>
+      </div>
+      <div class="foundation-subscription-url">
+        <span>Runtime sync</span>
+        <code>${selectedSyncAccounts.length ? escapeHtml(selectedSyncAccounts.map((account) => `${account.siteId}:${account.runtimeSync?.status || 'unknown'}`).join(' / ')) : 'No runtime account selected'}</code>
+      </div>
+      <div class="foundation-table user-subscription-table">
+        <article class="foundation-table-row is-header">
+          <strong>User</strong>
+          <span>Sites</span>
+          <span>Runtime sync</span>
+          <small>Subscription</small>
+        </article>
+        ${asArray(state.userCenter.overseaEntitlements).map((entitlement) => `
+          <article class="foundation-table-row">
+            <strong>${escapeHtml(users.find((user) => user.userId === entitlement.userId)?.displayName || entitlement.userId)}</strong>
+            <span>${renderChipList(asArray(entitlement.siteIds), 'success')}</span>
+            <span>${renderUserOverseaSyncChips(entitlement.accounts)}</span>
+            <small>${escapeHtml(entitlement.status === 'active' ? userOverseaSubscriptionUrl(entitlement.userId) : 'disabled')}</small>
+          </article>
+        `).join('') || '<div class="empty-state">No user Oversea entitlement yet</div>'}
+      </div>
+    </section>
+  `;
+}
+
+function renderUserServiceAccessPanel() {
+  const rows = [
+    ['Launcher Runtime', 'login / device identity / AppCenter host', 'User Center subject + device binding', 'login, update, network traces'],
+    ['AppCenter', 'install H2O and future apps', 'entitlement + app release channel', 'app install evidence'],
+    ['H2O', 'consume Launcher Network and app config', 'app permission manifest', 'E2E + runtime logs'],
+    ['Oversea Access', 'hysteria2 subscription, site group, node switch', 'oversea.access.use + subscription issue policy', 'subscription issue + node health'],
+    ['Domestic Relay', 'WG/H2I/DNS reachability for H endpoints', 'relay lease + device enrollment', 'relay lease evidence'],
+    ['SDK Gateway', 'external systems call Internal APIs', 'service account + route scopes', 'token introspection + API audit']
+  ];
+  return `
+    <section class="foundation-panel foundation-wide">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>Service access matrix</h4>
+          <p>User Center 不只是用户表，它还记录用户开通了哪些服务、经过哪些内部系统、由哪些证据闭环。</p>
+        </div>
+        <span>entitlement model</span>
+      </div>
+      <div class="foundation-table service-access-table">
+        <article class="foundation-table-row is-header">
+          <strong>Service</strong>
+          <span>Capability</span>
+          <span>Grant source</span>
+          <small>Evidence</small>
+        </article>
+        ${rows.map((row) => `
+          <article class="foundation-table-row">
+            <strong>${escapeHtml(row[0])}</strong>
+            <span>${escapeHtml(row[1])}</span>
+            <span>${escapeHtml(row[2])}</span>
+            <small>${escapeHtml(row[3])}</small>
+          </article>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
+
+function overseaAuthoritySites() {
+  const siteIds = new Set();
+  for (const site of asArray(state.overseaOverview?.sites)) {
+    if (site.siteId) siteIds.add(site.siteId);
+  }
+  for (const pipeline of asArray(state.dashboard?.siteSlotPipelines)) {
+    if (pipeline.kind === 'oversea' && pipeline.siteId) siteIds.add(pipeline.siteId);
+  }
+  return [...siteIds].sort();
+}
+
+function renderOverseaEntitlementPanel() {
+  const sites = overseaAuthoritySites();
+  const rows = [
+    ['Site group', sites.length ? sites.join(' / ') : 'oversea sites pending', '一个订阅可以包含多台 Oversea 节点，用户在 Clash/Launcher Network 内切换。'],
+    ['Account issue', 'user-scoped + bootstrap accounts', '预设账号保留，真实用户访问走 User Center entitlement 和可吊销凭证。'],
+    ['Subscription authority', 'Internal mihomo', 'Internal 生成 YAML，Oversea 仅提供 Docker hysteria2 runtime 和健康证据出口。'],
+    ['Runtime check', 'hysteria2 + health exporter', 'Stack Status 只看 Docker runtime；3434 定位为健康和证据出口，不做订阅真相。'],
+    ['Revoke / rotate', 'RBAC action gate', '禁用用户或撤销 oversea.access.use 后，订阅凭证旋转并写入 Evidence History。']
+  ];
+  return `
+    <section class="foundation-panel foundation-wide">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>Oversea entitlement</h4>
+          <p>刚跑通的 Oversea 部署会接入 User Center / RBAC：用户可开通 Oversea，选择站点组，订阅由 Internal 生成和审计。</p>
+        </div>
+        <span>${escapeHtml(String(sites.length))} sites</span>
+      </div>
+      ${renderFoundationRows(rows)}
+    </section>
+  `;
+}
+
+function renderUserIntegrationPanel() {
+  const endpoints = [
+    ['Identity API', 'POST /internal/v1/user-center/tokens/introspect', '外部系统验证用户、服务账号、设备身份。'],
+    ['Entitlement API', 'GET /internal/v1/user-center/users/:id/services', '查询 Launcher、H2O、Oversea、SDK Gateway 的服务开通状态。'],
+    ['Subscription API', 'GET /internal/v1/launcher-network/mihomo/sites/:site/account/:account.yaml', 'H 端通过 Internal/Domestic 路径获取 mihomo 配置。'],
+    ['Audit API', 'GET /internal/v1/evidence?subject=:id', '统一拉取用户、权限、发版、订阅和远程执行证据。']
+  ];
+  return `
+    <section class="foundation-panel">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>API surface</h4>
+          <p>自有系统和外部客户系统都用同一组接口接入 Internal。</p>
+        </div>
+      </div>
+      ${renderFoundationRows(endpoints)}
+    </section>
+    ${renderRelayEnrollmentPanel()}
+  `;
+}
+
+function renderRbacPanel() {
+  const roles = asArray(state.userCenter.roles);
+  const rows = roles.map((role) => [
+    role.displayName || role.roleId,
+    role.roleId,
+    asArray(role.scopes).slice(0, 5).join(' / ') || '-',
+    `${asArray(role.scopes).length} scopes`
+  ]);
+  return `
+    <section class="foundation-panel foundation-wide">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>Role and scope catalog</h4>
+          <p>权限中心定义 Internal 的功能权限结构：角色只是人可读分组，真正门禁使用 scope、resource、action 和 evidence 绑定。</p>
+        </div>
+        <span>${escapeHtml(String(roles.length))} roles</span>
+      </div>
+      ${roles.length ? `
+        <div class="foundation-table rbac-role-table">
+          <article class="foundation-table-row is-header">
+            <strong>Role</strong>
+            <span>Role ID</span>
+            <span>Representative scopes</span>
+            <small>Coverage</small>
+          </article>
+          ${rows.map((row) => `
+            <article class="foundation-table-row">
+              <strong>${escapeHtml(row[0])}</strong>
+              <span>${escapeHtml(row[1])}</span>
+              <span>${escapeHtml(row[2])}</span>
+              <small>${escapeHtml(row[3])}</small>
+            </article>
+          `).join('')}
+        </div>
+      ` : '<div class="empty-state">No roles loaded. Bootstrap User Center first.</div>'}
+    </section>
+    <section class="foundation-panel">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>Access standard</h4>
+          <p>权限不是后台手工猜出来的，系统要把功能结构以 manifest / E2E / SDK 契约上报。</p>
+        </div>
+      </div>
+      ${renderFoundationRows([
+        ['Subject', 'user / service-account / device / anonymous install', 'User Center'],
+        ['Resource', 'system.module.object, such as oversea.subscription', 'Permission registry'],
+        ['Action', 'read / use / create / approve / rollback / release', 'RBAC scope'],
+        ['Gate', 'risk level + confirmation + test evidence', 'Action Gates']
+      ])}
+    </section>
+  `;
+}
+
+function renderPermissionRegistryPanel() {
+  const rows = [
+    ['Launcher Runtime', 'launcher.runtime.v1', 'login, device, AppCenter host, network profile, forced update'],
+    ['AppCenter', 'appcenter.app.v1', 'install, skip update, gray channel, release evidence'],
+    ['H2O', 'h2o.application.v1', 'consume Launcher Network, app config, e2e result'],
+    ['Oversea Access', 'oversea.access.v1', 'issue subscription, rotate password, select site group, revoke user'],
+    ['Domestic Relay', 'domestic.relay.v1', 'lease peer, DNS/H2I path, relay evidence'],
+    ['External System', 'external.manifest.v1', 'reported modules, scopes, tests, release policy']
+  ];
+  return `
+    <section class="foundation-panel foundation-wide">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>Permission registry</h4>
+          <p>接入系统维护完整权限功能结构，Internal 根据这份结构做授权、灰度、发版、门禁和审计。</p>
+        </div>
+        <span>manifest-driven</span>
+      </div>
+      <div class="foundation-table permission-registry-table">
+        <article class="foundation-table-row is-header">
+          <strong>System</strong>
+          <span>Manifest</span>
+          <small>Functional permissions</small>
+        </article>
+        ${rows.map((row) => `
+          <article class="foundation-table-row">
+            <strong>${escapeHtml(row[0])}</strong>
+            <span>${escapeHtml(row[1])}</span>
+            <small>${escapeHtml(row[2])}</small>
+          </article>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
+
+function renderExternalSystemContractPanel() {
+  return `
+    <section class="foundation-panel foundation-wide">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>External onboarding contract</h4>
+          <p>MX-Launcher 对自有系统和外部接入系统提供同一条测试、发版、权限和证据链路。</p>
+        </div>
+        <span>SDK Gateway</span>
+      </div>
+      <div class="foundation-contract-grid">
+        ${[
+          ['1. Declare', '系统提交权限树、API surface、E2E 契约和发布资产定义。'],
+          ['2. Test', 'E2E Gate 运行 synthetic probe、截图、runner output、配置快照。'],
+          ['3. Authorize', 'RBAC 将 role/scope/resource/action 绑定到用户、服务账号或设备。'],
+          ['4. Release', 'Release Center 按权限对象做灰度、回滚、跳过和强制策略。'],
+          ['5. Observe', 'Observability 把用户行为、系统日志和证据挂回同一 subject。']
+        ].map((item) => `
+          <article class="foundation-contract-card">
+            <strong>${escapeHtml(item[0])}</strong>
+            <span>${escapeHtml(item[1])}</span>
+          </article>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
+
+function renderConfigCenterPanel(overview) {
+  const rows = [
+    ['SSH Profiles', `${asArray(state.sshProfiles).length} profiles`, 'Remote SSH runner、host key、identity、site binding。'],
+    ['Runtime Policies', `${asArray(state.awxRuntimePolicies).length} feature gates`, '远程执行、artifact push、rollback、AWX optional gate。'],
+    ['Subscription Defaults', `${overview.siteSlotPlans || 0} site plans`, 'hysteria2 port、DNS、rate limit、mihomo YAML 模板。'],
+    ['Config Snapshots', `${overview.configPolicySnapshots || 0} snapshots`, '每次下发、测试和发布都保存可回滚快照。']
+  ];
+  return `
+    <section class="foundation-panel foundation-wide">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>Config Center authority</h4>
+          <p>站点配置、SSH Profile、订阅模板和 runtime feature policy 都由 Internal 保存，slot 只接收 materialized artifact。</p>
+        </div>
+        <span>${escapeHtml(String(overview.configPolicySnapshots || 0))} snapshots</span>
+      </div>
+      ${renderFoundationRows(rows)}
+    </section>
+    <section class="foundation-panel">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>Remote execution source</h4>
+          <p>Oversea 默认使用 Remote SSH runner；AWX 只作为已有企业自动化平台的可选 adapter。</p>
+        </div>
+      </div>
+      ${renderFoundationRows([
+        ['Default path', 'Internal -> Remote SSH runner -> worker job -> artifact -> Docker hysteria2', 'active'],
+        ['AWX adapter', 'Internal -> AWX inventory/credential/job template', 'optional'],
+        ['Evidence', 'plan, preflight, runner session, worker report, remote stdout/stderr', 'required']
+      ])}
+    </section>
+  `;
+}
+
+function renderOptionalAwxProviderPanel() {
+  const providers = asArray(state.awxProviders);
+  return `
+    <section class="foundation-panel foundation-wide">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>Optional AWX adapter</h4>
+          <p>AWX 不再是 Oversea 部署的默认路径。这里保留 provider 配置、对象同步和 token 检查，用于接入已有 AWX 环境。</p>
+        </div>
+        <span>${escapeHtml(String(providers.length))} providers</span>
+      </div>
+      ${renderFoundationRows([
+        ['Default Oversea flow', 'Remote SSH direct runner', 'recommended'],
+        ['AWX flow', 'inventory / credential / job template sync', 'optional'],
+        ['K8s presence', 'AWX shadow 可以继续在 k8s 中默认启动', 'demo / compatibility'],
+        ['Gate policy', 'AWX credential/object/launch gates stay disabled unless explicitly enabled', 'controlled']
+      ])}
+    </section>
+  `;
+}
+
+function internalModuleBlueprint(moduleId, overview) {
+  const sites = overseaAuthoritySites();
+  const evidenceCount = consoleEvidenceTotal(state.dashboard?.siteSlotPipelines || []);
+  const blueprints = {
+    dns: {
+      badge: overview.dnsZoneSnapshots || 0,
+      contracts: [
+        ['Authority', 'Internal CoreDNS owns MX split DNS and whitelist matching.', 'Internal'],
+        ['Fallback', 'missed domains fall back to system DNS / proxy / Clash policy.', 'Launcher Network'],
+        ['H endpoint path', 'Domestic WG + H2I makes Internal DNS reachable before private subscription fetch.', 'Domestic gated']
+      ],
+      actions: [
+        ['Zone snapshot', 'save current authority zones and whitelists before release'],
+        ['Probe', 'synthetic query for Internal, Domestic, Oversea and public domains'],
+        ['Evidence', 'store query trace and resolved route decision']
+      ]
+    },
+    mihomo: {
+      badge: state.overseaOverview?.mihomo?.subscriptions || overview.siteSlotPlans || 0,
+      contracts: [
+        ['Authority', 'Internal generates mihomo YAML and owns user subscription truth.', 'Internal'],
+        ['Sites', sites.length ? sites.join(' / ') : 'no oversea sites loaded', 'site group'],
+        ['Oversea role', 'Docker hysteria2 runtime plus health/evidence outlet, not subscription truth.', 'runtime only']
+      ],
+      actions: [
+        ['Issue', 'bind user entitlement to account and site group'],
+        ['Rotate', 'rotate password / fingerprint / YAML revision after revoke'],
+        ['Deliver', 'H endpoint fetches via Domestic relay when Internal is not public']
+      ]
+    },
+    release: {
+      badge: overview.releaseManagementPlans || 0,
+      contracts: [
+        ['Launcher Runtime', 'platform critical updates can be forced and rolled back.', 'strict'],
+        ['AppCenter apps', 'manual, skip, gray and app-scoped rollback.', 'flexible'],
+        ['External systems', 'release policy is derived from permission manifest and E2E gate.', 'contract']
+      ],
+      actions: [
+        ['Build artifact', 'version, notes, checksum, target audience'],
+        ['Gate', 'E2E + synthetic + observability evidence'],
+        ['Roll back', 'restore artifact and config snapshot']
+      ]
+    },
+    'e2e-gate': {
+      badge: overview.testRuns || 0,
+      contracts: [
+        ['Definition', 'E2E cases can become permission feature definitions.', 'test-as-contract'],
+        ['Evidence', 'runner output, screenshots, config snapshots and probes are attached.', 'required'],
+        ['Release binding', 'gray and rollback gates consume the same result.', 'Release Center']
+      ],
+      actions: [
+        ['Run synthetic probe', 'H/D/I/O path plus user entitlement check'],
+        ['Capture', 'stdout/stderr, screenshots, DNS/routing decision'],
+        ['Promote', 'mark release or feature scope as passed']
+      ]
+    },
+    observability: {
+      badge: evidenceCount,
+      contracts: [
+        ['Trace', 'H/D/I/O hops share request id and subject id.', 'cross-plane'],
+        ['Log', 'runner, worker, release and UI actions are queryable by evidence id.', 'audit'],
+        ['Metric', 'health summaries and site runtime state feed topology.', 'topology']
+      ],
+      actions: [
+        ['Correlate', 'subject -> entitlement -> action -> evidence'],
+        ['Export', 'health/evidence outlet for topology and ops UI'],
+        ['Gate', 'block release or rollback when evidence is missing']
+      ]
+    },
+    'admin-runner': {
+      badge: overview.siteSlotPlans || 0,
+      contracts: [
+        ['Admin', 'topology, Action Gates, approval and rollback share one action model.', 'operator UI'],
+        ['Runner', 'Remote SSH worker handoff is default for Oversea/Domestic slots.', 'direct'],
+        ['AWX', 'optional adapter; not required for Internal foundations.', 'optional']
+      ],
+      actions: [
+        ['Plan', 'materialize slot plan and remote command set'],
+        ['Run', 'preflight, apply, runner session, worker job'],
+        ['Explain', 'Evidence Drawer explains steps, commands and stdout/stderr']
+      ]
+    },
+    'sdk-gateway': {
+      badge: overview.sdkGatewayRoutes || 0,
+      contracts: [
+        ['Route manifest', 'stable APIs for Launcher, AppCenter apps and external systems.', 'contract'],
+        ['Auth', 'service account token introspection and allowed route list.', 'User Center'],
+        ['Policy', 'RBAC scopes bind route, resource and release audience.', 'RBAC']
+      ],
+      actions: [
+        ['Register route', 'declare input, scopes, evidence and tests'],
+        ['Issue token', 'service account with minimal scopes'],
+        ['Audit usage', 'usage record links to user/service account']
+      ]
+    }
+  };
+  return blueprints[moduleId] || {
+    badge: '-',
+    contracts: [['Planned', 'Module blueprint not loaded yet.', 'pending']],
+    actions: [['Define', 'add module manifest, evidence and actions']]
+  };
+}
+
+function renderInternalModulePanel(moduleId, overview) {
+  const meta = internalSubsectionMeta[moduleId] || internalSubsectionMeta.overview;
+  const blueprint = internalModuleBlueprint(moduleId, overview);
+  return `
+    <section class="foundation-panel foundation-wide">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>${escapeHtml(meta.title)} contract</h4>
+          <p>${escapeHtml(meta.subtitle)}</p>
+        </div>
+        <span>${escapeHtml(String(blueprint.badge))}</span>
+      </div>
+      <div class="foundation-table module-contract-table">
+        <article class="foundation-table-row is-header">
+          <strong>Boundary</strong>
+          <span>Definition</span>
+          <small>Owner</small>
+        </article>
+        ${blueprint.contracts.map((row) => `
+          <article class="foundation-table-row">
+            <strong>${escapeHtml(row[0])}</strong>
+            <span>${escapeHtml(row[1])}</span>
+            <small>${escapeHtml(row[2])}</small>
+          </article>
+        `).join('')}
+      </div>
+    </section>
+    <section class="foundation-panel">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>Expected actions</h4>
+          <p>这些动作会逐步落到 Admin action model、Release Gate 和 Evidence History。</p>
+        </div>
+      </div>
+      ${renderFoundationRows(blueprint.actions.map((row) => [row[0], row[1], moduleId]))}
     </section>
   `;
 }

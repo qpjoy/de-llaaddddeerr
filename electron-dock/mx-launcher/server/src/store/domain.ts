@@ -77,6 +77,8 @@ import type {
   UserCenterTenant,
   UserCenterTokenRecord,
   UserCenterUser,
+  UserOverseaEntitlement,
+  UserOverseaSubscriptionRender,
   TestStep,
   TestGateVerdict,
   TestRun,
@@ -2738,12 +2740,20 @@ function siteSlotDeploymentPhases(
   const overseaDefaultAccountNames = defaultSiteSlotAccessAccountNames(overseaSiteId);
   const overseaInternalAccountName = `${safeAccountPrefix(overseaSiteId)}-internal`;
   const overseaDomesticAccountName = `${safeAccountPrefix(overseaSiteId)}-domestic`;
+  const overseaInputAccessAccounts = (input.accessAccounts ?? [])
+    .filter((account) => (
+      Boolean(account.username)
+      && Boolean(account.authToken)
+      && (account.status == null || account.status === 'active')
+    ));
   const overseaAccessAccountMaterial = new Map(
-    (input.accessAccounts ?? [])
-      .filter((account) => account.status == null || account.status === 'active')
-      .map((account) => [safeAccountName(account.username), account])
+    overseaInputAccessAccounts.map((account) => [safeAccountName(account.username), account])
   );
-  const overseaAccountMaterialCount = overseaDefaultAccountNames
+  const overseaRuntimeAccountNames = [...new Set([
+    ...overseaDefaultAccountNames,
+    ...overseaInputAccessAccounts.map((account) => safeAccountName(account.username))
+  ])];
+  const overseaAccountMaterialCount = overseaRuntimeAccountNames
     .filter((username) => overseaAccessAccountMaterial.has(safeAccountName(username))).length;
   const overseaReservedInternalCidrs = ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16', '10.91.0.0/16'];
   const overseaReservedInternalCidrsCsv = overseaReservedInternalCidrs.join(',');
@@ -2764,7 +2774,7 @@ function siteSlotDeploymentPhases(
     'HY2_HOP_INTERVAL_SECONDS=0',
     'HY2_STACK_SUBNET=10.254.0.0/24',
     'HY2_STACK_GATEWAY=10.254.0.1',
-    `HY2_USERS=${overseaDefaultAccountNames.join(',')}`,
+    `HY2_USERS=${overseaRuntimeAccountNames.join(',')}`,
     `HY2_PEER_DNS=${HYSTERIA2_CLIENT_DNS.join(',')}`,
     `HY2_INTERNAL_MIHOMO_BASE_URL=${internalMihomoBaseUrl}`,
     'HY2_INTERNAL_SUBSCRIPTION_STORE=config-center',
@@ -2803,7 +2813,7 @@ function siteSlotDeploymentPhases(
         dnsPath: 'wg-relay-internal-dns'
       }
     ],
-    accounts: overseaDefaultAccountNames.map((username) => ({
+    accounts: overseaRuntimeAccountNames.map((username) => ({
         id: username,
         username,
         authToken: overseaAccessAccountMaterial.get(safeAccountName(username))?.authToken ?? `<hy2-token:${username}:from-internal-config-center>`,
@@ -2944,7 +2954,7 @@ function siteSlotDeploymentPhases(
         commands: [
           `POST /internal/v1/site-slots/${overseaSiteId}/access-accounts issueDefaults=true service=hysteria2 store=config-center accounts=${overseaDefaultAccountNames.join(',')}`,
           `POST /internal/v1/launcher-network/mihomo/sites/${overseaSiteId} mode=internal-managed source=${overseaSubscriptionBaseUrl} reachability=internal-url-requires-domestic-wg-relay`,
-          `Record overseaAccessAccountMaterial=internal-issued accounts=${overseaAccountMaterialCount}/${overseaDefaultAccountNames.length} source=config-center`,
+          `Record overseaAccessAccountMaterial=internal-issued accounts=${overseaAccountMaterialCount}/${overseaRuntimeAccountNames.length} source=config-center`,
           ssh(overseaDockerInstallScript()),
           ssh(overseaEnvWriteCommand),
           ssh(`printf "%s" ${overseaTunnelStateBase64} | base64 -d > /opt/mx/site-agent/tunnel-state.json`),
@@ -3310,6 +3320,8 @@ export function buildSiteSlotAccessAccount(
 ): SiteSlotAccessAccount {
   const username = safeAccountName(input.username);
   const siteId = input.siteId.trim() || 'oversea-main';
+  const authToken = previous?.authToken || input.authToken;
+  const materialChanged = !previous || previous.authToken !== authToken || previous.status !== 'active';
   return {
     accountId: `slotacct_${siteId}_${username}`.replace(/[^a-zA-Z0-9._-]/g, '_'),
     siteId,
@@ -3317,14 +3329,14 @@ export function buildSiteSlotAccessAccount(
     service: 'hysteria2',
     username,
     role: inferAccessAccountRole(siteId, username),
-    authToken: previous?.authToken || input.authToken,
+    authToken,
     status: 'active',
     routingPolicy: 'cn-direct',
     subscriptionPath: `/internal/v1/site-slots/${siteId}/subscriptions/hysteria2/${username}.yaml`,
     createdBy: previous?.createdBy ?? input.requestedBy ?? 'internal',
     createdAt: previous?.createdAt ?? now,
-    updatedBy: input.requestedBy ?? previous?.updatedBy ?? 'internal',
-    updatedAt: now
+    updatedBy: materialChanged ? input.requestedBy ?? previous?.updatedBy ?? 'internal' : previous?.updatedBy ?? 'internal',
+    updatedAt: materialChanged ? now : previous?.updatedAt ?? now
   };
 }
 
@@ -3391,6 +3403,90 @@ export function renderHysteria2MihomoSubscription(
     contentType: 'text/yaml',
     yaml: lines.join('\n'),
     reachability: site.reachability,
+    generatedAt: now
+  };
+}
+
+export function userOverseaAccountName(user: UserCenterUser, siteId: string): string {
+  const subject = user.email || user.userId;
+  return safeAccountName(`${siteId}-${subject}`).slice(0, 80);
+}
+
+export function userOverseaEntitlementId(userId: string): string {
+  return `useroversea_${safeAccountName(userId)}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+export function renderUserOverseaMihomoSubscription(
+  user: UserCenterUser,
+  entitlement: UserOverseaEntitlement,
+  entries: Array<{ site: LauncherNetworkMihomoSite; account: SiteSlotAccessAccount }>,
+  now = new Date().toISOString()
+): UserOverseaSubscriptionRender {
+  const activeEntries = entries.filter(({ account }) => account.status === 'active');
+  const proxyNames = activeEntries.map(({ site }) => `${site.siteId}-hysteria2`);
+  const reservedInternalCidrs = [...new Set(activeEntries.flatMap(({ site }) => site.reservedInternalCidrs))];
+  const proxyLines = activeEntries.flatMap(({ site, account }) => {
+    const proxyName = `${site.siteId}-hysteria2`;
+    const server = site.publicHost || `${site.siteId}.oversea.invalid`;
+    const proxyFingerprintLines = site.tlsFingerprint
+      ? [`    fingerprint: ${yamlQuote(site.tlsFingerprint)}`]
+      : [];
+    return [
+      `  - name: ${yamlQuote(proxyName)}`,
+      '    type: hysteria2',
+      `    server: ${yamlQuote(server)}`,
+      `    port: ${firstHysteriaPort(site.serverPorts)}`,
+      `    password: ${yamlQuote(account.authToken)}`,
+      `    down: ${yamlQuote(HYSTERIA2_CLIENT_DOWNLOAD)}`,
+      `    up: ${yamlQuote(HYSTERIA2_CLIENT_UPLOAD)}`,
+      `    sni: ${yamlQuote(site.publicHost || server)}`,
+      '    skip-cert-verify: true',
+      ...proxyFingerprintLines,
+      '    alpn:',
+      `      - ${HYSTERIA2_CLIENT_ALPN}`
+    ];
+  });
+  const lines = [
+    `# Generated by MX Launcher Internal at ${now}`,
+    `# user=${user.userId} email=${user.email}`,
+    `# entitlement=${entitlement.entitlementId} sites=${entitlement.siteIds.join(',')}`,
+    '# Reachability: this Internal subscription URL requires Domestic WG relay/H2I before H endpoints can fetch it.',
+    'mixed-port: 7890',
+    'allow-lan: false',
+    'mode: rule',
+    'log-level: info',
+    'geodata-mode: true',
+    'geo-auto-update: true',
+    'geo-update-interval: 24',
+    '',
+    'dns:',
+    '  enable: true',
+    '  listen: 127.0.0.1:1053',
+    '  enhanced-mode: fake-ip',
+    '  nameserver:',
+    ...HYSTERIA2_CLIENT_DNS.map((server) => `    - ${server}`),
+    'proxies:',
+    ...proxyLines,
+    'proxy-groups:',
+    '  - name: Oversea',
+    '    type: select',
+    '    proxies:',
+    ...proxyNames.map((proxyName) => `      - ${yamlQuote(proxyName)}`),
+    '      - DIRECT',
+    'rules:',
+    ...HYSTERIA2_LOCAL_DIRECT_RULES.map((rule) => `  - ${rule}`),
+    ...reservedInternalCidrs.map((cidr) => `  - IP-CIDR,${cidr},DIRECT,no-resolve`),
+    '  - GEOSITE,CN,DIRECT',
+    '  - GEOIP,CN,DIRECT',
+    '  - MATCH,Oversea',
+    ''
+  ];
+  return {
+    userId: user.userId,
+    entitlementId: entitlement.entitlementId,
+    contentType: 'text/yaml',
+    yaml: lines.join('\n'),
+    accounts: entitlement.accounts,
     generatedAt: now
   };
 }

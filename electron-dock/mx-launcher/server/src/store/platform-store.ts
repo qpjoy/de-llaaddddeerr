@@ -78,6 +78,11 @@ import type {
   UserCenterRole,
   UserCenterServiceAccount,
   UserCenterUser,
+  UserOverseaEntitlement,
+  UserOverseaEntitlementInput,
+  UserOverseaAccountSyncReport,
+  UserOverseaAccountSyncReportInput,
+  UserOverseaSubscriptionRender,
   TestRun,
   TestRunInput,
   TestStepInput
@@ -159,6 +164,12 @@ export interface PlatformStore {
   listUserCenterRoles(): MaybePromise<UserCenterRole[]>;
   listUserCenterUsers(): MaybePromise<UserCenterUser[]>;
   createUserCenterUser(input: CreateUserInput): MaybePromise<UserCenterUser>;
+  listUserOverseaEntitlements(): MaybePromise<UserOverseaEntitlement[]>;
+  getUserOverseaEntitlement(userId: string): MaybePromise<UserOverseaEntitlement | null>;
+  upsertUserOverseaEntitlement(input: UserOverseaEntitlementInput): MaybePromise<UserOverseaEntitlement>;
+  recordUserOverseaAccountSyncReport(input: UserOverseaAccountSyncReportInput): MaybePromise<UserOverseaAccountSyncReport>;
+  listUserOverseaAccountSyncReports(userId?: string | null, siteId?: string | null): MaybePromise<UserOverseaAccountSyncReport[]>;
+  renderUserOverseaMihomoSubscription(userId: string): MaybePromise<UserOverseaSubscriptionRender | null>;
   listUserCenterServiceAccounts(): MaybePromise<UserCenterServiceAccount[]>;
   createUserCenterServiceAccount(input: CreateServiceAccountInput): MaybePromise<UserCenterServiceAccount>;
   issueUserCenterToken(input: IssueTokenInput): MaybePromise<UserCenterIssuedToken>;

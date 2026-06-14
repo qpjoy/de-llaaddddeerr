@@ -1630,6 +1630,90 @@ export interface MihomoSubscriptionRender {
   generatedAt: string;
 }
 
+export interface UserOverseaEntitlementInput {
+  userId?: string | null;
+  siteIds?: string[] | string | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface UserOverseaEntitlementAccount {
+  siteId: string;
+  username: string;
+  accountId: string;
+  status: SiteSlotAccessAccount['status'];
+  subscriptionPath: string;
+  siteSubscriptionUrl: string;
+  runtimeSync: {
+    status: 'synced' | 'pending-sync' | 'no-runtime-evidence' | 'disabled';
+    checkedAt: string;
+    accountUpdatedAt: string;
+    lastSyncedAt: string | null;
+    requiredAction: 'none' | 'run-user-oversea-remote-sync' | 'run-oversea-install-sync';
+    reason: string;
+  };
+}
+
+export interface UserOverseaEntitlement {
+  entitlementId: string;
+  userId: string;
+  environment: string;
+  service: 'hysteria2';
+  siteIds: string[];
+  accounts: UserOverseaEntitlementAccount[];
+  status: 'active' | 'disabled';
+  subscriptionPath: string;
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export interface UserOverseaSubscriptionRender {
+  userId: string;
+  entitlementId: string;
+  contentType: 'text/yaml';
+  yaml: string;
+  accounts: UserOverseaEntitlementAccount[];
+  generatedAt: string;
+}
+
+export interface UserOverseaAccountSyncReportInput {
+  userId?: string | null;
+  siteId?: string | null;
+  accountId?: string | null;
+  username?: string | null;
+  status?: 'passed' | 'failed' | 'blocked' | null;
+  exitCode?: number | null;
+  command?: string | null;
+  stdout?: string | null;
+  stderr?: string | null;
+  diagnosis?: Record<string, unknown> | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+}
+
+export interface UserOverseaAccountSyncReport {
+  reportId: string;
+  userId: string;
+  siteId: string;
+  accountId: string;
+  username: string;
+  status: 'passed' | 'failed' | 'blocked';
+  exitCode: number | null;
+  command: string | null;
+  stdout: string;
+  stderr: string;
+  diagnosis: Record<string, unknown> | null;
+  requestedBy: string;
+  requestId: string | null;
+  startedAt: string | null;
+  finishedAt: string;
+  createdAt: string;
+}
+
 export type DnsFallbackTarget = 'system-dns' | 'system-proxy' | 'h2o-proxy' | 'direct';
 
 export interface DnsPolicy {

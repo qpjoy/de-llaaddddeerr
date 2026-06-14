@@ -36,9 +36,11 @@ import type {
   ReleaseManagementPlan,
   RuntimeFeaturePolicy,
   SiteHeartbeat,
+  SiteSlotAccessAccount,
   SiteSlotExecutionRun,
   SiteSlotExecutionMode,
   SiteSlotPlan,
+  SiteSlotPlanAccessAccountInput,
   SiteSlotPlanInput,
   SiteSlotKind,
   SiteSlotRollbackExecution,
@@ -216,6 +218,7 @@ export class AdminController {
       requestedBy,
       requestId: `${requestId}-internal-mihomo`
     });
+    const planAccessAccounts = siteSlotPlanAccessAccountMaterial(await this.store.listSiteSlotAccessAccounts(siteId));
     const provider = await this.resolveAwxProviderConfig('oversea', stringValue(body.awxProviderId) ?? stringValue(body.providerId));
     const awxCheck = provider
       ? await checkAwxProvider(provider, {
@@ -237,13 +240,7 @@ export class AdminController {
       hasDocker: true,
       hasOutboundInternet: true,
       internalBaseUrl,
-      accessAccounts: access.accounts.map((account) => ({
-        username: account.username,
-        authToken: account.authToken,
-        status: account.status,
-        upRate: '30 Mbps',
-        downRate: '30 Mbps'
-      })),
+      accessAccounts: planAccessAccounts,
       createdBy: requestedBy,
       requestId: `${requestId}-plan`
     });
@@ -361,13 +358,14 @@ export class AdminController {
       requestedBy,
       requestId
     });
+    const planAccessAccounts = siteSlotPlanAccessAccountMaterial(await this.store.listSiteSlotAccessAccounts(siteId));
     ensureSteps.push(overseaEnsureStep('internal-mihomo', 'passed', access.site.siteId, {
       subscriptionBaseUrl: access.site.subscriptionBaseUrl,
-      accounts: access.accounts.length
+      accounts: planAccessAccounts.length
     }));
 
     let plan = await this.findReusableOverseaPlan(siteId, profile.profileId);
-    if (!plan) {
+    if (!plan || !reusableOverseaPlanIncludesAccounts(plan, planAccessAccounts)) {
       plan = await this.store.createSiteSlotPlan({
         siteId,
         kind: 'oversea',
@@ -379,13 +377,7 @@ export class AdminController {
         hasDocker: true,
         hasOutboundInternet: true,
         internalBaseUrl,
-        accessAccounts: access.accounts.map((account) => ({
-          username: account.username,
-          authToken: account.authToken,
-          status: account.status,
-          upRate: '30 Mbps',
-          downRate: '30 Mbps'
-        })),
+        accessAccounts: planAccessAccounts,
         createdBy: requestedBy,
         requestId
       });
@@ -1566,6 +1558,18 @@ function siteSlotPlanAccessAccountsValue(value: unknown): SiteSlotPlanInput['acc
       downRate: stringValue(row.downRate)
     };
   }).filter((account) => account.username && account.authToken);
+}
+
+function siteSlotPlanAccessAccountMaterial(accounts: SiteSlotAccessAccount[]): SiteSlotPlanAccessAccountInput[] {
+  return accounts
+    .filter((account) => account.status === 'active')
+    .map((account) => ({
+      username: account.username,
+      authToken: account.authToken,
+      status: account.status,
+      upRate: '30 Mbps',
+      downRate: '30 Mbps'
+    }));
 }
 
 function booleanValue(value: unknown): boolean | null {
@@ -3215,7 +3219,12 @@ function reusableOverseaPlanContract(plan: SiteSlotPlan): boolean {
     && commands.some((command) => command.includes('./manage.sh docker-status'))
     && commands.some((command) => command.includes('slot services placeholder; no Docker services selected'))
     && commands.some((command) => command.includes('overseaConfigDelivery=internal-pushed'))
-    && commands.some((command) => command.includes('overseaAccessAccountMaterial=internal-issued accounts=11/11'));
+    && commands.some((command) => command.includes('overseaAccessAccountMaterial=internal-issued accounts='));
+}
+
+function reusableOverseaPlanIncludesAccounts(plan: SiteSlotPlan, accounts: SiteSlotPlanAccessAccountInput[]): boolean {
+  const commandText = plan.deploymentPhases.flatMap((phase) => phase.commands ?? []).join('\n');
+  return accounts.every((account) => commandText.includes(account.username));
 }
 
 function applyAdminSshProfile(command: string, profile: SiteSlotSshProfile | null): string {

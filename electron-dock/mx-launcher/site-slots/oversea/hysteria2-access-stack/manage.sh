@@ -40,7 +40,7 @@ Commands:
   check-subscription-auth
                     Show health/evidence Basic Auth state; optionally verify with --password
   list-users        Show current configured Hysteria2 users and advertised up/down values
-  add-user          Add one or more Hysteria2 users, no restart needed
+  add-user          Add/upsert one or more Hysteria2 users, no restart needed
   del-user          Delete one or more Hysteria2 users and refresh summary
   set-limit         Set/update one or more users' Hysteria2 up/down values, then refresh summary
   clear-limit       Reset one or more users' Hysteria2 up/down values to stack defaults
@@ -56,6 +56,7 @@ Examples:
   sudo bash ./manage.sh reset-auth --user download --password pass
   sudo bash ./manage.sh check-subscription-auth --password pass
   sudo bash ./manage.sh add-user --names intelligent01,intelligent02
+  sudo bash ./manage.sh add-user --names mx-user --auth-token internal-issued-token --down-ceil "30 Mbps" --up-ceil "30 Mbps"
   sudo bash ./manage.sh del-user --names intelligent02
   sudo bash ./manage.sh set-limit --names intelligent01 --down-ceil "30 Mbps" --up-ceil "30 Mbps"
   sudo bash ./manage.sh reconcile-from-json --state-file /tmp/tunnel-state.json
@@ -931,6 +932,7 @@ upsert_user_record() {
 	mv "$tmp" "$USERS_FILE"
 
 	echo "$name,$auth_token,$up_rate,$down_rate" >> "$USERS_FILE"
+	chmod 600 "$USERS_FILE"
 }
 
 remove_user_record() {
@@ -1577,8 +1579,9 @@ add_user_command() {
 	local names_csv="${1:-}"
 	local down_value="${DOWN_CEIL:-${DOWN_RATE:-}}"
 	local up_value="${UP_CEIL:-${UP_RATE:-}}"
+	local auth_token_override="${AUTH_TOKEN:-}"
 	local -a additions=()
-	local name existing_record auth_token
+	local name existing_record auth_token current_auth current_up current_down
 
 	load_env
 	ensure_users_file
@@ -1589,20 +1592,31 @@ add_user_command() {
 
 	mapfile -t additions < <(parse_names_csv "$names_csv")
 	[[ "${#additions[@]}" -gt 0 ]] || die "No valid user names provided."
+	if [[ -n "$auth_token_override" && "${#additions[@]}" -ne 1 ]]; then
+		die "--auth-token can only be used with one user name."
+	fi
 
 	for name in "${additions[@]}"; do
 		existing_record="$(user_record "$name" || true)"
 		if [[ -n "$existing_record" ]]; then
-			echo "User already exists, skipping: $name"
+			IFS=$'\t' read -r current_auth current_up current_down <<< "$existing_record"
+			if [[ -z "$auth_token_override" && -z "$down_value" && -z "$up_value" ]]; then
+				echo "User already exists, skipping: $name"
+				continue
+			fi
+			auth_token="${auth_token_override:-$current_auth}"
+			upsert_user_record "$name" "$auth_token" "${up_value:-${current_up:-${HY2_DEFAULT_UP:-$(default_hy2_upload_rate)}}}" "${down_value:-${current_down:-${HY2_DEFAULT_DOWN:-$(default_hy2_download_rate)}}}"
+			echo "User updated: $name"
 			continue
 		fi
-		auth_token="$(random_token)"
+		auth_token="${auth_token_override:-$(random_token)}"
 		upsert_user_record "$name" "$auth_token" "${up_value:-${HY2_DEFAULT_UP:-$(default_hy2_upload_rate)}}" "${down_value:-${HY2_DEFAULT_DOWN:-$(default_hy2_download_rate)}}"
+		echo "User added: $name"
 	done
 
 	sync_env_user_list_from_file
 	refresh_subscriptions
-	echo "Added users: $(array_join_csv "${additions[@]}")"
+	echo "Upserted users: $(array_join_csv "${additions[@]}")"
 }
 
 del_user_command() {
@@ -1868,6 +1882,7 @@ main() {
 		;;
 		add-user)
 			local names_csv=""
+			local auth_token=""
 			local down_rate=""
 			local down_ceil=""
 			local up_rate=""
@@ -1875,6 +1890,7 @@ main() {
 			while [[ $# -gt 0 ]]; do
 				case "$1" in
 					--names) names_csv="$2"; shift 2 ;;
+					--auth|--auth-token) auth_token="$2"; shift 2 ;;
 					--down-rate) down_rate="$2"; shift 2 ;;
 					--down-ceil) down_ceil="$2"; shift 2 ;;
 					--up-rate) up_rate="$2"; shift 2 ;;
@@ -1882,7 +1898,7 @@ main() {
 					*) die "Unknown add-user option: $1" ;;
 				esac
 			done
-			DOWN_RATE="$down_rate" DOWN_CEIL="$down_ceil" UP_RATE="$up_rate" UP_CEIL="$up_ceil" add_user_command "$names_csv"
+			AUTH_TOKEN="$auth_token" DOWN_RATE="$down_rate" DOWN_CEIL="$down_ceil" UP_RATE="$up_rate" UP_CEIL="$up_ceil" add_user_command "$names_csv"
 		;;
 		del-user)
 			local names_csv=""

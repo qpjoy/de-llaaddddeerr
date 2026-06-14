@@ -87,6 +87,11 @@ import type {
   UserCenterTenant,
   UserCenterTokenRecord,
   UserCenterUser,
+  UserOverseaEntitlement,
+  UserOverseaEntitlementInput,
+  UserOverseaAccountSyncReport,
+  UserOverseaAccountSyncReportInput,
+  UserOverseaSubscriptionRender,
   TestRun,
   TestRunInput,
   TestStep,
@@ -138,8 +143,11 @@ import {
   normalizeUpdatePolicy,
   releasePolicyByKind,
   renderHysteria2MihomoSubscription,
+  renderUserOverseaMihomoSubscription,
   renderCoreDnsConfigMap,
   resolvePrincipalContext,
+  userOverseaAccountName,
+  userOverseaEntitlementId,
   required
 } from './domain.js';
 import { applyCoreDnsConfigMapToKubernetes } from './kubernetes.js';
@@ -156,6 +164,8 @@ type RecordKind =
   | 'iam-org'
   | 'iam-role'
   | 'iam-user'
+  | 'user-oversea-entitlement'
+  | 'user-oversea-account-sync-report'
   | 'iam-service-account'
   | 'iam-token'
   | 'dns-policy'
@@ -715,6 +725,228 @@ export class PostgresStore implements PlatformStore {
       }
     });
     return user;
+  }
+
+  async listUserOverseaEntitlements(): Promise<UserOverseaEntitlement[]> {
+    const entitlements = await this.listRecords<UserOverseaEntitlement>('user-oversea-entitlement');
+    return (await Promise.all(entitlements.map((entitlement) => this.withUserOverseaRuntimeSync(entitlement))))
+      .sort((a, b) => a.userId.localeCompare(b.userId));
+  }
+
+  async getUserOverseaEntitlement(userId: string): Promise<UserOverseaEntitlement | null> {
+    const entitlement = await this.getRecord<UserOverseaEntitlement>('user-oversea-entitlement', userOverseaEntitlementId(userId));
+    return entitlement ? this.withUserOverseaRuntimeSync(entitlement) : null;
+  }
+
+  private async withUserOverseaRuntimeSync(entitlement: UserOverseaEntitlement): Promise<UserOverseaEntitlement> {
+    const accounts: UserOverseaEntitlement['accounts'] = [];
+    for (const account of entitlement.accounts) {
+      const runtimeAccount = await this.getRecord<SiteSlotAccessAccount>('site-slot-access-account', account.accountId);
+      const status = runtimeAccount?.status ?? account.status;
+      const accountUpdatedAt = runtimeAccount?.updatedAt ?? account.runtimeSync?.accountUpdatedAt ?? entitlement.updatedAt;
+      accounts.push({
+        ...account,
+        status,
+        runtimeSync: await this.userOverseaAccountRuntimeSync(entitlement.userId, account.siteId, account.username, status, accountUpdatedAt)
+      });
+    }
+    return { ...entitlement, accounts };
+  }
+
+  private async userOverseaAccountRuntimeSync(
+    userId: string,
+    siteId: string,
+    username: string,
+    accountStatus: SiteSlotAccessAccount['status'],
+    accountUpdatedAt: string
+  ): Promise<UserOverseaEntitlement['accounts'][number]['runtimeSync']> {
+    const checkedAt = new Date().toISOString();
+    const incrementalSync = await this.latestUserOverseaAccountSyncReport(userId, siteId, username);
+    const fullSyncAt = await this.latestOverseaAccountSyncAt(siteId);
+    const lastSyncedAt = latestIsoString([incrementalSync?.createdAt ?? null, fullSyncAt]);
+    if (accountStatus !== 'active') {
+      return {
+        status: 'disabled',
+        checkedAt,
+        accountUpdatedAt,
+        lastSyncedAt,
+        requiredAction: 'none',
+        reason: 'The Internal access account is paused.'
+      };
+    }
+    if (!lastSyncedAt) {
+      return {
+        status: 'no-runtime-evidence',
+        checkedAt,
+        accountUpdatedAt,
+        lastSyncedAt,
+        requiredAction: 'run-user-oversea-remote-sync',
+        reason: 'No successful single-account or full configure evidence has been recorded for this Oversea account.'
+      };
+    }
+    const synced = Date.parse(lastSyncedAt) >= Date.parse(accountUpdatedAt);
+    return {
+      status: synced ? 'synced' : 'pending-sync',
+      checkedAt,
+      accountUpdatedAt,
+      lastSyncedAt,
+      requiredAction: synced ? 'none' : 'run-user-oversea-remote-sync',
+      reason: synced
+        ? (incrementalSync?.createdAt === lastSyncedAt
+          ? 'The latest successful single-account remote sync is newer than this account material.'
+          : 'The latest successful Oversea configure evidence is newer than this account material.')
+        : 'This account was issued after the latest successful single-account or full configure evidence.'
+    };
+  }
+
+  private async latestUserOverseaAccountSyncReport(
+    userId: string,
+    siteId: string,
+    username: string
+  ): Promise<UserOverseaAccountSyncReport | null> {
+    return (await this.listRecords<UserOverseaAccountSyncReport>('user-oversea-account-sync-report'))
+      .filter((item) => (
+        item.userId === userId
+        && item.siteId === siteId
+        && item.username === username
+        && item.status === 'passed'
+      ))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
+  }
+
+  private async latestOverseaAccountSyncAt(siteId: string): Promise<string | null> {
+    const report = (await this.listRecords<SiteSlotWorkerReport>('site-slot-worker-report'))
+      .filter((item) => (
+        item.siteId === siteId
+        && item.stepReports.some((step) => step.status === 'passed' && step.sourceId.startsWith('configure-oversea-access'))
+      ))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    return report?.createdAt ?? null;
+  }
+
+  async upsertUserOverseaEntitlement(input: UserOverseaEntitlementInput): Promise<UserOverseaEntitlement> {
+    const userId = input.userId?.trim();
+    if (!userId) throw new Error('userId is required');
+    const user = await this.getRecord<UserCenterUser>('iam-user', userId);
+    if (!user) throw new Error(`User not found: ${userId}`);
+    const siteIds = normalizeEntitlementSiteIds(input.siteIds);
+    const previous = await this.getUserOverseaEntitlement(user.userId);
+    const accounts: UserOverseaEntitlement['accounts'] = [];
+    for (const siteId of siteIds) {
+      const accountName = userOverseaAccountName(user, siteId);
+      const issued = await this.issueSiteSlotAccessAccounts({
+        siteId,
+        accountNames: [accountName],
+        issueDefaults: false,
+        requestedBy: input.requestedBy ?? 'user-center',
+        requestId: input.requestId
+      });
+      const account = issued.accounts[0];
+      accounts.push({
+        siteId,
+        username: account.username,
+        accountId: account.accountId,
+        status: account.status,
+        subscriptionPath: account.subscriptionPath,
+        siteSubscriptionUrl: `${issued.site.subscriptionBaseUrl.replace(/\/+$/, '')}/${encodeURIComponent(account.username)}.yaml`,
+        runtimeSync: await this.userOverseaAccountRuntimeSync(user.userId, account.siteId, account.username, account.status, account.updatedAt)
+      });
+    }
+    const now = new Date().toISOString();
+    const entitlement: UserOverseaEntitlement = {
+      entitlementId: userOverseaEntitlementId(user.userId),
+      userId: user.userId,
+      environment: this.config.environment,
+      service: 'hysteria2',
+      siteIds,
+      accounts,
+      status: siteIds.length ? 'active' : 'disabled',
+      subscriptionPath: `/internal/v1/user-center/users/${encodeURIComponent(user.userId)}/oversea/subscription.yaml`,
+      createdBy: previous?.createdBy ?? input.requestedBy ?? 'user-center',
+      createdAt: previous?.createdAt ?? now,
+      updatedBy: input.requestedBy ?? previous?.updatedBy ?? 'user-center',
+      updatedAt: now
+    };
+    await this.saveRecord('user-oversea-entitlement', entitlement.entitlementId, entitlement, this.config.siteId);
+    await this.recordAudit({
+      eventType: 'iam.user_oversea_entitlement.upserted',
+      actorKind: 'user-center',
+      userId: user.userId,
+      requestId: input.requestId ?? null,
+      metadata: {
+        siteIds,
+        accounts: accounts.map((account) => ({ siteId: account.siteId, username: account.username })),
+        status: entitlement.status
+      }
+    });
+    return this.withUserOverseaRuntimeSync(entitlement);
+  }
+
+  async recordUserOverseaAccountSyncReport(input: UserOverseaAccountSyncReportInput): Promise<UserOverseaAccountSyncReport> {
+    const now = new Date().toISOString();
+    const userId = input.userId?.trim();
+    const siteId = input.siteId?.trim();
+    const accountId = input.accountId?.trim();
+    const username = input.username?.trim();
+    if (!userId) throw new Error('userId is required');
+    if (!siteId) throw new Error('siteId is required');
+    if (!accountId) throw new Error('accountId is required');
+    if (!username) throw new Error('username is required');
+    const status = input.status === 'passed' || input.status === 'failed' || input.status === 'blocked'
+      ? input.status
+      : 'blocked';
+    const report: UserOverseaAccountSyncReport = {
+      reportId: `useroverseasync_${randomUUID()}`,
+      userId,
+      siteId,
+      accountId,
+      username,
+      status,
+      exitCode: typeof input.exitCode === 'number' ? input.exitCode : null,
+      command: input.command ?? null,
+      stdout: input.stdout ?? '',
+      stderr: input.stderr ?? '',
+      diagnosis: input.diagnosis ?? null,
+      requestedBy: input.requestedBy ?? 'user-center',
+      requestId: input.requestId ?? null,
+      startedAt: input.startedAt ?? null,
+      finishedAt: input.finishedAt ?? now,
+      createdAt: now
+    };
+    await this.saveRecord('user-oversea-account-sync-report', report.reportId, report, siteId);
+    await this.recordAudit({
+      eventType: 'iam.user_oversea_account.sync_reported',
+      actorKind: 'user-center',
+      userId,
+      requestId: report.requestId,
+      metadata: {
+        siteId,
+        username,
+        status: report.status,
+        exitCode: report.exitCode
+      }
+    });
+    return report;
+  }
+
+  async listUserOverseaAccountSyncReports(userId?: string | null, siteId?: string | null): Promise<UserOverseaAccountSyncReport[]> {
+    return (await this.listRecords<UserOverseaAccountSyncReport>('user-oversea-account-sync-report'))
+      .filter((item) => (!userId || item.userId === userId) && (!siteId || item.siteId === siteId))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async renderUserOverseaMihomoSubscription(userId: string): Promise<UserOverseaSubscriptionRender | null> {
+    const user = await this.getRecord<UserCenterUser>('iam-user', userId);
+    const entitlement = await this.getUserOverseaEntitlement(userId);
+    if (!user || !entitlement || entitlement.status !== 'active') return null;
+    const entries = [];
+    for (const accountRef of entitlement.accounts) {
+      const site = await this.getLauncherNetworkMihomoSite(accountRef.siteId);
+      const account = await this.getSiteSlotAccessAccount(accountRef.siteId, accountRef.username);
+      if (site && account) entries.push({ site, account });
+    }
+    if (!entries.length) return null;
+    return renderUserOverseaMihomoSubscription(user, entitlement, entries);
   }
 
   async listUserCenterServiceAccounts(): Promise<UserCenterServiceAccount[]> {
@@ -2425,4 +2657,19 @@ function resolveIssueAccountNames(input: SiteSlotAccessAccountIssueInput, siteId
     ? requested
     : [...defaultSiteSlotAccessAccountNames(siteId), ...requested];
   return [...new Set(names.map((name) => String(name).trim().toLowerCase()).filter(Boolean))];
+}
+
+function normalizeEntitlementSiteIds(value: UserOverseaEntitlementInput['siteIds']): string[] {
+  const raw = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(',')
+      : [];
+  return [...new Set(raw.map((item) => item.trim()).filter(Boolean))].sort();
+}
+
+function latestIsoString(values: Array<string | null | undefined>): string | null {
+  return values
+    .filter((value): value is string => Boolean(value))
+    .sort((a, b) => b.localeCompare(a))[0] ?? null;
 }

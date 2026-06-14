@@ -1,4 +1,9 @@
-import { Body, Controller, Get, Inject, Post } from '@nestjs/common';
+import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { connect as netConnect } from 'node:net';
+import { promisify } from 'node:util';
+
+import { Body, Controller, Get, Header, Inject, NotFoundException, Param, Post } from '@nestjs/common';
 
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
 import type { PlatformStore } from '../../store/platform-store.js';
@@ -8,8 +13,15 @@ import type {
   CreateUserInput,
   IssueTokenInput,
   PrincipalContextInput,
-  TokenIntrospectionInput
+  SiteSlotAccessAccount,
+  SiteSlotSshProfile,
+  TokenIntrospectionInput,
+  UserOverseaAccountSyncReport,
+  UserOverseaEntitlement,
+  UserOverseaEntitlementInput
 } from '../../types.js';
+
+const execFileAsync = promisify(execFile);
 
 @Controller()
 export class UserCenterController {
@@ -50,6 +62,80 @@ export class UserCenterController {
     return { user: await this.store.createUserCenterUser(toCreateUserInput(asRecord(rawBody))) };
   }
 
+  @Get('internal/v1/user-center/oversea-entitlements')
+  async overseaEntitlements() {
+    return { entitlements: await this.store.listUserOverseaEntitlements() };
+  }
+
+  @Get('internal/v1/user-center/users/:userId/oversea')
+  async userOverseaEntitlement(@Param('userId') userId: string) {
+    const entitlement = await this.store.getUserOverseaEntitlement(userId);
+    return { entitlement };
+  }
+
+  @Post('internal/v1/user-center/users/:userId/oversea')
+  async upsertUserOverseaEntitlement(@Param('userId') userId: string, @Body() rawBody: unknown) {
+    return {
+      entitlement: await this.store.upsertUserOverseaEntitlement({
+        ...toUserOverseaEntitlementInput(asRecord(rawBody)),
+        userId
+      })
+    };
+  }
+
+  @Post('internal/v1/user-center/users/:userId/oversea/sync-runtime')
+  async syncUserOverseaRuntime(@Param('userId') userId: string, @Body() rawBody: unknown) {
+    const body = asRecord(rawBody);
+    const requestedBy = nullableString(body.requestedBy) ?? 'desktop-admin';
+    const requestId = nullableString(body.requestId) ?? `user-oversea-sync-${Date.now()}`;
+    const timeoutSeconds = remoteSyncTimeoutSeconds(body.timeoutSeconds);
+    const confirmed = booleanValue(body.confirmRemoteExecution) === true;
+    const entitlement = await this.store.getUserOverseaEntitlement(userId);
+    if (!entitlement || entitlement.status !== 'active') {
+      throw new NotFoundException('Active user Oversea entitlement not found');
+    }
+    const siteFilter = new Set(stringArray(body.siteIds));
+    const accounts = entitlement.accounts.filter((account) => (
+      account.status === 'active'
+      && (siteFilter.size === 0 || siteFilter.has(account.siteId))
+    ));
+    const profiles = await this.store.listSiteSlotSshProfiles();
+    const reports: UserOverseaAccountSyncReport[] = [];
+    for (const accountRef of accounts) {
+      const account = await this.store.getSiteSlotAccessAccount(accountRef.siteId, accountRef.username);
+      const report = await this.syncOneUserOverseaAccount({
+        entitlement,
+        accountRef,
+        account,
+        profile: latestByUpdatedAt(profiles.filter((item) => item.kind === 'oversea' && item.siteId === accountRef.siteId && item.status === 'active')),
+        confirmed,
+        requestedBy,
+        requestId,
+        timeoutSeconds
+      });
+      reports.push(report);
+    }
+    const refreshed = await this.store.getUserOverseaEntitlement(userId);
+    return {
+      sync: {
+        status: reports.some((report) => report.status === 'failed')
+          ? 'failed'
+          : reports.some((report) => report.status === 'blocked') ? 'blocked' : 'passed',
+        reports,
+        generatedAt: new Date().toISOString()
+      },
+      entitlement: refreshed
+    };
+  }
+
+  @Get('internal/v1/user-center/users/:userId/oversea/subscription.yaml')
+  @Header('content-type', 'text/yaml; charset=utf-8')
+  async userOverseaSubscription(@Param('userId') userId: string) {
+    const subscription = await this.store.renderUserOverseaMihomoSubscription(userId);
+    if (!subscription) throw new NotFoundException('User Oversea subscription not found');
+    return subscription.yaml;
+  }
+
   @Get('internal/v1/user-center/service-accounts')
   async serviceAccounts() {
     return { serviceAccounts: await this.store.listUserCenterServiceAccounts() };
@@ -76,6 +162,90 @@ export class UserCenterController {
   async resolvePrincipal(@Body() rawBody: unknown) {
     return { context: await this.store.resolvePrincipalContext(toPrincipalInput(asRecord(rawBody))) };
   }
+
+  private async syncOneUserOverseaAccount(input: {
+    entitlement: UserOverseaEntitlement;
+    accountRef: UserOverseaEntitlement['accounts'][number];
+    account: SiteSlotAccessAccount | null;
+    profile: SiteSlotSshProfile | null;
+    confirmed: boolean;
+    requestedBy: string;
+    requestId: string;
+    timeoutSeconds: number;
+  }): Promise<UserOverseaAccountSyncReport> {
+    const account = input.account;
+    const accountId = account?.accountId ?? input.accountRef.accountId;
+    const username = account?.username ?? input.accountRef.username;
+    const gateFailures = [
+      ...(!account ? ['Internal access account is missing'] : []),
+      ...(account?.status === 'active' ? [] : ['Internal access account is not active']),
+      ...(!input.profile ? ['active Oversea SSH profile is required'] : []),
+      ...(process.env.SITE_SLOT_WORKER_REMOTE_SSH === '1' ? [] : ['SITE_SLOT_WORKER_REMOTE_SSH=1 is required before remote account sync']),
+      ...(input.confirmed ? [] : ['confirmRemoteExecution=true is required']),
+      ...(input.profile?.host ? [] : ['SSH host is required']),
+      ...(input.profile?.identityFile && !existsSync(input.profile.identityFile) ? [`SSH identity file does not exist: ${input.profile.identityFile}`] : []),
+      ...(input.profile?.knownHostsFile && !existsSync(input.profile.knownHostsFile) ? [`SSH known_hosts file does not exist: ${input.profile.knownHostsFile}`] : []),
+      ...(input.profile?.sshConfigFile && !existsSync(input.profile.sshConfigFile) ? [`SSH config file does not exist: ${input.profile.sshConfigFile}`] : [])
+    ];
+    const baseReport = {
+      userId: input.entitlement.userId,
+      siteId: input.accountRef.siteId,
+      accountId,
+      username,
+      requestedBy: input.requestedBy,
+      requestId: input.requestId
+    };
+    if (gateFailures.length > 0 || !input.profile || !account) {
+      return this.store.recordUserOverseaAccountSyncReport({
+        ...baseReport,
+        status: 'blocked',
+        exitCode: null,
+        command: null,
+        stdout: '',
+        stderr: gateFailures.join('\n'),
+        diagnosis: { category: 'gate', summary: gateFailures[0] ?? 'Remote sync gate blocked', gateFailures }
+      });
+    }
+
+    const command = userOverseaAccountSyncCommand(account, '30 Mbps', '30 Mbps');
+    const redactedCommand = userOverseaAccountSyncCommand({ ...account, authToken: '<redacted>' }, '30 Mbps', '30 Mbps');
+    const startedAt = new Date().toISOString();
+    try {
+      const { stdout, stderr } = await execFileAsync('ssh', userCenterOverseaSshArgv(input.profile, command), {
+        timeout: input.timeoutSeconds * 1000,
+        maxBuffer: 4 * 1024 * 1024
+      });
+      return this.store.recordUserOverseaAccountSyncReport({
+        ...baseReport,
+        status: 'passed',
+        exitCode: 0,
+        command: redactedCommand,
+        stdout,
+        stderr,
+        startedAt,
+        finishedAt: new Date().toISOString()
+      });
+    } catch (error) {
+      const execError = error as Error & { code?: number | string; stdout?: string; stderr?: string };
+      const diagnosis = sshFailureDiagnosis(execError.stderr ?? execError.message, execError.code) as Record<string, unknown>;
+      diagnosis.tcpProbe = await tcpConnectProbe(
+        input.profile.host,
+        input.profile.sshPort,
+        effectiveSshConnectTimeoutSeconds(input.profile.connectTimeoutSeconds)
+      );
+      return this.store.recordUserOverseaAccountSyncReport({
+        ...baseReport,
+        status: 'failed',
+        exitCode: typeof execError.code === 'number' ? execError.code : null,
+        command: redactedCommand,
+        stdout: execError.stdout ?? '',
+        stderr: execError.stderr ?? execError.message,
+        diagnosis,
+        startedAt,
+        finishedAt: new Date().toISOString()
+      });
+    }
+  }
 }
 
 export function toTokenInput(body: Record<string, unknown>): TokenIntrospectionInput {
@@ -93,6 +263,15 @@ function toCreateUserInput(body: Record<string, unknown>): CreateUserInput {
     displayName: nullableString(body.displayName),
     roleIds: stringArray(body.roleIds),
     orgIds: stringArray(body.orgIds),
+    requestId: nullableString(body.requestId)
+  };
+}
+
+function toUserOverseaEntitlementInput(body: Record<string, unknown>): UserOverseaEntitlementInput {
+  return {
+    userId: nullableString(body.userId),
+    siteIds: stringArray(body.siteIds),
+    requestedBy: nullableString(body.requestedBy),
     requestId: nullableString(body.requestId)
   };
 }
@@ -121,6 +300,157 @@ function toIssueTokenInput(body: Record<string, unknown>): IssueTokenInput {
 
 function numberValue(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function booleanValue(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'y'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'n'].includes(normalized)) return false;
+  }
+  return null;
+}
+
+function remoteSyncTimeoutSeconds(value: unknown): number {
+  const raw = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : 180;
+  return Number.isFinite(raw) ? Math.max(10, Math.min(Math.floor(raw), 600)) : 180;
+}
+
+function userOverseaAccountSyncCommand(account: SiteSlotAccessAccount, upRate: string, downRate: string): string {
+  return [
+    'set -eu',
+    'echo "mx-user-oversea-account-sync"',
+    `echo ${shellQuote(`site=${account.siteId}`)}`,
+    `echo ${shellQuote(`account=${account.username}`)}`,
+    'cd /opt/mx/current/hysteria2-access-stack 2>/dev/null || cd /opt/mx/releases/oversea-access-stack 2>/dev/null || { echo "access stack missing; run full Sync Remote once before per-user sync"; exit 2; }',
+    'grep -q -- "--auth|--auth-token" ./manage.sh || { echo "legacy access stack artifact; run full Sync Remote once before per-user sync"; exit 3; }',
+    `./manage.sh add-user --names ${shellQuote(account.username)} --auth-token ${shellQuote(account.authToken)} --up-ceil ${shellQuote(upRate)} --down-ceil ${shellQuote(downRate)}`,
+    `./manage.sh list-users | awk -v name=${shellQuote(account.username)} '$1 == name { print "runtime-user " $1 " " $2 " " $3; found = 1 } END { exit(found ? 0 : 4) }'`
+  ].join('; ');
+}
+
+function userCenterOverseaSshArgv(profile: SiteSlotSshProfile, command: string): string[] {
+  const connectTimeoutSeconds = effectiveSshConnectTimeoutSeconds(profile.connectTimeoutSeconds);
+  const args = [
+    '-F', internalSshConfigFile(profile),
+    '-o', `BatchMode=${profile.batchMode ?? 'yes'}`,
+    '-o', `ConnectTimeout=${connectTimeoutSeconds}`,
+    '-o', 'ConnectionAttempts=2',
+    '-o', 'AddressFamily=inet',
+    '-o', 'IPQoS=none',
+    '-o', 'ServerAliveInterval=5',
+    '-o', 'ServerAliveCountMax=2',
+    '-o', `StrictHostKeyChecking=${profile.strictHostKeyChecking ?? 'yes'}`
+  ];
+  if (internalSshUsesDefaultIsolatedConfig(profile)) {
+    args.push('-o', 'ProxyCommand=none', '-o', 'ProxyJump=none');
+  }
+  if (profile.identityFile) args.push('-i', profile.identityFile);
+  if (profile.knownHostsFile) args.push('-o', `UserKnownHostsFile=${profile.knownHostsFile}`);
+  if (profile.hostKeyAlias) {
+    args.push('-o', `HostKeyAlias=${profile.hostKeyAlias}`);
+    args.push('-o', 'CheckHostIP=no');
+  }
+  args.push('-p', String(profile.sshPort ?? 22), `${profile.sshUser ?? 'root'}@${profile.host ?? '<host>'}`, command);
+  return args;
+}
+
+function internalSshConfigFile(profile?: SiteSlotSshProfile | null): string {
+  return profile?.sshConfigFile?.trim()
+    || process.env.MX_SITE_SLOT_SSH_CONFIG_FILE?.trim()
+    || process.env.SITE_SLOT_SSH_CONFIG_FILE?.trim()
+    || '/dev/null';
+}
+
+function internalSshUsesDefaultIsolatedConfig(profile?: SiteSlotSshProfile | null): boolean {
+  return !profile?.sshConfigFile && !process.env.MX_SITE_SLOT_SSH_CONFIG_FILE && !process.env.SITE_SLOT_SSH_CONFIG_FILE;
+}
+
+function latestByUpdatedAt<T extends { updatedAt?: string | null }>(items: T[]): T | null {
+  return [...items].sort((left, right) => String(right.updatedAt ?? '').localeCompare(String(left.updatedAt ?? '')))[0] ?? null;
+}
+
+function effectiveSshConnectTimeoutSeconds(value: number | null | undefined): number {
+  return Math.max(5, Math.min(Number(value ?? 10), 30));
+}
+
+function sshFailureDiagnosis(stderr: unknown, exitCode: unknown) {
+  const text = String(stderr ?? '');
+  const lower = text.toLowerCase();
+  let category = 'unknown';
+  let summary = 'SSH command failed';
+  const nextActions = ['check-user-oversea-sync-report', 'check-ssh-profile-and-host-firewall'];
+  if (lower.includes('connection timed out during banner exchange')) {
+    category = 'ssh-banner-timeout';
+    summary = 'TCP may be reachable, but SSH did not complete banner exchange before timeout';
+    nextActions.push('verify-server-sshd-and-proxy-tun-path');
+  } else if (lower.includes('connection timed out') || lower.includes('operation timed out')) {
+    category = 'tcp-timeout';
+    summary = 'TCP connection to SSH port timed out';
+    nextActions.push('verify-port-22-firewall-security-group-or-local-tun-route');
+  } else if (lower.includes('no route to host') || lower.includes('network is unreachable')) {
+    category = 'network-unreachable';
+    summary = 'Internal runner cannot route to the SSH host';
+    nextActions.push('check-clash-tun-routing-or-k8s-node-egress');
+  } else if (lower.includes('host key verification failed') || lower.includes('no ed25519 host key is known')) {
+    category = 'host-key';
+    summary = 'Host key verification failed';
+    nextActions.push('rerun-bootstrap-key-or-refresh-known-hosts');
+  } else if (lower.includes('permission denied')) {
+    category = 'auth';
+    summary = 'SSH authentication failed';
+    nextActions.push('rotate-or-bootstrap-internal-managed-key');
+  } else if (typeof exitCode === 'number' && exitCode !== 255) {
+    category = 'remote-command';
+    summary = 'SSH connected, but the remote command failed';
+    nextActions.push('inspect-step-command-output');
+  }
+  return {
+    category,
+    summary,
+    exitCode: typeof exitCode === 'number' ? exitCode : null,
+    stderr: text.trim().slice(0, 1000),
+    nextActions: Array.from(new Set(nextActions))
+  };
+}
+
+function tcpConnectProbe(host: string | null | undefined, port: number | null | undefined, timeoutSeconds: number | null | undefined) {
+  return new Promise((resolveProbe) => {
+    if (!host) {
+      resolveProbe({
+        status: 'blocked',
+        host: null,
+        port: port ?? null,
+        durationMs: 0,
+        message: 'SSH host is not configured'
+      });
+      return;
+    }
+    const started = Date.now();
+    const socket = netConnect({ host, port: Number(port || 22) });
+    let settled = false;
+    const finish = (status: string, message: string | null = null) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolveProbe({
+        status,
+        host,
+        port: Number(port || 22),
+        durationMs: Date.now() - started,
+        message
+      });
+    };
+    socket.setTimeout(Math.max(1000, Math.min(Number(timeoutSeconds || 10) * 1000, 30000)));
+    socket.once('connect', () => finish('passed'));
+    socket.once('timeout', () => finish('timeout', 'TCP connect timed out'));
+    socket.once('error', (error) => finish('failed', error.message));
+  });
+}
+
+function shellQuote(value: string): string {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
 export function toPrincipalInput(body: Record<string, unknown>): PrincipalContextInput {
