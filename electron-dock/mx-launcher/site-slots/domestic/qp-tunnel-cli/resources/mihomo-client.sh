@@ -49,7 +49,7 @@ Commands:
   egress-off           Alias for server-off
   proxy-on             Write /etc/profile.d proxy exports for login shells
   proxy-off            Remove /etc/profile.d proxy exports
-  tun-on               Enable Mihomo TUN mode with cn-direct and local/private route bypasses
+  tun-on               Enable persistent Mihomo TUN mode with cn-direct and local/private route bypasses
   tun-off              Disable Mihomo TUN mode and also turn proxy-on off
   ssh-proxy-on         Configure OpenSSH client to use local Mihomo SOCKS for common Git hosts
   ssh-proxy-off        Remove OpenSSH proxy override
@@ -831,10 +831,12 @@ tun_on_command() {
 	daemon_proxy_on_command
 	if service_is_active; then
 		systemctl restart "$MIHOMO_SERVICE_NAME"
-		echo "Mihomo TUN mode enabled and service restarted."
+		systemctl enable "$MIHOMO_SERVICE_NAME" >/dev/null 2>&1 || true
+		echo "Mihomo TUN mode enabled, persisted, and service restarted."
 	else
 		systemctl start "$MIHOMO_SERVICE_NAME"
-		echo "Mihomo TUN mode enabled and service started."
+		systemctl enable "$MIHOMO_SERVICE_NAME" >/dev/null 2>&1 || true
+		echo "Mihomo TUN mode enabled, persisted, and service started."
 	fi
 }
 

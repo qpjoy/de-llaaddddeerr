@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/tunnel-cli",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Global QPJoy Tunnel CLI for mihomo-client and cross-platform HDO mesh enrollment.",
   "private": false,
   "type": "commonjs",
@@ -21,16 +21,16 @@
   "publishConfig": {
     "access": "public"
   },
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "prepack": "tsc -p tsconfig.json && node scripts/prepare-package.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "tsc -p tsconfig.json --noEmit"
-  },
   "dependencies": {
-    "@qpjoy/electron-core-wireguard": "workspace:^"
+    "@qpjoy/electron-core-wireguard": "^0.1.28"
   },
   "devDependencies": {
     "@types/node": "^22.10.7"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "sync:mx-launcher-fallback": "node scripts/sync-mx-launcher-fallback.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit"
   }
 }

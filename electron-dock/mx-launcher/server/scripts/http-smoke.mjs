@@ -473,25 +473,6 @@ const checks = [
         && action.confirmFields?.includes('confirmRelayPeerAppend')
         && action.confirmFields?.includes('confirmRelayReadOnlyProbeReviewed')
         && action.confirmFields?.includes('confirmRelayPeerPlanReviewed'))
-      && body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.domestic-relay-peer-append-awx.prepare'
-        && action.allowed === true
-        && action.gate === 'manual-evidence'
-        && action.risk === 'medium'
-        && action.confirmFields?.includes('confirmAwxLaunchPrepare'))
-      && body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.worker-run.awx-sync-plan'
-        && action.allowed === true
-        && action.gate === 'manual-evidence'
-        && action.risk === 'low')
-      && body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.worker-run.awx-credential-sync'
-        && action.allowed === true
-        && action.gate === 'confirm-remote-execution'
-        && action.risk === 'high'
-        && action.confirmFields?.includes('confirmAwxCredentialSync'))
-      && body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.worker-run.awx-object-sync'
-        && action.allowed === true
-        && action.gate === 'confirm-remote-execution'
-        && action.risk === 'medium'
-        && action.confirmFields?.includes('confirmAwxSync'))
       && body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.domestic-relay-peer-append-ssh.prepare'
         && action.allowed === true
         && action.gate === 'confirm-remote-execution'
@@ -504,6 +485,7 @@ const checks = [
       && body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.worker-run.artifact-push-fake-transport'
         && action.allowed === true
         && action.gate === 'confirm-fake-transport')
+      && !body?.actionPolicy?.actions?.some((action) => typeof action.actionId === 'string' && action.actionId.includes('awx'))
       && body?.actionPolicy?.actions?.some((action) => action.actionId === 'dns.coredns.apply'
         && action.allowed === true
         && action.requiredScopes?.includes('dns.manage'))
@@ -719,7 +701,8 @@ const checks = [
       const prepareRelayAuthority = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'prepare-domestic-relay-authority');
       const resolveSubscription = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'resolve-domestic-bootstrap-subscription');
       const bootstrapEgress = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'bootstrap-domestic-egress');
-      const installWireGuard = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'install-host-wireguard');
+      const installDockerRuntime = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'install-domestic-docker-runtime');
+      const activatePeerCenter = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'activate-domestic-peer-center');
       return typeof state.domesticSlotPlanId === 'string'
         && body?.plan?.kind === 'domestic'
         && body?.plan?.network?.mode === 'oversea-assisted'
@@ -727,6 +710,7 @@ const checks = [
         && body?.plan?.services?.hostServices?.includes('wg-quick@mx-domestic')
         && packageArtifacts?.commands?.some((command) => command.includes('qp-tunnel-cli-offline-fallback'))
         && packageArtifacts?.commands?.some((command) => command.includes('refresh-tunnel-cli latest'))
+        && packageArtifacts?.commands?.some((command) => command.includes('--from-tarball'))
         && prepareRelayAuthority?.mode === 'admin-action'
         && prepareRelayAuthority?.commands?.some((command) => command.includes('Domestic WG gateway=10.88.0.1') && command.includes('Internal service peer=10.90.0.10'))
         && prepareRelayAuthority?.commands?.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('10.90.0.0/16'))
@@ -735,25 +719,29 @@ const checks = [
         && prepareRelayAuthority?.commands?.some((command) => command.includes('Domestic WG relay primary'))
         && resolveSubscription?.mode === 'admin-action'
         && resolveSubscription?.commands?.some((command) => command.includes('domesticBootstrapSubscription') && command.includes('/internal/v1/site-slots/oversea-main/subscriptions/hysteria2/oversea-main-domestic.yaml'))
-        && resolveSubscription?.commands?.some((command) => command.includes('do not ask Domestic to npm install'))
+        && resolveSubscription?.commands?.some((command) => command.includes('install node/npm') && command.includes('npm install'))
         && bootstrapEgress?.mode === 'artifact-push'
-        && bootstrapEgress?.commands?.some((command) => command.includes('npm i -g @qpjoy/tunnel-cli'))
+        && bootstrapEgress?.commands?.some((command) => command.includes('QP_TUNNEL_CLI=/opt/mx/current/qp-tunnel-cli/bin/qp-tunnel-cli'))
         && bootstrapEgress?.commands?.some((command) => command.includes('mx-domestic-qp-tunnel-cli-fallback.tar.gz'))
-        && bootstrapEgress?.commands?.some((command) => command.includes(`--subscription ${baseUrl}/internal/v1/site-slots/oversea-main/subscriptions/hysteria2/oversea-main-domestic.yaml`))
+        && bootstrapEgress?.commands?.some((command) => command.includes('npm i @qpjoy/tunnel-cli -g') && command.includes('npm refresh skipped after server-on'))
+        && bootstrapEgress?.commands?.some((command) => command.includes('node/npm absent'))
+        && bootstrapEgress?.commands?.some((command) => command.includes(`install --url ${baseUrl}/internal/v1/site-slots/oversea-main/subscriptions/hysteria2/oversea-main-domestic.yaml`))
         && bootstrapEgress?.commands?.some((command) => command.includes('server-on'))
+        && !bootstrapEgress?.commands?.some((command) => command.includes('elif command -v npm'))
         && !bootstrapEgress?.commands?.some((command) => command.includes('<internal-issued-oversea-hysteria2-subscription>'))
-        && installWireGuard?.commands?.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))
-        && installWireGuard?.commands?.some((command) => command.includes('mx-domestic-relay.env') && command.includes('/opt/mx/current/domestic/mx-domestic-relay.env'))
-        && installWireGuard?.commands?.some((command) => command.includes('internal service peer private key must not be copied to Domestic'))
-        && !installWireGuard?.commands?.some((command) => command.includes('rsync') && command.includes('mx-internal-service-peer.conf'))
-        && !bootstrapEgress?.commands?.some((command) => command.includes('tun-on'));
+        && installDockerRuntime?.commands?.some((command) => command.includes('docker') && command.includes('apt-get'))
+        && activatePeerCenter?.commands?.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))
+        && activatePeerCenter?.commands?.some((command) => command.includes('mx-domestic-relay.env') && command.includes('/opt/mx/current/domestic/mx-domestic-relay.env'))
+        && activatePeerCenter?.commands?.some((command) => command.includes('internal service peer private key must not be copied to Domestic'))
+        && !activatePeerCenter?.commands?.some((command) => command.includes('rsync') && command.includes('mx-internal-service-peer.conf'));
     }
   },
   {
     name: 'domestic slot get',
     path: () => `/internal/v1/site-slots/plans/${encodeURIComponent(state.domesticSlotPlanId)}`,
     assert: (body) => body?.plan?.planId === state.domesticSlotPlanId
-      && body?.plan?.nextActions?.includes('install-host-wireguard-service')
+      && body?.plan?.nextActions?.includes('install-docker-runtime')
+      && body?.plan?.nextActions?.includes('activate-domestic-peer-center')
   },
   {
     name: 'domestic slot preflight execution',
@@ -1023,22 +1011,25 @@ const checks = [
         state.domesticSlotAdminWorkerStepId = hintedJob.steps?.[0]?.stepId;
       }
       const jobId = state.domesticSlotAdminWorkerJobId;
+      const hints = Array.isArray(body?.pipeline?.summary?.actionHints) ? body.pipeline.summary.actionHints : [];
+      const hasRelayPeerHintForOrdinaryJob = [
+        'site-slot.worker-run.domestic-relay-readonly-probe',
+        'site-slot.worker-run.domestic-relay-peer-plan',
+        'site-slot.worker-run.domestic-relay-peer-append',
+        'site-slot.worker-run.domestic-relay-peer-append-ssh'
+      ].some((actionId) => hints.some((action) => action?.actionId === actionId
+        && action?.allowed === true
+        && typeof action?.path === 'string'
+        && action.path.startsWith(`/internal/v1/site-slots/worker-jobs/${jobId}/`)));
       return typeof jobId === 'string'
         && workerActionHintMatches(body, 'site-slot.worker-run.remote-ssh-gate', jobId, '/remote-ssh-gate')
         && workerActionHintMatches(body, 'site-slot.worker-run.remote-ssh-readonly-probe', jobId, '/remote-ssh-readonly-probe', ['confirmReadOnlyProbe'])
         && workerActionHintMatches(body, 'site-slot.worker-run.remote-ssh-execute', jobId, '/run-artifact-push-remote-ssh', ['confirmWorkerHandoff'])
         && workerActionHintMatches(body, 'site-slot.worker-run.artifact-push-remote-ssh-plan', jobId, '/run-artifact-push-remote-ssh-plan', ['confirmPlanOnly'])
         && workerActionHintMatches(body, 'site-slot.worker-run.artifact-push-dry-run', jobId, '/run-artifact-push-dry-run')
-        && workerActionHintMatches(body, 'site-slot.worker-run.domestic-relay-readonly-probe', jobId, '/domestic-relay-readonly-probe', ['confirmRelayReadOnlyProbe'])
-        && workerActionHintMatches(body, 'site-slot.worker-run.domestic-relay-peer-plan', jobId, '/run-domestic-relay-peer-plan', ['confirmRelayPeerPlan'])
-        && workerActionHintMatches(body, 'site-slot.worker-run.domestic-relay-peer-append', jobId, '/domestic-relay-peer-append', ['confirmRelayPeerAppend', 'confirmRelayReadOnlyProbeReviewed', 'confirmRelayPeerPlanReviewed'])
-        && workerActionHintMatches(body, 'site-slot.worker-run.domestic-relay-peer-append-ssh', jobId, '/run-domestic-relay-peer-append-ssh', ['confirmRemoteExecution', 'confirmRelayPeerAppendSsh', 'confirmRelayPeerAppend', 'confirmRelayReadOnlyProbeReviewed', 'confirmRelayPeerPlanReviewed'])
+        && !hasRelayPeerHintForOrdinaryJob
         && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.artifact-push-fake-transport', jobId, '/run-artifact-push-fake-transport', ['confirmFakeTransport'])
-        && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-sync-plan', jobId, '/awx-sync-plan')
-        && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-credential-sync', jobId, '/run-awx-credential-sync', ['confirmAwxCredentialSync'])
-        && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-object-sync', jobId, '/run-awx-object-sync', ['confirmAwxSync'])
-        && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-shadow', jobId, '/run-awx-shadow')
-        && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-launch', jobId, '/run-awx-launch', ['confirmAwxLaunch']);
+        && !hints.some((action) => typeof action?.actionId === 'string' && action.actionId.includes('awx'));
     }
   },
   {
@@ -1173,7 +1164,7 @@ const checks = [
     body: {
       workerId: 'worker-http-smoke-relay-peer',
       workerKind: 'internal-runner',
-      rollbackStrategy: 'restore-domestic-relay-peer-plan',
+      rollbackStrategy: 'restore-domestic-wg-peer-before-append',
       requestedBy: 'http-smoke',
       requestId: 'http-smoke-domestic-relay-peer-worker-job'
     },
@@ -1211,17 +1202,7 @@ const checks = [
       state.domesticRelayPeerWorkerJobId,
       '/run-domestic-relay-peer-append-ssh',
       ['confirmRemoteExecution', 'confirmRelayPeerAppendSsh', 'confirmRelayPeerAppend', 'confirmRelayReadOnlyProbeReviewed', 'confirmRelayPeerPlanReviewed']
-    ) && body?.pipeline?.summary?.actionHints?.some((action) => action.actionId === 'site-slot.domestic-relay-peer-append-awx.prepare'
-      && action.path === `/internal/v1/site-slots/executions/${state.domesticSlotAdminApplyRunId}/prepare-domestic-relay-peer-append-awx`
-      && action.allowed === true
-      && action.confirmFields?.includes('confirmAwxLaunchPrepare'))
-    && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-sync-plan', state.domesticRelayPeerWorkerJobId, '/awx-sync-plan')
-    && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-credential-sync', state.domesticRelayPeerWorkerJobId, '/run-awx-credential-sync', ['confirmAwxCredentialSync'])
-    && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-object-sync', state.domesticRelayPeerWorkerJobId, '/run-awx-object-sync', ['confirmAwxSync'])
-    && body?.pipeline?.summary?.actionHints?.some((action) => action.actionId === 'site-slot.domestic-relay-peer-append-ssh.prepare'
-      && action.path === `/internal/v1/site-slots/executions/${state.domesticSlotAdminApplyRunId}/prepare-domestic-relay-peer-append-ssh`
-      && action.allowed === true
-      && action.confirmFields?.includes('confirmRelayPeerAppendSshPrepare'))
+    ) && !body?.pipeline?.summary?.actionHints?.some((action) => typeof action?.actionId === 'string' && action.actionId.includes('awx'))
   },
   {
     name: 'domestic relay readonly probe handoff',
@@ -1340,139 +1321,6 @@ const checks = [
       && !body.report
   },
   {
-    name: 'domestic relay peer append awx prepare',
-    path: () => `/internal/v1/admin/actions/execute?token=${encodeURIComponent(state.adminToken)}`,
-    method: 'POST',
-    body: () => ({
-      actionId: 'site-slot.domestic-relay-peer-append-awx.prepare',
-      path: `/internal/v1/site-slots/executions/${encodeURIComponent(state.domesticSlotAdminApplyRunId)}/prepare-domestic-relay-peer-append-awx`,
-      body: {
-        confirmAwxLaunchPrepare: true,
-        approvalId: 'approval-http-smoke-domestic-relay-peer-append-awx',
-        changeWindowStart: '2026-06-11T00:00:00.000Z',
-        changeWindowEnd: '2026-06-12T00:00:00.000Z',
-        workerId: 'worker-http-smoke-awx-domestic-relay-append',
-        workerKind: 'awx-runner',
-        retryLimit: 1,
-        rollbackStrategy: 'restore-domestic-wg-peer-before-append',
-        requestedBy: 'http-smoke-admin-action',
-        requestId: 'http-smoke-domestic-relay-peer-append-awx-prepare'
-      }
-    }),
-    assert: (body) => {
-      const prepare = body?.relayPeerAppendAwxPrepare;
-      state.domesticRelayPeerAppendAwxPrepareSessionId = body?.session?.sessionId;
-      state.domesticRelayPeerAppendAwxPrepareJobId = body?.job?.jobId;
-      return body?.actionResult?.actionId === 'site-slot.domestic-relay-peer-append-awx.prepare'
-        && prepare?.status === 'ready'
-        && prepare?.mode === 'domestic-relay-peer-append-awx-prepare'
-        && prepare?.boundary === 'awx-runner-job-preparation'
-        && prepare?.execution === 'not-started'
-        && prepare?.gates?.confirmAwxLaunchPrepare === true
-        && prepare?.gates?.domesticOnly === true
-        && prepare?.gates?.applyConfirmed === true
-        && body?.session?.mode === 'awx-shadow'
-        && body?.session?.status === 'queued'
-        && body?.job?.mode === 'awx-shadow'
-        && body?.job?.worker?.kind === 'awx-runner'
-        && body?.job?.status === 'ready'
-        && typeof state.domesticRelayPeerAppendAwxPrepareSessionId === 'string'
-        && typeof state.domesticRelayPeerAppendAwxPrepareJobId === 'string';
-    }
-  },
-  {
-    name: 'domestic relay peer append awx sync plan',
-    path: () => `/internal/v1/admin/actions/execute?token=${encodeURIComponent(state.adminToken)}`,
-    method: 'POST',
-    body: () => ({
-      actionId: 'site-slot.worker-run.awx-sync-plan',
-      path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(state.domesticRelayPeerAppendAwxPrepareJobId)}/awx-sync-plan`,
-      body: {
-        requestedBy: 'http-smoke-admin-action',
-        requestId: 'http-smoke-domestic-relay-peer-append-awx-sync-plan'
-      }
-    }),
-    assert: (body) => {
-      const syncPlan = body?.awxSyncPlan;
-      return body?.actionResult?.actionId === 'site-slot.worker-run.awx-sync-plan'
-        && syncPlan?.mode === 'awx-object-sync-plan'
-        && syncPlan?.execution === 'not-started'
-        && syncPlan?.boundary === 'awx-object-sync-plan-only'
-        && syncPlan?.targetKind === 'domestic'
-        && syncPlan?.siteId === 'domestic-main'
-        && syncPlan?.inventoryHost === 'domestic-main'
-        && typeof syncPlan?.inventory === 'string'
-        && syncPlan.inventory.includes('domestic')
-        && typeof syncPlan?.credential === 'string'
-        && typeof syncPlan?.jobTemplate === 'string'
-        && syncPlan.jobTemplate.includes('domestic-worker-v1')
-        && Array.isArray(syncPlan?.objects)
-        && syncPlan.objects.some((item) => item.objectType === 'inventory')
-        && syncPlan.objects.some((item) => item.objectType === 'credential')
-        && syncPlan.objects.some((item) => item.objectType === 'job-template')
-        && Array.isArray(syncPlan?.extraVarsContract)
-        && syncPlan.extraVarsContract.includes('mx_worker_steps')
-        && !body.report;
-    }
-  },
-  {
-    name: 'domestic relay peer append awx credential sync blocked',
-    path: () => `/internal/v1/admin/actions/execute?token=${encodeURIComponent(state.adminToken)}`,
-    method: 'POST',
-    body: () => ({
-      actionId: 'site-slot.worker-run.awx-credential-sync',
-      path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(state.domesticRelayPeerAppendAwxPrepareJobId)}/run-awx-credential-sync`,
-      body: {
-        confirmAwxCredentialSync: true,
-        requestedBy: 'http-smoke-admin-action',
-        requestId: 'http-smoke-domestic-relay-peer-append-awx-credential-sync'
-      }
-    }),
-    assert: (body) => {
-      const credentialSync = body?.awxCredentialSync;
-      return body?.actionResult?.actionId === 'site-slot.worker-run.awx-credential-sync'
-        && credentialSync?.mode === 'awx-credential-sync'
-        && credentialSync?.execution === 'blocked'
-        && credentialSync?.boundary === 'awx-api-credential-sync'
-        && credentialSync?.status === 'blocked'
-        && credentialSync?.targetKind === 'domestic'
-        && credentialSync?.siteId === 'domestic-main'
-        && Array.isArray(credentialSync?.operations)
-        && credentialSync.operations.length === 0
-        && credentialSync?.blockedReasons?.some((reason) => reason.includes('AWX_API_CREDENTIAL_SYNC_ENABLED=true'))
-        && credentialSync?.blockedReasons?.some((reason) => reason.includes('managed SSH profile is required'))
-        && !body.report;
-    }
-  },
-  {
-    name: 'domestic relay peer append awx object sync blocked',
-    path: () => `/internal/v1/admin/actions/execute?token=${encodeURIComponent(state.adminToken)}`,
-    method: 'POST',
-    body: () => ({
-      actionId: 'site-slot.worker-run.awx-object-sync',
-      path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(state.domesticRelayPeerAppendAwxPrepareJobId)}/run-awx-object-sync`,
-      body: {
-        confirmAwxSync: true,
-        requestedBy: 'http-smoke-admin-action',
-        requestId: 'http-smoke-domestic-relay-peer-append-awx-object-sync'
-      }
-    }),
-    assert: (body) => {
-      const objectSync = body?.awxObjectSync;
-      return body?.actionResult?.actionId === 'site-slot.worker-run.awx-object-sync'
-        && objectSync?.mode === 'awx-object-sync'
-        && objectSync?.execution === 'blocked'
-        && objectSync?.boundary === 'awx-api-object-sync'
-        && objectSync?.status === 'blocked'
-        && objectSync?.targetKind === 'domestic'
-        && Array.isArray(objectSync?.operations)
-        && objectSync.operations.length === 0
-        && objectSync?.blockedReasons?.some((reason) => reason.includes('AWX_API_OBJECT_SYNC_ENABLED=true'))
-        && objectSync?.blockedReasons?.some((reason) => reason.includes('sshProfileId is required'))
-        && !body.report;
-    }
-  },
-  {
     name: 'domestic relay peer append ssh prepare',
     path: () => `/internal/v1/admin/actions/execute?token=${encodeURIComponent(state.adminToken)}`,
     method: 'POST',
@@ -1497,6 +1345,10 @@ const checks = [
       const prepare = body?.relayPeerAppendSshPrepare;
       state.domesticRelayPeerAppendSshPrepareSessionId = body?.session?.sessionId;
       state.domesticRelayPeerAppendSshPrepareJobId = body?.job?.jobId;
+      const blockedByReadinessGate = prepare?.status === 'blocked'
+        && body?.session == null
+        && body?.job == null
+        && prepare?.blockedReasons?.some((reason) => reason.includes('Internal-managed SSH Profile'));
       const blockedByRunnerGate = prepare?.status === 'blocked'
         && body?.session?.mode === 'remote-ssh'
         && body?.session?.status === 'blocked'
@@ -1519,8 +1371,7 @@ const checks = [
         && prepare?.gates?.confirmRelayPeerAppendSshPrepare === true
         && prepare?.gates?.domesticOnly === true
         && prepare?.gates?.applyConfirmed === true
-        && typeof state.domesticRelayPeerAppendSshPrepareSessionId === 'string'
-        && (blockedByRunnerGate || preparedJob);
+        && (blockedByReadinessGate || blockedByRunnerGate || preparedJob);
     }
   },
   {
@@ -2775,9 +2626,6 @@ function selectWorkerActionHintJobId(body) {
     && workerActionHintMatches(body, 'site-slot.worker-run.remote-ssh-readonly-probe', jobId, '/remote-ssh-readonly-probe', ['confirmReadOnlyProbe'])
     && workerActionHintMatches(body, 'site-slot.worker-run.remote-ssh-execute', jobId, '/run-artifact-push-remote-ssh', ['confirmWorkerHandoff'])
     && workerActionHintMatches(body, 'site-slot.worker-run.artifact-push-remote-ssh-plan', jobId, '/run-artifact-push-remote-ssh-plan', ['confirmPlanOnly'])
-    && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-sync-plan', jobId, '/awx-sync-plan')
-    && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-credential-sync', jobId, '/run-awx-credential-sync', ['confirmAwxCredentialSync'])
-    && optionalWorkerActionHintMatches(body, 'site-slot.worker-run.awx-object-sync', jobId, '/run-awx-object-sync', ['confirmAwxSync'])
     && workerActionHintMatches(body, 'site-slot.worker-run.artifact-push-dry-run', jobId, '/run-artifact-push-dry-run')) ?? null;
 }
 

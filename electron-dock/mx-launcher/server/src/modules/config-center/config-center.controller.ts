@@ -22,6 +22,7 @@ import { checkAwxProvider } from './awx-provider-check.js';
 import { buildAwxProviderSyncPlan } from './awx-provider-sync-plan.js';
 import { prepareSiteSlotSshProfileBootstrap } from './ssh-profile-bootstrap.js';
 import { SSH_READONLY_PROBE_FEATURE_KEY, buildSshProfileReadinessProbe } from './ssh-profile-readiness.js';
+import { generateWireGuardKeyPair } from './wireguard-keys.js';
 
 @Controller()
 export class ConfigCenterController {
@@ -46,6 +47,7 @@ export class ConfigCenterController {
         'site-slot-ssh-profile.manage',
         'site-slot-ssh-profile.bootstrap',
         'domestic-wg-secret.manage',
+        'domestic-wg-secret.generate',
         'domestic-wg-secret.materializer-env',
         'runtime-feature-policy.manage'
       ]
@@ -214,6 +216,52 @@ export class ConfigCenterController {
     return { secret: redactDomesticWireGuardSecret(secret) };
   }
 
+  @Post('internal/v1/config-center/domestic-wg-secrets/:siteId/generate')
+  async generateDomesticWireGuardSecret(@Param('siteId') siteId: string, @Body() rawBody: unknown) {
+    const body = asRecord(rawBody);
+    const previous = await this.store.getSiteSlotDomesticWireGuardSecret(siteId);
+    const generated = toGeneratedDomesticWireGuardSecretInput(siteId, previous, body);
+    const secret = await this.store.upsertSiteSlotDomesticWireGuardSecret(generated.input);
+    await this.store.recordAudit({
+      eventType: 'config.domestic_wg_secret.generated',
+      actorKind: 'config-center',
+      requestId: generated.input.requestId ?? null,
+      metadata: {
+        secretId: secret.secretId,
+        siteId: secret.siteId,
+        publicEndpoint: secret.publicEndpoint,
+        generated: generated.generated,
+        rotate: generated.rotate,
+        endpointChanged: generated.endpointChanged,
+        materialDigest: secret.fingerprints.materialDigest
+      }
+    });
+    return {
+      secret: redactDomesticWireGuardSecret(secret),
+      generation: {
+        status: secret.readiness.missingSecretInputs.length === 0 ? 'ready' : 'blocked',
+        boundary: 'internal-generated-domestic-wg-secret',
+        siteId: secret.siteId,
+        secretId: secret.secretId,
+        publicEndpoint: secret.publicEndpoint,
+        generated: generated.generated,
+        rotate: generated.rotate,
+        endpointChanged: generated.endpointChanged,
+        previousMaterialDigest: generated.previousMaterialDigest,
+        materialDigest: secret.fingerprints.materialDigest,
+        clientRefresh: {
+          mode: 'snapshot-digest',
+          changed: generated.previousMaterialDigest !== secret.fingerprints.materialDigest,
+          previousMaterialDigest: generated.previousMaterialDigest,
+          materialDigest: secret.fingerprints.materialDigest
+        },
+        nextActions: secret.readiness.missingSecretInputs.length === 0
+          ? ['materialize-domestic-ready-artifacts', 'publish-config-snapshot-for-client-refresh']
+          : ['provide-missing-domestic-wg-inputs']
+      }
+    };
+  }
+
   @Post('internal/v1/config-center/domestic-wg-secrets/:siteId/materializer-env')
   async domesticWireGuardSecretMaterializerEnv(@Param('siteId') siteId: string, @Body() rawBody: unknown) {
     const secret = await this.store.getSiteSlotDomesticWireGuardSecret(siteId);
@@ -314,6 +362,52 @@ function toDomesticWireGuardSecretInput(body: Record<string, unknown>): SiteSlot
     internalServicePublicKey: nullableString(body.internalServicePublicKey),
     requestedBy: nullableString(body.requestedBy),
     requestId: nullableString(body.requestId)
+  };
+}
+
+function toGeneratedDomesticWireGuardSecretInput(
+  siteId: string,
+  previous: SiteSlotDomesticWireGuardSecret | null,
+  body: Record<string, unknown>
+) {
+  const rotateAll = booleanValue(body.rotateKey) || booleanValue(body.rotateAll);
+  const rotateRelayKey = rotateAll || booleanValue(body.rotateRelayKey);
+  const rotateInternalServiceKey = rotateAll || booleanValue(body.rotateInternalServiceKey);
+  const relayMissing = !previous?.domesticRelayPrivateKey || !previous.domesticRelayPublicKey;
+  const internalMissing = !previous?.internalServicePrivateKey || !previous.internalServicePublicKey;
+  const relayPair = relayMissing || rotateRelayKey ? generateWireGuardKeyPair() : null;
+  const internalPair = internalMissing || rotateInternalServiceKey ? generateWireGuardKeyPair() : null;
+  const publicEndpoint = nullableString(body.publicEndpoint) ?? nullableString(body.endpoint) ?? previous?.publicEndpoint ?? null;
+  const input: SiteSlotDomesticWireGuardSecretInput = {
+    siteId,
+    status: nullableString(body.status) ?? previous?.status ?? 'active',
+    publicEndpoint,
+    listenPort: numberOrNull(body.listenPort) ?? previous?.listenPort ?? 51820,
+    domesticGatewayIp: nullableString(body.domesticGatewayIp) ?? previous?.domesticGatewayIp ?? '10.88.0.1',
+    domesticGatewayCidr: nullableString(body.domesticGatewayCidr) ?? previous?.domesticGatewayCidr ?? '10.88.0.0/16',
+    userRelayCidr: nullableString(body.userRelayCidr) ?? previous?.userRelayCidr ?? '10.89.0.0/16',
+    internalServiceIp: nullableString(body.internalServiceIp) ?? previous?.internalServiceIp ?? '10.90.0.10',
+    internalServiceCidr: nullableString(body.internalServiceCidr) ?? previous?.internalServiceCidr ?? '10.90.0.0/16',
+    guestRelayCidr: nullableString(body.guestRelayCidr) ?? previous?.guestRelayCidr ?? '10.91.0.0/16',
+    domesticRelayPrivateKey: relayPair?.privateKey ?? previous?.domesticRelayPrivateKey ?? null,
+    domesticRelayPublicKey: relayPair?.publicKey ?? previous?.domesticRelayPublicKey ?? null,
+    internalServicePrivateKey: internalPair?.privateKey ?? previous?.internalServicePrivateKey ?? null,
+    internalServicePublicKey: internalPair?.publicKey ?? previous?.internalServicePublicKey ?? null,
+    requestedBy: nullableString(body.requestedBy),
+    requestId: nullableString(body.requestId)
+  };
+  return {
+    input,
+    generated: {
+      domesticRelayKeyPair: Boolean(relayPair),
+      internalServiceKeyPair: Boolean(internalPair)
+    },
+    rotate: {
+      domesticRelayKeyPair: rotateRelayKey,
+      internalServiceKeyPair: rotateInternalServiceKey
+    },
+    endpointChanged: Boolean(previous && publicEndpoint && previous.publicEndpoint !== publicEndpoint),
+    previousMaterialDigest: previous?.fingerprints.materialDigest ?? null
   };
 }
 

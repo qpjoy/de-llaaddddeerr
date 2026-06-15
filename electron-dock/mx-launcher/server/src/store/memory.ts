@@ -5,6 +5,7 @@ import {
   buildAwxProviderConfig,
   buildReleaseManagementPlan,
   buildRuntimeFeaturePolicy,
+  attachDomesticWireGuardRefreshHint,
   buildLauncherNetworkMihomoSite,
   buildLauncherNetworkTopology,
   buildLauncherNetworkReachabilityPlan,
@@ -1546,6 +1547,8 @@ export class MemoryStore implements PlatformStore {
       domesticSiteId: input.siteId,
       publicKey: input.publicKey
     });
+    const domesticWireGuardSecret = this.siteSlotDomesticWireGuardSecrets.get(topology.domestic.siteId) ?? null;
+    const topologyWithRefreshHint = attachDomesticWireGuardRefreshHint(topology, domesticWireGuardSecret);
     const issuedAt = new Date().toISOString();
     const unsigned = {
       environment: this.config.environment,
@@ -1555,7 +1558,7 @@ export class MemoryStore implements PlatformStore {
       userId: input.userId ?? null,
       mode,
       leaseIp,
-      topology,
+      topology: topologyWithRefreshHint,
       issuedAt
     };
     const digest = createHash('sha256').update(JSON.stringify(unsigned)).digest('hex');
@@ -1572,7 +1575,7 @@ export class MemoryStore implements PlatformStore {
         leaseIp,
         relayMode: 'h2i'
       },
-      topology,
+      topology: topologyWithRefreshHint,
       capabilities: {
         wireGuard: true,
         splitDns: true,
@@ -2034,13 +2037,15 @@ export class MemoryStore implements PlatformStore {
     const domesticRelayAuthority = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'prepare-domestic-relay-authority');
     const domesticResolveSubscription = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'resolve-domestic-bootstrap-subscription');
     const domesticBootstrapEgress = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'bootstrap-domestic-egress');
-    const domesticWireGuardInstall = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'install-host-wireguard');
+    const domesticDockerRuntime = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'install-domestic-docker-runtime');
+    const domesticPeerCenter = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'activate-domestic-peer-center');
     if (
       domesticSlotPlan.network.mode !== 'oversea-assisted'
       || domesticSlotPlan.network.qpTunnelCliMode !== 'server-on'
       || !domesticSlotPlan.services.hostServices.includes('wg-quick@mx-domestic')
       || !domesticPackageArtifacts?.commands.some((command) => command.includes('qp-tunnel-cli-offline-fallback'))
       || !domesticPackageArtifacts?.commands.some((command) => command.includes('refresh-tunnel-cli latest'))
+      || !domesticPackageArtifacts?.commands.some((command) => command.includes('--from-tarball'))
       || domesticRelayAuthority?.mode !== 'admin-action'
       || !domesticRelayAuthority?.commands.some((command) => command.includes('Domestic WG gateway=10.88.0.1') && command.includes('Internal service peer=10.90.0.10'))
       || !domesticRelayAuthority?.commands.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('10.90.0.0/16'))
@@ -2048,16 +2053,19 @@ export class MemoryStore implements PlatformStore {
       || !domesticRelayAuthority?.commands.some((command) => command.includes('Internal has no public ingress'))
       || domesticResolveSubscription?.mode !== 'admin-action'
       || !domesticResolveSubscription?.commands.some((command) => command.includes('domesticBootstrapSubscription'))
-      || !domesticResolveSubscription?.commands.some((command) => command.includes('do not ask Domestic to npm install'))
+      || !domesticResolveSubscription?.commands.some((command) => command.includes('install node/npm') && command.includes('npm install'))
       || domesticBootstrapEgress?.mode !== 'artifact-push'
-      || !domesticBootstrapEgress?.commands.some((command) => command.includes('npm i -g @qpjoy/tunnel-cli'))
+      || !domesticBootstrapEgress?.commands.some((command) => command.includes('QP_TUNNEL_CLI=/opt/mx/current/qp-tunnel-cli/bin/qp-tunnel-cli'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('mx-domestic-qp-tunnel-cli-fallback.tar.gz'))
+      || !domesticBootstrapEgress?.commands.some((command) => command.includes('npm i @qpjoy/tunnel-cli -g') && command.includes('npm refresh skipped after server-on'))
+      || !domesticBootstrapEgress?.commands.some((command) => command.includes('node/npm absent'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('server-on'))
-      || !domesticWireGuardInstall?.commands.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))
-      || !domesticWireGuardInstall?.commands.some((command) => command.includes('mx-domestic-relay.env'))
-      || !domesticWireGuardInstall?.commands.some((command) => command.includes('internal service peer private key must not be copied to Domestic'))
-      || domesticWireGuardInstall?.commands.some((command) => command.includes('rsync') && command.includes('mx-internal-service-peer.conf'))
-      || domesticBootstrapEgress?.commands.some((command) => command.includes('tun-on'))
+      || !domesticBootstrapEgress?.commands.some((command) => command.includes('install --url'))
+      || !domesticDockerRuntime?.commands.some((command) => command.includes('docker') && command.includes('apt-get'))
+      || !domesticPeerCenter?.commands.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))
+      || !domesticPeerCenter?.commands.some((command) => command.includes('mx-domestic-relay.env'))
+      || !domesticPeerCenter?.commands.some((command) => command.includes('internal service peer private key must not be copied to Domestic'))
+      || domesticPeerCenter?.commands.some((command) => command.includes('rsync') && command.includes('mx-internal-service-peer.conf'))
     ) {
       throw new Error('Domestic slot plan did not model host WireGuard and Oversea-assisted bootstrap');
     }

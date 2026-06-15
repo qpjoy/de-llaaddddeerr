@@ -115,11 +115,12 @@ function createTunnelCliTar(artifactRoot) {
     metadata: {
       packageName: packageJson.name,
       packageVersion: packageJson.version,
-      npmInstallCommand: 'npm i -g @qpjoy/tunnel-cli',
-      refreshCommand: 'bash scripts/manage.sh ops site-slot refresh-tunnel-cli latest',
-      fallbackMode: 'mihomo-client-resource-wrapper'
+      npmInstallCommand: 'npm i @qpjoy/tunnel-cli -g',
+      refreshCommand: 'bash scripts/manage.sh ops site-slot refresh-tunnel-cli latest | bash scripts/manage.sh ops site-slot refresh-tunnel-cli --from-tarball <tgz>',
+      fallbackMode: 'mihomo-client-resource-wrapper',
+      bootstrapMode: 'Internal-pushed no-node/no-outbound first'
     },
-    notes: ['Official path is npm i -g @qpjoy/tunnel-cli; this no-outbound fallback only wraps resources/mihomo-client.sh for bootstrap commands.'],
+    notes: ['Domestic bootstrap uses this Internal-pushed fallback before node/npm or registry egress exists; refresh it from npm pack or a published tarball when @qpjoy/tunnel-cli changes.'],
     buildStaging: (staging) => {
       copyRequired(sourceRoot, join(staging, 'package'), [
         'package.json',

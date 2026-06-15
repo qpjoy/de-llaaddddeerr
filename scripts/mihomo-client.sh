@@ -16,7 +16,7 @@ MIHOMO_SERVICE_FILE="${MIHOMO_SERVICE_FILE:-/etc/systemd/system/$MIHOMO_SERVICE_
 MIHOMO_PROFILE_PROXY_FILE="${MIHOMO_PROFILE_PROXY_FILE:-/etc/profile.d/mihomo-client-proxy.sh}"
 MIHOMO_DAEMON_PROXY_SERVICES="${MIHOMO_DAEMON_PROXY_SERVICES:-docker.service containerd.service buildkit.service}"
 MIHOMO_DAEMON_PROXY_DROPIN_NAME="${MIHOMO_DAEMON_PROXY_DROPIN_NAME:-mihomo-proxy.conf}"
-MIHOMO_NO_PROXY="${MIHOMO_NO_PROXY:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,100.88.0.0/16,100.89.0.0/16,100.90.0.0/16,host.docker.internal,.local}"
+MIHOMO_NO_PROXY="${MIHOMO_NO_PROXY:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,169.254.169.254,169.254.169.254/32,100.64.0.0/10,100.88.0.0/16,100.89.0.0/16,100.90.0.0/16,10.88.0.0/16,10.89.0.0/16,10.90.0.0/16,10.91.0.0/16,100.100.100.200,100.100.100.200/32,host.docker.internal,docker.for.mac.host.internal,docker.for.win.localhost,kubernetes.docker.internal,kubernetes.default.svc,.cluster.local,.local,.lan}"
 MIHOMO_SSH_PROXY_HELPER="${MIHOMO_SSH_PROXY_HELPER:-/usr/local/bin/mihomo-ssh-proxy}"
 MIHOMO_SSH_CONFIG_DIR="${MIHOMO_SSH_CONFIG_DIR:-/etc/ssh/ssh_config.d}"
 MIHOMO_SSH_CONFIG_FILE="${MIHOMO_SSH_CONFIG_FILE:-$MIHOMO_SSH_CONFIG_DIR/99-mihomo-proxy.conf}"
@@ -49,7 +49,7 @@ Commands:
   egress-off           Alias for server-off
   proxy-on             Write /etc/profile.d proxy exports for login shells
   proxy-off            Remove /etc/profile.d proxy exports
-  tun-on               Enable Mihomo TUN mode and also turn proxy-on on
+  tun-on               Enable persistent Mihomo TUN mode with cn-direct and local/private route bypasses
   tun-off              Disable Mihomo TUN mode and also turn proxy-on off
   ssh-proxy-on         Configure OpenSSH client to use local Mihomo SOCKS for common Git hosts
   ssh-proxy-off        Remove OpenSSH proxy override
@@ -399,8 +399,43 @@ ensure_subscription_source() {
 	[[ -f "$MIHOMO_SUBSCRIPTION_FILE" ]] || die "Subscription source not found. Please run install or update-subscription first."
 }
 
+detect_tun_proxy_group_name() {
+	local configured="${MIHOMO_TUN_PROXY_GROUP:-}"
+	local detected=""
+	if [[ -n "$configured" ]]; then
+		echo "$configured"
+		return
+	fi
+	if [[ -f "$MIHOMO_SUBSCRIPTION_FILE" ]]; then
+		detected="$(awk '
+			/^[[:space:]]*proxy-groups:[[:space:]]*$/ { in_groups=1; next }
+			in_groups && /^[^[:space:]-]/ { in_groups=0 }
+			in_groups && /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ {
+				line=$0
+				sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, "", line)
+				gsub(/^[[:space:]"]+/, "", line)
+				gsub(/[[:space:]"]+$/, "", line)
+				print line
+				exit
+			}
+			in_groups && /^[[:space:]]*name:[[:space:]]*/ {
+				line=$0
+				sub(/^[[:space:]]*name:[[:space:]]*/, "", line)
+				gsub(/^[[:space:]"]+/, "", line)
+				gsub(/[[:space:]"]+$/, "", line)
+				print line
+				exit
+			}
+		' "$MIHOMO_SUBSCRIPTION_FILE" || true)"
+	fi
+	echo "${detected:-PROXY}"
+}
+
 write_tun_overlay() {
-	cat > "$MIHOMO_TUN_OVERLAY_FILE" <<'EOF'
+	ensure_subscription_source
+	local proxy_group
+	proxy_group="$(detect_tun_proxy_group_name)"
+	cat > "$MIHOMO_TUN_OVERLAY_FILE" <<EOF
 tun:
   enable: true
   stack: system
@@ -408,6 +443,17 @@ tun:
   auto-redirect: true
   auto-detect-interface: true
   strict-route: true
+  route-exclude-address:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 169.254.0.0/16
+    - 100.64.0.0/10
+    - 10.88.0.0/16
+    - 10.89.0.0/16
+    - 10.90.0.0/16
+    - 10.91.0.0/16
+    - 100.100.100.200/32
   dns-hijack:
     - any:53
     - tcp://any:53
@@ -425,6 +471,7 @@ dns:
     - 223.5.5.5
     - 119.29.29.29
     - 1.1.1.1
+    - 8.8.8.8
   nameserver:
     - https://dns.alidns.com/dns-query
     - https://doh.pub/dns-query
@@ -436,6 +483,31 @@ dns:
     geoip-code: CN
     geosite:
       - gfw
+
+rules:
+  - DOMAIN-SUFFIX,local,DIRECT
+  - DOMAIN-SUFFIX,lan,DIRECT
+  - DOMAIN-SUFFIX,internal,DIRECT
+  - DOMAIN-SUFFIX,cluster.local,DIRECT
+  - DOMAIN,metadata.google.internal,DIRECT
+  - DOMAIN,kubernetes.default.svc,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+  - IP-CIDR,10.88.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,10.89.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,10.90.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,10.91.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,100.100.100.200/32,DIRECT,no-resolve
+  - IP-CIDR6,::1/128,DIRECT,no-resolve
+  - IP-CIDR6,fc00::/7,DIRECT,no-resolve
+  - IP-CIDR6,fe80::/10,DIRECT,no-resolve
+  - GEOSITE,CN,DIRECT
+  - GEOIP,CN,DIRECT
+  - MATCH,$proxy_group
 EOF
 	chmod 600 "$MIHOMO_TUN_OVERLAY_FILE"
 }
@@ -759,10 +831,12 @@ tun_on_command() {
 	daemon_proxy_on_command
 	if service_is_active; then
 		systemctl restart "$MIHOMO_SERVICE_NAME"
-		echo "Mihomo TUN mode enabled and service restarted."
+		systemctl enable "$MIHOMO_SERVICE_NAME" >/dev/null 2>&1 || true
+		echo "Mihomo TUN mode enabled, persisted, and service restarted."
 	else
 		systemctl start "$MIHOMO_SERVICE_NAME"
-		echo "Mihomo TUN mode enabled and service started."
+		systemctl enable "$MIHOMO_SERVICE_NAME" >/dev/null 2>&1 || true
+		echo "Mihomo TUN mode enabled, persisted, and service started."
 	fi
 }
 

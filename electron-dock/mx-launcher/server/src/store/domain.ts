@@ -1222,6 +1222,15 @@ export function buildLauncherNetworkTopology(
         configArtifact: 'mx-domestic-wg-relay.conf',
         envArtifact: 'mx-domestic-relay.env'
       },
+      refreshHint: {
+        source: 'internal-domestic-wg-secret',
+        mode: 'snapshot-digest',
+        publicEndpoint: null,
+        domesticRelayPublicKeyFingerprint: null,
+        internalServicePublicKeyFingerprint: null,
+        materialDigest: null,
+        secretUpdatedAt: null
+      },
       internalServicePeer: {
         role: 'internal-service',
         fixedIp: '10.90.0.10',
@@ -1262,6 +1271,27 @@ export function buildLauncherNetworkTopology(
       wgRelayBecomesPrimaryAfterEnroll: true,
       domesticMustNotOwnUsersOrSubscriptions: true,
       overseaMustNotOwnSubscriptionStore: true
+    }
+  };
+}
+
+export function attachDomesticWireGuardRefreshHint(
+  topology: LauncherNetworkTopology,
+  secret: SiteSlotDomesticWireGuardSecret | null
+): LauncherNetworkTopology {
+  return {
+    ...topology,
+    relayPlan: {
+      ...topology.relayPlan,
+      refreshHint: {
+        source: 'internal-domestic-wg-secret',
+        mode: 'snapshot-digest',
+        publicEndpoint: secret?.publicEndpoint ?? null,
+        domesticRelayPublicKeyFingerprint: secret?.fingerprints.domesticRelayPublicKey ?? null,
+        internalServicePublicKeyFingerprint: secret?.fingerprints.internalServicePublicKey ?? null,
+        materialDigest: secret?.fingerprints.materialDigest ?? null,
+        secretUpdatedAt: secret?.updatedAt ?? null
+      }
     }
   };
 }
@@ -2454,7 +2484,7 @@ function siteSlotApplySteps(plan: SiteSlotPlan): SiteSlotExecutionRun['steps'] {
         order: steps.length + 1,
         requiresRoot: phase.target === 'domestic' && (
           phase.phaseId === 'bootstrap-domestic-egress'
-          || phase.phaseId === 'install-host-wireguard'
+          || phase.phaseId === 'activate-domestic-peer-center'
           || command.includes('/etc/wireguard')
           || command.includes('systemctl')
         ),
@@ -2562,8 +2592,8 @@ function siteSlotWarnings(
     warnings.push('blocked: domestic has no outbound internet and no Oversea bootstrap slot is configured');
   }
   if (kind === 'domestic' && input.hasOutboundInternet === false && networkMode === 'oversea-assisted') {
-    warnings.push('warning: domestic outbound bootstrap depends on Oversea subscription and qp-tunnel-cli server-on');
-    warnings.push('warning: materialize mx-domestic-qp-tunnel-cli-fallback before bootstrap because Domestic may not reach npm until Oversea egress is available');
+    warnings.push('warning: domestic outbound bootstrap depends on Oversea subscription and qp-tunnel-cli hdo/server-on');
+    warnings.push('warning: materialize mx-domestic-qp-tunnel-cli-fallback before bootstrap because Domestic may have no node/npm or registry egress until server-on is available');
   }
   return warnings;
 }
@@ -2582,7 +2612,7 @@ function siteSlotServices(kind: SiteSlotKind): SiteSlotPlan['services'] {
       'wireguard-tools',
       'wg-quick@mx-domestic',
       'systemd forwarding and firewall rules',
-      '@qpjoy/tunnel-cli server-safe egress bootstrap'
+      '@qpjoy/tunnel-cli hdo/server-on egress bootstrap'
     ],
     dockerStacks: ['mx-domestic-edge-api', 'mx-h2i-proxy', 'mx-snapshot-cache', 'mx-observability-forwarder'],
     dockerPreferred: true,
@@ -2636,8 +2666,9 @@ function siteSlotNetworkNotes(kind: SiteSlotKind, mode: SiteSlotNetworkMode): st
   if (mode === 'oversea-assisted') {
     return [
       'Domestic cannot rely on direct outbound internet during bootstrap.',
-      'Configure Oversea first, let Internal issue Domestic bootstrap account/subscription, then use @qpjoy/tunnel-cli server-on to register the machine without taking over inbound return routes.',
-      'After Domestic can reach Internal, keep runtime traffic on policy-controlled H2I relay/proxy paths; reserve tun-on for non-public hosts or short break-glass sessions.'
+      'Configure Oversea first, let Internal issue the Domestic bootstrap account/subscription, then push the Internal-materialized qp-tunnel-cli fallback and use hdo/server-on so the host can pull Docker and service dependencies without taking over inbound return routes.',
+      'After server-on is up, optionally refresh the global @qpjoy/tunnel-cli with .npmrc/private registry access or a published npm tarball synced into Internal. Initial no-egress bootstrap must not depend on node/npm on Domestic.',
+      'Keep server-on as the Domestic default for public hosts. tun-on is persistent but should stay a non-public-host or break-glass mode because it proxies full host traffic and can break public service return paths.'
     ];
   }
   if (mode === 'offline-manual') {
@@ -2729,18 +2760,18 @@ function siteSlotPreflightChecks(
         command: remote('curl -fsSI --max-time 8 https://registry-1.docker.io/v2/ || curl -fsSI --max-time 8 https://github.com/'),
         expected: mode === 'direct' ? 'Domestic can reach public registries or GitHub' : 'May fail until Oversea-assisted qp-tunnel-cli bootstrap is enabled',
         remediation: mode === 'oversea-assisted'
-          ? 'Configure Oversea, consume the Internal-issued Oversea hysteria2 bootstrap subscription with @qpjoy/tunnel-cli, then run server-on before pulling images.'
+          ? 'Configure Oversea, consume the Internal-issued Oversea hysteria2 bootstrap subscription with @qpjoy/tunnel-cli hdo/server-on, then install Docker before starting Domestic services.'
           : 'Fix egress routing, DNS, firewall, or proxy before deployment.'
       },
       {
         checkId: 'domestic.qp-tunnel-cli',
         title: '@qpjoy/tunnel-cli check',
         stage: 'network',
-        severity: mode === 'oversea-assisted' ? 'required' : 'optional',
-        requiresRoot: mode === 'oversea-assisted',
-        command: remote('command -v qp-tunnel-cli || command -v qpjoy-tunnel-cli || true'),
-        expected: mode === 'oversea-assisted' ? 'qp-tunnel-cli is available for server-safe egress bootstrap' : 'Only required when Domestic cannot access outbound internet directly',
-        remediation: 'Install @qpjoy/tunnel-cli from an Internal/offline bundle or scp a prebuilt binary before network bootstrap.'
+        severity: mode === 'oversea-assisted' ? 'recommended' : 'optional',
+        requiresRoot: false,
+        command: remote('command -v qp-tunnel-cli || command -v qpjoy-tunnel-cli || { test -x /opt/mx/current/qp-tunnel-cli/bin/qp-tunnel-cli && echo /opt/mx/current/qp-tunnel-cli/bin/qp-tunnel-cli; } || echo "qp-tunnel-cli: will be pushed by Internal fallback"'),
+        expected: mode === 'oversea-assisted' ? 'Global qp-tunnel-cli may be absent before artifact push; the Internal fallback provides hdo/server-on egress bootstrap, and tun-on is persistent but not the public Domestic default' : 'Only required when Domestic cannot access outbound internet directly',
+        remediation: 'Refresh the Internal fallback from npm pack or --from-tarball, then materialize and push mx-domestic-qp-tunnel-cli-fallback.tar.gz before network bootstrap.'
       }
     );
   } else {
@@ -2817,6 +2848,9 @@ function siteSlotDeploymentPhases(
   const overseaDefaultAccountNames = defaultSiteSlotAccessAccountNames(overseaSiteId);
   const overseaInternalAccountName = `${safeAccountPrefix(overseaSiteId)}-internal`;
   const overseaDomesticAccountName = `${safeAccountPrefix(overseaSiteId)}-domestic`;
+  const domesticBootstrapSubscriptionUrl = `${overseaSubscriptionBaseUrl}/${overseaDomesticAccountName}.yaml`;
+  const domesticTunnelModeCommand = '{ QP_TUNNEL_MODE=${QP_TUNNEL_MODE:-server-on}; case "$QP_TUNNEL_MODE" in server|server-on|egress|egress-on) $QP_TUNNEL_CLI server-on ;; tun|tun-on) $QP_TUNNEL_CLI tun-on ;; *) echo "blocked: unsupported QP_TUNNEL_MODE=$QP_TUNNEL_MODE"; exit 1 ;; esac; }';
+  const domesticTunnelPostEgressRefreshCommand = 'if command -v npm >/dev/null 2>&1; then if npm i @qpjoy/tunnel-cli -g; then qp-tunnel-cli status || echo "warning: @qpjoy/tunnel-cli npm refresh status failed after server-on; keep Internal fallback"; else echo "warning: @qpjoy/tunnel-cli npm refresh skipped after server-on; keep Internal fallback"; fi; else echo "node/npm absent; keep Internal fallback until next refresh"; fi';
   const overseaInputAccessAccounts = (input.accessAccounts ?? [])
     .filter((account) => (
       Boolean(account.username)
@@ -2925,7 +2959,7 @@ function siteSlotDeploymentPhases(
           ? `Release Center materialize artifactSet=${kind} modules=hysteria2-access-stack,site-agent,runner-worker,observability-forwarder output=${artifactRoot}`
           : `Release Center materialize artifactSet=${kind} modules=wireguard-config,qp-tunnel-cli-offline-fallback,h2i-proxy,api-proxy,snapshot-cache,observability-forwarder output=${artifactRoot}`,
         kind === 'domestic'
-          ? 'If @qpjoy/tunnel-cli was republished, refresh fallback first: bash scripts/manage.sh ops site-slot refresh-tunnel-cli latest'
+          ? 'If @qpjoy/tunnel-cli was republished, refresh fallback in Internal before materializing: bash scripts/manage.sh ops site-slot refresh-tunnel-cli latest or bash scripts/manage.sh ops site-slot refresh-tunnel-cli --from-tarball <@qpjoy-tunnel-cli.tgz>'
           : 'Keep hysteria2 access-stack source under electron-dock/mx-launcher/site-slots/oversea/hysteria2-access-stack before materializing; mihomo is deployed by Internal, not by Oversea.',
         `Write ${artifactRoot}/manifest.json with sha256, target paths, rollback metadata, and source revision.`,
         'Exclude .git, docs, tests, local fixtures, node_modules, and unrelated workspace packages; never sync the repository root.'
@@ -2976,11 +3010,11 @@ function siteSlotDeploymentPhases(
       target: 'internal',
       required: true,
       commands: [
-        `Read domesticBootstrapSubscription=${overseaSubscriptionBaseUrl}/${overseaDomesticAccountName}.yaml from Internal Config Center for Oversea siteId=${overseaSiteId} host=${input.overseaHost ?? '<oversea-host>'}`,
+        `Read domesticBootstrapSubscription=${domesticBootstrapSubscriptionUrl} from Internal Config Center for Oversea siteId=${overseaSiteId} host=${input.overseaHost ?? '<oversea-host>'}`,
         `Verify ${artifactRoot}/mx-domestic-qp-tunnel-cli-fallback.tar.gz exists in Internal before touching Domestic.`,
-        'If subscription/account material is missing, stop here; do not ask Domestic to npm install or pull until Internal has issued the Oversea bootstrap account.'
+        'If subscription/account material is missing, stop here; do not ask Domestic to install node/npm, run npm install, or pull public packages until Internal has issued the Oversea bootstrap account and fallback artifact.'
       ],
-      notes: ['Internal owns the bootstrap subscription, mihomo config, and fallback artifact before Domestic can recover outbound access.']
+      notes: ['Internal owns the bootstrap subscription, mihomo config, and fallback artifact before Domestic can recover outbound access; .npmrc only helps Internal refresh or post-egress npm refresh, not the first no-egress bootstrap.']
     });
     phases.push({
       phaseId: 'bootstrap-domestic-egress',
@@ -2992,35 +3026,39 @@ function siteSlotDeploymentPhases(
         ssh(`install -d -m 0755 ${incomingDir} ${currentRoot} ${domesticTunnelCliReleaseDir}`),
         rsyncOverSsh(domesticTunnelCliBundle, `${incomingDir}/`),
         ssh(`tar -xzf ${incomingDir}/${domesticTunnelCliBundleName} -C ${domesticTunnelCliReleaseDir} && ln -sfn ${domesticTunnelCliReleaseDir} ${domesticTunnelCliCurrentDir}`),
-        ssh(`chmod +x ${domesticTunnelCliCurrentDir}/bin/qp-tunnel-cli && if command -v qp-tunnel-cli >/dev/null 2>&1; then QP_TUNNEL_CLI=qp-tunnel-cli; elif command -v npm >/dev/null 2>&1 && npm view @qpjoy/tunnel-cli version >/dev/null 2>&1; then npm i -g @qpjoy/tunnel-cli && QP_TUNNEL_CLI=qp-tunnel-cli; else QP_TUNNEL_CLI=${domesticTunnelCliCurrentDir}/bin/qp-tunnel-cli; fi; $QP_TUNNEL_CLI register --internal ${internalBaseUrl} --role domestic --site ${input.siteId ?? 'domestic-main'} --subscription ${overseaSubscriptionBaseUrl}/${overseaDomesticAccountName}.yaml && $QP_TUNNEL_CLI server-on`)
+        ssh(`QP_TUNNEL_CLI=${domesticTunnelCliCurrentDir}/bin/qp-tunnel-cli && chmod +x "$QP_TUNNEL_CLI" && $QP_TUNNEL_CLI install --url ${domesticBootstrapSubscriptionUrl} && ${domesticTunnelModeCommand} && $QP_TUNNEL_CLI status && ${domesticTunnelPostEgressRefreshCommand}`)
       ],
-      notes: ['Prefer npm i -g @qpjoy/tunnel-cli when the target can reach npm; keep the Internal-pushed fallback bundle for no-outbound Domestic bootstrap.']
+      notes: ['Use the Internal-pushed fallback first because Domestic may not have node/npm or registry egress yet. After server-on is available, a best-effort npm refresh can upgrade the global CLI. server-on is the public Domestic default; tun-on is persistent but may break public service return paths.']
+    });
+  }
+  if (kind === 'domestic') {
+    phases.push({
+      phaseId: 'install-domestic-docker-runtime',
+      title: 'Install Domestic Docker runtime',
+      mode: 'artifact-push',
+      target: 'domestic',
+      required: true,
+      commands: [
+        ssh(overseaDockerInstallScript())
+      ],
+      notes: ['Run after the Oversea subscription proxy is available so Docker packages and images can resolve through server-on when direct egress is unavailable.']
     });
   }
   phases.push(
-    {
-      phaseId: kind === 'domestic' ? 'install-host-wireguard' : 'prepare-access-stack',
-      title: kind === 'domestic' ? 'Install Domestic host WireGuard service' : 'Prepare Oversea Docker hysteria2 access stack',
-      mode: 'artifact-push',
+    ...(kind === 'oversea' ? [{
+      phaseId: 'prepare-access-stack',
+      title: 'Prepare Oversea Docker hysteria2 access stack',
+      mode: 'artifact-push' as const,
       target: kind,
       required: true,
-      commands: kind === 'domestic'
-          ? [
-            ssh(`install -d -m 0700 /etc/wireguard && install -d -m 0755 ${slotCurrentDir}`),
-            rsyncOverSsh(domesticWireGuardConfig, '/etc/wireguard/mx-domestic.conf'),
-            rsyncOverSsh(domesticRelayEnv, `${slotCurrentDir}/mx-domestic-relay.env`),
-            ssh('if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi; systemctl enable --now wg-quick@mx-domestic')
-          ]
-        : [
-            ssh(`install -d -m 0755 /opt/mx ${incomingDir} ${currentRoot} /opt/mx/site-agent ${overseaAccessStackReleaseDir}`),
-            rsyncOverSsh(overseaAccessStackBundle, `${incomingDir}/`),
-            ssh(`tar -xzf ${incomingDir}/${overseaAccessStackBundleName} -C ${overseaAccessStackReleaseDir} && ln -sfn ${overseaAccessStackReleaseDir} ${overseaAccessStackCurrentDir}`),
-            ssh(`cd ${overseaAccessStackCurrentDir} && chmod +x manage.sh && test -f docker-compose.yml && test -f .env.example`)
-          ],
-      notes: kind === 'domestic'
-        ? ['WireGuard/routing is host-level because Domestic is the relay path and has limited memory/disk.']
-        : ['Internal pushes the access stack over rsync/OpenSSH and falls back to scp; the Oversea host does not clone or pull source code.']
-    },
+      commands: [
+        ssh(`install -d -m 0755 /opt/mx ${incomingDir} ${currentRoot} /opt/mx/site-agent ${overseaAccessStackReleaseDir}`),
+        rsyncOverSsh(overseaAccessStackBundle, `${incomingDir}/`),
+        ssh(`tar -xzf ${incomingDir}/${overseaAccessStackBundleName} -C ${overseaAccessStackReleaseDir} && ln -sfn ${overseaAccessStackReleaseDir} ${overseaAccessStackCurrentDir}`),
+        ssh(`cd ${overseaAccessStackCurrentDir} && chmod +x manage.sh && test -f docker-compose.yml && test -f .env.example`)
+      ],
+      notes: ['Internal pushes the access stack over rsync/OpenSSH and falls back to scp; the Oversea host does not clone or pull source code.']
+    }] : []),
     ...(kind === 'oversea' ? [
       {
         phaseId: 'configure-oversea-access',
@@ -3079,6 +3117,20 @@ function siteSlotDeploymentPhases(
       ],
       notes: ['Internal pushes Release Center bundles; slot hosts run the unpacked bundle and do not pull code from git.']
     },
+    ...(kind === 'domestic' ? [{
+      phaseId: 'activate-domestic-peer-center',
+      title: 'Activate Domestic WireGuard peer center',
+      mode: 'artifact-push' as const,
+      target: kind,
+      required: true,
+      commands: [
+        ssh(`install -d -m 0700 /etc/wireguard && install -d -m 0755 ${slotCurrentDir}`),
+        rsyncOverSsh(domesticWireGuardConfig, '/etc/wireguard/mx-domestic.conf'),
+        rsyncOverSsh(domesticRelayEnv, `${slotCurrentDir}/mx-domestic-relay.env`),
+        ssh('if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi; systemctl enable --now wg-quick@mx-domestic')
+      ],
+      notes: ['WireGuard/routing is host-level because Domestic is the peer center path and has limited memory/disk.']
+    }] : []),
     {
       phaseId: 'sync-internal-config',
       title: 'Sync signed Internal config',
@@ -3116,9 +3168,10 @@ function siteSlotNextActions(
   actions.push('materialize-slot-artifacts');
   actions.push('run-remote-preflight');
   if (kind === 'domestic' && mode !== 'direct') actions.push('configure-oversea-bootstrap');
+  if (kind === 'domestic') actions.push('install-docker-runtime');
   if (kind === 'oversea') actions.push('push-oversea-access-stack');
-  if (kind === 'domestic') actions.push('install-host-wireguard-service');
   actions.push('push-slot-service-bundle', 'sync-signed-internal-config', 'run-slot-smoke');
+  if (kind === 'domestic') actions.push('activate-domestic-peer-center');
   if (!input.internalBaseUrl) actions.push('set-internal-base-url-for-reachability-check');
   return actions;
 }

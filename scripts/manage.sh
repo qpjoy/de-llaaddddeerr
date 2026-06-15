@@ -351,6 +351,17 @@ sync_hdo_demo_npm_mode() {
   (cd "$ROOT/electron-demo/hdo" && node scripts/dev-mode.mjs npm --force)
 }
 
+sync_tunnel_cli_mx_launcher_fallback() {
+  local name="$1" path="$2" tarball="$3"
+  [ "$name" = "@qpjoy/tunnel-cli" ] || return 0
+  local sync_script="$ROOT/$path/scripts/sync-mx-launcher-fallback.mjs"
+  [ -f "$sync_script" ] || die "未找到 tunnel-cli fallback 同步脚本: $sync_script"
+  [ -f "$tarball" ] || die "未找到 @qpjoy/tunnel-cli pack tarball: $tarball"
+  say "sync: @qpjoy/tunnel-cli tarball -> mx-launcher Domestic fallback"
+  node "$sync_script" --from-tarball "$tarball"
+  ok "mx-launcher Domestic fallback 已同步: $tarball"
+}
+
 cmd_sync_hdo_npm() {
   header "把 electron-demo/hdo 同步到已发布 npm 包"
   sync_hdo_demo_npm_mode
@@ -365,6 +376,8 @@ prepare_one() {
   name=$(pkg_field "$row" 1)
   path=$(pkg_field "$row" 2)
   label=$(pkg_field "$row" 4)
+  local preview_dir="/tmp/qpjoy-publish-preview"
+  local preview_tgz
 
   header "准备发布: $name  (${label})"
   echo "  本地路径: $path"
@@ -415,9 +428,12 @@ prepare_one() {
   (cd "$ROOT/$path/.." && pnpm --filter "$name" build) || die "build 失败"
 
   say "pack 预览到 /tmp/qpjoy-publish-preview/"
-  rm -rf /tmp/qpjoy-publish-preview
-  mkdir -p /tmp/qpjoy-publish-preview
-  (cd "$ROOT/$path" && pnpm pack --pack-destination /tmp/qpjoy-publish-preview)
+  rm -rf "$preview_dir"
+  mkdir -p "$preview_dir"
+  (cd "$ROOT/$path" && pnpm pack --pack-destination "$preview_dir")
+  preview_tgz="$(find "$preview_dir" -maxdepth 1 -type f -name '*.tgz' | sort | tail -n 1)"
+  [ -n "$preview_tgz" ] || die "pack 未生成 tgz: $preview_dir"
+  sync_tunnel_cli_mx_launcher_fallback "$name" "$path" "$preview_tgz"
 
   echo
   ok "准备完成"
@@ -435,6 +451,9 @@ prepare_one() {
   if hdo_demo_tracks_package "$name"; then
     echo "${C_DIM}  - 发布到 npm 后刷新正式 HDO demo 依赖：scripts/manage.sh sync-hdo-npm${C_RESET}"
   fi
+  if [ "$name" = "@qpjoy/tunnel-cli" ]; then
+    echo "${C_DIM}  - @qpjoy/tunnel-cli tarball 已同步到 mx-launcher Domestic fallback${C_RESET}"
+  fi
 
   echo
   local publish_otp
@@ -449,6 +468,9 @@ prepare_one() {
     echo "${C_DIM}已跳过自动发布，保留上面的手动发布命令。${C_RESET}"
     if hdo_demo_tracks_package "$name"; then
       echo "${C_DIM}手动发布成功后运行：scripts/manage.sh sync-hdo-npm${C_RESET}"
+    fi
+    if [ "$name" = "@qpjoy/tunnel-cli" ]; then
+      echo "${C_DIM}@qpjoy/tunnel-cli 的本次 pack tarball 已同步；若手动发布前重新打包，请再运行 scripts/manage.sh prepare-tool${C_RESET}"
     fi
   fi
 }

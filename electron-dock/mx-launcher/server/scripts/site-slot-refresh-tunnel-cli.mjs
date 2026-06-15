@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -15,9 +18,12 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const mxRoot = resolve(scriptDir, '../..');
 const args = process.argv.slice(2);
 const fromLocal = optionValue('--from-local');
+const fromTarball = optionValue('--from-tarball') || optionValue('--tarball');
 const targetDir = resolve(optionValue('--target-dir') || join(mxRoot, 'site-slots/domestic/qp-tunnel-cli'));
 const tempDir = resolve(optionValue('--temp-dir') || join(mxRoot, '.tmp/site-slot-tunnel-cli-refresh'));
-const requestedVersion = optionValue('--version') || positionalArgs()[0] || 'latest';
+const requestedVersion = optionValue('--version') || positionalArgs()[0] || (fromTarball ? 'tarball' : 'latest');
+
+if (fromLocal && fromTarball) die('Use only one of --from-local DIR or --from-tarball FILE');
 
 const requiredFiles = [
   'package.json',
@@ -30,15 +36,22 @@ const requiredFiles = [
   'resources/mihomo-client.sh'
 ];
 
-const sourceDir = fromLocal ? resolve(fromLocal) : fetchFromNpm();
+const sourceDir = fromLocal ? resolve(fromLocal) : fromTarball ? fetchFromTarball(fromTarball) : fetchFromNpm();
 const packageJson = readPackageJson(sourceDir);
+const source = fromLocal ? 'local' : fromTarball ? 'tarball' : 'npm-pack';
+const sourceReference = fromLocal
+  ? resolve(fromLocal)
+  : fromTarball
+    ? resolve(fromTarball)
+    : `@qpjoy/tunnel-cli@${requestedVersion}`;
 copyFallbackSource(sourceDir, targetDir);
 writeFileSync(join(targetDir, 'refresh-metadata.json'), JSON.stringify({
   packageName: packageJson.name,
   packageVersion: packageJson.version,
-  requestedVersion,
-  source: fromLocal ? 'local' : 'npm-pack',
-  officialInstallCommand: 'npm i -g @qpjoy/tunnel-cli',
+  requestedVersion: requestedVersion === 'tarball' ? packageJson.version : requestedVersion,
+  source,
+  sourceReference,
+  officialInstallCommand: 'npm i @qpjoy/tunnel-cli -g',
   refreshedAt: new Date().toISOString()
 }, null, 2));
 
@@ -47,8 +60,10 @@ console.log(JSON.stringify({
   targetDir,
   packageName: packageJson.name,
   packageVersion: packageJson.version,
-  officialInstallCommand: 'npm i -g @qpjoy/tunnel-cli',
-  fallbackUsage: 'no-outbound bootstrap only'
+  source,
+  sourceReference,
+  officialInstallCommand: 'npm i @qpjoy/tunnel-cli -g',
+  fallbackUsage: 'Internal-pushed no-node/no-outbound bootstrap first, optional npm refresh after server-on'
 }, null, 2));
 
 function fetchFromNpm() {
@@ -68,6 +83,26 @@ function fetchFromNpm() {
   return join(tempDir, 'package');
 }
 
+function fetchFromTarball(tarballPath) {
+  rmSync(tempDir, { recursive: true, force: true });
+  mkdirSync(tempDir, { recursive: true });
+  execFileSync('tar', ['-xzf', resolve(tarballPath), '-C', tempDir], {
+    env: { ...process.env, LC_ALL: 'C', LANG: 'C' }
+  });
+  return findExtractedPackageRoot(tempDir);
+}
+
+function findExtractedPackageRoot(extractRoot) {
+  const packageRoot = join(extractRoot, 'package');
+  if (existsSync(join(packageRoot, 'package.json'))) return packageRoot;
+  if (existsSync(join(extractRoot, 'package.json'))) return extractRoot;
+  for (const entry of readdirSync(extractRoot)) {
+    const candidate = join(extractRoot, entry);
+    if (statSync(candidate).isDirectory() && existsSync(join(candidate, 'package.json'))) return candidate;
+  }
+  die(`Could not find package.json after extracting tarball into ${extractRoot}`);
+}
+
 function copyFallbackSource(sourceRoot, targetRoot) {
   for (const file of requiredFiles) {
     const source = join(sourceRoot, file);
@@ -79,6 +114,7 @@ function copyFallbackSource(sourceRoot, targetRoot) {
     const target = join(targetRoot, file);
     mkdirSync(dirname(target), { recursive: true });
     cpSync(source, target, { recursive: true });
+    if (file === 'resources/mihomo-client.sh') chmodSync(target, 0o755);
   }
 }
 
@@ -94,12 +130,15 @@ function readPackageJson(sourceRoot) {
 
 function optionValue(name) {
   const index = args.indexOf(name);
-  return index >= 0 ? args[index + 1] : null;
+  if (index < 0) return null;
+  const value = args[index + 1];
+  if (!value || value.startsWith('--')) die(`Missing value for ${name}`);
+  return value;
 }
 
 function positionalArgs() {
   const out = [];
-  const optionsWithValue = new Set(['--from-local', '--target-dir', '--temp-dir', '--version']);
+  const optionsWithValue = new Set(['--from-local', '--from-tarball', '--tarball', '--target-dir', '--temp-dir', '--version']);
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (optionsWithValue.has(arg)) {

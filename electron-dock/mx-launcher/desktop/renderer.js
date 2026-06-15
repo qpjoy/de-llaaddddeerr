@@ -5905,6 +5905,12 @@ async function continueSetupRun() {
       stopSetupRun(result?.error?.message || 'Action failed.', 'failed');
       return;
     }
+    const blockedMessage = setupActionBlockedMessage(result.payload || {});
+    if (blockedMessage) {
+      pushSetupRunStep(action, 'blocked', blockedMessage);
+      stopSetupRun(blockedMessage, 'blocked');
+      return;
+    }
     pushSetupRunStep(action, 'passed', summarizeActionPayload(action, result.payload || {}));
     state.setupRun.message = 'Refreshing pipeline state...';
     renderSetupGuidance(state.currentPipeline, state.currentActions);
@@ -5924,6 +5930,34 @@ function setupManualStopReason(action) {
     return `${action.label} needs operator input before execution.`;
   }
   return '';
+}
+
+function setupActionBlockedMessage(payload) {
+  const gateFailures = asArray(payload?.gate?.gateFailures);
+  if (payload?.gate?.verdict === 'blocked') {
+    return gateFailures.length
+      ? `Remote SSH Gate blocked: ${gateFailures.join('; ')}`
+      : 'Remote SSH Gate blocked. Review gate evidence before continuing.';
+  }
+  const blockedResult = [
+    payload?.readOnlyProbe,
+    payload?.workerHandoff,
+    payload?.remoteSshPlan,
+    payload?.fakeTransport,
+    payload?.domesticWgMaterialize,
+    payload?.relayReadOnlyProbe,
+    payload?.relayPeerPlan,
+    payload?.relayPeerAppend,
+    payload?.relayPeerAppendSsh,
+    payload?.awxCredentialSync,
+    payload?.awxObjectSync,
+    payload?.awxLaunch
+  ].find((item) => item?.status === 'blocked');
+  if (!blockedResult) return '';
+  const reasons = asArray(blockedResult.blockedReasons);
+  return reasons.length
+    ? `Action blocked: ${reasons.join('; ')}`
+    : 'Action blocked. Review action evidence before continuing.';
 }
 
 function pushSetupRunStep(action, status, message) {
@@ -5993,8 +6027,9 @@ function actionGuidanceText(action) {
     'site-slot.worker-run.awx-launch': '提交 AWX job，真正执行 Ansible 并把结果回写成 worker report。',
     'site-slot.worker-run.remote-ssh-gate': '先检查 Remote SSH 执行边界和 SSH Profile，不会改远端主机。',
     'site-slot.worker-run.remote-ssh-readonly-probe': '通过 SSH 做只读探测，收集 OS、Docker、磁盘和访问栈状态证据。',
-    'site-slot.worker-run.remote-ssh-execute': '通过 Remote SSH 执行 Internal-controlled artifact push 和远端 worker，同步 Oversea Docker hysteria2。',
+    'site-slot.worker-run.remote-ssh-execute': '通过 Remote SSH 执行 Internal-controlled artifact push：Domestic 按订阅出网、Docker、服务、peer center 顺序部署；Oversea 同步 Docker hysteria2。',
     'site-slot.worker-run.artifact-push-remote-ssh-plan': '生成 Remote SSH artifact push 计划报告，便于审计下发内容。',
+    'site-slot.domestic-wg.materialize': 'Internal 生成或复用 Domestic WG secret，并重新 materialize ready artifact。换公网 IP 只更新 endpoint；换整机时显式设置 rotateRelayKey=true 和 confirmRotate=true。',
     'site-slot.domestic-relay-peer-append-awx.prepare': '高级备用：为 Domestic relay peer append 准备 AWX worker job。',
     'site-slot.domestic-relay-peer-append-ssh.prepare': '准备 Domestic Remote SSH worker job；需要先绑定 SSH Profile。',
     'site-slot.worker-run.domestic-relay-readonly-probe': '先只读检查 Domestic WG relay 状态。',
@@ -6033,6 +6068,9 @@ function setupActionGuidanceText(pipeline, action) {
   if (action.actionId === 'site-slot.worker-job.create') {
     return '下一步会把 Remote SSH runner 变成 Domestic worker job；随后进入 SSH Gate、Readonly Probe 和远端同步。';
   }
+  if (action.actionId === 'site-slot.domestic-wg.materialize') {
+    return '下一步在 Internal 生成/复用 WG relay secret，并把 wireguard-config materialize 成 ready artifact；不会修改 Domestic 主机。';
+  }
   if (action.actionId === 'site-slot.worker-run.remote-ssh-gate') {
     return '下一步只检查 SSH Profile、远端执行边界和 artifact gate，不会修改 Domestic 主机。通过后再做 Readonly Probe。';
   }
@@ -6040,7 +6078,7 @@ function setupActionGuidanceText(pipeline, action) {
     return '下一步只读探测 Domestic 主机的 OS、Docker、WG 和服务状态；通过后再执行远端安装/同步。';
   }
   if (action.actionId === 'site-slot.worker-run.remote-ssh-execute') {
-    return '下一步会通过 Internal Remote SSH 下发 Domestic artifact 并执行远端安装/同步。';
+    return '下一步会通过 Internal Remote SSH 下发 Domestic artifact，按 Oversea 订阅出网、Docker runtime、Docker services、WG/H2I peer center 的顺序执行远端部署。';
   }
   return actionGuidanceText(action);
 }
@@ -6067,8 +6105,8 @@ function renderSetupActionChain(pipeline, action) {
     || (activeProfileId && planProfileId !== activeProfileId)
     || (plan.network?.mode === 'offline-manual' && Boolean(domesticBootstrapOverseaSite()));
   const steps = needsPlan
-    ? ['Save SSH', 'Create Plan', 'Preflight', 'Apply', 'Remote SSH', 'Install / Sync']
-    : ['Plan bound', 'Remote SSH Runner', 'Worker Job', 'SSH Gate', 'Readonly Probe', 'Install / Sync'];
+    ? ['Save SSH', 'Create Plan', 'Preflight', 'Apply', 'WG Secret', 'Remote SSH', 'Install / Sync']
+    : ['Plan bound', 'WG Secret', 'Remote SSH Runner', 'Worker Job', 'SSH Gate', 'Readonly Probe', 'Install / Sync'];
   const current = needsPlan
     ? 'Create Plan'
     : setupChainCurrentStep(action.actionId);
@@ -6082,6 +6120,7 @@ function renderSetupActionChain(pipeline, action) {
 }
 
 function setupChainCurrentStep(actionId) {
+  if (actionId === 'site-slot.domestic-wg.materialize') return 'WG Secret';
   if (actionId === 'site-slot.runner.remote-ssh') return 'Remote SSH Runner';
   if (actionId === 'site-slot.worker-job.create' || actionId === 'site-slot.domestic-relay-peer-append-ssh.prepare') return 'Worker Job';
   if (actionId === 'site-slot.worker-run.remote-ssh-gate') return 'SSH Gate';
@@ -6101,6 +6140,7 @@ function defaultPreferredAction(actions) {
     'site-slot.preflight.create',
     'site-slot.apply.confirm',
     'site-slot.runner.remote-ssh',
+    'site-slot.domestic-wg.materialize',
     'site-slot.runner.simulate',
     'site-slot.worker-job.create',
     'site-slot.worker-run.remote-ssh-gate',
@@ -6526,6 +6566,15 @@ function nextActionFocusFromResult(action, payload) {
   if (action?.actionId === 'site-slot.worker-run.remote-ssh-gate' && payload?.gate?.verdict !== 'passed') {
     return { jobId, actionIds: ['site-slot.worker-run.remote-ssh-gate'] };
   }
+  if (action?.actionId === 'site-slot.worker-run.remote-ssh-gate' && payload?.gate?.verdict === 'passed') {
+    const job = currentPipelineWorkerJob(jobId);
+    return {
+      jobId,
+      actionIds: isDomesticRelayPeerWorkerJob(job)
+        ? ['site-slot.worker-run.domestic-relay-readonly-probe', 'site-slot.worker-run.domestic-relay-peer-append', 'site-slot.worker-run.domestic-relay-peer-append-ssh']
+        : ['site-slot.worker-run.remote-ssh-readonly-probe', 'site-slot.worker-run.remote-ssh-execute', 'site-slot.worker-run.artifact-push-remote-ssh-plan']
+    };
+  }
   if (action?.actionId === 'site-slot.worker-run.domestic-relay-readonly-probe'
     && payload?.relayReadOnlyProbe?.status !== 'ready') {
     return { jobId, actionIds: ['site-slot.worker-run.domestic-relay-readonly-probe'] };
@@ -6563,6 +6612,17 @@ function nextActionFocusFromResult(action, payload) {
   return actionIds ? { jobId, actionIds } : state.preferredActionFocus;
 }
 
+function currentPipelineWorkerJob(jobId) {
+  return asArray(state.currentPipeline?.workerJobs).find((job) => job.jobId === jobId) || null;
+}
+
+function isDomesticRelayPeerWorkerJob(job) {
+  return job?.kind === 'domestic' && (
+    job.rollbackPolicy?.strategy === 'restore-domestic-wg-peer-before-append'
+    || String(job.worker?.workerId || '').includes('domestic-relay')
+  );
+}
+
 function jobIdFromActionPath(path) {
   const match = String(path || '').match(/\/worker-jobs\/([^/]+)\//);
   return match ? decodeURIComponent(match[1]) : null;
@@ -6586,6 +6646,7 @@ function summarizeActionPayload(action, payload) {
     || payload.awxCredentialSync
     || payload.awxObjectSync
     || payload.awxLaunch
+    || payload.domesticWgMaterialize
     || payload.fakeTransport
     || payload.workerHandoff
     || payload.readOnlyProbe
@@ -6623,6 +6684,26 @@ function summarizeActionDetail(payload) {
       workerJob: prepare.workerJob,
       blockedReasons: prepare.blockedReasons || [],
       nextActions: prepare.nextActions || []
+    }, null, 2);
+  }
+  const domesticWgMaterialize = payload?.domesticWgMaterialize;
+  if (domesticWgMaterialize) {
+    return JSON.stringify({
+      status: domesticWgMaterialize.status,
+      execution: domesticWgMaterialize.execution,
+      boundary: domesticWgMaterialize.boundary,
+      publicEndpoint: domesticWgMaterialize.publicEndpoint,
+      rotate: domesticWgMaterialize.rotate,
+      generated: domesticWgMaterialize.generated,
+      endpointChanged: domesticWgMaterialize.endpointChanged,
+      previousMaterialDigest: domesticWgMaterialize.previousMaterialDigest,
+      materialDigest: domesticWgMaterialize.materialDigest,
+      clientRefresh: domesticWgMaterialize.clientRefresh,
+      fingerprints: domesticWgMaterialize.fingerprints,
+      relay: domesticWgMaterialize.relay,
+      artifact: domesticWgMaterialize.artifact,
+      blockedReasons: domesticWgMaterialize.blockedReasons || [],
+      nextActions: domesticWgMaterialize.nextActions || []
     }, null, 2);
   }
   const relayPeerAppendSsh = payload?.relayPeerAppendSsh;

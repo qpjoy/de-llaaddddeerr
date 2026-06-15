@@ -12,6 +12,7 @@ import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
 import { checkAwxProvider } from '../config-center/awx-provider-check.js';
 import { buildAwxProviderSyncPlan } from '../config-center/awx-provider-sync-plan.js';
+import { generateWireGuardKeyPair } from '../config-center/wireguard-keys.js';
 import { buildSiteSlotRemoteSshGate, buildSiteSlotRemoteSshReadOnlyProbe, buildSiteSlotRemoteSshWorkerHandoff } from '../site-slots/remote-ssh-gate.js';
 import { runAwxApiLaunch } from './awx-api-launch.js';
 import { runAwxCredentialSync } from './awx-credential-sync.js';
@@ -37,6 +38,8 @@ import type {
   RuntimeFeaturePolicy,
   SiteHeartbeat,
   SiteSlotAccessAccount,
+  SiteSlotDomesticWireGuardSecret,
+  SiteSlotDomesticWireGuardSecretInput,
   SiteSlotExecutionRun,
   SiteSlotExecutionMode,
   SiteSlotPlan,
@@ -821,6 +824,89 @@ export class AdminController {
     };
   }
 
+  private async materializeDomesticWireGuard(
+    siteId: string,
+    plan: SiteSlotPlan | null,
+    previous: SiteSlotDomesticWireGuardSecret | null,
+    body: Record<string, unknown>
+  ) {
+    const requestedBy = stringValue(body.requestedBy) ?? 'admin-ui';
+    const requestId = stringValue(body.requestId);
+    const input = buildAdminDomesticWireGuardSecretInput(siteId, plan, previous, body, requestedBy, requestId);
+    if (input.blockedReasons.length) {
+      return {
+        secret: previous,
+        result: adminDomesticWireGuardMaterializeResult(siteId, previous, input, null, input.blockedReasons)
+      };
+    }
+    const secret = await this.store.upsertSiteSlotDomesticWireGuardSecret(input.secretInput);
+    if (secret.readiness.missingSecretInputs.length) {
+      const blockedReasons = secret.readiness.missingSecretInputs.map((key) => `missing secret input: ${key}`);
+      return {
+        secret,
+        result: adminDomesticWireGuardMaterializeResult(siteId, secret, input, null, blockedReasons)
+      };
+    }
+
+    const mxRoot = resolveMxLauncherRoot();
+    const scriptPath = resolve(mxRoot, 'server/scripts/site-slot-artifact-materializer.mjs');
+    let execution: { exitCode: number; stdout: string; stderr: string } | null = null;
+    const blockedReasons: string[] = [];
+    try {
+      const { stdout, stderr } = await execFileAsync(process.execPath, [scriptPath, 'domestic'], {
+        cwd: mxRoot,
+        env: {
+          ...process.env,
+          SITE_SLOT_ARTIFACT_OUTPUT_DIR: resolveSiteSlotArtifactBaseDir(),
+          ...domesticWireGuardMaterializerEnv(secret)
+        },
+        timeout: 60 * 1000,
+        maxBuffer: 4 * 1024 * 1024
+      });
+      execution = { exitCode: 0, stdout, stderr };
+    } catch (error) {
+      const execError = error as Error & { code?: number | string; stdout?: string; stderr?: string };
+      execution = {
+        exitCode: typeof execError.code === 'number' ? execError.code : 1,
+        stdout: execError.stdout ?? '',
+        stderr: execError.stderr ?? execError.message
+      };
+      blockedReasons.push(`artifact materializer failed: ${execution.stderr || execution.exitCode}`);
+    }
+
+    const manifestFailures: string[] = [];
+    const manifest = readArtifactManifest('domestic', resolveSiteSlotArtifactBaseDir(), manifestFailures);
+    const module = manifest?.modules.find((item) => item.moduleId === 'wireguard-config') ?? null;
+    if (manifestFailures.length) blockedReasons.push(...manifestFailures);
+    if (module?.status !== 'ready') {
+      blockedReasons.push(`wireguard-config artifact is ${module?.status ?? 'missing'}, expected ready`);
+    }
+    await this.store.recordAudit({
+      eventType: 'site_slot.domestic_wg.materialized',
+      actorKind: 'admin-action',
+      requestId,
+      metadata: {
+        siteId,
+        planId: plan?.planId ?? null,
+        secretId: secret.secretId,
+        rotate: input.rotate,
+        generated: input.generated,
+        endpointChanged: input.endpointChanged,
+        materialDigest: secret.fingerprints.materialDigest,
+        artifactStatus: module?.status ?? null,
+        blockedReasons
+      }
+    });
+    return {
+      secret,
+      result: adminDomesticWireGuardMaterializeResult(siteId, secret, input, {
+        execution,
+        manifest,
+        module
+      }, blockedReasons)
+    };
+  }
+
   private async buildActionPolicy(authorization?: string, rawToken?: string, rawUserId?: string): Promise<AdminActionPolicy> {
     const token = bearerToken(authorization) ?? stringValue(rawToken);
     const userId = stringValue(rawUserId);
@@ -898,6 +984,18 @@ export class AdminController {
           requestedBy: stringValue(body.requestedBy),
           requestId: stringValue(body.requestId)
         })
+      };
+    }
+    if (actionId === 'site-slot.domestic-wg.materialize') {
+      const match = matchPath(path, /^\/internal\/v1\/config-center\/domestic-wg-secrets\/([^/]+)\/materialize-ready$/);
+      if (!match) throw new BadRequestException('Admin Domestic WG materialize path is invalid');
+      const siteId = match[1];
+      const plan = stringValue(body.planId) ? await this.store.getSiteSlotPlan(stringValue(body.planId) ?? '') : null;
+      const previous = await this.store.getSiteSlotDomesticWireGuardSecret(siteId);
+      const materialize = await this.materializeDomesticWireGuard(siteId, plan, previous, body);
+      return {
+        domesticWgMaterialize: materialize.result,
+        secret: materialize.secret ? redactAdminDomesticWireGuardSecret(materialize.secret) : null
       };
     }
     if (actionId === 'site-slot.domestic-relay-peer-append-ssh.prepare') {
@@ -1732,7 +1830,7 @@ function domesticRelayPeerPlanStepReports(
 } {
   const steps = [...job.steps].sort((left, right) => left.order - right.order);
   const carrierStep = steps.find((step) => phaseIdFromSource(step.sourceId) === 'prepare-domestic-relay-authority')
-    ?? steps.find((step) => phaseIdFromSource(step.sourceId) === 'install-host-wireguard')
+    ?? steps.find((step) => phaseIdFromSource(step.sourceId) === 'activate-domestic-peer-center')
     ?? steps[0];
   const evidence = domesticRelayPeerPlanEvidence(job, carrierStep, plan, body);
   const stepReports = steps.map((step) => {
@@ -1972,11 +2070,14 @@ function artifactPushDryRunEvidence(
   job: SiteSlotWorkerJob,
   step: SiteSlotWorkerJob['steps'][number],
   plan: SiteSlotPlan | null,
-  sshProfile: SiteSlotSshProfile | null
+  sshProfile: SiteSlotSshProfile | null,
+  options: { failOnTemplateArtifact?: boolean } = {}
 ) {
   const failures: string[] = [];
   const artifactBaseDir = resolveSiteSlotArtifactBaseDir();
-  const artifactReferences = artifactReferenceValues(step.command).map((ref) => artifactReferenceEvidence(ref, artifactBaseDir, failures));
+  const artifactReferences = artifactReferenceValues(step.command).map((ref) => artifactReferenceEvidence(ref, artifactBaseDir, failures, {
+    failOnTemplateArtifact: options.failOnTemplateArtifact === true
+  }));
   return {
     dryRun: true,
     mode: 'artifact-push-dry-run',
@@ -2018,7 +2119,7 @@ function artifactPushFakeTransportEvidence(
   plan: SiteSlotPlan | null,
   sshProfile: SiteSlotSshProfile | null
 ) {
-  const evidence = artifactPushDryRunEvidence(job, step, plan, sshProfile);
+  const evidence = artifactPushDryRunEvidence(job, step, plan, sshProfile, { failOnTemplateArtifact: true });
   const commandKind = adminCommandKind(step.command);
   const executableRemoteCommand = executableAdminRemoteCommandKind(commandKind);
   return {
@@ -2053,7 +2154,7 @@ function artifactPushRemoteSshPlanEvidence(
   plan: SiteSlotPlan | null,
   sshProfile: SiteSlotSshProfile | null
 ) {
-  const evidence = artifactPushDryRunEvidence(job, step, plan, sshProfile);
+  const evidence = artifactPushDryRunEvidence(job, step, plan, sshProfile, { failOnTemplateArtifact: true });
   const commandKind = adminCommandKind(step.command);
   const executableRemoteCommand = executableAdminRemoteCommandKind(commandKind);
   return {
@@ -2094,7 +2195,7 @@ function awxShadowEvidence(
   sshProfile: SiteSlotSshProfile | null,
   provider: AwxProviderConfig | null
 ) {
-  const evidence = artifactPushDryRunEvidence(job, step, plan, sshProfile);
+  const evidence = artifactPushDryRunEvidence(job, step, plan, sshProfile, { failOnTemplateArtifact: true });
   const commandKind = adminCommandKind(step.command);
   const template = `${provider?.jobTemplatePrefix ?? 'mx-site-slot'}-${job.kind}-worker-v1`;
   const inventory = `${provider?.inventoryPrefix ?? 'mx'}-${job.environment}-${job.kind}`;
@@ -2610,12 +2711,185 @@ function domesticRelayPeerAppendSshPrepareFailures(
 }
 
 function domesticRemoteSshReadinessFailures(plan: SiteSlotPlan): string[] {
+  const profileWarnings = Array.isArray(plan.ssh?.profileWarnings) ? plan.ssh.profileWarnings : [];
   return [
-    ...(plan.ssh.profileId ? [] : ['link an Internal-managed SSH Profile before queueing Domestic Remote SSH']),
+    ...(plan.ssh?.profileId ? [] : ['link an Internal-managed SSH Profile before queueing Domestic Remote SSH']),
     ...(plan.host ? [] : ['set the Domestic host before queueing Domestic Remote SSH']),
-    ...(plan.ssh.profileStatus === 'paused' ? ['managed SSH Profile is paused'] : []),
-    ...plan.ssh.profileWarnings.map((warning) => `SSH Profile warning: ${warning}`)
+    ...(plan.ssh?.profileStatus === 'paused' ? ['managed SSH Profile is paused'] : []),
+    ...(domesticWireGuardArtifactReady() ? [] : ['materialize Internal WG secret/artifacts before queueing Domestic Remote SSH']),
+    ...profileWarnings.map((warning) => `SSH Profile warning: ${warning}`)
   ];
+}
+
+function buildAdminDomesticWireGuardSecretInput(
+  siteId: string,
+  plan: SiteSlotPlan | null,
+  previous: SiteSlotDomesticWireGuardSecret | null,
+  body: Record<string, unknown>,
+  requestedBy: string,
+  requestId: string | null
+) {
+  const rotateAll = booleanValue(body.rotateKey) || booleanValue(body.rotateAll);
+  const rotateRelayKey = rotateAll || booleanValue(body.rotateRelayKey);
+  const rotateInternalServiceKey = rotateAll || booleanValue(body.rotateInternalServiceKey);
+  const confirmRotate = booleanValue(body.confirmRotate);
+  const listenPort = numberValueOrNull(body.listenPort) ?? previous?.listenPort ?? 51820;
+  const publicEndpoint = stringValue(body.publicEndpoint)
+    ?? stringValue(body.endpoint)
+    ?? previous?.publicEndpoint
+    ?? endpointFromPlanHost(plan, listenPort);
+  const relayMissing = !previous?.domesticRelayPrivateKey || !previous.domesticRelayPublicKey;
+  const internalMissing = !previous?.internalServicePrivateKey || !previous.internalServicePublicKey;
+  const relayPair = relayMissing || rotateRelayKey ? generateWireGuardKeyPair() : null;
+  const internalPair = internalMissing || rotateInternalServiceKey ? generateWireGuardKeyPair() : null;
+  const secretInput: SiteSlotDomesticWireGuardSecretInput = {
+    siteId,
+    status: stringValue(body.status) ?? previous?.status ?? 'active',
+    publicEndpoint,
+    listenPort,
+    domesticGatewayIp: stringValue(body.domesticGatewayIp) ?? previous?.domesticGatewayIp ?? '10.88.0.1',
+    domesticGatewayCidr: stringValue(body.domesticGatewayCidr) ?? previous?.domesticGatewayCidr ?? '10.88.0.0/16',
+    userRelayCidr: stringValue(body.userRelayCidr) ?? previous?.userRelayCidr ?? '10.89.0.0/16',
+    internalServiceIp: stringValue(body.internalServiceIp) ?? previous?.internalServiceIp ?? '10.90.0.10',
+    internalServiceCidr: stringValue(body.internalServiceCidr) ?? previous?.internalServiceCidr ?? '10.90.0.0/16',
+    guestRelayCidr: stringValue(body.guestRelayCidr) ?? previous?.guestRelayCidr ?? '10.91.0.0/16',
+    domesticRelayPrivateKey: relayPair?.privateKey ?? previous?.domesticRelayPrivateKey ?? null,
+    domesticRelayPublicKey: relayPair?.publicKey ?? previous?.domesticRelayPublicKey ?? null,
+    internalServicePrivateKey: internalPair?.privateKey ?? previous?.internalServicePrivateKey ?? null,
+    internalServicePublicKey: internalPair?.publicKey ?? previous?.internalServicePublicKey ?? null,
+    requestedBy,
+    requestId
+  };
+  return {
+    secretInput,
+    generated: {
+      domesticRelayKeyPair: Boolean(relayPair),
+      internalServiceKeyPair: Boolean(internalPair)
+    },
+    rotate: {
+      domesticRelayKeyPair: rotateRelayKey,
+      internalServiceKeyPair: rotateInternalServiceKey
+    },
+    endpointChanged: Boolean(previous && publicEndpoint && previous.publicEndpoint !== publicEndpoint),
+    previousMaterialDigest: previous?.fingerprints.materialDigest ?? null,
+    blockedReasons: [
+      ...(rotateRelayKey || rotateInternalServiceKey ? confirmRotate ? [] : ['confirmRotate=true is required before rotating Domestic WG keys'] : []),
+      ...(publicEndpoint ? [] : ['publicEndpoint is required before materializing Domestic WG'])
+    ]
+  };
+}
+
+function endpointFromPlanHost(plan: SiteSlotPlan | null, listenPort: number): string | null {
+  const host = plan?.host?.trim();
+  if (!host) return null;
+  return /:\d+$/.test(host) ? host : `${host}:${listenPort}`;
+}
+
+function domesticWireGuardMaterializerEnv(secret: SiteSlotDomesticWireGuardSecret): Record<string, string> {
+  return {
+    MX_DOMESTIC_RELAY_PRIVATE_KEY: secret.domesticRelayPrivateKey ?? '',
+    MX_DOMESTIC_RELAY_PUBLIC_KEY: secret.domesticRelayPublicKey ?? '',
+    MX_INTERNAL_SERVICE_PRIVATE_KEY: secret.internalServicePrivateKey ?? '',
+    MX_INTERNAL_SERVICE_PUBLIC_KEY: secret.internalServicePublicKey ?? '',
+    MX_DOMESTIC_PUBLIC_ENDPOINT: secret.publicEndpoint ?? '',
+    MX_WG_LISTEN_PORT: String(secret.listenPort),
+    MX_DOMESTIC_GATEWAY_IP: secret.domesticGatewayIp,
+    MX_DOMESTIC_GATEWAY_CIDR: secret.domesticGatewayCidr,
+    MX_USER_RELAY_CIDR: secret.userRelayCidr,
+    MX_INTERNAL_SERVICE_IP: secret.internalServiceIp,
+    MX_INTERNAL_SERVICE_CIDR: secret.internalServiceCidr,
+    MX_GUEST_RELAY_CIDR: secret.guestRelayCidr
+  };
+}
+
+function adminDomesticWireGuardMaterializeResult(
+  siteId: string,
+  secret: SiteSlotDomesticWireGuardSecret | null,
+  input: ReturnType<typeof buildAdminDomesticWireGuardSecretInput>,
+  artifacts: {
+    execution: { exitCode: number; stdout: string; stderr: string } | null;
+    manifest: ReturnType<typeof readArtifactManifest> | null;
+    module: NonNullable<ReturnType<typeof readArtifactManifest>>['modules'][number] | null;
+  } | null,
+  blockedReasons: string[]
+) {
+  const status = blockedReasons.length ? 'blocked' : 'passed';
+  return {
+    materializeId: `domestic_wg_materialize_${siteId}`,
+    status,
+    execution: artifacts?.execution ? artifacts.execution.exitCode === 0 ? 'completed' : 'failed' : blockedReasons.length ? 'blocked' : 'not-started',
+    boundary: 'internal-domestic-wg-secret-materialize',
+    siteId,
+    secretId: secret?.secretId ?? null,
+    publicEndpoint: secret?.publicEndpoint ?? input.secretInput.publicEndpoint ?? null,
+    rotate: input.rotate,
+    generated: input.generated,
+    endpointChanged: input.endpointChanged,
+    previousMaterialDigest: input.previousMaterialDigest,
+    materialDigest: secret?.fingerprints.materialDigest ?? null,
+    clientRefresh: {
+      mode: 'snapshot-digest',
+      changed: Boolean(secret && input.previousMaterialDigest !== secret.fingerprints.materialDigest),
+      previousMaterialDigest: input.previousMaterialDigest,
+      materialDigest: secret?.fingerprints.materialDigest ?? null
+    },
+    fingerprints: secret?.fingerprints ?? null,
+    relay: secret ? {
+      domesticGatewayIp: secret.domesticGatewayIp,
+      domesticGatewayCidr: secret.domesticGatewayCidr,
+      userRelayCidr: secret.userRelayCidr,
+      internalServiceIp: secret.internalServiceIp,
+      internalServiceCidr: secret.internalServiceCidr,
+      guestRelayCidr: secret.guestRelayCidr
+    } : null,
+    artifact: artifacts?.module ? {
+      moduleId: artifacts.module.moduleId,
+      status: artifacts.module.status,
+      targetPath: artifacts.module.targetPath,
+      sha256: artifacts.module.sha256,
+      manifestPath: artifacts.manifest?.path ?? null,
+      releaseRevision: artifacts.manifest?.releaseRevision ?? null,
+      metadata: artifacts.module.metadata
+    } : null,
+    stdout: artifacts?.execution?.stdout?.slice(-4000) ?? null,
+    stderr: artifacts?.execution?.stderr?.slice(-4000) ?? null,
+    blockedReasons,
+    nextActions: status === 'passed'
+      ? ['rerun-remote-ssh-gate', 'publish-config-snapshot-for-client-refresh']
+      : ['fix-domestic-wg-materialize-inputs']
+  };
+}
+
+function redactAdminDomesticWireGuardSecret(secret: SiteSlotDomesticWireGuardSecret) {
+  return {
+    secretId: secret.secretId,
+    siteId: secret.siteId,
+    status: secret.status,
+    publicEndpoint: secret.publicEndpoint,
+    listenPort: secret.listenPort,
+    domesticGatewayIp: secret.domesticGatewayIp,
+    domesticGatewayCidr: secret.domesticGatewayCidr,
+    userRelayCidr: secret.userRelayCidr,
+    internalServiceIp: secret.internalServiceIp,
+    internalServiceCidr: secret.internalServiceCidr,
+    guestRelayCidr: secret.guestRelayCidr,
+    material: {
+      domesticRelayPrivateKey: secret.domesticRelayPrivateKey ? 'configured' : 'missing',
+      domesticRelayPublicKey: secret.domesticRelayPublicKey ? 'configured' : 'missing',
+      internalServicePrivateKey: secret.internalServicePrivateKey ? 'configured' : 'missing',
+      internalServicePublicKey: secret.internalServicePublicKey ? 'configured' : 'missing'
+    },
+    fingerprints: secret.fingerprints,
+    readiness: secret.readiness,
+    updatedAt: secret.updatedAt
+  };
+}
+
+function domesticWireGuardArtifactReady(): boolean {
+  const failures: string[] = [];
+  const manifest = readArtifactManifest('domestic', resolveSiteSlotArtifactBaseDir(), failures);
+  const module = manifest?.modules.find((item) => item.moduleId === 'wireguard-config') ?? null;
+  return failures.length === 0 && module?.status === 'ready';
 }
 
 function domesticRelayPeerAppendSshFailures(
@@ -2649,7 +2923,7 @@ async function domesticRelayPeerAppendSshStepReports(
   const blockedReasons = domesticRelayPeerAppendSshFailures(gate, body, relayPeerAppend, sshProfile);
   const steps = [...job.steps].sort((left, right) => left.order - right.order);
   const carrierStep = steps.find((step) => phaseIdFromSource(step.sourceId) === 'prepare-domestic-relay-authority')
-    ?? steps.find((step) => phaseIdFromSource(step.sourceId) === 'install-host-wireguard')
+    ?? steps.find((step) => phaseIdFromSource(step.sourceId) === 'activate-domestic-peer-center')
     ?? steps[0];
   const startedAt = new Date().toISOString();
   let status: NonNullable<SiteSlotWorkerReportInput['status']> = blockedReasons.length > 0 ? 'blocked' : 'passed';
@@ -3027,7 +3301,12 @@ function adminFakeTransportResult(
   };
 }
 
-function artifactReferenceEvidence(ref: string, artifactBaseDir: string, failures: string[]) {
+function artifactReferenceEvidence(
+  ref: string,
+  artifactBaseDir: string,
+  failures: string[],
+  options: { failOnTemplateArtifact?: boolean } = {}
+) {
   const resolvedPath = resolveArtifactReference(ref, artifactBaseDir);
   const exists = existsSync(resolvedPath);
   const kind = artifactKind(ref);
@@ -3042,7 +3321,7 @@ function artifactReferenceEvidence(ref: string, artifactBaseDir: string, failure
   if (exists && moduleMatch?.primary && module?.sha256 && sha256 !== module.sha256) {
     failures.push(`artifact sha256 mismatch for ${ref}: expected ${module.sha256}, got ${sha256}`);
   }
-  if (exists && module?.status === 'template' && !manifestSelfReference) {
+  if (options.failOnTemplateArtifact === true && exists && module?.status === 'template' && !manifestSelfReference) {
     failures.push(`artifact module is template-only and cannot be remotely applied before Internal injection: ${module.moduleId}`);
   }
   return {
@@ -3418,6 +3697,14 @@ function buildPipelineActionHints(
     const hasReport = workerReports.some((report) => report.jobId === job.jobId);
     return job.status === 'ready' && !hasReport;
   }) ?? null;
+  const readyWorkerJobNeedsChangeWindow = readyWorkerJob?.mode === 'remote-ssh'
+    && readyWorkerJob.changeWindow.required
+    && (!readyWorkerJob.changeWindow.start || !readyWorkerJob.changeWindow.end);
+  const repairWorkerJobSession = readyWorkerJobNeedsChangeWindow
+    ? runnerSessions.find((session) => session.sessionId === readyWorkerJob.sessionId) ?? null
+    : null;
+  const domesticBaseInstalled = plan.kind === 'domestic' && workerReports.some((report) => report.status === 'passed' && workerReportHasRemoteExecution(report));
+  const domesticRelayPeerJob = readyWorkerJob ? isDomesticRelayPeerWorkerJob(readyWorkerJob) : false;
 
   if (!readyPreflight) {
     actions.push(contextualAction(
@@ -3451,6 +3738,35 @@ function buildPipelineActionHints(
       },
       true,
       'preflight evidence must be ready before apply'
+    ));
+  }
+
+  if (plan.kind === 'domestic' && confirmedApply) {
+    actions.push(contextualAction(
+      actionPolicy,
+      'site-slot.domestic-wg.materialize',
+      {
+        path: `/internal/v1/config-center/domestic-wg-secrets/${encodeURIComponent(plan.siteId)}/materialize-ready`,
+        bodyTemplate: {
+          siteId: plan.siteId,
+          planId: plan.planId,
+          publicEndpoint: endpointFromPlanHost(plan, 51820),
+          listenPort: 51820,
+          domesticGatewayIp: '10.88.0.1',
+          domesticGatewayCidr: '10.88.0.0/16',
+          userRelayCidr: '10.89.0.0/16',
+          internalServiceIp: '10.90.0.10',
+          internalServiceCidr: '10.90.0.0/16',
+          guestRelayCidr: '10.91.0.0/16',
+          rotateRelayKey: false,
+          rotateInternalServiceKey: false,
+          confirmRotate: false,
+          requestedBy: actionPolicy.principal.principalId,
+          requestId: 'admin-ui-domestic-wg-materialize'
+        }
+      },
+      Boolean(plan.host),
+      'set Domestic host before materializing or rotating Internal WG relay artifacts'
     ));
   }
 
@@ -3496,7 +3812,7 @@ function buildPipelineActionHints(
     }
   }
 
-  if (plan.kind === 'domestic' && confirmedApply) {
+  if (plan.kind === 'domestic' && confirmedApply && domesticBaseInstalled && !readyWorkerJob) {
     const remoteRunnerReadinessFailures = domesticRemoteSshReadinessFailures(plan);
     actions.push(contextualAction(
       actionPolicy,
@@ -3524,34 +3840,42 @@ function buildPipelineActionHints(
     ));
   }
 
-  if (sessionNeedingWorker) {
-    actions.push(contextualAction(
-      actionPolicy,
-      'site-slot.worker-job.create',
-      {
-        path: `/internal/v1/site-slots/runner-sessions/${encodeURIComponent(sessionNeedingWorker.sessionId)}/worker-jobs`,
-        bodyTemplate: {
-          workerId: 'worker-admin-1',
-          workerKind: sessionNeedingWorker.mode === 'awx-shadow'
-            ? 'awx-runner'
-            : sessionNeedingWorker.kind === 'oversea'
-              ? 'oversea-site-agent'
-              : sessionNeedingWorker.kind === 'domestic'
-                ? 'domestic-runner'
-                : 'internal-runner',
-          approvalId: 'approval-id',
-          retryLimit: 2,
-          rollbackStrategy: 'restore-previous-state',
-          requestedBy: actionPolicy.principal.principalId,
-          requestId: 'admin-ui-worker-job'
-        }
-      },
-      true,
-      'runner session must be ready for worker attachment'
-    ));
+  if (sessionNeedingWorker || repairWorkerJobSession) {
+    const targetSession = sessionNeedingWorker ?? repairWorkerJobSession;
+    const repairWorkerJob = sessionNeedingWorker ? null : readyWorkerJob;
+    if (targetSession) {
+      actions.push(contextualAction(
+        actionPolicy,
+        'site-slot.worker-job.create',
+        {
+          path: `/internal/v1/site-slots/runner-sessions/${encodeURIComponent(targetSession.sessionId)}/worker-jobs`,
+          bodyTemplate: {
+            workerId: repairWorkerJob?.worker.workerId ?? 'worker-admin-1',
+            workerKind: targetSession.mode === 'awx-shadow'
+              ? 'awx-runner'
+              : targetSession.kind === 'oversea'
+                ? 'oversea-site-agent'
+                : targetSession.kind === 'domestic'
+                  ? 'domestic-runner'
+                  : 'internal-runner',
+            approvalId: repairWorkerJob?.approval.approvalId ?? 'approval-id',
+            changeWindowStart: '<change-window-start-iso>',
+            changeWindowEnd: '<change-window-end-iso>',
+            retryLimit: 2,
+            rollbackStrategy: 'restore-previous-state',
+            requestedBy: actionPolicy.principal.principalId,
+            requestId: repairWorkerJob ? 'admin-ui-worker-job-recreate-change-window' : 'admin-ui-worker-job'
+          }
+        },
+        true,
+        repairWorkerJob
+          ? 'existing remote SSH worker job is missing a change window; recreate it before gate review'
+          : 'runner session must be ready for worker attachment'
+      ));
+    }
   }
 
-  if (readyWorkerJob) {
+  if (readyWorkerJob && !readyWorkerJobNeedsChangeWindow) {
     actions.push(contextualAction(
       actionPolicy,
       'site-slot.worker-run.remote-ssh-gate',
@@ -3629,7 +3953,7 @@ function buildPipelineActionHints(
       true,
       'worker job must be ready before artifact-push dry-run'
     ));
-    if (readyWorkerJob.kind === 'domestic') {
+    if (readyWorkerJob.kind === 'domestic' && domesticRelayPeerJob) {
       actions.push(contextualAction(
         actionPolicy,
         'site-slot.worker-run.domestic-relay-readonly-probe',
@@ -3761,6 +4085,13 @@ function buildPipelineActionHints(
   return actions.slice(0, 20);
 }
 
+function isDomesticRelayPeerWorkerJob(job: SiteSlotWorkerJob): boolean {
+  return job.kind === 'domestic' && (
+    job.rollbackPolicy.strategy === 'restore-domestic-wg-peer-before-append'
+    || job.worker.workerId.includes('domestic-relay')
+  );
+}
+
 function pipelineHealth(
   plan: SiteSlotPlan,
   executions: SiteSlotExecutionRun[],
@@ -3822,7 +4153,7 @@ function adminDashboardNextActions(summaries: AdminSiteSlotPipelineSummary[]): s
 }
 
 function buildAdminActions(principal: PlatformPrincipal): AdminActionDescriptor[] {
-  return adminActionTemplates().map((template) => {
+  return adminActionTemplates().filter((template) => adminAwxFlowEnabled() || !isAwxAdminAction(template.actionId)).map((template) => {
     const missingScopes = template.requiredScopes.filter((scope) => !principal.scopes.includes(scope));
     return {
       ...template,
@@ -3832,6 +4163,17 @@ function buildAdminActions(principal: PlatformPrincipal): AdminActionDescriptor[
         : `missing scopes: ${missingScopes.join(', ')}`
     };
   });
+}
+
+function adminAwxFlowEnabled(): boolean {
+  const value = String(process.env.MX_ENABLE_AWX_FLOW ?? '').toLowerCase();
+  return value === '1' || value === 'true' || value === 'yes';
+}
+
+function isAwxAdminAction(actionId: string): boolean {
+  return actionId === 'site-slot.runner.awx-shadow'
+    || actionId === 'site-slot.domestic-relay-peer-append-awx.prepare'
+    || actionId.startsWith('site-slot.worker-run.awx-');
 }
 
 function contextualAction(
@@ -4370,6 +4712,33 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
       }
     },
     {
+      actionId: 'site-slot.domestic-wg.materialize',
+      label: 'Materialize Domestic WG',
+      category: 'site-slot',
+      method: 'POST',
+      path: '/internal/v1/config-center/domestic-wg-secrets/:siteId/materialize-ready',
+      requiredScopes: ['site-slot.manage'],
+      gate: 'internal-secret-materialize',
+      risk: 'medium',
+      confirmFields: [],
+      bodyTemplate: {
+        siteId: 'domestic-main',
+        planId: '<plan-id>',
+        publicEndpoint: '<domestic-public-endpoint>',
+        listenPort: 51820,
+        domesticGatewayIp: '10.88.0.1',
+        domesticGatewayCidr: '10.88.0.0/16',
+        userRelayCidr: '10.89.0.0/16',
+        internalServiceIp: '10.90.0.10',
+        internalServiceCidr: '10.90.0.0/16',
+        guestRelayCidr: '10.91.0.0/16',
+        rotateRelayKey: false,
+        rotateInternalServiceKey: false,
+        confirmRotate: false,
+        requestedBy: 'admin-ui'
+      }
+    },
+    {
       actionId: 'site-slot.runner.simulate',
       label: 'Start Simulated Runner',
       category: 'site-slot',
@@ -4469,11 +4838,13 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
       requiredScopes: ['site-slot.execute'],
       gate: 'change-window',
       risk: 'medium',
-      confirmFields: ['approvalId'],
+      confirmFields: ['approvalId', 'changeWindowStart', 'changeWindowEnd'],
       bodyTemplate: {
         workerId: 'worker-admin-1',
         workerKind: 'internal-runner',
         approvalId: 'approval-id',
+        changeWindowStart: '<change-window-start-iso>',
+        changeWindowEnd: '<change-window-end-iso>',
         retryLimit: 2,
         rollbackStrategy: 'restore-previous-state',
         requestedBy: 'admin-ui'

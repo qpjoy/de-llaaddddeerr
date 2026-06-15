@@ -42,8 +42,9 @@ Usage:
   bash scripts/manage.sh ops site-slot oversea-plan <oversea-host|->
   bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all]
   bash scripts/manage.sh ops site-slot domestic-wg-secret-upsert <site-id> <endpoint>
+  bash scripts/manage.sh ops site-slot domestic-wg-materialize <site-id> <endpoint> [rotate]
   bash scripts/manage.sh ops site-slot materialize-domestic-ready <site-id>
-  bash scripts/manage.sh ops site-slot refresh-tunnel-cli [version|--from-local DIR]
+  bash scripts/manage.sh ops site-slot refresh-tunnel-cli [version|--from-local DIR|--from-tarball FILE]
   bash scripts/manage.sh ops site-slot ssh-profiles
   bash scripts/manage.sh ops site-slot ssh-profile-upsert <site-id> <domestic|oversea> [host]
   bash scripts/manage.sh ops site-slot ssh-profile-readiness <profile-id> [plan-only|execute]
@@ -963,15 +964,12 @@ ops_local_platform_plan() {
 MX Launcher local-platform plan
 
 This is the explicit one-command path for a full local platform stack.
-It keeps the lightweight Internal cycle separate from the heavier AWX install.
+It keeps the default platform cycle independent from optional AWX tooling.
 
 Order:
-  1. Install or reconcile AWX shadow in namespace mx-awx.
-  2. Build and apply Internal K8s shadow in namespace mx-internal-shadow.
-  3. Run Internal HTTP smoke and DB summary.
-  4. Temporarily port-forward Internal API.
-  5. Upsert Config Center awx-provider awxprov_oversea:
-     http://mx-awx-service.mx-awx.svc.cluster.local
+  1. Build and apply Internal K8s shadow in namespace mx-internal-shadow.
+  2. Run Internal HTTP smoke and DB summary.
+  3. Temporarily port-forward Internal API when needed.
 
 Commands:
   bash scripts/manage.sh ops local-platform dry-run
@@ -980,56 +978,9 @@ Commands:
   bash scripts/manage.sh ops local-platform down
 
 Notes:
-  - ops k8s-shadow cycle remains Internal-only and does not install AWX.
-  - Set MX_LOCAL_PLATFORM_CHECK_AWX=1 and SITE_SLOT_AWX_TOKEN or AWX_TOKEN to
-    run the readonly awx-provider check after provider upsert.
+  - AWX remains available only as an explicit optional path:
+    bash scripts/manage.sh ops awx-shadow install
 EOF
-}
-
-local_platform_upsert_awx_provider() {
-  local requested_port="${1:-18090}"
-  local ns port pf_pid previous_base had_previous_base
-  ns="$(k8s_namespace internal-shadow)"
-  port="$(k8s_smoke_port "$requested_port")"
-  need_kubectl
-  say "port-forward Internal API on 127.0.0.1:${port} for provider upsert"
-  kubectl -n "$ns" port-forward svc/mx-launcher-internal "$port:18090" >/tmp/mx-launcher-local-platform-port-forward.log 2>&1 &
-  pf_pid="$!"
-  sleep 2
-
-  had_previous_base=0
-  previous_base=""
-  if [ "${MX_INTERNAL_BASE_URL+x}" = "x" ]; then
-    had_previous_base=1
-    previous_base="$MX_INTERNAL_BASE_URL"
-  fi
-  export MX_INTERNAL_BASE_URL="http://127.0.0.1:${port}"
-  if ! ops_awx_provider upsert awxprov_oversea; then
-    kill "$pf_pid" 2>/dev/null || true
-    wait "$pf_pid" 2>/dev/null || true
-    [ "$had_previous_base" -eq 1 ] && export MX_INTERNAL_BASE_URL="$previous_base" || unset MX_INTERNAL_BASE_URL
-    die "local-platform failed while upserting awx-provider; see /tmp/mx-launcher-local-platform-port-forward.log"
-  fi
-
-  if [ "${MX_LOCAL_PLATFORM_CHECK_AWX:-0}" = "1" ]; then
-    if [ -n "${SITE_SLOT_AWX_TOKEN:-${AWX_TOKEN:-}}" ]; then
-      say "run readonly AWX provider check"
-      if ! ops_awx_provider check awxprov_oversea; then
-        kill "$pf_pid" 2>/dev/null || true
-        wait "$pf_pid" 2>/dev/null || true
-        [ "$had_previous_base" -eq 1 ] && export MX_INTERNAL_BASE_URL="$previous_base" || unset MX_INTERNAL_BASE_URL
-        die "local-platform AWX provider check failed"
-      fi
-    else
-      say "skip AWX provider check: SITE_SLOT_AWX_TOKEN or AWX_TOKEN is required"
-    fi
-  else
-    say "skip AWX provider check; set MX_LOCAL_PLATFORM_CHECK_AWX=1 when AWX org/project/inventory/template are ready"
-  fi
-
-  kill "$pf_pid" 2>/dev/null || true
-  wait "$pf_pid" 2>/dev/null || true
-  [ "$had_previous_base" -eq 1 ] && export MX_INTERNAL_BASE_URL="$previous_base" || unset MX_INTERNAL_BASE_URL
 }
 
 ops_local_platform() {
@@ -1042,26 +993,18 @@ ops_local_platform() {
       ;;
     dry-run)
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops local-platform dry-run"
-      say "dry-run AWX shadow"
-      awx_shadow_dry_run
       say "dry-run Internal K8s shadow"
       k8s_dry_run internal-shadow
       ;;
     cycle)
       [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops local-platform cycle [local-port]"
       ops_local_platform_plan
-      say "install/reconcile AWX shadow"
-      awx_shadow_install
       say "cycle Internal K8s shadow"
       ops_k8s_shadow cycle "${1:-18090}"
-      say "upsert Internal AWX provider"
-      local_platform_upsert_awx_provider "${1:-18090}"
       say "local-platform cycle OK. Use 'bash scripts/manage.sh ops local-platform status' to inspect it."
       ;;
     status)
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops local-platform status"
-      say "AWX shadow status"
-      awx_shadow_status
       say "Internal K8s shadow status"
       k8s_status internal-shadow
       ;;
@@ -1069,8 +1012,6 @@ ops_local_platform() {
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops local-platform down"
       say "stop Internal K8s shadow"
       k8s_down internal-shadow
-      say "stop AWX shadow"
-      awx_shadow_down
       ;;
     *)
       die "Usage: bash scripts/manage.sh ops local-platform plan|dry-run|cycle [local-port]|status|down"
@@ -1175,6 +1116,8 @@ Path F: Internal-owned site slot planning.
     bash scripts/manage.sh ops site-slot oversea-plan oversea.example.com
   bash scripts/manage.sh ops site-slot materialize oversea
   bash scripts/manage.sh ops site-slot refresh-tunnel-cli latest
+  # Or after syncing a published npm tarball into Internal:
+  bash scripts/manage.sh ops site-slot refresh-tunnel-cli --from-tarball /path/to/qpjoy-tunnel-cli.tgz
   MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
     bash scripts/manage.sh ops site-slot domestic-plan domestic.example.com oversea.example.com
   MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
@@ -1497,6 +1440,48 @@ ops_site_slot() {
           process.exit(1);
         });
       ' "$base" "$1" "$2"
+      ;;
+    domestic-wg-materialize)
+      [ "$#" -ge 2 ] || die "Usage: bash scripts/manage.sh ops site-slot domestic-wg-materialize <site-id> <endpoint> [rotate]"
+      node -e '
+        const [base, siteId, endpoint, rotateFlag = ""] = process.argv.slice(1);
+        const rotate = rotateFlag === "rotate" || rotateFlag === "true" || rotateFlag === "1";
+        const body = {
+          siteId,
+          planId: process.env.SITE_SLOT_PLAN_ID || null,
+          publicEndpoint: endpoint,
+          listenPort: Number(process.env.MX_WG_LISTEN_PORT || "51820"),
+          domesticGatewayIp: process.env.MX_DOMESTIC_GATEWAY_IP || "10.88.0.1",
+          domesticGatewayCidr: process.env.MX_DOMESTIC_GATEWAY_CIDR || "10.88.0.0/16",
+          userRelayCidr: process.env.MX_USER_RELAY_CIDR || "10.89.0.0/16",
+          internalServiceIp: process.env.MX_INTERNAL_SERVICE_IP || "10.90.0.10",
+          internalServiceCidr: process.env.MX_INTERNAL_SERVICE_CIDR || "10.90.0.0/16",
+          guestRelayCidr: process.env.MX_GUEST_RELAY_CIDR || "10.91.0.0/16",
+          rotateRelayKey: rotate,
+          rotateInternalServiceKey: rotate,
+          confirmRotate: rotate,
+          requestedBy: process.env.USER || "manage.sh",
+          requestId: rotate ? "manage-domestic-wg-materialize-rotate" : "manage-domestic-wg-materialize"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/admin/actions/execute`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              actionId: "site-slot.domestic-wg.materialize",
+              path: `/internal/v1/config-center/domestic-wg-secrets/${encodeURIComponent(siteId)}/materialize-ready`,
+              body
+            })
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          console.log(JSON.stringify(payload, null, 2));
+          if (payload.domesticWgMaterialize?.status === "blocked") process.exit(2);
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$1" "$2" "${3:-}"
       ;;
     materialize-domestic-ready)
       [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot materialize-domestic-ready <site-id>"
@@ -2350,7 +2335,7 @@ ops_site_slot() {
       ' "$base" "$1" "${2:-passed}"
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all] | refresh-tunnel-cli [version|--from-local DIR] | ssh-profiles | ssh-profile-upsert <site-id> <domestic|oversea> [host] | ssh-profile-readiness <profile-id> [plan-only|execute] | oversea-readonly-test <site-id> <host> | oversea-remote-test <site-id> <host> [pipeline|dry-run|plan-only|readonly|execute] | domestic-plan <domestic-host|-> [oversea-host] | oversea-plan <oversea-host|-> | preflight <plan-id> [dry-run|manual|ssh] | apply <plan-id> [manual|dry-run|ssh] | executions [plan-id] | runner-start <run-id> [simulate|remote-ssh|awx-shadow] | runner-sessions [run-id] | worker-job <session-id> | worker-gate <job-id> [confirm] | worker-handoff <job-id> [confirm] | domestic-relay-append-ssh-prepare <apply-run-id> [confirm] | worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|awx-shadow|awx-credential-sync|awx-object-sync|awx-launch|local-exec] | worker-report <job-id> [running|passed|failed|blocked] | rollback-start <report-id> [simulate|manual] | rollback-report <rollback-execution-id> [running|passed|failed|blocked]"
+      die "Usage: bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all] | domestic-wg-materialize <site-id> <endpoint> [rotate] | refresh-tunnel-cli [version|--from-local DIR|--from-tarball FILE] | ssh-profiles | ssh-profile-upsert <site-id> <domestic|oversea> [host] | ssh-profile-readiness <profile-id> [plan-only|execute] | oversea-readonly-test <site-id> <host> | oversea-remote-test <site-id> <host> [pipeline|dry-run|plan-only|readonly|execute] | domestic-plan <domestic-host|-> [oversea-host] | oversea-plan <oversea-host|-> | preflight <plan-id> [dry-run|manual|ssh] | apply <plan-id> [manual|dry-run|ssh] | executions [plan-id] | runner-start <run-id> [simulate|remote-ssh|awx-shadow] | runner-sessions [run-id] | worker-job <session-id> | worker-gate <job-id> [confirm] | worker-handoff <job-id> [confirm] | domestic-relay-append-ssh-prepare <apply-run-id> [confirm] | worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|awx-shadow|awx-credential-sync|awx-object-sync|awx-launch|local-exec] | worker-report <job-id> [running|passed|failed|blocked] | rollback-start <report-id> [simulate|manual] | rollback-report <rollback-execution-id> [running|passed|failed|blocked]"
       ;;
   esac
 }
@@ -3068,7 +3053,7 @@ case "$cmd" in
         ops_admin "$@"
         ;;
       site-slot)
-        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all] | refresh-tunnel-cli [version|--from-local DIR] | ssh-profiles | ssh-profile-upsert <site-id> <domestic|oversea> [host] | ssh-profile-readiness <profile-id> [plan-only|execute] | oversea-readonly-test <site-id> <host> | oversea-remote-test <site-id> <host> [pipeline|dry-run|plan-only|readonly|execute] | domestic-plan <domestic-host|-> [oversea-host] | oversea-plan <oversea-host|-> | preflight <plan-id> [dry-run|manual|ssh] | apply <plan-id> [manual|dry-run|ssh] | executions [plan-id] | runner-start <run-id> [simulate|remote-ssh|awx-shadow] | runner-sessions [run-id] | worker-job <session-id> | worker-gate <job-id> [confirm] | worker-handoff <job-id> [confirm] | domestic-relay-append-ssh-prepare <apply-run-id> [confirm] | worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|awx-shadow|awx-credential-sync|awx-object-sync|awx-launch|local-exec] | worker-report <job-id> [running|passed|failed|blocked] | rollback-start <report-id> [simulate|manual] | rollback-report <rollback-execution-id> [running|passed|failed|blocked]"
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all] | domestic-wg-materialize <site-id> <endpoint> [rotate] | refresh-tunnel-cli [version|--from-local DIR|--from-tarball FILE] | ssh-profiles | ssh-profile-upsert <site-id> <domestic|oversea> [host] | ssh-profile-readiness <profile-id> [plan-only|execute] | oversea-readonly-test <site-id> <host> | oversea-remote-test <site-id> <host> [pipeline|dry-run|plan-only|readonly|execute] | domestic-plan <domestic-host|-> [oversea-host] | oversea-plan <oversea-host|-> | preflight <plan-id> [dry-run|manual|ssh] | apply <plan-id> [manual|dry-run|ssh] | executions [plan-id] | runner-start <run-id> [simulate|remote-ssh|awx-shadow] | runner-sessions [run-id] | worker-job <session-id> | worker-gate <job-id> [confirm] | worker-handoff <job-id> [confirm] | domestic-relay-append-ssh-prepare <apply-run-id> [confirm] | worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|awx-shadow|awx-credential-sync|awx-object-sync|awx-launch|local-exec] | worker-report <job-id> [running|passed|failed|blocked] | rollback-start <report-id> [simulate|manual] | rollback-report <rollback-execution-id> [running|passed|failed|blocked]"
         ops_site_slot "$@"
         ;;
       local-shadow)

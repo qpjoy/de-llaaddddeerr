@@ -535,7 +535,7 @@ export interface AdminTimelineEntry {
 }
 
 export type AdminActionCategory = 'release' | 'site-slot' | 'dns' | 'observability' | 'rbac';
-export type AdminActionGate = 'none' | 'confirm-apply' | 'confirm-remote-execution' | 'confirm-fake-transport' | 'confirm-rollback' | 'manual-evidence' | 'change-window';
+export type AdminActionGate = 'none' | 'confirm-apply' | 'confirm-remote-execution' | 'confirm-fake-transport' | 'confirm-rollback' | 'manual-evidence' | 'change-window' | 'internal-secret-materialize';
 export type AdminActionRisk = 'low' | 'medium' | 'high';
 
 export interface AdminActionDescriptor {
@@ -1515,6 +1515,15 @@ export interface LauncherNetworkTopology {
       gatewayIp: '10.88.0.1';
       configArtifact: 'mx-domestic-wg-relay.conf';
       envArtifact: 'mx-domestic-relay.env';
+    };
+    refreshHint: {
+      source: 'internal-domestic-wg-secret';
+      mode: 'snapshot-digest';
+      publicEndpoint: string | null;
+      domesticRelayPublicKeyFingerprint: string | null;
+      internalServicePublicKeyFingerprint: string | null;
+      materialDigest: string | null;
+      secretUpdatedAt: string | null;
     };
     internalServicePeer: {
       role: 'internal-service';
