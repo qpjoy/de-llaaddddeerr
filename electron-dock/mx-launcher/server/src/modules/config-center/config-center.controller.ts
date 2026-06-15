@@ -12,6 +12,8 @@ import type {
   RuntimeFeaturePolicy,
   RuntimeFeaturePolicyInput,
   SiteSlotKind,
+  SiteSlotDomesticWireGuardSecret,
+  SiteSlotDomesticWireGuardSecretInput,
   SiteSlotSshProfile,
   SiteSlotSshProfileBootstrapInput,
   SiteSlotSshProfileInput
@@ -43,6 +45,8 @@ export class ConfigCenterController {
         'awx-provider.sync-plan',
         'site-slot-ssh-profile.manage',
         'site-slot-ssh-profile.bootstrap',
+        'domestic-wg-secret.manage',
+        'domestic-wg-secret.materializer-env',
         'runtime-feature-policy.manage'
       ]
     };
@@ -191,6 +195,34 @@ export class ConfigCenterController {
     };
   }
 
+  @Get('internal/v1/config-center/domestic-wg-secrets')
+  async listDomesticWireGuardSecrets() {
+    const secrets = await this.store.listSiteSlotDomesticWireGuardSecrets();
+    return { secrets: secrets.map(redactDomesticWireGuardSecret) };
+  }
+
+  @Get('internal/v1/config-center/domestic-wg-secrets/:siteId')
+  async getDomesticWireGuardSecret(@Param('siteId') siteId: string) {
+    const secret = await this.store.getSiteSlotDomesticWireGuardSecret(siteId);
+    if (!secret) throw new NotFoundException('Domestic WireGuard secret not found');
+    return { secret: redactDomesticWireGuardSecret(secret) };
+  }
+
+  @Post('internal/v1/config-center/domestic-wg-secrets')
+  async upsertDomesticWireGuardSecret(@Body() rawBody: unknown) {
+    const secret = await this.store.upsertSiteSlotDomesticWireGuardSecret(toDomesticWireGuardSecretInput(asRecord(rawBody)));
+    return { secret: redactDomesticWireGuardSecret(secret) };
+  }
+
+  @Post('internal/v1/config-center/domestic-wg-secrets/:siteId/materializer-env')
+  async domesticWireGuardSecretMaterializerEnv(@Param('siteId') siteId: string, @Body() rawBody: unknown) {
+    const secret = await this.store.getSiteSlotDomesticWireGuardSecret(siteId);
+    if (!secret) throw new NotFoundException('Domestic WireGuard secret not found');
+    return {
+      export: domesticWireGuardSecretExport(secret, asRecord(rawBody))
+    };
+  }
+
   @Post('internal/v1/config-center/snapshots/effective')
   async createEffectiveSnapshot(@Body() rawBody: unknown) {
     return { snapshot: await this.store.createConfigPolicySnapshot(toSnapshotInput(asRecord(rawBody))) };
@@ -261,6 +293,97 @@ function toSshProfileBootstrapInput(body: Record<string, unknown>): SiteSlotSshP
     confirmBootstrap: booleanOrNull(body.confirmBootstrap),
     requestedBy: nullableString(body.requestedBy),
     requestId: nullableString(body.requestId)
+  };
+}
+
+function toDomesticWireGuardSecretInput(body: Record<string, unknown>): SiteSlotDomesticWireGuardSecretInput {
+  return {
+    siteId: nullableString(body.siteId),
+    status: nullableString(body.status),
+    publicEndpoint: nullableString(body.publicEndpoint),
+    listenPort: numberOrNull(body.listenPort),
+    domesticGatewayIp: nullableString(body.domesticGatewayIp),
+    domesticGatewayCidr: nullableString(body.domesticGatewayCidr),
+    userRelayCidr: nullableString(body.userRelayCidr),
+    internalServiceIp: nullableString(body.internalServiceIp),
+    internalServiceCidr: nullableString(body.internalServiceCidr),
+    guestRelayCidr: nullableString(body.guestRelayCidr),
+    domesticRelayPrivateKey: nullableString(body.domesticRelayPrivateKey),
+    domesticRelayPublicKey: nullableString(body.domesticRelayPublicKey),
+    internalServicePrivateKey: nullableString(body.internalServicePrivateKey),
+    internalServicePublicKey: nullableString(body.internalServicePublicKey),
+    requestedBy: nullableString(body.requestedBy),
+    requestId: nullableString(body.requestId)
+  };
+}
+
+function redactDomesticWireGuardSecret(secret: SiteSlotDomesticWireGuardSecret) {
+  return {
+    secretId: secret.secretId,
+    siteId: secret.siteId,
+    kind: secret.kind,
+    environment: secret.environment,
+    status: secret.status,
+    publicEndpoint: secret.publicEndpoint,
+    listenPort: secret.listenPort,
+    domesticGatewayIp: secret.domesticGatewayIp,
+    domesticGatewayCidr: secret.domesticGatewayCidr,
+    userRelayCidr: secret.userRelayCidr,
+    internalServiceIp: secret.internalServiceIp,
+    internalServiceCidr: secret.internalServiceCidr,
+    guestRelayCidr: secret.guestRelayCidr,
+    material: {
+      domesticRelayPrivateKey: secret.domesticRelayPrivateKey ? 'configured' : 'missing',
+      domesticRelayPublicKey: secret.domesticRelayPublicKey ? 'configured' : 'missing',
+      internalServicePrivateKey: secret.internalServicePrivateKey ? 'configured' : 'missing',
+      internalServicePublicKey: secret.internalServicePublicKey ? 'configured' : 'missing'
+    },
+    fingerprints: secret.fingerprints,
+    readiness: secret.readiness,
+    createdBy: secret.createdBy,
+    createdAt: secret.createdAt,
+    updatedBy: secret.updatedBy,
+    updatedAt: secret.updatedAt
+  };
+}
+
+function domesticWireGuardSecretExport(secret: SiteSlotDomesticWireGuardSecret, body: Record<string, unknown>) {
+  const confirmSecretExport = booleanValue(body.confirmSecretExport);
+  const envGate = process.env.SITE_SLOT_DOMESTIC_WG_SECRET_EXPORT_ENABLED === '1';
+  const blockedReasons = [
+    ...(confirmSecretExport ? [] : ['confirmSecretExport=true is required before exporting Domestic WG materializer env']),
+    ...(envGate ? [] : ['SITE_SLOT_DOMESTIC_WG_SECRET_EXPORT_ENABLED=1 is required on Internal']),
+    ...(secret.status === 'active' ? [] : [`Domestic WG secret is ${secret.status}`]),
+    ...secret.readiness.missingSecretInputs.map((input) => `missing secret input: ${input}`)
+  ];
+  const ready = blockedReasons.length === 0;
+  return {
+    status: ready ? 'ready' : 'blocked',
+    boundary: 'internal-secret-export-materializer-env',
+    siteId: secret.siteId,
+    secretId: secret.secretId,
+    confirmSecretExport,
+    envGate: envGate ? 'passed' : 'blocked',
+    blockedReasons,
+    redactedEnvKeys: secret.readiness.materializerEnvKeys,
+    env: ready ? domesticWireGuardMaterializerEnv(secret) : {}
+  };
+}
+
+function domesticWireGuardMaterializerEnv(secret: SiteSlotDomesticWireGuardSecret): Record<string, string> {
+  return {
+    MX_DOMESTIC_RELAY_PRIVATE_KEY: secret.domesticRelayPrivateKey ?? '',
+    MX_DOMESTIC_RELAY_PUBLIC_KEY: secret.domesticRelayPublicKey ?? '',
+    MX_INTERNAL_SERVICE_PRIVATE_KEY: secret.internalServicePrivateKey ?? '',
+    MX_INTERNAL_SERVICE_PUBLIC_KEY: secret.internalServicePublicKey ?? '',
+    MX_DOMESTIC_PUBLIC_ENDPOINT: secret.publicEndpoint ?? '',
+    MX_WG_LISTEN_PORT: String(secret.listenPort),
+    MX_DOMESTIC_GATEWAY_IP: secret.domesticGatewayIp,
+    MX_DOMESTIC_GATEWAY_CIDR: secret.domesticGatewayCidr,
+    MX_USER_RELAY_CIDR: secret.userRelayCidr,
+    MX_INTERNAL_SERVICE_IP: secret.internalServiceIp,
+    MX_INTERNAL_SERVICE_CIDR: secret.internalServiceCidr,
+    MX_GUEST_RELAY_CIDR: secret.guestRelayCidr
   };
 }
 

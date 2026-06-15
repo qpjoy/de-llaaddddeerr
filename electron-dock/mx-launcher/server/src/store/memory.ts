@@ -11,6 +11,7 @@ import {
   buildSiteSlotAccessAccount,
   buildSiteSlotExecutionRun,
   buildSiteSlotPlan,
+  buildSiteSlotDomesticWireGuardSecret,
   buildSiteSlotRunnerSession,
   buildSiteSlotSshProfile,
   buildSiteSlotRollbackExecution,
@@ -109,6 +110,8 @@ import type {
   SiteSlotAccessAccount,
   SiteSlotAccessAccountIssueInput,
   SiteSlotAccessAccountIssueResult,
+  SiteSlotDomesticWireGuardSecret,
+  SiteSlotDomesticWireGuardSecretInput,
   SiteSlotKind,
   SiteSlotPlan,
   SiteSlotPlanInput,
@@ -163,6 +166,7 @@ export class MemoryStore implements PlatformStore {
   private readonly siteSlotRollbackExecutions = new Map<string, SiteSlotRollbackExecution>();
   private readonly siteSlotRollbackReports = new Map<string, SiteSlotRollbackReport>();
   private readonly siteSlotSshProfiles = new Map<string, SiteSlotSshProfile>();
+  private readonly siteSlotDomesticWireGuardSecrets = new Map<string, SiteSlotDomesticWireGuardSecret>();
   private readonly siteSlotAccessAccounts = new Map<string, SiteSlotAccessAccount>();
   private readonly launcherNetworkMihomoSites = new Map<string, LauncherNetworkMihomoSite>();
   private readonly runtimeFeaturePolicies = new Map<string, RuntimeFeaturePolicy>();
@@ -1094,6 +1098,36 @@ export class MemoryStore implements PlatformStore {
       }
     });
     return profile;
+  }
+
+  listSiteSlotDomesticWireGuardSecrets(): SiteSlotDomesticWireGuardSecret[] {
+    return [...this.siteSlotDomesticWireGuardSecrets.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  getSiteSlotDomesticWireGuardSecret(siteId: string): SiteSlotDomesticWireGuardSecret | null {
+    return this.siteSlotDomesticWireGuardSecrets.get(siteId) ?? null;
+  }
+
+  upsertSiteSlotDomesticWireGuardSecret(input: SiteSlotDomesticWireGuardSecretInput): SiteSlotDomesticWireGuardSecret {
+    const siteId = input.siteId?.trim() || 'domestic-main';
+    const previous = this.siteSlotDomesticWireGuardSecrets.get(siteId) ?? null;
+    const secret = buildSiteSlotDomesticWireGuardSecret(this.config, input, previous);
+    this.siteSlotDomesticWireGuardSecrets.set(secret.siteId, secret);
+    this.recordAudit({
+      eventType: 'config.domestic_wg_secret.upserted',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        secretId: secret.secretId,
+        siteId: secret.siteId,
+        status: secret.status,
+        secretMaterial: secret.readiness.secretMaterial,
+        publicEndpointStatus: secret.readiness.publicEndpointStatus,
+        missingSecretInputs: secret.readiness.missingSecretInputs,
+        fingerprints: secret.fingerprints
+      }
+    });
+    return secret;
   }
 
   issueSiteSlotAccessAccounts(input: SiteSlotAccessAccountIssueInput): SiteSlotAccessAccountIssueResult {

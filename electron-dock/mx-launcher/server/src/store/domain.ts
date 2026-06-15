@@ -52,6 +52,8 @@ import type {
   SiteSlotNetworkMode,
   SiteSlotPlan,
   SiteSlotPlanInput,
+  SiteSlotDomesticWireGuardSecret,
+  SiteSlotDomesticWireGuardSecretInput,
   SiteSlotRunnerSession,
   SiteSlotRunnerStartInput,
   SiteSlotSshProfile,
@@ -1584,6 +1586,81 @@ export function buildSiteSlotSshProfile(
   };
 }
 
+export function buildSiteSlotDomesticWireGuardSecret(
+  config: RuntimeConfig,
+  input: SiteSlotDomesticWireGuardSecretInput,
+  previous: SiteSlotDomesticWireGuardSecret | null,
+  now = new Date().toISOString()
+): SiteSlotDomesticWireGuardSecret {
+  const siteId = input.siteId?.trim() || previous?.siteId || 'domestic-main';
+  const listenPort = input.listenPort && input.listenPort > 0 ? Math.floor(input.listenPort) : previous?.listenPort ?? 51820;
+  const publicEndpoint = input.publicEndpoint?.trim() || previous?.publicEndpoint || null;
+  const material = {
+    domesticRelayPrivateKey: input.domesticRelayPrivateKey?.trim() || previous?.domesticRelayPrivateKey || null,
+    domesticRelayPublicKey: input.domesticRelayPublicKey?.trim() || previous?.domesticRelayPublicKey || null,
+    internalServicePrivateKey: input.internalServicePrivateKey?.trim() || previous?.internalServicePrivateKey || null,
+    internalServicePublicKey: input.internalServicePublicKey?.trim() || previous?.internalServicePublicKey || null
+  };
+  const missingSecretInputs = [
+    material.domesticRelayPrivateKey ? null : 'MX_DOMESTIC_RELAY_PRIVATE_KEY',
+    material.domesticRelayPublicKey ? null : 'MX_DOMESTIC_RELAY_PUBLIC_KEY',
+    material.internalServicePrivateKey ? null : 'MX_INTERNAL_SERVICE_PRIVATE_KEY',
+    material.internalServicePublicKey ? null : 'MX_INTERNAL_SERVICE_PUBLIC_KEY',
+    publicEndpoint ? null : 'MX_DOMESTIC_PUBLIC_ENDPOINT'
+  ].filter((value): value is string => Boolean(value));
+  const updatedBy = input.requestedBy?.trim() || 'config-center';
+  return {
+    secretId: `domesticwg_${safeIdPart(siteId)}`,
+    siteId,
+    kind: 'domestic',
+    environment: config.environment,
+    status: input.status === 'paused' ? 'paused' : 'active',
+    publicEndpoint,
+    listenPort,
+    domesticGatewayIp: input.domesticGatewayIp?.trim() || previous?.domesticGatewayIp || '10.88.0.1',
+    domesticGatewayCidr: input.domesticGatewayCidr?.trim() || previous?.domesticGatewayCidr || '10.88.0.0/16',
+    userRelayCidr: input.userRelayCidr?.trim() || previous?.userRelayCidr || '10.89.0.0/16',
+    internalServiceIp: input.internalServiceIp?.trim() || previous?.internalServiceIp || '10.90.0.10',
+    internalServiceCidr: input.internalServiceCidr?.trim() || previous?.internalServiceCidr || '10.90.0.0/16',
+    guestRelayCidr: input.guestRelayCidr?.trim() || previous?.guestRelayCidr || '10.91.0.0/16',
+    ...material,
+    fingerprints: {
+      domesticRelayPublicKey: material.domesticRelayPublicKey ? shortDigest(material.domesticRelayPublicKey) : null,
+      internalServicePublicKey: material.internalServicePublicKey ? shortDigest(material.internalServicePublicKey) : null,
+      materialDigest: shortDigest([
+        siteId,
+        publicEndpoint ?? '',
+        String(listenPort),
+        material.domesticRelayPublicKey ?? '',
+        material.internalServicePublicKey ?? ''
+      ].join('|'))
+    },
+    readiness: {
+      secretMaterial: missingSecretInputs.length === 0 ? 'injected' : 'placeholder',
+      publicEndpointStatus: publicEndpoint ? 'ready' : 'placeholder',
+      missingSecretInputs,
+      materializerEnvKeys: [
+        'MX_DOMESTIC_RELAY_PRIVATE_KEY',
+        'MX_DOMESTIC_RELAY_PUBLIC_KEY',
+        'MX_INTERNAL_SERVICE_PRIVATE_KEY',
+        'MX_INTERNAL_SERVICE_PUBLIC_KEY',
+        'MX_DOMESTIC_PUBLIC_ENDPOINT',
+        'MX_WG_LISTEN_PORT',
+        'MX_DOMESTIC_GATEWAY_IP',
+        'MX_DOMESTIC_GATEWAY_CIDR',
+        'MX_USER_RELAY_CIDR',
+        'MX_INTERNAL_SERVICE_IP',
+        'MX_INTERNAL_SERVICE_CIDR',
+        'MX_GUEST_RELAY_CIDR'
+      ]
+    },
+    createdBy: previous?.createdBy ?? updatedBy,
+    createdAt: previous?.createdAt ?? now,
+    updatedBy,
+    updatedAt: now
+  };
+}
+
 export function buildRuntimeFeaturePolicy(
   config: RuntimeConfig,
   input: RuntimeFeaturePolicyInput,
@@ -3071,6 +3148,10 @@ function awxProviderStatus(value: AwxProviderConfigInput['status']): AwxProvider
 
 function safeIdPart(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/^_+|_+$/g, '') || 'default';
+}
+
+function shortDigest(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 16);
 }
 
 function runtimeFeatureScopeKind(value: RuntimeFeaturePolicyInput['scopeKind']): RuntimeFeaturePolicyScopeKind {

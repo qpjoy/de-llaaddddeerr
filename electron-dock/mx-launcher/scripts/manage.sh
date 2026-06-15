@@ -41,6 +41,8 @@ Usage:
   bash scripts/manage.sh ops site-slot domestic-plan <domestic-host|-> [oversea-host]
   bash scripts/manage.sh ops site-slot oversea-plan <oversea-host|->
   bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all]
+  bash scripts/manage.sh ops site-slot domestic-wg-secret-upsert <site-id> <endpoint>
+  bash scripts/manage.sh ops site-slot materialize-domestic-ready <site-id>
   bash scripts/manage.sh ops site-slot refresh-tunnel-cli [version|--from-local DIR]
   bash scripts/manage.sh ops site-slot ssh-profiles
   bash scripts/manage.sh ops site-slot ssh-profile-upsert <site-id> <domestic|oversea> [host]
@@ -1459,6 +1461,71 @@ ops_site_slot() {
     materialize)
       [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all]"
       node server/scripts/site-slot-artifact-materializer.mjs "${1:-all}"
+      ;;
+    domestic-wg-secret-upsert)
+      [ "$#" -ge 2 ] || die "Usage: MX_DOMESTIC_RELAY_PRIVATE_KEY=... MX_DOMESTIC_RELAY_PUBLIC_KEY=... MX_INTERNAL_SERVICE_PRIVATE_KEY=... MX_INTERNAL_SERVICE_PUBLIC_KEY=... bash scripts/manage.sh ops site-slot domestic-wg-secret-upsert <site-id> <endpoint>"
+      node -e '
+        const [base, siteId, endpoint] = process.argv.slice(1);
+        const body = {
+          siteId,
+          publicEndpoint: endpoint,
+          listenPort: Number(process.env.MX_WG_LISTEN_PORT || "51820"),
+          domesticGatewayIp: process.env.MX_DOMESTIC_GATEWAY_IP || "10.88.0.1",
+          domesticGatewayCidr: process.env.MX_DOMESTIC_GATEWAY_CIDR || "10.88.0.0/16",
+          userRelayCidr: process.env.MX_USER_RELAY_CIDR || "10.89.0.0/16",
+          internalServiceIp: process.env.MX_INTERNAL_SERVICE_IP || "10.90.0.10",
+          internalServiceCidr: process.env.MX_INTERNAL_SERVICE_CIDR || "10.90.0.0/16",
+          guestRelayCidr: process.env.MX_GUEST_RELAY_CIDR || "10.91.0.0/16",
+          domesticRelayPrivateKey: process.env.MX_DOMESTIC_RELAY_PRIVATE_KEY || null,
+          domesticRelayPublicKey: process.env.MX_DOMESTIC_RELAY_PUBLIC_KEY || null,
+          internalServicePrivateKey: process.env.MX_INTERNAL_SERVICE_PRIVATE_KEY || null,
+          internalServicePublicKey: process.env.MX_INTERNAL_SERVICE_PUBLIC_KEY || null,
+          requestedBy: process.env.USER || "manage.sh",
+          requestId: "manage-domestic-wg-secret-upsert"
+        };
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/config-center/domestic-wg-secrets`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          console.log(JSON.stringify(payload, null, 2));
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$1" "$2"
+      ;;
+    materialize-domestic-ready)
+      [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops site-slot materialize-domestic-ready <site-id>"
+      node -e '
+        const { spawnSync } = require("node:child_process");
+        const [base, siteId] = process.argv.slice(1);
+        (async () => {
+          const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/config-center/domestic-wg-secrets/${encodeURIComponent(siteId)}/materializer-env`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              confirmSecretExport: true,
+              requestedBy: process.env.USER || "manage.sh",
+              requestId: "manage-materialize-domestic-ready"
+            })
+          });
+          const payload = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(payload));
+          if (payload.export?.status !== "ready") throw new Error(JSON.stringify(payload, null, 2));
+          const child = spawnSync(process.execPath, ["server/scripts/site-slot-artifact-materializer.mjs", "domestic"], {
+            stdio: "inherit",
+            env: { ...process.env, ...payload.export.env }
+          });
+          process.exit(child.status ?? 1);
+        })().catch((error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      ' "$base" "$1"
       ;;
     refresh-tunnel-cli)
       node server/scripts/site-slot-refresh-tunnel-cli.mjs "$@"

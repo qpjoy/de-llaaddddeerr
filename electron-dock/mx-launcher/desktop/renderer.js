@@ -1047,9 +1047,11 @@ async function createPlanFromSshProfile() {
     state.pendingEvidenceFocus = plan?.planId
       ? { planId: plan.planId, kind: 'plan', id: plan.planId }
       : null;
+    const planMode = plan?.network?.mode ? ` / ${plan.network.mode}` : '';
+    const bootstrap = plan?.network?.overseaSiteId ? ` via ${plan.network.overseaSiteId}` : '';
     state.sshProfileFeedback = {
       kind: 'success',
-      message: plan ? `Created plan ${plan.siteId} / ${plan.status}` : 'Created plan'
+      message: plan ? `Created plan ${plan.siteId} / ${plan.status}${planMode}${bootstrap}` : 'Created plan'
     };
     await refreshAdmin();
   } catch (error) {
@@ -1441,6 +1443,7 @@ function sshProfileFormPayload() {
 
 function sshProfilePlanPayload() {
   const kind = sshProfileKind.value === 'domestic' ? 'domestic' : 'oversea';
+  const domesticBootstrap = kind === 'domestic' ? domesticBootstrapOverseaSite() : null;
   return {
     siteId: blankToNull(sshProfileSiteId.value),
     kind,
@@ -1451,10 +1454,20 @@ function sshProfilePlanPayload() {
     rootAccess: (blankToNull(sshProfileUser.value) || 'root') === 'root',
     hasDocker: true,
     hasOutboundInternet: kind === 'oversea',
+    overseaSiteId: domesticBootstrap?.siteId || null,
+    overseaHost: domesticBootstrap?.host || null,
     internalBaseUrl: normalizedServerBase(),
     createdBy: 'desktop-admin',
     requestId: `desktop-site-slot-plan-${Date.now()}`
   };
+}
+
+function domesticBootstrapOverseaSite() {
+  const sites = asArray(state.overseaOverview?.sites);
+  const usableStatuses = ['installed', 'passed', 'running', 'ready'];
+  return sites.find((site) => usableStatuses.includes(site.status))
+    || sites.find((site) => site.sshProfile?.profileId && site.host)
+    || null;
 }
 
 function sshProfileShadowSetupPayload() {
@@ -5438,26 +5451,43 @@ function renderSetupGuidance(pipeline, actions) {
     renderSelectedSiteSetupGuidance();
     return;
   }
-  const actionText = nextAction ? actionGuidanceText(nextAction) : '当前没有可执行 gate。可以刷新或查看 Evidence History。';
+  const needsDomesticPlan = setupNeedsDomesticPlan(pipeline);
+  const actionText = nextAction ? setupActionGuidanceText(pipeline, nextAction) : '当前没有可执行 gate。可以刷新或查看 Evidence History。';
   const runState = setupRunViewState(nextAction);
+  const primaryReady = needsDomesticPlan
+    ? Boolean(selectedSshProfileId()) && !state.sshPlanBusy
+    : Boolean(nextAction?.allowed && !state.actionBusy && !state.setupRun.active);
+  const primaryLabel = needsDomesticPlan
+    ? (state.sshPlanBusy ? 'Creating' : 'Create Plan')
+    : runState.buttonLabel;
+  const setupTitle = needsDomesticPlan
+    ? `${summary.siteId}: Create Plan`
+    : runState.title || setupHeadline(summary, nextAction);
   setupGuide.innerHTML = `
-    <section class="setup-guide-card" data-ready="${nextAction?.allowed ? 'true' : 'false'}">
+    <section class="setup-guide-card" data-ready="${primaryReady ? 'true' : 'false'}">
       <div>
         <span class="site-kind">Setup Assistant</span>
-        <strong>${escapeHtml(runState.title || setupHeadline(summary, nextAction))}</strong>
+        <strong>${escapeHtml(setupTitle)}</strong>
         <p>${escapeHtml(runState.message || actionText)}</p>
+        ${renderSetupActionChain(pipeline, nextAction)}
         ${renderSetupRunProgress()}
         ${renderAwxSummaryPanel(setupAwxSummary(), 'setup')}
       </div>
       <div class="setup-guide-actions">
-        <button class="primary-button" type="button" data-setup-continue ${nextAction?.allowed && !state.actionBusy && !state.setupRun.active ? '' : 'disabled'}>
-          ${escapeHtml(runState.buttonLabel)}
+        <button class="primary-button" type="button" ${needsDomesticPlan ? 'data-setup-create-plan' : 'data-setup-continue'} ${primaryReady ? '' : 'disabled'}>
+          ${escapeHtml(primaryLabel)}
         </button>
         ${state.setupRun.active ? '<button class="secondary-button" type="button" data-setup-stop>Stop</button>' : ''}
         <button class="secondary-button" type="button" data-setup-refresh>Refresh</button>
       </div>
     </section>
   `;
+  const createPlanButton = setupGuide.querySelector('[data-setup-create-plan]');
+  if (createPlanButton) {
+    createPlanButton.addEventListener('click', () => {
+      void createPlanFromSshProfile();
+    });
+  }
   const continueButton = setupGuide.querySelector('[data-setup-continue]');
   if (continueButton && nextAction) {
     continueButton.addEventListener('click', () => {
@@ -5953,10 +5983,10 @@ function actionGuidanceText(action) {
   const map = {
     'site-slot.preflight.create': '先做 preflight：只创建检查执行，不会改远端主机。',
     'site-slot.apply.confirm': '确认 apply manifest：这是进入部署/runner 前的审批点。',
-    'site-slot.runner.awx-shadow': '创建 AWX runner session，后续会挂 worker job 并同步 AWX objects。',
+    'site-slot.runner.awx-shadow': '高级备用：创建 AWX shadow runner session。',
     'site-slot.runner.remote-ssh': '创建 Remote SSH runner session，由 Internal 直接把 slot artifact 和配置下发到远端。',
     'site-slot.runner.simulate': '创建模拟 runner session，用于本机 shadow 验证。',
-    'site-slot.worker-job.create': '创建 worker job。Oversea 默认走 Remote SSH handoff；AWX 保留在高级 provider 面。',
+    'site-slot.worker-job.create': '创建 worker job。Oversea 和 Domestic 默认走 Internal Remote SSH handoff。',
     'site-slot.worker-run.awx-sync-plan': '生成 AWX 对象计划，先预览 inventory、credential、job template 名称。',
     'site-slot.worker-run.awx-credential-sync': '把当前 SSH Profile 写成 AWX Machine Credential，需要确认和 API token。',
     'site-slot.worker-run.awx-object-sync': '在 AWX 中创建/更新 organization、project、inventory、host 和 job template。',
@@ -5965,11 +5995,99 @@ function actionGuidanceText(action) {
     'site-slot.worker-run.remote-ssh-readonly-probe': '通过 SSH 做只读探测，收集 OS、Docker、磁盘和访问栈状态证据。',
     'site-slot.worker-run.remote-ssh-execute': '通过 Remote SSH 执行 Internal-controlled artifact push 和远端 worker，同步 Oversea Docker hysteria2。',
     'site-slot.worker-run.artifact-push-remote-ssh-plan': '生成 Remote SSH artifact push 计划报告，便于审计下发内容。',
-    'site-slot.domestic-relay-peer-append-awx.prepare': '为 Domestic relay peer append 准备 AWX worker job。',
+    'site-slot.domestic-relay-peer-append-awx.prepare': '高级备用：为 Domestic relay peer append 准备 AWX worker job。',
+    'site-slot.domestic-relay-peer-append-ssh.prepare': '准备 Domestic Remote SSH worker job；需要先绑定 SSH Profile。',
     'site-slot.worker-run.domestic-relay-readonly-probe': '先只读检查 Domestic WG relay 状态。',
     'site-slot.worker-run.domestic-relay-peer-append': '生成 Home peer append handoff，确认 lease/public key 和安全边界。'
   };
   return map[action.actionId] || `${action.gate || 'gate'} / ${action.reason || 'review next action'}`;
+}
+
+function setupActionGuidanceText(pipeline, action) {
+  if (!action) return '';
+  const summary = pipeline?.summary || {};
+  if (summary.kind !== 'domestic') return actionGuidanceText(action);
+  const plan = pipeline?.plan || {};
+  const profile = inspectorSshProfile('domestic', summary.siteId);
+  const planProfileId = plan.ssh?.profileId || '';
+  const activeProfileId = profile?.profileId || '';
+  const profileMatchesPlan = Boolean(planProfileId && (!activeProfileId || planProfileId === activeProfileId));
+  if (plan.network?.mode === 'offline-manual') {
+    const bootstrap = domesticBootstrapOverseaSite();
+    return bootstrap
+      ? `当前 plan 是 offline-manual，缺少 Oversea bootstrap。已发现可用 ${bootstrap.siteId}，请重新 Create Plan 生成 oversea-assisted Domestic plan。`
+      : '当前 Domestic 无公网出站且没有可用 Oversea bootstrap slot。先安装/同步一个 Oversea，再回来重新 Create Plan。';
+  }
+  if (!planProfileId) {
+    return '当前 Domestic plan 还没有绑定 SSH Profile。先在 SSH Access 保存 profile 后点击 Create Plan，再从 Preflight / Apply 进入 Remote SSH。';
+  }
+  if (!profileMatchesPlan) {
+    return `当前 plan 绑定的是 ${planProfileId}，表单选中的是 ${activeProfileId || '未选择'}。如要使用新 SSH，请先点击 Create Plan 生成新的 Domestic plan。`;
+  }
+  if (action.actionId === 'site-slot.runner.remote-ssh') {
+    return `当前 plan 已绑定 ${planProfileId}，不需要再次 Create Plan。Review & Continue 会创建 Remote SSH runner，之后继续 Create Worker Job、SSH Gate、Readonly Probe 和 Domestic install/sync。`;
+  }
+  if (action.actionId === 'site-slot.domestic-relay-peer-append-ssh.prepare') {
+    return `当前 plan 已绑定 ${planProfileId}。Review & Continue 会创建 Domestic Remote SSH worker job，之后执行 SSH Gate、Readonly Probe，再进行 WG relay / H2I / DNS 远端同步。`;
+  }
+  if (action.actionId === 'site-slot.worker-job.create') {
+    return '下一步会把 Remote SSH runner 变成 Domestic worker job；随后进入 SSH Gate、Readonly Probe 和远端同步。';
+  }
+  if (action.actionId === 'site-slot.worker-run.remote-ssh-gate') {
+    return '下一步只检查 SSH Profile、远端执行边界和 artifact gate，不会修改 Domestic 主机。通过后再做 Readonly Probe。';
+  }
+  if (action.actionId === 'site-slot.worker-run.remote-ssh-readonly-probe') {
+    return '下一步只读探测 Domestic 主机的 OS、Docker、WG 和服务状态；通过后再执行远端安装/同步。';
+  }
+  if (action.actionId === 'site-slot.worker-run.remote-ssh-execute') {
+    return '下一步会通过 Internal Remote SSH 下发 Domestic artifact 并执行远端安装/同步。';
+  }
+  return actionGuidanceText(action);
+}
+
+function setupNeedsDomesticPlan(pipeline) {
+  const summary = pipeline?.summary || {};
+  if (summary.kind !== 'domestic') return false;
+  const plan = pipeline?.plan || {};
+  const profile = inspectorSshProfile('domestic', summary.siteId);
+  const activeProfileId = profile?.profileId || selectedSshProfileId();
+  const planProfileId = plan.ssh?.profileId || '';
+  if (!activeProfileId) return false;
+  return !planProfileId || planProfileId !== activeProfileId || (plan.network?.mode === 'offline-manual' && Boolean(domesticBootstrapOverseaSite()));
+}
+
+function renderSetupActionChain(pipeline, action) {
+  const summary = pipeline?.summary || {};
+  if (summary.kind !== 'domestic' || !action) return '';
+  const plan = pipeline?.plan || {};
+  const profile = inspectorSshProfile('domestic', summary.siteId);
+  const planProfileId = plan.ssh?.profileId || '';
+  const activeProfileId = profile?.profileId || '';
+  const needsPlan = !planProfileId
+    || (activeProfileId && planProfileId !== activeProfileId)
+    || (plan.network?.mode === 'offline-manual' && Boolean(domesticBootstrapOverseaSite()));
+  const steps = needsPlan
+    ? ['Save SSH', 'Create Plan', 'Preflight', 'Apply', 'Remote SSH', 'Install / Sync']
+    : ['Plan bound', 'Remote SSH Runner', 'Worker Job', 'SSH Gate', 'Readonly Probe', 'Install / Sync'];
+  const current = needsPlan
+    ? 'Create Plan'
+    : setupChainCurrentStep(action.actionId);
+  return `
+    <ol class="setup-next-chain" aria-label="Domestic setup chain">
+      ${steps.map((step) => `
+        <li data-current="${step === current ? 'true' : 'false'}">${escapeHtml(step)}</li>
+      `).join('')}
+    </ol>
+  `;
+}
+
+function setupChainCurrentStep(actionId) {
+  if (actionId === 'site-slot.runner.remote-ssh') return 'Remote SSH Runner';
+  if (actionId === 'site-slot.worker-job.create' || actionId === 'site-slot.domestic-relay-peer-append-ssh.prepare') return 'Worker Job';
+  if (actionId === 'site-slot.worker-run.remote-ssh-gate') return 'SSH Gate';
+  if (actionId === 'site-slot.worker-run.remote-ssh-readonly-probe') return 'Readonly Probe';
+  if (actionId === 'site-slot.worker-run.remote-ssh-execute' || actionId === 'site-slot.worker-run.domestic-relay-peer-append-ssh') return 'Install / Sync';
+  return '';
 }
 
 function preferredNextAction(actions) {
@@ -5983,19 +6101,12 @@ function defaultPreferredAction(actions) {
     'site-slot.preflight.create',
     'site-slot.apply.confirm',
     'site-slot.runner.remote-ssh',
-    'site-slot.runner.awx-shadow',
     'site-slot.runner.simulate',
     'site-slot.worker-job.create',
     'site-slot.worker-run.remote-ssh-gate',
     'site-slot.worker-run.remote-ssh-readonly-probe',
     'site-slot.worker-run.remote-ssh-execute',
     'site-slot.worker-run.artifact-push-remote-ssh-plan',
-    'site-slot.worker-run.awx-sync-plan',
-    'site-slot.worker-run.awx-credential-sync',
-    'site-slot.worker-run.awx-object-sync',
-    'site-slot.worker-run.awx-launch',
-    'site-slot.worker-run.awx-shadow',
-    'site-slot.domestic-relay-peer-append-awx.prepare',
     'site-slot.domestic-relay-peer-append-ssh.prepare',
     'site-slot.worker-run.domestic-relay-readonly-probe',
     'site-slot.worker-run.domestic-relay-peer-append',
@@ -6443,7 +6554,7 @@ function nextActionFocusFromResult(action, payload) {
     'site-slot.worker-run.remote-ssh-gate': ['site-slot.worker-run.domestic-relay-readonly-probe', 'site-slot.worker-run.remote-ssh-readonly-probe', 'site-slot.worker-run.remote-ssh-execute'],
     'site-slot.worker-run.remote-ssh-readonly-probe': ['site-slot.worker-run.remote-ssh-execute', 'site-slot.worker-run.artifact-push-remote-ssh-plan'],
     'site-slot.worker-run.domestic-relay-readonly-probe': ['site-slot.worker-run.domestic-relay-peer-append'],
-    'site-slot.worker-run.domestic-relay-peer-append': ['site-slot.worker-run.awx-sync-plan', 'site-slot.worker-run.awx-credential-sync', 'site-slot.worker-run.awx-object-sync', 'site-slot.worker-run.awx-launch', 'site-slot.worker-run.awx-shadow', 'site-slot.worker-run.domestic-relay-peer-append-ssh'],
+    'site-slot.worker-run.domestic-relay-peer-append': ['site-slot.worker-run.domestic-relay-peer-append-ssh', 'site-slot.worker-run.remote-ssh-gate'],
     'site-slot.worker-run.awx-sync-plan': ['site-slot.worker-run.awx-credential-sync', 'site-slot.worker-run.awx-object-sync', 'site-slot.worker-run.awx-launch', 'site-slot.worker-run.awx-shadow'],
     'site-slot.worker-run.awx-credential-sync': ['site-slot.worker-run.awx-object-sync', 'site-slot.worker-run.awx-launch'],
     'site-slot.worker-run.awx-object-sync': ['site-slot.worker-run.awx-launch', 'site-slot.worker-run.awx-sync-plan']

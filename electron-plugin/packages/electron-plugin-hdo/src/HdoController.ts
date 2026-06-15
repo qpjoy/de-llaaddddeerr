@@ -2317,7 +2317,7 @@ export class HdoController {
     }
     const headers = new Headers(init.headers);
     headers.set('authorization', `Bearer ${await this.accessToken()}`);
-    const res = await fetch(new URL(path, base).toString(), {
+    const res = await this.fetchControlPlane(new URL(path, base).toString(), {
       ...init,
       headers
     });
@@ -2335,13 +2335,92 @@ export class HdoController {
     if (!base) {
       throw new Error('未配置 HDO 控制面 URL');
     }
-    return fetch(new URL(path, base).toString(), init);
+    return this.fetchControlPlane(new URL(path, base).toString(), init);
+  }
+
+  private async fetchControlPlane(url: string, init: RequestInit): Promise<Response> {
+    await this.repairDarwinControlPlaneRoute(url, 'control-plane-preflight');
+    try {
+      return await fetch(url, init);
+    } catch (err) {
+      if (!isControlPlaneNetworkError(err)) throw err;
+      const repaired = await this.repairDarwinControlPlaneRoute(url, 'control-plane-fetch-failed', true);
+      if (plainObject(repaired)?.repaired === true) {
+        return fetch(url, init);
+      }
+      throw err;
+    }
+  }
+
+  private async repairDarwinControlPlaneRoute(
+    url: string,
+    reason: string,
+    force = false
+  ): Promise<Record<string, unknown> | null> {
+    if (process.platform !== 'darwin') return null;
+    const host = controlPlaneIpv4Host(url);
+    if (!host) return null;
+
+    const route = await darwinRouteGet(host).catch((err) => ({
+      ok: false,
+      error: errorMessage(err)
+    }));
+    const routeRow = plainObject(route);
+    if (routeRow?.ok === false) return routeRow;
+
+    const defaultRoute = await darwinRouteGet('default').catch(() => null);
+    const shouldCleanup = force
+      ? isDarwinStaticHostRoute(routeRow)
+      : darwinControlPlaneRouteNeedsCleanup(routeRow, plainObject(defaultRoute));
+    if (!shouldCleanup) return { ok: true, skipped: true, reason: 'control-plane-route-current', host, route };
+
+    this.ctx.log.warn('repairing stale HDO control-plane host route', {
+      reason,
+      host,
+      route,
+      defaultRoute
+    });
+    const shellCommand = [
+      `route -q -n delete -host ${shellQuote(host)} >/dev/null 2>&1 || true`,
+      `route -n get ${shellQuote(host)} >/dev/null 2>&1 || true`
+    ].join('\n');
+    const script = `do shell script ${appleScriptString(shellCommand)} with administrator privileges`;
+    try {
+      const result = await execFileTextAsync('osascript', ['-e', script], 30_000);
+      const after = await darwinRouteGet(host).catch((err) => ({
+        ok: false,
+        error: errorMessage(err)
+      }));
+      return {
+        ok: true,
+        repaired: true,
+        reason,
+        host,
+        routeBefore: route,
+        defaultRoute,
+        routeAfter: after,
+        stdout: result.stdout,
+        stderr: result.stderr
+      };
+    } catch (err) {
+      const payload = {
+        ok: false,
+        repaired: false,
+        reason,
+        host,
+        routeBefore: route,
+        defaultRoute,
+        error: errorMessage(err)
+      };
+      this.ctx.log.warn('failed to repair stale HDO control-plane host route', payload);
+      return payload;
+    }
   }
 
   private async refreshAccessToken(refreshToken: string): Promise<boolean> {
     const base = this.serverBaseUrl();
     if (!base) return false;
-    const res = await fetch(new URL('/api/v1/auth/refresh', base).toString(), {
+    const res = await this.fetchControlPlane(new URL('/api/v1/auth/refresh', base).toString(), {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'application/json' },
       body: JSON.stringify({ refreshToken })
@@ -2520,6 +2599,64 @@ function normalizeBaseUrl(value: unknown): string | null {
   } catch {
     return null;
   }
+}
+
+function controlPlaneIpv4Host(value: string): string | null {
+  try {
+    const host = new URL(value).hostname;
+    return isIpv4Text(host) ? host : null;
+  } catch {
+    return null;
+  }
+}
+
+async function darwinRouteGet(target: string): Promise<Record<string, unknown>> {
+  const result = await execFileTextAsync('route', ['-n', 'get', target], 4000);
+  return {
+    ok: true,
+    target,
+    ...parseDarwinRouteGet(result.stdout),
+    raw: result.stdout
+  };
+}
+
+function parseDarwinRouteGet(stdout: string): Record<string, string | null> {
+  return {
+    routeTo: darwinRouteField(stdout, 'route to'),
+    destination: darwinRouteField(stdout, 'destination'),
+    gateway: darwinRouteField(stdout, 'gateway'),
+    interfaceName: darwinRouteField(stdout, 'interface'),
+    flags: darwinRouteField(stdout, 'flags')
+  };
+}
+
+function darwinRouteField(stdout: string, field: string): string | null {
+  const escaped = field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = stdout.match(new RegExp(`^\\s*${escaped}:\\s*(.+?)\\s*$`, 'im'));
+  return match?.[1]?.trim() || null;
+}
+
+function darwinControlPlaneRouteNeedsCleanup(
+  route: Record<string, unknown> | null,
+  defaultRoute: Record<string, unknown> | null
+): boolean {
+  if (!isDarwinStaticHostRoute(route)) return false;
+  const defaultInterface = stringValue(defaultRoute?.interfaceName);
+  if (!defaultInterface || isDarwinTunnelInterface(defaultInterface)) return false;
+  const routeInterface = stringValue(route?.interfaceName);
+  const routeGateway = stringValue(route?.gateway);
+  const defaultGateway = stringValue(defaultRoute?.gateway);
+  if (routeInterface && routeInterface !== defaultInterface) return true;
+  return Boolean(routeGateway && defaultGateway && routeGateway !== defaultGateway);
+}
+
+function isDarwinStaticHostRoute(route: Record<string, unknown> | null): boolean {
+  const flags = stringValue(route?.flags) ?? '';
+  return flags.includes('HOST') && flags.includes('STATIC');
+}
+
+function isDarwinTunnelInterface(value: string): boolean {
+  return value.startsWith('utun') || value.startsWith('tun') || value.startsWith('tap');
 }
 
 function defaultDeviceLabel(): string {

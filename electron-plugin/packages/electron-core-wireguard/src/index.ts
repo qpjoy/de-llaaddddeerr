@@ -1468,6 +1468,7 @@ function buildDarwinUserspaceTunnelCommand(
   const routeDownCommands = routeCleanupCidrs
     .filter((cidr) => cidr.includes('/'))
     .map((cidr) => darwinRouteDeleteCommand(cidr));
+  const endpointCleanupCommands = darwinEndpointBypassCleanupCommands(profile.endpointHosts, '"$ROUTE_LOG"');
   const addressCommands = profile.addresses.map((address) => {
     if (address.includes(':')) return `ifconfig "$REAL_INTERFACE" inet6 ${shellQuote(address)} alias`;
     const ip = address.split('/')[0] ?? address;
@@ -1500,6 +1501,7 @@ function buildDarwinUserspaceTunnelCommand(
     `if [ -z "$REAL_INTERFACE" ] && [ -n ${shellQuote(primaryAddress)} ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q ${shellQuote(`inet ${primaryAddress}`)}; then REAL_INTERFACE="$candidate"; break; fi; done; fi`,
     `echo ${shellQuote('realInterfaceBeforeStop=')}"$REAL_INTERFACE" >> "$ROUTE_LOG" 2>&1`,
     ...dnsRestoreCommands,
+    ...endpointCleanupCommands,
     `if [ -n "$REAL_INTERFACE" ]; then`,
     ...routeDownCommands.map((line) => `  ${line}`),
     ...addressDownCommands.map((line) => `  ${line}`),
@@ -1695,6 +1697,8 @@ function darwinLaunchDaemonInstallShell(assets: DarwinLaunchDaemonAssets): strin
     `BIN_DIR=${shellQuote(assets.binDir)}`,
     `LOG_DIR=${shellQuote(assets.logDir)}`,
     'launchctl bootout "system/$LABEL" >/dev/null 2>&1 || launchctl bootout system "$PLIST" >/dev/null 2>&1 || true',
+    '__hdo_bootout_i=0',
+    'while launchctl print "system/$LABEL" >/dev/null 2>&1 && [ "$__hdo_bootout_i" -lt 40 ]; do sleep 0.25; __hdo_bootout_i=$((__hdo_bootout_i + 1)); done',
     'mkdir -p "$SUPPORT_DIR" "$BIN_DIR" "$LOG_DIR" /var/run/wireguard',
     `cp ${shellQuote(assets.sourceConfigPath)} ${shellQuote(assets.rootConfigPath)}`,
     `cp ${shellQuote(assets.sourceSetConfigPath)} ${shellQuote(assets.rootSetConfigPath)}`,
@@ -1707,7 +1711,14 @@ function darwinLaunchDaemonInstallShell(assets: DarwinLaunchDaemonAssets): strin
     `chmod 600 ${shellQuote(assets.rootConfigPath)} ${shellQuote(assets.rootSetConfigPath)}`,
     `chmod 755 ${shellQuote(assets.rootWgPath)} ${shellQuote(assets.rootWireGuardGoPath)} ${shellQuote(assets.daemonScriptPath)}`,
     `chmod 644 ${shellQuote(assets.plistPath)}`,
-    'launchctl bootstrap system "$PLIST"',
+    '__hdo_bootstrap_i=0',
+    'until launchctl bootstrap system "$PLIST"; do',
+    '  __hdo_bootstrap_status=$?',
+    '  if [ "$__hdo_bootstrap_i" -ge 5 ]; then exit "$__hdo_bootstrap_status"; fi',
+    '  launchctl bootout "system/$LABEL" >/dev/null 2>&1 || launchctl bootout system "$PLIST" >/dev/null 2>&1 || true',
+    '  sleep 0.5',
+    '  __hdo_bootstrap_i=$((__hdo_bootstrap_i + 1))',
+    'done',
     'launchctl enable "system/$LABEL" >/dev/null 2>&1 || true',
     'launchctl kickstart -k "system/$LABEL" >/dev/null 2>&1 || true',
     'launchctl print "system/$LABEL" >/dev/null'
@@ -1749,6 +1760,7 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
   const routeDownCommands = routeCleanupCidrs
     .filter((cidr) => cidr.includes('/'))
     .map((cidr) => darwinRouteDeleteCommand(cidr));
+  const endpointCleanupCommands = darwinEndpointBypassCleanupCommands(profile.endpointHosts, '"$ROUTE_LOG"');
   const addressCommands = profile.addresses.map((address) => {
     if (address.includes(':')) return `ifconfig "$REAL_INTERFACE" inet6 ${shellQuote(address)} alias`;
     const ip = address.split('/')[0] ?? address;
@@ -1800,6 +1812,7 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     '  REAL_INTERFACE="$(cat "$NAME_FILE" 2>/dev/null || true)"',
     '  if [ -z "$REAL_INTERFACE" ] && [ -n "$PRIMARY_ADDRESS" ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q "inet $PRIMARY_ADDRESS"; then REAL_INTERFACE="$candidate"; break; fi; done; fi',
     ...dnsRestoreCommands.map((line) => `  ${line}`),
+    ...endpointCleanupCommands.map((line) => `  ${line}`),
     '  if [ -n "$REAL_INTERFACE" ]; then',
     ...routeDownCommands.map((line) => `    ${line}`),
     ...addressDownCommands.map((line) => `    ${line}`),
@@ -1960,6 +1973,17 @@ function darwinEndpointBypassCommands(endpointHosts: string[], logArg: string): 
   ];
 }
 
+function darwinEndpointBypassCleanupCommands(endpointHosts: string[], logArg: string): string[] {
+  const hosts = uniqueStrings(endpointHosts.filter(isIpv4));
+  if (hosts.length === 0) return [];
+  return [
+    `for __hdo_endpoint_host in ${hosts.map(shellQuote).join(' ')}; do`,
+    `  { echo "endpointBypassCleanup=$__hdo_endpoint_host"; route -n get "$__hdo_endpoint_host" 2>&1 || true; } >> ${logArg} 2>&1`,
+    '  route -q -n delete -host "$__hdo_endpoint_host" >/dev/null 2>&1 || true',
+    'done'
+  ];
+}
+
 function darwinDnsSetCommands(dnsServers: string[], dnsDomains: string[], statePathArg: string, logArg: string): string[] {
   const servers = uniqueStrings(dnsServers.filter((value) => Boolean(value.trim())));
   if (servers.length === 0) return [];
@@ -2100,7 +2124,14 @@ function darwinWgQuickShellCommand(
   const envPrefix = Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`).join(' ');
   const wgQuickCommand = [envPrefix, shellQuote(wgQuick)].filter(Boolean).join(' ');
   if (action === 'down') {
-    return [wgQuickCommand, 'down', shellQuote(configPath)].join(' ');
+    return [
+      'set +e',
+      ...darwinRouteLogSetupLines(configPath, profile.interfaceName, 'wg-quick-down'),
+      [wgQuickCommand, 'down', shellQuote(configPath)].join(' '),
+      '__hdo_wg_quick_status=$?',
+      ...darwinEndpointBypassCleanupCommands(profile.endpointHosts, '"$ROUTE_LOG"'),
+      'exit "$__hdo_wg_quick_status"'
+    ].join('\n');
   }
   const upCommand = [wgQuickCommand, 'up', shellQuote(configPath)].join(' ');
   const lines = [

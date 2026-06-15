@@ -279,6 +279,9 @@ function artifactReferenceEvidence(ref: string, artifactBaseDir: string, failure
   if (exists && moduleMatch?.primary && module?.sha256 && sha256 !== module.sha256) {
     failures.push(`artifact sha256 mismatch for ${ref}: expected ${module.sha256}, got ${sha256}`);
   }
+  if (exists && module?.status === 'template' && !manifestSelfReference) {
+    failures.push(`artifact module is template-only and cannot be remotely applied before Internal injection: ${module.moduleId}`);
+  }
   return {
     ref,
     path: resolvedPath,

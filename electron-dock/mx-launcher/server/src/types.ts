@@ -1003,6 +1003,60 @@ export interface SiteSlotSshProfile {
   updatedAt: string;
 }
 
+export interface SiteSlotDomesticWireGuardSecretInput {
+  siteId?: string | null;
+  status?: 'active' | 'paused' | string | null;
+  publicEndpoint?: string | null;
+  listenPort?: number | null;
+  domesticGatewayIp?: string | null;
+  domesticGatewayCidr?: string | null;
+  userRelayCidr?: string | null;
+  internalServiceIp?: string | null;
+  internalServiceCidr?: string | null;
+  guestRelayCidr?: string | null;
+  domesticRelayPrivateKey?: string | null;
+  domesticRelayPublicKey?: string | null;
+  internalServicePrivateKey?: string | null;
+  internalServicePublicKey?: string | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface SiteSlotDomesticWireGuardSecret {
+  secretId: string;
+  siteId: string;
+  kind: 'domestic';
+  environment: string;
+  status: 'active' | 'paused';
+  publicEndpoint: string | null;
+  listenPort: number;
+  domesticGatewayIp: string;
+  domesticGatewayCidr: string;
+  userRelayCidr: string;
+  internalServiceIp: string;
+  internalServiceCidr: string;
+  guestRelayCidr: string;
+  domesticRelayPrivateKey: string | null;
+  domesticRelayPublicKey: string | null;
+  internalServicePrivateKey: string | null;
+  internalServicePublicKey: string | null;
+  fingerprints: {
+    domesticRelayPublicKey: string | null;
+    internalServicePublicKey: string | null;
+    materialDigest: string;
+  };
+  readiness: {
+    secretMaterial: 'injected' | 'placeholder';
+    publicEndpointStatus: 'ready' | 'placeholder';
+    missingSecretInputs: string[];
+    materializerEnvKeys: string[];
+  };
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
 export type RuntimeFeaturePolicyScopeKind = 'global' | 'site' | 'profile';
 export type RuntimeFeaturePolicyMode = 'disabled' | 'plan-only' | 'readonly-execute' | 'remote-execute';
 

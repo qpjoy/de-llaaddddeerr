@@ -2596,6 +2596,7 @@ function domesticRelayPeerAppendSshPrepareFailures(
     ...(execution.confirmApply ? [] : ['apply execution must be confirmed before Domestic relay peer append prepare']),
     ...(plan ? [] : ['plan not found while preparing Domestic relay peer append SSH job']),
     ...(plan && plan.kind !== 'domestic' ? [`Domestic relay peer append prepare requires a domestic plan, got ${plan.kind}`] : []),
+    ...(plan ? domesticRemoteSshReadinessFailures(plan) : []),
     ...(booleanValue(body.confirmRemoteExecution) === true
       ? []
       : ['confirmRemoteExecution=true is required before preparing Domestic relay peer append SSH job']),
@@ -2605,6 +2606,15 @@ function domesticRelayPeerAppendSshPrepareFailures(
     ...(stringValue(body.approvalId) ? [] : ['approvalId is required before creating Domestic relay append remote-ssh job']),
     ...(stringValue(body.changeWindowStart) ? [] : ['changeWindowStart is required before creating Domestic relay append remote-ssh job']),
     ...(stringValue(body.changeWindowEnd) ? [] : ['changeWindowEnd is required before creating Domestic relay append remote-ssh job'])
+  ];
+}
+
+function domesticRemoteSshReadinessFailures(plan: SiteSlotPlan): string[] {
+  return [
+    ...(plan.ssh.profileId ? [] : ['link an Internal-managed SSH Profile before queueing Domestic Remote SSH']),
+    ...(plan.host ? [] : ['set the Domestic host before queueing Domestic Remote SSH']),
+    ...(plan.ssh.profileStatus === 'paused' ? ['managed SSH Profile is paused'] : []),
+    ...plan.ssh.profileWarnings.map((warning) => `SSH Profile warning: ${warning}`)
   ];
 }
 
@@ -3032,6 +3042,9 @@ function artifactReferenceEvidence(ref: string, artifactBaseDir: string, failure
   if (exists && moduleMatch?.primary && module?.sha256 && sha256 !== module.sha256) {
     failures.push(`artifact sha256 mismatch for ${ref}: expected ${module.sha256}, got ${sha256}`);
   }
+  if (exists && module?.status === 'template' && !manifestSelfReference) {
+    failures.push(`artifact module is template-only and cannot be remotely applied before Internal injection: ${module.moduleId}`);
+  }
   return {
     ref,
     path: resolvedPath,
@@ -3444,6 +3457,9 @@ function buildPipelineActionHints(
   if (latestReadyExecution) {
     const hasRunnerForExecution = runnerSessions.some((session) => session.runId === latestReadyExecution.runId);
     if (!hasRunnerForExecution) {
+      const remoteRunnerReadinessFailures = plan.kind === 'domestic'
+        ? domesticRemoteSshReadinessFailures(plan)
+        : [];
       actions.push(contextualAction(
         actionPolicy,
         'site-slot.runner.remote-ssh',
@@ -3456,64 +3472,32 @@ function buildPipelineActionHints(
             requestId: 'admin-ui-runner-remote'
           }
         },
-        true,
-        'execution must be ready before remote runner session starts'
+        remoteRunnerReadinessFailures.length === 0,
+        remoteRunnerReadinessFailures.length
+          ? remoteRunnerReadinessFailures.join('; ')
+          : 'execution must be ready before remote runner session starts'
       ));
-      if (plan.kind !== 'oversea') {
+      if (plan.kind !== 'domestic') {
         actions.push(contextualAction(
           actionPolicy,
-          'site-slot.runner.awx-shadow',
+          'site-slot.runner.simulate',
           {
             path: `/internal/v1/site-slots/executions/${encodeURIComponent(latestReadyExecution.runId)}/runner-sessions`,
             bodyTemplate: {
-              mode: 'awx-shadow',
+              mode: 'simulate',
               requestedBy: actionPolicy.principal.principalId,
-              requestId: 'admin-ui-runner-awx-shadow'
+              requestId: 'admin-ui-runner-simulate'
             }
           },
           true,
-          'execution must be ready before AWX shadow runner session starts'
+          'execution must be ready before runner session starts'
         ));
       }
-      actions.push(contextualAction(
-        actionPolicy,
-        'site-slot.runner.simulate',
-        {
-          path: `/internal/v1/site-slots/executions/${encodeURIComponent(latestReadyExecution.runId)}/runner-sessions`,
-          bodyTemplate: {
-            mode: 'simulate',
-            requestedBy: actionPolicy.principal.principalId,
-            requestId: 'admin-ui-runner-simulate'
-          }
-        },
-        true,
-        'execution must be ready before runner session starts'
-      ));
     }
   }
 
   if (plan.kind === 'domestic' && confirmedApply) {
-    actions.push(contextualAction(
-      actionPolicy,
-      'site-slot.domestic-relay-peer-append-awx.prepare',
-      {
-        path: `/internal/v1/site-slots/executions/${encodeURIComponent(confirmedApply.runId)}/prepare-domestic-relay-peer-append-awx`,
-        bodyTemplate: {
-          confirmAwxLaunchPrepare: true,
-          approvalId: 'approval-domestic-relay-peer-append-awx',
-          changeWindowStart: '<change-window-start-iso>',
-          changeWindowEnd: '<change-window-end-iso>',
-          workerId: `worker-awx-domestic-relay-${plan.siteId}`,
-          workerKind: 'awx-runner',
-          retryLimit: 1,
-          rollbackStrategy: 'restore-domestic-wg-peer-before-append',
-          requestedBy: actionPolicy.principal.principalId,
-          requestId: 'admin-ui-domestic-relay-peer-append-awx-prepare'
-        }
-      },
-      true,
-      'confirmed Domestic apply execution is required before preparing relay peer append AWX job'
-    ));
+    const remoteRunnerReadinessFailures = domesticRemoteSshReadinessFailures(plan);
     actions.push(contextualAction(
       actionPolicy,
       'site-slot.domestic-relay-peer-append-ssh.prepare',
@@ -3533,8 +3517,10 @@ function buildPipelineActionHints(
           requestId: 'admin-ui-domestic-relay-peer-append-ssh-prepare'
         }
       },
-      true,
-      'confirmed Domestic apply execution is required before preparing relay peer append SSH job'
+      remoteRunnerReadinessFailures.length === 0,
+      remoteRunnerReadinessFailures.length
+        ? remoteRunnerReadinessFailures.join('; ')
+        : 'confirmed Domestic apply execution is required before preparing relay peer append SSH job'
     ));
   }
 
@@ -3550,7 +3536,9 @@ function buildPipelineActionHints(
             ? 'awx-runner'
             : sessionNeedingWorker.kind === 'oversea'
               ? 'oversea-site-agent'
-              : 'internal-runner',
+              : sessionNeedingWorker.kind === 'domestic'
+                ? 'domestic-runner'
+                : 'internal-runner',
           approvalId: 'approval-id',
           retryLimit: 2,
           rollbackStrategy: 'restore-previous-state',
@@ -3564,88 +3552,6 @@ function buildPipelineActionHints(
   }
 
   if (readyWorkerJob) {
-    if (readyWorkerJob.kind !== 'oversea') {
-      actions.push(contextualAction(
-        actionPolicy,
-        'site-slot.worker-run.awx-sync-plan',
-        {
-          path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/awx-sync-plan`,
-          bodyTemplate: {
-            workerId: readyWorkerJob.worker.workerId,
-            requestedBy: actionPolicy.principal.principalId,
-            requestId: 'admin-ui-worker-run-awx-sync-plan'
-          }
-        },
-        true,
-        'worker job must be ready before AWX object sync planning'
-      ));
-      actions.push(contextualAction(
-        actionPolicy,
-        'site-slot.worker-run.awx-credential-sync',
-        {
-          path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/run-awx-credential-sync`,
-          bodyTemplate: {
-            confirmAwxCredentialSync: true,
-            timeoutSeconds: 120,
-            workerId: readyWorkerJob.worker.workerId,
-            requestedBy: actionPolicy.principal.principalId,
-            requestId: 'admin-ui-worker-run-awx-credential-sync'
-          }
-        },
-        true,
-        'worker job must be ready before AWX credential sync'
-      ));
-      actions.push(contextualAction(
-        actionPolicy,
-        'site-slot.worker-run.awx-object-sync',
-        {
-          path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/run-awx-object-sync`,
-          bodyTemplate: {
-            confirmAwxSync: true,
-            timeoutSeconds: 120,
-            workerId: readyWorkerJob.worker.workerId,
-            requestedBy: actionPolicy.principal.principalId,
-            requestId: 'admin-ui-worker-run-awx-object-sync'
-          }
-        },
-        true,
-        'worker job must be ready before AWX object sync'
-      ));
-      actions.push(contextualAction(
-        actionPolicy,
-        'site-slot.worker-run.awx-launch',
-        {
-          path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/run-awx-launch`,
-          bodyTemplate: {
-            confirmAwxLaunch: true,
-            waitForCompletion: true,
-            timeoutSeconds: 180,
-            pollIntervalMs: 2000,
-            workerId: readyWorkerJob.worker.workerId,
-            message: 'AWX API launch by admin-ui',
-            requestedBy: actionPolicy.principal.principalId,
-            requestId: 'admin-ui-worker-run-awx-launch'
-          }
-        },
-        true,
-        'worker job must be ready before AWX API launch'
-      ));
-      actions.push(contextualAction(
-        actionPolicy,
-        'site-slot.worker-run.awx-shadow',
-        {
-          path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/run-awx-shadow`,
-          bodyTemplate: {
-            workerId: readyWorkerJob.worker.workerId,
-            message: 'AWX shadow worker run by admin-ui',
-            requestedBy: actionPolicy.principal.principalId,
-            requestId: 'admin-ui-worker-run-awx-shadow'
-          }
-        },
-        true,
-        'worker job must be ready before AWX shadow report'
-      ));
-    }
     actions.push(contextualAction(
       actionPolicy,
       'site-slot.worker-run.remote-ssh-gate',

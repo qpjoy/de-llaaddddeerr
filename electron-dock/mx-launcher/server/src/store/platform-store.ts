@@ -51,6 +51,8 @@ import type {
   SiteSlotExecutionRun,
   SiteSlotPlan,
   SiteSlotPlanInput,
+  SiteSlotDomesticWireGuardSecret,
+  SiteSlotDomesticWireGuardSecretInput,
   SiteSlotAccessAccount,
   SiteSlotAccessAccountIssueInput,
   SiteSlotAccessAccountIssueResult,
@@ -183,6 +185,9 @@ export interface PlatformStore {
   getSiteSlotSshProfile(profileId: string): MaybePromise<SiteSlotSshProfile | null>;
   getSiteSlotSshProfileForSite(siteId: string): MaybePromise<SiteSlotSshProfile | null>;
   upsertSiteSlotSshProfile(input: SiteSlotSshProfileInput): MaybePromise<SiteSlotSshProfile>;
+  listSiteSlotDomesticWireGuardSecrets(): MaybePromise<SiteSlotDomesticWireGuardSecret[]>;
+  getSiteSlotDomesticWireGuardSecret(siteId: string): MaybePromise<SiteSlotDomesticWireGuardSecret | null>;
+  upsertSiteSlotDomesticWireGuardSecret(input: SiteSlotDomesticWireGuardSecretInput): MaybePromise<SiteSlotDomesticWireGuardSecret>;
   issueSiteSlotAccessAccounts(input: SiteSlotAccessAccountIssueInput): MaybePromise<SiteSlotAccessAccountIssueResult>;
   listSiteSlotAccessAccounts(siteId: string): MaybePromise<SiteSlotAccessAccount[]>;
   getSiteSlotAccessAccount(siteId: string, username: string): MaybePromise<SiteSlotAccessAccount | null>;

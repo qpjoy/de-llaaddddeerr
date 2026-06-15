@@ -60,6 +60,8 @@ import type {
   SiteSlotAccessAccount,
   SiteSlotAccessAccountIssueInput,
   SiteSlotAccessAccountIssueResult,
+  SiteSlotDomesticWireGuardSecret,
+  SiteSlotDomesticWireGuardSecretInput,
   SiteSlotPlan,
   SiteSlotPlanInput,
   SiteSlotRollbackExecution,
@@ -108,6 +110,7 @@ import {
   buildSiteSlotAccessAccount,
   buildSiteSlotExecutionRun,
   buildSiteSlotPlan,
+  buildSiteSlotDomesticWireGuardSecret,
   buildSiteSlotRunnerSession,
   buildSiteSlotSshProfile,
   buildSiteSlotRollbackExecution,
@@ -182,6 +185,7 @@ type RecordKind =
   | 'site-slot-rollback-execution'
   | 'site-slot-rollback-report'
   | 'site-slot-ssh-profile'
+  | 'site-slot-domestic-wg-secret'
   | 'site-slot-access-account'
   | 'launcher-network-mihomo-site'
   | 'runtime-feature-policy'
@@ -1190,6 +1194,37 @@ export class PostgresStore implements PlatformStore {
       }
     });
     return profile;
+  }
+
+  async listSiteSlotDomesticWireGuardSecrets(): Promise<SiteSlotDomesticWireGuardSecret[]> {
+    const secrets = await this.listRecords<SiteSlotDomesticWireGuardSecret>('site-slot-domestic-wg-secret');
+    return secrets.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  async getSiteSlotDomesticWireGuardSecret(siteId: string): Promise<SiteSlotDomesticWireGuardSecret | null> {
+    return this.getRecord<SiteSlotDomesticWireGuardSecret>('site-slot-domestic-wg-secret', siteId);
+  }
+
+  async upsertSiteSlotDomesticWireGuardSecret(input: SiteSlotDomesticWireGuardSecretInput): Promise<SiteSlotDomesticWireGuardSecret> {
+    const siteId = input.siteId?.trim() || 'domestic-main';
+    const previous = await this.getSiteSlotDomesticWireGuardSecret(siteId);
+    const secret = buildSiteSlotDomesticWireGuardSecret(this.config, input, previous);
+    await this.saveRecord('site-slot-domestic-wg-secret', secret.siteId, secret, secret.siteId);
+    await this.recordAudit({
+      eventType: 'config.domestic_wg_secret.upserted',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        secretId: secret.secretId,
+        siteId: secret.siteId,
+        status: secret.status,
+        secretMaterial: secret.readiness.secretMaterial,
+        publicEndpointStatus: secret.readiness.publicEndpointStatus,
+        missingSecretInputs: secret.readiness.missingSecretInputs,
+        fingerprints: secret.fingerprints
+      }
+    });
+    return secret;
   }
 
   async issueSiteSlotAccessAccounts(input: SiteSlotAccessAccountIssueInput): Promise<SiteSlotAccessAccountIssueResult> {

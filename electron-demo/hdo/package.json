@@ -3,43 +3,38 @@
   "productName": "MX HDO",
   "version": "0.1.0",
   "private": true,
+  "author": "QPJoy",
   "description": "MX HDO desktop client.",
   "main": "src/main.cjs",
   "scripts": {
-    "dev": "node scripts/dev-mode.mjs local && electron-forge start",
-    "dev:npm": "node scripts/dev-mode.mjs npm && electron-forge start",
+    "dev": "node scripts/dev-mode.mjs local && electron-builder install-app-deps && electron .",
+    "dev:npm": "node scripts/dev-mode.mjs npm && electron-builder install-app-deps && electron .",
     "dev:reset": "node scripts/dev-mode.mjs npm",
     "start": "pnpm dev",
     "setup": "node scripts/dev-mode.mjs local",
     "setup:npm": "node scripts/dev-mode.mjs npm",
-    "package": "node scripts/dev-mode.mjs npm && electron-forge package",
-    "make": "node scripts/dev-mode.mjs npm && electron-forge make",
-    "make:mac": "node scripts/dev-mode.mjs npm && electron-forge make --platform=darwin",
-    "make:mac:dmg": "node scripts/dev-mode.mjs npm && FORGE_INCLUDE_DMG=1 electron-forge make --platform=darwin",
-    "make:win": "node scripts/dev-mode.mjs npm && electron-forge make --platform=win32 --arch=x64",
-    "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check forge.config.cjs",
+    "package": "node scripts/dev-mode.mjs npm && electron-builder --config electron-builder.config.cjs --dir",
+    "make": "node scripts/dev-mode.mjs npm && electron-builder --config electron-builder.config.cjs",
+    "make:mac": "node scripts/dev-mode.mjs npm && electron-builder --config electron-builder.config.cjs --mac --universal",
+    "make:mac:dmg": "node scripts/dev-mode.mjs npm && electron-builder --config electron-builder.config.cjs --mac dmg --universal",
+    "make:win": "node scripts/dev-mode.mjs npm && electron-builder --config electron-builder.config.cjs --win --x64",
+    "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check electron-builder.config.cjs",
     "build:local": "pnpm --dir ../../electron-market build && pnpm --dir ../../electron-plugin build:packages"
   },
   "dependencies": {
     "@qpjoy/electron-market": "^0.4.2",
-    "@qpjoy/electron-plugin-hdo": "^0.2.19",
+    "@qpjoy/electron-plugin-hdo": "^1.0.0",
     "@qpjoy/electron-plugin-sdk": "^0.1.4",
     "@qpjoy/electron-plugin-tunnel": "^0.1.17"
   },
   "devDependencies": {
-    "@electron-forge/cli": "^7.8.1",
-    "@electron-forge/maker-dmg": "^7.8.1",
-    "@electron-forge/maker-zip": "^7.8.1",
-    "@electron-forge/maker-squirrel": "^7.8.1",
-    "electron": "^34.0.0"
+    "electron": "^34.0.0",
+    "electron-builder": "^25.1.8"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
       "better-sqlite3",
-      "electron",
-      "electron-winstaller",
-      "fs-xattr",
-      "macos-alias"
+      "electron"
     ]
   }
 }
