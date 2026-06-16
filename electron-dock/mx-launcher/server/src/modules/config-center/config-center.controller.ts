@@ -352,6 +352,7 @@ function toDomesticWireGuardSecretInput(body: Record<string, unknown>): SiteSlot
     listenPort: numberOrNull(body.listenPort),
     domesticGatewayIp: nullableString(body.domesticGatewayIp),
     domesticGatewayCidr: nullableString(body.domesticGatewayCidr),
+    productRelayCidrs: cidrListValue(body.productRelayCidrs),
     userRelayCidr: nullableString(body.userRelayCidr),
     internalServiceIp: nullableString(body.internalServiceIp),
     internalServiceCidr: nullableString(body.internalServiceCidr),
@@ -385,10 +386,11 @@ function toGeneratedDomesticWireGuardSecretInput(
     listenPort: numberOrNull(body.listenPort) ?? previous?.listenPort ?? 51820,
     domesticGatewayIp: nullableString(body.domesticGatewayIp) ?? previous?.domesticGatewayIp ?? '10.88.0.1',
     domesticGatewayCidr: nullableString(body.domesticGatewayCidr) ?? previous?.domesticGatewayCidr ?? '10.88.0.0/16',
+    productRelayCidrs: cidrListValue(body.productRelayCidrs) ?? previous?.productRelayCidrs ?? ['10.89.0.0/16', '10.90.0.0/16'],
     userRelayCidr: nullableString(body.userRelayCidr) ?? previous?.userRelayCidr ?? '10.89.0.0/16',
-    internalServiceIp: nullableString(body.internalServiceIp) ?? previous?.internalServiceIp ?? '10.90.0.10',
-    internalServiceCidr: nullableString(body.internalServiceCidr) ?? previous?.internalServiceCidr ?? '10.90.0.0/16',
-    guestRelayCidr: nullableString(body.guestRelayCidr) ?? previous?.guestRelayCidr ?? '10.91.0.0/16',
+    internalServiceIp: nullableString(body.internalServiceIp) ?? previous?.internalServiceIp ?? '10.88.88.88',
+    internalServiceCidr: nullableString(body.internalServiceCidr) ?? previous?.internalServiceCidr ?? '10.88.0.0/16',
+    guestRelayCidr: nullableString(body.guestRelayCidr) ?? previous?.guestRelayCidr ?? '10.90.0.0/16',
     domesticRelayPrivateKey: relayPair?.privateKey ?? previous?.domesticRelayPrivateKey ?? null,
     domesticRelayPublicKey: relayPair?.publicKey ?? previous?.domesticRelayPublicKey ?? null,
     internalServicePrivateKey: internalPair?.privateKey ?? previous?.internalServicePrivateKey ?? null,
@@ -422,6 +424,7 @@ function redactDomesticWireGuardSecret(secret: SiteSlotDomesticWireGuardSecret) 
     listenPort: secret.listenPort,
     domesticGatewayIp: secret.domesticGatewayIp,
     domesticGatewayCidr: secret.domesticGatewayCidr,
+    productRelayCidrs: domesticSecretProductRelayCidrs(secret),
     userRelayCidr: secret.userRelayCidr,
     internalServiceIp: secret.internalServiceIp,
     internalServiceCidr: secret.internalServiceCidr,
@@ -474,6 +477,7 @@ function domesticWireGuardMaterializerEnv(secret: SiteSlotDomesticWireGuardSecre
     MX_WG_LISTEN_PORT: String(secret.listenPort),
     MX_DOMESTIC_GATEWAY_IP: secret.domesticGatewayIp,
     MX_DOMESTIC_GATEWAY_CIDR: secret.domesticGatewayCidr,
+    MX_PRODUCT_RELAY_CIDRS: domesticSecretProductRelayCidrs(secret).join(','),
     MX_USER_RELAY_CIDR: secret.userRelayCidr,
     MX_INTERNAL_SERVICE_IP: secret.internalServiceIp,
     MX_INTERNAL_SERVICE_CIDR: secret.internalServiceCidr,
@@ -571,4 +575,23 @@ function booleanOrNull(value: unknown): boolean | null {
   if (value === true || value === 'true' || value === '1' || value === 1) return true;
   if (value === false || value === 'false' || value === '0' || value === 0) return false;
   return null;
+}
+
+function cidrListValue(value: unknown): string[] | null {
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(',')
+      : [];
+  const cidrs = values
+    .map((item) => typeof item === 'string' ? item.trim() : '')
+    .filter((item) => item.length > 0);
+  return cidrs.length ? [...new Set(cidrs)] : null;
+}
+
+function domesticSecretProductRelayCidrs(secret: SiteSlotDomesticWireGuardSecret): string[] {
+  const cidrs = secret.productRelayCidrs?.length
+    ? secret.productRelayCidrs
+    : [secret.userRelayCidr, secret.internalServiceCidr, secret.guestRelayCidr];
+  return [...new Set(cidrs.filter((cidr) => Boolean(cidr)))];
 }

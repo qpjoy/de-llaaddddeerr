@@ -93,7 +93,7 @@ Planned:
   bash scripts/manage.sh oversea up --site oversea-sg-1
   bash scripts/manage.sh client build --platform win32-x64
   bash scripts/manage.sh migrate export-domestic
-  bash scripts/manage.sh test e2e --suite hdo-shadow-e2e --topology h-d-i-o-shadow
+  bash scripts/manage.sh test e2e --suite hdi-shadow-e2e --topology h-d-i-o-shadow
   bash scripts/manage.sh kit export --target /Volumes/MX-SALES
 EOF
 }
@@ -101,7 +101,7 @@ EOF
 role_modules() {
   case "$1" in
     internal)
-      echo "iam,app-center,config-center,deploy-center,release-center,artifact-center,runner-controller,test-center,audit-center,observability,sdk-gateway,launcher-network-control,hdo-compat,dns-control,edge-sync"
+      echo "iam,app-center,config-center,deploy-center,release-center,artifact-center,runner-controller,test-center,audit-center,observability,sdk-gateway,launcher-network-control,hdi-compat,dns-control,edge-sync"
       ;;
     domestic)
       echo "edge-api,relay-facade,h2i-proxy,snapshot-cache,observability-forwarder"
@@ -1415,10 +1415,11 @@ ops_site_slot() {
           listenPort: Number(process.env.MX_WG_LISTEN_PORT || "51820"),
           domesticGatewayIp: process.env.MX_DOMESTIC_GATEWAY_IP || "10.88.0.1",
           domesticGatewayCidr: process.env.MX_DOMESTIC_GATEWAY_CIDR || "10.88.0.0/16",
+          productRelayCidrs: (process.env.MX_PRODUCT_RELAY_CIDRS || "10.89.0.0/16,10.90.0.0/16").split(",").map((item) => item.trim()).filter(Boolean),
           userRelayCidr: process.env.MX_USER_RELAY_CIDR || "10.89.0.0/16",
-          internalServiceIp: process.env.MX_INTERNAL_SERVICE_IP || "10.90.0.10",
+          internalServiceIp: process.env.MX_INTERNAL_SERVICE_IP || "10.88.88.88",
           internalServiceCidr: process.env.MX_INTERNAL_SERVICE_CIDR || "10.90.0.0/16",
-          guestRelayCidr: process.env.MX_GUEST_RELAY_CIDR || "10.91.0.0/16",
+          guestRelayCidr: process.env.MX_GUEST_RELAY_CIDR || "10.90.0.0/16",
           domesticRelayPrivateKey: process.env.MX_DOMESTIC_RELAY_PRIVATE_KEY || null,
           domesticRelayPublicKey: process.env.MX_DOMESTIC_RELAY_PUBLIC_KEY || null,
           internalServicePrivateKey: process.env.MX_INTERNAL_SERVICE_PRIVATE_KEY || null,
@@ -1453,10 +1454,11 @@ ops_site_slot() {
           listenPort: Number(process.env.MX_WG_LISTEN_PORT || "51820"),
           domesticGatewayIp: process.env.MX_DOMESTIC_GATEWAY_IP || "10.88.0.1",
           domesticGatewayCidr: process.env.MX_DOMESTIC_GATEWAY_CIDR || "10.88.0.0/16",
+          productRelayCidrs: (process.env.MX_PRODUCT_RELAY_CIDRS || "10.89.0.0/16,10.90.0.0/16").split(",").map((item) => item.trim()).filter(Boolean),
           userRelayCidr: process.env.MX_USER_RELAY_CIDR || "10.89.0.0/16",
-          internalServiceIp: process.env.MX_INTERNAL_SERVICE_IP || "10.90.0.10",
+          internalServiceIp: process.env.MX_INTERNAL_SERVICE_IP || "10.88.88.88",
           internalServiceCidr: process.env.MX_INTERNAL_SERVICE_CIDR || "10.90.0.0/16",
-          guestRelayCidr: process.env.MX_GUEST_RELAY_CIDR || "10.91.0.0/16",
+          guestRelayCidr: process.env.MX_GUEST_RELAY_CIDR || "10.90.0.0/16",
           rotateRelayKey: rotate,
           rotateInternalServiceKey: rotate,
           confirmRotate: rotate,
@@ -2542,7 +2544,7 @@ Browser:
 
 Manual checks:
   1. Server URL is http://127.0.0.1:18090.
-  2. App Center loads HDO without console errors.
+  2. App Center loads HDI without console errors.
   3. Switch to Admin and click Refresh.
   4. Confirm dashboard metrics, topology, action list, and site-slot pipelines render.
   5. Create or reuse an SSH Profile, then create a plan from it.
@@ -2873,7 +2875,7 @@ doctor() {
   [ -f desktop/package.json ] || die "missing desktop/package.json"
   [ -f server/package.json ] || die "missing server/package.json"
   [ -f desktop/electron-builder.yml ] || die "missing desktop/electron-builder.yml"
-  [ -d desktop/products/hdo ] || die "missing desktop/products/hdo/"
+  [ -d desktop/products/hdi ] || die "missing desktop/products/hdi/"
 
   say "doctor OK"
 }

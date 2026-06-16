@@ -31,6 +31,10 @@ const WORKSPACE_PACKS = [
   { name: '@qpjoy/electron-plugin-sdk', dir: 'electron-market/packages/electron-plugin-sdk' },
   { name: '@qpjoy/marketplace-db', dir: 'electron-market/packages/marketplace-db' },
   { name: '@qpjoy/electron-market', dir: 'electron-market/packages/electron-market' },
+  { name: '@qpjoy/mx-launcher-core', dir: 'electron-dock/mx-launcher/packages/launcher-core' },
+  { name: '@qpjoy/mx-launcher-embed-sdk', dir: 'electron-dock/mx-launcher/packages/launcher-embed-sdk' },
+  { name: '@qpjoy/mx-launcher-standalone', dir: 'electron-dock/mx-launcher/packages/launcher-standalone' },
+  { name: '@qpjoy/electron-launcher', dir: 'electron-dock/mx-launcher/packages/electron-launcher' },
   { name: '@qpjoy/electron-core-wireguard-engine-darwin-arm64', dir: 'electron-plugin/packages/wireguard-engines/darwin-arm64' },
   { name: '@qpjoy/electron-core-wireguard-engine-darwin-x64', dir: 'electron-plugin/packages/wireguard-engines/darwin-x64' },
   { name: '@qpjoy/electron-core-wireguard-engine-linux-arm64', dir: 'electron-plugin/packages/wireguard-engines/linux-arm64' },
@@ -42,12 +46,17 @@ const WORKSPACE_PACKS = [
 
 const LOCAL_DIRECT_DEP_NAMES = [
   '@qpjoy/electron-market',
+  '@qpjoy/electron-launcher',
   '@qpjoy/electron-plugin-sdk',
   '@qpjoy/electron-plugin-hdo'
 ];
 
 const FALLBACK_NPM_DEPENDENCIES = {
   '@qpjoy/electron-market': '^0.3.27',
+  '@qpjoy/electron-launcher': '^0.1.0',
+  '@qpjoy/mx-launcher-core': '^0.1.0',
+  '@qpjoy/mx-launcher-embed-sdk': '^0.1.0',
+  '@qpjoy/mx-launcher-standalone': '^0.1.0',
   '@qpjoy/electron-plugin-hdo': '^1.0.0',
   '@qpjoy/electron-plugin-sdk': '^0.1.4',
   '@qpjoy/electron-plugin-tunnel': '^0.1.16',
@@ -62,6 +71,7 @@ const FALLBACK_NPM_DEPENDENCIES = {
 
 const NPM_DIRECT_DEP_NAMES = [
   '@qpjoy/electron-market',
+  '@qpjoy/electron-launcher',
   '@qpjoy/electron-plugin-sdk',
   '@qpjoy/electron-plugin-hdo',
   '@qpjoy/electron-plugin-tunnel'
@@ -132,6 +142,8 @@ function buildWorkspaces() {
   shell('pnpm --filter @qpjoy/electron-plugin-hdo build', resolve(REPO_ROOT, 'electron-plugin'));
   shell('pnpm install --prefer-offline --frozen-lockfile=false', resolve(REPO_ROOT, 'electron-market'));
   shell('pnpm -r build', resolve(REPO_ROOT, 'electron-market'));
+  shell('pnpm install --prefer-offline --frozen-lockfile=false', resolve(REPO_ROOT, 'electron-dock', 'mx-launcher'));
+  shell('pnpm build:packages', resolve(REPO_ROOT, 'electron-dock', 'mx-launcher'));
 }
 
 function packAll() {

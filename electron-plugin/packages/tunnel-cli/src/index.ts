@@ -101,9 +101,10 @@ Usage:
 
 Common commands:
   qp-tunnel-cli install --url http://IP:3434/peer_user01.mihomo.yaml --user download --password pass
+  qp-tunnel-cli install --file /opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml
   qp-tunnel-cli status
   qp-tunnel-cli start
-  qp-tunnel-cli server-on
+  qp-tunnel-cli egress-on
   qp-tunnel-cli tun-on
   qp-tunnel-cli tun-off
   qp-tunnel-cli update-subscription
@@ -123,6 +124,7 @@ QP_TUNNEL_CONTAINER_HTTP_PROXY=http://host.docker.internal:<mixed-port>.
 Install the script as a normal server command:
   sudo qp-tunnel-cli install-script
   sudo mihomo-client status
+  sudo mihomo-client egress-on
 
 Enroll this machine into an HDO mesh:
   HDO_PASSWORD=... qp-tunnel-cli hdo enroll --server-url https://domestic.example.com --username user
@@ -217,7 +219,7 @@ function mixedPortFromConfig(): string {
   const configFile = process.env.MIHOMO_CONFIG_FILE || defaultMihomoConfigFile;
   if (!existsSync(configFile)) {
     process.stderr.write(
-      `Mihomo config not found: ${configFile}\nRun: sudo qp-tunnel-cli install ... && sudo qp-tunnel-cli server-on\n`,
+      `Mihomo config not found: ${configFile}\nRun: sudo qp-tunnel-cli install ... && sudo qp-tunnel-cli egress-on\n`,
     );
     process.exit(1);
   }

@@ -26,6 +26,8 @@ const api = {
   hdoStop: () => ipcRenderer.invoke('demo:hdo-stop'),
   /** Re-apply HDO DNS/route priority rules for the active tunnel. */
   hdoRepairDns: () => ipcRenderer.invoke('demo:hdo-repair-dns'),
+  /** Ask MX Launcher for the H2O embed route plan without changing the active tunnel. */
+  launcherRoutePlan: (payload) => ipcRenderer.invoke('demo:launcher-route-plan', payload),
   /** Ask the embedded market host to check release policies now. */
   checkUpdates: () => ipcRenderer.invoke('demo:check-updates'),
   /** Subscribe to HDO state changes pushed by the plugin. */

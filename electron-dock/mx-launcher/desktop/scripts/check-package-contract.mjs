@@ -4,7 +4,7 @@ import { join } from 'node:path';
 const projectRoot = new URL('..', import.meta.url);
 
 await assertFile('electron-builder.yml');
-await assertFile('products/hdo/product.json');
+await assertFile('products/hdi/product.json');
 await assertFile('main.cjs');
 await assertBuilderContract();
 await assertProductManifest();
@@ -39,18 +39,18 @@ async function assertBuilderContract() {
 }
 
 async function assertProductManifest() {
-  const manifest = JSON.parse(await readFile(new URL('products/hdo/product.json', projectRoot), 'utf8'));
+  const manifest = JSON.parse(await readFile(new URL('products/hdi/product.json', projectRoot), 'utf8'));
   const required = [
-    ['id', 'hdo'],
+    ['id', 'hdi'],
     ['legacyProductId', 'hdo'],
-    ['backend.mxLauncherAdminApi', '/api/v1/mx-launcher/admin/products/hdo'],
+    ['backend.mxLauncherAdminApi', '/api/v1/mx-launcher/admin/products/hdi'],
     ['backend.legacyApiBase', '/api/v1/hdo'],
-    ['artifacts.resourcesDirectory', 'products/hdo'],
-    ['artifacts.serviceProfile', 'hdo-network']
+    ['artifacts.resourcesDirectory', 'products/hdi'],
+    ['artifacts.serviceProfile', 'hdi-network']
   ];
   for (const [path, expected] of required) {
     const actual = path.split('.').reduce((value, key) => value && value[key], manifest);
-    if (actual !== expected) throw new Error(`products/hdo/product.json ${path} expected ${expected}`);
+    if (actual !== expected) throw new Error(`products/hdi/product.json ${path} expected ${expected}`);
   }
 }
 

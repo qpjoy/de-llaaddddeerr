@@ -154,6 +154,7 @@ const hdoPlugin = {
         skipDnsRepair?: boolean | null;
       }) => controller.accountConnect(input),
       prepareWireGuardPeer: (input?: { rotate?: boolean | null }) => controller.prepareWireGuardPeer(input),
+      prepareLauncherNetworkPeer: (input?: Record<string, unknown>) => controller.prepareLauncherNetworkPeer(input),
       connectWireGuardPeer: (input?: { action?: 'up' | 'down' | 'restart' | null; skipDnsRepair?: boolean | null }) => controller.connectWireGuardPeer(input),
       applyDomainProxyFromManifest: (manifest?: Record<string, unknown> | null) =>
         controller.applyDomainProxyFromManifest(manifest),

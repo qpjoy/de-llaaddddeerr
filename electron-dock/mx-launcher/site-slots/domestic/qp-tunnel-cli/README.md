@@ -23,6 +23,8 @@ server, enroll into the HDO mesh without installing Electron:
 npm i -g @qpjoy/tunnel-cli
 HDO_PASSWORD='<password>' qp-tunnel-cli hdo enroll \
   --server-url 'https://domestic.example.com' \
+  --internal-url 'http://127.0.0.1:18090' \
+  --product-id h2o \
   --username 'internal-i' \
   --device-id internal-i \
   --label 'Internal I'
@@ -40,6 +42,8 @@ HDO_PASSWORD='<password>' sudo -E qp-tunnel-cli hdo enroll \
 The command:
 
 - logs in with username/password, or uses `--token` when provided
+- requests an MX Launcher Internal product lease when `--internal-url` is set
+- uses that lease as the WireGuard client address and adds the product route CIDR
 - uses `@qpjoy/electron-core-wireguard` to find/install the platform WireGuard engine
 - registers the machine as an HDO device
 - downloads the HDO manifest from `electron-server`
@@ -48,6 +52,22 @@ The command:
 - starts a system-level tunnel at boot. On Linux, if `wg-quick@.service` is not
   installed by the OS, the CLI writes a compatible systemd unit that uses the
   bundled WireGuard tools from the npm package.
+
+To test the new Internal allocator without applying WireGuard yet, run lease-only
+mode. If `--server-url` is omitted and `--internal-url` is present, the command
+automatically behaves as lease-only:
+
+```bash
+qp-tunnel-cli hdo enroll \
+  --internal-url 'http://127.0.0.1:18090' \
+  --product-id h2o \
+  --identity-kind anonymous \
+  --lease-only
+```
+
+For H2O, Internal assigns logged-in users from `10.90.0.1-10.90.99.254` and
+anonymous users from `10.90.100.1-10.90.254.254`, based on the Product Network
+Registry.
 
 Useful follow-up commands:
 
@@ -81,15 +101,24 @@ Run commands directly through the bundled script:
 
 ```bash
 qp-tunnel-cli status
-qp-tunnel-cli server-on
+qp-tunnel-cli egress-on
 qp-tunnel-cli update-subscription
 ```
 
 For server commands, `qp-tunnel-cli` re-runs itself with `sudo` when root is needed.
-Use `server-on` for public VPS hosts: it keeps Mihomo running as a local outbound
+Use `egress-on` for public VPS hosts: it keeps Mihomo running as a local outbound
 proxy and configures shell, SSH, Docker/containerd/buildkit proxy drop-ins without
 enabling TUN route takeover. Reserve `tun-on` for machines that are not serving
 public inbound traffic.
+
+Domestic bootstrap can install from an Internal-pushed subscription file before
+the WG relay can reach Internal:
+
+```bash
+sudo qp-tunnel-cli install \
+  --file /opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml
+sudo qp-tunnel-cli egress-on
+```
 
 Run any command through the active Mihomo local proxy:
 
@@ -109,7 +138,7 @@ Install the bundled script as a normal Linux command:
 sudo qp-tunnel-cli install-script
 sudo qp-tunnel-cli upgrade-systemd
 sudo mihomo-client status
-sudo mihomo-client server-on
+sudo mihomo-client egress-on
 ```
 
 Use a custom target when needed:

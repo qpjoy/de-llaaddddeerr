@@ -43,6 +43,7 @@ const DEFAULT_SYSTEM_PAC_ENABLED = true;
 
 let mainWindow = null;
 let host = null;
+let electronLauncherModulePromise = null;
 let isClosing = false;
 let hdoEventUnsubscribe = null;
 let systemDomainProxy = null;
@@ -410,9 +411,340 @@ function execFileText(command, args, timeoutMs) {
   });
 }
 
+function electronLauncherModule() {
+  if (!electronLauncherModulePromise) {
+    electronLauncherModulePromise = import('@qpjoy/electron-launcher');
+  }
+  return electronLauncherModulePromise;
+}
+
+function h2oLauncherProduct(launcherModule) {
+  return launcherModule.defineLauncherProduct({
+    productId: 'h2o',
+    displayName: 'H2O',
+    mode: 'embed',
+    launcherActions: {
+      network: true,
+      release: true,
+      update: true,
+      rollout: true,
+      appCenter: true
+    }
+  });
+}
+
+async function launcherRoutePlanProbe(rawPayload) {
+  const payload = rawPayload && typeof rawPayload === 'object' ? rawPayload : {};
+  const baseUrl = typeof payload.serverUrl === 'string' && payload.serverUrl.trim()
+    ? payload.serverUrl.trim().replace(/\/+$/, '')
+    : defaultHdoServerUrl();
+  if (!baseUrl) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: 'launcher-server-url-missing'
+    };
+  }
+  try {
+    const launcherModule = await electronLauncherModule();
+    const product = h2oLauncherProduct(launcherModule);
+    const launcher = launcherModule.createElectronLauncher({
+      baseUrl,
+      productId: typeof payload.productId === 'string' && payload.productId.trim() ? payload.productId.trim() : product.productId,
+      mode: product.mode,
+      installId: typeof payload.installId === 'string' ? payload.installId : undefined,
+      deviceId: typeof payload.deviceId === 'string' ? payload.deviceId : undefined,
+      siteId: typeof payload.siteId === 'string' ? payload.siteId : undefined,
+      publicKey: typeof payload.publicKey === 'string' ? payload.publicKey : undefined,
+      fetchImpl: timeoutFetch(2500)
+    });
+    const userId = typeof payload.userId === 'string' && payload.userId.trim() ? payload.userId.trim() : null;
+    const session = typeof launcher.connectNetwork === 'function'
+      ? await launcher.connectNetwork({
+          userId,
+          identityKind: userId ? 'user' : 'anonymous',
+          deviceLabel: 'HDO Demo',
+          requestId: `hdo-demo-launcher-connect-${Date.now()}`
+        })
+      : null;
+    const routePlan = session?.routePlan || await launcher.createRoutePlan({
+      userId: typeof payload.userId === 'string' ? payload.userId : null,
+      requestId: `hdo-demo-launcher-plan-${Date.now()}`
+    });
+    let launcherWireGuardPeer = null;
+    if (session) {
+      try {
+        launcherWireGuardPeer = await hdoCall('prepareLauncherNetworkPeer', { session });
+      } catch (err) {
+        launcherWireGuardPeer = {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err)
+        };
+      }
+    }
+    return {
+      ok: true,
+      product,
+      networkSession: session ? publicLauncherNetworkSession(session) : null,
+      launcherWireGuardPeer: publicLauncherWireGuardPeerPrepare(launcherWireGuardPeer),
+      routePlan: publicLauncherRoutePlan(routePlan)
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      baseUrl,
+      error: err instanceof Error ? err.message : String(err)
+    };
+  }
+}
+
+function timeoutFetch(timeoutMs) {
+  return async (url, init = {}) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, {
+        ...init,
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
+
+function publicLauncherRoutePlan(routePlan) {
+  return {
+    productId: routePlan.productId,
+    launcherMode: routePlan.launcherMode,
+    identityKind: routePlan.identityKind,
+    leaseIp: routePlan.leaseIp,
+    serviceVip: routePlan.serviceVip,
+    internalControlIp: routePlan.internalControlIp,
+    domesticGatewayIp: routePlan.domesticGatewayIp,
+    domesticRelayEndpoint: routePlan.domesticRelayEndpoint || null,
+    domesticRelayPublicKeyReady: Boolean(routePlan.domesticRelayPublicKey),
+    domesticSiteId: routePlan.domesticSiteId,
+    overseaSiteId: routePlan.overseaSiteId,
+    dnsServer: routePlan.dnsServer,
+    routeCidrs: routePlan.routeCidrs,
+    updatePolicy: routePlan.updatePolicy,
+    rateLimitProfile: routePlan.rateLimitProfile,
+    dnsPolicyId: routePlan.dnsPolicyId,
+    licensePolicyId: routePlan.licensePolicyId,
+    snapshotId: routePlan.snapshotId,
+    refreshKey: routePlan.refreshKey
+  };
+}
+
+function publicLauncherWireGuardPeerPrepare(result) {
+  const row = objectValue(result);
+  if (!row) return null;
+  const peer = objectValue(row.peer);
+  return {
+    ok: row.ok === true,
+    message: typeof row.message === 'string' ? row.message : null,
+    error: typeof row.error === 'string' ? row.error : null,
+    launcherNetwork: objectValue(row.launcherNetwork),
+    routeProbe: objectValue(row.routeProbe),
+    peer: peer ? {
+      publicKey: typeof peer.publicKey === 'string' ? peer.publicKey : null,
+      overlayIp: typeof peer.overlayIp === 'string' ? peer.overlayIp : null,
+      address: typeof peer.address === 'string' ? peer.address : null,
+      allowedIps: Array.isArray(peer.allowedIps) ? peer.allowedIps : null,
+      dns: Array.isArray(peer.dns) ? peer.dns : null,
+      dnsDomains: Array.isArray(peer.dnsDomains) ? peer.dnsDomains : null,
+      domesticRelayEndpoint: typeof peer.domesticRelayEndpoint === 'string' ? peer.domesticRelayEndpoint : null,
+      domesticRelayPublicKeyReady: Boolean(peer.domesticRelayPublicKey),
+      configReady: Boolean(peer.configPath),
+      canUseDefaultMesh: peer.canUseDefaultMesh === true,
+      lastError: typeof peer.lastError === 'string' ? peer.lastError : null,
+      updatedAt: typeof peer.updatedAt === 'string' ? peer.updatedAt : null
+    } : null
+  };
+}
+
+async function connectH2oLauncherNetwork(rawPayload, identityKind) {
+  const payload = objectValue(rawPayload) || {};
+  const baseUrl = typeof payload.serverUrl === 'string' && payload.serverUrl.trim()
+    ? payload.serverUrl.trim().replace(/\/+$/, '')
+    : defaultHdoServerUrl();
+  if (!baseUrl) {
+    return {
+      ok: false,
+      source: 'launcher-network',
+      mode: identityKind === 'user' ? 'account' : 'anonymous',
+      reason: 'launcher-server-url-missing',
+      message: 'Launcher server URL is missing.'
+    };
+  }
+
+  let auth = null;
+  if (identityKind === 'user') {
+    const identifier = stringValue(payload.identifier);
+    const password = stringValue(payload.password);
+    if (identifier || password) {
+      if (!identifier || !password) throw new Error('账号和密码必须一起填写，或先在插件市场登录');
+      auth = await hdoCall('login', { serverUrl: baseUrl, identifier, password });
+    }
+  }
+
+  const snapshot = await hdoCall('snapshot').catch(() => null);
+  const settings = objectValue(snapshot?.settings) || {};
+  const anonymous = objectValue(settings.anonymous) || {};
+  const peer = objectValue(settings.wireGuardPeer) || {};
+  const session = objectValue(snapshot?.session) || {};
+  const user = objectValue(auth?.user) || objectValue(session.user) || {};
+  const installId =
+    stringValue(payload.installId) ||
+    stringValue(anonymous.installId) ||
+    stringValue(settings.installId) ||
+    stringValue(settings.deviceId) ||
+    `hdo-demo-${randomUUID()}`;
+  const deviceId =
+    stringValue(payload.deviceId) ||
+    stringValue(settings.deviceId) ||
+    `hdo-device-${installId}`;
+  const userId = identityKind === 'user'
+    ? stringValue(payload.userId) || stringValue(user.id) || stringValue(user.userId) || stringValue(settings.sessionUserId)
+    : null;
+  const launcherModule = await electronLauncherModule();
+  const product = h2oLauncherProduct(launcherModule);
+  const launcher = launcherModule.createElectronLauncher({
+    baseUrl,
+    productId: product.productId,
+    mode: product.mode,
+    installId,
+    deviceId,
+    siteId: stringValue(payload.siteId) || stringValue(settings.siteId) || undefined,
+    privateKey: stringValue(peer.privateKey) || undefined,
+    fetchImpl: timeoutFetch(5000)
+  });
+  const networkSession = await launcher.connectNetwork({
+    identityKind,
+    userId,
+    deviceLabel: identityKind === 'user' ? 'MX HDO Account' : 'MX HDO Anonymous',
+    platform: process.platform,
+    requestId: `hdo-demo-launcher-${identityKind}-${Date.now()}`
+  });
+  const prepared = await hdoCall('prepareLauncherNetworkPeer', {
+    session: networkSession,
+    deviceLabel: 'MX HDO',
+    platform: process.platform
+  });
+  const preparedPublic = publicLauncherWireGuardPeerPrepare(prepared);
+  let connected = null;
+  let latestSnapshot = null;
+  if (prepared && typeof prepared === 'object' && prepared.ok === true && payload.autoConnect !== false) {
+    connected = await hdoCall('connectWireGuardPeer', {
+      action: 'restart',
+      skipIfActive: false,
+      fallbackToAppManaged: false,
+      skipDnsRepair: systemPacEnabled === true
+    }).catch((err) => ({
+      ok: false,
+      error: err instanceof Error ? err.message : String(err)
+    }));
+    latestSnapshot = await hdoCall('snapshot').catch(() => null);
+  }
+  return {
+    ok: preparedPublic?.ok === true,
+    source: 'launcher-network',
+    mode: identityKind === 'user' ? 'account' : 'anonymous',
+    message: preparedPublic?.ok === true
+      ? '已通过 Launcher Network 准备 H2O WireGuard 配置。'
+      : preparedPublic?.message || preparedPublic?.error || 'Launcher Network 配置生成失败。',
+    auth,
+    networkSession: publicLauncherNetworkSession(networkSession),
+    routePlan: publicLauncherRoutePlan(networkSession.routePlan),
+    prepared: preparedPublic,
+    connected,
+    wireGuardStatus: latestSnapshot?.wireGuardStatus || null,
+    peer: preparedPublic?.peer || null,
+    domainProxy: null
+  };
+}
+
+async function connectH2oWithLauncherFallback(rawPayload, identityKind, legacyConnect) {
+  const launcherResult = await connectH2oLauncherNetwork(rawPayload, identityKind).catch((err) => ({
+    ok: false,
+    source: 'launcher-network',
+    mode: identityKind === 'user' ? 'account' : 'anonymous',
+    error: err instanceof Error ? err.message : String(err)
+  }));
+  if (launcherResult.ok === true || launcherResult.connected) return launcherResult;
+  const launcherNetworkAttempt = await rememberLauncherNetworkAttempt(launcherResult);
+  const legacyResult = await legacyConnect();
+  return {
+    ...legacyResult,
+    source: 'legacy-hdo-manifest',
+    launcherNetworkAttempt
+  };
+}
+
+async function rememberLauncherNetworkAttempt(result) {
+  const attempt = publicLauncherNetworkAttempt(result);
+  if (!attempt) return null;
+  const next = {
+    ...attempt,
+    fallback: 'legacy-hdo-manifest',
+    updatedAt: new Date().toISOString()
+  };
+  await hdoCall('updateSettings', { lastLauncherNetworkAttempt: next }).catch(() => null);
+  return next;
+}
+
+function publicLauncherNetworkAttempt(result) {
+  const row = objectValue(result);
+  if (!row) return null;
+  return {
+    ok: row.ok === true,
+    source: stringValue(row.source),
+    mode: stringValue(row.mode),
+    reason: stringValue(row.reason),
+    message: stringValue(row.message),
+    error: stringValue(row.error),
+    prepared: publicLauncherWireGuardPeerPrepare(row.prepared) || objectValue(row.prepared),
+    routePlan: objectValue(row.routePlan),
+    updatedAt: stringValue(row.updatedAt)
+  };
+}
+
+function publicLauncherNetworkSession(session) {
+  return {
+    wireGuard: {
+      publicKey: session.wireGuard?.publicKey || null,
+      privateKeyReady: Boolean(session.wireGuard?.privateKey),
+      source: session.wireGuard?.source || null
+    },
+    lease: session.lease ? {
+      leaseId: session.lease.leaseId,
+      productId: session.lease.productId,
+      launcherMode: session.lease.launcherMode,
+      identityKind: session.lease.identityKind,
+      leaseIp: session.lease.leaseIp,
+      serviceVip: session.lease.serviceVip,
+      internalControlIp: session.lease.internalControlIp,
+      domesticGatewayIp: session.lease.domesticGatewayIp,
+      domesticSiteId: session.lease.domesticSiteId,
+      status: session.lease.status
+    } : null,
+    routePlan: publicLauncherRoutePlan(session.routePlan)
+  };
+}
+
+function objectValue(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+function stringValue(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 function isAnonymousHdoSnapshot(snapshot) {
   const settings = snapshot?.settings || {};
   const peer = settings.wireGuardPeer || {};
+  if (peer.launcherNetwork && peer.launcherNetwork.identityKind === 'anonymous') return true;
   if (settings.anonymous && settings.anonymous.mode === 'anonymous') return true;
   if (String(settings.deviceId || '').startsWith('hdo-anon-')) return true;
   return String(peer.overlayIp || '').startsWith('100.91.');
@@ -750,6 +1082,8 @@ if (gotSingleInstanceLock) {
         };
       });
 
+      ipcMain.handle('demo:launcher-route-plan', async (_e, payload) => launcherRoutePlanProbe(payload));
+
       ipcMain.handle('demo:set-system-pac-enabled', async (_e, enabled) => {
         systemPacEnabled = enabled === true;
         writeClientSettings({ systemPacEnabled });
@@ -779,15 +1113,16 @@ if (gotSingleInstanceLock) {
       });
 
       ipcMain.handle('demo:hdo-anonymous-connect', async (_e, payload) => {
-        const result = await hdoCall('anonymousConnect', {
+        const legacyConnect = () => hdoCall('anonymousConnect', {
           ...(payload && typeof payload === 'object' ? payload : {}),
           relayMode: FAST_RELAY_MODE,
           appId: 'qpjoy-hdo',
           deviceLabel: 'MX HDO',
           skipDnsRepair: systemPacEnabled === true
         });
+        const result = await connectH2oWithLauncherFallback(payload, 'anonymous', legacyConnect);
         const autoConnect = !payload || typeof payload !== 'object' || payload.autoConnect !== false;
-        if (result && typeof result === 'object' && result.ok !== false && autoConnect) {
+        if (result && typeof result === 'object' && result.ok !== false && autoConnect && result.domainProxy) {
           return {
             ...result,
             systemDomainProxy: await safelyApplySystemDomainProxy(result.domainProxy, 'anonymous-connect')
@@ -798,15 +1133,19 @@ if (gotSingleInstanceLock) {
 
       ipcMain.handle('demo:hdo-switch-anonymous', async (_e, payload) => {
         const networkSwitch = await anonymousNetworkSwitchHint();
-        const result = await hdoCall('anonymousConnect', {
+        const switchPayload = {
           ...(payload && typeof payload === 'object' ? payload : {}),
+          autoConnect: true
+        };
+        const legacyConnect = () => hdoCall('anonymousConnect', {
+          ...switchPayload,
           relayMode: FAST_RELAY_MODE,
           appId: 'qpjoy-hdo',
           deviceLabel: 'MX HDO',
-          autoConnect: true,
           skipDnsRepair: systemPacEnabled === true
         });
-        if (result && typeof result === 'object' && result.ok !== false) {
+        const result = await connectH2oWithLauncherFallback(switchPayload, 'anonymous', legacyConnect);
+        if (result && typeof result === 'object' && result.ok !== false && result.domainProxy) {
           return {
             ...result,
             networkSwitch,
@@ -818,13 +1157,14 @@ if (gotSingleInstanceLock) {
 
       ipcMain.handle('demo:hdo-account-connect', async (_e, payload) => {
         const accountSwitch = await accountNetworkSwitchHint();
-        const result = await hdoCall('accountConnect', {
+        const legacyConnect = () => hdoCall('accountConnect', {
           ...(payload && typeof payload === 'object' ? payload : {}),
           relayMode: FAST_RELAY_MODE,
           skipDnsRepair: systemPacEnabled === true
         });
+        const result = await connectH2oWithLauncherFallback(payload, 'user', legacyConnect);
         const autoConnect = !payload || typeof payload !== 'object' || payload.autoConnect !== false;
-        if (result && typeof result === 'object' && result.ok !== false && autoConnect) {
+        if (result && typeof result === 'object' && result.ok !== false && autoConnect && result.domainProxy) {
           return {
             ...result,
             accountSwitch,

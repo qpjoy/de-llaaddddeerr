@@ -1,21 +1,21 @@
 {
-  "id": "hdo",
-  "name": "HDO",
+  "id": "hdi",
+  "name": "HDI",
   "legacyProductId": "hdo",
-  "displayName": "HDO",
-  "description": "MX Launcher-managed HDO desktop product compatible with the existing HDO backend APIs.",
+  "displayName": "HDI",
+  "description": "MX Launcher-managed Home-Domestic-Internal network runtime compatible with the existing legacy HDO backend APIs.",
   "category": "network",
   "channels": ["stable", "beta", "internal"],
   "platforms": ["darwin", "win32"],
   "capabilities": ["network.mesh", "wireguard", "dns", "route", "employee-login", "visitor-access"],
   "backend": {
-    "mxLauncherAdminApi": "/api/v1/mx-launcher/admin/products/hdo",
+    "mxLauncherAdminApi": "/api/v1/mx-launcher/admin/products/hdi",
     "legacyApiBase": "/api/v1/hdo",
-    "configApi": "/api/v1/mx-launcher/admin/products/hdo/config"
+    "configApi": "/api/v1/mx-launcher/admin/products/hdi/config"
   },
   "artifacts": {
-    "resourcesDirectory": "products/hdo",
-    "serviceProfile": "hdo-network"
+    "resourcesDirectory": "products/hdi",
+    "serviceProfile": "hdi-network"
   },
   "config": [
     {

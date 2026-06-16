@@ -23,11 +23,15 @@ import type {
   DnsZoneSnapshotInput,
   IdentityLinkRequest,
   IssueTokenInput,
+  LauncherNetworkLease,
+  LauncherNetworkLeaseInput,
   LauncherNetworkSnapshot,
   LauncherNetworkSnapshotInput,
   LauncherNetworkMihomoSite,
   LauncherNetworkMihomoSiteInput,
   LauncherNetworkReachabilityPlan,
+  LauncherProductNetwork,
+  LauncherProductNetworkInput,
   LogEntryInput,
   MihomoSubscriptionRender,
   PermissionGrant,
@@ -194,6 +198,12 @@ export interface PlatformStore {
   upsertLauncherNetworkMihomoSite(input: LauncherNetworkMihomoSiteInput): MaybePromise<LauncherNetworkMihomoSite>;
   getLauncherNetworkMihomoSite(siteId: string): MaybePromise<LauncherNetworkMihomoSite | null>;
   getLauncherNetworkMihomoReachability(siteId: string): MaybePromise<LauncherNetworkReachabilityPlan | null>;
+  listLauncherProductNetworks(): MaybePromise<LauncherProductNetwork[]>;
+  getLauncherProductNetwork(productId: string): MaybePromise<LauncherProductNetwork | null>;
+  upsertLauncherProductNetwork(input: LauncherProductNetworkInput): MaybePromise<LauncherProductNetwork>;
+  listLauncherNetworkLeases(productId?: string | null): MaybePromise<LauncherNetworkLease[]>;
+  getLauncherNetworkLease(leaseId: string): MaybePromise<LauncherNetworkLease | null>;
+  enrollLauncherNetworkLease(input: LauncherNetworkLeaseInput): MaybePromise<LauncherNetworkLease>;
   renderHysteria2MihomoSubscription(siteId: string, username: string): MaybePromise<MihomoSubscriptionRender | null>;
   listRuntimeFeaturePolicies(featureKey?: string | null): MaybePromise<RuntimeFeaturePolicy[]>;
   getRuntimeFeaturePolicy(policyId: string): MaybePromise<RuntimeFeaturePolicy | null>;

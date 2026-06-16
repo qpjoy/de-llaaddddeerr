@@ -32,7 +32,7 @@ PostgreSQL for deployable shadow checks:
 
 - AppCenter registry with built-in `h2o`.
 - Permission registry and audit event recording.
-- Launcher Network guest snapshot with `10.91.0.0/16` policy.
+- Launcher Network product snapshot with configured user/anonymous lease ranges.
 - Release update policy split between platform-critical and app-managed
   components.
 - Test Center run, step, and gate verdict.

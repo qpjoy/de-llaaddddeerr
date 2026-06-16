@@ -1,23 +1,23 @@
 import type { MxLauncherCatalog, MxProductDefinition } from './contracts/mx.js';
 
-export const hdoProduct: MxProductDefinition = {
-  id: 'hdo',
-  name: 'HDO',
+export const hdiProduct: MxProductDefinition = {
+  id: 'hdi',
+  name: 'HDI',
   legacyProductId: 'hdo',
-  displayName: 'HDO',
-  description: 'MX-managed HDO desktop product compatible with existing HDO APIs.',
+  displayName: 'HDI',
+  description: 'MX-managed Home-Domestic-Internal network runtime compatible with existing legacy HDO APIs.',
   category: 'network',
   channels: ['stable', 'beta', 'internal'],
   platforms: ['darwin', 'win32'],
   capabilities: ['network.mesh', 'wireguard', 'dns', 'route', 'employee-login', 'visitor-access'],
   backend: {
-    mxLauncherAdminApi: '/api/v1/mx-launcher/admin/products/hdo',
+    mxLauncherAdminApi: '/api/v1/mx-launcher/admin/products/hdi',
     legacyApiBase: '/api/v1/hdo',
-    configApi: '/api/v1/mx-launcher/admin/products/hdo/config'
+    configApi: '/api/v1/mx-launcher/admin/products/hdi/config'
   },
   artifacts: {
-    resourcesDirectory: 'products/hdo',
-    serviceProfile: 'hdo-network'
+    resourcesDirectory: 'products/hdi',
+    serviceProfile: 'hdi-network'
   },
   config: [
     {
@@ -27,7 +27,7 @@ export const hdoProduct: MxProductDefinition = {
       valueType: 'string',
       required: false,
       defaultValue: '',
-      description: 'MX Launcher connects HDO to this MX Launcher Server base URL.'
+      description: 'MX Launcher connects HDI to this MX Launcher Server base URL.'
     },
     {
       key: 'defaultMode',
@@ -49,7 +49,7 @@ export const hdoProduct: MxProductDefinition = {
   ]
 };
 
-export const launcherProducts: MxProductDefinition[] = [hdoProduct];
+export const launcherProducts: MxProductDefinition[] = [hdiProduct];
 
 export const mxLauncherCatalog: MxLauncherCatalog = {
   schemaVersion: 1,

@@ -19,7 +19,86 @@ export class LauncherNetworkController {
         userId: nullableString(body.userId),
         publicKey: nullableString(body.publicKey),
         appId: nullableString(body.appId) ?? 'h2o',
+        launcherMode: launcherProductMode(nullableString(body.launcherMode)),
         requestId: nullableString(body.requestId) ?? undefined
+      })
+    };
+  }
+
+  @Post('enrollments')
+  async enrollLease(@Body() rawBody: unknown) {
+    const body = asRecord(rawBody);
+    return {
+      lease: await this.store.enrollLauncherNetworkLease({
+        productId: nullableString(body.productId),
+        mode: nullableString(body.mode),
+        identityKind: nullableString(body.identityKind),
+        installId: nullableString(body.installId),
+        deviceId: nullableString(body.deviceId),
+        siteId: nullableString(body.siteId),
+        userId: nullableString(body.userId),
+        publicKey: nullableString(body.publicKey),
+        deviceLabel: nullableString(body.deviceLabel),
+        platform: nullableString(body.platform),
+        requestedBy: nullableString(body.requestedBy),
+        requestId: nullableString(body.requestId)
+      })
+    };
+  }
+
+  @Get('leases')
+  async listLeases() {
+    return {
+      leases: await this.store.listLauncherNetworkLeases()
+    };
+  }
+
+  @Get('leases/:leaseId')
+  async getLease(@Param('leaseId') leaseId: string) {
+    const lease = await this.store.getLauncherNetworkLease(leaseId);
+    if (!lease) throw new NotFoundException('Launcher network lease not found');
+    return { lease };
+  }
+
+  @Get('products')
+  async listProductNetworks() {
+    return {
+      products: await this.store.listLauncherProductNetworks()
+    };
+  }
+
+  @Get('products/:productId')
+  async getProductNetwork(@Param('productId') productId: string) {
+    const product = await this.store.getLauncherProductNetwork(productId);
+    if (!product) throw new NotFoundException('Launcher product network not found');
+    return { product };
+  }
+
+  @Post('products/:productId')
+  async upsertProductNetwork(@Param('productId') productId: string, @Body() rawBody: unknown) {
+    const body = asRecord(rawBody);
+    return {
+      product: await this.store.upsertLauncherProductNetwork({
+        productId,
+        displayName: nullableString(body.displayName),
+        mode: nullableString(body.mode),
+        productIndex: numberValue(body.productIndex),
+        serviceVip: nullableString(body.serviceVip),
+        userCidr: nullableString(body.userCidr),
+        anonymousCidr: nullableString(body.anonymousCidr),
+        userLeaseStart: nullableString(body.userLeaseStart),
+        userLeaseEnd: nullableString(body.userLeaseEnd),
+        anonymousLeaseStart: nullableString(body.anonymousLeaseStart),
+        anonymousLeaseEnd: nullableString(body.anonymousLeaseEnd),
+        defaultDomesticSiteId: nullableString(body.defaultDomesticSiteId),
+        defaultOverseaSiteId: nullableString(body.defaultOverseaSiteId),
+        updatePolicy: nullableString(body.updatePolicy),
+        rateLimitProfile: nullableString(body.rateLimitProfile),
+        dnsPolicyId: nullableString(body.dnsPolicyId),
+        licensePolicyId: nullableString(body.licensePolicyId),
+        enabled: typeof body.enabled === 'boolean' ? body.enabled : null,
+        requestedBy: nullableString(body.requestedBy),
+        requestId: nullableString(body.requestId)
       })
     };
   }
@@ -54,4 +133,15 @@ export class LauncherNetworkController {
       })
     };
   }
+}
+
+function launcherProductMode(value: string | null): 'standalone' | 'embed' | null {
+  if (value === 'standalone' || value === 'embed') return value;
+  return null;
+}
+
+function numberValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  return null;
 }

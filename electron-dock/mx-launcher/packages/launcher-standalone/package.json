@@ -1,0 +1,24 @@
+{
+  "name": "@qpjoy/mx-launcher-standalone",
+  "version": "0.1.0",
+  "description": "Standalone MX Launcher shell adapter that uses launcher-core for AppCenter-wide network control.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@qpjoy/mx-launcher-core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@qpjoy/mx-launcher-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "pnpm --filter @qpjoy/mx-launcher-core build && pnpm --filter @qpjoy/mx-launcher-embed-sdk build && pnpm --filter @qpjoy/mx-launcher-standalone build && pnpm --filter @qpjoy/electron-launcher typecheck && pnpm --dir server typecheck && pnpm --dir desktop typecheck",
+    "build:packages": "pnpm --filter @qpjoy/mx-launcher-core build && pnpm --filter @qpjoy/mx-launcher-embed-sdk build && pnpm --filter @qpjoy/mx-launcher-standalone build && pnpm --filter @qpjoy/electron-launcher build"
+  }
+}

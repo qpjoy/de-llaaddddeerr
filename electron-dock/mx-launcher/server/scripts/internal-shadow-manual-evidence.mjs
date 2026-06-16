@@ -70,8 +70,8 @@ function checklistItems() {
       label: 'Server URL is http://127.0.0.1:18090'
     },
     {
-      id: 'app-center-hdo',
-      label: 'App Center loads HDO without console errors'
+      id: 'app-center-hdi',
+      label: 'App Center loads HDI without console errors'
     },
     {
       id: 'admin-refresh',

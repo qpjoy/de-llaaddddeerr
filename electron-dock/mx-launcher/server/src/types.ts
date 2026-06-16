@@ -1010,6 +1010,7 @@ export interface SiteSlotDomesticWireGuardSecretInput {
   listenPort?: number | null;
   domesticGatewayIp?: string | null;
   domesticGatewayCidr?: string | null;
+  productRelayCidrs?: string[] | null;
   userRelayCidr?: string | null;
   internalServiceIp?: string | null;
   internalServiceCidr?: string | null;
@@ -1032,6 +1033,7 @@ export interface SiteSlotDomesticWireGuardSecret {
   listenPort: number;
   domesticGatewayIp: string;
   domesticGatewayCidr: string;
+  productRelayCidrs: string[];
   userRelayCidr: string;
   internalServiceIp: string;
   internalServiceCidr: string;
@@ -1386,7 +1388,107 @@ export interface LauncherNetworkSnapshotInput {
   userId?: string | null;
   publicKey?: string | null;
   appId?: string;
+  launcherMode?: LauncherProductMode | null;
   requestId?: string;
+}
+
+export type LauncherProductMode = 'standalone' | 'embed';
+export type LauncherIdentityKind = 'user' | 'anonymous';
+export type LauncherProductUpdatePolicy = 'launcher-managed' | 'app-managed' | 'host-managed';
+
+export interface LauncherProductNetworkInput {
+  productId?: string | null;
+  displayName?: string | null;
+  mode?: LauncherProductMode | string | null;
+  productIndex?: number | null;
+  serviceVip?: string | null;
+  userCidr?: string | null;
+  anonymousCidr?: string | null;
+  userLeaseStart?: string | null;
+  userLeaseEnd?: string | null;
+  anonymousLeaseStart?: string | null;
+  anonymousLeaseEnd?: string | null;
+  defaultDomesticSiteId?: string | null;
+  defaultOverseaSiteId?: string | null;
+  updatePolicy?: LauncherProductUpdatePolicy | string | null;
+  rateLimitProfile?: string | null;
+  dnsPolicyId?: string | null;
+  licensePolicyId?: string | null;
+  enabled?: boolean | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface LauncherProductNetwork {
+  productId: string;
+  displayName: string;
+  mode: LauncherProductMode;
+  productIndex: number;
+  fabricCidr: '10.88.0.0/16';
+  internalControlIp: '10.88.88.88';
+  serviceVip: string;
+  userCidr: string;
+  anonymousCidr: string;
+  userLeaseStart: string;
+  userLeaseEnd: string;
+  anonymousLeaseStart: string;
+  anonymousLeaseEnd: string;
+  defaultDomesticSiteId: string;
+  defaultOverseaSiteId: string;
+  updatePolicy: LauncherProductUpdatePolicy;
+  rateLimitProfile: string;
+  dnsPolicyId: string;
+  licensePolicyId: string;
+  enabled: boolean;
+  notes: string[];
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export interface LauncherNetworkLeaseInput {
+  productId?: string | null;
+  mode?: LauncherProductMode | string | null;
+  identityKind?: LauncherIdentityKind | string | null;
+  installId?: string | null;
+  deviceId?: string | null;
+  siteId?: string | null;
+  userId?: string | null;
+  publicKey?: string | null;
+  deviceLabel?: string | null;
+  platform?: string | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface LauncherNetworkLease {
+  leaseId: string;
+  leaseKey: string;
+  environment: string;
+  productId: string;
+  launcherMode: LauncherProductMode;
+  identityKind: LauncherIdentityKind;
+  sequence: number;
+  installId: string;
+  deviceId: string;
+  siteId: string;
+  userId: string | null;
+  cidr: string;
+  leaseIp: string;
+  serviceVip: string;
+  internalControlIp: '10.88.88.88';
+  domesticGatewayIp: '10.88.0.1';
+  domesticSiteId: string;
+  overseaSiteId: string;
+  publicKey: string | null;
+  deviceLabel: string | null;
+  platform: string | null;
+  status: 'active';
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string;
+  updatedAt: string;
 }
 
 export interface LauncherNetworkSnapshot {
@@ -1398,7 +1500,10 @@ export interface LauncherNetworkSnapshot {
   userId: string | null;
   mode: 'guest' | 'user';
   overlayPolicy: {
-    cidr: '10.91.0.0/16' | '10.89.0.0/16';
+    productId: string;
+    launcherMode: LauncherProductMode;
+    identityKind: LauncherIdentityKind;
+    cidr: string;
     leaseIp: string;
     relayMode: 'h2i';
   };
@@ -1428,6 +1533,18 @@ export interface LauncherNetworkSnapshot {
 
 export interface LauncherNetworkTopology {
   model: 'internal-authority-domestic-relay-oversea-access-v1';
+  product: {
+    productId: string;
+    displayName: string;
+    mode: LauncherProductMode;
+    serviceVip: string;
+    userCidr: string;
+    anonymousCidr: string;
+    updatePolicy: LauncherProductUpdatePolicy;
+    rateLimitProfile: string;
+    dnsPolicyId: string;
+    licensePolicyId: string;
+  };
   bootstrap: {
     order: Array<
       | 'deploy-oversea-access-if-domestic-needs-egress'
@@ -1455,7 +1572,7 @@ export interface LauncherNetworkTopology {
   homeLease: {
     mode: 'guest' | 'user';
     ip: string;
-    cidr: '10.91.0.0/16' | '10.89.0.0/16';
+    cidr: string;
   };
   domestic: {
     siteId: string;
@@ -1478,7 +1595,7 @@ export interface LauncherNetworkTopology {
     requiresEnrollLease: true;
     relayPeer: {
       required: true;
-      fixedIp: '10.90.0.10';
+      fixedIp: '10.88.88.88';
       initiatedBy: 'internal-outbound-to-domestic-public-wg';
       purpose: 'make-internal-reachable-without-public-ip';
     };
@@ -1513,6 +1630,8 @@ export interface LauncherNetworkTopology {
       interfaceName: 'mx-domestic';
       listenPort: 51820;
       gatewayIp: '10.88.0.1';
+      publicEndpoint: string | null;
+      publicKey: string | null;
       configArtifact: 'mx-domestic-wg-relay.conf';
       envArtifact: 'mx-domestic-relay.env';
     };
@@ -1527,7 +1646,7 @@ export interface LauncherNetworkTopology {
     };
     internalServicePeer: {
       role: 'internal-service';
-      fixedIp: '10.90.0.10';
+      fixedIp: '10.88.88.88';
       allowedIps: string[];
       configArtifact: 'mx-internal-service-peer.conf';
       privateKeyPlacement: 'internal-only';
@@ -1536,7 +1655,7 @@ export interface LauncherNetworkTopology {
     homePeer: {
       role: 'guest' | 'user';
       leaseIp: string;
-      cidr: '10.91.0.0/16' | '10.89.0.0/16';
+      cidr: string;
       allowedIps: string[];
       publicKey: string | null;
       publicKeyStatus: 'ready-to-append' | 'pending-public-key';

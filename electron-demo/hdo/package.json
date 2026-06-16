@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@qpjoy/electron-market": "^0.4.2",
+    "@qpjoy/electron-launcher": "^0.1.0",
     "@qpjoy/electron-plugin-hdo": "^1.0.0",
     "@qpjoy/electron-plugin-sdk": "^0.1.4",
     "@qpjoy/electron-plugin-tunnel": "^0.1.17"

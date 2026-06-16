@@ -1,6 +1,6 @@
 export {
   getLauncherProduct,
-  hdoProduct,
+  hdiProduct,
   launcherProducts,
   mxLauncherCatalog
 } from './catalog.js';
@@ -44,10 +44,10 @@ export type {
 } from './service/contract.js';
 
 export type {
-  HdoAnonymousBootstrapRequest,
-  HdoEmployeeLoginRequest,
-  HdoLauncherBackendConfig,
-  HdoLauncherConnectionState,
-  HdoLauncherMode,
-  HdoLauncherSession
-} from './contracts/hdo.js';
+  HdiAnonymousBootstrapRequest,
+  HdiEmployeeLoginRequest,
+  HdiLauncherBackendConfig,
+  HdiLauncherConnectionState,
+  HdiLauncherMode,
+  HdiLauncherSession
+} from './contracts/hdi.js';

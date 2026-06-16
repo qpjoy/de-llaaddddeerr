@@ -19,6 +19,7 @@ Installed QPJoy packages in npm mode:
 | Package | Purpose |
 | --- | --- |
 | `@qpjoy/electron-market` | Published marketplace host and admin UI |
+| `@qpjoy/electron-launcher` | Product-facing Launcher client for route plans, release/update/rollout contracts |
 | `@qpjoy/electron-plugin-sdk` | Published plugin protocol/types used by the market runtime |
 | `@qpjoy/electron-plugin-tunnel` | Published tunnel seed plugin, installed offline on first app start |
 | `@qpjoy/electron-plugin-hdo` | Published HDO plugin for client/server panels |

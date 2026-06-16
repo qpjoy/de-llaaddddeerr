@@ -18,6 +18,7 @@ export interface HdoPluginSettings {
     updatedAt?: string | null;
   } | null;
   domainProxy?: Record<string, unknown> | null;
+  lastLauncherNetworkAttempt?: Record<string, unknown> | null;
   lastTaskRun?: Record<string, unknown> | null;
   lastNotification?: Record<string, unknown> | null;
   lastManifest?: Record<string, unknown> | null;
@@ -70,6 +71,9 @@ export interface HdoWireGuardPeerSettings {
   allowedIps?: string[] | null;
   dns?: string[] | null;
   dnsDomains?: string[] | null;
+  domesticRelayEndpoint?: string | null;
+  domesticRelayPublicKey?: string | null;
+  launcherNetwork?: unknown | null;
   h2iDirectCandidateIps?: string[] | null;
   routeProbe?: unknown | null;
   canUseDefaultMesh?: boolean | null;

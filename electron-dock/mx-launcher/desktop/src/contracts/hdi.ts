@@ -1,10 +1,10 @@
-export type HdoLauncherMode = 'visitor' | 'employee';
-export type HdoLauncherConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnecting' | 'error';
+export type HdiLauncherMode = 'visitor' | 'employee';
+export type HdiLauncherConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnecting' | 'error';
 
 /**
- * Compatible with POST /api/v1/hdo/anonymous/bootstrap.
+ * Compatible with the legacy POST /api/v1/hdo/anonymous/bootstrap endpoint.
  */
-export interface HdoAnonymousBootstrapRequest {
+export interface HdiAnonymousBootstrapRequest {
   publicKey: string;
   installId: string;
   appId?: string | null;
@@ -14,16 +14,16 @@ export interface HdoAnonymousBootstrapRequest {
   relayMode?: string | null;
 }
 
-export interface HdoEmployeeLoginRequest {
+export interface HdiEmployeeLoginRequest {
   identifier: string;
   password: string;
   deviceLabel?: string | null;
   platform?: string | null;
 }
 
-export interface HdoLauncherSession {
-  mode: HdoLauncherMode;
-  connectionState: HdoLauncherConnectionState;
+export interface HdiLauncherSession {
+  mode: HdiLauncherMode;
+  connectionState: HdiLauncherConnectionState;
   userId: string | null;
   deviceId: string | null;
   meshGroupId: string | null;
@@ -32,12 +32,12 @@ export interface HdoLauncherSession {
   profileId: string | null;
 }
 
-export interface HdoLauncherBackendConfig {
-  productId: 'hdo';
+export interface HdiLauncherBackendConfig {
+  productId: 'hdi';
   legacyProductId: 'hdo';
   apiBaseUrl: string;
   bootstrapEndpoint: '/api/v1/hdo/anonymous/bootstrap';
   readinessEndpoint: '/api/v1/hdo/readiness';
   deviceTasksEndpoint: '/api/v1/hdo/device-tasks';
-  launcherAdminEndpoint: '/api/v1/mx-launcher/admin/products/hdo';
+  launcherAdminEndpoint: '/api/v1/mx-launcher/admin/products/hdi';
 }

@@ -24,8 +24,14 @@ import type {
   DnsZoneRecord,
   DnsZoneSnapshot,
   IssueTokenInput,
+  LauncherNetworkLease,
+  LauncherNetworkLeaseInput,
   LauncherNetworkMihomoSite,
   LauncherNetworkMihomoSiteInput,
+  LauncherProductNetwork,
+  LauncherProductNetworkInput,
+  LauncherProductMode,
+  LauncherProductUpdatePolicy,
   LauncherNetworkReachabilityPlan,
   LauncherNetworkSnapshot,
   LauncherNetworkTopology,
@@ -400,6 +406,163 @@ export function builtinAppCenterApps(): AppCenterApp[] {
   ];
 }
 
+export function builtinLauncherProductNetworks(config: RuntimeConfig): LauncherProductNetwork[] {
+  const now = new Date().toISOString();
+  return [
+    buildLauncherProductNetwork(config, {
+      productId: 'launcher',
+      displayName: 'Launcher Standalone',
+      mode: 'standalone',
+      productIndex: 0,
+      serviceVip: '10.88.100.1',
+      userCidr: '10.89.0.0/16',
+      anonymousCidr: '10.89.0.0/16',
+      userLeaseStart: '10.89.0.1',
+      userLeaseEnd: '10.89.99.254',
+      anonymousLeaseStart: '10.89.100.1',
+      anonymousLeaseEnd: '10.89.254.254',
+      updatePolicy: 'launcher-managed',
+      rateLimitProfile: 'standalone-default',
+      dnsPolicyId: 'internal-default',
+      licensePolicyId: 'appcenter-default',
+      requestedBy: 'builtin'
+    }, null, now),
+    buildLauncherProductNetwork(config, {
+      productId: 'h2o',
+      displayName: 'H2O',
+      mode: 'embed',
+      productIndex: 0,
+      serviceVip: '10.88.100.10',
+      userCidr: '10.90.0.0/16',
+      anonymousCidr: '10.90.0.0/16',
+      userLeaseStart: '10.90.0.1',
+      userLeaseEnd: '10.90.99.254',
+      anonymousLeaseStart: '10.90.100.1',
+      anonymousLeaseEnd: '10.90.254.254',
+      updatePolicy: 'launcher-managed',
+      rateLimitProfile: 'product-default',
+      dnsPolicyId: 'internal-default',
+      licensePolicyId: 'h2o-default',
+      requestedBy: 'builtin'
+    }, null, now)
+  ];
+}
+
+export function buildLauncherProductNetwork(
+  config: RuntimeConfig,
+  input: LauncherProductNetworkInput,
+  previous: LauncherProductNetwork | null,
+  now = new Date().toISOString()
+): LauncherProductNetwork {
+  const productId = safeIdPart(input.productId?.trim() || previous?.productId || 'h2o').toLowerCase();
+  const mode = launcherProductMode(input.mode ?? previous?.mode);
+  const productIndex = Number.isFinite(input.productIndex ?? NaN)
+    ? Math.max(0, Math.floor(Number(input.productIndex)))
+    : previous?.productIndex ?? (mode === 'standalone' ? 0 : 0);
+  const defaults = defaultLauncherProductNetworkShape(productId, mode, productIndex);
+  const updatedBy = input.requestedBy?.trim() || 'config-center';
+  return {
+    productId,
+    displayName: input.displayName?.trim() || previous?.displayName || defaults.displayName,
+    mode,
+    productIndex,
+    fabricCidr: '10.88.0.0/16',
+    internalControlIp: '10.88.88.88',
+    serviceVip: validIpv4OrFallback(input.serviceVip, previous?.serviceVip || defaults.serviceVip),
+    userCidr: input.userCidr?.trim() || previous?.userCidr || defaults.userCidr,
+    anonymousCidr: input.anonymousCidr?.trim() || previous?.anonymousCidr || defaults.anonymousCidr,
+    userLeaseStart: validIpv4OrFallback(input.userLeaseStart, previous?.userLeaseStart || defaults.userLeaseStart),
+    userLeaseEnd: validIpv4OrFallback(input.userLeaseEnd, previous?.userLeaseEnd || defaults.userLeaseEnd),
+    anonymousLeaseStart: validIpv4OrFallback(input.anonymousLeaseStart, previous?.anonymousLeaseStart || defaults.anonymousLeaseStart),
+    anonymousLeaseEnd: validIpv4OrFallback(input.anonymousLeaseEnd, previous?.anonymousLeaseEnd || defaults.anonymousLeaseEnd),
+    defaultDomesticSiteId: input.defaultDomesticSiteId?.trim() || previous?.defaultDomesticSiteId || 'domestic-main',
+    defaultOverseaSiteId: input.defaultOverseaSiteId?.trim() || previous?.defaultOverseaSiteId || 'oversea-main',
+    updatePolicy: launcherProductUpdatePolicy(input.updatePolicy ?? previous?.updatePolicy),
+    rateLimitProfile: input.rateLimitProfile?.trim() || previous?.rateLimitProfile || defaults.rateLimitProfile,
+    dnsPolicyId: input.dnsPolicyId?.trim() || previous?.dnsPolicyId || 'internal-default',
+    licensePolicyId: input.licensePolicyId?.trim() || previous?.licensePolicyId || `${productId}-default`,
+    enabled: typeof input.enabled === 'boolean' ? input.enabled : previous?.enabled ?? true,
+    notes: launcherProductNetworkNotes(mode),
+    createdBy: previous?.createdBy ?? updatedBy,
+    createdAt: previous?.createdAt ?? now,
+    updatedBy,
+    updatedAt: now
+  };
+}
+
+export function launcherLeaseIpForProduct(
+  product: LauncherProductNetwork,
+  identityKind: 'user' | 'anonymous',
+  sequence: number
+): string {
+  return leaseIpFromRange(
+    identityKind === 'user' ? product.userLeaseStart : product.anonymousLeaseStart,
+    identityKind === 'user' ? product.userLeaseEnd : product.anonymousLeaseEnd,
+    sequence
+  );
+}
+
+export function launcherNetworkLeaseKey(input: LauncherNetworkLeaseInput, product: LauncherProductNetwork): string {
+  const identityKind = launcherNetworkIdentityKind(input.identityKind, input.userId);
+  const mode = launcherProductMode(input.mode ?? product.mode);
+  const principal = launcherNetworkLeasePrincipal(input, identityKind);
+  return [
+    product.productId,
+    mode,
+    identityKind,
+    principal
+  ].join(':');
+}
+
+export function launcherNetworkLeaseId(leaseKey: string): string {
+  return `lnlease_${createHash('sha256').update(leaseKey).digest('hex').slice(0, 24)}`;
+}
+
+export function buildLauncherNetworkLease(
+  config: RuntimeConfig,
+  input: LauncherNetworkLeaseInput,
+  product: LauncherProductNetwork,
+  sequence: number,
+  previous: LauncherNetworkLease | null,
+  now = new Date().toISOString()
+): LauncherNetworkLease {
+  const identityKind = launcherNetworkIdentityKind(input.identityKind, input.userId);
+  const launcherMode = launcherProductMode(input.mode ?? product.mode);
+  const leaseKey = launcherNetworkLeaseKey({ ...input, identityKind, mode: launcherMode }, product);
+  const updatedBy = input.requestedBy?.trim() || 'launcher-network';
+  const installId = input.installId?.trim() || previous?.installId || 'install-unknown';
+  const deviceId = input.deviceId?.trim() || previous?.deviceId || 'device-unknown';
+  const userId = identityKind === 'user' ? input.userId?.trim() || previous?.userId || null : null;
+  return {
+    leaseId: previous?.leaseId ?? launcherNetworkLeaseId(leaseKey),
+    leaseKey,
+    environment: config.environment,
+    productId: product.productId,
+    launcherMode,
+    identityKind,
+    sequence: previous?.sequence ?? Math.max(1, Math.floor(sequence)),
+    installId,
+    deviceId,
+    siteId: input.siteId?.trim() || previous?.siteId || product.defaultDomesticSiteId,
+    userId,
+    cidr: identityKind === 'user' ? product.userCidr : product.anonymousCidr,
+    leaseIp: previous?.leaseIp ?? launcherLeaseIpForProduct(product, identityKind, sequence),
+    serviceVip: product.serviceVip,
+    internalControlIp: product.internalControlIp,
+    domesticGatewayIp: '10.88.0.1',
+    domesticSiteId: product.defaultDomesticSiteId,
+    overseaSiteId: product.defaultOverseaSiteId,
+    publicKey: input.publicKey?.trim() || previous?.publicKey || null,
+    deviceLabel: input.deviceLabel?.trim() || previous?.deviceLabel || null,
+    platform: input.platform?.trim() || previous?.platform || null,
+    status: 'active',
+    createdBy: previous?.createdBy ?? updatedBy,
+    createdAt: previous?.createdAt ?? now,
+    updatedBy,
+    updatedAt: now
+  };
+}
+
 export function builtinDnsPolicies(config: RuntimeConfig): DnsPolicy[] {
   const now = new Date().toISOString();
   return [
@@ -740,6 +903,126 @@ function isIpv4(value: string): boolean {
   return /^(\d{1,3}\.){3}\d{1,3}$/.test(value);
 }
 
+function validIpv4OrFallback(value: string | null | undefined, fallback: string): string {
+  const candidate = value?.trim();
+  return candidate && isIpv4(candidate) ? candidate : fallback;
+}
+
+function productRelayCidrs(input: string[] | null | undefined, previous: string[] | undefined): string[] {
+  const candidates = input?.length ? input : previous?.length ? previous : ['10.89.0.0/16', '10.90.0.0/16'];
+  const cidrs = candidates
+    .map((cidr) => cidr.trim())
+    .filter((cidr) => /^10\.\d{1,3}\.0\.0\/16$/.test(cidr));
+  return [...new Set(cidrs.length ? cidrs : ['10.89.0.0/16', '10.90.0.0/16'])];
+}
+
+function launcherProductMode(value: LauncherProductNetworkInput['mode']): LauncherProductMode {
+  return value === 'standalone' ? 'standalone' : 'embed';
+}
+
+function launcherNetworkIdentityKind(value: LauncherNetworkLeaseInput['identityKind'], userId?: string | null): 'user' | 'anonymous' {
+  if (value === 'user' || userId?.trim()) return 'user';
+  return 'anonymous';
+}
+
+function launcherNetworkLeasePrincipal(input: LauncherNetworkLeaseInput, identityKind: 'user' | 'anonymous'): string {
+  if (identityKind === 'user') {
+    return `user:${input.userId?.trim() || input.installId?.trim() || input.deviceId?.trim() || 'unknown'}`;
+  }
+  return `install:${input.installId?.trim() || input.deviceId?.trim() || 'unknown'}`;
+}
+
+function launcherProductUpdatePolicy(value: LauncherProductNetworkInput['updatePolicy']): LauncherProductUpdatePolicy {
+  if (value === 'app-managed' || value === 'host-managed') return value;
+  return 'launcher-managed';
+}
+
+function defaultLauncherProductNetworkShape(productId: string, mode: LauncherProductMode, productIndex: number) {
+  if (mode === 'standalone') {
+    return {
+      displayName: productId === 'launcher' ? 'Launcher Standalone' : productId,
+      serviceVip: '10.88.100.1',
+      userCidr: '10.89.0.0/16',
+      anonymousCidr: '10.89.0.0/16',
+      userLeaseStart: '10.89.0.1',
+      userLeaseEnd: '10.89.99.254',
+      anonymousLeaseStart: '10.89.100.1',
+      anonymousLeaseEnd: '10.89.254.254',
+      rateLimitProfile: 'standalone-default'
+    };
+  }
+  const index = Math.max(0, Math.min(99, Math.floor(productIndex)));
+  const secondOctet = 90 + index;
+  const serviceOffset = 10 + (index % 200);
+  return {
+    displayName: productId.toUpperCase(),
+    serviceVip: `10.88.100.${serviceOffset}`,
+    userCidr: `10.${secondOctet}.0.0/16`,
+    anonymousCidr: `10.${secondOctet}.0.0/16`,
+    userLeaseStart: `10.${secondOctet}.0.1`,
+    userLeaseEnd: `10.${secondOctet}.99.254`,
+    anonymousLeaseStart: `10.${secondOctet}.100.1`,
+    anonymousLeaseEnd: `10.${secondOctet}.254.254`,
+    rateLimitProfile: 'product-default'
+  };
+}
+
+function launcherProductNetworkNotes(mode: LauncherProductMode): string[] {
+  return mode === 'standalone'
+    ? [
+        'Standalone Launcher owns AppCenter network policy and uses 10.89.0.1+ for signed-in users.',
+        'Anonymous standalone leases start at 10.89.100.1.'
+      ]
+    : [
+        'Embed products get isolated product leases under 10.90.* so colocated apps do not share one client IP.',
+        'The product service VIP stays in 10.88.100.0/24 and routes back to Internal 10.88.88.88 through Domestic relay.'
+      ];
+}
+
+function leaseIpFromStart(startIp: string, sequence: number): string {
+  const octets = startIp.split('.').map((part) => Number(part));
+  if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return startIp;
+  const offset = Math.max(0, Math.floor(sequence) - 1);
+  const base = ((octets[0] << 24) >>> 0) + (octets[1] << 16) + (octets[2] << 8) + octets[3];
+  const next = (base + offset) >>> 0;
+  return [
+    (next >>> 24) & 255,
+    (next >>> 16) & 255,
+    (next >>> 8) & 255,
+    next & 255
+  ].join('.');
+}
+
+function leaseIpFromRange(startIp: string, endIp: string, sequence: number): string {
+  const start = ipv4ToNumber(startIp);
+  const end = ipv4ToNumber(endIp);
+  if (start == null || end == null || end < start) return leaseIpFromStart(startIp, sequence);
+  let seen = 0;
+  const target = Math.max(1, Math.floor(sequence));
+  for (let value = start; value <= end; value += 1) {
+    const host = value & 255;
+    if (host === 0 || host === 255) continue;
+    seen += 1;
+    if (seen === target) return numberToIpv4(value);
+  }
+  throw new Error(`Launcher network lease range exhausted: ${startIp}-${endIp}`);
+}
+
+function ipv4ToNumber(value: string): number | null {
+  const octets = value.split('.').map((part) => Number(part));
+  if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+  return ((octets[0] << 24) >>> 0) + (octets[1] << 16) + (octets[2] << 8) + octets[3];
+}
+
+function numberToIpv4(value: number): string {
+  return [
+    (value >>> 24) & 255,
+    (value >>> 16) & 255,
+    (value >>> 8) & 255,
+    value & 255
+  ].join('.');
+}
+
 export function createSdkGatewayManifest(config: RuntimeConfig): SdkGatewayManifest {
   const routes = [
     {
@@ -1063,9 +1346,14 @@ export function createConfigSnapshot(
 ): ConfigSnapshot {
   const issuedAt = new Date();
   const expiresAt = new Date(issuedAt.getTime() + 6 * 60 * 60 * 1000);
+  const launcherProduct = buildLauncherProductNetwork(config, {
+    productId: enrollment.productId,
+    mode: enrollment.productId === 'launcher' ? 'standalone' : 'embed'
+  }, null);
   const launcherNetwork = buildLauncherNetworkTopology(config, {
     mode: enrollment.userId ? 'user' : 'guest',
     leaseIp: enrollment.overlayIp,
+    product: launcherProduct,
     domesticSiteId: enrollment.siteId,
     publicKey: enrollment.publicKey
   });
@@ -1120,20 +1408,34 @@ export function buildLauncherNetworkTopology(
   input: {
     mode: 'guest' | 'user';
     leaseIp: string;
+    product: LauncherProductNetwork;
     domesticSiteId?: string | null;
     overseaSiteId?: string | null;
     publicKey?: string | null;
   }
 ): LauncherNetworkTopology {
   const internalBaseUrl = trimTrailingSlash(config.internalBaseUrl);
-  const domesticSiteId = input.domesticSiteId?.trim() || 'domestic-main';
-  const overseaSiteId = input.overseaSiteId?.trim() || 'oversea-main';
-  const cidr = input.mode === 'user' ? '10.89.0.0/16' : '10.91.0.0/16';
+  const product = input.product;
+  const domesticSiteId = input.domesticSiteId?.trim() || product.defaultDomesticSiteId;
+  const overseaSiteId = input.overseaSiteId?.trim() || product.defaultOverseaSiteId;
+  const cidr = input.mode === 'user' ? product.userCidr : product.anonymousCidr;
   const publicKey = input.publicKey?.trim() || null;
   const subscriptionBaseUrl = `${internalBaseUrl}/internal/v1/site-slots/${overseaSiteId}/subscriptions/hysteria2`;
-  const internalCidrs = ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16', '10.91.0.0/16'];
+  const internalCidrs = [...new Set(['10.88.0.0/16', product.userCidr, product.anonymousCidr])];
   return {
     model: 'internal-authority-domestic-relay-oversea-access-v1',
+    product: {
+      productId: product.productId,
+      displayName: product.displayName,
+      mode: product.mode,
+      serviceVip: product.serviceVip,
+      userCidr: product.userCidr,
+      anonymousCidr: product.anonymousCidr,
+      updatePolicy: product.updatePolicy,
+      rateLimitProfile: product.rateLimitProfile,
+      dnsPolicyId: product.dnsPolicyId,
+      licensePolicyId: product.licensePolicyId
+    },
     bootstrap: {
       order: [
         'deploy-oversea-access-if-domestic-needs-egress',
@@ -1169,7 +1471,7 @@ export function buildLauncherNetworkTopology(
       publicIpRequired: true,
       publicServices: ['api-facade', 'wg-relay', 'h2i-proxy', 'snapshot-cache', 'observability-forwarder'],
       gatewayIp: '10.88.0.1',
-      overlayCidrs: ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16', '10.91.0.0/16'],
+      overlayCidrs: internalCidrs,
       configSource: 'internal-signed-snapshot',
       storesAuthority: false,
       requiredFor: ['enroll-proxy', 'wg-relay', 'h2i-proxy', 'internal-dns', 'snapshot-cache']
@@ -1184,7 +1486,7 @@ export function buildLauncherNetworkTopology(
       requiresEnrollLease: true,
       relayPeer: {
         required: true,
-        fixedIp: '10.90.0.10',
+        fixedIp: '10.88.88.88',
         initiatedBy: 'internal-outbound-to-domestic-public-wg',
         purpose: 'make-internal-reachable-without-public-ip'
       }
@@ -1219,6 +1521,8 @@ export function buildLauncherNetworkTopology(
         interfaceName: 'mx-domestic',
         listenPort: 51820,
         gatewayIp: '10.88.0.1',
+        publicEndpoint: null,
+        publicKey: null,
         configArtifact: 'mx-domestic-wg-relay.conf',
         envArtifact: 'mx-domestic-relay.env'
       },
@@ -1233,8 +1537,8 @@ export function buildLauncherNetworkTopology(
       },
       internalServicePeer: {
         role: 'internal-service',
-        fixedIp: '10.90.0.10',
-        allowedIps: ['10.90.0.10/32'],
+        fixedIp: '10.88.88.88',
+        allowedIps: ['10.88.88.88/32', `${product.serviceVip}/32`],
         configArtifact: 'mx-internal-service-peer.conf',
         privateKeyPlacement: 'internal-only',
         direction: 'internal-outbound-to-domestic-public-wg'
@@ -1283,6 +1587,11 @@ export function attachDomesticWireGuardRefreshHint(
     ...topology,
     relayPlan: {
       ...topology.relayPlan,
+      domesticRelay: {
+        ...topology.relayPlan.domesticRelay,
+        publicEndpoint: secret?.publicEndpoint ?? null,
+        publicKey: secret?.domesticRelayPublicKey ?? null
+      },
       refreshHint: {
         source: 'internal-domestic-wg-secret',
         mode: 'snapshot-digest',
@@ -1638,6 +1947,7 @@ export function buildSiteSlotDomesticWireGuardSecret(
     material.internalServicePublicKey ? null : 'MX_INTERNAL_SERVICE_PUBLIC_KEY',
     publicEndpoint ? null : 'MX_DOMESTIC_PUBLIC_ENDPOINT'
   ].filter((value): value is string => Boolean(value));
+  const normalizedProductRelayCidrs = productRelayCidrs(input.productRelayCidrs, previous?.productRelayCidrs);
   const updatedBy = input.requestedBy?.trim() || 'config-center';
   return {
     secretId: `domesticwg_${safeIdPart(siteId)}`,
@@ -1649,10 +1959,11 @@ export function buildSiteSlotDomesticWireGuardSecret(
     listenPort,
     domesticGatewayIp: input.domesticGatewayIp?.trim() || previous?.domesticGatewayIp || '10.88.0.1',
     domesticGatewayCidr: input.domesticGatewayCidr?.trim() || previous?.domesticGatewayCidr || '10.88.0.0/16',
+    productRelayCidrs: normalizedProductRelayCidrs,
     userRelayCidr: input.userRelayCidr?.trim() || previous?.userRelayCidr || '10.89.0.0/16',
-    internalServiceIp: input.internalServiceIp?.trim() || previous?.internalServiceIp || '10.90.0.10',
-    internalServiceCidr: input.internalServiceCidr?.trim() || previous?.internalServiceCidr || '10.90.0.0/16',
-    guestRelayCidr: input.guestRelayCidr?.trim() || previous?.guestRelayCidr || '10.91.0.0/16',
+    internalServiceIp: input.internalServiceIp?.trim() || previous?.internalServiceIp || '10.88.88.88',
+    internalServiceCidr: input.internalServiceCidr?.trim() || previous?.internalServiceCidr || '10.88.0.0/16',
+    guestRelayCidr: input.guestRelayCidr?.trim() || previous?.guestRelayCidr || '10.90.0.0/16',
     ...material,
     fingerprints: {
       domesticRelayPublicKey: material.domesticRelayPublicKey ? shortDigest(material.domesticRelayPublicKey) : null,
@@ -1662,7 +1973,8 @@ export function buildSiteSlotDomesticWireGuardSecret(
         publicEndpoint ?? '',
         String(listenPort),
         material.domesticRelayPublicKey ?? '',
-        material.internalServicePublicKey ?? ''
+        material.internalServicePublicKey ?? '',
+        normalizedProductRelayCidrs.join(',')
       ].join('|'))
     },
     readiness: {
@@ -1678,6 +1990,7 @@ export function buildSiteSlotDomesticWireGuardSecret(
         'MX_WG_LISTEN_PORT',
         'MX_DOMESTIC_GATEWAY_IP',
         'MX_DOMESTIC_GATEWAY_CIDR',
+        'MX_PRODUCT_RELAY_CIDRS',
         'MX_USER_RELAY_CIDR',
         'MX_INTERNAL_SERVICE_IP',
         'MX_INTERNAL_SERVICE_CIDR',
@@ -2562,7 +2875,7 @@ function siteSlotNetworkMode(kind: SiteSlotKind, input: SiteSlotPlanInput): Site
 
 function qpTunnelCliMode(kind: SiteSlotKind, mode: SiteSlotNetworkMode): SiteSlotPlan['network']['qpTunnelCliMode'] {
   if (kind === 'oversea') return 'server-on';
-  if (mode === 'oversea-assisted') return 'server-on';
+  if (mode === 'oversea-assisted') return 'egress-on';
   if (mode === 'offline-manual') return 'manual';
   return 'not-required';
 }
@@ -2592,8 +2905,8 @@ function siteSlotWarnings(
     warnings.push('blocked: domestic has no outbound internet and no Oversea bootstrap slot is configured');
   }
   if (kind === 'domestic' && input.hasOutboundInternet === false && networkMode === 'oversea-assisted') {
-    warnings.push('warning: domestic outbound bootstrap depends on Oversea subscription and qp-tunnel-cli hdo/server-on');
-    warnings.push('warning: materialize mx-domestic-qp-tunnel-cli-fallback before bootstrap because Domestic may have no node/npm or registry egress until server-on is available');
+    warnings.push('warning: domestic outbound bootstrap depends on Oversea subscription and qp-tunnel-cli hdo/egress-on');
+    warnings.push('warning: materialize mx-domestic-qp-tunnel-cli-fallback before bootstrap because Domestic may have no node/npm or registry egress until egress-on is available');
   }
   return warnings;
 }
@@ -2608,12 +2921,12 @@ function siteSlotServices(kind: SiteSlotKind): SiteSlotPlan['services'] {
     };
   }
   return {
-    hostServices: [
-      'wireguard-tools',
-      'wg-quick@mx-domestic',
-      'systemd forwarding and firewall rules',
-      '@qpjoy/tunnel-cli hdo/server-on egress bootstrap'
-    ],
+      hostServices: [
+        'wireguard-tools',
+        'wg-quick@mx-domestic',
+        'systemd forwarding and firewall rules',
+        '@qpjoy/tunnel-cli hdo/egress-on outbound bootstrap'
+      ],
     dockerStacks: ['mx-domestic-edge-api', 'mx-h2i-proxy', 'mx-snapshot-cache', 'mx-observability-forwarder'],
     dockerPreferred: true,
     hostServiceReason: 'Domestic has limited memory/disk but owns WireGuard relay and routing; network kernel pieces stay on the host, while API/cache/forwarder stay in Docker.'
@@ -2621,7 +2934,7 @@ function siteSlotServices(kind: SiteSlotKind): SiteSlotPlan['services'] {
 }
 
 function siteSlotAccess(kind: SiteSlotKind): SiteSlotPlan['access'] {
-  const reservedInternalCidrs = ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16', '10.91.0.0/16'];
+  const reservedInternalCidrs = ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16'];
   return {
     oversea: {
       role: kind === 'oversea' ? 'hysteria2-server' : 'not-required',
@@ -2660,15 +2973,15 @@ function siteSlotNetworkNotes(kind: SiteSlotKind, mode: SiteSlotNetworkMode): st
     return [
       'Oversea provides Docker-managed hysteria2 and site-agent capacity only.',
       'Internal owns mihomo, DNS authority, subscription storage, and initial account issuance.',
-      'H endpoints keep cn-direct; only DNS plus 10.88.0.0/16, 10.89.0.0/16, 10.90.0.0/16, and 10.91.0.0/16 go through Internal/WG, while external traffic uses the Oversea hysteria2 subscription. Domestic defaults to 10.88.0.1.'
+      'H endpoints keep cn-direct; only DNS plus reserved 10.88.0.0/16, 10.89.0.0/16, and configured product CIDRs such as 10.90.0.0/16 go through Internal/WG, while external traffic uses the Oversea hysteria2 subscription. Domestic defaults to 10.88.0.1.'
     ];
   }
   if (mode === 'oversea-assisted') {
     return [
       'Domestic cannot rely on direct outbound internet during bootstrap.',
-      'Configure Oversea first, let Internal issue the Domestic bootstrap account/subscription, then push the Internal-materialized qp-tunnel-cli fallback and use hdo/server-on so the host can pull Docker and service dependencies without taking over inbound return routes.',
-      'After server-on is up, optionally refresh the global @qpjoy/tunnel-cli with .npmrc/private registry access or a published npm tarball synced into Internal. Initial no-egress bootstrap must not depend on node/npm on Domestic.',
-      'Keep server-on as the Domestic default for public hosts. tun-on is persistent but should stay a non-public-host or break-glass mode because it proxies full host traffic and can break public service return paths.'
+      'Configure Oversea first, let Internal issue the Domestic bootstrap account/subscription, then push the Internal-materialized qp-tunnel-cli fallback and use hdo/egress-on so the host can pull Docker and service dependencies without taking over inbound return routes.',
+      'After egress-on is up, optionally refresh the global @qpjoy/tunnel-cli with .npmrc/private registry access or a published npm tarball synced into Internal. Initial no-egress bootstrap must not depend on node/npm on Domestic.',
+      'Keep egress-on as the Domestic default for public hosts. tun-on is persistent but should stay a non-public-host or break-glass mode because it proxies full host traffic and can break public service return paths.'
     ];
   }
   if (mode === 'offline-manual') {
@@ -2752,6 +3065,20 @@ function siteSlotPreflightChecks(
         remediation: 'Enable forwarding and prepare explicit firewall rules before H2I relay traffic is accepted.'
       },
       {
+        checkId: 'domestic.public-ingress-firewall',
+        title: 'Public ingress firewall and security group check',
+        stage: 'security',
+        severity: 'required',
+        requiresRoot: false,
+        command: [
+          `Operator evidence: allow UDP 51820 to ${host ?? '<domestic-public-host>'} for WireGuard relay.`,
+          `Operator evidence: allow TCP 443 to ${host ?? '<domestic-public-host>'} for bootstrap/enroll/snapshot/H2I facade; TCP 80 is optional for ACME/redirect only.`,
+          `Operator evidence: restrict TCP ${sshPort} SSH to Internal/admin source IPs and keep 3000/5432/18090/Docker daemon private.`
+        ].join(' '),
+        expected: 'Cloud security group and host firewall expose only the Domestic public relay/facade ports required by the plan',
+        remediation: 'Open udp/51820 and tcp/443 on the public Domestic address, optionally tcp/80 for certificates, restrict ssh, and keep Internal/API/database ports private.'
+      },
+      {
         checkId: 'domestic.outbound',
         title: 'Outbound internet check',
         stage: 'network',
@@ -2760,7 +3087,7 @@ function siteSlotPreflightChecks(
         command: remote('curl -fsSI --max-time 8 https://registry-1.docker.io/v2/ || curl -fsSI --max-time 8 https://github.com/'),
         expected: mode === 'direct' ? 'Domestic can reach public registries or GitHub' : 'May fail until Oversea-assisted qp-tunnel-cli bootstrap is enabled',
         remediation: mode === 'oversea-assisted'
-          ? 'Configure Oversea, consume the Internal-issued Oversea hysteria2 bootstrap subscription with @qpjoy/tunnel-cli hdo/server-on, then install Docker before starting Domestic services.'
+          ? 'Configure Oversea, consume the Internal-issued Oversea hysteria2 bootstrap subscription with @qpjoy/tunnel-cli hdo/egress-on, then install Docker before starting Domestic services.'
           : 'Fix egress routing, DNS, firewall, or proxy before deployment.'
       },
       {
@@ -2770,7 +3097,7 @@ function siteSlotPreflightChecks(
         severity: mode === 'oversea-assisted' ? 'recommended' : 'optional',
         requiresRoot: false,
         command: remote('command -v qp-tunnel-cli || command -v qpjoy-tunnel-cli || { test -x /opt/mx/current/qp-tunnel-cli/bin/qp-tunnel-cli && echo /opt/mx/current/qp-tunnel-cli/bin/qp-tunnel-cli; } || echo "qp-tunnel-cli: will be pushed by Internal fallback"'),
-        expected: mode === 'oversea-assisted' ? 'Global qp-tunnel-cli may be absent before artifact push; the Internal fallback provides hdo/server-on egress bootstrap, and tun-on is persistent but not the public Domestic default' : 'Only required when Domestic cannot access outbound internet directly',
+        expected: mode === 'oversea-assisted' ? 'Global qp-tunnel-cli may be absent before artifact push; the Internal fallback provides hdo/egress-on outbound bootstrap, and tun-on is persistent but not the public Domestic default' : 'Only required when Domestic cannot access outbound internet directly',
         remediation: 'Refresh the Internal fallback from npm pack or --from-tarball, then materialize and push mx-domestic-qp-tunnel-cli-fallback.tar.gz before network bootstrap.'
       }
     );
@@ -2786,7 +3113,18 @@ function siteSlotPreflightChecks(
       remediation: 'Use Internal rsync/scp to push mx-oversea-access-stack.tar.gz, then run the stack preflight before exposing traffic.'
     });
   }
-  if (input.internalBaseUrl) {
+  if (input.internalBaseUrl && kind === 'domestic') {
+    checks.push({
+      checkId: 'domestic.internal-after-relay',
+      title: 'Internal after-relay reachability',
+      stage: 'network',
+      severity: 'recommended',
+      requiresRoot: false,
+      command: remote('echo "Internal has no public ingress; verify http://10.88.88.88:18090/healthz only after mx-domestic WireGuard relay is active"'),
+      expected: 'Domestic does not require public Internal reachability before WG relay activation',
+      remediation: 'Start the Internal service peer with mx-internal-service-peer.conf, then verify Domestic can reach Internal at 10.88.88.88:18090 through mx-domestic.'
+    });
+  } else if (input.internalBaseUrl) {
     checks.push({
       checkId: `${kind}.internal-reachability`,
       title: 'Internal reachability check',
@@ -2830,6 +3168,9 @@ function siteSlotDeploymentPhases(
   const domesticWireGuardConfig = `${artifactRoot}/mx-domestic-wg-relay.conf`;
   const domesticRelayEnv = `${artifactRoot}/mx-domestic-relay.env`;
   const internalServicePeerConfig = `${artifactRoot}/mx-internal-service-peer.conf`;
+  const domesticBootstrapSubscriptionName = 'mx-domestic-bootstrap-subscription.yaml';
+  const domesticBootstrapSubscriptionArtifact = `${artifactRoot}/${domesticBootstrapSubscriptionName}`;
+  const domesticBootstrapSubscriptionRemote = `${domesticTunnelCliCurrentDir}/domestic-bootstrap-subscription.yaml`;
   const ssh = (command: string) => `ssh -p ${sshPort} ${sshUser}@${target} '${command}'`;
   const dockerReadonlyProbe = 'if command -v docker >/dev/null 2>&1; then docker version --format "{{.Server.Version}}" 2>/dev/null || docker version; else echo "docker: missing"; fi; if docker compose version >/dev/null 2>&1; then docker compose version; else echo "docker compose: missing"; fi';
   const scp = (source: string, dest: string) => `scp -P ${sshPort} ${source} ${sshUser}@${target}:${dest}`;
@@ -2849,8 +3190,35 @@ function siteSlotDeploymentPhases(
   const overseaInternalAccountName = `${safeAccountPrefix(overseaSiteId)}-internal`;
   const overseaDomesticAccountName = `${safeAccountPrefix(overseaSiteId)}-domestic`;
   const domesticBootstrapSubscriptionUrl = `${overseaSubscriptionBaseUrl}/${overseaDomesticAccountName}.yaml`;
-  const domesticTunnelModeCommand = '{ QP_TUNNEL_MODE=${QP_TUNNEL_MODE:-server-on}; case "$QP_TUNNEL_MODE" in server|server-on|egress|egress-on) $QP_TUNNEL_CLI server-on ;; tun|tun-on) $QP_TUNNEL_CLI tun-on ;; *) echo "blocked: unsupported QP_TUNNEL_MODE=$QP_TUNNEL_MODE"; exit 1 ;; esac; }';
-  const domesticTunnelPostEgressRefreshCommand = 'if command -v npm >/dev/null 2>&1; then if npm i @qpjoy/tunnel-cli -g; then qp-tunnel-cli status || echo "warning: @qpjoy/tunnel-cli npm refresh status failed after server-on; keep Internal fallback"; else echo "warning: @qpjoy/tunnel-cli npm refresh skipped after server-on; keep Internal fallback"; fi; else echo "node/npm absent; keep Internal fallback until next refresh"; fi';
+  const domesticTunnelModeCommand = '{ QP_TUNNEL_MODE=${QP_TUNNEL_MODE:-egress-on}; case "$QP_TUNNEL_MODE" in server|server-on|egress|egress-on) if "$QP_TUNNEL_CLI" help 2>/dev/null | grep -q "egress-on"; then "$QP_TUNNEL_CLI" egress-on; elif "$QP_TUNNEL_CLI" help 2>/dev/null | grep -q "server-on"; then echo "warning: selected tunnel cli lacks egress-on; falling back to server-on"; "$QP_TUNNEL_CLI" server-on; else echo "blocked: selected tunnel cli does not support egress-on/server-on"; exit 1; fi ;; tun|tun-on) if "$QP_TUNNEL_CLI" help 2>/dev/null | grep -q "tun-on"; then "$QP_TUNNEL_CLI" tun-on; else echo "blocked: selected tunnel cli does not support tun-on"; exit 1; fi ;; *) echo "blocked: unsupported QP_TUNNEL_MODE=$QP_TUNNEL_MODE"; exit 1 ;; esac; }';
+  const domesticTunnelPostEgressRefreshCommand = 'if test -f /etc/profile.d/mihomo-client-proxy.sh; then . /etc/profile.d/mihomo-client-proxy.sh || true; fi; if command -v npm >/dev/null 2>&1; then if npm i @qpjoy/tunnel-cli -g; then qp-tunnel-cli install-script || true; qp-tunnel-cli egress-on || qp-tunnel-cli server-on || true; qp-tunnel-cli status || echo "warning: @qpjoy/tunnel-cli npm refresh status failed after egress-on; keep Internal fallback"; else echo "warning: @qpjoy/tunnel-cli npm refresh skipped after egress-on; keep Internal fallback"; fi; else echo "node/npm absent; keep Internal fallback until next refresh"; fi';
+  const domesticLegacyWireGuardRetireCommand = [
+    'if systemctl is-active --quiet wg-quick@hdo-home || systemctl is-enabled --quiet wg-quick@hdo-home || ip link show hdo-home >/dev/null 2>&1 || test -f /etc/wireguard/hdo-home.conf; then',
+    'echo "retiring legacy hdo-home/100.* WireGuard before mx-domestic 2.0";',
+    'systemctl disable --now wg-quick@hdo-home >/dev/null 2>&1 || true;',
+    'wg-quick down hdo-home >/dev/null 2>&1 || true;',
+    'ip link delete hdo-home >/dev/null 2>&1 || true;',
+    'install -d -m 0755 /opt/mx/legacy-wireguard;',
+    'if test -f /etc/wireguard/hdo-home.conf; then mv -f /etc/wireguard/hdo-home.conf /opt/mx/legacy-wireguard/hdo-home.conf.$(date +%Y%m%d%H%M%S); fi;',
+    'fi;',
+    'if wg show 2>/dev/null | grep -q "100\\."; then echo "warning: legacy 100.* WireGuard peers remain after hdo-home retirement"; wg show; fi'
+  ].join(' ');
+  const domesticTunnelBootstrapCommand = [
+    'set -eu',
+    `QP_TUNNEL_CLI=${domesticTunnelCliCurrentDir}/bin/qp-tunnel-cli`,
+    `BOOTSTRAP_SUBSCRIPTION_FILE=${domesticBootstrapSubscriptionRemote}`,
+    'chmod +x "$QP_TUNNEL_CLI"',
+    'printf "%s\\n" "#!/usr/bin/env sh" "exec /usr/local/bin/mihomo-client \\"\\$@\\"" > /usr/local/bin/qp-tunnel-cli && chmod 0755 /usr/local/bin/qp-tunnel-cli',
+    `if test -f ${domesticTunnelCliCurrentDir}/package/resources/mihomo-client.sh; then install -m 0755 ${domesticTunnelCliCurrentDir}/package/resources/mihomo-client.sh /usr/local/bin/mihomo-client; fi`,
+    'if command -v systemctl >/dev/null 2>&1; then systemctl enable mihomo-client >/dev/null 2>&1 || true; fi',
+    'if command -v qp-tunnel-cli >/dev/null 2>&1; then QP_TUNNEL_CLI="$(command -v qp-tunnel-cli)"; QP_TUNNEL_CLI_KIND=global-qp-tunnel-cli; elif command -v mihomo-client >/dev/null 2>&1; then QP_TUNNEL_CLI="$(command -v mihomo-client)"; QP_TUNNEL_CLI_KIND=global-mihomo-client; else QP_TUNNEL_CLI_KIND=internal-fallback; fi',
+    'echo "qp-tunnel-cli selected: $QP_TUNNEL_CLI_KIND $QP_TUNNEL_CLI"',
+    `if test -s "$BOOTSTRAP_SUBSCRIPTION_FILE"; then SUBSCRIPTION_ARGS="--file $BOOTSTRAP_SUBSCRIPTION_FILE"; else echo "warning: local bootstrap subscription missing; falling back to URL ${domesticBootstrapSubscriptionUrl}"; SUBSCRIPTION_ARGS="--url ${domesticBootstrapSubscriptionUrl}"; fi`,
+    'if test -x /usr/local/bin/mihomo && { systemctl cat mihomo-client >/dev/null 2>&1 || test -f /etc/mihomo-client/config.yaml; }; then echo "mihomo-client already installed; reuse resident client and refresh subscription"; if "$QP_TUNNEL_CLI" help 2>/dev/null | grep -q "update-subscription"; then if "$QP_TUNNEL_CLI" update-subscription $SUBSCRIPTION_ARGS; then echo "mihomo-client subscription refreshed"; else echo "warning: mihomo-client subscription refresh failed; reusing existing resident subscription for bootstrap"; fi; else echo "warning: selected tunnel cli lacks update-subscription; reusing existing resident subscription for bootstrap"; fi; else "$QP_TUNNEL_CLI" install $SUBSCRIPTION_ARGS; fi',
+    domesticTunnelModeCommand,
+    '$QP_TUNNEL_CLI status || echo "warning: tunnel cli status failed after enabling egress; continuing with service evidence"',
+    domesticTunnelPostEgressRefreshCommand
+  ].join('; ');
   const overseaInputAccessAccounts = (input.accessAccounts ?? [])
     .filter((account) => (
       Boolean(account.username)
@@ -2866,7 +3234,7 @@ function siteSlotDeploymentPhases(
   ])];
   const overseaAccountMaterialCount = overseaRuntimeAccountNames
     .filter((username) => overseaAccessAccountMaterial.has(safeAccountName(username))).length;
-  const overseaReservedInternalCidrs = ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16', '10.91.0.0/16'];
+  const overseaReservedInternalCidrs = ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16'];
   const overseaReservedInternalCidrsCsv = overseaReservedInternalCidrs.join(',');
   const startSlotServicesCommand = 'if grep -q "\\"placeholder\\": true" enabled-modules.json 2>/dev/null; then echo "slot services placeholder; no Docker services selected"; else services="$(docker compose config --services)" && if [ -n "$services" ]; then docker compose up -d; else echo "slot services bundle has no Docker services selected"; fi; fi';
   const syncInternalConfigCommands = kind === 'oversea'
@@ -2876,7 +3244,7 @@ function siteSlotDeploymentPhases(
     ]
     : [
       `POST /internal/v1/config-center/snapshots/effective siteId=${input.siteId ?? 'domestic-main'}`,
-      ssh(`curl -fsS ${input.internalBaseUrl ?? '<internal-base-url>'}/healthz`)
+      ssh('curl -fsS --max-time 8 http://10.88.88.88:18090/healthz || echo "warning: Internal is not reachable at 10.88.88.88:18090 yet; start/verify the Internal service peer after Domestic relay activation"')
     ];
   const overseaEnvLines = [
     'TZ=Asia/Shanghai',
@@ -2989,8 +3357,8 @@ function siteSlotDeploymentPhases(
       target: 'internal',
       required: true,
       commands: [
-        'Allocate Domestic WG gateway=10.88.0.1 and Internal service peer=10.90.0.10 in Internal Config Center.',
-        `Render Domestic WG relay config ${domesticWireGuardConfig} with peer classes: internal-service=10.90.0.0/16, users=10.89.0.0/16, guests=10.91.0.0/16.`,
+        'Allocate Domestic WG gateway=10.88.0.1 and fixed Internal service peer=10.88.88.88 in Internal Config Center.',
+        `Render Domestic WG relay config ${domesticWireGuardConfig} with peer classes: internal-service=10.88.88.88/32, standalone=10.89.0.0/16, embed-products=10.90.0.0/16.`,
         `Render Internal service peer config ${internalServicePeerConfig}; never copy the Internal private key to Domestic.`,
         `Record Domestic public endpoint host=${target} and keep public API facade limited to enroll/bootstrap/cache.`,
         'Internal has no public ingress: Internal must initiate outbound WG to the Domestic public relay before Home can reach Internal services.',
@@ -2999,6 +3367,23 @@ function siteSlotDeploymentPhases(
       notes: [
         'There is no full HDI path without a relay when Internal has no public IP; before WG relay is ready, only enroll/bootstrap proxy is allowed.',
         'Domestic does not own users, subscriptions, DNS authority, or release truth. It only relays and caches Internal-signed snapshots.'
+      ]
+    });
+    phases.push({
+      phaseId: 'domestic-public-ingress-firewall',
+      title: 'Confirm Domestic public ingress firewall',
+      mode: 'manual',
+      target: 'domestic',
+      required: true,
+      commands: [
+        `Cloud/security group: allow UDP 51820 to ${target} for WireGuard relay traffic from Internal and H endpoints.`,
+        `Cloud/security group: allow TCP 443 to ${target} for bootstrap/enroll/snapshot/H2I facade; TCP 80 is optional for ACME or HTTP redirect only.`,
+        `Restrict TCP ${sshPort} SSH to Internal/admin source IPs; do not expose 3000, 5432, 18090, Docker daemon, or Internal-only service ports.`,
+        `Record Domestic WG publicEndpoint=${target}:51820 in Internal Config Center before publishing launcher snapshots.`
+      ],
+      notes: [
+        'This is operator/security-group evidence because the Domestic host cannot prove public cloud ingress rules from itself.',
+        'WireGuard uses UDP 51820; TCP 443 is for the public facade, not for WG. Keep the facade limited to bootstrap/enroll/cache/H2I paths.'
       ]
     });
   }
@@ -3010,8 +3395,9 @@ function siteSlotDeploymentPhases(
       target: 'internal',
       required: true,
       commands: [
-        `Read domesticBootstrapSubscription=${domesticBootstrapSubscriptionUrl} from Internal Config Center for Oversea siteId=${overseaSiteId} host=${input.overseaHost ?? '<oversea-host>'}`,
+        `Materialize domesticBootstrapSubscription=${domesticBootstrapSubscriptionUrl} into ${domesticBootstrapSubscriptionArtifact} from Internal Config Center for Oversea siteId=${overseaSiteId} host=${input.overseaHost ?? '<oversea-host>'}`,
         `Verify ${artifactRoot}/mx-domestic-qp-tunnel-cli-fallback.tar.gz exists in Internal before touching Domestic.`,
+        `Verify ${domesticBootstrapSubscriptionArtifact} exists in Internal; Domestic cannot fetch Internal URLs until mx-domestic reaches 10.88.88.88.`,
         'If subscription/account material is missing, stop here; do not ask Domestic to install node/npm, run npm install, or pull public packages until Internal has issued the Oversea bootstrap account and fallback artifact.'
       ],
       notes: ['Internal owns the bootstrap subscription, mihomo config, and fallback artifact before Domestic can recover outbound access; .npmrc only helps Internal refresh or post-egress npm refresh, not the first no-egress bootstrap.']
@@ -3026,9 +3412,10 @@ function siteSlotDeploymentPhases(
         ssh(`install -d -m 0755 ${incomingDir} ${currentRoot} ${domesticTunnelCliReleaseDir}`),
         rsyncOverSsh(domesticTunnelCliBundle, `${incomingDir}/`),
         ssh(`tar -xzf ${incomingDir}/${domesticTunnelCliBundleName} -C ${domesticTunnelCliReleaseDir} && ln -sfn ${domesticTunnelCliReleaseDir} ${domesticTunnelCliCurrentDir}`),
-        ssh(`QP_TUNNEL_CLI=${domesticTunnelCliCurrentDir}/bin/qp-tunnel-cli && chmod +x "$QP_TUNNEL_CLI" && $QP_TUNNEL_CLI install --url ${domesticBootstrapSubscriptionUrl} && ${domesticTunnelModeCommand} && $QP_TUNNEL_CLI status && ${domesticTunnelPostEgressRefreshCommand}`)
+        rsyncOverSsh(domesticBootstrapSubscriptionArtifact, `${domesticBootstrapSubscriptionRemote}`),
+        ssh(domesticTunnelBootstrapCommand)
       ],
-      notes: ['Use the Internal-pushed fallback first because Domestic may not have node/npm or registry egress yet. After server-on is available, a best-effort npm refresh can upgrade the global CLI. server-on is the public Domestic default; tun-on is persistent but may break public service return paths.']
+      notes: ['Prefer the Internal-pushed latest qp-tunnel-cli/mihomo-client wrapper on Domestic, upgrading any old manually installed script before enabling egress. Install or refresh the Internal-pushed local subscription file first; do not require Domestic to reach Internal before WG relay exists. Use the Internal-pushed fallback for first bootstrap because Domestic may not have node/npm or registry egress yet. After egress-on is available, a best-effort npm refresh can upgrade the global CLI. egress-on is the public Domestic default; tun-on is persistent but should remain break-glass because it can break public service return paths.']
     });
   }
   if (kind === 'domestic') {
@@ -3041,7 +3428,7 @@ function siteSlotDeploymentPhases(
       commands: [
         ssh(overseaDockerInstallScript())
       ],
-      notes: ['Run after the Oversea subscription proxy is available so Docker packages and images can resolve through server-on when direct egress is unavailable.']
+      notes: ['Run after the Oversea subscription proxy is available so Docker packages and images can resolve through egress-on when direct egress is unavailable.']
     });
   }
   phases.push(
@@ -3080,7 +3467,7 @@ function siteSlotDeploymentPhases(
         notes: [
           'Oversea runs hysteria2 only; Internal runs mihomo and stores subscription/account material.',
           'Port 3434 on Oversea is a protected health/evidence outlet for clients.csv and healthz, not a subscription authority.',
-          'H endpoints use WG relay only for Internal DNS and reserved 10.88.0.0/16-10.91.0.0/16 routes; Domestic defaults to 10.88.0.1, cn-direct stays direct, and external traffic uses the Oversea hysteria2 subscription.'
+          'H endpoints use WG relay only for Internal DNS and reserved/product routes; Domestic defaults to 10.88.0.1, cn-direct stays direct, and external traffic uses the Oversea hysteria2 subscription.'
         ]
       },
       {
@@ -3091,7 +3478,7 @@ function siteSlotDeploymentPhases(
         required: true,
         commands: [
           `Record overseaSubscriptionBaseUrl=${overseaSubscriptionBaseUrl}`,
-          `Record hEndpointBootstrapPath=WG relay for DNS and 10.88.0.0/16-10.91.0.0/16 -> Internal mihomo subscription -> cn-direct policy -> Oversea hysteria2 for external traffic`,
+          `Record hEndpointBootstrapPath=WG relay for DNS and reserved/product CIDRs -> Internal mihomo subscription -> cn-direct policy -> Oversea hysteria2 for external traffic`,
           `Record internalBootstrapSubscription=${overseaSubscriptionBaseUrl}/${overseaInternalAccountName}.yaml`,
           `Record domesticBootstrapSubscription=${overseaSubscriptionBaseUrl}/${overseaDomesticAccountName}.yaml`,
           'Attach Internal subscription URL, account IDs, Domestic WG/H2I reachability note, and tunnel-cli registration evidence to the worker report before Domestic oversea-assisted bootstrap.'
@@ -3127,9 +3514,10 @@ function siteSlotDeploymentPhases(
         ssh(`install -d -m 0700 /etc/wireguard && install -d -m 0755 ${slotCurrentDir}`),
         rsyncOverSsh(domesticWireGuardConfig, '/etc/wireguard/mx-domestic.conf'),
         rsyncOverSsh(domesticRelayEnv, `${slotCurrentDir}/mx-domestic-relay.env`),
+        ssh(domesticLegacyWireGuardRetireCommand),
         ssh('if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi; systemctl enable --now wg-quick@mx-domestic')
       ],
-      notes: ['WireGuard/routing is host-level because Domestic is the peer center path and has limited memory/disk.']
+      notes: ['WireGuard/routing is host-level because Domestic is the peer center path and has limited memory/disk. The 2.0 activation retires legacy hdo-home/100.* WireGuard state before enabling mx-domestic.']
     }] : []),
     {
       phaseId: 'sync-internal-config',
@@ -3167,6 +3555,7 @@ function siteSlotNextActions(
   if (status === 'blocked') actions.push('resolve-blocking-warnings');
   actions.push('materialize-slot-artifacts');
   actions.push('run-remote-preflight');
+  if (kind === 'domestic') actions.push('confirm-domestic-public-ingress-firewall');
   if (kind === 'domestic' && mode !== 'direct') actions.push('configure-oversea-bootstrap');
   if (kind === 'domestic') actions.push('install-docker-runtime');
   if (kind === 'oversea') actions.push('push-oversea-access-stack');
@@ -3268,7 +3657,7 @@ export function buildLauncherNetworkMihomoSite(
     tlsFingerprint,
     subscriptionBaseUrl,
     routingPolicy: 'cn-direct',
-    reservedInternalCidrs: ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16', '10.91.0.0/16'],
+    reservedInternalCidrs: ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16'],
     domesticGatewayIp: '10.88.0.1',
     dnsPath: 'wg-relay-internal-dns',
     reachability: {
@@ -3344,7 +3733,7 @@ export function buildLauncherNetworkReachabilityPlan(
         dependsOn: [],
         requiredEvidence: [
           'Config Center access account records exist for internal and domestic bootstrap users.',
-          'GET subscription YAML returns cn-direct, reserved 10.88/10.89/10.90/10.91 DIRECT rules, and hysteria2 proxy metadata.'
+          'GET subscription YAML returns cn-direct, reserved/product DIRECT rules, and hysteria2 proxy metadata.'
         ],
         notes: [
           'This is an Internal output only; it does not prove H endpoints can reach Internal yet.',
@@ -3377,7 +3766,7 @@ export function buildLauncherNetworkReachabilityPlan(
         dependsOn: ['oversea-hysteria2-runtime'],
         requiredEvidence: [
           'Domestic WireGuard service is up and owns 10.88.0.1.',
-          'WG handshake and route evidence exist for 10.88.0.0/16 through 10.91.0.0/16.',
+          'WG handshake and route evidence exist for reserved/product CIDRs.',
           'Domestic outbound bootstrap consumed the Internal-issued Oversea domestic subscription.'
         ],
         notes: [
@@ -3425,7 +3814,7 @@ export function buildLauncherNetworkReachabilityPlan(
         dependsOn: ['h-endpoint-subscription-fetch'],
         requiredEvidence: [
           'H endpoint connects directly to Oversea hysteria2 for non-CN external traffic.',
-          'CN traffic remains DIRECT and reserved 10.88/10.89/10.90/10.91 routes remain internal.'
+          'CN traffic remains DIRECT and reserved/product routes remain internal.'
         ],
         notes: [
           'This validates the final runtime split: Domestic for Internal reachability, Oversea for external proxy path.'

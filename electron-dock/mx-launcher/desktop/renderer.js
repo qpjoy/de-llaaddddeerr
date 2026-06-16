@@ -5,11 +5,11 @@ const SSH_READONLY_PROBE_FEATURE_KEY = 'site-slot.ssh-readonly-probe.execute';
 const api = window.mxLauncher || {
   getConfig: async () => ({
     serverBaseUrl: 'http://127.0.0.1:18090',
-    productConfigs: { hdo: { defaultMode: 'visitor' } }
+    productConfigs: { hdi: { defaultMode: 'visitor' } }
   }),
   saveConfig: async (input) => input,
   getProducts: async () => [{
-    id: 'hdo',
+    id: 'hdi',
     status: 'not-installed'
   }],
   getStatus: async () => ({
@@ -25,6 +25,8 @@ const api = window.mxLauncher || {
     return true;
   }
 };
+
+const defaultRelayEnrollmentDeviceId = `desktop-admin-${Date.now().toString(36)}`;
 
 const state = {
   activeView: 'app-center',
@@ -49,6 +51,7 @@ const state = {
   },
   preferredActionFocus: null,
   domesticPeerDraft: {
+    leaseId: '',
     peerRole: 'guest',
     leaseIp: '',
     publicKey: ''
@@ -103,10 +106,25 @@ const state = {
   relayEnrollment: {
     result: null,
     feedback: null,
-    busy: false
+    busy: false,
+    draft: {
+      productId: 'h2o',
+      mode: 'embed',
+      identityKind: 'anonymous',
+      siteId: 'domestic-main',
+      installId: defaultRelayEnrollmentDeviceId,
+      deviceId: defaultRelayEnrollmentDeviceId,
+      userId: '',
+      deviceLabel: 'Desktop Admin',
+      publicKey: ''
+    }
   },
   awxProviders: [],
   selectedAwxProviderId: null,
+  launcherProducts: [],
+  launcherProductsError: null,
+  launcherLeases: [],
+  launcherLeasesError: null,
   awxRuntimePolicies: [],
   awxRuntimePolicyBusy: false,
   awxRuntimePolicyFeedback: null,
@@ -263,9 +281,10 @@ const evidenceSubsectionMeta = {
 const sidebar = document.getElementById('sidebar');
 const sidebarCollapse = document.getElementById('sidebar-collapse');
 const stateChip = document.getElementById('connection-state');
-const hdoLaunch = document.getElementById('hdo-launch');
-const hdoAdmin = document.getElementById('hdo-admin');
-const hdoStatus = document.getElementById('hdo-status');
+const h2oLaunch = document.getElementById('h2o-launch');
+const h2oAdmin = document.getElementById('h2o-admin');
+const h2oStatus = document.getElementById('h2o-status');
+const h2oNetwork = document.getElementById('h2o-network');
 const serverInput = document.getElementById('server-input');
 const platformStatus = document.getElementById('platform-status');
 const appRefresh = document.getElementById('app-refresh');
@@ -400,11 +419,11 @@ for (const tab of tabs) {
   });
 }
 
-hdoLaunch.addEventListener('click', () => {
-  void launchHdo();
+h2oLaunch.addEventListener('click', () => {
+  void launchHdiProduct();
 });
 
-hdoAdmin.addEventListener('click', () => {
+h2oAdmin.addEventListener('click', () => {
   void api.openAdmin(serverInput.value);
 });
 
@@ -628,8 +647,21 @@ function applyAdminNavigation(nav = {}, options = {}) {
 
 async function refreshProducts() {
   const products = await api.getProducts();
-  const hdo = products.find((product) => product.id === 'hdo');
-  hdoStatus.textContent = hdo && hdo.status === 'installed' ? 'Installed' : 'Not installed';
+  const hdi = products.find((product) => product.id === 'hdi');
+  h2oStatus.textContent = hdi && hdi.status === 'installed' ? 'Installed' : 'Not installed';
+  await refreshAppCenterNetwork();
+}
+
+async function refreshAppCenterNetwork() {
+  const [productPayload, leasePayload] = await Promise.all([
+    loadLauncherProductNetworks(),
+    loadLauncherNetworkLeases()
+  ]);
+  state.launcherProducts = asArray(productPayload.products);
+  state.launcherProductsError = productPayload.error || null;
+  state.launcherLeases = asArray(leasePayload.leases);
+  state.launcherLeasesError = leasePayload.error || null;
+  renderAppCenterProductNetwork();
 }
 
 async function persistConfig() {
@@ -640,12 +672,12 @@ async function persistConfig() {
   });
 }
 
-async function launchHdo() {
+async function launchHdiProduct() {
   await persistConfig();
   stateChip.textContent = 'Starting';
   stateChip.dataset.state = 'connecting';
   const result = await api.launchProduct({
-    productId: 'hdo',
+    productId: 'hdi',
     serverBaseUrl: serverInput.value
   });
   if (!result.ok) {
@@ -659,11 +691,13 @@ async function refreshAdmin() {
   await persistConfig();
   renderAdminLoading();
   try {
-    const [dashboard, profilePayload, overseaPayload, userCenterPayload] = await Promise.all([
+    const [dashboard, profilePayload, overseaPayload, userCenterPayload, launcherProductsPayload, launcherLeasesPayload] = await Promise.all([
       fetchJson('/internal/v1/admin/dashboard'),
       loadSshProfiles(),
       loadOverseaOverview(),
-      loadUserCenterOverview()
+      loadUserCenterOverview(),
+      loadLauncherProductNetworks(),
+      loadLauncherNetworkLeases()
     ]);
     state.dashboard = dashboard;
     state.sshProfiles = asArray(profilePayload.profiles);
@@ -674,11 +708,16 @@ async function refreshAdmin() {
       state.userCenter.feedback = { kind: 'error', message: userCenterPayload.error };
     }
     state.awxProviders = asArray(dashboard.awxProviders);
+    state.launcherProducts = asArray(launcherProductsPayload.products);
+    state.launcherProductsError = launcherProductsPayload.error || null;
+    state.launcherLeases = asArray(launcherLeasesPayload.leases);
+    state.launcherLeasesError = launcherLeasesPayload.error || null;
+    renderAppCenterProductNetwork();
     state.awxRuntimePolicies = asArray(dashboard.runtimeFeaturePolicies);
     state.overseaOverview = overseaPayload.overview;
     state.overseaOverviewError = overseaPayload.error;
     const pipelines = dashboard.siteSlotPipelines || [];
-    const active = activePipelineForCurrentDeployment(pipelines);
+    const active = selectedOrActivePipelineForCurrentDeployment(pipelines);
     state.selectedPlanId = active?.planId || null;
     state.selectedSiteId = selectedSiteFromOverseaOverview() || active?.siteId || state.selectedSiteId;
     primeSshProfileForm(pipelines);
@@ -696,6 +735,11 @@ async function refreshAdmin() {
     }
     state.dashboard = null;
     state.overseaOverview = null;
+    state.launcherProducts = [];
+    state.launcherProductsError = error.message;
+    state.launcherLeases = [];
+    state.launcherLeasesError = error.message;
+    renderAppCenterProductNetwork();
     state.overseaOverviewError = error.message;
     renderAdminError(error);
     setConnection('error', 'Offline', 'Admin API unavailable');
@@ -708,6 +752,24 @@ async function loadOverseaOverview() {
     return { overview, error: null };
   } catch (error) {
     return { overview: null, error: error.message };
+  }
+}
+
+async function loadLauncherProductNetworks() {
+  try {
+    const payload = await fetchJson('/internal/v1/launcher-network/products');
+    return { products: asArray(payload.products), error: null };
+  } catch (error) {
+    return { products: [], error: error.message };
+  }
+}
+
+async function loadLauncherNetworkLeases() {
+  try {
+    const payload = await fetchJson('/internal/v1/launcher-network/leases');
+    return { leases: asArray(payload.leases), error: null };
+  } catch (error) {
+    return { leases: [], error: error.message };
   }
 }
 
@@ -2054,52 +2116,60 @@ async function syncUserOverseaRuntimeFromAdmin() {
   }
 }
 
-async function enrollHomeRelayFromAdmin() {
+async function enrollHomeRelayFromAdmin(root = foundationGrid) {
   if (state.relayEnrollment.busy) return;
-  const siteId = blankToNull(foundationGrid.querySelector('[data-relay-field="siteId"]')?.value) || 'domestic-main';
-  const publicKey = blankToNull(foundationGrid.querySelector('[data-relay-field="publicKey"]')?.value);
-  const installId = blankToNull(foundationGrid.querySelector('[data-relay-field="installId"]')?.value);
-  const deviceId = blankToNull(foundationGrid.querySelector('[data-relay-field="deviceId"]')?.value);
-  if (!publicKey) {
+  const draft = relayEnrollmentDraftFromForm(root);
+  if (!draft.publicKey) {
     state.relayEnrollment.feedback = { kind: 'error', message: 'Home WireGuard public key is required' };
     renderFoundationGrid(state.dashboard?.overview || {});
+    renderAppCenterProductNetwork();
     return;
   }
   state.relayEnrollment.busy = true;
-  state.relayEnrollment.feedback = { kind: 'info', message: 'Creating relay enrollment' };
+  state.relayEnrollment.feedback = { kind: 'info', message: 'Creating product relay lease' };
   renderFoundationGrid(state.dashboard?.overview || {});
+  renderAppCenterProductNetwork();
   try {
-    const payload = await fetchJson('/internal/v1/enrollments/anonymous', {
+    const payload = await fetchJson('/internal/v1/launcher-network/enrollments', {
       method: 'POST',
       body: {
-        productId: 'hdo',
-        siteId,
-        installId,
-        deviceId,
+        productId: draft.productId,
+        mode: draft.mode,
+        identityKind: draft.identityKind,
+        siteId: draft.siteId,
+        installId: draft.installId,
+        deviceId: draft.deviceId,
+        userId: draft.identityKind === 'user' ? draft.userId : null,
+        deviceLabel: draft.deviceLabel,
         platform: 'desktop-admin',
-        publicKey,
-        relayMode: 'h2i',
+        publicKey: draft.publicKey,
+        requestedBy: 'desktop-admin',
         requestId: `desktop-relay-enroll-${Date.now()}`
       }
     });
-    const enrollment = payload.enrollment || null;
-    state.relayEnrollment.result = enrollment;
+    const lease = payload.lease || null;
+    state.relayEnrollment.result = lease;
     state.relayEnrollment.feedback = {
       kind: 'success',
-      message: enrollment ? `Relay lease ${enrollment.overlayIp}` : 'Relay enrollment created'
+      message: lease ? `Product lease ${lease.leaseIp}` : 'Product relay lease created'
     };
-    if (enrollment?.overlayIp) {
+    if (lease?.leaseId) {
+      upsertLocalLauncherLease(lease);
       state.domesticPeerDraft = {
+        leaseId: lease.leaseId,
         peerRole: 'guest',
-        leaseIp: enrollment.overlayIp,
-        publicKey
+        leaseIp: lease.leaseIp || '',
+        publicKey: lease.publicKey || draft.publicKey
       };
+      const role = launcherLeaseRole(lease);
+      state.domesticPeerDraft.peerRole = role;
     }
   } catch (error) {
     state.relayEnrollment.feedback = { kind: 'error', message: error.message };
   } finally {
     state.relayEnrollment.busy = false;
     renderFoundationGrid(state.dashboard?.overview || {});
+    renderAppCenterProductNetwork();
   }
 }
 
@@ -2703,6 +2773,13 @@ function activePipelineForCurrentDeployment(pipelines) {
   return sites[0]?.activePipeline || null;
 }
 
+function selectedOrActivePipelineForCurrentDeployment(pipelines) {
+  const selected = state.selectedPlanId
+    ? asArray(pipelines).find((pipeline) => pipeline.kind === state.deploymentKind && pipeline.planId === state.selectedPlanId)
+    : null;
+  return selected || activePipelineForCurrentDeployment(pipelines);
+}
+
 function deploymentSites(pipelines, kind) {
   const bySite = new Map();
   for (const pipeline of asArray(pipelines).filter((item) => item.kind === kind)) {
@@ -2727,12 +2804,37 @@ function deploymentSites(pipelines, kind) {
 
 function chooseOperationalPipeline(pipelines) {
   const items = asArray(pipelines);
-  const open = items.filter((pipeline) => !['passed', 'failed', 'rollback'].includes(pipeline.health));
-  const preferred = open.length ? open : items;
+  const actionable = items.filter((pipeline) => {
+    const actions = asArray(pipeline.actionHints);
+    return actions.some((action) => action.allowed) && !isFailedOrRollbackPipeline(pipeline);
+  });
+  const openDeployment = items.filter((pipeline) => {
+    return !isRollbackPipeline(pipeline) && !['passed', 'failed', 'rollback'].includes(pipeline.health);
+  });
+  const passedDeployment = items.filter((pipeline) => pipeline.health === 'passed' && !isRollbackPipeline(pipeline));
+  const nonRollback = items.filter((pipeline) => !isRollbackPipeline(pipeline));
+  const preferred = actionable.length
+    ? actionable
+    : openDeployment.length
+      ? openDeployment
+      : passedDeployment.length
+        ? passedDeployment
+        : nonRollback.length
+          ? nonRollback
+          : items;
   return preferred
     .slice()
     .sort((left, right) => pipelineOperationalScore(right) - pipelineOperationalScore(left)
       || String(right.latestUpdatedAt || '').localeCompare(String(left.latestUpdatedAt || '')))[0] || null;
+}
+
+function isRollbackPipeline(pipeline) {
+  const stage = String(pipeline?.currentStage || '');
+  return pipeline?.health === 'rollback' || stage.startsWith('rollback-');
+}
+
+function isFailedOrRollbackPipeline(pipeline) {
+  return pipeline?.health === 'failed' || isRollbackPipeline(pipeline);
 }
 
 function latestPipeline(pipelines) {
@@ -2780,7 +2882,7 @@ function renderDeploymentWorkbench(pipelines) {
     return;
   }
   syncSshProfileFormToSelectedSite(site.siteId, site.kind);
-  const pipeline = site.activePipeline;
+  const pipeline = hydratePipelineForWorkbench(site.activePipeline);
   siteWorkbench.innerHTML = `
     <section class="site-hero">
       <div>
@@ -2796,8 +2898,102 @@ function renderDeploymentWorkbench(pipelines) {
       <span><strong>${pipelineObjectCount(pipeline)}</strong><small>active objects</small></span>
       <span><strong>${site.pipelines.length}</strong><small>history runs</small></span>
     </div>
+    ${renderDomesticRelayPanel(site, pipeline)}
   `;
+  bindDomesticWorkbenchActions(site);
   renderInspector();
+}
+
+function hydratePipelineForWorkbench(pipeline) {
+  if (!pipeline || state.currentPipeline?.summary?.planId !== pipeline.planId) return pipeline;
+  return {
+    ...pipeline,
+    ...state.currentPipeline.summary,
+    plan: state.currentPipeline.plan
+  };
+}
+
+function renderDomesticRelayPanel(site, pipeline) {
+  if (site.kind !== 'domestic') return '';
+  const detailedPipeline = state.currentPipeline?.summary?.planId === pipeline?.planId ? state.currentPipeline : null;
+  const plan = detailedPipeline?.plan || pipeline?.plan || {};
+  const summary = pipeline || {};
+  const nextAction = preferredNextAction(asArray(summary.actionHints));
+  const endpoint = domesticEndpointFromPlan(plan, summary);
+  const legacy = domesticLegacyCleanupState(plan, summary);
+  const profile = inspectorSshProfile('domestic', site.siteId);
+  const canCreatePlan = Boolean(profile?.profileId || selectedSshProfileId());
+  const status = isFailedOrRollbackPipeline(pipeline) ? 'blocked' : nextAction ? 'ready' : 'planned';
+  const statusText = isFailedOrRollbackPipeline(pipeline)
+    ? 'history selected'
+    : nextAction?.label || 'no pending gate';
+  return `
+    <section class="domestic-relay-panel" data-status="${escapeHtml(status)}">
+      <div class="domestic-relay-head">
+        <div>
+          <span class="site-kind">Domestic WG Relay 2.0</span>
+          <strong>${escapeHtml(statusText)}</strong>
+          <p>Internal 统一生成 secret 和 artifact；Domestic 只作为可替换 relay/cache/agent。</p>
+        </div>
+        <div class="domestic-relay-actions">
+          <button class="primary-button" type="button" data-domestic-create-plan ${canCreatePlan ? '' : 'disabled'}>New 2.0 Plan</button>
+          <button class="secondary-button" type="button" data-domestic-open-ssh>SSH Access</button>
+        </div>
+      </div>
+      <div class="domestic-relay-grid">
+        <span><small>WG endpoint</small><strong>${escapeHtml(endpoint || 'host:51820')}</strong></span>
+        <span><small>relay gateway</small><strong>10.88.0.1</strong></span>
+        <span><small>Internal service</small><strong>10.88.88.88</strong></span>
+        <span><small>standalone users</small><strong>10.89.0.0/16</strong></span>
+        <span><small>product ranges</small><strong>10.90.0.0/16 + registry</strong></span>
+        <span data-status="${escapeHtml(legacy.status)}"><small>legacy 1.0</small><strong>${escapeHtml(legacy.label)}</strong></span>
+      </div>
+    </section>
+  `;
+}
+
+function bindDomesticWorkbenchActions(site) {
+  if (site.kind !== 'domestic') return;
+  const createPlanButton = siteWorkbench.querySelector('[data-domestic-create-plan]');
+  if (createPlanButton) {
+    createPlanButton.addEventListener('click', () => {
+      syncSshProfileFormToSelectedSite(site.siteId, site.kind);
+      void createPlanFromSshProfile();
+    });
+  }
+  const openSshButton = siteWorkbench.querySelector('[data-domestic-open-ssh]');
+  if (openSshButton) {
+    openSshButton.addEventListener('click', () => {
+      syncSshProfileFormToSelectedSite(site.siteId, site.kind);
+      focusSshProfileForSite(site);
+    });
+  }
+}
+
+function domesticEndpointFromPlan(plan, summary = null) {
+  const host = plan?.host || summary?.host || '';
+  const port = plan?.wireGuard?.listenPort || plan?.relay?.listenPort || 51820;
+  return host ? `${host}:${port}` : '';
+}
+
+function domesticLegacyCleanupState(plan, summary = null) {
+  if (domesticPlanHasLegacyCleanup(plan)) {
+    return { status: 'passed', label: 'retires hdo-home / 100.*' };
+  }
+  const nextActions = asArray(plan?.nextActions?.length ? plan.nextActions : summary?.nextActions);
+  if (!asArray(plan?.deploymentPhases).length && nextActions.includes('activate-domestic-peer-center')) {
+    return { status: 'ready', label: 'planned at activate' };
+  }
+  return { status: 'blocked', label: 'not in this plan' };
+}
+
+function domesticPlanHasLegacyCleanup(plan) {
+  return asArray(plan?.deploymentPhases).some((phase) => {
+    return asArray(phase.commands).some((command) => {
+      const text = String(command || '');
+      return text.includes('hdo-home') && text.includes('100.*') && text.includes('mx-domestic');
+    });
+  });
 }
 
 function renderOverseaWorkbench(pipelines) {
@@ -3299,8 +3495,7 @@ function renderFoundationGrid(overview) {
   if (assignOversea) assignOversea.addEventListener('click', () => void assignUserOverseaFromAdmin());
   const syncOverseaUser = foundationGrid.querySelector('[data-oversea-sync-user]');
   if (syncOverseaUser) syncOverseaUser.addEventListener('click', () => void syncUserOverseaRuntimeFromAdmin());
-  const enrollRelay = foundationGrid.querySelector('[data-relay-enroll]');
-  if (enrollRelay) enrollRelay.addEventListener('click', () => void enrollHomeRelayFromAdmin());
+  bindRelayEnrollmentControls(foundationGrid);
 }
 
 function internalFoundationCards(overview) {
@@ -3476,6 +3671,12 @@ function renderFoundationKpi(label, value, hint) {
       <small>${escapeHtml(hint)}</small>
     </article>
   `;
+}
+
+function formatLeaseRange(start, end) {
+  if (!start && !end) return '-';
+  if (!end || start === end) return start || end || '-';
+  return `${start || '-'}-${end}`;
 }
 
 function renderFoundationRows(rows) {
@@ -3824,8 +4025,189 @@ function renderUserIntegrationPanel() {
       </div>
       ${renderFoundationRows(endpoints)}
     </section>
-    ${renderRelayEnrollmentPanel()}
   `;
+}
+
+function relayEnrollmentDraftForRender(siteId, overrides = {}) {
+  const product = overrides.productId ? launcherProductById(overrides.productId) : null;
+  const draft = {
+    productId: overrides.productId || state.relayEnrollment.draft?.productId || 'h2o',
+    mode: (overrides.mode || product?.mode || state.relayEnrollment.draft?.mode) === 'standalone' ? 'standalone' : 'embed',
+    identityKind: (overrides.identityKind || state.relayEnrollment.draft?.identityKind) === 'user' ? 'user' : 'anonymous',
+    siteId: state.relayEnrollment.draft?.siteId || siteId || 'domestic-main',
+    installId: state.relayEnrollment.draft?.installId || defaultRelayEnrollmentDeviceId,
+    deviceId: state.relayEnrollment.draft?.deviceId || defaultRelayEnrollmentDeviceId,
+    userId: state.relayEnrollment.draft?.userId || '',
+    deviceLabel: state.relayEnrollment.draft?.deviceLabel || 'Desktop Admin',
+    publicKey: state.relayEnrollment.draft?.publicKey || state.domesticPeerDraft.publicKey || ''
+  };
+  state.relayEnrollment.draft = draft;
+  return draft;
+}
+
+function relayEnrollmentDraftFromForm(root = foundationGrid) {
+  const current = state.relayEnrollment.draft || {};
+  const scope = root || foundationGrid || document;
+  const productId = blankToNull(scope.querySelector('[data-relay-field="productId"]')?.value) || current.productId || 'h2o';
+  const product = asArray(state.launcherProducts).find((item) => item?.productId === productId) || null;
+  const rawMode = blankToNull(scope.querySelector('[data-relay-field="mode"]')?.value) || product?.mode || current.mode || 'embed';
+  const rawIdentityKind = blankToNull(scope.querySelector('[data-relay-field="identityKind"]')?.value) || current.identityKind || 'anonymous';
+  const draft = {
+    productId,
+    mode: rawMode === 'standalone' ? 'standalone' : 'embed',
+    identityKind: rawIdentityKind === 'user' ? 'user' : 'anonymous',
+    siteId: blankToNull(scope.querySelector('[data-relay-field="siteId"]')?.value) || current.siteId || selectedDomesticSiteId() || 'domestic-main',
+    installId: blankToNull(scope.querySelector('[data-relay-field="installId"]')?.value) || current.installId || defaultRelayEnrollmentDeviceId,
+    deviceId: blankToNull(scope.querySelector('[data-relay-field="deviceId"]')?.value) || current.deviceId || defaultRelayEnrollmentDeviceId,
+    userId: blankToNull(scope.querySelector('[data-relay-field="userId"]')?.value) || current.userId || '',
+    deviceLabel: blankToNull(scope.querySelector('[data-relay-field="deviceLabel"]')?.value) || current.deviceLabel || 'Desktop Admin',
+    publicKey: blankToNull(scope.querySelector('[data-relay-field="publicKey"]')?.value) || current.publicKey || ''
+  };
+  state.relayEnrollment.draft = draft;
+  return draft;
+}
+
+function renderRelayProductOptions(selectedProductId) {
+  const products = asArray(state.launcherProducts);
+  const optionProducts = products.length
+    ? products
+    : [
+        { productId: 'h2o', displayName: 'H2O', mode: 'embed', serviceVip: '10.88.100.10' },
+        { productId: 'launcher', displayName: 'Launcher Standalone', mode: 'standalone', serviceVip: '10.88.100.1' }
+      ];
+  const selectedExists = optionProducts.some((product) => product.productId === selectedProductId);
+  const options = [
+    ...(!selectedExists && selectedProductId ? [{ productId: selectedProductId, displayName: selectedProductId, mode: 'embed', serviceVip: null }] : []),
+    ...optionProducts
+  ];
+  return options.map((product) => {
+    const label = `${product.displayName || product.productId} / ${product.mode || 'embed'} / ${product.serviceVip || '-'}`;
+    return `<option value="${escapeHtml(product.productId)}" ${product.productId === selectedProductId ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+  }).join('');
+}
+
+function upsertLocalLauncherLease(lease) {
+  if (!lease?.leaseId) return;
+  const existing = asArray(state.launcherLeases).filter((item) => item?.leaseId !== lease.leaseId);
+  state.launcherLeases = [lease, ...existing];
+  state.launcherLeasesError = null;
+}
+
+function bindRelayEnrollmentControls(root) {
+  if (!root) return;
+  for (const input of root.querySelectorAll('[data-relay-field]')) {
+    input.addEventListener('input', () => relayEnrollmentDraftFromForm(root));
+    input.addEventListener('change', () => relayEnrollmentDraftFromForm(root));
+  }
+  const enrollRelay = root.querySelector('[data-relay-enroll]');
+  if (enrollRelay) enrollRelay.addEventListener('click', () => void enrollHomeRelayFromAdmin(root));
+}
+
+function launcherProductById(productId) {
+  const normalized = String(productId || '').trim().toLowerCase();
+  return asArray(state.launcherProducts).find((product) => product?.productId === normalized) || null;
+}
+
+function fallbackLauncherProduct(productId) {
+  if (productId === 'launcher') {
+    return {
+      productId: 'launcher',
+      displayName: 'Launcher Standalone',
+      mode: 'standalone',
+      serviceVip: '10.88.100.1',
+      internalControlIp: '10.88.88.88',
+      userLeaseStart: '10.89.0.1',
+      userLeaseEnd: '10.89.99.254',
+      anonymousLeaseStart: '10.89.100.1',
+      anonymousLeaseEnd: '10.89.254.254',
+      defaultDomesticSiteId: 'domestic-main',
+      updatePolicy: 'launcher-managed'
+    };
+  }
+  return {
+    productId: 'h2o',
+    displayName: 'H2O',
+    mode: 'embed',
+    serviceVip: '10.88.100.10',
+    internalControlIp: '10.88.88.88',
+    userLeaseStart: '10.90.0.1',
+    userLeaseEnd: '10.90.99.254',
+    anonymousLeaseStart: '10.90.100.1',
+    anonymousLeaseEnd: '10.90.254.254',
+    defaultDomesticSiteId: 'domestic-main',
+    updatePolicy: 'launcher-managed'
+  };
+}
+
+function launcherProductNetwork(productId) {
+  return launcherProductById(productId) || fallbackLauncherProduct(productId);
+}
+
+function launcherLeasesForProduct(productId) {
+  const normalized = String(productId || '').trim().toLowerCase();
+  return asArray(state.launcherLeases)
+    .filter((lease) => lease?.productId === normalized)
+    .slice()
+    .sort((left, right) => String(right.updatedAt || right.createdAt || '').localeCompare(String(left.updatedAt || left.createdAt || '')));
+}
+
+function renderAppCenterProductNetwork() {
+  if (!h2oNetwork) return;
+  const product = launcherProductNetwork('h2o');
+  const leases = launcherLeasesForProduct('h2o');
+  const latestLease = leases[0] || null;
+  const error = state.launcherProductsError || state.launcherLeasesError || '';
+  h2oNetwork.innerHTML = `
+    <div class="product-network-head">
+      <div>
+        <strong>Product Network</strong>
+        <span>${escapeHtml(product.displayName || product.productId)} / ${escapeHtml(product.mode || 'embed')}</span>
+      </div>
+      <span class="product-network-badge">${escapeHtml(latestLease?.leaseIp || product.serviceVip || '10.88.100.10')}</span>
+    </div>
+    ${error ? `<div class="feedback error">${escapeHtml(error)}</div>` : ''}
+    <div class="product-network-facts">
+      <span><strong>${escapeHtml(product.serviceVip || '-')}</strong><small>service VIP</small></span>
+      <span><strong>${escapeHtml(product.internalControlIp || '10.88.88.88')}</strong><small>Internal</small></span>
+      <span><strong>${escapeHtml(formatLeaseRange(product.userLeaseStart, product.userLeaseEnd))}</strong><small>login users</small></span>
+      <span><strong>${escapeHtml(formatLeaseRange(product.anonymousLeaseStart, product.anonymousLeaseEnd))}</strong><small>anonymous</small></span>
+    </div>
+    <div class="product-lease-list">
+      ${leases.slice(0, 4).map((lease) => `
+        <article>
+          <strong>${escapeHtml(lease.leaseIp || '-')}</strong>
+          <span>${escapeHtml(`${lease.identityKind || 'identity'} / ${lease.launcherMode || 'mode'} / ${lease.deviceLabel || lease.deviceId || '-'}`)}</span>
+          <small>${escapeHtml(lease.leaseId || '-')}</small>
+        </article>
+      `).join('') || '<div class="empty-state">No H2O lease yet. Create one here for smoke, or let @qpjoy/electron-launcher enroll automatically later.</div>'}
+    </div>
+    <div class="product-network-actions">
+      <button class="secondary-button" type="button" data-h2o-domestic>Domestic Setup</button>
+    </div>
+    <details class="product-network-advanced" ${leases.length ? '' : 'open'}>
+      <summary>Advanced lease smoke</summary>
+      ${renderRelayEnrollmentPanel({
+        productId: 'h2o',
+        lockProduct: true,
+        lockMode: true,
+        title: 'H2O Relay Lease',
+        actionLabel: 'Create H2O Lease',
+        compact: true
+      })}
+    </details>
+  `;
+  bindRelayEnrollmentControls(h2oNetwork);
+  const domesticButton = h2oNetwork.querySelector('[data-h2o-domestic]');
+  if (domesticButton) {
+    domesticButton.addEventListener('click', () => {
+      setActiveView('admin', {
+        menu: 'operations',
+        section: 'deployment',
+        subsection: 'domestic',
+        deploymentKind: 'domestic'
+      });
+    });
+  }
 }
 
 function renderRbacPanel() {
@@ -3963,6 +4345,7 @@ function renderConfigCenterPanel(overview) {
       </div>
       ${renderFoundationRows(rows)}
     </section>
+    ${renderLauncherProductNetworksPanel()}
     <section class="foundation-panel">
       <div class="foundation-panel-head">
         <div>
@@ -3975,6 +4358,58 @@ function renderConfigCenterPanel(overview) {
         ['AWX adapter', 'Internal -> AWX inventory/credential/job template', 'optional'],
         ['Evidence', 'plan, preflight, runner session, worker report, remote stdout/stderr', 'required']
       ])}
+    </section>
+  `;
+}
+
+function renderLauncherProductNetworksPanel() {
+  const products = asArray(state.launcherProducts);
+  const error = state.launcherProductsError;
+  const standalone = products.find((product) => product.mode === 'standalone') || null;
+  const embedProducts = products.filter((product) => product.mode === 'embed');
+  const rows = products.map((product) => [
+    product.displayName || product.productId,
+    product.mode,
+    product.serviceVip || '-',
+    `${formatLeaseRange(product.userLeaseStart, product.userLeaseEnd)} / ${formatLeaseRange(product.anonymousLeaseStart, product.anonymousLeaseEnd)}`,
+    product.updatePolicy || '-'
+  ]);
+  return `
+    <section class="foundation-panel foundation-wide">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>Product Network Registry</h4>
+          <p>Internal 统一管理 standalone Launcher 和 embed 产品的入口 IP、租约段、DNS、限速、许可与更新策略。</p>
+        </div>
+        <span>${escapeHtml(String(products.length || 0))} products</span>
+      </div>
+      ${error ? `<div class="feedback error">${escapeHtml(error)}</div>` : ''}
+      <div class="foundation-kpi-grid">
+        ${renderFoundationKpi('Internal', '10.88.88.88', 'fixed control-plane peer')}
+        ${renderFoundationKpi('Standalone', formatLeaseRange(standalone?.userLeaseStart, standalone?.userLeaseEnd), standalone ? `${formatLeaseRange(standalone.anonymousLeaseStart, standalone.anonymousLeaseEnd)} anonymous` : 'Launcher pool')}
+        ${renderFoundationKpi('Embed', formatLeaseRange(embedProducts[0]?.userLeaseStart, embedProducts[0]?.userLeaseEnd), 'product-owned leases')}
+        ${renderFoundationKpi('Updater', 'Launcher', 'standalone/embed shared policy')}
+      </div>
+      ${rows.length ? `
+        <div class="foundation-table">
+          <article class="foundation-table-row is-header">
+            <strong>Product</strong>
+            <span>Mode</span>
+            <span>Service VIP</span>
+            <span>Login / anonymous range</span>
+            <small>Update</small>
+          </article>
+          ${rows.map((row) => `
+            <article class="foundation-table-row">
+              <strong>${escapeHtml(row[0])}</strong>
+              <span>${escapeHtml(row[1])}</span>
+              <span>${escapeHtml(row[2])}</span>
+              <span>${escapeHtml(row[3])}</span>
+              <small>${escapeHtml(row[4])}</small>
+            </article>
+          `).join('')}
+        </div>
+      ` : '<div class="empty-state">Product network registry is not loaded.</div>'}
     </section>
   `;
 }
@@ -4142,47 +4577,91 @@ function renderInternalModulePanel(moduleId, overview) {
   `;
 }
 
-function renderRelayEnrollmentPanel() {
+function renderRelayEnrollmentPanel(options = {}) {
   const result = state.relayEnrollment.result;
   const feedback = state.relayEnrollment.feedback;
   const siteId = state.deploymentKind === 'domestic'
     ? selectedDomesticSiteId()
     : 'domestic-main';
+  const product = options.productId ? launcherProductNetwork(options.productId) : null;
+  const draft = relayEnrollmentDraftForRender(siteId, {
+    productId: product?.productId,
+    mode: product?.mode
+  });
+  const lease = result?.leaseId ? result : null;
+  const leaseIp = state.domesticPeerDraft.leaseIp || lease?.leaseIp || '';
+  const productOptions = renderRelayProductOptions(draft.productId);
+  const title = options.title || 'Product Relay Lease';
+  const actionLabel = options.actionLabel || 'Create Product Lease';
+  const panelClass = options.compact ? 'foundation-operation-panel relay-lease-panel is-compact' : 'foundation-operation-panel relay-lease-panel';
+  const productLabel = product
+    ? `${product.displayName || product.productId} / ${product.serviceVip || '-'}`
+    : draft.productId;
   return `
-    <section class="foundation-operation-panel">
+    <section class="${panelClass}">
       <div class="section-title compact-title">
-        <h4>Home Relay Enrollment</h4>
-        <span>${escapeHtml(state.domesticPeerDraft.leaseIp || result?.overlayIp || '10.91')}</span>
+        <h4>${escapeHtml(title)}</h4>
+        <span>${escapeHtml(leaseIp || '10.90.100.x')}</span>
       </div>
       <div class="foundation-operation-grid relay-operation-grid">
         <label class="form-field">
+          <span>Product</span>
+          ${options.lockProduct
+            ? `<input autocomplete="off" value="${escapeHtml(productLabel)}" disabled /><input type="hidden" data-relay-field="productId" value="${escapeHtml(draft.productId)}" />`
+            : `<select data-relay-field="productId">${productOptions}</select>`}
+        </label>
+        <label class="form-field compact-field">
+          <span>Mode</span>
+          ${options.lockMode
+            ? `<input autocomplete="off" value="${escapeHtml(draft.mode)}" disabled /><input type="hidden" data-relay-field="mode" value="${escapeHtml(draft.mode)}" />`
+            : `<select data-relay-field="mode">
+                <option value="embed" ${draft.mode === 'embed' ? 'selected' : ''}>embed</option>
+                <option value="standalone" ${draft.mode === 'standalone' ? 'selected' : ''}>standalone</option>
+              </select>`}
+        </label>
+        <label class="form-field compact-field">
+          <span>Identity</span>
+          <select data-relay-field="identityKind">
+            <option value="anonymous" ${draft.identityKind === 'anonymous' ? 'selected' : ''}>anonymous</option>
+            <option value="user" ${draft.identityKind === 'user' ? 'selected' : ''}>user</option>
+          </select>
+        </label>
+        <label class="form-field">
           <span>Domestic Site</span>
-          <input data-relay-field="siteId" autocomplete="off" value="${escapeHtml(siteId)}" />
+          <input data-relay-field="siteId" autocomplete="off" value="${escapeHtml(draft.siteId)}" />
         </label>
         <label class="form-field">
           <span>Install ID</span>
-          <input data-relay-field="installId" autocomplete="off" placeholder="optional" />
+          <input data-relay-field="installId" autocomplete="off" value="${escapeHtml(draft.installId)}" placeholder="optional" />
         </label>
         <label class="form-field">
           <span>Device ID</span>
-          <input data-relay-field="deviceId" autocomplete="off" placeholder="optional" />
+          <input data-relay-field="deviceId" autocomplete="off" value="${escapeHtml(draft.deviceId)}" placeholder="optional" />
+        </label>
+        <label class="form-field">
+          <span>User ID</span>
+          <input data-relay-field="userId" autocomplete="off" value="${escapeHtml(draft.userId)}" placeholder="only for user identity" />
+        </label>
+        <label class="form-field">
+          <span>Device Label</span>
+          <input data-relay-field="deviceLabel" autocomplete="off" value="${escapeHtml(draft.deviceLabel)}" placeholder="optional" />
         </label>
         <label class="form-field wide-field">
           <span>Home WG Public Key</span>
-          <input data-relay-field="publicKey" autocomplete="off" value="${escapeHtml(state.domesticPeerDraft.publicKey)}" placeholder="base64 public key" />
+          <input data-relay-field="publicKey" autocomplete="off" value="${escapeHtml(draft.publicKey || state.domesticPeerDraft.publicKey)}" placeholder="base64 public key" />
         </label>
       </div>
       <div class="foundation-operation-actions">
         <button class="primary-button" type="button" data-relay-enroll ${state.relayEnrollment.busy ? 'disabled' : ''}>
-          ${state.relayEnrollment.busy ? 'Enrolling' : 'Create Relay Lease'}
+          ${state.relayEnrollment.busy ? 'Enrolling' : escapeHtml(actionLabel)}
         </button>
         ${feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(feedback.kind)}">${escapeHtml(feedback.message)}</span>` : ''}
       </div>
       <div class="foundation-list">
         <article>
-          <strong>${escapeHtml(state.domesticPeerDraft.leaseIp || result?.overlayIp || '-')}</strong>
-          <span>${escapeHtml(result?.anonymousPrincipalId || 'guest relay peer')}</span>
-          <small>${escapeHtml(state.domesticPeerDraft.publicKey || result?.publicKey || '-')}</small>
+          <strong>${escapeHtml(leaseIp || '-')}</strong>
+          <span>${escapeHtml(lease ? `${lease.productId} / ${lease.identityKind} / ${lease.launcherMode}` : `${draft.productId} / ${draft.identityKind} / ${draft.mode}`)}</span>
+          <small>${escapeHtml(lease?.leaseId || state.domesticPeerDraft.publicKey || draft.publicKey || '-')}</small>
         </article>
       </div>
     </section>
@@ -4608,18 +5087,37 @@ function renderPipelineList(pipelines) {
   }
   pipelineList.innerHTML = sites.map((site) => {
     const pipeline = site.activePipeline;
+    const runs = sitePipelinesForDisplay(site);
     return `
-    <button class="pipeline-item ${site.siteId === state.selectedSiteId ? 'is-selected' : ''}" type="button" data-site-id="${escapeHtml(site.siteId)}" data-plan-id="${escapeHtml(pipeline.planId)}">
-      <span class="pipeline-top">
-        <strong>${escapeHtml(site.siteId)}</strong>
-        <span class="health-chip" data-health="${escapeHtml(pipeline.health)}">${escapeHtml(pipeline.health)}</span>
-      </span>
-      <span class="pipeline-meta">${escapeHtml(site.kind)} / ${escapeHtml(pipeline.currentStage)} / ${escapeHtml(pipeline.latestStatus)}</span>
-      <span class="pipeline-counts">${pipelineObjectCount(pipeline)} active objects / ${site.pipelines.length} history</span>
-    </button>
+    <article class="pipeline-site">
+      <button class="pipeline-item ${site.siteId === state.selectedSiteId && pipeline.planId === state.selectedPlanId ? 'is-selected' : ''}" type="button" data-site-id="${escapeHtml(site.siteId)}" data-plan-id="${escapeHtml(pipeline.planId)}">
+        <span class="pipeline-top">
+          <strong>${escapeHtml(site.siteId)}</strong>
+          <span class="health-chip" data-health="${escapeHtml(pipeline.health)}">${escapeHtml(pipeline.health)}</span>
+        </span>
+        <span class="pipeline-meta">${escapeHtml(site.kind)} / ${escapeHtml(pipeline.currentStage)} / ${escapeHtml(pipeline.latestStatus)}</span>
+        <span class="pipeline-counts">${pipelineObjectCount(pipeline)} active objects / ${site.pipelines.length} history</span>
+        <span class="pipeline-selected-role">${escapeHtml(sitePipelineRoleLabel(site, pipeline))}</span>
+      </button>
+      <div class="pipeline-run-strip" aria-label="${escapeHtml(site.siteId)} history runs">
+        ${runs.map((run) => `
+          <button
+            class="pipeline-run ${run.planId === state.selectedPlanId ? 'is-selected' : ''}"
+            type="button"
+            data-site-id="${escapeHtml(site.siteId)}"
+            data-plan-id="${escapeHtml(run.planId)}"
+            title="${escapeHtml(run.currentStage)} / ${escapeHtml(run.latestStatus)} / ${formatTime(run.latestUpdatedAt)}"
+          >
+            <span class="health-dot" data-health="${escapeHtml(run.health)}"></span>
+            <strong>${escapeHtml(run.currentStage)}</strong>
+            <small>${formatTime(run.latestUpdatedAt)}</small>
+          </button>
+        `).join('')}
+      </div>
+    </article>
   `;
   }).join('');
-  for (const item of pipelineList.querySelectorAll('.pipeline-item')) {
+  for (const item of pipelineList.querySelectorAll('.pipeline-item, .pipeline-run')) {
     item.addEventListener('click', () => {
       state.selectedSiteId = item.dataset.siteId || null;
       void refreshPipelineDetail(item.dataset.planId);
@@ -4628,9 +5126,31 @@ function renderPipelineList(pipelines) {
 }
 
 function renderPipelineSelection() {
-  for (const item of pipelineList.querySelectorAll('.pipeline-item')) {
-    item.classList.toggle('is-selected', item.dataset.siteId === state.selectedSiteId);
+  for (const item of pipelineList.querySelectorAll('.pipeline-item, .pipeline-run')) {
+    item.classList.toggle(
+      'is-selected',
+      item.dataset.siteId === state.selectedSiteId && item.dataset.planId === state.selectedPlanId
+    );
   }
+}
+
+function sitePipelinesForDisplay(site) {
+  const activeId = site.activePipeline?.planId || '';
+  const latestId = site.latestPipeline?.planId || '';
+  const runs = asArray(site.pipelines)
+    .slice()
+    .sort((left, right) => String(right.latestUpdatedAt || '').localeCompare(String(left.latestUpdatedAt || '')));
+  const pinned = [site.activePipeline, site.latestPipeline].filter(Boolean);
+  return [...pinned, ...runs]
+    .filter((pipeline, index, all) => pipeline && all.findIndex((item) => item?.planId === pipeline.planId) === index)
+    .slice(0, activeId === latestId ? 4 : 5);
+}
+
+function sitePipelineRoleLabel(site, pipeline) {
+  if (site.activePipeline?.planId === pipeline.planId && site.latestPipeline?.planId === pipeline.planId) return 'recommended + latest';
+  if (site.activePipeline?.planId === pipeline.planId) return 'recommended';
+  if (site.latestPipeline?.planId === pipeline.planId) return 'latest';
+  return isFailedOrRollbackPipeline(pipeline) ? 'history' : 'run';
 }
 
 function renderPipelineDetail(pipeline) {
@@ -4675,6 +5195,9 @@ function renderPipelineDetail(pipeline) {
   }
   if (!timeline.some((entry) => entry.id === state.selectedTimelineEntryId)) {
     closeEvidenceDrawer();
+  }
+  if (state.adminSection === 'deployment') {
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
   }
   renderInspector();
 }
@@ -5451,6 +5974,10 @@ function renderSetupGuidance(pipeline, actions) {
     renderSelectedSiteSetupGuidance();
     return;
   }
+  if (summary.kind === 'domestic' && isFailedOrRollbackPipeline(summary)) {
+    renderDomesticHistorySetupGuidance(pipeline);
+    return;
+  }
   const needsDomesticPlan = setupNeedsDomesticPlan(pipeline);
   const actionText = nextAction ? setupActionGuidanceText(pipeline, nextAction) : '当前没有可执行 gate。可以刷新或查看 Evidence History。';
   const runState = setupRunViewState(nextAction);
@@ -5502,6 +6029,62 @@ function renderSetupGuidance(pipeline, actions) {
   }
   const refreshButton = setupGuide.querySelector('[data-setup-refresh]');
   if (refreshButton) refreshButton.addEventListener('click', () => void refreshAdmin());
+}
+
+function renderDomesticHistorySetupGuidance(pipeline) {
+  const summary = pipeline?.summary || {};
+  const profile = inspectorSshProfile('domestic', summary.siteId);
+  const canCreatePlan = Boolean(profile?.profileId || selectedSshProfileId()) && !state.sshPlanBusy;
+  const recommended = recommendedPipelineForSite(summary.siteId, 'domestic');
+  const canOpenRecommended = recommended?.planId && recommended.planId !== summary.planId && !isFailedOrRollbackPipeline(recommended);
+  setupGuide.innerHTML = `
+    <section class="setup-guide-card domestic-history-guide" data-ready="${canCreatePlan || canOpenRecommended ? 'true' : 'false'}">
+      <div>
+        <span class="site-kind">Setup Assistant</span>
+        <strong>${escapeHtml(summary.siteId)}: start a clean Domestic WG 2.0 plan</strong>
+        <p>当前选中的是 ${escapeHtml(summary.health)} / ${escapeHtml(summary.currentStage)} 历史执行，不是继续部署入口。新的 2.0 plan 会先 Materialize Domestic WG，然后通过 Remote SSH 执行 install/sync；activate 阶段会清理 hdo-home 和 100.* 旧网段。</p>
+        <ol class="setup-next-chain" aria-label="Domestic setup chain">
+          ${['SSH Profile', 'New 2.0 Plan', 'WG Secret', 'Preflight', 'Apply', 'Remote SSH', 'Install / Sync'].map((step, index) => `
+            <li data-current="${index === 1 ? 'true' : 'false'}">${escapeHtml(step)}</li>
+          `).join('')}
+        </ol>
+      </div>
+      <div class="setup-guide-actions">
+        ${canOpenRecommended ? '<button class="secondary-button" type="button" data-setup-open-recommended>Open Recommended</button>' : ''}
+        <button class="primary-button" type="button" data-setup-create-plan ${canCreatePlan ? '' : 'disabled'}>${state.sshPlanBusy ? 'Creating' : 'New 2.0 Plan'}</button>
+        <button class="secondary-button" type="button" data-setup-site-open-ssh>SSH Access</button>
+        <button class="secondary-button" type="button" data-setup-refresh>Refresh</button>
+      </div>
+    </section>
+  `;
+  const openRecommended = setupGuide.querySelector('[data-setup-open-recommended]');
+  if (openRecommended && recommended?.planId) {
+    openRecommended.addEventListener('click', () => {
+      state.selectedSiteId = recommended.siteId || summary.siteId;
+      void refreshPipelineDetail(recommended.planId);
+    });
+  }
+  const createPlanButton = setupGuide.querySelector('[data-setup-create-plan]');
+  if (createPlanButton) {
+    createPlanButton.addEventListener('click', () => {
+      syncSshProfileFormToSelectedSite(summary.siteId, 'domestic');
+      void createPlanFromSshProfile();
+    });
+  }
+  const openSsh = setupGuide.querySelector('[data-setup-site-open-ssh]');
+  if (openSsh) {
+    openSsh.addEventListener('click', () => {
+      syncSshProfileFormToSelectedSite(summary.siteId, 'domestic');
+      focusSshProfileForSite({ siteId: summary.siteId, kind: 'domestic' });
+    });
+  }
+  const refreshButton = setupGuide.querySelector('[data-setup-refresh]');
+  if (refreshButton) refreshButton.addEventListener('click', () => void refreshAdmin());
+}
+
+function recommendedPipelineForSite(siteId, kind) {
+  const sites = deploymentSites(state.dashboard?.siteSlotPipelines || [], kind);
+  return sites.find((site) => site.siteId === siteId)?.activePipeline || null;
 }
 
 function renderSelectedSiteSetupGuidance() {
@@ -5933,6 +6516,11 @@ function setupManualStopReason(action) {
 }
 
 function setupActionBlockedMessage(payload) {
+  if (payload?.workerExecution?.status === 'failed') {
+    return payload.workerExecution.stderr
+      ? `Remote SSH worker failed: ${String(payload.workerExecution.stderr).slice(0, 600)}`
+      : 'Remote SSH worker failed. Review worker report evidence before retrying.';
+  }
   const gateFailures = asArray(payload?.gate?.gateFailures);
   if (payload?.gate?.verdict === 'blocked') {
     return gateFailures.length
@@ -6106,7 +6694,7 @@ function renderSetupActionChain(pipeline, action) {
     || (plan.network?.mode === 'offline-manual' && Boolean(domesticBootstrapOverseaSite()));
   const steps = needsPlan
     ? ['Save SSH', 'Create Plan', 'Preflight', 'Apply', 'WG Secret', 'Remote SSH', 'Install / Sync']
-    : ['Plan bound', 'WG Secret', 'Remote SSH Runner', 'Worker Job', 'SSH Gate', 'Readonly Probe', 'Install / Sync'];
+    : ['Plan bound', 'WG Secret', 'Preflight', 'Apply', 'Remote SSH Runner', 'Worker Job', 'SSH Gate', 'Readonly Probe', 'Install / Sync'];
   const current = needsPlan
     ? 'Create Plan'
     : setupChainCurrentStep(action.actionId);
@@ -6121,6 +6709,8 @@ function renderSetupActionChain(pipeline, action) {
 
 function setupChainCurrentStep(actionId) {
   if (actionId === 'site-slot.domestic-wg.materialize') return 'WG Secret';
+  if (actionId === 'site-slot.preflight.create') return 'Preflight';
+  if (actionId === 'site-slot.apply.confirm') return 'Apply';
   if (actionId === 'site-slot.runner.remote-ssh') return 'Remote SSH Runner';
   if (actionId === 'site-slot.worker-job.create' || actionId === 'site-slot.domestic-relay-peer-append-ssh.prepare') return 'Worker Job';
   if (actionId === 'site-slot.worker-run.remote-ssh-gate') return 'SSH Gate';
@@ -6137,10 +6727,10 @@ function preferredNextAction(actions) {
 function defaultPreferredAction(actions) {
   const candidates = asArray(actions).filter((action) => action.allowed);
   const priority = [
+    'site-slot.domestic-wg.materialize',
     'site-slot.preflight.create',
     'site-slot.apply.confirm',
     'site-slot.runner.remote-ssh',
-    'site-slot.domestic-wg.materialize',
     'site-slot.runner.simulate',
     'site-slot.worker-job.create',
     'site-slot.worker-run.remote-ssh-gate',
@@ -6312,6 +6902,7 @@ function materializeActionBodyTemplate(action) {
     '<change-window-start-iso>': changeWindowStart,
     '<change-window-end-iso>': changeWindowEnd,
     '<internal-base-url>': normalizedServerBase(),
+    '<launcher-network-lease-id>': state.domesticPeerDraft.leaseId || '<launcher-network-lease-id>',
     '<home-lease-ip>': state.domesticPeerDraft.leaseIp || '<home-lease-ip>',
     '<home-wg-public-key>': state.domesticPeerDraft.publicKey || '<home-wg-public-key>',
     '<request-id>': requestId
@@ -6336,6 +6927,9 @@ function actionBodyForExecution(action) {
     throw new Error('Action body JSON is invalid or still contains placeholders.');
   }
   const body = JSON.parse(text);
+  if (action?.actionId === 'site-slot.worker-run.remote-ssh-execute') {
+    body.executeWorkerHandoff = true;
+  }
   syncDomesticPeerDraftFromObject(body);
   return awxActionBodyForExecution(action, body);
 }
@@ -6355,31 +6949,81 @@ function hasUnresolvedActionPlaceholder(text) {
   return /<[^>\n]+>/.test(text);
 }
 
+function launcherLeaseById(leaseId) {
+  return asArray(state.launcherLeases).find((lease) => lease?.leaseId === leaseId) || null;
+}
+
+function launcherLeaseRole(lease) {
+  if (lease?.identityKind === 'user') return 'user';
+  if (lease?.identityKind === 'anonymous') return 'guest';
+  return inferDomesticPeerRole(lease?.leaseIp) || 'guest';
+}
+
+function launcherLeaseLabel(lease) {
+  const identity = lease.identityKind === 'user' ? 'user' : 'anonymous';
+  const mode = lease.launcherMode ? ` / ${lease.launcherMode}` : '';
+  const device = lease.deviceLabel || lease.deviceId || lease.installId || lease.leaseId;
+  return `${lease.productId || 'product'} / ${identity}${mode} / ${lease.leaseIp} / ${device}`;
+}
+
+function selectableLauncherLeases() {
+  return asArray(state.launcherLeases)
+    .filter((lease) => lease?.leaseId && lease?.leaseIp && lease?.publicKey && lease?.status === 'active')
+    .sort((left, right) => launcherLeaseLabel(left).localeCompare(launcherLeaseLabel(right)));
+}
+
 function renderHomePeerQuickFields(bodyText) {
   const body = parseActionBodyObject(bodyText);
-  const hasHomePeer = body && ('leaseIp' in body || 'publicKey' in body || 'peerRole' in body);
+  const hasHomePeer = body && ('leaseId' in body || 'leaseIp' in body || 'publicKey' in body || 'peerRole' in body);
   if (!hasHomePeer) return '';
-  const peerRole = body.peerRole === 'user' || body.peerRole === 'guest'
-    ? body.peerRole
-    : state.domesticPeerDraft.peerRole;
-  const leaseIp = typeof body.leaseIp === 'string' && !hasUnresolvedActionPlaceholder(body.leaseIp)
-    ? body.leaseIp
-    : state.domesticPeerDraft.leaseIp;
-  const publicKey = typeof body.publicKey === 'string' && !hasUnresolvedActionPlaceholder(body.publicKey)
-    ? body.publicKey
-    : state.domesticPeerDraft.publicKey;
+  const bodyLeaseId = typeof body.leaseId === 'string' && !hasUnresolvedActionPlaceholder(body.leaseId)
+    ? body.leaseId
+    : '';
+  const leaseId = bodyLeaseId || state.domesticPeerDraft.leaseId;
+  const selectedLease = leaseId ? launcherLeaseById(leaseId) : null;
+  const peerRole = selectedLease
+    ? launcherLeaseRole(selectedLease)
+    : body.peerRole === 'user' || body.peerRole === 'guest'
+      ? body.peerRole
+      : state.domesticPeerDraft.peerRole;
+  const leaseIp = selectedLease?.leaseIp
+    || (typeof body.leaseIp === 'string' && !hasUnresolvedActionPlaceholder(body.leaseIp) ? body.leaseIp : '')
+    || state.domesticPeerDraft.leaseIp;
+  const publicKey = selectedLease?.publicKey
+    || (typeof body.publicKey === 'string' && !hasUnresolvedActionPlaceholder(body.publicKey) ? body.publicKey : '')
+    || state.domesticPeerDraft.publicKey;
+  const leases = selectableLauncherLeases();
+  const leaseOptions = leases.map((lease) => `
+    <option value="${escapeHtml(lease.leaseId)}" ${lease.leaseId === leaseId ? 'selected' : ''}>
+      ${escapeHtml(launcherLeaseLabel(lease))}
+    </option>
+  `).join('');
+  const missingSelectedLease = leaseId && !leases.some((lease) => lease.leaseId === leaseId)
+    ? `<option value="${escapeHtml(leaseId)}" selected>${escapeHtml(leaseId)}</option>`
+    : '';
+  const emptyLeaseOption = leases.length > 0
+    ? '<option value="">Select Internal lease</option>'
+    : `<option value="">${escapeHtml(state.launcherLeasesError || 'No active lease with public key')}</option>`;
   return `
     <section class="home-peer-fields" aria-label="Home relay peer">
       <label>
+        <span>Internal Lease</span>
+        <select data-home-peer-field="leaseId">
+          ${emptyLeaseOption}
+          ${missingSelectedLease}
+          ${leaseOptions}
+        </select>
+      </label>
+      <label>
         <span>Peer Role</span>
         <select data-home-peer-field="peerRole">
-          <option value="guest" ${peerRole === 'guest' ? 'selected' : ''}>guest / 10.91</option>
-          <option value="user" ${peerRole === 'user' ? 'selected' : ''}>user / 10.89</option>
+          <option value="guest" ${peerRole === 'guest' ? 'selected' : ''}>anonymous / product .100-.254</option>
+          <option value="user" ${peerRole === 'user' ? 'selected' : ''}>user / product .0-.99</option>
         </select>
       </label>
       <label>
         <span>Lease IP</span>
-        <input data-home-peer-field="leaseIp" value="${escapeHtml(leaseIp)}" placeholder="10.91.x.y" />
+        <input data-home-peer-field="leaseIp" value="${escapeHtml(leaseIp)}" placeholder="10.90.100.x" />
       </label>
       <label>
         <span>WG Public Key</span>
@@ -6439,15 +7083,34 @@ function renderAwxActionQuickFields(bodyText, action) {
 
 function syncHomePeerField(input) {
   const field = input.dataset.homePeerField;
-  if (field === 'peerRole') {
+  if (field === 'leaseId') {
+    state.domesticPeerDraft.leaseId = input.value.trim();
+    const lease = launcherLeaseById(state.domesticPeerDraft.leaseId);
+    if (lease) applyLauncherLeaseToDomesticPeerDraft(lease);
+  } else if (field === 'peerRole') {
     state.domesticPeerDraft.peerRole = input.value === 'user' ? 'user' : 'guest';
   } else if (field === 'leaseIp') {
     state.domesticPeerDraft.leaseIp = input.value.trim();
-    if (state.domesticPeerDraft.leaseIp.startsWith('10.89.')) state.domesticPeerDraft.peerRole = 'user';
-    if (state.domesticPeerDraft.leaseIp.startsWith('10.91.')) state.domesticPeerDraft.peerRole = 'guest';
+    const inferredRole = inferDomesticPeerRole(state.domesticPeerDraft.leaseIp);
+    if (inferredRole) state.domesticPeerDraft.peerRole = inferredRole;
   } else if (field === 'publicKey') {
     state.domesticPeerDraft.publicKey = input.value.trim();
   }
+}
+
+function applyLauncherLeaseToDomesticPeerDraft(lease) {
+  state.domesticPeerDraft.leaseId = lease.leaseId || state.domesticPeerDraft.leaseId;
+  state.domesticPeerDraft.leaseIp = lease.leaseIp || state.domesticPeerDraft.leaseIp;
+  state.domesticPeerDraft.publicKey = lease.publicKey || state.domesticPeerDraft.publicKey;
+  state.domesticPeerDraft.peerRole = launcherLeaseRole(lease);
+}
+
+function inferDomesticPeerRole(leaseIp) {
+  const parts = String(leaseIp || '').split('.').map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) return null;
+  if (parts[0] !== 10 || parts[1] < 89 || parts[1] > 254 || parts[1] === 88) return null;
+  if (parts[2] < 0 || parts[2] > 254 || parts[3] < 1 || parts[3] > 254) return null;
+  return parts[2] >= 100 ? 'guest' : 'user';
 }
 
 function syncAwxActionField(input) {
@@ -6468,6 +7131,7 @@ function updateSelectedActionBodyFromHomePeer() {
   if (!bodyInput) return;
   const body = parseActionBodyObject(bodyInput.value);
   if (!body) return;
+  if ('leaseId' in body) body.leaseId = state.domesticPeerDraft.leaseId || '<launcher-network-lease-id>';
   if ('peerRole' in body) body.peerRole = state.domesticPeerDraft.peerRole;
   if ('leaseIp' in body) body.leaseIp = state.domesticPeerDraft.leaseIp || '<home-lease-ip>';
   if ('publicKey' in body) body.publicKey = state.domesticPeerDraft.publicKey || '<home-wg-public-key>';
@@ -6475,6 +7139,12 @@ function updateSelectedActionBodyFromHomePeer() {
   bodyInput.value = state.selectedActionBody;
   const roleSelect = pipelineActions.querySelector('[data-home-peer-field="peerRole"]');
   if (roleSelect) roleSelect.value = state.domesticPeerDraft.peerRole;
+  const leaseSelect = pipelineActions.querySelector('[data-home-peer-field="leaseId"]');
+  if (leaseSelect) leaseSelect.value = state.domesticPeerDraft.leaseId;
+  const leaseIpInput = pipelineActions.querySelector('[data-home-peer-field="leaseIp"]');
+  if (leaseIpInput) leaseIpInput.value = state.domesticPeerDraft.leaseIp;
+  const publicKeyInput = pipelineActions.querySelector('[data-home-peer-field="publicKey"]');
+  if (publicKeyInput) publicKeyInput.value = state.domesticPeerDraft.publicKey;
 }
 
 function updateSelectedActionBodyFromAwxDraft() {
@@ -6513,13 +7183,19 @@ function syncDomesticPeerDraftFromPayload(payload) {
 function syncDomesticPeerDraftFromObject(value) {
   if (!value || typeof value !== 'object') return;
   const role = value.peerRole || value.role;
+  const leaseId = typeof value.leaseId === 'string' && !hasUnresolvedActionPlaceholder(value.leaseId) ? value.leaseId : null;
   const leaseIp = typeof value.leaseIp === 'string' && !hasUnresolvedActionPlaceholder(value.leaseIp) ? value.leaseIp : null;
   const publicKey = typeof value.publicKey === 'string' && !hasUnresolvedActionPlaceholder(value.publicKey) ? value.publicKey : null;
+  if (leaseId) {
+    state.domesticPeerDraft.leaseId = leaseId;
+    const lease = launcherLeaseById(leaseId);
+    if (lease) applyLauncherLeaseToDomesticPeerDraft(lease);
+  }
   if (role === 'user' || role === 'guest') state.domesticPeerDraft.peerRole = role;
   if (leaseIp) {
     state.domesticPeerDraft.leaseIp = leaseIp;
-    if (leaseIp.startsWith('10.89.')) state.domesticPeerDraft.peerRole = 'user';
-    if (leaseIp.startsWith('10.91.')) state.domesticPeerDraft.peerRole = 'guest';
+    const inferredRole = inferDomesticPeerRole(leaseIp);
+    if (inferredRole) state.domesticPeerDraft.peerRole = inferredRole;
   }
   if (publicKey) state.domesticPeerDraft.publicKey = publicKey;
 }
@@ -6534,6 +7210,10 @@ function parseActionBodyObject(text) {
 }
 
 function nextActionFocusFromResult(action, payload) {
+  if (action?.actionId === 'site-slot.worker-run.remote-ssh-execute'
+    && (payload?.report?.reportId || payload?.workerExecution?.status)) {
+    return null;
+  }
   const preparedAwxJobId = payload?.relayPeerAppendAwxPrepare?.jobId;
   if (preparedAwxJobId) {
     return {
@@ -6647,12 +7327,14 @@ function summarizeActionPayload(action, payload) {
     || payload.awxObjectSync
     || payload.awxLaunch
     || payload.domesticWgMaterialize
+    || payload.report
+    || payload.workerExecution
     || payload.fakeTransport
     || payload.workerHandoff
     || payload.readOnlyProbe
     || payload.gate
     || payload.result;
-  const id = target?.id || created?.credentialSyncId || created?.objectSyncId || created?.syncPlanId || created?.awxLaunchId || created?.fakeTransportId || created?.handoffId || created?.probeId || created?.gateId || created?.snapshotId || created?.syncId || created?.applyId || action.actionId;
+  const id = target?.id || created?.credentialSyncId || created?.objectSyncId || created?.syncPlanId || created?.awxLaunchId || created?.fakeTransportId || created?.reportId || created?.handoffId || created?.probeId || created?.gateId || created?.snapshotId || created?.syncId || created?.applyId || action.actionId;
   const status = created?.status || created?.verdict || created?.allowed;
   return status ? `${action.label}: ${id} / ${status}` : `${action.label}: ${id}`;
 }

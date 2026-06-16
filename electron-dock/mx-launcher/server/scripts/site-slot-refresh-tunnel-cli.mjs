@@ -63,7 +63,7 @@ console.log(JSON.stringify({
   source,
   sourceReference,
   officialInstallCommand: 'npm i @qpjoy/tunnel-cli -g',
-  fallbackUsage: 'Internal-pushed no-node/no-outbound bootstrap first, optional npm refresh after server-on'
+  fallbackUsage: 'Internal-pushed no-node/no-outbound bootstrap first, optional npm refresh after egress-on'
 }, null, 2));
 
 function fetchFromNpm() {

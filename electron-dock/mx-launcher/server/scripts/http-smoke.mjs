@@ -13,7 +13,9 @@ const expectK8sApply = process.env.MX_SMOKE_EXPECT_K8S_APPLY === '1';
 const remoteReadyOnly = process.env.MX_SMOKE_REMOTE_READY_ONLY === '1';
 const state = {};
 const shadowHomePublicKey = 'WvN2n3i6LXoJt1qX0lA2uP7cYy4rZs8mQb9dEfGhIjK=';
-const smokeHomePeerLeaseIp = '10.91.10.20';
+const smokeHomePeerLeaseIp = '10.90.100.20';
+const smokeDomesticSiteId = 'domestic-smoke';
+const smokeDomesticHost = 'domestic-smoke.example.com';
 const mxLauncherRoot = resolve(scriptDir, '../..');
 const remoteReadyFixture = remoteReadyOnly ? prepareRemoteReadySshFixture() : null;
 
@@ -69,7 +71,7 @@ const checks = [
       const topology = body?.snapshot?.config?.launcherNetwork;
       return typeof state.installId === 'string'
         && typeof state.homeOverlayIp === 'string'
-        && isRelayLeaseIp(state.homeOverlayIp, '10.91')
+        && isRelayLeaseIp(state.homeOverlayIp, '10.90.100')
         && body?.snapshot?.config?.defaultMode === 'visitor'
         && body?.enrollment?.publicKey === shadowHomePublicKey
         && topology?.model === 'internal-authority-domestic-relay-oversea-access-v1'
@@ -80,22 +82,22 @@ const checks = [
         && topology?.homePath?.bootstrap === 'home-to-domestic-public-enroll-proxy'
         && topology?.homePath?.subscriptionFetch === 'home-through-domestic-h2i-to-internal-mihomo'
         && topology?.homePath?.overseaTraffic === 'home-direct-to-oversea-hysteria2'
-        && topology?.homeLease?.cidr === '10.91.0.0/16'
+        && topology?.homeLease?.cidr === '10.90.0.0/16'
         && topology?.domestic?.publicIpRequired === true
         && topology?.domestic?.publicServices?.includes('wg-relay')
         && topology?.domestic?.gatewayIp === '10.88.0.1'
         && topology?.domestic?.storesAuthority === false
-        && topology?.domestic?.overlayCidrs?.includes('10.89.0.0/16')
+        && topology?.domestic?.overlayCidrs?.includes(topology.homeLease.cidr)
         && topology?.internal?.publicIngress === false
         && topology?.internal?.requiresEnrollLease === true
-        && topology?.internal?.relayPeer?.fixedIp === '10.90.0.10'
+        && topology?.internal?.relayPeer?.fixedIp === '10.88.88.88'
         && topology?.internal?.relayPeer?.initiatedBy === 'internal-outbound-to-domestic-public-wg'
         && topology?.subscriptions?.mihomo?.authority === 'internal-config-center'
         && topology?.subscriptions?.mihomo?.reachableVia?.includes('h2i-proxy')
         && topology?.relayPlan?.domesticRelay?.configArtifact === 'mx-domestic-wg-relay.conf'
         && topology?.relayPlan?.domesticRelay?.envArtifact === 'mx-domestic-relay.env'
         && topology?.relayPlan?.domesticRelay?.listenPort === 51820
-        && topology?.relayPlan?.internalServicePeer?.fixedIp === '10.90.0.10'
+        && topology?.relayPlan?.internalServicePeer?.fixedIp === '10.88.88.88'
         && topology?.relayPlan?.internalServicePeer?.configArtifact === 'mx-internal-service-peer.conf'
         && topology?.relayPlan?.internalServicePeer?.privateKeyPlacement === 'internal-only'
         && topology?.relayPlan?.homePeer?.leaseIp === state.homeOverlayIp
@@ -183,12 +185,12 @@ const checks = [
     assert: (body) => body?.snapshot?.signatures?.algorithm === 'sha256-dev-digest'
       && typeof body?.snapshot?.signatures?.digest === 'string'
       && body?.snapshot?.policies?.dns?.policy?.policyId === 'dns_default_internal_split'
-      && body?.snapshot?.policies?.launcherNetwork?.overlayPolicy?.cidr === '10.91.0.0/16'
+      && body?.snapshot?.policies?.launcherNetwork?.overlayPolicy?.cidr === '10.90.0.0/16'
       && body?.snapshot?.policies?.launcherNetwork?.topology?.model === 'internal-authority-domestic-relay-oversea-access-v1'
       && body?.snapshot?.policies?.launcherNetwork?.topology?.domestic?.gatewayIp === '10.88.0.1'
       && body?.snapshot?.policies?.launcherNetwork?.topology?.domestic?.storesAuthority === false
       && body?.snapshot?.policies?.launcherNetwork?.topology?.internal?.publicIngress === false
-      && body?.snapshot?.policies?.launcherNetwork?.topology?.internal?.relayPeer?.fixedIp === '10.90.0.10'
+      && body?.snapshot?.policies?.launcherNetwork?.topology?.internal?.relayPeer?.fixedIp === '10.88.88.88'
       && body?.snapshot?.policies?.launcherNetwork?.topology?.bootstrap?.steadyStateAccess === 'domestic-wg-relay-primary'
       && body?.snapshot?.policies?.launcherNetwork?.topology?.internal?.mihomoSubscriptionBaseUrl?.includes('/internal/v1/site-slots/oversea-main/subscriptions/hysteria2')
       && body?.snapshot?.policies?.launcherNetwork?.topology?.subscriptions?.mihomo?.fallback === 'domestic-snapshot-cache'
@@ -578,7 +580,7 @@ const checks = [
         && prepareAccess?.commands?.some((command) => command.includes('scp -P') && command.includes('mx-oversea-access-stack.tar.gz'))
         && prepareAccess?.commands?.some((command) => command.includes('/opt/mx/releases/oversea-access-stack/__release_revision__'))
         && configureAccess?.commands?.some((command) => command.includes('HY2_EXPORT_BASE_URL=http://oversea.example.com:3434') && command.includes('HY2_EXPORT_USER=download') && command.includes('HY2_EXPORT_PASSWORD_HASH='))
-        && configureAccess?.commands?.some((command) => command.includes('HY2_MIHOMO_ROUTING_MODE=cn-direct') && command.includes('HY2_RESERVED_INTERNAL_CIDRS=10.88.0.0/16,10.89.0.0/16,10.90.0.0/16,10.91.0.0/16') && command.includes('HY2_DOMESTIC_GATEWAY_IP=10.88.0.1'))
+        && configureAccess?.commands?.some((command) => command.includes('HY2_MIHOMO_ROUTING_MODE=cn-direct') && command.includes('HY2_RESERVED_INTERNAL_CIDRS=10.88.0.0/16,10.89.0.0/16,10.90.0.0/16') && command.includes('HY2_DOMESTIC_GATEWAY_IP=10.88.0.1'))
         && configureAccess?.commands?.some((command) => command.includes('base64 -d') && command.includes('tunnel-state.json'))
         && configureAccess?.commands?.some((command) => command.includes('reconcile-from-json') && command.includes('--mode hysteria2-only'))
         && configureAccess?.commands?.some((command) => command.includes('./manage.sh sync-internal-defaults'))
@@ -642,7 +644,7 @@ const checks = [
       && body?.reachability?.gates?.internalDnsRequired === true
       && body?.reachability?.gates?.overseaRuntime === 'hysteria2-only'
       && body?.reachability?.gates?.domesticGatewayIp === '10.88.0.1'
-      && body?.reachability?.gates?.reservedInternalCidrs?.includes('10.91.0.0/16')
+      && body?.reachability?.gates?.reservedInternalCidrs?.includes('10.90.0.0/16')
       && body?.reachability?.accountSummary?.domestic === 1
       && body?.reachability?.accountSummary?.internalReserved === 9
       && body?.reachability?.stages?.some((stage) => stage.stageId === 'internal-subscription-authority' && stage.status === 'ready')
@@ -684,8 +686,8 @@ const checks = [
     method: 'POST',
     body: () => ({
       kind: 'domestic',
-      siteId: 'domestic-main',
-      host: 'domestic.example.com',
+      siteId: smokeDomesticSiteId,
+      host: smokeDomesticHost,
       sshUser: 'root',
       rootAccess: true,
       hasDocker: true,
@@ -703,36 +705,47 @@ const checks = [
       const bootstrapEgress = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'bootstrap-domestic-egress');
       const installDockerRuntime = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'install-domestic-docker-runtime');
       const activatePeerCenter = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'activate-domestic-peer-center');
+      const syncInternalConfig = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'sync-internal-config');
       return typeof state.domesticSlotPlanId === 'string'
         && body?.plan?.kind === 'domestic'
         && body?.plan?.network?.mode === 'oversea-assisted'
-        && body?.plan?.network?.qpTunnelCliMode === 'server-on'
+        && body?.plan?.network?.qpTunnelCliMode === 'egress-on'
         && body?.plan?.services?.hostServices?.includes('wg-quick@mx-domestic')
         && packageArtifacts?.commands?.some((command) => command.includes('qp-tunnel-cli-offline-fallback'))
         && packageArtifacts?.commands?.some((command) => command.includes('refresh-tunnel-cli latest'))
         && packageArtifacts?.commands?.some((command) => command.includes('--from-tarball'))
         && prepareRelayAuthority?.mode === 'admin-action'
-        && prepareRelayAuthority?.commands?.some((command) => command.includes('Domestic WG gateway=10.88.0.1') && command.includes('Internal service peer=10.90.0.10'))
+        && prepareRelayAuthority?.commands?.some((command) => command.includes('Domestic WG gateway=10.88.0.1') && command.includes('Internal service peer=10.88.88.88'))
         && prepareRelayAuthority?.commands?.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('10.90.0.0/16'))
         && prepareRelayAuthority?.commands?.some((command) => command.includes('mx-internal-service-peer.conf') && command.includes('never copy the Internal private key to Domestic'))
         && prepareRelayAuthority?.commands?.some((command) => command.includes('Internal has no public ingress'))
         && prepareRelayAuthority?.commands?.some((command) => command.includes('Domestic WG relay primary'))
         && resolveSubscription?.mode === 'admin-action'
         && resolveSubscription?.commands?.some((command) => command.includes('domesticBootstrapSubscription') && command.includes('/internal/v1/site-slots/oversea-main/subscriptions/hysteria2/oversea-main-domestic.yaml'))
+        && resolveSubscription?.commands?.some((command) => command.includes('mx-domestic-bootstrap-subscription.yaml') && command.includes('Domestic cannot fetch Internal URLs until mx-domestic reaches 10.88.88.88'))
         && resolveSubscription?.commands?.some((command) => command.includes('install node/npm') && command.includes('npm install'))
         && bootstrapEgress?.mode === 'artifact-push'
         && bootstrapEgress?.commands?.some((command) => command.includes('QP_TUNNEL_CLI=/opt/mx/current/qp-tunnel-cli/bin/qp-tunnel-cli'))
         && bootstrapEgress?.commands?.some((command) => command.includes('mx-domestic-qp-tunnel-cli-fallback.tar.gz'))
-        && bootstrapEgress?.commands?.some((command) => command.includes('npm i @qpjoy/tunnel-cli -g') && command.includes('npm refresh skipped after server-on'))
+        && bootstrapEgress?.commands?.some((command) => command.includes('mx-domestic-bootstrap-subscription.yaml') && command.includes('domestic-bootstrap-subscription.yaml'))
+        && bootstrapEgress?.commands?.some((command) => command.includes('npm i @qpjoy/tunnel-cli -g') && command.includes('npm refresh skipped after egress-on'))
         && bootstrapEgress?.commands?.some((command) => command.includes('node/npm absent'))
-        && bootstrapEgress?.commands?.some((command) => command.includes(`install --url ${baseUrl}/internal/v1/site-slots/oversea-main/subscriptions/hysteria2/oversea-main-domestic.yaml`))
-        && bootstrapEgress?.commands?.some((command) => command.includes('server-on'))
+        && bootstrapEgress?.commands?.some((command) => command.includes('BOOTSTRAP_SUBSCRIPTION_FILE=/opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml'))
+        && bootstrapEgress?.commands?.some((command) => command.includes('--file $BOOTSTRAP_SUBSCRIPTION_FILE'))
+        && bootstrapEgress?.commands?.some((command) => command.includes(`--url ${baseUrl}/internal/v1/site-slots/oversea-main/subscriptions/hysteria2/oversea-main-domestic.yaml`))
+        && bootstrapEgress?.commands?.some((command) => command.includes('egress-on'))
+        && bootstrapEgress?.commands?.some((command) => command.includes('QP_TUNNEL_MODE=${QP_TUNNEL_MODE:-egress-on}'))
+        && bootstrapEgress?.commands?.some((command) => command.includes('/usr/local/bin/mihomo-client'))
+        && bootstrapEgress?.commands?.some((command) => command.includes('systemctl enable mihomo-client'))
         && !bootstrapEgress?.commands?.some((command) => command.includes('elif command -v npm'))
         && !bootstrapEgress?.commands?.some((command) => command.includes('<internal-issued-oversea-hysteria2-subscription>'))
         && installDockerRuntime?.commands?.some((command) => command.includes('docker') && command.includes('apt-get'))
         && activatePeerCenter?.commands?.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))
         && activatePeerCenter?.commands?.some((command) => command.includes('mx-domestic-relay.env') && command.includes('/opt/mx/current/domestic/mx-domestic-relay.env'))
+        && activatePeerCenter?.commands?.some((command) => command.includes('retiring legacy hdo-home/100.* WireGuard') && command.includes('wg-quick@hdo-home'))
         && activatePeerCenter?.commands?.some((command) => command.includes('internal service peer private key must not be copied to Domestic'))
+        && syncInternalConfig?.commands?.some((command) => command.includes('10.88.88.88:18090/healthz'))
+        && !syncInternalConfig?.commands?.some((command) => command.includes('127.0.0.1:18090/healthz'))
         && !activatePeerCenter?.commands?.some((command) => command.includes('rsync') && command.includes('mx-internal-service-peer.conf'));
     }
   },
@@ -828,6 +841,41 @@ const checks = [
     assert: (body) => Array.isArray(body?.executions)
       && body.executions.some((execution) => execution.runId === state.domesticSlotPreflightRunId)
       && body.executions.some((execution) => execution.runId === state.domesticSlotApplyRunId)
+  },
+  {
+    name: 'admin action execute domestic wg materialize',
+    path: () => `/internal/v1/admin/actions/execute?token=${encodeURIComponent(state.adminToken)}`,
+    method: 'POST',
+    body: () => ({
+      actionId: 'site-slot.domestic-wg.materialize',
+      path: `/internal/v1/config-center/domestic-wg-secrets/${smokeDomesticSiteId}/materialize-ready`,
+      body: {
+        siteId: smokeDomesticSiteId,
+        planId: state.domesticSlotPlanId,
+        publicEndpoint: `${smokeDomesticHost}:51820`,
+        listenPort: 51820,
+        domesticGatewayIp: '10.88.0.1',
+        domesticGatewayCidr: '10.88.0.0/16',
+        productRelayCidrs: ['10.89.0.0/16', '10.90.0.0/16'],
+        userRelayCidr: '10.89.0.0/16',
+        internalServiceIp: '10.88.88.88',
+        internalServiceCidr: '10.88.0.0/16',
+        guestRelayCidr: '10.90.0.0/16',
+        rotateRelayKey: false,
+        rotateInternalServiceKey: false,
+        confirmRotate: false,
+        requestedBy: 'http-smoke-admin-action',
+        requestId: 'http-smoke-domestic-wg-materialize'
+      }
+    }),
+    assert: (body) => body?.actionResult?.actionId === 'site-slot.domestic-wg.materialize'
+      && body?.domesticWgMaterialize?.status === 'passed'
+      && body?.domesticWgMaterialize?.publicEndpoint === `${smokeDomesticHost}:51820`
+      && body?.secret?.listenPort === 51820
+      && body?.secret?.readiness?.secretMaterial === 'injected'
+      && body?.secret?.readiness?.publicEndpointStatus === 'ready'
+      && body?.domesticWgMaterialize?.artifact?.moduleId === 'wireguard-config'
+      && body?.domesticWgMaterialize?.artifact?.status === 'ready'
   },
   {
     name: 'domestic slot runner simulate',
@@ -1227,7 +1275,7 @@ const checks = [
       && body?.relayReadOnlyProbe?.domesticRelay?.gatewayIp === '10.88.0.1'
       && body?.relayReadOnlyProbe?.command?.startsWith('ssh ')
       && body?.relayReadOnlyProbe?.command?.includes('wg show mx-domestic')
-      && body?.relayReadOnlyProbe?.command?.includes('ip route get 10.90.0.10')
+      && body?.relayReadOnlyProbe?.command?.includes('ip route get 10.88.88.88')
       && body?.relayReadOnlyProbe?.command?.includes('systemctl status wg-quick@mx-domestic')
       && body?.relayReadOnlyProbe?.command?.includes('mx-internal-service-peer.conf')
       && !body?.relayReadOnlyProbe?.command?.includes('wg set')
@@ -1406,7 +1454,7 @@ const checks = [
           && evidence?.homePeer?.allowedIps?.includes(`${smokeHomePeerLeaseIp}/32`)
           && evidence?.domesticRelay?.interfaceName === 'mx-domestic'
           && evidence?.domesticRelay?.gatewayIp === '10.88.0.1'
-          && evidence?.internalServicePeer?.fixedIp === '10.90.0.10'
+          && evidence?.internalServicePeer?.fixedIp === '10.88.88.88'
           && evidence?.internalServicePeer?.privateKeyPlacement === 'internal-only'
           && evidence?.internalServicePeer?.privateKeyCopiedToDomestic === false
           && evidence?.plannedCommands?.some((command) => command.includes(`allowed-ips ${smokeHomePeerLeaseIp}/32`))
@@ -1785,7 +1833,7 @@ const checks = [
       && body.releaseManagementPlan?.decisions?.readyToPromote === true
       && body.releaseManagementPlan?.test?.gate?.verdict === 'passed'
       && body.domesticSlotPlan?.network?.mode === 'oversea-assisted'
-      && body.domesticSlotPlan?.network?.qpTunnelCliMode === 'server-on'
+      && body.domesticSlotPlan?.network?.qpTunnelCliMode === 'egress-on'
       && body.domesticSlotPreflightExecution?.status === 'ready'
       && body.domesticSlotApplyExecution?.status === 'requires-confirmation'
       && body.domesticSlotPreflightRunnerSession?.status === 'passed'
@@ -2704,8 +2752,9 @@ function hasManifestArtifactEvidence(step) {
 
 function isRelayLeaseIp(value, prefix) {
   const parts = String(value || '').split('.');
+  const prefixParts = String(prefix || '').split('.');
   return parts.length === 4
-    && `${parts[0]}.${parts[1]}` === prefix
+    && prefixParts.every((part, index) => parts[index] === part)
     && parts.slice(2).every((part) => /^\d+$/.test(part))
     && Number(parts[2]) >= 0
     && Number(parts[2]) <= 255

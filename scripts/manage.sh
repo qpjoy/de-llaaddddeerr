@@ -60,8 +60,12 @@ PACKAGES=(
   "@qpjoy/electron-plugin-sdk|electron-market/packages/electron-plugin-sdk|host|Plugin SDK (类型定义)"
   "@qpjoy/marketplace-db|electron-market/packages/marketplace-db|host|Marketplace DB (SQLite 层)"
   "@qpjoy/electron-market|electron-market/packages/electron-market|host|Electron Market (宿主运行时)"
+  "@qpjoy/electron-launcher|electron-dock/mx-launcher/packages/electron-launcher|host|Electron Launcher (产品接入客户端)"
   "@qpjoy/electron-core-mihomo|electron-plugin/packages/electron-core-mihomo|core|Electron Core Mihomo (路由编译层)"
-  "@qpjoy/electron-core-wireguard|electron-plugin/packages/electron-core-wireguard|core|Electron Core WireGuard (HDO mesh 配置层)"
+  "@qpjoy/electron-core-wireguard|electron-plugin/packages/electron-core-wireguard|core|Electron Core WireGuard (HDI mesh 配置层)"
+  "@qpjoy/mx-launcher-core|electron-dock/mx-launcher/packages/launcher-core|core|MX Launcher Core (Internal API + route plan)"
+  "@qpjoy/mx-launcher-embed-sdk|electron-dock/mx-launcher/packages/launcher-embed-sdk|core|MX Launcher Embed SDK"
+  "@qpjoy/mx-launcher-standalone|electron-dock/mx-launcher/packages/launcher-standalone|core|MX Launcher Standalone adapter"
   "@qpjoy/electron-plugin-tunnel-engine-darwin-arm64|electron-plugin/packages/tunnel-engines/darwin-arm64|engine|Tunnel Engine macOS arm64"
   "@qpjoy/electron-plugin-tunnel-engine-darwin-x64|electron-plugin/packages/tunnel-engines/darwin-x64|engine|Tunnel Engine macOS x64"
   "@qpjoy/electron-plugin-tunnel-engine-linux-arm64|electron-plugin/packages/tunnel-engines/linux-arm64|engine|Tunnel Engine Linux arm64"
@@ -279,7 +283,7 @@ publish_one_with_otp() {
 
 hdo_demo_tracks_package() {
   case "$1" in
-    @qpjoy/electron-plugin-sdk|@qpjoy/marketplace-db|@qpjoy/electron-market|@qpjoy/electron-core-mihomo|@qpjoy/electron-core-wireguard|@qpjoy/electron-plugin-tunnel|@qpjoy/electron-plugin-hdo|@qpjoy/electron-plugin-tunnel-engine-*|@qpjoy/electron-core-wireguard-engine-*)
+    @qpjoy/electron-plugin-sdk|@qpjoy/marketplace-db|@qpjoy/electron-market|@qpjoy/electron-launcher|@qpjoy/mx-launcher-core|@qpjoy/mx-launcher-embed-sdk|@qpjoy/mx-launcher-standalone|@qpjoy/electron-core-mihomo|@qpjoy/electron-core-wireguard|@qpjoy/electron-plugin-tunnel|@qpjoy/electron-plugin-hdo|@qpjoy/electron-plugin-tunnel-engine-*|@qpjoy/electron-core-wireguard-engine-*)
       return 0
       ;;
     *)
@@ -291,6 +295,7 @@ hdo_demo_tracks_package() {
 hdo_demo_direct_dep_path() {
   case "$1" in
     @qpjoy/electron-market) echo "electron-market/packages/electron-market";;
+    @qpjoy/electron-launcher) echo "electron-dock/mx-launcher/packages/electron-launcher";;
     @qpjoy/electron-plugin-sdk) echo "electron-market/packages/electron-plugin-sdk";;
     @qpjoy/electron-plugin-hdo) echo "electron-plugin/packages/electron-plugin-hdo";;
     @qpjoy/electron-plugin-tunnel) echo "electron-plugin/packages/electron-plugin-tunnel";;
@@ -314,6 +319,7 @@ sync_published_hdo_demo_direct_deps() {
   local name path local_v npm_v target_v
   for name in \
     @qpjoy/electron-market \
+    @qpjoy/electron-launcher \
     @qpjoy/electron-plugin-sdk \
     @qpjoy/electron-plugin-hdo \
     @qpjoy/electron-plugin-tunnel
@@ -383,6 +389,9 @@ prepare_one() {
   echo "  本地路径: $path"
   echo "  本地版本: $(pkg_local_version "$path")"
   echo "  npm 版本:  $(pkg_npm_version "$name")"
+  if [ "$name" = "@qpjoy/electron-launcher" ]; then
+    echo "  ${C_YELLOW}发布前置:${C_RESET} 先发布 @qpjoy/mx-launcher-core / @qpjoy/mx-launcher-embed-sdk / @qpjoy/mx-launcher-standalone 的同版本"
+  fi
   echo
 
   read -r -p "新版本号 (回车 = 跳过 bump，直接打包当前版本): " new_ver

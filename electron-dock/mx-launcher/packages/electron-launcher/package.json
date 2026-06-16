@@ -1,0 +1,33 @@
+{
+  "name": "@qpjoy/electron-launcher",
+  "version": "0.1.0",
+  "description": "Product-facing Electron Launcher client for MX Launcher release, update, rollout, AppCenter, and network integration.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "package.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepack": "pnpm build"
+  },
+  "dependencies": {
+    "@qpjoy/mx-launcher-core": "workspace:*",
+    "@qpjoy/mx-launcher-embed-sdk": "workspace:*",
+    "@qpjoy/mx-launcher-standalone": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

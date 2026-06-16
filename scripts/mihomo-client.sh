@@ -45,8 +45,8 @@ Commands:
   upgrade-systemd      Refresh the installed systemd unit from this script
   server-on            Enable persistent server-safe outbound proxy mode, without TUN
   server-off           Disable server-safe proxy integrations, keeping the service installed
-  egress-on            Alias for server-on
-  egress-off           Alias for server-off
+  egress-on            Preferred server-safe outbound proxy mode for Domestic bootstrap
+  egress-off           Disable server-safe outbound proxy integrations
   proxy-on             Write /etc/profile.d proxy exports for login shells
   proxy-off            Remove /etc/profile.d proxy exports
   tun-on               Enable persistent Mihomo TUN mode with cn-direct and local/private route bypasses
@@ -65,6 +65,7 @@ Commands:
 
 Install options:
   --url URL            Subscription URL, e.g. http://IP:3434/peer_user01.mihomo.yaml
+  --file FILE          Local subscription YAML file, for Internal-pushed bootstrap
   --user USER          Basic Auth username for subscription
   --password PASS      Basic Auth password for subscription
   --version TAG        Mihomo version tag. Default: latest stable release
@@ -73,6 +74,7 @@ Install options:
 
 Update options:
   --url URL            Override saved subscription URL
+  --file FILE          Replace subscription from a local YAML file
   --user USER          Override saved subscription username
   --password PASS      Override saved subscription password
 
@@ -89,9 +91,13 @@ Examples:
     --url http://IP:3434/peer_user01.mihomo.yaml \
     --binary-path /tmp/mihomo
 
+  sudo bash ./scripts/mihomo-client.sh install \
+    --file /opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml
+
   sudo bash ./scripts/mihomo-client.sh update-subscription
+  sudo bash ./scripts/mihomo-client.sh update-subscription --file /opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml
   sudo bash ./scripts/mihomo-client.sh start
-  sudo bash ./scripts/mihomo-client.sh server-on
+  sudo bash ./scripts/mihomo-client.sh egress-on
   sudo bash ./scripts/mihomo-client.sh proxy-on
   sudo bash ./scripts/mihomo-client.sh tun-on
   sudo bash ./scripts/mihomo-client.sh ssh-proxy-on
@@ -575,6 +581,20 @@ fetch_subscription() {
 	render_runtime_config
 }
 
+install_subscription_file() {
+	local file_path="$1"
+
+	[[ -n "$file_path" ]] || die "Subscription file is required."
+	[[ -f "$file_path" ]] || die "Subscription file not found: $file_path"
+	[[ -s "$file_path" ]] || die "Subscription file is empty: $file_path"
+
+	ensure_dirs
+	log "Installing local subscription file: $file_path"
+	cp "$file_path" "$MIHOMO_SUBSCRIPTION_FILE"
+	chmod 600 "$MIHOMO_SUBSCRIPTION_FILE"
+	render_runtime_config
+}
+
 mixed_port_from_config() {
 	if [[ -f "$MIHOMO_CONFIG_FILE" ]]; then
 		awk -F: '/^[[:space:]]*mixed-port[[:space:]]*:/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' "$MIHOMO_CONFIG_FILE"
@@ -682,9 +702,28 @@ update_subscription_command() {
 	local url="${1:-}"
 	local username="${2:-}"
 	local password="${3:-}"
+	local file_path="${4:-}"
 	local -a normalized=()
 
 	load_env
+
+	if [[ -n "$file_path" ]]; then
+		install_subscription_file "$file_path"
+		set_env_value MIHOMO_SUBSCRIPTION_SOURCE "local-file"
+		set_env_value MIHOMO_SUBSCRIPTION_LOCAL_FILE "$file_path"
+		set_env_value MIHOMO_SUBSCRIPTION_URL ""
+		set_env_value MIHOMO_SUBSCRIPTION_USER ""
+		set_env_value MIHOMO_SUBSCRIPTION_PASSWORD ""
+
+		if service_is_active; then
+			log "Restarting Mihomo service after local subscription update"
+			systemctl restart "$MIHOMO_SERVICE_NAME"
+			echo "Subscription updated from local file and service restarted."
+		else
+			echo "Subscription updated from local file."
+		fi
+		return
+	fi
 
 	url="${url:-${MIHOMO_SUBSCRIPTION_URL:-}}"
 	username="${username:-${MIHOMO_SUBSCRIPTION_USER:-}}"
@@ -697,6 +736,8 @@ update_subscription_command() {
 	[[ -n "$url" ]] || die "No subscription URL configured. Use install or pass --url."
 
 	fetch_subscription "$url" "$username" "$password"
+	set_env_value MIHOMO_SUBSCRIPTION_SOURCE "url"
+	set_env_value MIHOMO_SUBSCRIPTION_LOCAL_FILE ""
 	set_env_value MIHOMO_SUBSCRIPTION_URL "$url"
 	set_env_value MIHOMO_SUBSCRIPTION_USER "$username"
 	set_env_value MIHOMO_SUBSCRIPTION_PASSWORD "$password"
@@ -941,24 +982,27 @@ install_command() {
 	local version="${4:-latest}"
 	local autostart="${5:-true}"
 	local binary_path="${6:-}"
+	local file_path="${7:-}"
 	local -a normalized=()
 
 	ensure_dirs
 	load_env
 	log "Starting Mihomo client install/setup"
 
-	if [[ -z "$url" ]]; then
+	if [[ -z "$file_path" && -z "$url" ]]; then
 		url="$(prompt_default "Subscription URL" "${MIHOMO_SUBSCRIPTION_URL:-}")"
 	fi
-	mapfile -t normalized < <(normalize_subscription_inputs "$url" "$username" "$password")
-	url="${normalized[0]}"
-	username="${normalized[1]}"
-	password="${normalized[2]}"
-	if [[ -z "$username" ]]; then
-		username="$(prompt_default "Subscription username (empty if none)" "${MIHOMO_SUBSCRIPTION_USER:-}")"
-	fi
-	if [[ -z "$password" ]]; then
-		password="$(prompt_password "Subscription password (empty if none)")"
+	if [[ -z "$file_path" ]]; then
+		mapfile -t normalized < <(normalize_subscription_inputs "$url" "$username" "$password")
+		url="${normalized[0]}"
+		username="${normalized[1]}"
+		password="${normalized[2]}"
+		if [[ -z "$username" ]]; then
+			username="$(prompt_default "Subscription username (empty if none)" "${MIHOMO_SUBSCRIPTION_USER:-}")"
+		fi
+		if [[ -z "$password" ]]; then
+			password="$(prompt_password "Subscription password (empty if none)")"
+		fi
 	fi
 
 	if [[ -n "$binary_path" ]]; then
@@ -978,8 +1022,8 @@ install_command() {
 	set_env_value MIHOMO_SUBSCRIPTION_USER "$username"
 	set_env_value MIHOMO_SUBSCRIPTION_PASSWORD "$password"
 
-	log "Downloading initial subscription and rendering runtime config"
-	update_subscription_command "$url" "$username" "$password"
+	log "Installing initial subscription and rendering runtime config"
+	update_subscription_command "$url" "$username" "$password" "$file_path"
 
 	systemctl enable "$MIHOMO_SERVICE_NAME" >/dev/null 2>&1 || true
 	if [[ "$autostart" == "true" ]]; then
@@ -1080,9 +1124,11 @@ main() {
 			local version="latest"
 			local autostart="true"
 			local binary_path=""
+			local file_path=""
 			while [[ $# -gt 0 ]]; do
 				case "$1" in
 					--url) url="$2"; shift 2 ;;
+					--file) file_path="$2"; shift 2 ;;
 					--user) username="$2"; shift 2 ;;
 					--password) password="$2"; shift 2 ;;
 					--version) version="$2"; shift 2 ;;
@@ -1091,21 +1137,23 @@ main() {
 					*) die "Unknown install option: $1" ;;
 				esac
 			done
-			install_command "$url" "$username" "$password" "$version" "$autostart" "$binary_path"
+			install_command "$url" "$username" "$password" "$version" "$autostart" "$binary_path" "$file_path"
 		;;
 		update-subscription)
 			local url=""
 			local username=""
 			local password=""
+			local file_path=""
 			while [[ $# -gt 0 ]]; do
 				case "$1" in
 					--url) url="$2"; shift 2 ;;
+					--file) file_path="$2"; shift 2 ;;
 					--user) username="$2"; shift 2 ;;
 					--password) password="$2"; shift 2 ;;
 					*) die "Unknown update-subscription option: $1" ;;
 				esac
 			done
-			update_subscription_command "$url" "$username" "$password"
+			update_subscription_command "$url" "$username" "$password" "$file_path"
 		;;
 		start)
 			start_command

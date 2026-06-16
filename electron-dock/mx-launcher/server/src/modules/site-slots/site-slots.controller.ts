@@ -1,4 +1,7 @@
 import { Body, Controller, Get, Header, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { asRecord, nullableString } from '../../lib/http.js';
 import type { PlatformStore } from '../../store/platform-store.js';
@@ -9,7 +12,9 @@ import type {
   SiteSlotExecutionInput,
   SiteSlotExecutionMode,
   SiteSlotKind,
+  SiteSlotAccessAccount,
   SiteSlotPlanInput,
+  SiteSlotPlan,
   SiteSlotRollbackExecutionInput,
   SiteSlotRollbackExecutionMode,
   SiteSlotRollbackReportInput,
@@ -104,7 +109,10 @@ export class SiteSlotsController {
 
   @Post('internal/v1/site-slots/plans')
   async createPlan(@Body() rawBody: unknown) {
-    return { plan: await this.store.createSiteSlotPlan(toSiteSlotPlanInput(asRecord(rawBody))) };
+    const input = await this.withDomesticBootstrapAccess(toSiteSlotPlanInput(asRecord(rawBody)));
+    const plan = await this.store.createSiteSlotPlan(input);
+    await this.materializeDomesticBootstrapSubscription(plan);
+    return { plan };
   }
 
   @Get('internal/v1/site-slots/plans/:planId')
@@ -385,6 +393,78 @@ export class SiteSlotsController {
       throw error;
     }
   }
+
+  private async withDomesticBootstrapAccess(input: SiteSlotPlanInput): Promise<SiteSlotPlanInput> {
+    const kind = input.kind === 'oversea' ? 'oversea' : 'domestic';
+    if (kind !== 'domestic' || input.hasOutboundInternet === true) return input;
+    const overseaSiteId = input.overseaSiteId?.trim() || 'oversea-main';
+    if (input.accessAccounts?.length) return { ...input, overseaSiteId };
+
+    await this.store.issueSiteSlotAccessAccounts({
+      siteId: overseaSiteId,
+      service: 'hysteria2',
+      issueDefaults: true,
+      publicHost: input.overseaHost ?? undefined,
+      requestedBy: input.createdBy ?? 'site-slots-controller',
+      requestId: `${input.requestId ?? 'site-slot-plan'}-domestic-bootstrap`
+    });
+    const accounts = await this.store.listSiteSlotAccessAccounts(overseaSiteId);
+    return {
+      ...input,
+      overseaSiteId,
+      accessAccounts: siteSlotPlanAccessAccountMaterial(accounts)
+    };
+  }
+
+  private async materializeDomesticBootstrapSubscription(plan: SiteSlotPlan): Promise<void> {
+    if (plan.kind !== 'domestic' || plan.network.mode !== 'oversea-assisted' || !plan.network.overseaSiteId) return;
+    const accounts = await this.store.listSiteSlotAccessAccounts(plan.network.overseaSiteId);
+    const account = domesticBootstrapAccount(accounts);
+    if (!account) return;
+    const subscription = await this.store.renderHysteria2MihomoSubscription(plan.network.overseaSiteId, account.username);
+    if (!subscription) return;
+    const filePath = resolve(resolveSiteSlotArtifactBaseDir(), 'domestic/mx-domestic-bootstrap-subscription.yaml');
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, subscription.yaml);
+    chmodSync(filePath, 0o600);
+  }
+}
+
+function siteSlotPlanAccessAccountMaterial(accounts: SiteSlotAccessAccount[]): SiteSlotPlanInput['accessAccounts'] {
+  return accounts
+    .filter((account) => account.status === 'active')
+    .map((account) => ({
+      username: account.username,
+      authToken: account.authToken,
+      status: account.status,
+      upRate: '30 Mbps',
+      downRate: '30 Mbps'
+    }));
+}
+
+function domesticBootstrapAccount(accounts: SiteSlotAccessAccount[]): SiteSlotAccessAccount | null {
+  return accounts.find((account) => account.role === 'domestic')
+    ?? accounts.find((account) => account.username.endsWith('-domestic'))
+    ?? null;
+}
+
+function resolveSiteSlotArtifactBaseDir(): string {
+  if (process.env.SITE_SLOT_ARTIFACT_BASE_DIR) return resolve(process.env.SITE_SLOT_ARTIFACT_BASE_DIR);
+  return resolve(resolveMxLauncherRoot(), 'artifacts/site-slots');
+}
+
+function resolveMxLauncherRoot(): string {
+  const controllerDir = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    process.env.MX_LAUNCHER_ROOT,
+    resolve(process.cwd(), 'electron-dock/mx-launcher'),
+    resolve(controllerDir, '../../../..'),
+    resolve(controllerDir, '../../../../..'),
+    process.cwd()
+  ].filter((candidate): candidate is string => Boolean(candidate));
+  return candidates.find((candidate) => existsSync(resolve(candidate, 'server/package.json')) && existsSync(resolve(candidate, 'scripts/manage.sh')))
+    ?? candidates.find((candidate) => existsSync(resolve(candidate, 'artifacts/site-slots')))
+    ?? process.cwd();
 }
 
 function toSiteSlotPlanInput(body: Record<string, unknown>): SiteSlotPlanInput {

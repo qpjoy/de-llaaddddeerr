@@ -1167,6 +1167,160 @@ export class HdoController {
     };
   }
 
+  async prepareLauncherNetworkPeer(input: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    this.ensureSettingsForCurrentSession();
+    const routeProbe = buildHdoRouteProbe();
+    const now = new Date().toISOString();
+    const previous = this.settings.wireGuardPeer ?? {};
+    const session = plainObject(input.session);
+    const routePlan = plainObject(input.routePlan) ?? plainObject(session?.routePlan);
+    const lease = plainObject(input.lease) ?? plainObject(session?.lease);
+    const wireGuard = plainObject(input.wireGuard) ?? plainObject(session?.wireGuard);
+    const identityKind = stringValue(routePlan?.identityKind) === 'user' || stringValue(lease?.identityKind) === 'user'
+      ? 'user'
+      : 'anonymous';
+    const installId = stringValue(lease?.installId) ?? stringValue(input.installId) ?? stringValue(this.settings.anonymous?.installId);
+    const deviceId = stringValue(lease?.deviceId) ?? stringValue(input.deviceId) ?? stringValue(this.settings.deviceId);
+    const userId = identityKind === 'user'
+      ? stringValue(lease?.userId) ?? stringValue(input.userId) ?? this.currentSessionUserId() ?? stringValue(this.settings.sessionUserId)
+      : null;
+    const privateKey = stringValue(input.privateKey) ?? stringValue(wireGuard?.privateKey) ?? stringValue(previous.privateKey);
+    const publicKey = stringValue(input.publicKey) ?? stringValue(wireGuard?.publicKey) ?? stringValue(previous.publicKey);
+    const overlayIp = stringValue(routePlan?.leaseIp) ?? stringValue(lease?.leaseIp) ?? stringValue(previous.overlayIp);
+    const domesticRelayPublicKey = stringValue(routePlan?.domesticRelayPublicKey);
+    const domesticRelayEndpoint = stringValue(routePlan?.domesticRelayEndpoint);
+    const dnsServers = normalizeWireGuardDnsServers([stringValue(routePlan?.dnsServer)]);
+    const routeCidrs = uniqueStrings([
+      ...stringArray(routePlan?.routeCidrs),
+      ...wireGuardDnsRouteCidrs(dnsServers)
+    ]);
+    const missing = [
+      privateKey ? null : 'wireGuard.privateKey',
+      publicKey ? null : 'wireGuard.publicKey',
+      overlayIp ? null : 'routePlan.leaseIp',
+      domesticRelayPublicKey ? null : 'routePlan.domesticRelayPublicKey',
+      domesticRelayEndpoint ? null : 'routePlan.domesticRelayEndpoint',
+      routeCidrs.length ? null : 'routePlan.routeCidrs'
+    ].filter((value): value is string => Boolean(value));
+    let config: string | null = null;
+    let configPath: string | null = null;
+    let allowedIps: string[] | null = null;
+    let lastError: string | null = null;
+
+    if (missing.length) {
+      lastError = `launcher network session 缺少 WireGuard 配置材料：${missing.join(', ')}`;
+    } else {
+      try {
+        const exclusionCidrs = localCidrsForAllowedIpExclusion(routeProbe, routeCidrs);
+        let routeAllowedIps = excludeLocalRoutesFromAllowedIps(routeCidrs, exclusionCidrs);
+        if (routeAllowedIps.length === 0 && process.platform === 'win32') {
+          routeAllowedIps = routeCidrs;
+        } else if (routeAllowedIps.length === 0) {
+          throw new Error('Launcher Network 下发的 AllowedIPs 与本机路由完全重叠，已拒绝生成会覆盖本地网络的配置。');
+        }
+        config = renderHdoClientWireGuardConfig({
+          privateKey: privateKey as string,
+          address: wireGuardAddress(overlayIp as string),
+          domesticPublicKey: domesticRelayPublicKey as string,
+          domesticEndpoint: domesticRelayEndpoint as string,
+          allowedIps: routeAllowedIps,
+          dns: dnsServers,
+          dnsDomains: [],
+          splitDns: false,
+          directPeers: [],
+          persistentKeepalive: 25
+        });
+        configPath = this.writeWireGuardProfile(config);
+        allowedIps = wireGuardAllowedIps(config);
+      } catch (err) {
+        lastError = errorMessage(err);
+      }
+    }
+
+    const launcherNetwork = routePlan ? {
+      productId: stringValue(routePlan.productId),
+      launcherMode: stringValue(routePlan.launcherMode),
+      identityKind,
+      installId,
+      deviceId,
+      userId,
+      leaseIp: overlayIp,
+      serviceVip: stringValue(routePlan.serviceVip),
+      internalControlIp: stringValue(routePlan.internalControlIp),
+      domesticGatewayIp: stringValue(routePlan.domesticGatewayIp),
+      domesticRelayEndpoint,
+      snapshotId: stringValue(routePlan.snapshotId),
+      refreshKey: stringValue(routePlan.refreshKey)
+    } : null;
+    const peer = {
+      ...previous,
+      privateKey,
+      publicKey,
+      overlayIp,
+      address: overlayIp ? wireGuardAddress(overlayIp) : null,
+      config,
+      configPath,
+      allowedIps,
+      dns: dnsServers.length ? dnsServers : null,
+      dnsDomains: null,
+      domesticRelayEndpoint,
+      domesticRelayPublicKey,
+      launcherNetwork,
+      h2iDirectCandidateIps: [],
+      routeProbe,
+      canUseDefaultMesh: routeProbe.canUseDefaultMesh,
+      lastError,
+      updatedAt: now
+    };
+    const launcherNetworkAttempt = {
+      source: 'launcher-network',
+      ok: Boolean(config),
+      mode: identityKind === 'user' ? 'account' : 'anonymous',
+      identityKind,
+      message: config ? '已根据 Launcher Network session 生成本机 WireGuard 配置。' : lastError,
+      launcherNetwork,
+      peer: {
+        publicKey,
+        overlayIp,
+        address: overlayIp ? wireGuardAddress(overlayIp) : null,
+        allowedIps,
+        dns: dnsServers.length ? dnsServers : null,
+        dnsDomains: null,
+        domesticRelayEndpoint,
+        domesticRelayPublicKeyReady: Boolean(domesticRelayPublicKey),
+        configReady: Boolean(configPath),
+        canUseDefaultMesh: routeProbe.canUseDefaultMesh,
+        lastError,
+        updatedAt: now
+      },
+      updatedAt: now
+    };
+    this.updateSettings({
+      deviceId: deviceId ?? this.settings.deviceId,
+      deviceLabel: stringValue(input.deviceLabel) ?? this.settings.deviceLabel,
+      devicePlatform: stringValue(input.platform) ?? this.settings.devicePlatform ?? process.platform,
+      anonymous: identityKind === 'anonymous' ? {
+        ...(this.settings.anonymous ?? {}),
+        mode: 'anonymous',
+        appId: stringValue(routePlan?.productId) ?? 'h2o',
+        installId: installId ?? this.settings.anonymous?.installId ?? null,
+        updatedAt: now
+      } : null,
+      sessionUserId: identityKind === 'user' ? userId : this.settings.sessionUserId,
+      wireGuardPeer: peer,
+      lastLauncherNetworkAttempt: launcherNetworkAttempt
+    });
+    this.rememberNetworkLease(identityKind === 'user' ? 'account' : 'anonymous');
+    return {
+      ok: Boolean(config),
+      message: config ? '已根据 Launcher Network session 生成本机 WireGuard 配置。' : lastError,
+      routeProbe,
+      launcherNetwork,
+      peer: publicWireGuardPeer(peer),
+      config
+    };
+  }
+
   async openWireGuardProfile(): Promise<Record<string, unknown>> {
     const peer = this.settings.wireGuardPeer;
     const configPath = stringValue(peer?.configPath);
@@ -1991,6 +2145,7 @@ export class HdoController {
       anonymous: publicAnonymousSettings(settings.anonymous),
       domainProxy: settings.domainProxy ?? null,
       domainProxyDiagnostics: this.domainProxy?.diagnostics() ?? null,
+      lastLauncherNetworkAttempt: settings.lastLauncherNetworkAttempt ?? null,
       wireGuardDesiredActive: settings.wireGuardDesiredActive === true,
       wireGuardPeer: peer ? publicEventWireGuardPeer(peer) : null,
       detail,

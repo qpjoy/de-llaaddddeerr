@@ -440,6 +440,16 @@ async function refreshStatus(showOutput = true) {
     const configuredNetwork = currentNetwork || targetNetworkForConnect(status);
     const anonymousPeer = currentNetwork === NETWORK_ANONYMOUS;
     const accountConnected = currentNetwork === NETWORK_ACCOUNT;
+    const launcherRoutePlan = showOutput && typeof api.launcherRoutePlan === 'function'
+      ? await api.launcherRoutePlan({
+          serverUrl: serverInput.value.trim(),
+          productId: 'h2o',
+          installId: anonymous.installId || settings.installId || null,
+          deviceId: settings.deviceId || null,
+          siteId: settings.siteId || null,
+          userId: session.user?.id || session.userId || null
+        })
+      : null;
     const mode = currentNetwork ? networkLabel(currentNetwork) : networkLabel(configuredNetwork);
     const lastError = hdo.lastError || peer.lastError || null;
     renderUpdateBanner(status.updates?.restartRequired || null);
@@ -515,9 +525,15 @@ async function refreshStatus(showOutput = true) {
           installId: anonymous.installId,
           updatedAt: anonymous.updatedAt
         } : null,
+        launcherNetwork: peer.launcherNetwork || null,
+        launcherNetworkAttempt: settings.lastLauncherNetworkAttempt || null,
+        launcherNetworkSource: peer.launcherNetwork
+          ? 'launcher-network'
+          : (settings.lastLauncherNetworkAttempt?.fallback || null),
         domainProxy: settings.domainProxy || null,
         domainProxyDiagnostics: hdo.domainProxyDiagnostics || null,
         systemDomainProxy,
+        launcherRoutePlan,
         hdoNetworkProbe,
         lastError
       }));
@@ -595,6 +611,7 @@ function relayModeLabel(value) {
 }
 
 function isAnonymousPeer(settings, peer) {
+  if (peer?.launcherNetwork?.identityKind === NETWORK_ANONYMOUS) return true;
   if (settings?.anonymous?.mode === 'anonymous') return true;
   if (String(settings?.deviceId || '').startsWith('hdo-anon-')) return true;
   return String(peer?.overlayIp || '').startsWith('100.91.');

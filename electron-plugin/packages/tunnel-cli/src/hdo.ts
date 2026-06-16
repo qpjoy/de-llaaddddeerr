@@ -30,11 +30,15 @@ interface HdoCliContext {
 
 interface HdoClientState {
   serverUrl?: string;
+  internalUrl?: string;
   bearerToken?: string;
   refreshToken?: string;
   accessExpiresAt?: string;
   refreshExpiresAt?: string;
   username?: string;
+  productId?: string;
+  launcherMode?: 'standalone' | 'embed';
+  identityKind?: 'user' | 'anonymous';
   deviceId?: string;
   label?: string;
   interfaceName?: string;
@@ -47,6 +51,7 @@ interface HdoClientState {
   preferDirectPeers?: boolean;
   endpointHost?: string;
   listenPort?: number;
+  launcherNetworkLease?: LauncherNetworkLease;
   lastManifestGeneration?: number;
   enrolledAt?: string;
   updatedAt?: string;
@@ -54,6 +59,7 @@ interface HdoClientState {
 
 interface HdoEnrollOptions {
   serverUrl?: string;
+  internalUrl?: string;
   token?: string;
   tokenFile?: string;
   username?: string;
@@ -65,14 +71,41 @@ interface HdoEnrollOptions {
   configPath?: string;
   stateFile?: string;
   installDir?: string;
+  productId?: string;
+  mode?: 'standalone' | 'embed';
+  identityKind?: 'user' | 'anonymous';
   role: string;
   start: boolean;
+  leaseOnly: boolean;
   rotateKey: boolean;
   directListener: boolean;
   preferDirectPeers: boolean;
   publicEndpoint?: string;
   endpointHost?: string;
   listenPort?: number;
+}
+
+interface LauncherNetworkLease {
+  leaseId: string;
+  leaseKey?: string;
+  productId: string;
+  launcherMode: 'standalone' | 'embed';
+  identityKind: 'user' | 'anonymous';
+  sequence?: number;
+  installId: string;
+  deviceId: string;
+  siteId: string;
+  userId?: string | null;
+  cidr: string;
+  leaseIp: string;
+  serviceVip?: string;
+  internalControlIp?: string;
+  domesticGatewayIp?: string;
+  domesticSiteId?: string;
+  overseaSiteId?: string;
+  publicKey?: string | null;
+  status?: string;
+  updatedAt?: string;
 }
 
 interface HdoAuthMaterial {
@@ -135,6 +168,11 @@ Usage:
 
 Enroll options:
   --server-url URL       HDO/electron-server base URL
+  --internal-url URL     MX Launcher Internal URL for product IP lease allocation
+  --product-id ID        Product network id. Default: h2o
+  --mode MODE            Launcher mode: embed or standalone
+  --identity-kind KIND   user or anonymous. Default: user when --username is set, else anonymous
+  --lease-only           Only request/store the Internal lease; skip legacy HDO manifest/WireGuard apply
   --username USER        Login username/email/phone
   --password PASS        Login password. Prefer HDO_PASSWORD or --password-file
   --password-file PATH   Read login password from a file
@@ -158,6 +196,8 @@ Enroll options:
 
 Environment:
   HDO_SERVER_URL / QPJOY_HDO_SERVER_URL
+  HDO_INTERNAL_URL / QPJOY_HDO_INTERNAL_URL / MX_INTERNAL_URL
+  HDO_PRODUCT_ID / QPJOY_HDO_PRODUCT_ID
   HDO_USERNAME / QPJOY_HDO_USERNAME
   HDO_PASSWORD / QPJOY_HDO_PASSWORD
   HDO_TOKEN / QPJOY_HDO_TOKEN
@@ -201,17 +241,33 @@ async function enrollCommand(args: string[], refreshOnly: boolean): Promise<void
       process.env.QPJOY_HDO_SERVER_URL ??
       previous.serverUrl,
   );
+  const internalUrl = normalizeBaseUrl(
+    options.internalUrl ??
+      process.env.HDO_INTERNAL_URL ??
+      process.env.QPJOY_HDO_INTERNAL_URL ??
+      process.env.MX_INTERNAL_URL ??
+      previous.internalUrl,
+  );
   const username =
     options.username ??
     process.env.HDO_USERNAME ??
     process.env.QPJOY_HDO_USERNAME ??
     previous.username;
+  const productId = sanitizeId(
+    options.productId ??
+      process.env.HDO_PRODUCT_ID ??
+      process.env.QPJOY_HDO_PRODUCT_ID ??
+      previous.productId ??
+      'h2o',
+  );
+  const launcherMode = options.mode ?? previous.launcherMode ?? (productId === 'launcher' ? 'standalone' : 'embed');
+  const identityKind = options.identityKind ?? previous.identityKind ?? (username ? 'user' : 'anonymous');
+  const leaseOnly = Boolean(options.leaseOnly || (internalUrl && !serverUrl));
 
-  if (!serverUrl) {
-    throw new Error('Missing --server-url or HDO_SERVER_URL.');
+  if (!serverUrl && !leaseOnly) {
+    throw new Error('Missing --server-url/HDO_SERVER_URL or use --internal-url with --lease-only.');
   }
 
-  const auth = await resolveAuth(serverUrl, options, previous, username);
   const deviceId =
     options.deviceId ||
     previous.deviceId ||
@@ -219,6 +275,66 @@ async function enrollCommand(args: string[], refreshOnly: boolean): Promise<void
   const label = options.label || previous.label || `${process.platform} ${hostname()}`;
   const keys = resolveKeypair(options, previous, installDir);
   const direct = resolveDirectEndpoint(options, previous);
+  const launcherNetworkLease = internalUrl
+    ? await enrollLauncherNetworkLease(internalUrl, {
+      productId,
+      mode: launcherMode,
+      identityKind,
+      installId: deviceId,
+      deviceId,
+      siteId: previous.launcherNetworkLease?.siteId,
+      userId: identityKind === 'user' ? username : undefined,
+      publicKey: keys.publicKey,
+      deviceLabel: label,
+      platform: `${process.platform}-${process.arch}`,
+      requestedBy: '@qpjoy/tunnel-cli',
+      requestId: `qp-tunnel-cli-hdo-enroll-${Date.now()}`,
+    })
+    : undefined;
+
+  if (leaseOnly) {
+    const now = new Date().toISOString();
+    writeState(stateFile, {
+      ...previous,
+      internalUrl,
+      productId,
+      launcherMode,
+      identityKind,
+      username,
+      deviceId,
+      label,
+      interfaceName,
+      configPath,
+      installDir,
+      privateKey: keys.privateKey,
+      publicKey: keys.publicKey,
+      overlayIp: launcherNetworkLease?.leaseIp ?? previous.overlayIp,
+      launcherNetworkLease: launcherNetworkLease ?? previous.launcherNetworkLease,
+      enrolledAt: previous.enrolledAt || now,
+      updatedAt: now,
+    });
+    process.stdout.write(
+      [
+        refreshOnly ? 'HDO Internal lease refreshed.' : 'HDO Internal lease enrolled.',
+        `Product: ${productId}`,
+        `Mode: ${launcherMode}`,
+        `Identity: ${identityKind}`,
+        `Device: ${deviceId}`,
+        `Lease IP: ${launcherNetworkLease?.leaseIp ?? previous.overlayIp ?? 'unassigned'}`,
+        `Lease CIDR: ${launcherNetworkLease?.cidr ?? 'unassigned'}`,
+        `State file: ${stateFile}`,
+        'System tunnel not started (lease-only).',
+        '',
+      ].join('\n'),
+    );
+    return;
+  }
+
+  if (!serverUrl) {
+    throw new Error('Missing --server-url or HDO_SERVER_URL.');
+  }
+
+  const auth = await resolveAuth(serverUrl, options, previous, username);
 
   const registered = await apiJson(serverUrl, auth.accessToken, '/api/v1/hdo/devices/register', {
     method: 'POST',
@@ -251,6 +367,8 @@ async function enrollCommand(args: string[], refreshOnly: boolean): Promise<void
   });
   const runtime = hdoRuntimeFromManifest(manifest, registered, keys.privateKey, {
     allowEndpointlessDirectPeers: direct.directListener,
+    launcherNetworkLease,
+    ownPublicKey: keys.publicKey,
   });
   writeWireGuardConfig(configPath, renderHdoClientWireGuardConfig({
     privateKey: runtime.privateKey,
@@ -266,11 +384,15 @@ async function enrollCommand(args: string[], refreshOnly: boolean): Promise<void
   const now = new Date().toISOString();
   writeState(stateFile, {
     serverUrl,
+    internalUrl,
     bearerToken: auth.accessToken,
     refreshToken: auth.refreshToken,
     accessExpiresAt: auth.accessExpiresAt,
     refreshExpiresAt: auth.refreshExpiresAt,
     username: auth.username ?? username,
+    productId,
+    launcherMode,
+    identityKind,
     deviceId,
     label,
     interfaceName,
@@ -279,6 +401,7 @@ async function enrollCommand(args: string[], refreshOnly: boolean): Promise<void
     privateKey: keys.privateKey,
     publicKey: keys.publicKey,
     overlayIp: runtime.overlayIp,
+    launcherNetworkLease: launcherNetworkLease ?? previous.launcherNetworkLease,
     directListener: direct.directListener,
     preferDirectPeers: direct.preferDirectPeers,
     endpointHost: direct.endpointHost,
@@ -319,8 +442,13 @@ function statusCommand(input: HdoCommandOptions): void {
 
   process.stdout.write(`State file: ${stateFile}\n`);
   process.stdout.write(`Server URL: ${state.serverUrl || 'unset'}\n`);
+  process.stdout.write(`Internal URL: ${state.internalUrl || 'unset'}\n`);
+  process.stdout.write(`Product: ${state.productId || 'unset'} (${state.launcherMode || 'unset'} / ${state.identityKind || 'unset'})\n`);
   process.stdout.write(`Device: ${state.deviceId || 'unset'}\n`);
   process.stdout.write(`Overlay IP: ${state.overlayIp || 'unset'}\n`);
+  if (state.launcherNetworkLease) {
+    process.stdout.write(`Internal lease: ${state.launcherNetworkLease.leaseIp} ${state.launcherNetworkLease.cidr} (${state.launcherNetworkLease.leaseId})\n`);
+  }
   process.stdout.write(`WireGuard config: ${configPath}\n\n`);
 
   if (process.platform === 'linux') {
@@ -397,6 +525,7 @@ function parseEnrollOptions(args: string[]): HdoEnrollOptions {
     interfaceName: defaultInterfaceName,
     role: 'internal',
     start: true,
+    leaseOnly: false,
     rotateKey: false,
     directListener: false,
     preferDirectPeers: false,
@@ -413,6 +542,37 @@ function parseEnrollOptions(args: string[]): HdoEnrollOptions {
     switch (arg) {
       case '--server-url':
         options.serverUrl = readValue();
+        break;
+      case '--internal-url':
+      case '--mx-internal-url':
+        options.internalUrl = readValue();
+        break;
+      case '--product-id':
+      case '--app-id':
+        options.productId = readValue();
+        break;
+      case '--mode': {
+        const value = readValue();
+        if (value !== 'standalone' && value !== 'embed') throw new Error(`Invalid --mode: ${value}`);
+        options.mode = value;
+        break;
+      }
+      case '--identity-kind': {
+        const value = readValue();
+        if (value !== 'user' && value !== 'anonymous') throw new Error(`Invalid --identity-kind: ${value}`);
+        options.identityKind = value;
+        break;
+      }
+      case '--anonymous':
+        options.identityKind = 'anonymous';
+        break;
+      case '--user-identity':
+      case '--employee':
+        options.identityKind = 'user';
+        break;
+      case '--lease-only':
+        options.leaseOnly = true;
+        options.start = false;
         break;
       case '--token':
         options.token = readValue();
@@ -606,6 +766,86 @@ async function refreshAuth(serverUrl: string, refreshToken: string, username?: s
   };
 }
 
+async function enrollLauncherNetworkLease(
+  internalUrl: string,
+  input: {
+    productId: string;
+    mode: 'standalone' | 'embed';
+    identityKind: 'user' | 'anonymous';
+    installId: string;
+    deviceId: string;
+    siteId?: string | null;
+    userId?: string;
+    publicKey: string;
+    deviceLabel: string;
+    platform: string;
+    requestedBy: string;
+    requestId: string;
+  },
+): Promise<LauncherNetworkLease> {
+  const raw = await apiJson(internalUrl, '', '/internal/v1/launcher-network/enrollments', {
+    method: 'POST',
+    auth: false,
+    body: input,
+  });
+  const root = requireRecord(raw, 'launcher network enroll response');
+  const lease = requireRecord(root.lease, 'launcher network lease');
+  return parseLauncherNetworkLease(lease);
+}
+
+function parseLauncherNetworkLease(lease: Record<string, unknown>): LauncherNetworkLease {
+  const leaseId = stringField(lease.leaseId);
+  const productId = stringField(lease.productId);
+  const launcherMode = stringField(lease.launcherMode);
+  const identityKind = stringField(lease.identityKind);
+  const installId = stringField(lease.installId);
+  const deviceId = stringField(lease.deviceId);
+  const siteId = stringField(lease.siteId);
+  const cidr = stringField(lease.cidr);
+  const leaseIp = stringField(lease.leaseIp);
+  if (!leaseId || !productId || !installId || !deviceId || !siteId || !cidr || !leaseIp) {
+    throw new Error('Launcher Network lease response is missing required fields.');
+  }
+  if (launcherMode !== 'standalone' && launcherMode !== 'embed') {
+    throw new Error(`Launcher Network lease response has invalid launcherMode: ${launcherMode ?? 'missing'}`);
+  }
+  if (identityKind !== 'user' && identityKind !== 'anonymous') {
+    throw new Error(`Launcher Network lease response has invalid identityKind: ${identityKind ?? 'missing'}`);
+  }
+  return {
+    leaseId,
+    leaseKey: stringField(lease.leaseKey) ?? undefined,
+    productId,
+    launcherMode,
+    identityKind,
+    sequence: numberField(lease.sequence),
+    installId,
+    deviceId,
+    siteId,
+    userId: stringField(lease.userId),
+    cidr,
+    leaseIp,
+    serviceVip: stringField(lease.serviceVip) ?? undefined,
+    internalControlIp: stringField(lease.internalControlIp) ?? undefined,
+    domesticGatewayIp: stringField(lease.domesticGatewayIp) ?? undefined,
+    domesticSiteId: stringField(lease.domesticSiteId) ?? undefined,
+    overseaSiteId: stringField(lease.overseaSiteId) ?? undefined,
+    publicKey: stringField(lease.publicKey),
+    status: stringField(lease.status) ?? undefined,
+    updatedAt: stringField(lease.updatedAt) ?? undefined,
+  };
+}
+
+function allowedIpsFromLauncherNetworkLease(lease?: LauncherNetworkLease): string[] {
+  if (!lease) return [];
+  return uniqueStrings([
+    lease.cidr,
+    lease.serviceVip ? `${lease.serviceVip}/32` : '',
+    lease.internalControlIp ? `${lease.internalControlIp}/32` : '',
+    lease.domesticGatewayIp ? `${lease.domesticGatewayIp}/32` : '',
+  ]).filter((value) => value.includes('/'));
+}
+
 function resolveKeypair(
   options: HdoEnrollOptions,
   previous: HdoClientState,
@@ -664,7 +904,7 @@ function resolveDirectEndpoint(
 function directPeersFromManifest(
   wireGuard: Record<string, unknown>,
   ownOverlayIp: string,
-  options: { allowEndpointlessDirectPeers?: boolean } = {},
+  options: { allowEndpointlessDirectPeers?: boolean; ownPublicKey?: string } = {},
 ): WireGuardPeer[] {
   const ownIp = ownOverlayIp.split('/')[0] || ownOverlayIp;
   const rows = Array.isArray(wireGuard.directPeers) ? wireGuard.directPeers : [];
@@ -674,6 +914,7 @@ function directPeersFromManifest(
     const publicKey = stringField(row.publicKey);
     const overlayIp = stringField(row.overlayIp);
     if (!publicKey || !overlayIp || overlayIp === ownIp) return [];
+    if (options.ownPublicKey && publicKey === options.ownPublicKey) return [];
     const allowedIps = stringArray(row.allowedIps);
     const endpoint = stringField(row.endpoint);
     if (!endpoint && options.allowEndpointlessDirectPeers !== true) return [];
@@ -746,7 +987,7 @@ function hdoRuntimeFromManifest(
   manifest: unknown,
   registered: unknown,
   privateKey: string,
-  options: { allowEndpointlessDirectPeers?: boolean } = {},
+  options: { allowEndpointlessDirectPeers?: boolean; launcherNetworkLease?: LauncherNetworkLease; ownPublicKey?: string } = {},
 ): {
   privateKey: string;
   address: string;
@@ -765,9 +1006,10 @@ function hdoRuntimeFromManifest(
   const wireGuard = requireRecord(root.wireGuard, 'manifest.wireGuard');
   const client = requireRecord(wireGuard.client, 'manifest.wireGuard.client');
   const domestic = requireRecord(wireGuard.domestic, 'manifest.wireGuard.domestic');
-  const overlayIp =
+  const manifestOverlayIp =
     stringField(client.overlayIp) ||
     stringField(requireRecord(registered, 'registered device').overlayIp);
+  const overlayIp = options.launcherNetworkLease?.leaseIp || manifestOverlayIp;
   const domesticPublicKey = stringField(domestic.publicKey);
   const domesticEndpoint = stringField(domestic.endpoint);
   if (!overlayIp) throw new Error('HDO manifest did not assign an overlay IP.');
@@ -778,6 +1020,7 @@ function hdoRuntimeFromManifest(
   const domesticOverlay = stringField(domestic.overlayIp);
   const allowedIps = uniqueStrings([
     ...routeCidrs,
+    ...allowedIpsFromLauncherNetworkLease(options.launcherNetworkLease),
     ...(domesticOverlay ? [`${domesticOverlay}/32`] : []),
   ]).filter((value) => value.includes('/'));
   if (allowedIps.length === 0) {

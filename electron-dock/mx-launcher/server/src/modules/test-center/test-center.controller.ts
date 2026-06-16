@@ -13,7 +13,7 @@ export class TestCenterController {
     const body = asRecord(rawBody);
     return {
       run: await this.store.createTestRun({
-        suiteId: nullableString(body.suiteId) ?? 'hdo-shadow-e2e',
+        suiteId: nullableString(body.suiteId) ?? 'hdi-shadow-e2e',
         releaseId: nullableString(body.releaseId),
         configSnapshotId: nullableString(body.configSnapshotId),
         installId: nullableString(body.installId),
@@ -50,7 +50,7 @@ export class TestCenterController {
     const body = asRecord(rawBody);
     return {
       verdict: await this.store.evaluateTestGate({
-        gateId: nullableString(body.gateId) ?? 'gate_hdo_shadow_e2e',
+        gateId: nullableString(body.gateId) ?? 'gate_hdi_shadow_e2e',
         releaseId: nullableString(body.releaseId) ?? 'rel_shadow',
         runIds: stringArray(body.runIds)
       })

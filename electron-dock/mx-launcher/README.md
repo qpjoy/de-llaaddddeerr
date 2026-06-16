@@ -27,11 +27,11 @@ platform. New Launcher solution design and implementation should happen here.
 
 - `desktop/` - complete Electron desktop app packaged by electron-builder.
 - `server/` - server/backend package for MX Launcher control plane.
-- `desktop/products/hdo/product.json` - product manifest for HDO.
+- `desktop/products/hdi/product.json` - product manifest for HDI.
 - `desktop/src/catalog.ts` - multi-product catalog helpers.
 - `desktop/src/config/` - product config registry helpers.
 - `desktop/src/contracts/mx.ts` - platform-level product and config contracts.
-- `desktop/src/contracts/hdo.ts` - HDO-compatible launcher API types.
+- `desktop/src/contracts/hdi.ts` - HDI launcher API types with legacy HDO endpoint compatibility.
 - `desktop/src/launcher/` - launcher install/update decision model.
 - `desktop/src/service/` - native service IPC contract.
 - `desktop/src/security/` - package manifest contracts.
@@ -43,12 +43,12 @@ platform. New Launcher solution design and implementation should happen here.
 - `docs/00-delivery-plan.md` - executable implementation phases.
 - `docs/01-windows-uac-service-model.md` - UAC, service, signing, and update
   model.
-- `docs/02-backend-contract.md` - backend contract and HDO compatibility policy.
+- `docs/02-backend-contract.md` - backend contract and HDI compatibility policy.
 - `docs/03-macos-signing-notarization.md` - macOS signing, notarization, and
   DMG delivery policy.
 - `docs/04-product-and-config-contract.md` - platform product and config
   contract.
-- `docs/05-hdo-multi-site-platform-architecture.md` - Launcher Network / HDO
+- `docs/05-hdo-multi-site-platform-architecture.md` - Launcher Network / HDI
   multi-site platform architecture for Internal, Domestic, Oversea, and H
   endpoints.
 - `docs/06-server-shadow-control-plane.md` - MX Launcher Server shadow control
@@ -58,7 +58,7 @@ platform. New Launcher solution design and implementation should happen here.
 - `docs/08-cdtr-platform-lessons.md` - useful CDTR/DRTC platform lessons folded
   into MX Launcher.
 - `docs/09-observable-automation-test-platform.md` - observable automation,
-  online E2E, synthetic probes, release gates, and HDOI test-center design.
+  online E2E, synthetic probes, release gates, and H/D/I/O test-center design.
 - `docs/10-mx-3ks-appcenter-launcher-network-h2o-architecture.md` - MX-3ks
   platform, AppCenter protocol, Launcher Network, H2O, Domestic minimization,
   and SDK gateway architecture.

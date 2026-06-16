@@ -8,7 +8,7 @@ let mainWindow = null;
 let config = {
   serverBaseUrl: '',
   productConfigs: {
-    hdo: {
+    hdi: {
       defaultMode: 'visitor'
     }
   }
@@ -70,12 +70,12 @@ function registerIpc() {
   ipcMain.handle('launcher:get-products', () => {
     return [
       {
-        id: 'hdo',
-        name: 'HDO',
-        displayName: 'HDO',
+        id: 'hdi',
+        name: 'HDI',
+        displayName: 'HDI',
         description: '访客 / 员工网络连接、DNS、路由和内网服务访问',
         status: 'not-installed',
-        config: config.productConfigs.hdo
+        config: config.productConfigs.hdi
       }
     ];
   });
@@ -92,7 +92,7 @@ function registerIpc() {
   });
   ipcMain.handle('launcher:launch-product', async (_event, input) => {
     const productId = input && typeof input.productId === 'string' ? input.productId : '';
-    if (productId !== 'hdo') {
+    if (productId !== 'hdi') {
       return {
         ok: false,
         productId,
@@ -102,7 +102,7 @@ function registerIpc() {
     }
     return {
       ok: false,
-      productId: 'hdo',
+      productId: 'hdi',
       state: 'not-installed',
       localIp: null,
       error: 'MX privileged service is not installed yet.'
@@ -116,7 +116,7 @@ function registerIpc() {
   });
   ipcMain.handle('launcher:open-admin', async (_event, serverBaseUrl) => {
     const base = typeof serverBaseUrl === 'string' ? serverBaseUrl.trim().replace(/\/+$/, '') : '';
-    const url = base ? `${base}/admin/#/server/mx-launcher/hdo` : 'http://127.0.0.1:8080/admin/#/server/mx-launcher/hdo';
+    const url = base ? `${base}/admin/#/server/mx-launcher/hdi` : 'http://127.0.0.1:8080/admin/#/server/mx-launcher/hdi';
     await shell.openExternal(url);
     return true;
   });
@@ -156,14 +156,16 @@ function normalizeConfig(input) {
   const productConfigs = row.productConfigs && typeof row.productConfigs === 'object'
     ? row.productConfigs
     : {};
-  const hdoConfig = productConfigs.hdo && typeof productConfigs.hdo === 'object'
-    ? productConfigs.hdo
-    : {};
+  const hdiConfig = productConfigs.hdi && typeof productConfigs.hdi === 'object'
+    ? productConfigs.hdi
+    : productConfigs.hdo && typeof productConfigs.hdo === 'object'
+      ? productConfigs.hdo
+      : {};
   return {
     serverBaseUrl,
     productConfigs: {
-      hdo: {
-        defaultMode: hdoConfig.defaultMode === 'employee' ? 'employee' : 'visitor'
+      hdi: {
+        defaultMode: hdiConfig.defaultMode === 'employee' ? 'employee' : 'visitor'
       }
     }
   };

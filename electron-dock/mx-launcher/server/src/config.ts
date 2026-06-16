@@ -50,7 +50,7 @@ function enabledModulesFromEnv(siteRole: SiteRole): string[] {
     'observability',
     'sdk-gateway',
     'launcher-network-control',
-    'hdo-compat',
+    'hdi-compat',
     'dns-control',
     'edge-sync'
   ];

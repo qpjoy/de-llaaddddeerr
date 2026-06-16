@@ -32,6 +32,7 @@ import type {
   AdminTimelineEntry,
   AwxProviderCheckResult,
   AwxProviderConfig,
+  LauncherNetworkLease,
   LauncherNetworkMihomoSite,
   PlatformPrincipal,
   ReleaseManagementPlan,
@@ -684,7 +685,7 @@ export class AdminController {
           SITE_SLOT_WORKER_REMOTE_SSH: '1',
           SITE_SLOT_CONFIRM_REMOTE_EXECUTION: '1',
           SITE_SLOT_WORKER_ID: 'worker-admin-ensure',
-          SITE_SLOT_WORKER_MESSAGE: 'oversea install/sync by admin ensure',
+          SITE_SLOT_WORKER_MESSAGE: 'site slot remote SSH worker by admin action',
           SITE_SLOT_WORKER_REQUEST_ID: requestId,
           SITE_SLOT_WORKER_REQUESTED_BY: requestedBy
         },
@@ -736,7 +737,7 @@ export class AdminController {
         sites: sites.filter((site) => site.mihomoSite).length,
         subscriptions: subscriptionCount,
         routingPolicy: 'cn-direct',
-        reservedInternalCidrs: ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16', '10.91.0.0/16'],
+        reservedInternalCidrs: ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16'],
         domesticGatewayIp: '10.88.0.1',
         deliveryBoundary: 'Internal publishes subscriptions; H endpoints need Domestic WG/H2I/DNS before they can fetch Internal mihomo.'
       },
@@ -849,7 +850,10 @@ export class AdminController {
     }
 
     const mxRoot = resolveMxLauncherRoot();
-    const scriptPath = resolve(mxRoot, 'server/scripts/site-slot-artifact-materializer.mjs');
+    const scriptPath = [
+      resolve(mxRoot, 'server/scripts/site-slot-artifact-materializer.mjs'),
+      resolve(mxRoot, 'scripts/site-slot-artifact-materializer.mjs')
+    ].find((candidate) => existsSync(candidate)) ?? resolve(mxRoot, 'server/scripts/site-slot-artifact-materializer.mjs');
     let execution: { exitCode: number; stdout: string; stderr: string } | null = null;
     const blockedReasons: string[] = [];
     try {
@@ -1085,6 +1089,7 @@ export class AdminController {
       const job = await this.store.getSiteSlotWorkerJob(match[1]);
       if (!job) throw new NotFoundException('Site slot worker job not found');
       const plan = await this.store.getSiteSlotPlan(job.planId);
+      await this.assertDomesticWgReadyForWorkerJob(job, plan);
       const sshProfile = plan?.ssh.profileId ? await this.store.getSiteSlotSshProfile(plan.ssh.profileId) : null;
       return {
         gate: buildSiteSlotRemoteSshGate(job, plan, sshProfile, {
@@ -1100,6 +1105,7 @@ export class AdminController {
       const job = await this.store.getSiteSlotWorkerJob(match[1]);
       if (!job) throw new NotFoundException('Site slot worker job not found');
       const plan = await this.store.getSiteSlotPlan(job.planId);
+      await this.assertDomesticWgReadyForWorkerJob(job, plan);
       const sshProfile = plan?.ssh.profileId ? await this.store.getSiteSlotSshProfile(plan.ssh.profileId) : null;
       const gate = buildSiteSlotRemoteSshGate(job, plan, sshProfile, {
         confirmRemoteExecution: booleanValue(body.confirmRemoteExecution) === true,
@@ -1119,18 +1125,44 @@ export class AdminController {
       const job = await this.store.getSiteSlotWorkerJob(match[1]);
       if (!job) throw new NotFoundException('Site slot worker job not found');
       const plan = await this.store.getSiteSlotPlan(job.planId);
+      await this.assertDomesticWgReadyForWorkerJob(job, plan);
       const sshProfile = plan?.ssh.profileId ? await this.store.getSiteSlotSshProfile(plan.ssh.profileId) : null;
       const gate = buildSiteSlotRemoteSshGate(job, plan, sshProfile, {
         confirmRemoteExecution: booleanValue(body.confirmRemoteExecution) === true,
         requestedBy: stringValue(body.requestedBy),
         requestId: stringValue(body.requestId)
       });
+      const workerHandoff = buildSiteSlotRemoteSshWorkerHandoff(job, plan, gate, {
+        internalBaseUrl: stringValue(body.internalBaseUrl),
+        confirmWorkerHandoff: booleanValue(body.confirmWorkerHandoff) === true
+      });
+      if (workerHandoff.status !== 'ready' || booleanValue(body.executeWorkerHandoff) !== true) {
+        return {
+          gate,
+          workerHandoff
+        };
+      }
+      if (job.currentReportId) throw new BadRequestException('Site slot worker job already has a report');
+      if (job.status !== 'ready') throw new BadRequestException(`Site slot worker job is not ready: ${job.status}`);
+      const profileId = stringValue(workerHandoff.env?.SITE_SLOT_SSH_PROFILE_ID) ?? plan?.ssh.profileId;
+      if (!profileId) throw new BadRequestException('Managed SSH profile is required before Remote SSH worker execution');
+      const internalBaseUrl = stringValue(workerHandoff.env?.MX_INTERNAL_BASE_URL) ?? stringValue(body.internalBaseUrl);
+      if (!internalBaseUrl) throw new BadRequestException('internalBaseUrl is required before Remote SSH worker execution');
+      const requestedBy = stringValue(body.requestedBy) ?? 'admin-ui';
+      const requestId = stringValue(body.requestId) ?? 'admin-ui-worker-run-remote-ssh-execute';
+      const workerExecution = await this.runRemoteSshWorker(job.jobId, profileId, internalBaseUrl, requestedBy, requestId);
+      const latestReport = latestByCreatedAt(await this.store.listSiteSlotWorkerReports(job.jobId));
+      const executionStatus = workerExecution.status === 'completed' && latestReport?.status === 'passed' ? 'executed' : workerExecution.status;
       return {
         gate,
-        workerHandoff: buildSiteSlotRemoteSshWorkerHandoff(job, plan, gate, {
-          internalBaseUrl: stringValue(body.internalBaseUrl),
-          confirmWorkerHandoff: booleanValue(body.confirmWorkerHandoff) === true
-        })
+        workerHandoff: {
+          ...workerHandoff,
+          execution: executionStatus,
+          reportId: latestReport?.reportId ?? null,
+          exitCode: workerExecution.exitCode
+        },
+        workerExecution,
+        report: latestReport
       };
     }
     if (actionId === 'site-slot.worker-run.artifact-push-fake-transport') {
@@ -1141,6 +1173,7 @@ export class AdminController {
       if (job.currentReportId) throw new BadRequestException('Site slot worker job already has a report');
       if (job.status !== 'ready') throw new BadRequestException(`Site slot worker job is not ready: ${job.status}`);
       const plan = await this.store.getSiteSlotPlan(job.planId);
+      await this.assertDomesticWgReadyForWorkerJob(job, plan);
       const sshProfile = plan?.ssh.profileId ? await this.store.getSiteSlotSshProfile(plan.ssh.profileId) : null;
       const gate = buildSiteSlotRemoteSshGate(job, plan, sshProfile, {
         confirmRemoteExecution: booleanValue(body.confirmRemoteExecution) === true,
@@ -1177,6 +1210,7 @@ export class AdminController {
       if (job.currentReportId) throw new BadRequestException('Site slot worker job already has a report');
       if (job.status !== 'ready') throw new BadRequestException(`Site slot worker job is not ready: ${job.status}`);
       const plan = await this.store.getSiteSlotPlan(job.planId);
+      await this.assertDomesticWgReadyForWorkerJob(job, plan);
       const sshProfile = plan?.ssh.profileId ? await this.store.getSiteSlotSshProfile(plan.ssh.profileId) : null;
       const gate = buildSiteSlotRemoteSshGate(job, plan, sshProfile, {
         confirmRemoteExecution: booleanValue(body.confirmRemoteExecution) === true,
@@ -1213,9 +1247,11 @@ export class AdminController {
       if (job.currentReportId) throw new BadRequestException('Site slot worker job already has a report');
       if (job.status !== 'ready') throw new BadRequestException(`Site slot worker job is not ready: ${job.status}`);
       const plan = await this.store.getSiteSlotPlan(job.planId);
-      const relayPeerPlan = adminDomesticRelayPeerPlanResult(job, plan, body);
+      await this.assertDomesticWgReadyForWorkerJob(job, plan);
+      const relayPeerInput = await resolveDomesticRelayPeerInput(this.store, body);
+      const relayPeerPlan = adminDomesticRelayPeerPlanResult(job, plan, body, relayPeerInput);
       if (relayPeerPlan.status !== 'ready') return { relayPeerPlan };
-      const reportResult = domesticRelayPeerPlanStepReports(job, plan, body);
+      const reportResult = domesticRelayPeerPlanStepReports(job, plan, body, relayPeerInput);
       const report = await this.store.recordSiteSlotWorkerReport({
         jobId: job.jobId,
         workerId: stringValue(body.workerId) ?? job.worker.workerId,
@@ -1240,6 +1276,7 @@ export class AdminController {
       const job = await this.store.getSiteSlotWorkerJob(match[1]);
       if (!job) throw new NotFoundException('Site slot worker job not found');
       const plan = await this.store.getSiteSlotPlan(job.planId);
+      await this.assertDomesticWgReadyForWorkerJob(job, plan);
       return {
         relayReadOnlyProbe: adminDomesticRelayReadOnlyProbeResult(job, plan, body)
       };
@@ -1250,8 +1287,10 @@ export class AdminController {
       const job = await this.store.getSiteSlotWorkerJob(match[1]);
       if (!job) throw new NotFoundException('Site slot worker job not found');
       const plan = await this.store.getSiteSlotPlan(job.planId);
+      await this.assertDomesticWgReadyForWorkerJob(job, plan);
+      const relayPeerInput = await resolveDomesticRelayPeerInput(this.store, body);
       return {
-        relayPeerAppend: adminDomesticRelayPeerAppendResult(job, plan, body)
+        relayPeerAppend: adminDomesticRelayPeerAppendResult(job, plan, body, relayPeerInput)
       };
     }
     if (actionId === 'site-slot.worker-run.domestic-relay-peer-append-ssh') {
@@ -1260,16 +1299,18 @@ export class AdminController {
       const job = await this.store.getSiteSlotWorkerJob(match[1]);
       if (!job) throw new NotFoundException('Site slot worker job not found');
       const plan = await this.store.getSiteSlotPlan(job.planId);
+      await this.assertDomesticWgReadyForWorkerJob(job, plan);
       const sshProfile = plan?.ssh.profileId ? await this.store.getSiteSlotSshProfile(plan.ssh.profileId) : null;
       const gate = buildSiteSlotRemoteSshGate(job, plan, sshProfile, {
         confirmRemoteExecution: booleanValue(body.confirmRemoteExecution) === true,
         requestedBy: stringValue(body.requestedBy),
         requestId: stringValue(body.requestId)
       });
-      const relayPeerAppend = adminDomesticRelayPeerAppendResult(job, plan, body);
+      const relayPeerInput = await resolveDomesticRelayPeerInput(this.store, body);
+      const relayPeerAppend = adminDomesticRelayPeerAppendResult(job, plan, body, relayPeerInput);
       const relayPeerAppendSsh = adminDomesticRelayPeerAppendSshResult(job, plan, sshProfile, gate, body, relayPeerAppend);
       if (relayPeerAppendSsh.status !== 'ready') return { gate, relayPeerAppend, relayPeerAppendSsh };
-      const reportResult = await domesticRelayPeerAppendSshStepReports(job, plan, sshProfile, gate, body);
+      const reportResult = await domesticRelayPeerAppendSshStepReports(job, plan, sshProfile, gate, body, relayPeerInput, relayPeerAppend);
       const report = await this.store.recordSiteSlotWorkerReport({
         jobId: job.jobId,
         workerId: stringValue(body.workerId) ?? job.worker.workerId,
@@ -1432,7 +1473,8 @@ export class AdminController {
       if (job.currentReportId) throw new BadRequestException('Site slot worker job already has a report');
       if (job.status !== 'ready') throw new BadRequestException(`Site slot worker job is not ready: ${job.status}`);
       const dryRun = actionId === 'site-slot.worker-run.artifact-push-dry-run';
-      const plan = dryRun ? await this.store.getSiteSlotPlan(job.planId) : null;
+      const plan = await this.store.getSiteSlotPlan(job.planId);
+      await this.assertDomesticWgReadyForWorkerJob(job, plan);
       const sshProfile = dryRun && plan?.ssh.profileId ? await this.store.getSiteSlotSshProfile(plan.ssh.profileId) : null;
       const dryRunResult = dryRun ? artifactPushDryRunStepReports(job, plan, sshProfile) : null;
       return {
@@ -1490,15 +1532,25 @@ export class AdminController {
     return policies.flat();
   }
 
+  private async assertDomesticWgReadyForWorkerJob(job: SiteSlotWorkerJob, plan: SiteSlotPlan | null): Promise<void> {
+    if (job.kind !== 'domestic' && plan?.kind !== 'domestic') return;
+    if (!plan) throw new BadRequestException('Site slot plan is required before Domestic worker execution');
+    const secret = await this.store.getSiteSlotDomesticWireGuardSecret(plan.siteId);
+    if (domesticWireGuardMaterializeNeeded(plan, secret)) {
+      throw new BadRequestException('Materialize Domestic WG before running Domestic worker job gates');
+    }
+  }
+
   private async buildSiteSlotPipelines(actionPolicy: AdminActionPolicy, planId?: string | null): Promise<AdminSiteSlotPipeline[]> {
-    const [plans, executions, runnerSessions, workerJobs, workerReports, rollbackExecutions, rollbackReports] = await Promise.all([
+    const [plans, executions, runnerSessions, workerJobs, workerReports, rollbackExecutions, rollbackReports, domesticWgSecrets] = await Promise.all([
       this.store.listSiteSlotPlans(),
       this.store.listSiteSlotExecutions(),
       this.store.listSiteSlotRunnerSessions(),
       this.store.listSiteSlotWorkerJobs(),
       this.store.listSiteSlotWorkerReports(),
       this.store.listSiteSlotRollbackExecutions(),
-      this.store.listSiteSlotRollbackReports()
+      this.store.listSiteSlotRollbackReports(),
+      this.store.listSiteSlotDomesticWireGuardSecrets()
     ]);
     return plans
       .filter((plan) => !planId || plan.planId === planId)
@@ -1510,6 +1562,7 @@ export class AdminController {
         workerReports.filter((report) => report.planId === plan.planId),
         rollbackExecutions.filter((execution) => execution.planId === plan.planId),
         rollbackReports.filter((report) => report.planId === plan.planId),
+        domesticWgSecrets.find((secret) => secret.siteId === plan.siteId) ?? null,
         actionPolicy
       ))
       .sort((a, b) => b.summary.latestUpdatedAt.localeCompare(a.summary.latestUpdatedAt));
@@ -1524,6 +1577,7 @@ function buildPipeline(
   workerReports: SiteSlotWorkerReport[],
   rollbackExecutions: SiteSlotRollbackExecution[],
   rollbackReports: SiteSlotRollbackReport[],
+  domesticWgSecret: SiteSlotDomesticWireGuardSecret | null,
   actionPolicy: AdminActionPolicy
 ): AdminSiteSlotPipeline {
   const timeline = buildTimeline(plan, executions, runnerSessions, workerJobs, workerReports, rollbackExecutions, rollbackReports);
@@ -1556,7 +1610,7 @@ function buildPipeline(
     },
     warnings,
     nextActions,
-    actionHints: buildPipelineActionHints(actionPolicy, plan, executions, runnerSessions, workerJobs, workerReports, rollbackExecutions)
+    actionHints: buildPipelineActionHints(actionPolicy, plan, executions, runnerSessions, workerJobs, workerReports, rollbackExecutions, domesticWgSecret)
   };
   return {
     summary,
@@ -1823,7 +1877,8 @@ function artifactPushRemoteSshPlanStepReport(
 function domesticRelayPeerPlanStepReports(
   job: SiteSlotWorkerJob,
   plan: SiteSlotPlan | null,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  input = domesticRelayPeerInput(body)
 ): {
   status: NonNullable<SiteSlotWorkerReportInput['status']>;
   stepReports: NonNullable<SiteSlotWorkerReportInput['stepReports']>;
@@ -1832,7 +1887,7 @@ function domesticRelayPeerPlanStepReports(
   const carrierStep = steps.find((step) => phaseIdFromSource(step.sourceId) === 'prepare-domestic-relay-authority')
     ?? steps.find((step) => phaseIdFromSource(step.sourceId) === 'activate-domestic-peer-center')
     ?? steps[0];
-  const evidence = domesticRelayPeerPlanEvidence(job, carrierStep, plan, body);
+  const evidence = domesticRelayPeerPlanEvidence(job, carrierStep, plan, body, input);
   const stepReports = steps.map((step) => {
     const startedAt = new Date().toISOString();
     const isCarrier = step.stepId === carrierStep?.stepId;
@@ -1857,9 +1912,9 @@ function domesticRelayPeerPlanEvidence(
   job: SiteSlotWorkerJob,
   step: SiteSlotWorkerJob['steps'][number] | undefined,
   plan: SiteSlotPlan | null,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  input = domesticRelayPeerInput(body)
 ) {
-  const input = domesticRelayPeerInput(body);
   const allowedIp = input.leaseIp ? `${input.leaseIp}/32` : null;
   const plannedCommand = input.publicKey && allowedIp
     ? `wg set mx-domestic peer ${input.publicKey} allowed-ips ${allowedIp}`
@@ -1890,22 +1945,16 @@ function domesticRelayPeerPlanEvidence(
     },
     internalServicePeer: {
       role: 'internal-service',
-      fixedIp: '10.90.0.10',
-      allowedIps: ['10.90.0.10/32'],
+      fixedIp: '10.88.88.88',
+      allowedIps: ['10.88.88.88/32'],
       configArtifact: 'mx-internal-service-peer.conf',
       privateKeyPlacement: 'internal-only',
       privateKeyCopiedToDomestic: false
     },
-    homePeer: {
-      role: input.peerRole,
-      leaseIp: input.leaseIp,
-      cidr: relayPeerCidr(input.peerRole),
-      allowedIps: allowedIp ? [allowedIp] : [],
-      publicKey: input.publicKey,
-      publicKeyStatus: input.publicKey ? 'ready-to-append' : 'pending-public-key',
+    homePeer: domesticRelayPeerHomePeer(input, {
       provisionedBy: 'internal-signed-relay-lease',
       domesticMutation: 'append-peer-after-enroll'
-    },
+    }),
     planOnly: {
       enabled: true,
       commandExecuted: false,
@@ -2297,9 +2346,9 @@ function adminRemoteSshPlanResult(
 function adminDomesticRelayPeerPlanResult(
   job: SiteSlotWorkerJob,
   plan: SiteSlotPlan | null,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  input = domesticRelayPeerInput(body)
 ) {
-  const input = domesticRelayPeerInput(body);
   const blockedReasons = domesticRelayPeerPlanFailures(job, plan, body, input);
   return {
     relayPeerPlanId: `domestic_relay_peer_plan_${job.jobId}`,
@@ -2311,14 +2360,7 @@ function adminDomesticRelayPeerPlanResult(
     planId: job.planId,
     siteId: job.siteId,
     kind: job.kind,
-    homePeer: {
-      role: input.peerRole,
-      leaseIp: input.leaseIp,
-      cidr: relayPeerCidr(input.peerRole),
-      allowedIps: input.leaseIp ? [`${input.leaseIp}/32`] : [],
-      publicKey: input.publicKey,
-      publicKeyStatus: input.publicKey ? 'ready-to-append' : 'pending-public-key'
-    },
+    homePeer: domesticRelayPeerHomePeer(input),
     domesticRelay: {
       interfaceName: 'mx-domestic',
       listenPort: 51820,
@@ -2326,7 +2368,7 @@ function adminDomesticRelayPeerPlanResult(
       endpointHost: plan?.host ?? null
     },
     internalServicePeer: {
-      fixedIp: '10.90.0.10',
+      fixedIp: '10.88.88.88',
       privateKeyPlacement: 'internal-only',
       privateKeyCopiedToDomestic: false
     },
@@ -2382,7 +2424,7 @@ function adminDomesticRelayReadOnlyProbeResult(
         'test ! -f /etc/wireguard/mx-internal-service-peer.conf',
         'wg show mx-domestic',
         'ip -4 address show dev mx-domestic',
-        'ip route get 10.90.0.10',
+        'ip route get 10.88.88.88',
         'systemctl status wg-quick@mx-domestic --no-pager'
       ]
     },
@@ -2407,11 +2449,10 @@ function adminDomesticRelayReadOnlyProbeResult(
 function adminDomesticRelayPeerAppendResult(
   job: SiteSlotWorkerJob,
   plan: SiteSlotPlan | null,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  input = domesticRelayPeerInput(body)
 ) {
-  const input = domesticRelayPeerInput(body);
   const blockedReasons = domesticRelayPeerAppendFailures(job, plan, body, input);
-  const allowedIp = input.leaseIp ? `${input.leaseIp}/32` : null;
   return {
     appendId: `domestic_relay_peer_append_${job.jobId}`,
     status: blockedReasons.length > 0 ? 'blocked' as const : 'ready' as const,
@@ -2438,14 +2479,7 @@ function adminDomesticRelayPeerAppendResult(
       configPath: '/etc/wireguard/mx-domestic.conf',
       unit: 'wg-quick@mx-domestic'
     },
-    homePeer: {
-      role: input.peerRole,
-      leaseIp: input.leaseIp,
-      cidr: relayPeerCidr(input.peerRole),
-      allowedIps: allowedIp ? [allowedIp] : [],
-      publicKey: input.publicKey,
-      publicKeyStatus: input.publicKey ? 'ready-to-append' : 'pending-public-key'
-    },
+    homePeer: domesticRelayPeerHomePeer(input),
     handoff: {
       commandExecuted: false,
       remoteMutation: true,
@@ -2749,10 +2783,11 @@ function buildAdminDomesticWireGuardSecretInput(
     listenPort,
     domesticGatewayIp: stringValue(body.domesticGatewayIp) ?? previous?.domesticGatewayIp ?? '10.88.0.1',
     domesticGatewayCidr: stringValue(body.domesticGatewayCidr) ?? previous?.domesticGatewayCidr ?? '10.88.0.0/16',
+    productRelayCidrs: cidrListValue(body.productRelayCidrs) ?? previous?.productRelayCidrs ?? ['10.89.0.0/16', '10.90.0.0/16'],
     userRelayCidr: stringValue(body.userRelayCidr) ?? previous?.userRelayCidr ?? '10.89.0.0/16',
-    internalServiceIp: stringValue(body.internalServiceIp) ?? previous?.internalServiceIp ?? '10.90.0.10',
-    internalServiceCidr: stringValue(body.internalServiceCidr) ?? previous?.internalServiceCidr ?? '10.90.0.0/16',
-    guestRelayCidr: stringValue(body.guestRelayCidr) ?? previous?.guestRelayCidr ?? '10.91.0.0/16',
+    internalServiceIp: stringValue(body.internalServiceIp) ?? previous?.internalServiceIp ?? '10.88.88.88',
+    internalServiceCidr: stringValue(body.internalServiceCidr) ?? previous?.internalServiceCidr ?? '10.88.0.0/16',
+    guestRelayCidr: stringValue(body.guestRelayCidr) ?? previous?.guestRelayCidr ?? '10.90.0.0/16',
     domesticRelayPrivateKey: relayPair?.privateKey ?? previous?.domesticRelayPrivateKey ?? null,
     domesticRelayPublicKey: relayPair?.publicKey ?? previous?.domesticRelayPublicKey ?? null,
     internalServicePrivateKey: internalPair?.privateKey ?? previous?.internalServicePrivateKey ?? null,
@@ -2795,6 +2830,7 @@ function domesticWireGuardMaterializerEnv(secret: SiteSlotDomesticWireGuardSecre
     MX_WG_LISTEN_PORT: String(secret.listenPort),
     MX_DOMESTIC_GATEWAY_IP: secret.domesticGatewayIp,
     MX_DOMESTIC_GATEWAY_CIDR: secret.domesticGatewayCidr,
+    MX_PRODUCT_RELAY_CIDRS: domesticSecretProductRelayCidrs(secret).join(','),
     MX_USER_RELAY_CIDR: secret.userRelayCidr,
     MX_INTERNAL_SERVICE_IP: secret.internalServiceIp,
     MX_INTERNAL_SERVICE_CIDR: secret.internalServiceCidr,
@@ -2837,6 +2873,7 @@ function adminDomesticWireGuardMaterializeResult(
     relay: secret ? {
       domesticGatewayIp: secret.domesticGatewayIp,
       domesticGatewayCidr: secret.domesticGatewayCidr,
+      productRelayCidrs: domesticSecretProductRelayCidrs(secret),
       userRelayCidr: secret.userRelayCidr,
       internalServiceIp: secret.internalServiceIp,
       internalServiceCidr: secret.internalServiceCidr,
@@ -2869,6 +2906,7 @@ function redactAdminDomesticWireGuardSecret(secret: SiteSlotDomesticWireGuardSec
     listenPort: secret.listenPort,
     domesticGatewayIp: secret.domesticGatewayIp,
     domesticGatewayCidr: secret.domesticGatewayCidr,
+    productRelayCidrs: domesticSecretProductRelayCidrs(secret),
     userRelayCidr: secret.userRelayCidr,
     internalServiceIp: secret.internalServiceIp,
     internalServiceCidr: secret.internalServiceCidr,
@@ -2913,13 +2951,13 @@ async function domesticRelayPeerAppendSshStepReports(
   plan: SiteSlotPlan | null,
   sshProfile: SiteSlotSshProfile | null,
   gate: ReturnType<typeof buildSiteSlotRemoteSshGate>,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  input = domesticRelayPeerInput(body),
+  relayPeerAppend = adminDomesticRelayPeerAppendResult(job, plan, body, input)
 ): Promise<{
   status: NonNullable<SiteSlotWorkerReportInput['status']>;
   stepReports: NonNullable<SiteSlotWorkerReportInput['stepReports']>;
 }> {
-  const input = domesticRelayPeerInput(body);
-  const relayPeerAppend = adminDomesticRelayPeerAppendResult(job, plan, body);
   const blockedReasons = domesticRelayPeerAppendSshFailures(gate, body, relayPeerAppend, sshProfile);
   const steps = [...job.steps].sort((left, right) => left.order - right.order);
   const carrierStep = steps.find((step) => phaseIdFromSource(step.sourceId) === 'prepare-domestic-relay-authority')
@@ -2961,7 +2999,7 @@ async function domesticRelayPeerAppendSshStepReports(
     }
   }
 
-  const evidence = domesticRelayPeerAppendSshEvidence(job, carrierStep, plan, sshProfile, gate, body, {
+  const evidence = domesticRelayPeerAppendSshEvidence(job, carrierStep, plan, sshProfile, gate, body, input, {
     status,
     execution,
     exitCode,
@@ -2995,6 +3033,7 @@ function domesticRelayPeerAppendSshEvidence(
   sshProfile: SiteSlotSshProfile | null,
   gate: ReturnType<typeof buildSiteSlotRemoteSshGate>,
   body: Record<string, unknown>,
+  input: DomesticRelayPeerInput,
   result: {
     status: NonNullable<SiteSlotWorkerReportInput['status']>;
     execution: string;
@@ -3003,8 +3042,6 @@ function domesticRelayPeerAppendSshEvidence(
     executionResult: Record<string, unknown> | null;
   }
 ) {
-  const input = domesticRelayPeerInput(body);
-  const allowedIp = input.leaseIp ? `${input.leaseIp}/32` : null;
   return {
     dryRun: false,
     mode: 'domestic-relay-peer-append-ssh',
@@ -3030,14 +3067,7 @@ function domesticRelayPeerAppendSshEvidence(
       configPath: '/etc/wireguard/mx-domestic.conf',
       unit: 'wg-quick@mx-domestic'
     },
-    homePeer: {
-      role: input.peerRole,
-      leaseIp: input.leaseIp,
-      cidr: relayPeerCidr(input.peerRole),
-      allowedIps: allowedIp ? [allowedIp] : [],
-      publicKey: input.publicKey,
-      publicKeyStatus: input.publicKey ? 'ready-to-append' : 'pending-public-key'
-    },
+    homePeer: domesticRelayPeerHomePeer(input),
     handoff: {
       commandExecuted: result.execution === 'executed',
       remoteMutation: true,
@@ -3089,19 +3119,94 @@ function domesticRelayPeerAppendSshSkippedEvidence(
   };
 }
 
-function domesticRelayPeerInput(body: Record<string, unknown>): {
+type DomesticRelayPeerInput = {
   peerRole: 'guest' | 'user';
   leaseIp: string | null;
   publicKey: string | null;
-} {
+  leaseId: string | null;
+  leaseResolved: boolean;
+  leaseError: string | null;
+  productId: string | null;
+  launcherMode: string | null;
+  identityKind: string | null;
+  leaseCidr: string | null;
+  serviceVip: string | null;
+  internalControlIp: string | null;
+  domesticGatewayIp: string | null;
+  publicKeySource: 'launcher-network-lease' | 'request-body' | 'missing';
+  leaseIpSource: 'launcher-network-lease' | 'request-body' | 'missing';
+  warnings: string[];
+};
+
+async function resolveDomesticRelayPeerInput(store: PlatformStore, body: Record<string, unknown>): Promise<DomesticRelayPeerInput> {
+  const leaseId = stringValue(body.leaseId) ?? stringValue(body.launcherNetworkLeaseId);
+  if (!leaseId || leaseId.includes('<')) return domesticRelayPeerInput(body);
+  const lease = await store.getLauncherNetworkLease(leaseId);
+  return domesticRelayPeerInput(body, lease, lease ? null : `Launcher Network lease not found: ${leaseId}`);
+}
+
+function domesticRelayPeerInput(
+  body: Record<string, unknown>,
+  lease: LauncherNetworkLease | null = null,
+  leaseError: string | null = null
+): DomesticRelayPeerInput {
+  const requestedLeaseId = stringValue(body.leaseId) ?? stringValue(body.launcherNetworkLeaseId);
+  const bodyLeaseIp = stringValue(body.leaseIp) ?? stringValue(body.ip);
+  const bodyPublicKey = stringValue(body.publicKey);
+  const leaseIp = lease?.leaseIp ?? bodyLeaseIp ?? null;
+  const publicKey = lease?.publicKey ?? bodyPublicKey ?? null;
   const rawRole = stringValue(body.peerRole) ?? stringValue(body.role);
-  const leaseIp = stringValue(body.leaseIp) ?? stringValue(body.ip);
-  const inferredRole = leaseIp?.startsWith('10.89.') ? 'user' : 'guest';
+  const inferredRole = lease?.identityKind === 'user'
+    ? 'user'
+    : lease?.identityKind === 'anonymous'
+      ? 'guest'
+      : relayLeaseIdentityKind(leaseIp) ?? 'guest';
   const peerRole = rawRole === 'user' || rawRole === 'guest' ? rawRole : inferredRole;
+  const warnings = [
+    ...(lease && bodyLeaseIp && bodyLeaseIp !== lease.leaseIp ? [`request leaseIp ${bodyLeaseIp} ignored; Internal lease ${lease.leaseId} owns ${lease.leaseIp}`] : []),
+    ...(lease?.publicKey && bodyPublicKey && bodyPublicKey !== lease.publicKey ? [`request publicKey ignored; Internal lease ${lease.leaseId} owns the peer public key`] : [])
+  ];
   return {
     peerRole,
     leaseIp,
-    publicKey: stringValue(body.publicKey)
+    publicKey,
+    leaseId: requestedLeaseId ?? lease?.leaseId ?? null,
+    leaseResolved: Boolean(lease),
+    leaseError,
+    productId: lease?.productId ?? stringValue(body.productId) ?? null,
+    launcherMode: lease?.launcherMode ?? stringValue(body.launcherMode) ?? stringValue(body.mode) ?? null,
+    identityKind: lease?.identityKind ?? null,
+    leaseCidr: lease?.cidr ?? (leaseIp && validRelayLeaseIp(leaseIp) ? relayPeerCidr(peerRole, leaseIp) : null),
+    serviceVip: lease?.serviceVip ?? null,
+    internalControlIp: lease?.internalControlIp ?? null,
+    domesticGatewayIp: lease?.domesticGatewayIp ?? null,
+    publicKeySource: lease?.publicKey ? 'launcher-network-lease' : bodyPublicKey ? 'request-body' : 'missing',
+    leaseIpSource: lease?.leaseIp ? 'launcher-network-lease' : bodyLeaseIp ? 'request-body' : 'missing',
+    warnings
+  };
+}
+
+function domesticRelayPeerHomePeer(input: DomesticRelayPeerInput, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  const allowedIp = input.leaseIp ? `${input.leaseIp}/32` : null;
+  return {
+    role: input.peerRole,
+    leaseId: input.leaseId,
+    leaseResolved: input.leaseResolved,
+    productId: input.productId,
+    launcherMode: input.launcherMode,
+    identityKind: input.identityKind,
+    leaseIp: input.leaseIp,
+    cidr: input.leaseCidr ?? relayPeerCidr(input.peerRole, input.leaseIp),
+    serviceVip: input.serviceVip,
+    internalControlIp: input.internalControlIp,
+    domesticGatewayIp: input.domesticGatewayIp,
+    allowedIps: allowedIp ? [allowedIp] : [],
+    publicKey: input.publicKey,
+    publicKeyStatus: input.publicKey ? 'ready-to-append' : 'pending-public-key',
+    publicKeySource: input.publicKeySource,
+    leaseIpSource: input.leaseIpSource,
+    warnings: input.warnings,
+    ...extra
   };
 }
 
@@ -3109,9 +3214,10 @@ function domesticRelayPeerPlanFailures(
   job: SiteSlotWorkerJob,
   plan: SiteSlotPlan | null,
   body: Record<string, unknown>,
-  input = domesticRelayPeerInput(body)
+  input: DomesticRelayPeerInput = domesticRelayPeerInput(body)
 ): string[] {
   const failures: string[] = [];
+  if (input.leaseError) failures.push(input.leaseError);
   if (job.status !== 'ready') failures.push(`worker job is not ready: ${job.status}`);
   if (job.currentReportId) failures.push(`worker job already has report: ${job.currentReportId}`);
   if (job.kind !== 'domestic') failures.push(`Domestic relay peer plan requires a domestic worker job, got ${job.kind}`);
@@ -3128,11 +3234,11 @@ function domesticRelayPeerPlanFailures(
   if (!input.leaseIp) {
     failures.push('Home relay leaseIp is required before Domestic peer append can be planned');
   } else if (!validRelayLeaseIp(input.leaseIp)) {
-    failures.push('Home relay leaseIp must be in 10.89.0.0/16 or 10.91.0.0/16');
-  } else if (input.peerRole === 'user' && !input.leaseIp.startsWith('10.89.')) {
-    failures.push('user relay peer must use 10.89.0.0/16');
-  } else if (input.peerRole === 'guest' && !input.leaseIp.startsWith('10.91.')) {
-    failures.push('guest relay peer must use 10.91.0.0/16');
+    failures.push('Home relay leaseIp must be in a product relay CIDR, with 10.88.0.0/16 reserved for relay fabric');
+  } else if (input.peerRole === 'user' && relayLeaseIdentityKind(input.leaseIp) !== 'user') {
+    failures.push('user relay peer must use the product login range (third octet 0-99)');
+  } else if (input.peerRole === 'guest' && relayLeaseIdentityKind(input.leaseIp) !== 'guest') {
+    failures.push('guest relay peer must use the product anonymous range (third octet 100-254)');
   }
   return failures;
 }
@@ -3146,18 +3252,33 @@ function validRelayLeaseIp(value: string): boolean {
   if (parts.length !== 4 || parts.some((part) => !/^\d+$/.test(part))) return false;
   const octets = parts.map((part) => Number(part));
   if (octets.some((octet) => octet < 0 || octet > 255)) return false;
-  return octets[0] === 10 && (octets[1] === 89 || octets[1] === 91);
+  return octets[0] === 10
+    && octets[1] >= 89
+    && octets[1] <= 254
+    && octets[2] <= 254
+    && octets[3] >= 1
+    && octets[3] <= 254;
 }
 
-function relayPeerCidr(role: 'guest' | 'user'): string {
-  return role === 'user' ? '10.89.0.0/16' : '10.91.0.0/16';
+function relayLeaseIdentityKind(value: string | null | undefined): 'guest' | 'user' | null {
+  if (!value || !validRelayLeaseIp(value)) return null;
+  const thirdOctet = Number(value.split('.')[2]);
+  return thirdOctet >= 100 ? 'guest' : 'user';
+}
+
+function relayPeerCidr(role: 'guest' | 'user', leaseIp?: string | null): string {
+  if (leaseIp && validRelayLeaseIp(leaseIp)) {
+    const [, secondOctet] = leaseIp.split('.');
+    return `10.${secondOctet}.0.0/16`;
+  }
+  return role === 'user' ? '10.89.0.0/16' : '10.90.0.0/16';
 }
 
 function domesticRelayPeerAppendFailures(
   job: SiteSlotWorkerJob,
   plan: SiteSlotPlan | null,
   body: Record<string, unknown>,
-  input = domesticRelayPeerInput(body)
+  input: DomesticRelayPeerInput = domesticRelayPeerInput(body)
 ): string[] {
   return [
     ...domesticRelayPeerInputFailures(job, plan, input, 'Domestic relay peer append'),
@@ -3176,10 +3297,11 @@ function domesticRelayPeerAppendFailures(
 function domesticRelayPeerInputFailures(
   job: SiteSlotWorkerJob,
   plan: SiteSlotPlan | null,
-  input: ReturnType<typeof domesticRelayPeerInput>,
+  input: DomesticRelayPeerInput,
   label: string
 ): string[] {
   const failures: string[] = [];
+  if (input.leaseError) failures.push(input.leaseError);
   if (job.status !== 'ready') failures.push(`worker job is not ready: ${job.status}`);
   if (job.currentReportId) failures.push(`worker job already has report: ${job.currentReportId}`);
   if (job.kind !== 'domestic') failures.push(`${label} requires a domestic worker job, got ${job.kind}`);
@@ -3194,11 +3316,11 @@ function domesticRelayPeerInputFailures(
   if (!input.leaseIp) {
     failures.push('Home relay leaseIp is required before Domestic peer append can be planned');
   } else if (!validRelayLeaseIp(input.leaseIp)) {
-    failures.push('Home relay leaseIp must be in 10.89.0.0/16 or 10.91.0.0/16');
-  } else if (input.peerRole === 'user' && !input.leaseIp.startsWith('10.89.')) {
-    failures.push('user relay peer must use 10.89.0.0/16');
-  } else if (input.peerRole === 'guest' && !input.leaseIp.startsWith('10.91.')) {
-    failures.push('guest relay peer must use 10.91.0.0/16');
+    failures.push('Home relay leaseIp must be in a product relay CIDR, with 10.88.0.0/16 reserved for relay fabric');
+  } else if (input.peerRole === 'user' && relayLeaseIdentityKind(input.leaseIp) !== 'user') {
+    failures.push('user relay peer must use the product login range (third octet 0-99)');
+  } else if (input.peerRole === 'guest' && relayLeaseIdentityKind(input.leaseIp) !== 'guest') {
+    failures.push('guest relay peer must use the product anonymous range (third octet 100-254)');
   }
   return failures;
 }
@@ -3239,14 +3361,14 @@ function domesticRelayReadOnlyProbeScript(): string {
     'if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi',
     'if command -v wg >/dev/null 2>&1; then wg show mx-domestic; else echo "wg: missing"; fi',
     'ip -4 address show dev mx-domestic 2>/dev/null || true',
-    'ip route get 10.90.0.10 2>/dev/null || true',
+    'ip route get 10.88.88.88 2>/dev/null || true',
     'systemctl status wg-quick@mx-domestic --no-pager 2>/dev/null || true'
   ].join('; ');
 }
 
 function domesticRelayPeerAppendCommand(
   plan: SiteSlotPlan | null,
-  input: ReturnType<typeof domesticRelayPeerInput>
+  input: DomesticRelayPeerInput
 ): string {
   const sshUser = plan?.ssh.user ?? 'root';
   const sshPort = plan?.ssh.port ?? 22;
@@ -3254,7 +3376,7 @@ function domesticRelayPeerAppendCommand(
   return `ssh -p ${sshPort} ${shellQuote(`${sshUser}@${host}`)} ${shellQuote(domesticRelayPeerAppendScript(input))}`;
 }
 
-function domesticRelayPeerAppendScript(input: ReturnType<typeof domesticRelayPeerInput>): string {
+function domesticRelayPeerAppendScript(input: DomesticRelayPeerInput): string {
   const publicKey = input.publicKey ?? '<home-wg-public-key>';
   const allowedIp = input.leaseIp ? `${input.leaseIp}/32` : '<home-lease-ip>/32';
   return [
@@ -3679,7 +3801,8 @@ function buildPipelineActionHints(
   runnerSessions: SiteSlotRunnerSession[],
   workerJobs: SiteSlotWorkerJob[],
   workerReports: SiteSlotWorkerReport[],
-  rollbackExecutions: SiteSlotRollbackExecution[]
+  rollbackExecutions: SiteSlotRollbackExecution[],
+  domesticWgSecret: SiteSlotDomesticWireGuardSecret | null
 ): AdminActionDescriptor[] {
   const actions: AdminActionDescriptor[] = [];
   const readyPreflight = sortByCreatedAt(executions).find((execution) => execution.action === 'preflight' && execution.status === 'ready');
@@ -3705,6 +3828,13 @@ function buildPipelineActionHints(
     : null;
   const domesticBaseInstalled = plan.kind === 'domestic' && workerReports.some((report) => report.status === 'passed' && workerReportHasRemoteExecution(report));
   const domesticRelayPeerJob = readyWorkerJob ? isDomesticRelayPeerWorkerJob(readyWorkerJob) : false;
+  const needsDomesticWgMaterialize = plan.kind === 'domestic' && domesticWireGuardMaterializeNeeded(plan, domesticWgSecret);
+  const domesticWorkerRunReady = !(plan.kind === 'domestic' && needsDomesticWgMaterialize);
+  const domesticWorkerRunBlockedReason = 'Materialize Domestic WG before running Domestic worker job gates';
+
+  if (needsDomesticWgMaterialize) {
+    actions.push(domesticWgMaterializeAction(actionPolicy, plan, 'WG secret/materialized artifacts must exist before Domestic preflight and remote SSH'));
+  }
 
   if (!readyPreflight) {
     actions.push(contextualAction(
@@ -3741,35 +3871,6 @@ function buildPipelineActionHints(
     ));
   }
 
-  if (plan.kind === 'domestic' && confirmedApply) {
-    actions.push(contextualAction(
-      actionPolicy,
-      'site-slot.domestic-wg.materialize',
-      {
-        path: `/internal/v1/config-center/domestic-wg-secrets/${encodeURIComponent(plan.siteId)}/materialize-ready`,
-        bodyTemplate: {
-          siteId: plan.siteId,
-          planId: plan.planId,
-          publicEndpoint: endpointFromPlanHost(plan, 51820),
-          listenPort: 51820,
-          domesticGatewayIp: '10.88.0.1',
-          domesticGatewayCidr: '10.88.0.0/16',
-          userRelayCidr: '10.89.0.0/16',
-          internalServiceIp: '10.90.0.10',
-          internalServiceCidr: '10.90.0.0/16',
-          guestRelayCidr: '10.91.0.0/16',
-          rotateRelayKey: false,
-          rotateInternalServiceKey: false,
-          confirmRotate: false,
-          requestedBy: actionPolicy.principal.principalId,
-          requestId: 'admin-ui-domestic-wg-materialize'
-        }
-      },
-      Boolean(plan.host),
-      'set Domestic host before materializing or rotating Internal WG relay artifacts'
-    ));
-  }
-
   if (latestReadyExecution) {
     const hasRunnerForExecution = runnerSessions.some((session) => session.runId === latestReadyExecution.runId);
     if (!hasRunnerForExecution) {
@@ -3788,9 +3889,11 @@ function buildPipelineActionHints(
             requestId: 'admin-ui-runner-remote'
           }
         },
-        remoteRunnerReadinessFailures.length === 0,
+        remoteRunnerReadinessFailures.length === 0 && !needsDomesticWgMaterialize,
         remoteRunnerReadinessFailures.length
           ? remoteRunnerReadinessFailures.join('; ')
+          : needsDomesticWgMaterialize
+            ? domesticWorkerRunBlockedReason
           : 'execution must be ready before remote runner session starts'
       ));
       if (plan.kind !== 'domestic') {
@@ -3833,10 +3936,12 @@ function buildPipelineActionHints(
           requestId: 'admin-ui-domestic-relay-peer-append-ssh-prepare'
         }
       },
-      remoteRunnerReadinessFailures.length === 0,
-      remoteRunnerReadinessFailures.length
-        ? remoteRunnerReadinessFailures.join('; ')
-        : 'confirmed Domestic apply execution is required before preparing relay peer append SSH job'
+        remoteRunnerReadinessFailures.length === 0 && !needsDomesticWgMaterialize,
+        remoteRunnerReadinessFailures.length
+          ? remoteRunnerReadinessFailures.join('; ')
+          : needsDomesticWgMaterialize
+            ? domesticWorkerRunBlockedReason
+          : 'confirmed Domestic apply execution is required before preparing relay peer append SSH job'
     ));
   }
 
@@ -3867,9 +3972,11 @@ function buildPipelineActionHints(
             requestId: repairWorkerJob ? 'admin-ui-worker-job-recreate-change-window' : 'admin-ui-worker-job'
           }
         },
-        true,
+        targetSession.kind === 'domestic' ? domesticWorkerRunReady : true,
         repairWorkerJob
           ? 'existing remote SSH worker job is missing a change window; recreate it before gate review'
+          : targetSession.kind === 'domestic' && !domesticWorkerRunReady
+            ? domesticWorkerRunBlockedReason
           : 'runner session must be ready for worker attachment'
       ));
     }
@@ -3887,8 +3994,8 @@ function buildPipelineActionHints(
           requestId: 'admin-ui-worker-run-remote-ssh-gate'
         }
       },
-      true,
-      'worker job must be ready before remote SSH gate review'
+      domesticWorkerRunReady,
+      domesticWorkerRunReady ? 'worker job must be ready before remote SSH gate review' : domesticWorkerRunBlockedReason
     ));
     actions.push(contextualAction(
       actionPolicy,
@@ -3902,8 +4009,8 @@ function buildPipelineActionHints(
           requestId: 'admin-ui-worker-run-remote-ssh-readonly-probe'
         }
       },
-      true,
-      'worker job must pass remote SSH gate before read-only probe'
+      domesticWorkerRunReady,
+      domesticWorkerRunReady ? 'worker job must pass remote SSH gate before read-only probe' : domesticWorkerRunBlockedReason
     ));
     actions.push(contextualAction(
       actionPolicy,
@@ -3919,8 +4026,8 @@ function buildPipelineActionHints(
           requestId: 'admin-ui-worker-run-remote-ssh-plan'
         }
       },
-      true,
-      'worker job must be ready before remote SSH plan report'
+      domesticWorkerRunReady,
+      domesticWorkerRunReady ? 'worker job must be ready before remote SSH plan report' : domesticWorkerRunBlockedReason
     ));
     actions.push(contextualAction(
       actionPolicy,
@@ -3930,13 +4037,14 @@ function buildPipelineActionHints(
         bodyTemplate: {
           confirmRemoteExecution: true,
           confirmWorkerHandoff: true,
+          executeWorkerHandoff: true,
           internalBaseUrl: '<internal-base-url>',
           requestedBy: actionPolicy.principal.principalId,
           requestId: 'admin-ui-worker-run-remote-ssh-execute'
         }
       },
-      true,
-      'worker job must be ready before remote SSH worker handoff'
+      domesticWorkerRunReady,
+      domesticWorkerRunReady ? 'worker job must be ready before remote SSH worker execution' : domesticWorkerRunBlockedReason
     ));
     actions.push(contextualAction(
       actionPolicy,
@@ -3950,8 +4058,8 @@ function buildPipelineActionHints(
           requestId: 'admin-ui-worker-run-artifact-push-dry-run'
         }
       },
-      true,
-      'worker job must be ready before artifact-push dry-run'
+      domesticWorkerRunReady,
+      domesticWorkerRunReady ? 'worker job must be ready before artifact-push dry-run' : domesticWorkerRunBlockedReason
     ));
     if (readyWorkerJob.kind === 'domestic' && domesticRelayPeerJob) {
       actions.push(contextualAction(
@@ -3965,8 +4073,8 @@ function buildPipelineActionHints(
             requestId: 'admin-ui-worker-run-domestic-relay-readonly-probe'
           }
         },
-        true,
-        'Domestic worker job must be ready before relay read-only probe'
+        domesticWorkerRunReady,
+        domesticWorkerRunReady ? 'Domestic worker job must be ready before relay read-only probe' : domesticWorkerRunBlockedReason
       ));
       actions.push(contextualAction(
         actionPolicy,
@@ -3975,6 +4083,7 @@ function buildPipelineActionHints(
           path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/run-domestic-relay-peer-plan`,
           bodyTemplate: {
             confirmRelayPeerPlan: true,
+            leaseId: '<launcher-network-lease-id>',
             peerRole: 'guest',
             leaseIp: '<home-lease-ip>',
             publicKey: '<home-wg-public-key>',
@@ -3984,8 +4093,8 @@ function buildPipelineActionHints(
             requestId: 'admin-ui-worker-run-domestic-relay-peer-plan'
           }
         },
-        true,
-        'Domestic worker job must be ready before relay peer plan evidence'
+        domesticWorkerRunReady,
+        domesticWorkerRunReady ? 'Domestic worker job must be ready before relay peer plan evidence' : domesticWorkerRunBlockedReason
       ));
       actions.push(contextualAction(
         actionPolicy,
@@ -3996,6 +4105,7 @@ function buildPipelineActionHints(
             confirmRelayPeerAppend: true,
             confirmRelayReadOnlyProbeReviewed: true,
             confirmRelayPeerPlanReviewed: true,
+            leaseId: '<launcher-network-lease-id>',
             peerRole: 'guest',
             leaseIp: '<home-lease-ip>',
             publicKey: '<home-wg-public-key>',
@@ -4003,8 +4113,8 @@ function buildPipelineActionHints(
             requestId: 'admin-ui-worker-run-domestic-relay-peer-append'
           }
         },
-        true,
-        'Domestic relay read-only probe and peer plan should be reviewed before peer append handoff'
+        domesticWorkerRunReady,
+        domesticWorkerRunReady ? 'Domestic relay read-only probe and peer plan should be reviewed before peer append handoff' : domesticWorkerRunBlockedReason
       ));
       actions.push(contextualAction(
         actionPolicy,
@@ -4017,6 +4127,7 @@ function buildPipelineActionHints(
             confirmRelayPeerAppend: true,
             confirmRelayReadOnlyProbeReviewed: true,
             confirmRelayPeerPlanReviewed: true,
+            leaseId: '<launcher-network-lease-id>',
             peerRole: 'guest',
             leaseIp: '<home-lease-ip>',
             publicKey: '<home-wg-public-key>',
@@ -4026,8 +4137,8 @@ function buildPipelineActionHints(
             requestId: 'admin-ui-worker-run-domestic-relay-peer-append-ssh'
           }
         },
-        true,
-        'Domestic relay peer append SSH requires remote SSH gates and explicit operator confirmation'
+        domesticWorkerRunReady,
+        domesticWorkerRunReady ? 'Domestic relay peer append SSH requires remote SSH gates and explicit operator confirmation' : domesticWorkerRunBlockedReason
       ));
     }
     actions.push(contextualAction(
@@ -4044,8 +4155,8 @@ function buildPipelineActionHints(
           requestId: 'admin-ui-worker-run-artifact-push-fake-transport'
         }
       },
-      true,
-      'worker job must be ready before fake transport report'
+      domesticWorkerRunReady,
+      domesticWorkerRunReady ? 'worker job must be ready before fake transport report' : domesticWorkerRunBlockedReason
     ));
     actions.push(contextualAction(
       actionPolicy,
@@ -4059,8 +4170,8 @@ function buildPipelineActionHints(
           requestId: 'admin-ui-worker-run-simulate'
         }
       },
-      true,
-      'worker job must be ready before simulated worker run'
+      domesticWorkerRunReady,
+      domesticWorkerRunReady ? 'worker job must be ready before simulated worker run' : domesticWorkerRunBlockedReason
     ));
   }
 
@@ -4083,6 +4194,56 @@ function buildPipelineActionHints(
   }
 
   return actions.slice(0, 20);
+}
+
+function domesticWireGuardMaterializeNeeded(
+  plan: SiteSlotPlan,
+  secret: SiteSlotDomesticWireGuardSecret | null
+): boolean {
+  if (plan.kind !== 'domestic') return false;
+  const expectedEndpoint = endpointFromPlanHost(plan, secret?.listenPort ?? 51820);
+  return !secret
+    || secret.status !== 'active'
+    || secret.readiness.secretMaterial !== 'injected'
+    || secret.readiness.publicEndpointStatus !== 'ready'
+    || secret.readiness.missingSecretInputs.length > 0
+    || !secret.domesticRelayPublicKey
+    || !secret.internalServicePublicKey
+    || Boolean(expectedEndpoint && secret.publicEndpoint !== expectedEndpoint);
+}
+
+function domesticWgMaterializeAction(
+  actionPolicy: AdminActionPolicy,
+  plan: SiteSlotPlan,
+  blockedReason: string
+): AdminActionDescriptor {
+  return contextualAction(
+    actionPolicy,
+    'site-slot.domestic-wg.materialize',
+    {
+      path: `/internal/v1/config-center/domestic-wg-secrets/${encodeURIComponent(plan.siteId)}/materialize-ready`,
+      bodyTemplate: {
+        siteId: plan.siteId,
+        planId: plan.planId,
+        publicEndpoint: endpointFromPlanHost(plan, 51820),
+        listenPort: 51820,
+        domesticGatewayIp: '10.88.0.1',
+        domesticGatewayCidr: '10.88.0.0/16',
+        productRelayCidrs: ['10.89.0.0/16', '10.90.0.0/16'],
+        userRelayCidr: '10.89.0.0/16',
+        internalServiceIp: '10.88.88.88',
+        internalServiceCidr: '10.88.0.0/16',
+        guestRelayCidr: '10.90.0.0/16',
+        rotateRelayKey: false,
+        rotateInternalServiceKey: false,
+        confirmRotate: false,
+        requestedBy: actionPolicy.principal.principalId,
+        requestId: 'admin-ui-domestic-wg-materialize'
+      }
+    },
+    Boolean(plan.host),
+    blockedReason
+  );
 }
 
 function isDomesticRelayPeerWorkerJob(job: SiteSlotWorkerJob): boolean {
@@ -4728,10 +4889,11 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         listenPort: 51820,
         domesticGatewayIp: '10.88.0.1',
         domesticGatewayCidr: '10.88.0.0/16',
+        productRelayCidrs: ['10.89.0.0/16', '10.90.0.0/16'],
         userRelayCidr: '10.89.0.0/16',
-        internalServiceIp: '10.90.0.10',
-        internalServiceCidr: '10.90.0.0/16',
-        guestRelayCidr: '10.91.0.0/16',
+        internalServiceIp: '10.88.88.88',
+        internalServiceCidr: '10.88.0.0/16',
+        guestRelayCidr: '10.90.0.0/16',
         rotateRelayKey: false,
         rotateInternalServiceKey: false,
         confirmRotate: false,
@@ -4970,7 +5132,7 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
     },
     {
       actionId: 'site-slot.worker-run.remote-ssh-execute',
-      label: 'Remote SSH Worker Handoff',
+      label: 'Remote SSH Worker Execute',
       category: 'site-slot',
       method: 'POST',
       path: '/internal/v1/site-slots/worker-jobs/:jobId/run-artifact-push-remote-ssh',
@@ -4981,6 +5143,7 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
       bodyTemplate: {
         confirmRemoteExecution: true,
         confirmWorkerHandoff: true,
+        executeWorkerHandoff: true,
         internalBaseUrl: '<internal-base-url>',
         requestedBy: 'admin-ui'
       }
@@ -5047,6 +5210,7 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
       confirmFields: ['confirmRelayPeerPlan'],
       bodyTemplate: {
         confirmRelayPeerPlan: true,
+        leaseId: '<launcher-network-lease-id>',
         peerRole: 'guest',
         leaseIp: '<home-lease-ip>',
         publicKey: '<home-wg-public-key>',
@@ -5084,6 +5248,7 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         confirmRelayPeerAppend: true,
         confirmRelayReadOnlyProbeReviewed: true,
         confirmRelayPeerPlanReviewed: true,
+        leaseId: '<launcher-network-lease-id>',
         peerRole: 'guest',
         leaseIp: '<home-lease-ip>',
         publicKey: '<home-wg-public-key>',
@@ -5106,6 +5271,7 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         confirmRelayPeerAppend: true,
         confirmRelayReadOnlyProbeReviewed: true,
         confirmRelayPeerPlanReviewed: true,
+        leaseId: '<launcher-network-lease-id>',
         peerRole: 'guest',
         leaseIp: '<home-lease-ip>',
         publicKey: '<home-wg-public-key>',
@@ -5253,6 +5419,25 @@ function sortByStartedAt<T extends { startedAt: string }>(items: T[]): T[] {
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.filter((value) => value.trim().length > 0))].slice(0, 12);
+}
+
+function cidrListValue(value: unknown): string[] | null {
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(',')
+      : [];
+  const cidrs = values
+    .map((item) => typeof item === 'string' ? item.trim() : '')
+    .filter((item) => item.length > 0);
+  return cidrs.length ? uniqueStrings(cidrs) : null;
+}
+
+function domesticSecretProductRelayCidrs(secret: SiteSlotDomesticWireGuardSecret): string[] {
+  const cidrs = secret.productRelayCidrs?.length
+    ? secret.productRelayCidrs
+    : [secret.userRelayCidr, secret.internalServiceCidr, secret.guestRelayCidr];
+  return uniqueStrings(cidrs.filter((cidr) => Boolean(cidr)));
 }
 
 function numberValue(value: unknown, fallback: number): number {
