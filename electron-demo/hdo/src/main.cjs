@@ -40,6 +40,7 @@ const UPDATE_RESTART_REQUIRED_META = 'updates.restartRequired';
 const FAST_RELAY_MODE = 'mesh-h2i';
 const CLIENT_SETTINGS_FILE = 'hdo-client-settings.json';
 const DEFAULT_SYSTEM_PAC_ENABLED = true;
+const HDO_DNS_PRIORITY_RECENT_MS = 15000;
 
 let mainWindow = null;
 let host = null;
@@ -47,6 +48,9 @@ let isClosing = false;
 let hdoEventUnsubscribe = null;
 let systemDomainProxy = null;
 let systemDomainProxyApplyInFlight = null;
+let hdoDnsPriorityEnsureInFlight = null;
+let hdoDnsPriorityHandledUntil = 0;
+let hdoDnsPriorityHandledReason = null;
 let systemPacEnabled = DEFAULT_SYSTEM_PAC_ENABLED;
 const childWindows = new Set();
 
@@ -318,6 +322,36 @@ async function hdoCall(method, ...args) {
   return fn(...args);
 }
 
+function objectValue(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+function hdoConnectHandledDnsPriority(result) {
+  if (process.platform !== 'win32') return false;
+  const row = objectValue(result);
+  const connected = objectValue(row?.connected);
+  if (!connected || connected.ok === false || connected.action === 'down') return false;
+  const status = objectValue(row?.wireGuardStatus);
+  return status?.active === true || connected.ok === true;
+}
+
+function rememberHdoDnsPriorityHandled(reason) {
+  if (process.platform !== 'win32') return;
+  hdoDnsPriorityHandledUntil = Date.now() + HDO_DNS_PRIORITY_RECENT_MS;
+  hdoDnsPriorityHandledReason = reason;
+}
+
+function recentHdoDnsPriorityResult(reason) {
+  if (process.platform !== 'win32' || Date.now() >= hdoDnsPriorityHandledUntil) return null;
+  return {
+    ok: true,
+    skipped: true,
+    reason: 'recent-wireguard-dns-priority',
+    sourceReason: hdoDnsPriorityHandledReason,
+    requestReason: reason
+  };
+}
+
 function systemDomainProxyStatus() {
   if (!systemDomainProxy) {
     return {
@@ -499,17 +533,27 @@ async function ensureHdoDnsPriority(reason = 'manual') {
       reason: process.platform !== 'win32' ? 'non-windows-platform' : 'app-closing'
     };
   }
-  try {
-    return await hdoCall('ensureWireGuardDnsPriority');
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    console.warn('[hdo] failed to ensure DNS priority:', { reason, error });
-    return {
-      ok: false,
-      reason,
-      error
-    };
-  }
+  const recent = recentHdoDnsPriorityResult(reason);
+  if (recent) return recent;
+  if (hdoDnsPriorityEnsureInFlight) return hdoDnsPriorityEnsureInFlight;
+  hdoDnsPriorityEnsureInFlight = (async () => {
+    try {
+      const result = await hdoCall('ensureWireGuardDnsPriority');
+      if (objectValue(result)?.ok !== false) rememberHdoDnsPriorityHandled(reason);
+      return result;
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      console.warn('[hdo] failed to ensure DNS priority:', { reason, error });
+      return {
+        ok: false,
+        reason,
+        error
+      };
+    }
+  })().finally(() => {
+    hdoDnsPriorityEnsureInFlight = null;
+  });
+  return hdoDnsPriorityEnsureInFlight;
 }
 
 async function safelyDisableSystemDomainProxy(reason = 'manual') {
@@ -790,6 +834,7 @@ if (gotSingleInstanceLock) {
           skipDnsRepair: systemPacEnabled === true
         });
         const autoConnect = !payload || typeof payload !== 'object' || payload.autoConnect !== false;
+        if (hdoConnectHandledDnsPriority(result)) rememberHdoDnsPriorityHandled('anonymous-connect');
         if (result && typeof result === 'object' && result.ok !== false && autoConnect) {
           return {
             ...result,
@@ -809,6 +854,7 @@ if (gotSingleInstanceLock) {
           autoConnect: true,
           skipDnsRepair: systemPacEnabled === true
         });
+        if (hdoConnectHandledDnsPriority(result)) rememberHdoDnsPriorityHandled('anonymous-switch');
         if (result && typeof result === 'object' && result.ok !== false) {
           return {
             ...result,
@@ -827,6 +873,7 @@ if (gotSingleInstanceLock) {
           skipDnsRepair: systemPacEnabled === true
         });
         const autoConnect = !payload || typeof payload !== 'object' || payload.autoConnect !== false;
+        if (hdoConnectHandledDnsPriority(result)) rememberHdoDnsPriorityHandled('account-connect');
         if (result && typeof result === 'object' && result.ok !== false && autoConnect) {
           return {
             ...result,
@@ -878,6 +925,7 @@ if (gotSingleInstanceLock) {
         const repaired = await hdoCall('repairWireGuardRoutes');
         let systemDomainProxyState = await verifiedSystemDomainProxyStatus();
         if (repaired && typeof repaired === 'object' && repaired.ok !== false) {
+          rememberHdoDnsPriorityHandled('manual-repair-dns');
           try {
             const ensured = await ensureSystemDomainProxyFromManifest('repair-dns');
             systemDomainProxyState = ensured.systemDomainProxy || systemDomainProxyState;
