@@ -1,4 +1,4 @@
-const { mkdirSync, writeFileSync } = require('node:fs');
+const { existsSync, mkdirSync, readFileSync, writeFileSync } = require('node:fs');
 const { join } = require('node:path');
 const { loadProjectEnv } = require('./src/env.cjs');
 
@@ -22,6 +22,35 @@ function appContentDir(context) {
   return join(resourcesDir, 'app');
 }
 
+function patchHdoWireGuardWindowsElevation(appDir) {
+  const corePath = join(
+    appDir,
+    'node_modules',
+    '@qpjoy',
+    'electron-plugin-hdo',
+    'dist',
+    'vendor',
+    'electron-core-wireguard',
+    'dist',
+    'index.js'
+  );
+  const visibleRunAs = '-Verb RunAs -Wait -PassThru';
+  const hiddenRunAs = '-Verb RunAs -WindowStyle Hidden -Wait -PassThru';
+
+  if (!existsSync(corePath)) {
+    throw new Error(`HDO WireGuard vendor core is missing: ${corePath}`);
+  }
+
+  const source = readFileSync(corePath, 'utf8');
+  if (source.includes(hiddenRunAs)) return false;
+  if (!source.includes(visibleRunAs)) {
+    throw new Error(`HDO WireGuard elevation command was not found in: ${corePath}`);
+  }
+
+  writeFileSync(corePath, source.replaceAll(visibleRunAs, hiddenRunAs));
+  return true;
+}
+
 module.exports = {
   appId: 'dev.qpjoy.hdo',
   productName: 'MX HDO',
@@ -42,6 +71,10 @@ module.exports = {
       join(dir, 'qpjoy-hdo.config.json'),
       JSON.stringify({ serverBaseUrl: packagedServerBaseUrl }, null, 2)
     );
+    if (context.electronPlatformName === 'win32') {
+      const patched = patchHdoWireGuardWindowsElevation(dir);
+      console.log(`[hdo] HDO WireGuard Windows elevation ${patched ? 'patched' : 'already hidden'}`);
+    }
   },
   mac: {
     target: ['zip', 'dmg'],

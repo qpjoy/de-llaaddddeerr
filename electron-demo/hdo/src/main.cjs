@@ -135,6 +135,9 @@ function missingHdoSeedRuntimeFiles(packageDir) {
     try {
       const core = fs.readFileSync(corePath, 'utf8');
       if (!core.includes('-Verb RunAs')) missing.push('dist/vendor/electron-core-wireguard/dist/index.js:<uac-script>');
+      if (core.includes('-Verb RunAs -Wait -PassThru')) {
+        missing.push('dist/vendor/electron-core-wireguard/dist/index.js:<visible-uac-window>');
+      }
     } catch {
       missing.push('dist/vendor/electron-core-wireguard/dist/index.js:<readable>');
     }
