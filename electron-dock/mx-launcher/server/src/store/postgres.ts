@@ -1136,7 +1136,7 @@ export class PostgresStore implements PlatformStore {
       siteId: enrollment?.siteId ?? undefined,
       userId: principalContext.principal.userId ?? enrollment?.userId ?? input.userId ?? null,
       publicKey: enrollment?.publicKey ?? null,
-      appId,
+      appId: enrollment?.productId ?? appId,
       requestId: input.requestId ?? undefined
     });
     const launcherRelease = await this.evaluateReleaseUpdate({
@@ -1359,6 +1359,7 @@ export class PostgresStore implements PlatformStore {
       requestId: input.requestId ?? null,
       metadata: {
         mode: product.mode,
+        standaloneChannelProductId: product.standaloneChannelProductId,
         serviceVip: product.serviceVip,
         userCidr: product.userCidr,
         anonymousCidr: product.anonymousCidr,
@@ -1383,7 +1384,7 @@ export class PostgresStore implements PlatformStore {
   async enrollLauncherNetworkLease(input: LauncherNetworkLeaseInput): Promise<LauncherNetworkLease> {
     const installId = input.installId?.trim() || `inst_${randomUUID()}`;
     const deviceId = input.deviceId?.trim() || `dev_${randomUUID()}`;
-    const productId = input.productId?.trim().toLowerCase() || 'h2o';
+    const productId = input.productId?.trim().toLowerCase() || 'launcher';
     const product = await this.getLauncherProductNetwork(productId)
       ?? buildLauncherProductNetwork(this.config, { productId, mode: input.mode ?? 'embed' }, null);
     const normalizedInput: LauncherNetworkLeaseInput = {
@@ -1760,12 +1761,16 @@ export class PostgresStore implements PlatformStore {
   }
 
   async createLauncherNetworkSnapshot(input: LauncherNetworkSnapshotInput): Promise<LauncherNetworkSnapshot> {
-    const appId = input.appId ?? 'h2o';
-    const launcherMode = input.launcherMode === 'standalone' ? 'standalone' : null;
+    const appId = input.appId ?? 'launcher';
+    const launcherMode = input.launcherMode === 'embed' || input.launcherMode === 'standalone'
+      ? input.launcherMode
+      : appId === 'launcher'
+        ? 'standalone'
+        : 'embed';
     const mode = input.userId ? 'user' : 'guest';
     const lease = await this.enrollLauncherNetworkLease({
       productId: appId,
-      mode: launcherMode ?? 'embed',
+      mode: launcherMode,
       identityKind: mode === 'user' ? 'user' : 'anonymous',
       installId: input.installId,
       deviceId: input.deviceId,
@@ -2148,7 +2153,7 @@ export class PostgresStore implements PlatformStore {
     checks.push('OK SDK Gateway denied missing scope');
     const smokeHomePublicKey = 'WvN2n3i6LXoJt1qX0lA2uP7cYy4rZs8mQb9dEfGhIjK=';
     const { enrollment } = await this.enrollAnonymous({
-      productId: 'h2o',
+      productId: 'launcher',
       platform: 'darwin',
       publicKey: smokeHomePublicKey,
       requestId: 'smoke-enroll'
@@ -2325,7 +2330,8 @@ export class PostgresStore implements PlatformStore {
       || !domesticDockerRuntime?.commands.some((command) => command.includes('docker') && command.includes('apt-get'))
       || !domesticPeerCenter?.commands.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))
       || !domesticPeerCenter?.commands.some((command) => command.includes('mx-domestic-relay.env'))
-      || !domesticPeerCenter?.commands.some((command) => command.includes('retiring legacy hdo-home/100.* WireGuard') && command.includes('wg-quick@hdo-home'))
+      || !domesticPeerCenter?.commands.some((command) => command.includes('preserving V1') && command.includes('cleanup-v1-wireguard --apply'))
+      || domesticPeerCenter?.commands.some((command) => command.includes('disable --now wg-quick@hdo-home') || command.includes('wg-quick down hdo-home') || command.includes('ip link delete hdo-home'))
       || !domesticPeerCenter?.commands.some((command) => command.includes('internal service peer private key must not be copied to Domestic'))
       || domesticPeerCenter?.commands.some((command) => command.includes('rsync') && command.includes('mx-internal-service-peer.conf'))
     ) {
@@ -2528,11 +2534,12 @@ export class PostgresStore implements PlatformStore {
       installId: enrollment.installId,
       deviceId: enrollment.deviceId,
       publicKey: enrollment.publicKey,
-      appId: 'h2o',
+      appId: 'launcher',
+      launcherMode: 'standalone',
       requestId: 'smoke-network'
     });
     if (
-      networkSnapshot.overlayPolicy.cidr !== '10.90.0.0/16'
+      networkSnapshot.overlayPolicy.cidr !== '10.89.0.0/16'
       || networkSnapshot.overlayPolicy.leaseIp !== enrollment.overlayIp
       || networkSnapshot.topology.relayPlan.homePeer.publicKey !== smokeHomePublicKey
       || networkSnapshot.topology.relayPlan.homePeer.publicKeyStatus !== 'ready-to-append'
@@ -2544,11 +2551,11 @@ export class PostgresStore implements PlatformStore {
       throw new Error('guest network snapshot did not model Domestic relay peer lease');
     }
     checks.push('OK guest network snapshot issued with Domestic relay lease');
-    const h2oLeases = await this.listLauncherNetworkLeases('h2o');
-    if (!h2oLeases.some((lease) => lease.leaseIp === networkSnapshot.overlayPolicy.leaseIp && lease.identityKind === 'anonymous')) {
-      throw new Error('launcher network lease allocator did not persist H2O anonymous lease');
+    const launcherLeases = await this.listLauncherNetworkLeases('launcher');
+    if (!launcherLeases.some((lease) => lease.leaseIp === networkSnapshot.overlayPolicy.leaseIp && lease.identityKind === 'anonymous')) {
+      throw new Error('launcher network lease allocator did not persist Launcher anonymous lease');
     }
-    checks.push('OK Launcher Network lease allocator persisted H2O anonymous lease');
+    checks.push('OK Launcher Network lease allocator persisted Launcher anonymous lease');
     const permissionGrant = await this.requestPermission({
       appId: 'h2o',
       installId: enrollment.installId,
@@ -2562,7 +2569,7 @@ export class PostgresStore implements PlatformStore {
     checks.push('OK h2o permission granted');
     const testRun = await this.createTestRun({
       suiteId: 'hdi-shadow-e2e',
-      productId: 'h2o',
+      productId: 'launcher',
       topology: 'h-d-i-shadow',
       sites: ['domestic-main', 'internal-main'],
       releaseId: 'rel_smoke',
@@ -2612,6 +2619,7 @@ export class PostgresStore implements PlatformStore {
       releaseId: 'rel_smoke_management',
       installId: enrollment.installId,
       channel: 'shadow',
+      productId: 'launcher',
       appId: 'h2o',
       e2eResult: 'passed',
       requestId: 'smoke-release-management'
@@ -2673,7 +2681,7 @@ export class PostgresStore implements PlatformStore {
       !configPolicySnapshot.signatures.digest
       || configPolicySnapshot.policies.dns.policy.policyId !== dnsPolicy.policyId
       || configPolicySnapshot.policies.permissionPolicy.declaredScopes.length === 0
-      || configPolicySnapshot.policies.launcherNetwork.overlayPolicy.cidr !== '10.90.0.0/16'
+      || configPolicySnapshot.policies.launcherNetwork.overlayPolicy.cidr !== '10.89.0.0/16'
     ) {
       throw new Error('config policy snapshot did not aggregate signed platform policy');
     }

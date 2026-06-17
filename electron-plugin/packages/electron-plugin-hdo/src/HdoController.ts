@@ -1371,7 +1371,7 @@ export class HdoController {
     const runtime = resolveWireGuardConnectionRuntime({
       installDir: join(this.ctx.userDataDir, 'bin'),
       bundledDir: this.ctx.bundledWireGuardDir,
-      allowSystemFallback: true
+      allowSystemFallback: false
     });
     if (input.skipIfActive === true && action === 'up') {
       const status = safeWireGuardStatus(runtime, configPath);
@@ -1756,7 +1756,7 @@ export class HdoController {
     const runtime = resolveWireGuardConnectionRuntime({
       installDir: join(this.ctx.userDataDir, 'bin'),
       bundledDir: this.ctx.bundledWireGuardDir,
-      allowSystemFallback: true
+      allowSystemFallback: false
     });
     const result = await repairWireGuardTunnelRoutes({ runtime, configPath });
     const payload = {
@@ -1793,7 +1793,7 @@ export class HdoController {
     const runtime = resolveWireGuardConnectionRuntime({
       installDir: join(this.ctx.userDataDir, 'bin'),
       bundledDir: this.ctx.bundledWireGuardDir,
-      allowSystemFallback: true
+      allowSystemFallback: false
     });
     const status = safeWireGuardStatus(runtime, configPath);
     if (status?.active !== true) {
@@ -1872,7 +1872,7 @@ export class HdoController {
     const runtime = resolveWireGuardConnectionRuntime({
       installDir: join(this.ctx.userDataDir, 'bin'),
       bundledDir: this.ctx.bundledWireGuardDir,
-      allowSystemFallback: true
+      allowSystemFallback: false
     });
     return {
       ...getDarwinWireGuardLaunchDaemonStatus({ runtime, configPath }),
@@ -1890,7 +1890,7 @@ export class HdoController {
     const runtime = resolveWireGuardConnectionRuntime({
       installDir: join(this.ctx.userDataDir, 'bin'),
       bundledDir: this.ctx.bundledWireGuardDir,
-      allowSystemFallback: true
+      allowSystemFallback: false
     });
     const result = await installDarwinWireGuardLaunchDaemon({ runtime, configPath });
     if (result.ok) {
@@ -1924,7 +1924,7 @@ export class HdoController {
     const runtime = resolveWireGuardConnectionRuntime({
       installDir: join(this.ctx.userDataDir, 'bin'),
       bundledDir: this.ctx.bundledWireGuardDir,
-      allowSystemFallback: true
+      allowSystemFallback: false
     });
     const daemonStatus = getDarwinWireGuardLaunchDaemonStatus({ runtime, configPath });
     const hadDaemon = hasWireGuardLaunchDaemon(daemonStatus);
@@ -1981,7 +1981,7 @@ export class HdoController {
     const runtime = resolveWireGuardConnectionRuntime({
       installDir: join(this.ctx.userDataDir, 'bin'),
       bundledDir: this.ctx.bundledWireGuardDir,
-      allowSystemFallback: true
+      allowSystemFallback: false
     });
     if (!runtime.available) {
       this.ctx.log.warn('skip HDO WireGuard shutdown because runtime is unavailable', {
@@ -2161,7 +2161,7 @@ export class HdoController {
     const runtime = resolveWireGuardConnectionRuntime({
       installDir: join(this.ctx.userDataDir, 'bin'),
       bundledDir: this.ctx.bundledWireGuardDir,
-      allowSystemFallback: true
+      allowSystemFallback: false
     });
     try {
       const status = getWireGuardTunnelStatus({ runtime, configPath });

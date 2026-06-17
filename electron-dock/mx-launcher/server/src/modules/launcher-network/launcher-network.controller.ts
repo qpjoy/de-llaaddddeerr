@@ -18,7 +18,7 @@ export class LauncherNetworkController {
         siteId: nullableString(body.siteId),
         userId: nullableString(body.userId),
         publicKey: nullableString(body.publicKey),
-        appId: nullableString(body.appId) ?? 'h2o',
+        appId: nullableString(body.appId) ?? 'launcher',
         launcherMode: launcherProductMode(nullableString(body.launcherMode)),
         requestId: nullableString(body.requestId) ?? undefined
       })
@@ -82,6 +82,7 @@ export class LauncherNetworkController {
         productId,
         displayName: nullableString(body.displayName),
         mode: nullableString(body.mode),
+        standaloneChannelProductId: nullableString(body.standaloneChannelProductId),
         productIndex: numberValue(body.productIndex),
         serviceVip: nullableString(body.serviceVip),
         userCidr: nullableString(body.userCidr),

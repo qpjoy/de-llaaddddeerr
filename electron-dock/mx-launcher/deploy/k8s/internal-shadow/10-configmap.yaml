@@ -24,6 +24,12 @@ data:
   SITE_SLOT_SSH_PASSWORD_BOOTSTRAP_ENABLED: "0"
   SITE_SLOT_SSH_READONLY_PROBE_EXECUTE: "0"
   SITE_SLOT_DOMESTIC_WG_SECRET_EXPORT_ENABLED: "1"
+  MX_INTERNAL_HOST_RUNNER_URL: http://host.docker.internal:19190
+  MX_INTERNAL_HOST_RUNNER_K8S_URL: http://mx-internal-host-runner.mx-internal-shadow.svc.cluster.local:19190
+  MX_INTERNAL_HOST_RUNNER_K8S_ENSURE_ENABLED: "1"
+  MX_INTERNAL_HOST_RUNNER_K8S_NAMESPACE: mx-internal-shadow
+  MX_INTERNAL_HOST_RUNNER_K8S_NAME: mx-internal-host-runner
+  MX_INTERNAL_HOST_RUNNER_IMAGE: qpjoy/mx-launcher-server:shadow
   MX_SITE_SLOT_SSH_KEY_DIR: /app/artifacts/ssh
   AWX_BASE_URL: http://mx-awx-service.mx-awx.svc.cluster.local
   AWX_ORGANIZATION: MX Internal

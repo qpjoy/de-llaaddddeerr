@@ -44,6 +44,9 @@ Usage:
   bash scripts/manage.sh ops site-slot domestic-wg-secret-upsert <site-id> <endpoint>
   bash scripts/manage.sh ops site-slot domestic-wg-materialize <site-id> <endpoint> [rotate]
   bash scripts/manage.sh ops site-slot materialize-domestic-ready <site-id>
+  bash scripts/manage.sh ops site-slot internal-service-peer-handoff [status|command|apply] [config-path]
+  bash scripts/manage.sh ops site-slot internal-service-peer-host-runner [port]
+  bash scripts/manage.sh ops site-slot cleanup-v1-wireguard [--apply] [hdo-home hdo-internal ...]
   bash scripts/manage.sh ops site-slot refresh-tunnel-cli [version|--from-local DIR|--from-tarball FILE]
   bash scripts/manage.sh ops site-slot ssh-profiles
   bash scripts/manage.sh ops site-slot ssh-profile-upsert <site-id> <domestic|oversea> [host]
@@ -309,6 +312,8 @@ k8s_render() {
   printf '\n---\n'
   cat "$dir"/25-coredns-rbac.yaml
   printf '\n---\n'
+  cat "$dir"/27-host-runner-rbac.yaml
+  printf '\n---\n'
   cat "$dir"/30-migration-job.yaml
   printf '\n---\n'
   cat "$dir"/40-internal-api.yaml
@@ -363,6 +368,8 @@ k8s_dry_run() {
   kubectl apply --dry-run=client --validate=false -f "$dir/20-postgres.yaml"
   say "dry-run coredns writer rbac"
   kubectl apply --dry-run=client --validate=false -f "$dir/25-coredns-rbac.yaml"
+  say "dry-run host runner rbac"
+  kubectl apply --dry-run=client --validate=false -f "$dir/27-host-runner-rbac.yaml"
   say "dry-run migration job"
   kubectl apply --dry-run=client --validate=false -f "$dir/30-migration-job.yaml"
   say "dry-run internal api service/deployment"
@@ -392,6 +399,8 @@ k8s_apply() {
   kubectl apply -f "$dir/20-postgres.yaml"
   say "apply coredns writer rbac"
   kubectl apply -f "$dir/25-coredns-rbac.yaml"
+  say "apply host runner rbac"
+  kubectl apply -f "$dir/27-host-runner-rbac.yaml"
   say "wait postgres rollout"
   kubectl -n "$ns" rollout status statefulset/mx-internal-postgres --timeout=180s
 
@@ -633,6 +642,8 @@ k8s_down() {
   kubectl -n "$ns" delete job mx-launcher-migrate --ignore-not-found
   say "delete coredns writer rbac"
   kubectl delete -f "$dir/25-coredns-rbac.yaml" --ignore-not-found
+  say "delete host runner rbac"
+  kubectl delete -f "$dir/27-host-runner-rbac.yaml" --ignore-not-found
   say "delete postgres workload and service; PVC is kept"
   kubectl delete -f "$dir/20-postgres.yaml" --ignore-not-found
   say "delete dns control target"
@@ -1396,6 +1407,124 @@ ops_admin() {
   esac
 }
 
+cleanup_v1_wireguard() {
+  local mode="dry-run"
+  if [ "${1:-}" = "--apply" ] || [ "${1:-}" = "apply" ]; then
+    mode="apply"
+    shift || true
+  fi
+
+  local interfaces=("$@")
+  if [ "${#interfaces[@]}" -eq 0 ]; then
+    # V1 defaults: old HDO home endpoint and old Internal direct-listener peer.
+    # Override with MX_LEGACY_WG_INTERFACES="hdo-home hdo-internal custom-iface".
+    # shellcheck disable=SC2206
+    interfaces=(${MX_LEGACY_WG_INTERFACES:-hdo-home hdo-internal})
+  fi
+
+  if [ "$mode" = "apply" ] && [ "$(id -u)" -ne 0 ]; then
+    say "Re-running with sudo to clean V1 WireGuard services: ${interfaces[*]}"
+    exec sudo -E bash "$0" ops site-slot cleanup-v1-wireguard --apply "${interfaces[@]}"
+  fi
+
+  say "V1 WireGuard cleanup mode: $mode"
+  say "interfaces: ${interfaces[*]}"
+  if [ "$mode" != "apply" ]; then
+    say "dry-run only. Add --apply to stop wg-quick@<iface>, bring the iface down, and move /etc/wireguard/<iface>.conf to /opt/mx/legacy-wireguard/."
+  fi
+
+  local iface service config backup_dir backup_path timestamp
+  timestamp="$(date +%Y%m%d%H%M%S)"
+  backup_dir="/opt/mx/legacy-wireguard"
+  for iface in "${interfaces[@]}"; do
+    [ -n "$iface" ] || continue
+    service="wg-quick@$iface"
+    config="/etc/wireguard/$iface.conf"
+    backup_path="$backup_dir/$iface.conf.$timestamp"
+    say "checking $iface"
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl is-active --quiet "$service" 2>/dev/null && say "$service active" || true
+      systemctl is-enabled --quiet "$service" 2>/dev/null && say "$service enabled" || true
+    fi
+    ip link show "$iface" >/dev/null 2>&1 && say "interface $iface exists" || true
+    [ -f "$config" ] && say "config exists: $config" || true
+
+    if [ "$mode" = "apply" ]; then
+      if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now "$service" >/dev/null 2>&1 || true
+      fi
+      if command -v wg-quick >/dev/null 2>&1; then
+        wg-quick down "$iface" >/dev/null 2>&1 || true
+      fi
+      ip link delete "$iface" >/dev/null 2>&1 || true
+      if [ -f "$config" ]; then
+        install -d -m 0755 "$backup_dir"
+        mv -f "$config" "$backup_path"
+        say "moved $config -> $backup_path"
+      fi
+    fi
+  done
+
+  if command -v wg >/dev/null 2>&1 && wg show 2>/dev/null | grep -q '100\.'; then
+    say "legacy 100.* WireGuard peers are still present:"
+    wg show 2>/dev/null || true
+  fi
+}
+
+internal_service_peer_handoff() {
+  local mode="${1:-status}"
+  if [ "$#" -gt 0 ]; then shift || true; fi
+
+  local artifact_root="${MX_INTERNAL_SERVICE_ARTIFACT_DIR:-$ROOT/server/artifacts/site-slots/domestic}"
+  local apply_script="${MX_INTERNAL_SERVICE_APPLY_SCRIPT:-$artifact_root/mx-internal-service-peer-apply.sh}"
+  local config_path="${1:-${MX_INTERNAL_SERVICE_CONFIG:-$artifact_root/mx-internal-service-peer.conf}}"
+  local iface="${MX_INTERNAL_SERVICE_WG_INTERFACE:-mx-internal-svc}"
+  local command_text="sudo env MX_INTERNAL_SERVICE_WG_INTERFACE=$iface bash '$apply_script' '$config_path'"
+
+  case "$mode" in
+    status|command|apply) ;;
+    *)
+      die "Usage: bash scripts/manage.sh ops site-slot internal-service-peer-handoff [status|command|apply] [config-path]"
+      ;;
+  esac
+
+  say "Internal service peer handoff mode: $mode"
+  say "interface: $iface"
+  say "config: $config_path"
+  say "apply script: $apply_script"
+
+  [ -f "$config_path" ] && say "config exists" || say "config missing"
+  [ -f "$apply_script" ] && say "apply script exists" || say "apply script missing"
+  command -v wg >/dev/null 2>&1 && say "wg: $(command -v wg)" || say "wg: missing on this host"
+  command -v wg-quick >/dev/null 2>&1 && say "wg-quick: $(command -v wg-quick)" || say "wg-quick: missing on this host"
+  if command -v qp-tunnel-cli >/dev/null 2>&1; then
+    say "qp-tunnel-cli: $(command -v qp-tunnel-cli)"
+    say "note: V2 Internal WG runtime resolves wg/wireguard-go through qp-tunnel-cli's @qpjoy/electron-core-wireguard package."
+  fi
+
+  if [ "$mode" = "command" ]; then
+    printf '%s\n' "$command_text"
+    return
+  fi
+
+  if [ "$mode" != "apply" ]; then
+    say "dry-run only. Run 'bash scripts/manage.sh ops site-slot internal-service-peer-handoff command' to print the apply command."
+    say "run apply only on the Internal runtime host that should own 10.88.88.88."
+    return
+  fi
+
+  [ -f "$config_path" ] || die "Internal service peer config not found: $config_path"
+  [ -f "$apply_script" ] || die "Internal service peer apply script not found: $apply_script"
+  command -v wg-quick >/dev/null 2>&1 || die "wg-quick is required to apply V2 Internal service peer config on this host"
+
+  if [ "$(id -u)" -ne 0 ]; then
+    say "Re-running with sudo to apply $iface on this Internal runtime host"
+    exec sudo -E env MX_INTERNAL_SERVICE_WG_INTERFACE="$iface" bash "$apply_script" "$config_path"
+  fi
+
+  env MX_INTERNAL_SERVICE_WG_INTERFACE="$iface" bash "$apply_script" "$config_path"
+}
+
 ops_site_slot() {
   local action="$1"
   shift || true
@@ -1513,6 +1642,16 @@ ops_site_slot() {
           process.exit(1);
         });
       ' "$base" "$1"
+      ;;
+    internal-service-peer-handoff)
+      internal_service_peer_handoff "$@"
+      ;;
+    internal-service-peer-host-runner|internal-host-runner)
+      [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops site-slot internal-service-peer-host-runner [port]"
+      MX_INTERNAL_HOST_RUNNER_HOST="${MX_INTERNAL_HOST_RUNNER_HOST:-0.0.0.0}" node server/scripts/internal-service-peer-host-runner.mjs "${1:-19190}"
+      ;;
+    cleanup-v1-wireguard)
+      cleanup_v1_wireguard "$@"
       ;;
     refresh-tunnel-cli)
       node server/scripts/site-slot-refresh-tunnel-cli.mjs "$@"
@@ -2337,7 +2476,7 @@ ops_site_slot() {
       ' "$base" "$1" "${2:-passed}"
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all] | domestic-wg-materialize <site-id> <endpoint> [rotate] | refresh-tunnel-cli [version|--from-local DIR|--from-tarball FILE] | ssh-profiles | ssh-profile-upsert <site-id> <domestic|oversea> [host] | ssh-profile-readiness <profile-id> [plan-only|execute] | oversea-readonly-test <site-id> <host> | oversea-remote-test <site-id> <host> [pipeline|dry-run|plan-only|readonly|execute] | domestic-plan <domestic-host|-> [oversea-host] | oversea-plan <oversea-host|-> | preflight <plan-id> [dry-run|manual|ssh] | apply <plan-id> [manual|dry-run|ssh] | executions [plan-id] | runner-start <run-id> [simulate|remote-ssh|awx-shadow] | runner-sessions [run-id] | worker-job <session-id> | worker-gate <job-id> [confirm] | worker-handoff <job-id> [confirm] | domestic-relay-append-ssh-prepare <apply-run-id> [confirm] | worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|awx-shadow|awx-credential-sync|awx-object-sync|awx-launch|local-exec] | worker-report <job-id> [running|passed|failed|blocked] | rollback-start <report-id> [simulate|manual] | rollback-report <rollback-execution-id> [running|passed|failed|blocked]"
+      die "Usage: bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all] | domestic-wg-materialize <site-id> <endpoint> [rotate] | materialize-domestic-ready <site-id> | internal-service-peer-handoff [status|command|apply] [config-path] | internal-service-peer-host-runner [port] | cleanup-v1-wireguard [--apply] [iface...] | refresh-tunnel-cli [version|--from-local DIR|--from-tarball FILE] | ssh-profiles | ssh-profile-upsert <site-id> <domestic|oversea> [host] | ssh-profile-readiness <profile-id> [plan-only|execute] | oversea-readonly-test <site-id> <host> | oversea-remote-test <site-id> <host> [pipeline|dry-run|plan-only|readonly|execute] | domestic-plan <domestic-host|-> [oversea-host] | oversea-plan <oversea-host|-> | preflight <plan-id> [dry-run|manual|ssh] | apply <plan-id> [manual|dry-run|ssh] | executions [plan-id] | runner-start <run-id> [simulate|remote-ssh|awx-shadow] | runner-sessions [run-id] | worker-job <session-id> | worker-gate <job-id> [confirm] | worker-handoff <job-id> [confirm] | domestic-relay-append-ssh-prepare <apply-run-id> [confirm] | worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|awx-shadow|awx-credential-sync|awx-object-sync|awx-launch|local-exec] | worker-report <job-id> [running|passed|failed|blocked] | rollback-start <report-id> [simulate|manual] | rollback-report <rollback-execution-id> [running|passed|failed|blocked]"
       ;;
   esac
 }

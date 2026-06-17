@@ -36,4 +36,7 @@ bash scripts/manage.sh ops awx-shadow password
 bash scripts/manage.sh ops awx-shadow status
 bash scripts/manage.sh ops awx-shadow password
 bash scripts/manage.sh ops awx-shadow port-forward 18080
+
+# 清理V1.0
+bash scripts/manage.sh ops site-slot cleanup-v1-wireguard --apply
 ```

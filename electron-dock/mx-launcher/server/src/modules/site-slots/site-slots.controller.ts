@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Header, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Header, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -110,6 +110,8 @@ export class SiteSlotsController {
   @Post('internal/v1/site-slots/plans')
   async createPlan(@Body() rawBody: unknown) {
     const input = await this.withDomesticBootstrapAccess(toSiteSlotPlanInput(asRecord(rawBody)));
+    const hostFailure = await this.domesticPlanHostValidationFailure(input);
+    if (hostFailure) throw new BadRequestException(hostFailure);
     const plan = await this.store.createSiteSlotPlan(input);
     await this.materializeDomesticBootstrapSubscription(plan);
     return { plan };
@@ -416,14 +418,41 @@ export class SiteSlotsController {
     };
   }
 
+  private async domesticPlanHostValidationFailure(input: SiteSlotPlanInput): Promise<string | null> {
+    const kind = input.kind === 'oversea' ? 'oversea' : 'domestic';
+    if (kind !== 'domestic') return null;
+    if (input.host?.trim()) return siteSlotPlanHostValidationFailure(kind, input.host);
+    const profileId = input.sshProfileId?.trim();
+    if (!profileId) return siteSlotPlanHostValidationFailure(kind, null);
+    const profile = await this.store.getSiteSlotSshProfile(profileId);
+    if (!profile) return null;
+    return siteSlotPlanHostValidationFailure(kind, profile.host);
+  }
+
   private async materializeDomesticBootstrapSubscription(plan: SiteSlotPlan): Promise<void> {
     if (plan.kind !== 'domestic' || plan.network.mode !== 'oversea-assisted' || !plan.network.overseaSiteId) return;
     const accounts = await this.store.listSiteSlotAccessAccounts(plan.network.overseaSiteId);
-    const account = domesticBootstrapAccount(accounts);
+    await this.writeBootstrapSubscriptionArtifact(
+      plan.network.overseaSiteId,
+      domesticBootstrapAccount(accounts),
+      'domestic/mx-domestic-bootstrap-subscription.yaml'
+    );
+    await this.writeBootstrapSubscriptionArtifact(
+      plan.network.overseaSiteId,
+      internalBootstrapAccount(accounts),
+      'domestic/mx-internal-egress-subscription.yaml'
+    );
+  }
+
+  private async writeBootstrapSubscriptionArtifact(
+    siteId: string,
+    account: SiteSlotAccessAccount | null,
+    artifactPath: string
+  ): Promise<void> {
     if (!account) return;
-    const subscription = await this.store.renderHysteria2MihomoSubscription(plan.network.overseaSiteId, account.username);
+    const subscription = await this.store.renderHysteria2MihomoSubscription(siteId, account.username);
     if (!subscription) return;
-    const filePath = resolve(resolveSiteSlotArtifactBaseDir(), 'domestic/mx-domestic-bootstrap-subscription.yaml');
+    const filePath = resolve(resolveSiteSlotArtifactBaseDir(), artifactPath);
     mkdirSync(dirname(filePath), { recursive: true });
     writeFileSync(filePath, subscription.yaml);
     chmodSync(filePath, 0o600);
@@ -445,6 +474,12 @@ function siteSlotPlanAccessAccountMaterial(accounts: SiteSlotAccessAccount[]): S
 function domesticBootstrapAccount(accounts: SiteSlotAccessAccount[]): SiteSlotAccessAccount | null {
   return accounts.find((account) => account.role === 'domestic')
     ?? accounts.find((account) => account.username.endsWith('-domestic'))
+    ?? null;
+}
+
+function internalBootstrapAccount(accounts: SiteSlotAccessAccount[]): SiteSlotAccessAccount | null {
+  return accounts.find((account) => account.role === 'internal')
+    ?? accounts.find((account) => account.username.endsWith('-internal'))
     ?? null;
 }
 
@@ -485,6 +520,41 @@ function toSiteSlotPlanInput(body: Record<string, unknown>): SiteSlotPlanInput {
     requestId: nullableString(body.requestId),
     createdBy: nullableString(body.createdBy)
   };
+}
+
+function siteSlotPlanHostValidationFailure(kind: SiteSlotPlanInput['kind'], host: string | null | undefined): string | null {
+  if (kind !== 'domestic') return null;
+  const normalized = normalizedPlanHost(host);
+  if (!normalized) return 'Domestic plan requires a real public host or IP before WG materialization';
+  if (isPlaceholderDomesticPlanHost(normalized)) {
+    return `Domestic plan host "${host}" is a placeholder; use the real Domestic public IP or DNS name`;
+  }
+  return null;
+}
+
+function normalizedPlanHost(host: string | null | undefined): string | null {
+  const value = host?.trim();
+  if (!value) return null;
+  const withoutScheme = value.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
+  const authority = withoutScheme.split('/')[0] ?? withoutScheme;
+  const withoutUserInfo = authority.includes('@') ? authority.split('@').pop() ?? authority : authority;
+  if (withoutUserInfo.startsWith('[')) return withoutUserInfo.slice(1, withoutUserInfo.indexOf(']')).toLowerCase();
+  return withoutUserInfo.replace(/:\d+$/, '').toLowerCase();
+}
+
+function isPlaceholderDomesticPlanHost(host: string): boolean {
+  return (host.startsWith('<') && host.endsWith('>'))
+    || host === 'host'
+    || host === 'localhost'
+    || host === '0.0.0.0'
+    || host === '::1'
+    || host.startsWith('127.')
+    || host.endsWith('.localhost')
+    || host.endsWith('.invalid')
+    || host.endsWith('.test')
+    || host.endsWith('.example.com')
+    || host.endsWith('.example.net')
+    || host.endsWith('.example.org');
 }
 
 function toSiteSlotExecutionInput(body: Record<string, unknown>): SiteSlotExecutionInput {

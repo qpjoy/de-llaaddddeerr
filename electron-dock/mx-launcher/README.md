@@ -69,6 +69,9 @@ platform. New Launcher solution design and implementation should happen here.
 - `docs/13-platform-ops-and-admin-design-system-roadmap.md` - K8s operations
   platform, AWX execution plane, Ubuntu/CentOS support contract, and Admin
   design system roadmap.
+- `docs/14-mx-h2i-standalone-launcher-architecture.md` - MX-H2I standalone
+  Launcher, AppCenter/H2O embed boundary, Mesh/IP allocation, deployment, local
+  dev, npm release, and desktop packaging design.
 
 ## Local Checks
 

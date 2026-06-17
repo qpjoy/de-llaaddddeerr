@@ -15,7 +15,7 @@ const state = {};
 const shadowHomePublicKey = 'WvN2n3i6LXoJt1qX0lA2uP7cYy4rZs8mQb9dEfGhIjK=';
 const smokeHomePeerLeaseIp = '10.90.100.20';
 const smokeDomesticSiteId = 'domestic-smoke';
-const smokeDomesticHost = 'domestic-smoke.example.com';
+const smokeDomesticHost = process.env.MX_SMOKE_DOMESTIC_HOST || 'domestic-smoke.localdomain';
 const mxLauncherRoot = resolve(scriptDir, '../..');
 const remoteReadyFixture = remoteReadyOnly ? prepareRemoteReadySshFixture() : null;
 
@@ -60,7 +60,7 @@ const checks = [
     path: '/internal/v1/enrollments/anonymous',
     method: 'POST',
     body: {
-      productId: 'h2o',
+      productId: 'launcher',
       platform: 'darwin',
       publicKey: shadowHomePublicKey,
       requestId: 'http-smoke-enroll'
@@ -71,7 +71,7 @@ const checks = [
       const topology = body?.snapshot?.config?.launcherNetwork;
       return typeof state.installId === 'string'
         && typeof state.homeOverlayIp === 'string'
-        && isRelayLeaseIp(state.homeOverlayIp, '10.90.100')
+        && isRelayLeaseIp(state.homeOverlayIp, '10.89.100')
         && body?.snapshot?.config?.defaultMode === 'visitor'
         && body?.enrollment?.publicKey === shadowHomePublicKey
         && topology?.model === 'internal-authority-domestic-relay-oversea-access-v1'
@@ -82,7 +82,7 @@ const checks = [
         && topology?.homePath?.bootstrap === 'home-to-domestic-public-enroll-proxy'
         && topology?.homePath?.subscriptionFetch === 'home-through-domestic-h2i-to-internal-mihomo'
         && topology?.homePath?.overseaTraffic === 'home-direct-to-oversea-hysteria2'
-        && topology?.homeLease?.cidr === '10.90.0.0/16'
+        && topology?.homeLease?.cidr === '10.89.0.0/16'
         && topology?.domestic?.publicIpRequired === true
         && topology?.domestic?.publicServices?.includes('wg-relay')
         && topology?.domestic?.gatewayIp === '10.88.0.1'
@@ -104,7 +104,7 @@ const checks = [
         && topology?.relayPlan?.homePeer?.publicKey === shadowHomePublicKey
         && topology?.relayPlan?.homePeer?.publicKeyStatus === 'ready-to-append'
         && topology?.relayPlan?.homePeer?.allowedIps?.includes(`${state.homeOverlayIp}/32`)
-        && topology?.relayPlan?.routes?.internalCidrs?.includes('10.90.0.0/16')
+        && topology?.relayPlan?.routes?.internalCidrs?.includes('10.89.0.0/16')
         && topology?.relayPlan?.routes?.subscriptionReachability === 'domestic-wg-relay+h2i-proxy'
         && topology?.relayPlan?.gates?.domesticConfigMustNotContainInternalPrivateKey === true
         && topology?.relayPlan?.gates?.homePublicKeyRequiredForRealPeer === true
@@ -185,7 +185,7 @@ const checks = [
     assert: (body) => body?.snapshot?.signatures?.algorithm === 'sha256-dev-digest'
       && typeof body?.snapshot?.signatures?.digest === 'string'
       && body?.snapshot?.policies?.dns?.policy?.policyId === 'dns_default_internal_split'
-      && body?.snapshot?.policies?.launcherNetwork?.overlayPolicy?.cidr === '10.90.0.0/16'
+      && body?.snapshot?.policies?.launcherNetwork?.overlayPolicy?.cidr === '10.89.0.0/16'
       && body?.snapshot?.policies?.launcherNetwork?.topology?.model === 'internal-authority-domestic-relay-oversea-access-v1'
       && body?.snapshot?.policies?.launcherNetwork?.topology?.domestic?.gatewayIp === '10.88.0.1'
       && body?.snapshot?.policies?.launcherNetwork?.topology?.domestic?.storesAuthority === false
@@ -508,6 +508,7 @@ const checks = [
       releaseId: 'rel_http_smoke',
       installId: state.installId,
       channel: 'shadow',
+      productId: 'launcher',
       appId: 'h2o',
       e2eResult: 'passed',
       createdBy: 'http-smoke',
@@ -742,7 +743,8 @@ const checks = [
         && installDockerRuntime?.commands?.some((command) => command.includes('docker') && command.includes('apt-get'))
         && activatePeerCenter?.commands?.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))
         && activatePeerCenter?.commands?.some((command) => command.includes('mx-domestic-relay.env') && command.includes('/opt/mx/current/domestic/mx-domestic-relay.env'))
-        && activatePeerCenter?.commands?.some((command) => command.includes('retiring legacy hdo-home/100.* WireGuard') && command.includes('wg-quick@hdo-home'))
+        && activatePeerCenter?.commands?.some((command) => command.includes('preserving V1') && command.includes('cleanup-v1-wireguard --apply'))
+        && !activatePeerCenter?.commands?.some((command) => command.includes('disable --now wg-quick@hdo-home') || command.includes('wg-quick down hdo-home') || command.includes('ip link delete hdo-home'))
         && activatePeerCenter?.commands?.some((command) => command.includes('internal service peer private key must not be copied to Domestic'))
         && syncInternalConfig?.commands?.some((command) => command.includes('10.88.88.88:18090/healthz'))
         && !syncInternalConfig?.commands?.some((command) => command.includes('127.0.0.1:18090/healthz'))
@@ -1226,31 +1228,14 @@ const checks = [
   {
     name: 'domestic relay actions hint',
     path: () => `/internal/v1/admin/site-slots/pipelines/${encodeURIComponent(state.domesticSlotPlanId)}?token=${encodeURIComponent(state.adminToken)}`,
-    assert: (body) => workerActionHintMatches(
-      body,
-      'site-slot.worker-run.domestic-relay-readonly-probe',
-      state.domesticRelayPeerWorkerJobId,
-      '/domestic-relay-readonly-probe',
-      ['confirmRelayReadOnlyProbe']
-    ) && workerActionHintMatches(
-      body,
-      'site-slot.worker-run.domestic-relay-peer-plan',
-      state.domesticRelayPeerWorkerJobId,
-      '/run-domestic-relay-peer-plan',
-      ['confirmRelayPeerPlan']
-    ) && workerActionHintMatches(
-      body,
-      'site-slot.worker-run.domestic-relay-peer-append',
-      state.domesticRelayPeerWorkerJobId,
-      '/domestic-relay-peer-append',
-      ['confirmRelayPeerAppend', 'confirmRelayReadOnlyProbeReviewed', 'confirmRelayPeerPlanReviewed']
-    ) && workerActionHintMatches(
-      body,
-      'site-slot.worker-run.domestic-relay-peer-append-ssh',
-      state.domesticRelayPeerWorkerJobId,
-      '/run-domestic-relay-peer-append-ssh',
-      ['confirmRemoteExecution', 'confirmRelayPeerAppendSsh', 'confirmRelayPeerAppend', 'confirmRelayReadOnlyProbeReviewed', 'confirmRelayPeerPlanReviewed']
-    ) && !body?.pipeline?.summary?.actionHints?.some((action) => typeof action?.actionId === 'string' && action.actionId.includes('awx'))
+    assert: (body) => !body?.pipeline?.summary?.actionHints?.some((action) => [
+        'site-slot.domestic-relay-peer-append-ssh.prepare',
+        'site-slot.domestic-relay-peer-append-awx.prepare',
+        'site-slot.worker-run.domestic-relay-peer-plan',
+        'site-slot.worker-run.domestic-relay-peer-append',
+        'site-slot.worker-run.domestic-relay-peer-append-ssh'
+      ].includes(action?.actionId))
+      && !body?.pipeline?.summary?.actionHints?.some((action) => typeof action?.actionId === 'string' && action.actionId.includes('awx'))
   },
   {
     name: 'domestic relay readonly probe handoff',
@@ -1275,10 +1260,19 @@ const checks = [
       && body?.relayReadOnlyProbe?.domesticRelay?.gatewayIp === '10.88.0.1'
       && body?.relayReadOnlyProbe?.command?.startsWith('ssh ')
       && body?.relayReadOnlyProbe?.command?.includes('wg show mx-domestic')
-      && body?.relayReadOnlyProbe?.command?.includes('ip route get 10.88.88.88')
+      && body?.relayReadOnlyProbe?.command?.includes('wg show mx-domestic latest-handshakes')
+      && body?.relayReadOnlyProbe?.command?.includes('Internal service peer has no latest handshake')
+      && body?.relayReadOnlyProbe?.command?.includes('ip route get "$internal_ip"')
+      && body?.relayReadOnlyProbe?.command?.includes('http://${internal_ip}:18090/healthz')
       && body?.relayReadOnlyProbe?.command?.includes('systemctl status wg-quick@mx-domestic')
       && body?.relayReadOnlyProbe?.command?.includes('mx-internal-service-peer.conf')
       && !body?.relayReadOnlyProbe?.command?.includes('wg set')
+      && body?.relayReadOnlyProbe?.h2iGate?.internalServiceIp === '10.88.88.88'
+      && body?.relayReadOnlyProbe?.h2iGate?.internalServicePublicKey === 'configured'
+      && body?.relayReadOnlyProbe?.h2iGate?.requiresLatestHandshake === true
+      && body?.relayReadOnlyProbe?.h2iGate?.requiresInternalHealthz === true
+      && body?.relayReadOnlyProbe?.readOnlyProbe?.checks?.includes('wg show mx-domestic latest-handshakes')
+      && body?.relayReadOnlyProbe?.readOnlyProbe?.checks?.includes('curl/wget http://10.88.88.88:18090/healthz')
       && body?.relayReadOnlyProbe?.gates?.remoteMutationAllowed === false
       && body?.relayReadOnlyProbe?.gates?.internalPrivateKeyMustNotExistOnDomestic === true
       && !body.report
@@ -1738,6 +1732,7 @@ const checks = [
         && pipeline?.summary?.planId === state.domesticSlotPlanId
         && pipeline?.summary?.health === 'passed'
         && Array.isArray(pipeline?.summary?.actionHints)
+        && !pipeline.summary.actionHints.some((action) => action?.actionId === 'site-slot.internal-service-peer.handoff')
         && execution?.steps?.some((step) => step.stepId && step.command && step.target)
         && runner?.stepResults?.some((step) => step.stepId && step.command && step.status)
         && adminWorkerReport?.stepReports?.some((step) => step.stepId === state.domesticSlotAdminWorkerStepId
@@ -1848,6 +1843,39 @@ const checks = [
       && body.coreDnsSync?.applied === false
       && body.sdkGateway?.authAuthority === 'user-center'
       && body.dnsDecision?.route === 'internal-dns'
+  },
+  {
+    name: 'domestic blocked plan with stale wg secret',
+    path: '/internal/v1/site-slots/plans',
+    method: 'POST',
+    body: () => ({
+      kind: 'domestic',
+      siteId: smokeDomesticSiteId,
+      host: smokeDomesticHost,
+      sshUser: 'deploy',
+      rootAccess: false,
+      hasDocker: false,
+      hasOutboundInternet: false,
+      requestId: 'http-smoke-domestic-blocked-plan-no-internal-handoff'
+    }),
+    assert: (body) => {
+      state.domesticBlockedPlanId = body?.plan?.planId;
+      return typeof state.domesticBlockedPlanId === 'string'
+        && body?.plan?.kind === 'domestic'
+        && body?.plan?.status === 'blocked';
+    }
+  },
+  {
+    name: 'domestic blocked plan does not suggest internal service peer',
+    path: () => `/internal/v1/admin/site-slots/pipelines/${encodeURIComponent(state.domesticBlockedPlanId)}?token=${encodeURIComponent(state.adminToken)}`,
+    assert: (body) => {
+      const hints = Array.isArray(body?.pipeline?.summary?.actionHints) ? body.pipeline.summary.actionHints : [];
+      return body?.pipeline?.summary?.planId === state.domesticBlockedPlanId
+        && !hints.some((action) => action?.actionId === 'site-slot.internal-service-peer.handoff')
+        && hints.some((action) => action?.actionId === 'site-slot.preflight.create'
+          && action?.allowed === false
+          && String(action?.reason || '').includes('plan status is blocked'));
+    }
   }
 ];
 

@@ -30,7 +30,9 @@ const defaultRelayEnrollmentDeviceId = `desktop-admin-${Date.now().toString(36)}
 
 const state = {
   activeView: 'app-center',
+  activeAppNode: 'appcenter',
   sidebarCollapsed: false,
+  inspectorCollapsed: false,
   adminSubnavCollapsed: false,
   hoverAdminMenu: null,
   adminMenu: 'operations',
@@ -43,6 +45,17 @@ const state = {
   currentActions: [],
   selectedAction: null,
   selectedActionBody: null,
+  internalPeer: {
+    busy: false,
+    materializeBusy: false,
+    statusBusy: false,
+    applyBusy: false,
+    hostRunnerEnsureBusy: false,
+    feedback: null,
+    result: null,
+    runtimeStatus: null,
+    applyResult: null
+  },
   awxActionDraft: {
     providerId: '',
     token: '',
@@ -51,6 +64,8 @@ const state = {
   },
   preferredActionFocus: null,
   domesticPeerDraft: {
+    productId: 'launcher',
+    productSecondOctet: '89',
     leaseId: '',
     peerRole: 'guest',
     leaseIp: '',
@@ -108,8 +123,9 @@ const state = {
     feedback: null,
     busy: false,
     draft: {
-      productId: 'h2o',
-      mode: 'embed',
+      productId: 'launcher',
+      productSecondOctet: '89',
+      mode: 'standalone',
       identityKind: 'anonymous',
       siteId: 'domestic-main',
       installId: defaultRelayEnrollmentDeviceId,
@@ -317,6 +333,9 @@ const foundationGrid = document.getElementById('foundation-grid');
 const evidenceHeading = document.getElementById('evidence-heading');
 const evidenceSubtitle = document.getElementById('evidence-subtitle');
 const evidenceHistory = document.getElementById('evidence-history');
+const adminConsole = document.getElementById('admin-console');
+const adminInspector = document.getElementById('admin-inspector');
+const inspectorToggle = document.getElementById('inspector-toggle');
 const inspectorKind = document.getElementById('inspector-kind');
 const inspectorTitle = document.getElementById('inspector-title');
 const inspectorMeta = document.getElementById('inspector-meta');
@@ -409,7 +428,7 @@ void boot();
 for (const tab of tabs) {
   tab.addEventListener('click', () => {
     state.hoverAdminMenu = null;
-    setActiveView(tab.dataset.view, adminNavFromElement(tab));
+    setActiveView(tab.dataset.view, adminNavFromElement(tab), { appNode: tab.dataset.appNode });
   });
   tab.addEventListener('mouseenter', () => {
     previewCollapsedAdminSubnav(tab);
@@ -450,6 +469,14 @@ sidebarCollapse.addEventListener('click', () => {
   requestAnimationFrame(() => resizeTopology());
 });
 
+if (inspectorToggle) {
+  inspectorToggle.addEventListener('click', () => {
+    state.inspectorCollapsed = !state.inspectorCollapsed;
+    renderInspectorChrome();
+    requestAnimationFrame(() => resizeTopology());
+  });
+}
+
 sidebar.addEventListener('mouseleave', () => {
   if (!state.sidebarCollapsed) return;
   state.hoverAdminMenu = null;
@@ -465,19 +492,39 @@ if (adminSubnavToggle) {
 }
 
 for (const tab of adminModuleTabs) {
-  tab.addEventListener('click', () => {
-    applyAdminNavigation(adminNavFromElement(tab), { stopSetupMessage: 'Stopped because the operator changed sections.' });
-    renderAdminShell();
-    if (state.dashboard && state.adminSection === 'deployment') {
-      const active = activePipelineForCurrentDeployment(state.dashboard.siteSlotPipelines || []);
-      state.selectedPlanId = active?.planId || null;
-      state.selectedSiteId = active?.siteId || state.selectedSiteId;
-      renderAdminDashboard(state.dashboard);
-      if (state.selectedPlanId) void refreshPipelineDetail(state.selectedPlanId);
-    } else if (state.dashboard) {
-      renderAdminDashboard(state.dashboard);
-    }
+  tab.addEventListener('click', (event) => {
+    event.stopPropagation();
+    handleAdminModuleNavigation(tab);
   });
+}
+
+if (adminSubnavItems) {
+  adminSubnavItems.addEventListener('click', (event) => {
+    const tab = event.target.closest?.('.admin-module-tab');
+    if (!tab) return;
+    handleAdminModuleNavigation(tab);
+  });
+}
+
+document.addEventListener('click', (event) => {
+  const tab = event.target.closest?.('.admin-module-tab');
+  if (!tab) return;
+  event.stopPropagation();
+  handleAdminModuleNavigation(tab);
+}, true);
+
+function handleAdminModuleNavigation(tab) {
+  applyAdminNavigation(adminNavFromElement(tab), { stopSetupMessage: 'Stopped because the operator changed sections.' });
+  renderAdminShell();
+  if (state.dashboard && state.adminSection === 'deployment') {
+    const active = activePipelineForCurrentDeployment(state.dashboard.siteSlotPipelines || []);
+    state.selectedPlanId = active?.planId || null;
+    state.selectedSiteId = active?.siteId || state.selectedSiteId;
+    renderAdminDashboard(state.dashboard);
+    if (state.selectedPlanId) void refreshPipelineDetail(state.selectedPlanId);
+  } else if (state.dashboard) {
+    renderAdminDashboard(state.dashboard);
+  }
 }
 
 sshProfileForm.addEventListener('submit', (event) => {
@@ -585,7 +632,7 @@ function previewCollapsedAdminSubnav(tab) {
   renderAdminSubnav();
 }
 
-function setActiveView(view, nav = {}) {
+function setActiveView(view, nav = {}, options = {}) {
   if (view !== 'admin' && state.setupRun.active) {
     clearSetupRun('Stopped because the operator left I-HDO.', 'stopped');
   }
@@ -593,6 +640,9 @@ function setActiveView(view, nav = {}) {
     applyAdminNavigation(nav);
   }
   state.activeView = view === 'admin' ? 'admin' : 'app-center';
+  if (state.activeView === 'app-center') {
+    state.activeAppNode = options.appNode || state.activeAppNode || 'appcenter';
+  }
   if (state.activeView !== 'admin') {
     state.hoverAdminMenu = null;
     sidebar.classList.remove('is-subnav-open');
@@ -601,7 +651,7 @@ function setActiveView(view, nav = {}) {
   }
   for (const tab of tabs) {
     const active = state.activeView === 'app-center'
-      ? tab.dataset.view === 'app-center'
+      ? tab.dataset.view === 'app-center' && (tab.dataset.appNode || 'appcenter') === state.activeAppNode
       : tab.dataset.view === 'admin' && (tab.dataset.adminMenu || 'operations') === state.adminMenu;
     tab.classList.toggle('is-active', active);
   }
@@ -629,7 +679,7 @@ function applyAdminNavigation(nav = {}, options = {}) {
   state.adminSection = nav.section || meta.defaultSection;
   state.adminSubsection = nav.subsection || meta.defaultSubsection;
   if (nav.deploymentKind) {
-    state.deploymentKind = nav.deploymentKind === 'domestic' ? 'domestic' : 'oversea';
+    state.deploymentKind = ['domestic', 'oversea', 'internal'].includes(nav.deploymentKind) ? nav.deploymentKind : 'oversea';
   }
   const changedDeployment = previousKind !== state.deploymentKind;
   const changedSection = previousSection !== state.adminSection;
@@ -799,7 +849,9 @@ async function refreshPipelineDetail(planId) {
     const payload = await fetchJson(`/internal/v1/admin/site-slots/pipelines/${encodeURIComponent(planId)}`);
     const pipeline = payload.pipeline;
     state.selectedSiteId = pipeline?.summary?.siteId || state.selectedSiteId;
-    state.deploymentKind = pipeline?.summary?.kind === 'domestic' ? 'domestic' : pipeline?.summary?.kind === 'oversea' ? 'oversea' : state.deploymentKind;
+    if (state.deploymentKind !== 'internal') {
+      state.deploymentKind = pipeline?.summary?.kind === 'domestic' ? 'domestic' : pipeline?.summary?.kind === 'oversea' ? 'oversea' : state.deploymentKind;
+    }
     state.mihomoReachability = null;
     state.mihomoReachabilitySiteId = pipeline?.summary?.kind === 'oversea' ? pipeline.summary.siteId : null;
     state.mihomoReachabilityError = null;
@@ -1095,6 +1147,13 @@ async function createPlanFromSshProfile() {
     renderSshProfileFeedback();
     return;
   }
+  const planBody = sshProfilePlanPayload();
+  const hostFailure = domesticPlanHostValidationFailure(planBody.kind, planBody.host);
+  if (hostFailure) {
+    state.sshProfileFeedback = { kind: 'error', message: hostFailure };
+    renderSshProfileFeedback();
+    return;
+  }
   state.sshPlanBusy = true;
   state.sshProfileFeedback = { kind: 'info', message: 'Creating site slot plan' };
   renderSshProfileFeedback();
@@ -1102,7 +1161,7 @@ async function createPlanFromSshProfile() {
   try {
     const payload = await fetchJson('/internal/v1/site-slots/plans', {
       method: 'POST',
-      body: sshProfilePlanPayload()
+      body: planBody
     });
     const plan = payload.plan;
     state.selectedPlanId = plan?.planId || state.selectedPlanId;
@@ -1522,6 +1581,52 @@ function sshProfilePlanPayload() {
     createdBy: 'desktop-admin',
     requestId: `desktop-site-slot-plan-${Date.now()}`
   };
+}
+
+function domesticPlanHostValidationFailure(kind, host) {
+  if (kind !== 'domestic') return null;
+  const normalized = normalizedPlanHost(host);
+  if (!normalized) return 'Domestic plan needs the real public host or IP from SSH Access';
+  if (isPlaceholderDomesticPlanHost(normalized)) {
+    return `Domestic host "${host}" is a placeholder; enter the real public IP or DNS name`;
+  }
+  return null;
+}
+
+function normalizedPlanHost(host) {
+  const value = String(host || '').trim();
+  if (!value) return null;
+  const withoutScheme = value.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
+  const authority = withoutScheme.split('/')[0] || withoutScheme;
+  const withoutUserInfo = authority.includes('@') ? authority.split('@').pop() || authority : authority;
+  if (withoutUserInfo.startsWith('[')) return withoutUserInfo.slice(1, withoutUserInfo.indexOf(']')).toLowerCase();
+  return withoutUserInfo.replace(/:\d+$/, '').toLowerCase();
+}
+
+function isPlaceholderDomesticPlanHost(host) {
+  return (host.startsWith('<') && host.endsWith('>'))
+    || host === 'host'
+    || host === 'localhost'
+    || host === '0.0.0.0'
+    || host === '::1'
+    || host.startsWith('127.')
+    || host.endsWith('.localhost')
+    || host.endsWith('.invalid')
+    || host.endsWith('.test')
+    || host.endsWith('.example.com')
+    || host.endsWith('.example.net')
+    || host.endsWith('.example.org');
+}
+
+function domesticEndpointBlockedReason(endpoint) {
+  const value = String(endpoint || '').trim();
+  if (!value) return 'Domestic public endpoint is missing';
+  const host = normalizedPlanHost(value);
+  if (!host) return `Domestic public endpoint is invalid: ${value}`;
+  if (isPlaceholderDomesticPlanHost(host)) {
+    return `Domestic public endpoint is a placeholder: ${value}`;
+  }
+  return null;
 }
 
 function domesticBootstrapOverseaSite() {
@@ -2130,6 +2235,13 @@ async function enrollHomeRelayFromAdmin(root = foundationGrid) {
   renderFoundationGrid(state.dashboard?.overview || {});
   renderAppCenterProductNetwork();
   try {
+    const product = await ensureRelayProductNetwork(draft);
+    const productSecondOctet = productSecondOctetFromProduct(product)
+      || normalizeProductSecondOctet(draft.productSecondOctet, defaultProductSecondOctet(draft.productId, draft.mode));
+    state.relayEnrollment.draft = {
+      ...draft,
+      productSecondOctet
+    };
     const payload = await fetchJson('/internal/v1/launcher-network/enrollments', {
       method: 'POST',
       body: {
@@ -2155,14 +2267,16 @@ async function enrollHomeRelayFromAdmin(root = foundationGrid) {
     };
     if (lease?.leaseId) {
       upsertLocalLauncherLease(lease);
-      state.domesticPeerDraft = {
-        leaseId: lease.leaseId,
-        peerRole: 'guest',
-        leaseIp: lease.leaseIp || '',
-        publicKey: lease.publicKey || draft.publicKey
-      };
-      const role = launcherLeaseRole(lease);
-      state.domesticPeerDraft.peerRole = role;
+      if (launcherLeaseIsRuntimeClient(lease)) {
+        state.domesticPeerDraft = {
+          productId: lease.productId || draft.productId,
+          productSecondOctet: productSecondOctetFromIp(lease.leaseIp) || productSecondOctet,
+          leaseId: lease.leaseId,
+          peerRole: launcherLeaseRole(lease),
+          leaseIp: lease.leaseIp || '',
+          publicKey: lease.publicKey || draft.publicKey
+        };
+      }
     }
   } catch (error) {
     state.relayEnrollment.feedback = { kind: 'error', message: error.message };
@@ -2689,13 +2803,14 @@ function setConnection(stateName, label, description) {
 function renderPrimaryNav() {
   for (const tab of tabs) {
     const active = state.activeView === 'app-center'
-      ? tab.dataset.view === 'app-center'
+      ? tab.dataset.view === 'app-center' && (tab.dataset.appNode || 'appcenter') === state.activeAppNode
       : tab.dataset.view === 'admin' && (tab.dataset.adminMenu || 'operations') === state.adminMenu;
     tab.classList.toggle('is-active', active);
   }
 }
 
 function renderAdminShell() {
+  renderInspectorChrome();
   renderPrimaryNav();
   renderAdminSubnav();
   const menu = adminMenuMeta[state.adminMenu] || adminMenuMeta.operations;
@@ -2707,13 +2822,35 @@ function renderAdminShell() {
     section.hidden = !active;
   }
   if (state.adminSection === 'deployment') {
-    const label = state.deploymentKind === 'domestic' ? 'Domestic' : 'Oversea';
+    const label = deploymentKindLabel(state.deploymentKind);
     deploymentTitle.textContent = `${label} Deployment`;
-    deploymentSubtitle.textContent = state.deploymentKind === 'domestic'
-      ? 'Domestic 负责 WG relay、H2I proxy、Internal DNS 可达性和缓存/观测转发。'
-      : 'Oversea 负责 Docker hysteria2、site-agent、runner-worker；mihomo authority 留在 Internal。';
-    sshProfileKind.value = state.deploymentKind;
+    deploymentSubtitle.textContent = deploymentKindSubtitle(state.deploymentKind);
+    if (state.deploymentKind === 'domestic' || state.deploymentKind === 'oversea') {
+      sshProfileKind.value = state.deploymentKind;
+    }
   }
+}
+
+function deploymentKindLabel(kind) {
+  if (kind === 'internal') return 'Internal';
+  return kind === 'domestic' ? 'Domestic' : 'Oversea';
+}
+
+function deploymentKindSubtitle(kind) {
+  if (kind === 'internal') return 'Internal runtime host 安装 service peer，作为 10.88.88.88 接入 Domestic WG relay。';
+  return kind === 'domestic'
+    ? 'Domestic 负责 WG relay、H2I proxy、Internal DNS 可达性和缓存/观测转发。'
+    : 'Oversea 负责 Docker hysteria2、site-agent、runner-worker；mihomo authority 留在 Internal。';
+}
+
+function renderInspectorChrome() {
+  if (!adminConsole || !adminInspector || !inspectorToggle) return;
+  adminConsole.classList.toggle('is-inspector-collapsed', state.inspectorCollapsed);
+  adminInspector.classList.toggle('is-collapsed', state.inspectorCollapsed);
+  inspectorToggle.setAttribute('aria-expanded', state.inspectorCollapsed ? 'false' : 'true');
+  inspectorToggle.setAttribute('aria-label', state.inspectorCollapsed ? 'Expand inspector' : 'Collapse inspector');
+  inspectorToggle.setAttribute('title', state.inspectorCollapsed ? 'Expand inspector' : 'Collapse inspector');
+  inspectorToggle.textContent = state.inspectorCollapsed ? '←' : '→';
 }
 
 function renderAdminSubnav() {
@@ -2766,7 +2903,7 @@ function renderAdminSectionHeadings() {
 }
 
 function activePipelineForCurrentDeployment(pipelines) {
-  const sites = deploymentSites(pipelines, state.deploymentKind);
+  const sites = deploymentSites(pipelines, deploymentPipelineKind());
   if (state.selectedSiteId) {
     return sites.find((site) => site.siteId === state.selectedSiteId)?.activePipeline || null;
   }
@@ -2774,10 +2911,15 @@ function activePipelineForCurrentDeployment(pipelines) {
 }
 
 function selectedOrActivePipelineForCurrentDeployment(pipelines) {
+  const kind = deploymentPipelineKind();
   const selected = state.selectedPlanId
-    ? asArray(pipelines).find((pipeline) => pipeline.kind === state.deploymentKind && pipeline.planId === state.selectedPlanId)
+    ? asArray(pipelines).find((pipeline) => pipeline.kind === kind && pipeline.planId === state.selectedPlanId)
     : null;
   return selected || activePipelineForCurrentDeployment(pipelines);
+}
+
+function deploymentPipelineKind(kind = state.deploymentKind) {
+  return kind === 'internal' ? 'domestic' : kind;
 }
 
 function deploymentSites(pipelines, kind) {
@@ -2868,6 +3010,10 @@ function pipelineObjectCount(pipeline) {
 }
 
 function renderDeploymentWorkbench(pipelines) {
+  if (state.deploymentKind === 'internal') {
+    renderInternalPeerWorkbench(pipelines);
+    return;
+  }
   if (state.deploymentKind === 'oversea') {
     renderOverseaWorkbench(pipelines);
     return;
@@ -2902,6 +3048,528 @@ function renderDeploymentWorkbench(pipelines) {
   `;
   bindDomesticWorkbenchActions(site);
   renderInspector();
+}
+
+function renderInternalPeerWorkbench(pipelines) {
+  const sites = deploymentSites(pipelines, 'domestic');
+  deploymentSiteCount.textContent = `${sites.length} domestic relay${sites.length === 1 ? '' : 's'}`;
+  const selectedSite = sites.find((item) => item.siteId === state.selectedSiteId) || null;
+  const passedSite = sites.find((item) => item.activePipeline?.health === 'passed' && !item.siteId.includes('smoke'))
+    || sites.find((item) => item.activePipeline?.health === 'passed')
+    || null;
+  const site = selectedSite?.activePipeline?.health === 'passed'
+    ? selectedSite
+    : passedSite || selectedSite || sites[0] || null;
+  if (site && state.selectedSiteId !== site.siteId) {
+    state.selectedSiteId = site.siteId;
+    state.selectedPlanId = null;
+  }
+  if (!site?.activePipeline) {
+    siteWorkbench.innerHTML = '<div class="empty-state">No Domestic relay is ready for Internal service peer handoff</div>';
+    renderInspector();
+    return;
+  }
+  const pipeline = hydratePipelineForWorkbench(site.activePipeline);
+  if (!state.selectedPlanId) state.selectedPlanId = pipeline.planId;
+  const detailedPipeline = state.currentPipeline?.summary?.planId === pipeline?.planId ? state.currentPipeline : null;
+  const plan = detailedPipeline?.plan || pipeline?.plan || {};
+  const materializeAction = domesticWgMaterializeActionFromSummary(pipeline);
+  const feedback = state.internalPeer.feedback;
+  const result = state.internalPeer.result;
+  const endpoint = result?.relay?.publicEndpoint || domesticEndpointFromPlan(plan, pipeline);
+  const endpointBlockedReason = endpoint ? domesticEndpointBlockedReason(endpoint) : null;
+  const profile = inspectorSshProfile('domestic', site.siteId);
+  const canCreatePlan = Boolean(profile?.profileId);
+  const runtimeStatus = state.internalPeer.runtimeStatus;
+  const applyResult = state.internalPeer.applyResult;
+  const handoffDisabled = state.internalPeer.busy || Boolean(materializeAction) || Boolean(endpointBlockedReason);
+  const hostRunnerOffline = internalPeerHostRunnerOffline(runtimeStatus);
+  const installUnavailable = internalPeerInstallUnavailable(runtimeStatus);
+  const installDisabled = state.internalPeer.applyBusy || installUnavailable;
+  const hostRunnerEnsureDisabled = state.internalPeer.hostRunnerEnsureBusy || !hostRunnerOffline;
+  const hostRunnerCommand = internalPeerHostRunnerCommand(runtimeStatus);
+  const runtimeBlocked = hostRunnerOffline || runtimeStatus?.status === 'blocked' || installUnavailable;
+  const panelStatus = materializeAction
+    ? 'blocked'
+    : endpointBlockedReason
+      ? 'blocked'
+      : result?.status === 'blocked' && !runtimeStatus
+        ? 'blocked'
+        : runtimeBlocked
+          ? 'blocked'
+          : result?.status || (pipeline.health === 'passed' ? 'ready' : pipeline.health);
+  const handoffHeading = materializeAction
+    ? 'Domestic WG materialize required'
+    : endpointBlockedReason
+      ? 'Domestic endpoint required'
+      : result?.status === 'ready'
+        ? 'handoff ready'
+        : result?.status === 'blocked' && !runtimeStatus
+          ? 'handoff blocked'
+          : runtimeBlocked
+            ? 'runtime host blocked'
+            : 'Generate Internal peer handoff';
+  const materializeFeedback = materializeAction && !feedback
+    ? { kind: materializeAction.allowed ? 'warning' : 'error', message: materializeAction.allowed ? 'Materialize Domestic WG before generating handoff' : materializeAction.reason || 'Domestic WG materialize is locked', detail: null }
+    : endpointBlockedReason && !feedback
+      ? { kind: 'warning', message: endpointBlockedReason, detail: canCreatePlan ? `Create a new Domestic 2.0 plan from SSH Profile ${profile.profileId}, then Generate Handoff.` : 'Open SSH Access and save the real Domestic public host first.' }
+    : hostRunnerOffline && !feedback
+      ? { kind: 'warning', message: 'Handoff is ready; ensure the Internal host runner, then Install / Restart assigns 10.88.88.88.', detail: hostRunnerCommand }
+    : null;
+  const handoffDescription = materializeAction
+    ? '当前 Domestic WG secret/artifact 与选中的 plan 不一致，先重新 materialize，再生成 Internal handoff。'
+    : endpointBlockedReason
+      ? '当前 Domestic endpoint 仍是模板或本机地址。先用真实公网 IP/DNS 创建新的 Domestic 2.0 plan，或重新 Materialize Domestic WG。'
+      : 'Generate Handoff only creates the Internal WG artifact. Ensure the host runner on the Internal host, then Install / Restart enables qp-tunnel-cli egress-on, installs WG, and assigns 10.88.88.88.';
+  const displayedFeedback = feedback || materializeFeedback;
+  const resultDetail = result ? formatJson({
+    status: result.status,
+    execution: result.execution,
+    command: result.command,
+    env: result.env,
+    config: result.config,
+    relay: result.relay,
+    blockedReasons: result.blockedReasons || [],
+    checks: result.checks || [],
+    nextActions: result.nextActions || []
+  }) : '';
+  const runtimeDetail = runtimeStatus || applyResult ? formatJson({
+    runtimeStatus,
+    applyResult
+  }) : '';
+  siteWorkbench.innerHTML = `
+    <section class="site-hero">
+      <div>
+        <span class="site-kind">Internal service peer</span>
+        <h4>mx-internal-service-peer</h4>
+        <p>${escapeHtml(site.siteId)} supplies the relay endpoint; Internal runtime host receives 10.88.88.88 after Install / Restart.</p>
+      </div>
+      <span class="health-chip" data-health="${escapeHtml(pipeline.health)}">${escapeHtml(pipeline.health)}</span>
+    </section>
+    <div class="site-facts">
+      <span><strong>10.88.88.88</strong><small>Internal service IP</small></span>
+      <span><strong>10.88.0.1</strong><small>Domestic relay IP</small></span>
+      <span><strong>${escapeHtml(endpoint || 'host:51820')}</strong><small>WG endpoint</small></span>
+      <span><strong>${escapeHtml(site.siteId)}</strong><small>source Domestic</small></span>
+    </div>
+    <section class="internal-peer-panel" data-status="${escapeHtml(panelStatus)}">
+      <div class="domestic-relay-head">
+        <div>
+          <span class="site-kind">Runtime host handoff</span>
+          <strong>${escapeHtml(handoffHeading)}</strong>
+          <p>${escapeHtml(handoffDescription)}</p>
+        </div>
+        <div class="domestic-relay-actions">
+          ${materializeAction ? `<button class="primary-button" type="button" data-internal-peer-materialize ${state.internalPeer.materializeBusy || !materializeAction.allowed ? 'disabled' : ''}>${state.internalPeer.materializeBusy ? 'Materializing' : 'Materialize Domestic WG'}</button>` : ''}
+          ${endpointBlockedReason ? `<button class="primary-button" type="button" data-internal-peer-create-plan ${canCreatePlan && !state.sshPlanBusy ? '' : 'disabled'}>${state.sshPlanBusy ? 'Creating' : 'New 2.0 Plan'}</button>` : ''}
+          <button class="primary-button" type="button" data-internal-peer-handoff ${handoffDisabled ? 'disabled' : ''} title="${escapeHtml(materializeAction ? 'Materialize Domestic WG first' : endpointBlockedReason || 'Generate Internal peer handoff')}">${state.internalPeer.busy ? 'Generating' : 'Generate Handoff'}</button>
+          ${hostRunnerOffline
+            ? `<button class="primary-button" type="button" data-internal-peer-host-runner-ensure ${hostRunnerEnsureDisabled ? 'disabled' : ''} title="Create or update the k8s host-runner DaemonSet">${state.internalPeer.hostRunnerEnsureBusy ? 'Ensuring' : 'Ensure Host Runner'}</button>`
+            : `<button class="primary-button" type="button" data-internal-peer-apply ${installDisabled ? 'disabled' : ''} title="${escapeHtml(installUnavailable ? 'Runtime install is not ready' : 'Install or restart Internal service peer')}">${state.internalPeer.applyBusy ? 'Installing' : 'Install / Restart'}</button>`}
+          <button class="secondary-button" type="button" data-internal-peer-status ${state.internalPeer.statusBusy ? 'disabled' : ''}>${state.internalPeer.statusBusy ? 'Checking' : 'Refresh Status'}</button>
+          <button class="secondary-button" type="button" data-internal-open-domestic>Open Domestic</button>
+        </div>
+      </div>
+      <div class="domestic-relay-grid">
+        <span><small>Linux service</small><strong>wg-quick@mx-internal-svc</strong></span>
+        <span><small>start host runner first</small><strong>${escapeHtml(hostRunnerCommand)}</strong></span>
+        <span><small>apply artifact</small><strong>artifacts/site-slots/domestic/mx-internal-service-peer-apply.sh</strong></span>
+        <span><small>config artifact</small><strong>artifacts/site-slots/domestic/mx-internal-service-peer.conf</strong></span>
+        <span><small>runtime route</small><strong>10.88.0.1/16 via mx-internal-svc</strong></span>
+        <span><small>verification</small><strong>wg active + handshake + Domestic healthz</strong></span>
+      </div>
+      ${displayedFeedback ? `<div class="action-feedback" data-kind="${escapeHtml(displayedFeedback.kind)}"><strong>${escapeHtml(displayedFeedback.message)}</strong>${displayedFeedback.detail ? `<pre>${escapeHtml(displayedFeedback.detail)}</pre>` : ''}</div>` : ''}
+      ${renderInternalPeerRuntimeStatus(runtimeStatus, applyResult)}
+      ${resultDetail ? `<pre class="internal-peer-result">${escapeHtml(resultDetail)}</pre>` : ''}
+      ${runtimeDetail ? `<pre class="internal-peer-result">${escapeHtml(runtimeDetail)}</pre>` : ''}
+    </section>
+  `;
+  bindInternalPeerWorkbenchActions(site, pipeline);
+  renderInspector();
+}
+
+function bindInternalPeerWorkbenchActions(site, pipeline) {
+  const materializeAction = domesticWgMaterializeActionFromSummary(pipeline);
+  const materializeButton = siteWorkbench.querySelector('[data-internal-peer-materialize]');
+  if (materializeButton) {
+    materializeButton.addEventListener('click', () => {
+      if (!materializeAction) return;
+      void materializeDomesticWgForInternalPeer(site, pipeline, materializeAction);
+    });
+  }
+  const handoffButton = siteWorkbench.querySelector('[data-internal-peer-handoff]');
+  if (handoffButton) {
+    handoffButton.addEventListener('click', () => {
+      if (materializeAction) return;
+      void generateInternalPeerHandoff(site, pipeline);
+    });
+  }
+  const createPlanButton = siteWorkbench.querySelector('[data-internal-peer-create-plan]');
+  if (createPlanButton) {
+    createPlanButton.addEventListener('click', () => {
+      syncSshProfileFormToSelectedSite(site.siteId, 'domestic');
+      void createPlanFromSshProfile();
+    });
+  }
+  const statusButton = siteWorkbench.querySelector('[data-internal-peer-status]');
+  if (statusButton) {
+    statusButton.addEventListener('click', () => {
+      void refreshInternalPeerRuntimeStatus(site, pipeline);
+    });
+  }
+  const hostRunnerEnsureButton = siteWorkbench.querySelector('[data-internal-peer-host-runner-ensure]');
+  if (hostRunnerEnsureButton) {
+    hostRunnerEnsureButton.addEventListener('click', () => {
+      void ensureInternalPeerHostRunner(site, pipeline);
+    });
+  }
+  const applyButton = siteWorkbench.querySelector('[data-internal-peer-apply]');
+  if (applyButton) {
+    applyButton.addEventListener('click', () => {
+      void installInternalPeerService(site, pipeline);
+    });
+  }
+  const domesticButton = siteWorkbench.querySelector('[data-internal-open-domestic]');
+  if (domesticButton) {
+    domesticButton.addEventListener('click', () => {
+      state.deploymentKind = 'domestic';
+      state.adminSubsection = 'domestic';
+      state.selectedSiteId = site.siteId;
+      state.selectedPlanId = pipeline.planId;
+      state.internalPeer.feedback = null;
+      renderAdminShell();
+      renderAdminDashboard(state.dashboard);
+      void refreshPipelineDetail(pipeline.planId);
+    });
+  }
+}
+
+async function materializeDomesticWgForInternalPeer(site, pipeline, action) {
+  if (state.internalPeer.materializeBusy) return;
+  state.internalPeer.materializeBusy = true;
+  state.internalPeer.feedback = { kind: 'info', message: 'Materializing Domestic WG for selected plan', detail: null };
+  state.internalPeer.result = null;
+  renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+  try {
+    const payload = await fetchJson('/internal/v1/admin/actions/execute', {
+      method: 'POST',
+      body: {
+        actionId: action.actionId,
+        path: action.path,
+        body: materializeActionBodyTemplate(action)
+      }
+    });
+    const materialize = payload.domesticWgMaterialize || null;
+    state.internalPeer.feedback = {
+      kind: materialize?.status === 'passed' ? 'success' : materialize?.status === 'blocked' ? 'warning' : 'error',
+      message: materialize ? `Domestic WG materialize ${materialize.status}` : 'Domestic WG materialize finished',
+      detail: summarizeActionDetail(payload)
+    };
+    await refreshAdmin();
+    if (pipeline.planId) {
+      await refreshPipelineDetail(pipeline.planId);
+    }
+  } catch (error) {
+    state.internalPeer.feedback = { kind: 'error', message: error.message, detail: null };
+  } finally {
+    state.internalPeer.materializeBusy = false;
+    renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+    renderInspector();
+  }
+}
+
+async function generateInternalPeerHandoff(site, pipeline) {
+  if (state.internalPeer.busy) return;
+  const materializeAction = domesticWgMaterializeActionFromSummary(pipeline);
+  if (materializeAction) {
+    state.internalPeer.feedback = {
+      kind: 'warning',
+      message: 'Materialize Domestic WG before generating handoff',
+      detail: materializeAction.reason || null
+    };
+    renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+    renderInspector();
+    return;
+  }
+  const detailedPipeline = state.currentPipeline?.summary?.planId === pipeline?.planId ? state.currentPipeline : null;
+  const plan = detailedPipeline?.plan || pipeline?.plan || {};
+  const endpoint = domesticEndpointFromPlan(plan, pipeline);
+  const endpointBlockedReason = endpoint ? domesticEndpointBlockedReason(endpoint) : null;
+  if (endpointBlockedReason) {
+    const profile = inspectorSshProfile('domestic', site.siteId);
+    state.internalPeer.feedback = {
+      kind: 'warning',
+      message: endpointBlockedReason,
+      detail: profile?.profileId
+        ? `Click New 2.0 Plan to use SSH Profile ${profile.profileId}, then Generate Handoff.`
+        : 'Open SSH Access and save the real Domestic public host first.'
+    };
+    renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+    renderInspector();
+    return;
+  }
+  state.internalPeer.busy = true;
+  state.internalPeer.feedback = { kind: 'info', message: 'Generating Internal service peer handoff', detail: null };
+  state.internalPeer.result = null;
+  renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+  try {
+    const payload = await fetchJson('/internal/v1/admin/actions/execute', {
+      method: 'POST',
+      body: {
+        actionId: 'site-slot.internal-service-peer.handoff',
+        path: `/internal/v1/config-center/domestic-wg-secrets/${encodeURIComponent(site.siteId)}/internal-service-peer-handoff`,
+        body: {
+          siteId: site.siteId,
+          planId: pipeline.planId,
+          confirmInternalServicePeerHandoff: true,
+          requestedBy: 'desktop-admin',
+          requestId: `desktop-internal-service-peer-handoff-${Date.now()}`
+        }
+      }
+    });
+    const handoff = payload.internalServicePeerHandoff || null;
+    state.internalPeer.result = handoff;
+    state.internalPeer.feedback = {
+      kind: handoff?.status === 'blocked' ? 'warning' : 'success',
+      message: handoff ? `Internal service peer handoff ${handoff.status}` : 'Internal service peer handoff generated',
+      detail: summarizeActionDetail(payload)
+    };
+    if (handoff?.status === 'ready') {
+      const statusPayload = await requestInternalPeerRuntimeStatus(site, pipeline);
+      state.internalPeer.runtimeStatus = statusPayload.internalServicePeerRuntimeStatus || null;
+      if (internalPeerHostRunnerOffline(state.internalPeer.runtimeStatus)) {
+        state.internalPeer.feedback = {
+          kind: 'warning',
+          message: 'Internal handoff is ready; start the host runner, then Install / Restart will enable egress-on and enroll the host WG peer.',
+          detail: internalPeerHostRunnerCommand(state.internalPeer.runtimeStatus)
+        };
+      }
+    }
+  } catch (error) {
+    state.internalPeer.feedback = { kind: 'error', message: error.message, detail: null };
+  } finally {
+    state.internalPeer.busy = false;
+    renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+    renderInspector();
+  }
+}
+
+function renderInternalPeerRuntimeStatus(runtimeStatus, applyResult) {
+  const status = runtimeStatus?.status || 'ready';
+  const install = runtimeStatus?.install || {};
+  const tools = runtimeStatus?.tools || {};
+  const wireGuardCore = runtimeStatus?.wireGuardCore || {};
+  const coreAvailable = wireGuardCore.available === true;
+  const link = runtimeStatus?.link || {};
+  const iface = runtimeStatus?.interface || {};
+  const handshake = iface.handshake || {};
+  const runtimeTarget = runtimeStatus?.runtimeTarget || {};
+  const hostRunner = runtimeTarget.hostRunner || {};
+  const hostRunnerOffline = runtimeTarget.mode === 'host-runner-unreachable' || Boolean(hostRunner.error);
+  const internalEgress = runtimeStatus?.internalEgress || {};
+  const proxy = runtimeStatus?.proxy || {};
+  const splitDns = proxy.splitDns || {};
+  const applyStatus = applyResult?.status || 'not-run';
+  const rows = [
+    { label: 'target', value: runtimeTarget.mode || 'not checked', status: runtimeTarget.mode === 'host-runner' ? 'passed' : hostRunnerOffline || runtimeTarget.mode === 'api-pod' ? 'blocked' : 'ready' },
+    { label: 'host runner', value: hostRunner.error || hostRunner.url || hostRunner.startCommand || 'not configured', status: hostRunner.error ? 'blocked' : hostRunner.configured ? 'passed' : 'ready' },
+    { label: 'wg runtime', value: hostRunnerOffline ? 'not checked' : wireGuardCore.method ? `${wireGuardCore.method} / ${wireGuardCore.source || 'core'}` : 'not checked', status: hostRunnerOffline ? 'ready' : wireGuardCore.status || (coreAvailable ? 'passed' : 'ready') },
+    { label: 'wg', value: hostRunnerOffline ? 'not checked' : tools.wg?.path || 'missing', status: hostRunnerOffline ? 'ready' : tools.wg?.available ? 'passed' : coreAvailable ? 'ready' : 'blocked' },
+    { label: 'wg-quick', value: hostRunnerOffline ? 'not checked' : tools.wgQuick?.path || 'missing', status: hostRunnerOffline ? 'ready' : tools.wgQuick?.available ? 'passed' : coreAvailable ? 'ready' : 'blocked' },
+    { label: 'qp-tunnel-cli', value: hostRunnerOffline ? 'not checked' : tools.qpTunnelCli?.path || 'required runtime source missing', status: hostRunnerOffline ? 'ready' : tools.qpTunnelCli?.available ? 'passed' : 'blocked' },
+    { label: 'internal egress-on', value: hostRunnerOffline ? 'not checked' : internalEgress.summary || internalEgress.status || 'not checked', status: hostRunnerOffline ? 'ready' : internalEgress.status || 'ready' },
+    { label: 'service', value: hostRunnerOffline ? 'not checked' : iface.wgShow?.status || (wireGuardCore.tunnel?.active ? 'tunnel active' : wireGuardCore.daemon?.running ? 'launchd running' : 'not checked'), status: hostRunnerOffline ? 'ready' : iface.wgShow?.status || wireGuardCore.status || 'ready' },
+    { label: 'handshake', value: hostRunnerOffline ? 'not checked' : handshake.newest?.at || handshake.status || 'not checked', status: hostRunnerOffline ? 'ready' : handshake.status || 'ready' },
+    { label: 'proxy bypass', value: hostRunnerOffline ? 'not checked' : Array.isArray(proxy.missingBypass) && proxy.missingBypass.length ? `missing ${proxy.missingBypass.join(',')}` : proxy.clashTunCompatibility || 'not checked', status: hostRunnerOffline ? 'ready' : proxy.status || 'ready' },
+    { label: 'split DNS', value: splitDns.authority || 'Internal DNS planned', status: splitDns.status || 'ready' },
+    { label: 'Domestic 10.88.0.1', value: hostRunnerOffline ? 'not checked' : link.domesticGatewayPing?.status || link.routeToDomestic?.status || 'not checked', status: hostRunnerOffline ? 'ready' : link.domesticGatewayPing?.status || link.routeToDomestic?.status || 'ready' },
+    { label: 'Internal healthz', value: hostRunnerOffline ? 'not checked' : link.internalHealthz?.status || 'not checked', status: hostRunnerOffline ? 'ready' : link.internalHealthz?.status || 'ready' },
+    { label: 'install', value: install.available ? `${install.method || 'runtime'} ready` : (install.blockedReasons || []).join('; ') || 'not ready', status: install.available ? 'passed' : 'blocked' },
+    { label: 'last apply', value: applyStatus, status: applyStatus === 'passed' ? 'passed' : applyStatus === 'blocked' || applyStatus === 'failed' ? 'blocked' : 'ready' }
+  ];
+  return `
+    <section class="internal-peer-status" data-status="${escapeHtml(status)}">
+      <div class="domestic-relay-head">
+        <div>
+          <span class="site-kind">Execution target</span>
+          <strong>${escapeHtml(runtimeStatus?.host?.hostname || 'not checked')}</strong>
+          <p>${escapeHtml(runtimeStatus ? `${runtimeTarget.mode || 'runtime'} / ${runtimeStatus.host?.platform || 'host'} / ${runtimeStatus.interfaceName || 'mx-internal-svc'} / checked ${runtimeStatus.checkedAt || '-'}` : 'Refresh to inspect host runner, WireGuard tools, interface, and Domestic path.')}</p>
+        </div>
+        <span class="health-chip" data-health="${escapeHtml(status)}">${escapeHtml(status)}</span>
+      </div>
+      <div class="domestic-relay-grid">
+        ${rows.map((item) => `
+          <span data-status="${escapeHtml(normalizeRuntimeCellStatus(item.status))}">
+            <small>${escapeHtml(item.label)}</small>
+            <strong title="${escapeHtml(item.value)}">${escapeHtml(item.value)}</strong>
+          </span>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
+
+function normalizeRuntimeCellStatus(status) {
+  if (status === 'passed' || status === 'ready') return status;
+  if (status === 'blocked' || status === 'failed' || status === 'missing' || status === 'timeout') return 'blocked';
+  return 'ready';
+}
+
+function internalPeerHostRunnerOffline(runtimeStatus = null) {
+  const runtimeTarget = runtimeStatus?.runtimeTarget || {};
+  return runtimeTarget.mode === 'host-runner-unreachable' || Boolean(runtimeTarget.hostRunner?.error);
+}
+
+function internalPeerInstallUnavailable(runtimeStatus = null) {
+  if (!runtimeStatus?.install) return false;
+  return runtimeStatus.install.available === false;
+}
+
+function internalPeerHostRunnerCommand(runtimeStatus = null) {
+  return runtimeStatus?.runtimeTarget?.hostRunner?.startCommand
+    || runtimeStatus?.install?.hostRunnerCommand
+    || 'MX_INTERNAL_HOST_RUNNER_HOST=0.0.0.0 bash scripts/manage.sh ops site-slot internal-service-peer-host-runner 19190';
+}
+
+async function requestInternalPeerRuntimeStatus(site, pipeline) {
+  return fetchJson('/internal/v1/admin/actions/execute', {
+    method: 'POST',
+    body: {
+      actionId: 'site-slot.internal-service-peer.status',
+      path: `/internal/v1/config-center/domestic-wg-secrets/${encodeURIComponent(site.siteId)}/internal-service-peer-status`,
+      body: {
+        siteId: site.siteId,
+        planId: pipeline.planId,
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-internal-service-peer-status-${Date.now()}`
+      }
+    }
+  });
+}
+
+async function refreshInternalPeerRuntimeStatus(site, pipeline) {
+  if (state.internalPeer.statusBusy) return;
+  state.internalPeer.statusBusy = true;
+  state.internalPeer.feedback = { kind: 'info', message: 'Checking Internal service peer status', detail: null };
+  if (state.internalPeer.result?.status === 'blocked') {
+    state.internalPeer.result = null;
+  }
+  renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+  try {
+    const payload = await requestInternalPeerRuntimeStatus(site, pipeline);
+    const runtimeStatus = payload.internalServicePeerRuntimeStatus || null;
+    state.internalPeer.runtimeStatus = runtimeStatus;
+    state.internalPeer.feedback = {
+      kind: runtimeStatus?.status === 'blocked' ? 'warning' : 'success',
+      message: internalPeerHostRunnerOffline(runtimeStatus)
+        ? 'Host runner is not reachable; click Ensure Host Runner, then Install / Restart enables egress-on, installs WG, and assigns 10.88.88.88.'
+        : runtimeStatus
+          ? `Internal service peer status ${runtimeStatus.status}`
+          : 'Internal service peer status checked',
+      detail: internalPeerHostRunnerOffline(runtimeStatus)
+        ? internalPeerHostRunnerCommand(runtimeStatus)
+        : summarizeActionDetail(payload)
+    };
+  } catch (error) {
+    state.internalPeer.feedback = { kind: 'error', message: error.message, detail: null };
+  } finally {
+    state.internalPeer.statusBusy = false;
+    renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+    renderInspector();
+  }
+}
+
+async function ensureInternalPeerHostRunner(site, pipeline) {
+  if (state.internalPeer.hostRunnerEnsureBusy) return;
+  state.internalPeer.hostRunnerEnsureBusy = true;
+  state.internalPeer.feedback = { kind: 'info', message: 'Ensuring Internal host runner through k8s', detail: null };
+  renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+  try {
+    const payload = await fetchJson('/internal/v1/admin/actions/execute', {
+      method: 'POST',
+      body: {
+        actionId: 'site-slot.internal-service-peer.host-runner.ensure',
+        path: `/internal/v1/config-center/domestic-wg-secrets/${encodeURIComponent(site.siteId)}/internal-service-peer-host-runner`,
+        body: {
+          siteId: site.siteId,
+          planId: pipeline.planId,
+          confirmInternalHostRunnerEnsure: true,
+          requestedBy: 'desktop-admin',
+          requestId: `desktop-internal-host-runner-ensure-${Date.now()}`
+        }
+      }
+    });
+    const ensureResult = payload.internalServicePeerHostRunnerEnsure || null;
+    state.internalPeer.runtimeStatus = payload.internalServicePeerRuntimeStatus || ensureResult?.afterStatus || state.internalPeer.runtimeStatus;
+    state.internalPeer.feedback = {
+      kind: ensureResult?.status === 'passed' ? 'success' : ensureResult?.status === 'ready' || ensureResult?.status === 'blocked' ? 'warning' : 'error',
+      message: ensureResult ? `Internal host runner ${ensureResult.status}` : 'Internal host runner ensure finished',
+      detail: summarizeActionDetail(payload)
+    };
+  } catch (error) {
+    state.internalPeer.feedback = { kind: 'error', message: error.message, detail: null };
+  } finally {
+    state.internalPeer.hostRunnerEnsureBusy = false;
+    renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+    renderInspector();
+  }
+}
+
+async function installInternalPeerService(site, pipeline) {
+  if (state.internalPeer.applyBusy) return;
+  if (internalPeerHostRunnerOffline(state.internalPeer.runtimeStatus)) {
+    state.internalPeer.feedback = {
+      kind: 'warning',
+      message: 'Start the host runner on the Internal host before enabling egress-on and installing WG.',
+      detail: internalPeerHostRunnerCommand(state.internalPeer.runtimeStatus)
+    };
+    renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+    renderInspector();
+    return;
+  }
+  if (internalPeerInstallUnavailable(state.internalPeer.runtimeStatus)) {
+    state.internalPeer.feedback = {
+      kind: 'warning',
+      message: 'Internal runtime install is not ready.',
+      detail: (state.internalPeer.runtimeStatus?.install?.blockedReasons || []).join('\n') || 'Refresh Status after the host runner is reachable.'
+    };
+    renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+    renderInspector();
+    return;
+  }
+  state.internalPeer.applyBusy = true;
+  state.internalPeer.feedback = { kind: 'info', message: 'Installing WG service peer and assigning 10.88.88.88 on the Internal host', detail: null };
+  renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+  try {
+    const payload = await fetchJson('/internal/v1/admin/actions/execute', {
+      method: 'POST',
+      body: {
+        actionId: 'site-slot.internal-service-peer.apply',
+        path: `/internal/v1/config-center/domestic-wg-secrets/${encodeURIComponent(site.siteId)}/internal-service-peer-apply`,
+        body: {
+          siteId: site.siteId,
+          planId: pipeline.planId,
+          confirmInternalServicePeerApply: true,
+          requestedBy: 'desktop-admin',
+          requestId: `desktop-internal-service-peer-apply-${Date.now()}`
+        }
+      }
+    });
+    const applyResult = payload.internalServicePeerApply || null;
+    state.internalPeer.applyResult = applyResult;
+    state.internalPeer.runtimeStatus = payload.internalServicePeerRuntimeStatus || applyResult?.afterStatus || null;
+    state.internalPeer.feedback = {
+      kind: applyResult?.status === 'passed' ? 'success' : ['blocked', 'ready'].includes(applyResult?.status) ? 'warning' : 'error',
+      message: applyResult ? `Internal service peer install ${applyResult.status}` : 'Internal service peer install finished',
+      detail: summarizeActionDetail(payload)
+    };
+  } catch (error) {
+    state.internalPeer.feedback = { kind: 'error', message: error.message, detail: null };
+  } finally {
+    state.internalPeer.applyBusy = false;
+    renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+    renderInspector();
+  }
 }
 
 function hydratePipelineForWorkbench(pipeline) {
@@ -2971,29 +3639,28 @@ function bindDomesticWorkbenchActions(site) {
 }
 
 function domesticEndpointFromPlan(plan, summary = null) {
+  const materializeEndpoint = actionPublicEndpoint(domesticWgMaterializeActionFromSummary(summary));
+  if (materializeEndpoint) return materializeEndpoint;
   const host = plan?.host || summary?.host || '';
   const port = plan?.wireGuard?.listenPort || plan?.relay?.listenPort || 51820;
   return host ? `${host}:${port}` : '';
 }
 
-function domesticLegacyCleanupState(plan, summary = null) {
-  if (domesticPlanHasLegacyCleanup(plan)) {
-    return { status: 'passed', label: 'retires hdo-home / 100.*' };
-  }
-  const nextActions = asArray(plan?.nextActions?.length ? plan.nextActions : summary?.nextActions);
-  if (!asArray(plan?.deploymentPhases).length && nextActions.includes('activate-domestic-peer-center')) {
-    return { status: 'ready', label: 'planned at activate' };
-  }
-  return { status: 'blocked', label: 'not in this plan' };
+function domesticWgMaterializeActionFromSummary(summary = null) {
+  return asArray(summary?.actionHints).find((action) => action.actionId === 'site-slot.domestic-wg.materialize') || null;
 }
 
-function domesticPlanHasLegacyCleanup(plan) {
-  return asArray(plan?.deploymentPhases).some((phase) => {
-    return asArray(phase.commands).some((command) => {
-      const text = String(command || '');
-      return text.includes('hdo-home') && text.includes('100.*') && text.includes('mx-domestic');
-    });
-  });
+function actionPublicEndpoint(action = null) {
+  const endpoint = action?.bodyTemplate?.publicEndpoint;
+  return typeof endpoint === 'string' && endpoint.trim() ? endpoint.trim() : '';
+}
+
+function domesticLegacyCleanupState(plan, summary = null) {
+  const nextActions = asArray(plan?.nextActions?.length ? plan.nextActions : summary?.nextActions);
+  if (!asArray(plan?.deploymentPhases).length && nextActions.includes('activate-domestic-peer-center')) {
+    return { status: 'ready', label: 'preserve V1 at activate' };
+  }
+  return { status: 'ready', label: 'manual cleanup only' };
 }
 
 function renderOverseaWorkbench(pipelines) {
@@ -4028,18 +4695,95 @@ function renderUserIntegrationPanel() {
   `;
 }
 
+function normalizeLauncherProductId(value) {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || 'launcher';
+}
+
+function normalizeStandaloneProductId(value) {
+  const productId = normalizeLauncherProductId(value);
+  const product = launcherProductById(productId);
+  return product && product.mode !== 'standalone' ? 'launcher' : productId;
+}
+
+function launcherProductDisplayName(productId, product = null) {
+  if (productId === 'launcher') return 'MX-H2I';
+  if (product?.displayName) return product.displayName;
+  if (productId === 'h2o') return 'H2O';
+  return productId
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ') || productId;
+}
+
+function productSecondOctetFromIp(value) {
+  const parts = String(value || '').split('.').map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) return null;
+  if (parts[0] !== 10 || parts[1] < 1 || parts[1] > 254 || parts[1] === 88) return null;
+  return String(parts[1]);
+}
+
+function productSecondOctetFromProduct(product) {
+  return productSecondOctetFromIp(product?.anonymousLeaseStart)
+    || productSecondOctetFromIp(product?.userLeaseStart)
+    || productSecondOctetFromIp(product?.anonymousCidr)
+    || productSecondOctetFromIp(product?.userCidr);
+}
+
+function normalizeProductSecondOctet(value, fallback = '89') {
+  const number = Number.parseInt(String(value ?? ''), 10);
+  if (Number.isInteger(number) && number >= 1 && number <= 254 && number !== 88) return String(number);
+  return fallback;
+}
+
+function defaultProductSecondOctet(productId, mode = 'standalone') {
+  const product = launcherProductById(productId);
+  const existing = productSecondOctetFromProduct(product);
+  if (existing) return existing;
+  if (productId === 'launcher') return '89';
+  if (productId === 'h2o') return '90';
+  return '90';
+}
+
+function relayProductNetworkShape(secondOctet) {
+  const octet = normalizeProductSecondOctet(secondOctet);
+  return {
+    userCidr: `10.${octet}.0.0/16`,
+    anonymousCidr: `10.${octet}.0.0/16`,
+    userLeaseStart: `10.${octet}.0.1`,
+    userLeaseEnd: `10.${octet}.99.254`,
+    anonymousLeaseStart: `10.${octet}.100.1`,
+    anonymousLeaseEnd: `10.${octet}.254.254`
+  };
+}
+
 function relayEnrollmentDraftForRender(siteId, overrides = {}) {
-  const product = overrides.productId ? launcherProductById(overrides.productId) : null;
+  const previous = state.relayEnrollment.draft || {};
+  const productId = normalizeStandaloneProductId(overrides.productId || previous.productId || 'launcher');
+  const product = launcherProductById(productId);
+  const mode = (overrides.mode || product?.mode || previous.mode || (productId === 'launcher' ? 'standalone' : 'embed')) === 'standalone'
+    ? 'standalone'
+    : 'embed';
+  const productSecondOctet = normalizeProductSecondOctet(
+    overrides.productSecondOctet || (previous.productId === productId ? previous.productSecondOctet : null),
+    productSecondOctetFromProduct(product) || defaultProductSecondOctet(productId, mode)
+  );
   const draft = {
-    productId: overrides.productId || state.relayEnrollment.draft?.productId || 'h2o',
-    mode: (overrides.mode || product?.mode || state.relayEnrollment.draft?.mode) === 'standalone' ? 'standalone' : 'embed',
-    identityKind: (overrides.identityKind || state.relayEnrollment.draft?.identityKind) === 'user' ? 'user' : 'anonymous',
-    siteId: state.relayEnrollment.draft?.siteId || siteId || 'domestic-main',
-    installId: state.relayEnrollment.draft?.installId || defaultRelayEnrollmentDeviceId,
-    deviceId: state.relayEnrollment.draft?.deviceId || defaultRelayEnrollmentDeviceId,
-    userId: state.relayEnrollment.draft?.userId || '',
-    deviceLabel: state.relayEnrollment.draft?.deviceLabel || 'Desktop Admin',
-    publicKey: state.relayEnrollment.draft?.publicKey || state.domesticPeerDraft.publicKey || ''
+    productId,
+    productSecondOctet,
+    mode,
+    identityKind: (overrides.identityKind || previous.identityKind) === 'user' ? 'user' : 'anonymous',
+    siteId: previous.siteId || siteId || 'domestic-main',
+    installId: previous.installId || defaultRelayEnrollmentDeviceId,
+    deviceId: previous.deviceId || defaultRelayEnrollmentDeviceId,
+    userId: previous.userId || '',
+    deviceLabel: previous.deviceLabel || 'Desktop Admin',
+    publicKey: previous.publicKey || state.domesticPeerDraft.publicKey || ''
   };
   state.relayEnrollment.draft = draft;
   return draft;
@@ -4048,13 +4792,19 @@ function relayEnrollmentDraftForRender(siteId, overrides = {}) {
 function relayEnrollmentDraftFromForm(root = foundationGrid) {
   const current = state.relayEnrollment.draft || {};
   const scope = root || foundationGrid || document;
-  const productId = blankToNull(scope.querySelector('[data-relay-field="productId"]')?.value) || current.productId || 'h2o';
+  const productId = normalizeStandaloneProductId(blankToNull(scope.querySelector('[data-relay-field="productId"]')?.value) || current.productId || 'launcher');
   const product = asArray(state.launcherProducts).find((item) => item?.productId === productId) || null;
-  const rawMode = blankToNull(scope.querySelector('[data-relay-field="mode"]')?.value) || product?.mode || current.mode || 'embed';
+  const rawMode = blankToNull(scope.querySelector('[data-relay-field="mode"]')?.value) || product?.mode || current.mode || 'standalone';
   const rawIdentityKind = blankToNull(scope.querySelector('[data-relay-field="identityKind"]')?.value) || current.identityKind || 'anonymous';
+  const mode = rawMode === 'standalone' ? 'standalone' : 'embed';
+  const productSecondOctet = normalizeProductSecondOctet(
+    blankToNull(scope.querySelector('[data-relay-field="productSecondOctet"]')?.value) || current.productSecondOctet,
+    productSecondOctetFromProduct(product) || defaultProductSecondOctet(productId, mode)
+  );
   const draft = {
     productId,
-    mode: rawMode === 'standalone' ? 'standalone' : 'embed',
+    productSecondOctet,
+    mode,
     identityKind: rawIdentityKind === 'user' ? 'user' : 'anonymous',
     siteId: blankToNull(scope.querySelector('[data-relay-field="siteId"]')?.value) || current.siteId || selectedDomesticSiteId() || 'domestic-main',
     installId: blankToNull(scope.querySelector('[data-relay-field="installId"]')?.value) || current.installId || defaultRelayEnrollmentDeviceId,
@@ -4068,22 +4818,81 @@ function relayEnrollmentDraftFromForm(root = foundationGrid) {
 }
 
 function renderRelayProductOptions(selectedProductId) {
-  const products = asArray(state.launcherProducts);
+  const selectedStandaloneProductId = normalizeStandaloneProductId(selectedProductId);
+  const products = asArray(state.launcherProducts).filter((product) => product?.mode === 'standalone');
   const optionProducts = products.length
     ? products
     : [
-        { productId: 'h2o', displayName: 'H2O', mode: 'embed', serviceVip: '10.88.100.10' },
-        { productId: 'launcher', displayName: 'Launcher Standalone', mode: 'standalone', serviceVip: '10.88.100.1' }
+        { productId: 'launcher', displayName: 'MX-H2I', mode: 'standalone', serviceVip: '10.88.100.1' }
       ];
-  const selectedExists = optionProducts.some((product) => product.productId === selectedProductId);
+  const selectedExists = optionProducts.some((product) => product.productId === selectedStandaloneProductId);
   const options = [
-    ...(!selectedExists && selectedProductId ? [{ productId: selectedProductId, displayName: selectedProductId, mode: 'embed', serviceVip: null }] : []),
+    ...(!selectedExists && selectedStandaloneProductId ? [{ productId: selectedStandaloneProductId, displayName: selectedStandaloneProductId, mode: 'standalone', serviceVip: null }] : []),
     ...optionProducts
   ];
   return options.map((product) => {
-    const label = `${product.displayName || product.productId} / ${product.mode || 'embed'} / ${product.serviceVip || '-'}`;
-    return `<option value="${escapeHtml(product.productId)}" ${product.productId === selectedProductId ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    const label = `${launcherProductDisplayName(product.productId, product)} / ${product.serviceVip || 'new standalone'}`;
+    return `<option value="${escapeHtml(product.productId)}" ${product.productId === selectedStandaloneProductId ? 'selected' : ''}>${escapeHtml(label)}</option>`;
   }).join('');
+}
+
+function desiredRelayProductNetwork(draft) {
+  const productId = normalizeStandaloneProductId(draft.productId);
+  const mode = draft.mode === 'standalone' ? 'standalone' : 'embed';
+  const secondOctet = normalizeProductSecondOctet(draft.productSecondOctet, defaultProductSecondOctet(productId, mode));
+  const ranges = relayProductNetworkShape(secondOctet);
+  const productIndex = productId === 'launcher' ? 0 : Math.max(0, Math.min(99, Number(secondOctet) - 90));
+  const serviceHost = productId === 'launcher' ? 1 : Math.max(2, Math.min(254, 2 + productIndex));
+  return {
+    productId,
+    displayName: launcherProductDisplayName(productId, launcherProductById(productId)),
+    mode,
+    standaloneChannelProductId: productId,
+    productIndex,
+    serviceVip: `10.88.100.${serviceHost}`,
+    ...ranges,
+    defaultDomesticSiteId: draft.siteId || 'domestic-main',
+    updatePolicy: productId === 'launcher' || mode === 'embed' ? 'launcher-managed' : 'app-managed',
+    requestedBy: 'desktop-admin',
+    requestId: `desktop-product-network-${Date.now()}`
+  };
+}
+
+function relayProductNeedsUpsert(product, desired) {
+  if (!product) return true;
+  return [
+    'mode',
+    'standaloneChannelProductId',
+    'userCidr',
+    'anonymousCidr',
+    'userLeaseStart',
+    'userLeaseEnd',
+    'anonymousLeaseStart',
+    'anonymousLeaseEnd',
+    'defaultDomesticSiteId'
+  ].some((field) => String(product[field] || '') !== String(desired[field] || ''));
+}
+
+function upsertLocalLauncherProduct(product) {
+  if (!product?.productId) return;
+  const existing = asArray(state.launcherProducts).filter((item) => item?.productId !== product.productId);
+  state.launcherProducts = [product, ...existing]
+    .sort((left, right) => String(left.mode || '').localeCompare(String(right.mode || ''))
+      || Number(left.productIndex || 0) - Number(right.productIndex || 0)
+      || String(left.productId || '').localeCompare(String(right.productId || '')));
+  state.launcherProductsError = null;
+}
+
+async function ensureRelayProductNetwork(draft) {
+  const desired = desiredRelayProductNetwork(draft);
+  const current = launcherProductById(desired.productId);
+  if (!relayProductNeedsUpsert(current, desired)) return current;
+  const payload = await fetchJson(`/internal/v1/launcher-network/products/${encodeURIComponent(desired.productId)}`, {
+    method: 'POST',
+    body: desired
+  });
+  if (payload.product) upsertLocalLauncherProduct(payload.product);
+  return payload.product || desired;
 }
 
 function upsertLocalLauncherLease(lease) {
@@ -4114,6 +4923,7 @@ function fallbackLauncherProduct(productId) {
       productId: 'launcher',
       displayName: 'Launcher Standalone',
       mode: 'standalone',
+      standaloneChannelProductId: 'launcher',
       serviceVip: '10.88.100.1',
       internalControlIp: '10.88.88.88',
       userLeaseStart: '10.89.0.1',
@@ -4128,6 +4938,7 @@ function fallbackLauncherProduct(productId) {
     productId: 'h2o',
     displayName: 'H2O',
     mode: 'embed',
+    standaloneChannelProductId: 'launcher',
     serviceVip: '10.88.100.10',
     internalControlIp: '10.88.88.88',
     userLeaseStart: '10.90.0.1',
@@ -4143,6 +4954,16 @@ function launcherProductNetwork(productId) {
   return launcherProductById(productId) || fallbackLauncherProduct(productId);
 }
 
+function standaloneChannelProductIdForProduct(product) {
+  if (!product) return 'launcher';
+  if (product.mode === 'standalone') return normalizeStandaloneProductId(product.productId);
+  return normalizeStandaloneProductId(product.standaloneChannelProductId || 'launcher');
+}
+
+function standaloneChannelProductForProduct(product) {
+  return launcherProductNetwork(standaloneChannelProductIdForProduct(product));
+}
+
 function launcherLeasesForProduct(productId) {
   const normalized = String(productId || '').trim().toLowerCase();
   return asArray(state.launcherLeases)
@@ -4154,23 +4975,27 @@ function launcherLeasesForProduct(productId) {
 function renderAppCenterProductNetwork() {
   if (!h2oNetwork) return;
   const product = launcherProductNetwork('h2o');
-  const leases = launcherLeasesForProduct('h2o');
+  const channelProduct = standaloneChannelProductForProduct(product);
+  const channelProductId = standaloneChannelProductIdForProduct(product);
+  const leases = launcherLeasesForProduct(channelProductId).filter((lease) => launcherLeaseIsRuntimeClient(lease));
+  const launcherSmokeLeases = launcherLeasesForProduct('launcher');
   const latestLease = leases[0] || null;
   const error = state.launcherProductsError || state.launcherLeasesError || '';
   h2oNetwork.innerHTML = `
     <div class="product-network-head">
       <div>
         <strong>Product Network</strong>
-        <span>${escapeHtml(product.displayName || product.productId)} / ${escapeHtml(product.mode || 'embed')}</span>
+        <span>${escapeHtml(product.displayName || product.productId)} / embed via ${escapeHtml(launcherProductDisplayName(channelProductId, channelProduct))}</span>
       </div>
-      <span class="product-network-badge">${escapeHtml(latestLease?.leaseIp || product.serviceVip || '10.88.100.10')}</span>
+      <span class="product-network-badge">${escapeHtml(latestLease?.leaseIp || channelProduct.serviceVip || product.serviceVip || '10.88.100.1')}</span>
     </div>
     ${error ? `<div class="feedback error">${escapeHtml(error)}</div>` : ''}
     <div class="product-network-facts">
       <span><strong>${escapeHtml(product.serviceVip || '-')}</strong><small>service VIP</small></span>
+      <span><strong>${escapeHtml(launcherProductDisplayName(channelProductId, channelProduct))}</strong><small>standalone channel</small></span>
       <span><strong>${escapeHtml(product.internalControlIp || '10.88.88.88')}</strong><small>Internal</small></span>
-      <span><strong>${escapeHtml(formatLeaseRange(product.userLeaseStart, product.userLeaseEnd))}</strong><small>login users</small></span>
-      <span><strong>${escapeHtml(formatLeaseRange(product.anonymousLeaseStart, product.anonymousLeaseEnd))}</strong><small>anonymous</small></span>
+      <span><strong>${escapeHtml(formatLeaseRange(channelProduct.userLeaseStart, channelProduct.userLeaseEnd))}</strong><small>channel login users</small></span>
+      <span><strong>${escapeHtml(formatLeaseRange(channelProduct.anonymousLeaseStart, channelProduct.anonymousLeaseEnd))}</strong><small>channel anonymous</small></span>
     </div>
     <div class="product-lease-list">
       ${leases.slice(0, 4).map((lease) => `
@@ -4179,19 +5004,18 @@ function renderAppCenterProductNetwork() {
           <span>${escapeHtml(`${lease.identityKind || 'identity'} / ${lease.launcherMode || 'mode'} / ${lease.deviceLabel || lease.deviceId || '-'}`)}</span>
           <small>${escapeHtml(lease.leaseId || '-')}</small>
         </article>
-      `).join('') || '<div class="empty-state">No H2O lease yet. Create one here for smoke, or let @qpjoy/electron-launcher enroll automatically later.</div>'}
+      `).join('') || '<div class="empty-state">No MX-H2I client lease yet. Product ranges are reserved, but no real Launcher client has joined the relay.</div>'}
     </div>
     <div class="product-network-actions">
       <button class="secondary-button" type="button" data-h2o-domestic>Domestic Setup</button>
     </div>
-    <details class="product-network-advanced" ${leases.length ? '' : 'open'}>
+    <details class="product-network-advanced" ${launcherSmokeLeases.length ? '' : 'open'}>
       <summary>Advanced lease smoke</summary>
       ${renderRelayEnrollmentPanel({
-        productId: 'h2o',
+        productId: 'launcher',
         lockProduct: true,
-        lockMode: true,
-        title: 'H2O Relay Lease',
-        actionLabel: 'Create H2O Lease',
+        title: 'Launcher Relay Smoke',
+        actionLabel: 'Create Launcher Lease',
         compact: true
       })}
     </details>
@@ -4367,11 +5191,15 @@ function renderLauncherProductNetworksPanel() {
   const error = state.launcherProductsError;
   const standalone = products.find((product) => product.mode === 'standalone') || null;
   const embedProducts = products.filter((product) => product.mode === 'embed');
+  const firstEmbedChannel = embedProducts[0] ? standaloneChannelProductForProduct(embedProducts[0]) : null;
   const rows = products.map((product) => [
     product.displayName || product.productId,
     product.mode,
+    launcherProductDisplayName(standaloneChannelProductIdForProduct(product), standaloneChannelProductForProduct(product)),
     product.serviceVip || '-',
-    `${formatLeaseRange(product.userLeaseStart, product.userLeaseEnd)} / ${formatLeaseRange(product.anonymousLeaseStart, product.anonymousLeaseEnd)}`,
+    product.mode === 'standalone'
+      ? `${formatLeaseRange(product.userLeaseStart, product.userLeaseEnd)} / ${formatLeaseRange(product.anonymousLeaseStart, product.anonymousLeaseEnd)}`
+      : 'uses standalone channel lease',
     product.updatePolicy || '-'
   ]);
   return `
@@ -4379,7 +5207,7 @@ function renderLauncherProductNetworksPanel() {
       <div class="foundation-panel-head">
         <div>
           <h4>Product Network Registry</h4>
-          <p>Internal 统一管理 standalone Launcher 和 embed 产品的入口 IP、租约段、DNS、限速、许可与更新策略。</p>
+          <p>Internal 统一管理 standalone Launcher 通道，以及 embed app 依赖的通道、DNS、限速、许可与更新策略。</p>
         </div>
         <span>${escapeHtml(String(products.length || 0))} products</span>
       </div>
@@ -4387,14 +5215,15 @@ function renderLauncherProductNetworksPanel() {
       <div class="foundation-kpi-grid">
         ${renderFoundationKpi('Internal', '10.88.88.88', 'fixed control-plane peer')}
         ${renderFoundationKpi('Standalone', formatLeaseRange(standalone?.userLeaseStart, standalone?.userLeaseEnd), standalone ? `${formatLeaseRange(standalone.anonymousLeaseStart, standalone.anonymousLeaseEnd)} anonymous` : 'Launcher pool')}
-        ${renderFoundationKpi('Embed', formatLeaseRange(embedProducts[0]?.userLeaseStart, embedProducts[0]?.userLeaseEnd), 'product-owned leases')}
+        ${renderFoundationKpi('Embed Channel', firstEmbedChannel ? launcherProductDisplayName(firstEmbedChannel.productId, firstEmbedChannel) : 'MX-H2I', 'embed apps reuse standalone leases')}
         ${renderFoundationKpi('Updater', 'Launcher', 'standalone/embed shared policy')}
       </div>
       ${rows.length ? `
-        <div class="foundation-table">
+        <div class="foundation-table product-network-table">
           <article class="foundation-table-row is-header">
             <strong>Product</strong>
             <span>Mode</span>
+            <span>Channel</span>
             <span>Service VIP</span>
             <span>Login / anonymous range</span>
             <small>Update</small>
@@ -4405,7 +5234,8 @@ function renderLauncherProductNetworksPanel() {
               <span>${escapeHtml(row[1])}</span>
               <span>${escapeHtml(row[2])}</span>
               <span>${escapeHtml(row[3])}</span>
-              <small>${escapeHtml(row[4])}</small>
+              <span>${escapeHtml(row[4])}</span>
+              <small>${escapeHtml(row[5])}</small>
             </article>
           `).join('')}
         </div>
@@ -4586,39 +5416,40 @@ function renderRelayEnrollmentPanel(options = {}) {
   const product = options.productId ? launcherProductNetwork(options.productId) : null;
   const draft = relayEnrollmentDraftForRender(siteId, {
     productId: product?.productId,
-    mode: product?.mode
+    mode: 'standalone'
   });
   const lease = result?.leaseId ? result : null;
   const leaseIp = state.domesticPeerDraft.leaseIp || lease?.leaseIp || '';
   const productOptions = renderRelayProductOptions(draft.productId);
+  const productOptionsId = options.compact ? 'relay-product-options-compact' : 'relay-product-options';
   const title = options.title || 'Product Relay Lease';
   const actionLabel = options.actionLabel || 'Create Product Lease';
   const panelClass = options.compact ? 'foundation-operation-panel relay-lease-panel is-compact' : 'foundation-operation-panel relay-lease-panel';
   const productLabel = product
-    ? `${product.displayName || product.productId} / ${product.serviceVip || '-'}`
+    ? `${launcherProductDisplayName(product.productId, product)} / 10.${draft.productSecondOctet}`
     : draft.productId;
+  const leasePlaceholder = draft.identityKind === 'user'
+    ? `10.${draft.productSecondOctet}.0.x`
+    : `10.${draft.productSecondOctet}.100.x`;
   return `
     <section class="${panelClass}">
       <div class="section-title compact-title">
         <h4>${escapeHtml(title)}</h4>
-        <span>${escapeHtml(leaseIp || '10.90.100.x')}</span>
+        <span>${escapeHtml(leaseIp || leasePlaceholder)}</span>
       </div>
       <div class="foundation-operation-grid relay-operation-grid">
         <label class="form-field">
-          <span>Product</span>
+          <span>App / Product</span>
           ${options.lockProduct
             ? `<input autocomplete="off" value="${escapeHtml(productLabel)}" disabled /><input type="hidden" data-relay-field="productId" value="${escapeHtml(draft.productId)}" />`
-            : `<select data-relay-field="productId">${productOptions}</select>`}
+            : `<input data-relay-field="productId" list="${escapeHtml(productOptionsId)}" autocomplete="off" value="${escapeHtml(draft.productId)}" placeholder="launcher or luopan" />
+              <datalist id="${escapeHtml(productOptionsId)}">${productOptions}</datalist>`}
         </label>
         <label class="form-field compact-field">
-          <span>Mode</span>
-          ${options.lockMode
-            ? `<input autocomplete="off" value="${escapeHtml(draft.mode)}" disabled /><input type="hidden" data-relay-field="mode" value="${escapeHtml(draft.mode)}" />`
-            : `<select data-relay-field="mode">
-                <option value="embed" ${draft.mode === 'embed' ? 'selected' : ''}>embed</option>
-                <option value="standalone" ${draft.mode === 'standalone' ? 'selected' : ''}>standalone</option>
-              </select>`}
+          <span>10.* Segment</span>
+          <input data-relay-field="productSecondOctet" inputmode="numeric" min="1" max="254" type="number" value="${escapeHtml(draft.productSecondOctet)}" />
         </label>
+        <input type="hidden" data-relay-field="mode" value="standalone" />
         <label class="form-field compact-field">
           <span>Identity</span>
           <select data-relay-field="identityKind">
@@ -5079,10 +5910,10 @@ function renderInspectorEvidence(timeline) {
 }
 
 function renderPipelineList(pipelines) {
-  const sites = deploymentSites(pipelines, state.deploymentKind);
+  const sites = deploymentSites(pipelines, deploymentPipelineKind());
   pipelineCount.textContent = String(sites.length);
   if (sites.length === 0) {
-    pipelineList.innerHTML = `<div class="empty-state">No ${escapeHtml(state.deploymentKind)} sites</div>`;
+    pipelineList.innerHTML = `<div class="empty-state">No ${escapeHtml(deploymentKindLabel(state.deploymentKind))} sites</div>`;
     return;
   }
   pipelineList.innerHTML = sites.map((site) => {
@@ -6042,7 +6873,7 @@ function renderDomesticHistorySetupGuidance(pipeline) {
       <div>
         <span class="site-kind">Setup Assistant</span>
         <strong>${escapeHtml(summary.siteId)}: start a clean Domestic WG 2.0 plan</strong>
-        <p>当前选中的是 ${escapeHtml(summary.health)} / ${escapeHtml(summary.currentStage)} 历史执行，不是继续部署入口。新的 2.0 plan 会先 Materialize Domestic WG，然后通过 Remote SSH 执行 install/sync；activate 阶段会清理 hdo-home 和 100.* 旧网段。</p>
+        <p>当前选中的是 ${escapeHtml(summary.health)} / ${escapeHtml(summary.currentStage)} 历史执行，不是继续部署入口。新的 2.0 plan 会先 Materialize Domestic WG，然后通过 Remote SSH 执行 install/sync；activate 阶段保留 hdo-home/hdo-internal 和 100.* 旧网段，V1 清理由 manage.sh 显式执行。</p>
         <ol class="setup-next-chain" aria-label="Domestic setup chain">
           ${['SSH Profile', 'New 2.0 Plan', 'WG Secret', 'Preflight', 'Apply', 'Remote SSH', 'Install / Sync'].map((step, index) => `
             <li data-current="${index === 1 ? 'true' : 'false'}">${escapeHtml(step)}</li>
@@ -6738,9 +7569,7 @@ function defaultPreferredAction(actions) {
     'site-slot.worker-run.remote-ssh-execute',
     'site-slot.worker-run.artifact-push-remote-ssh-plan',
     'site-slot.domestic-relay-peer-append-ssh.prepare',
-    'site-slot.worker-run.domestic-relay-readonly-probe',
-    'site-slot.worker-run.domestic-relay-peer-append',
-    'site-slot.worker-run.domestic-relay-peer-append-ssh'
+    'site-slot.worker-run.domestic-relay-readonly-probe'
   ];
   for (const actionId of priority) {
     const action = candidates.find((item) => item.actionId === actionId);
@@ -6791,7 +7620,10 @@ function renderActionConfirm(action) {
     ? state.selectedActionBody
     : formatJson(materializeActionBodyTemplate(action));
   const bodyObject = parseActionBodyObject(body);
-  if (bodyObject) prepareAwxActionDraft(action, bodyObject);
+  if (bodyObject) {
+    syncDomesticPeerDraftFromObject(bodyObject);
+    prepareAwxActionDraft(action, bodyObject);
+  }
   return `
     <section class="action-confirm" aria-label="Action confirmation">
       <div class="action-confirm-head">
@@ -6803,12 +7635,15 @@ function renderActionConfirm(action) {
       </div>
       ${action.confirmFields && action.confirmFields.length ? `
         <div class="confirm-fields">
-          ${action.confirmFields.map((field) => `
+          ${action.confirmFields.map((field) => {
+            const checked = bodyObject && bodyObject[field] === true;
+            return `
             <label>
-              <input type="checkbox" data-confirm-field="${escapeHtml(field)}" />
+              <input type="checkbox" data-confirm-field="${escapeHtml(field)}" ${checked ? 'checked' : ''} />
               <span>${escapeHtml(field)}</span>
             </label>
-          `).join('')}
+          `;
+          }).join('')}
         </div>
       ` : ''}
       ${renderHomePeerQuickFields(body)}
@@ -6828,7 +7663,9 @@ function renderActionConfirm(action) {
 
 async function executeSelectedAction(options = {}) {
   const action = state.selectedAction;
-  if (!action || !action.allowed || state.actionBusy) return { ok: false, error: new Error('No executable action selected.') };
+  if (state.actionBusy) return { ok: false, error: new Error('Another action is already running. Wait for the current gate to finish.') };
+  if (!action) return { ok: false, error: new Error('Select an allowed action before executing.') };
+  if (!action.allowed) return { ok: false, error: new Error(action.reason || `${action.label} is locked by policy.`) };
   const resumeSetupAfterSuccess = state.setupRun.status === 'waiting-confirm';
   state.actionBusy = true;
   renderPipelineActions(state.currentActions);
@@ -6863,7 +7700,9 @@ async function executeSelectedAction(options = {}) {
         message: 'Approval recorded. Continuing setup...',
         steps: asArray(state.setupRun.steps)
       };
-      void continueSetupRun();
+      window.setTimeout(() => {
+        void continueSetupRun();
+      }, 0);
       return { ok: true, payload };
     }
     const monitorReason = options.monitor === false ? '' : postActionMonitorReason(action, payload);
@@ -6898,13 +7737,15 @@ function materializeActionBodyTemplate(action) {
   const changeWindowStart = now.toISOString();
   const changeWindowEnd = new Date(now.getTime() + 60 * 60 * 1000).toISOString();
   const requestId = `desktop-${String(action?.actionId || 'admin-action').replace(/[^a-zA-Z0-9_-]+/g, '-')}`;
+  const homePeer = runtimeDomesticPeerDraft();
   const body = replaceActionTemplateValue(action?.bodyTemplate || {}, {
     '<change-window-start-iso>': changeWindowStart,
     '<change-window-end-iso>': changeWindowEnd,
     '<internal-base-url>': normalizedServerBase(),
-    '<launcher-network-lease-id>': state.domesticPeerDraft.leaseId || '<launcher-network-lease-id>',
-    '<home-lease-ip>': state.domesticPeerDraft.leaseIp || '<home-lease-ip>',
-    '<home-wg-public-key>': state.domesticPeerDraft.publicKey || '<home-wg-public-key>',
+    '<product-id>': homePeer.productId || 'launcher',
+    '<launcher-network-lease-id>': homePeer.leaseId || '<launcher-network-lease-id>',
+    '<home-lease-ip>': homePeer.leaseIp || '<home-lease-ip>',
+    '<home-wg-public-key>': homePeer.publicKey || '<home-wg-public-key>',
     '<request-id>': requestId
   });
   return awxActionBodyDefaults(action, body);
@@ -6924,7 +7765,11 @@ function actionBodyForExecution(action) {
     ? state.selectedActionBody
     : formatJson(materializeActionBodyTemplate(action));
   if (!isActionBodyExecutable(text)) {
-    throw new Error('Action body JSON is invalid or still contains placeholders.');
+    if (!text.trim()) throw new Error('Action body is empty.');
+    if (hasUnresolvedActionPlaceholder(text)) {
+      throw new Error('Action body still contains angle-bracket placeholders. Fill the quick fields before executing.');
+    }
+    throw new Error('Action body JSON is invalid.');
   }
   const body = JSON.parse(text);
   if (action?.actionId === 'site-slot.worker-run.remote-ssh-execute') {
@@ -6961,15 +7806,110 @@ function launcherLeaseRole(lease) {
 
 function launcherLeaseLabel(lease) {
   const identity = lease.identityKind === 'user' ? 'user' : 'anonymous';
-  const mode = lease.launcherMode ? ` / ${lease.launcherMode}` : '';
+  const product = launcherProductDisplayName(lease.productId || 'launcher', launcherProductById(lease.productId));
   const device = lease.deviceLabel || lease.deviceId || lease.installId || lease.leaseId;
-  return `${lease.productId || 'product'} / ${identity}${mode} / ${lease.leaseIp} / ${device}`;
+  const mode = lease.launcherMode ? ` / ${lease.launcherMode}` : '';
+  return `${product} ${identity} / ${lease.leaseIp}${mode} / ${device}`;
+}
+
+function launcherLeaseIsStandalone(lease) {
+  if (!lease) return false;
+  if (lease.launcherMode === 'standalone') return true;
+  if (lease.launcherMode === 'embed') return false;
+  const product = launcherProductById(lease.productId);
+  return lease.productId === 'launcher' || product?.mode === 'standalone';
+}
+
+function leaseLooksGeneratedBySmoke(lease) {
+  const values = [
+    lease?.installId,
+    lease?.deviceId,
+    lease?.deviceLabel,
+    lease?.createdBy,
+    lease?.updatedBy,
+    lease?.leaseKey
+  ].map((value) => String(value || '').toLowerCase());
+  return values.some((value) => value.startsWith('dev_')
+    || value.startsWith('desktop-admin')
+    || value.includes('desktop-admin')
+    || value.includes('http-smoke')
+    || value.includes('smoke'));
+}
+
+function launcherLeaseIsRuntimeClient(lease) {
+  return launcherLeaseIsStandalone(lease)
+    && lease?.leaseId
+    && lease?.leaseIp
+    && lease?.publicKey
+    && lease?.status === 'active'
+    && !leaseLooksGeneratedBySmoke(lease);
 }
 
 function selectableLauncherLeases() {
   return asArray(state.launcherLeases)
-    .filter((lease) => lease?.leaseId && lease?.leaseIp && lease?.publicKey && lease?.status === 'active')
+    .filter((lease) => launcherLeaseIsRuntimeClient(lease))
     .sort((left, right) => launcherLeaseLabel(left).localeCompare(launcherLeaseLabel(right)));
+}
+
+function knownGeneratedLeaseByIp(leaseIp) {
+  if (!leaseIp) return null;
+  return asArray(state.launcherLeases).find((lease) => lease?.leaseIp === leaseIp && leaseLooksGeneratedBySmoke(lease)) || null;
+}
+
+function cleanHomePeerTextValue(value) {
+  const text = String(value || '').trim();
+  return text && !hasUnresolvedActionPlaceholder(text) ? text : '';
+}
+
+function cleanHomePeerLeaseIp(value) {
+  const leaseIp = cleanHomePeerTextValue(value);
+  if (!leaseIp || knownGeneratedLeaseByIp(leaseIp)) return '';
+  return leaseIp;
+}
+
+function peerRoleLabel(role, secondOctet) {
+  const octet = normalizeProductSecondOctet(secondOctet);
+  return role === 'user'
+    ? `account login / 10.${octet}.0.1+`
+    : `anonymous / 10.${octet}.100.1+`;
+}
+
+function runtimeDomesticPeerDraft() {
+  const lease = launcherLeaseById(state.domesticPeerDraft.leaseId);
+  if (launcherLeaseIsRuntimeClient(lease)) {
+    const productId = normalizeStandaloneProductId(lease.productId || state.domesticPeerDraft.productId || 'launcher');
+    const product = launcherProductNetwork(productId);
+    const productSecondOctet = productSecondOctetFromIp(lease.leaseIp)
+      || productSecondOctetFromProduct(product)
+      || state.domesticPeerDraft.productSecondOctet
+      || defaultProductSecondOctet(productId, product?.mode);
+    return {
+      lease,
+      leaseId: lease.leaseId || '',
+      leaseIp: lease.leaseIp || '',
+      publicKey: lease.publicKey || '',
+      peerRole: launcherLeaseRole(lease),
+      productId,
+      productSecondOctet
+    };
+  }
+  const leaseIp = cleanHomePeerLeaseIp(state.domesticPeerDraft.leaseIp);
+  const productId = normalizeStandaloneProductId(state.domesticPeerDraft.productId || 'launcher');
+  const product = launcherProductNetwork(productId);
+  const peerRole = inferDomesticPeerRole(leaseIp) || state.domesticPeerDraft.peerRole || 'guest';
+  const productSecondOctet = productSecondOctetFromIp(leaseIp)
+    || state.domesticPeerDraft.productSecondOctet
+    || productSecondOctetFromProduct(product)
+    || defaultProductSecondOctet(productId, product?.mode);
+  return {
+    lease: null,
+    leaseId: '',
+    leaseIp,
+    publicKey: leaseIp ? cleanHomePeerTextValue(state.domesticPeerDraft.publicKey) : '',
+    peerRole,
+    productId,
+    productSecondOctet
+  };
 }
 
 function renderHomePeerQuickFields(bodyText) {
@@ -6979,56 +7919,50 @@ function renderHomePeerQuickFields(bodyText) {
   const bodyLeaseId = typeof body.leaseId === 'string' && !hasUnresolvedActionPlaceholder(body.leaseId)
     ? body.leaseId
     : '';
-  const leaseId = bodyLeaseId || state.domesticPeerDraft.leaseId;
-  const selectedLease = leaseId ? launcherLeaseById(leaseId) : null;
-  const peerRole = selectedLease
-    ? launcherLeaseRole(selectedLease)
-    : body.peerRole === 'user' || body.peerRole === 'guest'
-      ? body.peerRole
-      : state.domesticPeerDraft.peerRole;
-  const leaseIp = selectedLease?.leaseIp
-    || (typeof body.leaseIp === 'string' && !hasUnresolvedActionPlaceholder(body.leaseIp) ? body.leaseIp : '')
-    || state.domesticPeerDraft.leaseIp;
-  const publicKey = selectedLease?.publicKey
-    || (typeof body.publicKey === 'string' && !hasUnresolvedActionPlaceholder(body.publicKey) ? body.publicKey : '')
-    || state.domesticPeerDraft.publicKey;
+  const selectedBodyLease = bodyLeaseId ? launcherLeaseById(bodyLeaseId) : null;
+  if (launcherLeaseIsRuntimeClient(selectedBodyLease)) applyLauncherLeaseToDomesticPeerDraft(selectedBodyLease);
+  const draft = runtimeDomesticPeerDraft();
+  const product = launcherProductNetwork(draft.productId);
+  const leaseIp = draft.leaseIp;
+  const publicKey = draft.publicKey;
+  const productSecondOctet = draft.productSecondOctet;
+  const leaseIpPlaceholder = draft.peerRole === 'user'
+    ? `10.${productSecondOctet}.0.x`
+    : `10.${productSecondOctet}.100.x`;
   const leases = selectableLauncherLeases();
   const leaseOptions = leases.map((lease) => `
-    <option value="${escapeHtml(lease.leaseId)}" ${lease.leaseId === leaseId ? 'selected' : ''}>
+    <option value="${escapeHtml(lease.leaseId)}" ${lease.leaseId === draft.leaseId ? 'selected' : ''}>
       ${escapeHtml(launcherLeaseLabel(lease))}
     </option>
   `).join('');
-  const missingSelectedLease = leaseId && !leases.some((lease) => lease.leaseId === leaseId)
-    ? `<option value="${escapeHtml(leaseId)}" selected>${escapeHtml(leaseId)}</option>`
-    : '';
-  const emptyLeaseOption = leases.length > 0
-    ? '<option value="">Select Internal lease</option>'
-    : `<option value="">${escapeHtml(state.launcherLeasesError || 'No active lease with public key')}</option>`;
+  const leaseControl = leases.length > 0
+    ? `<select data-home-peer-field="leaseId">
+        <option value="" ${draft.leaseId ? '' : 'selected'}>Select standalone client lease</option>
+        ${leaseOptions}
+      </select>`
+    : `<input value="${escapeHtml(state.launcherLeasesError || 'No MX-H2I/Luopan client lease yet')}" readonly />`;
   return `
     <section class="home-peer-fields" aria-label="Home relay peer">
-      <label>
-        <span>Internal Lease</span>
-        <select data-home-peer-field="leaseId">
-          ${emptyLeaseOption}
-          ${missingSelectedLease}
-          ${leaseOptions}
-        </select>
+      <label class="home-peer-lease-field">
+        <span>Standalone Client Lease</span>
+        ${leaseControl}
       </label>
-      <label>
-        <span>Peer Role</span>
-        <select data-home-peer-field="peerRole">
-          <option value="guest" ${peerRole === 'guest' ? 'selected' : ''}>anonymous / product .100-.254</option>
-          <option value="user" ${peerRole === 'user' ? 'selected' : ''}>user / product .0-.99</option>
-        </select>
+      <label class="home-peer-readonly">
+        <span>Identity</span>
+        <input data-home-peer-field="identityLabel" value="${escapeHtml(peerRoleLabel(draft.peerRole, productSecondOctet))}" readonly />
       </label>
-      <label>
+      <label class="home-peer-readonly">
         <span>Lease IP</span>
-        <input data-home-peer-field="leaseIp" value="${escapeHtml(leaseIp)}" placeholder="10.90.100.x" />
+        <input value="${escapeHtml(leaseIp)}" placeholder="${escapeHtml(leaseIpPlaceholder)}" readonly />
       </label>
-      <label>
+      <label class="home-peer-public-key-field home-peer-readonly">
         <span>WG Public Key</span>
-        <input data-home-peer-field="publicKey" value="${escapeHtml(publicKey)}" placeholder="Home WireGuard public key" />
+        <input value="${escapeHtml(publicKey)}" placeholder="created by MX-H2I/Luopan client" readonly />
       </label>
+      <div class="home-peer-route-field">
+        <strong>${escapeHtml(launcherProductDisplayName(draft.productId, product))}: Domestic ${escapeHtml(draft.lease?.domesticGatewayIp || '10.88.0.1')}</strong>
+        <small>to Internal ${escapeHtml(product?.internalControlIp || '10.88.88.88')}</small>
+      </div>
     </section>
   `;
 }
@@ -7086,19 +8020,23 @@ function syncHomePeerField(input) {
   if (field === 'leaseId') {
     state.domesticPeerDraft.leaseId = input.value.trim();
     const lease = launcherLeaseById(state.domesticPeerDraft.leaseId);
-    if (lease) applyLauncherLeaseToDomesticPeerDraft(lease);
-  } else if (field === 'peerRole') {
-    state.domesticPeerDraft.peerRole = input.value === 'user' ? 'user' : 'guest';
-  } else if (field === 'leaseIp') {
-    state.domesticPeerDraft.leaseIp = input.value.trim();
-    const inferredRole = inferDomesticPeerRole(state.domesticPeerDraft.leaseIp);
-    if (inferredRole) state.domesticPeerDraft.peerRole = inferredRole;
-  } else if (field === 'publicKey') {
-    state.domesticPeerDraft.publicKey = input.value.trim();
+    if (launcherLeaseIsRuntimeClient(lease)) {
+      applyLauncherLeaseToDomesticPeerDraft(lease);
+    } else {
+      state.domesticPeerDraft.leaseId = '';
+      state.domesticPeerDraft.leaseIp = '';
+      state.domesticPeerDraft.publicKey = '';
+      state.domesticPeerDraft.peerRole = 'guest';
+    }
   }
 }
 
 function applyLauncherLeaseToDomesticPeerDraft(lease) {
+  state.domesticPeerDraft.productId = normalizeStandaloneProductId(lease.productId || state.domesticPeerDraft.productId || 'launcher');
+  state.domesticPeerDraft.productSecondOctet = productSecondOctetFromIp(lease.leaseIp)
+    || productSecondOctetFromProduct(launcherProductById(lease.productId))
+    || state.domesticPeerDraft.productSecondOctet
+    || '89';
   state.domesticPeerDraft.leaseId = lease.leaseId || state.domesticPeerDraft.leaseId;
   state.domesticPeerDraft.leaseIp = lease.leaseIp || state.domesticPeerDraft.leaseIp;
   state.domesticPeerDraft.publicKey = lease.publicKey || state.domesticPeerDraft.publicKey;
@@ -7108,7 +8046,7 @@ function applyLauncherLeaseToDomesticPeerDraft(lease) {
 function inferDomesticPeerRole(leaseIp) {
   const parts = String(leaseIp || '').split('.').map((part) => Number(part));
   if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) return null;
-  if (parts[0] !== 10 || parts[1] < 89 || parts[1] > 254 || parts[1] === 88) return null;
+  if (parts[0] !== 10 || parts[1] < 1 || parts[1] > 254 || parts[1] === 88) return null;
   if (parts[2] < 0 || parts[2] > 254 || parts[3] < 1 || parts[3] > 254) return null;
   return parts[2] >= 100 ? 'guest' : 'user';
 }
@@ -7131,20 +8069,18 @@ function updateSelectedActionBodyFromHomePeer() {
   if (!bodyInput) return;
   const body = parseActionBodyObject(bodyInput.value);
   if (!body) return;
-  if ('leaseId' in body) body.leaseId = state.domesticPeerDraft.leaseId || '<launcher-network-lease-id>';
-  if ('peerRole' in body) body.peerRole = state.domesticPeerDraft.peerRole;
-  if ('leaseIp' in body) body.leaseIp = state.domesticPeerDraft.leaseIp || '<home-lease-ip>';
-  if ('publicKey' in body) body.publicKey = state.domesticPeerDraft.publicKey || '<home-wg-public-key>';
+  const homePeer = runtimeDomesticPeerDraft();
+  if ('productId' in body) body.productId = homePeer.productId || 'launcher';
+  if ('leaseId' in body) body.leaseId = homePeer.leaseId || '<launcher-network-lease-id>';
+  if ('peerRole' in body) body.peerRole = homePeer.peerRole;
+  if ('leaseIp' in body) body.leaseIp = homePeer.leaseIp || '<home-lease-ip>';
+  if ('publicKey' in body) body.publicKey = homePeer.publicKey || '<home-wg-public-key>';
   state.selectedActionBody = formatJson(body);
   bodyInput.value = state.selectedActionBody;
-  const roleSelect = pipelineActions.querySelector('[data-home-peer-field="peerRole"]');
-  if (roleSelect) roleSelect.value = state.domesticPeerDraft.peerRole;
+  const identityInput = pipelineActions.querySelector('[data-home-peer-field="identityLabel"]');
+  if (identityInput) identityInput.value = peerRoleLabel(homePeer.peerRole, homePeer.productSecondOctet);
   const leaseSelect = pipelineActions.querySelector('[data-home-peer-field="leaseId"]');
-  if (leaseSelect) leaseSelect.value = state.domesticPeerDraft.leaseId;
-  const leaseIpInput = pipelineActions.querySelector('[data-home-peer-field="leaseIp"]');
-  if (leaseIpInput) leaseIpInput.value = state.domesticPeerDraft.leaseIp;
-  const publicKeyInput = pipelineActions.querySelector('[data-home-peer-field="publicKey"]');
-  if (publicKeyInput) publicKeyInput.value = state.domesticPeerDraft.publicKey;
+  if (leaseSelect) leaseSelect.value = homePeer.leaseId;
 }
 
 function updateSelectedActionBodyFromAwxDraft() {
@@ -7183,21 +8119,32 @@ function syncDomesticPeerDraftFromPayload(payload) {
 function syncDomesticPeerDraftFromObject(value) {
   if (!value || typeof value !== 'object') return;
   const role = value.peerRole || value.role;
+  const productId = typeof value.productId === 'string' && !hasUnresolvedActionPlaceholder(value.productId) ? normalizeStandaloneProductId(value.productId) : null;
   const leaseId = typeof value.leaseId === 'string' && !hasUnresolvedActionPlaceholder(value.leaseId) ? value.leaseId : null;
   const leaseIp = typeof value.leaseIp === 'string' && !hasUnresolvedActionPlaceholder(value.leaseIp) ? value.leaseIp : null;
   const publicKey = typeof value.publicKey === 'string' && !hasUnresolvedActionPlaceholder(value.publicKey) ? value.publicKey : null;
+  if (productId) {
+    state.domesticPeerDraft.productId = productId;
+    state.domesticPeerDraft.productSecondOctet = productSecondOctetFromProduct(launcherProductById(productId))
+      || state.domesticPeerDraft.productSecondOctet
+      || defaultProductSecondOctet(productId);
+  }
   if (leaseId) {
-    state.domesticPeerDraft.leaseId = leaseId;
     const lease = launcherLeaseById(leaseId);
-    if (lease) applyLauncherLeaseToDomesticPeerDraft(lease);
+    if (launcherLeaseIsRuntimeClient(lease)) {
+      state.domesticPeerDraft.leaseId = leaseId;
+      applyLauncherLeaseToDomesticPeerDraft(lease);
+    }
   }
   if (role === 'user' || role === 'guest') state.domesticPeerDraft.peerRole = role;
-  if (leaseIp) {
+  if (leaseIp && !knownGeneratedLeaseByIp(leaseIp)) {
     state.domesticPeerDraft.leaseIp = leaseIp;
     const inferredRole = inferDomesticPeerRole(leaseIp);
     if (inferredRole) state.domesticPeerDraft.peerRole = inferredRole;
+    const inferredSecondOctet = productSecondOctetFromIp(leaseIp);
+    if (inferredSecondOctet) state.domesticPeerDraft.productSecondOctet = inferredSecondOctet;
   }
-  if (publicKey) state.domesticPeerDraft.publicKey = publicKey;
+  if (publicKey && (!leaseIp || !knownGeneratedLeaseByIp(leaseIp))) state.domesticPeerDraft.publicKey = publicKey;
 }
 
 function parseActionBodyObject(text) {
@@ -7220,7 +8167,6 @@ function nextActionFocusFromResult(action, payload) {
       jobId: preparedAwxJobId,
       actionIds: [
         'site-slot.worker-run.domestic-relay-readonly-probe',
-        'site-slot.worker-run.domestic-relay-peer-append',
         'site-slot.worker-run.awx-sync-plan',
         'site-slot.worker-run.awx-credential-sync',
         'site-slot.worker-run.awx-object-sync',
@@ -7235,9 +8181,7 @@ function nextActionFocusFromResult(action, payload) {
       jobId: preparedJobId,
       actionIds: [
         'site-slot.worker-run.remote-ssh-gate',
-        'site-slot.worker-run.domestic-relay-readonly-probe',
-        'site-slot.worker-run.domestic-relay-peer-append',
-        'site-slot.worker-run.domestic-relay-peer-append-ssh'
+        'site-slot.worker-run.domestic-relay-readonly-probe'
       ]
     };
   }
@@ -7251,17 +8195,13 @@ function nextActionFocusFromResult(action, payload) {
     return {
       jobId,
       actionIds: isDomesticRelayPeerWorkerJob(job)
-        ? ['site-slot.worker-run.domestic-relay-readonly-probe', 'site-slot.worker-run.domestic-relay-peer-append', 'site-slot.worker-run.domestic-relay-peer-append-ssh']
+        ? ['site-slot.worker-run.domestic-relay-readonly-probe']
         : ['site-slot.worker-run.remote-ssh-readonly-probe', 'site-slot.worker-run.remote-ssh-execute', 'site-slot.worker-run.artifact-push-remote-ssh-plan']
     };
   }
   if (action?.actionId === 'site-slot.worker-run.domestic-relay-readonly-probe'
     && payload?.relayReadOnlyProbe?.status !== 'ready') {
     return { jobId, actionIds: ['site-slot.worker-run.domestic-relay-readonly-probe'] };
-  }
-  if (action?.actionId === 'site-slot.worker-run.domestic-relay-peer-append'
-    && payload?.relayPeerAppend?.status !== 'ready') {
-    return { jobId, actionIds: ['site-slot.worker-run.domestic-relay-peer-append'] };
   }
   if (action?.actionId === 'site-slot.worker-run.awx-sync-plan'
     && payload?.awxSyncPlan?.status !== 'ready') {
@@ -7282,8 +8222,7 @@ function nextActionFocusFromResult(action, payload) {
   const nextByActionId = {
     'site-slot.worker-run.remote-ssh-gate': ['site-slot.worker-run.domestic-relay-readonly-probe', 'site-slot.worker-run.remote-ssh-readonly-probe', 'site-slot.worker-run.remote-ssh-execute'],
     'site-slot.worker-run.remote-ssh-readonly-probe': ['site-slot.worker-run.remote-ssh-execute', 'site-slot.worker-run.artifact-push-remote-ssh-plan'],
-    'site-slot.worker-run.domestic-relay-readonly-probe': ['site-slot.worker-run.domestic-relay-peer-append'],
-    'site-slot.worker-run.domestic-relay-peer-append': ['site-slot.worker-run.domestic-relay-peer-append-ssh', 'site-slot.worker-run.remote-ssh-gate'],
+    'site-slot.worker-run.domestic-relay-readonly-probe': ['site-slot.worker-run.remote-ssh-gate'],
     'site-slot.worker-run.awx-sync-plan': ['site-slot.worker-run.awx-credential-sync', 'site-slot.worker-run.awx-object-sync', 'site-slot.worker-run.awx-launch', 'site-slot.worker-run.awx-shadow'],
     'site-slot.worker-run.awx-credential-sync': ['site-slot.worker-run.awx-object-sync', 'site-slot.worker-run.awx-launch'],
     'site-slot.worker-run.awx-object-sync': ['site-slot.worker-run.awx-launch', 'site-slot.worker-run.awx-sync-plan']
@@ -7327,6 +8266,7 @@ function summarizeActionPayload(action, payload) {
     || payload.awxObjectSync
     || payload.awxLaunch
     || payload.domesticWgMaterialize
+    || payload.internalServicePeerHandoff
     || payload.report
     || payload.workerExecution
     || payload.fakeTransport
@@ -7386,6 +8326,37 @@ function summarizeActionDetail(payload) {
       artifact: domesticWgMaterialize.artifact,
       blockedReasons: domesticWgMaterialize.blockedReasons || [],
       nextActions: domesticWgMaterialize.nextActions || []
+    }, null, 2);
+  }
+  const internalServicePeerHandoff = payload?.internalServicePeerHandoff;
+  if (internalServicePeerHandoff) {
+    return JSON.stringify({
+      status: internalServicePeerHandoff.status,
+      execution: internalServicePeerHandoff.execution,
+      boundary: internalServicePeerHandoff.boundary,
+      command: internalServicePeerHandoff.command,
+      env: internalServicePeerHandoff.env,
+      config: internalServicePeerHandoff.config,
+      relay: internalServicePeerHandoff.relay,
+      gates: internalServicePeerHandoff.gates,
+      checks: internalServicePeerHandoff.checks || [],
+      blockedReasons: internalServicePeerHandoff.blockedReasons || [],
+      nextActions: internalServicePeerHandoff.nextActions || []
+    }, null, 2);
+  }
+  const internalServicePeerHostRunnerEnsure = payload?.internalServicePeerHostRunnerEnsure;
+  if (internalServicePeerHostRunnerEnsure) {
+    return JSON.stringify({
+      status: internalServicePeerHostRunnerEnsure.status,
+      execution: internalServicePeerHostRunnerEnsure.execution,
+      mode: internalServicePeerHostRunnerEnsure.mode,
+      runnerUrl: internalServicePeerHostRunnerEnsure.runnerUrl,
+      namespace: internalServicePeerHostRunnerEnsure.namespace,
+      name: internalServicePeerHostRunnerEnsure.name,
+      image: internalServicePeerHostRunnerEnsure.image,
+      objects: internalServicePeerHostRunnerEnsure.objects || [],
+      blockedReasons: internalServicePeerHostRunnerEnsure.blockedReasons || [],
+      nextActions: internalServicePeerHostRunnerEnsure.nextActions || []
     }, null, 2);
   }
   const relayPeerAppendSsh = payload?.relayPeerAppendSsh;

@@ -166,7 +166,7 @@ async function recordReleaseManagementPlan() {
       body: {
         releaseId,
         channel: 'shadow',
-        productId: 'mx-launcher',
+        productId: 'launcher',
         appId: 'h2o',
         launcherCurrentVersion: process.env.MX_INTERNAL_SHADOW_LAUNCHER_CURRENT_VERSION || '0.1.0',
         launcherTargetVersion: process.env.MX_INTERNAL_SHADOW_LAUNCHER_TARGET_VERSION || '0.1.1',

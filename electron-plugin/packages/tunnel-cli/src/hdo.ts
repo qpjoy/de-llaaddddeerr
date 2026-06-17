@@ -437,7 +437,7 @@ function statusCommand(input: HdoCommandOptions): void {
   const installDir = resolveInstallDir(input.installDir || state.installDir);
   const runtime = resolveWireGuardConnectionRuntime({
     installDir,
-    allowSystemFallback: true,
+    allowSystemFallback: false,
   });
 
   process.stdout.write(`State file: ${stateFile}\n`);
@@ -489,7 +489,7 @@ async function downCommand(input: HdoCommandOptions): Promise<void> {
   if (process.platform === 'linux') {
     const runtime = resolveWireGuardConnectionRuntime({
       installDir,
-      allowSystemFallback: true,
+      allowSystemFallback: false,
     });
     if (commandAvailable('systemctl') && systemdUnitExists('wg-quick@.service')) {
       inheritRequired('systemctl', ['disable', '--now', `wg-quick@${interfaceName}`]);
@@ -503,7 +503,7 @@ async function downCommand(input: HdoCommandOptions): Promise<void> {
 
   const runtime = resolveWireGuardConnectionRuntime({
     installDir,
-    allowSystemFallback: true,
+    allowSystemFallback: false,
   });
   if (process.platform === 'darwin') {
     if (!canReadFile(configPath)) {
@@ -856,7 +856,7 @@ function resolveKeypair(
   }
   const runtime = resolveWireGuardRuntime({
     installDir,
-    allowSystemFallback: true,
+    allowSystemFallback: false,
   });
   if (!runtime.command) {
     throw new Error(runtime.error ?? 'WireGuard wg command unavailable.');
@@ -946,7 +946,7 @@ async function startSystemTunnel(interfaceName: string, configPath: string, inst
 
   const runtime = resolveWireGuardConnectionRuntime({
     installDir,
-    allowSystemFallback: true,
+    allowSystemFallback: false,
   });
   if (process.platform === 'darwin') {
     const result = await installDarwinWireGuardLaunchDaemon({ runtime, configPath });
@@ -1129,14 +1129,14 @@ function printWireGuardRuntimeStatus(runtime: WireGuardConnectionRuntimeStatus, 
 async function ensureLinuxWireGuardRuntime(installDir: string): Promise<WireGuardConnectionRuntimeStatus> {
   let runtime = resolveWireGuardConnectionRuntime({
     installDir,
-    allowSystemFallback: true,
+    allowSystemFallback: false,
   });
   if (runtime.available) return runtime;
 
   const installed = installLinuxWireGuardTools();
   runtime = resolveWireGuardConnectionRuntime({
     installDir,
-    allowSystemFallback: true,
+    allowSystemFallback: false,
   });
   if (runtime.available) return runtime;
 

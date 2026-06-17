@@ -22,10 +22,28 @@
         </div>
 
         <nav class="nav-tabs" aria-label="Primary">
-          <button id="tab-app-center" class="nav-tab is-active" type="button" data-view="app-center" data-short="App">
-            <strong>AppCenter</strong>
-            <span>应用宿主</span>
-          </button>
+          <section class="nav-group" aria-label="Applications">
+            <div class="nav-group-title">
+              <strong>应用 App</strong>
+              <span>Launcher products</span>
+            </div>
+            <div class="nav-tree">
+              <button id="tab-mx-h2i" class="nav-tab nav-tab-standalone" type="button" data-view="app-center" data-app-node="mx-h2i" data-short="H2I">
+                <strong>MX-H2I</strong>
+                <span>standalone channel</span>
+              </button>
+              <div class="nav-tree-children">
+                <button id="tab-app-center" class="nav-tab is-active" type="button" data-view="app-center" data-app-node="appcenter" data-short="App">
+                  <strong>AppCenter</strong>
+                  <span>embed host</span>
+                </button>
+                <button id="tab-h2o" class="nav-tab" type="button" data-view="app-center" data-app-node="h2o" data-short="H2O">
+                  <strong>H2O</strong>
+                  <span>embed app</span>
+                </button>
+              </div>
+            </div>
+          </section>
           <button id="tab-admin" class="nav-tab" type="button" data-view="admin" data-admin-menu="operations" data-admin-section="dashboard" data-admin-subsection="overview" data-short="I-HDO">
             <strong>I-HDO</strong>
             <span>Operations H/D/I/O</span>
@@ -60,6 +78,10 @@
             <button class="admin-module-tab" type="button" data-admin-menu="operations" data-admin-section="deployment" data-admin-subsection="domestic" data-deployment-kind="domestic">
               <strong>Domestic</strong>
               <span>WG / H2I relay</span>
+            </button>
+            <button class="admin-module-tab" type="button" data-admin-menu="operations" data-admin-section="deployment" data-admin-subsection="internal" data-deployment-kind="internal">
+              <strong>Internal</strong>
+              <span>service peer / host runner</span>
             </button>
             <button class="admin-module-tab" type="button" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="overview" hidden>
               <strong>Overview</strong>
@@ -194,7 +216,7 @@
             <button id="admin-refresh" class="primary-button" type="button">Refresh</button>
           </header>
 
-          <section class="admin-console">
+          <section id="admin-console" class="admin-console">
             <section class="admin-module-content">
               <section id="admin-section-dashboard" class="admin-section is-active">
                 <section class="mx-console-bar" aria-label="MX Console status">
@@ -496,21 +518,24 @@
               </section>
             </section>
 
-            <aside class="admin-inspector" aria-labelledby="inspector-title">
+            <aside id="admin-inspector" class="admin-inspector" aria-labelledby="inspector-title">
               <div class="inspector-head">
-                <div>
+                <div class="inspector-title-block">
                   <span id="inspector-kind" class="site-kind">Inspector</span>
                   <h3 id="inspector-title">No object selected</h3>
                   <p id="inspector-meta">Select a site or pipeline to inspect.</p>
                 </div>
-                <span id="inspector-status" class="health-chip" data-health="ready">idle</span>
+                <div class="inspector-head-actions">
+                  <span id="inspector-status" class="health-chip" data-health="ready">idle</span>
+                  <button id="inspector-toggle" class="icon-button inspector-toggle" type="button" aria-label="Collapse inspector" aria-expanded="true" title="Collapse inspector">→</button>
+                </div>
               </div>
-              <dl id="inspector-facts" class="inspector-facts"></dl>
-              <section class="inspector-section">
+              <dl id="inspector-facts" class="inspector-facts inspector-body"></dl>
+              <section class="inspector-section inspector-body">
                 <h4>Next Gate</h4>
                 <div id="inspector-next">No gated action selected.</div>
               </section>
-              <section class="inspector-section">
+              <section class="inspector-section inspector-body">
                 <h4>Recent Evidence</h4>
                 <div id="inspector-evidence" class="inspector-evidence"></div>
               </section>

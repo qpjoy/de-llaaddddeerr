@@ -459,8 +459,8 @@ export async function createLauncherNetworkSession(
   input: LauncherNetworkSessionInput = {}
 ): Promise<LauncherNetworkSession> {
   const wireGuard = await resolveWireGuardKeyMaterial(input);
-  const productId = input.productId?.trim() || input.appId?.trim() || 'h2o';
-  const mode = launcherProductMode(input.mode ?? input.launcherMode ?? 'embed');
+  const productId = input.productId?.trim() || input.appId?.trim() || 'launcher';
+  const mode = launcherProductMode(input.mode ?? input.launcherMode ?? (productId === 'launcher' ? 'standalone' : 'embed'));
   const lease = await client.enrollLease({
     productId,
     mode,

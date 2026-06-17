@@ -413,6 +413,7 @@ export function builtinLauncherProductNetworks(config: RuntimeConfig): LauncherP
       productId: 'launcher',
       displayName: 'Launcher Standalone',
       mode: 'standalone',
+      standaloneChannelProductId: 'launcher',
       productIndex: 0,
       serviceVip: '10.88.100.1',
       userCidr: '10.89.0.0/16',
@@ -431,6 +432,7 @@ export function builtinLauncherProductNetworks(config: RuntimeConfig): LauncherP
       productId: 'h2o',
       displayName: 'H2O',
       mode: 'embed',
+      standaloneChannelProductId: 'launcher',
       productIndex: 0,
       serviceVip: '10.88.100.10',
       userCidr: '10.90.0.0/16',
@@ -454,17 +456,22 @@ export function buildLauncherProductNetwork(
   previous: LauncherProductNetwork | null,
   now = new Date().toISOString()
 ): LauncherProductNetwork {
-  const productId = safeIdPart(input.productId?.trim() || previous?.productId || 'h2o').toLowerCase();
-  const mode = launcherProductMode(input.mode ?? previous?.mode);
+  const productId = safeIdPart(input.productId?.trim() || previous?.productId || 'launcher').toLowerCase();
+  const mode = launcherProductMode(input.mode ?? previous?.mode ?? (productId === 'launcher' ? 'standalone' : 'embed'));
   const productIndex = Number.isFinite(input.productIndex ?? NaN)
     ? Math.max(0, Math.floor(Number(input.productIndex)))
     : previous?.productIndex ?? (mode === 'standalone' ? 0 : 0);
   const defaults = defaultLauncherProductNetworkShape(productId, mode, productIndex);
+  const rawStandaloneChannel = mode === 'standalone'
+    ? productId
+    : input.standaloneChannelProductId?.trim() || previous?.standaloneChannelProductId || 'launcher';
+  const standaloneChannelProductId = safeIdPart(rawStandaloneChannel).toLowerCase() || (mode === 'standalone' ? productId : 'launcher');
   const updatedBy = input.requestedBy?.trim() || 'config-center';
   return {
     productId,
     displayName: input.displayName?.trim() || previous?.displayName || defaults.displayName,
     mode,
+    standaloneChannelProductId,
     productIndex,
     fabricCidr: '10.88.0.0/16',
     internalControlIp: '10.88.88.88',
@@ -576,7 +583,14 @@ export function builtinDnsPolicies(config: RuntimeConfig): DnsPolicy[] {
       priority: 100,
       owners: ['launcher-network', 'h2o', 'sdk-gateway'],
       whitelist: {
-        exactDomains: ['internal.mx', 'gateway.internal.mx'],
+        exactDomains: [
+          'internal.mx',
+          'gateway.internal.mx',
+          'dns.internal.mx',
+          'host-runner.internal.mx',
+          'service-peer.internal.mx',
+          'domestic-relay.internal.mx'
+        ],
         suffixes: ['.internal.mx', '.corp.mx', '.h2i.mx']
       },
       internal: {
@@ -662,7 +676,7 @@ export function buildDnsZoneSnapshot(
   const expiresAt = new Date(issuedAt.getTime() + 30 * 60 * 1000);
   const targetServiceDns = hostFromUrl(config.internalBaseUrl) || input.policy.internal.serviceDns;
   const zoneNames = dnsPolicyZoneNames(input.policy);
-  const records = dnsZoneRecords(input.policy, input.reverseProxyRoutes, targetServiceDns);
+  const records = dnsZoneRecords(config, input.policy, input.reverseProxyRoutes, targetServiceDns);
   const serverBlocks = zoneNames.map((zone) => ({
     zone,
     text: corefileServerBlock(zone, records, targetServiceDns)
@@ -839,6 +853,7 @@ function dnsPolicyZoneNames(policy: DnsPolicy): string[] {
 }
 
 function dnsZoneRecords(
+  config: RuntimeConfig,
   policy: DnsPolicy,
   routes: DnsReverseProxyRoute[],
   targetServiceDns: string
@@ -852,7 +867,28 @@ function dnsZoneRecords(
     const target = hostFromUrl(route.targetUrl) || targetServiceDns;
     records.set(host, dnsRecordForTarget(host, target, 'reverse-proxy-route'));
   }
+  for (const record of internalDnsServiceRecords(config, policy)) {
+    records.set(record.name, record);
+  }
   return [...records.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function internalDnsServiceRecords(config: RuntimeConfig, policy: DnsPolicy): DnsZoneRecord[] {
+  const internalServiceIp = '10.88.88.88';
+  const domesticRelayIp = '10.88.0.1';
+  const hostRunnerServiceDns = 'mx-internal-host-runner.mx-internal-shadow.svc.cluster.local';
+  const coreDnsServiceDns = policy.internal.serviceDns || 'mx-internal-coredns.mx-dns.svc.cluster.local';
+  const apiTarget = isClusterServiceHost(hostFromUrl(config.internalBaseUrl))
+    ? internalServiceIp
+    : hostFromUrl(config.internalBaseUrl) || internalServiceIp;
+  return [
+    dnsRecordForTarget('internal.mx', apiTarget, 'internal-service'),
+    dnsRecordForTarget('gateway.internal.mx', apiTarget, 'internal-service'),
+    dnsRecordForTarget('dns.internal.mx', coreDnsServiceDns, 'internal-service'),
+    dnsRecordForTarget('host-runner.internal.mx', hostRunnerServiceDns, 'internal-service'),
+    dnsRecordForTarget('service-peer.internal.mx', internalServiceIp, 'internal-service'),
+    dnsRecordForTarget('domestic-relay.internal.mx', domesticRelayIp, 'internal-service')
+  ];
 }
 
 function dnsRecordForTarget(
@@ -886,6 +922,7 @@ function corefileServerBlock(zone: string, records: DnsZoneRecord[], targetServi
     ...rewrites,
     ...hostsBlock,
     '  cache 30',
+    '  reload',
     '  forward . /etc/resolv.conf',
     '}'
   ].join('\n');
@@ -901,6 +938,10 @@ function hostFromUrl(value: string): string {
 
 function isIpv4(value: string): boolean {
   return /^(\d{1,3}\.){3}\d{1,3}$/.test(value);
+}
+
+function isClusterServiceHost(value: string): boolean {
+  return value.endsWith('.svc') || value.includes('.svc.cluster.local');
 }
 
 function validIpv4OrFallback(value: string | null | undefined, fallback: string): string {
@@ -939,15 +980,18 @@ function launcherProductUpdatePolicy(value: LauncherProductNetworkInput['updateP
 
 function defaultLauncherProductNetworkShape(productId: string, mode: LauncherProductMode, productIndex: number) {
   if (mode === 'standalone') {
+    const index = Math.max(0, Math.min(164, Math.floor(productIndex)));
+    const secondOctet = productId === 'launcher' ? 89 : 90 + index;
+    const serviceOffset = productId === 'launcher' ? 1 : 2 + (index % 198);
     return {
       displayName: productId === 'launcher' ? 'Launcher Standalone' : productId,
-      serviceVip: '10.88.100.1',
-      userCidr: '10.89.0.0/16',
-      anonymousCidr: '10.89.0.0/16',
-      userLeaseStart: '10.89.0.1',
-      userLeaseEnd: '10.89.99.254',
-      anonymousLeaseStart: '10.89.100.1',
-      anonymousLeaseEnd: '10.89.254.254',
+      serviceVip: `10.88.100.${serviceOffset}`,
+      userCidr: `10.${secondOctet}.0.0/16`,
+      anonymousCidr: `10.${secondOctet}.0.0/16`,
+      userLeaseStart: `10.${secondOctet}.0.1`,
+      userLeaseEnd: `10.${secondOctet}.99.254`,
+      anonymousLeaseStart: `10.${secondOctet}.100.1`,
+      anonymousLeaseEnd: `10.${secondOctet}.254.254`,
       rateLimitProfile: 'standalone-default'
     };
   }
@@ -3192,16 +3236,12 @@ function siteSlotDeploymentPhases(
   const domesticBootstrapSubscriptionUrl = `${overseaSubscriptionBaseUrl}/${overseaDomesticAccountName}.yaml`;
   const domesticTunnelModeCommand = '{ QP_TUNNEL_MODE=${QP_TUNNEL_MODE:-egress-on}; case "$QP_TUNNEL_MODE" in server|server-on|egress|egress-on) if "$QP_TUNNEL_CLI" help 2>/dev/null | grep -q "egress-on"; then "$QP_TUNNEL_CLI" egress-on; elif "$QP_TUNNEL_CLI" help 2>/dev/null | grep -q "server-on"; then echo "warning: selected tunnel cli lacks egress-on; falling back to server-on"; "$QP_TUNNEL_CLI" server-on; else echo "blocked: selected tunnel cli does not support egress-on/server-on"; exit 1; fi ;; tun|tun-on) if "$QP_TUNNEL_CLI" help 2>/dev/null | grep -q "tun-on"; then "$QP_TUNNEL_CLI" tun-on; else echo "blocked: selected tunnel cli does not support tun-on"; exit 1; fi ;; *) echo "blocked: unsupported QP_TUNNEL_MODE=$QP_TUNNEL_MODE"; exit 1 ;; esac; }';
   const domesticTunnelPostEgressRefreshCommand = 'if test -f /etc/profile.d/mihomo-client-proxy.sh; then . /etc/profile.d/mihomo-client-proxy.sh || true; fi; if command -v npm >/dev/null 2>&1; then if npm i @qpjoy/tunnel-cli -g; then qp-tunnel-cli install-script || true; qp-tunnel-cli egress-on || qp-tunnel-cli server-on || true; qp-tunnel-cli status || echo "warning: @qpjoy/tunnel-cli npm refresh status failed after egress-on; keep Internal fallback"; else echo "warning: @qpjoy/tunnel-cli npm refresh skipped after egress-on; keep Internal fallback"; fi; else echo "node/npm absent; keep Internal fallback until next refresh"; fi';
-  const domesticLegacyWireGuardRetireCommand = [
-    'if systemctl is-active --quiet wg-quick@hdo-home || systemctl is-enabled --quiet wg-quick@hdo-home || ip link show hdo-home >/dev/null 2>&1 || test -f /etc/wireguard/hdo-home.conf; then',
-    'echo "retiring legacy hdo-home/100.* WireGuard before mx-domestic 2.0";',
-    'systemctl disable --now wg-quick@hdo-home >/dev/null 2>&1 || true;',
-    'wg-quick down hdo-home >/dev/null 2>&1 || true;',
-    'ip link delete hdo-home >/dev/null 2>&1 || true;',
-    'install -d -m 0755 /opt/mx/legacy-wireguard;',
-    'if test -f /etc/wireguard/hdo-home.conf; then mv -f /etc/wireguard/hdo-home.conf /opt/mx/legacy-wireguard/hdo-home.conf.$(date +%Y%m%d%H%M%S); fi;',
+  const domesticLegacyWireGuardCompatCommand = [
+    'legacy_wg_detected=0; for legacy_wg_iface in hdo-home hdo-internal; do if systemctl is-active --quiet wg-quick@$legacy_wg_iface 2>/dev/null || systemctl is-enabled --quiet wg-quick@$legacy_wg_iface 2>/dev/null || ip link show $legacy_wg_iface >/dev/null 2>&1 || test -f /etc/wireguard/$legacy_wg_iface.conf; then legacy_wg_detected=1; fi; done; if test "$legacy_wg_detected" = "1"; then',
+    'echo "legacy hdo-home/hdo-internal 100.* WireGuard detected; preserving V1 while mx-domestic 2.0 starts";',
+    'echo "run bash scripts/manage.sh ops site-slot cleanup-v1-wireguard --apply when V1 is no longer needed";',
     'fi;',
-    'if wg show 2>/dev/null | grep -q "100\\."; then echo "warning: legacy 100.* WireGuard peers remain after hdo-home retirement"; wg show; fi'
+    'if wg show 2>/dev/null | grep -q "100\\."; then echo "legacy 100.* WireGuard peers remain by design during V1/V2 compatibility"; fi'
   ].join(' ');
   const domesticTunnelBootstrapCommand = [
     'set -eu',
@@ -3514,10 +3554,10 @@ function siteSlotDeploymentPhases(
         ssh(`install -d -m 0700 /etc/wireguard && install -d -m 0755 ${slotCurrentDir}`),
         rsyncOverSsh(domesticWireGuardConfig, '/etc/wireguard/mx-domestic.conf'),
         rsyncOverSsh(domesticRelayEnv, `${slotCurrentDir}/mx-domestic-relay.env`),
-        ssh(domesticLegacyWireGuardRetireCommand),
-        ssh('if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi; systemctl enable --now wg-quick@mx-domestic')
+        ssh(domesticLegacyWireGuardCompatCommand),
+        ssh('if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi; chmod 600 /etc/wireguard/mx-domestic.conf; if command -v systemctl >/dev/null 2>&1; then systemctl enable wg-quick@mx-domestic >/dev/null 2>&1 || true; systemctl restart wg-quick@mx-domestic; else wg-quick down mx-domestic >/dev/null 2>&1 || true; wg-quick up mx-domestic; fi; ip -4 addr replace 10.88.0.1/16 dev mx-domestic; ip link set up dev mx-domestic; sysctl -w net.ipv4.ip_forward=1; ip -4 address show dev mx-domestic')
       ],
-      notes: ['WireGuard/routing is host-level because Domestic is the peer center path and has limited memory/disk. The 2.0 activation retires legacy hdo-home/100.* WireGuard state before enabling mx-domestic.']
+      notes: ['WireGuard/routing is host-level because Domestic is the peer center path and has limited memory/disk. The 2.0 activation preserves legacy hdo-home/hdo-internal 100.* WireGuard state for V1/V2 compatibility; cleanup is an explicit manage.sh operation.']
     }] : []),
     {
       phaseId: 'sync-internal-config',

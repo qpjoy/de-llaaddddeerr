@@ -23,7 +23,7 @@ interface KubernetesApplyOutcome {
   message: string;
 }
 
-interface KubernetesResponse {
+export interface KubernetesResponse {
   statusCode: number;
   body: unknown;
   text: string;
@@ -94,7 +94,7 @@ export async function applyCoreDnsConfigMapToKubernetes(
   };
 }
 
-async function kubernetesRequest(method: string, path: string, body?: unknown): Promise<KubernetesResponse> {
+export async function kubernetesRequest(method: string, path: string, body?: unknown): Promise<KubernetesResponse> {
   const host = process.env.KUBERNETES_SERVICE_HOST;
   const port = Number(process.env.KUBERNETES_SERVICE_PORT_HTTPS ?? process.env.KUBERNETES_SERVICE_PORT ?? '443');
   if (!host) {

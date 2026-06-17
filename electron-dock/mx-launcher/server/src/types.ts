@@ -1400,6 +1400,7 @@ export interface LauncherProductNetworkInput {
   productId?: string | null;
   displayName?: string | null;
   mode?: LauncherProductMode | string | null;
+  standaloneChannelProductId?: string | null;
   productIndex?: number | null;
   serviceVip?: string | null;
   userCidr?: string | null;
@@ -1423,6 +1424,7 @@ export interface LauncherProductNetwork {
   productId: string;
   displayName: string;
   mode: LauncherProductMode;
+  standaloneChannelProductId: string;
   productIndex: number;
   fabricCidr: '10.88.0.0/16';
   internalControlIp: '10.88.88.88';
@@ -1968,7 +1970,7 @@ export interface DnsZoneRecord {
   type: 'A' | 'CNAME';
   value: string;
   ttlSeconds: number;
-  source: 'dns-policy' | 'reverse-proxy-route';
+  source: 'dns-policy' | 'reverse-proxy-route' | 'internal-service';
 }
 
 export interface DnsZoneSnapshot {

@@ -13,7 +13,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
 ENV PORT=18090
-RUN apk add --no-cache openssh-client sshpass rsync
+RUN apk add --no-cache bash iproute2 iputils kmod openssh-client openresolv rsync sshpass sudo wireguard-tools wireguard-tools-wg-quick
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json

@@ -2,12 +2,14 @@ import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { connect as netConnect } from 'node:net';
+import { hostname as osHostname, platform as osPlatform, release as osRelease } from 'node:os';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { BadRequestException, Body, Controller, ForbiddenException, Get, Headers, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
 
 import { asRecord } from '../../lib/http.js';
+import { kubernetesRequest } from '../../store/kubernetes.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
 import { checkAwxProvider } from '../config-center/awx-provider-check.js';
@@ -60,6 +62,8 @@ import type {
 } from '../../types.js';
 
 const execFileAsync = promisify(execFile);
+const INTERNAL_SERVICE_PEER_ID = 'mx-internal-service-peer';
+const INTERNAL_SERVICE_PEER_INTERFACE = 'mx-internal-svc';
 
 @Controller('internal/v1/admin')
 export class AdminController {
@@ -940,8 +944,11 @@ export class AdminController {
   private async dispatchAdminAction(actionId: string, path: string, body: Record<string, unknown>) {
     if (actionId === 'site-slot.plan.create') {
       if (path !== '/internal/v1/site-slots/plans') throw new BadRequestException('Admin site-slot plan path is invalid');
+      const input = toSiteSlotPlanInput(body);
+      const hostFailure = await this.domesticPlanHostValidationFailure(input);
+      if (hostFailure) throw new BadRequestException(hostFailure);
       return {
-        plan: await this.store.createSiteSlotPlan(toSiteSlotPlanInput(body))
+        plan: await this.store.createSiteSlotPlan(input)
       };
     }
     if (actionId === 'site-slot.preflight.create' || actionId === 'site-slot.apply.confirm') {
@@ -1000,6 +1007,54 @@ export class AdminController {
       return {
         domesticWgMaterialize: materialize.result,
         secret: materialize.secret ? redactAdminDomesticWireGuardSecret(materialize.secret) : null
+      };
+    }
+    if (actionId === 'site-slot.internal-service-peer.handoff') {
+      const match = matchPath(path, /^\/internal\/v1\/config-center\/domestic-wg-secrets\/([^/]+)\/internal-service-peer-handoff$/);
+      if (!match) throw new BadRequestException('Admin Internal service peer handoff path is invalid');
+      const siteId = match[1];
+      const secret = await this.store.getSiteSlotDomesticWireGuardSecret(siteId);
+      const plan = stringValue(body.planId) ? await this.store.getSiteSlotPlan(stringValue(body.planId) ?? '') : null;
+      return {
+        internalServicePeerHandoff: adminInternalServicePeerHandoffResult(siteId, plan, secret, body),
+        secret: secret ? redactAdminDomesticWireGuardSecret(secret) : null
+      };
+    }
+    if (actionId === 'site-slot.internal-service-peer.status') {
+      const match = matchPath(path, /^\/internal\/v1\/config-center\/domestic-wg-secrets\/([^/]+)\/internal-service-peer-status$/);
+      if (!match) throw new BadRequestException('Admin Internal service peer status path is invalid');
+      const siteId = match[1];
+      const secret = await this.store.getSiteSlotDomesticWireGuardSecret(siteId);
+      const plan = stringValue(body.planId) ? await this.store.getSiteSlotPlan(stringValue(body.planId) ?? '') : null;
+      return {
+        internalServicePeerRuntimeStatus: await adminInternalServicePeerRuntimeStatus(siteId, plan, secret, this.store),
+        secret: secret ? redactAdminDomesticWireGuardSecret(secret) : null
+      };
+    }
+    if (actionId === 'site-slot.internal-service-peer.host-runner.ensure') {
+      const match = matchPath(path, /^\/internal\/v1\/config-center\/domestic-wg-secrets\/([^/]+)\/internal-service-peer-host-runner$/);
+      if (!match) throw new BadRequestException('Admin Internal service peer host-runner path is invalid');
+      const siteId = match[1];
+      const secret = await this.store.getSiteSlotDomesticWireGuardSecret(siteId);
+      const plan = stringValue(body.planId) ? await this.store.getSiteSlotPlan(stringValue(body.planId) ?? '') : null;
+      const internalServicePeerHostRunnerEnsure = await adminInternalServicePeerHostRunnerEnsureResult(siteId, plan, secret, body, this.store);
+      return {
+        internalServicePeerHostRunnerEnsure,
+        internalServicePeerRuntimeStatus: internalServicePeerHostRunnerEnsure.afterStatus ?? null,
+        secret: secret ? redactAdminDomesticWireGuardSecret(secret) : null
+      };
+    }
+    if (actionId === 'site-slot.internal-service-peer.apply') {
+      const match = matchPath(path, /^\/internal\/v1\/config-center\/domestic-wg-secrets\/([^/]+)\/internal-service-peer-apply$/);
+      if (!match) throw new BadRequestException('Admin Internal service peer apply path is invalid');
+      const siteId = match[1];
+      const secret = await this.store.getSiteSlotDomesticWireGuardSecret(siteId);
+      const plan = stringValue(body.planId) ? await this.store.getSiteSlotPlan(stringValue(body.planId) ?? '') : null;
+      const internalServicePeerApply = await adminInternalServicePeerApplyResult(siteId, plan, secret, body, this.store);
+      return {
+        internalServicePeerApply,
+        internalServicePeerRuntimeStatus: internalServicePeerApply.afterStatus ?? internalServicePeerApply.beforeStatus,
+        secret: secret ? redactAdminDomesticWireGuardSecret(secret) : null
       };
     }
     if (actionId === 'site-slot.domestic-relay-peer-append-ssh.prepare') {
@@ -1277,8 +1332,9 @@ export class AdminController {
       if (!job) throw new NotFoundException('Site slot worker job not found');
       const plan = await this.store.getSiteSlotPlan(job.planId);
       await this.assertDomesticWgReadyForWorkerJob(job, plan);
+      const secret = plan?.siteId ? await this.store.getSiteSlotDomesticWireGuardSecret(plan.siteId) : null;
       return {
-        relayReadOnlyProbe: adminDomesticRelayReadOnlyProbeResult(job, plan, body)
+        relayReadOnlyProbe: adminDomesticRelayReadOnlyProbeResult(job, plan, body, secret)
       };
     }
     if (actionId === 'site-slot.worker-run.domestic-relay-peer-append') {
@@ -1504,6 +1560,17 @@ export class AdminController {
     throw new BadRequestException('Admin action is not executable in Action Execution V1');
   }
 
+  private async domesticPlanHostValidationFailure(input: SiteSlotPlanInput): Promise<string | null> {
+    const kind = input.kind === 'oversea' ? 'oversea' : 'domestic';
+    if (kind !== 'domestic') return null;
+    if (input.host?.trim()) return siteSlotPlanHostValidationFailure(kind, input.host);
+    const profileId = input.sshProfileId?.trim();
+    if (!profileId) return siteSlotPlanHostValidationFailure(kind, null);
+    const profile = await this.store.getSiteSlotSshProfile(profileId);
+    if (!profile) return null;
+    return siteSlotPlanHostValidationFailure(kind, profile.host);
+  }
+
   private async resolveAwxProviderConfig(kind: SiteSlotKind, providerId?: string | null): Promise<AwxProviderConfig | null> {
     if (providerId) {
       const provider = await this.store.getAwxProviderConfig(providerId);
@@ -1696,6 +1763,41 @@ function toSiteSlotPlanInput(body: Record<string, unknown>): SiteSlotPlanInput {
     requestId: stringValue(body.requestId),
     createdBy: stringValue(body.createdBy)
   };
+}
+
+function siteSlotPlanHostValidationFailure(kind: SiteSlotPlanInput['kind'], host: string | null | undefined): string | null {
+  if (kind !== 'domestic') return null;
+  const normalized = normalizedPlanHost(host);
+  if (!normalized) return 'Domestic plan requires a real public host or IP before WG materialization';
+  if (isPlaceholderDomesticPlanHost(normalized)) {
+    return `Domestic plan host "${host}" is a placeholder; use the real Domestic public IP or DNS name`;
+  }
+  return null;
+}
+
+function normalizedPlanHost(host: string | null | undefined): string | null {
+  const value = host?.trim();
+  if (!value) return null;
+  const withoutScheme = value.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
+  const authority = withoutScheme.split('/')[0] ?? withoutScheme;
+  const withoutUserInfo = authority.includes('@') ? authority.split('@').pop() ?? authority : authority;
+  if (withoutUserInfo.startsWith('[')) return withoutUserInfo.slice(1, withoutUserInfo.indexOf(']')).toLowerCase();
+  return withoutUserInfo.replace(/:\d+$/, '').toLowerCase();
+}
+
+function isPlaceholderDomesticPlanHost(host: string): boolean {
+  return (host.startsWith('<') && host.endsWith('>'))
+    || host === 'host'
+    || host === 'localhost'
+    || host === '0.0.0.0'
+    || host === '::1'
+    || host.startsWith('127.')
+    || host.endsWith('.localhost')
+    || host.endsWith('.invalid')
+    || host.endsWith('.test')
+    || host.endsWith('.example.com')
+    || host.endsWith('.example.net')
+    || host.endsWith('.example.org');
 }
 
 function siteSlotPlanAccessAccountsValue(value: unknown): SiteSlotPlanInput['accessAccounts'] {
@@ -2387,7 +2489,8 @@ function adminDomesticRelayPeerPlanResult(
 function adminDomesticRelayReadOnlyProbeResult(
   job: SiteSlotWorkerJob,
   plan: SiteSlotPlan | null,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  secret: SiteSlotDomesticWireGuardSecret | null = null
 ) {
   const blockedReasons = domesticRelayReadOnlyProbeFailures(job, plan, body);
   return {
@@ -2401,7 +2504,7 @@ function adminDomesticRelayReadOnlyProbeResult(
     siteId: job.siteId,
     kind: job.kind,
     cwd: resolveMxLauncherRoot(),
-    command: domesticRelayReadOnlyProbeCommand(plan),
+    command: domesticRelayReadOnlyProbeCommand(plan, secret),
     env: {
       SITE_SLOT_READONLY_PROBE: '1',
       SITE_SLOT_DOMESTIC_RELAY_PROBE: '1',
@@ -2423,10 +2526,20 @@ function adminDomesticRelayReadOnlyProbeResult(
         'test -f /etc/wireguard/mx-domestic.conf',
         'test ! -f /etc/wireguard/mx-internal-service-peer.conf',
         'wg show mx-domestic',
+        'wg show mx-domestic endpoints',
+        'wg show mx-domestic latest-handshakes',
         'ip -4 address show dev mx-domestic',
+        'mx-domestic has 10.88.0.1/16',
         'ip route get 10.88.88.88',
+        'curl/wget http://10.88.88.88:18090/healthz',
         'systemctl status wg-quick@mx-domestic --no-pager'
       ]
+    },
+    h2iGate: {
+      internalServiceIp: secret?.internalServiceIp ?? '10.88.88.88',
+      internalServicePublicKey: secret?.internalServicePublicKey ? 'configured' : 'missing',
+      requiresLatestHandshake: true,
+      requiresInternalHealthz: true
     },
     gates: {
       confirmRelayReadOnlyProbe: booleanValue(body.confirmRelayReadOnlyProbe) === true,
@@ -2438,7 +2551,8 @@ function adminDomesticRelayReadOnlyProbeResult(
     notes: [
       'This Admin action returns a read-only SSH handoff command for Domestic relay status checks.',
       'It does not open SSH, run the command, write /etc/wireguard, append peers, or restart services.',
-      'The probe fails if /etc/wireguard/mx-internal-service-peer.conf exists on Domestic.'
+      'The probe fails if /etc/wireguard/mx-internal-service-peer.conf exists on Domestic.',
+      'H2I is only ready after the Internal service peer has a latest handshake and Domestic can reach Internal healthz.'
     ],
     nextActions: blockedReasons.length > 0
       ? ['fix-domestic-relay-readonly-probe-gates', 'rerun-domestic-relay-readonly-probe']
@@ -2768,10 +2882,13 @@ function buildAdminDomesticWireGuardSecretInput(
   const rotateInternalServiceKey = rotateAll || booleanValue(body.rotateInternalServiceKey);
   const confirmRotate = booleanValue(body.confirmRotate);
   const listenPort = numberValueOrNull(body.listenPort) ?? previous?.listenPort ?? 51820;
-  const publicEndpoint = stringValue(body.publicEndpoint)
-    ?? stringValue(body.endpoint)
-    ?? previous?.publicEndpoint
-    ?? endpointFromPlanHost(plan, listenPort);
+  const planEndpoint = endpointFromPlanHost(plan, listenPort);
+  const explicitEndpoint = stringValue(body.publicEndpoint) ?? stringValue(body.endpoint);
+  const previousEndpoint = previous?.publicEndpoint;
+  const publicEndpoint = explicitEndpoint
+    ?? planEndpoint
+    ?? previousEndpoint
+    ?? null;
   const relayMissing = !previous?.domesticRelayPrivateKey || !previous.domesticRelayPublicKey;
   const internalMissing = !previous?.internalServicePrivateKey || !previous.internalServicePublicKey;
   const relayPair = relayMissing || rotateRelayKey ? generateWireGuardKeyPair() : null;
@@ -2809,7 +2926,8 @@ function buildAdminDomesticWireGuardSecretInput(
     previousMaterialDigest: previous?.fingerprints.materialDigest ?? null,
     blockedReasons: [
       ...(rotateRelayKey || rotateInternalServiceKey ? confirmRotate ? [] : ['confirmRotate=true is required before rotating Domestic WG keys'] : []),
-      ...(publicEndpoint ? [] : ['publicEndpoint is required before materializing Domestic WG'])
+      ...(publicEndpoint ? [] : ['publicEndpoint is required before materializing Domestic WG']),
+      ...(publicEndpoint && domesticRelayEndpointBlockedReason(publicEndpoint) ? [domesticRelayEndpointBlockedReason(publicEndpoint) as string] : [])
     ]
   };
 }
@@ -2818,6 +2936,27 @@ function endpointFromPlanHost(plan: SiteSlotPlan | null, listenPort: number): st
   const host = plan?.host?.trim();
   if (!host) return null;
   return /:\d+$/.test(host) ? host : `${host}:${listenPort}`;
+}
+
+function domesticRelayEndpointBlockedReason(endpoint: string | null | undefined): string | null {
+  const value = endpoint?.trim();
+  if (!value) return 'Domestic public endpoint is missing';
+  const host = value.replace(/^\[/, '').replace(/\]?:\d+$/, '').toLowerCase();
+  if (!host || host === 'host') return `Domestic public endpoint is a placeholder: ${value}`;
+  if (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(host)) {
+    return `Domestic public endpoint must be reachable from the Internal runtime host: ${value}`;
+  }
+  if (
+    host.endsWith('.example.com')
+    || host.endsWith('.example.net')
+    || host.endsWith('.example.org')
+    || host.endsWith('.invalid')
+    || host.endsWith('.test')
+    || host.endsWith('.localhost')
+  ) {
+    return `Domestic public endpoint is a non-routable placeholder: ${value}`;
+  }
+  return null;
 }
 
 function domesticWireGuardMaterializerEnv(secret: SiteSlotDomesticWireGuardSecret): Record<string, string> {
@@ -2892,8 +3031,1182 @@ function adminDomesticWireGuardMaterializeResult(
     stderr: artifacts?.execution?.stderr?.slice(-4000) ?? null,
     blockedReasons,
     nextActions: status === 'passed'
-      ? ['rerun-remote-ssh-gate', 'publish-config-snapshot-for-client-refresh']
+      ? ['join-internal-service-peer', 'run-domestic-relay-readonly-probe', 'publish-config-snapshot-for-client-refresh']
       : ['fix-domestic-wg-materialize-inputs']
+  };
+}
+
+function adminInternalServicePeerHandoffResult(
+  siteId: string,
+  plan: SiteSlotPlan | null,
+  secret: SiteSlotDomesticWireGuardSecret | null,
+  body: Record<string, unknown>
+) {
+  const paths = internalServicePeerArtifactPaths();
+  const blockedReasons = internalServicePeerHandoffFailures(siteId, secret, paths, body, plan);
+  const status = blockedReasons.length ? 'blocked' : 'ready';
+  return {
+    handoffId: `internal_service_peer_handoff_${siteId}`,
+    status,
+    execution: 'not-started',
+    boundary: 'internal-service-peer-local-handoff-only',
+    siteId,
+    planId: plan?.planId ?? stringValue(body.planId) ?? null,
+    cwd: resolveMxLauncherRoot(),
+    command: internalServicePeerHandoffCommand(paths.applyScriptPath),
+    env: {
+      MX_INTERNAL_SERVICE_WG_INTERFACE: INTERNAL_SERVICE_PEER_INTERFACE,
+      MX_INTERNAL_SERVICE_IP: secret?.internalServiceIp ?? '10.88.88.88',
+      MX_DOMESTIC_GATEWAY_IP: secret?.domesticGatewayIp ?? '10.88.0.1'
+    },
+    config: {
+      sourceConfigPath: paths.configPath,
+      applyScriptPath: paths.applyScriptPath,
+      targetConfigPath: `/etc/wireguard/${INTERNAL_SERVICE_PEER_INTERFACE}.conf`,
+      privateKeyPlacement: 'internal-only',
+      copiedToDomestic: false
+    },
+    localHelper: {
+      statusCommand: 'bash scripts/manage.sh ops site-slot internal-service-peer-handoff status',
+      printCommand: 'bash scripts/manage.sh ops site-slot internal-service-peer-handoff command',
+      applyCommand: 'bash scripts/manage.sh ops site-slot internal-service-peer-handoff apply',
+      requires: [
+        'qp-tunnel-cli egress-on on the Internal runtime host for H2O/outbound bootstrap',
+        'qp-tunnel-cli with @qpjoy/electron-core-wireguard on the Internal runtime host',
+        'sudo privilege on the Internal runtime host'
+      ],
+      macosNote: 'macOS local dev validates @qpjoy/electron-core-wireguard for WG; qp-tunnel-cli egress-on is a Linux systemd server mode for Ubuntu production hosts.'
+    },
+    relay: secret ? {
+      publicEndpoint: secret.publicEndpoint,
+      listenPort: secret.listenPort,
+      domesticGatewayIp: secret.domesticGatewayIp,
+      domesticGatewayCidr: secret.domesticGatewayCidr,
+      internalServiceIp: secret.internalServiceIp,
+      internalServiceCidr: secret.internalServiceCidr,
+      productRelayCidrs: domesticSecretProductRelayCidrs(secret)
+    } : null,
+    gates: {
+      confirmInternalServicePeerHandoff: booleanValue(body.confirmInternalServicePeerHandoff) === true,
+      internalOnly: true,
+      remoteMutationAllowed: false,
+      domesticRelayPrivateKeyCopiedToInternal: false,
+      internalPrivateKeyMustNotMoveToDomestic: true
+    },
+    checks: [
+      `install /etc/wireguard/${INTERNAL_SERVICE_PEER_INTERFACE}.conf on the Internal runtime host`,
+      `systemctl restart wg-quick@${INTERNAL_SERVICE_PEER_INTERFACE}`,
+      `wg show ${INTERNAL_SERVICE_PEER_INTERFACE} latest-handshakes`,
+      'ip route get 10.88.0.1',
+      'then run Domestic Relay Readonly Probe to verify Domestic -> 10.88.88.88 healthz'
+    ],
+    blockedReasons,
+    notes: [
+      'This Admin action returns a local Internal handoff command; the API does not run sudo, wg, systemctl, or mutate the host.',
+      'The Internal peer config is rendered from the selected Domestic WG secret and synced to the Internal host runner before status/apply.',
+      'If the API runs in a container, /app/artifacts is the container path; use scripts/manage.sh on the actual Internal runtime host or copy the artifact there first.',
+      'Domestic should never receive mx-internal-service-peer.conf because it contains the Internal service private key.'
+    ],
+    nextActions: status === 'ready'
+      ? ['execute-on-internal-runtime-host', 'run-domestic-relay-readonly-probe', 'verify-latest-handshake-and-healthz']
+      : ['materialize-domestic-wg', 'fix-internal-service-peer-handoff-inputs']
+  };
+}
+
+function internalServicePeerArtifactPaths() {
+  const domesticArtifactRoot = resolve(resolveSiteSlotArtifactBaseDir(), 'domestic');
+  return {
+    artifactRoot: domesticArtifactRoot,
+    configPath: resolve(domesticArtifactRoot, `${INTERNAL_SERVICE_PEER_ID}.conf`),
+    applyScriptPath: resolve(domesticArtifactRoot, `${INTERNAL_SERVICE_PEER_ID}-apply.sh`),
+    internalEgressSubscriptionPath: resolve(domesticArtifactRoot, 'mx-internal-egress-subscription.yaml')
+  };
+}
+
+function internalServicePeerRouteCommands(prefix: 'PostUp' | 'PostDown', cidrs: string[], ignoreFailure = false): string[] {
+  return cidrs.map((cidr) => {
+    const command = prefix === 'PostDown'
+      ? `ip route del ${cidr} dev %i`
+      : `ip route replace ${cidr} dev %i`;
+    return `${prefix} = ${ignoreFailure ? `${command} || true` : command}`;
+  });
+}
+
+function internalServicePeerApplyScriptContent(): string {
+  return [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    '',
+    'SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"',
+    `IFACE="\${MX_INTERNAL_SERVICE_WG_INTERFACE:-${INTERNAL_SERVICE_PEER_INTERFACE}}"`,
+    'CONFIG_SOURCE="${1:-$SCRIPT_DIR/mx-internal-service-peer.conf}"',
+    'TARGET="/etc/wireguard/${IFACE}.conf"',
+    '',
+    'if [ "${#IFACE}" -gt 15 ]; then',
+    '  echo "blocked: Linux WireGuard interface name must be 15 characters or fewer: $IFACE" >&2',
+    '  exit 1',
+    'fi',
+    '',
+    'if [ ! -f "$CONFIG_SOURCE" ]; then',
+    '  echo "blocked: Internal service peer config not found: $CONFIG_SOURCE" >&2',
+    '  exit 1',
+    'fi',
+    '',
+    'install -d -m 700 /etc/wireguard',
+    'install -m 600 -o root -g root "$CONFIG_SOURCE" "$TARGET"',
+    '',
+    'if command -v systemctl >/dev/null 2>&1; then',
+    '  systemctl enable --now "wg-quick@${IFACE}"',
+    '  systemctl restart "wg-quick@${IFACE}"',
+    'else',
+    '  wg-quick down "$IFACE" >/dev/null 2>&1 || true',
+    '  wg-quick up "$IFACE"',
+    'fi',
+    '',
+    'wg show "$IFACE"',
+    'wg show "$IFACE" latest-handshakes || true',
+    'ip route get 10.88.0.1 || true',
+    ''
+  ].join('\n');
+}
+
+function internalServicePeerRenderedArtifacts(secret: SiteSlotDomesticWireGuardSecret | null): {
+  configContent: string;
+  applyScriptContent: string;
+} | null {
+  if (!secret?.internalServicePrivateKey || !secret.domesticRelayPublicKey || !secret.publicEndpoint) return null;
+  const productRelayCidrs = domesticSecretProductRelayCidrs(secret);
+  const internalRouteCidrs = uniqueStrings([secret.domesticGatewayCidr, ...productRelayCidrs]);
+  const configContent = [
+    '# MX Internal service peer generated by MX Launcher.',
+    '# Apply inside Internal runtime so Internal can reach Domestic relay without public ingress.',
+    '[Interface]',
+    `Address = ${secret.internalServiceIp}/32`,
+    `PrivateKey = ${secret.internalServicePrivateKey}`,
+    '# DNS is managed by Internal DNS/CoreDNS; keep wg-quick from mutating host resolv.conf.',
+    'Table = off',
+    ...internalServicePeerRouteCommands('PostUp', internalRouteCidrs),
+    ...internalServicePeerRouteCommands('PostDown', internalRouteCidrs, true),
+    '',
+    '[Peer]',
+    `PublicKey = ${secret.domesticRelayPublicKey}`,
+    `Endpoint = ${secret.publicEndpoint}`,
+    `AllowedIPs = ${internalRouteCidrs.join(',')}`,
+    'PersistentKeepalive = 25',
+    ''
+  ].join('\n');
+  return {
+    configContent,
+    applyScriptContent: internalServicePeerApplyScriptContent()
+  };
+}
+
+function internalServicePeerHostRunnerUrl(): string | null {
+  const raw = process.env.MX_INTERNAL_HOST_RUNNER_URL ?? process.env.MX_INTERNAL_SERVICE_PEER_HOST_RUNNER_URL;
+  if (!raw?.trim()) return internalServicePeerK8sHostRunnerUrl();
+  return raw.trim().replace(/\/+$/, '');
+}
+
+function internalServicePeerHostRunnerUrlCandidates(): string[] {
+  return uniqueStrings([
+    internalServicePeerHostRunnerUrl(),
+    internalServicePeerK8sHostRunnerUrl()
+  ].filter((item): item is string => Boolean(item)));
+}
+
+function internalServicePeerK8sHostRunnerNamespace(): string {
+  return process.env.MX_INTERNAL_HOST_RUNNER_K8S_NAMESPACE?.trim()
+    || process.env.POD_NAMESPACE?.trim()
+    || 'mx-internal-shadow';
+}
+
+function internalServicePeerK8sHostRunnerName(): string {
+  return process.env.MX_INTERNAL_HOST_RUNNER_K8S_NAME?.trim() || 'mx-internal-host-runner';
+}
+
+function internalServicePeerK8sHostRunnerPort(): number {
+  const raw = process.env.MX_INTERNAL_HOST_RUNNER_PORT?.trim()
+    || process.env.MX_INTERNAL_HOST_RUNNER_K8S_PORT?.trim()
+    || '19190';
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 19190;
+}
+
+function internalServicePeerK8sHostRunnerUrl(): string | null {
+  if (!process.env.KUBERNETES_SERVICE_HOST) return null;
+  const raw = process.env.MX_INTERNAL_HOST_RUNNER_K8S_URL?.trim();
+  if (raw) return raw.replace(/\/+$/, '');
+  const name = internalServicePeerK8sHostRunnerName();
+  const namespace = internalServicePeerK8sHostRunnerNamespace();
+  const port = internalServicePeerK8sHostRunnerPort();
+  return `http://${name}.${namespace}.svc.cluster.local:${port}`;
+}
+
+function internalServicePeerHostRunnerEnsureEnabled(): boolean {
+  const raw = process.env.MX_INTERNAL_HOST_RUNNER_K8S_ENSURE_ENABLED;
+  return raw === '1' || raw?.toLowerCase() === 'true';
+}
+
+function internalServicePeerRuntimeTarget(hostRunnerUrl: string | null, hostRunnerError: string | null) {
+  const apiInKubernetes = Boolean(process.env.KUBERNETES_SERVICE_HOST);
+  const hostRunnerCandidates = internalServicePeerHostRunnerUrlCandidates();
+  return {
+    mode: hostRunnerUrl && !hostRunnerError ? 'host-runner' : hostRunnerUrl && hostRunnerError ? 'host-runner-unreachable' : apiInKubernetes ? 'api-pod' : 'api-host',
+    boundary: apiInKubernetes
+      ? 'k8s-api-control-plane-needs-host-runner'
+      : 'api-process-local-runtime',
+    apiRuntime: {
+      hostname: osHostname(),
+      platform: osPlatform(),
+      release: osRelease(),
+      inKubernetes: apiInKubernetes
+    },
+    hostRunner: {
+      configured: Boolean(hostRunnerUrl),
+      url: hostRunnerUrl,
+      candidates: hostRunnerCandidates,
+      error: hostRunnerError,
+      startCommand: 'MX_INTERNAL_HOST_RUNNER_HOST=0.0.0.0 bash scripts/manage.sh ops site-slot internal-service-peer-host-runner 19190',
+      k8sUrlHint: internalServicePeerK8sHostRunnerUrl() ?? 'http://host.docker.internal:19190',
+      k8sEnsureEnabled: internalServicePeerHostRunnerEnsureEnabled()
+    }
+  };
+}
+
+function notCheckedTool(command: string) {
+  return {
+    available: false,
+    path: null,
+    probe: 'not-checked',
+    command
+  };
+}
+
+function notCheckedCommand(command: string, args: string[] = []) {
+  return {
+    status: 'not-checked',
+    command,
+    args,
+    exitCode: null,
+    stdout: '',
+    stderr: '',
+    startedAt: null,
+    finishedAt: null
+  };
+}
+
+function adminInternalServicePeerHostRunnerUnavailableStatus(
+  siteId: string,
+  plan: SiteSlotPlan | null,
+  secret: SiteSlotDomesticWireGuardSecret | null,
+  paths: ReturnType<typeof internalServicePeerArtifactPaths>,
+  hostRunnerUrl: string,
+  hostRunnerError: string
+) {
+  const renderedArtifacts = internalServicePeerRenderedArtifacts(secret);
+  const runtimeTarget = internalServicePeerRuntimeTarget(hostRunnerUrl, hostRunnerError);
+  const domesticGatewayIp = secret?.domesticGatewayIp ?? '10.88.0.1';
+  const internalServiceIp = secret?.internalServiceIp ?? '10.88.88.88';
+  const blockedReasons = [
+    'Internal service peer install must run on the Internal runtime host via host-runner',
+    `Internal host runner is not reachable: ${hostRunnerError}`
+  ];
+  return {
+    status: 'blocked',
+    mode: 'internal-service-peer-host-runner-unreachable',
+    siteId,
+    planId: plan?.planId ?? null,
+    host: {
+      hostname: osHostname(),
+      platform: osPlatform(),
+      release: osRelease()
+    },
+    interfaceName: INTERNAL_SERVICE_PEER_INTERFACE,
+    domesticGatewayIp,
+    internalServiceIp,
+    runtimeTarget,
+    tools: {
+      wg: notCheckedTool('wg'),
+      wgQuick: notCheckedTool('wg-quick'),
+      systemctl: notCheckedTool('systemctl'),
+      ip: notCheckedTool('ip'),
+      ping: notCheckedTool('ping'),
+      qpTunnelCli: notCheckedTool('qp-tunnel-cli')
+    },
+    artifacts: {
+      configPath: paths.configPath,
+      configExists: Boolean(renderedArtifacts?.configContent || existsSync(paths.configPath)),
+      applyScriptPath: paths.applyScriptPath,
+      applyScriptExists: Boolean(renderedArtifacts?.applyScriptContent || existsSync(paths.applyScriptPath)),
+      internalEgressSubscriptionPath: paths.internalEgressSubscriptionPath,
+      internalEgressSubscriptionExists: existsSync(paths.internalEgressSubscriptionPath)
+    },
+    internalEgress: {
+      status: 'not-checked',
+      mode: 'qp-tunnel-cli-egress-on',
+      supported: null,
+      required: true,
+      subscriptionPath: paths.internalEgressSubscriptionPath,
+      subscriptionExists: existsSync(paths.internalEgressSubscriptionPath),
+      summary: 'host-runner unreachable; Internal qp-tunnel-cli egress-on not checked',
+      blockedReasons: []
+    },
+    interface: {
+      name: INTERNAL_SERVICE_PEER_INTERFACE,
+      wgShow: notCheckedCommand('wg', ['show', INTERNAL_SERVICE_PEER_INTERFACE]),
+      latestHandshakes: notCheckedCommand('wg', ['show', INTERNAL_SERVICE_PEER_INTERFACE, 'latest-handshakes']),
+      handshake: {
+        status: 'not-checked',
+        newest: {
+          publicKey: null,
+          timestamp: 0,
+          at: null
+        },
+        peers: []
+      }
+    },
+    link: {
+      routeToDomestic: notCheckedCommand('route', ['get', domesticGatewayIp]),
+      domesticGatewayPing: notCheckedCommand('ping', ['-c', '1', domesticGatewayIp]),
+      internalHealthz: {
+        status: 'not-checked',
+        url: `http://${internalServiceIp}:18090/healthz`,
+        httpStatus: null,
+        durationMs: null
+      }
+    },
+    install: {
+      available: false,
+      applyCommand: 'bash scripts/manage.sh ops site-slot internal-service-peer-handoff apply',
+      hostRunnerCommand: 'MX_INTERNAL_HOST_RUNNER_HOST=0.0.0.0 bash scripts/manage.sh ops site-slot internal-service-peer-host-runner 19190',
+      requires: [
+        'Internal host-runner reachable from the Internal API pod',
+        'qp-tunnel-cli egress-on on the Internal runtime host for H2O/outbound bootstrap',
+        'qp-tunnel-cli with @qpjoy/electron-core-wireguard on the Internal runtime host',
+        'sudo/root privilege on the Internal runtime host'
+      ],
+      blockedReasons
+    },
+    blockedReasons,
+    checkedAt: new Date().toISOString()
+  };
+}
+
+async function internalServicePeerHostRunnerPayload(
+  siteId: string,
+  plan: SiteSlotPlan | null,
+  secret: SiteSlotDomesticWireGuardSecret | null,
+  paths: ReturnType<typeof internalServicePeerArtifactPaths>,
+  store: PlatformStore | null = null
+) {
+  const renderedArtifacts = internalServicePeerRenderedArtifacts(secret);
+  const internalEgressSubscriptionContent = readTextFileIfExists(paths.internalEgressSubscriptionPath)
+    ?? await internalServicePeerEgressSubscriptionContent(plan, store);
+  return {
+    siteId,
+    planId: plan?.planId ?? null,
+    interfaceName: INTERNAL_SERVICE_PEER_INTERFACE,
+    domesticGatewayIp: secret?.domesticGatewayIp ?? '10.88.0.1',
+    internalServiceIp: secret?.internalServiceIp ?? '10.88.88.88',
+    apiRuntime: {
+      hostname: osHostname(),
+      platform: osPlatform(),
+      release: osRelease(),
+      inKubernetes: Boolean(process.env.KUBERNETES_SERVICE_HOST)
+    },
+    artifacts: {
+      configPath: paths.configPath,
+      configContent: renderedArtifacts?.configContent ?? readTextFileIfExists(paths.configPath),
+      applyScriptPath: paths.applyScriptPath,
+      applyScriptContent: renderedArtifacts?.applyScriptContent ?? readTextFileIfExists(paths.applyScriptPath),
+      internalEgressSubscriptionPath: paths.internalEgressSubscriptionPath,
+      internalEgressSubscriptionContent
+    }
+  };
+}
+
+async function internalServicePeerEgressSubscriptionContent(
+  plan: SiteSlotPlan | null,
+  store: PlatformStore | null
+): Promise<string | null> {
+  const overseaSiteId = plan?.network.mode === 'oversea-assisted'
+    ? plan.network.overseaSiteId?.trim()
+    : null;
+  if (!overseaSiteId || !store) return null;
+  const accounts = await store.listSiteSlotAccessAccounts(overseaSiteId);
+  const account = accounts.find((item) => item.role === 'internal')
+    ?? accounts.find((item) => item.username.endsWith('-internal'))
+    ?? null;
+  if (!account) return null;
+  const subscription = await store.renderHysteria2MihomoSubscription(overseaSiteId, account.username);
+  return subscription?.yaml ?? null;
+}
+
+function readTextFileIfExists(path: string): string | null {
+  try {
+    return existsSync(path) ? readFileSync(path, 'utf8') : null;
+  } catch {
+    return null;
+  }
+}
+
+async function postInternalServicePeerHostRunner(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const baseUrls = internalServicePeerHostRunnerUrlCandidates();
+  if (baseUrls.length === 0) throw new Error('MX_INTERNAL_HOST_RUNNER_URL is not configured');
+  const timeoutMs = path.includes('/apply') ? 180000 : 12000;
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  const token = process.env.MX_INTERNAL_HOST_RUNNER_TOKEN?.trim();
+  if (token) headers['x-mx-host-runner-token'] = token;
+  const errors: string[] = [];
+  for (const baseUrl of baseUrls) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${baseUrl}${path}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+      const text = await response.text();
+      let payload: unknown = {};
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch {
+        payload = { raw: text };
+      }
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} from ${baseUrl}${path}: ${text.slice(0, 500)}`);
+      }
+      return asRecord(payload);
+    } catch (error) {
+      errors.push(`${baseUrl}${path} ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new Error(errors.join('; '));
+}
+
+function internalServicePeerBlockedReasons(status: { blockedReasons?: unknown }): string[] {
+  return Array.isArray(status.blockedReasons)
+    ? status.blockedReasons.filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
+function internalServicePeerHandoffFailures(
+  siteId: string,
+  secret: SiteSlotDomesticWireGuardSecret | null,
+  paths: ReturnType<typeof internalServicePeerArtifactPaths>,
+  body: Record<string, unknown>,
+  plan: SiteSlotPlan | null = null,
+  requireConfirm = true
+): string[] {
+  const failures: string[] = [];
+  const renderedArtifacts = internalServicePeerRenderedArtifacts(secret);
+  if (!secret) {
+    failures.push(`Domestic WG secret is not materialized for site: ${siteId}`);
+  } else {
+    if (secret.status !== 'active') failures.push(`Domestic WG secret is not active: ${secret.status}`);
+    if (secret.readiness.secretMaterial !== 'injected') failures.push('Domestic WG secret material is not injected');
+    if (secret.readiness.publicEndpointStatus !== 'ready') failures.push('Domestic public endpoint is not ready');
+    const endpointFailure = domesticRelayEndpointBlockedReason(secret.publicEndpoint);
+    if (endpointFailure) failures.push(endpointFailure);
+    if (secret.readiness.missingSecretInputs.length) {
+      failures.push(`missing secret inputs: ${secret.readiness.missingSecretInputs.join(', ')}`);
+    }
+    if (!secret.internalServicePrivateKey || !secret.internalServicePublicKey) {
+      failures.push('Internal service key pair is missing');
+    }
+    if (!secret.domesticRelayPublicKey) {
+      failures.push('Domestic relay public key is missing');
+    }
+    const staleReason = plan ? domesticWireGuardStaleReason(plan, secret) : null;
+    if (staleReason) failures.push(staleReason);
+  }
+  if (!domesticWireGuardArtifactReady()) failures.push('Domestic WireGuard artifact manifest is not ready');
+  if (!renderedArtifacts?.configContent && !existsSync(paths.configPath)) {
+    failures.push(`Internal service peer config artifact is missing: ${paths.configPath}`);
+  }
+  if (!renderedArtifacts?.applyScriptContent && !existsSync(paths.applyScriptPath)) {
+    failures.push(`Internal service peer apply script is missing: ${paths.applyScriptPath}`);
+  }
+  if (plan && plan.kind !== 'domestic') failures.push(`Internal service peer handoff requires a domestic plan, got ${plan.kind}`);
+  if (requireConfirm && booleanValue(body.confirmInternalServicePeerHandoff) !== true) {
+    failures.push('confirmInternalServicePeerHandoff=true is required before returning Internal service peer handoff');
+  }
+  return failures;
+}
+
+function internalServicePeerHandoffCommand(applyScriptPath: string): string {
+  return `sudo env MX_INTERNAL_SERVICE_WG_INTERFACE=${INTERNAL_SERVICE_PEER_INTERFACE} bash ${shellQuote(applyScriptPath)}`;
+}
+
+async function adminInternalServicePeerRuntimeStatus(
+  siteId: string,
+  plan: SiteSlotPlan | null,
+  secret: SiteSlotDomesticWireGuardSecret | null,
+  store: PlatformStore | null = null,
+  hostRunnerError: string | null = null
+) {
+  const paths = internalServicePeerArtifactPaths();
+  const hostRunnerUrl = internalServicePeerHostRunnerUrl();
+  if (hostRunnerUrl && !hostRunnerError) {
+    try {
+      const payload = await postInternalServicePeerHostRunner('/internal-service-peer/status', {
+        ...await internalServicePeerHostRunnerPayload(siteId, plan, secret, paths, store),
+        mode: 'status'
+      });
+      return asRecord(payload.runtimeStatus ?? payload);
+    } catch (error) {
+      return adminInternalServicePeerRuntimeStatus(siteId, plan, secret, store, error instanceof Error ? error.message : String(error));
+    }
+  }
+  const interfaceName = INTERNAL_SERVICE_PEER_INTERFACE;
+  const domesticGatewayIp = secret?.domesticGatewayIp ?? '10.88.0.1';
+  const internalServiceIp = secret?.internalServiceIp ?? '10.88.88.88';
+  const runtimeTarget = internalServicePeerRuntimeTarget(hostRunnerUrl, hostRunnerError);
+  if (hostRunnerUrl && hostRunnerError && Boolean(process.env.KUBERNETES_SERVICE_HOST)) {
+    return adminInternalServicePeerHostRunnerUnavailableStatus(siteId, plan, secret, paths, hostRunnerUrl, hostRunnerError);
+  }
+  const tools = {
+    wg: await localCommandPath('wg'),
+    wgQuick: await localCommandPath('wg-quick'),
+    systemctl: await localCommandPath('systemctl'),
+    ip: await localCommandPath('ip'),
+    ping: await localCommandPath('ping'),
+    qpTunnelCli: await localCommandPath('qp-tunnel-cli')
+  };
+  const artifacts = {
+    configPath: paths.configPath,
+    configExists: existsSync(paths.configPath),
+    applyScriptPath: paths.applyScriptPath,
+    applyScriptExists: existsSync(paths.applyScriptPath)
+  };
+  const wgShow = tools.wg.available
+    ? await runLocalCommand(tools.wg.path ?? 'wg', ['show', interfaceName], 3000)
+    : null;
+  const latestHandshakes = tools.wg.available
+    ? await runLocalCommand(tools.wg.path ?? 'wg', ['show', interfaceName, 'latest-handshakes'], 3000)
+    : null;
+  const routeToDomestic = tools.ip.available
+    ? await runLocalCommand(tools.ip.path ?? 'ip', ['route', 'get', domesticGatewayIp], 3000)
+    : await runLocalCommand('route', ['-n', 'get', domesticGatewayIp], 3000);
+  const domesticGatewayPing = tools.ping.available
+    ? await runLocalCommand(tools.ping.path ?? 'ping', ['-c', '1', domesticGatewayIp], 3000)
+    : null;
+  const internalHealthz = await httpHealthProbe(`http://${internalServiceIp}:18090/healthz`, 3000);
+  const handshake = parseWireGuardLatestHandshake(latestHandshakes?.stdout ?? '');
+  const blockedReasons = [
+    ...(runtimeTarget.mode === 'api-pod' ? ['Internal service peer install must run on the Internal runtime host; this API is running inside a k8s pod'] : []),
+    ...(hostRunnerError ? [`Internal host runner is not reachable: ${hostRunnerError}`] : []),
+    ...(!artifacts.configExists ? [`Internal service peer config artifact is missing: ${paths.configPath}`] : []),
+    ...(!artifacts.applyScriptExists ? [`Internal service peer apply script is missing: ${paths.applyScriptPath}`] : []),
+    ...(!tools.wg.available ? ['wg is missing on the current host'] : []),
+    ...(!tools.wgQuick.available ? ['wg-quick is missing on the current host'] : [])
+  ];
+  const interfaceReady = wgShow?.status === 'passed';
+  const linkReady = handshake.status === 'passed' || domesticGatewayPing?.status === 'passed';
+  const healthReady = internalHealthz.status === 'passed';
+  const status = blockedReasons.length > 0
+    ? 'blocked'
+    : interfaceReady && linkReady && healthReady
+      ? 'passed'
+      : interfaceReady
+        ? 'ready'
+        : 'blocked';
+  return {
+    status,
+    mode: 'internal-service-peer-current-host-status',
+    siteId,
+    planId: plan?.planId ?? null,
+    host: {
+      hostname: osHostname(),
+      platform: osPlatform(),
+      release: osRelease()
+    },
+    interfaceName,
+    domesticGatewayIp,
+    internalServiceIp,
+    runtimeTarget,
+    tools,
+    artifacts,
+    interface: {
+      name: interfaceName,
+      wgShow,
+      latestHandshakes,
+      handshake
+    },
+    link: {
+      routeToDomestic,
+      domesticGatewayPing,
+      internalHealthz
+    },
+    install: {
+      available: blockedReasons.length === 0,
+      applyCommand: `bash scripts/manage.sh ops site-slot internal-service-peer-handoff apply`,
+      hostRunnerCommand: 'MX_INTERNAL_HOST_RUNNER_HOST=0.0.0.0 bash scripts/manage.sh ops site-slot internal-service-peer-host-runner 19190',
+      requires: [
+        'qp-tunnel-cli egress-on on the Internal runtime host for H2O/outbound bootstrap',
+        'wg-quick or @qpjoy/electron-core-wireguard on the Internal runtime host',
+        'sudo/root privilege on the Internal runtime host'
+      ],
+      blockedReasons
+    },
+    blockedReasons,
+    checkedAt: new Date().toISOString()
+  };
+}
+
+function internalServicePeerHostRunnerImage(): string {
+  return process.env.MX_INTERNAL_HOST_RUNNER_IMAGE?.trim()
+    || process.env.MX_INTERNAL_IMAGE?.trim()
+    || 'qpjoy/mx-launcher-server:shadow';
+}
+
+function internalServicePeerHostRunnerK8sObjects(namespace: string, name: string, port: number): Record<string, unknown>[] {
+  const selectorLabels = {
+    'app.kubernetes.io/name': name,
+    'app.kubernetes.io/component': 'internal-host-runner'
+  };
+  const labels = {
+    ...selectorLabels,
+    'app.kubernetes.io/part-of': 'mx-3ks'
+  };
+  return [
+    {
+      apiVersion: 'v1',
+      kind: 'Service',
+      metadata: {
+        name,
+        namespace,
+        labels
+      },
+      spec: {
+        type: 'ClusterIP',
+        selector: selectorLabels,
+        ports: [{
+          name: 'http',
+          port,
+          targetPort: 'http'
+        }]
+      }
+    },
+    {
+      apiVersion: 'apps/v1',
+      kind: 'DaemonSet',
+      metadata: {
+        name,
+        namespace,
+        labels
+      },
+      spec: {
+        selector: {
+          matchLabels: selectorLabels
+        },
+        updateStrategy: {
+          type: 'RollingUpdate'
+        },
+        template: {
+          metadata: {
+            labels
+          },
+          spec: {
+            hostNetwork: true,
+            dnsPolicy: 'ClusterFirstWithHostNet',
+            automountServiceAccountToken: false,
+            containers: [{
+              name: 'host-runner',
+              image: internalServicePeerHostRunnerImage(),
+              imagePullPolicy: 'IfNotPresent',
+              command: ['sh', '-lc'],
+              args: [`if [ -f server/scripts/internal-service-peer-host-runner.mjs ]; then node server/scripts/internal-service-peer-host-runner.mjs ${port}; else node scripts/internal-service-peer-host-runner.mjs ${port}; fi`],
+              ports: [{
+                name: 'http',
+                containerPort: port,
+                hostPort: port
+              }],
+              env: [
+                { name: 'MX_INTERNAL_HOST_RUNNER_HOST', value: '0.0.0.0' },
+                { name: 'MX_INTERNAL_HOST_RUNNER_PORT', value: String(port) },
+                { name: 'MX_INTERNAL_SERVICE_ARTIFACT_DIR', value: '/var/lib/mx-launcher/internal-service-peer' }
+              ],
+              securityContext: {
+                privileged: true,
+                capabilities: {
+                  add: ['NET_ADMIN', 'SYS_MODULE']
+                }
+              },
+              readinessProbe: {
+                httpGet: {
+                  path: '/healthz',
+                  port: 'http'
+                },
+                initialDelaySeconds: 2,
+                periodSeconds: 5,
+                timeoutSeconds: 2,
+                failureThreshold: 12
+              },
+              resources: {
+                requests: {
+                  cpu: '25m',
+                  memory: '64Mi'
+                },
+                limits: {
+                  cpu: '500m',
+                  memory: '256Mi'
+                }
+              },
+              volumeMounts: [
+                {
+                  name: 'runner-state',
+                  mountPath: '/var/lib/mx-launcher/internal-service-peer'
+                },
+                {
+                  name: 'wireguard-config',
+                  mountPath: '/etc/wireguard'
+                },
+                {
+                  name: 'tun-device',
+                  mountPath: '/dev/net/tun'
+                },
+                {
+                  name: 'kernel-modules',
+                  mountPath: '/lib/modules',
+                  readOnly: true
+                }
+              ]
+            }],
+            volumes: [
+              {
+                name: 'runner-state',
+                hostPath: {
+                  path: '/var/lib/mx-launcher/internal-service-peer',
+                  type: 'DirectoryOrCreate'
+                }
+              },
+              {
+                name: 'wireguard-config',
+                hostPath: {
+                  path: '/etc/wireguard',
+                  type: 'DirectoryOrCreate'
+                }
+              },
+              {
+                name: 'tun-device',
+                hostPath: {
+                  path: '/dev/net/tun',
+                  type: 'CharDevice'
+                }
+              },
+              {
+                name: 'kernel-modules',
+                hostPath: {
+                  path: '/lib/modules',
+                  type: 'DirectoryOrCreate'
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ];
+}
+
+function kubernetesObjectMetadata(object: Record<string, unknown>) {
+  const metadata = asRecord(object.metadata);
+  const name = stringValue(metadata.name);
+  const namespace = stringValue(metadata.namespace);
+  if (!name || !namespace) throw new Error('Kubernetes object metadata.name and metadata.namespace are required');
+  return { name, namespace };
+}
+
+function kubernetesMetadataString(value: unknown, key: string): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const metadata = (value as { metadata?: unknown }).metadata;
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+  const raw = (metadata as Record<string, unknown>)[key];
+  return typeof raw === 'string' && raw ? raw : null;
+}
+
+function kubernetesObjectPaths(object: Record<string, unknown>) {
+  const kind = stringValue(object.kind);
+  const apiVersion = stringValue(object.apiVersion);
+  const { name, namespace } = kubernetesObjectMetadata(object);
+  if (apiVersion === 'v1' && kind === 'Service') {
+    return {
+      kind,
+      name,
+      namespace,
+      resourcePath: `/api/v1/namespaces/${encodeURIComponent(namespace)}/services/${encodeURIComponent(name)}`,
+      createPath: `/api/v1/namespaces/${encodeURIComponent(namespace)}/services`
+    };
+  }
+  if (apiVersion === 'apps/v1' && kind === 'DaemonSet') {
+    return {
+      kind,
+      name,
+      namespace,
+      resourcePath: `/apis/apps/v1/namespaces/${encodeURIComponent(namespace)}/daemonsets/${encodeURIComponent(name)}`,
+      createPath: `/apis/apps/v1/namespaces/${encodeURIComponent(namespace)}/daemonsets`
+    };
+  }
+  throw new Error(`Unsupported Kubernetes host-runner object: ${apiVersion || 'unknown'}/${kind || 'unknown'}`);
+}
+
+async function applyInternalServicePeerHostRunnerK8sObject(object: Record<string, unknown>) {
+  const paths = kubernetesObjectPaths(object);
+  const existing = await kubernetesRequest('GET', paths.resourcePath);
+  if (existing.statusCode === 404) {
+    const created = await kubernetesRequest('POST', paths.createPath, object);
+    if (created.statusCode < 200 || created.statusCode >= 300) {
+      return {
+        status: 'failed',
+        action: 'create',
+        kind: paths.kind,
+        name: paths.name,
+        namespace: paths.namespace,
+        resourceVersion: null,
+        message: `HTTP ${created.statusCode} ${created.text}`
+      };
+    }
+    return {
+      status: 'created',
+      action: 'create',
+      kind: paths.kind,
+      name: paths.name,
+      namespace: paths.namespace,
+      resourceVersion: kubernetesMetadataString(created.body, 'resourceVersion'),
+      message: `${paths.kind} ${paths.namespace}/${paths.name} created`
+    };
+  }
+  if (existing.statusCode < 200 || existing.statusCode >= 300) {
+    return {
+      status: 'failed',
+      action: 'read',
+      kind: paths.kind,
+      name: paths.name,
+      namespace: paths.namespace,
+      resourceVersion: null,
+      message: `HTTP ${existing.statusCode} ${existing.text}`
+    };
+  }
+  const resourceVersion = kubernetesMetadataString(existing.body, 'resourceVersion');
+  const metadata = asRecord(object.metadata);
+  const desiredSpec = asRecord(object.spec);
+  const existingSpec = asRecord(asRecord(existing.body).spec);
+  const servicePreservedFields = ['clusterIP', 'clusterIPs', 'ipFamilies', 'ipFamilyPolicy', 'internalTrafficPolicy'];
+  const spec = paths.kind === 'Service'
+    ? servicePreservedFields.reduce<Record<string, unknown>>((nextSpec, key) => ({
+      ...nextSpec,
+      ...(!(key in nextSpec) && existingSpec[key] !== undefined ? { [key]: existingSpec[key] } : {})
+    }), { ...desiredSpec })
+    : desiredSpec;
+  const updated = await kubernetesRequest('PUT', paths.resourcePath, {
+    ...object,
+    metadata: {
+      ...metadata,
+      ...(resourceVersion ? { resourceVersion } : {})
+    },
+    spec
+  });
+  if (updated.statusCode < 200 || updated.statusCode >= 300) {
+    return {
+      status: 'failed',
+      action: 'update',
+      kind: paths.kind,
+      name: paths.name,
+      namespace: paths.namespace,
+      resourceVersion,
+      message: `HTTP ${updated.statusCode} ${updated.text}`
+    };
+  }
+  return {
+    status: 'updated',
+    action: 'update',
+    kind: paths.kind,
+    name: paths.name,
+    namespace: paths.namespace,
+    resourceVersion: kubernetesMetadataString(updated.body, 'resourceVersion'),
+    message: `${paths.kind} ${paths.namespace}/${paths.name} updated`
+  };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
+async function adminInternalServicePeerHostRunnerEnsureResult(
+  siteId: string,
+  plan: SiteSlotPlan | null,
+  secret: SiteSlotDomesticWireGuardSecret | null,
+  body: Record<string, unknown>,
+  store: PlatformStore | null = null
+) {
+  const namespace = internalServicePeerK8sHostRunnerNamespace();
+  const name = internalServicePeerK8sHostRunnerName();
+  const port = internalServicePeerK8sHostRunnerPort();
+  const runnerUrl = internalServicePeerK8sHostRunnerUrl();
+  const confirm = booleanValue(body.confirmInternalHostRunnerEnsure) === true;
+  const blockedReasons = [
+    ...(!confirm ? ['confirmInternalHostRunnerEnsure=true is required before creating the k8s host-runner'] : []),
+    ...(!process.env.KUBERNETES_SERVICE_HOST ? ['Internal host-runner ensure must run inside the Internal k8s API pod'] : []),
+    ...(!internalServicePeerHostRunnerEnsureEnabled() ? ['MX_INTERNAL_HOST_RUNNER_K8S_ENSURE_ENABLED=true is required before creating the k8s host-runner'] : [])
+  ];
+  if (blockedReasons.length > 0) {
+    return {
+      status: 'blocked',
+      execution: 'not-started',
+      mode: 'internal-service-peer-k8s-host-runner-ensure',
+      siteId,
+      planId: plan?.planId ?? stringValue(body.planId) ?? null,
+      runnerUrl,
+      namespace,
+      name,
+      objects: [],
+      blockedReasons,
+      nextActions: ['Enable the k8s host-runner ensure gate or start the host runner manually on the Internal host'],
+      afterStatus: null,
+      finishedAt: new Date().toISOString()
+    };
+  }
+
+  const objects = internalServicePeerHostRunnerK8sObjects(namespace, name, port);
+  const results = [];
+  for (const object of objects) {
+    results.push(await applyInternalServicePeerHostRunnerK8sObject(object));
+  }
+  const failed = results.filter((item) => item.status === 'failed');
+  if (failed.length > 0) {
+    return {
+      status: 'failed',
+      execution: 'failed',
+      mode: 'internal-service-peer-k8s-host-runner-ensure',
+      siteId,
+      planId: plan?.planId ?? stringValue(body.planId) ?? null,
+      runnerUrl,
+      namespace,
+      name,
+      objects: results,
+      blockedReasons: failed.map((item) => item.message),
+      nextActions: ['Check Internal API RBAC for services and daemonsets, then retry Ensure Host Runner'],
+      afterStatus: null,
+      finishedAt: new Date().toISOString()
+    };
+  }
+
+  let afterStatus = await adminInternalServicePeerRuntimeStatus(siteId, plan, secret, store);
+  for (let attempt = 0; internalPeerRuntimeHostRunnerOffline(afterStatus) && attempt < 5; attempt += 1) {
+    await delay(1000);
+    afterStatus = await adminInternalServicePeerRuntimeStatus(siteId, plan, secret, store);
+  }
+  const runnerReachable = !internalPeerRuntimeHostRunnerOffline(afterStatus);
+  return {
+    status: runnerReachable ? 'passed' : 'ready',
+    execution: 'completed',
+    mode: 'internal-service-peer-k8s-host-runner-ensure',
+    siteId,
+    planId: plan?.planId ?? stringValue(body.planId) ?? null,
+    runnerUrl,
+    namespace,
+    name,
+    image: internalServicePeerHostRunnerImage(),
+    objects: results,
+    blockedReasons: runnerReachable ? [] : internalServicePeerBlockedReasons(afterStatus),
+    nextActions: runnerReachable
+      ? ['Click Install / Restart to apply the Internal WG peer on the host runner']
+      : ['Wait for the host-runner DaemonSet pod to become ready, then Refresh Status'],
+    afterStatus,
+    finishedAt: new Date().toISOString()
+  };
+}
+
+function internalPeerRuntimeHostRunnerOffline(runtimeStatus: unknown): boolean {
+  const runtimeTarget = asRecord(asRecord(runtimeStatus).runtimeTarget);
+  const hostRunner = asRecord(runtimeTarget.hostRunner);
+  return runtimeTarget.mode === 'host-runner-unreachable' || Boolean(hostRunner.error);
+}
+
+async function adminInternalServicePeerApplyResult(
+  siteId: string,
+  plan: SiteSlotPlan | null,
+  secret: SiteSlotDomesticWireGuardSecret | null,
+  body: Record<string, unknown>,
+  store: PlatformStore | null = null
+) {
+  const paths = internalServicePeerArtifactPaths();
+  const hostRunnerUrl = internalServicePeerHostRunnerUrl();
+  if (hostRunnerUrl) {
+    try {
+      const payload = await postInternalServicePeerHostRunner('/internal-service-peer/apply', {
+        ...await internalServicePeerHostRunnerPayload(siteId, plan, secret, paths, store),
+        mode: 'apply',
+        confirmInternalServicePeerApply: booleanValue(body.confirmInternalServicePeerApply) === true,
+        requestedBy: stringValue(body.requestedBy) ?? 'admin-ui',
+        requestId: stringValue(body.requestId) ?? `admin-internal-service-peer-apply-${Date.now()}`
+      });
+      return asRecord(payload.applyResult ?? payload.internalServicePeerApply ?? payload);
+    } catch (error) {
+      const beforeStatus = await adminInternalServicePeerRuntimeStatus(siteId, plan, secret, store, error instanceof Error ? error.message : String(error));
+      const blockedReasons = Array.isArray(beforeStatus.blockedReasons)
+        ? beforeStatus.blockedReasons.filter((item): item is string => typeof item === 'string')
+        : ['Internal host runner is not reachable'];
+      return {
+        status: 'blocked',
+        execution: 'not-started',
+        mode: 'internal-service-peer-host-runner-apply',
+        siteId,
+        planId: plan?.planId ?? stringValue(body.planId) ?? null,
+        command: null,
+        exitCode: null,
+        stdout: '',
+        stderr: blockedReasons.join('\n'),
+        beforeStatus,
+        afterStatus: beforeStatus,
+        blockedReasons,
+        finishedAt: new Date().toISOString()
+      };
+    }
+  }
+  const beforeStatus = await adminInternalServicePeerRuntimeStatus(siteId, plan, secret, store);
+  const confirm = booleanValue(body.confirmInternalServicePeerApply) === true;
+  const blockedReasons = [
+    ...(!confirm ? ['confirmInternalServicePeerApply=true is required before installing the service'] : []),
+    ...internalServicePeerBlockedReasons(beforeStatus)
+  ];
+  if (blockedReasons.length > 0) {
+    return {
+      status: 'blocked',
+      execution: 'not-started',
+      mode: 'internal-service-peer-current-host-apply',
+      siteId,
+      planId: plan?.planId ?? stringValue(body.planId) ?? null,
+      command: null,
+      exitCode: null,
+      stdout: '',
+      stderr: blockedReasons.join('\n'),
+      beforeStatus,
+      afterStatus: beforeStatus,
+      blockedReasons,
+      finishedAt: new Date().toISOString()
+    };
+  }
+
+  const interfaceName = INTERNAL_SERVICE_PEER_INTERFACE;
+  const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  const command = isRoot ? 'env' : 'sudo';
+  const args = isRoot
+    ? [`MX_INTERNAL_SERVICE_WG_INTERFACE=${interfaceName}`, 'bash', paths.applyScriptPath, paths.configPath]
+    : ['-n', 'env', `MX_INTERNAL_SERVICE_WG_INTERFACE=${interfaceName}`, 'bash', paths.applyScriptPath, paths.configPath];
+  const execution = await runLocalCommand(command, args, 60000);
+  const afterStatus = await adminInternalServicePeerRuntimeStatus(siteId, plan, secret, store);
+  const status = execution.status === 'passed'
+    ? afterStatus.status === 'passed' ? 'passed' : 'ready'
+    : 'failed';
+  return {
+    status,
+    execution: execution.status === 'passed' ? 'completed' : 'failed',
+    mode: 'internal-service-peer-current-host-apply',
+    siteId,
+    planId: plan?.planId ?? stringValue(body.planId) ?? null,
+    command: `${command} ${args.map(shellQuote).join(' ')}`,
+    exitCode: execution.exitCode,
+    stdout: execution.stdout,
+    stderr: execution.stderr,
+    beforeStatus,
+    afterStatus,
+    blockedReasons: status === 'passed' ? [] : internalServicePeerBlockedReasons(afterStatus),
+    finishedAt: new Date().toISOString()
+  };
+}
+
+async function localCommandPath(command: string) {
+  const result = await runLocalCommand('sh', ['-lc', `command -v ${command}`], 1000);
+  const path = result.status === 'passed' ? result.stdout.trim().split(/\s+/)[0] ?? null : null;
+  return {
+    available: Boolean(path),
+    path,
+    probe: result.status
+  };
+}
+
+async function runLocalCommand(command: string, args: string[], timeoutMs: number) {
+  const startedAt = new Date().toISOString();
+  try {
+    const { stdout, stderr } = await execFileAsync(command, args, {
+      timeout: timeoutMs,
+      maxBuffer: 1024 * 1024
+    });
+    return {
+      status: 'passed',
+      command,
+      args,
+      exitCode: 0,
+      stdout: stdout.trim(),
+      stderr: stderr.trim(),
+      startedAt,
+      finishedAt: new Date().toISOString()
+    };
+  } catch (error) {
+    const execError = error as Error & { code?: number | string; stdout?: string; stderr?: string; killed?: boolean; signal?: string };
+    return {
+      status: execError.killed ? 'timeout' : execError.code === 'ENOENT' ? 'missing' : 'failed',
+      command,
+      args,
+      exitCode: typeof execError.code === 'number' ? execError.code : null,
+      stdout: (execError.stdout ?? '').trim(),
+      stderr: (execError.stderr ?? execError.message).trim(),
+      signal: execError.signal ?? null,
+      startedAt,
+      finishedAt: new Date().toISOString()
+    };
+  }
+}
+
+async function httpHealthProbe(url: string, timeoutMs: number) {
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    const text = await response.text();
+    return {
+      status: response.ok ? 'passed' : 'failed',
+      url,
+      httpStatus: response.status,
+      durationMs: Date.now() - startedAt,
+      body: text.slice(0, 500)
+    };
+  } catch (error) {
+    return {
+      status: 'failed',
+      url,
+      httpStatus: null,
+      durationMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function parseWireGuardLatestHandshake(stdout: string) {
+  const rows = stdout.trim().split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  const latest = rows.map((line) => {
+    const [publicKey, rawTimestamp] = line.split(/\s+/);
+    const timestamp = Number(rawTimestamp || 0);
+    return {
+      publicKey,
+      timestamp: Number.isFinite(timestamp) ? timestamp : 0,
+      at: Number.isFinite(timestamp) && timestamp > 0 ? new Date(timestamp * 1000).toISOString() : null
+    };
+  });
+  const newest = latest.reduce((current, item) => item.timestamp > current.timestamp ? item : current, { publicKey: null as string | null, timestamp: 0, at: null as string | null });
+  return {
+    status: newest.timestamp > 0 ? 'passed' : rows.length > 0 ? 'blocked' : 'missing',
+    newest,
+    peers: latest
   };
 }
 
@@ -3343,25 +4656,37 @@ function domesticRelayReadOnlyProbeFailures(
   ];
 }
 
-function domesticRelayReadOnlyProbeCommand(plan: SiteSlotPlan | null): string {
+function domesticRelayReadOnlyProbeCommand(plan: SiteSlotPlan | null, secret: SiteSlotDomesticWireGuardSecret | null = null): string {
   const sshUser = plan?.ssh.user ?? 'root';
   const sshPort = plan?.ssh.port ?? 22;
   const host = plan?.host ?? '<domestic-host>';
-  return `ssh -p ${sshPort} ${shellQuote(`${sshUser}@${host}`)} ${shellQuote(domesticRelayReadOnlyProbeScript())}`;
+  return `ssh -p ${sshPort} ${shellQuote(`${sshUser}@${host}`)} ${shellQuote(domesticRelayReadOnlyProbeScript(secret))}`;
 }
 
-function domesticRelayReadOnlyProbeScript(): string {
+function domesticRelayReadOnlyProbeScript(secret: SiteSlotDomesticWireGuardSecret | null = null): string {
+  const internalPublicKey = secret?.internalServicePublicKey ?? '<internal-service-public-key>';
+  const internalServiceIp = secret?.internalServiceIp ?? '10.88.88.88';
   return [
     'set -eu',
     'printf "mx-domestic-relay-readonly-probe\\n"',
+    `internal_peer=${shellQuote(internalPublicKey)}`,
+    `internal_ip=${shellQuote(internalServiceIp)}`,
     'id -u',
     'hostname',
     'uname -a',
     'test -f /etc/wireguard/mx-domestic.conf',
     'if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi',
-    'if command -v wg >/dev/null 2>&1; then wg show mx-domestic; else echo "wg: missing"; fi',
-    'ip -4 address show dev mx-domestic 2>/dev/null || true',
-    'ip route get 10.88.88.88 2>/dev/null || true',
+    'if ! command -v wg >/dev/null 2>&1; then echo "blocked: wg missing"; exit 1; fi',
+    'wg show mx-domestic',
+    'wg show mx-domestic endpoints || true',
+    'wg show mx-domestic latest-handshakes || true',
+    'if echo "$internal_peer" | grep -q "^<"; then echo "blocked: internal service public key is missing from Internal secret"; exit 1; fi',
+    'handshake="$(wg show mx-domestic latest-handshakes | awk -v peer="$internal_peer" \'$1 == peer { print $2 }\')"',
+    'if [ -z "$handshake" ] || [ "$handshake" = "0" ]; then echo "blocked: Internal service peer has no latest handshake"; exit 1; fi',
+    'ip -4 address show dev mx-domestic',
+    'ip -4 address show dev mx-domestic | grep -q "10\\.88\\.0\\.1/" || { echo "blocked: mx-domestic missing 10.88.0.1/16"; exit 1; }',
+    'ip route get "$internal_ip"',
+    'if command -v curl >/dev/null 2>&1; then curl -fsS --max-time 5 "http://${internal_ip}:18090/healthz"; elif command -v wget >/dev/null 2>&1; then wget -qO- -T 5 "http://${internal_ip}:18090/healthz"; else echo "blocked: curl or wget is required for Internal healthz"; exit 1; fi',
     'systemctl status wg-quick@mx-domestic --no-pager 2>/dev/null || true'
   ].join('; ');
 }
@@ -3826,14 +5151,16 @@ function buildPipelineActionHints(
   const repairWorkerJobSession = readyWorkerJobNeedsChangeWindow
     ? runnerSessions.find((session) => session.sessionId === readyWorkerJob.sessionId) ?? null
     : null;
-  const domesticBaseInstalled = plan.kind === 'domestic' && workerReports.some((report) => report.status === 'passed' && workerReportHasRemoteExecution(report));
   const domesticRelayPeerJob = readyWorkerJob ? isDomesticRelayPeerWorkerJob(readyWorkerJob) : false;
   const needsDomesticWgMaterialize = plan.kind === 'domestic' && domesticWireGuardMaterializeNeeded(plan, domesticWgSecret);
   const domesticWorkerRunReady = !(plan.kind === 'domestic' && needsDomesticWgMaterialize);
   const domesticWorkerRunBlockedReason = 'Materialize Domestic WG before running Domestic worker job gates';
+  const hasPassedWorkerReport = workerReports.some((report) => report.status === 'passed');
 
   if (needsDomesticWgMaterialize) {
     actions.push(domesticWgMaterializeAction(actionPolicy, plan, 'WG secret/materialized artifacts must exist before Domestic preflight and remote SSH'));
+  } else if (plan.kind === 'domestic' && domesticWgSecret && confirmedApply && !hasPassedWorkerReport) {
+    actions.push(internalServicePeerHandoffAction(actionPolicy, plan, domesticWgSecret));
   }
 
   if (!readyPreflight) {
@@ -3913,36 +5240,6 @@ function buildPipelineActionHints(
         ));
       }
     }
-  }
-
-  if (plan.kind === 'domestic' && confirmedApply && domesticBaseInstalled && !readyWorkerJob) {
-    const remoteRunnerReadinessFailures = domesticRemoteSshReadinessFailures(plan);
-    actions.push(contextualAction(
-      actionPolicy,
-      'site-slot.domestic-relay-peer-append-ssh.prepare',
-      {
-        path: `/internal/v1/site-slots/executions/${encodeURIComponent(confirmedApply.runId)}/prepare-domestic-relay-peer-append-ssh`,
-        bodyTemplate: {
-          confirmRemoteExecution: true,
-          confirmRelayPeerAppendSshPrepare: true,
-          approvalId: 'approval-domestic-relay-peer-append',
-          changeWindowStart: '<change-window-start-iso>',
-          changeWindowEnd: '<change-window-end-iso>',
-          workerId: `worker-domestic-relay-${plan.siteId}`,
-          workerKind: 'domestic-runner',
-          retryLimit: 1,
-          rollbackStrategy: 'restore-domestic-wg-peer-before-append',
-          requestedBy: actionPolicy.principal.principalId,
-          requestId: 'admin-ui-domestic-relay-peer-append-ssh-prepare'
-        }
-      },
-        remoteRunnerReadinessFailures.length === 0 && !needsDomesticWgMaterialize,
-        remoteRunnerReadinessFailures.length
-          ? remoteRunnerReadinessFailures.join('; ')
-          : needsDomesticWgMaterialize
-            ? domesticWorkerRunBlockedReason
-          : 'confirmed Domestic apply execution is required before preparing relay peer append SSH job'
-    ));
   }
 
   if (sessionNeedingWorker || repairWorkerJobSession) {
@@ -4076,70 +5373,6 @@ function buildPipelineActionHints(
         domesticWorkerRunReady,
         domesticWorkerRunReady ? 'Domestic worker job must be ready before relay read-only probe' : domesticWorkerRunBlockedReason
       ));
-      actions.push(contextualAction(
-        actionPolicy,
-        'site-slot.worker-run.domestic-relay-peer-plan',
-        {
-          path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/run-domestic-relay-peer-plan`,
-          bodyTemplate: {
-            confirmRelayPeerPlan: true,
-            leaseId: '<launcher-network-lease-id>',
-            peerRole: 'guest',
-            leaseIp: '<home-lease-ip>',
-            publicKey: '<home-wg-public-key>',
-            workerId: readyWorkerJob.worker.workerId,
-            message: 'Domestic relay peer plan by admin-ui',
-            requestedBy: actionPolicy.principal.principalId,
-            requestId: 'admin-ui-worker-run-domestic-relay-peer-plan'
-          }
-        },
-        domesticWorkerRunReady,
-        domesticWorkerRunReady ? 'Domestic worker job must be ready before relay peer plan evidence' : domesticWorkerRunBlockedReason
-      ));
-      actions.push(contextualAction(
-        actionPolicy,
-        'site-slot.worker-run.domestic-relay-peer-append',
-        {
-          path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/domestic-relay-peer-append`,
-          bodyTemplate: {
-            confirmRelayPeerAppend: true,
-            confirmRelayReadOnlyProbeReviewed: true,
-            confirmRelayPeerPlanReviewed: true,
-            leaseId: '<launcher-network-lease-id>',
-            peerRole: 'guest',
-            leaseIp: '<home-lease-ip>',
-            publicKey: '<home-wg-public-key>',
-            requestedBy: actionPolicy.principal.principalId,
-            requestId: 'admin-ui-worker-run-domestic-relay-peer-append'
-          }
-        },
-        domesticWorkerRunReady,
-        domesticWorkerRunReady ? 'Domestic relay read-only probe and peer plan should be reviewed before peer append handoff' : domesticWorkerRunBlockedReason
-      ));
-      actions.push(contextualAction(
-        actionPolicy,
-        'site-slot.worker-run.domestic-relay-peer-append-ssh',
-        {
-          path: `/internal/v1/site-slots/worker-jobs/${encodeURIComponent(readyWorkerJob.jobId)}/run-domestic-relay-peer-append-ssh`,
-          bodyTemplate: {
-            confirmRemoteExecution: true,
-            confirmRelayPeerAppendSsh: true,
-            confirmRelayPeerAppend: true,
-            confirmRelayReadOnlyProbeReviewed: true,
-            confirmRelayPeerPlanReviewed: true,
-            leaseId: '<launcher-network-lease-id>',
-            peerRole: 'guest',
-            leaseIp: '<home-lease-ip>',
-            publicKey: '<home-wg-public-key>',
-            workerId: readyWorkerJob.worker.workerId,
-            message: 'Domestic relay peer append SSH by admin-ui',
-            requestedBy: actionPolicy.principal.principalId,
-            requestId: 'admin-ui-worker-run-domestic-relay-peer-append-ssh'
-          }
-        },
-        domesticWorkerRunReady,
-        domesticWorkerRunReady ? 'Domestic relay peer append SSH requires remote SSH gates and explicit operator confirmation' : domesticWorkerRunBlockedReason
-      ));
     }
     actions.push(contextualAction(
       actionPolicy,
@@ -4212,6 +5445,18 @@ function domesticWireGuardMaterializeNeeded(
     || Boolean(expectedEndpoint && secret.publicEndpoint !== expectedEndpoint);
 }
 
+function domesticWireGuardStaleReason(
+  plan: SiteSlotPlan,
+  secret: SiteSlotDomesticWireGuardSecret
+): string | null {
+  if (!domesticWireGuardMaterializeNeeded(plan, secret)) return null;
+  const expectedEndpoint = endpointFromPlanHost(plan, secret.listenPort ?? 51820);
+  if (expectedEndpoint && secret.publicEndpoint !== expectedEndpoint) {
+    return `Domestic WG materialized artifact is stale for the selected plan: endpoint ${secret.publicEndpoint || 'unset'} != ${expectedEndpoint}`;
+  }
+  return 'Domestic WG materialized artifact is stale for the selected plan; run Materialize Domestic WG first';
+}
+
 function domesticWgMaterializeAction(
   actionPolicy: AdminActionPolicy,
   plan: SiteSlotPlan,
@@ -4243,6 +5488,34 @@ function domesticWgMaterializeAction(
     },
     Boolean(plan.host),
     blockedReason
+  );
+}
+
+function internalServicePeerHandoffAction(
+  actionPolicy: AdminActionPolicy,
+  plan: SiteSlotPlan,
+  secret: SiteSlotDomesticWireGuardSecret
+): AdminActionDescriptor {
+  const paths = internalServicePeerArtifactPaths();
+  const failures = internalServicePeerHandoffFailures(plan.siteId, secret, paths, {
+    planId: plan.planId,
+    confirmInternalServicePeerHandoff: true
+  }, plan, false);
+  return contextualAction(
+    actionPolicy,
+    'site-slot.internal-service-peer.handoff',
+    {
+      path: `/internal/v1/config-center/domestic-wg-secrets/${encodeURIComponent(plan.siteId)}/internal-service-peer-handoff`,
+      bodyTemplate: {
+        siteId: plan.siteId,
+        planId: plan.planId,
+        confirmInternalServicePeerHandoff: true,
+        requestedBy: actionPolicy.principal.principalId,
+        requestId: 'admin-ui-internal-service-peer-handoff'
+      }
+    },
+    failures.length === 0,
+    failures.join('; ') || 'Domestic WG materialize must complete before Internal service peer handoff'
   );
 }
 
@@ -4835,7 +6108,7 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         kind: 'domestic',
         siteId: 'domestic-main',
         sshProfileId: null,
-        host: 'domestic.example.com',
+        host: '<domestic-public-host-or-ip>',
         sshUser: 'root',
         hasDocker: true,
         hasOutboundInternet: false
@@ -4897,6 +6170,23 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         rotateRelayKey: false,
         rotateInternalServiceKey: false,
         confirmRotate: false,
+        requestedBy: 'admin-ui'
+      }
+    },
+    {
+      actionId: 'site-slot.internal-service-peer.handoff',
+      label: 'Internal Service Peer Handoff',
+      category: 'site-slot',
+      method: 'POST',
+      path: '/internal/v1/config-center/domestic-wg-secrets/:siteId/internal-service-peer-handoff',
+      requiredScopes: ['site-slot.manage'],
+      gate: 'confirm-remote-execution',
+      risk: 'high',
+      confirmFields: ['confirmInternalServicePeerHandoff'],
+      bodyTemplate: {
+        siteId: 'domestic-main',
+        planId: '<plan-id>',
+        confirmInternalServicePeerHandoff: true,
         requestedBy: 'admin-ui'
       }
     },
@@ -4988,6 +6278,56 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         workerKind: 'domestic-runner',
         retryLimit: 1,
         rollbackStrategy: 'restore-domestic-wg-peer-before-append',
+        requestedBy: 'admin-ui'
+      }
+    },
+    {
+      actionId: 'site-slot.internal-service-peer.status',
+      label: 'Internal Service Peer Status',
+      category: 'site-slot',
+      method: 'POST',
+      path: '/internal/v1/config-center/domestic-wg-secrets/:siteId/internal-service-peer-status',
+      requiredScopes: ['site-slot.manage'],
+      gate: 'none',
+      risk: 'low',
+      confirmFields: [],
+      bodyTemplate: {
+        siteId: 'domestic-main',
+        planId: '<plan-id>',
+        requestedBy: 'admin-ui'
+      }
+    },
+    {
+      actionId: 'site-slot.internal-service-peer.host-runner.ensure',
+      label: 'Ensure Internal Host Runner',
+      category: 'site-slot',
+      method: 'POST',
+      path: '/internal/v1/config-center/domestic-wg-secrets/:siteId/internal-service-peer-host-runner',
+      requiredScopes: ['site-slot.execute'],
+      gate: 'confirm-remote-execution',
+      risk: 'high',
+      confirmFields: ['confirmInternalHostRunnerEnsure'],
+      bodyTemplate: {
+        siteId: 'domestic-main',
+        planId: '<plan-id>',
+        confirmInternalHostRunnerEnsure: true,
+        requestedBy: 'admin-ui'
+      }
+    },
+    {
+      actionId: 'site-slot.internal-service-peer.apply',
+      label: 'Install Internal Service Peer',
+      category: 'site-slot',
+      method: 'POST',
+      path: '/internal/v1/config-center/domestic-wg-secrets/:siteId/internal-service-peer-apply',
+      requiredScopes: ['site-slot.execute'],
+      gate: 'confirm-remote-execution',
+      risk: 'high',
+      confirmFields: ['confirmInternalServicePeerApply'],
+      bodyTemplate: {
+        siteId: 'domestic-main',
+        planId: '<plan-id>',
+        confirmInternalServicePeerApply: true,
         requestedBy: 'admin-ui'
       }
     },

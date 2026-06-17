@@ -18,7 +18,7 @@ export class TestCenterController {
         configSnapshotId: nullableString(body.configSnapshotId),
         installId: nullableString(body.installId),
         deviceId: nullableString(body.deviceId),
-        productId: nullableString(body.productId) ?? 'h2o',
+        productId: nullableString(body.productId) ?? 'launcher',
         topology: nullableString(body.topology) ?? 'h-d-i-shadow',
         sites: stringArray(body.sites)
       })
