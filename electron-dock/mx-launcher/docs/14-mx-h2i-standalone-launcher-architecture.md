@@ -177,6 +177,15 @@ Domestic WG service peer，负责把 Internal 固定到 `10.88.88.88` 并访问 
 `qp-tunnel-cli install --file ...`，再 `qp-tunnel-cli egress-on`，最后应用
 `mx-internal-service-peer.conf`。
 
+Internal API 可以跑在 k8s pod 里，但 WG runtime 必须跑在真实 Internal 宿主机上。当前
+默认 host-runner 是 native runner：macOS 用 LaunchAgent，Ubuntu/Linux 用 systemd，
+由 `bash scripts/manage.sh ops site-slot native-host-runner install 19190` 安装；k8s API
+通过 `host.docker.internal:19190` 或部署环境提供的 native host URL 调用它。k8s
+DaemonSet runner 只作为显式启用的 fallback 测试路径，因为 Docker Desktop/LinuxKit 里的
+WireGuard namespace 不等价于 macOS 宿主机，不能用来证明 H2I 链路已在宿主机生效。
+Domestic relay 已经建好后不要反复 New Plan；Internal public key 变化时只同步 Domestic
+peer key，然后重新 Install / Restart Internal service peer。
+
 H 端优先使用 H2I private API；不可达时回退 Domestic public bootstrap：
 
 ```text
@@ -196,14 +205,15 @@ Internal K8s 运行 `mx-internal-coredns`，Config Center 生成 signed zone sna
 | --- | --- | --- |
 | `internal.mx` / `gateway.internal.mx` | `10.88.88.88` | H 端命中 split DNS 后优先走 Domestic WG allowIPs 到 Internal service peer |
 | `dns.internal.mx` | `mx-internal-coredns.mx-dns.svc.cluster.local` | Internal K8s 内 DNS authority service discovery |
-| `host-runner.internal.mx` | `mx-internal-host-runner.mx-internal-shadow.svc.cluster.local` | API pod 到 host-runner 的集群内发现 |
+| `host-runner.internal.mx` | native host-runner URL 或显式 k8s fallback service | API pod 到真实宿主机 runner 的发现 |
 | `service-peer.internal.mx` | `10.88.88.88` | Internal service peer 固定地址 |
 | `domestic-relay.internal.mx` | `10.88.0.1` | Domestic WG gateway 固定地址 |
 
 H 端策略是：`internal.mx`、`.internal.mx`、`.corp.mx`、`.h2i.mx` 命中 Internal DNS；
 未命中域名按 system DNS / system proxy / H2O proxy / direct 的 fallback 顺序处理。
-当前本地 Mac + Docker Desktop 中，host-runner DaemonSet 操作的是 LinuxKit node；
-正式 Ubuntu 环境中，它操作 Ubuntu node 的 host network、WireGuard 和路由。
+当前本地 Mac + Docker Desktop 中，host-runner DaemonSet 操作的是 LinuxKit node，不等于
+Mac 宿主机；正式 Ubuntu 环境中也优先使用 native systemd runner，让 WireGuard、路由和
+egress-on 都落在同一个真实 Internal runtime host 上。
 
 ## Mesh 和 IP 规划
 
@@ -284,7 +294,7 @@ mx-domestic-luopan   -> 10.92.0.1 / internal 10.92.88.88
    路径，本地 Mac 只验证 `@qpjoy/electron-core-wireguard` 的 WG/launchd 路径。
    本地/目标机可先用
    `bash scripts/manage.sh ops site-slot internal-service-peer-handoff status`
-   检查 artifact 和 `wg`/`wg-quick` 是否存在；只有在真正的 Internal runtime host 上才执行
+   检查 artifact、`qp-tunnel-cli`、以及 `@qpjoy/electron-core-wireguard` runtime 是否存在；只有在真正的 Internal runtime host 上才执行
    `bash scripts/manage.sh ops site-slot internal-service-peer-handoff apply`。
 2. 把 Domestic ready gate 从“报告通过”升级为“有 endpoint/latest handshake，且
    `curl http://10.88.88.88:18090/healthz` 成功”。

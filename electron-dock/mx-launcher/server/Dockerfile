@@ -18,6 +18,7 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/scripts ./scripts
+COPY --from=build /app/scripts ./server/scripts
 COPY --from=build /app/artifacts ./artifacts
 EXPOSE 18090
 HEALTHCHECK --interval=30s --timeout=4s --retries=3 \

@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/tunnel-cli",
-  "version": "0.1.10",
+  "version": "0.1.12",
   "description": "Global QPJoy Tunnel CLI for mihomo-client and cross-platform HDO mesh enrollment.",
   "private": false,
   "type": "commonjs",
@@ -22,7 +22,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@qpjoy/electron-core-wireguard": "^0.1.28"
+    "@qpjoy/electron-core-wireguard": "^0.1.30"
   },
   "devDependencies": {
     "@types/node": "^22.10.7"

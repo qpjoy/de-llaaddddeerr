@@ -46,6 +46,7 @@ Usage:
   bash scripts/manage.sh ops site-slot materialize-domestic-ready <site-id>
   bash scripts/manage.sh ops site-slot internal-service-peer-handoff [status|command|apply] [config-path]
   bash scripts/manage.sh ops site-slot internal-service-peer-host-runner [port]
+  bash scripts/manage.sh ops site-slot native-host-runner status|start|install|uninstall [port]
   bash scripts/manage.sh ops site-slot cleanup-v1-wireguard [--apply] [hdo-home hdo-internal ...]
   bash scripts/manage.sh ops site-slot refresh-tunnel-cli [version|--from-local DIR|--from-tarball FILE]
   bash scripts/manage.sh ops site-slot ssh-profiles
@@ -180,8 +181,25 @@ shadow_image_artifacts() {
   node server/scripts/site-slot-artifact-materializer.mjs all --out-dir server/artifacts/site-slots
 }
 
+shadow_image_admin_assets() {
+  local out_dir="$ROOT/server/artifacts/admin"
+  local three_build_dir="$ROOT/desktop/node_modules/three/build"
+  [ -f "$ROOT/desktop/index.html" ] || die "missing desktop/index.html"
+  [ -f "$ROOT/desktop/renderer.js" ] || die "missing desktop/renderer.js"
+  [ -f "$ROOT/desktop/styles.css" ] || die "missing desktop/styles.css"
+  [ -f "$three_build_dir/three.module.js" ] || die "missing desktop/node_modules/three; run pnpm --dir desktop install"
+  say "sync browser admin assets for shadow image"
+  rm -rf "$out_dir"
+  mkdir -p "$out_dir/node_modules/three/build"
+  cp "$ROOT/desktop/index.html" "$out_dir/index.html"
+  cp "$ROOT/desktop/renderer.js" "$out_dir/renderer.js"
+  cp "$ROOT/desktop/styles.css" "$out_dir/styles.css"
+  cp "$three_build_dir"/*.js "$out_dir/node_modules/three/build/"
+}
+
 shadow_image_build() {
   shadow_image_artifacts
+  shadow_image_admin_assets
   (cd server && docker compose -f docker-compose.shadow.yml build internal)
 }
 
@@ -994,6 +1012,55 @@ Notes:
 EOF
 }
 
+ops_local_platform_cleanup_host_runner_fallback() {
+  local namespace="${MX_INTERNAL_HOST_RUNNER_K8S_NAMESPACE:-mx-internal-shadow}"
+  local name="${MX_INTERNAL_HOST_RUNNER_K8S_NAME:-mx-internal-host-runner}"
+  say "remove stale k8s Internal host-runner fallback ($namespace/$name)"
+  kubectl -n "$namespace" delete daemonset "$name" --ignore-not-found
+  kubectl -n "$namespace" delete service "$name" --ignore-not-found
+}
+
+ops_local_platform_detect_host_runner_url() {
+  if [ -n "${MX_INTERNAL_HOST_RUNNER_URL:-}" ]; then
+    printf '%s\n' "${MX_INTERNAL_HOST_RUNNER_URL%/}"
+    return 0
+  fi
+  if [ -n "${MX_INTERNAL_HOST_RUNNER_NATIVE_URL:-}" ]; then
+    printf '%s\n' "${MX_INTERNAL_HOST_RUNNER_NATIVE_URL%/}"
+    return 0
+  fi
+
+  local host_ip default_if
+  if command -v ipconfig >/dev/null 2>&1; then
+    default_if="$(route -n get default 2>/dev/null | awk '/interface:/{print $2; exit}')"
+    if [ -n "$default_if" ]; then
+      host_ip="$(ipconfig getifaddr "$default_if" 2>/dev/null || true)"
+    fi
+  fi
+  if [ -z "${host_ip:-}" ] && command -v ip >/dev/null 2>&1; then
+    host_ip="$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')"
+  fi
+  if [ -z "${host_ip:-}" ] && command -v hostname >/dev/null 2>&1; then
+    host_ip="$(hostname -I 2>/dev/null | awk '{print $1; exit}')"
+  fi
+  if [ -n "${host_ip:-}" ]; then
+    printf 'http://%s:%s\n' "$host_ip" "${MX_INTERNAL_HOST_RUNNER_PORT:-19190}"
+    return 0
+  fi
+  printf 'http://host.docker.internal:%s\n' "${MX_INTERNAL_HOST_RUNNER_PORT:-19190}"
+}
+
+ops_local_platform_apply_native_host_runner_url() {
+  local namespace url
+  namespace="${MX_INTERNAL_HOST_RUNNER_K8S_NAMESPACE:-mx-internal-shadow}"
+  url="$(ops_local_platform_detect_host_runner_url)"
+  say "point Internal API at native host runner: $url"
+  kubectl -n "$namespace" set env deployment/mx-launcher-internal \
+    MX_INTERNAL_HOST_RUNNER_URL="$url" \
+    MX_INTERNAL_HOST_RUNNER_NATIVE_URL="$url" >/dev/null
+  kubectl -n "$namespace" rollout status deployment/mx-launcher-internal --timeout=180s
+}
+
 ops_local_platform() {
   local action="$1"
   shift || true
@@ -1010,8 +1077,11 @@ ops_local_platform() {
     cycle)
       [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops local-platform cycle [local-port]"
       ops_local_platform_plan
+      ops_local_platform_cleanup_host_runner_fallback
       say "cycle Internal K8s shadow"
       ops_k8s_shadow cycle "${1:-18090}"
+      ops_local_platform_apply_native_host_runner_url
+      ops_local_platform_cleanup_host_runner_fallback
       say "local-platform cycle OK. Use 'bash scripts/manage.sh ops local-platform status' to inspect it."
       ;;
     status)
@@ -1525,6 +1595,285 @@ internal_service_peer_handoff() {
   env MX_INTERNAL_SERVICE_WG_INTERFACE="$iface" bash "$apply_script" "$config_path"
 }
 
+native_host_runner_label() {
+  echo "com.qpjoy.mx-launcher.internal-host-runner"
+}
+
+native_host_runner_service_name() {
+  echo "mx-internal-host-runner"
+}
+
+native_host_runner_node_bin() {
+  command -v node || die "node is required for the Internal native host runner"
+}
+
+native_host_runner_state_dir() {
+  echo "${MX_NATIVE_HOST_RUNNER_STATE_DIR:-$HOME/.qpjoy/mx-launcher/internal-host-runner}"
+}
+
+native_host_runner_artifact_dir() {
+  echo "${MX_INTERNAL_SERVICE_ARTIFACT_DIR:-$(native_host_runner_state_dir)/artifacts/site-slots/domestic}"
+}
+
+native_host_runner_bundle_dir() {
+  echo "${MX_QP_TUNNEL_CLI_BUNDLE_DIR:-$(native_host_runner_state_dir)/qp-tunnel-cli-runtime}"
+}
+
+native_host_runner_prepare_runtime() {
+  local artifact_dir bundle_dir archive_name source_archive target_archive archive_bytes marker_path
+  artifact_dir="$(native_host_runner_artifact_dir)"
+  bundle_dir="$(native_host_runner_bundle_dir)"
+  archive_name="mx-domestic-qp-tunnel-cli-fallback.tar.gz"
+  mkdir -p "$artifact_dir" "$bundle_dir"
+  target_archive="$artifact_dir/$archive_name"
+  for source_archive in \
+    "$ROOT/artifacts/site-slots/domestic/$archive_name" \
+    "$ROOT/server/artifacts/site-slots/domestic/$archive_name"; do
+    if [ -f "$source_archive" ]; then
+      if [ ! -f "$target_archive" ] || ! cmp -s "$source_archive" "$target_archive"; then
+        rm -rf "$bundle_dir"
+        mkdir -p "$bundle_dir"
+      fi
+      cp "$source_archive" "$target_archive"
+      chmod 600 "$target_archive" >/dev/null 2>&1 || true
+      marker_path="$bundle_dir/.fallback-archive"
+      if [ -f "$marker_path" ]; then
+        archive_bytes="$(wc -c < "$target_archive" | tr -d ' ')"
+        if ! grep -Fx "$archive_bytes" "$marker_path" >/dev/null 2>&1; then
+          rm -rf "$bundle_dir"
+          mkdir -p "$bundle_dir"
+        fi
+      fi
+      break
+    fi
+  done
+}
+
+native_host_runner_health() {
+  local port="${1:-19190}"
+  local url="http://127.0.0.1:$port/healthz"
+  if command -v curl >/dev/null 2>&1 && curl -fsS "$url" >/dev/null 2>&1; then
+    say "health: reachable at $url"
+    return 0
+  fi
+  say "health: not reachable at $url"
+  return 1
+}
+
+native_host_runner_start_foreground() {
+  local port="${1:-19190}"
+  local artifact_dir bundle_dir
+  native_host_runner_prepare_runtime
+  artifact_dir="$(native_host_runner_artifact_dir)"
+  bundle_dir="$(native_host_runner_bundle_dir)"
+  say "Starting native Internal host runner in the foreground on 0.0.0.0:$port"
+  say "This process must run on the real Internal host, not inside the k8s pod or Docker Desktop VM."
+  MX_INTERNAL_HOST_RUNNER_HOST="${MX_INTERNAL_HOST_RUNNER_HOST:-0.0.0.0}" \
+    MX_INTERNAL_HOST_RUNNER_PORT="$port" \
+    MX_INTERNAL_SERVICE_ARTIFACT_DIR="$artifact_dir" \
+    MX_QP_TUNNEL_CLI_BUNDLE_DIR="$bundle_dir" \
+    "$(native_host_runner_node_bin)" server/scripts/internal-service-peer-host-runner.mjs "$port"
+}
+
+native_host_runner_status() {
+  local port="${1:-19190}"
+  local os_name
+  os_name="$(uname -s)"
+  say "Native Internal host runner status"
+  say "project: $ROOT"
+  say "port: $port"
+  native_host_runner_health "$port" || true
+
+  case "$os_name" in
+    Darwin)
+      local label
+      label="$(native_host_runner_label)"
+      if command -v launchctl >/dev/null 2>&1; then
+        launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 \
+          && say "launchd: $label loaded" \
+          || say "launchd: $label not loaded"
+      fi
+      ;;
+    Linux)
+      local service
+      service="$(native_host_runner_service_name).service"
+      if command -v systemctl >/dev/null 2>&1; then
+        systemctl is-active --quiet "$service" 2>/dev/null \
+          && say "systemd: $service active" \
+          || say "systemd: $service not active"
+        systemctl is-enabled --quiet "$service" 2>/dev/null \
+          && say "systemd: $service enabled" \
+          || true
+      fi
+      ;;
+    *)
+      say "service manager: unsupported OS $os_name; use start for foreground mode"
+      ;;
+  esac
+}
+
+native_host_runner_install_macos() {
+  local port="${1:-19190}"
+  local label plist log_dir node_bin node_dir artifact_dir bundle_dir
+  label="$(native_host_runner_label)"
+  plist="$HOME/Library/LaunchAgents/$label.plist"
+  log_dir="$HOME/Library/Logs/mx-launcher"
+  node_bin="$(native_host_runner_node_bin)"
+  node_dir="$(dirname "$node_bin")"
+  native_host_runner_prepare_runtime
+  artifact_dir="$(native_host_runner_artifact_dir)"
+  bundle_dir="$(native_host_runner_bundle_dir)"
+  mkdir -p "$(dirname "$plist")" "$log_dir"
+  cat >"$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$label</string>
+  <key>WorkingDirectory</key>
+  <string>$ROOT</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$node_bin</string>
+    <string>server/scripts/internal-service-peer-host-runner.mjs</string>
+    <string>$port</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MX_INTERNAL_HOST_RUNNER_HOST</key>
+    <string>0.0.0.0</string>
+    <key>MX_INTERNAL_HOST_RUNNER_PORT</key>
+    <string>$port</string>
+    <key>MX_INTERNAL_SERVICE_ARTIFACT_DIR</key>
+    <string>$artifact_dir</string>
+    <key>MX_QP_TUNNEL_CLI_BUNDLE_DIR</key>
+    <string>$bundle_dir</string>
+    <key>PATH</key>
+    <string>$node_dir:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>$log_dir/internal-host-runner.log</string>
+  <key>StandardErrorPath</key>
+  <string>$log_dir/internal-host-runner.err.log</string>
+</dict>
+</plist>
+EOF
+  launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/$(id -u)" "$plist"
+  launchctl kickstart -k "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+  say "installed launchd agent: $plist"
+  native_host_runner_status "$port"
+}
+
+native_host_runner_install_linux() {
+  local port="${1:-19190}"
+  local service node_bin node_dir temp artifact_dir bundle_dir
+  service="$(native_host_runner_service_name).service"
+  node_bin="$(native_host_runner_node_bin)"
+  node_dir="$(dirname "$node_bin")"
+  native_host_runner_prepare_runtime
+  artifact_dir="$(native_host_runner_artifact_dir)"
+  bundle_dir="$(native_host_runner_bundle_dir)"
+  command -v systemctl >/dev/null 2>&1 || die "systemctl is required to install the native host runner on Linux"
+  temp="$(mktemp)"
+  cat >"$temp" <<EOF
+[Unit]
+Description=MX Internal native host runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$ROOT
+Environment=MX_INTERNAL_HOST_RUNNER_HOST=0.0.0.0
+Environment=MX_INTERNAL_HOST_RUNNER_PORT=$port
+Environment=MX_INTERNAL_SERVICE_ARTIFACT_DIR=$artifact_dir
+Environment=MX_QP_TUNNEL_CLI_BUNDLE_DIR=$bundle_dir
+Environment=PATH=$node_dir:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+ExecStart=$node_bin server/scripts/internal-service-peer-host-runner.mjs $port
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  sudo install -m 0644 "$temp" "/etc/systemd/system/$service"
+  rm -f "$temp"
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now "$service"
+  say "installed systemd service: /etc/systemd/system/$service"
+  native_host_runner_status "$port"
+}
+
+native_host_runner_install() {
+  local port="${1:-19190}"
+  case "$(uname -s)" in
+    Darwin)
+      native_host_runner_install_macos "$port"
+      ;;
+    Linux)
+      native_host_runner_install_linux "$port"
+      ;;
+    *)
+      die "Unsupported OS for native host runner install. Use start for foreground mode."
+      ;;
+  esac
+}
+
+native_host_runner_uninstall() {
+  local port="${1:-19190}"
+  case "$(uname -s)" in
+    Darwin)
+      local label plist
+      label="$(native_host_runner_label)"
+      plist="$HOME/Library/LaunchAgents/$label.plist"
+      launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || true
+      rm -f "$plist"
+      say "removed launchd agent: $plist"
+      ;;
+    Linux)
+      local service
+      service="$(native_host_runner_service_name).service"
+      sudo systemctl disable --now "$service" >/dev/null 2>&1 || true
+      sudo rm -f "/etc/systemd/system/$service"
+      sudo systemctl daemon-reload
+      say "removed systemd service: /etc/systemd/system/$service"
+      ;;
+    *)
+      die "Unsupported OS for native host runner uninstall"
+      ;;
+  esac
+  native_host_runner_status "$port"
+}
+
+native_host_runner() {
+  local action="${1:-status}"
+  if [ "$#" -gt 0 ]; then shift || true; fi
+  local port="${1:-19190}"
+  case "$action" in
+    status)
+      native_host_runner_status "$port"
+      ;;
+    start|run)
+      native_host_runner_start_foreground "$port"
+      ;;
+    install)
+      native_host_runner_install "$port"
+      ;;
+    uninstall|remove)
+      native_host_runner_uninstall "$port"
+      ;;
+    *)
+      die "Usage: bash scripts/manage.sh ops site-slot native-host-runner status|start|install|uninstall [port]"
+      ;;
+  esac
+}
+
 ops_site_slot() {
   local action="$1"
   shift || true
@@ -1649,6 +1998,9 @@ ops_site_slot() {
     internal-service-peer-host-runner|internal-host-runner)
       [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops site-slot internal-service-peer-host-runner [port]"
       MX_INTERNAL_HOST_RUNNER_HOST="${MX_INTERNAL_HOST_RUNNER_HOST:-0.0.0.0}" node server/scripts/internal-service-peer-host-runner.mjs "${1:-19190}"
+      ;;
+    native-host-runner|internal-native-host-runner)
+      native_host_runner "$@"
       ;;
     cleanup-v1-wireguard)
       cleanup_v1_wireguard "$@"
@@ -2476,7 +2828,7 @@ ops_site_slot() {
       ' "$base" "$1" "${2:-passed}"
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all] | domestic-wg-materialize <site-id> <endpoint> [rotate] | materialize-domestic-ready <site-id> | internal-service-peer-handoff [status|command|apply] [config-path] | internal-service-peer-host-runner [port] | cleanup-v1-wireguard [--apply] [iface...] | refresh-tunnel-cli [version|--from-local DIR|--from-tarball FILE] | ssh-profiles | ssh-profile-upsert <site-id> <domestic|oversea> [host] | ssh-profile-readiness <profile-id> [plan-only|execute] | oversea-readonly-test <site-id> <host> | oversea-remote-test <site-id> <host> [pipeline|dry-run|plan-only|readonly|execute] | domestic-plan <domestic-host|-> [oversea-host] | oversea-plan <oversea-host|-> | preflight <plan-id> [dry-run|manual|ssh] | apply <plan-id> [manual|dry-run|ssh] | executions [plan-id] | runner-start <run-id> [simulate|remote-ssh|awx-shadow] | runner-sessions [run-id] | worker-job <session-id> | worker-gate <job-id> [confirm] | worker-handoff <job-id> [confirm] | domestic-relay-append-ssh-prepare <apply-run-id> [confirm] | worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|awx-shadow|awx-credential-sync|awx-object-sync|awx-launch|local-exec] | worker-report <job-id> [running|passed|failed|blocked] | rollback-start <report-id> [simulate|manual] | rollback-report <rollback-execution-id> [running|passed|failed|blocked]"
+      die "Usage: bash scripts/manage.sh ops site-slot materialize [oversea|domestic|all] | domestic-wg-materialize <site-id> <endpoint> [rotate] | materialize-domestic-ready <site-id> | internal-service-peer-handoff [status|command|apply] [config-path] | internal-service-peer-host-runner [port] | native-host-runner status|start|install|uninstall [port] | cleanup-v1-wireguard [--apply] [iface...] | refresh-tunnel-cli [version|--from-local DIR|--from-tarball FILE] | ssh-profiles | ssh-profile-upsert <site-id> <domestic|oversea> [host] | ssh-profile-readiness <profile-id> [plan-only|execute] | oversea-readonly-test <site-id> <host> | oversea-remote-test <site-id> <host> [pipeline|dry-run|plan-only|readonly|execute] | domestic-plan <domestic-host|-> [oversea-host] | oversea-plan <oversea-host|-> | preflight <plan-id> [dry-run|manual|ssh] | apply <plan-id> [manual|dry-run|ssh] | executions [plan-id] | runner-start <run-id> [simulate|remote-ssh|awx-shadow] | runner-sessions [run-id] | worker-job <session-id> | worker-gate <job-id> [confirm] | worker-handoff <job-id> [confirm] | domestic-relay-append-ssh-prepare <apply-run-id> [confirm] | worker-run <job-id> [simulate|artifact-push-dry-run|artifact-push-remote-ssh-plan|remote-readonly-probe|artifact-push-remote-ssh|artifact-push-fake-transport|awx-shadow|awx-credential-sync|awx-object-sync|awx-launch|local-exec] | worker-report <job-id> [running|passed|failed|blocked] | rollback-start <report-id> [simulate|manual] | rollback-report <rollback-execution-id> [running|passed|failed|blocked]"
       ;;
   esac
 }
@@ -2674,12 +3026,8 @@ Terminal 1: keep the Internal API exposed while you test.
   cd electron-dock/mx-launcher
   bash scripts/manage.sh ops internal-local port-forward
 
-Terminal 2: serve the browser-friendly Launcher UI shell.
-  cd electron-dock/mx-launcher
-  python3 -m http.server 18110 --directory desktop
-
 Browser:
-  http://127.0.0.1:18110/index.html
+  http://127.0.0.1:18090/admin/
 
 Manual checks:
   1. Server URL is http://127.0.0.1:18090.

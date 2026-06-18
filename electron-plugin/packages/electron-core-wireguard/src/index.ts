@@ -100,6 +100,15 @@ export interface WireGuardConnectionRuntimeStatus {
   error?: string | null;
 }
 
+export interface WireGuardServiceIdentity {
+  displayName?: string;
+  darwinLaunchDaemonLabelPrefix?: string;
+  darwinSupportRoot?: string;
+  darwinLogDir?: string;
+  darwinDaemonScriptName?: string;
+  staleDarwinLaunchDaemonLabelPrefixes?: string[];
+}
+
 export interface WireGuardTunnelCommand {
   action: WireGuardTunnelAction;
   platform: NodeJS.Platform;
@@ -638,6 +647,8 @@ export function buildWireGuardTunnelCommand(input: {
   const env = wireGuardQuickEnv(runtime);
   const shellCommand = runtime.platform === 'darwin'
     ? darwinWgQuickShellCommand(configPath, action, env, wgQuick)
+    : action === 'restart'
+      ? linuxWgQuickRestartShellCommand(configPath, env, wgQuick)
     : [
         ...Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`),
         shellQuote(wgQuick),
@@ -661,6 +672,18 @@ export function buildWireGuardTunnelCommand(input: {
   }
 
   const needsAdmin = typeof process.getuid === 'function' && process.getuid() !== 0;
+  if (action === 'restart') {
+    return {
+      action,
+      platform: runtime.platform,
+      configPath,
+      command: 'sh',
+      args: ['-lc', shellCommand],
+      displayCommand: needsAdmin ? `sudo sh -lc ${shellQuote(shellCommand)}` : shellCommand,
+      needsAdmin,
+      runtime
+    };
+  }
   const displayCommand = needsAdmin
     ? ['sudo', 'env', ...Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`), shellQuote(wgQuick), action, shellQuote(configPath)].join(' ')
     : shellCommand;
@@ -675,6 +698,22 @@ export function buildWireGuardTunnelCommand(input: {
     runtime,
     env
   };
+}
+
+function linuxWgQuickRestartShellCommand(
+  configPath: string,
+  env: Record<string, string>,
+  wgQuick: string
+): string {
+  const commandPrefix = [
+    ...Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`),
+    shellQuote(wgQuick)
+  ].join(' ');
+  return [
+    'set -e',
+    `${commandPrefix} down ${shellQuote(configPath)} >/dev/null 2>&1 || true`,
+    `${commandPrefix} up ${shellQuote(configPath)}`
+  ].join('\n');
 }
 
 export async function setWireGuardTunnelState(input: {
@@ -899,11 +938,15 @@ export async function repairWireGuardTunnelRoutes(input: {
 export function getDarwinWireGuardLaunchDaemonStatus(input: {
   runtime: WireGuardConnectionRuntimeStatus;
   configPath: string;
+  serviceIdentity?: WireGuardServiceIdentity;
 }): WireGuardLaunchDaemonStatus {
   const base = wireGuardLaunchDaemonUnsupportedStatus(input.runtime, input.configPath);
   if (input.runtime.platform !== 'darwin' || input.runtime.method !== 'darwin-userspace') return base;
   try {
-    const assets = darwinLaunchDaemonAssets(input.runtime, input.configPath, { writeSetConfig: false });
+    const assets = darwinLaunchDaemonAssets(input.runtime, input.configPath, {
+      writeSetConfig: false,
+      serviceIdentity: input.serviceIdentity
+    });
     const print = tryExecFile('launchctl', ['print', `system/${assets.label}`]);
     const stdout = print.stdout.trim();
     const stderr = print.stderr.trim();
@@ -937,6 +980,7 @@ export function getDarwinWireGuardLaunchDaemonStatus(input: {
 export async function installDarwinWireGuardLaunchDaemon(input: {
   runtime: WireGuardConnectionRuntimeStatus;
   configPath: string;
+  serviceIdentity?: WireGuardServiceIdentity;
 }): Promise<WireGuardLaunchDaemonResult> {
   const base = getDarwinWireGuardLaunchDaemonStatus(input);
   if (!base.supported) {
@@ -944,7 +988,7 @@ export async function installDarwinWireGuardLaunchDaemon(input: {
       ...base,
       ok: false,
       command: '',
-      message: '当前平台不支持 HDO WireGuard LaunchDaemon。'
+      message: '当前平台不支持 WireGuard LaunchDaemon。'
     };
   }
   if (!input.runtime.available) {
@@ -956,7 +1000,10 @@ export async function installDarwinWireGuardLaunchDaemon(input: {
     };
   }
   try {
-    const assets = darwinLaunchDaemonAssets(input.runtime, input.configPath, { writeSetConfig: true });
+    const assets = darwinLaunchDaemonAssets(input.runtime, input.configPath, {
+      writeSetConfig: true,
+      serviceIdentity: input.serviceIdentity
+    });
     const shellCommand = darwinLaunchDaemonInstallShell(assets);
     const script = `do shell script ${appleScriptString(shellCommand)} with administrator privileges`;
     const displayCommand = `osascript -e ${shellQuote(script)}`;
@@ -972,17 +1019,17 @@ export async function installDarwinWireGuardLaunchDaemon(input: {
       stdout: result.stdout,
       stderr: result.stderr,
       message: tunnelActive || status.running
-        ? '已安装并启动 HDO WireGuard 系统守护。'
+        ? `已安装并启动 ${assets.displayName} 系统守护。`
         : (status.loaded
-            ? '已安装 HDO WireGuard 系统守护，正在等待 tunnel 就绪。'
-            : '已安装 HDO WireGuard 系统守护，但 launchd 尚未报告运行状态。')
+            ? `已安装 ${assets.displayName} 系统守护，正在等待 tunnel 就绪。`
+            : `已安装 ${assets.displayName} 系统守护，但 launchd 尚未报告运行状态。`)
     };
   } catch (err) {
     const status = getDarwinWireGuardLaunchDaemonStatus(input);
     return {
       ...status,
       ok: false,
-      command: 'osascript -e <install-hdo-wireguard-launchdaemon>',
+      command: 'osascript -e <install-wireguard-launchdaemon>',
       routeLogPath: wireGuardRouteLogPathFromConfig(input.configPath),
       routeLogTail: readTextTail(wireGuardRouteLogPathFromConfig(input.configPath)),
       message: wireGuardCommandErrorMessage({
@@ -990,8 +1037,8 @@ export async function installDarwinWireGuardLaunchDaemon(input: {
         platform: input.runtime.platform,
         configPath: input.configPath,
         command: 'osascript',
-        args: ['-e', '<install-hdo-wireguard-launchdaemon>'],
-        displayCommand: 'osascript -e <install-hdo-wireguard-launchdaemon>',
+        args: ['-e', '<install-wireguard-launchdaemon>'],
+        displayCommand: 'osascript -e <install-wireguard-launchdaemon>',
         needsAdmin: true,
         runtime: input.runtime
       }, err)
@@ -1002,6 +1049,7 @@ export async function installDarwinWireGuardLaunchDaemon(input: {
 async function waitForDarwinLaunchDaemonReady(input: {
   runtime: WireGuardConnectionRuntimeStatus;
   configPath: string;
+  serviceIdentity?: WireGuardServiceIdentity;
 }): Promise<{
   status: WireGuardLaunchDaemonStatus;
   tunnelStatus: WireGuardTunnelStatus | null;
@@ -1028,6 +1076,7 @@ async function waitForDarwinLaunchDaemonReady(input: {
 export async function uninstallDarwinWireGuardLaunchDaemon(input: {
   runtime: WireGuardConnectionRuntimeStatus;
   configPath: string;
+  serviceIdentity?: WireGuardServiceIdentity;
 }): Promise<WireGuardLaunchDaemonResult> {
   const base = getDarwinWireGuardLaunchDaemonStatus(input);
   if (!base.supported) {
@@ -1035,11 +1084,14 @@ export async function uninstallDarwinWireGuardLaunchDaemon(input: {
       ...base,
       ok: false,
       command: '',
-      message: '当前平台不支持 HDO WireGuard LaunchDaemon。'
+      message: '当前平台不支持 WireGuard LaunchDaemon。'
     };
   }
   try {
-    const assets = darwinLaunchDaemonAssets(input.runtime, input.configPath, { writeSetConfig: false });
+    const assets = darwinLaunchDaemonAssets(input.runtime, input.configPath, {
+      writeSetConfig: false,
+      serviceIdentity: input.serviceIdentity
+    });
     const shellCommand = darwinLaunchDaemonUninstallShell(assets);
     const script = `do shell script ${appleScriptString(shellCommand)} with administrator privileges`;
     const displayCommand = `osascript -e ${shellQuote(script)}`;
@@ -1053,14 +1105,14 @@ export async function uninstallDarwinWireGuardLaunchDaemon(input: {
       routeLogTail: readTextTail(assets.routeLogPath),
       stdout: result.stdout,
       stderr: result.stderr,
-      message: '已卸载 HDO WireGuard 系统守护。'
+      message: `已卸载 ${assets.displayName} 系统守护。`
     };
   } catch (err) {
     const status = getDarwinWireGuardLaunchDaemonStatus(input);
     return {
       ...status,
       ok: false,
-      command: 'osascript -e <uninstall-hdo-wireguard-launchdaemon>',
+      command: 'osascript -e <uninstall-wireguard-launchdaemon>',
       routeLogPath: wireGuardRouteLogPathFromConfig(input.configPath),
       routeLogTail: readTextTail(wireGuardRouteLogPathFromConfig(input.configPath)),
       message: wireGuardCommandErrorMessage({
@@ -1068,8 +1120,8 @@ export async function uninstallDarwinWireGuardLaunchDaemon(input: {
         platform: input.runtime.platform,
         configPath: input.configPath,
         command: 'osascript',
-        args: ['-e', '<uninstall-hdo-wireguard-launchdaemon>'],
-        displayCommand: 'osascript -e <uninstall-hdo-wireguard-launchdaemon>',
+        args: ['-e', '<uninstall-wireguard-launchdaemon>'],
+        displayCommand: 'osascript -e <uninstall-wireguard-launchdaemon>',
         needsAdmin: true,
         runtime: input.runtime
       }, err)
@@ -1172,11 +1224,13 @@ export function getWireGuardTunnelStatus(input: {
 
   const routes = detectInterfaceRoutes(realInterfaceName);
   const ifconfig = readInterfaceState(realInterfaceName);
+  const routeProbes = darwinRouteProbeResults(profile.allowedIps, realInterfaceName);
   const hasConfiguredAddress = Boolean(
-    ifconfig && profile.addresses.some((address) => ifconfig.includes(`inet ${address.split('/')[0]}`))
+    input.runtime.platform === 'darwin' && input.runtime.method === 'darwin-userspace'
+      ? ifconfig && routeProbes.length > 0 && routeProbes.every((probe) => probe.ok)
+      : ifconfig && profile.addresses.some((address) => ifconfig.includes(`inet ${address.split('/')[0]}`))
   );
   if (ifconfig && interfaceStateIsUp(ifconfig) && hasConfiguredAddress) {
-    const routeProbes = darwinRouteProbeResults(profile.allowedIps, realInterfaceName);
     return {
       ...status,
       active: true,
@@ -1191,7 +1245,6 @@ export function getWireGuardTunnelStatus(input: {
       ifconfig
     };
   }
-  const routeProbes = darwinRouteProbeResults(profile.allowedIps, realInterfaceName);
   return {
     ...status,
     ok: false,
@@ -1468,29 +1521,34 @@ function buildDarwinUserspaceTunnelCommand(
   const routeDownCommands = routeCleanupCidrs
     .filter((cidr) => cidr.includes('/'))
     .map((cidr) => darwinRouteDeleteCommand(cidr));
+  const selfRouteIps = uniqueStrings(profile.addresses
+    .map((address) => address.split('/')[0] ?? address)
+    .filter(isIpv4));
+  const selfRouteUpCommands = selfRouteIps.map((ip) => [
+    darwinSelfRouteInstallCommand(ip),
+    darwinSelfRouteProbeLogCommand(ip, '"$ROUTE_LOG"')
+  ].join('\n'));
+  const selfRouteDownCommands = selfRouteIps.map((ip) => darwinSelfRouteDeleteCommand(ip));
+  const anchorIp = darwinUserspaceAnchorIp(profile.interfaceName, selfRouteIps);
+  const anchorUpCommand = darwinUserspaceAnchorInstallCommand(anchorIp);
+  const anchorDownCommand = darwinUserspaceAnchorDeleteCommand(anchorIp);
   const endpointCleanupCommands = darwinEndpointBypassCleanupCommands(profile.endpointHosts, '"$ROUTE_LOG"');
   const addressCommands = profile.addresses.map((address) => {
     if (address.includes(':')) return `ifconfig "$REAL_INTERFACE" inet6 ${shellQuote(address)} alias`;
     const ip = address.split('/')[0] ?? address;
-    return `ifconfig "$REAL_INTERFACE" inet ${shellQuote(ip)} ${shellQuote(ip)} netmask 255.255.255.255 alias || ifconfig "$REAL_INTERFACE" inet ${shellQuote(ip)} ${shellQuote(ip)} netmask 255.255.255.255`;
+    if (isIpv4(ip)) return 'true';
+    return 'true';
   });
   const addressDownCommands = profile.addresses.map((address) => {
     const ip = address.split('/')[0] ?? address;
     if (address.includes(':')) return `ifconfig "$REAL_INTERFACE" inet6 ${shellQuote(ip)} -alias >/dev/null 2>&1 || true`;
     return `ifconfig "$REAL_INTERFACE" inet ${shellQuote(ip)} ${shellQuote(ip)} -alias >/dev/null 2>&1 || ifconfig "$REAL_INTERFACE" inet ${shellQuote(ip)} -alias >/dev/null 2>&1 || true`;
   });
-  const staleHdoInterfaceCleanupLines = [
-    'for candidate in $(ifconfig -l 2>/dev/null); do',
-    '  case "$candidate" in utun*) ;; *) continue ;; esac',
-    '  candidate_state="$(ifconfig "$candidate" 2>/dev/null || true)"',
-    `  printf '%s\\n' "$candidate_state" | awk '/inet 100[.](88|89|90|91)[.]/{found=1} END{exit found?0:1}' >/dev/null 2>&1 || continue`,
-    ...routeDownCommands.map((line) => `  ${line.replaceAll('"$REAL_INTERFACE"', '"$candidate"')}`),
-    `  for hdo_ip in $(printf '%s\\n' "$candidate_state" | awk '/inet 100[.](88|89|90|91)[.]/{print $2}'); do ifconfig "$candidate" inet "$hdo_ip" "$hdo_ip" -alias >/dev/null 2>&1 || ifconfig "$candidate" inet "$hdo_ip" -alias >/dev/null 2>&1 || true; done`,
-    '  ifconfig "$candidate" down >/dev/null 2>&1 || true',
-    '  rm -f "/var/run/wireguard/$candidate.sock"',
-    'done'
-  ];
   const primaryAddress = profile.addresses[0]?.split('/')[0] ?? '';
+  const staleHdoInterfaceCleanupLines = darwinStaleUserspaceInterfaceCleanupLines(
+    [...selfRouteDownCommands, ...routeDownCommands],
+    primaryAddress
+  );
   const dnsStatePath = join(dirname(configPath), `${profile.interfaceName}.dns.state`);
   const dnsRestoreCommands = darwinDnsRestoreCommands(shellQuote(dnsStatePath), '"$ROUTE_LOG"');
   const dnsSetCommands = darwinDnsSetCommands(profile.dnsServers, profile.dnsDomains, shellQuote(dnsStatePath), '"$ROUTE_LOG"');
@@ -1499,12 +1557,15 @@ function buildDarwinUserspaceTunnelCommand(
     'mkdir -p /var/run/wireguard',
     `REAL_INTERFACE="$(cat ${shellQuote(nameFile)} 2>/dev/null || true)"`,
     `if [ -z "$REAL_INTERFACE" ] && [ -n ${shellQuote(primaryAddress)} ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q ${shellQuote(`inet ${primaryAddress}`)}; then REAL_INTERFACE="$candidate"; break; fi; done; fi`,
+    `if [ -z "$REAL_INTERFACE" ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q ${shellQuote(`inet ${anchorIp}`)}; then REAL_INTERFACE="$candidate"; break; fi; done; fi`,
     `echo ${shellQuote('realInterfaceBeforeStop=')}"$REAL_INTERFACE" >> "$ROUTE_LOG" 2>&1`,
     ...dnsRestoreCommands,
     ...endpointCleanupCommands,
     `if [ -n "$REAL_INTERFACE" ]; then`,
+    ...selfRouteDownCommands.map((line) => `  ${line}`),
     ...routeDownCommands.map((line) => `  ${line}`),
     ...addressDownCommands.map((line) => `  ${line}`),
+    `  ${anchorDownCommand}`,
     '  ifconfig "$REAL_INTERFACE" down >/dev/null 2>&1 || true',
     '  rm -f "/var/run/wireguard/$REAL_INTERFACE.sock"',
     'fi',
@@ -1517,6 +1578,7 @@ function buildDarwinUserspaceTunnelCommand(
     '  fi',
     'fi',
     `if [ -n ${shellQuote(primaryAddress)} ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q ${shellQuote(`inet ${primaryAddress}`)}; then REAL_INTERFACE="$candidate"; ${addressDownCommands.join('; ')}; ifconfig "$candidate" down >/dev/null 2>&1 || true; rm -f "/var/run/wireguard/$candidate.sock"; fi; done; fi`,
+    `for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q ${shellQuote(`inet ${anchorIp}`)}; then REAL_INTERFACE="$candidate"; ${anchorDownCommand}; ifconfig "$candidate" down >/dev/null 2>&1 || true; rm -f "/var/run/wireguard/$candidate.sock"; fi; done`,
     ...staleHdoInterfaceCleanupLines,
     `if command -v pgrep >/dev/null 2>&1; then for stale_pid in $(pgrep -x wireguard-go 2>/dev/null || true); do stale_command="$(ps -p "$stale_pid" -o command= 2>/dev/null || true)"; printf '%s\\n' "$stale_command" | grep -F ${shellQuote(wireGuardGo)} >/dev/null 2>&1 && kill "$stale_pid" >/dev/null 2>&1 || true; done; fi`,
     `rm -f ${shellQuote(nameFile)} ${shellQuote(pidFile)}`
@@ -1535,13 +1597,16 @@ function buildDarwinUserspaceTunnelCommand(
     `if [ -z "$REAL_INTERFACE" ]; then AFTER_INTERFACES="$(${shellQuote(wg)} show interfaces 2>/dev/null || true)"; for candidate in $AFTER_INTERFACES; do case " $BEFORE_INTERFACES " in *" $candidate "*) ;; *) REAL_INTERFACE="$candidate"; break ;; esac; done; fi`,
     '[ -n "$REAL_INTERFACE" ]',
     `echo ${shellQuote('realInterface=')}"$REAL_INTERFACE" >> "$ROUTE_LOG" 2>&1`,
+    `echo ${shellQuote(`anchorAddress=${anchorIp}`)} >> "$ROUTE_LOG" 2>&1`,
     `echo "$REAL_INTERFACE" > ${shellQuote(nameFile)}`,
     `chmod 644 ${shellQuote(nameFile)} >/dev/null 2>&1 || true`,
     `${shellQuote(wg)} setconf "$REAL_INTERFACE" ${shellQuote(profile.setConfigPath)}`,
     'ifconfig "$REAL_INTERFACE" up',
     ...addressCommands,
+    anchorUpCommand,
     ...routeDownCommands,
     ...routeUpCommands,
+    ...selfRouteUpCommands,
     ...dnsSetCommands
   ];
   const scriptLines = action === 'down'
@@ -1600,6 +1665,7 @@ function darwinUserspaceProfile(configPath: string, writeSetConfig: boolean): Da
 }
 
 interface DarwinLaunchDaemonAssets {
+  displayName: string;
   label: string;
   supportDir: string;
   binDir: string;
@@ -1621,6 +1687,7 @@ interface DarwinLaunchDaemonAssets {
   nameFile: string;
   pidFile: string;
   dnsStatePath: string;
+  staleLaunchDaemonLabelPrefixes: string[];
   profile: DarwinUserspaceProfile;
 }
 
@@ -1647,7 +1714,7 @@ function wireGuardLaunchDaemonUnsupportedStatus(
 function darwinLaunchDaemonAssets(
   runtime: WireGuardConnectionRuntimeStatus,
   configPath: string,
-  options: { writeSetConfig?: boolean } = {}
+  options: { writeSetConfig?: boolean; serviceIdentity?: WireGuardServiceIdentity } = {}
 ): DarwinLaunchDaemonAssets {
   const wg = runtime.wg.command;
   const wireGuardGo = runtime.wireGuardGo?.command;
@@ -1655,18 +1722,20 @@ function darwinLaunchDaemonAssets(
   const profile = options.writeSetConfig === false
     ? inspectDarwinUserspaceProfile(configPath)
     : prepareDarwinUserspaceProfile(configPath);
+  const identity = normalizeWireGuardServiceIdentity(options.serviceIdentity);
   const component = sanitizeLaunchDaemonComponent(profile.interfaceName);
-  const label = `com.qpjoy.hdo.wireguard.${component}`;
-  const supportDir = `/Library/Application Support/QPJoy/HDO/${component}`;
+  const label = `${identity.darwinLaunchDaemonLabelPrefix}.${component}`;
+  const supportDir = `${identity.darwinSupportRoot}/${component}`;
   const binDir = `${supportDir}/bin`;
-  const logDir = '/Library/Logs/QPJoy-HDO';
+  const logDir = identity.darwinLogDir;
   return {
+    displayName: identity.displayName,
     label,
     supportDir,
     binDir,
     logDir,
     plistPath: `/Library/LaunchDaemons/${label}.plist`,
-    daemonScriptPath: `${supportDir}/hdo-wireguard-daemon.sh`,
+    daemonScriptPath: `${supportDir}/${identity.darwinDaemonScriptName}`,
     routeLogPath: `${supportDir}/${profile.interfaceName}.route.log`,
     launchdStdoutPath: `${logDir}/${profile.interfaceName}.launchd.out.log`,
     launchdStderrPath: `${logDir}/${profile.interfaceName}.launchd.err.log`,
@@ -1682,8 +1751,41 @@ function darwinLaunchDaemonAssets(
     nameFile: `/var/run/wireguard/${profile.interfaceName}.name`,
     pidFile: `/var/run/wireguard/${profile.interfaceName}.pid`,
     dnsStatePath: `${supportDir}/${profile.interfaceName}.dns.state`,
+    staleLaunchDaemonLabelPrefixes: identity.staleDarwinLaunchDaemonLabelPrefixes,
     profile
   };
+}
+
+function normalizeWireGuardServiceIdentity(input?: WireGuardServiceIdentity): Required<WireGuardServiceIdentity> {
+  const defaultLabelPrefix = 'com.qpjoy.hdo.wireguard';
+  const labelPrefix = sanitizeLaunchDaemonLabelPrefix(input?.darwinLaunchDaemonLabelPrefix || defaultLabelPrefix);
+  return {
+    displayName: input?.displayName?.trim() || 'HDO WireGuard',
+    darwinLaunchDaemonLabelPrefix: labelPrefix,
+    darwinSupportRoot: trimTrailingSlash(input?.darwinSupportRoot || '/Library/Application Support/QPJoy/HDO'),
+    darwinLogDir: trimTrailingSlash(input?.darwinLogDir || '/Library/Logs/QPJoy-HDO'),
+    darwinDaemonScriptName: sanitizeDarwinScriptName(input?.darwinDaemonScriptName || 'hdo-wireguard-daemon.sh'),
+    staleDarwinLaunchDaemonLabelPrefixes: uniqueStrings([
+      labelPrefix,
+      ...(input?.staleDarwinLaunchDaemonLabelPrefixes || []).map(sanitizeLaunchDaemonLabelPrefix).filter(Boolean)
+    ])
+  };
+}
+
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, '') || '/';
+}
+
+function sanitizeLaunchDaemonLabelPrefix(value: string): string {
+  return value
+    .split('.')
+    .map((part) => sanitizeLaunchDaemonComponent(part))
+    .filter(Boolean)
+    .join('.') || 'com.qpjoy.hdo.wireguard';
+}
+
+function sanitizeDarwinScriptName(value: string): string {
+  return basename(value).replace(/[^a-zA-Z0-9_.-]/g, '-') || 'wireguard-daemon.sh';
 }
 
 function darwinLaunchDaemonInstallShell(assets: DarwinLaunchDaemonAssets): string {
@@ -1696,6 +1798,8 @@ function darwinLaunchDaemonInstallShell(assets: DarwinLaunchDaemonAssets): strin
     `SUPPORT_DIR=${shellQuote(assets.supportDir)}`,
     `BIN_DIR=${shellQuote(assets.binDir)}`,
     `LOG_DIR=${shellQuote(assets.logDir)}`,
+    `PRIMARY_ADDRESS=${shellQuote(assets.profile.addresses[0]?.split('/')[0] ?? '')}`,
+    ...darwinStaleLaunchDaemonCleanupLines(assets.staleLaunchDaemonLabelPrefixes),
     'launchctl bootout "system/$LABEL" >/dev/null 2>&1 || launchctl bootout system "$PLIST" >/dev/null 2>&1 || true',
     '__hdo_bootout_i=0',
     'while launchctl print "system/$LABEL" >/dev/null 2>&1 && [ "$__hdo_bootout_i" -lt 40 ]; do sleep 0.25; __hdo_bootout_i=$((__hdo_bootout_i + 1)); done',
@@ -1723,6 +1827,29 @@ function darwinLaunchDaemonInstallShell(assets: DarwinLaunchDaemonAssets): strin
     'launchctl kickstart -k "system/$LABEL" >/dev/null 2>&1 || true',
     'launchctl print "system/$LABEL" >/dev/null'
   ].join('\n');
+}
+
+function darwinStaleLaunchDaemonCleanupLines(labelPrefixes: string[]): string[] {
+  return [
+    'if [ -n "$PRIMARY_ADDRESS" ]; then',
+    `  for STALE_PREFIX in ${labelPrefixes.map(shellQuote).join(' ')}; do`,
+    '    for STALE_PLIST in /Library/LaunchDaemons/$STALE_PREFIX.*.plist; do',
+    '      [ -e "$STALE_PLIST" ] || continue',
+    '      [ "$STALE_PLIST" = "$PLIST" ] && continue',
+    '      STALE_SCRIPT="$(/usr/libexec/PlistBuddy -c "Print :ProgramArguments:1" "$STALE_PLIST" 2>/dev/null || true)"',
+    '      [ -f "$STALE_SCRIPT" ] || continue',
+    '      grep -F "PRIMARY_ADDRESS=\'$PRIMARY_ADDRESS\'" "$STALE_SCRIPT" >/dev/null 2>&1 || continue',
+    '      STALE_LABEL="$(basename "$STALE_PLIST" .plist)"',
+    '      STALE_SUPPORT_DIR="$(dirname "$STALE_SCRIPT")"',
+    '      launchctl bootout "system/$STALE_LABEL" >/dev/null 2>&1 || launchctl bootout system "$STALE_PLIST" >/dev/null 2>&1 || true',
+    '      __hdo_stale_i=0',
+    '      while launchctl print "system/$STALE_LABEL" >/dev/null 2>&1 && [ "$__hdo_stale_i" -lt 40 ]; do sleep 0.25; __hdo_stale_i=$((__hdo_stale_i + 1)); done',
+    '      rm -f "$STALE_PLIST"',
+    '      rm -rf "$STALE_SUPPORT_DIR"',
+    '    done',
+    '  done',
+    'fi'
+  ];
 }
 
 function darwinLaunchDaemonUninstallShell(assets: DarwinLaunchDaemonAssets): string {
@@ -1760,11 +1887,23 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
   const routeDownCommands = routeCleanupCidrs
     .filter((cidr) => cidr.includes('/'))
     .map((cidr) => darwinRouteDeleteCommand(cidr));
+  const selfRouteIps = uniqueStrings(profile.addresses
+    .map((address) => address.split('/')[0] ?? address)
+    .filter(isIpv4));
+  const selfRouteUpCommands = selfRouteIps.map((ip) => [
+    darwinSelfRouteInstallCommand(ip),
+    darwinSelfRouteProbeLogCommand(ip, '"$ROUTE_LOG"')
+  ].join('\n'));
+  const selfRouteDownCommands = selfRouteIps.map((ip) => darwinSelfRouteDeleteCommand(ip));
+  const anchorIp = darwinUserspaceAnchorIp(profile.interfaceName, selfRouteIps);
+  const anchorUpCommand = darwinUserspaceAnchorInstallCommand(anchorIp);
+  const anchorDownCommand = darwinUserspaceAnchorDeleteCommand(anchorIp);
   const endpointCleanupCommands = darwinEndpointBypassCleanupCommands(profile.endpointHosts, '"$ROUTE_LOG"');
   const addressCommands = profile.addresses.map((address) => {
     if (address.includes(':')) return `ifconfig "$REAL_INTERFACE" inet6 ${shellQuote(address)} alias`;
     const ip = address.split('/')[0] ?? address;
-    return `ifconfig "$REAL_INTERFACE" inet ${shellQuote(ip)} ${shellQuote(ip)} netmask 255.255.255.255 alias || ifconfig "$REAL_INTERFACE" inet ${shellQuote(ip)} ${shellQuote(ip)} netmask 255.255.255.255`;
+    if (isIpv4(ip)) return 'true';
+    return 'true';
   });
   const addressDownCommands = profile.addresses.map((address) => {
     const ip = address.split('/')[0] ?? address;
@@ -1772,20 +1911,12 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     return `ifconfig "$REAL_INTERFACE" inet ${shellQuote(ip)} ${shellQuote(ip)} -alias >/dev/null 2>&1 || ifconfig "$REAL_INTERFACE" inet ${shellQuote(ip)} -alias >/dev/null 2>&1 || true`;
   });
   const primaryAddress = profile.addresses[0]?.split('/')[0] ?? '';
+  const staleHdoInterfaceCleanupLines = darwinStaleUserspaceInterfaceCleanupLines(
+    [...selfRouteDownCommands, ...routeDownCommands],
+    primaryAddress
+  );
   const dnsRestoreCommands = darwinDnsRestoreCommands('"$DNS_STATE_FILE"', '"$ROUTE_LOG"');
   const dnsSetCommands = darwinDnsSetCommands(profile.dnsServers, profile.dnsDomains, '"$DNS_STATE_FILE"', '"$ROUTE_LOG"');
-  const staleHdoInterfaceCleanupLines = [
-    'for candidate in $(ifconfig -l 2>/dev/null); do',
-    '  case "$candidate" in utun*) ;; *) continue ;; esac',
-    '  candidate_state="$(ifconfig "$candidate" 2>/dev/null || true)"',
-    `  printf '%s\\n' "$candidate_state" | awk '/inet 100[.](88|89|90|91)[.]/{found=1} END{exit found?0:1}' >/dev/null 2>&1 || continue`,
-    ...routeDownCommands.map((line) => `  ${line.replaceAll('"$REAL_INTERFACE"', '"$candidate"')}`),
-    `  for hdo_ip in $(printf '%s\\n' "$candidate_state" | awk '/inet 100[.](88|89|90|91)[.]/{print $2}'); do ifconfig "$candidate" inet "$hdo_ip" "$hdo_ip" -alias >/dev/null 2>&1 || ifconfig "$candidate" inet "$hdo_ip" -alias >/dev/null 2>&1 || true; done`,
-    '  ifconfig "$candidate" down >/dev/null 2>&1 || true',
-    '  rm -f "/var/run/wireguard/$candidate.sock"',
-    'done'
-  ];
-
   return [
     '#!/bin/sh',
     'set -u',
@@ -1800,6 +1931,7 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     `ROUTE_LOG=${shellQuote(assets.routeLogPath)}`,
     `WG_GO_LOG=${shellQuote(assets.wireGuardGoLogPath)}`,
     `PRIMARY_ADDRESS=${shellQuote(primaryAddress)}`,
+    `ANCHOR_ADDRESS=${shellQuote(anchorIp)}`,
     'mkdir -p /var/run/wireguard "$(dirname "$ROUTE_LOG")" "$(dirname "$WG_GO_LOG")"',
     'touch "$ROUTE_LOG" "$WG_GO_LOG"',
     'chmod 644 "$ROUTE_LOG" "$WG_GO_LOG" >/dev/null 2>&1 || true',
@@ -1811,11 +1943,14 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     '  log_route "exit=$code"',
     '  REAL_INTERFACE="$(cat "$NAME_FILE" 2>/dev/null || true)"',
     '  if [ -z "$REAL_INTERFACE" ] && [ -n "$PRIMARY_ADDRESS" ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q "inet $PRIMARY_ADDRESS"; then REAL_INTERFACE="$candidate"; break; fi; done; fi',
+    '  if [ -z "$REAL_INTERFACE" ] && [ -n "$ANCHOR_ADDRESS" ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q "inet $ANCHOR_ADDRESS"; then REAL_INTERFACE="$candidate"; break; fi; done; fi',
     ...dnsRestoreCommands.map((line) => `  ${line}`),
     ...endpointCleanupCommands.map((line) => `  ${line}`),
     '  if [ -n "$REAL_INTERFACE" ]; then',
+    ...selfRouteDownCommands.map((line) => `    ${line}`),
     ...routeDownCommands.map((line) => `    ${line}`),
     ...addressDownCommands.map((line) => `    ${line}`),
+    `    ${anchorDownCommand}`,
     '    ifconfig "$REAL_INTERFACE" down >/dev/null 2>&1 || true',
     '    rm -f "/var/run/wireguard/$REAL_INTERFACE.sock"',
     '  fi',
@@ -1842,11 +1977,14 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     'echo "$REAL_INTERFACE" > "$NAME_FILE"',
     'chmod 644 "$NAME_FILE" >/dev/null 2>&1 || true',
     'log_route "realInterface=$REAL_INTERFACE"',
+    'log_route "anchorAddress=$ANCHOR_ADDRESS"',
     '"$WG" setconf "$REAL_INTERFACE" "$SETCONF"',
     'ifconfig "$REAL_INTERFACE" up',
     ...addressCommands,
+    anchorUpCommand,
     ...routeDownCommands,
     ...routeUpCommands,
+    ...selfRouteUpCommands,
     ...dnsSetCommands,
     'wait "$WG_PID"',
     'exit "$?"'
@@ -1954,18 +2092,75 @@ function darwinRouteProbeLogCommand(cidr: string, interfaceArg: string, logArg: 
   return `{ echo ${shellQuote(`route=${normalizeCidr(cidr) ?? cidr}`)}; echo ${shellQuote(`target=${target}`)}; echo ${shellQuote('expected=')}${interfaceArg}; route -n get ${shellQuote(target)} 2>&1; } >> ${logArg} 2>&1`;
 }
 
+function darwinSelfRouteInstallCommand(ip: string): string {
+  const quotedIp = shellQuote(ip);
+  const quotedCidr = shellQuote(`${ip}/32`);
+  return [
+    `ifconfig lo0 alias ${quotedCidr} >/dev/null 2>&1 || ifconfig lo0 alias ${quotedIp} >/dev/null 2>&1 || true`,
+    `route -q -n add -host ${quotedIp} -interface lo0 || route -q -n change -host ${quotedIp} -interface lo0 || true`
+  ].join('\n');
+}
+
+function darwinSelfRouteDeleteCommand(ip: string): string {
+  const quotedIp = shellQuote(ip);
+  return [
+    `route -q -n delete -host ${quotedIp} >/dev/null 2>&1 || true`,
+    `ifconfig lo0 -alias ${quotedIp} >/dev/null 2>&1 || true`
+  ].join('\n');
+}
+
+function darwinSelfRouteProbeLogCommand(ip: string, logArg: string): string {
+  return `{ echo ${shellQuote(`selfRoute=${ip}`)}; echo ${shellQuote('expected=lo0')}; route -n get ${shellQuote(ip)} 2>&1; } >> ${logArg} 2>&1`;
+}
+
+function darwinUserspaceAnchorIp(interfaceName: string, selfIps: string[]): string {
+  const seed = `${interfaceName}:${selfIps.join(',')}`;
+  let hash = 2166136261;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash ^= seed.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  const third = 64 + (hash % 128);
+  const fourth = 1 + ((hash >>> 8) % 254);
+  return `169.254.${third}.${fourth}`;
+}
+
+function darwinUserspaceAnchorInstallCommand(ip: string): string {
+  const quotedIp = shellQuote(ip);
+  return [
+    `ifconfig "$REAL_INTERFACE" inet ${quotedIp} ${quotedIp} alias >/dev/null 2>&1 || ifconfig "$REAL_INTERFACE" inet ${quotedIp} alias >/dev/null 2>&1 || true`,
+    `{ echo ${shellQuote(`utunAnchor=${ip}`)}; ifconfig "$REAL_INTERFACE" 2>&1; } >> "$ROUTE_LOG" 2>&1`
+  ].join('\n');
+}
+
+function darwinUserspaceAnchorDeleteCommand(ip: string): string {
+  const quotedIp = shellQuote(ip);
+  return `ifconfig "$REAL_INTERFACE" inet ${quotedIp} ${quotedIp} -alias >/dev/null 2>&1 || ifconfig "$REAL_INTERFACE" inet ${quotedIp} -alias >/dev/null 2>&1 || true`;
+}
+
 function darwinEndpointBypassCommands(endpointHosts: string[], logArg: string): string[] {
-  const hosts = uniqueStrings(endpointHosts.filter(isIpv4));
+  const hosts = uniqueStrings(endpointHosts.filter((host) => isIpv4(host) || /^[a-zA-Z0-9.-]+$/.test(host)));
   if (hosts.length === 0) return [];
   return [
     '__hdo_endpoint_gateway="$(route -n get default 2>/dev/null | awk \'/gateway:/{print $2; exit}\')"',
     '__hdo_endpoint_interface="$(route -n get default 2>/dev/null | awk \'/interface:/{print $2; exit}\')"',
     'if [ -n "$__hdo_endpoint_gateway" ]; then',
     `  for __hdo_endpoint_host in ${hosts.map(shellQuote).join(' ')}; do`,
-    `    { echo "endpointBypass=$__hdo_endpoint_host"; echo "gateway=$__hdo_endpoint_gateway"; echo "defaultInterface=$__hdo_endpoint_interface"; } >> ${logArg} 2>&1`,
-    '    route -q -n delete -host "$__hdo_endpoint_host" >/dev/null 2>&1 || true',
-    '    route -q -n add -host "$__hdo_endpoint_host" "$__hdo_endpoint_gateway" >/dev/null 2>&1 || route -q -n change -host "$__hdo_endpoint_host" "$__hdo_endpoint_gateway" >/dev/null 2>&1 || true',
-    `    route -n get "$__hdo_endpoint_host" >> ${logArg} 2>&1 || true`,
+    '    case "$__hdo_endpoint_host" in',
+    '      *[!0-9.]*|"")',
+    '        __hdo_endpoint_ips="$(dscacheutil -q host -a name "$__hdo_endpoint_host" 2>/dev/null | awk \'/^ip_address: [0-9]/{print $2}\' | sort -u)"',
+    '        if [ -z "$__hdo_endpoint_ips" ] && command -v dig >/dev/null 2>&1; then __hdo_endpoint_ips="$(dig +short A "$__hdo_endpoint_host" 2>/dev/null | awk \'/^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$/{print}\' | sort -u)"; fi',
+    '        ;;',
+    '      *)',
+    '        __hdo_endpoint_ips="$__hdo_endpoint_host"',
+    '        ;;',
+    '    esac',
+    `    { echo "endpointBypass=$__hdo_endpoint_host"; echo "endpointIps=$__hdo_endpoint_ips"; echo "gateway=$__hdo_endpoint_gateway"; echo "defaultInterface=$__hdo_endpoint_interface"; } >> ${logArg} 2>&1`,
+    '    for __hdo_endpoint_ip in $__hdo_endpoint_ips; do',
+    '      route -q -n delete -host "$__hdo_endpoint_ip" >/dev/null 2>&1 || true',
+    '      route -q -n add -host "$__hdo_endpoint_ip" "$__hdo_endpoint_gateway" >/dev/null 2>&1 || route -q -n change -host "$__hdo_endpoint_ip" "$__hdo_endpoint_gateway" >/dev/null 2>&1 || true',
+    `      route -n get "$__hdo_endpoint_ip" >> ${logArg} 2>&1 || true`,
+    '    done',
     '  done',
     'else',
     `  echo "endpointBypass=skipped no default gateway" >> ${logArg} 2>&1`,
@@ -1974,12 +2169,24 @@ function darwinEndpointBypassCommands(endpointHosts: string[], logArg: string): 
 }
 
 function darwinEndpointBypassCleanupCommands(endpointHosts: string[], logArg: string): string[] {
-  const hosts = uniqueStrings(endpointHosts.filter(isIpv4));
+  const hosts = uniqueStrings(endpointHosts.filter((host) => isIpv4(host) || /^[a-zA-Z0-9.-]+$/.test(host)));
   if (hosts.length === 0) return [];
   return [
     `for __hdo_endpoint_host in ${hosts.map(shellQuote).join(' ')}; do`,
-    `  { echo "endpointBypassCleanup=$__hdo_endpoint_host"; route -n get "$__hdo_endpoint_host" 2>&1 || true; } >> ${logArg} 2>&1`,
-    '  route -q -n delete -host "$__hdo_endpoint_host" >/dev/null 2>&1 || true',
+    '  case "$__hdo_endpoint_host" in',
+    '    *[!0-9.]*|"")',
+    '      __hdo_endpoint_ips="$(dscacheutil -q host -a name "$__hdo_endpoint_host" 2>/dev/null | awk \'/^ip_address: [0-9]/{print $2}\' | sort -u)"',
+    '      if [ -z "$__hdo_endpoint_ips" ] && command -v dig >/dev/null 2>&1; then __hdo_endpoint_ips="$(dig +short A "$__hdo_endpoint_host" 2>/dev/null | awk \'/^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$/{print}\' | sort -u)"; fi',
+    '      ;;',
+    '    *)',
+    '      __hdo_endpoint_ips="$__hdo_endpoint_host"',
+    '      ;;',
+    '  esac',
+    `  { echo "endpointBypassCleanup=$__hdo_endpoint_host"; echo "endpointIps=$__hdo_endpoint_ips"; } >> ${logArg} 2>&1`,
+    '  for __hdo_endpoint_ip in $__hdo_endpoint_ips; do',
+    `    route -n get "$__hdo_endpoint_ip" >> ${logArg} 2>&1 || true`,
+    '    route -q -n delete -host "$__hdo_endpoint_ip" >/dev/null 2>&1 || true',
+    '  done',
     'done'
   ];
 }
@@ -2176,6 +2383,36 @@ function darwinRouteLogSetupLines(configPath: string, interfaceName: string, act
   ];
 }
 
+function darwinStaleUserspaceInterfaceCleanupLines(
+  routeDownCommands: string[],
+  primaryAddress: string
+): string[] {
+  const addressPattern = darwinStaleInterfaceAddressAwkPattern(primaryAddress);
+  return [
+    'for candidate in $(ifconfig -l 2>/dev/null); do',
+    '  case "$candidate" in utun*) ;; *) continue ;; esac',
+    '  candidate_state="$(ifconfig "$candidate" 2>/dev/null || true)"',
+    `  printf '%s\\n' "$candidate_state" | awk '${addressPattern} {found=1} END{exit found?0:1}' >/dev/null 2>&1 || continue`,
+    ...routeDownCommands.map((line) => `  ${line.replaceAll('"$REAL_INTERFACE"', '"$candidate"')}`),
+    `  for hdo_ip in $(printf '%s\\n' "$candidate_state" | awk '${addressPattern} {print $2}'); do ifconfig "$candidate" inet "$hdo_ip" "$hdo_ip" -alias >/dev/null 2>&1 || ifconfig "$candidate" inet "$hdo_ip" -alias >/dev/null 2>&1 || true; done`,
+    '  ifconfig "$candidate" down >/dev/null 2>&1 || true',
+    '  rm -f "/var/run/wireguard/$candidate.sock"',
+    'done'
+  ];
+}
+
+function darwinStaleInterfaceAddressAwkPattern(primaryAddress: string): string {
+  const patterns = ['inet 100[.](88|89|90|91)[.]'];
+  if (isIpv4(primaryAddress)) {
+    patterns.push(`inet ${escapeAwkRegex(primaryAddress)}([[:space:]]|$)`);
+  }
+  return `/${patterns.join('|')}/`;
+}
+
+function escapeAwkRegex(value: string): string {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+}
+
 function darwinRouteProbeResults(
   allowedIps: string[],
   expectedInterface: string
@@ -2337,7 +2574,7 @@ function parseWireGuardProfile(configPath: string): {
     allowedIps: uniqueStrings(allowedIps),
     dnsServers: uniqueStrings(dnsServers),
     dnsDomains: uniqueStrings(dnsDomains),
-    endpointHosts: uniqueStrings(endpoints.map(wireGuardEndpointIpv4Host).filter(isString)),
+    endpointHosts: uniqueStrings(endpoints.map(wireGuardEndpointHost).filter(isString)),
     setConfigLines
   };
 }
@@ -2355,13 +2592,15 @@ function valueList(line: string): string[] {
     .filter(Boolean);
 }
 
-function wireGuardEndpointIpv4Host(value: string): string | null {
+function wireGuardEndpointHost(value: string): string | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
   if (trimmed.startsWith('[')) return null;
   const colonIndex = trimmed.lastIndexOf(':');
   const host = colonIndex >= 0 ? trimmed.slice(0, colonIndex) : trimmed;
-  return isIpv4(host) ? host : null;
+  if (isIpv4(host)) return host;
+  if (/^[a-zA-Z0-9.-]+$/.test(host) && host.includes('.')) return host;
+  return null;
 }
 
 function resolveWireGuardRealInterface(
@@ -2374,7 +2613,8 @@ function resolveWireGuardRealInterface(
     try {
       if (existsSync(nameFile)) {
         const value = readFileSync(nameFile, 'utf8').trim();
-        if (value && interfaceHasAnyConfiguredAddress(value, addresses)) return value;
+        const state = value ? readInterfaceState(value) : null;
+        if (value && state && interfaceStateIsUp(state)) return value;
       }
     } catch {
       // Older launches wrote this file as root-only; discover the utun by address instead.

@@ -195,10 +195,10 @@ function createTunnelCliTar(artifactRoot, previousModules = new Map()) {
       packageVersion: packageJson.version,
       npmInstallCommand: 'npm i @qpjoy/tunnel-cli -g',
       refreshCommand: 'bash scripts/manage.sh ops site-slot refresh-tunnel-cli latest | bash scripts/manage.sh ops site-slot refresh-tunnel-cli --from-tarball <tgz>',
-      fallbackMode: 'mihomo-client-resource-wrapper',
+      fallbackMode: 'node-capable-qp-tunnel-cli-with-electron-core-wireguard',
       bootstrapMode: 'Internal-pushed no-node/no-outbound first'
     },
-    notes: ['Domestic bootstrap uses this Internal-pushed fallback before node/npm or registry egress exists; refresh it from npm pack or a published tarball when @qpjoy/tunnel-cli changes.'],
+    notes: ['Domestic and Internal host-runner bootstrap use this Internal-pushed fallback before node/npm or registry egress exists; refresh it from npm pack or a published tarball when @qpjoy/tunnel-cli changes.'],
     buildStaging: (staging) => {
       copyRequired(sourceRoot, join(staging, 'package'), [
         'package.json',
@@ -216,13 +216,67 @@ function createTunnelCliTar(artifactRoot, previousModules = new Map()) {
         '#!/usr/bin/env sh',
         'set -eu',
         'ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"',
+        'if command -v node >/dev/null 2>&1 && [ -f "$ROOT/package/dist/index.js" ]; then',
+        '  exec node "$ROOT/package/dist/index.js" "$@"',
+        'fi',
         'exec "$ROOT/package/resources/mihomo-client.sh" "$@"',
         ''
       ].join('\n'));
+      copyTunnelCliRuntimeDependencies(staging);
       chmodIfExists(join(binDir, 'qp-tunnel-cli'), 0o755);
       chmodIfExists(join(staging, 'package/resources/mihomo-client.sh'), 0o755);
     }
   });
+}
+
+function copyTunnelCliRuntimeDependencies(staging) {
+  const electronPluginRoot = resolve(mxRoot, '../../electron-plugin');
+  const coreSource = join(electronPluginRoot, 'packages/electron-core-wireguard');
+  if (!existsSync(join(coreSource, 'package.json'))) {
+    die(`Missing required WireGuard runtime package: ${coreSource}`);
+  }
+  const targetScope = join(staging, 'node_modules/@qpjoy');
+  copyPackageRuntime(coreSource, join(targetScope, 'electron-core-wireguard'), [
+    'package.json',
+    'README.md',
+    'dist'
+  ]);
+  for (const engine of ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-x64']) {
+    const engineSource = join(electronPluginRoot, `packages/wireguard-engines/${engine}`);
+    if (!existsSync(join(engineSource, 'package.json'))) {
+      die(`Missing required WireGuard engine package: ${engineSource}`);
+    }
+    copyPackageRuntime(engineSource, join(targetScope, `electron-core-wireguard-engine-${engine}`), [
+      'package.json',
+      'README.md',
+      'resources'
+    ]);
+    chmodWireGuardEngineBins(join(targetScope, `electron-core-wireguard-engine-${engine}/resources/wireguard`));
+  }
+}
+
+function copyPackageRuntime(sourceRoot, targetRoot, files) {
+  rmSync(targetRoot, { recursive: true, force: true });
+  copyRequired(sourceRoot, targetRoot, files);
+}
+
+function chmodWireGuardEngineBins(root) {
+  for (const target of [
+    'darwin-arm64/wg',
+    'darwin-arm64/wg-quick',
+    'darwin-arm64/wireguard-go',
+    'darwin-x64/wg',
+    'darwin-x64/wg-quick',
+    'darwin-x64/wireguard-go',
+    'linux-arm64/wg',
+    'linux-arm64/wg-quick',
+    'linux-x64/wg',
+    'linux-x64/wg-quick',
+    'win32-x64/wg.exe',
+    'win32-x64/wireguard.exe'
+  ]) {
+    chmodIfExists(join(root, target), 0o755);
+  }
 }
 
 function writeOverseaTunnelCliShim(staging) {

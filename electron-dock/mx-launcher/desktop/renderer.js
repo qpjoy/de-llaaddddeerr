@@ -1,10 +1,40 @@
 import * as THREE from './node_modules/three/build/three.module.js';
 
 const SSH_READONLY_PROBE_FEATURE_KEY = 'site-slot.ssh-readonly-probe.execute';
+const LOCAL_SERVER_BASE_URL = 'http://127.0.0.1:18090';
+
+function isLocalStaticAdminBaseUrl(value) {
+  try {
+    const url = new URL(value);
+    return (url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1')
+      && url.port === '18110';
+  } catch {
+    return false;
+  }
+}
+
+function normalizeServerBaseValue(value) {
+  const raw = String(value || '').trim().replace(/\/+$/, '');
+  if (!raw) return '';
+  return isLocalStaticAdminBaseUrl(raw) ? LOCAL_SERVER_BASE_URL : raw;
+}
+
+function defaultServerBaseUrl() {
+  if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
+    const host = window.location.hostname;
+    const port = window.location.port;
+    const isLocalStaticAdmin = (host === '127.0.0.1' || host === 'localhost' || host === '::1')
+      && port === '18110'
+      && !window.location.pathname.startsWith('/admin');
+    if (isLocalStaticAdmin) return LOCAL_SERVER_BASE_URL;
+    return window.location.origin;
+  }
+  return LOCAL_SERVER_BASE_URL;
+}
 
 const api = window.mxLauncher || {
   getConfig: async () => ({
-    serverBaseUrl: 'http://127.0.0.1:18090',
+    serverBaseUrl: defaultServerBaseUrl(),
     productConfigs: { hdi: { defaultMode: 'visitor' } }
   }),
   saveConfig: async (input) => input,
@@ -21,7 +51,7 @@ const api = window.mxLauncher || {
     error: 'MX privileged service is not installed yet.'
   }),
   openAdmin: async (serverBaseUrl) => {
-    window.open(`${serverBaseUrl || 'http://127.0.0.1:18090'}/admin`, '_blank');
+    window.open(`${serverBaseUrl || defaultServerBaseUrl()}/admin/`, '_blank');
     return true;
   }
 };
@@ -51,10 +81,12 @@ const state = {
     statusBusy: false,
     applyBusy: false,
     hostRunnerEnsureBusy: false,
+    syncBusy: false,
     feedback: null,
     result: null,
     runtimeStatus: null,
-    applyResult: null
+    applyResult: null,
+    keySyncResult: null
   },
   awxActionDraft: {
     providerId: '',
@@ -608,8 +640,9 @@ window.addEventListener('keydown', (event) => {
 });
 
 async function boot() {
+  serverInput.value = normalizeServerBaseValue(serverInput.value || defaultServerBaseUrl());
   const config = await api.getConfig();
-  serverInput.value = config.serverBaseUrl || 'http://127.0.0.1:18090';
+  serverInput.value = normalizeServerBaseValue(config.serverBaseUrl || serverInput.value || defaultServerBaseUrl());
   initTopologyScene();
   await refreshProducts();
   const status = await api.getStatus();
@@ -1563,16 +1596,27 @@ function sshProfileFormPayload() {
 }
 
 function sshProfilePlanPayload() {
-  const kind = sshProfileKind.value === 'domestic' ? 'domestic' : 'oversea';
+  const profileId = blankToNull(sshProfileId.value);
+  const savedProfile = profileId
+    ? asArray(state.sshProfiles).find((profile) => profile.profileId === profileId) || null
+    : null;
+  const kind = (savedProfile?.kind || sshProfileKind.value) === 'domestic' ? 'domestic' : 'oversea';
   const domesticBootstrap = kind === 'domestic' ? domesticBootstrapOverseaSite() : null;
+  const formHost = blankToNull(sshProfileHost.value);
+  const savedHost = blankToNull(savedProfile?.host);
+  const host = kind === 'domestic' && domesticPlanHostValidationFailure(kind, formHost)
+    ? savedHost || formHost
+    : formHost || savedHost;
+  const sshUser = blankToNull(sshProfileUser.value) || savedProfile?.sshUser || 'root';
+  const sshPort = positiveNumberOrNull(sshProfilePort.value) || savedProfile?.sshPort || 22;
   return {
-    siteId: blankToNull(sshProfileSiteId.value),
+    siteId: blankToNull(sshProfileSiteId.value) || savedProfile?.siteId || null,
     kind,
-    sshProfileId: blankToNull(sshProfileId.value),
-    host: blankToNull(sshProfileHost.value),
-    sshUser: blankToNull(sshProfileUser.value) || 'root',
-    sshPort: positiveNumberOrNull(sshProfilePort.value) || 22,
-    rootAccess: (blankToNull(sshProfileUser.value) || 'root') === 'root',
+    sshProfileId: profileId,
+    host,
+    sshUser,
+    sshPort,
+    rootAccess: sshUser === 'root',
     hasDocker: true,
     hasOutboundInternet: kind === 'oversea',
     overseaSiteId: domesticBootstrap?.siteId || null,
@@ -2782,8 +2826,8 @@ async function fetchJson(path, options = {}) {
 }
 
 function normalizedServerBase() {
-  const raw = serverInput.value.trim().replace(/\/+$/, '');
-  return raw || 'http://127.0.0.1:18090';
+  const raw = normalizeServerBaseValue(serverInput.value);
+  return raw || defaultServerBaseUrl();
 }
 
 function renderStatus(status) {
@@ -3082,12 +3126,17 @@ function renderInternalPeerWorkbench(pipelines) {
   const canCreatePlan = Boolean(profile?.profileId);
   const runtimeStatus = state.internalPeer.runtimeStatus;
   const applyResult = state.internalPeer.applyResult;
+  const keySyncResult = state.internalPeer.keySyncResult;
   const handoffDisabled = state.internalPeer.busy || Boolean(materializeAction) || Boolean(endpointBlockedReason);
+  const materializeDisabled = state.internalPeer.materializeBusy || !materializeAction?.allowed || Boolean(endpointBlockedReason);
+  const keySyncDisabled = state.internalPeer.syncBusy || Boolean(endpointBlockedReason);
   const hostRunnerOffline = internalPeerHostRunnerOffline(runtimeStatus);
   const installUnavailable = internalPeerInstallUnavailable(runtimeStatus);
   const installDisabled = state.internalPeer.applyBusy || installUnavailable;
-  const hostRunnerEnsureDisabled = state.internalPeer.hostRunnerEnsureBusy || !hostRunnerOffline;
+  const canEnsureK8sHostRunner = hostRunnerOffline && internalPeerCanEnsureK8sHostRunner(runtimeStatus);
+  const hostRunnerEnsureDisabled = state.internalPeer.hostRunnerEnsureBusy || !canEnsureK8sHostRunner;
   const hostRunnerCommand = internalPeerHostRunnerCommand(runtimeStatus);
+  const hostRunnerSetupDetail = internalPeerHostRunnerSetupDetail(runtimeStatus);
   const runtimeBlocked = hostRunnerOffline || runtimeStatus?.status === 'blocked' || installUnavailable;
   const panelStatus = materializeAction
     ? 'blocked'
@@ -3114,7 +3163,7 @@ function renderInternalPeerWorkbench(pipelines) {
     : endpointBlockedReason && !feedback
       ? { kind: 'warning', message: endpointBlockedReason, detail: canCreatePlan ? `Create a new Domestic 2.0 plan from SSH Profile ${profile.profileId}, then Generate Handoff.` : 'Open SSH Access and save the real Domestic public host first.' }
     : hostRunnerOffline && !feedback
-      ? { kind: 'warning', message: 'Handoff is ready; ensure the Internal host runner, then Install / Restart assigns 10.88.88.88.', detail: hostRunnerCommand }
+      ? { kind: 'warning', message: 'Handoff is ready; install or start the native Internal host runner, then Install / Restart assigns 10.88.88.88.', detail: hostRunnerSetupDetail }
     : null;
   const handoffDescription = materializeAction
     ? '当前 Domestic WG secret/artifact 与选中的 plan 不一致，先重新 materialize，再生成 Internal handoff。'
@@ -3122,16 +3171,34 @@ function renderInternalPeerWorkbench(pipelines) {
       ? '当前 Domestic endpoint 仍是模板或本机地址。先用真实公网 IP/DNS 创建新的 Domestic 2.0 plan，或重新 Materialize Domestic WG。'
       : 'Generate Handoff only creates the Internal WG artifact. Ensure the host runner on the Internal host, then Install / Restart enables qp-tunnel-cli egress-on, installs WG, and assigns 10.88.88.88.';
   const displayedFeedback = feedback || materializeFeedback;
-  const resultDetail = result ? formatJson({
-    status: result.status,
-    execution: result.execution,
-    command: result.command,
-    env: result.env,
-    config: result.config,
-    relay: result.relay,
-    blockedReasons: result.blockedReasons || [],
-    checks: result.checks || [],
-    nextActions: result.nextActions || []
+  const resultDetail = result || keySyncResult ? formatJson({
+    handoff: result ? {
+      status: result.status,
+      execution: result.execution,
+      command: result.command,
+      env: result.env,
+      config: result.config,
+      relay: result.relay,
+      blockedReasons: result.blockedReasons || [],
+      checks: result.checks || [],
+      nextActions: result.nextActions || []
+    } : null,
+    domesticKeySync: keySyncResult ? {
+      status: keySyncResult.status,
+      execution: keySyncResult.execution,
+      internal: keySyncResult.internal,
+      domestic: keySyncResult.domestic,
+      warnings: keySyncResult.warnings || [],
+      blockedReasons: keySyncResult.blockedReasons || [],
+      nextActions: keySyncResult.nextActions || [],
+      materialize: keySyncResult.materialize ? {
+        status: keySyncResult.materialize.status,
+        execution: keySyncResult.materialize.execution,
+        endpointChanged: keySyncResult.materialize.endpointChanged,
+        clientRefresh: keySyncResult.materialize.clientRefresh,
+        blockedReasons: keySyncResult.materialize.blockedReasons || []
+      } : null
+    } : null
   }) : '';
   const runtimeDetail = runtimeStatus || applyResult ? formatJson({
     runtimeStatus,
@@ -3160,19 +3227,22 @@ function renderInternalPeerWorkbench(pipelines) {
           <p>${escapeHtml(handoffDescription)}</p>
         </div>
         <div class="domestic-relay-actions">
-          ${materializeAction ? `<button class="primary-button" type="button" data-internal-peer-materialize ${state.internalPeer.materializeBusy || !materializeAction.allowed ? 'disabled' : ''}>${state.internalPeer.materializeBusy ? 'Materializing' : 'Materialize Domestic WG'}</button>` : ''}
+          ${materializeAction ? `<button class="primary-button" type="button" data-internal-peer-materialize ${materializeDisabled ? 'disabled' : ''} title="${escapeHtml(endpointBlockedReason || materializeAction.reason || 'Materialize Domestic WG')}">${state.internalPeer.materializeBusy ? 'Materializing' : 'Materialize Domestic WG'}</button>` : ''}
           ${endpointBlockedReason ? `<button class="primary-button" type="button" data-internal-peer-create-plan ${canCreatePlan && !state.sshPlanBusy ? '' : 'disabled'}>${state.sshPlanBusy ? 'Creating' : 'New 2.0 Plan'}</button>` : ''}
           <button class="primary-button" type="button" data-internal-peer-handoff ${handoffDisabled ? 'disabled' : ''} title="${escapeHtml(materializeAction ? 'Materialize Domestic WG first' : endpointBlockedReason || 'Generate Internal peer handoff')}">${state.internalPeer.busy ? 'Generating' : 'Generate Handoff'}</button>
+          <button class="secondary-button" type="button" data-internal-peer-sync-domestic-key ${keySyncDisabled ? 'disabled' : ''} title="${escapeHtml(endpointBlockedReason || 'Sync Domestic mx-domestic Internal peer key with the current Internal runtime key')}">${state.internalPeer.syncBusy ? 'Syncing' : 'Sync Domestic WG Key'}</button>
           ${hostRunnerOffline
-            ? `<button class="primary-button" type="button" data-internal-peer-host-runner-ensure ${hostRunnerEnsureDisabled ? 'disabled' : ''} title="Create or update the k8s host-runner DaemonSet">${state.internalPeer.hostRunnerEnsureBusy ? 'Ensuring' : 'Ensure Host Runner'}</button>`
+            ? canEnsureK8sHostRunner
+              ? `<button class="primary-button" type="button" data-internal-peer-host-runner-ensure ${hostRunnerEnsureDisabled ? 'disabled' : ''} title="Create or update the k8s host-runner fallback DaemonSet">${state.internalPeer.hostRunnerEnsureBusy ? 'Ensuring' : 'Ensure K8s Fallback'}</button>`
+              : `<button class="secondary-button" type="button" data-internal-peer-native-runner-guide title="Show native host runner setup command">Native Runner Setup</button>`
             : `<button class="primary-button" type="button" data-internal-peer-apply ${installDisabled ? 'disabled' : ''} title="${escapeHtml(installUnavailable ? 'Runtime install is not ready' : 'Install or restart Internal service peer')}">${state.internalPeer.applyBusy ? 'Installing' : 'Install / Restart'}</button>`}
           <button class="secondary-button" type="button" data-internal-peer-status ${state.internalPeer.statusBusy ? 'disabled' : ''}>${state.internalPeer.statusBusy ? 'Checking' : 'Refresh Status'}</button>
           <button class="secondary-button" type="button" data-internal-open-domestic>Open Domestic</button>
         </div>
       </div>
       <div class="domestic-relay-grid">
-        <span><small>Linux service</small><strong>wg-quick@mx-internal-svc</strong></span>
-        <span><small>start host runner first</small><strong>${escapeHtml(hostRunnerCommand)}</strong></span>
+        <span><small>WG service</small><strong>@qpjoy/electron-core-wireguard / mx-internal-svc</strong></span>
+        <span><small>native runner command</small><strong>${escapeHtml(hostRunnerCommand)}</strong></span>
         <span><small>apply artifact</small><strong>artifacts/site-slots/domestic/mx-internal-service-peer-apply.sh</strong></span>
         <span><small>config artifact</small><strong>artifacts/site-slots/domestic/mx-internal-service-peer.conf</strong></span>
         <span><small>runtime route</small><strong>10.88.0.1/16 via mx-internal-svc</strong></span>
@@ -3204,6 +3274,12 @@ function bindInternalPeerWorkbenchActions(site, pipeline) {
       void generateInternalPeerHandoff(site, pipeline);
     });
   }
+  const syncDomesticKeyButton = siteWorkbench.querySelector('[data-internal-peer-sync-domestic-key]');
+  if (syncDomesticKeyButton) {
+    syncDomesticKeyButton.addEventListener('click', () => {
+      void syncInternalPeerDomesticKey(site, pipeline);
+    });
+  }
   const createPlanButton = siteWorkbench.querySelector('[data-internal-peer-create-plan]');
   if (createPlanButton) {
     createPlanButton.addEventListener('click', () => {
@@ -3221,6 +3297,12 @@ function bindInternalPeerWorkbenchActions(site, pipeline) {
   if (hostRunnerEnsureButton) {
     hostRunnerEnsureButton.addEventListener('click', () => {
       void ensureInternalPeerHostRunner(site, pipeline);
+    });
+  }
+  const nativeRunnerGuideButton = siteWorkbench.querySelector('[data-internal-peer-native-runner-guide]');
+  if (nativeRunnerGuideButton) {
+    nativeRunnerGuideButton.addEventListener('click', () => {
+      showInternalPeerNativeRunnerGuide();
     });
   }
   const applyButton = siteWorkbench.querySelector('[data-internal-peer-apply]');
@@ -3241,6 +3323,52 @@ function bindInternalPeerWorkbenchActions(site, pipeline) {
       renderAdminDashboard(state.dashboard);
       void refreshPipelineDetail(pipeline.planId);
     });
+  }
+}
+
+async function syncInternalPeerDomesticKey(site, pipeline) {
+  if (state.internalPeer.syncBusy) return;
+  state.internalPeer.syncBusy = true;
+  state.internalPeer.feedback = { kind: 'info', message: 'Syncing Domestic WG Internal peer key', detail: null };
+  state.internalPeer.keySyncResult = null;
+  renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+  try {
+    const payload = await fetchJson('/internal/v1/admin/actions/execute', {
+      method: 'POST',
+      body: {
+        actionId: 'site-slot.internal-service-peer.sync-domestic-key',
+        path: `/internal/v1/config-center/domestic-wg-secrets/${encodeURIComponent(site.siteId)}/internal-service-peer-sync-domestic-key`,
+        body: {
+          siteId: site.siteId,
+          planId: pipeline.planId,
+          confirmDomesticPeerKeySync: true,
+          confirmAdoptDomesticRuntimeRelayPublicKey: true,
+          requestedBy: 'desktop-admin',
+          requestId: `desktop-internal-service-peer-domestic-key-sync-${Date.now()}`
+        }
+      }
+    });
+    const syncResult = payload.internalServicePeerDomesticKeySync || null;
+    state.internalPeer.keySyncResult = syncResult;
+    state.internalPeer.runtimeStatus = payload.internalServicePeerRuntimeStatus || syncResult?.afterStatus || state.internalPeer.runtimeStatus;
+    const warnings = Array.isArray(syncResult?.warnings) && syncResult.warnings.length
+      ? syncResult.warnings.join('\n')
+      : null;
+    state.internalPeer.feedback = {
+      kind: syncResult?.status === 'passed' ? 'success' : syncResult?.status === 'blocked' || syncResult?.status === 'ready' ? 'warning' : 'error',
+      message: syncResult ? `Domestic WG key sync ${syncResult.status}` : 'Domestic WG key sync finished',
+      detail: warnings || summarizeActionDetail(payload)
+    };
+    await refreshAdmin();
+    if (pipeline.planId) {
+      await refreshPipelineDetail(pipeline.planId);
+    }
+  } catch (error) {
+    state.internalPeer.feedback = { kind: 'error', message: error.message, detail: null };
+  } finally {
+    state.internalPeer.syncBusy = false;
+    renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+    renderInspector();
   }
 }
 
@@ -3340,8 +3468,8 @@ async function generateInternalPeerHandoff(site, pipeline) {
       if (internalPeerHostRunnerOffline(state.internalPeer.runtimeStatus)) {
         state.internalPeer.feedback = {
           kind: 'warning',
-          message: 'Internal handoff is ready; start the host runner, then Install / Restart will enable egress-on and enroll the host WG peer.',
-          detail: internalPeerHostRunnerCommand(state.internalPeer.runtimeStatus)
+          message: 'Internal handoff is ready; install or start the native host runner, then Install / Restart will enable egress-on and enroll the host WG peer.',
+          detail: internalPeerHostRunnerSetupDetail(state.internalPeer.runtimeStatus)
         };
       }
     }
@@ -3360,6 +3488,7 @@ function renderInternalPeerRuntimeStatus(runtimeStatus, applyResult) {
   const tools = runtimeStatus?.tools || {};
   const wireGuardCore = runtimeStatus?.wireGuardCore || {};
   const coreAvailable = wireGuardCore.available === true;
+  const coreRuntime = wireGuardCore.runtime || {};
   const link = runtimeStatus?.link || {};
   const iface = runtimeStatus?.interface || {};
   const handshake = iface.handshake || {};
@@ -3370,15 +3499,38 @@ function renderInternalPeerRuntimeStatus(runtimeStatus, applyResult) {
   const proxy = runtimeStatus?.proxy || {};
   const splitDns = proxy.splitDns || {};
   const applyStatus = applyResult?.status || 'not-run';
+  const qpTunnelCliValue = tools.qpTunnelCli?.path
+    ? `${tools.qpTunnelCli.path}${tools.qpTunnelCli.version ? ` / ${tools.qpTunnelCli.version}` : ''}`
+    : 'required runtime source missing';
+  const internalEgressValue = internalEgress.serviceName
+    ? `${internalEgress.serviceName} / ${internalEgress.summary || internalEgress.status || 'not checked'}`
+    : internalEgress.summary || internalEgress.status || 'not checked';
+  const tunnel = wireGuardCore.tunnel || {};
+  const daemon = wireGuardCore.daemon || {};
+  const serviceValue = hostRunnerOffline
+    ? 'not checked'
+    : daemon.running
+      ? `launchd running${tunnel.realInterfaceName ? ` / ${tunnel.realInterfaceName}` : ''}`
+      : tunnel.active
+        ? `tunnel active${tunnel.realInterfaceName ? ` / ${tunnel.realInterfaceName}` : ''}`
+        : iface.wgShow?.status || 'not checked';
+  const serviceStatus = hostRunnerOffline
+    ? 'ready'
+    : daemon.running || tunnel.active
+      ? 'passed'
+      : iface.wgShow?.status === 'not-checked'
+        ? 'ready'
+        : iface.wgShow?.status || wireGuardCore.status || 'ready';
   const rows = [
     { label: 'target', value: runtimeTarget.mode || 'not checked', status: runtimeTarget.mode === 'host-runner' ? 'passed' : hostRunnerOffline || runtimeTarget.mode === 'api-pod' ? 'blocked' : 'ready' },
     { label: 'host runner', value: hostRunner.error || hostRunner.url || hostRunner.startCommand || 'not configured', status: hostRunner.error ? 'blocked' : hostRunner.configured ? 'passed' : 'ready' },
     { label: 'wg runtime', value: hostRunnerOffline ? 'not checked' : wireGuardCore.method ? `${wireGuardCore.method} / ${wireGuardCore.source || 'core'}` : 'not checked', status: hostRunnerOffline ? 'ready' : wireGuardCore.status || (coreAvailable ? 'passed' : 'ready') },
-    { label: 'wg', value: hostRunnerOffline ? 'not checked' : tools.wg?.path || 'missing', status: hostRunnerOffline ? 'ready' : tools.wg?.available ? 'passed' : coreAvailable ? 'ready' : 'blocked' },
-    { label: 'wg-quick', value: hostRunnerOffline ? 'not checked' : tools.wgQuick?.path || 'missing', status: hostRunnerOffline ? 'ready' : tools.wgQuick?.available ? 'passed' : coreAvailable ? 'ready' : 'blocked' },
-    { label: 'qp-tunnel-cli', value: hostRunnerOffline ? 'not checked' : tools.qpTunnelCli?.path || 'required runtime source missing', status: hostRunnerOffline ? 'ready' : tools.qpTunnelCli?.available ? 'passed' : 'blocked' },
-    { label: 'internal egress-on', value: hostRunnerOffline ? 'not checked' : internalEgress.summary || internalEgress.status || 'not checked', status: hostRunnerOffline ? 'ready' : internalEgress.status || 'ready' },
-    { label: 'service', value: hostRunnerOffline ? 'not checked' : iface.wgShow?.status || (wireGuardCore.tunnel?.active ? 'tunnel active' : wireGuardCore.daemon?.running ? 'launchd running' : 'not checked'), status: hostRunnerOffline ? 'ready' : iface.wgShow?.status || wireGuardCore.status || 'ready' },
+    { label: 'core wg', value: hostRunnerOffline ? 'not checked' : coreRuntime.wg?.command || coreRuntime.wg?.error || 'missing', status: hostRunnerOffline ? 'ready' : coreRuntime.wg?.available ? 'passed' : coreAvailable ? 'ready' : 'blocked' },
+    { label: 'core wg-quick', value: hostRunnerOffline ? 'not checked' : coreRuntime.wgQuick?.command || coreRuntime.wgQuick?.error || 'missing', status: hostRunnerOffline ? 'ready' : coreRuntime.wgQuick?.available ? 'passed' : coreRuntime.method === 'darwin-userspace' ? 'ready' : 'blocked' },
+    { label: 'core wireguard-go', value: hostRunnerOffline ? 'not checked' : coreRuntime.wireGuardGo?.command || coreRuntime.wireGuardGo?.error || (coreRuntime.platform === 'darwin' ? 'missing' : 'not required'), status: hostRunnerOffline ? 'ready' : coreRuntime.platform === 'darwin' ? coreRuntime.wireGuardGo?.available ? 'passed' : 'blocked' : 'ready' },
+    { label: 'qp-tunnel-cli', value: hostRunnerOffline ? 'not checked' : qpTunnelCliValue, status: hostRunnerOffline ? 'ready' : tools.qpTunnelCli?.available ? 'passed' : 'blocked' },
+    { label: 'internal egress-on', value: hostRunnerOffline ? 'not checked' : internalEgressValue, status: hostRunnerOffline ? 'ready' : internalEgress.status || 'ready' },
+    { label: 'service', value: serviceValue, status: serviceStatus },
     { label: 'handshake', value: hostRunnerOffline ? 'not checked' : handshake.newest?.at || handshake.status || 'not checked', status: hostRunnerOffline ? 'ready' : handshake.status || 'ready' },
     { label: 'proxy bypass', value: hostRunnerOffline ? 'not checked' : Array.isArray(proxy.missingBypass) && proxy.missingBypass.length ? `missing ${proxy.missingBypass.join(',')}` : proxy.clashTunCompatibility || 'not checked', status: hostRunnerOffline ? 'ready' : proxy.status || 'ready' },
     { label: 'split DNS', value: splitDns.authority || 'Internal DNS planned', status: splitDns.status || 'ready' },
@@ -3426,9 +3578,46 @@ function internalPeerInstallUnavailable(runtimeStatus = null) {
 }
 
 function internalPeerHostRunnerCommand(runtimeStatus = null) {
-  return runtimeStatus?.runtimeTarget?.hostRunner?.startCommand
+  return runtimeStatus?.runtimeTarget?.hostRunner?.installCommand
     || runtimeStatus?.install?.hostRunnerCommand
-    || 'MX_INTERNAL_HOST_RUNNER_HOST=0.0.0.0 bash scripts/manage.sh ops site-slot internal-service-peer-host-runner 19190';
+    || runtimeStatus?.runtimeTarget?.hostRunner?.startCommand
+    || 'bash scripts/manage.sh ops site-slot native-host-runner install 19190';
+}
+
+function internalPeerHostRunnerStartCommand(runtimeStatus = null) {
+  return runtimeStatus?.runtimeTarget?.hostRunner?.startCommand
+    || runtimeStatus?.runtimeTarget?.hostRunner?.legacyForegroundCommand
+    || 'bash scripts/manage.sh ops site-slot native-host-runner start 19190';
+}
+
+function internalPeerHostRunnerStatusCommand(runtimeStatus = null) {
+  return runtimeStatus?.runtimeTarget?.hostRunner?.statusCommand
+    || 'bash scripts/manage.sh ops site-slot native-host-runner status 19190';
+}
+
+function internalPeerCanEnsureK8sHostRunner(runtimeStatus = null) {
+  const hostRunner = runtimeStatus?.runtimeTarget?.hostRunner || {};
+  return hostRunner.k8sEnsureAvailable === true
+    || (hostRunner.k8sEnsureEnabled === true && hostRunner.k8sFallbackEnabled === true);
+}
+
+function internalPeerHostRunnerSetupDetail(runtimeStatus = null) {
+  return [
+    `Install daemon: ${internalPeerHostRunnerCommand(runtimeStatus)}`,
+    `Foreground run: ${internalPeerHostRunnerStartCommand(runtimeStatus)}`,
+    `Check status: ${internalPeerHostRunnerStatusCommand(runtimeStatus)}`,
+    'Then click Refresh Status, Sync Domestic WG Key if the Internal public key changed, and Install / Restart.'
+  ].join('\n');
+}
+
+function showInternalPeerNativeRunnerGuide() {
+  state.internalPeer.feedback = {
+    kind: 'warning',
+    message: 'Native Internal host runner is required on the real macOS/Ubuntu host.',
+    detail: internalPeerHostRunnerSetupDetail(state.internalPeer.runtimeStatus)
+  };
+  renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+  renderInspector();
 }
 
 async function requestInternalPeerRuntimeStatus(site, pipeline) {
@@ -3462,12 +3651,12 @@ async function refreshInternalPeerRuntimeStatus(site, pipeline) {
     state.internalPeer.feedback = {
       kind: runtimeStatus?.status === 'blocked' ? 'warning' : 'success',
       message: internalPeerHostRunnerOffline(runtimeStatus)
-        ? 'Host runner is not reachable; click Ensure Host Runner, then Install / Restart enables egress-on, installs WG, and assigns 10.88.88.88.'
+        ? 'Native host runner is not reachable; install/start it on the real Internal host, then Install / Restart enables egress-on, installs WG, and assigns 10.88.88.88.'
         : runtimeStatus
           ? `Internal service peer status ${runtimeStatus.status}`
           : 'Internal service peer status checked',
       detail: internalPeerHostRunnerOffline(runtimeStatus)
-        ? internalPeerHostRunnerCommand(runtimeStatus)
+        ? internalPeerHostRunnerSetupDetail(runtimeStatus)
         : summarizeActionDetail(payload)
     };
   } catch (error) {
@@ -3482,7 +3671,7 @@ async function refreshInternalPeerRuntimeStatus(site, pipeline) {
 async function ensureInternalPeerHostRunner(site, pipeline) {
   if (state.internalPeer.hostRunnerEnsureBusy) return;
   state.internalPeer.hostRunnerEnsureBusy = true;
-  state.internalPeer.feedback = { kind: 'info', message: 'Ensuring Internal host runner through k8s', detail: null };
+  state.internalPeer.feedback = { kind: 'info', message: 'Ensuring Internal host runner through k8s fallback', detail: null };
   renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
   try {
     const payload = await fetchJson('/internal/v1/admin/actions/execute', {
@@ -3520,8 +3709,8 @@ async function installInternalPeerService(site, pipeline) {
   if (internalPeerHostRunnerOffline(state.internalPeer.runtimeStatus)) {
     state.internalPeer.feedback = {
       kind: 'warning',
-      message: 'Start the host runner on the Internal host before enabling egress-on and installing WG.',
-      detail: internalPeerHostRunnerCommand(state.internalPeer.runtimeStatus)
+      message: 'Install or start the native host runner on the Internal host before enabling egress-on and installing WG.',
+      detail: internalPeerHostRunnerSetupDetail(state.internalPeer.runtimeStatus)
     };
     renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
     renderInspector();
@@ -4081,7 +4270,7 @@ function syncSshProfileFormToSelectedSite(siteId, kind) {
   const profile = asArray(state.sshProfiles)
     .filter((item) => item.kind === kind && item.siteId === siteId)
     .sort((left, right) => String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')))[0] || null;
-  if (profile && selectedSshProfileId() !== profile.profileId) {
+  if (profile && (selectedSshProfileId() !== profile.profileId || !sshProfileFormMatchesProfile(profile))) {
     state.selectedSshProfileId = profile.profileId;
     fillSshProfileForm(profile);
     state.sshProfileReadiness = null;
@@ -4094,6 +4283,15 @@ function syncSshProfileFormToSelectedSite(siteId, kind) {
     sshProfileHostKeyAlias.value = siteId;
     renderSshProfileSaveState();
   }
+}
+
+function sshProfileFormMatchesProfile(profile) {
+  return blankToNull(sshProfileId.value) === profile.profileId
+    && blankToNull(sshProfileSiteId.value) === profile.siteId
+    && sshProfileKind.value === profile.kind
+    && blankToNull(sshProfileHost.value) === profile.host
+    && (blankToNull(sshProfileUser.value) || 'root') === (profile.sshUser || 'root')
+    && (positiveNumberOrNull(sshProfilePort.value) || 22) === (profile.sshPort || 22);
 }
 
 function siteDescription(kind) {

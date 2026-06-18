@@ -14,7 +14,7 @@ import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
 import { checkAwxProvider } from '../config-center/awx-provider-check.js';
 import { buildAwxProviderSyncPlan } from '../config-center/awx-provider-sync-plan.js';
-import { generateWireGuardKeyPair } from '../config-center/wireguard-keys.js';
+import { deriveWireGuardPublicKey, generateWireGuardKeyPair } from '../config-center/wireguard-keys.js';
 import { buildSiteSlotRemoteSshGate, buildSiteSlotRemoteSshReadOnlyProbe, buildSiteSlotRemoteSshWorkerHandoff } from '../site-slots/remote-ssh-gate.js';
 import { runAwxApiLaunch } from './awx-api-launch.js';
 import { runAwxCredentialSync } from './awx-credential-sync.js';
@@ -915,6 +915,245 @@ export class AdminController {
     };
   }
 
+  private async adminInternalServicePeerDomesticKeySyncResult(
+    siteId: string,
+    plan: SiteSlotPlan | null,
+    secret: SiteSlotDomesticWireGuardSecret | null,
+    body: Record<string, unknown>
+  ) {
+    const requestedBy = stringValue(body.requestedBy) ?? 'admin-ui';
+    const requestId = stringValue(body.requestId) ?? `admin-internal-service-peer-domestic-key-sync-${Date.now()}`;
+    const confirm = booleanValue(body.confirmDomesticPeerKeySync) === true;
+    const confirmAdoptRuntimeRelayKey = booleanValue(body.confirmAdoptDomesticRuntimeRelayPublicKey) === true;
+    const beforeStatus = await adminInternalServicePeerRuntimeStatus(siteId, plan, secret, this.store);
+    const explicitInternalPublicKey = stringValue(body.internalServicePublicKey);
+    const internalPublicKey = explicitInternalPublicKey
+      ?? internalServicePublicKeyFromRuntimeStatus(beforeStatus)
+      ?? deriveWireGuardPublicKeyFromPrivate(secret?.internalServicePrivateKey)
+      ?? secret?.internalServicePublicKey
+      ?? null;
+    const internalPublicKeySource = explicitInternalPublicKey
+      ? 'request-body'
+      : internalServicePublicKeyFromRuntimeStatus(beforeStatus)
+        ? 'internal-host-runner'
+        : deriveWireGuardPublicKeyFromPrivate(secret?.internalServicePrivateKey)
+          ? 'internal-secret-private-key'
+          : secret?.internalServicePublicKey
+            ? 'internal-secret-public-key'
+            : 'missing';
+    const sshProfile = plan?.ssh.profileId ? await this.store.getSiteSlotSshProfile(plan.ssh.profileId) : null;
+    const profileFailures = sshProfile ? sshProfileBlockingReasons(sshProfile) : [];
+    const initialBlockedReasons = [
+      ...(!confirm ? ['confirmDomesticPeerKeySync=true is required before syncing the Domestic WG peer'] : []),
+      ...(secret ? [] : ['Domestic WG secret is missing; Materialize Domestic WG before syncing the peer key']),
+      ...(plan ? [] : ['Domestic site plan is missing; select the Domestic relay plan before syncing the peer key']),
+      ...(sshProfile ? [] : ['Domestic SSH profile is required before syncing the peer key']),
+      ...profileFailures,
+      ...(internalPublicKey ? [] : ['Internal service peer public key is missing; install or refresh the Internal host runner first']),
+      ...(internalPublicKey && validWireGuardPublicKey(internalPublicKey) ? [] : internalPublicKey ? ['Internal service peer public key does not look like a base64 WireGuard public key'] : [])
+    ];
+    if (initialBlockedReasons.length > 0 || !secret || !sshProfile || !internalPublicKey) {
+      return {
+        syncId: `internal_service_peer_domestic_key_sync_${siteId}`,
+        status: 'blocked',
+        execution: 'not-started',
+        mode: 'internal-service-peer-domestic-key-sync',
+        siteId,
+        planId: plan?.planId ?? stringValue(body.planId) ?? null,
+        internal: {
+          publicKey: internalPublicKey,
+          publicKeySource: internalPublicKeySource,
+          serviceIp: secret?.internalServiceIp ?? '10.88.88.88'
+        },
+        domestic: null,
+        ssh: null,
+        materialize: null,
+        beforeStatus,
+        afterStatus: beforeStatus,
+        secret: secret ? redactAdminDomesticWireGuardSecret(secret) : null,
+        warnings: [],
+        blockedReasons: initialBlockedReasons,
+        nextActions: ['fix-domestic-ssh-profile-or-internal-runtime-key', 'retry-sync-domestic-wg-key'],
+        finishedAt: new Date().toISOString()
+      };
+    }
+
+    const readScript = domesticRelayPublicKeyReadScript();
+    const readStartedAt = new Date().toISOString();
+    let readExecution;
+    try {
+      readExecution = await runSshScriptWithProfile(sshProfile, readScript, 30000);
+    } catch (error) {
+      readExecution = sshScriptFailure(error, readStartedAt);
+    }
+    const domesticPublicKey = stringValue(body.domesticRelayPublicKey)
+      ?? domesticRelayPublicKeyFromReadOutput(readExecution.stdout)
+      ?? null;
+    const relayPublicKeyFromPrivate = deriveWireGuardPublicKeyFromPrivate(secret.domesticRelayPrivateKey);
+    const runtimeRelayKeyDrift = Boolean(relayPublicKeyFromPrivate && domesticPublicKey && relayPublicKeyFromPrivate !== domesticPublicKey);
+    const readBlockedReasons = [
+      ...(readExecution.status === 'passed' ? [] : [`Domestic relay public key read failed: ${readExecution.stderr || readExecution.status}`]),
+      ...(domesticPublicKey ? [] : ['Domestic relay public key could not be read from mx-domestic']),
+      ...(domesticPublicKey && validWireGuardPublicKey(domesticPublicKey) ? [] : domesticPublicKey ? ['Domestic relay public key does not look like a base64 WireGuard public key'] : []),
+      ...(runtimeRelayKeyDrift && !confirmAdoptRuntimeRelayKey ? ['Domestic runtime relay public key differs from the Config Center relay private key; confirmAdoptDomesticRuntimeRelayPublicKey=true is required before adopting the runtime key'] : [])
+    ];
+    if (readBlockedReasons.length > 0 || !domesticPublicKey) {
+      return {
+        syncId: `internal_service_peer_domestic_key_sync_${siteId}`,
+        status: readExecution.status === 'passed' ? 'blocked' : 'failed',
+        execution: readExecution.status === 'passed' ? 'not-started' : 'failed',
+        mode: 'internal-service-peer-domestic-key-sync',
+        siteId,
+        planId: plan?.planId ?? stringValue(body.planId) ?? null,
+        internal: {
+          publicKey: internalPublicKey,
+          publicKeySource: internalPublicKeySource,
+          serviceIp: secret.internalServiceIp
+        },
+        domestic: {
+          publicKey: domesticPublicKey,
+          publicKeySource: stringValue(body.domesticRelayPublicKey) ? 'request-body' : 'remote-wg-show',
+          relayPublicKeyFromConfigPrivate: relayPublicKeyFromPrivate,
+          runtimeRelayKeyDrift,
+          adoptedRuntimeRelayKey: false
+        },
+        ssh: {
+          read: readExecution,
+          sync: null
+        },
+        materialize: null,
+        beforeStatus,
+        afterStatus: beforeStatus,
+        secret: redactAdminDomesticWireGuardSecret(secret),
+        warnings: runtimeRelayKeyDrift ? ['Domestic runtime relay key differs from Config Center; avoid re-applying Domestic relay until the key is imported or rotated.'] : [],
+        blockedReasons: readBlockedReasons,
+        nextActions: runtimeRelayKeyDrift
+          ? ['import-or-rotate-domestic-relay-key', 'or-confirm-runtime-key-adoption-for-dev-sync']
+          : ['fix-domestic-wg-service', 'retry-sync-domestic-wg-key'],
+        finishedAt: new Date().toISOString()
+      };
+    }
+
+    const syncScript = domesticInternalServicePeerKeySyncScript(internalPublicKey, secret.internalServiceIp);
+    const syncStartedAt = new Date().toISOString();
+    let syncExecution;
+    try {
+      syncExecution = await runSshScriptWithProfile(sshProfile, syncScript, 45000);
+    } catch (error) {
+      syncExecution = sshScriptFailure(error, syncStartedAt);
+    }
+    if (syncExecution.status !== 'passed') {
+      return {
+        syncId: `internal_service_peer_domestic_key_sync_${siteId}`,
+        status: 'failed',
+        execution: 'failed',
+        mode: 'internal-service-peer-domestic-key-sync',
+        siteId,
+        planId: plan?.planId ?? stringValue(body.planId) ?? null,
+        internal: {
+          publicKey: internalPublicKey,
+          publicKeySource: internalPublicKeySource,
+          serviceIp: secret.internalServiceIp
+        },
+        domestic: {
+          publicKey: domesticPublicKey,
+          publicKeySource: stringValue(body.domesticRelayPublicKey) ? 'request-body' : 'remote-wg-show',
+          relayPublicKeyFromConfigPrivate: relayPublicKeyFromPrivate,
+          runtimeRelayKeyDrift,
+          adoptedRuntimeRelayKey: false
+        },
+        ssh: {
+          read: readExecution,
+          sync: syncExecution
+        },
+        materialize: null,
+        beforeStatus,
+        afterStatus: beforeStatus,
+        secret: redactAdminDomesticWireGuardSecret(secret),
+        warnings: [],
+        blockedReasons: [`Domestic Internal peer key sync failed: ${syncExecution.stderr || syncExecution.status}`],
+        nextActions: ['check-domestic-wg-service', 'retry-sync-domestic-wg-key'],
+        finishedAt: new Date().toISOString()
+      };
+    }
+
+    const syncedSecret = await this.store.upsertSiteSlotDomesticWireGuardSecret({
+      siteId,
+      domesticRelayPublicKey: domesticPublicKey,
+      internalServicePublicKey: internalPublicKey,
+      requestedBy,
+      requestId
+    });
+    const materialize = await this.materializeDomesticWireGuard(siteId, plan, syncedSecret, {
+      publicEndpoint: syncedSecret.publicEndpoint,
+      listenPort: syncedSecret.listenPort,
+      requestedBy,
+      requestId: `${requestId}-materialize`
+    });
+    const afterStatus = await adminInternalServicePeerRuntimeStatus(siteId, plan, materialize.secret, this.store);
+    const warnings = [
+      ...(secret.internalServicePublicKey && secret.internalServicePublicKey !== internalPublicKey
+        ? ['Config Center Internal service public key was updated from the active Internal runtime key.']
+        : []),
+      ...(secret.domesticRelayPublicKey && secret.domesticRelayPublicKey !== domesticPublicKey
+        ? ['Config Center Domestic relay public key was updated from the active Domestic runtime key.']
+        : []),
+      ...(runtimeRelayKeyDrift
+        ? ['Domestic runtime relay key differs from Config Center relay private key; future Domestic relay re-apply may rotate the relay unless the private key is imported or rotated deliberately.']
+        : [])
+    ];
+    await this.store.recordAudit({
+      eventType: 'site_slot.internal_service_peer.domestic_key_synced',
+      actorKind: 'admin-action',
+      requestId,
+      metadata: {
+        siteId,
+        planId: plan?.planId ?? null,
+        internalPublicKeySource,
+        runtimeRelayKeyDrift,
+        materializeStatus: materialize.result.status,
+        syncStatus: syncExecution.status
+      }
+    });
+    return {
+      syncId: `internal_service_peer_domestic_key_sync_${siteId}`,
+      status: materialize.result.status === 'passed' ? 'passed' : 'ready',
+      execution: 'completed',
+      mode: 'internal-service-peer-domestic-key-sync',
+      siteId,
+      planId: plan?.planId ?? stringValue(body.planId) ?? null,
+      internal: {
+        publicKey: internalPublicKey,
+        publicKeySource: internalPublicKeySource,
+        previousPublicKey: secret.internalServicePublicKey,
+        serviceIp: secret.internalServiceIp
+      },
+      domestic: {
+        publicKey: domesticPublicKey,
+        publicKeySource: stringValue(body.domesticRelayPublicKey) ? 'request-body' : 'remote-wg-show',
+        relayPublicKeyFromConfigPrivate: relayPublicKeyFromPrivate,
+        runtimeRelayKeyDrift,
+        adoptedRuntimeRelayKey: runtimeRelayKeyDrift
+      },
+      ssh: {
+        read: readExecution,
+        sync: syncExecution
+      },
+      materialize: materialize.result,
+      beforeStatus,
+      afterStatus,
+      secret: materialize.secret ? redactAdminDomesticWireGuardSecret(materialize.secret) : redactAdminDomesticWireGuardSecret(syncedSecret),
+      warnings,
+      blockedReasons: materialize.result.status === 'passed' ? [] : materialize.result.blockedReasons ?? [],
+      nextActions: [
+        'click-install-restart-to-reload-internal-service-peer',
+        'refresh-status-to-check-handshake',
+        'run-domestic-relay-readonly-probe-after-handshake'
+      ],
+      finishedAt: new Date().toISOString()
+    };
+  }
+
   private async buildActionPolicy(authorization?: string, rawToken?: string, rawUserId?: string): Promise<AdminActionPolicy> {
     const token = bearerToken(authorization) ?? stringValue(rawToken);
     const userId = stringValue(rawUserId);
@@ -1055,6 +1294,19 @@ export class AdminController {
         internalServicePeerApply,
         internalServicePeerRuntimeStatus: internalServicePeerApply.afterStatus ?? internalServicePeerApply.beforeStatus,
         secret: secret ? redactAdminDomesticWireGuardSecret(secret) : null
+      };
+    }
+    if (actionId === 'site-slot.internal-service-peer.sync-domestic-key') {
+      const match = matchPath(path, /^\/internal\/v1\/config-center\/domestic-wg-secrets\/([^/]+)\/internal-service-peer-sync-domestic-key$/);
+      if (!match) throw new BadRequestException('Admin Internal service peer Domestic key sync path is invalid');
+      const siteId = match[1];
+      const secret = await this.store.getSiteSlotDomesticWireGuardSecret(siteId);
+      const plan = stringValue(body.planId) ? await this.store.getSiteSlotPlan(stringValue(body.planId) ?? '') : null;
+      const internalServicePeerDomesticKeySync = await this.adminInternalServicePeerDomesticKeySyncResult(siteId, plan, secret, body);
+      return {
+        internalServicePeerDomesticKeySync,
+        internalServicePeerRuntimeStatus: internalServicePeerDomesticKeySync.afterStatus ?? internalServicePeerDomesticKeySync.beforeStatus ?? null,
+        secret: internalServicePeerDomesticKeySync.secret ?? (secret ? redactAdminDomesticWireGuardSecret(secret) : null)
       };
     }
     if (actionId === 'site-slot.domestic-relay-peer-append-ssh.prepare') {
@@ -3202,16 +3454,33 @@ function internalServicePeerRenderedArtifacts(secret: SiteSlotDomesticWireGuardS
 }
 
 function internalServicePeerHostRunnerUrl(): string | null {
-  const raw = process.env.MX_INTERNAL_HOST_RUNNER_URL ?? process.env.MX_INTERNAL_SERVICE_PEER_HOST_RUNNER_URL;
-  if (!raw?.trim()) return internalServicePeerK8sHostRunnerUrl();
-  return raw.trim().replace(/\/+$/, '');
+  return internalServicePeerHostRunnerUrlCandidates()[0] ?? null;
 }
 
 function internalServicePeerHostRunnerUrlCandidates(): string[] {
   return uniqueStrings([
-    internalServicePeerHostRunnerUrl(),
-    internalServicePeerK8sHostRunnerUrl()
+    internalServicePeerNativeHostRunnerUrl(),
+    explicitInternalServicePeerHostRunnerUrl(),
+    internalServicePeerK8sHostRunnerFallbackEnabled() ? internalServicePeerK8sHostRunnerUrl() : null
   ].filter((item): item is string => Boolean(item)));
+}
+
+function explicitInternalServicePeerHostRunnerUrl(): string | null {
+  const raw = process.env.MX_INTERNAL_HOST_RUNNER_URL ?? process.env.MX_INTERNAL_SERVICE_PEER_HOST_RUNNER_URL;
+  return raw?.trim() ? raw.trim().replace(/\/+$/, '') : null;
+}
+
+function internalServicePeerNativeHostRunnerUrl(): string | null {
+  const raw = process.env.MX_INTERNAL_HOST_RUNNER_NATIVE_URL?.trim();
+  if (raw) return raw.replace(/\/+$/, '');
+  if (!process.env.KUBERNETES_SERVICE_HOST) return null;
+  const port = internalServicePeerK8sHostRunnerPort();
+  return `http://host.docker.internal:${port}`;
+}
+
+function internalServicePeerK8sHostRunnerFallbackEnabled(): boolean {
+  const raw = process.env.MX_INTERNAL_HOST_RUNNER_K8S_FALLBACK_ENABLED;
+  return raw === '1' || raw?.toLowerCase() === 'true';
 }
 
 function internalServicePeerK8sHostRunnerNamespace(): string {
@@ -3247,13 +3516,35 @@ function internalServicePeerHostRunnerEnsureEnabled(): boolean {
   return raw === '1' || raw?.toLowerCase() === 'true';
 }
 
+function internalServicePeerK8sHostRunnerEnsureAvailable(): boolean {
+  return internalServicePeerHostRunnerEnsureEnabled() && internalServicePeerK8sHostRunnerFallbackEnabled();
+}
+
+function internalServicePeerNativeHostRunnerInstallCommand(): string {
+  return 'bash scripts/manage.sh ops site-slot native-host-runner install 19190';
+}
+
+function internalServicePeerNativeHostRunnerStartCommand(): string {
+  return 'bash scripts/manage.sh ops site-slot native-host-runner start 19190';
+}
+
+function internalServicePeerNativeHostRunnerStatusCommand(): string {
+  return 'bash scripts/manage.sh ops site-slot native-host-runner status 19190';
+}
+
+function internalServicePeerLegacyHostRunnerStartCommand(): string {
+  return 'MX_INTERNAL_HOST_RUNNER_HOST=0.0.0.0 bash scripts/manage.sh ops site-slot internal-service-peer-host-runner 19190';
+}
+
 function internalServicePeerRuntimeTarget(hostRunnerUrl: string | null, hostRunnerError: string | null) {
   const apiInKubernetes = Boolean(process.env.KUBERNETES_SERVICE_HOST);
   const hostRunnerCandidates = internalServicePeerHostRunnerUrlCandidates();
+  const nativeUrl = internalServicePeerNativeHostRunnerUrl();
+  const k8sUrl = internalServicePeerK8sHostRunnerUrl();
   return {
     mode: hostRunnerUrl && !hostRunnerError ? 'host-runner' : hostRunnerUrl && hostRunnerError ? 'host-runner-unreachable' : apiInKubernetes ? 'api-pod' : 'api-host',
     boundary: apiInKubernetes
-      ? 'k8s-api-control-plane-needs-host-runner'
+      ? 'k8s-api-control-plane-prefers-native-host-runner'
       : 'api-process-local-runtime',
     apiRuntime: {
       hostname: osHostname(),
@@ -3266,9 +3557,16 @@ function internalServicePeerRuntimeTarget(hostRunnerUrl: string | null, hostRunn
       url: hostRunnerUrl,
       candidates: hostRunnerCandidates,
       error: hostRunnerError,
-      startCommand: 'MX_INTERNAL_HOST_RUNNER_HOST=0.0.0.0 bash scripts/manage.sh ops site-slot internal-service-peer-host-runner 19190',
-      k8sUrlHint: internalServicePeerK8sHostRunnerUrl() ?? 'http://host.docker.internal:19190',
-      k8sEnsureEnabled: internalServicePeerHostRunnerEnsureEnabled()
+      preferredTarget: nativeUrl ? 'native-host-runner' : 'api-process',
+      installCommand: internalServicePeerNativeHostRunnerInstallCommand(),
+      startCommand: internalServicePeerNativeHostRunnerStartCommand(),
+      statusCommand: internalServicePeerNativeHostRunnerStatusCommand(),
+      legacyForegroundCommand: internalServicePeerLegacyHostRunnerStartCommand(),
+      nativeUrlHint: nativeUrl ?? 'http://host.docker.internal:19190',
+      k8sUrlHint: k8sUrl,
+      k8sFallbackEnabled: internalServicePeerK8sHostRunnerFallbackEnabled(),
+      k8sEnsureEnabled: internalServicePeerHostRunnerEnsureEnabled(),
+      k8sEnsureAvailable: internalServicePeerK8sHostRunnerEnsureAvailable()
     }
   };
 }
@@ -3378,9 +3676,9 @@ function adminInternalServicePeerHostRunnerUnavailableStatus(
     install: {
       available: false,
       applyCommand: 'bash scripts/manage.sh ops site-slot internal-service-peer-handoff apply',
-      hostRunnerCommand: 'MX_INTERNAL_HOST_RUNNER_HOST=0.0.0.0 bash scripts/manage.sh ops site-slot internal-service-peer-host-runner 19190',
+      hostRunnerCommand: internalServicePeerNativeHostRunnerInstallCommand(),
       requires: [
-        'Internal host-runner reachable from the Internal API pod',
+        'Native Internal host-runner reachable from the Internal API pod',
         'qp-tunnel-cli egress-on on the Internal runtime host for H2O/outbound bootstrap',
         'qp-tunnel-cli with @qpjoy/electron-core-wireguard on the Internal runtime host',
         'sudo/root privilege on the Internal runtime host'
@@ -3645,10 +3943,10 @@ async function adminInternalServicePeerRuntimeStatus(
     install: {
       available: blockedReasons.length === 0,
       applyCommand: `bash scripts/manage.sh ops site-slot internal-service-peer-handoff apply`,
-      hostRunnerCommand: 'MX_INTERNAL_HOST_RUNNER_HOST=0.0.0.0 bash scripts/manage.sh ops site-slot internal-service-peer-host-runner 19190',
+      hostRunnerCommand: internalServicePeerNativeHostRunnerInstallCommand(),
       requires: [
         'qp-tunnel-cli egress-on on the Internal runtime host for H2O/outbound bootstrap',
-        'wg-quick or @qpjoy/electron-core-wireguard on the Internal runtime host',
+        'qp-tunnel-cli with @qpjoy/electron-core-wireguard on the Internal runtime host',
         'sudo/root privilege on the Internal runtime host'
       ],
       blockedReasons
@@ -3729,7 +4027,9 @@ function internalServicePeerHostRunnerK8sObjects(namespace: string, name: string
               env: [
                 { name: 'MX_INTERNAL_HOST_RUNNER_HOST', value: '0.0.0.0' },
                 { name: 'MX_INTERNAL_HOST_RUNNER_PORT', value: String(port) },
-                { name: 'MX_INTERNAL_SERVICE_ARTIFACT_DIR', value: '/var/lib/mx-launcher/internal-service-peer' }
+                { name: 'MX_INTERNAL_SERVICE_ARTIFACT_DIR', value: '/var/lib/mx-launcher/internal-service-peer' },
+                { name: 'MX_QP_TUNNEL_CLI_BUNDLE_DIR', value: '/var/lib/mx-launcher/internal-service-peer/qp-tunnel-cli-runtime' },
+                { name: 'MX_QP_TUNNEL_CLI_FALLBACK_TAR', value: '/app/artifacts/site-slots/domestic/mx-domestic-qp-tunnel-cli-fallback.tar.gz' }
               ],
               securityContext: {
                 privileged: true,
@@ -3952,7 +4252,8 @@ async function adminInternalServicePeerHostRunnerEnsureResult(
   const blockedReasons = [
     ...(!confirm ? ['confirmInternalHostRunnerEnsure=true is required before creating the k8s host-runner'] : []),
     ...(!process.env.KUBERNETES_SERVICE_HOST ? ['Internal host-runner ensure must run inside the Internal k8s API pod'] : []),
-    ...(!internalServicePeerHostRunnerEnsureEnabled() ? ['MX_INTERNAL_HOST_RUNNER_K8S_ENSURE_ENABLED=true is required before creating the k8s host-runner'] : [])
+    ...(!internalServicePeerHostRunnerEnsureEnabled() ? ['MX_INTERNAL_HOST_RUNNER_K8S_ENSURE_ENABLED=true is required before creating the k8s host-runner fallback'] : []),
+    ...(!internalServicePeerK8sHostRunnerFallbackEnabled() ? ['MX_INTERNAL_HOST_RUNNER_K8S_FALLBACK_ENABLED=true is required before creating the k8s host-runner fallback'] : [])
   ];
   if (blockedReasons.length > 0) {
     return {
@@ -3966,7 +4267,7 @@ async function adminInternalServicePeerHostRunnerEnsureResult(
       name,
       objects: [],
       blockedReasons,
-      nextActions: ['Enable the k8s host-runner ensure gate or start the host runner manually on the Internal host'],
+      nextActions: ['Install/start the native host runner on the Internal host, or explicitly enable k8s fallback for a container-only test'],
       afterStatus: null,
       finishedAt: new Date().toISOString()
     };
@@ -3990,7 +4291,7 @@ async function adminInternalServicePeerHostRunnerEnsureResult(
       name,
       objects: results,
       blockedReasons: failed.map((item) => item.message),
-      nextActions: ['Check Internal API RBAC for services and daemonsets, then retry Ensure Host Runner'],
+      nextActions: ['Check Internal API RBAC for services and daemonsets, then retry Ensure K8s Fallback'],
       afterStatus: null,
       finishedAt: new Date().toISOString()
     };
@@ -4716,6 +5017,114 @@ function domesticRelayPeerAppendScript(input: DomesticRelayPeerInput): string {
     'if command -v wg-quick >/dev/null 2>&1; then wg-quick save mx-domestic || true; fi',
     'systemctl status wg-quick@mx-domestic --no-pager 2>/dev/null || true'
   ].join('; ');
+}
+
+function domesticRelayPublicKeyReadScript(): string {
+  return [
+    'set -eu',
+    'printf "mx-domestic-relay-public-key-read\\n"',
+    'test -f /etc/wireguard/mx-domestic.conf',
+    'if ! command -v wg >/dev/null 2>&1; then echo "blocked: wg missing"; exit 1; fi',
+    'wg show mx-domestic >/dev/null',
+    'printf "domestic_public_key=%s\\n" "$(wg show mx-domestic public-key)"',
+    'wg show mx-domestic allowed-ips || true'
+  ].join('; ');
+}
+
+function domesticInternalServicePeerKeySyncScript(internalPublicKey: string, internalServiceIp: string): string {
+  const allowedIp = `${internalServiceIp}/32`;
+  return [
+    'set -eu',
+    'printf "mx-domestic-internal-service-peer-key-sync\\n"',
+    'test -f /etc/wireguard/mx-domestic.conf',
+    'if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi',
+    'if ! command -v wg >/dev/null 2>&1; then echo "blocked: wg missing"; exit 1; fi',
+    'wg show mx-domestic >/dev/null',
+    `internal_peer=${shellQuote(internalPublicKey)}`,
+    `allowed_ip=${shellQuote(allowedIp)}`,
+    'stale_peers="$(wg show mx-domestic allowed-ips | awk -v keep="$internal_peer" -v ip="$allowed_ip" \'$1 != keep { for (i = 2; i <= NF; i += 1) if ($i == ip) print $1 }\')"',
+    'for peer in $stale_peers; do wg set mx-domestic peer "$peer" remove; done',
+    'wg set mx-domestic peer "$internal_peer" allowed-ips "$allowed_ip"',
+    'printf "domestic_public_key=%s\\n" "$(wg show mx-domestic public-key)"',
+    'printf "internal_peer=%s\\n" "$internal_peer"',
+    'wg show mx-domestic allowed-ips',
+    'if command -v wg-quick >/dev/null 2>&1; then wg-quick save mx-domestic || true; fi',
+    'systemctl status wg-quick@mx-domestic --no-pager 2>/dev/null || true'
+  ].join('; ');
+}
+
+async function runSshScriptWithProfile(profile: SiteSlotSshProfile, script: string, timeoutMs: number) {
+  const startedAt = new Date().toISOString();
+  const args = overseaTerminalSshArgv(profile, script);
+  const { stdout, stderr } = await execFileAsync('ssh', args, {
+    timeout: timeoutMs,
+    maxBuffer: 4 * 1024 * 1024
+  });
+  return {
+    status: 'passed',
+    command: `ssh ${args.map(shellQuote).join(' ')}`,
+    exitCode: 0,
+    stdout: stdout.trim(),
+    stderr: stderr.trim(),
+    startedAt,
+    finishedAt: new Date().toISOString()
+  };
+}
+
+function sshScriptFailure(error: unknown, startedAt: string) {
+  const execError = error as Error & { code?: number | string; stdout?: string; stderr?: string; killed?: boolean; signal?: string };
+  return {
+    status: execError.killed ? 'timeout' : execError.code === 'ENOENT' ? 'missing' : 'failed',
+    command: null,
+    exitCode: typeof execError.code === 'number' ? execError.code : null,
+    stdout: (execError.stdout ?? '').trim(),
+    stderr: (execError.stderr ?? execError.message).trim(),
+    signal: execError.signal ?? null,
+    startedAt,
+    finishedAt: new Date().toISOString()
+  };
+}
+
+function domesticRelayPublicKeyFromReadOutput(stdout: string | null | undefined): string | null {
+  const text = stdout ?? '';
+  const keyed = text.match(/(?:^|\n)domestic_public_key=([A-Za-z0-9+/=]{32,88})(?:\n|$)/);
+  if (keyed?.[1] && validWireGuardPublicKey(keyed[1])) return keyed[1];
+  return firstWireGuardPublicKey(text);
+}
+
+function internalServicePublicKeyFromRuntimeStatus(status: unknown): string | null {
+  const interfacePublicKey = stringValue(asRecord(asRecord(status).interface).publicKey);
+  if (interfacePublicKey && validWireGuardPublicKey(interfacePublicKey)) return interfacePublicKey;
+  const corePublicKey = stringValue(asRecord(asRecord(status).wireGuardCore).publicKey);
+  if (corePublicKey && validWireGuardPublicKey(corePublicKey)) return corePublicKey;
+  const wgShow = asRecord(asRecord(asRecord(status).interface).wgShow);
+  const stdout = stringValue(wgShow.stdout);
+  const fromShow = interfacePublicKeyFromWireGuardShow(stdout);
+  if (fromShow) return fromShow;
+  const tunnel = asRecord(asRecord(status).wireGuardCore).tunnel;
+  const tunnelRecord = asRecord(tunnel);
+  return interfacePublicKeyFromWireGuardShow(stringValue(tunnelRecord.ifconfig) ?? '');
+}
+
+function interfacePublicKeyFromWireGuardShow(stdout: string | null | undefined): string | null {
+  const match = (stdout ?? '').match(/public key:\s*([A-Za-z0-9+/=]{32,88})/);
+  return match?.[1] && validWireGuardPublicKey(match[1]) ? match[1] : null;
+}
+
+function firstWireGuardPublicKey(stdout: string | null | undefined): string | null {
+  const match = (stdout ?? '').match(/\b([A-Za-z0-9+/=]{32,88})\b/);
+  return match?.[1] && validWireGuardPublicKey(match[1]) ? match[1] : null;
+}
+
+function deriveWireGuardPublicKeyFromPrivate(privateKey: string | null | undefined): string | null {
+  if (!privateKey?.trim()) return null;
+  try {
+    const bytes = Buffer.from(privateKey.trim(), 'base64');
+    if (bytes.length !== 32) return null;
+    return deriveWireGuardPublicKey(bytes);
+  } catch {
+    return null;
+  }
 }
 
 function adminFakeTransportResult(
@@ -6299,7 +6708,7 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
     },
     {
       actionId: 'site-slot.internal-service-peer.host-runner.ensure',
-      label: 'Ensure Internal Host Runner',
+      label: 'Ensure Internal K8s Host Runner Fallback',
       category: 'site-slot',
       method: 'POST',
       path: '/internal/v1/config-center/domestic-wg-secrets/:siteId/internal-service-peer-host-runner',
@@ -6328,6 +6737,24 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         siteId: 'domestic-main',
         planId: '<plan-id>',
         confirmInternalServicePeerApply: true,
+        requestedBy: 'admin-ui'
+      }
+    },
+    {
+      actionId: 'site-slot.internal-service-peer.sync-domestic-key',
+      label: 'Sync Domestic WG Key',
+      category: 'site-slot',
+      method: 'POST',
+      path: '/internal/v1/config-center/domestic-wg-secrets/:siteId/internal-service-peer-sync-domestic-key',
+      requiredScopes: ['site-slot.execute'],
+      gate: 'confirm-remote-execution',
+      risk: 'high',
+      confirmFields: ['confirmDomesticPeerKeySync'],
+      bodyTemplate: {
+        siteId: 'domestic-main',
+        planId: '<plan-id>',
+        confirmDomesticPeerKeySync: true,
+        confirmAdoptDomesticRuntimeRelayPublicKey: true,
         requestedBy: 'admin-ui'
       }
     },

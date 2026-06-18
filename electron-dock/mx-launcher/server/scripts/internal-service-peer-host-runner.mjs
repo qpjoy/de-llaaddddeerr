@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
-import { existsSync, chmodSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, hostname, platform, release } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,9 +21,15 @@ const defaultApplyScriptPath = process.env.MX_INTERNAL_SERVICE_APPLY_SCRIPT
 const defaultInternalEgressSubscriptionPath = process.env.MX_INTERNAL_EGRESS_SUBSCRIPTION
   || join(artifactRoot, 'mx-internal-egress-subscription.yaml');
 const defaultInterfaceName = process.env.MX_INTERNAL_SERVICE_WG_INTERFACE || 'mx-internal-svc';
+const fallbackTunnelCliArchiveName = 'mx-domestic-qp-tunnel-cli-fallback.tar.gz';
+const fallbackTunnelCliRuntimeDir = process.env.MX_QP_TUNNEL_CLI_BUNDLE_DIR
+  || join(artifactRoot, 'qp-tunnel-cli-runtime');
 const host = process.env.MX_INTERNAL_HOST_RUNNER_HOST || '127.0.0.1';
 const port = Number(process.argv[2] || process.env.MX_INTERNAL_HOST_RUNNER_PORT || '19190');
 const runnerUrl = `http://${host}:${port}`;
+const nativeHostRunnerInstallCommand = `bash scripts/manage.sh ops site-slot native-host-runner install ${port}`;
+const nativeHostRunnerStartCommand = `bash scripts/manage.sh ops site-slot native-host-runner start ${port}`;
+const legacyHostRunnerStartCommand = `MX_INTERNAL_HOST_RUNNER_HOST=0.0.0.0 bash scripts/manage.sh ops site-slot internal-service-peer-host-runner ${port}`;
 const requiredProxyBypassEntries = [
   '10.88.0.0/16',
   '10.89.0.0/16',
@@ -48,6 +54,10 @@ function boolValue(value) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isLinuxKitHost() {
+  return platform() === 'linux' && /linuxkit/i.test(release());
 }
 
 function csvEntries(value) {
@@ -88,6 +98,7 @@ function primeProxyBypassEnv() {
 }
 
 const proxyBypassEnv = primeProxyBypassEnv();
+let cachedFallbackTunnelCli = null;
 
 async function commandPath(command) {
   const override = command === 'qp-tunnel-cli'
@@ -102,6 +113,42 @@ async function commandPath(command) {
       command
     };
   }
+  if (command === 'qp-tunnel-cli') {
+    const fallback = await ensureFallbackTunnelCli();
+    if (fallback.path) {
+      return {
+        available: true,
+        path: fallback.path,
+        probe: fallback.probe,
+        command,
+        fallbackArchivePath: fallback.archivePath,
+        version: await commandVersion(fallback.path),
+        error: null
+      };
+    }
+    const result = await runCommand('sh', ['-lc', `command -v ${command}`], 1000);
+    const path = result.status === 'passed' ? result.stdout.trim().split(/\s+/)[0] || null : null;
+    if (path) {
+      return {
+        available: true,
+        path,
+        probe: result.status,
+        command,
+        fallbackArchivePath: null,
+        version: await commandVersion(path),
+        error: null
+      };
+    }
+    return {
+      available: false,
+      path: null,
+      probe: fallback.error ? 'missing-fallback-artifact' : result.status,
+      command,
+      fallbackArchivePath: fallback.archivePath || null,
+      version: null,
+      error: fallback.error || null
+    };
+  }
   const result = await runCommand('sh', ['-lc', `command -v ${command}`], 1000);
   const path = result.status === 'passed' ? result.stdout.trim().split(/\s+/)[0] || null : null;
   return {
@@ -110,6 +157,136 @@ async function commandPath(command) {
     probe: result.status,
     command
   };
+}
+
+async function commandVersion(path) {
+  const result = await runCommand(path, ['-v'], 2000);
+  return result.status === 'passed' ? result.stdout.trim() || null : null;
+}
+
+function fallbackTunnelCliPath() {
+  return join(fallbackTunnelCliRuntimeDir, 'bin/qp-tunnel-cli');
+}
+
+function fallbackTunnelCliMarkerPath() {
+  return join(fallbackTunnelCliRuntimeDir, '.fallback-archive');
+}
+
+function fallbackTunnelCliRuntimeReady() {
+  return existsSync(fallbackTunnelCliPath())
+    && existsSync(join(fallbackTunnelCliRuntimeDir, 'node_modules/@qpjoy/electron-core-wireguard/package.json'));
+}
+
+function fallbackArchiveFingerprint(archivePath) {
+  const stat = statSync(archivePath);
+  return `${archivePath}\n${stat.size}\n${Math.trunc(stat.mtimeMs)}`;
+}
+
+function fallbackArchiveMarkerMatches(archivePath) {
+  const markerPath = fallbackTunnelCliMarkerPath();
+  if (!existsSync(markerPath)) return false;
+  try {
+    return readFileSync(markerPath, 'utf8') === fallbackArchiveFingerprint(archivePath);
+  } catch {
+    return false;
+  }
+}
+
+function writeFallbackArchiveMarker(archivePath) {
+  writeFileSync(fallbackTunnelCliMarkerPath(), fallbackArchiveFingerprint(archivePath), { mode: 0o600 });
+}
+
+function fallbackTunnelCliArchiveCandidates() {
+  return [
+    process.env.MX_QP_TUNNEL_CLI_FALLBACK_TAR,
+    join(serverDir, 'artifacts/site-slots/domestic', fallbackTunnelCliArchiveName),
+    resolve(serverDir, '../artifacts/site-slots/domestic', fallbackTunnelCliArchiveName),
+    resolve(scriptDir, '../../artifacts/site-slots/domestic', fallbackTunnelCliArchiveName),
+    join(artifactRoot, fallbackTunnelCliArchiveName),
+    `/app/artifacts/site-slots/domestic/${fallbackTunnelCliArchiveName}`
+  ].filter((candidate, index, candidates) => (
+    typeof candidate === 'string'
+    && candidate.trim()
+    && candidates.indexOf(candidate) === index
+  ));
+}
+
+function chmodFallbackTunnelCliRuntime() {
+  for (const target of [
+    'bin/qp-tunnel-cli',
+    'package/resources/mihomo-client.sh',
+    'node_modules/@qpjoy/electron-core-wireguard-engine-darwin-arm64/resources/wireguard/darwin-arm64/wg',
+    'node_modules/@qpjoy/electron-core-wireguard-engine-darwin-arm64/resources/wireguard/darwin-arm64/wg-quick',
+    'node_modules/@qpjoy/electron-core-wireguard-engine-darwin-arm64/resources/wireguard/darwin-arm64/wireguard-go',
+    'node_modules/@qpjoy/electron-core-wireguard-engine-darwin-x64/resources/wireguard/darwin-x64/wg',
+    'node_modules/@qpjoy/electron-core-wireguard-engine-darwin-x64/resources/wireguard/darwin-x64/wg-quick',
+    'node_modules/@qpjoy/electron-core-wireguard-engine-darwin-x64/resources/wireguard/darwin-x64/wireguard-go',
+    'node_modules/@qpjoy/electron-core-wireguard-engine-linux-arm64/resources/wireguard/linux-arm64/wg',
+    'node_modules/@qpjoy/electron-core-wireguard-engine-linux-arm64/resources/wireguard/linux-arm64/wg-quick',
+    'node_modules/@qpjoy/electron-core-wireguard-engine-linux-x64/resources/wireguard/linux-x64/wg',
+    'node_modules/@qpjoy/electron-core-wireguard-engine-linux-x64/resources/wireguard/linux-x64/wg-quick',
+    'node_modules/@qpjoy/electron-core-wireguard-engine-win32-x64/resources/wireguard/win32-x64/wg.exe',
+    'node_modules/@qpjoy/electron-core-wireguard-engine-win32-x64/resources/wireguard/win32-x64/wireguard.exe'
+  ]) {
+    const path = join(fallbackTunnelCliRuntimeDir, target);
+    if (existsSync(path)) chmodSync(path, 0o755);
+  }
+}
+
+async function ensureFallbackTunnelCli() {
+  const archivePath = fallbackTunnelCliArchiveCandidates().find((candidate) => existsSync(candidate)) || null;
+  if (cachedFallbackTunnelCli?.path && fallbackTunnelCliRuntimeReady()) {
+    if (!archivePath || fallbackArchiveMarkerMatches(archivePath)) return cachedFallbackTunnelCli;
+    cachedFallbackTunnelCli = null;
+  }
+  const existingCli = fallbackTunnelCliPath();
+  if (fallbackTunnelCliRuntimeReady() && (!archivePath || fallbackArchiveMarkerMatches(archivePath))) {
+    chmodFallbackTunnelCliRuntime();
+    cachedFallbackTunnelCli = {
+      path: existingCli,
+      probe: 'fallback-artifact',
+      archivePath,
+      error: null
+    };
+    return cachedFallbackTunnelCli;
+  }
+
+  if (!archivePath) {
+    return {
+      path: null,
+      probe: 'missing-fallback-artifact',
+      archivePath: null,
+      error: `qp-tunnel-cli fallback archive not found: ${fallbackTunnelCliArchiveCandidates().join(', ')}`
+    };
+  }
+
+  try {
+    rmSync(fallbackTunnelCliRuntimeDir, { recursive: true, force: true });
+    mkdirSync(fallbackTunnelCliRuntimeDir, { recursive: true });
+    const extracted = await runCommand('tar', ['-xzf', archivePath, '-C', fallbackTunnelCliRuntimeDir], 30000);
+    if (extracted.status !== 'passed') {
+      throw new Error(extracted.stderr || extracted.stdout || `tar exited with ${extracted.exitCode}`);
+    }
+    chmodFallbackTunnelCliRuntime();
+    if (!fallbackTunnelCliRuntimeReady()) {
+      throw new Error(`extracted archive does not contain qp-tunnel-cli plus @qpjoy/electron-core-wireguard under ${fallbackTunnelCliRuntimeDir}`);
+    }
+    writeFallbackArchiveMarker(archivePath);
+    cachedFallbackTunnelCli = {
+      path: existingCli,
+      probe: 'fallback-artifact',
+      archivePath,
+      error: null
+    };
+    return cachedFallbackTunnelCli;
+  } catch (error) {
+    return {
+      path: null,
+      probe: 'failed-fallback-artifact',
+      archivePath,
+      error: `Failed to extract qp-tunnel-cli fallback archive ${archivePath}: ${errorMessage(error)}`
+    };
+  }
 }
 
 async function runCommand(command, args, timeoutMs) {
@@ -144,19 +321,77 @@ async function runCommand(command, args, timeoutMs) {
   }
 }
 
-function privilegedCommand(command, args) {
+function commandEnvArgs(env = {}) {
+  return Object.entries(env)
+    .filter(([, value]) => value !== undefined && value !== null && String(value).trim())
+    .map(([key, value]) => `${key}=${String(value)}`);
+}
+
+function privilegedCommand(command, args, env = {}) {
   const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  const envArgs = commandEnvArgs(env);
+  if (envArgs.length) {
+    return isRoot
+      ? { command: 'env', args: [...envArgs, command, ...args] }
+      : { command: 'sudo', args: ['-n', 'env', ...envArgs, command, ...args] };
+  }
   return isRoot
     ? { command, args }
     : { command: 'sudo', args: ['-n', command, ...args] };
 }
 
+function internalEgressCommandEnv() {
+  return {
+    MIHOMO_HOME: process.env.MX_INTERNAL_EGRESS_HOME || '/etc/mx-internal-egress',
+    MIHOMO_BIN: process.env.MX_INTERNAL_EGRESS_MIHOMO_BIN || '/usr/local/bin/mx-internal-egress-mihomo',
+    MIHOMO_CLIENT_LAUNCHER: process.env.MX_INTERNAL_EGRESS_CLIENT_LAUNCHER || '/usr/local/bin/mx-internal-egress',
+    MIHOMO_SERVICE_NAME: process.env.MX_INTERNAL_EGRESS_SERVICE_NAME || 'mx-internal-egress.service',
+    MIHOMO_PROFILE_PROXY_FILE: process.env.MX_INTERNAL_EGRESS_PROFILE_PROXY_FILE || '/etc/profile.d/mx-internal-egress-proxy.sh',
+    MIHOMO_DAEMON_PROXY_DROPIN_NAME: process.env.MX_INTERNAL_EGRESS_DAEMON_PROXY_DROPIN_NAME || 'mx-internal-egress-proxy.conf',
+    MIHOMO_SSH_PROXY_HELPER: process.env.MX_INTERNAL_EGRESS_SSH_PROXY_HELPER || '/usr/local/bin/mx-internal-egress-ssh-proxy',
+    MIHOMO_SSH_CONFIG_FILE: process.env.MX_INTERNAL_EGRESS_SSH_CONFIG_FILE || '/etc/ssh/ssh_config.d/99-mx-internal-egress-proxy.conf'
+  };
+}
+
+function displayCommand(command, args, env = {}) {
+  const envArgs = commandEnvArgs(env);
+  return [
+    ...(envArgs.length ? ['env', ...envArgs.map(shellQuote)] : []),
+    shellQuote(command),
+    ...args.map(shellQuote)
+  ].join(' ');
+}
+
 function defaultWireGuardInstallDir() {
   if (platform() === 'win32') {
-    return join(process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'QPJoy', 'HDO', 'bin');
+    return join(
+      process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'),
+      'QPJoy',
+      'MX Launcher',
+      'Internal WireGuard',
+      'bin'
+    );
   }
-  if (platform() === 'linux') return '/usr/local/lib/qpjoy/hdo/bin';
-  return join(homedir(), '.qpjoy', 'hdo', 'bin');
+  if (platform() === 'linux') return '/usr/local/lib/qpjoy/mx-launcher/internal-wireguard/bin';
+  return join(homedir(), '.qpjoy', 'mx-launcher', 'internal-wireguard', 'bin');
+}
+
+function internalWireGuardServiceIdentity() {
+  return {
+    displayName: process.env.MX_INTERNAL_SERVICE_WG_DISPLAY_NAME || 'MX Internal WireGuard',
+    darwinLaunchDaemonLabelPrefix: process.env.MX_INTERNAL_SERVICE_WG_LAUNCHD_LABEL_PREFIX
+      || 'com.qpjoy.mx-launcher.internal.wireguard',
+    darwinSupportRoot: process.env.MX_INTERNAL_SERVICE_WG_DARWIN_SUPPORT_ROOT
+      || '/Library/Application Support/QPJoy/MX Launcher/Internal WireGuard',
+    darwinLogDir: process.env.MX_INTERNAL_SERVICE_WG_DARWIN_LOG_DIR
+      || '/Library/Logs/QPJoy-MX-Launcher',
+    darwinDaemonScriptName: process.env.MX_INTERNAL_SERVICE_WG_DARWIN_SCRIPT_NAME
+      || 'mx-internal-wireguard-daemon.sh',
+    staleDarwinLaunchDaemonLabelPrefixes: mergeCsvEntries(
+      ['com.qpjoy.hdo.wireguard'],
+      csvEntries(process.env.MX_INTERNAL_SERVICE_WG_STALE_LAUNCHD_PREFIXES)
+    )
+  };
 }
 
 function loadWireGuardCore(qpTunnelCliPath) {
@@ -344,16 +579,76 @@ function wireGuardCoreApplySummary(result) {
   };
 }
 
+function wireGuardCliProbeSkippedResult(command, args, reason) {
+  return {
+    status: 'not-checked',
+    command,
+    args,
+    exitCode: null,
+    stdout: '',
+    stderr: reason,
+    startedAt: null,
+    finishedAt: null
+  };
+}
+
+function shouldSkipWireGuardCliProbe(wireGuardCore) {
+  const runtime = wireGuardCore?.runtime || {};
+  return runtime.platform === 'darwin'
+    && runtime.method === 'darwin-userspace'
+    && typeof process.getuid === 'function'
+    && process.getuid() !== 0;
+}
+
+function wireGuardProbeInterfaceName(wireGuardCore, interfaceName) {
+  return wireGuardCore?.tunnel?.realInterfaceName || interfaceName;
+}
+
+function validWireGuardPublicKey(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(value.trim());
+}
+
+function wireGuardPrivateKeyFromConfig(configPath) {
+  try {
+    const content = readFileSync(configPath, 'utf8');
+    const match = content.match(/^\s*PrivateKey\s*=\s*([A-Za-z0-9+/=]+)\s*$/im);
+    return match?.[1]?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function wireGuardPublicKeyFromConfig(wgCommand, configPath) {
+  const privateKey = wireGuardPrivateKeyFromConfig(configPath);
+  if (!wgCommand || !privateKey) return null;
+  try {
+    const publicKey = execFileSync(wgCommand, ['pubkey'], {
+      input: `${privateKey}\n`,
+      encoding: 'utf8',
+      timeout: 2000,
+      stdio: ['pipe', 'pipe', 'ignore']
+    }).trim();
+    return validWireGuardPublicKey(publicKey) ? publicKey : null;
+  } catch {
+    return null;
+  }
+}
+
 function buildWireGuardCoreStatus(tools, artifacts) {
   const resolved = resolveWireGuardCoreRuntime(tools.qpTunnelCli?.path);
   let tunnel = null;
   let daemon = null;
-  if (resolved.runtime && artifacts.configExists) {
+  const configPath = artifacts.runtimeConfigPath || artifacts.configPath;
+  const configExists = artifacts.runtimeConfigExists ?? artifacts.configExists;
+  const publicKey = configExists
+    ? wireGuardPublicKeyFromConfig(resolved.runtime?.wg?.command, configPath)
+    : null;
+  if (resolved.runtime && configExists) {
     if (typeof resolved.module?.getWireGuardTunnelStatus === 'function') {
       try {
         tunnel = wireGuardTunnelSummary(resolved.module.getWireGuardTunnelStatus({
           runtime: resolved.runtime,
-          configPath: artifacts.configPath
+          configPath
         }));
       } catch (error) {
         tunnel = { ok: false, active: false, error: errorMessage(error) };
@@ -366,7 +661,8 @@ function buildWireGuardCoreStatus(tools, artifacts) {
       try {
         daemon = wireGuardDaemonSummary(resolved.module.getDarwinWireGuardLaunchDaemonStatus({
           runtime: resolved.runtime,
-          configPath: artifacts.configPath
+          configPath,
+          serviceIdentity: internalWireGuardServiceIdentity()
         }));
       } catch (error) {
         daemon = { ok: false, supported: true, error: errorMessage(error) };
@@ -381,9 +677,7 @@ function buildWireGuardCoreStatus(tools, artifacts) {
       ? 'blocked'
       : tunnelReady
         ? 'passed'
-        : daemonStarted
-          ? 'blocked'
-          : 'ready';
+        : 'ready';
   return {
     available: Boolean(resolved.available),
     moduleAvailable: Boolean(resolved.moduleAvailable),
@@ -393,6 +687,8 @@ function buildWireGuardCoreStatus(tools, artifacts) {
     installDir: resolved.installDir,
     method: resolved.runtime?.method || 'missing',
     runtime: wireGuardRuntimeSummary(resolved.runtime),
+    publicKey,
+    publicKeySource: publicKey ? 'runtime-config-private-key' : null,
     daemon,
     tunnel,
     error: resolved.error
@@ -496,31 +792,48 @@ function parseInternalEgressOnStatus(statusCommand) {
   };
 }
 
+function internalEgressOnCliSupported() {
+  return platform() === 'linux' && !isLinuxKitHost();
+}
+
+function internalEgressOnUnsupportedSummary() {
+  if (isLinuxKitHost()) return 'linuxkit container host; native Internal egress-on must run on the real host';
+  if (platform() === 'darwin') return 'darwin host; native Internal WG is managed by LaunchDaemon, mac egress-on daemon is not required for H2I handoff';
+  return `${platform()} host; qp-tunnel-cli egress-on is not supported by this CLI runtime`;
+}
+
 async function buildInternalEgressOnStatus(tools, artifacts) {
   const qpTunnelCliPath = tools.qpTunnelCli?.path || null;
   const subscriptionPath = artifacts.internalEgressSubscriptionPath || defaultInternalEgressSubscriptionPath;
   const subscriptionExists = Boolean(artifacts.internalEgressSubscriptionExists);
-  const supported = platform() === 'linux';
+  const supported = internalEgressOnCliSupported();
+  const forcedRequired = process.env.MX_INTERNAL_EGRESS_ON_REQUIRED === '1';
+  const required = forcedRequired || supported;
+  const egressEnv = internalEgressCommandEnv();
   const installCommand = subscriptionExists && qpTunnelCliPath
-    ? `sudo ${shellQuote(qpTunnelCliPath)} install --file ${shellQuote(subscriptionPath)}`
+    ? `sudo ${displayCommand(qpTunnelCliPath, ['install', '--file', subscriptionPath], egressEnv)}`
     : null;
   const enableCommand = qpTunnelCliPath
-    ? `sudo ${shellQuote(qpTunnelCliPath)} egress-on`
+    ? `sudo ${displayCommand(qpTunnelCliPath, ['egress-on'], egressEnv)}`
     : 'sudo qp-tunnel-cli egress-on';
 
   if (!supported) {
+    const summary = internalEgressOnUnsupportedSummary();
     return {
-      status: 'ready',
+      status: forcedRequired ? 'blocked' : 'ready',
       mode: 'qp-tunnel-cli-egress-on',
       supported: false,
-      required: false,
+      required: forcedRequired,
       subscriptionPath,
       subscriptionExists,
+      env: egressEnv,
+      serviceName: egressEnv.MIHOMO_SERVICE_NAME,
+      home: egressEnv.MIHOMO_HOME,
       installCommand,
       enableCommand,
-      summary: `${platform()} dev host; linux systemd egress-on skipped`,
+      summary,
       statusCommand: null,
-      blockedReasons: []
+      blockedReasons: forcedRequired ? [summary] : []
     };
   }
 
@@ -532,6 +845,9 @@ async function buildInternalEgressOnStatus(tools, artifacts) {
       required: true,
       subscriptionPath,
       subscriptionExists,
+      env: egressEnv,
+      serviceName: egressEnv.MIHOMO_SERVICE_NAME,
+      home: egressEnv.MIHOMO_HOME,
       installCommand,
       enableCommand,
       summary: 'qp-tunnel-cli missing',
@@ -540,7 +856,7 @@ async function buildInternalEgressOnStatus(tools, artifacts) {
     };
   }
 
-  const statusInvocation = privilegedCommand(qpTunnelCliPath, ['status']);
+  const statusInvocation = privilegedCommand(qpTunnelCliPath, ['status'], egressEnv);
   const statusCommand = await runCommand(statusInvocation.command, statusInvocation.args, 8000);
   const parsed = parseInternalEgressOnStatus(statusCommand);
   const systemctlMissing = /Required command not found:\s*systemctl/.test(`${statusCommand.stdout}\n${statusCommand.stderr}`);
@@ -563,6 +879,9 @@ async function buildInternalEgressOnStatus(tools, artifacts) {
     required: true,
     subscriptionPath,
     subscriptionExists,
+    env: egressEnv,
+    serviceName: egressEnv.MIHOMO_SERVICE_NAME,
+    home: egressEnv.MIHOMO_HOME,
     installCommand,
     enableCommand,
     summary,
@@ -605,9 +924,30 @@ function syncArtifacts(payload) {
   };
 }
 
+function runtimeConfigPath(interfaceName) {
+  return join(artifactRoot, `${interfaceName}.conf`);
+}
+
+function prepareRuntimeConfigArtifact(artifacts, interfaceName) {
+  const targetPath = runtimeConfigPath(interfaceName);
+  if (artifacts.configExists) {
+    if (targetPath !== artifacts.configPath) {
+      writeFileSync(targetPath, readFileSync(artifacts.configPath), { mode: 0o600 });
+      chmodSync(targetPath, 0o600);
+    } else {
+      chmodSync(targetPath, 0o600);
+    }
+  }
+  return {
+    ...artifacts,
+    runtimeConfigPath: targetPath,
+    runtimeConfigExists: existsSync(targetPath)
+  };
+}
+
 async function buildStatus(payload) {
-  const artifacts = syncArtifacts(payload);
   const interfaceName = stringValue(payload.interfaceName, defaultInterfaceName);
+  const artifacts = prepareRuntimeConfigArtifact(syncArtifacts(payload), interfaceName);
   const domesticGatewayIp = stringValue(payload.domesticGatewayIp, '10.88.0.1');
   const internalServiceIp = stringValue(payload.internalServiceIp, '10.88.88.88');
   const tools = {
@@ -621,11 +961,28 @@ async function buildStatus(payload) {
   const proxy = proxyBypassStatus();
   const internalEgress = await buildInternalEgressOnStatus(tools, artifacts);
   const wireGuardCore = buildWireGuardCoreStatus(tools, artifacts);
-  const wgShow = tools.wg.available
-    ? await runCommand(tools.wg.path || 'wg', ['show', interfaceName], 3000)
+  const wireGuardProbeCommand = wireGuardCore.runtime?.wg?.available
+    ? wireGuardCore.runtime.wg.command
     : null;
-  const latestHandshakes = tools.wg.available
-    ? await runCommand(tools.wg.path || 'wg', ['show', interfaceName, 'latest-handshakes'], 3000)
+  const wireGuardProbeName = wireGuardProbeInterfaceName(wireGuardCore, interfaceName);
+  const skipWireGuardProbe = shouldSkipWireGuardCliProbe(wireGuardCore);
+  const wgShow = wireGuardProbeCommand
+    ? skipWireGuardProbe
+      ? wireGuardCliProbeSkippedResult(
+          wireGuardProbeCommand,
+          ['show', wireGuardProbeName],
+          'macOS userspace WireGuard requires elevated access for wg show; using LaunchDaemon and route probes'
+        )
+      : await runCommand(wireGuardProbeCommand, ['show', wireGuardProbeName], 3000)
+    : null;
+  const latestHandshakes = wireGuardProbeCommand
+    ? skipWireGuardProbe
+      ? wireGuardCliProbeSkippedResult(
+          wireGuardProbeCommand,
+          ['show', wireGuardProbeName, 'latest-handshakes'],
+          'macOS userspace WireGuard requires elevated access for latest-handshakes'
+        )
+      : await runCommand(wireGuardProbeCommand, ['show', wireGuardProbeName, 'latest-handshakes'], 3000)
     : null;
   const routeToDomestic = tools.ip.available
     ? await runCommand(tools.ip.path || 'ip', ['route', 'get', domesticGatewayIp], 3000)
@@ -634,12 +991,18 @@ async function buildStatus(payload) {
     ? await runCommand(tools.ping.path || 'ping', ['-c', '1', domesticGatewayIp], 3000)
     : null;
   const internalHealthz = await healthProbe(`http://${internalServiceIp}:18090/healthz`, 3000);
-  const handshake = parseHandshake(latestHandshakes?.stdout || '');
+  const handshake = latestHandshakes?.status === 'not-checked'
+    ? {
+        status: 'not-checked',
+        newest: { publicKey: null, timestamp: 0, at: null },
+        peers: []
+      }
+    : parseHandshake(latestHandshakes?.stdout || '');
   const blockedReasons = [
     ...(!artifacts.configExists ? [`Internal service peer config artifact is missing: ${artifacts.configPath}`] : []),
     ...(!artifacts.applyScriptExists ? [`Internal service peer apply script is missing: ${artifacts.applyScriptPath}`] : []),
     ...(internalEgress.status === 'blocked' ? internalEgress.blockedReasons : []),
-    ...(!tools.wgQuick.available && !wireGuardCore.available
+    ...(!wireGuardCore.available
       ? [wireGuardCore.error
           ? `WireGuard runtime is unavailable on the Internal runtime host: ${wireGuardCore.error}`
           : 'WireGuard runtime is unavailable on the Internal runtime host']
@@ -656,13 +1019,7 @@ async function buildStatus(payload) {
     : interfaceReady && linkReady && healthReady
       ? 'passed'
       : 'ready';
-  const installMethod = platform() === 'darwin' && wireGuardCore.available
-    ? 'electron-core-wireguard'
-    : tools.wgQuick.available
-      ? 'wg-quick'
-      : wireGuardCore.available
-        ? 'electron-core-wireguard'
-        : 'unavailable';
+  const installMethod = wireGuardCore.available ? 'electron-core-wireguard' : 'unavailable';
   return {
     status,
     mode: 'internal-service-peer-host-runner-status',
@@ -682,7 +1039,9 @@ async function buildStatus(payload) {
       hostRunner: {
         configured: true,
         url: runnerUrl,
-        startCommand: 'MX_INTERNAL_HOST_RUNNER_HOST=0.0.0.0 bash scripts/manage.sh ops site-slot internal-service-peer-host-runner 19190'
+        installCommand: nativeHostRunnerInstallCommand,
+        startCommand: nativeHostRunnerStartCommand,
+        legacyForegroundCommand: legacyHostRunnerStartCommand
       },
       apiRuntime: asRecord(payload.apiRuntime)
     },
@@ -693,6 +1052,9 @@ async function buildStatus(payload) {
     artifacts,
     interface: {
       name: interfaceName,
+      realName: wireGuardProbeName,
+      publicKey: wireGuardCore.publicKey || null,
+      publicKeySource: wireGuardCore.publicKeySource || null,
       wgShow,
       latestHandshakes,
       handshake
@@ -706,7 +1068,7 @@ async function buildStatus(payload) {
       available: blockedReasons.length === 0,
       method: installMethod,
       applyCommand: `bash scripts/manage.sh ops site-slot internal-service-peer-handoff apply`,
-      hostRunnerCommand: 'MX_INTERNAL_HOST_RUNNER_HOST=0.0.0.0 bash scripts/manage.sh ops site-slot internal-service-peer-host-runner 19190',
+      hostRunnerCommand: nativeHostRunnerInstallCommand,
       requires: [
         'qp-tunnel-cli egress-on on the Internal runtime host for H2O/outbound bootstrap',
         'qp-tunnel-cli with @qpjoy/electron-core-wireguard on the Internal runtime host',
@@ -736,7 +1098,8 @@ async function applyWithWireGuardCore(beforeStatus) {
 
   const input = {
     runtime: resolved.runtime,
-    configPath: beforeStatus.artifacts.configPath
+    configPath: beforeStatus.artifacts.runtimeConfigPath || beforeStatus.artifacts.configPath,
+    serviceIdentity: internalWireGuardServiceIdentity()
   };
   const useDarwinLaunchDaemon = resolved.runtime.platform === 'darwin'
     && resolved.runtime.method === 'darwin-userspace'
@@ -759,14 +1122,15 @@ async function applyWithWireGuardCore(beforeStatus) {
 
 async function ensureInternalEgressOn(beforeStatus) {
   const egressStatus = beforeStatus.internalEgress || {};
-  if (egressStatus.supported === false || platform() !== 'linux') {
+  const egressEnv = egressStatus.env || internalEgressCommandEnv();
+  if (egressStatus.supported === false) {
     return {
       status: 'skipped',
       execution: 'skipped',
       mode: 'qp-tunnel-cli-egress-on',
       command: null,
       exitCode: 0,
-      stdout: egressStatus.summary || 'qp-tunnel-cli egress-on is only applied on Linux systemd hosts',
+      stdout: egressStatus.summary || 'qp-tunnel-cli egress-on is not supported on this host runtime',
       stderr: '',
       steps: []
     };
@@ -790,7 +1154,7 @@ async function ensureInternalEgressOn(beforeStatus) {
       'install',
       '--file',
       beforeStatus.artifacts.internalEgressSubscriptionPath
-    ]);
+    ], egressEnv);
     const installExecution = await runCommand(installInvocation.command, installInvocation.args, 120000);
     steps.push({ step: 'install-subscription', ...installExecution });
     if (installExecution.status !== 'passed') {
@@ -807,7 +1171,7 @@ async function ensureInternalEgressOn(beforeStatus) {
     }
   }
 
-  const egressInvocation = privilegedCommand(qpTunnelCliPath, ['egress-on']);
+  const egressInvocation = privilegedCommand(qpTunnelCliPath, ['egress-on'], egressEnv);
   const egressExecution = await runCommand(egressInvocation.command, egressInvocation.args, 120000);
   steps.push({ step: 'egress-on', ...egressExecution });
   return {
@@ -870,8 +1234,7 @@ async function applyServicePeer(payload) {
     };
   }
 
-  const shouldUseWireGuardCore = beforeStatus.wireGuardCore?.available
-    && (platform() === 'darwin' || !beforeStatus.tools?.wgQuick?.available);
+  const shouldUseWireGuardCore = beforeStatus.wireGuardCore?.available;
   if (shouldUseWireGuardCore) {
     const execution = await applyWithWireGuardCore(beforeStatus);
     const afterStatus = await buildStatus(payload);
