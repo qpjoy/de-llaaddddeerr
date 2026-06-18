@@ -86,14 +86,15 @@ export class AdminController {
       this.store.listAwxProviderConfigs(),
       this.listAwxRuntimePolicies()
     ]);
-    const summaries = pipelines.map((pipeline) => pipeline.summary);
+    const visiblePipelines = limitSiteSlotPipelines(pipelines, limit);
+    const summaries = visiblePipelines.map((pipeline) => pipeline.summary);
     return {
       generatedAt: new Date().toISOString(),
       overview: overview as unknown as Record<string, unknown>,
       actionPolicy,
       sites: sortSites(sites).slice(0, limit),
       latestReleasePlans: sortReleasePlans(releasePlans).slice(0, limit),
-      siteSlotPipelines: summaries.slice(0, limit),
+      siteSlotPipelines: summaries,
       awxProviders: sortAwxProviderConfigs(awxProviders).slice(0, limit),
       runtimeFeaturePolicies,
       nextActions: adminDashboardNextActions(summaries)
@@ -153,7 +154,7 @@ export class AdminController {
     const pipelines = await this.buildSiteSlotPipelines(actionPolicy);
     return {
       actionPolicy,
-      pipelines: pipelines.slice(0, limit).map((pipeline) => ({
+      pipelines: limitSiteSlotPipelines(pipelines, limit).map((pipeline) => ({
         summary: pipeline.summary,
         timeline: pipeline.timeline
       }))
@@ -1944,6 +1945,65 @@ function buildPipeline(
   };
 }
 
+function limitSiteSlotPipelines(pipelines: AdminSiteSlotPipeline[], limit: number): AdminSiteSlotPipeline[] {
+  const max = Math.max(0, Math.floor(limit));
+  if (max === 0) return [];
+  const selected: AdminSiteSlotPipeline[] = [];
+  const selectedPlanIds = new Set<string>();
+  const bySite = new Map<string, AdminSiteSlotPipeline[]>();
+  for (const pipeline of pipelines) {
+    const key = `${pipeline.summary.kind}:${pipeline.summary.siteId}`;
+    const sitePipelines = bySite.get(key) ?? [];
+    sitePipelines.push(pipeline);
+    bySite.set(key, sitePipelines);
+  }
+  const representatives = [...bySite.values()]
+    .map((sitePipelines) => chooseSiteSlotPipelineRepresentative(sitePipelines))
+    .filter((pipeline): pipeline is AdminSiteSlotPipeline => Boolean(pipeline))
+    .sort(compareSiteSlotPipelinesForList);
+  for (const pipeline of representatives) {
+    if (selected.length >= max) return selected;
+    selected.push(pipeline);
+    selectedPlanIds.add(pipeline.summary.planId);
+  }
+  for (const pipeline of pipelines) {
+    if (selected.length >= max) break;
+    if (selectedPlanIds.has(pipeline.summary.planId)) continue;
+    selected.push(pipeline);
+    selectedPlanIds.add(pipeline.summary.planId);
+  }
+  return selected;
+}
+
+function chooseSiteSlotPipelineRepresentative(pipelines: AdminSiteSlotPipeline[]): AdminSiteSlotPipeline | null {
+  const nonRollback = pipelines.filter((pipeline) => {
+    return pipeline.summary.health !== 'rollback' && !pipeline.summary.currentStage.startsWith('rollback-');
+  });
+  const candidates = nonRollback.length ? nonRollback : pipelines;
+  return candidates
+    .slice()
+    .sort((left, right) => right.summary.latestUpdatedAt.localeCompare(left.summary.latestUpdatedAt))[0] ?? null;
+}
+
+function compareSiteSlotPipelinesForList(left: AdminSiteSlotPipeline, right: AdminSiteSlotPipeline): number {
+  return siteSlotPipelineRepresentativeScore(right) - siteSlotPipelineRepresentativeScore(left)
+    || right.summary.latestUpdatedAt.localeCompare(left.summary.latestUpdatedAt);
+}
+
+function siteSlotPipelineRepresentativeScore(pipeline: AdminSiteSlotPipeline): number {
+  const healthScore = {
+    running: 110,
+    ready: 100,
+    blocked: 90,
+    planned: 80,
+    passed: 70,
+    rollback: 30,
+    failed: 10
+  }[pipeline.summary.health] ?? 0;
+  const actionScore = pipeline.summary.actionHints.some((action) => action.allowed) ? 25 : 0;
+  return healthScore + actionScore + pipelineOperationalScoreForOverview(pipeline);
+}
+
 function toAdminActionExecutionInput(body: Record<string, unknown>) {
   return {
     actionId: stringValue(body.actionId) ?? '',
@@ -2292,7 +2352,7 @@ function domesticRelayPeerPlanEvidence(
       siteId: plan?.siteId ?? job.siteId,
       endpointHost: plan?.host ?? null,
       interfaceName: 'mx-domestic',
-      listenPort: 51820,
+      listenPort: 51280,
       gatewayIp: '10.88.0.1',
       configPath: '/etc/wireguard/mx-domestic.conf',
       envArtifact: 'mx-domestic-relay.env'
@@ -2717,7 +2777,7 @@ function adminDomesticRelayPeerPlanResult(
     homePeer: domesticRelayPeerHomePeer(input),
     domesticRelay: {
       interfaceName: 'mx-domestic',
-      listenPort: 51820,
+      listenPort: 51280,
       gatewayIp: '10.88.0.1',
       endpointHost: plan?.host ?? null
     },
@@ -2766,7 +2826,7 @@ function adminDomesticRelayReadOnlyProbeResult(
       siteId: plan?.siteId ?? job.siteId,
       endpointHost: plan?.host ?? null,
       interfaceName: 'mx-domestic',
-      listenPort: 51820,
+      listenPort: 51280,
       gatewayIp: '10.88.0.1',
       configPath: '/etc/wireguard/mx-domestic.conf',
       unit: 'wg-quick@mx-domestic'
@@ -2840,7 +2900,7 @@ function adminDomesticRelayPeerAppendResult(
       siteId: plan?.siteId ?? job.siteId,
       endpointHost: plan?.host ?? null,
       interfaceName: 'mx-domestic',
-      listenPort: 51820,
+      listenPort: 51280,
       gatewayIp: '10.88.0.1',
       configPath: '/etc/wireguard/mx-domestic.conf',
       unit: 'wg-quick@mx-domestic'
@@ -3133,7 +3193,7 @@ function buildAdminDomesticWireGuardSecretInput(
   const rotateRelayKey = rotateAll || booleanValue(body.rotateRelayKey);
   const rotateInternalServiceKey = rotateAll || booleanValue(body.rotateInternalServiceKey);
   const confirmRotate = booleanValue(body.confirmRotate);
-  const listenPort = numberValueOrNull(body.listenPort) ?? previous?.listenPort ?? 51820;
+  const listenPort = numberValueOrNull(body.listenPort) ?? previous?.listenPort ?? 51280;
   const planEndpoint = endpointFromPlanHost(plan, listenPort);
   const explicitEndpoint = stringValue(body.publicEndpoint) ?? stringValue(body.endpoint);
   const previousEndpoint = previous?.publicEndpoint;
@@ -4676,7 +4736,7 @@ function domesticRelayPeerAppendSshEvidence(
       siteId: plan?.siteId ?? job.siteId,
       endpointHost: plan?.host ?? null,
       interfaceName: 'mx-domestic',
-      listenPort: 51820,
+      listenPort: 51280,
       gatewayIp: '10.88.0.1',
       configPath: '/etc/wireguard/mx-domestic.conf',
       unit: 'wg-quick@mx-domestic'
@@ -5843,7 +5903,7 @@ function domesticWireGuardMaterializeNeeded(
   secret: SiteSlotDomesticWireGuardSecret | null
 ): boolean {
   if (plan.kind !== 'domestic') return false;
-  const expectedEndpoint = endpointFromPlanHost(plan, secret?.listenPort ?? 51820);
+  const expectedEndpoint = endpointFromPlanHost(plan, secret?.listenPort ?? 51280);
   return !secret
     || secret.status !== 'active'
     || secret.readiness.secretMaterial !== 'injected'
@@ -5859,7 +5919,7 @@ function domesticWireGuardStaleReason(
   secret: SiteSlotDomesticWireGuardSecret
 ): string | null {
   if (!domesticWireGuardMaterializeNeeded(plan, secret)) return null;
-  const expectedEndpoint = endpointFromPlanHost(plan, secret.listenPort ?? 51820);
+  const expectedEndpoint = endpointFromPlanHost(plan, secret.listenPort ?? 51280);
   if (expectedEndpoint && secret.publicEndpoint !== expectedEndpoint) {
     return `Domestic WG materialized artifact is stale for the selected plan: endpoint ${secret.publicEndpoint || 'unset'} != ${expectedEndpoint}`;
   }
@@ -5879,8 +5939,8 @@ function domesticWgMaterializeAction(
       bodyTemplate: {
         siteId: plan.siteId,
         planId: plan.planId,
-        publicEndpoint: endpointFromPlanHost(plan, 51820),
-        listenPort: 51820,
+        publicEndpoint: endpointFromPlanHost(plan, 51280),
+        listenPort: 51280,
         domesticGatewayIp: '10.88.0.1',
         domesticGatewayCidr: '10.88.0.0/16',
         productRelayCidrs: ['10.89.0.0/16', '10.90.0.0/16'],
@@ -6568,7 +6628,7 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         siteId: 'domestic-main',
         planId: '<plan-id>',
         publicEndpoint: '<domestic-public-endpoint>',
-        listenPort: 51820,
+        listenPort: 51280,
         domesticGatewayIp: '10.88.0.1',
         domesticGatewayCidr: '10.88.0.0/16',
         productRelayCidrs: ['10.89.0.0/16', '10.90.0.0/16'],

@@ -1563,7 +1563,7 @@ export function buildLauncherNetworkTopology(
       domesticRelay: {
         siteId: domesticSiteId,
         interfaceName: 'mx-domestic',
-        listenPort: 51820,
+        listenPort: 51280,
         gatewayIp: '10.88.0.1',
         publicEndpoint: null,
         publicKey: null,
@@ -1976,7 +1976,7 @@ export function buildSiteSlotDomesticWireGuardSecret(
   now = new Date().toISOString()
 ): SiteSlotDomesticWireGuardSecret {
   const siteId = input.siteId?.trim() || previous?.siteId || 'domestic-main';
-  const listenPort = input.listenPort && input.listenPort > 0 ? Math.floor(input.listenPort) : previous?.listenPort ?? 51820;
+  const listenPort = input.listenPort && input.listenPort > 0 ? Math.floor(input.listenPort) : previous?.listenPort ?? 51280;
   const publicEndpoint = input.publicEndpoint?.trim() || previous?.publicEndpoint || null;
   const material = {
     domesticRelayPrivateKey: input.domesticRelayPrivateKey?.trim() || previous?.domesticRelayPrivateKey || null,
@@ -3115,12 +3115,12 @@ function siteSlotPreflightChecks(
         severity: 'required',
         requiresRoot: false,
         command: [
-          `Operator evidence: allow UDP 51820 to ${host ?? '<domestic-public-host>'} for WireGuard relay.`,
+          `Operator evidence: allow UDP 51280 to ${host ?? '<domestic-public-host>'} for WireGuard relay.`,
           `Operator evidence: allow TCP 443 to ${host ?? '<domestic-public-host>'} for bootstrap/enroll/snapshot/H2I facade; TCP 80 is optional for ACME/redirect only.`,
           `Operator evidence: restrict TCP ${sshPort} SSH to Internal/admin source IPs and keep 3000/5432/18090/Docker daemon private.`
         ].join(' '),
         expected: 'Cloud security group and host firewall expose only the Domestic public relay/facade ports required by the plan',
-        remediation: 'Open udp/51820 and tcp/443 on the public Domestic address, optionally tcp/80 for certificates, restrict ssh, and keep Internal/API/database ports private.'
+        remediation: 'Open udp/51280 and tcp/443 on the public Domestic address, optionally tcp/80 for certificates, restrict ssh, and keep Internal/API/database ports private.'
       },
       {
         checkId: 'domestic.outbound',
@@ -3416,14 +3416,14 @@ function siteSlotDeploymentPhases(
       target: 'domestic',
       required: true,
       commands: [
-        `Cloud/security group: allow UDP 51820 to ${target} for WireGuard relay traffic from Internal and H endpoints.`,
+        `Cloud/security group: allow UDP 51280 to ${target} for WireGuard relay traffic from Internal and H endpoints.`,
         `Cloud/security group: allow TCP 443 to ${target} for bootstrap/enroll/snapshot/H2I facade; TCP 80 is optional for ACME or HTTP redirect only.`,
         `Restrict TCP ${sshPort} SSH to Internal/admin source IPs; do not expose 3000, 5432, 18090, Docker daemon, or Internal-only service ports.`,
-        `Record Domestic WG publicEndpoint=${target}:51820 in Internal Config Center before publishing launcher snapshots.`
+        `Record Domestic WG publicEndpoint=${target}:51280 in Internal Config Center before publishing launcher snapshots.`
       ],
       notes: [
         'This is operator/security-group evidence because the Domestic host cannot prove public cloud ingress rules from itself.',
-        'WireGuard uses UDP 51820; TCP 443 is for the public facade, not for WG. Keep the facade limited to bootstrap/enroll/cache/H2I paths.'
+        'WireGuard uses UDP 51280; TCP 443 is for the public facade, not for WG. Keep the facade limited to bootstrap/enroll/cache/H2I paths.'
       ]
     });
   }

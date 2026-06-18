@@ -2947,11 +2947,16 @@ function renderAdminSectionHeadings() {
 }
 
 function activePipelineForCurrentDeployment(pipelines) {
-  const sites = deploymentSites(pipelines, deploymentPipelineKind());
-  if (state.selectedSiteId) {
-    return sites.find((site) => site.siteId === state.selectedSiteId)?.activePipeline || null;
+  const kind = deploymentPipelineKind();
+  const sites = deploymentSites(pipelines, kind);
+  const selectedSite = state.selectedSiteId
+    ? sites.find((site) => site.siteId === state.selectedSiteId) || null
+    : null;
+  const preferredSite = preferredDeploymentSite(sites, kind);
+  if (shouldPromotePreferredDeploymentSite(selectedSite, preferredSite, kind)) {
+    return preferredSite?.activePipeline || null;
   }
-  return sites[0]?.activePipeline || null;
+  return selectedSite?.activePipeline || preferredSite?.activePipeline || null;
 }
 
 function selectedOrActivePipelineForCurrentDeployment(pipelines) {
@@ -2959,11 +2964,45 @@ function selectedOrActivePipelineForCurrentDeployment(pipelines) {
   const selected = state.selectedPlanId
     ? asArray(pipelines).find((pipeline) => pipeline.kind === kind && pipeline.planId === state.selectedPlanId)
     : null;
-  return selected || activePipelineForCurrentDeployment(pipelines);
+  const preferredSite = preferredDeploymentSite(deploymentSites(pipelines, kind), kind);
+  if (
+    selected
+    && !(kind === 'domestic' && isSmokeDeploymentSite(selected.siteId) && preferredSite && !isSmokeDeploymentSite(preferredSite.siteId))
+  ) {
+    return selected;
+  }
+  return activePipelineForCurrentDeployment(pipelines);
 }
 
 function deploymentPipelineKind(kind = state.deploymentKind) {
   return kind === 'internal' ? 'domestic' : kind;
+}
+
+function isSmokeDeploymentSite(siteId) {
+  return String(siteId || '').toLowerCase().includes('smoke');
+}
+
+function deploymentSiteSortPriority(site, kind) {
+  if (kind !== 'domestic') return 0;
+  const siteId = String(site?.siteId || '');
+  if (siteId === 'domestic-main') return 0;
+  return isSmokeDeploymentSite(siteId) ? 2 : 1;
+}
+
+function preferredDeploymentSite(sites, kind) {
+  const items = asArray(sites);
+  if (kind !== 'domestic') return items[0] || null;
+  return items.find((site) => site.siteId === 'domestic-main')
+    || items.find((site) => !isSmokeDeploymentSite(site.siteId))
+    || items[0]
+    || null;
+}
+
+function shouldPromotePreferredDeploymentSite(selectedSite, preferredSite, kind) {
+  if (!preferredSite) return false;
+  if (!selectedSite) return true;
+  if (kind !== 'domestic') return false;
+  return isSmokeDeploymentSite(selectedSite.siteId) && !isSmokeDeploymentSite(preferredSite.siteId);
 }
 
 function deploymentSites(pipelines, kind) {
@@ -2982,6 +3021,9 @@ function deploymentSites(pipelines, kind) {
     bySite.set(site.siteId, site);
   }
   return [...bySite.values()].sort((left, right) => {
+    const leftPriority = deploymentSiteSortPriority(left, kind);
+    const rightPriority = deploymentSiteSortPriority(right, kind);
+    if (leftPriority !== rightPriority) return leftPriority - rightPriority;
     if (left.siteId === state.selectedSiteId) return -1;
     if (right.siteId === state.selectedSiteId) return 1;
     return String(right.latestPipeline?.latestUpdatedAt || '').localeCompare(String(left.latestPipeline?.latestUpdatedAt || ''));
@@ -3064,8 +3106,17 @@ function renderDeploymentWorkbench(pipelines) {
   }
   const sites = deploymentSites(pipelines, state.deploymentKind);
   deploymentSiteCount.textContent = `${sites.length} sites`;
-  if (!state.selectedSiteId && sites[0]) state.selectedSiteId = sites[0].siteId;
-  const site = sites.find((item) => item.siteId === state.selectedSiteId) || sites[0] || null;
+  const selectedSite = state.selectedSiteId
+    ? sites.find((item) => item.siteId === state.selectedSiteId) || null
+    : null;
+  const preferredSite = preferredDeploymentSite(sites, state.deploymentKind);
+  if (shouldPromotePreferredDeploymentSite(selectedSite, preferredSite, state.deploymentKind)) {
+    state.selectedSiteId = preferredSite.siteId;
+    state.selectedPlanId = null;
+  } else if (!state.selectedSiteId && preferredSite) {
+    state.selectedSiteId = preferredSite.siteId;
+  }
+  const site = sites.find((item) => item.siteId === state.selectedSiteId) || preferredSite || sites[0] || null;
   if (!site?.activePipeline) {
     siteWorkbench.innerHTML = `<div class="empty-state">No ${escapeHtml(state.deploymentKind)} site yet</div>`;
     renderInspector();
@@ -3098,12 +3149,21 @@ function renderInternalPeerWorkbench(pipelines) {
   const sites = deploymentSites(pipelines, 'domestic');
   deploymentSiteCount.textContent = `${sites.length} domestic relay${sites.length === 1 ? '' : 's'}`;
   const selectedSite = sites.find((item) => item.siteId === state.selectedSiteId) || null;
-  const passedSite = sites.find((item) => item.activePipeline?.health === 'passed' && !item.siteId.includes('smoke'))
+  const preferredSite = preferredDeploymentSite(sites, 'domestic');
+  const passedRealSite = sites.find((item) => item.activePipeline?.health === 'passed' && !isSmokeDeploymentSite(item.siteId))
+    || null;
+  const passedSite = passedRealSite
     || sites.find((item) => item.activePipeline?.health === 'passed')
     || null;
-  const site = selectedSite?.activePipeline?.health === 'passed'
-    ? selectedSite
-    : passedSite || selectedSite || sites[0] || null;
+  const selectedRealSite = selectedSite && !isSmokeDeploymentSite(selectedSite.siteId) ? selectedSite : null;
+  const site = passedRealSite
+    || selectedRealSite
+    || preferredSite
+    || (selectedSite?.activePipeline?.health === 'passed' ? selectedSite : null)
+    || passedSite
+    || selectedSite
+    || sites[0]
+    || null;
   if (site && state.selectedSiteId !== site.siteId) {
     state.selectedSiteId = site.siteId;
     state.selectedPlanId = null;
@@ -3216,7 +3276,7 @@ function renderInternalPeerWorkbench(pipelines) {
     <div class="site-facts">
       <span><strong>10.88.88.88</strong><small>Internal service IP</small></span>
       <span><strong>10.88.0.1</strong><small>Domestic relay IP</small></span>
-      <span><strong>${escapeHtml(endpoint || 'host:51820')}</strong><small>WG endpoint</small></span>
+      <span><strong>${escapeHtml(endpoint || 'host:51280')}</strong><small>WG endpoint</small></span>
       <span><strong>${escapeHtml(site.siteId)}</strong><small>source Domestic</small></span>
     </div>
     <section class="internal-peer-panel" data-status="${escapeHtml(panelStatus)}">
@@ -3798,7 +3858,7 @@ function renderDomesticRelayPanel(site, pipeline) {
         </div>
       </div>
       <div class="domestic-relay-grid">
-        <span><small>WG endpoint</small><strong>${escapeHtml(endpoint || 'host:51820')}</strong></span>
+        <span><small>WG endpoint</small><strong>${escapeHtml(endpoint || 'host:51280')}</strong></span>
         <span><small>relay gateway</small><strong>10.88.0.1</strong></span>
         <span><small>Internal service</small><strong>10.88.88.88</strong></span>
         <span><small>standalone users</small><strong>10.89.0.0/16</strong></span>
@@ -3831,7 +3891,7 @@ function domesticEndpointFromPlan(plan, summary = null) {
   const materializeEndpoint = actionPublicEndpoint(domesticWgMaterializeActionFromSummary(summary));
   if (materializeEndpoint) return materializeEndpoint;
   const host = plan?.host || summary?.host || '';
-  const port = plan?.wireGuard?.listenPort || plan?.relay?.listenPort || 51820;
+  const port = plan?.wireGuard?.listenPort || plan?.relay?.listenPort || 51280;
   return host ? `${host}:${port}` : '';
 }
 

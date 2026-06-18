@@ -1536,7 +1536,10 @@ function buildDarwinUserspaceTunnelCommand(
   const addressCommands = profile.addresses.map((address) => {
     if (address.includes(':')) return `ifconfig "$REAL_INTERFACE" inet6 ${shellQuote(address)} alias`;
     const ip = address.split('/')[0] ?? address;
-    if (isIpv4(ip)) return 'true';
+    if (isIpv4(ip)) {
+      const quotedIp = shellQuote(ip);
+      return `ifconfig "$REAL_INTERFACE" inet ${quotedIp} ${quotedIp} alias >/dev/null 2>&1 || ifconfig "$REAL_INTERFACE" inet ${quotedIp} alias`;
+    }
     return 'true';
   });
   const addressDownCommands = profile.addresses.map((address) => {
@@ -1902,7 +1905,10 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
   const addressCommands = profile.addresses.map((address) => {
     if (address.includes(':')) return `ifconfig "$REAL_INTERFACE" inet6 ${shellQuote(address)} alias`;
     const ip = address.split('/')[0] ?? address;
-    if (isIpv4(ip)) return 'true';
+    if (isIpv4(ip)) {
+      const quotedIp = shellQuote(ip);
+      return `ifconfig "$REAL_INTERFACE" inet ${quotedIp} ${quotedIp} alias >/dev/null 2>&1 || ifconfig "$REAL_INTERFACE" inet ${quotedIp} alias`;
+    }
     return 'true';
   });
   const addressDownCommands = profile.addresses.map((address) => {

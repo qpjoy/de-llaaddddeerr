@@ -141,7 +141,7 @@ Domestic 是最小 edge：
 | 能力 | 说明 |
 | --- | --- |
 | Public bootstrap/API proxy | H 端未连上 H2I 前，转发登录、enroll、snapshot |
-| WireGuard relay | `mx-domestic`，默认 `10.88.0.1:51820` |
+| WireGuard relay | `mx-domestic`，默认 `10.88.0.1:51280` |
 | H2I proxy/cache | 对 `10.88.88.88` 的 Internal API 做连通和可选缓存 |
 | Snapshot cache | 缓存 Internal 签名快照，不拥有用户/权限真相 |
 | Observability forwarder | 连接质量、worker report、edge health |
@@ -158,7 +158,7 @@ V2 的 systemd/interface 命名应避免和旧 HDO 共用名称，保证同一�
 
 | 角色 | WireGuard interface / systemd unit | 说明 |
 | --- | --- | --- |
-| Domestic relay | `mx-domestic` / `wg-quick@mx-domestic` | 固定拥有 `10.88.0.1/16`，监听 UDP 51820 |
+| Domestic relay | `mx-domestic` / `wg-quick@mx-domestic` | 固定拥有 `10.88.0.1/16`，监听 UDP 51280 |
 | Internal service peer | 逻辑名 `mx-internal-service-peer`，Linux interface `mx-internal-svc` / `wg-quick@mx-internal-svc` | 固定拥有 `10.88.88.88/32`，由 Internal 主动拨 Domestic endpoint；Linux interface 名必须不超过 15 字符 |
 | 旧 HDO | `hdo-home`、`hdo-internal` / `wg-quick@hdo-*` | V1/V2 默认共存；确认不再需要后由 `bash scripts/manage.sh ops site-slot cleanup-v1-wireguard --apply` 显式清理 |
 

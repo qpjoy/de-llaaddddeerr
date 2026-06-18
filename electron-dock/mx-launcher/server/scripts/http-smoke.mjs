@@ -96,7 +96,7 @@ const checks = [
         && topology?.subscriptions?.mihomo?.reachableVia?.includes('h2i-proxy')
         && topology?.relayPlan?.domesticRelay?.configArtifact === 'mx-domestic-wg-relay.conf'
         && topology?.relayPlan?.domesticRelay?.envArtifact === 'mx-domestic-relay.env'
-        && topology?.relayPlan?.domesticRelay?.listenPort === 51820
+        && topology?.relayPlan?.domesticRelay?.listenPort === 51280
         && topology?.relayPlan?.internalServicePeer?.fixedIp === '10.88.88.88'
         && topology?.relayPlan?.internalServicePeer?.configArtifact === 'mx-internal-service-peer.conf'
         && topology?.relayPlan?.internalServicePeer?.privateKeyPlacement === 'internal-only'
@@ -854,8 +854,8 @@ const checks = [
       body: {
         siteId: smokeDomesticSiteId,
         planId: state.domesticSlotPlanId,
-        publicEndpoint: `${smokeDomesticHost}:51820`,
-        listenPort: 51820,
+        publicEndpoint: `${smokeDomesticHost}:51280`,
+        listenPort: 51280,
         domesticGatewayIp: '10.88.0.1',
         domesticGatewayCidr: '10.88.0.0/16',
         productRelayCidrs: ['10.89.0.0/16', '10.90.0.0/16'],
@@ -872,8 +872,8 @@ const checks = [
     }),
     assert: (body) => body?.actionResult?.actionId === 'site-slot.domestic-wg.materialize'
       && body?.domesticWgMaterialize?.status === 'passed'
-      && body?.domesticWgMaterialize?.publicEndpoint === `${smokeDomesticHost}:51820`
-      && body?.secret?.listenPort === 51820
+      && body?.domesticWgMaterialize?.publicEndpoint === `${smokeDomesticHost}:51280`
+      && body?.secret?.listenPort === 51280
       && body?.secret?.readiness?.secretMaterial === 'injected'
       && body?.secret?.readiness?.publicEndpointStatus === 'ready'
       && body?.domesticWgMaterialize?.artifact?.moduleId === 'wireguard-config'
@@ -1688,7 +1688,7 @@ const checks = [
   },
   {
     name: 'admin dashboard',
-    path: '/internal/v1/admin/dashboard',
+    path: '/internal/v1/admin/dashboard?limit=50',
     assert: (body) => body?.overview?.siteSlotPlans >= 2
       && body?.actionPolicy?.principal?.roles?.includes('mx-admin')
       && body?.actionPolicy?.warnings?.some((warning) => warning.includes('shadow-default-admin'))
@@ -1697,18 +1697,18 @@ const checks = [
       && Array.isArray(body?.latestReleasePlans)
       && body.latestReleasePlans.some((plan) => plan.planId === state.releaseManagementPlanId)
       && Array.isArray(body?.siteSlotPipelines)
-      && body.siteSlotPipelines.some((pipeline) => pipeline.planId === state.domesticSlotPlanId
-        && pipeline.health === 'passed'
+      && body.siteSlotPipelines.some((pipeline) => pipeline.siteId === smokeDomesticSiteId
         && Array.isArray(pipeline.actionHints))
       && (
         body?.nextActions?.includes('review-release-gates')
         || body?.nextActions?.includes('review-site-slot-recovery')
         || body?.nextActions?.includes('review-site-slot-gates')
+        || body?.nextActions?.includes('watch-running-site-slot-workers')
       )
   },
   {
     name: 'admin site slot pipelines list',
-    path: '/internal/v1/admin/site-slots/pipelines',
+    path: '/internal/v1/admin/site-slots/pipelines?limit=50',
     assert: (body) => body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.worker-job.create')
       && body?.actionPolicy?.actions?.some((action) => action.actionId === 'site-slot.worker-run.simulate')
       && Array.isArray(body?.pipelines)

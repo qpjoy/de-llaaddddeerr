@@ -27,7 +27,8 @@ bash scripts/manage.sh ops awx-shadow install
 bash scripts/manage.sh ops local-platform cycle
 
 # Terminal 2
-bash scripts/manage.sh ops internal-local port-forward 18090
+## bash scripts/manage.sh ops internal-local port-forward 18090
+bash electron-dock/mx-launcher/scripts/manage.sh k8s port-forward internal-local 18090
 
 # 打开 http://127.0.0.1:18090/admin/
 # 左下角 MX Server 默认使用：http://127.0.0.1:18090

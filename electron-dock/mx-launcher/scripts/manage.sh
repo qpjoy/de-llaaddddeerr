@@ -1890,7 +1890,7 @@ ops_site_slot() {
         const body = {
           siteId,
           publicEndpoint: endpoint,
-          listenPort: Number(process.env.MX_WG_LISTEN_PORT || "51820"),
+          listenPort: Number(process.env.MX_WG_LISTEN_PORT || "51280"),
           domesticGatewayIp: process.env.MX_DOMESTIC_GATEWAY_IP || "10.88.0.1",
           domesticGatewayCidr: process.env.MX_DOMESTIC_GATEWAY_CIDR || "10.88.0.0/16",
           productRelayCidrs: (process.env.MX_PRODUCT_RELAY_CIDRS || "10.89.0.0/16,10.90.0.0/16").split(",").map((item) => item.trim()).filter(Boolean),
@@ -1929,7 +1929,7 @@ ops_site_slot() {
           siteId,
           planId: process.env.SITE_SLOT_PLAN_ID || null,
           publicEndpoint: endpoint,
-          listenPort: Number(process.env.MX_WG_LISTEN_PORT || "51820"),
+          listenPort: Number(process.env.MX_WG_LISTEN_PORT || "51280"),
           domesticGatewayIp: process.env.MX_DOMESTIC_GATEWAY_IP || "10.88.0.1",
           domesticGatewayCidr: process.env.MX_DOMESTIC_GATEWAY_CIDR || "10.88.0.0/16",
           productRelayCidrs: (process.env.MX_PRODUCT_RELAY_CIDRS || "10.89.0.0/16,10.90.0.0/16").split(",").map((item) => item.trim()).filter(Boolean),

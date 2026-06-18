@@ -2279,8 +2279,8 @@ export class PostgresStore implements PlatformStore {
     checks.push('OK Launcher Network reachability ordering gated');
     const domesticSlotPlan = await this.createSiteSlotPlan({
       kind: 'domestic',
-      siteId: 'domestic-main',
-      host: 'domestic.example.com',
+      siteId: 'domestic-smoke',
+      host: 'domestic-smoke.localdomain',
       sshUser: 'root',
       rootAccess: true,
       hasDocker: true,
@@ -2310,7 +2310,7 @@ export class PostgresStore implements PlatformStore {
       || !domesticRelayAuthority?.commands.some((command) => command.includes('mx-internal-service-peer.conf') && command.includes('never copy the Internal private key to Domestic'))
       || !domesticRelayAuthority?.commands.some((command) => command.includes('Internal has no public ingress'))
       || domesticPublicIngress?.mode !== 'manual'
-      || !domesticPublicIngress?.commands.some((command) => command.includes('UDP 51820') && command.includes('WireGuard relay'))
+      || !domesticPublicIngress?.commands.some((command) => command.includes('UDP 51280') && command.includes('WireGuard relay'))
       || !domesticPublicIngress?.commands.some((command) => command.includes('TCP 443') && command.includes('bootstrap/enroll/snapshot/H2I facade'))
       || !domesticPublicIngress?.commands.some((command) => command.includes('do not expose 3000, 5432, 18090'))
       || !domesticSlotPlan.nextActions.includes('confirm-domestic-public-ingress-firewall')

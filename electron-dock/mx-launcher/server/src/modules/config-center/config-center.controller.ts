@@ -383,7 +383,7 @@ function toGeneratedDomesticWireGuardSecretInput(
     siteId,
     status: nullableString(body.status) ?? previous?.status ?? 'active',
     publicEndpoint,
-    listenPort: numberOrNull(body.listenPort) ?? previous?.listenPort ?? 51820,
+    listenPort: numberOrNull(body.listenPort) ?? previous?.listenPort ?? 51280,
     domesticGatewayIp: nullableString(body.domesticGatewayIp) ?? previous?.domesticGatewayIp ?? '10.88.0.1',
     domesticGatewayCidr: nullableString(body.domesticGatewayCidr) ?? previous?.domesticGatewayCidr ?? '10.88.0.0/16',
     productRelayCidrs: cidrListValue(body.productRelayCidrs) ?? previous?.productRelayCidrs ?? ['10.89.0.0/16', '10.90.0.0/16'],

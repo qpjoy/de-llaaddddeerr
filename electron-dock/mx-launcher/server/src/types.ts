@@ -1630,7 +1630,7 @@ export interface LauncherNetworkTopology {
     domesticRelay: {
       siteId: string;
       interfaceName: 'mx-domestic';
-      listenPort: 51820;
+      listenPort: 51280;
       gatewayIp: '10.88.0.1';
       publicEndpoint: string | null;
       publicKey: string | null;

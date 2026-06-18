@@ -363,7 +363,7 @@ internal-authority-domestic-relay-oversea-access-v1`：
 | `domestic.gatewayIp` | `10.88.0.1`，Domestic 只作为 relay/proxy/cache/forwarder |
 | `domestic.storesAuthority` | 固定为 `false`，禁止把用户、订阅、权限真相放回 Domestic |
 | `subscriptions.mihomo.fallback` | `domestic-snapshot-cache`，只允许缓存 Internal 签名快照 |
-| `relayPlan.domesticRelay` | Domestic WG relay 的执行目标：`mx-domestic`、`10.88.0.1`、`51820`、`mx-domestic-wg-relay.conf` |
+| `relayPlan.domesticRelay` | Domestic WG relay 的执行目标：`mx-domestic`、`10.88.0.1`、`51280`、`mx-domestic-wg-relay.conf` |
 | `relayPlan.internalServicePeer` | Internal 无公网 IP 时的固定 service peer：`10.90.0.10`，配置文件 `mx-internal-service-peer.conf` 只在 Internal 使用 |
 | `relayPlan.homePeer` | Home enroll 后的 Internal 签名 relay lease：guest 用 `10.91.0.0/16`，user 用 `10.89.0.0/16`，真实 peer append 前必须有 Home WG public key |
 | `relayPlan.gates` | 明确禁止把 Internal private key 下发到 Domestic；未建立 lease 前 Domestic public facade 只做 bootstrap/fallback |

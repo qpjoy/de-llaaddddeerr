@@ -535,8 +535,8 @@ function wireGuardRouteCommands(prefix, cidrs, ignoreFailure = false) {
 }
 
 function domesticWireGuardMaterial() {
-  const listenPort = envValue('MX_WG_LISTEN_PORT') || '51820';
-  const listenPortNumber = Number.parseInt(listenPort, 10) || 51820;
+  const listenPort = envValue('MX_WG_LISTEN_PORT') || '51280';
+  const listenPortNumber = Number.parseInt(listenPort, 10) || 51280;
   const domesticGatewayIp = envValue('MX_DOMESTIC_GATEWAY_IP') || '10.88.0.1';
   const internalServiceIp = envValue('MX_INTERNAL_SERVICE_IP') || '10.88.88.88';
   const domesticGatewayCidr = envValue('MX_DOMESTIC_GATEWAY_CIDR') || '10.88.0.0/16';
@@ -546,7 +546,7 @@ function domesticWireGuardMaterial() {
   const productRelayCidrs = parseCsv(envValue('MX_PRODUCT_RELAY_CIDRS') || `${userRelayCidr},${guestRelayCidr}`)
     .filter((cidr) => /^10\.\d{1,3}\.0\.0\/16$/.test(cidr));
   const endpoint = envValue('MX_DOMESTIC_PUBLIC_ENDPOINT')
-    || (envValue('MX_DOMESTIC_PUBLIC_HOST') ? `${envValue('MX_DOMESTIC_PUBLIC_HOST')}:${listenPort}` : '<domestic-public-ip>:51820');
+    || (envValue('MX_DOMESTIC_PUBLIC_HOST') ? `${envValue('MX_DOMESTIC_PUBLIC_HOST')}:${listenPort}` : '<domestic-public-ip>:51280');
   const required = [
     ['MX_DOMESTIC_RELAY_PRIVATE_KEY', '<domestic-relay-private-key-from-internal-secret>'],
     ['MX_DOMESTIC_RELAY_PUBLIC_KEY', '<domestic-relay-public-key-from-internal-secret>'],
