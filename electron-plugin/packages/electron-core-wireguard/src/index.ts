@@ -1533,15 +1533,7 @@ function buildDarwinUserspaceTunnelCommand(
   const anchorUpCommand = darwinUserspaceAnchorInstallCommand(anchorIp);
   const anchorDownCommand = darwinUserspaceAnchorDeleteCommand(anchorIp);
   const endpointCleanupCommands = darwinEndpointBypassCleanupCommands(profile.endpointHosts, '"$ROUTE_LOG"');
-  const addressCommands = profile.addresses.map((address) => {
-    if (address.includes(':')) return `ifconfig "$REAL_INTERFACE" inet6 ${shellQuote(address)} alias`;
-    const ip = address.split('/')[0] ?? address;
-    if (isIpv4(ip)) {
-      const quotedIp = shellQuote(ip);
-      return `ifconfig "$REAL_INTERFACE" inet ${quotedIp} ${quotedIp} alias >/dev/null 2>&1 || ifconfig "$REAL_INTERFACE" inet ${quotedIp} alias`;
-    }
-    return 'true';
-  });
+  const addressCommands = profile.addresses.map(darwinUserspaceInterfaceAddressInstallCommand);
   const addressDownCommands = profile.addresses.map((address) => {
     const ip = address.split('/')[0] ?? address;
     if (address.includes(':')) return `ifconfig "$REAL_INTERFACE" inet6 ${shellQuote(ip)} -alias >/dev/null 2>&1 || true`;
@@ -1902,15 +1894,7 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
   const anchorUpCommand = darwinUserspaceAnchorInstallCommand(anchorIp);
   const anchorDownCommand = darwinUserspaceAnchorDeleteCommand(anchorIp);
   const endpointCleanupCommands = darwinEndpointBypassCleanupCommands(profile.endpointHosts, '"$ROUTE_LOG"');
-  const addressCommands = profile.addresses.map((address) => {
-    if (address.includes(':')) return `ifconfig "$REAL_INTERFACE" inet6 ${shellQuote(address)} alias`;
-    const ip = address.split('/')[0] ?? address;
-    if (isIpv4(ip)) {
-      const quotedIp = shellQuote(ip);
-      return `ifconfig "$REAL_INTERFACE" inet ${quotedIp} ${quotedIp} alias >/dev/null 2>&1 || ifconfig "$REAL_INTERFACE" inet ${quotedIp} alias`;
-    }
-    return 'true';
-  });
+  const addressCommands = profile.addresses.map(darwinUserspaceInterfaceAddressInstallCommand);
   const addressDownCommands = profile.addresses.map((address) => {
     const ip = address.split('/')[0] ?? address;
     if (address.includes(':')) return `ifconfig "$REAL_INTERFACE" inet6 ${shellQuote(ip)} -alias >/dev/null 2>&1 || true`;
@@ -2098,12 +2082,20 @@ function darwinRouteProbeLogCommand(cidr: string, interfaceArg: string, logArg: 
   return `{ echo ${shellQuote(`route=${normalizeCidr(cidr) ?? cidr}`)}; echo ${shellQuote(`target=${target}`)}; echo ${shellQuote('expected=')}${interfaceArg}; route -n get ${shellQuote(target)} 2>&1; } >> ${logArg} 2>&1`;
 }
 
+function darwinUserspaceInterfaceAddressInstallCommand(address: string): string {
+  if (address.includes(':')) return `ifconfig "$REAL_INTERFACE" inet6 ${shellQuote(address)} alias`;
+  const ip = address.split('/')[0] ?? address;
+  if (!isIpv4(ip)) return 'true';
+  return `ifconfig "$REAL_INTERFACE" inet ${shellQuote(ip)} ${shellQuote(ip)} alias >/dev/null 2>&1 || ifconfig "$REAL_INTERFACE" inet ${shellQuote(ip)} alias >/dev/null 2>&1 || true`;
+}
+
 function darwinSelfRouteInstallCommand(ip: string): string {
   const quotedIp = shellQuote(ip);
   const quotedCidr = shellQuote(`${ip}/32`);
   return [
     `ifconfig lo0 alias ${quotedCidr} >/dev/null 2>&1 || ifconfig lo0 alias ${quotedIp} >/dev/null 2>&1 || true`,
-    `route -q -n add -host ${quotedIp} -interface lo0 || route -q -n change -host ${quotedIp} -interface lo0 || true`
+    `route -q -n delete -host ${quotedIp} >/dev/null 2>&1 || true`,
+    `route -q -n add -host ${quotedIp} 127.0.0.1 || route -q -n change -host ${quotedIp} 127.0.0.1 || route -q -n add -host ${quotedIp} -interface lo0 || route -q -n change -host ${quotedIp} -interface lo0 || true`
   ].join('\n');
 }
 
