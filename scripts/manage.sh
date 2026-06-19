@@ -51,6 +51,7 @@ header() { printf '\n%s%s%s\n' "$C_CYAN$C_BOLD" "$*" "$C_RESET"; hr; }
 # Format: "<npm-name>|<workspace-path>|<category>|<display-name>"
 # Category: host = marketplace runtime, plugin = installable plugin,
 #           core = reusable runtime library,
+#           design = reusable UI design package,
 #           engine = platform-specific tunnel engine resource package,
 #           tool = npm CLI/helper, game = installable game.
 #
@@ -66,6 +67,7 @@ PACKAGES=(
   "@qpjoy/mx-launcher-core|electron-dock/mx-launcher/packages/launcher-core|core|MX Launcher Core (Internal API + route plan)"
   "@qpjoy/mx-launcher-embed-sdk|electron-dock/mx-launcher/packages/launcher-embed-sdk|core|MX Launcher Embed SDK"
   "@qpjoy/mx-launcher-standalone|electron-dock/mx-launcher/packages/launcher-standalone|core|MX Launcher Standalone adapter"
+  "@qpjoy/ui-design-neon-void|electron-dock/mx-launcher/ui-design|design|QPJoy UI Design Neon Void"
   "@qpjoy/electron-plugin-tunnel-engine-darwin-arm64|electron-plugin/packages/tunnel-engines/darwin-arm64|engine|Tunnel Engine macOS arm64"
   "@qpjoy/electron-plugin-tunnel-engine-darwin-x64|electron-plugin/packages/tunnel-engines/darwin-x64|engine|Tunnel Engine macOS x64"
   "@qpjoy/electron-plugin-tunnel-engine-linux-arm64|electron-plugin/packages/tunnel-engines/linux-arm64|engine|Tunnel Engine Linux arm64"
@@ -185,6 +187,9 @@ cmd_status() {
   header "公共网络底座 (core libraries)"
   while IFS= read -r row; do pkg_status_line "$row"; done < <(pkgs_by_category core)
 
+  header "样式组件库 (design systems)"
+  while IFS= read -r row; do pkg_status_line "$row"; done < <(pkgs_by_category design)
+
   header "市场上架插件 (plugins)"
   while IFS= read -r row; do pkg_status_line "$row"; done < <(pkgs_by_category plugin)
 
@@ -202,7 +207,7 @@ cmd_status() {
   fi
 
   echo
-  echo "${C_DIM}Tip: 'prepare-host' / 'prepare-core' / 'prepare-plugin' / 'prepare-engine' / 'prepare-tool' / 'prepare-game' 准备发布；'sync-apps' 让 demo/test 用上本地最新包${C_RESET}"
+  echo "${C_DIM}Tip: 'prepare-host' / 'prepare-core' / 'prepare-design' / 'prepare-plugin' / 'prepare-engine' / 'prepare-tool' / 'prepare-game' 准备发布；'sync-apps' 让 demo/test 用上本地最新包${C_RESET}"
 }
 
 cmd_market() {
@@ -518,6 +523,7 @@ pick_pkg_then_prepare() {
 
 cmd_prepare_plugin() { pick_pkg_then_prepare plugin "插件"; }
 cmd_prepare_core()   { pick_pkg_then_prepare core   "公共网络底座"; }
+cmd_prepare_design() { pick_pkg_then_prepare design "样式组件库"; }
 cmd_prepare_engine() { pick_pkg_then_prepare engine "引擎资源包"; }
 cmd_prepare_host()   { pick_pkg_then_prepare host   "宿主组件"; }
 cmd_prepare_tool()   { pick_pkg_then_prepare tool   "命令行工具"; }
@@ -634,6 +640,7 @@ Subcommands:
   ${C_BOLD}market${C_RESET}            浏览市场内置目录（seed-index 卡片）
   ${C_BOLD}prepare-plugin${C_RESET}    选择插件 → bump 版本 + build + pack 预览
   ${C_BOLD}prepare-core${C_RESET}      选择公共网络底座做同样操作
+  ${C_BOLD}prepare-design${C_RESET}    选择样式组件库做同样操作
   ${C_BOLD}prepare-engine${C_RESET}    选择平台引擎资源包做同样操作
   ${C_BOLD}prepare-host${C_RESET}      选择宿主组件（electron-market 等）做同样操作
   ${C_BOLD}prepare-tool${C_RESET}      选择命令行工具做同样操作
@@ -662,7 +669,7 @@ Examples:
   scripts/manage.sh hdo setup-domestic --server-url http://domestic:8080 --public-host domestic.example.com
 
 发布流程（每次手动 OTP）:
-  1. scripts/manage.sh prepare-plugin     # 或 prepare-core / prepare-engine / prepare-host / prepare-tool / prepare-game
+  1. scripts/manage.sh prepare-plugin     # 或 prepare-core / prepare-design / prepare-engine / prepare-host / prepare-tool / prepare-game
   2. 脚本会打印手动 publish 命令；也可输入 OTP 让脚本直接发布
      cd <package-dir> && pnpm publish --otp=XXXXXX --no-git-checks
   3. scripts/manage.sh sync-hdo-npm       # 发布后让 electron-demo/hdo 回到 npm 正式依赖
@@ -679,6 +686,7 @@ cmd_menu() {
     "market         查看市场卡片列表 (seed-index)"
     "prepare-plugin 准备发布: 插件"
     "prepare-core   准备发布: 公共网络底座"
+    "prepare-design 准备发布: 样式组件库"
     "prepare-engine 准备发布: Tunnel 引擎资源包"
     "prepare-host   准备发布: 市场宿主组件"
     "prepare-tool   准备发布: 命令行工具"
@@ -703,6 +711,7 @@ cmd_menu() {
       market)         cmd_market ;;
       prepare-plugin) cmd_prepare_plugin ;;
       prepare-core)   cmd_prepare_core ;;
+      prepare-design) cmd_prepare_design ;;
       prepare-engine) cmd_prepare_engine ;;
       prepare-host)   cmd_prepare_host ;;
       prepare-tool)   cmd_prepare_tool ;;
@@ -731,6 +740,7 @@ case "$sub" in
   market|cards|catalog)         cmd_market "$@" ;;
   prepare-plugin|plugin)        cmd_prepare_plugin "$@" ;;
   prepare-core|core)            cmd_prepare_core "$@" ;;
+  prepare-design|design)        cmd_prepare_design "$@" ;;
   prepare-engine|engine)        cmd_prepare_engine "$@" ;;
   prepare-host|host)            cmd_prepare_host "$@" ;;
   prepare-tool|tool)            cmd_prepare_tool "$@" ;;

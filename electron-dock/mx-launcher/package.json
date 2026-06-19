@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "pnpm --filter @qpjoy/mx-launcher-core build && pnpm --filter @qpjoy/mx-launcher-embed-sdk build && pnpm --filter @qpjoy/mx-launcher-standalone build && pnpm --filter @qpjoy/electron-launcher typecheck && pnpm --dir server typecheck && pnpm --dir desktop typecheck",
-    "build:packages": "pnpm --filter @qpjoy/mx-launcher-core build && pnpm --filter @qpjoy/mx-launcher-embed-sdk build && pnpm --filter @qpjoy/mx-launcher-standalone build && pnpm --filter @qpjoy/electron-launcher build"
+    "typecheck": "pnpm --filter @qpjoy/mx-launcher-core build && pnpm --filter @qpjoy/mx-launcher-embed-sdk build && pnpm --filter @qpjoy/mx-launcher-standalone build && pnpm --filter @qpjoy/electron-launcher typecheck && pnpm --filter @qpjoy/ui-design-neon-void typecheck && pnpm --dir server typecheck && pnpm --dir desktop typecheck",
+    "build:packages": "pnpm --filter @qpjoy/mx-launcher-core build && pnpm --filter @qpjoy/mx-launcher-embed-sdk build && pnpm --filter @qpjoy/mx-launcher-standalone build && pnpm --filter @qpjoy/electron-launcher build && pnpm --filter @qpjoy/ui-design-neon-void build",
+    "ui-design:build": "pnpm --filter @qpjoy/ui-design-neon-void build",
+    "ui-design:demo": "pnpm --filter @qpjoy/ui-design-neon-void-demo dev"
   }
 }

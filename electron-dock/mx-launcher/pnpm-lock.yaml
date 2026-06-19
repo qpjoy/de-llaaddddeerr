@@ -8,6 +8,25 @@ importers:
 
   .: {}
 
+  demos/mx-h2i:
+    dependencies:
+      '@qpjoy/electron-launcher':
+        specifier: workspace:*
+        version: link:../../packages/electron-launcher
+    devDependencies:
+      electron:
+        specifier: ^34.0.0
+        version: 34.5.8
+      electron-builder:
+        specifier: ^25.1.8
+        version: 25.1.8(electron-builder-squirrel-windows@25.1.8)
+
+  demos/ui-design-neon-void:
+    dependencies:
+      '@qpjoy/ui-design-neon-void':
+        specifier: workspace:*
+        version: link:../../ui-design
+
   desktop:
     dependencies:
       three:
@@ -99,6 +118,12 @@ importers:
       tsx:
         specifier: ^4.19.2
         version: 4.22.4
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  ui-design:
+    devDependencies:
       typescript:
         specifier: ^5.7.3
         version: 5.9.3

@@ -1,11 +1,11 @@
-# MX-H2I Standalone Launcher Architecture
+# MX-H2I Product on MX-Launcher Architecture
 
-本文档定义新的 MX-H2I 客户端、Launcher standalone/embed 边界、AppCenter/H2O
+本文档定义新的 MX-H2I 客户端、Launcher standalone/embed 两种运行模式、AppCenter/H2O
 接入方式、Mesh/IP 规划，以及本地开发、npm 发版和桌面打包方案。
 
 ## 结论
 
-MX-H2I 应作为新的 H 端 standalone Launcher 项目，不建议继续把
+MX-H2I 应作为新的 H 端 VPN 产品，并使用 Launcher standalone 模式，不建议继续把
 `electron-demo/hdo` 改成 HDO 2.0。
 
 原因：
@@ -21,10 +21,10 @@ MX-H2I 应作为新的 H 端 standalone Launcher 项目，不建议继续把
 
 | 名称 | 类型 | 责任 |
 | --- | --- | --- |
-| MX-H2I | standalone Launcher | H 端入口、登录、游客模式、WG/H2I、AppCenter host、更新器、权限执行 |
-| AppCenter | embed app/runtime | 应用列表、安装、授权展示、打开应用、应用更新入口，默认复用 MX-H2I standalone 通道 |
-| H2O | embed app | 类 Clash 应用，规则/订阅/节点/代理模式 UI，不直接拥有系统网络 |
-| Luopan 等独立产品 | standalone 或 embed | 如果发布独立 standalone，则 embed app 可以选择复用 Luopan 通道；否则默认 embed 到 MX-H2I |
+| MX-H2I | VPN 产品，Launcher standalone 模式 | H 端入口、登录、游客模式、WG/H2I、AppCenter host、更新器、权限执行 |
+| AppCenter | 产品/host，Launcher embed 模式 | 应用列表、安装、授权展示、打开应用、应用更新入口，默认复用 MX-H2I 的 Launcher standalone 通道 |
+| H2O | 产品，Launcher embed 模式 | 类 Clash 应用，规则/订阅/节点/代理模式 UI，不直接拥有系统网络 |
+| Luopan 等独立产品 | 产品，可选 Launcher standalone 或 embed 模式 | 如果作为独立 Launcher standalone 通道发布，则 embed app 可以选择复用 Luopan 通道；否则默认 embed 到 MX-H2I |
 
 ## 为什么 HDO 会安装 Launcher
 
@@ -43,7 +43,7 @@ MX-H2I 应抽出一个通用 dev-mode/publish 流程，避免每个 demo 手写�
 | 包 | 角色 |
 | --- | --- |
 | `@qpjoy/mx-launcher-core` | 协议、类型、快照、route plan、WG key、client |
-| `@qpjoy/mx-launcher-standalone` | standalone shell SDK，默认产品为 `launcher`/`mx-h2i` |
+| `@qpjoy/mx-launcher-standalone` | Launcher standalone 模式 SDK，默认承载 `mx-h2i` 产品 |
 | `@qpjoy/mx-launcher-embed-sdk` | AppCenter/H2O/Luopan embed 应用 SDK |
 | `@qpjoy/electron-launcher` | 对外 npm 门面，隐藏 core/standalone/embed 拆分 |
 
@@ -69,6 +69,78 @@ electron-dock/mx-launcher/
 
 `apps/mx-h2i` 是可运行、可打包的 Electron 客户端；`packages/*` 只放可发布库。
 如果必须全部放 `packages`，也应区分 `packages/mx-h2i-shell` 和真正的 Electron app。
+
+## Launcher Foundation
+
+Launcher 是所有 MX 产品共同依赖的功能底座，不等同于 MX-H2I。MX-H2I 是一个 VPN 产品，
+它选择 Launcher standalone 模式来拥有本机网络主权；AppCenter、H2O 等产品通常选择
+Launcher embed 模式来消费已有能力。
+
+Launcher 必须解决两个问题：
+
+- embed 足够轻：业务应用不重复安装 native helper、不申请 TUN/WG/DNS 权限、不自建更新器。
+- 同机不打架：多个产品共存时，只有一个明确的 owner 修改系统网络，其它产品通过 broker
+  申请能力、读取上下文和拿 scoped token。
+
+### 运行模式
+
+| 模式 | 进程/权限 | 网络主权 | 适用产品 |
+| --- | --- | --- | --- |
+| `standalone` | Electron shell + Launcher host/broker + 可选 native helper | 可以拥有 WG/TUN/DNS/route、peer lease、更新器和本地权限 broker | MX-H2I、独立 Luopan |
+| `embed` | 轻量 SDK + app-scoped IPC/client | 不直接改系统网络，不分配 WG peer；复用 `standaloneChannelProductId` 指向的 channel | AppCenter、H2O、嵌入式业务应用 |
+
+### 本机能力仲裁
+
+Launcher standalone 在本机启动一个能力 broker，embed 只和 broker 交互。broker 需要按
+`productId`、`standaloneChannelProductId`、`installId` 和 `userId` 管理作用域：
+
+| 能力 | standalone owner | embed 行为 | 防冲突规则 |
+| --- | --- | --- | --- |
+| WG/TUN/route | 拥有接口、AllowedIPs、端口和 route table | 只读 network context，发起 connect/disconnect 请求 | 同一 channel 只有一个 network owner；route 由 owner 合并后一次性下发 |
+| Split DNS/PAC | 生成系统 DNS/PAC/mihomo 策略 | 提交 app-level DNS/代理需求 | broker 合并策略并保留 evidence；embed 不直接写系统 DNS |
+| Auth/User | 维护匿名身份、登录态、refresh token、设备绑定 | 申请 app-scoped token 和 permission decision | token audience 绑定 app/product，不能跨 app 复用 |
+| Release/Gray | 管理底座和 standalone shell 更新 | 读取自身 update decision，触发 app update | 单机一个 update scheduler；每个 app 有独立 channel/skip/force 策略 |
+| Storage/Logs | 维护 runtime、cache、diagnostics | 写入 app namespace 下的日志和缓存 | 路径按 product 隔离，broker 汇总到 observability |
+| Native Permission | 安装/升级 helper、申请系统权限 | 只能请求 capability，不直接提权 | helper 版本和签名由 standalone 校验 |
+
+建议本机目录和 socket 也按这个边界命名：
+
+```text
+~/.qpjoy/mx-launcher/runtime/{standaloneChannelProductId}/
+~/.qpjoy/mx-launcher/products/{productId}/
+~/.qpjoy/mx-launcher/sockets/{standaloneChannelProductId}.sock
+~/.qpjoy/mx-launcher/logs/{productId}/
+```
+
+### Admin 产品模型
+
+Product Registry 不应把 `launcher` 当业务产品。它应登记业务产品如何依赖 Launcher：
+
+| 字段 | 说明 |
+| --- | --- |
+| `productId` | 业务产品 ID，例如 `mx-h2i`、`appcenter`、`h2o`、`luopan` |
+| `displayName` | 产品名 |
+| `launcherMode` / `mode` | Launcher 运行模式：`standalone` 或 `embed` |
+| `standaloneChannelProductId` | embed 依赖的 Launcher standalone channel；使用 standalone 模式的产品等于自身 |
+| `networkPolicy` | lease 段、service VIP、DNS/proxy/TUN 权限 |
+| `permissionManifest` | 产品暴露的功能、scope、resource/action |
+| `releasePolicy` | 版本、灰度、强制/可跳过、回滚策略 |
+| `runtimeIsolation` | storage/socket/protocol/port namespace |
+
+校验规则：
+
+- 使用 MX-Launcher 网络或服务器能力的产品必须声明 Launcher 模式。
+- `embed` 产品必须依赖一个 enabled 的 `standaloneChannelProductId`，默认 `mx-h2i`。
+- 只有 `standalone` channel 分配 H 端 peer lease；`embed` 产品返回 channel context。
+- 同一台机器允许多个 Launcher standalone channel，但同一时刻只有当前 owner 写系统网络；切换 owner
+  需要 broker 生成 route/DNS 差异和回滚 evidence。
+
+默认 App Registry：
+
+- `mx-h2i`、`appcenter`、`h2o` 是系统内置 App，启动时自动初始化到 DB。
+- 三者在 Admin 左侧应用导航中同级展示；App 分组可以收起。
+- 内置 App 可以编辑展示/策略元信息，但不能删除；自定义 App 支持新增、编辑、删除。
+- `mx-h2i` 使用 Launcher `standalone` 模式；`appcenter`、`h2o` 默认使用 `embed` 并依赖 `mx-h2i`。
 
 ## Frontend
 
@@ -111,14 +183,14 @@ createElectronLauncher({
   baseUrl,
   productId: 'h2o',
   mode: 'embed',
-  standaloneChannelProductId: 'launcher',
+  standaloneChannelProductId: 'mx-h2i',
   hostVersionRange: '^0.1.0'
 });
 ```
 
 `standaloneChannelProductId` 和 `hostVersionRange` 需要作为 SDK/后端字段保留。embed
-应用默认不新建 WG peer，不写系统网络，只拿所选 standalone channel 的 network context
-和能力 token。AppCenter/H2O 默认选择 `launcher`，Luopan 的 embed 应用可以选择
+应用默认不新建 WG peer，不写系统网络，只拿所选 Launcher standalone channel 的 network context
+和能力 token。AppCenter/H2O 默认选择 `mx-h2i`，Luopan 的 embed 应用可以选择
 `luopan`。
 
 ## Backend
@@ -152,7 +224,7 @@ Domestic flow 的边界应固定为 CLI/runner 部署、WG relay 连通和 H2I �
 - Domestic gate 验证 `10.88.0.1`、`10.88.88.88`、WG handshake、healthz、DNS/proxy 前置条件。
 - Domestic peer append 只消费已经存在的 standalone 客户端 lease，用于在 D 上追加 WG peer。
 - Domestic 不定义 App name，不选择 embed/standalone 模式，不分配产品网段，也不承担用户/权限/AppCenter 真相。
-- 产品定义、standalone/embed 关系、embed 选择哪个 standalone channel，放在 Product Registry/AppCenter 和 MX-H2I 客户端中完成。
+- 产品定义、Launcher mode、embed 选择哪个 Launcher standalone channel，放在 Product Registry/AppCenter 和 MX-H2I 客户端中完成。
 
 V2 的 systemd/interface 命名应避免和旧 HDO 共用名称，保证同一台机器可以保留/迁移旧服务：
 
@@ -228,11 +300,11 @@ egress-on 都落在同一个真实 Internal runtime host 上。
 | `10.88.88.88` | Internal service peer 固定 IP |
 | `10.88.100.x` | 产品 service VIP / gateway alias |
 | `10.89.0.0/16` | MX-H2I standalone H 端 lease |
-| `10.90.0.0/16+` | 非 MX-H2I 的独立 standalone 产品 lease，默认从 Luopan 类产品开始 |
+| `10.90.0.0/16+` | 非 MX-H2I、但使用 Launcher standalone 模式的产品 lease，默认从 Luopan 类产品开始 |
 
 MX-H2I：
 
-- standalone namespace：`mx-h2i`
+- Launcher standalone channel：`mx-h2i`
 - Domestic gateway：`10.88.0.1`
 - Internal fixed peer：`10.88.88.88`
 - service VIP：`10.88.100.1`
@@ -245,13 +317,13 @@ AppCenter/H2O：
 - 复用 MX-H2I 的 H 端 WG peer 和本机网络权限
 - 可以有 app-level DNS/permission/rate-limit policy
 - 默认不分配独立 H 端 lease
-- 新增 embed app 可以选择依赖的 standalone channel，默认 `launcher`/MX-H2I
+- 新增 embed app 可以选择依赖的 Launcher standalone channel，默认 `mx-h2i`
 
 Luopan 这类独立产品：
 
 - 如果只是 AppCenter 应用，做 embed，复用 `mx-h2i`
-- 如果需要独立登录态、独立守护、独立更新器或隔离策略，做 standalone namespace
-- Luopan 的 embed app 可以选择 `luopan` 作为 standalone channel
+- 如果需要独立登录态、独立守护、独立更新器或隔离策略，做自己的 Launcher standalone channel
+- Luopan 的 embed app 可以选择 `luopan` 作为 Launcher standalone channel
 - v1 仍共用 `mx-domestic` 和 Internal `10.88.88.88`
 - 可分配独立 gateway alias/service VIP，例如 `10.88.0.2` / `10.88.101.1`
 - H 端 lease 使用独立段，未手填时默认从 `10.90.0.0/16` 开始
@@ -270,9 +342,9 @@ mx-domestic-luopan   -> 10.92.0.1 / internal 10.92.88.88
 | 字段 | 说明 |
 | --- | --- |
 | `meshId` | Mesh 标识 |
-| `standaloneProductId` | 拥有 standalone 的产品，如 `mx-h2i`、`luopan` |
-| `standaloneChannelProductId` | embed 依赖的 standalone，默认 `launcher`/MX-H2I；独立产品如 Luopan 可选 `luopan` |
-| `mode` | `standalone` 或 `embed` |
+| `standaloneProductId` | 使用 Launcher standalone 模式并拥有 peer lease 的产品，如 `mx-h2i`、`luopan` |
+| `standaloneChannelProductId` | embed 依赖的 Launcher standalone channel，默认 `mx-h2i`；独立产品如 Luopan 可选 `luopan` |
+| `mode` | Launcher 运行模式：`standalone` 或 `embed` |
 | `fabricId` | 默认 `domestic-main` 的 `mx-domestic` |
 | `domesticGatewayIp` | gateway 或 gateway alias |
 | `internalServiceIp` | 默认 `10.88.88.88` |

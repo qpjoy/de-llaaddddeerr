@@ -24,6 +24,7 @@ Usage:
   bash scripts/manage.sh help
   bash scripts/manage.sh doctor [--role internal|domestic|oversea]
   bash scripts/manage.sh check
+  bash scripts/manage.sh ui-design build|pack|demo [port]
   bash scripts/manage.sh desktop-check
   bash scripts/manage.sh desktop-typecheck
   bash scripts/manage.sh server-typecheck
@@ -201,6 +202,29 @@ shadow_image_build() {
   shadow_image_artifacts
   shadow_image_admin_assets
   (cd server && docker compose -f docker-compose.shadow.yml build internal)
+  shadow_image_cleanup
+}
+
+shadow_image_cleanup() {
+  local cleanup="${MX_SHADOW_IMAGE_CLEANUP:-1}"
+  local prune_cache="${MX_SHADOW_BUILDKIT_PRUNE:-1}"
+  local cache_until="${MX_SHADOW_BUILDKIT_PRUNE_UNTIL:-168h}"
+  local keep_storage="${MX_SHADOW_BUILDKIT_KEEP_STORAGE:-8GB}"
+  [ "$cleanup" = "0" ] && return 0
+  if command -v docker >/dev/null 2>&1; then
+    say "cleanup dangling MX Launcher shadow images"
+    docker image prune -f \
+      --filter "label=dev.qpjoy.mx-launcher.project=mx-launcher" \
+      --filter "label=dev.qpjoy.mx-launcher.image=shadow" >/dev/null \
+      || say "image cleanup skipped"
+    if [ "$prune_cache" != "0" ]; then
+      say "cleanup old BuildKit cache (until=$cache_until, keep=$keep_storage)"
+      docker builder prune -f \
+        --filter "until=$cache_until" \
+        --keep-storage "$keep_storage" >/dev/null \
+        || say "BuildKit cache cleanup skipped"
+    fi
+  fi
 }
 
 wait_http_ready() {
@@ -3213,8 +3237,9 @@ menu_show() {
 27) awx-password      输出 AWX admin 密码
 28) platform-cycle    一键 AWX + Internal + provider
 29) guide             查看本机测试方案
-30) help              查看 CLI 帮助
-31) quit              退出
+30) ui-design         构建 Neon Void 样式组件库
+31) help              查看 CLI 帮助
+32) quit              退出
 EOF
 }
 
@@ -3313,10 +3338,13 @@ menu_run() {
     29|guide)
       ops_guide
       ;;
-    30|help)
+    30|ui-design)
+      ui_design build
+      ;;
+    31|help)
       usage
       ;;
-    31|quit|q|exit)
+    32|quit|q|exit)
       MENU_QUIT=1
       return 0
       ;;
@@ -3367,6 +3395,35 @@ doctor() {
   say "doctor OK"
 }
 
+ui_design() {
+  local action="${1:-build}"
+  shift || true
+  case "$action" in
+    build|check)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ui-design build"
+      (cd "$ROOT" && pnpm --filter @qpjoy/ui-design-neon-void build)
+      ;;
+    pack)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ui-design pack"
+      local preview_dir="/tmp/qpjoy-publish-preview"
+      rm -rf "$preview_dir"
+      mkdir -p "$preview_dir"
+      (cd "$ROOT" && pnpm --filter @qpjoy/ui-design-neon-void build)
+      (cd "$ROOT/ui-design" && pnpm pack --pack-destination "$preview_dir")
+      say "pack preview: $preview_dir"
+      ;;
+    demo)
+      [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ui-design demo [port]"
+      local port="${1:-18130}"
+      say "demo: http://127.0.0.1:$port/demos/ui-design-neon-void/"
+      (cd "$ROOT" && PORT="$port" pnpm --filter @qpjoy/ui-design-neon-void-demo dev)
+      ;;
+    *)
+      die "Usage: bash scripts/manage.sh ui-design build|pack|demo [port]"
+      ;;
+  esac
+}
+
 case "$cmd" in
   menu)
     [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh menu"
@@ -3382,6 +3439,9 @@ case "$cmd" in
     (cd desktop && pnpm run check)
     run_tsc -p desktop/tsconfig.json --noEmit
     run_tsc -p server/tsconfig.json --noEmit
+    ;;
+  ui-design)
+    ui_design "$@"
     ;;
   desktop-check)
     (cd desktop && pnpm run check)

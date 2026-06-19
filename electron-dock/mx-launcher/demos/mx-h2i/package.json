@@ -1,0 +1,25 @@
+{
+  "name": "@qpjoy/mx-h2i-demo",
+  "productName": "MX-H2I",
+  "version": "0.1.0",
+  "private": true,
+  "author": "QPJoy",
+  "description": "MX-H2I Electron standalone launcher demo.",
+  "main": "src/main.cjs",
+  "scripts": {
+    "dev": "electron .",
+    "start": "pnpm dev",
+    "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check electron-builder.config.cjs",
+    "package": "pnpm run check && electron-builder --config electron-builder.config.cjs --dir",
+    "make": "pnpm run check && electron-builder --config electron-builder.config.cjs",
+    "make:mac:dmg": "pnpm run check && electron-builder --config electron-builder.config.cjs --mac dmg --universal",
+    "make:win": "pnpm run check && electron-builder --config electron-builder.config.cjs --win --x64"
+  },
+  "dependencies": {
+    "@qpjoy/electron-launcher": "workspace:*"
+  },
+  "devDependencies": {
+    "electron": "^34.0.0",
+    "electron-builder": "^25.1.8"
+  }
+}

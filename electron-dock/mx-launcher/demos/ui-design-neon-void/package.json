@@ -1,0 +1,13 @@
+{
+  "name": "@qpjoy/ui-design-neon-void-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs",
+    "check": "node --check app.js && node --check server.mjs"
+  },
+  "dependencies": {
+    "@qpjoy/ui-design-neon-void": "workspace:*"
+  }
+}

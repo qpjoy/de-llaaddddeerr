@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Inject, NotFoundException, Param, Post } from '@nestjs/common';
 
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
+import { MX_H2I_PRODUCT_ID } from '../../store/domain.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
 
@@ -18,7 +19,7 @@ export class TestCenterController {
         configSnapshotId: nullableString(body.configSnapshotId),
         installId: nullableString(body.installId),
         deviceId: nullableString(body.deviceId),
-        productId: nullableString(body.productId) ?? 'launcher',
+        productId: nullableString(body.productId) ?? MX_H2I_PRODUCT_ID,
         topology: nullableString(body.topology) ?? 'h-d-i-shadow',
         sites: stringArray(body.sites)
       })

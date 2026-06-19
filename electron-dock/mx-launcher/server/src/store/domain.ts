@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import type {
   AnonymousEnrollment,
   AppCenterApp,
+  AppCenterAppInput,
   AwxProviderConfig,
   AwxProviderConfigInput,
   AwxProviderKind,
@@ -372,16 +373,148 @@ function gatewayRouteRequiredScopes(routeId: string): string[] {
   return [];
 }
 
+export const MX_H2I_PRODUCT_ID = 'mx-h2i';
+export const APP_CENTER_PRODUCT_ID = 'appcenter';
+export const LAUNCHER_FOUNDATION_PRODUCT_ID = 'launcher';
+
+export function normalizeLauncherNetworkProductId(value?: string | null): string {
+  const normalized = safeIdPart(value?.trim() || MX_H2I_PRODUCT_ID).toLowerCase();
+  return normalized || MX_H2I_PRODUCT_ID;
+}
+
+export function launcherNetworkProductIsStandaloneDefault(productId: string): boolean {
+  return productId === MX_H2I_PRODUCT_ID || productId === LAUNCHER_FOUNDATION_PRODUCT_ID;
+}
+
+export function launcherNetworkLeaseProductId(productId?: string | null): string {
+  const normalized = normalizeLauncherNetworkProductId(productId);
+  return normalized === LAUNCHER_FOUNDATION_PRODUCT_ID ? MX_H2I_PRODUCT_ID : normalized;
+}
+
+function appCenterStringList(value: AppCenterAppInput['channels'], fallback: string[]): string[] {
+  const source = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(',')
+      : fallback;
+  return [...new Set(source.map((item) => String(item || '').trim()).filter(Boolean))];
+}
+
+function appCenterRecordMap(value: AppCenterAppInput['entrypoints'], fallback: Record<string, string>): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { ...fallback };
+  return Object.entries(value).reduce<Record<string, string>>((next, [key, raw]) => {
+    const normalizedKey = safeIdPart(key).toLowerCase();
+    const text = String(raw || '').trim();
+    if (normalizedKey && text) next[normalizedKey] = text;
+    return next;
+  }, {});
+}
+
+export function buildAppCenterApp(
+  input: AppCenterAppInput,
+  previous: AppCenterApp | null = null
+): AppCenterApp {
+  const appId = safeIdPart(String(input.appId || previous?.appId || 'app').trim()).toLowerCase();
+  const launcherMode = launcherProductMode(input.launcherMode ?? previous?.launcherMode ?? (appId === MX_H2I_PRODUCT_ID ? 'standalone' : 'embed'));
+  const productNetworkId = normalizeLauncherNetworkProductId(input.productNetworkId || previous?.productNetworkId || appId);
+  const standaloneChannelProductId = launcherMode === 'standalone'
+    ? productNetworkId
+    : launcherNetworkLeaseProductId(input.standaloneChannelProductId || previous?.standaloneChannelProductId || MX_H2I_PRODUCT_ID);
+  const builtin = typeof input.builtin === 'boolean' ? input.builtin : previous?.builtin ?? false;
+  return {
+    appId,
+    displayName: input.displayName?.trim() || previous?.displayName || launcherProductDisplayName(appId),
+    builtin,
+    systemOwned: typeof input.systemOwned === 'boolean' ? input.systemOwned : previous?.systemOwned ?? builtin,
+    version: input.version?.trim() || previous?.version || '0.1.0',
+    category: input.category?.trim() || previous?.category || 'custom',
+    description: input.description?.trim() || previous?.description || 'Launcher powered application.',
+    launcherMode,
+    standaloneChannelProductId,
+    productNetworkId,
+    enabled: typeof input.enabled === 'boolean' ? input.enabled : previous?.enabled ?? true,
+    channels: appCenterStringList(input.channels, previous?.channels ?? ['shadow', 'beta', 'stable']),
+    permissions: appCenterStringList(input.permissions, previous?.permissions ?? ['auth.read']),
+    requiredCapabilities: appCenterStringList(
+      input.requiredCapabilities,
+      previous?.requiredCapabilities ?? (launcherMode === 'standalone'
+        ? ['launcher-network', 'launcher-standalone']
+        : ['launcher-network', 'launcher-embed-sdk'])
+    ),
+    updatePolicy: normalizeUpdatePolicy(String(input.updatePolicy || previous?.updatePolicy || 'app-managed')),
+    entrypoints: appCenterRecordMap(input.entrypoints, previous?.entrypoints ?? {
+      desktop: `app://${appId}/index.html`,
+      settings: `app://${appId}/settings.html`
+    }),
+    protocol: {
+      appCenter: input.protocol?.appCenter?.trim() || previous?.protocol?.appCenter || '1.0',
+      launcher: input.protocol?.launcher?.trim() || previous?.protocol?.launcher || '1.0'
+    }
+  };
+}
+
+function launcherProductDisplayName(productId: string): string {
+  if (productId === MX_H2I_PRODUCT_ID) return 'MX-H2I';
+  if (productId === APP_CENTER_PRODUCT_ID) return 'AppCenter';
+  if (productId === 'h2o') return 'H2O';
+  return productId
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+    .join(' ') || productId;
+}
+
 export function builtinAppCenterApps(): AppCenterApp[] {
   return [
-    {
+    buildAppCenterApp({
+      appId: MX_H2I_PRODUCT_ID,
+      displayName: 'MX-H2I',
+      builtin: true,
+      systemOwned: true,
+      version: '0.1.0',
+      category: 'vpn',
+      description: 'VPN product that owns the Launcher standalone channel and peer leases.',
+      launcherMode: 'standalone',
+      standaloneChannelProductId: MX_H2I_PRODUCT_ID,
+      productNetworkId: MX_H2I_PRODUCT_ID,
+      permissions: ['auth.read', 'network.tun.request', 'network.wg.peer', 'network.dns.policy', 'observability.write'],
+      requiredCapabilities: ['launcher-network', 'launcher-standalone', 'wireguard-peer'],
+      updatePolicy: 'mandatory-app',
+      entrypoints: {
+        desktop: 'app://mx-h2i/index.html',
+        settings: 'app://mx-h2i/settings.html'
+      }
+    }),
+    buildAppCenterApp({
+      appId: APP_CENTER_PRODUCT_ID,
+      displayName: 'AppCenter',
+      builtin: true,
+      systemOwned: true,
+      version: '0.1.0',
+      category: 'platform',
+      description: 'Application catalog and runtime access surface, embedded through MX-H2I launcher channel.',
+      launcherMode: 'embed',
+      standaloneChannelProductId: MX_H2I_PRODUCT_ID,
+      productNetworkId: APP_CENTER_PRODUCT_ID,
+      permissions: ['auth.read', 'appcenter.read', 'permission.request', 'observability.write'],
+      requiredCapabilities: ['app-center-runtime', 'launcher-embed-sdk'],
+      updatePolicy: 'platform-ui',
+      entrypoints: {
+        desktop: 'app://appcenter/index.html',
+        settings: 'app://appcenter/settings.html'
+      }
+    }),
+    buildAppCenterApp({
       appId: 'h2o',
       displayName: 'H2O',
       builtin: true,
+      systemOwned: true,
       version: '0.1.0',
       category: 'network',
-      description: 'Clash-like AppCenter network app powered by Launcher Network.',
-      channels: ['shadow', 'beta', 'stable'],
+      description: 'Network, split DNS, PAC, and Internal service access through MX-H2I launcher channel.',
+      launcherMode: 'embed',
+      standaloneChannelProductId: MX_H2I_PRODUCT_ID,
+      productNetworkId: 'h2o',
       permissions: [
         'auth.read',
         'network.hdi.status',
@@ -392,17 +525,13 @@ export function builtinAppCenterApps(): AppCenterApp[] {
         'network.pac.policy',
         'observability.write'
       ],
-      requiredCapabilities: ['launcher-network', 'app-center-runtime'],
+      requiredCapabilities: ['launcher-network', 'launcher-embed-sdk', 'app-center-runtime'],
       updatePolicy: 'app-managed',
       entrypoints: {
         desktop: 'app://h2o/index.html',
         settings: 'app://h2o/settings.html'
-      },
-      protocol: {
-        appCenter: '1.0',
-        launcher: '1.0'
       }
-    }
+    })
   ];
 }
 
@@ -410,10 +539,10 @@ export function builtinLauncherProductNetworks(config: RuntimeConfig): LauncherP
   const now = new Date().toISOString();
   return [
     buildLauncherProductNetwork(config, {
-      productId: 'launcher',
-      displayName: 'Launcher Standalone',
+      productId: MX_H2I_PRODUCT_ID,
+      displayName: 'MX-H2I',
       mode: 'standalone',
-      standaloneChannelProductId: 'launcher',
+      standaloneChannelProductId: MX_H2I_PRODUCT_ID,
       productIndex: 0,
       serviceVip: '10.88.100.1',
       userCidr: '10.89.0.0/16',
@@ -429,11 +558,30 @@ export function builtinLauncherProductNetworks(config: RuntimeConfig): LauncherP
       requestedBy: 'builtin'
     }, null, now),
     buildLauncherProductNetwork(config, {
+      productId: APP_CENTER_PRODUCT_ID,
+      displayName: 'AppCenter',
+      mode: 'embed',
+      standaloneChannelProductId: MX_H2I_PRODUCT_ID,
+      productIndex: 1,
+      serviceVip: '10.88.100.9',
+      userCidr: '10.92.0.0/16',
+      anonymousCidr: '10.92.0.0/16',
+      userLeaseStart: '10.92.0.1',
+      userLeaseEnd: '10.92.99.254',
+      anonymousLeaseStart: '10.92.100.1',
+      anonymousLeaseEnd: '10.92.254.254',
+      updatePolicy: 'launcher-managed',
+      rateLimitProfile: 'product-default',
+      dnsPolicyId: 'internal-default',
+      licensePolicyId: 'appcenter-default',
+      requestedBy: 'builtin'
+    }, null, now),
+    buildLauncherProductNetwork(config, {
       productId: 'h2o',
       displayName: 'H2O',
       mode: 'embed',
-      standaloneChannelProductId: 'launcher',
-      productIndex: 0,
+      standaloneChannelProductId: MX_H2I_PRODUCT_ID,
+      productIndex: 2,
       serviceVip: '10.88.100.10',
       userCidr: '10.90.0.0/16',
       anonymousCidr: '10.90.0.0/16',
@@ -456,16 +604,16 @@ export function buildLauncherProductNetwork(
   previous: LauncherProductNetwork | null,
   now = new Date().toISOString()
 ): LauncherProductNetwork {
-  const productId = safeIdPart(input.productId?.trim() || previous?.productId || 'launcher').toLowerCase();
-  const mode = launcherProductMode(input.mode ?? previous?.mode ?? (productId === 'launcher' ? 'standalone' : 'embed'));
+  const productId = normalizeLauncherNetworkProductId(input.productId?.trim() || previous?.productId);
+  const mode = launcherProductMode(input.mode ?? previous?.mode ?? (launcherNetworkProductIsStandaloneDefault(productId) ? 'standalone' : 'embed'));
   const productIndex = Number.isFinite(input.productIndex ?? NaN)
     ? Math.max(0, Math.floor(Number(input.productIndex)))
     : previous?.productIndex ?? (mode === 'standalone' ? 0 : 0);
   const defaults = defaultLauncherProductNetworkShape(productId, mode, productIndex);
   const rawStandaloneChannel = mode === 'standalone'
     ? productId
-    : input.standaloneChannelProductId?.trim() || previous?.standaloneChannelProductId || 'launcher';
-  const standaloneChannelProductId = safeIdPart(rawStandaloneChannel).toLowerCase() || (mode === 'standalone' ? productId : 'launcher');
+    : input.standaloneChannelProductId?.trim() || previous?.standaloneChannelProductId || MX_H2I_PRODUCT_ID;
+  const standaloneChannelProductId = launcherNetworkLeaseProductId(rawStandaloneChannel || (mode === 'standalone' ? productId : MX_H2I_PRODUCT_ID));
   const updatedBy = input.requestedBy?.trim() || 'config-center';
   return {
     productId,
@@ -981,10 +1129,11 @@ function launcherProductUpdatePolicy(value: LauncherProductNetworkInput['updateP
 function defaultLauncherProductNetworkShape(productId: string, mode: LauncherProductMode, productIndex: number) {
   if (mode === 'standalone') {
     const index = Math.max(0, Math.min(164, Math.floor(productIndex)));
-    const secondOctet = productId === 'launcher' ? 89 : 90 + index;
-    const serviceOffset = productId === 'launcher' ? 1 : 2 + (index % 198);
+    const isMxH2i = launcherNetworkProductIsStandaloneDefault(productId);
+    const secondOctet = isMxH2i ? 89 : 90 + index;
+    const serviceOffset = isMxH2i ? 1 : 2 + (index % 198);
     return {
-      displayName: productId === 'launcher' ? 'Launcher Standalone' : productId,
+      displayName: productId === MX_H2I_PRODUCT_ID ? 'MX-H2I' : productId === LAUNCHER_FOUNDATION_PRODUCT_ID ? 'Launcher Foundation' : productId,
       serviceVip: `10.88.100.${serviceOffset}`,
       userCidr: `10.${secondOctet}.0.0/16`,
       anonymousCidr: `10.${secondOctet}.0.0/16`,
@@ -1014,11 +1163,11 @@ function defaultLauncherProductNetworkShape(productId: string, mode: LauncherPro
 function launcherProductNetworkNotes(mode: LauncherProductMode): string[] {
   return mode === 'standalone'
     ? [
-        'Standalone Launcher owns AppCenter network policy and uses 10.89.0.1+ for signed-in users.',
-        'Anonymous standalone leases start at 10.89.100.1.'
+        'Launcher standalone mode owns the product peer lease and uses 10.89.0.1+ for signed-in users.',
+        'Anonymous launcher standalone leases start at 10.89.100.1.'
       ]
     : [
-        'Embed products get isolated product leases under 10.90.* so colocated apps do not share one client IP.',
+        'Launcher embed mode does not allocate its own WG peer; it consumes the selected standalone channel context.',
         'The product service VIP stays in 10.88.100.0/24 and routes back to Internal 10.88.88.88 through Domestic relay.'
       ];
 }
@@ -1392,7 +1541,7 @@ export function createConfigSnapshot(
   const expiresAt = new Date(issuedAt.getTime() + 6 * 60 * 60 * 1000);
   const launcherProduct = buildLauncherProductNetwork(config, {
     productId: enrollment.productId,
-    mode: enrollment.productId === 'launcher' ? 'standalone' : 'embed'
+    mode: launcherNetworkProductIsStandaloneDefault(enrollment.productId) ? 'standalone' : 'embed'
   }, null);
   const launcherNetwork = buildLauncherNetworkTopology(config, {
     mode: enrollment.userId ? 'user' : 'guest',

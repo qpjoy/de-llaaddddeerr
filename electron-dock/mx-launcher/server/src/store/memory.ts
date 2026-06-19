@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import {
   builtinAppCenterApps,
+  buildAppCenterApp,
   builtinLauncherProductNetworks,
   buildLauncherProductNetwork,
   buildAwxProviderConfig,
@@ -57,7 +58,11 @@ import {
   resolvePrincipalContext,
   userOverseaAccountName,
   userOverseaEntitlementId,
-  required
+  required,
+  MX_H2I_PRODUCT_ID,
+  launcherNetworkLeaseProductId,
+  launcherNetworkProductIsStandaloneDefault,
+  normalizeLauncherNetworkProductId
 } from './domain.js';
 import { applyCoreDnsConfigMapToKubernetes } from './kubernetes.js';
 import type { PlatformStore } from './platform-store.js';
@@ -65,6 +70,7 @@ import type {
   AnonymousEnrollment,
   AnonymousEnrollmentRequest,
   AppCenterApp,
+  AppCenterAppInput,
   AuditEvent,
   AuditEventInput,
   AwxProviderConfig,
@@ -525,11 +531,11 @@ export class MemoryStore implements PlatformStore {
     const now = new Date().toISOString();
     const installId = input.installId?.trim() || `inst_${randomUUID()}`;
     const deviceId = input.deviceId?.trim() || `dev_${randomUUID()}`;
-    const productId = input.productId?.trim() || 'hdi';
+    const productId = normalizeLauncherNetworkProductId(input.productId);
     const siteId = input.siteId?.trim() || 'domestic-main';
     const lease = this.enrollLauncherNetworkLease({
       productId,
-      mode: productId === 'launcher' ? 'standalone' : 'embed',
+      mode: launcherNetworkProductIsStandaloneDefault(productId) ? 'standalone' : 'embed',
       identityKind: 'anonymous',
       installId,
       deviceId,
@@ -588,7 +594,7 @@ export class MemoryStore implements PlatformStore {
     enrollment.userId = input.userId;
     const lease = this.enrollLauncherNetworkLease({
       productId: enrollment.productId,
-      mode: enrollment.productId === 'launcher' ? 'standalone' : 'embed',
+      mode: launcherNetworkProductIsStandaloneDefault(enrollment.productId) ? 'standalone' : 'embed',
       identityKind: 'user',
       installId: enrollment.installId,
       deviceId: enrollment.deviceId,
@@ -1253,6 +1259,12 @@ export class MemoryStore implements PlatformStore {
   upsertLauncherProductNetwork(input: LauncherProductNetworkInput): LauncherProductNetwork {
     const previous = input.productId ? this.getLauncherProductNetwork(input.productId) : null;
     const product = buildLauncherProductNetwork(this.config, input, previous);
+    if (product.mode === 'embed') {
+      const channel = this.getLauncherProductNetwork(product.standaloneChannelProductId);
+      if (!channel || channel.mode !== 'standalone' || !channel.enabled) {
+        throw new Error(`Embed product ${product.productId} requires an enabled launcher standalone channel: ${product.standaloneChannelProductId}`);
+      }
+    }
     this.launcherProductNetworks.set(product.productId, product);
     this.recordAudit({
       eventType: 'launcher_network.product_network.upserted',
@@ -1285,13 +1297,21 @@ export class MemoryStore implements PlatformStore {
   enrollLauncherNetworkLease(input: LauncherNetworkLeaseInput): LauncherNetworkLease {
     const installId = input.installId?.trim() || `inst_${randomUUID()}`;
     const deviceId = input.deviceId?.trim() || `dev_${randomUUID()}`;
-    const productId = input.productId?.trim().toLowerCase() || 'launcher';
+    const requestedProductId = normalizeLauncherNetworkProductId(input.productId);
+    const requestedProduct = this.getLauncherProductNetwork(requestedProductId)
+      ?? buildLauncherProductNetwork(this.config, {
+        productId: requestedProductId,
+        mode: input.mode ?? (launcherNetworkProductIsStandaloneDefault(requestedProductId) ? 'standalone' : 'embed')
+      }, null);
+    const productId = launcherNetworkLeaseProductId(
+      requestedProduct.mode === 'standalone' ? requestedProduct.productId : requestedProduct.standaloneChannelProductId
+    );
     const product = this.getLauncherProductNetwork(productId)
-      ?? buildLauncherProductNetwork(this.config, { productId, mode: input.mode ?? 'embed' }, null);
+      ?? buildLauncherProductNetwork(this.config, { productId, mode: 'standalone' }, null);
     const normalizedInput: LauncherNetworkLeaseInput = {
       ...input,
       productId: product.productId,
-      mode: input.mode ?? product.mode,
+      mode: product.mode,
       identityKind: input.identityKind === 'user' || input.userId?.trim() ? 'user' : 'anonymous',
       installId,
       deviceId
@@ -1468,6 +1488,43 @@ export class MemoryStore implements PlatformStore {
 
   getAppCenterApp(appId: string): AppCenterApp | null {
     return this.appCatalog.get(appId) ?? null;
+  }
+
+  upsertAppCenterApp(input: AppCenterAppInput): AppCenterApp {
+    const appId = input.appId?.trim() || '';
+    const previous = appId ? this.getAppCenterApp(appId) : null;
+    const app = buildAppCenterApp(input, previous);
+    this.appCatalog.set(app.appId, app);
+    this.recordAudit({
+      eventType: previous ? 'app-center.app.updated' : 'app-center.app.created',
+      actorKind: 'app-center',
+      productId: app.appId,
+      metadata: {
+        requestedBy: input.requestedBy?.trim() || 'desktop-admin',
+        launcherMode: app.launcherMode,
+        standaloneChannelProductId: app.standaloneChannelProductId,
+        builtin: app.builtin
+      }
+    });
+    return app;
+  }
+
+  deleteAppCenterApp(appId: string): boolean {
+    const app = this.getAppCenterApp(appId);
+    if (!app) return false;
+    if (app.builtin || app.systemOwned) {
+      throw new Error('builtin AppCenter app cannot be deleted');
+    }
+    this.appCatalog.delete(app.appId);
+    this.recordAudit({
+      eventType: 'app-center.app.deleted',
+      actorKind: 'app-center',
+      productId: app.appId,
+      metadata: {
+        requestedBy: 'desktop-admin'
+      }
+    });
+    return true;
   }
 
   listDnsPolicies(): DnsPolicy[] {
@@ -1653,10 +1710,10 @@ export class MemoryStore implements PlatformStore {
   }
 
   createLauncherNetworkSnapshot(input: LauncherNetworkSnapshotInput): LauncherNetworkSnapshot {
-    const appId = input.appId ?? 'launcher';
+    const appId = normalizeLauncherNetworkProductId(input.appId);
     const launcherMode = input.launcherMode === 'embed' || input.launcherMode === 'standalone'
       ? input.launcherMode
-      : appId === 'launcher'
+      : launcherNetworkProductIsStandaloneDefault(appId)
         ? 'standalone'
         : 'embed';
     const mode = input.userId ? 'user' : 'guest';
@@ -2033,7 +2090,7 @@ export class MemoryStore implements PlatformStore {
     checks.push('OK SDK Gateway denied missing scope');
     const smokeHomePublicKey = 'WvN2n3i6LXoJt1qX0lA2uP7cYy4rZs8mQb9dEfGhIjK=';
     const { enrollment } = this.enrollAnonymous({
-      productId: 'launcher',
+      productId: MX_H2I_PRODUCT_ID,
       platform: 'darwin',
       publicKey: smokeHomePublicKey,
       requestId: 'smoke-enroll'
@@ -2414,7 +2471,7 @@ export class MemoryStore implements PlatformStore {
       installId: enrollment.installId,
       deviceId: enrollment.deviceId,
       publicKey: enrollment.publicKey,
-      appId: 'launcher',
+      appId: MX_H2I_PRODUCT_ID,
       launcherMode: 'standalone',
       requestId: 'smoke-network'
     });
@@ -2431,11 +2488,11 @@ export class MemoryStore implements PlatformStore {
       throw new Error('guest network snapshot did not model Domestic relay peer lease');
     }
     checks.push('OK guest network snapshot issued with Domestic relay lease');
-    const launcherLeases = this.listLauncherNetworkLeases('launcher');
-    if (!launcherLeases.some((lease) => lease.leaseIp === networkSnapshot.overlayPolicy.leaseIp && lease.identityKind === 'anonymous')) {
-      throw new Error('launcher network lease allocator did not persist Launcher anonymous lease');
+    const mxH2iLeases = this.listLauncherNetworkLeases(MX_H2I_PRODUCT_ID);
+    if (!mxH2iLeases.some((lease) => lease.leaseIp === networkSnapshot.overlayPolicy.leaseIp && lease.identityKind === 'anonymous')) {
+      throw new Error('MX-H2I network lease allocator did not persist anonymous lease');
     }
-    checks.push('OK Launcher Network lease allocator persisted Launcher anonymous lease');
+    checks.push('OK MX-H2I Network lease allocator persisted anonymous lease');
     const permissionGrant = this.requestPermission({
       appId: 'h2o',
       installId: enrollment.installId,
@@ -2449,7 +2506,7 @@ export class MemoryStore implements PlatformStore {
     checks.push('OK h2o permission granted');
     const testRun = this.createTestRun({
       suiteId: 'hdi-shadow-e2e',
-      productId: 'launcher',
+      productId: MX_H2I_PRODUCT_ID,
       topology: 'h-d-i-shadow',
       sites: ['domestic-main', 'internal-main'],
       releaseId: 'rel_smoke',
@@ -2499,7 +2556,7 @@ export class MemoryStore implements PlatformStore {
       releaseId: 'rel_smoke_management',
       installId: enrollment.installId,
       channel: 'shadow',
-      productId: 'launcher',
+      productId: MX_H2I_PRODUCT_ID,
       appId: 'h2o',
       e2eResult: 'passed',
       requestId: 'smoke-release-management'

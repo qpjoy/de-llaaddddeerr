@@ -10,6 +10,9 @@ RUN pnpm prune --prod
 
 FROM node:22-alpine AS runtime
 WORKDIR /app
+LABEL dev.qpjoy.mx-launcher.project="mx-launcher" \
+      dev.qpjoy.mx-launcher.component="server" \
+      dev.qpjoy.mx-launcher.image="shadow"
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
 ENV PORT=18090

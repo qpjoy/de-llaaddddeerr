@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Inject, NotFoundException, Param, Post } from '@nestjs/common';
 
 import { asRecord, nullableString } from '../../lib/http.js';
+import { MX_H2I_PRODUCT_ID } from '../../store/domain.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
 
@@ -18,7 +19,7 @@ export class LauncherNetworkController {
         siteId: nullableString(body.siteId),
         userId: nullableString(body.userId),
         publicKey: nullableString(body.publicKey),
-        appId: nullableString(body.appId) ?? 'launcher',
+        appId: nullableString(body.appId) ?? MX_H2I_PRODUCT_ID,
         launcherMode: launcherProductMode(nullableString(body.launcherMode)),
         requestId: nullableString(body.requestId) ?? undefined
       })

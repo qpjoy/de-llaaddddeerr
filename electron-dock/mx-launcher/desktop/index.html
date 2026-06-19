@@ -22,40 +22,56 @@
         </div>
 
         <nav class="nav-tabs" aria-label="Primary">
-          <section class="nav-group" aria-label="Applications">
-            <div class="nav-group-title">
-              <strong>应用 App</strong>
-              <span>Launcher products</span>
-            </div>
-            <div class="nav-tree">
-              <button id="tab-mx-h2i" class="nav-tab nav-tab-standalone" type="button" data-view="app-center" data-app-node="mx-h2i" data-short="H2I">
+          <section id="nav-group-apps" class="nav-group is-active" aria-label="Applications" data-nav-group="apps">
+            <button id="app-nav-toggle" class="nav-group-title nav-group-toggle" type="button" aria-expanded="true" aria-controls="app-nav-tree">
+              <span>
+                <strong>应用 App</strong>
+                <small>Launcher products</small>
+              </span>
+              <b aria-hidden="true">⌃</b>
+            </button>
+            <div id="app-nav-tree" class="nav-tree">
+              <button id="tab-mx-h2i" class="nav-tab is-active" type="button" data-view="app-center" data-app-node="mx-h2i" data-short="H2I">
                 <strong>MX-H2I</strong>
-                <span>standalone channel</span>
+                <span>VPN / standalone launcher</span>
               </button>
-              <div class="nav-tree-children">
-                <button id="tab-app-center" class="nav-tab is-active" type="button" data-view="app-center" data-app-node="appcenter" data-short="App">
-                  <strong>AppCenter</strong>
-                  <span>embed host</span>
-                </button>
-                <button id="tab-h2o" class="nav-tab" type="button" data-view="app-center" data-app-node="h2o" data-short="H2O">
-                  <strong>H2O</strong>
-                  <span>embed app</span>
-                </button>
-              </div>
+              <button id="tab-app-center" class="nav-tab" type="button" data-view="app-center" data-app-node="appcenter" data-short="App">
+                <strong>AppCenter</strong>
+                <span>embed launcher host</span>
+              </button>
+              <button id="tab-h2o" class="nav-tab" type="button" data-view="app-center" data-app-node="h2o" data-short="H2O">
+                <strong>H2O</strong>
+                <span>embed launcher app</span>
+              </button>
             </div>
           </section>
-          <button id="tab-admin" class="nav-tab" type="button" data-view="admin" data-admin-menu="operations" data-admin-section="dashboard" data-admin-subsection="overview" data-short="I-HDO">
-            <strong>I-HDO</strong>
-            <span>Operations H/D/I/O</span>
-          </button>
-          <button id="tab-internal" class="nav-tab" type="button" data-view="admin" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="overview" data-short="INT">
-            <strong>Internal 基础系统</strong>
-            <span>User / RBAC / Config</span>
-          </button>
-          <button id="tab-evidence" class="nav-tab" type="button" data-view="admin" data-admin-menu="evidence" data-admin-section="evidence" data-admin-subsection="overview" data-short="EVD">
-            <strong>Evidence History</strong>
-            <span>Trace / log / gate</span>
-          </button>
+          <section id="nav-group-operations" class="nav-group admin-nav-group" aria-label="I-HDO" data-nav-group="operations">
+            <button id="tab-admin" class="nav-tab nav-group-parent" type="button" data-view="admin" data-admin-menu="operations" data-admin-section="dashboard" data-admin-subsection="overview" data-short="I-HDO" aria-expanded="true">
+              <span class="nav-tab-copy">
+                <strong>I-HDO</strong>
+                <span>Operations H/D/I/O</span>
+              </span>
+              <b class="nav-disclosure" aria-hidden="true">⌃</b>
+            </button>
+          </section>
+          <section id="nav-group-internal" class="nav-group admin-nav-group is-group-collapsed" aria-label="Internal" data-nav-group="internal">
+            <button id="tab-internal" class="nav-tab nav-group-parent" type="button" data-view="admin" data-admin-menu="internal" data-admin-section="foundations" data-admin-subsection="overview" data-short="INT" aria-expanded="false">
+              <span class="nav-tab-copy">
+                <strong>Internal 基础系统</strong>
+                <span>User / RBAC / Config</span>
+              </span>
+              <b class="nav-disclosure" aria-hidden="true">⌄</b>
+            </button>
+          </section>
+          <section id="nav-group-evidence" class="nav-group admin-nav-group is-group-collapsed" aria-label="Evidence" data-nav-group="evidence">
+            <button id="tab-evidence" class="nav-tab nav-group-parent" type="button" data-view="admin" data-admin-menu="evidence" data-admin-section="evidence" data-admin-subsection="overview" data-short="EVD" aria-expanded="false">
+              <span class="nav-tab-copy">
+                <strong>Evidence History</strong>
+                <span>Trace / log / gate</span>
+              </span>
+              <b class="nav-disclosure" aria-hidden="true">⌄</b>
+            </button>
+          </section>
         </nav>
 
         <nav id="admin-subnav" class="admin-module-nav sidebar-admin-nav" aria-label="Admin modules" hidden>
@@ -64,7 +80,6 @@
               <span id="admin-subnav-kicker">Operations</span>
               <strong id="admin-subnav-title">H/D/I/O</strong>
             </div>
-            <button id="admin-subnav-toggle" class="icon-button" type="button" aria-expanded="true" title="Toggle admin menu">⌃</button>
           </div>
           <div id="admin-subnav-items" class="admin-subnav-items">
             <button class="admin-module-tab is-active" type="button" data-admin-menu="operations" data-admin-section="dashboard" data-admin-subsection="overview">
@@ -184,26 +199,21 @@
           <header class="view-header">
             <div>
               <h2 id="app-center-heading">AppCenter</h2>
-              <p>Installed applications and runtime access.</p>
+              <p id="app-center-subtitle">Installed applications and runtime access.</p>
             </div>
             <button id="app-refresh" class="secondary-button" type="button">Refresh</button>
           </header>
 
-          <section class="app-grid" aria-label="Applications">
-            <article class="product-card" aria-labelledby="h2o-title">
-              <div>
-                <h3 id="h2o-title">H2O</h3>
-                <p>Network, split DNS, PAC, and Internal service access.</p>
-              </div>
-              <span id="h2o-status" class="product-state">Not installed</span>
-              <div class="action-row">
-                <button id="h2o-launch" class="primary-button" type="button">Launch</button>
-                <button id="h2o-admin" class="secondary-button" type="button">Open Admin</button>
-              </div>
-              <section id="h2o-network" class="product-network-panel" aria-label="H2O product network">
-                <div class="empty-state">Product network is waiting for Internal.</div>
-              </section>
-            </article>
+          <section id="launcher-foundation-overview" class="launcher-foundation-overview" aria-label="Launcher foundation overview">
+            <div class="empty-state">Launcher foundation is waiting for Internal.</div>
+          </section>
+
+          <section id="app-selected-detail" class="app-selected-detail" aria-label="Selected application">
+            <div class="empty-state">Select an app to inspect its Launcher mode.</div>
+          </section>
+
+          <section id="app-products-panel" class="app-products-panel" aria-label="Applications">
+            <div class="empty-state">Applications are waiting for Internal.</div>
           </section>
         </section>
 
@@ -544,6 +554,8 @@
         </section>
       </section>
     </main>
+    <div id="app-editor-backdrop" class="app-editor-backdrop" hidden></div>
+    <aside id="app-editor-drawer" class="app-editor-drawer" aria-labelledby="app-editor-title" aria-modal="true" role="dialog" hidden></aside>
     <div id="evidence-backdrop" class="evidence-backdrop" hidden></div>
     <aside id="evidence-drawer" class="evidence-drawer" aria-labelledby="evidence-title" hidden>
       <header class="evidence-header">

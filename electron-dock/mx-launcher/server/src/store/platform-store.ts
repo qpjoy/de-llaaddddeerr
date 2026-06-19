@@ -2,6 +2,7 @@ import type {
   AnonymousEnrollment,
   AnonymousEnrollmentRequest,
   AppCenterApp,
+  AppCenterAppInput,
   AuditEvent,
   AuditEventInput,
   AwxProviderConfig,
@@ -219,6 +220,8 @@ export interface PlatformStore {
   observabilitySinks(): MaybePromise<RuntimeConfig['observabilitySinks']>;
   listAppCenterApps(): MaybePromise<AppCenterApp[]>;
   getAppCenterApp(appId: string): MaybePromise<AppCenterApp | null>;
+  upsertAppCenterApp(input: AppCenterAppInput): MaybePromise<AppCenterApp>;
+  deleteAppCenterApp(appId: string): MaybePromise<boolean>;
   listDnsPolicies(): MaybePromise<DnsPolicy[]>;
   getEffectiveDnsPolicy(appId?: string | null): MaybePromise<DnsPolicy>;
   evaluateDnsQuery(input: DnsQueryInput): MaybePromise<DnsResolutionDecision>;

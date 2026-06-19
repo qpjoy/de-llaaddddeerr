@@ -2,6 +2,9 @@ import * as THREE from './node_modules/three/build/three.module.js';
 
 const SSH_READONLY_PROBE_FEATURE_KEY = 'site-slot.ssh-readonly-probe.execute';
 const LOCAL_SERVER_BASE_URL = 'http://127.0.0.1:18090';
+const MX_H2I_PRODUCT_ID = 'mx-h2i';
+const APP_CENTER_PRODUCT_ID = 'appcenter';
+const LAUNCHER_FOUNDATION_PRODUCT_ID = 'launcher';
 
 function isLocalStaticAdminBaseUrl(value) {
   try {
@@ -60,10 +63,22 @@ const defaultRelayEnrollmentDeviceId = `desktop-admin-${Date.now().toString(36)}
 
 const state = {
   activeView: 'app-center',
-  activeAppNode: 'appcenter',
+  activeAppNode: MX_H2I_PRODUCT_ID,
+  appNavCollapsed: false,
+  appCenterApps: [],
+  appCenterAppsError: null,
+  appCatalogFilter: '',
+  appCatalogModeFilter: 'all',
+  appCatalogEditor: null,
+  appCatalogBusy: false,
+  appCatalogFeedback: null,
   sidebarCollapsed: false,
   inspectorCollapsed: false,
-  adminSubnavCollapsed: false,
+  adminNavCollapsed: {
+    operations: false,
+    internal: true,
+    evidence: true
+  },
   hoverAdminMenu: null,
   adminMenu: 'operations',
   adminSection: 'dashboard',
@@ -96,7 +111,7 @@ const state = {
   },
   preferredActionFocus: null,
   domesticPeerDraft: {
-    productId: 'launcher',
+    productId: MX_H2I_PRODUCT_ID,
     productSecondOctet: '89',
     leaseId: '',
     peerRole: 'guest',
@@ -155,7 +170,7 @@ const state = {
     feedback: null,
     busy: false,
     draft: {
-      productId: 'launcher',
+      productId: MX_H2I_PRODUCT_ID,
       productSecondOctet: '89',
       mode: 'standalone',
       identityKind: 'anonymous',
@@ -329,10 +344,17 @@ const evidenceSubsectionMeta = {
 const sidebar = document.getElementById('sidebar');
 const sidebarCollapse = document.getElementById('sidebar-collapse');
 const stateChip = document.getElementById('connection-state');
+const appNavToggle = document.getElementById('app-nav-toggle');
+const appNavTree = document.getElementById('app-nav-tree');
+const appCenterHeading = document.getElementById('app-center-heading');
+const appCenterSubtitle = document.getElementById('app-center-subtitle');
+const appProductsPanel = document.getElementById('app-products-panel');
+const appSelectedDetail = document.getElementById('app-selected-detail');
 const h2oLaunch = document.getElementById('h2o-launch');
 const h2oAdmin = document.getElementById('h2o-admin');
 const h2oStatus = document.getElementById('h2o-status');
 const h2oNetwork = document.getElementById('h2o-network');
+const launcherFoundationOverview = document.getElementById('launcher-foundation-overview');
 const serverInput = document.getElementById('server-input');
 const platformStatus = document.getElementById('platform-status');
 const appRefresh = document.getElementById('app-refresh');
@@ -349,7 +371,6 @@ const pipelineHealth = document.getElementById('pipeline-health');
 const adminModuleTabs = Array.from(document.querySelectorAll('.admin-module-tab'));
 const adminSections = Array.from(document.querySelectorAll('.admin-section'));
 const adminSubnav = document.getElementById('admin-subnav');
-const adminSubnavToggle = document.getElementById('admin-subnav-toggle');
 const adminSubnavKicker = document.getElementById('admin-subnav-kicker');
 const adminSubnavTitle = document.getElementById('admin-subnav-title');
 const adminSubnavItems = document.getElementById('admin-subnav-items');
@@ -442,6 +463,8 @@ const awxProviderCheck = document.getElementById('awx-provider-check');
 const awxRuntimeGates = document.getElementById('awx-runtime-gates');
 const awxProviderList = document.getElementById('awx-provider-list');
 const topologyCanvas = document.getElementById('topology-canvas');
+const appEditorBackdrop = document.getElementById('app-editor-backdrop');
+const appEditorDrawer = document.getElementById('app-editor-drawer');
 const evidenceBackdrop = document.getElementById('evidence-backdrop');
 const evidenceDrawer = document.getElementById('evidence-drawer');
 const evidenceClose = document.getElementById('evidence-close');
@@ -452,15 +475,33 @@ const evidenceSummary = document.getElementById('evidence-summary');
 const evidenceSteps = document.getElementById('evidence-steps');
 const evidenceJson = document.getElementById('evidence-json');
 
-const tabs = Array.from(document.querySelectorAll('.nav-tab'));
+let tabs = Array.from(document.querySelectorAll('.nav-tab'));
 const views = Array.from(document.querySelectorAll('.view'));
+const navGroups = Array.from(document.querySelectorAll('.nav-group'));
+const boundNavTabs = new WeakSet();
 
-void boot();
-
-for (const tab of tabs) {
-  tab.addEventListener('click', () => {
-    state.hoverAdminMenu = null;
+function handlePrimaryNavTabClick(tab) {
+  state.hoverAdminMenu = null;
+  if (tab.dataset.view === 'admin') {
+    const menuName = adminMenuFromElement(tab);
+    const sameActiveMenu = state.activeView === 'admin' && state.adminMenu === menuName;
+    if (!state.sidebarCollapsed && sameActiveMenu) {
+      state.adminNavCollapsed[menuName] = !adminNavIsCollapsed(menuName);
+      renderAdminShell();
+      return;
+    }
+    state.adminNavCollapsed[menuName] = false;
     setActiveView(tab.dataset.view, adminNavFromElement(tab), { appNode: tab.dataset.appNode });
+    return;
+  }
+  setActiveView(tab.dataset.view, adminNavFromElement(tab), { appNode: tab.dataset.appNode });
+}
+
+function bindPrimaryNavTab(tab) {
+  if (!tab || boundNavTabs.has(tab)) return;
+  boundNavTabs.add(tab);
+  tab.addEventListener('click', () => {
+    handlePrimaryNavTabClick(tab);
   });
   tab.addEventListener('mouseenter', () => {
     previewCollapsedAdminSubnav(tab);
@@ -470,13 +511,32 @@ for (const tab of tabs) {
   });
 }
 
-h2oLaunch.addEventListener('click', () => {
-  void launchHdiProduct();
-});
+function refreshNavTabs() {
+  tabs = Array.from(document.querySelectorAll('.nav-tab'));
+  for (const tab of tabs) bindPrimaryNavTab(tab);
+}
 
-h2oAdmin.addEventListener('click', () => {
-  void api.openAdmin(serverInput.value);
-});
+refreshNavTabs();
+void boot();
+
+if (h2oLaunch) {
+  h2oLaunch.addEventListener('click', () => {
+    void launchHdiProduct();
+  });
+}
+
+if (h2oAdmin) {
+  h2oAdmin.addEventListener('click', () => {
+    void api.openAdmin(serverInput.value);
+  });
+}
+
+if (appNavToggle) {
+  appNavToggle.addEventListener('click', () => {
+    state.appNavCollapsed = !state.appNavCollapsed;
+    renderAppNav();
+  });
+}
 
 serverInput.addEventListener('change', () => {
   void persistConfig();
@@ -493,10 +553,14 @@ adminRefresh.addEventListener('click', () => {
 sidebarCollapse.addEventListener('click', () => {
   state.sidebarCollapsed = !state.sidebarCollapsed;
   state.hoverAdminMenu = null;
+  if (!state.sidebarCollapsed && state.activeView === 'admin') {
+    state.adminNavCollapsed[state.adminMenu] = false;
+  }
   sidebar.classList.toggle('is-collapsed', state.sidebarCollapsed);
   sidebar.classList.toggle('is-subnav-open', state.sidebarCollapsed && state.activeView === 'admin');
   sidebarCollapse.setAttribute('aria-expanded', state.sidebarCollapsed ? 'false' : 'true');
   sidebarCollapse.textContent = state.sidebarCollapsed ? '展开 →' : '收起 ←';
+  renderAppNav();
   renderAdminSubnav();
   requestAnimationFrame(() => resizeTopology());
 });
@@ -515,13 +579,6 @@ sidebar.addEventListener('mouseleave', () => {
   sidebar.classList.toggle('is-subnav-open', state.activeView === 'admin');
   renderAdminSubnav();
 });
-
-if (adminSubnavToggle) {
-  adminSubnavToggle.addEventListener('click', () => {
-    state.adminSubnavCollapsed = !state.adminSubnavCollapsed;
-    renderAdminSubnav();
-  });
-}
 
 for (const tab of adminModuleTabs) {
   tab.addEventListener('click', (event) => {
@@ -547,6 +604,8 @@ document.addEventListener('click', (event) => {
 
 function handleAdminModuleNavigation(tab) {
   applyAdminNavigation(adminNavFromElement(tab), { stopSetupMessage: 'Stopped because the operator changed sections.' });
+  state.adminNavCollapsed[state.adminMenu] = false;
+  state.hoverAdminMenu = null;
   renderAdminShell();
   if (state.dashboard && state.adminSection === 'deployment') {
     const active = activePipelineForCurrentDeployment(state.dashboard.siteSlotPipelines || []);
@@ -633,7 +692,15 @@ evidenceBackdrop.addEventListener('click', () => {
   closeEvidenceDrawer();
 });
 
+if (appEditorBackdrop) {
+  appEditorBackdrop.addEventListener('click', () => closeAppCatalogEditor());
+}
+
 window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && appEditorDrawer && !appEditorDrawer.hidden) {
+    closeAppCatalogEditor();
+    return;
+  }
   if (event.key === 'Escape' && !evidenceDrawer.hidden) {
     closeEvidenceDrawer();
   }
@@ -658,9 +725,17 @@ function adminNavFromElement(element) {
   };
 }
 
+function adminMenuFromElement(element) {
+  return element?.dataset?.adminMenu || 'operations';
+}
+
+function adminNavIsCollapsed(menuName) {
+  return state.adminNavCollapsed?.[menuName] === true;
+}
+
 function previewCollapsedAdminSubnav(tab) {
   if (!state.sidebarCollapsed || tab.dataset.view !== 'admin') return;
-  state.hoverAdminMenu = tab.dataset.adminMenu || 'operations';
+  state.hoverAdminMenu = adminMenuFromElement(tab);
   sidebar.classList.add('is-subnav-open');
   renderAdminSubnav();
 }
@@ -671,6 +746,7 @@ function setActiveView(view, nav = {}, options = {}) {
   }
   if (view === 'admin') {
     applyAdminNavigation(nav);
+    state.adminNavCollapsed[state.adminMenu] = false;
   }
   state.activeView = view === 'admin' ? 'admin' : 'app-center';
   if (state.activeView === 'app-center') {
@@ -684,12 +760,16 @@ function setActiveView(view, nav = {}, options = {}) {
   }
   for (const tab of tabs) {
     const active = state.activeView === 'app-center'
-      ? tab.dataset.view === 'app-center' && (tab.dataset.appNode || 'appcenter') === state.activeAppNode
-      : tab.dataset.view === 'admin' && (tab.dataset.adminMenu || 'operations') === state.adminMenu;
+      ? tab.dataset.view === 'app-center' && (tab.dataset.appNode || APP_CENTER_PRODUCT_ID) === state.activeAppNode
+      : tab.dataset.view === 'admin' && adminMenuFromElement(tab) === state.adminMenu;
     tab.classList.toggle('is-active', active);
   }
   for (const item of views) {
     item.classList.toggle('is-active', item.id === `view-${state.activeView}`);
+  }
+  renderAppNav();
+  if (state.activeView === 'app-center') {
+    renderAppCenterShell();
   }
   renderAdminShell();
   if (state.activeView === 'admin' && !state.dashboard) {
@@ -731,20 +811,24 @@ function applyAdminNavigation(nav = {}, options = {}) {
 async function refreshProducts() {
   const products = await api.getProducts();
   const hdi = products.find((product) => product.id === 'hdi');
-  h2oStatus.textContent = hdi && hdi.status === 'installed' ? 'Installed' : 'Not installed';
+  if (h2oStatus) h2oStatus.textContent = hdi && hdi.status === 'installed' ? 'Installed' : 'Not installed';
   await refreshAppCenterNetwork();
 }
 
 async function refreshAppCenterNetwork() {
-  const [productPayload, leasePayload] = await Promise.all([
+  const [appPayload, productPayload, leasePayload] = await Promise.all([
+    loadAppCenterApps(),
     loadLauncherProductNetworks(),
     loadLauncherNetworkLeases()
   ]);
+  state.appCenterApps = asArray(appPayload.apps);
+  state.appCenterAppsError = appPayload.error || null;
   state.launcherProducts = asArray(productPayload.products);
   state.launcherProductsError = productPayload.error || null;
   state.launcherLeases = asArray(leasePayload.leases);
   state.launcherLeasesError = leasePayload.error || null;
-  renderAppCenterProductNetwork();
+  renderLauncherFoundationOverview();
+  renderAppCenterShell();
 }
 
 async function persistConfig() {
@@ -774,11 +858,12 @@ async function refreshAdmin() {
   await persistConfig();
   renderAdminLoading();
   try {
-    const [dashboard, profilePayload, overseaPayload, userCenterPayload, launcherProductsPayload, launcherLeasesPayload] = await Promise.all([
+    const [dashboard, profilePayload, overseaPayload, userCenterPayload, appCenterAppsPayload, launcherProductsPayload, launcherLeasesPayload] = await Promise.all([
       fetchJson('/internal/v1/admin/dashboard'),
       loadSshProfiles(),
       loadOverseaOverview(),
       loadUserCenterOverview(),
+      loadAppCenterApps(),
       loadLauncherProductNetworks(),
       loadLauncherNetworkLeases()
     ]);
@@ -791,11 +876,13 @@ async function refreshAdmin() {
       state.userCenter.feedback = { kind: 'error', message: userCenterPayload.error };
     }
     state.awxProviders = asArray(dashboard.awxProviders);
+    state.appCenterApps = asArray(appCenterAppsPayload.apps);
+    state.appCenterAppsError = appCenterAppsPayload.error || null;
     state.launcherProducts = asArray(launcherProductsPayload.products);
     state.launcherProductsError = launcherProductsPayload.error || null;
     state.launcherLeases = asArray(launcherLeasesPayload.leases);
     state.launcherLeasesError = launcherLeasesPayload.error || null;
-    renderAppCenterProductNetwork();
+    renderAppCenterShell();
     state.awxRuntimePolicies = asArray(dashboard.runtimeFeaturePolicies);
     state.overseaOverview = overseaPayload.overview;
     state.overseaOverviewError = overseaPayload.error;
@@ -818,11 +905,13 @@ async function refreshAdmin() {
     }
     state.dashboard = null;
     state.overseaOverview = null;
+    state.appCenterApps = [];
+    state.appCenterAppsError = error.message;
     state.launcherProducts = [];
     state.launcherProductsError = error.message;
     state.launcherLeases = [];
     state.launcherLeasesError = error.message;
-    renderAppCenterProductNetwork();
+    renderAppCenterShell();
     state.overseaOverviewError = error.message;
     renderAdminError(error);
     setConnection('error', 'Offline', 'Admin API unavailable');
@@ -853,6 +942,15 @@ async function loadLauncherNetworkLeases() {
     return { leases: asArray(payload.leases), error: null };
   } catch (error) {
     return { leases: [], error: error.message };
+  }
+}
+
+async function loadAppCenterApps() {
+  try {
+    const payload = await fetchJson('/internal/v1/app-center/apps');
+    return { apps: asArray(payload.apps), error: null };
+  } catch (error) {
+    return { apps: [], error: error.message };
   }
 }
 
@@ -2845,11 +2943,24 @@ function setConnection(stateName, label, description) {
 }
 
 function renderPrimaryNav() {
+  for (const group of navGroups) {
+    group.classList.remove('is-active');
+  }
   for (const tab of tabs) {
     const active = state.activeView === 'app-center'
-      ? tab.dataset.view === 'app-center' && (tab.dataset.appNode || 'appcenter') === state.activeAppNode
-      : tab.dataset.view === 'admin' && (tab.dataset.adminMenu || 'operations') === state.adminMenu;
+      ? tab.dataset.view === 'app-center' && (tab.dataset.appNode || APP_CENTER_PRODUCT_ID) === state.activeAppNode
+      : tab.dataset.view === 'admin' && adminMenuFromElement(tab) === state.adminMenu;
     tab.classList.toggle('is-active', active);
+    const group = tab.closest('.nav-group');
+    if (active && group) group.classList.add('is-active');
+    if (tab.dataset.view === 'admin') {
+      const menuName = adminMenuFromElement(tab);
+      const collapsed = adminNavIsCollapsed(menuName);
+      tab.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      tab.closest('.nav-group')?.classList.toggle('is-group-collapsed', collapsed);
+      const disclosure = tab.querySelector('.nav-disclosure');
+      if (disclosure) disclosure.textContent = collapsed ? '⌄' : '⌃';
+    }
   }
 }
 
@@ -2900,7 +3011,9 @@ function renderInspectorChrome() {
 function renderAdminSubnav() {
   if (!adminSubnav) return;
   const displayMenuName = state.hoverAdminMenu || state.adminMenu;
+  const flyout = state.sidebarCollapsed;
   const visible = state.activeView === 'admin' || Boolean(state.hoverAdminMenu);
+  const collapsed = !flyout && adminNavIsCollapsed(displayMenuName);
   const menu = adminMenuMeta[displayMenuName] || adminMenuMeta.operations;
   const anchor = tabs.find((tab) => tab.dataset.view === 'admin' && (tab.dataset.adminMenu || 'operations') === displayMenuName);
   if (anchor && adminSubnav.previousElementSibling !== anchor) {
@@ -2909,10 +3022,11 @@ function renderAdminSubnav() {
   if (anchor) {
     adminSubnav.style.setProperty('--admin-subnav-top', `${anchor.offsetTop}px`);
   }
-  adminSubnav.hidden = !visible;
+  adminSubnav.hidden = !visible || collapsed;
   adminSubnav.dataset.menu = displayMenuName;
+  adminSubnav.dataset.flyout = flyout ? 'true' : 'false';
   adminSubnav.setAttribute('aria-label', `${menu.heading} modules`);
-  adminSubnav.classList.toggle('is-collapsed', state.adminSubnavCollapsed);
+  adminSubnav.classList.toggle('is-collapsed', collapsed);
   if (adminSubnavKicker) adminSubnavKicker.textContent = menu.kicker;
   if (adminSubnavTitle) adminSubnavTitle.textContent = menu.title;
   for (const tab of adminModuleTabs) {
@@ -2930,11 +3044,7 @@ function renderAdminSubnav() {
         && subsection === state.adminSubsection
     );
   }
-  if (adminSubnavItems) adminSubnavItems.hidden = state.adminSubnavCollapsed;
-  if (adminSubnavToggle) {
-    adminSubnavToggle.setAttribute('aria-expanded', state.adminSubnavCollapsed ? 'false' : 'true');
-    adminSubnavToggle.textContent = state.adminSubnavCollapsed ? '⌄' : '⌃';
-  }
+  if (adminSubnavItems) adminSubnavItems.hidden = false;
 }
 
 function renderAdminSectionHeadings() {
@@ -4953,23 +5063,30 @@ function renderUserIntegrationPanel() {
   `;
 }
 
-function normalizeLauncherProductId(value) {
-  const normalized = String(value || '')
+function cleanLauncherProductId(value) {
+  return String(value || '')
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9_-]+/g, '-')
     .replace(/^-+|-+$/g, '');
-  return normalized || 'launcher';
+}
+
+function normalizeLauncherProductId(value) {
+  const normalized = cleanLauncherProductId(value);
+  return normalized || MX_H2I_PRODUCT_ID;
 }
 
 function normalizeStandaloneProductId(value) {
   const productId = normalizeLauncherProductId(value);
+  if (productId === LAUNCHER_FOUNDATION_PRODUCT_ID) return MX_H2I_PRODUCT_ID;
   const product = launcherProductById(productId);
-  return product && product.mode !== 'standalone' ? 'launcher' : productId;
+  return product && product.mode !== 'standalone' ? MX_H2I_PRODUCT_ID : productId;
 }
 
 function launcherProductDisplayName(productId, product = null) {
-  if (productId === 'launcher') return 'MX-H2I';
+  if (productId === MX_H2I_PRODUCT_ID) return 'MX-H2I';
+  if (productId === APP_CENTER_PRODUCT_ID) return 'AppCenter';
+  if (productId === LAUNCHER_FOUNDATION_PRODUCT_ID) return 'Launcher Foundation';
   if (product?.displayName) return product.displayName;
   if (productId === 'h2o') return 'H2O';
   return productId
@@ -4980,7 +5097,8 @@ function launcherProductDisplayName(productId, product = null) {
 }
 
 function productSecondOctetFromIp(value) {
-  const parts = String(value || '').split('.').map((part) => Number(part));
+  const address = String(value || '').split('/')[0];
+  const parts = address.split('.').map((part) => Number(part));
   if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) return null;
   if (parts[0] !== 10 || parts[1] < 1 || parts[1] > 254 || parts[1] === 88) return null;
   return String(parts[1]);
@@ -5003,9 +5121,10 @@ function defaultProductSecondOctet(productId, mode = 'standalone') {
   const product = launcherProductById(productId);
   const existing = productSecondOctetFromProduct(product);
   if (existing) return existing;
-  if (productId === 'launcher') return '89';
+  if (productId === MX_H2I_PRODUCT_ID || productId === LAUNCHER_FOUNDATION_PRODUCT_ID) return '89';
+  if (productId === APP_CENTER_PRODUCT_ID) return '92';
   if (productId === 'h2o') return '90';
-  return '90';
+  return nextAvailableProductSecondOctet(productId, mode);
 }
 
 function relayProductNetworkShape(secondOctet) {
@@ -5020,11 +5139,69 @@ function relayProductNetworkShape(secondOctet) {
   };
 }
 
+function launcherProductNetworkForDefault(productId) {
+  if ([MX_H2I_PRODUCT_ID, APP_CENTER_PRODUCT_ID, 'h2o'].includes(productId)) {
+    return launcherProductNetwork(productId);
+  }
+  return launcherProductById(productId);
+}
+
+function knownProductNetworkSecondOctets(excludingProductId = null) {
+  const excluding = cleanLauncherProductId(excludingProductId);
+  const byProduct = new Map();
+  for (const productId of [MX_H2I_PRODUCT_ID, APP_CENTER_PRODUCT_ID, 'h2o']) {
+    const product = launcherProductNetworkForDefault(productId);
+    if (product?.productId) byProduct.set(product.productId, product);
+  }
+  for (const product of asArray(state.launcherProducts)) {
+    if (product?.productId) byProduct.set(product.productId, product);
+  }
+  return [...byProduct.values()]
+    .filter((product) => !excluding || product.productId !== excluding)
+    .map((product) => ({
+      product,
+      secondOctet: productSecondOctetFromProduct(product)
+    }))
+    .filter((item) => item.secondOctet);
+}
+
+function nextAvailableProductSecondOctet(excludingProductId = null, mode = 'standalone') {
+  const used = new Set(knownProductNetworkSecondOctets(excludingProductId).map((item) => Number(item.secondOctet)));
+  const fallback = mode === 'standalone' ? 90 : 92;
+  const maxUsed = [...used].reduce((max, value) => Number.isInteger(value) ? Math.max(max, value) : max, 88);
+  for (let candidate = Math.max(fallback, maxUsed + 1); candidate <= 254; candidate += 1) {
+    if (candidate !== 88 && !used.has(candidate)) return String(candidate);
+  }
+  for (let candidate = fallback; candidate <= 254; candidate += 1) {
+    if (candidate !== 88 && !used.has(candidate)) return String(candidate);
+  }
+  return String(fallback);
+}
+
+function productNetworkSecondOctetConflict(secondOctet, excludingProductId = null) {
+  const normalized = normalizeProductSecondOctet(secondOctet, '');
+  if (!normalized) return null;
+  return knownProductNetworkSecondOctets(excludingProductId)
+    .find((item) => item.secondOctet === normalized)?.product || null;
+}
+
+function productIndexForSecondOctet(secondOctet, productId) {
+  if (productId === MX_H2I_PRODUCT_ID) return 0;
+  const octet = Number(normalizeProductSecondOctet(secondOctet, '90'));
+  return Math.max(0, Math.min(164, octet - 90));
+}
+
+function serviceVipForProductSecondOctet(secondOctet, productId) {
+  if (productId === MX_H2I_PRODUCT_ID) return '10.88.100.1';
+  const index = productIndexForSecondOctet(secondOctet, productId);
+  return `10.88.100.${Math.max(2, Math.min(254, 2 + index))}`;
+}
+
 function relayEnrollmentDraftForRender(siteId, overrides = {}) {
   const previous = state.relayEnrollment.draft || {};
-  const productId = normalizeStandaloneProductId(overrides.productId || previous.productId || 'launcher');
+  const productId = normalizeStandaloneProductId(overrides.productId || previous.productId || MX_H2I_PRODUCT_ID);
   const product = launcherProductById(productId);
-  const mode = (overrides.mode || product?.mode || previous.mode || (productId === 'launcher' ? 'standalone' : 'embed')) === 'standalone'
+  const mode = (overrides.mode || product?.mode || previous.mode || (productId === MX_H2I_PRODUCT_ID ? 'standalone' : 'embed')) === 'standalone'
     ? 'standalone'
     : 'embed';
   const productSecondOctet = normalizeProductSecondOctet(
@@ -5050,7 +5227,7 @@ function relayEnrollmentDraftForRender(siteId, overrides = {}) {
 function relayEnrollmentDraftFromForm(root = foundationGrid) {
   const current = state.relayEnrollment.draft || {};
   const scope = root || foundationGrid || document;
-  const productId = normalizeStandaloneProductId(blankToNull(scope.querySelector('[data-relay-field="productId"]')?.value) || current.productId || 'launcher');
+  const productId = normalizeStandaloneProductId(blankToNull(scope.querySelector('[data-relay-field="productId"]')?.value) || current.productId || MX_H2I_PRODUCT_ID);
   const product = asArray(state.launcherProducts).find((item) => item?.productId === productId) || null;
   const rawMode = blankToNull(scope.querySelector('[data-relay-field="mode"]')?.value) || product?.mode || current.mode || 'standalone';
   const rawIdentityKind = blankToNull(scope.querySelector('[data-relay-field="identityKind"]')?.value) || current.identityKind || 'anonymous';
@@ -5077,11 +5254,14 @@ function relayEnrollmentDraftFromForm(root = foundationGrid) {
 
 function renderRelayProductOptions(selectedProductId) {
   const selectedStandaloneProductId = normalizeStandaloneProductId(selectedProductId);
-  const products = asArray(state.launcherProducts).filter((product) => product?.mode === 'standalone');
+  const hasMxH2iProduct = asArray(state.launcherProducts).some((product) => product?.productId === MX_H2I_PRODUCT_ID);
+  const products = asArray(state.launcherProducts)
+    .filter((product) => product?.mode === 'standalone')
+    .filter((product) => !(hasMxH2iProduct && product?.productId === LAUNCHER_FOUNDATION_PRODUCT_ID));
   const optionProducts = products.length
     ? products
     : [
-        { productId: 'launcher', displayName: 'MX-H2I', mode: 'standalone', serviceVip: '10.88.100.1' }
+        { productId: MX_H2I_PRODUCT_ID, displayName: 'MX-H2I', mode: 'standalone', serviceVip: '10.88.100.1' }
       ];
   const selectedExists = optionProducts.some((product) => product.productId === selectedStandaloneProductId);
   const options = [
@@ -5099,8 +5279,8 @@ function desiredRelayProductNetwork(draft) {
   const mode = draft.mode === 'standalone' ? 'standalone' : 'embed';
   const secondOctet = normalizeProductSecondOctet(draft.productSecondOctet, defaultProductSecondOctet(productId, mode));
   const ranges = relayProductNetworkShape(secondOctet);
-  const productIndex = productId === 'launcher' ? 0 : Math.max(0, Math.min(99, Number(secondOctet) - 90));
-  const serviceHost = productId === 'launcher' ? 1 : Math.max(2, Math.min(254, 2 + productIndex));
+  const productIndex = productId === MX_H2I_PRODUCT_ID ? 0 : Math.max(0, Math.min(99, Number(secondOctet) - 90));
+  const serviceHost = productId === MX_H2I_PRODUCT_ID ? 1 : Math.max(2, Math.min(254, 2 + productIndex));
   return {
     productId,
     displayName: launcherProductDisplayName(productId, launcherProductById(productId)),
@@ -5110,7 +5290,7 @@ function desiredRelayProductNetwork(draft) {
     serviceVip: `10.88.100.${serviceHost}`,
     ...ranges,
     defaultDomesticSiteId: draft.siteId || 'domestic-main',
-    updatePolicy: productId === 'launcher' || mode === 'embed' ? 'launcher-managed' : 'app-managed',
+    updatePolicy: productId === MX_H2I_PRODUCT_ID || mode === 'embed' ? 'launcher-managed' : 'app-managed',
     requestedBy: 'desktop-admin',
     requestId: `desktop-product-network-${Date.now()}`
   };
@@ -5176,12 +5356,12 @@ function launcherProductById(productId) {
 }
 
 function fallbackLauncherProduct(productId) {
-  if (productId === 'launcher') {
+  if (productId === MX_H2I_PRODUCT_ID || productId === LAUNCHER_FOUNDATION_PRODUCT_ID) {
     return {
-      productId: 'launcher',
-      displayName: 'Launcher Standalone',
+      productId,
+      displayName: productId === LAUNCHER_FOUNDATION_PRODUCT_ID ? 'Launcher Foundation' : 'MX-H2I',
       mode: 'standalone',
-      standaloneChannelProductId: 'launcher',
+      standaloneChannelProductId: MX_H2I_PRODUCT_ID,
       serviceVip: '10.88.100.1',
       internalControlIp: '10.88.88.88',
       userLeaseStart: '10.89.0.1',
@@ -5192,17 +5372,49 @@ function fallbackLauncherProduct(productId) {
       updatePolicy: 'launcher-managed'
     };
   }
+  if (productId === APP_CENTER_PRODUCT_ID) {
+    return {
+      productId,
+      displayName: 'AppCenter',
+      mode: 'embed',
+      standaloneChannelProductId: MX_H2I_PRODUCT_ID,
+      serviceVip: '10.88.100.9',
+      internalControlIp: '10.88.88.88',
+      userLeaseStart: '10.92.0.1',
+      userLeaseEnd: '10.92.99.254',
+      anonymousLeaseStart: '10.92.100.1',
+      anonymousLeaseEnd: '10.92.254.254',
+      defaultDomesticSiteId: 'domestic-main',
+      updatePolicy: 'launcher-managed'
+    };
+  }
+  if (productId === 'h2o') {
+    return {
+      productId: 'h2o',
+      displayName: 'H2O',
+      mode: 'embed',
+      standaloneChannelProductId: MX_H2I_PRODUCT_ID,
+      serviceVip: '10.88.100.10',
+      internalControlIp: '10.88.88.88',
+      userLeaseStart: '10.90.0.1',
+      userLeaseEnd: '10.90.99.254',
+      anonymousLeaseStart: '10.90.100.1',
+      anonymousLeaseEnd: '10.90.254.254',
+      defaultDomesticSiteId: 'domestic-main',
+      updatePolicy: 'launcher-managed'
+    };
+  }
   return {
-    productId: 'h2o',
-    displayName: 'H2O',
+    productId,
+    displayName: launcherProductDisplayName(productId, { displayName: productId }),
     mode: 'embed',
-    standaloneChannelProductId: 'launcher',
-    serviceVip: '10.88.100.10',
+    standaloneChannelProductId: MX_H2I_PRODUCT_ID,
+    serviceVip: '',
     internalControlIp: '10.88.88.88',
-    userLeaseStart: '10.90.0.1',
-    userLeaseEnd: '10.90.99.254',
-    anonymousLeaseStart: '10.90.100.1',
-    anonymousLeaseEnd: '10.90.254.254',
+    userLeaseStart: '',
+    userLeaseEnd: '',
+    anonymousLeaseStart: '',
+    anonymousLeaseEnd: '',
     defaultDomesticSiteId: 'domestic-main',
     updatePolicy: 'launcher-managed'
   };
@@ -5213,9 +5425,9 @@ function launcherProductNetwork(productId) {
 }
 
 function standaloneChannelProductIdForProduct(product) {
-  if (!product) return 'launcher';
+  if (!product) return MX_H2I_PRODUCT_ID;
   if (product.mode === 'standalone') return normalizeStandaloneProductId(product.productId);
-  return normalizeStandaloneProductId(product.standaloneChannelProductId || 'launcher');
+  return normalizeStandaloneProductId(product.standaloneChannelProductId || MX_H2I_PRODUCT_ID);
 }
 
 function standaloneChannelProductForProduct(product) {
@@ -5230,56 +5442,946 @@ function launcherLeasesForProduct(productId) {
     .sort((left, right) => String(right.updatedAt || right.createdAt || '').localeCompare(String(left.updatedAt || left.createdAt || '')));
 }
 
-function renderAppCenterProductNetwork() {
-  if (!h2oNetwork) return;
-  const product = launcherProductNetwork('h2o');
-  const channelProduct = standaloneChannelProductForProduct(product);
-  const channelProductId = standaloneChannelProductIdForProduct(product);
-  const leases = launcherLeasesForProduct(channelProductId).filter((lease) => launcherLeaseIsRuntimeClient(lease));
-  const launcherSmokeLeases = launcherLeasesForProduct('launcher');
-  const latestLease = leases[0] || null;
-  const error = state.launcherProductsError || state.launcherLeasesError || '';
-  h2oNetwork.innerHTML = `
-    <div class="product-network-head">
-      <div>
-        <strong>Product Network</strong>
-        <span>${escapeHtml(product.displayName || product.productId)} / embed via ${escapeHtml(launcherProductDisplayName(channelProductId, channelProduct))}</span>
-      </div>
-      <span class="product-network-badge">${escapeHtml(latestLease?.leaseIp || channelProduct.serviceVip || product.serviceVip || '10.88.100.1')}</span>
-    </div>
-    ${error ? `<div class="feedback error">${escapeHtml(error)}</div>` : ''}
-    <div class="product-network-facts">
-      <span><strong>${escapeHtml(product.serviceVip || '-')}</strong><small>service VIP</small></span>
-      <span><strong>${escapeHtml(launcherProductDisplayName(channelProductId, channelProduct))}</strong><small>standalone channel</small></span>
-      <span><strong>${escapeHtml(product.internalControlIp || '10.88.88.88')}</strong><small>Internal</small></span>
-      <span><strong>${escapeHtml(formatLeaseRange(channelProduct.userLeaseStart, channelProduct.userLeaseEnd))}</strong><small>channel login users</small></span>
-      <span><strong>${escapeHtml(formatLeaseRange(channelProduct.anonymousLeaseStart, channelProduct.anonymousLeaseEnd))}</strong><small>channel anonymous</small></span>
-    </div>
-    <div class="product-lease-list">
-      ${leases.slice(0, 4).map((lease) => `
-        <article>
-          <strong>${escapeHtml(lease.leaseIp || '-')}</strong>
-          <span>${escapeHtml(`${lease.identityKind || 'identity'} / ${lease.launcherMode || 'mode'} / ${lease.deviceLabel || lease.deviceId || '-'}`)}</span>
-          <small>${escapeHtml(lease.leaseId || '-')}</small>
-        </article>
-      `).join('') || '<div class="empty-state">No MX-H2I client lease yet. Product ranges are reserved, but no real Launcher client has joined the relay.</div>'}
-    </div>
-    <div class="product-network-actions">
-      <button class="secondary-button" type="button" data-h2o-domestic>Domestic Setup</button>
-    </div>
-    <details class="product-network-advanced" ${launcherSmokeLeases.length ? '' : 'open'}>
-      <summary>Advanced lease smoke</summary>
-      ${renderRelayEnrollmentPanel({
-        productId: 'launcher',
-        lockProduct: true,
-        title: 'Launcher Relay Smoke',
-        actionLabel: 'Create Launcher Lease',
-        compact: true
-      })}
-    </details>
+function fallbackAppCenterApps() {
+  return [
+    {
+      appId: MX_H2I_PRODUCT_ID,
+      displayName: 'MX-H2I',
+      builtin: true,
+      systemOwned: true,
+      enabled: true,
+      version: '0.1.0',
+      category: 'vpn',
+      description: 'VPN product that owns the Launcher standalone channel and peer leases.',
+      launcherMode: 'standalone',
+      standaloneChannelProductId: MX_H2I_PRODUCT_ID,
+      productNetworkId: MX_H2I_PRODUCT_ID,
+      channels: ['shadow', 'beta', 'stable'],
+      requiredCapabilities: ['launcher-network', 'launcher-standalone']
+    },
+    {
+      appId: APP_CENTER_PRODUCT_ID,
+      displayName: 'AppCenter',
+      builtin: true,
+      systemOwned: true,
+      enabled: true,
+      version: '0.1.0',
+      category: 'platform',
+      description: 'Application catalog and runtime access surface embedded through MX-H2I.',
+      launcherMode: 'embed',
+      standaloneChannelProductId: MX_H2I_PRODUCT_ID,
+      productNetworkId: APP_CENTER_PRODUCT_ID,
+      channels: ['shadow', 'beta', 'stable'],
+      requiredCapabilities: ['app-center-runtime', 'launcher-embed-sdk']
+    },
+    {
+      appId: 'h2o',
+      displayName: 'H2O',
+      builtin: true,
+      systemOwned: true,
+      enabled: true,
+      version: '0.1.0',
+      category: 'network',
+      description: 'Network, split DNS, PAC, and Internal service access through MX-H2I.',
+      launcherMode: 'embed',
+      standaloneChannelProductId: MX_H2I_PRODUCT_ID,
+      productNetworkId: 'h2o',
+      channels: ['shadow', 'beta', 'stable'],
+      requiredCapabilities: ['launcher-network', 'launcher-embed-sdk', 'app-center-runtime']
+    }
+  ];
+}
+
+function orderedAppCenterApps() {
+  const byId = new Map(fallbackAppCenterApps().map((app) => [app.appId, app]));
+  for (const app of asArray(state.appCenterApps)) {
+    if (app?.appId) byId.set(app.appId, { ...byId.get(app.appId), ...app });
+  }
+  const apps = [...byId.values()];
+  const order = new Map([[MX_H2I_PRODUCT_ID, 0], [APP_CENTER_PRODUCT_ID, 1], ['h2o', 2]]);
+  return apps
+    .slice()
+    .sort((left, right) => (order.get(left.appId) ?? 50) - (order.get(right.appId) ?? 50)
+      || String(left.displayName || left.appId || '').localeCompare(String(right.displayName || right.appId || '')));
+}
+
+function appCenterAppById(appId) {
+  const normalized = normalizeLauncherProductId(appId);
+  return orderedAppCenterApps().find((app) => app?.appId === normalized) || null;
+}
+
+function activeAppCenterApp() {
+  return appCenterAppById(state.activeAppNode) || appCenterAppById(MX_H2I_PRODUCT_ID) || fallbackAppCenterApps()[0];
+}
+
+function launcherModeForApp(app) {
+  if (app?.launcherMode === 'standalone') return 'standalone';
+  if (app?.launcherMode === 'embed') return 'embed';
+  const product = launcherProductNetwork(app?.productNetworkId || app?.appId || MX_H2I_PRODUCT_ID);
+  return product.mode === 'standalone' ? 'standalone' : 'embed';
+}
+
+function productNetworkIdForApp(app) {
+  return normalizeLauncherProductId(app?.productNetworkId || app?.appId || MX_H2I_PRODUCT_ID);
+}
+
+function standaloneChannelIdForApp(app) {
+  if (launcherModeForApp(app) === 'standalone') return productNetworkIdForApp(app);
+  return normalizeStandaloneProductId(app?.standaloneChannelProductId || MX_H2I_PRODUCT_ID);
+}
+
+function appStatusLabel(app) {
+  if (app?.enabled === false) return 'Disabled';
+  return app?.builtin || app?.systemOwned ? 'System' : 'Custom';
+}
+
+function appNavShortLabel(app) {
+  const name = String(app?.displayName || app?.appId || '').trim();
+  if (!name) return 'APP';
+  if (app.appId === MX_H2I_PRODUCT_ID) return 'H2I';
+  if (app.appId === APP_CENTER_PRODUCT_ID) return 'App';
+  if (app.appId === 'h2o') return 'H2O';
+  return name.replace(/^mx[-_\s]*/i, '').slice(0, 3).toUpperCase();
+}
+
+function appNavSubtitle(app) {
+  const mode = launcherModeForApp(app);
+  if (mode === 'standalone') {
+    return app.appId === MX_H2I_PRODUCT_ID ? 'VPN / standalone launcher' : 'standalone launcher';
+  }
+  const channelId = standaloneChannelIdForApp(app);
+  return `embed via ${launcherProductDisplayName(channelId, launcherProductNetwork(channelId))}`;
+}
+
+function groupedAppNavItems() {
+  const apps = orderedAppCenterApps();
+  const groups = [];
+  const groupsById = new Map();
+  for (const app of apps) {
+    if (launcherModeForApp(app) !== 'standalone') continue;
+    const productId = productNetworkIdForApp(app);
+    const group = { app, embeds: [] };
+    groups.push(group);
+    groupsById.set(productId, group);
+  }
+  for (const app of apps) {
+    if (launcherModeForApp(app) === 'standalone') continue;
+    const channelId = standaloneChannelIdForApp(app);
+    const group = groupsById.get(channelId) || groupsById.get(MX_H2I_PRODUCT_ID);
+    if (group) group.embeds.push(app);
+  }
+  return groups.length ? groups : [{ app: fallbackAppCenterApps()[0], embeds: apps.filter((app) => launcherModeForApp(app) !== 'standalone') }];
+}
+
+function renderAppNavButton(app, level) {
+  const appId = normalizeLauncherProductId(app?.appId || MX_H2I_PRODUCT_ID);
+  const active = state.activeView === 'app-center' && state.activeAppNode === appId;
+  return `
+    <button
+      class="nav-tab app-nav-item app-nav-level-${escapeHtml(String(level))} ${active ? 'is-active' : ''}"
+      type="button"
+      data-view="app-center"
+      data-app-node="${escapeHtml(appId)}"
+      data-short="${escapeHtml(appNavShortLabel(app))}"
+    >
+      <strong>${escapeHtml(app?.displayName || launcherProductDisplayName(appId, null))}</strong>
+      <span>${escapeHtml(appNavSubtitle(app))}</span>
+    </button>
   `;
-  bindRelayEnrollmentControls(h2oNetwork);
-  const domesticButton = h2oNetwork.querySelector('[data-h2o-domestic]');
+}
+
+function renderAppNav() {
+  if (!appNavToggle || !appNavTree) return;
+  const appGroup = appNavToggle.closest('.nav-group');
+  appNavToggle.setAttribute('aria-expanded', state.appNavCollapsed ? 'false' : 'true');
+  const icon = appNavToggle.querySelector('b');
+  if (icon) icon.textContent = state.appNavCollapsed ? '⌄' : '⌃';
+  appNavTree.hidden = state.appNavCollapsed && !state.sidebarCollapsed;
+  appNavTree.innerHTML = groupedAppNavItems().map((group) => `
+    <div class="app-nav-channel">
+      ${renderAppNavButton(group.app, 2)}
+      ${group.embeds.length ? `
+        <div class="app-nav-embeds" aria-label="${escapeHtml(group.app.displayName || group.app.appId)} embed apps">
+          ${group.embeds.map((app) => renderAppNavButton(app, 3)).join('')}
+        </div>
+      ` : ''}
+    </div>
+  `).join('');
+  refreshNavTabs();
+  if (appGroup) {
+    appGroup.classList.toggle('is-active', state.activeView === 'app-center');
+    appGroup.classList.toggle('is-group-collapsed', state.appNavCollapsed && !state.sidebarCollapsed);
+  }
+  renderPrimaryNav();
+}
+
+function renderAppCenterShell() {
+  const app = activeAppCenterApp();
+  const mode = launcherModeForApp(app);
+  const channelId = standaloneChannelIdForApp(app);
+  if (appCenterHeading) appCenterHeading.textContent = app.displayName || launcherProductDisplayName(app.appId, null);
+  if (appCenterSubtitle) {
+    appCenterSubtitle.textContent = mode === 'standalone'
+      ? 'VPN product / launcher standalone channel.'
+      : `${launcherProductDisplayName(app.appId, null)} embeds launcher and uses ${launcherProductDisplayName(channelId, launcherProductNetwork(channelId))}.`;
+  }
+  renderLauncherFoundationOverview();
+  renderAppCatalogPanel();
+  renderSelectedAppDetail();
+  renderAppNav();
+}
+
+function filteredAppCenterApps() {
+  const query = String(state.appCatalogFilter || '').trim().toLowerCase();
+  const mode = state.appCatalogModeFilter || 'all';
+  return orderedAppCenterApps()
+    .filter((app) => {
+      const appMode = launcherModeForApp(app);
+      if (mode !== 'all' && appMode !== mode) return false;
+      if (!query) return true;
+      return [
+        app.appId,
+        app.displayName,
+        app.category,
+        app.description,
+        appMode,
+        standaloneChannelIdForApp(app)
+      ].some((value) => String(value || '').toLowerCase().includes(query));
+    });
+}
+
+function renderAppCatalogPanel() {
+  if (!appProductsPanel) return;
+  const apps = filteredAppCenterApps();
+  const selectedId = activeAppCenterApp()?.appId || MX_H2I_PRODUCT_ID;
+  const error = state.appCenterAppsError || '';
+  appProductsPanel.innerHTML = `
+    <section class="app-catalog-card">
+      <div class="app-catalog-toolbar">
+        <div>
+          <span class="site-kind">Applications</span>
+          <strong>Launcher app registry</strong>
+        </div>
+        <div class="app-catalog-controls">
+          <input data-app-filter="search" value="${escapeHtml(state.appCatalogFilter || '')}" placeholder="Search app..." />
+          <select data-app-filter="mode">
+            <option value="all" ${state.appCatalogModeFilter === 'all' ? 'selected' : ''}>All modes</option>
+            <option value="standalone" ${state.appCatalogModeFilter === 'standalone' ? 'selected' : ''}>Standalone</option>
+            <option value="embed" ${state.appCatalogModeFilter === 'embed' ? 'selected' : ''}>Embed</option>
+          </select>
+          <button class="primary-button" type="button" data-app-new>New App</button>
+        </div>
+      </div>
+      ${error ? `<div class="feedback error">${escapeHtml(error)}</div>` : ''}
+      ${state.appCatalogFeedback ? `<div class="feedback ${escapeHtml(state.appCatalogFeedback.kind || 'info')}">${escapeHtml(state.appCatalogFeedback.message || '')}</div>` : ''}
+      <div class="app-table" role="table" aria-label="Launcher applications">
+        <div class="app-table-row is-header" role="row">
+          <span>App</span>
+          <span>Launcher Mode</span>
+          <span>Channel</span>
+          <span>Network</span>
+          <span>Version</span>
+          <span>Status</span>
+          <span>Actions</span>
+        </div>
+        ${apps.map((app) => renderAppCatalogRow(app, selectedId)).join('') || '<div class="empty-state">No apps match the current filters.</div>'}
+      </div>
+    </section>
+  `;
+  bindAppCatalogControls();
+  renderAppEditorDrawer();
+}
+
+function renderAppCatalogRow(app, selectedId) {
+  const mode = launcherModeForApp(app);
+  const channelId = standaloneChannelIdForApp(app);
+  const productId = productNetworkIdForApp(app);
+  const product = launcherProductNetwork(productId);
+  const isSystem = app?.builtin || app?.systemOwned;
+  return `
+    <article class="app-table-row ${app.appId === selectedId ? 'is-selected' : ''}" role="row" tabindex="0" data-app-select="${escapeHtml(app.appId)}">
+      <span>
+        <strong>${escapeHtml(app.displayName || app.appId)}</strong>
+        <small>${escapeHtml(app.category || app.appId)}</small>
+      </span>
+      <span><b>${escapeHtml(mode)}</b><small>${mode === 'standalone' ? 'owns launcher channel' : 'uses launcher context'}</small></span>
+      <span>${escapeHtml(mode === 'standalone' ? 'self' : launcherProductDisplayName(channelId, launcherProductNetwork(channelId)))}</span>
+      <span>${escapeHtml(product.serviceVip || '-')}</span>
+      <span>${escapeHtml(app.version || '-')}</span>
+      <span><mark data-kind="${escapeHtml(app.enabled === false ? 'muted' : isSystem ? 'system' : 'custom')}">${escapeHtml(appStatusLabel(app))}</mark></span>
+      <span class="app-table-actions">
+        <button class="secondary-button" type="button" data-app-edit="${escapeHtml(app.appId)}">Edit</button>
+        <button class="secondary-button" type="button" data-app-delete="${escapeHtml(app.appId)}" ${isSystem ? 'disabled title="System app"' : ''}>${isSystem ? 'System' : 'Delete'}</button>
+      </span>
+    </article>
+  `;
+}
+
+function appCatalogEditorDraft() {
+  if (!state.appCatalogEditor) return null;
+  if (!state.appCatalogEditor.draft) {
+    state.appCatalogEditor.draft = createAppCatalogEditorDraft(state.appCatalogEditor.mode, state.appCatalogEditor.appId);
+  }
+  return state.appCatalogEditor.draft;
+}
+
+function createAppCatalogEditorDraft(mode = 'create', appId = '') {
+  const editing = mode === 'edit';
+  const app = editing ? appCenterAppById(appId) : null;
+  const normalizedAppId = editing ? cleanLauncherProductId(app?.appId || appId) : '';
+  const appMode = editing && app ? launcherModeForApp(app) : 'embed';
+  const productId = editing && app ? productNetworkIdForApp(app) : normalizedAppId;
+  const product = launcherProductNetworkForDefault(productId);
+  const productSecondOctet = productSecondOctetFromProduct(product)
+    || nextAvailableProductSecondOctet(normalizedAppId || null, appMode);
+  return {
+    appId: normalizedAppId,
+    displayName: app?.displayName || '',
+    category: app?.category || 'custom',
+    version: app?.version || '0.1.0',
+    description: app?.description || '',
+    launcherMode: appMode,
+    standaloneChannelProductId: appMode === 'standalone'
+      ? normalizedAppId || MX_H2I_PRODUCT_ID
+      : standaloneChannelIdForApp(app || { standaloneChannelProductId: MX_H2I_PRODUCT_ID }),
+    productSecondOctet,
+    enabled: app?.enabled === false ? false : true,
+    builtin: app?.builtin === true,
+    systemOwned: app?.systemOwned === true,
+    channels: asArray(app?.channels).length ? app.channels : ['shadow', 'beta', 'stable']
+  };
+}
+
+function openAppCatalogEditor(mode = 'create', appId = '') {
+  state.appCatalogEditor = {
+    mode,
+    appId: cleanLauncherProductId(appId),
+    draft: createAppCatalogEditorDraft(mode, appId)
+  };
+  state.appCatalogFeedback = null;
+  renderAppCenterShell();
+  requestAnimationFrame(() => {
+    const firstField = appEditorDrawer?.querySelector('[data-app-field="appId"]:not([readonly]), [data-app-field="displayName"]');
+    firstField?.focus?.();
+  });
+}
+
+function closeAppCatalogEditor() {
+  state.appCatalogEditor = null;
+  state.appCatalogBusy = false;
+  if (appEditorBackdrop) appEditorBackdrop.hidden = true;
+  if (appEditorDrawer) {
+    appEditorDrawer.hidden = true;
+    appEditorDrawer.innerHTML = '';
+  }
+}
+
+function renderAppEditorDrawer() {
+  if (!appEditorBackdrop || !appEditorDrawer) return;
+  const draft = appCatalogEditorDraft();
+  if (!draft) {
+    appEditorBackdrop.hidden = true;
+    appEditorDrawer.hidden = true;
+    appEditorDrawer.innerHTML = '';
+    return;
+  }
+  const creating = state.appCatalogEditor?.mode !== 'edit';
+  const mode = draft.launcherMode === 'standalone' ? 'standalone' : 'embed';
+  const appId = cleanLauncherProductId(draft.appId);
+  const title = creating ? 'New Launcher App' : `Edit ${draft.displayName || draft.appId}`;
+  const systemCopy = draft.builtin || draft.systemOwned ? 'System app cannot be deleted; metadata and network policy stay managed here.' : 'Custom app uses Launcher network, permission, release, and update services.';
+  const conflict = mode === 'standalone'
+    ? productNetworkSecondOctetConflict(draft.productSecondOctet, appId || null)
+    : null;
+  appEditorBackdrop.hidden = false;
+  appEditorDrawer.hidden = false;
+  appEditorDrawer.innerHTML = `
+    <form class="app-editor-form" data-app-editor>
+      <header class="app-drawer-header">
+        <div>
+          <span class="site-kind">Launcher App</span>
+          <h2 id="app-editor-title">${escapeHtml(title)}</h2>
+          <p>${escapeHtml(systemCopy)}</p>
+        </div>
+        <button class="icon-button app-drawer-close" type="button" data-app-editor-close aria-label="Close app editor">×</button>
+      </header>
+
+      <div class="app-drawer-scroll">
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>01</span>
+            <strong>Basic identity</strong>
+          </div>
+          <div class="app-editor-grid">
+            <label class="app-form-field">
+              <span>App ID</span>
+              <input data-app-field="appId" value="${escapeHtml(draft.appId || '')}" ${creating ? '' : 'readonly'} placeholder="my-app" autocomplete="off" />
+            </label>
+            <label class="app-form-field">
+              <span>Name</span>
+              <input data-app-field="displayName" value="${escapeHtml(draft.displayName || '')}" placeholder="My App" autocomplete="off" />
+            </label>
+            <label class="app-form-field">
+              <span>Category</span>
+              <select data-app-field="category">
+                ${renderAppCategoryOptions(draft.category || 'custom')}
+              </select>
+            </label>
+            <label class="app-form-field">
+              <span>Version</span>
+              <input data-app-field="version" value="${escapeHtml(draft.version || '0.1.0')}" placeholder="0.1.0" autocomplete="off" />
+            </label>
+            <label class="app-form-field app-form-wide">
+              <span>Description</span>
+              <textarea data-app-field="description" rows="3" placeholder="Launcher powered application.">${escapeHtml(draft.description || '')}</textarea>
+            </label>
+          </div>
+        </section>
+
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>02</span>
+            <strong>Launcher mode</strong>
+          </div>
+          <div class="app-mode-selector" role="radiogroup" aria-label="Launcher mode">
+            ${renderAppModeChoice('standalone', mode, 'standalone', 'Owns a Launcher network channel and can receive leases.')}
+            ${renderAppModeChoice('embed', mode, 'embed', 'Uses a selected standalone channel without another TUN/WG/DNS owner.')}
+          </div>
+          ${mode === 'standalone' ? renderAppStandaloneNetworkSection(draft, conflict) : renderAppEmbedNetworkSection(draft)}
+        </section>
+
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>03</span>
+            <strong>Runtime defaults</strong>
+          </div>
+          <label class="app-check-row">
+            <input data-app-field="enabled" type="checkbox" ${draft.enabled === false ? '' : 'checked'} />
+            <span aria-hidden="true"></span>
+            <strong>Enabled for Launcher clients</strong>
+          </label>
+          <details class="app-advanced-defaults">
+            <summary>Advanced defaults</summary>
+            <div class="app-network-facts">
+              <span><strong>release</strong><small>shadow / beta / stable</small></span>
+              <span><strong>policy</strong><small>${mode === 'standalone' ? 'app-managed network' : 'launcher embed context'}</small></span>
+              <span><strong>domestic</strong><small>domestic-main</small></span>
+              <span><strong>identity</strong><small>anonymous + login leases</small></span>
+            </div>
+          </details>
+        </section>
+
+        ${state.appCatalogFeedback ? `<div class="feedback ${escapeHtml(state.appCatalogFeedback.kind || 'info')}">${escapeHtml(state.appCatalogFeedback.message || '')}</div>` : ''}
+      </div>
+
+      <footer class="app-drawer-actions">
+        <button class="secondary-button" type="button" data-app-editor-cancel>Cancel</button>
+        <button class="primary-button" type="submit" ${state.appCatalogBusy || (mode === 'standalone' && !!conflict) ? 'disabled' : ''}>${state.appCatalogBusy ? 'Saving...' : 'Save App'}</button>
+      </footer>
+    </form>
+  `;
+  bindAppEditorDrawerControls();
+}
+
+function renderAppCategoryOptions(selectedCategory) {
+  const selected = String(selectedCategory || 'custom').trim() || 'custom';
+  const categories = ['vpn', 'platform', 'network', 'custom'];
+  if (!categories.includes(selected)) categories.push(selected);
+  return categories.map((category) => (
+    `<option value="${escapeHtml(category)}" ${category === selected ? 'selected' : ''}>${escapeHtml(category)}</option>`
+  )).join('');
+}
+
+function renderAppModeChoice(value, selected, title, detail) {
+  const active = value === selected;
+  return `
+    <label class="app-mode-choice ${active ? 'is-selected' : ''}">
+      <input data-app-field="launcherMode" type="radio" name="launcherMode" value="${escapeHtml(value)}" ${active ? 'checked' : ''} />
+      <span aria-hidden="true"></span>
+      <strong>${escapeHtml(title)}</strong>
+      <small>${escapeHtml(detail)}</small>
+    </label>
+  `;
+}
+
+function renderAppStandaloneNetworkSection(draft, conflict) {
+  const appId = cleanLauncherProductId(draft.appId);
+  const secondOctet = normalizeProductSecondOctet(draft.productSecondOctet, nextAvailableProductSecondOctet(appId || null, 'standalone'));
+  const ranges = relayProductNetworkShape(secondOctet);
+  const serviceVip = serviceVipForProductSecondOctet(secondOctet, appId);
+  return `
+    <div class="app-network-panel ${conflict ? 'has-error' : ''}">
+      <label class="app-form-field">
+        <span>Standalone IP segment</span>
+        <div class="app-network-octet">
+          <b>10.</b>
+          <input data-app-field="productSecondOctet" inputmode="numeric" min="1" max="254" type="number" value="${escapeHtml(secondOctet)}" />
+          <b>.0.0/16</b>
+        </div>
+      </label>
+      <p>${conflict ? `10.${escapeHtml(secondOctet)}.* is already used by ${escapeHtml(conflict.displayName || conflict.productId)}.` : 'Only standalone launcher mode owns an IP segment. Embed apps inherit their selected channel.'}</p>
+      <div class="app-network-facts">
+        <span><strong>${escapeHtml(ranges.userLeaseStart)} - ${escapeHtml(ranges.userLeaseEnd)}</strong><small>login users</small></span>
+        <span><strong>${escapeHtml(ranges.anonymousLeaseStart)} - ${escapeHtml(ranges.anonymousLeaseEnd)}</strong><small>anonymous users</small></span>
+        <span><strong>${escapeHtml(serviceVip)}</strong><small>service VIP</small></span>
+        <span><strong>10.88.88.88</strong><small>Internal control plane</small></span>
+      </div>
+    </div>
+  `;
+}
+
+function renderAppEmbedNetworkSection(draft) {
+  const channelId = normalizeStandaloneProductId(draft.standaloneChannelProductId || MX_H2I_PRODUCT_ID);
+  const channel = launcherProductNetwork(channelId);
+  return `
+    <div class="app-network-panel">
+      <label class="app-form-field">
+        <span>Standalone Channel</span>
+        <select data-app-field="standaloneChannelProductId">
+          ${renderRelayProductOptions(channelId)}
+        </select>
+      </label>
+      <p>Embed mode is lightweight: no extra local tunnel owner, no separate WG service, and no editable product IP segment.</p>
+      <div class="app-network-facts">
+        <span><strong>${escapeHtml(launcherProductDisplayName(channelId, channel))}</strong><small>channel owner</small></span>
+        <span><strong>${escapeHtml(channel.serviceVip || '10.88.100.1')}</strong><small>channel service VIP</small></span>
+        <span><strong>${escapeHtml(channel.userLeaseStart || '10.89.0.1')} - ${escapeHtml(channel.userLeaseEnd || '10.89.99.254')}</strong><small>login users</small></span>
+        <span><strong>${escapeHtml(channel.anonymousLeaseStart || '10.89.100.1')} - ${escapeHtml(channel.anonymousLeaseEnd || '10.89.254.254')}</strong><small>anonymous users</small></span>
+      </div>
+    </div>
+  `;
+}
+
+function appEditorDraftFromForm(root) {
+  const current = appCatalogEditorDraft() || {};
+  const editing = state.appCatalogEditor?.mode === 'edit';
+  const appId = editing ? cleanLauncherProductId(current.appId) : cleanLauncherProductId(appEditorValue(root, 'appId'));
+  const launcherMode = appEditorValue(root, 'launcherMode') === 'standalone' ? 'standalone' : 'embed';
+  const fallbackSecondOctet = current.productSecondOctet || nextAvailableProductSecondOctet(appId || null, launcherMode);
+  return {
+    ...current,
+    appId,
+    displayName: appEditorValue(root, 'displayName') || current.displayName || '',
+    category: appEditorValue(root, 'category') || current.category || 'custom',
+    version: appEditorValue(root, 'version') || current.version || '0.1.0',
+    description: appEditorValue(root, 'description') || current.description || '',
+    launcherMode,
+    standaloneChannelProductId: launcherMode === 'standalone'
+      ? appId || current.appId || MX_H2I_PRODUCT_ID
+      : normalizeStandaloneProductId(appEditorValue(root, 'standaloneChannelProductId') || current.standaloneChannelProductId || MX_H2I_PRODUCT_ID),
+    productSecondOctet: normalizeProductSecondOctet(appEditorValue(root, 'productSecondOctet') || fallbackSecondOctet, fallbackSecondOctet),
+    enabled: appEditorValue(root, 'enabled') !== false
+  };
+}
+
+function bindAppEditorDrawerControls() {
+  if (!appEditorDrawer || appEditorDrawer.hidden) return;
+  const form = appEditorDrawer.querySelector('[data-app-editor]');
+  if (!form) return;
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void saveAppCenterAppFromEditor(form);
+  });
+  for (const close of appEditorDrawer.querySelectorAll('[data-app-editor-close], [data-app-editor-cancel]')) {
+    close.addEventListener('click', () => closeAppCatalogEditor());
+  }
+  for (const control of appEditorDrawer.querySelectorAll('[data-app-field="launcherMode"], [data-app-field="standaloneChannelProductId"], [data-app-field="productSecondOctet"], [data-app-field="category"]')) {
+    control.addEventListener('change', () => {
+      state.appCatalogEditor.draft = appEditorDraftFromForm(form);
+      state.appCatalogFeedback = null;
+      renderAppEditorDrawer();
+    });
+  }
+  for (const control of appEditorDrawer.querySelectorAll('[data-app-field]')) {
+    control.addEventListener('input', () => {
+      state.appCatalogEditor.draft = appEditorDraftFromForm(form);
+      state.appCatalogFeedback = null;
+      if (control.dataset.appField === 'productSecondOctet') {
+        renderAppEditorDrawer();
+      }
+    });
+  }
+}
+
+function bindAppCatalogControls() {
+  if (!appProductsPanel) return;
+  const search = appProductsPanel.querySelector('[data-app-filter="search"]');
+  if (search) {
+    search.addEventListener('input', () => {
+      state.appCatalogFilter = search.value;
+      renderAppCatalogPanel();
+    });
+  }
+  const mode = appProductsPanel.querySelector('[data-app-filter="mode"]');
+  if (mode) {
+    mode.addEventListener('change', () => {
+      state.appCatalogModeFilter = mode.value || 'all';
+      renderAppCatalogPanel();
+    });
+  }
+  const create = appProductsPanel.querySelector('[data-app-new]');
+  if (create) {
+    create.addEventListener('click', () => {
+      openAppCatalogEditor('create');
+    });
+  }
+  for (const row of appProductsPanel.querySelectorAll('[data-app-select]')) {
+    row.addEventListener('click', (event) => {
+      if (event.target.closest('button')) return;
+      selectAppNode(row.dataset.appSelect);
+    });
+    row.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      selectAppNode(row.dataset.appSelect);
+    });
+  }
+  for (const button of appProductsPanel.querySelectorAll('[data-app-edit]')) {
+    button.addEventListener('click', () => {
+      openAppCatalogEditor('edit', button.dataset.appEdit);
+    });
+  }
+  for (const button of appProductsPanel.querySelectorAll('[data-app-delete]')) {
+    button.addEventListener('click', () => void deleteAppCenterAppFromCatalog(button.dataset.appDelete));
+  }
+}
+
+function selectAppNode(appId) {
+  const normalized = normalizeLauncherProductId(appId);
+  state.activeAppNode = normalized;
+  state.appCatalogFeedback = null;
+  for (const tab of tabs) {
+    const active = tab.dataset.view === 'app-center' && (tab.dataset.appNode || APP_CENTER_PRODUCT_ID) === normalized;
+    tab.classList.toggle('is-active', active);
+  }
+  renderAppCenterShell();
+}
+
+function appEditorValue(root, field) {
+  const elements = Array.from(root.querySelectorAll(`[data-app-field="${field}"]`));
+  const element = elements.find((item) => item.type === 'radio' ? item.checked : true);
+  if (!element) return null;
+  if (element.type === 'checkbox') return element.checked;
+  if (element.type === 'radio') return element.checked ? element.value : null;
+  return blankToNull(element.value);
+}
+
+async function saveAppCenterAppFromEditor(root) {
+  const draft = appEditorDraftFromForm(root);
+  const appId = cleanLauncherProductId(draft.appId);
+  if (!appId) {
+    state.appCatalogFeedback = { kind: 'error', message: 'App ID is required.' };
+    if (state.appCatalogEditor) state.appCatalogEditor.draft = draft;
+    renderAppEditorDrawer();
+    return;
+  }
+  const launcherMode = draft.launcherMode === 'standalone' ? 'standalone' : 'embed';
+  const secondOctet = normalizeProductSecondOctet(draft.productSecondOctet, nextAvailableProductSecondOctet(appId, launcherMode));
+  const conflict = launcherMode === 'standalone' ? productNetworkSecondOctetConflict(secondOctet, appId) : null;
+  if (conflict) {
+    state.appCatalogFeedback = {
+      kind: 'error',
+      message: `10.${secondOctet}.* is already used by ${conflict.displayName || conflict.productId}.`
+    };
+    if (state.appCatalogEditor) state.appCatalogEditor.draft = { ...draft, productSecondOctet: secondOctet };
+    renderAppEditorDrawer();
+    return;
+  }
+  const body = {
+    appId,
+    displayName: draft.displayName || appId,
+    category: draft.category || 'custom',
+    version: draft.version || '0.1.0',
+    description: draft.description || 'Launcher powered application.',
+    launcherMode,
+    standaloneChannelProductId: launcherMode === 'standalone'
+      ? appId
+      : normalizeStandaloneProductId(draft.standaloneChannelProductId || MX_H2I_PRODUCT_ID),
+    productNetworkId: appId,
+    enabled: draft.enabled !== false,
+    requestedBy: 'desktop-admin'
+  };
+  state.appCatalogBusy = true;
+  state.appCatalogFeedback = null;
+  if (state.appCatalogEditor) state.appCatalogEditor.draft = { ...draft, appId, productSecondOctet: secondOctet };
+  renderAppEditorDrawer();
+  try {
+    if (launcherMode === 'standalone') {
+      const ranges = relayProductNetworkShape(secondOctet);
+      const networkPayload = {
+        productId: appId,
+        displayName: body.displayName,
+        mode: 'standalone',
+        standaloneChannelProductId: appId,
+        productIndex: productIndexForSecondOctet(secondOctet, appId),
+        serviceVip: serviceVipForProductSecondOctet(secondOctet, appId),
+        ...ranges,
+        defaultDomesticSiteId: selectedDomesticSiteId() || 'domestic-main',
+        updatePolicy: appId === MX_H2I_PRODUCT_ID ? 'launcher-managed' : 'app-managed',
+        enabled: body.enabled,
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-app-network-${Date.now()}`
+      };
+      const networkResponse = await fetchJson(`/internal/v1/launcher-network/products/${encodeURIComponent(appId)}`, {
+        method: 'POST',
+        body: networkPayload
+      });
+      if (networkResponse.product) upsertLocalLauncherProduct(networkResponse.product);
+    }
+    const payload = await fetchJson(`/internal/v1/app-center/apps/${encodeURIComponent(appId)}`, {
+      method: 'POST',
+      body
+    });
+    const app = payload.app || body;
+    state.appCenterApps = [
+      app,
+      ...orderedAppCenterApps().filter((item) => item.appId !== app.appId)
+    ];
+    state.activeAppNode = app.appId;
+    state.appCatalogEditor = null;
+    state.appCatalogFeedback = { kind: 'success', message: `${app.displayName || app.appId} saved.` };
+  } catch (error) {
+    state.appCatalogFeedback = { kind: 'error', message: error.message };
+  } finally {
+    state.appCatalogBusy = false;
+    renderAppCenterShell();
+  }
+}
+
+async function deleteAppCenterAppFromCatalog(appId) {
+  const app = appCenterAppById(appId);
+  if (!app || app.builtin || app.systemOwned) return;
+  state.appCatalogBusy = true;
+  state.appCatalogFeedback = null;
+  renderAppCatalogPanel();
+  try {
+    await fetchJson(`/internal/v1/app-center/apps/${encodeURIComponent(app.appId)}`, { method: 'DELETE' });
+    state.appCenterApps = orderedAppCenterApps().filter((item) => item.appId !== app.appId);
+    if (state.activeAppNode === app.appId) state.activeAppNode = MX_H2I_PRODUCT_ID;
+    state.appCatalogFeedback = { kind: 'success', message: `${app.displayName || app.appId} deleted.` };
+  } catch (error) {
+    state.appCatalogFeedback = { kind: 'error', message: error.message };
+  } finally {
+    state.appCatalogBusy = false;
+    renderAppCenterShell();
+  }
+}
+
+function renderLauncherFoundationCard() {
+  const mxH2i = launcherProductNetwork(MX_H2I_PRODUCT_ID);
+  const embedApps = orderedAppCenterApps().filter((app) => launcherModeForApp(app) === 'embed');
+  const runtimeLeases = launcherLeasesForProduct(MX_H2I_PRODUCT_ID).filter((lease) => launcherLeaseIsRuntimeClient(lease));
+  const networkProductCount = asArray(state.launcherProducts)
+    .filter((product) => product?.productId !== LAUNCHER_FOUNDATION_PRODUCT_ID)
+    .length;
+  const productCount = Math.max(networkProductCount, orderedAppCenterApps().length, 3);
+  const error = state.appCenterAppsError || state.launcherProductsError || state.launcherLeasesError || '';
+  return `
+    <section class="setup-guide-card launcher-foundation-card">
+      <div>
+        <span class="site-kind">Launcher Foundation</span>
+        <strong>Launcher is the shared base; apps choose standalone or embed mode</strong>
+        <p>MX-H2I is the default VPN app and owns the standalone channel. AppCenter, H2O, and custom embed apps reuse that channel without installing another TUN/WG/DNS owner.</p>
+      </div>
+      <div class="launcher-foundation-facts">
+        <span><strong>standalone</strong><small>${escapeHtml(launcherProductDisplayName(MX_H2I_PRODUCT_ID, mxH2i))} / ${escapeHtml(formatLeaseRange(mxH2i.userLeaseStart, mxH2i.userLeaseEnd))}</small></span>
+        <span><strong>embed</strong><small>${escapeHtml(embedApps.map((app) => app.displayName || app.appId).join(' / ') || 'custom apps')} via MX-H2I</small></span>
+        <span><strong>${escapeHtml(String(runtimeLeases.length))}</strong><small>runtime client leases</small></span>
+        <span><strong>${escapeHtml(String(productCount))}</strong><small>registered products</small></span>
+      </div>
+      ${error ? `<p class="profile-feedback" data-kind="error">${escapeHtml(error)}</p>` : ''}
+    </section>
+  `;
+}
+
+function renderLauncherFoundationOverview() {
+  if (!launcherFoundationOverview) return;
+  launcherFoundationOverview.innerHTML = renderLauncherFoundationCard();
+}
+
+function renderAppCenterProductNetwork() {
+  renderSelectedAppDetail();
+}
+
+function renderSelectedAppDetail() {
+  if (!appSelectedDetail) return;
+  const app = activeAppCenterApp();
+  const mode = launcherModeForApp(app);
+  const productId = productNetworkIdForApp(app);
+  const product = launcherProductNetwork(productId);
+  const channelProductId = standaloneChannelIdForApp(app);
+  const channelProduct = launcherProductNetwork(channelProductId);
+  const leases = launcherLeasesForProduct(channelProductId).filter((lease) => launcherLeaseIsRuntimeClient(lease));
+  const mxH2iSmokeLeases = launcherLeasesForProduct(MX_H2I_PRODUCT_ID);
+  const latestLease = leases[0] || null;
+  const error = state.appCenterAppsError || state.launcherProductsError || state.launcherLeasesError || '';
+  const channels = asArray(app.channels).length ? asArray(app.channels) : ['shadow', 'beta', 'stable'];
+  const capabilities = Array.from(new Set([
+    ...asArray(app.requiredCapabilities),
+    mode === 'standalone' ? 'launcher-standalone' : 'launcher-embed-sdk',
+    'rbac-scope',
+    'gray-release'
+  ])).slice(0, 8);
+  const channelLabel = mode === 'standalone'
+    ? 'self'
+    : launcherProductDisplayName(channelProductId, channelProduct);
+  const appName = app.displayName || launcherProductDisplayName(app.appId, null);
+  appSelectedDetail.innerHTML = `
+    <section class="app-workbench" aria-labelledby="selected-app-title">
+      <header class="app-workbench-hero">
+        <div>
+          <span class="site-kind">Launcher App</span>
+          <h3 id="selected-app-title">${escapeHtml(appName)}</h3>
+          <p>${escapeHtml(app.description || 'Launcher powered application.')}</p>
+        </div>
+        <span class="product-state">${escapeHtml(appStatusLabel(app))}</span>
+        <div class="action-row">
+          <button class="primary-button" type="button" data-selected-app-launch>Launch</button>
+          <button class="secondary-button" type="button" data-selected-app-edit>Edit App</button>
+          <button class="secondary-button" type="button" data-selected-app-users>Users / RBAC</button>
+          <button class="secondary-button" type="button" data-selected-app-admin>Open Admin</button>
+        </div>
+      </header>
+
+      ${error ? `<div class="feedback error">${escapeHtml(error)}</div>` : ''}
+
+      <section class="product-network-panel app-workbench-network" aria-label="Selected application network">
+        <div class="product-network-head">
+          <div>
+            <strong>Launcher Channel</strong>
+            <span>${escapeHtml(mode === 'standalone' ? 'standalone owner' : `embed via ${channelLabel}`)}</span>
+          </div>
+          <span class="product-network-badge">${escapeHtml(latestLease?.leaseIp || product.serviceVip || channelProduct.serviceVip || '10.88.100.1')}</span>
+        </div>
+        <div class="product-network-facts">
+          <span><strong>${escapeHtml(mode)}</strong><small>launcher mode</small></span>
+          <span><strong>${escapeHtml(channelLabel)}</strong><small>standalone channel</small></span>
+          <span><strong>${escapeHtml(product.serviceVip || '-')}</strong><small>service VIP</small></span>
+          <span><strong>${escapeHtml(product.internalControlIp || '10.88.88.88')}</strong><small>Internal</small></span>
+          <span><strong>${escapeHtml(formatLeaseRange(channelProduct.userLeaseStart, channelProduct.userLeaseEnd))}</strong><small>login users</small></span>
+          <span><strong>${escapeHtml(formatLeaseRange(channelProduct.anonymousLeaseStart, channelProduct.anonymousLeaseEnd))}</strong><small>anonymous users</small></span>
+        </div>
+      </section>
+
+      <div class="app-workbench-panels">
+        <section class="app-workbench-panel">
+          <div class="app-workbench-panel-head">
+            <span>01</span>
+            <strong>Config Management</strong>
+          </div>
+          <div class="app-workbench-facts">
+            <span><strong>${escapeHtml(app.appId || '-')}</strong><small>app id</small></span>
+            <span><strong>${escapeHtml(app.category || 'custom')}</strong><small>category</small></span>
+            <span><strong>${escapeHtml(app.version || '0.1.0')}</strong><small>version</small></span>
+            <span><strong>${escapeHtml(app.enabled === false ? 'disabled' : 'enabled')}</strong><small>client visibility</small></span>
+          </div>
+        </section>
+
+        <section class="app-workbench-panel">
+          <div class="app-workbench-panel-head">
+            <span>02</span>
+            <strong>Gray Release</strong>
+          </div>
+          <div class="app-release-lanes">
+            ${channels.map((channel, index) => `
+              <article>
+                <strong>${escapeHtml(channel)}</strong>
+                <span>${escapeHtml(index === 0 ? 'canary' : index === channels.length - 1 ? 'stable' : 'progressive')}</span>
+                <small>${escapeHtml(app.version || '0.1.0')}</small>
+              </article>
+            `).join('')}
+          </div>
+        </section>
+
+        <section class="app-workbench-panel">
+          <div class="app-workbench-panel-head">
+            <span>03</span>
+            <strong>Features</strong>
+          </div>
+          <div class="app-feature-chips">
+            ${capabilities.map((capability) => `<span>${escapeHtml(capability)}</span>`).join('')}
+          </div>
+        </section>
+
+        <section class="app-workbench-panel">
+          <div class="app-workbench-panel-head">
+            <span>04</span>
+            <strong>Permissions</strong>
+          </div>
+          <div class="app-permission-rows">
+            <article><strong>${escapeHtml(app.appId || 'app')}:use</strong><span>runtime access</span><small>0 users</small></article>
+            <article><strong>${escapeHtml(app.appId || 'app')}:admin</strong><span>admin access</span><small>0 users</small></article>
+            <article><strong>${escapeHtml(app.appId || 'app')}:release</strong><span>release access</span><small>0 users</small></article>
+          </div>
+        </section>
+      </div>
+
+      <section class="app-workbench-panel app-service-registry">
+        <div class="app-workbench-panel-head">
+          <span>05</span>
+          <strong>Service Registry</strong>
+        </div>
+        <div class="app-workbench-facts">
+          <span><strong>${escapeHtml(`${app.appId || 'app'}.launcher`)}</strong><small>sdk namespace</small></span>
+          <span><strong>${escapeHtml(channelProduct.defaultDomesticSiteId || 'domestic-main')}</strong><small>domestic relay</small></span>
+          <span><strong>${escapeHtml(product.updatePolicy || 'launcher-managed')}</strong><small>update policy</small></span>
+          <span><strong>${escapeHtml(String(leases.length))}</strong><small>runtime leases</small></span>
+        </div>
+      </section>
+
+      <section class="product-network-panel app-workbench-leases" aria-label="Launcher leases">
+        <div class="product-network-head">
+          <div>
+            <strong>Runtime Leases</strong>
+            <span>${escapeHtml(channelLabel)} channel clients</span>
+          </div>
+        </div>
+        <div class="product-lease-list">
+          ${leases.slice(0, 4).map((lease) => `
+            <article>
+              <strong>${escapeHtml(lease.leaseIp || '-')}</strong>
+              <span>${escapeHtml(`${lease.identityKind || 'identity'} / ${lease.launcherMode || 'mode'} / ${lease.deviceLabel || lease.deviceId || '-'}`)}</span>
+              <small>${escapeHtml(lease.leaseId || '-')}</small>
+            </article>
+          `).join('') || '<div class="empty-state">No Launcher client lease yet.</div>'}
+        </div>
+        <div class="product-network-actions">
+          <button class="secondary-button" type="button" data-selected-app-domestic>Domestic Setup</button>
+        </div>
+      </section>
+
+      ${app.appId === MX_H2I_PRODUCT_ID ? `
+        <details class="product-network-advanced" ${mxH2iSmokeLeases.length ? '' : 'open'}>
+          <summary>Advanced lease smoke</summary>
+          ${renderRelayEnrollmentPanel({
+            productId: MX_H2I_PRODUCT_ID,
+            lockProduct: true,
+            title: 'MX-H2I Relay Smoke',
+            actionLabel: 'Create MX-H2I Lease',
+            compact: true
+          })}
+        </details>
+      ` : ''}
+    </section>
+  `;
+  bindRelayEnrollmentControls(appSelectedDetail);
+  const launchButton = appSelectedDetail.querySelector('[data-selected-app-launch]');
+  if (launchButton) launchButton.addEventListener('click', () => void launchHdiProduct());
+  const editButton = appSelectedDetail.querySelector('[data-selected-app-edit]');
+  if (editButton) editButton.addEventListener('click', () => openAppCatalogEditor('edit', app.appId));
+  const usersButton = appSelectedDetail.querySelector('[data-selected-app-users]');
+  if (usersButton) {
+    usersButton.addEventListener('click', () => {
+      setActiveView('admin', {
+        menu: 'internal',
+        section: 'foundations',
+        subsection: 'user-center'
+      });
+    });
+  }
+  const adminButton = appSelectedDetail.querySelector('[data-selected-app-admin]');
+  if (adminButton) adminButton.addEventListener('click', () => void api.openAdmin(serverInput.value));
+  const domesticButton = appSelectedDetail.querySelector('[data-selected-app-domestic]');
   if (domesticButton) {
     domesticButton.addEventListener('click', () => {
       setActiveView('admin', {
@@ -5445,9 +6547,12 @@ function renderConfigCenterPanel(overview) {
 }
 
 function renderLauncherProductNetworksPanel() {
-  const products = asArray(state.launcherProducts);
+  const rawProducts = asArray(state.launcherProducts);
+  const hasMxH2iProduct = rawProducts.some((product) => product?.productId === MX_H2I_PRODUCT_ID);
+  const products = rawProducts.filter((product) => !(hasMxH2iProduct && product?.productId === LAUNCHER_FOUNDATION_PRODUCT_ID));
   const error = state.launcherProductsError;
-  const standalone = products.find((product) => product.mode === 'standalone') || null;
+  const mxH2iProduct = products.find((product) => product.productId === MX_H2I_PRODUCT_ID) || null;
+  const standalone = mxH2iProduct || products.find((product) => product.mode === 'standalone') || null;
   const embedProducts = products.filter((product) => product.mode === 'embed');
   const firstEmbedChannel = embedProducts[0] ? standaloneChannelProductForProduct(embedProducts[0]) : null;
   const rows = products.map((product) => [
@@ -5457,34 +6562,34 @@ function renderLauncherProductNetworksPanel() {
     product.serviceVip || '-',
     product.mode === 'standalone'
       ? `${formatLeaseRange(product.userLeaseStart, product.userLeaseEnd)} / ${formatLeaseRange(product.anonymousLeaseStart, product.anonymousLeaseEnd)}`
-      : 'uses standalone channel lease',
+      : 'uses launcher standalone peer',
     product.updatePolicy || '-'
   ]);
   return `
     <section class="foundation-panel foundation-wide">
       <div class="foundation-panel-head">
         <div>
-          <h4>Product Network Registry</h4>
-          <p>Internal 统一管理 standalone Launcher 通道，以及 embed app 依赖的通道、DNS、限速、许可与更新策略。</p>
+          <h4>Product Registry</h4>
+          <p>Launcher 是功能底座，standalone/embed 是 launcher 运行模式；MX-H2I 是 VPN 产品，使用 launcher standalone；embed 产品复用所选 launcher standalone 通道。</p>
         </div>
         <span>${escapeHtml(String(products.length || 0))} products</span>
       </div>
       ${error ? `<div class="feedback error">${escapeHtml(error)}</div>` : ''}
       <div class="foundation-kpi-grid">
+        ${renderFoundationKpi('Launcher Foundation', 'standalone / embed', 'network, auth, release, policy')}
+        ${renderFoundationKpi('MX-H2I VPN', formatLeaseRange(standalone?.userLeaseStart, standalone?.userLeaseEnd), standalone ? `${formatLeaseRange(standalone.anonymousLeaseStart, standalone.anonymousLeaseEnd)} anonymous` : 'launcher standalone 10.89')}
+        ${renderFoundationKpi('Embed Dependency', firstEmbedChannel ? launcherProductDisplayName(firstEmbedChannel.productId, firstEmbedChannel) : 'MX-H2I', 'embed products reuse channel context')}
         ${renderFoundationKpi('Internal', '10.88.88.88', 'fixed control-plane peer')}
-        ${renderFoundationKpi('Standalone', formatLeaseRange(standalone?.userLeaseStart, standalone?.userLeaseEnd), standalone ? `${formatLeaseRange(standalone.anonymousLeaseStart, standalone.anonymousLeaseEnd)} anonymous` : 'Launcher pool')}
-        ${renderFoundationKpi('Embed Channel', firstEmbedChannel ? launcherProductDisplayName(firstEmbedChannel.productId, firstEmbedChannel) : 'MX-H2I', 'embed apps reuse standalone leases')}
-        ${renderFoundationKpi('Updater', 'Launcher', 'standalone/embed shared policy')}
       </div>
       ${rows.length ? `
         <div class="foundation-table product-network-table">
           <article class="foundation-table-row is-header">
             <strong>Product</strong>
-            <span>Mode</span>
+            <span>Launcher Mode</span>
             <span>Channel</span>
             <span>Service VIP</span>
-            <span>Login / anonymous range</span>
-            <small>Update</small>
+            <span>Peer lease rule</span>
+            <small>Foundation</small>
           </article>
           ${rows.map((row) => `
             <article class="foundation-table-row">
@@ -5493,7 +6598,7 @@ function renderLauncherProductNetworksPanel() {
               <span>${escapeHtml(row[2])}</span>
               <span>${escapeHtml(row[3])}</span>
               <span>${escapeHtml(row[4])}</span>
-              <small>${escapeHtml(row[5])}</small>
+              <small>${escapeHtml(row[5] === 'launcher-managed' ? 'launcher runtime' : row[5])}</small>
             </article>
           `).join('')}
         </div>
@@ -5700,7 +6805,7 @@ function renderRelayEnrollmentPanel(options = {}) {
           <span>App / Product</span>
           ${options.lockProduct
             ? `<input autocomplete="off" value="${escapeHtml(productLabel)}" disabled /><input type="hidden" data-relay-field="productId" value="${escapeHtml(draft.productId)}" />`
-            : `<input data-relay-field="productId" list="${escapeHtml(productOptionsId)}" autocomplete="off" value="${escapeHtml(draft.productId)}" placeholder="launcher or luopan" />
+            : `<input data-relay-field="productId" list="${escapeHtml(productOptionsId)}" autocomplete="off" value="${escapeHtml(draft.productId)}" placeholder="mx-h2i or luopan" />
               <datalist id="${escapeHtml(productOptionsId)}">${productOptions}</datalist>`}
         </label>
         <label class="form-field compact-field">
@@ -7345,6 +8450,7 @@ function renderDashboardGuidance() {
         ${renderDashboardLane('domestic', domestic, domesticAction)}
       </div>
     </section>
+    ${renderLauncherFoundationCard()}
   `;
   for (const button of dashboardGuidance.querySelectorAll('[data-dashboard-lane]')) {
     button.addEventListener('click', () => {
@@ -8000,7 +9106,7 @@ function materializeActionBodyTemplate(action) {
     '<change-window-start-iso>': changeWindowStart,
     '<change-window-end-iso>': changeWindowEnd,
     '<internal-base-url>': normalizedServerBase(),
-    '<product-id>': homePeer.productId || 'launcher',
+    '<product-id>': homePeer.productId || MX_H2I_PRODUCT_ID,
     '<launcher-network-lease-id>': homePeer.leaseId || '<launcher-network-lease-id>',
     '<home-lease-ip>': homePeer.leaseIp || '<home-lease-ip>',
     '<home-wg-public-key>': homePeer.publicKey || '<home-wg-public-key>',
@@ -8064,7 +9170,7 @@ function launcherLeaseRole(lease) {
 
 function launcherLeaseLabel(lease) {
   const identity = lease.identityKind === 'user' ? 'user' : 'anonymous';
-  const product = launcherProductDisplayName(lease.productId || 'launcher', launcherProductById(lease.productId));
+  const product = launcherProductDisplayName(lease.productId || MX_H2I_PRODUCT_ID, launcherProductById(lease.productId));
   const device = lease.deviceLabel || lease.deviceId || lease.installId || lease.leaseId;
   const mode = lease.launcherMode ? ` / ${lease.launcherMode}` : '';
   return `${product} ${identity} / ${lease.leaseIp}${mode} / ${device}`;
@@ -8075,7 +9181,7 @@ function launcherLeaseIsStandalone(lease) {
   if (lease.launcherMode === 'standalone') return true;
   if (lease.launcherMode === 'embed') return false;
   const product = launcherProductById(lease.productId);
-  return lease.productId === 'launcher' || product?.mode === 'standalone';
+  return lease.productId === MX_H2I_PRODUCT_ID || product?.mode === 'standalone';
 }
 
 function leaseLooksGeneratedBySmoke(lease) {
@@ -8135,7 +9241,7 @@ function peerRoleLabel(role, secondOctet) {
 function runtimeDomesticPeerDraft() {
   const lease = launcherLeaseById(state.domesticPeerDraft.leaseId);
   if (launcherLeaseIsRuntimeClient(lease)) {
-    const productId = normalizeStandaloneProductId(lease.productId || state.domesticPeerDraft.productId || 'launcher');
+    const productId = normalizeStandaloneProductId(lease.productId || state.domesticPeerDraft.productId || MX_H2I_PRODUCT_ID);
     const product = launcherProductNetwork(productId);
     const productSecondOctet = productSecondOctetFromIp(lease.leaseIp)
       || productSecondOctetFromProduct(product)
@@ -8152,7 +9258,7 @@ function runtimeDomesticPeerDraft() {
     };
   }
   const leaseIp = cleanHomePeerLeaseIp(state.domesticPeerDraft.leaseIp);
-  const productId = normalizeStandaloneProductId(state.domesticPeerDraft.productId || 'launcher');
+  const productId = normalizeStandaloneProductId(state.domesticPeerDraft.productId || MX_H2I_PRODUCT_ID);
   const product = launcherProductNetwork(productId);
   const peerRole = inferDomesticPeerRole(leaseIp) || state.domesticPeerDraft.peerRole || 'guest';
   const productSecondOctet = productSecondOctetFromIp(leaseIp)
@@ -8202,7 +9308,7 @@ function renderHomePeerQuickFields(bodyText) {
   return `
     <section class="home-peer-fields" aria-label="Home relay peer">
       <label class="home-peer-lease-field">
-        <span>Standalone Client Lease</span>
+        <span>Launcher Standalone Peer Lease</span>
         ${leaseControl}
       </label>
       <label class="home-peer-readonly">
@@ -8290,7 +9396,7 @@ function syncHomePeerField(input) {
 }
 
 function applyLauncherLeaseToDomesticPeerDraft(lease) {
-  state.domesticPeerDraft.productId = normalizeStandaloneProductId(lease.productId || state.domesticPeerDraft.productId || 'launcher');
+  state.domesticPeerDraft.productId = normalizeStandaloneProductId(lease.productId || state.domesticPeerDraft.productId || MX_H2I_PRODUCT_ID);
   state.domesticPeerDraft.productSecondOctet = productSecondOctetFromIp(lease.leaseIp)
     || productSecondOctetFromProduct(launcherProductById(lease.productId))
     || state.domesticPeerDraft.productSecondOctet
@@ -8328,7 +9434,7 @@ function updateSelectedActionBodyFromHomePeer() {
   const body = parseActionBodyObject(bodyInput.value);
   if (!body) return;
   const homePeer = runtimeDomesticPeerDraft();
-  if ('productId' in body) body.productId = homePeer.productId || 'launcher';
+  if ('productId' in body) body.productId = homePeer.productId || MX_H2I_PRODUCT_ID;
   if ('leaseId' in body) body.leaseId = homePeer.leaseId || '<launcher-network-lease-id>';
   if ('peerRole' in body) body.peerRole = homePeer.peerRole;
   if ('leaseIp' in body) body.leaseIp = homePeer.leaseIp || '<home-lease-ip>';

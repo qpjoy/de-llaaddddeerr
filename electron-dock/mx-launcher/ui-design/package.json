@@ -1,0 +1,44 @@
+{
+  "name": "@qpjoy/ui-design-neon-void",
+  "version": "0.1.0",
+  "description": "QPJoy Neon Void dark cyan design tokens and CSS component library.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./styles.css": "./dist/styles.css",
+    "./tokens.css": "./dist/tokens.css",
+    "./tokens.json": "./dist/tokens.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "package.json"
+  ],
+  "sideEffects": [
+    "./dist/styles.css",
+    "./dist/tokens.css"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepack": "pnpm build"
+  },
+  "keywords": [
+    "qpjoy",
+    "design-system",
+    "css",
+    "tokens",
+    "dark-theme",
+    "neon"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

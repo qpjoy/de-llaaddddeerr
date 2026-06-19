@@ -1345,9 +1345,14 @@ export interface AppCenterApp {
   appId: string;
   displayName: string;
   builtin: boolean;
+  systemOwned?: boolean;
   version: string;
   category: string;
   description: string;
+  launcherMode?: LauncherProductMode;
+  standaloneChannelProductId?: string | null;
+  productNetworkId?: string | null;
+  enabled?: boolean;
   channels: string[];
   permissions: string[];
   requiredCapabilities: string[];
@@ -1357,6 +1362,30 @@ export interface AppCenterApp {
     appCenter: string;
     launcher: string;
   };
+}
+
+export interface AppCenterAppInput {
+  appId?: string | null;
+  displayName?: string | null;
+  builtin?: boolean | null;
+  systemOwned?: boolean | null;
+  version?: string | null;
+  category?: string | null;
+  description?: string | null;
+  launcherMode?: LauncherProductMode | string | null;
+  standaloneChannelProductId?: string | null;
+  productNetworkId?: string | null;
+  enabled?: boolean | null;
+  channels?: string[] | string | null;
+  permissions?: string[] | string | null;
+  requiredCapabilities?: string[] | string | null;
+  updatePolicy?: UpdatePolicyKind | string | null;
+  entrypoints?: Record<string, string> | null;
+  protocol?: {
+    appCenter?: string | null;
+    launcher?: string | null;
+  } | null;
+  requestedBy?: string | null;
 }
 
 export interface PermissionRequestInput {

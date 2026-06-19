@@ -1,0 +1,654 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Neon Void UI Demo</title>
+    <link rel="stylesheet" href="../../ui-design/src/styles.css" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body class="qp-app qp-theme-neon-void qp-density--medium demo-app">
+    <div class="qp-shell demo-shell">
+      <aside class="qp-sidebar demo-sidebar">
+        <div class="demo-brand">
+          <div class="demo-brand__mark">NV</div>
+          <div>
+            <h1 class="qp-heading-1">Neon Void</h1>
+            <p class="qp-body-2 qp-muted">@qpjoy/ui-design</p>
+          </div>
+        </div>
+
+        <nav class="qp-list demo-nav" aria-label="Component categories">
+          <a class="qp-list__item demo-nav-link is-selected" href="/demos/ui-design-neon-void/" data-route-link="overview">
+            <span>Overview</span>
+            <span class="qp-tag qp-tag--primary">App</span>
+          </a>
+          <a class="qp-list__item demo-nav-link" href="/demos/ui-design-neon-void/buttons" data-route-link="buttons">
+            <span>Buttons</span>
+            <span class="qp-status" data-status="success">states</span>
+          </a>
+          <a class="qp-list__item demo-nav-link" href="/demos/ui-design-neon-void/inputs" data-route-link="inputs">
+            <span>Inputs</span>
+            <span class="qp-status" data-status="info">forms</span>
+          </a>
+          <a class="qp-list__item demo-nav-link" href="/demos/ui-design-neon-void/dropdowns" data-route-link="dropdowns">
+            <span>Dropdowns</span>
+            <span class="qp-status" data-status="info">custom</span>
+          </a>
+          <a class="qp-list__item demo-nav-link" href="/demos/ui-design-neon-void/feedback" data-route-link="feedback">
+            <span>Feedback</span>
+            <span class="qp-status" data-status="warning">toast</span>
+          </a>
+          <a class="qp-list__item demo-nav-link" href="/demos/ui-design-neon-void/settings" data-route-link="settings">
+            <span>Settings</span>
+            <span class="qp-status" data-status="success">page</span>
+          </a>
+          <a class="qp-list__item demo-nav-link" href="/demos/ui-design-neon-void/properties" data-route-link="properties">
+            <span>Properties</span>
+            <span class="qp-status" data-status="info">panel</span>
+          </a>
+          <a class="qp-list__item demo-nav-link" href="/demos/ui-design-neon-void/icons" data-route-link="icons">
+            <span>Icons</span>
+            <span class="qp-status" data-status="success">spec</span>
+          </a>
+          <a class="qp-list__item demo-nav-link" href="/demos/ui-design-neon-void/tokens" data-route-link="tokens">
+            <span>Tokens</span>
+            <span class="qp-status" data-status="warning">color</span>
+          </a>
+        </nav>
+
+        <section class="qp-panel qp-panel--design-frame demo-density-card">
+          <h2 class="qp-heading-2">Density</h2>
+          <div class="qp-segmented" role="group" aria-label="Density">
+            <button class="qp-segmented__item" type="button" data-density="small">Small</button>
+            <button class="qp-segmented__item is-active" type="button" data-density="medium">Medium</button>
+            <button class="qp-segmented__item" type="button" data-density="large">Large</button>
+          </div>
+        </section>
+      </aside>
+
+      <main class="qp-main qp-scrollbar demo-main">
+        <header class="demo-toolbar">
+          <div>
+            <p id="route-kicker" class="qp-kicker">EFFECTIVE CONTROL SURFACE</p>
+            <h2 id="route-title" class="qp-heading-1">Project Console</h2>
+          </div>
+          <div class="qp-row">
+            <button class="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="Refresh">↻</button>
+            <button class="qp-button qp-button--outline" type="button">Import</button>
+            <button class="qp-button qp-button--primary" type="button">Publish</button>
+          </div>
+        </header>
+
+        <section class="demo-route demo-board" data-route="overview">
+          <section class="demo-column">
+            <h2 class="qp-section-title">Projects</h2>
+            <div class="demo-project-grid">
+              <article class="qp-project-card is-active">
+                <div class="qp-project-card__media"></div>
+                <div class="qp-project-card__body">
+                  <strong class="qp-project-card__title">JRIazhu's Project</strong>
+                  <div class="qp-project-card__meta">
+                    <span class="qp-row"><span class="qp-avatar">J</span> Team Happy</span>
+                    <span>Editing</span>
+                  </div>
+                </div>
+              </article>
+              <article class="qp-project-card">
+                <div class="qp-project-card__media demo-cover-blue"></div>
+                <div class="qp-project-card__body">
+                  <strong class="qp-project-card__title">Market Gateway</strong>
+                  <div class="qp-project-card__meta">
+                    <span class="qp-row"><span class="qp-avatar">M</span> Runtime</span>
+                    <span>59 secs ago</span>
+                  </div>
+                </div>
+              </article>
+              <article class="qp-project-card">
+                <div class="qp-project-card__media demo-cover-green"></div>
+                <div class="qp-project-card__body">
+                  <strong class="qp-project-card__title">Internal Ops</strong>
+                  <div class="qp-project-card__meta">
+                    <span class="qp-row"><span class="qp-avatar">O</span> Control</span>
+                    <span>10 months ago</span>
+                  </div>
+                </div>
+              </article>
+            </div>
+
+          </section>
+
+          <aside class="demo-column demo-side">
+            <section class="qp-panel qp-panel--active">
+              <div class="qp-row qp-row--between">
+                <h3 class="qp-heading-2">Inspector</h3>
+                <label class="qp-switch">
+                  <input type="checkbox" checked />
+                  <span class="qp-switch__track"></span>
+                </label>
+              </div>
+              <div class="qp-stack">
+                <label class="qp-choice qp-choice--radio">
+                  <input type="radio" name="mode" checked />
+                  <span class="qp-choice__control"></span>
+                  <span>Published Only</span>
+                </label>
+                <label class="qp-choice qp-choice--radio">
+                  <input type="radio" name="mode" />
+                  <span class="qp-choice__control"></span>
+                  <span>Local Only</span>
+                </label>
+                <label class="qp-choice qp-choice--checkbox">
+                  <input type="checkbox" checked />
+                  <span class="qp-choice__control"></span>
+                  <span>Include assets</span>
+                </label>
+                <label class="qp-choice qp-choice--checkbox">
+                  <input id="partial-check" type="checkbox" />
+                  <span class="qp-choice__control"></span>
+                  <span>Workshop partial</span>
+                </label>
+              </div>
+            </section>
+
+            <section class="qp-panel">
+              <h3 class="qp-heading-2">Members</h3>
+              <div class="qp-stack qp-stack--tight">
+                <article class="qp-user-card">
+                  <span class="qp-avatar">Q</span>
+                  <div>
+                    <div class="qp-user-card__name">wwwwwwwwwww... (Me)</div>
+                    <span class="qp-user-card__role">Owner</span>
+                  </div>
+                  <button class="qp-button qp-button--ghost qp-icon-button qp-button--sm" type="button" aria-label="More">...</button>
+                </article>
+                <article class="qp-user-card">
+                  <span class="qp-avatar">H</span>
+                  <div>
+                    <div class="qp-user-card__name">Team Happy</div>
+                    <span class="qp-user-card__role">Editor</span>
+                  </div>
+                  <button class="qp-button qp-button--ghost qp-icon-button qp-button--sm" type="button" aria-label="Approve">✓</button>
+                </article>
+              </div>
+            </section>
+
+          </aside>
+        </section>
+
+        <section class="demo-route demo-system" data-route="buttons" hidden>
+          <h2 class="qp-section-title">Buttons</h2>
+          <div class="demo-button-page">
+            <section class="qp-panel demo-control-panel">
+              <div class="qp-row qp-row--between">
+                <h3 class="qp-heading-2">Button Matrix</h3>
+                <div class="qp-tabs" role="tablist" aria-label="Button variants">
+                  <button class="qp-tab" type="button" aria-selected="true">Default</button>
+                  <button class="qp-tab" type="button">Hover</button>
+                  <button class="qp-tab" type="button">Pressed</button>
+                </div>
+              </div>
+              <div class="demo-button-matrix demo-button-matrix--wide">
+                <button class="qp-button qp-button--primary" type="button">Market</button>
+                <button class="qp-button qp-button--outline" type="button">Market</button>
+                <button class="qp-button qp-button--transparent" type="button">Market</button>
+                <button class="qp-button qp-button--primary qp-button--lg" type="button">Large</button>
+                <button class="qp-button qp-button--outline qp-button--lg" type="button">Large</button>
+                <button class="qp-button qp-button--transparent qp-button--lg" type="button">Large</button>
+                <button class="qp-button qp-button--primary qp-button--sm" type="button">Small</button>
+                <button class="qp-button qp-button--outline qp-button--sm" type="button">Small</button>
+                <button class="qp-button qp-button--transparent qp-button--sm" type="button">Small</button>
+                <button class="qp-button qp-button--primary" type="button"><span class="qp-spinner" aria-hidden="true"></span></button>
+                <button class="qp-button qp-button--outline" type="button"><span class="qp-spinner" aria-hidden="true"></span></button>
+                <button class="qp-button" type="button" disabled>Disabled</button>
+              </div>
+            </section>
+            <section class="qp-panel demo-control-panel">
+              <h3 class="qp-heading-2">Icon Buttons & Segmented Controls</h3>
+              <div class="demo-button-strip">
+                <button class="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="Move up">⌃</button>
+                <button class="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="Move down">⌄</button>
+                <button class="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="Back">‹</button>
+                <button class="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="Next">›</button>
+                <button class="qp-button qp-button--danger" type="button">Delete</button>
+              </div>
+              <div class="qp-segmented" role="group" aria-label="Gender">
+                <button class="qp-segmented__item" type="button">Male</button>
+                <button class="qp-segmented__item is-active" type="button">Female</button>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="demo-route demo-system" data-route="inputs" hidden>
+          <h2 class="qp-section-title">Inputs</h2>
+          <div class="demo-input-page">
+            <section class="qp-panel demo-control-panel">
+              <div class="qp-row qp-row--between">
+                <h3 class="qp-heading-2">Text & Search Inputs</h3>
+                <span class="qp-tag qp-tag--primary">small / medium / large</span>
+              </div>
+              <div class="demo-form-grid">
+                <label class="qp-field">
+                  <span class="qp-field__label">Small Search</span>
+                  <span class="qp-input-group">
+                    <span class="qp-input-group__prefix">⌕</span>
+                    <input class="qp-input qp-input--sm" value="BLABLABLA" />
+                  </span>
+                </label>
+                <label class="qp-field">
+                  <span class="qp-field__label">Medium Name</span>
+                  <input class="qp-input" value="BLABLABLA" />
+                </label>
+                <label class="qp-field">
+                  <span class="qp-field__label">Large Path</span>
+                  <span class="qp-input-group">
+                    <input class="qp-input qp-input--lg" value="C:\\Users\\lilithgames\\AppData\\Roaming" />
+                    <span class="qp-input-group__suffix">□</span>
+                  </span>
+                </label>
+                <label class="qp-field">
+                  <span class="qp-field__label">Read only</span>
+                  <input class="qp-input" value="BLABLABLA" readonly />
+                </label>
+              </div>
+            </section>
+            <section class="qp-panel demo-control-panel">
+              <h3 class="qp-heading-2">Coordinates & Numeric Inputs</h3>
+              <div class="demo-coordinate-grid">
+                <span class="qp-axis-field"><span class="qp-axis-field__axis" style="--axis-color:var(--qp-axis-x)">X</span><input class="qp-axis-field__value" value="123.45" /><span class="qp-axis-field__unit">m</span></span>
+                <span class="qp-axis-field"><span class="qp-axis-field__axis" style="--axis-color:var(--qp-axis-y)">Y</span><input class="qp-axis-field__value" value="123.45" /><span class="qp-axis-field__unit">m</span></span>
+                <span class="qp-axis-field"><span class="qp-axis-field__axis" style="--axis-color:var(--qp-axis-z)">Z</span><input class="qp-axis-field__value" value="123.45" /><span class="qp-axis-field__unit">m</span></span>
+              </div>
+              <label class="qp-field">
+                <span class="qp-field__label">Scale</span>
+                <input class="qp-slider" type="range" value="66" min="0" max="100" />
+              </label>
+            </section>
+          </div>
+        </section>
+
+        <section class="demo-route demo-system" data-route="dropdowns" hidden>
+          <h2 class="qp-section-title">Dropdowns & Selection</h2>
+          <div class="demo-dropdown-page">
+            <section class="qp-panel demo-control-panel">
+              <h3 class="qp-heading-2">Custom Dropdown</h3>
+              <div class="demo-form-grid">
+                <div class="qp-field">
+                  <span class="qp-field__label">Status</span>
+                  <div class="qp-dropdown" data-dropdown>
+                    <button class="qp-dropdown__trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                      <span class="qp-dropdown__value" data-dropdown-value>Published</span>
+                      <span class="qp-dropdown__chevron">⌄</span>
+                    </button>
+                    <div class="qp-dropdown__menu" role="listbox" aria-label="Status">
+                      <button class="qp-dropdown__option is-selected" type="button" role="option" aria-selected="true" data-value="Published">Published</button>
+                      <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="Local">Local</button>
+                      <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="Workshop">Workshop</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="qp-field">
+                  <span class="qp-field__label">Material UV</span>
+                  <div class="qp-dropdown" data-dropdown>
+                    <button class="qp-dropdown__trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                      <span class="qp-dropdown__value" data-dropdown-value>ModelUV</span>
+                      <span class="qp-dropdown__chevron">⌄</span>
+                    </button>
+                    <div class="qp-dropdown__menu" role="listbox" aria-label="Material UV">
+                      <button class="qp-dropdown__option is-selected" type="button" role="option" aria-selected="true" data-value="ModelUV">ModelUV</button>
+                      <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="WorldUV">WorldUV</button>
+                      <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="ScreenUV">ScreenUV</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+            <section class="qp-panel demo-control-panel">
+              <h3 class="qp-heading-2">Radio, Checkbox, Switch</h3>
+              <div class="demo-choice-grid">
+                <label class="qp-choice qp-choice--radio"><input type="radio" name="dropdown-mode" checked /><span class="qp-choice__control"></span><span>Published Only</span></label>
+                <label class="qp-choice qp-choice--radio"><input type="radio" name="dropdown-mode" /><span class="qp-choice__control"></span><span>Local Only</span></label>
+                <label class="qp-choice qp-choice--checkbox"><input type="checkbox" checked /><span class="qp-choice__control"></span><span>Include assets</span></label>
+                <label class="qp-switch"><input type="checkbox" checked /><span class="qp-switch__track"></span><span>Auto Save</span></label>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="demo-route demo-system" data-route="feedback" hidden>
+          <h2 class="qp-section-title">Feedback</h2>
+          <div class="demo-feedback-page">
+            <section class="qp-panel">
+              <h3 class="qp-heading-2">Actionbar & Dialog</h3>
+              <div class="demo-action-grid">
+                <div class="qp-actionbar">
+                  <button class="qp-actionbar__item" type="button">Open</button>
+                  <button class="qp-actionbar__item" type="button">Publish</button>
+                  <button class="qp-actionbar__item" type="button">Duplicate</button>
+                  <button class="qp-actionbar__item" type="button">Delete</button>
+                </div>
+                <div class="qp-dialog">
+                  <div class="qp-dialog__icon">!</div>
+                  <div class="qp-dialog__body">
+                    <strong>Failed to import</strong>
+                    <p class="qp-body-2 qp-muted">Failed to import 32 files. PNG and JPEG are supported.</p>
+                    <div class="qp-dialog__actions">
+                      <button class="qp-button qp-button--transparent" type="button">Cancel</button>
+                      <button class="qp-button qp-button--primary" type="button">OK</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+            <section class="qp-panel">
+              <h3 class="qp-heading-2">Toasts</h3>
+              <div class="qp-toast-stack">
+                <div class="qp-toast" data-tone="danger">There's something wrong here</div>
+                <div class="qp-toast" data-tone="success">Successfully saved!</div>
+                <div class="qp-toast" data-tone="info">Something need to be informed</div>
+                <div class="qp-toast" data-tone="warning">Alert! Alert! Alert!</div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="demo-route demo-system" data-route="settings" hidden>
+          <h2 class="qp-section-title">Settings</h2>
+          <div class="qp-card demo-window">
+            <div class="qp-appbar demo-window__bar">
+              <div class="demo-window__logo">NV</div>
+              <nav class="qp-appbar__menu" aria-label="Application menu">
+                <span>File</span>
+                <span>Edit</span>
+                <span>View</span>
+                <span>Help</span>
+              </nav>
+              <div class="qp-appbar__user">
+                <button class="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="Notifications">⌁</button>
+                <button class="qp-button qp-button--transparent" type="button">Market</button>
+              </div>
+            </div>
+            <div class="qp-settings-view demo-settings-view">
+              <nav class="qp-settings-nav" aria-label="Settings navigation">
+                <div class="qp-settings-nav__group">
+                  <button class="qp-settings-nav__item" type="button">Tutorial</button>
+                  <button class="qp-settings-nav__item" type="button">API Doc</button>
+                </div>
+                <div class="qp-settings-nav__group">
+                  <button class="qp-settings-nav__item is-active" type="button">Team 1</button>
+                  <button class="qp-settings-nav__item" type="button">Team 2</button>
+                  <button class="qp-settings-nav__item" type="button">Team 3</button>
+                </div>
+                <div class="qp-settings-nav__group">
+                  <button class="qp-settings-nav__item" type="button">Plug In</button>
+                  <button class="qp-settings-nav__item" type="button">Editor</button>
+                  <button class="qp-settings-nav__item" type="button">Settings</button>
+                </div>
+              </nav>
+              <section class="qp-settings-content">
+                <div class="qp-row qp-row--between">
+                  <h3 class="qp-heading-1">Installation</h3>
+                  <a class="demo-link" href="#properties">Editor Version ›</a>
+                </div>
+                <div class="qp-setting-row">
+                  <span class="qp-field__label">General</span>
+                  <div class="qp-row">
+                    <button class="qp-button qp-button--transparent" type="button">Check Update</button>
+                    <label class="qp-choice qp-choice--checkbox">
+                      <input type="checkbox" checked />
+                      <span class="qp-choice__control"></span>
+                      <span>Update Automatically</span>
+                    </label>
+                  </div>
+                </div>
+                <div class="qp-setting-row">
+                  <span class="qp-field__label">Editor Installation Path</span>
+                  <span class="qp-path-field">
+                    <span class="qp-path-field__value">C:\Users\lilithgames\AppData\Roaming</span>
+                    <button class="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="Browse">□</button>
+                  </span>
+                </div>
+                <div class="qp-setting-row">
+                  <span class="qp-field__label">Project Save Path</span>
+                  <span class="qp-path-field">
+                    <span class="qp-path-field__value">C:\Users\lilithgames\AppData\Roaming</span>
+                    <button class="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="Browse">□</button>
+                  </span>
+                </div>
+                <article class="qp-version-card">
+                  <div class="qp-stack qp-stack--tight">
+                    <strong>0.19.4.343</strong>
+                    <div class="qp-version-card__meta">
+                      <span>Engine Version: 0.2.0</span>
+                      <span>Launch Time: 2022-02-02</span>
+                    </div>
+                    <a class="demo-link" href="#patch">Patch Note⌄</a>
+                  </div>
+                  <button class="qp-button qp-button--primary" type="button">Update</button>
+                </article>
+                <article class="qp-version-card">
+                  <div class="qp-stack qp-stack--tight">
+                    <strong>0.19.4.250</strong>
+                    <div class="qp-version-card__meta">
+                      <span>Engine Version: 0.1.0</span>
+                      <span>Launch Time: 2022-02-02</span>
+                    </div>
+                    <p class="qp-body-2 qp-muted demo-logline">12345678901234567890123456789012345678901234567890</p>
+                    <a class="demo-link" href="#patch">Patch Note⌃</a>
+                  </div>
+                </article>
+              </section>
+            </div>
+          </div>
+        </section>
+
+        <section id="properties" class="demo-route demo-system" data-route="properties" hidden>
+          <h2 class="qp-section-title">Properties & Panels</h2>
+          <div class="demo-properties-grid">
+            <section class="qp-properties-panel">
+              <div class="qp-panel-tabs">
+                <button class="qp-panel-tab is-active" type="button">Properties</button>
+                <button class="qp-panel-tab" type="button">History</button>
+                <button class="qp-panel-tab" type="button">Layers</button>
+              </div>
+              <header class="qp-properties-header">
+                <span class="qp-icon-cell demo-object-icon">M</span>
+                <div class="qp-properties-header__title">
+                  <strong>G_Residence_White_04_Instance</strong>
+                  <span class="qp-body-2 qp-muted">Workspace/Box/FakeAnMoTe/Avatar/Occ</span>
+                </div>
+                <button class="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="More">⋮</button>
+              </header>
+              <div class="demo-properties-scroll qp-scrollbar">
+                <label class="qp-field demo-search-field">
+                  <span class="qp-input-group">
+                    <span class="qp-input-group__prefix">⌕</span>
+                    <input class="qp-input" placeholder="Search" />
+                  </span>
+                </label>
+                <details class="qp-property-section" open>
+                  <summary>Full Transform</summary>
+                  <div class="qp-property-section__body">
+                    <div class="qp-property-row">
+                      <span class="qp-property-label">★ LocalPosition</span>
+                      <div class="qp-axis-grid">
+                        <span class="qp-axis-field"><span class="qp-axis-field__axis" style="--axis-color:var(--qp-axis-x)">X</span><input class="qp-axis-field__value" value="4.4444" /><span class="qp-axis-field__unit">m</span></span>
+                        <span class="qp-axis-field"><span class="qp-axis-field__axis" style="--axis-color:var(--qp-axis-y)">Y</span><input class="qp-axis-field__value" value="1.2345" /><span class="qp-axis-field__unit">m</span></span>
+                        <span class="qp-axis-field"><span class="qp-axis-field__axis" style="--axis-color:var(--qp-axis-z)">Z</span><input class="qp-axis-field__value" value="1.2345" /><span class="qp-axis-field__unit">m</span></span>
+                      </div>
+                    </div>
+                    <div class="qp-property-row">
+                      <span class="qp-property-label">☆ RotationEulerDegree</span>
+                      <div class="qp-axis-grid">
+                        <span class="qp-axis-field"><span class="qp-axis-field__axis" style="--axis-color:var(--qp-axis-x)">X</span><input class="qp-axis-field__value" value="5.6555" /><span class="qp-axis-field__unit">°</span></span>
+                        <span class="qp-axis-field"><span class="qp-axis-field__axis" style="--axis-color:var(--qp-axis-y)">Y</span><input class="qp-axis-field__value" value="0" /><span class="qp-axis-field__unit">°</span></span>
+                        <span class="qp-axis-field"><span class="qp-axis-field__axis" style="--axis-color:var(--qp-axis-z)">Z</span><input class="qp-axis-field__value" value="1.2234" /><span class="qp-axis-field__unit">°</span></span>
+                      </div>
+                    </div>
+                    <div class="qp-mini-tool-row">
+                      <button class="qp-mini-tool" type="button">□</button>
+                      <button class="qp-mini-tool" type="button">▣</button>
+                      <button class="qp-mini-tool" type="button">↻</button>
+                      <button class="qp-mini-tool" type="button">↺</button>
+                    </div>
+                  </div>
+                </details>
+                <details class="qp-property-section" open>
+                  <summary>ObjectDate</summary>
+                  <div class="qp-property-section__body">
+                    <div class="qp-property-row">
+                      <span class="qp-property-label">Networking</span>
+                      <div class="qp-row">
+                        <label class="qp-switch"><input type="checkbox" checked /><span class="qp-switch__track"></span></label>
+                        <span>True</span>
+                      </div>
+                    </div>
+                  </div>
+                </details>
+                <details class="qp-property-section" open>
+                  <summary>Material</summary>
+                  <div class="qp-property-section__body">
+                    <div class="qp-property-row">
+                      <span class="qp-property-label">UvSpreadType</span>
+                      <div class="qp-dropdown" data-dropdown>
+                        <button class="qp-dropdown__trigger" type="button" aria-haspopup="listbox" aria-expanded="false"><span class="qp-dropdown__value" data-dropdown-value>ModelUV</span><span class="qp-dropdown__chevron">⌄</span></button>
+                        <div class="qp-dropdown__menu" role="listbox" aria-label="UvSpreadType">
+                          <button class="qp-dropdown__option is-selected" type="button" role="option" aria-selected="true" data-value="ModelUV">ModelUV</button>
+                          <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="WorldUV">WorldUV</button>
+                          <button class="qp-dropdown__option" type="button" role="option" aria-selected="false" data-value="ScreenUV">ScreenUV</button>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="qp-property-row">
+                      <span class="qp-property-label">MainColor</span>
+                      <span class="qp-swatch-input">
+                        <span class="qp-swatch-input__chip" style="--swatch-color:#ccffff"></span>
+                        <input class="qp-input" value="# CCCCCCC" />
+                        <input class="qp-input" value="100%" />
+                      </span>
+                    </div>
+                    <div class="qp-property-row">
+                      <span class="qp-property-label">UVOffset</span>
+                      <div class="qp-axis-grid">
+                        <span class="qp-axis-field"><span class="qp-axis-field__axis" style="--axis-color:var(--qp-axis-x)">X</span><input class="qp-axis-field__value" value="1.2345" /></span>
+                        <span class="qp-axis-field"><span class="qp-axis-field__axis" style="--axis-color:var(--qp-axis-y)">Y</span><input class="qp-axis-field__value" value="1.2345" /></span>
+                        <span class="qp-axis-field"><span class="qp-axis-field__axis" style="--axis-color:var(--qp-axis-z)">Z</span><input class="qp-axis-field__value" value="1.2345" /></span>
+                      </div>
+                    </div>
+                  </div>
+                </details>
+                <details class="qp-property-section">
+                  <summary>MeshRender</summary>
+                </details>
+                <details class="qp-property-section" open>
+                  <summary>RigidBody</summary>
+                  <div class="qp-property-section__body">
+                    <div class="qp-property-row"><span class="qp-property-label">IsStatic</span><div class="qp-row"><label class="qp-switch"><input type="checkbox" checked /><span class="qp-switch__track"></span></label><span>True</span></div></div>
+                    <div class="qp-property-row"><span class="qp-property-label">EnableGravity</span><div class="qp-row"><label class="qp-switch"><input type="checkbox" checked /><span class="qp-switch__track"></span></label><span>True</span></div></div>
+                  </div>
+                </details>
+              </div>
+            </section>
+
+            <section class="qp-card demo-preset-card">
+              <div class="qp-row qp-row--between">
+                <h3 class="qp-heading-1">Style Presets</h3>
+                <button class="qp-button qp-button--ghost qp-icon-button" type="button" aria-label="More">⋮</button>
+              </div>
+              <div class="demo-style-preview">
+                <span class="qp-anchor-preset is-active">
+                  <span class="qp-anchor-glyph" style="--anchor-x:0;--anchor-y:0;--box-x:0;--box-y:0"><span class="qp-anchor-glyph__box"></span></span>
+                </span>
+                <span class="qp-heading-1">Stretch-Stretch</span>
+              </div>
+              <div class="qp-anchor-grid">
+                <span></span>
+                <span class="qp-anchor-grid__head">Left</span>
+                <span class="qp-anchor-grid__head">Centre</span>
+                <span class="qp-anchor-grid__head">Right</span>
+                <span class="qp-anchor-grid__head">Stretch</span>
+                <span class="qp-anchor-grid__side">Top</span>
+                <span class="qp-anchor-preset is-active"><span class="qp-anchor-glyph" style="--anchor-x:0;--anchor-y:0;--box-x:0;--box-y:0"><span class="qp-anchor-glyph__box"></span></span></span>
+                <span class="qp-anchor-preset"><span class="qp-anchor-glyph" style="--anchor-x:50%;--anchor-y:0;--box-x:29%;--box-y:0"><span class="qp-anchor-glyph__box"></span></span></span>
+                <span class="qp-anchor-preset"><span class="qp-anchor-glyph" style="--anchor-x:100%;--anchor-y:0;--box-x:58%;--box-y:0"><span class="qp-anchor-glyph__box"></span></span></span>
+                <span class="qp-anchor-preset"><span class="qp-anchor-glyph qp-anchor-glyph--stretch" style="--anchor-x:50%;--anchor-y:0;--box-x:0;--box-y:0"><span class="qp-anchor-glyph__box"></span></span></span>
+                <span class="qp-anchor-grid__side">Middle</span>
+                <span class="qp-anchor-preset"><span class="qp-anchor-glyph" style="--anchor-x:0;--anchor-y:50%;--box-x:0;--box-y:29%"><span class="qp-anchor-glyph__box"></span></span></span>
+                <span class="qp-anchor-preset"><span class="qp-anchor-glyph" style="--anchor-x:50%;--anchor-y:50%;--box-x:29%;--box-y:29%"><span class="qp-anchor-glyph__box"></span></span></span>
+                <span class="qp-anchor-preset"><span class="qp-anchor-glyph" style="--anchor-x:100%;--anchor-y:50%;--box-x:58%;--box-y:29%"><span class="qp-anchor-glyph__box"></span></span></span>
+                <span class="qp-anchor-preset"><span class="qp-anchor-glyph qp-anchor-glyph--stretch" style="--anchor-x:50%;--anchor-y:50%;--box-x:0;--box-y:29%"><span class="qp-anchor-glyph__box"></span></span></span>
+                <span class="qp-anchor-grid__side">Bottom</span>
+                <span class="qp-anchor-preset"><span class="qp-anchor-glyph" style="--anchor-x:0;--anchor-y:100%;--box-x:0;--box-y:58%"><span class="qp-anchor-glyph__box"></span></span></span>
+                <span class="qp-anchor-preset"><span class="qp-anchor-glyph" style="--anchor-x:50%;--anchor-y:100%;--box-x:29%;--box-y:58%"><span class="qp-anchor-glyph__box"></span></span></span>
+                <span class="qp-anchor-preset"><span class="qp-anchor-glyph" style="--anchor-x:100%;--anchor-y:100%;--box-x:58%;--box-y:58%"><span class="qp-anchor-glyph__box"></span></span></span>
+                <span class="qp-anchor-preset"><span class="qp-anchor-glyph qp-anchor-glyph--stretch" style="--anchor-x:50%;--anchor-y:100%;--box-x:0;--box-y:58%"><span class="qp-anchor-glyph__box"></span></span></span>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="demo-route demo-system" data-route="icons" hidden>
+          <h2 class="qp-section-title">Icons</h2>
+          <div class="qp-icon-board qp-card">
+            <div class="demo-icon-rules">
+              <strong>Icon Spec</strong>
+              <span>32px canvas, 1.5px stroke, color by category, optional red construction guides.</span>
+            </div>
+            <div class="qp-icon-category" style="--category-color:var(--qp-archetype)">
+              <span class="qp-icon-category__name">Archetype</span>
+              <div class="qp-icon-grid">
+                <span class="qp-icon-cell"><svg viewBox="0 0 24 24"><path d="M12 3 4 7v10l8 4 8-4V7z"/><path d="M12 3v18M4 7l8 4 8-4"/></svg></span>
+                <span class="qp-icon-cell"><svg viewBox="0 0 24 24"><path d="M4 8h16v10H4z"/><path d="M8 8V5h8v3"/></svg></span>
+                <span class="qp-icon-cell"><svg viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/><circle cx="12" cy="12" r="4"/></svg></span>
+                <span class="qp-icon-cell"><svg viewBox="0 0 24 24"><path d="M5 5h14v14H5z"/><path d="M8 8h8v8H8z"/></svg></span>
+              </div>
+            </div>
+            <div class="qp-icon-category" style="--category-color:var(--qp-warning)">
+              <span class="qp-icon-category__name">Effect</span>
+              <div class="qp-icon-grid">
+                <span class="qp-icon-cell"><svg viewBox="0 0 24 24"><path d="M5 17 12 4l7 13"/><path d="M8 17h8M12 4v13"/></svg></span>
+                <span class="qp-icon-cell"><svg viewBox="0 0 24 24"><path d="M13 3s2 4-2 7c-3 3-2 8 3 8 4 0 7-4 4-8"/><path d="M9 13c-4 2-3 8 3 8"/></svg></span>
+                <span class="qp-icon-cell"><svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="M8 10h8M8 14h5"/></svg></span>
+                <span class="qp-icon-cell"><svg viewBox="0 0 24 24"><path d="M4 12h16M12 4v16"/><circle cx="12" cy="12" r="7"/></svg></span>
+              </div>
+            </div>
+            <div class="qp-icon-category" style="--category-color:var(--qp-success)">
+              <span class="qp-icon-category__name">Stuff</span>
+              <div class="qp-icon-grid">
+                <span class="qp-icon-cell"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></span>
+                <span class="qp-icon-cell"><svg viewBox="0 0 24 24"><path d="M6 6 18 18M18 6 6 18"/></svg></span>
+                <span class="qp-icon-cell"><svg viewBox="0 0 24 24"><path d="M8 21V9a4 4 0 0 1 8 0v12"/><path d="M5 12h14"/></svg></span>
+                <span class="qp-icon-cell"><svg viewBox="0 0 24 24"><path d="M4 17h5l3-10 3 10h5"/></svg></span>
+              </div>
+            </div>
+            <div class="qp-icon-category" style="--category-color:var(--qp-info)">
+              <span class="qp-icon-category__name">Operation</span>
+              <div class="qp-icon-grid">
+                <span class="qp-icon-cell qp-icon-cell--lg"><svg viewBox="0 0 24 24"><path class="qp-icon-fill" d="m4 4 16 8-7 2-2 6z"/></svg></span>
+                <span class="qp-icon-cell qp-icon-cell--lg"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M6 6l-3 6 3 6M18 6l3 6-3 6M6 6l6-3 6 3M6 18l6 3 6-3"/></svg></span>
+                <span class="qp-icon-cell qp-icon-cell--lg"><svg viewBox="0 0 24 24"><path d="M8 7h8v10H8z"/><path d="M4 12h16M12 4v16"/></svg></span>
+                <span class="qp-icon-cell qp-icon-cell--lg"><svg viewBox="0 0 24 24"><path d="M7 17 17 7M9 7h8v8"/><path d="M4 20h16"/></svg></span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="demo-route demo-foundation" data-route="tokens" hidden>
+          <h2 class="qp-section-title">Tokens</h2>
+          <div class="qp-grid qp-grid--dense">
+            <div class="qp-color-swatch" style="--swatch-color:#141417"><strong>BG1</strong><span>#141417</span></div>
+            <div class="qp-color-swatch" style="--swatch-color:#1A1B23"><strong>BG2</strong><span>#1A1B23</span></div>
+            <div class="qp-color-swatch" style="--swatch-color:#21232D"><strong>BG3 Panel</strong><span>#21232D</span></div>
+            <div class="qp-color-swatch" style="--swatch-color:#292C37"><strong>BG4 Dialog</strong><span>#292C37</span></div>
+            <div class="qp-color-swatch" style="--swatch-color:#2BF6D2;--swatch-text:#071311"><strong>Main</strong><span>#2BF6D2</span></div>
+            <div class="qp-color-swatch" style="--swatch-color:#EE6067;--swatch-text:#160507"><strong>Danger</strong><span>#EE6067</span></div>
+            <div class="qp-color-swatch" style="--swatch-color:#F8D06C;--swatch-text:#161205"><strong>Warning</strong><span>#F8D06C</span></div>
+            <div class="qp-color-swatch" style="--swatch-color:#5E8EEC"><strong>Info</strong><span>#5E8EEC</span></div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>

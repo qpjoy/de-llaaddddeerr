@@ -28,7 +28,11 @@ bash scripts/manage.sh ops local-platform cycle
 
 # Terminal 2
 ## bash scripts/manage.sh ops internal-local port-forward 18090
-bash electron-dock/mx-launcher/scripts/manage.sh k8s port-forward internal-local 18090
+bash scripts/manage.sh k8s port-forward internal-local 18090
+
+
+# 最快看desktop样式
+python3 -m http.server 18110 -d electron-dock/mx-launcher/desktop
 
 # 打开 http://127.0.0.1:18090/admin/
 # 左下角 MX Server 默认使用：http://127.0.0.1:18090
@@ -44,6 +48,10 @@ bash scripts/manage.sh ops awx-shadow port-forward 18080
 
 # 清理V1.0
 bash scripts/manage.sh ops site-slot cleanup-v1-wireguard --apply
+
+# 清理docker
+docker image prune -f
+docker builder prune -f --filter until=168h --keep-storage 8GB
 
 
 # wg Domestic
