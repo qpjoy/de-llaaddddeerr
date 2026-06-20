@@ -1,7 +1,12 @@
 const path = require('node:path');
 const fs = require('node:fs/promises');
+const fsSync = require('node:fs');
+const http = require('node:http');
+const https = require('node:https');
 const { randomUUID } = require('node:crypto');
 const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: electronScreen } = require('electron');
+
+loadDotEnvFiles();
 
 const APP_ID = 'dev.qpjoy.mx-h2i';
 const STATE_FILE = 'mx-h2i-runtime.json';
@@ -11,10 +16,15 @@ const WIREGUARD_PROFILE_NAME = 'mx-h2i.conf';
 const INTERNAL_PEER_IP = '10.88.88.88';
 const LOCAL_INTERNAL_BASE_URLS = ['http://127.0.0.1:18090', 'http://localhost:18090'];
 const DEFAULT_CONFIG = {
+  bootstrapApiBaseUrl: defaultBootstrapApiBaseUrl(),
   internalApiBaseUrl: 'http://10.88.88.88:18090',
   domesticRelayHost: '121.43.253.179',
   domesticRelayPort: 51280,
-  sdkGatewayBaseUrl: 'http://10.88.88.88:18090/internal/v1/sdk',
+  sdkGatewayBaseUrl: '',
+  hostResolve: defaultHostResolve(),
+  splitDnsDomains: nullableString(process.env.MX_H2I_SPLIT_DNS_DOMAINS)
+    || nullableString(process.env.MX_H2I_DNS_DOMAINS)
+    || '',
   releaseChannel: 'stable',
   rolloutGroup: 'staff-ring',
   useLocalEngineResources: true,
@@ -150,8 +160,8 @@ function registerIpc() {
     setConnecting('employee');
     await saveAndBroadcast();
     try {
-      const baseUrl = await resolveInternalBaseUrl(runtime.config);
-      await applyResolvedBaseUrl(baseUrl);
+      const baseUrl = await resolveBootstrapBaseUrl(runtime.config);
+      await applyResolvedBootstrapBaseUrl(baseUrl);
       const auth = await authenticateUserViaGateway(baseUrl, account, password);
       const session = await connectLauncherNetwork({
         identityKind: 'user',
@@ -253,7 +263,10 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:open-admin', async () => {
-    const url = `${runtime.config.internalApiBaseUrl.replace(/\/+$/, '')}/admin/`;
+    const baseUrl = runtime.connection?.state === 'connected'
+      ? (runtime.connection.internalBaseUrl || runtime.config.internalApiBaseUrl)
+      : (runtime.config.bootstrapApiBaseUrl || runtime.config.internalApiBaseUrl);
+    const url = `${baseUrl.replace(/\/+$/, '')}/admin/`;
     await shell.openExternal(url);
     return true;
   });
@@ -614,11 +627,15 @@ async function normalizeRuntime(input) {
 function normalizeConfig(input) {
   const row = input && typeof input === 'object' ? input : {};
   const domesticRelayPort = Number(row.domesticRelayPort);
+  const bootstrapApiBaseUrl = stringValue(row.bootstrapApiBaseUrl, DEFAULT_CONFIG.bootstrapApiBaseUrl);
   return {
+    bootstrapApiBaseUrl,
     internalApiBaseUrl: stringValue(row.internalApiBaseUrl, DEFAULT_CONFIG.internalApiBaseUrl),
     domesticRelayHost: stringValue(row.domesticRelayHost, DEFAULT_CONFIG.domesticRelayHost),
     domesticRelayPort: Number.isInteger(domesticRelayPort) && domesticRelayPort > 0 ? domesticRelayPort : DEFAULT_CONFIG.domesticRelayPort,
-    sdkGatewayBaseUrl: stringValue(row.sdkGatewayBaseUrl, DEFAULT_CONFIG.sdkGatewayBaseUrl),
+    sdkGatewayBaseUrl: stringValue(row.sdkGatewayBaseUrl, DEFAULT_CONFIG.sdkGatewayBaseUrl || sdkGatewayBaseUrl(bootstrapApiBaseUrl)),
+    hostResolve: stringValue(row.hostResolve, DEFAULT_CONFIG.hostResolve),
+    splitDnsDomains: stringValue(row.splitDnsDomains, DEFAULT_CONFIG.splitDnsDomains),
     releaseChannel: stringValue(row.releaseChannel, DEFAULT_CONFIG.releaseChannel),
     rolloutGroup: stringValue(row.rolloutGroup, DEFAULT_CONFIG.rolloutGroup),
     useLocalEngineResources: row.useLocalEngineResources !== false,
@@ -821,7 +838,7 @@ async function launcherContract(config) {
 
 function launcherCreateOptions(config) {
   return {
-    baseUrl: config.internalApiBaseUrl,
+    baseUrl: config.bootstrapApiBaseUrl || config.internalApiBaseUrl,
     productId: 'mx-h2i',
     mode: 'standalone',
     deviceLabel: 'MX-H2I Desktop'
@@ -1043,8 +1060,8 @@ async function connectLauncherNetwork(input) {
 }
 
 async function launcherContext() {
-  const baseUrl = await resolveInternalBaseUrl(runtime.config);
-  await applyResolvedBaseUrl(baseUrl);
+  const baseUrl = await resolveBootstrapBaseUrl(runtime.config);
+  await applyResolvedBootstrapBaseUrl(baseUrl);
   const installation = await ensureInstallation();
   const mod = await import('@qpjoy/electron-launcher');
   const launcher = mod.createElectronLauncher({
@@ -1199,6 +1216,7 @@ async function startWireGuardForSession(input) {
       ...wireGuardRuntimeOptions(),
       routePlan,
       privateKey,
+      dnsDomains: splitDnsDomains(runtime.config),
       action: 'restart'
     });
     const status = result.status || {};
@@ -1408,11 +1426,14 @@ async function authenticateUserViaGateway(baseUrl, account, password) {
   };
 }
 
-async function resolveInternalBaseUrl(config) {
+async function resolveBootstrapBaseUrl(config) {
   const candidates = uniqueValues([
+    normalizeBaseUrl(process.env.MX_H2I_BOOTSTRAP_BASE_URL),
+    normalizeBaseUrl(config.bootstrapApiBaseUrl),
+    defaultBootstrapApiBaseUrl(),
+    ...LOCAL_INTERNAL_BASE_URLS,
     normalizeBaseUrl(process.env.MX_H2I_INTERNAL_BASE_URL),
-    normalizeBaseUrl(config.internalApiBaseUrl),
-    ...LOCAL_INTERNAL_BASE_URLS
+    normalizeBaseUrl(config.internalApiBaseUrl)
   ].filter(Boolean));
   let lastError = null;
   for (const candidate of candidates) {
@@ -1423,16 +1444,16 @@ async function resolveInternalBaseUrl(config) {
       lastError = err;
     }
   }
-  throw new Error(`无法连接 Internal API：${candidates.join(', ')}；${errorMessage(lastError)}`);
+  throw new Error(`无法连接 bootstrap API：${candidates.join(', ')}；${errorMessage(lastError)}`);
 }
 
-async function applyResolvedBaseUrl(baseUrl) {
+async function applyResolvedBootstrapBaseUrl(baseUrl) {
   const normalized = normalizeBaseUrl(baseUrl);
-  if (!normalized || normalized === runtime.config.internalApiBaseUrl) return;
+  if (!normalized || normalized === runtime.config.bootstrapApiBaseUrl) return;
   runtime.config = normalizeConfig({
     ...runtime.config,
-    internalApiBaseUrl: normalized,
-    sdkGatewayBaseUrl: `${normalized}/internal/v1/sdk`
+    bootstrapApiBaseUrl: normalized,
+    sdkGatewayBaseUrl: sdkGatewayBaseUrl(normalized)
   });
   runtime.launcherContract = await launcherContract(runtime.config);
 }
@@ -1470,6 +1491,8 @@ function normalizeRoutePlan(input) {
 }
 
 async function requestJson(url, options = {}) {
+  const hostOverride = hostResolveOverride(url);
+  if (hostOverride) return requestJsonWithHostOverride(hostOverride, options);
   if (typeof fetch !== 'function') throw new Error('当前 Electron 运行时没有 fetch。');
   const controller = new AbortController();
   const timeout = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 6000;
@@ -1496,6 +1519,50 @@ async function requestJson(url, options = {}) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function requestJsonWithHostOverride(override, options = {}) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(override.url);
+    const body = options.body ? JSON.stringify(options.body) : undefined;
+    const timeout = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 6000;
+    const headers = {
+      accept: 'application/json',
+      host: override.hostHeader,
+      ...(body ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {})
+    };
+    const client = target.protocol === 'https:' ? https : http;
+    const request = client.request({
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port || (target.protocol === 'https:' ? 443 : 80),
+      path: `${target.pathname}${target.search}`,
+      method: options.method || 'GET',
+      headers,
+      servername: override.servername,
+      timeout
+    }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        const payload = parseJsonPayload(text);
+        if ((response.statusCode || 0) < 200 || (response.statusCode || 0) >= 300) {
+          const err = new Error(`HTTP ${response.statusCode}${response.statusMessage ? ` ${response.statusMessage}` : ''}`);
+          err.payload = payload;
+          reject(err);
+          return;
+        }
+        resolve(payload);
+      });
+    });
+    request.on('timeout', () => {
+      request.destroy(new Error('请求超时。'));
+    });
+    request.on('error', reject);
+    if (body) request.write(body);
+    request.end();
+  });
 }
 
 function visibleRuntime(source = runtime) {
@@ -1572,6 +1639,133 @@ function defaultActivity() {
   ];
 }
 
+function loadDotEnvFiles() {
+  const candidates = uniqueValues([
+    path.join(process.cwd(), '.env'),
+    path.resolve(__dirname, '..', '.env'),
+    path.resolve(__dirname, '..', '..', '.env'),
+    process.resourcesPath ? path.join(process.resourcesPath, 'app', '.env') : null,
+    process.resourcesPath ? path.join(process.resourcesPath, '.env') : null
+  ].filter(Boolean));
+  for (const file of candidates) {
+    loadDotEnvFile(file);
+  }
+}
+
+function loadDotEnvFile(file) {
+  try {
+    if (!fsSync.existsSync(file)) return;
+    const raw = fsSync.readFileSync(file, 'utf8');
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+      if (!match) continue;
+      const key = match[1];
+      if (Object.prototype.hasOwnProperty.call(process.env, key)) continue;
+      process.env[key] = unquoteEnvValue(match[2]);
+    }
+  } catch {
+    // A missing or unreadable local .env should not prevent the desktop app from booting.
+  }
+}
+
+function unquoteEnvValue(value) {
+  const trimmed = String(value ?? '').trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function defaultBootstrapApiBaseUrl() {
+  const explicit = normalizeBaseUrl(process.env.MX_H2I_BOOTSTRAP_BASE_URL)
+    || normalizeBaseUrl(process.env.MX_H2I_PUBLIC_BASE_URL);
+  if (explicit) return explicit;
+  const host = nullableString(process.env.MX_H2I_BOOTSTRAP_HOST)
+    || nullableString(process.env.MX_H2I_BOOTSTRAP_DOMAIN);
+  if (!host) return '';
+  const protocol = stringValue(process.env.MX_H2I_BOOTSTRAP_PROTOCOL, 'http').replace(/:$/, '');
+  const port = nullableString(process.env.MX_H2I_BOOTSTRAP_PORT) || '18090';
+  return `${protocol}://${host}${port ? `:${port}` : ''}`;
+}
+
+function defaultHostResolve() {
+  const explicit = nullableString(process.env.MX_H2I_HOST_RESOLVE)
+    || nullableString(process.env.MX_H2I_BOOTSTRAP_HOST_RESOLVE);
+  if (explicit) return explicit;
+  const host = nullableString(process.env.MX_H2I_BOOTSTRAP_HOST)
+    || nullableString(process.env.MX_H2I_BOOTSTRAP_DOMAIN);
+  const ip = nullableString(process.env.MX_H2I_BOOTSTRAP_RESOLVE_IP)
+    || nullableString(process.env.MX_H2I_BOOTSTRAP_IP);
+  return host && ip ? `${host}=${ip}` : '';
+}
+
+function hostResolveOverride(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  const resolveMap = parseHostResolve(runtime?.config?.hostResolve || DEFAULT_CONFIG.hostResolve);
+  const mapped = resolveMap.get(parsed.hostname.toLowerCase());
+  if (!mapped) return null;
+  const target = new URL(parsed.toString());
+  target.hostname = mapped.host;
+  if (mapped.port) target.port = mapped.port;
+  return {
+    url: target.toString(),
+    hostHeader: parsed.host,
+    servername: parsed.hostname
+  };
+}
+
+function parseHostResolve(value) {
+  const map = new Map();
+  const text = nullableString(value);
+  if (!text) return map;
+  for (const pair of text.split(/[,\n;]/)) {
+    const trimmed = pair.trim();
+    if (!trimmed) continue;
+    const separator = trimmed.includes('=') ? '=' : ':';
+    const index = trimmed.indexOf(separator);
+    if (index <= 0) continue;
+    const host = trimmed.slice(0, index).trim().toLowerCase();
+    const target = parseHostResolveTarget(trimmed.slice(index + 1).trim());
+    if (host && target) map.set(host, target);
+  }
+  return map;
+}
+
+function parseHostResolveTarget(value) {
+  const text = nullableString(value);
+  if (!text) return null;
+  if (text.startsWith('[')) {
+    const close = text.indexOf(']');
+    if (close > 0) {
+      return {
+        host: text.slice(1, close),
+        port: text.slice(close + 1).replace(/^:/, '') || null
+      };
+    }
+  }
+  const [host, port] = text.split(':');
+  return {
+    host,
+    port: port || null
+  };
+}
+
+function splitDnsDomains(config) {
+  return arrayValue(String(config?.splitDnsDomains || '').split(/[,\s]+/), [])
+    .map((domain) => domain.replace(/^\.+/, '').replace(/\.+$/, '').toLowerCase())
+    .filter(Boolean);
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -1599,6 +1793,11 @@ function joinApiUrl(baseUrl, pathName) {
   const base = normalizeBaseUrl(baseUrl);
   if (!base) throw new Error('Internal API baseUrl 为空。');
   return `${base}${pathName.startsWith('/') ? pathName : `/${pathName}`}`;
+}
+
+function sdkGatewayBaseUrl(baseUrl) {
+  const normalized = normalizeBaseUrl(baseUrl);
+  return normalized ? `${normalized}/internal/v1/sdk` : '';
 }
 
 function uniqueValues(values) {

@@ -226,6 +226,26 @@ V2 路由和 DNS 需要分层处理，不能把 bootstrap endpoint、overlay end
 | Split DNS | app 域名、k8s/service 域名 | 在 WG 已通之后再启用；DNS server 可以是 Internal DNS 或 Domestic relay/cache，但查询路径必须走 MX-H2I WG route |
 | 系统代理/Fake IP | Clash/mihomo/TUN | 不能作为 H2I 成功证据；`198.18.0.0/15`、非 MX-H2I `utun` 或 `lo0` 都应判为 not ready |
 
+MX-H2I 客户端连接分两个阶段：
+
+1. Bootstrap 阶段：客户端还没有 WG route，只能访问 Domestic 公网 IP/公网域名。Domestic
+   作为公网 facade 转发到 Internal 的 gateway 接口，供 H 端登录、申请 lease、拉 routePlan。
+2. Overlay 阶段：客户端 WG 已连上 Domestic relay 后，Internal API 和后续应用流量走
+   routePlan 下发的 `internalControlIp`，默认 `10.88.88.88`。
+
+开发和私有部署可以用 `.env` 配置 bootstrap 域名和临时解析，不需要把公网 IP 写死进包体：
+
+```dotenv
+MX_H2I_BOOTSTRAP_BASE_URL=http://api.mxinfo-inc.cn:18090
+MX_H2I_HOST_RESOLVE=api.mxinfo-inc.cn=121.43.253.179
+MX_H2I_INTERNAL_BASE_URL=http://10.88.88.88:18090
+MX_H2I_SPLIT_DNS_DOMAINS=mxinfo-inc.cn,api.mxinfo-inc.cn
+```
+
+正式部署时，公网 DNS 可以把 `api.mxinfo-inc.cn` 解析到 Domestic 公网入口；连上 WG 后，
+Internal DNS/split DNS 可以把同一域名或内网服务域名解析到 Internal overlay IP。这样用户不需要
+手动填 IP，Admin 只需要管理公网解析、Internal DNS policy 和 routePlan。
+
 Windows 客户端使用 `wireguard.exe /installtunnelservice` 管理 tunnel service，route proof 通过
 `Get-NetRoute + Get-NetIPInterface` 校验目标 IP 是否命中 `mx-h2i` tunnel alias；PowerShell
 不可用时退回 `route.exe print -4`。Windows split DNS 与 macOS 不同，底层应使用 NRPT：

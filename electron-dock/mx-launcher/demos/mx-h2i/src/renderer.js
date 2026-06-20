@@ -375,7 +375,11 @@ function renderConfigForm() {
         <button class="secondary-button" type="submit" ${busyAction === 'save-config' ? 'disabled' : ''}>保存</button>
       </div>
       <label class="field">
-        <span>Internal API</span>
+        <span>Bootstrap API</span>
+        <input name="bootstrapApiBaseUrl" value="${escapeAttr(config.bootstrapApiBaseUrl || '')}" />
+      </label>
+      <label class="field">
+        <span>Overlay Internal API</span>
         <input name="internalApiBaseUrl" value="${escapeAttr(config.internalApiBaseUrl)}" />
       </label>
       <div class="field-row">
@@ -391,6 +395,14 @@ function renderConfigForm() {
       <label class="field">
         <span>SDK Gateway</span>
         <input name="sdkGatewayBaseUrl" value="${escapeAttr(config.sdkGatewayBaseUrl)}" />
+      </label>
+      <label class="field">
+        <span>Host Resolve</span>
+        <input name="hostResolve" value="${escapeAttr(config.hostResolve || '')}" placeholder="api.mxinfo-inc.cn=121.43.253.179" />
+      </label>
+      <label class="field">
+        <span>Split DNS Domains</span>
+        <input name="splitDnsDomains" value="${escapeAttr(config.splitDnsDomains || '')}" placeholder="mxinfo-inc.cn, api.mxinfo-inc.cn" />
       </label>
       <div class="field-row">
         <label class="field">
@@ -638,10 +650,13 @@ function connectionCaption() {
 function readConfigForm(form) {
   const formData = new FormData(form);
   return {
+    bootstrapApiBaseUrl: String(formData.get('bootstrapApiBaseUrl') || ''),
     internalApiBaseUrl: String(formData.get('internalApiBaseUrl') || ''),
     domesticRelayHost: String(formData.get('domesticRelayHost') || ''),
     domesticRelayPort: Number(formData.get('domesticRelayPort') || 0),
     sdkGatewayBaseUrl: String(formData.get('sdkGatewayBaseUrl') || ''),
+    hostResolve: String(formData.get('hostResolve') || ''),
+    splitDnsDomains: String(formData.get('splitDnsDomains') || ''),
     releaseChannel: String(formData.get('releaseChannel') || ''),
     rolloutGroup: String(formData.get('rolloutGroup') || ''),
     useLocalEngineResources: formData.get('useLocalEngineResources') === 'on',
@@ -673,10 +688,13 @@ function clone(value) {
 function createMockApi() {
   let mockState = {
     config: {
+      bootstrapApiBaseUrl: 'http://api.mxinfo-inc.cn:18090',
       internalApiBaseUrl: 'http://10.88.88.88:18090',
       domesticRelayHost: '121.43.253.179',
       domesticRelayPort: 51280,
-      sdkGatewayBaseUrl: 'http://10.88.88.88:18090/internal/v1/sdk',
+      sdkGatewayBaseUrl: 'http://api.mxinfo-inc.cn:18090/internal/v1/sdk',
+      hostResolve: '',
+      splitDnsDomains: 'mxinfo-inc.cn,api.mxinfo-inc.cn',
       releaseChannel: 'stable',
       rolloutGroup: 'staff-ring',
       useLocalEngineResources: true,
