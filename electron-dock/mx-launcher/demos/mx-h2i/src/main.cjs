@@ -1321,6 +1321,71 @@ async function startWireGuardForSession(input) {
   }
 }
 
+async function probeWireGuardForConnection(input) {
+  const connection = input.connection || {};
+  const routePlan = normalizeRoutePlan(input.routePlan || connection.routePlan);
+  const domesticPeerSync = normalizeDomesticPeerSync(input.domesticPeerSync || connection.domesticPeerSync);
+  if (!routePlan) return wireGuardFailure('launcher routePlan 缺失。');
+
+  try {
+    const mod = await import('@qpjoy/electron-launcher/wireguard');
+    const internalBaseUrl = internalOverlayBaseUrl(routePlan, input.internalBaseUrl || connection.internalBaseUrl);
+    const status = mod.getLauncherWireGuardPeerStatus(wireGuardRuntimeOptions());
+    const wireGuard = summarizeWireGuardStatus(status, connection);
+    const targetIp = internalTargetIp(routePlan, internalBaseUrl);
+    const expectedInterfaceName = status?.realInterfaceName || status?.interfaceName || wireGuard.realInterfaceName || wireGuard.interfaceName || null;
+    const route = mod.probeLauncherWireGuardRoute({
+      ...wireGuardRuntimeOptions(),
+      targetIp,
+      expectedInterfaceName
+    });
+    const internalApi = route.ok
+      ? await probeInternalApiViaOverlay(internalBaseUrl)
+      : {
+          ok: false,
+          baseUrl: normalizeBaseUrl(internalBaseUrl),
+          error: `route to ${targetIp} is not on WireGuard (${route.interfaceName || route.error || 'unknown route'})`
+        };
+    const tunnelReady = status?.active === true || route.ok === true;
+    const ready = tunnelReady && route.ok === true && internalApi.ok === true;
+    const domesticRelayReady = domesticPeerSync?.status === 'passed' || route.ok === true;
+    const resultLike = {
+      ok: tunnelReady,
+      status,
+      peer: {
+        endpoint: connection.domesticRelayEndpoint,
+        allowedIps: connection.routeCidrs,
+        configPath: wireGuard.configPath
+      },
+      tunnel: {
+        message: status?.error || wireGuard.message
+      },
+      message: status?.error || wireGuard.message
+    };
+    return {
+      state: ready ? 'connected' : (tunnelReady ? 'tunnel-only' : 'lease-only'),
+      ready,
+      health: ready ? readyHealth() : {
+        wireGuard: tunnelReady ? 'ready' : 'blocked',
+        domesticRelay: domesticRelayReady ? 'ready' : domesticPeerSync?.status === 'failed' || domesticPeerSync?.status === 'blocked' ? 'blocked' : 'pending',
+        internalApi: internalApi.ok === true ? 'ready' : 'blocked',
+        splitDns: route.ok === true ? 'ready' : 'pending',
+        appBroker: 'ready'
+      },
+      wireGuard,
+      diagnostics: {
+        route,
+        internalApi,
+        domesticPeerSync,
+        updatedAt: nowIso()
+      },
+      message: ready ? 'ready' : wireGuardNotReadyMessage(resultLike, route, internalApi, domesticPeerSync)
+    };
+  } catch (err) {
+    return wireGuardFailure(errorMessage(err));
+  }
+}
+
 async function syncDomesticPeerForLease(lease) {
   const leaseId = nullableString(lease?.leaseId);
   if (!leaseId) {
@@ -1366,9 +1431,9 @@ async function refreshWireGuardDiagnostics() {
     return;
   }
   const domesticPeerSync = await syncDomesticPeerForLease({ leaseId: connection.leaseId });
-  const wireGuardResult = await startWireGuardForSession({
+  const wireGuardResult = await probeWireGuardForConnection({
+    connection,
     routePlan,
-    privateKey: runtime.installation?.keyPair?.privateKey || runtime.installation?.privateKey,
     internalBaseUrl: connection.internalBaseUrl,
     domesticPeerSync
   });
@@ -1487,6 +1552,30 @@ function summarizeWireGuardResult(result) {
     routes: Array.isArray(status.routes) ? status.routes : [],
     message,
     error: result?.ok === true ? null : message,
+    updatedAt: nowIso()
+  };
+}
+
+function summarizeWireGuardStatus(status, connection = {}) {
+  const previous = connection?.wireGuard || {};
+  const message = nullableString(status?.error) || nullableString(previous.message);
+  return {
+    ok: status?.ok !== false,
+    active: status?.active === true,
+    mode: nullableString(status?.mode) || nullableString(previous.mode),
+    interfaceName: nullableString(status?.interfaceName) || nullableString(previous.interfaceName),
+    realInterfaceName: nullableString(status?.realInterfaceName) || nullableString(previous.realInterfaceName),
+    configPath: nullableString(status?.configPath) || nullableString(previous.configPath),
+    endpoint: nullableString(previous.endpoint) || nullableString(connection?.domesticRelayEndpoint),
+    allowedIps: arrayValue(status?.allowedIps, arrayValue(previous.allowedIps, arrayValue(connection?.routeCidrs, []))),
+    statusError: nullableString(status?.error),
+    serviceState: nullableString(status?.serviceState) || nullableString(previous.serviceState),
+    routeLogPath: nullableString(status?.routeLogPath) || nullableString(previous.routeLogPath),
+    routeLogTail: tailText(nullableString(status?.routeLogTail) || nullableString(previous.routeLogTail), 1600),
+    peers: Array.isArray(status?.peers) ? status.peers : (Array.isArray(previous.peers) ? previous.peers : []),
+    routes: Array.isArray(status?.routes) ? status.routes : (Array.isArray(previous.routes) ? previous.routes : []),
+    message,
+    error: status?.ok === false ? message : null,
     updatedAt: nowIso()
   };
 }

@@ -112,7 +112,7 @@ export async function connectLauncherWireGuardPeer(
     action
   });
   const status = safeWireGuardStatus(runtime, peer.configPath);
-  const ok = tunnel.ok === true && status?.active === true;
+  const ok = tunnel.ok === true && (status?.active === true || runtime.platform === 'win32');
   return {
     ok,
     action,
