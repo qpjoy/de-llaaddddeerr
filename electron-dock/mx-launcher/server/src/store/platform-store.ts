@@ -57,6 +57,8 @@ import type {
   SiteSlotExecutionRun,
   SiteSlotPlan,
   SiteSlotPlanInput,
+  SiteSlotDomesticRuntimeConfig,
+  SiteSlotDomesticRuntimeConfigInput,
   SiteSlotDomesticWireGuardSecret,
   SiteSlotDomesticWireGuardSecretInput,
   SiteSlotAccessAccount,
@@ -119,6 +121,7 @@ export interface PlatformOverview {
   siteSlotWorkerReports: number;
   siteSlotRollbackExecutions: number;
   siteSlotRollbackReports: number;
+  siteSlotDomesticRuntimeConfigs: number;
   awxProviderConfigs: number;
   dnsPolicies: number;
   dnsReverseProxyRoutes: number;
@@ -194,6 +197,9 @@ export interface PlatformStore {
   listSiteSlotDomesticWireGuardSecrets(): MaybePromise<SiteSlotDomesticWireGuardSecret[]>;
   getSiteSlotDomesticWireGuardSecret(siteId: string): MaybePromise<SiteSlotDomesticWireGuardSecret | null>;
   upsertSiteSlotDomesticWireGuardSecret(input: SiteSlotDomesticWireGuardSecretInput): MaybePromise<SiteSlotDomesticWireGuardSecret>;
+  listSiteSlotDomesticRuntimeConfigs(): MaybePromise<SiteSlotDomesticRuntimeConfig[]>;
+  getSiteSlotDomesticRuntimeConfig(siteId: string): MaybePromise<SiteSlotDomesticRuntimeConfig | null>;
+  upsertSiteSlotDomesticRuntimeConfig(input: SiteSlotDomesticRuntimeConfigInput): MaybePromise<SiteSlotDomesticRuntimeConfig>;
   issueSiteSlotAccessAccounts(input: SiteSlotAccessAccountIssueInput): MaybePromise<SiteSlotAccessAccountIssueResult>;
   listSiteSlotAccessAccounts(siteId: string): MaybePromise<SiteSlotAccessAccount[]>;
   getSiteSlotAccessAccount(siteId: string, username: string): MaybePromise<SiteSlotAccessAccount | null>;

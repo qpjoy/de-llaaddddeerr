@@ -41,6 +41,8 @@ import type {
   RuntimeFeaturePolicy,
   SiteHeartbeat,
   SiteSlotAccessAccount,
+  SiteSlotDomesticRuntimeConfig,
+  SiteSlotDomesticRuntimeConfigInput,
   SiteSlotDomesticWireGuardSecret,
   SiteSlotDomesticWireGuardSecretInput,
   SiteSlotExecutionRun,
@@ -1191,6 +1193,21 @@ export class AdminController {
         plan: await this.store.createSiteSlotPlan(input)
       };
     }
+    if (actionId === 'site-slot.domestic-runtime-config.upsert') {
+      if (path !== '/internal/v1/config-center/domestic-runtime-configs') {
+        throw new BadRequestException('Admin Domestic runtime config path is invalid');
+      }
+      return {
+        config: await this.store.upsertSiteSlotDomesticRuntimeConfig(toDomesticRuntimeConfigInput(body))
+      };
+    }
+    if (actionId === 'site-slot.domestic-runtime-config.apply') {
+      const match = matchPath(path, /^\/internal\/v1\/config-center\/domestic-runtime-configs\/([^/]+)\/apply$/);
+      if (!match) throw new BadRequestException('Admin Domestic runtime apply path is invalid');
+      return {
+        apply: await this.adminDomesticRuntimeConfigApplyResult(match[1], body)
+      };
+    }
     if (actionId === 'site-slot.preflight.create' || actionId === 'site-slot.apply.confirm') {
       const match = matchPath(path, /^\/internal\/v1\/site-slots\/plans\/([^/]+)\/(preflight|apply)$/);
       if (!match) throw new BadRequestException('Admin site-slot execution path is invalid');
@@ -1824,6 +1841,99 @@ export class AdminController {
     return siteSlotPlanHostValidationFailure(kind, profile.host);
   }
 
+  private async adminDomesticRuntimeConfigApplyResult(siteId: string, body: Record<string, unknown>) {
+    const requestedBy = stringValue(body.requestedBy) ?? 'admin-ui';
+    const requestId = stringValue(body.requestId) ?? `admin-domestic-runtime-apply-${Date.now()}`;
+    const confirm = booleanValue(body.confirmDomesticRuntimeApply) === true;
+    const shouldSave = booleanValue(body.saveBeforeApply) === true;
+    const configInput = toDomesticRuntimeConfigInput({ ...body, siteId, requestedBy, requestId: `${requestId}-save` });
+    const savedConfig = shouldSave
+      ? await this.store.upsertSiteSlotDomesticRuntimeConfig(configInput)
+      : await this.store.getSiteSlotDomesticRuntimeConfig(siteId);
+    const config = savedConfig ?? await this.store.upsertSiteSlotDomesticRuntimeConfig({
+      siteId,
+      requestedBy,
+      requestId: `${requestId}-seed`
+    });
+    const explicitPlanId = stringValue(body.planId);
+    const explicitProfileId = stringValue(body.sshProfileId);
+    const plan = explicitPlanId ? await this.store.getSiteSlotPlan(explicitPlanId) : await this.latestDomesticPlan(siteId);
+    const profile = explicitProfileId
+      ? await this.store.getSiteSlotSshProfile(explicitProfileId)
+      : plan?.ssh.profileId
+        ? await this.store.getSiteSlotSshProfile(plan.ssh.profileId)
+        : await this.store.getSiteSlotSshProfileForSite(siteId);
+    const profileFailures = profile ? sshProfileBlockingReasons(profile) : [];
+    const blockedReasons = [
+      ...(!confirm ? ['confirmDomesticRuntimeApply=true is required before SSH apply/restart'] : []),
+      ...(config.status === 'active' ? [] : [`Domestic runtime config is ${config.status}`]),
+      ...blockedWarnings(config.warnings),
+      ...(profile ? [] : ['Domestic SSH profile is required before applying runtime config']),
+      ...profileFailures
+    ];
+    if (blockedReasons.length > 0 || !profile) {
+      return {
+        status: 'blocked',
+        execution: 'not-started',
+        mode: 'domestic-runtime-config-apply',
+        siteId,
+        planId: plan?.planId ?? explicitPlanId ?? null,
+        config,
+        sshProfileId: profile?.profileId ?? explicitProfileId ?? null,
+        blockedReasons,
+        warnings: config.warnings,
+        nextActions: ['save-runtime-config', 'fix-domestic-ssh-profile', 'confirm-and-apply-runtime-config'],
+        finishedAt: new Date().toISOString()
+      };
+    }
+
+    const startedAt = new Date().toISOString();
+    let execution;
+    try {
+      execution = await runSshScriptWithProfile(profile, domesticRuntimeConfigApplyScript(config), 90000);
+    } catch (error) {
+      execution = sshScriptFailure(error, startedAt);
+    }
+    const passed = execution.status === 'passed';
+    await this.store.recordAudit({
+      eventType: 'config.domestic_runtime_config.applied',
+      actorKind: 'admin-action',
+      requestId,
+      metadata: {
+        siteId,
+        planId: plan?.planId ?? null,
+        configId: config.configId,
+        publicBaseUrl: config.edge.publicBaseUrl,
+        internalApi: config.upstreams.internalApi,
+        sshProfileId: profile.profileId,
+        status: execution.status,
+        exitCode: execution.exitCode
+      }
+    });
+    return {
+      status: passed ? 'passed' : 'failed',
+      execution: passed ? 'completed' : 'failed',
+      mode: 'domestic-runtime-config-apply',
+      siteId,
+      planId: plan?.planId ?? explicitPlanId ?? null,
+      config,
+      sshProfileId: profile.profileId,
+      remote: execution,
+      publicBootstrapUrl: config.edge.publicBaseUrl,
+      blockedReasons: passed ? [] : [`Domestic runtime apply failed: ${execution.stderr || execution.status}`],
+      warnings: config.warnings,
+      nextActions: passed
+        ? ['verify-domestic-bootstrap-healthz', 'restart-h-endpoint-or-refresh-bootstrap-snapshot']
+        : ['check-domestic-ssh-and-docker-compose', 'retry-domestic-runtime-apply'],
+      finishedAt: new Date().toISOString()
+    };
+  }
+
+  private async latestDomesticPlan(siteId: string): Promise<SiteSlotPlan | null> {
+    const plans = await this.store.listSiteSlotPlans();
+    return latestByCreatedAt(plans.filter((plan) => plan.kind === 'domestic' && plan.siteId === siteId));
+  }
+
   private async resolveAwxProviderConfig(kind: SiteSlotKind, providerId?: string | null): Promise<AwxProviderConfig | null> {
     if (providerId) {
       const provider = await this.store.getAwxProviderConfig(providerId);
@@ -2074,6 +2184,25 @@ function toSiteSlotPlanInput(body: Record<string, unknown>): SiteSlotPlanInput {
     accessAccounts: siteSlotPlanAccessAccountsValue(body.accessAccounts),
     requestId: stringValue(body.requestId),
     createdBy: stringValue(body.createdBy)
+  };
+}
+
+function toDomesticRuntimeConfigInput(body: Record<string, unknown>): SiteSlotDomesticRuntimeConfigInput {
+  return {
+    siteId: stringValue(body.siteId),
+    status: stringValue(body.status),
+    edgeBind: stringValue(body.edgeBind),
+    edgePort: numberValueOrNull(body.edgePort),
+    bootstrapProtocol: stringValue(body.bootstrapProtocol),
+    bootstrapHost: stringValue(body.bootstrapHost),
+    bootstrapPort: numberValueOrNull(body.bootstrapPort),
+    internalBaseUrl: stringValue(body.internalBaseUrl),
+    internalApiUpstream: stringValue(body.internalApiUpstream),
+    internalH2iUpstream: stringValue(body.internalH2iUpstream),
+    dnsBind: stringValue(body.dnsBind),
+    dnsPort: numberValueOrNull(body.dnsPort),
+    requestedBy: stringValue(body.requestedBy),
+    requestId: stringValue(body.requestId)
   };
 }
 
@@ -5113,6 +5242,26 @@ function domesticInternalServicePeerKeySyncScript(internalPublicKey: string, int
   ].join('; ');
 }
 
+function domesticRuntimeConfigApplyScript(config: SiteSlotDomesticRuntimeConfig): string {
+  const envLines = Object.entries(config.env)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`);
+  return [
+    'set -eu',
+    'printf "mx-domestic-runtime-config-apply\\n"',
+    'stack_dir=/opt/mx/current/domestic',
+    'test -d "$stack_dir" || { echo "blocked: Domestic edge stack is not installed at $stack_dir"; exit 1; }',
+    'test -f "$stack_dir/manage.sh" || { echo "blocked: Domestic manage.sh is missing; run Install / Sync first"; exit 1; }',
+    `printf "%s\\n" ${envLines.map(shellQuote).join(' ')} > "$stack_dir/.env.tmp"`,
+    'mv "$stack_dir/.env.tmp" "$stack_dir/.env"',
+    'cd "$stack_dir"',
+    'chmod +x ./manage.sh || true',
+    './manage.sh up',
+    './manage.sh status || true',
+    './manage.sh health'
+  ].join('; ');
+}
+
 async function runSshScriptWithProfile(profile: SiteSlotSshProfile, script: string, timeoutMs: number) {
   const startedAt = new Date().toISOString();
   const args = overseaTerminalSshArgv(profile, script);
@@ -6581,6 +6730,61 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         sshUser: 'root',
         hasDocker: true,
         hasOutboundInternet: false
+      }
+    },
+    {
+      actionId: 'site-slot.domestic-runtime-config.upsert',
+      label: 'Save Domestic Runtime',
+      category: 'site-slot',
+      method: 'POST',
+      path: '/internal/v1/config-center/domestic-runtime-configs',
+      requiredScopes: ['site-slot.manage'],
+      gate: 'none',
+      risk: 'medium',
+      confirmFields: [],
+      bodyTemplate: {
+        siteId: 'domestic-main',
+        status: 'active',
+        edgeBind: '0.0.0.0',
+        edgePort: 18090,
+        bootstrapProtocol: 'http',
+        bootstrapHost: 'api.mxinfo-inc.cn',
+        bootstrapPort: 18090,
+        internalBaseUrl: 'http://10.88.88.88:18090',
+        internalApiUpstream: 'http://10.88.88.88:18090',
+        internalH2iUpstream: 'http://10.88.88.88:18090',
+        dnsBind: '10.88.0.1',
+        dnsPort: 53,
+        requestedBy: 'admin-ui'
+      }
+    },
+    {
+      actionId: 'site-slot.domestic-runtime-config.apply',
+      label: 'Apply Domestic Runtime',
+      category: 'site-slot',
+      method: 'POST',
+      path: '/internal/v1/config-center/domestic-runtime-configs/:siteId/apply',
+      requiredScopes: ['site-slot.execute'],
+      gate: 'confirm-remote-execution',
+      risk: 'high',
+      confirmFields: ['confirmDomesticRuntimeApply'],
+      bodyTemplate: {
+        siteId: 'domestic-main',
+        planId: null,
+        sshProfileId: null,
+        saveBeforeApply: true,
+        edgeBind: '0.0.0.0',
+        edgePort: 18090,
+        bootstrapProtocol: 'http',
+        bootstrapHost: 'api.mxinfo-inc.cn',
+        bootstrapPort: 18090,
+        internalBaseUrl: 'http://10.88.88.88:18090',
+        internalApiUpstream: 'http://10.88.88.88:18090',
+        internalH2iUpstream: 'http://10.88.88.88:18090',
+        dnsBind: '10.88.0.1',
+        dnsPort: 53,
+        confirmDomesticRuntimeApply: true,
+        requestedBy: 'admin-ui'
       }
     },
     {

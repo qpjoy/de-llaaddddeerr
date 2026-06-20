@@ -233,7 +233,51 @@ MX-H2I 客户端连接分两个阶段：
 2. Overlay 阶段：客户端 WG 已连上 Domestic relay 后，Internal API 和后续应用流量走
    routePlan 下发的 `internalControlIp`，默认 `10.88.88.88`。
 
-开发和私有部署可以用 `.env` 配置 bootstrap 域名和临时解析，不需要把公网 IP 写死进包体：
+Domestic edge 对外端口和 Internal gateway 端口不要混用：
+
+- `18090` 是当前 V2 Domestic edge 对外 bootstrap 端口，容器内 Caddy 仍监听 `8088`；
+  Docker 端口映射为 `MX_DOMESTIC_EDGE_PORT:8088`，正式环境可以换成 `443`。
+- `18090` 是 Internal gateway/k8s Service 端口，只应被 Internal 本机、Internal service peer
+  或 Domestic edge 上游访问。
+- `bash scripts/manage.sh ops internal-local port-forward 18090` 默认只绑定 Mac 的
+  `127.0.0.1`，只用于本机开发调试。Windows 端不能通过这个地址访问 Internal。
+- 本地联调 Windows -> Domestic -> Mac Internal 时，可以临时运行
+  `bash scripts/manage.sh ops internal-local port-forward 18090 0.0.0.0`，然后把
+  Config Center 里的 Domestic runtime config 的 `internalApiUpstream`/`internalH2iUpstream`
+  保持为 `http://10.88.88.88:18090`。如果还没有 Internal service peer，但 Domestic 能直连
+  Mac 局域网，才临时改成 `http://<Mac LAN IP>:18090`。这只是 shadow/dev 暴露，
+  正式环境不要依赖它；也不要 SSH 到 Domestic 手动编辑 `.env`。
+
+Domestic edge 提供两个健康面：
+
+- `/healthz` 表示 Domestic edge 自己活着。
+- `/bootstrap-healthz` 会反代到 Internal `/healthz`，用于证明 Windows bootstrap 入口
+  能真正到达 Internal gateway。
+
+Domestic runtime config 是 Internal 配置中心对象，默认 seed 为：
+
+```json
+{
+  "siteId": "domestic-main",
+  "edgeBind": "0.0.0.0",
+  "edgePort": 18090,
+  "bootstrapHost": "api.mxinfo-inc.cn",
+  "bootstrapPort": 18090,
+  "internalApiUpstream": "http://10.88.88.88:18090",
+  "internalH2iUpstream": "http://10.88.88.88:18090",
+  "dnsBind": "10.88.0.1",
+  "dnsPort": 53
+}
+```
+
+Admin 可以在 Internal 基础系统 / Config Center 里修改并 `Save & Apply`，或通过
+`site-slot.domestic-runtime-config.upsert` / `site-slot.domestic-runtime-config.apply` 执行。
+保存只更新 Internal 配置中心；Apply 会通过 Domestic SSH Profile 写入
+`/opt/mx/current/domestic/.env` 并重启 Domestic edge stack。创建 Domestic plan 时，
+Internal 也会把这个配置渲染成 Domestic bundle 的 `.env` 并通过 SSH runner 下发；
+Domestic 不需要单独登录，也不应该成为配置真相。
+
+开发和私有部署可以用 MX-H2I 客户端 `.env` 配置 bootstrap 域名和临时解析，不需要把公网 IP 写死进包体：
 
 ```dotenv
 MX_H2I_BOOTSTRAP_BASE_URL=http://api.mxinfo-inc.cn:18090
@@ -245,6 +289,11 @@ MX_H2I_SPLIT_DNS_DOMAINS=mxinfo-inc.cn,api.mxinfo-inc.cn
 正式部署时，公网 DNS 可以把 `api.mxinfo-inc.cn` 解析到 Domestic 公网入口；连上 WG 后，
 Internal DNS/split DNS 可以把同一域名或内网服务域名解析到 Internal overlay IP。这样用户不需要
 手动填 IP，Admin 只需要管理公网解析、Internal DNS policy 和 routePlan。
+
+正式 Ubuntu Internal 不需要手动长期运行 `kubectl port-forward`。Internal API 仍可以保持
+k8s `ClusterIP`，由 Internal service peer/host gateway 在 Internal 主机侧绑定
+`10.88.88.88:18090` 并转入 k8s Service；Domestic 只反代这个 overlay 地址。这样部署中心、
+用户中心、DNS authority、release truth 都在 Internal，Domestic 只保留公网 bootstrap/relay/cache。
 
 Windows 客户端使用 `wireguard.exe /installtunnelservice` 管理 tunnel service，route proof 通过
 `Get-NetRoute + Get-NetIPInterface` 校验目标 IP 是否命中 `mx-h2i` tunnel alias；PowerShell

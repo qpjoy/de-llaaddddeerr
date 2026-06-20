@@ -66,6 +66,8 @@ import type {
   SiteSlotAccessAccount,
   SiteSlotAccessAccountIssueInput,
   SiteSlotAccessAccountIssueResult,
+  SiteSlotDomesticRuntimeConfig,
+  SiteSlotDomesticRuntimeConfigInput,
   SiteSlotDomesticWireGuardSecret,
   SiteSlotDomesticWireGuardSecretInput,
   SiteSlotPlan,
@@ -125,6 +127,7 @@ import {
   buildSiteSlotAccessAccount,
   buildSiteSlotExecutionRun,
   buildSiteSlotPlan,
+  buildSiteSlotDomesticRuntimeConfig,
   buildSiteSlotDomesticWireGuardSecret,
   buildSiteSlotRunnerSession,
   buildSiteSlotSshProfile,
@@ -204,6 +207,7 @@ type RecordKind =
   | 'site-slot-rollback-execution'
   | 'site-slot-rollback-report'
   | 'site-slot-ssh-profile'
+  | 'site-slot-domestic-runtime-config'
   | 'site-slot-domestic-wg-secret'
   | 'site-slot-access-account'
   | 'launcher-network-mihomo-site'
@@ -234,6 +238,7 @@ export class PostgresStore implements PlatformStore {
     await store.registerBuiltinApps();
     await store.registerBuiltinProductNetworks();
     await store.registerBuiltinDns();
+    await store.registerBuiltinDomesticRuntimeConfigs();
     return store;
   }
 
@@ -254,6 +259,7 @@ export class PostgresStore implements PlatformStore {
       siteSlotWorkerReports,
       siteSlotRollbackExecutions,
       siteSlotRollbackReports,
+      siteSlotDomesticRuntimeConfigs,
       awxProviderConfigs,
       dnsPolicies,
       dnsReverseProxyRoutes,
@@ -281,6 +287,7 @@ export class PostgresStore implements PlatformStore {
       this.countRecords('site-slot-worker-report'),
       this.countRecords('site-slot-rollback-execution'),
       this.countRecords('site-slot-rollback-report'),
+      this.countRecords('site-slot-domestic-runtime-config'),
       this.countRecords('awx-provider-config'),
       this.countRecords('dns-policy'),
       this.countRecords('dns-reverse-proxy-route'),
@@ -314,6 +321,7 @@ export class PostgresStore implements PlatformStore {
       siteSlotWorkerReports,
       siteSlotRollbackExecutions,
       siteSlotRollbackReports,
+      siteSlotDomesticRuntimeConfigs,
       awxProviderConfigs,
       dnsPolicies,
       dnsReverseProxyRoutes,
@@ -347,7 +355,21 @@ export class PostgresStore implements PlatformStore {
 
   async createSiteSlotPlan(input: SiteSlotPlanInput): Promise<SiteSlotPlan> {
     const planInput = await this.withSiteSlotSshProfile(input);
-    const plan = buildSiteSlotPlan(this.config, planInput, `slotplan_${randomUUID()}`);
+    const kind = (planInput.kind ?? planInput.sshProfile?.kind) === 'oversea' ? 'oversea' : 'domestic';
+    const siteId = planInput.siteId?.trim() || planInput.sshProfile?.siteId || `${kind}-main`;
+    const storedDomesticRuntimeConfig = kind === 'domestic'
+      ? await this.getSiteSlotDomesticRuntimeConfig(siteId)
+      : null;
+    const domesticRuntimeConfig = kind === 'domestic'
+      ? planInput.domesticRuntimeConfig
+        ?? storedDomesticRuntimeConfig
+        ?? buildSiteSlotDomesticRuntimeConfig(this.config, { siteId }, null)
+      : null;
+    const plan = buildSiteSlotPlan(
+      this.config,
+      { ...planInput, domesticRuntimeConfig },
+      `slotplan_${randomUUID()}`
+    );
     await this.saveRecord('site-slot-plan', plan.planId, plan, plan.siteId);
     await this.recordAudit({
       eventType: 'site_slot.plan.created',
@@ -1237,6 +1259,38 @@ export class PostgresStore implements PlatformStore {
       }
     });
     return profile;
+  }
+
+  async listSiteSlotDomesticRuntimeConfigs(): Promise<SiteSlotDomesticRuntimeConfig[]> {
+    const configs = await this.listRecords<SiteSlotDomesticRuntimeConfig>('site-slot-domestic-runtime-config');
+    return configs.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  async getSiteSlotDomesticRuntimeConfig(siteId: string): Promise<SiteSlotDomesticRuntimeConfig | null> {
+    return this.getRecord<SiteSlotDomesticRuntimeConfig>('site-slot-domestic-runtime-config', siteId);
+  }
+
+  async upsertSiteSlotDomesticRuntimeConfig(input: SiteSlotDomesticRuntimeConfigInput): Promise<SiteSlotDomesticRuntimeConfig> {
+    const siteId = input.siteId?.trim() || 'domestic-main';
+    const previous = await this.getSiteSlotDomesticRuntimeConfig(siteId);
+    const config = buildSiteSlotDomesticRuntimeConfig(this.config, input, previous);
+    await this.saveRecord('site-slot-domestic-runtime-config', config.siteId, config, config.siteId);
+    await this.recordAudit({
+      eventType: 'config.domestic_runtime_config.upserted',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        configId: config.configId,
+        siteId: config.siteId,
+        status: config.status,
+        edge: config.edge,
+        upstreams: config.upstreams,
+        dns: config.dns,
+        warnings: config.warnings,
+        configDigest: config.fingerprints.configDigest
+      }
+    });
+    return config;
   }
 
   async listSiteSlotDomesticWireGuardSecrets(): Promise<SiteSlotDomesticWireGuardSecret[]> {
@@ -2862,6 +2916,14 @@ export class PostgresStore implements PlatformStore {
         return this.saveRecord('dns-reverse-proxy-route', route.routeId, route, this.config.siteId);
       })
     ]);
+  }
+
+  private async registerBuiltinDomesticRuntimeConfigs(): Promise<void> {
+    const siteId = 'domestic-main';
+    const existing = await this.getSiteSlotDomesticRuntimeConfig(siteId);
+    if (existing) return;
+    const config = buildSiteSlotDomesticRuntimeConfig(this.config, { siteId, requestedBy: 'pg-seed' }, null);
+    await this.saveRecord('site-slot-domestic-runtime-config', config.siteId, config, config.siteId);
   }
 
   private createSnapshot(

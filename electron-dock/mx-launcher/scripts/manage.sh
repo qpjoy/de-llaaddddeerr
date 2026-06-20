@@ -31,7 +31,7 @@ Usage:
   bash scripts/manage.sh profile internal|domestic|oversea|h-endpoint-dev
   bash scripts/manage.sh smoke platform-kernel
   bash scripts/manage.sh smoke server-http [base-url]
-  bash scripts/manage.sh shadow build|up|smoke|logs|down
+  bash scripts/manage.sh shadow admin-assets|build|up|smoke|logs|down
   bash scripts/manage.sh ops guide
   bash scripts/manage.sh ops doctor
   bash scripts/manage.sh ops config feature-list [feature-key]
@@ -69,7 +69,7 @@ Usage:
   bash scripts/manage.sh ops site-slot rollback-start <report-id> [simulate|manual]
   bash scripts/manage.sh ops site-slot rollback-report <rollback-execution-id> [running|passed|failed|blocked]
   bash scripts/manage.sh ops local-shadow plan|cycle|build|up|status|smoke|logs|down
-  bash scripts/manage.sh ops internal-local plan|dry-run|cycle|build|apply|status|port-forward [local-port]|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down
+  bash scripts/manage.sh ops internal-local plan|dry-run|cycle|build|apply|status|port-forward [local-port] [bind-address]|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down
   bash scripts/manage.sh ops k8s-shadow plan|dry-run|cycle|build|apply|status|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down
   bash scripts/manage.sh ops awx-shadow plan|dry-run|install|status|port-forward [local-port]|logs|password|down
   bash scripts/manage.sh ops awx-provider list|upsert [provider-id] [base-url]|check <provider-id>
@@ -80,7 +80,7 @@ Usage:
   bash scripts/manage.sh k8s dry-run internal-shadow
   bash scripts/manage.sh k8s apply internal-shadow
   bash scripts/manage.sh k8s status internal-shadow
-  bash scripts/manage.sh k8s port-forward internal-local [local-port]
+  bash scripts/manage.sh k8s port-forward internal-local [local-port] [bind-address]
   bash scripts/manage.sh k8s logs internal-shadow
   bash scripts/manage.sh k8s db-summary internal-shadow
   MX_K8S_SHADOW_CONFIRM_RESET=1 bash scripts/manage.sh k8s reset-data internal-shadow
@@ -602,13 +602,17 @@ k8s_smoke() {
 k8s_port_forward() {
   local target="$1"
   local local_port="${2:-18090}"
+  local bind_address="${3:-${MX_K8S_PORT_FORWARD_ADDRESS:-127.0.0.1}}"
   local ns
   ns="$(k8s_namespace "$target")"
   need_kubectl
-  say "keep Internal API exposed on http://127.0.0.1:${local_port}"
+  say "keep Internal API exposed on http://${bind_address}:${local_port}"
   say "target namespace: $ns"
+  if [ "$bind_address" != "127.0.0.1" ] && [ "$bind_address" != "localhost" ]; then
+    say "dev-only LAN exposure; keep this behind a trusted network/firewall"
+  fi
   say "press Ctrl+C in this terminal when you are done"
-  kubectl -n "$ns" port-forward svc/mx-launcher-internal "${local_port}:18090"
+  kubectl -n "$ns" port-forward --address "$bind_address" svc/mx-launcher-internal "${local_port}:18090"
 }
 
 k8s_internal_shadow_gate() {
@@ -2979,7 +2983,7 @@ ops_k8s_shadow() {
       k8s_status "$target"
       ;;
     port-forward|forward)
-      k8s_port_forward "$target" "${2:-18090}"
+      k8s_port_forward "$target" "${2:-18090}" "${3:-}"
       ;;
     smoke)
       k8s_smoke "$target" "${2:-18090}"
@@ -3023,7 +3027,7 @@ ops_k8s_shadow() {
       k8s_down "$target"
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops internal-local plan|dry-run|cycle|build|apply|status|port-forward [local-port]|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down"
+      die "Usage: bash scripts/manage.sh ops internal-local plan|dry-run|cycle|build|apply|status|port-forward [local-port] [bind-address]|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down"
       ;;
   esac
 }
@@ -3475,10 +3479,13 @@ case "$cmd" in
     esac
     ;;
   shadow)
-    [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh shadow build|up|smoke|logs|down"
+    [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh shadow admin-assets|build|up|smoke|logs|down"
     action="$1"
     shift || true
     case "$action" in
+      admin-assets)
+        shadow_image_admin_assets
+        ;;
     build)
       shadow_image_build
       ;;
@@ -3532,8 +3539,8 @@ case "$cmd" in
         k8s_status "$target"
         ;;
       port-forward|forward)
-        [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh k8s port-forward internal-local [local-port]"
-        k8s_port_forward "$target" "${1:-18090}"
+        [ "$#" -le 2 ] || die "Usage: bash scripts/manage.sh k8s port-forward internal-local [local-port] [bind-address]"
+        k8s_port_forward "$target" "${1:-18090}" "${2:-}"
         ;;
       logs)
         [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh k8s logs internal-shadow"
@@ -3610,7 +3617,7 @@ case "$cmd" in
         ops_local_shadow "$@"
         ;;
       internal-local)
-        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-local plan|dry-run|cycle|build|apply|status|port-forward [local-port]|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down"
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-local plan|dry-run|cycle|build|apply|status|port-forward [local-port] [bind-address]|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down"
         OPS_K8S_TARGET=internal-local OPS_K8S_AREA=internal-local ops_k8s_shadow "$@"
         ;;
       k8s-shadow)

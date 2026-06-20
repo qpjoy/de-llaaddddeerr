@@ -3240,6 +3240,19 @@ select {
   gap: 10px;
 }
 
+.domestic-runtime-grid {
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+}
+
+.domestic-runtime-summary article {
+  grid-template-columns: minmax(180px, 0.9fr) minmax(220px, 1fr) minmax(220px, 1.25fr);
+}
+
+.domestic-runtime-result-grid {
+  margin-top: 8px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .relay-operation-grid {
   grid-template-columns: repeat(8, minmax(0, 1fr));
 }
@@ -4321,6 +4334,12 @@ select {
   border-color: color-mix(in srgb, var(--mx-danger) 58%, transparent);
   background: color-mix(in srgb, var(--mx-danger) 14%, var(--mx-bg-panel));
   color: #ffb8bd;
+}
+
+.action-feedback[data-kind="warning"] {
+  border-color: color-mix(in srgb, var(--mx-warning) 58%, transparent);
+  background: color-mix(in srgb, var(--mx-warning) 14%, var(--mx-bg-panel));
+  color: #ffe29a;
 }
 
 .action-feedback pre {

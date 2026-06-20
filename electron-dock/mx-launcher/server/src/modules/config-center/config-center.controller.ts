@@ -12,6 +12,7 @@ import type {
   RuntimeFeaturePolicy,
   RuntimeFeaturePolicyInput,
   SiteSlotKind,
+  SiteSlotDomesticRuntimeConfigInput,
   SiteSlotDomesticWireGuardSecret,
   SiteSlotDomesticWireGuardSecretInput,
   SiteSlotSshProfile,
@@ -46,6 +47,7 @@ export class ConfigCenterController {
         'awx-provider.sync-plan',
         'site-slot-ssh-profile.manage',
         'site-slot-ssh-profile.bootstrap',
+        'domestic-runtime-config.manage',
         'domestic-wg-secret.manage',
         'domestic-wg-secret.generate',
         'domestic-wg-secret.materializer-env',
@@ -197,6 +199,25 @@ export class ConfigCenterController {
     };
   }
 
+  @Get('internal/v1/config-center/domestic-runtime-configs')
+  async listDomesticRuntimeConfigs() {
+    return { configs: await this.store.listSiteSlotDomesticRuntimeConfigs() };
+  }
+
+  @Get('internal/v1/config-center/domestic-runtime-configs/:siteId')
+  async getDomesticRuntimeConfig(@Param('siteId') siteId: string) {
+    const config = await this.store.getSiteSlotDomesticRuntimeConfig(siteId);
+    if (!config) throw new NotFoundException('Domestic runtime config not found');
+    return { config };
+  }
+
+  @Post('internal/v1/config-center/domestic-runtime-configs')
+  async upsertDomesticRuntimeConfig(@Body() rawBody: unknown) {
+    return {
+      config: await this.store.upsertSiteSlotDomesticRuntimeConfig(toDomesticRuntimeConfigInput(asRecord(rawBody)))
+    };
+  }
+
   @Get('internal/v1/config-center/domestic-wg-secrets')
   async listDomesticWireGuardSecrets() {
     const secrets = await this.store.listSiteSlotDomesticWireGuardSecrets();
@@ -339,6 +360,25 @@ function toSshProfileBootstrapInput(body: Record<string, unknown>): SiteSlotSshP
     scanHostKey: booleanOrNull(body.scanHostKey),
     executeBootstrap: booleanOrNull(body.executeBootstrap),
     confirmBootstrap: booleanOrNull(body.confirmBootstrap),
+    requestedBy: nullableString(body.requestedBy),
+    requestId: nullableString(body.requestId)
+  };
+}
+
+function toDomesticRuntimeConfigInput(body: Record<string, unknown>): SiteSlotDomesticRuntimeConfigInput {
+  return {
+    siteId: nullableString(body.siteId),
+    status: nullableString(body.status),
+    edgeBind: nullableString(body.edgeBind),
+    edgePort: numberOrNull(body.edgePort),
+    bootstrapProtocol: nullableString(body.bootstrapProtocol),
+    bootstrapHost: nullableString(body.bootstrapHost),
+    bootstrapPort: numberOrNull(body.bootstrapPort),
+    internalBaseUrl: nullableString(body.internalBaseUrl),
+    internalApiUpstream: nullableString(body.internalApiUpstream),
+    internalH2iUpstream: nullableString(body.internalH2iUpstream),
+    dnsBind: nullableString(body.dnsBind),
+    dnsPort: numberOrNull(body.dnsPort),
     requestedBy: nullableString(body.requestedBy),
     requestId: nullableString(body.requestId)
   };

@@ -182,6 +182,15 @@ const state = {
       publicKey: ''
     }
   },
+  domesticRuntime: {
+    configs: [],
+    selectedSiteId: 'domestic-main',
+    feedback: null,
+    busy: false,
+    applyBusy: false,
+    applyResult: null,
+    error: null
+  },
   awxProviders: [],
   selectedAwxProviderId: null,
   launcherProducts: [],
@@ -858,14 +867,24 @@ async function refreshAdmin() {
   await persistConfig();
   renderAdminLoading();
   try {
-    const [dashboard, profilePayload, overseaPayload, userCenterPayload, appCenterAppsPayload, launcherProductsPayload, launcherLeasesPayload] = await Promise.all([
+    const [
+      dashboard,
+      profilePayload,
+      overseaPayload,
+      userCenterPayload,
+      appCenterAppsPayload,
+      launcherProductsPayload,
+      launcherLeasesPayload,
+      domesticRuntimePayload
+    ] = await Promise.all([
       fetchJson('/internal/v1/admin/dashboard'),
       loadSshProfiles(),
       loadOverseaOverview(),
       loadUserCenterOverview(),
       loadAppCenterApps(),
       loadLauncherProductNetworks(),
-      loadLauncherNetworkLeases()
+      loadLauncherNetworkLeases(),
+      loadDomesticRuntimeConfigs()
     ]);
     state.dashboard = dashboard;
     state.sshProfiles = asArray(profilePayload.profiles);
@@ -882,6 +901,8 @@ async function refreshAdmin() {
     state.launcherProductsError = launcherProductsPayload.error || null;
     state.launcherLeases = asArray(launcherLeasesPayload.leases);
     state.launcherLeasesError = launcherLeasesPayload.error || null;
+    state.domesticRuntime.configs = asArray(domesticRuntimePayload.configs);
+    state.domesticRuntime.error = domesticRuntimePayload.error || null;
     renderAppCenterShell();
     state.awxRuntimePolicies = asArray(dashboard.runtimeFeaturePolicies);
     state.overseaOverview = overseaPayload.overview;
@@ -911,6 +932,8 @@ async function refreshAdmin() {
     state.launcherProductsError = error.message;
     state.launcherLeases = [];
     state.launcherLeasesError = error.message;
+    state.domesticRuntime.configs = [];
+    state.domesticRuntime.error = error.message;
     renderAppCenterShell();
     state.overseaOverviewError = error.message;
     renderAdminError(error);
@@ -942,6 +965,15 @@ async function loadLauncherNetworkLeases() {
     return { leases: asArray(payload.leases), error: null };
   } catch (error) {
     return { leases: [], error: error.message };
+  }
+}
+
+async function loadDomesticRuntimeConfigs() {
+  try {
+    const payload = await fetchJson('/internal/v1/config-center/domestic-runtime-configs');
+    return { configs: asArray(payload.configs), error: null };
+  } catch (error) {
+    return { configs: [], error: error.message };
   }
 }
 
@@ -4530,6 +4562,7 @@ function renderFoundationGrid(overview) {
   if (assignOversea) assignOversea.addEventListener('click', () => void assignUserOverseaFromAdmin());
   const syncOverseaUser = foundationGrid.querySelector('[data-oversea-sync-user]');
   if (syncOverseaUser) syncOverseaUser.addEventListener('click', () => void syncUserOverseaRuntimeFromAdmin());
+  bindDomesticRuntimeControls(foundationGrid);
   bindRelayEnrollmentControls(foundationGrid);
 }
 
@@ -6529,6 +6562,7 @@ function renderConfigCenterPanel(overview) {
       </div>
       ${renderFoundationRows(rows)}
     </section>
+    ${renderDomesticRuntimeConfigPanel()}
     ${renderLauncherProductNetworksPanel()}
     <section class="foundation-panel">
       <div class="foundation-panel-head">
@@ -6544,6 +6578,294 @@ function renderConfigCenterPanel(overview) {
       ])}
     </section>
   `;
+}
+
+function renderDomesticRuntimeConfigPanel() {
+  const config = domesticRuntimeConfigForRender();
+  const bootstrap = domesticRuntimeBootstrapParts(config);
+  const feedback = state.domesticRuntime.feedback;
+  const apply = state.domesticRuntime.applyResult;
+  const siteIds = uniqueText([
+    ...asArray(state.domesticRuntime.configs).map((item) => item.siteId),
+    state.domesticRuntime.selectedSiteId,
+    selectedDomesticSiteId(),
+    'domestic-main'
+  ]);
+  const warnings = asArray(config.warnings);
+  const isBusy = state.domesticRuntime.busy || state.domesticRuntime.applyBusy;
+  const publicUrl = domesticRuntimePublicUrl({
+    protocol: bootstrap.protocol,
+    host: bootstrap.host,
+    port: bootstrap.port
+  });
+  return `
+    <section class="foundation-panel foundation-wide domestic-runtime-panel">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>Domestic Runtime Config</h4>
+          <p>Internal 保存配置；Apply 会通过 Domestic SSH Profile 更新远端 .env 并重启 edge stack。</p>
+        </div>
+        <span>${escapeHtml(config.fingerprints?.configDigest || config.status || 'draft')}</span>
+      </div>
+      ${state.domesticRuntime.error ? `<div class="feedback error">${escapeHtml(state.domesticRuntime.error)}</div>` : ''}
+      <div class="foundation-operation-grid domestic-runtime-grid">
+        <label class="form-field">
+          <span>Domestic Site</span>
+          <select data-domestic-runtime-site data-domestic-runtime-field="siteId">
+            ${siteIds.map((siteId) => `<option value="${escapeHtml(siteId)}" ${siteId === config.siteId ? 'selected' : ''}>${escapeHtml(siteId)}</option>`).join('')}
+          </select>
+        </label>
+        <label class="form-field compact-field">
+          <span>Status</span>
+          <select data-domestic-runtime-field="status">
+            <option value="active" ${config.status !== 'paused' ? 'selected' : ''}>active</option>
+            <option value="paused" ${config.status === 'paused' ? 'selected' : ''}>paused</option>
+          </select>
+        </label>
+        <label class="form-field compact-field">
+          <span>Protocol</span>
+          <select data-domestic-runtime-field="bootstrapProtocol">
+            <option value="http" ${bootstrap.protocol !== 'https' ? 'selected' : ''}>http</option>
+            <option value="https" ${bootstrap.protocol === 'https' ? 'selected' : ''}>https</option>
+          </select>
+        </label>
+        <label class="form-field">
+          <span>Bootstrap Host</span>
+          <input data-domestic-runtime-field="bootstrapHost" autocomplete="off" value="${escapeHtml(bootstrap.host)}" placeholder="api.mxinfo-inc.cn" />
+        </label>
+        <label class="form-field compact-field">
+          <span>Bootstrap Port</span>
+          <input data-domestic-runtime-field="bootstrapPort" inputmode="numeric" type="number" min="1" max="65535" value="${escapeHtml(String(bootstrap.port))}" />
+        </label>
+        <label class="form-field">
+          <span>Edge Bind</span>
+          <input data-domestic-runtime-field="edgeBind" autocomplete="off" value="${escapeHtml(config.edge?.bind || '0.0.0.0')}" />
+        </label>
+        <label class="form-field compact-field">
+          <span>Edge Port</span>
+          <input data-domestic-runtime-field="edgePort" inputmode="numeric" type="number" min="1" max="65535" value="${escapeHtml(String(config.edge?.port || bootstrap.port || 18090))}" />
+        </label>
+        <label class="form-field wide-field">
+          <span>Internal Base URL</span>
+          <input data-domestic-runtime-field="internalBaseUrl" autocomplete="off" value="${escapeHtml(config.upstreams?.internalBaseUrl || 'http://10.88.88.88:18090')}" />
+        </label>
+        <label class="form-field wide-field">
+          <span>Internal API Upstream</span>
+          <input data-domestic-runtime-field="internalApiUpstream" autocomplete="off" value="${escapeHtml(config.upstreams?.internalApi || config.upstreams?.internalBaseUrl || 'http://10.88.88.88:18090')}" />
+        </label>
+        <label class="form-field wide-field">
+          <span>H2I Upstream</span>
+          <input data-domestic-runtime-field="internalH2iUpstream" autocomplete="off" value="${escapeHtml(config.upstreams?.internalH2i || config.upstreams?.internalBaseUrl || 'http://10.88.88.88:18090')}" />
+        </label>
+        <label class="form-field">
+          <span>DNS Bind</span>
+          <input data-domestic-runtime-field="dnsBind" autocomplete="off" value="${escapeHtml(config.dns?.bind || '10.88.0.1')}" />
+        </label>
+        <label class="form-field compact-field">
+          <span>DNS Port</span>
+          <input data-domestic-runtime-field="dnsPort" inputmode="numeric" type="number" min="1" max="65535" value="${escapeHtml(String(config.dns?.port || 53))}" />
+        </label>
+      </div>
+      <div class="foundation-list domestic-runtime-summary">
+        <article>
+          <strong>${escapeHtml(publicUrl)}</strong>
+          <span>H 端启动入口；旧端口客户端重启后会按同域名候选端口重新探测。</span>
+          <small>${escapeHtml(config.edge?.bind || '0.0.0.0')}:${escapeHtml(String(config.edge?.port || bootstrap.port || '-'))} -> ${escapeHtml(config.upstreams?.internalApi || '-')}</small>
+        </article>
+        <article>
+          <strong>${escapeHtml(config.dns?.bind || '10.88.0.1')}:${escapeHtml(String(config.dns?.port || 53))}</strong>
+          <span>Domestic DNS cache / split DNS edge</span>
+          <small>Internal authority remains the source of truth.</small>
+        </article>
+      </div>
+      ${warnings.length ? `<div class="profile-feedback" data-kind="warning">${warnings.map(escapeHtml).join(' / ')}</div>` : ''}
+      <div class="foundation-operation-actions">
+        <button class="secondary-button" type="button" data-domestic-runtime-save ${isBusy ? 'disabled' : ''}>${state.domesticRuntime.busy ? 'Saving' : 'Save Config'}</button>
+        <button class="primary-button" type="button" data-domestic-runtime-apply ${isBusy ? 'disabled' : ''}>${state.domesticRuntime.applyBusy ? 'Applying' : 'Save & Apply'}</button>
+        ${feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(feedback.kind)}">${escapeHtml(feedback.message)}</span>` : ''}
+      </div>
+      ${apply ? renderDomesticRuntimeApplyResult(apply) : ''}
+    </section>
+  `;
+}
+
+function domesticRuntimeConfigForRender() {
+  const selected = state.domesticRuntime.selectedSiteId || selectedDomesticSiteId() || 'domestic-main';
+  return asArray(state.domesticRuntime.configs).find((config) => config?.siteId === selected)
+    || asArray(state.domesticRuntime.configs)[0]
+    || domesticRuntimeDefaultConfig(selected);
+}
+
+function domesticRuntimeDefaultConfig(siteId = 'domestic-main') {
+  return {
+    siteId,
+    status: 'active',
+    edge: {
+      bind: '0.0.0.0',
+      port: 18090,
+      publicBaseUrl: 'http://api.mxinfo-inc.cn:18090'
+    },
+    upstreams: {
+      internalBaseUrl: 'http://10.88.88.88:18090',
+      internalApi: 'http://10.88.88.88:18090',
+      internalH2i: 'http://10.88.88.88:18090'
+    },
+    dns: {
+      bind: '10.88.0.1',
+      port: 53
+    },
+    warnings: [],
+    fingerprints: null
+  };
+}
+
+function domesticRuntimeBootstrapParts(config) {
+  const edge = config?.edge || {};
+  try {
+    const parsed = new URL(edge.publicBaseUrl);
+    const protocol = parsed.protocol.replace(/:$/, '') === 'https' ? 'https' : 'http';
+    const port = Number(parsed.port || (protocol === 'https' ? 443 : 80));
+    return {
+      protocol,
+      host: parsed.hostname || 'api.mxinfo-inc.cn',
+      port: Number.isFinite(port) ? port : (edge.port || 18090)
+    };
+  } catch {
+    return {
+      protocol: 'http',
+      host: 'api.mxinfo-inc.cn',
+      port: edge.port || 18090
+    };
+  }
+}
+
+function domesticRuntimePublicUrl(input) {
+  const protocol = input.protocol === 'https' ? 'https' : 'http';
+  const host = input.host || 'api.mxinfo-inc.cn';
+  const port = positiveNumberOrNull(input.port) || (protocol === 'https' ? 443 : 80);
+  const isDefault = (protocol === 'https' && port === 443) || (protocol === 'http' && port === 80);
+  return `${protocol}://${host}${isDefault ? '' : `:${port}`}`;
+}
+
+function renderDomesticRuntimeApplyResult(apply) {
+  const status = apply.status || apply.execution || 'unknown';
+  const details = [
+    ['site', apply.siteId || '-'],
+    ['ssh', apply.sshProfileId || '-'],
+    ['bootstrap', apply.publicBootstrapUrl || apply.config?.edge?.publicBaseUrl || '-'],
+    ['remote', apply.remote?.status || apply.remote || '-']
+  ];
+  return `
+    <div class="action-feedback" data-kind="${escapeHtml(status === 'passed' ? 'success' : status === 'blocked' ? 'warning' : 'error')}">
+      <strong>${escapeHtml(status === 'passed' ? 'Domestic runtime applied' : `Domestic runtime ${status}`)}</strong>
+      <div class="evidence-step-grid domestic-runtime-result-grid">
+        ${details.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(formatSummaryValue(value))}</dd></div>`).join('')}
+      </div>
+      ${asArray(apply.blockedReasons).length ? `<pre>${escapeHtml(apply.blockedReasons.join('\n'))}</pre>` : ''}
+    </div>
+  `;
+}
+
+function bindDomesticRuntimeControls(root) {
+  const siteSelect = root.querySelector('[data-domestic-runtime-site]');
+  if (siteSelect) {
+    siteSelect.addEventListener('change', () => {
+      state.domesticRuntime.selectedSiteId = siteSelect.value || 'domestic-main';
+      state.domesticRuntime.feedback = null;
+      renderFoundationGrid(state.dashboard?.overview || {});
+    });
+  }
+  const save = root.querySelector('[data-domestic-runtime-save]');
+  if (save) save.addEventListener('click', () => void saveDomesticRuntimeConfigFromAdmin({ apply: false }));
+  const apply = root.querySelector('[data-domestic-runtime-apply]');
+  if (apply) apply.addEventListener('click', () => void saveDomesticRuntimeConfigFromAdmin({ apply: true }));
+}
+
+function domesticRuntimeFormPayload(root = foundationGrid) {
+  const value = (field) => root.querySelector(`[data-domestic-runtime-field="${field}"]`)?.value?.trim() || '';
+  const siteId = value('siteId') || state.domesticRuntime.selectedSiteId || selectedDomesticSiteId() || 'domestic-main';
+  return {
+    siteId,
+    status: value('status') === 'paused' ? 'paused' : 'active',
+    edgeBind: value('edgeBind') || '0.0.0.0',
+    edgePort: positiveNumberOrNull(value('edgePort')),
+    bootstrapProtocol: value('bootstrapProtocol') === 'https' ? 'https' : 'http',
+    bootstrapHost: value('bootstrapHost') || 'api.mxinfo-inc.cn',
+    bootstrapPort: positiveNumberOrNull(value('bootstrapPort')),
+    internalBaseUrl: value('internalBaseUrl') || 'http://10.88.88.88:18090',
+    internalApiUpstream: value('internalApiUpstream') || value('internalBaseUrl') || 'http://10.88.88.88:18090',
+    internalH2iUpstream: value('internalH2iUpstream') || value('internalBaseUrl') || 'http://10.88.88.88:18090',
+    dnsBind: value('dnsBind') || '10.88.0.1',
+    dnsPort: positiveNumberOrNull(value('dnsPort')),
+    requestedBy: 'desktop-admin',
+    requestId: `desktop-domestic-runtime-${Date.now()}`
+  };
+}
+
+async function saveDomesticRuntimeConfigFromAdmin(options = {}) {
+  const shouldApply = options.apply === true;
+  if (state.domesticRuntime.busy || state.domesticRuntime.applyBusy) return;
+  const body = domesticRuntimeFormPayload(foundationGrid);
+  state.domesticRuntime.selectedSiteId = body.siteId;
+  state.domesticRuntime.feedback = { kind: 'info', message: shouldApply ? 'Applying Domestic runtime config' : 'Saving Domestic runtime config' };
+  state.domesticRuntime.applyResult = null;
+  if (shouldApply) {
+    state.domesticRuntime.applyBusy = true;
+  } else {
+    state.domesticRuntime.busy = true;
+  }
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    if (shouldApply) {
+      const payload = await fetchJson('/internal/v1/admin/actions/execute', {
+        method: 'POST',
+        body: {
+          actionId: 'site-slot.domestic-runtime-config.apply',
+          path: `/internal/v1/config-center/domestic-runtime-configs/${encodeURIComponent(body.siteId)}/apply`,
+          body: {
+            ...body,
+            planId: state.currentPipeline?.summary?.kind === 'domestic' ? state.currentPipeline.summary.planId : null,
+            saveBeforeApply: true,
+            confirmDomesticRuntimeApply: true,
+            requestId: `desktop-domestic-runtime-apply-${Date.now()}`
+          }
+        }
+      });
+      const apply = payload.apply || null;
+      state.domesticRuntime.applyResult = apply;
+      if (apply?.config) upsertDomesticRuntimeConfig(apply.config);
+      state.domesticRuntime.feedback = {
+        kind: apply?.status === 'passed' ? 'success' : apply?.status === 'blocked' ? 'warning' : 'error',
+        message: apply?.status === 'passed'
+          ? `Applied ${apply.publicBootstrapUrl || apply.config?.edge?.publicBaseUrl || body.siteId}`
+          : asArray(apply?.blockedReasons)[0] || `Domestic runtime ${apply?.status || 'apply failed'}`
+      };
+    } else {
+      const payload = await fetchJson('/internal/v1/config-center/domestic-runtime-configs', {
+        method: 'POST',
+        body
+      });
+      if (payload.config) upsertDomesticRuntimeConfig(payload.config);
+      state.domesticRuntime.feedback = {
+        kind: 'success',
+        message: `Saved ${payload.config?.edge?.publicBaseUrl || body.siteId}`
+      };
+    }
+  } catch (error) {
+    state.domesticRuntime.feedback = { kind: 'error', message: error.message };
+  } finally {
+    state.domesticRuntime.busy = false;
+    state.domesticRuntime.applyBusy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+  }
+}
+
+function upsertDomesticRuntimeConfig(config) {
+  if (!config?.siteId) return;
+  const next = asArray(state.domesticRuntime.configs).filter((item) => item?.siteId !== config.siteId);
+  next.unshift(config);
+  state.domesticRuntime.configs = next;
+  state.domesticRuntime.selectedSiteId = config.siteId;
 }
 
 function renderLauncherProductNetworksPanel() {

@@ -60,6 +60,8 @@ import type {
   SiteSlotNetworkMode,
   SiteSlotPlan,
   SiteSlotPlanInput,
+  SiteSlotDomesticRuntimeConfig,
+  SiteSlotDomesticRuntimeConfigInput,
   SiteSlotDomesticWireGuardSecret,
   SiteSlotDomesticWireGuardSecretInput,
   SiteSlotRunnerSession,
@@ -2088,8 +2090,18 @@ export function buildSiteSlotPlan(
   const rootAccess = input.rootAccess === true || sshUser === 'root';
   const networkMode = siteSlotNetworkMode(kind, input);
   const requiresOversea = kind === 'domestic' && networkMode === 'oversea-assisted';
-  const warnings = siteSlotWarnings(kind, input, profile, profileMatches, host, rootAccess, networkMode);
+  const baseWarnings = siteSlotWarnings(kind, input, profile, profileMatches, host, rootAccess, networkMode);
   const sshProfileId = input.sshProfileId?.trim() || profile?.profileId || null;
+  const domesticRuntimeConfig = kind === 'domestic'
+    ? input.domesticRuntimeConfig ?? buildSiteSlotDomesticRuntimeConfig(config, { siteId }, null, createdAt)
+    : null;
+  const warnings = [
+    ...baseWarnings,
+    ...(domesticRuntimeConfig?.warnings.map((warning) => warning.startsWith('blocked:')
+      ? `blocked: domestic-runtime ${warning.slice('blocked:'.length).trim()}`
+      : `domestic-runtime: ${warning}`
+    ) ?? [])
+  ];
   const status = host && warnings.every((warning) => !warning.startsWith('blocked:'))
     ? 'ready-for-preflight'
     : warnings.some((warning) => warning.startsWith('blocked:')) ? 'blocked' : 'planned';
@@ -2121,8 +2133,11 @@ export function buildSiteSlotPlan(
     },
     access: siteSlotAccess(kind),
     services,
+    runtime: {
+      domestic: domesticRuntimeConfig
+    },
     preflightChecks: siteSlotPreflightChecks(kind, input, host, sshUser, sshPort, networkMode),
-    deploymentPhases: siteSlotDeploymentPhases(kind, input, host, sshUser, sshPort, networkMode),
+    deploymentPhases: siteSlotDeploymentPhases(kind, input, host, sshUser, sshPort, networkMode, domesticRuntimeConfig),
     warnings,
     nextActions: siteSlotNextActions(kind, status, networkMode, input),
     createdBy: input.createdBy?.trim() || 'internal-admin-shadow',
@@ -2256,6 +2271,165 @@ export function buildSiteSlotDomesticWireGuardSecret(
     updatedBy,
     updatedAt: now
   };
+}
+
+export function buildSiteSlotDomesticRuntimeConfig(
+  config: RuntimeConfig,
+  input: SiteSlotDomesticRuntimeConfigInput,
+  previous: SiteSlotDomesticRuntimeConfig | null,
+  now = new Date().toISOString()
+): SiteSlotDomesticRuntimeConfig {
+  const siteId = input.siteId?.trim() || previous?.siteId || 'domestic-main';
+  const status = input.status === 'paused' ? 'paused' : 'active';
+  const edgeBind = input.edgeBind?.trim() || previous?.edge.bind || '0.0.0.0';
+  const edgePort = positivePort(input.edgePort, previous?.edge.port, 18090);
+  const bootstrapProtocol = normalizeProtocol(input.bootstrapProtocol || previousBootstrapProtocol(previous) || 'http');
+  const bootstrapHost = input.bootstrapHost?.trim() || previousBootstrapHost(previous) || 'api.mxinfo-inc.cn';
+  const bootstrapPort = positivePort(input.bootstrapPort, previousBootstrapPort(previous), edgePort);
+  const internalBaseUrl = normalizeHttpUrl(input.internalBaseUrl || previous?.upstreams.internalBaseUrl || 'http://10.88.88.88:18090');
+  const internalApi = normalizeHttpUrl(input.internalApiUpstream || previous?.upstreams.internalApi || internalBaseUrl);
+  const internalH2i = normalizeHttpUrl(input.internalH2iUpstream || previous?.upstreams.internalH2i || internalBaseUrl);
+  const dnsBind = input.dnsBind?.trim() || previous?.dns.bind || '10.88.0.1';
+  const dnsPort = positivePort(input.dnsPort, previous?.dns.port, 53);
+  const publicBaseUrl = `${bootstrapProtocol}://${bootstrapHost}${defaultPortForProtocol(bootstrapProtocol) === bootstrapPort ? '' : `:${bootstrapPort}`}`;
+  const env = domesticRuntimeEnv({
+    siteId,
+    internalBaseUrl,
+    internalApi,
+    internalH2i,
+    edgeBind,
+    edgePort,
+    dnsBind,
+    dnsPort
+  });
+  const warnings = [
+    ...(status === 'paused' ? ['blocked: Domestic runtime config is paused'] : []),
+    ...(!isHttpUrl(internalApi) ? [`blocked: internalApiUpstream must be http(s): ${internalApi}`] : []),
+    ...(!isHttpUrl(internalH2i) ? [`blocked: internalH2iUpstream must be http(s): ${internalH2i}`] : []),
+    ...(edgeBind === '0.0.0.0' ? ['public-bind: Domestic edge listens on all interfaces; protect with cloud firewall/security group'] : []),
+    ...(bootstrapHost === 'api.mxinfo-inc.cn' ? ['default-domain: update bootstrapHost when production DNS is ready'] : [])
+  ];
+  const digestSource = JSON.stringify({
+    siteId,
+    status,
+    edgeBind,
+    edgePort,
+    publicBaseUrl,
+    internalBaseUrl,
+    internalApi,
+    internalH2i,
+    dnsBind,
+    dnsPort,
+    env
+  });
+  return {
+    configId: `domesticruntime_${safeIdPart(siteId)}`,
+    siteId,
+    kind: 'domestic-runtime',
+    environment: config.environment,
+    status,
+    edge: {
+      bind: edgeBind,
+      port: edgePort,
+      publicBaseUrl
+    },
+    upstreams: {
+      internalBaseUrl,
+      internalApi,
+      internalH2i
+    },
+    dns: {
+      bind: dnsBind,
+      port: dnsPort
+    },
+    env,
+    warnings,
+    fingerprints: {
+      configDigest: shortDigest(digestSource)
+    },
+    createdBy: previous?.createdBy || input.requestedBy?.trim() || 'config-center',
+    createdAt: previous?.createdAt || now,
+    updatedBy: input.requestedBy?.trim() || previous?.updatedBy || 'config-center',
+    updatedAt: now
+  };
+}
+
+function domesticRuntimeEnv(input: {
+  siteId: string;
+  internalBaseUrl: string;
+  internalApi: string;
+  internalH2i: string;
+  edgeBind: string;
+  edgePort: number;
+  dnsBind: string;
+  dnsPort: number;
+}): Record<string, string> {
+  return {
+    MX_SITE_ID: input.siteId,
+    MX_SITE_ROLE: 'domestic',
+    MX_INTERNAL_BASE_URL: input.internalBaseUrl,
+    MX_INTERNAL_API_UPSTREAM: input.internalApi,
+    MX_INTERNAL_H2I_UPSTREAM: input.internalH2i,
+    MX_DOMESTIC_EDGE_BIND: input.edgeBind,
+    MX_DOMESTIC_EDGE_PORT: String(input.edgePort),
+    MX_DOMESTIC_DNS_BIND: input.dnsBind,
+    MX_DOMESTIC_DNS_PORT: String(input.dnsPort)
+  };
+}
+
+function positivePort(input: number | null | undefined, previous: number | undefined, fallback: number): number {
+  const value = Number(input ?? previous ?? fallback);
+  return Number.isFinite(value) && value > 0 && value <= 65535 ? Math.floor(value) : fallback;
+}
+
+function normalizeProtocol(value: string | null | undefined): 'http' | 'https' {
+  return value?.replace(/:$/, '').toLowerCase() === 'https' ? 'https' : 'http';
+}
+
+function defaultPortForProtocol(protocol: 'http' | 'https'): number {
+  return protocol === 'https' ? 443 : 80;
+}
+
+function previousBootstrapProtocol(previous: SiteSlotDomesticRuntimeConfig | null): string | null {
+  if (!previous) return null;
+  try {
+    return new URL(previous.edge.publicBaseUrl).protocol.replace(/:$/, '');
+  } catch {
+    return null;
+  }
+}
+
+function previousBootstrapHost(previous: SiteSlotDomesticRuntimeConfig | null): string | null {
+  if (!previous) return null;
+  try {
+    return new URL(previous.edge.publicBaseUrl).hostname;
+  } catch {
+    return null;
+  }
+}
+
+function previousBootstrapPort(previous: SiteSlotDomesticRuntimeConfig | null): number | undefined {
+  if (!previous) return undefined;
+  try {
+    const parsed = new URL(previous.edge.publicBaseUrl);
+    return parsed.port ? Number(parsed.port) : defaultPortForProtocol(normalizeProtocol(parsed.protocol));
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeHttpUrl(value: string): string {
+  const trimmed = value.trim().replace(/\/+$/, '');
+  return trimmed || 'http://10.88.88.88:18090';
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 export function buildRuntimeFeaturePolicy(
@@ -3399,7 +3573,8 @@ function siteSlotDeploymentPhases(
   host: string | null,
   sshUser: string,
   sshPort: number,
-  mode: SiteSlotNetworkMode
+  mode: SiteSlotNetworkMode,
+  domesticRuntimeConfig: SiteSlotDomesticRuntimeConfig | null
 ): SiteSlotPlan['deploymentPhases'] {
   const target = host ?? `<${kind}-host>`;
   const artifactRoot = `./artifacts/site-slots/${kind}`;
@@ -3411,6 +3586,9 @@ function siteSlotDeploymentPhases(
   const slotServiceBundle = `${artifactRoot}/${slotServiceBundleName}`;
   const slotReleaseDir = `${releaseRoot}/${kind}/${releaseRevision}`;
   const slotCurrentDir = `${currentRoot}/${kind}`;
+  const domesticEnvWriteCommand = domesticRuntimeConfig
+    ? `printf "%s\\n" ${domesticRuntimeEnvLines(domesticRuntimeConfig).map(shellDoubleQuote).join(' ')} > ${slotCurrentDir}/.env`
+    : `cp -n ${slotCurrentDir}/.env.example ${slotCurrentDir}/.env`;
   const domesticTunnelCliBundleName = 'mx-domestic-qp-tunnel-cli-fallback.tar.gz';
   const domesticTunnelCliBundle = `${artifactRoot}/${domesticTunnelCliBundleName}`;
   const domesticTunnelCliReleaseDir = `${releaseRoot}/qp-tunnel-cli/${releaseRevision}`;
@@ -3750,9 +3928,12 @@ function siteSlotDeploymentPhases(
         rsyncOverSsh(slotServiceBundle, `${incomingDir}/`),
         kind === 'oversea'
           ? ssh(`tar -xzf ${incomingDir}/${slotServiceBundleName} -C ${slotReleaseDir} && ln -sfn ${slotReleaseDir} ${slotCurrentDir} && printf "MX_SITE_ID=${input.siteId ?? 'oversea-main'}\\nMX_SITE_ROLE=oversea\\nMX_ENABLED_MODULES=access-node,site-agent,runner-worker,observability-forwarder\\nMX_INTERNAL_BASE_URL=${internalBaseUrl}\\nLOCAL_STACK_PATH=${overseaAccessStackCurrentDir}\\nMX_ACCESS_RUNTIME=hysteria2-only\\n" > ${slotCurrentDir}/.env && cd ${slotCurrentDir} && ${startSlotServicesCommand}`)
-          : ssh(`tar -xzf ${incomingDir}/${slotServiceBundleName} -C ${slotReleaseDir} && ln -sfn ${slotReleaseDir} ${slotCurrentDir} && cd ${slotCurrentDir} && ${startSlotServicesCommand}`)
+          : ssh(`tar -xzf ${incomingDir}/${slotServiceBundleName} -C ${slotReleaseDir} && ln -sfn ${slotReleaseDir} ${slotCurrentDir} && ${domesticEnvWriteCommand} && cd ${slotCurrentDir} && ${startSlotServicesCommand}`)
       ],
-      notes: ['Internal pushes Release Center bundles; slot hosts run the unpacked bundle and do not pull code from git.']
+      notes: [
+        'Internal pushes Release Center bundles; slot hosts run the unpacked bundle and do not pull code from git.',
+        ...(kind === 'domestic' ? ['Domestic .env is rendered from Internal Config Center runtime config on every deploy; operators should not edit it manually on the host.'] : [])
+      ]
     },
     ...(kind === 'domestic' ? [{
       phaseId: 'activate-domestic-peer-center',
@@ -3867,6 +4048,12 @@ function overseaDockerInstallScript(): string {
     'docker version',
     'docker compose version || docker-compose version'
   ].join('; ');
+}
+
+function domesticRuntimeEnvLines(config: SiteSlotDomesticRuntimeConfig): string[] {
+  return Object.entries(config.env)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`);
 }
 
 function shellDoubleQuote(value: string): string {

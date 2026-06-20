@@ -66,6 +66,7 @@ export interface SiteSlotPlanInput {
   overseaSiteId?: string | null;
   overseaHost?: string | null;
   internalBaseUrl?: string | null;
+  domesticRuntimeConfig?: SiteSlotDomesticRuntimeConfig | null;
   accessAccounts?: SiteSlotPlanAccessAccountInput[] | null;
   requestId?: string | null;
   createdBy?: string | null;
@@ -147,6 +148,9 @@ export interface SiteSlotPlan {
     dockerStacks: string[];
     dockerPreferred: boolean;
     hostServiceReason: string;
+  };
+  runtime: {
+    domestic: SiteSlotDomesticRuntimeConfig | null;
   };
   preflightChecks: SiteSlotPreflightCheck[];
   deploymentPhases: SiteSlotDeploymentPhase[];
@@ -1053,6 +1057,54 @@ export interface SiteSlotDomesticWireGuardSecret {
     publicEndpointStatus: 'ready' | 'placeholder';
     missingSecretInputs: string[];
     materializerEnvKeys: string[];
+  };
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export interface SiteSlotDomesticRuntimeConfigInput {
+  siteId?: string | null;
+  status?: 'active' | 'paused' | string | null;
+  edgeBind?: string | null;
+  edgePort?: number | null;
+  bootstrapProtocol?: string | null;
+  bootstrapHost?: string | null;
+  bootstrapPort?: number | null;
+  internalBaseUrl?: string | null;
+  internalApiUpstream?: string | null;
+  internalH2iUpstream?: string | null;
+  dnsBind?: string | null;
+  dnsPort?: number | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface SiteSlotDomesticRuntimeConfig {
+  configId: string;
+  siteId: string;
+  kind: 'domestic-runtime';
+  environment: string;
+  status: 'active' | 'paused';
+  edge: {
+    bind: string;
+    port: number;
+    publicBaseUrl: string;
+  };
+  upstreams: {
+    internalBaseUrl: string;
+    internalApi: string;
+    internalH2i: string;
+  };
+  dns: {
+    bind: string;
+    port: number;
+  };
+  env: Record<string, string>;
+  warnings: string[];
+  fingerprints: {
+    configDigest: string;
   };
   createdBy: string;
   createdAt: string;

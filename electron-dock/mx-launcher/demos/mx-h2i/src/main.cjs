@@ -1427,24 +1427,111 @@ async function authenticateUserViaGateway(baseUrl, account, password) {
 }
 
 async function resolveBootstrapBaseUrl(config) {
-  const candidates = uniqueValues([
+  const seeds = [
     normalizeBaseUrl(process.env.MX_H2I_BOOTSTRAP_BASE_URL),
     normalizeBaseUrl(config.bootstrapApiBaseUrl),
     defaultBootstrapApiBaseUrl(),
-    ...LOCAL_INTERNAL_BASE_URLS,
+    normalizeBaseUrl(process.env.MX_H2I_PUBLIC_BASE_URL),
     normalizeBaseUrl(process.env.MX_H2I_INTERNAL_BASE_URL),
     normalizeBaseUrl(config.internalApiBaseUrl)
-  ].filter(Boolean));
+  ].filter(Boolean);
+  const candidates = bootstrapBaseUrlCandidates(seeds);
   let lastError = null;
   for (const candidate of candidates) {
     try {
-      await requestJson(joinApiUrl(candidate, '/healthz'), { timeoutMs: 900 });
+      await probeBootstrapApiBaseUrl(candidate);
       return candidate;
     } catch (err) {
       lastError = err;
     }
   }
   throw new Error(`无法连接 bootstrap API：${candidates.join(', ')}；${errorMessage(lastError)}`);
+}
+
+function bootstrapBaseUrlCandidates(seeds) {
+  const expanded = [];
+  for (const seed of seeds) {
+    const normalized = normalizeBaseUrl(seed);
+    if (!normalized) continue;
+    expanded.push(normalized);
+    expanded.push(...bootstrapPortVariantUrls(normalized));
+  }
+  expanded.push(
+    ...LOCAL_INTERNAL_BASE_URLS,
+    ...LOCAL_INTERNAL_BASE_URLS.flatMap((baseUrl) => bootstrapPortVariantUrls(baseUrl))
+  );
+  return uniqueValues(expanded.map((value) => normalizeBaseUrl(value)).filter(Boolean));
+}
+
+function bootstrapPortVariantUrls(baseUrl) {
+  let parsed;
+  try {
+    parsed = new URL(normalizeBaseUrl(baseUrl) || '');
+  } catch {
+    return [];
+  }
+  const protocol = parsed.protocol.replace(/:$/, '') === 'https' ? 'https' : 'http';
+  const host = parsed.hostname.includes(':') ? `[${parsed.hostname}]` : parsed.hostname;
+  if (!host) return [];
+  return bootstrapPortCandidates(parsed.port, protocol).map((port) => {
+    const defaultPort = protocol === 'https' ? '443' : '80';
+    return `${protocol}://${host}${String(port) === defaultPort ? '' : `:${port}`}`;
+  });
+}
+
+function bootstrapPortCandidates(primaryPort, protocol) {
+  return uniqueValues([
+    ...parseBootstrapPortList(process.env.MX_H2I_BOOTSTRAP_PORTS),
+    nullableString(process.env.MX_H2I_BOOTSTRAP_PORT),
+    nullableString(primaryPort),
+    '18090',
+    '8088',
+    protocol === 'https' ? '443' : '80'
+  ].filter(Boolean))
+    .map((port) => String(port).trim())
+    .filter((port) => {
+      const number = Number(port);
+      return Number.isFinite(number) && number > 0 && number <= 65535;
+    });
+}
+
+function parseBootstrapPortList(value) {
+  return String(value || '')
+    .split(/[,\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+async function probeBootstrapApiBaseUrl(baseUrl) {
+  let bootstrapHealthError = null;
+  try {
+    await assertHealthResponse(requestJson(joinApiUrl(baseUrl, '/bootstrap-healthz'), { timeoutMs: 1400 }));
+    return;
+  } catch (err) {
+    bootstrapHealthError = err;
+    if (!shouldFallbackToLegacyHealthz(err)) throw err;
+  }
+  try {
+    await assertHealthResponse(requestJson(joinApiUrl(baseUrl, '/healthz'), { timeoutMs: 900 }));
+  } catch (err) {
+    err.bootstrapHealthError = bootstrapHealthError;
+    throw err;
+  }
+}
+
+async function assertHealthResponse(promise) {
+  const payload = await promise;
+  if (payload && typeof payload === 'object' && payload.ok === true) return payload;
+  const err = new Error('healthz 没有返回 JSON ok=true。');
+  err.code = 'MX_HEALTH_PAYLOAD_UNSUPPORTED';
+  err.payload = payload;
+  throw err;
+}
+
+function shouldFallbackToLegacyHealthz(err) {
+  if (!err) return false;
+  if (err.code === 'MX_HEALTH_PAYLOAD_UNSUPPORTED') return true;
+  return /^HTTP (404|405|501)\b/.test(err.message || '');
 }
 
 async function applyResolvedBootstrapBaseUrl(baseUrl) {

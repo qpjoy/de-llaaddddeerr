@@ -20,6 +20,7 @@ import {
   buildSiteSlotAccessAccount,
   buildSiteSlotExecutionRun,
   buildSiteSlotPlan,
+  buildSiteSlotDomesticRuntimeConfig,
   buildSiteSlotDomesticWireGuardSecret,
   buildSiteSlotRunnerSession,
   buildSiteSlotSshProfile,
@@ -129,6 +130,8 @@ import type {
   SiteSlotAccessAccount,
   SiteSlotAccessAccountIssueInput,
   SiteSlotAccessAccountIssueResult,
+  SiteSlotDomesticRuntimeConfig,
+  SiteSlotDomesticRuntimeConfigInput,
   SiteSlotDomesticWireGuardSecret,
   SiteSlotDomesticWireGuardSecretInput,
   SiteSlotKind,
@@ -185,6 +188,7 @@ export class MemoryStore implements PlatformStore {
   private readonly siteSlotRollbackExecutions = new Map<string, SiteSlotRollbackExecution>();
   private readonly siteSlotRollbackReports = new Map<string, SiteSlotRollbackReport>();
   private readonly siteSlotSshProfiles = new Map<string, SiteSlotSshProfile>();
+  private readonly siteSlotDomesticRuntimeConfigs = new Map<string, SiteSlotDomesticRuntimeConfig>();
   private readonly siteSlotDomesticWireGuardSecrets = new Map<string, SiteSlotDomesticWireGuardSecret>();
   private readonly siteSlotAccessAccounts = new Map<string, SiteSlotAccessAccount>();
   private readonly launcherNetworkMihomoSites = new Map<string, LauncherNetworkMihomoSite>();
@@ -216,6 +220,7 @@ export class MemoryStore implements PlatformStore {
     this.registerBuiltinApps();
     this.registerBuiltinProductNetworks();
     this.registerBuiltinDns();
+    this.registerBuiltinDomesticRuntimeConfigs();
   }
 
   overview() {
@@ -240,6 +245,7 @@ export class MemoryStore implements PlatformStore {
       siteSlotWorkerReports: this.siteSlotWorkerReports.size,
       siteSlotRollbackExecutions: this.siteSlotRollbackExecutions.size,
       siteSlotRollbackReports: this.siteSlotRollbackReports.size,
+      siteSlotDomesticRuntimeConfigs: this.siteSlotDomesticRuntimeConfigs.size,
       awxProviderConfigs: this.awxProviderConfigs.size,
       dnsPolicies: this.dnsPolicies.size,
       dnsReverseProxyRoutes: this.dnsReverseProxyRoutes.size,
@@ -273,7 +279,18 @@ export class MemoryStore implements PlatformStore {
 
   createSiteSlotPlan(input: SiteSlotPlanInput): SiteSlotPlan {
     const planInput = this.withSiteSlotSshProfile(input);
-    const plan = buildSiteSlotPlan(this.config, planInput, `slotplan_${randomUUID()}`);
+    const kind = (planInput.kind ?? planInput.sshProfile?.kind) === 'oversea' ? 'oversea' : 'domestic';
+    const siteId = planInput.siteId?.trim() || planInput.sshProfile?.siteId || `${kind}-main`;
+    const domesticRuntimeConfig = kind === 'domestic'
+      ? planInput.domesticRuntimeConfig
+        ?? this.siteSlotDomesticRuntimeConfigs.get(siteId)
+        ?? buildSiteSlotDomesticRuntimeConfig(this.config, { siteId }, null)
+      : null;
+    const plan = buildSiteSlotPlan(
+      this.config,
+      { ...planInput, domesticRuntimeConfig },
+      `slotplan_${randomUUID()}`
+    );
     this.siteSlotPlans.set(plan.planId, plan);
     this.recordAudit({
       eventType: 'site_slot.plan.created',
@@ -1141,6 +1158,37 @@ export class MemoryStore implements PlatformStore {
       }
     });
     return profile;
+  }
+
+  listSiteSlotDomesticRuntimeConfigs(): SiteSlotDomesticRuntimeConfig[] {
+    return [...this.siteSlotDomesticRuntimeConfigs.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  getSiteSlotDomesticRuntimeConfig(siteId: string): SiteSlotDomesticRuntimeConfig | null {
+    return this.siteSlotDomesticRuntimeConfigs.get(siteId) ?? null;
+  }
+
+  upsertSiteSlotDomesticRuntimeConfig(input: SiteSlotDomesticRuntimeConfigInput): SiteSlotDomesticRuntimeConfig {
+    const siteId = input.siteId?.trim() || 'domestic-main';
+    const previous = this.siteSlotDomesticRuntimeConfigs.get(siteId) ?? null;
+    const config = buildSiteSlotDomesticRuntimeConfig(this.config, input, previous);
+    this.siteSlotDomesticRuntimeConfigs.set(config.siteId, config);
+    this.recordAudit({
+      eventType: 'config.domestic_runtime_config.upserted',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        configId: config.configId,
+        siteId: config.siteId,
+        status: config.status,
+        edge: config.edge,
+        upstreams: config.upstreams,
+        dns: config.dns,
+        warnings: config.warnings,
+        configDigest: config.fingerprints.configDigest
+      }
+    });
+    return config;
   }
 
   listSiteSlotDomesticWireGuardSecrets(): SiteSlotDomesticWireGuardSecret[] {
@@ -2724,6 +2772,11 @@ export class MemoryStore implements PlatformStore {
     for (const route of builtinDnsReverseProxyRoutes(this.config)) {
       this.dnsReverseProxyRoutes.set(route.routeId, route);
     }
+  }
+
+  private registerBuiltinDomesticRuntimeConfigs(): void {
+    const config = buildSiteSlotDomesticRuntimeConfig(this.config, { siteId: 'domestic-main' }, null);
+    this.siteSlotDomesticRuntimeConfigs.set(config.siteId, config);
   }
 
   private principalForSubject(
