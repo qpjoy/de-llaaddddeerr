@@ -1285,7 +1285,8 @@ async function startWireGuardForSession(input) {
     const route = mod.probeLauncherWireGuardRoute({
       ...wireGuardRuntimeOptions(),
       targetIp,
-      expectedInterfaceName: status.realInterfaceName || status.interfaceName || null
+      expectedInterfaceName: status.realInterfaceName || status.interfaceName || null,
+      expectedInterfaceAddresses: status.addresses || []
     });
     const internalApi = route.ok
       ? await probeInternalApiViaOverlay(internalBaseUrl)
@@ -1337,7 +1338,8 @@ async function probeWireGuardForConnection(input) {
     const route = mod.probeLauncherWireGuardRoute({
       ...wireGuardRuntimeOptions(),
       targetIp,
-      expectedInterfaceName
+      expectedInterfaceName,
+      expectedInterfaceAddresses: status?.addresses || []
     });
     const internalApi = route.ok
       ? await probeInternalApiViaOverlay(internalBaseUrl)

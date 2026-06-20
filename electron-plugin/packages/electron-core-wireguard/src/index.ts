@@ -620,6 +620,8 @@ export function buildWireGuardTunnelCommand(input: {
       action,
       tunnelName,
       windowsNrptRulesFromProfile(profile),
+      windowsRouteRulesFromProfile(profile),
+      profile.addresses,
       scriptPaths.elevated,
       routeLogPath
     );
@@ -824,11 +826,12 @@ export async function repairWireGuardTunnelRoutes(input: {
   }
   if (input.runtime.platform === 'win32') {
     const nrptRules = windowsNrptRulesFromProfile(profile);
-    if (nrptRules.length === 0) {
+    const routeRules = windowsRouteRulesFromProfile(profile);
+    if (nrptRules.length === 0 && routeRules.length === 0) {
       return {
         ...baseResult,
         ok: false,
-        message: '当前 WireGuard 配置没有 HDO split DNS 规则。'
+        message: '当前 WireGuard 配置没有可修复的 HDO route 或 split DNS 规则。'
       };
     }
     const serviceState = readWindowsTunnelServiceState(profile.interfaceName);
@@ -839,7 +842,7 @@ export async function repairWireGuardTunnelRoutes(input: {
         message: 'WireGuard 未运行，请先连接 HDO 网络。'
       };
     }
-    const command = buildWindowsNrptRepairCommand(input.runtime, input.configPath, nrptRules);
+    const command = buildWindowsRepairCommand(input.runtime, input.configPath, nrptRules, routeRules, profile.addresses);
     try {
       const result = await execFileAsync(command.command, command.args, {
         env: command.env ? { ...process.env, ...command.env } : process.env
@@ -851,7 +854,9 @@ export async function repairWireGuardTunnelRoutes(input: {
         routeLogTail: readTextTail(baseResult.routeLogPath),
         stdout: result.stdout,
         stderr: result.stderr,
-        message: '已修复 HDO split DNS 优先级。'
+        message: routeRules.length > 0
+          ? '已修复 HDO Windows 路由和 split DNS 优先级。'
+          : '已修复 HDO split DNS 优先级。'
       };
     } catch (err) {
       return {
@@ -2730,7 +2735,16 @@ function readWindowsTunnelServiceState(interfaceName: string): string | null {
   const raw = tryExecFile('sc.exe', ['query', `WireGuardTunnel$${interfaceName}`]).stdout
     || tryExecFile('sc', ['query', `WireGuardTunnel$${interfaceName}`]).stdout;
   const match = raw?.match(/STATE\s*:\s*\d+\s+([A-Z_]+)/i);
-  return match?.[1]?.toUpperCase() ?? null;
+  if (match?.[1]) return match[1].toUpperCase();
+  const serviceName = `WireGuardTunnel$${interfaceName}`;
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    `$svc = Get-Service -Name ${powerShellString(serviceName)}`,
+    "if ($null -ne $svc) { [string]$svc.Status }"
+  ].join('; ');
+  const ps = tryExecFile(windowsPowerShellCommand(), ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script]);
+  const status = ps.stdout.trim().toUpperCase();
+  return status || null;
 }
 
 function routeLooksLikeExistingHdoRoute(
@@ -3041,6 +3055,10 @@ type WindowsNrptRule = {
   nameServers: string[];
 };
 
+type WindowsRouteRule = {
+  destinationPrefix: string;
+};
+
 function windowsNrptRulesFromProfile(profile: ReturnType<typeof parseWireGuardProfile>): WindowsNrptRule[] {
   if (profile.dnsServers.length === 0 || profile.dnsDomains.length === 0) return [];
   const servers = uniqueStrings(profile.dnsServers.filter(isIpv4));
@@ -3052,24 +3070,42 @@ function windowsNrptRulesFromProfile(profile: ReturnType<typeof parseWireGuardPr
   }));
 }
 
+function windowsRouteRulesFromProfile(profile: ReturnType<typeof parseWireGuardProfile>): WindowsRouteRule[] {
+  const selfIps = new Set(profile.addresses
+    .map((address) => address.split('/')[0]?.trim())
+    .filter(isString));
+  return uniqueStrings(profile.allowedIps
+    .map((cidr) => normalizeCidr(cidr) ?? cidr)
+    .filter((cidr) => {
+      const parsed = parseIpv4Cidr(cidr);
+      if (!parsed || parsed.prefix === 0) return false;
+      const host = cidr.split('/')[0]?.trim();
+      return !(parsed.prefix === 32 && host && selfIps.has(host));
+    }))
+    .map((destinationPrefix) => ({ destinationPrefix }));
+}
+
 function windowsElevatedStartProcessScripts(
   command: string,
   args: string[],
   action: WireGuardTunnelAction,
   tunnelName: string,
   nrptRules: WindowsNrptRule[] = [],
+  routeRules: WindowsRouteRule[] = [],
+  interfaceAddresses: string[] = [],
   elevatedScriptPath: string,
   auditLogPath?: string | null
 ): { wrapper: string; elevated: string } {
   const serviceName = `WireGuardTunnel$${tunnelName}`;
   const serviceArg = powerShellString(serviceName);
   const serviceLookup = `$svc = Get-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`;
-  const canPreflight = nrptRules.length === 0;
+  const canPreflight = nrptRules.length === 0 && routeRules.length === 0;
   const preflightLines = !canPreflight ? [] : (action === 'up'
     ? [serviceLookup, "if ($null -ne $svc -and $svc.Status -eq 'Running') { exit 0 }"]
     : (action === 'down' ? [serviceLookup, 'if ($null -eq $svc) { exit 0 }'] : []));
   const runWireGuard = (wireGuardArgs: string[]) => `& ${powerShellString(command)} ${wireGuardArgs.map(powerShellString).join(' ')}`;
   const nrptLines = windowsNrptPowerShellLines(nrptRules, tunnelName);
+  const routeLines = windowsRoutePowerShellLines(routeRules, tunnelName, interfaceAddresses);
   const waitForServiceAbsent = () => [
     '$deadline = (Get-Date).AddSeconds(12)',
     'while ($true) {',
@@ -3094,15 +3130,17 @@ function windowsElevatedStartProcessScripts(
     ...windowsAuditPowerShellLines(auditLogPath),
     `Write-HdoAudit ${powerShellString(`elevated start action=${action} tunnel=${tunnelName} service=${serviceName} nrptRules=${nrptRules.length}`)}`,
     ...nrptLines,
+    ...routeLines,
     serviceLookup
   ];
   if (action === 'up') {
     elevatedLines.push(
-      "if ($null -ne $svc -and $svc.Status -eq 'Running') { Write-HdoAudit 'service already running; applying NRPT rules'; Add-HdoNrptRules; exit 0 }",
+      "if ($null -ne $svc -and $svc.Status -eq 'Running') { Write-HdoAudit 'service already running; applying routes and NRPT rules'; Add-HdoOverlayRoutes; Add-HdoNrptRules; exit 0 }",
       `if ($null -ne $svc) {`,
       `  Write-HdoAudit ${powerShellString(`service exists; ensuring ${serviceName} is running`)}`,
       `  Start-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`,
       ...waitForServiceRunning(),
+      '  Add-HdoOverlayRoutes',
       '  Add-HdoNrptRules',
       '  exit 0',
       '}'
@@ -3110,10 +3148,12 @@ function windowsElevatedStartProcessScripts(
   } else if (action === 'down') {
     elevatedLines.push(`Write-HdoAudit ${powerShellString(`removing NRPT rules for ${serviceName}`)}`);
     elevatedLines.push('Remove-HdoNrptRules');
+    elevatedLines.push('Remove-HdoOverlayRoutes');
     elevatedLines.push('if ($null -eq $svc) { exit 0 }');
   } else {
     elevatedLines.push(`Write-HdoAudit ${powerShellString(`restart removing NRPT rules for ${serviceName}`)}`);
     elevatedLines.push('Remove-HdoNrptRules');
+    elevatedLines.push('Remove-HdoOverlayRoutes');
     elevatedLines.push(
       'if ($null -ne $svc) {',
       `  Write-HdoAudit ${powerShellString(`stopping and uninstalling ${serviceName}`)}`,
@@ -3131,7 +3171,7 @@ function windowsElevatedStartProcessScripts(
     "Write-HdoAudit ('wireguard exitCode=' + [string]$LASTEXITCODE)",
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
     ...(action === 'down' ? waitForServiceAbsent() : waitForServiceRunning()),
-    ...(action === 'down' ? [] : ['Add-HdoNrptRules']),
+    ...(action === 'down' ? [] : ['Add-HdoOverlayRoutes', 'Add-HdoNrptRules']),
     `Write-HdoAudit ${powerShellString(`elevated complete action=${action} tunnel=${tunnelName}`)}`,
     'exit 0'
   );
@@ -3141,10 +3181,12 @@ function windowsElevatedStartProcessScripts(
   };
 }
 
-function buildWindowsNrptRepairCommand(
+function buildWindowsRepairCommand(
   runtime: WireGuardConnectionRuntimeStatus,
   configPath: string,
-  nrptRules: WindowsNrptRule[]
+  nrptRules: WindowsNrptRule[],
+  routeRules: WindowsRouteRule[],
+  interfaceAddresses: string[]
 ): WireGuardTunnelCommand {
   const tunnelName = pathWin32.basename(configPath).replace(/\.[^.]+$/, '');
   const profile = parseWireGuardProfile(configPath);
@@ -3153,10 +3195,12 @@ function buildWindowsNrptRepairCommand(
   const elevated = [
     "$ErrorActionPreference = 'Stop'",
     ...windowsAuditPowerShellLines(routeLogPath),
-    `Write-HdoAudit ${powerShellString(`repair-dns start tunnel=${tunnelName} nrptRules=${nrptRules.length}`)}`,
+    `Write-HdoAudit ${powerShellString(`repair start tunnel=${tunnelName} nrptRules=${nrptRules.length} routeRules=${routeRules.length}`)}`,
     ...windowsNrptPowerShellLines(nrptRules, tunnelName),
+    ...windowsRoutePowerShellLines(routeRules, tunnelName, interfaceAddresses),
+    'Add-HdoOverlayRoutes',
     'Add-HdoNrptRules',
-    `Write-HdoAudit ${powerShellString(`repair-dns complete tunnel=${tunnelName}`)}`,
+    `Write-HdoAudit ${powerShellString(`repair complete tunnel=${tunnelName}`)}`,
     'exit 0'
   ].join('\n');
   writePowerShellScriptFile(scriptPaths.elevated, elevated);
@@ -3208,6 +3252,77 @@ function windowsAuditPowerShellLines(auditLogPath?: string | null): string[] {
     '    if ($parent) { New-Item -ItemType Directory -Path $parent -Force -ErrorAction SilentlyContinue | Out-Null }',
     "    Add-Content -Path $hdoAuditLogPath -Value ((Get-Date -Format o) + ' ' + $Message) -Encoding UTF8 -ErrorAction SilentlyContinue",
     '  } catch { }',
+    '}'
+  ];
+}
+
+function windowsRoutePowerShellLines(
+  rules: WindowsRouteRule[],
+  tunnelName: string,
+  interfaceAddresses: string[]
+): string[] {
+  if (rules.length === 0) {
+    return [
+      `Write-HdoAudit ${powerShellString(`route skipped tunnel=${tunnelName} rules=0`)}`,
+      "function Add-HdoOverlayRoutes { Write-HdoAudit 'route add skipped rules=0' }",
+      "function Remove-HdoOverlayRoutes { Write-HdoAudit 'route remove skipped rules=0' }"
+    ];
+  }
+  const routeEntries = rules.map((rule) =>
+    `[pscustomobject]@{ DestinationPrefix = ${powerShellString(rule.destinationPrefix)} }`
+  );
+  const addressEntries = uniqueStrings(interfaceAddresses
+    .map((address) => address.split('/')[0]?.trim())
+    .filter(isString)
+    .filter(isIpv4))
+    .map(powerShellString);
+  return [
+    `$hdoRouteRules = @(${routeEntries.join(', ')})`,
+    `$hdoRouteTunnelName = ${powerShellString(tunnelName)}`,
+    `$hdoRouteInterfaceAddresses = @(${addressEntries.join(', ')})`,
+    `Write-HdoAudit ${powerShellString(`route prepared tunnel=${tunnelName} rules=${rules.length}`)}`,
+    'function Resolve-HdoOverlayInterface {',
+    '  $iface = Get-NetIPInterface -AddressFamily IPv4 -InterfaceAlias $hdoRouteTunnelName -ErrorAction SilentlyContinue | Select-Object -First 1',
+    '  if ($null -eq $iface -and $hdoRouteInterfaceAddresses.Count -gt 0) {',
+    '    $addr = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $hdoRouteInterfaceAddresses -contains $_.IPAddress } | Select-Object -First 1',
+    '    if ($null -ne $addr) {',
+    '      $iface = Get-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $addr.InterfaceIndex -ErrorAction SilentlyContinue | Select-Object -First 1',
+    '    }',
+    '  }',
+    "  if ($null -eq $iface) { Write-HdoAudit ('route interface missing tunnel=' + $hdoRouteTunnelName); return $null }",
+    "  Write-HdoAudit ('route interface index=' + [string]$iface.InterfaceIndex + ' alias=' + [string]$iface.InterfaceAlias)",
+    '  return $iface',
+    '}',
+    'function Remove-HdoOverlayRoutes {',
+    '  $iface = Resolve-HdoOverlayInterface',
+    "  if ($null -eq $iface) { Write-HdoAudit 'route remove skipped: interface missing'; return }",
+    '  foreach ($rule in $hdoRouteRules) {',
+    "    Write-HdoAudit ('route remove prefix=' + $rule.DestinationPrefix + ' if=' + [string]$iface.InterfaceIndex)",
+    '    Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $rule.DestinationPrefix -InterfaceIndex $iface.InterfaceIndex -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue',
+    '  }',
+    '}',
+    'function Add-HdoOverlayRoutes {',
+    '  $iface = Resolve-HdoOverlayInterface',
+    "  if ($null -eq $iface) { throw ('HDO WireGuard interface not found for ' + $hdoRouteTunnelName) }",
+    '  try {',
+    '    Set-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $iface.InterfaceIndex -InterfaceMetric 1 -ErrorAction Stop | Out-Null',
+    "    Write-HdoAudit ('route interface metric set if=' + [string]$iface.InterfaceIndex)",
+    '  } catch {',
+    "    Write-HdoAudit ('route interface metric failed: ' + ($_ | Out-String).Trim())",
+    '  }',
+    '  foreach ($rule in $hdoRouteRules) {',
+    '    Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $rule.DestinationPrefix -InterfaceIndex $iface.InterfaceIndex -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue',
+    '    try {',
+    "      New-NetRoute -AddressFamily IPv4 -DestinationPrefix $rule.DestinationPrefix -InterfaceIndex $iface.InterfaceIndex -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction Stop | Out-Null",
+    "      Write-HdoAudit ('route add ok prefix=' + $rule.DestinationPrefix + ' if=' + [string]$iface.InterfaceIndex)",
+    '    } catch {',
+    '      $existing = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $rule.DestinationPrefix -InterfaceIndex $iface.InterfaceIndex -ErrorAction SilentlyContinue)',
+    '      if ($existing.Count -eq 0) { throw }',
+    "      Write-HdoAudit ('route add kept existing prefix=' + $rule.DestinationPrefix + ' if=' + [string]$iface.InterfaceIndex)",
+    '    }',
+    '    $verified = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $rule.DestinationPrefix -InterfaceIndex $iface.InterfaceIndex -ErrorAction SilentlyContinue)',
+    "    if ($verified.Count -eq 0) { throw ('HDO route missing after add: ' + $rule.DestinationPrefix) }",
+    '  }',
     '}'
   ];
 }

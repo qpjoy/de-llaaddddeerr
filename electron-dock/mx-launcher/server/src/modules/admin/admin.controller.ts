@@ -3582,9 +3582,10 @@ function internalServicePeerApplyScriptContent(): string {
     `IFACE="\${MX_INTERNAL_SERVICE_WG_INTERFACE:-${INTERNAL_SERVICE_PEER_INTERFACE}}"`,
     'CONFIG_SOURCE="${1:-$SCRIPT_DIR/mx-internal-service-peer.conf}"',
     'TARGET="/etc/wireguard/${IFACE}.conf"',
+    'OS_NAME="$(uname -s)"',
     '',
     'if [ "${#IFACE}" -gt 15 ]; then',
-    '  echo "blocked: Linux WireGuard interface name must be 15 characters or fewer: $IFACE" >&2',
+    '  echo "blocked: WireGuard interface name must be 15 characters or fewer: $IFACE" >&2',
     '  exit 1',
     'fi',
     '',
@@ -3594,6 +3595,37 @@ function internalServicePeerApplyScriptContent(): string {
     'fi',
     '',
     'install -d -m 700 /etc/wireguard',
+    '',
+    'internal_route_cidrs() {',
+    '  awk \'BEGIN { in_peer=0 } /^\\[Peer\\]/ { in_peer=1; next } /^\\[/ { in_peer=0 } in_peer && /^[[:space:]]*AllowedIPs[[:space:]]*=/ { sub(/^[^=]+=/, ""); print }\' "$CONFIG_SOURCE" \\',
+    '    | tr "," "\\n" \\',
+    '    | sed "s/^[[:space:]]*//;s/[[:space:]]*$//" \\',
+    '    | grep -E "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+/[0-9]+$" \\',
+    '    | grep -v "/32$" \\',
+    '    | sort -u',
+    '}',
+    '',
+    'if [ "$OS_NAME" = "Darwin" ]; then',
+    '  awk \'!/^[[:space:]]*Post(Up|Down)[[:space:]]*=[[:space:]]*ip route / { print }\' "$CONFIG_SOURCE" > "$TARGET"',
+    '  chmod 600 "$TARGET"',
+    '  wg-quick down "$TARGET" >/dev/null 2>&1 || wg-quick down "$IFACE" >/dev/null 2>&1 || true',
+    '  wg-quick up "$TARGET"',
+    '  REAL_IFACE="$(route -n get 10.88.0.1 2>/dev/null | awk \'/interface:/{print $2; exit}\')"',
+    '  if [ -z "$REAL_IFACE" ]; then',
+    '    echo "blocked: unable to resolve Darwin WireGuard utun for 10.88.0.1" >&2',
+    '    exit 1',
+    '  fi',
+    '  while IFS= read -r cidr; do',
+    '    [ -n "$cidr" ] || continue',
+    '    route -q -n delete -net "$cidr" >/dev/null 2>&1 || true',
+    '    route -q -n add -net "$cidr" -interface "$REAL_IFACE" >/dev/null 2>&1 || route -q -n change -net "$cidr" -interface "$REAL_IFACE"',
+    '  done < <(internal_route_cidrs)',
+    '  wg show "$REAL_IFACE" || wg show "$IFACE" || true',
+    '  route -n get 10.88.0.1 || true',
+    '  route -n get 10.89.100.1 || true',
+    '  exit 0',
+    'fi',
+    '',
     'install -m 600 -o root -g root "$CONFIG_SOURCE" "$TARGET"',
     '',
     'if command -v systemctl >/dev/null 2>&1; then',
@@ -3794,6 +3826,7 @@ function adminInternalServicePeerHostRunnerUnavailableStatus(
   const runtimeTarget = internalServicePeerRuntimeTarget(hostRunnerUrl, hostRunnerError);
   const domesticGatewayIp = secret?.domesticGatewayIp ?? '10.88.0.1';
   const internalServiceIp = secret?.internalServiceIp ?? '10.88.88.88';
+  const userRelayProbeIp = '10.89.100.1';
   const blockedReasons = [
     'Internal service peer install must run on the Internal runtime host via host-runner',
     `Internal host runner is not reachable: ${hostRunnerError}`
@@ -4052,6 +4085,7 @@ async function adminInternalServicePeerRuntimeStatus(
   const interfaceName = INTERNAL_SERVICE_PEER_INTERFACE;
   const domesticGatewayIp = secret?.domesticGatewayIp ?? '10.88.0.1';
   const internalServiceIp = secret?.internalServiceIp ?? '10.88.88.88';
+  const userRelayProbeIp = '10.89.100.1';
   const runtimeTarget = internalServicePeerRuntimeTarget(hostRunnerUrl, hostRunnerError);
   if (hostRunnerUrl && hostRunnerError && Boolean(process.env.KUBERNETES_SERVICE_HOST)) {
     return adminInternalServicePeerHostRunnerUnavailableStatus(siteId, plan, secret, paths, hostRunnerUrl, hostRunnerError);
@@ -4079,22 +4113,33 @@ async function adminInternalServicePeerRuntimeStatus(
   const routeToDomestic = tools.ip.available
     ? await runLocalCommand(tools.ip.path ?? 'ip', ['route', 'get', domesticGatewayIp], 3000)
     : await runLocalCommand('route', ['-n', 'get', domesticGatewayIp], 3000);
+  const routeToUserRelay = tools.ip.available
+    ? await runLocalCommand(tools.ip.path ?? 'ip', ['route', 'get', userRelayProbeIp], 3000)
+    : await runLocalCommand('route', ['-n', 'get', userRelayProbeIp], 3000);
   const domesticGatewayPing = tools.ping.available
     ? await runLocalCommand(tools.ping.path ?? 'ping', ['-c', '1', domesticGatewayIp], 3000)
     : null;
   const internalHealthz = await httpHealthProbe(`http://${internalServiceIp}:18090/healthz`, 3000);
   const handshake = parseWireGuardLatestHandshake(latestHandshakes?.stdout ?? '');
+  const domesticRouteInterface = routeProbeInterface(routeToDomestic.stdout);
+  const userRelayRouteInterface = routeProbeInterface(routeToUserRelay.stdout);
+  const userRelayRouteReady = routeToUserRelay.status === 'passed'
+    && Boolean(domesticRouteInterface)
+    && userRelayRouteInterface === domesticRouteInterface;
+  const interfaceReady = wgShow?.status === 'passed';
+  const linkReady = handshake.status === 'passed' || domesticGatewayPing?.status === 'passed';
+  const healthReady = internalHealthz.status === 'passed';
   const blockedReasons = [
     ...(runtimeTarget.mode === 'api-pod' ? ['Internal service peer install must run on the Internal runtime host; this API is running inside a k8s pod'] : []),
     ...(hostRunnerError ? [`Internal host runner is not reachable: ${hostRunnerError}`] : []),
     ...(!artifacts.configExists ? [`Internal service peer config artifact is missing: ${paths.configPath}`] : []),
     ...(!artifacts.applyScriptExists ? [`Internal service peer apply script is missing: ${paths.applyScriptPath}`] : []),
     ...(!tools.wg.available ? ['wg is missing on the current host'] : []),
-    ...(!tools.wgQuick.available ? ['wg-quick is missing on the current host'] : [])
+    ...(!tools.wgQuick.available ? ['wg-quick is missing on the current host'] : []),
+    ...(interfaceReady && linkReady && !userRelayRouteReady
+      ? [`Internal return route to 10.89.0.0/16 is not on ${domesticRouteInterface ?? interfaceName}; route to ${userRelayProbeIp} is on ${userRelayRouteInterface ?? 'unknown'}`]
+      : [])
   ];
-  const interfaceReady = wgShow?.status === 'passed';
-  const linkReady = handshake.status === 'passed' || domesticGatewayPing?.status === 'passed';
-  const healthReady = internalHealthz.status === 'passed';
   const status = blockedReasons.length > 0
     ? 'blocked'
     : interfaceReady && linkReady && healthReady
@@ -4126,6 +4171,7 @@ async function adminInternalServicePeerRuntimeStatus(
     },
     link: {
       routeToDomestic,
+      routeToUserRelay,
       domesticGatewayPing,
       internalHealthz
     },
@@ -4652,6 +4698,13 @@ async function runLocalCommand(command: string, args: string[], timeoutMs: numbe
       finishedAt: new Date().toISOString()
     };
   }
+}
+
+function routeProbeInterface(stdout: string | null | undefined): string | null {
+  const text = typeof stdout === 'string' ? stdout : '';
+  return text.match(/^\s*interface:\s*(\S+)/m)?.[1]
+    ?? text.match(/\bdev\s+(\S+)/)?.[1]
+    ?? null;
 }
 
 async function httpHealthProbe(url: string, timeoutMs: number) {

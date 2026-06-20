@@ -32,6 +32,7 @@ export interface ElectronLauncherWireGuardPeerInput extends ElectronLauncherWire
 export interface ElectronLauncherWireGuardProbeInput extends ElectronLauncherWireGuardRuntimeOptions {
   targetIp: string;
   expectedInterfaceName?: string | null;
+  expectedInterfaceAddresses?: string[] | null;
 }
 
 export interface ElectronLauncherWireGuardPeer {
@@ -173,8 +174,11 @@ export function probeLauncherWireGuardRoute(input: ElectronLauncherWireGuardProb
   const gateway = route.gateway;
   const viaLoopback = interfaceName === 'lo0' || gateway === '127.0.0.1' || gateway === '::1';
   const expected = input.expectedInterfaceName?.trim() || null;
+  const expectedAddresses = uniqueStrings(input.expectedInterfaceAddresses ?? [])
+    .map((address) => address.split('/')[0]?.trim() ?? '')
+    .filter(isIpv4);
   const interfaceMatches = expected
-    ? interfaceName === expected
+    ? interfaceName === expected || Boolean(interfaceName && expectedAddresses.includes(interfaceName))
     : Boolean(interfaceName && (/^utun\d+$/.test(interfaceName) || /^wg/.test(interfaceName)));
   const viaWireGuard = Boolean(interfaceName && !viaLoopback && interfaceMatches);
   return {
