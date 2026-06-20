@@ -361,6 +361,8 @@ function renderWireGuardDiagnostics() {
         ${metric('Peer Sync', peerSync.status || '-')}
         ${metric('Relay', relayDiag.status || '-')}
         ${metric('IP Forward', relaySummary.ipForward || '-')}
+        ${metric('Relay FORWARD', relaySummary.firewallForward || '-')}
+        ${metric('Relay Docker', relaySummary.firewallDockerUser || '-')}
         ${metric('Interface', wireGuard.realInterfaceName || wireGuard.interfaceName || '-')}
         ${metric('Expected', route.expectedInterfaceName || wireGuard.realInterfaceName || '-')}
         ${metric('Endpoint', wireGuard.endpoint || connection.domesticRelayEndpoint || '-')}

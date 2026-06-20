@@ -5139,6 +5139,12 @@ function domesticRelayRouteCidrsForAllowedIp(allowedIp: string): string[] {
   return uniqueStrings([derived, '10.89.0.0/16', '10.90.0.0/16'].filter((cidr): cidr is string => Boolean(cidr)));
 }
 
+function domesticRelayFirewallEnsureCommands(): string[] {
+  return [
+    'if command -v iptables >/dev/null 2>&1; then iptables -C FORWARD -i mx-domestic -o mx-domestic -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i mx-domestic -o mx-domestic -j ACCEPT; if iptables -S DOCKER-USER >/dev/null 2>&1; then iptables -C DOCKER-USER -i mx-domestic -o mx-domestic -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -i mx-domestic -o mx-domestic -j ACCEPT; fi; iptables -C INPUT -i mx-domestic -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i mx-domestic -p udp --dport 53 -j ACCEPT; iptables -C INPUT -i mx-domestic -p tcp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i mx-domestic -p tcp --dport 53 -j ACCEPT; fi'
+  ];
+}
+
 function domesticRelayPeerAppendFailures(
   job: SiteSlotWorkerJob,
   plan: SiteSlotPlan | null,
@@ -5269,6 +5275,7 @@ function domesticRelayPeerAppendScript(input: DomesticRelayPeerInput): string {
     `wg set mx-domestic peer ${shellQuote(publicKey)} allowed-ips ${shellQuote(allowedIp)}`,
     'ip link set up dev mx-domestic',
     'sysctl -w net.ipv4.ip_forward=1 >/dev/null || true',
+    ...domesticRelayFirewallEnsureCommands(),
     'for route_cidr in $relay_route_cidrs; do ip route replace "$route_cidr" dev mx-domestic; done',
     'ip route replace "$allowed_ip" dev mx-domestic || true',
     'wg show mx-domestic',
@@ -5308,6 +5315,7 @@ function domesticInternalServicePeerKeySyncScript(internalPublicKey: string, int
     'wg set mx-domestic peer "$internal_peer" allowed-ips "$allowed_ip"',
     'ip link set up dev mx-domestic',
     'sysctl -w net.ipv4.ip_forward=1 >/dev/null || true',
+    ...domesticRelayFirewallEnsureCommands(),
     'for route_cidr in $relay_route_cidrs; do ip route replace "$route_cidr" dev mx-domestic; done',
     'printf "domestic_public_key=%s\\n" "$(wg show mx-domestic public-key)"',
     'printf "internal_peer=%s\\n" "$internal_peer"',

@@ -318,6 +318,7 @@ function domesticRelayPeerSyncScript(publicKey: string, allowedIp: string): stri
     `wg set mx-domestic peer ${shellQuote(publicKey)} allowed-ips ${shellQuote(allowedIp)}`,
     'ip link set up dev mx-domestic',
     'sysctl -w net.ipv4.ip_forward=1 >/dev/null || true',
+    ...domesticRelayFirewallEnsureCommands(),
     'for route_cidr in $relay_route_cidrs; do ip route replace "$route_cidr" dev mx-domestic; done',
     'ip route replace "$allowed_ip" dev mx-domestic || true',
     'if command -v wg-quick >/dev/null 2>&1; then wg-quick save mx-domestic || true; fi',
@@ -440,6 +441,7 @@ function domesticRelayDiagnosticsScript(
     'if ! command -v wg >/dev/null 2>&1; then echo "blocked: wg missing"; exit 1; fi',
     'wg show mx-domestic >/dev/null',
     'printf "ip_forward=%s\\n" "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo unknown)"',
+    'if command -v iptables >/dev/null 2>&1; then if iptables -C FORWARD -i mx-domestic -o mx-domestic -j ACCEPT 2>/dev/null; then printf "firewall_forward=present\\n"; else printf "firewall_forward=missing\\n"; fi; if iptables -S DOCKER-USER >/dev/null 2>&1; then if iptables -C DOCKER-USER -i mx-domestic -o mx-domestic -j ACCEPT 2>/dev/null; then printf "firewall_docker_user=present\\n"; else printf "firewall_docker_user=missing\\n"; fi; else printf "firewall_docker_user=absent\\n"; fi; else printf "firewall_forward=unknown\\n"; printf "firewall_docker_user=unknown\\n"; fi',
     'printf "client_peer_configured=%s\\n" "$(wg show mx-domestic allowed-ips | awk -v peer="$client_peer" -v ip="$allowed_ip" \'$1 == peer { for (i = 2; i <= NF; i += 1) if ($i == ip) found=1 } END { print found ? "yes" : "no" }\')"',
     'printf "client_latest_handshake=%s\\n" "$(wg show mx-domestic latest-handshakes | awk -v peer="$client_peer" \'$1 == peer { print $2 }\')"',
     'printf "client_transfer=%s\\n" "$(wg show mx-domestic transfer | awk -v peer="$client_peer" \'$1 == peer { print $2 "/" $3 }\')"',
@@ -477,6 +479,8 @@ function summarizeDomesticRelayDiagnostics(
     internalPeerConfigured: keyed.internal_peer_configured ?? null,
     internalLatestHandshake: keyed.internal_latest_handshake ?? null,
     internalTransfer: keyed.internal_transfer ?? null,
+    firewallForward: keyed.firewall_forward ?? null,
+    firewallDockerUser: keyed.firewall_docker_user ?? null,
     relayRouteCidrs: routeCidrs,
     routeStatus,
     routeToLease: firstPrefixedLine(stdout, 'route_to_lease '),
@@ -490,6 +494,8 @@ function domesticRelayDiagnosticBlockedReasons(summary: ReturnType<typeof summar
     ...(summary.ipForward === '1' ? [] : [`Domestic ip_forward is ${summary.ipForward ?? 'unknown'}, expected 1`]),
     ...(summary.clientPeerConfigured === 'yes' ? [] : [`Domestic client peer ${summary.allowedIp} is not configured`]),
     ...(summary.internalPeerConfigured === 'yes' || summary.internalPeerConfigured === 'unknown' ? [] : [`Domestic Internal peer ${summary.internalIp}/32 is not configured`]),
+    ...(summary.firewallForward === 'present' ? [] : [`Domestic FORWARD mx-domestic->mx-domestic rule is ${summary.firewallForward ?? 'unknown'}`]),
+    ...(summary.firewallDockerUser === 'present' || summary.firewallDockerUser === 'absent' ? [] : [`Domestic DOCKER-USER mx-domestic->mx-domestic rule is ${summary.firewallDockerUser ?? 'unknown'}`]),
     ...Object.entries(summary.routeStatus)
       .filter(([, status]) => status !== 'present')
       .map(([cidr, status]) => `Domestic route ${cidr} dev mx-domestic is ${status}`),
@@ -587,6 +593,12 @@ function domesticRelayRouteCidrsForAllowedIp(allowedIp: string): string[] {
     ? `10.${parts[1]}.0.0/16`
     : null;
   return [...new Set([derived, '10.89.0.0/16', '10.90.0.0/16'].filter((cidr): cidr is string => Boolean(cidr)))];
+}
+
+function domesticRelayFirewallEnsureCommands(): string[] {
+  return [
+    'if command -v iptables >/dev/null 2>&1; then iptables -C FORWARD -i mx-domestic -o mx-domestic -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i mx-domestic -o mx-domestic -j ACCEPT; if iptables -S DOCKER-USER >/dev/null 2>&1; then iptables -C DOCKER-USER -i mx-domestic -o mx-domestic -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -i mx-domestic -o mx-domestic -j ACCEPT; fi; iptables -C INPUT -i mx-domestic -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i mx-domestic -p udp --dport 53 -j ACCEPT; iptables -C INPUT -i mx-domestic -p tcp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i mx-domestic -p tcp --dport 53 -j ACCEPT; fi'
+  ];
 }
 
 function keyValueLines(stdout: string): Record<string, string> {
