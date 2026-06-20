@@ -22,6 +22,7 @@ const DEFAULT_CONFIG = {
   domesticRelayPort: 51280,
   sdkGatewayBaseUrl: '',
   hostResolve: defaultHostResolve(),
+  bootstrapResolveMode: defaultBootstrapResolveMode(),
   splitDnsDomains: nullableString(process.env.MX_H2I_SPLIT_DNS_DOMAINS)
     || nullableString(process.env.MX_H2I_DNS_DOMAINS)
     || '',
@@ -160,9 +161,12 @@ function registerIpc() {
     setConnecting('employee');
     await saveAndBroadcast();
     try {
-      const baseUrl = await resolveBootstrapBaseUrl(runtime.config);
+      const bootstrap = await resolveBootstrapEndpoint(runtime.config);
+      const baseUrl = bootstrap.baseUrl;
       await applyResolvedBootstrapBaseUrl(baseUrl);
-      const auth = await authenticateUserViaGateway(baseUrl, account, password);
+      const auth = await authenticateUserViaGateway(baseUrl, account, password, {
+        bootstrapResolveMode: bootstrap.resolveMode
+      });
       const session = await connectLauncherNetwork({
         identityKind: 'user',
         userId: auth.user.userId,
@@ -635,6 +639,7 @@ function normalizeConfig(input) {
     domesticRelayPort: Number.isInteger(domesticRelayPort) && domesticRelayPort > 0 ? domesticRelayPort : DEFAULT_CONFIG.domesticRelayPort,
     sdkGatewayBaseUrl: stringValue(row.sdkGatewayBaseUrl, DEFAULT_CONFIG.sdkGatewayBaseUrl || sdkGatewayBaseUrl(bootstrapApiBaseUrl)),
     hostResolve: stringValue(row.hostResolve, DEFAULT_CONFIG.hostResolve),
+    bootstrapResolveMode: normalizeBootstrapResolveMode(row.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode),
     splitDnsDomains: stringValue(row.splitDnsDomains, DEFAULT_CONFIG.splitDnsDomains),
     releaseChannel: stringValue(row.releaseChannel, DEFAULT_CONFIG.releaseChannel),
     rolloutGroup: stringValue(row.rolloutGroup, DEFAULT_CONFIG.rolloutGroup),
@@ -1060,12 +1065,14 @@ async function connectLauncherNetwork(input) {
 }
 
 async function launcherContext() {
-  const baseUrl = await resolveBootstrapBaseUrl(runtime.config);
+  const bootstrap = await resolveBootstrapEndpoint(runtime.config);
+  const baseUrl = bootstrap.baseUrl;
   await applyResolvedBootstrapBaseUrl(baseUrl);
   const installation = await ensureInstallation();
   const mod = await import('@qpjoy/electron-launcher');
   const launcher = mod.createElectronLauncher({
     baseUrl,
+    fetchImpl: launcherFetchForBootstrap(bootstrap.resolveMode),
     productId: PRODUCT_ID,
     mode: 'standalone',
     installId: installation.installId,
@@ -1392,10 +1399,11 @@ function portFromBaseUrl(value) {
   }
 }
 
-async function authenticateUserViaGateway(baseUrl, account, password) {
+async function authenticateUserViaGateway(baseUrl, account, password, requestOptions = {}) {
   const tokenPayload = await requestJson(joinApiUrl(baseUrl, '/internal/v1/sdk/oauth/token'), {
     method: 'POST',
     timeoutMs: 5000,
+    bootstrapResolveMode: requestOptions.bootstrapResolveMode,
     body: {
       grant_type: 'password',
       username: account,
@@ -1427,6 +1435,10 @@ async function authenticateUserViaGateway(baseUrl, account, password) {
 }
 
 async function resolveBootstrapBaseUrl(config) {
+  return (await resolveBootstrapEndpoint(config)).baseUrl;
+}
+
+async function resolveBootstrapEndpoint(config) {
   const seeds = [
     normalizeBaseUrl(process.env.MX_H2I_BOOTSTRAP_BASE_URL),
     normalizeBaseUrl(config.bootstrapApiBaseUrl),
@@ -1438,18 +1450,31 @@ async function resolveBootstrapBaseUrl(config) {
   const candidates = bootstrapBaseUrlCandidates(seeds);
   const failures = [];
   for (const candidate of candidates) {
-    try {
-      await probeBootstrapApiBaseUrl(candidate);
-      return candidate;
-    } catch (err) {
-      failures.push({
-        candidate,
-        error: err,
-        override: hostResolveOverride(candidate)
-      });
+    for (const resolveMode of bootstrapResolveAttempts(candidate, config)) {
+      try {
+        await probeBootstrapApiBaseUrl(candidate, { bootstrapResolveMode: resolveMode });
+        return { baseUrl: candidate, resolveMode };
+      } catch (err) {
+        failures.push({
+          candidate,
+          resolveMode,
+          error: err,
+          override: hostResolveOverride(candidate, { bootstrapResolveMode: resolveMode })
+        });
+      }
     }
   }
   throw new Error(`无法连接 bootstrap API：${summarizeBootstrapProbeFailures(failures)}`);
+}
+
+function bootstrapResolveAttempts(candidate, config) {
+  const mode = normalizeBootstrapResolveMode(config?.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode);
+  const hasHostOverride = Boolean(hostResolveOverride(candidate, { bootstrapResolveMode: 'env-only' }));
+  if (mode === 'env-only') return ['env-only'];
+  if (mode === 'dns-only') return ['dns-only'];
+  if (!hasHostOverride) return ['dns-only'];
+  if (mode === 'dns-first') return ['dns-only', 'env-only'];
+  return ['env-only', 'dns-only'];
 }
 
 function bootstrapBaseUrlCandidates(seeds) {
@@ -1511,7 +1536,8 @@ function summarizeBootstrapProbeFailures(failures) {
     const resolved = failure.override?.url && failure.override.url !== failure.candidate
       ? ` -> ${failure.override.url}`
       : '';
-    return `${failure.candidate}${resolved}: ${errorMessage(failure.error)}`;
+    const mode = failure.resolveMode === 'env-only' ? 'env' : 'dns';
+    return `[${mode}] ${failure.candidate}${resolved}: ${errorMessage(failure.error)}`;
   });
   const hidden = failures.length > rows.length ? `；另有 ${failures.length - rows.length} 个候选失败` : '';
   const hostResolveHint = bootstrapHostResolveHint(failures);
@@ -1532,17 +1558,23 @@ function bootstrapHostResolveHint(failures) {
   return '；Host Resolve 未命中 api.mxinfo-inc.cn，请在 .env 或高级选项设置 MX_H2I_HOST_RESOLVE=api.mxinfo-inc.cn=<Domestic公网IP>';
 }
 
-async function probeBootstrapApiBaseUrl(baseUrl) {
+async function probeBootstrapApiBaseUrl(baseUrl, options = {}) {
   let bootstrapHealthError = null;
   try {
-    await assertHealthResponse(requestJson(joinApiUrl(baseUrl, '/bootstrap-healthz'), { timeoutMs: 1400 }));
+    await assertHealthResponse(requestJson(joinApiUrl(baseUrl, '/bootstrap-healthz'), {
+      timeoutMs: 1400,
+      bootstrapResolveMode: options.bootstrapResolveMode
+    }));
     return;
   } catch (err) {
     bootstrapHealthError = err;
     if (!shouldFallbackToLegacyHealthz(err)) throw err;
   }
   try {
-    await assertHealthResponse(requestJson(joinApiUrl(baseUrl, '/healthz'), { timeoutMs: 900 }));
+    await assertHealthResponse(requestJson(joinApiUrl(baseUrl, '/healthz'), {
+      timeoutMs: 900,
+      bootstrapResolveMode: options.bootstrapResolveMode
+    }));
   } catch (err) {
     err.bootstrapHealthError = bootstrapHealthError;
     throw err;
@@ -1608,7 +1640,7 @@ function normalizeRoutePlan(input) {
 }
 
 async function requestJson(url, options = {}) {
-  const hostOverride = hostResolveOverride(url);
+  const hostOverride = hostResolveOverride(url, { bootstrapResolveMode: options.bootstrapResolveMode });
   if (hostOverride) return requestJsonWithHostOverride(hostOverride, options);
   if (typeof fetch !== 'function') throw new Error('当前 Electron 运行时没有 fetch。');
   const controller = new AbortController();
@@ -1639,11 +1671,48 @@ async function requestJson(url, options = {}) {
 }
 
 function requestJsonWithHostOverride(override, options = {}) {
+  return requestTextWithHostOverride(override, options).then((result) => {
+    const payload = parseJsonPayload(result.text);
+    if (result.status < 200 || result.status >= 300) {
+      const err = new Error(`HTTP ${result.status}${result.statusText ? ` ${result.statusText}` : ''}`);
+      err.payload = payload;
+      err.dialUrl = override.url;
+      err.originalUrl = override.originalUrl;
+      err.bootstrapResolveMode = override.resolveMode;
+      throw err;
+    }
+    return payload;
+  });
+}
+
+function launcherFetchForBootstrap(resolveMode) {
+  return async (url, init = {}) => {
+    const hostOverride = hostResolveOverride(String(url), { bootstrapResolveMode: resolveMode });
+    if (!hostOverride) {
+      if (typeof fetch !== 'function') throw new Error('当前 Electron 运行时没有 fetch。');
+      return fetch(url, init);
+    }
+    const result = await requestTextWithHostOverride(hostOverride, {
+      method: init.method || 'GET',
+      headers: init.headers,
+      body: init.body,
+      timeoutMs: 10000
+    });
+    return new Response(result.text, {
+      status: result.status,
+      statusText: result.statusText,
+      headers: result.headers
+    });
+  };
+}
+
+function requestTextWithHostOverride(override, options = {}) {
   return new Promise((resolve, reject) => {
     const target = new URL(override.url);
-    const body = options.body ? JSON.stringify(options.body) : undefined;
+    const body = requestBody(options.body);
     const timeout = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 6000;
     const headers = {
+      ...normalizeRequestHeaders(options.headers),
       accept: 'application/json',
       host: override.hostHeader,
       ...(override.originalHostHeader ? { 'x-forwarded-host': override.originalHostHeader } : {}),
@@ -1664,23 +1733,45 @@ function requestJsonWithHostOverride(override, options = {}) {
       response.on('data', (chunk) => chunks.push(chunk));
       response.on('end', () => {
         const text = Buffer.concat(chunks).toString('utf8');
-        const payload = parseJsonPayload(text);
-        if ((response.statusCode || 0) < 200 || (response.statusCode || 0) >= 300) {
-          const err = new Error(`HTTP ${response.statusCode}${response.statusMessage ? ` ${response.statusMessage}` : ''}`);
-          err.payload = payload;
-          reject(err);
-          return;
-        }
-        resolve(payload);
+        resolve({
+          text,
+          status: response.statusCode || 0,
+          statusText: response.statusMessage || '',
+          headers: response.headers
+        });
       });
     });
     request.on('timeout', () => {
-      request.destroy(new Error('请求超时。'));
+      const err = new Error(`请求超时：${override.originalUrl || ''} -> ${override.url}`);
+      err.code = 'MX_BOOTSTRAP_TIMEOUT';
+      err.dialUrl = override.url;
+      err.originalUrl = override.originalUrl;
+      err.bootstrapResolveMode = override.resolveMode;
+      request.destroy(err);
     });
-    request.on('error', reject);
+    request.on('error', (err) => {
+      err.dialUrl = err.dialUrl || override.url;
+      err.originalUrl = err.originalUrl || override.originalUrl;
+      err.bootstrapResolveMode = err.bootstrapResolveMode || override.resolveMode;
+      reject(err);
+    });
     if (body) request.write(body);
     request.end();
   });
+}
+
+function requestBody(body) {
+  if (body === undefined || body === null) return undefined;
+  if (typeof body === 'string' || Buffer.isBuffer(body)) return body;
+  return JSON.stringify(body);
+}
+
+function normalizeRequestHeaders(headers) {
+  if (!headers) return {};
+  if (typeof headers.entries === 'function') return Object.fromEntries(headers.entries());
+  if (Array.isArray(headers)) return Object.fromEntries(headers);
+  if (typeof headers === 'object') return { ...headers };
+  return {};
 }
 
 function visibleRuntime(source = runtime) {
@@ -1829,7 +1920,30 @@ function defaultHostResolve() {
   return host && ip ? `${host}=${ip}` : '';
 }
 
-function hostResolveOverride(url) {
+function defaultBootstrapResolveMode() {
+  return normalizeBootstrapResolveMode(
+    process.env.MX_H2I_BOOTSTRAP_RESOLVE_MODE
+      || process.env.MX_H2I_BOOTSTRAP_DNS_MODE
+      || (defaultHostResolve() ? 'env-first' : 'dns-first')
+  );
+}
+
+function normalizeBootstrapResolveMode(value) {
+  const text = String(value || '').trim().toLowerCase().replace(/_/g, '-');
+  if (['env', 'env-first', 'host', 'host-first', 'host-resolve', 'host-resolve-first'].includes(text)) {
+    return 'env-first';
+  }
+  if (['dns', 'dns-first', 'public-dns', 'system-dns', 'provider-dns'].includes(text)) {
+    return 'dns-first';
+  }
+  if (['env-only', 'host-only', 'host-resolve-only'].includes(text)) return 'env-only';
+  if (['dns-only', 'public-dns-only', 'system-dns-only', 'provider-dns-only'].includes(text)) return 'dns-only';
+  return 'env-first';
+}
+
+function hostResolveOverride(url, options = {}) {
+  const resolveMode = normalizeBootstrapResolveMode(options.bootstrapResolveMode || runtime?.config?.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode);
+  if (resolveMode === 'dns-first' || resolveMode === 'dns-only') return null;
   let parsed;
   try {
     parsed = new URL(url);
@@ -1844,9 +1958,11 @@ function hostResolveOverride(url) {
   if (mapped.port) target.port = mapped.port;
   const useOriginalHostHeader = target.protocol === 'https:';
   return {
+    originalUrl: parsed.toString(),
     url: target.toString(),
     hostHeader: useOriginalHostHeader ? parsed.host : target.host,
     originalHostHeader: parsed.host,
+    resolveMode,
     servername: useOriginalHostHeader ? parsed.hostname : undefined
   };
 }
@@ -1968,6 +2084,8 @@ function parseJsonPayload(text) {
 
 function errorMessage(err) {
   if (!err) return 'unknown error';
+  const dial = err.originalUrl && err.dialUrl ? `${err.originalUrl} -> ${err.dialUrl}` : '';
+  const mode = err.bootstrapResolveMode ? `resolve=${err.bootstrapResolveMode}` : '';
   const payload = err.payload;
   if (payload && typeof payload === 'object') {
     if (typeof payload.message === 'string') return payload.message;
@@ -1981,7 +2099,7 @@ function errorMessage(err) {
     const port = err.cause.port ? `:${err.cause.port}` : '';
     const causeMessage = typeof err.cause.message === 'string' ? err.cause.message : '';
     if (code || causeMessage) {
-      return [err.message, code, address ? `${address}${port}` : '', causeMessage]
+      return [dial, mode, err.message, code, address ? `${address}${port}` : '', causeMessage]
         .filter(Boolean)
         .join(' / ');
     }
@@ -1989,11 +2107,11 @@ function errorMessage(err) {
   if (typeof err.code === 'string') {
     const address = typeof err.address === 'string' ? err.address : '';
     const port = err.port ? `:${err.port}` : '';
-    return [err.message, err.code, address ? `${address}${port}` : '']
+    return [dial, mode, err.message, err.code, address ? `${address}${port}` : '']
       .filter(Boolean)
       .join(' / ');
   }
-  return err.message || String(err);
+  return [dial, mode, err.message || String(err)].filter(Boolean).join(' / ');
 }
 
 function delay(ms) {

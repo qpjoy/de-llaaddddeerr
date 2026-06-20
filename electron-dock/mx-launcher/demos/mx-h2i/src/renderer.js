@@ -401,6 +401,15 @@ function renderConfigForm() {
         <input name="hostResolve" value="${escapeAttr(config.hostResolve || '')}" placeholder="api.mxinfo-inc.cn=121.43.253.179" />
       </label>
       <label class="field">
+        <span>Bootstrap DNS</span>
+        <select name="bootstrapResolveMode">
+          ${option('env-first', config.bootstrapResolveMode)}
+          ${option('dns-first', config.bootstrapResolveMode)}
+          ${option('env-only', config.bootstrapResolveMode)}
+          ${option('dns-only', config.bootstrapResolveMode)}
+        </select>
+      </label>
+      <label class="field">
         <span>Split DNS Domains</span>
         <input name="splitDnsDomains" value="${escapeAttr(config.splitDnsDomains || '')}" placeholder="mxinfo-inc.cn, api.mxinfo-inc.cn" />
       </label>
@@ -656,6 +665,7 @@ function readConfigForm(form) {
     domesticRelayPort: Number(formData.get('domesticRelayPort') || 0),
     sdkGatewayBaseUrl: String(formData.get('sdkGatewayBaseUrl') || ''),
     hostResolve: String(formData.get('hostResolve') || ''),
+    bootstrapResolveMode: String(formData.get('bootstrapResolveMode') || ''),
     splitDnsDomains: String(formData.get('splitDnsDomains') || ''),
     releaseChannel: String(formData.get('releaseChannel') || ''),
     rolloutGroup: String(formData.get('rolloutGroup') || ''),
@@ -694,6 +704,7 @@ function createMockApi() {
       domesticRelayPort: 51280,
       sdkGatewayBaseUrl: 'http://api.mxinfo-inc.cn:18090/internal/v1/sdk',
       hostResolve: '',
+      bootstrapResolveMode: 'env-first',
       splitDnsDomains: 'mxinfo-inc.cn,api.mxinfo-inc.cn',
       releaseChannel: 'stable',
       rolloutGroup: 'staff-ring',

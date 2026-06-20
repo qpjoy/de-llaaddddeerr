@@ -33,6 +33,12 @@ The package and make scripts run the same local Launcher preparation step
 before invoking electron-builder, so clean Windows workspaces do not start with
 an empty `@qpjoy/electron-launcher/dist`.
 
+Bootstrap DNS can be selected with `MX_H2I_BOOTSTRAP_RESOLVE_MODE`:
+`env-first`, `dns-first`, `env-only`, or `dns-only`. The bootstrap phase may use
+`MX_H2I_HOST_RESOLVE=api.mxinfo-inc.cn=<Domestic public IP>` to bypass public
+DNS, while the connected WireGuard phase still relies on the launcher route
+plan and split DNS.
+
 The Electron entry is intentionally light for the reservation phase:
 
 - `src/main.cjs` owns the window, local runtime state, persisted endpoint
