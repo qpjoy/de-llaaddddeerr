@@ -5130,6 +5130,15 @@ function relayPeerCidr(role: 'guest' | 'user', leaseIp?: string | null): string 
   return role === 'user' ? '10.89.0.0/16' : '10.90.0.0/16';
 }
 
+function domesticRelayRouteCidrsForAllowedIp(allowedIp: string): string[] {
+  const ip = allowedIp.split('/')[0] ?? '';
+  const parts = ip.split('.').map((part) => Number(part));
+  const derived = parts.length === 4 && parts[0] === 10 && Number.isInteger(parts[1]) && parts[1] >= 89 && parts[1] <= 254
+    ? `10.${parts[1]}.0.0/16`
+    : null;
+  return uniqueStrings([derived, '10.89.0.0/16', '10.90.0.0/16'].filter((cidr): cidr is string => Boolean(cidr)));
+}
+
 function domesticRelayPeerAppendFailures(
   job: SiteSlotWorkerJob,
   plan: SiteSlotPlan | null,
@@ -5247,15 +5256,23 @@ function domesticRelayPeerAppendCommand(
 function domesticRelayPeerAppendScript(input: DomesticRelayPeerInput): string {
   const publicKey = input.publicKey ?? '<home-wg-public-key>';
   const allowedIp = input.leaseIp ? `${input.leaseIp}/32` : '<home-lease-ip>/32';
+  const routeCidrs = domesticRelayRouteCidrsForAllowedIp(allowedIp);
   return [
     'set -eu',
     'printf "mx-domestic-relay-peer-append\\n"',
+    `allowed_ip=${shellQuote(allowedIp)}`,
+    `relay_route_cidrs=${shellQuote(routeCidrs.join(' '))}`,
     'test -f /etc/wireguard/mx-domestic.conf',
     'if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi',
     'if ! command -v wg >/dev/null 2>&1; then echo "blocked: wg missing"; exit 1; fi',
     'wg show mx-domestic >/dev/null',
     `wg set mx-domestic peer ${shellQuote(publicKey)} allowed-ips ${shellQuote(allowedIp)}`,
+    'ip link set up dev mx-domestic',
+    'sysctl -w net.ipv4.ip_forward=1 >/dev/null || true',
+    'for route_cidr in $relay_route_cidrs; do ip route replace "$route_cidr" dev mx-domestic; done',
+    'ip route replace "$allowed_ip" dev mx-domestic || true',
     'wg show mx-domestic',
+    'ip route get "${allowed_ip%/*}" || true',
     'if command -v wg-quick >/dev/null 2>&1; then wg-quick save mx-domestic || true; fi',
     'systemctl status wg-quick@mx-domestic --no-pager 2>/dev/null || true'
   ].join('; ');
@@ -5275,9 +5292,11 @@ function domesticRelayPublicKeyReadScript(): string {
 
 function domesticInternalServicePeerKeySyncScript(internalPublicKey: string, internalServiceIp: string): string {
   const allowedIp = `${internalServiceIp}/32`;
+  const relayRouteCidrs = domesticRelayRouteCidrsForAllowedIp('10.89.100.1/32');
   return [
     'set -eu',
     'printf "mx-domestic-internal-service-peer-key-sync\\n"',
+    `relay_route_cidrs=${shellQuote(relayRouteCidrs.join(' '))}`,
     'test -f /etc/wireguard/mx-domestic.conf',
     'if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi',
     'if ! command -v wg >/dev/null 2>&1; then echo "blocked: wg missing"; exit 1; fi',
@@ -5287,6 +5306,9 @@ function domesticInternalServicePeerKeySyncScript(internalPublicKey: string, int
     'stale_peers="$(wg show mx-domestic allowed-ips | awk -v keep="$internal_peer" -v ip="$allowed_ip" \'$1 != keep { for (i = 2; i <= NF; i += 1) if ($i == ip) print $1 }\')"',
     'for peer in $stale_peers; do wg set mx-domestic peer "$peer" remove; done',
     'wg set mx-domestic peer "$internal_peer" allowed-ips "$allowed_ip"',
+    'ip link set up dev mx-domestic',
+    'sysctl -w net.ipv4.ip_forward=1 >/dev/null || true',
+    'for route_cidr in $relay_route_cidrs; do ip route replace "$route_cidr" dev mx-domestic; done',
     'printf "domestic_public_key=%s\\n" "$(wg show mx-domestic public-key)"',
     'printf "internal_peer=%s\\n" "$internal_peer"',
     'wg show mx-domestic allowed-ips',

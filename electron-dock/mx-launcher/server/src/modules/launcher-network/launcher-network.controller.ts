@@ -7,7 +7,7 @@ import { asRecord, nullableString } from '../../lib/http.js';
 import { MX_H2I_PRODUCT_ID } from '../../store/domain.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
-import type { LauncherNetworkLease, SiteSlotPlan, SiteSlotSshProfile } from '../../types.js';
+import type { LauncherNetworkLease, SiteSlotDomesticWireGuardSecret, SiteSlotPlan, SiteSlotSshProfile } from '../../types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -88,6 +88,18 @@ export class LauncherNetworkController {
       requestId: nullableString(body.requestId)
     });
     return { lease, domesticPeerSync };
+  }
+
+  @Post('leases/:leaseId/domestic-relay/diagnostics')
+  async diagnoseDomesticRelay(@Param('leaseId') leaseId: string, @Body() rawBody: unknown) {
+    const body = asRecord(rawBody);
+    const lease = await this.store.getLauncherNetworkLease(leaseId);
+    if (!lease) throw new NotFoundException('Launcher network lease not found');
+    const domesticRelayDiagnostics = await diagnoseDomesticRelayForLease(this.store, lease, {
+      requestedBy: nullableString(body.requestedBy),
+      requestId: nullableString(body.requestId)
+    });
+    return { lease, domesticRelayDiagnostics };
   }
 
   @Get('products')
@@ -293,20 +305,197 @@ function domesticRelayPeerSyncFailures(
 }
 
 function domesticRelayPeerSyncScript(publicKey: string, allowedIp: string): string {
+  const routeCidrs = domesticRelayRouteCidrsForAllowedIp(allowedIp);
   return [
     'set -eu',
     'printf "mx-launcher-domestic-peer-sync\\n"',
+    `allowed_ip=${shellQuote(allowedIp)}`,
+    `relay_route_cidrs=${shellQuote(routeCidrs.join(' '))}`,
     'test -f /etc/wireguard/mx-domestic.conf',
     'if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi',
     'if ! command -v wg >/dev/null 2>&1; then echo "blocked: wg missing"; exit 1; fi',
     'wg show mx-domestic >/dev/null',
     `wg set mx-domestic peer ${shellQuote(publicKey)} allowed-ips ${shellQuote(allowedIp)}`,
+    'ip link set up dev mx-domestic',
+    'sysctl -w net.ipv4.ip_forward=1 >/dev/null || true',
+    'for route_cidr in $relay_route_cidrs; do ip route replace "$route_cidr" dev mx-domestic; done',
+    'ip route replace "$allowed_ip" dev mx-domestic || true',
     'if command -v wg-quick >/dev/null 2>&1; then wg-quick save mx-domestic || true; fi',
     `printf "peer=%s\\n" ${shellQuote(publicKey)}`,
     `printf "allowed_ip=%s\\n" ${shellQuote(allowedIp)}`,
+    'printf "relay_route_cidrs=%s\\n" "$relay_route_cidrs"',
+    'ip route get "${allowed_ip%/*}" || true',
     `wg show mx-domestic allowed-ips | awk -v peer=${shellQuote(publicKey)} '$1 == peer { print "allowed " $0 }'`,
     `wg show mx-domestic latest-handshakes | awk -v peer=${shellQuote(publicKey)} '$1 == peer { print "handshake " $0 }'`
   ].join('; ');
+}
+
+async function diagnoseDomesticRelayForLease(
+  store: PlatformStore,
+  lease: LauncherNetworkLease,
+  input: { requestedBy?: string | null; requestId?: string | null }
+) {
+  const checkedAt = new Date().toISOString();
+  const siteId = lease.domesticSiteId || lease.siteId;
+  const plan = await latestDomesticPlan(store, siteId);
+  const profile = await domesticSshProfile(store, plan, siteId);
+  const secret = await store.getSiteSlotDomesticWireGuardSecret(siteId);
+  const failures = domesticRelayPeerSyncFailures(lease, plan, profile);
+  if (failures.length > 0) {
+    return {
+      status: 'blocked' as const,
+      execution: 'not-started' as const,
+      checkedAt,
+      lease: domesticRelayLeaseEvidence(lease),
+      domesticRelay: domesticRelayPlanEvidence(plan, profile),
+      summary: null,
+      failures
+    };
+  }
+
+  const script = domesticRelayDiagnosticsScript(lease, secret);
+  const ssh = sshArgv(profile as SiteSlotSshProfile, script);
+  try {
+    const result = await execFileAsync('ssh', ssh, {
+      timeout: (effectiveSshConnectTimeoutSeconds(profile?.connectTimeoutSeconds) + 45) * 1000,
+      maxBuffer: 4 * 1024 * 1024
+    });
+    const summary = summarizeDomesticRelayDiagnostics(result.stdout, lease, secret);
+    const blockedReasons = domesticRelayDiagnosticBlockedReasons(summary);
+    await store.recordAudit({
+      eventType: 'launcher_network.domestic_relay.diagnosed',
+      actorKind: lease.identityKind === 'user' ? 'user' : 'install',
+      userId: lease.userId,
+      installId: lease.installId,
+      deviceId: lease.deviceId,
+      productId: lease.productId,
+      siteId: lease.domesticSiteId,
+      overlayIp: lease.leaseIp,
+      requestId: input.requestId ?? null,
+      metadata: {
+        leaseId: lease.leaseId,
+        requestedBy: input.requestedBy ?? 'launcher-network',
+        status: blockedReasons.length > 0 ? 'blocked' : 'passed',
+        blockedReasons
+      }
+    });
+    return {
+      status: blockedReasons.length > 0 ? 'blocked' as const : 'passed' as const,
+      execution: 'executed' as const,
+      checkedAt,
+      lease: domesticRelayLeaseEvidence(lease),
+      domesticRelay: domesticRelayPlanEvidence(plan, profile),
+      summary,
+      blockedReasons,
+      result: {
+        exitCode: 0,
+        stdout: result.stdout,
+        stderr: result.stderr
+      }
+    };
+  } catch (error) {
+    const execError = error as Error & { code?: number | string; stdout?: string; stderr?: string };
+    return {
+      status: 'failed' as const,
+      execution: 'failed' as const,
+      checkedAt,
+      lease: domesticRelayLeaseEvidence(lease),
+      domesticRelay: domesticRelayPlanEvidence(plan, profile),
+      summary: summarizeDomesticRelayDiagnostics(execError.stdout ?? '', lease, secret),
+      result: {
+        exitCode: typeof execError.code === 'number' ? execError.code : null,
+        stdout: execError.stdout ?? '',
+        stderr: execError.stderr ?? execError.message
+      },
+      failures: [sshFailureSummary(execError.stderr ?? execError.message, execError.code)]
+    };
+  }
+}
+
+function domesticRelayDiagnosticsScript(
+  lease: LauncherNetworkLease,
+  secret: SiteSlotDomesticWireGuardSecret | null
+): string {
+  const leaseIp = lease.leaseIp;
+  const allowedIp = `${lease.leaseIp}/32`;
+  const publicKey = lease.publicKey ?? '';
+  const internalPeer = secret?.internalServicePublicKey ?? '';
+  const internalIp = secret?.internalServiceIp ?? '10.88.88.88';
+  const routeCidrs = domesticRelayRouteCidrsForAllowedIp(allowedIp);
+  return [
+    'set -eu',
+    'printf "mx-launcher-domestic-relay-diagnostics\\n"',
+    `lease_ip=${shellQuote(leaseIp)}`,
+    `allowed_ip=${shellQuote(allowedIp)}`,
+    `client_peer=${shellQuote(publicKey)}`,
+    `internal_peer=${shellQuote(internalPeer)}`,
+    `internal_ip=${shellQuote(internalIp)}`,
+    `relay_route_cidrs=${shellQuote(routeCidrs.join(' '))}`,
+    'printf "lease_ip=%s\\n" "$lease_ip"',
+    'printf "allowed_ip=%s\\n" "$allowed_ip"',
+    'printf "internal_ip=%s\\n" "$internal_ip"',
+    'printf "relay_route_cidrs=%s\\n" "$relay_route_cidrs"',
+    'test -f /etc/wireguard/mx-domestic.conf',
+    'if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key exists on Domestic"; exit 1; fi',
+    'if ! command -v wg >/dev/null 2>&1; then echo "blocked: wg missing"; exit 1; fi',
+    'wg show mx-domestic >/dev/null',
+    'printf "ip_forward=%s\\n" "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo unknown)"',
+    'printf "client_peer_configured=%s\\n" "$(wg show mx-domestic allowed-ips | awk -v peer="$client_peer" -v ip="$allowed_ip" \'$1 == peer { for (i = 2; i <= NF; i += 1) if ($i == ip) found=1 } END { print found ? "yes" : "no" }\')"',
+    'printf "client_latest_handshake=%s\\n" "$(wg show mx-domestic latest-handshakes | awk -v peer="$client_peer" \'$1 == peer { print $2 }\')"',
+    'printf "client_transfer=%s\\n" "$(wg show mx-domestic transfer | awk -v peer="$client_peer" \'$1 == peer { print $2 "/" $3 }\')"',
+    'if [ -n "$internal_peer" ]; then printf "internal_peer_configured=%s\\n" "$(wg show mx-domestic allowed-ips | awk -v peer="$internal_peer" -v ip="$internal_ip/32" \'$1 == peer { for (i = 2; i <= NF; i += 1) if ($i == ip) found=1 } END { print found ? "yes" : "no" }\')"; printf "internal_latest_handshake=%s\\n" "$(wg show mx-domestic latest-handshakes | awk -v peer="$internal_peer" \'$1 == peer { print $2 }\')"; printf "internal_transfer=%s\\n" "$(wg show mx-domestic transfer | awk -v peer="$internal_peer" \'$1 == peer { print $2 "/" $3 }\')"; else printf "internal_peer_configured=unknown\\n"; printf "internal_latest_handshake=\\n"; printf "internal_transfer=\\n"; fi',
+    'for route_cidr in $relay_route_cidrs; do safe="$(printf "%s" "$route_cidr" | tr "./" "__")"; if ip route show "$route_cidr" | grep -q "dev mx-domestic"; then printf "route_%s=present\\n" "$safe"; else printf "route_%s=missing\\n" "$safe"; fi; done',
+    'ip route get "$lease_ip" 2>&1 | sed "s/^/route_to_lease /" || true',
+    'ip route get "$internal_ip" 2>&1 | sed "s/^/route_to_internal /" || true',
+    'ip -4 addr show dev mx-domestic 2>&1 | sed "s/^/addr /" || true',
+    'wg show mx-domestic allowed-ips 2>&1 | sed "s/^/allowed_ips /" || true',
+    'wg show mx-domestic latest-handshakes 2>&1 | sed "s/^/latest_handshakes /" || true',
+    'if command -v curl >/dev/null 2>&1; then if curl -fsS --max-time 4 "http://${internal_ip}:18090/healthz" >/tmp/mx-internal-healthz.out 2>/tmp/mx-internal-healthz.err; then printf "internal_healthz=passed\\n"; else printf "internal_healthz=failed:%s\\n" "$(cat /tmp/mx-internal-healthz.err 2>/dev/null || true)"; fi; else printf "internal_healthz=skipped:curl missing\\n"; fi',
+    'if command -v nft >/dev/null 2>&1; then nft list ruleset 2>/dev/null | sed -n "1,80p" | sed "s/^/nft /" || true; elif command -v iptables >/dev/null 2>&1; then iptables -S FORWARD 2>/dev/null | sed "s/^/iptables /" || true; fi'
+  ].join('; ');
+}
+
+function summarizeDomesticRelayDiagnostics(
+  stdout: string,
+  lease: LauncherNetworkLease,
+  secret: SiteSlotDomesticWireGuardSecret | null
+) {
+  const routeCidrs = domesticRelayRouteCidrsForAllowedIp(`${lease.leaseIp}/32`);
+  const keyed = keyValueLines(stdout);
+  const routeStatus = Object.fromEntries(routeCidrs.map((cidr) => {
+    const key = `route_${cidr.replace(/[./]/g, '_')}`;
+    return [cidr, keyed[key] ?? 'unknown'];
+  }));
+  return {
+    leaseIp: lease.leaseIp,
+    allowedIp: `${lease.leaseIp}/32`,
+    internalIp: secret?.internalServiceIp ?? '10.88.88.88',
+    ipForward: keyed.ip_forward ?? null,
+    clientPeerConfigured: keyed.client_peer_configured ?? null,
+    clientLatestHandshake: keyed.client_latest_handshake ?? null,
+    clientTransfer: keyed.client_transfer ?? null,
+    internalPeerConfigured: keyed.internal_peer_configured ?? null,
+    internalLatestHandshake: keyed.internal_latest_handshake ?? null,
+    internalTransfer: keyed.internal_transfer ?? null,
+    relayRouteCidrs: routeCidrs,
+    routeStatus,
+    routeToLease: firstPrefixedLine(stdout, 'route_to_lease '),
+    routeToInternal: firstPrefixedLine(stdout, 'route_to_internal '),
+    internalHealthz: keyed.internal_healthz ?? null
+  };
+}
+
+function domesticRelayDiagnosticBlockedReasons(summary: ReturnType<typeof summarizeDomesticRelayDiagnostics>): string[] {
+  return [
+    ...(summary.ipForward === '1' ? [] : [`Domestic ip_forward is ${summary.ipForward ?? 'unknown'}, expected 1`]),
+    ...(summary.clientPeerConfigured === 'yes' ? [] : [`Domestic client peer ${summary.allowedIp} is not configured`]),
+    ...(summary.internalPeerConfigured === 'yes' || summary.internalPeerConfigured === 'unknown' ? [] : [`Domestic Internal peer ${summary.internalIp}/32 is not configured`]),
+    ...Object.entries(summary.routeStatus)
+      .filter(([, status]) => status !== 'present')
+      .map(([cidr, status]) => `Domestic route ${cidr} dev mx-domestic is ${status}`),
+    ...(summary.routeToLease && /dev mx-domestic/.test(summary.routeToLease) ? [] : [`Domestic route to ${summary.leaseIp} is not on mx-domestic`]),
+    ...(summary.internalHealthz === 'passed' ? [] : [`Domestic cannot reach Internal healthz: ${summary.internalHealthz ?? 'unknown'}`])
+  ];
 }
 
 function sshArgv(profile: SiteSlotSshProfile, command: string): string[] {
@@ -389,6 +578,29 @@ function validRelayLeaseIp(value: string): boolean {
     && octets[2] <= 254
     && octets[3] >= 1
     && octets[3] <= 254;
+}
+
+function domesticRelayRouteCidrsForAllowedIp(allowedIp: string): string[] {
+  const ip = allowedIp.split('/')[0] ?? '';
+  const parts = ip.split('.').map((part) => Number(part));
+  const derived = parts.length === 4 && parts[0] === 10 && Number.isInteger(parts[1]) && parts[1] >= 89 && parts[1] <= 254
+    ? `10.${parts[1]}.0.0/16`
+    : null;
+  return [...new Set([derived, '10.89.0.0/16', '10.90.0.0/16'].filter((cidr): cidr is string => Boolean(cidr)))];
+}
+
+function keyValueLines(stdout: string): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = line.match(/^([A-Za-z0-9_.-]+)=(.*)$/);
+    if (match) values[match[1]] = match[2];
+  }
+  return values;
+}
+
+function firstPrefixedLine(stdout: string, prefix: string): string | null {
+  const line = stdout.split(/\r?\n/).find((item) => item.startsWith(prefix));
+  return line ? line.slice(prefix.length).trim() : null;
 }
 
 function sshFailureSummary(stderr: unknown, exitCode: unknown): string {

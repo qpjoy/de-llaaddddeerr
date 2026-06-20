@@ -1052,6 +1052,9 @@ function normalizeDiagnostics(input) {
       error: nullableString(row.internalApi.error)
     } : null,
     domesticPeerSync: normalizeDomesticPeerSync(row.domesticPeerSync),
+    domesticRelayDiagnostics: row.domesticRelayDiagnostics && typeof row.domesticRelayDiagnostics === 'object'
+      ? row.domesticRelayDiagnostics
+      : null,
     updatedAt: nullableString(row.updatedAt) || nowIso()
   };
 }
@@ -1228,11 +1231,13 @@ async function applyNetworkSession(session, options) {
   touchRuntime(options.mode === 'employee' ? 'employee lease ready' : 'guest lease ready');
 
   const domesticPeerSync = await syncDomesticPeerForLease(lease);
+  const domesticRelayDiagnostics = await diagnoseDomesticRelayForLease(lease);
   const wireGuardResult = await startWireGuardForSession({
     routePlan,
     privateKey,
     internalBaseUrl: overlayInternalBaseUrl,
-    domesticPeerSync
+    domesticPeerSync,
+    domesticRelayDiagnostics
   });
   runtime.connection = {
     ...runtime.connection,
@@ -1267,6 +1272,7 @@ async function startWireGuardForSession(input) {
   const routePlan = normalizeRoutePlan(input.routePlan);
   const privateKey = nullableString(input.privateKey);
   const domesticPeerSync = normalizeDomesticPeerSync(input.domesticPeerSync);
+  const domesticRelayDiagnostics = input.domesticRelayDiagnostics || null;
   if (!routePlan) return wireGuardFailure('launcher routePlan 缺失。');
   if (!privateKey) return wireGuardFailure('本机 WireGuard privateKey 缺失。');
 
@@ -1297,7 +1303,7 @@ async function startWireGuardForSession(input) {
         };
     const ready = result.ok === true && route.ok === true && internalApi.ok === true;
     const tunnelReady = result.ok === true;
-    const domesticRelayReady = domesticPeerSync?.status === 'passed' || route.ok === true;
+    const domesticRelayReady = domesticRelayDiagnostics?.status === 'passed' || domesticPeerSync?.status === 'passed' || route.ok === true;
     return {
       state: ready ? 'connected' : (tunnelReady ? 'tunnel-only' : 'lease-only'),
       ready,
@@ -1313,9 +1319,10 @@ async function startWireGuardForSession(input) {
         route,
         internalApi,
         domesticPeerSync,
+        domesticRelayDiagnostics,
         updatedAt: nowIso()
       },
-      message: ready ? 'ready' : wireGuardNotReadyMessage(result, route, internalApi, domesticPeerSync)
+      message: ready ? 'ready' : wireGuardNotReadyMessage(result, route, internalApi, domesticPeerSync, domesticRelayDiagnostics)
     };
   } catch (err) {
     return wireGuardFailure(errorMessage(err));
@@ -1326,6 +1333,7 @@ async function probeWireGuardForConnection(input) {
   const connection = input.connection || {};
   const routePlan = normalizeRoutePlan(input.routePlan || connection.routePlan);
   const domesticPeerSync = normalizeDomesticPeerSync(input.domesticPeerSync || connection.domesticPeerSync);
+  const domesticRelayDiagnostics = input.domesticRelayDiagnostics || connection.diagnostics?.domesticRelayDiagnostics || null;
   if (!routePlan) return wireGuardFailure('launcher routePlan 缺失。');
 
   try {
@@ -1350,7 +1358,7 @@ async function probeWireGuardForConnection(input) {
         };
     const tunnelReady = status?.active === true || route.ok === true;
     const ready = tunnelReady && route.ok === true && internalApi.ok === true;
-    const domesticRelayReady = domesticPeerSync?.status === 'passed' || route.ok === true;
+    const domesticRelayReady = domesticRelayDiagnostics?.status === 'passed' || domesticPeerSync?.status === 'passed' || route.ok === true;
     const resultLike = {
       ok: tunnelReady,
       status,
@@ -1379,9 +1387,10 @@ async function probeWireGuardForConnection(input) {
         route,
         internalApi,
         domesticPeerSync,
+        domesticRelayDiagnostics,
         updatedAt: nowIso()
       },
-      message: ready ? 'ready' : wireGuardNotReadyMessage(resultLike, route, internalApi, domesticPeerSync)
+      message: ready ? 'ready' : wireGuardNotReadyMessage(resultLike, route, internalApi, domesticPeerSync, domesticRelayDiagnostics)
     };
   } catch (err) {
     return wireGuardFailure(errorMessage(err));
@@ -1425,6 +1434,43 @@ async function syncDomesticPeerForLease(lease) {
   }
 }
 
+async function diagnoseDomesticRelayForLease(lease) {
+  const leaseId = nullableString(lease?.leaseId);
+  if (!leaseId) {
+    return {
+      status: 'skipped',
+      execution: 'not-started',
+      checkedAt: nowIso(),
+      failures: ['leaseId missing before Domestic relay diagnostics']
+    };
+  }
+  try {
+    const payload = await requestJson(joinApiUrl(runtime.config.bootstrapApiBaseUrl, `/internal/v1/launcher-network/leases/${encodeURIComponent(leaseId)}/domestic-relay/diagnostics`), {
+      method: 'POST',
+      body: {
+        requestedBy: REQUESTED_BY,
+        requestId: makeRequestId('domestic-relay-diagnostics')
+      },
+      timeoutMs: 22000,
+      bootstrapResolveMode: runtime.config.bootstrapResolveMode
+    });
+    return payload?.domesticRelayDiagnostics || {
+      status: 'failed',
+      execution: 'failed',
+      checkedAt: nowIso(),
+      failures: ['Domestic relay diagnostics returned an empty payload']
+    };
+  } catch (err) {
+    return {
+      status: 'failed',
+      execution: 'failed',
+      checkedAt: nowIso(),
+      error: errorMessage(err),
+      failures: [errorMessage(err)]
+    };
+  }
+}
+
 async function refreshWireGuardDiagnostics() {
   const connection = runtime.connection || {};
   const routePlan = normalizeRoutePlan(connection.routePlan);
@@ -1433,11 +1479,13 @@ async function refreshWireGuardDiagnostics() {
     return;
   }
   const domesticPeerSync = await syncDomesticPeerForLease({ leaseId: connection.leaseId });
+  const domesticRelayDiagnostics = await diagnoseDomesticRelayForLease({ leaseId: connection.leaseId });
   const wireGuardResult = await probeWireGuardForConnection({
     connection,
     routePlan,
     internalBaseUrl: connection.internalBaseUrl,
-    domesticPeerSync
+    domesticPeerSync,
+    domesticRelayDiagnostics
   });
   runtime.connection = {
     ...connection,
@@ -1582,10 +1630,18 @@ function summarizeWireGuardStatus(status, connection = {}) {
   };
 }
 
-function wireGuardNotReadyMessage(result, route, internalApi, domesticPeerSync) {
+function wireGuardNotReadyMessage(result, route, internalApi, domesticPeerSync, domesticRelayDiagnostics) {
   if (domesticPeerSync?.status === 'failed' || domesticPeerSync?.status === 'blocked') {
     const reason = domesticPeerSync.failures?.[0] || domesticPeerSync.error || domesticPeerSync.status;
     return `Domestic relay peer 未同步：${reason}`;
+  }
+  if (domesticRelayDiagnostics?.status === 'failed' || domesticRelayDiagnostics?.status === 'blocked') {
+    const reasons = Array.isArray(domesticRelayDiagnostics.blockedReasons)
+      ? domesticRelayDiagnostics.blockedReasons
+      : Array.isArray(domesticRelayDiagnostics.failures)
+        ? domesticRelayDiagnostics.failures
+        : [];
+    return `Domestic relay 诊断未通过：${reasons[0] || domesticRelayDiagnostics.error || domesticRelayDiagnostics.status}`;
   }
   if (result?.ok !== true) return nullableString(result?.message) || nullableString(result?.tunnel?.message) || 'WireGuard tunnel 未启动。';
   if (route?.ok !== true) {

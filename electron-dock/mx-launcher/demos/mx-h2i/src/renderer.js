@@ -343,6 +343,10 @@ function renderWireGuardDiagnostics() {
   const route = diagnostics.route || {};
   const internalApi = diagnostics.internalApi || {};
   const peerSync = connection.domesticPeerSync || diagnostics.domesticPeerSync || {};
+  const relayDiag = diagnostics.domesticRelayDiagnostics || {};
+  const relaySummary = relayDiag.summary || {};
+  const relayBlockedReasons = Array.isArray(relayDiag.blockedReasons) ? relayDiag.blockedReasons : [];
+  const relayFailures = Array.isArray(relayDiag.failures) ? relayDiag.failures : [];
   return `
     <section class="settings-panel">
       <div class="panel-head">
@@ -355,6 +359,8 @@ function renderWireGuardDiagnostics() {
       <div class="metric-grid">
         ${metric('WG', connection.health?.wireGuard || 'idle')}
         ${metric('Peer Sync', peerSync.status || '-')}
+        ${metric('Relay', relayDiag.status || '-')}
+        ${metric('IP Forward', relaySummary.ipForward || '-')}
         ${metric('Interface', wireGuard.realInterfaceName || wireGuard.interfaceName || '-')}
         ${metric('Expected', route.expectedInterfaceName || wireGuard.realInterfaceName || '-')}
         ${metric('Endpoint', wireGuard.endpoint || connection.domesticRelayEndpoint || '-')}
@@ -362,11 +368,16 @@ function renderWireGuardDiagnostics() {
         ${metric('Route dev', route.interfaceName || '-')}
         ${metric('Service', wireGuard.serviceState || (wireGuard.active ? 'active' : '-'))}
         ${metric('Internal', internalApi.ok ? 'ready' : (internalApi.error || connection.health?.internalApi || 'idle'))}
+        ${metric('Relay to lease', relaySummary.routeToLease || '-')}
+        ${metric('Relay client', relaySummary.clientPeerConfigured ? `${relaySummary.clientPeerConfigured} / ${relaySummary.clientLatestHandshake || '-'} / ${relaySummary.clientTransfer || '-'}` : '-')}
+        ${metric('Relay Internal', relaySummary.internalPeerConfigured ? `${relaySummary.internalPeerConfigured} / ${relaySummary.internalLatestHandshake || '-'} / ${relaySummary.internalTransfer || '-'}` : '-')}
+        ${metric('Relay healthz', relaySummary.internalHealthz || '-')}
         ${metric('AllowedIPs', compactList(wireGuard.allowedIps))}
         ${metric('Route CIDRs', compactList(connection.routeCidrs))}
         ${metric('Config', wireGuard.configPath || '-')}
       </div>
       ${peerSync.failures?.length ? `<p class="diagnostic-note">${escapeHtml(peerSync.failures.join(' / '))}</p>` : ''}
+      ${relayBlockedReasons.length || relayFailures.length ? `<p class="diagnostic-note">${escapeHtml([...relayBlockedReasons, ...relayFailures].join(' / '))}</p>` : ''}
       ${wireGuard.statusError || wireGuard.routeLogTail ? `<p class="diagnostic-note">${escapeHtml(wireGuard.statusError || wireGuard.routeLogTail)}</p>` : ''}
     </section>
   `;
