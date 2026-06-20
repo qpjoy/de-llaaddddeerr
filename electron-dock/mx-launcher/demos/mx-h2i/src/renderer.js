@@ -130,6 +130,7 @@ async function runAction(action, payload) {
       installAppCenter: () => api.installAppCenter(),
       enableH2o: () => api.enableH2o(),
       checkUpdates: () => api.checkUpdates(),
+      refreshDiagnostics: () => api.refreshDiagnostics?.(),
       openAdmin: () => api.openAdmin()
     };
     if (handlers[action]) {
@@ -341,6 +342,7 @@ function renderWireGuardDiagnostics() {
   const diagnostics = connection.diagnostics || {};
   const route = diagnostics.route || {};
   const internalApi = diagnostics.internalApi || {};
+  const peerSync = connection.domesticPeerSync || diagnostics.domesticPeerSync || {};
   return `
     <section class="settings-panel">
       <div class="panel-head">
@@ -348,17 +350,24 @@ function renderWireGuardDiagnostics() {
           <h2>WireGuard 诊断</h2>
           <p>route proof / overlay health</p>
         </div>
-        <span class="status-pill" data-state="${escapeAttr(connection.health?.wireGuard || 'idle')}">${escapeHtml(connection.health?.wireGuard || 'idle')}</span>
+        <button class="secondary-button" type="button" data-action="refreshDiagnostics" ${busyAction === 'refreshDiagnostics' ? 'disabled' : ''}>重新诊断</button>
       </div>
       <div class="metric-grid">
+        ${metric('WG', connection.health?.wireGuard || 'idle')}
+        ${metric('Peer Sync', peerSync.status || '-')}
         ${metric('Interface', wireGuard.realInterfaceName || wireGuard.interfaceName || '-')}
         ${metric('Expected', route.expectedInterfaceName || wireGuard.realInterfaceName || '-')}
         ${metric('Endpoint', wireGuard.endpoint || connection.domesticRelayEndpoint || '-')}
         ${metric('Target', route.targetIp || '10.88.88.88')}
         ${metric('Route dev', route.interfaceName || '-')}
+        ${metric('Service', wireGuard.serviceState || (wireGuard.active ? 'active' : '-'))}
         ${metric('Internal', internalApi.ok ? 'ready' : (internalApi.error || connection.health?.internalApi || 'idle'))}
+        ${metric('AllowedIPs', compactList(wireGuard.allowedIps))}
+        ${metric('Route CIDRs', compactList(connection.routeCidrs))}
         ${metric('Config', wireGuard.configPath || '-')}
       </div>
+      ${peerSync.failures?.length ? `<p class="diagnostic-note">${escapeHtml(peerSync.failures.join(' / '))}</p>` : ''}
+      ${wireGuard.statusError || wireGuard.routeLogTail ? `<p class="diagnostic-note">${escapeHtml(wireGuard.statusError || wireGuard.routeLogTail)}</p>` : ''}
     </section>
   `;
 }
@@ -647,6 +656,17 @@ function metric(label, value) {
   return `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || '-')}</strong></div>`;
 }
 
+function compactList(value) {
+  const items = Array.isArray(value) ? value : [];
+  if (!items.length) return '-';
+  const text = items.map((item) => {
+    if (typeof item === 'string') return item;
+    if (item && typeof item === 'object') return item.cidr || item.destination || item.interfaceName || JSON.stringify(item);
+    return String(item || '');
+  }).filter(Boolean).join(', ');
+  return text.length > 90 ? `${text.slice(0, 87)}...` : text;
+}
+
 function connectionCaption() {
   const connection = state.connection || {};
   if (connection.state === 'connecting') return '正在准备 WireGuard、DNS、PAC 和权限上下文';
@@ -899,6 +919,18 @@ function createMockApi() {
         lastCheckedAt: new Date().toISOString()
       },
       feedback: { tone: 'info', message: '更新策略已刷新。' }
+    }),
+    refreshDiagnostics: async () => commit({
+      connection: {
+        ...mockState.connection,
+        domesticPeerSync: {
+          status: 'passed',
+          execution: 'executed',
+          checkedAt: new Date().toISOString(),
+          failures: []
+        }
+      },
+      feedback: { tone: 'success', message: '诊断已刷新。' }
     }),
     openAdmin: async () => true,
     setWindowMode: async () => true,

@@ -112,14 +112,15 @@ export async function connectLauncherWireGuardPeer(
     action
   });
   const status = safeWireGuardStatus(runtime, peer.configPath);
+  const ok = tunnel.ok === true && status?.active === true;
   return {
-    ok: tunnel.ok === true && status?.active === true,
+    ok,
     action,
     peer,
     runtime,
     status,
     tunnel,
-    message: tunnel.message
+    message: ok ? tunnel.message : launcherWireGuardNotReadyMessage(tunnel, status)
   };
 }
 
@@ -220,6 +221,27 @@ function safeWireGuardStatus(
   } catch {
     return null;
   }
+}
+
+function launcherWireGuardNotReadyMessage(tunnel: unknown, status: unknown): string {
+  const tunnelRecord = objectRecord(tunnel);
+  const statusRecord = objectRecord(status);
+  const parts = uniqueStrings([
+    stringValue(tunnelRecord.message),
+    tunnelRecord.ok === true && statusRecord.active !== true ? 'WireGuard command succeeded but tunnel status is not active yet' : null,
+    stringValue(statusRecord.serviceState) ? `service=${stringValue(statusRecord.serviceState)}` : null,
+    stringValue(statusRecord.error),
+    stringValue(tunnelRecord.error)
+  ].filter((item): item is string => Boolean(item)));
+  return parts.length ? parts.join('; ') : 'WireGuard tunnel is not active yet';
+}
+
+function objectRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : {};
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
 function readRouteToTarget(targetIp: string): {

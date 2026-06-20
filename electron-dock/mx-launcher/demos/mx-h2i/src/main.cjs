@@ -266,6 +266,11 @@ function registerIpc() {
     await saveAndBroadcast();
     return visibleRuntime();
   });
+  ipcMain.handle('mx-h2i:refresh-diagnostics', async () => {
+    await refreshWireGuardDiagnostics();
+    await saveAndBroadcast();
+    return visibleRuntime();
+  });
   ipcMain.handle('mx-h2i:open-admin', async () => {
     const baseUrl = runtime.connection?.state === 'connected'
       ? (runtime.connection.internalBaseUrl || runtime.config.internalApiBaseUrl)
@@ -687,6 +692,7 @@ function normalizeConnection(input) {
       routePlan: normalizeRoutePlan(row.routePlan),
       health: normalizeHealth(row.health, leasedHealth()),
       wireGuard: normalizeWireGuardSummary(row.wireGuard),
+      domesticPeerSync: normalizeDomesticPeerSync(row.domesticPeerSync),
       diagnostics: normalizeDiagnostics(row.diagnostics)
     });
   }
@@ -911,6 +917,7 @@ function idleConnection() {
     routeCidrs: [],
     routePlan: null,
     wireGuard: null,
+    domesticPeerSync: null,
     diagnostics: null,
     health: idleHealth()
   };
@@ -979,9 +986,50 @@ function normalizeWireGuardSummary(input) {
     configPath: nullableString(row.configPath),
     endpoint: nullableString(row.endpoint),
     allowedIps: arrayValue(row.allowedIps, []),
+    statusError: nullableString(row.statusError),
+    serviceState: nullableString(row.serviceState),
+    routeLogPath: nullableString(row.routeLogPath),
+    routeLogTail: tailText(nullableString(row.routeLogTail), 1600),
+    peers: Array.isArray(row.peers) ? row.peers : [],
+    routes: Array.isArray(row.routes) ? row.routes : [],
     message: nullableString(row.message),
     error: nullableString(row.error),
     updatedAt: nullableString(row.updatedAt) || nowIso()
+  };
+}
+
+function normalizeDomesticPeerSync(input) {
+  const row = input && typeof input === 'object' ? input : null;
+  if (!row) return null;
+  const lease = row.lease && typeof row.lease === 'object' ? row.lease : null;
+  const domesticRelay = row.domesticRelay && typeof row.domesticRelay === 'object' ? row.domesticRelay : null;
+  const result = row.result && typeof row.result === 'object' ? row.result : null;
+  return {
+    status: nullableString(row.status) || 'unknown',
+    execution: nullableString(row.execution),
+    checkedAt: nullableString(row.checkedAt),
+    failures: arrayValue(row.failures, []),
+    error: nullableString(row.error),
+    lease: lease ? {
+      leaseId: nullableString(lease.leaseId),
+      leaseIp: nullableString(lease.leaseIp),
+      allowedIp: nullableString(lease.allowedIp),
+      domesticSiteId: nullableString(lease.domesticSiteId)
+    } : null,
+    domesticRelay: domesticRelay ? {
+      siteId: nullableString(domesticRelay.siteId),
+      planId: nullableString(domesticRelay.planId),
+      planStatus: nullableString(domesticRelay.planStatus),
+      host: nullableString(domesticRelay.host),
+      profileId: nullableString(domesticRelay.profileId),
+      interfaceName: nullableString(domesticRelay.interfaceName),
+      gatewayIp: nullableString(domesticRelay.gatewayIp)
+    } : null,
+    result: result ? {
+      exitCode: typeof result.exitCode === 'number' ? result.exitCode : null,
+      stdout: tailText(nullableString(result.stdout), 1600),
+      stderr: tailText(nullableString(result.stderr), 1600)
+    } : null
   };
 }
 
@@ -1003,6 +1051,7 @@ function normalizeDiagnostics(input) {
       baseUrl: nullableString(row.internalApi.baseUrl),
       error: nullableString(row.internalApi.error)
     } : null,
+    domesticPeerSync: normalizeDomesticPeerSync(row.domesticPeerSync),
     updatedAt: nullableString(row.updatedAt) || nowIso()
   };
 }
@@ -1027,6 +1076,7 @@ function connectedState(input) {
     routeCidrs: arrayValue(input.routeCidrs, []),
     routePlan: normalizeRoutePlan(input.routePlan),
     wireGuard: normalizeWireGuardSummary(input.wireGuard),
+    domesticPeerSync: normalizeDomesticPeerSync(input.domesticPeerSync),
     diagnostics: normalizeDiagnostics(input.diagnostics),
     health: normalizeHealth(input.health, leasedHealth())
   };
@@ -1177,16 +1227,19 @@ async function applyNetworkSession(session, options) {
   };
   touchRuntime(options.mode === 'employee' ? 'employee lease ready' : 'guest lease ready');
 
+  const domesticPeerSync = await syncDomesticPeerForLease(lease);
   const wireGuardResult = await startWireGuardForSession({
     routePlan,
     privateKey,
-    internalBaseUrl: overlayInternalBaseUrl
+    internalBaseUrl: overlayInternalBaseUrl,
+    domesticPeerSync
   });
   runtime.connection = {
     ...runtime.connection,
     state: wireGuardResult.state,
     health: wireGuardResult.health,
     wireGuard: wireGuardResult.wireGuard,
+    domesticPeerSync,
     diagnostics: wireGuardResult.diagnostics
   };
   runtime.feedback = {
@@ -1213,6 +1266,7 @@ function applyConnectionError(label, err) {
 async function startWireGuardForSession(input) {
   const routePlan = normalizeRoutePlan(input.routePlan);
   const privateKey = nullableString(input.privateKey);
+  const domesticPeerSync = normalizeDomesticPeerSync(input.domesticPeerSync);
   if (!routePlan) return wireGuardFailure('launcher routePlan 缺失。');
   if (!privateKey) return wireGuardFailure('本机 WireGuard privateKey 缺失。');
 
@@ -1242,12 +1296,13 @@ async function startWireGuardForSession(input) {
         };
     const ready = result.ok === true && route.ok === true && internalApi.ok === true;
     const tunnelReady = result.ok === true;
+    const domesticRelayReady = domesticPeerSync?.status === 'passed' || route.ok === true;
     return {
       state: ready ? 'connected' : (tunnelReady ? 'tunnel-only' : 'lease-only'),
       ready,
       health: ready ? readyHealth() : {
         wireGuard: result.ok === true ? 'ready' : 'blocked',
-        domesticRelay: result.ok === true ? 'ready' : 'pending',
+        domesticRelay: domesticRelayReady ? 'ready' : domesticPeerSync?.status === 'failed' || domesticPeerSync?.status === 'blocked' ? 'blocked' : 'pending',
         internalApi: internalApi.ok === true ? 'ready' : 'blocked',
         splitDns: route.ok === true ? 'ready' : 'pending',
         appBroker: 'ready'
@@ -1256,13 +1311,80 @@ async function startWireGuardForSession(input) {
       diagnostics: {
         route,
         internalApi,
+        domesticPeerSync,
         updatedAt: nowIso()
       },
-      message: ready ? 'ready' : wireGuardNotReadyMessage(result, route, internalApi)
+      message: ready ? 'ready' : wireGuardNotReadyMessage(result, route, internalApi, domesticPeerSync)
     };
   } catch (err) {
     return wireGuardFailure(errorMessage(err));
   }
+}
+
+async function syncDomesticPeerForLease(lease) {
+  const leaseId = nullableString(lease?.leaseId);
+  if (!leaseId) {
+    return {
+      status: 'skipped',
+      execution: 'not-started',
+      checkedAt: nowIso(),
+      failures: ['leaseId missing before Domestic peer sync']
+    };
+  }
+  try {
+    const payload = await requestJson(joinApiUrl(runtime.config.bootstrapApiBaseUrl, `/internal/v1/launcher-network/leases/${encodeURIComponent(leaseId)}/domestic-peer/sync`), {
+      method: 'POST',
+      body: {
+        requestedBy: REQUESTED_BY,
+        requestId: makeRequestId('domestic-peer-sync')
+      },
+      timeoutMs: 18000,
+      bootstrapResolveMode: runtime.config.bootstrapResolveMode
+    });
+    return normalizeDomesticPeerSync(payload?.domesticPeerSync) || {
+      status: 'failed',
+      execution: 'failed',
+      checkedAt: nowIso(),
+      failures: ['Domestic peer sync returned an empty payload']
+    };
+  } catch (err) {
+    return {
+      status: 'failed',
+      execution: 'failed',
+      checkedAt: nowIso(),
+      error: errorMessage(err),
+      failures: [errorMessage(err)]
+    };
+  }
+}
+
+async function refreshWireGuardDiagnostics() {
+  const connection = runtime.connection || {};
+  const routePlan = normalizeRoutePlan(connection.routePlan);
+  if (!routePlan || !connection.leaseId) {
+    runtime.feedback = { tone: 'warning', message: '当前没有可诊断的 launcher lease。' };
+    return;
+  }
+  const domesticPeerSync = await syncDomesticPeerForLease({ leaseId: connection.leaseId });
+  const wireGuardResult = await startWireGuardForSession({
+    routePlan,
+    privateKey: runtime.installation?.keyPair?.privateKey || runtime.installation?.privateKey,
+    internalBaseUrl: connection.internalBaseUrl,
+    domesticPeerSync
+  });
+  runtime.connection = {
+    ...connection,
+    state: wireGuardResult.state,
+    health: wireGuardResult.health,
+    wireGuard: wireGuardResult.wireGuard,
+    domesticPeerSync,
+    diagnostics: wireGuardResult.diagnostics
+  };
+  runtime.feedback = {
+    tone: wireGuardResult.ready ? 'success' : 'warning',
+    message: wireGuardResult.ready ? 'WireGuard 诊断通过，Domestic 和 Internal overlay 可达。' : `WireGuard 仍未 ready：${wireGuardResult.message}`
+  };
+  touchRuntime('wireguard diagnostics refreshed');
 }
 
 async function stopWireGuardForRuntime() {
@@ -1324,6 +1446,12 @@ function wireGuardFailure(message) {
       configPath: null,
       endpoint: null,
       allowedIps: [],
+      statusError: null,
+      serviceState: null,
+      routeLogPath: null,
+      routeLogTail: null,
+      peers: [],
+      routes: [],
       message,
       error: message,
       updatedAt: nowIso()
@@ -1351,13 +1479,23 @@ function summarizeWireGuardResult(result) {
     configPath: nullableString(peer.configPath) || nullableString(tunnel.configPath),
     endpoint: nullableString(peer.endpoint),
     allowedIps: arrayValue(peer.allowedIps, arrayValue(status.allowedIps, [])),
+    statusError: nullableString(status.error),
+    serviceState: nullableString(status.serviceState),
+    routeLogPath: nullableString(status.routeLogPath) || nullableString(tunnel.routeLogPath),
+    routeLogTail: tailText(nullableString(status.routeLogTail) || nullableString(tunnel.routeLogTail), 1600),
+    peers: Array.isArray(status.peers) ? status.peers : [],
+    routes: Array.isArray(status.routes) ? status.routes : [],
     message,
     error: result?.ok === true ? null : message,
     updatedAt: nowIso()
   };
 }
 
-function wireGuardNotReadyMessage(result, route, internalApi) {
+function wireGuardNotReadyMessage(result, route, internalApi, domesticPeerSync) {
+  if (domesticPeerSync?.status === 'failed' || domesticPeerSync?.status === 'blocked') {
+    const reason = domesticPeerSync.failures?.[0] || domesticPeerSync.error || domesticPeerSync.status;
+    return `Domestic relay peer 未同步：${reason}`;
+  }
   if (result?.ok !== true) return nullableString(result?.message) || nullableString(result?.tunnel?.message) || 'WireGuard tunnel 未启动。';
   if (route?.ok !== true) {
     if (route?.viaLoopback) return `到 ${route?.targetIp || INTERNAL_PEER_IP} 当前走 lo0，本机 Internal/客户端同机测试会覆盖 overlay 路由。`;
@@ -2028,6 +2166,13 @@ function stringValue(value, fallback) {
 function nullableString(value) {
   const text = typeof value === 'string' ? value.trim() : '';
   return text || null;
+}
+
+function tailText(value, maxLength) {
+  const text = nullableString(value);
+  if (!text) return null;
+  const limit = Number.isFinite(maxLength) ? Math.max(80, Math.floor(maxLength)) : 1200;
+  return text.length > limit ? text.slice(text.length - limit) : text;
 }
 
 function arrayValue(value, fallback) {

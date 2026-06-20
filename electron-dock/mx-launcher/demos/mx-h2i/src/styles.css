@@ -753,6 +753,17 @@ button:disabled {
   font-size: 16px;
 }
 
+.diagnostic-note {
+  overflow: hidden;
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: rgba(255, 208, 105, 0.08);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .mx-workbench {
   display: grid;
   grid-template-rows: auto auto minmax(0, auto) minmax(0, 1fr);
