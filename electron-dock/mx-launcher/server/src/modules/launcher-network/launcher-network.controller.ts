@@ -61,6 +61,17 @@ export class LauncherNetworkController {
     return { lease };
   }
 
+  @Post('leases/:leaseId/release')
+  async releaseLease(@Param('leaseId') leaseId: string, @Body() rawBody: unknown) {
+    const body = asRecord(rawBody);
+    return {
+      lease: await this.store.releaseLauncherNetworkLease(leaseId, {
+        requestedBy: nullableString(body.requestedBy),
+        requestId: nullableString(body.requestId)
+      })
+    };
+  }
+
   @Get('products')
   async listProductNetworks() {
     return {

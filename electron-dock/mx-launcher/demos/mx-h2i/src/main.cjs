@@ -1,9 +1,15 @@
 const path = require('node:path');
 const fs = require('node:fs/promises');
+const { randomUUID } = require('node:crypto');
 const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: electronScreen } = require('electron');
 
 const APP_ID = 'dev.qpjoy.mx-h2i';
 const STATE_FILE = 'mx-h2i-runtime.json';
+const PRODUCT_ID = 'mx-h2i';
+const REQUESTED_BY = 'mx-h2i-desktop';
+const WIREGUARD_PROFILE_NAME = 'mx-h2i.conf';
+const INTERNAL_PEER_IP = '10.88.88.88';
+const LOCAL_INTERNAL_BASE_URLS = ['http://127.0.0.1:18090', 'http://localhost:18090'];
 const DEFAULT_CONFIG = {
   internalApiBaseUrl: 'http://10.88.88.88:18090',
   domesticRelayHost: '121.43.253.179',
@@ -96,77 +102,94 @@ function createMainWindow() {
 }
 
 function registerIpc() {
-  ipcMain.handle('mx-h2i:get-state', () => runtime);
+  ipcMain.handle('mx-h2i:get-state', () => visibleRuntime());
   ipcMain.handle('mx-h2i:save-config', async (_event, input) => {
     runtime.config = normalizeConfig(input);
     runtime.launcherContract = await launcherContract(runtime.config);
     touchRuntime('config saved');
     await saveAndBroadcast();
-    return runtime;
+    return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:connect-guest', async () => {
     setConnecting('guest');
     await saveAndBroadcast();
-    await delay(420);
-    runtime.connection = connectedState({
-      mode: 'guest',
-      localIp: '10.89.120.24',
-      routePolicy: 'guest limited',
-      subject: 'anonymousPrincipal:h2i-demo'
-    });
-    runtime.identity = {
-      kind: 'anonymous',
-      displayName: 'Visitor',
-      account: null,
-      scopes: ['auth.read', 'network.hdi.status']
-    };
-    runtime.feedback = null;
-    touchRuntime('guest connected');
+    try {
+      const session = await connectLauncherNetwork({
+        identityKind: 'anonymous',
+        requestTag: 'guest'
+      });
+      await applyNetworkSession(session, {
+        mode: 'guest',
+        subject: `anonymous:${session.lease.installId}`,
+        routePolicy: 'guest limited',
+        identity: {
+          kind: 'anonymous',
+          displayName: 'Visitor',
+          account: null,
+          scopes: ['auth.read', 'network.hdi.status', 'network.proxy.app']
+        },
+        auth: null,
+        feedback: '访客 lease 已由 Internal 下发，并保留 180 天未续租回收。'
+      });
+    } catch (err) {
+      applyConnectionError('访客连接失败', err);
+    }
     await saveAndBroadcast();
-    return runtime;
+    return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:login-employee', async (_event, input) => {
     const account = typeof input?.account === 'string' ? input.account.trim() : '';
     const password = typeof input?.password === 'string' ? input.password : '';
     if (!account || !password) {
-      return {
-        ...runtime,
-        feedback: {
-          tone: 'danger',
-          message: '请输入员工账号和密码。'
-        }
+      runtime.feedback = {
+        tone: 'danger',
+        message: '请输入员工账号和密码。'
       };
+      return visibleRuntime();
     }
     setConnecting('employee');
     await saveAndBroadcast();
-    await delay(520);
-    const displayName = account.includes('@') ? account.split('@')[0] : account;
-    runtime.connection = connectedState({
-      mode: 'employee',
-      localIp: '10.89.8.24',
-      routePolicy: 'user full',
-      subject: `user:${displayName}`
-    });
-    runtime.identity = {
-      kind: 'user',
-      displayName,
-      account,
-      scopes: ['auth.read', 'appcenter.read', 'network.hdi.status', 'network.proxy.app', 'network.dns.policy']
-    };
-    runtime.feedback = null;
-    touchRuntime('employee connected');
+    try {
+      const baseUrl = await resolveInternalBaseUrl(runtime.config);
+      await applyResolvedBaseUrl(baseUrl);
+      const auth = await authenticateUserViaGateway(baseUrl, account, password);
+      const session = await connectLauncherNetwork({
+        identityKind: 'user',
+        userId: auth.user.userId,
+        requestTag: 'employee'
+      });
+      await applyNetworkSession(session, {
+        mode: 'employee',
+        subject: `user:${auth.user.userId}`,
+        routePolicy: 'user full',
+        identity: {
+          kind: 'user',
+          displayName: auth.user.displayName || displayNameFromAccount(account),
+          account: auth.user.email || account,
+          scopes: ['auth.read', 'appcenter.read', 'network.hdi.status', 'network.proxy.app', 'network.dns.policy']
+        },
+        auth,
+        feedback: '员工账号已绑定 Internal User Center，并续租固定 user IP。'
+      });
+    } catch (err) {
+      applyConnectionError('员工登录失败', err);
+    }
     await saveAndBroadcast();
-    return runtime;
+    return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:disconnect', async () => {
+    const wireGuard = await stopWireGuardForRuntime();
     runtime.connection = idleConnection();
+    runtime.auth = null;
     runtime.feedback = {
-      tone: 'info',
-      message: '已断开 MX-H2I standalone channel。'
+      tone: wireGuard?.ok === false ? 'warning' : 'info',
+      message: wireGuard?.ok === false
+        ? `已断开 launcher channel，但 WireGuard 停止失败：${wireGuard.message || wireGuard.error || 'unknown'}`
+        : '已断开 MX-H2I standalone channel 和客户端 WireGuard；IP lease 会保留并在下次连接时续租。'
     };
     touchRuntime('disconnected');
     await saveAndBroadcast();
-    return runtime;
+    return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:install-appcenter', async () => {
     if (runtime.connection.state !== 'connected') {
@@ -175,7 +198,7 @@ function registerIpc() {
         message: 'AppCenter 需要先连接 MX-H2I channel。'
       };
       await saveAndBroadcast();
-      return runtime;
+      return visibleRuntime();
     }
     runtime.apps.appcenter.installed = true;
     runtime.apps.appcenter.enabled = true;
@@ -187,7 +210,7 @@ function registerIpc() {
     };
     touchRuntime('appcenter installed');
     await saveAndBroadcast();
-    return runtime;
+    return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:enable-h2o', async () => {
     if (!runtime.apps.appcenter.installed) {
@@ -196,7 +219,7 @@ function registerIpc() {
         message: '请先安装 AppCenter。'
       };
       await saveAndBroadcast();
-      return runtime;
+      return visibleRuntime();
     }
     runtime.apps.h2o.installed = true;
     runtime.apps.h2o.enabled = true;
@@ -208,7 +231,7 @@ function registerIpc() {
     };
     touchRuntime('h2o enabled');
     await saveAndBroadcast();
-    return runtime;
+    return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:check-updates', async () => {
     runtime.update = {
@@ -227,7 +250,7 @@ function registerIpc() {
     };
     touchRuntime('update checked');
     await saveAndBroadcast();
-    return runtime;
+    return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:open-admin', async () => {
     const url = `${runtime.config.internalApiBaseUrl.replace(/\/+$/, '')}/admin/`;
@@ -575,6 +598,8 @@ async function normalizeRuntime(input) {
   const config = normalizeConfig(row.config);
   return {
     config,
+    installation: normalizeInstallation(row.installation),
+    auth: normalizeAuth(row.auth),
     connection: normalizeConnection(row.connection),
     identity: normalizeIdentity(row.identity),
     apps: normalizeApps(row.apps),
@@ -601,15 +626,46 @@ function normalizeConfig(input) {
   };
 }
 
+function normalizeInstallation(input) {
+  const row = input && typeof input === 'object' ? input : {};
+  const keyPairRow = row.keyPair && typeof row.keyPair === 'object' ? row.keyPair : {};
+  const privateKey = nullableString(row.privateKey) || nullableString(keyPairRow.privateKey);
+  const publicKey = nullableString(row.publicKey) || nullableString(keyPairRow.publicKey);
+  return {
+    installId: nullableString(row.installId),
+    deviceId: nullableString(row.deviceId),
+    siteId: stringValue(row.siteId, 'domestic-main'),
+    deviceLabel: stringValue(row.deviceLabel, 'MX-H2I Desktop'),
+    keyPair: privateKey && publicKey ? { privateKey, publicKey } : null,
+    createdAt: typeof row.createdAt === 'string' ? row.createdAt : null,
+    updatedAt: typeof row.updatedAt === 'string' ? row.updatedAt : null
+  };
+}
+
 function normalizeConnection(input) {
   const row = input && typeof input === 'object' ? input : {};
-  if (row.state === 'connected') {
+  if (row.state === 'connected' || row.state === 'lease-only' || row.state === 'tunnel-only') {
     return connectedState({
+      state: row.state,
       mode: row.mode === 'employee' ? 'employee' : 'guest',
       localIp: stringValue(row.localIp, '10.89.120.24'),
       routePolicy: stringValue(row.routePolicy, 'guest limited'),
       subject: stringValue(row.subject, 'anonymousPrincipal:h2i-demo'),
-      connectedAt: typeof row.connectedAt === 'string' ? row.connectedAt : nowIso()
+      connectedAt: typeof row.connectedAt === 'string' ? row.connectedAt : nowIso(),
+      leaseId: nullableString(row.leaseId),
+      snapshotId: nullableString(row.snapshotId),
+      productId: nullableString(row.productId),
+      serviceVip: nullableString(row.serviceVip),
+      internalBaseUrl: nullableString(row.internalBaseUrl),
+      internalControlIp: nullableString(row.internalControlIp),
+      domesticRelayEndpoint: nullableString(row.domesticRelayEndpoint),
+      publicKey: nullableString(row.publicKey),
+      allowedIps: arrayValue(row.allowedIps, []),
+      routeCidrs: arrayValue(row.routeCidrs, []),
+      routePlan: normalizeRoutePlan(row.routePlan),
+      health: normalizeHealth(row.health, leasedHealth()),
+      wireGuard: normalizeWireGuardSummary(row.wireGuard),
+      diagnostics: normalizeDiagnostics(row.diagnostics)
     });
   }
   if (row.state === 'connecting') {
@@ -637,6 +693,22 @@ function normalizeIdentity(input) {
     displayName: 'Visitor',
     account: null,
     scopes: ['auth.read']
+  };
+}
+
+function normalizeAuth(input) {
+  const row = input && typeof input === 'object' ? input : {};
+  const accessToken = nullableString(row.accessToken) || nullableString(row.access_token);
+  if (!accessToken) return null;
+  return {
+    accessToken,
+    tokenType: nullableString(row.tokenType) || nullableString(row.token_type) || 'Bearer',
+    issuedTokenType: nullableString(row.issuedTokenType) || nullableString(row.issued_token_type) || 'urn:ietf:params:oauth:token-type:jwt',
+    issuer: nullableString(row.issuer),
+    audience: nullableString(row.audience),
+    subject: nullableString(row.subject),
+    expiresAt: nullableString(row.expiresAt) || nullableString(row.expires_at),
+    scopes: arrayValue(row.scopes, typeof row.scope === 'string' ? row.scope.split(/\s+/) : [])
   };
 }
 
@@ -805,31 +877,136 @@ function idleConnection() {
     routePolicy: 'none',
     subject: null,
     connectedAt: null,
-    health: {
-      wireGuard: 'idle',
-      domesticRelay: 'idle',
-      internalApi: 'idle',
-      splitDns: 'idle',
-      appBroker: 'idle'
-    }
+    leaseId: null,
+    snapshotId: null,
+    productId: null,
+    serviceVip: null,
+    internalBaseUrl: null,
+    internalControlIp: null,
+    domesticRelayEndpoint: null,
+    publicKey: null,
+    allowedIps: [],
+    routeCidrs: [],
+    routePlan: null,
+    wireGuard: null,
+    diagnostics: null,
+    health: idleHealth()
+  };
+}
+
+function idleHealth() {
+  return {
+    wireGuard: 'idle',
+    domesticRelay: 'idle',
+    internalApi: 'idle',
+    splitDns: 'idle',
+    appBroker: 'idle'
+  };
+}
+
+function leasedHealth() {
+  return {
+    wireGuard: 'lease',
+    domesticRelay: 'pending',
+    internalApi: 'pending',
+    splitDns: 'pending',
+    appBroker: 'ready'
+  };
+}
+
+function readyHealth() {
+  return {
+    wireGuard: 'ready',
+    domesticRelay: 'ready',
+    internalApi: 'ready',
+    splitDns: 'ready',
+    appBroker: 'ready'
+  };
+}
+
+function blockedHealth() {
+  return {
+    wireGuard: 'blocked',
+    domesticRelay: 'pending',
+    internalApi: 'blocked',
+    splitDns: 'pending',
+    appBroker: 'ready'
+  };
+}
+
+function normalizeHealth(input, fallback) {
+  const row = input && typeof input === 'object' ? input : {};
+  return {
+    wireGuard: stringValue(row.wireGuard, fallback.wireGuard),
+    domesticRelay: stringValue(row.domesticRelay, fallback.domesticRelay),
+    internalApi: stringValue(row.internalApi, fallback.internalApi),
+    splitDns: stringValue(row.splitDns, fallback.splitDns),
+    appBroker: stringValue(row.appBroker, fallback.appBroker)
+  };
+}
+
+function normalizeWireGuardSummary(input) {
+  const row = input && typeof input === 'object' ? input : null;
+  if (!row) return null;
+  return {
+    ok: row.ok === true,
+    active: row.active === true,
+    mode: nullableString(row.mode),
+    interfaceName: nullableString(row.interfaceName),
+    realInterfaceName: nullableString(row.realInterfaceName),
+    configPath: nullableString(row.configPath),
+    endpoint: nullableString(row.endpoint),
+    allowedIps: arrayValue(row.allowedIps, []),
+    message: nullableString(row.message),
+    error: nullableString(row.error),
+    updatedAt: nullableString(row.updatedAt) || nowIso()
+  };
+}
+
+function normalizeDiagnostics(input) {
+  const row = input && typeof input === 'object' ? input : null;
+  if (!row) return null;
+  return {
+    route: row.route && typeof row.route === 'object' ? {
+      ok: row.route.ok === true,
+      targetIp: nullableString(row.route.targetIp),
+      interfaceName: nullableString(row.route.interfaceName),
+      gateway: nullableString(row.route.gateway),
+      viaLoopback: row.route.viaLoopback === true,
+      expectedInterfaceName: nullableString(row.route.expectedInterfaceName),
+      error: nullableString(row.route.error)
+    } : null,
+    internalApi: row.internalApi && typeof row.internalApi === 'object' ? {
+      ok: row.internalApi.ok === true,
+      baseUrl: nullableString(row.internalApi.baseUrl),
+      error: nullableString(row.internalApi.error)
+    } : null,
+    updatedAt: nullableString(row.updatedAt) || nowIso()
   };
 }
 
 function connectedState(input) {
   return {
-    state: 'connected',
+    state: input.state || 'connected',
     mode: input.mode,
     localIp: input.localIp,
     routePolicy: input.routePolicy,
     subject: input.subject,
     connectedAt: input.connectedAt || nowIso(),
-    health: {
-      wireGuard: 'ready',
-      domesticRelay: 'ready',
-      internalApi: 'ready',
-      splitDns: 'ready',
-      appBroker: 'ready'
-    }
+    leaseId: input.leaseId || null,
+    snapshotId: input.snapshotId || null,
+    productId: input.productId || PRODUCT_ID,
+    serviceVip: input.serviceVip || null,
+    internalBaseUrl: input.internalBaseUrl || null,
+    internalControlIp: input.internalControlIp || null,
+    domesticRelayEndpoint: input.domesticRelayEndpoint || null,
+    publicKey: input.publicKey || null,
+    allowedIps: arrayValue(input.allowedIps, []),
+    routeCidrs: arrayValue(input.routeCidrs, []),
+    routePlan: normalizeRoutePlan(input.routePlan),
+    wireGuard: normalizeWireGuardSummary(input.wireGuard),
+    diagnostics: normalizeDiagnostics(input.diagnostics),
+    health: normalizeHealth(input.health, leasedHealth())
   };
 }
 
@@ -846,6 +1023,516 @@ function setConnecting(mode) {
   touchRuntime(mode === 'employee' ? 'employee connecting' : 'guest connecting');
 }
 
+async function connectLauncherNetwork(input) {
+  const context = await launcherContext();
+  const requestTag = stringValue(input.requestTag, 'connect');
+  return context.launcher.connectNetwork({
+    identityKind: input.identityKind,
+    userId: input.userId || undefined,
+    installId: context.installation.installId,
+    deviceId: context.installation.deviceId,
+    siteId: context.installation.siteId,
+    keyPair: context.installation.keyPair,
+    privateKey: context.installation.keyPair.privateKey,
+    publicKey: context.installation.keyPair.publicKey,
+    deviceLabel: context.installation.deviceLabel,
+    platform: process.platform,
+    requestedBy: REQUESTED_BY,
+    requestId: makeRequestId(requestTag)
+  });
+}
+
+async function launcherContext() {
+  const baseUrl = await resolveInternalBaseUrl(runtime.config);
+  await applyResolvedBaseUrl(baseUrl);
+  const installation = await ensureInstallation();
+  const mod = await import('@qpjoy/electron-launcher');
+  const launcher = mod.createElectronLauncher({
+    baseUrl,
+    productId: PRODUCT_ID,
+    mode: 'standalone',
+    installId: installation.installId,
+    deviceId: installation.deviceId,
+    siteId: installation.siteId,
+    keyPair: installation.keyPair,
+    privateKey: installation.keyPair.privateKey,
+    publicKey: installation.keyPair.publicKey,
+    deviceLabel: installation.deviceLabel
+  });
+  await ensureMxH2iProduct(launcher);
+  return { baseUrl, installation, launcher };
+}
+
+async function ensureInstallation() {
+  const current = normalizeInstallation(runtime.installation);
+  let keyPair = current.keyPair;
+  if (!keyPair) {
+    const mod = await import('@qpjoy/electron-launcher');
+    keyPair = mod.createLauncherWireGuardKeyPair();
+  }
+  const now = nowIso();
+  const installation = {
+    installId: current.installId || `inst_mxh2i_${shortId()}`,
+    deviceId: current.deviceId || `dev_mxh2i_${shortId()}`,
+    siteId: current.siteId,
+    deviceLabel: current.deviceLabel,
+    keyPair,
+    createdAt: current.createdAt || now,
+    updatedAt: now
+  };
+  runtime.installation = installation;
+  return installation;
+}
+
+async function ensureMxH2iProduct(launcher) {
+  try {
+    const product = await launcher.getProduct(PRODUCT_ID);
+    if (product.enabled === false) throw new Error('MX-H2I 尚未在 Internal 后台启用。');
+    return product;
+  } catch (err) {
+    if (err?.status && err.status !== 404) throw err;
+    if (!err?.status && !/404/.test(err?.message || '')) throw err;
+  }
+  return launcher.upsertProduct(PRODUCT_ID, {
+    productId: PRODUCT_ID,
+    displayName: 'MX-H2I',
+    mode: 'standalone',
+    serviceVip: '10.88.100.1',
+    userCidr: '10.89.0.0/16',
+    anonymousCidr: '10.89.0.0/16',
+    defaultDomesticSiteId: 'domestic-main',
+    defaultOverseaSiteId: 'oversea-main',
+    updatePolicy: 'launcher-managed',
+    enabled: true,
+    requestedBy: REQUESTED_BY,
+    requestId: makeRequestId('product')
+  });
+}
+
+async function applyNetworkSession(session, options) {
+  const lease = session.lease || {};
+  const routePlan = normalizeRoutePlan(session.routePlan);
+  const wireGuard = session.wireGuard || {};
+  const privateKey = nullableString(wireGuard.privateKey) || runtime.installation?.keyPair?.privateKey;
+  const publicKey = nullableString(wireGuard.publicKey) || runtime.installation?.keyPair?.publicKey || lease.publicKey;
+  const now = nowIso();
+  runtime.installation = normalizeInstallation({
+    ...runtime.installation,
+    installId: lease.installId || runtime.installation?.installId,
+    deviceId: lease.deviceId || runtime.installation?.deviceId,
+    siteId: lease.siteId || runtime.installation?.siteId,
+    privateKey,
+    publicKey,
+    updatedAt: now,
+    createdAt: runtime.installation?.createdAt || now
+  });
+  const overlayInternalBaseUrl = internalOverlayBaseUrl(routePlan, runtime.config.internalApiBaseUrl);
+  runtime.connection = connectedState({
+    mode: options.mode,
+    localIp: routePlan?.leaseIp || lease.leaseIp,
+    routePolicy: options.routePolicy,
+    subject: options.subject,
+    leaseId: lease.leaseId,
+    snapshotId: routePlan?.snapshotId || session.snapshot?.snapshotId,
+    productId: routePlan?.productId || lease.productId,
+    serviceVip: routePlan?.serviceVip || lease.serviceVip,
+    internalBaseUrl: overlayInternalBaseUrl,
+    internalControlIp: routePlan?.internalControlIp || null,
+    domesticRelayEndpoint: routePlan?.domesticRelayEndpoint || null,
+    publicKey,
+    allowedIps: routePlan?.allowedIps || [],
+    routeCidrs: routePlan?.routeCidrs || [],
+    routePlan,
+    health: leasedHealth()
+  });
+  runtime.identity = options.identity;
+  runtime.auth = normalizeAuth(options.auth);
+  runtime.feedback = {
+    tone: 'info',
+    message: `${options.feedback} 正在启动客户端 WireGuard。`
+  };
+  touchRuntime(options.mode === 'employee' ? 'employee lease ready' : 'guest lease ready');
+
+  const wireGuardResult = await startWireGuardForSession({
+    routePlan,
+    privateKey,
+    internalBaseUrl: overlayInternalBaseUrl
+  });
+  runtime.connection = {
+    ...runtime.connection,
+    state: wireGuardResult.state,
+    health: wireGuardResult.health,
+    wireGuard: wireGuardResult.wireGuard,
+    diagnostics: wireGuardResult.diagnostics
+  };
+  runtime.feedback = {
+    tone: wireGuardResult.ready ? 'success' : 'warning',
+    message: wireGuardResult.ready
+      ? `${options.feedback} 客户端 WireGuard 已连到 Domestic relay，并通过 overlay 探测 Internal。`
+      : `${options.feedback} 已保留租约，但客户端 WireGuard 还未 ready：${wireGuardResult.message}`
+  };
+  touchRuntime(wireGuardResult.ready
+    ? (options.mode === 'employee' ? 'employee wireguard connected' : 'guest wireguard connected')
+    : 'wireguard lease only');
+}
+
+function applyConnectionError(label, err) {
+  runtime.connection = idleConnection();
+  runtime.auth = null;
+  runtime.feedback = {
+    tone: 'danger',
+    message: `${label}：${errorMessage(err)}`
+  };
+  touchRuntime(`${label} failed`);
+}
+
+async function startWireGuardForSession(input) {
+  const routePlan = normalizeRoutePlan(input.routePlan);
+  const privateKey = nullableString(input.privateKey);
+  if (!routePlan) return wireGuardFailure('launcher routePlan 缺失。');
+  if (!privateKey) return wireGuardFailure('本机 WireGuard privateKey 缺失。');
+
+  try {
+    const mod = await import('@qpjoy/electron-launcher/wireguard');
+    const internalBaseUrl = internalOverlayBaseUrl(routePlan, input.internalBaseUrl);
+    const result = await mod.connectLauncherWireGuardPeer({
+      ...wireGuardRuntimeOptions(),
+      routePlan,
+      privateKey,
+      action: 'restart'
+    });
+    const status = result.status || {};
+    const targetIp = internalTargetIp(routePlan, internalBaseUrl);
+    const route = mod.probeLauncherWireGuardRoute({
+      ...wireGuardRuntimeOptions(),
+      targetIp,
+      expectedInterfaceName: status.realInterfaceName || status.interfaceName || null
+    });
+    const internalApi = route.ok
+      ? await probeInternalApiViaOverlay(internalBaseUrl)
+      : {
+          ok: false,
+          baseUrl: normalizeBaseUrl(internalBaseUrl),
+          error: `route to ${targetIp} is not on WireGuard (${route.interfaceName || route.error || 'unknown route'})`
+        };
+    const ready = result.ok === true && route.ok === true && internalApi.ok === true;
+    const tunnelReady = result.ok === true;
+    return {
+      state: ready ? 'connected' : (tunnelReady ? 'tunnel-only' : 'lease-only'),
+      ready,
+      health: ready ? readyHealth() : {
+        wireGuard: result.ok === true ? 'ready' : 'blocked',
+        domesticRelay: result.ok === true ? 'ready' : 'pending',
+        internalApi: internalApi.ok === true ? 'ready' : 'blocked',
+        splitDns: route.ok === true ? 'ready' : 'pending',
+        appBroker: 'ready'
+      },
+      wireGuard: summarizeWireGuardResult(result),
+      diagnostics: {
+        route,
+        internalApi,
+        updatedAt: nowIso()
+      },
+      message: ready ? 'ready' : wireGuardNotReadyMessage(result, route, internalApi)
+    };
+  } catch (err) {
+    return wireGuardFailure(errorMessage(err));
+  }
+}
+
+async function stopWireGuardForRuntime() {
+  try {
+    const mod = await import('@qpjoy/electron-launcher/wireguard');
+    return await mod.stopLauncherWireGuardPeer(wireGuardRuntimeOptions());
+  } catch (err) {
+    return {
+      ok: false,
+      message: errorMessage(err)
+    };
+  }
+}
+
+function wireGuardRuntimeOptions() {
+  return {
+    userDataDir: app.getPath('userData'),
+    profileName: WIREGUARD_PROFILE_NAME,
+    allowSystemFallback: false
+  };
+}
+
+async function probeInternalApiViaOverlay(baseUrl) {
+  const normalized = normalizeBaseUrl(baseUrl);
+  if (!normalized) {
+    return {
+      ok: false,
+      baseUrl: null,
+      error: 'Internal API baseUrl 为空。'
+    };
+  }
+  try {
+    await requestJson(joinApiUrl(normalized, '/healthz'), { timeoutMs: 2200 });
+    return {
+      ok: true,
+      baseUrl: normalized,
+      error: null
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      baseUrl: normalized,
+      error: errorMessage(err)
+    };
+  }
+}
+
+function wireGuardFailure(message) {
+  return {
+    state: 'lease-only',
+    ready: false,
+    health: blockedHealth(),
+    wireGuard: {
+      ok: false,
+      active: false,
+      mode: null,
+      interfaceName: null,
+      realInterfaceName: null,
+      configPath: null,
+      endpoint: null,
+      allowedIps: [],
+      message,
+      error: message,
+      updatedAt: nowIso()
+    },
+    diagnostics: {
+      route: null,
+      internalApi: null,
+      updatedAt: nowIso()
+    },
+    message
+  };
+}
+
+function summarizeWireGuardResult(result) {
+  const status = result?.status || {};
+  const peer = result?.peer || {};
+  const tunnel = result?.tunnel || {};
+  const message = nullableString(result?.message) || nullableString(tunnel.message);
+  return {
+    ok: result?.ok === true,
+    active: status.active === true,
+    mode: nullableString(status.mode) || nullableString(result?.runtime?.method),
+    interfaceName: nullableString(status.interfaceName),
+    realInterfaceName: nullableString(status.realInterfaceName),
+    configPath: nullableString(peer.configPath) || nullableString(tunnel.configPath),
+    endpoint: nullableString(peer.endpoint),
+    allowedIps: arrayValue(peer.allowedIps, arrayValue(status.allowedIps, [])),
+    message,
+    error: result?.ok === true ? null : message,
+    updatedAt: nowIso()
+  };
+}
+
+function wireGuardNotReadyMessage(result, route, internalApi) {
+  if (result?.ok !== true) return nullableString(result?.message) || nullableString(result?.tunnel?.message) || 'WireGuard tunnel 未启动。';
+  if (route?.ok !== true) {
+    if (route?.viaLoopback) return `到 ${route?.targetIp || INTERNAL_PEER_IP} 当前走 lo0，本机 Internal/客户端同机测试会覆盖 overlay 路由。`;
+    if (route?.interfaceName && route?.expectedInterfaceName) {
+      return `到 ${route.targetIp || INTERNAL_PEER_IP} 当前走 ${route.interfaceName}，期望 ${route.expectedInterfaceName}；可能被系统代理或其它 utun 规则抢先。`;
+    }
+    return `到 ${route?.targetIp || INTERNAL_PEER_IP} 的路由没有走 MX-H2I WireGuard。`;
+  }
+  if (internalApi?.ok !== true) return `Internal API overlay 探测失败：${internalApi?.error || 'unknown'}`;
+  return 'WireGuard 未 ready。';
+}
+
+function internalOverlayBaseUrl(routePlan, fallbackBaseUrl) {
+  const internalIp = nullableString(routePlan?.internalControlIp) || INTERNAL_PEER_IP;
+  const port = portFromBaseUrl(routePlan?.internalBaseUrl) || portFromBaseUrl(fallbackBaseUrl) || '18090';
+  return `http://${internalIp}:${port}`;
+}
+
+function internalTargetIp(routePlan, baseUrl) {
+  const routePlanIp = nullableString(routePlan?.internalControlIp);
+  if (routePlanIp) return routePlanIp;
+  try {
+    const hostname = new URL(normalizeBaseUrl(baseUrl) || '').hostname;
+    return hostname || INTERNAL_PEER_IP;
+  } catch {
+    return INTERNAL_PEER_IP;
+  }
+}
+
+function portFromBaseUrl(value) {
+  const normalized = normalizeBaseUrl(value);
+  if (!normalized) return null;
+  try {
+    const url = new URL(normalized);
+    if (url.port) return url.port;
+    return url.protocol === 'https:' ? '443' : '80';
+  } catch {
+    return null;
+  }
+}
+
+async function authenticateUserViaGateway(baseUrl, account, password) {
+  const tokenPayload = await requestJson(joinApiUrl(baseUrl, '/internal/v1/sdk/oauth/token'), {
+    method: 'POST',
+    timeoutMs: 5000,
+    body: {
+      grant_type: 'password',
+      username: account,
+      password,
+      audience: 'mx-sdk',
+      scope: 'auth.read appcenter.read network.hdi.status network.proxy.app network.dns.policy',
+      requestId: makeRequestId('oauth')
+    }
+  });
+  const token = tokenPayload?.token || tokenPayload;
+  const principal = token?.principal && typeof token.principal === 'object' ? token.principal : {};
+  const userId = nullableString(principal.userId) || parseUserIdFromSubject(token?.subject);
+  if (!userId) throw new Error('OAuth token 没有返回 user principal。');
+  return {
+    accessToken: token.access_token,
+    tokenType: token.token_type,
+    issuedTokenType: token.issued_token_type,
+    issuer: token.issuer,
+    audience: token.audience,
+    subject: token.subject,
+    expiresAt: token.expires_at,
+    scopes: typeof token.scope === 'string' ? token.scope.split(/\s+/).filter(Boolean) : [],
+    user: {
+      userId,
+      displayName: nullableString(principal.displayName) || displayNameFromAccount(account),
+      email: account.includes('@') ? account : null
+    }
+  };
+}
+
+async function resolveInternalBaseUrl(config) {
+  const candidates = uniqueValues([
+    normalizeBaseUrl(process.env.MX_H2I_INTERNAL_BASE_URL),
+    normalizeBaseUrl(config.internalApiBaseUrl),
+    ...LOCAL_INTERNAL_BASE_URLS
+  ].filter(Boolean));
+  let lastError = null;
+  for (const candidate of candidates) {
+    try {
+      await requestJson(joinApiUrl(candidate, '/healthz'), { timeoutMs: 900 });
+      return candidate;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw new Error(`无法连接 Internal API：${candidates.join(', ')}；${errorMessage(lastError)}`);
+}
+
+async function applyResolvedBaseUrl(baseUrl) {
+  const normalized = normalizeBaseUrl(baseUrl);
+  if (!normalized || normalized === runtime.config.internalApiBaseUrl) return;
+  runtime.config = normalizeConfig({
+    ...runtime.config,
+    internalApiBaseUrl: normalized,
+    sdkGatewayBaseUrl: `${normalized}/internal/v1/sdk`
+  });
+  runtime.launcherContract = await launcherContract(runtime.config);
+}
+
+function normalizeRoutePlan(input) {
+  const row = input && typeof input === 'object' ? input : null;
+  if (!row) return null;
+  return {
+    productId: nullableString(row.productId) || PRODUCT_ID,
+    launcherMode: nullableString(row.launcherMode) || 'standalone',
+    identityKind: nullableString(row.identityKind) || 'anonymous',
+    leaseIp: nullableString(row.leaseIp),
+    leaseCidr: nullableString(row.leaseCidr),
+    serviceVip: nullableString(row.serviceVip),
+    internalControlIp: nullableString(row.internalControlIp),
+    internalBaseUrl: nullableString(row.internalBaseUrl),
+    domesticGatewayIp: nullableString(row.domesticGatewayIp),
+    domesticRelayEndpoint: nullableString(row.domesticRelayEndpoint),
+    domesticRelayPublicKey: nullableString(row.domesticRelayPublicKey),
+    domesticSiteId: nullableString(row.domesticSiteId),
+    overseaSiteId: nullableString(row.overseaSiteId),
+    dnsServer: nullableString(row.dnsServer),
+    allowedIps: arrayValue(row.allowedIps, []),
+    routeCidrs: arrayValue(row.routeCidrs, []),
+    updatePolicy: nullableString(row.updatePolicy),
+    rateLimitProfile: nullableString(row.rateLimitProfile),
+    dnsPolicyId: nullableString(row.dnsPolicyId),
+    licensePolicyId: nullableString(row.licensePolicyId),
+    snapshotId: nullableString(row.snapshotId),
+    snapshotDigest: nullableString(row.snapshotDigest),
+    materialDigest: nullableString(row.materialDigest),
+    secretUpdatedAt: nullableString(row.secretUpdatedAt),
+    refreshKey: nullableString(row.refreshKey)
+  };
+}
+
+async function requestJson(url, options = {}) {
+  if (typeof fetch !== 'function') throw new Error('当前 Electron 运行时没有 fetch。');
+  const controller = new AbortController();
+  const timeout = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 6000;
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    const body = options.body ? JSON.stringify(options.body) : undefined;
+    const response = await fetch(url, {
+      method: options.method || 'GET',
+      headers: {
+        accept: 'application/json',
+        ...(body ? { 'content-type': 'application/json' } : {})
+      },
+      body,
+      signal: controller.signal
+    });
+    const text = await response.text();
+    const payload = parseJsonPayload(text);
+    if (!response.ok) {
+      const err = new Error(`HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`);
+      err.payload = payload;
+      throw err;
+    }
+    return payload;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function visibleRuntime(source = runtime) {
+  return {
+    ...source,
+    installation: visibleInstallation(source.installation),
+    auth: visibleAuth(source.auth)
+  };
+}
+
+function visibleInstallation(input) {
+  const installation = normalizeInstallation(input);
+  return {
+    installId: installation.installId,
+    deviceId: installation.deviceId,
+    siteId: installation.siteId,
+    deviceLabel: installation.deviceLabel,
+    publicKey: installation.keyPair?.publicKey || null,
+    createdAt: installation.createdAt,
+    updatedAt: installation.updatedAt
+  };
+}
+
+function visibleAuth(input) {
+  const auth = normalizeAuth(input);
+  if (!auth) return null;
+  return {
+    tokenType: auth.tokenType,
+    issuedTokenType: auth.issuedTokenType,
+    issuer: auth.issuer,
+    audience: auth.audience,
+    subject: auth.subject,
+    expiresAt: auth.expiresAt,
+    scopes: auth.scopes
+  };
+}
+
 async function saveAndBroadcast() {
   await saveRuntime(runtime);
   broadcastState();
@@ -858,7 +1545,7 @@ async function saveRuntime(next) {
 
 function broadcastState() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  mainWindow.webContents.send('mx-h2i:state', runtime);
+  mainWindow.webContents.send('mx-h2i:state', visibleRuntime());
 }
 
 function runtimePath() {
@@ -894,8 +1581,68 @@ function stringValue(value, fallback) {
   return text || fallback;
 }
 
+function nullableString(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return text || null;
+}
+
 function arrayValue(value, fallback) {
   return Array.isArray(value) ? value.map((item) => String(item || '').trim()).filter(Boolean) : fallback;
+}
+
+function normalizeBaseUrl(value) {
+  const text = typeof value === 'string' ? value.trim().replace(/\/+$/, '') : '';
+  return text || null;
+}
+
+function joinApiUrl(baseUrl, pathName) {
+  const base = normalizeBaseUrl(baseUrl);
+  if (!base) throw new Error('Internal API baseUrl 为空。');
+  return `${base}${pathName.startsWith('/') ? pathName : `/${pathName}`}`;
+}
+
+function uniqueValues(values) {
+  return [...new Set(values)];
+}
+
+function displayNameFromAccount(account) {
+  const text = account.trim();
+  return text.includes('@') ? text.split('@')[0] : text;
+}
+
+function parseUserIdFromSubject(subject) {
+  const text = nullableString(subject);
+  if (!text) return null;
+  return text.startsWith('user:') ? text.slice('user:'.length) : text;
+}
+
+function shortId() {
+  return randomUUID().replace(/-/g, '');
+}
+
+function makeRequestId(prefix) {
+  return `${prefix}-${Date.now()}-${shortId().slice(0, 8)}`;
+}
+
+function parseJsonPayload(text) {
+  if (!text || !text.trim()) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function errorMessage(err) {
+  if (!err) return 'unknown error';
+  const payload = err.payload;
+  if (payload && typeof payload === 'object') {
+    if (typeof payload.message === 'string') return payload.message;
+    if (Array.isArray(payload.message)) return payload.message.join(', ');
+    if (typeof payload.error === 'string') return payload.error;
+  }
+  if (err.name === 'AbortError') return '请求超时。';
+  return err.message || String(err);
 }
 
 function delay(ms) {

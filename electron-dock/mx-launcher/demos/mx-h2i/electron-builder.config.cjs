@@ -17,12 +17,35 @@ module.exports = {
     'package.json',
     'src/**/*'
   ],
+  extraResources: [
+    {
+      from: '../../../../electron-plugin/packages/wireguard-engines/darwin-arm64/resources/wireguard/darwin-arm64',
+      to: 'wireguard/darwin-arm64'
+    },
+    {
+      from: '../../../../electron-plugin/packages/wireguard-engines/darwin-x64/resources/wireguard/darwin-x64',
+      to: 'wireguard/darwin-x64'
+    },
+    {
+      from: '../../../../electron-plugin/packages/wireguard-engines/linux-arm64/resources/wireguard/linux-arm64',
+      to: 'wireguard/linux-arm64'
+    },
+    {
+      from: '../../../../electron-plugin/packages/wireguard-engines/linux-x64/resources/wireguard/linux-x64',
+      to: 'wireguard/linux-x64'
+    },
+    {
+      from: '../../../../electron-plugin/packages/wireguard-engines/win32-x64/resources/wireguard/win32-x64',
+      to: 'wireguard/win32-x64'
+    }
+  ],
   publish: null,
   mac: {
     target: ['zip', 'dmg'],
     category: 'public.app-category.business',
     hardenedRuntime: true,
     gatekeeperAssess: false,
+    x64ArchFiles: '**/wireguard/darwin-{arm64,x64}/**/*',
     entitlements: 'build/entitlements.mac.plist',
     entitlementsInherit: 'build/entitlements.mac.plist',
     ...(shouldNotarize ? { notarize: true } : {})

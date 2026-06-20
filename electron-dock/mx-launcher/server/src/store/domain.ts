@@ -27,6 +27,7 @@ import type {
   IssueTokenInput,
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
+  LauncherNetworkLeaseReleaseInput,
   LauncherNetworkMihomoSite,
   LauncherNetworkMihomoSiteInput,
   LauncherProductNetwork,
@@ -103,6 +104,9 @@ const USER_SCOPES = [
 ];
 
 const GUEST_SCOPES = ['auth.read', 'network.dns.policy'];
+
+export const LAUNCHER_NETWORK_LEASE_TTL_DAYS = 180;
+export const LAUNCHER_NETWORK_LEASE_TTL_MS = LAUNCHER_NETWORK_LEASE_TTL_DAYS * 24 * 60 * 60 * 1000;
 
 const HYSTERIA2_ACCESS_PORT = 51288;
 const HYSTERIA2_ACCESS_PORTS = String(HYSTERIA2_ACCESS_PORT);
@@ -657,6 +661,25 @@ export function launcherLeaseIpForProduct(
   );
 }
 
+export function nextAvailableLauncherNetworkLeaseSequence(
+  product: LauncherProductNetwork,
+  identityKind: 'user' | 'anonymous',
+  leases: LauncherNetworkLease[],
+  now = new Date()
+): number {
+  const activeIps = new Set(
+    leases
+      .filter((lease) => lease.productId === product.productId)
+      .filter((lease) => launcherNetworkLeaseIsActive(lease, now))
+      .map((lease) => lease.leaseIp)
+  );
+  for (let sequence = 1; sequence < 65535; sequence += 1) {
+    const leaseIp = launcherLeaseIpForProduct(product, identityKind, sequence);
+    if (!activeIps.has(leaseIp)) return sequence;
+  }
+  throw new Error(`Launcher network lease range exhausted: ${product.productId}:${identityKind}`);
+}
+
 export function launcherNetworkLeaseKey(input: LauncherNetworkLeaseInput, product: LauncherProductNetwork): string {
   const identityKind = launcherNetworkIdentityKind(input.identityKind, input.userId);
   const mode = launcherProductMode(input.mode ?? product.mode);
@@ -671,6 +694,30 @@ export function launcherNetworkLeaseKey(input: LauncherNetworkLeaseInput, produc
 
 export function launcherNetworkLeaseId(leaseKey: string): string {
   return `lnlease_${createHash('sha256').update(leaseKey).digest('hex').slice(0, 24)}`;
+}
+
+export function launcherNetworkLeaseIsActive(lease: LauncherNetworkLease, now = new Date()): boolean {
+  if (lease.status !== 'active') return false;
+  const expiresAt = Date.parse(lease.expiresAt || '');
+  if (Number.isFinite(expiresAt)) return expiresAt > now.getTime();
+  const updatedAt = Date.parse(lease.updatedAt || lease.createdAt || '');
+  return Number.isFinite(updatedAt) ? updatedAt + LAUNCHER_NETWORK_LEASE_TTL_MS > now.getTime() : true;
+}
+
+export function releaseLauncherNetworkLease(
+  lease: LauncherNetworkLease,
+  input: LauncherNetworkLeaseReleaseInput = {},
+  now = new Date().toISOString()
+): LauncherNetworkLease {
+  const updatedBy = input.requestedBy?.trim() || 'launcher-network';
+  return {
+    ...lease,
+    status: 'released',
+    expiresAt: now,
+    releasedAt: now,
+    updatedBy,
+    updatedAt: now
+  };
 }
 
 export function buildLauncherNetworkLease(
@@ -688,6 +735,8 @@ export function buildLauncherNetworkLease(
   const installId = input.installId?.trim() || previous?.installId || 'install-unknown';
   const deviceId = input.deviceId?.trim() || previous?.deviceId || 'device-unknown';
   const userId = identityKind === 'user' ? input.userId?.trim() || previous?.userId || null : null;
+  const nowMs = Date.parse(now);
+  const expiresAt = new Date((Number.isFinite(nowMs) ? nowMs : Date.now()) + LAUNCHER_NETWORK_LEASE_TTL_MS).toISOString();
   return {
     leaseId: previous?.leaseId ?? launcherNetworkLeaseId(leaseKey),
     leaseKey,
@@ -711,6 +760,8 @@ export function buildLauncherNetworkLease(
     deviceLabel: input.deviceLabel?.trim() || previous?.deviceLabel || null,
     platform: input.platform?.trim() || previous?.platform || null,
     status: 'active',
+    expiresAt,
+    releasedAt: null,
     createdBy: previous?.createdBy ?? updatedBy,
     createdAt: previous?.createdAt ?? now,
     updatedBy,
@@ -1115,10 +1166,11 @@ function launcherNetworkIdentityKind(value: LauncherNetworkLeaseInput['identityK
 }
 
 function launcherNetworkLeasePrincipal(input: LauncherNetworkLeaseInput, identityKind: 'user' | 'anonymous'): string {
+  const installPrincipal = input.installId?.trim() || input.deviceId?.trim() || 'unknown';
   if (identityKind === 'user') {
-    return `user:${input.userId?.trim() || input.installId?.trim() || input.deviceId?.trim() || 'unknown'}`;
+    return `account:${input.userId?.trim() || 'unknown'}:install:${installPrincipal}`;
   }
-  return `install:${input.installId?.trim() || input.deviceId?.trim() || 'unknown'}`;
+  return `install:${installPrincipal}`;
 }
 
 function launcherProductUpdatePolicy(value: LauncherProductNetworkInput['updatePolicy']): LauncherProductUpdatePolicy {
@@ -1219,6 +1271,14 @@ function numberToIpv4(value: number): string {
 export function createSdkGatewayManifest(config: RuntimeConfig): SdkGatewayManifest {
   const routes = [
     {
+      routeId: 'sdk.oauth.token',
+      path: '/internal/v1/sdk/oauth/token',
+      upstreamModule: 'sdk-gateway',
+      audience: 'mx-sdk',
+      authRequired: false,
+      description: 'OAuth-compatible token endpoint backed by User Center JWT records.'
+    },
+    {
       routeId: 'sdk.identity.introspect',
       path: '/internal/v1/sdk/identity/introspect',
       upstreamModule: 'user-center',
@@ -1310,6 +1370,7 @@ export function createSdkGatewayManifest(config: RuntimeConfig): SdkGatewayManif
     routes,
     sdk: {
       audience: 'mx-sdk',
+      oauthTokenUrl: '/internal/v1/sdk/oauth/token',
       tokenIntrospectionUrl: '/internal/v1/sdk/identity/introspect',
       principalContextUrl: '/internal/v1/sdk/identity/context',
       configSnapshotUrl: '/internal/v1/sdk/config/snapshot',

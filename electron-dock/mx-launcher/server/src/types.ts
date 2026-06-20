@@ -815,6 +815,7 @@ export interface SdkGatewayManifest {
   routes: SdkGatewayRoute[];
   sdk: {
     audience: string;
+    oauthTokenUrl: string;
     tokenIntrospectionUrl: string;
     principalContextUrl: string;
     configSnapshotUrl: string;
@@ -1493,6 +1494,11 @@ export interface LauncherNetworkLeaseInput {
   requestId?: string | null;
 }
 
+export interface LauncherNetworkLeaseReleaseInput {
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
 export interface LauncherNetworkLease {
   leaseId: string;
   leaseKey: string;
@@ -1515,7 +1521,9 @@ export interface LauncherNetworkLease {
   publicKey: string | null;
   deviceLabel: string | null;
   platform: string | null;
-  status: 'active';
+  status: 'active' | 'released';
+  expiresAt: string;
+  releasedAt: string | null;
   createdBy: string;
   createdAt: string;
   updatedBy: string;

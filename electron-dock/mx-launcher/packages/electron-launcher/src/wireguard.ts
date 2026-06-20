@@ -1,0 +1,509 @@
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import {
+  buildHdoRouteProbe,
+  excludeLocalRoutesFromAllowedIps,
+  getWireGuardTunnelStatus,
+  localCidrsForAllowedIpExclusion,
+  renderHdoClientWireGuardConfig,
+  resolveWireGuardConnectionRuntime,
+  setWireGuardTunnelState
+} from '@qpjoy/electron-core-wireguard';
+import type { LauncherRoutePlan } from '@qpjoy/mx-launcher-core';
+
+export type ElectronLauncherWireGuardAction = 'up' | 'down' | 'restart';
+
+export interface ElectronLauncherWireGuardRuntimeOptions {
+  userDataDir: string;
+  profileName?: string;
+  installDir?: string;
+  bundledDir?: string | null;
+  allowSystemFallback?: boolean;
+}
+
+export interface ElectronLauncherWireGuardPeerInput extends ElectronLauncherWireGuardRuntimeOptions {
+  routePlan: LauncherRoutePlan;
+  privateKey: string;
+  dnsDomains?: string[];
+  mtu?: number | null;
+}
+
+export interface ElectronLauncherWireGuardProbeInput extends ElectronLauncherWireGuardRuntimeOptions {
+  targetIp: string;
+  expectedInterfaceName?: string | null;
+}
+
+export interface ElectronLauncherWireGuardPeer {
+  address: string;
+  allowedIps: string[];
+  config: string;
+  configPath: string;
+  dns: string[];
+  endpoint: string;
+  publicKey: string;
+  routeCidrs: string[];
+  routeProbe: ReturnType<typeof buildHdoRouteProbe>;
+}
+
+export function prepareLauncherWireGuardPeer(input: ElectronLauncherWireGuardPeerInput): ElectronLauncherWireGuardPeer {
+  const routePlan = input.routePlan;
+  const leaseIp = requiredString(routePlan.leaseIp, 'routePlan.leaseIp');
+  const privateKey = requiredString(input.privateKey, 'privateKey');
+  const publicKey = requiredString(routePlan.domesticRelayPublicKey, 'routePlan.domesticRelayPublicKey');
+  const endpoint = requiredString(routePlan.domesticRelayEndpoint, 'routePlan.domesticRelayEndpoint');
+  const routeCidrs = uniqueStrings(routePlan.routeCidrs);
+  if (routeCidrs.length === 0) throw new Error('routePlan.routeCidrs is required');
+
+  const routeProbe = buildHdoRouteProbe({ hdoCidrs: routeCidrs });
+  const exclusionCidrs = localCidrsForAllowedIpExclusion(routeProbe, routeCidrs);
+  let allowedIps = excludeLocalRoutesFromAllowedIps(routeCidrs, exclusionCidrs);
+  if (allowedIps.length === 0 && process.platform === 'win32') {
+    allowedIps = routeCidrs;
+  }
+  if (allowedIps.length === 0) {
+    throw new Error('服务端下发的 WireGuard AllowedIPs 与本机路由完全重叠，已拒绝生成会覆盖本地网络的配置。');
+  }
+
+  const dns = routePlan.dnsServer ? [routePlan.dnsServer] : [];
+  const config = renderHdoClientWireGuardConfig({
+    privateKey,
+    address: `${leaseIp}/32`,
+    domesticPublicKey: publicKey,
+    domesticEndpoint: endpoint,
+    allowedIps,
+    dns,
+    dnsDomains: input.dnsDomains,
+    splitDns: Boolean(dns.length && input.dnsDomains?.length),
+    mtu: input.mtu,
+    persistentKeepalive: 25
+  });
+  const configPath = writeLauncherWireGuardProfile(input, config);
+  return {
+    address: `${leaseIp}/32`,
+    allowedIps,
+    config,
+    configPath,
+    dns,
+    endpoint,
+    publicKey,
+    routeCidrs,
+    routeProbe
+  };
+}
+
+export function resolveLauncherWireGuardRuntime(input: ElectronLauncherWireGuardRuntimeOptions) {
+  return resolveWireGuardConnectionRuntime({
+    installDir: input.installDir ?? join(input.userDataDir, 'bin'),
+    bundledDir: input.bundledDir ?? defaultBundledWireGuardDir(),
+    allowSystemFallback: input.allowSystemFallback ?? false
+  });
+}
+
+export async function connectLauncherWireGuardPeer(
+  input: ElectronLauncherWireGuardPeerInput & { action?: ElectronLauncherWireGuardAction }
+) {
+  const peer = prepareLauncherWireGuardPeer(input);
+  const runtime = resolveLauncherWireGuardRuntime(input);
+  const action = input.action ?? 'restart';
+  const tunnel = await setWireGuardTunnelState({
+    runtime,
+    configPath: peer.configPath,
+    action
+  });
+  const status = safeWireGuardStatus(runtime, peer.configPath);
+  return {
+    ok: tunnel.ok === true && status?.active === true,
+    action,
+    peer,
+    runtime,
+    status,
+    tunnel,
+    message: tunnel.message
+  };
+}
+
+export async function stopLauncherWireGuardPeer(input: ElectronLauncherWireGuardRuntimeOptions) {
+  const configPath = launcherWireGuardConfigPath(input);
+  if (!existsSync(configPath)) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: 'missing-wireguard-config',
+      configPath
+    };
+  }
+  const runtime = resolveLauncherWireGuardRuntime(input);
+  const tunnel = await setWireGuardTunnelState({
+    runtime,
+    configPath,
+    action: 'down'
+  });
+  const status = safeWireGuardStatus(runtime, configPath);
+  return {
+    ok: tunnel.ok === true,
+    skipped: false,
+    configPath,
+    runtime,
+    status,
+    tunnel,
+    message: tunnel.message
+  };
+}
+
+export function getLauncherWireGuardPeerStatus(input: ElectronLauncherWireGuardRuntimeOptions) {
+  const configPath = launcherWireGuardConfigPath(input);
+  if (!existsSync(configPath)) {
+    return {
+      ok: false,
+      active: false,
+      configPath,
+      error: 'WireGuard config missing'
+    };
+  }
+  const runtime = resolveLauncherWireGuardRuntime(input);
+  return safeWireGuardStatus(runtime, configPath);
+}
+
+export function probeLauncherWireGuardRoute(input: ElectronLauncherWireGuardProbeInput) {
+  const targetIp = requiredString(input.targetIp, 'targetIp');
+  const route = readRouteToTarget(targetIp);
+  const interfaceName = route.interfaceName;
+  const gateway = route.gateway;
+  const viaLoopback = interfaceName === 'lo0' || gateway === '127.0.0.1' || gateway === '::1';
+  const expected = input.expectedInterfaceName?.trim() || null;
+  const interfaceMatches = expected
+    ? interfaceName === expected
+    : Boolean(interfaceName && (/^utun\d+$/.test(interfaceName) || /^wg/.test(interfaceName)));
+  const viaWireGuard = Boolean(interfaceName && !viaLoopback && interfaceMatches);
+  return {
+    ok: viaWireGuard,
+    targetIp,
+    interfaceName,
+    gateway,
+    viaLoopback,
+    expectedInterfaceName: expected,
+    raw: route.raw,
+    error: route.error
+  };
+}
+
+export function launcherWireGuardConfigPath(input: ElectronLauncherWireGuardRuntimeOptions): string {
+  const profileName = sanitizeProfileName(input.profileName ?? 'mx-h2i.conf');
+  return join(input.userDataDir, 'wireguard', profileName);
+}
+
+export function defaultBundledWireGuardDir(): string {
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath ?? process.cwd();
+  const candidates = [
+    join(resourcesPath, 'qpjoy-wireguard-engine'),
+    join(resourcesPath, 'wireguard'),
+    resolve(process.cwd(), 'resources/qpjoy-wireguard-engine'),
+    resolve(process.cwd(), 'resources/wireguard')
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
+}
+
+function writeLauncherWireGuardProfile(input: ElectronLauncherWireGuardRuntimeOptions, config: string): string {
+  const configPath = launcherWireGuardConfigPath(input);
+  mkdirSync(join(input.userDataDir, 'wireguard'), { recursive: true });
+  writeFileSync(configPath, config, { mode: 0o600 });
+  return configPath;
+}
+
+function safeWireGuardStatus(
+  runtime: ReturnType<typeof resolveWireGuardConnectionRuntime>,
+  configPath: string
+): ReturnType<typeof getWireGuardTunnelStatus> | null {
+  try {
+    return getWireGuardTunnelStatus({ runtime, configPath });
+  } catch {
+    return null;
+  }
+}
+
+function readRouteToTarget(targetIp: string): {
+  interfaceName: string | null;
+  gateway: string | null;
+  raw: string | null;
+  error: string | null;
+} {
+  try {
+    if (process.platform === 'darwin') {
+      const raw = execFileSync('route', ['-n', 'get', targetIp], { encoding: 'utf8', timeout: 2500 });
+      return {
+        interfaceName: matchRouteField(raw, 'interface'),
+        gateway: matchRouteField(raw, 'gateway'),
+        raw,
+        error: null
+      };
+    }
+    if (process.platform === 'linux') {
+      const raw = execFileSync('ip', ['route', 'get', targetIp], { encoding: 'utf8', timeout: 2500 });
+      const interfaceName = raw.match(/\bdev\s+(\S+)/)?.[1] ?? null;
+      const gateway = raw.match(/\bvia\s+(\S+)/)?.[1] ?? null;
+      return { interfaceName, gateway, raw, error: null };
+    }
+    if (process.platform === 'win32') {
+      return readWindowsRouteToTarget(targetIp);
+    }
+    return {
+      interfaceName: null,
+      gateway: null,
+      raw: null,
+      error: `route probe is not implemented on ${process.platform}`
+    };
+  } catch (err) {
+    return {
+      interfaceName: null,
+      gateway: null,
+      raw: null,
+      error: err instanceof Error ? err.message : String(err)
+    };
+  }
+}
+
+function readWindowsRouteToTarget(targetIp: string): {
+  interfaceName: string | null;
+  gateway: string | null;
+  raw: string | null;
+  error: string | null;
+} {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    '$ifaces = @{}',
+    "Get-NetIPInterface -AddressFamily IPv4 | ForEach-Object { $ifaces[[string]$_.InterfaceIndex] = $_.InterfaceAlias }",
+    'Get-NetRoute -AddressFamily IPv4 | ForEach-Object {',
+    '  [pscustomobject]@{',
+    '    DestinationPrefix = $_.DestinationPrefix;',
+    '    NextHop = $_.NextHop;',
+    '    InterfaceIndex = $_.InterfaceIndex;',
+    '    InterfaceAlias = $ifaces[[string]$_.InterfaceIndex];',
+    '    RouteMetric = $_.RouteMetric;',
+    '    InterfaceMetric = $_.InterfaceMetric',
+    '  }',
+    '} | ConvertTo-Json -Compress'
+  ].join('; ');
+  try {
+    const raw = execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+      encoding: 'utf8',
+      timeout: 3500,
+      windowsHide: true
+    }).trim();
+    const rows = normalizeWindowsRouteRows(JSON.parse(raw));
+    const best = bestWindowsRouteForTarget(rows, targetIp);
+    if (best) {
+      return {
+        interfaceName: best.interfaceAlias || (best.interfaceIndex ? String(best.interfaceIndex) : null),
+        gateway: best.nextHop && best.nextHop !== '0.0.0.0' ? best.nextHop : null,
+        raw: JSON.stringify(best),
+        error: null
+      };
+    }
+    return {
+      interfaceName: null,
+      gateway: null,
+      raw,
+      error: `no Windows route matched ${targetIp}`
+    };
+  } catch (err) {
+    return readWindowsRoutePrintToTarget(targetIp, err);
+  }
+}
+
+function readWindowsRoutePrintToTarget(targetIp: string, previousError: unknown): {
+  interfaceName: string | null;
+  gateway: string | null;
+  raw: string | null;
+  error: string | null;
+} {
+  try {
+    const raw = execFileSync('route.exe', ['print', '-4'], {
+      encoding: 'utf8',
+      timeout: 3500,
+      windowsHide: true
+    });
+    const rows = raw.split(/\r?\n/)
+      .map((line) => line.trim())
+      .map(parseWindowsRoutePrintLine)
+      .filter((row): row is WindowsRouteRow => Boolean(row));
+    const best = bestWindowsRouteForTarget(rows, targetIp);
+    if (best) {
+      return {
+        interfaceName: best.interfaceAlias || null,
+        gateway: best.nextHop && best.nextHop !== '0.0.0.0' ? best.nextHop : null,
+        raw: best.raw || raw,
+        error: null
+      };
+    }
+    return {
+      interfaceName: null,
+      gateway: null,
+      raw,
+      error: `PowerShell route probe failed (${errorText(previousError)}); route.exe found no route for ${targetIp}`
+    };
+  } catch (err) {
+    return {
+      interfaceName: null,
+      gateway: null,
+      raw: null,
+      error: `PowerShell route probe failed (${errorText(previousError)}); route.exe failed (${errorText(err)})`
+    };
+  }
+}
+
+type WindowsRouteRow = {
+  destinationPrefix: string;
+  nextHop: string | null;
+  interfaceAlias: string | null;
+  interfaceIndex: number | null;
+  routeMetric: number;
+  interfaceMetric: number;
+  raw?: string | null;
+};
+
+function normalizeWindowsRouteRows(input: unknown): WindowsRouteRow[] {
+  const rows = Array.isArray(input) ? input : input ? [input] : [];
+  return rows.map((row) => {
+    const record = row && typeof row === 'object' ? row as Record<string, unknown> : {};
+    return {
+      destinationPrefix: stringField(record.DestinationPrefix),
+      nextHop: nullableField(record.NextHop),
+      interfaceAlias: nullableField(record.InterfaceAlias),
+      interfaceIndex: numericField(record.InterfaceIndex),
+      routeMetric: numericField(record.RouteMetric) ?? 0,
+      interfaceMetric: numericField(record.InterfaceMetric) ?? 0,
+      raw: JSON.stringify(record)
+    };
+  }).filter((row) => Boolean(row.destinationPrefix));
+}
+
+function parseWindowsRoutePrintLine(line: string): WindowsRouteRow | null {
+  const columns = line.trim().split(/\s+/);
+  if (columns.length < 5 || !isIpv4(columns[0]) || !isIpv4(columns[1])) return null;
+  const prefix = cidrFromAddressAndMask(columns[0], columns[1]);
+  if (!prefix) return null;
+  return {
+    destinationPrefix: prefix,
+    nextHop: columns[2] === 'On-link' ? null : columns[2] ?? null,
+    interfaceAlias: columns[3] ?? null,
+    interfaceIndex: null,
+    routeMetric: Number(columns[4]) || 0,
+    interfaceMetric: 0,
+    raw: line
+  };
+}
+
+function bestWindowsRouteForTarget(rows: WindowsRouteRow[], targetIp: string): WindowsRouteRow | null {
+  const target = ipv4ToInt(targetIp);
+  if (target === null) return null;
+  const candidates = rows
+    .map((row) => ({ row, parsed: parseCidr(row.destinationPrefix) }))
+    .filter((entry): entry is { row: WindowsRouteRow; parsed: { network: number; prefix: number; mask: number } } =>
+      Boolean(entry.parsed && (target & entry.parsed.mask) === entry.parsed.network)
+    )
+    .sort((a, b) => {
+      if (b.parsed.prefix !== a.parsed.prefix) return b.parsed.prefix - a.parsed.prefix;
+      return (a.row.routeMetric + a.row.interfaceMetric) - (b.row.routeMetric + b.row.interfaceMetric);
+    });
+  return candidates[0]?.row ?? null;
+}
+
+function matchRouteField(raw: string, field: string): string | null {
+  const match = raw.match(new RegExp(`^\\s*${field}:\\s*(\\S+)`, 'm'));
+  return match?.[1] ?? null;
+}
+
+function requiredString(value: string | null | undefined, field: string): string {
+  const trimmed = value?.trim();
+  if (!trimmed) throw new Error(`${field} is required`);
+  return trimmed;
+}
+
+function uniqueStrings(values: readonly string[] | null | undefined): string[] {
+  return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
+}
+
+function sanitizeProfileName(value: string): string {
+  const trimmed = value.trim() || 'mx-h2i.conf';
+  return trimmed.replace(/[/\\]/g, '-');
+}
+
+function stringField(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function nullableField(value: unknown): string | null {
+  const text = stringField(value);
+  return text || null;
+}
+
+function numericField(value: unknown): number | null {
+  const number = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function isIpv4(value: string | null | undefined): value is string {
+  if (!value) return false;
+  return ipv4ToInt(value) !== null;
+}
+
+function ipv4ToInt(value: string): number | null {
+  const parts = value.split('.');
+  if (parts.length !== 4) return null;
+  let out = 0;
+  for (const part of parts) {
+    if (!/^\d+$/.test(part)) return null;
+    const number = Number(part);
+    if (!Number.isInteger(number) || number < 0 || number > 255) return null;
+    out = ((out << 8) | number) >>> 0;
+  }
+  return out >>> 0;
+}
+
+function parseCidr(value: string): { network: number; prefix: number; mask: number } | null {
+  const [address, prefixText] = value.split('/');
+  const ip = ipv4ToInt(address ?? '');
+  const prefix = Number(prefixText);
+  if (ip === null || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return null;
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return {
+    network: (ip & mask) >>> 0,
+    prefix,
+    mask
+  };
+}
+
+function cidrFromAddressAndMask(address: string, maskText: string): string | null {
+  const ip = ipv4ToInt(address);
+  const mask = ipv4ToInt(maskText);
+  if (ip === null || mask === null) return null;
+  const prefix = maskToPrefix(mask);
+  if (prefix === null) return null;
+  return `${intToIpv4((ip & mask) >>> 0)}/${prefix}`;
+}
+
+function maskToPrefix(mask: number): number | null {
+  let prefix = 0;
+  let seenZero = false;
+  for (let bit = 31; bit >= 0; bit -= 1) {
+    const one = Boolean(mask & (1 << bit));
+    if (one && seenZero) return null;
+    if (one) prefix += 1;
+    else seenZero = true;
+  }
+  return prefix;
+}
+
+function intToIpv4(value: number): string {
+  return [
+    (value >>> 24) & 255,
+    (value >>> 16) & 255,
+    (value >>> 8) & 255,
+    value & 255
+  ].join('.');
+}

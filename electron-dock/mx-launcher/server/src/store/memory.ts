@@ -13,7 +13,10 @@ import {
   buildLauncherNetworkTopology,
   buildLauncherNetworkReachabilityPlan,
   buildLauncherNetworkLease,
+  nextAvailableLauncherNetworkLeaseSequence,
+  launcherNetworkLeaseIsActive,
   launcherNetworkLeaseKey,
+  releaseLauncherNetworkLease,
   buildSiteSlotAccessAccount,
   buildSiteSlotExecutionRun,
   buildSiteSlotPlan,
@@ -94,6 +97,7 @@ import type {
   IssueTokenInput,
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
+  LauncherNetworkLeaseReleaseInput,
   LauncherNetworkSnapshot,
   LauncherNetworkSnapshotInput,
   LauncherNetworkMihomoSite,
@@ -1317,8 +1321,15 @@ export class MemoryStore implements PlatformStore {
       deviceId
     };
     const leaseKey = launcherNetworkLeaseKey(normalizedInput, product);
-    const previous = [...this.launcherNetworkLeases.values()].find((lease) => lease.leaseKey === leaseKey) ?? null;
-    const sequence = previous?.sequence ?? this.nextLauncherNetworkLeaseSequence(product.productId, normalizedInput.identityKind === 'user' ? 'user' : 'anonymous');
+    const now = new Date();
+    const leases = [...this.launcherNetworkLeases.values()].filter((lease) => lease.productId === product.productId);
+    const previous = leases.find((lease) => lease.leaseKey === leaseKey && launcherNetworkLeaseIsActive(lease, now)) ?? null;
+    const sequence = previous?.sequence ?? nextAvailableLauncherNetworkLeaseSequence(
+      product,
+      normalizedInput.identityKind === 'user' ? 'user' : 'anonymous',
+      leases,
+      now
+    );
     const lease = buildLauncherNetworkLease(this.config, normalizedInput, product, sequence, previous);
     this.launcherNetworkLeases.set(lease.leaseId, lease);
     this.recordAudit({
@@ -1340,6 +1351,32 @@ export class MemoryStore implements PlatformStore {
       }
     });
     return lease;
+  }
+
+  releaseLauncherNetworkLease(leaseId: string, input: LauncherNetworkLeaseReleaseInput = {}): LauncherNetworkLease {
+    const lease = this.getLauncherNetworkLease(leaseId);
+    if (!lease) throw new Error('Launcher network lease not found');
+    const released = releaseLauncherNetworkLease(lease, input);
+    this.launcherNetworkLeases.set(released.leaseId, released);
+    this.recordAudit({
+      eventType: 'launcher_network.lease.released',
+      actorKind: released.identityKind === 'user' ? 'user' : 'install',
+      userId: released.userId,
+      installId: released.installId,
+      deviceId: released.deviceId,
+      productId: released.productId,
+      siteId: released.siteId,
+      requestId: input.requestId ?? null,
+      overlayIp: released.leaseIp,
+      metadata: {
+        leaseId: released.leaseId,
+        launcherMode: released.launcherMode,
+        identityKind: released.identityKind,
+        status: released.status,
+        releasedAt: released.releasedAt
+      }
+    });
+    return released;
   }
 
   renderHysteria2MihomoSubscription(siteId: string, username: string): MihomoSubscriptionRender | null {
@@ -2666,13 +2703,6 @@ export class MemoryStore implements PlatformStore {
     return [...this.siteSlotPlans.values()]
       .filter((plan) => plan.siteId === siteId)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
-  }
-
-  private nextLauncherNetworkLeaseSequence(productId: string, identityKind: 'user' | 'anonymous'): number {
-    const maxSequence = [...this.launcherNetworkLeases.values()]
-      .filter((lease) => lease.productId === productId && lease.identityKind === identityKind)
-      .reduce((max, lease) => Math.max(max, lease.sequence), 0);
-    return maxSequence + 1;
   }
 
   private registerBuiltinApps(): void {

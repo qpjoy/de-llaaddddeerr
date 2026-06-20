@@ -4,3 +4,5 @@ packages:
   - "packages/*"
   - "ui-design"
   - "demos/*"
+  - "../../electron-plugin/packages/electron-core-wireguard"
+  - "../../electron-plugin/packages/wireguard-engines/*"

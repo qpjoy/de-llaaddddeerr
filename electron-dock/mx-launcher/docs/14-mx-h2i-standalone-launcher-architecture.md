@@ -169,7 +169,7 @@ stateDiagram-v2
 | --- | --- |
 | Setup | 选择 Internal/Domestic 地址、快速设置、本机资源、自动更新 |
 | Guest Connect | 游客模式，一键连接 Domestic relay |
-| Login | 邮箱/手机号登录、记住登录、忘记密码、登录后刷新 user lease |
+| Login | 邮箱/手机号登录、记住登录、忘记密码、登录后续租固定 user lease |
 | Connected | 展示本机 IP、Internal 可达性、WG handshake、DNS/PAC/TUN 状态 |
 | AppCenter | 类图 2/7，展示 H2O 等产品集合、安装/更新/打开/权限 |
 | App Detail | 权限、版本、依赖 standalone 版本、网络能力、发布渠道 |
@@ -177,6 +177,13 @@ stateDiagram-v2
 | Settings | 更新、通道、代理、DNS、权限、设备绑定 |
 
 AppCenter 和 H2O 默认是 embed，应使用系统 MX-H2I 的 Launcher runtime：
+
+IP lease 采用接近 DHCP 的稳定租约策略：同一安装的访客 lease、同一账号的 user lease
+会在连接/登录时续租并保留固定 IP；退出 MX-H2I 或从访客切到员工只断开本地 runtime，
+不立即释放 IP。默认半年未续租后才进入可回收池，管理员仍可通过 release 接口做显式回收。
+lease key 以 standalone product 为边界，再区分 `anonymous` / `user`：访客 lease 按安装
+固定，账号 lease 按账号加安装固定。因此 MX-H2I 和 Luopan 的 standalone 池互不影响，
+同一个 MX-H2I 安装上的访客 IP 和员工 IP 也互不影响。
 
 ```ts
 createElectronLauncher({
@@ -192,6 +199,45 @@ createElectronLauncher({
 应用默认不新建 WG peer，不写系统网络，只拿所选 Launcher standalone channel 的 network context
 和能力 token。AppCenter/H2O 默认选择 `mx-h2i`，Luopan 的 embed 应用可以选择
 `luopan`。
+
+### WireGuard client runtime
+
+V2 不再让 MX-H2I 直接依赖旧的 `@qpjoy/electron-plugin-hdo` 业务插件。客户端 WG 能力从
+`@qpjoy/electron-core-wireguard` 复用，并通过 `@qpjoy/electron-launcher/wireguard`
+暴露为 Launcher 底座的一部分：
+
+- `connectNetwork()` 只负责向 Internal 拿 lease、snapshot 和 routePlan。
+- `connectLauncherWireGuardPeer()` 用 routePlan、客户端 keyPair、Domestic relay 公钥/endpoint
+  生成本机 WG profile，并启动客户端 tunnel。
+- MX-H2I 只有在 WG tunnel active、到 `10.88.88.88` 的 route probe 走 WG interface、
+  且 overlay `healthz` 成功后，才把 runtime 升级为 `connected`。
+- 如果只拿到 lease，或因为同机 Internal 本地路由冲突导致 route probe 不走 WG，客户端保持
+  `lease-only`，AppCenter/H2O 不会被误认为已经具备内网通路。
+- Electron 打包时必须把 `wireguard-engines/*/resources/wireguard` 复制到 app
+  `resources/wireguard`，运行时优先从这个目录安装 `wg` / `wireguard-go`。
+
+V2 路由和 DNS 需要分层处理，不能把 bootstrap endpoint、overlay endpoint 和应用域名解析
+混在一起：
+
+| 层 | 用途 | 规则 |
+| --- | --- | --- |
+| Bootstrap API | 登录、拿 lease、拿 routePlan | 可以是本机 `127.0.0.1`、公网 gateway 或运维端口；不证明 H2I 已通 |
+| Overlay Internal IP | H2I 到 Internal peer server | 优先使用 routePlan 的 `internalControlIp`，默认 `10.88.88.88`；route probe 必须匹配 MX-H2I 自己的 WG interface |
+| Split DNS | app 域名、k8s/service 域名 | 在 WG 已通之后再启用；DNS server 可以是 Internal DNS 或 Domestic relay/cache，但查询路径必须走 MX-H2I WG route |
+| 系统代理/Fake IP | Clash/mihomo/TUN | 不能作为 H2I 成功证据；`198.18.0.0/15`、非 MX-H2I `utun` 或 `lo0` 都应判为 not ready |
+
+Windows 客户端使用 `wireguard.exe /installtunnelservice` 管理 tunnel service，route proof 通过
+`Get-NetRoute + Get-NetIPInterface` 校验目标 IP 是否命中 `mx-h2i` tunnel alias；PowerShell
+不可用时退回 `route.exe print -4`。Windows split DNS 与 macOS 不同，底层应使用 NRPT：
+`@qpjoy/electron-core-wireguard` 已支持从 profile 注释生成 NRPT 规则并在 service 启停时安装/清理，
+但 V2 还需要在 Internal routePlan/DNS policy 中明确下发 split DNS domains。未下发 domain
+前，MX-H2I 只用 `10.88.88.88` 这类 overlay IP 做连通性证明，不把 k8s/service 域名解析作为
+H2I ready 的条件。
+
+同一台 Mac 同时作为 Internal peer 和 MX-H2I 客户端时，macOS 会为本机地址生成 `lo0`
+host route，例如 `10.88.88.88 -> lo0`、`10.89.x.x -> lo0`。这种场景可以验证客户端 WG
+进程、profile、handshake 和本机地址是否存在，但不能证明完整路径
+`10.89.x.x -> Domestic relay -> 10.88.88.88`。完整路径需要另一台机器或 VM 做 MX-H2I 客户端。
 
 ## Backend
 

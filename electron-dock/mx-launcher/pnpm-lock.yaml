@@ -8,6 +8,41 @@ importers:
 
   .: {}
 
+  ../../electron-plugin/packages/electron-core-wireguard:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.7
+        version: 22.19.21
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+    optionalDependencies:
+      '@qpjoy/electron-core-wireguard-engine-darwin-arm64':
+        specifier: workspace:^
+        version: link:../wireguard-engines/darwin-arm64
+      '@qpjoy/electron-core-wireguard-engine-darwin-x64':
+        specifier: workspace:^
+        version: link:../wireguard-engines/darwin-x64
+      '@qpjoy/electron-core-wireguard-engine-linux-arm64':
+        specifier: workspace:^
+        version: link:../wireguard-engines/linux-arm64
+      '@qpjoy/electron-core-wireguard-engine-linux-x64':
+        specifier: workspace:^
+        version: link:../wireguard-engines/linux-x64
+      '@qpjoy/electron-core-wireguard-engine-win32-x64':
+        specifier: workspace:^
+        version: link:../wireguard-engines/win32-x64
+
+  ../../electron-plugin/packages/wireguard-engines/darwin-arm64: {}
+
+  ../../electron-plugin/packages/wireguard-engines/darwin-x64: {}
+
+  ../../electron-plugin/packages/wireguard-engines/linux-arm64: {}
+
+  ../../electron-plugin/packages/wireguard-engines/linux-x64: {}
+
+  ../../electron-plugin/packages/wireguard-engines/win32-x64: {}
+
   demos/mx-h2i:
     dependencies:
       '@qpjoy/electron-launcher':
@@ -48,6 +83,9 @@ importers:
 
   packages/electron-launcher:
     dependencies:
+      '@qpjoy/electron-core-wireguard':
+        specifier: workspace:^
+        version: link:../../../../electron-plugin/packages/electron-core-wireguard
       '@qpjoy/mx-launcher-core':
         specifier: workspace:*
         version: link:../launcher-core
@@ -58,6 +96,9 @@ importers:
         specifier: workspace:*
         version: link:../launcher-standalone
     devDependencies:
+      '@types/node':
+        specifier: ^22.10.7
+        version: 22.19.21
       typescript:
         specifier: ^5.7.3
         version: 5.9.3

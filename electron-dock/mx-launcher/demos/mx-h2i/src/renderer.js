@@ -158,12 +158,14 @@ async function setScreen(nextScreen) {
 function render() {
   if (!state) return;
   const connected = state.connection?.state === 'connected';
+  const leaseOnly = state.connection?.state === 'lease-only';
+  const tunnelOnly = state.connection?.state === 'tunnel-only';
   const connecting = state.connection?.state === 'connecting';
   const shellClass = screen === 'appcenter' ? 'is-appcenter' : 'is-phone';
   root.innerHTML = `
     <div class="mx-shell ${shellClass}">
       ${screen === 'appcenter' ? '' : renderWindowChrome()}
-      ${screen === 'appcenter' ? renderWorkbench(connected, connecting) : renderPhone(connected, connecting)}
+      ${screen === 'appcenter' ? renderWorkbench(connected, connecting) : renderPhone(connected, connecting, leaseOnly, tunnelOnly)}
     </div>
   `;
 }
@@ -181,11 +183,19 @@ function renderWindowChrome() {
   `;
 }
 
-function renderPhone(connected, connecting) {
+function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = false) {
   if (screen === 'advanced') return renderAdvancedPhone();
   const mode = modeDraft;
+  const activeLease = connected || leaseOnly || tunnelOnly;
+  const showEmployeeLogin = mode === 'employee' && (!activeLease || state.connection.mode !== 'employee');
   const modeTitle = connected
-    ? `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 已连接`
+    ? showEmployeeLogin
+      ? '员工模式'
+      : `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 已连接`
+    : leaseOnly
+      ? `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 租约已就绪`
+      : tunnelOnly
+        ? `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 隧道已就绪`
     : mode === 'employee'
       ? '员工模式'
       : '访客模式';
@@ -204,19 +214,19 @@ function renderPhone(connected, connecting) {
       </section>
       ${renderFeedback()}
 
-      ${mode === 'employee' && !connected ? renderEmployeeLogin(connecting) : renderGuestConnect(connected, connecting)}
+      ${showEmployeeLogin ? renderEmployeeLogin(connecting) : renderGuestConnect(activeLease, connecting, activeLease && !connected)}
       ${renderConnectionStrip()}
       ${renderPhoneAppCenterAction(connected, connecting)}
     </section>
   `;
 }
 
-function renderGuestConnect(connected, connecting) {
+function renderGuestConnect(connected, connecting, leaseOnly = false) {
   const label = connected ? '断开连接' : connecting ? '连接中' : '连接';
   const action = connected ? 'disconnect' : 'connectGuest';
   return `
     <section class="connect-panel">
-      <button class="connect-dial ${connected ? 'is-connected' : ''}" type="button" data-action="${action}" ${connecting ? 'disabled' : ''}>
+      <button class="connect-dial ${connected && !leaseOnly ? 'is-connected' : ''}" type="button" data-action="${action}" ${connecting ? 'disabled' : ''}>
         <span>${escapeHtml(label)}</span>
       </button>
       <div class="connect-actions">
@@ -285,6 +295,7 @@ function renderAdvancedPhone() {
         ${renderAdvancedRow('应用设置', 'AppCenter / H2O embed defaults', '⚙')}
         ${renderAdvancedRow('更多设置', 'network, release, diagnostics', '…')}
       </section>
+      ${renderWireGuardDiagnostics()}
       ${renderConfigForm()}
     </section>
   `;
@@ -319,6 +330,34 @@ function renderConnectionStrip() {
       <div>
         <span>Internal</span>
         <strong>${escapeHtml(health.internalApi || 'idle')}</strong>
+      </div>
+    </section>
+  `;
+}
+
+function renderWireGuardDiagnostics() {
+  const connection = state.connection || {};
+  const wireGuard = connection.wireGuard || {};
+  const diagnostics = connection.diagnostics || {};
+  const route = diagnostics.route || {};
+  const internalApi = diagnostics.internalApi || {};
+  return `
+    <section class="settings-panel">
+      <div class="panel-head">
+        <div>
+          <h2>WireGuard 诊断</h2>
+          <p>route proof / overlay health</p>
+        </div>
+        <span class="status-pill" data-state="${escapeAttr(connection.health?.wireGuard || 'idle')}">${escapeHtml(connection.health?.wireGuard || 'idle')}</span>
+      </div>
+      <div class="metric-grid">
+        ${metric('Interface', wireGuard.realInterfaceName || wireGuard.interfaceName || '-')}
+        ${metric('Expected', route.expectedInterfaceName || wireGuard.realInterfaceName || '-')}
+        ${metric('Endpoint', wireGuard.endpoint || connection.domesticRelayEndpoint || '-')}
+        ${metric('Target', route.targetIp || '10.88.88.88')}
+        ${metric('Route dev', route.interfaceName || '-')}
+        ${metric('Internal', internalApi.ok ? 'ready' : (internalApi.error || connection.health?.internalApi || 'idle'))}
+        ${metric('Config', wireGuard.configPath || '-')}
       </div>
     </section>
   `;
@@ -591,6 +630,8 @@ function connectionCaption() {
   const connection = state.connection || {};
   if (connection.state === 'connecting') return '正在准备 WireGuard、DNS、PAC 和权限上下文';
   if (connection.state === 'connected') return `${connection.localIp} / ${connection.routePolicy}`;
+  if (connection.state === 'tunnel-only') return `${connection.localIp} / tunnel only / ${connection.health?.internalApi || 'internal pending'}`;
+  if (connection.state === 'lease-only') return `${connection.localIp} / lease only / ${connection.health?.wireGuard || 'wg pending'}`;
   return 'standalone launcher channel owner';
 }
 

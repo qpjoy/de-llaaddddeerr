@@ -2,6 +2,7 @@ import { DataSource } from 'typeorm';
 
 import { PlatformRecordEntity } from './entities.js';
 import { InitPlatformRecords1760000000000 } from './migrations/1760000000000-InitPlatformRecords.js';
+import { LauncherNetworkLeaseConstraints1760000000100 } from './migrations/1760000000100-LauncherNetworkLeaseConstraints.js';
 import type { RuntimeConfig } from '../types.js';
 
 export function createPlatformDataSource(config: RuntimeConfig): DataSource {
@@ -12,7 +13,7 @@ export function createPlatformDataSource(config: RuntimeConfig): DataSource {
     type: 'postgres',
     url: config.databaseUrl,
     entities: [PlatformRecordEntity],
-    migrations: [InitPlatformRecords1760000000000],
+    migrations: [InitPlatformRecords1760000000000, LauncherNetworkLeaseConstraints1760000000100],
     migrationsTableName: 'mx_schema_migrations',
     synchronize: false,
     logging: false

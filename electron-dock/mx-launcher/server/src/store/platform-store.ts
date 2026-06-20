@@ -26,6 +26,7 @@ import type {
   IssueTokenInput,
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
+  LauncherNetworkLeaseReleaseInput,
   LauncherNetworkSnapshot,
   LauncherNetworkSnapshotInput,
   LauncherNetworkMihomoSite,
@@ -205,6 +206,7 @@ export interface PlatformStore {
   listLauncherNetworkLeases(productId?: string | null): MaybePromise<LauncherNetworkLease[]>;
   getLauncherNetworkLease(leaseId: string): MaybePromise<LauncherNetworkLease | null>;
   enrollLauncherNetworkLease(input: LauncherNetworkLeaseInput): MaybePromise<LauncherNetworkLease>;
+  releaseLauncherNetworkLease(leaseId: string, input?: LauncherNetworkLeaseReleaseInput): MaybePromise<LauncherNetworkLease>;
   renderHysteria2MihomoSubscription(siteId: string, username: string): MaybePromise<MihomoSubscriptionRender | null>;
   listRuntimeFeaturePolicies(featureKey?: string | null): MaybePromise<RuntimeFeaturePolicy[]>;
   getRuntimeFeaturePolicy(policyId: string): MaybePromise<RuntimeFeaturePolicy | null>;

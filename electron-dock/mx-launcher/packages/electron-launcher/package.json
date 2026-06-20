@@ -10,6 +10,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./wireguard": {
+      "types": "./dist/wireguard.d.ts",
+      "import": "./dist/wireguard.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -23,11 +27,13 @@
     "prepack": "pnpm build"
   },
   "dependencies": {
+    "@qpjoy/electron-core-wireguard": "workspace:^",
     "@qpjoy/mx-launcher-core": "workspace:*",
     "@qpjoy/mx-launcher-embed-sdk": "workspace:*",
     "@qpjoy/mx-launcher-standalone": "workspace:*"
   },
   "devDependencies": {
+    "@types/node": "^22.10.7",
     "typescript": "^5.7.3"
   }
 }

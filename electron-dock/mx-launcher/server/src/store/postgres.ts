@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
-import type { DataSource, Repository } from 'typeorm';
+import type { DataSource, EntityManager, Repository } from 'typeorm';
 
 import { createPlatformDataSource } from '../db/data-source.js';
 import { PlatformRecordEntity, type PlatformRecordRow } from '../db/entities.js';
@@ -32,6 +32,7 @@ import type {
   IssueTokenInput,
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
+  LauncherNetworkLeaseReleaseInput,
   LauncherNetworkSnapshot,
   LauncherNetworkSnapshotInput,
   LauncherNetworkMihomoSite,
@@ -117,7 +118,10 @@ import {
   buildLauncherNetworkTopology,
   buildLauncherNetworkReachabilityPlan,
   buildLauncherNetworkLease,
+  nextAvailableLauncherNetworkLeaseSequence,
+  launcherNetworkLeaseIsActive,
   launcherNetworkLeaseKey,
+  releaseLauncherNetworkLease,
   buildSiteSlotAccessAccount,
   buildSiteSlotExecutionRun,
   buildSiteSlotPlan,
@@ -1415,14 +1419,37 @@ export class PostgresStore implements PlatformStore {
       installId,
       deviceId
     };
-    const leaseKey = launcherNetworkLeaseKey(normalizedInput, product);
-    const previous = (await this.listLauncherNetworkLeases(product.productId))
-      .find((lease) => lease.leaseKey === leaseKey) ?? null;
-    const sequence = previous
-      ? previous.sequence
-      : await this.nextLauncherNetworkLeaseSequence(product.productId, normalizedInput.identityKind === 'user' ? 'user' : 'anonymous');
-    const lease = buildLauncherNetworkLease(this.config, normalizedInput, product, sequence, previous);
-    await this.saveRecord('launcher-network-lease', lease.leaseId, lease, lease.siteId);
+    const allocation = await this.dataSource.transaction(async (manager) => {
+      const records = manager.getRepository(PlatformRecordEntity);
+      const identityKind = normalizedInput.identityKind === 'user' ? 'user' : 'anonymous';
+      await this.lockLauncherNetworkLeasePool(manager, product.productId, identityKind);
+      const leaseKey = launcherNetworkLeaseKey(normalizedInput, product);
+      const now = new Date();
+      const nowIso = now.toISOString();
+      const leases = (await this.listRecordsFrom<LauncherNetworkLease>(records, 'launcher-network-lease'))
+        .filter((lease) => lease.productId === product.productId);
+      const expiredLeases = leases.filter((lease) => lease.status === 'active' && !launcherNetworkLeaseIsActive(lease, now));
+      for (const expiredLease of expiredLeases) {
+        const released = releaseLauncherNetworkLease(expiredLease, {
+          requestedBy: 'launcher-network-expiry',
+          requestId: input.requestId ?? null
+        }, nowIso);
+        await this.saveRecordTo(records, 'launcher-network-lease', released.leaseId, released, released.siteId);
+      }
+      const previous = leases.find((lease) => lease.leaseKey === leaseKey && launcherNetworkLeaseIsActive(lease, now)) ?? null;
+      const sequence = previous
+        ? previous.sequence
+        : nextAvailableLauncherNetworkLeaseSequence(
+          product,
+          identityKind,
+          leases,
+          now
+        );
+      const lease = buildLauncherNetworkLease(this.config, normalizedInput, product, sequence, previous, nowIso);
+      await this.saveRecordTo(records, 'launcher-network-lease', lease.leaseId, lease, lease.siteId);
+      return { lease, previous };
+    });
+    const { lease, previous } = allocation;
     await this.recordAudit({
       eventType: previous ? 'launcher_network.lease.refreshed' : 'launcher_network.lease.enrolled',
       actorKind: lease.identityKind === 'user' ? 'user' : 'install',
@@ -1442,6 +1469,32 @@ export class PostgresStore implements PlatformStore {
       }
     });
     return lease;
+  }
+
+  async releaseLauncherNetworkLease(leaseId: string, input: LauncherNetworkLeaseReleaseInput = {}): Promise<LauncherNetworkLease> {
+    const lease = await this.getLauncherNetworkLease(leaseId);
+    if (!lease) throw new Error('Launcher network lease not found');
+    const released = releaseLauncherNetworkLease(lease, input);
+    await this.saveRecord('launcher-network-lease', released.leaseId, released, released.siteId);
+    await this.recordAudit({
+      eventType: 'launcher_network.lease.released',
+      actorKind: released.identityKind === 'user' ? 'user' : 'install',
+      userId: released.userId,
+      installId: released.installId,
+      deviceId: released.deviceId,
+      productId: released.productId,
+      siteId: released.siteId,
+      requestId: input.requestId ?? null,
+      overlayIp: released.leaseIp,
+      metadata: {
+        leaseId: released.leaseId,
+        launcherMode: released.launcherMode,
+        identityKind: released.identityKind,
+        status: released.status,
+        releasedAt: released.releasedAt
+      }
+    });
+    return released;
   }
 
   async renderHysteria2MihomoSubscription(siteId: string, username: string): Promise<MihomoSubscriptionRender | null> {
@@ -2819,14 +2872,6 @@ export class PostgresStore implements PlatformStore {
     return createConfigSnapshot(this.config, enrollment, `cfgsnap_${randomUUID()}`, version, defaultMode);
   }
 
-  private async nextLauncherNetworkLeaseSequence(productId: string, identityKind: 'user' | 'anonymous'): Promise<number> {
-    const leases = await this.listLauncherNetworkLeases(productId);
-    const maxSequence = leases
-      .filter((lease) => lease.identityKind === identityKind)
-      .reduce((max, lease) => Math.max(max, lease.sequence), 0);
-    return maxSequence + 1;
-  }
-
   private async countRecords(kind: RecordKind): Promise<number> {
     return this.records.count({
       where: {
@@ -2837,7 +2882,14 @@ export class PostgresStore implements PlatformStore {
   }
 
   private async listRecords<T extends object>(kind: RecordKind): Promise<T[]> {
-    const rows = await this.records.find({
+    return this.listRecordsFrom(this.records, kind);
+  }
+
+  private async listRecordsFrom<T extends object>(
+    records: Repository<PlatformRecordRow>,
+    kind: RecordKind
+  ): Promise<T[]> {
+    const rows = await records.find({
       where: {
         kind,
         environment: this.config.environment
@@ -2866,13 +2918,34 @@ export class PostgresStore implements PlatformStore {
     data: T,
     siteId: string | null
   ): Promise<void> {
-    await this.records.save({
+    await this.saveRecordTo(this.records, kind, id, data, siteId);
+  }
+
+  private async saveRecordTo<T extends object>(
+    records: Repository<PlatformRecordRow>,
+    kind: RecordKind,
+    id: string,
+    data: T,
+    siteId: string | null
+  ): Promise<void> {
+    await records.save({
       kind,
       id,
       environment: this.config.environment,
       siteId,
       data: data as Record<string, unknown>
     });
+  }
+
+  private async lockLauncherNetworkLeasePool(
+    manager: EntityManager,
+    productId: string,
+    identityKind: 'user' | 'anonymous'
+  ): Promise<void> {
+    await manager.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+      [`mx-launcher:${this.config.environment}:${productId}`, `launcher-network-lease:${identityKind}`]
+    );
   }
 
   private async upsertRecord<T extends object>(
