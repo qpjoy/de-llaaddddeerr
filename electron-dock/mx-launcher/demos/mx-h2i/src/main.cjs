@@ -1436,16 +1436,20 @@ async function resolveBootstrapBaseUrl(config) {
     normalizeBaseUrl(config.internalApiBaseUrl)
   ].filter(Boolean);
   const candidates = bootstrapBaseUrlCandidates(seeds);
-  let lastError = null;
+  const failures = [];
   for (const candidate of candidates) {
     try {
       await probeBootstrapApiBaseUrl(candidate);
       return candidate;
     } catch (err) {
-      lastError = err;
+      failures.push({
+        candidate,
+        error: err,
+        override: hostResolveOverride(candidate)
+      });
     }
   }
-  throw new Error(`无法连接 bootstrap API：${candidates.join(', ')}；${errorMessage(lastError)}`);
+  throw new Error(`无法连接 bootstrap API：${summarizeBootstrapProbeFailures(failures)}`);
 }
 
 function bootstrapBaseUrlCandidates(seeds) {
@@ -1500,6 +1504,32 @@ function parseBootstrapPortList(value) {
     .split(/[,\s]+/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function summarizeBootstrapProbeFailures(failures) {
+  const rows = failures.slice(0, 8).map((failure) => {
+    const resolved = failure.override?.url && failure.override.url !== failure.candidate
+      ? ` -> ${failure.override.url}`
+      : '';
+    return `${failure.candidate}${resolved}: ${errorMessage(failure.error)}`;
+  });
+  const hidden = failures.length > rows.length ? `；另有 ${failures.length - rows.length} 个候选失败` : '';
+  const hostResolveHint = bootstrapHostResolveHint(failures);
+  return `${rows.join('；')}${hidden}${hostResolveHint}`;
+}
+
+function bootstrapHostResolveHint(failures) {
+  const apiFailures = failures.filter((failure) => {
+    try {
+      return new URL(failure.candidate).hostname === 'api.mxinfo-inc.cn';
+    } catch {
+      return false;
+    }
+  });
+  if (!apiFailures.length) return '';
+  const hasOverride = apiFailures.some((failure) => failure.override);
+  if (hasOverride) return '';
+  return '；Host Resolve 未命中 api.mxinfo-inc.cn，请在 .env 或高级选项设置 MX_H2I_HOST_RESOLVE=api.mxinfo-inc.cn=<Domestic公网IP>';
 }
 
 async function probeBootstrapApiBaseUrl(baseUrl) {
@@ -1727,13 +1757,20 @@ function defaultActivity() {
 }
 
 function loadDotEnvFiles() {
-  const candidates = uniqueValues([
-    path.join(process.cwd(), '.env'),
-    path.resolve(__dirname, '..', '.env'),
-    path.resolve(__dirname, '..', '..', '.env'),
-    process.resourcesPath ? path.join(process.resourcesPath, 'app', '.env') : null,
-    process.resourcesPath ? path.join(process.resourcesPath, '.env') : null
+  const bases = uniqueValues([
+    process.cwd(),
+    process.env.INIT_CWD,
+    path.resolve(process.cwd(), 'demos', 'mx-h2i'),
+    path.resolve(process.cwd(), 'electron-dock', 'mx-launcher', 'demos', 'mx-h2i'),
+    path.resolve(__dirname, '..'),
+    path.resolve(__dirname, '..', '..'),
+    process.resourcesPath ? path.join(process.resourcesPath, 'app') : null,
+    process.resourcesPath || null
   ].filter(Boolean));
+  const candidates = uniqueValues(bases.flatMap((base) => [
+    path.join(base, '.env.local'),
+    path.join(base, '.env')
+  ]));
   for (const file of candidates) {
     loadDotEnvFile(file);
   }
@@ -1798,7 +1835,7 @@ function hostResolveOverride(url) {
   } catch {
     return null;
   }
-  const resolveMap = parseHostResolve(runtime?.config?.hostResolve || DEFAULT_CONFIG.hostResolve);
+  const resolveMap = parseHostResolve(effectiveHostResolve());
   const mapped = resolveMap.get(parsed.hostname.toLowerCase());
   if (!mapped) return null;
   const target = new URL(parsed.toString());
@@ -1809,6 +1846,13 @@ function hostResolveOverride(url) {
     hostHeader: parsed.host,
     servername: parsed.hostname
   };
+}
+
+function effectiveHostResolve() {
+  return [
+    runtime?.config?.hostResolve,
+    DEFAULT_CONFIG.hostResolve
+  ].filter(Boolean).join(',');
 }
 
 function parseHostResolve(value) {
@@ -1928,6 +1972,24 @@ function errorMessage(err) {
     if (typeof payload.error === 'string') return payload.error;
   }
   if (err.name === 'AbortError') return '请求超时。';
+  if (err.cause && typeof err.cause === 'object') {
+    const code = typeof err.cause.code === 'string' ? err.cause.code : '';
+    const address = typeof err.cause.address === 'string' ? err.cause.address : '';
+    const port = err.cause.port ? `:${err.cause.port}` : '';
+    const causeMessage = typeof err.cause.message === 'string' ? err.cause.message : '';
+    if (code || causeMessage) {
+      return [err.message, code, address ? `${address}${port}` : '', causeMessage]
+        .filter(Boolean)
+        .join(' / ');
+    }
+  }
+  if (typeof err.code === 'string') {
+    const address = typeof err.address === 'string' ? err.address : '';
+    const port = err.port ? `:${err.port}` : '';
+    return [err.message, err.code, address ? `${address}${port}` : '']
+      .filter(Boolean)
+      .join(' / ');
+  }
   return err.message || String(err);
 }
 
