@@ -1646,6 +1646,7 @@ function requestJsonWithHostOverride(override, options = {}) {
     const headers = {
       accept: 'application/json',
       host: override.hostHeader,
+      ...(override.originalHostHeader ? { 'x-forwarded-host': override.originalHostHeader } : {}),
       ...(body ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {})
     };
     const client = target.protocol === 'https:' ? https : http;
@@ -1841,10 +1842,12 @@ function hostResolveOverride(url) {
   const target = new URL(parsed.toString());
   target.hostname = mapped.host;
   if (mapped.port) target.port = mapped.port;
+  const useOriginalHostHeader = target.protocol === 'https:';
   return {
     url: target.toString(),
-    hostHeader: parsed.host,
-    servername: parsed.hostname
+    hostHeader: useOriginalHostHeader ? parsed.host : target.host,
+    originalHostHeader: parsed.host,
+    servername: useOriginalHostHeader ? parsed.hostname : undefined
   };
 }
 

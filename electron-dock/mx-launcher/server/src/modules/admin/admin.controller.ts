@@ -5246,6 +5246,7 @@ function domesticRuntimeConfigApplyScript(config: SiteSlotDomesticRuntimeConfig)
   const envLines = Object.entries(config.env)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `${key}=${value}`);
+  const caddyfileBase64 = Buffer.from(domesticServicesCaddyfileContent()).toString('base64');
   return [
     'set -eu',
     'printf "mx-domestic-runtime-config-apply\\n"',
@@ -5254,12 +5255,79 @@ function domesticRuntimeConfigApplyScript(config: SiteSlotDomesticRuntimeConfig)
     'test -f "$stack_dir/manage.sh" || { echo "blocked: Domestic manage.sh is missing; run Install / Sync first"; exit 1; }',
     `printf "%s\\n" ${envLines.map(shellQuote).join(' ')} > "$stack_dir/.env.tmp"`,
     'mv "$stack_dir/.env.tmp" "$stack_dir/.env"',
+    `if command -v base64 >/dev/null 2>&1; then printf "%s" ${shellQuote(caddyfileBase64)} | base64 -d > "$stack_dir/Caddyfile.tmp"; mv "$stack_dir/Caddyfile.tmp" "$stack_dir/Caddyfile"; else echo "blocked: base64 is required to refresh Domestic Caddyfile"; exit 1; fi`,
     'cd "$stack_dir"',
     'chmod +x ./manage.sh || true',
     './manage.sh up',
     './manage.sh status || true',
     './manage.sh health'
   ].join('; ');
+}
+
+function domesticServicesCaddyfileContent(): string {
+  return [
+    '{',
+    '  auto_https off',
+    '}',
+    '',
+    ':8088 {',
+    '  encode gzip',
+    '  header {',
+    '    X-MX-Site-Role domestic',
+    '    X-MX-Domestic-Mode bootstrap-and-relay',
+    '  }',
+    '',
+    '  @health path /healthz',
+    '  respond @health "{\\"ok\\":true,\\"service\\":\\"mx-domestic-edge\\",\\"role\\":\\"domestic\\",\\"mode\\":\\"bootstrap-and-relay\\"}" 200',
+    '',
+    '  @bootstrapHealth path /bootstrap-healthz /internal-healthz',
+    '  handle @bootstrapHealth {',
+    '    rewrite * /healthz',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up Host {upstream_hostport}',
+    '      header_up X-Forwarded-Host {http.request.host}',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '',
+    '  handle_path /evidence/* {',
+    '    root * /srv/mx/evidence',
+    '    file_server browse',
+    '  }',
+    '',
+    '  handle_path /snapshots/* {',
+    '    root * /srv/mx/snapshots',
+    '    file_server browse',
+    '  }',
+    '',
+    '  handle_path /h2i/* {',
+    '    reverse_proxy {$MX_INTERNAL_H2I_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up Host {upstream_hostport}',
+    '      header_up X-Forwarded-Host {http.request.host}',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '',
+    '  handle_path /api/* {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up Host {upstream_hostport}',
+    '      header_up X-Forwarded-Host {http.request.host}',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '',
+    '  handle /internal/* {',
+    '    reverse_proxy {$MX_INTERNAL_API_UPSTREAM:http://10.88.88.88:18090} {',
+    '      header_up Host {upstream_hostport}',
+    '      header_up X-Forwarded-Host {http.request.host}',
+    '      header_up X-MX-Forwarded-By domestic-edge',
+    '    }',
+    '  }',
+    '',
+    '  respond "mx-domestic-edge\\n" 200',
+    '}',
+    ''
+  ].join('\n');
 }
 
 async function runSshScriptWithProfile(profile: SiteSlotSshProfile, script: string, timeoutMs: number) {
