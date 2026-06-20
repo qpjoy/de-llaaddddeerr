@@ -7,13 +7,15 @@
   "description": "MX-H2I Electron standalone launcher demo.",
   "main": "src/main.cjs",
   "scripts": {
-    "dev": "electron .",
+    "setup": "node scripts/dev-mode.mjs local",
+    "dev": "node scripts/dev-mode.mjs local && electron-builder install-app-deps && electron .",
     "start": "pnpm dev",
-    "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check electron-builder.config.cjs",
-    "package": "pnpm run check && electron-builder --config electron-builder.config.cjs --dir",
-    "make": "pnpm run check && electron-builder --config electron-builder.config.cjs",
-    "make:mac:dmg": "pnpm run check && electron-builder --config electron-builder.config.cjs --mac dmg --universal",
-    "make:win": "pnpm run check && electron-builder --config electron-builder.config.cjs --win --x64"
+    "build": "pnpm run package",
+    "check": "node --check scripts/dev-mode.mjs && node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check electron-builder.config.cjs",
+    "package": "node scripts/dev-mode.mjs local && pnpm run check && electron-builder --config electron-builder.config.cjs --dir",
+    "make": "node scripts/dev-mode.mjs local && pnpm run check && electron-builder --config electron-builder.config.cjs",
+    "make:mac:dmg": "node scripts/dev-mode.mjs local && pnpm run check && electron-builder --config electron-builder.config.cjs --mac dmg --universal",
+    "make:win": "node scripts/dev-mode.mjs local && pnpm run check && electron-builder --config electron-builder.config.cjs --win --x64"
   },
   "dependencies": {
     "@qpjoy/electron-launcher": "workspace:*"

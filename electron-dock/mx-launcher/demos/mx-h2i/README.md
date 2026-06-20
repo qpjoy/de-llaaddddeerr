@@ -16,12 +16,22 @@ From `electron-dock/mx-launcher`:
 pnpm --filter @qpjoy/mx-h2i-demo dev
 ```
 
+`pnpm dev` follows the V1 HDO local-development flow: it prepares the local
+Launcher workspace packages before starting Electron. This keeps
+`@qpjoy/electron-launcher` usable from the workspace without publishing it to
+npm first.
+
 ## Package
 
 ```sh
+pnpm --filter @qpjoy/mx-h2i-demo build
 pnpm --filter @qpjoy/mx-h2i-demo package
 pnpm --filter @qpjoy/mx-h2i-demo make
 ```
+
+The package and make scripts run the same local Launcher preparation step
+before invoking electron-builder, so clean Windows workspaces do not start with
+an empty `@qpjoy/electron-launcher/dist`.
 
 The Electron entry is intentionally light for the reservation phase:
 
