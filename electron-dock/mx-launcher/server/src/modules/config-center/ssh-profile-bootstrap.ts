@@ -156,6 +156,8 @@ export async function prepareSiteSlotSshProfileBootstrap(
       knownHostsFile,
       sshConfigFile,
       hostKeyAlias,
+      serverPorts: input.serverPorts,
+      exportPort: input.exportPort,
       strictHostKeyChecking: 'yes',
       connectTimeoutSeconds,
       batchMode: 'yes',

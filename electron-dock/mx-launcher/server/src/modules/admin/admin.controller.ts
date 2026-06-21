@@ -203,8 +203,8 @@ export class AdminController {
     const requestedBy = stringValue(body.requestedBy) ?? actionPolicy.principal.principalId;
     const requestId = stringValue(body.requestId) ?? `admin-oversea-shadow-setup-${Date.now()}`;
     const internalBaseUrl = normalizeBaseUrl(stringValue(body.internalBaseUrl) ?? process.env.MX_INTERNAL_BASE_URL ?? 'http://127.0.0.1:18090');
-    const serverPorts = stringValue(body.serverPorts);
-    const exportPort = numberValueOrNull(body.exportPort);
+    const requestServerPorts = stringValue(body.serverPorts);
+    const requestExportPort = numberValueOrNull(body.exportPort);
     const profile = await this.store.upsertSiteSlotSshProfile({
       profileId: stringValue(body.sshProfileId) ?? stringValue(body.profileId),
       siteId,
@@ -216,6 +216,8 @@ export class AdminController {
       knownHostsFile: stringValue(body.knownHostsFile),
       sshConfigFile: stringValue(body.sshConfigFile),
       hostKeyAlias: stringValue(body.hostKeyAlias) ?? siteId,
+      serverPorts: requestServerPorts,
+      exportPort: requestExportPort,
       strictHostKeyChecking: stringValue(body.strictHostKeyChecking) ?? 'yes',
       connectTimeoutSeconds: numberValueOrNull(body.connectTimeoutSeconds) ?? 30,
       batchMode: stringValue(body.batchMode) ?? 'yes',
@@ -223,6 +225,8 @@ export class AdminController {
       requestedBy,
       requestId: `${requestId}-ssh-profile`
     });
+    const serverPorts = requestServerPorts ?? profile.serverPorts;
+    const exportPort = requestExportPort ?? profile.exportPort;
     const access = await this.store.issueSiteSlotAccessAccounts({
       siteId,
       service: 'hysteria2',
@@ -345,8 +349,8 @@ export class AdminController {
     const executeRemote = booleanValue(body.executeRemote) === true;
     const confirmInstall = booleanValue(body.confirmInstall) === true;
     const force = booleanValue(body.force) === true;
-    const serverPorts = stringValue(body.serverPorts);
-    const exportPort = numberValueOrNull(body.exportPort);
+    const requestServerPorts = stringValue(body.serverPorts);
+    const requestExportPort = numberValueOrNull(body.exportPort);
     const ensureSteps: Array<Record<string, unknown>> = [];
 
     const profiles = await this.store.listSiteSlotSshProfiles();
@@ -367,6 +371,8 @@ export class AdminController {
       const ensure = ensureBlocked(siteId, 'ssh-profile-not-ready', profileFailures, ensureSteps);
       return { ensure, oversea: await this.buildOverseaOverview(actionPolicy, ensure) };
     }
+    const serverPorts = requestServerPorts ?? profile.serverPorts;
+    const exportPort = requestExportPort ?? profile.exportPort;
 
     const access = await this.store.issueSiteSlotAccessAccounts({
       siteId,
@@ -805,6 +811,8 @@ export class AdminController {
         knownHostsFile: profile.knownHostsFile,
         sshConfigFile: profile.sshConfigFile,
         hostKeyAlias: profile.hostKeyAlias,
+        serverPorts: profile.serverPorts,
+        exportPort: profile.exportPort,
         status: profile.status,
         warnings: profile.warnings
       } : null,
@@ -821,8 +829,8 @@ export class AdminController {
         docker: latestReport ? reportStepStatus(latestReport, 'remote-preflight') : null,
         hysteria2: latestReport && workerReportHasRemoteExecution(latestReport) && latestReport.status === 'passed' ? 'ready' : status === 'ready-to-install' ? 'pending-install' : 'unknown',
         siteAgent: latestReport && workerReportHasRemoteExecution(latestReport) && latestReport.status === 'passed' ? 'ready' : 'unknown',
-        serverPorts: pipeline?.plan.runtime.oversea?.serverPorts ?? mihomoSite?.serverPorts ?? null,
-        exportPort: pipeline?.plan.runtime.oversea?.exportPort ?? null,
+        serverPorts: pipeline?.plan.runtime.oversea?.serverPorts ?? mihomoSite?.serverPorts ?? profile?.serverPorts ?? null,
+        exportPort: pipeline?.plan.runtime.oversea?.exportPort ?? profile?.exportPort ?? null,
         exportBaseUrl: pipeline?.plan.runtime.oversea?.exportBaseUrl ?? null,
         workerReportId: latestReport?.reportId ?? null,
         workerReportStatus: latestReport?.status ?? null,

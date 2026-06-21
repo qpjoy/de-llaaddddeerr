@@ -1718,10 +1718,12 @@ async function allowSshProfileReadonlyPolicy() {
 }
 
 function sshProfileFormPayload() {
+  const kind = sshProfileKind.value === 'domestic' ? 'domestic' : 'oversea';
+  const runtimePayload = kind === 'oversea' ? overseaRuntimeFormPayload() : {};
   return {
     profileId: blankToNull(sshProfileId.value),
     siteId: blankToNull(sshProfileSiteId.value),
-    kind: sshProfileKind.value,
+    kind,
     host: blankToNull(sshProfileHost.value),
     sshUser: blankToNull(sshProfileUser.value) || 'root',
     sshPort: positiveNumberOrNull(sshProfilePort.value) || 22,
@@ -1733,6 +1735,7 @@ function sshProfileFormPayload() {
     connectTimeoutSeconds: positiveNumberOrNull(sshProfileTimeout.value) || 30,
     batchMode: sshProfileBatchMode.value,
     status: 'active',
+    ...runtimePayload,
     requestedBy: 'desktop-admin',
     requestId: `desktop-ssh-profile-${Date.now()}`
   };
@@ -1869,16 +1872,19 @@ function sshProfileShadowSetupPayload() {
 }
 
 function sshProfileBootstrapPayload(password) {
+  const kind = sshProfileKind.value === 'domestic' ? 'domestic' : 'oversea';
+  const runtimePayload = kind === 'oversea' ? overseaRuntimeFormPayload() : {};
   return {
     profileId: blankToNull(sshProfileId.value),
     siteId: blankToNull(sshProfileSiteId.value),
-    kind: sshProfileKind.value,
+    kind,
     host: blankToNull(sshProfileHost.value),
     sshUser: blankToNull(sshProfileUser.value) || 'root',
     sshPort: positiveNumberOrNull(sshProfilePort.value) || 22,
     password,
     hostKeyAlias: blankToNull(sshProfileHostKeyAlias.value),
     connectTimeoutSeconds: positiveNumberOrNull(sshProfileTimeout.value) || 30,
+    ...runtimePayload,
     rotateKey: sshProfileRotateKey.checked,
     scanHostKey: true,
     executeBootstrap: true,
@@ -1889,15 +1895,18 @@ function sshProfileBootstrapPayload(password) {
 }
 
 function sshProfileHostKeyRefreshPayload() {
+  const kind = sshProfileKind.value === 'domestic' ? 'domestic' : 'oversea';
+  const runtimePayload = kind === 'oversea' ? overseaRuntimeFormPayload() : {};
   return {
     profileId: blankToNull(sshProfileId.value),
     siteId: blankToNull(sshProfileSiteId.value),
-    kind: sshProfileKind.value,
+    kind,
     host: blankToNull(sshProfileHost.value),
     sshUser: blankToNull(sshProfileUser.value) || 'root',
     sshPort: positiveNumberOrNull(sshProfilePort.value) || 22,
     hostKeyAlias: blankToNull(sshProfileHostKeyAlias.value) || blankToNull(sshProfileSiteId.value),
     connectTimeoutSeconds: positiveNumberOrNull(sshProfileTimeout.value) || 30,
+    ...runtimePayload,
     rotateKey: false,
     scanHostKey: true,
     executeBootstrap: false,
@@ -2573,8 +2582,8 @@ function fillSshProfileForm(profile) {
   sshProfilePassword.value = '';
   sshProfileRotateKey.checked = false;
   sshProfilePort.value = String(profile.sshPort || 22);
-  sshProfileHy2Ports.value = profile.kind === 'oversea' ? runtime.serverPorts : '';
-  sshProfileHealthPort.value = profile.kind === 'oversea' ? String(runtime.exportPort) : '';
+  sshProfileHy2Ports.value = profile.kind === 'oversea' ? (profile.serverPorts || runtime.serverPorts) : '';
+  sshProfileHealthPort.value = profile.kind === 'oversea' ? String(positiveNumberOrNull(profile.exportPort) || runtime.exportPort) : '';
   sshProfileStrict.value = profile.strictHostKeyChecking || 'yes';
   sshProfileBatchMode.value = profile.batchMode || 'yes';
   sshProfileTimeout.value = String(profile.connectTimeoutSeconds || 30);
@@ -4288,8 +4297,8 @@ function renderOverseaSiteDetail(site) {
     </div>
     <dl class="oversea-runtime-meta">
       <div><dt>SSH profile</dt><dd>${escapeHtml(site.sshProfile?.profileId || 'not linked')}</dd></div>
-      <div><dt>HY2 UDP</dt><dd>${escapeHtml(site.runtime?.serverPorts || site.mihomoSite?.serverPorts || '51288')}</dd></div>
-      <div><dt>Health TCP</dt><dd>${escapeHtml(site.runtime?.exportPort || '3434')}</dd></div>
+      <div><dt>HY2 UDP</dt><dd>${escapeHtml(site.runtime?.serverPorts || site.sshProfile?.serverPorts || site.mihomoSite?.serverPorts || '51288')}</dd></div>
+      <div><dt>Health TCP</dt><dd>${escapeHtml(site.runtime?.exportPort || site.sshProfile?.exportPort || '3434')}</dd></div>
       <div><dt>Identity</dt><dd>${escapeHtml(site.sshProfile?.identityFile || '-')}</dd></div>
       <div><dt>SSH Config</dt><dd>${escapeHtml(site.sshProfile?.sshConfigFile || '-')}</dd></div>
       <div><dt>Worker report</dt><dd>${escapeHtml(site.runtime?.workerReportStatus || '-')} ${escapeHtml(site.runtime?.workerReportId || '')}</dd></div>
@@ -4397,8 +4406,8 @@ function overseaRuntimeForSiteId(siteId) {
   const site = overseaSitesWithDraft(asArray(state.overseaOverview?.sites))
     .find((item) => item.siteId === siteId);
   return {
-    serverPorts: site?.runtime?.serverPorts || site?.mihomoSite?.serverPorts || '51288',
-    exportPort: positiveNumberOrNull(site?.runtime?.exportPort) || 3434
+    serverPorts: site?.runtime?.serverPorts || site?.sshProfile?.serverPorts || site?.mihomoSite?.serverPorts || '51288',
+    exportPort: positiveNumberOrNull(site?.runtime?.exportPort) || positiveNumberOrNull(site?.sshProfile?.exportPort) || 3434
   };
 }
 

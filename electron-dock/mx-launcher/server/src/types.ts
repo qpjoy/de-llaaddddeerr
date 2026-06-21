@@ -925,6 +925,8 @@ export interface SiteSlotSshProfileInput {
   knownHostsFile?: string | null;
   sshConfigFile?: string | null;
   hostKeyAlias?: string | null;
+  serverPorts?: string | null;
+  exportPort?: number | null;
   strictHostKeyChecking?: 'yes' | 'no' | 'ask' | 'accept-new' | string | null;
   connectTimeoutSeconds?: number | null;
   batchMode?: 'yes' | 'no' | string | null;
@@ -942,6 +944,8 @@ export interface SiteSlotSshProfileBootstrapInput {
   sshPort?: number | null;
   password?: string | null;
   hostKeyAlias?: string | null;
+  serverPorts?: string | null;
+  exportPort?: number | null;
   connectTimeoutSeconds?: number | null;
   rotateKey?: boolean | null;
   scanHostKey?: boolean | null;
@@ -1011,6 +1015,8 @@ export interface SiteSlotSshProfile {
   knownHostsFile: string | null;
   sshConfigFile: string | null;
   hostKeyAlias: string | null;
+  serverPorts: string | null;
+  exportPort: number | null;
   strictHostKeyChecking: 'yes' | 'no' | 'ask' | 'accept-new';
   connectTimeoutSeconds: number;
   batchMode: 'yes' | 'no';

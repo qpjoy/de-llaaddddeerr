@@ -2176,8 +2176,15 @@ export function buildSiteSlotPlan(
   const domesticRuntimeConfig = kind === 'domestic'
     ? input.domesticRuntimeConfig ?? buildSiteSlotDomesticRuntimeConfig(config, { siteId }, null, createdAt)
     : null;
+  const runtimeInput = kind === 'oversea'
+    ? {
+        ...input,
+        serverPorts: input.serverPorts ?? activeProfile?.serverPorts,
+        exportPort: input.exportPort ?? activeProfile?.exportPort
+      }
+    : input;
   const overseaRuntimeConfig = kind === 'oversea'
-    ? buildSiteSlotOverseaRuntimeConfig(input, host)
+    ? buildSiteSlotOverseaRuntimeConfig(runtimeInput, host)
     : null;
   const warnings = [
     ...baseWarnings,
@@ -2222,10 +2229,10 @@ export function buildSiteSlotPlan(
       domestic: domesticRuntimeConfig,
       oversea: overseaRuntimeConfig
     },
-    preflightChecks: siteSlotPreflightChecks(kind, input, host, sshUser, sshPort, networkMode),
-    deploymentPhases: siteSlotDeploymentPhases(kind, input, host, sshUser, sshPort, networkMode, domesticRuntimeConfig, overseaRuntimeConfig),
+    preflightChecks: siteSlotPreflightChecks(kind, runtimeInput, host, sshUser, sshPort, networkMode),
+    deploymentPhases: siteSlotDeploymentPhases(kind, runtimeInput, host, sshUser, sshPort, networkMode, domesticRuntimeConfig, overseaRuntimeConfig),
     warnings,
-    nextActions: siteSlotNextActions(kind, status, networkMode, input),
+    nextActions: siteSlotNextActions(kind, status, networkMode, runtimeInput),
     createdBy: input.createdBy?.trim() || 'internal-admin-shadow',
     createdAt
   };
@@ -2252,6 +2259,18 @@ export function buildSiteSlotSshProfile(
   const knownHostsFile = input.knownHostsFile?.trim() || previous?.knownHostsFile || null;
   const sshConfigFile = input.sshConfigFile?.trim() || previous?.sshConfigFile || null;
   const hostKeyAlias = input.hostKeyAlias?.trim() || previous?.hostKeyAlias || null;
+  const serverPorts = kind === 'oversea'
+    ? normalizeHysteria2ServerPorts(input.serverPorts ?? previous?.serverPorts).normalized
+    : null;
+  const exportPort = kind === 'oversea'
+    ? normalizeTcpPort(input.exportPort ?? previous?.exportPort, HYSTERIA2_EXPORT_FALLBACK_PORT)
+    : null;
+  if (kind === 'oversea' && input.serverPorts && serverPorts !== input.serverPorts.trim()) {
+    warnings.push(`runtime: invalid Hysteria2 serverPorts "${input.serverPorts}", using ${serverPorts}`);
+  }
+  if (kind === 'oversea' && input.exportPort != null && exportPort !== input.exportPort) {
+    warnings.push(`runtime: invalid health/evidence exportPort "${input.exportPort}", using ${exportPort}`);
+  }
   if (!identityFile) warnings.push('missing: identityFile is required before artifact-push-remote-ssh can execute');
   if (!knownHostsFile) warnings.push('missing: knownHostsFile is required before artifact-push-remote-ssh can verify host keys');
   if (!hostKeyAlias) warnings.push('recommended: hostKeyAlias pins the expected known_hosts entry for this slot');
@@ -2267,6 +2286,8 @@ export function buildSiteSlotSshProfile(
     knownHostsFile,
     sshConfigFile,
     hostKeyAlias,
+    serverPorts,
+    exportPort,
     strictHostKeyChecking,
     connectTimeoutSeconds,
     batchMode,
