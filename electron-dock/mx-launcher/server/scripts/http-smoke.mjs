@@ -16,6 +16,10 @@ const shadowHomePublicKey = 'WvN2n3i6LXoJt1qX0lA2uP7cYy4rZs8mQb9dEfGhIjK=';
 const smokeHomePeerLeaseIp = '10.90.100.20';
 const smokeDomesticSiteId = 'domestic-smoke';
 const smokeDomesticHost = process.env.MX_SMOKE_DOMESTIC_HOST || 'domestic-smoke.localdomain';
+const smokeOverseaSiteId = process.env.MX_SMOKE_OVERSEA_SITE_ID || 'oversea-smoke';
+const smokeOverseaHost = process.env.MX_SMOKE_OVERSEA_HOST || 'oversea-smoke.example.com';
+const smokeOverseaSshProfileId = process.env.MX_SMOKE_OVERSEA_PROFILE_ID || `sshprof_http_smoke_${safeSmokeId(smokeOverseaSiteId)}`;
+const smokeOverseaAccountPrefix = safeAccessAccountPrefix(smokeOverseaSiteId);
 const mxLauncherRoot = resolve(scriptDir, '../..');
 const remoteReadyFixture = remoteReadyOnly ? prepareRemoteReadySshFixture() : null;
 
@@ -270,15 +274,15 @@ const checks = [
     path: '/internal/v1/config-center/site-slot-ssh-profiles',
     method: 'POST',
     body: {
-      profileId: 'sshprof_http_smoke_oversea',
-      siteId: 'oversea-main',
+      profileId: smokeOverseaSshProfileId,
+      siteId: smokeOverseaSiteId,
       kind: 'oversea',
-      host: 'oversea.example.com',
+      host: smokeOverseaHost,
       sshUser: 'root',
       sshPort: 22,
-      identityFile: '/opt/mx/ssh/oversea-main_ed25519',
-      knownHostsFile: '/opt/mx/ssh/known_hosts.oversea-main',
-      hostKeyAlias: 'oversea-main',
+      identityFile: `/opt/mx/ssh/${smokeOverseaSiteId}_ed25519`,
+      knownHostsFile: `/opt/mx/ssh/known_hosts.${smokeOverseaSiteId}`,
+      hostKeyAlias: smokeOverseaSiteId,
       strictHostKeyChecking: 'yes',
       connectTimeoutSeconds: 9,
       batchMode: 'yes',
@@ -287,8 +291,8 @@ const checks = [
     },
     assert: (body) => {
       state.sshProfileId = body?.profile?.profileId;
-      return state.sshProfileId === 'sshprof_http_smoke_oversea'
-        && body?.profile?.siteId === 'oversea-main'
+      return state.sshProfileId === smokeOverseaSshProfileId
+        && body?.profile?.siteId === smokeOverseaSiteId
         && body?.profile?.status === 'active'
         && body?.profile?.strictHostKeyChecking === 'yes'
         && body?.profile?.connectTimeoutSeconds === 9
@@ -341,13 +345,13 @@ const checks = [
     name: 'config center ssh profile get',
     path: () => `/internal/v1/config-center/site-slot-ssh-profiles/${encodeURIComponent(state.sshProfileId)}`,
     assert: (body) => body?.profile?.profileId === state.sshProfileId
-      && body?.profile?.knownHostsFile === '/opt/mx/ssh/known_hosts.oversea-main'
+      && body?.profile?.knownHostsFile === `/opt/mx/ssh/known_hosts.${smokeOverseaSiteId}`
   },
   {
     name: 'config center ssh profile by site',
-    path: '/internal/v1/config-center/site-slot-ssh-profiles/site/oversea-main',
+    path: () => `/internal/v1/config-center/site-slot-ssh-profiles/site/${encodeURIComponent(smokeOverseaSiteId)}`,
     assert: (body) => body?.profile?.profileId === state.sshProfileId
-      && body?.profile?.hostKeyAlias === 'oversea-main'
+      && body?.profile?.hostKeyAlias === smokeOverseaSiteId
   },
   {
     name: 'config center ssh profile readiness blocked',
@@ -571,7 +575,7 @@ const checks = [
     method: 'POST',
     body: () => ({
       kind: 'oversea',
-      siteId: 'oversea-main',
+      siteId: smokeOverseaSiteId,
       sshProfileId: state.sshProfileId,
       hasDocker: true,
       hasOutboundInternet: true,
@@ -595,7 +599,7 @@ const checks = [
         && body?.plan?.ssh?.profileId === state.sshProfileId
         && body?.plan?.ssh?.profileSource === 'config-center'
         && body?.plan?.ssh?.profileStatus === 'active'
-        && body?.plan?.host === 'oversea.example.com'
+        && body?.plan?.host === smokeOverseaHost
         && body?.plan?.ssh?.user === 'root'
         && body?.plan?.network?.qpTunnelCliMode === 'server-on'
         && body?.plan?.services?.dockerStacks?.includes('docker/hysteria2-access-stack')
@@ -613,8 +617,8 @@ const checks = [
         && configureAccess?.commands?.some((command) => command.includes('./manage.sh sync-internal-defaults'))
         && configureAccess?.commands?.some((command) => command.includes('./manage.sh docker-status'))
         && configureAccess?.commands?.some((command) => command.includes('@qpjoy/tunnel-cli') || command.includes('qp-tunnel-cli register') || command.includes('registration skipped'))
-        && publishSubscription?.commands?.some((command) => command.includes('domesticBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/oversea-main-domestic.yaml'))
-        && publishSubscription?.commands?.some((command) => command.includes('internalBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/oversea-main-internal.yaml'))
+        && publishSubscription?.commands?.some((command) => command.includes('domesticBootstrapSubscription=') && command.includes(`/subscriptions/hysteria2/${smokeOverseaAccountPrefix}-domestic.yaml`))
+        && publishSubscription?.commands?.some((command) => command.includes('internalBootstrapSubscription=') && command.includes(`/subscriptions/hysteria2/${smokeOverseaAccountPrefix}-internal.yaml`))
         && deployServices?.mode === 'artifact-push'
         && deployServices?.commands?.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-services.tar.gz'))
         && deployServices?.commands?.some((command) => command.includes('/opt/mx/incoming/mx-oversea-services.tar.gz'))
@@ -627,7 +631,7 @@ const checks = [
   },
   {
     name: 'oversea access accounts issue defaults',
-    path: '/internal/v1/site-slots/oversea-main/access-accounts',
+    path: () => `/internal/v1/site-slots/${encodeURIComponent(smokeOverseaSiteId)}/access-accounts`,
     method: 'POST',
     body: () => ({
       issueDefaults: true,
@@ -638,33 +642,33 @@ const checks = [
       requestId: 'http-smoke-oversea-access-accounts'
     }),
     assert: (body) => {
-      state.overseaDomesticAccount = 'oversea-main-domestic';
-      return body?.site?.siteId === 'oversea-main'
+      state.overseaDomesticAccount = `${smokeOverseaAccountPrefix}-domestic`;
+      return body?.site?.siteId === smokeOverseaSiteId
         && body?.site?.mode === 'internal-managed'
         && body?.site?.serverPorts === (state.overseaServerPorts || '51288')
         && body?.site?.tlsFingerprint === 'D6:55:9C:55:7C:BF:F7:F1:D1:EE:0C:65:18:8E:90:A1:50:66:1F:70:F8:71:1D:16:50:E9:D2:B2:48:DD:00:58'
         && body?.site?.reachability?.domesticWgRelayRequired === true
         && Array.isArray(body?.accounts)
         && body.accounts.length >= 11
-        && body.accounts.some((account) => account.username === 'oversea-main-internal' && account.role === 'internal')
+        && body.accounts.some((account) => account.username === `${smokeOverseaAccountPrefix}-internal` && account.role === 'internal')
         && body.accounts.some((account) => account.username === state.overseaDomesticAccount && account.role === 'domestic')
-        && body.accounts.some((account) => account.username === 'oversea-main-internal09' && account.role === 'internal-reserved')
+        && body.accounts.some((account) => account.username === `${smokeOverseaAccountPrefix}-internal09` && account.role === 'internal-reserved')
         && body.accounts.every((account) => account.service === 'hysteria2' && typeof account.authToken === 'string');
     }
   },
   {
     name: 'oversea mihomo site get',
-    path: '/internal/v1/launcher-network/mihomo/sites/oversea-main',
-    assert: (body) => body?.site?.siteId === 'oversea-main'
-      && (body?.site?.subscriptionBaseUrl?.endsWith('/internal/v1/site-slots/oversea-main/subscriptions/hysteria2')
-        || body?.site?.subscriptionBaseUrl === 'internal-pushed://oversea-main/subscriptions/hysteria2')
+    path: () => `/internal/v1/launcher-network/mihomo/sites/${encodeURIComponent(smokeOverseaSiteId)}`,
+    assert: (body) => body?.site?.siteId === smokeOverseaSiteId
+      && (body?.site?.subscriptionBaseUrl?.endsWith(`/internal/v1/site-slots/${smokeOverseaSiteId}/subscriptions/hysteria2`)
+        || body?.site?.subscriptionBaseUrl === `internal-pushed://${smokeOverseaSiteId}/subscriptions/hysteria2`)
       && body?.site?.reachability?.internalUrlOnly === true
       && body?.site?.reachability?.h2iRequired === true
   },
   {
     name: 'oversea mihomo reachability ordering',
-    path: '/internal/v1/launcher-network/mihomo/sites/oversea-main/reachability',
-    assert: (body) => body?.reachability?.siteId === 'oversea-main'
+    path: () => `/internal/v1/launcher-network/mihomo/sites/${encodeURIComponent(smokeOverseaSiteId)}/reachability`,
+    assert: (body) => body?.reachability?.siteId === smokeOverseaSiteId
       && body?.reachability?.verdict === 'h-endpoint-blocked'
       && body?.reachability?.currentBoundary === 'internal-only'
       && body?.reachability?.gates?.domesticWgRelayRequired === true
@@ -683,7 +687,7 @@ const checks = [
   {
     name: 'oversea domestic mihomo subscription yaml',
     run: async () => {
-      const response = await fetch(`${baseUrl}/internal/v1/site-slots/oversea-main/subscriptions/hysteria2/${state.overseaDomesticAccount}.yaml`);
+      const response = await fetch(`${baseUrl}/internal/v1/site-slots/${encodeURIComponent(smokeOverseaSiteId)}/subscriptions/hysteria2/${encodeURIComponent(state.overseaDomesticAccount)}.yaml`);
       const text = await response.text();
       if (!response.ok) throw new Error(`subscription yaml failed: HTTP ${response.status} ${text}`);
       return { text, contentType: response.headers.get('content-type') };
@@ -705,7 +709,7 @@ const checks = [
       && body.text.includes('GEOSITE,CN,DIRECT')
       && body.text.includes('GEOIP,CN,DIRECT')
       && body.text.includes('10.88.0.0/16')
-      && body.text.includes('oversea-main-hysteria2')
+      && body.text.includes(`${smokeOverseaSiteId}-hysteria2`)
       && body.text.includes('Reachability: this Internal subscription URL requires Domestic WG relay/H2I')
   },
   {
@@ -749,7 +753,7 @@ const checks = [
         && prepareRelayAuthority?.commands?.some((command) => command.includes('Internal has no public ingress'))
         && prepareRelayAuthority?.commands?.some((command) => command.includes('Domestic WG relay primary'))
         && resolveSubscription?.mode === 'admin-action'
-        && resolveSubscription?.commands?.some((command) => command.includes('domesticBootstrapSubscription') && command.includes('/internal/v1/site-slots/oversea-main/subscriptions/hysteria2/oversea-main-domestic.yaml'))
+        && resolveSubscription?.commands?.some((command) => command.includes('domesticBootstrapSubscription') && command.includes(`/internal/v1/site-slots/${smokeOverseaSiteId}/subscriptions/hysteria2/${state.overseaDomesticAccount}.yaml`))
         && resolveSubscription?.commands?.some((command) => command.includes('mx-domestic-bootstrap-subscription.yaml') && command.includes('Domestic cannot fetch Internal URLs until mx-domestic reaches 10.88.88.88'))
         && resolveSubscription?.commands?.some((command) => command.includes('install node/npm') && command.includes('npm install'))
         && bootstrapEgress?.mode === 'artifact-push'
@@ -760,7 +764,7 @@ const checks = [
         && bootstrapEgress?.commands?.some((command) => command.includes('node/npm absent'))
         && bootstrapEgress?.commands?.some((command) => command.includes('BOOTSTRAP_SUBSCRIPTION_FILE=/opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml'))
         && bootstrapEgress?.commands?.some((command) => command.includes('--file $BOOTSTRAP_SUBSCRIPTION_FILE'))
-        && bootstrapEgress?.commands?.some((command) => command.includes(`--url ${baseUrl}/internal/v1/site-slots/oversea-main/subscriptions/hysteria2/oversea-main-domestic.yaml`))
+        && bootstrapEgress?.commands?.some((command) => command.includes(`--url ${baseUrl}/internal/v1/site-slots/${smokeOverseaSiteId}/subscriptions/hysteria2/${state.overseaDomesticAccount}.yaml`))
         && bootstrapEgress?.commands?.some((command) => command.includes('egress-on'))
         && bootstrapEgress?.commands?.some((command) => command.includes('QP_TUNNEL_MODE=${QP_TUNNEL_MODE:-egress-on}'))
         && bootstrapEgress?.commands?.some((command) => command.includes('/usr/local/bin/mihomo-client'))
@@ -2803,6 +2807,25 @@ function hasManifestArtifactEvidence(step) {
     && artifact?.module?.sha256Status === 'passed'
     && typeof artifact?.module?.targetPath === 'string'
     && artifact.module.targetPath.startsWith('/opt/mx/'));
+}
+
+function safeSmokeId(value) {
+  return String(value ?? '')
+    .trim()
+    .replace(/[^A-Za-z0-9_-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '')
+    .slice(0, 80) || 'oversea_smoke';
+}
+
+function safeAccessAccountPrefix(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80) || 'account';
 }
 
 function isRelayLeaseIp(value, prefix) {

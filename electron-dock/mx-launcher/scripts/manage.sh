@@ -75,6 +75,7 @@ Usage:
   bash scripts/manage.sh ops awx-provider list|upsert [provider-id] [base-url]|check <provider-id>
   bash scripts/manage.sh ops local-platform plan|dry-run|cycle [local-port]|status|down
   bash scripts/manage.sh ops internal-production plan|deploy|apply|status|gateway-smoke [gateway-url]|down
+  bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures [--apply]
   bash scripts/manage.sh k8s plan internal-shadow
   bash scripts/manage.sh k8s explain internal-shadow
   bash scripts/manage.sh k8s render internal-shadow
@@ -86,6 +87,7 @@ Usage:
   bash scripts/manage.sh k8s db-summary internal-shadow
   bash scripts/manage.sh k8s gateway-smoke internal-shadow [gateway-url]
   MX_K8S_SHADOW_CONFIRM_RESET=1 bash scripts/manage.sh k8s reset-data internal-shadow
+  bash scripts/manage.sh k8s cleanup-smoke-fixtures internal-shadow [--apply]
   bash scripts/manage.sh k8s remote-runner internal-shadow enable|disable
   bash scripts/manage.sh k8s readonly-probe internal-shadow enable|disable
   bash scripts/manage.sh k8s ssh-bootstrap internal-shadow enable|disable
@@ -877,6 +879,121 @@ k8s_reset_data() {
   k8s_db_summary "$target"
 }
 
+k8s_cleanup_smoke_fixtures() {
+  local target="$1"
+  local mode="${2:-plan}"
+  local ns record_env legacy select_sql delete_sql
+  ns="$(k8s_namespace "$target")"
+  record_env="${MX_K8S_RECORD_ENVIRONMENT:-shadow}"
+  legacy="${MX_K8S_CLEANUP_LEGACY_OVERSEA_MAIN_SMOKE:-0}"
+  need_kubectl
+  select_sql="$(cat <<'SQL'
+WITH candidates AS (
+  SELECT kind, id, environment, site_id, data
+  FROM mx_platform_records
+  WHERE environment = :'record_env'
+    AND (
+      site_id IN ('oversea-smoke', 'oversea-bootstrap-smoke', 'domestic-smoke')
+      OR (kind = 'site-slot-ssh-profile' AND id LIKE 'sshprof_http_smoke%')
+      OR (
+        kind IN (
+          'site-slot-plan',
+          'site-slot-execution',
+          'site-slot-runner-session',
+          'site-slot-worker-job',
+          'site-slot-worker-report',
+          'site-slot-rollback-execution',
+          'site-slot-rollback-report'
+        )
+        AND data::text LIKE '%http-smoke%'
+      )
+      OR (
+        kind IN ('release-management-plan', 'test-run', 'test-gate-verdict', 'config-policy-snapshot', 'log-entry')
+        AND data::text LIKE '%http-smoke%'
+      )
+      OR (
+        :'legacy' = '1'
+        AND (
+          (site_id = 'oversea-main' AND data::text LIKE '%sshprof_http_smoke_oversea%')
+          OR (
+            kind IN ('launcher-network-mihomo-site', 'site-slot-access-account')
+            AND site_id = 'oversea-main'
+            AND ((data->>'createdBy') LIKE 'http-smoke%' OR (data->>'updatedBy') LIKE 'http-smoke%')
+          )
+        )
+      )
+    )
+)
+SELECT kind, id, COALESCE(site_id, '-') AS site_id, COALESCE(data->>'createdBy', '-') AS created_by, COALESCE(data->>'updatedBy', '-') AS updated_by
+FROM candidates
+ORDER BY kind, site_id, id;
+SQL
+)"
+  delete_sql="$(cat <<'SQL'
+WITH candidates AS (
+  SELECT kind, id, environment, site_id, data
+  FROM mx_platform_records
+  WHERE environment = :'record_env'
+    AND (
+      site_id IN ('oversea-smoke', 'oversea-bootstrap-smoke', 'domestic-smoke')
+      OR (kind = 'site-slot-ssh-profile' AND id LIKE 'sshprof_http_smoke%')
+      OR (
+        kind IN (
+          'site-slot-plan',
+          'site-slot-execution',
+          'site-slot-runner-session',
+          'site-slot-worker-job',
+          'site-slot-worker-report',
+          'site-slot-rollback-execution',
+          'site-slot-rollback-report'
+        )
+        AND data::text LIKE '%http-smoke%'
+      )
+      OR (
+        kind IN ('release-management-plan', 'test-run', 'test-gate-verdict', 'config-policy-snapshot', 'log-entry')
+        AND data::text LIKE '%http-smoke%'
+      )
+      OR (
+        :'legacy' = '1'
+        AND (
+          (site_id = 'oversea-main' AND data::text LIKE '%sshprof_http_smoke_oversea%')
+          OR (
+            kind IN ('launcher-network-mihomo-site', 'site-slot-access-account')
+            AND site_id = 'oversea-main'
+            AND ((data->>'createdBy') LIKE 'http-smoke%' OR (data->>'updatedBy') LIKE 'http-smoke%')
+          )
+        )
+      )
+    )
+)
+DELETE FROM mx_platform_records r
+USING candidates c
+WHERE r.kind = c.kind
+  AND r.id = c.id
+  AND r.environment = c.environment
+RETURNING r.kind, r.id, COALESCE(r.site_id, '-') AS site_id;
+SQL
+)"
+  say "smoke fixture cleanup candidates (env=$record_env, legacy-oversea-main=$legacy)"
+  printf '%s\n' "$select_sql" | kubectl -n "$ns" exec -i statefulset/mx-internal-postgres -- \
+    psql -v ON_ERROR_STOP=1 -v record_env="$record_env" -v legacy="$legacy" \
+      -U "${PG_USER:-mx_internal}" -d "${PG_DB:-mx_internal_shadow}"
+  case "$mode" in
+    --apply|apply)
+      say "delete smoke fixture records"
+      printf '%s\n' "$delete_sql" | kubectl -n "$ns" exec -i statefulset/mx-internal-postgres -- \
+        psql -v ON_ERROR_STOP=1 -v record_env="$record_env" -v legacy="$legacy" \
+          -U "${PG_USER:-mx_internal}" -d "${PG_DB:-mx_internal_shadow}"
+      ;;
+    plan|dry-run|'')
+      say "dry-run only. Re-run with --apply to delete listed smoke fixtures."
+      ;;
+    *)
+      die "Usage: bash scripts/manage.sh k8s cleanup-smoke-fixtures internal-shadow [--apply]"
+      ;;
+  esac
+}
+
 k8s_smoke() {
   local target="$1"
   local requested_port="${2:-18090}"
@@ -904,8 +1021,27 @@ k8s_gateway_smoke() {
   need_kubectl
   say "gateway rollout status"
   kubectl -n "$(k8s_namespace "$target")" rollout status daemonset/mx-internal-gateway --timeout=180s
-  say "HTTP smoke through Internal gateway: $gateway_url"
-  (cd server && MX_SMOKE_EXPECT_K8S_APPLY=1 pnpm run smoke:http -- "$gateway_url")
+  say "read-only gateway health check: $gateway_url"
+  node -e '
+    const base = process.argv[1].replace(/\/+$/, "");
+    async function check(path) {
+      const response = await fetch(`${base}${path}`);
+      const text = await response.text();
+      if (!response.ok) throw new Error(`${path} failed: HTTP ${response.status} ${text}`);
+      let body;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        throw new Error(`${path} returned non-JSON response: ${text}`);
+      }
+      if (body?.ok !== true) throw new Error(`${path} returned unexpected payload: ${text}`);
+      console.log(`OK ${path}`);
+    }
+    check("/healthz").then(() => check("/readyz")).catch((error) => {
+      console.error(error.message || error);
+      process.exit(1);
+    });
+  ' "$gateway_url"
 }
 
 k8s_port_forward() {
@@ -3324,6 +3460,9 @@ ops_k8s_shadow() {
     reset-data)
       k8s_reset_data "$target"
       ;;
+    cleanup-smoke-fixtures)
+      k8s_cleanup_smoke_fixtures "$target" "${2:-plan}"
+      ;;
     remote-runner)
       shift || true
       [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh ops $ops_area remote-runner enable|disable"
@@ -3343,7 +3482,7 @@ ops_k8s_shadow() {
       k8s_down "$target"
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops internal-local plan|dry-run|cycle|build|apply|status|port-forward [local-port] [bind-address]|gate|gate-manual|manual-evidence|smoke|gateway-smoke [gateway-url]|logs|db-summary|reset-data|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down"
+      die "Usage: bash scripts/manage.sh ops internal-local plan|dry-run|cycle|build|apply|status|port-forward [local-port] [bind-address]|gate|gate-manual|manual-evidence|smoke|gateway-smoke [gateway-url]|logs|db-summary|reset-data|cleanup-smoke-fixtures [--apply]|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down"
       ;;
   esac
 }
@@ -3366,6 +3505,7 @@ Commands:
   bash scripts/manage.sh ops internal-production deploy
   bash scripts/manage.sh ops internal-production status
   bash scripts/manage.sh ops internal-production gateway-smoke
+  bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures
   bash scripts/manage.sh ops internal-production down
 
 Notes:
@@ -3374,6 +3514,8 @@ Notes:
     Docker build.
   - It also preloads postgres/coredns/caddy runtime images through Docker and
     imports them into containerd so Docker proxy/TUN egress can be reused.
+  - gateway-smoke is read-only and checks /healthz plus /readyz. Full HTTP
+    smoke is a development check because it writes smoke fixtures.
   - Keep TCP 18090 private to the Internal host, Internal WG service peer, or a
     trusted LAN. Do not expose PostgreSQL or Docker daemon.
   - HDO V1 uses 8080 and hdo-home/hdo-internal; this path does not stop them.
@@ -3420,12 +3562,16 @@ ops_internal_production() {
       [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops internal-production gateway-smoke [gateway-url]"
       k8s_gateway_smoke internal-shadow "${1:-}"
       ;;
+    cleanup-smoke-fixtures)
+      [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures [--apply]"
+      k8s_cleanup_smoke_fixtures internal-shadow "${1:-plan}"
+      ;;
     down)
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production down"
       k8s_down internal-shadow
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops internal-production plan|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|down"
+      die "Usage: bash scripts/manage.sh ops internal-production plan|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|down"
       ;;
   esac
 }
@@ -3907,7 +4053,7 @@ case "$cmd" in
     esac
     ;;
   k8s)
-    [ "$#" -ge 2 ] || die "Usage: bash scripts/manage.sh k8s plan|explain|render|dry-run|apply|status|port-forward|logs|db-summary|reset-data|remote-runner|readonly-probe|ssh-bootstrap|gate|gate-manual|smoke|gateway-smoke|down internal-local"
+    [ "$#" -ge 2 ] || die "Usage: bash scripts/manage.sh k8s plan|explain|render|dry-run|apply|status|port-forward|logs|db-summary|reset-data|cleanup-smoke-fixtures|remote-runner|readonly-probe|ssh-bootstrap|gate|gate-manual|smoke|gateway-smoke|down internal-local"
     action="$1"
     target="$2"
     shift 2 || true
@@ -3951,6 +4097,10 @@ case "$cmd" in
       reset-data)
         [ "$#" -eq 0 ] || die "Usage: MX_K8S_SHADOW_CONFIRM_RESET=1 bash scripts/manage.sh k8s reset-data internal-shadow"
         k8s_reset_data "$target"
+        ;;
+      cleanup-smoke-fixtures)
+        [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh k8s cleanup-smoke-fixtures internal-shadow [--apply]"
+        k8s_cleanup_smoke_fixtures "$target" "${1:-plan}"
         ;;
       remote-runner)
         [ "$#" -eq 1 ] || die "Usage: bash scripts/manage.sh k8s remote-runner internal-shadow enable|disable"
@@ -4023,7 +4173,7 @@ case "$cmd" in
         OPS_K8S_TARGET=internal-local OPS_K8S_AREA=internal-local ops_k8s_shadow "$@"
         ;;
       k8s-shadow)
-        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops k8s-shadow plan|dry-run|cycle|build|apply|status|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down"
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops k8s-shadow plan|dry-run|cycle|build|apply|status|gate|gate-manual|manual-evidence|smoke|gateway-smoke [gateway-url]|logs|db-summary|reset-data|cleanup-smoke-fixtures [--apply]|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down"
         ops_k8s_shadow "$@"
         ;;
       awx-shadow)
@@ -4039,7 +4189,7 @@ case "$cmd" in
         ops_local_platform "$@"
         ;;
       internal-production)
-        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-production plan|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|down"
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-production plan|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|down"
         ops_internal_production "$@"
         ;;
       *)
