@@ -470,6 +470,8 @@ k8s_render() {
   printf '\n---\n'
   cat "$dir"/15-dns-control-target.yaml
   printf '\n---\n'
+  cat "$dir"/18-local-pv.yaml
+  printf '\n---\n'
   cat "$dir"/20-postgres.yaml
   printf '\n---\n'
   cat "$dir"/25-coredns-rbac.yaml
@@ -526,6 +528,8 @@ k8s_dry_run() {
   kubectl apply --dry-run=client --validate=false -f "$dir/10-configmap.yaml"
   say "dry-run dns control target"
   kubectl apply --dry-run=client --validate=false -f "$dir/15-dns-control-target.yaml"
+  say "dry-run local persistent volumes"
+  kubectl apply --dry-run=client --validate=false -f "$dir/18-local-pv.yaml"
   say "dry-run generated db secret"
   k8s_secret_dry_run "$ns"
   say "dry-run postgres service/statefulset"
@@ -559,6 +563,8 @@ k8s_apply() {
   kubectl apply -f "$dir/10-configmap.yaml"
   say "apply dns control target"
   kubectl apply -f "$dir/15-dns-control-target.yaml"
+  say "apply local persistent volumes"
+  kubectl apply -f "$dir/18-local-pv.yaml"
   say "create/update db secret from local env"
   k8s_apply_db_secret "$ns"
   say "apply postgres service/statefulset"

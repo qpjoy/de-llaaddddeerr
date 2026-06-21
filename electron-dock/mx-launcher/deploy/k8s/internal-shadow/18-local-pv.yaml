@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mx-internal-postgres-local-pv
+  labels:
+    app.kubernetes.io/name: mx-internal-postgres
+    app.kubernetes.io/part-of: mx-3ks
+spec:
+  capacity:
+    storage: 2Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  volumeMode: Filesystem
+  hostPath:
+    path: /var/lib/mx-launcher/k8s/postgres
+    type: DirectoryOrCreate
+  claimRef:
+    namespace: mx-internal-shadow
+    name: postgres-data-mx-internal-postgres-0
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mx-launcher-internal-ssh-local-pv
+  labels:
+    app.kubernetes.io/name: mx-launcher-internal
+    app.kubernetes.io/part-of: mx-3ks
+spec:
+  capacity:
+    storage: 256Mi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  volumeMode: Filesystem
+  hostPath:
+    path: /var/lib/mx-launcher/k8s/internal-ssh
+    type: DirectoryOrCreate
+  claimRef:
+    namespace: mx-internal-shadow
+    name: mx-launcher-internal-ssh

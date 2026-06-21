@@ -51,6 +51,14 @@ Postgres 不能像普通 API 那样随便换身份、换盘，所以使用 State
 的 named volume，但由 K8s 的存储系统提供。`k8s down` 默认保留 PVC，是为了模拟
 “服务重启但数据仍在”的真实部署场景。
 
+裸 kubeadm 单节点通常没有默认 StorageClass。`18-local-pv.yaml` 会为 Internal CentOS
+测试/正式主机创建两个 hostPath PV：
+
+- `mx-internal-postgres-local-pv` -> `/var/lib/mx-launcher/k8s/postgres`
+- `mx-launcher-internal-ssh-local-pv` -> `/var/lib/mx-launcher/k8s/internal-ssh`
+
+它们使用 `Retain` 回收策略，`down` 不删除 PV/PVC，也不删除宿主机目录。
+
 ### Migration Job
 
 虽然 API 启动时也会兜底执行 TypeORM migration，但 K8s 部署流程里更推荐先跑 Job：
