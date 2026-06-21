@@ -65,6 +65,8 @@ export interface SiteSlotPlanInput {
   hasOutboundInternet?: boolean | null;
   overseaSiteId?: string | null;
   overseaHost?: string | null;
+  serverPorts?: string | null;
+  exportPort?: number | null;
   internalBaseUrl?: string | null;
   domesticRuntimeConfig?: SiteSlotDomesticRuntimeConfig | null;
   accessAccounts?: SiteSlotPlanAccessAccountInput[] | null;
@@ -151,6 +153,7 @@ export interface SiteSlotPlan {
   };
   runtime: {
     domestic: SiteSlotDomesticRuntimeConfig | null;
+    oversea: SiteSlotOverseaRuntimeConfig | null;
   };
   preflightChecks: SiteSlotPreflightCheck[];
   deploymentPhases: SiteSlotDeploymentPhase[];
@@ -158,6 +161,14 @@ export interface SiteSlotPlan {
   nextActions: string[];
   createdBy: string;
   createdAt: string;
+}
+
+export interface SiteSlotOverseaRuntimeConfig {
+  serverPorts: string;
+  firstServerPort: number;
+  exportPort: number;
+  exportBaseUrl: string | null;
+  warnings: string[];
 }
 
 export type SiteSlotExecutionAction = 'preflight' | 'apply';

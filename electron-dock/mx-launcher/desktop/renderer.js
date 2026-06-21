@@ -428,6 +428,8 @@ const sshProfileUser = document.getElementById('ssh-profile-user');
 const sshProfilePassword = document.getElementById('ssh-profile-password');
 const sshProfileRotateKey = document.getElementById('ssh-profile-rotate-key');
 const sshProfilePort = document.getElementById('ssh-profile-port');
+const sshProfileHy2Ports = document.getElementById('ssh-profile-hy2-ports');
+const sshProfileHealthPort = document.getElementById('ssh-profile-health-port');
 const sshProfileStrict = document.getElementById('ssh-profile-strict');
 const sshProfileBatchMode = document.getElementById('ssh-profile-batch-mode');
 const sshProfileTimeout = document.getElementById('ssh-profile-timeout');
@@ -677,6 +679,8 @@ for (const control of [
   sshProfilePassword,
   sshProfileRotateKey,
   sshProfilePort,
+  sshProfileHy2Ports,
+  sshProfileHealthPort,
   sshProfileStrict,
   sshProfileBatchMode,
   sshProfileTimeout,
@@ -1441,12 +1445,14 @@ async function ensureSelectedOversea() {
   };
   renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
   try {
+    const runtimePayload = overseaRuntimePayloadForSite(siteId);
     const payload = await fetchJson(`/internal/v1/admin/oversea/${encodeURIComponent(siteId)}/ensure`, {
       method: 'POST',
       body: {
         executeRemote: true,
         confirmInstall: true,
         force: true,
+        ...runtimePayload,
         internalBaseUrl: normalizedServerBase(),
         requestedBy: 'desktop-admin',
         requestId: `desktop-oversea-ensure-${Date.now()}`
@@ -1739,6 +1745,7 @@ function sshProfilePlanPayload() {
     : formHost || savedHost;
   const sshUser = blankToNull(sshProfileUser.value) || savedProfile?.sshUser || 'root';
   const sshPort = positiveNumberOrNull(sshProfilePort.value) || savedProfile?.sshPort || 22;
+  const overseaRuntime = kind === 'oversea' ? overseaRuntimeFormPayload() : {};
   return {
     siteId: blankToNull(sshProfileSiteId.value) || savedProfile?.siteId || null,
     kind,
@@ -1751,9 +1758,28 @@ function sshProfilePlanPayload() {
     hasOutboundInternet: kind === 'oversea',
     overseaSiteId: domesticBootstrap?.siteId || null,
     overseaHost: domesticBootstrap?.host || null,
+    ...overseaRuntime,
     internalBaseUrl: normalizedServerBase(),
     createdBy: 'desktop-admin',
     requestId: `desktop-site-slot-plan-${Date.now()}`
+  };
+}
+
+function overseaRuntimeFormPayload() {
+  return {
+    serverPorts: blankToNull(sshProfileHy2Ports?.value) || '51288',
+    exportPort: positiveNumberOrNull(sshProfileHealthPort?.value) || 3434
+  };
+}
+
+function overseaRuntimePayloadForSite(siteId) {
+  if (sshProfileKind.value === 'oversea' && blankToNull(sshProfileSiteId.value) === siteId) {
+    return overseaRuntimeFormPayload();
+  }
+  const runtime = overseaRuntimeForSiteId(siteId);
+  return {
+    serverPorts: runtime.serverPorts,
+    exportPort: runtime.exportPort
   };
 }
 
@@ -1829,6 +1855,7 @@ function sshProfileShadowSetupPayload() {
     awxProviderId: blankToNull(awxProviderId.value) || state.selectedAwxProviderId || provider?.providerId || null,
     awxToken: blankToNull(awxProviderToken.value),
     awxRequestTimeoutSeconds: positiveNumberOrNull(awxProviderTimeout.value) || 30,
+    ...overseaRuntimeFormPayload(),
     requestedBy: 'desktop-admin',
     requestId: `desktop-oversea-shadow-setup-${Date.now()}`
   };
@@ -2530,6 +2557,7 @@ function renderSshProfiles(profiles) {
 }
 
 function fillSshProfileForm(profile) {
+  const runtime = overseaRuntimeForSiteId(profile.siteId);
   sshProfileId.value = profile.profileId || '';
   sshProfileSiteId.value = profile.siteId || '';
   sshProfileKind.value = profile.kind === 'domestic' ? 'domestic' : 'oversea';
@@ -2538,6 +2566,8 @@ function fillSshProfileForm(profile) {
   sshProfilePassword.value = '';
   sshProfileRotateKey.checked = false;
   sshProfilePort.value = String(profile.sshPort || 22);
+  sshProfileHy2Ports.value = profile.kind === 'oversea' ? runtime.serverPorts : '';
+  sshProfileHealthPort.value = profile.kind === 'oversea' ? String(runtime.exportPort) : '';
   sshProfileStrict.value = profile.strictHostKeyChecking || 'yes';
   sshProfileBatchMode.value = profile.batchMode || 'yes';
   sshProfileTimeout.value = String(profile.connectTimeoutSeconds || 30);
@@ -2560,6 +2590,8 @@ function primeSshProfileForm(pipelines) {
   sshProfilePassword.value = '';
   sshProfileRotateKey.checked = false;
   sshProfilePort.value = '22';
+  sshProfileHy2Ports.value = kind === 'oversea' ? '51288' : '';
+  sshProfileHealthPort.value = kind === 'oversea' ? '3434' : '';
   sshProfileStrict.value = 'yes';
   sshProfileBatchMode.value = 'yes';
   sshProfileTimeout.value = '30';
@@ -4241,6 +4273,8 @@ function renderOverseaSiteDetail(site) {
     </div>
     <dl class="oversea-runtime-meta">
       <div><dt>SSH profile</dt><dd>${escapeHtml(site.sshProfile?.profileId || 'not linked')}</dd></div>
+      <div><dt>HY2 UDP</dt><dd>${escapeHtml(site.runtime?.serverPorts || site.mihomoSite?.serverPorts || '51288')}</dd></div>
+      <div><dt>Health TCP</dt><dd>${escapeHtml(site.runtime?.exportPort || '3434')}</dd></div>
       <div><dt>Identity</dt><dd>${escapeHtml(site.sshProfile?.identityFile || '-')}</dd></div>
       <div><dt>SSH Config</dt><dd>${escapeHtml(site.sshProfile?.sshConfigFile || '-')}</dd></div>
       <div><dt>Worker report</dt><dd>${escapeHtml(site.runtime?.workerReportStatus || '-')} ${escapeHtml(site.runtime?.workerReportId || '')}</dd></div>
@@ -4344,6 +4378,15 @@ function selectedOverseaSite() {
   return sites.find((site) => site.siteId === state.selectedSiteId) || sites[0] || null;
 }
 
+function overseaRuntimeForSiteId(siteId) {
+  const site = overseaSitesWithDraft(asArray(state.overseaOverview?.sites))
+    .find((item) => item.siteId === siteId);
+  return {
+    serverPorts: site?.runtime?.serverPorts || site?.mihomoSite?.serverPorts || '51288',
+    exportPort: positiveNumberOrNull(site?.runtime?.exportPort) || 3434
+  };
+}
+
 function overseaSitesWithDraft(sites) {
   const items = asArray(sites);
   const draft = state.siteDraft?.kind === 'oversea' ? state.siteDraft : null;
@@ -4394,6 +4437,8 @@ function fillNewSshProfileForm(kind, siteId) {
   sshProfilePassword.value = '';
   sshProfileRotateKey.checked = false;
   sshProfilePort.value = '22';
+  sshProfileHy2Ports.value = kind === 'oversea' ? '51288' : '';
+  sshProfileHealthPort.value = kind === 'oversea' ? '3434' : '';
   sshProfileStrict.value = 'yes';
   sshProfileBatchMode.value = 'yes';
   sshProfileTimeout.value = '30';

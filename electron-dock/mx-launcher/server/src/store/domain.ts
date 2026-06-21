@@ -58,6 +58,7 @@ import type {
   SiteSlotAccessAccountRole,
   SiteSlotKind,
   SiteSlotNetworkMode,
+  SiteSlotOverseaRuntimeConfig,
   SiteSlotPlan,
   SiteSlotPlanInput,
   SiteSlotDomesticRuntimeConfig,
@@ -112,6 +113,7 @@ export const LAUNCHER_NETWORK_LEASE_TTL_MS = LAUNCHER_NETWORK_LEASE_TTL_DAYS * 2
 
 const HYSTERIA2_ACCESS_PORT = 51288;
 const HYSTERIA2_ACCESS_PORTS = String(HYSTERIA2_ACCESS_PORT);
+const HYSTERIA2_EXPORT_FALLBACK_PORT = 3434;
 const HYSTERIA2_CLIENT_DOWNLOAD = '30 Mbps';
 const HYSTERIA2_CLIENT_UPLOAD = '30 Mbps';
 const HYSTERIA2_CLIENT_ALPN = 'h3';
@@ -2174,12 +2176,16 @@ export function buildSiteSlotPlan(
   const domesticRuntimeConfig = kind === 'domestic'
     ? input.domesticRuntimeConfig ?? buildSiteSlotDomesticRuntimeConfig(config, { siteId }, null, createdAt)
     : null;
+  const overseaRuntimeConfig = kind === 'oversea'
+    ? buildSiteSlotOverseaRuntimeConfig(input, host)
+    : null;
   const warnings = [
     ...baseWarnings,
     ...(domesticRuntimeConfig?.warnings.map((warning) => warning.startsWith('blocked:')
       ? `blocked: domestic-runtime ${warning.slice('blocked:'.length).trim()}`
       : `domestic-runtime: ${warning}`
-    ) ?? [])
+    ) ?? []),
+    ...(overseaRuntimeConfig?.warnings.map((warning) => `oversea-runtime: ${warning}`) ?? [])
   ];
   const status = host && warnings.every((warning) => !warning.startsWith('blocked:'))
     ? 'ready-for-preflight'
@@ -2213,10 +2219,11 @@ export function buildSiteSlotPlan(
     access: siteSlotAccess(kind),
     services,
     runtime: {
-      domestic: domesticRuntimeConfig
+      domestic: domesticRuntimeConfig,
+      oversea: overseaRuntimeConfig
     },
     preflightChecks: siteSlotPreflightChecks(kind, input, host, sshUser, sshPort, networkMode),
-    deploymentPhases: siteSlotDeploymentPhases(kind, input, host, sshUser, sshPort, networkMode, domesticRuntimeConfig),
+    deploymentPhases: siteSlotDeploymentPhases(kind, input, host, sshUser, sshPort, networkMode, domesticRuntimeConfig, overseaRuntimeConfig),
     warnings,
     nextActions: siteSlotNextActions(kind, status, networkMode, input),
     createdBy: input.createdBy?.trim() || 'internal-admin-shadow',
@@ -3397,6 +3404,48 @@ function siteSlotNetworkMode(kind: SiteSlotKind, input: SiteSlotPlanInput): Site
   return 'direct';
 }
 
+function buildSiteSlotOverseaRuntimeConfig(input: SiteSlotPlanInput, host: string | null): SiteSlotOverseaRuntimeConfig {
+  const serverPorts = normalizeHysteria2ServerPorts(input.serverPorts);
+  const exportPort = normalizeTcpPort(input.exportPort, HYSTERIA2_EXPORT_FALLBACK_PORT);
+  const warnings: string[] = [];
+  if (input.serverPorts && serverPorts.normalized !== input.serverPorts.trim()) {
+    warnings.push(`invalid Hysteria2 serverPorts "${input.serverPorts}", using ${serverPorts.normalized}`);
+  }
+  if (input.exportPort != null && exportPort !== input.exportPort) {
+    warnings.push(`invalid health/evidence exportPort "${input.exportPort}", using ${exportPort}`);
+  }
+  return {
+    serverPorts: serverPorts.normalized,
+    firstServerPort: serverPorts.firstPort,
+    exportPort,
+    exportBaseUrl: host ? `http://${host}:${exportPort}` : null,
+    warnings
+  };
+}
+
+function normalizeHysteria2ServerPorts(value: string | null | undefined): { normalized: string; firstPort: number } {
+  const raw = value?.trim() || HYSTERIA2_ACCESS_PORTS;
+  const match = /^([0-9]{1,5})(?:-([0-9]{1,5}))?$/.exec(raw);
+  if (!match) return { normalized: HYSTERIA2_ACCESS_PORTS, firstPort: HYSTERIA2_ACCESS_PORT };
+  const firstPort = Number(match[1]);
+  const lastPort = Number(match[2] ?? match[1]);
+  if (!isValidPort(firstPort) || !isValidPort(lastPort) || firstPort > lastPort) {
+    return { normalized: HYSTERIA2_ACCESS_PORTS, firstPort: HYSTERIA2_ACCESS_PORT };
+  }
+  return {
+    normalized: match[2] ? `${firstPort}-${lastPort}` : String(firstPort),
+    firstPort
+  };
+}
+
+function normalizeTcpPort(value: number | null | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isInteger(value) && isValidPort(value) ? value : fallback;
+}
+
+function isValidPort(value: number): boolean {
+  return Number.isInteger(value) && value >= 1 && value <= 65535;
+}
+
 function qpTunnelCliMode(kind: SiteSlotKind, mode: SiteSlotNetworkMode): SiteSlotPlan['network']['qpTunnelCliMode'] {
   if (kind === 'oversea') return 'server-on';
   if (mode === 'oversea-assisted') return 'egress-on';
@@ -3670,7 +3719,8 @@ function siteSlotDeploymentPhases(
   sshUser: string,
   sshPort: number,
   mode: SiteSlotNetworkMode,
-  domesticRuntimeConfig: SiteSlotDomesticRuntimeConfig | null
+  domesticRuntimeConfig: SiteSlotDomesticRuntimeConfig | null,
+  overseaRuntimeConfig: SiteSlotOverseaRuntimeConfig | null
 ): SiteSlotPlan['deploymentPhases'] {
   const target = host ?? `<${kind}-host>`;
   const artifactRoot = `./artifacts/site-slots/${kind}`;
@@ -3713,7 +3763,9 @@ function siteSlotDeploymentPhases(
     ? input.overseaSiteId?.trim() || 'oversea-main'
     : input.siteId?.trim() || 'oversea-main';
   const overseaSubscriptionBaseUrl = `${internalBaseUrl}/internal/v1/site-slots/${overseaSiteId}/subscriptions/hysteria2`;
-  const overseaExportBaseUrl = `http://${target}:3434`;
+  const overseaServerPorts = overseaRuntimeConfig?.serverPorts ?? HYSTERIA2_ACCESS_PORTS;
+  const overseaExportPort = overseaRuntimeConfig?.exportPort ?? HYSTERIA2_EXPORT_FALLBACK_PORT;
+  const overseaExportBaseUrl = overseaRuntimeConfig?.exportBaseUrl ?? `http://${target}:${overseaExportPort}`;
   const overseaDefaultAccountNames = defaultSiteSlotAccessAccountNames(overseaSiteId);
   const overseaInternalAccountName = `${safeAccountPrefix(overseaSiteId)}-internal`;
   const overseaDomesticAccountName = `${safeAccountPrefix(overseaSiteId)}-domestic`;
@@ -3773,7 +3825,7 @@ function siteSlotDeploymentPhases(
   const overseaEnvLines = [
     'TZ=Asia/Shanghai',
     `HY2_SERVER_HOST=${target}`,
-    `HY2_SERVER_PORTS=${HYSTERIA2_ACCESS_PORTS}`,
+    `HY2_SERVER_PORTS=${overseaServerPorts}`,
     'HY2_HOP_INTERVAL_SECONDS=0',
     'HY2_STACK_SUBNET=10.254.0.0/24',
     'HY2_STACK_GATEWAY=10.254.0.1',
@@ -3795,7 +3847,7 @@ function siteSlotDeploymentPhases(
     'HY2_OBFS_PASSWORD=',
     'HY2_EXPORT_SITE_ADDRESS=:8080',
     `HY2_EXPORT_BASE_URL=${overseaExportBaseUrl}`,
-    'HY2_EXPORT_FALLBACK_PORT=3434',
+    `HY2_EXPORT_FALLBACK_PORT=${overseaExportPort}`,
     'HY2_EXPORT_USER=download',
     'HY2_EXPORT_PASSWORD_HASH='
   ];
@@ -3804,7 +3856,7 @@ function siteSlotDeploymentPhases(
     revision: 'internal-shadow-1',
     node: {
       publicHost: target,
-      serverPorts: HYSTERIA2_ACCESS_PORTS
+      serverPorts: overseaServerPorts
     },
     policies: [
       {
@@ -3978,19 +4030,19 @@ function siteSlotDeploymentPhases(
         target: kind,
         required: true,
         commands: [
-          `POST /internal/v1/site-slots/${overseaSiteId}/access-accounts issueDefaults=true service=hysteria2 store=config-center accounts=${overseaDefaultAccountNames.join(',')}`,
-          `POST /internal/v1/launcher-network/mihomo/sites/${overseaSiteId} mode=internal-managed source=${overseaSubscriptionBaseUrl} reachability=internal-url-requires-domestic-wg-relay`,
+          `POST /internal/v1/site-slots/${overseaSiteId}/access-accounts issueDefaults=true service=hysteria2 serverPorts=${overseaServerPorts} store=config-center accounts=${overseaDefaultAccountNames.join(',')}`,
+          `POST /internal/v1/launcher-network/mihomo/sites/${overseaSiteId} serverPorts=${overseaServerPorts} mode=internal-managed source=${overseaSubscriptionBaseUrl} reachability=internal-url-requires-domestic-wg-relay`,
           `Record overseaAccessAccountMaterial=internal-issued accounts=${overseaAccountMaterialCount}/${overseaRuntimeAccountNames.length} source=config-center`,
           ssh(overseaDockerInstallScript()),
           ssh(overseaEnvWriteCommand),
           ssh(`printf "%s" ${overseaTunnelStateBase64} | base64 -d > /opt/mx/site-agent/tunnel-state.json`),
           ssh(`cd ${overseaAccessStackCurrentDir} && ./manage.sh reconcile-from-json --state-file /opt/mx/site-agent/tunnel-state.json --mode hysteria2-only`),
           ssh(`chmod +x ${overseaAccessStackCurrentDir}/bin/qp-tunnel-cli && ${overseaAccessStackCurrentDir}/bin/qp-tunnel-cli register --internal ${internalBaseUrl} --role oversea --site ${input.siteId ?? 'oversea-main'} --service hysteria2`),
-          ssh(`cd ${overseaAccessStackCurrentDir} && ./manage.sh sync-internal-defaults && ./manage.sh docker-status && curl -fsS http://127.0.0.1:3434/healthz`)
+          ssh(`cd ${overseaAccessStackCurrentDir} && ./manage.sh sync-internal-defaults && ./manage.sh docker-status && curl -fsS http://127.0.0.1:${overseaExportPort}/healthz`)
         ],
         notes: [
           'Oversea runs hysteria2 only; Internal runs mihomo and stores subscription/account material.',
-          'Port 3434 on Oversea is a protected health/evidence outlet for clients.csv and healthz, not a subscription authority.',
+          `Port ${overseaExportPort} on Oversea is a protected health/evidence outlet for clients.csv and healthz, not a subscription authority.`,
           'H endpoints use WG relay only for Internal DNS and reserved/product routes; Domestic defaults to 10.88.0.1, cn-direct stays direct, and external traffic uses the Oversea hysteria2 subscription.'
         ]
       },
@@ -4174,7 +4226,7 @@ export function buildLauncherNetworkMihomoSite(
 ): LauncherNetworkMihomoSite {
   const siteId = input.siteId?.trim() || previous?.siteId || 'oversea-main';
   const publicHost = input.publicHost?.trim() || previous?.publicHost || fallbackPublicHost;
-  const serverPorts = HYSTERIA2_ACCESS_PORTS;
+  const serverPorts = normalizeHysteria2ServerPorts(input.serverPorts ?? previous?.serverPorts).normalized;
   const tlsFingerprint = normalizeTlsFingerprint(input.tlsFingerprint) ?? normalizeTlsFingerprint(previous?.tlsFingerprint);
   const subscriptionBaseUrl = input.subscriptionBaseUrl?.trim()
     || previous?.subscriptionBaseUrl
@@ -4211,8 +4263,9 @@ export function buildLauncherNetworkMihomoSite(
 
 export function normalizeLauncherNetworkMihomoSite(site: LauncherNetworkMihomoSite): LauncherNetworkMihomoSite {
   const tlsFingerprint = normalizeTlsFingerprint(site.tlsFingerprint);
-  if (site.serverPorts === HYSTERIA2_ACCESS_PORTS && site.tlsFingerprint === tlsFingerprint) return site;
-  return { ...site, serverPorts: HYSTERIA2_ACCESS_PORTS, tlsFingerprint };
+  const serverPorts = normalizeHysteria2ServerPorts(site.serverPorts).normalized;
+  if (site.serverPorts === serverPorts && site.tlsFingerprint === tlsFingerprint) return site;
+  return { ...site, serverPorts, tlsFingerprint };
 }
 
 export function buildLauncherNetworkReachabilityPlan(
@@ -4569,8 +4622,8 @@ function inferAccessAccountRole(siteId: string, username: string): SiteSlotAcces
   return 'h-endpoint';
 }
 
-function firstHysteriaPort(_serverPorts: string): number {
-  return HYSTERIA2_ACCESS_PORT;
+function firstHysteriaPort(serverPorts: string): number {
+  return normalizeHysteria2ServerPorts(serverPorts).firstPort;
 }
 
 function normalizeTlsFingerprint(value: string | null | undefined): string | null {

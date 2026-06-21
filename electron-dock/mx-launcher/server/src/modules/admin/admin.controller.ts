@@ -203,6 +203,8 @@ export class AdminController {
     const requestedBy = stringValue(body.requestedBy) ?? actionPolicy.principal.principalId;
     const requestId = stringValue(body.requestId) ?? `admin-oversea-shadow-setup-${Date.now()}`;
     const internalBaseUrl = normalizeBaseUrl(stringValue(body.internalBaseUrl) ?? process.env.MX_INTERNAL_BASE_URL ?? 'http://127.0.0.1:18090');
+    const serverPorts = stringValue(body.serverPorts);
+    const exportPort = numberValueOrNull(body.exportPort);
     const profile = await this.store.upsertSiteSlotSshProfile({
       profileId: stringValue(body.sshProfileId) ?? stringValue(body.profileId),
       siteId,
@@ -226,6 +228,7 @@ export class AdminController {
       service: 'hysteria2',
       issueDefaults: true,
       publicHost: profile.host,
+      serverPorts,
       requestedBy,
       requestId: `${requestId}-internal-mihomo`
     });
@@ -250,6 +253,8 @@ export class AdminController {
       rootAccess: profile.sshUser === 'root',
       hasDocker: true,
       hasOutboundInternet: true,
+      serverPorts,
+      exportPort,
       internalBaseUrl,
       accessAccounts: planAccessAccounts,
       createdBy: requestedBy,
@@ -340,6 +345,8 @@ export class AdminController {
     const executeRemote = booleanValue(body.executeRemote) === true;
     const confirmInstall = booleanValue(body.confirmInstall) === true;
     const force = booleanValue(body.force) === true;
+    const serverPorts = stringValue(body.serverPorts);
+    const exportPort = numberValueOrNull(body.exportPort);
     const ensureSteps: Array<Record<string, unknown>> = [];
 
     const profiles = await this.store.listSiteSlotSshProfiles();
@@ -366,6 +373,7 @@ export class AdminController {
       service: 'hysteria2',
       issueDefaults: true,
       publicHost: profile.host,
+      serverPorts,
       requestedBy,
       requestId
     });
@@ -375,7 +383,7 @@ export class AdminController {
       accounts: planAccessAccounts.length
     }));
 
-    let plan = await this.findReusableOverseaPlan(siteId, profile.profileId);
+    let plan = await this.findReusableOverseaPlan(siteId, profile.profileId, serverPorts, exportPort);
     if (!plan || !reusableOverseaPlanIncludesAccounts(plan, planAccessAccounts)) {
       plan = await this.store.createSiteSlotPlan({
         siteId,
@@ -387,6 +395,8 @@ export class AdminController {
         rootAccess: profile.sshUser === 'root',
         hasDocker: true,
         hasOutboundInternet: true,
+        serverPorts,
+        exportPort,
         internalBaseUrl,
         accessAccounts: planAccessAccounts,
         createdBy: requestedBy,
@@ -596,7 +606,12 @@ export class AdminController {
     }
   }
 
-  private async findReusableOverseaPlan(siteId: string, profileId: string): Promise<SiteSlotPlan | null> {
+  private async findReusableOverseaPlan(
+    siteId: string,
+    profileId: string,
+    serverPorts: string | null,
+    exportPort: number | null
+  ): Promise<SiteSlotPlan | null> {
     const plans = await this.store.listSiteSlotPlans();
     return latestByCreatedAt(plans.filter((plan) => (
       plan.kind === 'oversea'
@@ -604,6 +619,7 @@ export class AdminController {
       && plan.ssh.profileId === profileId
       && plan.status !== 'blocked'
       && reusableOverseaPlanContract(plan)
+      && reusableOverseaPlanMatchesRuntime(plan, serverPorts, exportPort)
     )));
   }
 
@@ -805,6 +821,9 @@ export class AdminController {
         docker: latestReport ? reportStepStatus(latestReport, 'remote-preflight') : null,
         hysteria2: latestReport && workerReportHasRemoteExecution(latestReport) && latestReport.status === 'passed' ? 'ready' : status === 'ready-to-install' ? 'pending-install' : 'unknown',
         siteAgent: latestReport && workerReportHasRemoteExecution(latestReport) && latestReport.status === 'passed' ? 'ready' : 'unknown',
+        serverPorts: pipeline?.plan.runtime.oversea?.serverPorts ?? mihomoSite?.serverPorts ?? null,
+        exportPort: pipeline?.plan.runtime.oversea?.exportPort ?? null,
+        exportBaseUrl: pipeline?.plan.runtime.oversea?.exportBaseUrl ?? null,
         workerReportId: latestReport?.reportId ?? null,
         workerReportStatus: latestReport?.status ?? null,
         failure: latestReportFailure,
@@ -2180,6 +2199,8 @@ function toSiteSlotPlanInput(body: Record<string, unknown>): SiteSlotPlanInput {
     hasOutboundInternet: booleanValue(body.hasOutboundInternet),
     overseaSiteId: stringValue(body.overseaSiteId),
     overseaHost: stringValue(body.overseaHost),
+    serverPorts: stringValue(body.serverPorts),
+    exportPort: numberValueOrNull(body.exportPort),
     internalBaseUrl: stringValue(body.internalBaseUrl),
     accessAccounts: siteSlotPlanAccessAccountsValue(body.accessAccounts),
     requestId: stringValue(body.requestId),
@@ -5742,6 +5763,13 @@ function reusableOverseaPlanContract(plan: SiteSlotPlan): boolean {
 function reusableOverseaPlanIncludesAccounts(plan: SiteSlotPlan, accounts: SiteSlotPlanAccessAccountInput[]): boolean {
   const commandText = plan.deploymentPhases.flatMap((phase) => phase.commands ?? []).join('\n');
   return accounts.every((account) => commandText.includes(account.username));
+}
+
+function reusableOverseaPlanMatchesRuntime(plan: SiteSlotPlan, serverPorts: string | null, exportPort: number | null): boolean {
+  const runtime = plan.runtime.oversea;
+  if (serverPorts && runtime?.serverPorts !== serverPorts) return false;
+  if (exportPort != null && runtime?.exportPort !== exportPort) return false;
+  return true;
 }
 
 function applyAdminSshProfile(command: string, profile: SiteSlotSshProfile | null): string {

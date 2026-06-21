@@ -407,6 +407,7 @@ export class SiteSlotsController {
       service: 'hysteria2',
       issueDefaults: true,
       publicHost: input.overseaHost ?? undefined,
+      serverPorts: input.serverPorts,
       requestedBy: input.createdBy ?? 'site-slots-controller',
       requestId: `${input.requestId ?? 'site-slot-plan'}-domestic-bootstrap`
     });
@@ -515,6 +516,8 @@ function toSiteSlotPlanInput(body: Record<string, unknown>): SiteSlotPlanInput {
     hasOutboundInternet: booleanValue(body.hasOutboundInternet),
     overseaSiteId: nullableString(body.overseaSiteId),
     overseaHost: nullableString(body.overseaHost),
+    serverPorts: nullableString(body.serverPorts),
+    exportPort: numberValue(body.exportPort),
     internalBaseUrl: nullableString(body.internalBaseUrl),
     accessAccounts: siteSlotPlanAccessAccountsValue(body.accessAccounts),
     requestId: nullableString(body.requestId),

@@ -11,6 +11,11 @@
 3. 推荐操作顺序：
 第一次空 Ubuntu：
 3.1. 填 Site / Kind / Host / User / Password / Port。
+3.1.1. `HY2 UDP` 是客户端连接 Oversea Hysteria2 的 UDP 端口，默认 `51288`。
+3.1.2. `Health TCP` 是 Oversea health/evidence 出口，默认 `3434`；如果旧服务已经占用
+      `3434`，填 `3435` 或其它空闲 TCP 端口。Run Setup 会把它写入远端
+      `HY2_EXPORT_FALLBACK_PORT` 并使用同一端口做 health smoke。
+      Save Profile 只保存 SSH 凭据；这两个端口随 Create Plan / Shadow Setup / Run Setup 生效。
 3.2. Rotate 不勾选。
 3.3. 点 Bootstrap Key。
 3.4. 成功后它会自动保存 profile，并回填 Internal 默认的 Identity / Known Hosts 路径。
