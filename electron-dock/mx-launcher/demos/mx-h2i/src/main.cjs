@@ -1637,11 +1637,11 @@ function wireGuardRuntimeOptions() {
   };
 }
 
-function effectiveWireGuardPathPreference(routePlan, internalDirectPeerSync, configuredPreference) {
+function effectiveWireGuardPathPreference(routePlan, _internalDirectPeerSync, configuredPreference) {
   const preference = normalizeRoutePathPreference(configuredPreference);
   if (preference === 'relay') return 'relay';
   if (preference === 'direct') return 'direct';
-  return routePlanHasDirect(routePlan) && internalDirectPeerSync?.status === 'passed' ? 'direct' : 'relay';
+  return routePlanHasDirect(routePlan) ? 'direct' : 'relay';
 }
 
 function routePlanHasDirect(routePlan) {
