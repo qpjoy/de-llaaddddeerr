@@ -230,6 +230,8 @@ export class MemoryStore implements PlatformStore {
       siteRole: this.config.siteRole,
       enabledModules: this.config.enabledModules,
       storeDriver: this.config.storeDriver,
+      publicBaseUrl: this.config.publicBaseUrl,
+      internalBaseUrl: this.config.internalBaseUrl,
       sites: this.sites.size,
       enrollments: this.enrollments.size,
       snapshots: this.snapshots.size,
@@ -2238,7 +2240,7 @@ export class MemoryStore implements PlatformStore {
       || !overseaConfigureAccess?.commands.some((command) => command.includes('reconcile-from-json') && command.includes('--mode hysteria2-only'))
       || !overseaConfigureAccess?.commands.some((command) => command.includes('./manage.sh sync-internal-defaults'))
       || !overseaConfigureAccess?.commands.some((command) => command.includes('./manage.sh docker-status'))
-      || !overseaConfigureAccess?.commands.some((command) => command.includes('@qpjoy/tunnel-cli') || command.includes('qp-tunnel-cli register'))
+      || !overseaConfigureAccess?.commands.some((command) => command.includes('@qpjoy/tunnel-cli') || command.includes('qp-tunnel-cli register') || command.includes('oversea callback push-only; registration skipped'))
       || !overseaPublishSubscription?.commands.some((command) => command.includes('domesticBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/oversea-sg-1-domestic.yaml'))
       || !overseaPublishSubscription?.commands.some((command) => command.includes('internalBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/oversea-sg-1-internal.yaml'))
       || overseaDeployServices?.mode !== 'artifact-push'

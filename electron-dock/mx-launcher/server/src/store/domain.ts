@@ -2176,11 +2176,16 @@ export function buildSiteSlotPlan(
   const domesticRuntimeConfig = kind === 'domestic'
     ? input.domesticRuntimeConfig ?? buildSiteSlotDomesticRuntimeConfig(config, { siteId }, null, createdAt)
     : null;
+  const hasOverseaCallbackInput = Object.prototype.hasOwnProperty.call(input, 'overseaCallbackBaseUrl');
   const runtimeInput = kind === 'oversea'
     ? {
         ...input,
         serverPorts: input.serverPorts ?? activeProfile?.serverPorts,
-        exportPort: input.exportPort ?? activeProfile?.exportPort
+        exportPort: input.exportPort ?? activeProfile?.exportPort,
+        workerInternalBaseUrl: input.workerInternalBaseUrl ?? activeProfile?.workerInternalBaseUrl ?? input.internalBaseUrl,
+        overseaCallbackBaseUrl: hasOverseaCallbackInput
+          ? input.overseaCallbackBaseUrl ?? null
+          : activeProfile?.overseaCallbackBaseUrl ?? null
       }
     : input;
   const overseaRuntimeConfig = kind === 'oversea'
@@ -2265,6 +2270,12 @@ export function buildSiteSlotSshProfile(
   const exportPort = kind === 'oversea'
     ? normalizeTcpPort(input.exportPort ?? previous?.exportPort, HYSTERIA2_EXPORT_FALLBACK_PORT)
     : null;
+  const workerInternalBaseUrl = kind === 'oversea'
+    ? normalizeOptionalHttpUrl(input.workerInternalBaseUrl ?? input.internalBaseUrl ?? previous?.workerInternalBaseUrl ?? null)
+    : null;
+  const overseaCallbackBaseUrl = kind === 'oversea'
+    ? normalizeOptionalHttpUrl(input.overseaCallbackBaseUrl ?? null)
+    : null;
   if (kind === 'oversea' && input.serverPorts && serverPorts !== input.serverPorts.trim()) {
     warnings.push(`runtime: invalid Hysteria2 serverPorts "${input.serverPorts}", using ${serverPorts}`);
   }
@@ -2288,6 +2299,8 @@ export function buildSiteSlotSshProfile(
     hostKeyAlias,
     serverPorts,
     exportPort,
+    workerInternalBaseUrl,
+    overseaCallbackBaseUrl,
     strictHostKeyChecking,
     connectTimeoutSeconds,
     batchMode,
@@ -2545,6 +2558,19 @@ function previousBootstrapPort(previous: SiteSlotDomesticRuntimeConfig | null): 
 function normalizeHttpUrl(value: string): string {
   const trimmed = value.trim().replace(/\/+$/, '');
   return trimmed || 'http://10.88.88.88:18090';
+}
+
+function normalizeOptionalHttpUrl(value: string | null | undefined): string | null {
+  const trimmed = value?.trim().replace(/\/+$/, '') || '';
+  return trimmed || null;
+}
+
+function siteSlotWorkerInternalBaseUrl(input: SiteSlotPlanInput): string | null {
+  return normalizeOptionalHttpUrl(input.workerInternalBaseUrl ?? input.internalBaseUrl ?? null);
+}
+
+function siteSlotOverseaCallbackBaseUrl(input: SiteSlotPlanInput): string | null {
+  return normalizeOptionalHttpUrl(input.overseaCallbackBaseUrl ?? null);
 }
 
 function isHttpUrl(value: string): boolean {
@@ -3428,6 +3454,8 @@ function siteSlotNetworkMode(kind: SiteSlotKind, input: SiteSlotPlanInput): Site
 function buildSiteSlotOverseaRuntimeConfig(input: SiteSlotPlanInput, host: string | null): SiteSlotOverseaRuntimeConfig {
   const serverPorts = normalizeHysteria2ServerPorts(input.serverPorts);
   const exportPort = normalizeTcpPort(input.exportPort, HYSTERIA2_EXPORT_FALLBACK_PORT);
+  const workerInternalBaseUrl = siteSlotWorkerInternalBaseUrl(input);
+  const overseaCallbackBaseUrl = siteSlotOverseaCallbackBaseUrl(input);
   const warnings: string[] = [];
   if (input.serverPorts && serverPorts.normalized !== input.serverPorts.trim()) {
     warnings.push(`invalid Hysteria2 serverPorts "${input.serverPorts}", using ${serverPorts.normalized}`);
@@ -3440,6 +3468,9 @@ function buildSiteSlotOverseaRuntimeConfig(input: SiteSlotPlanInput, host: strin
     firstServerPort: serverPorts.firstPort,
     exportPort,
     exportBaseUrl: host ? `http://${host}:${exportPort}` : null,
+    workerInternalBaseUrl,
+    overseaCallbackBaseUrl,
+    callbackMode: overseaCallbackBaseUrl ? 'remote-callback' : 'push-only',
     warnings
   };
 }
@@ -3707,7 +3738,9 @@ function siteSlotPreflightChecks(
       remediation: 'Use Internal rsync/scp to push mx-oversea-access-stack.tar.gz, then run the stack preflight before exposing traffic.'
     });
   }
-  if (input.internalBaseUrl && kind === 'domestic') {
+  const workerInternalBaseUrl = siteSlotWorkerInternalBaseUrl(input);
+  const overseaCallbackBaseUrl = siteSlotOverseaCallbackBaseUrl(input);
+  if (workerInternalBaseUrl && kind === 'domestic') {
     checks.push({
       checkId: 'domestic.internal-after-relay',
       title: 'Internal after-relay reachability',
@@ -3718,16 +3751,16 @@ function siteSlotPreflightChecks(
       expected: 'Domestic does not require public Internal reachability before WG relay activation',
       remediation: 'Start the Internal service peer with mx-internal-service-peer.conf, then verify Domestic can reach Internal at 10.88.88.88:18090 through mx-domestic.'
     });
-  } else if (input.internalBaseUrl) {
+  } else if (kind === 'oversea' && overseaCallbackBaseUrl) {
     checks.push({
-      checkId: `${kind}.internal-reachability`,
-      title: 'Internal reachability check',
+      checkId: 'oversea.internal-callback-reachability',
+      title: 'Optional Internal callback reachability',
       stage: 'network',
-      severity: 'required',
+      severity: 'optional',
       requiresRoot: false,
-      command: remote(`curl -fsS --max-time 8 ${input.internalBaseUrl.replace(/'/g, '')}/healthz`),
-      expected: 'Slot can reach Internal control-plane health endpoint',
-      remediation: 'Allow outbound path to Internal, or route through Domestic/Oversea-assisted tunnel first.'
+      command: remote(`curl -fsS --max-time 8 ${overseaCallbackBaseUrl.replace(/'/g, '')}/healthz || echo "warning: Internal callback URL is not reachable from Oversea; continuing in push-only mode"`),
+      expected: 'Optional: Oversea can reach the callback URL if remote self-registration is enabled',
+      remediation: 'Leave Oversea callback URL empty for Internal-pushed mode, or expose a trusted callback path through Domestic/WG/VPN.'
     });
   }
   return checks;
@@ -3778,12 +3811,20 @@ function siteSlotDeploymentPhases(
     const flags = deleteStale ? '-az --delete' : '-az';
     return `if command -v rsync >/dev/null 2>&1; then rsync ${flags} -e 'ssh -p ${sshPort}' ${source} ${sshUser}@${target}:${dest}; else ${source.endsWith('/') ? scpRecursive(source, dest) : scp(source, dest)}; fi`;
   };
-  const internalBaseUrl = input.internalBaseUrl ?? '<internal-base-url>';
-  const internalMihomoBaseUrl = `${internalBaseUrl}/internal/v1/launcher-network/mihomo`;
+  const workerInternalBaseUrl = siteSlotWorkerInternalBaseUrl(input) ?? '<worker-internal-base-url>';
+  const overseaCallbackBaseUrl = kind === 'oversea'
+    ? siteSlotOverseaCallbackBaseUrl(input)
+    : workerInternalBaseUrl;
+  const overseaCallbackMode = overseaCallbackBaseUrl ? 'remote-callback' : 'push-only';
+  const internalMihomoBaseUrl = overseaCallbackBaseUrl
+    ? `${overseaCallbackBaseUrl}/internal/v1/launcher-network/mihomo`
+    : '';
   const overseaSiteId = kind === 'domestic'
     ? input.overseaSiteId?.trim() || 'oversea-main'
     : input.siteId?.trim() || 'oversea-main';
-  const overseaSubscriptionBaseUrl = `${internalBaseUrl}/internal/v1/site-slots/${overseaSiteId}/subscriptions/hysteria2`;
+  const overseaSubscriptionBaseUrl = overseaCallbackBaseUrl
+    ? `${overseaCallbackBaseUrl}/internal/v1/site-slots/${overseaSiteId}/subscriptions/hysteria2`
+    : `internal-pushed://${overseaSiteId}/subscriptions/hysteria2`;
   const overseaServerPorts = overseaRuntimeConfig?.serverPorts ?? HYSTERIA2_ACCESS_PORTS;
   const overseaExportPort = overseaRuntimeConfig?.exportPort ?? HYSTERIA2_EXPORT_FALLBACK_PORT;
   const overseaExportBaseUrl = overseaRuntimeConfig?.exportBaseUrl ?? `http://${target}:${overseaExportPort}`;
@@ -3837,7 +3878,7 @@ function siteSlotDeploymentPhases(
   const syncInternalConfigCommands = kind === 'oversea'
     ? [
       `POST /internal/v1/config-center/snapshots/effective siteId=${input.siteId ?? 'oversea-main'}`,
-      `Record overseaConfigDelivery=internal-pushed siteId=${input.siteId ?? 'oversea-main'} internalHealth=${internalBaseUrl}/healthz remoteCurl=skipped loopback-not-routable-from-slot`
+      `Record overseaConfigDelivery=internal-pushed siteId=${input.siteId ?? 'oversea-main'} workerInternalHealth=${workerInternalBaseUrl}/healthz overseaCallbackMode=${overseaCallbackMode} remoteCurl=skipped`
     ]
     : [
       `POST /internal/v1/config-center/snapshots/effective siteId=${input.siteId ?? 'domestic-main'}`,
@@ -3853,6 +3894,8 @@ function siteSlotDeploymentPhases(
     `HY2_USERS=${overseaRuntimeAccountNames.join(',')}`,
     `HY2_PEER_DNS=${HYSTERIA2_CLIENT_DNS.join(',')}`,
     `HY2_INTERNAL_MIHOMO_BASE_URL=${internalMihomoBaseUrl}`,
+    `HY2_INTERNAL_CALLBACK_MODE=${overseaCallbackMode}`,
+    `HY2_INTERNAL_CALLBACK_BASE_URL=${overseaCallbackBaseUrl ?? ''}`,
     'HY2_INTERNAL_SUBSCRIPTION_STORE=config-center',
     'HY2_MIHOMO_ROUTING_MODE=cn-direct',
     `HY2_RESERVED_INTERNAL_CIDRS=${overseaReservedInternalCidrsCsv}`,
@@ -3879,6 +3922,11 @@ function siteSlotDeploymentPhases(
       publicHost: target,
       serverPorts: overseaServerPorts
     },
+    internal: {
+      callbackMode: overseaCallbackMode,
+      callbackBaseUrl: overseaCallbackBaseUrl,
+      workerBaseUrl: workerInternalBaseUrl
+    },
     policies: [
       {
         id: 'cn-direct',
@@ -3900,6 +3948,20 @@ function siteSlotDeploymentPhases(
       }))
   });
   const overseaTunnelStateBase64 = Buffer.from(overseaTunnelStateJson, 'utf8').toString('base64');
+  const overseaRegistrationCommand = overseaCallbackBaseUrl
+    ? ssh(`chmod +x ${overseaAccessStackCurrentDir}/bin/qp-tunnel-cli && ${overseaAccessStackCurrentDir}/bin/qp-tunnel-cli register --internal ${overseaCallbackBaseUrl} --role oversea --site ${input.siteId ?? 'oversea-main'} --service hysteria2`)
+    : ssh(`install -d -m 0755 /opt/mx/site-agent && printf "%s\\n" "MX_INTERNAL_CALLBACK_MODE=push-only" "MX_SITE_ID=${input.siteId ?? 'oversea-main'}" "MX_SITE_ROLE=oversea" > /opt/mx/site-agent/registration.env && echo "oversea callback push-only; registration skipped"`);
+  const overseaSlotServiceEnvLines = [
+    `MX_SITE_ID=${input.siteId ?? 'oversea-main'}`,
+    'MX_SITE_ROLE=oversea',
+    'MX_ENABLED_MODULES=access-node,site-agent,runner-worker,observability-forwarder',
+    `MX_INTERNAL_BASE_URL=${overseaCallbackBaseUrl ?? ''}`,
+    `MX_INTERNAL_CALLBACK_MODE=${overseaCallbackMode}`,
+    `MX_WORKER_INTERNAL_BASE_URL=${workerInternalBaseUrl}`,
+    `LOCAL_STACK_PATH=${overseaAccessStackCurrentDir}`,
+    'MX_ACCESS_RUNTIME=hysteria2-only'
+  ];
+  const overseaSlotServiceEnvWriteCommand = `printf "%s\\n" ${overseaSlotServiceEnvLines.map(shellDoubleQuote).join(' ')} > ${slotCurrentDir}/.env`;
   const phases: SiteSlotPlan['deploymentPhases'] = [
     {
       phaseId: 'register-slot',
@@ -4058,7 +4120,7 @@ function siteSlotDeploymentPhases(
           ssh(overseaEnvWriteCommand),
           ssh(`printf "%s" ${overseaTunnelStateBase64} | base64 -d > /opt/mx/site-agent/tunnel-state.json`),
           ssh(`cd ${overseaAccessStackCurrentDir} && ./manage.sh reconcile-from-json --state-file /opt/mx/site-agent/tunnel-state.json --mode hysteria2-only`),
-          ssh(`chmod +x ${overseaAccessStackCurrentDir}/bin/qp-tunnel-cli && ${overseaAccessStackCurrentDir}/bin/qp-tunnel-cli register --internal ${internalBaseUrl} --role oversea --site ${input.siteId ?? 'oversea-main'} --service hysteria2`),
+          overseaRegistrationCommand,
           ssh(`cd ${overseaAccessStackCurrentDir} && ./manage.sh sync-internal-defaults && ./manage.sh docker-status && curl -fsS http://127.0.0.1:${overseaExportPort}/healthz`)
         ],
         notes: [
@@ -4096,7 +4158,7 @@ function siteSlotDeploymentPhases(
         ssh(`install -d -m 0755 ${incomingDir} ${currentRoot} ${slotReleaseDir}`),
         rsyncOverSsh(slotServiceBundle, `${incomingDir}/`),
         kind === 'oversea'
-          ? ssh(`tar -xzf ${incomingDir}/${slotServiceBundleName} -C ${slotReleaseDir} && ln -sfn ${slotReleaseDir} ${slotCurrentDir} && printf "MX_SITE_ID=${input.siteId ?? 'oversea-main'}\\nMX_SITE_ROLE=oversea\\nMX_ENABLED_MODULES=access-node,site-agent,runner-worker,observability-forwarder\\nMX_INTERNAL_BASE_URL=${internalBaseUrl}\\nLOCAL_STACK_PATH=${overseaAccessStackCurrentDir}\\nMX_ACCESS_RUNTIME=hysteria2-only\\n" > ${slotCurrentDir}/.env && cd ${slotCurrentDir} && ${startSlotServicesCommand}`)
+          ? ssh(`tar -xzf ${incomingDir}/${slotServiceBundleName} -C ${slotReleaseDir} && ln -sfn ${slotReleaseDir} ${slotCurrentDir} && ${overseaSlotServiceEnvWriteCommand} && cd ${slotCurrentDir} && ${startSlotServicesCommand}`)
           : ssh(`tar -xzf ${incomingDir}/${slotServiceBundleName} -C ${slotReleaseDir} && ln -sfn ${slotReleaseDir} ${slotCurrentDir} && ${domesticEnvWriteCommand} && cd ${slotCurrentDir} && ${startSlotServicesCommand}`)
       ],
       notes: [
@@ -4161,7 +4223,7 @@ function siteSlotNextActions(
   if (kind === 'oversea') actions.push('push-oversea-access-stack');
   actions.push('push-slot-service-bundle', 'sync-signed-internal-config', 'run-slot-smoke');
   if (kind === 'domestic') actions.push('activate-domestic-peer-center');
-  if (!input.internalBaseUrl) actions.push('set-internal-base-url-for-reachability-check');
+  if (kind === 'domestic' && !siteSlotWorkerInternalBaseUrl(input)) actions.push('set-internal-base-url-for-reachability-check');
   return actions;
 }
 
@@ -4357,7 +4419,7 @@ export function buildLauncherNetworkReachabilityPlan(
         requiredEvidence: [
           'Remote SSH worker report shows docker version and docker compose are available.',
           'Oversea access stack status and hysteria2 healthz pass.',
-          '@qpjoy/tunnel-cli register --role oversea --service hysteria2 evidence is attached.'
+          'Oversea registration evidence is attached: remote callback register when configured, otherwise Internal push-only registration metadata.'
         ],
         notes: [
           'Oversea should run hysteria2/site-agent only. It should not run Internal mihomo authority.',

@@ -202,7 +202,8 @@ export class AdminController {
     const siteId = sanitizeSiteId(rawSiteId, 'oversea-main');
     const requestedBy = stringValue(body.requestedBy) ?? actionPolicy.principal.principalId;
     const requestId = stringValue(body.requestId) ?? `admin-oversea-shadow-setup-${Date.now()}`;
-    const internalBaseUrl = normalizeBaseUrl(stringValue(body.internalBaseUrl) ?? process.env.MX_INTERNAL_BASE_URL ?? 'http://127.0.0.1:18090');
+    const workerInternalBaseUrl = workerInternalBaseUrlFromBody(body);
+    const overseaCallbackBaseUrl = overseaCallbackBaseUrlFromBody(body);
     const requestServerPorts = stringValue(body.serverPorts);
     const requestExportPort = numberValueOrNull(body.exportPort);
     const profile = await this.store.upsertSiteSlotSshProfile({
@@ -218,6 +219,8 @@ export class AdminController {
       hostKeyAlias: stringValue(body.hostKeyAlias) ?? siteId,
       serverPorts: requestServerPorts,
       exportPort: requestExportPort,
+      workerInternalBaseUrl,
+      overseaCallbackBaseUrl,
       strictHostKeyChecking: stringValue(body.strictHostKeyChecking) ?? 'yes',
       connectTimeoutSeconds: numberValueOrNull(body.connectTimeoutSeconds) ?? 30,
       batchMode: stringValue(body.batchMode) ?? 'yes',
@@ -259,7 +262,9 @@ export class AdminController {
       hasOutboundInternet: true,
       serverPorts,
       exportPort,
-      internalBaseUrl,
+      internalBaseUrl: workerInternalBaseUrl,
+      workerInternalBaseUrl,
+      overseaCallbackBaseUrl,
       accessAccounts: planAccessAccounts,
       createdBy: requestedBy,
       requestId: `${requestId}-plan`
@@ -345,7 +350,9 @@ export class AdminController {
     const siteId = sanitizeSiteId(rawSiteId, 'oversea-main');
     const requestedBy = stringValue(body.requestedBy) ?? actionPolicy.principal.principalId;
     const requestId = stringValue(body.requestId) ?? `admin-oversea-ensure-${Date.now()}`;
-    const internalBaseUrl = normalizeBaseUrl(stringValue(body.internalBaseUrl) ?? process.env.MX_INTERNAL_BASE_URL ?? 'http://127.0.0.1:18090');
+    const requestWorkerInternalBaseUrl = stringValue(body.workerInternalBaseUrl) ?? stringValue(body.internalBaseUrl);
+    const requestOverseaCallbackBaseUrlProvided = Object.prototype.hasOwnProperty.call(body, 'overseaCallbackBaseUrl');
+    const requestOverseaCallbackBaseUrl = overseaCallbackBaseUrlFromBody(body);
     const executeRemote = booleanValue(body.executeRemote) === true;
     const confirmInstall = booleanValue(body.confirmInstall) === true;
     const force = booleanValue(body.force) === true;
@@ -373,6 +380,10 @@ export class AdminController {
     }
     const serverPorts = requestServerPorts ?? profile.serverPorts;
     const exportPort = requestExportPort ?? profile.exportPort;
+    const workerInternalBaseUrl = normalizeBaseUrl(requestWorkerInternalBaseUrl ?? profile.workerInternalBaseUrl ?? process.env.MX_INTERNAL_BASE_URL ?? 'http://127.0.0.1:18090');
+    const overseaCallbackBaseUrl = requestOverseaCallbackBaseUrlProvided
+      ? requestOverseaCallbackBaseUrl
+      : profile.overseaCallbackBaseUrl ?? null;
 
     const access = await this.store.issueSiteSlotAccessAccounts({
       siteId,
@@ -389,7 +400,7 @@ export class AdminController {
       accounts: planAccessAccounts.length
     }));
 
-    let plan = await this.findReusableOverseaPlan(siteId, profile.profileId, serverPorts, exportPort);
+    let plan = await this.findReusableOverseaPlan(siteId, profile.profileId, serverPorts, exportPort, workerInternalBaseUrl, overseaCallbackBaseUrl);
     if (!plan || !reusableOverseaPlanIncludesAccounts(plan, planAccessAccounts)) {
       plan = await this.store.createSiteSlotPlan({
         siteId,
@@ -403,7 +414,9 @@ export class AdminController {
         hasOutboundInternet: true,
         serverPorts,
         exportPort,
-        internalBaseUrl,
+        internalBaseUrl: workerInternalBaseUrl,
+        workerInternalBaseUrl,
+        overseaCallbackBaseUrl,
         accessAccounts: planAccessAccounts,
         createdBy: requestedBy,
         requestId
@@ -485,7 +498,7 @@ export class AdminController {
       return { ensure, oversea: await this.buildOverseaOverview(actionPolicy, ensure) };
     }
 
-    const workerRun = await this.runRemoteSshWorker(job.jobId, profile.profileId, internalBaseUrl, requestedBy, requestId);
+    const workerRun = await this.runRemoteSshWorker(job.jobId, profile.profileId, workerInternalBaseUrl, requestedBy, requestId);
     const latestReport = latestByCreatedAt(await this.store.listSiteSlotWorkerReports(job.jobId));
     const status = latestReport?.status ?? (workerRun.exitCode === 0 ? 'passed' : 'failed');
     const ensure = {
@@ -616,7 +629,9 @@ export class AdminController {
     siteId: string,
     profileId: string,
     serverPorts: string | null,
-    exportPort: number | null
+    exportPort: number | null,
+    workerInternalBaseUrl: string | null,
+    overseaCallbackBaseUrl: string | null
   ): Promise<SiteSlotPlan | null> {
     const plans = await this.store.listSiteSlotPlans();
     return latestByCreatedAt(plans.filter((plan) => (
@@ -625,7 +640,7 @@ export class AdminController {
       && plan.ssh.profileId === profileId
       && plan.status !== 'blocked'
       && reusableOverseaPlanContract(plan)
-      && reusableOverseaPlanMatchesRuntime(plan, serverPorts, exportPort)
+      && reusableOverseaPlanMatchesRuntime(plan, serverPorts, exportPort, workerInternalBaseUrl, overseaCallbackBaseUrl)
     )));
   }
 
@@ -813,6 +828,8 @@ export class AdminController {
         hostKeyAlias: profile.hostKeyAlias,
         serverPorts: profile.serverPorts,
         exportPort: profile.exportPort,
+        workerInternalBaseUrl: profile.workerInternalBaseUrl,
+        overseaCallbackBaseUrl: profile.overseaCallbackBaseUrl,
         status: profile.status,
         warnings: profile.warnings
       } : null,
@@ -832,6 +849,9 @@ export class AdminController {
         serverPorts: pipeline?.plan.runtime.oversea?.serverPorts ?? mihomoSite?.serverPorts ?? profile?.serverPorts ?? null,
         exportPort: pipeline?.plan.runtime.oversea?.exportPort ?? profile?.exportPort ?? null,
         exportBaseUrl: pipeline?.plan.runtime.oversea?.exportBaseUrl ?? null,
+        workerInternalBaseUrl: pipeline?.plan.runtime.oversea?.workerInternalBaseUrl ?? profile?.workerInternalBaseUrl ?? null,
+        overseaCallbackBaseUrl: pipeline?.plan.runtime.oversea?.overseaCallbackBaseUrl ?? profile?.overseaCallbackBaseUrl ?? null,
+        callbackMode: pipeline?.plan.runtime.oversea?.callbackMode ?? (profile?.overseaCallbackBaseUrl ? 'remote-callback' : 'push-only'),
         workerReportId: latestReport?.reportId ?? null,
         workerReportStatus: latestReport?.status ?? null,
         failure: latestReportFailure,
@@ -1485,7 +1505,7 @@ export class AdminController {
         requestId: stringValue(body.requestId)
       });
       const workerHandoff = buildSiteSlotRemoteSshWorkerHandoff(job, plan, gate, {
-        internalBaseUrl: stringValue(body.internalBaseUrl),
+        workerInternalBaseUrl: stringValue(body.workerInternalBaseUrl) ?? stringValue(body.internalBaseUrl),
         confirmWorkerHandoff: booleanValue(body.confirmWorkerHandoff) === true
       });
       if (workerHandoff.status !== 'ready' || booleanValue(body.executeWorkerHandoff) !== true) {
@@ -1498,8 +1518,11 @@ export class AdminController {
       if (job.status !== 'ready') throw new BadRequestException(`Site slot worker job is not ready: ${job.status}`);
       const profileId = stringValue(workerHandoff.env?.SITE_SLOT_SSH_PROFILE_ID) ?? plan?.ssh.profileId;
       if (!profileId) throw new BadRequestException('Managed SSH profile is required before Remote SSH worker execution');
-      const internalBaseUrl = stringValue(workerHandoff.env?.MX_INTERNAL_BASE_URL) ?? stringValue(body.internalBaseUrl);
-      if (!internalBaseUrl) throw new BadRequestException('internalBaseUrl is required before Remote SSH worker execution');
+      const internalBaseUrl = stringValue(workerHandoff.env?.MX_WORKER_INTERNAL_BASE_URL)
+        ?? stringValue(workerHandoff.env?.MX_INTERNAL_BASE_URL)
+        ?? stringValue(body.workerInternalBaseUrl)
+        ?? stringValue(body.internalBaseUrl);
+      if (!internalBaseUrl) throw new BadRequestException('workerInternalBaseUrl is required before Remote SSH worker execution');
       const requestedBy = stringValue(body.requestedBy) ?? 'admin-ui';
       const requestId = stringValue(body.requestId) ?? 'admin-ui-worker-run-remote-ssh-execute';
       const workerExecution = await this.runRemoteSshWorker(job.jobId, profileId, internalBaseUrl, requestedBy, requestId);
@@ -2210,6 +2233,8 @@ function toSiteSlotPlanInput(body: Record<string, unknown>): SiteSlotPlanInput {
     serverPorts: stringValue(body.serverPorts),
     exportPort: numberValueOrNull(body.exportPort),
     internalBaseUrl: stringValue(body.internalBaseUrl),
+    workerInternalBaseUrl: stringValue(body.workerInternalBaseUrl),
+    overseaCallbackBaseUrl: stringValue(body.overseaCallbackBaseUrl),
     accessAccounts: siteSlotPlanAccessAccountsValue(body.accessAccounts),
     requestId: stringValue(body.requestId),
     createdBy: stringValue(body.createdBy)
@@ -5760,7 +5785,8 @@ function executableAdminRemoteCommandKind(value: string): boolean {
 
 function reusableOverseaPlanContract(plan: SiteSlotPlan): boolean {
   const commands = plan.deploymentPhases.flatMap((phase) => phase.commands ?? []);
-  return commands.some((command) => command.includes('/bin/qp-tunnel-cli register --internal'))
+  return (commands.some((command) => command.includes('/bin/qp-tunnel-cli register --internal'))
+    || commands.some((command) => command.includes('oversea callback push-only; registration skipped')))
     && commands.some((command) => command.includes('./manage.sh sync-internal-defaults'))
     && commands.some((command) => command.includes('./manage.sh docker-status'))
     && commands.some((command) => command.includes('slot services placeholder; no Docker services selected'))
@@ -5773,10 +5799,18 @@ function reusableOverseaPlanIncludesAccounts(plan: SiteSlotPlan, accounts: SiteS
   return accounts.every((account) => commandText.includes(account.username));
 }
 
-function reusableOverseaPlanMatchesRuntime(plan: SiteSlotPlan, serverPorts: string | null, exportPort: number | null): boolean {
+function reusableOverseaPlanMatchesRuntime(
+  plan: SiteSlotPlan,
+  serverPorts: string | null,
+  exportPort: number | null,
+  workerInternalBaseUrl: string | null,
+  overseaCallbackBaseUrl: string | null
+): boolean {
   const runtime = plan.runtime.oversea;
   if (serverPorts && runtime?.serverPorts !== serverPorts) return false;
   if (exportPort != null && runtime?.exportPort !== exportPort) return false;
+  if (workerInternalBaseUrl && runtime?.workerInternalBaseUrl !== workerInternalBaseUrl) return false;
+  if ((runtime?.overseaCallbackBaseUrl ?? null) !== (overseaCallbackBaseUrl ?? null)) return false;
   return true;
 }
 
@@ -6149,7 +6183,8 @@ function buildPipelineActionHints(
           confirmRemoteExecution: true,
           confirmWorkerHandoff: true,
           executeWorkerHandoff: true,
-          internalBaseUrl: '<internal-base-url>',
+          workerInternalBaseUrl: '<worker-internal-base-url>',
+          overseaCallbackBaseUrl: '<oversea-callback-base-url>',
           requestedBy: actionPolicy.principal.principalId,
           requestId: 'admin-ui-worker-run-remote-ssh-execute'
         }
@@ -6476,6 +6511,23 @@ function sanitizeSiteId(value: string | null | undefined, fallback: string): str
 
 function normalizeBaseUrl(value: string): string {
   return value.trim().replace(/\/+$/, '') || 'http://127.0.0.1:18090';
+}
+
+function normalizeOptionalBaseUrl(value: string | null): string | null {
+  return value ? normalizeBaseUrl(value) : null;
+}
+
+function workerInternalBaseUrlFromBody(body: Record<string, unknown>): string {
+  return normalizeBaseUrl(
+    stringValue(body.workerInternalBaseUrl)
+      ?? stringValue(body.internalBaseUrl)
+      ?? process.env.MX_INTERNAL_BASE_URL
+      ?? 'http://127.0.0.1:18090'
+  );
+}
+
+function overseaCallbackBaseUrlFromBody(body: Record<string, unknown>): string | null {
+  return normalizeOptionalBaseUrl(stringValue(body.overseaCallbackBaseUrl));
 }
 
 function terminalTimeoutSeconds(value: unknown): number {
@@ -7377,7 +7429,8 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         confirmRemoteExecution: true,
         confirmWorkerHandoff: true,
         executeWorkerHandoff: true,
-        internalBaseUrl: '<internal-base-url>',
+        workerInternalBaseUrl: '<worker-internal-base-url>',
+        overseaCallbackBaseUrl: '<oversea-callback-base-url>',
         requestedBy: 'admin-ui'
       }
     },

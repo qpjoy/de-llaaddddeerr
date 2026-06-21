@@ -68,6 +68,8 @@ export interface SiteSlotPlanInput {
   serverPorts?: string | null;
   exportPort?: number | null;
   internalBaseUrl?: string | null;
+  workerInternalBaseUrl?: string | null;
+  overseaCallbackBaseUrl?: string | null;
   domesticRuntimeConfig?: SiteSlotDomesticRuntimeConfig | null;
   accessAccounts?: SiteSlotPlanAccessAccountInput[] | null;
   requestId?: string | null;
@@ -168,6 +170,9 @@ export interface SiteSlotOverseaRuntimeConfig {
   firstServerPort: number;
   exportPort: number;
   exportBaseUrl: string | null;
+  workerInternalBaseUrl: string | null;
+  overseaCallbackBaseUrl: string | null;
+  callbackMode: 'push-only' | 'remote-callback';
   warnings: string[];
 }
 
@@ -927,6 +932,9 @@ export interface SiteSlotSshProfileInput {
   hostKeyAlias?: string | null;
   serverPorts?: string | null;
   exportPort?: number | null;
+  internalBaseUrl?: string | null;
+  workerInternalBaseUrl?: string | null;
+  overseaCallbackBaseUrl?: string | null;
   strictHostKeyChecking?: 'yes' | 'no' | 'ask' | 'accept-new' | string | null;
   connectTimeoutSeconds?: number | null;
   batchMode?: 'yes' | 'no' | string | null;
@@ -946,6 +954,9 @@ export interface SiteSlotSshProfileBootstrapInput {
   hostKeyAlias?: string | null;
   serverPorts?: string | null;
   exportPort?: number | null;
+  internalBaseUrl?: string | null;
+  workerInternalBaseUrl?: string | null;
+  overseaCallbackBaseUrl?: string | null;
   connectTimeoutSeconds?: number | null;
   rotateKey?: boolean | null;
   scanHostKey?: boolean | null;
@@ -1017,6 +1028,8 @@ export interface SiteSlotSshProfile {
   hostKeyAlias: string | null;
   serverPorts: string | null;
   exportPort: number | null;
+  workerInternalBaseUrl: string | null;
+  overseaCallbackBaseUrl: string | null;
   strictHostKeyChecking: 'yes' | 'no' | 'ask' | 'accept-new';
   connectTimeoutSeconds: number;
   batchMode: 'yes' | 'no';

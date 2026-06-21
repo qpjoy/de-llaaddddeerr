@@ -106,6 +106,8 @@ export interface PlatformOverview {
   siteRole: SiteRole;
   enabledModules: string[];
   storeDriver: RuntimeConfig['storeDriver'];
+  publicBaseUrl: string;
+  internalBaseUrl: string;
   sites: number;
   enrollments: number;
   snapshots: number;

@@ -519,6 +519,8 @@ function toSiteSlotPlanInput(body: Record<string, unknown>): SiteSlotPlanInput {
     serverPorts: nullableString(body.serverPorts),
     exportPort: numberValue(body.exportPort),
     internalBaseUrl: nullableString(body.internalBaseUrl),
+    workerInternalBaseUrl: nullableString(body.workerInternalBaseUrl),
+    overseaCallbackBaseUrl: nullableString(body.overseaCallbackBaseUrl),
     accessAccounts: siteSlotPlanAccessAccountsValue(body.accessAccounts),
     requestId: nullableString(body.requestId),
     createdBy: nullableString(body.createdBy)

@@ -71,12 +71,18 @@ export function buildSiteSlotRemoteSshWorkerHandoff(
   plan: SiteSlotPlan | null,
   gate: ReturnType<typeof buildSiteSlotRemoteSshGate>,
   input: {
-    internalBaseUrl: string | null;
+    internalBaseUrl?: string | null;
+    workerInternalBaseUrl?: string | null;
     confirmWorkerHandoff: boolean;
   }
 ) {
+  const workerInternalBaseUrl = input.workerInternalBaseUrl
+    ?? input.internalBaseUrl
+    ?? process.env.MX_INTERNAL_BASE_URL
+    ?? 'http://127.0.0.1:18090';
   const env = {
-    MX_INTERNAL_BASE_URL: input.internalBaseUrl ?? process.env.MX_INTERNAL_BASE_URL ?? 'http://127.0.0.1:18090',
+    MX_INTERNAL_BASE_URL: workerInternalBaseUrl,
+    MX_WORKER_INTERNAL_BASE_URL: workerInternalBaseUrl,
     SITE_SLOT_WORKER_REMOTE_SSH: '1',
     SITE_SLOT_CONFIRM_REMOTE_EXECUTION: '1',
     SITE_SLOT_WORKER_MODE: 'artifact-push-remote-ssh',
