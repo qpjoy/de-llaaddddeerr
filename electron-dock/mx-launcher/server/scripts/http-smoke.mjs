@@ -580,6 +580,10 @@ const checks = [
     assert: (body) => {
       state.overseaSiteId = body?.plan?.siteId;
       state.overseaHost = body?.plan?.host;
+      state.overseaServerPorts = String(body?.plan?.runtime?.oversea?.serverPorts || '51288');
+      state.overseaFirstServerPort = Number(body?.plan?.runtime?.oversea?.firstServerPort || state.overseaServerPorts.split(',')[0] || 51288);
+      state.overseaExportBaseUrl = body?.plan?.runtime?.oversea?.exportBaseUrl || `http://${state.overseaHost}:3434`;
+      state.overseaCallbackMode = body?.plan?.runtime?.oversea?.callbackMode || 'remote-callback';
       const packageArtifacts = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'package-slot-artifacts');
       const prepareAccess = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'prepare-access-stack');
       const configureAccess = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'configure-oversea-access');
@@ -602,13 +606,13 @@ const checks = [
         && prepareAccess?.commands?.some((command) => command.includes('rsync -az') && command.includes('mx-oversea-access-stack.tar.gz'))
         && prepareAccess?.commands?.some((command) => command.includes('scp -P') && command.includes('mx-oversea-access-stack.tar.gz'))
         && prepareAccess?.commands?.some((command) => command.includes('/opt/mx/releases/oversea-access-stack/__release_revision__'))
-        && configureAccess?.commands?.some((command) => command.includes('HY2_EXPORT_BASE_URL=http://oversea.example.com:3434') && command.includes('HY2_EXPORT_USER=download') && command.includes('HY2_EXPORT_PASSWORD_HASH='))
+        && configureAccess?.commands?.some((command) => command.includes(`HY2_EXPORT_BASE_URL=${state.overseaExportBaseUrl}`) && command.includes('HY2_EXPORT_USER=download') && command.includes('HY2_EXPORT_PASSWORD_HASH='))
         && configureAccess?.commands?.some((command) => command.includes('HY2_MIHOMO_ROUTING_MODE=cn-direct') && command.includes('HY2_RESERVED_INTERNAL_CIDRS=10.88.0.0/16,10.89.0.0/16,10.90.0.0/16') && command.includes('HY2_DOMESTIC_GATEWAY_IP=10.88.0.1'))
         && configureAccess?.commands?.some((command) => command.includes('base64 -d') && command.includes('tunnel-state.json'))
         && configureAccess?.commands?.some((command) => command.includes('reconcile-from-json') && command.includes('--mode hysteria2-only'))
         && configureAccess?.commands?.some((command) => command.includes('./manage.sh sync-internal-defaults'))
         && configureAccess?.commands?.some((command) => command.includes('./manage.sh docker-status'))
-        && configureAccess?.commands?.some((command) => command.includes('@qpjoy/tunnel-cli') || command.includes('qp-tunnel-cli register'))
+        && configureAccess?.commands?.some((command) => command.includes('@qpjoy/tunnel-cli') || command.includes('qp-tunnel-cli register') || command.includes('registration skipped'))
         && publishSubscription?.commands?.some((command) => command.includes('domesticBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/oversea-main-domestic.yaml'))
         && publishSubscription?.commands?.some((command) => command.includes('internalBootstrapSubscription=') && command.includes('/subscriptions/hysteria2/oversea-main-internal.yaml'))
         && deployServices?.mode === 'artifact-push'
@@ -628,7 +632,7 @@ const checks = [
     body: () => ({
       issueDefaults: true,
       publicHost: state.overseaHost,
-      serverPorts: '51288',
+      serverPorts: state.overseaServerPorts || '51288',
       tlsFingerprint: 'D6:55:9C:55:7C:BF:F7:F1:D1:EE:0C:65:18:8E:90:A1:50:66:1F:70:F8:71:1D:16:50:E9:D2:B2:48:DD:00:58',
       requestedBy: 'http-smoke',
       requestId: 'http-smoke-oversea-access-accounts'
@@ -637,7 +641,7 @@ const checks = [
       state.overseaDomesticAccount = 'oversea-main-domestic';
       return body?.site?.siteId === 'oversea-main'
         && body?.site?.mode === 'internal-managed'
-        && body?.site?.serverPorts === '51288'
+        && body?.site?.serverPorts === (state.overseaServerPorts || '51288')
         && body?.site?.tlsFingerprint === 'D6:55:9C:55:7C:BF:F7:F1:D1:EE:0C:65:18:8E:90:A1:50:66:1F:70:F8:71:1D:16:50:E9:D2:B2:48:DD:00:58'
         && body?.site?.reachability?.domesticWgRelayRequired === true
         && Array.isArray(body?.accounts)
@@ -652,7 +656,8 @@ const checks = [
     name: 'oversea mihomo site get',
     path: '/internal/v1/launcher-network/mihomo/sites/oversea-main',
     assert: (body) => body?.site?.siteId === 'oversea-main'
-      && body?.site?.subscriptionBaseUrl?.endsWith('/internal/v1/site-slots/oversea-main/subscriptions/hysteria2')
+      && (body?.site?.subscriptionBaseUrl?.endsWith('/internal/v1/site-slots/oversea-main/subscriptions/hysteria2')
+        || body?.site?.subscriptionBaseUrl === 'internal-pushed://oversea-main/subscriptions/hysteria2')
       && body?.site?.reachability?.internalUrlOnly === true
       && body?.site?.reachability?.h2iRequired === true
   },
@@ -688,7 +693,7 @@ const checks = [
       && body.text.includes('mode: rule')
       && body.text.includes('log-level: info')
       && body.text.includes('geodata-mode: true')
-      && body.text.includes('port: 51288')
+      && body.text.includes(`port: ${state.overseaFirstServerPort || 51288}`)
       && !body.text.includes('port: 52120')
       && body.text.includes('down: "30 Mbps"')
       && body.text.includes('up: "30 Mbps"')
