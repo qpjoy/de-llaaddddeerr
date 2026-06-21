@@ -474,9 +474,10 @@ configure_firewall() {
 
 wait_for_cluster() {
   [ "$SKIP_INIT" = "0" ] || return 0
+  say "wait for Flannel rollout"
+  run_allow_fail kubectl -n kube-flannel rollout status daemonset/kube-flannel-ds --timeout=300s
   say "wait for node readiness"
   run_allow_fail kubectl wait --for=condition=Ready node --all --timeout=300s
-  run_allow_fail kubectl -n kube-flannel rollout status daemonset/kube-flannel-ds --timeout=300s
   run kubectl get nodes -o wide
   run kubectl -n kube-system get pods -o wide
 }
