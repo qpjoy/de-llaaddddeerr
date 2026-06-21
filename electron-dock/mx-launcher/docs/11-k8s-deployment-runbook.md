@@ -312,6 +312,12 @@ bash scripts/manage.sh ops internal-production gateway-smoke
 PostgreSQL / migration Job / Internal API / `mx-internal-gateway`，然后直接通过
 `http://127.0.0.1:18090` 跑 gateway smoke。若该机器有防火墙或云安全组，只允许可信
 Internal 管理网、Domestic relay 或 `mx-internal-svc` overlay 访问 TCP `18090`。
+构建镜像前，脚本会检查 `site-slots/domestic/qp-tunnel-cli` fallback 是否包含
+`dist/index.js`、`dist/hdo.js` 和声明文件；如果缺失，会优先从同仓库的
+`electron-plugin/packages/tunnel-cli` 本地源码刷新，必要时先构建
+`@qpjoy/electron-core-wireguard` 和 `@qpjoy/tunnel-cli`。`electron-plugin`
+workspace 固定 `pnpm@9.15.4`；部署脚本会读取该 workspace 的 `packageManager` 并通过
+Corepack 调用对应 pnpm 版本，避免 CentOS 全局 pnpm 版本漂移导致安装失败。
 
 ### 与 HDO V1 共存
 

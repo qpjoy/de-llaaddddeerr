@@ -153,6 +153,34 @@ run_tsc() {
   "$tsc" "$@"
 }
 
+pnpm_version_for_dir() {
+  local dir="$1"
+  node -e '
+    const { readFileSync } = require("node:fs");
+    const { join } = require("node:path");
+    try {
+      const packageJson = JSON.parse(readFileSync(join(process.argv[1], "package.json"), "utf8"));
+      const match = String(packageJson.packageManager || "").match(/^pnpm@(.+)$/);
+      if (match) process.stdout.write(match[1]);
+    } catch {
+      process.exit(0);
+    }
+  ' "$dir"
+}
+
+run_pnpm_dir() {
+  local dir="$1"
+  shift
+  local version
+  version="$(pnpm_version_for_dir "$dir")"
+  if [ -n "$version" ] && command -v corepack >/dev/null 2>&1; then
+    corepack "pnpm@$version" --dir "$dir" "$@"
+    return
+  fi
+  command -v pnpm >/dev/null 2>&1 || die "pnpm is required for package scripts"
+  pnpm --dir "$dir" "$@"
+}
+
 need_kubectl() {
   command -v kubectl >/dev/null 2>&1 || die "kubectl is required for k8s actions"
 }
@@ -179,7 +207,65 @@ k8s_manifest_dir() {
   esac
 }
 
+qp_tunnel_cli_fallback_ready() {
+  local dir="$1"
+  local required=(
+    package.json
+    README.md
+    README.setup.md
+    dist/index.js
+    dist/hdo.js
+    dist/index.d.ts
+    dist/hdo.d.ts
+    resources/mihomo-client.sh
+  )
+  local file
+  for file in "${required[@]}"; do
+    [ -f "$dir/$file" ] || return 1
+  done
+}
+
+wireguard_runtime_ready() {
+  local plugin_root="$1"
+  local core="$plugin_root/packages/electron-core-wireguard"
+  local engine engine_root
+  [ -f "$core/package.json" ] || return 1
+  [ -f "$core/README.md" ] || return 1
+  [ -d "$core/dist" ] || return 1
+  for engine in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-x64; do
+    engine_root="$plugin_root/packages/wireguard-engines/$engine"
+    [ -f "$engine_root/package.json" ] || return 1
+    [ -f "$engine_root/README.md" ] || return 1
+    [ -d "$engine_root/resources" ] || return 1
+  done
+}
+
+shadow_image_tunnel_cli_fallback() {
+  local target_dir="$ROOT/site-slots/domestic/qp-tunnel-cli"
+  local plugin_root="$ROOT/../../electron-plugin"
+  local cli_source="$plugin_root/packages/tunnel-cli"
+  if qp_tunnel_cli_fallback_ready "$target_dir" && wireguard_runtime_ready "$plugin_root"; then
+    return 0
+  fi
+  [ -f "$cli_source/package.json" ] || die "missing qp-tunnel-cli source: $cli_source"
+  if ! qp_tunnel_cli_fallback_ready "$cli_source" || ! wireguard_runtime_ready "$plugin_root"; then
+    if [ ! -d "$plugin_root/node_modules" ]; then
+      say "install electron-plugin workspace dependencies for qp-tunnel-cli fallback"
+      run_pnpm_dir "$plugin_root" install --frozen-lockfile
+    fi
+    say "build WireGuard runtime for qp-tunnel-cli fallback"
+    run_pnpm_dir "$plugin_root" --filter @qpjoy/electron-core-wireguard build
+    say "build qp-tunnel-cli fallback dist"
+    run_pnpm_dir "$plugin_root" --filter @qpjoy/tunnel-cli build
+  fi
+  qp_tunnel_cli_fallback_ready "$cli_source" || die "qp-tunnel-cli source dist is missing after build: $cli_source/dist"
+  wireguard_runtime_ready "$plugin_root" || die "electron-core-wireguard runtime artifacts are missing after build"
+  say "refresh mx-launcher qp-tunnel-cli fallback from local electron-plugin package"
+  node server/scripts/site-slot-refresh-tunnel-cli.mjs --from-local "$cli_source"
+}
+
 shadow_image_artifacts() {
+  shadow_image_tunnel_cli_fallback
   say "materialize site-slot artifacts for shadow image"
   node server/scripts/site-slot-artifact-materializer.mjs all --out-dir server/artifacts/site-slots
 }

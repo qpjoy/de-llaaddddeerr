@@ -70,4 +70,24 @@ wg show mx-domestic latest-handshakes
 wg show mx-domestic endpoints
 # wg Internal host runner
 bash scripts/manage.sh ops site-slot native-host-runner status 19190
+
+
+### 正式部署
+# 先在 CentOS 上按 runbook 安装 kubeadm/containerd/kubectl，并 kubeadm init
+kubectl get nodes -o wide
+kubectl -n kube-system get pods -o wide
+
+# 然后进入仓库
+cd /path/to/de-llaaddddeerr/electron-dock/mx-launcher
+
+corepack enable
+pnpm approve-builds --yes
+pnpm install
+
+PG_PASSWORD='<换成 Internal 测试库密码>' \
+  bash scripts/manage.sh ops internal-production deploy
+
+bash scripts/manage.sh ops internal-production status
+bash scripts/manage.sh ops internal-production gateway-smoke
+curl -fsS http://127.0.0.1:18090/healthz
 ```
