@@ -1330,14 +1330,6 @@ async function startWireGuardForSession(input) {
       internalBaseUrl,
       pathPreference
     });
-    if (configuredPreference === 'auto' && pathPreference === 'hybrid') {
-      attempt = await connectAndProbeWireGuardPath(mod, {
-        routePlan,
-        privateKey,
-        internalBaseUrl,
-        pathPreference: attempt.ready === true ? 'direct' : 'relay'
-      });
-    }
     const { result, route, internalApi, ready } = attempt;
     const tunnelReady = result.ok === true;
     const domesticRelayReady = domesticRelayDiagnostics?.status === 'passed' || domesticPeerSync?.status === 'passed' || route.ok === true;
@@ -1650,7 +1642,7 @@ function effectiveWireGuardPathPreference(routePlan, _internalDirectPeerSync, co
   if (preference === 'relay') return 'relay';
   if (preference === 'direct') return 'direct';
   if (preference === 'hybrid') return 'hybrid';
-  return routePlanHasDirect(routePlan) ? 'hybrid' : 'relay';
+  return routePlanHasDirect(routePlan) ? 'direct' : 'relay';
 }
 
 function routePathFromPreference(preference) {

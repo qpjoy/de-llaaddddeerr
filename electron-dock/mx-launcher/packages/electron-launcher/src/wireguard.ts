@@ -226,8 +226,8 @@ export async function connectLauncherWireGuardPeer(
     configPath: peer.configPath,
     action
   });
-  const status = safeWireGuardStatus(runtime, peer.configPath);
-  const ok = tunnel.ok === true && (status?.active === true || runtime.platform === 'win32');
+  const status = await waitForLauncherWireGuardStatus(runtime, peer.configPath);
+  const ok = tunnel.ok === true && status?.active === true;
   return {
     ok,
     action,
@@ -237,6 +237,24 @@ export async function connectLauncherWireGuardPeer(
     tunnel,
     message: ok ? tunnel.message : launcherWireGuardNotReadyMessage(tunnel, status)
   };
+}
+
+async function waitForLauncherWireGuardStatus(
+  runtime: ReturnType<typeof resolveWireGuardConnectionRuntime>,
+  configPath: string
+): Promise<ReturnType<typeof getWireGuardTunnelStatus> | null> {
+  const attempts = runtime.platform === 'win32' ? 16 : 1;
+  let status: ReturnType<typeof getWireGuardTunnelStatus> | null = null;
+  for (let index = 0; index < attempts; index += 1) {
+    status = safeWireGuardStatus(runtime, configPath);
+    if (status?.active === true || runtime.platform !== 'win32') return status;
+    await delay(500);
+  }
+  return status;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
 
 export async function stopLauncherWireGuardPeer(input: ElectronLauncherWireGuardRuntimeOptions) {
