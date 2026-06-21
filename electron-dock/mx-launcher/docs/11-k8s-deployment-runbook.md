@@ -16,6 +16,7 @@ Docker Compose 适合把本地服务跑起来；K8s 适合把服务声明成“�
 | `services.internal` | Deployment | `mx-launcher-internal`，无状态 NestJS API |
 | `services.postgres` | StatefulSet | `mx-internal-postgres`，有状态数据库 |
 | `ports` | Service + port-forward / Ingress | `mx-launcher-internal` ClusterIP，smoke 用 port-forward |
+| 宿主机入口 | DaemonSet + hostNetwork | `mx-internal-gateway`，正式 Internal 主机长驻入口 |
 | `environment` | ConfigMap + Secret | 非敏感配置进 ConfigMap，密码和 `DATABASE_URL` 进 Secret |
 | `volumes` | PersistentVolumeClaim | Postgres 数据盘，`down` 默认不删除 |
 | `healthcheck` | livenessProbe / readinessProbe | `/healthz` 判断进程，`/readyz` 判断可接流量 |
@@ -80,11 +81,169 @@ bash scripts/manage.sh k8s smoke internal-shadow
 它会把本地 `127.0.0.1:18090` 临时转发到集群内 `mx-launcher-internal:18090`，然后跑
 同一套 HTTP smoke。
 
+正式 Internal 主机不需要长期手动 port-forward。`45-internal-gateway.yaml` 会部署
+`mx-internal-gateway` DaemonSet，使用 `hostNetwork` 绑定宿主机 `0.0.0.0:18090`，
+反代到 `mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090`。在单台
+CentOS/Ubuntu Internal K8s 上，DaemonSet 实际只运行一个 Pod；如果以后变成多节点，
+应给真正拥有 `mx-internal-svc` / `10.88.88.88` 的节点打 label，再把 gateway 约束到
+那台节点。
+
 ## 部署顺序
 
-当前 manifest 使用镜像 `qpjoy/mx-launcher-server:shadow`。如果使用 Docker Desktop 本地
-K8s，通常可以直接复用本机镜像；如果是远程 Internal 集群，需要先把镜像推到集群可访问
-的 registry，并在 manifest 或后续部署模板中替换 image。
+### CentOS 单节点 K8s Bootstrap
+
+如果 Internal 服务器现在只安装了 Docker，建议先用 kubeadm 初始化一套单节点 K8s。
+当前 Kubernetes 官方 RPM 文档使用 `v1.36` 仓库；如果现场要锁定别的 minor，把仓库 URL
+里的 `v1.36` 一并替换。
+
+优先使用 CentOS Stream 9 / Rocky 9 / Alma 9 这类仍在维护的系统。如果是 CentOS 7，
+建议先升级系统或改用企业发行版 K8s；CentOS 7 已经过维护期，kubeadm、containerd、
+CNI 和内核网络组合更容易出现场地问题。
+
+推荐直接使用一键脚本。脚本会关闭 swap、配置 containerd、安装 kubeadm / kubelet /
+kubectl、初始化单节点集群、安装 Flannel、放开单节点 control-plane 调度，并按需打开
+firewalld 的 `18090/tcp`、`6443/tcp`、`8472/udp`。
+
+```bash
+cd ~/mx/workspace/de-llaaddddeerr/electron-dock/mx-launcher
+
+bash scripts/install-k8s-centos.sh --advertise-address <这台 Internal CentOS 的内网 IP>
+```
+
+如果希望 K8s 安装完成后顺手部署 MX-H2I Internal 服务：
+
+```bash
+cd ~/mx/workspace/de-llaaddddeerr/electron-dock/mx-launcher
+
+PG_PASSWORD='<换成 Internal 测试库密码>' \
+  bash scripts/install-k8s-centos.sh \
+    --advertise-address <这台 Internal CentOS 的内网 IP> \
+    --deploy-mx
+```
+
+可以先预览脚本动作：
+
+```bash
+bash scripts/install-k8s-centos.sh --advertise-address <IP> --dry-run
+```
+
+脚本默认参数可以通过环境变量覆盖：
+
+```bash
+K8S_VERSION=v1.36 \
+POD_CIDR=10.244.0.0/16 \
+SERVICE_CIDR=10.96.0.0/12 \
+bash scripts/install-k8s-centos.sh --advertise-address <IP>
+```
+
+下面是脚本展开后的手动步骤，保留给现场排障或审计。以下命令在 Internal CentOS
+服务器上以 root 执行：
+
+```bash
+cat /etc/os-release
+ip -4 addr
+```
+
+准备 containerd、内核网络和 swap：
+
+```bash
+swapoff -a
+sed -i.bak '/[[:space:]]swap[[:space:]]/ s/^/#/' /etc/fstab
+
+cat >/etc/modules-load.d/k8s.conf <<'EOF'
+overlay
+br_netfilter
+EOF
+modprobe overlay
+modprobe br_netfilter
+
+cat >/etc/sysctl.d/99-kubernetes-cri.conf <<'EOF'
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward = 1
+EOF
+sysctl --system
+
+mkdir -p /etc/containerd
+containerd config default >/etc/containerd/config.toml
+sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+systemctl enable --now containerd
+systemctl restart containerd
+```
+
+安装 kubeadm / kubelet / kubectl：
+
+```bash
+setenforce 0 || true
+sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config
+
+cat >/etc/yum.repos.d/kubernetes.repo <<'EOF'
+[kubernetes]
+name=Kubernetes
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.36/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.36/rpm/repodata/repomd.xml.key
+exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+EOF
+
+yum install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
+systemctl enable --now kubelet
+```
+
+初始化单节点集群。`10.244.0.0/16` 给 Flannel Pod 网段，`10.96.0.0/12` 给 K8s
+Service 网段；它们不占用 HDO V1 的 `100.*`，也不占用 MX-H2I service peer 的
+`10.88.*` / `10.89.*`。
+
+```bash
+CENTOS_LAN_IP=<这台 Internal CentOS 的内网 IP>
+kubeadm init \
+  --apiserver-advertise-address="$CENTOS_LAN_IP" \
+  --pod-network-cidr=10.244.0.0/16 \
+  --service-cidr=10.96.0.0/12 \
+  --cri-socket=unix:///run/containerd/containerd.sock
+
+mkdir -p "$HOME/.kube"
+cp -i /etc/kubernetes/admin.conf "$HOME/.kube/config"
+chown "$(id -u):$(id -g)" "$HOME/.kube/config"
+
+kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+kubectl get nodes -o wide
+kubectl -n kube-system get pods -o wide
+```
+
+如果开启了 `firewalld` 或云安全组，至少要让可信 Internal 管理机能访问 TCP `18090`。
+K8s API `6443` 只开放给管理员机器；PostgreSQL、Docker daemon 和 containerd socket 不
+对外开放。
+
+```bash
+firewall-cmd --permanent --add-port=18090/tcp
+firewall-cmd --permanent --add-port=6443/tcp
+firewall-cmd --reload
+```
+
+### 安装当前 MX-H2I 服务
+
+把当前仓库放到 Internal CentOS 后，在 `electron-dock/mx-launcher` 目录执行：
+
+```bash
+corepack enable
+pnpm install
+
+PG_PASSWORD='<换成 Internal 测试库密码>' \
+  bash scripts/manage.sh ops internal-production deploy
+
+bash scripts/manage.sh ops internal-production status
+bash scripts/manage.sh ops internal-production gateway-smoke
+curl -fsS http://127.0.0.1:18090/healthz
+```
+
+`internal-production deploy` 会构建 `qpjoy/mx-launcher-server:shadow`。在 CentOS
+kubeadm/containerd 环境里，脚本会自动把 Docker 本地镜像导入 containerd 的 `k8s.io`
+namespace，让 migration Job 和 Internal API Pod 能直接使用这份镜像。如果现场改成推送
+到 Harbor / 私有 registry，也可以设置 `MX_SHADOW_CONTAINERD_IMPORT=0` 跳过本地导入，
+并把 manifest 中的 image 改成 registry 地址。
 
 ```bash
 bash scripts/manage.sh k8s plan internal-shadow
@@ -93,9 +252,61 @@ bash scripts/manage.sh k8s render internal-shadow
 bash scripts/manage.sh k8s apply internal-shadow
 bash scripts/manage.sh k8s status internal-shadow
 bash scripts/manage.sh k8s smoke internal-shadow
+bash scripts/manage.sh k8s gateway-smoke internal-shadow
 bash scripts/manage.sh k8s db-summary internal-shadow
 bash scripts/manage.sh k8s logs internal-shadow
 ```
+
+面向 Internal CentOS/Ubuntu 的一键正式部署：
+
+```bash
+bash scripts/manage.sh ops internal-production deploy
+bash scripts/manage.sh ops internal-production status
+bash scripts/manage.sh ops internal-production gateway-smoke
+```
+
+`internal-production deploy` 会构建 `qpjoy/mx-launcher-server:shadow`、部署
+PostgreSQL / migration Job / Internal API / `mx-internal-gateway`，然后直接通过
+`http://127.0.0.1:18090` 跑 gateway smoke。若该机器有防火墙或云安全组，只允许可信
+Internal 管理网、Domestic relay 或 `mx-internal-svc` overlay 访问 TCP `18090`。
+
+### 与 HDO V1 共存
+
+`internal-shadow` 可以先部署到 Internal CentOS 的 K8s 上，默认不会替换或停止已经在线上
+运行的 HDO V1。当前边界如下：
+
+| 维度 | MX-H2I / Launcher 2.0 | HDO V1 | 共存判断 |
+| --- | --- | --- | --- |
+| K8s namespace | `mx-internal-shadow`，另建 `mx-dns` | 不使用这套 K8s manifest | 不重名 |
+| API 端口 | Pod / Service 内部 `18090`；正式 gateway 绑定宿主机 `18090` | `electron-server` 默认 `8080` | 不抢 V1 `8080`，但正式 gateway 会占用宿主机 `18090` |
+| Postgres | Service `mx-internal-postgres:5432`，PVC 独立 | Compose `qpjoy-postgres`，宿主机默认 `5433:5432` | 不共库、不共 volume |
+| 服务名 | `mx-launcher-internal`、`mx-internal-postgres`、`mx-internal-coredns` | `qpjoy-market`、`qpjoy-postgres`、`hdo-home` | 不重名 |
+| 网段 | `10.88.0.0/16`、`10.89.0.0/16`、`10.90.0.0/16+` | legacy `100.88/100.89` | 不重叠 |
+| WireGuard interface | 2.0 使用 `mx-domestic`、`mx-internal-svc` | V1 使用 `hdo-home`、`hdo-internal` | 不重名；V1 清理是显式命令 |
+
+默认 `k8s apply internal-shadow` 只创建/更新 K8s 对象、Secret、migration Job、
+ClusterIP Service 和 Internal gateway；它不会执行 `wg-quick`、不会改宿主机 route/iptables、不会停止
+`hdo-home`。会触碰宿主机网络的动作是后续单独阶段：
+
+- Domestic 2.0 relay 激活：创建/重启 `wg-quick@mx-domestic`，写入 `10.88.*` 路由和
+  `mx-domestic` 转发规则。
+- Internal service peer handoff：在真正的 Internal runtime host 上启动
+  `mx-internal-svc`，把 Internal 固定到 `10.88.88.88`。
+- `ops site-slot cleanup-v1-wireguard --apply`：显式停止并归档 `hdo-home` /
+  `hdo-internal`，只有确认 V1 不再需要时才执行。
+
+在同一台机器同时保留 HDO V1 和 MX-H2I 2.0 时，推荐先只执行：
+
+```bash
+bash scripts/manage.sh k8s apply internal-shadow
+bash scripts/manage.sh k8s status internal-shadow
+bash scripts/manage.sh k8s smoke internal-shadow
+```
+
+如果需要让局域网内的 Mac 临时访问 Internal API，可以用 `18190` 等非冲突端口
+port-forward；正式路径用 `mx-internal-gateway` 提供宿主机 `18090`，再通过
+`mx-domestic` + `mx-internal-svc` 让客户端访问 `10.88.88.88:18090`。不要把
+Postgres 或 Docker daemon 暴露到公网。
 
 面向本机运维的封装命令：
 

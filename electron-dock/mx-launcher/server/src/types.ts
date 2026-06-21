@@ -822,6 +822,10 @@ export interface SdkGatewayManifest {
     oauthTokenUrl: string;
     tokenIntrospectionUrl: string;
     principalContextUrl: string;
+    rolesUrl: string;
+    usersUrl: string;
+    serviceAccountsUrl: string;
+    permissionsRequestUrl: string;
     configSnapshotUrl: string;
     dnsPolicyUrl: string;
     dnsEvaluateUrl: string;

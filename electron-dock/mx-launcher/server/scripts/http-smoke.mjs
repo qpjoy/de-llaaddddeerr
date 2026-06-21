@@ -50,6 +50,8 @@ const checks = [
     assert: (body) => Array.isArray(body?.gateway?.routes)
       && body.gateway.routes.some((route) => route.routeId === 'sdk.identity.introspect')
       && body.gateway.routes.some((route) => route.routeId === 'sdk.gateway.access.evaluate')
+      && body.gateway.routes.some((route) => route.routeId === 'sdk.users.list')
+      && body.gateway.routes.some((route) => route.routeId === 'sdk.permissions.request')
       && body.gateway.routes.some((route) => route.routeId === 'sdk.config.snapshot')
       && body.gateway.routes.some((route) => route.routeId === 'sdk.dns.zone')
       && body.gateway.routes.some((route) => route.routeId === 'sdk.dns.coredns-configmap')
@@ -141,6 +143,7 @@ const checks = [
       state.serviceToken = body?.issued?.token;
       return typeof state.serviceToken === 'string'
         && body?.issued?.record?.subjectKind === 'service-account'
+        && body?.issued?.record?.scopes?.includes('sdk.user.read')
         && body?.issued?.record?.scopes?.includes('sdk.config.snapshot')
         && body?.issued?.record?.scopes?.includes('sdk.dns.evaluate');
     }
@@ -169,6 +172,25 @@ const checks = [
     }),
     assert: (body) => body?.decision?.allowed === true
       && body?.decision?.matchedScopes?.includes('sdk.dns.evaluate')
+  },
+  {
+    name: 'sdk gateway user route access allow',
+    path: '/internal/v1/sdk/gateway/access/evaluate',
+    method: 'POST',
+    body: () => ({
+      token: state.serviceToken,
+      audience: 'mx-sdk',
+      routeId: 'sdk.users.list',
+      requestId: 'http-smoke-sdk-users-access'
+    }),
+    assert: (body) => body?.decision?.allowed === true
+      && body?.decision?.matchedScopes?.includes('sdk.user.read')
+  },
+  {
+    name: 'sdk user roles',
+    path: '/internal/v1/sdk/roles',
+    assert: (body) => Array.isArray(body?.roles)
+      && body.roles.some((role) => role.roleId === 'mx-service-account')
   },
   {
     name: 'sdk config snapshot',

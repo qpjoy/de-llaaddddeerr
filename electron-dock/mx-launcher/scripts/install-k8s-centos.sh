@@ -1,0 +1,368 @@
+#!/usr/bin/env bash
+# Bootstrap a single-node kubeadm cluster for the MX-H2I Internal host.
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+K8S_VERSION="${K8S_VERSION:-v1.36}"
+POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
+SERVICE_CIDR="${SERVICE_CIDR:-10.96.0.0/12}"
+CRI_SOCKET="${CRI_SOCKET:-unix:///run/containerd/containerd.sock}"
+K8S_APISERVER_ADVERTISE_ADDRESS="${K8S_APISERVER_ADVERTISE_ADDRESS:-}"
+K8S_FLANNEL_URL="${K8S_FLANNEL_URL:-https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml}"
+K8S_GATEWAY_PORT="${K8S_GATEWAY_PORT:-18090}"
+K8S_OPEN_FIREWALL="${K8S_OPEN_FIREWALL:-1}"
+K8S_DISABLE_SWAP="${K8S_DISABLE_SWAP:-1}"
+K8S_SET_SELINUX_PERMISSIVE="${K8S_SET_SELINUX_PERMISSIVE:-1}"
+K8S_INSTALL_FLANNEL="${K8S_INSTALL_FLANNEL:-1}"
+K8S_UNTAINT_CONTROL_PLANE="${K8S_UNTAINT_CONTROL_PLANE:-1}"
+DEPLOY_MX="${DEPLOY_MX:-0}"
+DRY_RUN=0
+SKIP_INIT=0
+MX_ROOT="$ROOT"
+
+say() { printf '▸ %s\n' "$*"; }
+die() { printf '✗ %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bash scripts/install-k8s-centos.sh [options]
+
+Options:
+  --advertise-address IP   Internal CentOS LAN IP for kube-apiserver.
+  --pod-cidr CIDR          Pod CIDR. Default: 10.244.0.0/16.
+  --service-cidr CIDR      Service CIDR. Default: 10.96.0.0/12.
+  --k8s-version VERSION    Kubernetes RPM minor repo. Default: v1.36.
+  --skip-init              Install packages/config only; do not run kubeadm init.
+  --skip-flannel           Do not install Flannel CNI.
+  --skip-firewall          Do not modify firewalld.
+  --deploy-mx              After K8s is ready, run ops internal-production deploy.
+  --mx-root DIR            mx-launcher root. Default: this script's parent dir.
+  --dry-run                Print steps without changing the host.
+  -h, --help               Show this help.
+
+Environment:
+  PG_PASSWORD=...          Required with --deploy-mx unless existing secret is enough.
+  K8S_APISERVER_ADVERTISE_ADDRESS=IP
+  K8S_VERSION=v1.36
+  POD_CIDR=10.244.0.0/16
+  SERVICE_CIDR=10.96.0.0/12
+  K8S_OPEN_FIREWALL=0
+  K8S_DISABLE_SWAP=0
+  K8S_SET_SELINUX_PERMISSIVE=0
+  K8S_INSTALL_FLANNEL=0
+  K8S_UNTAINT_CONTROL_PLANE=0
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --advertise-address)
+      K8S_APISERVER_ADVERTISE_ADDRESS="${2:-}"
+      shift 2
+      ;;
+    --pod-cidr)
+      POD_CIDR="${2:-}"
+      shift 2
+      ;;
+    --service-cidr)
+      SERVICE_CIDR="${2:-}"
+      shift 2
+      ;;
+    --k8s-version)
+      K8S_VERSION="${2:-}"
+      shift 2
+      ;;
+    --skip-init)
+      SKIP_INIT=1
+      shift
+      ;;
+    --skip-flannel)
+      K8S_INSTALL_FLANNEL=0
+      shift
+      ;;
+    --skip-firewall)
+      K8S_OPEN_FIREWALL=0
+      shift
+      ;;
+    --deploy-mx)
+      DEPLOY_MX=1
+      shift
+      ;;
+    --mx-root)
+      MX_ROOT="${2:-}"
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "Unknown option: $1"
+      ;;
+  esac
+done
+
+run() {
+  say "+ $*"
+  [ "$DRY_RUN" = "1" ] || "$@"
+}
+
+run_allow_fail() {
+  say "+ $*"
+  [ "$DRY_RUN" = "1" ] && return 0
+  "$@" || return 0
+}
+
+write_file() {
+  local path="$1"
+  if [ "$DRY_RUN" = "1" ]; then
+    say "would write $path"
+    cat >/dev/null
+    return 0
+  fi
+  cat >"$path"
+}
+
+backup_file() {
+  local path="$1"
+  local stamp
+  [ -f "$path" ] || return 0
+  stamp="$(date +%Y%m%d%H%M%S)"
+  run cp -a "$path" "$path.mx-k8s.$stamp.bak"
+}
+
+require_root() {
+  if [ "$(id -u)" != "0" ]; then
+    [ "$DRY_RUN" = "1" ] && say "dry-run without root; real install must run as root" && return 0
+    die "Run as root on the CentOS Internal host."
+  fi
+}
+
+detect_rhel_family() {
+  [ -f /etc/os-release ] || die "Cannot find /etc/os-release"
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  case "${ID:-}:${ID_LIKE:-}" in
+    centos:*|rhel:*|rocky:*|almalinux:*|ol:*|*:rhel*|*:fedora*)
+      say "OS: ${PRETTY_NAME:-$ID}"
+      ;;
+    *)
+      die "This installer targets CentOS/RHEL-compatible hosts. Found: ${PRETTY_NAME:-unknown}"
+      ;;
+  esac
+}
+
+package_manager() {
+  if command -v dnf >/dev/null 2>&1; then
+    echo dnf
+    return
+  fi
+  if command -v yum >/dev/null 2>&1; then
+    echo yum
+    return
+  fi
+  die "dnf or yum is required"
+}
+
+auto_advertise_ip() {
+  local ip
+  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')"
+  [ -n "$ip" ] || die "Cannot auto-detect LAN IP. Re-run with --advertise-address <IP>."
+  echo "$ip"
+}
+
+disable_swap() {
+  [ "$K8S_DISABLE_SWAP" = "1" ] || return 0
+  say "disable swap for kubelet"
+  run swapoff -a
+  if grep -Eq '^[^#].*[[:space:]]swap[[:space:]]' /etc/fstab; then
+    backup_file /etc/fstab
+    run sed -i '/^[^#].*[[:space:]]swap[[:space:]]/ s/^/#/' /etc/fstab
+  fi
+}
+
+configure_kernel_networking() {
+  say "configure kernel modules and sysctl"
+  write_file /etc/modules-load.d/k8s.conf <<'EOF'
+overlay
+br_netfilter
+EOF
+  run modprobe overlay
+  run modprobe br_netfilter
+  write_file /etc/sysctl.d/99-kubernetes-cri.conf <<'EOF'
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward = 1
+EOF
+  run sysctl --system
+}
+
+configure_containerd() {
+  local pm
+  pm="$(package_manager)"
+  if ! command -v containerd >/dev/null 2>&1; then
+    say "containerd is missing; install containerd.io from configured repositories"
+    run "$pm" install -y containerd.io
+  fi
+  say "configure containerd for Kubernetes CRI"
+  run mkdir -p /etc/containerd
+  [ ! -f /etc/containerd/config.toml ] || backup_file /etc/containerd/config.toml
+  if [ "$DRY_RUN" = "1" ]; then
+    say "would generate /etc/containerd/config.toml"
+  else
+    containerd config default >/etc/containerd/config.toml
+  fi
+  run sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+  run sed -i 's/disabled_plugins = \["cri"\]/disabled_plugins = []/g' /etc/containerd/config.toml
+  run systemctl enable --now containerd
+  run systemctl restart containerd
+}
+
+configure_selinux() {
+  [ "$K8S_SET_SELINUX_PERMISSIVE" = "1" ] || return 0
+  say "set SELinux to permissive for kubeadm"
+  run_allow_fail setenforce 0
+  if [ -f /etc/selinux/config ]; then
+    backup_file /etc/selinux/config
+    run sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config
+  fi
+}
+
+install_kubernetes_packages() {
+  local pm
+  pm="$(package_manager)"
+  say "configure Kubernetes RPM repository $K8S_VERSION"
+  write_file /etc/yum.repos.d/kubernetes.repo <<EOF
+[kubernetes]
+name=Kubernetes
+baseurl=https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/rpm/repodata/repomd.xml.key
+exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+EOF
+  say "install kubelet kubeadm kubectl"
+  if [ "$DRY_RUN" = "1" ]; then
+    say "would install kubelet kubeadm kubectl"
+  elif ! "$pm" install -y kubelet kubeadm kubectl --disableexcludes=kubernetes; then
+    "$pm" install -y kubelet kubeadm kubectl --setopt=disable_excludes=kubernetes
+  fi
+  run systemctl enable kubelet
+  run_allow_fail systemctl start kubelet
+}
+
+configure_kubectl() {
+  [ -f /etc/kubernetes/admin.conf ] || return 0
+  say "configure root kubectl"
+  run mkdir -p "$HOME/.kube"
+  if [ "$DRY_RUN" = "1" ]; then
+    say "would copy /etc/kubernetes/admin.conf to $HOME/.kube/config"
+  else
+    cp -f /etc/kubernetes/admin.conf "$HOME/.kube/config"
+  fi
+  run chown "$(id -u):$(id -g)" "$HOME/.kube/config"
+}
+
+init_cluster() {
+  [ "$SKIP_INIT" = "0" ] || return 0
+  if [ -f /etc/kubernetes/admin.conf ]; then
+    say "existing kubeadm cluster detected; skip kubeadm init"
+    configure_kubectl
+    return 0
+  fi
+  if [ -z "$K8S_APISERVER_ADVERTISE_ADDRESS" ]; then
+    K8S_APISERVER_ADVERTISE_ADDRESS="$(auto_advertise_ip)"
+  fi
+  say "initialize single-node Kubernetes cluster at $K8S_APISERVER_ADVERTISE_ADDRESS"
+  run kubeadm init \
+    --apiserver-advertise-address="$K8S_APISERVER_ADVERTISE_ADDRESS" \
+    --pod-network-cidr="$POD_CIDR" \
+    --service-cidr="$SERVICE_CIDR" \
+    --cri-socket="$CRI_SOCKET"
+  configure_kubectl
+}
+
+install_flannel() {
+  [ "$K8S_INSTALL_FLANNEL" = "1" ] || return 0
+  [ "$SKIP_INIT" = "0" ] || return 0
+  say "install Flannel CNI"
+  run kubectl apply -f "$K8S_FLANNEL_URL"
+}
+
+untaint_control_plane() {
+  [ "$K8S_UNTAINT_CONTROL_PLANE" = "1" ] || return 0
+  [ "$SKIP_INIT" = "0" ] || return 0
+  say "allow workloads on single control-plane node"
+  run_allow_fail kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+}
+
+configure_firewall() {
+  [ "$K8S_OPEN_FIREWALL" = "1" ] || return 0
+  command -v firewall-cmd >/dev/null 2>&1 || return 0
+  if [ "$DRY_RUN" != "1" ] && ! firewall-cmd --state >/dev/null 2>&1; then
+    say "firewalld is not running; skip firewall rules"
+    return 0
+  fi
+  say "open firewall ports for Internal gateway and Kubernetes admin"
+  run firewall-cmd --permanent --add-port="${K8S_GATEWAY_PORT}/tcp"
+  run firewall-cmd --permanent --add-port=6443/tcp
+  run firewall-cmd --permanent --add-port=8472/udp
+  run firewall-cmd --permanent --add-masquerade
+  run firewall-cmd --reload
+}
+
+wait_for_cluster() {
+  [ "$SKIP_INIT" = "0" ] || return 0
+  say "wait for node readiness"
+  run_allow_fail kubectl wait --for=condition=Ready node --all --timeout=300s
+  run_allow_fail kubectl -n kube-flannel rollout status daemonset/kube-flannel-ds --timeout=300s
+  run kubectl get nodes -o wide
+  run kubectl -n kube-system get pods -o wide
+}
+
+deploy_mx() {
+  [ "$DEPLOY_MX" = "1" ] || return 0
+  [ -d "$MX_ROOT" ] || die "mx-launcher root not found: $MX_ROOT"
+  [ -f "$MX_ROOT/scripts/manage.sh" ] || die "manage.sh not found under $MX_ROOT"
+  [ -n "${PG_PASSWORD:-}" ] || die "PG_PASSWORD is required when using --deploy-mx"
+  say "deploy MX-H2I Internal production stack"
+  if command -v corepack >/dev/null 2>&1; then
+    run corepack enable
+  fi
+  if [ "$DRY_RUN" = "1" ]; then
+    say "would run pnpm install and ops internal-production deploy in $MX_ROOT"
+  else
+    command -v pnpm >/dev/null 2>&1 || die "pnpm is required for --deploy-mx"
+    (cd "$MX_ROOT" && pnpm install)
+    (cd "$MX_ROOT" && bash scripts/manage.sh ops internal-production deploy)
+  fi
+}
+
+main() {
+  require_root
+  detect_rhel_family
+  say "Kubernetes repo version: $K8S_VERSION"
+  say "Pod CIDR: $POD_CIDR"
+  say "Service CIDR: $SERVICE_CIDR"
+  disable_swap
+  configure_kernel_networking
+  configure_containerd
+  configure_selinux
+  install_kubernetes_packages
+  init_cluster
+  install_flannel
+  untaint_control_plane
+  configure_firewall
+  wait_for_cluster
+  deploy_mx
+  say "K8s bootstrap complete"
+}
+
+main "$@"

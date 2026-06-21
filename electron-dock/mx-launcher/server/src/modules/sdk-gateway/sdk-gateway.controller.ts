@@ -1,9 +1,9 @@
 import { BadRequestException, Body, Controller, Get, Inject, Post, UnauthorizedException } from '@nestjs/common';
 
-import { asRecord, nullableString } from '../../lib/http.js';
+import { asRecord, nullableString, stringArray } from '../../lib/http.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
-import type { SdkGatewayAccessInput } from '../../types.js';
+import type { CreateServiceAccountInput, CreateUserInput, SdkGatewayAccessInput } from '../../types.js';
 import { toPrincipalInput, toTokenInput } from '../user-center/user-center.controller.js';
 
 @Controller()
@@ -41,6 +41,48 @@ export class SdkGatewayController {
   @Post('internal/v1/sdk/gateway/access/evaluate')
   async access(@Body() rawBody: unknown) {
     return { decision: await this.store.evaluateSdkGatewayAccess(toAccessInput(asRecord(rawBody))) };
+  }
+
+  @Get('internal/v1/sdk/roles')
+  async roles() {
+    return { roles: await this.store.listUserCenterRoles() };
+  }
+
+  @Get('internal/v1/sdk/users')
+  async users() {
+    return { users: await this.store.listUserCenterUsers() };
+  }
+
+  @Post('internal/v1/sdk/users')
+  async createUser(@Body() rawBody: unknown) {
+    return { user: await this.store.createUserCenterUser(toCreateUserInput(asRecord(rawBody))) };
+  }
+
+  @Get('internal/v1/sdk/service-accounts')
+  async serviceAccounts() {
+    return { serviceAccounts: await this.store.listUserCenterServiceAccounts() };
+  }
+
+  @Post('internal/v1/sdk/service-accounts')
+  async createServiceAccount(@Body() rawBody: unknown) {
+    return {
+      serviceAccount: await this.store.createUserCenterServiceAccount(toCreateServiceAccountInput(asRecord(rawBody)))
+    };
+  }
+
+  @Post('internal/v1/sdk/permissions/requests')
+  async requestPermission(@Body() rawBody: unknown) {
+    const body = asRecord(rawBody);
+    return {
+      grant: await this.store.requestPermission({
+        appId: nullableString(body.appId) ?? 'h2o',
+        installId: nullableString(body.installId),
+        userId: nullableString(body.userId),
+        requestedBy: nullableString(body.requestedBy) ?? 'sdk-gateway',
+        scopes: stringArray(body.scopes),
+        requestId: nullableString(body.requestId) ?? undefined
+      })
+    };
   }
 
   private async issueUserToken(body: Record<string, unknown>) {
@@ -99,6 +141,27 @@ function toAccessInput(body: Record<string, unknown>): SdkGatewayAccessInput {
     token: nullableString(body.token),
     audience: nullableString(body.audience),
     routeId: nullableString(body.routeId) ?? 'sdk.identity.context',
+    requestId: nullableString(body.requestId)
+  };
+}
+
+function toCreateUserInput(body: Record<string, unknown>): CreateUserInput {
+  return {
+    userId: nullableString(body.userId),
+    email: nullableString(body.email),
+    displayName: nullableString(body.displayName),
+    roleIds: stringArray(body.roleIds),
+    orgIds: stringArray(body.orgIds),
+    requestId: nullableString(body.requestId)
+  };
+}
+
+function toCreateServiceAccountInput(body: Record<string, unknown>): CreateServiceAccountInput {
+  return {
+    serviceAccountId: nullableString(body.serviceAccountId),
+    displayName: nullableString(body.displayName),
+    roleIds: stringArray(body.roleIds),
+    scopes: stringArray(body.scopes),
     requestId: nullableString(body.requestId)
   };
 }

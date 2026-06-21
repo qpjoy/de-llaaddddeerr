@@ -74,6 +74,7 @@ Usage:
   bash scripts/manage.sh ops awx-shadow plan|dry-run|install|status|port-forward [local-port]|logs|password|down
   bash scripts/manage.sh ops awx-provider list|upsert [provider-id] [base-url]|check <provider-id>
   bash scripts/manage.sh ops local-platform plan|dry-run|cycle [local-port]|status|down
+  bash scripts/manage.sh ops internal-production plan|deploy|apply|status|gateway-smoke [gateway-url]|down
   bash scripts/manage.sh k8s plan internal-shadow
   bash scripts/manage.sh k8s explain internal-shadow
   bash scripts/manage.sh k8s render internal-shadow
@@ -83,6 +84,7 @@ Usage:
   bash scripts/manage.sh k8s port-forward internal-local [local-port] [bind-address]
   bash scripts/manage.sh k8s logs internal-shadow
   bash scripts/manage.sh k8s db-summary internal-shadow
+  bash scripts/manage.sh k8s gateway-smoke internal-shadow [gateway-url]
   MX_K8S_SHADOW_CONFIRM_RESET=1 bash scripts/manage.sh k8s reset-data internal-shadow
   bash scripts/manage.sh k8s remote-runner internal-shadow enable|disable
   bash scripts/manage.sh k8s readonly-probe internal-shadow enable|disable
@@ -205,6 +207,25 @@ shadow_image_build() {
   shadow_image_cleanup
 }
 
+shadow_image_import_containerd() {
+  local mode="${MX_SHADOW_CONTAINERD_IMPORT:-auto}"
+  local image="qpjoy/mx-launcher-server:shadow"
+  local archive="${TMPDIR:-/tmp}/mx-launcher-server-shadow.tar"
+  [ "$mode" = "0" ] && return 0
+  if ! command -v ctr >/dev/null 2>&1; then
+    [ "$mode" = "1" ] && die "ctr is required when MX_SHADOW_CONTAINERD_IMPORT=1"
+    say "ctr not found; assuming Kubernetes can pull $image from a registry or Docker Desktop"
+    return 0
+  fi
+  command -v docker >/dev/null 2>&1 || die "docker is required to export $image"
+  docker image inspect "$image" >/dev/null
+  say "import $image into containerd namespace k8s.io"
+  rm -f "$archive"
+  docker save "$image" -o "$archive"
+  ctr -n k8s.io images import "$archive"
+  rm -f "$archive"
+}
+
 shadow_image_cleanup() {
   local cleanup="${MX_SHADOW_IMAGE_CLEANUP:-1}"
   local prune_cache="${MX_SHADOW_BUILDKIT_PRUNE:-1}"
@@ -290,7 +311,8 @@ Order:
      and wait for completion.
   10. Apply Internal API Deployment + Service.
   11. Wait for Internal API rollout.
-  12. Run HTTP smoke through a temporary kubectl port-forward.
+  12. Apply Internal Gateway DaemonSet.
+  13. Run HTTP smoke through a temporary kubectl port-forward or the gateway.
 
 Data policy:
   k8s down keeps the PostgreSQL PVC by default. Delete PVCs only with a
@@ -359,6 +381,8 @@ k8s_render() {
   cat "$dir"/30-migration-job.yaml
   printf '\n---\n'
   cat "$dir"/40-internal-api.yaml
+  printf '\n---\n'
+  cat "$dir"/45-internal-gateway.yaml
 }
 
 k8s_apply_db_secret() {
@@ -416,6 +440,8 @@ k8s_dry_run() {
   kubectl apply --dry-run=client --validate=false -f "$dir/30-migration-job.yaml"
   say "dry-run internal api service/deployment"
   kubectl apply --dry-run=client --validate=false -f "$dir/40-internal-api.yaml"
+  say "dry-run internal gateway"
+  kubectl apply --dry-run=client --validate=false -f "$dir/45-internal-gateway.yaml"
   say "k8s dry-run OK"
 }
 
@@ -455,6 +481,10 @@ k8s_apply() {
   kubectl apply -f "$dir/40-internal-api.yaml"
   say "wait internal api rollout"
   kubectl -n "$ns" rollout status deployment/mx-launcher-internal --timeout=180s
+  say "apply internal gateway"
+  kubectl apply -f "$dir/45-internal-gateway.yaml"
+  say "wait internal gateway rollout"
+  kubectl -n "$ns" rollout status daemonset/mx-internal-gateway --timeout=180s
   say "k8s apply OK"
 }
 
@@ -463,7 +493,7 @@ k8s_status() {
   local ns
   ns="$(k8s_namespace "$target")"
   need_kubectl
-  kubectl -n "$ns" get pods,svc,deploy,statefulset,job,pvc
+  kubectl -n "$ns" get pods,svc,deploy,statefulset,daemonset,job,pvc
 }
 
 k8s_logs() {
@@ -599,6 +629,16 @@ k8s_smoke() {
   wait "$pf_pid" 2>/dev/null || true
 }
 
+k8s_gateway_smoke() {
+  local target="$1"
+  local gateway_url="${2:-${MX_INTERNAL_GATEWAY_URL:-http://127.0.0.1:18090}}"
+  need_kubectl
+  say "gateway rollout status"
+  kubectl -n "$(k8s_namespace "$target")" rollout status daemonset/mx-internal-gateway --timeout=180s
+  say "HTTP smoke through Internal gateway: $gateway_url"
+  (cd server && MX_SMOKE_EXPECT_K8S_APPLY=1 pnpm run smoke:http -- "$gateway_url")
+}
+
 k8s_port_forward() {
   local target="$1"
   local local_port="${2:-18090}"
@@ -682,6 +722,8 @@ k8s_down() {
   dir="$(k8s_manifest_dir "$target")"
   need_kubectl
   [ -d "$dir" ] || die "missing k8s manifest directory: $dir"
+  say "delete internal gateway"
+  kubectl delete -f "$dir/45-internal-gateway.yaml" --ignore-not-found
   say "delete internal api"
   kubectl delete -f "$dir/40-internal-api.yaml" --ignore-not-found
   say "delete migration job"
@@ -2988,6 +3030,9 @@ ops_k8s_shadow() {
     smoke)
       k8s_smoke "$target" "${2:-18090}"
       ;;
+    gateway-smoke)
+      k8s_gateway_smoke "$target" "${2:-}"
+      ;;
     gate)
       k8s_internal_shadow_gate "$target" "${2:-18090}"
       ;;
@@ -3027,7 +3072,84 @@ ops_k8s_shadow() {
       k8s_down "$target"
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops internal-local plan|dry-run|cycle|build|apply|status|port-forward [local-port] [bind-address]|gate|gate-manual|manual-evidence|smoke|logs|db-summary|reset-data|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down"
+      die "Usage: bash scripts/manage.sh ops internal-local plan|dry-run|cycle|build|apply|status|port-forward [local-port] [bind-address]|gate|gate-manual|manual-evidence|smoke|gateway-smoke [gateway-url]|logs|db-summary|reset-data|remote-runner enable|disable|readonly-probe enable|disable|ssh-bootstrap enable|disable|down"
+      ;;
+  esac
+}
+
+ops_internal_production_plan() {
+  cat <<'EOF'
+MX Launcher Internal production deployment
+
+This path deploys the Internal K8s control plane plus a long-running host
+gateway. It is intended for the Internal CentOS/Ubuntu runtime host, not for
+short-lived desktop port-forward testing.
+
+Gateway:
+  - DaemonSet: mx-internal-gateway
+  - Host bind: 0.0.0.0:18090
+  - Upstream:  mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090
+  - Smoke URL: http://127.0.0.1:18090 by default
+
+Commands:
+  bash scripts/manage.sh ops internal-production deploy
+  bash scripts/manage.sh ops internal-production status
+  bash scripts/manage.sh ops internal-production gateway-smoke
+  bash scripts/manage.sh ops internal-production down
+
+Notes:
+  - On kubeadm/containerd hosts, deploy imports qpjoy/mx-launcher-server:shadow
+    into the containerd k8s.io namespace after Docker build.
+  - Keep TCP 18090 private to the Internal host, Internal WG service peer, or a
+    trusted LAN. Do not expose PostgreSQL or Docker daemon.
+  - HDO V1 uses 8080 and hdo-home/hdo-internal; this path does not stop them.
+EOF
+}
+
+ops_internal_production() {
+  local action="$1"
+  shift || true
+  case "$action" in
+    plan)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production plan"
+      ops_internal_production_plan
+      ;;
+    deploy|cycle)
+      [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops internal-production deploy [gateway-url]"
+      ops_internal_production_plan
+      say "build Internal image"
+      shadow_image_build
+      shadow_image_import_containerd
+      say "apply Internal K8s production stack"
+      k8s_apply internal-shadow
+      say "restart Internal API for rebuilt image"
+      k8s_restart_internal_api internal-shadow
+      say "status"
+      k8s_status internal-shadow
+      say "gateway smoke"
+      k8s_gateway_smoke internal-shadow "${1:-}"
+      say "db summary"
+      k8s_db_summary internal-shadow
+      say "internal-production deploy OK"
+      ;;
+    apply)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production apply"
+      k8s_apply internal-shadow
+      ;;
+    status)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production status"
+      k8s_status internal-shadow
+      ;;
+    gateway-smoke|smoke)
+      [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops internal-production gateway-smoke [gateway-url]"
+      k8s_gateway_smoke internal-shadow "${1:-}"
+      ;;
+    down)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production down"
+      k8s_down internal-shadow
+      ;;
+    *)
+      die "Usage: bash scripts/manage.sh ops internal-production plan|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|down"
       ;;
   esac
 }
@@ -3040,7 +3162,7 @@ menu_status() {
     local ns
     ns="$(k8s_namespace internal-local)"
     say "k8s namespace: $ns"
-    kubectl -n "$ns" get deploy,statefulset,pod,svc,job,pvc 2>/dev/null || say "local Internal K8s is not running yet"
+    kubectl -n "$ns" get deploy,statefulset,daemonset,pod,svc,job,pvc 2>/dev/null || say "local Internal K8s is not running yet"
   else
     say "kubectl is missing; start Docker Desktop Kubernetes or install kubectl before K8s tests"
   fi
@@ -3509,7 +3631,7 @@ case "$cmd" in
     esac
     ;;
   k8s)
-    [ "$#" -ge 2 ] || die "Usage: bash scripts/manage.sh k8s plan|explain|render|dry-run|apply|status|port-forward|logs|db-summary|reset-data|remote-runner|readonly-probe|ssh-bootstrap|gate|gate-manual|smoke|down internal-local"
+    [ "$#" -ge 2 ] || die "Usage: bash scripts/manage.sh k8s plan|explain|render|dry-run|apply|status|port-forward|logs|db-summary|reset-data|remote-runner|readonly-probe|ssh-bootstrap|gate|gate-manual|smoke|gateway-smoke|down internal-local"
     action="$1"
     target="$2"
     shift 2 || true
@@ -3578,6 +3700,10 @@ case "$cmd" in
         [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh k8s smoke internal-shadow [local-port]"
         k8s_smoke "$target" "${1:-18090}"
         ;;
+      gateway-smoke)
+        [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh k8s gateway-smoke internal-shadow [gateway-url]"
+        k8s_gateway_smoke "$target" "${1:-}"
+        ;;
       down)
         [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh k8s down internal-shadow"
         k8s_down "$target"
@@ -3588,7 +3714,7 @@ case "$cmd" in
     esac
     ;;
   ops)
-    [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops guide|doctor|config|admin|site-slot|local-shadow|k8s-shadow|awx-shadow|awx-provider|local-platform"
+    [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops guide|doctor|config|admin|site-slot|local-shadow|k8s-shadow|awx-shadow|awx-provider|local-platform|internal-production"
     area="$1"
     shift || true
     case "$area" in
@@ -3635,6 +3761,10 @@ case "$cmd" in
       local-platform)
         [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops local-platform plan|dry-run|cycle [local-port]|status|down"
         ops_local_platform "$@"
+        ;;
+      internal-production)
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-production plan|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|down"
+        ops_internal_production "$@"
         ;;
       *)
         die "Unknown ops area: $area"

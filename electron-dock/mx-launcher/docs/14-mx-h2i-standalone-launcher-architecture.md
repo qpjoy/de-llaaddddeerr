@@ -290,10 +290,14 @@ MX_H2I_SPLIT_DNS_DOMAINS=mxinfo-inc.cn,api.mxinfo-inc.cn
 Internal DNS/split DNS 可以把同一域名或内网服务域名解析到 Internal overlay IP。这样用户不需要
 手动填 IP，Admin 只需要管理公网解析、Internal DNS policy 和 routePlan。
 
-正式 Ubuntu Internal 不需要手动长期运行 `kubectl port-forward`。Internal API 仍可以保持
-k8s `ClusterIP`，由 Internal service peer/host gateway 在 Internal 主机侧绑定
-`10.88.88.88:18090` 并转入 k8s Service；Domestic 只反代这个 overlay 地址。这样部署中心、
-用户中心、DNS authority、release truth 都在 Internal，Domestic 只保留公网 bootstrap/relay/cache。
+正式 Ubuntu/CentOS Internal 不需要手动长期运行 `kubectl port-forward`。Internal API
+仍保持 k8s `ClusterIP`，`mx-internal-gateway` DaemonSet 在 Internal 主机侧用
+`hostNetwork` 长驻绑定 `0.0.0.0:18090`，反代到
+`mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090`。Internal service peer
+再把 `10.88.88.88` 固定到真实 Internal runtime host，Domestic 只反代这个 overlay 地址。
+单台 Internal CentOS 上 DaemonSet 只有一个 Pod；多节点时应把 gateway 约束到拥有
+`mx-internal-svc` 的节点。这样部署中心、用户中心、DNS authority、release truth 都在
+Internal，Domestic 只保留公网 bootstrap/relay/cache。
 
 Windows 客户端使用 `wireguard.exe /installtunnelservice` 管理 tunnel service，route proof 通过
 `Get-NetRoute + Get-NetIPInterface` 校验目标 IP 是否命中 `mx-h2i` tunnel alias；PowerShell

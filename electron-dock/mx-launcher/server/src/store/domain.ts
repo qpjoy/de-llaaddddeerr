@@ -130,6 +130,9 @@ const HYSTERIA2_LOCAL_DIRECT_RULES = [
 
 const SERVICE_ACCOUNT_SCOPES = [
   'sdk.identity.read',
+  'sdk.user.read',
+  'sdk.user.write',
+  'sdk.permission.request',
   'sdk.config.snapshot',
   'sdk.dns.evaluate',
   'sdk.audit.write',
@@ -373,6 +376,11 @@ function gatewayRouteRequiredScopes(routeId: string): string[] {
   if (routeId === 'sdk.gateway.access.evaluate') return ['sdk.identity.read'];
   if (routeId === 'sdk.config.snapshot') return ['sdk.config.snapshot', 'sdk.identity.read', 'auth.read'];
   if (routeId.startsWith('sdk.identity.')) return ['sdk.identity.read', 'auth.read'];
+  if (routeId === 'sdk.roles.list' || routeId === 'sdk.users.list' || routeId === 'sdk.service_accounts.list') {
+    return ['sdk.user.read', 'rbac.manage'];
+  }
+  if (routeId === 'sdk.users.create' || routeId === 'sdk.service_accounts.create') return ['sdk.user.write', 'rbac.manage'];
+  if (routeId === 'sdk.permissions.request') return ['sdk.permission.request', 'permission.request'];
   if (routeId.startsWith('sdk.dns.')) return ['sdk.dns.evaluate', 'network.dns.policy'];
   if (routeId === 'sdk.audit.write') return ['sdk.audit.write'];
   if (routeId === 'sdk.observability.logs') return ['sdk.observability.write', 'observability.write'];
@@ -1305,6 +1313,54 @@ export function createSdkGatewayManifest(config: RuntimeConfig): SdkGatewayManif
       description: 'Evaluates whether a principal can call a SDK Gateway route.'
     },
     {
+      routeId: 'sdk.roles.list',
+      path: '/internal/v1/sdk/roles',
+      upstreamModule: 'user-center',
+      audience: 'mx-sdk',
+      authRequired: true,
+      description: 'Lists User Center roles and their SDK/RBAC scopes.'
+    },
+    {
+      routeId: 'sdk.users.list',
+      path: '/internal/v1/sdk/users',
+      upstreamModule: 'user-center',
+      audience: 'mx-sdk',
+      authRequired: true,
+      description: 'Lists active User Center users for trusted peer systems.'
+    },
+    {
+      routeId: 'sdk.users.create',
+      path: '/internal/v1/sdk/users',
+      upstreamModule: 'user-center',
+      audience: 'mx-sdk',
+      authRequired: true,
+      description: 'Creates or upserts a User Center user through the SDK Gateway.'
+    },
+    {
+      routeId: 'sdk.service_accounts.list',
+      path: '/internal/v1/sdk/service-accounts',
+      upstreamModule: 'user-center',
+      audience: 'mx-sdk',
+      authRequired: true,
+      description: 'Lists service accounts that can call SDK Gateway routes.'
+    },
+    {
+      routeId: 'sdk.service_accounts.create',
+      path: '/internal/v1/sdk/service-accounts',
+      upstreamModule: 'user-center',
+      audience: 'mx-sdk',
+      authRequired: true,
+      description: 'Creates a service account and assigns SDK Gateway scopes.'
+    },
+    {
+      routeId: 'sdk.permissions.request',
+      path: '/internal/v1/sdk/permissions/requests',
+      upstreamModule: 'permissions',
+      audience: 'mx-sdk',
+      authRequired: true,
+      description: 'Requests app or install scoped permissions through the permission authority.'
+    },
+    {
       routeId: 'sdk.config.snapshot',
       path: '/internal/v1/sdk/config/snapshot',
       upstreamModule: 'config-center',
@@ -1375,6 +1431,10 @@ export function createSdkGatewayManifest(config: RuntimeConfig): SdkGatewayManif
       oauthTokenUrl: '/internal/v1/sdk/oauth/token',
       tokenIntrospectionUrl: '/internal/v1/sdk/identity/introspect',
       principalContextUrl: '/internal/v1/sdk/identity/context',
+      rolesUrl: '/internal/v1/sdk/roles',
+      usersUrl: '/internal/v1/sdk/users',
+      serviceAccountsUrl: '/internal/v1/sdk/service-accounts',
+      permissionsRequestUrl: '/internal/v1/sdk/permissions/requests',
       configSnapshotUrl: '/internal/v1/sdk/config/snapshot',
       dnsPolicyUrl: '/internal/v1/sdk/dns/policy',
       dnsEvaluateUrl: '/internal/v1/sdk/dns/evaluate',

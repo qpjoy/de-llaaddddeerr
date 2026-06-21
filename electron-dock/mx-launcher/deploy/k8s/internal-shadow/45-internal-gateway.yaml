@@ -1,0 +1,94 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mx-internal-gateway-caddy
+  namespace: mx-internal-shadow
+  labels:
+    app.kubernetes.io/name: mx-internal-gateway
+    app.kubernetes.io/part-of: mx-3ks
+    mx.qpjoy.com/component: internal-gateway
+data:
+  Caddyfile: |
+    {
+      admin off
+      auto_https off
+    }
+
+    :18090 {
+      bind 0.0.0.0
+      encode zstd gzip
+      header {
+        X-MX-Gateway internal-k8s-host-gateway
+      }
+      reverse_proxy mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: mx-internal-gateway
+  namespace: mx-internal-shadow
+  labels:
+    app.kubernetes.io/name: mx-internal-gateway
+    app.kubernetes.io/part-of: mx-3ks
+    mx.qpjoy.com/component: internal-gateway
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mx-internal-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mx-internal-gateway
+        app.kubernetes.io/part-of: mx-3ks
+        mx.qpjoy.com/component: internal-gateway
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: gateway
+          image: caddy:2.8.4-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - caddy
+          args:
+            - run
+            - --config
+            - /etc/caddy/Caddyfile
+            - --adapter
+            - caddyfile
+          ports:
+            - name: http
+              containerPort: 18090
+              hostPort: 18090
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: caddy-config
+              mountPath: /etc/caddy/Caddyfile
+              subPath: Caddyfile
+              readOnly: true
+      volumes:
+        - name: caddy-config
+          configMap:
+            name: mx-internal-gateway-caddy
