@@ -6,15 +6,15 @@ import {
   excludeLocalRoutesFromAllowedIps,
   getWireGuardTunnelStatus,
   localCidrsForAllowedIpExclusion,
-  renderHdoClientWireGuardConfig,
+  renderWireGuardInterface,
   resolveWireGuardConnectionRuntime,
   setWireGuardTunnelState
 } from '@qpjoy/electron-core-wireguard';
 import type { LauncherRoutePlan } from '@qpjoy/mx-launcher-core';
 
 export type ElectronLauncherWireGuardAction = 'up' | 'down' | 'restart';
-export type ElectronLauncherWireGuardPathPreference = 'auto' | 'direct' | 'relay';
-export type ElectronLauncherWireGuardPath = 'h2i-direct' | 'hdi-relay';
+export type ElectronLauncherWireGuardPathPreference = 'auto' | 'direct' | 'relay' | 'hybrid';
+export type ElectronLauncherWireGuardPath = 'h2i-direct' | 'hdi-relay' | 'h2i-hybrid';
 
 export interface ElectronLauncherWireGuardRuntimeOptions {
   userDataDir: string;
@@ -45,8 +45,10 @@ export interface ElectronLauncherWireGuardPeer {
   configPath: string;
   dns: string[];
   endpoint: string;
+  endpoints: string[];
   path: ElectronLauncherWireGuardPath;
   publicKey: string;
+  publicKeys: string[];
   routeCidrs: string[];
   routeProbe: ReturnType<typeof buildHdoRouteProbe>;
 }
@@ -55,79 +57,154 @@ export function prepareLauncherWireGuardPeer(input: ElectronLauncherWireGuardPee
   const routePlan = input.routePlan;
   const leaseIp = requiredString(routePlan.leaseIp, 'routePlan.leaseIp');
   const privateKey = requiredString(input.privateKey, 'privateKey');
-  const selectedPeer = selectLauncherWireGuardPeer(routePlan, input.pathPreference ?? 'auto');
-  const publicKey = requiredString(selectedPeer.publicKey, selectedPeer.path === 'h2i-direct' ? 'routePlan.h2iDirectPublicKey' : 'routePlan.domesticRelayPublicKey');
-  const endpoint = requiredString(selectedPeer.endpoint, selectedPeer.path === 'h2i-direct' ? 'routePlan.h2iDirectEndpoint' : 'routePlan.domesticRelayEndpoint');
-  const routeCidrs = uniqueStrings(selectedPeer.routeCidrs);
+  const selected = selectLauncherWireGuardPeers(routePlan, input.pathPreference ?? 'auto');
+  if (selected.peers.length === 0) throw new Error('routePlan WireGuard peer is required');
+  const routeCidrs = uniqueStrings(selected.routeCidrs);
   if (routeCidrs.length === 0) throw new Error('routePlan.routeCidrs is required');
 
   const routeProbe = buildHdoRouteProbe({ hdoCidrs: routeCidrs });
   const exclusionCidrs = localCidrsForAllowedIpExclusion(routeProbe, routeCidrs);
-  let allowedIps = excludeLocalRoutesFromAllowedIps(routeCidrs, exclusionCidrs);
-  if (allowedIps.length === 0 && process.platform === 'win32') {
-    allowedIps = routeCidrs;
-  }
-  if (allowedIps.length === 0) {
+  const configPeers = selected.peers.map((peer) => {
+    const publicKey = requiredString(peer.publicKey, `${peer.fieldPrefix}PublicKey`);
+    const endpoint = requiredString(peer.endpoint, `${peer.fieldPrefix}Endpoint`);
+    let allowedIps = excludeLocalRoutesFromAllowedIps(uniqueStrings(peer.routeCidrs), exclusionCidrs);
+    if (allowedIps.length === 0 && process.platform === 'win32') {
+      allowedIps = uniqueStrings(peer.routeCidrs);
+    }
+    if (allowedIps.length === 0) {
+      if (selected.path === 'h2i-hybrid') return null;
+      throw new Error(`${peer.name} AllowedIPs 与本机路由完全重叠，已拒绝生成会覆盖本地网络的配置。`);
+    }
+    return {
+      name: peer.name,
+      publicKey,
+      endpoint,
+      allowedIps,
+      persistentKeepalive: 25
+    };
+  }).filter((peer): peer is NonNullable<typeof peer> => Boolean(peer));
+  if (configPeers.length === 0) {
     throw new Error('服务端下发的 WireGuard AllowedIPs 与本机路由完全重叠，已拒绝生成会覆盖本地网络的配置。');
   }
+  const allowedIps = uniqueStrings(configPeers.flatMap((peer) => peer.allowedIps));
 
   const dns = routePlan.dnsServer ? [routePlan.dnsServer] : [];
-  const config = renderHdoClientWireGuardConfig({
+  const splitDns = Boolean(dns.length && input.dnsDomains?.length);
+  const config = renderWireGuardInterface({
     privateKey,
-    address: `${leaseIp}/32`,
-    domesticPublicKey: publicKey,
-    domesticEndpoint: endpoint,
-    allowedIps,
-    dns,
-    dnsDomains: input.dnsDomains,
-    splitDns: Boolean(dns.length && input.dnsDomains?.length),
+    addresses: [`${leaseIp}/32`],
+    dns: splitDns ? undefined : dns,
+    hdoDnsServers: splitDns ? dns : undefined,
+    hdoDnsDomains: input.dnsDomains,
+    suppressInterfaceDns: splitDns,
     mtu: input.mtu,
-    persistentKeepalive: 25
+    peers: configPeers
   });
   const configPath = writeLauncherWireGuardProfile(input, config);
+  const endpoints = configPeers.map((peer) => peer.endpoint).filter(Boolean);
+  const publicKeys = configPeers.map((peer) => peer.publicKey).filter(Boolean);
   return {
     address: `${leaseIp}/32`,
     allowedIps,
     config,
     configPath,
     dns,
-    endpoint,
-    path: selectedPeer.path,
-    publicKey,
+    endpoint: endpoints[0] ?? '',
+    endpoints,
+    path: selected.path,
+    publicKey: publicKeys[0] ?? '',
+    publicKeys,
     routeCidrs,
     routeProbe
   };
 }
 
-function selectLauncherWireGuardPeer(
+function selectLauncherWireGuardPeers(
   routePlan: LauncherRoutePlan,
   preference: ElectronLauncherWireGuardPathPreference
-): { path: ElectronLauncherWireGuardPath; endpoint: string | null; publicKey: string | null; routeCidrs: string[] } {
+): {
+  path: ElectronLauncherWireGuardPath;
+  routeCidrs: string[];
+  peers: Array<{
+    name: string;
+    fieldPrefix: string;
+    endpoint: string | null;
+    publicKey: string | null;
+    routeCidrs: string[];
+  }>;
+} {
   const directReady = routePlan.h2iDirectEnabled === true
     && Boolean(routePlan.h2iDirectEndpoint)
     && Boolean(routePlan.h2iDirectPublicKey);
   if (preference === 'direct') {
     return {
       path: 'h2i-direct',
-      endpoint: routePlan.h2iDirectEndpoint,
-      publicKey: routePlan.h2iDirectPublicKey,
-      routeCidrs: routePlan.h2iDirectAllowedIps?.length ? routePlan.h2iDirectAllowedIps : routePlan.routeCidrs
+      routeCidrs: routePlan.h2iDirectAllowedIps?.length ? routePlan.h2iDirectAllowedIps : routePlan.routeCidrs,
+      peers: [
+        {
+          name: 'MX H2I Internal Direct',
+          fieldPrefix: 'routePlan.h2iDirect',
+          endpoint: routePlan.h2iDirectEndpoint,
+          publicKey: routePlan.h2iDirectPublicKey,
+          routeCidrs: routePlan.h2iDirectAllowedIps?.length ? routePlan.h2iDirectAllowedIps : routePlan.routeCidrs
+        }
+      ]
     };
   }
-  if (preference === 'auto' && directReady) {
+  if ((preference === 'auto' || preference === 'hybrid') && directReady) {
+    const directCidrs = hybridDirectCidrs(routePlan);
     return {
-      path: 'h2i-direct',
-      endpoint: routePlan.h2iDirectEndpoint,
-      publicKey: routePlan.h2iDirectPublicKey,
-      routeCidrs: routePlan.h2iDirectAllowedIps?.length ? routePlan.h2iDirectAllowedIps : routePlan.routeCidrs
+      path: 'h2i-hybrid',
+      routeCidrs: uniqueStrings([...routePlan.routeCidrs, ...directCidrs]),
+      peers: [
+        {
+          name: 'MX H2I Internal Direct',
+          fieldPrefix: 'routePlan.h2iDirect',
+          endpoint: routePlan.h2iDirectEndpoint,
+          publicKey: routePlan.h2iDirectPublicKey,
+          routeCidrs: directCidrs
+        },
+        {
+          name: 'MX HDI Domestic Relay',
+          fieldPrefix: 'routePlan.domesticRelay',
+          endpoint: routePlan.domesticRelayEndpoint,
+          publicKey: routePlan.domesticRelayPublicKey,
+          routeCidrs: routePlan.routeCidrs
+        }
+      ]
     };
   }
   return {
     path: 'hdi-relay',
-    endpoint: routePlan.domesticRelayEndpoint,
-    publicKey: routePlan.domesticRelayPublicKey,
-    routeCidrs: routePlan.routeCidrs
+    routeCidrs: routePlan.routeCidrs,
+    peers: [
+      {
+        name: 'MX HDI Domestic Relay',
+        fieldPrefix: 'routePlan.domesticRelay',
+        endpoint: routePlan.domesticRelayEndpoint,
+        publicKey: routePlan.domesticRelayPublicKey,
+        routeCidrs: routePlan.routeCidrs
+      }
+    ]
   };
+}
+
+function hybridDirectCidrs(routePlan: LauncherRoutePlan): string[] {
+  const directHosts = uniqueStrings([
+    routePlan.internalControlIp,
+    ipv4HostFromUrl(routePlan.internalBaseUrl)
+  ].filter((value): value is string => Boolean(value)));
+  return directHosts.length ? directHosts.map((host) => `${host}/32`) : uniqueStrings(routePlan.h2iDirectAllowedIps ?? []);
+}
+
+function ipv4HostFromUrl(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    const host = new URL(value).hostname;
+    return isIpv4(host) ? host : null;
+  } catch {
+    return null;
+  }
 }
 
 export function resolveLauncherWireGuardRuntime(input: ElectronLauncherWireGuardRuntimeOptions) {

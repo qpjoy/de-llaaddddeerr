@@ -348,7 +348,7 @@ export interface LauncherRoutePlan {
   domesticGatewayIp: '10.88.0.1';
   domesticRelayEndpoint: string | null;
   domesticRelayPublicKey: string | null;
-  preferredPath: 'h2i-direct' | 'hdi-relay';
+  preferredPath: 'h2i-direct' | 'hdi-relay' | 'h2i-hybrid';
   h2iDirectEnabled: boolean;
   h2iDirectEndpoint: string | null;
   h2iDirectPublicKey: string | null;
@@ -545,7 +545,7 @@ export function routePlanFromSnapshot(snapshot: LauncherNetworkSnapshot): Launch
     domesticRelayEndpoint: relayPlan.domesticRelay.publicEndpoint ?? relayPlan.refreshHint.publicEndpoint ?? null,
     domesticRelayPublicKey: relayPlan.domesticRelay.publicKey ?? null,
     preferredPath: relayPlan.internalDirectPeer?.enabled && relayPlan.internalDirectPeer.endpoint && relayPlan.internalDirectPeer.publicKey
-      ? 'h2i-direct'
+      ? 'h2i-hybrid'
       : 'hdi-relay',
     h2iDirectEnabled: relayPlan.internalDirectPeer?.enabled === true,
     h2iDirectEndpoint: relayPlan.internalDirectPeer?.endpoint ?? null,

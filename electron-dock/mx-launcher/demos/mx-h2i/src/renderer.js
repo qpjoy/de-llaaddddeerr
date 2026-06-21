@@ -439,6 +439,7 @@ function renderConfigForm() {
         <span>WG Path</span>
         <select name="routePathPreference">
           ${option('auto', config.routePathPreference)}
+          ${option('hybrid', config.routePathPreference)}
           ${option('direct', config.routePathPreference)}
           ${option('relay', config.routePathPreference)}
         </select>

@@ -1292,7 +1292,7 @@ async function applyNetworkSession(session, options) {
   runtime.feedback = {
     tone: wireGuardResult.ready ? 'success' : 'warning',
     message: wireGuardResult.ready
-      ? `${options.feedback} 客户端 WireGuard 已通过 ${wireGuardResult.path === 'h2i-direct' ? 'H2I direct' : 'Domestic relay'} 探测 Internal。`
+      ? `${options.feedback} 客户端 WireGuard 已通过 ${wireGuardPathLabel(wireGuardResult.path)} 探测 Internal。`
       : `${options.feedback} 已保留租约，但客户端 WireGuard 还未 ready：${wireGuardResult.message}`
   };
   touchRuntime(wireGuardResult.ready
@@ -1324,12 +1324,20 @@ async function startWireGuardForSession(input) {
     const internalBaseUrl = internalOverlayBaseUrl(routePlan, input.internalBaseUrl);
     const configuredPreference = normalizeRoutePathPreference(runtime.config.routePathPreference);
     const pathPreference = effectiveWireGuardPathPreference(routePlan, internalDirectPeerSync, configuredPreference);
-    const attempt = await connectAndProbeWireGuardPath(mod, {
+    let attempt = await connectAndProbeWireGuardPath(mod, {
       routePlan,
       privateKey,
       internalBaseUrl,
       pathPreference
     });
+    if (configuredPreference === 'auto' && pathPreference === 'hybrid' && attempt.ready !== true) {
+      attempt = await connectAndProbeWireGuardPath(mod, {
+        routePlan,
+        privateKey,
+        internalBaseUrl,
+        pathPreference: 'relay'
+      });
+    }
     const { result, route, internalApi, ready } = attempt;
     const tunnelReady = result.ok === true;
     const domesticRelayReady = domesticRelayDiagnostics?.status === 'passed' || domesticPeerSync?.status === 'passed' || route.ok === true;
@@ -1352,7 +1360,7 @@ async function startWireGuardForSession(input) {
         domesticRelayDiagnostics,
         updatedAt: nowIso()
       },
-      path: result.peer?.path || (attempt.pathPreference === 'direct' ? 'h2i-direct' : 'hdi-relay'),
+      path: result.peer?.path || routePathFromPreference(attempt.pathPreference),
       message: ready ? 'ready' : wireGuardNotReadyMessage(result, route, internalApi, internalDirectPeerSync, domesticPeerSync, domesticRelayDiagnostics)
     };
   } catch (err) {
@@ -1641,7 +1649,21 @@ function effectiveWireGuardPathPreference(routePlan, _internalDirectPeerSync, co
   const preference = normalizeRoutePathPreference(configuredPreference);
   if (preference === 'relay') return 'relay';
   if (preference === 'direct') return 'direct';
-  return routePlanHasDirect(routePlan) ? 'direct' : 'relay';
+  if (preference === 'hybrid') return 'hybrid';
+  return routePlanHasDirect(routePlan) ? 'hybrid' : 'relay';
+}
+
+function routePathFromPreference(preference) {
+  const normalized = normalizeRoutePathPreference(preference);
+  if (normalized === 'direct') return 'h2i-direct';
+  if (normalized === 'hybrid' || normalized === 'auto') return 'h2i-hybrid';
+  return 'hdi-relay';
+}
+
+function wireGuardPathLabel(path) {
+  if (path === 'h2i-direct') return 'H2I direct';
+  if (path === 'h2i-hybrid') return 'H2I hybrid';
+  return 'Domestic relay';
 }
 
 function routePlanHasDirect(routePlan) {
@@ -1764,7 +1786,7 @@ function summarizeWireGuardStatus(status, connection = {}) {
 
 function wireGuardNotReadyMessage(result, route, internalApi, internalDirectPeerSync, domesticPeerSync, domesticRelayDiagnostics) {
   const peerPath = nullableString(result?.peer?.path);
-  if (peerPath === 'h2i-direct' && (internalDirectPeerSync?.status === 'failed' || internalDirectPeerSync?.status === 'blocked')) {
+  if ((peerPath === 'h2i-direct' || peerPath === 'h2i-hybrid') && (internalDirectPeerSync?.status === 'failed' || internalDirectPeerSync?.status === 'blocked')) {
     const reason = internalDirectPeerSync.failures?.[0] || internalDirectPeerSync.error || internalDirectPeerSync.status;
     return `Internal direct peer 未同步：${reason}`;
   }
@@ -2371,6 +2393,7 @@ function normalizeBootstrapResolveMode(value) {
 function normalizeRoutePathPreference(value) {
   const text = String(value || '').trim().toLowerCase().replace(/_/g, '-');
   if (['direct', 'h2i', 'h2i-direct'].includes(text)) return 'direct';
+  if (['hybrid', 'h2i-hybrid', 'mixed', 'mix'].includes(text)) return 'hybrid';
   if (['relay', 'hdi', 'hdi-relay', 'domestic', 'domestic-relay'].includes(text)) return 'relay';
   return 'auto';
 }
@@ -2378,6 +2401,7 @@ function normalizeRoutePathPreference(value) {
 function normalizeRoutePlanPath(value) {
   const text = String(value || '').trim().toLowerCase().replace(/_/g, '-');
   if (text === 'h2i-direct' || text === 'direct') return 'h2i-direct';
+  if (text === 'h2i-hybrid' || text === 'hybrid') return 'h2i-hybrid';
   return 'hdi-relay';
 }
 
