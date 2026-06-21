@@ -132,6 +132,40 @@ Docker/Compose build containers, the CLI also injects container-facing variables
 such as `MARKET_CONTAINER_HTTP_PROXY` and `QP_TUNNEL_CONTAINER_HTTP_PROXY`
 pointing at `host.docker.internal:<mixed-port>`.
 
+### K8s/containerd Image Preload
+
+Kubernetes on kubeadm/containerd does not use Docker's image store. If Docker
+Compose can pull images through `tun-on` but pods still hit `ImagePullBackOff`,
+preload the runtime images into containerd's `k8s.io` namespace on the K8s host:
+
+```bash
+sudo qp-tunnel-cli tun-on
+sudo qp-tunnel-cli k8s preload-images
+sudo qp-tunnel-cli tun-off
+```
+
+The default preload set matches the MX Launcher Internal runtime images:
+`postgres:16-alpine`, `coredns/coredns:1.11.3`, and `caddy:2.8.4-alpine`.
+Add more images as needed:
+
+```bash
+sudo qp-tunnel-cli k8s preload-images \
+  --image postgres:16-alpine \
+  --image qpjoy/mx-launcher-server:shadow
+```
+
+If the cluster already has pods stuck in `ImagePullBackOff`, read the current
+pod specs and preload their referenced images:
+
+```bash
+sudo qp-tunnel-cli k8s preload-images --from-cluster
+```
+
+The command pulls missing images with Docker, saves them, and imports them with
+`ctr -n k8s.io images import`, so kubelet can start pods without reaching the
+remote registry. After preloading a previously failed pod image, restart the pod
+or rerun the deployment rollout.
+
 Install the bundled script as a normal Linux command:
 
 ```bash

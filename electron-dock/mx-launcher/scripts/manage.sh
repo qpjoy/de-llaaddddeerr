@@ -548,6 +548,9 @@ k8s_postgres_diagnostics() {
   kubectl -n "$ns" get pods,pvc -o wide || true
   say "postgres diagnostics: PVs"
   kubectl get pv || true
+  say "postgres diagnostics: node conditions and taints"
+  kubectl get nodes -o wide || true
+  kubectl describe nodes | sed -n '/^Name:/,/^Non-terminated Pods:/p' || true
   say "postgres diagnostics: PVC detail"
   kubectl -n "$ns" describe pvc postgres-data-mx-internal-postgres-0 || true
   say "postgres diagnostics: Pod detail"

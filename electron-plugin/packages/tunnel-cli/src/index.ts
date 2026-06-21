@@ -6,11 +6,14 @@ import {
   constants,
   copyFileSync,
   existsSync,
+  mkdtempSync,
   mkdirSync,
   readFileSync,
+  rmSync,
 } from 'node:fs';
 import { access } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 
 import { runHdoCli } from './hdo';
 
@@ -20,6 +23,8 @@ const bundledClientScript = resolve(packageRoot, 'resources/mihomo-client.sh');
 const repoClientScript = resolve(packageRoot, '../../../scripts/mihomo-client.sh');
 const defaultInstallTarget = '/usr/local/bin/mihomo-client';
 const defaultMihomoConfigFile = '/etc/mihomo-client/config.yaml';
+const defaultK8sImageNamespace = 'k8s.io';
+const defaultK8sRuntimeImages = ['postgres:16-alpine', 'coredns/coredns:1.11.3', 'caddy:2.8.4-alpine'];
 const defaultNoProxyEntries = [
   'localhost',
   '127.0.0.1',
@@ -94,6 +99,7 @@ Usage:
   qp-tunnel-cli install-script [--target /usr/local/bin/mihomo-client]
   qp-tunnel-cli script-path
   qp-tunnel-cli client-help
+  qp-tunnel-cli k8s preload-images [--image postgres:16-alpine]
   qp-tunnel-cli hdo enroll --server-url https://domestic.example.com --username user
   qp-tunnel-cli <mihomo-client command> [options]
   qp-tunnel-cli -- <command> [args...]
@@ -107,6 +113,7 @@ Common commands:
   qp-tunnel-cli egress-on
   qp-tunnel-cli tun-on
   qp-tunnel-cli tun-off
+  qp-tunnel-cli k8s preload-images
   qp-tunnel-cli update-subscription
   qp-tunnel-cli hdo status
   qp-tunnel-cli uninstall --purge
@@ -120,6 +127,12 @@ Unknown commands are executed with QPJoy proxy variables injected. Host commands
 receive HTTP_PROXY=http://127.0.0.1:<mixed-port>; Docker/Compose build contexts
 also receive container-facing variables such as MARKET_CONTAINER_HTTP_PROXY and
 QP_TUNNEL_CONTAINER_HTTP_PROXY=http://host.docker.internal:<mixed-port>.
+
+K8s/containerd hosts keep a separate image store from Docker. After tun-on or
+egress-on makes Docker pulls work, preload runtime images into containerd:
+  sudo qp-tunnel-cli tun-on
+  sudo qp-tunnel-cli k8s preload-images
+  sudo qp-tunnel-cli tun-off
 
 Install the script as a normal server command:
   sudo qp-tunnel-cli install-script
@@ -316,6 +329,295 @@ function runExternalCommand(commandArgs: string[]): never {
   exitFromSpawn(result);
 }
 
+function commandAvailable(command: string): boolean {
+  const result = spawnSync('sh', ['-c', `command -v ${command} >/dev/null 2>&1`], {
+    stdio: 'ignore',
+  });
+  return result.status === 0;
+}
+
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) {
+    return value;
+  }
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function runStep(command: string, commandArgs: string[], dryRun = false): void {
+  process.stdout.write(`+ ${[command, ...commandArgs].map(shellQuote).join(' ')}\n`);
+  if (dryRun) {
+    return;
+  }
+
+  const result = spawnSync(command, commandArgs, {
+    stdio: 'inherit',
+    env: process.env,
+  });
+  if (result.error) {
+    process.stderr.write(`${result.error.message}\n`);
+    process.exit(1);
+  }
+  if (result.signal) {
+    process.stderr.write(`Command terminated by signal ${result.signal}\n`);
+    process.exit(1);
+  }
+  if ((result.status ?? 0) !== 0) {
+    process.exit(result.status ?? 1);
+  }
+}
+
+function commandSucceeds(command: string, commandArgs: string[]): boolean {
+  const result = spawnSync(command, commandArgs, {
+    stdio: 'ignore',
+    env: process.env,
+  });
+  return !result.error && !result.signal && result.status === 0;
+}
+
+function splitImageList(value: string): string[] {
+  return value
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function dedupe(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    if (seen.has(value)) continue;
+    seen.add(value);
+    result.push(value);
+  }
+  return result;
+}
+
+type K8sPreloadOptions = {
+  dryRun: boolean;
+  fromCluster: boolean;
+  images: string[];
+  namespace: string;
+  pull: boolean;
+};
+
+function k8sHelp(): void {
+  process.stdout.write(`Usage:
+  qp-tunnel-cli k8s help
+  qp-tunnel-cli k8s preload-images [options]
+
+Options:
+  --image <image>       Add one image. Can be repeated.
+  --images <images>     Add comma- or space-separated images.
+  --from-cluster        Include images referenced by current Kubernetes pods.
+  --namespace <name>    containerd namespace. Default: ${defaultK8sImageNamespace}
+  --no-pull             Import only images already present in Docker.
+  --dry-run             Print commands without running them.
+
+Default images used when no image options are provided and --from-cluster is not set:
+  ${defaultK8sRuntimeImages.join(' ')}
+
+The preload command pulls with Docker, saves each image, then imports it into
+containerd's k8s.io namespace so kubelet can start pods without reaching the
+remote registry itself. Run it after tun-on or egress-on on the K8s host.
+`);
+}
+
+function parseK8sPreloadArgs(commandArgs: string[]): K8sPreloadOptions {
+  let namespace = defaultK8sImageNamespace;
+  let pull = true;
+  let dryRun = false;
+  let fromCluster = false;
+  const images: string[] = [];
+
+  for (let index = 0; index < commandArgs.length; index += 1) {
+    const arg = commandArgs[index];
+    if (arg === '--image') {
+      const value = commandArgs[index + 1];
+      if (!value) {
+        process.stderr.write('Missing value for --image.\n');
+        process.exit(1);
+      }
+      images.push(value);
+      index += 1;
+    } else if (arg === '--images') {
+      const value = commandArgs[index + 1];
+      if (!value) {
+        process.stderr.write('Missing value for --images.\n');
+        process.exit(1);
+      }
+      images.push(...splitImageList(value));
+      index += 1;
+    } else if (arg === '--namespace') {
+      const value = commandArgs[index + 1];
+      if (!value) {
+        process.stderr.write('Missing value for --namespace.\n');
+        process.exit(1);
+      }
+      namespace = value;
+      index += 1;
+    } else if (arg === '--no-pull') {
+      pull = false;
+    } else if (arg === '--dry-run') {
+      dryRun = true;
+    } else if (arg === '--from-cluster') {
+      fromCluster = true;
+    } else if (arg === '--help' || arg === '-h') {
+      k8sHelp();
+      process.exit(0);
+    } else {
+      process.stderr.write(`Unknown k8s preload-images option: ${arg}\n`);
+      process.exit(1);
+    }
+  }
+
+  return {
+    dryRun,
+    fromCluster,
+    images: dedupe(images),
+    namespace,
+    pull,
+  };
+}
+
+function ensureK8sHostTools(dryRun: boolean, fromCluster: boolean): void {
+  if (dryRun) {
+    return;
+  }
+
+  const requiredCommands = fromCluster ? ['docker', 'ctr', 'kubectl'] : ['docker', 'ctr'];
+  const missing = requiredCommands.filter((command) => !commandAvailable(command));
+  if (missing.length > 0) {
+    process.stderr.write(
+      `Missing required command(s): ${missing.join(', ')}\nInstall Docker and containerd, then retry on the K8s host.\n`,
+    );
+    process.exit(1);
+  }
+}
+
+function collectImagesFromContainerList(value: unknown, images: string[]): void {
+  if (!Array.isArray(value)) {
+    return;
+  }
+  for (const container of value) {
+    if (
+      typeof container === 'object' &&
+      container !== null &&
+      'image' in container &&
+      typeof container.image === 'string'
+    ) {
+      images.push(container.image);
+    }
+  }
+}
+
+function collectClusterPodImages(dryRun: boolean): string[] {
+  process.stdout.write('+ kubectl get pods -A -o json\n');
+  if (dryRun) {
+    return [];
+  }
+
+  const result = spawnSync('kubectl', ['get', 'pods', '-A', '-o', 'json'], {
+    encoding: 'utf8',
+    env: process.env,
+  });
+  if (result.error) {
+    process.stderr.write(`${result.error.message}\n`);
+    process.exit(1);
+  }
+  if (result.signal) {
+    process.stderr.write(`Command terminated by signal ${result.signal}\n`);
+    process.exit(1);
+  }
+  if ((result.status ?? 0) !== 0) {
+    process.stderr.write(result.stderr || 'kubectl get pods failed.\n');
+    process.exit(result.status ?? 1);
+  }
+
+  const parsed = JSON.parse(result.stdout) as { items?: Array<{ spec?: Record<string, unknown> }> };
+  const images: string[] = [];
+  for (const item of parsed.items ?? []) {
+    const spec = item.spec ?? {};
+    collectImagesFromContainerList(spec.initContainers, images);
+    collectImagesFromContainerList(spec.containers, images);
+    collectImagesFromContainerList(spec.ephemeralContainers, images);
+  }
+  return dedupe(images);
+}
+
+function importDockerImageIntoContainerd(image: string, namespace: string, dryRun: boolean): void {
+  const tempDir = dryRun ? '/tmp/qp-tunnel-cli-k8s-dry-run' : mkdtempSync(join(tmpdir(), 'qp-tunnel-cli-k8s-'));
+  const archive = join(tempDir, 'image.tar');
+
+  try {
+    runStep('docker', ['save', image, '-o', archive], dryRun);
+    runStep('ctr', ['-n', namespace, 'images', 'import', archive], dryRun);
+  } finally {
+    if (!dryRun) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+}
+
+function preloadK8sImages(commandArgs: string[]): void {
+  if (process.platform !== 'linux') {
+    process.stderr.write('K8s/containerd image preload targets Linux servers. Run this on the K8s host.\n');
+    process.exit(1);
+  }
+
+  if (!isRoot()) {
+    sudoSelf(['k8s', 'preload-images', ...commandArgs]);
+  }
+
+  const options = parseK8sPreloadArgs(commandArgs);
+  ensureK8sHostTools(options.dryRun, options.fromCluster);
+
+  const clusterImages = options.fromCluster ? collectClusterPodImages(options.dryRun) : [];
+  const images = dedupe([
+    ...(options.images.length > 0 || options.fromCluster ? options.images : defaultK8sRuntimeImages),
+    ...clusterImages,
+  ]);
+  if (images.length === 0) {
+    process.stderr.write('No K8s images found to preload.\n');
+    process.exit(1);
+  }
+
+  process.stdout.write(
+    `Preloading ${images.length} image(s) into containerd namespace ${options.namespace}\n`,
+  );
+
+  for (const image of images) {
+    process.stdout.write(`\nImage: ${image}\n`);
+    const inDocker = !options.dryRun && commandSucceeds('docker', ['image', 'inspect', image]);
+    if (!inDocker && options.pull) {
+      runStep('docker', ['pull', image], options.dryRun);
+    } else if (!inDocker && !options.pull) {
+      process.stderr.write(`Docker image is missing and --no-pull was set: ${image}\n`);
+      process.exit(1);
+    }
+    importDockerImageIntoContainerd(image, options.namespace, options.dryRun);
+  }
+
+  process.stdout.write('\nK8s/containerd image preload complete.\n');
+}
+
+function runK8sCommand(commandArgs: string[]): void {
+  const subcommand = commandArgs[0] ?? 'help';
+
+  if (subcommand === 'help' || subcommand === '--help' || subcommand === '-h') {
+    k8sHelp();
+    return;
+  }
+
+  if (subcommand === 'preload' || subcommand === 'preload-images' || subcommand === 'containerd-preload') {
+    preloadK8sImages(commandArgs.slice(1));
+    return;
+  }
+
+  process.stderr.write(`Unknown k8s command: ${subcommand}\n`);
+  k8sHelp();
+  process.exit(1);
+}
+
 function parseInstallScriptArgs(scriptArgs: string[]): string {
   let target = defaultInstallTarget;
 
@@ -411,6 +713,11 @@ async function main(): Promise<void> {
 
   if (command === 'install-script') {
     installClientScript(args.slice(1));
+    return;
+  }
+
+  if (command === 'k8s') {
+    runK8sCommand(args.slice(1));
     return;
   }
 

@@ -19,4 +19,17 @@ qp-tunnel-cli curl google.com
 
 # 删除mac的HDO进程
 qp-tunnel-cli hdo down --interface hdo-client
+
+# tunnel-cli
+qp-tunnel-cli install --url 'http://download:qpjoy@23.225.161.60:3434/peer_intelligent01.mihomo.yaml'
+
+# K8s/containerd 镜像预热：Docker 能拉，但 kubelet/containerd 不能拉时用
+sudo qp-tunnel-cli tun-on
+sudo qp-tunnel-cli k8s preload-images
+sudo qp-tunnel-cli tun-off
+
+
+
+
+qp-tunnel-cli k8s preload-images --from-cluster
 ```
