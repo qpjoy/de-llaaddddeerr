@@ -912,9 +912,16 @@ async function refreshAdmin() {
     state.overseaOverview = overseaPayload.overview;
     state.overseaOverviewError = overseaPayload.error;
     const pipelines = dashboard.siteSlotPipelines || [];
-    const active = selectedOrActivePipelineForCurrentDeployment(pipelines);
-    state.selectedPlanId = active?.planId || null;
-    state.selectedSiteId = selectedSiteFromOverseaOverview() || active?.siteId || state.selectedSiteId;
+    const overviewSelectedSiteId = selectedSiteFromOverseaOverview();
+    if (state.deploymentKind === 'oversea' && overviewSelectedSiteId) {
+      state.selectedSiteId = overviewSelectedSiteId;
+      const siteActive = activePipelineForSite(pipelines, 'oversea', overviewSelectedSiteId);
+      state.selectedPlanId = siteActive?.planId || null;
+    } else {
+      const active = selectedOrActivePipelineForCurrentDeployment(pipelines);
+      state.selectedPlanId = active?.planId || null;
+      state.selectedSiteId = active?.siteId || state.selectedSiteId;
+    }
     primeSshProfileForm(pipelines);
     primeAwxProviderForm(state.awxProviders);
     renderAdminDashboard(dashboard);
@@ -3133,6 +3140,13 @@ function activePipelineForCurrentDeployment(pipelines) {
   return selectedSite?.activePipeline || preferredSite?.activePipeline || null;
 }
 
+function activePipelineForSite(pipelines, kind, siteId) {
+  if (!siteId) return null;
+  const pipelineKind = deploymentPipelineKind(kind);
+  return deploymentSites(pipelines, pipelineKind)
+    .find((site) => site.siteId === siteId)?.activePipeline || null;
+}
+
 function selectedOrActivePipelineForCurrentDeployment(pipelines) {
   const kind = deploymentPipelineKind();
   const selected = state.selectedPlanId
@@ -4170,11 +4184,12 @@ function renderOverseaWorkbench(pipelines) {
       state.overseaTerminalResult = null;
       renderDeploymentWorkbench(pipelines);
       renderInspector();
-      const active = activePipelineForCurrentDeployment(pipelines);
+      const active = activePipelineForSite(pipelines, 'oversea', state.selectedSiteId);
       if (active?.planId) {
         void refreshPipelineDetail(active.planId);
       } else {
         state.selectedPlanId = null;
+        state.currentPipeline = null;
         renderEmptyPipeline();
       }
     });
