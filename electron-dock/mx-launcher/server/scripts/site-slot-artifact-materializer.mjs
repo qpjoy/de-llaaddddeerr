@@ -184,6 +184,11 @@ function createTunnelCliTar(artifactRoot, previousModules = new Map()) {
     die(`Missing required artifact source: ${join(sourceRoot, 'package.json')}`);
   }
   const packageJson = JSON.parse(readFileSync(join(sourceRoot, 'package.json'), 'utf8'));
+  const fullFallbackReady = tunnelCliFullFallbackReady(sourceRoot) && wireGuardRuntimeReady();
+  const allowDegraded = process.env.MX_SITE_SLOT_ALLOW_DEGRADED_QP_TUNNEL_CLI !== '0';
+  if (!fullFallbackReady && !allowDegraded) {
+    die(`Missing required qp-tunnel-cli fallback dist or WireGuard runtime. Re-run after refreshing ${sourceRoot}, or set MX_SITE_SLOT_ALLOW_DEGRADED_QP_TUNNEL_CLI=1 for server-safe materialization.`);
+  }
   return createTarModule({
     artifactRoot,
     moduleId: 'qp-tunnel-cli',
@@ -195,21 +200,29 @@ function createTunnelCliTar(artifactRoot, previousModules = new Map()) {
       packageVersion: packageJson.version,
       npmInstallCommand: 'npm i @qpjoy/tunnel-cli -g',
       refreshCommand: 'bash scripts/manage.sh ops site-slot refresh-tunnel-cli latest | bash scripts/manage.sh ops site-slot refresh-tunnel-cli --from-tarball <tgz>',
-      fallbackMode: 'node-capable-qp-tunnel-cli-with-electron-core-wireguard',
+      fallbackMode: fullFallbackReady
+        ? 'node-capable-qp-tunnel-cli-with-electron-core-wireguard'
+        : 'server-safe-mihomo-shell-fallback-without-electron-plugin-build',
       bootstrapMode: 'Internal-pushed no-node/no-outbound first'
     },
-    notes: ['Domestic and Internal host-runner bootstrap use this Internal-pushed fallback before node/npm or registry egress exists; refresh it from npm pack or a published tarball when @qpjoy/tunnel-cli changes.'],
+    notes: fullFallbackReady
+      ? ['Domestic and Internal host-runner bootstrap use this Internal-pushed fallback before node/npm or registry egress exists; refresh it from npm pack or a published tarball when @qpjoy/tunnel-cli changes.']
+      : ['Server-safe degraded qp-tunnel-cli fallback was materialized without compiling electron-plugin/native dependencies. It is enough for Internal API image build; refresh from a built @qpjoy/tunnel-cli tarball before relying on Domestic offline qp-tunnel-cli node commands.'],
     buildStaging: (staging) => {
       copyRequired(sourceRoot, join(staging, 'package'), [
         'package.json',
         'README.md',
         'README.setup.md',
-        'dist/index.js',
-        'dist/hdo.js',
-        'dist/index.d.ts',
-        'dist/hdo.d.ts',
         'resources/mihomo-client.sh'
       ]);
+      if (fullFallbackReady) {
+        copyOptional(sourceRoot, join(staging, 'package'), [
+          'dist/index.js',
+          'dist/hdo.js',
+          'dist/index.d.ts',
+          'dist/hdo.d.ts'
+        ]);
+      }
       const binDir = join(staging, 'bin');
       mkdirSync(binDir, { recursive: true });
       writeFileSync(join(binDir, 'qp-tunnel-cli'), [
@@ -222,17 +235,38 @@ function createTunnelCliTar(artifactRoot, previousModules = new Map()) {
         'exec "$ROOT/package/resources/mihomo-client.sh" "$@"',
         ''
       ].join('\n'));
-      copyTunnelCliRuntimeDependencies(staging);
+      copyTunnelCliRuntimeDependencies(staging, { allowMissing: !fullFallbackReady });
       chmodIfExists(join(binDir, 'qp-tunnel-cli'), 0o755);
       chmodIfExists(join(staging, 'package/resources/mihomo-client.sh'), 0o755);
     }
   });
 }
 
-function copyTunnelCliRuntimeDependencies(staging) {
+function tunnelCliFullFallbackReady(sourceRoot) {
+  return [
+    'dist/index.js',
+    'dist/hdo.js',
+    'dist/index.d.ts',
+    'dist/hdo.d.ts'
+  ].every((file) => existsSync(join(sourceRoot, file)));
+}
+
+function wireGuardRuntimeReady() {
+  const electronPluginRoot = resolve(mxRoot, '../../electron-plugin');
+  const coreSource = join(electronPluginRoot, 'packages/electron-core-wireguard');
+  if (!existsSync(join(coreSource, 'package.json')) || !existsSync(join(coreSource, 'dist'))) return false;
+  return ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-x64'].every((engine) => {
+    const engineSource = join(electronPluginRoot, `packages/wireguard-engines/${engine}`);
+    return existsSync(join(engineSource, 'package.json')) && existsSync(join(engineSource, 'resources'));
+  });
+}
+
+function copyTunnelCliRuntimeDependencies(staging, options = {}) {
+  const allowMissing = Boolean(options.allowMissing);
   const electronPluginRoot = resolve(mxRoot, '../../electron-plugin');
   const coreSource = join(electronPluginRoot, 'packages/electron-core-wireguard');
   if (!existsSync(join(coreSource, 'package.json'))) {
+    if (allowMissing) return;
     die(`Missing required WireGuard runtime package: ${coreSource}`);
   }
   const targetScope = join(staging, 'node_modules/@qpjoy');
@@ -240,23 +274,28 @@ function copyTunnelCliRuntimeDependencies(staging) {
     'package.json',
     'README.md',
     'dist'
-  ]);
+  ], { allowMissing });
   for (const engine of ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-x64']) {
     const engineSource = join(electronPluginRoot, `packages/wireguard-engines/${engine}`);
     if (!existsSync(join(engineSource, 'package.json'))) {
+      if (allowMissing) continue;
       die(`Missing required WireGuard engine package: ${engineSource}`);
     }
     copyPackageRuntime(engineSource, join(targetScope, `electron-core-wireguard-engine-${engine}`), [
       'package.json',
       'README.md',
       'resources'
-    ]);
+    ], { allowMissing });
     chmodWireGuardEngineBins(join(targetScope, `electron-core-wireguard-engine-${engine}/resources/wireguard`));
   }
 }
 
-function copyPackageRuntime(sourceRoot, targetRoot, files) {
+function copyPackageRuntime(sourceRoot, targetRoot, files, options = {}) {
   rmSync(targetRoot, { recursive: true, force: true });
+  if (options.allowMissing) {
+    copyOptional(sourceRoot, targetRoot, files);
+    return;
+  }
   copyRequired(sourceRoot, targetRoot, files);
 }
 
@@ -1160,6 +1199,16 @@ function copyRequired(sourceRoot, targetRoot, files) {
     const source = join(sourceRoot, file);
     const target = join(targetRoot, file);
     if (!existsSync(source)) die(`Missing required artifact source: ${source}`);
+    mkdirSync(dirname(target), { recursive: true });
+    cpSync(source, target, { recursive: true });
+  }
+}
+
+function copyOptional(sourceRoot, targetRoot, files) {
+  for (const file of files) {
+    const source = join(sourceRoot, file);
+    if (!existsSync(source)) continue;
+    const target = join(targetRoot, file);
     mkdirSync(dirname(target), { recursive: true });
     cpSync(source, target, { recursive: true });
   }

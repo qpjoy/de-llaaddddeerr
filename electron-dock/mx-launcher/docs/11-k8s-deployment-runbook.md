@@ -313,11 +313,12 @@ PostgreSQL / migration Job / Internal API / `mx-internal-gateway`，然后直接
 `http://127.0.0.1:18090` 跑 gateway smoke。若该机器有防火墙或云安全组，只允许可信
 Internal 管理网、Domestic relay 或 `mx-internal-svc` overlay 访问 TCP `18090`。
 构建镜像前，脚本会检查 `site-slots/domestic/qp-tunnel-cli` fallback 是否包含
-`dist/index.js`、`dist/hdo.js` 和声明文件；如果缺失，会优先从同仓库的
-`electron-plugin/packages/tunnel-cli` 本地源码刷新，必要时先构建
-`@qpjoy/electron-core-wireguard` 和 `@qpjoy/tunnel-cli`。`electron-plugin`
-workspace 固定 `pnpm@9.15.4`；部署脚本会读取该 workspace 的 `packageManager` 并通过
-Corepack 调用对应 pnpm 版本，避免 CentOS 全局 pnpm 版本漂移导致安装失败。
+`dist/index.js`、`dist/hdo.js` 和声明文件。CentOS/Internal runtime 主机默认不安装或编译
+`electron-plugin` workspace，避免触发 `better-sqlite3`、Electron native module、
+node-gyp 等桌面/原生依赖；如果 fallback dist 缺失，materializer 会生成一个
+server-safe degraded fallback，足够完成 Internal API 镜像构建和 K8s 部署。需要给
+Domestic 做完整离线 `qp-tunnel-cli` 推送前，应在开发/发布机刷新完整 fallback，或显式在
+构建机设置 `MX_SHADOW_BUILD_ELECTRON_PLUGIN_FALLBACK=1`。
 
 ### 与 HDO V1 共存
 

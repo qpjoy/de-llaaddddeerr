@@ -244,7 +244,18 @@ shadow_image_tunnel_cli_fallback() {
   local target_dir="$ROOT/site-slots/domestic/qp-tunnel-cli"
   local plugin_root="$ROOT/../../electron-plugin"
   local cli_source="$plugin_root/packages/tunnel-cli"
-  if qp_tunnel_cli_fallback_ready "$target_dir" && wireguard_runtime_ready "$plugin_root"; then
+  local build_full="${MX_SHADOW_BUILD_ELECTRON_PLUGIN_FALLBACK:-0}"
+  if qp_tunnel_cli_fallback_ready "$target_dir"; then
+    return 0
+  fi
+  if [ -f "$cli_source/package.json" ] && qp_tunnel_cli_fallback_ready "$cli_source" && wireguard_runtime_ready "$plugin_root"; then
+    say "refresh mx-launcher qp-tunnel-cli fallback from local electron-plugin package"
+    node server/scripts/site-slot-refresh-tunnel-cli.mjs --from-local "$cli_source"
+    return 0
+  fi
+  if [ "$build_full" != "1" ]; then
+    say "qp-tunnel-cli full fallback is not prebuilt; use server-safe degraded fallback for image materialization"
+    say "set MX_SHADOW_BUILD_ELECTRON_PLUGIN_FALLBACK=1 on a build host to produce the full electron-plugin fallback"
     return 0
   fi
   [ -f "$cli_source/package.json" ] || die "missing qp-tunnel-cli source: $cli_source"
@@ -267,7 +278,8 @@ shadow_image_tunnel_cli_fallback() {
 shadow_image_artifacts() {
   shadow_image_tunnel_cli_fallback
   say "materialize site-slot artifacts for shadow image"
-  node server/scripts/site-slot-artifact-materializer.mjs all --out-dir server/artifacts/site-slots
+  MX_SITE_SLOT_ALLOW_DEGRADED_QP_TUNNEL_CLI="${MX_SITE_SLOT_ALLOW_DEGRADED_QP_TUNNEL_CLI:-1}" \
+    node server/scripts/site-slot-artifact-materializer.mjs all --out-dir server/artifacts/site-slots
 }
 
 shadow_image_admin_assets() {
