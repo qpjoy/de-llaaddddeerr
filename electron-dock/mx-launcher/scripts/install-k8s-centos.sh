@@ -17,6 +17,7 @@ K8S_DISABLE_SWAP="${K8S_DISABLE_SWAP:-1}"
 K8S_SET_SELINUX_PERMISSIVE="${K8S_SET_SELINUX_PERMISSIVE:-1}"
 K8S_INSTALL_FLANNEL="${K8S_INSTALL_FLANNEL:-1}"
 K8S_UNTAINT_CONTROL_PLANE="${K8S_UNTAINT_CONTROL_PLANE:-1}"
+K8S_ALLOW_CGROUP_V1="${K8S_ALLOW_CGROUP_V1:-auto}"
 DEPLOY_MX="${DEPLOY_MX:-0}"
 DRY_RUN=0
 SKIP_INIT=0
@@ -38,6 +39,8 @@ Options:
   --skip-init              Install packages/config only; do not run kubeadm init.
   --skip-flannel           Do not install Flannel CNI.
   --skip-firewall          Do not modify firewalld.
+  --allow-cgroup-v1        Let kubeadm/kubelet run on cgroups v1 hosts.
+  --no-cgroup-v1           Fail instead of applying cgroups v1 compatibility.
   --deploy-mx              After K8s is ready, run ops internal-production deploy.
   --mx-root DIR            mx-launcher root. Default: this script's parent dir.
   --dry-run                Print steps without changing the host.
@@ -54,6 +57,7 @@ Environment:
   K8S_SET_SELINUX_PERMISSIVE=0
   K8S_INSTALL_FLANNEL=0
   K8S_UNTAINT_CONTROL_PLANE=0
+  K8S_ALLOW_CGROUP_V1=auto|1|0
 EOF
 }
 
@@ -85,6 +89,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --skip-firewall)
       K8S_OPEN_FIREWALL=0
+      shift
+      ;;
+    --allow-cgroup-v1)
+      K8S_ALLOW_CGROUP_V1=1
+      shift
+      ;;
+    --no-cgroup-v1)
+      K8S_ALLOW_CGROUP_V1=0
       shift
       ;;
     --deploy-mx)
@@ -146,7 +158,10 @@ require_root() {
 }
 
 detect_rhel_family() {
-  [ -f /etc/os-release ] || die "Cannot find /etc/os-release"
+  if [ ! -f /etc/os-release ]; then
+    [ "$DRY_RUN" = "1" ] && say "dry-run: /etc/os-release not available; assuming RHEL-compatible host" && return 0
+    die "Cannot find /etc/os-release"
+  fi
   # shellcheck disable=SC1091
   . /etc/os-release
   case "${ID:-}:${ID_LIKE:-}" in
@@ -168,6 +183,7 @@ package_manager() {
     echo yum
     return
   fi
+  [ "$DRY_RUN" = "1" ] && echo yum && return
   die "dnf or yum is required"
 }
 
@@ -178,11 +194,37 @@ auto_advertise_ip() {
   echo "$ip"
 }
 
+resolve_advertise_address() {
+  if [ -z "$K8S_APISERVER_ADVERTISE_ADDRESS" ]; then
+    K8S_APISERVER_ADVERTISE_ADDRESS="$(auto_advertise_ip)"
+  fi
+}
+
+using_cgroup_v1() {
+  [ "$DRY_RUN" = "1" ] && [ "$K8S_ALLOW_CGROUP_V1" = "1" ] && return 0
+  [ -f /sys/fs/cgroup/cgroup.controllers ] && return 1
+  [ -f /proc/filesystems ] || return 1
+  grep -qw cgroup /proc/filesystems 2>/dev/null
+}
+
+k8s_minor_version() {
+  printf '%s\n' "$K8S_VERSION" | sed -E 's/^v?1\.([0-9]+).*/\1/'
+}
+
+needs_cgroup_v1_compat() {
+  local minor
+  using_cgroup_v1 || return 1
+  [ "$K8S_ALLOW_CGROUP_V1" != "0" ] || die "cgroups v1 detected; migrate to cgroups v2 or re-run without --no-cgroup-v1."
+  minor="$(k8s_minor_version)"
+  [ -n "$minor" ] || return 1
+  [ "$minor" -ge 35 ]
+}
+
 disable_swap() {
   [ "$K8S_DISABLE_SWAP" = "1" ] || return 0
   say "disable swap for kubelet"
   run swapoff -a
-  if grep -Eq '^[^#].*[[:space:]]swap[[:space:]]' /etc/fstab; then
+  if [ -f /etc/fstab ] && grep -Eq '^[^#].*[[:space:]]swap[[:space:]]' /etc/fstab; then
     backup_file /etc/fstab
     run sed -i '/^[^#].*[[:space:]]swap[[:space:]]/ s/^/#/' /etc/fstab
   fi
@@ -223,6 +265,23 @@ configure_containerd() {
   run sed -i 's/disabled_plugins = \["cri"\]/disabled_plugins = []/g' /etc/containerd/config.toml
   run systemctl enable --now containerd
   run systemctl restart containerd
+}
+
+configure_hostname_resolution() {
+  local node_name
+  resolve_advertise_address
+  node_name="$(hostname)"
+  [ -n "$node_name" ] || return 0
+  if command -v getent >/dev/null 2>&1 && getent hosts "$node_name" >/dev/null 2>&1; then
+    return 0
+  fi
+  say "add hostname resolution for $node_name -> $K8S_APISERVER_ADVERTISE_ADDRESS"
+  backup_file /etc/hosts
+  if [ "$DRY_RUN" = "1" ]; then
+    say "would append '$K8S_APISERVER_ADVERTISE_ADDRESS $node_name' to /etc/hosts"
+  else
+    printf '%s %s\n' "$K8S_APISERVER_ADVERTISE_ADDRESS" "$node_name" >>/etc/hosts
+  fi
 }
 
 configure_selinux() {
@@ -277,15 +336,38 @@ init_cluster() {
     configure_kubectl
     return 0
   fi
-  if [ -z "$K8S_APISERVER_ADVERTISE_ADDRESS" ]; then
-    K8S_APISERVER_ADVERTISE_ADDRESS="$(auto_advertise_ip)"
-  fi
+  resolve_advertise_address
   say "initialize single-node Kubernetes cluster at $K8S_APISERVER_ADVERTISE_ADDRESS"
-  run kubeadm init \
-    --apiserver-advertise-address="$K8S_APISERVER_ADVERTISE_ADDRESS" \
-    --pod-network-cidr="$POD_CIDR" \
-    --service-cidr="$SERVICE_CIDR" \
-    --cri-socket="$CRI_SOCKET"
+  if needs_cgroup_v1_compat; then
+    local kubeadm_config="/tmp/mx-kubeadm-init.yaml"
+    say "cgroups v1 detected; enabling kubelet failCgroupV1=false compatibility"
+    write_file "$kubeadm_config" <<EOF
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: ${K8S_APISERVER_ADVERTISE_ADDRESS}
+nodeRegistration:
+  criSocket: ${CRI_SOCKET}
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+networking:
+  podSubnet: ${POD_CIDR}
+  serviceSubnet: ${SERVICE_CIDR}
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd
+failCgroupV1: false
+EOF
+    run kubeadm init --config "$kubeadm_config" --ignore-preflight-errors=SystemVerification
+  else
+    run kubeadm init \
+      --apiserver-advertise-address="$K8S_APISERVER_ADVERTISE_ADDRESS" \
+      --pod-network-cidr="$POD_CIDR" \
+      --service-cidr="$SERVICE_CIDR" \
+      --cri-socket="$CRI_SOCKET"
+  fi
   configure_kubectl
 }
 
@@ -313,6 +395,7 @@ configure_firewall() {
   say "open firewall ports for Internal gateway and Kubernetes admin"
   run firewall-cmd --permanent --add-port="${K8S_GATEWAY_PORT}/tcp"
   run firewall-cmd --permanent --add-port=6443/tcp
+  run firewall-cmd --permanent --add-port=10250/tcp
   run firewall-cmd --permanent --add-port=8472/udp
   run firewall-cmd --permanent --add-masquerade
   run firewall-cmd --reload
@@ -351,15 +434,17 @@ main() {
   say "Kubernetes repo version: $K8S_VERSION"
   say "Pod CIDR: $POD_CIDR"
   say "Service CIDR: $SERVICE_CIDR"
+  resolve_advertise_address
   disable_swap
   configure_kernel_networking
   configure_containerd
+  configure_hostname_resolution
   configure_selinux
   install_kubernetes_packages
+  configure_firewall
   init_cluster
   install_flannel
   untaint_control_plane
-  configure_firewall
   wait_for_cluster
   deploy_mx
   say "K8s bootstrap complete"

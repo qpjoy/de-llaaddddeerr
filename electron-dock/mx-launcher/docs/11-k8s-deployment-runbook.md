@@ -110,6 +110,20 @@ cd ~/mx/workspace/de-llaaddddeerr/electron-dock/mx-launcher
 bash scripts/install-k8s-centos.sh --advertise-address <这台 Internal CentOS 的内网 IP>
 ```
 
+CentOS/RHEL 8 系列常见组合是 4.18 内核 + cgroups v1。Kubernetes v1.35+ 会把
+cgroups v1 作为 deprecated 路径，v1.36 可能在 kubeadm preflight 阶段报
+`FailCgroupV1` / `SystemVerification`。脚本会自动识别并启用测试机兼容路径；也可以
+显式传入：
+
+```bash
+bash scripts/install-k8s-centos.sh \
+  --advertise-address <这台 Internal CentOS 的内网 IP> \
+  --allow-cgroup-v1
+```
+
+长期生产建议升级到 CentOS Stream 9 / Rocky 9 / Alma 9 或启用 cgroups v2；cgroups v1
+只是为了当前 Internal 测试机先跑通。
+
 如果希望 K8s 安装完成后顺手部署 MX-H2I Internal 服务：
 
 ```bash
@@ -131,6 +145,7 @@ bash scripts/install-k8s-centos.sh --advertise-address <IP> --dry-run
 
 ```bash
 K8S_VERSION=v1.36 \
+K8S_ALLOW_CGROUP_V1=auto \
 POD_CIDR=10.244.0.0/16 \
 SERVICE_CIDR=10.96.0.0/12 \
 bash scripts/install-k8s-centos.sh --advertise-address <IP>
