@@ -1330,12 +1330,12 @@ async function startWireGuardForSession(input) {
       internalBaseUrl,
       pathPreference
     });
-    if (configuredPreference === 'auto' && pathPreference === 'hybrid' && attempt.ready !== true) {
+    if (configuredPreference === 'auto' && pathPreference === 'hybrid') {
       attempt = await connectAndProbeWireGuardPath(mod, {
         routePlan,
         privateKey,
         internalBaseUrl,
-        pathPreference: 'relay'
+        pathPreference: attempt.ready === true ? 'direct' : 'relay'
       });
     }
     const { result, route, internalApi, ready } = attempt;
