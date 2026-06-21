@@ -341,6 +341,7 @@ function renderWireGuardDiagnostics() {
   const wireGuard = connection.wireGuard || {};
   const diagnostics = connection.diagnostics || {};
   const route = diagnostics.route || {};
+  const endpointRoute = diagnostics.endpointRoute || {};
   const internalApi = diagnostics.internalApi || {};
   const directSync = diagnostics.internalDirectPeerSync || {};
   const peerSync = connection.domesticPeerSync || diagnostics.domesticPeerSync || {};
@@ -369,6 +370,8 @@ function renderWireGuardDiagnostics() {
         ${metric('Interface', wireGuard.realInterfaceName || wireGuard.interfaceName || '-')}
         ${metric('Expected', route.expectedInterfaceName || wireGuard.realInterfaceName || '-')}
         ${metric('Endpoint', wireGuard.endpoint || connection.domesticRelayEndpoint || '-')}
+        ${metric('Endpoint route', endpointRoute.interfaceName ? `${endpointRoute.interfaceName}${endpointRoute.gateway ? ` / ${endpointRoute.gateway}` : ''}` : (endpointRoute.error || '-'))}
+        ${metric('Endpoint proxy', endpointRoute.viaProxyTun ? 'proxy-tun' : (endpointRoute.ok ? 'clear' : '-'))}
         ${metric('Target', route.targetIp || '10.88.88.88')}
         ${metric('Route dev', route.interfaceName || '-')}
         ${metric('Service', wireGuard.serviceState || (wireGuard.active ? 'active' : '-'))}

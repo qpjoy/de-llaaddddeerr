@@ -38,6 +38,10 @@ export interface ElectronLauncherWireGuardProbeInput extends ElectronLauncherWir
   expectedInterfaceAddresses?: string[] | null;
 }
 
+export interface ElectronLauncherWireGuardEndpointProbeInput {
+  endpoint: string | null | undefined;
+}
+
 export interface ElectronLauncherWireGuardPeer {
   address: string;
   allowedIps: string[];
@@ -325,6 +329,47 @@ export function probeLauncherWireGuardRoute(input: ElectronLauncherWireGuardProb
   };
 }
 
+export function probeLauncherWireGuardEndpoint(input: ElectronLauncherWireGuardEndpointProbeInput) {
+  const endpoint = stringValue(input.endpoint);
+  const host = endpointHost(endpoint);
+  if (!endpoint || !host) {
+    return {
+      ok: false,
+      endpoint: endpoint ?? null,
+      host,
+      interfaceName: null,
+      gateway: null,
+      viaProxyTun: false,
+      raw: null,
+      error: 'WireGuard endpoint is empty or unsupported'
+    };
+  }
+  if (!isIpv4(host)) {
+    return {
+      ok: false,
+      endpoint,
+      host,
+      interfaceName: null,
+      gateway: null,
+      viaProxyTun: false,
+      raw: null,
+      error: `endpoint host is not an IPv4 address: ${host}`
+    };
+  }
+  const route = readRouteToTarget(host);
+  const viaProxyTun = isProxyTunGateway(route.gateway);
+  return {
+    ok: Boolean(route.interfaceName || route.gateway) && !viaProxyTun && !route.error,
+    endpoint,
+    host,
+    interfaceName: route.interfaceName,
+    gateway: route.gateway,
+    viaProxyTun,
+    raw: route.raw,
+    error: route.error ?? (viaProxyTun ? `endpoint route is captured by proxy TUN gateway ${route.gateway}` : null)
+  };
+}
+
 export function launcherWireGuardConfigPath(input: ElectronLauncherWireGuardRuntimeOptions): string {
   const profileName = sanitizeProfileName(input.profileName ?? 'mx-h2i.conf');
   return join(input.userDataDir, 'wireguard', profileName);
@@ -378,6 +423,31 @@ function objectRecord(value: unknown): Record<string, unknown> {
 
 function stringValue(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function endpointHost(value: string | null): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  const bracket = trimmed.match(/^\[([^\]]+)](?::\d+)?$/);
+  if (bracket?.[1]) return bracket[1];
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      return new URL(trimmed).hostname || null;
+    } catch {
+      return null;
+    }
+  }
+  const parts = trimmed.split(':');
+  if (parts.length === 1) return parts[0] || null;
+  if (parts.length === 2) return parts[0] || null;
+  return null;
+}
+
+function isProxyTunGateway(value: string | null | undefined): boolean {
+  const gateway = value ? ipv4ToInt(value) : null;
+  const start = ipv4ToInt('198.18.0.0');
+  const end = ipv4ToInt('198.19.255.255');
+  return gateway !== null && start !== null && end !== null && gateway >= start && gateway <= end;
 }
 
 function readRouteToTarget(targetIp: string): {

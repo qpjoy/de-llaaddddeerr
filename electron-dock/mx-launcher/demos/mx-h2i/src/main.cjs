@@ -1085,6 +1085,15 @@ function normalizeDiagnostics(input) {
       expectedInterfaceName: nullableString(row.route.expectedInterfaceName),
       error: nullableString(row.route.error)
     } : null,
+    endpointRoute: row.endpointRoute && typeof row.endpointRoute === 'object' ? {
+      ok: row.endpointRoute.ok === true,
+      endpoint: nullableString(row.endpointRoute.endpoint),
+      host: nullableString(row.endpointRoute.host),
+      interfaceName: nullableString(row.endpointRoute.interfaceName),
+      gateway: nullableString(row.endpointRoute.gateway),
+      viaProxyTun: row.endpointRoute.viaProxyTun === true,
+      error: nullableString(row.endpointRoute.error)
+    } : null,
     internalApi: row.internalApi && typeof row.internalApi === 'object' ? {
       ok: row.internalApi.ok === true,
       baseUrl: nullableString(row.internalApi.baseUrl),
@@ -1330,7 +1339,7 @@ async function startWireGuardForSession(input) {
       internalBaseUrl,
       pathPreference
     });
-    const { result, route, internalApi, ready } = attempt;
+    const { result, route, endpointRoute, internalApi, ready } = attempt;
     const tunnelReady = result.ok === true;
     const domesticRelayReady = domesticRelayDiagnostics?.status === 'passed' || domesticPeerSync?.status === 'passed' || route.ok === true;
     return {
@@ -1346,6 +1355,7 @@ async function startWireGuardForSession(input) {
       wireGuard: summarizeWireGuardResult(result),
       diagnostics: {
         route,
+        endpointRoute,
         internalApi,
         internalDirectPeerSync,
         domesticPeerSync,
@@ -1371,6 +1381,9 @@ async function connectAndProbeWireGuardPath(mod, input) {
   });
   const status = result.status || {};
   const targetIp = internalTargetIp(input.routePlan, input.internalBaseUrl);
+  const endpointRoute = mod.probeLauncherWireGuardEndpoint({
+    endpoint: result.peer?.endpoint || endpointForRoutePreference(input.routePlan, input.pathPreference)
+  });
   const route = mod.probeLauncherWireGuardRoute({
     ...wireGuardRuntimeOptions(),
     targetIp,
@@ -1388,6 +1401,7 @@ async function connectAndProbeWireGuardPath(mod, input) {
     pathPreference: input.pathPreference,
     result,
     route,
+    endpointRoute,
     internalApi,
     ready: result.ok === true && route.ok === true && internalApi.ok === true
   };
@@ -1407,6 +1421,9 @@ async function probeWireGuardForConnection(input) {
     const status = mod.getLauncherWireGuardPeerStatus(wireGuardRuntimeOptions());
     const wireGuard = summarizeWireGuardStatus(status, connection);
     const targetIp = internalTargetIp(routePlan, internalBaseUrl);
+    const endpointRoute = mod.probeLauncherWireGuardEndpoint({
+      endpoint: wireGuard.endpoint || endpointForRoutePreference(routePlan, wireGuard.path)
+    });
     const expectedInterfaceName = status?.realInterfaceName || status?.interfaceName || wireGuard.realInterfaceName || wireGuard.interfaceName || null;
     const route = mod.probeLauncherWireGuardRoute({
       ...wireGuardRuntimeOptions(),
@@ -1451,6 +1468,7 @@ async function probeWireGuardForConnection(input) {
       wireGuard,
       diagnostics: {
       route,
+      endpointRoute,
       internalApi,
       internalDirectPeerSync,
       domesticPeerSync,
@@ -1650,6 +1668,13 @@ function routePathFromPreference(preference) {
   if (normalized === 'direct') return 'h2i-direct';
   if (normalized === 'hybrid' || normalized === 'auto') return 'h2i-hybrid';
   return 'hdi-relay';
+}
+
+function endpointForRoutePreference(routePlan, preference) {
+  const plan = normalizeRoutePlan(routePlan);
+  const normalized = normalizeRoutePathPreference(preference);
+  if (normalized === 'relay') return plan?.domesticRelayEndpoint || null;
+  return plan?.h2iDirectEndpoint || plan?.domesticRelayEndpoint || null;
 }
 
 function wireGuardPathLabel(path) {
