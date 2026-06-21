@@ -76,10 +76,11 @@ export function buildSiteSlotRemoteSshWorkerHandoff(
     confirmWorkerHandoff: boolean;
   }
 ) {
-  const workerInternalBaseUrl = input.workerInternalBaseUrl
-    ?? input.internalBaseUrl
-    ?? process.env.MX_INTERNAL_BASE_URL
-    ?? 'http://127.0.0.1:18090';
+  const workerInternalBaseUrl = workerInternalBaseUrlFromSources(
+    input.workerInternalBaseUrl,
+    input.internalBaseUrl,
+    process.env.MX_INTERNAL_BASE_URL
+  );
   const env = {
     MX_INTERNAL_BASE_URL: workerInternalBaseUrl,
     MX_WORKER_INTERNAL_BASE_URL: workerInternalBaseUrl,
@@ -518,6 +519,29 @@ function allowedRemoteShellCommand(command: string): boolean {
 
 function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function normalizeBaseUrl(value: string): string {
+  return value.trim().replace(/\/+$/, '') || 'http://127.0.0.1:18090';
+}
+
+function isK8sInternalServiceBaseUrl(value: string | null | undefined): boolean {
+  const normalized = value ? normalizeBaseUrl(value) : '';
+  if (!normalized) return false;
+  try {
+    const host = new URL(normalized).hostname.toLowerCase();
+    return host.endsWith('.svc.cluster.local') || host.endsWith('.svc') || host.includes('.svc.');
+  } catch {
+    return false;
+  }
+}
+
+function workerInternalBaseUrlFromSources(...values: Array<string | null | undefined>): string {
+  for (const value of values) {
+    if (!value || isK8sInternalServiceBaseUrl(value)) continue;
+    return normalizeBaseUrl(value);
+  }
+  return 'http://127.0.0.1:18090';
 }
 
 function siteSlotTransportEvidence(command: string) {

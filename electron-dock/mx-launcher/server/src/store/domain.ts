@@ -2270,17 +2270,25 @@ export function buildSiteSlotSshProfile(
   const exportPort = kind === 'oversea'
     ? normalizeTcpPort(input.exportPort ?? previous?.exportPort, HYSTERIA2_EXPORT_FALLBACK_PORT)
     : null;
+  const rawWorkerInternalBaseUrl = input.workerInternalBaseUrl ?? input.internalBaseUrl ?? previous?.workerInternalBaseUrl ?? null;
+  const rawOverseaCallbackBaseUrl = input.overseaCallbackBaseUrl ?? null;
   const workerInternalBaseUrl = kind === 'oversea'
-    ? normalizeOptionalHttpUrl(input.workerInternalBaseUrl ?? input.internalBaseUrl ?? previous?.workerInternalBaseUrl ?? null)
+    ? normalizeOptionalInternalWorkerHttpUrl(rawWorkerInternalBaseUrl)
     : null;
   const overseaCallbackBaseUrl = kind === 'oversea'
-    ? normalizeOptionalHttpUrl(input.overseaCallbackBaseUrl ?? null)
+    ? normalizeOptionalOverseaCallbackHttpUrl(rawOverseaCallbackBaseUrl)
     : null;
   if (kind === 'oversea' && input.serverPorts && serverPorts !== input.serverPorts.trim()) {
     warnings.push(`runtime: invalid Hysteria2 serverPorts "${input.serverPorts}", using ${serverPorts}`);
   }
   if (kind === 'oversea' && input.exportPort != null && exportPort !== input.exportPort) {
     warnings.push(`runtime: invalid health/evidence exportPort "${input.exportPort}", using ${exportPort}`);
+  }
+  if (kind === 'oversea' && rawWorkerInternalBaseUrl && isK8sServiceHttpUrl(rawWorkerInternalBaseUrl)) {
+    warnings.push('runtime: Kubernetes service DNS workerInternalBaseUrl ignored; Internal-local worker URL will be used at execution time');
+  }
+  if (kind === 'oversea' && rawOverseaCallbackBaseUrl && isK8sServiceHttpUrl(rawOverseaCallbackBaseUrl)) {
+    warnings.push('runtime: Kubernetes service DNS overseaCallbackBaseUrl ignored; push-only mode will be used');
   }
   if (!identityFile) warnings.push('missing: identityFile is required before artifact-push-remote-ssh can execute');
   if (!knownHostsFile) warnings.push('missing: knownHostsFile is required before artifact-push-remote-ssh can verify host keys');
@@ -2565,12 +2573,33 @@ function normalizeOptionalHttpUrl(value: string | null | undefined): string | nu
   return trimmed || null;
 }
 
+function isK8sServiceHttpUrl(value: string | null | undefined): boolean {
+  const normalized = normalizeOptionalHttpUrl(value);
+  if (!normalized) return false;
+  try {
+    const host = new URL(normalized).hostname.toLowerCase();
+    return host.endsWith('.svc.cluster.local') || host.endsWith('.svc') || host.includes('.svc.');
+  } catch {
+    return false;
+  }
+}
+
+function normalizeOptionalInternalWorkerHttpUrl(value: string | null | undefined): string | null {
+  const normalized = normalizeOptionalHttpUrl(value);
+  return normalized && !isK8sServiceHttpUrl(normalized) ? normalized : null;
+}
+
+function normalizeOptionalOverseaCallbackHttpUrl(value: string | null | undefined): string | null {
+  const normalized = normalizeOptionalHttpUrl(value);
+  return normalized && !isK8sServiceHttpUrl(normalized) ? normalized : null;
+}
+
 function siteSlotWorkerInternalBaseUrl(input: SiteSlotPlanInput): string | null {
-  return normalizeOptionalHttpUrl(input.workerInternalBaseUrl ?? input.internalBaseUrl ?? null);
+  return normalizeOptionalInternalWorkerHttpUrl(input.workerInternalBaseUrl ?? input.internalBaseUrl ?? null);
 }
 
 function siteSlotOverseaCallbackBaseUrl(input: SiteSlotPlanInput): string | null {
-  return normalizeOptionalHttpUrl(input.overseaCallbackBaseUrl ?? null);
+  return normalizeOptionalOverseaCallbackHttpUrl(input.overseaCallbackBaseUrl ?? null);
 }
 
 function isHttpUrl(value: string): boolean {

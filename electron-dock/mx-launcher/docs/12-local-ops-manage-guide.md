@@ -277,6 +277,14 @@ mihomo、DNS authority、账号/订阅存储仍由 Internal 托管；H 端通过
 源包保存在 `electron-dock/mx-launcher/site-slots/oversea/hysteria2-access-stack`，
 materializer 只从 mx-launcher 内部取材，不读取仓库根的 `docker/` 目录。
 
+Oversea SSH Profile 里的 Worker URL 是 Internal worker 读取 job、回写 report 的 Internal
+API base。Admin 触发的 remote-ssh worker 和 Internal API 在同一个运行面时，默认使用
+`http://127.0.0.1:18090`；不要把 `mx-launcher-internal.mx-internal-shadow.svc.cluster.local`
+这类 K8s Service DNS 写入 profile。Callback URL 默认留空，表示 push-only：Internal
+通过 SSH/artifact push 下发配置，Oversea 不反向调用 Internal。`hysteria2-access-stack`
+默认 Docker bridge 子网是 `10.254.0.0/24`；如果目标机器已有 Docker 网络冲突，远端
+`manage.sh` 会在 compose 启动前自动改用一个不冲突的候选子网并写回 `.env`。
+
 如果是一台空 Ubuntu，推荐先在 Admin 的 `SSH Profiles` 中输入 site、host、user、一次性
 password，然后点击 `Bootstrap Key`。Internal 会在默认 key root 生成并托管 SSH key、
 known_hosts 和 profile；password 只用于把公钥写入远端 `authorized_keys`，不会保存到

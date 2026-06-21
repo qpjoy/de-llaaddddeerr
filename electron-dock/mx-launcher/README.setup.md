@@ -90,4 +90,18 @@ PG_PASSWORD='<换成 Internal 测试库密码>' \
 bash scripts/manage.sh ops internal-production status
 bash scripts/manage.sh ops internal-production gateway-smoke
 curl -fsS http://127.0.0.1:18090/healthz
+
+# Oversea SSH Profile
+# Worker URL 是 Internal worker 读取 job、回写 report 的 Internal API base。
+# 默认填 http://127.0.0.1:18090；Admin 触发的 worker 跟 Internal API 在同一运行面，不依赖外部网络。
+# 如果以后 worker 挪到独立宿主机，再填那个 worker 宿主机能访问到的 Internal gateway，例如 http://192.168.31.121:18090。
+# 不要填 http://mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090；
+# svc.cluster.local 只适合 K8s Pod 内部 DNS，不适合 Mac/browser/Oversea host。
+# Callback URL 可以留空，push-only 模式不要求 Oversea 反向访问 Internal。
+
+
+### 删除smoke数据
+bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures
+bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures --apply
+MX_K8S_CLEANUP_LEGACY_OVERSEA_MAIN_SMOKE=1 bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures --apply
 ```

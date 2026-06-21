@@ -1794,7 +1794,7 @@ function overseaRuntimePayloadForSite(siteId) {
   return {
     serverPorts: runtime.serverPorts,
     exportPort: runtime.exportPort,
-    workerInternalBaseUrl: runtime.workerInternalBaseUrl || defaultWorkerInternalBaseUrl(),
+    workerInternalBaseUrl: normalizeWorkerBaseValue(runtime.workerInternalBaseUrl) || defaultWorkerInternalBaseUrl(),
     overseaCallbackBaseUrl: runtime.overseaCallbackBaseUrl || null
   };
 }
@@ -2579,6 +2579,9 @@ function renderSshProfiles(profiles) {
 
 function fillSshProfileForm(profile) {
   const runtime = overseaRuntimeForSiteId(profile.siteId);
+  const workerBaseUrl = normalizeWorkerBaseValue(profile.workerInternalBaseUrl)
+    || normalizeWorkerBaseValue(runtime.workerInternalBaseUrl)
+    || defaultWorkerInternalBaseUrl();
   sshProfileId.value = profile.profileId || '';
   sshProfileSiteId.value = profile.siteId || '';
   sshProfileKind.value = profile.kind === 'domestic' ? 'domestic' : 'oversea';
@@ -2589,7 +2592,7 @@ function fillSshProfileForm(profile) {
   sshProfilePort.value = String(profile.sshPort || 22);
   sshProfileHy2Ports.value = profile.kind === 'oversea' ? (profile.serverPorts || runtime.serverPorts) : '';
   sshProfileHealthPort.value = profile.kind === 'oversea' ? String(positiveNumberOrNull(profile.exportPort) || runtime.exportPort) : '';
-  sshProfileWorkerInternalUrl.value = profile.kind === 'oversea' ? (profile.workerInternalBaseUrl || runtime.workerInternalBaseUrl || defaultWorkerInternalBaseUrl()) : '';
+  sshProfileWorkerInternalUrl.value = profile.kind === 'oversea' ? workerBaseUrl : '';
   sshProfileOverseaCallbackUrl.value = profile.kind === 'oversea' ? (profile.overseaCallbackBaseUrl || runtime.overseaCallbackBaseUrl || '') : '';
   sshProfileStrict.value = profile.strictHostKeyChecking || 'yes';
   sshProfileBatchMode.value = profile.batchMode || 'yes';
@@ -3017,13 +3020,31 @@ function normalizedServerBase() {
   return raw || defaultServerBaseUrl();
 }
 
+function isK8sInternalServiceBaseUrl(value) {
+  const raw = normalizeServerBaseValue(value);
+  if (!raw) return false;
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    return host.endsWith('.svc.cluster.local') || host.endsWith('.svc') || host.includes('.svc.');
+  } catch {
+    return false;
+  }
+}
+
+function normalizeWorkerBaseValue(value) {
+  const raw = normalizeServerBaseValue(value);
+  if (!raw || isK8sInternalServiceBaseUrl(raw)) return '';
+  return raw;
+}
+
 function defaultWorkerInternalBaseUrl() {
-  const raw = normalizeServerBaseValue(state.dashboard?.overview?.internalBaseUrl);
-  return raw || normalizedServerBase();
+  // Admin-triggered workers are spawned beside the Internal API process.
+  // Use loopback by default so the worker does not depend on WG, LAN, or K8s DNS.
+  return LOCAL_SERVER_BASE_URL;
 }
 
 function workerInternalBaseUrl() {
-  const raw = normalizeServerBaseValue(sshProfileWorkerInternalUrl?.value);
+  const raw = normalizeWorkerBaseValue(sshProfileWorkerInternalUrl?.value);
   return raw || defaultWorkerInternalBaseUrl();
 }
 
@@ -4324,7 +4345,7 @@ function renderOverseaSiteDetail(site) {
       <div><dt>HY2 UDP</dt><dd>${escapeHtml(site.runtime?.serverPorts || site.sshProfile?.serverPorts || site.mihomoSite?.serverPorts || '51288')}</dd></div>
       <div><dt>Health TCP</dt><dd>${escapeHtml(site.runtime?.exportPort || site.sshProfile?.exportPort || '3434')}</dd></div>
       <div><dt>Callback</dt><dd>${escapeHtml(site.runtime?.callbackMode || (site.runtime?.overseaCallbackBaseUrl || site.sshProfile?.overseaCallbackBaseUrl ? 'remote-callback' : 'push-only'))}</dd></div>
-      <div><dt>Worker URL</dt><dd>${escapeHtml(site.runtime?.workerInternalBaseUrl || site.sshProfile?.workerInternalBaseUrl || defaultWorkerInternalBaseUrl())}</dd></div>
+      <div><dt>Worker URL</dt><dd>${escapeHtml(workerInternalBaseUrlForSite(site))}</dd></div>
       <div><dt>Identity</dt><dd>${escapeHtml(site.sshProfile?.identityFile || '-')}</dd></div>
       <div><dt>SSH Config</dt><dd>${escapeHtml(site.sshProfile?.sshConfigFile || '-')}</dd></div>
       <div><dt>Worker report</dt><dd>${escapeHtml(site.runtime?.workerReportStatus || '-')} ${escapeHtml(site.runtime?.workerReportId || '')}</dd></div>
@@ -4435,10 +4456,16 @@ function overseaRuntimeForSiteId(siteId) {
   return {
     serverPorts: site?.runtime?.serverPorts || site?.sshProfile?.serverPorts || site?.mihomoSite?.serverPorts || '51288',
     exportPort: positiveNumberOrNull(site?.runtime?.exportPort) || positiveNumberOrNull(site?.sshProfile?.exportPort) || 3434,
-    workerInternalBaseUrl: site?.runtime?.workerInternalBaseUrl || site?.sshProfile?.workerInternalBaseUrl || defaultWorkerInternalBaseUrl(),
+    workerInternalBaseUrl: workerInternalBaseUrlForSite(site),
     overseaCallbackBaseUrl,
     callbackMode: site?.runtime?.callbackMode || (overseaCallbackBaseUrl ? 'remote-callback' : 'push-only')
   };
+}
+
+function workerInternalBaseUrlForSite(site) {
+  return normalizeWorkerBaseValue(site?.runtime?.workerInternalBaseUrl)
+    || normalizeWorkerBaseValue(site?.sshProfile?.workerInternalBaseUrl)
+    || defaultWorkerInternalBaseUrl();
 }
 
 function overseaSitesWithDraft(sites) {

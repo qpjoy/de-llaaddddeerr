@@ -380,10 +380,14 @@ export class AdminController {
     }
     const serverPorts = requestServerPorts ?? profile.serverPorts;
     const exportPort = requestExportPort ?? profile.exportPort;
-    const workerInternalBaseUrl = normalizeBaseUrl(requestWorkerInternalBaseUrl ?? profile.workerInternalBaseUrl ?? process.env.MX_INTERNAL_BASE_URL ?? 'http://127.0.0.1:18090');
+    const workerInternalBaseUrl = workerInternalBaseUrlFromSources(
+      requestWorkerInternalBaseUrl,
+      profile.workerInternalBaseUrl,
+      process.env.MX_INTERNAL_BASE_URL
+    );
     const overseaCallbackBaseUrl = requestOverseaCallbackBaseUrlProvided
       ? requestOverseaCallbackBaseUrl
-      : profile.overseaCallbackBaseUrl ?? null;
+      : normalizeOverseaCallbackBaseUrl(profile.overseaCallbackBaseUrl);
 
     const access = await this.store.issueSiteSlotAccessAccounts({
       siteId,
@@ -719,12 +723,13 @@ export class AdminController {
   ): Promise<{ status: 'completed' | 'failed'; exitCode: number | null; stdout: string; stderr: string; diagnosis?: ReturnType<typeof sshFailureDiagnosis> }> {
     const mxRoot = resolveMxLauncherRoot();
     const scriptPath = resolveSiteSlotWorkerRunScript(mxRoot);
+    const workerBaseUrl = workerInternalBaseUrlFromSources(internalBaseUrl);
     try {
-      const { stdout, stderr } = await execFileAsync(process.execPath, [scriptPath, internalBaseUrl, jobId, 'artifact-push-remote-ssh'], {
+      const { stdout, stderr } = await execFileAsync(process.execPath, [scriptPath, workerBaseUrl, jobId, 'artifact-push-remote-ssh'], {
         cwd: mxRoot,
         env: {
           ...process.env,
-          MX_INTERNAL_BASE_URL: internalBaseUrl,
+          MX_INTERNAL_BASE_URL: workerBaseUrl,
           SITE_SLOT_SSH_PROFILE_ID: sshProfileId,
           SITE_SLOT_WORKER_REMOTE_SSH: '1',
           SITE_SLOT_CONFIRM_REMOTE_EXECUTION: '1',
@@ -811,6 +816,11 @@ export class AdminController {
     const status = overseaSiteStatus(profile, pipeline, latestSession, latestJob, latestReport);
     const latestReportFailure = latestReport ? workerReportFailureSummary(latestReport) : null;
     const subscriptionBaseUrl = mihomoSite?.subscriptionBaseUrl ?? null;
+    const planWorkerInternalBaseUrl = normalizeWorkerInternalBaseUrl(pipeline?.plan.runtime.oversea?.workerInternalBaseUrl);
+    const planOverseaCallbackBaseUrl = normalizeOverseaCallbackBaseUrl(pipeline?.plan.runtime.oversea?.overseaCallbackBaseUrl);
+    const profileWorkerInternalBaseUrl = normalizeWorkerInternalBaseUrl(profile?.workerInternalBaseUrl);
+    const profileOverseaCallbackBaseUrl = normalizeOverseaCallbackBaseUrl(profile?.overseaCallbackBaseUrl);
+    const runtimeOverseaCallbackBaseUrl = planOverseaCallbackBaseUrl ?? profileOverseaCallbackBaseUrl;
     return {
       siteId,
       kind: 'oversea' as const,
@@ -828,8 +838,8 @@ export class AdminController {
         hostKeyAlias: profile.hostKeyAlias,
         serverPorts: profile.serverPorts,
         exportPort: profile.exportPort,
-        workerInternalBaseUrl: profile.workerInternalBaseUrl,
-        overseaCallbackBaseUrl: profile.overseaCallbackBaseUrl,
+        workerInternalBaseUrl: profileWorkerInternalBaseUrl,
+        overseaCallbackBaseUrl: profileOverseaCallbackBaseUrl,
         status: profile.status,
         warnings: profile.warnings
       } : null,
@@ -849,9 +859,9 @@ export class AdminController {
         serverPorts: pipeline?.plan.runtime.oversea?.serverPorts ?? mihomoSite?.serverPorts ?? profile?.serverPorts ?? null,
         exportPort: pipeline?.plan.runtime.oversea?.exportPort ?? profile?.exportPort ?? null,
         exportBaseUrl: pipeline?.plan.runtime.oversea?.exportBaseUrl ?? null,
-        workerInternalBaseUrl: pipeline?.plan.runtime.oversea?.workerInternalBaseUrl ?? profile?.workerInternalBaseUrl ?? null,
-        overseaCallbackBaseUrl: pipeline?.plan.runtime.oversea?.overseaCallbackBaseUrl ?? profile?.overseaCallbackBaseUrl ?? null,
-        callbackMode: pipeline?.plan.runtime.oversea?.callbackMode ?? (profile?.overseaCallbackBaseUrl ? 'remote-callback' : 'push-only'),
+        workerInternalBaseUrl: planWorkerInternalBaseUrl ?? profileWorkerInternalBaseUrl,
+        overseaCallbackBaseUrl: runtimeOverseaCallbackBaseUrl,
+        callbackMode: pipeline?.plan.runtime.oversea?.callbackMode ?? (runtimeOverseaCallbackBaseUrl ? 'remote-callback' : 'push-only'),
         workerReportId: latestReport?.reportId ?? null,
         workerReportStatus: latestReport?.status ?? null,
         failure: latestReportFailure,
@@ -6523,21 +6533,45 @@ function normalizeBaseUrl(value: string): string {
   return value.trim().replace(/\/+$/, '') || 'http://127.0.0.1:18090';
 }
 
-function normalizeOptionalBaseUrl(value: string | null): string | null {
-  return value ? normalizeBaseUrl(value) : null;
+function isK8sInternalServiceBaseUrl(value: string | null | undefined): boolean {
+  const normalized = value ? normalizeBaseUrl(value) : '';
+  if (!normalized) return false;
+  try {
+    const host = new URL(normalized).hostname.toLowerCase();
+    return host.endsWith('.svc.cluster.local') || host.endsWith('.svc') || host.includes('.svc.');
+  } catch {
+    return false;
+  }
+}
+
+function normalizeWorkerInternalBaseUrl(value: string | null | undefined): string | null {
+  if (!value || isK8sInternalServiceBaseUrl(value)) return null;
+  return normalizeBaseUrl(value);
+}
+
+function workerInternalBaseUrlFromSources(...values: Array<string | null | undefined>): string {
+  for (const value of values) {
+    const normalized = normalizeWorkerInternalBaseUrl(value);
+    if (normalized) return normalized;
+  }
+  return 'http://127.0.0.1:18090';
+}
+
+function normalizeOverseaCallbackBaseUrl(value: string | null | undefined): string | null {
+  if (!value || isK8sInternalServiceBaseUrl(value)) return null;
+  return normalizeBaseUrl(value);
 }
 
 function workerInternalBaseUrlFromBody(body: Record<string, unknown>): string {
-  return normalizeBaseUrl(
-    stringValue(body.workerInternalBaseUrl)
-      ?? stringValue(body.internalBaseUrl)
-      ?? process.env.MX_INTERNAL_BASE_URL
-      ?? 'http://127.0.0.1:18090'
+  return workerInternalBaseUrlFromSources(
+    stringValue(body.workerInternalBaseUrl),
+    stringValue(body.internalBaseUrl),
+    process.env.MX_INTERNAL_BASE_URL
   );
 }
 
 function overseaCallbackBaseUrlFromBody(body: Record<string, unknown>): string | null {
-  return normalizeOptionalBaseUrl(stringValue(body.overseaCallbackBaseUrl));
+  return normalizeOverseaCallbackBaseUrl(stringValue(body.overseaCallbackBaseUrl));
 }
 
 function terminalTimeoutSeconds(value: unknown): number {

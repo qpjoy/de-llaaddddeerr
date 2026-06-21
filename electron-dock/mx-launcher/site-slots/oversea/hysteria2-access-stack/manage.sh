@@ -348,6 +348,126 @@ load_env() {
 	set +a
 }
 
+cidr_range() {
+	local cidr="$1"
+	local a b c d prefix ip mask start end
+
+	[[ "$cidr" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)/([0-9]+)$ ]] || return 1
+	a=$((10#${BASH_REMATCH[1]}))
+	b=$((10#${BASH_REMATCH[2]}))
+	c=$((10#${BASH_REMATCH[3]}))
+	d=$((10#${BASH_REMATCH[4]}))
+	prefix=$((10#${BASH_REMATCH[5]}))
+	(( a <= 255 && b <= 255 && c <= 255 && d <= 255 && prefix <= 32 )) || return 1
+
+	ip=$(( (a << 24) | (b << 16) | (c << 8) | d ))
+	if (( prefix == 0 )); then
+		mask=0
+	else
+		mask=$(( (0xffffffff << (32 - prefix)) & 0xffffffff ))
+	fi
+	start=$(( ip & mask ))
+	end=$(( start | (0xffffffff ^ mask) ))
+	printf "%s %s\n" "$start" "$end"
+}
+
+cidrs_overlap() {
+	local left="$1"
+	local right="$2"
+	local left_range right_range left_start left_end right_start right_end
+
+	left_range="$(cidr_range "$left")" || return 1
+	right_range="$(cidr_range "$right")" || return 1
+	read -r left_start left_end <<< "$left_range"
+	read -r right_start right_end <<< "$right_range"
+	(( left_start <= right_end && right_start <= left_end ))
+}
+
+stack_network_name() {
+	printf "%s_hy2_access\n" "$(basename "$STACK_DIR")"
+}
+
+docker_network_cidrs_except_current_stack() {
+	local network_id name subnet current_network
+
+	command -v docker >/dev/null 2>&1 || return 0
+	current_network="$(stack_network_name)"
+	while IFS= read -r network_id; do
+		[[ -n "$network_id" ]] || continue
+		name="$(docker network inspect "$network_id" -f '{{.Name}}' 2>/dev/null || true)"
+		[[ -n "$name" ]] || continue
+		[[ "$name" == "$current_network" ]] && continue
+		while IFS= read -r subnet; do
+			[[ -n "$subnet" ]] && printf "%s\n" "$subnet"
+		done < <(docker network inspect "$network_id" -f '{{range .IPAM.Config}}{{if .Subnet}}{{.Subnet}}{{"\n"}}{{end}}{{end}}' 2>/dev/null || true)
+	done < <(docker network ls -q 2>/dev/null || true)
+}
+
+docker_network_cidr_conflict() {
+	local cidr="$1"
+	local existing
+
+	cidr_range "$cidr" >/dev/null || return 1
+	while IFS= read -r existing; do
+		if cidrs_overlap "$cidr" "$existing"; then
+			printf "%s\n" "$existing"
+			return 0
+		fi
+	done < <(docker_network_cidrs_except_current_stack)
+	return 1
+}
+
+gateway_for_cidr() {
+	local cidr="$1"
+	local a b c prefix
+
+	[[ "$cidr" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)\.[0-9]+/([0-9]+)$ ]] || return 1
+	a=$((10#${BASH_REMATCH[1]}))
+	b=$((10#${BASH_REMATCH[2]}))
+	c=$((10#${BASH_REMATCH[3]}))
+	prefix=$((10#${BASH_REMATCH[4]}))
+	(( a <= 255 && b <= 255 && c <= 255 && prefix <= 30 )) || return 1
+	printf "%s.%s.%s.1\n" "$a" "$b" "$c"
+}
+
+ensure_non_overlapping_stack_subnet() {
+	local current conflict candidate gateway
+	local -a candidates=(
+		"10.254.0.0/24"
+		"10.253.0.0/24"
+		"10.252.0.0/24"
+		"10.251.0.0/24"
+		"10.250.0.0/24"
+		"172.31.254.0/24"
+		"172.30.254.0/24"
+		"192.168.254.0/24"
+	)
+
+	command -v docker >/dev/null 2>&1 || return 0
+	load_env
+	current="${HY2_STACK_SUBNET:-10.254.0.0/24}"
+	cidr_range "$current" >/dev/null || return 0
+	if ! conflict="$(docker_network_cidr_conflict "$current")"; then
+		return 0
+	fi
+
+	for candidate in "$current" "${candidates[@]}"; do
+		cidr_range "$candidate" >/dev/null || continue
+		if docker_network_cidr_conflict "$candidate" >/dev/null; then
+			continue
+		fi
+		gateway="$(gateway_for_cidr "$candidate" 2>/dev/null || true)"
+		[[ -n "$gateway" ]] || gateway="${HY2_STACK_GATEWAY:-10.254.0.1}"
+		echo "Docker stack subnet ${current} overlaps existing Docker network ${conflict}; using ${candidate}." >&2
+		set_env_value HY2_STACK_SUBNET "$candidate"
+		set_env_value HY2_STACK_GATEWAY "$gateway"
+		load_env
+		return 0
+	done
+
+	die "Docker stack subnet ${current} overlaps existing Docker network ${conflict}; set HY2_STACK_SUBNET/HY2_STACK_GATEWAY to a free Docker bridge subnet."
+}
+
 prompt_default() {
 	local prompt="$1"
 	local default_value="${2:-}"
@@ -1128,6 +1248,7 @@ start_target() {
 	case "$target" in
 		all)
 			render_runtime_files
+			ensure_non_overlapping_stack_subnet
 			safe_recreate_service subscriptions
 			wait_for_container "$SUBSCRIPTIONS_CONTAINER"
 			safe_recreate_service hysteria
@@ -1136,11 +1257,13 @@ start_target() {
 		;;
 		hysteria)
 			render_runtime_files
+			ensure_non_overlapping_stack_subnet
 			safe_recreate_service hysteria
 			wait_for_container "$HYSTERIA_CONTAINER"
 			refresh_subscriptions
 		;;
 		subscriptions)
+			ensure_non_overlapping_stack_subnet
 			safe_recreate_service subscriptions
 			wait_for_container "$SUBSCRIPTIONS_CONTAINER"
 		;;
