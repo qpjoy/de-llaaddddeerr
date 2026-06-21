@@ -4260,6 +4260,16 @@ function internalServicePeerHostRunnerImage(): string {
     || 'qpjoy/mx-launcher-server:shadow';
 }
 
+function internalServicePeerHostRunnerImagePullPolicy(): string {
+  const explicit = process.env.MX_INTERNAL_HOST_RUNNER_IMAGE_PULL_POLICY?.trim();
+  if (explicit) return explicit;
+  const image = internalServicePeerHostRunnerImage();
+  if (image === 'qpjoy/mx-launcher-server:shadow' || image === 'docker.io/qpjoy/mx-launcher-server:shadow') {
+    return 'Never';
+  }
+  return 'IfNotPresent';
+}
+
 function internalServicePeerHostRunnerK8sObjects(namespace: string, name: string, port: number): Record<string, unknown>[] {
   const selectorLabels = {
     'app.kubernetes.io/name': name,
@@ -4314,7 +4324,7 @@ function internalServicePeerHostRunnerK8sObjects(namespace: string, name: string
             containers: [{
               name: 'host-runner',
               image: internalServicePeerHostRunnerImage(),
-              imagePullPolicy: 'IfNotPresent',
+              imagePullPolicy: internalServicePeerHostRunnerImagePullPolicy(),
               command: ['sh', '-lc'],
               args: [`if [ -f server/scripts/internal-service-peer-host-runner.mjs ]; then node server/scripts/internal-service-peer-host-runner.mjs ${port}; else node scripts/internal-service-peer-host-runner.mjs ${port}; fi`],
               ports: [{

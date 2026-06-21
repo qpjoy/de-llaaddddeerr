@@ -58,7 +58,7 @@ spec:
       containers:
         - name: internal-api
           image: qpjoy/mx-launcher-server:shadow
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Never
           ports:
             - name: http
               containerPort: 18090

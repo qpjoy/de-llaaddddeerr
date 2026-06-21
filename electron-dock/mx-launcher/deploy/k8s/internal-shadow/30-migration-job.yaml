@@ -19,7 +19,7 @@ spec:
       containers:
         - name: migrate
           image: qpjoy/mx-launcher-server:shadow
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Never
           command:
             - node
             - dist/src/migrate.js

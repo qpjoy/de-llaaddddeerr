@@ -307,7 +307,7 @@ shadow_image_build() {
 
 containerd_import_docker_image() {
   local image="$1"
-  local safe archive
+  local safe archive refs
   command -v docker >/dev/null 2>&1 || die "docker is required to export $image"
   command -v ctr >/dev/null 2>&1 || die "ctr is required to import $image into containerd"
   docker image inspect "$image" >/dev/null
@@ -319,15 +319,105 @@ containerd_import_docker_image() {
   docker save "$image" -o "$archive"
   ctr -n k8s.io images import "$archive"
   rm -f "$archive"
+  containerd_ensure_image_refs "$image"
+  refs="$(containerd_present_image_refs "$image" | tr '\n' ' ')"
+  say "containerd image refs ready: $refs"
+}
+
+containerd_image_ref_aliases() {
+  local image="$1"
+  local first
+  printf '%s\n' "$image"
+  if [[ "$image" == */* ]]; then
+    first="${image%%/*}"
+    if [[ "$first" == *.* || "$first" == *:* || "$first" == "localhost" ]]; then
+      return 0
+    fi
+    printf 'docker.io/%s\n' "$image"
+    return 0
+  fi
+  printf 'docker.io/library/%s\n' "$image"
+}
+
+containerd_image_ref_present() {
+  local ref="$1"
+  ctr -n k8s.io images ls -q | grep -Fx -- "$ref" >/dev/null 2>&1
+}
+
+containerd_present_image_refs() {
+  local image="$1"
+  local ref
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    containerd_image_ref_present "$ref" && printf '%s\n' "$ref"
+  done < <(containerd_image_ref_aliases "$image")
+}
+
+containerd_first_present_ref() {
+  local image="$1"
+  local ref
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    if containerd_image_ref_present "$ref"; then
+      printf '%s\n' "$ref"
+      return 0
+    fi
+  done < <(containerd_image_ref_aliases "$image")
+  return 1
+}
+
+containerd_image_ref_is_short() {
+  local ref="$1"
+  local first
+  if [[ "$ref" != */* ]]; then
+    return 0
+  fi
+  first="${ref%%/*}"
+  [[ "$first" != *.* && "$first" != *:* && "$first" != "localhost" ]]
+}
+
+containerd_ensure_image_refs() {
+  local image="$1"
+  local source ref
+  if ! source="$(containerd_first_present_ref "$image")"; then
+    die "containerd import did not create an image ref for $image in namespace k8s.io"
+  fi
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    if ! containerd_image_ref_present "$ref"; then
+      if containerd_image_ref_is_short "$ref"; then
+        say "containerd short ref not present: $ref; kubelet will use the canonical Docker ref"
+        continue
+      fi
+      say "tag containerd image $source as $ref"
+      ctr -n k8s.io images tag "$source" "$ref" >/dev/null
+    fi
+  done < <(containerd_image_ref_aliases "$image")
 }
 
 shadow_image_import_containerd() {
-  local mode="${MX_SHADOW_CONTAINERD_IMPORT:-auto}"
+  local mode="${MX_SHADOW_CONTAINERD_IMPORT:-1}"
   local image="qpjoy/mx-launcher-server:shadow"
-  [ "$mode" = "0" ] && return 0
+  case "$mode" in
+    0|false|off|skip)
+      say "skip containerd import for local-only image because MX_SHADOW_CONTAINERD_IMPORT=$mode"
+      return 0
+      ;;
+    auto)
+      if ! command -v ctr >/dev/null 2>&1; then
+        say "ctr not found; assuming Kubernetes can resolve the local Docker image directly"
+        return 0
+      fi
+      ;;
+    1|true|on|required)
+      command -v ctr >/dev/null 2>&1 || die "ctr is required to deploy local-only image $image; set MX_SHADOW_CONTAINERD_IMPORT=0 only if your K8s runtime can see Docker images directly"
+      ;;
+    *)
+      die "Unknown MX_SHADOW_CONTAINERD_IMPORT value: $mode"
+      ;;
+  esac
   if ! command -v ctr >/dev/null 2>&1; then
-    [ "$mode" = "1" ] && die "ctr is required when MX_SHADOW_CONTAINERD_IMPORT=1"
-    say "ctr not found; assuming Kubernetes can pull $image from a registry or Docker Desktop"
+    say "ctr not found; assuming Kubernetes can resolve the local Docker image directly"
     return 0
   fi
   containerd_import_docker_image "$image"
@@ -561,6 +651,27 @@ k8s_postgres_diagnostics() {
   kubectl -n "$ns" logs pod/mx-internal-postgres-0 -c postgres --tail=120 || true
 }
 
+k8s_job_diagnostics() {
+  local ns="$1"
+  local job="$2"
+  local selector pod
+  say "$job diagnostics: job"
+  kubectl -n "$ns" get job "$job" -o wide || true
+  selector="$(kubectl -n "$ns" get job "$job" -o jsonpath='{.spec.selector.matchLabels}' 2>/dev/null || true)"
+  say "$job diagnostics: pods"
+  kubectl -n "$ns" get pods -l "job-name=$job" -o wide || true
+  pod="$(kubectl -n "$ns" get pods -l "job-name=$job" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [ -n "$pod" ]; then
+    say "$job diagnostics: pod detail"
+    kubectl -n "$ns" describe pod "$pod" || true
+    say "$job diagnostics: logs"
+    kubectl -n "$ns" logs "$pod" --all-containers --tail=200 || true
+  fi
+  [ -n "$selector" ] && say "$job diagnostics: selector $selector"
+  say "$job diagnostics: recent namespace events"
+  kubectl -n "$ns" get events --sort-by=.lastTimestamp || true
+}
+
 k8s_dry_run() {
   local target="$1"
   local ns dir
@@ -630,7 +741,10 @@ k8s_apply() {
   say "run migration job"
   kubectl -n "$ns" delete job mx-launcher-migrate --ignore-not-found
   kubectl apply -f "$dir/30-migration-job.yaml"
-  kubectl -n "$ns" wait --for=condition=complete job/mx-launcher-migrate --timeout=180s
+  if ! kubectl -n "$ns" wait --for=condition=complete job/mx-launcher-migrate --timeout=180s; then
+    k8s_job_diagnostics "$ns" mx-launcher-migrate
+    die "migration job failed"
+  fi
 
   say "apply internal api"
   kubectl apply -f "$dir/40-internal-api.yaml"
@@ -3129,6 +3243,8 @@ ops_k8s_shadow_plan() {
 
 Local Internal image flow
   - ops $ops_area cycle builds qpjoy/mx-launcher-server:shadow before apply.
+  - On kubeadm/containerd hosts, use internal-production deploy so the image is
+    imported into the containerd k8s.io namespace before Pods start.
   - The local image tag is reused, so cycle restarts the Internal API
     Deployment after apply. A new Pod then resolves the rebuilt local image.
 EOF
@@ -3253,8 +3369,9 @@ Commands:
   bash scripts/manage.sh ops internal-production down
 
 Notes:
-  - On kubeadm/containerd hosts, deploy imports qpjoy/mx-launcher-server:shadow
-    into the containerd k8s.io namespace after Docker build.
+  - qpjoy/mx-launcher-server:shadow is local-only. Deploy does not push it to
+    Docker Hub; it imports and verifies the image in containerd k8s.io after
+    Docker build.
   - It also preloads postgres/coredns/caddy runtime images through Docker and
     imports them into containerd so Docker proxy/TUN egress can be reused.
   - Keep TCP 18090 private to the Internal host, Internal WG service peer, or a
