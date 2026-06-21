@@ -1799,6 +1799,18 @@ export function buildLauncherNetworkTopology(
         privateKeyPlacement: 'internal-only',
         direction: 'internal-outbound-to-domestic-public-wg'
       },
+      internalDirectPeer: {
+        role: 'internal-direct-service',
+        enabled: false,
+        fixedIp: '10.88.88.88',
+        endpoint: null,
+        listenPort: 51280,
+        publicKey: null,
+        allowedIps: internalCidrs,
+        configArtifact: 'mx-internal-service-peer.conf',
+        peerMutation: 'append-home-peer-after-enroll',
+        fallback: 'domestic-wg-relay'
+      },
       homePeer: {
         role: input.mode,
         leaseIp: input.leaseIp,
@@ -1847,6 +1859,13 @@ export function attachDomesticWireGuardRefreshHint(
         ...topology.relayPlan.domesticRelay,
         publicEndpoint: secret?.publicEndpoint ?? null,
         publicKey: secret?.domesticRelayPublicKey ?? null
+      },
+      internalDirectPeer: {
+        ...topology.relayPlan.internalDirectPeer,
+        enabled: secret?.internalDirectEnabled === true,
+        endpoint: secret?.internalDirectEndpoint ?? null,
+        listenPort: secret?.internalDirectListenPort ?? topology.relayPlan.internalDirectPeer.listenPort,
+        publicKey: secret?.internalServicePublicKey ?? null
       },
       refreshHint: {
         source: 'internal-domestic-wg-secret',
@@ -2203,6 +2222,14 @@ export function buildSiteSlotDomesticWireGuardSecret(
   const siteId = input.siteId?.trim() || previous?.siteId || 'domestic-main';
   const listenPort = input.listenPort && input.listenPort > 0 ? Math.floor(input.listenPort) : previous?.listenPort ?? 51280;
   const publicEndpoint = input.publicEndpoint?.trim() || previous?.publicEndpoint || null;
+  const internalDirectListenPort = input.internalDirectListenPort && input.internalDirectListenPort > 0
+    ? Math.floor(input.internalDirectListenPort)
+    : previous?.internalDirectListenPort ?? 51280;
+  const internalDirectEndpoint = input.internalDirectEndpoint?.trim() || previous?.internalDirectEndpoint || null;
+  const internalDirectEnabled = input.internalDirectEnabled === true
+    || input.internalDirectEnabled === false
+      ? input.internalDirectEnabled
+      : previous?.internalDirectEnabled ?? Boolean(internalDirectEndpoint);
   const material = {
     domesticRelayPrivateKey: input.domesticRelayPrivateKey?.trim() || previous?.domesticRelayPrivateKey || null,
     domesticRelayPublicKey: input.domesticRelayPublicKey?.trim() || previous?.domesticRelayPublicKey || null,
@@ -2226,6 +2253,9 @@ export function buildSiteSlotDomesticWireGuardSecret(
     status: input.status === 'paused' ? 'paused' : 'active',
     publicEndpoint,
     listenPort,
+    internalDirectEnabled,
+    internalDirectEndpoint,
+    internalDirectListenPort,
     domesticGatewayIp: input.domesticGatewayIp?.trim() || previous?.domesticGatewayIp || '10.88.0.1',
     domesticGatewayCidr: input.domesticGatewayCidr?.trim() || previous?.domesticGatewayCidr || '10.88.0.0/16',
     productRelayCidrs: normalizedProductRelayCidrs,
@@ -2241,6 +2271,9 @@ export function buildSiteSlotDomesticWireGuardSecret(
         siteId,
         publicEndpoint ?? '',
         String(listenPort),
+        internalDirectEndpoint ?? '',
+        String(internalDirectListenPort),
+        String(internalDirectEnabled),
         material.domesticRelayPublicKey ?? '',
         material.internalServicePublicKey ?? '',
         normalizedProductRelayCidrs.join(',')
@@ -2256,6 +2289,9 @@ export function buildSiteSlotDomesticWireGuardSecret(
         'MX_INTERNAL_SERVICE_PRIVATE_KEY',
         'MX_INTERNAL_SERVICE_PUBLIC_KEY',
         'MX_DOMESTIC_PUBLIC_ENDPOINT',
+        'MX_INTERNAL_DIRECT_ENDPOINT',
+        'MX_INTERNAL_DIRECT_LISTEN_PORT',
+        'MX_INTERNAL_DIRECT_ENABLED',
         'MX_WG_LISTEN_PORT',
         'MX_DOMESTIC_GATEWAY_IP',
         'MX_DOMESTIC_GATEWAY_CIDR',

@@ -342,6 +342,7 @@ function renderWireGuardDiagnostics() {
   const diagnostics = connection.diagnostics || {};
   const route = diagnostics.route || {};
   const internalApi = diagnostics.internalApi || {};
+  const directSync = diagnostics.internalDirectPeerSync || {};
   const peerSync = connection.domesticPeerSync || diagnostics.domesticPeerSync || {};
   const relayDiag = diagnostics.domesticRelayDiagnostics || {};
   const relaySummary = relayDiag.summary || {};
@@ -358,6 +359,8 @@ function renderWireGuardDiagnostics() {
       </div>
       <div class="metric-grid">
         ${metric('WG', connection.health?.wireGuard || 'idle')}
+        ${metric('Path', wireGuard.path || connection.routePlan?.preferredPath || '-')}
+        ${metric('Direct Sync', directSync.status || '-')}
         ${metric('Peer Sync', peerSync.status || '-')}
         ${metric('Relay', relayDiag.status || '-')}
         ${metric('IP Forward', relaySummary.ipForward || '-')}
@@ -378,6 +381,7 @@ function renderWireGuardDiagnostics() {
         ${metric('Route CIDRs', compactList(connection.routeCidrs))}
         ${metric('Config', wireGuard.configPath || '-')}
       </div>
+      ${directSync.failures?.length ? `<p class="diagnostic-note">${escapeHtml(directSync.failures.join(' / '))}</p>` : ''}
       ${peerSync.failures?.length ? `<p class="diagnostic-note">${escapeHtml(peerSync.failures.join(' / '))}</p>` : ''}
       ${relayBlockedReasons.length || relayFailures.length ? `<p class="diagnostic-note">${escapeHtml([...relayBlockedReasons, ...relayFailures].join(' / '))}</p>` : ''}
       ${wireGuard.statusError || wireGuard.routeLogTail ? `<p class="diagnostic-note">${escapeHtml(wireGuard.statusError || wireGuard.routeLogTail)}</p>` : ''}
@@ -429,6 +433,14 @@ function renderConfigForm() {
           ${option('dns-first', config.bootstrapResolveMode)}
           ${option('env-only', config.bootstrapResolveMode)}
           ${option('dns-only', config.bootstrapResolveMode)}
+        </select>
+      </label>
+      <label class="field">
+        <span>WG Path</span>
+        <select name="routePathPreference">
+          ${option('auto', config.routePathPreference)}
+          ${option('direct', config.routePathPreference)}
+          ${option('relay', config.routePathPreference)}
         </select>
       </label>
       <label class="field">
@@ -699,6 +711,7 @@ function readConfigForm(form) {
     sdkGatewayBaseUrl: String(formData.get('sdkGatewayBaseUrl') || ''),
     hostResolve: String(formData.get('hostResolve') || ''),
     bootstrapResolveMode: String(formData.get('bootstrapResolveMode') || ''),
+    routePathPreference: String(formData.get('routePathPreference') || ''),
     splitDnsDomains: String(formData.get('splitDnsDomains') || ''),
     releaseChannel: String(formData.get('releaseChannel') || ''),
     rolloutGroup: String(formData.get('rolloutGroup') || ''),
@@ -738,6 +751,7 @@ function createMockApi() {
       sdkGatewayBaseUrl: 'http://api.mxinfo-inc.cn:18090/internal/v1/sdk',
       hostResolve: '',
       bootstrapResolveMode: 'env-first',
+      routePathPreference: 'auto',
       splitDnsDomains: 'mxinfo-inc.cn,api.mxinfo-inc.cn',
       releaseChannel: 'stable',
       rolloutGroup: 'staff-ring',

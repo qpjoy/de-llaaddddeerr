@@ -390,6 +390,9 @@ function toDomesticWireGuardSecretInput(body: Record<string, unknown>): SiteSlot
     status: nullableString(body.status),
     publicEndpoint: nullableString(body.publicEndpoint),
     listenPort: numberOrNull(body.listenPort),
+    internalDirectEnabled: booleanOrNull(body.internalDirectEnabled),
+    internalDirectEndpoint: nullableString(body.internalDirectEndpoint),
+    internalDirectListenPort: numberOrNull(body.internalDirectListenPort),
     domesticGatewayIp: nullableString(body.domesticGatewayIp),
     domesticGatewayCidr: nullableString(body.domesticGatewayCidr),
     productRelayCidrs: cidrListValue(body.productRelayCidrs),
@@ -419,11 +422,16 @@ function toGeneratedDomesticWireGuardSecretInput(
   const relayPair = relayMissing || rotateRelayKey ? generateWireGuardKeyPair() : null;
   const internalPair = internalMissing || rotateInternalServiceKey ? generateWireGuardKeyPair() : null;
   const publicEndpoint = nullableString(body.publicEndpoint) ?? nullableString(body.endpoint) ?? previous?.publicEndpoint ?? null;
+  const internalDirectEndpoint = nullableString(body.internalDirectEndpoint) ?? previous?.internalDirectEndpoint ?? null;
+  const internalDirectEnabled = booleanOrNull(body.internalDirectEnabled) ?? previous?.internalDirectEnabled ?? Boolean(internalDirectEndpoint);
   const input: SiteSlotDomesticWireGuardSecretInput = {
     siteId,
     status: nullableString(body.status) ?? previous?.status ?? 'active',
     publicEndpoint,
     listenPort: numberOrNull(body.listenPort) ?? previous?.listenPort ?? 51280,
+    internalDirectEnabled,
+    internalDirectEndpoint,
+    internalDirectListenPort: numberOrNull(body.internalDirectListenPort) ?? previous?.internalDirectListenPort ?? 51280,
     domesticGatewayIp: nullableString(body.domesticGatewayIp) ?? previous?.domesticGatewayIp ?? '10.88.0.1',
     domesticGatewayCidr: nullableString(body.domesticGatewayCidr) ?? previous?.domesticGatewayCidr ?? '10.88.0.0/16',
     productRelayCidrs: cidrListValue(body.productRelayCidrs) ?? previous?.productRelayCidrs ?? ['10.89.0.0/16', '10.90.0.0/16'],
@@ -462,6 +470,9 @@ function redactDomesticWireGuardSecret(secret: SiteSlotDomesticWireGuardSecret) 
     status: secret.status,
     publicEndpoint: secret.publicEndpoint,
     listenPort: secret.listenPort,
+    internalDirectEnabled: secret.internalDirectEnabled,
+    internalDirectEndpoint: secret.internalDirectEndpoint,
+    internalDirectListenPort: secret.internalDirectListenPort,
     domesticGatewayIp: secret.domesticGatewayIp,
     domesticGatewayCidr: secret.domesticGatewayCidr,
     productRelayCidrs: domesticSecretProductRelayCidrs(secret),
@@ -514,6 +525,9 @@ function domesticWireGuardMaterializerEnv(secret: SiteSlotDomesticWireGuardSecre
     MX_INTERNAL_SERVICE_PRIVATE_KEY: secret.internalServicePrivateKey ?? '',
     MX_INTERNAL_SERVICE_PUBLIC_KEY: secret.internalServicePublicKey ?? '',
     MX_DOMESTIC_PUBLIC_ENDPOINT: secret.publicEndpoint ?? '',
+    MX_INTERNAL_DIRECT_ENABLED: secret.internalDirectEnabled ? '1' : '0',
+    MX_INTERNAL_DIRECT_ENDPOINT: secret.internalDirectEndpoint ?? '',
+    MX_INTERNAL_DIRECT_LISTEN_PORT: String(secret.internalDirectListenPort),
     MX_WG_LISTEN_PORT: String(secret.listenPort),
     MX_DOMESTIC_GATEWAY_IP: secret.domesticGatewayIp,
     MX_DOMESTIC_GATEWAY_CIDR: secret.domesticGatewayCidr,

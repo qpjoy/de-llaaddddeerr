@@ -304,6 +304,18 @@ export interface LauncherNetworkTopology {
       privateKeyPlacement: 'internal-only';
       direction: 'internal-outbound-to-domestic-public-wg';
     };
+    internalDirectPeer?: {
+      role: 'internal-direct-service';
+      enabled: boolean;
+      fixedIp: '10.88.88.88';
+      endpoint: string | null;
+      listenPort: number;
+      publicKey: string | null;
+      allowedIps: string[];
+      configArtifact: string;
+      peerMutation: 'append-home-peer-after-enroll';
+      fallback: 'domestic-wg-relay';
+    };
     homePeer: {
       role: 'guest' | 'user';
       leaseIp: string;
@@ -336,6 +348,11 @@ export interface LauncherRoutePlan {
   domesticGatewayIp: '10.88.0.1';
   domesticRelayEndpoint: string | null;
   domesticRelayPublicKey: string | null;
+  preferredPath: 'h2i-direct' | 'hdi-relay';
+  h2iDirectEnabled: boolean;
+  h2iDirectEndpoint: string | null;
+  h2iDirectPublicKey: string | null;
+  h2iDirectAllowedIps: string[];
   domesticSiteId: string;
   overseaSiteId: string;
   dnsServer: '10.88.0.1';
@@ -527,6 +544,13 @@ export function routePlanFromSnapshot(snapshot: LauncherNetworkSnapshot): Launch
     domesticGatewayIp: topology.domestic.gatewayIp,
     domesticRelayEndpoint: relayPlan.domesticRelay.publicEndpoint ?? relayPlan.refreshHint.publicEndpoint ?? null,
     domesticRelayPublicKey: relayPlan.domesticRelay.publicKey ?? null,
+    preferredPath: relayPlan.internalDirectPeer?.enabled && relayPlan.internalDirectPeer.endpoint && relayPlan.internalDirectPeer.publicKey
+      ? 'h2i-direct'
+      : 'hdi-relay',
+    h2iDirectEnabled: relayPlan.internalDirectPeer?.enabled === true,
+    h2iDirectEndpoint: relayPlan.internalDirectPeer?.endpoint ?? null,
+    h2iDirectPublicKey: relayPlan.internalDirectPeer?.publicKey ?? null,
+    h2iDirectAllowedIps: [...(relayPlan.internalDirectPeer?.allowedIps ?? relayPlan.routes.internalCidrs)],
     domesticSiteId: topology.domestic.siteId,
     overseaSiteId: topology.oversea.siteId,
     dnsServer: relayPlan.routes.dnsServer,

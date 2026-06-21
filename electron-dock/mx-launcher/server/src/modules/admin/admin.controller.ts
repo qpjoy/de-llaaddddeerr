@@ -3330,6 +3330,8 @@ function buildAdminDomesticWireGuardSecretInput(
     ?? planEndpoint
     ?? previousEndpoint
     ?? null;
+  const internalDirectEndpoint = stringValue(body.internalDirectEndpoint) ?? previous?.internalDirectEndpoint ?? null;
+  const internalDirectEnabled = booleanValue(body.internalDirectEnabled) ?? previous?.internalDirectEnabled ?? Boolean(internalDirectEndpoint);
   const relayMissing = !previous?.domesticRelayPrivateKey || !previous.domesticRelayPublicKey;
   const internalMissing = !previous?.internalServicePrivateKey || !previous.internalServicePublicKey;
   const relayPair = relayMissing || rotateRelayKey ? generateWireGuardKeyPair() : null;
@@ -3339,6 +3341,9 @@ function buildAdminDomesticWireGuardSecretInput(
     status: stringValue(body.status) ?? previous?.status ?? 'active',
     publicEndpoint,
     listenPort,
+    internalDirectEnabled,
+    internalDirectEndpoint,
+    internalDirectListenPort: numberValueOrNull(body.internalDirectListenPort) ?? previous?.internalDirectListenPort ?? 51280,
     domesticGatewayIp: stringValue(body.domesticGatewayIp) ?? previous?.domesticGatewayIp ?? '10.88.0.1',
     domesticGatewayCidr: stringValue(body.domesticGatewayCidr) ?? previous?.domesticGatewayCidr ?? '10.88.0.0/16',
     productRelayCidrs: cidrListValue(body.productRelayCidrs) ?? previous?.productRelayCidrs ?? ['10.89.0.0/16', '10.90.0.0/16'],
@@ -3407,6 +3412,9 @@ function domesticWireGuardMaterializerEnv(secret: SiteSlotDomesticWireGuardSecre
     MX_INTERNAL_SERVICE_PRIVATE_KEY: secret.internalServicePrivateKey ?? '',
     MX_INTERNAL_SERVICE_PUBLIC_KEY: secret.internalServicePublicKey ?? '',
     MX_DOMESTIC_PUBLIC_ENDPOINT: secret.publicEndpoint ?? '',
+    MX_INTERNAL_DIRECT_ENABLED: secret.internalDirectEnabled ? '1' : '0',
+    MX_INTERNAL_DIRECT_ENDPOINT: secret.internalDirectEndpoint ?? '',
+    MX_INTERNAL_DIRECT_LISTEN_PORT: String(secret.internalDirectListenPort),
     MX_WG_LISTEN_PORT: String(secret.listenPort),
     MX_DOMESTIC_GATEWAY_IP: secret.domesticGatewayIp,
     MX_DOMESTIC_GATEWAY_CIDR: secret.domesticGatewayCidr,
@@ -3656,6 +3664,7 @@ function internalServicePeerRenderedArtifacts(secret: SiteSlotDomesticWireGuardS
     '[Interface]',
     `Address = ${secret.internalServiceIp}/32`,
     `PrivateKey = ${secret.internalServicePrivateKey}`,
+    ...(secret.internalDirectEnabled ? [`ListenPort = ${secret.internalDirectListenPort}`] : []),
     '# DNS is managed by Internal DNS/CoreDNS; keep wg-quick from mutating host resolv.conf.',
     'Table = off',
     ...internalServicePeerRouteCommands('PostUp', internalRouteCidrs),
@@ -6241,6 +6250,9 @@ function domesticWgMaterializeAction(
         planId: plan.planId,
         publicEndpoint: endpointFromPlanHost(plan, 51280),
         listenPort: 51280,
+        internalDirectEnabled: false,
+        internalDirectEndpoint: '<internal-reachable-host-or-ip>:51280',
+        internalDirectListenPort: 51280,
         domesticGatewayIp: '10.88.0.1',
         domesticGatewayCidr: '10.88.0.0/16',
         productRelayCidrs: ['10.89.0.0/16', '10.90.0.0/16'],
@@ -6984,6 +6996,9 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         planId: '<plan-id>',
         publicEndpoint: '<domestic-public-endpoint>',
         listenPort: 51280,
+        internalDirectEnabled: false,
+        internalDirectEndpoint: '<internal-reachable-host-or-ip>:51280',
+        internalDirectListenPort: 51280,
         domesticGatewayIp: '10.88.0.1',
         domesticGatewayCidr: '10.88.0.0/16',
         productRelayCidrs: ['10.89.0.0/16', '10.90.0.0/16'],

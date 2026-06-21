@@ -1013,6 +1013,9 @@ export interface SiteSlotDomesticWireGuardSecretInput {
   status?: 'active' | 'paused' | string | null;
   publicEndpoint?: string | null;
   listenPort?: number | null;
+  internalDirectEnabled?: boolean | null;
+  internalDirectEndpoint?: string | null;
+  internalDirectListenPort?: number | null;
   domesticGatewayIp?: string | null;
   domesticGatewayCidr?: string | null;
   productRelayCidrs?: string[] | null;
@@ -1036,6 +1039,9 @@ export interface SiteSlotDomesticWireGuardSecret {
   status: 'active' | 'paused';
   publicEndpoint: string | null;
   listenPort: number;
+  internalDirectEnabled: boolean;
+  internalDirectEndpoint: string | null;
+  internalDirectListenPort: number;
   domesticGatewayIp: string;
   domesticGatewayCidr: string;
   productRelayCidrs: string[];
@@ -1742,6 +1748,18 @@ export interface LauncherNetworkTopology {
       configArtifact: 'mx-internal-service-peer.conf';
       privateKeyPlacement: 'internal-only';
       direction: 'internal-outbound-to-domestic-public-wg';
+    };
+    internalDirectPeer: {
+      role: 'internal-direct-service';
+      enabled: boolean;
+      fixedIp: '10.88.88.88';
+      endpoint: string | null;
+      listenPort: number;
+      publicKey: string | null;
+      allowedIps: string[];
+      configArtifact: 'mx-internal-service-peer.conf';
+      peerMutation: 'append-home-peer-after-enroll';
+      fallback: 'domestic-wg-relay';
     };
     homePeer: {
       role: 'guest' | 'user';

@@ -102,6 +102,18 @@ export class LauncherNetworkController {
     return { lease, domesticRelayDiagnostics };
   }
 
+  @Post('leases/:leaseId/internal-direct-peer/sync')
+  async syncInternalDirectPeer(@Param('leaseId') leaseId: string, @Body() rawBody: unknown) {
+    const body = asRecord(rawBody);
+    const lease = await this.store.getLauncherNetworkLease(leaseId);
+    if (!lease) throw new NotFoundException('Launcher network lease not found');
+    const internalDirectPeerSync = await syncInternalDirectPeerForLease(this.store, lease, {
+      requestedBy: nullableString(body.requestedBy),
+      requestId: nullableString(body.requestId)
+    });
+    return { lease, internalDirectPeerSync };
+  }
+
   @Get('products')
   async listProductNetworks() {
     return {
@@ -413,6 +425,106 @@ async function diagnoseDomesticRelayForLease(
   }
 }
 
+async function syncInternalDirectPeerForLease(
+  store: PlatformStore,
+  lease: LauncherNetworkLease,
+  input: { requestedBy?: string | null; requestId?: string | null }
+) {
+  const checkedAt = new Date().toISOString();
+  const siteId = lease.domesticSiteId || lease.siteId;
+  const secret = await store.getSiteSlotDomesticWireGuardSecret(siteId);
+  const plan = await latestDomesticPlan(store, siteId);
+  const failures = internalDirectPeerSyncFailures(lease, secret);
+  if (failures.length > 0) {
+    return {
+      status: 'blocked' as const,
+      execution: 'not-started' as const,
+      checkedAt,
+      lease: domesticRelayLeaseEvidence(lease),
+      internalDirect: internalDirectPeerEvidence(secret),
+      failures
+    };
+  }
+
+  try {
+    const payload = await postInternalServicePeerHostRunner('/internal-service-peer/direct-peer-sync', {
+      siteId,
+      planId: plan?.planId ?? null,
+      interfaceName: 'mx-internal-svc',
+      internalServiceIp: secret?.internalServiceIp ?? '10.88.88.88',
+      leaseId: lease.leaseId,
+      peerPublicKey: lease.publicKey,
+      peerAllowedIp: `${lease.leaseIp}/32`,
+      requestedBy: input.requestedBy ?? 'launcher-network',
+      requestId: input.requestId ?? null
+    });
+    const directPeerSync = asRecord(payload.directPeerSync ?? payload);
+    await store.recordAudit({
+      eventType: 'launcher_network.internal_direct_peer.synced',
+      actorKind: lease.identityKind === 'user' ? 'user' : 'install',
+      userId: lease.userId,
+      installId: lease.installId,
+      deviceId: lease.deviceId,
+      productId: lease.productId,
+      siteId,
+      overlayIp: lease.leaseIp,
+      requestId: input.requestId ?? null,
+      metadata: {
+        leaseId: lease.leaseId,
+        publicKey: lease.publicKey,
+        allowedIp: `${lease.leaseIp}/32`,
+        status: directPeerSync.status ?? null,
+        requestedBy: input.requestedBy ?? 'launcher-network'
+      }
+    });
+    return {
+      status: directPeerSync.status === 'passed' ? 'passed' as const : 'blocked' as const,
+      execution: directPeerSync.execution === 'completed' ? 'executed' as const : 'not-started' as const,
+      checkedAt,
+      lease: domesticRelayLeaseEvidence(lease),
+      internalDirect: internalDirectPeerEvidence(secret),
+      result: directPeerSync
+    };
+  } catch (error) {
+    return {
+      status: 'failed' as const,
+      execution: 'failed' as const,
+      checkedAt,
+      lease: domesticRelayLeaseEvidence(lease),
+      internalDirect: internalDirectPeerEvidence(secret),
+      failures: [error instanceof Error ? error.message : String(error)]
+    };
+  }
+}
+
+function internalDirectPeerSyncFailures(
+  lease: LauncherNetworkLease,
+  secret: SiteSlotDomesticWireGuardSecret | null
+): string[] {
+  return [
+    ...(lease.status === 'active' ? [] : [`lease is not active: ${lease.status}`]),
+    ...(lease.publicKey ? [] : ['lease publicKey is required before Internal direct peer sync']),
+    ...(lease.publicKey && validWireGuardPublicKey(lease.publicKey) ? [] : lease.publicKey ? ['lease publicKey is not a valid WireGuard public key'] : []),
+    ...(validRelayLeaseIp(lease.leaseIp) ? [] : ['leaseIp must be in launcher product relay range']),
+    ...(secret ? [] : [`Domestic WG secret not found for site ${lease.domesticSiteId || lease.siteId}`]),
+    ...(secret?.status === 'active' ? [] : secret ? [`Domestic WG secret is ${secret.status}`] : []),
+    ...(secret?.internalDirectEnabled === true ? [] : ['Internal direct peer is not enabled in Config Center']),
+    ...(secret?.internalDirectEndpoint ? [] : ['Internal direct endpoint is not configured']),
+    ...(secret?.internalServicePublicKey ? [] : ['Internal service public key is missing'])
+  ];
+}
+
+function internalDirectPeerEvidence(secret: SiteSlotDomesticWireGuardSecret | null) {
+  return {
+    siteId: secret?.siteId ?? null,
+    enabled: secret?.internalDirectEnabled === true,
+    endpoint: secret?.internalDirectEndpoint ?? null,
+    listenPort: secret?.internalDirectListenPort ?? null,
+    internalServiceIp: secret?.internalServiceIp ?? null,
+    publicKeyStatus: secret?.internalServicePublicKey ? 'configured' : 'missing'
+  };
+}
+
 function domesticRelayDiagnosticsScript(
   lease: LauncherNetworkLease,
   secret: SiteSlotDomesticWireGuardSecret | null
@@ -502,6 +614,86 @@ function domesticRelayDiagnosticBlockedReasons(summary: ReturnType<typeof summar
     ...(summary.routeToLease && /dev mx-domestic/.test(summary.routeToLease) ? [] : [`Domestic route to ${summary.leaseIp} is not on mx-domestic`]),
     ...(summary.internalHealthz === 'passed' ? [] : [`Domestic cannot reach Internal healthz: ${summary.internalHealthz ?? 'unknown'}`])
   ];
+}
+
+async function postInternalServicePeerHostRunner(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const baseUrls = internalServicePeerHostRunnerUrlCandidates();
+  if (baseUrls.length === 0) throw new Error('MX_INTERNAL_HOST_RUNNER_URL is not configured');
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  const token = process.env.MX_INTERNAL_HOST_RUNNER_TOKEN?.trim();
+  if (token) headers['x-mx-host-runner-token'] = token;
+  const errors: string[] = [];
+  for (const baseUrl of baseUrls) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 180000);
+    try {
+      const response = await fetch(`${baseUrl}${path}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+      const text = await response.text();
+      let payload: unknown = {};
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch {
+        payload = { raw: text };
+      }
+      if (!response.ok) throw new Error(`HTTP ${response.status} from ${baseUrl}${path}: ${text.slice(0, 500)}`);
+      return asRecord(payload);
+    } catch (error) {
+      errors.push(`${baseUrl}${path} ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new Error(errors.join('; '));
+}
+
+function internalServicePeerHostRunnerUrlCandidates(): string[] {
+  return uniqueStrings([
+    internalServicePeerNativeHostRunnerUrl(),
+    explicitInternalServicePeerHostRunnerUrl(),
+    internalServicePeerK8sHostRunnerFallbackEnabled() ? internalServicePeerK8sHostRunnerUrl() : null
+  ].filter((item): item is string => Boolean(item)));
+}
+
+function explicitInternalServicePeerHostRunnerUrl(): string | null {
+  const raw = process.env.MX_INTERNAL_HOST_RUNNER_URL ?? process.env.MX_INTERNAL_SERVICE_PEER_HOST_RUNNER_URL;
+  return raw?.trim() ? raw.trim().replace(/\/+$/, '') : null;
+}
+
+function internalServicePeerNativeHostRunnerUrl(): string | null {
+  const raw = process.env.MX_INTERNAL_HOST_RUNNER_NATIVE_URL?.trim();
+  if (raw) return raw.replace(/\/+$/, '');
+  if (!process.env.KUBERNETES_SERVICE_HOST) return null;
+  const port = internalServicePeerK8sHostRunnerPort();
+  return `http://host.docker.internal:${port}`;
+}
+
+function internalServicePeerK8sHostRunnerFallbackEnabled(): boolean {
+  const raw = process.env.MX_INTERNAL_HOST_RUNNER_K8S_FALLBACK_ENABLED;
+  return raw === '1' || raw?.toLowerCase() === 'true';
+}
+
+function internalServicePeerK8sHostRunnerUrl(): string | null {
+  if (!process.env.KUBERNETES_SERVICE_HOST) return null;
+  const raw = process.env.MX_INTERNAL_HOST_RUNNER_K8S_URL?.trim();
+  if (raw) return raw.replace(/\/+$/, '');
+  const name = process.env.MX_INTERNAL_HOST_RUNNER_K8S_NAME?.trim() || 'mx-internal-host-runner';
+  const namespace = process.env.MX_INTERNAL_HOST_RUNNER_K8S_NAMESPACE?.trim()
+    || process.env.POD_NAMESPACE?.trim()
+    || 'mx-internal-shadow';
+  return `http://${name}.${namespace}.svc.cluster.local:${internalServicePeerK8sHostRunnerPort()}`;
+}
+
+function internalServicePeerK8sHostRunnerPort(): number {
+  const raw = process.env.MX_INTERNAL_HOST_RUNNER_PORT?.trim()
+    || process.env.MX_INTERNAL_HOST_RUNNER_K8S_PORT?.trim()
+    || '19190';
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 19190;
 }
 
 function sshArgv(profile: SiteSlotSshProfile, command: string): string[] {
@@ -625,4 +817,8 @@ function sshFailureSummary(stderr: unknown, exitCode: unknown): string {
 
 function shellQuote(value: string): string {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }

@@ -1289,6 +1289,130 @@ async function applyServicePeer(payload) {
   };
 }
 
+async function syncDirectPeer(payload) {
+  const beforeStatus = await buildStatus(payload);
+  const peerPublicKey = stringValue(payload.peerPublicKey, null);
+  const peerAllowedIp = stringValue(payload.peerAllowedIp, null);
+  const leaseId = stringValue(payload.leaseId, null);
+  const blockedReasons = [
+    ...(!validWireGuardPublicKey(peerPublicKey) ? ['peerPublicKey is not a valid WireGuard public key'] : []),
+    ...(!validSingleHostCidr(peerAllowedIp) ? ['peerAllowedIp must be an IPv4 /32 CIDR'] : []),
+    ...(!beforeStatus.artifacts?.runtimeConfigExists ? [`Internal service runtime config is missing: ${beforeStatus.artifacts?.runtimeConfigPath || beforeStatus.artifacts?.configPath || 'unknown'}`] : []),
+    ...(!beforeStatus.wireGuardCore?.available ? ['WireGuard runtime is unavailable on the Internal runtime host'] : [])
+  ];
+  if (blockedReasons.length > 0) {
+    return {
+      status: 'blocked',
+      execution: 'not-started',
+      mode: 'internal-service-peer-direct-peer-sync',
+      siteId: beforeStatus.siteId,
+      planId: beforeStatus.planId,
+      leaseId,
+      peerPublicKey,
+      peerAllowedIp,
+      beforeStatus,
+      afterStatus: beforeStatus,
+      blockedReasons,
+      finishedAt: new Date().toISOString()
+    };
+  }
+
+  const configPath = beforeStatus.artifacts.runtimeConfigPath || beforeStatus.artifacts.configPath;
+  const configPaths = mergeCsvEntries([
+    beforeStatus.artifacts.configPath,
+    beforeStatus.artifacts.runtimeConfigPath
+  ].filter(Boolean));
+  let changed = false;
+  for (const targetPath of configPaths) {
+    if (!existsSync(targetPath)) continue;
+    const previousConfig = readFileSync(targetPath, 'utf8');
+    const nextConfig = upsertManagedHomePeerConfig(previousConfig, {
+      publicKey: peerPublicKey,
+      allowedIp: peerAllowedIp,
+      leaseId,
+      requestedBy: stringValue(payload.requestedBy, 'launcher-network')
+    });
+    if (nextConfig === previousConfig) continue;
+    writeFileSync(targetPath, nextConfig, { mode: 0o600 });
+    chmodSync(targetPath, 0o600);
+    changed = true;
+  }
+  if (!changed) {
+    const afterStatus = await buildStatus(payload);
+    const status = afterStatus.status === 'passed' ? 'passed' : afterStatus.status;
+    return {
+      status,
+      execution: 'not-needed',
+      mode: 'internal-service-peer-direct-peer-sync',
+      siteId: beforeStatus.siteId,
+      planId: beforeStatus.planId,
+      leaseId,
+      peerPublicKey,
+      peerAllowedIp,
+      configPath,
+      changed,
+      beforeStatus,
+      afterStatus,
+      blockedReasons: status === 'passed' ? [] : [`Internal service peer is ${status}`],
+      finishedAt: new Date().toISOString()
+    };
+  }
+  const execution = await applyWithWireGuardCore(beforeStatus);
+  const afterStatus = await buildStatus(payload);
+  const status = execution.status === 'passed' ? 'passed' : execution.status;
+  return {
+    status,
+    execution: execution.execution,
+    mode: 'internal-service-peer-direct-peer-sync',
+    siteId: beforeStatus.siteId,
+    planId: beforeStatus.planId,
+    leaseId,
+    peerPublicKey,
+    peerAllowedIp,
+    configPath,
+    changed,
+    command: execution.command,
+    exitCode: execution.exitCode,
+    stdout: execution.stdout,
+    stderr: execution.stderr,
+    beforeStatus,
+    afterStatus,
+    blockedReasons: status === 'passed' ? [] : [execution.stderr || execution.status || 'direct peer sync failed'],
+    finishedAt: new Date().toISOString()
+  };
+}
+
+function validSingleHostCidr(value) {
+  if (typeof value !== 'string' || !value.trim().endsWith('/32')) return false;
+  const ip = value.trim().slice(0, -3);
+  const parts = ip.split('.');
+  return parts.length === 4 && parts.every((part) => {
+    if (!/^\d{1,3}$/.test(part)) return false;
+    const number = Number(part);
+    return Number.isInteger(number) && number >= 0 && number <= 255;
+  });
+}
+
+function upsertManagedHomePeerConfig(config, peer) {
+  const nextBlock = [
+    '# MX-H2I managed home peer begin',
+    `# lease_id = ${peer.leaseId || 'unknown'}`,
+    `# requested_by = ${peer.requestedBy || 'launcher-network'}`,
+    '[Peer]',
+    `PublicKey = ${peer.publicKey}`,
+    `AllowedIPs = ${peer.allowedIp}`,
+    '# MX-H2I managed home peer end'
+  ].join('\n');
+  const withoutExisting = String(config || '')
+    .replace(/\n?# MX-H2I managed home peer begin\n[\s\S]*?# MX-H2I managed home peer end\n?/g, (block) => {
+      if (block.includes(`PublicKey = ${peer.publicKey}`) || block.includes(`AllowedIPs = ${peer.allowedIp}`)) return '\n';
+      return block;
+    })
+    .replace(/\n{3,}/g, '\n\n')
+    .trimEnd();
+  return `${withoutExisting}\n\n${nextBlock}\n`;
+}
+
 function shellQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
@@ -1339,6 +1463,10 @@ const server = createServer(async (req, res) => {
     }
     if (req.url === '/internal-service-peer/apply') {
       sendJson(res, 200, { applyResult: await applyServicePeer(payload) });
+      return;
+    }
+    if (req.url === '/internal-service-peer/direct-peer-sync') {
+      sendJson(res, 200, { directPeerSync: await syncDirectPeer(payload) });
       return;
     }
     sendJson(res, 404, { error: 'Not found' });

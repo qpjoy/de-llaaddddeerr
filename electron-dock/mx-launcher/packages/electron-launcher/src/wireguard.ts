@@ -13,6 +13,8 @@ import {
 import type { LauncherRoutePlan } from '@qpjoy/mx-launcher-core';
 
 export type ElectronLauncherWireGuardAction = 'up' | 'down' | 'restart';
+export type ElectronLauncherWireGuardPathPreference = 'auto' | 'direct' | 'relay';
+export type ElectronLauncherWireGuardPath = 'h2i-direct' | 'hdi-relay';
 
 export interface ElectronLauncherWireGuardRuntimeOptions {
   userDataDir: string;
@@ -27,6 +29,7 @@ export interface ElectronLauncherWireGuardPeerInput extends ElectronLauncherWire
   privateKey: string;
   dnsDomains?: string[];
   mtu?: number | null;
+  pathPreference?: ElectronLauncherWireGuardPathPreference;
 }
 
 export interface ElectronLauncherWireGuardProbeInput extends ElectronLauncherWireGuardRuntimeOptions {
@@ -42,6 +45,7 @@ export interface ElectronLauncherWireGuardPeer {
   configPath: string;
   dns: string[];
   endpoint: string;
+  path: ElectronLauncherWireGuardPath;
   publicKey: string;
   routeCidrs: string[];
   routeProbe: ReturnType<typeof buildHdoRouteProbe>;
@@ -51,9 +55,10 @@ export function prepareLauncherWireGuardPeer(input: ElectronLauncherWireGuardPee
   const routePlan = input.routePlan;
   const leaseIp = requiredString(routePlan.leaseIp, 'routePlan.leaseIp');
   const privateKey = requiredString(input.privateKey, 'privateKey');
-  const publicKey = requiredString(routePlan.domesticRelayPublicKey, 'routePlan.domesticRelayPublicKey');
-  const endpoint = requiredString(routePlan.domesticRelayEndpoint, 'routePlan.domesticRelayEndpoint');
-  const routeCidrs = uniqueStrings(routePlan.routeCidrs);
+  const selectedPeer = selectLauncherWireGuardPeer(routePlan, input.pathPreference ?? 'auto');
+  const publicKey = requiredString(selectedPeer.publicKey, selectedPeer.path === 'h2i-direct' ? 'routePlan.h2iDirectPublicKey' : 'routePlan.domesticRelayPublicKey');
+  const endpoint = requiredString(selectedPeer.endpoint, selectedPeer.path === 'h2i-direct' ? 'routePlan.h2iDirectEndpoint' : 'routePlan.domesticRelayEndpoint');
+  const routeCidrs = uniqueStrings(selectedPeer.routeCidrs);
   if (routeCidrs.length === 0) throw new Error('routePlan.routeCidrs is required');
 
   const routeProbe = buildHdoRouteProbe({ hdoCidrs: routeCidrs });
@@ -87,9 +92,41 @@ export function prepareLauncherWireGuardPeer(input: ElectronLauncherWireGuardPee
     configPath,
     dns,
     endpoint,
+    path: selectedPeer.path,
     publicKey,
     routeCidrs,
     routeProbe
+  };
+}
+
+function selectLauncherWireGuardPeer(
+  routePlan: LauncherRoutePlan,
+  preference: ElectronLauncherWireGuardPathPreference
+): { path: ElectronLauncherWireGuardPath; endpoint: string | null; publicKey: string | null; routeCidrs: string[] } {
+  const directReady = routePlan.h2iDirectEnabled === true
+    && Boolean(routePlan.h2iDirectEndpoint)
+    && Boolean(routePlan.h2iDirectPublicKey);
+  if (preference === 'direct') {
+    return {
+      path: 'h2i-direct',
+      endpoint: routePlan.h2iDirectEndpoint,
+      publicKey: routePlan.h2iDirectPublicKey,
+      routeCidrs: routePlan.h2iDirectAllowedIps?.length ? routePlan.h2iDirectAllowedIps : routePlan.routeCidrs
+    };
+  }
+  if (preference === 'auto' && directReady) {
+    return {
+      path: 'h2i-direct',
+      endpoint: routePlan.h2iDirectEndpoint,
+      publicKey: routePlan.h2iDirectPublicKey,
+      routeCidrs: routePlan.h2iDirectAllowedIps?.length ? routePlan.h2iDirectAllowedIps : routePlan.routeCidrs
+    };
+  }
+  return {
+    path: 'hdi-relay',
+    endpoint: routePlan.domesticRelayEndpoint,
+    publicKey: routePlan.domesticRelayPublicKey,
+    routeCidrs: routePlan.routeCidrs
   };
 }
 
