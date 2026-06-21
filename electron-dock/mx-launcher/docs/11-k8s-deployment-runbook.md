@@ -320,6 +320,11 @@ bash scripts/manage.sh ops internal-production gateway-smoke
 PostgreSQL / migration Job / Internal API / `mx-internal-gateway`，然后直接通过
 `http://127.0.0.1:18090` 跑 gateway smoke。若该机器有防火墙或云安全组，只允许可信
 Internal 管理网、Domestic relay 或 `mx-internal-svc` overlay 访问 TCP `18090`。
+在 kubeadm/containerd 主机上，Docker 能下载镜像不代表 kubelet/containerd 也能下载。
+部署脚本会默认通过 Docker 拉取 `postgres:16-alpine`、`coredns/coredns:1.11.3`、
+`caddy:2.8.4-alpine`，再导入 containerd 的 `k8s.io` namespace，复用 Docker 已经可用的
+代理/TUN 出站能力。可通过 `MX_K8S_PRELOAD_RUNTIME_IMAGES=0` 关闭，或用
+`MX_K8S_RUNTIME_IMAGES="..."` 覆盖镜像列表。
 构建镜像前，脚本会检查 `site-slots/domestic/qp-tunnel-cli` fallback 是否包含
 `dist/index.js`、`dist/hdo.js` 和声明文件。CentOS/Internal runtime 主机默认不安装或编译
 `electron-plugin` workspace，避免触发 `better-sqlite3`、Electron native module、

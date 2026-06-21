@@ -305,23 +305,52 @@ shadow_image_build() {
   shadow_image_cleanup
 }
 
+containerd_import_docker_image() {
+  local image="$1"
+  local safe archive
+  command -v docker >/dev/null 2>&1 || die "docker is required to export $image"
+  command -v ctr >/dev/null 2>&1 || die "ctr is required to import $image into containerd"
+  docker image inspect "$image" >/dev/null
+  safe="${image//\//_}"
+  safe="${safe//:/_}"
+  archive="${TMPDIR:-/tmp}/mx-k8s-image-${safe}.tar"
+  say "import $image into containerd namespace k8s.io"
+  rm -f "$archive"
+  docker save "$image" -o "$archive"
+  ctr -n k8s.io images import "$archive"
+  rm -f "$archive"
+}
+
 shadow_image_import_containerd() {
   local mode="${MX_SHADOW_CONTAINERD_IMPORT:-auto}"
   local image="qpjoy/mx-launcher-server:shadow"
-  local archive="${TMPDIR:-/tmp}/mx-launcher-server-shadow.tar"
   [ "$mode" = "0" ] && return 0
   if ! command -v ctr >/dev/null 2>&1; then
     [ "$mode" = "1" ] && die "ctr is required when MX_SHADOW_CONTAINERD_IMPORT=1"
     say "ctr not found; assuming Kubernetes can pull $image from a registry or Docker Desktop"
     return 0
   fi
-  command -v docker >/dev/null 2>&1 || die "docker is required to export $image"
-  docker image inspect "$image" >/dev/null
-  say "import $image into containerd namespace k8s.io"
-  rm -f "$archive"
-  docker save "$image" -o "$archive"
-  ctr -n k8s.io images import "$archive"
-  rm -f "$archive"
+  containerd_import_docker_image "$image"
+}
+
+k8s_preload_runtime_images() {
+  local mode="${MX_K8S_PRELOAD_RUNTIME_IMAGES:-auto}"
+  local images image
+  [ "$mode" = "0" ] && return 0
+  images="${MX_K8S_RUNTIME_IMAGES:-postgres:16-alpine coredns/coredns:1.11.3 caddy:2.8.4-alpine}"
+  if ! command -v ctr >/dev/null 2>&1; then
+    [ "$mode" = "1" ] && die "ctr is required when MX_K8S_PRELOAD_RUNTIME_IMAGES=1"
+    say "ctr not found; assuming Kubernetes can pull runtime images directly"
+    return 0
+  fi
+  command -v docker >/dev/null 2>&1 || die "docker is required to preload K8s runtime images"
+  for image in $images; do
+    if ! docker image inspect "$image" >/dev/null 2>&1; then
+      say "pull K8s runtime image through Docker: $image"
+      docker pull "$image"
+    fi
+    containerd_import_docker_image "$image"
+  done
 }
 
 shadow_image_cleanup() {
@@ -513,6 +542,22 @@ k8s_secret_dry_run() {
     --dry-run=client -o yaml >/dev/null
 }
 
+k8s_postgres_diagnostics() {
+  local ns="$1"
+  say "postgres diagnostics: pods and PVCs"
+  kubectl -n "$ns" get pods,pvc -o wide || true
+  say "postgres diagnostics: PVs"
+  kubectl get pv || true
+  say "postgres diagnostics: PVC detail"
+  kubectl -n "$ns" describe pvc postgres-data-mx-internal-postgres-0 || true
+  say "postgres diagnostics: Pod detail"
+  kubectl -n "$ns" describe pod mx-internal-postgres-0 || true
+  say "postgres diagnostics: recent namespace events"
+  kubectl -n "$ns" get events --sort-by=.lastTimestamp || true
+  say "postgres diagnostics: logs"
+  kubectl -n "$ns" logs pod/mx-internal-postgres-0 -c postgres --tail=120 || true
+}
+
 k8s_dry_run() {
   local target="$1"
   local ns dir
@@ -574,7 +619,10 @@ k8s_apply() {
   say "apply host runner rbac"
   kubectl apply -f "$dir/27-host-runner-rbac.yaml"
   say "wait postgres rollout"
-  kubectl -n "$ns" rollout status statefulset/mx-internal-postgres --timeout=180s
+  if ! kubectl -n "$ns" rollout status statefulset/mx-internal-postgres --timeout=180s; then
+    k8s_postgres_diagnostics "$ns"
+    die "postgres rollout failed"
+  fi
 
   say "run migration job"
   kubectl -n "$ns" delete job mx-launcher-migrate --ignore-not-found
@@ -3204,6 +3252,8 @@ Commands:
 Notes:
   - On kubeadm/containerd hosts, deploy imports qpjoy/mx-launcher-server:shadow
     into the containerd k8s.io namespace after Docker build.
+  - It also preloads postgres/coredns/caddy runtime images through Docker and
+    imports them into containerd so Docker proxy/TUN egress can be reused.
   - Keep TCP 18090 private to the Internal host, Internal WG service peer, or a
     trusted LAN. Do not expose PostgreSQL or Docker daemon.
   - HDO V1 uses 8080 and hdo-home/hdo-internal; this path does not stop them.
@@ -3224,6 +3274,8 @@ ops_internal_production() {
       say "build Internal image"
       shadow_image_build
       shadow_image_import_containerd
+      say "preload K8s runtime images"
+      k8s_preload_runtime_images
       say "apply Internal K8s production stack"
       k8s_apply internal-shadow
       say "restart Internal API for rebuilt image"
