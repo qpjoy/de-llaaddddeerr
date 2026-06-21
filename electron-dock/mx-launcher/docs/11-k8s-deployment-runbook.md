@@ -121,6 +121,20 @@ bash scripts/install-k8s-centos.sh \
   --allow-cgroup-v1
 ```
 
+如果卡在 `registry.k8s.io/kube-apiserver` / `europe-west3-docker.pkg.dev` 镜像下载，
+说明当前网络访问 Kubernetes 官方镜像仓库超时。改用可访问的镜像仓库：
+
+```bash
+bash scripts/install-k8s-centos.sh \
+  --advertise-address <这台 Internal CentOS 的内网 IP> \
+  --allow-cgroup-v1 \
+  --image-repository registry.aliyuncs.com/google_containers
+```
+
+脚本会先执行 `kubeadm config images pull` 预拉控制面镜像，并把同一个
+`imageRepository` 写入 kubeadm init 配置。若现场使用 Harbor / 内网 registry，把
+`registry.aliyuncs.com/google_containers` 换成对应地址即可。
+
 长期生产建议升级到 CentOS Stream 9 / Rocky 9 / Alma 9 或启用 cgroups v2；cgroups v1
 只是为了当前 Internal 测试机先跑通。
 
@@ -146,6 +160,7 @@ bash scripts/install-k8s-centos.sh --advertise-address <IP> --dry-run
 ```bash
 K8S_VERSION=v1.36 \
 K8S_ALLOW_CGROUP_V1=auto \
+K8S_IMAGE_REPOSITORY=registry.aliyuncs.com/google_containers \
 POD_CIDR=10.244.0.0/16 \
 SERVICE_CIDR=10.96.0.0/12 \
 bash scripts/install-k8s-centos.sh --advertise-address <IP>

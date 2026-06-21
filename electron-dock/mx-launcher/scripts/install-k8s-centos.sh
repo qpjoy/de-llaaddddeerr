@@ -6,6 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 K8S_VERSION="${K8S_VERSION:-v1.36}"
+K8S_IMAGE_REPOSITORY="${K8S_IMAGE_REPOSITORY:-registry.k8s.io}"
+K8S_PAUSE_VERSION="${K8S_PAUSE_VERSION:-3.10.2}"
 POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
 SERVICE_CIDR="${SERVICE_CIDR:-10.96.0.0/12}"
 CRI_SOCKET="${CRI_SOCKET:-unix:///run/containerd/containerd.sock}"
@@ -36,6 +38,7 @@ Options:
   --pod-cidr CIDR          Pod CIDR. Default: 10.244.0.0/16.
   --service-cidr CIDR      Service CIDR. Default: 10.96.0.0/12.
   --k8s-version VERSION    Kubernetes RPM minor repo. Default: v1.36.
+  --image-repository REPO  Control-plane image registry. Default: registry.k8s.io.
   --skip-init              Install packages/config only; do not run kubeadm init.
   --skip-flannel           Do not install Flannel CNI.
   --skip-firewall          Do not modify firewalld.
@@ -50,6 +53,8 @@ Environment:
   PG_PASSWORD=...          Required with --deploy-mx unless existing secret is enough.
   K8S_APISERVER_ADVERTISE_ADDRESS=IP
   K8S_VERSION=v1.36
+  K8S_IMAGE_REPOSITORY=registry.aliyuncs.com/google_containers
+  K8S_PAUSE_VERSION=3.10.2
   POD_CIDR=10.244.0.0/16
   SERVICE_CIDR=10.96.0.0/12
   K8S_OPEN_FIREWALL=0
@@ -77,6 +82,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --k8s-version)
       K8S_VERSION="${2:-}"
+      shift 2
+      ;;
+    --image-repository)
+      K8S_IMAGE_REPOSITORY="${2:-}"
       shift 2
       ;;
     --skip-init)
@@ -211,6 +220,18 @@ k8s_minor_version() {
   printf '%s\n' "$K8S_VERSION" | sed -E 's/^v?1\.([0-9]+).*/\1/'
 }
 
+kubeadm_runtime_version() {
+  if [ -n "${K8S_KUBERNETES_VERSION:-}" ]; then
+    echo "$K8S_KUBERNETES_VERSION"
+    return
+  fi
+  if [ "$DRY_RUN" != "1" ] && command -v kubeadm >/dev/null 2>&1; then
+    kubeadm version -o short
+    return
+  fi
+  echo stable-"${K8S_VERSION#v}"
+}
+
 needs_cgroup_v1_compat() {
   local minor
   using_cgroup_v1 || return 1
@@ -263,6 +284,7 @@ configure_containerd() {
   fi
   run sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
   run sed -i 's/disabled_plugins = \["cri"\]/disabled_plugins = []/g' /etc/containerd/config.toml
+  run sed -i "s#sandbox_image = \".*\"#sandbox_image = \"${K8S_IMAGE_REPOSITORY}/pause:${K8S_PAUSE_VERSION}\"#g" /etc/containerd/config.toml
   run systemctl enable --now containerd
   run systemctl restart containerd
 }
@@ -329,6 +351,52 @@ configure_kubectl() {
   run chown "$(id -u):$(id -g)" "$HOME/.kube/config"
 }
 
+kubeadm_init_config() {
+  local path="$1"
+  local include_cgroup_v1="$2"
+  write_file "$path" <<EOF
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: ${K8S_APISERVER_ADVERTISE_ADDRESS}
+nodeRegistration:
+  criSocket: ${CRI_SOCKET}
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+imageRepository: ${K8S_IMAGE_REPOSITORY}
+kubernetesVersion: $(kubeadm_runtime_version)
+networking:
+  podSubnet: ${POD_CIDR}
+  serviceSubnet: ${SERVICE_CIDR}
+EOF
+  if [ "$include_cgroup_v1" = "1" ]; then
+    write_file "$path.kubelet" <<'EOF'
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd
+failCgroupV1: false
+EOF
+    if [ "$DRY_RUN" = "1" ]; then
+      say "would append kubelet cgroups v1 compatibility to $path"
+    else
+      cat "$path.kubelet" >>"$path"
+      rm -f "$path.kubelet"
+    fi
+  fi
+}
+
+prepull_kubeadm_images() {
+  [ "$SKIP_INIT" = "0" ] || return 0
+  [ ! -f /etc/kubernetes/admin.conf ] || return 0
+  say "pre-pull Kubernetes control-plane images from $K8S_IMAGE_REPOSITORY"
+  run kubeadm config images pull \
+    --kubernetes-version "$(kubeadm_runtime_version)" \
+    --image-repository "$K8S_IMAGE_REPOSITORY" \
+    --cri-socket "$CRI_SOCKET"
+}
+
 init_cluster() {
   [ "$SKIP_INIT" = "0" ] || return 0
   if [ -f /etc/kubernetes/admin.conf ]; then
@@ -341,32 +409,16 @@ init_cluster() {
   if needs_cgroup_v1_compat; then
     local kubeadm_config="/tmp/mx-kubeadm-init.yaml"
     say "cgroups v1 detected; enabling kubelet failCgroupV1=false compatibility"
-    write_file "$kubeadm_config" <<EOF
-apiVersion: kubeadm.k8s.io/v1beta4
-kind: InitConfiguration
-localAPIEndpoint:
-  advertiseAddress: ${K8S_APISERVER_ADVERTISE_ADDRESS}
-nodeRegistration:
-  criSocket: ${CRI_SOCKET}
----
-apiVersion: kubeadm.k8s.io/v1beta4
-kind: ClusterConfiguration
-networking:
-  podSubnet: ${POD_CIDR}
-  serviceSubnet: ${SERVICE_CIDR}
----
-apiVersion: kubelet.config.k8s.io/v1beta1
-kind: KubeletConfiguration
-cgroupDriver: systemd
-failCgroupV1: false
-EOF
+    kubeadm_init_config "$kubeadm_config" 1
     run kubeadm init --config "$kubeadm_config" --ignore-preflight-errors=SystemVerification
   else
     run kubeadm init \
       --apiserver-advertise-address="$K8S_APISERVER_ADVERTISE_ADDRESS" \
       --pod-network-cidr="$POD_CIDR" \
       --service-cidr="$SERVICE_CIDR" \
-      --cri-socket="$CRI_SOCKET"
+      --cri-socket="$CRI_SOCKET" \
+      --image-repository="$K8S_IMAGE_REPOSITORY" \
+      --kubernetes-version="$(kubeadm_runtime_version)"
   fi
   configure_kubectl
 }
@@ -432,6 +484,7 @@ main() {
   require_root
   detect_rhel_family
   say "Kubernetes repo version: $K8S_VERSION"
+  say "Kubernetes image repository: $K8S_IMAGE_REPOSITORY"
   say "Pod CIDR: $POD_CIDR"
   say "Service CIDR: $SERVICE_CIDR"
   resolve_advertise_address
@@ -442,6 +495,7 @@ main() {
   configure_selinux
   install_kubernetes_packages
   configure_firewall
+  prepull_kubeadm_images
   init_cluster
   install_flannel
   untaint_control_plane
