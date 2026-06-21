@@ -135,6 +135,18 @@ bash scripts/install-k8s-centos.sh \
 `imageRepository` 写入 kubeadm init 配置。若现场使用 Harbor / 内网 registry，把
 `registry.aliyuncs.com/google_containers` 换成对应地址即可。
 
+如果 Flannel 卡在 `Init:0/2`，并且 DaemonSet 镜像是
+`ghcr.io/flannel-io/flannel*`，通常是 GHCR 镜像源访问问题。可以让脚本把 Flannel
+镜像改成 Docker Hub 的 `flannel/*`，或改成现场 Harbor 镜像仓库：
+
+```bash
+bash scripts/install-k8s-centos.sh \
+  --advertise-address <这台 Internal CentOS 的内网 IP> \
+  --allow-cgroup-v1 \
+  --image-repository registry.aliyuncs.com/google_containers \
+  --flannel-image-repository docker.io/flannel
+```
+
 长期生产建议升级到 CentOS Stream 9 / Rocky 9 / Alma 9 或启用 cgroups v2；cgroups v1
 只是为了当前 Internal 测试机先跑通。
 
@@ -161,6 +173,7 @@ bash scripts/install-k8s-centos.sh --advertise-address <IP> --dry-run
 K8S_VERSION=v1.36 \
 K8S_ALLOW_CGROUP_V1=auto \
 K8S_IMAGE_REPOSITORY=registry.aliyuncs.com/google_containers \
+K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel \
 POD_CIDR=10.244.0.0/16 \
 SERVICE_CIDR=10.96.0.0/12 \
 bash scripts/install-k8s-centos.sh --advertise-address <IP>

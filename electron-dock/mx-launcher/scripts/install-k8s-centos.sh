@@ -13,6 +13,9 @@ SERVICE_CIDR="${SERVICE_CIDR:-10.96.0.0/12}"
 CRI_SOCKET="${CRI_SOCKET:-unix:///run/containerd/containerd.sock}"
 K8S_APISERVER_ADVERTISE_ADDRESS="${K8S_APISERVER_ADVERTISE_ADDRESS:-}"
 K8S_FLANNEL_URL="${K8S_FLANNEL_URL:-https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml}"
+K8S_FLANNEL_IMAGE_REPOSITORY="${K8S_FLANNEL_IMAGE_REPOSITORY:-}"
+K8S_FLANNEL_VERSION="${K8S_FLANNEL_VERSION:-v0.28.5}"
+K8S_FLANNEL_CNI_PLUGIN_VERSION="${K8S_FLANNEL_CNI_PLUGIN_VERSION:-v1.9.1-flannel1}"
 K8S_GATEWAY_PORT="${K8S_GATEWAY_PORT:-18090}"
 K8S_OPEN_FIREWALL="${K8S_OPEN_FIREWALL:-1}"
 K8S_DISABLE_SWAP="${K8S_DISABLE_SWAP:-1}"
@@ -39,6 +42,8 @@ Options:
   --service-cidr CIDR      Service CIDR. Default: 10.96.0.0/12.
   --k8s-version VERSION    Kubernetes RPM minor repo. Default: v1.36.
   --image-repository REPO  Control-plane image registry. Default: registry.k8s.io.
+  --flannel-image-repository REPO
+                          Override Flannel images after manifest apply, e.g. docker.io/flannel.
   --skip-init              Install packages/config only; do not run kubeadm init.
   --skip-flannel           Do not install Flannel CNI.
   --skip-firewall          Do not modify firewalld.
@@ -55,6 +60,9 @@ Environment:
   K8S_VERSION=v1.36
   K8S_IMAGE_REPOSITORY=registry.aliyuncs.com/google_containers
   K8S_PAUSE_VERSION=3.10.2
+  K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel
+  K8S_FLANNEL_VERSION=v0.28.5
+  K8S_FLANNEL_CNI_PLUGIN_VERSION=v1.9.1-flannel1
   POD_CIDR=10.244.0.0/16
   SERVICE_CIDR=10.96.0.0/12
   K8S_OPEN_FIREWALL=0
@@ -86,6 +94,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --image-repository)
       K8S_IMAGE_REPOSITORY="${2:-}"
+      shift 2
+      ;;
+    --flannel-image-repository)
+      K8S_FLANNEL_IMAGE_REPOSITORY="${2:-}"
       shift 2
       ;;
     --skip-init)
@@ -428,6 +440,13 @@ install_flannel() {
   [ "$SKIP_INIT" = "0" ] || return 0
   say "install Flannel CNI"
   run kubectl apply -f "$K8S_FLANNEL_URL"
+  if [ -n "$K8S_FLANNEL_IMAGE_REPOSITORY" ]; then
+    say "override Flannel images with $K8S_FLANNEL_IMAGE_REPOSITORY"
+    run kubectl -n kube-flannel set image daemonset/kube-flannel-ds \
+      "install-cni-plugin=${K8S_FLANNEL_IMAGE_REPOSITORY}/flannel-cni-plugin:${K8S_FLANNEL_CNI_PLUGIN_VERSION}" \
+      "install-cni=${K8S_FLANNEL_IMAGE_REPOSITORY}/flannel:${K8S_FLANNEL_VERSION}" \
+      "kube-flannel=${K8S_FLANNEL_IMAGE_REPOSITORY}/flannel:${K8S_FLANNEL_VERSION}"
+  fi
 }
 
 untaint_control_plane() {

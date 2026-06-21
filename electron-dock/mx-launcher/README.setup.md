@@ -9,6 +9,17 @@ bash electron-dock/mx-launcher/scripts/manage.sh ops local-shadow up
 bash electron-dock/mx-launcher/scripts/manage.sh ops local-shadow smoke
 bash electron-dock/mx-launcher/scripts/manage.sh ops local-shadow down
 
+# k8s install
+cd ~/mx/workspace/de-llaaddddeerr/electron-dock/mx-launcher
+
+kubeadm reset -f
+systemctl restart containerd kubelet
+
+bash scripts/install-k8s-centos.sh \
+  --advertise-address 192.168.31.121 \
+  --allow-cgroup-v1 \
+  --image-repository registry.aliyuncs.com/google_containers
+
 # local test
 bash scripts/manage.sh ops k8s-shadow cycle
 bash scripts/manage.sh ops internal-local port-forward
