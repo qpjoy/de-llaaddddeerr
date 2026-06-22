@@ -582,12 +582,14 @@
         </div>
         <button id="evidence-close" class="secondary-button" type="button">Close</button>
       </header>
-      <div id="evidence-summary" class="evidence-summary"></div>
-      <div id="evidence-steps" class="evidence-steps"></div>
-      <details class="evidence-json">
-        <summary>Object</summary>
-        <pre id="evidence-json"></pre>
-      </details>
+      <div class="evidence-scroll">
+        <div id="evidence-summary" class="evidence-summary"></div>
+        <div id="evidence-steps" class="evidence-steps"></div>
+        <details class="evidence-json">
+          <summary>Object</summary>
+          <pre id="evidence-json"></pre>
+        </details>
+      </div>
     </aside>
     <script type="module" src="./renderer.js"></script>
   </body>

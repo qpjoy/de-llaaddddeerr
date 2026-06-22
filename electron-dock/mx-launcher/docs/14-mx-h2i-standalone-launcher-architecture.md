@@ -283,6 +283,11 @@ Domestic 不需要单独登录，也不应该成为配置真相。
 `Save & Apply` 是已安装 edge stack 的重启/刷新入口，会在 Domestic 侧执行
 `docker compose up`，需要目标机已有 `caddy:2.8.4-alpine` / `coredns/coredns:1.11.3`
 镜像或可访问 registry。
+Domestic 2.0 plan 会先激活 `mx-domestic` WireGuard peer center，再启动 Docker edge
+services；这样 registry/Docker Hub 出口异常时，仍可单独验证 Domestic `10.88.0.1` 和
+Internal `10.88.88.88` 的 WG 数据面。若 `docker compose up` 报
+`registry-1.docker.io ... EOF`，优先检查 Domestic 上的 `qp-tunnel-cli status`、
+Docker systemd proxy 环境和 Oversea hysteria2 订阅，而不是把它归因到 WireGuard 安装失败。
 
 开发和私有部署可以用 MX-H2I 客户端 `.env` 配置 bootstrap 域名和临时解析，不需要把公网 IP 写死进包体：
 

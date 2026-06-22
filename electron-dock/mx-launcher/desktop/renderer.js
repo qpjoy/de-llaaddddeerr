@@ -8386,6 +8386,7 @@ function workerReportEvidenceSummary(kind, steps) {
     .map((evidence) => evidence.transport?.repositoryRootSynced)
     .filter((value) => value !== undefined && value !== null);
   return [
+    ...workerReportFirstFailureSummary(steps),
     ['evidenceMode', uniqueText(evidences.map((evidence) => evidence.mode)).join(' / ')],
     ['execution', uniqueText(evidences.map((evidence) => evidence.execution)).join(' / ')],
     ['boundary', uniqueText(evidences.map((evidence) => evidence.boundary)).join(' / ')],
@@ -8399,6 +8400,40 @@ function workerReportEvidenceSummary(kind, steps) {
     })).join(' / ')],
     ['effectiveCommands', evidences.filter((evidence) => evidence.effectiveCommand).length]
   ];
+}
+
+function workerReportFirstFailureSummary(steps) {
+  const failed = asArray(steps).find((step) => step.status === 'failed')
+    ?? asArray(steps).find((step) => step.status === 'blocked' && !derivedBlockedStep(step));
+  if (!failed) return [];
+  const phase = failed.evidence?.phaseId || failed.sourceId || failed.id || 'step';
+  const message = compactStepMessage(
+    failed.stderr
+      || failed.evidence?.executionResult?.stderr
+      || failed.evidence?.executionResult?.stdout
+      || failed.evidence?.gateFailures?.join?.('; ')
+      || 'worker step failed'
+  );
+  return [
+    ['firstFailure', `${failed.id} / ${phase}`],
+    ['failureMessage', message]
+  ];
+}
+
+function derivedBlockedStep(step) {
+  const stderr = String(step?.stderr || '').toLowerCase();
+  return stderr.includes('stopped after previous step failed');
+}
+
+function compactStepMessage(value) {
+  return String(value || '')
+    .replace(/\r/g, '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 4)
+    .join(' / ')
+    .slice(0, 360);
 }
 
 function awxSummaryForEvidence(object, steps) {

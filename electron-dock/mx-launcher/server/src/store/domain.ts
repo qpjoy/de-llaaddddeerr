@@ -3879,7 +3879,7 @@ function siteSlotDeploymentPhases(
   const domesticBootstrapSubscriptionUrl = `${overseaSubscriptionBaseUrl}/${overseaDomesticAccountName}.yaml`;
   const domesticTunnelInstallWrapperCommand = `printf "%s\\n" "#!/usr/bin/env sh" "exec ${domesticTunnelCliCurrentDir}/bin/qp-tunnel-cli \\"\\$@\\"" > /usr/local/bin/qp-tunnel-cli && chmod 0755 /usr/local/bin/qp-tunnel-cli`;
   const domesticTunnelModeCommand = '{ QP_TUNNEL_MODE=${QP_TUNNEL_MODE:-egress-on}; case "$QP_TUNNEL_MODE" in server|server-on|egress|egress-on) if "$QP_TUNNEL_CLI" help 2>/dev/null | grep -q "egress-on"; then "$QP_TUNNEL_CLI" egress-on; elif "$QP_TUNNEL_CLI" help 2>/dev/null | grep -q "server-on"; then echo "warning: selected tunnel cli lacks egress-on; falling back to server-on"; "$QP_TUNNEL_CLI" server-on; else echo "blocked: selected tunnel cli does not support egress-on/server-on"; exit 1; fi ;; tun|tun-on) if "$QP_TUNNEL_CLI" help 2>/dev/null | grep -q "tun-on"; then "$QP_TUNNEL_CLI" tun-on; else echo "blocked: selected tunnel cli does not support tun-on"; exit 1; fi ;; *) echo "blocked: unsupported QP_TUNNEL_MODE=$QP_TUNNEL_MODE"; exit 1 ;; esac; }';
-  const domesticTunnelPostEgressRefreshCommand = `if test -f /etc/profile.d/mihomo-client-proxy.sh; then . /etc/profile.d/mihomo-client-proxy.sh || true; fi; if command -v npm >/dev/null 2>&1; then if npm i @qpjoy/tunnel-cli@latest -g; then if qp-tunnel-cli help 2>/dev/null | grep -q "egress-on"; then qp-tunnel-cli install-script || true; qp-tunnel-cli egress-on || qp-tunnel-cli server-on || true; qp-tunnel-cli status || echo "warning: @qpjoy/tunnel-cli npm refresh status failed after egress-on; keep Internal fallback"; else echo "warning: npm-installed qp-tunnel-cli lacks egress-on; restoring Internal-pushed fallback"; ${domesticTunnelInstallWrapperCommand}; fi; else echo "warning: @qpjoy/tunnel-cli npm refresh skipped after egress-on; keep Internal fallback"; ${domesticTunnelInstallWrapperCommand}; fi; else echo "node/npm absent; keep Internal fallback until next refresh"; fi`;
+  const domesticTunnelPostEgressRefreshCommand = `if test -f /etc/profile.d/mihomo-client-proxy.sh; then . /etc/profile.d/mihomo-client-proxy.sh || true; fi; if command -v npm >/dev/null 2>&1; then if npm i @qpjoy/tunnel-cli -g; then if qp-tunnel-cli help 2>/dev/null | grep -q "egress-on"; then qp-tunnel-cli install-script || true; qp-tunnel-cli egress-on || qp-tunnel-cli server-on || true; qp-tunnel-cli status || echo "warning: @qpjoy/tunnel-cli npm refresh status failed after egress-on; keep Internal fallback"; else echo "warning: npm-installed qp-tunnel-cli lacks egress-on; restoring Internal-pushed fallback"; ${domesticTunnelInstallWrapperCommand}; fi; else echo "warning: @qpjoy/tunnel-cli npm refresh skipped after egress-on; keep Internal fallback"; ${domesticTunnelInstallWrapperCommand}; fi; else echo "node/npm absent; keep Internal fallback until next refresh"; fi`;
   const domesticLegacyWireGuardCompatCommand = [
     'legacy_wg_detected=0; for legacy_wg_iface in hdo-home hdo-internal; do if systemctl is-active --quiet wg-quick@$legacy_wg_iface 2>/dev/null || systemctl is-enabled --quiet wg-quick@$legacy_wg_iface 2>/dev/null || ip link show $legacy_wg_iface >/dev/null 2>&1 || test -f /etc/wireguard/$legacy_wg_iface.conf; then legacy_wg_detected=1; fi; done; if test "$legacy_wg_detected" = "1"; then',
     'echo "legacy hdo-home/hdo-internal 100.* WireGuard detected; preserving V1 while mx-domestic 2.0 starts";',
@@ -3922,7 +3922,16 @@ function siteSlotDeploymentPhases(
     .filter((username) => overseaAccessAccountMaterial.has(safeAccountName(username))).length;
   const overseaReservedInternalCidrs = ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16'];
   const overseaReservedInternalCidrsCsv = overseaReservedInternalCidrs.join(',');
-  const startSlotServicesCommand = 'if grep -q "\\"placeholder\\": true" enabled-modules.json 2>/dev/null; then echo "slot services placeholder; no Docker services selected"; else services="$(docker compose config --services)" && if [ -n "$services" ]; then docker compose up -d; else echo "slot services bundle has no Docker services selected"; fi; fi';
+  const startSlotServicesCommand = [
+    'if grep -q "\\"placeholder\\": true" enabled-modules.json 2>/dev/null; then echo "slot services placeholder; no Docker services selected"; else',
+    'services="$(docker compose config --services)"',
+    'if [ -n "$services" ]; then',
+    'images="$(docker compose config --images 2>/dev/null || true)"',
+    'if [ -n "$images" ]; then for image in $images; do if docker image inspect "$image" >/dev/null 2>&1; then echo "image ready: $image"; else echo "pull missing compose image: $image"; if ! docker pull "$image"; then echo "blocked: Docker cannot pull required compose image $image"; echo "diagnostics: qp-tunnel-cli"; if command -v qp-tunnel-cli >/dev/null 2>&1; then qp-tunnel-cli -v || true; qp-tunnel-cli status || true; else echo "qp-tunnel-cli: missing"; fi; echo "diagnostics: docker proxy env"; if command -v systemctl >/dev/null 2>&1; then systemctl show docker -p Environment || true; fi; echo "diagnostics: registry via local proxy"; if command -v curl >/dev/null 2>&1; then curl -I --max-time 15 --proxy http://127.0.0.1:7890 https://registry-1.docker.io/v2/ || true; fi; exit 1; fi; fi; done; fi',
+    'docker compose up -d',
+    'else echo "slot services bundle has no Docker services selected"; fi',
+    'fi'
+  ].join('; ');
   const syncInternalConfigCommands = kind === 'oversea'
     ? [
       `POST /internal/v1/config-center/snapshots/effective siteId=${input.siteId ?? 'oversea-main'}`,
@@ -4196,6 +4205,21 @@ function siteSlotDeploymentPhases(
         ]
       }
     ] : []),
+    ...(kind === 'domestic' ? [{
+      phaseId: 'activate-domestic-peer-center',
+      title: 'Activate Domestic WireGuard peer center',
+      mode: 'artifact-push' as const,
+      target: kind,
+      required: true,
+      commands: [
+        ssh(`install -d -m 0700 /etc/wireguard && install -d -m 0755 ${slotCurrentDir}`),
+        rsyncOverSsh(domesticWireGuardConfig, '/etc/wireguard/mx-domestic.conf'),
+        rsyncOverSsh(domesticRelayEnv, `${slotCurrentDir}/mx-domestic-relay.env`),
+        ssh(domesticLegacyWireGuardCompatCommand),
+        ssh('if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi; chmod 600 /etc/wireguard/mx-domestic.conf; if command -v systemctl >/dev/null 2>&1; then systemctl enable wg-quick@mx-domestic >/dev/null 2>&1 || true; systemctl restart wg-quick@mx-domestic; else wg-quick down mx-domestic >/dev/null 2>&1 || true; wg-quick up mx-domestic; fi; ip -4 addr replace 10.88.0.1/16 dev mx-domestic; ip link set up dev mx-domestic; sysctl -w net.ipv4.ip_forward=1; if command -v iptables >/dev/null 2>&1; then iptables -C FORWARD -i mx-domestic -o mx-domestic -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i mx-domestic -o mx-domestic -j ACCEPT; if iptables -S DOCKER-USER >/dev/null 2>&1; then iptables -C DOCKER-USER -i mx-domestic -o mx-domestic -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -i mx-domestic -o mx-domestic -j ACCEPT; fi; iptables -C INPUT -i mx-domestic -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i mx-domestic -p udp --dport 53 -j ACCEPT; iptables -C INPUT -i mx-domestic -p tcp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i mx-domestic -p tcp --dport 53 -j ACCEPT; fi; for route_cidr in 10.89.0.0/16 10.90.0.0/16; do ip route replace "$route_cidr" dev mx-domestic; done; ip -4 address show dev mx-domestic; ip route get 10.89.100.1 || true')
+      ],
+      notes: ['WireGuard/routing is host-level and is activated before Docker edge services so Domestic can establish the 10.88.0.1 relay path even when registry egress is unhealthy. The 2.0 activation preserves legacy hdo-home/hdo-internal 100.* WireGuard state for V1/V2 compatibility; cleanup is an explicit manage.sh operation.']
+    }] : []),
     {
       phaseId: 'deploy-slot-services',
       title: `Deploy ${kind} Docker services`,
@@ -4214,21 +4238,6 @@ function siteSlotDeploymentPhases(
         ...(kind === 'domestic' ? ['Domestic .env is rendered from Internal Config Center runtime config on every deploy; operators should not edit it manually on the host.'] : [])
       ]
     },
-    ...(kind === 'domestic' ? [{
-      phaseId: 'activate-domestic-peer-center',
-      title: 'Activate Domestic WireGuard peer center',
-      mode: 'artifact-push' as const,
-      target: kind,
-      required: true,
-      commands: [
-        ssh(`install -d -m 0700 /etc/wireguard && install -d -m 0755 ${slotCurrentDir}`),
-        rsyncOverSsh(domesticWireGuardConfig, '/etc/wireguard/mx-domestic.conf'),
-        rsyncOverSsh(domesticRelayEnv, `${slotCurrentDir}/mx-domestic-relay.env`),
-        ssh(domesticLegacyWireGuardCompatCommand),
-        ssh('if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi; chmod 600 /etc/wireguard/mx-domestic.conf; if command -v systemctl >/dev/null 2>&1; then systemctl enable wg-quick@mx-domestic >/dev/null 2>&1 || true; systemctl restart wg-quick@mx-domestic; else wg-quick down mx-domestic >/dev/null 2>&1 || true; wg-quick up mx-domestic; fi; ip -4 addr replace 10.88.0.1/16 dev mx-domestic; ip link set up dev mx-domestic; sysctl -w net.ipv4.ip_forward=1; if command -v iptables >/dev/null 2>&1; then iptables -C FORWARD -i mx-domestic -o mx-domestic -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i mx-domestic -o mx-domestic -j ACCEPT; if iptables -S DOCKER-USER >/dev/null 2>&1; then iptables -C DOCKER-USER -i mx-domestic -o mx-domestic -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -i mx-domestic -o mx-domestic -j ACCEPT; fi; iptables -C INPUT -i mx-domestic -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i mx-domestic -p udp --dport 53 -j ACCEPT; iptables -C INPUT -i mx-domestic -p tcp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i mx-domestic -p tcp --dport 53 -j ACCEPT; fi; for route_cidr in 10.89.0.0/16 10.90.0.0/16; do ip route replace "$route_cidr" dev mx-domestic; done; ip -4 address show dev mx-domestic; ip route get 10.89.100.1 || true')
-      ],
-      notes: ['WireGuard/routing is host-level because Domestic is the peer center path and has limited memory/disk. The 2.0 activation preserves legacy hdo-home/hdo-internal 100.* WireGuard state for V1/V2 compatibility; cleanup is an explicit manage.sh operation.']
-    }] : []),
     {
       phaseId: 'sync-internal-config',
       title: 'Sync signed Internal config',
@@ -4268,9 +4277,9 @@ function siteSlotNextActions(
   if (kind === 'domestic') actions.push('confirm-domestic-public-ingress-firewall');
   if (kind === 'domestic' && mode !== 'direct') actions.push('configure-oversea-bootstrap');
   if (kind === 'domestic') actions.push('install-docker-runtime');
+  if (kind === 'domestic') actions.push('activate-domestic-peer-center');
   if (kind === 'oversea') actions.push('push-oversea-access-stack');
   actions.push('push-slot-service-bundle', 'sync-signed-internal-config', 'run-slot-smoke');
-  if (kind === 'domestic') actions.push('activate-domestic-peer-center');
   if (kind === 'domestic' && !siteSlotWorkerInternalBaseUrl(input)) actions.push('set-internal-base-url-for-reachability-check');
   return actions;
 }
