@@ -634,9 +634,7 @@ ensure_hysteria_published_port() {
 	fi
 
 	echo "Docker published UDP port drift detected for $HYSTERIA_CONTAINER; expected ${HY2_SERVER_PORTS}/udp. Recreating hysteria service."
-	safe_recreate_service hysteria
-	wait_for_container "$HYSTERIA_CONTAINER"
-	hysteria_published_port_matches_env || die "Docker did not publish expected Hysteria2 UDP port ${HY2_SERVER_PORTS}/udp after recreate."
+	recreate_full_stack
 }
 
 wait_for_subscription_http_ready() {
@@ -1265,19 +1263,23 @@ destroy_stack_command() {
 	fi
 }
 
+start_full_stack_services() {
+	render_runtime_files
+	ensure_non_overlapping_stack_subnet
+	safe_recreate_service subscriptions
+	wait_for_container "$SUBSCRIPTIONS_CONTAINER"
+	safe_recreate_service hysteria
+	wait_for_container "$HYSTERIA_CONTAINER"
+	hysteria_published_port_matches_env || die "Docker did not publish expected Hysteria2 UDP port ${HY2_SERVER_PORTS}/udp after recreate."
+	refresh_subscriptions
+}
+
 start_target() {
 	local target="${1:-all}"
 
 	case "$target" in
 		all)
-			render_runtime_files
-			ensure_non_overlapping_stack_subnet
-			safe_recreate_service subscriptions
-			wait_for_container "$SUBSCRIPTIONS_CONTAINER"
-			safe_recreate_service hysteria
-			wait_for_container "$HYSTERIA_CONTAINER"
-			ensure_hysteria_published_port
-			refresh_subscriptions
+			start_full_stack_services
 		;;
 		hysteria)
 			render_runtime_files
@@ -1302,7 +1304,7 @@ recreate_full_stack() {
 	compose down --remove-orphans >/dev/null 2>&1 || true
 	docker rm -f "$HYSTERIA_CONTAINER" >/dev/null 2>&1 || true
 	docker rm -f "$SUBSCRIPTIONS_CONTAINER" >/dev/null 2>&1 || true
-	start_target all
+	start_full_stack_services
 }
 
 status_command() {
