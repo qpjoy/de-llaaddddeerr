@@ -198,7 +198,7 @@ function createTunnelCliTar(artifactRoot, previousModules = new Map()) {
     metadata: {
       packageName: packageJson.name,
       packageVersion: packageJson.version,
-      npmInstallCommand: 'npm i @qpjoy/tunnel-cli -g',
+      npmInstallCommand: 'npm i -g @qpjoy/tunnel-cli@latest --force',
       refreshCommand: 'bash scripts/manage.sh ops site-slot refresh-tunnel-cli latest | bash scripts/manage.sh ops site-slot refresh-tunnel-cli --from-tarball <tgz>',
       fallbackMode: fullFallbackReady
         ? 'node-capable-qp-tunnel-cli-with-electron-core-wireguard'

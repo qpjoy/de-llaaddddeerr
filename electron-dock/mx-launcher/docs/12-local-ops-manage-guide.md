@@ -308,7 +308,7 @@ snapshot cache 和 observability forwarder 等薄模块。WireGuard 产物拆成
 `mx-domestic-wg-relay.conf` 安装到 Domestic 的 `/etc/wireguard/mx-domestic.conf`，
 `mx-domestic-relay.env` 放到 Domestic current dir，`mx-internal-service-peer.conf`
 只给 Internal runtime 使用，不能复制到 Domestic。`@qpjoy/tunnel-cli` 首选在目标机上通过
-`npm i -g @qpjoy/tunnel-cli` 安装；Internal 只在 Domestic 无出站时推送
+`npm i -g @qpjoy/tunnel-cli@latest --force` 安装；Internal 只在 Domestic 无出站时推送
 `mx-domestic-qp-tunnel-cli-fallback.tar.gz` 作为离线兜底。目标机不需要 `git clone` /
 `git pull`，也不需要保留完整 monorepo。
 
@@ -320,6 +320,10 @@ bash scripts/manage.sh ops site-slot refresh-tunnel-cli latest
 SITE_SLOT_RELEASE_REVISION=shadow-001 \
   bash scripts/manage.sh ops site-slot materialize domestic
 ```
+
+这里的 materialize 是 Internal 发布/部署前的 artifact 物化动作，不是 Admin UI 的
+`Materialize Domestic WG` 按钮。正式 `internal-production deploy` 会在 build 前刷新
+`@qpjoy/tunnel-cli@latest` 并重物化 `server/artifacts/site-slots`。
 
 如果 Internal 也没有 npm 出站，就使用当前
 `electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli` 中已缓存的 fallback 版本。没有

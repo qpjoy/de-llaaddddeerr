@@ -760,7 +760,7 @@ const checks = [
         && bootstrapEgress?.commands?.some((command) => command.includes('QP_TUNNEL_CLI=/opt/mx/current/qp-tunnel-cli/bin/qp-tunnel-cli'))
         && bootstrapEgress?.commands?.some((command) => command.includes('mx-domestic-qp-tunnel-cli-fallback.tar.gz'))
         && bootstrapEgress?.commands?.some((command) => command.includes('mx-domestic-bootstrap-subscription.yaml') && command.includes('domestic-bootstrap-subscription.yaml'))
-        && bootstrapEgress?.commands?.some((command) => command.includes('npm i @qpjoy/tunnel-cli -g') && command.includes('npm refresh skipped after egress-on'))
+        && bootstrapEgress?.commands?.some((command) => command.includes('@qpjoy/tunnel-cli@latest') && command.includes('npm refresh skipped after egress-on'))
         && bootstrapEgress?.commands?.some((command) => command.includes('node/npm absent'))
         && bootstrapEgress?.commands?.some((command) => command.includes('BOOTSTRAP_SUBSCRIPTION_FILE=/opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml'))
         && bootstrapEgress?.commands?.some((command) => command.includes('--file $BOOTSTRAP_SUBSCRIPTION_FILE'))

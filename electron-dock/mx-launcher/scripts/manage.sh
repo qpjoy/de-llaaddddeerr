@@ -227,6 +227,11 @@ qp_tunnel_cli_fallback_ready() {
   done
 }
 
+qp_tunnel_cli_fallback_version() {
+  local dir="$1"
+  node -e "try { console.log(require(process.argv[1]).version || '') } catch { process.exit(1) }" "$dir/package.json" 2>/dev/null || true
+}
+
 wireguard_runtime_ready() {
   local plugin_root="$1"
   local core="$plugin_root/packages/electron-core-wireguard"
@@ -242,17 +247,41 @@ wireguard_runtime_ready() {
   done
 }
 
+shadow_image_refresh_tunnel_cli_from_npm() {
+  local target_dir="$ROOT/site-slots/domestic/qp-tunnel-cli"
+  local version="${MX_SHADOW_QP_TUNNEL_CLI_VERSION:-latest}"
+  local strict="${MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT:-0}"
+  local before after
+  [ "${MX_SHADOW_REFRESH_QP_TUNNEL_CLI_FROM_NPM:-1}" = "0" ] && return 0
+  before="$(qp_tunnel_cli_fallback_version "$target_dir")"
+  say "refresh mx-launcher qp-tunnel-cli fallback from npm @qpjoy/tunnel-cli@$version${before:+ (current $before)}"
+  if node server/scripts/site-slot-refresh-tunnel-cli.mjs "$version"; then
+    after="$(qp_tunnel_cli_fallback_version "$target_dir")"
+    say "qp-tunnel-cli fallback ready: ${after:-unknown}"
+    return 0
+  fi
+  if [ "$strict" = "1" ]; then
+    die "failed to refresh qp-tunnel-cli fallback from npm @qpjoy/tunnel-cli@$version"
+  fi
+  if qp_tunnel_cli_fallback_ready "$target_dir"; then
+    say "warning: npm refresh failed; continuing with existing qp-tunnel-cli fallback $(qp_tunnel_cli_fallback_version "$target_dir")"
+    return 0
+  fi
+  die "qp-tunnel-cli fallback is missing and npm refresh failed"
+}
+
 shadow_image_tunnel_cli_fallback() {
   local target_dir="$ROOT/site-slots/domestic/qp-tunnel-cli"
   local plugin_root="$ROOT/../../electron-plugin"
   local cli_source="$plugin_root/packages/tunnel-cli"
   local build_full="${MX_SHADOW_BUILD_ELECTRON_PLUGIN_FALLBACK:-0}"
+  shadow_image_refresh_tunnel_cli_from_npm
   if qp_tunnel_cli_fallback_ready "$target_dir"; then
     if [ -f "$cli_source/package.json" ] && qp_tunnel_cli_fallback_ready "$cli_source" && wireguard_runtime_ready "$plugin_root"; then
       local target_version=""
       local source_version=""
-      target_version="$(node -e "console.log(require(process.argv[1]).version || '')" "$target_dir/package.json" 2>/dev/null || true)"
-      source_version="$(node -e "console.log(require(process.argv[1]).version || '')" "$cli_source/package.json" 2>/dev/null || true)"
+      target_version="$(qp_tunnel_cli_fallback_version "$target_dir")"
+      source_version="$(qp_tunnel_cli_fallback_version "$cli_source")"
       if [ -n "$source_version" ] && [ "$target_version" != "$source_version" ]; then
         say "refresh mx-launcher qp-tunnel-cli fallback from local electron-plugin package ($target_version -> $source_version)"
         node server/scripts/site-slot-refresh-tunnel-cli.mjs --from-local "$cli_source"
@@ -3564,6 +3593,7 @@ ops_internal_production() {
       [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops internal-production deploy [gateway-url]"
       ops_internal_production_plan
       say "build Internal image"
+      MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT="${MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT:-1}"
       shadow_image_build
       shadow_image_import_containerd
       say "preload K8s runtime images"

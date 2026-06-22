@@ -2492,7 +2492,7 @@ export class PostgresStore implements PlatformStore {
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('QP_TUNNEL_CLI=/opt/mx/current/qp-tunnel-cli/bin/qp-tunnel-cli'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('mx-domestic-qp-tunnel-cli-fallback.tar.gz'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('mx-domestic-bootstrap-subscription.yaml') && command.includes('domestic-bootstrap-subscription.yaml'))
-      || !domesticBootstrapEgress?.commands.some((command) => command.includes('npm i @qpjoy/tunnel-cli -g') && command.includes('npm refresh skipped after egress-on'))
+      || !domesticBootstrapEgress?.commands.some((command) => command.includes('@qpjoy/tunnel-cli@latest') && command.includes('npm refresh skipped after egress-on'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('node/npm absent'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('egress-on'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('BOOTSTRAP_SUBSCRIPTION_FILE=/opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml'))

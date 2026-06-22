@@ -51,7 +51,7 @@ writeFileSync(join(targetDir, 'refresh-metadata.json'), JSON.stringify({
   requestedVersion: requestedVersion === 'tarball' ? packageJson.version : requestedVersion,
   source,
   sourceReference,
-  officialInstallCommand: 'npm i @qpjoy/tunnel-cli -g',
+  officialInstallCommand: 'npm i -g @qpjoy/tunnel-cli@latest --force',
   refreshedAt: new Date().toISOString()
 }, null, 2));
 
@@ -62,7 +62,7 @@ console.log(JSON.stringify({
   packageVersion: packageJson.version,
   source,
   sourceReference,
-  officialInstallCommand: 'npm i @qpjoy/tunnel-cli -g',
+  officialInstallCommand: 'npm i -g @qpjoy/tunnel-cli@latest --force',
   fallbackUsage: 'Internal-pushed no-node/no-outbound bootstrap first, optional npm refresh after egress-on'
 }, null, 2));
 
