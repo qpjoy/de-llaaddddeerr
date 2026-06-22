@@ -736,6 +736,7 @@ const checks = [
       const resolveSubscription = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'resolve-domestic-bootstrap-subscription');
       const bootstrapEgress = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'bootstrap-domestic-egress');
       const installDockerRuntime = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'install-domestic-docker-runtime');
+      const verifyDomesticEgress = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'verify-domestic-egress');
       const activatePeerCenter = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'activate-domestic-peer-center');
       const syncInternalConfig = body?.plan?.deploymentPhases?.find((phase) => phase.phaseId === 'sync-internal-config');
       return typeof state.domesticSlotPlanId === 'string'
@@ -758,13 +759,15 @@ const checks = [
         && resolveSubscription?.commands?.some((command) => command.includes('install node/npm') && command.includes('npm install'))
         && bootstrapEgress?.mode === 'artifact-push'
         && bootstrapEgress?.commands?.some((command) => command.includes('QP_TUNNEL_CLI=/opt/mx/current/qp-tunnel-cli/bin/qp-tunnel-cli'))
+        && bootstrapEgress?.commands?.some((command) => command.includes('attempt pre-egress npm install @qpjoy/tunnel-cli@latest'))
         && bootstrapEgress?.commands?.some((command) => command.includes('mx-domestic-qp-tunnel-cli-fallback.tar.gz'))
         && bootstrapEgress?.commands?.some((command) => command.includes('mx-domestic-bootstrap-subscription.yaml') && command.includes('domestic-bootstrap-subscription.yaml'))
         && bootstrapEgress?.commands?.some((command) => command.includes('@qpjoy/tunnel-cli@latest') && command.includes('npm refresh skipped after egress-on'))
         && bootstrapEgress?.commands?.some((command) => command.includes('node/npm absent'))
         && bootstrapEgress?.commands?.some((command) => command.includes('BOOTSTRAP_SUBSCRIPTION_FILE=/opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml'))
         && bootstrapEgress?.commands?.some((command) => command.includes('--file $BOOTSTRAP_SUBSCRIPTION_FILE'))
-        && bootstrapEgress?.commands?.some((command) => command.includes(`--url ${baseUrl}/internal/v1/site-slots/${smokeOverseaSiteId}/subscriptions/hysteria2/${state.overseaDomesticAccount}.yaml`))
+        && bootstrapEgress?.commands?.some((command) => command.includes('local bootstrap subscription file is required before WG relay/Internal URL is reachable'))
+        && !bootstrapEgress?.commands?.some((command) => command.includes('--url '))
         && bootstrapEgress?.commands?.some((command) => command.includes('egress-on'))
         && bootstrapEgress?.commands?.some((command) => command.includes('QP_TUNNEL_MODE=${QP_TUNNEL_MODE:-egress-on}'))
         && bootstrapEgress?.commands?.some((command) => command.includes('/usr/local/bin/mihomo-client'))
@@ -772,6 +775,9 @@ const checks = [
         && !bootstrapEgress?.commands?.some((command) => command.includes('elif command -v npm'))
         && !bootstrapEgress?.commands?.some((command) => command.includes('<internal-issued-oversea-hysteria2-subscription>'))
         && installDockerRuntime?.commands?.some((command) => command.includes('docker') && command.includes('apt-get'))
+        && verifyDomesticEgress?.mode === 'remote-ssh'
+        && verifyDomesticEgress?.commands?.some((command) => command.includes('registry-1.docker.io/v2/') && command.includes('127.0.0.1:7890'))
+        && verifyDomesticEgress?.commands?.some((command) => command.includes('mihomo-client service is not active') && command.includes('Docker registry is not reachable'))
         && activatePeerCenter?.commands?.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))
         && activatePeerCenter?.commands?.some((command) => command.includes('mx-domestic-relay.env') && command.includes('/opt/mx/current/domestic/mx-domestic-relay.env'))
         && activatePeerCenter?.commands?.some((command) => command.includes('preserving V1') && command.includes('cleanup-v1-wireguard --apply'))

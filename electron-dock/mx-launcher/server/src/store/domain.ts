@@ -3879,8 +3879,20 @@ function siteSlotDeploymentPhases(
   const domesticBootstrapSubscriptionUrl = `${overseaSubscriptionBaseUrl}/${overseaDomesticAccountName}.yaml`;
   const domesticTunnelInstallWrapperCommand = `printf "%s\\n" "#!/usr/bin/env sh" "exec ${domesticTunnelCliCurrentDir}/bin/qp-tunnel-cli \\"\\$@\\"" > /usr/local/bin/qp-tunnel-cli && chmod 0755 /usr/local/bin/qp-tunnel-cli`;
   const qpTunnelCliVersionProbe = (command: string) => `${command} --version 2>/dev/null || ${command} version 2>/dev/null || ${command} -v 2>/dev/null || ${command} help 2>/dev/null | sed -n "1p" || echo unknown`;
+  const domesticTunnelInitialCliRefreshCommand = `if command -v npm >/dev/null 2>&1; then echo "attempt pre-egress npm install @qpjoy/tunnel-cli@latest"; if command -v timeout >/dev/null 2>&1; then timeout 45 npm i -g @qpjoy/tunnel-cli@latest --force || echo "warning: pre-egress npm refresh failed; using Internal-pushed fallback"; else npm i -g @qpjoy/tunnel-cli@latest --force || echo "warning: pre-egress npm refresh failed; using Internal-pushed fallback"; fi; else echo "node/npm absent before egress; using Internal-pushed fallback"; fi`;
+  const domesticTunnelSelectCliCommand = `if command -v qp-tunnel-cli >/dev/null 2>&1 && qp-tunnel-cli help 2>/dev/null | grep -q "egress-on"; then QP_TUNNEL_CLI="$(command -v qp-tunnel-cli)"; QP_TUNNEL_CLI_KIND=global-qp-tunnel-cli; else ${domesticTunnelInstallWrapperCommand}; QP_TUNNEL_CLI="$INTERNAL_QP_TUNNEL_CLI"; QP_TUNNEL_CLI_KIND=internal-pushed-fallback; fi`;
   const domesticTunnelModeCommand = '{ QP_TUNNEL_MODE=${QP_TUNNEL_MODE:-egress-on}; case "$QP_TUNNEL_MODE" in server|server-on|egress|egress-on) if "$QP_TUNNEL_CLI" help 2>/dev/null | grep -q "egress-on"; then "$QP_TUNNEL_CLI" egress-on; elif "$QP_TUNNEL_CLI" help 2>/dev/null | grep -q "server-on"; then echo "warning: selected tunnel cli lacks egress-on; falling back to server-on"; "$QP_TUNNEL_CLI" server-on; else echo "blocked: selected tunnel cli does not support egress-on/server-on"; exit 1; fi ;; tun|tun-on) if "$QP_TUNNEL_CLI" help 2>/dev/null | grep -q "tun-on"; then "$QP_TUNNEL_CLI" tun-on; else echo "blocked: selected tunnel cli does not support tun-on"; exit 1; fi ;; *) echo "blocked: unsupported QP_TUNNEL_MODE=$QP_TUNNEL_MODE"; exit 1 ;; esac; }';
   const domesticTunnelPostEgressRefreshCommand = `if test -f /etc/profile.d/mihomo-client-proxy.sh; then . /etc/profile.d/mihomo-client-proxy.sh || true; fi; echo "Internal-pushed qp-tunnel-cli fallback version: $(${qpTunnelCliVersionProbe('"$INTERNAL_QP_TUNNEL_CLI"')})"; if command -v npm >/dev/null 2>&1; then if npm i -g @qpjoy/tunnel-cli@latest --force; then echo "npm-installed qp-tunnel-cli version: $(${qpTunnelCliVersionProbe('qp-tunnel-cli')})"; if qp-tunnel-cli help 2>/dev/null | grep -q "egress-on"; then qp-tunnel-cli install-script || true; qp-tunnel-cli egress-on || qp-tunnel-cli server-on || true; qp-tunnel-cli status || echo "warning: @qpjoy/tunnel-cli npm refresh status failed after egress-on; keep Internal fallback"; else echo "warning: npm-installed qp-tunnel-cli lacks egress-on; restoring Internal-pushed fallback"; ${domesticTunnelInstallWrapperCommand}; echo "restored Internal-pushed qp-tunnel-cli version: $(${qpTunnelCliVersionProbe('qp-tunnel-cli')})"; fi; else echo "warning: @qpjoy/tunnel-cli@latest npm refresh skipped after egress-on; keep Internal fallback"; ${domesticTunnelInstallWrapperCommand}; echo "restored Internal-pushed qp-tunnel-cli version: $(${qpTunnelCliVersionProbe('qp-tunnel-cli')})"; fi; else echo "node/npm absent; keep Internal fallback until next refresh"; fi`;
+  const domesticEgressProxyReadinessCommand = [
+    'set -eu',
+    'if test -f /etc/profile.d/mihomo-client-proxy.sh; then . /etc/profile.d/mihomo-client-proxy.sh || true; fi',
+    'echo "diagnostics: qp-tunnel-cli"',
+    `if command -v qp-tunnel-cli >/dev/null 2>&1; then echo "qp-tunnel-cli version: $(${qpTunnelCliVersionProbe('qp-tunnel-cli')})"; qp-tunnel-cli status || true; else echo "blocked: qp-tunnel-cli missing after Domestic egress bootstrap"; exit 1; fi`,
+    'if command -v systemctl >/dev/null 2>&1; then systemctl is-active --quiet mihomo-client || { systemctl status mihomo-client --no-pager -l || true; echo "blocked: mihomo-client service is not active after egress-on"; exit 1; }; fi',
+    'if command -v curl >/dev/null 2>&1; then curl -sSI --max-time 20 --proxy http://127.0.0.1:7890 https://registry-1.docker.io/v2/ >/tmp/mx-registry-probe.headers || { echo "blocked: Docker registry is not reachable through local egress proxy"; curl -Iv --max-time 20 --proxy http://127.0.0.1:7890 https://registry-1.docker.io/v2/ || true; exit 1; }; sed -n "1,6p" /tmp/mx-registry-probe.headers; else echo "warning: curl missing; skip registry proxy probe"; fi',
+    'if command -v systemctl >/dev/null 2>&1; then systemctl show docker -p Environment || true; fi',
+    'if command -v docker >/dev/null 2>&1; then docker info >/dev/null; fi'
+  ].join('; ');
   const domesticLegacyWireGuardCompatCommand = [
     'legacy_wg_detected=0; for legacy_wg_iface in hdo-home hdo-internal; do if systemctl is-active --quiet wg-quick@$legacy_wg_iface 2>/dev/null || systemctl is-enabled --quiet wg-quick@$legacy_wg_iface 2>/dev/null || ip link show $legacy_wg_iface >/dev/null 2>&1 || test -f /etc/wireguard/$legacy_wg_iface.conf; then legacy_wg_detected=1; fi; done; if test "$legacy_wg_detected" = "1"; then',
     'echo "legacy hdo-home/hdo-internal 100.* WireGuard detected; preserving V1 while mx-domestic 2.0 starts";',
@@ -3896,11 +3908,12 @@ function siteSlotDeploymentPhases(
     'test -x "$INTERNAL_QP_TUNNEL_CLI" || { echo "blocked: Internal-pushed qp-tunnel-cli fallback is missing: $INTERNAL_QP_TUNNEL_CLI"; exit 1; }',
     'chmod +x "$INTERNAL_QP_TUNNEL_CLI"',
     `if test -f ${domesticTunnelCliCurrentDir}/package/resources/mihomo-client.sh; then install -m 0755 ${domesticTunnelCliCurrentDir}/package/resources/mihomo-client.sh /usr/local/bin/mihomo-client; fi`,
-    domesticTunnelInstallWrapperCommand,
     'if command -v systemctl >/dev/null 2>&1; then systemctl enable mihomo-client >/dev/null 2>&1 || true; fi',
-    'if test -x "$INTERNAL_QP_TUNNEL_CLI"; then QP_TUNNEL_CLI="$INTERNAL_QP_TUNNEL_CLI"; QP_TUNNEL_CLI_KIND=internal-pushed-fallback; elif command -v qp-tunnel-cli >/dev/null 2>&1; then QP_TUNNEL_CLI="$(command -v qp-tunnel-cli)"; QP_TUNNEL_CLI_KIND=global-qp-tunnel-cli; elif command -v mihomo-client >/dev/null 2>&1; then QP_TUNNEL_CLI="$(command -v mihomo-client)"; QP_TUNNEL_CLI_KIND=global-mihomo-client; else QP_TUNNEL_CLI_KIND=missing; fi',
-    'echo "qp-tunnel-cli selected: $QP_TUNNEL_CLI_KIND $QP_TUNNEL_CLI"',
-    `if test -s "$BOOTSTRAP_SUBSCRIPTION_FILE"; then SUBSCRIPTION_ARGS="--file $BOOTSTRAP_SUBSCRIPTION_FILE"; else echo "warning: local bootstrap subscription missing; falling back to URL ${domesticBootstrapSubscriptionUrl}"; SUBSCRIPTION_ARGS="--url ${domesticBootstrapSubscriptionUrl}"; fi`,
+    domesticTunnelInitialCliRefreshCommand,
+    domesticTunnelSelectCliCommand,
+    `echo "qp-tunnel-cli selected: $QP_TUNNEL_CLI_KIND $QP_TUNNEL_CLI version=$(${qpTunnelCliVersionProbe('"$QP_TUNNEL_CLI"')})"`,
+    'test -s "$BOOTSTRAP_SUBSCRIPTION_FILE" || { echo "blocked: local bootstrap subscription file is required before WG relay/Internal URL is reachable: $BOOTSTRAP_SUBSCRIPTION_FILE"; exit 1; }',
+    'SUBSCRIPTION_ARGS="--file $BOOTSTRAP_SUBSCRIPTION_FILE"',
     'if test -x /usr/local/bin/mihomo && { systemctl cat mihomo-client >/dev/null 2>&1 || test -f /etc/mihomo-client/config.yaml; }; then echo "mihomo-client already installed; reuse resident client and refresh subscription"; if "$QP_TUNNEL_CLI" help 2>/dev/null | grep -q "update-subscription"; then if "$QP_TUNNEL_CLI" update-subscription $SUBSCRIPTION_ARGS; then echo "mihomo-client subscription refreshed"; else echo "warning: mihomo-client subscription refresh failed; reusing existing resident subscription for bootstrap"; fi; else echo "warning: selected tunnel cli lacks update-subscription; reusing existing resident subscription for bootstrap"; fi; else "$QP_TUNNEL_CLI" install $SUBSCRIPTION_ARGS; fi',
     domesticTunnelModeCommand,
     '$QP_TUNNEL_CLI status || echo "warning: tunnel cli status failed after enabling egress; continuing with service evidence"',
@@ -4168,6 +4181,22 @@ function siteSlotDeploymentPhases(
         ssh(overseaDockerInstallScript())
       ],
       notes: ['Run after the Oversea subscription proxy is available so Docker packages and images can resolve through egress-on when direct egress is unavailable.']
+    });
+  }
+  if (kind === 'domestic' && mode === 'oversea-assisted') {
+    phases.push({
+      phaseId: 'verify-domestic-egress',
+      title: 'Verify Domestic egress proxy before Docker services',
+      mode: 'remote-ssh',
+      target: 'domestic',
+      required: true,
+      commands: [
+        ssh(domesticEgressProxyReadinessCommand)
+      ],
+      notes: [
+        'Stop before Docker Compose if Domestic cannot reach Docker Hub through the local egress-on proxy.',
+        'A failure here means Domestic SSH and artifact push worked, but the Oversea subscription/proxy path is not ready for Docker image pulls.'
+      ]
     });
   }
   phases.push(

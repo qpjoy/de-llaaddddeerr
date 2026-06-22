@@ -2320,6 +2320,7 @@ export class MemoryStore implements PlatformStore {
     const domesticResolveSubscription = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'resolve-domestic-bootstrap-subscription');
     const domesticBootstrapEgress = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'bootstrap-domestic-egress');
     const domesticDockerRuntime = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'install-domestic-docker-runtime');
+    const domesticEgressProxyReadiness = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'verify-domestic-egress');
     const domesticPeerCenter = domesticSlotPlan.deploymentPhases.find((phase) => phase.phaseId === 'activate-domestic-peer-center');
     if (
       domesticSlotPlan.network.mode !== 'oversea-assisted'
@@ -2344,6 +2345,7 @@ export class MemoryStore implements PlatformStore {
       || !domesticResolveSubscription?.commands.some((command) => command.includes('install node/npm') && command.includes('npm install'))
       || domesticBootstrapEgress?.mode !== 'artifact-push'
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('QP_TUNNEL_CLI=/opt/mx/current/qp-tunnel-cli/bin/qp-tunnel-cli'))
+      || !domesticBootstrapEgress?.commands.some((command) => command.includes('attempt pre-egress npm install @qpjoy/tunnel-cli@latest'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('mx-domestic-qp-tunnel-cli-fallback.tar.gz'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('mx-domestic-bootstrap-subscription.yaml') && command.includes('domestic-bootstrap-subscription.yaml'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('@qpjoy/tunnel-cli@latest') && command.includes('npm refresh skipped after egress-on'))
@@ -2351,7 +2353,12 @@ export class MemoryStore implements PlatformStore {
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('egress-on'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('BOOTSTRAP_SUBSCRIPTION_FILE=/opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('--file $BOOTSTRAP_SUBSCRIPTION_FILE'))
+      || !domesticBootstrapEgress?.commands.some((command) => command.includes('local bootstrap subscription file is required before WG relay/Internal URL is reachable'))
+      || domesticBootstrapEgress?.commands.some((command) => command.includes('--url '))
       || !domesticDockerRuntime?.commands.some((command) => command.includes('docker') && command.includes('apt-get'))
+      || domesticEgressProxyReadiness?.mode !== 'remote-ssh'
+      || !domesticEgressProxyReadiness?.commands.some((command) => command.includes('registry-1.docker.io/v2/') && command.includes('127.0.0.1:7890'))
+      || !domesticEgressProxyReadiness?.commands.some((command) => command.includes('mihomo-client service is not active') && command.includes('Docker registry is not reachable'))
       || !domesticPeerCenter?.commands.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))
       || !domesticPeerCenter?.commands.some((command) => command.includes('mx-domestic-relay.env'))
       || !domesticPeerCenter?.commands.some((command) => command.includes('preserving V1') && command.includes('cleanup-v1-wireguard --apply'))
