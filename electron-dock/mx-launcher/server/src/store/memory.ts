@@ -2357,8 +2357,11 @@ export class MemoryStore implements PlatformStore {
       || domesticBootstrapEgress?.commands.some((command) => command.includes('--url '))
       || !domesticDockerRuntime?.commands.some((command) => command.includes('docker') && command.includes('apt-get'))
       || domesticEgressProxyReadiness?.mode !== 'remote-ssh'
+      || !domesticEgressProxyReadiness?.commands.some((command) => command.includes('www.gstatic.com/generate_204') && command.includes('--http1.1'))
+      || !domesticEgressProxyReadiness?.commands.some((command) => command.includes('auth.docker.io/token') && command.includes('registry-1.docker.io/v2/'))
       || !domesticEgressProxyReadiness?.commands.some((command) => command.includes('registry-1.docker.io/v2/') && command.includes('127.0.0.1:7890'))
-      || !domesticEgressProxyReadiness?.commands.some((command) => command.includes('mihomo-client service is not active') && command.includes('Docker registry is not reachable'))
+      || !domesticEgressProxyReadiness?.commands.some((command) => command.includes('generic HTTPS is not reachable') && command.includes('Docker registry is not reachable'))
+      || !domesticEgressProxyReadiness?.commands.some((command) => command.includes('mihomo-client service is not active') && command.includes('journalctl -u mihomo-client'))
       || !domesticPeerCenter?.commands.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))
       || !domesticPeerCenter?.commands.some((command) => command.includes('mx-domestic-relay.env'))
       || !domesticPeerCenter?.commands.some((command) => command.includes('preserving V1') && command.includes('cleanup-v1-wireguard --apply'))

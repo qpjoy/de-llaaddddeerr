@@ -776,8 +776,11 @@ const checks = [
         && !bootstrapEgress?.commands?.some((command) => command.includes('<internal-issued-oversea-hysteria2-subscription>'))
         && installDockerRuntime?.commands?.some((command) => command.includes('docker') && command.includes('apt-get'))
         && verifyDomesticEgress?.mode === 'remote-ssh'
+        && verifyDomesticEgress?.commands?.some((command) => command.includes('www.gstatic.com/generate_204') && command.includes('--http1.1'))
+        && verifyDomesticEgress?.commands?.some((command) => command.includes('auth.docker.io/token') && command.includes('registry-1.docker.io/v2/'))
         && verifyDomesticEgress?.commands?.some((command) => command.includes('registry-1.docker.io/v2/') && command.includes('127.0.0.1:7890'))
-        && verifyDomesticEgress?.commands?.some((command) => command.includes('mihomo-client service is not active') && command.includes('Docker registry is not reachable'))
+        && verifyDomesticEgress?.commands?.some((command) => command.includes('generic HTTPS is not reachable') && command.includes('Docker registry is not reachable'))
+        && verifyDomesticEgress?.commands?.some((command) => command.includes('mihomo-client service is not active') && command.includes('journalctl -u mihomo-client'))
         && activatePeerCenter?.commands?.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))
         && activatePeerCenter?.commands?.some((command) => command.includes('mx-domestic-relay.env') && command.includes('/opt/mx/current/domestic/mx-domestic-relay.env'))
         && activatePeerCenter?.commands?.some((command) => command.includes('preserving V1') && command.includes('cleanup-v1-wireguard --apply'))
