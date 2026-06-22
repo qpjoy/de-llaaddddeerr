@@ -404,6 +404,23 @@ export class AdminController {
       accounts: planAccessAccounts.length
     }));
 
+    if (executeRemote && confirmInstall) {
+      const artifactMaterialize = await this.materializeSiteSlotArtifactSet('oversea');
+      ensureSteps.push(overseaEnsureStep('artifacts', artifactMaterialize.blockedReasons.length ? 'blocked' : 'passed', artifactMaterialize.manifest?.path ?? 'oversea', {
+        execution: artifactMaterialize.execution,
+        modules: artifactMaterialize.manifest?.modules.map((module) => ({
+          moduleId: module.moduleId,
+          status: module.status,
+          artifact: module.artifact
+        })) ?? [],
+        blockedReasons: artifactMaterialize.blockedReasons
+      }));
+      if (artifactMaterialize.blockedReasons.length > 0) {
+        const ensure = ensureBlocked(siteId, 'artifact-materialize-failed', artifactMaterialize.blockedReasons, ensureSteps);
+        return { ensure, oversea: await this.buildOverseaOverview(actionPolicy, ensure) };
+      }
+    }
+
     let plan = await this.findReusableOverseaPlan(siteId, profile.profileId, serverPorts, exportPort, workerInternalBaseUrl, overseaCallbackBaseUrl);
     if (!plan || !reusableOverseaPlanIncludesAccounts(plan, planAccessAccounts)) {
       plan = await this.store.createSiteSlotPlan({
@@ -1060,6 +1077,49 @@ export class AdminController {
         module
       }, blockedReasons)
     };
+  }
+
+  private async materializeSiteSlotArtifactSet(kind: 'oversea' | 'domestic'): Promise<{
+    execution: { exitCode: number; stdout: string; stderr: string } | null;
+    manifest: ReturnType<typeof readArtifactManifest> | null;
+    blockedReasons: string[];
+  }> {
+    const mxRoot = resolveMxLauncherRoot();
+    const scriptPath = [
+      resolve(mxRoot, 'server/scripts/site-slot-artifact-materializer.mjs'),
+      resolve(mxRoot, 'scripts/site-slot-artifact-materializer.mjs')
+    ].find((candidate) => existsSync(candidate)) ?? resolve(mxRoot, 'server/scripts/site-slot-artifact-materializer.mjs');
+    let execution: { exitCode: number; stdout: string; stderr: string } | null = null;
+    const blockedReasons: string[] = [];
+    try {
+      const { stdout, stderr } = await execFileAsync(process.execPath, [scriptPath, kind], {
+        cwd: mxRoot,
+        env: {
+          ...process.env,
+          SITE_SLOT_ARTIFACT_OUTPUT_DIR: resolveSiteSlotArtifactBaseDir()
+        },
+        timeout: 60 * 1000,
+        maxBuffer: 4 * 1024 * 1024
+      });
+      execution = { exitCode: 0, stdout, stderr };
+    } catch (error) {
+      const execError = error as Error & { code?: number | string; stdout?: string; stderr?: string };
+      execution = {
+        exitCode: typeof execError.code === 'number' ? execError.code : 1,
+        stdout: execError.stdout ?? '',
+        stderr: execError.stderr ?? execError.message
+      };
+      blockedReasons.push(`artifact materializer failed: ${execution.stderr || execution.exitCode}`);
+    }
+    const manifestFailures: string[] = [];
+    const manifest = readArtifactManifest(kind, resolveSiteSlotArtifactBaseDir(), manifestFailures);
+    if (manifestFailures.length) blockedReasons.push(...manifestFailures);
+    const requiredModuleId = kind === 'oversea' ? 'hysteria2-access-stack' : 'qp-tunnel-cli';
+    const module = manifest?.modules.find((item) => item.moduleId === requiredModuleId) ?? null;
+    if (module?.status !== 'ready') {
+      blockedReasons.push(`${requiredModuleId} artifact is ${module?.status ?? 'missing'}, expected ready`);
+    }
+    return { execution, manifest, blockedReasons };
   }
 
   private async adminInternalServicePeerDomesticKeySyncResult(

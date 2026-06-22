@@ -616,6 +616,29 @@ container_running() {
 	[[ "$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || true)" == "true" ]]
 }
 
+hysteria_port_publish_check_supported() {
+	[[ "${HY2_SERVER_PORTS:-}" =~ ^[0-9]+$ ]]
+}
+
+hysteria_published_port_matches_env() {
+	hysteria_port_publish_check_supported || return 0
+	docker port "$HYSTERIA_CONTAINER" "${HY2_SERVER_PORTS}/udp" >/dev/null 2>&1
+}
+
+ensure_hysteria_published_port() {
+	load_env
+	container_running "$HYSTERIA_CONTAINER" || return 0
+	hysteria_port_publish_check_supported || return 0
+	if hysteria_published_port_matches_env; then
+		return 0
+	fi
+
+	echo "Docker published UDP port drift detected for $HYSTERIA_CONTAINER; expected ${HY2_SERVER_PORTS}/udp. Recreating hysteria service."
+	safe_recreate_service hysteria
+	wait_for_container "$HYSTERIA_CONTAINER"
+	hysteria_published_port_matches_env || die "Docker did not publish expected Hysteria2 UDP port ${HY2_SERVER_PORTS}/udp after recreate."
+}
+
 wait_for_subscription_http_ready() {
 	local port="${1:-$HY2_EXPORT_FALLBACK_PORT}"
 	local deadline=$((SECONDS + 60))
@@ -1253,6 +1276,7 @@ start_target() {
 			wait_for_container "$SUBSCRIPTIONS_CONTAINER"
 			safe_recreate_service hysteria
 			wait_for_container "$HYSTERIA_CONTAINER"
+			ensure_hysteria_published_port
 			refresh_subscriptions
 		;;
 		hysteria)
@@ -1260,6 +1284,7 @@ start_target() {
 			ensure_non_overlapping_stack_subnet
 			safe_recreate_service hysteria
 			wait_for_container "$HYSTERIA_CONTAINER"
+			ensure_hysteria_published_port
 			refresh_subscriptions
 		;;
 		subscriptions)
@@ -1352,6 +1377,11 @@ internal_defaults_drift_report() {
 	fi
 	if [[ "${HY2_DEFAULT_UP:-}" != "$(default_hy2_upload_rate)" ]]; then
 		echo "drift: HY2_DEFAULT_UP=${HY2_DEFAULT_UP:-unset} expected $(default_hy2_upload_rate)"
+		drift=1
+	fi
+	if container_running "$HYSTERIA_CONTAINER" && ! hysteria_published_port_matches_env; then
+		echo "drift: Docker published UDP port does not match HY2_SERVER_PORTS=${HY2_SERVER_PORTS:-unset}"
+		docker port "$HYSTERIA_CONTAINER" 2>/dev/null || true
 		drift=1
 	fi
 	if [[ "${HY2_INTERNAL_SUBSCRIPTION_STORE:-}" != "config-center" ]]; then
@@ -1453,6 +1483,8 @@ sync_internal_defaults_command() {
 		start_target all
 	elif [[ "$old_signature" != "$new_signature" ]]; then
 		recreate_full_stack
+	elif ! hysteria_published_port_matches_env; then
+		ensure_hysteria_published_port
 	else
 		refresh_subscriptions
 	fi
@@ -1910,6 +1942,8 @@ reconcile_from_json_command() {
 		start_target all
 	elif [[ "$old_signature" != "$new_signature" ]]; then
 		recreate_full_stack
+	elif ! hysteria_published_port_matches_env; then
+		ensure_hysteria_published_port
 	else
 		refresh_subscriptions
 	fi
