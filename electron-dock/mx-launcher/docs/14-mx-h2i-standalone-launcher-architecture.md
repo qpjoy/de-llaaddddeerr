@@ -388,6 +388,54 @@ artifact 和本地 apply 命令，不代表 API pod 已经远程安装 WireGuard
 `Internal Service Peer Status`，确认 native host-runner 可达后再执行
 `Install Internal Service Peer`。
 
+### Oversea install-sync plan and validation
+
+正式 Internal 上通过 Admin `Oversea -> Sync Remote` 触发的是
+`POST /internal/v1/admin/oversea/:siteId/ensure`。这条路径以 Internal 为唯一真相：
+Oversea 只接收 Docker hysteria2 access stack、site-agent/runner-worker artifact 和
+Internal 下发的 access account material，不保存 Config Center 权限真相。
+
+当前 oversea plan 的主要步骤是：
+
+1. `ssh-profile`：读取 active Oversea SSH Profile，检查 host、identity、known_hosts 和
+   ssh config。Profile 只描述远端登录方式，不代表已经执行远端变更。
+2. `internal-mihomo`：在 Internal Config Center 为该 oversea site issue hysteria2 access
+   accounts，并生成 subscription endpoint。Oversea 端只拿被推送的账号 material。
+3. `plan`：生成 site-slot plan。plan 里包含 `package-slot-artifacts`、
+   `prepare-access-stack`、`configure-oversea-access`、`publish-internal-subscription`、
+   `deploy-slot-services` 和 `sync-internal-config`。
+4. `preflight`：dry-run manifest/evidence，确认 artifact、SSH profile 和 deployment
+   commands 可被 Internal 描述出来。
+5. `apply`：确认 apply execution。这里仍是控制面 gate，不直接 SSH。
+6. `remote-runner`：创建 `remote-ssh` runner session。只有 `queued` runner 可以挂新的
+   worker job；已经 `passed` 的 runner 表示上一轮 worker report 已结束，不能再复用。
+7. `worker-job`：创建 oversea worker job，展开每个 artifact-push/配置/健康检查命令。
+8. `remote-worker-run`：在 `executeRemote=true` 且 `confirmInstall=true` 时，通过 Internal
+   侧 worker 执行 SSH/rsync/scp，把 artifact 推到 Oversea 并运行远端脚本；成功后 worker
+   report 中应出现 `mode=artifact-push-remote-ssh`、`execution=executed`。
+
+如果 UI 显示
+`runner session must be completed or queued before creating a worker job; current status is passed`，
+含义不是 Docker/hysteria2 失败，而是 Internal 尝试把新 worker job 挂到上一轮已经
+`passed` 的 runner session。正确行为是：已有 `artifact-push-remote-ssh` passed report 时直接
+认为 `installed`；需要重跑安装时创建新的 `queued` runner/job，或显式带 `force=true`。
+
+验证 Oversea 侧是否真正可用，可以分三层看：
+
+- Oversea 主机：`docker ps` 应看到 hysteria2 UDP 端口和 health/export 端口，例如
+  `0.0.0.0:51288->51288/udp`、`0.0.0.0:3435->8080/tcp`。
+- Internal 证据：最近 worker report 必须是 remote executed 的 passed report，而不是纯
+  AWX shadow/dry-run evidence。
+- Internal 宿主机外联：可以在真实 Internal runtime host 安装 `@qpjoy/tunnel-cli`，使用
+  Internal 账号 subscription 验证 Oversea Hysteria2 出口。如果 Internal subscription URL
+  可以匿名 `curl`，可直接执行
+  `qp-tunnel-cli install --url http://<internal>/internal/v1/site-slots/oversea-main/subscriptions/hysteria2/oversea-main-internal.yaml`；
+  离线/内推场景则先下载 `oversea-main-internal.yaml`，再执行
+  `qp-tunnel-cli install --file /path/to/oversea-main-internal.yaml`。随后运行
+  `qp-tunnel-cli egress-on`。如果这个 host 上的 `curl`/Docker registry egress 恢复，说明
+  Internal 宿主机经 Oversea access 的 outbound bootstrap 成功。不要用这个结果替代
+  `mx-internal-svc`/Domestic WG 的 H2I 数据面验证；两者是互补的两条链路。
+
 Internal API 可以跑在 k8s pod 里，但 WG runtime 必须跑在真实 Internal 宿主机上。当前
 默认 host-runner 是 native runner：macOS 用 LaunchAgent，Ubuntu/Linux 用 systemd，
 由 `bash scripts/manage.sh ops site-slot native-host-runner install 19190` 安装；k8s API

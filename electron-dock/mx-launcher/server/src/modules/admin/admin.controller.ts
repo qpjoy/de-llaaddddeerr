@@ -442,6 +442,29 @@ export class AdminController {
       return { ensure, oversea: await this.buildOverseaOverview(actionPolicy, ensure) };
     }
 
+    const existingInstallReport = latestByCreatedAt((await this.store.listSiteSlotWorkerReports())
+      .filter((report) => report.planId === plan.planId && report.status === 'passed' && workerReportHasRemoteExecution(report)));
+    if (existingInstallReport && !force) {
+      const ensure = {
+        siteId,
+        status: 'installed',
+        blockedReasons: [],
+        planId: plan.planId,
+        jobId: existingInstallReport.jobId,
+        reportId: existingInstallReport.reportId,
+        steps: [
+          ...ensureSteps,
+          overseaEnsureStep('worker-report', 'passed', existingInstallReport.reportId, {
+            status: existingInstallReport.status,
+            mode: workerReportModes(existingInstallReport).join(' / ') || 'artifact-push-remote-ssh'
+          })
+        ],
+        nextActions: ['sync-oversea-status', 'manage-internal-mihomo-subscriptions', 'prepare-domestic-wg-h2i-delivery'],
+        generatedAt: new Date().toISOString()
+      };
+      return { ensure, oversea: await this.buildOverseaOverview(actionPolicy, ensure) };
+    }
+
     const session = await this.ensureRemoteRunnerSession(apply, requestedBy, `${requestId}-runner`);
     ensureSteps.push(overseaEnsureStep('remote-runner', normalizeStageStatusForEnsure(session.status), session.sessionId, {
       status: session.status,
@@ -742,7 +765,7 @@ export class AdminController {
     const sessions = await this.store.listSiteSlotRunnerSessions(execution.runId);
     const existing = latestByStartedAt(sessions.filter((session) => (
       session.mode === 'remote-ssh'
-      && (session.status === 'queued' || session.status === 'running' || session.status === 'passed')
+      && session.status === 'queued'
     )));
     if (existing) return existing;
     return this.store.startSiteSlotRunnerSession({
@@ -6084,7 +6107,7 @@ function buildPipelineActionHints(
   const confirmedApply = sortByCreatedAt(executions).find((execution) => execution.action === 'apply' && execution.status === 'ready' && execution.confirmApply);
   const latestReadyExecution = [...sortByCreatedAt(executions)].reverse().find((execution) => execution.status === 'ready') ?? null;
   const sessionNeedingWorker = [...sortByStartedAt(runnerSessions)].reverse().find((session) => {
-    const canAttachWorker = session.status === 'completed' || session.status === 'queued' || session.status === 'running';
+    const canAttachWorker = session.status === 'completed' || session.status === 'queued';
     return canAttachWorker && !workerJobs.some((job) => job.sessionId === session.sessionId);
   }) ?? null;
   const failedReportNeedingRollback = [...sortByCreatedAt(workerReports)].reverse().find((report) => {

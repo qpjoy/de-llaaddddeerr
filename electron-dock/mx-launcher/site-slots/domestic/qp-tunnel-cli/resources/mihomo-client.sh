@@ -68,6 +68,7 @@ Install options:
   --file FILE          Local subscription YAML file, for Internal-pushed bootstrap
   --user USER          Basic Auth username for subscription
   --password PASS      Basic Auth password for subscription
+  --no-auth            Do not prompt for or send Basic Auth credentials
   --version TAG        Mihomo version tag. Default: latest stable release
   --binary-path PATH   Use an existing Mihomo binary instead of downloading from GitHub
   --no-start           Install/update files but do not start the service
@@ -77,6 +78,7 @@ Update options:
   --file FILE          Replace subscription from a local YAML file
   --user USER          Override saved subscription username
   --password PASS      Override saved subscription password
+  --no-auth            Clear saved Basic Auth credentials and fetch without auth
 
 Uninstall options:
   --purge              Also remove config, env, downloaded YAML, and Mihomo binary
@@ -703,6 +705,7 @@ update_subscription_command() {
 	local username="${2:-}"
 	local password="${3:-}"
 	local file_path="${4:-}"
+	local no_auth="${5:-false}"
 	local -a normalized=()
 
 	load_env
@@ -726,8 +729,13 @@ update_subscription_command() {
 	fi
 
 	url="${url:-${MIHOMO_SUBSCRIPTION_URL:-}}"
-	username="${username:-${MIHOMO_SUBSCRIPTION_USER:-}}"
-	password="${password:-${MIHOMO_SUBSCRIPTION_PASSWORD:-}}"
+	if [[ "$no_auth" == "true" ]]; then
+		username=""
+		password=""
+	else
+		username="${username:-${MIHOMO_SUBSCRIPTION_USER:-}}"
+		password="${password:-${MIHOMO_SUBSCRIPTION_PASSWORD:-}}"
+	fi
 	mapfile -t normalized < <(normalize_subscription_inputs "$url" "$username" "$password")
 	url="${normalized[0]}"
 	username="${normalized[1]}"
@@ -983,6 +991,7 @@ install_command() {
 	local autostart="${5:-true}"
 	local binary_path="${6:-}"
 	local file_path="${7:-}"
+	local no_auth="${8:-false}"
 	local -a normalized=()
 
 	ensure_dirs
@@ -997,10 +1006,14 @@ install_command() {
 		url="${normalized[0]}"
 		username="${normalized[1]}"
 		password="${normalized[2]}"
-		if [[ -z "$username" ]]; then
+		if [[ "$no_auth" == "true" ]]; then
+			username=""
+			password=""
+		fi
+		if [[ "$no_auth" != "true" && -z "$username" ]]; then
 			username="$(prompt_default "Subscription username (empty if none)" "${MIHOMO_SUBSCRIPTION_USER:-}")"
 		fi
-		if [[ -z "$password" ]]; then
+		if [[ "$no_auth" != "true" && -z "$password" ]]; then
 			password="$(prompt_password "Subscription password (empty if none)")"
 		fi
 	fi
@@ -1125,35 +1138,47 @@ main() {
 			local autostart="true"
 			local binary_path=""
 			local file_path=""
+			local no_auth="false"
+			local url_arg_provided="false"
 			while [[ $# -gt 0 ]]; do
 				case "$1" in
-					--url) url="$2"; shift 2 ;;
+					--url) url="$2"; url_arg_provided="true"; shift 2 ;;
 					--file) file_path="$2"; shift 2 ;;
 					--user) username="$2"; shift 2 ;;
 					--password) password="$2"; shift 2 ;;
+					--no-auth) no_auth="true"; shift ;;
 					--version) version="$2"; shift 2 ;;
 					--binary-path) binary_path="$2"; shift 2 ;;
 					--no-start) autostart="false"; shift ;;
 					*) die "Unknown install option: $1" ;;
 				esac
 			done
-			install_command "$url" "$username" "$password" "$version" "$autostart" "$binary_path" "$file_path"
+			if [[ "$url_arg_provided" == "true" && -z "$username" && -z "$password" ]]; then
+				no_auth="true"
+			fi
+			install_command "$url" "$username" "$password" "$version" "$autostart" "$binary_path" "$file_path" "$no_auth"
 		;;
 		update-subscription)
 			local url=""
 			local username=""
 			local password=""
 			local file_path=""
+			local no_auth="false"
+			local url_arg_provided="false"
 			while [[ $# -gt 0 ]]; do
 				case "$1" in
-					--url) url="$2"; shift 2 ;;
+					--url) url="$2"; url_arg_provided="true"; shift 2 ;;
 					--file) file_path="$2"; shift 2 ;;
 					--user) username="$2"; shift 2 ;;
 					--password) password="$2"; shift 2 ;;
+					--no-auth) no_auth="true"; shift ;;
 					*) die "Unknown update-subscription option: $1" ;;
 				esac
 			done
-			update_subscription_command "$url" "$username" "$password" "$file_path"
+			if [[ "$url_arg_provided" == "true" && -z "$username" && -z "$password" ]]; then
+				no_auth="true"
+			fi
+			update_subscription_command "$url" "$username" "$password" "$file_path" "$no_auth"
 		;;
 		start)
 			start_command

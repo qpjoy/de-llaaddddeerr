@@ -107,6 +107,7 @@ Usage:
 
 Common commands:
   qp-tunnel-cli install --url http://IP:3434/peer_user01.mihomo.yaml --user download --password pass
+  qp-tunnel-cli install --url http://internal:18090/internal/v1/site-slots/oversea-main/subscriptions/hysteria2/oversea-main-internal.yaml
   qp-tunnel-cli install --file /opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml
   qp-tunnel-cli status
   qp-tunnel-cli start
