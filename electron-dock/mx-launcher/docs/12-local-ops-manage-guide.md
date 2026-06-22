@@ -335,6 +335,10 @@ worker 时回调 Internal API 的地址；它不要求 Domestic 主机或浏览�
 Remote SSH gate 和 Domestic WG materialize 会从最新 Config Center 重新渲染这两个 bootstrap
 YAML；Oversea 新增的 H/user 订阅账号仍由 Internal API 动态渲染，不需要写入 Domestic bootstrap
 快照。
+Domestic bootstrap 会优先使用 Internal 推送的 `/opt/mx/current/qp-tunnel-cli/bin/qp-tunnel-cli`，
+并覆盖 `/usr/local/bin/qp-tunnel-cli` wrapper，避免旧全局 npm 版本缺少 `egress-on`。
+`qp-tunnel-cli install --file` / `update-subscription --file` 会覆盖
+`/etc/mihomo-client/subscription.yaml`，不会合并多份 YAML；切换 bootstrap identity 前应先备份旧文件。
 
 再规划 Domestic。如果 Domestic 不能直接访问外网，把 Oversea host 一起传入，plan 会进入
 `oversea-assisted` 模式，并提示使用 `@qpjoy/tunnel-cli server-on` / `egress-on`

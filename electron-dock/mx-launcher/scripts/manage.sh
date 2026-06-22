@@ -248,6 +248,16 @@ shadow_image_tunnel_cli_fallback() {
   local cli_source="$plugin_root/packages/tunnel-cli"
   local build_full="${MX_SHADOW_BUILD_ELECTRON_PLUGIN_FALLBACK:-0}"
   if qp_tunnel_cli_fallback_ready "$target_dir"; then
+    if [ -f "$cli_source/package.json" ] && qp_tunnel_cli_fallback_ready "$cli_source" && wireguard_runtime_ready "$plugin_root"; then
+      local target_version=""
+      local source_version=""
+      target_version="$(node -e "console.log(require(process.argv[1]).version || '')" "$target_dir/package.json" 2>/dev/null || true)"
+      source_version="$(node -e "console.log(require(process.argv[1]).version || '')" "$cli_source/package.json" 2>/dev/null || true)"
+      if [ -n "$source_version" ] && [ "$target_version" != "$source_version" ]; then
+        say "refresh mx-launcher qp-tunnel-cli fallback from local electron-plugin package ($target_version -> $source_version)"
+        node server/scripts/site-slot-refresh-tunnel-cli.mjs --from-local "$cli_source"
+      fi
+    fi
     return 0
   fi
   if [ -f "$cli_source/package.json" ] && qp_tunnel_cli_fallback_ready "$cli_source" && wireguard_runtime_ready "$plugin_root"; then
