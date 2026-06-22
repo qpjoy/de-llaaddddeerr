@@ -2853,7 +2853,7 @@ export function buildSiteSlotWorkerJob(
       requiresRoot: step.command.includes('root@') || step.command.includes('/etc/wireguard') || step.command.includes('systemctl'),
       timeoutSeconds: step.command.startsWith('Check ') ? 30 : 300,
       stopOnFailure: true,
-      redactOutput: step.command.includes('subscription') || step.command.includes('token') || step.command.includes('DATABASE_URL')
+      redactOutput: siteSlotWorkerStepRedactOutput(step)
     })),
     warnings,
     currentReportId: null,
@@ -2863,6 +2863,13 @@ export function buildSiteSlotWorkerJob(
     createdBy: input.requestedBy?.trim() || session.createdBy,
     createdAt
   };
+}
+
+function siteSlotWorkerStepRedactOutput(step: SiteSlotRunnerSession['stepResults'][number]): boolean {
+  const command = step.command;
+  if (step.sourceId.startsWith('verify-domestic-egress.')) return false;
+  if (command.includes('subscription') || command.includes('DATABASE_URL')) return true;
+  return /(^|[^A-Za-z0-9_])(?:authToken|AUTH_TOKEN|accessToken|ACCESS_TOKEN|token|TOKEN)(?:=|:)/.test(command);
 }
 
 export function buildSiteSlotWorkerReport(

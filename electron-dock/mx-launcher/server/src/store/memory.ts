@@ -2401,6 +2401,38 @@ export class MemoryStore implements PlatformStore {
       throw new Error('Domestic slot apply execution did not require explicit confirmation');
     }
     checks.push('OK Domestic slot apply execution gate requires confirmation');
+    const domesticSlotConfirmedApplyExecution = this.createSiteSlotExecution({
+      planId: domesticSlotPlan.planId,
+      action: 'apply',
+      mode: 'manual',
+      confirmApply: true,
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-apply-confirmed'
+    });
+    const domesticSlotApplyRunnerSession = this.startSiteSlotRunnerSession({
+      runId: domesticSlotConfirmedApplyExecution.runId,
+      mode: 'simulate',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-apply-runner-simulate'
+    });
+    const domesticSlotApplyWorkerJob = this.createSiteSlotWorkerJob({
+      sessionId: domesticSlotApplyRunnerSession.sessionId,
+      workerId: 'worker-shadow-domestic-apply',
+      workerKind: 'internal-runner',
+      requestedBy: 'platform-kernel-smoke',
+      requestId: 'smoke-domestic-slot-apply-worker-job'
+    });
+    const domesticBootstrapEgressWorkerStep = domesticSlotApplyWorkerJob.steps.find((step) => step.sourceId.startsWith('bootstrap-domestic-egress.'));
+    const domesticVerifyEgressWorkerStep = domesticSlotApplyWorkerJob.steps.find((step) => step.sourceId.startsWith('verify-domestic-egress.'));
+    if (
+      domesticSlotConfirmedApplyExecution.status !== 'ready'
+      || domesticSlotApplyRunnerSession.status !== 'completed'
+      || !domesticBootstrapEgressWorkerStep?.redactOutput
+      || domesticVerifyEgressWorkerStep?.redactOutput !== false
+    ) {
+      throw new Error('Domestic apply worker redaction policy did not preserve egress diagnostics');
+    }
+    checks.push('OK Domestic apply worker preserves egress diagnostics');
     const domesticSlotPreflightRunnerSession = this.startSiteSlotRunnerSession({
       runId: domesticSlotPreflightExecution.runId,
       mode: 'simulate',
