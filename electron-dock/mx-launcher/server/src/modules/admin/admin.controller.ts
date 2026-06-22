@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { connect as netConnect } from 'node:net';
 import { hostname as osHostname, platform as osPlatform, release as osRelease } from 'node:os';
 import { basename, dirname, resolve } from 'node:path';
@@ -648,6 +648,58 @@ export class AdminController {
     )));
   }
 
+  private async withDomesticBootstrapAccess(input: SiteSlotPlanInput): Promise<SiteSlotPlanInput> {
+    const kind = input.kind === 'oversea' ? 'oversea' : 'domestic';
+    if (kind !== 'domestic' || input.hasOutboundInternet === true) return input;
+    const overseaSiteId = input.overseaSiteId?.trim() || 'oversea-main';
+    if (input.accessAccounts?.length) return { ...input, overseaSiteId };
+
+    await this.store.issueSiteSlotAccessAccounts({
+      siteId: overseaSiteId,
+      service: 'hysteria2',
+      issueDefaults: true,
+      publicHost: input.overseaHost ?? undefined,
+      serverPorts: input.serverPorts,
+      requestedBy: input.createdBy ?? 'admin-controller',
+      requestId: `${input.requestId ?? 'admin-site-slot-plan'}-domestic-bootstrap`
+    });
+    const accounts = await this.store.listSiteSlotAccessAccounts(overseaSiteId);
+    return {
+      ...input,
+      overseaSiteId,
+      accessAccounts: siteSlotPlanAccessAccountMaterial(accounts)
+    };
+  }
+
+  private async materializeDomesticBootstrapSubscription(plan: SiteSlotPlan): Promise<void> {
+    if (plan.kind !== 'domestic' || plan.network.mode !== 'oversea-assisted' || !plan.network.overseaSiteId) return;
+    const accounts = await this.store.listSiteSlotAccessAccounts(plan.network.overseaSiteId);
+    await this.writeBootstrapSubscriptionArtifact(
+      plan.network.overseaSiteId,
+      domesticBootstrapAccount(accounts),
+      'domestic/mx-domestic-bootstrap-subscription.yaml'
+    );
+    await this.writeBootstrapSubscriptionArtifact(
+      plan.network.overseaSiteId,
+      internalBootstrapAccount(accounts),
+      'domestic/mx-internal-egress-subscription.yaml'
+    );
+  }
+
+  private async writeBootstrapSubscriptionArtifact(
+    siteId: string,
+    account: SiteSlotAccessAccount | null,
+    artifactPath: string
+  ): Promise<void> {
+    if (!account) return;
+    const subscription = await this.store.renderHysteria2MihomoSubscription(siteId, account.username);
+    if (!subscription) return;
+    const filePath = resolve(resolveSiteSlotArtifactBaseDir(), artifactPath);
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, subscription.yaml);
+    chmodSync(filePath, 0o600);
+  }
+
   private async ensureSiteSlotExecution(
     plan: SiteSlotPlan,
     action: 'preflight' | 'apply',
@@ -1243,11 +1295,13 @@ export class AdminController {
   private async dispatchAdminAction(actionId: string, path: string, body: Record<string, unknown>) {
     if (actionId === 'site-slot.plan.create') {
       if (path !== '/internal/v1/site-slots/plans') throw new BadRequestException('Admin site-slot plan path is invalid');
-      const input = toSiteSlotPlanInput(body);
+      const input = await this.withDomesticBootstrapAccess(toSiteSlotPlanInput(body));
       const hostFailure = await this.domesticPlanHostValidationFailure(input);
       if (hostFailure) throw new BadRequestException(hostFailure);
+      const plan = await this.store.createSiteSlotPlan(input);
+      await this.materializeDomesticBootstrapSubscription(plan);
       return {
-        plan: await this.store.createSiteSlotPlan(input)
+        plan
       };
     }
     if (actionId === 'site-slot.domestic-runtime-config.upsert') {
@@ -2329,6 +2383,18 @@ function siteSlotPlanAccessAccountMaterial(accounts: SiteSlotAccessAccount[]): S
       upRate: '30 Mbps',
       downRate: '30 Mbps'
     }));
+}
+
+function domesticBootstrapAccount(accounts: SiteSlotAccessAccount[]): SiteSlotAccessAccount | null {
+  return accounts.find((account) => account.role === 'domestic')
+    ?? accounts.find((account) => account.username.endsWith('-domestic'))
+    ?? null;
+}
+
+function internalBootstrapAccount(accounts: SiteSlotAccessAccount[]): SiteSlotAccessAccount | null {
+  return accounts.find((account) => account.role === 'internal')
+    ?? accounts.find((account) => account.username.endsWith('-internal'))
+    ?? null;
 }
 
 function booleanValue(value: unknown): boolean | null {
@@ -6342,7 +6408,6 @@ function domesticWgMaterializeAction(
         publicEndpoint: endpointFromPlanHost(plan, 51280),
         listenPort: 51280,
         internalDirectEnabled: false,
-        internalDirectEndpoint: '<internal-reachable-host-or-ip>:51280',
         internalDirectListenPort: 51280,
         domesticGatewayIp: '10.88.0.1',
         domesticGatewayCidr: '10.88.0.0/16',
@@ -7129,7 +7194,6 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         publicEndpoint: '<domestic-public-endpoint>',
         listenPort: 51280,
         internalDirectEnabled: false,
-        internalDirectEndpoint: '<internal-reachable-host-or-ip>:51280',
         internalDirectListenPort: 51280,
         domesticGatewayIp: '10.88.0.1',
         domesticGatewayCidr: '10.88.0.0/16',

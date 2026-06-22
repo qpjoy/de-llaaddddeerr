@@ -9604,7 +9604,18 @@ function materializeActionBodyTemplate(action) {
     '<home-wg-public-key>': homePeer.publicKey || '<home-wg-public-key>',
     '<request-id>': requestId
   });
-  return awxActionBodyDefaults(action, body);
+  return awxActionBodyDefaults(action, normalizeActionBodyTemplate(action, body));
+}
+
+function normalizeActionBodyTemplate(action, body) {
+  if (action?.actionId !== 'site-slot.domestic-wg.materialize' || !body || typeof body !== 'object' || Array.isArray(body)) {
+    return body;
+  }
+  const normalized = { ...body };
+  if (normalized.internalDirectEnabled !== true && isAngleBracketPlaceholder(normalized.internalDirectEndpoint)) {
+    delete normalized.internalDirectEndpoint;
+  }
+  return normalized;
 }
 
 function replaceActionTemplateValue(value, replacements) {
@@ -9614,6 +9625,10 @@ function replaceActionTemplateValue(value, replacements) {
   }
   if (typeof value !== 'string') return value;
   return Object.prototype.hasOwnProperty.call(replacements, value) ? replacements[value] : value;
+}
+
+function isAngleBracketPlaceholder(value) {
+  return typeof value === 'string' && /<[^>]+>/.test(value);
 }
 
 function actionBodyForExecution(action) {

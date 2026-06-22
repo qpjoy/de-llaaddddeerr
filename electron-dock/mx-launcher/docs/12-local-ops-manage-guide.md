@@ -326,6 +326,13 @@ SITE_SLOT_RELEASE_REVISION=shadow-001 \
 Oversea 订阅时，Domestic plan 会停在 `resolve-domestic-bootstrap-subscription`：Internal
 只先准备 fallback artifact，不让 Domestic 自己 npm 拉包，也不执行 `server-on`。
 
+Admin UI 的 Domestic `New 2.0 Plan` 走 `site-slot.plan.create` action。Domestic 无公网出站时，
+这个 action 必须和 CLI plan 一样先确保 Oversea bootstrap access accounts 存在，并在
+Internal artifact root 下写入 `domestic/mx-domestic-bootstrap-subscription.yaml` 和
+`domestic/mx-internal-egress-subscription.yaml`。`Remote SSH Worker Execute` 里的
+`workerInternalBaseUrl=http://127.0.0.1:18090` 是 Internal server 在同一 pod/container 内启动
+worker 时回调 Internal API 的地址；它不要求 Domestic 主机或浏览器能访问这个 loopback。
+
 再规划 Domestic。如果 Domestic 不能直接访问外网，把 Oversea host 一起传入，plan 会进入
 `oversea-assisted` 模式，并提示使用 `@qpjoy/tunnel-cli server-on` / `egress-on`
 完成受控外网引导。mihomo 订阅仍由 Internal 托管，Domestic 只保留 WG relay、proxy、
