@@ -377,8 +377,71 @@ kubelet_eviction_hard_arg() {
     "$K8S_KUBELET_EVICTION_IMAGEFS_INODES_FREE"
 }
 
+kubelet_eviction_yaml_block() {
+  cat <<EOF
+evictionHard:
+  memory.available: "${K8S_KUBELET_EVICTION_MEMORY_AVAILABLE}"
+  nodefs.available: "${K8S_KUBELET_EVICTION_NODEFS_AVAILABLE}"
+  imagefs.available: "${K8S_KUBELET_EVICTION_IMAGEFS_AVAILABLE}"
+  nodefs.inodesFree: "${K8S_KUBELET_EVICTION_NODEFS_INODES_FREE}"
+  imagefs.inodesFree: "${K8S_KUBELET_EVICTION_IMAGEFS_INODES_FREE}"
+EOF
+}
+
 systemd_environment_value() {
   printf '%s\n' "$1" | sed 's/%/%%/g'
+}
+
+configure_kubelet_config_eviction() {
+  local config_path="/var/lib/kubelet/config.yaml"
+  local tmp_path
+  if [ ! -f "$config_path" ]; then
+    say "kubelet config not found yet: $config_path; kubeadm init config will carry eviction thresholds"
+    return 0
+  fi
+  say "write kubelet config evictionHard in $config_path"
+  backup_file "$config_path"
+  if [ "$DRY_RUN" = "1" ]; then
+    kubelet_eviction_yaml_block >/dev/null
+    say "would replace or append evictionHard in $config_path"
+    return 0
+  fi
+  tmp_path="${config_path}.mx-eviction.$$"
+  awk \
+    -v memory="$K8S_KUBELET_EVICTION_MEMORY_AVAILABLE" \
+    -v nodefs="$K8S_KUBELET_EVICTION_NODEFS_AVAILABLE" \
+    -v imagefs="$K8S_KUBELET_EVICTION_IMAGEFS_AVAILABLE" \
+    -v nodefs_inodes="$K8S_KUBELET_EVICTION_NODEFS_INODES_FREE" \
+    -v imagefs_inodes="$K8S_KUBELET_EVICTION_IMAGEFS_INODES_FREE" '
+      function block() {
+        print "evictionHard:"
+        print "  memory.available: \"" memory "\""
+        print "  nodefs.available: \"" nodefs "\""
+        print "  imagefs.available: \"" imagefs "\""
+        print "  nodefs.inodesFree: \"" nodefs_inodes "\""
+        print "  imagefs.inodesFree: \"" imagefs_inodes "\""
+      }
+      /^evictionHard:[[:space:]]*$/ {
+        block()
+        replaced = 1
+        skipping = 1
+        next
+      }
+      skipping {
+        if ($0 ~ /^[^[:space:]#]/ || $0 ~ /^---[[:space:]]*$/) {
+          skipping = 0
+        } else {
+          next
+        }
+      }
+      { print }
+      END {
+        if (!replaced) {
+          block()
+        }
+      }
+    ' "$config_path" >"$tmp_path"
+  mv "$tmp_path" "$config_path"
 }
 
 configure_kubelet_eviction() {
@@ -392,6 +455,7 @@ configure_kubelet_eviction() {
 [Service]
 Environment="KUBELET_EXTRA_ARGS=--eviction-hard=${systemd_eviction_hard}"
 EOF
+  configure_kubelet_config_eviction
   run systemctl daemon-reload
   run_allow_fail systemctl restart kubelet
 }
@@ -427,20 +491,27 @@ networking:
   podSubnet: ${POD_CIDR}
   serviceSubnet: ${SERVICE_CIDR}
 EOF
-  if [ "$include_cgroup_v1" = "1" ]; then
-    write_file "$path.kubelet" <<'EOF'
+  if [ "$include_cgroup_v1" = "1" ] || [ "$K8S_CONFIGURE_KUBELET_EVICTION" = "1" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      say "would append kubelet configuration to $path"
+      return 0
+    fi
+    cat >"$path.kubelet" <<'EOF'
 ---
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
+EOF
+    if [ "$include_cgroup_v1" = "1" ]; then
+      cat >>"$path.kubelet" <<'EOF'
 cgroupDriver: systemd
 failCgroupV1: false
 EOF
-    if [ "$DRY_RUN" = "1" ]; then
-      say "would append kubelet cgroups v1 compatibility to $path"
-    else
-      cat "$path.kubelet" >>"$path"
-      rm -f "$path.kubelet"
     fi
+    if [ "$K8S_CONFIGURE_KUBELET_EVICTION" = "1" ]; then
+      kubelet_eviction_yaml_block >>"$path.kubelet"
+    fi
+    cat "$path.kubelet" >>"$path"
+    rm -f "$path.kubelet"
   fi
 }
 
@@ -468,6 +539,11 @@ init_cluster() {
     say "cgroups v1 detected; enabling kubelet failCgroupV1=false compatibility"
     kubeadm_init_config "$kubeadm_config" 1
     run kubeadm init --config "$kubeadm_config" --ignore-preflight-errors=SystemVerification
+  elif [ "$K8S_CONFIGURE_KUBELET_EVICTION" = "1" ]; then
+    local kubeadm_config="/tmp/mx-kubeadm-init.yaml"
+    say "initialize with kubelet eviction thresholds"
+    kubeadm_init_config "$kubeadm_config" 0
+    run kubeadm init --config "$kubeadm_config"
   else
     run kubeadm init \
       --apiserver-advertise-address="$K8S_APISERVER_ADVERTISE_ADDRESS" \
