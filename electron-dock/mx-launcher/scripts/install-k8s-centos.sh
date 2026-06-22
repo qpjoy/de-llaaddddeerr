@@ -23,6 +23,12 @@ K8S_SET_SELINUX_PERMISSIVE="${K8S_SET_SELINUX_PERMISSIVE:-1}"
 K8S_INSTALL_FLANNEL="${K8S_INSTALL_FLANNEL:-1}"
 K8S_UNTAINT_CONTROL_PLANE="${K8S_UNTAINT_CONTROL_PLANE:-1}"
 K8S_ALLOW_CGROUP_V1="${K8S_ALLOW_CGROUP_V1:-auto}"
+K8S_CONFIGURE_KUBELET_EVICTION="${K8S_CONFIGURE_KUBELET_EVICTION:-1}"
+K8S_KUBELET_EVICTION_MEMORY_AVAILABLE="${K8S_KUBELET_EVICTION_MEMORY_AVAILABLE:-100Mi}"
+K8S_KUBELET_EVICTION_NODEFS_AVAILABLE="${K8S_KUBELET_EVICTION_NODEFS_AVAILABLE:-20Gi}"
+K8S_KUBELET_EVICTION_IMAGEFS_AVAILABLE="${K8S_KUBELET_EVICTION_IMAGEFS_AVAILABLE:-20Gi}"
+K8S_KUBELET_EVICTION_NODEFS_INODES_FREE="${K8S_KUBELET_EVICTION_NODEFS_INODES_FREE:-1%}"
+K8S_KUBELET_EVICTION_IMAGEFS_INODES_FREE="${K8S_KUBELET_EVICTION_IMAGEFS_INODES_FREE:-1%}"
 DEPLOY_MX="${DEPLOY_MX:-0}"
 DRY_RUN=0
 SKIP_INIT=0
@@ -47,6 +53,7 @@ Options:
   --skip-init              Install packages/config only; do not run kubeadm init.
   --skip-flannel           Do not install Flannel CNI.
   --skip-firewall          Do not modify firewalld.
+  --skip-eviction-tuning   Do not tune kubelet DiskPressure hard eviction thresholds.
   --allow-cgroup-v1        Let kubeadm/kubelet run on cgroups v1 hosts.
   --no-cgroup-v1           Fail instead of applying cgroups v1 compatibility.
   --deploy-mx              After K8s is ready, run ops internal-production deploy.
@@ -71,6 +78,12 @@ Environment:
   K8S_INSTALL_FLANNEL=0
   K8S_UNTAINT_CONTROL_PLANE=0
   K8S_ALLOW_CGROUP_V1=auto|1|0
+  K8S_CONFIGURE_KUBELET_EVICTION=1
+  K8S_KUBELET_EVICTION_MEMORY_AVAILABLE=100Mi
+  K8S_KUBELET_EVICTION_NODEFS_AVAILABLE=20Gi
+  K8S_KUBELET_EVICTION_IMAGEFS_AVAILABLE=20Gi
+  K8S_KUBELET_EVICTION_NODEFS_INODES_FREE=1%
+  K8S_KUBELET_EVICTION_IMAGEFS_INODES_FREE=1%
 EOF
 }
 
@@ -110,6 +123,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --skip-firewall)
       K8S_OPEN_FIREWALL=0
+      shift
+      ;;
+    --skip-eviction-tuning)
+      K8S_CONFIGURE_KUBELET_EVICTION=0
       shift
       ;;
     --allow-cgroup-v1)
@@ -351,6 +368,34 @@ EOF
   run_allow_fail systemctl start kubelet
 }
 
+kubelet_eviction_hard_arg() {
+  printf 'memory.available<%s,nodefs.available<%s,imagefs.available<%s,nodefs.inodesFree<%s,imagefs.inodesFree<%s' \
+    "$K8S_KUBELET_EVICTION_MEMORY_AVAILABLE" \
+    "$K8S_KUBELET_EVICTION_NODEFS_AVAILABLE" \
+    "$K8S_KUBELET_EVICTION_IMAGEFS_AVAILABLE" \
+    "$K8S_KUBELET_EVICTION_NODEFS_INODES_FREE" \
+    "$K8S_KUBELET_EVICTION_IMAGEFS_INODES_FREE"
+}
+
+systemd_environment_value() {
+  printf '%s\n' "$1" | sed 's/%/%%/g'
+}
+
+configure_kubelet_eviction() {
+  [ "$K8S_CONFIGURE_KUBELET_EVICTION" = "1" ] || return 0
+  local eviction_hard systemd_eviction_hard
+  eviction_hard="$(kubelet_eviction_hard_arg)"
+  systemd_eviction_hard="$(systemd_environment_value "$eviction_hard")"
+  say "configure kubelet hard eviction thresholds: $eviction_hard"
+  run mkdir -p /etc/systemd/system/kubelet.service.d
+  write_file /etc/systemd/system/kubelet.service.d/20-mx-eviction.conf <<EOF
+[Service]
+Environment="KUBELET_EXTRA_ARGS=--eviction-hard=${systemd_eviction_hard}"
+EOF
+  run systemctl daemon-reload
+  run_allow_fail systemctl restart kubelet
+}
+
 configure_kubectl() {
   [ -f /etc/kubernetes/admin.conf ] || return 0
   say "configure root kubectl"
@@ -514,6 +559,7 @@ main() {
   configure_hostname_resolution
   configure_selinux
   install_kubernetes_packages
+  configure_kubelet_eviction
   configure_firewall
   prepull_kubeadm_images
   init_cluster

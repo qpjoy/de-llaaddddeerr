@@ -70,6 +70,25 @@ Postgres 不能像普通 API 那样随便换身份、换盘，所以使用 State
 这样 Admin 后台可以清楚展示“数据库迁移是否成功”，而不是把迁移隐含在 API Pod 启动
 日志里。
 
+如果部署停在 `migration job failed`，先看事件里是否有 `DiskPressure` 或
+`ephemeral-storage` 驱逐。Postgres / gateway 被驱逐后，migration job 往往只是第一个
+显式失败的步骤，不代表 migration SQL 本身有问题。大盘单节点不要只按百分比判断剩余
+空间：3T 盘的 5% 约等于 150G，业务上可能还够，但 kubelet 已经会置
+`DiskPressure=True`。`install-k8s-centos.sh` 默认把 kubelet hard eviction 调成
+`memory.available<100Mi,nodefs.available<20Gi,imagefs.available<20Gi,nodefs.inodesFree<1%,imagefs.inodesFree<1%`；
+已有集群可重新执行安装脚本的 `--skip-init` 路径让 drop-in 生效。紧急部署时也可以用
+`MX_K8S_IGNORE_DISK_PRESSURE=1` 只跳过 `manage.sh` 的前置阻断，但如果 kubelet 阈值没有
+更新，pod 仍可能被 kubelet 继续驱逐。
+
+```bash
+sudo K8S_KUBELET_EVICTION_NODEFS_AVAILABLE=20Gi \
+  K8S_KUBELET_EVICTION_IMAGEFS_AVAILABLE=20Gi \
+  bash scripts/install-k8s-centos.sh --skip-init --skip-flannel --skip-firewall
+
+MX_K8S_IGNORE_DISK_PRESSURE=1 \
+  bash scripts/manage.sh ops internal-production deploy
+```
+
 ### Deployment 和 Probes
 
 Internal API 是无状态 HTTP 服务，用 Deployment。K8s 通过 probes 判断 Pod 状态：

@@ -653,6 +653,19 @@ k8s_postgres_diagnostics() {
   kubectl -n "$ns" logs pod/mx-internal-postgres-0 -c postgres --tail=120 || true
 }
 
+k8s_node_disk_pressure_report() {
+  local ns="$1"
+  local nodes
+  nodes="$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .status.conditions[?(@.type=="DiskPressure")]}{.status}{end}{"\n"}{end}' 2>/dev/null | awk '$2 == "True" {print $1}' || true)"
+  [ -n "$nodes" ] || return 1
+  say "node DiskPressure detected before migration: $nodes"
+  kubectl get nodes -o wide || true
+  kubectl describe nodes $nodes | sed -n '/^Name:/,/^Non-terminated Pods:/p' || true
+  say "recent namespace events"
+  kubectl -n "$ns" get events --sort-by=.lastTimestamp | tail -n 80 || true
+  return 0
+}
+
 k8s_job_diagnostics() {
   local ns="$1"
   local job="$2"
@@ -738,6 +751,13 @@ k8s_apply() {
   if ! kubectl -n "$ns" rollout status statefulset/mx-internal-postgres --timeout=180s; then
     k8s_postgres_diagnostics "$ns"
     die "postgres rollout failed"
+  fi
+
+  say "check node disk pressure before migration"
+  if [ "${MX_K8S_IGNORE_DISK_PRESSURE:-0}" = "1" ]; then
+    say "skip node DiskPressure guard because MX_K8S_IGNORE_DISK_PRESSURE=1"
+  elif k8s_node_disk_pressure_report "$ns"; then
+    die "node DiskPressure detected before migration; free node/container-runtime disk and rerun deploy"
   fi
 
   say "run migration job"

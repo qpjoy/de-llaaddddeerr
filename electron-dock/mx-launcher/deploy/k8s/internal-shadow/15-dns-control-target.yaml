@@ -131,9 +131,11 @@ spec:
             requests:
               cpu: 20m
               memory: 32Mi
+              ephemeral-storage: 32Mi
             limits:
               cpu: 200m
               memory: 128Mi
+              ephemeral-storage: 128Mi
           volumeMounts:
             - name: coredns-config
               mountPath: /etc/coredns

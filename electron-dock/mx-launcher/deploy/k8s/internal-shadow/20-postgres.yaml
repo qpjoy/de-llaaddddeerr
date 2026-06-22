@@ -86,9 +86,11 @@ spec:
             requests:
               cpu: 100m
               memory: 256Mi
+              ephemeral-storage: 256Mi
             limits:
               cpu: 1000m
               memory: 1Gi
+              ephemeral-storage: 1Gi
   volumeClaimTemplates:
     - metadata:
         name: postgres-data
