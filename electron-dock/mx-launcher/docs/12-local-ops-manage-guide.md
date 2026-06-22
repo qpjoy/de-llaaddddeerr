@@ -332,6 +332,9 @@ Internal artifact root 下写入 `domestic/mx-domestic-bootstrap-subscription.ya
 `domestic/mx-internal-egress-subscription.yaml`。`Remote SSH Worker Execute` 里的
 `workerInternalBaseUrl=http://127.0.0.1:18090` 是 Internal server 在同一 pod/container 内启动
 worker 时回调 Internal API 的地址；它不要求 Domestic 主机或浏览器能访问这个 loopback。
+Remote SSH gate 和 Domestic WG materialize 会从最新 Config Center 重新渲染这两个 bootstrap
+YAML；Oversea 新增的 H/user 订阅账号仍由 Internal API 动态渲染，不需要写入 Domestic bootstrap
+快照。
 
 再规划 Domestic。如果 Domestic 不能直接访问外网，把 Oversea host 一起传入，plan 会进入
 `oversea-assisted` 模式，并提示使用 `@qpjoy/tunnel-cli server-on` / `egress-on`

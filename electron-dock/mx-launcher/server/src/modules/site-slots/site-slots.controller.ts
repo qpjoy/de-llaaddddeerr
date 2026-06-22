@@ -183,6 +183,7 @@ export class SiteSlotsController {
     const job = await this.store.getSiteSlotWorkerJob(jobId);
     if (!job) throw new NotFoundException('Site slot worker job not found');
     const plan = await this.store.getSiteSlotPlan(job.planId);
+    if (plan) await this.materializeDomesticBootstrapSubscription(plan);
     const sshProfile = plan?.ssh.profileId ? await this.store.getSiteSlotSshProfile(plan.ssh.profileId) : null;
     const body = asRecord(rawBody);
     return {
@@ -199,6 +200,7 @@ export class SiteSlotsController {
     const job = await this.store.getSiteSlotWorkerJob(jobId);
     if (!job) throw new NotFoundException('Site slot worker job not found');
     const plan = await this.store.getSiteSlotPlan(job.planId);
+    if (plan) await this.materializeDomesticBootstrapSubscription(plan);
     const sshProfile = plan?.ssh.profileId ? await this.store.getSiteSlotSshProfile(plan.ssh.profileId) : null;
     const body = asRecord(rawBody);
     const gate = buildSiteSlotRemoteSshGate(job, plan, sshProfile, {
@@ -219,6 +221,7 @@ export class SiteSlotsController {
     const job = await this.store.getSiteSlotWorkerJob(jobId);
     if (!job) throw new NotFoundException('Site slot worker job not found');
     const plan = await this.store.getSiteSlotPlan(job.planId);
+    if (plan) await this.materializeDomesticBootstrapSubscription(plan);
     const sshProfile = plan?.ssh.profileId ? await this.store.getSiteSlotSshProfile(plan.ssh.profileId) : null;
     const body = asRecord(rawBody);
     const gate = buildSiteSlotRemoteSshGate(job, plan, sshProfile, {
@@ -432,7 +435,18 @@ export class SiteSlotsController {
 
   private async materializeDomesticBootstrapSubscription(plan: SiteSlotPlan): Promise<void> {
     if (plan.kind !== 'domestic' || plan.network.mode !== 'oversea-assisted' || !plan.network.overseaSiteId) return;
-    const accounts = await this.store.listSiteSlotAccessAccounts(plan.network.overseaSiteId);
+    let accounts = await this.store.listSiteSlotAccessAccounts(plan.network.overseaSiteId);
+    if (!domesticBootstrapAccount(accounts) || !internalBootstrapAccount(accounts)) {
+      await this.store.issueSiteSlotAccessAccounts({
+        siteId: plan.network.overseaSiteId,
+        service: 'hysteria2',
+        issueDefaults: true,
+        publicHost: plan.network.overseaHost ?? undefined,
+        requestedBy: plan.createdBy || 'site-slots-controller',
+        requestId: `${plan.planId}-domestic-bootstrap-sync`
+      });
+      accounts = await this.store.listSiteSlotAccessAccounts(plan.network.overseaSiteId);
+    }
     await this.writeBootstrapSubscriptionArtifact(
       plan.network.overseaSiteId,
       domesticBootstrapAccount(accounts),

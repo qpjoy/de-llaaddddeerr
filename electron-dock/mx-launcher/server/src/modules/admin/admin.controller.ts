@@ -673,7 +673,18 @@ export class AdminController {
 
   private async materializeDomesticBootstrapSubscription(plan: SiteSlotPlan): Promise<void> {
     if (plan.kind !== 'domestic' || plan.network.mode !== 'oversea-assisted' || !plan.network.overseaSiteId) return;
-    const accounts = await this.store.listSiteSlotAccessAccounts(plan.network.overseaSiteId);
+    let accounts = await this.store.listSiteSlotAccessAccounts(plan.network.overseaSiteId);
+    if (!domesticBootstrapAccount(accounts) || !internalBootstrapAccount(accounts)) {
+      await this.store.issueSiteSlotAccessAccounts({
+        siteId: plan.network.overseaSiteId,
+        service: 'hysteria2',
+        issueDefaults: true,
+        publicHost: plan.network.overseaHost ?? undefined,
+        requestedBy: plan.createdBy || 'admin-controller',
+        requestId: `${plan.planId}-domestic-bootstrap-sync`
+      });
+      accounts = await this.store.listSiteSlotAccessAccounts(plan.network.overseaSiteId);
+    }
     await this.writeBootstrapSubscriptionArtifact(
       plan.network.overseaSiteId,
       domesticBootstrapAccount(accounts),
@@ -964,6 +975,7 @@ export class AdminController {
         result: adminDomesticWireGuardMaterializeResult(siteId, secret, input, null, blockedReasons)
       };
     }
+    if (plan) await this.materializeDomesticBootstrapSubscription(plan);
 
     const mxRoot = resolveMxLauncherRoot();
     const scriptPath = [
@@ -2079,6 +2091,7 @@ export class AdminController {
   private async assertDomesticWgReadyForWorkerJob(job: SiteSlotWorkerJob, plan: SiteSlotPlan | null): Promise<void> {
     if (job.kind !== 'domestic' && plan?.kind !== 'domestic') return;
     if (!plan) throw new BadRequestException('Site slot plan is required before Domestic worker execution');
+    await this.materializeDomesticBootstrapSubscription(plan);
     const secret = await this.store.getSiteSlotDomesticWireGuardSecret(plan.siteId);
     if (domesticWireGuardMaterializeNeeded(plan, secret)) {
       throw new BadRequestException('Materialize Domestic WG before running Domestic worker job gates');
