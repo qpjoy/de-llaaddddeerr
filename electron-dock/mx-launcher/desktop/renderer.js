@@ -3422,8 +3422,10 @@ function renderDeploymentWorkbench(pipelines) {
       <span><strong>${site.pipelines.length}</strong><small>history runs</small></span>
     </div>
     ${renderDomesticRelayPanel(site, pipeline)}
+    ${renderDomesticRuntimeConfigPanel()}
   `;
   bindDomesticWorkbenchActions(site);
+  bindDomesticRuntimeControls(siteWorkbench);
   renderInspector();
 }
 
@@ -6963,13 +6965,13 @@ function bindDomesticRuntimeControls(root) {
     siteSelect.addEventListener('change', () => {
       state.domesticRuntime.selectedSiteId = siteSelect.value || 'domestic-main';
       state.domesticRuntime.feedback = null;
-      renderFoundationGrid(state.dashboard?.overview || {});
+      renderDomesticRuntimeContext(root);
     });
   }
   const save = root.querySelector('[data-domestic-runtime-save]');
-  if (save) save.addEventListener('click', () => void saveDomesticRuntimeConfigFromAdmin({ apply: false }));
+  if (save) save.addEventListener('click', () => void saveDomesticRuntimeConfigFromAdmin({ apply: false, root }));
   const apply = root.querySelector('[data-domestic-runtime-apply]');
-  if (apply) apply.addEventListener('click', () => void saveDomesticRuntimeConfigFromAdmin({ apply: true }));
+  if (apply) apply.addEventListener('click', () => void saveDomesticRuntimeConfigFromAdmin({ apply: true, root }));
 }
 
 function domesticRuntimeFormPayload(root = foundationGrid) {
@@ -6996,8 +6998,9 @@ function domesticRuntimeFormPayload(root = foundationGrid) {
 
 async function saveDomesticRuntimeConfigFromAdmin(options = {}) {
   const shouldApply = options.apply === true;
+  const root = options.root || foundationGrid;
   if (state.domesticRuntime.busy || state.domesticRuntime.applyBusy) return;
-  const body = domesticRuntimeFormPayload(foundationGrid);
+  const body = domesticRuntimeFormPayload(root);
   state.domesticRuntime.selectedSiteId = body.siteId;
   state.domesticRuntime.feedback = { kind: 'info', message: shouldApply ? 'Applying Domestic runtime config' : 'Saving Domestic runtime config' };
   state.domesticRuntime.applyResult = null;
@@ -7006,7 +7009,7 @@ async function saveDomesticRuntimeConfigFromAdmin(options = {}) {
   } else {
     state.domesticRuntime.busy = true;
   }
-  renderFoundationGrid(state.dashboard?.overview || {});
+  renderDomesticRuntimeContext(root);
   try {
     if (shouldApply) {
       const payload = await fetchJson('/internal/v1/admin/actions/execute', {
@@ -7048,8 +7051,16 @@ async function saveDomesticRuntimeConfigFromAdmin(options = {}) {
   } finally {
     state.domesticRuntime.busy = false;
     state.domesticRuntime.applyBusy = false;
-    renderFoundationGrid(state.dashboard?.overview || {});
+    renderDomesticRuntimeContext(root);
   }
+}
+
+function renderDomesticRuntimeContext(root) {
+  if (root === siteWorkbench && state.adminSection === 'deployment' && state.deploymentKind === 'domestic') {
+    renderDeploymentWorkbench(state.dashboard?.siteSlotPipelines || []);
+    return;
+  }
+  renderFoundationGrid(state.dashboard?.overview || {});
 }
 
 function upsertDomesticRuntimeConfig(config) {
