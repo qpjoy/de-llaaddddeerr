@@ -819,8 +819,13 @@ function applyAdminNavigation(nav = {}, options = {}) {
   if (changedDeployment) {
     state.selectedSiteId = null;
     state.selectedPlanId = null;
+    state.selectedSshProfileId = null;
     state.selectedAction = null;
     state.actionFeedback = null;
+    state.sshProfileBootstrap = null;
+    state.sshProfileShadowSetup = null;
+    state.sshProfileReadiness = null;
+    state.sshRuntimePolicy = null;
     closeEvidenceDrawer();
   }
 }
@@ -2510,7 +2515,10 @@ async function enrollHomeRelayFromAdmin(root = foundationGrid) {
 }
 
 function renderSshProfiles(profiles) {
-  const items = asArray(profiles);
+  const kindFilter = sshProfileListKindFilter();
+  const items = kindFilter
+    ? asArray(profiles).filter((profile) => profile.kind === kindFilter)
+    : asArray(profiles);
   sshProfileCount.textContent = String(items.length);
   renderSshProfileFeedback();
   renderSshProfileSaveState();
@@ -2518,7 +2526,7 @@ function renderSshProfiles(profiles) {
   renderSshProfileShadowSetup();
   renderSshProfileReadiness();
   if (!items.length) {
-    sshProfileList.innerHTML = '<div class="empty-state">No SSH profiles</div>';
+    sshProfileList.innerHTML = `<div class="empty-state">No ${kindFilter ? deploymentKindLabel(kindFilter) : 'SSH'} profiles</div>`;
     return;
   }
   sshProfileList.innerHTML = items.map((profile) => `
@@ -2577,6 +2585,13 @@ function renderSshProfiles(profiles) {
   }
 }
 
+function sshProfileListKindFilter() {
+  if (state.adminSection !== 'deployment') return null;
+  return state.deploymentKind === 'domestic' || state.deploymentKind === 'oversea'
+    ? state.deploymentKind
+    : null;
+}
+
 function fillSshProfileForm(profile) {
   const runtime = overseaRuntimeForSiteId(profile.siteId);
   const workerBaseUrl = normalizeWorkerBaseValue(profile.workerInternalBaseUrl)
@@ -2605,27 +2620,52 @@ function fillSshProfileForm(profile) {
 
 function primeSshProfileForm(pipelines) {
   if (sshProfileSiteId.value.trim()) return;
-  const pipeline = asArray(pipelines).find((item) => item.kind === 'oversea') || asArray(pipelines)[0];
-  const kind = pipeline?.kind === 'domestic' ? 'domestic' : 'oversea';
-  const siteId = pipeline?.siteId || `${kind}-main`;
-  sshProfileId.value = '';
-  sshProfileSiteId.value = siteId;
-  sshProfileKind.value = kind;
-  sshProfileHostKeyAlias.value = siteId;
-  sshProfileUser.value = 'root';
-  sshProfilePassword.value = '';
-  sshProfileRotateKey.checked = false;
-  sshProfilePort.value = '22';
-  sshProfileHy2Ports.value = kind === 'oversea' ? '51288' : '';
-  sshProfileHealthPort.value = kind === 'oversea' ? '3434' : '';
-  sshProfileWorkerInternalUrl.value = kind === 'oversea' ? defaultWorkerInternalBaseUrl() : '';
-  sshProfileOverseaCallbackUrl.value = '';
-  sshProfileStrict.value = 'yes';
-  sshProfileBatchMode.value = 'yes';
-  sshProfileTimeout.value = '30';
-  sshProfileIdentity.value = '';
-  sshProfileKnownHosts.value = '';
-  sshProfileConfigFile.value = '';
+  const kind = state.deploymentKind === 'domestic' ? 'domestic' : 'oversea';
+  const pipeline = asArray(pipelines).find((item) => item.kind === kind) || null;
+  fillNewSshProfileForm(kind, pipeline?.siteId || defaultSiteIdForKind(kind));
+}
+
+function defaultSiteIdForKind(kind) {
+  return kind === 'domestic' ? 'domestic-main' : 'oversea-main';
+}
+
+function formSiteKindMismatch(kind, siteId) {
+  if (!siteId) return false;
+  if (kind === 'domestic') return /^oversea([._-]|$)/i.test(siteId);
+  return /^domestic([._-]|$)/i.test(siteId);
+}
+
+function syncSshProfileFormForDeploymentKind(kind) {
+  const normalizedKind = kind === 'domestic' ? 'domestic' : 'oversea';
+  const formProfile = asArray(state.sshProfiles).find((profile) => profile.profileId && profile.profileId === sshProfileId.value.trim());
+  const currentSiteId = blankToNull(sshProfileSiteId.value);
+  const currentKind = sshProfileKind.value === 'domestic' ? 'domestic' : 'oversea';
+  const needsReset = currentKind !== normalizedKind
+    || (formProfile && formProfile.kind !== normalizedKind)
+    || formSiteKindMismatch(normalizedKind, currentSiteId);
+  if (!needsReset) return;
+
+  const selectedProfile = asArray(state.sshProfiles).find((profile) => (
+    profile.kind === normalizedKind
+    && (
+      profile.profileId === state.selectedSshProfileId
+      || profile.siteId === state.selectedSiteId
+    )
+  ));
+  const fallbackProfile = selectedProfile
+    || asArray(state.sshProfiles).find((profile) => profile.kind === normalizedKind && profile.siteId === defaultSiteIdForKind(normalizedKind))
+    || asArray(state.sshProfiles).find((profile) => profile.kind === normalizedKind);
+
+  state.selectedSshProfileId = fallbackProfile?.profileId || null;
+  state.sshProfileBootstrap = null;
+  state.sshProfileShadowSetup = null;
+  state.sshProfileReadiness = null;
+  state.sshRuntimePolicy = null;
+  if (fallbackProfile) {
+    fillSshProfileForm(fallbackProfile);
+  } else {
+    fillNewSshProfileForm(normalizedKind, defaultSiteIdForKind(normalizedKind));
+  }
 }
 
 function renderSshProfileFeedback() {
@@ -3106,7 +3146,7 @@ function renderAdminShell() {
     deploymentTitle.textContent = `${label} Deployment`;
     deploymentSubtitle.textContent = deploymentKindSubtitle(state.deploymentKind);
     if (state.deploymentKind === 'domestic' || state.deploymentKind === 'oversea') {
-      sshProfileKind.value = state.deploymentKind;
+      syncSshProfileFormForDeploymentKind(state.deploymentKind);
     }
   }
 }
