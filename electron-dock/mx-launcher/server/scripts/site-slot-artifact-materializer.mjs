@@ -766,7 +766,7 @@ function writeDomesticServicesCompose(staging) {
     '',
     'services:',
     '  domestic-edge:',
-    '    image: caddy:2-alpine',
+    '    image: caddy:2.8.4-alpine',
     '    container_name: mx-domestic-edge',
     '    restart: unless-stopped',
     '    environment:',

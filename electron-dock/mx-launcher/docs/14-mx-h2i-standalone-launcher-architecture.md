@@ -277,6 +277,13 @@ Admin 可以在 Internal 基础系统 / Config Center 里修改并 `Save & Apply
 Internal 也会把这个配置渲染成 Domestic bundle 的 `.env` 并通过 SSH runner 下发；
 Domestic 不需要单独登录，也不应该成为配置真相。
 
+正式 Domestic 没有 Docker Hub/registry egress 时，先使用 `Save Config` 只保存
+`http://<domestic-public-ip>:18090` 这样的 bootstrap 配置，再通过 Domestic plan 的
+`Materialize Domestic WG`、preflight、runner/worker install-sync 路径下发 bundle。
+`Save & Apply` 是已安装 edge stack 的重启/刷新入口，会在 Domestic 侧执行
+`docker compose up`，需要目标机已有 `caddy:2.8.4-alpine` / `coredns/coredns:1.11.3`
+镜像或可访问 registry。
+
 开发和私有部署可以用 MX-H2I 客户端 `.env` 配置 bootstrap 域名和临时解析，不需要把公网 IP 写死进包体：
 
 ```dotenv

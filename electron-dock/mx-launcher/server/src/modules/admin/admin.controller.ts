@@ -5488,6 +5488,7 @@ function domesticRuntimeConfigApplyScript(config: SiteSlotDomesticRuntimeConfig)
     `printf "%s\\n" ${envLines.map(shellQuote).join(' ')} > "$stack_dir/.env.tmp"`,
     'mv "$stack_dir/.env.tmp" "$stack_dir/.env"',
     `if command -v base64 >/dev/null 2>&1; then printf "%s" ${shellQuote(caddyfileBase64)} | base64 -d > "$stack_dir/Caddyfile.tmp"; mv "$stack_dir/Caddyfile.tmp" "$stack_dir/Caddyfile"; else echo "blocked: base64 is required to refresh Domestic Caddyfile"; exit 1; fi`,
+    'if test -f "$stack_dir/docker-compose.yml"; then sed -i.bak -E \'s#^([[:space:]]*image:[[:space:]]*)caddy:2-alpine#\\1caddy:2.8.4-alpine#\' "$stack_dir/docker-compose.yml"; fi',
     'cd "$stack_dir"',
     'chmod +x ./manage.sh || true',
     './manage.sh up',
@@ -6371,6 +6372,7 @@ function domesticWireGuardMaterializeNeeded(
   if (plan.kind !== 'domestic') return false;
   const expectedEndpoint = endpointFromPlanHost(plan, secret?.listenPort ?? 51280);
   return !secret
+    || !domesticWireGuardArtifactReady()
     || secret.status !== 'active'
     || secret.readiness.secretMaterial !== 'injected'
     || secret.readiness.publicEndpointStatus !== 'ready'
@@ -6385,6 +6387,9 @@ function domesticWireGuardStaleReason(
   secret: SiteSlotDomesticWireGuardSecret
 ): string | null {
   if (!domesticWireGuardMaterializeNeeded(plan, secret)) return null;
+  if (!domesticWireGuardArtifactReady()) {
+    return 'Domestic WireGuard artifact manifest is not ready; run Materialize Domestic WG first';
+  }
   const expectedEndpoint = endpointFromPlanHost(plan, secret.listenPort ?? 51280);
   if (expectedEndpoint && secret.publicEndpoint !== expectedEndpoint) {
     return `Domestic WG materialized artifact is stale for the selected plan: endpoint ${secret.publicEndpoint || 'unset'} != ${expectedEndpoint}`;
