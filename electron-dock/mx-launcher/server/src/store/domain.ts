@@ -2174,7 +2174,10 @@ export function buildSiteSlotPlan(
   const baseWarnings = siteSlotWarnings(kind, input, profile, profileMatches, host, rootAccess, networkMode);
   const sshProfileId = input.sshProfileId?.trim() || profile?.profileId || null;
   const domesticRuntimeConfig = kind === 'domestic'
-    ? input.domesticRuntimeConfig ?? buildSiteSlotDomesticRuntimeConfig(config, { siteId }, null, createdAt)
+    ? input.domesticRuntimeConfig ?? buildSiteSlotDomesticRuntimeConfig(config, {
+        siteId,
+        bootstrapHost: bootstrapHostFromPlanHost(host)
+      }, null, createdAt)
     : null;
   const hasOverseaCallbackInput = Object.prototype.hasOwnProperty.call(input, 'overseaCallbackBaseUrl');
   const runtimeInput = kind === 'oversea'
@@ -2560,6 +2563,19 @@ function previousBootstrapPort(previous: SiteSlotDomesticRuntimeConfig | null): 
     return parsed.port ? Number(parsed.port) : defaultPortForProtocol(normalizeProtocol(parsed.protocol));
   } catch {
     return undefined;
+  }
+}
+
+function bootstrapHostFromPlanHost(host: string | null): string | null {
+  const value = host?.trim();
+  if (!value) return null;
+  const normalized = value.includes('://') ? value : `http://${value}`;
+  try {
+    return new URL(normalized).hostname || null;
+  } catch {
+    const authority = value.split('/')[0] ?? value;
+    const withoutUserInfo = authority.includes('@') ? authority.split('@').pop() ?? authority : authority;
+    return withoutUserInfo.replace(/:\d+$/, '').trim() || null;
   }
 }
 

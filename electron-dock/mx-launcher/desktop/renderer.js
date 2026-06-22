@@ -6865,13 +6865,14 @@ function domesticRuntimeConfigForRender() {
 }
 
 function domesticRuntimeDefaultConfig(siteId = 'domestic-main') {
+  const bootstrapHost = domesticRuntimeDefaultBootstrapHost(siteId);
   return {
     siteId,
     status: 'active',
     edge: {
       bind: '0.0.0.0',
       port: 18090,
-      publicBaseUrl: 'http://api.mxinfo-inc.cn:18090'
+      publicBaseUrl: `http://${bootstrapHost}:18090`
     },
     upstreams: {
       internalBaseUrl: 'http://10.88.88.88:18090',
@@ -6887,21 +6888,43 @@ function domesticRuntimeDefaultConfig(siteId = 'domestic-main') {
   };
 }
 
+function domesticRuntimeDefaultBootstrapHost(siteId = 'domestic-main') {
+  const pipeline = asArray(state.dashboard?.siteSlotPipelines)
+    .filter((item) => item.kind === 'domestic' && item.siteId === siteId)
+    .sort((left, right) => String(right.latestUpdatedAt || '').localeCompare(String(left.latestUpdatedAt || '')))[0] || null;
+  const profile = inspectorSshProfile('domestic', siteId);
+  return normalizeBootstrapHost(pipeline?.host || profile?.host) || 'api.mxinfo-inc.cn';
+}
+
+function normalizeBootstrapHost(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const normalized = text.includes('://') ? text : `http://${text}`;
+  try {
+    return new URL(normalized).hostname || '';
+  } catch {
+    const authority = text.split('/')[0] || text;
+    const withoutUserInfo = authority.includes('@') ? authority.split('@').pop() || authority : authority;
+    return withoutUserInfo.replace(/:\d+$/, '').trim();
+  }
+}
+
 function domesticRuntimeBootstrapParts(config) {
   const edge = config?.edge || {};
+  const fallbackHost = domesticRuntimeDefaultBootstrapHost(config?.siteId || selectedDomesticSiteId() || 'domestic-main');
   try {
     const parsed = new URL(edge.publicBaseUrl);
     const protocol = parsed.protocol.replace(/:$/, '') === 'https' ? 'https' : 'http';
     const port = Number(parsed.port || (protocol === 'https' ? 443 : 80));
     return {
       protocol,
-      host: parsed.hostname || 'api.mxinfo-inc.cn',
+      host: parsed.hostname || fallbackHost,
       port: Number.isFinite(port) ? port : (edge.port || 18090)
     };
   } catch {
     return {
       protocol: 'http',
-      host: 'api.mxinfo-inc.cn',
+      host: fallbackHost,
       port: edge.port || 18090
     };
   }
@@ -6952,13 +6975,14 @@ function bindDomesticRuntimeControls(root) {
 function domesticRuntimeFormPayload(root = foundationGrid) {
   const value = (field) => root.querySelector(`[data-domestic-runtime-field="${field}"]`)?.value?.trim() || '';
   const siteId = value('siteId') || state.domesticRuntime.selectedSiteId || selectedDomesticSiteId() || 'domestic-main';
+  const bootstrapHost = value('bootstrapHost') || domesticRuntimeDefaultBootstrapHost(siteId);
   return {
     siteId,
     status: value('status') === 'paused' ? 'paused' : 'active',
     edgeBind: value('edgeBind') || '0.0.0.0',
     edgePort: positiveNumberOrNull(value('edgePort')),
     bootstrapProtocol: value('bootstrapProtocol') === 'https' ? 'https' : 'http',
-    bootstrapHost: value('bootstrapHost') || 'api.mxinfo-inc.cn',
+    bootstrapHost: bootstrapHost || 'api.mxinfo-inc.cn',
     bootstrapPort: positiveNumberOrNull(value('bootstrapPort')),
     internalBaseUrl: value('internalBaseUrl') || 'http://10.88.88.88:18090',
     internalApiUpstream: value('internalApiUpstream') || value('internalBaseUrl') || 'http://10.88.88.88:18090',
