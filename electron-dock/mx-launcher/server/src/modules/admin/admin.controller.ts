@@ -2243,21 +2243,27 @@ function buildPipeline(
   const timeline = buildTimeline(plan, executions, runnerSessions, workerJobs, workerReports, rollbackExecutions, rollbackReports);
   const latest = timeline[timeline.length - 1] ?? null;
   const failureSummary = latestWorkerReportFailureSummary(workerReports);
+  const domesticPostInstallGate = domesticPostInstallInternalGate(plan, workerReports, domesticWgSecret);
   const warnings = uniqueStrings([
+    ...domesticPostInstallGate.warnings,
     ...plan.warnings,
     ...executions.flatMap((execution) => execution.warnings),
     ...runnerSessions.flatMap((session) => session.warnings),
     ...workerJobs.flatMap((job) => job.warnings),
     ...rollbackExecutions.flatMap((execution) => execution.warnings)
   ]);
-  const nextActions = uniqueStrings(latest?.nextActions.length ? latest.nextActions : plan.nextActions);
+  const nextActions = uniqueStrings([
+    ...domesticPostInstallGate.nextActions,
+    ...(latest?.nextActions.length ? latest.nextActions : plan.nextActions)
+  ]);
+  const health = pipelineHealth(plan, executions, runnerSessions, workerJobs, workerReports, rollbackExecutions, rollbackReports);
   const summary: AdminSiteSlotPipelineSummary = {
     planId: plan.planId,
     siteId: plan.siteId,
     kind: plan.kind,
     environment: plan.environment,
     status: plan.status,
-    health: pipelineHealth(plan, executions, runnerSessions, workerJobs, workerReports, rollbackExecutions, rollbackReports),
+    health: domesticPostInstallGate.blocked && health === 'passed' ? 'blocked' : health,
     currentStage: latest ? latest.kind : 'plan',
     latestStatus: latest ? latest.status : plan.status,
     latestUpdatedAt: latest ? latest.at : plan.createdAt,
@@ -2272,7 +2278,7 @@ function buildPipeline(
     warnings,
     failureSummary,
     nextActions,
-    actionHints: buildPipelineActionHints(actionPolicy, plan, executions, runnerSessions, workerJobs, workerReports, rollbackExecutions, domesticWgSecret)
+    actionHints: buildPipelineActionHints(actionPolicy, plan, executions, runnerSessions, workerJobs, workerReports, rollbackExecutions, domesticWgSecret, domesticPostInstallGate)
   };
   return {
     summary,
@@ -6199,6 +6205,89 @@ function buildTimeline(
   return entries.sort((a, b) => a.at.localeCompare(b.at));
 }
 
+interface DomesticPostInstallInternalGate {
+  blocked: boolean;
+  warnings: string[];
+  nextActions: string[];
+}
+
+function domesticPostInstallInternalGate(
+  plan: SiteSlotPlan,
+  workerReports: SiteSlotWorkerReport[],
+  secret: SiteSlotDomesticWireGuardSecret | null
+): DomesticPostInstallInternalGate {
+  const empty = { blocked: false, warnings: [], nextActions: [] };
+  if (plan.kind !== 'domestic') return empty;
+  const report = latestByCreatedAt(workerReports);
+  if (!report || report.status !== 'passed') return empty;
+  const step = report.stepReports.find((item) => {
+    const text = `${item.stdout ?? ''}\n${item.stderr ?? ''}`.toLowerCase();
+    return item.sourceId === 'sync-internal-config.2'
+      || text.includes('internal is not reachable')
+      || text.includes('destination address required')
+      || text.includes('no route to host');
+  });
+  if (!step) return empty;
+  const text = `${step.stdout ?? ''}\n${step.stderr ?? ''}`.toLowerCase();
+  const hasInternalReachabilityWarning = text.includes('internal is not reachable')
+    || text.includes('no route to host')
+    || text.includes('destination address required');
+  if (!hasInternalReachabilityWarning) return empty;
+  const internalIp = secret?.internalServiceIp || '10.88.88.88';
+  const internalPort = domesticRuntimePortFromPlan(plan);
+  const endpoint = secret?.publicEndpoint
+    || endpointFromPlanHost(plan, secret?.listenPort ?? 51280)
+    || `${plan.host || '<domestic-host>'}:${secret?.listenPort ?? 51280}`;
+  const listenPort = secret?.listenPort ?? domesticListenPortFromEndpoint(endpoint) ?? 51280;
+  const reason = domesticInternalReachabilityReason(step.stdout, step.stderr);
+  return {
+    blocked: true,
+    warnings: [
+      `blocked: Domestic relay installed but Internal service peer is not reachable at ${internalIp}:${internalPort} (${reason}). Run Internal Service Peer Status/Install on the Internal host and allow UDP ${listenPort} to ${endpoint}.`
+    ],
+    nextActions: [
+      'check-internal-service-peer-status',
+      'install-internal-service-peer',
+      'verify-domestic-wg-handshake'
+    ]
+  };
+}
+
+function domesticRuntimePortFromPlan(plan: SiteSlotPlan): number {
+  try {
+    const port = plan.runtime.domestic?.upstreams.internalBaseUrl
+      ? Number(new URL(plan.runtime.domestic.upstreams.internalBaseUrl).port)
+      : NaN;
+    return Number.isFinite(port) && port > 0 ? port : 18090;
+  } catch {
+    return 18090;
+  }
+}
+
+function domesticListenPortFromEndpoint(endpoint: string | null | undefined): number | null {
+  const match = endpoint?.match(/:(\d+)$/);
+  if (!match) return null;
+  const port = Number(match[1]);
+  return Number.isFinite(port) && port > 0 ? port : null;
+}
+
+function domesticInternalReachabilityReason(stdout: string | null, stderr: string | null): string {
+  const text = `${stdout ?? ''}\n${stderr ?? ''}`.toLowerCase();
+  if (text.includes('destination address required')) {
+    return 'WireGuard peer has no learned endpoint/handshake yet';
+  }
+  if (text.includes('no route to host')) {
+    return 'No route to host through mx-domestic';
+  }
+  if (text.includes('connection refused')) {
+    return 'Internal API port is reachable but refused the connection';
+  }
+  if (text.includes('timed out') || text.includes('timeout')) {
+    return 'Internal API reachability timed out';
+  }
+  return 'Internal service peer has not completed the Domestic WG path';
+}
+
 function buildPipelineActionHints(
   actionPolicy: AdminActionPolicy,
   plan: SiteSlotPlan,
@@ -6207,7 +6296,8 @@ function buildPipelineActionHints(
   workerJobs: SiteSlotWorkerJob[],
   workerReports: SiteSlotWorkerReport[],
   rollbackExecutions: SiteSlotRollbackExecution[],
-  domesticWgSecret: SiteSlotDomesticWireGuardSecret | null
+  domesticWgSecret: SiteSlotDomesticWireGuardSecret | null,
+  domesticPostInstallGate: DomesticPostInstallInternalGate = { blocked: false, warnings: [], nextActions: [] }
 ): AdminActionDescriptor[] {
   const actions: AdminActionDescriptor[] = [];
   const readyPreflight = sortByCreatedAt(executions).find((execution) => execution.action === 'preflight' && execution.status === 'ready');
@@ -6236,6 +6326,17 @@ function buildPipelineActionHints(
   const domesticWorkerRunReady = !(plan.kind === 'domestic' && needsDomesticWgMaterialize);
   const domesticWorkerRunBlockedReason = 'Materialize Domestic WG before running Domestic worker job gates';
   const hasPassedWorkerReport = workerReports.some((report) => report.status === 'passed');
+
+  if (domesticPostInstallGate.blocked && plan.kind === 'domestic') {
+    actions.push(internalServicePeerStatusAction(actionPolicy, plan));
+    if (domesticWgSecret) {
+      actions.push(internalServicePeerHandoffAction(actionPolicy, plan, domesticWgSecret));
+      actions.push(internalServicePeerApplyAction(actionPolicy, plan, domesticWgSecret));
+    }
+    if (internalServicePeerK8sHostRunnerEnsureAvailable()) {
+      actions.push(internalServicePeerHostRunnerEnsureAction(actionPolicy, plan));
+    }
+  }
 
   if (needsDomesticWgMaterialize) {
     actions.push(domesticWgMaterializeAction(actionPolicy, plan, 'WG secret/materialized artifacts must exist before Domestic preflight and remote SSH'));
