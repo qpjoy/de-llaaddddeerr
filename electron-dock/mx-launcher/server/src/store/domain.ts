@@ -4298,8 +4298,8 @@ function siteSlotNextActions(
   actions.push('run-remote-preflight');
   if (kind === 'domestic') actions.push('confirm-domestic-public-ingress-firewall');
   if (kind === 'domestic' && mode !== 'direct') actions.push('configure-oversea-bootstrap');
-  if (kind === 'domestic') actions.push('install-docker-runtime');
   if (kind === 'domestic') actions.push('activate-domestic-peer-center');
+  if (kind === 'domestic') actions.push('install-docker-runtime');
   if (kind === 'oversea') actions.push('push-oversea-access-stack');
   actions.push('push-slot-service-bundle', 'sync-signed-internal-config', 'run-slot-smoke');
   if (kind === 'domestic' && !siteSlotWorkerInternalBaseUrl(input)) actions.push('set-internal-base-url-for-reachability-check');

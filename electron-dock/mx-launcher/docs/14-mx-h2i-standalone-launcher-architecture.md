@@ -383,6 +383,10 @@ Domestic WG service peer，负责把 Internal 固定到 `10.88.88.88` 并访问 
 `10.88.0.1`。页面的 Install / Restart 顺序应是：先用 Internal subscription
 `qp-tunnel-cli install --file ...`，再 `qp-tunnel-cli egress-on`，最后应用
 `mx-internal-service-peer.conf`。
+Admin 里的 `Internal Service Peer Handoff` 只生成/返回 Internal runtime host 的 handoff
+artifact 和本地 apply 命令，不代表 API pod 已经远程安装 WireGuard；操作员应先跑
+`Internal Service Peer Status`，确认 native host-runner 可达后再执行
+`Install Internal Service Peer`。
 
 Internal API 可以跑在 k8s pod 里，但 WG runtime 必须跑在真实 Internal 宿主机上。当前
 默认 host-runner 是 native runner：macOS 用 LaunchAgent，Ubuntu/Linux 用 systemd，

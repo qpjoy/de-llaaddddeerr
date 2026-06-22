@@ -6108,7 +6108,12 @@ function buildPipelineActionHints(
   if (needsDomesticWgMaterialize) {
     actions.push(domesticWgMaterializeAction(actionPolicy, plan, 'WG secret/materialized artifacts must exist before Domestic preflight and remote SSH'));
   } else if (plan.kind === 'domestic' && domesticWgSecret && confirmedApply && !hasPassedWorkerReport) {
+    actions.push(internalServicePeerStatusAction(actionPolicy, plan));
     actions.push(internalServicePeerHandoffAction(actionPolicy, plan, domesticWgSecret));
+    actions.push(internalServicePeerApplyAction(actionPolicy, plan, domesticWgSecret));
+    if (internalServicePeerK8sHostRunnerEnsureAvailable()) {
+      actions.push(internalServicePeerHostRunnerEnsureAction(actionPolicy, plan));
+    }
   }
 
   if (!readyPreflight) {
@@ -6471,6 +6476,77 @@ function internalServicePeerHandoffAction(
     },
     failures.length === 0,
     failures.join('; ') || 'Domestic WG materialize must complete before Internal service peer handoff'
+  );
+}
+
+function internalServicePeerStatusAction(
+  actionPolicy: AdminActionPolicy,
+  plan: SiteSlotPlan
+): AdminActionDescriptor {
+  return contextualAction(
+    actionPolicy,
+    'site-slot.internal-service-peer.status',
+    {
+      path: `/internal/v1/config-center/domestic-wg-secrets/${encodeURIComponent(plan.siteId)}/internal-service-peer-status`,
+      bodyTemplate: {
+        siteId: plan.siteId,
+        planId: plan.planId,
+        requestedBy: actionPolicy.principal.principalId,
+        requestId: 'admin-ui-internal-service-peer-status'
+      }
+    },
+    true,
+    'check Internal host-runner, WireGuard, egress-on, and 10.88.88.88 reachability before install'
+  );
+}
+
+function internalServicePeerApplyAction(
+  actionPolicy: AdminActionPolicy,
+  plan: SiteSlotPlan,
+  secret: SiteSlotDomesticWireGuardSecret
+): AdminActionDescriptor {
+  const paths = internalServicePeerArtifactPaths();
+  const failures = internalServicePeerHandoffFailures(plan.siteId, secret, paths, {
+    planId: plan.planId,
+    confirmInternalServicePeerApply: true
+  }, plan, false);
+  return contextualAction(
+    actionPolicy,
+    'site-slot.internal-service-peer.apply',
+    {
+      path: `/internal/v1/config-center/domestic-wg-secrets/${encodeURIComponent(plan.siteId)}/internal-service-peer-apply`,
+      bodyTemplate: {
+        siteId: plan.siteId,
+        planId: plan.planId,
+        confirmInternalServicePeerApply: true,
+        requestedBy: actionPolicy.principal.principalId,
+        requestId: 'admin-ui-internal-service-peer-apply'
+      }
+    },
+    failures.length === 0,
+    failures.join('; ') || 'Internal service peer artifact must be ready before installing on the Internal runtime host'
+  );
+}
+
+function internalServicePeerHostRunnerEnsureAction(
+  actionPolicy: AdminActionPolicy,
+  plan: SiteSlotPlan
+): AdminActionDescriptor {
+  return contextualAction(
+    actionPolicy,
+    'site-slot.internal-service-peer.host-runner.ensure',
+    {
+      path: `/internal/v1/config-center/domestic-wg-secrets/${encodeURIComponent(plan.siteId)}/internal-service-peer-host-runner`,
+      bodyTemplate: {
+        siteId: plan.siteId,
+        planId: plan.planId,
+        confirmInternalHostRunnerEnsure: true,
+        requestedBy: actionPolicy.principal.principalId,
+        requestId: 'admin-ui-internal-host-runner-ensure'
+      }
+    },
+    internalServicePeerK8sHostRunnerEnsureAvailable(),
+    'MX_INTERNAL_HOST_RUNNER_K8S_ENSURE_ENABLED and MX_INTERNAL_HOST_RUNNER_K8S_FALLBACK_ENABLED are required for k8s fallback'
   );
 }
 
