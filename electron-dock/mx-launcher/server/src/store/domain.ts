@@ -3923,15 +3923,37 @@ function siteSlotDeploymentPhases(
   const overseaReservedInternalCidrs = ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16'];
   const overseaReservedInternalCidrsCsv = overseaReservedInternalCidrs.join(',');
   const startSlotServicesCommand = [
-    'if grep -q "\\"placeholder\\": true" enabled-modules.json 2>/dev/null; then echo "slot services placeholder; no Docker services selected"; else',
-    'services="$(docker compose config --services)"',
+    'if grep -q "\\"placeholder\\": true" enabled-modules.json 2>/dev/null; then',
+    'echo "slot services placeholder; no Docker services selected";',
+    'else',
+    'services="$(docker compose config --services)";',
     'if [ -n "$services" ]; then',
-    'images="$(docker compose config --images 2>/dev/null || true)"',
-    'if [ -n "$images" ]; then for image in $images; do if docker image inspect "$image" >/dev/null 2>&1; then echo "image ready: $image"; else echo "pull missing compose image: $image"; if ! docker pull "$image"; then echo "blocked: Docker cannot pull required compose image $image"; echo "diagnostics: qp-tunnel-cli"; if command -v qp-tunnel-cli >/dev/null 2>&1; then qp-tunnel-cli -v || true; qp-tunnel-cli status || true; else echo "qp-tunnel-cli: missing"; fi; echo "diagnostics: docker proxy env"; if command -v systemctl >/dev/null 2>&1; then systemctl show docker -p Environment || true; fi; echo "diagnostics: registry via local proxy"; if command -v curl >/dev/null 2>&1; then curl -I --max-time 15 --proxy http://127.0.0.1:7890 https://registry-1.docker.io/v2/ || true; fi; exit 1; fi; fi; done; fi',
-    'docker compose up -d',
-    'else echo "slot services bundle has no Docker services selected"; fi',
+    'images="$(docker compose config --images 2>/dev/null || true)";',
+    'if [ -n "$images" ]; then',
+    'for image in $images; do',
+    'if docker image inspect "$image" >/dev/null 2>&1; then',
+    'echo "image ready: $image";',
+    'else',
+    'echo "pull missing compose image: $image";',
+    'if ! docker pull "$image"; then',
+    'echo "blocked: Docker cannot pull required compose image $image";',
+    'echo "diagnostics: qp-tunnel-cli";',
+    'if command -v qp-tunnel-cli >/dev/null 2>&1; then qp-tunnel-cli -v || true; qp-tunnel-cli status || true; else echo "qp-tunnel-cli: missing"; fi;',
+    'echo "diagnostics: docker proxy env";',
+    'if command -v systemctl >/dev/null 2>&1; then systemctl show docker -p Environment || true; fi;',
+    'echo "diagnostics: registry via local proxy";',
+    'if command -v curl >/dev/null 2>&1; then curl -I --max-time 15 --proxy http://127.0.0.1:7890 https://registry-1.docker.io/v2/ || true; fi;',
+    'exit 1;',
+    'fi;',
+    'fi;',
+    'done;',
+    'fi;',
+    'docker compose up -d;',
+    'else',
+    'echo "slot services bundle has no Docker services selected";',
+    'fi;',
     'fi'
-  ].join('; ');
+  ].join(' ');
   const syncInternalConfigCommands = kind === 'oversea'
     ? [
       `POST /internal/v1/config-center/snapshots/effective siteId=${input.siteId ?? 'oversea-main'}`,
