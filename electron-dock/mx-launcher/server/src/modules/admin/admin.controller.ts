@@ -408,6 +408,9 @@ export class AdminController {
       const artifactMaterialize = await this.materializeSiteSlotArtifactSet('oversea');
       ensureSteps.push(overseaEnsureStep('artifacts', artifactMaterialize.blockedReasons.length ? 'blocked' : 'passed', artifactMaterialize.manifest?.path ?? 'oversea', {
         execution: artifactMaterialize.execution,
+        mode: artifactMaterialize.mode,
+        sourceRoot: artifactMaterialize.sourceRoot,
+        artifactBaseDir: artifactMaterialize.artifactBaseDir,
         modules: artifactMaterialize.manifest?.modules.map((module) => ({
           moduleId: module.moduleId,
           status: module.status,
@@ -1083,43 +1086,60 @@ export class AdminController {
     execution: { exitCode: number; stdout: string; stderr: string } | null;
     manifest: ReturnType<typeof readArtifactManifest> | null;
     blockedReasons: string[];
+    mode: 'materialized-from-source' | 'prebuilt-artifact';
+    sourceRoot: string;
+    artifactBaseDir: string;
   }> {
     const mxRoot = resolveMxLauncherRoot();
-    const scriptPath = [
-      resolve(mxRoot, 'server/scripts/site-slot-artifact-materializer.mjs'),
-      resolve(mxRoot, 'scripts/site-slot-artifact-materializer.mjs')
-    ].find((candidate) => existsSync(candidate)) ?? resolve(mxRoot, 'server/scripts/site-slot-artifact-materializer.mjs');
+    const artifactBaseDir = resolveSiteSlotArtifactBaseDir();
+    const sourceProbe = siteSlotArtifactSourceProbe(mxRoot, kind);
     let execution: { exitCode: number; stdout: string; stderr: string } | null = null;
     const blockedReasons: string[] = [];
-    try {
-      const { stdout, stderr } = await execFileAsync(process.execPath, [scriptPath, kind], {
-        cwd: mxRoot,
-        env: {
-          ...process.env,
-          SITE_SLOT_ARTIFACT_OUTPUT_DIR: resolveSiteSlotArtifactBaseDir()
-        },
-        timeout: 60 * 1000,
-        maxBuffer: 4 * 1024 * 1024
-      });
-      execution = { exitCode: 0, stdout, stderr };
-    } catch (error) {
-      const execError = error as Error & { code?: number | string; stdout?: string; stderr?: string };
-      execution = {
-        exitCode: typeof execError.code === 'number' ? execError.code : 1,
-        stdout: execError.stdout ?? '',
-        stderr: execError.stderr ?? execError.message
-      };
-      blockedReasons.push(`artifact materializer failed: ${execution.stderr || execution.exitCode}`);
+    if (sourceProbe.ready) {
+      const scriptPath = [
+        resolve(mxRoot, 'server/scripts/site-slot-artifact-materializer.mjs'),
+        resolve(mxRoot, 'scripts/site-slot-artifact-materializer.mjs')
+      ].find((candidate) => existsSync(candidate)) ?? resolve(mxRoot, 'server/scripts/site-slot-artifact-materializer.mjs');
+      try {
+        const { stdout, stderr } = await execFileAsync(process.execPath, [scriptPath, kind], {
+          cwd: mxRoot,
+          env: {
+            ...process.env,
+            SITE_SLOT_ARTIFACT_OUTPUT_DIR: artifactBaseDir
+          },
+          timeout: 60 * 1000,
+          maxBuffer: 4 * 1024 * 1024
+        });
+        execution = { exitCode: 0, stdout, stderr };
+      } catch (error) {
+        const execError = error as Error & { code?: number | string; stdout?: string; stderr?: string };
+        execution = {
+          exitCode: typeof execError.code === 'number' ? execError.code : 1,
+          stdout: execError.stdout ?? '',
+          stderr: execError.stderr ?? execError.message
+        };
+        blockedReasons.push(`artifact materializer failed: ${execution.stderr || execution.exitCode}`);
+      }
     }
     const manifestFailures: string[] = [];
-    const manifest = readArtifactManifest(kind, resolveSiteSlotArtifactBaseDir(), manifestFailures);
+    const manifest = readArtifactManifest(kind, artifactBaseDir, manifestFailures);
     if (manifestFailures.length) blockedReasons.push(...manifestFailures);
     const requiredModuleId = kind === 'oversea' ? 'hysteria2-access-stack' : 'qp-tunnel-cli';
     const module = manifest?.modules.find((item) => item.moduleId === requiredModuleId) ?? null;
+    if (!sourceProbe.ready && module?.status !== 'ready') {
+      blockedReasons.push(`artifact source missing in runtime image: ${sourceProbe.missing.join(', ')}; expected prebuilt ${requiredModuleId} artifact in ${resolve(artifactBaseDir, kind)}`);
+    }
     if (module?.status !== 'ready') {
       blockedReasons.push(`${requiredModuleId} artifact is ${module?.status ?? 'missing'}, expected ready`);
     }
-    return { execution, manifest, blockedReasons };
+    return {
+      execution,
+      manifest,
+      blockedReasons,
+      mode: sourceProbe.ready ? 'materialized-from-source' : 'prebuilt-artifact',
+      sourceRoot: sourceProbe.sourceRoot,
+      artifactBaseDir
+    };
   }
 
   private async adminInternalServicePeerDomesticKeySyncResult(
@@ -5922,6 +5942,33 @@ function resolveMxLauncherRoot(): string {
   return candidates.find((candidate) => existsSync(resolve(candidate, 'server/package.json')) && existsSync(resolve(candidate, 'scripts/manage.sh')))
     ?? candidates.find((candidate) => existsSync(resolve(candidate, 'artifacts/site-slots')))
     ?? process.cwd();
+}
+
+function siteSlotArtifactSourceProbe(mxRoot: string, kind: 'oversea' | 'domestic') {
+  const sourceRoot = kind === 'oversea'
+    ? resolve(mxRoot, 'site-slots/oversea/hysteria2-access-stack')
+    : resolve(mxRoot, 'site-slots/domestic/qp-tunnel-cli');
+  const requiredFiles = kind === 'oversea'
+    ? [
+      '.env.example',
+      'Caddyfile',
+      'docker-compose.yml',
+      'manage.sh',
+      'scripts/reconcile-tunnel-state.mjs'
+    ]
+    : [
+      'package.json',
+      'resources/mihomo-client.sh'
+    ];
+  const missing = requiredFiles
+    .map((item) => resolve(sourceRoot, item))
+    .filter((item) => !existsSync(item));
+  return {
+    sourceRoot,
+    requiredFiles,
+    missing,
+    ready: missing.length === 0
+  };
 }
 
 function resolveSiteSlotWorkerRunScript(mxRoot: string): string {
