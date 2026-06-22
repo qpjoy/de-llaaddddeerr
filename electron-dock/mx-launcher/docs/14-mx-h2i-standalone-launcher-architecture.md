@@ -440,6 +440,12 @@ Internal 下发的 access account material，不保存 Config Center 权限真�
   host 必须临时 `tun-on` 时，把已知公网入口来源写入
   `MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS` 或
   `/etc/mihomo-client/tun-route-exclude-addresses.txt` 后再启用。
+- `Sync Remote` 对 Oversea 的端口同步发生在 `configure-oversea-access`：Internal 先把
+  `HY2_SERVER_PORTS=<UI HY2 UDP>` 写入远端 `.env` 和 `/opt/mx/site-agent/tunnel-state.json`，
+  再执行 `./manage.sh reconcile-from-json --mode hysteria2-only`，端口变化会触发
+  `docker compose` 重建 `mx-oversea-hysteria2`。如果订阅 YAML 已显示 51289 但 Oversea
+  `docker ps` 仍是 51288，应检查这个 reconcile 步骤和远端 `manage.sh` 版本，而不是只刷新
+  Internal subscription。
 
 Internal API 可以跑在 k8s pod 里，但 WG runtime 必须跑在真实 Internal 宿主机上。当前
 默认 host-runner 是 native runner：macOS 用 LaunchAgent，Ubuntu/Linux 用 systemd，

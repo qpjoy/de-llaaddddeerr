@@ -444,7 +444,7 @@ export class AdminController {
 
     const existingInstallReport = latestByCreatedAt((await this.store.listSiteSlotWorkerReports())
       .filter((report) => report.planId === plan.planId && report.status === 'passed' && workerReportHasRemoteExecution(report)));
-    if (existingInstallReport && !force) {
+    if (existingInstallReport && !force && !(executeRemote && confirmInstall)) {
       const ensure = {
         siteId,
         status: 'installed',

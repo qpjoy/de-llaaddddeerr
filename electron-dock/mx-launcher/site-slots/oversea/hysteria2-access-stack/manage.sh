@@ -267,7 +267,7 @@ default_hy2_peer_dns() {
 }
 
 apply_internal_managed_defaults() {
-	set_env_value HY2_SERVER_PORTS "$(default_hy2_server_ports)"
+	set_env_value HY2_SERVER_PORTS "$(default_hy2_server_ports_value)"
 	set_env_value HY2_HOP_INTERVAL_SECONDS "0"
 	set_env_value HY2_PEER_DNS "$(default_hy2_peer_dns)"
 	set_env_value HY2_SERVER_BANDWIDTH_DOWN "$(default_hy2_download_rate)"
@@ -1326,8 +1326,8 @@ internal_defaults_drift_report() {
 	local drift=0
 	local default_up default_down user_limit_drift
 
-	if [[ "${HY2_SERVER_PORTS:-}" != "$(default_hy2_server_ports)" ]]; then
-		echo "drift: HY2_SERVER_PORTS=${HY2_SERVER_PORTS:-unset} expected $(default_hy2_server_ports)"
+	if [[ -z "${HY2_SERVER_PORTS:-}" ]]; then
+		echo "drift: HY2_SERVER_PORTS=unset expected Internal-managed Hysteria2 UDP port"
 		drift=1
 	fi
 	if [[ "${HY2_HOP_INTERVAL_SECONDS:-}" != "0" ]]; then
@@ -1870,6 +1870,7 @@ reconcile_from_json_command() {
 	tmp_env="$(mktemp)"
 
 	reconcile_tunnel_state_files "$parser" "$state_file" "$tmp_users" "$tmp_env"
+	apply_internal_managed_defaults
 
 	# shellcheck disable=SC1090
 	source "$tmp_env"
@@ -1896,7 +1897,6 @@ reconcile_from_json_command() {
 	if [[ -n "${TUNNEL_DOMESTIC_GATEWAY_IP:-}" ]]; then
 		set_env_value HY2_DOMESTIC_GATEWAY_IP "$TUNNEL_DOMESTIC_GATEWAY_IP"
 	fi
-	apply_internal_managed_defaults
 
 	mv "$tmp_users" "$USERS_FILE"
 	chmod 600 "$USERS_FILE"
