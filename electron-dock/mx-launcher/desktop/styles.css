@@ -2669,6 +2669,42 @@ select {
   color: #ffc4c8;
 }
 
+.pipeline-failure-summary {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--mx-danger) 58%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--mx-danger) 14%, var(--mx-bg-panel));
+  color: #ffc4c8;
+}
+
+.pipeline-failure-summary.is-compact {
+  gap: 2px;
+  padding: 7px 9px;
+}
+
+.summary-strip .pipeline-failure-summary {
+  flex: 1 0 100%;
+}
+
+.pipeline-failure-summary strong,
+.pipeline-failure-summary span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pipeline-failure-summary strong {
+  font-size: 13px;
+}
+
+.pipeline-failure-summary span {
+  font-size: 12px;
+}
+
 .same-host-note {
   display: grid;
   gap: 4px;

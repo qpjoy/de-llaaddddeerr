@@ -2139,6 +2139,7 @@ function buildPipeline(
 ): AdminSiteSlotPipeline {
   const timeline = buildTimeline(plan, executions, runnerSessions, workerJobs, workerReports, rollbackExecutions, rollbackReports);
   const latest = timeline[timeline.length - 1] ?? null;
+  const failureSummary = latestWorkerReportFailureSummary(workerReports);
   const warnings = uniqueStrings([
     ...plan.warnings,
     ...executions.flatMap((execution) => execution.warnings),
@@ -2166,6 +2167,7 @@ function buildPipeline(
       rollbackReports: rollbackReports.length
     },
     warnings,
+    failureSummary,
     nextActions,
     actionHints: buildPipelineActionHints(actionPolicy, plan, executions, runnerSessions, workerJobs, workerReports, rollbackExecutions, domesticWgSecret)
   };
@@ -7084,6 +7086,11 @@ function reportStepStatus(report: SiteSlotWorkerReport, sourcePrefix: string): s
   return step?.status ?? null;
 }
 
+function latestWorkerReportFailureSummary(workerReports: SiteSlotWorkerReport[]): { phase: string; stepId: string; status: string; message: string } | null {
+  const report = latestByCreatedAt(workerReports.filter((item) => item.status === 'failed' || item.status === 'blocked'));
+  return report ? workerReportFailureSummary(report) : null;
+}
+
 function workerReportFailureSummary(report: SiteSlotWorkerReport): { phase: string; stepId: string; status: string; message: string } | null {
   const step = report.stepReports.find((item) => item.status === 'failed')
     ?? report.stepReports.find((item) => item.status === 'blocked');
@@ -7091,14 +7098,14 @@ function workerReportFailureSummary(report: SiteSlotWorkerReport): { phase: stri
   const evidence = parseJsonRecord(step.stdout ?? '');
   const executionResult = asRecord(evidence?.executionResult);
   const diagnosis = asRecord(executionResult?.diagnosis);
-  const rawMessage = (diagnosis ? `${stringValue(diagnosis.category) ?? 'ssh'}: ${stringValue(diagnosis.summary) ?? 'remote execution failed'}` : null)
-    ?? stringValue(step.stderr)
+  const rawMessage = stringValue(step.stderr)
     ?? stringValue(executionResult?.stderr)
     ?? stringValue(executionResult?.stdout)
+    ?? (diagnosis ? `${stringValue(diagnosis.category) ?? 'ssh'}: ${stringValue(diagnosis.summary) ?? 'remote execution failed'}` : null)
     ?? 'worker step failed';
   return {
     phase: stringValue(evidence?.phaseId) ?? phaseIdFromSource(step.sourceId),
-    stepId: step.stepId,
+    stepId: step.sourceId || step.stepId,
     status: step.status,
     message: compactFailureMessage(rawMessage)
   };

@@ -3347,6 +3347,27 @@ function isFailedOrRollbackPipeline(pipeline) {
   return pipeline?.health === 'failed' || isRollbackPipeline(pipeline);
 }
 
+function pipelineFailureSummaryObject(pipelineOrSummary) {
+  const summary = pipelineOrSummary?.summary || pipelineOrSummary || {};
+  const failure = summary.failureSummary || null;
+  return failure && typeof failure === 'object' ? failure : null;
+}
+
+function renderPipelineFailureSummary(pipelineOrSummary, options = {}) {
+  const failure = pipelineFailureSummaryObject(pipelineOrSummary);
+  if (!failure) return '';
+  const label = failure.stepId || failure.phase || 'failed step';
+  const status = failure.status || 'failed';
+  const classes = ['pipeline-failure-summary'];
+  if (options.compact) classes.push('is-compact');
+  return `
+    <div class="${classes.join(' ')}" data-status="${escapeHtml(status)}">
+      <strong>${escapeHtml(label)} ${escapeHtml(status)}</strong>
+      <span>${escapeHtml(failure.message || 'worker step failed')}</span>
+    </div>
+  `;
+}
+
 function latestPipeline(pipelines) {
   return asArray(pipelines)
     .slice()
@@ -3421,6 +3442,7 @@ function renderDeploymentWorkbench(pipelines) {
       <span><strong>${pipelineObjectCount(pipeline)}</strong><small>active objects</small></span>
       <span><strong>${site.pipelines.length}</strong><small>history runs</small></span>
     </div>
+    ${renderPipelineFailureSummary(pipeline)}
     ${renderDomesticRelayPanel(site, pipeline)}
     ${renderDomesticRuntimeConfigPanel()}
   `;
@@ -7815,6 +7837,7 @@ function renderPipelineList(pipelines) {
           <span class="health-chip" data-health="${escapeHtml(pipeline.health)}">${escapeHtml(pipeline.health)}</span>
         </span>
         <span class="pipeline-meta">${escapeHtml(site.kind)} / ${escapeHtml(pipeline.currentStage)} / ${escapeHtml(pipeline.latestStatus)}</span>
+        ${renderPipelineFailureSummary(pipeline, { compact: true })}
         <span class="pipeline-counts">${pipelineObjectCount(pipeline)} active objects / ${site.pipelines.length} history</span>
         <span class="pipeline-selected-role">${escapeHtml(sitePipelineRoleLabel(site, pipeline))}</span>
       </button>
@@ -7933,6 +7956,7 @@ function renderCurrentPipelineSummary() {
     <span>${escapeHtml(summary.currentStage)}</span>
     <span>${escapeHtml(summary.latestStatus)}</span>
     <span>${formatTime(summary.latestUpdatedAt)}</span>
+    ${renderPipelineFailureSummary(summary, { compact: true })}
     ${renderMihomoReachabilityStrip(summary)}
   `;
 }
@@ -9134,11 +9158,14 @@ function setupPipelineObservation(pipeline) {
   const running = pipelineHasRunningWork(pipeline);
   const nextAction = preferredNextAction(asArray(summary.actionHints));
   if (health === 'failed') {
+    const failure = pipelineFailureSummaryObject(summary);
     return {
       done: true,
       status: 'failed',
       stepStatus: 'failed',
-      message: `${summary.siteId || 'slot'} failed at ${summary.currentStage || 'pipeline'}.`
+      message: failure
+        ? `${summary.siteId || 'slot'} failed at ${failure.stepId || failure.phase || summary.currentStage || 'pipeline'}: ${failure.message || 'worker step failed'}`
+        : `${summary.siteId || 'slot'} failed at ${summary.currentStage || 'pipeline'}.`
     };
   }
   if (health === 'blocked') {

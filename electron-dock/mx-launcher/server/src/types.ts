@@ -599,6 +599,12 @@ export interface AdminSiteSlotPipelineSummary {
     rollbackReports: number;
   };
   warnings: string[];
+  failureSummary: {
+    phase: string;
+    stepId: string;
+    status: string;
+    message: string;
+  } | null;
   nextActions: string[];
   actionHints: AdminActionDescriptor[];
 }
