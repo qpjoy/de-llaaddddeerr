@@ -762,6 +762,7 @@ const checks = [
         && bootstrapEgress?.commands?.some((command) => command.includes('attempt pre-egress npm install @qpjoy/tunnel-cli@latest'))
         && bootstrapEgress?.commands?.some((command) => command.includes('mx-domestic-qp-tunnel-cli-fallback.tar.gz'))
         && bootstrapEgress?.commands?.some((command) => command.includes('mx-domestic-bootstrap-subscription.yaml') && command.includes('domestic-bootstrap-subscription.yaml'))
+        && bootstrapEgress?.commands?.some((command) => command.includes('MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS') && command.includes('using Internal-pushed fallback'))
         && bootstrapEgress?.commands?.some((command) => command.includes('@qpjoy/tunnel-cli@latest') && command.includes('npm refresh skipped after egress-on'))
         && bootstrapEgress?.commands?.some((command) => command.includes('node/npm absent'))
         && bootstrapEgress?.commands?.some((command) => command.includes('BOOTSTRAP_SUBSCRIPTION_FILE=/opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml'))
@@ -778,7 +779,7 @@ const checks = [
         && verifyDomesticEgress?.mode === 'remote-ssh'
         && verifyDomesticEgress?.commands?.some((command) => command.includes('www.gstatic.com/generate_204') && command.includes('--http1.1'))
         && verifyDomesticEgress?.commands?.some((command) => command.includes('auth.docker.io/token') && command.includes('registry-1.docker.io/v2/'))
-        && verifyDomesticEgress?.commands?.some((command) => command.includes('registry-1.docker.io/v2/') && command.includes('127.0.0.1:7890'))
+        && verifyDomesticEgress?.commands?.some((command) => command.includes('registry-1.docker.io/v2/') && command.includes('127.0.0.1:7788'))
         && verifyDomesticEgress?.commands?.some((command) => command.includes('generic HTTPS is not reachable') && command.includes('Docker registry is not reachable'))
         && verifyDomesticEgress?.commands?.some((command) => command.includes('mihomo-client service is not active') && command.includes('journalctl -u mihomo-client'))
         && activatePeerCenter?.commands?.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))

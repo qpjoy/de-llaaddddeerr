@@ -13,6 +13,14 @@ MIHOMO_BIN="${MIHOMO_BIN:-/usr/local/bin/mihomo}"
 MIHOMO_CLIENT_LAUNCHER="${MIHOMO_CLIENT_LAUNCHER:-/usr/local/bin/mihomo-client}"
 MIHOMO_SERVICE_NAME="${MIHOMO_SERVICE_NAME:-mihomo-client.service}"
 MIHOMO_SERVICE_FILE="${MIHOMO_SERVICE_FILE:-/etc/systemd/system/$MIHOMO_SERVICE_NAME}"
+MIHOMO_MIXED_PORT="${MIHOMO_MIXED_PORT:-7788}"
+MIHOMO_TUN_AUTO_ROUTE="${MIHOMO_TUN_AUTO_ROUTE:-true}"
+MIHOMO_TUN_AUTO_REDIRECT="${MIHOMO_TUN_AUTO_REDIRECT:-false}"
+MIHOMO_TUN_AUTO_DETECT_INTERFACE="${MIHOMO_TUN_AUTO_DETECT_INTERFACE:-true}"
+MIHOMO_TUN_STRICT_ROUTE="${MIHOMO_TUN_STRICT_ROUTE:-true}"
+MIHOMO_TUN_PRESERVE_SSH_CLIENT="${MIHOMO_TUN_PRESERVE_SSH_CLIENT:-true}"
+MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS="${MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS:-${MIHOMO_TUN_EXTRA_ROUTE_EXCLUDE_ADDRESS:-}}"
+MIHOMO_TUN_ROUTE_EXCLUDE_FILE="${MIHOMO_TUN_ROUTE_EXCLUDE_FILE:-$MIHOMO_HOME/tun-route-exclude-addresses.txt}"
 MIHOMO_PROFILE_PROXY_FILE="${MIHOMO_PROFILE_PROXY_FILE:-/etc/profile.d/mihomo-client-proxy.sh}"
 MIHOMO_DAEMON_PROXY_SERVICES="${MIHOMO_DAEMON_PROXY_SERVICES:-docker.service containerd.service buildkit.service}"
 MIHOMO_DAEMON_PROXY_DROPIN_NAME="${MIHOMO_DAEMON_PROXY_DROPIN_NAME:-mihomo-proxy.conf}"
@@ -80,6 +88,16 @@ Update options:
   --password PASS      Override saved subscription password
   --no-auth            Clear saved Basic Auth credentials and fetch without auth
 
+TUN safety environment:
+  MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS
+                       Extra comma/space-separated CIDRs or IPs to keep outside TUN
+  MIHOMO_TUN_ROUTE_EXCLUDE_FILE
+                       Extra newline/comma-separated CIDRs, default /etc/mihomo-client/tun-route-exclude-addresses.txt
+  MIHOMO_TUN_AUTO_REDIRECT
+                       Linux nft auto-redirect toggle, default false for server hosts
+  MIHOMO_TUN_PRESERVE_SSH_CLIENT
+                       Add the current SSH client IP to route-exclude-address, default true
+
 Uninstall options:
   --purge              Also remove config, env, downloaded YAML, and Mihomo binary
 
@@ -100,8 +118,10 @@ Examples:
   sudo bash ./scripts/mihomo-client.sh update-subscription --file /opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml
   sudo bash ./scripts/mihomo-client.sh start
   sudo bash ./scripts/mihomo-client.sh egress-on
+  sudo bash ./scripts/mihomo-client.sh egress-off
   sudo bash ./scripts/mihomo-client.sh proxy-on
   sudo bash ./scripts/mihomo-client.sh tun-on
+  sudo MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS="203.0.113.10/32,198.51.100.0/24" bash ./scripts/mihomo-client.sh tun-on
   sudo bash ./scripts/mihomo-client.sh ssh-proxy-on
   sudo bash ./scripts/mihomo-client.sh daemon-proxy-on
   sudo bash ./scripts/mihomo-client.sh run curl -I https://www.google.com/generate_204
@@ -439,29 +459,130 @@ detect_tun_proxy_group_name() {
 	echo "${detected:-PROXY}"
 }
 
+yaml_bool() {
+	local value="$1"
+	local name="${2:-value}"
+
+	case "$value" in
+		true|TRUE|True|1|yes|YES|Yes|on|ON|On)
+			echo "true"
+		;;
+		false|FALSE|False|0|no|NO|No|off|OFF|Off)
+			echo "false"
+		;;
+		*)
+			die "$name must be true or false, got: $value"
+		;;
+	esac
+}
+
+is_ipv4_address() {
+	local ip="$1"
+	local a b c d octet
+
+	[[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+	IFS=. read -r a b c d <<< "$ip"
+	for octet in "$a" "$b" "$c" "$d"; do
+		[[ "$octet" =~ ^[0-9]+$ ]] || return 1
+		(( octet >= 0 && octet <= 255 )) || return 1
+	done
+}
+
+normalize_route_exclude_token() {
+	local token="$1"
+
+	token="${token%%#*}"
+	token="$(printf "%s" "$token" | awk '{$1=$1; print}')"
+	[[ -n "$token" ]] || return 0
+
+	if [[ "$token" == */* ]]; then
+		echo "$token"
+	elif is_ipv4_address "$token"; then
+		echo "$token/32"
+	elif [[ "$token" == *:* ]]; then
+		echo "$token/128"
+	else
+		echo "$token"
+	fi
+}
+
+emit_route_exclude_tokens() {
+	local raw="$1"
+	local token
+
+	[[ -n "$raw" ]] || return 0
+	printf "%s\n" "$raw" | tr ',[:space:]' '\n' | while IFS= read -r token; do
+		normalize_route_exclude_token "$token"
+	done
+}
+
+emit_route_exclude_file_tokens() {
+	local line
+
+	[[ -f "$MIHOMO_TUN_ROUTE_EXCLUDE_FILE" ]] || return 0
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		emit_route_exclude_tokens "$line"
+	done < "$MIHOMO_TUN_ROUTE_EXCLUDE_FILE"
+}
+
+emit_ssh_client_route_exclude() {
+	local peer=""
+
+	if [[ -n "${SSH_CLIENT:-}" ]]; then
+		peer="${SSH_CLIENT%% *}"
+	elif [[ -n "${SSH_CONNECTION:-}" ]]; then
+		peer="${SSH_CONNECTION%% *}"
+	fi
+	normalize_route_exclude_token "$peer"
+}
+
+tun_route_exclude_addresses() {
+	{
+		cat <<'EOF'
+10.0.0.0/8
+172.16.0.0/12
+192.168.0.0/16
+169.254.0.0/16
+100.64.0.0/10
+10.88.0.0/16
+10.89.0.0/16
+10.90.0.0/16
+10.91.0.0/16
+100.100.100.200/32
+EOF
+		if [[ "$(yaml_bool "$MIHOMO_TUN_PRESERVE_SSH_CLIENT" "MIHOMO_TUN_PRESERVE_SSH_CLIENT")" == "true" ]]; then
+			emit_ssh_client_route_exclude
+		fi
+		emit_route_exclude_tokens "$MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS"
+		emit_route_exclude_file_tokens
+	} | awk 'NF && !seen[$0]++ { print }'
+}
+
+write_route_exclude_address_lines() {
+	tun_route_exclude_addresses | sed 's/^/    - /'
+}
+
 write_tun_overlay() {
 	ensure_subscription_source
-	local proxy_group
+	local proxy_group auto_route auto_redirect auto_detect_interface strict_route
 	proxy_group="$(detect_tun_proxy_group_name)"
-	cat > "$MIHOMO_TUN_OVERLAY_FILE" <<EOF
+	auto_route="$(yaml_bool "$MIHOMO_TUN_AUTO_ROUTE" "MIHOMO_TUN_AUTO_ROUTE")"
+	auto_redirect="$(yaml_bool "$MIHOMO_TUN_AUTO_REDIRECT" "MIHOMO_TUN_AUTO_REDIRECT")"
+	auto_detect_interface="$(yaml_bool "$MIHOMO_TUN_AUTO_DETECT_INTERFACE" "MIHOMO_TUN_AUTO_DETECT_INTERFACE")"
+	strict_route="$(yaml_bool "$MIHOMO_TUN_STRICT_ROUTE" "MIHOMO_TUN_STRICT_ROUTE")"
+	{
+		cat <<EOF
 tun:
   enable: true
   stack: system
-  auto-route: true
-  auto-redirect: true
-  auto-detect-interface: true
-  strict-route: true
+  auto-route: $auto_route
+  auto-redirect: $auto_redirect
+  auto-detect-interface: $auto_detect_interface
+  strict-route: $strict_route
   route-exclude-address:
-    - 10.0.0.0/8
-    - 172.16.0.0/12
-    - 192.168.0.0/16
-    - 169.254.0.0/16
-    - 100.64.0.0/10
-    - 10.88.0.0/16
-    - 10.89.0.0/16
-    - 10.90.0.0/16
-    - 10.91.0.0/16
-    - 100.100.100.200/32
+EOF
+		write_route_exclude_address_lines
+		cat <<EOF
   dns-hijack:
     - any:53
     - tcp://any:53
@@ -517,6 +638,7 @@ rules:
   - GEOIP,CN,DIRECT
   - MATCH,$proxy_group
 EOF
+	} > "$MIHOMO_TUN_OVERLAY_FILE"
 	chmod 600 "$MIHOMO_TUN_OVERLAY_FILE"
 }
 
@@ -549,9 +671,35 @@ EOF
 	fi
 }
 
+apply_mixed_port_override() {
+	local tmp
+
+	tmp="$(mktemp)"
+	if grep -Eq '^[[:space:]]*mixed-port[[:space:]]*:' "$MIHOMO_CONFIG_FILE"; then
+		awk -v port="$MIHOMO_MIXED_PORT" '
+			BEGIN { done = 0 }
+			/^[[:space:]]*mixed-port[[:space:]]*:/ {
+				if (!done) {
+					print "mixed-port: " port
+					done = 1
+				}
+				next
+			}
+			{ print }
+		' "$MIHOMO_CONFIG_FILE" > "$tmp"
+	else
+		{
+			printf "mixed-port: %s\n" "$MIHOMO_MIXED_PORT"
+			cat "$MIHOMO_CONFIG_FILE"
+		} > "$tmp"
+	fi
+	mv "$tmp" "$MIHOMO_CONFIG_FILE"
+}
+
 render_runtime_config() {
 	ensure_subscription_source
 	cat "$MIHOMO_SUBSCRIPTION_FILE" > "$MIHOMO_CONFIG_FILE"
+	apply_mixed_port_override
 	append_geox_overlay_if_needed
 	if tun_enabled; then
 		printf "\n" >> "$MIHOMO_CONFIG_FILE"
@@ -784,7 +932,7 @@ set -eu
 
 HOST="${1:?host required}"
 PORT="${2:?port required}"
-PROXY_ADDR="${MIHOMO_SSH_PROXY_ADDR:-127.0.0.1:7890}"
+PROXY_ADDR="${MIHOMO_SSH_PROXY_ADDR:-127.0.0.1:7788}"
 
 if command -v nc >/dev/null 2>&1; then
 	exec nc -x "$PROXY_ADDR" -X 5 "$HOST" "$PORT"
@@ -908,12 +1056,10 @@ server_on_command() {
 	if tun_enabled; then
 		was_tun_enabled="true"
 		remove_tun_overlay
-		render_runtime_config
 	fi
+	render_runtime_config
 	if service_is_active; then
-		if [[ "$was_tun_enabled" == "true" ]]; then
-			systemctl restart "$MIHOMO_SERVICE_NAME"
-		fi
+		systemctl restart "$MIHOMO_SERVICE_NAME"
 	else
 		systemctl start "$MIHOMO_SERVICE_NAME"
 	fi
@@ -926,12 +1072,17 @@ server_on_command() {
 }
 
 server_off_command() {
+	local can_render="false"
+
 	remove_tun_overlay
-	render_runtime_config
+	if [[ -f "$MIHOMO_SUBSCRIPTION_FILE" || -f "$MIHOMO_CONFIG_FILE" ]]; then
+		render_runtime_config
+		can_render="true"
+	fi
 	proxy_off_command
 	ssh_proxy_off_command
 	daemon_proxy_off_command
-	if service_is_active; then
+	if [[ "$can_render" == "true" ]] && service_is_active; then
 		systemctl restart "$MIHOMO_SERVICE_NAME"
 	fi
 	echo "Server-safe outbound proxy integrations disabled. Mihomo service remains installed."

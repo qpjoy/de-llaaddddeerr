@@ -170,7 +170,7 @@ write_profile() {
 	first_port="$(first_port_from_spec "$SERVER_PORTS")"
 
 	{
-		echo "mixed-port: 7890"
+		echo "mixed-port: ${MIHOMO_MIXED_PORT:-7788}"
 		echo "allow-lan: false"
 		echo "mode: rule"
 		echo "log-level: info"

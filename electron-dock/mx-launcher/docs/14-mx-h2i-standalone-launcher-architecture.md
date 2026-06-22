@@ -435,6 +435,11 @@ Internal 下发的 access account material，不保存 Config Center 权限真�
   `qp-tunnel-cli egress-on`。如果这个 host 上的 `curl`/Docker registry egress 恢复，说明
   Internal 宿主机经 Oversea access 的 outbound bootstrap 成功。不要用这个结果替代
   `mx-internal-svc`/Domestic WG 的 H2I 数据面验证；两者是互补的两条链路。
+- 关闭这条受控出站链路时使用 `qp-tunnel-cli egress-off`，它会移除 shell/SSH/daemon proxy
+  集成并清掉 TUN overlay；如果还要释放本地 mixed-port，再执行 `qp-tunnel-cli stop`。公网
+  host 必须临时 `tun-on` 时，把已知公网入口来源写入
+  `MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS` 或
+  `/etc/mihomo-client/tun-route-exclude-addresses.txt` 后再启用。
 
 Internal API 可以跑在 k8s pod 里，但 WG runtime 必须跑在真实 Internal 宿主机上。当前
 默认 host-runner 是 native runner：macOS 用 LaunchAgent，Ubuntu/Linux 用 systemd，

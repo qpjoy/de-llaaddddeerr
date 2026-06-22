@@ -345,7 +345,7 @@ write_mihomo_profile() {
 	allowed_yaml=$(yaml_allowed_ips_list)
 
 	{
-		echo "mixed-port: 7890"
+		echo "mixed-port: ${MIHOMO_MIXED_PORT:-7788}"
 		echo "allow-lan: false"
 		echo "mode: rule"
 		echo "log-level: info"

@@ -311,6 +311,10 @@ Domestic outbound policy：
   drop-in。
 - 不在公网 Domestic 长期使用 `tun-on`。TUN 会改写默认路由，容易让网站/API/WG relay
   的入站连接回程走代理，外部访问会变得不可预测。
+- 必须临时 `tun-on` 时，`qp-tunnel-cli` 现在默认关闭 Linux `auto-redirect`，并把私网、
+  100.* mesh、当前 SSH client 加入 `route-exclude-address`；已知公网入口来源需要通过
+  `MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS` 或
+  `/etc/mihomo-client/tun-route-exclude-addresses.txt` 显式加入。
 - Oversea 的 `hysteria2-mihomo-stack` 继续生成 `cn-direct` 订阅；Domestic 消费该订阅后，
   国内目标直连，外网目标经 Oversea。需要全局 TUN 时，只用于非公网机器、临时 bootstrap
   或后续带 policy routing/route exclude 的专门模式。

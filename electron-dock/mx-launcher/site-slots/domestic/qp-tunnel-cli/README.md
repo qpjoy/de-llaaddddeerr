@@ -102,6 +102,7 @@ Run commands directly through the bundled script:
 ```bash
 qp-tunnel-cli status
 qp-tunnel-cli egress-on
+qp-tunnel-cli egress-off
 qp-tunnel-cli update-subscription
 ```
 
@@ -109,7 +110,22 @@ For server commands, `qp-tunnel-cli` re-runs itself with `sudo` when root is nee
 Use `egress-on` for public VPS hosts: it keeps Mihomo running as a local outbound
 proxy and configures shell, SSH, Docker/containerd/buildkit proxy drop-ins without
 enabling TUN route takeover. Reserve `tun-on` for machines that are not serving
-public inbound traffic.
+public inbound traffic. `egress-off` removes those shell/SSH/daemon proxy
+integrations and disables the TUN overlay; run `qp-tunnel-cli stop` as well if
+you also want to stop the resident local proxy on the mixed port.
+
+When `tun-on` is necessary on a server host, the generated overlay uses safer
+defaults for inbound access: Linux `auto-redirect` is disabled by default,
+private/local CIDRs bypass TUN, and the current SSH client IP is added to
+`route-exclude-address`. Add known public ingress sources before enabling TUN:
+
+```bash
+MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS="203.0.113.10/32,198.51.100.0/24" \
+  sudo -E qp-tunnel-cli tun-on
+```
+
+For persistent entries, write newline or comma separated CIDRs to
+`/etc/mihomo-client/tun-route-exclude-addresses.txt` and rerun `tun-on`.
 
 Domestic bootstrap can install from an Internal-pushed subscription file before
 the WG relay can reach Internal:

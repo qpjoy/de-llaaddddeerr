@@ -248,7 +248,7 @@ else
 fi
 
 print_section "Quick Hints"
-echo "- 7890/7897 are Mihomo client-side local ports, not the server's public WG port."
+echo "- 7788/7897 are Mihomo client-side local ports, not the server's public WG port."
 echo "- If only 'subscriptions' is started, it should not touch host routing or wg forwarding."
 echo "- If host wg0 is already stable, prefer 'host WireGuard + subscriptions container' on Ubuntu."
 echo "- If Docker WG and host WG both run, use different UDP ports and compare iptables before/after."

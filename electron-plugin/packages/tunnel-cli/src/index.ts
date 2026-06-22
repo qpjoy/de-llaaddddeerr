@@ -112,7 +112,9 @@ Common commands:
   qp-tunnel-cli status
   qp-tunnel-cli start
   qp-tunnel-cli egress-on
+  qp-tunnel-cli egress-off
   qp-tunnel-cli tun-on
+  MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS=203.0.113.10/32 sudo -E qp-tunnel-cli tun-on
   qp-tunnel-cli tun-off
   qp-tunnel-cli k8s preload-images
   qp-tunnel-cli update-subscription
@@ -134,6 +136,11 @@ egress-on makes Docker pulls work, preload runtime images into containerd:
   sudo qp-tunnel-cli tun-on
   sudo qp-tunnel-cli k8s preload-images
   sudo qp-tunnel-cli tun-off
+
+tun-on uses server-safer defaults: Linux auto-redirect is off by default, local
+and private networks bypass TUN, and the current SSH client IP is preserved.
+Add public ingress sources with MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS or
+/etc/mihomo-client/tun-route-exclude-addresses.txt before enabling tun-on.
 
 Install the script as a normal server command:
   sudo qp-tunnel-cli install-script

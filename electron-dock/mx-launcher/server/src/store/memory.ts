@@ -2348,6 +2348,7 @@ export class MemoryStore implements PlatformStore {
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('attempt pre-egress npm install @qpjoy/tunnel-cli@latest'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('mx-domestic-qp-tunnel-cli-fallback.tar.gz'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('mx-domestic-bootstrap-subscription.yaml') && command.includes('domestic-bootstrap-subscription.yaml'))
+      || !domesticBootstrapEgress?.commands.some((command) => command.includes('MIHOMO_TUN_ROUTE_EXCLUDE_ADDRESS') && command.includes('using Internal-pushed fallback'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('@qpjoy/tunnel-cli@latest') && command.includes('npm refresh skipped after egress-on'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('node/npm absent'))
       || !domesticBootstrapEgress?.commands.some((command) => command.includes('egress-on'))
@@ -2359,7 +2360,7 @@ export class MemoryStore implements PlatformStore {
       || domesticEgressProxyReadiness?.mode !== 'remote-ssh'
       || !domesticEgressProxyReadiness?.commands.some((command) => command.includes('www.gstatic.com/generate_204') && command.includes('--http1.1'))
       || !domesticEgressProxyReadiness?.commands.some((command) => command.includes('auth.docker.io/token') && command.includes('registry-1.docker.io/v2/'))
-      || !domesticEgressProxyReadiness?.commands.some((command) => command.includes('registry-1.docker.io/v2/') && command.includes('127.0.0.1:7890'))
+      || !domesticEgressProxyReadiness?.commands.some((command) => command.includes('registry-1.docker.io/v2/') && command.includes('127.0.0.1:7788'))
       || !domesticEgressProxyReadiness?.commands.some((command) => command.includes('generic HTTPS is not reachable') && command.includes('Docker registry is not reachable'))
       || !domesticEgressProxyReadiness?.commands.some((command) => command.includes('mihomo-client service is not active') && command.includes('journalctl -u mihomo-client'))
       || !domesticPeerCenter?.commands.some((command) => command.includes('mx-domestic-wg-relay.conf') && command.includes('/etc/wireguard/mx-domestic.conf'))
