@@ -163,6 +163,7 @@ const state = {
       roleId: 'all',
       status: 'all'
     },
+    openDropdown: null,
     drawer: null,
     selectedOverseaUserId: null,
     overseaFeedback: null,
@@ -725,7 +726,18 @@ if (userEditorBackdrop) {
   userEditorBackdrop.addEventListener('click', () => closeUserEditorDrawer());
 }
 
+document.addEventListener('click', (event) => {
+  if (!state.userCenter.openDropdown) return;
+  if (event.target?.closest?.('[data-user-dropdown-root]')) return;
+  closeUserCenterDropdown();
+});
+
 window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && state.userCenter.openDropdown) {
+    event.preventDefault();
+    closeUserCenterDropdown();
+    return;
+  }
   if (event.key === 'Escape' && userEditorDrawer && !userEditorDrawer.hidden) {
     closeUserEditorDrawer();
     return;
@@ -2296,6 +2308,70 @@ function renderUserCenterSurfaces() {
   renderUserEditorDrawer();
 }
 
+function rerenderUserCenterDropdownContext() {
+  if (state.adminMenu === 'internal' && state.adminSection === 'foundations' && state.adminSubsection === 'user-center') {
+    renderUserCenterSurfaces();
+  } else if (state.userCenter.drawer) {
+    renderUserEditorDrawer();
+  }
+}
+
+function syncUserDropdownDom() {
+  for (const dropdown of document.querySelectorAll('[data-user-dropdown-root]')) {
+    const open = dropdown.dataset.userDropdownRoot === state.userCenter.openDropdown;
+    dropdown.classList.toggle('is-open', open);
+    dropdown.querySelector('[data-user-dropdown-toggle]')?.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+}
+
+function closeUserCenterDropdown() {
+  if (!state.userCenter.openDropdown) return;
+  state.userCenter.openDropdown = null;
+  syncUserDropdownDom();
+}
+
+function toggleUserCenterDropdown(dropdownId) {
+  if (!dropdownId) return;
+  state.userCenter.openDropdown = state.userCenter.openDropdown === dropdownId ? null : dropdownId;
+  rerenderUserCenterDropdownContext();
+}
+
+function applyUserCenterDropdownValue(field, value) {
+  if (!field) return;
+  if (field.startsWith('filter:')) {
+    const filterField = field.slice('filter:'.length);
+    if (filterField) userCenterFilters()[filterField] = value || 'all';
+    return;
+  }
+  if (field === 'drawer:roleId' && state.userCenter.drawer) {
+    state.userCenter.drawer.draft = {
+      ...(state.userCenter.drawer.draft || {}),
+      roleId: value || defaultUserRoleId()
+    };
+    state.userCenter.feedback = null;
+  }
+}
+
+function bindUserDropdownControls(root) {
+  if (!root) return;
+  for (const trigger of root.querySelectorAll('[data-user-dropdown-toggle]')) {
+    trigger.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleUserCenterDropdown(trigger.dataset.userDropdownToggle);
+    });
+  }
+  for (const option of root.querySelectorAll('[data-user-dropdown-option]')) {
+    option.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      applyUserCenterDropdownValue(option.dataset.userDropdownField, option.dataset.userDropdownValue);
+      state.userCenter.openDropdown = null;
+      rerenderUserCenterDropdownContext();
+    });
+  }
+}
+
 async function bootstrapUserCenterFromAdmin() {
   if (state.userCenter.busy) return;
   state.userCenter.busy = true;
@@ -2394,6 +2470,7 @@ function openUserEditorDrawer(mode = 'edit', userId = '') {
     userId: user?.userId || '',
     draft: createUserEditorDraft(normalizedMode, user?.userId || '')
   };
+  state.userCenter.openDropdown = null;
   state.userCenter.feedback = null;
   state.userCenter.overseaFeedback = null;
   state.userCenter.selectedOverseaUserId = user?.userId || null;
@@ -2406,6 +2483,7 @@ function openUserEditorDrawer(mode = 'edit', userId = '') {
 
 function closeUserEditorDrawer() {
   state.userCenter.drawer = null;
+  state.userCenter.openDropdown = null;
   state.userCenter.busy = false;
   if (userEditorBackdrop) userEditorBackdrop.hidden = true;
   if (userEditorDrawer) {
@@ -4925,12 +5003,7 @@ function renderFoundationGrid(overview) {
       });
     });
   }
-  for (const filterControl of foundationGrid.querySelectorAll('select[data-user-filter]')) {
-    filterControl.addEventListener('change', () => {
-      userCenterFilters()[filterControl.dataset.userFilter] = filterControl.value || 'all';
-      renderFoundationGrid(state.dashboard?.overview || overview || {});
-    });
-  }
+  bindUserDropdownControls(foundationGrid);
   for (const row of foundationGrid.querySelectorAll('[data-user-select]')) {
     row.addEventListener('click', (event) => {
       if (event.target.closest('button')) return;
@@ -5249,27 +5322,69 @@ function filteredUserCenterUsers() {
   });
 }
 
-function renderUserRoleOptions(selectedRoleId, includeAll = false) {
+function userRoleDropdownOptions(includeAll = false) {
   const roles = asArray(state.userCenter.roles);
-  const selected = selectedRoleId || (includeAll ? 'all' : defaultUserRoleId());
-  const options = includeAll ? [`<option value="all" ${selected === 'all' ? 'selected' : ''}>All roles</option>`] : [];
   return [
-    ...options,
-    ...roles.map((role) => `
-      <option value="${escapeHtml(role.roleId)}" ${role.roleId === selected ? 'selected' : ''}>
-        ${escapeHtml(role.displayName || role.roleId)}
-      </option>
-    `)
-  ].join('');
+    ...(includeAll ? [{ value: 'all', label: 'All roles' }] : []),
+    ...roles.map((role) => ({
+      value: role.roleId,
+      label: role.displayName || role.roleId
+    }))
+  ];
 }
 
-function renderUserStatusOptions(selectedStatus) {
-  const selected = selectedStatus || 'all';
-  return ['all', 'active', 'disabled'].map((status) => `
-    <option value="${escapeHtml(status)}" ${status === selected ? 'selected' : ''}>
-      ${escapeHtml(status === 'all' ? 'All status' : status)}
-    </option>
-  `).join('');
+function userStatusDropdownOptions() {
+  return [
+    { value: 'all', label: 'All status' },
+    { value: 'active', label: 'active' },
+    { value: 'disabled', label: 'disabled' }
+  ];
+}
+
+function userDropdownLabel(options, selectedValue, fallback = '-') {
+  const selected = options.find((option) => option.value === selectedValue);
+  return selected?.label || fallback;
+}
+
+function renderUserDropdown({ id, field, value, options, label, disabled = false }) {
+  const normalizedOptions = asArray(options).filter((option) => option && option.value);
+  const selectedValue = value || normalizedOptions[0]?.value || '';
+  const selectedLabel = label || userDropdownLabel(normalizedOptions, selectedValue, 'Select');
+  const open = state.userCenter.openDropdown === id;
+  return `
+    <div class="qp-dropdown user-dropdown ${open ? 'is-open' : ''}" data-user-dropdown-root="${escapeHtml(id)}">
+      <button
+        class="qp-dropdown__trigger user-dropdown__trigger"
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded="${open ? 'true' : 'false'}"
+        data-user-dropdown-toggle="${escapeHtml(id)}"
+        data-user-dropdown-field="${escapeHtml(field)}"
+        ${disabled ? 'disabled' : ''}
+      >
+        <span class="qp-dropdown__value user-dropdown__value">${escapeHtml(selectedLabel)}</span>
+        <span class="qp-dropdown__chevron user-dropdown__chevron" aria-hidden="true">⌄</span>
+      </button>
+      <div class="qp-dropdown__menu user-dropdown__menu" role="listbox" aria-label="${escapeHtml(selectedLabel)}">
+        ${normalizedOptions.length ? normalizedOptions.map((option) => {
+          const selected = option.value === selectedValue;
+          return `
+            <button
+              class="qp-dropdown__option user-dropdown__option ${selected ? 'is-selected' : ''}"
+              type="button"
+              role="option"
+              aria-selected="${selected ? 'true' : 'false'}"
+              data-user-dropdown-option="${escapeHtml(id)}"
+              data-user-dropdown-field="${escapeHtml(field)}"
+              data-user-dropdown-value="${escapeHtml(option.value)}"
+            >${escapeHtml(option.label || option.value)}</button>
+          `;
+        }).join('') : `
+          <button class="qp-dropdown__option user-dropdown__option" type="button" role="option" aria-disabled="true" disabled>No options</button>
+        `}
+      </div>
+    </div>
+  `;
 }
 
 function renderUserStatusBadge(status) {
@@ -5282,6 +5397,8 @@ function renderUserCenterPanel() {
   const filteredUsers = filteredUserCenterUsers();
   const filter = userCenterFilters();
   const feedback = state.userCenter.feedback;
+  const roleOptions = userRoleDropdownOptions(true);
+  const statusOptions = userStatusDropdownOptions();
   return `
     <section class="foundation-panel foundation-wide user-workbench">
       <div class="app-catalog-toolbar user-catalog-toolbar">
@@ -5292,12 +5409,20 @@ function renderUserCenterPanel() {
         </div>
         <div class="app-catalog-controls user-catalog-controls">
           <input data-user-filter="search" value="${escapeHtml(filter.search || '')}" autocomplete="off" placeholder="Search user..." />
-          <select class="user-filter-select" data-user-filter="roleId">
-            ${renderUserRoleOptions(filter.roleId, true)}
-          </select>
-          <select class="user-filter-select" data-user-filter="status">
-            ${renderUserStatusOptions(filter.status)}
-          </select>
+          ${renderUserDropdown({
+            id: 'user-filter-role',
+            field: 'filter:roleId',
+            value: filter.roleId || 'all',
+            options: roleOptions,
+            label: userDropdownLabel(roleOptions, filter.roleId || 'all', 'All roles')
+          })}
+          ${renderUserDropdown({
+            id: 'user-filter-status',
+            field: 'filter:status',
+            value: filter.status || 'all',
+            options: statusOptions,
+            label: userDropdownLabel(statusOptions, filter.status || 'all', 'All status')
+          })}
           <button class="secondary-button" type="button" data-user-bootstrap ${state.userCenter.busy ? 'disabled' : ''} title="Initialize User Center seed records">Bootstrap</button>
           <button class="primary-button" type="button" data-user-new ${state.userCenter.busy ? 'disabled' : ''}>New User</button>
         </div>
@@ -5433,6 +5558,9 @@ function renderUserEditorDrawer() {
   const editing = drawer.mode === 'edit';
   const user = editing ? userCenterUserById(drawer.userId) : null;
   const draft = drawer.draft || createUserEditorDraft(drawer.mode, drawer.userId);
+  const roleOptions = userRoleDropdownOptions(false);
+  const draftRoleId = draft.roleId || defaultUserRoleId() || roleOptions[0]?.value || '';
+  if (!draft.roleId && draftRoleId) draft.roleId = draftRoleId;
   const title = editing ? `Edit ${user?.displayName || draft.displayName || draft.userId}` : 'New User';
   const feedback = state.userCenter.feedback;
   userEditorBackdrop.hidden = false;
@@ -5469,9 +5597,15 @@ function renderUserEditorDrawer() {
             </label>
             <label class="app-form-field">
               <span>Role</span>
-              <select data-user-editor-field="roleId">
-                ${renderUserRoleOptions(draft.roleId || defaultUserRoleId()) || '<option value="">Bootstrap roles first</option>'}
-              </select>
+              <input type="hidden" data-user-editor-field="roleId" value="${escapeHtml(draftRoleId)}" />
+              ${renderUserDropdown({
+                id: 'user-editor-role',
+                field: 'drawer:roleId',
+                value: draftRoleId,
+                options: roleOptions,
+                label: userDropdownLabel(roleOptions, draftRoleId, 'Bootstrap roles first'),
+                disabled: !roleOptions.length
+              })}
             </label>
           </div>
         </section>
@@ -5520,6 +5654,7 @@ function bindUserEditorDrawerControls() {
   for (const close of userEditorDrawer.querySelectorAll('[data-user-editor-close], [data-user-editor-cancel]')) {
     close.addEventListener('click', () => closeUserEditorDrawer());
   }
+  bindUserDropdownControls(userEditorDrawer);
   for (const control of userEditorDrawer.querySelectorAll('[data-user-editor-field]')) {
     control.addEventListener('input', () => {
       state.userCenter.drawer.draft = userEditorDraftFromForm(form);
