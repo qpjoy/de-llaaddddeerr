@@ -2277,6 +2277,7 @@ function buildPipeline(
     },
     warnings,
     failureSummary,
+    domesticWireGuard: domesticWireGuardPipelineSummary(domesticWgSecret),
     nextActions,
     actionHints: buildPipelineActionHints(actionPolicy, plan, executions, runnerSessions, workerJobs, workerReports, rollbackExecutions, domesticWgSecret, domesticPostInstallGate)
   };
@@ -2290,6 +2291,21 @@ function buildPipeline(
     rollbackExecutions: sortByCreatedAt(rollbackExecutions),
     rollbackReports: sortByCreatedAt(rollbackReports),
     timeline
+  };
+}
+
+function domesticWireGuardPipelineSummary(secret: SiteSlotDomesticWireGuardSecret | null): AdminSiteSlotPipelineSummary['domesticWireGuard'] {
+  if (!secret) return null;
+  return {
+    status: secret.status,
+    publicEndpoint: secret.publicEndpoint,
+    listenPort: secret.listenPort,
+    internalDirectEnabled: secret.internalDirectEnabled,
+    internalDirectEndpoint: secret.internalDirectEndpoint,
+    internalDirectListenPort: secret.internalDirectListenPort,
+    internalServiceIp: secret.internalServiceIp,
+    materialDigest: secret.fingerprints.materialDigest,
+    updatedAt: secret.updatedAt
   };
 }
 
@@ -3585,7 +3601,7 @@ function buildAdminDomesticWireGuardSecretInput(
     ?? previousEndpoint
     ?? null;
   const internalDirectEndpoint = stringValue(body.internalDirectEndpoint) ?? previous?.internalDirectEndpoint ?? null;
-  const internalDirectEnabled = booleanValue(body.internalDirectEnabled) ?? previous?.internalDirectEnabled ?? Boolean(internalDirectEndpoint);
+  const internalDirectEnabled = booleanValue(body.internalDirectEnabled) ?? previous?.internalDirectEnabled ?? true;
   const relayMissing = !previous?.domesticRelayPrivateKey || !previous.domesticRelayPublicKey;
   const internalMissing = !previous?.internalServicePrivateKey || !previous.internalServicePublicKey;
   const relayPair = relayMissing || rotateRelayKey ? generateWireGuardKeyPair() : null;
@@ -6704,7 +6720,7 @@ function domesticWgMaterializeAction(
         planId: plan.planId,
         publicEndpoint: endpointFromPlanHost(plan, 51280),
         listenPort: 51280,
-        internalDirectEnabled: false,
+        internalDirectEnabled: true,
         internalDirectListenPort: 51280,
         domesticGatewayIp: '10.88.0.1',
         domesticGatewayCidr: '10.88.0.0/16',
@@ -7566,7 +7582,7 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         planId: '<plan-id>',
         publicEndpoint: '<domestic-public-endpoint>',
         listenPort: 51280,
-        internalDirectEnabled: false,
+        internalDirectEnabled: true,
         internalDirectListenPort: 51280,
         domesticGatewayIp: '10.88.0.1',
         domesticGatewayCidr: '10.88.0.0/16',

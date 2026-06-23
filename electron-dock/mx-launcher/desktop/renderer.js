@@ -97,6 +97,8 @@ const state = {
     applyBusy: false,
     hostRunnerEnsureBusy: false,
     syncBusy: false,
+    directModeBusy: false,
+    directEnabledOverride: null,
     feedback: null,
     result: null,
     runtimeStatus: null,
@@ -3771,6 +3773,13 @@ function renderInternalPeerWorkbench(pipelines) {
   const runtimeStatus = state.internalPeer.runtimeStatus;
   const applyResult = state.internalPeer.applyResult;
   const keySyncResult = state.internalPeer.keySyncResult;
+  const directSettings = internalPeerDirectSettings(pipeline);
+  const directStatus = directSettings.enabled
+    ? directSettings.endpoint ? 'ready' : 'blocked'
+    : 'disabled';
+  const directLabel = directSettings.enabled
+    ? directSettings.endpoint ? 'direct endpoint ready' : 'endpoint required'
+    : 'relay fallback';
   const handoffDisabled = state.internalPeer.busy || Boolean(materializeAction) || Boolean(endpointBlockedReason);
   const materializeDisabled = state.internalPeer.materializeBusy || !materializeAction?.allowed || Boolean(endpointBlockedReason);
   const keySyncDisabled = state.internalPeer.syncBusy || Boolean(endpointBlockedReason);
@@ -3861,7 +3870,7 @@ function renderInternalPeerWorkbench(pipelines) {
       <span><strong>10.88.88.88</strong><small>Internal service IP</small></span>
       <span><strong>10.88.0.1</strong><small>Domestic relay IP</small></span>
       <span><strong>${escapeHtml(endpoint || 'host:51280')}</strong><small>WG endpoint</small></span>
-      <span><strong>${escapeHtml(site.siteId)}</strong><small>source Domestic</small></span>
+      <span><strong>${escapeHtml(directSettings.endpoint || `${directSettings.listenPort}/listener`)}</strong><small>H2I direct</small></span>
     </div>
     <section class="internal-peer-panel" data-status="${escapeHtml(panelStatus)}">
       <div class="domestic-relay-head">
@@ -3884,8 +3893,22 @@ function renderInternalPeerWorkbench(pipelines) {
           <button class="secondary-button" type="button" data-internal-open-domestic>Open Domestic</button>
         </div>
       </div>
+      <div class="internal-peer-direct-control" data-status="${escapeHtml(directStatus)}">
+        <label class="admin-switch" title="Enable Internal as an H2I direct WireGuard listener">
+          <input type="checkbox" data-internal-peer-direct-enabled ${directSettings.enabled ? 'checked' : ''} ${state.internalPeer.directModeBusy ? 'disabled' : ''} />
+          <span class="admin-switch-track"></span>
+        </label>
+        <div>
+          <strong>H2I direct listener</strong>
+          <p>${escapeHtml(directSettings.enabled
+            ? `enabled / ${directSettings.endpoint || `listening ${directSettings.listenPort}, endpoint not published`}`
+            : 'disabled / Domestic relay fallback')}</p>
+        </div>
+        <span class="health-chip" data-health="${escapeHtml(directStatus === 'disabled' ? 'ready' : directStatus)}">${escapeHtml(directLabel)}</span>
+      </div>
       <div class="domestic-relay-grid">
         <span><small>WG service</small><strong>@qpjoy/electron-core-wireguard / mx-internal-svc</strong></span>
+        <span data-status="${escapeHtml(directStatus === 'disabled' ? 'ready' : directStatus)}"><small>direct listener</small><strong>${escapeHtml(directSettings.enabled ? `ListenPort ${directSettings.listenPort}` : 'disabled')}</strong></span>
         <span><small>native runner command</small><strong>${escapeHtml(hostRunnerCommand)}</strong></span>
         <span><small>apply artifact</small><strong>artifacts/site-slots/domestic/mx-internal-service-peer-apply.sh</strong></span>
         <span><small>config artifact</small><strong>artifacts/site-slots/domestic/mx-internal-service-peer.conf</strong></span>
@@ -3902,8 +3925,42 @@ function renderInternalPeerWorkbench(pipelines) {
   renderInspector();
 }
 
+function internalPeerDirectSettings(pipeline = null) {
+  const summary = pipeline?.domesticWireGuard || {};
+  const override = state.internalPeer.directEnabledOverride;
+  const backendEnabled = typeof summary.internalDirectEnabled === 'boolean' ? summary.internalDirectEnabled : null;
+  const enabled = typeof override === 'boolean'
+    ? override
+    : typeof backendEnabled === 'boolean'
+      ? backendEnabled
+      : true;
+  const listenPort = Number(summary.internalDirectListenPort || 51280) || 51280;
+  return {
+    enabled,
+    backendEnabled,
+    endpoint: typeof summary.internalDirectEndpoint === 'string' ? summary.internalDirectEndpoint : '',
+    listenPort,
+    internalServiceIp: typeof summary.internalServiceIp === 'string' ? summary.internalServiceIp : '10.88.88.88'
+  };
+}
+
+function internalPeerDirectMaterializeOverrides(pipeline = null) {
+  const direct = internalPeerDirectSettings(pipeline);
+  return {
+    internalDirectEnabled: direct.enabled,
+    internalDirectListenPort: direct.listenPort,
+    ...(direct.endpoint ? { internalDirectEndpoint: direct.endpoint } : {})
+  };
+}
+
 function bindInternalPeerWorkbenchActions(site, pipeline) {
   const materializeAction = domesticWgMaterializeActionFromSummary(pipeline);
+  const directToggle = siteWorkbench.querySelector('[data-internal-peer-direct-enabled]');
+  if (directToggle) {
+    directToggle.addEventListener('change', (event) => {
+      void saveInternalPeerDirectMode(site, pipeline, event.currentTarget.checked === true);
+    });
+  }
   const materializeButton = siteWorkbench.querySelector('[data-internal-peer-materialize]');
   if (materializeButton) {
     materializeButton.addEventListener('click', () => {
@@ -4016,6 +4073,47 @@ async function syncInternalPeerDomesticKey(site, pipeline) {
   }
 }
 
+async function saveInternalPeerDirectMode(site, pipeline, enabled) {
+  if (state.internalPeer.directModeBusy) return;
+  state.internalPeer.directModeBusy = true;
+  state.internalPeer.directEnabledOverride = enabled;
+  const direct = internalPeerDirectSettings(pipeline);
+  state.internalPeer.feedback = {
+    kind: 'info',
+    message: `${enabled ? 'Enabling' : 'Disabling'} H2I direct listener`,
+    detail: null
+  };
+  renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+  try {
+    const payload = await fetchJson('/internal/v1/config-center/domestic-wg-secrets', {
+      method: 'POST',
+      body: {
+        siteId: site.siteId,
+        internalDirectEnabled: enabled,
+        internalDirectListenPort: direct.listenPort || 51280,
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-internal-direct-${enabled ? 'enable' : 'disable'}-${Date.now()}`
+      }
+    });
+    state.internalPeer.feedback = {
+      kind: 'success',
+      message: `H2I direct listener ${payload.secret?.internalDirectEnabled ? 'enabled' : 'disabled'}`,
+      detail: payload.secret?.internalDirectEndpoint
+        ? `Endpoint: ${payload.secret.internalDirectEndpoint}`
+        : 'Endpoint is not published yet; configure Internal direct endpoint before H clients can bypass Domestic relay.'
+    };
+    state.internalPeer.directEnabledOverride = null;
+    await refreshAdmin();
+    if (pipeline?.planId) await refreshPipelineDetail(pipeline.planId);
+  } catch (error) {
+    state.internalPeer.feedback = { kind: 'error', message: error.message, detail: null };
+  } finally {
+    state.internalPeer.directModeBusy = false;
+    renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+    renderInspector();
+  }
+}
+
 async function materializeDomesticWgForInternalPeer(site, pipeline, action) {
   if (state.internalPeer.materializeBusy) return;
   state.internalPeer.materializeBusy = true;
@@ -4028,7 +4126,7 @@ async function materializeDomesticWgForInternalPeer(site, pipeline, action) {
       body: {
         actionId: action.actionId,
         path: action.path,
-        body: materializeActionBodyTemplate(action)
+        body: materializeActionBodyTemplate(action, internalPeerDirectMaterializeOverrides(pipeline))
       }
     });
     const materialize = payload.domesticWgMaterialize || null;
@@ -10552,7 +10650,7 @@ async function executeSelectedAction(options = {}) {
   }
 }
 
-function materializeActionBodyTemplate(action) {
+function materializeActionBodyTemplate(action, overrides = {}) {
   const now = new Date();
   const changeWindowStart = now.toISOString();
   const changeWindowEnd = new Date(now.getTime() + 60 * 60 * 1000).toISOString();
@@ -10570,7 +10668,7 @@ function materializeActionBodyTemplate(action) {
     '<home-wg-public-key>': homePeer.publicKey || '<home-wg-public-key>',
     '<request-id>': requestId
   });
-  return awxActionBodyDefaults(action, normalizeActionBodyTemplate(action, body));
+  return awxActionBodyDefaults(action, normalizeActionBodyTemplate(action, { ...body, ...overrides }));
 }
 
 function normalizeActionBodyTemplate(action, body) {

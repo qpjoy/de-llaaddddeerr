@@ -433,7 +433,7 @@ function toGeneratedDomesticWireGuardSecretInput(
   const internalPair = internalMissing || rotateInternalServiceKey ? generateWireGuardKeyPair() : null;
   const publicEndpoint = nullableString(body.publicEndpoint) ?? nullableString(body.endpoint) ?? previous?.publicEndpoint ?? null;
   const internalDirectEndpoint = nullableString(body.internalDirectEndpoint) ?? previous?.internalDirectEndpoint ?? null;
-  const internalDirectEnabled = booleanOrNull(body.internalDirectEnabled) ?? previous?.internalDirectEnabled ?? Boolean(internalDirectEndpoint);
+  const internalDirectEnabled = booleanOrNull(body.internalDirectEnabled) ?? previous?.internalDirectEnabled ?? true;
   const input: SiteSlotDomesticWireGuardSecretInput = {
     siteId,
     status: nullableString(body.status) ?? previous?.status ?? 'active',

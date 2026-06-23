@@ -2371,7 +2371,7 @@ export function buildSiteSlotDomesticWireGuardSecret(
   const internalDirectEnabled = input.internalDirectEnabled === true
     || input.internalDirectEnabled === false
       ? input.internalDirectEnabled
-      : previous?.internalDirectEnabled ?? Boolean(internalDirectEndpoint);
+      : previous?.internalDirectEnabled ?? true;
   const material = {
     domesticRelayPrivateKey: input.domesticRelayPrivateKey?.trim() || previous?.domesticRelayPrivateKey || null,
     domesticRelayPublicKey: input.domesticRelayPublicKey?.trim() || previous?.domesticRelayPublicKey || null,

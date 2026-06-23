@@ -451,6 +451,7 @@ function createWireGuardTemplate(artifactRoot) {
     '[Interface]',
     `Address = ${material.internalServiceIp}/32`,
     `PrivateKey = ${material.internalServicePrivateKey}`,
+    ...(material.internalDirectEnabled ? [`ListenPort = ${material.internalDirectListenPort}`] : []),
     '# DNS is managed by Internal DNS/CoreDNS; keep wg-quick from mutating host resolv.conf.',
     'Table = off',
     ...wireGuardRouteCommands('PostUp', internalRouteCidrs),
@@ -546,6 +547,9 @@ function createWireGuardTemplate(artifactRoot) {
     `MX_INTERNAL_SERVICE_IP=${material.internalServiceIp}`,
     'MX_WG_INTERFACE=mx-domestic',
     `MX_WG_LISTEN_PORT=${material.listenPort}`,
+    `MX_INTERNAL_DIRECT_ENABLED=${material.internalDirectEnabled ? '1' : '0'}`,
+    `MX_INTERNAL_DIRECT_ENDPOINT=${material.internalDirectEndpoint ?? ''}`,
+    `MX_INTERNAL_DIRECT_LISTEN_PORT=${material.internalDirectListenPort}`,
     'MX_PUBLIC_FACADE_MODE=bootstrap-only',
     'MX_STEADY_STATE_ACCESS=domestic-wg-relay-primary',
     `MX_PRODUCT_RELAY_CIDRS=${material.productRelayCidrs.join(',')}`,
@@ -580,6 +584,9 @@ function createWireGuardTemplate(artifactRoot) {
       domesticGatewayCidr: material.domesticGatewayCidr,
       internalServicePeerIp: material.internalServiceIp,
       listenPort: material.listenPortNumber,
+      internalDirectEnabled: material.internalDirectEnabled,
+      internalDirectEndpoint: material.internalDirectEndpoint,
+      internalDirectListenPort: material.internalDirectListenPortNumber,
       hdiWithoutRelay: 'bootstrap-proxy-only',
       steadyStateAccess: 'domestic-wg-relay-primary',
       productRelayCidrs,
@@ -617,6 +624,10 @@ function wireGuardRouteCommands(prefix, cidrs, ignoreFailure = false) {
 function domesticWireGuardMaterial() {
   const listenPort = envValue('MX_WG_LISTEN_PORT') || '51280';
   const listenPortNumber = Number.parseInt(listenPort, 10) || 51280;
+  const internalDirectEnabled = envBool('MX_INTERNAL_DIRECT_ENABLED', true);
+  const internalDirectListenPort = envValue('MX_INTERNAL_DIRECT_LISTEN_PORT') || '51280';
+  const internalDirectListenPortNumber = Number.parseInt(internalDirectListenPort, 10) || 51280;
+  const internalDirectEndpoint = envValue('MX_INTERNAL_DIRECT_ENDPOINT');
   const domesticGatewayIp = envValue('MX_DOMESTIC_GATEWAY_IP') || '10.88.0.1';
   const internalServiceIp = envValue('MX_INTERNAL_SERVICE_IP') || '10.88.88.88';
   const domesticGatewayCidr = envValue('MX_DOMESTIC_GATEWAY_CIDR') || '10.88.0.0/16';
@@ -648,6 +659,10 @@ function domesticWireGuardMaterial() {
     missingInputs,
     listenPort,
     listenPortNumber,
+    internalDirectEnabled,
+    internalDirectEndpoint,
+    internalDirectListenPort: String(internalDirectListenPortNumber),
+    internalDirectListenPortNumber,
     domesticGatewayIp,
     internalServiceIp,
     domesticGatewayCidr,
@@ -1252,6 +1267,13 @@ function optionValue(name) {
 function envValue(name) {
   const value = process.env[name]?.trim();
   return value || null;
+}
+
+function envBool(name, defaultValue = false) {
+  const value = envValue(name)?.toLowerCase();
+  if (!value) return defaultValue;
+  if (value === '0' || value === 'false' || value === 'no' || value === 'off' || value === 'disabled') return false;
+  return value === '1' || value === 'true' || value === 'yes' || value === 'on' || value === 'enabled';
 }
 
 function parseCsv(value) {

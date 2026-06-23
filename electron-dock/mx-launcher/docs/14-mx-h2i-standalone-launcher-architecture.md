@@ -406,6 +406,13 @@ V2 的 systemd/interface 命名应避免和旧 HDO 共用名称，保证同一�
 | Internal service peer | 逻辑名 `mx-internal-service-peer`，Linux interface `mx-internal-svc` / `wg-quick@mx-internal-svc` | 固定拥有 `10.88.88.88/32`，由 Internal 主动拨 Domestic endpoint；Linux interface 名必须不超过 15 字符 |
 | 旧 HDO | `hdo-home`、`hdo-internal` / `wg-quick@hdo-*` | V1/V2 默认共存；确认不再需要后由 `bash scripts/manage.sh ops site-slot cleanup-v1-wireguard --apply` 显式清理 |
 
+V1 HDO 的 `qp-tunnel-cli hdo enroll --direct-listener --public-endpoint HOST:PORT`
+语义在 V2 对应为 `internalDirectEnabled=true`、`internalDirectEndpoint=HOST:PORT`、
+`internalDirectListenPort=51280`。V2 默认开启 direct listener，让 `mx-internal-service-peer.conf`
+写入 `ListenPort = 51280`；但只有 `internalDirectEndpoint` 配成 H 端可达的公网
+`HOST:51280` 时，routePlan 才发布 `h2i-direct` endpoint。endpoint 未配置时，Internal 仍可通过
+Domestic relay fallback 工作，页面应显示 direct listener enabled 但 endpoint blocked。
+
 `mx-internal-svc` 生成配置里的 peer `AllowedIPs` 使用 `10.88.0.1/32`、`10.88.0.0/16`
 加产品 relay CIDR。`10.88.0.1/32` 看起来被 `10.88.0.0/16` 覆盖，但它是有意保留的
 host route：macOS/Clash/mihomo TUN 或现场已有更具体路由时，Domestic gateway 必须优先

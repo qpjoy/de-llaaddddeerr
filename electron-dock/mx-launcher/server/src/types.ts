@@ -605,6 +605,17 @@ export interface AdminSiteSlotPipelineSummary {
     status: string;
     message: string;
   } | null;
+  domesticWireGuard?: {
+    status: string;
+    publicEndpoint: string | null;
+    listenPort: number;
+    internalDirectEnabled: boolean;
+    internalDirectEndpoint: string | null;
+    internalDirectListenPort: number;
+    internalServiceIp: string;
+    materialDigest: string | null;
+    updatedAt: string | null;
+  } | null;
   nextActions: string[];
   actionHints: AdminActionDescriptor[];
 }

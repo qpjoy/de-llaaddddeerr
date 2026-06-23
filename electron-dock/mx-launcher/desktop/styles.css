@@ -2568,6 +2568,95 @@ select {
   border-color: color-mix(in srgb, var(--mx-success) 38%, var(--line));
 }
 
+.internal-peer-direct-control {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--mx-bg-input) 68%, transparent);
+}
+
+.internal-peer-direct-control[data-status="ready"] {
+  border-color: color-mix(in srgb, var(--mx-success) 42%, var(--line));
+}
+
+.internal-peer-direct-control[data-status="blocked"] {
+  border-color: color-mix(in srgb, var(--mx-warning) 48%, var(--line));
+}
+
+.internal-peer-direct-control strong {
+  display: block;
+  font-size: 14px;
+}
+
+.internal-peer-direct-control p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 48px;
+  height: 28px;
+  cursor: pointer;
+}
+
+.admin-switch input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+}
+
+.admin-switch-track {
+  position: relative;
+  width: 48px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--mx-text) 8%, var(--mx-bg-input));
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+
+.admin-switch-track::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--mx-text-soft);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.24);
+  transition: transform 0.16s ease, background 0.16s ease;
+}
+
+.admin-switch input:checked + .admin-switch-track {
+  border-color: color-mix(in srgb, var(--mx-primary) 62%, transparent);
+  background: color-mix(in srgb, var(--mx-primary) 26%, var(--mx-bg-input));
+}
+
+.admin-switch input:checked + .admin-switch-track::after {
+  transform: translateX(20px);
+  background: var(--mx-primary);
+}
+
+.admin-switch input:focus-visible + .admin-switch-track {
+  outline: 2px solid color-mix(in srgb, var(--mx-primary) 72%, transparent);
+  outline-offset: 2px;
+}
+
+.admin-switch:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
 .internal-peer-status {
   display: grid;
   gap: 10px;
