@@ -545,6 +545,16 @@ flowchart LR
 - 未命中白名单的域名走系统 DNS、系统代理、浏览器代理或 Clash/mihomo 等已有配置。
 - DNS policy 通过统一 API 暴露给 Launcher Network、H2O 和 SDK Gateway：
   `/internal/v1/dns/*` 面向平台控制面，`/internal/v1/sdk/dns/*` 面向外部系统。
+- Bootstrap 阶段发生在 WireGuard ready 之前，不能强依赖只通过 `10.88.0.0/16`
+  可达的 Internal CoreDNS。MX-H2I 支持 `MX_H2I_BOOTSTRAP_RESOLVE_MODE`：
+  `env-first/env-only` 使用 `MX_H2I_HOST_RESOLVE` 或
+  `MX_H2I_BOOTSTRAP_RESOLVE_IP` 指到 Domestic 公网入口；`dns-first/dns-only`
+  可以通过 `MX_H2I_BOOTSTRAP_DNS_SERVERS` 指定一个公网或 Domestic edge resolver，
+  解析成功后用解析出的 IP 建连，同时保留原始 Host header。连接建立以后，再由
+  Launcher Network split DNS/PAC 将白名单域名切到 Internal CoreDNS。
+- Admin 可以维护 Internal reverse proxy routes：`host` 表示业务域名，
+  `targetUrl` 表示 Internal Gateway 或 service 入口。Zone snapshot 会把这些 route
+  渲染成 CoreDNS A/CNAME 记录，再交给 `mx-dns/coredns` ConfigMap apply。
 - Zone snapshot API：`POST /internal/v1/dns/zones/build` 给 Internal/Admin 使用，
   `POST /internal/v1/sdk/dns/zone` 给 SDK Gateway 使用，
   `GET /internal/v1/dns/zones/:snapshotId` 读取已生成快照。

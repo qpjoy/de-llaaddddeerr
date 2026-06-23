@@ -22,6 +22,7 @@ import type {
   DnsQueryInput,
   DnsResolutionDecision,
   DnsReverseProxyRoute,
+  DnsReverseProxyRouteInput,
   DnsZoneRecord,
   DnsZoneSnapshot,
   IssueTokenInput,
@@ -835,6 +836,30 @@ export function builtinDnsReverseProxyRoutes(config: RuntimeConfig): DnsReverseP
       updatedAt: now
     }
   ];
+}
+
+export function buildDnsReverseProxyRoute(
+  config: RuntimeConfig,
+  input: DnsReverseProxyRouteInput,
+  previous: DnsReverseProxyRoute | null,
+  now = new Date().toISOString()
+): DnsReverseProxyRoute {
+  const host = normalizeDomain(input.host?.trim() || previous?.host || '');
+  if (!host) throw new Error('DNS route host is required');
+  const targetUrl = input.targetUrl?.trim() || previous?.targetUrl || '';
+  if (!targetUrl) throw new Error('DNS route targetUrl is required');
+  const tlsMode = dnsReverseProxyTlsMode(input.tlsMode ?? previous?.tlsMode);
+  return {
+    routeId: input.routeId?.trim() || previous?.routeId || `rp_${safeIdPart(host)}`,
+    environment: config.environment,
+    host,
+    targetUrl,
+    enabled: input.enabled ?? previous?.enabled ?? true,
+    tlsMode,
+    authRequired: input.authRequired ?? previous?.authRequired ?? true,
+    createdAt: previous?.createdAt ?? now,
+    updatedAt: now
+  };
 }
 
 export function evaluateDnsPolicy(
@@ -1653,6 +1678,11 @@ function matchesDnsWhitelist(policy: DnsPolicy, normalizedDomain: string): boole
     const normalizedSuffix = normalizeDomain(suffix).replace(/^\./, '');
     return normalizedDomain === normalizedSuffix || normalizedDomain.endsWith(`.${normalizedSuffix}`);
   });
+}
+
+function dnsReverseProxyTlsMode(value: DnsReverseProxyRoute['tlsMode'] | null | undefined): DnsReverseProxyRoute['tlsMode'] {
+  if (value === 'passthrough' || value === 'edge-terminated') return value;
+  return 'internal';
 }
 
 export function createConfigSnapshot(

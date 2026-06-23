@@ -6,6 +6,7 @@ import {
   excludeLocalRoutesFromAllowedIps,
   getWireGuardTunnelStatus,
   localCidrsForAllowedIpExclusion,
+  repairWireGuardTunnelRoutes,
   renderWireGuardInterface,
   resolveWireGuardConnectionRuntime,
   setWireGuardTunnelState
@@ -247,12 +248,17 @@ async function waitForLauncherWireGuardStatus(
   runtime: ReturnType<typeof resolveWireGuardConnectionRuntime>,
   configPath: string
 ): Promise<ReturnType<typeof getWireGuardTunnelStatus> | null> {
-  const attempts = runtime.platform === 'win32' ? 16 : 1;
+  const attempts = runtime.platform === 'win32'
+    ? 16
+    : runtime.platform === 'darwin' && runtime.method === 'darwin-userspace'
+      ? 12
+      : 1;
   let status: ReturnType<typeof getWireGuardTunnelStatus> | null = null;
   for (let index = 0; index < attempts; index += 1) {
     status = safeWireGuardStatus(runtime, configPath);
-    if (status?.active === true || runtime.platform !== 'win32') return status;
-    await delay(500);
+    const missingRoutes = Array.isArray(status?.missingRoutes) ? status.missingRoutes.length : 0;
+    if ((status?.active === true && missingRoutes === 0) || index === attempts - 1) return status;
+    await delay(runtime.platform === 'darwin' && runtime.method === 'darwin-userspace' ? 350 : 500);
   }
   return status;
 }
@@ -286,6 +292,88 @@ export async function stopLauncherWireGuardPeer(input: ElectronLauncherWireGuard
     status,
     tunnel,
     message: tunnel.message
+  };
+}
+
+export async function repairLauncherWireGuardPeerRoutes(input: ElectronLauncherWireGuardRuntimeOptions) {
+  const configPath = launcherWireGuardConfigPath(input);
+  if (!existsSync(configPath)) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: 'missing-wireguard-config',
+      configPath
+    };
+  }
+  const runtime = resolveLauncherWireGuardRuntime(input);
+  const repaired = await repairWireGuardTunnelRoutes({ runtime, configPath });
+  const status = safeWireGuardStatus(runtime, configPath);
+  const missingRoutes = Array.isArray(status?.missingRoutes) ? status.missingRoutes : [];
+  const ok = repaired.ok === true && (status?.active !== true || missingRoutes.length === 0);
+  return {
+    ...repaired,
+    ok,
+    configPath,
+    runtime,
+    status,
+    missingRoutes,
+    message: ok
+      ? repaired.message
+      : `${repaired.message || 'WireGuard route repair completed, but route probes are still not ready.'}${missingRoutes.length ? ` missingRoutes=${missingRoutes.join(', ')}` : ''}`
+  };
+}
+
+export async function recoverLauncherWireGuardPeer(
+  input: ElectronLauncherWireGuardRuntimeOptions & { reason?: string | null }
+) {
+  const configPath = launcherWireGuardConfigPath(input);
+  if (!existsSync(configPath)) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: 'missing-wireguard-config',
+      recoveryReason: input.reason ?? null,
+      configPath
+    };
+  }
+  const runtime = resolveLauncherWireGuardRuntime(input);
+  const status = safeWireGuardStatus(runtime, configPath);
+  const missingRoutes = Array.isArray(status?.missingRoutes) ? status.missingRoutes : [];
+  if (status?.active === true && missingRoutes.length === 0) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: 'already-active',
+      recoveryReason: input.reason ?? null,
+      configPath,
+      runtime,
+      status
+    };
+  }
+  if (status?.active === true && missingRoutes.length > 0) {
+    const repaired = await repairLauncherWireGuardPeerRoutes(input);
+    return {
+      ...repaired,
+      action: 'repair-routes',
+      recoveryReason: input.reason ?? null
+    };
+  }
+  const tunnel = await setWireGuardTunnelState({
+    runtime,
+    configPath,
+    action: 'up'
+  });
+  const nextStatus = await waitForLauncherWireGuardStatus(runtime, configPath);
+  const ok = tunnel.ok === true && nextStatus?.active === true;
+  return {
+    ok,
+    action: 'recover-up',
+    recoveryReason: input.reason ?? null,
+    configPath,
+    runtime,
+    status: nextStatus,
+    tunnel,
+    message: ok ? tunnel.message : launcherWireGuardNotReadyMessage(tunnel, nextStatus)
   };
 }
 

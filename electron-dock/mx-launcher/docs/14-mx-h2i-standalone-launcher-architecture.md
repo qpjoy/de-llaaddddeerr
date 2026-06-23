@@ -406,11 +406,11 @@ V2 的 systemd/interface 命名应避免和旧 HDO 共用名称，保证同一�
 | Internal service peer | 逻辑名 `mx-internal-service-peer`，Linux interface `mx-internal-svc` / `wg-quick@mx-internal-svc` | 固定拥有 `10.88.88.88/32`，由 Internal 主动拨 Domestic endpoint；Linux interface 名必须不超过 15 字符 |
 | 旧 HDO | `hdo-home`、`hdo-internal` / `wg-quick@hdo-*` | V1/V2 默认共存；确认不再需要后由 `bash scripts/manage.sh ops site-slot cleanup-v1-wireguard --apply` 显式清理 |
 
-`mx-internal-svc` 生成配置里的 peer `AllowedIPs` 使用 `10.88.0.0/16` 加产品 relay CIDR，
-因此已经覆盖 Domestic gateway `10.88.0.1`，不需要像 V1 `hdo-internal` 那样再追加
-`10.88.0.1/32`。只有现场存在更具体的冲突 host route 时，才应在 runtime host 上做
-`ip route get 10.88.0.1` / `ip route get 10.88.88.88` 对比后定点修正，不应默认把冗余
-host route 写进 routePlan。
+`mx-internal-svc` 生成配置里的 peer `AllowedIPs` 使用 `10.88.0.1/32`、`10.88.0.0/16`
+加产品 relay CIDR。`10.88.0.1/32` 看起来被 `10.88.0.0/16` 覆盖，但它是有意保留的
+host route：macOS/Clash/mihomo TUN 或现场已有更具体路由时，Domestic gateway 必须优先
+落到 `mx-internal-svc`。这不要求手工改线上配置；重新 materialize/apply
+`mx-internal-service-peer.conf` 或执行 internal-production deploy 时应由产物自动带出。
 
 Internal 可以继续保留“节点/peer server”的语义，但不要再走普通 H 端用户登录模型。它应通过
 Internal 自举 secret 或一次性 service token 生成 `mx-internal-service-peer.conf`，由 CLI/apply

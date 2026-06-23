@@ -1,8 +1,9 @@
-import { Body, Controller, Get, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
 
 import { asRecord, nullableString } from '../../lib/http.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
+import type { DnsReverseProxyRouteInput } from '../../types.js';
 
 @Controller()
 export class DnsController {
@@ -27,6 +28,38 @@ export class DnsController {
   @Get('internal/v1/dns/reverse-proxy/routes')
   async reverseProxyRoutes() {
     return { routes: await this.store.listDnsReverseProxyRoutes() };
+  }
+
+  @Get('internal/v1/dns/reverse-proxy/routes/:routeId')
+  async reverseProxyRoute(@Param('routeId') routeId: string) {
+    const route = await this.store.getDnsReverseProxyRoute(routeId);
+    if (!route) throw new NotFoundException('DNS reverse proxy route not found');
+    return { route };
+  }
+
+  @Post('internal/v1/dns/reverse-proxy/routes')
+  async createReverseProxyRoute(@Body() body: DnsReverseProxyRouteInput) {
+    try {
+      return { route: await this.store.upsertDnsReverseProxyRoute(body || {}) };
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'DNS reverse proxy route cannot be saved');
+    }
+  }
+
+  @Post('internal/v1/dns/reverse-proxy/routes/:routeId')
+  async upsertReverseProxyRoute(@Param('routeId') routeId: string, @Body() body: DnsReverseProxyRouteInput) {
+    try {
+      return { route: await this.store.upsertDnsReverseProxyRoute({ ...(body || {}), routeId }) };
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'DNS reverse proxy route cannot be saved');
+    }
+  }
+
+  @Delete('internal/v1/dns/reverse-proxy/routes/:routeId')
+  async deleteReverseProxyRoute(@Param('routeId') routeId: string) {
+    const deleted = await this.store.deleteDnsReverseProxyRoute(routeId);
+    if (!deleted) throw new NotFoundException('DNS reverse proxy route not found');
+    return { deleted: true };
   }
 
   @Post('internal/v1/dns/zones/build')

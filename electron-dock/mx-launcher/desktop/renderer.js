@@ -172,6 +172,17 @@ const state = {
     feedback: null,
     busy: false
   },
+  dnsCenter: {
+    routes: [],
+    routesError: null,
+    filter: {
+      search: '',
+      status: 'all'
+    },
+    drawer: null,
+    feedback: null,
+    busy: false
+  },
   relayEnrollment: {
     result: null,
     feedback: null,
@@ -719,7 +730,13 @@ evidenceBackdrop.addEventListener('click', () => {
 });
 
 if (appEditorBackdrop) {
-  appEditorBackdrop.addEventListener('click', () => closeAppCatalogEditor());
+  appEditorBackdrop.addEventListener('click', () => {
+    if (state.dnsCenter.drawer) {
+      closeDnsRouteEditorDrawer();
+      return;
+    }
+    closeAppCatalogEditor();
+  });
 }
 
 if (userEditorBackdrop) {
@@ -743,7 +760,11 @@ window.addEventListener('keydown', (event) => {
     return;
   }
   if (event.key === 'Escape' && appEditorDrawer && !appEditorDrawer.hidden) {
-    closeAppCatalogEditor();
+    if (state.dnsCenter.drawer) {
+      closeDnsRouteEditorDrawer();
+    } else {
+      closeAppCatalogEditor();
+    }
     return;
   }
   if (event.key === 'Escape' && !evidenceDrawer.hidden) {
@@ -916,7 +937,8 @@ async function refreshAdmin() {
       appCenterAppsPayload,
       launcherProductsPayload,
       launcherLeasesPayload,
-      domesticRuntimePayload
+      domesticRuntimePayload,
+      dnsRoutesPayload
     ] = await Promise.all([
       fetchJson('/internal/v1/admin/dashboard'),
       loadSshProfiles(),
@@ -925,7 +947,8 @@ async function refreshAdmin() {
       loadAppCenterApps(),
       loadLauncherProductNetworks(),
       loadLauncherNetworkLeases(),
-      loadDomesticRuntimeConfigs()
+      loadDomesticRuntimeConfigs(),
+      loadDnsReverseProxyRoutes()
     ]);
     state.dashboard = dashboard;
     state.sshProfiles = asArray(profilePayload.profiles);
@@ -944,6 +967,8 @@ async function refreshAdmin() {
     state.launcherLeasesError = launcherLeasesPayload.error || null;
     state.domesticRuntime.configs = asArray(domesticRuntimePayload.configs);
     state.domesticRuntime.error = domesticRuntimePayload.error || null;
+    state.dnsCenter.routes = asArray(dnsRoutesPayload.routes);
+    state.dnsCenter.routesError = dnsRoutesPayload.error || null;
     renderAppCenterShell();
     state.awxRuntimePolicies = asArray(dashboard.runtimeFeaturePolicies);
     state.overseaOverview = overseaPayload.overview;
@@ -982,6 +1007,8 @@ async function refreshAdmin() {
     state.launcherLeasesError = error.message;
     state.domesticRuntime.configs = [];
     state.domesticRuntime.error = error.message;
+    state.dnsCenter.routes = [];
+    state.dnsCenter.routesError = error.message;
     renderAppCenterShell();
     state.overseaOverviewError = error.message;
     renderAdminError(error);
@@ -1022,6 +1049,15 @@ async function loadDomesticRuntimeConfigs() {
     return { configs: asArray(payload.configs), error: null };
   } catch (error) {
     return { configs: [], error: error.message };
+  }
+}
+
+async function loadDnsReverseProxyRoutes() {
+  try {
+    const payload = await fetchJson('/internal/v1/dns/reverse-proxy/routes');
+    return { routes: asArray(payload.routes), error: null };
+  } catch (error) {
+    return { routes: [], error: error.message };
   }
 }
 
@@ -3853,7 +3889,7 @@ function renderInternalPeerWorkbench(pipelines) {
         <span><small>native runner command</small><strong>${escapeHtml(hostRunnerCommand)}</strong></span>
         <span><small>apply artifact</small><strong>artifacts/site-slots/domestic/mx-internal-service-peer-apply.sh</strong></span>
         <span><small>config artifact</small><strong>artifacts/site-slots/domestic/mx-internal-service-peer.conf</strong></span>
-        <span><small>runtime route</small><strong>10.88.0.1/16 via mx-internal-svc</strong></span>
+        <span><small>runtime route</small><strong>10.88.0.1/32 + 10.88/16 via mx-internal-svc</strong></span>
         <span><small>verification</small><strong>wg active + handshake + Domestic healthz</strong></span>
       </div>
       ${displayedFeedback ? `<div class="action-feedback" data-kind="${escapeHtml(displayedFeedback.kind)}"><strong>${escapeHtml(displayedFeedback.message)}</strong>${displayedFeedback.detail ? `<pre>${escapeHtml(displayedFeedback.detail)}</pre>` : ''}</div>` : ''}
@@ -4951,6 +4987,9 @@ function renderFoundationGrid(overview) {
   if (activeId !== 'user-center' && state.userCenter.drawer) {
     closeUserEditorDrawer();
   }
+  if (activeId !== 'dns' && state.dnsCenter.drawer) {
+    closeDnsRouteEditorDrawer();
+  }
   const scopeCard = `
     <article class="foundation-scope-card">
       <div>
@@ -4970,6 +5009,8 @@ function renderFoundationGrid(overview) {
     body = renderRbacPanel() + renderPermissionRegistryPanel() + renderExternalSystemContractPanel();
   } else if (activeId === 'config-center') {
     body = renderConfigCenterPanel(overview || {});
+  } else if (activeId === 'dns') {
+    body = renderDnsCenterPanel();
   } else if (activeId === 'awx-provider') {
     body = renderOptionalAwxProviderPanel();
   } else {
@@ -5028,6 +5069,8 @@ function renderFoundationGrid(overview) {
     });
   }
   renderUserEditorDrawer();
+  bindDnsCenterControls(foundationGrid);
+  renderDnsRouteEditorDrawer();
   bindDomesticRuntimeControls(foundationGrid);
   bindRelayEnrollmentControls(foundationGrid);
 }
@@ -7710,6 +7753,437 @@ function renderInternalModulePanel(moduleId, overview) {
       ${renderFoundationRows(blueprint.actions.map((row) => [row[0], row[1], moduleId]))}
     </section>
   `;
+}
+
+function dnsCenterFilters() {
+  state.dnsCenter.filter = state.dnsCenter.filter || { search: '', status: 'all' };
+  return state.dnsCenter.filter;
+}
+
+function dnsRouteById(routeId) {
+  return asArray(state.dnsCenter.routes).find((route) => route.routeId === routeId) || null;
+}
+
+function filteredDnsRoutes() {
+  const filter = dnsCenterFilters();
+  const query = String(filter.search || '').trim().toLowerCase();
+  const status = filter.status || 'all';
+  return asArray(state.dnsCenter.routes)
+    .filter((route) => {
+      if (status === 'enabled' && route.enabled === false) return false;
+      if (status === 'disabled' && route.enabled !== false) return false;
+      if (!query) return true;
+      return [
+        route.routeId,
+        route.host,
+        route.targetUrl,
+        route.tlsMode,
+        route.authRequired ? 'auth' : 'public'
+      ].some((value) => String(value || '').toLowerCase().includes(query));
+    });
+}
+
+function renderDnsCenterPanel() {
+  const routes = filteredDnsRoutes();
+  const filter = dnsCenterFilters();
+  const total = asArray(state.dnsCenter.routes).length;
+  return `
+    <section class="app-catalog-card">
+      <div class="app-catalog-toolbar">
+        <div>
+          <span class="site-kind">DNS Control</span>
+          <strong>Internal DNS routes</strong>
+          <p>业务域名、Internal Gateway 和 CoreDNS zone snapshot 在这里形成一条配置链。</p>
+        </div>
+        <div class="app-catalog-controls">
+          <input data-dns-filter="search" value="${escapeHtml(filter.search || '')}" placeholder="Search domain..." />
+          <select data-dns-filter="status">
+            <option value="all" ${filter.status === 'all' ? 'selected' : ''}>All status</option>
+            <option value="enabled" ${filter.status === 'enabled' ? 'selected' : ''}>Enabled</option>
+            <option value="disabled" ${filter.status === 'disabled' ? 'selected' : ''}>Disabled</option>
+          </select>
+          <button class="secondary-button" type="button" data-dns-zone-build>Build Zone</button>
+          <button class="secondary-button" type="button" data-dns-coredns-sync>Dry-run CoreDNS</button>
+          <button class="primary-button" type="button" data-dns-new>New Route</button>
+        </div>
+      </div>
+      ${state.dnsCenter.routesError ? `<div class="feedback error">${escapeHtml(state.dnsCenter.routesError)}</div>` : ''}
+      ${state.dnsCenter.feedback ? `<div class="feedback ${escapeHtml(state.dnsCenter.feedback.kind || 'info')}">${escapeHtml(state.dnsCenter.feedback.message || '')}</div>` : ''}
+      <div class="user-table-meta">
+        <span>${escapeHtml(String(routes.length))} shown</span>
+        <span>${escapeHtml(String(total))} total</span>
+      </div>
+      <div class="app-table dns-route-table" role="table" aria-label="Internal DNS routes">
+        <div class="app-table-row is-header" role="row">
+          <span>Domain</span>
+          <span>Target</span>
+          <span>TLS</span>
+          <span>Auth</span>
+          <span>Status</span>
+          <span>Updated</span>
+          <span>Actions</span>
+        </div>
+        ${routes.map(renderDnsRouteRow).join('') || '<div class="empty-state">No DNS routes match the current filters.</div>'}
+      </div>
+    </section>
+  `;
+}
+
+function renderDnsRouteRow(route) {
+  const enabled = route.enabled !== false;
+  return `
+    <article class="app-table-row ${route.routeId === state.dnsCenter.drawer?.routeId ? 'is-selected' : ''}" role="row" tabindex="0" data-dns-route-select="${escapeHtml(route.routeId)}">
+      <span>
+        <strong>${escapeHtml(route.host || route.routeId)}</strong>
+        <small>${escapeHtml(route.routeId || 'auto route')}</small>
+      </span>
+      <span><b>${escapeHtml(shortUrlLabel(route.targetUrl || '-'))}</b><small>${escapeHtml(route.targetUrl || '-')}</small></span>
+      <span>${escapeHtml(route.tlsMode || 'internal')}</span>
+      <span>${route.authRequired === false ? 'public' : 'required'}</span>
+      <span><mark data-kind="${enabled ? 'system' : 'muted'}">${enabled ? 'enabled' : 'disabled'}</mark></span>
+      <span>${escapeHtml(formatTime(route.updatedAt || route.createdAt))}</span>
+      <span class="app-table-actions">
+        <button class="secondary-button" type="button" data-dns-route-edit="${escapeHtml(route.routeId)}">Edit</button>
+        <button class="secondary-button" type="button" data-dns-route-delete="${escapeHtml(route.routeId)}">Delete</button>
+      </span>
+    </article>
+  `;
+}
+
+function shortUrlLabel(value) {
+  try {
+    const url = new URL(value);
+    return `${url.hostname}${url.port ? `:${url.port}` : ''}`;
+  } catch {
+    return String(value || '-');
+  }
+}
+
+function bindDnsCenterControls(root) {
+  if (state.adminSubsection !== 'dns') return;
+  const search = root.querySelector('[data-dns-filter="search"]');
+  if (search) {
+    search.addEventListener('input', () => {
+      const cursor = search.selectionStart;
+      dnsCenterFilters().search = search.value;
+      renderFoundationGrid(state.dashboard?.overview || {});
+      requestAnimationFrame(() => {
+        const nextSearch = foundationGrid.querySelector('[data-dns-filter="search"]');
+        nextSearch?.focus?.();
+        if (typeof cursor === 'number') nextSearch?.setSelectionRange?.(cursor, cursor);
+      });
+    });
+  }
+  const status = root.querySelector('[data-dns-filter="status"]');
+  if (status) {
+    status.addEventListener('change', () => {
+      dnsCenterFilters().status = status.value || 'all';
+      renderFoundationGrid(state.dashboard?.overview || {});
+    });
+  }
+  const create = root.querySelector('[data-dns-new]');
+  if (create) create.addEventListener('click', () => openDnsRouteEditorDrawer('create'));
+  const build = root.querySelector('[data-dns-zone-build]');
+  if (build) build.addEventListener('click', () => void buildDnsZoneSnapshotFromAdmin());
+  const sync = root.querySelector('[data-dns-coredns-sync]');
+  if (sync) sync.addEventListener('click', () => void syncCoreDnsConfigMapFromAdmin());
+  for (const row of root.querySelectorAll('[data-dns-route-select]')) {
+    row.addEventListener('click', (event) => {
+      if (event.target.closest('button')) return;
+      openDnsRouteEditorDrawer('edit', row.dataset.dnsRouteSelect);
+    });
+    row.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      openDnsRouteEditorDrawer('edit', row.dataset.dnsRouteSelect);
+    });
+  }
+  for (const button of root.querySelectorAll('[data-dns-route-edit]')) {
+    button.addEventListener('click', () => openDnsRouteEditorDrawer('edit', button.dataset.dnsRouteEdit));
+  }
+  for (const button of root.querySelectorAll('[data-dns-route-delete]')) {
+    button.addEventListener('click', () => void deleteDnsRouteFromAdmin(button.dataset.dnsRouteDelete));
+  }
+}
+
+function dnsRouteEditorDraft() {
+  if (!state.dnsCenter.drawer) return null;
+  if (!state.dnsCenter.drawer.draft) {
+    state.dnsCenter.drawer.draft = createDnsRouteEditorDraft(state.dnsCenter.drawer.mode, state.dnsCenter.drawer.routeId);
+  }
+  return state.dnsCenter.drawer.draft;
+}
+
+function createDnsRouteEditorDraft(mode = 'create', routeId = '') {
+  const editing = mode === 'edit';
+  const route = editing ? dnsRouteById(routeId) : null;
+  return {
+    routeId: route?.routeId || '',
+    host: route?.host || '',
+    targetUrl: route?.targetUrl || 'http://10.88.88.88:18090',
+    enabled: route?.enabled === false ? false : true,
+    tlsMode: route?.tlsMode || 'internal',
+    authRequired: route?.authRequired === false ? false : true
+  };
+}
+
+function openDnsRouteEditorDrawer(mode = 'create', routeId = '') {
+  state.dnsCenter.drawer = {
+    mode,
+    routeId,
+    draft: createDnsRouteEditorDraft(mode, routeId)
+  };
+  state.dnsCenter.feedback = null;
+  renderFoundationGrid(state.dashboard?.overview || {});
+  requestAnimationFrame(() => {
+    const firstField = appEditorDrawer?.querySelector('[data-dns-route-field="host"]:not([readonly]), [data-dns-route-field="targetUrl"]');
+    firstField?.focus?.();
+  });
+}
+
+function closeDnsRouteEditorDrawer() {
+  state.dnsCenter.drawer = null;
+  state.dnsCenter.busy = false;
+  if (appEditorBackdrop) appEditorBackdrop.hidden = true;
+  if (appEditorDrawer) {
+    appEditorDrawer.hidden = true;
+    appEditorDrawer.innerHTML = '';
+  }
+}
+
+function renderDnsRouteEditorDrawer() {
+  if (!appEditorBackdrop || !appEditorDrawer) return;
+  const draft = dnsRouteEditorDraft();
+  if (!draft) {
+    if (!state.appCatalogEditor) {
+      appEditorBackdrop.hidden = true;
+      appEditorDrawer.hidden = true;
+      appEditorDrawer.innerHTML = '';
+    }
+    return;
+  }
+  const creating = state.dnsCenter.drawer?.mode !== 'edit';
+  const title = creating ? 'New DNS Route' : `Edit ${draft.host || draft.routeId}`;
+  appEditorBackdrop.hidden = false;
+  appEditorDrawer.hidden = false;
+  appEditorDrawer.innerHTML = `
+    <form class="app-editor-form" data-dns-route-editor>
+      <header class="app-drawer-header">
+        <div>
+          <span class="site-kind">DNS Route</span>
+          <h2>${escapeHtml(title)}</h2>
+          <p>Route records feed Internal CoreDNS zone snapshots and gateway reverse proxy decisions.</p>
+        </div>
+        <button class="icon-button app-drawer-close" type="button" data-dns-route-close aria-label="Close DNS route editor">×</button>
+      </header>
+      <div class="app-drawer-scroll">
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>01</span>
+            <strong>Record identity</strong>
+          </div>
+          <div class="app-editor-grid">
+            <label class="app-form-field">
+              <span>Route ID</span>
+              <input data-dns-route-field="routeId" value="${escapeHtml(draft.routeId || '')}" ${creating ? '' : 'readonly'} placeholder="auto from host" autocomplete="off" />
+            </label>
+            <label class="app-form-field">
+              <span>Domain</span>
+              <input data-dns-route-field="host" value="${escapeHtml(draft.host || '')}" placeholder="api.mxinfo-inc.cn" autocomplete="off" />
+            </label>
+            <label class="app-form-field app-form-wide">
+              <span>Target URL</span>
+              <input data-dns-route-field="targetUrl" value="${escapeHtml(draft.targetUrl || '')}" placeholder="http://10.88.88.88:18090" autocomplete="off" />
+            </label>
+          </div>
+        </section>
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>02</span>
+            <strong>Gateway policy</strong>
+          </div>
+          <div class="app-editor-grid">
+            <label class="app-form-field">
+              <span>TLS Mode</span>
+              <select data-dns-route-field="tlsMode">
+                ${renderDnsTlsModeOptions(draft.tlsMode)}
+              </select>
+            </label>
+            <label class="app-check-row">
+              <input data-dns-route-field="enabled" type="checkbox" ${draft.enabled === false ? '' : 'checked'} />
+              <span aria-hidden="true"></span>
+              <strong>Enabled in zone snapshot</strong>
+            </label>
+            <label class="app-check-row">
+              <input data-dns-route-field="authRequired" type="checkbox" ${draft.authRequired === false ? '' : 'checked'} />
+              <span aria-hidden="true"></span>
+              <strong>Gateway auth required</strong>
+            </label>
+          </div>
+        </section>
+        ${state.dnsCenter.feedback ? `<div class="feedback ${escapeHtml(state.dnsCenter.feedback.kind || 'info')}">${escapeHtml(state.dnsCenter.feedback.message || '')}</div>` : ''}
+      </div>
+      <footer class="app-drawer-actions">
+        <button class="secondary-button" type="button" data-dns-route-cancel>Cancel</button>
+        <button class="primary-button" type="submit" ${state.dnsCenter.busy ? 'disabled' : ''}>${state.dnsCenter.busy ? 'Saving...' : 'Save Route'}</button>
+      </footer>
+    </form>
+  `;
+  bindDnsRouteEditorControls();
+}
+
+function renderDnsTlsModeOptions(selected) {
+  return ['internal', 'passthrough', 'edge-terminated'].map((mode) => (
+    `<option value="${escapeHtml(mode)}" ${mode === selected ? 'selected' : ''}>${escapeHtml(mode)}</option>`
+  )).join('');
+}
+
+function bindDnsRouteEditorControls() {
+  if (!appEditorDrawer || appEditorDrawer.hidden) return;
+  const form = appEditorDrawer.querySelector('[data-dns-route-editor]');
+  if (!form) return;
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void saveDnsRouteFromEditor(form);
+  });
+  for (const close of appEditorDrawer.querySelectorAll('[data-dns-route-close], [data-dns-route-cancel]')) {
+    close.addEventListener('click', () => closeDnsRouteEditorDrawer());
+  }
+  for (const control of appEditorDrawer.querySelectorAll('[data-dns-route-field]')) {
+    control.addEventListener('input', () => {
+      state.dnsCenter.drawer.draft = dnsRouteEditorDraftFromForm(form);
+      state.dnsCenter.feedback = null;
+    });
+    control.addEventListener('change', () => {
+      state.dnsCenter.drawer.draft = dnsRouteEditorDraftFromForm(form);
+      state.dnsCenter.feedback = null;
+      if (control.dataset.dnsRouteField === 'tlsMode') renderDnsRouteEditorDrawer();
+    });
+  }
+}
+
+function dnsRouteEditorDraftFromForm(root) {
+  const current = dnsRouteEditorDraft() || {};
+  return {
+    ...current,
+    routeId: dnsRouteEditorValue(root, 'routeId') || current.routeId || '',
+    host: dnsRouteEditorValue(root, 'host') || '',
+    targetUrl: dnsRouteEditorValue(root, 'targetUrl') || '',
+    enabled: dnsRouteEditorValue(root, 'enabled') !== false,
+    tlsMode: dnsRouteEditorValue(root, 'tlsMode') || 'internal',
+    authRequired: dnsRouteEditorValue(root, 'authRequired') !== false
+  };
+}
+
+function dnsRouteEditorValue(root, field) {
+  const element = root.querySelector(`[data-dns-route-field="${field}"]`);
+  if (!element) return '';
+  if (element.type === 'checkbox') return element.checked;
+  return element.value;
+}
+
+async function saveDnsRouteFromEditor(root) {
+  if (state.dnsCenter.busy) return;
+  const draft = dnsRouteEditorDraftFromForm(root);
+  state.dnsCenter.busy = true;
+  state.dnsCenter.feedback = { kind: 'info', message: 'Saving DNS route' };
+  if (state.dnsCenter.drawer) state.dnsCenter.drawer.draft = draft;
+  renderDnsRouteEditorDrawer();
+  try {
+    const editing = state.dnsCenter.drawer?.mode === 'edit';
+    const routeId = state.dnsCenter.drawer?.routeId || draft.routeId;
+    const payload = await fetchJson(editing && routeId
+      ? `/internal/v1/dns/reverse-proxy/routes/${encodeURIComponent(routeId)}`
+      : '/internal/v1/dns/reverse-proxy/routes', {
+      method: 'POST',
+      body: {
+        routeId: blankToNull(draft.routeId),
+        host: draft.host,
+        targetUrl: draft.targetUrl,
+        enabled: draft.enabled,
+        tlsMode: draft.tlsMode,
+        authRequired: draft.authRequired,
+        requestedBy: 'desktop-admin'
+      }
+    });
+    await refreshDnsRoutesFromAdmin();
+    state.dnsCenter.drawer = {
+      mode: 'edit',
+      routeId: payload.route?.routeId || routeId,
+      draft: createDnsRouteEditorDraft('edit', payload.route?.routeId || routeId)
+    };
+    state.dnsCenter.feedback = { kind: 'success', message: `Saved ${payload.route?.host || draft.host}` };
+  } catch (error) {
+    state.dnsCenter.feedback = { kind: 'error', message: error.message };
+  } finally {
+    state.dnsCenter.busy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+  }
+}
+
+async function deleteDnsRouteFromAdmin(routeId) {
+  const route = dnsRouteById(routeId);
+  if (!route) return;
+  if (!window.confirm(`Delete DNS route ${route.host || route.routeId}?`)) return;
+  state.dnsCenter.feedback = { kind: 'info', message: `Deleting ${route.host || route.routeId}` };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    await fetchJson(`/internal/v1/dns/reverse-proxy/routes/${encodeURIComponent(route.routeId)}`, { method: 'DELETE' });
+    if (state.dnsCenter.drawer?.routeId === route.routeId) closeDnsRouteEditorDrawer();
+    await refreshDnsRoutesFromAdmin();
+    state.dnsCenter.feedback = { kind: 'success', message: `Deleted ${route.host || route.routeId}` };
+  } catch (error) {
+    state.dnsCenter.feedback = { kind: 'error', message: error.message };
+  }
+  renderFoundationGrid(state.dashboard?.overview || {});
+}
+
+async function refreshDnsRoutesFromAdmin() {
+  const payload = await loadDnsReverseProxyRoutes();
+  state.dnsCenter.routes = asArray(payload.routes);
+  state.dnsCenter.routesError = payload.error || null;
+}
+
+async function buildDnsZoneSnapshotFromAdmin() {
+  state.dnsCenter.feedback = { kind: 'info', message: 'Building DNS zone snapshot' };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    const payload = await fetchJson('/internal/v1/dns/zones/build', {
+      method: 'POST',
+      body: { appId: 'sdk-gateway', requestId: 'desktop-admin-dns-zone' }
+    });
+    const snapshot = payload.snapshot || {};
+    state.dnsCenter.feedback = {
+      kind: 'success',
+      message: `Zone ${snapshot.snapshotId || ''} built with ${asArray(snapshot.records).length} records`
+    };
+  } catch (error) {
+    state.dnsCenter.feedback = { kind: 'error', message: error.message };
+  }
+  renderFoundationGrid(state.dashboard?.overview || {});
+}
+
+async function syncCoreDnsConfigMapFromAdmin() {
+  state.dnsCenter.feedback = { kind: 'info', message: 'Rendering CoreDNS ConfigMap dry-run' };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    const payload = await fetchJson('/internal/v1/dns/coredns/configmap/sync', {
+      method: 'POST',
+      body: {
+        appId: 'sdk-gateway',
+        mode: 'dry-run',
+        requestId: 'desktop-admin-coredns-sync'
+      }
+    });
+    const result = payload.result || {};
+    state.dnsCenter.feedback = {
+      kind: 'success',
+      message: `CoreDNS ${result.namespace || 'mx-dns'}/${result.configMapName || 'coredns'} ${result.status || 'rendered'}`
+    };
+  } catch (error) {
+    state.dnsCenter.feedback = { kind: 'error', message: error.message };
+  }
+  renderFoundationGrid(state.dashboard?.overview || {});
 }
 
 function renderRelayEnrollmentPanel(options = {}) {

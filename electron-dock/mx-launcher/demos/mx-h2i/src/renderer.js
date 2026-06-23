@@ -188,15 +188,15 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
   if (screen === 'advanced') return renderAdvancedPhone();
   const mode = modeDraft;
   const activeLease = connected || leaseOnly || tunnelOnly;
-  const showEmployeeLogin = mode === 'employee' && (!activeLease || state.connection.mode !== 'employee');
+  const showEmployeeLogin = mode === 'employee' && (!connected || state.connection.mode !== 'employee');
   const modeTitle = connected
     ? showEmployeeLogin
       ? '员工模式'
       : `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 已连接`
     : leaseOnly
-      ? `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 租约已就绪`
+      ? `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 租约已保留`
       : tunnelOnly
-        ? `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 隧道已就绪`
+        ? `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 隧道待恢复`
     : mode === 'employee'
       ? '员工模式'
       : '访客模式';
@@ -215,7 +215,7 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
       </section>
       ${renderFeedback()}
 
-      ${showEmployeeLogin ? renderEmployeeLogin(connecting) : renderGuestConnect(activeLease, connecting, activeLease && !connected)}
+      ${showEmployeeLogin ? renderEmployeeLogin(connecting) : renderGuestConnect(connected, connecting, activeLease && !connected)}
       ${renderConnectionStrip()}
       ${renderPhoneAppCenterAction(connected, connecting)}
     </section>
@@ -223,7 +223,7 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
 }
 
 function renderGuestConnect(connected, connecting, leaseOnly = false) {
-  const label = connected ? '断开连接' : connecting ? '连接中' : '连接';
+  const label = connected ? '断开连接' : connecting ? '连接中' : leaseOnly ? '重新连接' : '连接';
   const action = connected ? 'disconnect' : 'connectGuest';
   return `
     <section class="connect-panel">
@@ -440,6 +440,10 @@ function renderConfigForm() {
           ${option('env-only', config.bootstrapResolveMode)}
           ${option('dns-only', config.bootstrapResolveMode)}
         </select>
+      </label>
+      <label class="field">
+        <span>Bootstrap DNS Servers</span>
+        <input name="bootstrapDnsServers" value="${escapeAttr(config.bootstrapDnsServers || '')}" placeholder="223.5.5.5, 119.29.29.29" />
       </label>
       <label class="field">
         <span>WG Path</span>
@@ -725,6 +729,7 @@ function readConfigForm(form) {
     sdkGatewayBaseUrl: String(formData.get('sdkGatewayBaseUrl') || ''),
     hostResolve: String(formData.get('hostResolve') || ''),
     bootstrapResolveMode: String(formData.get('bootstrapResolveMode') || ''),
+    bootstrapDnsServers: String(formData.get('bootstrapDnsServers') || ''),
     routePathPreference: String(formData.get('routePathPreference') || ''),
     splitDnsDomains: String(formData.get('splitDnsDomains') || ''),
     releaseChannel: String(formData.get('releaseChannel') || ''),
@@ -765,6 +770,7 @@ function createMockApi() {
       sdkGatewayBaseUrl: 'http://api.mxinfo-inc.cn:18090/internal/v1/sdk',
       hostResolve: '',
       bootstrapResolveMode: 'env-first',
+      bootstrapDnsServers: '',
       routePathPreference: 'auto',
       splitDnsDomains: 'mxinfo-inc.cn,api.mxinfo-inc.cn',
       releaseChannel: 'stable',

@@ -1231,9 +1231,7 @@ export function getWireGuardTunnelStatus(input: {
   const ifconfig = readInterfaceState(realInterfaceName);
   const routeProbes = darwinRouteProbeResults(profile.allowedIps, realInterfaceName);
   const hasConfiguredAddress = Boolean(
-    input.runtime.platform === 'darwin' && input.runtime.method === 'darwin-userspace'
-      ? ifconfig && routeProbes.length > 0 && routeProbes.every((probe) => probe.ok)
-      : ifconfig && profile.addresses.some((address) => ifconfig.includes(`inet ${address.split('/')[0]}`))
+    ifconfig && profile.addresses.some((address) => ifconfig.includes(`inet ${address.split('/')[0]}`))
   );
   if (ifconfig && interfaceStateIsUp(ifconfig) && hasConfiguredAddress) {
     return {
@@ -2078,7 +2076,7 @@ function darwinRouteInstallCommand(cidr: string, interfaceArg: string): string {
 function darwinRouteEnsureCommand(cidr: string, interfaceArg: string): string {
   const check = darwinRouteInterfaceCheckCommand(cidr, interfaceArg);
   if (!check) return 'true';
-  return `${check} || (\n${darwinRouteDeleteCommand(cidr)}\n${darwinRouteInstallCommand(cidr, interfaceArg)}\n${check}\n)`;
+  return `${check} || (\n${darwinRouteDeleteCommand(cidr)}\n${darwinRouteInstallCommand(cidr, interfaceArg)}\n${check} || true\n)`;
 }
 
 function darwinRouteProbeLogCommand(cidr: string, interfaceArg: string, logArg: string): string {

@@ -31,6 +31,7 @@ import {
   applySiteSlotRollbackReportState,
   applySiteSlotWorkerReportState,
   buildDnsZoneSnapshot,
+  buildDnsReverseProxyRoute,
   builtinDnsPolicies,
   builtinDnsReverseProxyRoutes,
   builtinUserCenterOrg,
@@ -92,6 +93,7 @@ import type {
   DnsQueryInput,
   DnsResolutionDecision,
   DnsReverseProxyRoute,
+  DnsReverseProxyRouteInput,
   DnsZoneSnapshot,
   DnsZoneSnapshotInput,
   IdentityLinkRequest,
@@ -1648,6 +1650,44 @@ export class MemoryStore implements PlatformStore {
 
   listDnsReverseProxyRoutes(): DnsReverseProxyRoute[] {
     return [...this.dnsReverseProxyRoutes.values()].sort((a, b) => a.host.localeCompare(b.host));
+  }
+
+  getDnsReverseProxyRoute(routeId: string): DnsReverseProxyRoute | null {
+    return this.dnsReverseProxyRoutes.get(routeId) ?? null;
+  }
+
+  upsertDnsReverseProxyRoute(input: DnsReverseProxyRouteInput): DnsReverseProxyRoute {
+    const previous = input.routeId ? this.getDnsReverseProxyRoute(input.routeId) : null;
+    const route = buildDnsReverseProxyRoute(this.config, input, previous);
+    this.dnsReverseProxyRoutes.set(route.routeId, route);
+    this.recordAudit({
+      eventType: previous ? 'dns.reverse_proxy_route.updated' : 'dns.reverse_proxy_route.created',
+      actorKind: 'dns-control',
+      requestId: input.requestedBy ?? null,
+      metadata: {
+        routeId: route.routeId,
+        host: route.host,
+        targetUrl: route.targetUrl,
+        enabled: route.enabled
+      }
+    });
+    return route;
+  }
+
+  deleteDnsReverseProxyRoute(routeId: string): boolean {
+    const route = this.getDnsReverseProxyRoute(routeId);
+    if (!route) return false;
+    this.dnsReverseProxyRoutes.delete(route.routeId);
+    this.recordAudit({
+      eventType: 'dns.reverse_proxy_route.deleted',
+      actorKind: 'dns-control',
+      metadata: {
+        routeId: route.routeId,
+        host: route.host,
+        targetUrl: route.targetUrl
+      }
+    });
+    return true;
   }
 
   buildDnsZoneSnapshot(input: DnsZoneSnapshotInput): DnsZoneSnapshot {

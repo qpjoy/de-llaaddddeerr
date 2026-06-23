@@ -2106,6 +2106,16 @@ export interface DnsReverseProxyRoute {
   updatedAt: string;
 }
 
+export interface DnsReverseProxyRouteInput {
+  routeId?: string | null;
+  host?: string | null;
+  targetUrl?: string | null;
+  enabled?: boolean | null;
+  tlsMode?: DnsReverseProxyRoute['tlsMode'] | null;
+  authRequired?: boolean | null;
+  requestedBy?: string | null;
+}
+
 export interface DnsZoneSnapshotInput {
   policyId?: string | null;
   appId?: string | null;

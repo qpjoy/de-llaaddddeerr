@@ -3,8 +3,10 @@ const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
 const http = require('node:http');
 const https = require('node:https');
+const dnsPromises = require('node:dns').promises;
+const net = require('node:net');
 const { randomUUID } = require('node:crypto');
-const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: electronScreen } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: electronScreen, powerMonitor } = require('electron');
 
 loadDotEnvFiles();
 
@@ -23,6 +25,7 @@ const DEFAULT_CONFIG = {
   sdkGatewayBaseUrl: '',
   hostResolve: defaultHostResolve(),
   bootstrapResolveMode: defaultBootstrapResolveMode(),
+  bootstrapDnsServers: defaultBootstrapDnsServers(),
   splitDnsDomains: nullableString(process.env.MX_H2I_SPLIT_DNS_DOMAINS)
     || nullableString(process.env.MX_H2I_DNS_DOMAINS)
     || '',
@@ -47,6 +50,11 @@ let topAnimationTimer = null;
 let needsRevealZoneReentry = false;
 let topDockHoldUntil = 0;
 let topDockLeaveStartedAt = 0;
+let wireGuardRecoveryInterval = null;
+let wireGuardRecoveryInFlight = null;
+let wireGuardConnectInFlight = false;
+let lastWireGuardRecoveryFailureAt = 0;
+const wireGuardRecoveryTimers = [];
 
 const TOP_DOCK_Y = 0;
 const TOP_REVEAL_ZONE = 18;
@@ -72,10 +80,15 @@ app.whenReady().then(async () => {
   createTray();
   createMainWindow();
   startTopRevealWatcher();
+  startWireGuardRecoveryWatcher();
 });
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  stopWireGuardRecoveryWatcher();
 });
 
 app.on('activate', () => {
@@ -268,6 +281,7 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:refresh-diagnostics', async () => {
+    await recoverWireGuardForRuntime('manual-diagnostics');
     await refreshWireGuardDiagnostics();
     await saveAndBroadcast();
     return visibleRuntime();
@@ -526,6 +540,47 @@ function startTopRevealWatcher() {
   }, 160);
 }
 
+function startWireGuardRecoveryWatcher() {
+  stopWireGuardRecoveryWatcher();
+  scheduleWireGuardRecovery('app-ready', [2500, 12_000]);
+  wireGuardRecoveryInterval = setInterval(() => {
+    scheduleWireGuardRecovery('interval', [0]);
+  }, 45_000);
+  wireGuardRecoveryInterval.unref?.();
+  powerMonitor?.on?.('resume', onPowerResume);
+  powerMonitor?.on?.('unlock-screen', onUnlockScreen);
+}
+
+function stopWireGuardRecoveryWatcher() {
+  if (wireGuardRecoveryInterval) clearInterval(wireGuardRecoveryInterval);
+  wireGuardRecoveryInterval = null;
+  while (wireGuardRecoveryTimers.length) {
+    clearTimeout(wireGuardRecoveryTimers.pop());
+  }
+  powerMonitor?.off?.('resume', onPowerResume);
+  powerMonitor?.off?.('unlock-screen', onUnlockScreen);
+}
+
+function onPowerResume() {
+  scheduleWireGuardRecovery('power-resume', [2500, 12_000, 25_000]);
+}
+
+function onUnlockScreen() {
+  scheduleWireGuardRecovery('unlock-screen', [1500, 10_000, 25_000]);
+}
+
+function scheduleWireGuardRecovery(reason, delays = [2500, 12_000, 25_000]) {
+  for (const delay of delays) {
+    const timer = setTimeout(() => {
+      const index = wireGuardRecoveryTimers.indexOf(timer);
+      if (index >= 0) wireGuardRecoveryTimers.splice(index, 1);
+      void recoverWireGuardForRuntime(reason, { allowPrivileged: false }).catch(() => undefined);
+    }, Math.max(0, delay));
+    timer.unref?.();
+    wireGuardRecoveryTimers.push(timer);
+  }
+}
+
 function isCursorInsideWindow(point = electronScreen.getCursorScreenPoint()) {
   if (!mainWindow || mainWindow.isDestroyed()) return false;
   const bounds = mainWindow.getBounds();
@@ -646,6 +701,7 @@ function normalizeConfig(input) {
     sdkGatewayBaseUrl: stringValue(row.sdkGatewayBaseUrl, DEFAULT_CONFIG.sdkGatewayBaseUrl || sdkGatewayBaseUrl(bootstrapApiBaseUrl)),
     hostResolve: stringValue(row.hostResolve, DEFAULT_CONFIG.hostResolve),
     bootstrapResolveMode: normalizeBootstrapResolveMode(row.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode),
+    bootstrapDnsServers: stringValue(row.bootstrapDnsServers, DEFAULT_CONFIG.bootstrapDnsServers),
     splitDnsDomains: stringValue(row.splitDnsDomains, DEFAULT_CONFIG.splitDnsDomains),
     routePathPreference: normalizeRoutePathPreference(row.routePathPreference || DEFAULT_CONFIG.routePathPreference),
     releaseChannel: stringValue(row.releaseChannel, DEFAULT_CONFIG.releaseChannel),
@@ -1237,77 +1293,86 @@ async function ensureMxH2iProduct(launcher) {
 }
 
 async function applyNetworkSession(session, options) {
+  wireGuardConnectInFlight = true;
   const lease = session.lease || {};
-  const routePlan = normalizeRoutePlan(session.routePlan);
-  const wireGuard = session.wireGuard || {};
-  const privateKey = nullableString(wireGuard.privateKey) || runtime.installation?.keyPair?.privateKey;
-  const publicKey = nullableString(wireGuard.publicKey) || runtime.installation?.keyPair?.publicKey || lease.publicKey;
-  const now = nowIso();
-  runtime.installation = normalizeInstallation({
-    ...runtime.installation,
-    installId: lease.installId || runtime.installation?.installId,
-    deviceId: lease.deviceId || runtime.installation?.deviceId,
-    siteId: lease.siteId || runtime.installation?.siteId,
-    privateKey,
-    publicKey,
-    updatedAt: now,
-    createdAt: runtime.installation?.createdAt || now
-  });
-  const overlayInternalBaseUrl = internalOverlayBaseUrl(routePlan, runtime.config.internalApiBaseUrl);
-  runtime.connection = connectedState({
-    mode: options.mode,
-    localIp: routePlan?.leaseIp || lease.leaseIp,
-    routePolicy: options.routePolicy,
-    subject: options.subject,
-    leaseId: lease.leaseId,
-    snapshotId: routePlan?.snapshotId || session.snapshot?.snapshotId,
-    productId: routePlan?.productId || lease.productId,
-    serviceVip: routePlan?.serviceVip || lease.serviceVip,
-    internalBaseUrl: overlayInternalBaseUrl,
-    internalControlIp: routePlan?.internalControlIp || null,
-    domesticRelayEndpoint: routePlan?.domesticRelayEndpoint || null,
-    publicKey,
-    allowedIps: routePlan?.allowedIps || [],
-    routeCidrs: routePlan?.routeCidrs || [],
-    routePlan,
-    health: leasedHealth()
-  });
-  runtime.identity = options.identity;
-  runtime.auth = normalizeAuth(options.auth);
-  runtime.feedback = {
-    tone: 'info',
-    message: `${options.feedback} 正在启动客户端 WireGuard。`
-  };
-  touchRuntime(options.mode === 'employee' ? 'employee lease ready' : 'guest lease ready');
+  try {
+    const routePlan = normalizeRoutePlan(session.routePlan);
+    const wireGuard = session.wireGuard || {};
+    const privateKey = nullableString(wireGuard.privateKey) || runtime.installation?.keyPair?.privateKey;
+    const publicKey = nullableString(wireGuard.publicKey) || runtime.installation?.keyPair?.publicKey || lease.publicKey;
+    const now = nowIso();
+    runtime.installation = normalizeInstallation({
+      ...runtime.installation,
+      installId: lease.installId || runtime.installation?.installId,
+      deviceId: lease.deviceId || runtime.installation?.deviceId,
+      siteId: lease.siteId || runtime.installation?.siteId,
+      privateKey,
+      publicKey,
+      updatedAt: now,
+      createdAt: runtime.installation?.createdAt || now
+    });
+    const overlayInternalBaseUrl = internalOverlayBaseUrl(routePlan, runtime.config.internalApiBaseUrl);
+    runtime.connection = connectedState({
+      state: 'lease-only',
+      mode: options.mode,
+      localIp: routePlan?.leaseIp || lease.leaseIp,
+      routePolicy: options.routePolicy,
+      subject: options.subject,
+      leaseId: lease.leaseId,
+      snapshotId: routePlan?.snapshotId || session.snapshot?.snapshotId,
+      productId: routePlan?.productId || lease.productId,
+      serviceVip: routePlan?.serviceVip || lease.serviceVip,
+      internalBaseUrl: overlayInternalBaseUrl,
+      internalControlIp: routePlan?.internalControlIp || null,
+      domesticRelayEndpoint: routePlan?.domesticRelayEndpoint || null,
+      publicKey,
+      allowedIps: routePlan?.allowedIps || [],
+      routeCidrs: routePlan?.routeCidrs || [],
+      routePlan,
+      health: leasedHealth()
+    });
+    runtime.identity = options.identity;
+    runtime.auth = normalizeAuth(options.auth);
+    runtime.feedback = {
+      tone: 'info',
+      message: `${options.feedback} 正在启动客户端 WireGuard。`
+    };
+    touchRuntime(options.mode === 'employee' ? 'employee lease ready' : 'guest lease ready');
 
-  const domesticPeerSync = await syncDomesticPeerForLease(lease);
-  const internalDirectPeerSync = await syncInternalDirectPeerForLease(lease, routePlan);
-  const domesticRelayDiagnostics = await diagnoseDomesticRelayForLease(lease);
-  const wireGuardResult = await startWireGuardForSession({
-    routePlan,
-    privateKey,
-    internalBaseUrl: overlayInternalBaseUrl,
-    internalDirectPeerSync,
-    domesticPeerSync,
-    domesticRelayDiagnostics
-  });
-  runtime.connection = {
-    ...runtime.connection,
-    state: wireGuardResult.state,
-    health: wireGuardResult.health,
-    wireGuard: wireGuardResult.wireGuard,
-    domesticPeerSync,
-    diagnostics: wireGuardResult.diagnostics
-  };
-  runtime.feedback = {
-    tone: wireGuardResult.ready ? 'success' : 'warning',
-    message: wireGuardResult.ready
-      ? `${options.feedback} 客户端 WireGuard 已通过 ${wireGuardPathLabel(wireGuardResult.path)} 探测 Internal。`
-      : `${options.feedback} 已保留租约，但客户端 WireGuard 还未 ready：${wireGuardResult.message}`
-  };
-  touchRuntime(wireGuardResult.ready
-    ? (options.mode === 'employee' ? 'employee wireguard connected' : 'guest wireguard connected')
-    : 'wireguard lease only');
+    const domesticPeerSync = await syncDomesticPeerForLease(lease);
+    const internalDirectPeerSync = await syncInternalDirectPeerForLease(lease, routePlan);
+    const domesticRelayDiagnostics = await diagnoseDomesticRelayForLease(lease);
+    const wireGuardResult = await startWireGuardForSession({
+      routePlan,
+      privateKey,
+      internalBaseUrl: overlayInternalBaseUrl,
+      internalDirectPeerSync,
+      domesticPeerSync,
+      domesticRelayDiagnostics
+    });
+    runtime.connection = {
+      ...runtime.connection,
+      state: wireGuardResult.state,
+      health: wireGuardResult.health,
+      wireGuard: wireGuardResult.wireGuard,
+      domesticPeerSync,
+      diagnostics: wireGuardResult.diagnostics
+    };
+    runtime.feedback = {
+      tone: wireGuardResult.ready ? 'success' : 'warning',
+      message: wireGuardResult.ready
+        ? `${options.feedback} 客户端 WireGuard 已通过 ${wireGuardPathLabel(wireGuardResult.path)} 探测 Internal。`
+        : `${options.feedback} 已保留租约，但客户端 WireGuard 还未 ready：${wireGuardResult.message}`
+    };
+    touchRuntime(wireGuardResult.ready
+      ? (options.mode === 'employee' ? 'employee wireguard connected' : 'guest wireguard connected')
+      : 'wireguard lease only');
+    if (!wireGuardResult.ready) {
+      scheduleWireGuardRecovery('post-connect-probe', [1500, 4000, 9000]);
+    }
+  } finally {
+    wireGuardConnectInFlight = false;
+  }
 }
 
 function applyConnectionError(label, err) {
@@ -1391,7 +1456,8 @@ async function connectAndProbeWireGuardPath(mod, input) {
     expectedInterfaceName: status.realInterfaceName || status.interfaceName || null,
     expectedInterfaceAddresses: status.addresses || []
   });
-  const internalApi = route.ok
+  const routeReady = route.ok === true || routeProbeCanFallbackToInternalApi(route, result.ok === true);
+  const internalApi = routeReady
     ? await probeInternalApiViaOverlay(input.internalBaseUrl)
     : internalApiProbeBlockedByRoute(input.internalBaseUrl, targetIp, route);
   return {
@@ -1400,7 +1466,7 @@ async function connectAndProbeWireGuardPath(mod, input) {
     route,
     endpointRoute,
     internalApi,
-    ready: result.ok === true && route.ok === true && internalApi.ok === true
+    ready: result.ok === true && routeReady && internalApi.ok === true
   };
 }
 
@@ -1428,11 +1494,12 @@ async function probeWireGuardForConnection(input) {
       expectedInterfaceName,
       expectedInterfaceAddresses: status?.addresses || []
     });
-    const internalApi = route.ok
+    const routeReady = route.ok === true || routeProbeCanFallbackToInternalApi(route, status?.active === true);
+    const internalApi = routeReady
       ? await probeInternalApiViaOverlay(internalBaseUrl)
       : internalApiProbeBlockedByRoute(internalBaseUrl, targetIp, route);
     const tunnelReady = status?.active === true || route.ok === true;
-    const ready = tunnelReady && route.ok === true && internalApi.ok === true;
+    const ready = tunnelReady && routeReady && internalApi.ok === true;
     const domesticRelayReady = domesticRelayDiagnostics?.status === 'passed' || domesticPeerSync?.status === 'passed' || route.ok === true;
     const resultLike = {
       ok: tunnelReady,
@@ -1629,6 +1696,139 @@ async function refreshWireGuardDiagnostics() {
   touchRuntime('wireguard diagnostics refreshed');
 }
 
+async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
+  if (!runtime || !shouldRecoverWireGuardConnection(runtime.connection)) {
+    return { ok: true, skipped: true, reason: 'connection-not-desired' };
+  }
+  if (wireGuardConnectInFlight || runtime.connection?.state === 'connecting') {
+    return { ok: true, skipped: true, reason: 'connect-in-flight' };
+  }
+  if (wireGuardRecoveryInFlight) return wireGuardRecoveryInFlight;
+  const manual = String(reason || '').startsWith('manual');
+  const allowPrivileged = options.allowPrivileged !== false;
+  if (!manual && lastWireGuardRecoveryFailureAt && Date.now() - lastWireGuardRecoveryFailureAt < 5 * 60 * 1000) {
+    return { ok: true, skipped: true, reason: 'failure-cooldown' };
+  }
+  wireGuardRecoveryInFlight = (async () => {
+    const connection = runtime.connection || {};
+    const routePlan = normalizeRoutePlan(connection.routePlan);
+    if (!routePlan) return { ok: true, skipped: true, reason: 'missing-route-plan' };
+    try {
+      const mod = await import('@qpjoy/electron-launcher/wireguard');
+      if (!allowPrivileged) {
+        const wireGuardResult = await probeWireGuardForConnection({
+          connection,
+          routePlan,
+          internalBaseUrl: connection.internalBaseUrl
+        });
+        const shouldPersistProbe = wireGuardResult.state !== connection.state || reason !== 'interval';
+        if (shouldPersistProbe) {
+          runtime.connection = {
+            ...connection,
+            state: wireGuardResult.state,
+            health: wireGuardResult.health,
+            wireGuard: wireGuardResult.wireGuard,
+            diagnostics: {
+              ...wireGuardResult.diagnostics,
+              recovery: {
+                ok: wireGuardResult.ready,
+                action: 'probe-only',
+                reason,
+                message: wireGuardResult.ready ? 'ready' : wireGuardResult.message,
+                missingRoutes: [],
+                updatedAt: nowIso()
+              }
+            }
+          };
+          if (wireGuardResult.ready && reason !== 'interval') {
+            runtime.feedback = {
+              tone: 'success',
+              message: `MX-H2I 已检测到 WireGuard ready（${reason}）。`
+            };
+          } else if (!wireGuardResult.ready && reason !== 'interval') {
+            runtime.feedback = {
+              tone: 'warning',
+              message: `MX-H2I 检测到 WireGuard 未 ready：${wireGuardResult.message}。请点击连接或刷新诊断进行授权修复。`
+            };
+          }
+          touchRuntime(`wireguard probed: ${reason}`);
+          await saveAndBroadcast();
+        }
+        return {
+          ok: true,
+          skipped: true,
+          reason: 'privileged-recovery-disabled',
+          recoveryReason: reason,
+          ready: wireGuardResult.ready
+        };
+      }
+      const recovered = await mod.recoverLauncherWireGuardPeer({
+        ...wireGuardRuntimeOptions(),
+        reason
+      });
+      if (recovered?.skipped) return recovered;
+      const wireGuardResult = await probeWireGuardForConnection({
+        connection,
+        routePlan,
+        internalBaseUrl: connection.internalBaseUrl
+      });
+      runtime.connection = {
+        ...connection,
+        state: wireGuardResult.state,
+        health: wireGuardResult.health,
+        wireGuard: wireGuardResult.wireGuard,
+        diagnostics: {
+          ...wireGuardResult.diagnostics,
+          recovery: {
+            ok: recovered?.ok !== false,
+            action: recovered?.action || recovered?.mode || 'recover',
+            reason,
+            message: nullableString(recovered?.message),
+            missingRoutes: arrayValue(recovered?.missingRoutes, []),
+            updatedAt: nowIso()
+          }
+        }
+      };
+      runtime.feedback = {
+        tone: wireGuardResult.ready ? 'success' : 'warning',
+        message: wireGuardResult.ready
+          ? `MX-H2I 已恢复 WireGuard 路由（${reason}）。`
+          : `MX-H2I 恢复后仍未 ready：${wireGuardResult.message}`
+      };
+      touchRuntime(`wireguard recovered: ${reason}`);
+      await saveAndBroadcast();
+      if (recovered?.ok === false || !wireGuardResult.ready) lastWireGuardRecoveryFailureAt = Date.now();
+      else lastWireGuardRecoveryFailureAt = 0;
+      return {
+        ...recovered,
+        ready: wireGuardResult.ready,
+        route: wireGuardResult.diagnostics?.route || null,
+        internalApi: wireGuardResult.diagnostics?.internalApi || null
+      };
+    } catch (err) {
+      lastWireGuardRecoveryFailureAt = Date.now();
+      if (manual) {
+        runtime.feedback = {
+          tone: 'warning',
+          message: `MX-H2I 恢复 WireGuard 失败：${errorMessage(err)}`
+        };
+        touchRuntime(`wireguard recovery failed: ${reason}`);
+        await saveAndBroadcast();
+      }
+      return { ok: false, reason, message: errorMessage(err) };
+    } finally {
+      wireGuardRecoveryInFlight = null;
+    }
+  })();
+  return wireGuardRecoveryInFlight;
+}
+
+function shouldRecoverWireGuardConnection(connection) {
+  const state = connection?.state;
+  return (state === 'connected' || state === 'tunnel-only' || state === 'lease-only')
+    && Boolean(normalizeRoutePlan(connection.routePlan));
+}
+
 async function stopWireGuardForRuntime() {
   try {
     const mod = await import('@qpjoy/electron-launcher/wireguard');
@@ -1718,6 +1918,12 @@ function internalApiProbeBlockedByRoute(baseUrl, targetIp, route) {
       ? `route to ${targetIp} is local loopback (${routeLabel}); same-host Internal/client test shadows H2I route proof`
       : `route to ${targetIp} is not on WireGuard (${routeLabel})`
   };
+}
+
+function routeProbeCanFallbackToInternalApi(route, tunnelReady) {
+  if (!tunnelReady || route?.ok === true) return false;
+  const error = `${route?.error || ''}\n${route?.raw || ''}`;
+  return /operation not permitted|not permitted|permission denied/i.test(error);
 }
 
 function internalApiHealthStatus(route, internalApi) {
@@ -2005,8 +2211,9 @@ function parseBootstrapPortList(value) {
 
 function summarizeBootstrapProbeFailures(failures) {
   const rows = failures.slice(0, 8).map((failure) => {
-    const resolved = failure.override?.url && failure.override.url !== failure.candidate
-      ? ` -> ${failure.override.url}`
+    const dialUrl = failure.override?.url || failure.error?.dialUrl;
+    const resolved = dialUrl && dialUrl !== failure.candidate
+      ? ` -> ${dialUrl}`
       : '';
     const mode = failure.resolveMode === 'env-only' ? 'env' : 'dns';
     return `[${mode}] ${failure.candidate}${resolved}: ${errorMessage(failure.error)}`;
@@ -2117,21 +2324,26 @@ function normalizeRoutePlan(input) {
 }
 
 async function requestJson(url, options = {}) {
-  const hostOverride = hostResolveOverride(url, { bootstrapResolveMode: options.bootstrapResolveMode });
+  const hostOverride = await requestHostOverride(url, { bootstrapResolveMode: options.bootstrapResolveMode });
   if (hostOverride) return requestJsonWithHostOverride(hostOverride, options);
   if (typeof fetch !== 'function') throw new Error('当前 Electron 运行时没有 fetch。');
   const controller = new AbortController();
   const timeout = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 6000;
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
-    const body = options.body ? JSON.stringify(options.body) : undefined;
+    const method = requestMethod(options.method);
+    const body = requestBodyForMethod(method, options.body);
+    const headers = {
+      accept: 'application/json',
+      ...normalizeRequestHeaders(options.headers)
+    };
+    if (body !== undefined && !hasRequestHeader(headers, 'content-type')) {
+      headers['content-type'] = 'application/json';
+    }
     const response = await fetch(url, {
-      method: options.method || 'GET',
-      headers: {
-        accept: 'application/json',
-        ...(body ? { 'content-type': 'application/json' } : {})
-      },
-      body,
+      method,
+      headers,
+      ...(body !== undefined ? { body } : {}),
       signal: controller.signal
     });
     const text = await response.text();
@@ -2164,7 +2376,7 @@ function requestJsonWithHostOverride(override, options = {}) {
 
 function launcherFetchForBootstrap(resolveMode) {
   return async (url, init = {}) => {
-    const hostOverride = hostResolveOverride(String(url), { bootstrapResolveMode: resolveMode });
+    const hostOverride = await requestHostOverride(String(url), { bootstrapResolveMode: resolveMode });
     if (!hostOverride) {
       if (typeof fetch !== 'function') throw new Error('当前 Electron 运行时没有 fetch。');
       return fetch(url, init);
@@ -2186,22 +2398,26 @@ function launcherFetchForBootstrap(resolveMode) {
 function requestTextWithHostOverride(override, options = {}) {
   return new Promise((resolve, reject) => {
     const target = new URL(override.url);
-    const body = requestBody(options.body);
+    const method = requestMethod(options.method);
+    const body = requestBodyForMethod(method, options.body);
     const timeout = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 6000;
     const headers = {
       ...normalizeRequestHeaders(options.headers),
       accept: 'application/json',
       host: override.hostHeader,
-      ...(override.originalHostHeader ? { 'x-forwarded-host': override.originalHostHeader } : {}),
-      ...(body ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {})
+      ...(override.originalHostHeader ? { 'x-forwarded-host': override.originalHostHeader } : {})
     };
+    if (body !== undefined) {
+      if (!hasRequestHeader(headers, 'content-type')) headers['content-type'] = 'application/json';
+      if (!hasRequestHeader(headers, 'content-length')) headers['content-length'] = Buffer.byteLength(body);
+    }
     const client = target.protocol === 'https:' ? https : http;
     const request = client.request({
       protocol: target.protocol,
       hostname: target.hostname,
       port: target.port || (target.protocol === 'https:' ? 443 : 80),
       path: `${target.pathname}${target.search}`,
-      method: options.method || 'GET',
+      method,
       headers,
       servername: override.servername,
       timeout
@@ -2232,13 +2448,19 @@ function requestTextWithHostOverride(override, options = {}) {
       err.bootstrapResolveMode = err.bootstrapResolveMode || override.resolveMode;
       reject(err);
     });
-    if (body) request.write(body);
+    if (body !== undefined) request.write(body);
     request.end();
   });
 }
 
-function requestBody(body) {
-  if (body === undefined || body === null) return undefined;
+function requestMethod(method) {
+  return String(method || 'GET').toUpperCase();
+}
+
+function requestBodyForMethod(method, body) {
+  if (body === undefined || body === null) {
+    return method !== 'GET' && method !== 'HEAD' ? '{}' : undefined;
+  }
   if (typeof body === 'string' || Buffer.isBuffer(body)) return body;
   return JSON.stringify(body);
 }
@@ -2249,6 +2471,11 @@ function normalizeRequestHeaders(headers) {
   if (Array.isArray(headers)) return Object.fromEntries(headers);
   if (typeof headers === 'object') return { ...headers };
   return {};
+}
+
+function hasRequestHeader(headers, name) {
+  const lowerName = String(name).toLowerCase();
+  return Object.keys(headers || {}).some((key) => key.toLowerCase() === lowerName);
 }
 
 function visibleRuntime(source = runtime) {
@@ -2405,6 +2632,14 @@ function defaultBootstrapResolveMode() {
   );
 }
 
+function defaultBootstrapDnsServers() {
+  return nullableString(process.env.MX_H2I_BOOTSTRAP_DNS_SERVERS)
+    || nullableString(process.env.MX_H2I_BOOTSTRAP_DNS_SERVER)
+    || nullableString(process.env.MX_H2I_BOOTSTRAP_RESOLVE_DNS)
+    || nullableString(process.env.MX_H2I_BOOTSTRAP_DNS)
+    || '';
+}
+
 function normalizeBootstrapResolveMode(value) {
   const text = String(value || '').trim().toLowerCase().replace(/_/g, '-');
   if (['env', 'env-first', 'host', 'host-first', 'host-resolve', 'host-resolve-first'].includes(text)) {
@@ -2433,6 +2668,94 @@ function normalizeRoutePlanPath(value) {
   return 'hdi-relay';
 }
 
+async function requestHostOverride(url, options = {}) {
+  const resolveMode = normalizeBootstrapResolveMode(
+    options.bootstrapResolveMode || runtime?.config?.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode
+  );
+  if (resolveMode === 'env-first' || resolveMode === 'env-only') {
+    return hostResolveOverride(url, { bootstrapResolveMode: resolveMode });
+  }
+  if (resolveMode === 'dns-first' || resolveMode === 'dns-only') {
+    return bootstrapDnsResolveOverride(url, { bootstrapResolveMode: resolveMode });
+  }
+  return null;
+}
+
+async function bootstrapDnsResolveOverride(url, options = {}) {
+  const resolveMode = normalizeBootstrapResolveMode(
+    options.bootstrapResolveMode || runtime?.config?.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode
+  );
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (!shouldResolveBootstrapHost(parsed.hostname)) return null;
+  const servers = bootstrapDnsServers();
+  if (!servers.length) return null;
+  const address = await resolveBootstrapHostname(parsed.hostname, servers, resolveMode);
+  return buildHostOverride(parsed, { host: address, port: null }, resolveMode, {
+    preserveOriginalHost: true,
+    source: 'bootstrap-dns'
+  });
+}
+
+function shouldResolveBootstrapHost(hostname) {
+  const host = nullableString(hostname);
+  if (!host) return false;
+  if (host === 'localhost') return false;
+  return net.isIP(host) === 0;
+}
+
+function bootstrapDnsServers() {
+  return parseDnsServerList([
+    runtime?.config?.bootstrapDnsServers,
+    DEFAULT_CONFIG.bootstrapDnsServers
+  ].filter(Boolean).join(','));
+}
+
+function parseDnsServerList(value) {
+  return uniqueValues(String(value || '')
+    .split(/[,\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean));
+}
+
+async function resolveBootstrapHostname(hostname, servers, resolveMode) {
+  const resolver = new dnsPromises.Resolver();
+  resolver.setServers(servers);
+  try {
+    const records = await withTimeout(
+      resolver.resolve4(hostname),
+      1600,
+      `Bootstrap DNS timeout for ${hostname} via ${servers.join(',')}`
+    );
+    const address = records.find((record) => isIpv4(record));
+    if (address) return address;
+    throw new Error(`Bootstrap DNS did not return an A record for ${hostname}`);
+  } catch (err) {
+    const wrapped = new Error(`Bootstrap DNS failed for ${hostname} via ${servers.join(',')}: ${errorMessage(err)}`);
+    wrapped.code = 'MX_BOOTSTRAP_DNS_FAILED';
+    wrapped.bootstrapResolveMode = resolveMode;
+    throw wrapped;
+  }
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(message);
+      err.code = 'MX_BOOTSTRAP_DNS_TIMEOUT';
+      reject(err);
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 function hostResolveOverride(url, options = {}) {
   const resolveMode = normalizeBootstrapResolveMode(options.bootstrapResolveMode || runtime?.config?.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode);
   if (resolveMode === 'dns-first' || resolveMode === 'dns-only') return null;
@@ -2445,16 +2768,24 @@ function hostResolveOverride(url, options = {}) {
   const resolveMap = parseHostResolve(effectiveHostResolve());
   const mapped = resolveMap.get(parsed.hostname.toLowerCase());
   if (!mapped) return null;
+  return buildHostOverride(parsed, mapped, resolveMode, {
+    preserveOriginalHost: true,
+    source: 'host-resolve'
+  });
+}
+
+function buildHostOverride(parsed, mapped, resolveMode, options = {}) {
   const target = new URL(parsed.toString());
   target.hostname = mapped.host;
   if (mapped.port) target.port = mapped.port;
-  const useOriginalHostHeader = target.protocol === 'https:';
+  const useOriginalHostHeader = options.preserveOriginalHost === true || target.protocol === 'https:';
   return {
     originalUrl: parsed.toString(),
     url: target.toString(),
     hostHeader: useOriginalHostHeader ? parsed.host : target.host,
     originalHostHeader: parsed.host,
     resolveMode,
+    source: options.source || 'host-resolve',
     servername: useOriginalHostHeader ? parsed.hostname : undefined
   };
 }

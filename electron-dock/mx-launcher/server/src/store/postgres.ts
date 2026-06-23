@@ -26,6 +26,7 @@ import type {
   DnsQueryInput,
   DnsResolutionDecision,
   DnsReverseProxyRoute,
+  DnsReverseProxyRouteInput,
   DnsZoneSnapshot,
   DnsZoneSnapshotInput,
   IdentityLinkRequest,
@@ -115,6 +116,7 @@ import {
   buildAwxProviderConfig,
   buildReleaseManagementPlan,
   buildRuntimeFeaturePolicy,
+  buildDnsReverseProxyRoute,
   attachDomesticWireGuardRefreshHint,
   buildLauncherNetworkMihomoSite,
   buildLauncherNetworkTopology,
@@ -1782,6 +1784,48 @@ export class PostgresStore implements PlatformStore {
   async listDnsReverseProxyRoutes(): Promise<DnsReverseProxyRoute[]> {
     return (await this.listRecords<DnsReverseProxyRoute>('dns-reverse-proxy-route'))
       .sort((a, b) => a.host.localeCompare(b.host));
+  }
+
+  async getDnsReverseProxyRoute(routeId: string): Promise<DnsReverseProxyRoute | null> {
+    return this.getRecord<DnsReverseProxyRoute>('dns-reverse-proxy-route', routeId);
+  }
+
+  async upsertDnsReverseProxyRoute(input: DnsReverseProxyRouteInput): Promise<DnsReverseProxyRoute> {
+    const previous = input.routeId ? await this.getDnsReverseProxyRoute(input.routeId) : null;
+    const route = buildDnsReverseProxyRoute(this.config, input, previous);
+    await this.saveRecord('dns-reverse-proxy-route', route.routeId, route, this.config.siteId);
+    await this.recordAudit({
+      eventType: previous ? 'dns.reverse_proxy_route.updated' : 'dns.reverse_proxy_route.created',
+      actorKind: 'dns-control',
+      metadata: {
+        requestedBy: input.requestedBy?.trim() || 'desktop-admin',
+        routeId: route.routeId,
+        host: route.host,
+        targetUrl: route.targetUrl,
+        enabled: route.enabled
+      }
+    });
+    return route;
+  }
+
+  async deleteDnsReverseProxyRoute(routeId: string): Promise<boolean> {
+    const route = await this.getDnsReverseProxyRoute(routeId);
+    if (!route) return false;
+    await this.records.delete({
+      kind: 'dns-reverse-proxy-route',
+      id: route.routeId,
+      environment: this.config.environment
+    });
+    await this.recordAudit({
+      eventType: 'dns.reverse_proxy_route.deleted',
+      actorKind: 'dns-control',
+      metadata: {
+        routeId: route.routeId,
+        host: route.host,
+        targetUrl: route.targetUrl
+      }
+    });
+    return true;
   }
 
   async buildDnsZoneSnapshot(input: DnsZoneSnapshotInput): Promise<DnsZoneSnapshot> {

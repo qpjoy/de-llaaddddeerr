@@ -20,6 +20,7 @@ import type {
   DnsQueryInput,
   DnsResolutionDecision,
   DnsReverseProxyRoute,
+  DnsReverseProxyRouteInput,
   DnsZoneSnapshot,
   DnsZoneSnapshotInput,
   IdentityLinkRequest,
@@ -236,6 +237,9 @@ export interface PlatformStore {
   getEffectiveDnsPolicy(appId?: string | null): MaybePromise<DnsPolicy>;
   evaluateDnsQuery(input: DnsQueryInput): MaybePromise<DnsResolutionDecision>;
   listDnsReverseProxyRoutes(): MaybePromise<DnsReverseProxyRoute[]>;
+  getDnsReverseProxyRoute(routeId: string): MaybePromise<DnsReverseProxyRoute | null>;
+  upsertDnsReverseProxyRoute(input: DnsReverseProxyRouteInput): MaybePromise<DnsReverseProxyRoute>;
+  deleteDnsReverseProxyRoute(routeId: string): MaybePromise<boolean>;
   buildDnsZoneSnapshot(input: DnsZoneSnapshotInput): MaybePromise<DnsZoneSnapshot>;
   getDnsZoneSnapshot(snapshotId: string): MaybePromise<DnsZoneSnapshot | null>;
   syncCoreDnsConfigMap(input: CoreDnsConfigMapSyncInput): MaybePromise<CoreDnsConfigMapSyncResult>;
