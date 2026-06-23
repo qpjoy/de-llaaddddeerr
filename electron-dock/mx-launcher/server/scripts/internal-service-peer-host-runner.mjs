@@ -609,14 +609,66 @@ function validWireGuardPublicKey(value) {
   return typeof value === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(value.trim());
 }
 
-function wireGuardPrivateKeyFromConfig(configPath) {
+function validWireGuardPrivateKey(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(value.trim());
+}
+
+function wireGuardPrivateKeyRawFromConfig(configPath) {
   try {
     const content = readFileSync(configPath, 'utf8');
-    const match = content.match(/^\s*PrivateKey\s*=\s*([A-Za-z0-9+/=]+)\s*$/im);
+    const match = content.match(/^\s*PrivateKey\s*=\s*(\S+)\s*$/im);
     return match?.[1]?.trim() || null;
   } catch {
     return null;
   }
+}
+
+function wireGuardPrivateKeyFromConfig(configPath) {
+  const privateKey = wireGuardPrivateKeyRawFromConfig(configPath);
+  return validWireGuardPrivateKey(privateKey) ? privateKey : null;
+}
+
+function internalServicePeerConfigReadiness(artifacts) {
+  const configPath = artifacts.runtimeConfigPath || artifacts.configPath;
+  const configExists = artifacts.runtimeConfigExists ?? artifacts.configExists;
+  if (!configExists) {
+    return {
+      status: 'blocked',
+      configPath,
+      privateKey: 'missing',
+      summary: `missing config: ${configPath}`,
+      blockedReasons: [`Internal service peer config artifact is missing: ${configPath}`]
+    };
+  }
+  let content = '';
+  try {
+    content = readFileSync(configPath, 'utf8');
+  } catch (error) {
+    return {
+      status: 'blocked',
+      configPath,
+      privateKey: 'unreadable',
+      summary: `unreadable config: ${configPath}`,
+      blockedReasons: [`Internal service peer config is unreadable: ${errorMessage(error)}`]
+    };
+  }
+  const rawPrivateKey = wireGuardPrivateKeyRawFromConfig(configPath);
+  const blockedReasons = [];
+  if (/<internal-service-private-key-from-internal-secret>|<[^>\n]+>/.test(content)) {
+    blockedReasons.push(`Internal service peer config still contains template placeholders: ${configPath}`);
+  }
+  if (!rawPrivateKey) {
+    blockedReasons.push(`Internal service peer private key is missing: ${configPath}`);
+  } else if (!validWireGuardPrivateKey(rawPrivateKey)) {
+    blockedReasons.push(`Internal service peer private key is not a valid WireGuard private key: ${configPath}`);
+  }
+  return {
+    status: blockedReasons.length ? 'blocked' : 'ready',
+    configPath,
+    privateKey: rawPrivateKey ? validWireGuardPrivateKey(rawPrivateKey) ? 'configured' : 'invalid' : 'missing',
+    summary: blockedReasons.length ? blockedReasons[0] : 'config key ready',
+    blockedReasons
+  };
 }
 
 function wireGuardPublicKeyFromConfig(wgCommand, configPath) {
@@ -949,6 +1001,7 @@ function prepareRuntimeConfigArtifact(artifacts, interfaceName) {
 async function buildStatus(payload) {
   const interfaceName = stringValue(payload.interfaceName, defaultInterfaceName);
   const artifacts = prepareRuntimeConfigArtifact(syncArtifacts(payload), interfaceName);
+  const configReadiness = internalServicePeerConfigReadiness(artifacts);
   const domesticGatewayIp = stringValue(payload.domesticGatewayIp, '10.88.0.1');
   const internalServiceIp = stringValue(payload.internalServiceIp, '10.88.88.88');
   const tools = {
@@ -1000,7 +1053,7 @@ async function buildStatus(payload) {
       }
     : parseHandshake(latestHandshakes?.stdout || '');
   const blockedReasons = [
-    ...(!artifacts.configExists ? [`Internal service peer config artifact is missing: ${artifacts.configPath}`] : []),
+    ...configReadiness.blockedReasons,
     ...(!artifacts.applyScriptExists ? [`Internal service peer apply script is missing: ${artifacts.applyScriptPath}`] : []),
     ...(internalEgress.status === 'blocked' ? internalEgress.blockedReasons : []),
     ...(!wireGuardCore.available
@@ -1049,6 +1102,7 @@ async function buildStatus(payload) {
     tools,
     internalEgress,
     proxy,
+    configReadiness,
     wireGuardCore,
     artifacts,
     interface: {

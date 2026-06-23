@@ -3862,6 +3862,7 @@ function renderInternalPeerRuntimeStatus(runtimeStatus, applyResult) {
   const hostRunner = runtimeTarget.hostRunner || {};
   const hostRunnerOffline = runtimeTarget.mode === 'host-runner-unreachable' || Boolean(hostRunner.error);
   const internalEgress = runtimeStatus?.internalEgress || {};
+  const configReadiness = runtimeStatus?.configReadiness || {};
   const proxy = runtimeStatus?.proxy || {};
   const splitDns = proxy.splitDns || {};
   const applyStatus = applyResult?.status || 'not-run';
@@ -3890,6 +3891,7 @@ function renderInternalPeerRuntimeStatus(runtimeStatus, applyResult) {
   const rows = [
     { label: 'target', value: runtimeTarget.mode || 'not checked', status: runtimeTarget.mode === 'host-runner' ? 'passed' : hostRunnerOffline || runtimeTarget.mode === 'api-pod' ? 'blocked' : 'ready' },
     { label: 'host runner', value: hostRunner.error || hostRunner.url || hostRunner.startCommand || 'not configured', status: hostRunner.error ? 'blocked' : hostRunner.configured ? 'passed' : 'ready' },
+    { label: 'config key', value: hostRunnerOffline ? 'not checked' : configReadiness.summary || configReadiness.privateKey || 'not checked', status: hostRunnerOffline ? 'ready' : configReadiness.status || 'ready' },
     { label: 'wg runtime', value: hostRunnerOffline ? 'not checked' : wireGuardCore.method ? `${wireGuardCore.method} / ${wireGuardCore.source || 'core'}` : 'not checked', status: hostRunnerOffline ? 'ready' : wireGuardCore.status || (coreAvailable ? 'passed' : 'ready') },
     { label: 'core wg', value: hostRunnerOffline ? 'not checked' : coreRuntime.wg?.command || coreRuntime.wg?.error || 'missing', status: hostRunnerOffline ? 'ready' : coreRuntime.wg?.available ? 'passed' : coreAvailable ? 'ready' : 'blocked' },
     { label: 'core wg-quick', value: hostRunnerOffline ? 'not checked' : coreRuntime.wgQuick?.command || coreRuntime.wgQuick?.error || 'missing', status: hostRunnerOffline ? 'ready' : coreRuntime.wgQuick?.available ? 'passed' : coreRuntime.method === 'darwin-userspace' ? 'ready' : 'blocked' },

@@ -3856,6 +3856,16 @@ function internalServicePeerApplyScriptContent(): string {
     '  exit 1',
     'fi',
     '',
+    'PRIVATE_KEY="$(awk -F= \'/^[[:space:]]*PrivateKey[[:space:]]*=/{print $2; exit}\' "$CONFIG_SOURCE" | sed \'s/^[[:space:]]*//;s/[[:space:]]*$//\')"',
+    'if printf "%s" "$PRIVATE_KEY" | grep -q "[<>]"; then',
+    '  echo "blocked: Internal service peer config still contains a placeholder private key: $CONFIG_SOURCE" >&2',
+    '  exit 1',
+    'fi',
+    'if ! printf "%s" "$PRIVATE_KEY" | grep -Eq "^[A-Za-z0-9+/]{43}=$"; then',
+    '  echo "blocked: Internal service peer private key is missing or invalid: $CONFIG_SOURCE" >&2',
+    '  exit 1',
+    'fi',
+    '',
     'install -d -m 700 /etc/wireguard',
     '',
     'internal_route_cidrs() {',
@@ -4277,6 +4287,22 @@ function internalServicePeerBlockedReasons(status: { blockedReasons?: unknown })
     : [];
 }
 
+function internalServicePeerConfigFileFailures(path: string): string[] {
+  const content = readTextFileIfExists(path);
+  if (!content) return [];
+  const failures: string[] = [];
+  const privateKey = content.match(/^\s*PrivateKey\s*=\s*(\S+)\s*$/im)?.[1]?.trim() ?? '';
+  if (/<internal-service-private-key-from-internal-secret>|<[^>\n]+>/.test(content)) {
+    failures.push(`Internal service peer config still contains template placeholders: ${path}`);
+  }
+  if (!privateKey) {
+    failures.push(`Internal service peer private key is missing: ${path}`);
+  } else if (!validWireGuardPrivateKey(privateKey)) {
+    failures.push(`Internal service peer private key is not a valid WireGuard key: ${path}`);
+  }
+  return failures;
+}
+
 function internalServicePeerHandoffFailures(
   siteId: string,
   secret: SiteSlotDomesticWireGuardSecret | null,
@@ -4301,8 +4327,17 @@ function internalServicePeerHandoffFailures(
     if (!secret.internalServicePrivateKey || !secret.internalServicePublicKey) {
       failures.push('Internal service key pair is missing');
     }
+    if (secret.internalServicePrivateKey && !validWireGuardPrivateKey(secret.internalServicePrivateKey)) {
+      failures.push('Internal service private key is not a valid WireGuard key');
+    }
+    if (secret.internalServicePublicKey && !validWireGuardPublicKey(secret.internalServicePublicKey)) {
+      failures.push('Internal service public key is not a valid WireGuard key');
+    }
     if (!secret.domesticRelayPublicKey) {
       failures.push('Domestic relay public key is missing');
+    }
+    if (secret.domesticRelayPublicKey && !validWireGuardPublicKey(secret.domesticRelayPublicKey)) {
+      failures.push('Domestic relay public key is not a valid WireGuard key');
     }
     const staleReason = plan ? domesticWireGuardStaleReason(plan, secret) : null;
     if (staleReason) failures.push(staleReason);
@@ -4310,6 +4345,9 @@ function internalServicePeerHandoffFailures(
   if (!domesticWireGuardArtifactReady()) failures.push('Domestic WireGuard artifact manifest is not ready');
   if (!renderedArtifacts?.configContent && !existsSync(paths.configPath)) {
     failures.push(`Internal service peer config artifact is missing: ${paths.configPath}`);
+  }
+  if (!renderedArtifacts?.configContent) {
+    failures.push(...internalServicePeerConfigFileFailures(paths.configPath));
   }
   if (!renderedArtifacts?.applyScriptContent && !existsSync(paths.applyScriptPath)) {
     failures.push(`Internal service peer apply script is missing: ${paths.applyScriptPath}`);
@@ -5374,6 +5412,10 @@ function domesticRelayPeerPlanFailures(
 
 function validWireGuardPublicKey(value: string): boolean {
   return /^[A-Za-z0-9+/=]{32,88}$/.test(value) && !/\s/.test(value);
+}
+
+function validWireGuardPrivateKey(value: string): boolean {
+  return /^[A-Za-z0-9+/]{43}=$/.test(value.trim());
 }
 
 function validRelayLeaseIp(value: string): boolean {

@@ -2123,8 +2123,13 @@ internal_service_peer_handoff() {
   [ -f "$config_path" ] || die "Internal service peer config not found: $config_path"
   [ -f "$apply_script" ] || die "Internal service peer apply script not found: $apply_script"
   command -v wg-quick >/dev/null 2>&1 || die "wg-quick is required to apply V2 Internal service peer config on this host"
-  if grep -q '<internal-service-private-key-from-internal-secret>' "$config_path"; then
+  local private_key
+  private_key="$(awk -F= '/^[[:space:]]*PrivateKey[[:space:]]*=/{print $2; exit}' "$config_path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  if printf "%s" "$private_key" | grep -q '[<>]'; then
     die "Internal service peer config still contains placeholder key: $config_path. Run 'bash scripts/manage.sh ops site-slot materialize-domestic-ready <site-id>' or Generate Handoff from Internal first."
+  fi
+  if ! printf "%s" "$private_key" | grep -Eq '^[A-Za-z0-9+/]{43}=$'; then
+    die "Internal service peer private key is missing or invalid: $config_path. Run 'bash scripts/manage.sh ops site-slot materialize-domestic-ready <site-id>' or Generate Handoff from Internal first."
   fi
 
   if [ "$(id -u)" -ne 0 ]; then
