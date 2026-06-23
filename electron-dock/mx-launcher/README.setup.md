@@ -104,4 +104,13 @@ curl -fsS http://127.0.0.1:18090/healthz
 bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures
 bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures --apply
 MX_K8S_CLEANUP_LEGACY_OVERSEA_MAIN_SMOKE=1 bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures --apply
+
+
+### 服务器本机wg
+# 关闭
+sudo launchctl bootout system /Library/LaunchDaemons/com.qpjoy.mx-launcher.internal.wireguard.mx-internal-svc.plist
+# 启动
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.qpjoy.mx-launcher.internal.wireguard.mx-internal-svc.plist
+# 防开机启动
+sudo launchctl disable system/com.qpjoy.mx-launcher.internal.wireguard.mx-internal-svc
 ```

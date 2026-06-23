@@ -158,6 +158,12 @@ const state = {
     users: [],
     roles: [],
     overseaEntitlements: [],
+    filter: {
+      search: '',
+      roleId: 'all',
+      status: 'all'
+    },
+    drawer: null,
     selectedOverseaUserId: null,
     overseaFeedback: null,
     overseaBusy: false,
@@ -478,6 +484,8 @@ const awxProviderList = document.getElementById('awx-provider-list');
 const topologyCanvas = document.getElementById('topology-canvas');
 const appEditorBackdrop = document.getElementById('app-editor-backdrop');
 const appEditorDrawer = document.getElementById('app-editor-drawer');
+const userEditorBackdrop = document.getElementById('user-editor-backdrop');
+const userEditorDrawer = document.getElementById('user-editor-drawer');
 const evidenceBackdrop = document.getElementById('evidence-backdrop');
 const evidenceDrawer = document.getElementById('evidence-drawer');
 const evidenceClose = document.getElementById('evidence-close');
@@ -713,7 +721,15 @@ if (appEditorBackdrop) {
   appEditorBackdrop.addEventListener('click', () => closeAppCatalogEditor());
 }
 
+if (userEditorBackdrop) {
+  userEditorBackdrop.addEventListener('click', () => closeUserEditorDrawer());
+}
+
 window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && userEditorDrawer && !userEditorDrawer.hidden) {
+    closeUserEditorDrawer();
+    return;
+  }
   if (event.key === 'Escape' && appEditorDrawer && !appEditorDrawer.hidden) {
     closeAppCatalogEditor();
     return;
@@ -2272,13 +2288,19 @@ async function refreshUserCenterPanels() {
   state.userCenter.overseaEntitlements = asArray(payload.overseaEntitlements);
   if (payload.error) state.userCenter.feedback = { kind: 'error', message: payload.error };
   renderFoundationGrid(state.dashboard?.overview || {});
+  renderUserEditorDrawer();
+}
+
+function renderUserCenterSurfaces() {
+  renderFoundationGrid(state.dashboard?.overview || {});
+  renderUserEditorDrawer();
 }
 
 async function bootstrapUserCenterFromAdmin() {
   if (state.userCenter.busy) return;
   state.userCenter.busy = true;
   state.userCenter.feedback = { kind: 'info', message: 'Bootstrapping User Center' };
-  renderFoundationGrid(state.dashboard?.overview || {});
+  renderUserCenterSurfaces();
   try {
     const payload = await fetchJson('/internal/v1/user-center/bootstrap', { method: 'POST', body: {} });
     state.userCenter.feedback = {
@@ -2288,10 +2310,10 @@ async function bootstrapUserCenterFromAdmin() {
     await refreshUserCenterPanels();
   } catch (error) {
     state.userCenter.feedback = { kind: 'error', message: error.message };
-    renderFoundationGrid(state.dashboard?.overview || {});
+    renderUserCenterSurfaces();
   } finally {
     state.userCenter.busy = false;
-    renderFoundationGrid(state.dashboard?.overview || {});
+    renderUserCenterSurfaces();
   }
 }
 
@@ -2302,12 +2324,12 @@ async function createUserFromAdmin() {
   const roleId = blankToNull(foundationGrid.querySelector('[data-user-field="roleId"]')?.value);
   if (!email || !displayName) {
     state.userCenter.feedback = { kind: 'error', message: 'Email and display name are required' };
-    renderFoundationGrid(state.dashboard?.overview || {});
+    renderUserCenterSurfaces();
     return;
   }
   state.userCenter.busy = true;
   state.userCenter.feedback = { kind: 'info', message: 'Creating user' };
-  renderFoundationGrid(state.dashboard?.overview || {});
+  renderUserCenterSurfaces();
   try {
     const payload = await fetchJson('/internal/v1/user-center/users', {
       method: 'POST',
@@ -2326,22 +2348,156 @@ async function createUserFromAdmin() {
     await refreshUserCenterPanels();
   } catch (error) {
     state.userCenter.feedback = { kind: 'error', message: error.message };
-    renderFoundationGrid(state.dashboard?.overview || {});
+    renderUserCenterSurfaces();
   } finally {
     state.userCenter.busy = false;
-    renderFoundationGrid(state.dashboard?.overview || {});
+    renderUserCenterSurfaces();
+  }
+}
+
+function userCenterFilters() {
+  if (!state.userCenter.filter) {
+    state.userCenter.filter = { search: '', roleId: 'all', status: 'all' };
+  }
+  return state.userCenter.filter;
+}
+
+function userCenterControlRoot() {
+  return userEditorDrawer && !userEditorDrawer.hidden ? userEditorDrawer : foundationGrid;
+}
+
+function userCenterUserById(userId) {
+  return asArray(state.userCenter.users).find((user) => user.userId === userId) || null;
+}
+
+function defaultUserRoleId() {
+  const roles = asArray(state.userCenter.roles);
+  return roles.find((role) => role.roleId === 'mx-user')?.roleId || roles[0]?.roleId || '';
+}
+
+function createUserEditorDraft(mode = 'create', userId = '') {
+  const user = mode === 'edit' ? userCenterUserById(userId) : null;
+  return {
+    userId: user?.userId || '',
+    email: user?.email || '',
+    displayName: user?.displayName || '',
+    roleId: asArray(user?.roleIds)[0] || defaultUserRoleId()
+  };
+}
+
+function openUserEditorDrawer(mode = 'edit', userId = '') {
+  const normalizedMode = mode === 'create' ? 'create' : 'edit';
+  const user = normalizedMode === 'edit' ? userCenterUserById(userId) : null;
+  if (normalizedMode === 'edit' && !user) return;
+  state.userCenter.drawer = {
+    mode: normalizedMode,
+    userId: user?.userId || '',
+    draft: createUserEditorDraft(normalizedMode, user?.userId || '')
+  };
+  state.userCenter.feedback = null;
+  state.userCenter.overseaFeedback = null;
+  state.userCenter.selectedOverseaUserId = user?.userId || null;
+  renderUserEditorDrawer();
+  requestAnimationFrame(() => {
+    const firstField = userEditorDrawer?.querySelector('[data-user-editor-field="email"]:not([readonly]), [data-user-editor-field="displayName"]');
+    firstField?.focus?.();
+  });
+}
+
+function closeUserEditorDrawer() {
+  state.userCenter.drawer = null;
+  state.userCenter.busy = false;
+  if (userEditorBackdrop) userEditorBackdrop.hidden = true;
+  if (userEditorDrawer) {
+    userEditorDrawer.hidden = true;
+    userEditorDrawer.innerHTML = '';
+  }
+}
+
+function userEditorValue(root, field) {
+  const element = root.querySelector(`[data-user-editor-field="${field}"]`);
+  if (!element) return null;
+  if (element.type === 'checkbox') return element.checked;
+  return blankToNull(element.value);
+}
+
+function userEditorDraftFromForm(root) {
+  const current = state.userCenter.drawer?.draft || {};
+  const editing = state.userCenter.drawer?.mode === 'edit';
+  return {
+    ...current,
+    userId: editing ? current.userId : userEditorValue(root, 'userId') || current.userId || '',
+    email: userEditorValue(root, 'email') || '',
+    displayName: userEditorValue(root, 'displayName') || '',
+    roleId: userEditorValue(root, 'roleId') || defaultUserRoleId()
+  };
+}
+
+async function saveUserCenterUserFromEditor(root) {
+  if (state.userCenter.busy) return;
+  const draft = userEditorDraftFromForm(root);
+  if (!draft.email || !draft.displayName) {
+    state.userCenter.feedback = { kind: 'error', message: 'Email and display name are required' };
+    if (state.userCenter.drawer) state.userCenter.drawer.draft = draft;
+    renderUserEditorDrawer();
+    return;
+  }
+  state.userCenter.busy = true;
+  state.userCenter.feedback = {
+    kind: 'info',
+    message: state.userCenter.drawer?.mode === 'edit' ? 'Saving user' : 'Creating user'
+  };
+  if (state.userCenter.drawer) state.userCenter.drawer.draft = draft;
+  renderUserEditorDrawer();
+  try {
+    const payload = await fetchJson('/internal/v1/user-center/users', {
+      method: 'POST',
+      body: {
+        userId: state.userCenter.drawer?.mode === 'edit' ? draft.userId : blankToNull(draft.userId),
+        email: draft.email,
+        displayName: draft.displayName,
+        roleIds: draft.roleId ? [draft.roleId] : [],
+        orgIds: ['org_default'],
+        requestId: `desktop-user-${Date.now()}`
+      }
+    });
+    const saved = payload.user || {};
+    const savedUserId = saved.userId || draft.userId;
+    state.userCenter.drawer = {
+      mode: 'edit',
+      userId: savedUserId,
+      draft: {
+        userId: savedUserId,
+        email: saved.email || draft.email,
+        displayName: saved.displayName || draft.displayName,
+        roleId: asArray(saved.roleIds)[0] || draft.roleId
+      }
+    };
+    state.userCenter.selectedOverseaUserId = savedUserId || null;
+    state.userCenter.feedback = {
+      kind: 'success',
+      message: `Saved ${saved.displayName || draft.displayName || savedUserId}`
+    };
+    await refreshUserCenterPanels();
+  } catch (error) {
+    state.userCenter.feedback = { kind: 'error', message: error.message };
+    renderUserEditorDrawer();
+  } finally {
+    state.userCenter.busy = false;
+    renderUserCenterSurfaces();
   }
 }
 
 async function assignUserOverseaFromAdmin() {
   if (state.userCenter.overseaBusy) return;
-  const userId = blankToNull(foundationGrid.querySelector('[data-oversea-user]')?.value);
-  const siteIds = [...foundationGrid.querySelectorAll('[data-oversea-site]:checked')]
+  const root = userCenterControlRoot();
+  const userId = state.userCenter.drawer?.userId || blankToNull(root.querySelector('[data-oversea-user]')?.value);
+  const siteIds = [...root.querySelectorAll('[data-oversea-site]:checked')]
     .map((item) => item.value)
     .filter(Boolean);
   if (!userId) {
     state.userCenter.overseaFeedback = { kind: 'error', message: 'Select a user first' };
-    renderFoundationGrid(state.dashboard?.overview || {});
+    renderUserCenterSurfaces();
     return;
   }
   state.userCenter.selectedOverseaUserId = userId;
@@ -2350,7 +2506,7 @@ async function assignUserOverseaFromAdmin() {
     kind: 'info',
     message: siteIds.length ? 'Issuing user Oversea entitlement' : 'Disabling user Oversea access'
   };
-  renderFoundationGrid(state.dashboard?.overview || {});
+  renderUserCenterSurfaces();
   try {
     const payload = await fetchJson(`/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea`, {
       method: 'POST',
@@ -2367,7 +2523,7 @@ async function assignUserOverseaFromAdmin() {
         kind: 'info',
         message: `Assigned ${assignedCount} site(s); syncing this user to remote`
       };
-      renderFoundationGrid(state.dashboard?.overview || {});
+      renderUserCenterSurfaces();
       try {
         syncPayload = await runUserOverseaRuntimeSync(userId, siteIds, `desktop-user-oversea-sync-after-assign-${Date.now()}`);
       } catch (syncError) {
@@ -2387,10 +2543,10 @@ async function assignUserOverseaFromAdmin() {
     await refreshUserCenterPanels();
   } catch (error) {
     state.userCenter.overseaFeedback = { kind: 'error', message: error.message };
-    renderFoundationGrid(state.dashboard?.overview || {});
+    renderUserCenterSurfaces();
   } finally {
     state.userCenter.overseaBusy = false;
-    renderFoundationGrid(state.dashboard?.overview || {});
+    renderUserCenterSurfaces();
   }
 }
 
@@ -2406,28 +2562,30 @@ async function runUserOverseaRuntimeSync(userId, siteIds, requestId) {
   });
 }
 
-async function syncUserOverseaRuntimeFromAdmin() {
+async function syncUserOverseaRuntimeFromAdmin(input = {}) {
   if (state.userCenter.overseaSyncBusy || state.userCenter.overseaBusy) return;
-  const userId = blankToNull(foundationGrid.querySelector('[data-oversea-user]')?.value);
-  let siteIds = [...foundationGrid.querySelectorAll('[data-oversea-site]:checked')]
+  const root = userCenterControlRoot();
+  const userId = input.userId || state.userCenter.drawer?.userId || blankToNull(root.querySelector('[data-oversea-user]')?.value);
+  let siteIds = asArray(input.siteIds);
+  if (!siteIds.length) siteIds = [...root.querySelectorAll('[data-oversea-site]:checked')]
     .map((item) => item.value)
     .filter(Boolean);
   if (!userId) {
     state.userCenter.overseaFeedback = { kind: 'error', message: 'Select a user first' };
-    renderFoundationGrid(state.dashboard?.overview || {});
+    renderUserCenterSurfaces();
     return;
   }
   const entitlement = entitlementForUser(userId);
   if (!siteIds.length) siteIds = asArray(entitlement?.siteIds);
   if (!siteIds.length) {
     state.userCenter.overseaFeedback = { kind: 'error', message: 'Assign at least one Oversea site before syncing' };
-    renderFoundationGrid(state.dashboard?.overview || {});
+    renderUserCenterSurfaces();
     return;
   }
   state.userCenter.selectedOverseaUserId = userId;
   state.userCenter.overseaSyncBusy = true;
   state.userCenter.overseaFeedback = { kind: 'info', message: 'Syncing this user to selected remote site(s)' };
-  renderFoundationGrid(state.dashboard?.overview || {});
+  renderUserCenterSurfaces();
   try {
     const payload = await runUserOverseaRuntimeSync(userId, siteIds, `desktop-user-oversea-sync-${Date.now()}`);
     const reports = asArray(payload.sync?.reports);
@@ -2441,10 +2599,10 @@ async function syncUserOverseaRuntimeFromAdmin() {
     await refreshUserCenterPanels();
   } catch (error) {
     state.userCenter.overseaFeedback = { kind: 'error', message: error.message };
-    renderFoundationGrid(state.dashboard?.overview || {});
+    renderUserCenterSurfaces();
   } finally {
     state.userCenter.overseaSyncBusy = false;
-    renderFoundationGrid(state.dashboard?.overview || {});
+    renderUserCenterSurfaces();
   }
 }
 
@@ -3037,11 +3195,17 @@ function awxActionBodyForExecution(action, body) {
 async function fetchJson(path, options = {}) {
   const base = normalizedServerBase();
   const body = options.body ? JSON.stringify(options.body) : undefined;
-  const response = await fetch(`${base}${path}`, {
-    method: options.method || 'GET',
-    headers: body ? { 'content-type': 'application/json' } : undefined,
-    body
-  });
+  const url = `${base}${path}`;
+  let response;
+  try {
+    response = await fetch(url, {
+      method: options.method || 'GET',
+      headers: body ? { 'content-type': 'application/json' } : undefined,
+      body
+    });
+  } catch (error) {
+    throw new Error(`Admin API network error: ${url} (${error.message})`);
+  }
   const text = await response.text();
   let payload = null;
   try {
@@ -4706,6 +4870,9 @@ function renderFoundationGrid(overview) {
     awxProviderPanel.hidden = activeId !== 'awx-provider';
     if (activeId === 'awx-provider') awxProviderPanel.open = true;
   }
+  if (activeId !== 'user-center' && state.userCenter.drawer) {
+    closeUserEditorDrawer();
+  }
   const scopeCard = `
     <article class="foundation-scope-card">
       <div>
@@ -4720,7 +4887,7 @@ function renderFoundationGrid(overview) {
   if (activeId === 'overview') {
     body = renderInternalOverview(cards, overview || {});
   } else if (activeId === 'user-center') {
-    body = renderUserCenterPanel() + renderUserOverseaSubscriptionPanel() + renderUserServiceAccessPanel() + renderOverseaEntitlementPanel() + renderUserIntegrationPanel();
+    body = renderUserCenterPanel();
   } else if (activeId === 'rbac') {
     body = renderRbacPanel() + renderPermissionRegistryPanel() + renderExternalSystemContractPanel();
   } else if (activeId === 'config-center') {
@@ -4743,19 +4910,51 @@ function renderFoundationGrid(overview) {
   }
   const bootstrapUsers = foundationGrid.querySelector('[data-user-bootstrap]');
   if (bootstrapUsers) bootstrapUsers.addEventListener('click', () => void bootstrapUserCenterFromAdmin());
-  const createUser = foundationGrid.querySelector('[data-user-create]');
-  if (createUser) createUser.addEventListener('click', () => void createUserFromAdmin());
-  const overseaUserSelect = foundationGrid.querySelector('[data-oversea-user]');
-  if (overseaUserSelect) {
-    overseaUserSelect.addEventListener('change', () => {
-      state.userCenter.selectedOverseaUserId = overseaUserSelect.value || null;
+  const newUser = foundationGrid.querySelector('[data-user-new]');
+  if (newUser) newUser.addEventListener('click', () => openUserEditorDrawer('create'));
+  const userSearch = foundationGrid.querySelector('[data-user-filter="search"]');
+  if (userSearch) {
+    userSearch.addEventListener('input', () => {
+      const cursor = userSearch.selectionStart;
+      userCenterFilters().search = userSearch.value;
+      renderFoundationGrid(state.dashboard?.overview || overview || {});
+      requestAnimationFrame(() => {
+        const nextSearch = foundationGrid.querySelector('[data-user-filter="search"]');
+        nextSearch?.focus?.();
+        if (typeof cursor === 'number') nextSearch?.setSelectionRange?.(cursor, cursor);
+      });
+    });
+  }
+  for (const filterControl of foundationGrid.querySelectorAll('select[data-user-filter]')) {
+    filterControl.addEventListener('change', () => {
+      userCenterFilters()[filterControl.dataset.userFilter] = filterControl.value || 'all';
       renderFoundationGrid(state.dashboard?.overview || overview || {});
     });
   }
-  const assignOversea = foundationGrid.querySelector('[data-oversea-assign]');
-  if (assignOversea) assignOversea.addEventListener('click', () => void assignUserOverseaFromAdmin());
-  const syncOverseaUser = foundationGrid.querySelector('[data-oversea-sync-user]');
-  if (syncOverseaUser) syncOverseaUser.addEventListener('click', () => void syncUserOverseaRuntimeFromAdmin());
+  for (const row of foundationGrid.querySelectorAll('[data-user-select]')) {
+    row.addEventListener('click', (event) => {
+      if (event.target.closest('button')) return;
+      openUserEditorDrawer('edit', row.dataset.userSelect);
+    });
+    row.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      openUserEditorDrawer('edit', row.dataset.userSelect);
+    });
+  }
+  for (const button of foundationGrid.querySelectorAll('[data-user-open]')) {
+    button.addEventListener('click', () => openUserEditorDrawer('edit', button.dataset.userOpen));
+  }
+  for (const button of foundationGrid.querySelectorAll('[data-user-sync]')) {
+    button.addEventListener('click', () => {
+      const entitlement = entitlementForUser(button.dataset.userSync);
+      void syncUserOverseaRuntimeFromAdmin({
+        userId: button.dataset.userSync,
+        siteIds: asArray(entitlement?.siteIds)
+      });
+    });
+  }
+  renderUserEditorDrawer();
   bindDomesticRuntimeControls(foundationGrid);
   bindRelayEnrollmentControls(foundationGrid);
 }
@@ -5031,142 +5230,177 @@ function renderChipList(items, tone = 'neutral') {
   `;
 }
 
-function renderUserOverseaSyncChips(accounts) {
-  const list = asArray(accounts);
-  if (!list.length) return '<span class="foundation-chip" data-tone="muted">-</span>';
-  return `
-    <span class="foundation-chip-row">
-      ${list.map((account) => {
-        const status = account.runtimeSync?.status || 'unknown';
-        return `<span class="foundation-chip" data-tone="${escapeHtml(runtimeSyncTone(status))}" title="${escapeHtml(account.runtimeSync?.reason || account.username || status)}">${escapeHtml(`${account.siteId}: ${status}`)}</span>`;
-      }).join('')}
-    </span>
-  `;
+function filteredUserCenterUsers() {
+  const filter = userCenterFilters();
+  const query = String(filter.search || '').trim().toLowerCase();
+  return asArray(state.userCenter.users).filter((user) => {
+    const haystack = [
+      user.displayName,
+      user.email,
+      user.userId,
+      user.status,
+      userKind(user),
+      ...asArray(user.roleIds).map(roleLabel)
+    ].filter(Boolean).join(' ').toLowerCase();
+    const matchesQuery = !query || haystack.includes(query);
+    const matchesRole = !filter.roleId || filter.roleId === 'all' || asArray(user.roleIds).includes(filter.roleId);
+    const matchesStatus = !filter.status || filter.status === 'all' || user.status === filter.status;
+    return matchesQuery && matchesRole && matchesStatus;
+  });
 }
 
-function runtimeSyncTone(status) {
-  if (status === 'synced') return 'success';
-  if (status === 'pending-sync') return 'warning';
-  if (status === 'no-runtime-evidence') return 'danger';
-  return 'muted';
+function renderUserRoleOptions(selectedRoleId, includeAll = false) {
+  const roles = asArray(state.userCenter.roles);
+  const selected = selectedRoleId || (includeAll ? 'all' : defaultUserRoleId());
+  const options = includeAll ? [`<option value="all" ${selected === 'all' ? 'selected' : ''}>All roles</option>`] : [];
+  return [
+    ...options,
+    ...roles.map((role) => `
+      <option value="${escapeHtml(role.roleId)}" ${role.roleId === selected ? 'selected' : ''}>
+        ${escapeHtml(role.displayName || role.roleId)}
+      </option>
+    `)
+  ].join('');
+}
+
+function renderUserStatusOptions(selectedStatus) {
+  const selected = selectedStatus || 'all';
+  return ['all', 'active', 'disabled'].map((status) => `
+    <option value="${escapeHtml(status)}" ${status === selected ? 'selected' : ''}>
+      ${escapeHtml(status === 'all' ? 'All status' : status)}
+    </option>
+  `).join('');
+}
+
+function renderUserStatusBadge(status) {
+  const normalized = status === 'disabled' ? 'disabled' : 'active';
+  return `<mark data-kind="${escapeHtml(normalized)}">${escapeHtml(normalized)}</mark>`;
 }
 
 function renderUserCenterPanel() {
-  const roles = asArray(state.userCenter.roles);
   const users = asArray(state.userCenter.users);
-  const roleOptions = roles.map((role) => `
-    <option value="${escapeHtml(role.roleId)}">${escapeHtml(role.displayName || role.roleId)}</option>
-  `).join('');
+  const filteredUsers = filteredUserCenterUsers();
+  const filter = userCenterFilters();
   const feedback = state.userCenter.feedback;
   return `
-    <section class="foundation-panel foundation-wide">
-      <div class="foundation-panel-head">
+    <section class="foundation-panel foundation-wide user-workbench">
+      <div class="app-catalog-toolbar user-catalog-toolbar">
         <div>
-          <h4>User registry</h4>
-          <p>用户、服务账号、设备身份和外部系统 token 都从这里拿到统一 subject，再进入 RBAC 和发布门禁。</p>
+          <span class="site-kind">User Center</span>
+          <strong>User registry</strong>
+          <small>用户、服务账号、设备身份和 User scoped service access.</small>
         </div>
-        <span>${escapeHtml(users.length)} users</span>
-      </div>
-      <div class="foundation-operation-grid">
-        <label class="form-field">
-          <span>Email</span>
-          <input data-user-field="email" autocomplete="off" placeholder="user@example.com" />
-        </label>
-        <label class="form-field">
-          <span>Display Name</span>
-          <input data-user-field="displayName" autocomplete="off" placeholder="MX User" />
-        </label>
-        <label class="form-field">
-          <span>Role</span>
-          <select data-user-field="roleId">
-            ${roleOptions || '<option value="">bootstrap roles first</option>'}
+        <div class="app-catalog-controls user-catalog-controls">
+          <input data-user-filter="search" value="${escapeHtml(filter.search || '')}" autocomplete="off" placeholder="Search user..." />
+          <select class="user-filter-select" data-user-filter="roleId">
+            ${renderUserRoleOptions(filter.roleId, true)}
           </select>
-        </label>
+          <select class="user-filter-select" data-user-filter="status">
+            ${renderUserStatusOptions(filter.status)}
+          </select>
+          <button class="secondary-button" type="button" data-user-bootstrap ${state.userCenter.busy ? 'disabled' : ''} title="Initialize User Center seed records">Bootstrap</button>
+          <button class="primary-button" type="button" data-user-new ${state.userCenter.busy ? 'disabled' : ''}>New User</button>
+        </div>
       </div>
-      <div class="foundation-operation-actions">
-        <button class="secondary-button" type="button" data-user-bootstrap ${state.userCenter.busy ? 'disabled' : ''}>Bootstrap Users</button>
-        <button class="primary-button" type="button" data-user-create ${state.userCenter.busy ? 'disabled' : ''}>Create User</button>
+      <div class="user-workbench-meta">
+        <span>${escapeHtml(String(filteredUsers.length))} shown</span>
+        <span>${escapeHtml(String(users.length))} total</span>
         ${feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(feedback.kind)}">${escapeHtml(feedback.message)}</span>` : ''}
       </div>
-      <div class="foundation-table user-center-table">
-        <article class="foundation-table-row is-header">
+      <div class="app-table user-admin-table">
+        <article class="app-table-row is-header">
           <strong>User</strong>
-          <span>Identity</span>
-          <span>Roles</span>
-          <span>Enabled services</span>
+          <span>Role</span>
+          <span>Services</span>
           <span>Internal usage</span>
-          <small>Oversea</small>
+          <span>Oversea</span>
+          <span>Status</span>
+          <b>Actions</b>
         </article>
-        ${users.map((user) => `
-          <article class="foundation-table-row">
-            <strong>${escapeHtml(user.displayName || user.userId)}</strong>
-            <span>${escapeHtml(`${user.email || user.userId} / ${userKind(user)} / ${user.status || 'active'}`)}</span>
-            <span>${renderChipList(asArray(user.roleIds).map(roleLabel), 'info')}</span>
-            <span>${renderChipList(userEnabledServices(user).slice(0, 4), 'success')}</span>
-            <span>${escapeHtml(userInternalUsage(user))}</span>
-            <small>${escapeHtml(userOverseaAccess(user))}</small>
+        ${filteredUsers.map((user) => {
+          const entitlement = entitlementForUser(user.userId);
+          const syncDisabled = state.userCenter.overseaBusy
+            || state.userCenter.overseaSyncBusy
+            || !asArray(entitlement?.accounts).length;
+          return `
+          <article class="app-table-row ${user.userId === state.userCenter.drawer?.userId ? 'is-selected' : ''}" data-user-select="${escapeHtml(user.userId)}" tabindex="0">
+            <span>
+              <strong>${escapeHtml(user.displayName || user.userId)}</strong>
+              <small>${escapeHtml(user.email || user.userId)}</small>
+            </span>
+            <span>
+              <strong>${escapeHtml(asArray(user.roleIds).map(roleLabel).join(' / ') || '-')}</strong>
+              <small>${escapeHtml(userKind(user))}</small>
+            </span>
+            <span>${renderChipList(userEnabledServices(user).slice(0, 3), 'success')}</span>
+            <span>
+              <strong>${escapeHtml(userInternalUsage(user))}</strong>
+              <small>${escapeHtml(user.userId)}</small>
+            </span>
+            <span>
+              <strong>${escapeHtml(userOverseaAccess(user))}</strong>
+              <small>${escapeHtml(asArray(entitlement?.siteIds).join(' / ') || 'not assigned')}</small>
+            </span>
+            <span>${renderUserStatusBadge(user.status)}</span>
+            <span class="app-table-actions">
+              <button class="secondary-button" type="button" data-user-open="${escapeHtml(user.userId)}">Open</button>
+              <button class="secondary-button" type="button" data-user-sync="${escapeHtml(user.userId)}" ${syncDisabled ? 'disabled' : ''}>Sync</button>
+            </span>
           </article>
-        `).join('') || '<div class="empty-state">No users yet</div>'}
+        `; }).join('') || '<div class="empty-state">No users match the current filters.</div>'}
       </div>
     </section>
   `;
 }
 
-function renderUserOverseaSubscriptionPanel() {
-  const users = asArray(state.userCenter.users);
-  const sites = overseaAuthoritySites();
-  const activeEntitlements = asArray(state.userCenter.overseaEntitlements).filter((item) => item.status === 'active');
-  const selectedUserId = state.userCenter.selectedOverseaUserId
-    || activeEntitlements[0]?.userId
-    || users[0]?.userId
-    || '';
-  const selectedEntitlement = entitlementForUser(selectedUserId);
-  const selectedSiteIds = new Set(asArray(selectedEntitlement?.siteIds));
-  const feedback = state.userCenter.overseaFeedback;
-  const subscriptionUrl = selectedEntitlement?.status === 'active'
-    ? userOverseaSubscriptionUrl(selectedUserId)
-    : '';
-  const selectedSyncAccounts = selectedEntitlement?.status === 'active'
-    ? asArray(selectedEntitlement.accounts)
-    : [];
+function renderUserServiceSummary(user, draft) {
+  const effectiveUser = user || { roleIds: draft?.roleId ? [draft.roleId] : [] };
   return `
-    <section class="foundation-panel foundation-wide">
-      <div class="foundation-panel-head">
-        <div>
-          <h4>User Oversea subscriptions</h4>
-          <p>创建用户后，在这里分配可用 Oversea site。Internal 会为每个 site 发行用户专属 hysteria2 account，并生成一个聚合 mihomo 订阅。</p>
-        </div>
-        <span>${escapeHtml(String(activeEntitlements.length))} active</span>
+    <div class="user-drawer-summary">
+      <article>
+        <span>Kind</span>
+        <strong>${escapeHtml(userKind(effectiveUser))}</strong>
+      </article>
+      <article>
+        <span>Internal usage</span>
+        <strong>${escapeHtml(userInternalUsage(effectiveUser))}</strong>
+      </article>
+      <article>
+        <span>Services</span>
+        <strong>${escapeHtml(userEnabledServices(effectiveUser).join(' / '))}</strong>
+      </article>
+    </div>
+  `;
+}
+
+function renderUserOverseaEditor(user) {
+  const userId = user?.userId || '';
+  const sites = overseaAuthoritySites();
+  const entitlement = entitlementForUser(userId);
+  const selectedSiteIds = new Set(asArray(entitlement?.siteIds));
+  const accounts = asArray(entitlement?.accounts);
+  const subscriptionUrl = entitlement?.status === 'active' ? userOverseaSubscriptionUrl(userId) : '';
+  const feedback = state.userCenter.overseaFeedback;
+  return `
+    <section class="app-drawer-section">
+      <div class="app-section-title">
+        <span>03</span>
+        <strong>Oversea access</strong>
       </div>
-      <div class="foundation-operation-grid user-oversea-grid">
-        <label class="form-field">
-          <span>User</span>
-          <select data-oversea-user ${users.length ? '' : 'disabled'}>
-            ${users.map((user) => `
-              <option value="${escapeHtml(user.userId)}" ${user.userId === selectedUserId ? 'selected' : ''}>
-                ${escapeHtml(user.displayName || user.email || user.userId)}
-              </option>
-            `).join('') || '<option value="">create a user first</option>'}
-          </select>
-        </label>
-        <div class="form-field wide-field">
-          <span>Allowed Oversea sites</span>
-          <div class="foundation-checkbox-grid">
-            ${sites.map((siteId) => `
-              <label class="foundation-checkbox-option">
-                <input type="checkbox" data-oversea-site value="${escapeHtml(siteId)}" ${selectedSiteIds.has(siteId) ? 'checked' : ''} />
-                <span>${escapeHtml(siteId)}</span>
-              </label>
-            `).join('') || '<span class="oversea-boundary-note">No Oversea mihomo site is ready yet. Install / Sync an Oversea first.</span>'}
-          </div>
-        </div>
+      <div class="foundation-checkbox-grid user-drawer-sites">
+        ${sites.map((siteId) => `
+          <label class="foundation-checkbox-option">
+            <input type="checkbox" data-oversea-site value="${escapeHtml(siteId)}" ${selectedSiteIds.has(siteId) ? 'checked' : ''} />
+            <span>${escapeHtml(siteId)}</span>
+          </label>
+        `).join('') || '<span class="oversea-boundary-note">No Oversea site is ready yet.</span>'}
       </div>
       <div class="foundation-operation-actions">
-        <button class="primary-button" type="button" data-oversea-assign ${state.userCenter.overseaBusy || !selectedUserId || !sites.length ? 'disabled' : ''}>
-          ${state.userCenter.overseaBusy ? 'Assigning' : selectedSiteIds.size ? 'Assign / Issue' : 'Disable Access'}
+        <button class="primary-button" type="button" data-oversea-assign ${state.userCenter.overseaBusy || !userId || !sites.length ? 'disabled' : ''}>
+          ${state.userCenter.overseaBusy ? 'Saving Access' : selectedSiteIds.size ? 'Update Access' : 'Disable Access'}
         </button>
-        <button class="secondary-button" type="button" data-oversea-sync-user ${state.userCenter.overseaBusy || state.userCenter.overseaSyncBusy || !selectedUserId || !selectedSyncAccounts.length ? 'disabled' : ''}>
-          ${state.userCenter.overseaSyncBusy ? 'Syncing User' : 'Sync User Remote'}
+        <button class="secondary-button" type="button" data-oversea-sync-user ${state.userCenter.overseaBusy || state.userCenter.overseaSyncBusy || !userId || !accounts.length ? 'disabled' : ''}>
+          ${state.userCenter.overseaSyncBusy ? 'Syncing' : 'Sync Runtime'}
         </button>
         ${feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(feedback.kind)}">${escapeHtml(feedback.message)}</span>` : ''}
       </div>
@@ -5174,66 +5408,133 @@ function renderUserOverseaSubscriptionPanel() {
         <span>Subscription URL</span>
         <code>${escapeHtml(subscriptionUrl || 'Assign one or more Oversea sites to generate a user subscription URL')}</code>
       </div>
-      <div class="foundation-subscription-url">
-        <span>Runtime sync</span>
-        <code>${selectedSyncAccounts.length ? escapeHtml(selectedSyncAccounts.map((account) => `${account.siteId}:${account.runtimeSync?.status || 'unknown'}`).join(' / ')) : 'No runtime account selected'}</code>
-      </div>
-      <div class="foundation-table user-subscription-table">
-        <article class="foundation-table-row is-header">
-          <strong>User</strong>
-          <span>Sites</span>
-          <span>Runtime sync</span>
-          <small>Subscription</small>
-        </article>
-        ${asArray(state.userCenter.overseaEntitlements).map((entitlement) => `
-          <article class="foundation-table-row">
-            <strong>${escapeHtml(users.find((user) => user.userId === entitlement.userId)?.displayName || entitlement.userId)}</strong>
-            <span>${renderChipList(asArray(entitlement.siteIds), 'success')}</span>
-            <span>${renderUserOverseaSyncChips(entitlement.accounts)}</span>
-            <small>${escapeHtml(entitlement.status === 'active' ? userOverseaSubscriptionUrl(entitlement.userId) : 'disabled')}</small>
+      <div class="user-runtime-list">
+        ${accounts.map((account) => `
+          <article>
+            <strong>${escapeHtml(account.siteId)}</strong>
+            <span>${escapeHtml(account.username || account.accountId)}</span>
+            <small>${escapeHtml(account.runtimeSync?.status || 'unknown')}</small>
           </article>
-        `).join('') || '<div class="empty-state">No user Oversea entitlement yet</div>'}
+        `).join('') || '<div class="empty-state">No runtime account selected.</div>'}
       </div>
     </section>
   `;
 }
 
-function renderUserServiceAccessPanel() {
-  const rows = [
-    ['Launcher Runtime', 'login / device identity / AppCenter host', 'User Center subject + device binding', 'login, update, network traces'],
-    ['AppCenter', 'install H2O and future apps', 'entitlement + app release channel', 'app install evidence'],
-    ['H2O', 'consume Launcher Network and app config', 'app permission manifest', 'E2E + runtime logs'],
-    ['Oversea Access', 'hysteria2 subscription, site group, node switch', 'oversea.access.use + subscription issue policy', 'subscription issue + node health'],
-    ['Domestic Relay', 'WG/H2I/DNS reachability for H endpoints', 'relay lease + device enrollment', 'relay lease evidence'],
-    ['SDK Gateway', 'external systems call Internal APIs', 'service account + route scopes', 'token introspection + API audit']
-  ];
-  return `
-    <section class="foundation-panel foundation-wide">
-      <div class="foundation-panel-head">
+function renderUserEditorDrawer() {
+  if (!userEditorBackdrop || !userEditorDrawer) return;
+  const drawer = state.userCenter.drawer;
+  if (!drawer) {
+    userEditorBackdrop.hidden = true;
+    userEditorDrawer.hidden = true;
+    userEditorDrawer.innerHTML = '';
+    return;
+  }
+  const editing = drawer.mode === 'edit';
+  const user = editing ? userCenterUserById(drawer.userId) : null;
+  const draft = drawer.draft || createUserEditorDraft(drawer.mode, drawer.userId);
+  const title = editing ? `Edit ${user?.displayName || draft.displayName || draft.userId}` : 'New User';
+  const feedback = state.userCenter.feedback;
+  userEditorBackdrop.hidden = false;
+  userEditorDrawer.hidden = false;
+  userEditorDrawer.innerHTML = `
+    <form class="app-editor-form" data-user-editor>
+      <header class="app-drawer-header">
         <div>
-          <h4>Service access matrix</h4>
-          <p>User Center 不只是用户表，它还记录用户开通了哪些服务、经过哪些内部系统、由哪些证据闭环。</p>
+          <span class="site-kind">User Center</span>
+          <h2 id="user-editor-title">${escapeHtml(title)}</h2>
+          <p>${escapeHtml(editing ? `${user?.email || draft.email || '-'} / ${user?.status || 'active'}` : 'Create a User Center subject and assign access after saving.')}</p>
         </div>
-        <span>entitlement model</span>
+        <button class="icon-button app-drawer-close" type="button" data-user-editor-close aria-label="Close user editor">×</button>
+      </header>
+
+      <div class="app-drawer-scroll">
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>01</span>
+            <strong>Basic identity</strong>
+          </div>
+          <div class="app-editor-grid">
+            <label class="app-form-field">
+              <span>User ID</span>
+              <input data-user-editor-field="userId" value="${escapeHtml(draft.userId || '')}" ${editing ? 'readonly' : ''} placeholder="auto from email" autocomplete="off" />
+            </label>
+            <label class="app-form-field">
+              <span>Email</span>
+              <input data-user-editor-field="email" value="${escapeHtml(draft.email || '')}" placeholder="user@example.com" autocomplete="off" />
+            </label>
+            <label class="app-form-field">
+              <span>Display Name</span>
+              <input data-user-editor-field="displayName" value="${escapeHtml(draft.displayName || '')}" placeholder="MX User" autocomplete="off" />
+            </label>
+            <label class="app-form-field">
+              <span>Role</span>
+              <select data-user-editor-field="roleId">
+                ${renderUserRoleOptions(draft.roleId || defaultUserRoleId()) || '<option value="">Bootstrap roles first</option>'}
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>02</span>
+            <strong>Service access</strong>
+          </div>
+          ${renderUserServiceSummary(user, draft)}
+          <div class="user-scope-list">
+            ${renderChipList(scopesForRoleIds(draft.roleId ? [draft.roleId] : user?.roleIds).slice(0, 10), 'info')}
+          </div>
+        </section>
+
+        ${editing && user ? renderUserOverseaEditor(user) : `
+          <section class="app-drawer-section">
+            <div class="app-section-title">
+              <span>03</span>
+              <strong>Oversea access</strong>
+            </div>
+            <div class="empty-state">Save the user before assigning Oversea access.</div>
+          </section>
+        `}
+
+        ${feedback ? `<div class="feedback ${escapeHtml(feedback.kind || 'info')}">${escapeHtml(feedback.message || '')}</div>` : ''}
       </div>
-      <div class="foundation-table service-access-table">
-        <article class="foundation-table-row is-header">
-          <strong>Service</strong>
-          <span>Capability</span>
-          <span>Grant source</span>
-          <small>Evidence</small>
-        </article>
-        ${rows.map((row) => `
-          <article class="foundation-table-row">
-            <strong>${escapeHtml(row[0])}</strong>
-            <span>${escapeHtml(row[1])}</span>
-            <span>${escapeHtml(row[2])}</span>
-            <small>${escapeHtml(row[3])}</small>
-          </article>
-        `).join('')}
-      </div>
-    </section>
+
+      <footer class="app-drawer-actions">
+        <button class="secondary-button" type="button" data-user-editor-cancel>Cancel</button>
+        <button class="primary-button" type="submit" ${state.userCenter.busy ? 'disabled' : ''}>${state.userCenter.busy ? 'Saving...' : 'Save User'}</button>
+      </footer>
+    </form>
   `;
+  bindUserEditorDrawerControls();
+}
+
+function bindUserEditorDrawerControls() {
+  if (!userEditorDrawer || userEditorDrawer.hidden) return;
+  const form = userEditorDrawer.querySelector('[data-user-editor]');
+  if (!form) return;
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void saveUserCenterUserFromEditor(form);
+  });
+  for (const close of userEditorDrawer.querySelectorAll('[data-user-editor-close], [data-user-editor-cancel]')) {
+    close.addEventListener('click', () => closeUserEditorDrawer());
+  }
+  for (const control of userEditorDrawer.querySelectorAll('[data-user-editor-field]')) {
+    control.addEventListener('input', () => {
+      state.userCenter.drawer.draft = userEditorDraftFromForm(form);
+      state.userCenter.feedback = null;
+    });
+    control.addEventListener('change', () => {
+      state.userCenter.drawer.draft = userEditorDraftFromForm(form);
+      state.userCenter.feedback = null;
+      if (control.dataset.userEditorField === 'roleId') renderUserEditorDrawer();
+    });
+  }
+  const assignOversea = userEditorDrawer.querySelector('[data-oversea-assign]');
+  if (assignOversea) assignOversea.addEventListener('click', () => void assignUserOverseaFromAdmin());
+  const syncOverseaUser = userEditorDrawer.querySelector('[data-oversea-sync-user]');
+  if (syncOverseaUser) syncOverseaUser.addEventListener('click', () => void syncUserOverseaRuntimeFromAdmin());
 }
 
 function overseaAuthoritySites() {
@@ -5245,49 +5546,6 @@ function overseaAuthoritySites() {
     if (pipeline.kind === 'oversea' && pipeline.siteId) siteIds.add(pipeline.siteId);
   }
   return [...siteIds].sort();
-}
-
-function renderOverseaEntitlementPanel() {
-  const sites = overseaAuthoritySites();
-  const rows = [
-    ['Site group', sites.length ? sites.join(' / ') : 'oversea sites pending', '一个订阅可以包含多台 Oversea 节点，用户在 Clash/Launcher Network 内切换。'],
-    ['Account issue', 'user-scoped + bootstrap accounts', '预设账号保留，真实用户访问走 User Center entitlement 和可吊销凭证。'],
-    ['Subscription authority', 'Internal mihomo', 'Internal 生成 YAML，Oversea 仅提供 Docker hysteria2 runtime 和健康证据出口。'],
-    ['Runtime check', 'hysteria2 + health exporter', 'Stack Status 只看 Docker runtime；3434 定位为健康和证据出口，不做订阅真相。'],
-    ['Revoke / rotate', 'RBAC action gate', '禁用用户或撤销 oversea.access.use 后，订阅凭证旋转并写入 Evidence History。']
-  ];
-  return `
-    <section class="foundation-panel foundation-wide">
-      <div class="foundation-panel-head">
-        <div>
-          <h4>Oversea entitlement</h4>
-          <p>刚跑通的 Oversea 部署会接入 User Center / RBAC：用户可开通 Oversea，选择站点组，订阅由 Internal 生成和审计。</p>
-        </div>
-        <span>${escapeHtml(String(sites.length))} sites</span>
-      </div>
-      ${renderFoundationRows(rows)}
-    </section>
-  `;
-}
-
-function renderUserIntegrationPanel() {
-  const endpoints = [
-    ['Identity API', 'POST /internal/v1/user-center/tokens/introspect', '外部系统验证用户、服务账号、设备身份。'],
-    ['Entitlement API', 'GET /internal/v1/user-center/users/:id/services', '查询 Launcher、H2O、Oversea、SDK Gateway 的服务开通状态。'],
-    ['Subscription API', 'GET /internal/v1/launcher-network/mihomo/sites/:site/account/:account.yaml', 'H 端通过 Internal/Domestic 路径获取 mihomo 配置。'],
-    ['Audit API', 'GET /internal/v1/evidence?subject=:id', '统一拉取用户、权限、发版、订阅和远程执行证据。']
-  ];
-  return `
-    <section class="foundation-panel">
-      <div class="foundation-panel-head">
-        <div>
-          <h4>API surface</h4>
-          <p>自有系统和外部客户系统都用同一组接口接入 Internal。</p>
-        </div>
-      </div>
-      ${renderFoundationRows(endpoints)}
-    </section>
-  `;
 }
 
 function cleanLauncherProductId(value) {

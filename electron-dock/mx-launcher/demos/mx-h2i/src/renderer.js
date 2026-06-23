@@ -349,6 +349,8 @@ function renderWireGuardDiagnostics() {
   const relaySummary = relayDiag.summary || {};
   const relayBlockedReasons = Array.isArray(relayDiag.blockedReasons) ? relayDiag.blockedReasons : [];
   const relayFailures = Array.isArray(relayDiag.failures) ? relayDiag.failures : [];
+  const directSyncFailures = directSync.status === 'skipped' ? [] : (Array.isArray(directSync.failures) ? directSync.failures : []);
+  const directSyncStatus = directSync.status === 'skipped' && directSync.message ? 'relay fallback' : (directSync.status || '-');
   return `
     <section class="settings-panel">
       <div class="panel-head">
@@ -360,8 +362,8 @@ function renderWireGuardDiagnostics() {
       </div>
       <div class="metric-grid">
         ${metric('WG', connection.health?.wireGuard || 'idle')}
-        ${metric('Path', wireGuard.path || connection.routePlan?.preferredPath || '-')}
-        ${metric('Direct Sync', directSync.status || '-')}
+        ${metric('Path', pathLabel(wireGuard.path || connection.routePlan?.preferredPath))}
+        ${metric('Direct Sync', directSyncStatus)}
         ${metric('Peer Sync', peerSync.status || '-')}
         ${metric('Relay', relayDiag.status || '-')}
         ${metric('IP Forward', relaySummary.ipForward || '-')}
@@ -384,7 +386,8 @@ function renderWireGuardDiagnostics() {
         ${metric('Route CIDRs', compactList(connection.routeCidrs))}
         ${metric('Config', wireGuard.configPath || '-')}
       </div>
-      ${directSync.failures?.length ? `<p class="diagnostic-note">${escapeHtml(directSync.failures.join(' / '))}</p>` : ''}
+      ${directSync.message ? `<p class="diagnostic-note">${escapeHtml(directSync.message)}</p>` : ''}
+      ${directSyncFailures.length ? `<p class="diagnostic-note">${escapeHtml(directSyncFailures.join(' / '))}</p>` : ''}
       ${peerSync.failures?.length ? `<p class="diagnostic-note">${escapeHtml(peerSync.failures.join(' / '))}</p>` : ''}
       ${relayBlockedReasons.length || relayFailures.length ? `<p class="diagnostic-note">${escapeHtml([...relayBlockedReasons, ...relayFailures].join(' / '))}</p>` : ''}
       ${wireGuard.statusError || wireGuard.routeLogTail ? `<p class="diagnostic-note">${escapeHtml(wireGuard.statusError || wireGuard.routeLogTail)}</p>` : ''}
@@ -683,6 +686,13 @@ function renderUpdatePanel() {
 
 function metric(label, value) {
   return `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || '-')}</strong></div>`;
+}
+
+function pathLabel(value) {
+  if (value === 'hdi-relay') return 'H2I via Domestic relay';
+  if (value === 'h2i-direct') return 'H2I direct';
+  if (value === 'h2i-hybrid') return 'H2I hybrid';
+  return value || '-';
 }
 
 function compactList(value) {

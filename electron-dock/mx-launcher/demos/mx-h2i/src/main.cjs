@@ -1046,6 +1046,7 @@ function normalizeInternalDirectPeerSync(input) {
     status: nullableString(row.status) || 'unknown',
     execution: nullableString(row.execution),
     checkedAt: nullableString(row.checkedAt),
+    message: nullableString(row.message),
     failures: arrayValue(row.failures, []),
     error: nullableString(row.error),
     lease: lease ? {
@@ -1348,7 +1349,7 @@ async function startWireGuardForSession(input) {
       health: ready ? readyHealth() : {
         wireGuard: result.ok === true ? 'ready' : 'blocked',
         domesticRelay: domesticRelayReady ? 'ready' : domesticPeerSync?.status === 'failed' || domesticPeerSync?.status === 'blocked' ? 'blocked' : 'pending',
-        internalApi: internalApi.ok === true ? 'ready' : 'blocked',
+        internalApi: internalApiHealthStatus(route, internalApi),
         splitDns: route.ok === true ? 'ready' : 'pending',
         appBroker: 'ready'
       },
@@ -1392,11 +1393,7 @@ async function connectAndProbeWireGuardPath(mod, input) {
   });
   const internalApi = route.ok
     ? await probeInternalApiViaOverlay(input.internalBaseUrl)
-    : {
-        ok: false,
-        baseUrl: normalizeBaseUrl(input.internalBaseUrl),
-        error: `route to ${targetIp} is not on WireGuard (${route.interfaceName || route.error || 'unknown route'})`
-      };
+    : internalApiProbeBlockedByRoute(input.internalBaseUrl, targetIp, route);
   return {
     pathPreference: input.pathPreference,
     result,
@@ -1433,11 +1430,7 @@ async function probeWireGuardForConnection(input) {
     });
     const internalApi = route.ok
       ? await probeInternalApiViaOverlay(internalBaseUrl)
-      : {
-          ok: false,
-          baseUrl: normalizeBaseUrl(internalBaseUrl),
-          error: `route to ${targetIp} is not on WireGuard (${route.interfaceName || route.error || 'unknown route'})`
-        };
+      : internalApiProbeBlockedByRoute(internalBaseUrl, targetIp, route);
     const tunnelReady = status?.active === true || route.ok === true;
     const ready = tunnelReady && route.ok === true && internalApi.ok === true;
     const domesticRelayReady = domesticRelayDiagnostics?.status === 'passed' || domesticPeerSync?.status === 'passed' || route.ok === true;
@@ -1461,7 +1454,7 @@ async function probeWireGuardForConnection(input) {
       health: ready ? readyHealth() : {
         wireGuard: tunnelReady ? 'ready' : 'blocked',
         domesticRelay: domesticRelayReady ? 'ready' : domesticPeerSync?.status === 'failed' || domesticPeerSync?.status === 'blocked' ? 'blocked' : 'pending',
-        internalApi: internalApi.ok === true ? 'ready' : 'blocked',
+        internalApi: internalApiHealthStatus(route, internalApi),
         splitDns: route.ok === true ? 'ready' : 'pending',
         appBroker: 'ready'
       },
@@ -1535,7 +1528,8 @@ async function syncInternalDirectPeerForLease(lease, routePlan) {
       status: 'skipped',
       execution: 'not-started',
       checkedAt: nowIso(),
-      failures: ['H2I direct endpoint is not configured in routePlan']
+      message: 'H2I direct endpoint is not configured; using Domestic relay path.',
+      failures: []
     };
   }
   try {
@@ -1713,6 +1707,23 @@ async function probeInternalApiViaOverlay(baseUrl) {
       error: errorMessage(err)
     };
   }
+}
+
+function internalApiProbeBlockedByRoute(baseUrl, targetIp, route) {
+  const routeLabel = route?.interfaceName || route?.error || 'unknown route';
+  return {
+    ok: false,
+    baseUrl: normalizeBaseUrl(baseUrl),
+    error: route?.viaLoopback
+      ? `route to ${targetIp} is local loopback (${routeLabel}); same-host Internal/client test shadows H2I route proof`
+      : `route to ${targetIp} is not on WireGuard (${routeLabel})`
+  };
+}
+
+function internalApiHealthStatus(route, internalApi) {
+  if (internalApi?.ok === true) return 'ready';
+  if (route?.viaLoopback) return 'local-route';
+  return 'blocked';
 }
 
 function wireGuardFailure(message) {

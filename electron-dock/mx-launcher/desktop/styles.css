@@ -862,6 +862,135 @@ select {
   padding: 0 10px;
 }
 
+.user-workbench {
+  align-content: start;
+}
+
+.user-catalog-toolbar small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.user-catalog-controls {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(150px, 0.5fr) minmax(132px, 0.45fr) auto auto;
+  width: min(880px, 100%);
+}
+
+.user-catalog-controls input,
+.user-catalog-controls select {
+  width: 100%;
+}
+
+.user-filter-select {
+  appearance: none;
+  padding-right: 34px !important;
+  background:
+    linear-gradient(45deg, transparent 50%, var(--mx-text-soft) 50%) calc(100% - 18px) 17px / 6px 6px no-repeat,
+    linear-gradient(135deg, var(--mx-text-soft) 50%, transparent 50%) calc(100% - 13px) 17px / 6px 6px no-repeat,
+    var(--mx-bg-input) !important;
+}
+
+.user-workbench-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.user-workbench-meta > span:not(.profile-feedback) {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: var(--panel-quiet);
+}
+
+.user-admin-table .app-table-row {
+  grid-template-columns: minmax(190px, 1.1fr) minmax(150px, 0.85fr) minmax(190px, 1fr) minmax(170px, 0.9fr) minmax(160px, 0.82fr) minmax(90px, 0.48fr) minmax(142px, 0.72fr);
+  min-width: 1120px;
+}
+
+.user-admin-table .app-table-row mark[data-kind="active"] {
+  border-color: color-mix(in srgb, var(--green) 45%, transparent);
+  color: var(--green);
+}
+
+.user-admin-table .app-table-row mark[data-kind="disabled"] {
+  border-color: color-mix(in srgb, var(--red) 45%, transparent);
+  color: var(--red);
+}
+
+.user-editor-drawer {
+  width: min(56vw, 1040px);
+  min-width: min(720px, calc(100vw - 28px));
+}
+
+.user-drawer-summary,
+.user-runtime-list {
+  display: grid;
+  gap: 8px;
+}
+
+.user-drawer-summary {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.user-drawer-summary article,
+.user-runtime-list article {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(20, 20, 23, 0.42);
+}
+
+.user-drawer-summary span,
+.user-runtime-list small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.user-drawer-summary strong,
+.user-runtime-list strong,
+.user-runtime-list span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-drawer-summary strong,
+.user-runtime-list strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.user-runtime-list article {
+  grid-template-columns: minmax(110px, 0.7fr) minmax(160px, 1fr) minmax(110px, 0.6fr);
+  align-items: center;
+}
+
+.user-runtime-list span {
+  color: var(--mx-text-soft);
+  font-size: 12px;
+}
+
+.user-scope-list {
+  min-width: 0;
+}
+
+.user-drawer-sites {
+  gap: 8px;
+}
+
 .app-editor-backdrop {
   position: fixed;
   inset: 0;
@@ -3125,11 +3254,6 @@ select {
   line-height: 1.35;
 }
 
-.user-center-table .foundation-table-row {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 0.8fr);
-}
-
-.service-access-table .foundation-table-row,
 .module-contract-table .foundation-table-row {
   grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.7fr) minmax(0, 1.4fr) minmax(0, 0.8fr);
 }
@@ -3252,10 +3376,6 @@ select {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.user-subscription-table .foundation-table-row {
-  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr) minmax(0, 1.8fr) minmax(0, 1.5fr);
 }
 
 .foundation-operation-panel {
@@ -5056,6 +5176,7 @@ select {
   .product-network-facts,
   .app-workbench-panels,
   .app-workbench-facts,
+  .user-drawer-summary,
   .foundation-contract-grid {
     grid-template-columns: 1fr;
   }
@@ -5066,9 +5187,7 @@ select {
 
   .foundation-table-row,
   .product-network-table .foundation-table-row,
-  .user-center-table .foundation-table-row,
-  .user-subscription-table .foundation-table-row,
-  .service-access-table .foundation-table-row,
+  .user-admin-table .app-table-row,
   .module-contract-table .foundation-table-row,
   .rbac-role-table .foundation-table-row,
   .permission-registry-table .foundation-table-row {
@@ -5107,6 +5226,7 @@ select {
   .ssh-profile-form,
   .foundation-operation-grid,
   .user-oversea-grid,
+  .user-catalog-controls,
   .relay-operation-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
@@ -5200,6 +5320,9 @@ select {
   .ssh-readiness-output,
   .home-peer-fields,
   .awx-action-fields,
+  .user-catalog-controls,
+  .user-drawer-summary,
+  .user-runtime-list article,
   .inspector-facts,
   .mx-console-bar,
   .admin-module-nav,

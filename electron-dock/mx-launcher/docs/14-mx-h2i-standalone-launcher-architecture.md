@@ -233,12 +233,36 @@ MX-H2I 客户端连接分两个阶段：
 2. Overlay 阶段：客户端 WG 已连上 Domestic relay 后，Internal API 和后续应用流量走
    routePlan 下发的 `internalControlIp`，默认 `10.88.88.88`。
 
+`H2I direct endpoint is not configured in routePlan` 只表示 Internal direct peer
+没有在 Config Center 打开，默认 `auto` 会走 Domestic relay 的 `hdi-relay` 路径，不应直接判定
+MX-H2I 不通。真正的 H2I ready 证据是：客户端 tunnel active、`route -n get 10.88.88.88`
+命中 MX-H2I 自己的 WG interface，且 `curl http://10.88.88.88:18090/healthz` 成功。
+`hdi-relay` 是 H2I 的 Domestic relay 数据路径，含义是 H -> Domestic -> Internal；它和
+`h2i-direct` 的区别是是否绕过 Domestic relay 直连 Internal，不是 H2I 能力是否存在。
+如果 relay healthz 已 passed 但客户端仍是 `tunnel-only / blocked`，优先看 route proof 是否被
+`lo0`、其它 `utun` 或系统代理抢走。
+如果同一台 Mac 同时运行 Internal service peer 和 MX-H2I 客户端，`ping 10.88.88.88`
+可能比 `ping 10.88.0.1` 快很多，因为 `10.88.88.88` 是本机地址并走 `lo0`；这说明
+Internal service peer 本机存在，不等于完整 H -> Domestic relay -> Internal 的 H2I 路径已经由
+这台客户端证明。此时 UI 的 `local-route` / `lo0` 是 route proof 被本机覆盖，不是 Domestic
+relay 或 Internal service peer 阻塞。完整 H2I 证明需要另一台 H 端、VM 或临时去掉本机
+`10.88.88.88` host route 后再测。
+
 Domestic edge 对外端口和 Internal gateway 端口不要混用：
 
 - `18090` 是当前 V2 Domestic edge 对外 bootstrap 端口，容器内 Caddy 仍监听 `8088`；
   Docker 端口映射为 `MX_DOMESTIC_EDGE_PORT:8088`，正式环境可以换成 `443`。
 - `18090` 是 Internal gateway/k8s Service 端口，只应被 Internal 本机、Internal service peer
   或 Domestic edge 上游访问。
+- V1 HDO 的 `100.89.*:80` nginx 默认页和 `100.89.*:8080/login` OpenVPN UI 不是 V2 成功
+  判据。V2 访问 `10.88.88.88:8080` 返回 `{"error":"not found","path":"/"}` 只能说明该端口有
+  其它 HTTP 服务响应；访问 `10.88.88.88` 80 端口 refused 也只是没有监听 80。V2 应验证
+  `10.88.88.88:18090/healthz` 和 `/internal/*`。
+- `18090` 是控制面和 Internal app 域名的默认 HTTP gateway，不是所有内网服务的强制数据面。
+  直接访问 `10.88.*`/`10.89.*` 上明确暴露的 IP:port 仍可走 WG 路由；只有 k8s service 域名、
+  AppCenter app 域名、需要鉴权/观测/统一证书的 HTTP 服务，才默认收敛到
+  `10.88.88.88:18090` 反向代理。Caddy/Ingress 这一层通常只增加一次本机 L7 hop，和公网/WG RTT
+  相比很小；低延迟长连接、大文件或非 HTTP 协议应走独立 service port、L4 proxy 或专用 route。
 - `bash scripts/manage.sh ops internal-local port-forward 18090` 默认只绑定 Mac 的
   `127.0.0.1`，只用于本机开发调试。Windows 端不能通过这个地址访问 Internal。
 - 本地联调 Windows -> Domestic -> Mac Internal 时，可以临时运行
@@ -306,6 +330,19 @@ Internal DNS/split DNS 可以把同一域名或内网服务域名解析到 Inter
 路径一致。`api.mxinfo-inc.cn` 只是默认域名占位；未替换时会产生 warning，但不应该成为
 plan/preflight/apply 的阻断条件。
 
+Split DNS 的权威面放在 Internal K8s，而不是 Domestic：
+
+- Internal K8s 中的 `mx-dns`/CoreDNS 是 zone authority，Config Center 生成 DNS policy
+  snapshot 和 CoreDNS zone snapshot。
+- Domestic 可以保留 DNS forwarder/cache，但只转发或缓存 Internal 生成的结果，不拥有 zones。
+- H 端 Launcher Network 在 H2I ready 后才安装 split DNS；命中 app/internal 白名单的域名查询
+  Internal DNS endpoint，未命中域名按系统 DNS、系统代理、H2O/fake-ip、direct 顺序 fallback。
+- 每个 AppCenter app 可以声明独立域名、suffix、记录和可选 reverse proxy route；Config Center
+  按授权、灰度、tenant 和 app owner 合并成设备最终策略。
+- Internal Pod 继续使用 K8s service DNS；Internal host、Domestic、Oversea/site-agent 和 H 端
+  都通过同一份 signed DNS snapshot 或 Internal DNS endpoint 观察一致结果。若 Oversea 只需要
+  部署/订阅配置，优先读取 snapshot，不在 Oversea 复制 CoreDNS zone。
+
 正式 Ubuntu/CentOS Internal 不需要手动长期运行 `kubectl port-forward`。Internal API
 仍保持 k8s `ClusterIP`，`mx-internal-gateway` DaemonSet 在 Internal 主机侧用
 `hostNetwork` 长驻绑定 `0.0.0.0:18090`，反代到
@@ -368,6 +405,12 @@ V2 的 systemd/interface 命名应避免和旧 HDO 共用名称，保证同一�
 | Domestic relay | `mx-domestic` / `wg-quick@mx-domestic` | 固定拥有 `10.88.0.1/16`，监听 UDP 51280 |
 | Internal service peer | 逻辑名 `mx-internal-service-peer`，Linux interface `mx-internal-svc` / `wg-quick@mx-internal-svc` | 固定拥有 `10.88.88.88/32`，由 Internal 主动拨 Domestic endpoint；Linux interface 名必须不超过 15 字符 |
 | 旧 HDO | `hdo-home`、`hdo-internal` / `wg-quick@hdo-*` | V1/V2 默认共存；确认不再需要后由 `bash scripts/manage.sh ops site-slot cleanup-v1-wireguard --apply` 显式清理 |
+
+`mx-internal-svc` 生成配置里的 peer `AllowedIPs` 使用 `10.88.0.0/16` 加产品 relay CIDR，
+因此已经覆盖 Domestic gateway `10.88.0.1`，不需要像 V1 `hdo-internal` 那样再追加
+`10.88.0.1/32`。只有现场存在更具体的冲突 host route 时，才应在 runtime host 上做
+`ip route get 10.88.0.1` / `ip route get 10.88.88.88` 对比后定点修正，不应默认把冗余
+host route 写进 routePlan。
 
 Internal 可以继续保留“节点/peer server”的语义，但不要再走普通 H 端用户登录模型。它应通过
 Internal 自举 secret 或一次性 service token 生成 `mx-internal-service-peer.conf`，由 CLI/apply

@@ -243,6 +243,20 @@ CoreDNS authority 放 Internal K8s。H 端运行时由 Launcher Network 执行 s
 | DNS Policy | Internal Config Center | 下发 split DNS 白名单、fallback、优先级和版本 |
 | DNS Runtime | Launcher Network local resolver | 根据 snapshot 决定哪些域名走 HDI，哪些走系统 DNS 或代理 |
 
+Split DNS 的目标形态是“每个 app 提交自己的域名需求，Internal 合并为一个可验证的最终策略”：
+
+- AppCenter manifest 声明 `dns.exactDomains`、`dns.suffixes`、`dns.records` 和可选
+  `reverseProxyRoute`；声明本身不直接改系统 DNS。
+- Config Center 按 app、tenant、用户/匿名身份、灰度环合并策略，生成 policy snapshot 和
+  CoreDNS zone snapshot。冲突域名必须有 owner、优先级和 evidence。
+- H 端 Launcher Network 在 WG ready 后安装本地 split DNS：命中 app/internal 白名单的域名走
+  Internal DNS endpoint；未命中的域名按 `fallbackOrder` 走系统 DNS、系统代理、H2O/fake-ip
+  或 direct。
+- Domestic 不保存 DNS 真相；需要时只跑 `dns-edge-cache` 或 UDP/TCP forwarder，转发到
+  Internal DNS endpoint。
+- Oversea 和 site-agent 默认读取签名 snapshot；确实要解析 internal zone 时，也通过同一
+  Internal DNS authority 或 SDK/DoH gateway，不在 Oversea 复制 zones。
+
 当前 Internal API 先落地为统一策略入口：
 
 | API | 调用方 | 用途 |
@@ -265,6 +279,17 @@ CoreDNS authority 放 Internal K8s。H 端运行时由 Launcher Network 执行 s
 - 域名命中 Internal 后，可以继续由 Internal gateway 选择性反代，如
   `gateway.internal.mx -> MX Internal API`；是否反代由 Internal reverse proxy routes
   控制，不由 H 端硬编码。
+
+部署顺序上，Internal DNS authority 要先于 H 端 split DNS 全量开启：
+
+1. 部署 `mx-dns` namespace、CoreDNS ConfigMap writer RBAC 和 baseline CoreDNS Service。
+2. 部署 Internal API / Config Center，能生成 DNS policy snapshot 和 CoreDNS zone snapshot。
+3. 暴露 Internal DNS endpoint，例如 Internal host 上 `10.88.88.88:53`/`:5353` 转发到
+   `mx-internal-coredns.mx-dns.svc.cluster.local`，并在 routePlan 中下发该 endpoint。
+4. Domestic relay ready 后，H 端只对命中白名单的域名安装 split DNS；未命中仍走本机原有
+   系统 DNS、系统代理、fake-ip 或 H2O 规则。
+5. 最后再启用 AppCenter app 级 DNS policy，按 app 安装/授权状态合并到当前设备的最终
+   split DNS snapshot。
 
 PAC 优先级：
 
