@@ -10327,6 +10327,29 @@ function summarizeActionDetail(payload) {
       nextActions: internalServicePeerHostRunnerEnsure.nextActions || []
     }, null, 2);
   }
+  const internalServicePeerApply = payload?.internalServicePeerApply;
+  if (internalServicePeerApply) {
+    return JSON.stringify({
+      status: internalServicePeerApply.status,
+      execution: internalServicePeerApply.execution,
+      mode: internalServicePeerApply.mode,
+      command: internalServicePeerApply.command,
+      exitCode: internalServicePeerApply.exitCode,
+      stdout: internalServicePeerApply.stdout,
+      stderr: internalServicePeerApply.stderr,
+      internalEgressApply: internalServicePeerApply.internalEgressApply ? {
+        status: internalServicePeerApply.internalEgressApply.status,
+        execution: internalServicePeerApply.internalEgressApply.execution,
+        command: internalServicePeerApply.internalEgressApply.command,
+        exitCode: internalServicePeerApply.internalEgressApply.exitCode,
+        stdout: internalServicePeerApply.internalEgressApply.stdout,
+        stderr: internalServicePeerApply.internalEgressApply.stderr,
+        steps: internalServicePeerApply.internalEgressApply.steps || []
+      } : null,
+      wireGuardCoreApply: internalServicePeerApply.wireGuardCoreApply || null,
+      blockedReasons: internalServicePeerApply.blockedReasons || []
+    }, null, 2);
+  }
   const relayPeerAppendSsh = payload?.relayPeerAppendSsh;
   if (relayPeerAppendSsh) {
     return JSON.stringify({

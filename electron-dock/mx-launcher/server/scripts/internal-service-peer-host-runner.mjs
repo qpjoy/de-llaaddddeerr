@@ -174,7 +174,8 @@ function fallbackTunnelCliMarkerPath() {
 
 function fallbackTunnelCliRuntimeReady() {
   return existsSync(fallbackTunnelCliPath())
-    && existsSync(join(fallbackTunnelCliRuntimeDir, 'node_modules/@qpjoy/electron-core-wireguard/package.json'));
+    && existsSync(join(fallbackTunnelCliRuntimeDir, 'node_modules/@qpjoy/electron-core-wireguard/package.json'))
+    && existsSync(join(fallbackTunnelCliRuntimeDir, 'node_modules/@qpjoy/electron-core-wireguard/dist/index.js'));
 }
 
 function fallbackArchiveFingerprint(archivePath) {
@@ -199,10 +200,10 @@ function writeFallbackArchiveMarker(archivePath) {
 function fallbackTunnelCliArchiveCandidates() {
   return [
     process.env.MX_QP_TUNNEL_CLI_FALLBACK_TAR,
-    join(serverDir, 'artifacts/site-slots/domestic', fallbackTunnelCliArchiveName),
+    join(artifactRoot, fallbackTunnelCliArchiveName),
     resolve(serverDir, '../artifacts/site-slots/domestic', fallbackTunnelCliArchiveName),
     resolve(scriptDir, '../../artifacts/site-slots/domestic', fallbackTunnelCliArchiveName),
-    join(artifactRoot, fallbackTunnelCliArchiveName),
+    join(serverDir, 'artifacts/site-slots/domestic', fallbackTunnelCliArchiveName),
     `/app/artifacts/site-slots/domestic/${fallbackTunnelCliArchiveName}`
   ].filter((candidate, index, candidates) => (
     typeof candidate === 'string'

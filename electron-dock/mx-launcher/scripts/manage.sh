@@ -2079,7 +2079,10 @@ internal_service_peer_handoff() {
   local mode="${1:-status}"
   if [ "$#" -gt 0 ]; then shift || true; fi
 
-  local artifact_root="${MX_INTERNAL_SERVICE_ARTIFACT_DIR:-$ROOT/server/artifacts/site-slots/domestic}"
+  local artifact_root="${MX_INTERNAL_SERVICE_ARTIFACT_DIR:-$ROOT/artifacts/site-slots/domestic}"
+  if [ ! -f "$artifact_root/mx-internal-service-peer.conf" ] && [ -f "$ROOT/server/artifacts/site-slots/domestic/mx-internal-service-peer.conf" ]; then
+    artifact_root="$ROOT/server/artifacts/site-slots/domestic"
+  fi
   local apply_script="${MX_INTERNAL_SERVICE_APPLY_SCRIPT:-$artifact_root/mx-internal-service-peer-apply.sh}"
   local config_path="${1:-${MX_INTERNAL_SERVICE_CONFIG:-$artifact_root/mx-internal-service-peer.conf}}"
   local iface="${MX_INTERNAL_SERVICE_WG_INTERFACE:-mx-internal-svc}"
@@ -2120,6 +2123,9 @@ internal_service_peer_handoff() {
   [ -f "$config_path" ] || die "Internal service peer config not found: $config_path"
   [ -f "$apply_script" ] || die "Internal service peer apply script not found: $apply_script"
   command -v wg-quick >/dev/null 2>&1 || die "wg-quick is required to apply V2 Internal service peer config on this host"
+  if grep -q '<internal-service-private-key-from-internal-secret>' "$config_path"; then
+    die "Internal service peer config still contains placeholder key: $config_path. Run 'bash scripts/manage.sh ops site-slot materialize-domestic-ready <site-id>' or Generate Handoff from Internal first."
+  fi
 
   if [ "$(id -u)" -ne 0 ]; then
     say "Re-running with sudo to apply $iface on this Internal runtime host"
