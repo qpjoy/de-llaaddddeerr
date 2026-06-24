@@ -8051,7 +8051,7 @@ function renderDnsCenterPanel() {
         ['Business domains', '在 DNS Routes 新增或编辑；DNS target 不带端口，upstream URL 可带每个服务自己的端口。', 'editable'],
         ['Split DNS whitelist', `${exactDomains.length} exact / ${suffixes.length} suffix，由 policy 管理。`, policy?.enabled === false ? 'disabled' : 'effective'],
         ['CoreDNS authority', `${policy?.internal?.serviceDns || 'mx-internal-coredns.mx-dns.svc.cluster.local'} via ${MX_INTERNAL_DNS_IP}`, 'Internal'],
-        ['Internal gateway', `${MX_INTERNAL_DNS_IP}:8008 routes Host -> upstream URL`, 'standard ingress'],
+        ['Internal gateway', `${MX_INTERNAL_DNS_IP}:80 routes Host -> upstream URL`, 'standard ingress'],
         ['Fallback order', fallbackOrder.length ? fallbackOrder.join(' -> ') : 'system-dns -> system-proxy -> direct', policy?.proxyHints?.allowSystemProxyFallback === false ? 'locked' : 'Clash compatible']
       ])}
       <div class="dns-chip-group" aria-label="DNS whitelist preview">

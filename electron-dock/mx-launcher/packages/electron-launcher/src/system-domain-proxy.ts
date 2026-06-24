@@ -15,7 +15,7 @@ const PAC_MARKER = 'MX_ELECTRON_LAUNCHER_PAC';
 const WINDOWS_PROXY_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
 const DNS_QUERY_TIMEOUT_MS = 1500;
 const PROXY_CONNECT_TIMEOUT_MS = 10_000;
-const DEFAULT_INTERNAL_GATEWAY_APP_PORT = 8008;
+const INTERNAL_GATEWAY_APP_PORTS = new Set([80, 8008]);
 
 export type ElectronLauncherPacMatchMode = 'direct' | 'proxy';
 
@@ -1040,7 +1040,7 @@ function connectRouteTarget(
 function shouldPreserveHostForGatewayRoute(route: ElectronLauncherSystemDomainProxyRoute, url: URL): boolean {
   const dnsTarget = normalizeDnsTarget(route.dnsTarget);
   if (!dnsTarget || stripHostBrackets(url.hostname) !== dnsTarget) return false;
-  return upstreamPort(url) === DEFAULT_INTERNAL_GATEWAY_APP_PORT;
+  return INTERNAL_GATEWAY_APP_PORTS.has(upstreamPort(url));
 }
 
 function upstreamPort(url: URL): number {

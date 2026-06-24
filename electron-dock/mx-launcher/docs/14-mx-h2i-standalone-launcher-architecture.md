@@ -576,13 +576,13 @@ DNS Routes 面板里编辑，但落地到两份不同 ConfigMap：
   例如 `http://10.88.88.88:13141`、`http://10.88.88.88:18090` 或其它 Internal service URL。
 - 访问 `http://domain:port/` 时只依赖 split DNS 解析到 `10.88.88.88`，流量按原端口进入
   Internal；访问 `http://domain/` 或 `https://domain/` 且不带端口时，需要
-  本机 edge 或 `10.88.88.88:8008` 上的 Internal gateway 按 Host 反代到该 route 的
+  本机 edge 或 `10.88.88.88:80` 上的 Internal gateway 按 Host 反代到该 route 的
   `targetUrl`。
 - `targetUrl` 必须从实际执行反代的一侧可达：本机 edge 反代可以使用 WG overlay IP；
   如果由 Internal Pod/gateway 反代，则优先使用 k8s service DNS 或 host-runner 暴露的
   URL，避免在 Pod 内访问 `10.88.88.88` 时落到 gateway 自身或默认 nginx。
 - `http://domain/` 应优先走 Internal gateway/ingress；本机 edge 只是 H 端 PAC/系统代理的
-  第一跳，可以把命中白名单的 HTTP 流量送到 `10.88.88.88:8008` 并保留原始 `Host`。
+  第一跳，可以把命中白名单的 HTTP 流量送到 `10.88.88.88:80` 并保留原始 `Host`。
   `https://domain/` 不能被本机 proxy 透明解 TLS，除非 upstream 本身是 `https`/passthrough
   并持有该域名证书。
 - `Build Zone` 只生成 zone snapshot；只有 `Apply CoreDNS ConfigMap` 后才会更新
@@ -590,6 +590,9 @@ DNS Routes 面板里编辑，但落地到两份不同 ConfigMap：
 - `Dry-run Gateway` 渲染 Internal gateway Caddyfile；`Apply Gateway` 更新
   `mx-internal-gateway-caddy`。要让 `http://openvpn.mxinfo-inc.cn/` 不带端口访问到
   `http://10.88.88.88:8080`，需要先保存 route，再依次 Apply CoreDNS 和 Apply Gateway。
+  `8008` 只保留为迁移/调试 fallback；如果 `10.88.88.88:80` 仍由旧 nginx 占用，不带端口的
+  浏览器访问会继续命中旧 nginx，必须让 Internal gateway 接管 80 或把旧 nginx 配成 Host
+  reverse proxy 到 Internal gateway。
 - 若 H 端看到 `DNS timeout via <domestic-public>:50053/10.88.0.1:50053/10.88.88.88`，
   说明 Domestic DNS edge、WG 或 Internal CoreDNS 链路仍有一段未通；这时应先让
   本机 edge 用 route/default gateway fallback 保证浏览器流量进入 Internal，再检查是否需要

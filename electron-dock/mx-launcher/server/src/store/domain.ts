@@ -1170,24 +1170,8 @@ export function evaluateGatewayConfigMapApplyGate(
 }
 
 function renderGatewayCaddyfile(config: RuntimeConfig, routes: DnsReverseProxyRoute[]): string {
-  const appPort = Number.isFinite(config.gatewayAppPort) ? config.gatewayAppPort : 8008;
-  const routeBlocks = routes.flatMap((route) => {
-    const upstream = gatewayUpstreamUrl(route);
-    if (!upstream) return [];
-    const matcher = `route_${safeIdPart(route.routeId).replace(/[^a-zA-Z0-9_]/g, '_')}`;
-    const upstreamOrigin = `${upstream.protocol}//${upstream.host}`;
-    return [
-      `  @${matcher} host ${route.host}`,
-      `  handle @${matcher} {`,
-      `    reverse_proxy ${upstreamOrigin} {`,
-      `      header_up X-Forwarded-Host {http.request.host}`,
-      `      header_up X-Forwarded-Proto {http.request.scheme}`,
-      `      header_up X-MX-Route-Id ${route.routeId}`,
-      `    }`,
-      `  }`,
-      ''
-    ];
-  });
+  const appPort = Number.isFinite(config.gatewayAppPort) ? config.gatewayAppPort : 80;
+  const appPorts = [...new Set([appPort, 8008])].filter((port) => port > 0 && port <= 65535);
   return [
     '{',
     '  admin off',
@@ -1203,18 +1187,45 @@ function renderGatewayCaddyfile(config: RuntimeConfig, routes: DnsReverseProxyRo
     '  reverse_proxy mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090',
     '}',
     '',
-    `:${appPort} {`,
+    ...appPorts.flatMap((port) => gatewayAppServerBlock(port, routes, port === appPort ? 'internal-app-gateway' : 'internal-app-gateway-fallback'))
+  ].join('\n');
+}
+
+function gatewayAppServerBlock(port: number, routes: DnsReverseProxyRoute[], gatewayName: string): string[] {
+  return [
+    `:${port} {`,
     '  bind 0.0.0.0',
     '  encode zstd gzip',
     '  header {',
-    '    X-MX-Gateway internal-app-gateway',
+    `    X-MX-Gateway ${gatewayName}`,
     '  }',
-    ...routeBlocks,
+    ...gatewayRouteBlocks(routes, `p${port}`),
     '  handle {',
     '    respond "MX Internal gateway route not found\\n" 404',
     '  }',
-    '}'
-  ].join('\n');
+    '}',
+    ''
+  ];
+}
+
+function gatewayRouteBlocks(routes: DnsReverseProxyRoute[], prefix: string): string[] {
+  return routes.flatMap((route) => {
+    const upstream = gatewayUpstreamUrl(route);
+    if (!upstream) return [];
+    const matcher = `${prefix}_route_${safeIdPart(route.routeId).replace(/[^a-zA-Z0-9_]/g, '_')}`;
+    const upstreamOrigin = `${upstream.protocol}//${upstream.host}`;
+    return [
+      `  @${matcher} host ${route.host}`,
+      `  handle @${matcher} {`,
+      `    reverse_proxy ${upstreamOrigin} {`,
+      `      header_up X-Forwarded-Host {http.request.host}`,
+      `      header_up X-Forwarded-Proto {http.request.scheme}`,
+      `      header_up X-MX-Route-Id ${route.routeId}`,
+      `    }`,
+      `  }`,
+      ''
+    ];
+  });
 }
 
 function enabledGatewayRoutes(routes: DnsReverseProxyRoute[]): DnsReverseProxyRoute[] {

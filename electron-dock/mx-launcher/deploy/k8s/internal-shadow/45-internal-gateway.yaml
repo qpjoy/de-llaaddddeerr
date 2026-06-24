@@ -23,7 +23,7 @@ data:
       reverse_proxy mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090
     }
 
-    :8008 {
+    :80 {
       bind 0.0.0.0
       encode zstd gzip
       header {
@@ -33,11 +33,22 @@ data:
         respond "MX Internal gateway route not found\n" 404
       }
     }
+
+    :8008 {
+      bind 0.0.0.0
+      encode zstd gzip
+      header {
+        X-MX-Gateway internal-app-gateway-fallback
+      }
+      handle {
+        respond "MX Internal gateway route not found\n" 404
+      }
+    }
   mx-gateway-routes.json: |
     {
       "environment": "shadow",
       "siteId": "internal-main",
-      "gatewayPort": 8008,
+      "gatewayPort": 80,
       "routeCount": 0,
       "routes": []
     }
@@ -113,6 +124,10 @@ spec:
               hostPort: 18090
               protocol: TCP
             - name: app-http
+              containerPort: 80
+              hostPort: 80
+              protocol: TCP
+            - name: app-fallback
               containerPort: 8008
               hostPort: 8008
               protocol: TCP

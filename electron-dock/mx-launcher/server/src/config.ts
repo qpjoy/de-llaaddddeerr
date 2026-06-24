@@ -96,7 +96,7 @@ export function loadConfig(): RuntimeConfig {
     gatewayK8sApplyEnabled: boolFromEnv('GATEWAY_K8S_APPLY_ENABLED', false),
     gatewayK8sAllowedNamespace: process.env.GATEWAY_K8S_ALLOWED_NAMESPACE ?? 'mx-internal-shadow',
     gatewayK8sAllowedConfigMapName: process.env.GATEWAY_K8S_ALLOWED_CONFIGMAP_NAME ?? 'mx-internal-gateway-caddy',
-    gatewayAppPort: intFromEnv('GATEWAY_APP_PORT', 8008),
+    gatewayAppPort: intFromEnv('GATEWAY_APP_PORT', 80),
     siteSlotSshKeyRoot: process.env.MX_SITE_SLOT_SSH_KEY_DIR ?? 'artifacts/ssh'
   };
 }
