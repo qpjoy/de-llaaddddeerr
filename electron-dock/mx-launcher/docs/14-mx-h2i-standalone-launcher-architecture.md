@@ -559,23 +559,37 @@ Internal K8s 运行 `mx-internal-coredns`，Config Center 生成 signed zone sna
 
 H 端策略是：`internal.mx`、`.internal.mx`、`.corp.mx`、`.h2i.mx` 命中 Internal DNS；
 未命中域名按 system DNS / system proxy / H2O proxy / direct 的 fallback 顺序处理。
+长期标准入口是 Internal gateway/ingress：DNS 只把域名稳定解析到 Internal overlay IP，
+Gateway 再按 `Host` 转发到每条业务 route 的 upstream。Admin 可以把两层放在同一个
+DNS Routes 面板里编辑，但落地到两份不同 ConfigMap：
+
+- `mx-dns/coredns`：CoreDNS authority，来源是 DNS zone snapshot。
+- `mx-internal-shadow/mx-internal-gateway-caddy`：Internal gateway Caddyfile，来源是
+  enabled 且带 `targetUrl` 的 DNS route。
+
 业务域名 route 要把 DNS 和反代拆开配置：
 
 - `domain` 是用户访问的域名，例如 `night-all.mxinfo-inc.cn`。
 - `dnsTarget` 是 CoreDNS 记录目标，不带端口；默认指向 Internal gateway
   `10.88.88.88`。
-- `targetUrl` 是 gateway reverse proxy 的 upstream，可以按每个服务填写自己的端口，
+- `targetUrl` 是 Internal gateway reverse proxy 的 upstream，可以按每个服务填写自己的端口，
   例如 `http://10.88.88.88:13141`、`http://10.88.88.88:18090` 或其它 Internal service URL。
 - 访问 `http://domain:port/` 时只依赖 split DNS 解析到 `10.88.88.88`，流量按原端口进入
   Internal；访问 `http://domain/` 或 `https://domain/` 且不带端口时，需要
-  本机 edge 或 `10.88.88.88` 上的 gateway 按 Host 反代到该 route 的 `targetUrl`。
+  本机 edge 或 `10.88.88.88:8008` 上的 Internal gateway 按 Host 反代到该 route 的
+  `targetUrl`。
 - `targetUrl` 必须从实际执行反代的一侧可达：本机 edge 反代可以使用 WG overlay IP；
   如果由 Internal Pod/gateway 反代，则优先使用 k8s service DNS 或 host-runner 暴露的
   URL，避免在 Pod 内访问 `10.88.88.88` 时落到 gateway 自身或默认 nginx。
-- `http://domain/` 可以由本机 edge 转发到 `http://upstream:port`；`https://domain/`
-  不能被本机 proxy 透明解 TLS，除非 upstream 本身是 `https`/passthrough 并持有该域名证书。
+- `http://domain/` 应优先走 Internal gateway/ingress；本机 edge 只是 H 端 PAC/系统代理的
+  第一跳，可以把命中白名单的 HTTP 流量送到 `10.88.88.88:8008` 并保留原始 `Host`。
+  `https://domain/` 不能被本机 proxy 透明解 TLS，除非 upstream 本身是 `https`/passthrough
+  并持有该域名证书。
 - `Build Zone` 只生成 zone snapshot；只有 `Apply CoreDNS ConfigMap` 后才会更新
   `mx-dns/coredns` 并影响新的解析结果。本机 edge 会在 H2I ready 后拉取最新 DNS route。
+- `Dry-run Gateway` 渲染 Internal gateway Caddyfile；`Apply Gateway` 更新
+  `mx-internal-gateway-caddy`。要让 `http://openvpn.mxinfo-inc.cn/` 不带端口访问到
+  `http://10.88.88.88:8080`，需要先保存 route，再依次 Apply CoreDNS 和 Apply Gateway。
 - 若 H 端看到 `DNS timeout via <domestic-public>:50053/10.88.0.1:50053/10.88.88.88`，
   说明 Domestic DNS edge、WG 或 Internal CoreDNS 链路仍有一段未通；这时应先让
   本机 edge 用 route/default gateway fallback 保证浏览器流量进入 Internal，再检查是否需要

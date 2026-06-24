@@ -25,6 +25,10 @@ import type {
   DnsReverseProxyRouteInput,
   DnsZoneRecord,
   DnsZoneSnapshot,
+  GatewayConfigMapApplyInput,
+  GatewayConfigMapManifest,
+  GatewayConfigMapSyncInput,
+  GatewayConfigMapSyncResult,
   IssueTokenInput,
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
@@ -996,7 +1000,10 @@ export function renderCoreDnsConfigMap(
       Corefile: snapshot.corefile.combined,
       'mx-zone-snapshot.json': snapshotMetadata
     },
-    yaml: renderConfigMapYaml(configMapName, namespace, labels, annotations, snapshot.corefile.combined, snapshotMetadata)
+    yaml: renderConfigMapYaml(configMapName, namespace, labels, annotations, {
+      Corefile: snapshot.corefile.combined,
+      'mx-zone-snapshot.json': snapshotMetadata
+    })
   };
   return {
     syncId,
@@ -1047,13 +1054,192 @@ export function evaluateCoreDnsConfigMapApplyGate(
   return { allowed: true, serverDryRun, blockedReason: null };
 }
 
+export function renderGatewayConfigMap(
+  config: RuntimeConfig,
+  routes: DnsReverseProxyRoute[],
+  input: GatewayConfigMapSyncInput,
+  syncId: string
+): GatewayConfigMapSyncResult {
+  const namespace = input.namespace?.trim() || 'mx-internal-shadow';
+  const configMapName = input.configMapName?.trim() || 'mx-internal-gateway-caddy';
+  const mode = input.mode === 'shadow-apply' ? 'shadow-apply' : 'dry-run';
+  const issuedAt = new Date().toISOString();
+  const gatewayRoutes = enabledGatewayRoutes(routes);
+  const labels = {
+    'app.kubernetes.io/name': 'mx-internal-gateway',
+    'app.kubernetes.io/part-of': 'mx-3ks',
+    'mx.qpjoy.com/component': 'internal-gateway',
+    'mx.qpjoy.com/environment': config.environment
+  };
+  const digestPayload = JSON.stringify(gatewayRoutes.map((route) => ({
+    routeId: route.routeId,
+    host: route.host,
+    dnsTarget: route.dnsTarget,
+    targetUrl: route.targetUrl,
+    tlsMode: route.tlsMode,
+    authRequired: route.authRequired
+  })));
+  const digest = createHash('sha256').update(digestPayload).digest('hex');
+  const annotations = {
+    'mx.qpjoy.com/gateway-route-digest': digest,
+    'mx.qpjoy.com/sync-id': syncId
+  };
+  const routesMetadata = JSON.stringify({
+    environment: config.environment,
+    siteId: config.siteId,
+    gatewayPort: config.gatewayAppPort,
+    routeCount: gatewayRoutes.length,
+    routes: gatewayRoutes.map((route) => ({
+      routeId: route.routeId,
+      host: route.host,
+      dnsTarget: route.dnsTarget,
+      targetUrl: route.targetUrl,
+      tlsMode: route.tlsMode,
+      authRequired: route.authRequired,
+      updatedAt: route.updatedAt
+    })),
+    issuedAt,
+    digest
+  }, null, 2);
+  const caddyfile = renderGatewayCaddyfile(config, gatewayRoutes);
+  const manifest: GatewayConfigMapManifest = {
+    apiVersion: 'v1',
+    kind: 'ConfigMap',
+    metadata: {
+      name: configMapName,
+      namespace,
+      labels,
+      annotations
+    },
+    data: {
+      Caddyfile: caddyfile,
+      'mx-gateway-routes.json': routesMetadata
+    },
+    yaml: renderConfigMapYaml(configMapName, namespace, labels, annotations, {
+      Caddyfile: caddyfile,
+      'mx-gateway-routes.json': routesMetadata
+    })
+  };
+  return {
+    syncId,
+    mode,
+    status: mode === 'shadow-apply' ? 'recorded' : 'rendered',
+    applied: false,
+    namespace,
+    configMapName,
+    routeCount: gatewayRoutes.length,
+    manifest,
+    issuedAt,
+    message: mode === 'shadow-apply'
+      ? 'shadow apply recorded; no Kubernetes API mutation was performed'
+      : 'dry-run render only; no Kubernetes API mutation was performed'
+  };
+}
+
+export function evaluateGatewayConfigMapApplyGate(
+  config: RuntimeConfig,
+  sync: GatewayConfigMapSyncResult,
+  input: GatewayConfigMapApplyInput
+): { allowed: boolean; serverDryRun: boolean; blockedReason: string | null } {
+  const serverDryRun = input.serverDryRun !== false;
+  if (!config.gatewayK8sApplyEnabled) {
+    return {
+      allowed: false,
+      serverDryRun,
+      blockedReason: 'GATEWAY_K8S_APPLY_ENABLED is not enabled'
+    };
+  }
+  if (input.confirmApply !== true) {
+    return {
+      allowed: false,
+      serverDryRun,
+      blockedReason: 'confirmApply=true is required before Kubernetes mutation'
+    };
+  }
+  if (
+    sync.namespace !== config.gatewayK8sAllowedNamespace
+    || sync.configMapName !== config.gatewayK8sAllowedConfigMapName
+  ) {
+    return {
+      allowed: false,
+      serverDryRun,
+      blockedReason: `target ${sync.namespace}/${sync.configMapName} is outside the allowed Internal gateway target`
+    };
+  }
+  return { allowed: true, serverDryRun, blockedReason: null };
+}
+
+function renderGatewayCaddyfile(config: RuntimeConfig, routes: DnsReverseProxyRoute[]): string {
+  const appPort = Number.isFinite(config.gatewayAppPort) ? config.gatewayAppPort : 8008;
+  const routeBlocks = routes.flatMap((route) => {
+    const upstream = gatewayUpstreamUrl(route);
+    if (!upstream) return [];
+    const matcher = `route_${safeIdPart(route.routeId).replace(/[^a-zA-Z0-9_]/g, '_')}`;
+    const upstreamOrigin = `${upstream.protocol}//${upstream.host}`;
+    return [
+      `  @${matcher} host ${route.host}`,
+      `  handle @${matcher} {`,
+      `    reverse_proxy ${upstreamOrigin} {`,
+      `      header_up X-Forwarded-Host {http.request.host}`,
+      `      header_up X-Forwarded-Proto {http.request.scheme}`,
+      `      header_up X-MX-Route-Id ${route.routeId}`,
+      `    }`,
+      `  }`,
+      ''
+    ];
+  });
+  return [
+    '{',
+    '  admin off',
+    '  auto_https off',
+    '}',
+    '',
+    ':18090 {',
+    '  bind 0.0.0.0',
+    '  encode zstd gzip',
+    '  header {',
+    '    X-MX-Gateway internal-k8s-host-gateway',
+    '  }',
+    '  reverse_proxy mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090',
+    '}',
+    '',
+    `:${appPort} {`,
+    '  bind 0.0.0.0',
+    '  encode zstd gzip',
+    '  header {',
+    '    X-MX-Gateway internal-app-gateway',
+    '  }',
+    ...routeBlocks,
+    '  handle {',
+    '    respond "MX Internal gateway route not found\\n" 404',
+    '  }',
+    '}'
+  ].join('\n');
+}
+
+function enabledGatewayRoutes(routes: DnsReverseProxyRoute[]): DnsReverseProxyRoute[] {
+  return routes
+    .filter((route) => route.enabled !== false && gatewayUpstreamUrl(route))
+    .sort((a, b) => a.host.localeCompare(b.host));
+}
+
+function gatewayUpstreamUrl(route: DnsReverseProxyRoute): URL | null {
+  if (!route.targetUrl?.trim()) return null;
+  try {
+    const url = new URL(route.targetUrl);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
 function renderConfigMapYaml(
   name: string,
   namespace: string,
   labels: Record<string, string>,
   annotations: Record<string, string>,
-  corefile: string,
-  snapshotMetadata: string
+  data: Record<string, string>
 ): string {
   return [
     'apiVersion: v1',
@@ -1066,10 +1252,10 @@ function renderConfigMapYaml(
     '  annotations:',
     ...yamlStringMap(annotations, 4),
     'data:',
-    '  Corefile: |',
-    ...indentBlock(corefile, 4),
-    '  mx-zone-snapshot.json: |',
-    ...indentBlock(snapshotMetadata, 4)
+    ...Object.entries(data).flatMap(([key, value]) => [
+      `  ${key}: |`,
+      ...indentBlock(value, 4)
+    ])
   ].join('\n');
 }
 

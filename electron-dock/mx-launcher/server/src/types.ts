@@ -18,6 +18,10 @@ export interface RuntimeConfig {
   coreDnsK8sApplyEnabled: boolean;
   coreDnsK8sAllowedNamespace: string;
   coreDnsK8sAllowedConfigMapName: string;
+  gatewayK8sApplyEnabled: boolean;
+  gatewayK8sAllowedNamespace: string;
+  gatewayK8sAllowedConfigMapName: string;
+  gatewayAppPort: number;
   siteSlotSshKeyRoot: string;
 }
 
@@ -2227,6 +2231,68 @@ export interface CoreDnsConfigMapApplyResult {
   namespace: string;
   configMapName: string;
   manifest: CoreDnsConfigMapManifest;
+  resourceVersion: string | null;
+  blockedReason: string | null;
+  message: string;
+  issuedAt: string;
+  completedAt: string;
+}
+
+export interface GatewayConfigMapSyncInput {
+  appId?: string | null;
+  namespace?: string | null;
+  configMapName?: string | null;
+  mode?: 'dry-run' | 'shadow-apply' | null;
+  requestId?: string | null;
+}
+
+export interface GatewayConfigMapManifest {
+  apiVersion: 'v1';
+  kind: 'ConfigMap';
+  metadata: {
+    name: string;
+    namespace: string;
+    labels: Record<string, string>;
+    annotations: Record<string, string>;
+  };
+  data: {
+    Caddyfile: string;
+    'mx-gateway-routes.json': string;
+  };
+  yaml: string;
+}
+
+export interface GatewayConfigMapSyncResult {
+  syncId: string;
+  mode: 'dry-run' | 'shadow-apply';
+  status: 'rendered' | 'recorded';
+  applied: boolean;
+  namespace: string;
+  configMapName: string;
+  routeCount: number;
+  manifest: GatewayConfigMapManifest;
+  issuedAt: string;
+  message: string;
+}
+
+export interface GatewayConfigMapApplyInput extends GatewayConfigMapSyncInput {
+  confirmApply?: boolean | null;
+  serverDryRun?: boolean | null;
+  actor?: string | null;
+}
+
+export interface GatewayConfigMapApplyResult {
+  applyId: string;
+  syncId: string;
+  mode: 'k8s-server-dry-run' | 'k8s-apply';
+  status: 'blocked' | 'server-dry-run' | 'applied' | 'failed';
+  allowed: boolean;
+  applied: boolean;
+  serverDryRun: boolean;
+  namespace: string;
+  configMapName: string;
+  routeCount: number;
+  manifest: GatewayConfigMapManifest;
   resourceVersion: string | null;
   blockedReason: string | null;
   message: string;

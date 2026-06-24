@@ -22,6 +22,56 @@ data:
       }
       reverse_proxy mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090
     }
+
+    :8008 {
+      bind 0.0.0.0
+      encode zstd gzip
+      header {
+        X-MX-Gateway internal-app-gateway
+      }
+      handle {
+        respond "MX Internal gateway route not found\n" 404
+      }
+    }
+  mx-gateway-routes.json: |
+    {
+      "environment": "shadow",
+      "siteId": "internal-main",
+      "gatewayPort": 8008,
+      "routeCount": 0,
+      "routes": []
+    }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mx-internal-gateway-configmap-writer
+  namespace: mx-internal-shadow
+  labels:
+    app.kubernetes.io/name: mx-internal-gateway-configmap-writer
+    app.kubernetes.io/part-of: mx-3ks
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["mx-internal-gateway-caddy"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mx-launcher-internal-gateway-writer
+  namespace: mx-internal-shadow
+  labels:
+    app.kubernetes.io/name: mx-launcher-internal-gateway-writer
+    app.kubernetes.io/part-of: mx-3ks
+subjects:
+  - kind: ServiceAccount
+    name: mx-launcher-internal
+    namespace: mx-internal-shadow
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mx-internal-gateway-configmap-writer
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -61,6 +111,10 @@ spec:
             - name: http
               containerPort: 18090
               hostPort: 18090
+              protocol: TCP
+            - name: app-http
+              containerPort: 8008
+              hostPort: 8008
               protocol: TCP
           readinessProbe:
             tcpSocket:

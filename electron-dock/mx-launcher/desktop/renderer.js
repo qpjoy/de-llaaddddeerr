@@ -193,9 +193,12 @@ const state = {
     zoneBusy: false,
     corednsBusy: false,
     corednsApplyBusy: false,
+    gatewayBusy: false,
+    gatewayApplyBusy: false,
     evalBusy: false,
     zoneSnapshot: null,
     corednsResult: null,
+    gatewayResult: null,
     evaluateDomain: 'gateway.internal.mx',
     evaluateResult: null
   },
@@ -7991,6 +7994,8 @@ function renderDnsCenterPanel() {
           <button class="secondary-button" type="button" data-dns-zone-build ${state.dnsCenter.zoneBusy ? 'disabled' : ''}>${state.dnsCenter.zoneBusy ? 'Building...' : 'Build Zone'}</button>
           <button class="secondary-button" type="button" data-dns-coredns-sync ${state.dnsCenter.corednsBusy ? 'disabled' : ''}>${state.dnsCenter.corednsBusy ? 'Rendering...' : 'Dry-run CoreDNS'}</button>
           <button class="secondary-button" type="button" data-dns-coredns-apply ${state.dnsCenter.corednsApplyBusy ? 'disabled' : ''}>${state.dnsCenter.corednsApplyBusy ? 'Applying...' : 'Apply CoreDNS'}</button>
+          <button class="secondary-button" type="button" data-dns-gateway-sync ${state.dnsCenter.gatewayBusy ? 'disabled' : ''}>${state.dnsCenter.gatewayBusy ? 'Rendering...' : 'Dry-run Gateway'}</button>
+          <button class="secondary-button" type="button" data-dns-gateway-apply ${state.dnsCenter.gatewayApplyBusy ? 'disabled' : ''}>${state.dnsCenter.gatewayApplyBusy ? 'Applying...' : 'Apply Gateway'}</button>
           <button class="primary-button" type="button" data-dns-new>New Route</button>
         </div>
       </div>
@@ -8046,6 +8051,7 @@ function renderDnsCenterPanel() {
         ['Business domains', '在 DNS Routes 新增或编辑；DNS target 不带端口，upstream URL 可带每个服务自己的端口。', 'editable'],
         ['Split DNS whitelist', `${exactDomains.length} exact / ${suffixes.length} suffix，由 policy 管理。`, policy?.enabled === false ? 'disabled' : 'effective'],
         ['CoreDNS authority', `${policy?.internal?.serviceDns || 'mx-internal-coredns.mx-dns.svc.cluster.local'} via ${MX_INTERNAL_DNS_IP}`, 'Internal'],
+        ['Internal gateway', `${MX_INTERNAL_DNS_IP}:8008 routes Host -> upstream URL`, 'standard ingress'],
         ['Fallback order', fallbackOrder.length ? fallbackOrder.join(' -> ') : 'system-dns -> system-proxy -> direct', policy?.proxyHints?.allowSystemProxyFallback === false ? 'locked' : 'Clash compatible']
       ])}
       <div class="dns-chip-group" aria-label="DNS whitelist preview">
@@ -8056,8 +8062,8 @@ function renderDnsCenterPanel() {
     <section class="foundation-panel dns-tool-panel">
       <div class="foundation-panel-head">
         <div>
-          <h4>Probe & CoreDNS</h4>
-          <p>先 evaluate 域名决策，再生成 zone snapshot；dry-run 用来确认 CoreDNS ConfigMap 输出。</p>
+          <h4>Probe & config</h4>
+          <p>先 evaluate 域名决策，再 dry-run CoreDNS 和 Internal gateway，确认解析与反代入口分层生效。</p>
         </div>
       </div>
       <form class="dns-evaluate-form" data-dns-evaluate-form>
@@ -8068,7 +8074,7 @@ function renderDnsCenterPanel() {
         <button class="secondary-button" type="submit" ${state.dnsCenter.evalBusy ? 'disabled' : ''}>${state.dnsCenter.evalBusy ? 'Evaluating...' : 'Evaluate'}</button>
       </form>
       ${renderDnsDecisionResult(state.dnsCenter.evaluateResult)}
-      ${renderDnsZoneResult(state.dnsCenter.zoneSnapshot, state.dnsCenter.corednsResult)}
+      ${renderDnsZoneResult(state.dnsCenter.zoneSnapshot, state.dnsCenter.corednsResult, state.dnsCenter.gatewayResult)}
     </section>
   `;
 }
@@ -8159,9 +8165,10 @@ function renderDnsDecisionResult(decision) {
   `;
 }
 
-function renderDnsZoneResult(snapshot, corednsResult) {
+function renderDnsZoneResult(snapshot, corednsResult, gatewayResult) {
   const records = asArray(snapshot?.records);
   const result = corednsResult || null;
+  const gateway = gatewayResult || null;
   return `
     <div class="dns-zone-summary">
       <div>
@@ -8173,6 +8180,11 @@ function renderDnsZoneResult(snapshot, corednsResult) {
         <span>CoreDNS sync</span>
         <strong>${escapeHtml(result?.status || 'not rendered')}</strong>
         <small>${result ? `${result.namespace || 'mx-dns'}/${result.configMapName || 'coredns'} / ${result.mode || 'dry-run'}` : 'Dry-run or apply result appears here.'}</small>
+      </div>
+      <div>
+        <span>Gateway sync</span>
+        <strong>${escapeHtml(gateway?.status || 'not rendered')}</strong>
+        <small>${gateway ? `${gateway.namespace || 'mx-internal-shadow'}/${gateway.configMapName || 'mx-internal-gateway-caddy'} / ${gateway.routeCount || 0} routes` : 'Dry-run or apply Internal gateway result appears here.'}</small>
       </div>
     </div>
   `;
@@ -8209,6 +8221,10 @@ function bindDnsCenterControls(root) {
   if (sync) sync.addEventListener('click', () => void syncCoreDnsConfigMapFromAdmin());
   const apply = root.querySelector('[data-dns-coredns-apply]');
   if (apply) apply.addEventListener('click', () => void applyCoreDnsConfigMapFromAdmin());
+  const gatewaySync = root.querySelector('[data-dns-gateway-sync]');
+  if (gatewaySync) gatewaySync.addEventListener('click', () => void syncGatewayConfigMapFromAdmin());
+  const gatewayApply = root.querySelector('[data-dns-gateway-apply]');
+  if (gatewayApply) gatewayApply.addEventListener('click', () => void applyGatewayConfigMapFromAdmin());
   const evaluateForm = root.querySelector('[data-dns-evaluate-form]');
   if (evaluateForm) {
     evaluateForm.addEventListener('submit', (event) => {
@@ -8595,6 +8611,64 @@ async function applyCoreDnsConfigMapFromAdmin() {
     state.dnsCenter.feedback = { kind: 'error', message: error.message };
   } finally {
     state.dnsCenter.corednsApplyBusy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+  }
+}
+
+async function syncGatewayConfigMapFromAdmin() {
+  if (state.dnsCenter.gatewayBusy) return;
+  state.dnsCenter.gatewayBusy = true;
+  state.dnsCenter.feedback = { kind: 'info', message: 'Rendering Internal gateway ConfigMap dry-run' };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    const payload = await fetchJson('/internal/v1/dns/gateway/configmap/sync', {
+      method: 'POST',
+      body: {
+        appId: 'sdk-gateway',
+        mode: 'dry-run',
+        requestId: 'desktop-admin-gateway-sync'
+      }
+    });
+    const result = payload.result || {};
+    state.dnsCenter.gatewayResult = result;
+    state.dnsCenter.feedback = {
+      kind: 'success',
+      message: `Gateway ${result.namespace || 'mx-internal-shadow'}/${result.configMapName || 'mx-internal-gateway-caddy'} ${result.status || 'rendered'} with ${result.routeCount || 0} routes`
+    };
+  } catch (error) {
+    state.dnsCenter.feedback = { kind: 'error', message: error.message };
+  } finally {
+    state.dnsCenter.gatewayBusy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+  }
+}
+
+async function applyGatewayConfigMapFromAdmin() {
+  if (state.dnsCenter.gatewayApplyBusy) return;
+  state.dnsCenter.gatewayApplyBusy = true;
+  state.dnsCenter.feedback = { kind: 'info', message: 'Applying Internal gateway ConfigMap' };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    const payload = await fetchJson('/internal/v1/dns/gateway/configmap/apply', {
+      method: 'POST',
+      body: {
+        appId: 'sdk-gateway',
+        confirmApply: true,
+        serverDryRun: false,
+        actor: 'admin-ui',
+        requestId: 'desktop-admin-gateway-apply'
+      }
+    });
+    const result = payload.result || {};
+    state.dnsCenter.gatewayResult = result;
+    state.dnsCenter.feedback = {
+      kind: result.applied ? 'success' : (result.allowed === false ? 'error' : 'info'),
+      message: `Gateway ${result.namespace || 'mx-internal-shadow'}/${result.configMapName || 'mx-internal-gateway-caddy'} ${result.status || 'apply requested'}${result.message ? `: ${result.message}` : ''}`
+    };
+  } catch (error) {
+    state.dnsCenter.feedback = { kind: 'error', message: error.message };
+  } finally {
+    state.dnsCenter.gatewayApplyBusy = false;
     renderFoundationGrid(state.dashboard?.overview || {});
   }
 }

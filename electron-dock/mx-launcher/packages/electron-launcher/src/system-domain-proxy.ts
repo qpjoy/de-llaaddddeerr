@@ -15,6 +15,7 @@ const PAC_MARKER = 'MX_ELECTRON_LAUNCHER_PAC';
 const WINDOWS_PROXY_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
 const DNS_QUERY_TIMEOUT_MS = 1500;
 const PROXY_CONNECT_TIMEOUT_MS = 10_000;
+const DEFAULT_INTERNAL_GATEWAY_APP_PORT = 8008;
 
 export type ElectronLauncherPacMatchMode = 'direct' | 'proxy';
 
@@ -968,12 +969,15 @@ async function handleProxyHttpRequest(
       ? upstreamPort(routeUrl)
       : Number(target.port || 80);
     const requestImpl = routeUrl?.protocol === 'https:' ? httpsRequest : httpRequest;
+    const upstreamHostHeader = routeUrl && route && shouldPreserveHostForGatewayRoute(route, routeUrl)
+      ? target.host
+      : routeUrl?.host || target.host;
     const upstream = requestImpl({
       host: targetHost,
       port: targetPort,
       method: req.method,
       path: routeUrl ? reverseProxyPath(routeUrl, target) : `${target.pathname}${target.search}`,
-      headers: proxyForwardHeaders(req, routeUrl?.host || target.host, target.host),
+      headers: proxyForwardHeaders(req, upstreamHostHeader, target.host),
       timeout: PROXY_CONNECT_TIMEOUT_MS
     }, (upstreamRes) => {
       res.writeHead(upstreamRes.statusCode || 502, upstreamRes.statusMessage || undefined, upstreamRes.headers);
@@ -1031,6 +1035,12 @@ function connectRouteTarget(
     host: stripHostBrackets(url.hostname),
     port: upstreamPort(url)
   };
+}
+
+function shouldPreserveHostForGatewayRoute(route: ElectronLauncherSystemDomainProxyRoute, url: URL): boolean {
+  const dnsTarget = normalizeDnsTarget(route.dnsTarget);
+  if (!dnsTarget || stripHostBrackets(url.hostname) !== dnsTarget) return false;
+  return upstreamPort(url) === DEFAULT_INTERNAL_GATEWAY_APP_PORT;
 }
 
 function upstreamPort(url: URL): number {

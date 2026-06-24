@@ -21,6 +21,9 @@ const BOOTSTRAP_DNS_RETRY_LIMIT = 3;
 const BOOTSTRAP_DNS_RETRY_DELAY_MS = 350;
 const DEFAULT_LOCAL_EDGE_PORT = 2053;
 const DEFAULT_DOMESTIC_DNS_EDGE_PORT = 50053;
+const DEFAULT_INTERNAL_GATEWAY_APP_PORT = 8008;
+const DEFAULT_SPLIT_DNS_DOMAINS = 'mxinfo-inc.cn internal.mx corp.mx h2i.mx';
+const SYSTEM_DOMAIN_PROXY_REFRESH_MS = 30_000;
 const DEFAULT_CONFIG = {
   bootstrapApiBaseUrl: defaultBootstrapApiBaseUrl(),
   internalApiBaseUrl: 'http://10.88.88.88:18090',
@@ -32,7 +35,7 @@ const DEFAULT_CONFIG = {
   bootstrapDnsServers: defaultBootstrapDnsServers(),
   splitDnsDomains: nullableString(process.env.MX_H2I_SPLIT_DNS_DOMAINS)
     || nullableString(process.env.MX_H2I_DNS_DOMAINS)
-    || '',
+    || DEFAULT_SPLIT_DNS_DOMAINS,
   routePathPreference: normalizeRoutePathPreference(process.env.MX_H2I_ROUTE_PATH || process.env.MX_H2I_PATH_PREFERENCE || 'auto'),
   releaseChannel: 'stable',
   rolloutGroup: 'staff-ring',
@@ -60,6 +63,9 @@ let wireGuardConnectInFlight = false;
 let lastWireGuardRecoveryFailureAt = 0;
 const wireGuardRecoveryTimers = [];
 let systemDomainProxyManager = null;
+let systemDomainProxyRefreshInterval = null;
+let systemDomainProxyRefreshInFlight = false;
+let lastSystemDomainProxySignature = null;
 
 const TOP_DOCK_Y = 0;
 const TOP_REVEAL_ZONE = 18;
@@ -604,6 +610,7 @@ async function initializeSystemDomainProxy() {
     } else {
       await systemDomainProxyManager.restoreStale('app-startup');
     }
+    startSystemDomainProxyRefreshWatcher();
   } catch (err) {
     console.warn('[mx-h2i] system domain proxy unavailable:', errorMessage(err));
     systemDomainProxyManager = null;
@@ -648,6 +655,7 @@ async function ensureSystemDomainProxyForRuntime(reason = 'manual') {
 
 async function disableSystemDomainProxyForRuntime(reason = 'manual') {
   if (!systemDomainProxyManager) return null;
+  lastSystemDomainProxySignature = null;
   try {
     return await systemDomainProxyManager.disable(reason);
   } catch (err) {
@@ -662,8 +670,70 @@ async function disableSystemDomainProxyForRuntime(reason = 'manual') {
 }
 
 async function closeSystemDomainProxy() {
+  stopSystemDomainProxyRefreshWatcher();
   if (!systemDomainProxyManager) return;
   await systemDomainProxyManager.close?.().catch(() => undefined);
+}
+
+function startSystemDomainProxyRefreshWatcher() {
+  if (systemDomainProxyRefreshInterval) return;
+  systemDomainProxyRefreshInterval = setInterval(() => {
+    void refreshSystemDomainProxyForRuntime('route-refresh').catch(() => undefined);
+  }, SYSTEM_DOMAIN_PROXY_REFRESH_MS);
+  systemDomainProxyRefreshInterval.unref?.();
+}
+
+function stopSystemDomainProxyRefreshWatcher() {
+  if (systemDomainProxyRefreshInterval) clearInterval(systemDomainProxyRefreshInterval);
+  systemDomainProxyRefreshInterval = null;
+  systemDomainProxyRefreshInFlight = false;
+}
+
+async function refreshSystemDomainProxyForRuntime(reason = 'manual') {
+  if (systemDomainProxyRefreshInFlight || !systemDomainProxyManager) return null;
+  if (runtime?.connection?.state !== 'connected') return null;
+  systemDomainProxyRefreshInFlight = true;
+  try {
+    const status = await ensureSystemDomainProxyForRuntime(reason);
+    const signature = systemDomainProxyStatusSignature(status);
+    if (signature && signature !== lastSystemDomainProxySignature) {
+      lastSystemDomainProxySignature = signature;
+      runtime.connection = {
+        ...runtime.connection,
+        diagnostics: {
+          ...(runtime.connection.diagnostics || {}),
+          systemDomainProxy: status
+        }
+      };
+      touchRuntime(`system domain proxy refreshed: ${reason}`);
+      await saveAndBroadcast();
+    }
+    return status;
+  } finally {
+    systemDomainProxyRefreshInFlight = false;
+  }
+}
+
+function systemDomainProxyStatusSignature(status) {
+  if (!status || typeof status !== 'object') return null;
+  return JSON.stringify({
+    applied: status.applied === true,
+    pacUrl: nullableString(status.pacUrl),
+    proxy: nullableString(status.proxy),
+    fallbackProxy: nullableString(status.fallbackProxy),
+    dnsFallbackTarget: nullableString(status.dnsFallbackTarget),
+    domains: arrayValue(status.domains, []).map(String).sort(),
+    dnsServers: arrayValue(status.dnsServers, []).map(String).sort(),
+    reverseProxyRoutes: arrayValue(status.reverseProxyRoutes, [])
+      .map((route) => ({
+        host: nullableString(route?.host),
+        dnsTarget: nullableString(route?.dnsTarget),
+        targetUrl: nullableString(route?.targetUrl),
+        tlsMode: nullableString(route?.tlsMode),
+        enabled: route?.enabled !== false
+      }))
+      .sort((left, right) => String(left.host).localeCompare(String(right.host)))
+  });
 }
 
 function systemPacFallbackProxy() {
@@ -750,6 +820,20 @@ function systemPacDnsFallbackTarget() {
     || INTERNAL_PEER_IP;
 }
 
+function systemPacGatewayTargetUrl() {
+  const host = systemPacDnsFallbackTarget();
+  const port = Number.parseInt(
+    nullableString(process.env.MX_H2I_INTERNAL_GATEWAY_PORT)
+      || nullableString(process.env.MX_H2I_GATEWAY_APP_PORT)
+      || String(DEFAULT_INTERNAL_GATEWAY_APP_PORT),
+    10
+  );
+  const safePort = Number.isInteger(port) && port > 0 && port <= 65535
+    ? port
+    : DEFAULT_INTERNAL_GATEWAY_APP_PORT;
+  return `http://${host}:${safePort}`;
+}
+
 async function systemPacReverseProxyRoutes() {
   const baseUrl = normalizeBaseUrl(runtime?.connection?.internalBaseUrl)
     || internalOverlayBaseUrl(runtime?.connection?.routePlan, runtime?.config?.internalApiBaseUrl);
@@ -770,11 +854,12 @@ function normalizeSystemPacReverseProxyRoute(input) {
   const row = input && typeof input === 'object' ? input : {};
   const host = nullableString(row.host);
   if (!host || row.enabled === false) return null;
+  const routeUpstream = nullableString(row.targetUrl);
   return {
     routeId: nullableString(row.routeId),
     host,
     dnsTarget: nullableString(row.dnsTarget),
-    targetUrl: nullableString(row.targetUrl),
+    targetUrl: routeUpstream ? systemPacGatewayTargetUrl() : null,
     tlsMode: nullableString(row.tlsMode),
     authRequired: row.authRequired === true,
     enabled: true

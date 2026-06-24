@@ -8174,6 +8174,22 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
       }
     },
     {
+      actionId: 'dns.gateway.apply',
+      label: 'Apply Internal Gateway ConfigMap',
+      category: 'dns',
+      method: 'POST',
+      path: '/internal/v1/dns/gateway/configmap/apply',
+      requiredScopes: ['dns.manage'],
+      gate: 'confirm-apply',
+      risk: 'high',
+      confirmFields: ['confirmApply'],
+      bodyTemplate: {
+        confirmApply: true,
+        namespace: 'mx-internal-shadow',
+        configMapName: 'mx-internal-gateway-caddy'
+      }
+    },
+    {
       actionId: 'rbac.user.manage',
       label: 'Manage Users and Roles',
       category: 'rbac',

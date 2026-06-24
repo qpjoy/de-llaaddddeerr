@@ -84,6 +84,16 @@ export class DnsController {
     return { result: await this.store.applyCoreDnsConfigMap(toCoreDnsApplyInput(asRecord(rawBody))) };
   }
 
+  @Post('internal/v1/dns/gateway/configmap/sync')
+  async syncGatewayConfigMap(@Body() rawBody: unknown) {
+    return { result: await this.store.syncGatewayConfigMap(toGatewaySyncInput(asRecord(rawBody))) };
+  }
+
+  @Post('internal/v1/dns/gateway/configmap/apply')
+  async applyGatewayConfigMap(@Body() rawBody: unknown) {
+    return { result: await this.store.applyGatewayConfigMap(toGatewayApplyInput(asRecord(rawBody))) };
+  }
+
   @Get('internal/v1/sdk/dns/policy')
   async sdkPolicy(@Query('appId') appId?: string) {
     return { policy: await this.store.getEffectiveDnsPolicy(appId ?? 'sdk-gateway') };
@@ -97,6 +107,11 @@ export class DnsController {
   @Post('internal/v1/sdk/dns/coredns-configmap')
   async sdkCoreDnsConfigMap(@Body() rawBody: unknown) {
     return { result: await this.store.syncCoreDnsConfigMap(toCoreDnsSyncInput(asRecord(rawBody))) };
+  }
+
+  @Post('internal/v1/sdk/dns/gateway-configmap')
+  async sdkGatewayConfigMap(@Body() rawBody: unknown) {
+    return { result: await this.store.syncGatewayConfigMap(toGatewaySyncInput(asRecord(rawBody))) };
   }
 
   @Post('internal/v1/sdk/dns/evaluate')
@@ -126,6 +141,26 @@ function toCoreDnsSyncInput(body: Record<string, unknown>) {
 function toCoreDnsApplyInput(body: Record<string, unknown>) {
   return {
     ...toCoreDnsSyncInput(body),
+    confirmApply: booleanValue(body.confirmApply),
+    serverDryRun: booleanValue(body.serverDryRun),
+    actor: nullableString(body.actor)
+  };
+}
+
+function toGatewaySyncInput(body: Record<string, unknown>) {
+  const mode = nullableString(body.mode);
+  return {
+    appId: nullableString(body.appId),
+    namespace: nullableString(body.namespace),
+    configMapName: nullableString(body.configMapName),
+    mode: mode === 'shadow-apply' ? 'shadow-apply' as const : 'dry-run' as const,
+    requestId: nullableString(body.requestId)
+  };
+}
+
+function toGatewayApplyInput(body: Record<string, unknown>) {
+  return {
+    ...toGatewaySyncInput(body),
     confirmApply: booleanValue(body.confirmApply),
     serverDryRun: booleanValue(body.serverDryRun),
     actor: nullableString(body.actor)

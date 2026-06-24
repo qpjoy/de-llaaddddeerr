@@ -48,6 +48,7 @@ import {
   createUserCenterUser,
   createUserPrincipalFromRecord,
   evaluateCoreDnsConfigMapApplyGate,
+  evaluateGatewayConfigMapApplyGate,
   evaluateSdkGatewayRoute,
   evaluateDnsPolicy,
   hashToken,
@@ -60,6 +61,7 @@ import {
   renderHysteria2MihomoSubscription,
   renderUserOverseaMihomoSubscription,
   renderCoreDnsConfigMap,
+  renderGatewayConfigMap,
   resolvePrincipalContext,
   userOverseaAccountName,
   userOverseaEntitlementId,
@@ -69,7 +71,7 @@ import {
   launcherNetworkProductIsStandaloneDefault,
   normalizeLauncherNetworkProductId
 } from './domain.js';
-import { applyCoreDnsConfigMapToKubernetes } from './kubernetes.js';
+import { applyCoreDnsConfigMapToKubernetes, applyGatewayConfigMapToKubernetes } from './kubernetes.js';
 import type { PlatformStore } from './platform-store.js';
 import type {
   AnonymousEnrollment,
@@ -96,6 +98,10 @@ import type {
   DnsReverseProxyRouteInput,
   DnsZoneSnapshot,
   DnsZoneSnapshotInput,
+  GatewayConfigMapApplyInput,
+  GatewayConfigMapApplyResult,
+  GatewayConfigMapSyncInput,
+  GatewayConfigMapSyncResult,
   IdentityLinkRequest,
   IssueTokenInput,
   LauncherNetworkLease,
@@ -212,6 +218,8 @@ export class MemoryStore implements PlatformStore {
   private readonly dnsZoneSnapshots = new Map<string, DnsZoneSnapshot>();
   private readonly coreDnsConfigMapSyncs = new Map<string, CoreDnsConfigMapSyncResult>();
   private readonly coreDnsConfigMapApplies = new Map<string, CoreDnsConfigMapApplyResult>();
+  private readonly gatewayConfigMapSyncs = new Map<string, GatewayConfigMapSyncResult>();
+  private readonly gatewayConfigMapApplies = new Map<string, GatewayConfigMapApplyResult>();
   private readonly releaseManagementPlans = new Map<string, ReleaseManagementPlan>();
   private readonly permissionGrants = new Map<string, PermissionGrant>();
   private readonly testRuns = new Map<string, TestRun>();
@@ -256,6 +264,8 @@ export class MemoryStore implements PlatformStore {
       dnsZoneSnapshots: this.dnsZoneSnapshots.size,
       coreDnsConfigMapSyncs: this.coreDnsConfigMapSyncs.size,
       coreDnsConfigMapApplies: this.coreDnsConfigMapApplies.size,
+      gatewayConfigMapSyncs: this.gatewayConfigMapSyncs.size,
+      gatewayConfigMapApplies: this.gatewayConfigMapApplies.size,
       releaseManagementPlans: this.releaseManagementPlans.size,
       permissionGrants: this.permissionGrants.size,
       testRuns: this.testRuns.size,
@@ -1790,6 +1800,82 @@ export class MemoryStore implements PlatformStore {
         snapshotId: result.snapshotId,
         namespace: result.namespace,
         configMapName: result.configMapName,
+        blockedReason: result.blockedReason
+      }
+    });
+    return result;
+  }
+
+  syncGatewayConfigMap(input: GatewayConfigMapSyncInput): GatewayConfigMapSyncResult {
+    const result = renderGatewayConfigMap(
+      this.config,
+      this.listDnsReverseProxyRoutes(),
+      input,
+      `gatewaysync_${randomUUID()}`
+    );
+    this.gatewayConfigMapSyncs.set(result.syncId, result);
+    this.recordAudit({
+      eventType: 'dns.gateway_configmap.sync_recorded',
+      actorKind: 'dns-control',
+      requestId: input.requestId ?? null,
+      metadata: {
+        syncId: result.syncId,
+        mode: result.mode,
+        status: result.status,
+        applied: result.applied,
+        namespace: result.namespace,
+        configMapName: result.configMapName,
+        routeCount: result.routeCount
+      }
+    });
+    return result;
+  }
+
+  async applyGatewayConfigMap(input: GatewayConfigMapApplyInput): Promise<GatewayConfigMapApplyResult> {
+    const sync = this.syncGatewayConfigMap({ ...input, mode: 'shadow-apply' });
+    const gate = evaluateGatewayConfigMapApplyGate(this.config, sync, input);
+    const issuedAt = new Date().toISOString();
+    const outcome = gate.allowed
+      ? await applyGatewayConfigMapToKubernetes(sync.manifest, gate.serverDryRun)
+      : {
+          status: 'failed' as const,
+          applied: false,
+          resourceVersion: null,
+          message: gate.blockedReason ?? 'Internal gateway apply blocked'
+        };
+    const result: GatewayConfigMapApplyResult = {
+      applyId: `gatewayapply_${randomUUID()}`,
+      syncId: sync.syncId,
+      mode: gate.serverDryRun ? 'k8s-server-dry-run' : 'k8s-apply',
+      status: gate.allowed ? outcome.status : 'blocked',
+      allowed: gate.allowed,
+      applied: gate.allowed ? outcome.applied : false,
+      serverDryRun: gate.serverDryRun,
+      namespace: sync.namespace,
+      configMapName: sync.configMapName,
+      routeCount: sync.routeCount,
+      manifest: sync.manifest,
+      resourceVersion: gate.allowed ? outcome.resourceVersion : null,
+      blockedReason: gate.blockedReason,
+      message: gate.allowed ? outcome.message : (gate.blockedReason ?? 'Internal gateway apply blocked'),
+      issuedAt,
+      completedAt: new Date().toISOString()
+    };
+    this.gatewayConfigMapApplies.set(result.applyId, result);
+    this.recordAudit({
+      eventType: 'dns.gateway_configmap.apply_evaluated',
+      actorKind: 'dns-control',
+      requestId: input.requestId ?? null,
+      metadata: {
+        applyId: result.applyId,
+        syncId: result.syncId,
+        status: result.status,
+        allowed: result.allowed,
+        applied: result.applied,
+        serverDryRun: result.serverDryRun,
+        namespace: result.namespace,
+        configMapName: result.configMapName,
+        routeCount: result.routeCount,
         blockedReason: result.blockedReason
       }
     });

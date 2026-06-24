@@ -1,7 +1,9 @@
 import { readFile } from 'node:fs/promises';
 import { request as httpsRequest } from 'node:https';
 
-import type { CoreDnsConfigMapManifest } from '../types.js';
+import type { CoreDnsConfigMapManifest, GatewayConfigMapManifest } from '../types.js';
+
+type ConfigMapManifest = CoreDnsConfigMapManifest | GatewayConfigMapManifest;
 
 interface KubernetesConfigMapObject {
   apiVersion: 'v1';
@@ -13,7 +15,7 @@ interface KubernetesConfigMapObject {
     annotations: Record<string, string>;
     resourceVersion?: string;
   };
-  data: CoreDnsConfigMapManifest['data'];
+  data: ConfigMapManifest['data'];
 }
 
 interface KubernetesApplyOutcome {
@@ -34,6 +36,20 @@ const caPath = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt';
 
 export async function applyCoreDnsConfigMapToKubernetes(
   manifest: CoreDnsConfigMapManifest,
+  serverDryRun: boolean
+): Promise<KubernetesApplyOutcome> {
+  return applyConfigMapToKubernetes(manifest, serverDryRun);
+}
+
+export async function applyGatewayConfigMapToKubernetes(
+  manifest: GatewayConfigMapManifest,
+  serverDryRun: boolean
+): Promise<KubernetesApplyOutcome> {
+  return applyConfigMapToKubernetes(manifest, serverDryRun);
+}
+
+async function applyConfigMapToKubernetes(
+  manifest: ConfigMapManifest,
   serverDryRun: boolean
 ): Promise<KubernetesApplyOutcome> {
   const host = process.env.KUBERNETES_SERVICE_HOST;
@@ -149,7 +165,7 @@ export async function kubernetesRequest(method: string, path: string, body?: unk
 }
 
 function toKubernetesConfigMapObject(
-  manifest: CoreDnsConfigMapManifest,
+  manifest: ConfigMapManifest,
   resourceVersion: string | null
 ): KubernetesConfigMapObject {
   return {

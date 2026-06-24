@@ -93,6 +93,10 @@ export function loadConfig(): RuntimeConfig {
     coreDnsK8sApplyEnabled: boolFromEnv('COREDNS_K8S_APPLY_ENABLED', false),
     coreDnsK8sAllowedNamespace: process.env.COREDNS_K8S_ALLOWED_NAMESPACE ?? 'mx-dns',
     coreDnsK8sAllowedConfigMapName: process.env.COREDNS_K8S_ALLOWED_CONFIGMAP_NAME ?? 'coredns',
+    gatewayK8sApplyEnabled: boolFromEnv('GATEWAY_K8S_APPLY_ENABLED', false),
+    gatewayK8sAllowedNamespace: process.env.GATEWAY_K8S_ALLOWED_NAMESPACE ?? 'mx-internal-shadow',
+    gatewayK8sAllowedConfigMapName: process.env.GATEWAY_K8S_ALLOWED_CONFIGMAP_NAME ?? 'mx-internal-gateway-caddy',
+    gatewayAppPort: intFromEnv('GATEWAY_APP_PORT', 8008),
     siteSlotSshKeyRoot: process.env.MX_SITE_SLOT_SSH_KEY_DIR ?? 'artifacts/ssh'
   };
 }

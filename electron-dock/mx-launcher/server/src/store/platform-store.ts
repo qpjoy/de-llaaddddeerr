@@ -23,6 +23,10 @@ import type {
   DnsReverseProxyRouteInput,
   DnsZoneSnapshot,
   DnsZoneSnapshotInput,
+  GatewayConfigMapApplyInput,
+  GatewayConfigMapApplyResult,
+  GatewayConfigMapSyncInput,
+  GatewayConfigMapSyncResult,
   IdentityLinkRequest,
   IssueTokenInput,
   LauncherNetworkLease,
@@ -131,6 +135,8 @@ export interface PlatformOverview {
   dnsZoneSnapshots: number;
   coreDnsConfigMapSyncs: number;
   coreDnsConfigMapApplies: number;
+  gatewayConfigMapSyncs: number;
+  gatewayConfigMapApplies: number;
   releaseManagementPlans: number;
   permissionGrants: number;
   testRuns: number;
@@ -244,6 +250,8 @@ export interface PlatformStore {
   getDnsZoneSnapshot(snapshotId: string): MaybePromise<DnsZoneSnapshot | null>;
   syncCoreDnsConfigMap(input: CoreDnsConfigMapSyncInput): MaybePromise<CoreDnsConfigMapSyncResult>;
   applyCoreDnsConfigMap(input: CoreDnsConfigMapApplyInput): MaybePromise<CoreDnsConfigMapApplyResult>;
+  syncGatewayConfigMap(input: GatewayConfigMapSyncInput): MaybePromise<GatewayConfigMapSyncResult>;
+  applyGatewayConfigMap(input: GatewayConfigMapApplyInput): MaybePromise<GatewayConfigMapApplyResult>;
   requestPermission(input: PermissionRequestInput): MaybePromise<PermissionGrant>;
   createLauncherNetworkSnapshot(input: LauncherNetworkSnapshotInput): MaybePromise<LauncherNetworkSnapshot>;
   evaluateReleaseUpdate(input: ReleasePolicyInput): MaybePromise<ReleasePolicyDecision>;
