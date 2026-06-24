@@ -433,7 +433,7 @@ function renderConfigForm() {
       </label>
       <label class="field">
         <span>Host Resolve</span>
-        <input name="hostResolve" value="${escapeAttr(config.hostResolve || '')}" placeholder="api.mxinfo-inc.cn=121.43.253.179" />
+        <input name="hostResolve" value="${escapeAttr(config.hostResolve || '')}" placeholder="api.mxinfo-inc.cn=<gateway-ip>" />
       </label>
       <label class="field">
         <span>Bootstrap DNS</span>

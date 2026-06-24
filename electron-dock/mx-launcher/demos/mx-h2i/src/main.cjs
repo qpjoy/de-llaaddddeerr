@@ -2654,7 +2654,11 @@ function requestTextWithHostOverride(override, options = {}) {
       ...normalizeRequestHeaders(options.headers),
       accept: 'application/json',
       host: override.hostHeader,
-      ...(override.originalHostHeader ? { 'x-forwarded-host': override.originalHostHeader } : {})
+      ...(override.originalHostHeader ? {
+        'x-forwarded-host': override.originalHostHeader,
+        'x-mx-bootstrap-host': override.originalHostHeader,
+        'x-mx-bootstrap-domain': hostnameFromUrl(override.originalUrl || '')
+      } : {})
     };
     if (body !== undefined) {
       if (!hasRequestHeader(headers, 'content-type')) headers['content-type'] = 'application/json';
@@ -3071,7 +3075,7 @@ async function bootstrapDnsResolveOverride(url, options = {}) {
   if (!servers.length) return null;
   const address = await resolveBootstrapHostname(parsed.hostname, servers, resolveMode);
   return buildHostOverride(parsed, { host: address, port: null }, resolveMode, {
-    preserveOriginalHost: true,
+    preserveOriginalHost: false,
     source: 'bootstrap-dns'
   });
 }
@@ -3154,7 +3158,7 @@ function hostResolveOverride(url, options = {}) {
   const mapped = resolveMap.get(parsed.hostname.toLowerCase());
   if (!mapped) return null;
   return buildHostOverride(parsed, mapped, resolveMode, {
-    preserveOriginalHost: true,
+    preserveOriginalHost: false,
     source: 'host-resolve'
   });
 }
@@ -3254,6 +3258,14 @@ function normalizeBaseUrl(value) {
   return text || null;
 }
 
+function hostnameFromUrl(value) {
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return '';
+  }
+}
+
 function joinApiUrl(baseUrl, pathName) {
   const base = normalizeBaseUrl(baseUrl);
   if (!base) throw new Error('Internal API baseUrl 为空。');
@@ -3301,6 +3313,12 @@ function classifyConnectionError(err) {
   const message = errorMessage(err);
   const status = Number(err?.status || err?.statusCode || err?.payload?.statusCode || 0);
   const lower = message.toLowerCase();
+  if (status === 403 && isPublicIcpBlockedError(err)) {
+    return {
+      state: 'network-unavailable',
+      message: `公网域名被备案/公网入口拦截（403），不是 Internal 权限拒绝。请保留 Bootstrap API 域名，并在高级选项 Host Resolve 设置 api.mxinfo-inc.cn=<正式 Domestic gateway IP>；客户端会连接该 IP，HTTP Host 使用 gateway IP，原始域名放在 X-Forwarded-Host/X-MX-Bootstrap-Host。原始错误：${message}`
+    };
+  }
   if (status === 403 || lower.includes('403 forbidden') || lower.includes('forbidden')) {
     return {
       state: 'forbidden',
@@ -3325,6 +3343,25 @@ function classifyConnectionError(err) {
   };
 }
 
+function isPublicIcpBlockedError(err) {
+  const text = errorPayloadText(err).toLowerCase();
+  return text.includes('non-compliance icp filing')
+    || text.includes('beian')
+    || text.includes('aliyun.com/beian')
+    || text.includes('server: beaver');
+}
+
+function errorPayloadText(err) {
+  const payload = err?.payload;
+  if (typeof payload === 'string') return payload;
+  if (payload && typeof payload === 'object') {
+    return Object.values(payload)
+      .map((value) => Array.isArray(value) ? value.join(' ') : String(value || ''))
+      .join(' ');
+  }
+  return '';
+}
+
 function errorMessage(err) {
   if (!err) return 'unknown error';
   const dial = err.originalUrl && err.dialUrl ? `${err.originalUrl} -> ${err.dialUrl}` : '';
@@ -3334,6 +3371,10 @@ function errorMessage(err) {
     if (typeof payload.message === 'string') return payload.message;
     if (Array.isArray(payload.message)) return payload.message.join(', ');
     if (typeof payload.error === 'string') return payload.error;
+  }
+  if (typeof payload === 'string' && payload.trim()) {
+    const compact = payload.replace(/\s+/g, ' ').trim();
+    return compact.length > 180 ? `${compact.slice(0, 177)}...` : compact;
   }
   if (err.name === 'AbortError') return '请求超时。';
   if (err.cause && typeof err.cause === 'object') {

@@ -847,8 +847,7 @@ export function buildDnsReverseProxyRoute(
 ): DnsReverseProxyRoute {
   const host = normalizeDomain(input.host?.trim() || previous?.host || '');
   if (!host) throw new Error('DNS route host is required');
-  const targetUrl = input.targetUrl?.trim() || previous?.targetUrl || '';
-  if (!targetUrl) throw new Error('DNS route targetUrl is required');
+  const targetUrl = normalizeOptionalTargetUrl(input, previous);
   const dnsTarget = normalizeDnsRouteTarget(input.dnsTarget || previous?.dnsTarget || '10.88.88.88');
   if (!dnsTarget) throw new Error('DNS route dnsTarget is required');
   const tlsMode = dnsReverseProxyTlsMode(input.tlsMode ?? previous?.tlsMode);
@@ -1104,7 +1103,7 @@ function dnsZoneRecords(
   }
   for (const route of routes.filter((row) => row.enabled)) {
     const host = normalizeDomain(route.host);
-    const target = normalizeDnsRouteTarget(route.dnsTarget) || hostFromUrl(route.targetUrl) || targetServiceDns;
+    const target = normalizeDnsRouteTarget(route.dnsTarget) || hostFromUrl(route.targetUrl || '') || targetServiceDns;
     records.set(host, dnsRecordForTarget(host, target, 'reverse-proxy-route'));
   }
   for (const record of internalDnsServiceRecords(config, policy)) {
@@ -1181,6 +1180,13 @@ function normalizeDnsRouteTarget(value: string | null | undefined): string {
   if (!candidate) return '';
   const host = hostFromUrl(candidate).replace(/^([^:/]+):\d+$/, '$1');
   return isIpv4(host) ? host : normalizeDomain(host);
+}
+
+function normalizeOptionalTargetUrl(input: DnsReverseProxyRouteInput, previous: DnsReverseProxyRoute | null): string | null {
+  if (Object.prototype.hasOwnProperty.call(input, 'targetUrl')) {
+    return input.targetUrl?.trim() || null;
+  }
+  return previous?.targetUrl || null;
 }
 
 function isIpv4(value: string): boolean {

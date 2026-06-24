@@ -2110,7 +2110,7 @@ export interface DnsReverseProxyRoute {
   environment: string;
   host: string;
   dnsTarget: string;
-  targetUrl: string;
+  targetUrl: string | null;
   enabled: boolean;
   tlsMode: 'internal' | 'passthrough' | 'edge-terminated';
   authRequired: boolean;

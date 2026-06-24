@@ -317,7 +317,7 @@ Docker systemd proxy 环境和 Oversea hysteria2 订阅，而不是把它归因�
 
 ```dotenv
 MX_H2I_BOOTSTRAP_BASE_URL=http://api.mxinfo-inc.cn:18090
-MX_H2I_HOST_RESOLVE=api.mxinfo-inc.cn=121.43.253.179
+MX_H2I_HOST_RESOLVE=api.mxinfo-inc.cn=<gateway-ip>
 MX_H2I_INTERNAL_BASE_URL=http://10.88.88.88:18090
 MX_H2I_SPLIT_DNS_DOMAINS=mxinfo-inc.cn,api.mxinfo-inc.cn
 ```
@@ -325,6 +325,11 @@ MX_H2I_SPLIT_DNS_DOMAINS=mxinfo-inc.cn,api.mxinfo-inc.cn
 正式部署时，公网 DNS 可以把 `api.mxinfo-inc.cn` 解析到 Domestic 公网入口；连上 WG 后，
 Internal DNS/split DNS 可以把同一域名或内网服务域名解析到 Internal overlay IP。这样用户不需要
 手动填 IP，Admin 只需要管理公网解析、Internal DNS policy 和 routePlan。
+如果公网 DNS 命中了云厂商备案/合规拦截页，H2I bootstrap 应使用 Host Resolve：配置
+`Bootstrap API=http://api.mxinfo-inc.cn:18090`，再配置
+`Host Resolve=api.mxinfo-inc.cn=<可达的 Domestic/Internal gateway IP>`。客户端实际拨号到
+该 IP，HTTP `Host` 使用 gateway IP，并通过 `X-Forwarded-Host` / `X-MX-Bootstrap-Host`
+传递原始域名，避免公网备案层按 Host 拦截。
 若客户端选择 `dns-first` bootstrap，但显式 resolver 未启动、超时或中断，MX-H2I 应先做
 3 次 DNS 探测重试；仍不可用时在 UI 提示本次已降级，然后按 Host Resolve/env、系统默认网络/
 系统代理的顺序继续获取 lease。这个降级只用于 bootstrap，不应作为 H2I ready 证据；ready 仍以

@@ -8278,7 +8278,7 @@ function createDnsRouteEditorDraft(mode = 'create', routeId = '') {
     routeId: route?.routeId || '',
     host: route?.host || '',
     dnsTarget: route?.dnsTarget || MX_INTERNAL_DNS_IP,
-    targetUrl: route?.targetUrl || `http://${MX_INTERNAL_DNS_IP}:18090`,
+    targetUrl: route?.targetUrl || '',
     enabled: route?.enabled === false ? false : true,
     tlsMode: route?.tlsMode || 'internal',
     authRequired: route?.authRequired === false ? false : true
@@ -8331,7 +8331,7 @@ function renderDnsRouteEditorDrawer() {
         <div>
           <span class="site-kind">DNS Route</span>
           <h2>${escapeHtml(title)}</h2>
-          <p>DNS target feeds CoreDNS; upstream URL feeds gateway reverse proxy decisions.</p>
+          <p>DNS target feeds CoreDNS; optional upstream URL feeds gateway reverse proxy decisions.</p>
         </div>
         <button class="icon-button app-drawer-close" type="button" data-dns-route-close aria-label="Close DNS route editor">×</button>
       </header>
@@ -8355,8 +8355,8 @@ function renderDnsRouteEditorDrawer() {
               <input data-dns-route-field="dnsTarget" value="${escapeHtml(draft.dnsTarget || '')}" placeholder="${MX_INTERNAL_DNS_IP}" autocomplete="off" />
             </label>
             <label class="app-form-field app-form-wide">
-              <span>Upstream URL</span>
-              <input data-dns-route-field="targetUrl" value="${escapeHtml(draft.targetUrl || '')}" placeholder="http://${MX_INTERNAL_DNS_IP}:13141" autocomplete="off" />
+              <span>Upstream URL optional</span>
+              <input data-dns-route-field="targetUrl" value="${escapeHtml(draft.targetUrl || '')}" placeholder="http://${MX_INTERNAL_DNS_IP}:service-port" autocomplete="off" />
             </label>
           </div>
         </section>
@@ -8472,7 +8472,7 @@ async function saveDnsRouteFromEditor(root) {
         routeId: blankToNull(draft.routeId),
         host: draft.host,
         dnsTarget: draft.dnsTarget,
-        targetUrl: draft.targetUrl,
+        targetUrl: blankToNull(draft.targetUrl),
         enabled: draft.enabled,
         tlsMode: draft.tlsMode,
         authRequired: draft.authRequired,
