@@ -40,3 +40,46 @@ const routePlan = session.routePlan;
 
 `standalone` mode is for the full Launcher shell. `embed` mode is for product
 apps that carry Launcher network capability inside the app.
+
+## Runtime adapters
+
+The package exposes optional runtime adapters as separate subpaths so products
+can depend only on the capabilities they own:
+
+| Subpath | Purpose |
+| --- | --- |
+| `@qpjoy/electron-launcher` | launcher client, product definition, standalone/embed SDK facade |
+| `@qpjoy/electron-launcher/wireguard` | WireGuard profile rendering, route proof, and peer recovery |
+| `@qpjoy/electron-launcher/system-domain-proxy` | standalone local PAC/proxy edge plus OS PAC apply/restore/verify |
+
+System PAC is intended for Launcher standalone owners. For MX-H2I the local edge
+listens on `127.0.0.1:2053` by default and serves both `/proxy.pac` and an
+HTTP/CONNECT proxy on TCP, plus a UDP DNS relay on the same port. Internal
+domains are resolved with the Internal IP from the route plan, `10.88.88.88` by
+default, through the WireGuard AllowedIPs path. The Domestic gateway
+`10.88.0.1` is only a fallback relay/cache target; all other domains fall back
+to the previous system proxy when one is detected or provided. If another
+standalone launcher already owns the same local edge port, a later instance
+reuses it.
+
+```ts
+import { createElectronLauncherSystemDomainProxy } from '@qpjoy/electron-launcher/system-domain-proxy';
+
+const systemDomainProxy = createElectronLauncherSystemDomainProxy({
+  userDataDir: app.getPath('userData'),
+  pacPort: 2053
+});
+
+await systemDomainProxy.apply({
+  enabled: true,
+  domains: ['internal.mx', 'svc.cluster.local'],
+  matchMode: 'proxy',
+  proxy: '127.0.0.1:2053',
+  pacPort: 2053,
+  dnsServers: ['10.88.88.88', '10.88.0.1'],
+  fallbackProxy: '127.0.0.1:7890'
+});
+
+// Later, when the launcher channel disconnects:
+await systemDomainProxy.disable('disconnect');
+```

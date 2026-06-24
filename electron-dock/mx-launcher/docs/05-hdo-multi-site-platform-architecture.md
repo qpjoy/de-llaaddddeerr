@@ -552,6 +552,19 @@ flowchart LR
   可以通过 `MX_H2I_BOOTSTRAP_DNS_SERVERS` 指定一个公网或 Domestic edge resolver，
   解析成功后用解析出的 IP 建连，同时保留原始 Host header。连接建立以后，再由
   Launcher Network split DNS/PAC 将白名单域名切到 Internal CoreDNS。
+- `dns-first` 只是 bootstrap 的优先路径，不是单点依赖。显式 DNS resolver 超时或中断时，
+  客户端先重试 3 次；仍失败则提示用户，并临时降级到 Host Resolve/env 路径，若未配置或仍不可达，
+  再走系统默认网络/系统代理路径继续尝试 HDI lease 与后续 WireGuard 建连。
+- Clash/mihomo 的系统代理可以作为 bootstrap fallback；TUN/fake-ip 只能作为外联路径，
+  不能作为 H2I ready 证据。若 route proof 命中 `198.18.0.0/15`、proxy TUN、非 MX-H2I
+  `utun` 或 `lo0`，客户端必须保持 not ready/待恢复，而不是宣告 Internal 已通。
+- `@qpjoy/electron-launcher/system-domain-proxy` 负责可发布的 standalone 本机入口：
+  owner 在 H2I ready 后按 Internal 域名安装系统 PAC。MX-H2I 默认占用或复用
+  `127.0.0.1:2053`，同一端口提供 `/proxy.pac`、HTTP/CONNECT proxy 和 Internal DNS
+  resolver 访问；命中域名返回 `PROXY 127.0.0.1:2053`，由本机入口优先通过
+  routePlan `internalControlIp`（默认 `10.88.88.88`）解析并走 WG AllowedIPs。
+  `10.88.0.1` 是 Domestic gateway/relay，只作为 relay/cache fallback。未命中域名回落到原
+  Clash/mihomo/system proxy，断开时恢复原系统状态。
 - Admin 可以维护 Internal reverse proxy routes：`host` 表示业务域名，
   `targetUrl` 表示 Internal Gateway 或 service 入口。Zone snapshot 会把这些 route
   渲染成 CoreDNS A/CNAME 记录，再交给 `mx-dns/coredns` ConfigMap apply。

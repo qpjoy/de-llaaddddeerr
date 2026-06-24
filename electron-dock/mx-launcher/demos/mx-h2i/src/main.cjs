@@ -6,7 +6,7 @@ const https = require('node:https');
 const dnsPromises = require('node:dns').promises;
 const net = require('node:net');
 const { randomUUID } = require('node:crypto');
-const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: electronScreen, powerMonitor } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: electronScreen, powerMonitor, net: electronNet } = require('electron');
 
 loadDotEnvFiles();
 
@@ -17,6 +17,9 @@ const REQUESTED_BY = 'mx-h2i-desktop';
 const WIREGUARD_PROFILE_NAME = 'mx-h2i.conf';
 const INTERNAL_PEER_IP = '10.88.88.88';
 const LOCAL_INTERNAL_BASE_URLS = ['http://127.0.0.1:18090', 'http://localhost:18090'];
+const BOOTSTRAP_DNS_RETRY_LIMIT = 3;
+const BOOTSTRAP_DNS_RETRY_DELAY_MS = 350;
+const DEFAULT_LOCAL_EDGE_PORT = 2053;
 const DEFAULT_CONFIG = {
   bootstrapApiBaseUrl: defaultBootstrapApiBaseUrl(),
   internalApiBaseUrl: 'http://10.88.88.88:18090',
@@ -55,6 +58,7 @@ let wireGuardRecoveryInFlight = null;
 let wireGuardConnectInFlight = false;
 let lastWireGuardRecoveryFailureAt = 0;
 const wireGuardRecoveryTimers = [];
+let systemDomainProxyManager = null;
 
 const TOP_DOCK_Y = 0;
 const TOP_REVEAL_ZONE = 18;
@@ -76,6 +80,7 @@ app.on('second-instance', () => {
 
 app.whenReady().then(async () => {
   runtime = await loadRuntime();
+  await initializeSystemDomainProxy();
   registerIpc();
   createTray();
   createMainWindow();
@@ -89,6 +94,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   stopWireGuardRecoveryWatcher();
+  void closeSystemDomainProxy();
 });
 
 app.on('activate', () => {
@@ -177,7 +183,7 @@ function registerIpc() {
     try {
       const bootstrap = await resolveBootstrapEndpoint(runtime.config);
       const baseUrl = bootstrap.baseUrl;
-      await applyResolvedBootstrapBaseUrl(baseUrl);
+      await applyResolvedBootstrapEndpoint(bootstrap);
       const auth = await authenticateUserViaGateway(baseUrl, account, password, {
         bootstrapResolveMode: bootstrap.resolveMode
       });
@@ -206,14 +212,17 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:disconnect', async () => {
+    const systemDomainProxy = await disableSystemDomainProxyForRuntime('disconnect');
     const wireGuard = await stopWireGuardForRuntime();
     runtime.connection = idleConnection();
     runtime.auth = null;
     runtime.feedback = {
-      tone: wireGuard?.ok === false ? 'warning' : 'info',
+      tone: wireGuard?.ok === false || systemDomainProxy?.error ? 'warning' : 'info',
       message: wireGuard?.ok === false
         ? `已断开 launcher channel，但 WireGuard 停止失败：${wireGuard.message || wireGuard.error || 'unknown'}`
-        : '已断开 MX-H2I standalone channel 和客户端 WireGuard；IP lease 会保留并在下次连接时续租。'
+        : systemDomainProxy?.error
+          ? `已断开 MX-H2I standalone channel；系统 PAC 恢复失败：${systemDomainProxy.error}`
+          : '已断开 MX-H2I standalone channel、系统 PAC 和客户端 WireGuard；IP lease 会保留并在下次连接时续租。'
     };
     touchRuntime('disconnected');
     await saveAndBroadcast();
@@ -579,6 +588,106 @@ function scheduleWireGuardRecovery(reason, delays = [2500, 12_000, 25_000]) {
     timer.unref?.();
     wireGuardRecoveryTimers.push(timer);
   }
+}
+
+async function initializeSystemDomainProxy() {
+  try {
+    const mod = await import('@qpjoy/electron-launcher/system-domain-proxy');
+    systemDomainProxyManager = mod.createElectronLauncherSystemDomainProxy({
+      userDataDir: app.getPath('userData'),
+      pacPort: localEdgePort(),
+      log: console
+    });
+    if (shouldRecoverWireGuardConnection(runtime?.connection)) {
+      await ensureSystemDomainProxyForRuntime('app-startup');
+    } else {
+      await systemDomainProxyManager.restoreStale('app-startup');
+    }
+  } catch (err) {
+    console.warn('[mx-h2i] system domain proxy unavailable:', errorMessage(err));
+    systemDomainProxyManager = null;
+  }
+}
+
+async function ensureSystemDomainProxyForRuntime(reason = 'manual') {
+  if (!systemDomainProxyManager) return null;
+  const domains = splitDnsDomains(runtime?.config);
+  if (domains.length === 0 || runtime?.connection?.state !== 'connected') {
+    return disableSystemDomainProxyForRuntime(`${reason}-not-connected`);
+  }
+  try {
+    return await systemDomainProxyManager.apply({
+      enabled: true,
+      domains,
+      matchMode: 'proxy',
+      proxy: localEdgeProxy(),
+      pacPort: localEdgePort(),
+      dnsServers: systemPacDnsServers(),
+      fallbackProxy: systemPacFallbackProxy()
+    });
+  } catch (err) {
+    return {
+      supported: true,
+      applied: false,
+      platform: process.platform,
+      reason,
+      error: errorMessage(err)
+    };
+  }
+}
+
+async function disableSystemDomainProxyForRuntime(reason = 'manual') {
+  if (!systemDomainProxyManager) return null;
+  try {
+    return await systemDomainProxyManager.disable(reason);
+  } catch (err) {
+    return {
+      supported: true,
+      applied: false,
+      platform: process.platform,
+      reason,
+      error: errorMessage(err)
+    };
+  }
+}
+
+async function closeSystemDomainProxy() {
+  if (!systemDomainProxyManager) return;
+  await systemDomainProxyManager.close?.().catch(() => undefined);
+}
+
+function systemPacFallbackProxy() {
+  return nullableString(process.env.MX_H2I_SYSTEM_PAC_FALLBACK_PROXY)
+    || nullableString(process.env.MX_H2I_CLASH_PROXY)
+    || nullableString(process.env.MX_H2I_MIHOMO_PROXY)
+    || null;
+}
+
+function localEdgePort() {
+  const port = Number(
+    nullableString(process.env.MX_H2I_LOCAL_EDGE_PORT)
+    || nullableString(process.env.MX_H2I_SYSTEM_PAC_PORT)
+    || DEFAULT_LOCAL_EDGE_PORT
+  );
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : DEFAULT_LOCAL_EDGE_PORT;
+}
+
+function localEdgeProxy() {
+  return `127.0.0.1:${localEdgePort()}`;
+}
+
+function systemPacDnsServers() {
+  return arrayValue([
+    process.env.MX_H2I_LOCAL_EDGE_DNS_SERVER,
+    runtime?.connection?.routePlan?.internalControlIp,
+    runtime?.connection?.internalControlIp,
+    INTERNAL_PEER_IP,
+    runtime?.connection?.routePlan?.dnsServer,
+    runtime?.connection?.routePlan?.domesticGatewayIp
+  ], [])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .filter((item, index, rows) => rows.indexOf(item) === index);
 }
 
 function isCursorInsideWindow(point = electronScreen.getCursorScreenPoint()) {
@@ -1161,6 +1270,9 @@ function normalizeDiagnostics(input) {
     domesticRelayDiagnostics: row.domesticRelayDiagnostics && typeof row.domesticRelayDiagnostics === 'object'
       ? row.domesticRelayDiagnostics
       : null,
+    systemDomainProxy: row.systemDomainProxy && typeof row.systemDomainProxy === 'object'
+      ? row.systemDomainProxy
+      : null,
     updatedAt: nullableString(row.updatedAt) || nowIso()
   };
 }
@@ -1207,7 +1319,7 @@ function setConnecting(mode) {
 async function connectLauncherNetwork(input) {
   const context = await launcherContext();
   const requestTag = stringValue(input.requestTag, 'connect');
-  return context.launcher.connectNetwork({
+  const session = await context.launcher.connectNetwork({
     identityKind: input.identityKind,
     userId: input.userId || undefined,
     installId: context.installation.installId,
@@ -1221,12 +1333,16 @@ async function connectLauncherNetwork(input) {
     requestedBy: REQUESTED_BY,
     requestId: makeRequestId(requestTag)
   });
+  return {
+    ...session,
+    bootstrapResolution: context.bootstrap
+  };
 }
 
 async function launcherContext() {
   const bootstrap = await resolveBootstrapEndpoint(runtime.config);
   const baseUrl = bootstrap.baseUrl;
-  await applyResolvedBootstrapBaseUrl(baseUrl);
+  await applyResolvedBootstrapEndpoint(bootstrap);
   const installation = await ensureInstallation();
   const mod = await import('@qpjoy/electron-launcher');
   const launcher = mod.createElectronLauncher({
@@ -1243,7 +1359,7 @@ async function launcherContext() {
     deviceLabel: installation.deviceLabel
   });
   await ensureMxH2iProduct(launcher);
-  return { baseUrl, installation, launcher };
+  return { baseUrl, bootstrap, installation, launcher };
 }
 
 async function ensureInstallation() {
@@ -1295,6 +1411,11 @@ async function ensureMxH2iProduct(launcher) {
 async function applyNetworkSession(session, options) {
   wireGuardConnectInFlight = true;
   const lease = session.lease || {};
+  const bootstrapResolution = normalizeBootstrapResolution(session.bootstrapResolution);
+  const bootstrapResolveMode = bootstrapResolution?.resolveMode || runtime.config.bootstrapResolveMode;
+  const feedback = bootstrapResolution?.fallback?.message
+    ? `${options.feedback} ${bootstrapResolution.fallback.message}`
+    : options.feedback;
   try {
     const routePlan = normalizeRoutePlan(session.routePlan);
     const wireGuard = session.wireGuard || {};
@@ -1335,13 +1456,13 @@ async function applyNetworkSession(session, options) {
     runtime.auth = normalizeAuth(options.auth);
     runtime.feedback = {
       tone: 'info',
-      message: `${options.feedback} 正在启动客户端 WireGuard。`
+      message: `${feedback} 正在启动客户端 WireGuard。`
     };
     touchRuntime(options.mode === 'employee' ? 'employee lease ready' : 'guest lease ready');
 
-    const domesticPeerSync = await syncDomesticPeerForLease(lease);
-    const internalDirectPeerSync = await syncInternalDirectPeerForLease(lease, routePlan);
-    const domesticRelayDiagnostics = await diagnoseDomesticRelayForLease(lease);
+    const domesticPeerSync = await syncDomesticPeerForLease(lease, { bootstrapResolveMode });
+    const internalDirectPeerSync = await syncInternalDirectPeerForLease(lease, routePlan, { bootstrapResolveMode });
+    const domesticRelayDiagnostics = await diagnoseDomesticRelayForLease(lease, { bootstrapResolveMode });
     const wireGuardResult = await startWireGuardForSession({
       routePlan,
       privateKey,
@@ -1358,11 +1479,28 @@ async function applyNetworkSession(session, options) {
       domesticPeerSync,
       diagnostics: wireGuardResult.diagnostics
     };
+    const systemDomainProxy = wireGuardResult.ready
+      ? await ensureSystemDomainProxyForRuntime('post-connect')
+      : await disableSystemDomainProxyForRuntime('wireguard-not-ready');
+    if (systemDomainProxy) {
+      runtime.connection = {
+        ...runtime.connection,
+        diagnostics: {
+          ...(runtime.connection.diagnostics || {}),
+          systemDomainProxy
+        }
+      };
+    }
+    const pacFeedback = systemDomainProxy?.applied
+      ? ` 系统 PAC 已将 Internal 域名接入本机 ${localEdgeProxy()}，其它流量回落到原系统代理。`
+      : systemDomainProxy?.error
+        ? ` 系统 PAC 未启用：${systemDomainProxy.error}`
+        : '';
     runtime.feedback = {
       tone: wireGuardResult.ready ? 'success' : 'warning',
       message: wireGuardResult.ready
-        ? `${options.feedback} 客户端 WireGuard 已通过 ${wireGuardPathLabel(wireGuardResult.path)} 探测 Internal。`
-        : `${options.feedback} 已保留租约，但客户端 WireGuard 还未 ready：${wireGuardResult.message}`
+        ? `${feedback} 客户端 WireGuard 已通过 ${wireGuardPathLabel(wireGuardResult.path)} 探测 Internal。${pacFeedback}`
+        : `${feedback} 已保留租约，但客户端 WireGuard 还未 ready：${wireGuardResult.message}`
     };
     touchRuntime(wireGuardResult.ready
       ? (options.mode === 'employee' ? 'employee wireguard connected' : 'guest wireguard connected')
@@ -1542,7 +1680,7 @@ async function probeWireGuardForConnection(input) {
   }
 }
 
-async function syncDomesticPeerForLease(lease) {
+async function syncDomesticPeerForLease(lease, options = {}) {
   const leaseId = nullableString(lease?.leaseId);
   if (!leaseId) {
     return {
@@ -1560,7 +1698,7 @@ async function syncDomesticPeerForLease(lease) {
         requestId: makeRequestId('domestic-peer-sync')
       },
       timeoutMs: 18000,
-      bootstrapResolveMode: runtime.config.bootstrapResolveMode
+      bootstrapResolveMode: options.bootstrapResolveMode || runtime.config.bootstrapResolveMode
     });
     return normalizeDomesticPeerSync(payload?.domesticPeerSync) || {
       status: 'failed',
@@ -1579,7 +1717,7 @@ async function syncDomesticPeerForLease(lease) {
   }
 }
 
-async function syncInternalDirectPeerForLease(lease, routePlan) {
+async function syncInternalDirectPeerForLease(lease, routePlan, options = {}) {
   const leaseId = nullableString(lease?.leaseId);
   const plan = normalizeRoutePlan(routePlan);
   if (!leaseId) {
@@ -1607,7 +1745,7 @@ async function syncInternalDirectPeerForLease(lease, routePlan) {
         requestId: makeRequestId('internal-direct-peer-sync')
       },
       timeoutMs: 20000,
-      bootstrapResolveMode: runtime.config.bootstrapResolveMode
+      bootstrapResolveMode: options.bootstrapResolveMode || runtime.config.bootstrapResolveMode
     });
     return normalizeInternalDirectPeerSync(payload?.internalDirectPeerSync) || {
       status: 'failed',
@@ -1626,7 +1764,7 @@ async function syncInternalDirectPeerForLease(lease, routePlan) {
   }
 }
 
-async function diagnoseDomesticRelayForLease(lease) {
+async function diagnoseDomesticRelayForLease(lease, options = {}) {
   const leaseId = nullableString(lease?.leaseId);
   if (!leaseId) {
     return {
@@ -1644,7 +1782,7 @@ async function diagnoseDomesticRelayForLease(lease) {
         requestId: makeRequestId('domestic-relay-diagnostics')
       },
       timeoutMs: 22000,
-      bootstrapResolveMode: runtime.config.bootstrapResolveMode
+      bootstrapResolveMode: options.bootstrapResolveMode || runtime.config.bootstrapResolveMode
     });
     return payload?.domesticRelayDiagnostics || {
       status: 'failed',
@@ -2117,6 +2255,7 @@ async function resolveBootstrapBaseUrl(config) {
 }
 
 async function resolveBootstrapEndpoint(config) {
+  const requestedMode = normalizeBootstrapResolveMode(config?.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode);
   const seeds = [
     normalizeBaseUrl(process.env.MX_H2I_BOOTSTRAP_BASE_URL),
     normalizeBaseUrl(config.bootstrapApiBaseUrl),
@@ -2131,7 +2270,11 @@ async function resolveBootstrapEndpoint(config) {
     for (const resolveMode of bootstrapResolveAttempts(candidate, config)) {
       try {
         await probeBootstrapApiBaseUrl(candidate, { bootstrapResolveMode: resolveMode });
-        return { baseUrl: candidate, resolveMode };
+        return {
+          baseUrl: candidate,
+          resolveMode,
+          fallback: bootstrapResolveFallback(requestedMode, resolveMode, failures)
+        };
       } catch (err) {
         failures.push({
           candidate,
@@ -2150,9 +2293,17 @@ function bootstrapResolveAttempts(candidate, config) {
   const hasHostOverride = Boolean(hostResolveOverride(candidate, { bootstrapResolveMode: 'env-only' }));
   if (mode === 'env-only') return ['env-only'];
   if (mode === 'dns-only') return ['dns-only'];
-  if (!hasHostOverride) return ['dns-only'];
-  if (mode === 'dns-first') return ['dns-only', 'env-only'];
-  return ['env-only', 'dns-only'];
+  if (mode === 'system-only') return ['system-only'];
+  if (mode === 'dns-first') return uniqueValues([
+    'dns-only',
+    ...(hasHostOverride ? ['env-only'] : []),
+    'system-only'
+  ]);
+  return uniqueValues([
+    ...(hasHostOverride ? ['env-only'] : []),
+    'system-only',
+    'dns-only'
+  ]);
 }
 
 function bootstrapBaseUrlCandidates(seeds) {
@@ -2209,18 +2360,53 @@ function parseBootstrapPortList(value) {
     .filter(Boolean);
 }
 
+function bootstrapResolveFallback(requestedMode, resolveMode, failures) {
+  if (requestedMode !== 'dns-first' || resolveMode === 'dns-only') return null;
+  const dnsFailures = failures.filter((failure) => failure.resolveMode === 'dns-only' && isBootstrapDnsFailure(failure.error));
+  if (!dnsFailures.length) return null;
+  const retryCount = Math.max(
+    BOOTSTRAP_DNS_RETRY_LIMIT,
+    ...dnsFailures.map((failure) => Number(failure.error?.dnsRetryCount) || 0)
+  );
+  return {
+    from: 'dns-first',
+    to: resolveMode,
+    retryCount,
+    message: `Bootstrap DNS 连续 ${retryCount} 次未成功，已临时降级到 ${bootstrapResolveModeLabel(resolveMode)} 继续建立 HDI。`
+  };
+}
+
+function isBootstrapDnsFailure(err) {
+  if (!err) return false;
+  if (err.code === 'MX_BOOTSTRAP_DNS_FAILED' || err.code === 'MX_BOOTSTRAP_DNS_TIMEOUT') return true;
+  return isBootstrapDnsFailure(err.cause);
+}
+
+function bootstrapResolveModeLabel(mode) {
+  if (mode === 'env-only' || mode === 'env-first') return 'Host Resolve/env-first';
+  if (mode === 'system-only') return '系统默认网络/系统代理';
+  if (mode === 'dns-only' || mode === 'dns-first') return 'Bootstrap DNS';
+  return String(mode || '默认网络');
+}
+
 function summarizeBootstrapProbeFailures(failures) {
   const rows = failures.slice(0, 8).map((failure) => {
     const dialUrl = failure.override?.url || failure.error?.dialUrl;
     const resolved = dialUrl && dialUrl !== failure.candidate
       ? ` -> ${dialUrl}`
       : '';
-    const mode = failure.resolveMode === 'env-only' ? 'env' : 'dns';
+    const mode = bootstrapResolveModeShortLabel(failure.resolveMode);
     return `[${mode}] ${failure.candidate}${resolved}: ${errorMessage(failure.error)}`;
   });
   const hidden = failures.length > rows.length ? `；另有 ${failures.length - rows.length} 个候选失败` : '';
   const hostResolveHint = bootstrapHostResolveHint(failures);
   return `${rows.join('；')}${hidden}${hostResolveHint}`;
+}
+
+function bootstrapResolveModeShortLabel(mode) {
+  if (mode === 'env-only' || mode === 'env-first') return 'env';
+  if (mode === 'system-only') return 'system';
+  return 'dns';
 }
 
 function bootstrapHostResolveHint(failures) {
@@ -2286,6 +2472,35 @@ async function applyResolvedBootstrapBaseUrl(baseUrl) {
   runtime.launcherContract = await launcherContract(runtime.config);
 }
 
+async function applyResolvedBootstrapEndpoint(bootstrap) {
+  const resolution = normalizeBootstrapResolution(bootstrap);
+  if (!resolution?.baseUrl) return;
+  await applyResolvedBootstrapBaseUrl(resolution.baseUrl);
+  if (!resolution.fallback?.message) return;
+  runtime.feedback = {
+    tone: 'warning',
+    message: resolution.fallback.message
+  };
+  touchRuntime('bootstrap dns fallback');
+  await saveAndBroadcast();
+}
+
+function normalizeBootstrapResolution(input) {
+  const row = input && typeof input === 'object' ? input : null;
+  if (!row) return null;
+  const fallback = row.fallback && typeof row.fallback === 'object' ? row.fallback : null;
+  return {
+    baseUrl: normalizeBaseUrl(row.baseUrl),
+    resolveMode: normalizeBootstrapResolveMode(row.resolveMode),
+    fallback: fallback ? {
+      from: normalizeBootstrapResolveMode(fallback.from),
+      to: normalizeBootstrapResolveMode(fallback.to),
+      retryCount: Number.isFinite(fallback.retryCount) ? fallback.retryCount : null,
+      message: nullableString(fallback.message)
+    } : null
+  };
+}
+
 function normalizeRoutePlan(input) {
   const row = input && typeof input === 'object' ? input : null;
   if (!row) return null;
@@ -2324,39 +2539,20 @@ function normalizeRoutePlan(input) {
 }
 
 async function requestJson(url, options = {}) {
+  const resolveMode = normalizeBootstrapResolveMode(
+    options.bootstrapResolveMode || runtime?.config?.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode
+  );
   const hostOverride = await requestHostOverride(url, { bootstrapResolveMode: options.bootstrapResolveMode });
   if (hostOverride) return requestJsonWithHostOverride(hostOverride, options);
-  if (typeof fetch !== 'function') throw new Error('当前 Electron 运行时没有 fetch。');
-  const controller = new AbortController();
-  const timeout = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 6000;
-  const timer = setTimeout(() => controller.abort(), timeout);
-  try {
-    const method = requestMethod(options.method);
-    const body = requestBodyForMethod(method, options.body);
-    const headers = {
-      accept: 'application/json',
-      ...normalizeRequestHeaders(options.headers)
-    };
-    if (body !== undefined && !hasRequestHeader(headers, 'content-type')) {
-      headers['content-type'] = 'application/json';
-    }
-    const response = await fetch(url, {
-      method,
-      headers,
-      ...(body !== undefined ? { body } : {}),
-      signal: controller.signal
-    });
-    const text = await response.text();
-    const payload = parseJsonPayload(text);
-    if (!response.ok) {
-      const err = new Error(`HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`);
-      err.payload = payload;
-      throw err;
-    }
-    return payload;
-  } finally {
-    clearTimeout(timer);
+  if (resolveMode === 'system-only') return requestJsonWithSystemNetwork(url, options);
+  const result = await requestTextWithFetch(url, options);
+  const payload = parseJsonPayload(result.text);
+  if (result.status < 200 || result.status >= 300) {
+    const err = new Error(`HTTP ${result.status}${result.statusText ? ` ${result.statusText}` : ''}`);
+    err.payload = payload;
+    throw err;
   }
+  return payload;
 }
 
 function requestJsonWithHostOverride(override, options = {}) {
@@ -2374,10 +2570,38 @@ function requestJsonWithHostOverride(override, options = {}) {
   });
 }
 
+function requestJsonWithSystemNetwork(url, options = {}) {
+  return requestTextWithSystemNetwork(url, options).then((result) => {
+    const payload = parseJsonPayload(result.text);
+    if (result.status < 200 || result.status >= 300) {
+      const err = new Error(`HTTP ${result.status}${result.statusText ? ` ${result.statusText}` : ''}`);
+      err.payload = payload;
+      err.originalUrl = url;
+      err.bootstrapResolveMode = 'system-only';
+      throw err;
+    }
+    return payload;
+  });
+}
+
 function launcherFetchForBootstrap(resolveMode) {
+  const mode = normalizeBootstrapResolveMode(resolveMode);
   return async (url, init = {}) => {
-    const hostOverride = await requestHostOverride(String(url), { bootstrapResolveMode: resolveMode });
+    const hostOverride = await requestHostOverride(String(url), { bootstrapResolveMode: mode });
     if (!hostOverride) {
+      if (mode === 'system-only') {
+        const result = await requestTextWithSystemNetwork(String(url), {
+          method: init.method || 'GET',
+          headers: init.headers,
+          body: init.body,
+          timeoutMs: 10000
+        });
+        return new Response(result.text, {
+          status: result.status,
+          statusText: result.statusText,
+          headers: result.headers
+        });
+      }
       if (typeof fetch !== 'function') throw new Error('当前 Electron 运行时没有 fetch。');
       return fetch(url, init);
     }
@@ -2409,7 +2633,7 @@ function requestTextWithHostOverride(override, options = {}) {
     };
     if (body !== undefined) {
       if (!hasRequestHeader(headers, 'content-type')) headers['content-type'] = 'application/json';
-      if (!hasRequestHeader(headers, 'content-length')) headers['content-length'] = Buffer.byteLength(body);
+      if (!hasRequestHeader(headers, 'content-length')) headers['content-length'] = String(Buffer.byteLength(body));
     }
     const client = target.protocol === 'https:' ? https : http;
     const request = client.request({
@@ -2453,6 +2677,120 @@ function requestTextWithHostOverride(override, options = {}) {
   });
 }
 
+async function requestTextWithSystemNetwork(url, options = {}) {
+  if (!electronNet?.request) return requestTextWithFetch(url, options, 'system-only');
+  try {
+    return await requestTextWithElectronNet(url, options);
+  } catch (err) {
+    if (!isElectronNetInvalidArgument(err)) throw err;
+    return requestTextWithFetch(url, options, 'system-only');
+  }
+}
+
+function requestTextWithElectronNet(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const method = requestMethod(options.method);
+    const body = requestBodyForMethod(method, options.body);
+    const timeout = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 6000;
+    const headers = {
+      accept: 'application/json',
+      ...normalizeRequestHeaders(options.headers)
+    };
+    if (body !== undefined) {
+      if (!hasRequestHeader(headers, 'content-type')) headers['content-type'] = 'application/json';
+      if (!hasRequestHeader(headers, 'content-length')) headers['content-length'] = String(Buffer.byteLength(body));
+    }
+    let settled = false;
+    let timer = null;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      fn(value);
+    };
+    const request = electronNet.request({
+      method,
+      url
+    });
+    for (const [key, value] of Object.entries(headers)) {
+      request.setHeader(key, value);
+    }
+    timer = setTimeout(() => {
+      const err = new Error(`请求超时：${url}`);
+      err.code = 'MX_BOOTSTRAP_TIMEOUT';
+      err.originalUrl = url;
+      err.bootstrapResolveMode = 'system-only';
+      request.abort();
+      finish(reject, err);
+    }, timeout);
+    request.on('response', (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        finish(resolve, {
+          text: Buffer.concat(chunks).toString('utf8'),
+          status: response.statusCode || 0,
+          statusText: response.statusMessage || '',
+          headers: response.headers || {}
+        });
+      });
+    });
+    request.on('error', (err) => {
+      err.originalUrl = err.originalUrl || url;
+      err.bootstrapResolveMode = err.bootstrapResolveMode || 'system-only';
+      finish(reject, err);
+    });
+    try {
+      if (body !== undefined) request.write(body);
+      request.end();
+    } catch (err) {
+      err.originalUrl = err.originalUrl || url;
+      err.bootstrapResolveMode = err.bootstrapResolveMode || 'system-only';
+      finish(reject, err);
+    }
+  });
+}
+
+function isElectronNetInvalidArgument(err) {
+  return /ERR_INVALID_ARGUMENT|invalid argument/i.test(`${err?.code || ''} ${err?.message || ''}`);
+}
+
+async function requestTextWithFetch(url, options = {}, resolveMode = null) {
+  if (typeof fetch !== 'function') throw new Error('当前 Electron 运行时没有 fetch。');
+  const controller = new AbortController();
+  const timeout = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 6000;
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    const method = requestMethod(options.method);
+    const body = requestBodyForMethod(method, options.body);
+    const headers = {
+      accept: 'application/json',
+      ...normalizeRequestHeaders(options.headers)
+    };
+    if (body !== undefined && !hasRequestHeader(headers, 'content-type')) {
+      headers['content-type'] = 'application/json';
+    }
+    const response = await fetch(url, {
+      method,
+      headers,
+      ...(body !== undefined ? { body } : {}),
+      signal: controller.signal
+    });
+    return {
+      text: await response.text(),
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers
+    };
+  } catch (err) {
+    if (resolveMode) err.bootstrapResolveMode = err.bootstrapResolveMode || resolveMode;
+    err.originalUrl = err.originalUrl || url;
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function requestMethod(method) {
   return String(method || 'GET').toUpperCase();
 }
@@ -2466,11 +2804,21 @@ function requestBodyForMethod(method, body) {
 }
 
 function normalizeRequestHeaders(headers) {
+  let entries = [];
   if (!headers) return {};
-  if (typeof headers.entries === 'function') return Object.fromEntries(headers.entries());
-  if (Array.isArray(headers)) return Object.fromEntries(headers);
-  if (typeof headers === 'object') return { ...headers };
-  return {};
+  if (typeof headers.entries === 'function') {
+    entries = [...headers.entries()];
+  } else if (Array.isArray(headers)) {
+    entries = headers;
+  } else if (typeof headers === 'object') {
+    entries = Object.entries(headers);
+  }
+  return Object.fromEntries(entries
+    .filter(([key, value]) => key && value !== undefined && value !== null)
+    .map(([key, value]) => [
+      String(key),
+      Array.isArray(value) ? value.map((item) => String(item)).join(', ') : String(value)
+    ]));
 }
 
 function hasRequestHeader(headers, name) {
@@ -2650,6 +2998,7 @@ function normalizeBootstrapResolveMode(value) {
   }
   if (['env-only', 'host-only', 'host-resolve-only'].includes(text)) return 'env-only';
   if (['dns-only', 'public-dns-only', 'system-dns-only', 'provider-dns-only'].includes(text)) return 'dns-only';
+  if (['system', 'system-only', 'system-proxy', 'default-network'].includes(text)) return 'system-only';
   return 'env-first';
 }
 
@@ -2672,6 +3021,7 @@ async function requestHostOverride(url, options = {}) {
   const resolveMode = normalizeBootstrapResolveMode(
     options.bootstrapResolveMode || runtime?.config?.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode
   );
+  if (resolveMode === 'system-only') return null;
   if (resolveMode === 'env-first' || resolveMode === 'env-only') {
     return hostResolveOverride(url, { bootstrapResolveMode: resolveMode });
   }
@@ -2725,21 +3075,31 @@ function parseDnsServerList(value) {
 async function resolveBootstrapHostname(hostname, servers, resolveMode) {
   const resolver = new dnsPromises.Resolver();
   resolver.setServers(servers);
-  try {
-    const records = await withTimeout(
-      resolver.resolve4(hostname),
-      1600,
-      `Bootstrap DNS timeout for ${hostname} via ${servers.join(',')}`
-    );
-    const address = records.find((record) => isIpv4(record));
-    if (address) return address;
-    throw new Error(`Bootstrap DNS did not return an A record for ${hostname}`);
-  } catch (err) {
-    const wrapped = new Error(`Bootstrap DNS failed for ${hostname} via ${servers.join(',')}: ${errorMessage(err)}`);
-    wrapped.code = 'MX_BOOTSTRAP_DNS_FAILED';
-    wrapped.bootstrapResolveMode = resolveMode;
-    throw wrapped;
+  const failures = [];
+  for (let attempt = 1; attempt <= BOOTSTRAP_DNS_RETRY_LIMIT; attempt += 1) {
+    try {
+      const records = await withTimeout(
+        resolver.resolve4(hostname),
+        1600,
+        `Bootstrap DNS timeout for ${hostname} via ${servers.join(',')}`
+      );
+      const address = records.find((record) => isIpv4(record));
+      if (address) return address;
+      throw new Error(`Bootstrap DNS did not return an A record for ${hostname}`);
+    } catch (err) {
+      failures.push(err);
+      if (attempt < BOOTSTRAP_DNS_RETRY_LIMIT) {
+        await delay(BOOTSTRAP_DNS_RETRY_DELAY_MS * attempt);
+      }
+    }
   }
+  const last = failures[failures.length - 1];
+  const wrapped = new Error(`Bootstrap DNS failed for ${hostname} via ${servers.join(',')} after ${failures.length} attempts: ${errorMessage(last)}`);
+  wrapped.code = 'MX_BOOTSTRAP_DNS_FAILED';
+  wrapped.bootstrapResolveMode = resolveMode;
+  wrapped.dnsRetryCount = failures.length;
+  wrapped.cause = last;
+  throw wrapped;
 }
 
 function withTimeout(promise, timeoutMs, message) {
@@ -2758,7 +3118,7 @@ function withTimeout(promise, timeoutMs, message) {
 
 function hostResolveOverride(url, options = {}) {
   const resolveMode = normalizeBootstrapResolveMode(options.bootstrapResolveMode || runtime?.config?.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode);
-  if (resolveMode === 'dns-first' || resolveMode === 'dns-only') return null;
+  if (resolveMode === 'dns-first' || resolveMode === 'dns-only' || resolveMode === 'system-only') return null;
   let parsed;
   try {
     parsed = new URL(url);

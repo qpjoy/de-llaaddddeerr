@@ -14,6 +14,10 @@
       "types": "./dist/wireguard.d.ts",
       "import": "./dist/wireguard.js"
     },
+    "./system-domain-proxy": {
+      "types": "./dist/system-domain-proxy.d.ts",
+      "import": "./dist/system-domain-proxy.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

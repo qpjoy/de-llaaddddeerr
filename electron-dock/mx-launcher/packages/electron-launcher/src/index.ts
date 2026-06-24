@@ -47,6 +47,16 @@ import {
   type StandaloneSnapshotOptions,
   type StandaloneUserConnectOptions
 } from '@qpjoy/mx-launcher-standalone';
+export {
+  createElectronLauncherSystemDomainProxy,
+  renderElectronLauncherPacScript,
+  type ElectronLauncherPacProxy,
+  type ElectronLauncherPacMatchMode,
+  type ElectronLauncherSystemDomainProxyManager,
+  type ElectronLauncherSystemDomainProxyOptions,
+  type ElectronLauncherSystemDomainProxyPolicy,
+  type ElectronLauncherSystemDomainProxyStatus
+} from './system-domain-proxy.js';
 
 export const ELECTRON_LAUNCHER_PACKAGE_NAME = '@qpjoy/electron-launcher';
 

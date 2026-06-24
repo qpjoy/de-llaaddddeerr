@@ -41,6 +41,24 @@ bootstrap domain through an explicit resolver before dialing the resolved IP
 with the original Host header. The connected WireGuard phase still relies on
 the launcher route plan and split DNS.
 
+When `dns-first` is selected, MX-H2I retries the bootstrap DNS resolver three
+times. If DNS still fails, the connection warns the user and temporarily falls
+back to Host Resolve/env mode when configured, then to the system default
+network path, so the launcher can continue toward the HDI/WireGuard phase.
+The system path is intended to coexist with Clash/mihomo system proxy and TUN
+mode. Fake-IP or proxy TUN routes are not treated as H2I proof; the connected
+phase still requires the MX-H2I WireGuard route and Internal healthz.
+
+After WireGuard is ready, MX-H2I installs a standalone-owned system PAC that
+points Internal domains at the shared local edge `127.0.0.1:2053`. The same
+port serves `/proxy.pac` and an HTTP/CONNECT proxy. Matched domains are resolved
+through the route plan DNS server, then routed by WireGuard `AllowedIPs`; other
+traffic falls back to the previous system proxy such as Clash/mihomo. Multiple
+MX-H2I standalone instances can reuse the same local edge port. DNS resolution
+prefers the Internal fixed IP `10.88.88.88`; Domestic `10.88.0.1` is kept only
+as a relay/cache fallback. Override the port with `MX_H2I_LOCAL_EDGE_PORT` only
+for diagnostics or collision tests.
+
 The Electron entry is intentionally light for the reservation phase:
 
 - `src/main.cjs` owns the window, local runtime state, persisted endpoint

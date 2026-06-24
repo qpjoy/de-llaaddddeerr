@@ -325,6 +325,21 @@ MX_H2I_SPLIT_DNS_DOMAINS=mxinfo-inc.cn,api.mxinfo-inc.cn
 正式部署时，公网 DNS 可以把 `api.mxinfo-inc.cn` 解析到 Domestic 公网入口；连上 WG 后，
 Internal DNS/split DNS 可以把同一域名或内网服务域名解析到 Internal overlay IP。这样用户不需要
 手动填 IP，Admin 只需要管理公网解析、Internal DNS policy 和 routePlan。
+若客户端选择 `dns-first` bootstrap，但显式 resolver 未启动、超时或中断，MX-H2I 应先做
+3 次 DNS 探测重试；仍不可用时在 UI 提示本次已降级，然后按 Host Resolve/env、系统默认网络/
+系统代理的顺序继续获取 lease。这个降级只用于 bootstrap，不应作为 H2I ready 证据；ready 仍以
+WG tunnel、route proof 和 Internal healthz 为准。
+Clash/mihomo 开启系统代理或 TUN/fake-ip 时，bootstrap 可以复用系统代理完成公网 facade
+访问；但 overlay 阶段必须排除 `198.18.0.0/15` fake-ip、proxy TUN、其它 `utun` 和 `lo0`
+造成的假阳性。它们只能说明外联被代理接管，不等于 H -> Domestic -> Internal 的 H2I 路径成功。
+系统 PAC/本机入口能力抽象在 `@qpjoy/electron-launcher/system-domain-proxy`，由
+standalone owner 在 H2I ready 后安装、断开时恢复。MX-H2I 默认占用或复用
+`127.0.0.1:2053`，同一端口同时提供 `/proxy.pac` 和 HTTP/CONNECT proxy；命中 Internal
+域名时 PAC 返回 `PROXY 127.0.0.1:2053`，本机 proxy 优先使用 routePlan 的
+`internalControlIp`（默认 `10.88.88.88`）解析，再交给 WG AllowedIPs 进入 Internal。
+`10.88.0.1` 是 Domestic gateway/relay，只能作为 DNS relay/cache fallback。未命中域名应
+回落到原 Clash/mihomo 本地代理或系统默认路径。这样浏览器/PAC 流量、MX-H2I DNS 解析和
+WG 白名单路由都优先于系统代理、Clash fake-ip 和其它应用的默认网络路径。
 如果生产 DNS 还没有准备好，Domestic runtime 的 `bootstrapHost` 可以先使用 Domestic
 公网 IP，保持 `bootstrapProtocol=http`、`bootstrapPort=18090`，这与测试服 bootstrap
 路径一致。`api.mxinfo-inc.cn` 只是默认域名占位；未替换时会产生 warning，但不应该成为
