@@ -698,6 +698,98 @@
   color: #ffb8bd;
 }
 
+.qp-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: var(--qp-space-3);
+}
+
+.qp-metric {
+  display: grid;
+  min-width: 0;
+  gap: var(--qp-space-1);
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-md);
+  padding: var(--qp-space-3);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--qp-primary) 10%, transparent), transparent 62%),
+    var(--qp-bg-3);
+}
+
+.qp-metric__label,
+.qp-metric__hint {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qp-metric__value {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--qp-text-1);
+  font-size: var(--qp-font-head-2);
+  font-weight: var(--qp-weight-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qp-data-table {
+  display: grid;
+  min-width: 0;
+  overflow-x: auto;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-md);
+  background: var(--qp-bg-3);
+}
+
+.qp-data-row {
+  display: grid;
+  grid-template-columns: var(--qp-data-row-columns, repeat(4, minmax(120px, 1fr)));
+  gap: var(--qp-space-3);
+  align-items: center;
+  min-width: var(--qp-data-row-min-width, 720px);
+  padding: var(--qp-space-3);
+  border-bottom: 1px solid var(--qp-line);
+}
+
+.qp-data-row:last-child {
+  border-bottom: 0;
+}
+
+.qp-data-row--header {
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+  font-weight: var(--qp-weight-semibold);
+  text-transform: uppercase;
+}
+
+.qp-data-row:not(.qp-data-row--header):hover {
+  background: color-mix(in srgb, var(--qp-primary) 8%, transparent);
+}
+
+.qp-data-cell {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.qp-data-cell strong,
+.qp-data-cell span,
+.qp-data-cell small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qp-data-cell small {
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-caption-1);
+}
+
 .qp-status {
   display: inline-flex;
   align-items: center;

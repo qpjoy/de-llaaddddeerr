@@ -851,6 +851,11 @@ select {
   color: var(--green);
 }
 
+.app-table-row mark[data-kind="muted"] {
+  border-color: color-mix(in srgb, var(--muted) 34%, transparent);
+  color: var(--muted);
+}
+
 .app-table-actions {
   display: flex !important;
   flex-direction: row;
@@ -860,6 +865,229 @@ select {
 .app-table-actions .secondary-button {
   min-height: 34px;
   padding: 0 10px;
+}
+
+.dns-command-panel,
+.dns-route-panel,
+.dns-policy-panel,
+.dns-tool-panel {
+  align-content: start;
+}
+
+.dns-command-head {
+  align-items: center;
+}
+
+.dns-head-actions,
+.dns-toolbar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.dns-head-actions .secondary-button,
+.dns-head-actions .primary-button {
+  min-height: 38px;
+}
+
+.dns-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dns-metric {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--mx-primary) 10%, transparent), transparent 62%),
+    var(--panel-quiet);
+}
+
+.dns-metric span,
+.dns-metric small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dns-metric strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dns-toolbar {
+  justify-content: space-between;
+}
+
+.dns-toolbar input,
+.dns-evaluate-form input {
+  min-height: 40px;
+  min-width: min(100%, 280px);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 12px;
+  background: var(--mx-bg-input);
+  color: var(--mx-text);
+  font: inherit;
+}
+
+.dns-segmented {
+  display: inline-flex;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--mx-bg-input);
+}
+
+.dns-segment {
+  min-height: 38px;
+  min-width: 92px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.dns-segment:last-child {
+  border-right: 0;
+}
+
+.dns-segment.is-active {
+  background: color-mix(in srgb, var(--mx-primary) 16%, transparent);
+  color: var(--mx-primary);
+}
+
+.dns-route-table .dns-route-row {
+  grid-template-columns:
+    minmax(190px, 1.15fr)
+    minmax(210px, 1.1fr)
+    minmax(150px, 0.8fr)
+    minmax(95px, 0.45fr)
+    minmax(125px, 0.6fr)
+    minmax(145px, 0.65fr);
+  min-width: 960px;
+}
+
+.dns-empty {
+  padding: 24px;
+}
+
+.dns-chip-group {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dns-chip {
+  display: inline-flex;
+  max-width: 100%;
+  min-height: 26px;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--mx-primary) 30%, var(--line));
+  border-radius: 999px;
+  padding: 0 10px;
+  background: color-mix(in srgb, var(--mx-primary) 8%, transparent);
+  color: var(--mx-primary);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.dns-chip.is-muted {
+  border-color: var(--line);
+  background: var(--panel-quiet);
+  color: var(--muted);
+}
+
+.dns-evaluate-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.dns-evaluate-form .form-field {
+  min-width: 0;
+}
+
+.dns-evaluate-form input {
+  width: 100%;
+}
+
+.dns-result,
+.dns-zone-summary {
+  display: grid;
+  min-width: 0;
+  gap: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--panel-quiet);
+}
+
+.dns-result.is-empty {
+  color: var(--muted);
+}
+
+.dns-result strong,
+.dns-zone-summary strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dns-result p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.dns-result-grid,
+.dns-zone-summary {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.dns-result-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.dns-result-grid span,
+.dns-zone-summary > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.dns-result-grid small,
+.dns-zone-summary span,
+.dns-zone-summary small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dns-tls-selector {
+  grid-template-columns: 1fr;
 }
 
 .user-workbench {
@@ -5369,6 +5597,9 @@ select {
 
   .foundation-module-buttons,
   .foundation-kpi-grid,
+  .dns-metric-grid,
+  .dns-result-grid,
+  .dns-zone-summary,
   .product-network-facts,
   .app-workbench-panels,
   .app-workbench-facts,
@@ -5379,6 +5610,20 @@ select {
 
   .foundation-panel-head {
     display: grid;
+  }
+
+  .dns-head-actions,
+  .dns-toolbar,
+  .dns-evaluate-form {
+    display: grid;
+    grid-template-columns: 1fr;
+    justify-content: stretch;
+  }
+
+  .dns-head-actions .secondary-button,
+  .dns-head-actions .primary-button,
+  .dns-evaluate-form .secondary-button {
+    width: 100%;
   }
 
   .foundation-table-row,

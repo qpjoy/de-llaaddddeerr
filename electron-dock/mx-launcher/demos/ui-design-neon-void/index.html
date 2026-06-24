@@ -585,6 +585,51 @@
                 <span class="qp-anchor-preset"><span class="qp-anchor-glyph qp-anchor-glyph--stretch" style="--anchor-x:50%;--anchor-y:100%;--box-x:0;--box-y:58%"><span class="qp-anchor-glyph__box"></span></span></span>
               </div>
             </section>
+
+            <section class="qp-panel demo-control-panel">
+              <div class="qp-row qp-row--between">
+                <h3 class="qp-heading-2">Control Surface</h3>
+                <div class="qp-segmented" role="group" aria-label="Route status">
+                  <button class="qp-segmented__item is-active" type="button">All</button>
+                  <button class="qp-segmented__item" type="button">Enabled</button>
+                  <button class="qp-segmented__item" type="button">Disabled</button>
+                </div>
+              </div>
+              <div class="qp-metric-grid">
+                <article class="qp-metric">
+                  <span class="qp-metric__label">Internal DNS</span>
+                  <strong class="qp-metric__value">10.88.88.88</strong>
+                  <small class="qp-metric__hint">CoreDNS authority</small>
+                </article>
+                <article class="qp-metric">
+                  <span class="qp-metric__label">Launcher Edge</span>
+                  <strong class="qp-metric__value">127.0.0.1:2053</strong>
+                  <small class="qp-metric__hint">PAC / DNS first hop</small>
+                </article>
+                <article class="qp-metric">
+                  <span class="qp-metric__label">Routes</span>
+                  <strong class="qp-metric__value">3/4</strong>
+                  <small class="qp-metric__hint">enabled records</small>
+                </article>
+              </div>
+              <div class="qp-data-table" style="--qp-data-row-columns:minmax(160px,1.2fr) minmax(160px,1fr) minmax(96px,0.5fr);--qp-data-row-min-width:520px">
+                <div class="qp-data-row qp-data-row--header">
+                  <span>Domain</span>
+                  <span>Target</span>
+                  <span>Status</span>
+                </div>
+                <article class="qp-data-row">
+                  <span class="qp-data-cell"><strong>gateway.internal.mx</strong><small>rp_gateway_internal_mx</small></span>
+                  <span class="qp-data-cell"><strong>10.88.88.88:18090</strong><small>Internal Gateway</small></span>
+                  <span class="qp-tag qp-tag--primary">enabled</span>
+                </article>
+                <article class="qp-data-row">
+                  <span class="qp-data-cell"><strong>api.mxinfo-inc.cn</strong><small>public bridge</small></span>
+                  <span class="qp-data-cell"><strong>10.88.0.1:8088</strong><small>Domestic relay</small></span>
+                  <span class="qp-tag">fallback</span>
+                </article>
+              </div>
+            </section>
           </div>
         </section>
 
