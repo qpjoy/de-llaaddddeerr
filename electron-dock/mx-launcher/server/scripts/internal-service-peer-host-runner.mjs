@@ -917,6 +917,10 @@ function internalEgressOnCliSupported() {
   return platform() === 'linux' && !isLinuxKitHost();
 }
 
+function internalEgressOnHardRequired() {
+  return process.env.MX_INTERNAL_EGRESS_ON_REQUIRED === '1';
+}
+
 function internalEgressOnUnsupportedSummary() {
   if (isLinuxKitHost()) return 'linuxkit container host; native Internal egress-on must run on the real host';
   if (platform() === 'darwin') return 'darwin host; native Internal WG is managed by LaunchDaemon, mac egress-on daemon is not required for H2I handoff';
@@ -928,8 +932,7 @@ async function buildInternalEgressOnStatus(tools, artifacts) {
   const subscriptionPath = artifacts.internalEgressSubscriptionPath || defaultInternalEgressSubscriptionPath;
   const subscriptionExists = Boolean(artifacts.internalEgressSubscriptionExists);
   const supported = internalEgressOnCliSupported();
-  const forcedRequired = process.env.MX_INTERNAL_EGRESS_ON_REQUIRED === '1';
-  const required = forcedRequired || supported;
+  const hardRequired = internalEgressOnHardRequired();
   const egressEnv = internalEgressCommandEnv();
   const installCommand = subscriptionExists && qpTunnelCliPath
     ? `sudo ${displayCommand(qpTunnelCliPath, ['install', '--file', subscriptionPath], egressEnv)}`
@@ -941,10 +944,12 @@ async function buildInternalEgressOnStatus(tools, artifacts) {
   if (!supported) {
     const summary = internalEgressOnUnsupportedSummary();
     return {
-      status: forcedRequired ? 'blocked' : 'ready',
+      status: hardRequired ? 'blocked' : 'ready',
       mode: 'qp-tunnel-cli-egress-on',
       supported: false,
-      required: forcedRequired,
+      required: hardRequired,
+      recommended: false,
+      hardRequired,
       subscriptionPath,
       subscriptionExists,
       env: egressEnv,
@@ -954,16 +959,19 @@ async function buildInternalEgressOnStatus(tools, artifacts) {
       enableCommand,
       summary,
       statusCommand: null,
-      blockedReasons: forcedRequired ? [summary] : []
+      blockedReasons: hardRequired ? [summary] : []
     };
   }
 
   if (!tools.qpTunnelCli?.available || !qpTunnelCliPath) {
+    const summary = 'qp-tunnel-cli missing';
     return {
-      status: 'blocked',
+      status: hardRequired ? 'blocked' : 'ready',
       mode: 'qp-tunnel-cli-egress-on',
       supported: true,
-      required: true,
+      required: hardRequired,
+      recommended: true,
+      hardRequired,
       subscriptionPath,
       subscriptionExists,
       env: egressEnv,
@@ -971,9 +979,9 @@ async function buildInternalEgressOnStatus(tools, artifacts) {
       home: egressEnv.MIHOMO_HOME,
       installCommand,
       enableCommand,
-      summary: 'qp-tunnel-cli missing',
+      summary,
       statusCommand: null,
-      blockedReasons: ['Internal qp-tunnel-cli egress-on requires qp-tunnel-cli on the Internal runtime host']
+      blockedReasons: hardRequired ? ['Internal qp-tunnel-cli egress-on requires qp-tunnel-cli on the Internal runtime host'] : []
     };
   }
 
@@ -983,7 +991,7 @@ async function buildInternalEgressOnStatus(tools, artifacts) {
   const systemctlMissing = /Required command not found:\s*systemctl/.test(`${statusCommand.stdout}\n${statusCommand.stderr}`);
   const status = parsed.ready
     ? 'passed'
-    : systemctlMissing
+    : systemctlMissing && hardRequired
       ? 'blocked'
       : 'ready';
   const summary = parsed.ready
@@ -997,7 +1005,9 @@ async function buildInternalEgressOnStatus(tools, artifacts) {
     status,
     mode: 'qp-tunnel-cli-egress-on',
     supported: true,
-    required: true,
+    required: hardRequired,
+    recommended: true,
+    hardRequired,
     subscriptionPath,
     subscriptionExists,
     env: egressEnv,
@@ -1199,7 +1209,9 @@ async function buildStatus(payload) {
       applyCommand: `bash scripts/manage.sh ops site-slot internal-service-peer-handoff apply`,
       hostRunnerCommand: nativeHostRunnerInstallCommand,
       requires: [
-        'qp-tunnel-cli egress-on on the Internal runtime host for H2O/outbound bootstrap',
+        internalEgress.required
+          ? 'qp-tunnel-cli egress-on on the Internal runtime host for H2O/outbound bootstrap'
+          : 'qp-tunnel-cli egress-on is optional for H2O/outbound bootstrap unless MX_INTERNAL_EGRESS_ON_REQUIRED=1',
         'qp-tunnel-cli with @qpjoy/electron-core-wireguard on the Internal runtime host',
         'sudo/root privilege on the Internal runtime host'
       ],
@@ -1252,6 +1264,18 @@ async function applyWithWireGuardCore(beforeStatus) {
 async function ensureInternalEgressOn(beforeStatus) {
   const egressStatus = beforeStatus.internalEgress || {};
   const egressEnv = egressStatus.env || internalEgressCommandEnv();
+  const hardRequired = egressStatus.required === true || internalEgressOnHardRequired();
+  const steps = [];
+  const nonBlockingSkip = (stderr, command = null, exitCode = 0) => ({
+    status: 'skipped',
+    execution: 'skipped',
+    mode: 'qp-tunnel-cli-egress-on',
+    command,
+    exitCode,
+    stdout: '',
+    stderr,
+    steps
+  });
   if (egressStatus.supported === false) {
     return {
       status: 'skipped',
@@ -1264,8 +1288,23 @@ async function ensureInternalEgressOn(beforeStatus) {
       steps: []
     };
   }
+  if (egressStatus.status === 'passed' || egressStatus.parsed?.ready === true) {
+    return {
+      status: 'passed',
+      execution: 'skipped',
+      mode: 'qp-tunnel-cli-egress-on',
+      command: null,
+      exitCode: 0,
+      stdout: egressStatus.summary || 'egress-on already active',
+      stderr: '',
+      steps
+    };
+  }
   const qpTunnelCliPath = beforeStatus.tools?.qpTunnelCli?.path || null;
   if (!qpTunnelCliPath) {
+    if (!hardRequired) {
+      return nonBlockingSkip('qp-tunnel-cli is not available; skipping optional Internal egress-on before WireGuard apply');
+    }
     return {
       status: 'blocked',
       execution: 'not-started',
@@ -1277,7 +1316,6 @@ async function ensureInternalEgressOn(beforeStatus) {
       steps: []
     };
   }
-  const steps = [];
   if (beforeStatus.artifacts?.internalEgressSubscriptionExists) {
     const installInvocation = privilegedCommand(qpTunnelCliPath, [
       'install',
@@ -1287,11 +1325,19 @@ async function ensureInternalEgressOn(beforeStatus) {
     const installExecution = await runCommand(installInvocation.command, installInvocation.args, 120000);
     steps.push({ step: 'install-subscription', ...installExecution });
     if (installExecution.status !== 'passed') {
+      const command = `${installInvocation.command} ${installInvocation.args.map(shellQuote).join(' ')}`;
+      if (!hardRequired) {
+        return nonBlockingSkip(
+          `Optional Internal egress-on install skipped after ${installExecution.status}: ${installExecution.stderr || installExecution.stdout || 'no output'}`,
+          command,
+          installExecution.exitCode
+        );
+      }
       return {
         status: 'failed',
         execution: 'failed',
         mode: 'qp-tunnel-cli-egress-on',
-        command: `${installInvocation.command} ${installInvocation.args.map(shellQuote).join(' ')}`,
+        command,
         exitCode: installExecution.exitCode,
         stdout: installExecution.stdout,
         stderr: installExecution.stderr,
@@ -1303,11 +1349,19 @@ async function ensureInternalEgressOn(beforeStatus) {
   const egressInvocation = privilegedCommand(qpTunnelCliPath, ['egress-on'], egressEnv);
   const egressExecution = await runCommand(egressInvocation.command, egressInvocation.args, 120000);
   steps.push({ step: 'egress-on', ...egressExecution });
+  const egressCommand = `${egressInvocation.command} ${egressInvocation.args.map(shellQuote).join(' ')}`;
+  if (egressExecution.status !== 'passed' && !hardRequired) {
+    return nonBlockingSkip(
+      `Optional Internal egress-on skipped after ${egressExecution.status}: ${egressExecution.stderr || egressExecution.stdout || 'no output'}`,
+      egressCommand,
+      egressExecution.exitCode
+    );
+  }
   return {
     status: egressExecution.status === 'passed' ? 'passed' : 'failed',
     execution: egressExecution.status === 'passed' ? 'completed' : 'failed',
     mode: 'qp-tunnel-cli-egress-on',
-    command: `${egressInvocation.command} ${egressInvocation.args.map(shellQuote).join(' ')}`,
+    command: egressCommand,
     exitCode: egressExecution.exitCode,
     stdout: egressExecution.stdout,
     stderr: egressExecution.stderr,
