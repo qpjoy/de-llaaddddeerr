@@ -2484,8 +2484,8 @@ export function buildSiteSlotDomesticRuntimeConfig(
   const internalBaseUrl = normalizeHttpUrl(input.internalBaseUrl || previous?.upstreams.internalBaseUrl || 'http://10.88.88.88:18090');
   const internalApi = normalizeHttpUrl(input.internalApiUpstream || previous?.upstreams.internalApi || internalBaseUrl);
   const internalH2i = normalizeHttpUrl(input.internalH2iUpstream || previous?.upstreams.internalH2i || internalBaseUrl);
-  const dnsBind = input.dnsBind?.trim() || previous?.dns.bind || '10.88.0.1';
-  const dnsPort = positivePort(input.dnsPort, previous?.dns.port, 53);
+  const dnsBind = input.dnsBind?.trim() || previous?.dns.bind || '0.0.0.0';
+  const dnsPort = positivePort(input.dnsPort, previous?.dns.port, 50053);
   const publicBaseUrl = `${bootstrapProtocol}://${bootstrapHost}${defaultPortForProtocol(bootstrapProtocol) === bootstrapPort ? '' : `:${bootstrapPort}`}`;
   const env = domesticRuntimeEnv({
     siteId,
@@ -2502,6 +2502,8 @@ export function buildSiteSlotDomesticRuntimeConfig(
     ...(!isHttpUrl(internalApi) ? [`blocked: internalApiUpstream must be http(s): ${internalApi}`] : []),
     ...(!isHttpUrl(internalH2i) ? [`blocked: internalH2iUpstream must be http(s): ${internalH2i}`] : []),
     ...(edgeBind === '0.0.0.0' ? ['public-bind: Domestic edge listens on all interfaces; protect with cloud firewall/security group'] : []),
+    ...(dnsBind === '0.0.0.0' ? [`dns-public-bind: Domestic DNS edge listens on UDP/TCP ${dnsPort}; restrict sources with firewall/security group`] : []),
+    ...(dnsBind === '10.88.0.1' ? ['dns-wg-only: Domestic DNS edge is bound to WireGuard; clients cannot use it before WG is up'] : []),
     ...(bootstrapHost === 'api.mxinfo-inc.cn' ? ['default-domain: update bootstrapHost when production DNS is ready'] : [])
   ];
   const digestSource = JSON.stringify({
@@ -4325,7 +4327,7 @@ function siteSlotDeploymentPhases(
         rsyncOverSsh(domesticWireGuardConfig, '/etc/wireguard/mx-domestic.conf'),
         rsyncOverSsh(domesticRelayEnv, `${slotCurrentDir}/mx-domestic-relay.env`),
         ssh(domesticLegacyWireGuardCompatCommand),
-        ssh('if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi; chmod 600 /etc/wireguard/mx-domestic.conf; if command -v systemctl >/dev/null 2>&1; then systemctl enable wg-quick@mx-domestic >/dev/null 2>&1 || true; systemctl restart wg-quick@mx-domestic; else wg-quick down mx-domestic >/dev/null 2>&1 || true; wg-quick up mx-domestic; fi; ip -4 addr replace 10.88.0.1/16 dev mx-domestic; ip link set up dev mx-domestic; sysctl -w net.ipv4.ip_forward=1; if command -v iptables >/dev/null 2>&1; then iptables -C FORWARD -i mx-domestic -o mx-domestic -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i mx-domestic -o mx-domestic -j ACCEPT; if iptables -S DOCKER-USER >/dev/null 2>&1; then iptables -C DOCKER-USER -i mx-domestic -o mx-domestic -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -i mx-domestic -o mx-domestic -j ACCEPT; fi; iptables -C INPUT -i mx-domestic -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i mx-domestic -p udp --dport 53 -j ACCEPT; iptables -C INPUT -i mx-domestic -p tcp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i mx-domestic -p tcp --dport 53 -j ACCEPT; fi; for route_cidr in 10.89.0.0/16 10.90.0.0/16; do ip route replace "$route_cidr" dev mx-domestic; done; ip -4 address show dev mx-domestic; ip route get 10.89.100.1 || true')
+        ssh('if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi; chmod 600 /etc/wireguard/mx-domestic.conf; if command -v systemctl >/dev/null 2>&1; then systemctl enable wg-quick@mx-domestic >/dev/null 2>&1 || true; systemctl restart wg-quick@mx-domestic; else wg-quick down mx-domestic >/dev/null 2>&1 || true; wg-quick up mx-domestic; fi; ip -4 addr replace 10.88.0.1/16 dev mx-domestic; ip link set up dev mx-domestic; sysctl -w net.ipv4.ip_forward=1; if command -v iptables >/dev/null 2>&1; then iptables -C FORWARD -i mx-domestic -o mx-domestic -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i mx-domestic -o mx-domestic -j ACCEPT; if iptables -S DOCKER-USER >/dev/null 2>&1; then iptables -C DOCKER-USER -i mx-domestic -o mx-domestic -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -i mx-domestic -o mx-domestic -j ACCEPT; fi; for dns_port in 53 50053; do iptables -C INPUT -i mx-domestic -p udp --dport "$dns_port" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i mx-domestic -p udp --dport "$dns_port" -j ACCEPT; iptables -C INPUT -i mx-domestic -p tcp --dport "$dns_port" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i mx-domestic -p tcp --dport "$dns_port" -j ACCEPT; done; fi; for route_cidr in 10.89.0.0/16 10.90.0.0/16; do ip route replace "$route_cidr" dev mx-domestic; done; ip -4 address show dev mx-domestic; ip route get 10.89.100.1 || true')
       ],
       notes: ['WireGuard/routing is host-level and is activated before Docker edge services so Domestic can establish the 10.88.0.1 relay path even when registry egress is unhealthy. The 2.0 activation preserves legacy hdo-home/hdo-internal 100.* WireGuard state for V1/V2 compatibility; cleanup is an explicit manage.sh operation.']
     }] : []),

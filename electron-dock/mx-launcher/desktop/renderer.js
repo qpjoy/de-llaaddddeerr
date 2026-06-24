@@ -7467,11 +7467,11 @@ function renderDomesticRuntimeConfigPanel() {
         </label>
         <label class="form-field">
           <span>DNS Bind</span>
-          <input data-domestic-runtime-field="dnsBind" autocomplete="off" value="${escapeHtml(config.dns?.bind || '10.88.0.1')}" />
+          <input data-domestic-runtime-field="dnsBind" autocomplete="off" value="${escapeHtml(config.dns?.bind || '0.0.0.0')}" />
         </label>
         <label class="form-field compact-field">
           <span>DNS Port</span>
-          <input data-domestic-runtime-field="dnsPort" inputmode="numeric" type="number" min="1" max="65535" value="${escapeHtml(String(config.dns?.port || 53))}" />
+          <input data-domestic-runtime-field="dnsPort" inputmode="numeric" type="number" min="1" max="65535" value="${escapeHtml(String(config.dns?.port || 50053))}" />
         </label>
       </div>
       <div class="foundation-list domestic-runtime-summary">
@@ -7481,7 +7481,7 @@ function renderDomesticRuntimeConfigPanel() {
           <small>${escapeHtml(config.edge?.bind || '0.0.0.0')}:${escapeHtml(String(config.edge?.port || bootstrap.port || '-'))} -> ${escapeHtml(config.upstreams?.internalApi || '-')}</small>
         </article>
         <article>
-          <strong>${escapeHtml(config.dns?.bind || '10.88.0.1')}:${escapeHtml(String(config.dns?.port || 53))}</strong>
+          <strong>${escapeHtml(config.dns?.bind || '0.0.0.0')}:${escapeHtml(String(config.dns?.port || 50053))}</strong>
           <span>Domestic DNS cache / split DNS edge</span>
           <small>Internal authority remains the source of truth.</small>
         </article>
@@ -7627,7 +7627,7 @@ function domesticRuntimeFormPayload(root = foundationGrid) {
     internalBaseUrl: value('internalBaseUrl') || 'http://10.88.88.88:18090',
     internalApiUpstream: value('internalApiUpstream') || value('internalBaseUrl') || 'http://10.88.88.88:18090',
     internalH2iUpstream: value('internalH2iUpstream') || value('internalBaseUrl') || 'http://10.88.88.88:18090',
-    dnsBind: value('dnsBind') || '10.88.0.1',
+    dnsBind: value('dnsBind') || '0.0.0.0',
     dnsPort: positiveNumberOrNull(value('dnsPort')),
     requestedBy: 'desktop-admin',
     requestId: `desktop-domestic-runtime-${Date.now()}`

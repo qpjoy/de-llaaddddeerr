@@ -5660,6 +5660,8 @@ function domesticRuntimeConfigApplyScript(config: SiteSlotDomesticRuntimeConfig)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `${key}=${value}`);
   const caddyfileBase64 = Buffer.from(domesticServicesCaddyfileContent()).toString('base64');
+  const dnsEdgeCorefileBase64 = Buffer.from(domesticDnsEdgeCorefileContent(config)).toString('base64');
+  const dnsEdgeComposeBase64 = Buffer.from(domesticDnsEdgeComposeContent()).toString('base64');
   return [
     'set -eu',
     'printf "mx-domestic-runtime-config-apply\\n"',
@@ -5669,10 +5671,16 @@ function domesticRuntimeConfigApplyScript(config: SiteSlotDomesticRuntimeConfig)
     `printf "%s\\n" ${envLines.map(shellQuote).join(' ')} > "$stack_dir/.env.tmp"`,
     'mv "$stack_dir/.env.tmp" "$stack_dir/.env"',
     `if command -v base64 >/dev/null 2>&1; then printf "%s" ${shellQuote(caddyfileBase64)} | base64 -d > "$stack_dir/Caddyfile.tmp"; mv "$stack_dir/Caddyfile.tmp" "$stack_dir/Caddyfile"; else echo "blocked: base64 is required to refresh Domestic Caddyfile"; exit 1; fi`,
+    'mkdir -p "$stack_dir/dns-edge"',
+    `if command -v base64 >/dev/null 2>&1; then printf "%s" ${shellQuote(dnsEdgeCorefileBase64)} | base64 -d > "$stack_dir/dns-edge/Corefile.tmp"; mv "$stack_dir/dns-edge/Corefile.tmp" "$stack_dir/dns-edge/Corefile"; else echo "blocked: base64 is required to refresh Domestic DNS edge Corefile"; exit 1; fi`,
+    `if command -v base64 >/dev/null 2>&1; then printf "%s" ${shellQuote(dnsEdgeComposeBase64)} | base64 -d > "$stack_dir/docker-compose.dns-edge.yml.tmp"; mv "$stack_dir/docker-compose.dns-edge.yml.tmp" "$stack_dir/docker-compose.dns-edge.yml"; else echo "blocked: base64 is required to refresh Domestic DNS edge compose"; exit 1; fi`,
     'if test -f "$stack_dir/docker-compose.yml"; then sed -i.bak -E \'s#^([[:space:]]*image:[[:space:]]*)caddy:2-alpine#\\1caddy:2.8.4-alpine#\' "$stack_dir/docker-compose.yml"; fi',
     'cd "$stack_dir"',
     'chmod +x ./manage.sh || true',
     './manage.sh up',
+    'docker compose --profile dns stop dns-forwarder >/dev/null 2>&1 || true',
+    'docker compose -f docker-compose.yml -f docker-compose.dns-edge.yml up -d mx-domestic-dns-edge',
+    'docker compose -f docker-compose.yml -f docker-compose.dns-edge.yml ps mx-domestic-dns-edge || true',
     './manage.sh status || true',
     './manage.sh health'
   ].join('; ');
@@ -5742,6 +5750,41 @@ function domesticServicesCaddyfileContent(): string {
     '}',
     ''
   ].join('\n');
+}
+
+function domesticDnsEdgeCorefileContent(config: SiteSlotDomesticRuntimeConfig): string {
+  const bind = coreDnsBindHost(config.dns.bind);
+  const listenPort = config.dns.port || 50053;
+  return [
+    `.:${listenPort} {`,
+    `  bind ${bind}`,
+    '  errors',
+    '  cache 30',
+    '  forward . 10.88.88.88:53',
+    '  reload',
+    '}',
+    ''
+  ].join('\n');
+}
+
+function domesticDnsEdgeComposeContent(): string {
+  return [
+    'services:',
+    '  mx-domestic-dns-edge:',
+    '    image: coredns/coredns:1.11.3',
+    '    container_name: mx-domestic-dns-edge-v2',
+    '    restart: unless-stopped',
+    '    network_mode: host',
+    '    command: ["-conf", "/Corefile"]',
+    '    volumes:',
+    '      - ./dns-edge/Corefile:/Corefile:ro',
+    ''
+  ].join('\n');
+}
+
+function coreDnsBindHost(value: string | null | undefined): string {
+  const text = stringValue(value) || '0.0.0.0';
+  return /^(?:\d{1,3}\.){3}\d{1,3}$/.test(text) || text === 'localhost' ? text : '0.0.0.0';
 }
 
 async function runSshScriptWithProfile(profile: SiteSlotSshProfile, script: string, timeoutMs: number) {
@@ -7502,8 +7545,8 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         internalBaseUrl: 'http://10.88.88.88:18090',
         internalApiUpstream: 'http://10.88.88.88:18090',
         internalH2iUpstream: 'http://10.88.88.88:18090',
-        dnsBind: '10.88.0.1',
-        dnsPort: 53,
+        dnsBind: '0.0.0.0',
+        dnsPort: 50053,
         requestedBy: 'admin-ui'
       }
     },
@@ -7530,8 +7573,8 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         internalBaseUrl: 'http://10.88.88.88:18090',
         internalApiUpstream: 'http://10.88.88.88:18090',
         internalH2iUpstream: 'http://10.88.88.88:18090',
-        dnsBind: '10.88.0.1',
-        dnsPort: 53,
+        dnsBind: '0.0.0.0',
+        dnsPort: 50053,
         confirmDomesticRuntimeApply: true,
         requestedBy: 'admin-ui'
       }

@@ -8,10 +8,10 @@
   "main": "src/main.cjs",
   "scripts": {
     "setup": "node scripts/dev-mode.mjs local",
-    "dev": "node scripts/dev-mode.mjs local && electron-builder install-app-deps && electron .",
+    "dev": "node scripts/dev-mode.mjs local && electron-builder install-app-deps && node scripts/run-electron-dev.mjs",
     "start": "pnpm dev",
     "build": "pnpm run package",
-    "check": "node --check scripts/dev-mode.mjs && node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check electron-builder.config.cjs",
+    "check": "node --check scripts/dev-mode.mjs && node --check scripts/run-electron-dev.mjs && node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check electron-builder.config.cjs",
     "package": "node scripts/dev-mode.mjs local && pnpm run check && electron-builder --config electron-builder.config.cjs --dir",
     "make": "node scripts/dev-mode.mjs local && pnpm run check && electron-builder --config electron-builder.config.cjs",
     "make:mac:dmg": "node scripts/dev-mode.mjs local && pnpm run check && electron-builder --config electron-builder.config.cjs --mac dmg --universal",

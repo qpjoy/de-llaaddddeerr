@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createSocket, type RemoteInfo, type Socket as DgramSocket } from 'node:dgram';
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { connect as netConnect, isIP, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -26,6 +27,8 @@ export interface ElectronLauncherSystemDomainProxyPolicy {
   fallbackProxy?: string | null;
   pacPort?: number | null;
   dnsServers?: string[] | null;
+  dnsFallbackTarget?: string | null;
+  reverseProxyRoutes?: ElectronLauncherSystemDomainProxyRoute[] | null;
 }
 
 export interface ElectronLauncherSystemDomainProxyOptions {
@@ -46,7 +49,9 @@ export interface ElectronLauncherSystemDomainProxyStatus {
   pacPort?: number | null;
   sharedPac?: boolean;
   dnsServers?: string[];
+  dnsFallbackTarget?: string | null;
   domains?: string[];
+  reverseProxyRoutes?: ElectronLauncherSystemDomainProxyRoute[];
   updatedAt?: string | null;
   changed?: boolean;
   verified?: boolean;
@@ -61,6 +66,16 @@ export interface ElectronLauncherSystemDomainProxyStatus {
 export interface ElectronLauncherPacProxy {
   address: string;
   directive: string;
+}
+
+export interface ElectronLauncherSystemDomainProxyRoute {
+  routeId?: string | null;
+  host: string;
+  dnsTarget?: string | null;
+  targetUrl?: string | null;
+  tlsMode?: 'internal' | 'passthrough' | 'edge-terminated' | null;
+  authRequired?: boolean | null;
+  enabled?: boolean | null;
 }
 
 export interface ElectronLauncherSystemDomainProxyManager {
@@ -83,6 +98,8 @@ interface ResolvedPacSource {
   pacPort: number | null;
   sharedLocalPac: boolean;
   dnsServers: string[];
+  dnsFallbackTarget: string | null;
+  reverseProxyRoutes: ElectronLauncherSystemDomainProxyRoute[];
   usesLocalPac: boolean;
 }
 
@@ -97,7 +114,9 @@ interface StoredState {
   pacPort: number | null;
   sharedLocalPac?: boolean;
   dnsServers: string[];
+  dnsFallbackTarget?: string | null;
   domains: string[];
+  reverseProxyRoutes?: ElectronLauncherSystemDomainProxyRoute[];
   previous: unknown;
   pending?: boolean;
   updatedAt: string;
@@ -109,6 +128,8 @@ interface LocalPacServerConfig {
   matchMode: ElectronLauncherPacMatchMode;
   fallbackProxy: PacProxy | null;
   dnsServers: string[];
+  dnsFallbackTarget: string | null;
+  reverseProxyRoutes: ElectronLauncherSystemDomainProxyRoute[];
 }
 
 interface ExecTextResult {
@@ -153,6 +174,8 @@ export function createElectronLauncherSystemDomainProxy(
       proxy: pac.proxy?.directive || null,
       fallbackProxy: pac.fallbackProxy?.directive || null,
       dnsServers: pac.dnsServers,
+      dnsFallbackTarget: pac.dnsFallbackTarget,
+      reverseProxyRoutes: pac.reverseProxyRoutes,
       pacPort: pac.pacPort || null
     });
     if (localPacServer && localPacPort && localPacKey === key) {
@@ -168,7 +191,9 @@ export function createElectronLauncherSystemDomainProxy(
       proxy: pac.proxy,
       matchMode: pac.matchMode,
       fallbackProxy: pac.fallbackProxy,
-      dnsServers: pac.dnsServers
+      dnsServers: pac.dnsServers,
+      dnsFallbackTarget: pac.dnsFallbackTarget,
+      reverseProxyRoutes: pac.reverseProxyRoutes
     };
 
     if (localPacServer && localPacPort) {
@@ -256,19 +281,23 @@ export function createElectronLauncherSystemDomainProxy(
         marker: PAC_MARKER,
         pacUrl: localPacPort ? `http://127.0.0.1:${localPacPort}${PAC_PATH}` : null,
         domains: localPacConfig?.domains || [],
-        dnsServers: localPacConfig?.dnsServers || []
+        dnsServers: localPacConfig?.dnsServers || [],
+        dnsFallbackTarget: localPacConfig?.dnsFallbackTarget || null,
+        reverseProxyRoutes: localPacConfig?.reverseProxyRoutes || []
       });
       return;
     }
     if (controlPath === SHARED_APPLY_PATH && req.method === 'POST') {
       const body = await readRequestJson(req);
-      localPacConfig = normalizeSharedLocalPacConfig(body);
+      localPacConfig = mergeLocalPacConfigs(localPacConfig, normalizeSharedLocalPacConfig(body));
       localPacKey = JSON.stringify({
         domains: localPacConfig.domains,
         matchMode: localPacConfig.matchMode,
         proxy: localPacConfig.proxy?.directive || null,
         fallbackProxy: localPacConfig.fallbackProxy?.directive || null,
         dnsServers: localPacConfig.dnsServers,
+        dnsFallbackTarget: localPacConfig.dnsFallbackTarget,
+        reverseProxyRoutes: localPacConfig.reverseProxyRoutes,
         pacPort: localPacPort || null
       });
       writeJsonResponse(res, 200, {
@@ -312,7 +341,20 @@ export function createElectronLauncherSystemDomainProxy(
   async function handleLocalDnsRelay(message: Buffer, remote: RemoteInfo, socket: DgramSocket): Promise<void> {
     const config = localPacConfig;
     const host = dnsQuestionHost(message);
-    if (!config?.dnsServers.length || !host || !hostMatchesDomains(host, config.domains)) {
+    if (!config || !host || !hostMatchesDomains(host, config.domains)) {
+      const failure = dnsFailureResponse(message);
+      if (failure.length) socket.send(failure, remote.port, remote.address);
+      return;
+    }
+    const routeTarget = dnsTargetForHost(host, config);
+    if (routeTarget && isIP(routeTarget) === 4) {
+      const directResponse = dnsAResponse(message, routeTarget);
+      if (directResponse.length) {
+        socket.send(directResponse, remote.port, remote.address);
+        return;
+      }
+    }
+    if (!config.dnsServers.length) {
       const failure = dnsFailureResponse(message);
       if (failure.length) socket.send(failure, remote.port, remote.address);
       return;
@@ -321,6 +363,13 @@ export function createElectronLauncherSystemDomainProxy(
       const response = await forwardDnsPacket(message, config.dnsServers);
       socket.send(response, remote.port, remote.address);
     } catch {
+      if (config.dnsFallbackTarget && isIP(config.dnsFallbackTarget) === 4) {
+        const fallbackResponse = dnsAResponse(message, config.dnsFallbackTarget);
+        if (fallbackResponse.length) {
+          socket.send(fallbackResponse, remote.port, remote.address);
+          return;
+        }
+      }
       const failure = dnsFailureResponse(message);
       if (failure.length) socket.send(failure, remote.port, remote.address);
     }
@@ -331,10 +380,11 @@ export function createElectronLauncherSystemDomainProxy(
     try {
       const authority = parseProxyAuthority(req.url || '', 443);
       if (!authority) throw new Error(`unsupported CONNECT target: ${req.url || ''}`);
-      const targetHost = await resolveProxyHost(authority.host, config);
+      const routedTarget = connectRouteTarget(authority, config);
+      const targetHost = routedTarget?.host || await resolveProxyHost(authority.host, config);
       const upstream = netConnect({
         host: targetHost,
-        port: authority.port,
+        port: routedTarget?.port || authority.port,
         timeout: PROXY_CONNECT_TIMEOUT_MS
       });
       upstream.once('connect', () => {
@@ -361,6 +411,8 @@ export function createElectronLauncherSystemDomainProxy(
     const pacUrl = stringValue(policy.pacUrl);
     const pacPort = normalizePort(policy.pacPort) || normalizePort(options.pacPort);
     const dnsServers = normalizeDnsServers(policy.dnsServers);
+    const dnsFallbackTarget = normalizeDnsTarget(policy.dnsFallbackTarget);
+    const reverseProxyRoutes = normalizeReverseProxyRoutes(policy.reverseProxyRoutes);
     const fallbackProxy = normalizeProxyAddress(policy.fallbackProxy) || fallbackProxyForPac(previous);
     if (pacUrl) {
       return {
@@ -372,6 +424,8 @@ export function createElectronLauncherSystemDomainProxy(
         pacPort: null,
         sharedLocalPac: false,
         dnsServers,
+        dnsFallbackTarget,
+        reverseProxyRoutes,
         usesLocalPac: false
       };
     }
@@ -386,7 +440,9 @@ export function createElectronLauncherSystemDomainProxy(
       fallbackProxy,
       pacPort,
       sharedLocalPac: false,
-      dnsServers
+      dnsServers,
+      dnsFallbackTarget,
+      reverseProxyRoutes
     };
     const localServer = await ensureLocalPacServer(localPac);
     return {
@@ -422,7 +478,9 @@ export function createElectronLauncherSystemDomainProxy(
         pacPort: pac.pacPort,
         sharedLocalPac: pac.sharedLocalPac,
         dnsServers: pac.dnsServers,
+        dnsFallbackTarget: pac.dnsFallbackTarget,
         domains: pac.domains,
+        reverseProxyRoutes: pac.reverseProxyRoutes,
         previous,
         updatedAt: new Date().toISOString()
       };
@@ -901,13 +959,21 @@ async function handleProxyHttpRequest(
     return;
   }
   try {
-    const targetHost = await resolveProxyHost(target.hostname, config);
-    const upstream = httpRequest({
+    const route = reverseProxyRouteForHost(target.hostname, config);
+    const routeUrl = route?.targetUrl ? new URL(route.targetUrl) : null;
+    const targetHost = routeUrl
+      ? stripHostBrackets(routeUrl.hostname)
+      : await resolveProxyHost(target.hostname, config);
+    const targetPort = routeUrl
+      ? upstreamPort(routeUrl)
+      : Number(target.port || 80);
+    const requestImpl = routeUrl?.protocol === 'https:' ? httpsRequest : httpRequest;
+    const upstream = requestImpl({
       host: targetHost,
-      port: target.port || 80,
+      port: targetPort,
       method: req.method,
-      path: `${target.pathname}${target.search}`,
-      headers: proxyForwardHeaders(req, target.host),
+      path: routeUrl ? reverseProxyPath(routeUrl, target) : `${target.pathname}${target.search}`,
+      headers: proxyForwardHeaders(req, routeUrl?.host || target.host, target.host),
       timeout: PROXY_CONNECT_TIMEOUT_MS
     }, (upstreamRes) => {
       res.writeHead(upstreamRes.statusCode || 502, upstreamRes.statusMessage || undefined, upstreamRes.headers);
@@ -927,6 +993,8 @@ async function handleProxyHttpRequest(
 async function resolveProxyHost(host: string, config: LocalPacServerConfig | null): Promise<string> {
   const cleanHost = stripHostBrackets(host).toLowerCase();
   if (!cleanHost || isIP(cleanHost)) return cleanHost;
+  const routeTarget = dnsTargetForHost(cleanHost, config);
+  if (routeTarget) return routeTarget;
   if (!config?.dnsServers.length || !hostMatchesDomains(cleanHost, config.domains)) return cleanHost;
   const failures: string[] = [];
   for (const server of config.dnsServers) {
@@ -936,7 +1004,47 @@ async function resolveProxyHost(host: string, config: LocalPacServerConfig | nul
       failures.push(`${server}: ${errorMessage(err)}`);
     }
   }
+  if (config.dnsFallbackTarget) return config.dnsFallbackTarget;
   throw new Error(`Internal DNS failed for ${cleanHost}: ${failures.join('; ')}`);
+}
+
+function reverseProxyRouteForHost(host: string, config: LocalPacServerConfig | null): ElectronLauncherSystemDomainProxyRoute | null {
+  const cleanHost = normalizeDomainName(stripHostBrackets(host));
+  if (!cleanHost || !config?.reverseProxyRoutes.length) return null;
+  return config.reverseProxyRoutes.find((route) => route.host === cleanHost) || null;
+}
+
+function dnsTargetForHost(host: string, config: LocalPacServerConfig | null): string | null {
+  const route = reverseProxyRouteForHost(host, config);
+  return route?.dnsTarget && isIP(route.dnsTarget) ? route.dnsTarget : null;
+}
+
+function connectRouteTarget(
+  authority: { host: string; port: number },
+  config: LocalPacServerConfig | null
+): { host: string; port: number } | null {
+  const route = reverseProxyRouteForHost(authority.host, config);
+  if (!route?.targetUrl) return null;
+  const url = new URL(route.targetUrl);
+  if (url.protocol !== 'https:' && route.tlsMode !== 'passthrough') return null;
+  return {
+    host: stripHostBrackets(url.hostname),
+    port: upstreamPort(url)
+  };
+}
+
+function upstreamPort(url: URL): number {
+  const port = Number(url.port);
+  if (Number.isInteger(port) && port > 0 && port <= 65535) return port;
+  return url.protocol === 'https:' ? 443 : 80;
+}
+
+function reverseProxyPath(upstream: URL, target: URL): string {
+  const base = upstream.pathname && upstream.pathname !== '/'
+    ? upstream.pathname.replace(/\/+$/g, '')
+    : '';
+  const path = target.pathname || '/';
+  return `${base}${path.startsWith('/') ? path : `/${path}`}${target.search}`;
 }
 
 function proxyHttpTarget(req: IncomingMessage): URL | null {
@@ -951,7 +1059,7 @@ function proxyHttpTarget(req: IncomingMessage): URL | null {
   }
 }
 
-function proxyForwardHeaders(req: IncomingMessage, hostHeader: string): Record<string, string | string[]> {
+function proxyForwardHeaders(req: IncomingMessage, hostHeader: string, originalHost?: string): Record<string, string | string[]> {
   const out: Record<string, string | string[]> = {};
   for (const [key, value] of Object.entries(req.headers)) {
     if (value === undefined) continue;
@@ -969,6 +1077,10 @@ function proxyForwardHeaders(req: IncomingMessage, hostHeader: string): Record<s
     out[key] = Array.isArray(value) ? value.map(String) : String(value);
   }
   out.Host = hostHeader;
+  if (originalHost && originalHost !== hostHeader) {
+    out['X-Forwarded-Host'] = originalHost;
+    out['X-MX-Original-Host'] = originalHost;
+  }
   return out;
 }
 
@@ -1009,8 +1121,36 @@ function normalizeSharedLocalPacConfig(value: unknown): LocalPacServerConfig {
     proxy: normalizeProxyAddress(row.proxyDirective) || normalizeProxyAddress(row.proxy),
     matchMode: normalizeMatchMode(row.matchMode, row.proxy),
     fallbackProxy: normalizeProxyAddress(row.fallbackProxyDirective) || normalizeProxyAddress(row.fallbackProxy),
-    dnsServers: normalizeDnsServers(row.dnsServers)
+    dnsServers: normalizeDnsServers(row.dnsServers),
+    dnsFallbackTarget: normalizeDnsTarget(row.dnsFallbackTarget),
+    reverseProxyRoutes: normalizeReverseProxyRoutes(row.reverseProxyRoutes)
   };
+}
+
+function mergeLocalPacConfigs(
+  current: LocalPacServerConfig | null,
+  incoming: LocalPacServerConfig
+): LocalPacServerConfig {
+  if (!current) return incoming;
+  return {
+    domains: uniqueList([...current.domains, ...incoming.domains]),
+    proxy: incoming.proxy || current.proxy,
+    matchMode: current.matchMode === 'proxy' || incoming.matchMode === 'proxy' ? 'proxy' : incoming.matchMode,
+    fallbackProxy: incoming.fallbackProxy || current.fallbackProxy,
+    dnsServers: uniqueList([...current.dnsServers, ...incoming.dnsServers]),
+    dnsFallbackTarget: incoming.dnsFallbackTarget || current.dnsFallbackTarget,
+    reverseProxyRoutes: mergeReverseProxyRoutes(current.reverseProxyRoutes, incoming.reverseProxyRoutes)
+  };
+}
+
+function mergeReverseProxyRoutes(
+  current: ElectronLauncherSystemDomainProxyRoute[],
+  incoming: ElectronLauncherSystemDomainProxyRoute[]
+): ElectronLauncherSystemDomainProxyRoute[] {
+  const byHost = new Map<string, ElectronLauncherSystemDomainProxyRoute>();
+  for (const route of current) byHost.set(route.host, route);
+  for (const route of incoming) byHost.set(route.host, route);
+  return [...byHost.values()];
 }
 
 function parseProxyAuthority(value: string, defaultPort: number): { host: string; port: number } | null {
@@ -1091,7 +1231,9 @@ function httpJsonRequest(url: string, body: unknown, timeoutMs: number): Promise
       matchMode: (body as LocalPacServerConfig).matchMode,
       fallbackProxy: (body as LocalPacServerConfig).fallbackProxy?.address || null,
       fallbackProxyDirective: (body as LocalPacServerConfig).fallbackProxy?.directive || null,
-      dnsServers: normalizeDnsServers((body as LocalPacServerConfig).dnsServers)
+      dnsServers: normalizeDnsServers((body as LocalPacServerConfig).dnsServers),
+      dnsFallbackTarget: normalizeDnsTarget((body as LocalPacServerConfig).dnsFallbackTarget),
+      reverseProxyRoutes: normalizeReverseProxyRoutes((body as LocalPacServerConfig).reverseProxyRoutes)
     });
     const req = httpRequest({
       hostname: parsed.hostname,
@@ -1128,7 +1270,8 @@ function httpJsonRequest(url: string, body: unknown, timeoutMs: number): Promise
 
 function resolveDnsA(hostname: string, server: string): Promise<string> {
   const query = buildDnsAQuery(hostname);
-  const serverHost = stripHostBrackets(server.split(':')[0] || server);
+  const endpoint = parseDnsServerEndpoint(server);
+  if (!endpoint) return Promise.reject(new Error(`Invalid DNS server endpoint: ${server}`));
   return new Promise((resolve, reject) => {
     const socket = createSocket('udp4');
     const timer = setTimeout(() => {
@@ -1151,14 +1294,25 @@ function resolveDnsA(hostname: string, server: string): Promise<string> {
       socket.close();
       reject(err);
     });
-    socket.send(query.packet, 53, serverHost);
+    socket.send(query.packet, endpoint.port, endpoint.host);
   });
 }
 
-function forwardDnsPacket(packet: Buffer, servers: string[]): Promise<Buffer> {
-  const server = servers[0];
-  if (!server) return Promise.reject(new Error('Internal DNS server is not configured'));
-  const serverHost = stripHostBrackets(server.split(':')[0] || server);
+async function forwardDnsPacket(packet: Buffer, servers: string[]): Promise<Buffer> {
+  const failures: string[] = [];
+  for (const server of servers) {
+    try {
+      return await forwardDnsPacketToServer(packet, server);
+    } catch (err) {
+      failures.push(`${server}: ${errorMessage(err)}`);
+    }
+  }
+  throw new Error(failures.length ? failures.join('; ') : 'Internal DNS server is not configured');
+}
+
+function forwardDnsPacketToServer(packet: Buffer, server: string): Promise<Buffer> {
+  const endpoint = parseDnsServerEndpoint(server);
+  if (!endpoint) return Promise.reject(new Error(`Invalid DNS server endpoint: ${server}`));
   return new Promise((resolve, reject) => {
     const socket = createSocket('udp4');
     const timer = setTimeout(() => {
@@ -1175,7 +1329,7 @@ function forwardDnsPacket(packet: Buffer, servers: string[]): Promise<Buffer> {
       socket.close();
       reject(err);
     });
-    socket.send(packet, 53, serverHost);
+    socket.send(packet, endpoint.port, endpoint.host);
   });
 }
 
@@ -1188,6 +1342,47 @@ function dnsFailureResponse(query: Buffer): Buffer {
   response.writeUInt16BE(0, 8);
   response.writeUInt16BE(0, 10);
   return response;
+}
+
+function dnsAResponse(query: Buffer, address: string): Buffer {
+  if (query.length < 12 || isIP(address) !== 4) return Buffer.alloc(0);
+  const questionEnd = dnsQuestionEndOffset(query);
+  if (!questionEnd) return Buffer.alloc(0);
+  const response = Buffer.alloc(questionEnd + 16);
+  query.copy(response, 0, 0, questionEnd);
+  const flags = query.readUInt16BE(2);
+  response.writeUInt16BE((flags | 0x8000 | 0x0080) & 0xfff0, 2);
+  response.writeUInt16BE(1, 6);
+  response.writeUInt16BE(0, 8);
+  response.writeUInt16BE(0, 10);
+  let offset = questionEnd;
+  response.writeUInt16BE(0xc00c, offset);
+  offset += 2;
+  response.writeUInt16BE(1, offset);
+  offset += 2;
+  response.writeUInt16BE(1, offset);
+  offset += 2;
+  response.writeUInt32BE(30, offset);
+  offset += 4;
+  response.writeUInt16BE(4, offset);
+  offset += 2;
+  for (const part of address.split('.')) {
+    response[offset] = Number(part);
+    offset += 1;
+  }
+  return response;
+}
+
+function dnsQuestionEndOffset(packet: Buffer): number | null {
+  if (packet.length < 13 || packet.readUInt16BE(4) < 1) return null;
+  let offset = 12;
+  while (offset < packet.length) {
+    const length = packet[offset];
+    if (length === 0) return offset + 5 <= packet.length ? offset + 5 : null;
+    if ((length & 0xc0) === 0xc0 || offset + 1 + length > packet.length) return null;
+    offset += length + 1;
+  }
+  return null;
 }
 
 function dnsQuestionHost(packet: Buffer): string | null {
@@ -1305,7 +1500,9 @@ function publicState(state: StoredState, extra: Partial<ElectronLauncherSystemDo
     pacPort: state.pacPort || null,
     sharedPac: state.sharedLocalPac === true,
     dnsServers: normalizeDnsServers(state.dnsServers),
+    dnsFallbackTarget: normalizeDnsTarget(state.dnsFallbackTarget),
     domains: normalizeDomains(state.domains),
+    reverseProxyRoutes: normalizeReverseProxyRoutes(state.reverseProxyRoutes),
     updatedAt: state.updatedAt || null,
     ...extra
   };
@@ -1318,13 +1515,114 @@ function normalizeDomains(value: unknown): string[] {
     .filter(Boolean))];
 }
 
+function uniqueList(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
 function normalizeDnsServers(value: unknown): string[] {
   const raw = Array.isArray(value)
     ? value
     : (typeof value === 'string' ? value.split(/[,\s]+/) : []);
   return [...new Set(raw
-    .map((item) => typeof item === 'string' ? stripHostBrackets(item.trim()) : '')
-    .filter((item) => Boolean(item && isIP(item))))];
+    .map((item) => normalizeDnsServerEndpoint(item))
+    .filter((item): item is string => Boolean(item)))];
+}
+
+function normalizeDnsServerEndpoint(value: unknown): string | null {
+  const parsed = parseDnsServerEndpoint(value);
+  if (!parsed) return null;
+  if (parsed.port === 53) return parsed.host;
+  return parsed.host.includes(':') ? `[${parsed.host}]:${parsed.port}` : `${parsed.host}:${parsed.port}`;
+}
+
+function parseDnsServerEndpoint(value: unknown): { host: string; port: number } | null {
+  const text = stringValue(value);
+  if (!text) return null;
+  let host = text;
+  let portText: string | null = null;
+  if (text.startsWith('[')) {
+    const close = text.indexOf(']');
+    if (close <= 0) return null;
+    host = text.slice(1, close);
+    const rest = text.slice(close + 1);
+    if (rest.startsWith(':')) portText = rest.slice(1);
+  } else {
+    const portMatch = text.match(/^(.+):(\d{1,5})$/);
+    if (portMatch && !portMatch[1].includes(':')) {
+      host = portMatch[1];
+      portText = portMatch[2];
+    }
+  }
+  const cleanHost = stripHostBrackets(host.trim().replace(/\.+$/g, ''));
+  if (!isDnsServerHost(cleanHost)) return null;
+  const port = portText ? Number(portText) : 53;
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return null;
+  return { host: cleanHost, port };
+}
+
+function isDnsServerHost(host: string): boolean {
+  if (!host) return false;
+  if (isIP(host)) return true;
+  if (host === 'localhost') return true;
+  return /^(?=.{1,253}$)(?!-)[a-z0-9-]+(?:\.(?!-)[a-z0-9-]+)*\.?$/i.test(host);
+}
+
+function normalizeReverseProxyRoutes(value: unknown): ElectronLauncherSystemDomainProxyRoute[] {
+  const rows = Array.isArray(value) ? value : [];
+  const routes: ElectronLauncherSystemDomainProxyRoute[] = [];
+  const seen = new Set<string>();
+  for (const item of rows) {
+    if (!item || typeof item !== 'object') continue;
+    const row = item as Record<string, unknown>;
+    if (row.enabled === false) continue;
+    const host = normalizeDomainName(row.host);
+    if (!host || seen.has(host)) continue;
+    const dnsTarget = normalizeDnsTarget(row.dnsTarget);
+    const targetUrl = normalizeTargetUrl(row.targetUrl);
+    routes.push({
+      routeId: stringValue(row.routeId),
+      host,
+      dnsTarget,
+      targetUrl,
+      tlsMode: normalizeTlsMode(row.tlsMode),
+      authRequired: row.authRequired === true,
+      enabled: true
+    });
+    seen.add(host);
+  }
+  return routes;
+}
+
+function normalizeDomainName(value: unknown): string | null {
+  const text = stringValue(value)?.toLowerCase().replace(/^\.+|\.+$/g, '') || null;
+  if (!text || text.length > 253 || text.includes('/') || text.includes(':')) return null;
+  return text;
+}
+
+function normalizeDnsTarget(value: unknown): string | null {
+  const text = stringValue(value);
+  if (!text) return null;
+  const host = text.startsWith('[')
+    ? text.slice(1, text.indexOf(']') > 0 ? text.indexOf(']') : undefined)
+    : text.split(':')[0];
+  const cleanHost = stripHostBrackets(host || text);
+  return isIP(cleanHost) ? cleanHost : null;
+}
+
+function normalizeTargetUrl(value: unknown): string | null {
+  const text = stringValue(value);
+  if (!text) return null;
+  try {
+    const url = new URL(text);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function normalizeTlsMode(value: unknown): ElectronLauncherSystemDomainProxyRoute['tlsMode'] {
+  return value === 'passthrough' || value === 'edge-terminated' || value === 'internal' ? value : null;
 }
 
 function normalizePort(value: unknown): number | null {

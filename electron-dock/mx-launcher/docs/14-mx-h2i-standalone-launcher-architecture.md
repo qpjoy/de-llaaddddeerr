@@ -289,8 +289,8 @@ Domestic runtime config 是 Internal 配置中心对象，默认 seed 为：
   "bootstrapPort": 18090,
   "internalApiUpstream": "http://10.88.88.88:18090",
   "internalH2iUpstream": "http://10.88.88.88:18090",
-  "dnsBind": "10.88.0.1",
-  "dnsPort": 53
+  "dnsBind": "0.0.0.0",
+  "dnsPort": 50053
 }
 ```
 
@@ -340,11 +340,19 @@ Clash/mihomo 开启系统代理或 TUN/fake-ip 时，bootstrap 可以复用系�
 系统 PAC/本机入口能力抽象在 `@qpjoy/electron-launcher/system-domain-proxy`，由
 standalone owner 在 H2I ready 后安装、断开时恢复。MX-H2I 默认占用或复用
 `127.0.0.1:2053`，同一端口同时提供 `/proxy.pac` 和 HTTP/CONNECT proxy；命中 Internal
-域名时 PAC 返回 `PROXY 127.0.0.1:2053`，本机 proxy 优先使用 routePlan 的
-`internalControlIp`（默认 `10.88.88.88`）解析，再交给 WG AllowedIPs 进入 Internal。
+域名或 DNS route host 时 PAC 返回 `PROXY 127.0.0.1:2053`。本机 proxy 会先匹配
+route 的 `targetUrl`/`dnsTarget`；没有 route 时再使用 routePlan 的 `internalControlIp`
+（默认 `10.88.88.88`）或 Internal DNS 解析，最后交给 WG AllowedIPs 进入 Internal。
 `10.88.0.1` 是 Domestic gateway/relay，只能作为 DNS relay/cache fallback。未命中域名应
 回落到原 Clash/mihomo 本地代理或系统默认路径。这样浏览器/PAC 流量、MX-H2I DNS 解析和
 WG 白名单路由都优先于系统代理、Clash fake-ip 和其它应用的默认网络路径。
+V2 不应假设 TCP facade 会自动转发传统 DNS：UDP/53 与 HTTP/TCP reverse proxy 是两条链路。
+本机 edge 在 Internal/Domestic UDP DNS 超时后，可以把已命中 split DNS 的域名降级解析到
+Internal gateway `10.88.88.88`；更完整的生产形态是在 Domestic 部署 `dns-edge-cache`，
+由 Internal 同步 signed zone snapshot，Domestic 只做缓存/转发而不拥有 DNS 真相。V2 的
+Domestic DNS edge 使用独立容器 `mx-domestic-dns-edge-v2` 和 `50053` 端口，避免与
+V1 `hdo-coredns` 的 53 端口冲突。H 端连接前优先查询 Domestic 公网地址的 `:50053`；
+`10.88.0.1:50053` 只有在 `mx-domestic` WireGuard 已经起来后才作为备用路径。
 如果生产 DNS 还没有准备好，Domestic runtime 的 `bootstrapHost` 可以先使用 Domestic
 公网 IP，保持 `bootstrapProtocol=http`、`bootstrapPort=18090`，这与测试服 bootstrap
 路径一致。`api.mxinfo-inc.cn` 只是默认域名占位；未替换时会产生 warning，但不应该成为
@@ -560,9 +568,18 @@ H 端策略是：`internal.mx`、`.internal.mx`、`.corp.mx`、`.h2i.mx` 命中 
   例如 `http://10.88.88.88:13141`、`http://10.88.88.88:18090` 或其它 Internal service URL。
 - 访问 `http://domain:port/` 时只依赖 split DNS 解析到 `10.88.88.88`，流量按原端口进入
   Internal；访问 `http://domain/` 或 `https://domain/` 且不带端口时，需要
-  `10.88.88.88` 上的 gateway 按 Host 反代到该 route 的 `targetUrl`。
+  本机 edge 或 `10.88.88.88` 上的 gateway 按 Host 反代到该 route 的 `targetUrl`。
+- `targetUrl` 必须从实际执行反代的一侧可达：本机 edge 反代可以使用 WG overlay IP；
+  如果由 Internal Pod/gateway 反代，则优先使用 k8s service DNS 或 host-runner 暴露的
+  URL，避免在 Pod 内访问 `10.88.88.88` 时落到 gateway 自身或默认 nginx。
+- `http://domain/` 可以由本机 edge 转发到 `http://upstream:port`；`https://domain/`
+  不能被本机 proxy 透明解 TLS，除非 upstream 本身是 `https`/passthrough 并持有该域名证书。
 - `Build Zone` 只生成 zone snapshot；只有 `Apply CoreDNS ConfigMap` 后才会更新
-  `mx-dns/coredns` 并影响新的解析结果。反代 route 生效还需要 gateway 加载对应配置。
+  `mx-dns/coredns` 并影响新的解析结果。本机 edge 会在 H2I ready 后拉取最新 DNS route。
+- 若 H 端看到 `DNS timeout via <domestic-public>:50053/10.88.0.1:50053/10.88.88.88`，
+  说明 Domestic DNS edge、WG 或 Internal CoreDNS 链路仍有一段未通；这时应先让
+  本机 edge 用 route/default gateway fallback 保证浏览器流量进入 Internal，再检查是否需要
+  Domestic `dns-edge-cache`、CoreDNS Service 暴露或 WireGuard AllowedIPs/防火墙放通 UDP/TCP 50053/53。
 
 当前本地 Mac + Docker Desktop 中，host-runner DaemonSet 操作的是 LinuxKit node，不等于
 Mac 宿主机；正式 Ubuntu 环境中也优先使用 native systemd runner，让 WireGuard、路由和

@@ -55,6 +55,7 @@ export {
   type ElectronLauncherSystemDomainProxyManager,
   type ElectronLauncherSystemDomainProxyOptions,
   type ElectronLauncherSystemDomainProxyPolicy,
+  type ElectronLauncherSystemDomainProxyRoute,
   type ElectronLauncherSystemDomainProxyStatus
 } from './system-domain-proxy.js';
 

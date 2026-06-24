@@ -691,14 +691,14 @@ function createDomesticServicesTar(artifactRoot) {
       optionalProfiles: ['dns'],
       enabledModules: ['relay-facade', 'h2i-proxy', 'api-proxy', 'snapshot-cache', 'observability-forwarder'],
       edgePort: 18090,
-      dnsBind: '10.88.0.1',
+      dnsBind: '0.0.0.0',
       internalApiUpstream: 'http://10.88.88.88:18090',
       internalDnsUpstream: '10.88.88.88:53',
       publicFacadeMode: 'bootstrap-and-relay'
     },
     notes: [
       'Minimal runnable Domestic edge stack: Caddy exposes health/evidence/snapshot cache and relays API/H2I traffic to Internal over the Domestic WG path.',
-      'CoreDNS forwarder is shipped but disabled by default through the dns profile so a host without mx-domestic can still start the edge stack safely.',
+      'CoreDNS edge cache is shipped but disabled by default through the dns profile so a host without mx-domestic can still start the edge stack safely.',
       'Domestic remains relay/cache only; User Center, RBAC, DNS authority, subscriptions, and release truth stay in Internal.'
     ],
     buildStaging: (staging) => {
@@ -715,8 +715,8 @@ function createDomesticServicesTar(artifactRoot) {
         'MX_INTERNAL_H2I_UPSTREAM=http://10.88.88.88:18090',
         'MX_DOMESTIC_EDGE_BIND=0.0.0.0',
         'MX_DOMESTIC_EDGE_PORT=18090',
-        'MX_DOMESTIC_DNS_BIND=10.88.0.1',
-        'MX_DOMESTIC_DNS_PORT=53',
+        'MX_DOMESTIC_DNS_BIND=0.0.0.0',
+        'MX_DOMESTIC_DNS_PORT=50053',
         ''
       ].join('\n'));
       writeFileSync(join(staging, 'enabled-modules.json'), JSON.stringify({
@@ -757,7 +757,7 @@ function writeDomesticServicesReadme(staging) {
     '- keep the public bootstrap/relay surface small;',
     '- relay API and H2I traffic back to Internal over the Domestic WireGuard path;',
     '- expose health, evidence, and snapshot-cache files for diagnostics;',
-    '- optionally run a CoreDNS forwarder on the Domestic WG address.',
+    '- optionally run a CoreDNS edge cache on a non-conflicting V2 DNS port.',
     '',
     'Internal remains the source of truth for users, RBAC, DNS authority, subscriptions, config snapshots, release state, and evidence history.',
     '',
@@ -768,7 +768,7 @@ function writeDomesticServicesReadme(staging) {
     '',
     'Commands:',
     '- `./manage.sh up` starts the default edge relay.',
-    '- `./manage.sh up-dns` also starts the optional CoreDNS profile.',
+    '- `./manage.sh up-dns` also starts the optional CoreDNS profile on `${MX_DOMESTIC_DNS_BIND:-0.0.0.0}:${MX_DOMESTIC_DNS_PORT:-50053}`.',
     '- `./manage.sh status` prints health, compose status, and configured upstreams.',
     '- `./manage.sh health` checks both the Domestic edge and the Internal upstream bootstrap probe.',
     '',
@@ -823,8 +823,8 @@ function writeDomesticServicesCompose(staging) {
     '    restart: unless-stopped',
     '    command: ["-conf", "/etc/coredns/Corefile"]',
     '    ports:',
-    '      - "${MX_DOMESTIC_DNS_BIND:-10.88.0.1}:${MX_DOMESTIC_DNS_PORT:-53}:53/udp"',
-    '      - "${MX_DOMESTIC_DNS_BIND:-10.88.0.1}:${MX_DOMESTIC_DNS_PORT:-53}:53/tcp"',
+    '      - "${MX_DOMESTIC_DNS_BIND:-0.0.0.0}:${MX_DOMESTIC_DNS_PORT:-50053}:53/udp"',
+    '      - "${MX_DOMESTIC_DNS_BIND:-0.0.0.0}:${MX_DOMESTIC_DNS_PORT:-50053}:53/tcp"',
     '    volumes:',
     '      - ./Corefile:/etc/coredns/Corefile:ro',
     '    networks:',
@@ -992,7 +992,7 @@ function writeDomesticServicesManage(staging) {
     '  echo "Edge URL: http://${MX_DOMESTIC_EDGE_BIND:-0.0.0.0}:${MX_DOMESTIC_EDGE_PORT:-18090}"',
     '  echo "Internal API upstream: ${MX_INTERNAL_API_UPSTREAM:-http://10.88.88.88:18090}"',
     '  echo "Internal H2I upstream: ${MX_INTERNAL_H2I_UPSTREAM:-http://10.88.88.88:18090}"',
-    '  echo "DNS profile bind: ${MX_DOMESTIC_DNS_BIND:-10.88.0.1}:${MX_DOMESTIC_DNS_PORT:-53}"',
+    '  echo "DNS profile bind: ${MX_DOMESTIC_DNS_BIND:-0.0.0.0}:${MX_DOMESTIC_DNS_PORT:-50053}"',
     '  echo',
     '  compose ps',
     '}',

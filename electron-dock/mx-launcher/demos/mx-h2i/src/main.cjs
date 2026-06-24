@@ -20,6 +20,7 @@ const LOCAL_INTERNAL_BASE_URLS = ['http://127.0.0.1:18090', 'http://localhost:18
 const BOOTSTRAP_DNS_RETRY_LIMIT = 3;
 const BOOTSTRAP_DNS_RETRY_DELAY_MS = 350;
 const DEFAULT_LOCAL_EDGE_PORT = 2053;
+const DEFAULT_DOMESTIC_DNS_EDGE_PORT = 50053;
 const DEFAULT_CONFIG = {
   bootstrapApiBaseUrl: defaultBootstrapApiBaseUrl(),
   internalApiBaseUrl: 'http://10.88.88.88:18090',
@@ -611,11 +612,18 @@ async function initializeSystemDomainProxy() {
 
 async function ensureSystemDomainProxyForRuntime(reason = 'manual') {
   if (!systemDomainProxyManager) return null;
-  const domains = splitDnsDomains(runtime?.config);
-  if (domains.length === 0 || runtime?.connection?.state !== 'connected') {
+  if (runtime?.connection?.state !== 'connected') {
     return disableSystemDomainProxyForRuntime(`${reason}-not-connected`);
   }
   try {
+    const reverseProxyRoutes = await systemPacReverseProxyRoutes();
+    const domains = uniqueStrings([
+      ...splitDnsDomains(runtime?.config),
+      ...reverseProxyRoutes.map((route) => route.host).filter(Boolean)
+    ]);
+    if (domains.length === 0) {
+      return disableSystemDomainProxyForRuntime(`${reason}-no-domains`);
+    }
     return await systemDomainProxyManager.apply({
       enabled: true,
       domains,
@@ -623,6 +631,8 @@ async function ensureSystemDomainProxyForRuntime(reason = 'manual') {
       proxy: localEdgeProxy(),
       pacPort: localEdgePort(),
       dnsServers: systemPacDnsServers(),
+      dnsFallbackTarget: systemPacDnsFallbackTarget(),
+      reverseProxyRoutes,
       fallbackProxy: systemPacFallbackProxy()
     });
   } catch (err) {
@@ -679,15 +689,96 @@ function localEdgeProxy() {
 function systemPacDnsServers() {
   return arrayValue([
     process.env.MX_H2I_LOCAL_EDGE_DNS_SERVER,
+    process.env.MX_H2I_DOMESTIC_DNS_SERVER,
+    process.env.MX_H2I_DOMESTIC_DNS_EDGE,
+    domesticPublicDnsServer(),
+    runtime?.connection?.routePlan?.dnsServer,
+    domesticGatewayDnsServer(),
     runtime?.connection?.routePlan?.internalControlIp,
     runtime?.connection?.internalControlIp,
-    INTERNAL_PEER_IP,
-    runtime?.connection?.routePlan?.dnsServer,
-    runtime?.connection?.routePlan?.domesticGatewayIp
+    INTERNAL_PEER_IP
   ], [])
     .map((item) => String(item || '').trim())
     .filter(Boolean)
     .filter((item, index, rows) => rows.indexOf(item) === index);
+}
+
+function domesticPublicDnsServer() {
+  const host = publicHostFromEndpoint(runtime?.connection?.domesticRelayEndpoint)
+    || publicHostFromUrl(runtime?.config?.bootstrapApiBaseUrl)
+    || publicHostFromUrl(DEFAULT_CONFIG.bootstrapApiBaseUrl);
+  return host ? dnsEndpoint(host, DEFAULT_DOMESTIC_DNS_EDGE_PORT) : null;
+}
+
+function domesticGatewayDnsServer() {
+  const host = nullableString(runtime?.connection?.routePlan?.domesticGatewayIp) || '10.88.0.1';
+  return dnsEndpoint(host, DEFAULT_DOMESTIC_DNS_EDGE_PORT);
+}
+
+function dnsEndpoint(host, port) {
+  const cleanHost = nullableString(host);
+  if (!cleanHost) return null;
+  return cleanHost.includes(':') && !cleanHost.startsWith('[')
+    ? `[${cleanHost}]:${port}`
+    : `${cleanHost}:${port}`;
+}
+
+function publicHostFromEndpoint(endpoint) {
+  const text = nullableString(endpoint);
+  if (!text) return null;
+  try {
+    return new URL(text.includes('://') ? text : `udp://${text}`).hostname || null;
+  } catch {
+    return text.split(':')[0] || null;
+  }
+}
+
+function publicHostFromUrl(value) {
+  const text = normalizeBaseUrl(value);
+  if (!text) return null;
+  try {
+    const host = new URL(text).hostname;
+    return host && host !== 'localhost' && net.isIP(host) !== 6 ? host : null;
+  } catch {
+    return null;
+  }
+}
+
+function systemPacDnsFallbackTarget() {
+  return nullableString(runtime?.connection?.routePlan?.internalControlIp)
+    || nullableString(runtime?.connection?.internalControlIp)
+    || INTERNAL_PEER_IP;
+}
+
+async function systemPacReverseProxyRoutes() {
+  const baseUrl = normalizeBaseUrl(runtime?.connection?.internalBaseUrl)
+    || internalOverlayBaseUrl(runtime?.connection?.routePlan, runtime?.config?.internalApiBaseUrl);
+  try {
+    const payload = await requestJson(joinApiUrl(baseUrl, '/internal/v1/dns/reverse-proxy/routes'), {
+      timeoutMs: 2200
+    });
+    return arrayValue(payload?.routes, [])
+      .map((route) => normalizeSystemPacReverseProxyRoute(route))
+      .filter(Boolean);
+  } catch (err) {
+    console.warn('[mx-h2i] reverse proxy routes unavailable for local edge:', errorMessage(err));
+    return [];
+  }
+}
+
+function normalizeSystemPacReverseProxyRoute(input) {
+  const row = input && typeof input === 'object' ? input : {};
+  const host = nullableString(row.host);
+  if (!host || row.enabled === false) return null;
+  return {
+    routeId: nullableString(row.routeId),
+    host,
+    dnsTarget: nullableString(row.dnsTarget),
+    targetUrl: nullableString(row.targetUrl),
+    tlsMode: nullableString(row.tlsMode),
+    authRequired: row.authRequired === true,
+    enabled: true
+  };
 }
 
 function isCursorInsideWindow(point = electronScreen.getCursorScreenPoint()) {
@@ -1619,7 +1710,8 @@ async function connectAndProbeWireGuardPath(mod, input) {
     expectedInterfaceName: status.realInterfaceName || status.interfaceName || null,
     expectedInterfaceAddresses: status.addresses || []
   });
-  const routeReady = route.ok === true || routeProbeCanFallbackToInternalApi(route, result.ok === true);
+  const tunnelProofReady = result.ok === true || route.ok === true || wireGuardStatusCanUseInterfaceFallback(status);
+  const routeReady = route.ok === true || routeProbeCanFallbackToInternalApi(route, tunnelProofReady);
   const internalApi = routeReady
     ? await probeInternalApiViaOverlay(input.internalBaseUrl)
     : internalApiProbeBlockedByRoute(input.internalBaseUrl, targetIp, route);
@@ -1629,7 +1721,7 @@ async function connectAndProbeWireGuardPath(mod, input) {
     route,
     endpointRoute,
     internalApi,
-    ready: result.ok === true && routeReady && internalApi.ok === true
+    ready: tunnelProofReady && routeReady && internalApi.ok === true
   };
 }
 
@@ -1657,11 +1749,12 @@ async function probeWireGuardForConnection(input) {
       expectedInterfaceName,
       expectedInterfaceAddresses: status?.addresses || []
     });
-    const routeReady = route.ok === true || routeProbeCanFallbackToInternalApi(route, status?.active === true);
+    const tunnelProofReady = status?.active === true || route.ok === true || wireGuardStatusCanUseInterfaceFallback(status);
+    const routeReady = route.ok === true || routeProbeCanFallbackToInternalApi(route, tunnelProofReady);
     const internalApi = routeReady
       ? await probeInternalApiViaOverlay(internalBaseUrl)
       : internalApiProbeBlockedByRoute(internalBaseUrl, targetIp, route);
-    const tunnelReady = status?.active === true || route.ok === true;
+    const tunnelReady = tunnelProofReady;
     const ready = tunnelReady && routeReady && internalApi.ok === true;
     const domesticRelayReady = domesticRelayDiagnostics?.status === 'passed' || domesticPeerSync?.status === 'passed' || route.ok === true;
     const resultLike = {
@@ -2086,7 +2179,13 @@ function internalApiProbeBlockedByRoute(baseUrl, targetIp, route) {
 function routeProbeCanFallbackToInternalApi(route, tunnelReady) {
   if (!tunnelReady || route?.ok === true) return false;
   const error = `${route?.error || ''}\n${route?.raw || ''}`;
-  return /operation not permitted|not permitted|permission denied/i.test(error);
+  return /operation not permitted|not permitted|permission denied|requires elevated access/i.test(error);
+}
+
+function wireGuardStatusCanUseInterfaceFallback(status) {
+  const error = `${status?.error || ''}\n${status?.message || ''}`;
+  if (!/wg show requires elevated access|requires elevated access/i.test(error)) return false;
+  return Boolean(status?.ifconfig || status?.realInterfaceName || status?.interfaceName);
 }
 
 function internalApiHealthStatus(route, internalApi) {
@@ -3226,6 +3325,12 @@ function splitDnsDomains(config) {
   return arrayValue(String(config?.splitDnsDomains || '').split(/[,\s]+/), [])
     .map((domain) => domain.replace(/^\.+/, '').replace(/\.+$/, '').toLowerCase())
     .filter(Boolean);
+}
+
+function uniqueStrings(items) {
+  return [...new Set(arrayValue(items, [])
+    .map((item) => typeof item === 'string' ? item.trim() : '')
+    .filter(Boolean))];
 }
 
 function nowIso() {
