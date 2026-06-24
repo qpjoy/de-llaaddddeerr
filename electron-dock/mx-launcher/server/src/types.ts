@@ -2109,6 +2109,7 @@ export interface DnsReverseProxyRoute {
   routeId: string;
   environment: string;
   host: string;
+  dnsTarget: string;
   targetUrl: string;
   enabled: boolean;
   tlsMode: 'internal' | 'passthrough' | 'edge-terminated';
@@ -2120,6 +2121,7 @@ export interface DnsReverseProxyRoute {
 export interface DnsReverseProxyRouteInput {
   routeId?: string | null;
   host?: string | null;
+  dnsTarget?: string | null;
   targetUrl?: string | null;
   enabled?: boolean | null;
   tlsMode?: DnsReverseProxyRoute['tlsMode'] | null;

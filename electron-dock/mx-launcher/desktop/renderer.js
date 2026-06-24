@@ -192,6 +192,7 @@ const state = {
     busy: false,
     zoneBusy: false,
     corednsBusy: false,
+    corednsApplyBusy: false,
     evalBusy: false,
     zoneSnapshot: null,
     corednsResult: null,
@@ -7959,6 +7960,7 @@ function filteredDnsRoutes() {
       return [
         route.routeId,
         route.host,
+        route.dnsTarget,
         route.targetUrl,
         route.tlsMode,
         route.authRequired ? 'auth' : 'public'
@@ -7982,12 +7984,13 @@ function renderDnsCenterPanel() {
         <div>
           <span class="site-kind">DNS Control</span>
           <h4>Internal DNS configuration</h4>
-          <p>业务域名在 DNS Routes 配置；split DNS policy 由 Internal 生成；CoreDNS snapshot 再下发到 ${MX_INTERNAL_DNS_IP}。</p>
+          <p>业务域名在 DNS Routes 配置；DNS target 决定 CoreDNS 解析，upstream URL 决定 gateway 反代到哪个服务和端口。</p>
         </div>
         <div class="dns-head-actions">
           <button class="secondary-button" type="button" data-dns-refresh ${state.dnsCenter.busy ? 'disabled' : ''}>${state.dnsCenter.busy ? 'Refreshing...' : 'Refresh'}</button>
           <button class="secondary-button" type="button" data-dns-zone-build ${state.dnsCenter.zoneBusy ? 'disabled' : ''}>${state.dnsCenter.zoneBusy ? 'Building...' : 'Build Zone'}</button>
           <button class="secondary-button" type="button" data-dns-coredns-sync ${state.dnsCenter.corednsBusy ? 'disabled' : ''}>${state.dnsCenter.corednsBusy ? 'Rendering...' : 'Dry-run CoreDNS'}</button>
+          <button class="secondary-button" type="button" data-dns-coredns-apply ${state.dnsCenter.corednsApplyBusy ? 'disabled' : ''}>${state.dnsCenter.corednsApplyBusy ? 'Applying...' : 'Apply CoreDNS'}</button>
           <button class="primary-button" type="button" data-dns-new>New Route</button>
         </div>
       </div>
@@ -8006,7 +8009,7 @@ function renderDnsCenterPanel() {
       <div class="foundation-panel-head">
         <div>
           <h4>DNS Routes</h4>
-          <p>这里配置业务域名到 Internal Gateway / service target 的映射；保存后可 Build Zone，再 dry-run CoreDNS ConfigMap。</p>
+          <p>这里把业务域名先解析到 Internal gateway，再按 Host 反代到每条 route 自己的 upstream 服务。</p>
         </div>
         <span>${escapeHtml(String(routes.length))} shown / ${escapeHtml(String(allRoutes.length))} total</span>
       </div>
@@ -8021,7 +8024,8 @@ function renderDnsCenterPanel() {
       <div class="app-table dns-route-table" role="table" aria-label="Internal DNS routes">
         <div class="app-table-row is-header dns-route-row" role="row">
           <span>Domain</span>
-          <span>Target</span>
+          <span>DNS Target</span>
+          <span>Upstream</span>
           <span>Gateway</span>
           <span>Status</span>
           <span>Updated</span>
@@ -8039,7 +8043,7 @@ function renderDnsCenterPanel() {
         </div>
       </div>
       ${renderFoundationRows([
-        ['Business domains', '在 DNS Routes 新增或编辑，目标一般指向 Internal service / gateway URL。', 'editable'],
+        ['Business domains', '在 DNS Routes 新增或编辑；DNS target 不带端口，upstream URL 可带每个服务自己的端口。', 'editable'],
         ['Split DNS whitelist', `${exactDomains.length} exact / ${suffixes.length} suffix，由 policy 管理。`, policy?.enabled === false ? 'disabled' : 'effective'],
         ['CoreDNS authority', `${policy?.internal?.serviceDns || 'mx-internal-coredns.mx-dns.svc.cluster.local'} via ${MX_INTERNAL_DNS_IP}`, 'Internal'],
         ['Fallback order', fallbackOrder.length ? fallbackOrder.join(' -> ') : 'system-dns -> system-proxy -> direct', policy?.proxyHints?.allowSystemProxyFallback === false ? 'locked' : 'Clash compatible']
@@ -8103,6 +8107,10 @@ function renderDnsRouteRow(route) {
         <small>${escapeHtml(route.routeId || 'auto route')}</small>
       </span>
       <span>
+        <b>${escapeHtml(route.dnsTarget || MX_INTERNAL_DNS_IP)}</b>
+        <small>CoreDNS record</small>
+      </span>
+      <span>
         <b>${escapeHtml(shortUrlLabel(route.targetUrl || '-'))}</b>
         <small>${escapeHtml(route.targetUrl || '-')}</small>
       </span>
@@ -8162,9 +8170,9 @@ function renderDnsZoneResult(snapshot, corednsResult) {
         <small>${records.length ? `${records.length} records / ${asArray(snapshot?.zoneNames).join(', ') || 'zones'}` : 'Build Zone will render records from policy and routes.'}</small>
       </div>
       <div>
-        <span>CoreDNS dry-run</span>
+        <span>CoreDNS sync</span>
         <strong>${escapeHtml(result?.status || 'not rendered')}</strong>
-        <small>${result ? `${result.namespace || 'mx-dns'}/${result.configMapName || 'coredns'} / ${result.mode || 'dry-run'}` : 'Dry-run keeps Kubernetes untouched.'}</small>
+        <small>${result ? `${result.namespace || 'mx-dns'}/${result.configMapName || 'coredns'} / ${result.mode || 'dry-run'}` : 'Dry-run or apply result appears here.'}</small>
       </div>
     </div>
   `;
@@ -8199,6 +8207,8 @@ function bindDnsCenterControls(root) {
   if (build) build.addEventListener('click', () => void buildDnsZoneSnapshotFromAdmin());
   const sync = root.querySelector('[data-dns-coredns-sync]');
   if (sync) sync.addEventListener('click', () => void syncCoreDnsConfigMapFromAdmin());
+  const apply = root.querySelector('[data-dns-coredns-apply]');
+  if (apply) apply.addEventListener('click', () => void applyCoreDnsConfigMapFromAdmin());
   const evaluateForm = root.querySelector('[data-dns-evaluate-form]');
   if (evaluateForm) {
     evaluateForm.addEventListener('submit', (event) => {
@@ -8267,6 +8277,7 @@ function createDnsRouteEditorDraft(mode = 'create', routeId = '') {
   return {
     routeId: route?.routeId || '',
     host: route?.host || '',
+    dnsTarget: route?.dnsTarget || MX_INTERNAL_DNS_IP,
     targetUrl: route?.targetUrl || `http://${MX_INTERNAL_DNS_IP}:18090`,
     enabled: route?.enabled === false ? false : true,
     tlsMode: route?.tlsMode || 'internal',
@@ -8284,7 +8295,7 @@ function openDnsRouteEditorDrawer(mode = 'create', routeId = '') {
   state.dnsCenter.feedback = null;
   renderFoundationGrid(state.dashboard?.overview || {});
   requestAnimationFrame(() => {
-    const firstField = appEditorDrawer?.querySelector('[data-dns-route-field="host"]:not([readonly]), [data-dns-route-field="targetUrl"]');
+    const firstField = appEditorDrawer?.querySelector('[data-dns-route-field="host"]:not([readonly]), [data-dns-route-field="dnsTarget"], [data-dns-route-field="targetUrl"]');
     firstField?.focus?.();
   });
 }
@@ -8320,7 +8331,7 @@ function renderDnsRouteEditorDrawer() {
         <div>
           <span class="site-kind">DNS Route</span>
           <h2>${escapeHtml(title)}</h2>
-          <p>Route records feed Internal CoreDNS zone snapshots and gateway reverse proxy decisions.</p>
+          <p>DNS target feeds CoreDNS; upstream URL feeds gateway reverse proxy decisions.</p>
         </div>
         <button class="icon-button app-drawer-close" type="button" data-dns-route-close aria-label="Close DNS route editor">×</button>
       </header>
@@ -8337,11 +8348,15 @@ function renderDnsRouteEditorDrawer() {
             </label>
             <label class="app-form-field">
               <span>Domain</span>
-              <input data-dns-route-field="host" value="${escapeHtml(draft.host || '')}" placeholder="api.mxinfo-inc.cn" autocomplete="off" />
+              <input data-dns-route-field="host" value="${escapeHtml(draft.host || '')}" placeholder="night-all.mxinfo-inc.cn" autocomplete="off" />
+            </label>
+            <label class="app-form-field">
+              <span>DNS Target</span>
+              <input data-dns-route-field="dnsTarget" value="${escapeHtml(draft.dnsTarget || '')}" placeholder="${MX_INTERNAL_DNS_IP}" autocomplete="off" />
             </label>
             <label class="app-form-field app-form-wide">
-              <span>Target URL</span>
-              <input data-dns-route-field="targetUrl" value="${escapeHtml(draft.targetUrl || '')}" placeholder="http://${MX_INTERNAL_DNS_IP}:18090" autocomplete="off" />
+              <span>Upstream URL</span>
+              <input data-dns-route-field="targetUrl" value="${escapeHtml(draft.targetUrl || '')}" placeholder="http://${MX_INTERNAL_DNS_IP}:13141" autocomplete="off" />
             </label>
           </div>
         </section>
@@ -8421,6 +8436,7 @@ function dnsRouteEditorDraftFromForm(root) {
     ...current,
     routeId: dnsRouteEditorValue(root, 'routeId') || current.routeId || '',
     host: dnsRouteEditorValue(root, 'host') || '',
+    dnsTarget: dnsRouteEditorValue(root, 'dnsTarget') || MX_INTERNAL_DNS_IP,
     targetUrl: dnsRouteEditorValue(root, 'targetUrl') || '',
     enabled: dnsRouteEditorValue(root, 'enabled') !== false,
     tlsMode: dnsRouteEditorValue(root, 'tlsMode') || 'internal',
@@ -8455,6 +8471,7 @@ async function saveDnsRouteFromEditor(root) {
       body: {
         routeId: blankToNull(draft.routeId),
         host: draft.host,
+        dnsTarget: draft.dnsTarget,
         targetUrl: draft.targetUrl,
         enabled: draft.enabled,
         tlsMode: draft.tlsMode,
@@ -8548,6 +8565,36 @@ async function syncCoreDnsConfigMapFromAdmin() {
     state.dnsCenter.feedback = { kind: 'error', message: error.message };
   } finally {
     state.dnsCenter.corednsBusy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+  }
+}
+
+async function applyCoreDnsConfigMapFromAdmin() {
+  if (state.dnsCenter.corednsApplyBusy) return;
+  state.dnsCenter.corednsApplyBusy = true;
+  state.dnsCenter.feedback = { kind: 'info', message: 'Applying CoreDNS ConfigMap' };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    const payload = await fetchJson('/internal/v1/dns/coredns/configmap/apply', {
+      method: 'POST',
+      body: {
+        appId: 'sdk-gateway',
+        confirmApply: true,
+        serverDryRun: false,
+        actor: 'admin-ui',
+        requestId: 'desktop-admin-coredns-apply'
+      }
+    });
+    const result = payload.result || {};
+    state.dnsCenter.corednsResult = result;
+    state.dnsCenter.feedback = {
+      kind: result.applied ? 'success' : (result.allowed === false ? 'error' : 'info'),
+      message: `CoreDNS ${result.namespace || 'mx-dns'}/${result.configMapName || 'coredns'} ${result.status || 'apply requested'}${result.message ? `: ${result.message}` : ''}`
+    };
+  } catch (error) {
+    state.dnsCenter.feedback = { kind: 'error', message: error.message };
+  } finally {
+    state.dnsCenter.corednsApplyBusy = false;
     renderFoundationGrid(state.dashboard?.overview || {});
   }
 }

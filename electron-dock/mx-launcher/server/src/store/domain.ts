@@ -828,6 +828,7 @@ export function builtinDnsReverseProxyRoutes(config: RuntimeConfig): DnsReverseP
       routeId: 'rp_gateway_internal_mx',
       environment: config.environment,
       host: 'gateway.internal.mx',
+      dnsTarget: '10.88.88.88',
       targetUrl: config.internalBaseUrl,
       enabled: true,
       tlsMode: 'internal',
@@ -848,11 +849,14 @@ export function buildDnsReverseProxyRoute(
   if (!host) throw new Error('DNS route host is required');
   const targetUrl = input.targetUrl?.trim() || previous?.targetUrl || '';
   if (!targetUrl) throw new Error('DNS route targetUrl is required');
+  const dnsTarget = normalizeDnsRouteTarget(input.dnsTarget || previous?.dnsTarget || '10.88.88.88');
+  if (!dnsTarget) throw new Error('DNS route dnsTarget is required');
   const tlsMode = dnsReverseProxyTlsMode(input.tlsMode ?? previous?.tlsMode);
   return {
     routeId: input.routeId?.trim() || previous?.routeId || `rp_${safeIdPart(host)}`,
     environment: config.environment,
     host,
+    dnsTarget,
     targetUrl,
     enabled: input.enabled ?? previous?.enabled ?? true,
     tlsMode,
@@ -1100,7 +1104,7 @@ function dnsZoneRecords(
   }
   for (const route of routes.filter((row) => row.enabled)) {
     const host = normalizeDomain(route.host);
-    const target = hostFromUrl(route.targetUrl) || targetServiceDns;
+    const target = normalizeDnsRouteTarget(route.dnsTarget) || hostFromUrl(route.targetUrl) || targetServiceDns;
     records.set(host, dnsRecordForTarget(host, target, 'reverse-proxy-route'));
   }
   for (const record of internalDnsServiceRecords(config, policy)) {
@@ -1170,6 +1174,13 @@ function hostFromUrl(value: string): string {
   } catch {
     return value;
   }
+}
+
+function normalizeDnsRouteTarget(value: string | null | undefined): string {
+  const candidate = value?.trim();
+  if (!candidate) return '';
+  const host = hostFromUrl(candidate).replace(/^([^:/]+):\d+$/, '$1');
+  return isIpv4(host) ? host : normalizeDomain(host);
 }
 
 function isIpv4(value: string): boolean {

@@ -546,6 +546,19 @@ Internal K8s 运行 `mx-internal-coredns`，Config Center 生成 signed zone sna
 
 H 端策略是：`internal.mx`、`.internal.mx`、`.corp.mx`、`.h2i.mx` 命中 Internal DNS；
 未命中域名按 system DNS / system proxy / H2O proxy / direct 的 fallback 顺序处理。
+业务域名 route 要把 DNS 和反代拆开配置：
+
+- `domain` 是用户访问的域名，例如 `night-all.mxinfo-inc.cn`。
+- `dnsTarget` 是 CoreDNS 记录目标，不带端口；默认指向 Internal gateway
+  `10.88.88.88`。
+- `targetUrl` 是 gateway reverse proxy 的 upstream，可以按每个服务填写自己的端口，
+  例如 `http://10.88.88.88:13141`、`http://10.88.88.88:18090` 或其它 Internal service URL。
+- 访问 `http://domain:port/` 时只依赖 split DNS 解析到 `10.88.88.88`，流量按原端口进入
+  Internal；访问 `http://domain/` 或 `https://domain/` 且不带端口时，需要
+  `10.88.88.88` 上的 gateway 按 Host 反代到该 route 的 `targetUrl`。
+- `Build Zone` 只生成 zone snapshot；只有 `Apply CoreDNS ConfigMap` 后才会更新
+  `mx-dns/coredns` 并影响新的解析结果。反代 route 生效还需要 gateway 加载对应配置。
+
 当前本地 Mac + Docker Desktop 中，host-runner DaemonSet 操作的是 LinuxKit node，不等于
 Mac 宿主机；正式 Ubuntu 环境中也优先使用 native systemd runner，让 WireGuard、路由和
 egress-on 都落在同一个真实 Internal runtime host 上。

@@ -162,11 +162,12 @@ function render() {
   const leaseOnly = state.connection?.state === 'lease-only';
   const tunnelOnly = state.connection?.state === 'tunnel-only';
   const connecting = state.connection?.state === 'connecting';
+  const degraded = ['server-unavailable', 'network-unavailable', 'forbidden'].includes(state.connection?.state);
   const shellClass = screen === 'appcenter' ? 'is-appcenter' : 'is-phone';
   root.innerHTML = `
     <div class="mx-shell ${shellClass}">
       ${screen === 'appcenter' ? '' : renderWindowChrome()}
-      ${screen === 'appcenter' ? renderWorkbench(connected, connecting) : renderPhone(connected, connecting, leaseOnly, tunnelOnly)}
+      ${screen === 'appcenter' ? renderWorkbench(connected, connecting) : renderPhone(connected, connecting, leaseOnly, tunnelOnly, degraded)}
     </div>
   `;
 }
@@ -184,10 +185,10 @@ function renderWindowChrome() {
   `;
 }
 
-function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = false) {
+function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = false, degraded = false) {
   if (screen === 'advanced') return renderAdvancedPhone();
   const mode = modeDraft;
-  const activeLease = connected || leaseOnly || tunnelOnly;
+  const activeLease = connected || leaseOnly || tunnelOnly || degraded;
   const showEmployeeLogin = mode === 'employee' && (!connected || state.connection.mode !== 'employee');
   const modeTitle = connected
     ? showEmployeeLogin
@@ -197,6 +198,8 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
       ? `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 租约已保留`
       : tunnelOnly
         ? `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 隧道待恢复`
+        : degraded
+          ? `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 待恢复`
     : mode === 'employee'
       ? '员工模式'
       : '访客模式';
@@ -716,6 +719,9 @@ function connectionCaption() {
   if (connection.state === 'connected') return `${connection.localIp} / ${connection.routePolicy}`;
   if (connection.state === 'tunnel-only') return `${connection.localIp} / tunnel only / ${connection.health?.internalApi || 'internal pending'}`;
   if (connection.state === 'lease-only') return `${connection.localIp} / lease only / ${connection.health?.wireGuard || 'wg pending'}`;
+  if (connection.state === 'network-unavailable') return `${connection.localIp || '未分配'} / network unavailable`;
+  if (connection.state === 'server-unavailable') return `${connection.localIp || '未分配'} / server redeploying`;
+  if (connection.state === 'forbidden') return `${connection.localIp || '未分配'} / blocked`;
   return 'standalone launcher channel owner';
 }
 

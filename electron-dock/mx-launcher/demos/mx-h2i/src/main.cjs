@@ -836,9 +836,20 @@ function normalizeInstallation(input) {
   };
 }
 
+function isRetainedConnectionState(state) {
+  return [
+    'connected',
+    'lease-only',
+    'tunnel-only',
+    'server-unavailable',
+    'network-unavailable',
+    'forbidden'
+  ].includes(state);
+}
+
 function normalizeConnection(input) {
   const row = input && typeof input === 'object' ? input : {};
-  if (row.state === 'connected' || row.state === 'lease-only' || row.state === 'tunnel-only') {
+  if (isRetainedConnectionState(row.state)) {
     return connectedState({
       state: row.state,
       mode: row.mode === 'employee' ? 'employee' : 'guest',
@@ -871,6 +882,13 @@ function normalizeConnection(input) {
     };
   }
   return idleConnection();
+}
+
+function retainableConnectionSnapshot(connection) {
+  if (!connection || typeof connection !== 'object') return null;
+  if (isRetainedConnectionState(connection.state)) return connection;
+  if (connection.state === 'connecting' && (connection.leaseId || connection.localIp || connection.routePlan)) return connection;
+  return null;
 }
 
 function normalizeIdentity(input) {
@@ -1304,8 +1322,9 @@ function connectedState(input) {
 }
 
 function setConnecting(mode) {
+  const previous = retainableConnectionSnapshot(runtime.connection);
   runtime.connection = {
-    ...idleConnection(),
+    ...(previous || idleConnection()),
     state: 'connecting',
     mode
   };
@@ -1514,11 +1533,17 @@ async function applyNetworkSession(session, options) {
 }
 
 function applyConnectionError(label, err) {
-  runtime.connection = idleConnection();
+  const previous = retainableConnectionSnapshot(runtime.connection);
+  const classified = classifyConnectionError(err);
+  runtime.connection = {
+    ...(previous || idleConnection()),
+    state: classified.state,
+    mode: previous?.mode || runtime.connection?.mode || 'guest'
+  };
   runtime.auth = null;
   runtime.feedback = {
     tone: 'danger',
-    message: `${label}：${errorMessage(err)}`
+    message: `${label}：${classified.message}`
   };
   touchRuntime(`${label} failed`);
 }
@@ -1963,7 +1988,7 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
 
 function shouldRecoverWireGuardConnection(connection) {
   const state = connection?.state;
-  return (state === 'connected' || state === 'tunnel-only' || state === 'lease-only')
+  return (state === 'connected' || state === 'tunnel-only' || state === 'lease-only' || state === 'server-unavailable' || state === 'network-unavailable')
     && Boolean(normalizeRoutePlan(connection.routePlan));
 }
 
@@ -3270,6 +3295,34 @@ function parseJsonPayload(text) {
   } catch {
     return text;
   }
+}
+
+function classifyConnectionError(err) {
+  const message = errorMessage(err);
+  const status = Number(err?.status || err?.statusCode || err?.payload?.statusCode || 0);
+  const lower = message.toLowerCase();
+  if (status === 403 || lower.includes('403 forbidden') || lower.includes('forbidden')) {
+    return {
+      state: 'forbidden',
+      message: `Internal 已响应但拒绝请求（403）。请检查 launcher-network 产品、租约或当前 principal 权限；原始错误：${message}`
+    };
+  }
+  if (lower.includes('econnrefused') || lower.includes('enotfound') || lower.includes('enetunreach') || lower.includes('ehostunreach') || lower.includes('etimedout') || lower.includes('fetch failed') || lower.includes('timeout') || lower.includes('请求超时')) {
+    return {
+      state: 'network-unavailable',
+      message: `网络或 bootstrap API 暂不可达，已保留本机租约并等待恢复；原始错误：${message}`
+    };
+  }
+  if (status >= 500 || lower.includes('service unavailable') || lower.includes('bad gateway') || lower.includes('socket hang up')) {
+    return {
+      state: 'server-unavailable',
+      message: `Internal 服务可能正在重启或部署中，已保留本机租约并等待恢复；原始错误：${message}`
+    };
+  }
+  return {
+    state: 'server-unavailable',
+    message
+  };
 }
 
 function errorMessage(err) {
