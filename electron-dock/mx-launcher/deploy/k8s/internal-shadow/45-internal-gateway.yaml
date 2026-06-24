@@ -66,6 +66,10 @@ rules:
     resources: ["configmaps"]
     resourceNames: ["mx-internal-gateway-caddy"]
     verbs: ["get", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    resourceNames: ["mx-internal-gateway"]
+    verbs: ["get", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

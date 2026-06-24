@@ -45,7 +45,21 @@ export async function applyGatewayConfigMapToKubernetes(
   manifest: GatewayConfigMapManifest,
   serverDryRun: boolean
 ): Promise<KubernetesApplyOutcome> {
-  return applyConfigMapToKubernetes(manifest, serverDryRun);
+  const outcome = await applyConfigMapToKubernetes(manifest, serverDryRun);
+  if (serverDryRun || outcome.status !== 'applied') return outcome;
+  const rollout = await triggerInternalGatewayRollout(manifest.metadata.namespace, outcome.resourceVersion);
+  if (rollout.status === 'failed') {
+    return {
+      status: 'failed',
+      applied: false,
+      resourceVersion: outcome.resourceVersion,
+      message: `${outcome.message}; ${rollout.message}`
+    };
+  }
+  return {
+    ...outcome,
+    message: `${outcome.message}; ${rollout.message}`
+  };
 }
 
 async function applyConfigMapToKubernetes(
@@ -110,7 +124,12 @@ async function applyConfigMapToKubernetes(
   };
 }
 
-export async function kubernetesRequest(method: string, path: string, body?: unknown): Promise<KubernetesResponse> {
+export async function kubernetesRequest(
+  method: string,
+  path: string,
+  body?: unknown,
+  contentType = 'application/json'
+): Promise<KubernetesResponse> {
   const host = process.env.KUBERNETES_SERVICE_HOST;
   const port = Number(process.env.KUBERNETES_SERVICE_PORT_HTTPS ?? process.env.KUBERNETES_SERVICE_PORT ?? '443');
   if (!host) {
@@ -133,7 +152,7 @@ export async function kubernetesRequest(method: string, path: string, body?: unk
       headers: {
         authorization: `Bearer ${token.trim()}`,
         ...(payload ? {
-          'content-type': 'application/json',
+          'content-type': contentType,
           'content-length': String(payload.byteLength)
         } : {})
       }
@@ -179,6 +198,38 @@ function toKubernetesConfigMapObject(
       ...(resourceVersion ? { resourceVersion } : {})
     },
     data: manifest.data
+  };
+}
+
+async function triggerInternalGatewayRollout(
+  namespace: string,
+  configMapResourceVersion: string | null
+): Promise<Pick<KubernetesApplyOutcome, 'status' | 'message'>> {
+  const daemonSetName = 'mx-internal-gateway';
+  const resourcePath = `/apis/apps/v1/namespaces/${encodeURIComponent(namespace)}/daemonsets/${encodeURIComponent(daemonSetName)}`;
+  const reloadAt = new Date().toISOString();
+  const patch = {
+    spec: {
+      template: {
+        metadata: {
+          annotations: {
+            'mx.qpjoy.com/gateway-configmap-resource-version': configMapResourceVersion ?? 'unknown',
+            'mx.qpjoy.com/gateway-configmap-reload-at': reloadAt
+          }
+        }
+      }
+    }
+  };
+  const updated = await kubernetesRequest('PATCH', resourcePath, patch, 'application/merge-patch+json');
+  if (updated.statusCode < 200 || updated.statusCode >= 300) {
+    return {
+      status: 'failed',
+      message: `failed to trigger Internal gateway rollout ${namespace}/${daemonSetName}: HTTP ${updated.statusCode} ${updated.text}`
+    };
+  }
+  return {
+    status: 'applied',
+    message: `Internal gateway rollout triggered for ${namespace}/${daemonSetName}`
   };
 }
 
