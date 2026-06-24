@@ -628,6 +628,70 @@ function wireGuardPrivateKeyFromConfig(configPath) {
   return validWireGuardPrivateKey(privateKey) ? privateKey : null;
 }
 
+function wireGuardListenPortFromConfigContent(content) {
+  if (typeof content !== 'string') return null;
+  const match = content.match(/^\s*ListenPort\s*=\s*(\d+)\s*$/im);
+  const port = match ? Number(match[1]) : NaN;
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+}
+
+function wireGuardListenPortFromShow(output) {
+  if (typeof output !== 'string') return null;
+  const match = output.match(/^\s*listening port:\s*(\d+)\s*$/im);
+  const port = match ? Number(match[1]) : NaN;
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+}
+
+function wireGuardDirectListenerStatus(configReadiness, wgShow, interfaceName) {
+  const expectedPort = Number.isInteger(configReadiness?.listenPort) ? configReadiness.listenPort : null;
+  const livePort = wireGuardListenPortFromShow(wgShow?.stdout || '');
+  if (!expectedPort) {
+    return {
+      status: 'ready',
+      enabled: false,
+      interfaceName,
+      expectedPort: null,
+      livePort,
+      summary: livePort
+        ? `config has no ListenPort; live ${interfaceName} listens on ${livePort}`
+        : 'not configured',
+      blockedReasons: []
+    };
+  }
+  if (livePort === expectedPort) {
+    return {
+      status: 'passed',
+      enabled: true,
+      interfaceName,
+      expectedPort,
+      livePort,
+      summary: `listening ${livePort}`,
+      blockedReasons: []
+    };
+  }
+  if (livePort) {
+    const summary = `configured ${expectedPort}; live ${interfaceName} listens on ${livePort}`;
+    return {
+      status: 'blocked',
+      enabled: true,
+      interfaceName,
+      expectedPort,
+      livePort,
+      summary,
+      blockedReasons: [`Internal direct listener ${summary}. Click Install / Restart to apply the generated WireGuard config.`]
+    };
+  }
+  return {
+    status: 'ready',
+    enabled: true,
+    interfaceName,
+    expectedPort,
+    livePort: null,
+    summary: `configured ${expectedPort}; live listen port not checked`,
+    blockedReasons: []
+  };
+}
+
 function internalServicePeerConfigReadiness(artifacts) {
   const configPath = artifacts.runtimeConfigPath || artifacts.configPath;
   const configExists = artifacts.runtimeConfigExists ?? artifacts.configExists;
@@ -636,6 +700,7 @@ function internalServicePeerConfigReadiness(artifacts) {
       status: 'blocked',
       configPath,
       privateKey: 'missing',
+      listenPort: null,
       summary: `missing config: ${configPath}`,
       blockedReasons: [`Internal service peer config artifact is missing: ${configPath}`]
     };
@@ -648,11 +713,13 @@ function internalServicePeerConfigReadiness(artifacts) {
       status: 'blocked',
       configPath,
       privateKey: 'unreadable',
+      listenPort: null,
       summary: `unreadable config: ${configPath}`,
       blockedReasons: [`Internal service peer config is unreadable: ${errorMessage(error)}`]
     };
   }
   const rawPrivateKey = wireGuardPrivateKeyRawFromConfig(configPath);
+  const listenPort = wireGuardListenPortFromConfigContent(content);
   const blockedReasons = [];
   if (/<internal-service-private-key-from-internal-secret>|<[^>\n]+>/.test(content)) {
     blockedReasons.push(`Internal service peer config still contains template placeholders: ${configPath}`);
@@ -666,6 +733,7 @@ function internalServicePeerConfigReadiness(artifacts) {
     status: blockedReasons.length ? 'blocked' : 'ready',
     configPath,
     privateKey: rawPrivateKey ? validWireGuardPrivateKey(rawPrivateKey) ? 'configured' : 'invalid' : 'missing',
+    listenPort,
     summary: blockedReasons.length ? blockedReasons[0] : 'config key ready',
     blockedReasons
   };
@@ -1029,6 +1097,7 @@ async function buildStatus(payload) {
         )
       : await runCommand(wireGuardProbeCommand, ['show', wireGuardProbeName], 3000)
     : null;
+  const directListener = wireGuardDirectListenerStatus(configReadiness, wgShow, wireGuardProbeName);
   const latestHandshakes = wireGuardProbeCommand
     ? skipWireGuardProbe
       ? wireGuardCliProbeSkippedResult(
@@ -1052,7 +1121,7 @@ async function buildStatus(payload) {
         peers: []
       }
     : parseHandshake(latestHandshakes?.stdout || '');
-  const blockedReasons = [
+  const installBlockedReasons = [
     ...configReadiness.blockedReasons,
     ...(!artifacts.applyScriptExists ? [`Internal service peer apply script is missing: ${artifacts.applyScriptPath}`] : []),
     ...(internalEgress.status === 'blocked' ? internalEgress.blockedReasons : []),
@@ -1061,6 +1130,10 @@ async function buildStatus(payload) {
           ? `WireGuard runtime is unavailable on the Internal runtime host: ${wireGuardCore.error}`
           : 'WireGuard runtime is unavailable on the Internal runtime host']
       : [])
+  ];
+  const blockedReasons = [
+    ...installBlockedReasons,
+    ...(directListener.status === 'blocked' ? directListener.blockedReasons : [])
   ];
   const coreTunnelReady = wireGuardCore.tunnel?.active === true
     && (!Array.isArray(wireGuardCore.tunnel?.missingRoutes) || wireGuardCore.tunnel.missingRoutes.length === 0);
@@ -1104,6 +1177,7 @@ async function buildStatus(payload) {
     proxy,
     configReadiness,
     wireGuardCore,
+    directListener,
     artifacts,
     interface: {
       name: interfaceName,
@@ -1120,7 +1194,7 @@ async function buildStatus(payload) {
       internalHealthz
     },
     install: {
-      available: blockedReasons.length === 0,
+      available: installBlockedReasons.length === 0,
       method: installMethod,
       applyCommand: `bash scripts/manage.sh ops site-slot internal-service-peer-handoff apply`,
       hostRunnerCommand: nativeHostRunnerInstallCommand,
@@ -1129,7 +1203,7 @@ async function buildStatus(payload) {
         'qp-tunnel-cli with @qpjoy/electron-core-wireguard on the Internal runtime host',
         'sudo/root privilege on the Internal runtime host'
       ],
-      blockedReasons
+      blockedReasons: installBlockedReasons
     },
     blockedReasons,
     checkedAt: new Date().toISOString()
@@ -1244,9 +1318,12 @@ async function ensureInternalEgressOn(beforeStatus) {
 async function applyServicePeer(payload) {
   const beforeStatus = await buildStatus(payload);
   const confirm = boolValue(payload.confirmInternalServicePeerApply);
+  const installBlockedReasons = Array.isArray(beforeStatus.install?.blockedReasons)
+    ? beforeStatus.install.blockedReasons
+    : beforeStatus.blockedReasons;
   const blockedReasons = [
     ...(!confirm ? ['confirmInternalServicePeerApply=true is required before installing the service'] : []),
-    ...beforeStatus.blockedReasons
+    ...installBlockedReasons
   ];
   if (blockedReasons.length > 0) {
     return {

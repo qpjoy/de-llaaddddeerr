@@ -3774,12 +3774,9 @@ function renderInternalPeerWorkbench(pipelines) {
   const applyResult = state.internalPeer.applyResult;
   const keySyncResult = state.internalPeer.keySyncResult;
   const directSettings = internalPeerDirectSettings(pipeline);
-  const directStatus = directSettings.enabled
-    ? directSettings.endpoint ? 'ready' : 'blocked'
-    : 'disabled';
-  const directLabel = directSettings.enabled
-    ? directSettings.endpoint ? 'direct endpoint ready' : 'endpoint required'
-    : 'relay fallback';
+  const directUi = internalPeerDirectUiState(directSettings, runtimeStatus);
+  const directStatus = directUi.status;
+  const directLabel = directUi.label;
   const handoffDisabled = state.internalPeer.busy || Boolean(materializeAction) || Boolean(endpointBlockedReason);
   const materializeDisabled = state.internalPeer.materializeBusy || !materializeAction?.allowed || Boolean(endpointBlockedReason);
   const keySyncDisabled = state.internalPeer.syncBusy || Boolean(endpointBlockedReason);
@@ -3900,15 +3897,13 @@ function renderInternalPeerWorkbench(pipelines) {
         </label>
         <div>
           <strong>H2I direct listener</strong>
-          <p>${escapeHtml(directSettings.enabled
-            ? `enabled / ${directSettings.endpoint || `listening ${directSettings.listenPort}, endpoint not published`}`
-            : 'disabled / Domestic relay fallback')}</p>
+          <p>${escapeHtml(directUi.detail)}</p>
         </div>
         <span class="health-chip" data-health="${escapeHtml(directStatus === 'disabled' ? 'ready' : directStatus)}">${escapeHtml(directLabel)}</span>
       </div>
       <div class="domestic-relay-grid">
         <span><small>WG service</small><strong>@qpjoy/electron-core-wireguard / mx-internal-svc</strong></span>
-        <span data-status="${escapeHtml(directStatus === 'disabled' ? 'ready' : directStatus)}"><small>direct listener</small><strong>${escapeHtml(directSettings.enabled ? `ListenPort ${directSettings.listenPort}` : 'disabled')}</strong></span>
+        <span data-status="${escapeHtml(directStatus === 'disabled' ? 'ready' : directStatus)}"><small>direct listener</small><strong>${escapeHtml(directUi.gridValue)}</strong></span>
         <span><small>native runner command</small><strong>${escapeHtml(hostRunnerCommand)}</strong></span>
         <span><small>apply artifact</small><strong>artifacts/site-slots/domestic/mx-internal-service-peer-apply.sh</strong></span>
         <span><small>config artifact</small><strong>artifacts/site-slots/domestic/mx-internal-service-peer.conf</strong></span>
@@ -3941,6 +3936,45 @@ function internalPeerDirectSettings(pipeline = null) {
     endpoint: typeof summary.internalDirectEndpoint === 'string' ? summary.internalDirectEndpoint : '',
     listenPort,
     internalServiceIp: typeof summary.internalServiceIp === 'string' ? summary.internalServiceIp : '10.88.88.88'
+  };
+}
+
+function internalPeerDirectUiState(directSettings, runtimeStatus = null) {
+  if (!directSettings.enabled) {
+    return {
+      status: 'disabled',
+      label: 'relay fallback',
+      detail: 'disabled / Domestic relay fallback',
+      gridValue: 'disabled'
+    };
+  }
+  const runtime = runtimeStatus?.directListener || null;
+  const configuredPort = runtime?.expectedPort || directSettings.listenPort;
+  const livePort = runtime?.livePort || null;
+  const endpointText = directSettings.endpoint
+    ? `endpoint ${directSettings.endpoint}`
+    : 'endpoint not published';
+  if (runtime?.status === 'blocked') {
+    return {
+      status: 'blocked',
+      label: 'restart required',
+      detail: `enabled / ${runtime.summary || `configured ${configuredPort}, live port mismatch`}`,
+      gridValue: runtime.summary || `configured ${configuredPort} / live ${livePort || 'unknown'}`
+    };
+  }
+  if (runtime?.status === 'passed') {
+    return {
+      status: directSettings.endpoint ? 'passed' : 'blocked',
+      label: directSettings.endpoint ? 'direct ready' : 'endpoint required',
+      detail: `enabled / listening ${livePort || configuredPort}, ${endpointText}`,
+      gridValue: `ListenPort ${livePort || configuredPort}`
+    };
+  }
+  return {
+    status: directSettings.endpoint ? 'ready' : 'blocked',
+    label: directSettings.endpoint ? 'direct endpoint ready' : 'endpoint required',
+    detail: `enabled / configured ${configuredPort}, ${endpointText}`,
+    gridValue: `configured ${configuredPort}`
   };
 }
 
@@ -4098,9 +4132,15 @@ async function saveInternalPeerDirectMode(site, pipeline, enabled) {
     state.internalPeer.feedback = {
       kind: 'success',
       message: `H2I direct listener ${payload.secret?.internalDirectEnabled ? 'enabled' : 'disabled'}`,
-      detail: payload.secret?.internalDirectEndpoint
-        ? `Endpoint: ${payload.secret.internalDirectEndpoint}`
-        : 'Endpoint is not published yet; configure Internal direct endpoint before H clients can bypass Domestic relay.'
+      detail: payload.secret?.internalDirectEnabled
+        ? [
+            `Configured ListenPort ${payload.secret?.internalDirectListenPort || direct.listenPort || 51280}.`,
+            'Click Install / Restart to restart mx-internal-svc with the generated WireGuard config.',
+            payload.secret?.internalDirectEndpoint
+              ? `Endpoint: ${payload.secret.internalDirectEndpoint}`
+              : 'Endpoint is not published yet; configure Internal direct endpoint before H clients can bypass Domestic relay.'
+          ].join(' ')
+        : 'Domestic relay fallback will be used after Install / Restart applies the generated WireGuard config.'
     };
     state.internalPeer.directEnabledOverride = null;
     await refreshAdmin();
@@ -4239,6 +4279,7 @@ function renderInternalPeerRuntimeStatus(runtimeStatus, applyResult) {
   const hostRunnerOffline = runtimeTarget.mode === 'host-runner-unreachable' || Boolean(hostRunner.error);
   const internalEgress = runtimeStatus?.internalEgress || {};
   const configReadiness = runtimeStatus?.configReadiness || {};
+  const directListener = runtimeStatus?.directListener || {};
   const proxy = runtimeStatus?.proxy || {};
   const splitDns = proxy.splitDns || {};
   const applyStatus = applyResult?.status || 'not-run';
@@ -4275,6 +4316,7 @@ function renderInternalPeerRuntimeStatus(runtimeStatus, applyResult) {
     { label: 'qp-tunnel-cli', value: hostRunnerOffline ? 'not checked' : qpTunnelCliValue, status: hostRunnerOffline ? 'ready' : tools.qpTunnelCli?.available ? 'passed' : 'blocked' },
     { label: 'internal egress-on', value: hostRunnerOffline ? 'not checked' : internalEgressValue, status: hostRunnerOffline ? 'ready' : internalEgress.status || 'ready' },
     { label: 'service', value: serviceValue, status: serviceStatus },
+    { label: 'direct listener', value: hostRunnerOffline ? 'not checked' : directListener.summary || (directListener.expectedPort ? `configured ${directListener.expectedPort}` : 'not configured'), status: hostRunnerOffline ? 'ready' : directListener.status || 'ready' },
     { label: 'handshake', value: hostRunnerOffline ? 'not checked' : handshake.newest?.at || handshake.status || 'not checked', status: hostRunnerOffline ? 'ready' : handshake.status || 'ready' },
     { label: 'proxy bypass', value: hostRunnerOffline ? 'not checked' : Array.isArray(proxy.missingBypass) && proxy.missingBypass.length ? `missing ${proxy.missingBypass.join(',')}` : proxy.clashTunCompatibility || 'not checked', status: hostRunnerOffline ? 'ready' : proxy.status || 'ready' },
     { label: 'split DNS', value: splitDns.authority || 'Internal DNS planned', status: splitDns.status || 'ready' },
