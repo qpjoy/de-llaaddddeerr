@@ -90,6 +90,8 @@ metadata:
     mx.qpjoy.com/environment: shadow
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: mx-internal-coredns
@@ -109,9 +111,11 @@ spec:
           ports:
             - name: dns-udp
               containerPort: 53
+              hostPort: 50053
               protocol: UDP
             - name: dns-tcp
               containerPort: 53
+              hostPort: 50053
               protocol: TCP
           livenessProbe:
             tcpSocket:

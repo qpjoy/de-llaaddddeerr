@@ -1779,13 +1779,14 @@ async function startWireGuardForSession(input) {
     return {
       state: ready ? 'connected' : (tunnelReady ? 'tunnel-only' : 'lease-only'),
       ready,
-      health: ready ? readyHealth() : {
-        wireGuard: result.ok === true ? 'ready' : 'blocked',
-        domesticRelay: domesticRelayReady ? 'ready' : domesticPeerSync?.status === 'failed' || domesticPeerSync?.status === 'blocked' ? 'blocked' : 'pending',
-        internalApi: internalApiHealthStatus(route, internalApi),
-        splitDns: route.ok === true ? 'ready' : 'pending',
-        appBroker: 'ready'
-      },
+      health: launcherNetworkHealth({
+        networkReady: ready,
+        wireGuardReady: result.ok === true,
+        domesticRelayReady,
+        route,
+        internalApi,
+        domesticPeerSync
+      }),
       wireGuard: summarizeWireGuardResult(result),
       diagnostics: {
         route,
@@ -1835,7 +1836,7 @@ async function connectAndProbeWireGuardPath(mod, input) {
     route,
     endpointRoute,
     internalApi,
-    ready: tunnelProofReady && routeReady && internalApi.ok === true
+    ready: tunnelProofReady && routeReady
   };
 }
 
@@ -1869,7 +1870,7 @@ async function probeWireGuardForConnection(input) {
       ? await probeInternalApiViaOverlay(internalBaseUrl)
       : internalApiProbeBlockedByRoute(internalBaseUrl, targetIp, route);
     const tunnelReady = tunnelProofReady;
-    const ready = tunnelReady && routeReady && internalApi.ok === true;
+    const ready = tunnelReady && routeReady;
     const domesticRelayReady = domesticRelayDiagnostics?.status === 'passed' || domesticPeerSync?.status === 'passed' || route.ok === true;
     const resultLike = {
       ok: tunnelReady,
@@ -1888,28 +1889,49 @@ async function probeWireGuardForConnection(input) {
     return {
       state: ready ? 'connected' : (tunnelReady ? 'tunnel-only' : 'lease-only'),
       ready,
-      health: ready ? readyHealth() : {
-        wireGuard: tunnelReady ? 'ready' : 'blocked',
-        domesticRelay: domesticRelayReady ? 'ready' : domesticPeerSync?.status === 'failed' || domesticPeerSync?.status === 'blocked' ? 'blocked' : 'pending',
-        internalApi: internalApiHealthStatus(route, internalApi),
-        splitDns: route.ok === true ? 'ready' : 'pending',
-        appBroker: 'ready'
-      },
+      health: launcherNetworkHealth({
+        networkReady: ready,
+        wireGuardReady: tunnelReady,
+        domesticRelayReady,
+        route,
+        internalApi,
+        domesticPeerSync
+      }),
       wireGuard,
       diagnostics: {
-      route,
-      endpointRoute,
-      internalApi,
-      internalDirectPeerSync,
-      domesticPeerSync,
-      domesticRelayDiagnostics,
-      updatedAt: nowIso()
+        route,
+        endpointRoute,
+        internalApi,
+        internalDirectPeerSync,
+        domesticPeerSync,
+        domesticRelayDiagnostics,
+        updatedAt: nowIso()
       },
       message: ready ? 'ready' : wireGuardNotReadyMessage(resultLike, route, internalApi, internalDirectPeerSync, domesticPeerSync, domesticRelayDiagnostics)
     };
   } catch (err) {
     return wireGuardFailure(errorMessage(err));
   }
+}
+
+function launcherNetworkHealth(input) {
+  if (input.networkReady) {
+    return {
+      wireGuard: 'ready',
+      domesticRelay: input.domesticRelayReady ? 'ready' : 'pending',
+      internalApi: internalApiHealthStatus(input.route, input.internalApi),
+      splitDns: input.route?.ok === true ? 'ready' : 'pending',
+      appBroker: 'ready'
+    };
+  }
+  const domesticPeerSync = input.domesticPeerSync;
+  return {
+    wireGuard: input.wireGuardReady ? 'ready' : 'blocked',
+    domesticRelay: input.domesticRelayReady ? 'ready' : domesticPeerSync?.status === 'failed' || domesticPeerSync?.status === 'blocked' ? 'blocked' : 'pending',
+    internalApi: internalApiHealthStatus(input.route, input.internalApi),
+    splitDns: input.route?.ok === true ? 'ready' : 'pending',
+    appBroker: 'ready'
+  };
 }
 
 async function syncDomesticPeerForLease(lease, options = {}) {
