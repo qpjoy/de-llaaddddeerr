@@ -526,8 +526,7 @@ export function createElectronLauncherSystemDomainProxy(
         pending: true,
         updatedAt: new Date().toISOString()
       });
-      await applyPlatformPac(pac.pacUrl, previous);
-      const resolver = await applySystemResolvers(pac, existing, log);
+      const resolver = await applyPlatformPacAndSystemResolvers(pac, previous, existing, log);
       next.systemResolver = resolver.mode !== 'off';
       next.systemResolverMode = resolver.mode;
       next.resolverDomains = resolver.domains;
@@ -707,6 +706,20 @@ async function applyPlatformPac(pacUrl: string, previous: unknown): Promise<void
   }
 }
 
+async function applyPlatformPacAndSystemResolvers(
+  pac: ResolvedPacSource,
+  previous: unknown,
+  existing: StoredState | null,
+  log: Pick<Console, 'warn'>
+): Promise<SystemResolverApplyResult> {
+  const plan = systemResolverPlan(pac);
+  if (process.platform === 'darwin' && plan.mode === 'dynamic' && plan.port && plan.domains.length > 0) {
+    return applyDarwinPacAndDynamicResolvers(pac.pacUrl, previous, existing, { ...plan, port: plan.port }, log);
+  }
+  await applyPlatformPac(pac.pacUrl, previous);
+  return applySystemResolversWithPlan(pac, existing, plan, log);
+}
+
 async function restorePlatformState(previous: unknown): Promise<void> {
   if (process.platform === 'darwin') {
     await restoreDarwinState(previous);
@@ -729,6 +742,15 @@ async function applySystemResolvers(
   log: Pick<Console, 'warn'>
 ): Promise<SystemResolverApplyResult> {
   const plan = systemResolverPlan(pac);
+  return applySystemResolversWithPlan(pac, existing, plan, log);
+}
+
+async function applySystemResolversWithPlan(
+  _pac: ResolvedPacSource,
+  existing: StoredState | null,
+  plan: { mode: ElectronLauncherSystemResolverMode; domains: string[]; port: number | null },
+  log: Pick<Console, 'warn'>
+): Promise<SystemResolverApplyResult> {
   if (systemResolverPlanMatches(existing, plan)) {
     const current = await verifySystemResolvers(existing);
     if (current.applied) {
@@ -873,9 +895,15 @@ function darwinResolverDomains(domains: unknown): string[] {
 }
 
 async function applyDarwinDynamicResolvers(domains: string[], port: number): Promise<void> {
+  const script = darwinDynamicResolverScript(domains, port);
+  if (!script) return;
+  await runScutilScript(script);
+}
+
+function darwinDynamicResolverScript(domains: string[], port: number): string | null {
   const normalized = normalizeDomains(domains).filter(isDarwinResolverDomain);
-  if (normalized.length === 0) return;
-  const script = [
+  if (normalized.length === 0) return null;
+  return [
     'd.init',
     'd.add ServerAddresses * 127.0.0.1',
     `d.add ServerPort # ${port}`,
@@ -886,7 +914,86 @@ async function applyDarwinDynamicResolvers(domains: string[], port: number): Pro
     'quit',
     ''
   ].join('\n');
-  await runScutilScript(script);
+}
+
+async function applyDarwinPacAndDynamicResolvers(
+  pacUrl: string,
+  previous: unknown,
+  existing: StoredState | null,
+  plan: { mode: ElectronLauncherSystemResolverMode; domains: string[]; port: number },
+  log: Pick<Console, 'warn'>
+): Promise<SystemResolverApplyResult> {
+  if (existing?.applied && existing.pacUrl === pacUrl && systemResolverPlanMatches(existing, plan)) {
+    const pacVerification = await verifyDarwinPac(pacUrl, previous).catch(() => null);
+    const resolverVerification = await verifyDarwinDynamicResolvers(plan.domains, plan.port).catch(() => null);
+    if (pacVerification?.applied === true && resolverVerification?.applied === true) {
+      return {
+        mode: plan.mode,
+        domains: plan.domains,
+        port: plan.port,
+        applied: true,
+        error: null
+      };
+    }
+  }
+  const resolverScript = darwinDynamicResolverScript(plan.domains, plan.port);
+  if (!resolverScript) {
+    await applyDarwinPac(pacUrl, previous);
+    return {
+      mode: plan.mode,
+      domains: plan.domains,
+      port: plan.port,
+      applied: true,
+      error: null
+    };
+  }
+  try {
+    let services = darwinServiceNames(previous);
+    if (services.length === 0) services = await listDarwinNetworkServices();
+    if (services.length === 0) throw new Error('macOS network services not found');
+    const commands = [
+      'set -e',
+      ...darwinStaleResolverFileRemovalCommands(existing, plan),
+      ...services.flatMap((name) => [
+        ['/usr/sbin/networksetup', '-setautoproxyurl', name, pacUrl].map(shellQuote).join(' '),
+        ['/usr/sbin/networksetup', '-setautoproxystate', name, 'on'].map(shellQuote).join(' ')
+      ]),
+      `/usr/bin/printf %s ${shellQuote(resolverScript)} | /usr/sbin/scutil`
+    ];
+    await runDarwinPrivilegedShell(commands.join('\n'));
+    const verification = await verifyDarwinDynamicResolvers(plan.domains, plan.port);
+    return {
+      mode: plan.mode,
+      domains: plan.domains,
+      port: plan.port,
+      applied: verification.applied,
+      error: verification.error || null
+    };
+  } catch (err) {
+    const message = errorMessage(err);
+    log.warn('[electron-launcher] failed to apply macOS PAC and dynamic split DNS resolver', err);
+    return {
+      mode: plan.mode,
+      domains: plan.domains,
+      port: plan.port,
+      applied: false,
+      error: message
+    };
+  }
+}
+
+function darwinStaleResolverFileRemovalCommands(
+  existing: StoredState | null,
+  next: { mode: ElectronLauncherSystemResolverMode; domains: string[] }
+): string[] {
+  if (!existing) return [];
+  const previousDomains = normalizeDomains(existing.resolverDomains).filter(isDarwinResolverDomain);
+  const nextFileDomains = next.mode === 'file' ? new Set(normalizeDomains(next.domains)) : new Set<string>();
+  return previousDomains
+    .filter((domain) => !nextFileDomains.has(domain))
+    .map((domain) => darwinResolverPath(domain))
+    .filter((filePath): filePath is string => Boolean(filePath))
+    .map((filePath) => `if [ -f ${shellQuote(filePath)} ] && /usr/bin/grep -q ${shellQuote(DARWIN_RESOLVER_MARKER)} ${shellQuote(filePath)}; then /bin/rm -f ${shellQuote(filePath)}; fi`);
 }
 
 async function verifyDarwinDynamicResolvers(domains: string[], port: number): Promise<{ applied: boolean; platform: NodeJS.Platform; mode: ElectronLauncherSystemResolverMode; domains: unknown[]; error?: string | null }> {

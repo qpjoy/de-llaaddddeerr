@@ -918,7 +918,7 @@ export function buildDnsZoneSnapshot(
   const issuedAt = new Date();
   const expiresAt = new Date(issuedAt.getTime() + 30 * 60 * 1000);
   const targetServiceDns = hostFromUrl(config.internalBaseUrl) || input.policy.internal.serviceDns;
-  const zoneNames = dnsPolicyZoneNames(input.policy);
+  const zoneNames = dnsPolicyZoneNames(input.policy, input.reverseProxyRoutes);
   const records = dnsZoneRecords(config, input.policy, input.reverseProxyRoutes, targetServiceDns);
   const serverBlocks = zoneNames.map((zone) => ({
     zone,
@@ -1287,12 +1287,24 @@ function indentBlock(value: string, spaces: number): string[] {
   return value.split('\n').map((line) => `${prefix}${line}`);
 }
 
-function dnsPolicyZoneNames(policy: DnsPolicy): string[] {
+function dnsPolicyZoneNames(policy: DnsPolicy, routes: DnsReverseProxyRoute[] = []): string[] {
   const suffixZones = policy.whitelist.suffixes.map((suffix) => normalizeDomain(suffix).replace(/^\./, ''));
   const exactZones = policy.whitelist.exactDomains
     .map(normalizeDomain)
     .filter((domain) => !suffixZones.some((suffix) => domain.endsWith(`.${suffix}`)));
-  return [...new Set([...suffixZones, ...exactZones])].sort();
+  const routeZones = routes
+    .filter((route) => route.enabled !== false)
+    .map((route) => dnsRouteZoneName(route.host))
+    .filter(Boolean);
+  return [...new Set([...suffixZones, ...exactZones, ...routeZones])].sort();
+}
+
+function dnsRouteZoneName(host: string): string {
+  const domain = normalizeDomain(host);
+  if (!domain) return '';
+  const labels = domain.split('.').filter(Boolean);
+  if (labels.length <= 2) return domain;
+  return labels.slice(1).join('.');
 }
 
 function dnsZoneRecords(
