@@ -12,6 +12,8 @@ const PAC_PATH = '/proxy.pac';
 const SHARED_STATUS_PATH = '/__electron-launcher/domain-proxy/status';
 const SHARED_APPLY_PATH = '/__electron-launcher/domain-proxy/apply';
 const PAC_MARKER = 'MX_ELECTRON_LAUNCHER_PAC';
+const DARWIN_RESOLVER_MARKER = 'MX_ELECTRON_LAUNCHER_RESOLVER';
+const DARWIN_RESOLVER_DIR = '/etc/resolver';
 const WINDOWS_PROXY_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
 const DNS_QUERY_TIMEOUT_MS = 1500;
 const PROXY_CONNECT_TIMEOUT_MS = 10_000;
@@ -51,6 +53,10 @@ export interface ElectronLauncherSystemDomainProxyStatus {
   sharedPac?: boolean;
   dnsServers?: string[];
   dnsFallbackTarget?: string | null;
+  resolverDomains?: string[];
+  resolverPort?: number | null;
+  resolverApplied?: boolean;
+  resolverError?: string | null;
   domains?: string[];
   reverseProxyRoutes?: ElectronLauncherSystemDomainProxyRoute[];
   updatedAt?: string | null;
@@ -116,6 +122,10 @@ interface StoredState {
   sharedLocalPac?: boolean;
   dnsServers: string[];
   dnsFallbackTarget?: string | null;
+  resolverDomains?: string[];
+  resolverPort?: number | null;
+  resolverApplied?: boolean;
+  resolverError?: string | null;
   domains: string[];
   reverseProxyRoutes?: ElectronLauncherSystemDomainProxyRoute[];
   previous: unknown;
@@ -136,6 +146,13 @@ interface LocalPacServerConfig {
 interface ExecTextResult {
   stdout: string;
   stderr: string;
+}
+
+interface SystemResolverApplyResult {
+  domains: string[];
+  port: number | null;
+  applied: boolean;
+  error?: string | null;
 }
 
 export function createElectronLauncherSystemDomainProxy(
@@ -468,6 +485,7 @@ export function createElectronLauncherSystemDomainProxy(
         return this.disable('domain-proxy-disabled');
       }
 
+      const resolverPlan = systemResolverPlan(pac);
       const next: StoredState = {
         version: STATE_VERSION,
         applied: true,
@@ -480,6 +498,10 @@ export function createElectronLauncherSystemDomainProxy(
         sharedLocalPac: pac.sharedLocalPac,
         dnsServers: pac.dnsServers,
         dnsFallbackTarget: pac.dnsFallbackTarget,
+        resolverDomains: resolverPlan.domains,
+        resolverPort: resolverPlan.port,
+        resolverApplied: false,
+        resolverError: null,
         domains: pac.domains,
         reverseProxyRoutes: pac.reverseProxyRoutes,
         previous,
@@ -491,11 +513,21 @@ export function createElectronLauncherSystemDomainProxy(
         updatedAt: new Date().toISOString()
       });
       await applyPlatformPac(pac.pacUrl, previous);
+      const resolver = await applySystemResolvers(pac, existing, log);
+      next.resolverDomains = resolver.domains;
+      next.resolverPort = resolver.port;
+      next.resolverApplied = resolver.applied;
+      next.resolverError = resolver.error || null;
       if (pac.usesLocalPac !== true) await closeLocalPacServer();
       delete next.pending;
       next.updatedAt = new Date().toISOString();
       writeState(statePath, next);
-      return publicState(next, { changed: !existing || existing.pacUrl !== pac.pacUrl });
+      return publicState(next, {
+        changed: !existing
+          || existing.pacUrl !== pac.pacUrl
+          || existing.resolverPort !== next.resolverPort
+          || JSON.stringify(normalizeDomains(existing.resolverDomains)) !== JSON.stringify(normalizeDomains(next.resolverDomains))
+      });
     },
 
     async disable(reason = 'manual') {
@@ -513,6 +545,7 @@ export function createElectronLauncherSystemDomainProxy(
       }
 
       await restorePlatformState(existing.previous);
+      await restoreSystemResolvers(existing, log);
       await closeLocalPacServer();
       removeState(statePath, log);
       return {
@@ -529,6 +562,7 @@ export function createElectronLauncherSystemDomainProxy(
       const existing = readState(statePath);
       if (existing?.applied === true && existing.platform === process.platform) {
         await restorePlatformState(existing.previous);
+        await restoreSystemResolvers(existing, log);
         await closeLocalPacServer();
         removeState(statePath, log);
         return {
@@ -575,11 +609,17 @@ export function createElectronLauncherSystemDomainProxy(
         };
       }
       try {
-        const verification = await verifyPlatformPac(state.pacUrl, state.previous);
+        const pacVerification = await verifyPlatformPac(state.pacUrl, state.previous);
+        const resolverVerification = verifySystemResolvers(state);
         return publicState(state, {
-          applied: verification.applied,
+          applied: pacVerification.applied && resolverVerification.applied,
           verified: true,
-          actual: verification
+          actual: {
+            pac: pacVerification,
+            resolver: resolverVerification
+          },
+          resolverApplied: resolverVerification.applied,
+          resolverError: resolverVerification.error || null
         });
       } catch (err) {
         return publicState(state, {
@@ -664,6 +704,253 @@ async function verifyPlatformPac(pacUrl: string, previous: unknown): Promise<{ a
   if (process.platform === 'darwin') return verifyDarwinPac(pacUrl, previous);
   if (process.platform === 'win32') return verifyWindowsPac(pacUrl);
   return { applied: false, platform: process.platform };
+}
+
+async function applySystemResolvers(
+  pac: ResolvedPacSource,
+  existing: StoredState | null,
+  log: Pick<Console, 'warn'>
+): Promise<SystemResolverApplyResult> {
+  const plan = systemResolverPlan(pac);
+  await removeStaleSystemResolvers(existing, plan.domains, log);
+  if (process.platform !== 'darwin' || !plan.port || plan.domains.length === 0) {
+    return {
+      domains: plan.domains,
+      port: plan.port,
+      applied: true,
+      error: null
+    };
+  }
+  try {
+    await applyDarwinResolvers(plan.domains, plan.port);
+    const verification = verifyDarwinResolvers(plan.domains, plan.port);
+    return {
+      domains: plan.domains,
+      port: plan.port,
+      applied: verification.applied,
+      error: verification.error || null
+    };
+  } catch (err) {
+    const message = errorMessage(err);
+    log.warn('[electron-launcher] failed to apply macOS split DNS resolver', err);
+    return {
+      domains: plan.domains,
+      port: plan.port,
+      applied: false,
+      error: message
+    };
+  }
+}
+
+function verifySystemResolvers(state: StoredState): { applied: boolean; platform: NodeJS.Platform; domains: unknown[]; error?: string | null } {
+  if (process.platform !== 'darwin') {
+    return {
+      applied: true,
+      platform: process.platform,
+      domains: []
+    };
+  }
+  const domains = normalizeDomains(state.resolverDomains);
+  const port = normalizePort(state.resolverPort);
+  if (!domains.length || !port) {
+    return {
+      applied: true,
+      platform: process.platform,
+      domains: []
+    };
+  }
+  return verifyDarwinResolvers(domains, port);
+}
+
+async function restoreSystemResolvers(state: StoredState, log: Pick<Console, 'warn'>): Promise<void> {
+  if (process.platform !== 'darwin') return;
+  try {
+    await removeDarwinResolvers(normalizeDomains(state.resolverDomains));
+  } catch (err) {
+    log.warn('[electron-launcher] failed to remove macOS split DNS resolver', err);
+  }
+}
+
+async function removeStaleSystemResolvers(
+  existing: StoredState | null,
+  nextDomains: string[],
+  log: Pick<Console, 'warn'>
+): Promise<void> {
+  if (process.platform !== 'darwin' || !existing?.resolverDomains?.length) return;
+  const next = new Set(normalizeDomains(nextDomains));
+  const stale = normalizeDomains(existing.resolverDomains).filter((domain) => !next.has(domain));
+  if (!stale.length) return;
+  try {
+    await removeDarwinResolvers(stale);
+  } catch (err) {
+    log.warn('[electron-launcher] failed to remove stale macOS split DNS resolver', err);
+  }
+}
+
+function systemResolverPlan(pac: ResolvedPacSource): { domains: string[]; port: number | null } {
+  if (process.platform !== 'darwin' || pac.usesLocalPac !== true) {
+    return {
+      domains: [],
+      port: null
+    };
+  }
+  return {
+    domains: darwinResolverDomains(pac.domains),
+    port: normalizePort(pac.pacPort)
+  };
+}
+
+function darwinResolverDomains(domains: unknown): string[] {
+  const roots: string[] = [];
+  const candidates = normalizeDomains(domains)
+    .filter(isDarwinResolverDomain)
+    .sort((left, right) => left.length - right.length || left.localeCompare(right));
+  for (const domain of candidates) {
+    if (roots.some((root) => domain === root || domain.endsWith(`.${root}`))) continue;
+    roots.push(domain);
+  }
+  return roots;
+}
+
+async function applyDarwinResolvers(domains: string[], port: number): Promise<void> {
+  try {
+    writeDarwinResolverFiles(domains, port);
+  } catch {
+    await runDarwinResolverApplyScript(domains, port);
+  }
+}
+
+function writeDarwinResolverFiles(domains: string[], port: number): void {
+  mkdirSync(DARWIN_RESOLVER_DIR, { recursive: true });
+  for (const domain of domains) {
+    const filePath = darwinResolverPath(domain);
+    if (!filePath) continue;
+    if (hasForeignDarwinResolverFile(filePath)) continue;
+    writeFileSync(filePath, darwinResolverBody(domain, port));
+  }
+}
+
+async function runDarwinResolverApplyScript(domains: string[], port: number): Promise<void> {
+  if (domains.length === 0) return;
+  const commands = ['/bin/mkdir -p /etc/resolver'];
+  for (const domain of domains) {
+    const filePath = darwinResolverPath(domain);
+    if (!filePath) continue;
+    commands.push([
+      `if [ -e ${shellQuote(filePath)} ] && ! /usr/bin/grep -q ${shellQuote(DARWIN_RESOLVER_MARKER)} ${shellQuote(filePath)}; then`,
+      '  :',
+      'else',
+      `  /usr/bin/printf %s ${shellQuote(darwinResolverBody(domain, port))} > ${shellQuote(filePath)}`,
+      'fi'
+    ].join('\n'));
+  }
+  await runDarwinPrivilegedShell(commands.join('\n'));
+}
+
+async function removeDarwinResolvers(domains: string[]): Promise<void> {
+  const normalized = normalizeDomains(domains).filter(isDarwinResolverDomain);
+  if (normalized.length === 0) return;
+  try {
+    for (const domain of normalized) {
+      const filePath = darwinResolverPath(domain);
+      if (!filePath || !hasOwnedDarwinResolverFile(filePath)) continue;
+      rmSync(filePath, { force: true });
+    }
+  } catch {
+    const commands = normalized
+      .map((domain) => darwinResolverPath(domain))
+      .filter((filePath): filePath is string => Boolean(filePath))
+      .map((filePath) => `if [ -f ${shellQuote(filePath)} ] && /usr/bin/grep -q ${shellQuote(DARWIN_RESOLVER_MARKER)} ${shellQuote(filePath)}; then /bin/rm -f ${shellQuote(filePath)}; fi`);
+    if (commands.length) await runDarwinPrivilegedShell(commands.join('\n'));
+  }
+}
+
+function verifyDarwinResolvers(domains: string[], port: number): { applied: boolean; platform: NodeJS.Platform; domains: unknown[]; error?: string | null } {
+  const rows = normalizeDomains(domains).map((domain) => {
+    const filePath = darwinResolverPath(domain);
+    if (!filePath) {
+      return {
+        domain,
+        applied: false,
+        error: 'invalid resolver domain'
+      };
+    }
+    try {
+      const text = readFileSync(filePath, 'utf8');
+      const owned = text.includes(DARWIN_RESOLVER_MARKER);
+      const hasNameserver = /^\s*nameserver\s+127\.0\.0\.1\s*$/im.test(text);
+      const portMatch = text.match(/^\s*port\s+(\d+)\s*$/im);
+      const portApplied = Number(portMatch?.[1]) === port;
+      return {
+        domain,
+        filePath,
+        owned,
+        port,
+        applied: owned && hasNameserver && portApplied
+      };
+    } catch (err) {
+      return {
+        domain,
+        filePath,
+        applied: false,
+        error: errorMessage(err)
+      };
+    }
+  });
+  const failed = rows.find((row) => row.applied !== true);
+  return {
+    applied: rows.every((row) => row.applied === true),
+    platform: process.platform,
+    domains: rows,
+    error: failed ? `macOS resolver not applied for ${(failed as { domain?: string }).domain || 'domain'}` : null
+  };
+}
+
+function darwinResolverBody(domain: string, port: number): string {
+  return [
+    `# ${DARWIN_RESOLVER_MARKER}`,
+    '# generated by @qpjoy/electron-launcher',
+    `# domain ${domain}`,
+    'nameserver 127.0.0.1',
+    `port ${port}`,
+    'timeout 1',
+    'search_order 1',
+    ''
+  ].join('\n');
+}
+
+function darwinResolverPath(domain: string): string | null {
+  const clean = normalizeDomains([domain])[0];
+  if (!clean || !isDarwinResolverDomain(clean)) return null;
+  return join(DARWIN_RESOLVER_DIR, clean);
+}
+
+function isDarwinResolverDomain(domain: string): boolean {
+  return /^[a-z0-9-]+(\.[a-z0-9-]+)*$/.test(domain);
+}
+
+function hasForeignDarwinResolverFile(filePath: string): boolean {
+  try {
+    const text = readFileSync(filePath, 'utf8');
+    return !text.includes(DARWIN_RESOLVER_MARKER);
+  } catch {
+    return false;
+  }
+}
+
+function hasOwnedDarwinResolverFile(filePath: string): boolean {
+  try {
+    return readFileSync(filePath, 'utf8').includes(DARWIN_RESOLVER_MARKER);
+  } catch {
+    return false;
+  }
+}
+
+async function runDarwinPrivilegedShell(command: string): Promise<void> {
+  await execFileText('/usr/bin/osascript', [
+    '-e',
+    `do shell script ${JSON.stringify(command)} with administrator privileges`
+  ]);
 }
 
 async function captureDarwinState(): Promise<{ services: unknown[] }> {
@@ -1511,6 +1798,10 @@ function publicState(state: StoredState, extra: Partial<ElectronLauncherSystemDo
     sharedPac: state.sharedLocalPac === true,
     dnsServers: normalizeDnsServers(state.dnsServers),
     dnsFallbackTarget: normalizeDnsTarget(state.dnsFallbackTarget),
+    resolverDomains: normalizeDomains(state.resolverDomains),
+    resolverPort: normalizePort(state.resolverPort),
+    resolverApplied: state.resolverApplied === true,
+    resolverError: state.resolverError || null,
     domains: normalizeDomains(state.domains),
     reverseProxyRoutes: normalizeReverseProxyRoutes(state.reverseProxyRoutes),
     updatedAt: state.updatedAt || null,

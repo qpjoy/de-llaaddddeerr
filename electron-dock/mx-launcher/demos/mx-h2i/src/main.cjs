@@ -722,6 +722,10 @@ function systemDomainProxyStatusSignature(status) {
     proxy: nullableString(status.proxy),
     fallbackProxy: nullableString(status.fallbackProxy),
     dnsFallbackTarget: nullableString(status.dnsFallbackTarget),
+    resolverPort: status.resolverPort || null,
+    resolverApplied: status.resolverApplied === true,
+    resolverError: nullableString(status.resolverError),
+    resolverDomains: arrayValue(status.resolverDomains, []).map(String).sort(),
     domains: arrayValue(status.domains, []).map(String).sort(),
     dnsServers: arrayValue(status.dnsServers, []).map(String).sort(),
     reverseProxyRoutes: arrayValue(status.reverseProxyRoutes, [])
@@ -1686,8 +1690,13 @@ async function applyNetworkSession(session, options) {
         }
       };
     }
+    const resolverFeedback = arrayValue(systemDomainProxy?.resolverDomains, []).length > 0 && systemDomainProxy?.resolverApplied
+      ? ' 系统 split DNS 已接管命令行和其它非 PAC 应用的域名解析。'
+      : systemDomainProxy?.resolverError
+        ? ` 系统 split DNS 未启用：${systemDomainProxy.resolverError}`
+        : '';
     const pacFeedback = systemDomainProxy?.applied
-      ? ` 系统 PAC 已将 Internal 域名接入本机 ${localEdgeProxy()}，其它流量回落到原系统代理。`
+      ? ` 系统 PAC 已将 Internal 域名接入本机 ${localEdgeProxy()}，其它流量回落到原系统代理。${resolverFeedback}`
       : systemDomainProxy?.error
         ? ` 系统 PAC 未启用：${systemDomainProxy.error}`
         : '';

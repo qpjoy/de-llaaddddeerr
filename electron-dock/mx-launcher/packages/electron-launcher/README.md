@@ -62,6 +62,13 @@ to the previous system proxy when one is detected or provided. If another
 standalone launcher already owns the same local edge port, a later instance
 reuses it.
 
+On macOS, local PAC alone only covers proxy-aware traffic such as browsers. When
+the local edge is active, the package also installs owned `/etc/resolver/<domain>`
+split-DNS files that point matched domains at `127.0.0.1:<pacPort>` so `ping`,
+CLI tools, and non-PAC applications can resolve the same Internal names. Resolver
+files carry an `MX_ELECTRON_LAUNCHER_RESOLVER` marker and are removed on
+disconnect; existing non-MX resolver files are left untouched.
+
 ```ts
 import { createElectronLauncherSystemDomainProxy } from '@qpjoy/electron-launcher/system-domain-proxy';
 
