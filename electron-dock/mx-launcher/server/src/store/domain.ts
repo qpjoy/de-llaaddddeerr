@@ -1192,7 +1192,7 @@ function renderGatewayCaddyfile(config: RuntimeConfig, routes: DnsReverseProxyRo
 }
 
 function gatewayAppServerBlock(port: number, routes: DnsReverseProxyRoute[], gatewayName: string): string[] {
-  return [
+  const block = [
     `:${port} {`,
     '  bind 0.0.0.0',
     '  encode zstd gzip',
@@ -1204,6 +1204,13 @@ function gatewayAppServerBlock(port: number, routes: DnsReverseProxyRoute[], gat
     '    respond "MX Internal gateway route not found\\n" 404',
     '  }',
     '}',
+    ''
+  ];
+  if (port !== 80) return block;
+  return [
+    '# mx-gateway-optional-port-80:start',
+    ...block,
+    '# mx-gateway-optional-port-80:end',
     ''
   ];
 }

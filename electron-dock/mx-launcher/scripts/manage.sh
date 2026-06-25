@@ -812,7 +812,7 @@ k8s_apply() {
   say "wait internal api rollout"
   kubectl -n "$ns" rollout status deployment/mx-launcher-internal --timeout=180s
   say "apply internal gateway"
-  kubectl apply -f "$dir/45-internal-gateway.yaml"
+  k8s_apply_internal_gateway "$target"
   say "wait internal gateway rollout"
   kubectl -n "$ns" rollout status daemonset/mx-internal-gateway --timeout=180s
   say "k8s apply OK"
@@ -3465,6 +3465,20 @@ k8s_restart_internal_api() {
   kubectl -n "$ns" rollout status deployment/mx-launcher-internal --timeout=180s
 }
 
+k8s_apply_internal_gateway() {
+  local target="$1"
+  local ns dir file
+  ns="$(k8s_namespace "$target")"
+  dir="$(k8s_manifest_dir "$target")"
+  file="$dir/45-internal-gateway.yaml"
+  if kubectl -n "$ns" get configmap mx-internal-gateway-caddy >/dev/null 2>&1; then
+    say "preserve existing internal gateway ConfigMap data"
+    awk 'BEGIN { skip=1 } /^---[[:space:]]*$/ { skip=0; print; next } !skip { print }' "$file" | kubectl apply -f -
+    return
+  fi
+  kubectl apply -f "$file"
+}
+
 ops_k8s_shadow() {
   local action="$1"
   local target="${OPS_K8S_TARGET:-internal-shadow}"
@@ -3568,6 +3582,7 @@ short-lived desktop port-forward testing.
 Gateway:
   - DaemonSet: mx-internal-gateway
   - Host bind: 0.0.0.0:18090
+  - App bind:   0.0.0.0:80 when free, fallback 0.0.0.0:8008 when host 80 is occupied
   - Upstream:  mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090
   - Smoke URL: http://127.0.0.1:18090 by default
 
@@ -3584,6 +3599,8 @@ Notes:
     Docker build.
   - It also preloads postgres/coredns/caddy runtime images through Docker and
     imports them into containerd so Docker proxy/TUN egress can be reused.
+  - Existing mx-internal-gateway-caddy data is preserved during deploy so
+    generated gateway routes are not reset to the bootstrap Caddyfile.
   - gateway-smoke is read-only and checks /healthz plus /readyz. Full HTTP
     smoke is a development check because it writes smoke fixtures.
   - Keep TCP 18090 private to the Internal host, Internal WG service peer, or a
