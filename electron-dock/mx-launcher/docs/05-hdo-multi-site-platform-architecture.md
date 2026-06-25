@@ -563,8 +563,9 @@ flowchart LR
   `127.0.0.1:2053`，同一端口提供 `/proxy.pac`、HTTP/CONNECT proxy 和 Internal DNS
   resolver 访问；命中域名返回 `PROXY 127.0.0.1:2053`，由本机入口优先通过
   routePlan `internalControlIp`（默认 `10.88.88.88`）解析并走 WG AllowedIPs。
-  macOS 还需要安装 owned `/etc/resolver/<domain>` split-DNS 文件，才能让 `ping`、CLI
+  macOS 还需要安装运行态 SystemConfiguration supplemental DNS，才能让 `ping`、CLI
   和非 PAC 应用也解析到同一个本机 DNS edge；只配 PAC 时通常只有浏览器/代理感知流量生效。
+  `/etc/resolver` 文件模式只作为显式 fallback，不作为 MX-H2I 默认路径。
   `10.88.0.1` 是 Domestic gateway/relay，只作为 relay/cache fallback。未命中域名回落到原
   Clash/mihomo/system proxy，断开时恢复原系统状态。
 - Admin 可以维护 Internal reverse proxy routes：`host` 表示业务域名，

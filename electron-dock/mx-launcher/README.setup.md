@@ -85,6 +85,8 @@ pnpm approve-builds --yes
 pnpm install
 
 PG_PASSWORD='<换成 Internal 测试库密码>' \
+MX_SHADOW_BUILDKIT_KEEP_STORAGE=2GB \
+MX_SHADOW_BUILDKIT_PRUNE_UNTIL=24h \
   bash scripts/manage.sh ops internal-production deploy
 
 bash scripts/manage.sh ops internal-production status
@@ -113,4 +115,30 @@ sudo launchctl bootout system /Library/LaunchDaemons/com.qpjoy.mx-launcher.inter
 sudo launchctl bootstrap system /Library/LaunchDaemons/com.qpjoy.mx-launcher.internal.wireguard.mx-internal-svc.plist
 # 防开机启动
 sudo launchctl disable system/com.qpjoy.mx-launcher.internal.wireguard.mx-internal-svc
+
+
+# 备份canddy
+mkdir -p ./ops-backups
+
+kubectl -n mx-internal-shadow get cm mx-internal-gateway-caddy -o yaml \
+  > ./ops-backups/mx-internal-gateway-caddy.$(date +%F-%H%M%S).yaml
+
+# 清理k8s数据
+## 1. 只清这个 namespace 的 k8s 残留
+kubectl -n mx-internal-shadow delete job mx-launcher-migrate --ignore-not-found
+
+kubectl -n mx-internal-shadow delete pod --field-selector=status.phase=Succeeded
+kubectl -n mx-internal-shadow delete pod --field-selector=status.phase=Failed
+## 清这个 namespace 的 Pod 日志：
+find /var/log/pods -type f \
+  -path '/var/log/pods/mx-internal-shadow_*/*/*.log' \
+  -exec truncate -s 0 {} \;
+
+## 2. 只清当前脚本产生的 Docker 镜像/容器
+docker image ls --filter label=dev.qpjoy.mx-launcher.project=mx-launcher
+docker ps -a --filter name=mx-launcher-server-shadow
+docker ps -a --filter name=mx-internal-postgres-shadow
+## 3. 删除containerd
+crictl images | grep -E 'qpjoy/mx-launcher-server|caddy|coredns|postgres'
+crictl rmi --prune
 ```

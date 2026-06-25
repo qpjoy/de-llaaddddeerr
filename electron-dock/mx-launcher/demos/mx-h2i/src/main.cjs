@@ -639,6 +639,7 @@ async function ensureSystemDomainProxyForRuntime(reason = 'manual') {
       pacPort: localEdgePort(),
       dnsServers: systemPacDnsServers(),
       dnsFallbackTarget: systemPacDnsFallbackTarget(),
+      systemResolver: 'dynamic',
       reverseProxyRoutes,
       fallbackProxy: systemPacFallbackProxy()
     });
@@ -722,6 +723,7 @@ function systemDomainProxyStatusSignature(status) {
     proxy: nullableString(status.proxy),
     fallbackProxy: nullableString(status.fallbackProxy),
     dnsFallbackTarget: nullableString(status.dnsFallbackTarget),
+    systemResolverMode: nullableString(status.systemResolverMode),
     resolverPort: status.resolverPort || null,
     resolverApplied: status.resolverApplied === true,
     resolverError: nullableString(status.resolverError),
@@ -1691,7 +1693,7 @@ async function applyNetworkSession(session, options) {
       };
     }
     const resolverFeedback = arrayValue(systemDomainProxy?.resolverDomains, []).length > 0 && systemDomainProxy?.resolverApplied
-      ? ' 系统 split DNS 已接管命令行和其它非 PAC 应用的域名解析。'
+      ? ' 系统 dynamic split DNS 已接管命令行和其它非 PAC 应用的域名解析。'
       : systemDomainProxy?.resolverError
         ? ` 系统 split DNS 未启用：${systemDomainProxy.resolverError}`
         : '';

@@ -347,9 +347,10 @@ route 的 `targetUrl`/`dnsTarget`；没有 route 时再使用 routePlan 的 `int
 回落到原 Clash/mihomo 本地代理或系统默认路径。这样浏览器/PAC 流量、MX-H2I DNS 解析和
 WG 白名单路由都优先于系统代理、Clash fake-ip 和其它应用的默认网络路径。
 macOS 上，浏览器通不代表系统 resolver 已接管：`ping`、CLI 和不支持 PAC 的应用不会读取
-PAC 文件。因此 standalone 本机入口在 H2I ready 后还要写入带
-`MX_ELECTRON_LAUNCHER_RESOLVER` marker 的 `/etc/resolver/<domain>` split-DNS 文件，
-把这些域名指向本机 `127.0.0.1:2053`；断开时只清理由 MX 生成的 resolver 文件。
+PAC 文件。因此 standalone 本机入口在 H2I ready 后默认安装运行态 SystemConfiguration
+supplemental DNS，把这些域名动态指向本机 `127.0.0.1:2053`；这不写 `/etc/hosts`，也不写
+`/etc/resolver`。带 `MX_ELECTRON_LAUNCHER_RESOLVER` marker 的文件 resolver 仅作为显式
+fallback。
 V2 不应假设 TCP facade 会自动转发传统 DNS：UDP/53 与 HTTP/TCP reverse proxy 是两条链路。
 本机 edge 在 Internal/Domestic UDP DNS 超时后，可以把已命中 split DNS 的域名降级解析到
 Internal gateway `10.88.88.88`；更完整的生产形态是在 Domestic 部署 `dns-edge-cache`，
