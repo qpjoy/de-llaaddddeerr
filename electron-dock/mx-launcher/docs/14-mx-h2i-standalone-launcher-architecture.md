@@ -356,8 +356,10 @@ V2 不应假设 TCP facade 会自动转发传统 DNS：UDP/53 与 HTTP/TCP rever
 Internal gateway `10.88.88.88`；更完整的生产形态是在 Domestic 部署 `dns-edge-cache`，
 由 Internal 同步 signed zone snapshot，Domestic 只做缓存/转发而不拥有 DNS 真相。V2 的
 Domestic DNS edge 使用独立容器 `mx-domestic-dns-edge-v2` 和 `50053` 端口，避免与
-V1 `hdo-coredns` 的 53 端口冲突。H 端连接前优先查询 Domestic 公网地址的 `:50053`；
-`10.88.0.1:50053` 只有在 `mx-domestic` WireGuard 已经起来后才作为备用路径。
+V1 `hdo-coredns` 的 53 端口冲突。Internal host 同样用 `10.88.88.88:50053`
+暴露 DNS edge，再转发到集群内 `mx-internal-coredns:53`。H 端连接前优先查询
+Domestic 公网地址的 `:50053`；`10.88.0.1:50053` 只有在 `mx-domestic`
+WireGuard 已经起来后才作为备用路径。
 如果生产 DNS 还没有准备好，Domestic runtime 的 `bootstrapHost` 可以先使用 Domestic
 公网 IP，保持 `bootstrapProtocol=http`、`bootstrapPort=18090`，这与测试服 bootstrap
 路径一致。`api.mxinfo-inc.cn` 只是默认域名占位；未替换时会产生 warning，但不应该成为
@@ -598,10 +600,10 @@ DNS Routes 面板里编辑，但落地到两份不同 ConfigMap：
   `8008` 只保留为迁移/调试 fallback；如果 `10.88.88.88:80` 仍由旧 nginx 占用，不带端口的
   浏览器访问会继续命中旧 nginx，必须让 Internal gateway 接管 80 或把旧 nginx 配成 Host
   reverse proxy 到 Internal gateway。
-- 若 H 端看到 `DNS timeout via <domestic-public>:50053/10.88.0.1:50053/10.88.88.88`，
+- 若 H 端看到 `DNS timeout via <domestic-public>:50053/10.88.0.1:50053/10.88.88.88:50053`，
   说明 Domestic DNS edge、WG 或 Internal CoreDNS 链路仍有一段未通；这时应先让
   本机 edge 用 route/default gateway fallback 保证浏览器流量进入 Internal，再检查是否需要
-  Domestic `dns-edge-cache`、CoreDNS Service 暴露或 WireGuard AllowedIPs/防火墙放通 UDP/TCP 50053/53。
+  Domestic `dns-edge-cache`、Internal DNS edge 或 WireGuard AllowedIPs/防火墙放通 UDP/TCP 50053。
 
 当前本地 Mac + Docker Desktop 中，host-runner DaemonSet 操作的是 LinuxKit node，不等于
 Mac 宿主机；正式 Ubuntu 环境中也优先使用 native systemd runner，让 WireGuard、路由和

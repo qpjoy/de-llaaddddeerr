@@ -284,8 +284,8 @@ Split DNS 的目标形态是“每个 app 提交自己的域名需求，Internal
 
 1. 部署 `mx-dns` namespace、CoreDNS ConfigMap writer RBAC 和 baseline CoreDNS Service。
 2. 部署 Internal API / Config Center，能生成 DNS policy snapshot 和 CoreDNS zone snapshot。
-3. 暴露 Internal DNS endpoint，例如 Internal host 上 `10.88.88.88:53`/`:5353` 转发到
-   `mx-internal-coredns.mx-dns.svc.cluster.local`，并在 routePlan 中下发该 endpoint。
+3. 暴露 Internal DNS edge endpoint，例如 Internal host 上 `10.88.88.88:50053` 转发到
+   `mx-internal-coredns.mx-dns.svc.cluster.local:53`，并在 routePlan 中下发该 endpoint。
 4. Domestic relay ready 后，H 端只对命中白名单的域名安装 split DNS；未命中仍走本机原有
    系统 DNS、系统代理、fake-ip 或 H2O 规则。
 5. 最后再启用 AppCenter app 级 DNS policy，按 app 安装/授权状态合并到当前设备的最终

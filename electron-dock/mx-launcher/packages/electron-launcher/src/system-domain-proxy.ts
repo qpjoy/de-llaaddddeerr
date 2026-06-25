@@ -729,6 +729,18 @@ async function applySystemResolvers(
   log: Pick<Console, 'warn'>
 ): Promise<SystemResolverApplyResult> {
   const plan = systemResolverPlan(pac);
+  if (systemResolverPlanMatches(existing, plan)) {
+    const current = await verifySystemResolvers(existing);
+    if (current.applied) {
+      return {
+        mode: plan.mode,
+        domains: plan.domains,
+        port: plan.port,
+        applied: true,
+        error: null
+      };
+    }
+  }
   await removeStaleSystemResolvers(existing, plan, log);
   if (process.platform !== 'darwin' || plan.mode === 'off' || !plan.port || plan.domains.length === 0) {
     return {
@@ -763,6 +775,19 @@ async function applySystemResolvers(
       error: message
     };
   }
+}
+
+function systemResolverPlanMatches(
+  existing: StoredState | null,
+  plan: { mode: ElectronLauncherSystemResolverMode; domains: string[]; port: number | null }
+): existing is StoredState {
+  if (!existing?.applied || existing.platform !== process.platform) return false;
+  if (storedSystemResolverMode(existing) !== plan.mode) return false;
+  if ((normalizePort(existing.resolverPort) || null) !== (plan.port || null)) return false;
+  const previousDomains = normalizeDomains(existing.resolverDomains).sort();
+  const nextDomains = normalizeDomains(plan.domains).sort();
+  return previousDomains.length === nextDomains.length
+    && previousDomains.every((domain, index) => domain === nextDomains[index]);
 }
 
 async function verifySystemResolvers(state: StoredState): Promise<{ applied: boolean; platform: NodeJS.Platform; mode: ElectronLauncherSystemResolverMode; domains: unknown[]; error?: string | null }> {
@@ -870,7 +895,11 @@ async function verifyDarwinDynamicResolvers(domains: string[], port: number): Pr
     stdout: '',
     stderr: errorMessage(err)
   }));
-  const text = `${result.stdout}\n${result.stderr}`;
+  const dns = await execFileText('/usr/sbin/scutil', ['--dns']).catch((err) => ({
+    stdout: '',
+    stderr: errorMessage(err)
+  }));
+  const text = `${result.stdout}\n${result.stderr}\n${dns.stdout}\n${dns.stderr}`;
   const rows = normalized.map((domain) => ({
     domain,
     applied: text.includes(domain)
@@ -1036,7 +1065,10 @@ async function runDarwinPrivilegedShell(command: string): Promise<void> {
 async function runScutilScript(script: string): Promise<void> {
   const command = `/usr/bin/printf %s ${shellQuote(script)} | /usr/sbin/scutil`;
   try {
-    await execFileText('/bin/sh', ['-c', command]);
+    const result = await execFileText('/bin/sh', ['-c', command]);
+    if (scutilNeedsPrivilege(result)) {
+      throw new Error(scutilOutput(result) || 'scutil permission denied');
+    }
   } catch {
     await runDarwinPrivilegedShell(command);
   }
@@ -1049,6 +1081,14 @@ function runScutilReadScript(script: string): Promise<ExecTextResult> {
 
 function scutilToken(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, '');
+}
+
+function scutilNeedsPrivilege(result: ExecTextResult): boolean {
+  return /permission denied/i.test(scutilOutput(result));
+}
+
+function scutilOutput(result: ExecTextResult): string {
+  return `${result.stdout || ''}\n${result.stderr || ''}`.trim();
 }
 
 async function captureDarwinState(): Promise<{ services: unknown[] }> {

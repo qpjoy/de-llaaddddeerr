@@ -21,9 +21,11 @@ const BOOTSTRAP_DNS_RETRY_LIMIT = 3;
 const BOOTSTRAP_DNS_RETRY_DELAY_MS = 350;
 const DEFAULT_LOCAL_EDGE_PORT = 2053;
 const DEFAULT_DOMESTIC_DNS_EDGE_PORT = 50053;
+const DEFAULT_INTERNAL_DNS_EDGE_PORT = 50053;
 const DEFAULT_INTERNAL_GATEWAY_APP_PORT = 80;
 const DEFAULT_SPLIT_DNS_DOMAINS = 'mxinfo-inc.cn internal.mx corp.mx h2i.mx';
 const SYSTEM_DOMAIN_PROXY_REFRESH_MS = 30_000;
+const WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD = 3;
 const DEFAULT_CONFIG = {
   bootstrapApiBaseUrl: defaultBootstrapApiBaseUrl(),
   internalApiBaseUrl: 'http://10.88.88.88:18090',
@@ -61,6 +63,7 @@ let wireGuardRecoveryInterval = null;
 let wireGuardRecoveryInFlight = null;
 let wireGuardConnectInFlight = false;
 let lastWireGuardRecoveryFailureAt = 0;
+let wireGuardBackgroundProbeFailures = 0;
 const wireGuardRecoveryTimers = [];
 let systemDomainProxyManager = null;
 let systemDomainProxyRefreshInterval = null;
@@ -768,11 +771,11 @@ function systemPacDnsServers() {
     process.env.MX_H2I_DOMESTIC_DNS_SERVER,
     process.env.MX_H2I_DOMESTIC_DNS_EDGE,
     domesticPublicDnsServer(),
-    runtime?.connection?.routePlan?.dnsServer,
+    dnsServerWithDefaultPort(runtime?.connection?.routePlan?.dnsServer, DEFAULT_DOMESTIC_DNS_EDGE_PORT),
     domesticGatewayDnsServer(),
-    runtime?.connection?.routePlan?.internalControlIp,
-    runtime?.connection?.internalControlIp,
-    INTERNAL_PEER_IP
+    internalDnsEdgeServer(runtime?.connection?.routePlan?.internalControlIp),
+    internalDnsEdgeServer(runtime?.connection?.internalControlIp),
+    internalDnsEdgeServer(INTERNAL_PEER_IP)
   ], [])
     .map((item) => String(item || '').trim())
     .filter(Boolean)
@@ -789,6 +792,17 @@ function domesticPublicDnsServer() {
 function domesticGatewayDnsServer() {
   const host = nullableString(runtime?.connection?.routePlan?.domesticGatewayIp) || '10.88.0.1';
   return dnsEndpoint(host, DEFAULT_DOMESTIC_DNS_EDGE_PORT);
+}
+
+function internalDnsEdgeServer(host) {
+  return dnsServerWithDefaultPort(host, DEFAULT_INTERNAL_DNS_EDGE_PORT);
+}
+
+function dnsServerWithDefaultPort(value, port) {
+  const clean = nullableString(value);
+  if (!clean) return null;
+  if (/^\[[^\]]+\]:\d{1,5}$/.test(clean) || /^[^:]+:\d{1,5}$/.test(clean)) return clean;
+  return dnsEndpoint(clean, port);
 }
 
 function dnsEndpoint(host, port) {
@@ -1680,6 +1694,10 @@ async function applyNetworkSession(session, options) {
       domesticPeerSync,
       diagnostics: wireGuardResult.diagnostics
     };
+    if (wireGuardResult.ready) {
+      wireGuardBackgroundProbeFailures = 0;
+      lastWireGuardRecoveryFailureAt = 0;
+    }
     const systemDomainProxy = wireGuardResult.ready
       ? await ensureSystemDomainProxyForRuntime('post-connect')
       : await disableSystemDomainProxyForRuntime('wireguard-not-ready');
@@ -2073,7 +2091,17 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
           routePlan,
           internalBaseUrl: connection.internalBaseUrl
         });
-        const shouldPersistProbe = wireGuardResult.state !== connection.state || reason !== 'interval';
+        if (wireGuardResult.ready) {
+          wireGuardBackgroundProbeFailures = 0;
+        } else if (!manual && connection.state === 'connected') {
+          wireGuardBackgroundProbeFailures += 1;
+        }
+        const preserveConnected = !manual
+          && connection.state === 'connected'
+          && !wireGuardResult.ready
+          && wireGuardBackgroundProbeFailures < WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD;
+        const shouldPersistProbe = !preserveConnected
+          && (wireGuardResult.state !== connection.state || reason !== 'interval');
         if (shouldPersistProbe) {
           runtime.connection = {
             ...connection,
@@ -2105,6 +2133,28 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
           }
           touchRuntime(`wireguard probed: ${reason}`);
           await saveAndBroadcast();
+        } else if (preserveConnected && reason !== 'interval') {
+          runtime.connection = {
+            ...connection,
+            diagnostics: {
+              ...(connection.diagnostics || {}),
+              backgroundProbe: {
+                ok: false,
+                action: 'probe-only',
+                reason,
+                message: wireGuardResult.message,
+                consecutiveFailures: wireGuardBackgroundProbeFailures,
+                downgradeThreshold: WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD,
+                updatedAt: nowIso()
+              }
+            }
+          };
+          runtime.feedback = {
+            tone: 'warning',
+            message: `MX-H2I 后台探测暂未确认 WireGuard ready，已保持连接状态（${wireGuardBackgroundProbeFailures}/${WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD}）：${wireGuardResult.message}`
+          };
+          touchRuntime(`wireguard probe warning: ${reason}`);
+          await saveAndBroadcast();
         }
         return {
           ok: true,
@@ -2124,6 +2174,9 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
         routePlan,
         internalBaseUrl: connection.internalBaseUrl
       });
+      if (wireGuardResult.ready) {
+        wireGuardBackgroundProbeFailures = 0;
+      }
       runtime.connection = {
         ...connection,
         state: wireGuardResult.state,

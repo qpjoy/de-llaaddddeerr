@@ -1828,7 +1828,7 @@ export interface LauncherNetworkTopology {
     };
     routes: {
       internalCidrs: string[];
-      dnsServer: '10.88.0.1';
+      dnsServer: '10.88.0.1:50053';
       subscriptionReachability: 'domestic-wg-relay+h2i-proxy';
       externalTraffic: 'direct-to-oversea-hysteria2-after-subscription';
     };

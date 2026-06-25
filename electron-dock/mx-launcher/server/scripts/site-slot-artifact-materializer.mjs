@@ -693,7 +693,7 @@ function createDomesticServicesTar(artifactRoot) {
       edgePort: 18090,
       dnsBind: '0.0.0.0',
       internalApiUpstream: 'http://10.88.88.88:18090',
-      internalDnsUpstream: '10.88.88.88:53',
+      internalDnsUpstream: '10.88.88.88:50053',
       publicFacadeMode: 'bootstrap-and-relay'
     },
     notes: [
@@ -910,7 +910,7 @@ function writeDomesticServicesCorefile(staging) {
     '  health :8080',
     '  ready :8181',
     '  cache 30',
-    '  forward . 10.88.88.88:53 223.5.5.5 119.29.29.29 1.1.1.1 8.8.8.8 {',
+    '  forward . 10.88.88.88:50053 223.5.5.5 119.29.29.29 1.1.1.1 8.8.8.8 {',
     '    policy sequential',
     '    health_check 5s',
     '  }',

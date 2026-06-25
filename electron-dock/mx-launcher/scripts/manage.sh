@@ -570,7 +570,8 @@ Order:
   10. Apply Internal API Deployment + Service.
   11. Wait for Internal API rollout.
   12. Apply Internal Gateway DaemonSet.
-  13. Run HTTP smoke through a temporary kubectl port-forward or the gateway.
+  13. Apply Internal DNS Edge DaemonSet on 50053.
+  14. Run HTTP smoke through a temporary kubectl port-forward or the gateway.
 
 Data policy:
   k8s down keeps the PostgreSQL PVC by default. Delete PVCs only with a
@@ -643,6 +644,8 @@ k8s_render() {
   cat "$dir"/40-internal-api.yaml
   printf '\n---\n'
   cat "$dir"/45-internal-gateway.yaml
+  printf '\n---\n'
+  cat "$dir"/46-internal-dns-edge.yaml
 }
 
 k8s_apply_db_secret() {
@@ -757,6 +760,8 @@ k8s_dry_run() {
   kubectl apply --dry-run=client --validate=false -f "$dir/40-internal-api.yaml"
   say "dry-run internal gateway"
   kubectl apply --dry-run=client --validate=false -f "$dir/45-internal-gateway.yaml"
+  say "dry-run internal dns edge"
+  kubectl apply --dry-run=client --validate=false -f "$dir/46-internal-dns-edge.yaml"
   say "k8s dry-run OK"
 }
 
@@ -815,6 +820,10 @@ k8s_apply() {
   k8s_apply_internal_gateway "$target"
   say "wait internal gateway rollout"
   kubectl -n "$ns" rollout status daemonset/mx-internal-gateway --timeout=180s
+  say "apply internal dns edge"
+  kubectl apply -f "$dir/46-internal-dns-edge.yaml"
+  say "wait internal dns edge rollout"
+  kubectl -n mx-dns rollout status daemonset/mx-internal-dns-edge --timeout=180s
   say "k8s apply OK"
 }
 
@@ -824,6 +833,7 @@ k8s_status() {
   ns="$(k8s_namespace "$target")"
   need_kubectl
   kubectl -n "$ns" get pods,svc,deploy,statefulset,daemonset,job,pvc
+  kubectl -n mx-dns get pods,svc,deploy,daemonset,configmap
 }
 
 k8s_logs() {
@@ -1186,6 +1196,8 @@ k8s_down() {
   dir="$(k8s_manifest_dir "$target")"
   need_kubectl
   [ -d "$dir" ] || die "missing k8s manifest directory: $dir"
+  say "delete internal dns edge"
+  kubectl delete -f "$dir/46-internal-dns-edge.yaml" --ignore-not-found
   say "delete internal gateway"
   kubectl delete -f "$dir/45-internal-gateway.yaml" --ignore-not-found
   say "delete internal api"

@@ -5760,7 +5760,7 @@ function domesticDnsEdgeCorefileContent(config: SiteSlotDomesticRuntimeConfig): 
     `  bind ${bind}`,
     '  errors',
     '  cache 30',
-    '  forward . 10.88.88.88:53',
+    '  forward . 10.88.88.88:50053',
     '  reload',
     '}',
     ''

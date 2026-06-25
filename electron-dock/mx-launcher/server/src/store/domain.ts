@@ -2136,7 +2136,7 @@ export function buildLauncherNetworkTopology(
       },
       routes: {
         internalCidrs,
-        dnsServer: '10.88.0.1',
+        dnsServer: '10.88.0.1:50053',
         subscriptionReachability: 'domestic-wg-relay+h2i-proxy',
         externalTraffic: 'direct-to-oversea-hysteria2-after-subscription'
       },
