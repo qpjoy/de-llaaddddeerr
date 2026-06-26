@@ -2326,10 +2326,16 @@ EOF
 
 native_host_runner_install_linux() {
   local port="${1:-19190}"
-  local service node_bin node_dir temp artifact_dir bundle_dir
+  local service node_bin node_dir temp artifact_dir bundle_dir root_cmd
   service="$(native_host_runner_service_name).service"
   node_bin="$(native_host_runner_node_bin)"
   node_dir="$(dirname "$node_bin")"
+  root_cmd="sudo"
+  if [ "$(id -u)" = "0" ]; then
+    root_cmd=""
+  else
+    command -v sudo >/dev/null 2>&1 || die "sudo is required to install the native host runner when not running as root"
+  fi
   native_host_runner_prepare_runtime
   artifact_dir="$(native_host_runner_artifact_dir)"
   bundle_dir="$(native_host_runner_bundle_dir)"
@@ -2356,10 +2362,11 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
-  sudo install -m 0644 "$temp" "/etc/systemd/system/$service"
+  $root_cmd install -m 0644 "$temp" "/etc/systemd/system/$service"
   rm -f "$temp"
-  sudo systemctl daemon-reload
-  sudo systemctl enable --now "$service"
+  $root_cmd systemctl daemon-reload
+  $root_cmd systemctl enable "$service"
+  $root_cmd systemctl restart "$service"
   say "installed systemd service: /etc/systemd/system/$service"
   native_host_runner_status "$port"
 }
@@ -3643,6 +3650,12 @@ ops_internal_production() {
       k8s_apply internal-shadow
       say "restart Internal API for rebuilt image"
       k8s_restart_internal_api internal-shadow
+      if [ "${MX_INTERNAL_PRODUCTION_NATIVE_HOST_RUNNER_INSTALL:-1}" = "1" ]; then
+        say "install/restart native Internal host runner"
+        native_host_runner_install "${MX_INTERNAL_HOST_RUNNER_PORT:-19190}"
+      else
+        say "skip native Internal host runner install because MX_INTERNAL_PRODUCTION_NATIVE_HOST_RUNNER_INSTALL=0"
+      fi
       say "configure Internal API native host-runner URL"
       ops_local_platform_apply_native_host_runner_url
       say "status"

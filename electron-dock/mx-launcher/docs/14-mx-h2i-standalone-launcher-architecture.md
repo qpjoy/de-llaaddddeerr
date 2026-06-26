@@ -619,8 +619,14 @@ DNS Routes 面板里编辑。V2 默认仍保留 k8s Caddy 作为可回退 backen
   `mx-internal-host-runner.mx-internal-shadow.svc.cluster.local:19190` 访问。这个 k8s fallback
   runner 适合容器侧/hostNetwork 兜底，不默认用于宿主机 nginx；宿主机 nginx 需要 native
   host-runner。`internal-production deploy` 会探测真实宿主机地址并回写
-  `MX_INTERNAL_HOST_RUNNER_NATIVE_URL` / `MX_INTERNAL_HOST_RUNNER_URL` 到 Internal API。只有设置
-  `GATEWAY_HOST_NGINX_K8S_RUNNER_ENABLED=true` 时，host-nginx apply 才会尝试 k8s runner。
+  `MX_INTERNAL_HOST_RUNNER_NATIVE_URL` / `MX_INTERNAL_HOST_RUNNER_URL` 到 Internal API，并默认
+  安装/重启 native host-runner。只有设置 `GATEWAY_HOST_NGINX_K8S_RUNNER_ENABLED=true` 时，
+  host-nginx apply 才会尝试 k8s runner。
+- 如果 `Apply Gateway` 返回 `POST /gateway/nginx/apply HTTP 404`，而手工
+  `curl http://<host>:19190/gateway/nginx/apply` 返回 `Method not allowed`，只能说明 19190
+  runner 活着，不能说明它支持 nginx gateway endpoint。应在 Internal 宿主机执行
+  `bash scripts/manage.sh ops site-slot native-host-runner install 19190` 重启到当前工作区版本，
+  再访问 `http://127.0.0.1:19190/capabilities` 确认包含 `gateway-nginx.apply`。
 - 若 H 端看到 `DNS timeout via <domestic-public>/10.88.0.1/10.88.88.88`，
   说明 Domestic DNS edge、WG 或 Internal CoreDNS 链路仍有一段未通；这时应先让
   本机 edge 用 route/default gateway fallback 保证浏览器流量进入 Internal，再检查是否需要

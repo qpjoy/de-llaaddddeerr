@@ -1754,10 +1754,41 @@ function checkToken(req) {
   return req.headers['x-mx-host-runner-token'] === expected;
 }
 
+function requestPath(req) {
+  try {
+    return new URL(req.url || '/', runnerUrl).pathname.replace(/\/+$/, '') || '/';
+  } catch {
+    return req.url || '/';
+  }
+}
+
+function runnerCapabilities() {
+  return {
+    status: 'ok',
+    mode: 'internal-service-peer-host-runner',
+    url: runnerUrl,
+    capabilities: [
+      'internal-service-peer.status',
+      'internal-service-peer.apply',
+      'internal-service-peer.direct-peer-sync',
+      'gateway-nginx.apply'
+    ],
+    endpoints: [
+      'GET /healthz',
+      'GET /capabilities',
+      'POST /internal-service-peer/status',
+      'POST /internal-service-peer/apply',
+      'POST /internal-service-peer/direct-peer-sync',
+      'POST /gateway/nginx/apply'
+    ]
+  };
+}
+
 const server = createServer(async (req, res) => {
   try {
-    if (req.method === 'GET' && req.url === '/healthz') {
-      sendJson(res, 200, { status: 'ok', mode: 'internal-service-peer-host-runner', url: runnerUrl });
+    const path = requestPath(req);
+    if (req.method === 'GET' && (path === '/healthz' || path === '/capabilities')) {
+      sendJson(res, 200, runnerCapabilities());
       return;
     }
     if (req.method !== 'POST') {
@@ -1769,23 +1800,23 @@ const server = createServer(async (req, res) => {
       return;
     }
     const payload = asRecord(await readJson(req));
-    if (req.url === '/internal-service-peer/status') {
+    if (path === '/internal-service-peer/status') {
       sendJson(res, 200, { runtimeStatus: await buildStatus(payload) });
       return;
     }
-    if (req.url === '/internal-service-peer/apply') {
+    if (path === '/internal-service-peer/apply') {
       sendJson(res, 200, { applyResult: await applyServicePeer(payload) });
       return;
     }
-    if (req.url === '/internal-service-peer/direct-peer-sync') {
+    if (path === '/internal-service-peer/direct-peer-sync') {
       sendJson(res, 200, { directPeerSync: await syncDirectPeer(payload) });
       return;
     }
-    if (req.url === '/gateway/nginx/apply') {
+    if (path === '/gateway/nginx/apply') {
       sendJson(res, 200, { gatewayNginxApply: await applyGatewayNginx(payload) });
       return;
     }
-    sendJson(res, 404, { error: 'Not found' });
+    sendJson(res, 404, { error: 'Not found', path, capabilities: runnerCapabilities().capabilities });
   } catch (error) {
     sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
   }

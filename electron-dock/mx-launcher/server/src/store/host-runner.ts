@@ -59,6 +59,13 @@ export async function applyGatewayNginxConfigToHostRunner(
         parsed = { raw: text };
       }
       if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error(
+            `HTTP 404 from ${baseUrl}/gateway/nginx/apply: host-runner is reachable but does not expose gateway-nginx.apply. `
+            + `Restart or reinstall the native host runner from the current mx-launcher checkout: `
+            + `bash scripts/manage.sh ops site-slot native-host-runner install 19190. Response: ${text.slice(0, 500)}`
+          );
+        }
         throw new Error(`HTTP ${response.status} from ${baseUrl}/gateway/nginx/apply: ${text.slice(0, 500)}`);
       }
       return normalizeHostRunnerNginxApply(parsed);
