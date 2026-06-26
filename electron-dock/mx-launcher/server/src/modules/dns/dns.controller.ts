@@ -149,13 +149,22 @@ function toCoreDnsApplyInput(body: Record<string, unknown>) {
 
 function toGatewaySyncInput(body: Record<string, unknown>) {
   const mode = nullableString(body.mode);
+  const gatewayApplyBackend = gatewayApplyBackendValue(body.gatewayApplyBackend);
   return {
     appId: nullableString(body.appId),
     namespace: nullableString(body.namespace),
     configMapName: nullableString(body.configMapName),
+    gatewayApplyBackend,
+    gatewayHostNginxConfigPath: nullableString(body.gatewayHostNginxConfigPath),
+    gatewayHostNginxInternalApiUpstream: nullableString(body.gatewayHostNginxInternalApiUpstream),
     mode: mode === 'shadow-apply' ? 'shadow-apply' as const : 'dry-run' as const,
     requestId: nullableString(body.requestId)
   };
+}
+
+function gatewayApplyBackendValue(value: unknown): 'k8s' | 'host-nginx' | null {
+  const raw = nullableString(value);
+  return raw === 'host-nginx' || raw === 'k8s' ? raw : null;
 }
 
 function toGatewayApplyInput(body: Record<string, unknown>) {

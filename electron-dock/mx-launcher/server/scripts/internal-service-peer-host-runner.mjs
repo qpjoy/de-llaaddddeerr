@@ -1568,6 +1568,132 @@ async function syncDirectPeer(payload) {
   };
 }
 
+async function applyGatewayNginx(payload) {
+  const nginxConfig = stringValue(payload.nginxConfig, null);
+  const configPath = normalizeGatewayNginxConfigPath(payload.configPath);
+  const serverDryRun = payload.serverDryRun !== false && payload.serverDryRun !== 'false';
+  const blockedReasons = [
+    ...(!nginxConfig ? ['nginxConfig is required'] : []),
+    ...(!configPath ? ['configPath must be an absolute nginx include path under /etc/nginx, /usr/local/etc/nginx, /opt/homebrew/etc/nginx, or /tmp'] : [])
+  ];
+  if (blockedReasons.length > 0) {
+    return {
+      status: 'failed',
+      applied: false,
+      mode: 'host-runner-nginx-gateway-apply',
+      configPath: configPath || stringValue(payload.configPath, null),
+      serverDryRun,
+      command: null,
+      exitCode: null,
+      stdout: '',
+      stderr: blockedReasons.join('\n'),
+      message: blockedReasons.join('; '),
+      finishedAt: new Date().toISOString()
+    };
+  }
+
+  const tmpRoot = process.env.MX_GATEWAY_NGINX_TMP_DIR || '/tmp/mx-gateway-nginx';
+  mkdirSync(tmpRoot, { recursive: true });
+  mkdirSync(join(tmpRoot, 'logs'), { recursive: true });
+  const token = `${process.pid}-${Date.now()}`;
+  const testConfigPath = join(tmpRoot, `mx-gateway-${token}.conf`);
+  const wrapperConfigPath = join(tmpRoot, `nginx-wrapper-${token}.conf`);
+  writeFileSync(testConfigPath, nginxConfig, { mode: 0o644 });
+  writeFileSync(wrapperConfigPath, [
+    'events {}',
+    'http {',
+    `  include ${testConfigPath};`,
+    '}',
+    ''
+  ].join('\n'), { mode: 0o644 });
+
+  if (serverDryRun) {
+    const execution = await runCommand('nginx', ['-t', '-c', wrapperConfigPath, '-p', tmpRoot], 30000);
+    return {
+      status: execution.status === 'passed' ? 'server-dry-run' : 'failed',
+      applied: false,
+      mode: 'host-runner-nginx-gateway-apply',
+      configPath,
+      serverDryRun,
+      command: displayCommand(execution.command, execution.args),
+      exitCode: execution.exitCode,
+      stdout: execution.stdout,
+      stderr: execution.stderr,
+      message: execution.status === 'passed'
+        ? `nginx dry-run passed for ${configPath}`
+        : `nginx dry-run failed for ${configPath}: ${execution.stderr || execution.stdout || execution.status}`,
+      finishedAt: new Date().toISOString()
+    };
+  }
+
+  const routesMetadata = stringValue(payload.routesMetadata, '');
+  const execution = await runGatewayNginxApplyScript(configPath, nginxConfig, routesMetadata);
+  return {
+    status: execution.status === 'passed' ? 'applied' : 'failed',
+    applied: execution.status === 'passed',
+    mode: 'host-runner-nginx-gateway-apply',
+    configPath,
+    serverDryRun,
+    command: displayCommand(execution.command, execution.args),
+    exitCode: execution.exitCode,
+    stdout: execution.stdout,
+    stderr: execution.stderr,
+    message: execution.status === 'passed'
+      ? `nginx config applied and reloaded at ${configPath}`
+      : `nginx apply failed for ${configPath}: ${execution.stderr || execution.stdout || execution.status}`,
+    finishedAt: new Date().toISOString()
+  };
+}
+
+function normalizeGatewayNginxConfigPath(value) {
+  const raw = stringValue(value, '/etc/nginx/conf.d/mx-gateway.generated.conf');
+  if (!raw.startsWith('/')) return null;
+  const normalized = resolve(raw);
+  const allowedPrefixes = [
+    '/etc/nginx/',
+    '/usr/local/etc/nginx/',
+    '/opt/homebrew/etc/nginx/',
+    '/tmp/'
+  ];
+  return allowedPrefixes.some((prefix) => normalized.startsWith(prefix)) ? normalized : null;
+}
+
+async function runGatewayNginxApplyScript(configPath, nginxConfig, routesMetadata) {
+  const configDir = dirname(configPath);
+  const configBase64 = Buffer.from(nginxConfig, 'utf8').toString('base64');
+  const metadataBase64 = Buffer.from(routesMetadata, 'utf8').toString('base64');
+  const script = [
+    'set -e',
+    `config_path=${shellQuote(configPath)}`,
+    `config_dir=${shellQuote(configDir)}`,
+    'metadata_path="${config_path}.routes.json"',
+    'mkdir -p "$config_dir"',
+    'tmp_config="$(mktemp "${config_dir}/.mx-gateway.XXXXXX")"',
+    'tmp_metadata="$(mktemp "${config_dir}/.mx-gateway-routes.XXXXXX")"',
+    'backup_path="${config_path}.bak.$(date +%Y%m%d%H%M%S)"',
+    `printf %s ${shellQuote(configBase64)} | base64 -d > "$tmp_config"`,
+    `printf %s ${shellQuote(metadataBase64)} | base64 -d > "$tmp_metadata"`,
+    'chmod 0644 "$tmp_config" "$tmp_metadata"',
+    'if [ -f "$config_path" ]; then cp "$config_path" "$backup_path"; fi',
+    'install -m 0644 "$tmp_config" "$config_path"',
+    'install -m 0644 "$tmp_metadata" "$metadata_path"',
+    'if ! nginx -t; then',
+    '  if [ -f "$backup_path" ]; then install -m 0644 "$backup_path" "$config_path"; else rm -f "$config_path"; fi',
+    '  nginx -t || true',
+    '  exit 1',
+    'fi',
+    'if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nginx; then',
+    '  systemctl reload nginx',
+    'else',
+    '  nginx -s reload',
+    'fi',
+    'rm -f "$tmp_config" "$tmp_metadata"',
+    'printf "%s\\n" "applied $config_path"'
+  ].join('\n');
+  const invocation = privilegedCommand('sh', ['-lc', script]);
+  return runCommand(invocation.command, invocation.args, 60000);
+}
+
 function validSingleHostCidr(value) {
   if (typeof value !== 'string' || !value.trim().endsWith('/32')) return false;
   const ip = value.trim().slice(0, -3);
@@ -1653,6 +1779,10 @@ const server = createServer(async (req, res) => {
     }
     if (req.url === '/internal-service-peer/direct-peer-sync') {
       sendJson(res, 200, { directPeerSync: await syncDirectPeer(payload) });
+      return;
+    }
+    if (req.url === '/gateway/nginx/apply') {
+      sendJson(res, 200, { gatewayNginxApply: await applyGatewayNginx(payload) });
       return;
     }
     sendJson(res, 404, { error: 'Not found' });

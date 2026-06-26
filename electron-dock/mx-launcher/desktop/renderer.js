@@ -195,6 +195,7 @@ const state = {
     corednsApplyBusy: false,
     gatewayBusy: false,
     gatewayApplyBusy: false,
+    gatewayBackend: 'k8s',
     evalBusy: false,
     zoneSnapshot: null,
     corednsResult: null,
@@ -7990,6 +7991,10 @@ function renderDnsCenterPanel() {
           <p>业务域名在 DNS Routes 配置；DNS target 决定 CoreDNS 解析，upstream URL 决定 gateway 反代到哪个服务和端口。</p>
         </div>
         <div class="dns-head-actions">
+          <div class="dns-segmented" role="group" aria-label="Gateway backend">
+            ${renderGatewayBackendSegment('k8s', 'Caddy 80')}
+            ${renderGatewayBackendSegment('host-nginx', 'Host nginx')}
+          </div>
           <button class="secondary-button" type="button" data-dns-refresh ${state.dnsCenter.busy ? 'disabled' : ''}>${state.dnsCenter.busy ? 'Refreshing...' : 'Refresh'}</button>
           <button class="secondary-button" type="button" data-dns-zone-build ${state.dnsCenter.zoneBusy ? 'disabled' : ''}>${state.dnsCenter.zoneBusy ? 'Building...' : 'Build Zone'}</button>
           <button class="secondary-button" type="button" data-dns-coredns-sync ${state.dnsCenter.corednsBusy ? 'disabled' : ''}>${state.dnsCenter.corednsBusy ? 'Rendering...' : 'Dry-run CoreDNS'}</button>
@@ -8077,6 +8082,11 @@ function renderDnsCenterPanel() {
       ${renderDnsZoneResult(state.dnsCenter.zoneSnapshot, state.dnsCenter.corednsResult, state.dnsCenter.gatewayResult)}
     </section>
   `;
+}
+
+function renderGatewayBackendSegment(value, label) {
+  const active = (state.dnsCenter.gatewayBackend || 'k8s') === value;
+  return `<button class="dns-segment ${active ? 'is-active' : ''}" type="button" data-dns-gateway-backend="${escapeHtml(value)}">${escapeHtml(label)}</button>`;
 }
 
 function renderDnsMetric(label, value, hint) {
@@ -8225,6 +8235,13 @@ function bindDnsCenterControls(root) {
   if (gatewaySync) gatewaySync.addEventListener('click', () => void syncGatewayConfigMapFromAdmin());
   const gatewayApply = root.querySelector('[data-dns-gateway-apply]');
   if (gatewayApply) gatewayApply.addEventListener('click', () => void applyGatewayConfigMapFromAdmin());
+  for (const button of root.querySelectorAll('[data-dns-gateway-backend]')) {
+    button.addEventListener('click', () => {
+      const backend = button.dataset.dnsGatewayBackend;
+      state.dnsCenter.gatewayBackend = backend === 'host-nginx' ? 'host-nginx' : 'k8s';
+      renderFoundationGrid(state.dashboard?.overview || {});
+    });
+  }
   const evaluateForm = root.querySelector('[data-dns-evaluate-form]');
   if (evaluateForm) {
     evaluateForm.addEventListener('submit', (event) => {
@@ -8625,6 +8642,7 @@ async function syncGatewayConfigMapFromAdmin() {
       method: 'POST',
       body: {
         appId: 'sdk-gateway',
+        gatewayApplyBackend: state.dnsCenter.gatewayBackend || 'k8s',
         mode: 'dry-run',
         requestId: 'desktop-admin-gateway-sync'
       }
@@ -8646,13 +8664,15 @@ async function syncGatewayConfigMapFromAdmin() {
 async function applyGatewayConfigMapFromAdmin() {
   if (state.dnsCenter.gatewayApplyBusy) return;
   state.dnsCenter.gatewayApplyBusy = true;
-  state.dnsCenter.feedback = { kind: 'info', message: 'Applying Internal gateway ConfigMap' };
+  const gatewayBackend = state.dnsCenter.gatewayBackend || 'k8s';
+  state.dnsCenter.feedback = { kind: 'info', message: `Applying Internal gateway via ${gatewayBackend === 'host-nginx' ? 'host nginx' : 'k8s Caddy'}` };
   renderFoundationGrid(state.dashboard?.overview || {});
   try {
     const payload = await fetchJson('/internal/v1/dns/gateway/configmap/apply', {
       method: 'POST',
       body: {
         appId: 'sdk-gateway',
+        gatewayApplyBackend: gatewayBackend,
         confirmApply: true,
         serverDryRun: false,
         actor: 'admin-ui',
@@ -8663,7 +8683,7 @@ async function applyGatewayConfigMapFromAdmin() {
     state.dnsCenter.gatewayResult = result;
     state.dnsCenter.feedback = {
       kind: result.applied ? 'success' : (result.allowed === false ? 'error' : 'info'),
-      message: `Gateway ${result.namespace || 'mx-internal-shadow'}/${result.configMapName || 'mx-internal-gateway-caddy'} ${result.status || 'apply requested'}${result.message ? `: ${result.message}` : ''}`
+      message: `Gateway ${result.mode || gatewayBackend} ${result.status || 'apply requested'}${result.message ? `: ${result.message}` : ''}`
     };
   } catch (error) {
     state.dnsCenter.feedback = { kind: 'error', message: error.message };

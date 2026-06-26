@@ -21,6 +21,10 @@ export interface RuntimeConfig {
   gatewayK8sApplyEnabled: boolean;
   gatewayK8sAllowedNamespace: string;
   gatewayK8sAllowedConfigMapName: string;
+  gatewayApplyBackend: 'k8s' | 'host-nginx';
+  gatewayHostNginxApplyEnabled: boolean;
+  gatewayHostNginxConfigPath: string;
+  gatewayHostNginxInternalApiUpstream: string | null;
   gatewayAppPort: number;
   siteSlotSshKeyRoot: string;
 }
@@ -2242,6 +2246,9 @@ export interface GatewayConfigMapSyncInput {
   appId?: string | null;
   namespace?: string | null;
   configMapName?: string | null;
+  gatewayApplyBackend?: RuntimeConfig['gatewayApplyBackend'] | null;
+  gatewayHostNginxConfigPath?: string | null;
+  gatewayHostNginxInternalApiUpstream?: string | null;
   mode?: 'dry-run' | 'shadow-apply' | null;
   requestId?: string | null;
 }
@@ -2257,6 +2264,7 @@ export interface GatewayConfigMapManifest {
   };
   data: {
     Caddyfile: string;
+    'nginx.conf': string;
     'mx-gateway-routes.json': string;
   };
   yaml: string;
@@ -2284,7 +2292,7 @@ export interface GatewayConfigMapApplyInput extends GatewayConfigMapSyncInput {
 export interface GatewayConfigMapApplyResult {
   applyId: string;
   syncId: string;
-  mode: 'k8s-server-dry-run' | 'k8s-apply';
+  mode: 'k8s-server-dry-run' | 'k8s-apply' | 'host-nginx-dry-run' | 'host-nginx-apply';
   status: 'blocked' | 'server-dry-run' | 'applied' | 'failed';
   allowed: boolean;
   applied: boolean;

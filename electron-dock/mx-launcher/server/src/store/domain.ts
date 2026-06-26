@@ -1060,6 +1060,7 @@ export function renderGatewayConfigMap(
   input: GatewayConfigMapSyncInput,
   syncId: string
 ): GatewayConfigMapSyncResult {
+  const gatewayConfig = gatewayRuntimeConfigForInput(config, input);
   const namespace = input.namespace?.trim() || 'mx-internal-shadow';
   const configMapName = input.configMapName?.trim() || 'mx-internal-gateway-caddy';
   const mode = input.mode === 'shadow-apply' ? 'shadow-apply' : 'dry-run';
@@ -1085,9 +1086,11 @@ export function renderGatewayConfigMap(
     'mx.qpjoy.com/sync-id': syncId
   };
   const routesMetadata = JSON.stringify({
-    environment: config.environment,
-    siteId: config.siteId,
-    gatewayPort: config.gatewayAppPort,
+    environment: gatewayConfig.environment,
+    siteId: gatewayConfig.siteId,
+    gatewayApplyBackend: gatewayConfig.gatewayApplyBackend,
+    gatewayHostNginxConfigPath: gatewayConfig.gatewayHostNginxConfigPath,
+    gatewayPort: gatewayConfig.gatewayAppPort,
     routeCount: gatewayRoutes.length,
     routes: gatewayRoutes.map((route) => ({
       routeId: route.routeId,
@@ -1101,7 +1104,8 @@ export function renderGatewayConfigMap(
     issuedAt,
     digest
   }, null, 2);
-  const caddyfile = renderGatewayCaddyfile(config, gatewayRoutes);
+  const caddyfile = renderGatewayCaddyfile(gatewayConfig, gatewayRoutes);
+  const nginxConfig = renderGatewayNginxConfig(gatewayConfig, gatewayRoutes);
   const manifest: GatewayConfigMapManifest = {
     apiVersion: 'v1',
     kind: 'ConfigMap',
@@ -1113,10 +1117,12 @@ export function renderGatewayConfigMap(
     },
     data: {
       Caddyfile: caddyfile,
+      'nginx.conf': nginxConfig,
       'mx-gateway-routes.json': routesMetadata
     },
     yaml: renderConfigMapYaml(configMapName, namespace, labels, annotations, {
       Caddyfile: caddyfile,
+      'nginx.conf': nginxConfig,
       'mx-gateway-routes.json': routesMetadata
     })
   };
@@ -1141,8 +1147,26 @@ export function evaluateGatewayConfigMapApplyGate(
   sync: GatewayConfigMapSyncResult,
   input: GatewayConfigMapApplyInput
 ): { allowed: boolean; serverDryRun: boolean; blockedReason: string | null } {
+  const gatewayConfig = gatewayRuntimeConfigForInput(config, input);
   const serverDryRun = input.serverDryRun !== false;
-  if (!config.gatewayK8sApplyEnabled) {
+  if (gatewayConfig.gatewayApplyBackend === 'host-nginx') {
+    if (!gatewayConfig.gatewayHostNginxApplyEnabled) {
+      return {
+        allowed: false,
+        serverDryRun,
+        blockedReason: 'GATEWAY_HOST_NGINX_APPLY_ENABLED is not enabled'
+      };
+    }
+    if (input.confirmApply !== true) {
+      return {
+        allowed: false,
+        serverDryRun,
+        blockedReason: 'confirmApply=true is required before host nginx mutation'
+      };
+    }
+    return { allowed: true, serverDryRun, blockedReason: null };
+  }
+  if (!gatewayConfig.gatewayK8sApplyEnabled) {
     return {
       allowed: false,
       serverDryRun,
@@ -1157,8 +1181,8 @@ export function evaluateGatewayConfigMapApplyGate(
     };
   }
   if (
-    sync.namespace !== config.gatewayK8sAllowedNamespace
-    || sync.configMapName !== config.gatewayK8sAllowedConfigMapName
+    sync.namespace !== gatewayConfig.gatewayK8sAllowedNamespace
+    || sync.configMapName !== gatewayConfig.gatewayK8sAllowedConfigMapName
   ) {
     return {
       allowed: false,
@@ -1167,6 +1191,24 @@ export function evaluateGatewayConfigMapApplyGate(
     };
   }
   return { allowed: true, serverDryRun, blockedReason: null };
+}
+
+export function gatewayRuntimeConfigForInput(
+  config: RuntimeConfig,
+  input: Pick<GatewayConfigMapSyncInput, 'gatewayApplyBackend' | 'gatewayHostNginxConfigPath' | 'gatewayHostNginxInternalApiUpstream'>
+): RuntimeConfig {
+  const requestedBackend = input.gatewayApplyBackend === 'host-nginx' || input.gatewayApplyBackend === 'k8s'
+    ? input.gatewayApplyBackend
+    : null;
+  return {
+    ...config,
+    gatewayApplyBackend: requestedBackend ?? config.gatewayApplyBackend,
+    gatewayHostNginxApplyEnabled: config.gatewayHostNginxApplyEnabled || requestedBackend === 'host-nginx',
+    gatewayHostNginxConfigPath: input.gatewayHostNginxConfigPath?.trim()
+      || config.gatewayHostNginxConfigPath,
+    gatewayHostNginxInternalApiUpstream: input.gatewayHostNginxInternalApiUpstream?.trim()
+      || config.gatewayHostNginxInternalApiUpstream
+  };
 }
 
 function renderGatewayCaddyfile(config: RuntimeConfig, routes: DnsReverseProxyRoute[]): string {
@@ -1189,6 +1231,97 @@ function renderGatewayCaddyfile(config: RuntimeConfig, routes: DnsReverseProxyRo
     '',
     ...appPorts.flatMap((port) => gatewayAppServerBlock(port, routes, port === appPort ? 'internal-app-gateway' : 'internal-app-gateway-fallback'))
   ].join('\n');
+}
+
+export function renderGatewayNginxConfig(config: RuntimeConfig, routes: DnsReverseProxyRoute[]): string {
+  const appPort = Number.isFinite(config.gatewayAppPort) ? config.gatewayAppPort : 80;
+  const appPorts = [...new Set([appPort])].filter((port) => port > 0 && port <= 65535);
+  const internalApiUpstream = nginxUpstreamOrigin(config.gatewayHostNginxInternalApiUpstream);
+  return [
+    '# MX-H2I generated host nginx gateway include.',
+    '# This file is intended to be included from nginx http {} context.',
+    'map $http_upgrade $mx_gateway_connection_upgrade {',
+    '  default upgrade;',
+    "  '' close;",
+    '}',
+    '',
+    ...(internalApiUpstream ? nginxInternalApiServerBlock(internalApiUpstream) : []),
+    ...appPorts.flatMap((port) => nginxAppServerBlocks(port, routes))
+  ].join('\n');
+}
+
+function nginxInternalApiServerBlock(upstream: string): string[] {
+  return [
+    'server {',
+    '  listen 18090;',
+    '  server_name internal.mx gateway.internal.mx;',
+    '  add_header X-MX-Gateway internal-host-nginx-api always;',
+    '  location / {',
+    '    proxy_http_version 1.1;',
+    '    proxy_set_header Host $host;',
+    '    proxy_set_header X-Forwarded-Host $host;',
+    '    proxy_set_header X-Forwarded-Proto $scheme;',
+    '    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+    '    proxy_set_header Upgrade $http_upgrade;',
+    '    proxy_set_header Connection $mx_gateway_connection_upgrade;',
+    `    proxy_pass ${upstream};`,
+    '  }',
+    '}',
+    ''
+  ];
+}
+
+function nginxAppServerBlocks(port: number, routes: DnsReverseProxyRoute[]): string[] {
+  const routeBlocks = routes.flatMap((route) => nginxRouteServerBlock(port, route));
+  return [
+    ...routeBlocks,
+    'server {',
+    `  listen ${port} default_server;`,
+    '  server_name _;',
+    '  add_header X-MX-Gateway internal-host-nginx always;',
+    '  return 404 "MX Internal gateway route not found\\n";',
+    '}',
+    ''
+  ];
+}
+
+function nginxRouteServerBlock(port: number, route: DnsReverseProxyRoute): string[] {
+  const upstream = nginxUpstreamOrigin(route.targetUrl);
+  if (!upstream) return [];
+  return [
+    'server {',
+    `  listen ${port};`,
+    `  server_name ${route.host};`,
+    '  add_header X-MX-Gateway internal-host-nginx always;',
+    '  location / {',
+    '    proxy_http_version 1.1;',
+    '    proxy_set_header Host $host;',
+    '    proxy_set_header X-Forwarded-Host $host;',
+    '    proxy_set_header X-Forwarded-Proto $scheme;',
+    '    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+    `    proxy_set_header X-MX-Route-Id ${JSON.stringify(route.routeId)};`,
+    '    proxy_set_header Upgrade $http_upgrade;',
+    '    proxy_set_header Connection $mx_gateway_connection_upgrade;',
+    ...(upstream.startsWith('https://') ? [
+      '    proxy_ssl_server_name on;',
+      '    proxy_ssl_name $proxy_host;'
+    ] : []),
+    `    proxy_pass ${upstream};`,
+    '  }',
+    '}',
+    ''
+  ];
+}
+
+function nginxUpstreamOrigin(value: string | null | undefined): string | null {
+  if (!value?.trim()) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return null;
+  }
 }
 
 function gatewayAppServerBlock(port: number, routes: DnsReverseProxyRoute[], gatewayName: string): string[] {

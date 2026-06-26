@@ -8190,8 +8190,25 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
       confirmFields: ['confirmApply'],
       bodyTemplate: {
         confirmApply: true,
+        gatewayApplyBackend: 'k8s',
         namespace: 'mx-internal-shadow',
         configMapName: 'mx-internal-gateway-caddy'
+      }
+    },
+    {
+      actionId: 'dns.gateway.apply-host-nginx',
+      label: 'Apply Internal Gateway Host Nginx',
+      category: 'dns',
+      method: 'POST',
+      path: '/internal/v1/dns/gateway/configmap/apply',
+      requiredScopes: ['dns.manage'],
+      gate: 'confirm-apply',
+      risk: 'high',
+      confirmFields: ['confirmApply'],
+      bodyTemplate: {
+        confirmApply: true,
+        gatewayApplyBackend: 'host-nginx',
+        gatewayHostNginxConfigPath: '/etc/nginx/conf.d/mx-gateway.generated.conf'
       }
     },
     {

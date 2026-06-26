@@ -49,6 +49,7 @@ import {
   createUserPrincipalFromRecord,
   evaluateCoreDnsConfigMapApplyGate,
   evaluateGatewayConfigMapApplyGate,
+  gatewayRuntimeConfigForInput,
   evaluateSdkGatewayRoute,
   evaluateDnsPolicy,
   hashToken,
@@ -71,6 +72,7 @@ import {
   launcherNetworkProductIsStandaloneDefault,
   normalizeLauncherNetworkProductId
 } from './domain.js';
+import { applyGatewayNginxConfigToHostRunner } from './host-runner.js';
 import { applyCoreDnsConfigMapToKubernetes, applyGatewayConfigMapToKubernetes } from './kubernetes.js';
 import type { PlatformStore } from './platform-store.js';
 import type {
@@ -1833,10 +1835,19 @@ export class MemoryStore implements PlatformStore {
 
   async applyGatewayConfigMap(input: GatewayConfigMapApplyInput): Promise<GatewayConfigMapApplyResult> {
     const sync = this.syncGatewayConfigMap({ ...input, mode: 'shadow-apply' });
+    const gatewayConfig = gatewayRuntimeConfigForInput(this.config, input);
     const gate = evaluateGatewayConfigMapApplyGate(this.config, sync, input);
     const issuedAt = new Date().toISOString();
     const outcome = gate.allowed
-      ? await applyGatewayConfigMapToKubernetes(sync.manifest, gate.serverDryRun)
+      ? gatewayConfig.gatewayApplyBackend === 'host-nginx'
+        ? await applyGatewayNginxConfigToHostRunner(gatewayConfig, {
+            configPath: gatewayConfig.gatewayHostNginxConfigPath,
+            nginxConfig: sync.manifest.data['nginx.conf'],
+            routesMetadata: sync.manifest.data['mx-gateway-routes.json'],
+            serverDryRun: gate.serverDryRun,
+            requestId: input.requestId ?? null
+          })
+        : await applyGatewayConfigMapToKubernetes(sync.manifest, gate.serverDryRun)
       : {
           status: 'failed' as const,
           applied: false,
@@ -1846,7 +1857,9 @@ export class MemoryStore implements PlatformStore {
     const result: GatewayConfigMapApplyResult = {
       applyId: `gatewayapply_${randomUUID()}`,
       syncId: sync.syncId,
-      mode: gate.serverDryRun ? 'k8s-server-dry-run' : 'k8s-apply',
+      mode: gatewayConfig.gatewayApplyBackend === 'host-nginx'
+        ? gate.serverDryRun ? 'host-nginx-dry-run' : 'host-nginx-apply'
+        : gate.serverDryRun ? 'k8s-server-dry-run' : 'k8s-apply',
       status: gate.allowed ? outcome.status : 'blocked',
       allowed: gate.allowed,
       applied: gate.allowed ? outcome.applied : false,

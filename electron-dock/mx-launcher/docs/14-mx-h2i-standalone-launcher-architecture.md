@@ -570,11 +570,15 @@ H 端策略是：`.mx.cn`、`.mxinfo-inc.cn`、`internal.mx`、`.internal.mx`、
 未命中域名按 system DNS / system proxy / H2O proxy / direct 的 fallback 顺序处理。
 长期标准入口是 Internal gateway/ingress：DNS 只把域名稳定解析到 Internal overlay IP，
 Gateway 再按 `Host` 转发到每条业务 route 的 upstream。Admin 可以把两层放在同一个
-DNS Routes 面板里编辑，但落地到两份不同 ConfigMap：
+DNS Routes 面板里编辑。V2 默认仍保留 k8s Caddy 作为可回退 backend，但业务 gateway
+控制面可以切到宿主机 nginx：
 
 - `mx-dns/coredns`：CoreDNS authority，来源是 DNS zone snapshot。
 - `mx-internal-shadow/mx-internal-gateway-caddy`：Internal gateway Caddyfile，来源是
   enabled 且带 `targetUrl` 的 DNS route。
+- `/etc/nginx/conf.d/mx-gateway.generated.conf`：host-runner 写入的 nginx include，来源也是
+  enabled 且带 `targetUrl` 的 DNS route；这是 V2 从 k8s Caddy 迁移到宿主机 gateway 的
+  首选控制面。
 
 业务域名 route 要把 DNS 和反代拆开配置：
 
@@ -596,16 +600,33 @@ DNS Routes 面板里编辑，但落地到两份不同 ConfigMap：
   并持有该域名证书。
 - `Build Zone` 只生成 zone snapshot；只有 `Apply CoreDNS ConfigMap` 后才会更新
   `mx-dns/coredns` 并影响新的解析结果。本机 edge 会在 H2I ready 后拉取最新 DNS route。
-- `Dry-run Gateway` 渲染 Internal gateway Caddyfile；`Apply Gateway` 更新
-  `mx-internal-gateway-caddy`。要让 `http://openvpn.mxinfo-inc.cn/` 不带端口访问到
+- `Dry-run Gateway` 同时渲染 Caddyfile 和 nginx include。`Apply Gateway` 默认更新
+  `mx-internal-gateway-caddy`；设置 `GATEWAY_APPLY_BACKEND=host-nginx`、
+  `GATEWAY_HOST_NGINX_APPLY_ENABLED=true` 后，`Apply Gateway` 会通过 Internal host-runner
+  写入宿主机 nginx 并 reload。要让 `http://openvpn.mxinfo-inc.cn/` 不带端口访问到
   `http://10.88.88.88:8080`，需要先保存 route，再依次 Apply CoreDNS 和 Apply Gateway。
   `8008` 只保留为迁移/调试 fallback；如果 `10.88.88.88:80` 仍由旧 nginx 占用，不带端口的
-  浏览器访问会继续命中旧 nginx，必须让 Internal gateway 接管 80 或把旧 nginx 配成 Host
-  reverse proxy 到 Internal gateway。
+  浏览器访问会继续命中旧 nginx。V2 推荐让宿主机 nginx 直接接管 80 并按 Host 反代，
+  k8s Caddy 可在迁移期作为回退 backend 保留。
+- Admin DNS 页面可以直接选择 `Caddy 80` 或 `Host nginx`。`Caddy 80` 是保底默认；
+  `Host nginx` 在本次 Apply 请求中显式开启，不要求 `.env` 预先写
+  `GATEWAY_HOST_NGINX_APPLY_ENABLED=true`。`GATEWAY_HOST_NGINX_CONFIG_PATH` 默认是
+  `/etc/nginx/conf.d/mx-gateway.generated.conf`。
+- k8s bootstrap ConfigMap 默认带 `GATEWAY_APPLY_BACKEND=k8s` 和 host-runner fallback/ensure
+  开关，Admin 可以生成 `mx-internal-host-runner` DaemonSet 并通过
+  `mx-internal-host-runner.mx-internal-shadow.svc.cluster.local:19190` 访问。这个 k8s fallback
+  runner 适合容器侧/hostNetwork 兜底，不默认用于宿主机 nginx；宿主机 nginx 需要 native
+  host-runner 或显式 `MX_INTERNAL_HOST_RUNNER_URL` 指向真实宿主机 runner。只有设置
+  `GATEWAY_HOST_NGINX_K8S_RUNNER_ENABLED=true` 时，host-nginx apply 才会尝试 k8s runner。
 - 若 H 端看到 `DNS timeout via <domestic-public>/10.88.0.1/10.88.88.88`，
   说明 Domestic DNS edge、WG 或 Internal CoreDNS 链路仍有一段未通；这时应先让
   本机 edge 用 route/default gateway fallback 保证浏览器流量进入 Internal，再检查是否需要
   Domestic `dns-edge-cache`、Internal CoreDNS hostPort 或 WireGuard AllowedIPs/防火墙放通 UDP/TCP 53。
+
+V1/V2 共存期只把 DNS 53 视为共享资源：V2 Domestic apply 发现 V1 DNS 已占用 53 时复用
+它，不抢占也不停止；业务 gateway、Admin route、host nginx 配置都走 V2 自己的控制逻辑。
+等 V1 下线后，V2 CoreDNS 可以直接成为 53 authority，`GATEWAY_APPLY_BACKEND=host-nginx`
+的路径不需要跟随 V1 变化。
 
 当前本地 Mac + Docker Desktop 中，host-runner DaemonSet 操作的是 LinuxKit node，不等于
 Mac 宿主机；正式 Ubuntu 环境中也优先使用 native systemd runner，让 WireGuard、路由和

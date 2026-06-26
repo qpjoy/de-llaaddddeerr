@@ -23,6 +23,10 @@ function siteRoleFromEnv(): SiteRole {
   return 'internal';
 }
 
+function gatewayApplyBackendFromEnv(): RuntimeConfig['gatewayApplyBackend'] {
+  return process.env.GATEWAY_APPLY_BACKEND?.trim() === 'host-nginx' ? 'host-nginx' : 'k8s';
+}
+
 function enabledModulesFromEnv(siteRole: SiteRole): string[] {
   const raw = process.env.MX_ENABLED_MODULES;
   if (raw?.trim()) {
@@ -96,6 +100,11 @@ export function loadConfig(): RuntimeConfig {
     gatewayK8sApplyEnabled: boolFromEnv('GATEWAY_K8S_APPLY_ENABLED', false),
     gatewayK8sAllowedNamespace: process.env.GATEWAY_K8S_ALLOWED_NAMESPACE ?? 'mx-internal-shadow',
     gatewayK8sAllowedConfigMapName: process.env.GATEWAY_K8S_ALLOWED_CONFIGMAP_NAME ?? 'mx-internal-gateway-caddy',
+    gatewayApplyBackend: gatewayApplyBackendFromEnv(),
+    gatewayHostNginxApplyEnabled: boolFromEnv('GATEWAY_HOST_NGINX_APPLY_ENABLED', false),
+    gatewayHostNginxConfigPath: process.env.GATEWAY_HOST_NGINX_CONFIG_PATH
+      ?? '/etc/nginx/conf.d/mx-gateway.generated.conf',
+    gatewayHostNginxInternalApiUpstream: process.env.GATEWAY_HOST_NGINX_INTERNAL_API_UPSTREAM?.trim() || null,
     gatewayAppPort: intFromEnv('GATEWAY_APP_PORT', 80),
     siteSlotSshKeyRoot: process.env.MX_SITE_SLOT_SSH_KEY_DIR ?? 'artifacts/ssh'
   };
