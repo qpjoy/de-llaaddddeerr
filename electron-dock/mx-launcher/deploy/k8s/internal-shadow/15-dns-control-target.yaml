@@ -111,11 +111,11 @@ spec:
           ports:
             - name: dns-udp
               containerPort: 53
-              hostPort: 50053
+              hostPort: 53
               protocol: UDP
             - name: dns-tcp
               containerPort: 53
-              hostPort: 50053
+              hostPort: 53
               protocol: TCP
           livenessProbe:
             tcpSocket:

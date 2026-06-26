@@ -20,10 +20,10 @@ const LOCAL_INTERNAL_BASE_URLS = ['http://127.0.0.1:18090', 'http://localhost:18
 const BOOTSTRAP_DNS_RETRY_LIMIT = 3;
 const BOOTSTRAP_DNS_RETRY_DELAY_MS = 350;
 const DEFAULT_LOCAL_EDGE_PORT = 2053;
-const DEFAULT_DOMESTIC_DNS_EDGE_PORT = 50053;
-const DEFAULT_INTERNAL_DNS_EDGE_PORT = 50053;
+const DEFAULT_DOMESTIC_DNS_EDGE_PORT = 53;
+const DEFAULT_INTERNAL_DNS_EDGE_PORT = 53;
 const DEFAULT_INTERNAL_GATEWAY_APP_PORT = 80;
-const DEFAULT_SPLIT_DNS_DOMAINS = 'mxinfo-inc.cn internal.mx corp.mx h2i.mx';
+const DEFAULT_SPLIT_DNS_DOMAINS = 'mx.cn mxinfo-inc.cn internal.mx corp.mx h2i.mx';
 const SYSTEM_DOMAIN_PROXY_REFRESH_MS = 30_000;
 const WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD = 3;
 const DEFAULT_CONFIG = {
@@ -69,6 +69,9 @@ let systemDomainProxyManager = null;
 let systemDomainProxyRefreshInterval = null;
 let systemDomainProxyRefreshInFlight = false;
 let lastSystemDomainProxySignature = null;
+let lastSystemDomainProxyPolicySignature = null;
+let lastSystemDomainProxyAuthorizationCanceledSignature = null;
+let lastSystemPacReverseProxyRoutes = [];
 
 const TOP_DOCK_Y = 0;
 const TOP_REVEAL_ZONE = 18;
@@ -634,7 +637,7 @@ async function ensureSystemDomainProxyForRuntime(reason = 'manual') {
     if (domains.length === 0) {
       return disableSystemDomainProxyForRuntime(`${reason}-no-domains`);
     }
-    return await systemDomainProxyManager.apply({
+    const policy = {
       enabled: true,
       domains,
       matchMode: 'proxy',
@@ -645,7 +648,18 @@ async function ensureSystemDomainProxyForRuntime(reason = 'manual') {
       systemResolver: 'dynamic',
       reverseProxyRoutes,
       fallbackProxy: systemPacFallbackProxy()
-    });
+    };
+    const policySignature = systemDomainProxyPolicySignature(policy);
+    const skipped = maybeSkipSystemDomainProxyApply(reason, policySignature);
+    if (skipped) return skipped;
+    const status = await systemDomainProxyManager.apply(policy);
+    lastSystemDomainProxyPolicySignature = policySignature;
+    if (isSystemDomainProxyAuthorizationCanceled(status)) {
+      lastSystemDomainProxyAuthorizationCanceledSignature = policySignature;
+    } else if (status?.applied && !status?.error && !status?.resolverError) {
+      lastSystemDomainProxyAuthorizationCanceledSignature = null;
+    }
+    return status;
   } catch (err) {
     return {
       supported: true,
@@ -660,6 +674,9 @@ async function ensureSystemDomainProxyForRuntime(reason = 'manual') {
 async function disableSystemDomainProxyForRuntime(reason = 'manual') {
   if (!systemDomainProxyManager) return null;
   lastSystemDomainProxySignature = null;
+  lastSystemDomainProxyPolicySignature = null;
+  lastSystemDomainProxyAuthorizationCanceledSignature = null;
+  lastSystemPacReverseProxyRoutes = [];
   try {
     return await systemDomainProxyManager.disable(reason);
   } catch (err) {
@@ -743,6 +760,66 @@ function systemDomainProxyStatusSignature(status) {
       }))
       .sort((left, right) => String(left.host).localeCompare(String(right.host)))
   });
+}
+
+function systemDomainProxyPolicySignature(policy) {
+  if (!policy || typeof policy !== 'object') return null;
+  return JSON.stringify({
+    enabled: policy.enabled === true,
+    matchMode: nullableString(policy.matchMode),
+    proxy: nullableString(policy.proxy),
+    fallbackProxy: nullableString(policy.fallbackProxy),
+    pacPort: policy.pacPort || null,
+    dnsFallbackTarget: nullableString(policy.dnsFallbackTarget),
+    systemResolver: nullableString(policy.systemResolver),
+    domains: arrayValue(policy.domains, []).map(String).sort(),
+    dnsServers: arrayValue(policy.dnsServers, []).map(String).sort(),
+    reverseProxyRoutes: arrayValue(policy.reverseProxyRoutes, [])
+      .map((route) => ({
+        host: nullableString(route?.host),
+        dnsTarget: nullableString(route?.dnsTarget),
+        targetUrl: nullableString(route?.targetUrl),
+        tlsMode: nullableString(route?.tlsMode),
+        authRequired: route?.authRequired === true,
+        enabled: route?.enabled !== false
+      }))
+      .sort((left, right) => String(left.host).localeCompare(String(right.host)))
+  });
+}
+
+function maybeSkipSystemDomainProxyApply(reason, policySignature) {
+  if (reason !== 'route-refresh' || !policySignature || policySignature !== lastSystemDomainProxyPolicySignature) {
+    return null;
+  }
+  const status = typeof systemDomainProxyManager?.status === 'function'
+    ? systemDomainProxyManager.status()
+    : null;
+  if (!status || typeof status !== 'object') return null;
+  const resolverMode = nullableString(status.systemResolverMode);
+  const resolverDomains = arrayValue(status.resolverDomains, []);
+  if (status.applied && (resolverMode !== 'dynamic' || resolverDomains.length === 0 || status.resolverApplied === true)) {
+    return {
+      ...status,
+      reason,
+      skipped: true
+    };
+  }
+  if (
+    policySignature === lastSystemDomainProxyAuthorizationCanceledSignature
+    && isSystemDomainProxyAuthorizationCanceled(status)
+  ) {
+    return {
+      ...status,
+      reason,
+      skipped: true
+    };
+  }
+  return null;
+}
+
+function isSystemDomainProxyAuthorizationCanceled(status) {
+  const text = `${status?.error || ''}\n${status?.resolverError || ''}`;
+  return /authorization canceled|administrator authorization canceled|user canceled|用户已取消|\(-128\)/i.test(text);
 }
 
 function systemPacFallbackProxy() {
@@ -855,19 +932,42 @@ function systemPacGatewayTargetUrl() {
 }
 
 async function systemPacReverseProxyRoutes() {
-  const baseUrl = normalizeBaseUrl(runtime?.connection?.internalBaseUrl)
-    || internalOverlayBaseUrl(runtime?.connection?.routePlan, runtime?.config?.internalApiBaseUrl);
-  try {
-    const payload = await requestJson(joinApiUrl(baseUrl, '/internal/v1/dns/reverse-proxy/routes'), {
-      timeoutMs: 2200
-    });
-    return arrayValue(payload?.routes, [])
-      .map((route) => normalizeSystemPacReverseProxyRoute(route))
-      .filter(Boolean);
-  } catch (err) {
-    console.warn('[mx-h2i] reverse proxy routes unavailable for local edge:', errorMessage(err));
-    return [];
+  const baseUrls = systemPacReverseProxyRouteBaseUrls();
+  const failures = [];
+  for (const baseUrl of baseUrls) {
+    try {
+      const payload = await requestJson(joinApiUrl(baseUrl, '/internal/v1/dns/reverse-proxy/routes'), {
+        timeoutMs: 5000,
+        bootstrapResolveMode: runtime?.config?.bootstrapResolveMode
+      });
+      const routes = arrayValue(payload?.routes, [])
+        .map((route) => normalizeSystemPacReverseProxyRoute(route))
+        .filter(Boolean);
+      lastSystemPacReverseProxyRoutes = routes;
+      return routes;
+    } catch (err) {
+      failures.push(`${baseUrl}: ${errorMessage(err)}`);
+    }
   }
+  if (lastSystemPacReverseProxyRoutes.length > 0) {
+    console.warn('[mx-h2i] reverse proxy routes unavailable for local edge; using cached routes:', failures.join('; '));
+    return lastSystemPacReverseProxyRoutes;
+  }
+  if (failures.length > 0) {
+    console.warn('[mx-h2i] reverse proxy routes unavailable for local edge:', failures.join('; '));
+  }
+  return [];
+}
+
+function systemPacReverseProxyRouteBaseUrls() {
+  const routePlan = runtime?.connection?.routePlan;
+  return uniqueStrings([
+    normalizeBaseUrl(runtime?.connection?.internalBaseUrl),
+    internalOverlayBaseUrl(routePlan, runtime?.config?.internalApiBaseUrl),
+    normalizeBaseUrl(runtime?.config?.internalApiBaseUrl),
+    normalizeBaseUrl(runtime?.config?.bootstrapApiBaseUrl),
+    ...LOCAL_INTERNAL_BASE_URLS.map((url) => normalizeBaseUrl(url))
+  ]);
 }
 
 function normalizeSystemPacReverseProxyRoute(input) {

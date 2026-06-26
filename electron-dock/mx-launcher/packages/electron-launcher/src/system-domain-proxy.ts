@@ -787,7 +787,7 @@ async function applySystemResolversWithPlan(
       error: verification.error || null
     };
   } catch (err) {
-    const message = errorMessage(err);
+    const message = darwinAuthorizationErrorMessage(err);
     log.warn('[electron-launcher] failed to apply macOS split DNS resolver', err);
     return {
       mode: plan.mode,
@@ -970,7 +970,7 @@ async function applyDarwinPacAndDynamicResolvers(
       error: verification.error || null
     };
   } catch (err) {
-    const message = errorMessage(err);
+    const message = darwinAuthorizationErrorMessage(err);
     log.warn('[electron-launcher] failed to apply macOS PAC and dynamic split DNS resolver', err);
     return {
       mode: plan.mode,
@@ -2256,4 +2256,11 @@ function shellQuote(value: string): string {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function darwinAuthorizationErrorMessage(err: unknown): string {
+  const message = errorMessage(err);
+  return /用户已取消|\(-128\)|user canceled|user cancelled/i.test(message)
+    ? 'macOS administrator authorization canceled'
+    : message;
 }

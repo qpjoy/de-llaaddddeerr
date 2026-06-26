@@ -2,11 +2,11 @@
 import { spawn } from 'node:child_process';
 
 const env = { ...process.env };
-for (const key of ['NODE_OPTIONS', 'NPM_CONFIG_NODE_OPTIONS']) {
+for (const key of ['NODE_OPTIONS', 'NPM_CONFIG_NODE_OPTIONS', 'npm_config_node_options']) {
   if (!env[key]) continue;
   const next = env[key]
     .split(/\s+/)
-    .filter((part) => part && part !== '--no-expose-wasm')
+    .filter((part) => part && !/^--no-expose-wasm(?:=.*)?$/.test(part))
     .join(' ');
   if (next) env[key] = next;
   else delete env[key];

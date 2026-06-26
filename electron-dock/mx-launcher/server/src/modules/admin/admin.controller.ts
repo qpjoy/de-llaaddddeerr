@@ -5659,6 +5659,7 @@ function domesticRuntimeConfigApplyScript(config: SiteSlotDomesticRuntimeConfig)
   const envLines = Object.entries(config.env)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `${key}=${value}`);
+  const dnsPort = String(config.dns.port || 53);
   const caddyfileBase64 = Buffer.from(domesticServicesCaddyfileContent()).toString('base64');
   const dnsEdgeCorefileBase64 = Buffer.from(domesticDnsEdgeCorefileContent(config)).toString('base64');
   const dnsEdgeComposeBase64 = Buffer.from(domesticDnsEdgeComposeContent()).toString('base64');
@@ -5666,6 +5667,7 @@ function domesticRuntimeConfigApplyScript(config: SiteSlotDomesticRuntimeConfig)
     'set -eu',
     'printf "mx-domestic-runtime-config-apply\\n"',
     'stack_dir=/opt/mx/current/domestic',
+    `dns_port=${shellQuote(dnsPort)}`,
     'test -d "$stack_dir" || { echo "blocked: Domestic edge stack is not installed at $stack_dir"; exit 1; }',
     'test -f "$stack_dir/manage.sh" || { echo "blocked: Domestic manage.sh is missing; run Install / Sync first"; exit 1; }',
     `printf "%s\\n" ${envLines.map(shellQuote).join(' ')} > "$stack_dir/.env.tmp"`,
@@ -5677,10 +5679,13 @@ function domesticRuntimeConfigApplyScript(config: SiteSlotDomesticRuntimeConfig)
     'if test -f "$stack_dir/docker-compose.yml"; then sed -i.bak -E \'s#^([[:space:]]*image:[[:space:]]*)caddy:2-alpine#\\1caddy:2.8.4-alpine#\' "$stack_dir/docker-compose.yml"; fi',
     'cd "$stack_dir"',
     'chmod +x ./manage.sh || true',
+    'mx_dc() { if docker compose version >/dev/null 2>&1; then docker compose "$@"; elif command -v docker-compose >/dev/null 2>&1; then docker-compose "$@"; else echo "blocked: docker compose is missing"; return 127; fi; }',
+    'mx_dns_port_busy() { p="$1"; if command -v ss >/dev/null 2>&1 && ss -H -lntu 2>/dev/null | awk -v p=":$p" \'$5 ~ p "$" { found=1 } END { exit found ? 0 : 1 }\'; then return 0; fi; if command -v lsof >/dev/null 2>&1 && { lsof -nP -iTCP:"$p" -sTCP:LISTEN 2>/dev/null | awk \'NR > 1 { found=1 } END { exit found ? 0 : 1 }\' || lsof -nP -iUDP:"$p" 2>/dev/null | awk \'NR > 1 { found=1 } END { exit found ? 0 : 1 }\'; }; then return 0; fi; return 1; }',
     './manage.sh up',
-    'docker compose --profile dns stop dns-forwarder >/dev/null 2>&1 || true',
-    'docker compose -f docker-compose.yml -f docker-compose.dns-edge.yml up -d mx-domestic-dns-edge',
-    'docker compose -f docker-compose.yml -f docker-compose.dns-edge.yml ps mx-domestic-dns-edge || true',
+    'mx_dc --profile dns stop dns-forwarder >/dev/null 2>&1 || true',
+    'dns_edge_container_id="$(mx_dc -f docker-compose.yml -f docker-compose.dns-edge.yml ps -q mx-domestic-dns-edge 2>/dev/null || true)"',
+    'if [ -n "$dns_edge_container_id" ]; then echo "updating managed Domestic DNS edge on :$dns_port"; mx_dc -f docker-compose.yml -f docker-compose.dns-edge.yml up -d mx-domestic-dns-edge; elif mx_dns_port_busy "$dns_port"; then echo "Domestic DNS :$dns_port already has a listener; reusing existing V1/host DNS runtime"; else echo "starting managed Domestic DNS edge on :$dns_port"; mx_dc -f docker-compose.yml -f docker-compose.dns-edge.yml up -d mx-domestic-dns-edge; fi',
+    'mx_dc -f docker-compose.yml -f docker-compose.dns-edge.yml ps mx-domestic-dns-edge || true',
     './manage.sh status || true',
     './manage.sh health'
   ].join('; ');
@@ -5754,13 +5759,13 @@ function domesticServicesCaddyfileContent(): string {
 
 function domesticDnsEdgeCorefileContent(config: SiteSlotDomesticRuntimeConfig): string {
   const bind = coreDnsBindHost(config.dns.bind);
-  const listenPort = config.dns.port || 50053;
+  const listenPort = config.dns.port || 53;
   return [
     `.:${listenPort} {`,
     `  bind ${bind}`,
     '  errors',
     '  cache 30',
-    '  forward . 10.88.88.88:50053',
+    '  forward . 10.88.88.88:53',
     '  reload',
     '}',
     ''
@@ -7546,7 +7551,7 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         internalApiUpstream: 'http://10.88.88.88:18090',
         internalH2iUpstream: 'http://10.88.88.88:18090',
         dnsBind: '0.0.0.0',
-        dnsPort: 50053,
+        dnsPort: 53,
         requestedBy: 'admin-ui'
       }
     },
@@ -7574,7 +7579,7 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         internalApiUpstream: 'http://10.88.88.88:18090',
         internalH2iUpstream: 'http://10.88.88.88:18090',
         dnsBind: '0.0.0.0',
-        dnsPort: 50053,
+        dnsPort: 53,
         confirmDomesticRuntimeApply: true,
         requestedBy: 'admin-ui'
       }

@@ -807,7 +807,7 @@ export function builtinDnsPolicies(config: RuntimeConfig): DnsPolicy[] {
           'service-peer.internal.mx',
           'domestic-relay.internal.mx'
         ],
-        suffixes: ['.internal.mx', '.corp.mx', '.h2i.mx']
+        suffixes: ['.mx.cn', '.mxinfo-inc.cn', '.internal.mx', '.corp.mx', '.h2i.mx']
       },
       internal: {
         authority: 'internal-coredns',
@@ -2701,7 +2701,7 @@ export function buildSiteSlotDomesticRuntimeConfig(
   const internalApi = normalizeHttpUrl(input.internalApiUpstream || previous?.upstreams.internalApi || internalBaseUrl);
   const internalH2i = normalizeHttpUrl(input.internalH2iUpstream || previous?.upstreams.internalH2i || internalBaseUrl);
   const dnsBind = input.dnsBind?.trim() || previous?.dns.bind || '0.0.0.0';
-  const dnsPort = positivePort(input.dnsPort, previous?.dns.port, 50053);
+  const dnsPort = positivePort(input.dnsPort, previous?.dns.port, 53);
   const publicBaseUrl = `${bootstrapProtocol}://${bootstrapHost}${defaultPortForProtocol(bootstrapProtocol) === bootstrapPort ? '' : `:${bootstrapPort}`}`;
   const env = domesticRuntimeEnv({
     siteId,
