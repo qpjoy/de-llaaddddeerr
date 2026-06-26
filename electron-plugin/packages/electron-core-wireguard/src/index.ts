@@ -1559,6 +1559,12 @@ function buildDarwinUserspaceTunnelCommand(
     [...selfRouteDownCommands, ...routeDownCommands],
     primaryAddress
   );
+  const finalStartValidationCommands = [
+    `if [ -n "$WIREGUARD_GO_PID" ] && ! kill -0 "$WIREGUARD_GO_PID" >/dev/null 2>&1; then echo "wireguard-go exited after route configuration" >&2; tail -n 40 ${shellQuote(logFile)} >&2 2>/dev/null || true; exit 1; fi`,
+    ...(primaryAddress ? [
+      `ifconfig "$REAL_INTERFACE" 2>/dev/null | grep -q ${shellQuote(`inet ${primaryAddress}`)} || { echo "wireguard interface lost primary address ${primaryAddress}" >&2; ifconfig "$REAL_INTERFACE" >&2 2>/dev/null || true; exit 1; }`
+    ] : [])
+  ];
   const dnsStatePath = join(dirname(configPath), `${profile.interfaceName}.dns.state`);
   const dnsRestoreCommands = darwinDnsRestoreCommands(shellQuote(dnsStatePath), '"$ROUTE_LOG"');
   const dnsSetCommands = darwinDnsSetCommands(profile.dnsServers, profile.dnsDomains, shellQuote(dnsStatePath), '"$ROUTE_LOG"');
@@ -1568,6 +1574,7 @@ function buildDarwinUserspaceTunnelCommand(
     `REAL_INTERFACE="$(cat ${shellQuote(nameFile)} 2>/dev/null || true)"`,
     `if [ -z "$REAL_INTERFACE" ] && [ -n ${shellQuote(primaryAddress)} ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q ${shellQuote(`inet ${primaryAddress}`)}; then REAL_INTERFACE="$candidate"; break; fi; done; fi`,
     `if [ -z "$REAL_INTERFACE" ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q ${shellQuote(`inet ${anchorIp}`)}; then REAL_INTERFACE="$candidate"; break; fi; done; fi`,
+    `if [ -n "$REAL_INTERFACE" ]; then REAL_INTERFACE_STATE="$(ifconfig "$REAL_INTERFACE" 2>/dev/null || true)"; REAL_INTERFACE_OWNED=0; if [ -n ${shellQuote(primaryAddress)} ] && printf '%s\\n' "$REAL_INTERFACE_STATE" | grep -q ${shellQuote(`inet ${primaryAddress}`)}; then REAL_INTERFACE_OWNED=1; fi; if [ "$REAL_INTERFACE_OWNED" != "1" ] && printf '%s\\n' "$REAL_INTERFACE_STATE" | grep -q ${shellQuote(`inet ${anchorIp}`)}; then REAL_INTERFACE_OWNED=1; fi; if [ "$REAL_INTERFACE_OWNED" != "1" ]; then echo ${shellQuote('skipStaleRealInterfaceBeforeStop=')}"$REAL_INTERFACE" >> "$ROUTE_LOG" 2>&1; REAL_INTERFACE=""; fi; fi`,
     `echo ${shellQuote('realInterfaceBeforeStop=')}"$REAL_INTERFACE" >> "$ROUTE_LOG" 2>&1`,
     ...dnsRestoreCommands,
     ...endpointCleanupCommands,
@@ -1623,7 +1630,8 @@ function buildDarwinUserspaceTunnelCommand(
     ...routeDownCommands,
     ...routeUpCommands,
     ...selfRouteUpCommands,
-    ...dnsSetCommands
+    ...dnsSetCommands,
+    ...finalStartValidationCommands
   ];
   const scriptLines = action === 'down'
     ? ['set -e', ...stopLines]
@@ -1928,6 +1936,12 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     [...selfRouteDownCommands, ...routeDownCommands],
     primaryAddress
   );
+  const finalStartValidationCommands = [
+    'if [ -z "$WG_PID" ] || ! kill -0 "$WG_PID" >/dev/null 2>&1; then echo "wireguard-go exited after route configuration" >&2; tail -n 40 "$WG_GO_LOG" >&2 2>/dev/null || true; exit 1; fi',
+    ...(primaryAddress ? [
+      `ifconfig "$REAL_INTERFACE" 2>/dev/null | grep -q ${shellQuote(`inet ${primaryAddress}`)} || { echo "wireguard interface lost primary address ${primaryAddress}" >&2; ifconfig "$REAL_INTERFACE" >&2 2>/dev/null || true; exit 1; }`
+    ] : [])
+  ];
   const dnsRestoreCommands = darwinDnsRestoreCommands('"$DNS_STATE_FILE"', '"$ROUTE_LOG"');
   const dnsSetCommands = darwinDnsSetCommands(profile.dnsServers, profile.dnsDomains, '"$DNS_STATE_FILE"', '"$ROUTE_LOG"');
   return [
@@ -1957,6 +1971,7 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     '  REAL_INTERFACE="$(cat "$NAME_FILE" 2>/dev/null || true)"',
     '  if [ -z "$REAL_INTERFACE" ] && [ -n "$PRIMARY_ADDRESS" ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q "inet $PRIMARY_ADDRESS"; then REAL_INTERFACE="$candidate"; break; fi; done; fi',
     '  if [ -z "$REAL_INTERFACE" ] && [ -n "$ANCHOR_ADDRESS" ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q "inet $ANCHOR_ADDRESS"; then REAL_INTERFACE="$candidate"; break; fi; done; fi',
+    '  if [ -n "$REAL_INTERFACE" ]; then REAL_INTERFACE_STATE="$(ifconfig "$REAL_INTERFACE" 2>/dev/null || true)"; REAL_INTERFACE_OWNED=0; if [ -n "$PRIMARY_ADDRESS" ] && printf \'%s\\n\' "$REAL_INTERFACE_STATE" | grep -q "inet $PRIMARY_ADDRESS"; then REAL_INTERFACE_OWNED=1; fi; if [ "$REAL_INTERFACE_OWNED" != "1" ] && [ -n "$ANCHOR_ADDRESS" ] && printf \'%s\\n\' "$REAL_INTERFACE_STATE" | grep -q "inet $ANCHOR_ADDRESS"; then REAL_INTERFACE_OWNED=1; fi; if [ "$REAL_INTERFACE_OWNED" != "1" ]; then log_route "skipStaleRealInterfaceBeforeStop=$REAL_INTERFACE"; REAL_INTERFACE=""; fi; fi',
     ...dnsRestoreCommands.map((line) => `  ${line}`),
     ...endpointCleanupCommands.map((line) => `  ${line}`),
     '  if [ -n "$REAL_INTERFACE" ]; then',
@@ -2004,6 +2019,7 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     ...routeUpCommands,
     ...selfRouteUpCommands,
     ...dnsSetCommands,
+    ...finalStartValidationCommands,
     'wait "$WG_PID"',
     'exit "$?"'
   ].join('\n') + '\n';
@@ -2442,10 +2458,10 @@ function darwinStaleUserspaceInterfaceCleanupLines(
 }
 
 function darwinStaleInterfaceAddressAwkPattern(primaryAddress: string): string {
-  const patterns = ['inet 100[.](88|89|90|91)[.]'];
-  if (isIpv4(primaryAddress)) {
-    patterns.push(`inet ${escapeAwkRegex(primaryAddress)}([[:space:]]|$)`);
-  }
+  const patterns = isIpv4(primaryAddress)
+    ? [`inet ${escapeAwkRegex(primaryAddress)}([[:space:]]|$)`]
+    : [];
+  if (patterns.length === 0) return '/MX_WIREGUARD_NO_STALE_INTERFACE_MATCH/';
   return `/${patterns.join('|')}/`;
 }
 
