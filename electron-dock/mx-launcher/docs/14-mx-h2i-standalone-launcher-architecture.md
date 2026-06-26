@@ -601,8 +601,14 @@ DNS Routes 面板里编辑。V2 默认仍保留 k8s Caddy 作为可回退 backen
 - `Build Zone` 只生成 zone snapshot；只有 `Apply CoreDNS ConfigMap` 后才会更新
   `mx-dns/coredns` 并影响新的解析结果。本机 edge 会在 H2I ready 后拉取最新 DNS route。
 - macOS Wi-Fi/网络切换时，MX-H2I 会监控默认路由和 network service 签名变化；变化后先做
-  WireGuard probe/route recovery，再验证系统 PAC 与 dynamic split DNS。只有当前设置确实
-  丢失时才会触发一次 `network-change` apply，避免后台 route-refresh 周期反复弹权限框。
+  无权限 WireGuard probe，再验证系统 PAC 与 dynamic split DNS。网络变化不会自动执行
+  privileged apply；若 PAC/DNS 或 WG route 确实丢失，应通过明确的手动修复动作触发权限，
+  避免连接完成后或后台 route-refresh 周期反复弹权限框。
+- macOS 用户态 WireGuard 会把当前 routePlan 的 AllowedIPs 展开为数量受控的 `/20`
+  priority routes，并给 Domestic gateway、Internal control、DNS 等关键 IP 写 `/32`
+  priority routes，用来压过 Clash/Mihomo 等 198.18 TUN 的同前缀路由。多个 standalone
+  共存时，应尽量让 `10.89/10.90/10.91` 等产品/用户段不重叠；若两个实例声明同一大段，
+  系统路由仍以最后 apply 的实例为准。
 - `Dry-run Gateway` 同时渲染 Caddyfile 和 nginx include。`Apply Gateway` 默认读取
   Config Center 中的 gateway runtime config；首次 bootstrap/migrate 会按 env 默认 seed 为
   `Caddy 80`，Admin DNS 页面点击 `Host nginx` 会立即保存为数据库配置。保存 backend 不会

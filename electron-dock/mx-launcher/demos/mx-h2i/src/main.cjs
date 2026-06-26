@@ -667,7 +667,6 @@ function scheduleNetworkChangeRecovery(reason) {
 async function handleNetworkChange(reason) {
   const recoveryReason = `network-change-${reason || 'detected'}`;
   scheduleWireGuardRecovery(recoveryReason, [1500, 5000, 15_000], { allowPrivileged: false });
-  scheduleWireGuardRecovery(`${recoveryReason}-repair`, [9000], { allowPrivileged: true });
   if (runtime?.connection?.state !== 'connected') return;
   await refreshSystemDomainProxyAfterNetworkChange(recoveryReason);
 }
@@ -687,7 +686,11 @@ async function refreshSystemDomainProxyAfterNetworkChange(reason) {
       return verified;
     }
   }
-  const status = await ensureSystemDomainProxyForRuntime('network-change');
+  const status = currentSystemDomainProxyStatus('network-change', {
+    skipped: true,
+    skipReason: 'network-change-no-privileged-apply',
+    verified: false
+  });
   await recordSystemDomainProxyDiagnostics(status, `system domain proxy network change: ${reason}`);
   return status;
 }
@@ -1029,7 +1032,7 @@ function isBackgroundSystemDomainProxyReason(reason) {
 
 function shouldApplySystemDomainProxyForReason(reason) {
   const text = String(reason || '');
-  return text === 'post-connect' || text === 'network-change' || text.startsWith('manual');
+  return text === 'post-connect' || text.startsWith('manual');
 }
 
 function currentSystemDomainProxyStatus(reason, extra = {}) {
@@ -2175,8 +2178,8 @@ async function connectAndProbeWireGuardPath(mod, input) {
     expectedInterfaceName: status.realInterfaceName || status.interfaceName || null,
     expectedInterfaceAddresses: status.addresses || []
   });
-  const tunnelProofReady = result.ok === true || route.ok === true || wireGuardStatusCanUseInterfaceFallback(status);
-  const routeReady = route.ok === true || routeProbeCanFallbackToInternalApi(route, tunnelProofReady);
+  const tunnelProofReady = result.ok === true;
+  const routeReady = route.ok === true;
   const internalApi = routeReady
     ? await probeInternalApiViaOverlay(input.internalBaseUrl)
     : internalApiProbeBlockedByRoute(input.internalBaseUrl, targetIp, route);
@@ -2214,8 +2217,8 @@ async function probeWireGuardForConnection(input) {
       expectedInterfaceName,
       expectedInterfaceAddresses: status?.addresses || []
     });
-    const tunnelProofReady = status?.active === true || route.ok === true || wireGuardStatusCanUseInterfaceFallback(status);
-    const routeReady = route.ok === true || routeProbeCanFallbackToInternalApi(route, tunnelProofReady);
+    const tunnelProofReady = wireGuardStatusIsHealthy(status);
+    const routeReady = route.ok === true;
     const internalApi = routeReady
       ? await probeInternalApiViaOverlay(internalBaseUrl)
       : internalApiProbeBlockedByRoute(internalBaseUrl, targetIp, route);
@@ -2697,16 +2700,9 @@ function internalApiProbeBlockedByRoute(baseUrl, targetIp, route) {
   };
 }
 
-function routeProbeCanFallbackToInternalApi(route, tunnelReady) {
-  if (!tunnelReady || route?.ok === true) return false;
-  const error = `${route?.error || ''}\n${route?.raw || ''}`;
-  return /operation not permitted|not permitted|permission denied|requires elevated access/i.test(error);
-}
-
-function wireGuardStatusCanUseInterfaceFallback(status) {
-  const error = `${status?.error || ''}\n${status?.message || ''}`;
-  if (!/wg show requires elevated access|requires elevated access/i.test(error)) return false;
-  return Boolean(status?.ifconfig || status?.realInterfaceName || status?.interfaceName);
+function wireGuardStatusIsHealthy(status) {
+  const missingRoutes = Array.isArray(status?.missingRoutes) ? status.missingRoutes.length : 0;
+  return status?.active === true && missingRoutes === 0;
 }
 
 function internalApiHealthStatus(route, internalApi) {

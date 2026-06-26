@@ -55,6 +55,7 @@ export interface ElectronLauncherWireGuardPeer {
   publicKey: string;
   publicKeys: string[];
   routeCidrs: string[];
+  routePriorityCidrs: string[];
   routeProbe: ReturnType<typeof buildHdoRouteProbe>;
 }
 
@@ -92,6 +93,7 @@ export function prepareLauncherWireGuardPeer(input: ElectronLauncherWireGuardPee
     throw new Error('服务端下发的 WireGuard AllowedIPs 与本机路由完全重叠，已拒绝生成会覆盖本地网络的配置。');
   }
   const allowedIps = uniqueStrings(configPeers.flatMap((peer) => peer.allowedIps));
+  const routePriorityCidrs = launcherRoutePriorityCidrs(routePlan, routeCidrs);
 
   const dns = wireGuardDnsServers(routePlan.dnsServer);
   const splitDns = Boolean(dns.length && input.dnsDomains?.length);
@@ -101,6 +103,7 @@ export function prepareLauncherWireGuardPeer(input: ElectronLauncherWireGuardPee
     dns: splitDns ? undefined : dns,
     hdoDnsServers: splitDns ? dns : undefined,
     hdoDnsDomains: input.dnsDomains,
+    hdoRoutePriorityCidrs: routePriorityCidrs.length ? routePriorityCidrs : undefined,
     suppressInterfaceDns: splitDns,
     mtu: input.mtu,
     peers: configPeers
@@ -120,6 +123,7 @@ export function prepareLauncherWireGuardPeer(input: ElectronLauncherWireGuardPee
     publicKey: publicKeys[0] ?? '',
     publicKeys,
     routeCidrs,
+    routePriorityCidrs,
     routeProbe
   };
 }
@@ -212,6 +216,18 @@ function ipv4HostFromUrl(value: string | null | undefined): string | null {
   }
 }
 
+function launcherRoutePriorityCidrs(routePlan: LauncherRoutePlan, routeCidrs: string[]): string[] {
+  const hosts = uniqueStrings([
+    routePlan.domesticGatewayIp,
+    routePlan.internalControlIp,
+    ipv4HostFromUrl(routePlan.internalBaseUrl),
+    wireGuardDnsServerHost(routePlan.dnsServer)
+  ].filter((value): value is string => Boolean(value && isIpv4(value))));
+  return hosts
+    .filter((host) => routeCidrs.some((cidr) => cidrContainsHost(cidr, host)))
+    .map((host) => `${host}/32`);
+}
+
 function wireGuardDnsServers(value: string | null | undefined): string[] {
   const server = wireGuardDnsServerHost(value);
   return server ? [server] : [];
@@ -247,7 +263,8 @@ export async function connectLauncherWireGuardPeer(
     action
   });
   const status = await waitForLauncherWireGuardStatus(runtime, peer.configPath);
-  const ok = tunnel.ok === true && status?.active === true;
+  const missingRoutes = Array.isArray(status?.missingRoutes) ? status.missingRoutes.length : 0;
+  const ok = tunnel.ok === true && status?.active === true && missingRoutes === 0;
   return {
     ok,
     action,
@@ -379,7 +396,8 @@ export async function recoverLauncherWireGuardPeer(
     action: 'up'
   });
   const nextStatus = await waitForLauncherWireGuardStatus(runtime, configPath);
-  const ok = tunnel.ok === true && nextStatus?.active === true;
+  const nextMissingRouteCount = Array.isArray(nextStatus?.missingRoutes) ? nextStatus.missingRoutes.length : 0;
+  const ok = tunnel.ok === true && nextStatus?.active === true && nextMissingRouteCount === 0;
   return {
     ok,
     action: 'recover-up',
@@ -557,22 +575,35 @@ function routeInterfaceMatchesExpected(
   expectedAddresses: string[]
 ): boolean {
   if (!interfaceName) return false;
-  if (!expectedInterfaceName) return isWireGuardLikeInterface(interfaceName);
+  if (!expectedInterfaceName) {
+    return expectedAddresses.length > 0
+      ? interfaceHasExpectedAddress(interfaceName, expectedAddresses)
+      : isWireGuardLikeInterface(interfaceName);
+  }
   if (interfaceName === expectedInterfaceName) return true;
 
-  if (process.platform === 'darwin'
-    && /^utun\d+$/.test(interfaceName)
-    && /^utun\d+$/.test(expectedInterfaceName)) {
-    return true;
-  }
   if (/^wg/.test(interfaceName) && /^wg/.test(expectedInterfaceName)) {
     return true;
   }
-  return expectedAddresses.includes(interfaceName);
+  return interfaceHasExpectedAddress(interfaceName, expectedAddresses);
 }
 
 function isWireGuardLikeInterface(interfaceName: string): boolean {
   return /^utun\d+$/.test(interfaceName) || /^wg/.test(interfaceName);
+}
+
+function interfaceHasExpectedAddress(interfaceName: string, expectedAddresses: string[]): boolean {
+  const ips = expectedAddresses
+    .map((address) => address.split('/')[0]?.trim() ?? '')
+    .filter(isIpv4);
+  if (ips.length === 0) return false;
+  if (process.platform !== 'darwin' && process.platform !== 'linux') return false;
+  try {
+    const raw = execFileSync('ifconfig', [interfaceName], { encoding: 'utf8', timeout: 2000 });
+    return ips.some((ip) => raw.includes(`inet ${ip}`));
+  } catch {
+    return false;
+  }
 }
 
 function readRouteToTarget(targetIp: string): {
@@ -829,6 +860,13 @@ function parseCidr(value: string): { network: number; prefix: number; mask: numb
     prefix,
     mask
   };
+}
+
+function cidrContainsHost(cidr: string, host: string): boolean {
+  const parsed = parseCidr(cidr);
+  const ip = ipv4ToInt(host);
+  if (!parsed || ip === null) return false;
+  return ((ip & parsed.mask) >>> 0) === parsed.network;
 }
 
 function cidrFromAddressAndMask(address: string, maskText: string): string | null {

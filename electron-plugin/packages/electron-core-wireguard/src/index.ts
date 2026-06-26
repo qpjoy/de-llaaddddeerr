@@ -29,6 +29,7 @@ export interface WireGuardInterface {
   dns?: string[];
   hdoDnsServers?: string[];
   hdoDnsDomains?: string[];
+  hdoRoutePriorityCidrs?: string[];
   suppressInterfaceDns?: boolean;
   mtu?: number | null;
   peers: WireGuardPeer[];
@@ -273,7 +274,9 @@ export const HDO_MESH_ROUTE_CIDRS = [
   '100.91.0.0/16'
 ];
 
-const DARWIN_HDO_PRIORITY_ROUTE_PREFIX = 24;
+const DARWIN_HDO_PRIORITY_ROUTE_PREFIX = 20;
+const DARWIN_HDO_MIN_PRIORITY_ROUTE_PREFIX = 16;
+const DARWIN_HDO_MAX_PRIORITY_ROUTES_PER_CIDR = 64;
 
 export const HDO_COMMON_TRUSTED_PORTS: HdoSharedPort[] = [
   { label: 'SSH', port: 22, protocol: 'tcp', visibility: 'trusted-mesh' },
@@ -302,6 +305,9 @@ export function renderWireGuardInterface(config: WireGuardInterface): string {
   if (config.dns?.length && !config.suppressInterfaceDns) lines.push(`DNS = ${config.dns.join(', ')}`);
   if (config.hdoDnsServers?.length) lines.push(`# HDO DNS Servers = ${config.hdoDnsServers.join(', ')}`);
   if (config.hdoDnsDomains?.length) lines.push(`# HDO DNS Domains = ${config.hdoDnsDomains.join(', ')}`);
+  if (config.hdoRoutePriorityCidrs?.length) {
+    lines.push(`# HDO Route Priority CIDRs = ${config.hdoRoutePriorityCidrs.join(', ')}`);
+  }
   if (config.mtu) lines.push(`MTU = ${config.mtu}`);
 
   for (const peer of config.peers) {
@@ -883,7 +889,7 @@ export async function repairWireGuardTunnelRoutes(input: {
     };
   }
 
-  const routeInstallCidrs = darwinRouteInstallCidrs(profile.allowedIps);
+  const routeInstallCidrs = darwinRouteInstallCidrs(profile.allowedIps, profile.routePriorityCidrs);
   const routeCleanupCidrs = uniqueStrings([
     ...routeInstallCidrs,
     ...darwinStalePriorityRouteCidrs(profile.allowedIps)
@@ -1211,7 +1217,7 @@ export function getWireGuardTunnelStatus(input: {
     const rawDump = dump.stdout.trim();
     const peers = parseWireGuardDump(rawDump);
     const routes = detectInterfaceRoutes(realInterfaceName);
-    const routeProbes = darwinRouteProbeResults(profile.allowedIps, realInterfaceName);
+    const routeProbes = darwinRouteProbeResults(profile.allowedIps, realInterfaceName, profile.routePriorityCidrs);
     return {
       ...status,
       active: true,
@@ -1221,7 +1227,7 @@ export function getWireGuardTunnelStatus(input: {
       routeProbes,
       missingRoutes: routeProbes.length
         ? routeProbes.filter((probe) => !probe.ok).map((probe) => probe.cidr)
-        : missingInterfaceRoutes(input.runtime, profile.allowedIps, routes),
+        : missingInterfaceRoutes(input.runtime, profile.allowedIps, routes, profile.routePriorityCidrs),
       routeLogTail: readTextTail(status.routeLogPath),
       ifconfig: readInterfaceState(realInterfaceName)
     };
@@ -1229,7 +1235,7 @@ export function getWireGuardTunnelStatus(input: {
 
   const routes = detectInterfaceRoutes(realInterfaceName);
   const ifconfig = readInterfaceState(realInterfaceName);
-  const routeProbes = darwinRouteProbeResults(profile.allowedIps, realInterfaceName);
+  const routeProbes = darwinRouteProbeResults(profile.allowedIps, realInterfaceName, profile.routePriorityCidrs);
   const hasConfiguredAddress = Boolean(
     ifconfig && profile.addresses.some((address) => ifconfig.includes(`inet ${address.split('/')[0]}`))
   );
@@ -1243,7 +1249,7 @@ export function getWireGuardTunnelStatus(input: {
       routeProbes,
       missingRoutes: routeProbes.length
         ? routeProbes.filter((probe) => !probe.ok).map((probe) => probe.cidr)
-        : missingInterfaceRoutes(input.runtime, profile.allowedIps, routes),
+        : missingInterfaceRoutes(input.runtime, profile.allowedIps, routes, profile.routePriorityCidrs),
       routeLogTail: readTextTail(status.routeLogPath),
       ifconfig
     };
@@ -1256,7 +1262,7 @@ export function getWireGuardTunnelStatus(input: {
     routeProbes,
     missingRoutes: routeProbes.length
       ? routeProbes.filter((probe) => !probe.ok).map((probe) => probe.cidr)
-      : missingInterfaceRoutes(input.runtime, profile.allowedIps, routes),
+      : missingInterfaceRoutes(input.runtime, profile.allowedIps, routes, profile.routePriorityCidrs),
     routeLogTail: readTextTail(status.routeLogPath),
     ifconfig
   };
@@ -1417,13 +1423,19 @@ function cidrContains(parent: string, child: string): boolean {
   return parentRange.start <= childRange.start && parentRange.end >= childRange.end;
 }
 
-function priorityIpv4CidrAtPrefix(cidr: string, targetPrefix: number): string[] {
+function priorityIpv4CidrsAtPrefix(cidr: string, targetPrefix: number): string[] {
   const parsed = parseIpv4Cidr(normalizeCidr(cidr) ?? cidr);
   if (!parsed) return [];
   if (parsed.prefix >= targetPrefix) {
     return [normalizeCidr(`${intToIpv4(parsed.network)}/${parsed.prefix}`) ?? cidr];
   }
-  return [`${intToIpv4(parsed.network)}/${targetPrefix}`];
+  if (parsed.prefix < DARWIN_HDO_MIN_PRIORITY_ROUTE_PREFIX) return [];
+  const count = 2 ** (targetPrefix - parsed.prefix);
+  if (!Number.isFinite(count) || count <= 0 || count > DARWIN_HDO_MAX_PRIORITY_ROUTES_PER_CIDR) return [];
+  const size = 2 ** (32 - targetPrefix);
+  return Array.from({ length: count }, (_, index) =>
+    `${intToIpv4((parsed.network + index * size) >>> 0)}/${targetPrefix}`
+  );
 }
 
 export function normalizeCidr(value: string): string | null {
@@ -1507,7 +1519,7 @@ function buildDarwinUserspaceTunnelCommand(
   const nameFile = `/var/run/wireguard/${profile.interfaceName}.name`;
   const pidFile = `/var/run/wireguard/${profile.interfaceName}.pid`;
   const logFile = `/var/run/wireguard/${profile.interfaceName}.log`;
-  const routeInstallCidrs = darwinRouteInstallCidrs(profile.allowedIps);
+  const routeInstallCidrs = darwinRouteInstallCidrs(profile.allowedIps, profile.routePriorityCidrs);
   const routeCleanupCidrs = uniqueStrings([
     ...profile.allowedIps.map((cidr) => normalizeCidr(cidr) ?? cidr),
     ...routeInstallCidrs,
@@ -1594,6 +1606,9 @@ function buildDarwinUserspaceTunnelCommand(
     `REAL_INTERFACE="$(cat ${shellQuote(nameFile)} 2>/dev/null || true)"`,
     `if [ -z "$REAL_INTERFACE" ]; then AFTER_INTERFACES="$(${shellQuote(wg)} show interfaces 2>/dev/null || true)"; for candidate in $AFTER_INTERFACES; do case " $BEFORE_INTERFACES " in *" $candidate "*) ;; *) REAL_INTERFACE="$candidate"; break ;; esac; done; fi`,
     '[ -n "$REAL_INTERFACE" ]',
+    'case " $BEFORE_INTERFACES " in *" $REAL_INTERFACE "*) echo "wireguard-go returned an existing interface: $REAL_INTERFACE" >&2; exit 1 ;; esac',
+    `WIREGUARD_GO_PID="$(cat ${shellQuote(pidFile)} 2>/dev/null || true)"`,
+    `if [ -z "$WIREGUARD_GO_PID" ] || ! kill -0 "$WIREGUARD_GO_PID" >/dev/null 2>&1; then echo "wireguard-go exited before interface configuration" >&2; tail -n 40 ${shellQuote(logFile)} >&2 2>/dev/null || true; exit 1; fi`,
     `echo ${shellQuote('realInterface=')}"$REAL_INTERFACE" >> "$ROUTE_LOG" 2>&1`,
     `echo ${shellQuote(`anchorAddress=${anchorIp}`)} >> "$ROUTE_LOG" 2>&1`,
     `echo "$REAL_INTERFACE" > ${shellQuote(nameFile)}`,
@@ -1601,6 +1616,9 @@ function buildDarwinUserspaceTunnelCommand(
     `${shellQuote(wg)} setconf "$REAL_INTERFACE" ${shellQuote(profile.setConfigPath)}`,
     'ifconfig "$REAL_INTERFACE" up',
     ...addressCommands,
+    ...(primaryAddress ? [
+      `ifconfig "$REAL_INTERFACE" 2>/dev/null | grep -q ${shellQuote(`inet ${primaryAddress}`)} || { echo "wireguard interface missing primary address ${primaryAddress}" >&2; ifconfig "$REAL_INTERFACE" >&2 2>/dev/null || true; exit 1; }`
+    ] : []),
     anchorUpCommand,
     ...routeDownCommands,
     ...routeUpCommands,
@@ -1631,6 +1649,7 @@ type DarwinUserspaceProfile = {
   interfaceName: string;
   addresses: string[];
   allowedIps: string[];
+  routePriorityCidrs: string[];
   dnsServers: string[];
   dnsDomains: string[];
   endpointHosts: string[];
@@ -1655,6 +1674,7 @@ function darwinUserspaceProfile(configPath: string, writeSetConfig: boolean): Da
     interfaceName: parsed.interfaceName,
     addresses: parsed.addresses,
     allowedIps: parsed.allowedIps,
+    routePriorityCidrs: parsed.routePriorityCidrs,
     dnsServers: parsed.dnsServers,
     dnsDomains: parsed.dnsDomains,
     endpointHosts: parsed.endpointHosts,
@@ -1868,7 +1888,7 @@ function darwinLaunchDaemonUninstallShell(assets: DarwinLaunchDaemonAssets): str
 
 function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
   const profile = assets.profile;
-  const routeInstallCidrs = darwinRouteInstallCidrs(profile.allowedIps);
+  const routeInstallCidrs = darwinRouteInstallCidrs(profile.allowedIps, profile.routePriorityCidrs);
   const routeCleanupCidrs = uniqueStrings([
     ...profile.allowedIps.map((cidr) => normalizeCidr(cidr) ?? cidr),
     ...routeInstallCidrs,
@@ -1967,6 +1987,8 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     'REAL_INTERFACE="$(cat "$NAME_FILE" 2>/dev/null || true)"',
     'if [ -z "$REAL_INTERFACE" ]; then AFTER_INTERFACES="$("$WG" show interfaces 2>/dev/null || true)"; for candidate in $AFTER_INTERFACES; do case " $BEFORE_INTERFACES " in *" $candidate "*) ;; *) REAL_INTERFACE="$candidate"; break ;; esac; done; fi',
     '[ -n "$REAL_INTERFACE" ]',
+    'case " $BEFORE_INTERFACES " in *" $REAL_INTERFACE "*) echo "wireguard-go returned an existing interface: $REAL_INTERFACE" >&2; exit 1 ;; esac',
+    'if [ -z "$WG_PID" ] || ! kill -0 "$WG_PID" >/dev/null 2>&1; then echo "wireguard-go exited before interface configuration" >&2; tail -n 40 "$WG_GO_LOG" >&2 2>/dev/null || true; exit 1; fi',
     'echo "$REAL_INTERFACE" > "$NAME_FILE"',
     'chmod 644 "$NAME_FILE" >/dev/null 2>&1 || true',
     'log_route "realInterface=$REAL_INTERFACE"',
@@ -1974,6 +1996,9 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     '"$WG" setconf "$REAL_INTERFACE" "$SETCONF"',
     'ifconfig "$REAL_INTERFACE" up',
     ...addressCommands,
+    ...(primaryAddress ? [
+      `ifconfig "$REAL_INTERFACE" 2>/dev/null | grep -q ${shellQuote(`inet ${primaryAddress}`)} || { echo "wireguard interface missing primary address ${primaryAddress}" >&2; ifconfig "$REAL_INTERFACE" >&2 2>/dev/null || true; exit 1; }`
+    ] : []),
     anchorUpCommand,
     ...routeDownCommands,
     ...routeUpCommands,
@@ -2031,9 +2056,9 @@ function xmlEscape(value: string): string {
     .replace(/'/g, '&apos;');
 }
 
-function darwinRouteInstallCidrs(allowedIps: string[]): string[] {
+function darwinRouteInstallCidrs(allowedIps: string[], priorityCidrs: string[] = []): string[] {
   return uniqueStrings([
-    ...darwinCriticalHdoRouteCidrs(allowedIps),
+    ...darwinCriticalHdoRouteCidrs(allowedIps, priorityCidrs),
     ...allowedIps.map((cidr) => normalizeCidr(cidr) ?? cidr)
   ]);
 }
@@ -2430,9 +2455,10 @@ function escapeAwkRegex(value: string): string {
 
 function darwinRouteProbeResults(
   allowedIps: string[],
-  expectedInterface: string
+  expectedInterface: string,
+  priorityCidrs: string[] = []
 ): WireGuardRouteProbeStatus[] {
-  return darwinRequiredHealthyRouteCidrs(allowedIps)
+  return darwinRequiredHealthyRouteCidrs(allowedIps, priorityCidrs)
     .map((cidr) => normalizeCidr(cidr) ?? cidr)
     .filter((cidr) => cidr.includes('/'))
     .flatMap((cidr): WireGuardRouteProbeStatus[] => {
@@ -2483,32 +2509,35 @@ function readTextTail(path: string | null, maxBytes = 12000): string | null {
   }
 }
 
-function darwinCriticalHdoRouteCidrs(allowedIps: string[]): string[] {
+function darwinCriticalHdoRouteCidrs(allowedIps: string[], priorityCidrs: string[] = []): string[] {
   const normalizedAllowed = allowedIps
     .map((cidr) => normalizeCidr(cidr) ?? cidr)
     .filter((cidr) => cidr.includes('/'));
   if (normalizedAllowed.length === 0) return [];
 
-  // macOS/Clash TUN route priority is longest-prefix first; add the active
-  // HDO base /24s so common mesh traffic stays on the WireGuard utun.
-  return uniqueStrings(HDO_MESH_ROUTE_CIDRS.flatMap((hdoCidr) => {
-    const priorityCidrs = priorityIpv4CidrAtPrefix(hdoCidr, DARWIN_HDO_PRIORITY_ROUTE_PREFIX);
-    return priorityCidrs.filter((priorityCidr) =>
-      normalizedAllowed.some((allowedCidr) => cidrContains(allowedCidr, priorityCidr))
-    );
-  }));
+  // macOS and Clash/Mihomo TUN routing use longest-prefix wins. Expand overlay
+  // /16s into a bounded set of /20 routes and add explicit /32 control-plane
+  // targets so V2 routes stay on WireGuard even when another TUN owns 10.x/16.
+  const dynamicPriorityCidrs = normalizedAllowed.flatMap((cidr) =>
+    priorityIpv4CidrsAtPrefix(cidr, DARWIN_HDO_PRIORITY_ROUTE_PREFIX)
+  );
+  const explicitPriorityCidrs = priorityCidrs
+    .map((cidr) => normalizeCidr(cidr) ?? cidr)
+    .filter((cidr) => cidr.includes('/'))
+    .filter((cidr) => normalizedAllowed.some((allowedCidr) => cidrContains(allowedCidr, cidr)));
+  return uniqueStrings([...dynamicPriorityCidrs, ...explicitPriorityCidrs]);
 }
 
-function darwinRequiredHealthyRouteCidrs(allowedIps: string[]): string[] {
-  const priorityCidrs = darwinCriticalHdoRouteCidrs(allowedIps);
+function darwinRequiredHealthyRouteCidrs(allowedIps: string[], priorityCidrs: string[] = []): string[] {
+  const criticalCidrs = darwinCriticalHdoRouteCidrs(allowedIps, priorityCidrs);
   const normalizedAllowed = allowedIps
     .map((cidr) => normalizeCidr(cidr) ?? cidr)
     .filter((cidr) => cidr.includes('/'));
   return uniqueStrings([
     ...normalizedAllowed.filter((allowedCidr) =>
-      !priorityCidrs.some((priorityCidr) => cidrContains(allowedCidr, priorityCidr))
+      !criticalCidrs.some((priorityCidr) => cidrContains(allowedCidr, priorityCidr))
     ),
-    ...priorityCidrs
+    ...criticalCidrs
   ]);
 }
 
@@ -2535,6 +2564,7 @@ function parseWireGuardProfile(configPath: string): {
   interfaceName: string;
   addresses: string[];
   allowedIps: string[];
+  routePriorityCidrs: string[];
   dnsServers: string[];
   dnsDomains: string[];
   endpointHosts: string[];
@@ -2544,6 +2574,7 @@ function parseWireGuardProfile(configPath: string): {
   const interfaceName = wireGuardInterfaceName(configPath);
   const addresses: string[] = [];
   const allowedIps: string[] = [];
+  const routePriorityCidrs: string[] = [];
   const dnsServers: string[] = [];
   const dnsDomains: string[] = [];
   const endpoints: string[] = [];
@@ -2570,6 +2601,10 @@ function parseWireGuardProfile(configPath: string): {
       dnsDomains.push(...valueList(line).map(normalizeDnsDomain).filter(isString));
       continue;
     }
+    if (section === 'interface' && /^#\s*HDO\s+Route\s+Priority\s+CIDRs\s*=/i.test(trimmed)) {
+      routePriorityCidrs.push(...valueList(line).map((cidr) => normalizeCidr(cidr) ?? cidr));
+      continue;
+    }
     if (section === 'peer' && key === 'allowedips') {
       allowedIps.push(...valueList(line));
     }
@@ -2587,6 +2622,7 @@ function parseWireGuardProfile(configPath: string): {
     interfaceName,
     addresses,
     allowedIps: uniqueStrings(allowedIps),
+    routePriorityCidrs: uniqueStrings(routePriorityCidrs),
     dnsServers: uniqueStrings(dnsServers),
     dnsDomains: uniqueStrings(dnsDomains),
     endpointHosts: uniqueStrings(endpoints.map(wireGuardEndpointHost).filter(isString)),
@@ -2629,7 +2665,9 @@ function resolveWireGuardRealInterface(
       if (existsSync(nameFile)) {
         const value = readFileSync(nameFile, 'utf8').trim();
         const state = value ? readInterfaceState(value) : null;
-        if (value && state && interfaceStateIsUp(state)) return value;
+        if (value && state && interfaceStateIsUp(state) && interfaceHasAnyConfiguredAddress(value, addresses)) {
+          return value;
+        }
       }
     } catch {
       // Older launches wrote this file as root-only; discover the utun by address instead.
@@ -2724,13 +2762,14 @@ function detectInterfaceRoutes(interfaceName: string): string[] {
 function missingInterfaceRoutes(
   runtime: WireGuardConnectionRuntimeStatus,
   allowedIps: string[],
-  routes: string[]
+  routes: string[],
+  priorityCidrs: string[] = []
 ): string[] {
   if (runtime.platform !== 'darwin') return [];
   const routeCidrs = routes
     .map((line) => routeDestinationToCidr(line.trim().split(/\s+/)[0]))
     .filter(isString);
-  const requiredCidrs = darwinRequiredHealthyRouteCidrs(allowedIps)
+  const requiredCidrs = darwinRequiredHealthyRouteCidrs(allowedIps, priorityCidrs)
     .map((cidr) => normalizeCidr(cidr) ?? cidr)
     .filter((cidr) => cidr.includes('/'));
   return requiredCidrs.filter((required) =>
