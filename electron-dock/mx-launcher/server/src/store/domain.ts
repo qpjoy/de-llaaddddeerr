@@ -1357,7 +1357,7 @@ function nginxAppServerBlocks(port: number, routes: DnsReverseProxyRoute[]): str
   return [
     ...routeBlocks,
     'server {',
-    `  listen ${port} default_server;`,
+    `  listen ${port};`,
     '  server_name _;',
     '  add_header X-MX-Gateway internal-host-nginx always;',
     '  return 404 "MX Internal gateway route not found\\n";',

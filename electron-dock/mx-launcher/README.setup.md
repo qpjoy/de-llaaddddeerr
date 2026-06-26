@@ -15,6 +15,11 @@ cd ~/mx/workspace/de-llaaddddeerr/electron-dock/mx-launcher
 kubeadm reset -f
 systemctl restart containerd kubelet
 
+# 安装host-runner
+bash scripts/manage.sh ops site-slot native-host-runner install 19190
+curl -sS http://127.0.0.1:19190/capabilities
+curl -sS http://192.168.31.121:19190/capabilities
+
 bash scripts/install-k8s-centos.sh \
   --advertise-address 192.168.31.121 \
   --allow-cgroup-v1 \

@@ -613,7 +613,8 @@ DNS Routes 面板里编辑。V2 默认仍保留 k8s Caddy 作为可回退 backen
   `Host nginx` 不要求 `.env` 预先写 `GATEWAY_HOST_NGINX_APPLY_ENABLED=true`。受控文件默认是
   `/etc/nginx/conf.d/mx-gateway.generated.conf`；旧的手工
   `/etc/nginx/conf.d/mx-launcher.conf` 应在 Admin apply 成功后移除，避免两个 server block
-  同时匹配 `mx.cn` / `*.mx.cn`。
+  同时匹配 `mx.cn` / `*.mx.cn`。生成配置只使用普通 `listen 80`，不会声明
+  `default_server`，以免和发行版自带 `/etc/nginx/nginx.conf` 默认站点冲突。
 - k8s bootstrap ConfigMap 默认带 `GATEWAY_APPLY_BACKEND=k8s` 和 host-runner fallback/ensure
   开关，Admin 可以生成 `mx-internal-host-runner` DaemonSet 并通过
   `mx-internal-host-runner.mx-internal-shadow.svc.cluster.local:19190` 访问。这个 k8s fallback
