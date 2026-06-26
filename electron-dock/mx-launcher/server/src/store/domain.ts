@@ -29,6 +29,9 @@ import type {
   GatewayConfigMapManifest,
   GatewayConfigMapSyncInput,
   GatewayConfigMapSyncResult,
+  GatewayRuntimeBackend,
+  GatewayRuntimeConfig,
+  GatewayRuntimeConfigInput,
   IssueTokenInput,
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
@@ -102,6 +105,8 @@ import type {
   TestRun,
   UpdatePolicyKind
 } from '../types.js';
+
+export const GATEWAY_RUNTIME_CONFIG_ID = 'gateway_runtime_default';
 
 const USER_SCOPES = [
   'auth.read',
@@ -1052,6 +1057,82 @@ export function evaluateCoreDnsConfigMapApplyGate(
     };
   }
   return { allowed: true, serverDryRun, blockedReason: null };
+}
+
+export function builtinGatewayRuntimeConfig(
+  config: RuntimeConfig,
+  now: string = new Date().toISOString(),
+  actor = 'runtime-default'
+): GatewayRuntimeConfig {
+  return {
+    configId: GATEWAY_RUNTIME_CONFIG_ID,
+    environment: config.environment,
+    siteId: config.siteId,
+    backend: config.gatewayApplyBackend,
+    hostNginxApplyEnabled: config.gatewayHostNginxApplyEnabled,
+    hostNginxConfigPath: config.gatewayHostNginxConfigPath,
+    hostNginxInternalApiUpstream: config.gatewayHostNginxInternalApiUpstream,
+    gatewayAppPort: config.gatewayAppPort,
+    createdBy: actor,
+    createdAt: now,
+    updatedBy: actor,
+    updatedAt: now,
+    requestId: null
+  };
+}
+
+export function buildGatewayRuntimeConfig(
+  config: RuntimeConfig,
+  input: GatewayRuntimeConfigInput,
+  previous: GatewayRuntimeConfig | null,
+  now: string = new Date().toISOString()
+): GatewayRuntimeConfig {
+  const updatedBy = input.requestedBy?.trim() || previous?.updatedBy || 'config-center';
+  const base = previous ?? builtinGatewayRuntimeConfig(config, now, updatedBy);
+  const backend = gatewayRuntimeBackend(input.backend) ?? base.backend;
+  return {
+    ...base,
+    environment: config.environment,
+    siteId: config.siteId,
+    backend,
+    hostNginxApplyEnabled: config.gatewayHostNginxApplyEnabled || backend === 'host-nginx',
+    hostNginxConfigPath: input.hostNginxConfigPath?.trim()
+      || base.hostNginxConfigPath
+      || config.gatewayHostNginxConfigPath,
+    hostNginxInternalApiUpstream: gatewayRuntimeOptionalString(
+      input.hostNginxInternalApiUpstream,
+      base.hostNginxInternalApiUpstream ?? config.gatewayHostNginxInternalApiUpstream
+    ),
+    gatewayAppPort: Number.isFinite(config.gatewayAppPort) ? config.gatewayAppPort : base.gatewayAppPort,
+    createdBy: previous?.createdBy || base.createdBy || updatedBy,
+    createdAt: previous?.createdAt || base.createdAt || now,
+    updatedBy,
+    updatedAt: now,
+    requestId: input.requestId?.trim() || null
+  };
+}
+
+export function gatewayRuntimeConfigRequestInput<T extends GatewayConfigMapSyncInput>(
+  input: T,
+  runtime: GatewayRuntimeConfig
+): T {
+  return {
+    ...input,
+    gatewayApplyBackend: input.gatewayApplyBackend ?? runtime.backend,
+    gatewayHostNginxConfigPath: input.gatewayHostNginxConfigPath ?? runtime.hostNginxConfigPath,
+    gatewayHostNginxInternalApiUpstream: input.gatewayHostNginxInternalApiUpstream
+      ?? runtime.hostNginxInternalApiUpstream
+  } as T;
+}
+
+function gatewayRuntimeBackend(value: GatewayRuntimeConfigInput['backend']): GatewayRuntimeBackend | null {
+  return value === 'host-nginx' || value === 'k8s' ? value : null;
+}
+
+function gatewayRuntimeOptionalString(value: string | null | undefined, fallback: string | null): string | null {
+  if (value === null) return null;
+  if (typeof value === 'string') return value.trim() || null;
+  return fallback;
 }
 
 export function renderGatewayConfigMap(

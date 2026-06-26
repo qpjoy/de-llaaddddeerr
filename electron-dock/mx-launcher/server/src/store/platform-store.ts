@@ -27,6 +27,8 @@ import type {
   GatewayConfigMapApplyResult,
   GatewayConfigMapSyncInput,
   GatewayConfigMapSyncResult,
+  GatewayRuntimeConfig,
+  GatewayRuntimeConfigInput,
   IdentityLinkRequest,
   IssueTokenInput,
   LauncherNetworkLease,
@@ -248,6 +250,8 @@ export interface PlatformStore {
   deleteDnsReverseProxyRoute(routeId: string): MaybePromise<boolean>;
   buildDnsZoneSnapshot(input: DnsZoneSnapshotInput): MaybePromise<DnsZoneSnapshot>;
   getDnsZoneSnapshot(snapshotId: string): MaybePromise<DnsZoneSnapshot | null>;
+  getGatewayRuntimeConfig(): MaybePromise<GatewayRuntimeConfig>;
+  upsertGatewayRuntimeConfig(input: GatewayRuntimeConfigInput): MaybePromise<GatewayRuntimeConfig>;
   syncCoreDnsConfigMap(input: CoreDnsConfigMapSyncInput): MaybePromise<CoreDnsConfigMapSyncResult>;
   applyCoreDnsConfigMap(input: CoreDnsConfigMapApplyInput): MaybePromise<CoreDnsConfigMapApplyResult>;
   syncGatewayConfigMap(input: GatewayConfigMapSyncInput): MaybePromise<GatewayConfigMapSyncResult>;

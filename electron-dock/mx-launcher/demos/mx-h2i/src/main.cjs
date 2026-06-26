@@ -68,6 +68,7 @@ const wireGuardRecoveryTimers = [];
 let systemDomainProxyManager = null;
 let systemDomainProxyRefreshInterval = null;
 let systemDomainProxyRefreshInFlight = false;
+let systemDomainProxyEnsureInFlight = null;
 let lastSystemDomainProxySignature = null;
 let lastSystemDomainProxyPolicySignature = null;
 let lastSystemDomainProxyAuthorizationCanceledSignature = null;
@@ -624,6 +625,24 @@ async function initializeSystemDomainProxy() {
 }
 
 async function ensureSystemDomainProxyForRuntime(reason = 'manual') {
+  if (systemDomainProxyEnsureInFlight) {
+    const status = await systemDomainProxyEnsureInFlight;
+    return status && typeof status === 'object'
+      ? { ...status, reason, coalesced: true }
+      : status;
+  }
+  const pending = ensureSystemDomainProxyForRuntimeOnce(reason);
+  systemDomainProxyEnsureInFlight = pending;
+  try {
+    return await pending;
+  } finally {
+    if (systemDomainProxyEnsureInFlight === pending) {
+      systemDomainProxyEnsureInFlight = null;
+    }
+  }
+}
+
+async function ensureSystemDomainProxyForRuntimeOnce(reason = 'manual') {
   if (!systemDomainProxyManager) return null;
   if (runtime?.connection?.state !== 'connected') {
     return disableSystemDomainProxyForRuntime(`${reason}-not-connected`);

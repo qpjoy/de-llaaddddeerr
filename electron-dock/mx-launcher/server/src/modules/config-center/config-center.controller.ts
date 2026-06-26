@@ -8,6 +8,7 @@ import type {
   AwxProviderConfigInput,
   AwxProviderSyncPlanInput,
   ConfigPolicySnapshotInput,
+  GatewayRuntimeConfigInput,
   RuntimeConfig,
   RuntimeFeaturePolicy,
   RuntimeFeaturePolicyInput,
@@ -51,9 +52,20 @@ export class ConfigCenterController {
         'domestic-wg-secret.manage',
         'domestic-wg-secret.generate',
         'domestic-wg-secret.materializer-env',
+        'gateway-runtime-config.manage',
         'runtime-feature-policy.manage'
       ]
     };
+  }
+
+  @Get('internal/v1/config-center/gateway-runtime-config')
+  async getGatewayRuntimeConfig() {
+    return { config: await this.store.getGatewayRuntimeConfig() };
+  }
+
+  @Post('internal/v1/config-center/gateway-runtime-config')
+  async upsertGatewayRuntimeConfig(@Body() rawBody: unknown) {
+    return { config: await this.store.upsertGatewayRuntimeConfig(toGatewayRuntimeConfigInput(asRecord(rawBody))) };
   }
 
   @Get('internal/v1/config-center/runtime-feature-policies')
@@ -322,6 +334,23 @@ function toSnapshotInput(body: Record<string, unknown>): ConfigPolicySnapshotInp
     audience: nullableString(body.audience),
     requestId: nullableString(body.requestId)
   };
+}
+
+function toGatewayRuntimeConfigInput(body: Record<string, unknown>): GatewayRuntimeConfigInput {
+  const input: GatewayRuntimeConfigInput = {
+    backend: nullableString(body.backend) ?? nullableString(body.gatewayApplyBackend),
+    requestedBy: nullableString(body.requestedBy),
+    requestId: nullableString(body.requestId)
+  };
+  if ('hostNginxConfigPath' in body || 'gatewayHostNginxConfigPath' in body) {
+    input.hostNginxConfigPath = nullableString(body.hostNginxConfigPath)
+      ?? nullableString(body.gatewayHostNginxConfigPath);
+  }
+  if ('hostNginxInternalApiUpstream' in body || 'gatewayHostNginxInternalApiUpstream' in body) {
+    input.hostNginxInternalApiUpstream = nullableString(body.hostNginxInternalApiUpstream)
+      ?? nullableString(body.gatewayHostNginxInternalApiUpstream);
+  }
+  return input;
 }
 
 function toSshProfileInput(body: Record<string, unknown>): SiteSlotSshProfileInput {

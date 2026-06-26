@@ -1,5 +1,6 @@
 export type StoreDriver = 'memory' | 'postgres';
 export type SiteRole = 'internal' | 'domestic' | 'oversea' | 'h-endpoint-dev';
+export type GatewayRuntimeBackend = 'k8s' | 'host-nginx';
 
 export interface RuntimeConfig {
   environment: string;
@@ -21,7 +22,7 @@ export interface RuntimeConfig {
   gatewayK8sApplyEnabled: boolean;
   gatewayK8sAllowedNamespace: string;
   gatewayK8sAllowedConfigMapName: string;
-  gatewayApplyBackend: 'k8s' | 'host-nginx';
+  gatewayApplyBackend: GatewayRuntimeBackend;
   gatewayHostNginxApplyEnabled: boolean;
   gatewayHostNginxConfigPath: string;
   gatewayHostNginxInternalApiUpstream: string | null;
@@ -2251,6 +2252,30 @@ export interface GatewayConfigMapSyncInput {
   gatewayHostNginxInternalApiUpstream?: string | null;
   mode?: 'dry-run' | 'shadow-apply' | null;
   requestId?: string | null;
+}
+
+export interface GatewayRuntimeConfigInput {
+  backend?: GatewayRuntimeBackend | string | null;
+  hostNginxConfigPath?: string | null;
+  hostNginxInternalApiUpstream?: string | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface GatewayRuntimeConfig {
+  configId: string;
+  environment: string;
+  siteId: string;
+  backend: GatewayRuntimeBackend;
+  hostNginxApplyEnabled: boolean;
+  hostNginxConfigPath: string;
+  hostNginxInternalApiUpstream: string | null;
+  gatewayAppPort: number;
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string;
+  updatedAt: string;
+  requestId: string | null;
 }
 
 export interface GatewayConfigMapManifest {

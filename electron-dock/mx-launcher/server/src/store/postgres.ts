@@ -33,6 +33,8 @@ import type {
   GatewayConfigMapApplyResult,
   GatewayConfigMapSyncInput,
   GatewayConfigMapSyncResult,
+  GatewayRuntimeConfig,
+  GatewayRuntimeConfigInput,
   IdentityLinkRequest,
   IssueTokenInput,
   LauncherNetworkLease,
@@ -120,6 +122,9 @@ import {
   buildAwxProviderConfig,
   buildReleaseManagementPlan,
   buildRuntimeFeaturePolicy,
+  GATEWAY_RUNTIME_CONFIG_ID,
+  builtinGatewayRuntimeConfig,
+  buildGatewayRuntimeConfig,
   buildDnsReverseProxyRoute,
   attachDomesticWireGuardRefreshHint,
   buildLauncherNetworkMihomoSite,
@@ -161,6 +166,7 @@ import {
   createUserPrincipalFromRecord,
   evaluateCoreDnsConfigMapApplyGate,
   evaluateGatewayConfigMapApplyGate,
+  gatewayRuntimeConfigRequestInput,
   gatewayRuntimeConfigForInput,
   evaluateSdkGatewayRoute,
   evaluateDnsPolicy,
@@ -206,6 +212,7 @@ type RecordKind =
   | 'dns-policy'
   | 'dns-reverse-proxy-route'
   | 'dns-zone-snapshot'
+  | 'gateway-runtime-config'
   | 'coredns-configmap-sync'
   | 'coredns-configmap-apply'
   | 'gateway-configmap-sync'
@@ -250,6 +257,7 @@ export class PostgresStore implements PlatformStore {
     await store.registerBuiltinApps();
     await store.registerBuiltinProductNetworks();
     await store.registerBuiltinDns();
+    await store.registerBuiltinGatewayRuntimeConfig();
     await store.registerBuiltinDomesticRuntimeConfigs();
     return store;
   }
@@ -1875,6 +1883,28 @@ export class PostgresStore implements PlatformStore {
     return this.getRecord<DnsZoneSnapshot>('dns-zone-snapshot', snapshotId);
   }
 
+  async getGatewayRuntimeConfig(): Promise<GatewayRuntimeConfig> {
+    return await this.getRecord<GatewayRuntimeConfig>('gateway-runtime-config', GATEWAY_RUNTIME_CONFIG_ID)
+      ?? builtinGatewayRuntimeConfig(this.config);
+  }
+
+  async upsertGatewayRuntimeConfig(input: GatewayRuntimeConfigInput): Promise<GatewayRuntimeConfig> {
+    const previous = await this.getRecord<GatewayRuntimeConfig>('gateway-runtime-config', GATEWAY_RUNTIME_CONFIG_ID);
+    const runtimeConfig = buildGatewayRuntimeConfig(this.config, input, previous);
+    await this.saveRecord('gateway-runtime-config', runtimeConfig.configId, runtimeConfig, runtimeConfig.siteId);
+    await this.recordAudit({
+      eventType: 'config.gateway_runtime.saved',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        backend: runtimeConfig.backend,
+        hostNginxConfigPath: runtimeConfig.hostNginxConfigPath,
+        hostNginxInternalApiUpstream: runtimeConfig.hostNginxInternalApiUpstream
+      }
+    });
+    return runtimeConfig;
+  }
+
   async syncCoreDnsConfigMap(input: CoreDnsConfigMapSyncInput): Promise<CoreDnsConfigMapSyncResult> {
     const snapshot = input.snapshotId
       ? required(await this.getDnsZoneSnapshot(input.snapshotId), `DNS zone snapshot not found: ${input.snapshotId}`)
@@ -1951,17 +1981,18 @@ export class PostgresStore implements PlatformStore {
   }
 
   async syncGatewayConfigMap(input: GatewayConfigMapSyncInput): Promise<GatewayConfigMapSyncResult> {
+    const effectiveInput = gatewayRuntimeConfigRequestInput(input, await this.getGatewayRuntimeConfig());
     const result = renderGatewayConfigMap(
       this.config,
       await this.listDnsReverseProxyRoutes(),
-      input,
+      effectiveInput,
       `gatewaysync_${randomUUID()}`
     );
     await this.saveRecord('gateway-configmap-sync', result.syncId, result, this.config.siteId);
     await this.recordAudit({
       eventType: 'dns.gateway_configmap.sync_recorded',
       actorKind: 'dns-control',
-      requestId: input.requestId ?? null,
+      requestId: effectiveInput.requestId ?? null,
       metadata: {
         syncId: result.syncId,
         mode: result.mode,
@@ -1976,9 +2007,10 @@ export class PostgresStore implements PlatformStore {
   }
 
   async applyGatewayConfigMap(input: GatewayConfigMapApplyInput): Promise<GatewayConfigMapApplyResult> {
-    const sync = await this.syncGatewayConfigMap({ ...input, mode: 'shadow-apply' });
-    const gatewayConfig = gatewayRuntimeConfigForInput(this.config, input);
-    const gate = evaluateGatewayConfigMapApplyGate(this.config, sync, input);
+    const effectiveInput = gatewayRuntimeConfigRequestInput(input, await this.getGatewayRuntimeConfig());
+    const sync = await this.syncGatewayConfigMap({ ...effectiveInput, mode: 'shadow-apply' });
+    const gatewayConfig = gatewayRuntimeConfigForInput(this.config, effectiveInput);
+    const gate = evaluateGatewayConfigMapApplyGate(this.config, sync, effectiveInput);
     const issuedAt = new Date().toISOString();
     const outcome = gate.allowed
       ? gatewayConfig.gatewayApplyBackend === 'host-nginx'
@@ -1987,7 +2019,7 @@ export class PostgresStore implements PlatformStore {
             nginxConfig: sync.manifest.data['nginx.conf'],
             routesMetadata: sync.manifest.data['mx-gateway-routes.json'],
             serverDryRun: gate.serverDryRun,
-            requestId: input.requestId ?? null
+            requestId: effectiveInput.requestId ?? null
           })
         : await applyGatewayConfigMapToKubernetes(sync.manifest, gate.serverDryRun)
       : {
@@ -2020,7 +2052,7 @@ export class PostgresStore implements PlatformStore {
     await this.recordAudit({
       eventType: 'dns.gateway_configmap.apply_evaluated',
       actorKind: 'dns-control',
-      requestId: input.requestId ?? null,
+      requestId: effectiveInput.requestId ?? null,
       metadata: {
         applyId: result.applyId,
         syncId: result.syncId,
@@ -3108,6 +3140,13 @@ export class PostgresStore implements PlatformStore {
         return this.saveRecord('dns-reverse-proxy-route', route.routeId, route, this.config.siteId);
       })
     ]);
+  }
+
+  private async registerBuiltinGatewayRuntimeConfig(): Promise<void> {
+    const existing = await this.getRecord<GatewayRuntimeConfig>('gateway-runtime-config', GATEWAY_RUNTIME_CONFIG_ID);
+    if (existing) return;
+    const runtimeConfig = builtinGatewayRuntimeConfig(this.config, new Date().toISOString(), 'pg-seed');
+    await this.saveRecord('gateway-runtime-config', runtimeConfig.configId, runtimeConfig, runtimeConfig.siteId);
   }
 
   private async registerBuiltinDomesticRuntimeConfigs(): Promise<void> {

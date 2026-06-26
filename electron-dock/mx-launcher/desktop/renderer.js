@@ -195,6 +195,9 @@ const state = {
     corednsApplyBusy: false,
     gatewayBusy: false,
     gatewayApplyBusy: false,
+    gatewayConfigBusy: false,
+    gatewayRuntimeConfig: null,
+    gatewayRuntimeError: null,
     gatewayBackend: 'k8s',
     evalBusy: false,
     zoneSnapshot: null,
@@ -959,7 +962,8 @@ async function refreshAdmin() {
       launcherLeasesPayload,
       domesticRuntimePayload,
       dnsPolicyPayload,
-      dnsRoutesPayload
+      dnsRoutesPayload,
+      gatewayRuntimePayload
     ] = await Promise.all([
       fetchJson('/internal/v1/admin/dashboard'),
       loadSshProfiles(),
@@ -970,7 +974,8 @@ async function refreshAdmin() {
       loadLauncherNetworkLeases(),
       loadDomesticRuntimeConfigs(),
       loadDnsPolicyCenter(),
-      loadDnsReverseProxyRoutes()
+      loadDnsReverseProxyRoutes(),
+      loadGatewayRuntimeConfig()
     ]);
     state.dashboard = dashboard;
     state.sshProfiles = asArray(profilePayload.profiles);
@@ -994,6 +999,8 @@ async function refreshAdmin() {
     state.dnsCenter.policyError = dnsPolicyPayload.error || null;
     state.dnsCenter.routes = asArray(dnsRoutesPayload.routes);
     state.dnsCenter.routesError = dnsRoutesPayload.error || null;
+    applyGatewayRuntimeConfig(gatewayRuntimePayload.config);
+    state.dnsCenter.gatewayRuntimeError = gatewayRuntimePayload.error || null;
     renderAppCenterShell();
     state.awxRuntimePolicies = asArray(dashboard.runtimeFeaturePolicies);
     state.overseaOverview = overseaPayload.overview;
@@ -1102,6 +1109,23 @@ async function loadDnsReverseProxyRoutes() {
     return { routes: asArray(payload.routes), error: null };
   } catch (error) {
     return { routes: [], error: error.message };
+  }
+}
+
+async function loadGatewayRuntimeConfig() {
+  try {
+    const payload = await fetchJson('/internal/v1/config-center/gateway-runtime-config');
+    return { config: payload.config || null, error: null };
+  } catch (error) {
+    return { config: null, error: error.message };
+  }
+}
+
+function applyGatewayRuntimeConfig(config) {
+  state.dnsCenter.gatewayRuntimeConfig = config || null;
+  const backend = config?.backend || config?.gatewayApplyBackend;
+  if (backend === 'host-nginx' || backend === 'k8s') {
+    state.dnsCenter.gatewayBackend = backend;
   }
 }
 
@@ -8006,6 +8030,7 @@ function renderDnsCenterPanel() {
       </div>
       ${state.dnsCenter.policyError ? `<div class="feedback error">${escapeHtml(state.dnsCenter.policyError)}</div>` : ''}
       ${state.dnsCenter.routesError ? `<div class="feedback error">${escapeHtml(state.dnsCenter.routesError)}</div>` : ''}
+      ${state.dnsCenter.gatewayRuntimeError ? `<div class="feedback error">${escapeHtml(state.dnsCenter.gatewayRuntimeError)}</div>` : ''}
       ${feedback ? `<div class="feedback ${escapeHtml(feedback.kind || 'info')}">${escapeHtml(feedback.message || '')}</div>` : ''}
       <div class="dns-metric-grid">
         ${renderDnsMetric('Internal DNS', MX_INTERNAL_DNS_IP, 'CoreDNS authority / split DNS')}
@@ -8086,7 +8111,7 @@ function renderDnsCenterPanel() {
 
 function renderGatewayBackendSegment(value, label) {
   const active = (state.dnsCenter.gatewayBackend || 'k8s') === value;
-  return `<button class="dns-segment ${active ? 'is-active' : ''}" type="button" data-dns-gateway-backend="${escapeHtml(value)}">${escapeHtml(label)}</button>`;
+  return `<button class="dns-segment ${active ? 'is-active' : ''}" type="button" data-dns-gateway-backend="${escapeHtml(value)}" aria-pressed="${active ? 'true' : 'false'}" ${state.dnsCenter.gatewayConfigBusy ? 'disabled' : ''}>${escapeHtml(label)}</button>`;
 }
 
 function renderDnsMetric(label, value, hint) {
@@ -8238,8 +8263,7 @@ function bindDnsCenterControls(root) {
   for (const button of root.querySelectorAll('[data-dns-gateway-backend]')) {
     button.addEventListener('click', () => {
       const backend = button.dataset.dnsGatewayBackend;
-      state.dnsCenter.gatewayBackend = backend === 'host-nginx' ? 'host-nginx' : 'k8s';
-      renderFoundationGrid(state.dashboard?.overview || {});
+      void saveGatewayRuntimeConfigFromAdmin(backend === 'host-nginx' ? 'host-nginx' : 'k8s');
     });
   }
   const evaluateForm = root.querySelector('[data-dns-evaluate-form]');
@@ -8280,20 +8304,59 @@ async function refreshDnsCenterFromAdmin() {
   state.dnsCenter.busy = true;
   state.dnsCenter.feedback = { kind: 'info', message: 'Refreshing DNS policy and routes' };
   renderFoundationGrid(state.dashboard?.overview || {});
-  const [policyPayload, routesPayload] = await Promise.all([
+  const [policyPayload, routesPayload, gatewayRuntimePayload] = await Promise.all([
     loadDnsPolicyCenter(),
-    loadDnsReverseProxyRoutes()
+    loadDnsReverseProxyRoutes(),
+    loadGatewayRuntimeConfig()
   ]);
   state.dnsCenter.policy = policyPayload.policy || null;
   state.dnsCenter.policies = asArray(policyPayload.policies);
   state.dnsCenter.policyError = policyPayload.error || null;
   state.dnsCenter.routes = asArray(routesPayload.routes);
   state.dnsCenter.routesError = routesPayload.error || null;
+  applyGatewayRuntimeConfig(gatewayRuntimePayload.config);
+  state.dnsCenter.gatewayRuntimeError = gatewayRuntimePayload.error || null;
   state.dnsCenter.busy = false;
-  state.dnsCenter.feedback = policyPayload.error || routesPayload.error
-    ? { kind: 'error', message: policyPayload.error || routesPayload.error }
+  state.dnsCenter.feedback = policyPayload.error || routesPayload.error || gatewayRuntimePayload.error
+    ? { kind: 'error', message: policyPayload.error || routesPayload.error || gatewayRuntimePayload.error }
     : { kind: 'success', message: 'DNS policy and routes refreshed' };
   renderFoundationGrid(state.dashboard?.overview || {});
+}
+
+async function saveGatewayRuntimeConfigFromAdmin(backend) {
+  if (state.dnsCenter.gatewayConfigBusy) return;
+  const nextBackend = backend === 'host-nginx' ? 'host-nginx' : 'k8s';
+  const previousBackend = state.dnsCenter.gatewayBackend || 'k8s';
+  state.dnsCenter.gatewayBackend = nextBackend;
+  state.dnsCenter.gatewayConfigBusy = true;
+  state.dnsCenter.feedback = {
+    kind: 'info',
+    message: `Saving gateway backend: ${nextBackend === 'host-nginx' ? 'Host nginx' : 'Caddy 80'}`
+  };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    const payload = await fetchJson('/internal/v1/config-center/gateway-runtime-config', {
+      method: 'POST',
+      body: {
+        backend: nextBackend,
+        requestedBy: 'admin-ui',
+        requestId: 'desktop-admin-gateway-runtime-config'
+      }
+    });
+    applyGatewayRuntimeConfig(payload.config);
+    state.dnsCenter.gatewayRuntimeError = null;
+    state.dnsCenter.feedback = {
+      kind: 'success',
+      message: `Gateway backend saved: ${(state.dnsCenter.gatewayBackend || 'k8s') === 'host-nginx' ? 'Host nginx' : 'Caddy 80'}`
+    };
+  } catch (error) {
+    state.dnsCenter.gatewayBackend = previousBackend;
+    state.dnsCenter.gatewayRuntimeError = error.message;
+    state.dnsCenter.feedback = { kind: 'error', message: error.message };
+  } finally {
+    state.dnsCenter.gatewayConfigBusy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+  }
 }
 
 function dnsRouteEditorDraft() {

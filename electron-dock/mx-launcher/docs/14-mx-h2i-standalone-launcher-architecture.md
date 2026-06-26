@@ -600,23 +600,26 @@ DNS Routes 面板里编辑。V2 默认仍保留 k8s Caddy 作为可回退 backen
   并持有该域名证书。
 - `Build Zone` 只生成 zone snapshot；只有 `Apply CoreDNS ConfigMap` 后才会更新
   `mx-dns/coredns` 并影响新的解析结果。本机 edge 会在 H2I ready 后拉取最新 DNS route。
-- `Dry-run Gateway` 同时渲染 Caddyfile 和 nginx include。`Apply Gateway` 默认更新
-  `mx-internal-gateway-caddy`；设置 `GATEWAY_APPLY_BACKEND=host-nginx`、
-  `GATEWAY_HOST_NGINX_APPLY_ENABLED=true` 后，`Apply Gateway` 会通过 Internal host-runner
-  写入宿主机 nginx 并 reload。要让 `http://openvpn.mxinfo-inc.cn/` 不带端口访问到
+- `Dry-run Gateway` 同时渲染 Caddyfile 和 nginx include。`Apply Gateway` 默认读取
+  Config Center 中的 gateway runtime config；首次 bootstrap/migrate 会按 env 默认 seed 为
+  `Caddy 80`，Admin DNS 页面点击 `Host nginx` 会立即保存为数据库配置。保存 backend 不会
+  立刻改宿主机，只有 `Apply Gateway` 才会通过 Internal host-runner 写入宿主机 nginx 并
+  reload。要让 `http://openvpn.mxinfo-inc.cn/` 不带端口访问到
   `http://10.88.88.88:8080`，需要先保存 route，再依次 Apply CoreDNS 和 Apply Gateway。
   `8008` 只保留为迁移/调试 fallback；如果 `10.88.88.88:80` 仍由旧 nginx 占用，不带端口的
   浏览器访问会继续命中旧 nginx。V2 推荐让宿主机 nginx 直接接管 80 并按 Host 反代，
   k8s Caddy 可在迁移期作为回退 backend 保留。
-- Admin DNS 页面可以直接选择 `Caddy 80` 或 `Host nginx`。`Caddy 80` 是保底默认；
-  `Host nginx` 在本次 Apply 请求中显式开启，不要求 `.env` 预先写
-  `GATEWAY_HOST_NGINX_APPLY_ENABLED=true`。`GATEWAY_HOST_NGINX_CONFIG_PATH` 默认是
-  `/etc/nginx/conf.d/mx-gateway.generated.conf`。
+- Admin DNS 页面可以直接选择 `Caddy 80` 或 `Host nginx`，刷新后会从 Config Center 恢复。
+  `Host nginx` 不要求 `.env` 预先写 `GATEWAY_HOST_NGINX_APPLY_ENABLED=true`。受控文件默认是
+  `/etc/nginx/conf.d/mx-gateway.generated.conf`；旧的手工
+  `/etc/nginx/conf.d/mx-launcher.conf` 应在 Admin apply 成功后移除，避免两个 server block
+  同时匹配 `mx.cn` / `*.mx.cn`。
 - k8s bootstrap ConfigMap 默认带 `GATEWAY_APPLY_BACKEND=k8s` 和 host-runner fallback/ensure
   开关，Admin 可以生成 `mx-internal-host-runner` DaemonSet 并通过
   `mx-internal-host-runner.mx-internal-shadow.svc.cluster.local:19190` 访问。这个 k8s fallback
   runner 适合容器侧/hostNetwork 兜底，不默认用于宿主机 nginx；宿主机 nginx 需要 native
-  host-runner 或显式 `MX_INTERNAL_HOST_RUNNER_URL` 指向真实宿主机 runner。只有设置
+  host-runner。`internal-production deploy` 会探测真实宿主机地址并回写
+  `MX_INTERNAL_HOST_RUNNER_NATIVE_URL` / `MX_INTERNAL_HOST_RUNNER_URL` 到 Internal API。只有设置
   `GATEWAY_HOST_NGINX_K8S_RUNNER_ENABLED=true` 时，host-nginx apply 才会尝试 k8s runner。
 - 若 H 端看到 `DNS timeout via <domestic-public>/10.88.0.1/10.88.88.88`，
   说明 Domestic DNS edge、WG 或 Internal CoreDNS 链路仍有一段未通；这时应先让

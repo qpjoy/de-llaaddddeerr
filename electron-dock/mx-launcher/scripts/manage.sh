@@ -3643,6 +3643,8 @@ ops_internal_production() {
       k8s_apply internal-shadow
       say "restart Internal API for rebuilt image"
       k8s_restart_internal_api internal-shadow
+      say "configure Internal API native host-runner URL"
+      ops_local_platform_apply_native_host_runner_url
       say "status"
       k8s_status internal-shadow
       say "gateway smoke"

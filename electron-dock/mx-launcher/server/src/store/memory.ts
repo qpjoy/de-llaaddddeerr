@@ -8,6 +8,8 @@ import {
   buildAwxProviderConfig,
   buildReleaseManagementPlan,
   buildRuntimeFeaturePolicy,
+  builtinGatewayRuntimeConfig,
+  buildGatewayRuntimeConfig,
   attachDomesticWireGuardRefreshHint,
   buildLauncherNetworkMihomoSite,
   buildLauncherNetworkTopology,
@@ -49,6 +51,7 @@ import {
   createUserPrincipalFromRecord,
   evaluateCoreDnsConfigMapApplyGate,
   evaluateGatewayConfigMapApplyGate,
+  gatewayRuntimeConfigRequestInput,
   gatewayRuntimeConfigForInput,
   evaluateSdkGatewayRoute,
   evaluateDnsPolicy,
@@ -104,6 +107,8 @@ import type {
   GatewayConfigMapApplyResult,
   GatewayConfigMapSyncInput,
   GatewayConfigMapSyncResult,
+  GatewayRuntimeConfig,
+  GatewayRuntimeConfigInput,
   IdentityLinkRequest,
   IssueTokenInput,
   LauncherNetworkLease,
@@ -218,6 +223,7 @@ export class MemoryStore implements PlatformStore {
   private readonly dnsPolicies = new Map<string, DnsPolicy>();
   private readonly dnsReverseProxyRoutes = new Map<string, DnsReverseProxyRoute>();
   private readonly dnsZoneSnapshots = new Map<string, DnsZoneSnapshot>();
+  private gatewayRuntimeConfig: GatewayRuntimeConfig;
   private readonly coreDnsConfigMapSyncs = new Map<string, CoreDnsConfigMapSyncResult>();
   private readonly coreDnsConfigMapApplies = new Map<string, CoreDnsConfigMapApplyResult>();
   private readonly gatewayConfigMapSyncs = new Map<string, GatewayConfigMapSyncResult>();
@@ -229,6 +235,7 @@ export class MemoryStore implements PlatformStore {
   private readonly logs: LogEntryInput[] = [];
 
   constructor(private readonly config: RuntimeConfig) {
+    this.gatewayRuntimeConfig = builtinGatewayRuntimeConfig(config);
     this.registerBuiltinApps();
     this.registerBuiltinProductNetworks();
     this.registerBuiltinDns();
@@ -1733,6 +1740,26 @@ export class MemoryStore implements PlatformStore {
     return this.dnsZoneSnapshots.get(snapshotId) ?? null;
   }
 
+  getGatewayRuntimeConfig(): GatewayRuntimeConfig {
+    return this.gatewayRuntimeConfig;
+  }
+
+  upsertGatewayRuntimeConfig(input: GatewayRuntimeConfigInput): GatewayRuntimeConfig {
+    const runtimeConfig = buildGatewayRuntimeConfig(this.config, input, this.gatewayRuntimeConfig);
+    this.gatewayRuntimeConfig = runtimeConfig;
+    this.recordAudit({
+      eventType: 'config.gateway_runtime.saved',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        backend: runtimeConfig.backend,
+        hostNginxConfigPath: runtimeConfig.hostNginxConfigPath,
+        hostNginxInternalApiUpstream: runtimeConfig.hostNginxInternalApiUpstream
+      }
+    });
+    return runtimeConfig;
+  }
+
   syncCoreDnsConfigMap(input: CoreDnsConfigMapSyncInput): CoreDnsConfigMapSyncResult {
     const snapshot = input.snapshotId
       ? required(this.getDnsZoneSnapshot(input.snapshotId), `DNS zone snapshot not found: ${input.snapshotId}`)
@@ -1809,17 +1836,18 @@ export class MemoryStore implements PlatformStore {
   }
 
   syncGatewayConfigMap(input: GatewayConfigMapSyncInput): GatewayConfigMapSyncResult {
+    const effectiveInput = gatewayRuntimeConfigRequestInput(input, this.gatewayRuntimeConfig);
     const result = renderGatewayConfigMap(
       this.config,
       this.listDnsReverseProxyRoutes(),
-      input,
+      effectiveInput,
       `gatewaysync_${randomUUID()}`
     );
     this.gatewayConfigMapSyncs.set(result.syncId, result);
     this.recordAudit({
       eventType: 'dns.gateway_configmap.sync_recorded',
       actorKind: 'dns-control',
-      requestId: input.requestId ?? null,
+      requestId: effectiveInput.requestId ?? null,
       metadata: {
         syncId: result.syncId,
         mode: result.mode,
@@ -1834,9 +1862,10 @@ export class MemoryStore implements PlatformStore {
   }
 
   async applyGatewayConfigMap(input: GatewayConfigMapApplyInput): Promise<GatewayConfigMapApplyResult> {
-    const sync = this.syncGatewayConfigMap({ ...input, mode: 'shadow-apply' });
-    const gatewayConfig = gatewayRuntimeConfigForInput(this.config, input);
-    const gate = evaluateGatewayConfigMapApplyGate(this.config, sync, input);
+    const effectiveInput = gatewayRuntimeConfigRequestInput(input, this.gatewayRuntimeConfig);
+    const sync = this.syncGatewayConfigMap({ ...effectiveInput, mode: 'shadow-apply' });
+    const gatewayConfig = gatewayRuntimeConfigForInput(this.config, effectiveInput);
+    const gate = evaluateGatewayConfigMapApplyGate(this.config, sync, effectiveInput);
     const issuedAt = new Date().toISOString();
     const outcome = gate.allowed
       ? gatewayConfig.gatewayApplyBackend === 'host-nginx'
@@ -1845,7 +1874,7 @@ export class MemoryStore implements PlatformStore {
             nginxConfig: sync.manifest.data['nginx.conf'],
             routesMetadata: sync.manifest.data['mx-gateway-routes.json'],
             serverDryRun: gate.serverDryRun,
-            requestId: input.requestId ?? null
+            requestId: effectiveInput.requestId ?? null
           })
         : await applyGatewayConfigMapToKubernetes(sync.manifest, gate.serverDryRun)
       : {
@@ -1878,7 +1907,7 @@ export class MemoryStore implements PlatformStore {
     this.recordAudit({
       eventType: 'dns.gateway_configmap.apply_evaluated',
       actorKind: 'dns-control',
-      requestId: input.requestId ?? null,
+      requestId: effectiveInput.requestId ?? null,
       metadata: {
         applyId: result.applyId,
         syncId: result.syncId,
