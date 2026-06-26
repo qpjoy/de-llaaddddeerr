@@ -484,7 +484,7 @@ function createWireGuardTemplate(artifactRoot) {
     '  exit 1',
     'fi',
     '',
-    'PRIVATE_KEY="$(awk -F= \'/^[[:space:]]*PrivateKey[[:space:]]*=/{print $2; exit}\' "$CONFIG_SOURCE" | sed \'s/^[[:space:]]*//;s/[[:space:]]*$//\')"',
+    'PRIVATE_KEY="$(awk \'/^[[:space:]]*PrivateKey[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}\' "$CONFIG_SOURCE" | sed \'s/^[[:space:]]*//;s/[[:space:]]*$//\')"',
     'if printf "%s" "$PRIVATE_KEY" | grep -q "[<>]"; then',
     '  echo "blocked: Internal service peer config still contains a placeholder private key: $CONFIG_SOURCE" >&2',
     '  exit 1',
@@ -648,8 +648,9 @@ function domesticWireGuardMaterial() {
   const values = {};
   for (const [name, placeholder] of required) {
     const value = envValue(name);
-    values[name] = value || placeholder;
-    if (!value) missingInputs.push(name);
+    const valid = validWireGuardKeyMaterial(value);
+    values[name] = valid ? value : placeholder;
+    if (!valid) missingInputs.push(name);
   }
   const endpointReady = !endpoint.includes('<');
   if (!endpointReady) missingInputs.push('MX_DOMESTIC_PUBLIC_ENDPOINT');
@@ -676,6 +677,10 @@ function domesticWireGuardMaterial() {
     internalServicePrivateKey: values.MX_INTERNAL_SERVICE_PRIVATE_KEY,
     internalServicePublicKey: values.MX_INTERNAL_SERVICE_PUBLIC_KEY
   };
+}
+
+function validWireGuardKeyMaterial(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(value.trim());
 }
 
 function createDomesticServicesTar(artifactRoot) {

@@ -2133,7 +2133,7 @@ internal_service_peer_handoff() {
   [ -f "$apply_script" ] || die "Internal service peer apply script not found: $apply_script"
   command -v wg-quick >/dev/null 2>&1 || die "wg-quick is required to apply V2 Internal service peer config on this host"
   local private_key
-  private_key="$(awk -F= '/^[[:space:]]*PrivateKey[[:space:]]*=/{print $2; exit}' "$config_path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  private_key="$(awk '/^[[:space:]]*PrivateKey[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}' "$config_path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   if printf "%s" "$private_key" | grep -q '[<>]'; then
     die "Internal service peer config still contains placeholder key: $config_path. Run 'bash scripts/manage.sh ops site-slot materialize-domestic-ready <site-id>' or Generate Handoff from Internal first."
   fi
@@ -2530,6 +2530,17 @@ ops_site_slot() {
         const { spawnSync } = require("node:child_process");
         const [base, siteId] = process.argv.slice(1);
         (async () => {
+          const generateRes = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/config-center/domestic-wg-secrets/${encodeURIComponent(siteId)}/generate`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              requestedBy: process.env.USER || "manage.sh",
+              requestId: "manage-materialize-domestic-ready-repair"
+            })
+          });
+          const generatePayload = await generateRes.json();
+          if (!generateRes.ok) throw new Error(JSON.stringify(generatePayload));
+          if (generatePayload.generation?.status !== "ready") throw new Error(JSON.stringify(generatePayload, null, 2));
           const res = await fetch(`${base.replace(/\/+$/, "")}/internal/v1/config-center/domestic-wg-secrets/${encodeURIComponent(siteId)}/materializer-env`, {
             method: "POST",
             headers: { "content-type": "application/json" },

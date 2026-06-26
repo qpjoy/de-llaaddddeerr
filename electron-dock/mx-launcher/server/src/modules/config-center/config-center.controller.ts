@@ -456,8 +456,10 @@ function toGeneratedDomesticWireGuardSecretInput(
   const rotateAll = booleanValue(body.rotateKey) || booleanValue(body.rotateAll);
   const rotateRelayKey = rotateAll || booleanValue(body.rotateRelayKey);
   const rotateInternalServiceKey = rotateAll || booleanValue(body.rotateInternalServiceKey);
-  const relayMissing = !previous?.domesticRelayPrivateKey || !previous.domesticRelayPublicKey;
-  const internalMissing = !previous?.internalServicePrivateKey || !previous.internalServicePublicKey;
+  const relayMissing = !validWireGuardPrivateKey(previous?.domesticRelayPrivateKey)
+    || !validWireGuardPublicKey(previous?.domesticRelayPublicKey);
+  const internalMissing = !validWireGuardPrivateKey(previous?.internalServicePrivateKey)
+    || !validWireGuardPublicKey(previous?.internalServicePublicKey);
   const relayPair = relayMissing || rotateRelayKey ? generateWireGuardKeyPair() : null;
   const internalPair = internalMissing || rotateInternalServiceKey ? generateWireGuardKeyPair() : null;
   const publicEndpoint = nullableString(body.publicEndpoint) ?? nullableString(body.endpoint) ?? previous?.publicEndpoint ?? null;
@@ -520,10 +522,10 @@ function redactDomesticWireGuardSecret(secret: SiteSlotDomesticWireGuardSecret) 
     internalServiceCidr: secret.internalServiceCidr,
     guestRelayCidr: secret.guestRelayCidr,
     material: {
-      domesticRelayPrivateKey: secret.domesticRelayPrivateKey ? 'configured' : 'missing',
-      domesticRelayPublicKey: secret.domesticRelayPublicKey ? 'configured' : 'missing',
-      internalServicePrivateKey: secret.internalServicePrivateKey ? 'configured' : 'missing',
-      internalServicePublicKey: secret.internalServicePublicKey ? 'configured' : 'missing'
+      domesticRelayPrivateKey: wireGuardKeyStatus(secret.domesticRelayPrivateKey),
+      domesticRelayPublicKey: wireGuardKeyStatus(secret.domesticRelayPublicKey),
+      internalServicePrivateKey: wireGuardKeyStatus(secret.internalServicePrivateKey),
+      internalServicePublicKey: wireGuardKeyStatus(secret.internalServicePublicKey)
     },
     fingerprints: secret.fingerprints,
     readiness: secret.readiness,
@@ -534,6 +536,19 @@ function redactDomesticWireGuardSecret(secret: SiteSlotDomesticWireGuardSecret) 
   };
 }
 
+function validWireGuardPrivateKey(value: string | null | undefined): boolean {
+  return typeof value === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(value.trim());
+}
+
+function validWireGuardPublicKey(value: string | null | undefined): boolean {
+  return typeof value === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(value.trim());
+}
+
+function wireGuardKeyStatus(value: string | null | undefined): 'configured' | 'invalid' | 'missing' {
+  if (!value) return 'missing';
+  return validWireGuardPrivateKey(value) ? 'configured' : 'invalid';
+}
+
 function domesticWireGuardSecretExport(secret: SiteSlotDomesticWireGuardSecret, body: Record<string, unknown>) {
   const confirmSecretExport = booleanValue(body.confirmSecretExport);
   const envGate = process.env.SITE_SLOT_DOMESTIC_WG_SECRET_EXPORT_ENABLED === '1';
@@ -541,6 +556,7 @@ function domesticWireGuardSecretExport(secret: SiteSlotDomesticWireGuardSecret, 
     ...(confirmSecretExport ? [] : ['confirmSecretExport=true is required before exporting Domestic WG materializer env']),
     ...(envGate ? [] : ['SITE_SLOT_DOMESTIC_WG_SECRET_EXPORT_ENABLED=1 is required on Internal']),
     ...(secret.status === 'active' ? [] : [`Domestic WG secret is ${secret.status}`]),
+    ...domesticWireGuardSecretMaterialFailures(secret),
     ...secret.readiness.missingSecretInputs.map((input) => `missing secret input: ${input}`)
   ];
   const ready = blockedReasons.length === 0;
@@ -555,6 +571,15 @@ function domesticWireGuardSecretExport(secret: SiteSlotDomesticWireGuardSecret, 
     redactedEnvKeys: secret.readiness.materializerEnvKeys,
     env: ready ? domesticWireGuardMaterializerEnv(secret) : {}
   };
+}
+
+function domesticWireGuardSecretMaterialFailures(secret: SiteSlotDomesticWireGuardSecret): string[] {
+  return [
+    ...(validWireGuardPrivateKey(secret.domesticRelayPrivateKey) ? [] : ['invalid or missing Domestic relay private key']),
+    ...(validWireGuardPublicKey(secret.domesticRelayPublicKey) ? [] : ['invalid or missing Domestic relay public key']),
+    ...(validWireGuardPrivateKey(secret.internalServicePrivateKey) ? [] : ['invalid or missing Internal service private key']),
+    ...(validWireGuardPublicKey(secret.internalServicePublicKey) ? [] : ['invalid or missing Internal service public key'])
+  ];
 }
 
 function domesticWireGuardMaterializerEnv(secret: SiteSlotDomesticWireGuardSecret): Record<string, string> {

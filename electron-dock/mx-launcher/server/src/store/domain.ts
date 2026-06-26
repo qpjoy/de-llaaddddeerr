@@ -2842,10 +2842,10 @@ export function buildSiteSlotDomesticWireGuardSecret(
     internalServicePublicKey: input.internalServicePublicKey?.trim() || previous?.internalServicePublicKey || null
   };
   const missingSecretInputs = [
-    material.domesticRelayPrivateKey ? null : 'MX_DOMESTIC_RELAY_PRIVATE_KEY',
-    material.domesticRelayPublicKey ? null : 'MX_DOMESTIC_RELAY_PUBLIC_KEY',
-    material.internalServicePrivateKey ? null : 'MX_INTERNAL_SERVICE_PRIVATE_KEY',
-    material.internalServicePublicKey ? null : 'MX_INTERNAL_SERVICE_PUBLIC_KEY',
+    validWireGuardKeyMaterial(material.domesticRelayPrivateKey) ? null : 'MX_DOMESTIC_RELAY_PRIVATE_KEY',
+    validWireGuardKeyMaterial(material.domesticRelayPublicKey) ? null : 'MX_DOMESTIC_RELAY_PUBLIC_KEY',
+    validWireGuardKeyMaterial(material.internalServicePrivateKey) ? null : 'MX_INTERNAL_SERVICE_PRIVATE_KEY',
+    validWireGuardKeyMaterial(material.internalServicePublicKey) ? null : 'MX_INTERNAL_SERVICE_PUBLIC_KEY',
     publicEndpoint ? null : 'MX_DOMESTIC_PUBLIC_ENDPOINT'
   ].filter((value): value is string => Boolean(value));
   const normalizedProductRelayCidrs = productRelayCidrs(input.productRelayCidrs, previous?.productRelayCidrs);
@@ -2912,6 +2912,10 @@ export function buildSiteSlotDomesticWireGuardSecret(
     updatedBy,
     updatedAt: now
   };
+}
+
+function validWireGuardKeyMaterial(value: string | null | undefined): boolean {
+  return typeof value === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(value.trim());
 }
 
 export function buildSiteSlotDomesticRuntimeConfig(

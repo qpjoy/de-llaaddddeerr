@@ -763,7 +763,7 @@ function domesticRelayPlanEvidence(plan: SiteSlotPlan | null, profile: SiteSlotS
 }
 
 function validWireGuardPublicKey(value: string): boolean {
-  return /^[A-Za-z0-9+/=]{32,88}$/.test(value) && !/\s/.test(value);
+  return /^[A-Za-z0-9+/]{43}=$/.test(value.trim());
 }
 
 function validRelayLeaseIp(value: string): boolean {

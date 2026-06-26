@@ -3602,8 +3602,10 @@ function buildAdminDomesticWireGuardSecretInput(
     ?? null;
   const internalDirectEndpoint = stringValue(body.internalDirectEndpoint) ?? previous?.internalDirectEndpoint ?? null;
   const internalDirectEnabled = booleanValue(body.internalDirectEnabled) ?? previous?.internalDirectEnabled ?? true;
-  const relayMissing = !previous?.domesticRelayPrivateKey || !previous.domesticRelayPublicKey;
-  const internalMissing = !previous?.internalServicePrivateKey || !previous.internalServicePublicKey;
+  const relayMissing = !validWireGuardPrivateKey(previous?.domesticRelayPrivateKey)
+    || !validWireGuardPublicKey(previous?.domesticRelayPublicKey);
+  const internalMissing = !validWireGuardPrivateKey(previous?.internalServicePrivateKey)
+    || !validWireGuardPublicKey(previous?.internalServicePublicKey);
   const relayPair = relayMissing || rotateRelayKey ? generateWireGuardKeyPair() : null;
   const internalPair = internalMissing || rotateInternalServiceKey ? generateWireGuardKeyPair() : null;
   const secretInput: SiteSlotDomesticWireGuardSecretInput = {
@@ -3872,7 +3874,7 @@ function internalServicePeerApplyScriptContent(): string {
     '  exit 1',
     'fi',
     '',
-    'PRIVATE_KEY="$(awk -F= \'/^[[:space:]]*PrivateKey[[:space:]]*=/{print $2; exit}\' "$CONFIG_SOURCE" | sed \'s/^[[:space:]]*//;s/[[:space:]]*$//\')"',
+    'PRIVATE_KEY="$(awk \'/^[[:space:]]*PrivateKey[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}\' "$CONFIG_SOURCE" | sed \'s/^[[:space:]]*//;s/[[:space:]]*$//\')"',
     'if printf "%s" "$PRIVATE_KEY" | grep -q "[<>]"; then',
     '  echo "blocked: Internal service peer config still contains a placeholder private key: $CONFIG_SOURCE" >&2',
     '  exit 1',
@@ -5094,10 +5096,10 @@ function redactAdminDomesticWireGuardSecret(secret: SiteSlotDomesticWireGuardSec
     internalServiceCidr: secret.internalServiceCidr,
     guestRelayCidr: secret.guestRelayCidr,
     material: {
-      domesticRelayPrivateKey: secret.domesticRelayPrivateKey ? 'configured' : 'missing',
-      domesticRelayPublicKey: secret.domesticRelayPublicKey ? 'configured' : 'missing',
-      internalServicePrivateKey: secret.internalServicePrivateKey ? 'configured' : 'missing',
-      internalServicePublicKey: secret.internalServicePublicKey ? 'configured' : 'missing'
+      domesticRelayPrivateKey: wireGuardKeyMaterialStatus(secret.domesticRelayPrivateKey),
+      domesticRelayPublicKey: wireGuardKeyMaterialStatus(secret.domesticRelayPublicKey),
+      internalServicePrivateKey: wireGuardKeyMaterialStatus(secret.internalServicePrivateKey),
+      internalServicePublicKey: wireGuardKeyMaterialStatus(secret.internalServicePublicKey)
     },
     fingerprints: secret.fingerprints,
     readiness: secret.readiness,
@@ -5425,12 +5427,17 @@ function domesticRelayPeerPlanFailures(
   return failures;
 }
 
-function validWireGuardPublicKey(value: string): boolean {
-  return /^[A-Za-z0-9+/=]{32,88}$/.test(value) && !/\s/.test(value);
+function validWireGuardPublicKey(value: string | null | undefined): boolean {
+  return typeof value === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(value.trim());
 }
 
-function validWireGuardPrivateKey(value: string): boolean {
-  return /^[A-Za-z0-9+/]{43}=$/.test(value.trim());
+function validWireGuardPrivateKey(value: string | null | undefined): boolean {
+  return typeof value === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(value.trim());
+}
+
+function wireGuardKeyMaterialStatus(value: string | null | undefined): 'configured' | 'invalid' | 'missing' {
+  if (!value) return 'missing';
+  return validWireGuardPrivateKey(value) ? 'configured' : 'invalid';
 }
 
 function validRelayLeaseIp(value: string): boolean {
@@ -6733,8 +6740,10 @@ function domesticWireGuardMaterializeNeeded(
     || secret.readiness.secretMaterial !== 'injected'
     || secret.readiness.publicEndpointStatus !== 'ready'
     || secret.readiness.missingSecretInputs.length > 0
-    || !secret.domesticRelayPublicKey
-    || !secret.internalServicePublicKey
+    || !validWireGuardPrivateKey(secret.domesticRelayPrivateKey)
+    || !validWireGuardPublicKey(secret.domesticRelayPublicKey)
+    || !validWireGuardPrivateKey(secret.internalServicePrivateKey)
+    || !validWireGuardPublicKey(secret.internalServicePublicKey)
     || Boolean(expectedEndpoint && secret.publicEndpoint !== expectedEndpoint);
 }
 

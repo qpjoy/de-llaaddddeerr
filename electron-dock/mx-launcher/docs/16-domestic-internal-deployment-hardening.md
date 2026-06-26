@@ -128,6 +128,12 @@ Key is not the correct length or format: '<internal-service-private-key-from-int
 - 如果配置中仍含 `<...>` placeholder，脚本必须在调用 `wg-quick` 之前直接失败。
 - 如果 `PrivateKey` 不是 WireGuard 私钥格式 `^[A-Za-z0-9+/]{43}=$`，脚本必须直接失败。
 - apply script 本身也要做同样校验，不能只依赖上层 `manage.sh`。
+- 不要用 `awk -F=` 读取 WireGuard key。标准 key 是 32 字节 base64，末尾包含一个
+  padding `=`；按 `=` 拆字段会把 padding 吃掉，表现为 `length=43 invalid`。
+  脚本应只删除第一个 `key =` 前缀，例如 `sub(/^[^=]*=/, "")`，保留值里的 `=`。
+- Admin / Config Center materialize 必须把非 `^[A-Za-z0-9+/]{43}=$` 的历史 key 视为
+  missing，点击 `Materialize Domestic WG` 时自动重建 keypair，避免导出不可 apply 的
+  `mx-internal-service-peer.conf`。
 
 正确 break-glass 顺序：
 
@@ -188,4 +194,3 @@ curl -fsS --max-time 5 http://10.88.88.88:18090/healthz
 ```
 
 只有第 6、7 步都通过，Domestic/Internal 2.0 链路才算真正完成。
-
