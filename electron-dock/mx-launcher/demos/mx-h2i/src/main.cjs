@@ -300,7 +300,7 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:refresh-diagnostics', async () => {
-    await recoverWireGuardForRuntime('manual-diagnostics');
+    await recoverWireGuardForRuntime('manual-diagnostics', { allowPrivileged: false });
     await refreshWireGuardDiagnostics();
     await saveAndBroadcast();
     return visibleRuntime();
@@ -2150,7 +2150,7 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
           } else if (!wireGuardResult.ready && reason !== 'interval') {
             runtime.feedback = {
               tone: 'warning',
-              message: `MX-H2I 检测到 WireGuard 未 ready：${wireGuardResult.message}。请点击连接或刷新诊断进行授权修复。`
+              message: `MX-H2I 检测到 WireGuard 未 ready：${wireGuardResult.message}。请点击重新连接进行授权修复，或刷新诊断查看当前路由。`
             };
           }
           touchRuntime(`wireguard probed: ${reason}`);

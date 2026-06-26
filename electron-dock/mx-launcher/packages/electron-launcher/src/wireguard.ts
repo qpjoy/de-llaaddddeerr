@@ -93,7 +93,7 @@ export function prepareLauncherWireGuardPeer(input: ElectronLauncherWireGuardPee
   }
   const allowedIps = uniqueStrings(configPeers.flatMap((peer) => peer.allowedIps));
 
-  const dns = routePlan.dnsServer ? [routePlan.dnsServer] : [];
+  const dns = wireGuardDnsServers(routePlan.dnsServer);
   const splitDns = Boolean(dns.length && input.dnsDomains?.length);
   const config = renderWireGuardInterface({
     privateKey,
@@ -210,6 +210,21 @@ function ipv4HostFromUrl(value: string | null | undefined): string | null {
   } catch {
     return null;
   }
+}
+
+function wireGuardDnsServers(value: string | null | undefined): string[] {
+  const server = wireGuardDnsServerHost(value);
+  return server ? [server] : [];
+}
+
+function wireGuardDnsServerHost(value: string | null | undefined): string | null {
+  const clean = value?.trim();
+  if (!clean) return null;
+  const bracket = clean.match(/^\[([^\]]+)](?::\d{1,5})?$/);
+  if (bracket?.[1]) return bracket[1];
+  const ipv4WithPort = clean.match(/^(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}$/);
+  if (ipv4WithPort?.[1]) return ipv4WithPort[1];
+  return clean;
 }
 
 export function resolveLauncherWireGuardRuntime(input: ElectronLauncherWireGuardRuntimeOptions) {
@@ -401,9 +416,7 @@ export function probeLauncherWireGuardRoute(input: ElectronLauncherWireGuardProb
   const expectedAddresses = uniqueStrings(input.expectedInterfaceAddresses ?? [])
     .map((address) => address.split('/')[0]?.trim() ?? '')
     .filter(isIpv4);
-  const interfaceMatches = expected
-    ? interfaceName === expected || Boolean(interfaceName && expectedAddresses.includes(interfaceName))
-    : Boolean(interfaceName && (/^utun\d+$/.test(interfaceName) || /^wg/.test(interfaceName)));
+  const interfaceMatches = routeInterfaceMatchesExpected(interfaceName, expected, expectedAddresses);
   const viaWireGuard = Boolean(interfaceName && !viaLoopback && interfaceMatches);
   return {
     ok: viaWireGuard,
@@ -536,6 +549,30 @@ function isProxyTunGateway(value: string | null | undefined): boolean {
   const start = ipv4ToInt('198.18.0.0');
   const end = ipv4ToInt('198.19.255.255');
   return gateway !== null && start !== null && end !== null && gateway >= start && gateway <= end;
+}
+
+function routeInterfaceMatchesExpected(
+  interfaceName: string | null,
+  expectedInterfaceName: string | null,
+  expectedAddresses: string[]
+): boolean {
+  if (!interfaceName) return false;
+  if (!expectedInterfaceName) return isWireGuardLikeInterface(interfaceName);
+  if (interfaceName === expectedInterfaceName) return true;
+
+  if (process.platform === 'darwin'
+    && /^utun\d+$/.test(interfaceName)
+    && /^utun\d+$/.test(expectedInterfaceName)) {
+    return true;
+  }
+  if (/^wg/.test(interfaceName) && /^wg/.test(expectedInterfaceName)) {
+    return true;
+  }
+  return expectedAddresses.includes(interfaceName);
+}
+
+function isWireGuardLikeInterface(interfaceName: string): boolean {
+  return /^utun\d+$/.test(interfaceName) || /^wg/.test(interfaceName);
 }
 
 function readRouteToTarget(targetIp: string): {

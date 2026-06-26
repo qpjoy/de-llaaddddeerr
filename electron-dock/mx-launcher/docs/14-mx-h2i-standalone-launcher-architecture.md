@@ -361,6 +361,10 @@ V1 `hdo-coredns` 的 53 端口冲突。Internal 侧不再另跑第二个 DNS edg
 Internal host `10.88.88.88:50053`。H 端连接前优先查询
 Domestic 公网地址的 `:50053`；`10.88.0.1:50053` 只有在 `mx-domestic`
 WireGuard 已经起来后才作为备用路径。
+但 WireGuard 原生 DNS 与 macOS CLI split DNS 仍按 V1 语义使用 `10.88.0.1:53`：
+routePlan 下发 `dnsServer=10.88.0.1`，客户端写 WG 配置时会剥离旧 snapshot 中的
+`:50053`。这样 `ping`/CLI 不依赖 PAC 或 Clash fake-ip 路径；等 V2 替换 V1 时，
+Domestic 的 V2 DNS 服务接管 53 即可。
 如果生产 DNS 还没有准备好，Domestic runtime 的 `bootstrapHost` 可以先使用 Domestic
 公网 IP，保持 `bootstrapProtocol=http`、`bootstrapPort=18090`，这与测试服 bootstrap
 路径一致。`api.mxinfo-inc.cn` 只是默认域名占位；未替换时会产生 warning，但不应该成为
