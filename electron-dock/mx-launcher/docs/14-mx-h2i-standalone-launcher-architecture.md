@@ -615,6 +615,11 @@ DNS Routes 面板里编辑。V2 默认仍保留 k8s Caddy 作为可回退 backen
   `/etc/nginx/conf.d/mx-launcher.conf` 应在 Admin apply 成功后移除，避免两个 server block
   同时匹配 `mx.cn` / `*.mx.cn`。生成配置只使用普通 `listen 80`，不会声明
   `default_server`，以免和发行版自带 `/etc/nginx/nginx.conf` 默认站点冲突。
+- 没有宿主机 nginx、或希望少一层反代时，Admin 选择 `Caddy 80` 即可。这个 backend 只更新
+  `mx-internal-gateway-caddy` ConfigMap，由 hostNetwork Caddy DaemonSet 直接接管 80；如果
+  宿主机 80 已被其它进程占用，Caddy 启动脚本会自动移除 `:80` block 并保留 `:8008`
+  fallback。要让 Caddy 真正接管不带端口的 `http://*.mx.cn/`，需要先释放宿主机 80 并重启
+  `mx-internal-gateway` DaemonSet。
 - k8s bootstrap ConfigMap 默认带 `GATEWAY_APPLY_BACKEND=k8s` 和 host-runner fallback/ensure
   开关，Admin 可以生成 `mx-internal-host-runner` DaemonSet 并通过
   `mx-internal-host-runner.mx-internal-shadow.svc.cluster.local:19190` 访问。这个 k8s fallback

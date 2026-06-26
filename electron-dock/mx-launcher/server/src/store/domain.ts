@@ -1327,7 +1327,7 @@ export function renderGatewayNginxConfig(config: RuntimeConfig, routes: DnsRever
     '}',
     '',
     ...(internalApiUpstream ? nginxInternalApiServerBlock(internalApiUpstream) : []),
-    ...appPorts.flatMap((port) => nginxAppServerBlocks(port, routes))
+    ...appPorts.flatMap((port) => nginxAppServerBlocks(config, port, routes))
   ].join('\n');
 }
 
@@ -1352,8 +1352,8 @@ function nginxInternalApiServerBlock(upstream: string): string[] {
   ];
 }
 
-function nginxAppServerBlocks(port: number, routes: DnsReverseProxyRoute[]): string[] {
-  const routeBlocks = routes.flatMap((route) => nginxRouteServerBlock(port, route));
+function nginxAppServerBlocks(config: RuntimeConfig, port: number, routes: DnsReverseProxyRoute[]): string[] {
+  const routeBlocks = routes.flatMap((route) => nginxRouteServerBlock(config, port, route));
   return [
     ...routeBlocks,
     'server {',
@@ -1366,8 +1366,8 @@ function nginxAppServerBlocks(port: number, routes: DnsReverseProxyRoute[]): str
   ];
 }
 
-function nginxRouteServerBlock(port: number, route: DnsReverseProxyRoute): string[] {
-  const upstream = nginxUpstreamOrigin(route.targetUrl);
+function nginxRouteServerBlock(config: RuntimeConfig, port: number, route: DnsReverseProxyRoute): string[] {
+  const upstream = nginxRouteUpstreamOrigin(config, route.targetUrl);
   if (!upstream) return [];
   return [
     'server {',
@@ -1399,6 +1399,22 @@ function nginxUpstreamOrigin(value: string | null | undefined): string | null {
   try {
     const url = new URL(value);
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return null;
+  }
+}
+
+function nginxRouteUpstreamOrigin(config: RuntimeConfig, value: string | null | undefined): string | null {
+  if (!value?.trim()) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    const host = url.hostname.toLowerCase();
+    if (host === 'mx-launcher-internal.mx-internal-shadow.svc.cluster.local') {
+      return nginxUpstreamOrigin(config.gatewayHostNginxInternalApiUpstream)
+        ?? `${url.protocol}//127.0.0.1:${url.port || '18090'}`;
+    }
     return `${url.protocol}//${url.host}`;
   } catch {
     return null;
