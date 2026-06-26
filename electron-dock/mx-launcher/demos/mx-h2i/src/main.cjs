@@ -5,6 +5,7 @@ const http = require('node:http');
 const https = require('node:https');
 const dnsPromises = require('node:dns').promises;
 const net = require('node:net');
+const { execFile } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: electronScreen, powerMonitor, net: electronNet } = require('electron');
 
@@ -25,6 +26,10 @@ const DEFAULT_INTERNAL_DNS_EDGE_PORT = 53;
 const DEFAULT_INTERNAL_GATEWAY_APP_PORT = 80;
 const DEFAULT_SPLIT_DNS_DOMAINS = 'mx.cn mxinfo-inc.cn internal.mx corp.mx h2i.mx';
 const SYSTEM_DOMAIN_PROXY_REFRESH_MS = 30_000;
+const SYSTEM_DOMAIN_PROXY_ROUTE_REFRESH_TIMEOUT_MS = 2200;
+const SYSTEM_DOMAIN_PROXY_ROUTE_WARNING_MS = 60_000;
+const NETWORK_CHANGE_MONITOR_MS = 5000;
+const NETWORK_CHANGE_DEBOUNCE_MS = 1800;
 const WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD = 3;
 const DEFAULT_CONFIG = {
   bootstrapApiBaseUrl: defaultBootstrapApiBaseUrl(),
@@ -65,6 +70,10 @@ let wireGuardConnectInFlight = false;
 let lastWireGuardRecoveryFailureAt = 0;
 let wireGuardBackgroundProbeFailures = 0;
 const wireGuardRecoveryTimers = [];
+let networkChangeMonitorInterval = null;
+let networkChangeDebounceTimer = null;
+let networkChangeInFlight = false;
+let lastNetworkSignature = null;
 let systemDomainProxyManager = null;
 let systemDomainProxyRefreshInterval = null;
 let systemDomainProxyRefreshInFlight = false;
@@ -73,6 +82,7 @@ let lastSystemDomainProxySignature = null;
 let lastSystemDomainProxyPolicySignature = null;
 let lastSystemDomainProxyAuthorizationCanceledSignature = null;
 let lastSystemPacReverseProxyRoutes = [];
+let lastSystemPacReverseProxyRoutesWarningAt = 0;
 
 const TOP_DOCK_Y = 0;
 const TOP_REVEAL_ZONE = 18;
@@ -100,6 +110,7 @@ app.whenReady().then(async () => {
   createMainWindow();
   startTopRevealWatcher();
   startWireGuardRecoveryWatcher();
+  startNetworkChangeWatcher();
 });
 
 app.on('window-all-closed', () => {
@@ -107,6 +118,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  stopNetworkChangeWatcher();
   stopWireGuardRecoveryWatcher();
   void closeSystemDomainProxy();
 });
@@ -592,16 +604,141 @@ function onUnlockScreen() {
   scheduleWireGuardRecovery('unlock-screen', [1500, 10_000, 25_000]);
 }
 
-function scheduleWireGuardRecovery(reason, delays = [2500, 12_000, 25_000]) {
+function scheduleWireGuardRecovery(reason, delays = [2500, 12_000, 25_000], options = {}) {
+  const allowPrivileged = options.allowPrivileged === true;
   for (const delay of delays) {
     const timer = setTimeout(() => {
       const index = wireGuardRecoveryTimers.indexOf(timer);
       if (index >= 0) wireGuardRecoveryTimers.splice(index, 1);
-      void recoverWireGuardForRuntime(reason, { allowPrivileged: false }).catch(() => undefined);
+      void recoverWireGuardForRuntime(reason, { allowPrivileged }).catch(() => undefined);
     }, Math.max(0, delay));
     timer.unref?.();
     wireGuardRecoveryTimers.push(timer);
   }
+}
+
+function startNetworkChangeWatcher() {
+  stopNetworkChangeWatcher();
+  if (process.platform !== 'darwin') return;
+  void pollNetworkSignature('startup').catch(() => undefined);
+  networkChangeMonitorInterval = setInterval(() => {
+    void pollNetworkSignature('interval').catch(() => undefined);
+  }, NETWORK_CHANGE_MONITOR_MS);
+  networkChangeMonitorInterval.unref?.();
+}
+
+function stopNetworkChangeWatcher() {
+  if (networkChangeMonitorInterval) clearInterval(networkChangeMonitorInterval);
+  networkChangeMonitorInterval = null;
+  if (networkChangeDebounceTimer) clearTimeout(networkChangeDebounceTimer);
+  networkChangeDebounceTimer = null;
+  networkChangeInFlight = false;
+}
+
+async function pollNetworkSignature(reason) {
+  if (networkChangeInFlight) return;
+  networkChangeInFlight = true;
+  try {
+    const signature = await captureNetworkSignature();
+    if (!signature) return;
+    if (!lastNetworkSignature) {
+      lastNetworkSignature = signature;
+      return;
+    }
+    if (signature === lastNetworkSignature) return;
+    lastNetworkSignature = signature;
+    scheduleNetworkChangeRecovery(reason);
+  } finally {
+    networkChangeInFlight = false;
+  }
+}
+
+function scheduleNetworkChangeRecovery(reason) {
+  if (networkChangeDebounceTimer) clearTimeout(networkChangeDebounceTimer);
+  networkChangeDebounceTimer = setTimeout(() => {
+    networkChangeDebounceTimer = null;
+    void handleNetworkChange(reason).catch((err) => {
+      console.warn('[mx-h2i] network change recovery failed:', errorMessage(err));
+    });
+  }, NETWORK_CHANGE_DEBOUNCE_MS);
+  networkChangeDebounceTimer.unref?.();
+}
+
+async function handleNetworkChange(reason) {
+  const recoveryReason = `network-change-${reason || 'detected'}`;
+  scheduleWireGuardRecovery(recoveryReason, [1500, 5000, 15_000], { allowPrivileged: false });
+  scheduleWireGuardRecovery(`${recoveryReason}-repair`, [9000], { allowPrivileged: true });
+  if (runtime?.connection?.state !== 'connected') return;
+  await refreshSystemDomainProxyAfterNetworkChange(recoveryReason);
+}
+
+async function refreshSystemDomainProxyAfterNetworkChange(reason) {
+  if (!systemDomainProxyManager || runtime?.connection?.state !== 'connected') return null;
+  if (typeof systemDomainProxyManager.statusVerified === 'function') {
+    const verified = await systemDomainProxyManager.statusVerified().catch(() => null);
+    if (verified?.applied === true) {
+      await recordSystemDomainProxyDiagnostics({
+        ...verified,
+        reason,
+        verified: true,
+        skipped: true,
+        skipReason: 'network-change-verified'
+      }, `system domain proxy verified: ${reason}`);
+      return verified;
+    }
+  }
+  const status = await ensureSystemDomainProxyForRuntime('network-change');
+  await recordSystemDomainProxyDiagnostics(status, `system domain proxy network change: ${reason}`);
+  return status;
+}
+
+async function captureNetworkSignature() {
+  if (process.platform !== 'darwin') return null;
+  const [route, services] = await Promise.all([
+    execFileText('/sbin/route', ['-n', 'get', 'default']).catch((err) => `route-error:${errorMessage(err)}`),
+    execFileText('/usr/sbin/networksetup', ['-listallnetworkservices']).catch((err) => `services-error:${errorMessage(err)}`)
+  ]);
+  return JSON.stringify({
+    route: compactDarwinDefaultRoute(route),
+    services: compactDarwinNetworkServices(services)
+  });
+}
+
+function compactDarwinDefaultRoute(stdout) {
+  const text = String(stdout || '');
+  const pick = (name) => nullableString(text.match(new RegExp(`^\\s*${name}:\\s*(.+)$`, 'im'))?.[1]);
+  return {
+    gateway: pick('gateway'),
+    interfaceName: pick('interface'),
+    ifscope: pick('ifscope')
+  };
+}
+
+function compactDarwinNetworkServices(stdout) {
+  return String(stdout || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('An asterisk'))
+    .map((line) => line.replace(/^\*\s*/, ''))
+    .sort();
+}
+
+function execFileText(command, args = [], options = {}) {
+  return new Promise((resolve, reject) => {
+    const timeout = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 2000;
+    execFile(command, args, {
+      timeout,
+      maxBuffer: 256 * 1024
+    }, (err, stdout, stderr) => {
+      if (err) {
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
+      resolve(String(stdout || ''));
+    });
+  });
 }
 
 async function initializeSystemDomainProxy() {
@@ -612,11 +749,7 @@ async function initializeSystemDomainProxy() {
       pacPort: localEdgePort(),
       log: console
     });
-    if (shouldRecoverWireGuardConnection(runtime?.connection)) {
-      await ensureSystemDomainProxyForRuntime('app-startup');
-    } else {
-      await systemDomainProxyManager.restoreStale('app-startup');
-    }
+    await systemDomainProxyManager.restoreStale('app-startup');
     startSystemDomainProxyRefreshWatcher();
   } catch (err) {
     console.warn('[mx-h2i] system domain proxy unavailable:', errorMessage(err));
@@ -627,6 +760,13 @@ async function initializeSystemDomainProxy() {
 async function ensureSystemDomainProxyForRuntime(reason = 'manual') {
   if (systemDomainProxyEnsureInFlight) {
     const status = await systemDomainProxyEnsureInFlight;
+    if (
+      shouldApplySystemDomainProxyForReason(reason)
+      && status?.skipped === true
+      && status?.skipReason === 'background-refresh-no-privileged-apply'
+    ) {
+      return ensureSystemDomainProxyForRuntimeOnce(reason);
+    }
     return status && typeof status === 'object'
       ? { ...status, reason, coalesced: true }
       : status;
@@ -648,7 +788,11 @@ async function ensureSystemDomainProxyForRuntimeOnce(reason = 'manual') {
     return disableSystemDomainProxyForRuntime(`${reason}-not-connected`);
   }
   try {
-    const reverseProxyRoutes = await systemPacReverseProxyRoutes();
+    const backgroundRefresh = isBackgroundSystemDomainProxyReason(reason);
+    const reverseProxyRoutes = await systemPacReverseProxyRoutes({
+      allowWarnings: !backgroundRefresh,
+      timeoutMs: backgroundRefresh ? SYSTEM_DOMAIN_PROXY_ROUTE_REFRESH_TIMEOUT_MS : 5000
+    });
     const domains = uniqueStrings([
       ...splitDnsDomains(runtime?.config),
       ...reverseProxyRoutes.map((route) => route.host).filter(Boolean)
@@ -671,14 +815,38 @@ async function ensureSystemDomainProxyForRuntimeOnce(reason = 'manual') {
     const policySignature = systemDomainProxyPolicySignature(policy);
     const skipped = maybeSkipSystemDomainProxyApply(reason, policySignature);
     if (skipped) return skipped;
-    const status = await systemDomainProxyManager.apply(policy);
-    lastSystemDomainProxyPolicySignature = policySignature;
-    if (isSystemDomainProxyAuthorizationCanceled(status)) {
-      lastSystemDomainProxyAuthorizationCanceledSignature = policySignature;
-    } else if (status?.applied && !status?.error && !status?.resolverError) {
-      lastSystemDomainProxyAuthorizationCanceledSignature = null;
+    if (!shouldApplySystemDomainProxyForReason(reason)) {
+      return currentSystemDomainProxyStatus(reason, {
+        skipped: true,
+        skipReason: 'background-refresh-no-privileged-apply',
+        domains,
+        reverseProxyRoutes
+      });
     }
-    return status;
+    try {
+      const status = await systemDomainProxyManager.apply(policy);
+      lastSystemDomainProxyPolicySignature = policySignature;
+      if (isSystemDomainProxyAuthorizationCanceled(status)) {
+        lastSystemDomainProxyAuthorizationCanceledSignature = policySignature;
+      } else if (status?.applied && !status?.error && !status?.resolverError) {
+        lastSystemDomainProxyAuthorizationCanceledSignature = null;
+      }
+      return status;
+    } catch (err) {
+      lastSystemDomainProxyPolicySignature = policySignature;
+      if (isSystemDomainProxyAuthorizationCanceled(err)) {
+        lastSystemDomainProxyAuthorizationCanceledSignature = policySignature;
+      }
+      return {
+        supported: true,
+        applied: false,
+        platform: process.platform,
+        reason,
+        domains,
+        reverseProxyRoutes,
+        error: errorMessage(err)
+      };
+    }
   } catch (err) {
     return {
       supported: true,
@@ -696,6 +864,7 @@ async function disableSystemDomainProxyForRuntime(reason = 'manual') {
   lastSystemDomainProxyPolicySignature = null;
   lastSystemDomainProxyAuthorizationCanceledSignature = null;
   lastSystemPacReverseProxyRoutes = [];
+  lastSystemPacReverseProxyRoutesWarningAt = 0;
   try {
     return await systemDomainProxyManager.disable(reason);
   } catch (err) {
@@ -735,23 +904,27 @@ async function refreshSystemDomainProxyForRuntime(reason = 'manual') {
   systemDomainProxyRefreshInFlight = true;
   try {
     const status = await ensureSystemDomainProxyForRuntime(reason);
-    const signature = systemDomainProxyStatusSignature(status);
-    if (signature && signature !== lastSystemDomainProxySignature) {
-      lastSystemDomainProxySignature = signature;
-      runtime.connection = {
-        ...runtime.connection,
-        diagnostics: {
-          ...(runtime.connection.diagnostics || {}),
-          systemDomainProxy: status
-        }
-      };
-      touchRuntime(`system domain proxy refreshed: ${reason}`);
-      await saveAndBroadcast();
-    }
+    await recordSystemDomainProxyDiagnostics(status, `system domain proxy refreshed: ${reason}`);
     return status;
   } finally {
     systemDomainProxyRefreshInFlight = false;
   }
+}
+
+async function recordSystemDomainProxyDiagnostics(status, touchReason) {
+  const signature = systemDomainProxyStatusSignature(status);
+  if (!signature || signature === lastSystemDomainProxySignature) return false;
+  lastSystemDomainProxySignature = signature;
+  runtime.connection = {
+    ...runtime.connection,
+    diagnostics: {
+      ...(runtime.connection?.diagnostics || {}),
+      systemDomainProxy: status
+    }
+  };
+  touchRuntime(touchReason);
+  await saveAndBroadcast();
+  return true;
 }
 
 function systemDomainProxyStatusSignature(status) {
@@ -807,12 +980,25 @@ function systemDomainProxyPolicySignature(policy) {
 }
 
 function maybeSkipSystemDomainProxyApply(reason, policySignature) {
-  if (reason !== 'route-refresh' || !policySignature || policySignature !== lastSystemDomainProxyPolicySignature) {
+  if (!isBackgroundSystemDomainProxyReason(reason) || !policySignature || policySignature !== lastSystemDomainProxyPolicySignature) {
     return null;
   }
   const status = typeof systemDomainProxyManager?.status === 'function'
     ? systemDomainProxyManager.status()
     : null;
+  if (
+    policySignature === lastSystemDomainProxyAuthorizationCanceledSignature
+    && (!status || typeof status !== 'object')
+  ) {
+    return {
+      supported: true,
+      applied: false,
+      platform: process.platform,
+      reason,
+      skipped: true,
+      skipReason: 'authorization-canceled'
+    };
+  }
   if (!status || typeof status !== 'object') return null;
   const resolverMode = nullableString(status.systemResolverMode);
   const resolverDomains = arrayValue(status.resolverDomains, []);
@@ -825,19 +1011,44 @@ function maybeSkipSystemDomainProxyApply(reason, policySignature) {
   }
   if (
     policySignature === lastSystemDomainProxyAuthorizationCanceledSignature
-    && isSystemDomainProxyAuthorizationCanceled(status)
   ) {
     return {
       ...status,
       reason,
-      skipped: true
+      skipped: true,
+      skipReason: 'authorization-canceled'
     };
   }
   return null;
 }
 
+function isBackgroundSystemDomainProxyReason(reason) {
+  const text = String(reason || '');
+  return text === 'route-refresh' || text === 'app-startup' || text === 'app-startup-refresh';
+}
+
+function shouldApplySystemDomainProxyForReason(reason) {
+  const text = String(reason || '');
+  return text === 'post-connect' || text === 'network-change' || text.startsWith('manual');
+}
+
+function currentSystemDomainProxyStatus(reason, extra = {}) {
+  const status = typeof systemDomainProxyManager?.status === 'function'
+    ? systemDomainProxyManager.status()
+    : null;
+  return {
+    supported: true,
+    platform: process.platform,
+    ...(status && typeof status === 'object' ? status : {}),
+    reason,
+    ...extra
+  };
+}
+
 function isSystemDomainProxyAuthorizationCanceled(status) {
-  const text = `${status?.error || ''}\n${status?.resolverError || ''}`;
+  const text = status instanceof Error
+    ? `${status.message || ''}\n${status.stack || ''}`
+    : `${status?.error || ''}\n${status?.resolverError || ''}`;
   return /authorization canceled|administrator authorization canceled|user canceled|用户已取消|\(-128\)/i.test(text);
 }
 
@@ -950,13 +1161,14 @@ function systemPacGatewayTargetUrl() {
   return `http://${host}:${safePort}`;
 }
 
-async function systemPacReverseProxyRoutes() {
+async function systemPacReverseProxyRoutes(options = {}) {
   const baseUrls = systemPacReverseProxyRouteBaseUrls();
   const failures = [];
+  const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 5000;
   for (const baseUrl of baseUrls) {
     try {
       const payload = await requestJson(joinApiUrl(baseUrl, '/internal/v1/dns/reverse-proxy/routes'), {
-        timeoutMs: 5000,
+        timeoutMs,
         bootstrapResolveMode: runtime?.config?.bootstrapResolveMode
       });
       const routes = arrayValue(payload?.routes, [])
@@ -969,13 +1181,32 @@ async function systemPacReverseProxyRoutes() {
     }
   }
   if (lastSystemPacReverseProxyRoutes.length > 0) {
-    console.warn('[mx-h2i] reverse proxy routes unavailable for local edge; using cached routes:', failures.join('; '));
+    warnSystemPacReverseProxyRoutesUnavailable(
+      '[mx-h2i] reverse proxy routes unavailable for local edge; using cached routes:',
+      failures,
+      options
+    );
     return lastSystemPacReverseProxyRoutes;
   }
   if (failures.length > 0) {
-    console.warn('[mx-h2i] reverse proxy routes unavailable for local edge:', failures.join('; '));
+    warnSystemPacReverseProxyRoutesUnavailable(
+      '[mx-h2i] reverse proxy routes unavailable for local edge:',
+      failures,
+      options
+    );
   }
   return [];
+}
+
+function warnSystemPacReverseProxyRoutesUnavailable(prefix, failures, options = {}) {
+  if (!failures.length) return;
+  const now = Date.now();
+  const allowWarnings = options.allowWarnings !== false;
+  if (!allowWarnings && now - lastSystemPacReverseProxyRoutesWarningAt < SYSTEM_DOMAIN_PROXY_ROUTE_WARNING_MS) {
+    return;
+  }
+  lastSystemPacReverseProxyRoutesWarningAt = now;
+  console.warn(prefix, failures.join('; '));
 }
 
 function systemPacReverseProxyRouteBaseUrls() {

@@ -8,14 +8,14 @@
   "main": "src/main.cjs",
   "scripts": {
     "setup": "node scripts/dev-mode.mjs local",
-    "dev": "node scripts/dev-mode.mjs local && electron-builder install-app-deps && node scripts/run-electron-dev.mjs",
+    "dev": "node scripts/dev-mode.mjs local && node scripts/run-clean-env.mjs electron-builder install-app-deps && node scripts/run-electron-dev.mjs",
     "start": "pnpm dev",
     "build": "pnpm run package",
-    "check": "node --check scripts/dev-mode.mjs && node --check scripts/run-electron-dev.mjs && node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check electron-builder.config.cjs",
-    "package": "node scripts/dev-mode.mjs local && pnpm run check && electron-builder --config electron-builder.config.cjs --dir",
-    "make": "node scripts/dev-mode.mjs local && pnpm run check && electron-builder --config electron-builder.config.cjs",
-    "make:mac:dmg": "node scripts/dev-mode.mjs local && pnpm run check && electron-builder --config electron-builder.config.cjs --mac dmg --universal",
-    "make:win": "node scripts/dev-mode.mjs local && pnpm run check && electron-builder --config electron-builder.config.cjs --win --x64"
+    "check": "node --check scripts/dev-mode.mjs && node --check scripts/node-env.mjs && node --check scripts/run-clean-env.mjs && node --check scripts/run-electron-dev.mjs && node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check electron-builder.config.cjs",
+    "package": "node scripts/dev-mode.mjs local && pnpm run check && node scripts/run-clean-env.mjs electron-builder --config electron-builder.config.cjs --dir",
+    "make": "node scripts/dev-mode.mjs local && pnpm run check && node scripts/run-clean-env.mjs electron-builder --config electron-builder.config.cjs",
+    "make:mac:dmg": "node scripts/dev-mode.mjs local && pnpm run check && node scripts/run-clean-env.mjs electron-builder --config electron-builder.config.cjs --mac dmg --universal",
+    "make:win": "node scripts/dev-mode.mjs local && pnpm run check && node scripts/run-clean-env.mjs electron-builder --config electron-builder.config.cjs --win --x64"
   },
   "dependencies": {
     "@qpjoy/electron-launcher": "workspace:*"
