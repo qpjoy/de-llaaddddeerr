@@ -94,9 +94,33 @@ MX_SHADOW_BUILDKIT_KEEP_STORAGE=2GB \
 MX_SHADOW_BUILDKIT_PRUNE_UNTIL=24h \
   bash scripts/manage.sh ops internal-production deploy
 
+# 停k8s
+bash scripts/manage.sh ops internal-production down
+# 停宿主机侧 mx-internal-svc 和 native host-runner 
+systemctl stop wg-quick@mx-internal-svc mx-internal-host-runner
+
 bash scripts/manage.sh ops internal-production status
 bash scripts/manage.sh ops internal-production gateway-smoke
 curl -fsS http://127.0.0.1:18090/healthz
+
+# 重启k8s里的Internal API
+kubectl -n mx-internal-shadow rollout restart deployment/mx-launcher-internal
+kubectl -n mx-internal-shadow rollout status deployment/mx-launcher-internal --timeout=180s
+
+# rollout gateway
+kubectl -n mx-internal-shadow rollout restart daemonset/mx-internal-gateway
+kubectl -n mx-internal-shadow rollout status daemonset/mx-internal-gateway --timeout=180s
+
+# rollout CoreDNS
+kubectl -n mx-dns rollout restart deployment/mx-internal-coredns
+kubectl -n mx-dns rollout status deployment/mx-internal-coredns --timeout=180s
+
+# 验证
+kubectl -n mx-internal-shadow get pods -o wide
+kubectl -n mx-internal-shadow logs deployment/mx-launcher-internal --tail=120
+curl --noproxy '*' -v http://127.0.0.1:18090/healthz
+curl --noproxy '*' -v http://10.88.88.88:18090/healthz
+
 
 # Oversea SSH Profile
 # Worker URL 是 Internal worker 读取 job、回写 report 的 Internal API base。

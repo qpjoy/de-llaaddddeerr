@@ -705,6 +705,23 @@ k8s_node_disk_pressure_report() {
   return 0
 }
 
+k8s_repair_released_local_pv() {
+  local pv="$1"
+  local phase
+  phase="$(kubectl get pv "$pv" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  case "$phase" in
+    Released|Failed)
+      say "repair released local PV $pv ($phase); hostPath data is retained"
+      kubectl delete pv "$pv" --ignore-not-found
+      ;;
+  esac
+}
+
+k8s_repair_internal_local_pvs() {
+  k8s_repair_released_local_pv mx-internal-postgres-local-pv
+  k8s_repair_released_local_pv mx-launcher-internal-ssh-local-pv
+}
+
 k8s_job_diagnostics() {
   local ns="$1"
   local job="$2"
@@ -723,6 +740,30 @@ k8s_job_diagnostics() {
   fi
   [ -n "$selector" ] && say "$job diagnostics: selector $selector"
   say "$job diagnostics: recent namespace events"
+  kubectl -n "$ns" get events --sort-by=.lastTimestamp || true
+}
+
+k8s_workload_diagnostics() {
+  local ns="$1"
+  local kind="$2"
+  local name="$3"
+  local selector pods pod
+  say "$kind/$name diagnostics: workload"
+  kubectl -n "$ns" get "$kind/$name" -o wide || true
+  kubectl -n "$ns" describe "$kind/$name" || true
+  selector="$(kubectl -n "$ns" get "$kind/$name" -o jsonpath='{range $k,$v := .spec.selector.matchLabels}{$k}{"="}{$v}{","}{end}' 2>/dev/null | sed 's/,$//' || true)"
+  if [ -n "$selector" ]; then
+    say "$kind/$name diagnostics: pods"
+    kubectl -n "$ns" get pods -l "$selector" -o wide || true
+    pods="$(kubectl -n "$ns" get pods -l "$selector" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+    for pod in $pods; do
+      say "$kind/$name diagnostics: pod $pod"
+      kubectl -n "$ns" describe pod "$pod" || true
+      say "$kind/$name diagnostics: logs $pod"
+      kubectl -n "$ns" logs "$pod" --all-containers --tail=200 || true
+    done
+  fi
+  say "$kind/$name diagnostics: recent namespace events"
   kubectl -n "$ns" get events --sort-by=.lastTimestamp || true
 }
 
@@ -782,6 +823,7 @@ k8s_apply() {
   say "wait internal coredns rollout"
   kubectl -n mx-dns rollout status deployment/mx-internal-coredns --timeout=180s
   say "apply local persistent volumes"
+  k8s_repair_internal_local_pvs
   kubectl apply -f "$dir/18-local-pv.yaml"
   say "create/update db secret from local env"
   k8s_apply_db_secret "$ns"
@@ -815,11 +857,17 @@ k8s_apply() {
   say "apply internal api"
   kubectl apply -f "$dir/40-internal-api.yaml"
   say "wait internal api rollout"
-  kubectl -n "$ns" rollout status deployment/mx-launcher-internal --timeout=180s
+  if ! kubectl -n "$ns" rollout status deployment/mx-launcher-internal --timeout=180s; then
+    k8s_workload_diagnostics "$ns" deployment mx-launcher-internal
+    die "internal api rollout failed"
+  fi
   say "apply internal gateway"
   k8s_apply_internal_gateway "$target"
   say "wait internal gateway rollout"
-  kubectl -n "$ns" rollout status daemonset/mx-internal-gateway --timeout=180s
+  if ! kubectl -n "$ns" rollout status daemonset/mx-internal-gateway --timeout=180s; then
+    k8s_workload_diagnostics "$ns" daemonset mx-internal-gateway
+    die "internal gateway rollout failed"
+  fi
   say "k8s apply OK"
 }
 
