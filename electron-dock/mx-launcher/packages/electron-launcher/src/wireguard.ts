@@ -4,12 +4,16 @@ import { join, resolve } from 'node:path';
 import {
   buildHdoRouteProbe,
   excludeLocalRoutesFromAllowedIps,
+  getDarwinWireGuardLaunchDaemonStatus,
   getWireGuardTunnelStatus,
+  installDarwinWireGuardLaunchDaemon,
   localCidrsForAllowedIpExclusion,
   repairWireGuardTunnelRoutes,
   renderWireGuardInterface,
   resolveWireGuardConnectionRuntime,
-  setWireGuardTunnelState
+  setWireGuardTunnelState,
+  uninstallDarwinWireGuardLaunchDaemon,
+  type WireGuardServiceIdentity
 } from '@qpjoy/electron-core-wireguard';
 import type { LauncherRoutePlan } from '@qpjoy/mx-launcher-core';
 
@@ -23,6 +27,9 @@ export interface ElectronLauncherWireGuardRuntimeOptions {
   installDir?: string;
   bundledDir?: string | null;
   allowSystemFallback?: boolean;
+  darwinLaunchDaemon?: boolean | null;
+  darwinServiceIdentity?: WireGuardServiceIdentity;
+  fallbackToAppManaged?: boolean | null;
 }
 
 export interface ElectronLauncherWireGuardPeerInput extends ElectronLauncherWireGuardRuntimeOptions {
@@ -257,6 +264,34 @@ export async function connectLauncherWireGuardPeer(
   const peer = prepareLauncherWireGuardPeer(input);
   const runtime = resolveLauncherWireGuardRuntime(input);
   const action = input.action ?? 'restart';
+  if (action !== 'down' && shouldUseDarwinLaunchDaemon(input, runtime)) {
+    const launchDaemon = await installDarwinWireGuardLaunchDaemon({
+      runtime,
+      configPath: peer.configPath,
+      serviceIdentity: launcherDarwinServiceIdentity(input)
+    });
+    const status = await waitForLauncherWireGuardStatus(runtime, peer.configPath);
+    const missingRoutes = Array.isArray(status?.missingRoutes) ? status.missingRoutes.length : 0;
+    const ok = launchDaemon.ok === true && status?.active === true && missingRoutes === 0;
+    if (launchDaemon.ok || isDarwinAuthorizationCancelled(launchDaemon) || input.fallbackToAppManaged === false) {
+      return {
+        ok,
+        action,
+        peer,
+        runtime,
+        status,
+        launchDaemon,
+        tunnel: {
+          ok: launchDaemon.ok,
+          configPath: peer.configPath,
+          routeLogPath: launchDaemon.routeLogPath,
+          routeLogTail: launchDaemon.routeLogTail,
+          message: launchDaemon.message
+        },
+        message: ok ? launchDaemon.message : launcherWireGuardNotReadyMessage(launchDaemon, status)
+      };
+    }
+  }
   const tunnel = await setWireGuardTunnelState({
     runtime,
     configPath: peer.configPath,
@@ -310,6 +345,37 @@ export async function stopLauncherWireGuardPeer(input: ElectronLauncherWireGuard
     };
   }
   const runtime = resolveLauncherWireGuardRuntime(input);
+  if (shouldUseDarwinLaunchDaemon(input, runtime)) {
+    const launchDaemonStatus = getDarwinWireGuardLaunchDaemonStatus({
+      runtime,
+      configPath,
+      serviceIdentity: launcherDarwinServiceIdentity(input)
+    });
+    if (launchDaemonStatus.installed || launchDaemonStatus.loaded || launchDaemonStatus.running) {
+      const launchDaemon = await uninstallDarwinWireGuardLaunchDaemon({
+        runtime,
+        configPath,
+        serviceIdentity: launcherDarwinServiceIdentity(input)
+      });
+      const status = safeWireGuardStatus(runtime, configPath);
+      return {
+        ok: launchDaemon.ok === true,
+        skipped: false,
+        configPath,
+        runtime,
+        status,
+        launchDaemon,
+        tunnel: {
+          ok: launchDaemon.ok,
+          configPath,
+          routeLogPath: launchDaemon.routeLogPath,
+          routeLogTail: launchDaemon.routeLogTail,
+          message: launchDaemon.message
+        },
+        message: launchDaemon.message
+      };
+    }
+  }
   const tunnel = await setWireGuardTunnelState({
     runtime,
     configPath,
@@ -390,6 +456,35 @@ export async function recoverLauncherWireGuardPeer(
       recoveryReason: input.reason ?? null
     };
   }
+  if (shouldUseDarwinLaunchDaemon(input, runtime)) {
+    const launchDaemon = await installDarwinWireGuardLaunchDaemon({
+      runtime,
+      configPath,
+      serviceIdentity: launcherDarwinServiceIdentity(input)
+    });
+    const nextStatus = await waitForLauncherWireGuardStatus(runtime, configPath);
+    const nextMissingRouteCount = Array.isArray(nextStatus?.missingRoutes) ? nextStatus.missingRoutes.length : 0;
+    const ok = launchDaemon.ok === true && nextStatus?.active === true && nextMissingRouteCount === 0;
+    if (launchDaemon.ok || isDarwinAuthorizationCancelled(launchDaemon) || input.fallbackToAppManaged === false) {
+      return {
+        ok,
+        action: 'launchdaemon-recover',
+        recoveryReason: input.reason ?? null,
+        configPath,
+        runtime,
+        status: nextStatus,
+        launchDaemon,
+        tunnel: {
+          ok: launchDaemon.ok,
+          configPath,
+          routeLogPath: launchDaemon.routeLogPath,
+          routeLogTail: launchDaemon.routeLogTail,
+          message: launchDaemon.message
+        },
+        message: ok ? launchDaemon.message : launcherWireGuardNotReadyMessage(launchDaemon, nextStatus)
+      };
+    }
+  }
   const tunnel = await setWireGuardTunnelState({
     runtime,
     configPath,
@@ -421,7 +516,22 @@ export function getLauncherWireGuardPeerStatus(input: ElectronLauncherWireGuardR
     };
   }
   const runtime = resolveLauncherWireGuardRuntime(input);
-  return safeWireGuardStatus(runtime, configPath);
+  const status = safeWireGuardStatus(runtime, configPath);
+  if (!shouldUseDarwinLaunchDaemon(input, runtime)) return status;
+  const launchDaemon = getDarwinWireGuardLaunchDaemonStatus({
+    runtime,
+    configPath,
+    serviceIdentity: launcherDarwinServiceIdentity(input)
+  });
+  return {
+    ...(status ?? {
+      ok: false,
+      active: false,
+      configPath,
+      error: 'WireGuard status unavailable'
+    }),
+    launchDaemon
+  };
 }
 
 export function probeLauncherWireGuardRoute(input: ElectronLauncherWireGuardProbeInput) {
@@ -521,6 +631,31 @@ function safeWireGuardStatus(
   } catch {
     return null;
   }
+}
+
+function shouldUseDarwinLaunchDaemon(
+  input: ElectronLauncherWireGuardRuntimeOptions,
+  runtime: ReturnType<typeof resolveWireGuardConnectionRuntime>
+): boolean {
+  return input.darwinLaunchDaemon !== false
+    && runtime.platform === 'darwin'
+    && runtime.method === 'darwin-userspace';
+}
+
+function launcherDarwinServiceIdentity(input: ElectronLauncherWireGuardRuntimeOptions): WireGuardServiceIdentity {
+  return input.darwinServiceIdentity ?? {
+    displayName: 'Electron Launcher WireGuard',
+    darwinLaunchDaemonLabelPrefix: 'com.qpjoy.electron-launcher.wireguard',
+    darwinSupportRoot: '/Library/Application Support/QPJoy/Electron Launcher',
+    darwinLogDir: '/Library/Logs/QPJoy-Electron-Launcher',
+    darwinDaemonScriptName: 'electron-launcher-wireguard-daemon.sh',
+    staleDarwinLaunchDaemonLabelPrefixes: ['com.qpjoy.electron-launcher.wireguard']
+  };
+}
+
+function isDarwinAuthorizationCancelled(result: unknown): boolean {
+  const message = stringValue(objectRecord(result).message) || stringValue(objectRecord(result).error) || '';
+  return /user canceled|用户已取消|-128/i.test(message);
 }
 
 function launcherWireGuardNotReadyMessage(tunnel: unknown, status: unknown): string {

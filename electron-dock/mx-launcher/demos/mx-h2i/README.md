@@ -59,6 +59,16 @@ prefers the Internal fixed IP `10.88.88.88`; Domestic `10.88.0.1` is kept only
 as a relay/cache fallback. Override the port with `MX_H2I_LOCAL_EDGE_PORT` only
 for diagnostics or collision tests.
 
+Startup does not restore stale macOS PAC/split DNS state by default, because
+that repair requires an administrator prompt before the user has chosen to
+connect. Reconnect or disconnect performs the explicit repair path. Set
+`MX_H2I_RESTORE_SYSTEM_PROXY_ON_STARTUP=1` only for break-glass cleanup runs.
+
+On macOS, the WireGuard runtime prefers a product-owned LaunchDaemon
+(`com.qpjoy.mx-h2i.wireguard.*`) after the user approves connect. This mirrors
+the V1 HDO keep-alive path: launchd keeps the tunnel alive across lock, unlock,
+and sleep/resume, while the app process only probes and reports health.
+
 The Electron entry is intentionally light for the reservation phase:
 
 - `src/main.cjs` owns the window, local runtime state, persisted endpoint

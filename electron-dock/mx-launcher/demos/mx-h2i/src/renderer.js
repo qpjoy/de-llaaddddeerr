@@ -354,6 +354,10 @@ function renderWireGuardDiagnostics() {
   const relayFailures = Array.isArray(relayDiag.failures) ? relayDiag.failures : [];
   const directSyncFailures = directSync.status === 'skipped' ? [] : (Array.isArray(directSync.failures) ? directSync.failures : []);
   const directSyncStatus = directSync.status === 'skipped' && directSync.message ? 'relay fallback' : (directSync.status || '-');
+  const launchDaemon = wireGuard.launchDaemon || {};
+  const launchDaemonStatus = launchDaemon.supported
+    ? (launchDaemon.running ? 'running' : launchDaemon.loaded ? 'loaded' : launchDaemon.installed ? 'installed' : 'missing')
+    : '-';
   return `
     <section class="settings-panel">
       <div class="panel-head">
@@ -380,6 +384,7 @@ function renderWireGuardDiagnostics() {
         ${metric('Target', route.targetIp || '10.88.88.88')}
         ${metric('Route dev', route.interfaceName || '-')}
         ${metric('Service', wireGuard.serviceState || (wireGuard.active ? 'active' : '-'))}
+        ${metric('LaunchDaemon', launchDaemonStatus)}
         ${metric('Internal', internalApi.ok ? 'ready' : (internalApi.error || connection.health?.internalApi || 'idle'))}
         ${metric('Relay to lease', relaySummary.routeToLease || '-')}
         ${metric('Relay client', relaySummary.clientPeerConfigured ? `${relaySummary.clientPeerConfigured} / ${relaySummary.clientLatestHandshake || '-'} / ${relaySummary.clientTransfer || '-'}` : '-')}

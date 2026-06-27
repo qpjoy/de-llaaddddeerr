@@ -25,6 +25,14 @@ const DEFAULT_DOMESTIC_DNS_EDGE_PORT = 53;
 const DEFAULT_INTERNAL_DNS_EDGE_PORT = 53;
 const DEFAULT_INTERNAL_GATEWAY_APP_PORT = 80;
 const DEFAULT_SPLIT_DNS_DOMAINS = 'mx.cn mxinfo-inc.cn internal.mx corp.mx h2i.mx';
+const DARWIN_WIREGUARD_SERVICE_IDENTITY = {
+  displayName: 'MX-H2I WireGuard',
+  darwinLaunchDaemonLabelPrefix: 'com.qpjoy.mx-h2i.wireguard',
+  darwinSupportRoot: '/Library/Application Support/QPJoy/MX-H2I',
+  darwinLogDir: '/Library/Logs/QPJoy-MX-H2I',
+  darwinDaemonScriptName: 'mx-h2i-wireguard-daemon.sh',
+  staleDarwinLaunchDaemonLabelPrefixes: ['com.qpjoy.mx-h2i.wireguard']
+};
 const SYSTEM_DOMAIN_PROXY_REFRESH_MS = 30_000;
 const SYSTEM_DOMAIN_PROXY_ROUTE_REFRESH_TIMEOUT_MS = 2200;
 const SYSTEM_DOMAIN_PROXY_ROUTE_WARNING_MS = 60_000;
@@ -168,6 +176,7 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:connect-guest', async () => {
+    await recoverRetainedWireGuardBeforeBootstrap('guest-pre-bootstrap');
     setConnecting('guest');
     await saveAndBroadcast();
     try {
@@ -189,7 +198,7 @@ function registerIpc() {
         feedback: '访客 lease 已由 Internal 下发，并保留 180 天未续租回收。'
       });
     } catch (err) {
-      applyConnectionError('访客连接失败', err);
+      await applyConnectionError('访客连接失败', err);
     }
     await saveAndBroadcast();
     return visibleRuntime();
@@ -204,6 +213,7 @@ function registerIpc() {
       };
       return visibleRuntime();
     }
+    await recoverRetainedWireGuardBeforeBootstrap('employee-pre-bootstrap');
     setConnecting('employee');
     await saveAndBroadcast();
     try {
@@ -232,7 +242,7 @@ function registerIpc() {
         feedback: '员工账号已绑定 Internal User Center，并续租固定 user IP。'
       });
     } catch (err) {
-      applyConnectionError('员工登录失败', err);
+      await applyConnectionError('员工登录失败', err);
     }
     await saveAndBroadcast();
     return visibleRuntime();
@@ -752,7 +762,16 @@ async function initializeSystemDomainProxy() {
       pacPort: localEdgePort(),
       log: console
     });
-    await systemDomainProxyManager.restoreStale('app-startup');
+    if (process.env.MX_H2I_RESTORE_SYSTEM_PROXY_ON_STARTUP === '1') {
+      await systemDomainProxyManager.restoreStale('app-startup');
+    } else {
+      const status = typeof systemDomainProxyManager.status === 'function'
+        ? systemDomainProxyManager.status()
+        : null;
+      if (status?.applied) {
+        console.warn('[mx-h2i] system domain proxy state exists; startup restore skipped to avoid a macOS authorization prompt. Disconnect or reconnect MX-H2I to repair it.');
+      }
+    }
     startSystemDomainProxyRefreshWatcher();
   } catch (err) {
     console.warn('[mx-h2i] system domain proxy unavailable:', errorMessage(err));
@@ -1723,6 +1742,7 @@ function normalizeWireGuardSummary(input) {
     allowedIps: arrayValue(row.allowedIps, []),
     statusError: nullableString(row.statusError),
     serviceState: nullableString(row.serviceState),
+    launchDaemon: normalizeWireGuardLaunchDaemon(row.launchDaemon),
     routeLogPath: nullableString(row.routeLogPath),
     routeLogTail: tailText(nullableString(row.routeLogTail), 1600),
     peers: Array.isArray(row.peers) ? row.peers : [],
@@ -1730,6 +1750,24 @@ function normalizeWireGuardSummary(input) {
     message: nullableString(row.message),
     error: nullableString(row.error),
     updatedAt: nullableString(row.updatedAt) || nowIso()
+  };
+}
+
+function normalizeWireGuardLaunchDaemon(input) {
+  const row = input && typeof input === 'object' ? input : null;
+  if (!row) return null;
+  return {
+    ok: row.ok === true,
+    supported: row.supported === true,
+    installed: row.installed === true,
+    loaded: row.loaded === true,
+    running: row.running === true,
+    label: nullableString(row.label),
+    plistPath: nullableString(row.plistPath),
+    supportDir: nullableString(row.supportDir),
+    daemonScriptPath: nullableString(row.daemonScriptPath),
+    message: nullableString(row.message),
+    error: nullableString(row.error)
   };
 }
 
@@ -1905,6 +1943,22 @@ async function connectLauncherNetwork(input) {
     ...session,
     bootstrapResolution: context.bootstrap
   };
+}
+
+async function recoverRetainedWireGuardBeforeBootstrap(reason) {
+  if (!runtime || !shouldRecoverWireGuardConnection(runtime.connection)) return null;
+  const connection = runtime.connection || {};
+  if (!normalizeRoutePlan(connection.routePlan)) return null;
+  const result = await recoverWireGuardForRuntime(reason, { allowPrivileged: true });
+  if (result?.ready) {
+    runtime.feedback = {
+      tone: 'info',
+      message: '已先恢复本地保留的 WireGuard，接下来通过 Internal overlay 刷新 bootstrap。'
+    };
+    touchRuntime(`wireguard pre-bootstrap ready: ${reason}`);
+    await saveAndBroadcast();
+  }
+  return result;
 }
 
 async function launcherContext() {
@@ -2090,9 +2144,43 @@ async function applyNetworkSession(session, options) {
   }
 }
 
-function applyConnectionError(label, err) {
+async function applyConnectionError(label, err) {
   const previous = retainableConnectionSnapshot(runtime.connection);
   const classified = classifyConnectionError(err);
+  const routePlan = normalizeRoutePlan(previous?.routePlan);
+  if (previous && routePlan && isBootstrapReachabilityState(classified.state)) {
+    const wireGuardResult = await probeWireGuardForConnection({
+      connection: previous,
+      routePlan,
+      internalBaseUrl: previous.internalBaseUrl
+    });
+    runtime.connection = {
+      ...previous,
+      state: wireGuardResult.state,
+      health: wireGuardResult.health,
+      wireGuard: wireGuardResult.wireGuard,
+      domesticPeerSync: previous.domesticPeerSync,
+      diagnostics: {
+        ...wireGuardResult.diagnostics,
+        bootstrapRefresh: {
+          ok: false,
+          state: classified.state,
+          label,
+          message: classified.message,
+          updatedAt: nowIso()
+        }
+      }
+    };
+    runtime.auth = null;
+    runtime.feedback = {
+      tone: wireGuardResult.ready ? 'warning' : 'danger',
+      message: wireGuardResult.ready
+        ? `${label}：bootstrap API 暂不可达，但本地 WireGuard overlay 仍可用；本次没有刷新租约。原始错误：${classified.message}`
+        : `${label}：bootstrap API 暂不可达，且本地 WireGuard 未 ready：${wireGuardResult.message}。原始错误：${classified.message}`
+    };
+    touchRuntime(`${label} bootstrap refresh failed`);
+    return;
+  }
   runtime.connection = {
     ...(previous || idleConnection()),
     state: classified.state,
@@ -2104,6 +2192,10 @@ function applyConnectionError(label, err) {
     message: `${label}：${classified.message}`
   };
   touchRuntime(`${label} failed`);
+}
+
+function isBootstrapReachabilityState(state) {
+  return state === 'network-unavailable' || state === 'server-unavailable';
 }
 
 async function startWireGuardForSession(input) {
@@ -2625,7 +2717,9 @@ function wireGuardRuntimeOptions() {
   return {
     userDataDir: app.getPath('userData'),
     profileName: WIREGUARD_PROFILE_NAME,
-    allowSystemFallback: false
+    allowSystemFallback: false,
+    darwinLaunchDaemon: true,
+    darwinServiceIdentity: DARWIN_WIREGUARD_SERVICE_IDENTITY
   };
 }
 
@@ -2762,6 +2856,7 @@ function summarizeWireGuardResult(result) {
     allowedIps: arrayValue(peer.allowedIps, arrayValue(status.allowedIps, [])),
     statusError: nullableString(status.error),
     serviceState: nullableString(status.serviceState),
+    launchDaemon: normalizeWireGuardLaunchDaemon(result?.launchDaemon || status.launchDaemon || tunnel.launchDaemon),
     routeLogPath: nullableString(status.routeLogPath) || nullableString(tunnel.routeLogPath),
     routeLogTail: tailText(nullableString(status.routeLogTail) || nullableString(tunnel.routeLogTail), 1600),
     peers: Array.isArray(status.peers) ? status.peers : [],
@@ -2787,6 +2882,7 @@ function summarizeWireGuardStatus(status, connection = {}) {
     allowedIps: arrayValue(status?.allowedIps, arrayValue(previous.allowedIps, arrayValue(connection?.routeCidrs, []))),
     statusError: nullableString(status?.error),
     serviceState: nullableString(status?.serviceState) || nullableString(previous.serviceState),
+    launchDaemon: normalizeWireGuardLaunchDaemon(status?.launchDaemon || previous.launchDaemon),
     routeLogPath: nullableString(status?.routeLogPath) || nullableString(previous.routeLogPath),
     routeLogTail: tailText(nullableString(status?.routeLogTail) || nullableString(previous.routeLogTail), 1600),
     peers: Array.isArray(status?.peers) ? status.peers : (Array.isArray(previous.peers) ? previous.peers : []),
@@ -2898,6 +2994,7 @@ async function resolveBootstrapBaseUrl(config) {
 async function resolveBootstrapEndpoint(config) {
   const requestedMode = normalizeBootstrapResolveMode(config?.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode);
   const seeds = [
+    retainedOverlayBootstrapBaseUrl(config),
     normalizeBaseUrl(process.env.MX_H2I_BOOTSTRAP_BASE_URL),
     normalizeBaseUrl(config.bootstrapApiBaseUrl),
     defaultBootstrapApiBaseUrl(),
@@ -2929,12 +3026,35 @@ async function resolveBootstrapEndpoint(config) {
   throw new Error(`无法连接 bootstrap API：${summarizeBootstrapProbeFailures(failures)}`);
 }
 
+function retainedOverlayBootstrapBaseUrl(config) {
+  const connection = runtime?.connection || {};
+  const routePlan = normalizeRoutePlan(connection.routePlan);
+  if (!routePlan) return null;
+  if (!shouldPreferRetainedOverlayBootstrap(connection)) return null;
+  return internalOverlayBaseUrl(routePlan, connection.internalBaseUrl || config?.internalApiBaseUrl);
+}
+
+function shouldPreferRetainedOverlayBootstrap(connection) {
+  if (!connection) return false;
+  if (connection.state === 'connected' || connection.state === 'tunnel-only') return true;
+  if (connection.health?.wireGuard === 'ready') return true;
+  if (connection.wireGuard?.active === true) return true;
+  return false;
+}
+
 function bootstrapResolveAttempts(candidate, config) {
   const mode = normalizeBootstrapResolveMode(config?.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode);
   const hasHostOverride = Boolean(hostResolveOverride(candidate, { bootstrapResolveMode: 'env-only' }));
   if (mode === 'env-only') return ['env-only'];
   if (mode === 'dns-only') return ['dns-only'];
   if (mode === 'system-only') return ['system-only'];
+  if (bootstrapCandidateShouldPreferDirect(candidate)) {
+    return uniqueValues([
+      'dns-only',
+      ...(hasHostOverride ? ['env-only'] : []),
+      'system-only'
+    ]);
+  }
   if (mode === 'dns-first') return uniqueValues([
     'dns-only',
     ...(hasHostOverride ? ['env-only'] : []),
@@ -2945,6 +3065,15 @@ function bootstrapResolveAttempts(candidate, config) {
     'system-only',
     'dns-only'
   ]);
+}
+
+function bootstrapCandidateShouldPreferDirect(candidate) {
+  try {
+    const hostname = new URL(candidate).hostname;
+    return hostname === 'localhost' || net.isIP(hostname) !== 0;
+  } catch {
+    return false;
+  }
 }
 
 function bootstrapBaseUrlCandidates(seeds) {
