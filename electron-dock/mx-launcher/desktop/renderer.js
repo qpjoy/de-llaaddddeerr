@@ -3843,6 +3843,9 @@ function renderInternalPeerWorkbench(pipelines) {
   const directUi = internalPeerDirectUiState(directSettings, runtimeStatus);
   const directStatus = directUi.status;
   const directLabel = directUi.label;
+  const wgServiceLabel = runtimeStatus?.ownership?.owner === 'host-systemd'
+    ? 'host systemd wg-quick / mx-internal-svc'
+    : '@qpjoy/electron-core-wireguard / mx-internal-svc';
   const handoffDisabled = state.internalPeer.busy || Boolean(materializeAction) || Boolean(endpointBlockedReason);
   const materializeDisabled = state.internalPeer.materializeBusy || !materializeAction?.allowed || Boolean(endpointBlockedReason);
   const keySyncDisabled = state.internalPeer.syncBusy || Boolean(endpointBlockedReason);
@@ -3862,7 +3865,11 @@ function renderInternalPeerWorkbench(pipelines) {
         ? 'blocked'
         : runtimeBlocked
           ? 'blocked'
-          : result?.status || (pipeline.health === 'passed' ? 'ready' : pipeline.health);
+          : runtimeStatus?.status === 'passed'
+            ? 'passed'
+            : runtimeStatus?.status === 'ready'
+              ? 'ready'
+              : result?.status || (pipeline.health === 'passed' ? 'ready' : pipeline.health);
   const handoffHeading = materializeAction
     ? 'Domestic WG materialize required'
     : endpointBlockedReason
@@ -3873,7 +3880,9 @@ function renderInternalPeerWorkbench(pipelines) {
           ? 'handoff blocked'
           : runtimeBlocked
             ? 'runtime host blocked'
-            : 'Generate Internal peer handoff';
+            : runtimeStatus?.status === 'passed'
+              ? 'Internal service peer ready'
+              : 'Generate Internal peer handoff';
   const materializeFeedback = materializeAction && !feedback
     ? { kind: materializeAction.allowed ? 'warning' : 'error', message: materializeAction.allowed ? 'Materialize Domestic WG before generating handoff' : materializeAction.reason || 'Domestic WG materialize is locked', detail: null }
     : endpointBlockedReason && !feedback
@@ -3927,7 +3936,7 @@ function renderInternalPeerWorkbench(pipelines) {
         <h4>mx-internal-service-peer</h4>
         <p>${escapeHtml(site.siteId)} supplies the relay endpoint; Internal runtime host receives 10.88.88.88 after Install / Restart.</p>
       </div>
-      <span class="health-chip" data-health="${escapeHtml(pipeline.health)}">${escapeHtml(pipeline.health)}</span>
+      <span class="health-chip" data-health="${escapeHtml(panelStatus)}">${escapeHtml(panelStatus)}</span>
     </section>
     <div class="site-facts">
       <span><strong>10.88.88.88</strong><small>Internal service IP</small></span>
@@ -3968,7 +3977,7 @@ function renderInternalPeerWorkbench(pipelines) {
         <span class="health-chip" data-health="${escapeHtml(directStatus === 'disabled' ? 'ready' : directStatus)}">${escapeHtml(directLabel)}</span>
       </div>
       <div class="domestic-relay-grid">
-        <span><small>WG service</small><strong>@qpjoy/electron-core-wireguard / mx-internal-svc</strong></span>
+        <span><small>WG service</small><strong>${escapeHtml(wgServiceLabel)}</strong></span>
         <span data-status="${escapeHtml(directStatus === 'disabled' ? 'ready' : directStatus)}"><small>direct listener</small><strong>${escapeHtml(directUi.gridValue)}</strong></span>
         <span><small>native runner command</small><strong>${escapeHtml(hostRunnerCommand)}</strong></span>
         <span><small>apply artifact</small><strong>artifacts/site-slots/domestic/mx-internal-service-peer-apply.sh</strong></span>
@@ -4030,15 +4039,15 @@ function internalPeerDirectUiState(directSettings, runtimeStatus = null) {
   }
   if (runtime?.status === 'passed') {
     return {
-      status: directSettings.endpoint ? 'passed' : 'blocked',
-      label: directSettings.endpoint ? 'direct ready' : 'endpoint required',
+      status: directSettings.endpoint ? 'passed' : 'ready',
+      label: directSettings.endpoint ? 'direct ready' : 'relay path ready',
       detail: `enabled / listening ${livePort || configuredPort}, ${endpointText}`,
       gridValue: `ListenPort ${livePort || configuredPort}`
     };
   }
   return {
-    status: directSettings.endpoint ? 'ready' : 'blocked',
-    label: directSettings.endpoint ? 'direct endpoint ready' : 'endpoint required',
+    status: 'ready',
+    label: directSettings.endpoint ? 'direct endpoint ready' : 'relay endpoint pending',
     detail: `enabled / configured ${configuredPort}, ${endpointText}`,
     gridValue: `configured ${configuredPort}`
   };

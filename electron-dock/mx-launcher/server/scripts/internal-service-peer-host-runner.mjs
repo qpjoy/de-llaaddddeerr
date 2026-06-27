@@ -1177,7 +1177,7 @@ async function buildStatus(payload) {
   const interfaceReady = wgShow?.status === 'passed' || coreTunnelReady;
   const linkReady = handshake.status === 'passed' || domesticGatewayPing?.status === 'passed';
   const healthReady = internalHealthz.status === 'passed';
-  const wireGuardRuntimeBlocked = wireGuardCore.status === 'blocked';
+  const wireGuardRuntimeBlocked = applyBackend === 'electron-core-wireguard' && wireGuardCore.status === 'blocked';
   const status = blockedReasons.length > 0 || wireGuardRuntimeBlocked
     ? 'blocked'
     : interfaceReady && linkReady && healthReady
