@@ -39,3 +39,24 @@ spec:
   claimRef:
     namespace: mx-internal-shadow
     name: mx-launcher-internal-ssh
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mx-launcher-site-slots-local-pv
+  labels:
+    app.kubernetes.io/name: mx-launcher-internal
+    app.kubernetes.io/part-of: mx-3ks
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  volumeMode: Filesystem
+  hostPath:
+    path: /var/lib/mx-launcher/k8s/site-slots
+    type: DirectoryOrCreate
+  claimRef:
+    namespace: mx-internal-shadow
+    name: mx-launcher-site-slots

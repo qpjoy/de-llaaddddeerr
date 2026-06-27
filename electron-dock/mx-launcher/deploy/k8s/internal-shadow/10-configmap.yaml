@@ -33,6 +33,8 @@ data:
   MX_INTERNAL_HOST_RUNNER_IMAGE: qpjoy/mx-launcher-server:shadow
   MX_INTERNAL_HOST_RUNNER_IMAGE_PULL_POLICY: Never
   MX_SITE_SLOT_SSH_KEY_DIR: /app/artifacts/ssh
+  SITE_SLOT_ARTIFACT_BASE_DIR: /app/runtime-artifacts/site-slots
+  SITE_SLOT_ARTIFACT_OUTPUT_DIR: /app/runtime-artifacts/site-slots
   AWX_BASE_URL: http://mx-awx-service.mx-awx.svc.cluster.local
   AWX_ORGANIZATION: MX Internal
   AWX_PROJECT: mx-launcher-site-slots

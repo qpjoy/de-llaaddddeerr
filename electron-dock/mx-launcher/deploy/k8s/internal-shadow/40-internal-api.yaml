@@ -14,6 +14,21 @@ spec:
       storage: 256Mi
 ---
 apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mx-launcher-site-slots
+  namespace: mx-internal-shadow
+  labels:
+    app.kubernetes.io/name: mx-launcher-internal
+    app.kubernetes.io/part-of: mx-3ks
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: mx-launcher-internal
@@ -55,6 +70,21 @@ spec:
         app.kubernetes.io/part-of: mx-3ks
     spec:
       serviceAccountName: mx-launcher-internal
+      initContainers:
+        - name: seed-site-slot-artifacts
+          image: qpjoy/mx-launcher-server:shadow
+          imagePullPolicy: Never
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              mkdir -p /app/runtime-artifacts/site-slots
+              if [ ! -f /app/runtime-artifacts/site-slots/domestic/manifest.json ]; then
+                cp -a /app/artifacts/site-slots/. /app/runtime-artifacts/site-slots/
+              fi
+          volumeMounts:
+            - name: site-slots
+              mountPath: /app/runtime-artifacts/site-slots
       containers:
         - name: internal-api
           image: qpjoy/mx-launcher-server:shadow
@@ -105,7 +135,12 @@ spec:
           volumeMounts:
             - name: internal-ssh
               mountPath: /app/artifacts/ssh
+            - name: site-slots
+              mountPath: /app/runtime-artifacts/site-slots
       volumes:
         - name: internal-ssh
           persistentVolumeClaim:
             claimName: mx-launcher-internal-ssh
+        - name: site-slots
+          persistentVolumeClaim:
+            claimName: mx-launcher-site-slots

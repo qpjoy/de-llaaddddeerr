@@ -720,6 +720,7 @@ k8s_repair_released_local_pv() {
 k8s_repair_internal_local_pvs() {
   k8s_repair_released_local_pv mx-internal-postgres-local-pv
   k8s_repair_released_local_pv mx-launcher-internal-ssh-local-pv
+  k8s_repair_released_local_pv mx-launcher-site-slots-local-pv
 }
 
 k8s_job_diagnostics() {
@@ -3680,8 +3681,9 @@ Notes:
     smoke is a development check because it writes smoke fixtures.
   - Keep TCP 18090 private to the Internal host, Internal WG service peer, or a
     trusted LAN. Do not expose PostgreSQL or Docker daemon.
-  - Deploy does not sudo-install or restart mx-internal-svc. To update the
-    Internal service peer routes, materialize/apply the handoff explicitly:
+  - Deploy does not sudo-install or restart mx-internal-svc. Site-slot artifacts
+    are persisted by the mx-launcher-site-slots PV; only when WG keys/routes
+    change should you materialize/apply the handoff explicitly:
     bash scripts/manage.sh ops site-slot materialize-domestic-ready domestic-main
     bash scripts/manage.sh ops site-slot internal-service-peer-handoff apply
   - HDO V1 uses 8080 and hdo-home/hdo-internal; this path does not stop them.

@@ -52,12 +52,16 @@ Postgres 不能像普通 API 那样随便换身份、换盘，所以使用 State
 “服务重启但数据仍在”的真实部署场景。
 
 裸 kubeadm 单节点通常没有默认 StorageClass。`18-local-pv.yaml` 会为 Internal CentOS
-测试/正式主机创建两个 hostPath PV：
+测试/正式主机创建三个 hostPath PV：
 
 - `mx-internal-postgres-local-pv` -> `/var/lib/mx-launcher/k8s/postgres`
 - `mx-launcher-internal-ssh-local-pv` -> `/var/lib/mx-launcher/k8s/internal-ssh`
+- `mx-launcher-site-slots-local-pv` -> `/var/lib/mx-launcher/k8s/site-slots`
 
-它们使用 `Retain` 回收策略，`down` 不删除 PV/PVC，也不删除宿主机目录。
+它们使用 `Retain` 回收策略，`down` 不删除宿主机目录。`deploy` 会自动修复
+`Released` 状态的本地 PV 对象，再重新绑定 PVC。`site-slots` PV 持久化
+Domestic WG materialize、Internal handoff 和 gateway 相关运行态 artifacts，避免
+K8s Pod 重建后重复手工生成。
 
 ### Migration Job
 
