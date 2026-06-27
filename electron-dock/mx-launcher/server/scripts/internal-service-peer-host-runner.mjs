@@ -816,6 +816,36 @@ function buildWireGuardCoreStatus(tools, artifacts) {
   };
 }
 
+function internalServicePeerApplyBackend(tools, wireGuardCore) {
+  const explicit = String(process.env.MX_INTERNAL_SERVICE_WG_APPLY_BACKEND || '').trim().toLowerCase();
+  if (['systemd', 'wg-quick', 'systemd-wg-quick', 'host-systemd'].includes(explicit)) return 'systemd-wg-quick';
+  if (['core', 'electron-core', 'electron-core-wireguard'].includes(explicit)) return 'electron-core-wireguard';
+  if (['script', 'apply-script', 'wg-quick-script'].includes(explicit)) return 'wg-quick-script';
+  if (platform() === 'linux' && tools.systemctl?.available && tools.wgQuick?.available) return 'systemd-wg-quick';
+  if (wireGuardCore?.runtime?.platform === 'darwin') return 'electron-core-wireguard';
+  if (wireGuardCore?.available) return 'electron-core-wireguard';
+  return 'wg-quick-script';
+}
+
+function internalServicePeerApplyBackendBlockedReasons(backend, tools, wireGuardCore) {
+  if (backend === 'systemd-wg-quick') {
+    return [
+      ...(!tools.systemctl?.available ? ['systemctl is required for persistent mx-internal-svc ownership on Linux'] : []),
+      ...(!tools.wgQuick?.available ? ['wg-quick is required for persistent mx-internal-svc ownership on Linux'] : [])
+    ];
+  }
+  if (backend === 'electron-core-wireguard') {
+    return wireGuardCore?.available
+      ? []
+      : [wireGuardCore?.error
+          ? `WireGuard runtime is unavailable on the Internal runtime host: ${wireGuardCore.error}`
+          : 'WireGuard runtime is unavailable on the Internal runtime host'];
+  }
+  return [
+    ...(!tools.wgQuick?.available ? ['wg-quick is required to apply mx-internal-svc with the generated script'] : [])
+  ];
+}
+
 async function healthProbe(url, timeoutMs) {
   const startedAt = Date.now();
   const controller = new AbortController();
@@ -1093,6 +1123,7 @@ async function buildStatus(payload) {
   const proxy = proxyBypassStatus();
   const internalEgress = await buildInternalEgressOnStatus(tools, artifacts);
   const wireGuardCore = buildWireGuardCoreStatus(tools, artifacts);
+  const applyBackend = internalServicePeerApplyBackend(tools, wireGuardCore);
   const wireGuardProbeCommand = wireGuardCore.runtime?.wg?.available
     ? wireGuardCore.runtime.wg.command
     : null;
@@ -1135,11 +1166,7 @@ async function buildStatus(payload) {
     ...configReadiness.blockedReasons,
     ...(!artifacts.applyScriptExists ? [`Internal service peer apply script is missing: ${artifacts.applyScriptPath}`] : []),
     ...(internalEgress.status === 'blocked' ? internalEgress.blockedReasons : []),
-    ...(!wireGuardCore.available
-      ? [wireGuardCore.error
-          ? `WireGuard runtime is unavailable on the Internal runtime host: ${wireGuardCore.error}`
-          : 'WireGuard runtime is unavailable on the Internal runtime host']
-      : [])
+    ...internalServicePeerApplyBackendBlockedReasons(applyBackend, tools, wireGuardCore)
   ];
   const blockedReasons = [
     ...installBlockedReasons,
@@ -1156,7 +1183,6 @@ async function buildStatus(payload) {
     : interfaceReady && linkReady && healthReady
       ? 'passed'
       : 'ready';
-  const installMethod = wireGuardCore.available ? 'electron-core-wireguard' : 'unavailable';
   return {
     status,
     mode: 'internal-service-peer-host-runner-status',
@@ -1187,6 +1213,15 @@ async function buildStatus(payload) {
     proxy,
     configReadiness,
     wireGuardCore,
+    ownership: {
+      owner: applyBackend === 'systemd-wg-quick' ? 'host-systemd' : applyBackend === 'electron-core-wireguard' ? 'host-electron-core-wireguard' : 'host-wg-quick-script',
+      applyBackend,
+      k8sCoupled: false,
+      unit: applyBackend === 'systemd-wg-quick' ? `wg-quick@${interfaceName}.service` : null,
+      summary: applyBackend === 'systemd-wg-quick'
+        ? `mx-internal-svc is owned by host systemd; k8s admin only pushes artifacts and restarts the unit`
+        : 'mx-internal-svc is owned by the host runner runtime; use systemd-wg-quick for production persistence'
+    },
     directListener,
     artifacts,
     interface: {
@@ -1205,14 +1240,16 @@ async function buildStatus(payload) {
     },
     install: {
       available: installBlockedReasons.length === 0,
-      method: installMethod,
+      method: applyBackend,
       applyCommand: `bash scripts/manage.sh ops site-slot internal-service-peer-handoff apply`,
       hostRunnerCommand: nativeHostRunnerInstallCommand,
       requires: [
         internalEgress.required
           ? 'qp-tunnel-cli egress-on on the Internal runtime host for H2O/outbound bootstrap'
           : 'qp-tunnel-cli egress-on is optional for H2O/outbound bootstrap unless MX_INTERNAL_EGRESS_ON_REQUIRED=1',
-        'qp-tunnel-cli with @qpjoy/electron-core-wireguard on the Internal runtime host',
+        applyBackend === 'systemd-wg-quick'
+          ? 'host systemd wg-quick@mx-internal-svc service owns the WireGuard interface independently from k8s'
+          : 'qp-tunnel-cli with @qpjoy/electron-core-wireguard on the Internal runtime host',
         'sudo/root privilege on the Internal runtime host'
       ],
       blockedReasons: installBlockedReasons
@@ -1258,6 +1295,24 @@ async function applyWithWireGuardCore(beforeStatus) {
     stdout: summary?.stdout || '',
     stderr: summary?.stderr || summary?.message || '',
     coreResult: summary
+  };
+}
+
+async function applyWithGeneratedScript(beforeStatus, mode = 'wg-quick-script') {
+  const interfaceName = beforeStatus.interfaceName;
+  const configPath = beforeStatus.artifacts.runtimeConfigPath || defaultConfigPath;
+  const invocation = privilegedCommand('bash', [defaultApplyScriptPath, configPath], {
+    MX_INTERNAL_SERVICE_WG_INTERFACE: interfaceName
+  });
+  const execution = await runCommand(invocation.command, invocation.args, 60000);
+  return {
+    status: execution.status === 'passed' ? 'passed' : 'failed',
+    execution: execution.status === 'passed' ? 'completed' : 'failed',
+    mode,
+    command: `${invocation.command} ${invocation.args.map(shellQuote).join(' ')}`,
+    exitCode: execution.exitCode,
+    stdout: execution.stdout,
+    stderr: execution.stderr
   };
 }
 
@@ -1420,8 +1475,8 @@ async function applyServicePeer(payload) {
     };
   }
 
-  const shouldUseWireGuardCore = beforeStatus.wireGuardCore?.available;
-  if (shouldUseWireGuardCore) {
+  const applyBackend = beforeStatus.ownership?.applyBackend || beforeStatus.install?.method || 'wg-quick-script';
+  if (applyBackend === 'electron-core-wireguard') {
     const execution = await applyWithWireGuardCore(beforeStatus);
     const afterStatus = await buildStatus(payload);
     const status = execution.status === 'passed'
@@ -1446,13 +1501,7 @@ async function applyServicePeer(payload) {
     };
   }
 
-  const interfaceName = beforeStatus.interfaceName;
-  const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
-  const command = isRoot ? 'env' : 'sudo';
-  const args = isRoot
-    ? [`MX_INTERNAL_SERVICE_WG_INTERFACE=${interfaceName}`, 'bash', defaultApplyScriptPath, defaultConfigPath]
-    : ['-n', 'env', `MX_INTERNAL_SERVICE_WG_INTERFACE=${interfaceName}`, 'bash', defaultApplyScriptPath, defaultConfigPath];
-  const execution = await runCommand(command, args, 60000);
+  const execution = await applyWithGeneratedScript(beforeStatus, applyBackend);
   const afterStatus = await buildStatus(payload);
   const status = execution.status === 'passed'
     ? afterStatus.status === 'passed' ? 'passed' : 'ready'
@@ -1463,7 +1512,7 @@ async function applyServicePeer(payload) {
     mode: 'internal-service-peer-host-runner-apply',
     siteId: beforeStatus.siteId,
     planId: beforeStatus.planId,
-    command: `${command} ${args.map(shellQuote).join(' ')}`,
+    command: execution.command,
     exitCode: execution.exitCode,
     stdout: execution.stdout,
     stderr: execution.stderr,

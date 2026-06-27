@@ -540,6 +540,9 @@ Internal API 可以跑在 k8s pod 里，但 WG runtime 必须跑在真实 Intern
 通过 `host.docker.internal:19190` 或部署环境提供的 native host URL 调用它。k8s
 DaemonSet runner 只作为显式启用的 fallback 测试路径，因为 Docker Desktop/LinuxKit 里的
 WireGuard namespace 不等价于 macOS 宿主机，不能用来证明 H2I 链路已在宿主机生效。
+生产 Linux 上 `mx-internal-svc` 的 owner 是宿主机 `wg-quick@mx-internal-svc.service`：
+Admin 只通过 native host-runner 下发配置并 `enable/restart` 这个 systemd unit，K8s
+rollout、Internal API pod 重建或 host-runner 进程重启都不应该停止已经运行的 WG 服务。
 Domestic relay 已经建好后不要反复 New Plan；Internal public key 变化时只同步 Domestic
 peer key，然后重新 Install / Restart Internal service peer。
 
