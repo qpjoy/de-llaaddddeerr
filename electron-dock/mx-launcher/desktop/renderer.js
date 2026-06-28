@@ -8,6 +8,7 @@ const LAUNCHER_FOUNDATION_PRODUCT_ID = 'launcher';
 const MX_INTERNAL_DNS_IP = '10.88.88.88';
 const MX_DOMESTIC_RELAY_IP = '10.88.0.1';
 const MX_LOCAL_EDGE_DNS = '127.0.0.1:2053';
+const INTERNAL_PEER_STATUS_AUTO_REFRESH_MS = 30000;
 
 function isLocalStaticAdminBaseUrl(value) {
   try {
@@ -63,6 +64,7 @@ const api = window.mxLauncher || {
 };
 
 const defaultRelayEnrollmentDeviceId = `desktop-admin-${Date.now().toString(36)}`;
+let internalPeerAutoRefreshTimer = null;
 
 const state = {
   activeView: 'app-center',
@@ -106,7 +108,8 @@ const state = {
     result: null,
     runtimeStatus: null,
     applyResult: null,
-    keySyncResult: null
+    keySyncResult: null,
+    lastStatusAttemptAt: 0
   },
   awxActionDraft: {
     providerId: '',
@@ -3827,6 +3830,7 @@ function renderInternalPeerWorkbench(pipelines) {
   }
   const pipeline = hydratePipelineForWorkbench(site.activePipeline);
   if (!state.selectedPlanId) state.selectedPlanId = pipeline.planId;
+  scheduleInternalPeerRuntimeStatusRefresh(site, pipeline);
   const detailedPipeline = state.currentPipeline?.summary?.planId === pipeline?.planId ? state.currentPipeline : null;
   const plan = detailedPipeline?.plan || pipeline?.plan || {};
   const materializeAction = domesticWgMaterializeActionFromSummary(pipeline);
@@ -4497,34 +4501,123 @@ async function requestInternalPeerRuntimeStatus(site, pipeline) {
   });
 }
 
-async function refreshInternalPeerRuntimeStatus(site, pipeline) {
-  if (state.internalPeer.statusBusy) return;
-  state.internalPeer.statusBusy = true;
-  state.internalPeer.feedback = { kind: 'info', message: 'Checking Internal service peer status', detail: null };
-  if (state.internalPeer.result?.status === 'blocked') {
-    state.internalPeer.result = null;
+function preferredInternalPeerStatusTarget(pipelines) {
+  const sites = deploymentSites(pipelines, 'domestic');
+  const selectedSite = sites.find((item) => item.siteId === state.selectedSiteId) || null;
+  const preferredSite = preferredDeploymentSite(sites, 'domestic');
+  const passedRealSite = sites.find((item) => item.activePipeline?.health === 'passed' && !isSmokeDeploymentSite(item.siteId))
+    || null;
+  const selectedRealSite = selectedSite && !isSmokeDeploymentSite(selectedSite.siteId) ? selectedSite : null;
+  const site = passedRealSite
+    || selectedRealSite
+    || preferredSite
+    || selectedSite
+    || sites[0]
+    || null;
+  if (!site?.activePipeline) return null;
+  return {
+    site,
+    pipeline: hydratePipelineForWorkbench(site.activePipeline)
+  };
+}
+
+function internalPeerRuntimeStatusAgeMs(runtimeStatus = state.internalPeer.runtimeStatus) {
+  const checkedAt = Date.parse(runtimeStatus?.checkedAt || '');
+  if (!Number.isFinite(checkedAt)) return Number.POSITIVE_INFINITY;
+  return Math.max(0, Date.now() - checkedAt);
+}
+
+function internalPeerRuntimeStatusMatches(runtimeStatus, site, pipeline) {
+  if (!runtimeStatus || !site?.siteId || !pipeline?.planId) return false;
+  if (runtimeStatus.siteId && runtimeStatus.siteId !== site.siteId) return false;
+  if (runtimeStatus.planId && runtimeStatus.planId !== pipeline.planId) return false;
+  return true;
+}
+
+function shouldAutoRefreshInternalPeerRuntimeStatus(site, pipeline) {
+  if (!site?.siteId || !pipeline?.planId) return false;
+  if (
+    state.internalPeer.busy
+    || state.internalPeer.materializeBusy
+    || state.internalPeer.statusBusy
+    || state.internalPeer.applyBusy
+    || state.internalPeer.hostRunnerEnsureBusy
+    || state.internalPeer.syncBusy
+  ) {
+    return false;
   }
-  renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+  if (Date.now() - Number(state.internalPeer.lastStatusAttemptAt || 0) < INTERNAL_PEER_STATUS_AUTO_REFRESH_MS) {
+    return false;
+  }
+  const runtimeStatus = state.internalPeer.runtimeStatus;
+  if (!internalPeerRuntimeStatusMatches(runtimeStatus, site, pipeline)) return true;
+  return internalPeerRuntimeStatusAgeMs(runtimeStatus) > INTERNAL_PEER_STATUS_AUTO_REFRESH_MS;
+}
+
+function scheduleInternalPeerRuntimeStatusRefresh(site, pipeline) {
+  if (!shouldAutoRefreshInternalPeerRuntimeStatus(site, pipeline)) return;
+  if (internalPeerAutoRefreshTimer) return;
+  internalPeerAutoRefreshTimer = setTimeout(() => {
+    internalPeerAutoRefreshTimer = null;
+    void refreshInternalPeerRuntimeStatus(site, pipeline, { silent: true });
+  }, 250);
+}
+
+function scheduleInternalPeerRuntimeStatusRefreshFromDashboard(pipelines) {
+  const target = preferredInternalPeerStatusTarget(pipelines);
+  if (!target) return;
+  scheduleInternalPeerRuntimeStatusRefresh(target.site, target.pipeline);
+}
+
+function internalPeerRuntimeHealth({ requireFresh = true } = {}) {
+  const runtimeStatus = state.internalPeer.runtimeStatus;
+  if (!runtimeStatus) return null;
+  if (requireFresh && internalPeerRuntimeStatusAgeMs(runtimeStatus) > INTERNAL_PEER_STATUS_AUTO_REFRESH_MS * 4) return null;
+  if (runtimeStatus.status === 'passed') return 'passed';
+  if (runtimeStatus.status === 'ready') return 'ready';
+  if (runtimeStatus.status === 'blocked' || runtimeStatus.status === 'failed') return 'blocked';
+  return null;
+}
+
+async function refreshInternalPeerRuntimeStatus(site, pipeline, options = {}) {
+  if (state.internalPeer.statusBusy) return;
+  const silent = options.silent === true;
+  state.internalPeer.statusBusy = true;
+  state.internalPeer.lastStatusAttemptAt = Date.now();
+  if (!silent) {
+    state.internalPeer.feedback = { kind: 'info', message: 'Checking Internal service peer status', detail: null };
+    if (state.internalPeer.result?.status === 'blocked') {
+      state.internalPeer.result = null;
+    }
+    renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+  }
   try {
     const payload = await requestInternalPeerRuntimeStatus(site, pipeline);
     const runtimeStatus = payload.internalServicePeerRuntimeStatus || null;
     state.internalPeer.runtimeStatus = runtimeStatus;
-    state.internalPeer.feedback = {
-      kind: runtimeStatus?.status === 'blocked' ? 'warning' : 'success',
-      message: internalPeerHostRunnerOffline(runtimeStatus)
-        ? 'Native host runner is not reachable; install/start it on the real Internal host, then Install / Restart enables egress-on, installs WG, and assigns 10.88.88.88.'
-        : runtimeStatus
-          ? `Internal service peer status ${runtimeStatus.status}`
-          : 'Internal service peer status checked',
-      detail: internalPeerHostRunnerOffline(runtimeStatus)
-        ? internalPeerHostRunnerSetupDetail(runtimeStatus)
-        : summarizeActionDetail(payload)
-    };
+    if (!silent || runtimeStatus?.status === 'blocked' || internalPeerHostRunnerOffline(runtimeStatus)) {
+      state.internalPeer.feedback = {
+        kind: runtimeStatus?.status === 'blocked' ? 'warning' : 'success',
+        message: internalPeerHostRunnerOffline(runtimeStatus)
+          ? 'Native host runner is not reachable; install/start it on the real Internal host, then Install / Restart enables egress-on, installs WG, and assigns 10.88.88.88.'
+          : runtimeStatus
+            ? `Internal service peer status ${runtimeStatus.status}`
+            : 'Internal service peer status checked',
+        detail: internalPeerHostRunnerOffline(runtimeStatus)
+          ? internalPeerHostRunnerSetupDetail(runtimeStatus)
+          : summarizeActionDetail(payload)
+      };
+    } else if (state.internalPeer.feedback?.kind === 'error' || state.internalPeer.feedback?.kind === 'warning') {
+      state.internalPeer.feedback = null;
+    }
   } catch (error) {
-    state.internalPeer.feedback = { kind: 'error', message: error.message, detail: null };
+    if (!silent) {
+      state.internalPeer.feedback = { kind: 'error', message: error.message, detail: null };
+    }
   } finally {
     state.internalPeer.statusBusy = false;
     renderInternalPeerWorkbench(state.dashboard?.siteSlotPipelines || []);
+    updateTopologyFromPipelines(state.dashboard?.siteSlotPipelines || []);
     renderInspector();
   }
 }
@@ -9091,6 +9184,7 @@ function renderAdminDashboard(dashboard) {
   renderDashboardGuidance();
   updateTopologyFromPipelines(dashboard.siteSlotPipelines || []);
   renderInspector();
+  scheduleInternalPeerRuntimeStatusRefreshFromDashboard(dashboard.siteSlotPipelines || []);
 }
 
 function renderConsoleStatus(input) {
@@ -9187,24 +9281,33 @@ function renderInspector(options = {}) {
       : state.adminSection === 'dashboard'
         ? 'I-HDO Dashboard'
         : (evidenceSubsectionMeta[state.adminSubsection]?.title || 'Evidence history');
-  const health = normalizeStageStatus(summary?.health || selectedSite?.status || 'ready');
+  const dashboardRuntimeHealth = state.adminSection === 'dashboard' ? internalPeerRuntimeHealth() : null;
+  const dashboardRuntimeReady = dashboardRuntimeHealth === 'passed' || dashboardRuntimeHealth === 'ready';
+  const dashboardRuntimeStatus = dashboardRuntimeReady ? state.internalPeer.runtimeStatus : null;
+  const health = dashboardRuntimeHealth || normalizeStageStatus(summary?.health || selectedSite?.status || 'ready');
+  const statusText = dashboardRuntimeHealth || summary?.health || selectedSite?.status || 'ready';
+  const stageText = dashboardRuntimeStatus ? 'live-runtime' : summary?.currentStage || '-';
+  const latestText = dashboardRuntimeStatus ? dashboardRuntimeStatus.status || dashboardRuntimeHealth : summary?.latestStatus || selectedSite?.status || '-';
+  const updatedText = dashboardRuntimeStatus ? dashboardRuntimeStatus.checkedAt : summary?.latestUpdatedAt;
 
   inspectorKind.textContent = kind;
   inspectorTitle.textContent = title;
   inspectorMeta.textContent = inspectorMetaText(summary, selectedSite);
-  inspectorStatus.textContent = summary?.health || selectedSite?.status || 'ready';
+  inspectorStatus.textContent = statusText;
   inspectorStatus.dataset.health = health;
   inspectorFacts.innerHTML = renderInspectorFacts([
     ['Host', selectedSite?.host || profile?.host || '-'],
     ['SSH Profile', selectedSite?.sshProfile?.profileId || profile?.profileId || '-'],
     ['Provider', consoleProviderLabel(dashboard)],
     ['OS Scope', 'Ubuntu + CentOS/RHEL'],
-    ['Stage', summary?.currentStage || '-'],
-    ['Latest', summary?.latestStatus || selectedSite?.status || '-'],
-    ['Updated', formatTime(summary?.latestUpdatedAt)],
+    ['Stage', stageText],
+    ['Latest', latestText],
+    ['Updated', formatTime(updatedText)],
     ['Objects', summary ? String(pipelineObjectCount(summary)) : '-']
   ]);
-  inspectorNext.innerHTML = renderInspectorNextAction(summary, selectedSite);
+  inspectorNext.innerHTML = dashboardRuntimeStatus
+    ? renderInspectorRuntimeNextAction(dashboardRuntimeStatus)
+    : renderInspectorNextAction(summary, selectedSite);
   const timeline = summary && currentSummary?.siteId === summary.siteId ? state.currentPipeline?.timeline : [];
   renderInspectorEvidence(timeline || []);
 }
@@ -9251,6 +9354,19 @@ function renderInspectorNextAction(summary, site = null) {
       <strong>${escapeHtml(action.label || action.actionId || 'action')}</strong>
       <small>${escapeHtml(action.gate || 'none')} / ${escapeHtml(action.allowed ? 'allowed' : 'locked')}</small>
       ${action.reason ? `<p>${escapeHtml(action.reason)}</p>` : ''}
+    </article>
+  `;
+}
+
+function renderInspectorRuntimeNextAction(runtimeStatus) {
+  const health = internalPeerRuntimeHealth({ requireFresh: false }) || 'ready';
+  const checkedAt = runtimeStatus?.checkedAt ? `checked ${formatTime(runtimeStatus.checkedAt)}` : 'runtime checked';
+  return `
+    <article class="inspector-action" data-allowed="true">
+      <span class="risk-chip" data-risk="low">low</span>
+      <strong>Internal Service Peer Ready</strong>
+      <small>${escapeHtml(health)} / ${escapeHtml(checkedAt)}</small>
+      <p>host-owned mx-internal-svc is the current runtime truth for the H-D-I path.</p>
     </article>
   `;
 }
@@ -9549,6 +9665,7 @@ function normalizeStageStatus(status) {
   if (status === 'passed' || status === 'completed' || status === 'active') return 'passed';
   if (status === 'ready' || status === 'ready-for-preflight' || status === 'queued') return 'ready';
   if (status === 'running') return 'running';
+  if (status === 'rollback') return 'rollback';
   if (status === 'failed' || status === 'rollback-required') return 'failed';
   if (status === 'blocked' || status === 'requires-confirmation' || status === 'paused') return 'blocked';
   return 'planned';
@@ -12205,15 +12322,17 @@ function resizeTopology() {
 function updateTopologyFromPipelines(pipelines) {
   const topology = state.topology;
   if (!topology) return;
-  const domesticHealth = combinedHealth(pipelines.filter((pipeline) => pipeline.kind === 'domestic'));
+  const runtimeHealth = internalPeerRuntimeHealth();
+  const domesticHealth = runtimeHealth || combinedHealth(pipelines.filter((pipeline) => pipeline.kind === 'domestic'));
   const overseaHealth = combinedHealth(pipelines.filter((pipeline) => pipeline.kind === 'oversea'));
-  const overallHealth = combinedHealth(pipelines);
+  const internalHealth = runtimeHealth || combinedHealth(pipelines);
+  const overallHealth = combinedHealthValues([domesticHealth, internalHealth, overseaHealth]);
   setTopologyNodeHealth('domestic', domesticHealth);
-  setTopologyNodeHealth('internal', overallHealth);
+  setTopologyNodeHealth('internal', internalHealth);
   setTopologyNodeHealth('oversea', overseaHealth);
   setTopologyNodeHealth('h', overallHealth === 'failed' ? 'blocked' : 'ready');
   setTopologyLinkColor(0, overallHealth === 'failed' ? 'blocked' : domesticHealth);
-  setTopologyLinkColor(1, overallHealth);
+  setTopologyLinkColor(1, internalHealth);
   setTopologyLinkColor(2, overseaHealth);
 }
 
@@ -12245,12 +12364,18 @@ function setTopologyLinkColor(index, health) {
 }
 
 function combinedHealth(pipelines) {
-  const values = pipelines.map((pipeline) => pipeline.health);
-  if (values.includes('failed')) return 'failed';
-  if (values.includes('rollback')) return 'rollback';
-  if (values.includes('blocked')) return 'blocked';
-  if (values.includes('running')) return 'running';
-  if (values.includes('passed')) return 'passed';
+  return combinedHealthValues(asArray(pipelines).map((pipeline) => pipeline.health));
+}
+
+function combinedHealthValues(values) {
+  const normalized = asArray(values).map((value) => normalizeStageStatus(value));
+  if (!normalized.length) return 'ready';
+  if (normalized.includes('failed')) return 'failed';
+  if (normalized.includes('rollback')) return 'rollback';
+  if (normalized.includes('running')) return 'running';
+  if (normalized.includes('passed')) return 'passed';
+  if (normalized.includes('ready')) return 'ready';
+  if (normalized.includes('blocked')) return 'blocked';
   return 'ready';
 }
 
