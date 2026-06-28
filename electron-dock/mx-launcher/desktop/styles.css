@@ -1489,6 +1489,45 @@ select {
   line-height: 1.45;
 }
 
+.app-template-panel {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.2fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.app-template-preview {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  padding: 11px;
+  border: 1px solid color-mix(in srgb, var(--mx-primary) 32%, var(--line));
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--mx-primary) 8%, transparent), transparent 58%),
+    rgba(20, 20, 23, 0.42);
+}
+
+.app-template-preview strong,
+.app-template-preview span,
+.app-template-preview small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-template-preview strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.app-template-preview span,
+.app-template-preview small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .app-editor-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1664,6 +1703,20 @@ select {
 .app-network-known {
   color: var(--muted);
   font-size: 12px;
+}
+
+.app-dns-plan {
+  display: grid;
+  gap: 12px;
+}
+
+.app-dns-plan.is-disabled {
+  opacity: 0.74;
+}
+
+.app-dns-plan.is-disabled .app-network-facts,
+.app-dns-plan.is-disabled .app-editor-grid {
+  filter: grayscale(0.35);
 }
 
 .app-network-facts {
@@ -5996,7 +6049,8 @@ select {
   .app-mode-selector,
   .app-network-facts,
   .app-decision-path,
-  .app-runtime-defaults {
+  .app-runtime-defaults,
+  .app-template-panel {
     grid-template-columns: 1fr;
   }
 

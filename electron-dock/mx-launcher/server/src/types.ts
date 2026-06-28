@@ -1508,6 +1508,72 @@ export interface AppCenterAppInput {
   requestedBy?: string | null;
 }
 
+export interface AppOnboardingTemplate {
+  templateId: string;
+  label: string;
+  detail: string;
+  launcherMode?: LauncherProductMode;
+  category?: string;
+  appId?: string;
+  displayName?: string;
+  description?: string;
+  dnsRouteEnabled: boolean;
+}
+
+export interface AppOnboardingDefaultsInput {
+  templateId?: string | null;
+  appId?: string | null;
+  displayName?: string | null;
+  category?: string | null;
+  description?: string | null;
+  launcherMode?: LauncherProductMode | string | null;
+  standaloneChannelProductId?: string | null;
+  dnsHost?: string | null;
+  targetUrl?: string | null;
+  manifest?: Record<string, unknown> | null;
+  requestedBy?: string | null;
+}
+
+export interface AppOnboardingDefaults {
+  template: AppOnboardingTemplate;
+  app: AppCenterAppInput & {
+    appId: string;
+    displayName: string;
+    category: string;
+    description: string;
+    launcherMode: LauncherProductMode;
+    standaloneChannelProductId: string;
+    productNetworkId: string;
+    channels: string[];
+    permissions: string[];
+    requiredCapabilities: string[];
+    updatePolicy: UpdatePolicyKind;
+    enabled: boolean;
+  };
+  productNetwork: LauncherProductNetworkInput & {
+    productId: string;
+    displayName: string;
+    mode: LauncherProductMode;
+    standaloneChannelProductId: string;
+    productIndex: number;
+  };
+  dnsRoute: DnsReverseProxyRouteInput & {
+    routeId: string;
+    host: string;
+    dnsTarget: string;
+    targetUrl: string;
+    enabled: boolean;
+    tlsMode: DnsReverseProxyRoute['tlsMode'];
+    authRequired: boolean;
+  };
+  operatorSteps: Array<{
+    stepId: string;
+    label: string;
+    detail: string;
+    writesTo: string;
+  }>;
+}
+
 export interface PermissionRequestInput {
   appId: string;
   scopes: string[];

@@ -5,6 +5,9 @@ import type {
   AnonymousEnrollment,
   AppCenterApp,
   AppCenterAppInput,
+  AppOnboardingDefaults,
+  AppOnboardingDefaultsInput,
+  AppOnboardingTemplate,
   AwxProviderConfig,
   AwxProviderConfigInput,
   AwxProviderKind,
@@ -402,6 +405,7 @@ function gatewayRouteRequiredScopes(routeId: string): string[] {
 export const MX_H2I_PRODUCT_ID = 'mx-h2i';
 export const APP_CENTER_PRODUCT_ID = 'appcenter';
 export const LAUNCHER_FOUNDATION_PRODUCT_ID = 'launcher';
+export const MX_DEFAULT_APP_DNS_ZONE = 'mxinfo-inc.cn';
 
 export function normalizeLauncherNetworkProductId(value?: string | null): string {
   const normalized = safeIdPart(value?.trim() || MX_H2I_PRODUCT_ID).toLowerCase();
@@ -549,6 +553,220 @@ export function buildAppCenterApp(
       launcher: input.protocol?.launcher?.trim() || previous?.protocol?.launcher || '1.0'
     }
   };
+}
+
+export function buildAppOnboardingTemplates(): AppOnboardingTemplate[] {
+  return [
+    {
+      templateId: 'standalone-service',
+      label: 'Standalone business app',
+      detail: 'Create an independent Launcher channel, ProductNetwork, DNS route, and gateway upstream.',
+      launcherMode: 'standalone',
+      category: 'custom',
+      dnsRouteEnabled: true
+    },
+    {
+      templateId: 'luopan',
+      label: 'Luopan',
+      detail: 'Luopan AI intelligence system; defaults to an independent product network and luopan domain entry.',
+      appId: 'luopan',
+      displayName: 'Luopan',
+      category: 'custom',
+      description: '罗盘AI情报系统',
+      launcherMode: 'standalone',
+      dnsRouteEnabled: true
+    },
+    {
+      templateId: 'embed-runtime',
+      label: 'Embed runtime app',
+      detail: 'Reuse the selected MX-H2I standalone channel without another local TUN/WG/DNS owner.',
+      launcherMode: 'embed',
+      category: 'platform',
+      dnsRouteEnabled: true
+    },
+    {
+      templateId: 'custom',
+      label: 'Custom / imported manifest',
+      detail: 'Keep caller supplied fields; suitable for SDK manifest or k8s admin backfill.',
+      dnsRouteEnabled: false
+    }
+  ];
+}
+
+export function buildAppOnboardingDefaults(
+  config: RuntimeConfig,
+  input: AppOnboardingDefaultsInput,
+  products: LauncherProductNetwork[] = [],
+  routes: DnsReverseProxyRoute[] = []
+): AppOnboardingDefaults {
+  const manifest = input.manifest && typeof input.manifest === 'object' ? input.manifest : {};
+  const template = buildAppOnboardingTemplates().find((item) => item.templateId === (input.templateId?.trim() || manifestString(manifest, 'templateId')))
+    ?? buildAppOnboardingTemplates()[0];
+  const appId = safeIdPart(input.appId?.trim()
+    || manifestString(manifest, 'appId')
+    || manifestString(manifest, 'productId')
+    || template.appId
+    || 'app').toLowerCase();
+  const launcherMode = launcherProductMode(input.launcherMode ?? manifestString(manifest, 'launcherMode') ?? template.launcherMode ?? 'standalone');
+  const displayName = input.displayName?.trim()
+    || manifestString(manifest, 'displayName')
+    || manifestString(manifest, 'name')
+    || template.displayName
+    || launcherProductDisplayName(appId);
+  const category = input.category?.trim() || manifestString(manifest, 'category') || template.category || 'custom';
+  const description = input.description?.trim()
+    || manifestString(manifest, 'description')
+    || template.description
+    || (launcherMode === 'standalone'
+      ? `${displayName} owns a Launcher standalone channel and can receive Internal network leases.`
+      : `${displayName} runs through the MX-H2I Launcher channel without owning another local tunnel.`);
+  const standaloneChannelProductId = launcherMode === 'standalone'
+    ? appId
+    : launcherNetworkLeaseProductId(input.standaloneChannelProductId || manifestString(manifest, 'standaloneChannelProductId') || MX_H2I_PRODUCT_ID);
+  const previousProduct = products.find((product) => product.productId === appId) ?? null;
+  const productIndex = previousProduct?.productIndex ?? nextAppOnboardingProductIndex(products, appId, launcherMode);
+  const productNetwork = buildLauncherProductNetwork(config, {
+    productId: appId,
+    displayName,
+    mode: launcherMode,
+    standaloneChannelProductId,
+    productIndex,
+    updatePolicy: launcherMode === 'standalone' ? 'app-managed' : 'launcher-managed',
+    requestedBy: input.requestedBy || 'app-onboarding-defaults'
+  }, previousProduct);
+  const dnsHost = normalizeDomain(input.dnsHost?.trim() || manifestString(manifest, 'dnsHost') || `${appId}.${MX_DEFAULT_APP_DNS_ZONE}`);
+  const existingRoute = routes.find((route) => normalizeDomain(route.host) === dnsHost || route.routeId === `rp_${dnsHost}`) ?? null;
+  const capabilities = appOnboardingCapabilities(appId, launcherMode, category);
+  const permissions = appOnboardingPermissions(launcherMode, category);
+  const appUpdatePolicy: AppOnboardingDefaults['app']['updatePolicy'] = appId === MX_H2I_PRODUCT_ID || launcherMode === 'embed'
+    ? 'platform-ui'
+    : 'app-managed';
+  const dnsRoute = {
+    routeId: existingRoute?.routeId || `rp_${dnsHost}`,
+    host: existingRoute?.host || dnsHost,
+    dnsTarget: existingRoute?.dnsTarget || '10.88.88.88',
+    targetUrl: existingRoute?.targetUrl || input.targetUrl?.trim() || manifestString(manifest, 'targetUrl') || manifestString(manifest, 'upstreamUrl') || 'http://127.0.0.1:8080',
+    enabled: true,
+    tlsMode: existingRoute?.tlsMode || 'internal',
+    authRequired: existingRoute?.authRequired ?? true,
+    requestedBy: input.requestedBy || 'app-onboarding-defaults'
+  };
+  return {
+    template,
+    app: {
+      appId,
+      displayName,
+      category,
+      description,
+      launcherMode,
+      standaloneChannelProductId,
+      productNetworkId: appId,
+      enabled: true,
+      channels: ['shadow', 'beta', 'stable'],
+      permissions,
+      requiredCapabilities: capabilities,
+      updatePolicy: appUpdatePolicy,
+      entrypoints: {
+        desktop: `app://${appId}/index.html`,
+        settings: `app://${appId}/settings.html`
+      },
+      protocol: {
+        appCenter: '1.0',
+        launcher: '1.0'
+      },
+      requestedBy: input.requestedBy || 'app-onboarding-defaults'
+    },
+    productNetwork: {
+      productId: productNetwork.productId,
+      displayName: productNetwork.displayName,
+      mode: productNetwork.mode,
+      standaloneChannelProductId: productNetwork.standaloneChannelProductId,
+      productIndex: productNetwork.productIndex,
+      serviceVip: productNetwork.serviceVip,
+      userCidr: productNetwork.userCidr,
+      anonymousCidr: productNetwork.anonymousCidr,
+      userLeaseStart: productNetwork.userLeaseStart,
+      userLeaseEnd: productNetwork.userLeaseEnd,
+      anonymousLeaseStart: productNetwork.anonymousLeaseStart,
+      anonymousLeaseEnd: productNetwork.anonymousLeaseEnd,
+      defaultDomesticSiteId: productNetwork.defaultDomesticSiteId,
+      defaultOverseaSiteId: productNetwork.defaultOverseaSiteId,
+      updatePolicy: productNetwork.updatePolicy,
+      rateLimitProfile: productNetwork.rateLimitProfile,
+      dnsPolicyId: productNetwork.dnsPolicyId,
+      licensePolicyId: productNetwork.licensePolicyId,
+      enabled: productNetwork.enabled,
+      requestedBy: input.requestedBy || 'app-onboarding-defaults'
+    },
+    dnsRoute,
+    operatorSteps: [
+      {
+        stepId: 'app-center',
+        label: 'Register AppCenter app',
+        detail: 'Writes app identity, Launcher mode, capabilities, permissions, and release defaults.',
+        writesTo: 'app-center-app'
+      },
+      {
+        stepId: 'product-network',
+        label: launcherMode === 'standalone' ? 'Create ProductNetwork' : 'Bind standalone channel',
+        detail: launcherMode === 'standalone'
+          ? 'Allocates service VIP and client lease ranges for this app.'
+          : 'Reuses the selected standalone channel without a new local network owner.',
+        writesTo: 'launcher-product-network'
+      },
+      {
+        stepId: 'dns-route',
+        label: 'Create DNS route',
+        detail: 'Writes CoreDNS target and Internal gateway upstream for the app domain.',
+        writesTo: 'dns-reverse-proxy-route'
+      }
+    ]
+  };
+}
+
+function nextAppOnboardingProductIndex(
+  products: LauncherProductNetwork[],
+  productId: string,
+  launcherMode: LauncherProductMode
+): number {
+  if (launcherMode !== 'standalone') return Math.max(0, products.filter((product) => product.mode === 'embed').length);
+  if (launcherNetworkProductIsStandaloneDefault(productId)) return 0;
+  const used = new Set(products
+    .filter((product) => product.mode === 'standalone')
+    .filter((product) => product.productId !== productId)
+    .filter((product) => !launcherNetworkProductIsStandaloneDefault(product.productId))
+    .map((product) => product.productIndex)
+    .filter((index) => Number.isInteger(index) && index > 0));
+  for (let candidate = 1; candidate <= 164; candidate += 1) {
+    if (!used.has(candidate)) return candidate;
+  }
+  return 1;
+}
+
+function appOnboardingCapabilities(appId: string, launcherMode: LauncherProductMode, category: string): string[] {
+  const capabilities = launcherMode === 'standalone'
+    ? ['launcher-network', 'launcher-standalone']
+    : ['launcher-network', 'launcher-embed-sdk'];
+  if (launcherMode === 'standalone' && (category === 'vpn' || appId === MX_H2I_PRODUCT_ID)) capabilities.push('wireguard-peer');
+  if (category === 'platform' || category === 'network' || appId === APP_CENTER_PRODUCT_ID) capabilities.push('app-center-runtime');
+  return [...new Set(capabilities)];
+}
+
+function appOnboardingPermissions(launcherMode: LauncherProductMode, category: string): string[] {
+  const permissions = ['auth.read'];
+  if (launcherMode === 'standalone') {
+    permissions.push('network.tun.request', 'network.dns.policy', 'observability.write');
+    if (category === 'vpn') permissions.push('network.wg.peer');
+  } else {
+    permissions.push('appcenter.read', 'permission.request', 'observability.write');
+    if (category === 'network') permissions.push('network.dns.policy');
+  }
+  return [...new Set(permissions)];
+}
+
+function manifestString(manifest: Record<string, unknown>, key: string): string | null {
+  const value = manifest[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
 function launcherProductDisplayName(productId: string): string {

@@ -2,7 +2,7 @@ import { BadRequestException, Body, Controller, Delete, Get, Inject, NotFoundExc
 
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
-import type { AppCenterAppInput } from '../../types.js';
+import type { AppCenterAppInput, AppOnboardingDefaultsInput } from '../../types.js';
 
 @Controller('internal/v1/app-center')
 export class AppCenterController {
@@ -11,6 +11,16 @@ export class AppCenterController {
   @Get('apps')
   async listApps() {
     return { apps: await this.store.listAppCenterApps() };
+  }
+
+  @Get('onboarding/defaults')
+  async onboardingTemplates() {
+    return { templates: await this.store.listAppOnboardingTemplates() };
+  }
+
+  @Post('onboarding/defaults')
+  async onboardingDefaults(@Body() body: AppOnboardingDefaultsInput) {
+    return { defaults: await this.store.getAppOnboardingDefaults(body || {}) };
   }
 
   @Get('apps/:appId')

@@ -2,6 +2,8 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import {
   builtinAppCenterApps,
+  buildAppOnboardingDefaults,
+  buildAppOnboardingTemplates,
   buildAppCenterApp,
   builtinLauncherProductNetworks,
   buildLauncherProductNetwork,
@@ -86,6 +88,9 @@ import type {
   AnonymousEnrollmentRequest,
   AppCenterApp,
   AppCenterAppInput,
+  AppOnboardingDefaults,
+  AppOnboardingDefaultsInput,
+  AppOnboardingTemplate,
   AuditEvent,
   AuditEventInput,
   AwxProviderConfig,
@@ -1609,6 +1614,19 @@ export class MemoryStore implements PlatformStore {
 
   observabilitySinks(): RuntimeConfig['observabilitySinks'] {
     return this.config.observabilitySinks;
+  }
+
+  listAppOnboardingTemplates(): AppOnboardingTemplate[] {
+    return buildAppOnboardingTemplates();
+  }
+
+  getAppOnboardingDefaults(input: AppOnboardingDefaultsInput): AppOnboardingDefaults {
+    return buildAppOnboardingDefaults(
+      this.config,
+      input,
+      this.listLauncherProductNetworks(),
+      this.listDnsReverseProxyRoutes()
+    );
   }
 
   listAppCenterApps(): AppCenterApp[] {

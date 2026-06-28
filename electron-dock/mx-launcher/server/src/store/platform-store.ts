@@ -3,6 +3,9 @@ import type {
   AnonymousEnrollmentRequest,
   AppCenterApp,
   AppCenterAppInput,
+  AppOnboardingDefaults,
+  AppOnboardingDefaultsInput,
+  AppOnboardingTemplate,
   AuditEvent,
   AuditEventInput,
   AwxProviderConfig,
@@ -237,6 +240,8 @@ export interface PlatformStore {
   recordAudit(input: AuditEventInput): MaybePromise<AuditEvent>;
   recordLogs(entries: LogEntryInput[]): MaybePromise<{ accepted: number; sinks: RuntimeConfig['observabilitySinks'] }>;
   observabilitySinks(): MaybePromise<RuntimeConfig['observabilitySinks']>;
+  listAppOnboardingTemplates(): MaybePromise<AppOnboardingTemplate[]>;
+  getAppOnboardingDefaults(input: AppOnboardingDefaultsInput): MaybePromise<AppOnboardingDefaults>;
   listAppCenterApps(): MaybePromise<AppCenterApp[]>;
   getAppCenterApp(appId: string): MaybePromise<AppCenterApp | null>;
   upsertAppCenterApp(input: AppCenterAppInput): MaybePromise<AppCenterApp>;

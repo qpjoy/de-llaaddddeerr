@@ -9,6 +9,9 @@ import type {
   AnonymousEnrollmentRequest,
   AppCenterApp,
   AppCenterAppInput,
+  AppOnboardingDefaults,
+  AppOnboardingDefaultsInput,
+  AppOnboardingTemplate,
   AuditEvent,
   AuditEventInput,
   AwxProviderConfig,
@@ -116,6 +119,8 @@ import type {
 } from '../types.js';
 import {
   builtinAppCenterApps,
+  buildAppOnboardingDefaults,
+  buildAppOnboardingTemplates,
   buildAppCenterApp,
   builtinLauncherProductNetworks,
   buildLauncherProductNetwork,
@@ -1743,6 +1748,19 @@ export class PostgresStore implements PlatformStore {
 
   observabilitySinks(): RuntimeConfig['observabilitySinks'] {
     return this.config.observabilitySinks;
+  }
+
+  listAppOnboardingTemplates(): AppOnboardingTemplate[] {
+    return buildAppOnboardingTemplates();
+  }
+
+  async getAppOnboardingDefaults(input: AppOnboardingDefaultsInput): Promise<AppOnboardingDefaults> {
+    return buildAppOnboardingDefaults(
+      this.config,
+      input,
+      await this.listLauncherProductNetworks(),
+      await this.listDnsReverseProxyRoutes()
+    );
   }
 
   async listAppCenterApps(): Promise<AppCenterApp[]> {

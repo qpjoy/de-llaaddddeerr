@@ -8,6 +8,7 @@ const LAUNCHER_FOUNDATION_PRODUCT_ID = 'launcher';
 const MX_INTERNAL_DNS_IP = '10.88.88.88';
 const MX_DOMESTIC_RELAY_IP = '10.88.0.1';
 const MX_LOCAL_EDGE_DNS = '127.0.0.1:2053';
+const MX_DEFAULT_APP_DNS_ZONE = 'mxinfo-inc.cn';
 const INTERNAL_PEER_STATUS_AUTO_REFRESH_MS = 30000;
 
 function isLocalStaticAdminBaseUrl(value) {
@@ -72,6 +73,8 @@ const state = {
   appNavCollapsed: false,
   appCenterApps: [],
   appCenterAppsError: null,
+  appOnboardingTemplates: [],
+  appOnboardingTemplatesError: null,
   appCatalogFilter: '',
   appCatalogModeFilter: 'all',
   appCatalogEditor: null,
@@ -913,17 +916,23 @@ async function refreshProducts() {
 }
 
 async function refreshAppCenterNetwork() {
-  const [appPayload, productPayload, leasePayload] = await Promise.all([
+  const [appPayload, productPayload, leasePayload, dnsRoutesPayload, templatesPayload] = await Promise.all([
     loadAppCenterApps(),
     loadLauncherProductNetworks(),
-    loadLauncherNetworkLeases()
+    loadLauncherNetworkLeases(),
+    loadDnsReverseProxyRoutes(),
+    loadAppOnboardingTemplates()
   ]);
   state.appCenterApps = asArray(appPayload.apps);
   state.appCenterAppsError = appPayload.error || null;
+  state.appOnboardingTemplates = asArray(templatesPayload.templates);
+  state.appOnboardingTemplatesError = templatesPayload.error || null;
   state.launcherProducts = asArray(productPayload.products);
   state.launcherProductsError = productPayload.error || null;
   state.launcherLeases = asArray(leasePayload.leases);
   state.launcherLeasesError = leasePayload.error || null;
+  state.dnsCenter.routes = asArray(dnsRoutesPayload.routes);
+  state.dnsCenter.routesError = dnsRoutesPayload.error || null;
   renderLauncherFoundationOverview();
   renderAppCenterShell();
 }
@@ -961,6 +970,7 @@ async function refreshAdmin() {
       overseaPayload,
       userCenterPayload,
       appCenterAppsPayload,
+      appOnboardingTemplatesPayload,
       launcherProductsPayload,
       launcherLeasesPayload,
       domesticRuntimePayload,
@@ -973,6 +983,7 @@ async function refreshAdmin() {
       loadOverseaOverview(),
       loadUserCenterOverview(),
       loadAppCenterApps(),
+      loadAppOnboardingTemplates(),
       loadLauncherProductNetworks(),
       loadLauncherNetworkLeases(),
       loadDomesticRuntimeConfigs(),
@@ -991,6 +1002,8 @@ async function refreshAdmin() {
     state.awxProviders = asArray(dashboard.awxProviders);
     state.appCenterApps = asArray(appCenterAppsPayload.apps);
     state.appCenterAppsError = appCenterAppsPayload.error || null;
+    state.appOnboardingTemplates = asArray(appOnboardingTemplatesPayload.templates);
+    state.appOnboardingTemplatesError = appOnboardingTemplatesPayload.error || null;
     state.launcherProducts = asArray(launcherProductsPayload.products);
     state.launcherProductsError = launcherProductsPayload.error || null;
     state.launcherLeases = asArray(launcherLeasesPayload.leases);
@@ -1138,6 +1151,27 @@ async function loadAppCenterApps() {
     return { apps: asArray(payload.apps), error: null };
   } catch (error) {
     return { apps: [], error: error.message };
+  }
+}
+
+async function loadAppOnboardingTemplates() {
+  try {
+    const payload = await fetchJson('/internal/v1/app-center/onboarding/defaults');
+    return { templates: asArray(payload.templates), error: null };
+  } catch (error) {
+    return { templates: [], error: error.message };
+  }
+}
+
+async function loadAppOnboardingDefaults(input) {
+  try {
+    const payload = await fetchJson('/internal/v1/app-center/onboarding/defaults', {
+      method: 'POST',
+      body: input || {}
+    });
+    return { defaults: payload.defaults || null, error: null };
+  } catch (error) {
+    return { defaults: null, error: error.message };
   }
 }
 
@@ -6098,6 +6132,189 @@ function defaultProductSecondOctet(productId, mode = 'standalone') {
   return nextAvailableProductSecondOctet(productId, mode);
 }
 
+function launcherAppDnsHostPart(appId) {
+  return cleanLauncherProductId(appId) || 'app';
+}
+
+function launcherAppDefaultDnsHost(appId) {
+  return `${launcherAppDnsHostPart(appId)}.${MX_DEFAULT_APP_DNS_ZONE}`;
+}
+
+function launcherAppDnsRouteId(host) {
+  return `rp_${String(host || launcherAppDefaultDnsHost('app')).trim().toLowerCase()}`;
+}
+
+function launcherAppDefaultUpstreamUrl(templateId = 'standalone-service') {
+  if (templateId === 'mx-h2i') return 'http://127.0.0.1:8080';
+  if (templateId === 'luopan') return 'http://127.0.0.1:8080';
+  return 'http://127.0.0.1:8080';
+}
+
+function launcherAppExistingDnsRoute(appId, host = '') {
+  const normalizedHost = String(host || launcherAppDefaultDnsHost(appId)).trim().toLowerCase();
+  const routeId = launcherAppDnsRouteId(normalizedHost);
+  return asArray(state.dnsCenter.routes).find((route) => {
+    const routeHost = String(route?.host || '').trim().toLowerCase();
+    const routeKey = String(route?.routeId || '').trim().toLowerCase();
+    return routeHost === normalizedHost || routeKey === routeId;
+  }) || null;
+}
+
+function fallbackLauncherAppTemplateDefinitions() {
+  return [
+    {
+      templateId: 'standalone-service',
+      label: 'Standalone business app',
+      detail: '创建独立 Launcher channel、ProductNetwork、DNS route 和 gateway upstream。',
+      launcherMode: 'standalone',
+      category: 'custom',
+      dnsRouteEnabled: true
+    },
+    {
+      templateId: 'luopan',
+      label: 'Luopan',
+      detail: '罗盘AI情报系统；默认独立 10.* 网段，并生成 luopan 域名入口。',
+      appId: 'luopan',
+      displayName: 'Luopan',
+      category: 'custom',
+      description: '罗盘AI情报系统',
+      launcherMode: 'standalone',
+      dnsRouteEnabled: true
+    },
+    {
+      templateId: 'embed-runtime',
+      label: 'Embed runtime app',
+      detail: '复用 MX-H2I standalone channel，不新增本机网络 owner。',
+      launcherMode: 'embed',
+      category: 'platform',
+      dnsRouteEnabled: true
+    },
+    {
+      templateId: 'custom',
+      label: 'Custom / imported manifest',
+      detail: '保留当前字段；适合后续由 SDK manifest 或 k8s admin 回填。',
+      dnsRouteEnabled: false
+    }
+  ];
+}
+
+function launcherAppTemplateDefinitions() {
+  const remoteTemplates = asArray(state.appOnboardingTemplates)
+    .filter((template) => template?.templateId && template?.label);
+  return remoteTemplates.length ? remoteTemplates : fallbackLauncherAppTemplateDefinitions();
+}
+
+function launcherAppTemplateById(templateId) {
+  return launcherAppTemplateDefinitions().find((template) => template.templateId === templateId)
+    || launcherAppTemplateDefinitions()[0];
+}
+
+function inferLauncherAppTemplate(app) {
+  if (!app) return 'standalone-service';
+  if (app.appId === 'luopan') return 'luopan';
+  const mode = launcherModeForApp(app);
+  if (mode === 'embed') return 'embed-runtime';
+  if (mode === 'standalone') return 'standalone-service';
+  return 'custom';
+}
+
+function applyLauncherAppTemplateToDraft(draft, templateId, options = {}) {
+  const template = launcherAppTemplateById(templateId);
+  const forceIdentity = options.forceIdentity === true && !draft.builtin && !draft.systemOwned;
+  const appId = forceIdentity && template.appId ? template.appId : cleanLauncherProductId(draft.appId);
+  const launcherMode = template.launcherMode || draft.launcherMode || 'standalone';
+  const nextDraft = {
+    ...draft,
+    onboardingTemplate: template.templateId,
+    appId,
+    displayName: forceIdentity && template.displayName ? template.displayName : draft.displayName,
+    category: template.category || draft.category || 'custom',
+    description: forceIdentity && template.description ? template.description : draft.description,
+    launcherMode,
+    standaloneChannelProductId: launcherMode === 'standalone'
+      ? appId || draft.appId || MX_H2I_PRODUCT_ID
+      : normalizeStandaloneProductId(draft.standaloneChannelProductId || MX_H2I_PRODUCT_ID),
+    dnsRouteEnabled: typeof template.dnsRouteEnabled === 'boolean' ? template.dnsRouteEnabled : draft.dnsRouteEnabled !== false
+  };
+  nextDraft.productSecondOctet = launcherMode === 'standalone'
+    ? normalizeProductSecondOctet(draft.productSecondOctet, defaultProductSecondOctet(appId || draft.appId, launcherMode))
+    : normalizeProductSecondOctet(draft.productSecondOctet, defaultProductSecondOctet(appId || draft.appId, launcherMode));
+  if (!nextDraft.dnsHost || options.refreshDns === true || forceIdentity) {
+    nextDraft.dnsHost = launcherAppDefaultDnsHost(appId || draft.appId);
+  }
+  if (!nextDraft.dnsTarget) nextDraft.dnsTarget = MX_INTERNAL_DNS_IP;
+  if (!nextDraft.dnsTargetUrl || options.refreshDns === true || forceIdentity) {
+    nextDraft.dnsTargetUrl = launcherAppDefaultUpstreamUrl(template.templateId);
+  }
+  nextDraft.dnsRouteId = launcherAppDnsRouteId(nextDraft.dnsHost);
+  nextDraft.dnsRouteTlsMode = nextDraft.dnsRouteTlsMode || 'internal';
+  nextDraft.dnsRouteAuthRequired = nextDraft.dnsRouteAuthRequired !== false;
+  return nextDraft;
+}
+
+function applyServerAppOnboardingDefaultsToDraft(draft, defaults, options = {}) {
+  if (!defaults?.app) return draft;
+  const app = defaults.app || {};
+  const productNetwork = defaults.productNetwork || {};
+  const dnsRoute = defaults.dnsRoute || {};
+  const forceIdentity = options.forceIdentity === true && !draft.builtin && !draft.systemOwned;
+  const appId = cleanLauncherProductId(forceIdentity || !draft.appId ? app.appId : draft.appId);
+  const launcherMode = app.launcherMode === 'embed' ? 'embed' : 'standalone';
+  return {
+    ...draft,
+    onboardingTemplate: defaults.template?.templateId || draft.onboardingTemplate || 'standalone-service',
+    appId,
+    displayName: forceIdentity || !draft.displayName ? app.displayName || draft.displayName : draft.displayName,
+    category: app.category || draft.category || 'custom',
+    description: forceIdentity || !draft.description ? app.description || draft.description : draft.description,
+    launcherMode,
+    standaloneChannelProductId: launcherMode === 'standalone'
+      ? appId || app.appId || draft.appId || MX_H2I_PRODUCT_ID
+      : normalizeStandaloneProductId(app.standaloneChannelProductId || draft.standaloneChannelProductId || MX_H2I_PRODUCT_ID),
+    productSecondOctet: normalizeProductSecondOctet(productSecondOctetFromIp(productNetwork.userCidr), draft.productSecondOctet),
+    channels: uniqueStringList(app.channels).length ? uniqueStringList(app.channels) : draft.channels,
+    permissions: uniqueStringList(app.permissions).length ? uniqueStringList(app.permissions) : draft.permissions,
+    requiredCapabilities: uniqueStringList(app.requiredCapabilities).length ? uniqueStringList(app.requiredCapabilities) : draft.requiredCapabilities,
+    updatePolicy: app.updatePolicy || draft.updatePolicy,
+    dnsRouteEnabled: defaults.template?.dnsRouteEnabled !== false,
+    dnsRouteId: dnsRoute.routeId || draft.dnsRouteId,
+    dnsHost: dnsRoute.host || draft.dnsHost,
+    dnsTarget: dnsRoute.dnsTarget || draft.dnsTarget || MX_INTERNAL_DNS_IP,
+    dnsTargetUrl: dnsRoute.targetUrl || draft.dnsTargetUrl,
+    dnsRouteTlsMode: dnsRoute.tlsMode || draft.dnsRouteTlsMode || 'internal',
+    dnsRouteAuthRequired: dnsRoute.authRequired !== false,
+    serverOnboardingDefaults: defaults
+  };
+}
+
+async function hydrateAppCatalogEditorDefaultsFromServer(options = {}) {
+  const editor = state.appCatalogEditor;
+  if (!editor?.draft) return;
+  const requestKey = `${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  editor.defaultsRequestKey = requestKey;
+  const draft = editor.draft;
+  const payload = await loadAppOnboardingDefaults({
+    templateId: draft.onboardingTemplate,
+    appId: draft.appId,
+    displayName: draft.displayName,
+    category: draft.category,
+    description: draft.description,
+    launcherMode: draft.launcherMode,
+    standaloneChannelProductId: draft.standaloneChannelProductId,
+    dnsHost: draft.dnsHost,
+    targetUrl: draft.dnsTargetUrl,
+    requestedBy: 'desktop-admin'
+  });
+  if (!state.appCatalogEditor || state.appCatalogEditor.defaultsRequestKey !== requestKey) return;
+  if (payload.defaults) {
+    state.appCatalogEditor.draft = applyServerAppOnboardingDefaultsToDraft(state.appCatalogEditor.draft, payload.defaults, options);
+    state.appOnboardingTemplatesError = null;
+    renderAppEditorDrawer();
+  } else if (payload.error) {
+    state.appOnboardingTemplatesError = payload.error;
+  }
+}
+
 function relayProductNetworkShape(secondOctet) {
   const octet = normalizeProductSecondOctet(secondOctet);
   return {
@@ -6700,17 +6917,20 @@ function createAppCatalogEditorDraft(mode = 'create', appId = '') {
   const editing = mode === 'edit';
   const app = editing ? appCenterAppById(appId) : null;
   const normalizedAppId = editing ? cleanLauncherProductId(app?.appId || appId) : '';
-  const appMode = editing && app ? launcherModeForApp(app) : 'embed';
+  const appMode = editing && app ? launcherModeForApp(app) : 'standalone';
   const productId = editing && app ? productNetworkIdForApp(app) : normalizedAppId;
   const product = launcherProductNetworkForDefault(productId);
   const productSecondOctet = productSecondOctetFromProduct(product)
     || nextAvailableProductSecondOctet(normalizedAppId || null, appMode);
-  return {
+  const existingDnsRoute = editing ? launcherAppExistingDnsRoute(normalizedAppId) : null;
+  const onboardingTemplate = editing ? inferLauncherAppTemplate(app) : 'standalone-service';
+  const draft = {
     appId: normalizedAppId,
     displayName: app?.displayName || '',
     category: app?.category || 'custom',
     version: app?.version || '0.1.0',
     description: app?.description || '',
+    onboardingTemplate,
     launcherMode: appMode,
     standaloneChannelProductId: appMode === 'standalone'
       ? normalizedAppId || MX_H2I_PRODUCT_ID
@@ -6722,8 +6942,16 @@ function createAppCatalogEditorDraft(mode = 'create', appId = '') {
     channels: asArray(app?.channels).length ? app.channels : ['shadow', 'beta', 'stable'],
     permissions: asArray(app?.permissions),
     requiredCapabilities: asArray(app?.requiredCapabilities),
-    updatePolicy: app?.updatePolicy || (appMode === 'standalone' ? 'app-managed' : 'launcher-managed')
+    updatePolicy: app?.updatePolicy || (appMode === 'standalone' ? 'app-managed' : 'launcher-managed'),
+    dnsRouteEnabled: editing ? !!existingDnsRoute : true,
+    dnsRouteId: existingDnsRoute?.routeId || launcherAppDnsRouteId(launcherAppDefaultDnsHost(normalizedAppId)),
+    dnsHost: existingDnsRoute?.host || launcherAppDefaultDnsHost(normalizedAppId),
+    dnsTarget: existingDnsRoute?.dnsTarget || MX_INTERNAL_DNS_IP,
+    dnsTargetUrl: existingDnsRoute?.targetUrl || launcherAppDefaultUpstreamUrl(onboardingTemplate),
+    dnsRouteTlsMode: existingDnsRoute?.tlsMode || 'internal',
+    dnsRouteAuthRequired: existingDnsRoute?.authRequired === false ? false : true
   };
+  return applyLauncherAppTemplateToDraft(draft, onboardingTemplate, { refreshDns: !existingDnsRoute && !editing });
 }
 
 function launcherAppDefaultDescription(draft) {
@@ -6804,8 +7032,16 @@ function launcherAppEffectivePermissions(draft) {
 }
 
 function launcherAppEffectiveUpdatePolicy(draft) {
+  const existing = String(draft.updatePolicy || '').trim();
+  if (['platform-critical', 'platform-ui', 'app-managed', 'mandatory-app', 'config-snapshot'].includes(existing)) return existing;
+  if (draft.appId === MX_H2I_PRODUCT_ID) return 'mandatory-app';
+  if (draft.launcherMode !== 'standalone') return 'platform-ui';
+  return 'app-managed';
+}
+
+function launcherProductEffectiveUpdatePolicy(draft) {
   if (draft.appId === MX_H2I_PRODUCT_ID || draft.launcherMode !== 'standalone') return 'launcher-managed';
-  return draft.updatePolicy || 'app-managed';
+  return 'app-managed';
 }
 
 function launcherAppCapabilityHint(capability) {
@@ -6844,6 +7080,7 @@ function openAppCatalogEditor(mode = 'create', appId = '') {
     const firstField = appEditorDrawer?.querySelector('[data-app-field="appId"]:not([readonly]), [data-app-field="displayName"]');
     firstField?.focus?.();
   });
+  void hydrateAppCatalogEditorDefaultsFromServer({ forceIdentity: mode !== 'edit' });
 }
 
 function closeAppCatalogEditor() {
@@ -6897,6 +7134,16 @@ function renderAppEditorDrawer() {
 
         <section class="app-drawer-section">
           <div class="app-section-title">
+            <span>00</span>
+            <strong>Onboarding template</strong>
+          </div>
+          <p class="app-section-copy">模板只负责填默认值；保存时仍会落到 AppCenter、ProductNetwork 和 DNS Routes 三个正式注册表。</p>
+          ${state.appOnboardingTemplatesError ? `<div class="feedback error">${escapeHtml(state.appOnboardingTemplatesError)}</div>` : ''}
+          ${renderAppOnboardingTemplateSection(draftForPlan)}
+        </section>
+
+        <section class="app-drawer-section">
+          <div class="app-section-title">
             <span>01</span>
             <strong>Basic identity</strong>
           </div>
@@ -6943,6 +7190,15 @@ function renderAppEditorDrawer() {
         <section class="app-drawer-section">
           <div class="app-section-title">
             <span>03</span>
+            <strong>DNS and gateway</strong>
+          </div>
+          <p class="app-section-copy">DNS target 写入 CoreDNS A 记录；Upstream URL 写入 Internal gateway 反代策略。端口只在 upstream 保留。</p>
+          ${renderAppDnsRouteSection(draftForPlan)}
+        </section>
+
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>04</span>
             <strong>Entitlement plan</strong>
           </div>
           <p class="app-section-copy">生产环境客户端必须命中这里的 AppCenter 注册和 ProductNetwork 绑定。SDK test mode 只在服务端显式开启时放行，不写入正式能力。</p>
@@ -6951,7 +7207,7 @@ function renderAppEditorDrawer() {
 
         <section class="app-drawer-section">
           <div class="app-section-title">
-            <span>04</span>
+            <span>05</span>
             <strong>Runtime defaults</strong>
           </div>
           <label class="app-check-row">
@@ -7010,6 +7266,27 @@ function renderAppEditorDecisionPath(draft, conflict) {
   `;
 }
 
+function renderAppOnboardingTemplateSection(draft) {
+  const template = launcherAppTemplateById(draft.onboardingTemplate || 'standalone-service');
+  return `
+    <div class="app-template-panel">
+      <label class="app-form-field">
+        <span>Application type</span>
+        <select data-app-field="onboardingTemplate">
+          ${launcherAppTemplateDefinitions().map((item) => `
+            <option value="${escapeHtml(item.templateId)}" ${item.templateId === template.templateId ? 'selected' : ''}>${escapeHtml(item.label)}</option>
+          `).join('')}
+        </select>
+      </label>
+      <div class="app-template-preview">
+        <strong>${escapeHtml(template.label)}</strong>
+        <span>${escapeHtml(template.detail)}</span>
+        <small>${escapeHtml(template.templateId === 'custom' ? '后续可由 SDK manifest 或 k8s admin 回填字段。' : '可以继续编辑名称、域名和 upstream；能力和权限由系统推导。')}</small>
+      </div>
+    </div>
+  `;
+}
+
 function renderAppEntitlementPlan(draft, capabilities, permissions) {
   return `
     <div class="app-entitlement-plan">
@@ -7045,6 +7322,38 @@ function renderAppEntitlementPlan(draft, capabilities, permissions) {
           <span><strong>${escapeHtml(productNetworkIdForDraft(draft))}</strong><small>ProductNetwork binding</small></span>
         </div>
       </article>
+    </div>
+  `;
+}
+
+function renderAppDnsRouteSection(draft) {
+  const enabled = draft.dnsRouteEnabled !== false;
+  const host = draft.dnsHost || launcherAppDefaultDnsHost(draft.appId);
+  const routeId = draft.dnsRouteId || launcherAppDnsRouteId(host);
+  const existingRoute = launcherAppExistingDnsRoute(draft.appId, host);
+  return `
+    <div class="app-dns-plan ${enabled ? '' : 'is-disabled'}">
+      <label class="app-check-row">
+        <input data-app-field="dnsRouteEnabled" type="checkbox" ${enabled ? 'checked' : ''} />
+        <span aria-hidden="true"></span>
+        <strong>Create or update DNS Route</strong>
+      </label>
+      <div class="app-editor-grid">
+        <label class="app-form-field">
+          <span>Domain</span>
+          <input data-app-field="dnsHost" value="${escapeHtml(host)}" placeholder="${escapeHtml(launcherAppDefaultDnsHost(draft.appId))}" autocomplete="off" ${enabled ? '' : 'disabled'} />
+        </label>
+        <label class="app-form-field">
+          <span>Upstream URL</span>
+          <input data-app-field="dnsTargetUrl" value="${escapeHtml(draft.dnsTargetUrl || launcherAppDefaultUpstreamUrl(draft.onboardingTemplate))}" placeholder="http://127.0.0.1:8080" autocomplete="off" ${enabled ? '' : 'disabled'} />
+        </label>
+      </div>
+      <div class="app-network-facts">
+        <span><strong>${escapeHtml(routeId)}</strong><small>${existingRoute ? 'existing route will be updated' : 'route id'}</small></span>
+        <span><strong>${escapeHtml(draft.dnsTarget || MX_INTERNAL_DNS_IP)}</strong><small>CoreDNS A record target</small></span>
+        <span><strong>${escapeHtml(draft.dnsRouteTlsMode || 'internal')}</strong><small>gateway TLS mode</small></span>
+        <span><strong>${draft.dnsRouteAuthRequired === false ? 'public' : 'auth required'}</strong><small>gateway auth</small></span>
+      </div>
     </div>
   `;
 }
@@ -7160,6 +7469,11 @@ function appEditorDraftFromForm(root) {
     : cleanLauncherProductId(appEditorValue(root, 'appId') || appEditorValue(root, 'displayName'));
   const launcherMode = appEditorValue(root, 'launcherMode') === 'standalone' ? 'standalone' : 'embed';
   const fallbackSecondOctet = current.productSecondOctet || nextAvailableProductSecondOctet(appId || null, launcherMode);
+  const previousDefaultDnsHost = launcherAppDefaultDnsHost(current.appId);
+  const rawDnsHost = appEditorValue(root, 'dnsHost') || current.dnsHost || launcherAppDefaultDnsHost(appId);
+  const dnsHost = (!current.dnsHost || rawDnsHost === previousDefaultDnsHost)
+    ? launcherAppDefaultDnsHost(appId)
+    : rawDnsHost;
   const baseDraft = {
     ...current,
     appId,
@@ -7167,13 +7481,21 @@ function appEditorDraftFromForm(root) {
     category: appEditorValue(root, 'category') || current.category || 'custom',
     version: appEditorValue(root, 'version') || current.version || '0.1.0',
     description: appEditorValue(root, 'description') || current.description || '',
+    onboardingTemplate: appEditorValue(root, 'onboardingTemplate') || current.onboardingTemplate || 'standalone-service',
     launcherMode,
     standaloneChannelProductId: launcherMode === 'standalone'
       ? appId || current.appId || MX_H2I_PRODUCT_ID
       : normalizeStandaloneProductId(appEditorValue(root, 'standaloneChannelProductId') || current.standaloneChannelProductId || MX_H2I_PRODUCT_ID),
     productSecondOctet: normalizeProductSecondOctet(appEditorValue(root, 'productSecondOctet') || fallbackSecondOctet, fallbackSecondOctet),
     enabled: appEditorValue(root, 'enabled') !== false,
-    channels: uniqueStringList(current.channels).length ? uniqueStringList(current.channels) : ['shadow', 'beta', 'stable']
+    channels: uniqueStringList(current.channels).length ? uniqueStringList(current.channels) : ['shadow', 'beta', 'stable'],
+    dnsRouteEnabled: appEditorValue(root, 'dnsRouteEnabled') !== false,
+    dnsHost,
+    dnsRouteId: launcherAppDnsRouteId(dnsHost),
+    dnsTarget: current.dnsTarget || MX_INTERNAL_DNS_IP,
+    dnsTargetUrl: appEditorValue(root, 'dnsTargetUrl') || current.dnsTargetUrl || launcherAppDefaultUpstreamUrl(current.onboardingTemplate),
+    dnsRouteTlsMode: current.dnsRouteTlsMode || 'internal',
+    dnsRouteAuthRequired: current.dnsRouteAuthRequired !== false
   };
   if (!baseDraft.description) baseDraft.description = launcherAppDefaultDescription(baseDraft);
   return {
@@ -7204,11 +7526,17 @@ function bindAppEditorDrawerControls() {
       renderAppEditorDrawer();
     });
   }
-  for (const control of appEditorDrawer.querySelectorAll('[data-app-field="launcherMode"], [data-app-field="standaloneChannelProductId"], [data-app-field="productSecondOctet"], [data-app-field="category"]')) {
+  for (const control of appEditorDrawer.querySelectorAll('[data-app-field="launcherMode"], [data-app-field="standaloneChannelProductId"], [data-app-field="productSecondOctet"], [data-app-field="category"], [data-app-field="dnsRouteEnabled"], [data-app-field="onboardingTemplate"], [data-app-field="appId"], [data-app-field="displayName"], [data-app-field="dnsHost"], [data-app-field="dnsTargetUrl"]')) {
     control.addEventListener('change', () => {
-      state.appCatalogEditor.draft = appEditorDraftFromForm(form);
+      const nextDraft = appEditorDraftFromForm(form);
+      state.appCatalogEditor.draft = control.dataset.appField === 'onboardingTemplate'
+        ? applyLauncherAppTemplateToDraft(nextDraft, control.value, { forceIdentity: state.appCatalogEditor?.mode !== 'edit', refreshDns: true })
+        : nextDraft;
       state.appCatalogFeedback = null;
       renderAppEditorDrawer();
+      if (control.dataset.appField === 'onboardingTemplate') {
+        void hydrateAppCatalogEditorDefaultsFromServer({ forceIdentity: state.appCatalogEditor?.mode !== 'edit' });
+      }
     });
   }
   for (const control of appEditorDrawer.querySelectorAll('[data-app-field]')) {
@@ -7292,6 +7620,32 @@ function appEditorValue(root, field) {
   return blankToNull(element.value);
 }
 
+function launcherAppDnsRoutePayload(draft, appId) {
+  const host = String(draft.dnsHost || launcherAppDefaultDnsHost(appId)).trim().toLowerCase();
+  const routeId = draft.dnsRouteId || launcherAppDnsRouteId(host);
+  return {
+    routeId,
+    host,
+    dnsTarget: draft.dnsTarget || MX_INTERNAL_DNS_IP,
+    targetUrl: blankToNull(draft.dnsTargetUrl) || launcherAppDefaultUpstreamUrl(draft.onboardingTemplate),
+    enabled: true,
+    tlsMode: draft.dnsRouteTlsMode || 'internal',
+    authRequired: draft.dnsRouteAuthRequired !== false,
+    requestedBy: 'desktop-admin'
+  };
+}
+
+async function syncLauncherAppDnsRoute(draft, appId) {
+  if (draft.dnsRouteEnabled === false) return null;
+  const body = launcherAppDnsRoutePayload(draft, appId);
+  const payload = await fetchJson(`/internal/v1/dns/reverse-proxy/routes/${encodeURIComponent(body.routeId)}`, {
+    method: 'POST',
+    body
+  });
+  await refreshDnsRoutesFromAdmin();
+  return payload.route || body;
+}
+
 async function saveAppCenterAppFromEditor(root) {
   const draft = appEditorDraftFromForm(root);
   const appId = cleanLauncherProductId(draft.appId);
@@ -7336,6 +7690,7 @@ async function saveAppCenterAppFromEditor(root) {
   if (state.appCatalogEditor) state.appCatalogEditor.draft = { ...draft, appId, productSecondOctet: secondOctet };
   renderAppEditorDrawer();
   try {
+    let savedDnsRoute = null;
     if (launcherMode === 'standalone') {
       const ranges = relayProductNetworkShape(secondOctet);
       const networkPayload = {
@@ -7347,7 +7702,7 @@ async function saveAppCenterAppFromEditor(root) {
         serviceVip: serviceVipForProductSecondOctet(secondOctet, appId),
         ...ranges,
         defaultDomesticSiteId: selectedDomesticSiteId() || 'domestic-main',
-        updatePolicy: body.updatePolicy,
+        updatePolicy: launcherProductEffectiveUpdatePolicy({ ...draft, appId, launcherMode }),
         enabled: body.enabled,
         requestedBy: 'desktop-admin',
         requestId: `desktop-app-network-${Date.now()}`
@@ -7362,6 +7717,7 @@ async function saveAppCenterAppFromEditor(root) {
       method: 'POST',
       body
     });
+    savedDnsRoute = await syncLauncherAppDnsRoute({ ...draft, appId, launcherMode }, appId);
     const app = payload.app || body;
     state.appCenterApps = [
       app,
@@ -7369,7 +7725,12 @@ async function saveAppCenterAppFromEditor(root) {
     ];
     state.activeAppNode = app.appId;
     state.appCatalogEditor = null;
-    state.appCatalogFeedback = { kind: 'success', message: `${app.displayName || app.appId} saved.` };
+    state.appCatalogFeedback = {
+      kind: 'success',
+      message: savedDnsRoute
+        ? `${app.displayName || app.appId} saved with DNS route ${savedDnsRoute.host}.`
+        : `${app.displayName || app.appId} saved.`
+    };
   } catch (error) {
     state.appCatalogFeedback = { kind: 'error', message: error.message };
   } finally {
