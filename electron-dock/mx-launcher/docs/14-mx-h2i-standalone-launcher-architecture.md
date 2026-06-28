@@ -318,6 +318,8 @@ Docker systemd proxy 环境和 Oversea hysteria2 订阅，而不是把它归因�
 ```dotenv
 MX_H2I_BOOTSTRAP_BASE_URL=http://api.mxinfo-inc.cn:18090
 MX_H2I_HOST_RESOLVE=api.mxinfo-inc.cn=<gateway-ip>
+MX_H2I_BOOTSTRAP_RESOLVE_MODE=dns-first
+MX_H2I_BOOTSTRAP_DNS_SERVERS=<domestic-public-ip>:<dns-port>
 MX_H2I_INTERNAL_BASE_URL=http://10.88.88.88:18090
 MX_H2I_SPLIT_DNS_DOMAINS=mx.cn,mxinfo-inc.cn,api.mxinfo-inc.cn
 ```
@@ -325,6 +327,10 @@ MX_H2I_SPLIT_DNS_DOMAINS=mx.cn,mxinfo-inc.cn,api.mxinfo-inc.cn
 正式部署时，公网 DNS 可以把 `api.mxinfo-inc.cn` 解析到 Domestic 公网入口；连上 WG 后，
 Internal DNS/split DNS 可以把同一域名或内网服务域名解析到 Internal overlay IP。这样用户不需要
 手动填 IP，Admin 只需要管理公网解析、Internal DNS policy 和 routePlan。
+H 端还没有建立 WG 时，不能依赖 `10.88.0.1` 或 `10.88.88.88` 解析 bootstrap 域名。
+这个阶段允许用 `MX_H2I_BOOTSTRAP_DNS_SERVERS=<domestic-public-ip>:<dns-port>` 指向
+Domestic 公网 DNS endpoint。这里的 `host:port` 只属于 MX-H2I bootstrap resolver，
+不进入 WireGuard profile；连上 WG 后仍回到 routePlan 的标准 53 DNS。
 如果公网 DNS 命中了云厂商备案/合规拦截页，H2I bootstrap 应使用 Host Resolve：配置
 `Bootstrap API=http://api.mxinfo-inc.cn:18090`，再配置
 `Host Resolve=api.mxinfo-inc.cn=<可达的 Domestic/Internal gateway IP>`。客户端实际拨号到
@@ -355,13 +361,16 @@ V2 不应假设 TCP facade 会自动转发传统 DNS：UDP/53 与 HTTP/TCP rever
 本机 edge 在 Internal/Domestic UDP DNS 超时后，可以把已命中 split DNS 的域名降级解析到
 Internal gateway `10.88.88.88`；更完整的生产形态是在 Domestic 部署 `dns-edge-cache`，
 由 Internal 同步 signed zone snapshot，Domestic 只做缓存/转发而不拥有 DNS 真相。当前推荐
-回到 V1 HDO 的稳定语义：Domestic 和 Internal DNS 都默认监听 53。Internal
+沿用标准 DNS 53 的稳定语义，而不是沿用 V1 HDO 的 zone 数据模型。Internal
 `mx-internal-coredns` 使用同一份 `mx-dns/coredns` ConfigMap，并通过 hostPort 暴露
-Internal host `10.88.88.88:53`；Domestic apply 时先检查 53 是否已有 V1 `hdo-coredns`、
-系统 DNS 或其它 DNS runtime 在监听，已有则直接复用并继续后续部署，没有才启动
-`mx-domestic-dns-edge-v2` compose 服务。routePlan 下发 `dnsServer=10.88.0.1` 时不带端口，
-WireGuard 原生 DNS、macOS CLI split DNS 和本机 edge 都按 UDP/TCP 53 查询；`50053` 只作为
-旧 snapshot/旧环境的显式兼容值，不再是 V2 默认链路。
+Internal host `10.88.88.88:53`；Domestic 53 可以是 V2 `dns-edge-cache`，也可以是现有
+V1 HDO DNS runtime。纯 V1 `hdo-coredns` 不理解 V2 `upstream URL`，但可以在过渡期承载
+V2-only 域名的 A 记录，把它们解析到 `10.88.88.88`，再由 V2 gateway 处理 Host/upstream。
+Domestic apply 发现 53 已占用时，可以复用端口层运行资源；V2 DNS ready 的证据是
+V2-only 域名查询能返回预期 `10.88.88.88`，或同名冲突域名能通过 source/view/forward
+拿到 V2 答案。routePlan 下发 `dnsServer=10.88.0.1` 时不带端口，WireGuard 原生 DNS、
+macOS CLI split DNS 和本机 edge 都按 UDP/TCP 53 查询；`50053` 只作为旧 snapshot/旧环境
+的显式兼容值，不再是 V2 默认链路。
 如果生产 DNS 还没有准备好，Domestic runtime 的 `bootstrapHost` 可以先使用 Domestic
 公网 IP，保持 `bootstrapProtocol=http`、`bootstrapPort=18090`，这与测试服 bootstrap
 路径一致。`api.mxinfo-inc.cn` 只是默认域名占位；未替换时会产生 warning，但不应该成为
@@ -558,6 +567,204 @@ MX-H2I -> Domestic WG relay -> 10.88.88.88 Internal private API
 V2 DNS authority 固定放在 Internal，不再把 Domestic 作为域名真相。Domestic 可保留
 `dns-edge-cache`，但它只是 Internal 短暂不可达时的缓存，不分配或拥有 zone。
 
+### V1/V2 共存期 DNS 规划
+
+结论：共存期不要让 V2 抢 Domestic 53，也不要继续设计 `50053` 作为 H 端 WireGuard DNS。
+WireGuard 客户端侧 DNS 只稳定支持 nameserver，不适合把端口作为契约；同时本机 Clash/mihomo
+TUN 或虚拟网卡模式会让 `50053` 这类旁路解析路径很难获得系统级优先级。V2 应把
+`routePlan.dnsServer` 固定下发为 `10.88.0.1`，H 端连上 MX-H2I 后通过 Domestic WG
+访问 Domestic 上的 53；断开后系统 DNS/PAC 恢复到原有网络、系统代理或其它 DNS。
+
+这里的 V1 指线上 HDO：`electron-demo/hdo` + `electron-server` +
+`electron-plugin/packages/electron-plugin-hdo` +
+`electron-plugin/packages/electron-core-wireguard`。V1 HDO 不是 MX-H2I，也没有使用
+`mx.cn` 作为默认域名体系。V1 默认 mesh 是 `100.*`：Domestic `100.88.0.1`，登录用户
+`100.89.0.0/16`，service `100.90.0.0/16`，匿名网络使用 `100.91.0.0/16`。V1 DNS 后台
+只保存 `domain -> target_host`，例如 `api.mxinfo-inc.cn -> 100.89.0.12`，不保存
+V2 的 `upstream URL`。
+
+V2 指 MX-H2I：`electron-dock/mx-launcher/demos/mx-h2i`。V2 默认 mesh 是 `10.*`：
+Domestic gateway `10.88.0.1`，Internal service peer `10.88.88.88`，H 端 lease
+`10.89.0.0/16`。V2 DNS Route 的 `dnsTarget` 进入 CoreDNS A 记录，`upstream URL`
+只给 Internal gateway 反代使用。
+
+共存期分五层：
+
+| 层 | 共存期 owner | 责任 | 不承担 |
+| --- | --- | --- | --- |
+| V1 HDO DNS authority | `electron-server` HDO DNS / Domestic V1 runtime | 服务 V1 HDO 客户端，回答 `100.*` overlay 记录；过渡期可承载 V2-only A 记录 | 不保存 V2 `targetUrl` 或反代策略 |
+| V2 DNS authority | V2 Internal Config Center + Internal CoreDNS | 维护 V2 DNS route、zone snapshot、gateway route、审计和发布 | 不要求 V1 客户端或插件改造 |
+| Domestic DNS front | Domestic 53 listener，可以是 V1 HDO DNS、V2 dns-edge-cache 或 view/forward front | 让 H 端 WG DNS 始终查询 Domestic 53 | 不在 WireGuard DNS 里暴露非 53 端口 |
+| Bootstrap resolver | Domestic public IP + DNS port | 给未入网的 MX-H2I 解析 bootstrap 域名 | 不作为 H2I ready 证据，不进入 WireGuard DNS |
+| 业务反代 | V2 Internal gateway，优先 host nginx | 按 Host 把 V2 route 转到自己的 `targetUrl` | 不让 V1 DNS 理解 upstream URL 或端口 |
+
+V1 和 V2 DNS 记录按三档处理：
+
+| 类型 | 例子 | 过渡策略 |
+| --- | --- | --- |
+| V1 现有域名 | `api.mxinfo-inc.cn -> 100.89.0.12` | 保持不变，保证线上 HDO 不断 |
+| V2-only 域名 | `openvpn.mx.cn -> 10.88.88.88` | 可以手动或自动发布到 V1 HDO DNS A 记录，V2 gateway 再按 Host/upstream 分流 |
+| 同名迁移域名 | `night-all.mxinfo-inc.cn` V1 需要 `100.89.0.12`，V2 需要 `10.88.88.88` | 不直接覆盖；用新域名、灰度切换，或 Domestic DNS source/view/forward |
+
+同一个域名在 V1/V2 里可能合法地指向不同 IP：
+
+```text
+V1 HDO DNS:
+api.mxinfo-inc.cn       -> 100.89.0.12
+night-all.mxinfo-inc.cn -> 100.89.0.12
+www.mxinfo-inc.cn       -> 100.89.0.12
+
+V2 MX-H2I DNS Route:
+openvpn.mx.cn           -> 10.88.88.88
+openvpn.mxinfo-inc.cn   -> 10.88.88.88
+night-all.mxinfo-inc.cn -> 10.88.88.88
+```
+
+因此 V2-only 域名可以放进 V1 DNS 后台做测试和过渡；同名迁移域名不能无条件覆盖。
+如果 `night-all.mxinfo-inc.cn` 在 V1 仍用于线上 HDO，它在 V1 DNS 里应继续返回
+`100.89.0.12`。V2 要使用同名域名时，要么等切换窗口整体改 A 记录，要么让 Domestic
+DNS front 根据来源网段或 listener/view 转发到 V2 Internal CoreDNS，返回 `10.88.88.88`。
+如果暂时没有 view/forward 能力，开发期应优先使用 `*.mx.cn` 或明确的 V2-only 子域。
+
+V2 Admin 的 DNS Routes 仍然保存完整记录，例如：
+
+```text
+domain    = openvpn.mxinfo-inc.cn
+dnsTarget = 10.88.88.88
+targetUrl = http://127.0.0.1:8080 或 http://10.88.88.88:8080
+tlsMode   = internal / passthrough / edge-terminated
+```
+
+`dnsTarget` 可以进入 V2 CoreDNS zone snapshot，也可以在过渡期同步成 V1 HDO DNS 的
+`domain -> target_host` A 记录；`targetUrl` 只给 V2 gateway 使用。V1 HDO 客户端和插件
+无需修改；V2 在 Internal 侧管理自己的 route、gateway、审计和回滚。
+
+`targetUrl` 是 V2 的端口消除层。V1 DNS 只能把域名解析到 IP，访问具体项目仍要靠端口；
+V2 route 可以把 `h2i.mxinfo-inc.cn` 这类域名解析到 `10.88.88.88`，再由 Internal gateway
+按 Host 反代到 `http://127.0.0.1:8080`、`http://127.0.0.1:8008` 或其它服务端口。
+如果浏览器访问 `http://h2i.mxinfo-inc.cn/login` 直接进入 OpenVPN UI，说明
+`DNS -> 10.88.88.88 -> gateway -> upstream` 链路已经成立。
+
+`127.0.0.1` 的含义取决于实际执行反代的位置：
+
+- host nginx 执行反代时，`127.0.0.1:<port>` 是 Internal 宿主机。
+- hostNetwork Caddy 执行反代时，`127.0.0.1:<port>` 也可用于访问宿主机网络命名空间中的服务。
+- 非 hostNetwork Pod 执行反代时，`127.0.0.1` 是 Pod 自己；这时应改用 k8s Service DNS、
+  host-runner 暴露地址，或明确的 Internal host IP。
+
+H 端 bootstrap 路径：
+
+```text
+MX-H2I before WG
+-> MX_H2I_BOOTSTRAP_DNS_SERVERS=<domestic-public-ip>:<dns-port>
+-> 解析 api.mxinfo-inc.cn / bootstrapHost
+-> http://api.mxinfo-inc.cn:18090 或 Host Resolve 到 Domestic public edge
+-> 获取 lease / routePlan
+```
+
+H 端稳定态路径：
+
+```text
+H app/ping/curl/browser
+-> system DNS / dynamic resolver / PAC命中 V2 split domain
+-> 10.88.0.1:53
+-> Domestic 53 返回 V2-only A 记录，或按 view/forward 转 V2 Internal CoreDNS
+-> A 记录返回 10.88.88.88
+-> H 按 MX-H2I WG AllowedIPs 到 Internal service peer
+-> Internal host nginx :80
+-> proxy_pass http://127.0.0.1:8008
+-> k8s Caddy 按 Host 反代到 V2 route 的 targetUrl
+```
+
+现场验证语义：
+
+- 未配置 V1/V2 内网 DNS 记录时，`h2i.mxinfo-inc.cn` 解析到域名厂商或公网 DNS 返回的
+  `116.*` 是正常现象，说明还没有进入 H2I split DNS。
+- 在 V1 HDO DNS 后台新增 `h2i.mxinfo-inc.cn -> 10.88.88.88` 后，只打开 V1/HDO 时
+  DNS 会返回 `10.88.88.88`，但 ping 不通是正常现象；V1 的 WG 数据面是 `100.*`，
+  不证明 V2 `10.88.88.88` 可达。
+- 打开 V2/MX-H2I 后，同一域名能 ping 通 `10.88.88.88`，证明当前链路是
+  `V1 DNS 53 -> V2 WG route -> Internal service peer`。
+- V1 下线后，V2 需要用自己的 Domestic 53 / `dns-edge-cache` 或同等 listener 发布同一条
+  A 记录；H 端仍查询 `10.88.0.1:53`，不改变 WireGuard DNS 契约。
+
+V2-only 稳定期的解析优先级：
+
+1. 命中 V2 split DNS 的域名，先走 MX-H2I 本机 edge / 系统 supplemental DNS，再到
+   Domestic `10.88.0.1:53`，最终由 V2 CoreDNS 或 V2 `dns-edge-cache` 返回 `10.88.88.88`。
+2. 命中 split 的内网域名不应在 V2 DNS 失败后继续落到阿里、运营商或域名厂商 DNS；否则会
+   重新得到公网 `116.*`，把内网访问绕回公网或旧入口。失败时应显示 DNS/front 未就绪，
+   或使用明确的 V1 DNS 过渡记录。
+3. 系统代理和域名厂商 DNS 只用于 bootstrap、未命中 split 的普通公网域名，或用户显式选择的
+   fallback；不作为 V2 内网域名的权威答案来源。
+
+`h2i.mxinfo-inc.cn` 这类域名可以有双角色，但必须按连接状态切换：
+
+- `disconnected / before WG`：它是 bootstrap 域名，可以走系统 DNS、Clash/mihomo 代理、
+  Domestic public DNS endpoint 或域名厂商 DNS，解析到公网 IP 用于拿 lease/routePlan。
+- `connected / H2I ready`：它是 V2 split 内网域名，必须优先解析到 `10.88.88.88`，再走
+  MX-H2I WG route。这个阶段不应因为 Internal DNS 暂时失败而静默落回 `116.*` 或
+  `198.18.*`。
+- `disconnect / repair`：MX-H2I 必须撤销自己写入的 PAC、dynamic split DNS 和 local edge
+  状态，让域名重新回到连接前的系统 DNS/代理行为。若用户直接杀进程或系统网络切换导致
+  stale resolver 留存，下一次启动应能检测 marker 并提供一次性修复。
+
+Clash/mihomo 兼容原则不是按模式写两套逻辑，而是统一优先级 + 模式证据：
+
+| 场景 | 期望行为 |
+| --- | --- |
+| Clash system proxy | bootstrap 和普通公网流量可走原系统代理；V2 split 域名由 MX-H2I PAC/local edge 接管 |
+| Clash TUN/fake-ip | `198.18.0.0/15` 只作为代理 fake-ip 证据，不算 H2I ready；route proof 必须命中 MX-H2I WG interface |
+| Clash 关闭 | MX-H2I 断开后应恢复到系统 DNS/公网解析；如果仍返回 `198.18.*`，优先查系统 DNS cache、Clash 残留 TUN/DNS 或 stale MX-H2I resolver |
+| V2 connected | 对 `10.88.88.88`、`10.88.0.1`、Domestic relay endpoint、DNS server 写更具体 route/priority，压过 TUN 默认路由 |
+
+因此客户端需要检测 Clash/TUN/fake-ip，但检测结果只用于诊断、route proof 和针对性修复提示；
+主行为仍是同一套确定优先级：`V2 split DNS/PAC/local edge -> V2 WG route -> 原系统代理/系统 DNS -> 外部 DNS`。
+对 split 域名，`原系统代理/系统 DNS -> 外部 DNS` 只在 disconnected/bootstrap 状态参与。
+
+浏览器 PAC 是体验优化，不是唯一入口。V2 连接后应同时保证：
+
+- 浏览器通过 PAC 访问内网域名可用。
+- 不走浏览器代理的程序，例如 `ping`、`curl` 和普通 HTTP client，也能通过系统 DNS
+  解析到 `10.88.88.88` 并走 MX-H2I WG。
+- V2 断开或 route proof 失败时，不继续保留 V2 split DNS/PAC；客户端回退到连接前系统
+  DNS、系统代理或其它已存在的代理。
+
+开发期建议：
+
+1. Domestic 继续保障 V1 HDO DNS 53，不改 V1 客户端/插件。测试 V2-only 域名时，可以先在
+   V1 HDO DNS 后台手动写 `domain -> 10.88.88.88`，用 V2 的 gateway/upstream 验证内容。
+   不要覆盖 V1 正在使用的同名域名。
+2. Internal Admin 仍作为唯一编辑入口。新增或修改 DNS Route 后，先 Build Zone，再 Apply
+   Gateway；如需借用 V1 DNS 过渡，只同步 `domain -> dnsTarget`，不把 `targetUrl` 写进 V1。
+3. Internal 宿主机 80 已有 nginx 时，让 V2 生成并 apply
+   `/etc/nginx/conf.d/mx-gateway.generated.conf`，推荐 upstream 使用
+   `http://127.0.0.1:8008` 转到 Caddy，或者直接转具体服务端口；避免
+   `10.88.88.88` hairpin 到自身或落入默认站点。
+4. K8s Caddy hostNetwork 只作为 fallback。宿主机 80 被 nginx 占用时，Caddy 退到 `8008`；
+   nginx 再把 `*.mx.cn` / `*.mxinfo-inc.cn` 转到 `127.0.0.1:8008` 也是可接受的开发期路径。
+   更推荐 nginx 直接转具体 `targetUrl`，少一层 overlay/hairpin 变量。
+5. H 端入网前需要解析 bootstrap 域名时，使用
+   `MX_H2I_BOOTSTRAP_DNS_SERVERS=<domestic-public-ip>:<dns-port>`。这个端口可以按现场
+   暴露情况配置；它只用于 bootstrap DNS，不解决连上后系统 DNS 的 53 约束。
+
+上线期建议：
+
+1. Internal 仍然是 DNS/gateway 配置真相。所有业务域名、targetUrl、TLS 模式、auth
+   策略都从 Config Center 发布，并带 snapshot/evidence。
+2. V1 服务不能断时，Domestic 53 可以继续由 V1 HDO DNS runtime 承担。V2 Config Center
+   可以把 V2-only route 的 `domain -> dnsTarget` 发布到 V1 DNS；同名迁移域名进入
+   灰度窗口或 source/view/forward，不做静默覆盖。
+3. 如果 V1 完全下线，V2 Domestic `dns-edge-cache` 可以成为唯一 Domestic 53 listener，
+   默认转发 Internal CoreDNS；Internal CoreDNS 继续是 zone authority。H 端契约不变：
+   `routePlan.dnsServer = 10.88.0.1`，端口仍是 53。
+4. Internal gateway 优先使用宿主机 nginx 接管 80。K8s Caddy 保留为可回退 backend，
+   不再把 8008 暴露为用户默认入口。
+5. 切换门禁以证据为准：V1 HDO 现有域名查询仍返回 `100.*`；V2-only 域名查询
+   `dig domain @10.88.0.1` 返回 `10.88.88.88`；对 `10.88.88.88` 的 route proof 命中
+   MX-H2I WG interface；`curl http://domain/` 命中预期 `targetUrl`；断开 MX-H2I 后解析
+   和访问回到系统原状态。
+
 Internal K8s 运行 `mx-internal-coredns`，Config Center 生成 signed zone snapshot 并同步到
 `mx-dns/coredns` ConfigMap。当前最小 zone 记录：
 
@@ -607,6 +814,12 @@ DNS Routes 面板里编辑。V2 默认仍保留 k8s Caddy 作为可回退 backen
   无权限 WireGuard probe，再验证系统 PAC 与 dynamic split DNS。网络变化不会自动执行
   privileged apply；若 PAC/DNS 或 WG route 确实丢失，应通过明确的手动修复动作触发权限，
   避免连接完成后或后台 route-refresh 周期反复弹权限框。
+- macOS 权限申请应收敛为 Launcher network transaction。当前 V2 可能出现两次授权：
+  第一次安装/刷新 WireGuard LaunchDaemon 和 route，第二次写系统 PAC 与 dynamic split
+  DNS。短期应把 UI 文案合并为一次“即将修改 WireGuard、DNS、PAC”的连接动作，并尽量只在
+  首次连接或配置变更时触发；长期应由 Launcher native helper/broker 一次性执行
+  WG/route/DNS/PAC apply、记录 previous state，并在 disconnect/repair 中统一回滚。这样
+  MX-H2I、Luopan 等 standalone 都不各自弹权限，也不会互相覆盖系统网络。
 - macOS 用户态 WireGuard 会把当前 routePlan 的 AllowedIPs 展开为数量受控的 `/20`
   priority routes，并给 Domestic gateway、Internal control、DNS 等关键 IP 写 `/32`
   priority routes，用来压过 Clash/Mihomo 等 198.18 TUN 的同前缀路由。多个 standalone
@@ -699,6 +912,23 @@ Luopan 这类独立产品：
 - v1 仍共用 `mx-domestic` 和 Internal `10.88.88.88`
 - 可分配独立 gateway alias/service VIP，例如 `10.88.0.2` / `10.88.101.1`
 - H 端 lease 使用独立段，未手填时默认从 `10.90.0.0/16` 开始
+
+同机多个 standalone 的本机网络规则：
+
+- 本机系统网络只能有一个 active writer。MX-H2I 和 Luopan 可以同时运行 UI，但 WG route、
+  PAC、dynamic split DNS、local edge port 和 previous-state 回滚必须由 Launcher broker
+  合并后一次性写入。
+- 多个 standalone 可以共享同一个 Domestic fabric：Internal 仍是 `10.88.88.88`，Domestic
+  gateway 仍是 `10.88.0.1`；产品差异放在 H 端 lease 段、service VIP、DNS suffix/route 和
+  auth policy。
+- IP 段必须不重叠：MX-H2I 使用 `10.89.0.0/16`，Luopan 默认从 `10.90.0.0/16` 开始。
+  broker 对重叠 AllowedIPs 应拒绝 apply 或要求切换 owner。
+- DNS policy 可以合并：`mx-h2i` 的域名、`luopan` 的域名、AppCenter embed app 的域名
+  汇总成一个 local edge / PAC / dynamic split DNS 配置；每条 route 带 owner 和可回滚 evidence。
+- 开关某个 app/standalone 时，只移除该 owner 的 routes/domains/leases，不恢复整个系统网络；
+  只有最后一个 network owner 退出时，才恢复连接前的系统 PAC/DNS/代理状态。
+- Clash/TUN 存在时，broker 统一给 Internal service IP、Domestic DNS/gateway、各产品 lease
+  段写更具体 priority routes；不能让后启动的 standalone 用一整段大网段覆盖前一个产品。
 
 不推荐 v1 给 Luopan 新起 `wg-quick@Luopan` 或把 Internal 改成 `10.88.88.89`。那会让
 端口、防火墙、DNS、路由、secret 轮转、观测和远端部署复杂化。只有在监管隔离、客户
