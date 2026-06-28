@@ -100,6 +100,7 @@ export function createEmbedLauncher(options: EmbedLauncherOptions): EmbedLaunche
   async function enrollLease(input: EmbedLeaseOptions = {}): Promise<LauncherNetworkLease> {
     return client.enrollLease({
       ...input,
+      appId: input.appId ?? productId,
       productId,
       mode: 'embed',
       installId: input.installId ?? options.installId,

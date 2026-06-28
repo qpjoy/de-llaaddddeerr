@@ -14,6 +14,7 @@ loadDotEnvFiles();
 const APP_ID = 'dev.qpjoy.mx-h2i';
 const STATE_FILE = 'mx-h2i-runtime.json';
 const PRODUCT_ID = 'mx-h2i';
+const PRODUCT_DISPLAY_NAME = 'MX-H2I';
 const REQUESTED_BY = 'mx-h2i-desktop';
 const WIREGUARD_PROFILE_NAME = 'mx-h2i.conf';
 const INTERNAL_PEER_IP = '10.88.88.88';
@@ -40,6 +41,8 @@ const NETWORK_CHANGE_MONITOR_MS = 5000;
 const NETWORK_CHANGE_DEBOUNCE_MS = 1800;
 const WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD = 3;
 const DEFAULT_CONFIG = {
+  productId: defaultLauncherProductId(),
+  productDisplayName: defaultLauncherProductDisplayName(),
   bootstrapApiBaseUrl: defaultBootstrapApiBaseUrl(),
   internalApiBaseUrl: 'http://10.88.88.88:18090',
   domesticRelayHost: '121.43.253.179',
@@ -91,6 +94,7 @@ let lastSystemDomainProxyPolicySignature = null;
 let lastSystemDomainProxyAuthorizationCanceledSignature = null;
 let lastSystemPacReverseProxyRoutes = [];
 let lastSystemPacReverseProxyRoutesWarningAt = 0;
+let lastNetworkEnvironmentSignature = null;
 
 const TOP_DOCK_Y = 0;
 const TOP_REVEAL_ZONE = 18;
@@ -113,6 +117,9 @@ app.on('second-instance', () => {
 app.whenReady().then(async () => {
   runtime = await loadRuntime();
   await initializeSystemDomainProxy();
+  void refreshNetworkEnvironmentDiagnostics('app-startup').catch((err) => {
+    console.warn('[mx-h2i] startup network diagnostics failed:', errorMessage(err));
+  });
   registerIpc();
   createTray();
   createMainWindow();
@@ -178,6 +185,7 @@ function registerIpc() {
   ipcMain.handle('mx-h2i:connect-guest', async () => {
     await recoverRetainedWireGuardBeforeBootstrap('guest-pre-bootstrap');
     setConnecting('guest');
+    await refreshNetworkEnvironmentDiagnostics('guest-pre-connect', { phase: 'bootstrap', persist: false });
     await saveAndBroadcast();
     try {
       const session = await connectLauncherNetwork({
@@ -215,6 +223,7 @@ function registerIpc() {
     }
     await recoverRetainedWireGuardBeforeBootstrap('employee-pre-bootstrap');
     setConnecting('employee');
+    await refreshNetworkEnvironmentDiagnostics('employee-pre-connect', { phase: 'bootstrap', persist: false });
     await saveAndBroadcast();
     try {
       const bootstrap = await resolveBootstrapEndpoint(runtime.config);
@@ -248,8 +257,13 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:disconnect', async () => {
-    const systemDomainProxy = await disableSystemDomainProxyForRuntime('disconnect');
-    const wireGuard = await stopWireGuardForRuntime();
+    const systemDomainRestoreScript = systemDomainProxyManager?.darwinRestoreScript?.() || null;
+    const wireGuard = await stopWireGuardForRuntime({
+      darwinExtraUninstallShell: systemDomainRestoreScript
+    });
+    const systemDomainProxy = systemDomainRestoreScript && wireGuard?.launchDaemon && wireGuard?.ok !== false
+      ? await completeExternalSystemDomainProxyRestore('disconnect-combined')
+      : await disableSystemDomainProxyForRuntime('disconnect');
     runtime.connection = idleConnection();
     runtime.auth = null;
     runtime.feedback = {
@@ -328,6 +342,12 @@ function registerIpc() {
   ipcMain.handle('mx-h2i:refresh-diagnostics', async () => {
     await recoverWireGuardForRuntime('manual-diagnostics', { allowPrivileged: false });
     await refreshWireGuardDiagnostics();
+    await refreshNetworkEnvironmentDiagnostics('manual-diagnostics', { persist: false });
+    await saveAndBroadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('mx-h2i:repair-system-network', async () => {
+    await repairSystemNetworkForRuntime('manual-repair');
     await saveAndBroadcast();
     return visibleRuntime();
   });
@@ -832,7 +852,8 @@ async function ensureSystemDomainProxyForRuntimeOnce(reason = 'manual') {
       dnsFallbackTarget: systemPacDnsFallbackTarget(),
       systemResolver: 'dynamic',
       reverseProxyRoutes,
-      fallbackProxy: systemPacFallbackProxy()
+      fallbackProxy: systemPacFallbackProxy(),
+      ownershipClaim: systemDomainProxyOwnershipClaim(domains, reverseProxyRoutes)
     };
     const policySignature = systemDomainProxyPolicySignature(policy);
     const skipped = maybeSkipSystemDomainProxyApply(reason, policySignature);
@@ -880,6 +901,61 @@ async function ensureSystemDomainProxyForRuntimeOnce(reason = 'manual') {
   }
 }
 
+async function prepareSystemDomainProxyForWireGuardInstall(reason = 'pre-connect') {
+  if (!systemDomainProxyManager?.darwinPrepareApply || process.platform !== 'darwin') return null;
+  try {
+    const cachedRoutes = Array.isArray(lastSystemPacReverseProxyRoutes) ? lastSystemPacReverseProxyRoutes : [];
+    const reverseProxyRoutes = cachedRoutes.length > 0
+      ? cachedRoutes
+      : await systemPacReverseProxyRoutes({
+          allowWarnings: false,
+          timeoutMs: 1500
+        });
+    const domains = uniqueStrings([
+      ...splitDnsDomains(runtime?.config),
+      ...reverseProxyRoutes.map((route) => route.host).filter(Boolean)
+    ]);
+    if (domains.length === 0) return null;
+    const policy = {
+      enabled: true,
+      domains,
+      matchMode: 'proxy',
+      proxy: localEdgeProxy(),
+      pacPort: localEdgePort(),
+      dnsServers: systemPacDnsServers(),
+      dnsFallbackTarget: systemPacDnsFallbackTarget(),
+      systemResolver: 'dynamic',
+      reverseProxyRoutes,
+      fallbackProxy: systemPacFallbackProxy(),
+      ownershipClaim: systemDomainProxyOwnershipClaim(domains, reverseProxyRoutes)
+    };
+    const status = await systemDomainProxyManager.darwinPrepareApply(policy);
+    const shell = nullableString(status?.darwinApplyShell);
+    if (!shell) return { status, shell: null };
+    lastSystemDomainProxyPolicySignature = systemDomainProxyPolicySignature(policy);
+    lastSystemDomainProxyAuthorizationCanceledSignature = null;
+    return {
+      status,
+      shell
+    };
+  } catch (err) {
+    return {
+      status: {
+        supported: true,
+        applied: false,
+        platform: process.platform,
+        reason,
+        error: errorMessage(err)
+      },
+      shell: null
+    };
+  }
+}
+
+function shouldSuppressWireGuardDnsForSystemDomainProxy(_prepared = null) {
+  return process.platform === 'darwin' && Boolean(systemDomainProxyManager);
+}
+
 async function disableSystemDomainProxyForRuntime(reason = 'manual') {
   if (!systemDomainProxyManager) return null;
   lastSystemDomainProxySignature = null;
@@ -889,6 +965,45 @@ async function disableSystemDomainProxyForRuntime(reason = 'manual') {
   lastSystemPacReverseProxyRoutesWarningAt = 0;
   try {
     return await systemDomainProxyManager.disable(reason);
+  } catch (err) {
+    return {
+      supported: true,
+      applied: false,
+      platform: process.platform,
+      reason,
+      error: errorMessage(err)
+    };
+  }
+}
+
+async function completeExternalSystemDomainProxyApply(reason = 'external') {
+  if (!systemDomainProxyManager?.completeExternalApply) return null;
+  try {
+    const status = await systemDomainProxyManager.completeExternalApply(reason);
+    if (status?.applied && !status?.error && !status?.resolverError) {
+      lastSystemDomainProxyAuthorizationCanceledSignature = null;
+    }
+    return status;
+  } catch (err) {
+    return {
+      supported: true,
+      applied: false,
+      platform: process.platform,
+      reason,
+      error: errorMessage(err)
+    };
+  }
+}
+
+async function completeExternalSystemDomainProxyRestore(reason = 'external') {
+  if (!systemDomainProxyManager?.completeExternalRestore) return null;
+  lastSystemDomainProxySignature = null;
+  lastSystemDomainProxyPolicySignature = null;
+  lastSystemDomainProxyAuthorizationCanceledSignature = null;
+  lastSystemPacReverseProxyRoutes = [];
+  lastSystemPacReverseProxyRoutesWarningAt = 0;
+  try {
+    return await systemDomainProxyManager.completeExternalRestore(reason);
   } catch (err) {
     return {
       supported: true,
@@ -947,6 +1062,298 @@ async function recordSystemDomainProxyDiagnostics(status, touchReason) {
   touchRuntime(touchReason);
   await saveAndBroadcast();
   return true;
+}
+
+async function refreshNetworkEnvironmentDiagnostics(reason = 'manual', options = {}) {
+  if (!runtime) return null;
+  const diagnostics = await collectNetworkEnvironmentDiagnostics(reason, options);
+  const signature = networkEnvironmentSignature(diagnostics);
+  const shouldPersist = options.persist !== false;
+  runtime.connection = {
+    ...(runtime.connection || idleConnection()),
+    diagnostics: {
+      ...(runtime.connection?.diagnostics || {}),
+      networkEnvironment: diagnostics,
+      updatedAt: nowIso()
+    }
+  };
+  if (signature && signature !== lastNetworkEnvironmentSignature) {
+    lastNetworkEnvironmentSignature = signature;
+    touchRuntime(`network environment: ${reason}`);
+    if (shouldPersist) await saveAndBroadcast();
+  }
+  return diagnostics;
+}
+
+async function collectNetworkEnvironmentDiagnostics(reason = 'manual', options = {}) {
+  const phase = options.phase || networkDiagnosticPhase();
+  const host = options.host || networkDiagnosticHost();
+  const status = typeof systemDomainProxyManager?.status === 'function'
+    ? systemDomainProxyManager.status()
+    : null;
+  let resolution = null;
+  try {
+    const mod = await import('@qpjoy/electron-launcher/network-diagnostics');
+    resolution = await mod.diagnoseLauncherHostResolution({
+      host,
+      phase,
+      expectedInternalTargets: expectedInternalDnsTargets(),
+      internalCidrs: internalDiagnosticCidrs(),
+      v1HdoCidrs: configuredCidrList(process.env.MX_H2I_V1_HDO_CIDRS),
+      proxyFakeIpCidrs: configuredCidrList(process.env.MX_H2I_PROXY_FAKE_IP_CIDRS)
+    });
+  } catch (err) {
+    resolution = {
+      host: host || null,
+      phase,
+      addresses: [],
+      state: 'unresolved',
+      severity: phase === 'connected' ? 'error' : 'warning',
+      ok: false,
+      message: `网络解析诊断失败：${errorMessage(err)}`,
+      expectedInternalTargets: expectedInternalDnsTargets(),
+      internalCidrs: internalDiagnosticCidrs(),
+      v1HdoCidrs: configuredCidrList(process.env.MX_H2I_V1_HDO_CIDRS),
+      proxyFakeIpCidrs: configuredCidrList(process.env.MX_H2I_PROXY_FAKE_IP_CIDRS),
+      error: errorMessage(err),
+      updatedAt: nowIso()
+    };
+  }
+  return {
+    reason,
+    phase,
+    host: host || null,
+    resolution,
+    systemDomainProxy: compactSystemDomainProxyStatus(status),
+    priority: phase === 'connected'
+      ? ['v2-split-dns', 'mx-h2i-wireguard', 'system-proxy-or-dns-for-unmatched', 'external-dns-for-unmatched']
+      : ['bootstrap-dns-or-host-resolve', 'system-proxy-or-dns', 'external-dns'],
+    updatedAt: nowIso()
+  };
+}
+
+async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
+  const connected = runtime?.connection?.state === 'connected';
+  const before = await collectNetworkEnvironmentDiagnostics(`${reason}-before`);
+  let systemDomainProxy = null;
+  if (connected) {
+    systemDomainProxy = await ensureSystemDomainProxyForRuntime(reason);
+  } else if (systemDomainProxyManager?.restoreStale) {
+    try {
+      systemDomainProxy = await systemDomainProxyManager.restoreStale(reason);
+    } catch (err) {
+      systemDomainProxy = {
+        supported: true,
+        applied: false,
+        platform: process.platform,
+        reason,
+        error: errorMessage(err)
+      };
+    }
+  } else {
+    systemDomainProxy = await disableSystemDomainProxyForRuntime(reason);
+  }
+  lastSystemDomainProxySignature = null;
+  lastNetworkEnvironmentSignature = null;
+  const after = await collectNetworkEnvironmentDiagnostics(`${reason}-after`, {
+    phase: connected ? 'connected' : 'disconnected'
+  });
+  runtime.connection = {
+    ...(runtime.connection || idleConnection()),
+    diagnostics: {
+      ...(runtime.connection?.diagnostics || {}),
+      networkEnvironment: after,
+      systemDomainProxy,
+      networkRepair: {
+        reason,
+        connected,
+        before,
+        systemDomainProxy,
+        after,
+        updatedAt: nowIso()
+      },
+      updatedAt: nowIso()
+    }
+  };
+  runtime.feedback = {
+    tone: systemDomainProxy?.error ? 'warning' : after?.resolution?.severity === 'error' ? 'warning' : 'success',
+    message: connected
+      ? `已重新确认 MX-H2I PAC/DNS：${after?.resolution?.message || 'network ready'}`
+      : `已执行系统网络修复：${after?.resolution?.message || 'stale state cleared'}`
+  };
+  touchRuntime(`system network repaired: ${reason}`);
+  return {
+    before,
+    systemDomainProxy,
+    after
+  };
+}
+
+function networkDiagnosticPhase() {
+  const state = runtime?.connection?.state;
+  if (state === 'connected' || state === 'tunnel-only') return 'connected';
+  if (state === 'connecting') return 'bootstrap';
+  return 'disconnected';
+}
+
+function networkDiagnosticHost() {
+  const routeHost = preferredReverseProxyDiagnosticHost();
+  return firstHostname([
+    process.env.MX_H2I_DNS_DIAGNOSTIC_HOST,
+    routeHost,
+    process.env.MX_H2I_BOOTSTRAP_DOMAIN,
+    process.env.MX_H2I_BOOTSTRAP_HOST,
+    runtime?.config?.bootstrapApiBaseUrl,
+    DEFAULT_CONFIG.bootstrapApiBaseUrl,
+    runtime?.config?.internalApiBaseUrl
+  ]);
+}
+
+function preferredReverseProxyDiagnosticHost() {
+  const routes = Array.isArray(lastSystemPacReverseProxyRoutes) ? lastSystemPacReverseProxyRoutes : [];
+  const h2i = routes.find((route) => /(^|\.)h2i\./i.test(String(route?.host || '')));
+  return nullableString(h2i?.host) || nullableString(routes.find((route) => route?.host)?.host);
+}
+
+function firstHostname(values) {
+  for (const value of values) {
+    const host = hostnameFromMaybeUrl(value);
+    if (host) return host;
+  }
+  return null;
+}
+
+function hostnameFromMaybeUrl(value) {
+  const text = nullableString(value);
+  if (!text) return null;
+  if (/^https?:\/\//i.test(text)) {
+    try {
+      return new URL(text).hostname || null;
+    } catch {
+      return null;
+    }
+  }
+  return text.replace(/:\d{1,5}$/, '') || null;
+}
+
+function expectedInternalDnsTargets() {
+  const routePlan = normalizeRoutePlan(runtime?.connection?.routePlan);
+  return uniqueStrings([
+    nullableString(routePlan?.internalControlIp),
+    ipv4HostFromBaseUrl(routePlan?.internalBaseUrl),
+    nullableString(runtime?.connection?.internalControlIp),
+    ipv4HostFromBaseUrl(runtime?.connection?.internalBaseUrl),
+    systemPacDnsFallbackTarget(),
+    INTERNAL_PEER_IP
+  ].filter(Boolean));
+}
+
+function internalDiagnosticCidrs() {
+  const routePlan = normalizeRoutePlan(runtime?.connection?.routePlan);
+  return uniqueStrings([
+    ...configuredCidrList(process.env.MX_H2I_INTERNAL_CIDRS),
+    ...arrayValue(routePlan?.routeCidrs, []).filter(isLikelyInternalDiagnosticCidr),
+    '10.88.0.0/16',
+    '10.89.0.0/16',
+    '10.90.0.0/16'
+  ].filter(Boolean));
+}
+
+function configuredCidrList(value) {
+  return String(value || '')
+    .split(/[,\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function isLikelyInternalDiagnosticCidr(value) {
+  const text = String(value || '').trim();
+  return /^10\./.test(text) || /^172\.(1[6-9]|2\d|3[01])\./.test(text) || /^192\.168\./.test(text);
+}
+
+function ipv4HostFromBaseUrl(value) {
+  const baseUrl = normalizeBaseUrl(value);
+  if (!baseUrl) return null;
+  try {
+    const host = new URL(baseUrl).hostname;
+    return net.isIP(host) === 4 ? host : null;
+  } catch {
+    return null;
+  }
+}
+
+function compactSystemDomainProxyStatus(status) {
+  if (!status || typeof status !== 'object') return null;
+  return {
+    supported: status.supported === true,
+    applied: status.applied === true,
+    pacUrl: nullableString(status.pacUrl),
+    proxy: nullableString(status.proxy),
+    fallbackProxy: nullableString(status.fallbackProxy),
+    systemResolverMode: nullableString(status.systemResolverMode),
+    resolverApplied: status.resolverApplied === true,
+    resolverError: nullableString(status.resolverError),
+    resolverDomains: arrayValue(status.resolverDomains, []),
+    resolverPort: status.resolverPort || null,
+    ownershipRegistry: status.ownershipRegistry && typeof status.ownershipRegistry === 'object'
+      ? {
+          owners: arrayValue(status.ownershipRegistry.owners, []).map((owner) => nullableString(owner?.ownerId)).filter(Boolean),
+          conflicts: arrayValue(status.ownershipRegistry.conflicts, [])
+        }
+      : null,
+    staleState: status.staleState === true,
+    error: nullableString(status.error)
+  };
+}
+
+function systemDomainProxyOwnershipClaim(domains, reverseProxyRoutes) {
+  const installation = runtime?.installation || {};
+  const connection = runtime?.connection || {};
+  const productId = launcherProductId();
+  return {
+    ownerId: `${productId}:${installation.installId || installation.deviceId || 'local'}`,
+    productId,
+    instanceId: nullableString(installation.installId) || nullableString(installation.deviceId),
+    displayName: launcherProductDisplayName(),
+    state: connection.state === 'connecting' ? 'connecting' : 'active',
+    priority: 100,
+    leaseIp: nullableString(connection.localIp),
+    gatewayIp: systemPacDnsFallbackTarget(),
+    dnsZones: arrayValue(domains, []),
+    dnsHosts: arrayValue(reverseProxyRoutes, []).map((route) => nullableString(route?.host)).filter(Boolean),
+    routeCidrs: arrayValue(connection.routeCidrs, []).length
+      ? arrayValue(connection.routeCidrs, [])
+      : arrayValue(connection.routePlan?.routeCidrs, []),
+    reverseProxyRoutes: arrayValue(reverseProxyRoutes, []),
+    metadata: {
+      channel: runtime?.config?.releaseChannel || null,
+      mode: connection.mode || null
+    },
+    updatedAt: nowIso()
+  };
+}
+
+function networkEnvironmentSignature(diagnostics) {
+  if (!diagnostics || typeof diagnostics !== 'object') return null;
+  const resolution = diagnostics.resolution || {};
+  return JSON.stringify({
+    phase: diagnostics.phase,
+    host: diagnostics.host,
+    state: resolution.state,
+    severity: resolution.severity,
+    addresses: arrayValue(resolution.addresses, [])
+      .map((row) => `${row.address}:${row.classification}`)
+      .sort(),
+    systemDomainProxy: diagnostics.systemDomainProxy
+      ? {
+          applied: diagnostics.systemDomainProxy.applied === true,
+          pacUrl: diagnostics.systemDomainProxy.pacUrl || null,
+          systemResolverMode: diagnostics.systemDomainProxy.systemResolverMode || null,
+          resolverApplied: diagnostics.systemDomainProxy.resolverApplied === true,
+          resolverDomains: arrayValue(diagnostics.systemDomainProxy.resolverDomains, []).sort()
+        }
+      : null
+  });
 }
 
 function systemDomainProxyStatusSignature(status) {
@@ -1370,7 +1777,13 @@ function normalizeConfig(input) {
   const row = input && typeof input === 'object' ? input : {};
   const domesticRelayPort = Number(row.domesticRelayPort);
   const bootstrapApiBaseUrl = stringValue(row.bootstrapApiBaseUrl, DEFAULT_CONFIG.bootstrapApiBaseUrl);
+  const productId = normalizeLauncherProductId(row.productId || DEFAULT_CONFIG.productId);
+  const productDisplayName = nullableString(row.productDisplayName)
+    || (productId === DEFAULT_CONFIG.productId ? DEFAULT_CONFIG.productDisplayName : null)
+    || displayNameForLauncherProductId(productId);
   return {
+    productId,
+    productDisplayName,
     bootstrapApiBaseUrl,
     internalApiBaseUrl: stringValue(row.internalApiBaseUrl, DEFAULT_CONFIG.internalApiBaseUrl),
     domesticRelayHost: stringValue(row.domesticRelayHost, DEFAULT_CONFIG.domesticRelayHost),
@@ -1397,7 +1810,7 @@ function normalizeInstallation(input) {
     installId: nullableString(row.installId),
     deviceId: nullableString(row.deviceId),
     siteId: stringValue(row.siteId, 'domestic-main'),
-    deviceLabel: stringValue(row.deviceLabel, 'MX-H2I Desktop'),
+    deviceLabel: nullableString(row.deviceLabel),
     keyPair: privateKey && publicKey ? { privateKey, publicKey } : null,
     createdAt: typeof row.createdAt === 'string' ? row.createdAt : null,
     updatedAt: typeof row.updatedAt === 'string' ? row.updatedAt : null
@@ -1446,10 +1859,14 @@ function normalizeConnection(input) {
     return {
       ...idleConnection(),
       state: 'connecting',
-      mode: row.mode === 'employee' ? 'employee' : 'guest'
+      mode: row.mode === 'employee' ? 'employee' : 'guest',
+      diagnostics: normalizeDiagnostics(row.diagnostics)
     };
   }
-  return idleConnection();
+  return {
+    ...idleConnection(),
+    diagnostics: normalizeDiagnostics(row.diagnostics)
+  };
 }
 
 function retainableConnectionSnapshot(connection) {
@@ -1549,12 +1966,14 @@ function normalizeUpdate(input, config) {
 }
 
 async function launcherContract(config) {
+  const productId = normalizeLauncherProductId(config.productId);
+  const displayName = stringValue(config.productDisplayName, displayNameForLauncherProductId(productId));
   const fallback = {
     packageName: '@qpjoy/electron-launcher',
     available: false,
     product: {
-      productId: 'mx-h2i',
-      displayName: 'MX-H2I',
+      productId,
+      displayName,
       mode: 'standalone'
     },
     foundation: foundationContract(),
@@ -1564,15 +1983,15 @@ async function launcherContract(config) {
   try {
     const mod = await import('@qpjoy/electron-launcher');
     const product = mod.defineLauncherProduct({
-      productId: 'mx-h2i',
-      displayName: 'MX-H2I',
+      productId,
+      displayName,
       mode: 'standalone',
       appCenter: {
         visible: true,
-        category: 'vpn'
+        category: productId === PRODUCT_ID ? 'vpn' : 'custom'
       },
       release: {
-        componentId: 'mx-h2i',
+        componentId: productId,
         channel: config.releaseChannel,
         rolloutGroup: config.rolloutGroup
       },
@@ -1601,11 +2020,12 @@ async function launcherContract(config) {
 }
 
 function launcherCreateOptions(config) {
+  const productId = normalizeLauncherProductId(config.productId);
   return {
     baseUrl: config.bootstrapApiBaseUrl || config.internalApiBaseUrl,
-    productId: 'mx-h2i',
+    productId,
     mode: 'standalone',
-    deviceLabel: 'MX-H2I Desktop'
+    deviceLabel: `${stringValue(config.productDisplayName, displayNameForLauncherProductId(productId))} Desktop`
   };
 }
 
@@ -1878,6 +2298,12 @@ function normalizeDiagnostics(input) {
     systemDomainProxy: row.systemDomainProxy && typeof row.systemDomainProxy === 'object'
       ? row.systemDomainProxy
       : null,
+    networkEnvironment: row.networkEnvironment && typeof row.networkEnvironment === 'object'
+      ? row.networkEnvironment
+      : null,
+    networkRepair: row.networkRepair && typeof row.networkRepair === 'object'
+      ? row.networkRepair
+      : null,
     updatedAt: nullableString(row.updatedAt) || nowIso()
   };
 }
@@ -1892,7 +2318,7 @@ function connectedState(input) {
     connectedAt: input.connectedAt || nowIso(),
     leaseId: input.leaseId || null,
     snapshotId: input.snapshotId || null,
-    productId: input.productId || PRODUCT_ID,
+    productId: input.productId || launcherProductId(),
     serviceVip: input.serviceVip || null,
     internalBaseUrl: input.internalBaseUrl || null,
     internalControlIp: input.internalControlIp || null,
@@ -1966,11 +2392,13 @@ async function launcherContext() {
   const baseUrl = bootstrap.baseUrl;
   await applyResolvedBootstrapEndpoint(bootstrap);
   const installation = await ensureInstallation();
+  const productId = launcherProductId();
+  const productDisplayName = launcherProductDisplayName();
   const mod = await import('@qpjoy/electron-launcher');
   const launcher = mod.createElectronLauncher({
     baseUrl,
     fetchImpl: launcherFetchForBootstrap(bootstrap.resolveMode),
-    productId: PRODUCT_ID,
+    productId,
     mode: 'standalone',
     installId: installation.installId,
     deviceId: installation.deviceId,
@@ -1980,12 +2408,13 @@ async function launcherContext() {
     publicKey: installation.keyPair.publicKey,
     deviceLabel: installation.deviceLabel
   });
-  await ensureMxH2iProduct(launcher);
-  return { baseUrl, bootstrap, installation, launcher };
+  await ensureLauncherProduct(launcher, productId, productDisplayName);
+  return { baseUrl, bootstrap, installation, launcher, productId, productDisplayName };
 }
 
 async function ensureInstallation() {
   const current = normalizeInstallation(runtime.installation);
+  const productId = launcherProductId().replace(/[^a-z0-9]+/g, '_');
   let keyPair = current.keyPair;
   if (!keyPair) {
     const mod = await import('@qpjoy/electron-launcher');
@@ -1993,10 +2422,10 @@ async function ensureInstallation() {
   }
   const now = nowIso();
   const installation = {
-    installId: current.installId || `inst_mxh2i_${shortId()}`,
-    deviceId: current.deviceId || `dev_mxh2i_${shortId()}`,
+    installId: current.installId || `inst_${productId}_${shortId()}`,
+    deviceId: current.deviceId || `dev_${productId}_${shortId()}`,
     siteId: current.siteId,
-    deviceLabel: current.deviceLabel,
+    deviceLabel: current.deviceLabel || `${launcherProductDisplayName()} Desktop`,
     keyPair,
     createdAt: current.createdAt || now,
     updatedAt: now
@@ -2005,18 +2434,23 @@ async function ensureInstallation() {
   return installation;
 }
 
-async function ensureMxH2iProduct(launcher) {
+async function ensureLauncherProduct(launcher, productId, productDisplayName) {
+  const normalizedProductId = normalizeLauncherProductId(productId);
+  const displayName = stringValue(productDisplayName, displayNameForLauncherProductId(normalizedProductId));
   try {
-    const product = await launcher.getProduct(PRODUCT_ID);
-    if (product.enabled === false) throw new Error('MX-H2I 尚未在 Internal 后台启用。');
+    const product = await launcher.getProduct(normalizedProductId);
+    if (product.enabled === false) throw new Error(`${displayName} 尚未在 Internal 后台启用。`);
     return product;
   } catch (err) {
     if (err?.status && err.status !== 404) throw err;
     if (!err?.status && !/404/.test(err?.message || '')) throw err;
+    if (normalizedProductId !== PRODUCT_ID) {
+      throw new Error(`${displayName} (${normalizedProductId}) 尚未在 Internal admin 创建 launcher standalone product。请先在 AppCenter / Launcher App 中保存产品网络。`);
+    }
   }
-  return launcher.upsertProduct(PRODUCT_ID, {
-    productId: PRODUCT_ID,
-    displayName: 'MX-H2I',
+  return launcher.upsertProduct(normalizedProductId, {
+    productId: normalizedProductId,
+    displayName,
     mode: 'standalone',
     serviceVip: '10.88.100.1',
     userCidr: '10.89.0.0/16',
@@ -2085,13 +2519,16 @@ async function applyNetworkSession(session, options) {
     const domesticPeerSync = await syncDomesticPeerForLease(lease, { bootstrapResolveMode });
     const internalDirectPeerSync = await syncInternalDirectPeerForLease(lease, routePlan, { bootstrapResolveMode });
     const domesticRelayDiagnostics = await diagnoseDomesticRelayForLease(lease, { bootstrapResolveMode });
+    const combinedSystemDomainProxy = await prepareSystemDomainProxyForWireGuardInstall('pre-connect');
     const wireGuardResult = await startWireGuardForSession({
       routePlan,
       privateKey,
       internalBaseUrl: overlayInternalBaseUrl,
       internalDirectPeerSync,
       domesticPeerSync,
-      domesticRelayDiagnostics
+      domesticRelayDiagnostics,
+      darwinExtraInstallShell: combinedSystemDomainProxy?.shell || null,
+      suppressWireGuardDns: shouldSuppressWireGuardDnsForSystemDomainProxy(combinedSystemDomainProxy)
     });
     runtime.connection = {
       ...runtime.connection,
@@ -2106,17 +2543,22 @@ async function applyNetworkSession(session, options) {
       lastWireGuardRecoveryFailureAt = 0;
     }
     const systemDomainProxy = wireGuardResult.ready
-      ? await ensureSystemDomainProxyForRuntime('post-connect')
+      ? (combinedSystemDomainProxy?.shell
+          ? await completeExternalSystemDomainProxyApply('post-connect-combined')
+          : await ensureSystemDomainProxyForRuntime('post-connect'))
       : await disableSystemDomainProxyForRuntime('wireguard-not-ready');
-    if (systemDomainProxy) {
-      runtime.connection = {
-        ...runtime.connection,
-        diagnostics: {
-          ...(runtime.connection.diagnostics || {}),
-          systemDomainProxy
-        }
-      };
-    }
+    const networkEnvironment = await collectNetworkEnvironmentDiagnostics('post-connect', {
+      phase: wireGuardResult.ready ? 'connected' : 'bootstrap'
+    });
+    runtime.connection = {
+      ...runtime.connection,
+      diagnostics: {
+        ...(runtime.connection.diagnostics || {}),
+        ...(systemDomainProxy ? { systemDomainProxy } : {}),
+        networkEnvironment,
+        updatedAt: nowIso()
+      }
+    };
     const resolverFeedback = arrayValue(systemDomainProxy?.resolverDomains, []).length > 0 && systemDomainProxy?.resolverApplied
       ? ' 系统 dynamic split DNS 已接管命令行和其它非 PAC 应用的域名解析。'
       : systemDomainProxy?.resolverError
@@ -2216,7 +2658,9 @@ async function startWireGuardForSession(input) {
       routePlan,
       privateKey,
       internalBaseUrl,
-      pathPreference
+      pathPreference,
+      darwinExtraInstallShell: input.darwinExtraInstallShell,
+      suppressWireGuardDns: input.suppressWireGuardDns
     });
     const { result, route, endpointRoute, internalApi, ready } = attempt;
     const tunnelReady = result.ok === true;
@@ -2252,10 +2696,13 @@ async function startWireGuardForSession(input) {
 
 async function connectAndProbeWireGuardPath(mod, input) {
   const result = await mod.connectLauncherWireGuardPeer({
-    ...wireGuardRuntimeOptions(),
+    ...wireGuardRuntimeOptions({
+      darwinExtraInstallShell: input.darwinExtraInstallShell
+    }),
     routePlan: input.routePlan,
     privateKey: input.privateKey,
-    dnsDomains: splitDnsDomains(runtime.config),
+    dnsDomains: input.suppressWireGuardDns ? [] : splitDnsDomains(runtime.config),
+    suppressWireGuardDns: input.suppressWireGuardDns === true,
     pathPreference: input.pathPreference,
     action: 'restart'
   });
@@ -2701,10 +3148,10 @@ function shouldRecoverWireGuardConnection(connection) {
     && Boolean(normalizeRoutePlan(connection.routePlan));
 }
 
-async function stopWireGuardForRuntime() {
+async function stopWireGuardForRuntime(options = {}) {
   try {
     const mod = await import('@qpjoy/electron-launcher/wireguard');
-    return await mod.stopLauncherWireGuardPeer(wireGuardRuntimeOptions());
+    return await mod.stopLauncherWireGuardPeer(wireGuardRuntimeOptions(options));
   } catch (err) {
     return {
       ok: false,
@@ -2713,13 +3160,22 @@ async function stopWireGuardForRuntime() {
   }
 }
 
-function wireGuardRuntimeOptions() {
+function wireGuardRuntimeOptions(options = {}) {
+  const darwinServiceIdentity = {
+    ...DARWIN_WIREGUARD_SERVICE_IDENTITY,
+    ...(options.darwinExtraInstallShell ? {
+      darwinExtraInstallShell: options.darwinExtraInstallShell
+    } : {}),
+    ...(options.darwinExtraUninstallShell ? {
+      darwinExtraUninstallShell: options.darwinExtraUninstallShell
+    } : {})
+  };
   return {
     userDataDir: app.getPath('userData'),
     profileName: WIREGUARD_PROFILE_NAME,
     allowSystemFallback: false,
     darwinLaunchDaemon: true,
-    darwinServiceIdentity: DARWIN_WIREGUARD_SERVICE_IDENTITY
+    darwinServiceIdentity
   };
 }
 
@@ -3275,7 +3731,7 @@ function normalizeRoutePlan(input) {
   const row = input && typeof input === 'object' ? input : null;
   if (!row) return null;
   return {
-    productId: nullableString(row.productId) || PRODUCT_ID,
+    productId: nullableString(row.productId) || launcherProductId(),
     launcherMode: nullableString(row.launcherMode) || 'standalone',
     identityKind: nullableString(row.identityKind) || 'anonymous',
     leaseIp: nullableString(row.leaseIp),
@@ -3721,6 +4177,45 @@ function unquoteEnvValue(value) {
     return trimmed.slice(1, -1);
   }
   return trimmed;
+}
+
+function defaultLauncherProductId() {
+  return normalizeLauncherProductId(
+    process.env.MX_H2I_PRODUCT_ID
+      || process.env.MX_LAUNCHER_PRODUCT_ID
+      || PRODUCT_ID
+  );
+}
+
+function defaultLauncherProductDisplayName() {
+  return nullableString(process.env.MX_H2I_PRODUCT_DISPLAY_NAME)
+    || nullableString(process.env.MX_LAUNCHER_PRODUCT_DISPLAY_NAME)
+    || displayNameForLauncherProductId(defaultLauncherProductId());
+}
+
+function normalizeLauncherProductId(value) {
+  const text = nullableString(value) || PRODUCT_ID;
+  const normalized = text.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+  return normalized || PRODUCT_ID;
+}
+
+function launcherProductId() {
+  return normalizeLauncherProductId(runtime?.config?.productId || DEFAULT_CONFIG.productId || PRODUCT_ID);
+}
+
+function launcherProductDisplayName() {
+  const productId = launcherProductId();
+  return stringValue(runtime?.config?.productDisplayName, displayNameForLauncherProductId(productId));
+}
+
+function displayNameForLauncherProductId(productId) {
+  const normalized = normalizeLauncherProductId(productId);
+  if (normalized === PRODUCT_ID) return PRODUCT_DISPLAY_NAME;
+  return normalized
+    .split(/[-_.]/)
+    .filter(Boolean)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+    .join(' ') || normalized;
 }
 
 function defaultBootstrapApiBaseUrl() {

@@ -4,13 +4,22 @@ import { createServer, request as httpRequest, type IncomingMessage, type Server
 import { request as httpsRequest } from 'node:https';
 import { connect as netConnect, isIP, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  buildElectronLauncherNetworkOwnershipRegistry,
+  mergedElectronLauncherDnsZones,
+  mergedElectronLauncherReverseProxyRoutes,
+  resolveElectronLauncherDnsOwner,
+  type ElectronLauncherNetworkOwnershipClaim,
+  type ElectronLauncherNetworkOwnershipRegistry
+} from './network-ownership-registry.js';
 
 const STATE_VERSION = 1;
 const DEFAULT_STATE_FILE = 'electron-launcher-system-domain-proxy.json';
 const PAC_PATH = '/proxy.pac';
 const SHARED_STATUS_PATH = '/__electron-launcher/domain-proxy/status';
 const SHARED_APPLY_PATH = '/__electron-launcher/domain-proxy/apply';
+const SHARED_RELEASE_PATH = '/__electron-launcher/domain-proxy/release';
 const PAC_MARKER = 'MX_ELECTRON_LAUNCHER_PAC';
 const DARWIN_RESOLVER_MARKER = 'MX_ELECTRON_LAUNCHER_RESOLVER';
 const DARWIN_RESOLVER_DIR = '/etc/resolver';
@@ -35,6 +44,7 @@ export interface ElectronLauncherSystemDomainProxyPolicy {
   dnsFallbackTarget?: string | null;
   systemResolver?: boolean | ElectronLauncherSystemResolverMode | null;
   reverseProxyRoutes?: ElectronLauncherSystemDomainProxyRoute[] | null;
+  ownershipClaim?: ElectronLauncherNetworkOwnershipClaim | null;
 }
 
 export interface ElectronLauncherSystemDomainProxyOptions {
@@ -64,6 +74,7 @@ export interface ElectronLauncherSystemDomainProxyStatus {
   resolverError?: string | null;
   domains?: string[];
   reverseProxyRoutes?: ElectronLauncherSystemDomainProxyRoute[];
+  ownershipRegistry?: ElectronLauncherNetworkOwnershipRegistry | null;
   updatedAt?: string | null;
   changed?: boolean;
   verified?: boolean;
@@ -72,6 +83,10 @@ export interface ElectronLauncherSystemDomainProxyStatus {
   restored?: boolean;
   skipped?: boolean;
   staleState?: boolean;
+  orphanCleanup?: boolean;
+  pending?: boolean;
+  externalApply?: boolean;
+  darwinApplyShell?: string | null;
   error?: string;
 }
 
@@ -94,6 +109,10 @@ export interface ElectronLauncherSystemDomainProxyManager {
   apply(policy: ElectronLauncherSystemDomainProxyPolicy): Promise<ElectronLauncherSystemDomainProxyStatus>;
   disable(reason?: string): Promise<ElectronLauncherSystemDomainProxyStatus>;
   restoreStale(reason?: string): Promise<ElectronLauncherSystemDomainProxyStatus>;
+  darwinPrepareApply?(policy: ElectronLauncherSystemDomainProxyPolicy): Promise<ElectronLauncherSystemDomainProxyStatus>;
+  completeExternalApply?(reason?: string): Promise<ElectronLauncherSystemDomainProxyStatus>;
+  darwinRestoreScript?(): string | null;
+  completeExternalRestore?(reason?: string): Promise<ElectronLauncherSystemDomainProxyStatus>;
   status(): ElectronLauncherSystemDomainProxyStatus;
   statusVerified(): Promise<ElectronLauncherSystemDomainProxyStatus>;
   close(): Promise<void>;
@@ -113,6 +132,8 @@ interface ResolvedPacSource {
   dnsFallbackTarget: string | null;
   systemResolverMode: ElectronLauncherSystemResolverMode;
   reverseProxyRoutes: ElectronLauncherSystemDomainProxyRoute[];
+  ownershipClaim: ElectronLauncherNetworkOwnershipClaim | null;
+  ownershipClaims: ElectronLauncherNetworkOwnershipClaim[];
   usesLocalPac: boolean;
 }
 
@@ -136,6 +157,8 @@ interface StoredState {
   resolverError?: string | null;
   domains: string[];
   reverseProxyRoutes?: ElectronLauncherSystemDomainProxyRoute[];
+  ownershipClaim?: ElectronLauncherNetworkOwnershipClaim | null;
+  ownershipRegistry?: ElectronLauncherNetworkOwnershipRegistry | null;
   previous: unknown;
   pending?: boolean;
   updatedAt: string;
@@ -149,6 +172,7 @@ interface LocalPacServerConfig {
   dnsServers: string[];
   dnsFallbackTarget: string | null;
   reverseProxyRoutes: ElectronLauncherSystemDomainProxyRoute[];
+  ownershipClaims: ElectronLauncherNetworkOwnershipClaim[];
 }
 
 interface ExecTextResult {
@@ -164,6 +188,19 @@ interface SystemResolverApplyResult {
   error?: string | null;
 }
 
+interface PreparedSystemDomainProxyApply {
+  existing: StoredState | null;
+  previous: unknown;
+  pac: ResolvedPacSource;
+  resolverPlan: {
+    mode: ElectronLauncherSystemResolverMode;
+    domains: string[];
+    port: number | null;
+  };
+  next: StoredState;
+  changed: boolean;
+}
+
 export function createElectronLauncherSystemDomainProxy(
   options: ElectronLauncherSystemDomainProxyOptions
 ): ElectronLauncherSystemDomainProxyManager {
@@ -174,6 +211,19 @@ export function createElectronLauncherSystemDomainProxy(
   let localPacPort: number | null = null;
   let localPacKey: string | null = null;
   let localPacConfig: LocalPacServerConfig | null = null;
+
+  function localConfigFromPac(pac: Omit<ResolvedPacSource, 'pacUrl' | 'usesLocalPac' | 'sharedLocalPac'>): LocalPacServerConfig {
+    return applyOwnershipRegistryToLocalConfig({
+      domains: pac.domains,
+      proxy: pac.proxy,
+      matchMode: pac.matchMode,
+      fallbackProxy: pac.fallbackProxy,
+      dnsServers: pac.dnsServers,
+      dnsFallbackTarget: pac.dnsFallbackTarget,
+      reverseProxyRoutes: pac.reverseProxyRoutes,
+      ownershipClaims: normalizeOwnershipClaims(pac.ownershipClaim ? [pac.ownershipClaim] : [])
+    });
+  }
 
   async function closeLocalPacServer(): Promise<void> {
     const server = localPacServer;
@@ -193,6 +243,7 @@ export function createElectronLauncherSystemDomainProxy(
   async function ensureLocalPacServer(pac: Omit<ResolvedPacSource, 'pacUrl' | 'usesLocalPac' | 'sharedLocalPac'>): Promise<{
     pacUrl: string;
     port: number;
+    config?: LocalPacServerConfig | null;
     sharedLocalPac: boolean;
   }> {
     const key = JSON.stringify({
@@ -203,6 +254,7 @@ export function createElectronLauncherSystemDomainProxy(
       dnsServers: pac.dnsServers,
       dnsFallbackTarget: pac.dnsFallbackTarget,
       reverseProxyRoutes: pac.reverseProxyRoutes,
+      ownershipClaim: pac.ownershipClaim?.ownerId || null,
       pacPort: pac.pacPort || null
     });
     if (localPacServer && localPacPort && localPacKey === key) {
@@ -213,15 +265,7 @@ export function createElectronLauncherSystemDomainProxy(
       };
     }
 
-    const nextConfig: LocalPacServerConfig = {
-      domains: pac.domains,
-      proxy: pac.proxy,
-      matchMode: pac.matchMode,
-      fallbackProxy: pac.fallbackProxy,
-      dnsServers: pac.dnsServers,
-      dnsFallbackTarget: pac.dnsFallbackTarget,
-      reverseProxyRoutes: pac.reverseProxyRoutes
-    };
+    const nextConfig = localConfigFromPac(pac);
 
     if (localPacServer && localPacPort) {
       localPacConfig = nextConfig;
@@ -267,9 +311,11 @@ export function createElectronLauncherSystemDomainProxy(
       }
       if (preferredPort > 0 && isAddressInUseError(err)) {
         const shared = await registerSharedLocalPacServer(preferredPort, nextConfig);
+        const sharedConfig = normalizeSharedLocalPacConfig(shared.config || shared);
         return {
           pacUrl: shared.pacUrl,
           port: preferredPort,
+          config: sharedConfig,
           sharedLocalPac: true
         };
       }
@@ -308,29 +354,63 @@ export function createElectronLauncherSystemDomainProxy(
         marker: PAC_MARKER,
         pacUrl: localPacPort ? `http://127.0.0.1:${localPacPort}${PAC_PATH}` : null,
         domains: localPacConfig?.domains || [],
+        proxy: localPacConfig?.proxy?.address || null,
+        proxyDirective: localPacConfig?.proxy?.directive || null,
+        matchMode: localPacConfig?.matchMode || null,
+        fallbackProxy: localPacConfig?.fallbackProxy?.address || null,
+        fallbackProxyDirective: localPacConfig?.fallbackProxy?.directive || null,
         dnsServers: localPacConfig?.dnsServers || [],
         dnsFallbackTarget: localPacConfig?.dnsFallbackTarget || null,
-        reverseProxyRoutes: localPacConfig?.reverseProxyRoutes || []
+        reverseProxyRoutes: localPacConfig?.reverseProxyRoutes || [],
+        ownershipClaims: localPacConfig?.ownershipClaims || [],
+        ownershipRegistry: localPacConfig ? localConfigOwnershipRegistry(localPacConfig) : null
       });
       return;
     }
     if (controlPath === SHARED_APPLY_PATH && req.method === 'POST') {
       const body = await readRequestJson(req);
       localPacConfig = mergeLocalPacConfigs(localPacConfig, normalizeSharedLocalPacConfig(body));
-      localPacKey = JSON.stringify({
-        domains: localPacConfig.domains,
-        matchMode: localPacConfig.matchMode,
-        proxy: localPacConfig.proxy?.directive || null,
-        fallbackProxy: localPacConfig.fallbackProxy?.directive || null,
-        dnsServers: localPacConfig.dnsServers,
-        dnsFallbackTarget: localPacConfig.dnsFallbackTarget,
-        reverseProxyRoutes: localPacConfig.reverseProxyRoutes,
-        pacPort: localPacPort || null
-      });
+      localPacKey = localPacConfigKey(localPacConfig, localPacPort);
       writeJsonResponse(res, 200, {
         marker: PAC_MARKER,
         pacUrl: localPacPort ? `http://127.0.0.1:${localPacPort}${PAC_PATH}` : null,
-        shared: false
+        shared: false,
+        domains: localPacConfig.domains,
+        proxy: localPacConfig.proxy?.address || null,
+        proxyDirective: localPacConfig.proxy?.directive || null,
+        matchMode: localPacConfig.matchMode,
+        fallbackProxy: localPacConfig.fallbackProxy?.address || null,
+        fallbackProxyDirective: localPacConfig.fallbackProxy?.directive || null,
+        dnsServers: localPacConfig.dnsServers,
+        dnsFallbackTarget: localPacConfig.dnsFallbackTarget,
+        reverseProxyRoutes: localPacConfig.reverseProxyRoutes,
+        ownershipClaims: localPacConfig.ownershipClaims,
+        ownershipRegistry: localConfigOwnershipRegistry(localPacConfig)
+      });
+      return;
+    }
+    if (controlPath === SHARED_RELEASE_PATH && req.method === 'POST') {
+      const body = await readRequestJson(req);
+      const ownerId = normalizeOwnerId((body as Record<string, unknown>)?.ownerId);
+      if (ownerId && localPacConfig) {
+        localPacConfig = releaseLocalPacConfigOwner(localPacConfig, ownerId);
+        localPacKey = localPacConfigKey(localPacConfig, localPacPort);
+      }
+      writeJsonResponse(res, 200, {
+        marker: PAC_MARKER,
+        pacUrl: localPacPort ? `http://127.0.0.1:${localPacPort}${PAC_PATH}` : null,
+        releasedOwnerId: ownerId,
+        domains: localPacConfig?.domains || [],
+        proxy: localPacConfig?.proxy?.address || null,
+        proxyDirective: localPacConfig?.proxy?.directive || null,
+        matchMode: localPacConfig?.matchMode || null,
+        fallbackProxy: localPacConfig?.fallbackProxy?.address || null,
+        fallbackProxyDirective: localPacConfig?.fallbackProxy?.directive || null,
+        dnsServers: localPacConfig?.dnsServers || [],
+        dnsFallbackTarget: localPacConfig?.dnsFallbackTarget || null,
+        reverseProxyRoutes: localPacConfig?.reverseProxyRoutes || [],
+        ownershipClaims: localPacConfig?.ownershipClaims || [],
+        ownershipRegistry: localPacConfig ? localConfigOwnershipRegistry(localPacConfig) : null
       });
       return;
     }
@@ -381,6 +461,14 @@ export function createElectronLauncherSystemDomainProxy(
         return;
       }
     }
+    const ownershipTarget = dnsOwnershipTargetForHost(host, config);
+    if (ownershipTarget && isIP(ownershipTarget) === 4) {
+      const directResponse = dnsAResponse(message, ownershipTarget);
+      if (directResponse.length) {
+        socket.send(directResponse, remote.port, remote.address);
+        return;
+      }
+    }
     if (!config.dnsServers.length) {
       const failure = dnsFailureResponse(message);
       if (failure.length) socket.send(failure, remote.port, remote.address);
@@ -388,6 +476,13 @@ export function createElectronLauncherSystemDomainProxy(
     }
     try {
       const response = await forwardDnsPacket(message, config.dnsServers);
+      if (shouldUseDnsFallbackResponse(message, response, config.dnsFallbackTarget)) {
+        const fallbackResponse = dnsAResponse(message, config.dnsFallbackTarget || '');
+        if (fallbackResponse.length) {
+          socket.send(fallbackResponse, remote.port, remote.address);
+          return;
+        }
+      }
       socket.send(response, remote.port, remote.address);
     } catch {
       if (config.dnsFallbackTarget && isIP(config.dnsFallbackTarget) === 4) {
@@ -442,6 +537,7 @@ export function createElectronLauncherSystemDomainProxy(
     const systemResolverMode = normalizeSystemResolverMode(policy.systemResolver);
     const reverseProxyRoutes = normalizeReverseProxyRoutes(policy.reverseProxyRoutes);
     const fallbackProxy = normalizeProxyAddress(policy.fallbackProxy) || fallbackProxyForPac(previous);
+    const ownershipClaim = normalizeOwnershipClaim(policy.ownershipClaim);
     if (pacUrl) {
       return {
         pacUrl,
@@ -455,6 +551,8 @@ export function createElectronLauncherSystemDomainProxy(
         dnsFallbackTarget,
         systemResolverMode,
         reverseProxyRoutes,
+        ownershipClaim,
+        ownershipClaims: normalizeOwnershipClaims(ownershipClaim ? [ownershipClaim] : []),
         usesLocalPac: false
       };
     }
@@ -472,60 +570,140 @@ export function createElectronLauncherSystemDomainProxy(
       dnsServers,
       dnsFallbackTarget,
       systemResolverMode,
-      reverseProxyRoutes
+      reverseProxyRoutes,
+      ownershipClaim,
+      ownershipClaims: normalizeOwnershipClaims(ownershipClaim ? [ownershipClaim] : [])
     };
     const localServer = await ensureLocalPacServer(localPac);
+    const effectiveConfig = localServer.config || localConfigFromPac(localPac);
     return {
       ...localPac,
       pacUrl: localServer.pacUrl,
       pacPort: localServer.port,
+      domains: effectiveConfig.domains,
+      dnsServers: effectiveConfig.dnsServers,
+      dnsFallbackTarget: effectiveConfig.dnsFallbackTarget,
+      reverseProxyRoutes: effectiveConfig.reverseProxyRoutes,
+      ownershipClaims: effectiveConfig.ownershipClaims,
       sharedLocalPac: localServer.sharedLocalPac,
       usesLocalPac: true
     };
   }
 
+  async function prepareApplyState(policy: ElectronLauncherSystemDomainProxyPolicy): Promise<PreparedSystemDomainProxyApply | null> {
+    const existing = readState(statePath);
+    const previous = existing?.applied === true && existing.platform === process.platform
+      ? existing.previous
+      : await capturePlatformState();
+    const pac = await resolvePacSource(policy, previous);
+    if (!pac) return null;
+
+    const resolverPlan = systemResolverPlan(pac);
+    const next: StoredState = {
+      version: STATE_VERSION,
+      applied: true,
+      platform: process.platform,
+      pacUrl: pac.pacUrl,
+      proxy: pac.proxy?.address || null,
+      matchMode: pac.matchMode,
+      fallbackProxy: pac.fallbackProxy?.directive || null,
+      pacPort: pac.pacPort,
+      sharedLocalPac: pac.sharedLocalPac,
+      dnsServers: pac.dnsServers,
+      dnsFallbackTarget: pac.dnsFallbackTarget,
+      systemResolver: pac.systemResolverMode !== 'off',
+      systemResolverMode: pac.systemResolverMode,
+      resolverDomains: resolverPlan.domains,
+      resolverPort: resolverPlan.port,
+      resolverApplied: false,
+      resolverError: null,
+      domains: pac.domains,
+      reverseProxyRoutes: pac.reverseProxyRoutes,
+      ownershipClaim: pac.ownershipClaim,
+      ownershipRegistry: pac.ownershipClaims.length
+        ? buildElectronLauncherNetworkOwnershipRegistry(pac.ownershipClaims)
+        : null,
+      previous,
+      updatedAt: new Date().toISOString()
+    };
+    const changed = systemDomainProxyStateChanged(existing, next);
+    writeState(statePath, {
+      ...next,
+      pending: true,
+      updatedAt: new Date().toISOString()
+    });
+    return {
+      existing,
+      previous,
+      pac,
+      resolverPlan,
+      next,
+      changed
+    };
+  }
+
+  async function releaseSharedOwnerForState(state: StoredState): Promise<LocalPacServerConfig | null> {
+    const ownerId = stateOwnershipOwnerId(state);
+    const port = normalizePort(state.pacPort);
+    if (state.sharedLocalPac !== true || !ownerId || !port) return null;
+    const response = await releaseSharedLocalPacServer(port, ownerId);
+    return normalizeSharedLocalPacConfig(response);
+  }
+
+  async function releaseLocalOwnerAndRetainSharedEdge(state: StoredState): Promise<StoredState | null> {
+    const ownerId = stateOwnershipOwnerId(state);
+    if (!ownerId || !localPacServer || !localPacPort || !localPacConfig) return null;
+    const nextConfig = releaseLocalPacConfigOwner(localPacConfig, ownerId);
+    if (!nextConfig.ownershipClaims.length) return null;
+
+    localPacConfig = nextConfig;
+    localPacKey = localPacConfigKey(nextConfig, localPacPort);
+
+    const pac = resolvedPacSourceFromLocalConfig(
+      `http://127.0.0.1:${localPacPort}${PAC_PATH}`,
+      localPacPort,
+      storedSystemResolverMode(state),
+      nextConfig
+    );
+    const resolver = await applyPlatformPacAndSystemResolvers(pac, state.previous, state, log);
+    const next: StoredState = {
+      ...state,
+      applied: true,
+      pacUrl: pac.pacUrl,
+      proxy: pac.proxy?.address || null,
+      matchMode: pac.matchMode,
+      fallbackProxy: pac.fallbackProxy?.directive || null,
+      pacPort: pac.pacPort,
+      sharedLocalPac: false,
+      dnsServers: pac.dnsServers,
+      dnsFallbackTarget: pac.dnsFallbackTarget,
+      systemResolver: resolver.mode !== 'off',
+      systemResolverMode: resolver.mode,
+      resolverDomains: resolver.domains,
+      resolverPort: resolver.port,
+      resolverApplied: resolver.applied,
+      resolverError: resolver.error || null,
+      domains: pac.domains,
+      reverseProxyRoutes: pac.reverseProxyRoutes,
+      ownershipClaim: null,
+      ownershipRegistry: localConfigOwnershipRegistry(nextConfig),
+      pending: false,
+      updatedAt: new Date().toISOString()
+    };
+    delete next.pending;
+    writeState(statePath, next);
+    return next;
+  }
+
   return {
     async apply(policy) {
       if (!isSupportedPlatform()) return unsupportedStatus();
-      const existing = readState(statePath);
-      const previous = existing?.applied === true && existing.platform === process.platform
-        ? existing.previous
-        : await capturePlatformState();
-      const pac = await resolvePacSource(policy, previous);
-      if (!pac) {
+      const prepared = await prepareApplyState(policy);
+      if (!prepared) {
         await closeLocalPacServer();
         return this.disable('domain-proxy-disabled');
       }
-
-      const resolverPlan = systemResolverPlan(pac);
-      const next: StoredState = {
-        version: STATE_VERSION,
-        applied: true,
-        platform: process.platform,
-        pacUrl: pac.pacUrl,
-        proxy: pac.proxy?.address || null,
-        matchMode: pac.matchMode,
-        fallbackProxy: pac.fallbackProxy?.directive || null,
-        pacPort: pac.pacPort,
-        sharedLocalPac: pac.sharedLocalPac,
-        dnsServers: pac.dnsServers,
-        dnsFallbackTarget: pac.dnsFallbackTarget,
-        systemResolver: pac.systemResolverMode !== 'off',
-        systemResolverMode: pac.systemResolverMode,
-        resolverDomains: resolverPlan.domains,
-        resolverPort: resolverPlan.port,
-        resolverApplied: false,
-        resolverError: null,
-        domains: pac.domains,
-        reverseProxyRoutes: pac.reverseProxyRoutes,
-        previous,
-        updatedAt: new Date().toISOString()
-      };
-      writeState(statePath, {
-        ...next,
-        pending: true,
-        updatedAt: new Date().toISOString()
-      });
+      const { pac, previous, existing, next, changed } = prepared;
       const resolver = await applyPlatformPacAndSystemResolvers(pac, previous, existing, log);
       next.systemResolver = resolver.mode !== 'off';
       next.systemResolverMode = resolver.mode;
@@ -537,12 +715,85 @@ export function createElectronLauncherSystemDomainProxy(
       delete next.pending;
       next.updatedAt = new Date().toISOString();
       writeState(statePath, next);
+      return publicState(next, { changed });
+    },
+
+    async darwinPrepareApply(policy) {
+      if (!isSupportedPlatform()) return unsupportedStatus();
+      if (process.platform !== 'darwin') return unsupportedStatus({ platform: process.platform });
+      const prepared = await prepareApplyState(policy);
+      if (!prepared) {
+        await closeLocalPacServer();
+        return this.disable('domain-proxy-disabled');
+      }
+      const shell = await darwinPlatformAndSystemApplyShell(
+        prepared.pac.pacUrl,
+        prepared.previous,
+        prepared.existing,
+        prepared.resolverPlan
+      );
+      if (!shell) {
+        return publicState(prepared.next, {
+          changed: prepared.changed,
+          pending: true,
+          externalApply: false,
+          darwinApplyShell: null,
+          skipped: true,
+          reason: 'darwin-apply-shell-unavailable'
+        });
+      }
+      return publicState(prepared.next, {
+        changed: prepared.changed,
+        pending: true,
+        externalApply: true,
+        darwinApplyShell: shell
+      });
+    },
+
+    async completeExternalApply(reason = 'external') {
+      const existing = readState(statePath);
+      if (!existing?.applied || existing.platform !== process.platform) {
+        return {
+          supported: true,
+          applied: false,
+          platform: process.platform,
+          reason,
+          skipped: true
+        };
+      }
+      const resolver = await verifySystemResolvers(existing).catch((err) => ({
+        applied: false,
+        platform: process.platform,
+        mode: storedSystemResolverMode(existing),
+        domains: [],
+        error: errorMessage(err)
+      }));
+      const actual = await verifyPlatformPac(existing.pacUrl, existing.previous).catch((err) => ({
+        applied: false,
+        platform: process.platform,
+        error: errorMessage(err)
+      }));
+      const next: StoredState = {
+        ...existing,
+        systemResolver: resolver.mode !== 'off',
+        systemResolverMode: resolver.mode,
+        resolverDomains: normalizeDomains(existing.resolverDomains),
+        resolverPort: normalizePort(existing.resolverPort),
+        resolverApplied: resolver.applied,
+        resolverError: resolver.error || null,
+        pending: false,
+        updatedAt: new Date().toISOString()
+      };
+      delete next.pending;
+      writeState(statePath, next);
       return publicState(next, {
-        changed: !existing
-          || existing.pacUrl !== pac.pacUrl
-          || storedSystemResolverMode(existing) !== next.systemResolverMode
-          || existing.resolverPort !== next.resolverPort
-          || JSON.stringify(normalizeDomains(existing.resolverDomains)) !== JSON.stringify(normalizeDomains(next.resolverDomains))
+        reason,
+        verified: true,
+        externalApply: true,
+        actual: {
+          pac: actual,
+          resolver
+        }
       });
     },
 
@@ -560,8 +811,21 @@ export function createElectronLauncherSystemDomainProxy(
         };
       }
 
-      await restorePlatformState(existing.previous);
-      await restoreSystemResolvers(existing, log);
+      const retained = await releaseLocalOwnerAndRetainSharedEdge(existing).catch((err) => {
+        log.warn('[electron-launcher] failed to release local PAC owner before restore', err);
+        return null;
+      });
+      if (retained) {
+        return publicState(retained, {
+          reason,
+          changed: true,
+          skipped: true
+        });
+      }
+      await releaseSharedOwnerForState(existing).catch((err) => {
+        log.warn('[electron-launcher] failed to release shared PAC owner before restore', err);
+      });
+      await restorePlatformAndSystemState(existing, log);
       await closeLocalPacServer();
       removeState(statePath, log);
       return {
@@ -577,8 +841,7 @@ export function createElectronLauncherSystemDomainProxy(
       if (!isSupportedPlatform()) return unsupportedStatus({ reason });
       const existing = readState(statePath);
       if (existing?.applied === true && existing.platform === process.platform) {
-        await restorePlatformState(existing.previous);
-        await restoreSystemResolvers(existing, log);
+        await restorePlatformAndSystemState(existing, log);
         await closeLocalPacServer();
         removeState(statePath, log);
         return {
@@ -590,13 +853,44 @@ export function createElectronLauncherSystemDomainProxy(
           staleState: true
         };
       }
+      const orphanCleanup = await restoreOrphanSystemResolvers(log);
       await closeLocalPacServer();
       return {
         supported: true,
         applied: false,
         platform: process.platform,
         reason,
-        skipped: true
+        skipped: !orphanCleanup,
+        restored: orphanCleanup,
+        orphanCleanup
+      };
+    },
+
+    darwinRestoreScript() {
+      if (process.platform !== 'darwin') return null;
+      const existing = readState(statePath);
+      if (existing?.applied === true && existing.platform === process.platform) {
+        if (requiresManagedRelease(existing, localPacConfig)) return null;
+        return darwinPlatformAndSystemRestoreShell(existing);
+      }
+      return darwinOrphanSystemResolverRestoreShell();
+    },
+
+    async completeExternalRestore(reason = 'external') {
+      const existing = readState(statePath);
+      if (existing?.applied === true && existing.platform === process.platform) {
+        await releaseSharedOwnerForState(existing).catch((err) => {
+          log.warn('[electron-launcher] failed to release shared PAC owner after external restore', err);
+        });
+      }
+      await closeLocalPacServer();
+      removeState(statePath, log);
+      return {
+        supported: true,
+        applied: false,
+        platform: process.platform,
+        reason,
+        restored: true
       };
     },
 
@@ -727,6 +1021,26 @@ async function restorePlatformState(previous: unknown): Promise<void> {
   }
   if (process.platform === 'win32') {
     await restoreWindowsState(previous);
+  }
+}
+
+async function restorePlatformAndSystemState(state: StoredState, log: Pick<Console, 'warn'>): Promise<void> {
+  if (process.platform === 'darwin') {
+    await restoreDarwinPlatformAndSystemState(state, log);
+    return;
+  }
+  await restorePlatformState(state.previous);
+  await restoreSystemResolvers(state, log);
+}
+
+async function restoreOrphanSystemResolvers(log: Pick<Console, 'warn'>): Promise<boolean> {
+  if (process.platform !== 'darwin') return false;
+  try {
+    await runDarwinPrivilegedShell(darwinOrphanSystemResolverRestoreShell());
+    return true;
+  } catch (err) {
+    log.warn('[electron-launcher] failed to remove orphan macOS split DNS resolver', err);
+    return false;
   }
 }
 
@@ -936,8 +1250,8 @@ async function applyDarwinPacAndDynamicResolvers(
       };
     }
   }
-  const resolverScript = darwinDynamicResolverScript(plan.domains, plan.port);
-  if (!resolverScript) {
+  const shell = await darwinPlatformAndSystemApplyShell(pacUrl, previous, existing, plan);
+  if (!shell) {
     await applyDarwinPac(pacUrl, previous);
     return {
       mode: plan.mode,
@@ -948,19 +1262,7 @@ async function applyDarwinPacAndDynamicResolvers(
     };
   }
   try {
-    let services = darwinServiceNames(previous);
-    if (services.length === 0) services = await listDarwinNetworkServices();
-    if (services.length === 0) throw new Error('macOS network services not found');
-    const commands = [
-      'set -e',
-      ...darwinStaleResolverFileRemovalCommands(existing, plan),
-      ...services.flatMap((name) => [
-        ['/usr/sbin/networksetup', '-setautoproxyurl', name, pacUrl].map(shellQuote).join(' '),
-        ['/usr/sbin/networksetup', '-setautoproxystate', name, 'on'].map(shellQuote).join(' ')
-      ]),
-      `/usr/bin/printf %s ${shellQuote(resolverScript)} | /usr/sbin/scutil`
-    ];
-    await runDarwinPrivilegedShell(commands.join('\n'));
+    await runDarwinPrivilegedShell(shell);
     const verification = await verifyDarwinDynamicResolvers(plan.domains, plan.port);
     return {
       mode: plan.mode,
@@ -982,6 +1284,77 @@ async function applyDarwinPacAndDynamicResolvers(
   }
 }
 
+async function darwinPlatformAndSystemApplyShell(
+  pacUrl: string,
+  previous: unknown,
+  existing: StoredState | null,
+  plan: { mode: ElectronLauncherSystemResolverMode; domains: string[]; port: number | null }
+): Promise<string | null> {
+  if (process.platform !== 'darwin' || plan.mode !== 'dynamic' || !plan.port) return null;
+  const resolverScript = darwinDynamicResolverScript(plan.domains, plan.port);
+  if (!resolverScript) return null;
+  let services = darwinServiceNames(previous);
+  if (services.length === 0) services = await listDarwinNetworkServices();
+  if (services.length === 0) throw new Error('macOS network services not found');
+  return [
+    'set -e',
+    ...darwinStaleResolverFileRemovalCommands(existing, plan),
+    ...services.flatMap((name) => [
+      ['/usr/sbin/networksetup', '-setautoproxyurl', name, pacUrl].map(shellQuote).join(' '),
+      ['/usr/sbin/networksetup', '-setautoproxystate', name, 'on'].map(shellQuote).join(' ')
+    ]),
+    `/usr/bin/printf %s ${shellQuote(resolverScript)} | /usr/sbin/scutil`
+  ].join('\n');
+}
+
+async function restoreDarwinPlatformAndSystemState(state: StoredState, log: Pick<Console, 'warn'>): Promise<void> {
+  try {
+    await runDarwinPrivilegedShell(darwinPlatformAndSystemRestoreShell(state));
+  } catch (err) {
+    log.warn('[electron-launcher] failed to restore macOS PAC and split DNS in one transaction', err);
+    await restoreDarwinState(state.previous).catch((restoreErr) => {
+      log.warn('[electron-launcher] failed to restore macOS PAC after combined restore failure', restoreErr);
+    });
+    await restoreSystemResolvers(state, log);
+  }
+}
+
+function darwinPlatformAndSystemRestoreShell(state: StoredState): string {
+  return [
+    'set -e',
+    ...darwinAutoProxyRestoreCommands(state.previous),
+    darwinDynamicResolverRemovalCommand(),
+    ...darwinOwnedResolverFileRemovalCommands(normalizeDomains(state.resolverDomains))
+  ].join('\n');
+}
+
+function darwinOrphanSystemResolverRestoreShell(): string {
+  return [
+    'set -e',
+    darwinDynamicResolverRemovalCommand(),
+    ...darwinOwnedResolverFileRemovalCommands()
+  ].join('\n');
+}
+
+function darwinAutoProxyRestoreCommands(previous: unknown): string[] {
+  return previousServices(previous)
+    .filter((service) => service.name)
+    .flatMap((service) => {
+      const name = String(service.name);
+      const commands: string[] = [];
+      if (service.url) {
+        commands.push(['/usr/sbin/networksetup', '-setautoproxyurl', name, String(service.url)].map(shellQuote).join(' ') + ' || true');
+      }
+      commands.push(['/usr/sbin/networksetup', '-setautoproxystate', name, service.enabled === true ? 'on' : 'off'].map(shellQuote).join(' ') + ' || true');
+      return commands;
+    });
+}
+
+function darwinDynamicResolverRemovalCommand(): string {
+  const script = `remove ${DARWIN_DYNAMIC_DNS_KEY}\nquit\n`;
+  return `/usr/bin/printf %s ${shellQuote(script)} | /usr/sbin/scutil >/dev/null 2>&1 || true`;
+}
+
 function darwinStaleResolverFileRemovalCommands(
   existing: StoredState | null,
   next: { mode: ElectronLauncherSystemResolverMode; domains: string[] }
@@ -994,6 +1367,26 @@ function darwinStaleResolverFileRemovalCommands(
     .map((domain) => darwinResolverPath(domain))
     .filter((filePath): filePath is string => Boolean(filePath))
     .map((filePath) => `if [ -f ${shellQuote(filePath)} ] && /usr/bin/grep -q ${shellQuote(DARWIN_RESOLVER_MARKER)} ${shellQuote(filePath)}; then /bin/rm -f ${shellQuote(filePath)}; fi`);
+}
+
+function darwinOwnedResolverFileRemovalCommands(domains?: string[]): string[] {
+  const files = domains && domains.length > 0
+    ? domains
+        .map((domain) => darwinResolverPath(domain))
+        .filter((filePath): filePath is string => Boolean(filePath))
+    : darwinOwnedResolverFiles();
+  return uniqueList(files)
+    .map((filePath) => `if [ -f ${shellQuote(filePath)} ] && /usr/bin/grep -q ${shellQuote(DARWIN_RESOLVER_MARKER)} ${shellQuote(filePath)}; then /bin/rm -f ${shellQuote(filePath)}; fi`);
+}
+
+function darwinOwnedResolverFiles(): string[] {
+  try {
+    return readdirSync(DARWIN_RESOLVER_DIR)
+      .map((name) => join(DARWIN_RESOLVER_DIR, name))
+      .filter((filePath) => hasOwnedDarwinResolverFile(filePath));
+  } catch {
+    return [];
+  }
 }
 
 async function verifyDarwinDynamicResolvers(domains: string[], port: number): Promise<{ applied: boolean; platform: NodeJS.Platform; mode: ElectronLauncherSystemResolverMode; domains: unknown[]; error?: string | null }> {
@@ -1531,6 +1924,8 @@ async function resolveProxyHost(host: string, config: LocalPacServerConfig | nul
   if (!cleanHost || isIP(cleanHost)) return cleanHost;
   const routeTarget = dnsTargetForHost(cleanHost, config);
   if (routeTarget) return routeTarget;
+  const ownershipTarget = dnsOwnershipTargetForHost(cleanHost, config);
+  if (ownershipTarget) return ownershipTarget;
   if (!config?.dnsServers.length || !hostMatchesDomains(cleanHost, config.domains)) return cleanHost;
   const failures: string[] = [];
   for (const server of config.dnsServers) {
@@ -1553,6 +1948,13 @@ function reverseProxyRouteForHost(host: string, config: LocalPacServerConfig | n
 function dnsTargetForHost(host: string, config: LocalPacServerConfig | null): string | null {
   const route = reverseProxyRouteForHost(host, config);
   return route?.dnsTarget && isIP(route.dnsTarget) ? route.dnsTarget : null;
+}
+
+function dnsOwnershipTargetForHost(host: string, config: LocalPacServerConfig | null): string | null {
+  if (!config?.ownershipClaims.length) return null;
+  const registry = localConfigOwnershipRegistry(config);
+  const owner = resolveElectronLauncherDnsOwner(registry, host);
+  return owner?.target && isIP(owner.target) === 4 ? owner.target : null;
 }
 
 function connectRouteTarget(
@@ -1639,7 +2041,7 @@ function localControlPath(req: IncomingMessage): string | null {
   }
 }
 
-async function registerSharedLocalPacServer(port: number, config: LocalPacServerConfig): Promise<{ pacUrl: string }> {
+async function registerSharedLocalPacServer(port: number, config: LocalPacServerConfig): Promise<{ pacUrl: string; config?: LocalPacServerConfig | null }> {
   const pacUrl = `http://127.0.0.1:${port}${PAC_PATH}`;
   const status = await sharedLocalPacStatus(port).catch(() => null);
   if (status?.marker !== PAC_MARKER) {
@@ -1649,11 +2051,44 @@ async function registerSharedLocalPacServer(port: number, config: LocalPacServer
   if (response.marker !== PAC_MARKER) {
     throw new Error(`127.0.0.1:${port} did not accept Electron Launcher PAC registration`);
   }
-  return { pacUrl };
+  return { pacUrl, config: normalizeSharedLocalPacConfig(response) };
+}
+
+async function releaseSharedLocalPacServer(port: number, ownerId: string): Promise<Record<string, unknown>> {
+  const response = await httpJsonRequest(`http://127.0.0.1:${port}${SHARED_RELEASE_PATH}`, { ownerId }, 1800);
+  if (response.marker !== PAC_MARKER) {
+    throw new Error(`127.0.0.1:${port} did not accept Electron Launcher PAC release`);
+  }
+  return response;
 }
 
 async function sharedLocalPacStatus(port: number): Promise<Record<string, unknown>> {
   return httpJsonRequest(`http://127.0.0.1:${port}${SHARED_STATUS_PATH}`, null, 1200);
+}
+
+function resolvedPacSourceFromLocalConfig(
+  pacUrl: string,
+  pacPort: number,
+  systemResolverMode: ElectronLauncherSystemResolverMode,
+  config: LocalPacServerConfig
+): ResolvedPacSource {
+  const effective = applyOwnershipRegistryToLocalConfig(config);
+  return {
+    pacUrl,
+    domains: effective.domains,
+    proxy: effective.proxy,
+    matchMode: effective.matchMode,
+    fallbackProxy: effective.fallbackProxy,
+    pacPort,
+    sharedLocalPac: false,
+    dnsServers: effective.dnsServers,
+    dnsFallbackTarget: effective.dnsFallbackTarget,
+    systemResolverMode,
+    reverseProxyRoutes: effective.reverseProxyRoutes,
+    ownershipClaim: null,
+    ownershipClaims: effective.ownershipClaims,
+    usesLocalPac: true
+  };
 }
 
 function normalizeSharedLocalPacConfig(value: unknown): LocalPacServerConfig {
@@ -1665,7 +2100,11 @@ function normalizeSharedLocalPacConfig(value: unknown): LocalPacServerConfig {
     fallbackProxy: normalizeProxyAddress(row.fallbackProxyDirective) || normalizeProxyAddress(row.fallbackProxy),
     dnsServers: normalizeDnsServers(row.dnsServers),
     dnsFallbackTarget: normalizeDnsTarget(row.dnsFallbackTarget),
-    reverseProxyRoutes: normalizeReverseProxyRoutes(row.reverseProxyRoutes)
+    reverseProxyRoutes: normalizeReverseProxyRoutes(row.reverseProxyRoutes),
+    ownershipClaims: normalizeOwnershipClaims([
+      ...arrayValue(row.ownershipClaims, []),
+      row.ownershipClaim
+    ])
   };
 }
 
@@ -1673,16 +2112,118 @@ function mergeLocalPacConfigs(
   current: LocalPacServerConfig | null,
   incoming: LocalPacServerConfig
 ): LocalPacServerConfig {
-  if (!current) return incoming;
-  return {
+  if (!current) return applyOwnershipRegistryToLocalConfig(incoming);
+  return applyOwnershipRegistryToLocalConfig({
     domains: uniqueList([...current.domains, ...incoming.domains]),
     proxy: incoming.proxy || current.proxy,
     matchMode: current.matchMode === 'proxy' || incoming.matchMode === 'proxy' ? 'proxy' : incoming.matchMode,
     fallbackProxy: incoming.fallbackProxy || current.fallbackProxy,
     dnsServers: uniqueList([...current.dnsServers, ...incoming.dnsServers]),
     dnsFallbackTarget: incoming.dnsFallbackTarget || current.dnsFallbackTarget,
-    reverseProxyRoutes: mergeReverseProxyRoutes(current.reverseProxyRoutes, incoming.reverseProxyRoutes)
+    reverseProxyRoutes: mergeReverseProxyRoutes(current.reverseProxyRoutes, incoming.reverseProxyRoutes),
+    ownershipClaims: mergeOwnershipClaims(current.ownershipClaims, incoming.ownershipClaims)
+  });
+}
+
+function releaseLocalPacConfigOwner(config: LocalPacServerConfig, ownerId: string): LocalPacServerConfig {
+  const releasedOwnerId = normalizeOwnerId(ownerId);
+  const claims = normalizeOwnershipClaims(config.ownershipClaims);
+  const releasedClaims = claims.filter((claim) => normalizeOwnerId(claim.ownerId) === releasedOwnerId);
+  const remainingClaims = claims.filter((claim) => normalizeOwnerId(claim.ownerId) !== releasedOwnerId);
+  const releasedDomains = new Set(releasedClaims.flatMap(ownershipClaimDomains));
+  const remainingDomains = new Set(remainingClaims.flatMap(ownershipClaimDomains));
+  const releasedRouteHosts = new Set(releasedClaims.flatMap(ownershipClaimRouteHosts));
+  const remainingRouteHosts = new Set(remainingClaims.flatMap(ownershipClaimRouteHosts));
+  return applyOwnershipRegistryToLocalConfig({
+    ...config,
+    domains: config.domains.filter((domain) => !releasedDomains.has(domain) || remainingDomains.has(domain)),
+    reverseProxyRoutes: config.reverseProxyRoutes.filter((route) => {
+      const host = normalizeDomainName(route.host);
+      return !host || !releasedRouteHosts.has(host) || remainingRouteHosts.has(host);
+    }),
+    ownershipClaims: remainingClaims
+  });
+}
+
+function applyOwnershipRegistryToLocalConfig(config: LocalPacServerConfig): LocalPacServerConfig {
+  const ownershipClaims = normalizeOwnershipClaims(config.ownershipClaims);
+  if (!ownershipClaims.length) {
+    return {
+      ...config,
+      ownershipClaims
+    };
+  }
+  const registry = buildElectronLauncherNetworkOwnershipRegistry(ownershipClaims);
+  const registryZones = mergedElectronLauncherDnsZones(registry);
+  const registryHosts = registry.dnsHosts.map((entry) => entry.key);
+  const registryRoutes: ElectronLauncherSystemDomainProxyRoute[] = mergedElectronLauncherReverseProxyRoutes(registry)
+    .map((route): ElectronLauncherSystemDomainProxyRoute => ({
+      routeId: route.routeId,
+      host: route.host,
+      dnsTarget: route.dnsTarget,
+      targetUrl: route.targetUrl,
+      tlsMode: normalizeTlsMode(route.tlsMode),
+      authRequired: route.authRequired,
+      enabled: route.enabled
+    }));
+  return {
+    ...config,
+    domains: uniqueList([...config.domains, ...registryZones, ...registryHosts]),
+    reverseProxyRoutes: mergeReverseProxyRoutes(config.reverseProxyRoutes, registryRoutes),
+    ownershipClaims
   };
+}
+
+function localConfigOwnershipRegistry(config: LocalPacServerConfig): ElectronLauncherNetworkOwnershipRegistry {
+  return buildElectronLauncherNetworkOwnershipRegistry(config.ownershipClaims);
+}
+
+function requiresManagedRelease(state: StoredState, config: LocalPacServerConfig | null): boolean {
+  const ownerId = stateOwnershipOwnerId(state);
+  if (!ownerId) return false;
+  if (state.sharedLocalPac === true) return true;
+  const claims = normalizeOwnershipClaims(config?.ownershipClaims);
+  return claims.some((claim) => normalizeOwnerId(claim.ownerId) !== ownerId);
+}
+
+function stateOwnershipOwnerId(state: StoredState): string | null {
+  return normalizeOwnerId(state.ownershipClaim?.ownerId);
+}
+
+function ownershipClaimDomains(claim: ElectronLauncherNetworkOwnershipClaim): string[] {
+  return uniqueList([
+    ...normalizeDomains(claim.dnsZones),
+    ...normalizeDomains(claim.dnsHosts),
+    ...ownershipClaimRouteHosts(claim)
+  ]);
+}
+
+function ownershipClaimRouteHosts(claim: ElectronLauncherNetworkOwnershipClaim): string[] {
+  return normalizeReverseProxyRoutes(claim.reverseProxyRoutes).map((route) => route.host);
+}
+
+function mergeOwnershipClaims(
+  current: ElectronLauncherNetworkOwnershipClaim[],
+  incoming: ElectronLauncherNetworkOwnershipClaim[]
+): ElectronLauncherNetworkOwnershipClaim[] {
+  const byOwner = new Map<string, ElectronLauncherNetworkOwnershipClaim>();
+  for (const claim of normalizeOwnershipClaims(current)) byOwner.set(claim.ownerId, claim);
+  for (const claim of normalizeOwnershipClaims(incoming)) byOwner.set(claim.ownerId, claim);
+  return [...byOwner.values()];
+}
+
+function localPacConfigKey(config: LocalPacServerConfig, port: number | null): string {
+  return JSON.stringify({
+    domains: config.domains,
+    matchMode: config.matchMode,
+    proxy: config.proxy?.directive || null,
+    fallbackProxy: config.fallbackProxy?.directive || null,
+    dnsServers: config.dnsServers,
+    dnsFallbackTarget: config.dnsFallbackTarget,
+    reverseProxyRoutes: config.reverseProxyRoutes,
+    ownershipClaims: config.ownershipClaims.map((claim) => claim.ownerId).sort(),
+    pacPort: port || null
+  });
 }
 
 function mergeReverseProxyRoutes(
@@ -1766,17 +2307,7 @@ function readRequestJson(req: IncomingMessage): Promise<unknown> {
 function httpJsonRequest(url: string, body: unknown, timeoutMs: number): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
-    const payload = body === null ? null : JSON.stringify({
-      domains: normalizeDomains((body as LocalPacServerConfig).domains),
-      proxy: (body as LocalPacServerConfig).proxy?.address || null,
-      proxyDirective: (body as LocalPacServerConfig).proxy?.directive || null,
-      matchMode: (body as LocalPacServerConfig).matchMode,
-      fallbackProxy: (body as LocalPacServerConfig).fallbackProxy?.address || null,
-      fallbackProxyDirective: (body as LocalPacServerConfig).fallbackProxy?.directive || null,
-      dnsServers: normalizeDnsServers((body as LocalPacServerConfig).dnsServers),
-      dnsFallbackTarget: normalizeDnsTarget((body as LocalPacServerConfig).dnsFallbackTarget),
-      reverseProxyRoutes: normalizeReverseProxyRoutes((body as LocalPacServerConfig).reverseProxyRoutes)
-    });
+    const payload = body === null ? null : JSON.stringify(normalizeHttpJsonBody(body));
     const req = httpRequest({
       hostname: parsed.hostname,
       port: parsed.port,
@@ -1808,6 +2339,26 @@ function httpJsonRequest(url: string, body: unknown, timeoutMs: number): Promise
     if (payload !== null) req.end(payload);
     else req.end();
   });
+}
+
+function normalizeHttpJsonBody(body: unknown): Record<string, unknown> {
+  const row = body && typeof body === 'object' ? body as Record<string, unknown> : {};
+  const ownerId = normalizeOwnerId(row.ownerId);
+  if (ownerId && row.domains === undefined && row.ownershipClaims === undefined && row.proxy === undefined) {
+    return { ownerId };
+  }
+  return {
+    domains: normalizeDomains((body as LocalPacServerConfig).domains),
+    proxy: (body as LocalPacServerConfig).proxy?.address || null,
+    proxyDirective: (body as LocalPacServerConfig).proxy?.directive || null,
+    matchMode: (body as LocalPacServerConfig).matchMode,
+    fallbackProxy: (body as LocalPacServerConfig).fallbackProxy?.address || null,
+    fallbackProxyDirective: (body as LocalPacServerConfig).fallbackProxy?.directive || null,
+    dnsServers: normalizeDnsServers((body as LocalPacServerConfig).dnsServers),
+    dnsFallbackTarget: normalizeDnsTarget((body as LocalPacServerConfig).dnsFallbackTarget),
+    reverseProxyRoutes: normalizeReverseProxyRoutes((body as LocalPacServerConfig).reverseProxyRoutes),
+    ownershipClaims: normalizeOwnershipClaims((body as LocalPacServerConfig).ownershipClaims)
+  };
 }
 
 function resolveDnsA(hostname: string, server: string): Promise<string> {
@@ -1959,7 +2510,11 @@ function buildDnsAQuery(hostname: string): { id: number; packet: Buffer } {
 }
 
 function parseDnsAResponse(packet: Buffer, expectedId: number): string | null {
-  if (packet.length < 12 || packet.readUInt16BE(0) !== expectedId) return null;
+  return parseDnsARecords(packet, expectedId)[0] || null;
+}
+
+function parseDnsARecords(packet: Buffer, expectedId: number): string[] {
+  if (packet.length < 12 || packet.readUInt16BE(0) !== expectedId) return [];
   const rcode = packet.readUInt16BE(2) & 0x000f;
   if (rcode !== 0) throw new Error(`DNS response code ${rcode}`);
   const questions = packet.readUInt16BE(4);
@@ -1969,20 +2524,73 @@ function parseDnsAResponse(packet: Buffer, expectedId: number): string | null {
     offset = skipDnsName(packet, offset);
     offset += 4;
   }
+  const records: string[] = [];
   for (let i = 0; i < answers; i += 1) {
     offset = skipDnsName(packet, offset);
-    if (offset + 10 > packet.length) return null;
+    if (offset + 10 > packet.length) return [];
     const type = packet.readUInt16BE(offset);
     const klass = packet.readUInt16BE(offset + 2);
     const length = packet.readUInt16BE(offset + 8);
     offset += 10;
-    if (offset + length > packet.length) return null;
+    if (offset + length > packet.length) return [];
     if (type === 1 && klass === 1 && length === 4) {
-      return `${packet[offset]}.${packet[offset + 1]}.${packet[offset + 2]}.${packet[offset + 3]}`;
+      records.push(`${packet[offset]}.${packet[offset + 1]}.${packet[offset + 2]}.${packet[offset + 3]}`);
     }
     offset += length;
   }
-  return null;
+  return records;
+}
+
+function shouldUseDnsFallbackResponse(query: Buffer, response: Buffer, fallbackTarget: string | null): boolean {
+  if (!fallbackTarget || isIP(fallbackTarget) !== 4) return false;
+  let records: string[] = [];
+  try {
+    records = parseDnsARecords(response, query.readUInt16BE(0));
+  } catch {
+    return true;
+  }
+  if (records.length === 0) return true;
+  if (records.includes(fallbackTarget)) return false;
+  return records.every((record) => isPublicOrProxyFakeIp(record));
+}
+
+function isPublicOrProxyFakeIp(value: string): boolean {
+  if (isIP(value) !== 4) return false;
+  return !isOverlayOrPrivateIp(value) || cidrContainsIp('198.18.0.0/15', value);
+}
+
+function isOverlayOrPrivateIp(value: string): boolean {
+  return [
+    '10.0.0.0/8',
+    '172.16.0.0/12',
+    '192.168.0.0/16',
+    '100.64.0.0/10',
+    '127.0.0.0/8'
+  ].some((cidr) => cidrContainsIp(cidr, value));
+}
+
+function cidrContainsIp(cidr: string, ip: string): boolean {
+  const parsed = parseIpv4Cidr(cidr);
+  const target = ipv4ToInt(ip);
+  if (!parsed || target === null) return false;
+  const mask = parsed.prefix === 0 ? 0 : (0xffffffff << (32 - parsed.prefix)) >>> 0;
+  return (target & mask) === (parsed.base & mask);
+}
+
+function parseIpv4Cidr(value: string): { base: number; prefix: number } | null {
+  const [ip, prefixText] = value.split('/');
+  const base = ipv4ToInt(ip);
+  const prefix = Number(prefixText);
+  if (base === null || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return null;
+  return { base, prefix };
+}
+
+function ipv4ToInt(value: string | null | undefined): number | null {
+  const text = value?.trim();
+  if (!text || isIP(text) !== 4) return null;
+  const parts = text.split('.').map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+  return (((parts[0] * 256 + parts[1]) * 256 + parts[2]) * 256 + parts[3]) >>> 0;
 }
 
 function skipDnsName(packet: Buffer, offset: number): number {
@@ -2030,6 +2638,14 @@ function removeState(statePath: string, log: Pick<Console, 'warn'>): void {
   }
 }
 
+function systemDomainProxyStateChanged(existing: StoredState | null, next: StoredState): boolean {
+  return !existing
+    || existing.pacUrl !== next.pacUrl
+    || storedSystemResolverMode(existing) !== next.systemResolverMode
+    || existing.resolverPort !== next.resolverPort
+    || JSON.stringify(normalizeDomains(existing.resolverDomains)) !== JSON.stringify(normalizeDomains(next.resolverDomains));
+}
+
 function publicState(state: StoredState, extra: Partial<ElectronLauncherSystemDomainProxyStatus> = {}): ElectronLauncherSystemDomainProxyStatus {
   return {
     supported: true,
@@ -2051,6 +2667,9 @@ function publicState(state: StoredState, extra: Partial<ElectronLauncherSystemDo
     resolverError: state.resolverError || null,
     domains: normalizeDomains(state.domains),
     reverseProxyRoutes: normalizeReverseProxyRoutes(state.reverseProxyRoutes),
+    ownershipRegistry: state.ownershipRegistry || (state.ownershipClaim
+      ? buildElectronLauncherNetworkOwnershipRegistry([state.ownershipClaim])
+      : null),
     updatedAt: state.updatedAt || null,
     ...extra
   };
@@ -2065,6 +2684,58 @@ function normalizeDomains(value: unknown): string[] {
 
 function uniqueList(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
+}
+
+function arrayValue(value: unknown, fallback: unknown[] = []): unknown[] {
+  return Array.isArray(value) ? value : fallback;
+}
+
+function normalizeOwnershipClaims(value: unknown): ElectronLauncherNetworkOwnershipClaim[] {
+  return arrayValue(value, [])
+    .map(normalizeOwnershipClaim)
+    .filter((claim): claim is ElectronLauncherNetworkOwnershipClaim => Boolean(claim));
+}
+
+function normalizeOwnershipClaim(value: unknown): ElectronLauncherNetworkOwnershipClaim | null {
+  const row = value && typeof value === 'object' ? value as Record<string, unknown> : null;
+  if (!row) return null;
+  const ownerId = normalizeOwnerId(row.ownerId);
+  if (!ownerId) return null;
+  return {
+    ownerId,
+    productId: stringValue(row.productId) || null,
+    instanceId: stringValue(row.instanceId) || null,
+    displayName: stringValue(row.displayName) || null,
+    state: normalizeOwnershipState(row.state),
+    priority: normalizeInteger(row.priority),
+    leaseIp: normalizeDnsTarget(row.leaseIp),
+    gatewayIp: normalizeDnsTarget(row.gatewayIp),
+    dnsHosts: normalizeDomains(row.dnsHosts),
+    dnsZones: normalizeDomains(row.dnsZones),
+    routeCidrs: arrayValue(row.routeCidrs, [])
+      .map((item) => stringValue(item))
+      .filter((item): item is string => Boolean(item)),
+    reverseProxyRoutes: normalizeReverseProxyRoutes(row.reverseProxyRoutes),
+    metadata: row.metadata && typeof row.metadata === 'object' ? row.metadata as Record<string, unknown> : null,
+    updatedAt: stringValue(row.updatedAt) || null
+  };
+}
+
+function normalizeOwnerId(value: unknown): string | null {
+  const text = stringValue(value);
+  if (!text) return null;
+  return text.replace(/[^a-zA-Z0-9_.:-]/g, '-').slice(0, 160) || null;
+}
+
+function normalizeOwnershipState(value: unknown): ElectronLauncherNetworkOwnershipClaim['state'] {
+  return value === 'connecting' || value === 'active' || value === 'stale' || value === 'released'
+    ? value
+    : 'active';
+}
+
+function normalizeInteger(value: unknown): number | null {
+  const number = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(number) ? Math.trunc(number) : null;
 }
 
 function normalizeDnsServers(value: unknown): string[] {

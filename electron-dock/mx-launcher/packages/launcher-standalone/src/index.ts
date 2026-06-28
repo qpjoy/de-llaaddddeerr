@@ -108,6 +108,7 @@ export function createStandaloneLauncher(options: StandaloneLauncherOptions): St
   async function enrollLease(input: StandaloneLeaseOptions = {}): Promise<LauncherNetworkLease> {
     return client.enrollLease({
       ...input,
+      appId: input.appId ?? productId,
       productId,
       mode: 'standalone',
       installId: input.installId ?? options.installId,

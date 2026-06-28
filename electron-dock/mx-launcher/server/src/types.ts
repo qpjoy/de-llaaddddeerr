@@ -26,6 +26,7 @@ export interface RuntimeConfig {
   gatewayHostNginxApplyEnabled: boolean;
   gatewayHostNginxConfigPath: string;
   gatewayHostNginxInternalApiUpstream: string | null;
+  launcherNetworkSdkTestModeEnabled: boolean;
   gatewayAppPort: number;
   siteSlotSshKeyRoot: string;
 }
@@ -1598,6 +1599,7 @@ export interface LauncherProductNetwork {
 }
 
 export interface LauncherNetworkLeaseInput {
+  appId?: string | null;
   productId?: string | null;
   mode?: LauncherProductMode | string | null;
   identityKind?: LauncherIdentityKind | string | null;
@@ -1610,6 +1612,7 @@ export interface LauncherNetworkLeaseInput {
   platform?: string | null;
   requestedBy?: string | null;
   requestId?: string | null;
+  sdkTestMode?: boolean | string | null;
 }
 
 export interface LauncherNetworkLeaseReleaseInput {

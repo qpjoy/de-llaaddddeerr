@@ -131,6 +131,7 @@ async function runAction(action, payload) {
       enableH2o: () => api.enableH2o(),
       checkUpdates: () => api.checkUpdates(),
       refreshDiagnostics: () => api.refreshDiagnostics?.(),
+      repairSystemNetwork: () => api.repairSystemNetwork?.(),
       openAdmin: () => api.openAdmin()
     };
     if (handlers[action]) {
@@ -354,6 +355,12 @@ function renderWireGuardDiagnostics() {
   const relayFailures = Array.isArray(relayDiag.failures) ? relayDiag.failures : [];
   const directSyncFailures = directSync.status === 'skipped' ? [] : (Array.isArray(directSync.failures) ? directSync.failures : []);
   const directSyncStatus = directSync.status === 'skipped' && directSync.message ? 'relay fallback' : (directSync.status || '-');
+  const networkEnvironment = diagnostics.networkEnvironment || {};
+  const resolution = networkEnvironment.resolution || {};
+  const resolutionAddresses = Array.isArray(resolution.addresses)
+    ? resolution.addresses.map((row) => `${row.address || '-'} ${row.classification || ''}`.trim()).join(', ')
+    : '';
+  const systemProxy = networkEnvironment.systemDomainProxy || diagnostics.systemDomainProxy || {};
   const launchDaemon = wireGuard.launchDaemon || {};
   const launchDaemonStatus = launchDaemon.supported
     ? (launchDaemon.running ? 'running' : launchDaemon.loaded ? 'loaded' : launchDaemon.installed ? 'installed' : 'missing')
@@ -365,11 +372,19 @@ function renderWireGuardDiagnostics() {
           <h2>WireGuard 诊断</h2>
           <p>route proof / overlay health</p>
         </div>
-        <button class="secondary-button" type="button" data-action="refreshDiagnostics" ${busyAction === 'refreshDiagnostics' ? 'disabled' : ''}>重新诊断</button>
+        <div class="toolbar-actions">
+          <button class="secondary-button" type="button" data-action="repairSystemNetwork" ${busyAction === 'repairSystemNetwork' ? 'disabled' : ''}>修复网络</button>
+          <button class="secondary-button" type="button" data-action="refreshDiagnostics" ${busyAction === 'refreshDiagnostics' ? 'disabled' : ''}>重新诊断</button>
+        </div>
       </div>
       <div class="metric-grid">
         ${metric('WG', connection.health?.wireGuard || 'idle')}
         ${metric('Path', pathLabel(wireGuard.path || connection.routePlan?.preferredPath))}
+        ${metric('DNS Phase', networkEnvironment.phase || '-')}
+        ${metric('DNS Host', networkEnvironment.host || '-')}
+        ${metric('Resolved', compactText(resolutionAddresses, 90))}
+        ${metric('Resolution', resolution.state ? `${resolution.state} / ${resolution.severity || '-'}` : '-')}
+        ${metric('System PAC', systemProxy.applied ? `on / ${systemProxy.systemResolverMode || '-'}` : 'off')}
         ${metric('Direct Sync', directSyncStatus)}
         ${metric('Peer Sync', peerSync.status || '-')}
         ${metric('Relay', relayDiag.status || '-')}
@@ -399,6 +414,7 @@ function renderWireGuardDiagnostics() {
       ${peerSync.failures?.length ? `<p class="diagnostic-note">${escapeHtml(peerSync.failures.join(' / '))}</p>` : ''}
       ${relayBlockedReasons.length || relayFailures.length ? `<p class="diagnostic-note">${escapeHtml([...relayBlockedReasons, ...relayFailures].join(' / '))}</p>` : ''}
       ${wireGuard.statusError || wireGuard.routeLogTail ? `<p class="diagnostic-note">${escapeHtml(wireGuard.statusError || wireGuard.routeLogTail)}</p>` : ''}
+      ${resolution.message ? `<p class="diagnostic-note">${escapeHtml(resolution.message)}</p>` : ''}
     </section>
   `;
 }
@@ -718,6 +734,12 @@ function compactList(value) {
   return text.length > 90 ? `${text.slice(0, 87)}...` : text;
 }
 
+function compactText(value, limit = 90) {
+  const text = String(value || '').trim();
+  if (!text) return '-';
+  return text.length > limit ? `${text.slice(0, Math.max(0, limit - 3))}...` : text;
+}
+
 function connectionCaption() {
   const connection = state.connection || {};
   if (connection.state === 'connecting') return '正在准备 WireGuard、DNS、PAC 和权限上下文';
@@ -989,6 +1011,27 @@ function createMockApi() {
         }
       },
       feedback: { tone: 'success', message: '诊断已刷新。' }
+    }),
+    repairSystemNetwork: async () => commit({
+      connection: {
+        ...mockState.connection,
+        diagnostics: {
+          ...(mockState.connection.diagnostics || {}),
+          networkEnvironment: {
+            reason: 'mock-repair',
+            phase: mockState.connection.state === 'connected' ? 'connected' : 'disconnected',
+            host: 'h2i.mxinfo-inc.cn',
+            resolution: {
+              state: mockState.connection.state === 'connected' ? 'expected-internal' : 'public',
+              severity: 'ok',
+              message: 'mock network repaired',
+              addresses: [{ address: mockState.connection.state === 'connected' ? '10.88.88.88' : '116.62.51.154', classification: mockState.connection.state === 'connected' ? 'expected-internal-target' : 'public' }]
+            },
+            systemDomainProxy: { applied: mockState.connection.state === 'connected', systemResolverMode: 'dynamic' }
+          }
+        }
+      },
+      feedback: { tone: 'success', message: '系统网络状态已修复。' }
     }),
     openAdmin: async () => true,
     setWindowMode: async () => true,

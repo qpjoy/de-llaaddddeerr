@@ -6428,7 +6428,7 @@ function fallbackAppCenterApps() {
       standaloneChannelProductId: MX_H2I_PRODUCT_ID,
       productNetworkId: MX_H2I_PRODUCT_ID,
       channels: ['shadow', 'beta', 'stable'],
-      requiredCapabilities: ['launcher-network', 'launcher-standalone']
+      requiredCapabilities: ['launcher-network', 'launcher-standalone', 'wireguard-peer']
     },
     {
       appId: APP_CENTER_PRODUCT_ID,
@@ -6719,8 +6719,117 @@ function createAppCatalogEditorDraft(mode = 'create', appId = '') {
     enabled: app?.enabled === false ? false : true,
     builtin: app?.builtin === true,
     systemOwned: app?.systemOwned === true,
-    channels: asArray(app?.channels).length ? app.channels : ['shadow', 'beta', 'stable']
+    channels: asArray(app?.channels).length ? app.channels : ['shadow', 'beta', 'stable'],
+    permissions: asArray(app?.permissions),
+    requiredCapabilities: asArray(app?.requiredCapabilities),
+    updatePolicy: app?.updatePolicy || (appMode === 'standalone' ? 'app-managed' : 'launcher-managed')
   };
+}
+
+function launcherAppDefaultDescription(draft) {
+  const name = draft.displayName || draft.appId || 'Launcher app';
+  if (draft.launcherMode === 'standalone') {
+    return `${name} owns a Launcher standalone channel and can receive Internal network leases.`;
+  }
+  const channel = launcherProductDisplayName(normalizeStandaloneProductId(draft.standaloneChannelProductId || MX_H2I_PRODUCT_ID), null);
+  return `${name} runs through the ${channel} Launcher channel without owning another local tunnel.`;
+}
+
+function uniqueStringList(values) {
+  return Array.from(new Set(asArray(values).map((value) => String(value || '').trim()).filter(Boolean)));
+}
+
+function launcherAppKnownCapability(value) {
+  return [
+    'launcher-network',
+    'launcher-standalone',
+    'launcher-embed-sdk',
+    'wireguard-peer',
+    'app-center-runtime'
+  ].includes(value);
+}
+
+function launcherAppCategoryWantsRuntime(category) {
+  return ['platform', 'network'].includes(String(category || '').trim().toLowerCase());
+}
+
+function launcherAppEffectiveCapabilities(draft) {
+  const appId = cleanLauncherProductId(draft.appId);
+  const mode = draft.launcherMode === 'standalone' ? 'standalone' : 'embed';
+  const existing = uniqueStringList(draft.requiredCapabilities);
+  const generated = appId === APP_CENTER_PRODUCT_ID
+    ? ['app-center-runtime', 'launcher-embed-sdk']
+    : mode === 'standalone'
+      ? ['launcher-network', 'launcher-standalone']
+      : ['launcher-network', 'launcher-embed-sdk'];
+  if (mode === 'standalone' && (draft.category === 'vpn' || existing.includes('wireguard-peer'))) {
+    generated.push('wireguard-peer');
+  }
+  if (appId !== APP_CENTER_PRODUCT_ID && (launcherAppCategoryWantsRuntime(draft.category) || existing.includes('app-center-runtime'))) {
+    generated.push('app-center-runtime');
+  }
+  return uniqueStringList([
+    ...generated,
+    ...existing.filter((capability) => !launcherAppKnownCapability(capability))
+  ]);
+}
+
+function launcherAppKnownPermission(value) {
+  return [
+    'auth.read',
+    'network.tun.request',
+    'network.wg.peer',
+    'network.dns.policy',
+    'observability.write',
+    'appcenter.read',
+    'permission.request'
+  ].includes(value);
+}
+
+function launcherAppEffectivePermissions(draft) {
+  const mode = draft.launcherMode === 'standalone' ? 'standalone' : 'embed';
+  const existing = uniqueStringList(draft.permissions);
+  const generated = ['auth.read'];
+  if (mode === 'standalone') {
+    generated.push('network.tun.request', 'network.dns.policy', 'observability.write');
+    if (draft.category === 'vpn' || existing.includes('network.wg.peer')) generated.push('network.wg.peer');
+  } else {
+    generated.push('appcenter.read', 'permission.request', 'observability.write');
+    if (draft.category === 'network' || existing.includes('network.dns.policy')) generated.push('network.dns.policy');
+  }
+  return uniqueStringList([
+    ...generated,
+    ...existing.filter((permission) => !launcherAppKnownPermission(permission))
+  ]);
+}
+
+function launcherAppEffectiveUpdatePolicy(draft) {
+  if (draft.appId === MX_H2I_PRODUCT_ID || draft.launcherMode !== 'standalone') return 'launcher-managed';
+  return draft.updatePolicy || 'app-managed';
+}
+
+function launcherAppCapabilityHint(capability) {
+  const hints = {
+    'launcher-network': '允许 SDK/客户端向 Launcher Network 申请 lease。',
+    'launcher-standalone': '该应用拥有 standalone channel，可成为 TUN/WG/DNS owner。',
+    'launcher-embed-sdk': '该应用复用已有 standalone channel，不新增本机网络 owner。',
+    'wireguard-peer': 'VPN 类应用可创建 WireGuard peer 和相关诊断。',
+    'app-center-runtime': '可被 AppCenter/runtime 容器加载并走统一权限、发版链路。'
+  };
+  return hints[capability] || '保留已有自定义能力，不由本页自动解释。';
+}
+
+function launcherAppPermissionHint(permission) {
+  const hints = {
+    'auth.read': '读取登录态和基础身份。',
+    'network.tun.request': '向本机网络层申请 TUN/WG 上下文。',
+    'network.wg.peer': '创建或更新 WireGuard peer。',
+    'network.dns.policy': '使用 split DNS / PAC / resolver 策略。',
+    'observability.write': '写入运行诊断和审计证据。',
+    'appcenter.read': '读取 AppCenter 应用和发布信息。',
+    'permission.request': '通过 SDK Gateway 发起权限请求。'
+  };
+  return hints[permission] || '保留已有自定义权限。';
 }
 
 function openAppCatalogEditor(mode = 'create', appId = '') {
@@ -6760,7 +6869,13 @@ function renderAppEditorDrawer() {
   const mode = draft.launcherMode === 'standalone' ? 'standalone' : 'embed';
   const appId = cleanLauncherProductId(draft.appId);
   const title = creating ? 'New Launcher App' : `Edit ${draft.displayName || draft.appId}`;
-  const systemCopy = draft.builtin || draft.systemOwned ? 'System app cannot be deleted; metadata and network policy stay managed here.' : 'Custom app uses Launcher network, permission, release, and update services.';
+  const draftForPlan = { ...draft, appId, launcherMode: mode };
+  const descriptionValue = draft.description || launcherAppDefaultDescription(draftForPlan);
+  const capabilities = launcherAppEffectiveCapabilities(draftForPlan);
+  const permissions = launcherAppEffectivePermissions(draftForPlan);
+  const systemCopy = draft.builtin || draft.systemOwned
+    ? '系统预置应用不能删除；这里负责查看或校准它的网络、权限和发布策略。'
+    : '选择应用身份和 Launcher 模式后，系统会自动生成网络注册、SDK 接入门槛、权限和发布默认值。';
   const conflict = mode === 'standalone'
     ? productNetworkSecondOctetConflict(draft.productSecondOctet, appId || null)
     : null;
@@ -6778,11 +6893,14 @@ function renderAppEditorDrawer() {
       </header>
 
       <div class="app-drawer-scroll">
+        ${renderAppEditorDecisionPath(draftForPlan, conflict)}
+
         <section class="app-drawer-section">
           <div class="app-section-title">
             <span>01</span>
             <strong>Basic identity</strong>
           </div>
+          <p class="app-section-copy">App ID 是客户端 SDK、AppCenter 注册表和 ProductNetwork 的共同主键。新建时先填名称也可以，系统会尝试联动生成 ID。</p>
           <div class="app-editor-grid">
             <label class="app-form-field">
               <span>App ID</span>
@@ -6804,7 +6922,7 @@ function renderAppEditorDrawer() {
             </label>
             <label class="app-form-field app-form-wide">
               <span>Description</span>
-              <textarea data-app-field="description" rows="3" placeholder="Launcher powered application.">${escapeHtml(draft.description || '')}</textarea>
+              <textarea data-app-field="description" rows="3" placeholder="Generated from launcher mode.">${escapeHtml(descriptionValue)}</textarea>
             </label>
           </div>
         </section>
@@ -6814,6 +6932,7 @@ function renderAppEditorDrawer() {
             <span>02</span>
             <strong>Launcher mode</strong>
           </div>
+          <p class="app-section-copy">Standalone 会创建独立 ProductNetwork，可分配客户端 IP；Embed 只绑定已有 standalone channel，不新增本机 TUN/WG/DNS owner。</p>
           <div class="app-mode-selector" role="radiogroup" aria-label="Launcher mode">
             ${renderAppModeChoice('standalone', mode, 'standalone', 'Owns a Launcher network channel and can receive leases.')}
             ${renderAppModeChoice('embed', mode, 'embed', 'Uses a selected standalone channel without another TUN/WG/DNS owner.')}
@@ -6824,6 +6943,15 @@ function renderAppEditorDrawer() {
         <section class="app-drawer-section">
           <div class="app-section-title">
             <span>03</span>
+            <strong>Entitlement plan</strong>
+          </div>
+          <p class="app-section-copy">生产环境客户端必须命中这里的 AppCenter 注册和 ProductNetwork 绑定。SDK test mode 只在服务端显式开启时放行，不写入正式能力。</p>
+          ${renderAppEntitlementPlan(draftForPlan, capabilities, permissions)}
+        </section>
+
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>04</span>
             <strong>Runtime defaults</strong>
           </div>
           <label class="app-check-row">
@@ -6831,6 +6959,7 @@ function renderAppEditorDrawer() {
             <span aria-hidden="true"></span>
             <strong>Enabled for Launcher clients</strong>
           </label>
+          ${renderAppRuntimeDefaults(draftForPlan)}
           <details class="app-advanced-defaults">
             <summary>Advanced defaults</summary>
             <div class="app-network-facts">
@@ -6852,6 +6981,93 @@ function renderAppEditorDrawer() {
     </form>
   `;
   bindAppEditorDrawerControls();
+}
+
+function renderAppEditorDecisionPath(draft, conflict) {
+  const mode = draft.launcherMode === 'standalone' ? 'standalone' : 'embed';
+  const appId = cleanLauncherProductId(draft.appId);
+  const productId = appId || 'auto-after-save';
+  const channelId = mode === 'standalone'
+    ? productId
+    : normalizeStandaloneProductId(draft.standaloneChannelProductId || MX_H2I_PRODUCT_ID);
+  const steps = [
+    ['注册 AppCenter', productId, '保存应用身份、版本、类别和可见状态。'],
+    ['选择网络模式', mode, mode === 'standalone' ? '创建独立 ProductNetwork 和客户端 IP 池。' : `复用 ${launcherProductDisplayName(channelId, launcherProductNetwork(channelId))} 通道。`],
+    ['写入接入门槛', conflict ? 'blocked' : 'ready', conflict ? `10.${draft.productSecondOctet}.* 已被占用，保存前需要换段。` : 'SDK enroll 会校验 appId、productId、mode 和能力。'],
+    ['客户端结果', mode === 'standalone' ? 'own lease' : 'shared lease', mode === 'standalone' ? '该应用可以独立发放 Internal 网络 lease。' : '该应用随所选 channel 的网络上下文运行。']
+  ];
+  return `
+    <section class="app-decision-path" aria-label="Launcher app onboarding path">
+      ${steps.map(([label, value, detail], index) => `
+        <article data-state="${escapeHtml(value === 'blocked' ? 'blocked' : 'ready')}">
+          <span>${escapeHtml(String(index + 1).padStart(2, '0'))}</span>
+          <strong>${escapeHtml(label)}</strong>
+          <b>${escapeHtml(value)}</b>
+          <small>${escapeHtml(detail)}</small>
+        </article>
+      `).join('')}
+    </section>
+  `;
+}
+
+function renderAppEntitlementPlan(draft, capabilities, permissions) {
+  return `
+    <div class="app-entitlement-plan">
+      <article>
+        <div>
+          <strong>Required capabilities</strong>
+          <small>客户端 enroll 的硬门槛，保存时写入 AppCenter app。</small>
+        </div>
+        <div class="app-generated-chips">
+          ${capabilities.map((capability) => `
+            <span title="${escapeHtml(launcherAppCapabilityHint(capability))}">${escapeHtml(capability)}</span>
+          `).join('')}
+        </div>
+      </article>
+      <article>
+        <div>
+          <strong>Permission defaults</strong>
+          <small>权限中心的初始功能范围，后续由 manifest/RBAC 细化。</small>
+        </div>
+        <div class="app-generated-chips">
+          ${permissions.map((permission) => `
+            <span title="${escapeHtml(launcherAppPermissionHint(permission))}">${escapeHtml(permission)}</span>
+          `).join('')}
+        </div>
+      </article>
+      <article>
+        <div>
+          <strong>SDK gate</strong>
+          <small>正式包不会因为安装了 npm package 自动入网。</small>
+        </div>
+        <div class="app-network-facts">
+          <span><strong>${escapeHtml(draft.appId || 'app-id')}</strong><small>appId requested by SDK</small></span>
+          <span><strong>${escapeHtml(productNetworkIdForDraft(draft))}</strong><small>ProductNetwork binding</small></span>
+        </div>
+      </article>
+    </div>
+  `;
+}
+
+function productNetworkIdForDraft(draft) {
+  return cleanLauncherProductId(draft.appId) || 'created-on-save';
+}
+
+function renderAppRuntimeDefaults(draft) {
+  const mode = draft.launcherMode === 'standalone' ? 'standalone' : 'embed';
+  const updatePolicy = launcherAppEffectiveUpdatePolicy(draft);
+  const channels = uniqueStringList(draft.channels).length ? uniqueStringList(draft.channels) : ['shadow', 'beta', 'stable'];
+  const channelId = mode === 'standalone'
+    ? productNetworkIdForDraft(draft)
+    : normalizeStandaloneProductId(draft.standaloneChannelProductId || MX_H2I_PRODUCT_ID);
+  return `
+    <div class="app-runtime-defaults">
+      <span><strong>${escapeHtml(channels.join(' / '))}</strong><small>release lanes</small></span>
+      <span><strong>${escapeHtml(updatePolicy)}</strong><small>update policy</small></span>
+      <span><strong>${escapeHtml(channelId)}</strong><small>${mode === 'standalone' ? 'self channel' : 'selected channel'}</small></span>
+      <span><strong>domestic-main</strong><small>default relay site</small></span>
+    </div>
+  `;
 }
 
 function renderAppCategoryOptions(selectedCategory) {
@@ -6878,8 +7094,13 @@ function renderAppModeChoice(value, selected, title, detail) {
 function renderAppStandaloneNetworkSection(draft, conflict) {
   const appId = cleanLauncherProductId(draft.appId);
   const secondOctet = normalizeProductSecondOctet(draft.productSecondOctet, nextAvailableProductSecondOctet(appId || null, 'standalone'));
+  const suggestedOctet = nextAvailableProductSecondOctet(appId || null, 'standalone');
   const ranges = relayProductNetworkShape(secondOctet);
   const serviceVip = serviceVipForProductSecondOctet(secondOctet, appId);
+  const knownUsage = knownProductNetworkSecondOctets(appId || null)
+    .slice(0, 5)
+    .map((item) => `10.${item.secondOctet}.* ${launcherProductDisplayName(item.product.productId, item.product)}`)
+    .join(' / ');
   return `
     <div class="app-network-panel ${conflict ? 'has-error' : ''}">
       <label class="app-form-field">
@@ -6890,7 +7111,15 @@ function renderAppStandaloneNetworkSection(draft, conflict) {
           <b>.0.0/16</b>
         </div>
       </label>
+      <div class="app-network-suggestion">
+        <span>
+          <strong>10.${escapeHtml(suggestedOctet)}.0.0/16</strong>
+          <small>registry suggested next segment</small>
+        </span>
+        <button class="secondary-button" type="button" data-app-use-suggested-octet="${escapeHtml(suggestedOctet)}" ${suggestedOctet === secondOctet ? 'disabled' : ''}>Use suggested</button>
+      </div>
       <p>${conflict ? `10.${escapeHtml(secondOctet)}.* is already used by ${escapeHtml(conflict.displayName || conflict.productId)}.` : 'Only standalone launcher mode owns an IP segment. Embed apps inherit their selected channel.'}</p>
+      ${knownUsage ? `<p class="app-network-known">Known segments: ${escapeHtml(knownUsage)}</p>` : ''}
       <div class="app-network-facts">
         <span><strong>${escapeHtml(ranges.userLeaseStart)} - ${escapeHtml(ranges.userLeaseEnd)}</strong><small>login users</small></span>
         <span><strong>${escapeHtml(ranges.anonymousLeaseStart)} - ${escapeHtml(ranges.anonymousLeaseEnd)}</strong><small>anonymous users</small></span>
@@ -6926,10 +7155,12 @@ function renderAppEmbedNetworkSection(draft) {
 function appEditorDraftFromForm(root) {
   const current = appCatalogEditorDraft() || {};
   const editing = state.appCatalogEditor?.mode === 'edit';
-  const appId = editing ? cleanLauncherProductId(current.appId) : cleanLauncherProductId(appEditorValue(root, 'appId'));
+  const appId = editing
+    ? cleanLauncherProductId(current.appId)
+    : cleanLauncherProductId(appEditorValue(root, 'appId') || appEditorValue(root, 'displayName'));
   const launcherMode = appEditorValue(root, 'launcherMode') === 'standalone' ? 'standalone' : 'embed';
   const fallbackSecondOctet = current.productSecondOctet || nextAvailableProductSecondOctet(appId || null, launcherMode);
-  return {
+  const baseDraft = {
     ...current,
     appId,
     displayName: appEditorValue(root, 'displayName') || current.displayName || '',
@@ -6941,7 +7172,15 @@ function appEditorDraftFromForm(root) {
       ? appId || current.appId || MX_H2I_PRODUCT_ID
       : normalizeStandaloneProductId(appEditorValue(root, 'standaloneChannelProductId') || current.standaloneChannelProductId || MX_H2I_PRODUCT_ID),
     productSecondOctet: normalizeProductSecondOctet(appEditorValue(root, 'productSecondOctet') || fallbackSecondOctet, fallbackSecondOctet),
-    enabled: appEditorValue(root, 'enabled') !== false
+    enabled: appEditorValue(root, 'enabled') !== false,
+    channels: uniqueStringList(current.channels).length ? uniqueStringList(current.channels) : ['shadow', 'beta', 'stable']
+  };
+  if (!baseDraft.description) baseDraft.description = launcherAppDefaultDescription(baseDraft);
+  return {
+    ...baseDraft,
+    requiredCapabilities: launcherAppEffectiveCapabilities(baseDraft),
+    permissions: launcherAppEffectivePermissions(baseDraft),
+    updatePolicy: launcherAppEffectiveUpdatePolicy(baseDraft)
   };
 }
 
@@ -6956,6 +7195,15 @@ function bindAppEditorDrawerControls() {
   for (const close of appEditorDrawer.querySelectorAll('[data-app-editor-close], [data-app-editor-cancel]')) {
     close.addEventListener('click', () => closeAppCatalogEditor());
   }
+  for (const suggested of appEditorDrawer.querySelectorAll('[data-app-use-suggested-octet]')) {
+    suggested.addEventListener('click', () => {
+      const input = form.querySelector('[data-app-field="productSecondOctet"]');
+      if (input) input.value = suggested.dataset.appUseSuggestedOctet || input.value;
+      state.appCatalogEditor.draft = appEditorDraftFromForm(form);
+      state.appCatalogFeedback = null;
+      renderAppEditorDrawer();
+    });
+  }
   for (const control of appEditorDrawer.querySelectorAll('[data-app-field="launcherMode"], [data-app-field="standaloneChannelProductId"], [data-app-field="productSecondOctet"], [data-app-field="category"]')) {
     control.addEventListener('change', () => {
       state.appCatalogEditor.draft = appEditorDraftFromForm(form);
@@ -6965,6 +7213,13 @@ function bindAppEditorDrawerControls() {
   }
   for (const control of appEditorDrawer.querySelectorAll('[data-app-field]')) {
     control.addEventListener('input', () => {
+      if (state.appCatalogEditor?.mode !== 'edit' && control.dataset.appField === 'displayName') {
+        const appIdInput = form.querySelector('[data-app-field="appId"]');
+        if (appIdInput && !String(appIdInput.value || '').trim()) {
+          const generatedAppId = cleanLauncherProductId(control.value);
+          if (generatedAppId) appIdInput.value = generatedAppId;
+        }
+      }
       state.appCatalogEditor.draft = appEditorDraftFromForm(form);
       state.appCatalogFeedback = null;
       if (control.dataset.appField === 'productSecondOctet') {
@@ -7063,12 +7318,16 @@ async function saveAppCenterAppFromEditor(root) {
     displayName: draft.displayName || appId,
     category: draft.category || 'custom',
     version: draft.version || '0.1.0',
-    description: draft.description || 'Launcher powered application.',
+    description: draft.description || launcherAppDefaultDescription({ ...draft, appId, launcherMode }),
     launcherMode,
     standaloneChannelProductId: launcherMode === 'standalone'
       ? appId
       : normalizeStandaloneProductId(draft.standaloneChannelProductId || MX_H2I_PRODUCT_ID),
     productNetworkId: appId,
+    channels: uniqueStringList(draft.channels).length ? uniqueStringList(draft.channels) : ['shadow', 'beta', 'stable'],
+    permissions: launcherAppEffectivePermissions({ ...draft, appId, launcherMode }),
+    requiredCapabilities: launcherAppEffectiveCapabilities({ ...draft, appId, launcherMode }),
+    updatePolicy: launcherAppEffectiveUpdatePolicy({ ...draft, appId, launcherMode }),
     enabled: draft.enabled !== false,
     requestedBy: 'desktop-admin'
   };
@@ -7088,7 +7347,7 @@ async function saveAppCenterAppFromEditor(root) {
         serviceVip: serviceVipForProductSecondOctet(secondOctet, appId),
         ...ranges,
         defaultDomesticSiteId: selectedDomesticSiteId() || 'domestic-main',
-        updatePolicy: appId === MX_H2I_PRODUCT_ID ? 'launcher-managed' : 'app-managed',
+        updatePolicy: body.updatePolicy,
         enabled: body.enabled,
         requestedBy: 'desktop-admin',
         requestId: `desktop-app-network-${Date.now()}`

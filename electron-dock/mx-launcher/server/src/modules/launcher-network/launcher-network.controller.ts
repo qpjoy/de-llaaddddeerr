@@ -37,6 +37,7 @@ export class LauncherNetworkController {
     const body = asRecord(rawBody);
     return {
       lease: await this.store.enrollLauncherNetworkLease({
+        appId: nullableString(body.appId),
         productId: nullableString(body.productId),
         mode: nullableString(body.mode),
         identityKind: nullableString(body.identityKind),
@@ -48,7 +49,8 @@ export class LauncherNetworkController {
         deviceLabel: nullableString(body.deviceLabel),
         platform: nullableString(body.platform),
         requestedBy: nullableString(body.requestedBy),
-        requestId: nullableString(body.requestId)
+        requestId: nullableString(body.requestId),
+        sdkTestMode: body.sdkTestMode === true ? true : nullableString(body.sdkTestMode)
       })
     };
   }

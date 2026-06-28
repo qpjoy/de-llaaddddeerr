@@ -18,6 +18,14 @@
       "types": "./dist/system-domain-proxy.d.ts",
       "import": "./dist/system-domain-proxy.js"
     },
+    "./network-diagnostics": {
+      "types": "./dist/network-diagnostics.d.ts",
+      "import": "./dist/network-diagnostics.js"
+    },
+    "./network-ownership-registry": {
+      "types": "./dist/network-ownership-registry.d.ts",
+      "import": "./dist/network-ownership-registry.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

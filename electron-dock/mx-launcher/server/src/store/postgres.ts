@@ -186,8 +186,11 @@ import {
   userOverseaEntitlementId,
   required,
   MX_H2I_PRODUCT_ID,
+  assertLauncherNetworkLeaseEntitlement,
+  launcherNetworkAppIdForLeaseInput,
   launcherNetworkLeaseProductId,
   launcherNetworkProductIsStandaloneDefault,
+  launcherNetworkSdkTestModeAllowed,
   normalizeLauncherNetworkProductId
 } from './domain.js';
 import { applyGatewayNginxConfigToHostRunner } from './host-runner.js';
@@ -1483,7 +1486,12 @@ export class PostgresStore implements PlatformStore {
     const installId = input.installId?.trim() || `inst_${randomUUID()}`;
     const deviceId = input.deviceId?.trim() || `dev_${randomUUID()}`;
     const requestedProductId = normalizeLauncherNetworkProductId(input.productId);
-    const requestedProduct = await this.getLauncherProductNetwork(requestedProductId)
+    const sdkTestMode = launcherNetworkSdkTestModeAllowed(this.config, input);
+    const storedRequestedProduct = await this.getLauncherProductNetwork(requestedProductId);
+    if (!storedRequestedProduct && !sdkTestMode) {
+      throw new Error(`Launcher product ${requestedProductId} is not registered`);
+    }
+    const requestedProduct = storedRequestedProduct
       ?? buildLauncherProductNetwork(this.config, {
         productId: requestedProductId,
         mode: input.mode ?? (launcherNetworkProductIsStandaloneDefault(requestedProductId) ? 'standalone' : 'embed')
@@ -1491,10 +1499,20 @@ export class PostgresStore implements PlatformStore {
     const productId = launcherNetworkLeaseProductId(
       requestedProduct.mode === 'standalone' ? requestedProduct.productId : requestedProduct.standaloneChannelProductId
     );
-    const product = await this.getLauncherProductNetwork(productId)
+    const storedProduct = await this.getLauncherProductNetwork(productId);
+    if (!storedProduct && !sdkTestMode) {
+      throw new Error(`Launcher standalone channel ${productId} is not registered`);
+    }
+    const product = storedProduct
       ?? buildLauncherProductNetwork(this.config, { productId, mode: 'standalone' }, null);
+    if (!sdkTestMode) {
+      const appId = launcherNetworkAppIdForLeaseInput(input, requestedProduct);
+      const app = await this.getAppCenterApp(appId);
+      assertLauncherNetworkLeaseEntitlement(input, requestedProduct, product, app);
+    }
     const normalizedInput: LauncherNetworkLeaseInput = {
       ...input,
+      appId: input.appId || requestedProduct.productId,
       productId: product.productId,
       mode: product.mode,
       identityKind: input.identityKind === 'user' || input.userId?.trim() ? 'user' : 'anonymous',
@@ -1547,7 +1565,10 @@ export class PostgresStore implements PlatformStore {
         launcherMode: lease.launcherMode,
         identityKind: lease.identityKind,
         cidr: lease.cidr,
-        serviceVip: lease.serviceVip
+        serviceVip: lease.serviceVip,
+        requestedProductId: requestedProduct.productId,
+        appId: normalizedInput.appId,
+        sdkTestMode
       }
     });
     return lease;

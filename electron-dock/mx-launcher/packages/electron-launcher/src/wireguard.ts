@@ -36,6 +36,7 @@ export interface ElectronLauncherWireGuardPeerInput extends ElectronLauncherWire
   routePlan: LauncherRoutePlan;
   privateKey: string;
   dnsDomains?: string[];
+  suppressWireGuardDns?: boolean | null;
   mtu?: number | null;
   pathPreference?: ElectronLauncherWireGuardPathPreference;
 }
@@ -102,14 +103,15 @@ export function prepareLauncherWireGuardPeer(input: ElectronLauncherWireGuardPee
   const allowedIps = uniqueStrings(configPeers.flatMap((peer) => peer.allowedIps));
   const routePriorityCidrs = launcherRoutePriorityCidrs(routePlan, routeCidrs);
 
-  const dns = wireGuardDnsServers(routePlan.dnsServer);
-  const splitDns = Boolean(dns.length && input.dnsDomains?.length);
+  const suppressDns = input.suppressWireGuardDns === true;
+  const dns = suppressDns ? [] : wireGuardDnsServers(routePlan.dnsServer);
+  const splitDns = !suppressDns && Boolean(dns.length && input.dnsDomains?.length);
   const config = renderWireGuardInterface({
     privateKey,
     addresses: [`${leaseIp}/32`],
     dns: splitDns ? undefined : dns,
     hdoDnsServers: splitDns ? dns : undefined,
-    hdoDnsDomains: input.dnsDomains,
+    hdoDnsDomains: splitDns ? input.dnsDomains : undefined,
     hdoRoutePriorityCidrs: routePriorityCidrs.length ? routePriorityCidrs : undefined,
     suppressInterfaceDns: splitDns,
     mtu: input.mtu,

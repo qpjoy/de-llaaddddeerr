@@ -108,6 +108,8 @@ export interface WireGuardServiceIdentity {
   darwinLogDir?: string;
   darwinDaemonScriptName?: string;
   staleDarwinLaunchDaemonLabelPrefixes?: string[];
+  darwinExtraInstallShell?: string | null;
+  darwinExtraUninstallShell?: string | null;
 }
 
 export interface WireGuardTunnelCommand {
@@ -1015,7 +1017,7 @@ export async function installDarwinWireGuardLaunchDaemon(input: {
       writeSetConfig: true,
       serviceIdentity: input.serviceIdentity
     });
-    const shellCommand = darwinLaunchDaemonInstallShell(assets);
+    const shellCommand = darwinLaunchDaemonInstallShell(assets, input.serviceIdentity?.darwinExtraInstallShell);
     const script = `do shell script ${appleScriptString(shellCommand)} with administrator privileges`;
     const displayCommand = `osascript -e ${shellQuote(script)}`;
     const result = await execFileAsync('osascript', ['-e', script]);
@@ -1103,7 +1105,7 @@ export async function uninstallDarwinWireGuardLaunchDaemon(input: {
       writeSetConfig: false,
       serviceIdentity: input.serviceIdentity
     });
-    const shellCommand = darwinLaunchDaemonUninstallShell(assets);
+    const shellCommand = darwinLaunchDaemonUninstallShell(assets, input.serviceIdentity?.darwinExtraUninstallShell);
     const script = `do shell script ${appleScriptString(shellCommand)} with administrator privileges`;
     const displayCommand = `osascript -e ${shellQuote(script)}`;
     const result = await execFileAsync('osascript', ['-e', script]);
@@ -1794,7 +1796,9 @@ function normalizeWireGuardServiceIdentity(input?: WireGuardServiceIdentity): Re
     staleDarwinLaunchDaemonLabelPrefixes: uniqueStrings([
       labelPrefix,
       ...(input?.staleDarwinLaunchDaemonLabelPrefixes || []).map(sanitizeLaunchDaemonLabelPrefix).filter(Boolean)
-    ])
+    ]),
+    darwinExtraInstallShell: input?.darwinExtraInstallShell || null,
+    darwinExtraUninstallShell: input?.darwinExtraUninstallShell || null
   };
 }
 
@@ -1814,7 +1818,7 @@ function sanitizeDarwinScriptName(value: string): string {
   return basename(value).replace(/[^a-zA-Z0-9_.-]/g, '-') || 'wireguard-daemon.sh';
 }
 
-function darwinLaunchDaemonInstallShell(assets: DarwinLaunchDaemonAssets): string {
+function darwinLaunchDaemonInstallShell(assets: DarwinLaunchDaemonAssets, extraShell?: string | null): string {
   const daemonScript = darwinLaunchDaemonScript(assets);
   const plist = darwinLaunchDaemonPlist(assets);
   return [
@@ -1851,7 +1855,11 @@ function darwinLaunchDaemonInstallShell(assets: DarwinLaunchDaemonAssets): strin
     'done',
     'launchctl enable "system/$LABEL" >/dev/null 2>&1 || true',
     'launchctl kickstart -k "system/$LABEL" >/dev/null 2>&1 || true',
-    'launchctl print "system/$LABEL" >/dev/null'
+    'launchctl print "system/$LABEL" >/dev/null',
+    ...(extraShell ? [
+      '# Extra network setup requested by launcher.',
+      extraShell
+    ] : [])
   ].join('\n');
 }
 
@@ -1878,7 +1886,7 @@ function darwinStaleLaunchDaemonCleanupLines(labelPrefixes: string[]): string[] 
   ];
 }
 
-function darwinLaunchDaemonUninstallShell(assets: DarwinLaunchDaemonAssets): string {
+function darwinLaunchDaemonUninstallShell(assets: DarwinLaunchDaemonAssets, extraShell?: string | null): string {
   return [
     'set -e',
     `LABEL=${shellQuote(assets.label)}`,
@@ -1889,9 +1897,10 @@ function darwinLaunchDaemonUninstallShell(assets: DarwinLaunchDaemonAssets): str
     'launchctl bootout "system/$LABEL" >/dev/null 2>&1 || launchctl bootout system "$PLIST" >/dev/null 2>&1 || true',
     'if [ -s "$PID_FILE" ]; then WG_PID="$(cat "$PID_FILE" 2>/dev/null || true)"; if [ -n "$WG_PID" ]; then kill "$WG_PID" >/dev/null 2>&1 || true; sleep 0.2; kill -9 "$WG_PID" >/dev/null 2>&1 || true; fi; fi',
     'if command -v pgrep >/dev/null 2>&1; then for stale_pid in $(pgrep -x wireguard-go 2>/dev/null || true); do stale_command="$(ps -p "$stale_pid" -o command= 2>/dev/null || true)"; printf \'%s\\n\' "$stale_command" | grep -F "$WIREGUARD_GO" >/dev/null 2>&1 && kill "$stale_pid" >/dev/null 2>&1 || true; done; fi',
+    extraShell ? `# extra uninstall cleanup\n${extraShell}` : null,
     `rm -f ${shellQuote(assets.plistPath)} ${shellQuote(assets.nameFile)} ${shellQuote(assets.pidFile)}`,
     `rm -rf ${shellQuote(assets.supportDir)}`
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {

@@ -134,6 +134,12 @@ Product Registry 不应把 `launcher` 当业务产品。它应登记业务产品
 - 只有 `standalone` channel 分配 H 端 peer lease；`embed` 产品返回 channel context。
 - 同一台机器允许多个 Launcher standalone channel，但同一时刻只有当前 owner 写系统网络；切换 owner
   需要 broker 生成 route/DNS 差异和回滚 evidence。
+- npm 包只提供 SDK 能力，不等于入网授权。`/internal/v1/launcher-network/enrollments`
+  必须校验 ProductNetwork 和 AppCenter app 都已启用，并且 app 具备
+  `launcher-network` + `launcher-standalone` 或 `launcher-network` + `launcher-embed-sdk`
+  capability；未注册 app/product 默认拒绝。
+- 开发和 SDK smoke 可以通过服务端 `MX_LAUNCHER_NETWORK_SDK_TEST_MODE=1` 打开测试模式，
+  再由请求显式传 `sdkTestMode` 或 test requestedBy 走旧的临时 product fallback；生产默认关闭。
 
 默认 App Registry：
 
@@ -225,6 +231,44 @@ V2 路由和 DNS 需要分层处理，不能把 bootstrap endpoint、overlay end
 | Overlay Internal IP | H2I 到 Internal peer server | 优先使用 routePlan 的 `internalControlIp`，默认 `10.88.88.88`；route probe 必须匹配 MX-H2I 自己的 WG interface |
 | Split DNS | app 域名、k8s/service 域名 | 在 WG 已通之后再启用；DNS server 可以是 Internal DNS 或 Domestic relay/cache，但查询路径必须走 MX-H2I WG route |
 | 系统代理/Fake IP | Clash/mihomo/TUN | 不能作为 H2I 成功证据；`198.18.0.0/15`、非 MX-H2I `utun` 或 `lo0` 都应判为 not ready |
+
+### DNS / PAC ownership 和本机 resolver 策略
+
+V2 的长期形态是 Internal admin 管理 `launcher-network/products`、DNS routes 和 reverse
+proxy routes；客户端只消费 snapshot，并把本机网络修改收敛到一个 Launcher local edge。
+当前共存期 Domestic `:53` 仍可能由 HDO V1 服务，因此 MX-H2I 必须兼容“远端 DNS 还是
+V1，但本机 V2 已能根据 Internal route/ownership claim 直接回答已知 host”的模式。
+
+推荐优先级：
+
+1. 命中当前 Launcher ownership registry 的 exact host 或 DNS zone：本机 local DNS edge
+   直接返回 owner 的 gateway/control IP，例如 `h2i.mxinfo-inc.cn -> 10.88.88.88`。
+2. 命中 V2 DNS route 且有 `dnsTarget`：本机 edge 直接返回 route 目标，PAC/HTTP proxy
+   再按 `upstreamUrl` 反代到 Internal nginx/Caddy 或实际服务端口。
+3. 命中 split DNS zone 但本机没有直接答案：转发到 routePlan 下发的 Internal/Domestic
+   DNS server，通常是 `10.88.0.1:53` 或迁移期 Domestic `:53`。
+4. 未命中 Launcher 白名单：回落原系统 PAC/系统 DNS/用户代理；Clash/mihomo fake-ip 的
+   `198.18.0.0/15` 只能说明代理接管，不作为 Internal 解析成功。
+
+客户端不应把 `/etc/hosts` 作为产品路径。写 hosts 容易触发 EDR/杀毒软件告警，也难以表达
+zone、TTL、owner 和恢复状态。macOS 默认使用 SystemConfiguration dynamic supplemental
+DNS，把目标域名指到 `127.0.0.1:{localEdgePort}`；`/etc/resolver` 文件模式只保留为旧版本
+清理或显式 fallback，不作为 MX-H2I 默认路径。旧 `/etc/resolver` 只有在能识别为
+`MX_ELECTRON_LAUNCHER_RESOLVER` marker 的情况下自动清理；不能盲删 HDO V1 正在使用的文件。
+
+本机 DNS edge 是用户态 loopback 进程，不安装系统级 DNS 服务，也不监听公网地址。它的职责是：
+
+- 把 PAC、HTTP/CONNECT proxy、UDP DNS relay 放在同一个固定端口，减少端口和权限面。
+- 在 V1/V2 共存时，本机优先回答 V2 ownership claim 里的 host/zone，避免完全依赖 V1
+  Domestic DNS 是否已有记录。
+- 合并多个 Launcher standalone/app 的 DNS zone、route CIDR 和 reverse proxy route，并在
+  registry 中暴露 owner 和 conflict evidence。
+- 关闭某个 launcher 时只释放自己的 owner claim；如果还有其它 owner，保留 local edge 和
+  系统 resolver。
+
+Windows 后续不应写 hosts；应优先走受控 helper/service 管理 NRPT、WinHTTP/WinINET PAC
+和 WireGuard route。macOS 和 Windows 都需要代码签名、notarization/可信 publisher、清晰的
+权限说明和可诊断的 restore 按钮，降低安全软件误报概率。
 
 MX-H2I 客户端连接分两个阶段：
 

@@ -1406,6 +1406,59 @@ select {
   background: rgba(20, 20, 23, 0.45);
 }
 
+.app-decision-path {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.app-decision-path article {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--mx-primary) 30%, var(--line));
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--mx-primary) 8%, transparent), transparent 60%),
+    rgba(20, 20, 23, 0.5);
+}
+
+.app-decision-path article[data-state="blocked"] {
+  border-color: color-mix(in srgb, var(--red) 56%, var(--line));
+}
+
+.app-decision-path span {
+  color: var(--mx-primary);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.app-decision-path strong,
+.app-decision-path b,
+.app-decision-path small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-decision-path strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.app-decision-path b {
+  color: var(--mx-text-soft);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.app-decision-path small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .app-section-title {
   display: flex;
   align-items: center;
@@ -1427,6 +1480,13 @@ select {
 .app-section-title strong {
   color: var(--text);
   font-size: 15px;
+}
+
+.app-section-copy {
+  margin: -2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .app-editor-grid {
@@ -1570,6 +1630,42 @@ select {
   text-align: center;
 }
 
+.app-network-suggestion {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px dashed color-mix(in srgb, var(--mx-primary) 36%, var(--line));
+  border-radius: 8px;
+  background: rgba(37, 41, 54, 0.42);
+}
+
+.app-network-suggestion span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.app-network-suggestion strong,
+.app-network-suggestion small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-network-suggestion strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.app-network-suggestion small,
+.app-network-known {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .app-network-facts {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1637,6 +1733,91 @@ select {
 
 .app-check-row strong {
   font-size: 13px;
+}
+
+.app-entitlement-plan {
+  display: grid;
+  gap: 10px;
+}
+
+.app-entitlement-plan > article {
+  display: grid;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(20, 20, 23, 0.36);
+}
+
+.app-entitlement-plan > article > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.app-entitlement-plan strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.app-entitlement-plan small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.app-generated-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.app-generated-chips span {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--mx-primary) 38%, transparent);
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: color-mix(in srgb, var(--mx-primary) 8%, rgba(20, 20, 23, 0.54));
+  color: var(--mx-primary);
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-runtime-defaults {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.app-runtime-defaults span {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(20, 20, 23, 0.44);
+}
+
+.app-runtime-defaults strong,
+.app-runtime-defaults small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-runtime-defaults strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.app-runtime-defaults small {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .app-advanced-defaults {
@@ -5813,7 +5994,13 @@ select {
 
   .app-editor-grid,
   .app-mode-selector,
-  .app-network-facts {
+  .app-network-facts,
+  .app-decision-path,
+  .app-runtime-defaults {
+    grid-template-columns: 1fr;
+  }
+
+  .app-network-suggestion {
     grid-template-columns: 1fr;
   }
 

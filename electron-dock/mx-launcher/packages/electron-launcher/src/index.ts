@@ -58,6 +58,31 @@ export {
   type ElectronLauncherSystemDomainProxyRoute,
   type ElectronLauncherSystemDomainProxyStatus
 } from './system-domain-proxy.js';
+export {
+  classifyLauncherIpv4Address,
+  diagnoseLauncherHostResolution,
+  type ElectronLauncherAddressDiagnostic,
+  type ElectronLauncherHostResolutionDiagnostics,
+  type ElectronLauncherHostResolutionDiagnosticInput,
+  type ElectronLauncherHostResolutionSeverity,
+  type ElectronLauncherHostResolutionState,
+  type ElectronLauncherIpClassification,
+  type ElectronLauncherNetworkPhase
+} from './network-diagnostics.js';
+export {
+  buildElectronLauncherNetworkOwnershipRegistry,
+  mergedElectronLauncherDnsZones,
+  mergedElectronLauncherReverseProxyRoutes,
+  resolveElectronLauncherDnsOwner,
+  type ElectronLauncherNetworkOwner,
+  type ElectronLauncherNetworkOwnerState,
+  type ElectronLauncherNetworkOwnershipClaim,
+  type ElectronLauncherNetworkOwnershipConflict,
+  type ElectronLauncherNetworkOwnershipEntry,
+  type ElectronLauncherNetworkOwnershipRegistry,
+  type ElectronLauncherNetworkOwnershipResource,
+  type ElectronLauncherNetworkOwnershipRoute
+} from './network-ownership-registry.js';
 
 export const ELECTRON_LAUNCHER_PACKAGE_NAME = '@qpjoy/electron-launcher';
 

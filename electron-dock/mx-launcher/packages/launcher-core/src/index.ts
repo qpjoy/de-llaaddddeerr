@@ -73,6 +73,7 @@ export interface LauncherNetworkSnapshotInput {
 }
 
 export interface LauncherNetworkLeaseInput {
+  appId?: string | null;
   productId?: string | null;
   mode?: LauncherProductMode | string | null;
   identityKind?: LauncherIdentityKind | string | null;
@@ -85,6 +86,7 @@ export interface LauncherNetworkLeaseInput {
   platform?: string | null;
   requestedBy?: string | null;
   requestId?: string | null;
+  sdkTestMode?: boolean | string | null;
 }
 
 export interface LauncherNetworkSessionInput extends LauncherNetworkLeaseInput {
@@ -479,6 +481,7 @@ export async function createLauncherNetworkSession(
   const productId = input.productId?.trim() || input.appId?.trim() || 'launcher';
   const mode = launcherProductMode(input.mode ?? input.launcherMode ?? (productId === 'launcher' ? 'standalone' : 'embed'));
   const lease = await client.enrollLease({
+    appId: input.appId ?? productId,
     productId,
     mode,
     identityKind: input.identityKind,
@@ -490,7 +493,8 @@ export async function createLauncherNetworkSession(
     deviceLabel: input.deviceLabel,
     platform: input.platform,
     requestedBy: input.requestedBy ?? 'launcher-network-session',
-    requestId: input.requestId
+    requestId: input.requestId,
+    sdkTestMode: input.sdkTestMode
   });
   const snapshot = await client.createSnapshot({
     installId: lease.installId,

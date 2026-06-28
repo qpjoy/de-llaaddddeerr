@@ -417,6 +417,78 @@ export function launcherNetworkLeaseProductId(productId?: string | null): string
   return normalized === LAUNCHER_FOUNDATION_PRODUCT_ID ? MX_H2I_PRODUCT_ID : normalized;
 }
 
+export function launcherNetworkSdkTestModeAllowed(
+  config: RuntimeConfig,
+  input: LauncherNetworkLeaseInput
+): boolean {
+  if (config.launcherNetworkSdkTestModeEnabled !== true) return false;
+  if (booleanish(input.sdkTestMode)) return true;
+  const requestedBy = input.requestedBy?.trim().toLowerCase() || '';
+  return [
+    'sdk-test-mode',
+    'launcher-sdk-test',
+    'launcher-network-sdk-test',
+    'standalone-sdk-test',
+    'embed-sdk-test'
+  ].includes(requestedBy);
+}
+
+export function launcherNetworkAppIdForLeaseInput(
+  input: LauncherNetworkLeaseInput,
+  requestedProduct: LauncherProductNetwork
+): string {
+  return normalizeLauncherNetworkProductId(input.appId || input.productId || requestedProduct.productId);
+}
+
+export function assertLauncherNetworkLeaseEntitlement(
+  input: LauncherNetworkLeaseInput,
+  requestedProduct: LauncherProductNetwork,
+  leaseProduct: LauncherProductNetwork,
+  app: AppCenterApp | null
+): void {
+  if (requestedProduct.enabled === false) {
+    throw new Error(`Launcher product ${requestedProduct.productId} is disabled`);
+  }
+  if (leaseProduct.enabled === false) {
+    throw new Error(`Launcher standalone channel ${leaseProduct.productId} is disabled`);
+  }
+  const appId = launcherNetworkAppIdForLeaseInput(input, requestedProduct);
+  if (!app) {
+    throw new Error(`Launcher app ${appId} is not registered in AppCenter`);
+  }
+  if (app.enabled === false) {
+    throw new Error(`Launcher app ${app.appId} is disabled`);
+  }
+  const appProductId = normalizeLauncherNetworkProductId(app.productNetworkId || app.appId);
+  if (appProductId !== requestedProduct.productId) {
+    throw new Error(`Launcher app ${app.appId} is bound to ${appProductId}, not ${requestedProduct.productId}`);
+  }
+  const appMode = launcherProductMode(app.launcherMode ?? requestedProduct.mode);
+  if (appMode !== requestedProduct.mode) {
+    throw new Error(`Launcher app ${app.appId} mode ${appMode} does not match product mode ${requestedProduct.mode}`);
+  }
+  if (requestedProduct.mode === 'embed') {
+    const channelId = launcherNetworkLeaseProductId(app.standaloneChannelProductId || requestedProduct.standaloneChannelProductId);
+    if (channelId !== leaseProduct.productId) {
+      throw new Error(`Launcher app ${app.appId} is bound to channel ${channelId}, not ${leaseProduct.productId}`);
+    }
+  }
+  const required = requestedProduct.mode === 'standalone'
+    ? ['launcher-network', 'launcher-standalone']
+    : ['launcher-network', 'launcher-embed-sdk'];
+  const capabilities = new Set(app.requiredCapabilities || []);
+  const missing = required.filter((capability) => !capabilities.has(capability));
+  if (missing.length > 0) {
+    throw new Error(`Launcher app ${app.appId} lacks required capabilities: ${missing.join(', ')}`);
+  }
+}
+
+function booleanish(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value !== 'string') return false;
+  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
 function appCenterStringList(value: AppCenterAppInput['channels'], fallback: string[]): string[] {
   const source = Array.isArray(value)
     ? value

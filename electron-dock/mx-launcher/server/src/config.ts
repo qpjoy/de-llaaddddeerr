@@ -105,6 +105,7 @@ export function loadConfig(): RuntimeConfig {
     gatewayHostNginxConfigPath: process.env.GATEWAY_HOST_NGINX_CONFIG_PATH
       ?? '/etc/nginx/conf.d/mx-gateway.generated.conf',
     gatewayHostNginxInternalApiUpstream: process.env.GATEWAY_HOST_NGINX_INTERNAL_API_UPSTREAM?.trim() || null,
+    launcherNetworkSdkTestModeEnabled: boolFromEnv('MX_LAUNCHER_NETWORK_SDK_TEST_MODE', false),
     gatewayAppPort: intFromEnv('GATEWAY_APP_PORT', 80),
     siteSlotSshKeyRoot: process.env.MX_SITE_SLOT_SSH_KEY_DIR ?? 'artifacts/ssh'
   };
