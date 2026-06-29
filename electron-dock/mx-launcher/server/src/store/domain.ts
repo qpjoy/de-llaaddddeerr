@@ -1,8 +1,11 @@
 import { Buffer } from 'node:buffer';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 
 import type {
   AnonymousEnrollment,
+  AppCenterAccessDecision,
+  AppCenterAccessInput,
+  AppCenterAccessPolicy,
   AppCenterApp,
   AppCenterAppInput,
   AppOnboardingDefaults,
@@ -35,6 +38,8 @@ import type {
   GatewayRuntimeBackend,
   GatewayRuntimeConfig,
   GatewayRuntimeConfigInput,
+  ImportUserCenterUserRow,
+  ImportUserCenterUsersInput,
   IssueTokenInput,
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
@@ -49,6 +54,7 @@ import type {
   LauncherNetworkSnapshot,
   LauncherNetworkTopology,
   MihomoSubscriptionRender,
+  PermissionGrant,
   PrincipalContext,
   PrincipalContextInput,
   PlatformPrincipal,
@@ -101,6 +107,10 @@ import type {
   UserCenterTenant,
   UserCenterTokenRecord,
   UserCenterUser,
+  UserCenterAppAccess,
+  UserCenterUserCredential,
+  UserCenterUserCredentialSummary,
+  UserCenterUserProfile,
   UserOverseaEntitlement,
   UserOverseaSubscriptionRender,
   TestStep,
@@ -166,6 +176,13 @@ const ADMIN_SCOPES = [...new Set([
   'dns.manage'
 ])];
 
+const USER_PASSWORD_SCRYPT = {
+  N: 16384,
+  r: 8,
+  p: 1,
+  keyLength: 64
+};
+
 export function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
@@ -218,19 +235,264 @@ export function builtinUserCenterOrg(now = new Date().toISOString()): UserCenter
   };
 }
 
-export function createUserCenterUser(input: CreateUserInput, now = new Date().toISOString()): UserCenterUser {
-  const email = input.email?.trim() || 'demo-user@mx.local';
-  const userId = input.userId?.trim() || `usr_${email.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')}`;
+export function createUserCenterUser(
+  input: CreateUserInput,
+  previous: UserCenterUser | null = null,
+  credential: UserCenterUserCredentialSummary | null = null,
+  now = new Date().toISOString()
+): UserCenterUser {
+  const account = userAccountForInput(input, previous);
+  const userId = input.userId?.trim() || previous?.userId || `usr_${safeIdPart(account).toLowerCase()}`;
+  const email = nullableTrimmed(input.email) ?? previous?.email ?? (account.includes('@') ? account : null);
+  const displayName = input.displayName?.trim()
+    || previous?.displayName
+    || input.username?.trim()
+    || input.account?.trim()
+    || account;
   return {
     userId,
     tenantId: 'tenant_default',
     orgIds: input.orgIds?.length ? input.orgIds : ['org_default'],
     email,
-    displayName: input.displayName?.trim() || email,
+    account,
+    displayName,
     roleIds: input.roleIds?.length ? input.roleIds : ['mx-user'],
-    status: 'active',
-    createdAt: now
+    status: input.status === 'disabled' ? 'disabled' : previous?.status ?? 'active',
+    profile: mergeUserProfile(previous?.profile, input),
+    credential: credential ?? previous?.credential ?? emptyUserCredentialSummary(),
+    appAccess: mergeUserAppAccess(previous?.appAccess, input),
+    createdAt: previous?.createdAt ?? now,
+    updatedAt: now
   };
+}
+
+export function emptyUserCredentialSummary(): UserCenterUserCredentialSummary {
+  return {
+    hasPassword: false,
+    passwordUpdatedAt: null,
+    providers: []
+  };
+}
+
+export function userCredentialSummary(credential: UserCenterUserCredential | null): UserCenterUserCredentialSummary {
+  return credential
+    ? {
+      hasPassword: true,
+      passwordUpdatedAt: credential.updatedAt,
+      providers: [credential.kind]
+    }
+    : emptyUserCredentialSummary();
+}
+
+export function emptyUserAppAccess(): UserCenterAppAccess {
+  return {
+    homeAppId: null,
+    registeredByAppId: null,
+    allowedAppIds: [],
+    deniedAppIds: []
+  };
+}
+
+export function createUserCenterUserCredential(
+  userId: string,
+  password: string,
+  input: Pick<CreateUserInput, 'requestedBy' | 'requestId'> = {},
+  previous: UserCenterUserCredential | null = null,
+  now = new Date().toISOString()
+): UserCenterUserCredential {
+  const plain = password.trim();
+  if (!plain) throw new Error('password is required');
+  if (plain.length > 200) throw new Error('password is too long');
+  const requestedBy = input.requestedBy?.trim() || 'user-center';
+  return {
+    credentialId: `cred_${userId}_local_password`,
+    userId,
+    kind: 'local-password',
+    passwordHash: hashUserCenterPassword(plain),
+    createdBy: previous?.createdBy ?? requestedBy,
+    createdAt: previous?.createdAt ?? now,
+    updatedBy: requestedBy,
+    updatedAt: now
+  };
+}
+
+export function verifyUserCenterCredential(password: string, credential: UserCenterUserCredential | null): boolean {
+  if (!credential || credential.kind !== 'local-password') return false;
+  return verifyUserCenterPasswordHash(password, credential.passwordHash);
+}
+
+export function userMatchesLogin(user: UserCenterUser, login: string): boolean {
+  const normalized = normalizeUserLogin(login);
+  if (!normalized) return false;
+  return [
+    user.userId,
+    user.account,
+    user.email,
+    user.displayName,
+    user.profile?.externalIds?.legacyUserId,
+    user.profile?.externalIds?.legacyId
+  ].some((value) => normalizeUserLogin(value) === normalized);
+}
+
+export function normalizeImportUserCenterRow(
+  row: ImportUserCenterUserRow,
+  input: Pick<ImportUserCenterUsersInput, 'defaultRoleIds' | 'defaultOrgIds' | 'defaultHomeAppId' | 'defaultRegisteredByAppId' | 'defaultAllowedAppIds' | 'defaultOverseaSiteIds' | 'provisionOversea' | 'requestedBy' | 'requestId'>
+): CreateUserInput {
+  const account = nullableTrimmed(row.account)
+    ?? nullableTrimmed(row.username)
+    ?? nullableTrimmed(row.user_name)
+    ?? nullableTrimmed(row.email)
+    ?? (row.id === undefined || row.id === null ? null : String(row.id));
+  if (!account) throw new Error('account is required');
+  const legacyId = row.id === undefined || row.id === null ? null : String(row.id);
+  return {
+    userId: row.userId ?? null,
+    account,
+    username: nullableTrimmed(row.username) ?? nullableTrimmed(row.user_name) ?? account,
+    email: row.email ?? null,
+    displayName: nullableTrimmed(row.displayName) ?? nullableTrimmed(row.display_name) ?? nullableTrimmed(row.user_name) ?? account,
+    password: row.password ?? null,
+    roleIds: input.defaultRoleIds?.length ? input.defaultRoleIds : ['mx-user'],
+    orgIds: input.defaultOrgIds?.length ? input.defaultOrgIds : ['org_default'],
+    profile: row.profile ?? null,
+    attributes: row.attributes ?? null,
+    externalIds: {
+      ...(row.externalIds ?? {}),
+      ...(legacyId ? { legacyUserId: legacyId } : {}),
+      ...(nullableTrimmed(row.user_name) ? { legacyUserName: nullableTrimmed(row.user_name) as string } : {})
+    },
+    appAccess: row.appAccess ?? null,
+    homeAppId: nullableTrimmed(row.homeAppId) ?? input.defaultHomeAppId ?? null,
+    registeredByAppId: nullableTrimmed(row.registeredByAppId) ?? input.defaultRegisteredByAppId ?? null,
+    allowedAppIds: row.allowedAppIds ?? input.defaultAllowedAppIds ?? null,
+    deniedAppIds: row.deniedAppIds ?? null,
+    defaultOverseaSiteIds: input.defaultOverseaSiteIds ?? null,
+    provisionOversea: input.provisionOversea ?? null,
+    requestedBy: input.requestedBy ?? 'user-import',
+    requestId: input.requestId ?? null
+  };
+}
+
+function userAccountForInput(input: CreateUserInput, previous: UserCenterUser | null): string {
+  return nullableTrimmed(input.account)
+    ?? nullableTrimmed(input.username)
+    ?? nullableTrimmed(input.email)
+    ?? previous?.account
+    ?? previous?.email
+    ?? previous?.userId
+    ?? 'demo-user';
+}
+
+function mergeUserProfile(previous: UserCenterUserProfile | null | undefined, input: CreateUserInput): UserCenterUserProfile {
+  const profile = input.profile ?? {};
+  const previousExternalIds = previous?.externalIds ?? {};
+  return {
+    title: nullableTrimmed(profile.title) ?? previous?.title ?? null,
+    department: nullableTrimmed(profile.department) ?? previous?.department ?? null,
+    location: nullableTrimmed(profile.location) ?? previous?.location ?? null,
+    address: nullableTrimmed(profile.address) ?? previous?.address ?? null,
+    phone: nullableTrimmed(profile.phone) ?? previous?.phone ?? null,
+    tags: uniqueStrings([
+      ...(previous?.tags ?? []),
+      ...(Array.isArray(profile.tags) ? profile.tags : [])
+    ]),
+    attributes: {
+      ...(previous?.attributes ?? {}),
+      ...recordValue(input.attributes),
+      ...recordValue(profile.attributes)
+    },
+    externalIds: stringRecordValue({
+      ...previousExternalIds,
+      ...recordValue(input.externalIds),
+      ...recordValue(profile.externalIds)
+    })
+  };
+}
+
+function mergeUserAppAccess(previous: UserCenterAppAccess | null | undefined, input: CreateUserInput): UserCenterAppAccess {
+  const access = input.appAccess ?? {};
+  return {
+    homeAppId: normalizeOptionalAppId(input.homeAppId ?? access.homeAppId) ?? previous?.homeAppId ?? null,
+    registeredByAppId: normalizeOptionalAppId(input.registeredByAppId ?? access.registeredByAppId) ?? previous?.registeredByAppId ?? null,
+    allowedAppIds: uniqueAppIds([
+      ...(previous?.allowedAppIds ?? []),
+      ...appIdList(input.allowedAppIds),
+      ...appIdList(access.allowedAppIds)
+    ]),
+    deniedAppIds: uniqueAppIds([
+      ...(previous?.deniedAppIds ?? []),
+      ...appIdList(input.deniedAppIds),
+      ...appIdList(access.deniedAppIds)
+    ])
+  };
+}
+
+function hashUserCenterPassword(password: string): string {
+  const salt = randomBytes(16).toString('base64url');
+  const hash = scryptSync(password, salt, USER_PASSWORD_SCRYPT.keyLength, {
+    N: USER_PASSWORD_SCRYPT.N,
+    r: USER_PASSWORD_SCRYPT.r,
+    p: USER_PASSWORD_SCRYPT.p
+  }).toString('base64url');
+  return `scrypt$N=${USER_PASSWORD_SCRYPT.N},r=${USER_PASSWORD_SCRYPT.r},p=${USER_PASSWORD_SCRYPT.p}$${salt}$${hash}`;
+}
+
+function verifyUserCenterPasswordHash(password: string, encoded: string): boolean {
+  const parts = encoded.split('$');
+  if (parts.length !== 4 || parts[0] !== 'scrypt') return false;
+  const params = Object.fromEntries(parts[1].split(',').map((item) => {
+    const [key, value] = item.split('=');
+    return [key, Number(value)];
+  }));
+  const salt = parts[2];
+  const expected = Buffer.from(parts[3], 'base64url');
+  const actual = scryptSync(password, salt, expected.length, {
+    N: Number(params.N) || USER_PASSWORD_SCRYPT.N,
+    r: Number(params.r) || USER_PASSWORD_SCRYPT.r,
+    p: Number(params.p) || USER_PASSWORD_SCRYPT.p
+  });
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function nullableTrimmed(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function normalizeUserLogin(value: unknown): string {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function normalizeOptionalAppId(value: unknown): string | null {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  return raw ? safeIdPart(raw).toLowerCase() : null;
+}
+
+function appIdList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? uniqueAppIds(value)
+    : typeof value === 'string'
+      ? uniqueAppIds(value.split(/[,;\n]/))
+      : [];
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function stringRecordValue(value: Record<string, unknown>): Record<string, string> {
+  return Object.entries(value).reduce<Record<string, string>>((next, [key, raw]) => {
+    const text = typeof raw === 'string' ? raw.trim() : raw === undefined || raw === null ? '' : String(raw);
+    if (key && text) next[key] = text;
+    return next;
+  }, {});
+}
+
+function uniqueStrings(values: unknown[]): string[] {
+  return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
+}
+
+function uniqueAppIds(values: unknown[]): string[] {
+  return [...new Set(values.map(normalizeOptionalAppId).filter((value): value is string => Boolean(value)))];
 }
 
 export function createUserCenterServiceAccount(
@@ -367,6 +629,7 @@ export function evaluateSdkGatewayRoute(principal: PlatformPrincipal | null, rou
       principal: null,
       matchedScopes: [],
       missingScopes: requiredAnyScopes,
+      appAccess: null,
       reason: 'token is inactive or principal is missing'
     };
   }
@@ -378,6 +641,7 @@ export function evaluateSdkGatewayRoute(principal: PlatformPrincipal | null, rou
     principal,
     matchedScopes,
     missingScopes: allowed ? [] : requiredAnyScopes,
+    appAccess: null,
     reason: allowed ? 'principal has a scope accepted by SDK Gateway route' : 'principal lacks required SDK Gateway route scope'
   };
 }
@@ -543,6 +807,7 @@ export function buildAppCenterApp(
         ? ['launcher-network', 'launcher-standalone']
         : ['launcher-network', 'launcher-embed-sdk'])
     ),
+    accessPolicy: normalizeAppCenterAccessPolicy(appId, launcherMode, input.accessPolicy, previous?.accessPolicy),
     updatePolicy: normalizeUpdatePolicy(String(input.updatePolicy || previous?.updatePolicy || 'app-managed')),
     entrypoints: appCenterRecordMap(input.entrypoints, previous?.entrypoints ?? {
       desktop: `app://${appId}/index.html`,
@@ -553,6 +818,135 @@ export function buildAppCenterApp(
       launcher: input.protocol?.launcher?.trim() || previous?.protocol?.launcher || '1.0'
     }
   };
+}
+
+function normalizeAppCenterAccessPolicy(
+  appId: string,
+  launcherMode: LauncherProductMode,
+  input: Partial<AppCenterAccessPolicy> | null | undefined,
+  previous: AppCenterAccessPolicy | null | undefined
+): AppCenterAccessPolicy {
+  const defaultDecision = accessDefaultDecision(input?.defaultDecision ?? previous?.defaultDecision)
+    ?? defaultAppAccessDecision(appId, launcherMode);
+  return {
+    defaultDecision,
+    allowAdmin: typeof input?.allowAdmin === 'boolean' ? input.allowAdmin : previous?.allowAdmin ?? true,
+    allowRoles: uniqueStrings([...(previous?.allowRoles ?? []), ...appIdPolicyList(input?.allowRoles)]),
+    allowUserIds: uniqueStrings([...(previous?.allowUserIds ?? []), ...appIdPolicyList(input?.allowUserIds)]),
+    allowOrgIds: uniqueStrings([...(previous?.allowOrgIds ?? []), ...appIdPolicyList(input?.allowOrgIds)]),
+    allowRegisteredByAppIds: uniqueAppIds([
+      ...(previous?.allowRegisteredByAppIds ?? []),
+      ...appIdPolicyList(input?.allowRegisteredByAppIds)
+    ]),
+    allowHomeAppIds: uniqueAppIds([
+      ...(previous?.allowHomeAppIds ?? []),
+      ...appIdPolicyList(input?.allowHomeAppIds)
+    ]),
+    requirePermissionGrant: typeof input?.requirePermissionGrant === 'boolean'
+      ? input.requirePermissionGrant
+      : previous?.requirePermissionGrant ?? defaultDecision === 'private'
+  };
+}
+
+function accessDefaultDecision(value: unknown): AppCenterAccessPolicy['defaultDecision'] | null {
+  return value === 'public' || value === 'authenticated' || value === 'private' ? value : null;
+}
+
+function defaultAppAccessDecision(appId: string, launcherMode: LauncherProductMode): AppCenterAccessPolicy['defaultDecision'] {
+  if (appId === MX_H2I_PRODUCT_ID || appId === APP_CENTER_PRODUCT_ID) return 'public';
+  if (appId === 'h2o') return 'private';
+  return launcherMode === 'standalone' ? 'private' : 'private';
+}
+
+function appIdPolicyList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.map((item) => String(item || '').trim()).filter(Boolean)
+    : typeof value === 'string'
+      ? value.split(/[,;\n]/).map((item) => item.trim()).filter(Boolean)
+      : [];
+}
+
+export function evaluateAppCenterAccess(
+  app: AppCenterApp | null,
+  input: AppCenterAccessInput,
+  principal: PlatformPrincipal | null,
+  user: UserCenterUser | null,
+  grants: PermissionGrant[] = []
+): AppCenterAccessDecision {
+  const appId = app?.appId ?? normalizeOptionalAppId(input.appId) ?? 'unknown';
+  const policy = app?.accessPolicy ?? normalizeAppCenterAccessPolicy(appId, 'embed', null, null);
+  if (!app) {
+    return appAccessDecision(appId, policy, principal, false, false, 'app is not registered', [], ['app-center-app']);
+  }
+  if (app.enabled === false && input.includeDisabled !== true) {
+    return appAccessDecision(appId, policy, principal, false, false, 'app is disabled', [], ['enabled-app']);
+  }
+  if (policy.allowAdmin !== false && principal?.roles.includes('mx-admin')) {
+    return appAccessDecision(appId, policy, principal, true, true, 'admin role can access all applications', ['role:mx-admin'], []);
+  }
+  const userAppAccess = user?.appAccess ?? emptyUserAppAccess();
+  if (userAppAccess.deniedAppIds.includes(appId)) {
+    return appAccessDecision(appId, policy, principal, false, false, 'user is explicitly denied for this application', [], [`user-deny:${appId}`]);
+  }
+  if (policy.defaultDecision === 'public') {
+    return appAccessDecision(appId, policy, principal, true, true, 'application is public', ['policy:public'], []);
+  }
+  if (!principal || principal.kind === 'unknown' || principal.kind === 'anonymous') {
+    return appAccessDecision(appId, policy, principal, false, false, 'application requires an authenticated user', [], ['authenticated-user']);
+  }
+  const matched = [
+    ...principal.roles.filter((roleId) => policy.allowRoles.includes(roleId)).map((roleId) => `role:${roleId}`),
+    ...principal.orgIds.filter((orgId) => policy.allowOrgIds.includes(orgId)).map((orgId) => `org:${orgId}`),
+    ...(principal.userId && policy.allowUserIds.includes(principal.userId) ? [`user:${principal.userId}`] : []),
+    ...(userAppAccess.allowedAppIds.includes(appId) ? [`user-app:${appId}`] : []),
+    ...(userAppAccess.homeAppId && policy.allowHomeAppIds.includes(userAppAccess.homeAppId) ? [`home-app:${userAppAccess.homeAppId}`] : []),
+    ...(userAppAccess.registeredByAppId && policy.allowRegisteredByAppIds.includes(userAppAccess.registeredByAppId)
+      ? [`registered-by:${userAppAccess.registeredByAppId}`]
+      : []),
+    ...(input.sourceAppId && policy.allowRegisteredByAppIds.includes(input.sourceAppId) ? [`source-app:${input.sourceAppId}`] : [])
+  ];
+  const grantMatched = policy.requirePermissionGrant && grants.some((grant) => (
+    grant.appId === appId
+    && grant.userId === principal.userId
+    && (grant.decision === 'granted' || grant.decision === 'partial')
+    && grant.allowedScopes.length > 0
+  ));
+  if (grantMatched) matched.push(`permission-grant:${appId}`);
+  if (policy.defaultDecision === 'authenticated' || matched.length > 0) {
+    return appAccessDecision(
+      appId,
+      policy,
+      principal,
+      true,
+      true,
+      matched.length ? 'principal matched application access policy' : 'authenticated users may access this application',
+      matched.length ? matched : ['policy:authenticated'],
+      []
+    );
+  }
+  return appAccessDecision(
+    appId,
+    policy,
+    principal,
+    false,
+    input.includeHidden === true,
+    'application is private and no user/app grant matched',
+    [],
+    ['app-access-grant']
+  );
+}
+
+function appAccessDecision(
+  appId: string,
+  policy: AppCenterAccessPolicy,
+  principal: PlatformPrincipal | null,
+  allowed: boolean,
+  visible: boolean,
+  reason: string,
+  matched: string[],
+  missing: string[]
+): AppCenterAccessDecision {
+  return { appId, allowed, visible, reason, matched, missing, principal, policy };
 }
 
 export function buildAppOnboardingTemplates(): AppOnboardingTemplate[] {
@@ -795,6 +1189,16 @@ export function builtinAppCenterApps(): AppCenterApp[] {
       productNetworkId: MX_H2I_PRODUCT_ID,
       permissions: ['auth.read', 'network.tun.request', 'network.wg.peer', 'network.dns.policy', 'observability.write'],
       requiredCapabilities: ['launcher-network', 'launcher-standalone', 'wireguard-peer'],
+      accessPolicy: {
+        defaultDecision: 'public',
+        allowAdmin: true,
+        allowRoles: [],
+        allowUserIds: [],
+        allowOrgIds: [],
+        allowRegisteredByAppIds: [],
+        allowHomeAppIds: [],
+        requirePermissionGrant: false
+      },
       updatePolicy: 'mandatory-app',
       entrypoints: {
         desktop: 'app://mx-h2i/index.html',
@@ -814,6 +1218,16 @@ export function builtinAppCenterApps(): AppCenterApp[] {
       productNetworkId: APP_CENTER_PRODUCT_ID,
       permissions: ['auth.read', 'appcenter.read', 'permission.request', 'observability.write'],
       requiredCapabilities: ['app-center-runtime', 'launcher-embed-sdk'],
+      accessPolicy: {
+        defaultDecision: 'public',
+        allowAdmin: true,
+        allowRoles: [],
+        allowUserIds: [],
+        allowOrgIds: [],
+        allowRegisteredByAppIds: [MX_H2I_PRODUCT_ID],
+        allowHomeAppIds: [MX_H2I_PRODUCT_ID],
+        requirePermissionGrant: false
+      },
       updatePolicy: 'platform-ui',
       entrypoints: {
         desktop: 'app://appcenter/index.html',
@@ -842,6 +1256,16 @@ export function builtinAppCenterApps(): AppCenterApp[] {
         'observability.write'
       ],
       requiredCapabilities: ['launcher-network', 'launcher-embed-sdk', 'app-center-runtime'],
+      accessPolicy: {
+        defaultDecision: 'private',
+        allowAdmin: true,
+        allowRoles: [],
+        allowUserIds: [],
+        allowOrgIds: [],
+        allowRegisteredByAppIds: [MX_H2I_PRODUCT_ID],
+        allowHomeAppIds: [MX_H2I_PRODUCT_ID],
+        requirePermissionGrant: true
+      },
       updatePolicy: 'app-managed',
       entrypoints: {
         desktop: 'app://h2o/index.html',
@@ -2736,6 +3160,7 @@ export function createConfigPolicySnapshot(
     snapshotId: string;
     version: number;
     app: AppCenterApp | null;
+    appAccess: AppCenterAccessDecision | null;
     principal: PlatformPrincipal;
     enrollment: AnonymousEnrollment | null;
     launcherNetwork: LauncherNetworkSnapshot;
@@ -2779,7 +3204,16 @@ export function createConfigPolicySnapshot(
       permissionPolicy: {
         appId,
         declaredScopes: parts.app?.permissions ?? [],
-        defaultDecision: 'requires-appcenter-grant' as const
+        appAccess: parts.appAccess,
+        defaultDecision: parts.app?.accessPolicy.defaultDecision === 'public'
+          ? 'public-app' as const
+          : parts.appAccess && !parts.appAccess.allowed
+            ? 'denied-by-app-policy' as const
+          : parts.appAccess?.allowed
+            ? 'allowed-by-app-policy' as const
+            : parts.app
+              ? 'denied-by-app-policy' as const
+              : 'requires-appcenter-grant' as const
       },
       launcherNetwork: parts.launcherNetwork,
       dns: {
@@ -5508,7 +5942,7 @@ export function renderHysteria2MihomoSubscription(
 }
 
 export function userOverseaAccountName(user: UserCenterUser, siteId: string): string {
-  const subject = user.email || user.userId;
+  const subject = user.account || user.email || user.userId;
   return safeAccountName(`${siteId}-${subject}`).slice(0, 80);
 }
 
@@ -5548,7 +5982,7 @@ export function renderUserOverseaMihomoSubscription(
   });
   const lines = [
     `# Generated by MX Launcher Internal at ${now}`,
-    `# user=${user.userId} email=${user.email}`,
+    `# user=${user.userId} account=${user.account} email=${user.email ?? '-'}`,
     `# entitlement=${entitlement.entitlementId} sites=${entitlement.siteIds.join(',')}`,
     '# Reachability: this Internal subscription URL requires Domestic WG relay/H2I before H endpoints can fetch it.',
     'mixed-port: 7788',

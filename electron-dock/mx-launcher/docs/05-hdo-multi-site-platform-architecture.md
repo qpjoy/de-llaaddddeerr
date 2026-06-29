@@ -192,6 +192,19 @@ flowchart LR
 结论：
 
 - 用户中心是认证和授权真相，不承担所有平台 API 聚合。
+- 用户中心的用户主档以 `account` 为一等登录名，`email` 可为空；`profile` 承接姓名、
+  部门、地址、外部 id、来源系统属性和各业务系统需要的扩展字段。
+- `local-password` credential 与用户主档分表保存，列表只暴露 credential summary；
+  SDK password grant 必须通过 User Center 校验，不允许 Domestic/Oversea 再保存登录真相。
+- 用户级 Oversea entitlement 也是 Internal 主数据。创建或导入用户时可以传入默认
+  Oversea site，Internal 自动生成 hysteria2/mihomo 订阅运行态，之后仍可按用户手动调整。
+- AppCenter app 有独立 `accessPolicy`：`public` 对所有用户可见，`authenticated` 要求登录，
+  `private` 只允许命中角色、用户、组织、注册来源应用、Home App 或已有 permission grant
+  的用户。`mx-admin` 默认全通；自定义应用默认 private，避免 Luopan 这类业务注册用户横向访问
+  MX-H2I/H2O 之外的私有应用。
+- 用户主档有 `appAccess`：`homeAppId`、`registeredByAppId`、`allowedAppIds`、
+  `deniedAppIds`。MX-H2I 导入用户默认落在 `mx-h2i` 域并允许 AppCenter/H2O；
+  TEST 这类跨应用账号可以直接写多个 `allowedAppIds`，也可以在 app policy 里按角色/组织开放。
 - 各系统可以保留自己的内部 API，但外部系统优先接 SDK Gateway。
 - SDK Gateway 负责统一认证、限流、审计、trace、版本协商和路由聚合。
 - Launcher / AppCenter / H2O / 其他系统拿到的是 `mx-sdk` audience 的 token 或服务账号凭证。
@@ -206,7 +219,13 @@ flowchart LR
 | `POST /internal/v1/user-center/bootstrap` | Internal modules / ops | 幂等初始化默认 tenant、org、roles、demo user 和 SDK service account |
 | `GET /internal/v1/user-center/roles` | Internal modules / ops | 查看 RBAC roles 和 scopes |
 | `GET /internal/v1/user-center/users` | Internal modules / ops | 查看用户 |
-| `POST /internal/v1/user-center/users` | Internal modules / ops | 创建或更新 shadow 用户 |
+| `POST /internal/v1/user-center/users` | Internal modules / ops | 创建或更新用户、profile、local password 和默认 Oversea entitlement |
+| `POST /internal/v1/user-center/users/import` | Internal modules / ops | 批量导入旧账号或外部系统账号，可带默认角色、组织和 Oversea provisioning |
+| `GET /internal/v1/user-center/oversea-entitlements` | Internal modules / ops | 查看用户到 Oversea site 的 entitlement 和 runtime sync 状态 |
+| `POST /internal/v1/user-center/users/:userId/oversea` | Internal modules / ops | 手动分配或关闭用户级 Oversea access |
+| `POST /internal/v1/user-center/users/:userId/oversea/sync-runtime` | Internal modules / ops | 把用户级 hysteria2/mihomo access 同步到选定 Oversea runtime |
+| `GET /internal/v1/app-center/apps?userId=...&sourceAppId=...` | Launcher / AppCenter | 按应用访问策略过滤用户可见应用 |
+| `POST /internal/v1/sdk/gateway/access/evaluate` | SDK / 外部系统 | 可带 `appId/sourceAppId`，同时判断 SDK scope 和 app access policy |
 | `GET /internal/v1/user-center/service-accounts` | Internal modules / ops | 查看服务账号 |
 | `POST /internal/v1/user-center/service-accounts` | Internal modules / ops | 创建或更新服务账号 |
 | `POST /internal/v1/user-center/tokens/issue` | Internal modules / ops | 为 user 或 service account 签发短期 token，服务端只存 token hash |

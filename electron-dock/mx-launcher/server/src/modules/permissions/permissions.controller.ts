@@ -16,6 +16,7 @@ export class PermissionsController {
         appId: nullableString(body.appId) ?? 'h2o',
         installId: nullableString(body.installId),
         userId: nullableString(body.userId),
+        sourceAppId: nullableString(body.sourceAppId) ?? nullableString(body.source_app_id),
         requestedBy: nullableString(body.requestedBy) ?? 'app-center',
         scopes: stringArray(body.scopes),
         requestId: nullableString(body.requestId) ?? undefined

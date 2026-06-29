@@ -709,15 +709,55 @@ export interface UserCenterRole {
   createdAt: string;
 }
 
+export interface UserCenterUserProfile {
+  title: string | null;
+  department: string | null;
+  location: string | null;
+  address: string | null;
+  phone: string | null;
+  tags: string[];
+  attributes: Record<string, unknown>;
+  externalIds: Record<string, string>;
+}
+
+export interface UserCenterUserCredentialSummary {
+  hasPassword: boolean;
+  passwordUpdatedAt: string | null;
+  providers: string[];
+}
+
+export interface UserCenterAppAccess {
+  homeAppId: string | null;
+  registeredByAppId: string | null;
+  allowedAppIds: string[];
+  deniedAppIds: string[];
+}
+
 export interface UserCenterUser {
   userId: string;
   tenantId: string;
   orgIds: string[];
-  email: string;
+  account: string;
+  email: string | null;
   displayName: string;
   roleIds: string[];
   status: 'active' | 'disabled';
+  profile: UserCenterUserProfile;
+  credential: UserCenterUserCredentialSummary;
+  appAccess: UserCenterAppAccess;
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface UserCenterUserCredential {
+  credentialId: string;
+  userId: string;
+  kind: 'local-password';
+  passwordHash: string;
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string;
+  updatedAt: string;
 }
 
 export interface UserCenterServiceAccount {
@@ -758,11 +798,86 @@ export interface UserCenterBootstrapResult {
 
 export interface CreateUserInput {
   userId?: string | null;
+  account?: string | null;
+  username?: string | null;
   email?: string | null;
   displayName?: string | null;
+  password?: string | null;
   roleIds?: string[];
   orgIds?: string[];
+  status?: 'active' | 'disabled' | string | null;
+  profile?: Partial<UserCenterUserProfile> | null;
+  attributes?: Record<string, unknown> | null;
+  externalIds?: Record<string, string> | null;
+  appAccess?: Partial<UserCenterAppAccess> | null;
+  homeAppId?: string | null;
+  registeredByAppId?: string | null;
+  allowedAppIds?: string[] | string | null;
+  deniedAppIds?: string[] | string | null;
+  defaultOverseaSiteIds?: string[] | string | null;
+  provisionOversea?: boolean | null;
+  requestedBy?: string | null;
   requestId?: string | null;
+}
+
+export interface ImportUserCenterUserRow {
+  id?: string | number | null;
+  userId?: string | null;
+  account?: string | null;
+  username?: string | null;
+  user_name?: string | null;
+  email?: string | null;
+  displayName?: string | null;
+  display_name?: string | null;
+  password?: string | null;
+  profile?: Partial<UserCenterUserProfile> | null;
+  attributes?: Record<string, unknown> | null;
+  externalIds?: Record<string, string> | null;
+  appAccess?: Partial<UserCenterAppAccess> | null;
+  homeAppId?: string | null;
+  registeredByAppId?: string | null;
+  allowedAppIds?: string[] | string | null;
+  deniedAppIds?: string[] | string | null;
+}
+
+export interface ImportUserCenterUsersInput {
+  users: ImportUserCenterUserRow[];
+  defaultRoleIds?: string[];
+  defaultOrgIds?: string[];
+  defaultHomeAppId?: string | null;
+  defaultRegisteredByAppId?: string | null;
+  defaultAllowedAppIds?: string[] | string | null;
+  defaultOverseaSiteIds?: string[] | string | null;
+  provisionOversea?: boolean | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface ImportUserCenterUsersResult {
+  imported: number;
+  updated: number;
+  failed: number;
+  users: UserCenterUser[];
+  entitlements: UserOverseaEntitlement[];
+  failures: Array<{
+    index: number;
+    account: string | null;
+    reason: string;
+  }>;
+  generatedAt: string;
+}
+
+export interface UserPasswordVerificationInput {
+  userId?: string | null;
+  password?: string | null;
+  requestId?: string | null;
+}
+
+export interface UserPasswordVerificationResult {
+  userId: string;
+  ok: boolean;
+  hasPassword: boolean;
+  reason: string;
 }
 
 export interface CreateServiceAccountInput {
@@ -883,6 +998,8 @@ export interface SdkGatewayAccessInput {
   token?: string | null;
   audience?: string | null;
   routeId: string;
+  appId?: string | null;
+  sourceAppId?: string | null;
   requestId?: string | null;
 }
 
@@ -892,6 +1009,7 @@ export interface SdkGatewayAccessDecision {
   principal: PlatformPrincipal | null;
   matchedScopes: string[];
   missingScopes: string[];
+  appAccess: AppCenterAccessDecision | null;
   reason: string;
 }
 
@@ -938,6 +1056,7 @@ export interface ConfigPolicySnapshotInput {
   installId?: string | null;
   deviceId?: string | null;
   appId?: string | null;
+  sourceAppId?: string | null;
   productId?: string | null;
   channel?: string | null;
   userId?: string | null;
@@ -1374,7 +1493,8 @@ export interface ConfigPolicySnapshot {
     permissionPolicy: {
       appId: string;
       declaredScopes: string[];
-      defaultDecision: 'requires-appcenter-grant';
+      appAccess: AppCenterAccessDecision | null;
+      defaultDecision: 'public-app' | 'allowed-by-app-policy' | 'requires-appcenter-grant' | 'denied-by-app-policy';
     };
     launcherNetwork: LauncherNetworkSnapshot;
     dns: {
@@ -1461,6 +1581,42 @@ export type UpdatePolicyKind =
   | 'mandatory-app'
   | 'config-snapshot';
 
+export type AppCenterAccessDefaultDecision = 'public' | 'authenticated' | 'private';
+
+export interface AppCenterAccessPolicy {
+  defaultDecision: AppCenterAccessDefaultDecision;
+  allowAdmin: boolean;
+  allowRoles: string[];
+  allowUserIds: string[];
+  allowOrgIds: string[];
+  allowRegisteredByAppIds: string[];
+  allowHomeAppIds: string[];
+  requirePermissionGrant: boolean;
+}
+
+export interface AppCenterAccessContextInput {
+  userId?: string | null;
+  sourceAppId?: string | null;
+  includeHidden?: boolean | null;
+  includeDisabled?: boolean | null;
+  requestId?: string | null;
+}
+
+export interface AppCenterAccessDecision {
+  appId: string;
+  allowed: boolean;
+  visible: boolean;
+  reason: string;
+  matched: string[];
+  missing: string[];
+  principal: PlatformPrincipal | null;
+  policy: AppCenterAccessPolicy;
+}
+
+export interface AppCenterAccessInput extends AppCenterAccessContextInput {
+  appId: string;
+}
+
 export interface AppCenterApp {
   appId: string;
   displayName: string;
@@ -1476,6 +1632,7 @@ export interface AppCenterApp {
   channels: string[];
   permissions: string[];
   requiredCapabilities: string[];
+  accessPolicy: AppCenterAccessPolicy;
   updatePolicy: UpdatePolicyKind;
   entrypoints: Record<string, string>;
   protocol: {
@@ -1499,6 +1656,7 @@ export interface AppCenterAppInput {
   channels?: string[] | string | null;
   permissions?: string[] | string | null;
   requiredCapabilities?: string[] | string | null;
+  accessPolicy?: Partial<AppCenterAccessPolicy> | null;
   updatePolicy?: UpdatePolicyKind | string | null;
   entrypoints?: Record<string, string> | null;
   protocol?: {
@@ -1580,6 +1738,7 @@ export interface PermissionRequestInput {
   requestedBy: string;
   installId?: string | null;
   userId?: string | null;
+  sourceAppId?: string | null;
   requestId?: string;
 }
 
@@ -1593,6 +1752,9 @@ export interface PermissionGrant {
   requestedBy: string;
   installId: string | null;
   userId: string | null;
+  sourceAppId: string | null;
+  accessAllowed: boolean;
+  accessReason: string;
   createdAt: string;
 }
 

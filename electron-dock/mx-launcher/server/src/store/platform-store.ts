@@ -1,6 +1,9 @@
 import type {
   AnonymousEnrollment,
   AnonymousEnrollmentRequest,
+  AppCenterAccessContextInput,
+  AppCenterAccessDecision,
+  AppCenterAccessInput,
   AppCenterApp,
   AppCenterAppInput,
   AppOnboardingDefaults,
@@ -95,9 +98,13 @@ import type {
   TokenIntrospectionResult,
   UserCenterBootstrapResult,
   UserCenterIssuedToken,
+  ImportUserCenterUsersInput,
+  ImportUserCenterUsersResult,
   UserCenterRole,
   UserCenterServiceAccount,
   UserCenterUser,
+  UserPasswordVerificationInput,
+  UserPasswordVerificationResult,
   UserOverseaEntitlement,
   UserOverseaEntitlementInput,
   UserOverseaAccountSyncReport,
@@ -189,6 +196,8 @@ export interface PlatformStore {
   listUserCenterRoles(): MaybePromise<UserCenterRole[]>;
   listUserCenterUsers(): MaybePromise<UserCenterUser[]>;
   createUserCenterUser(input: CreateUserInput): MaybePromise<UserCenterUser>;
+  importUserCenterUsers(input: ImportUserCenterUsersInput): MaybePromise<ImportUserCenterUsersResult>;
+  verifyUserCenterPassword(input: UserPasswordVerificationInput): MaybePromise<UserPasswordVerificationResult>;
   listUserOverseaEntitlements(): MaybePromise<UserOverseaEntitlement[]>;
   getUserOverseaEntitlement(userId: string): MaybePromise<UserOverseaEntitlement | null>;
   upsertUserOverseaEntitlement(input: UserOverseaEntitlementInput): MaybePromise<UserOverseaEntitlement>;
@@ -242,7 +251,8 @@ export interface PlatformStore {
   observabilitySinks(): MaybePromise<RuntimeConfig['observabilitySinks']>;
   listAppOnboardingTemplates(): MaybePromise<AppOnboardingTemplate[]>;
   getAppOnboardingDefaults(input: AppOnboardingDefaultsInput): MaybePromise<AppOnboardingDefaults>;
-  listAppCenterApps(): MaybePromise<AppCenterApp[]>;
+  listAppCenterApps(input?: AppCenterAccessContextInput): MaybePromise<AppCenterApp[]>;
+  evaluateAppCenterAccess(input: AppCenterAccessInput): MaybePromise<AppCenterAccessDecision>;
   getAppCenterApp(appId: string): MaybePromise<AppCenterApp | null>;
   upsertAppCenterApp(input: AppCenterAppInput): MaybePromise<AppCenterApp>;
   deleteAppCenterApp(appId: string): MaybePromise<boolean>;

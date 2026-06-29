@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { connect as netConnect } from 'node:net';
 import { promisify } from 'node:util';
 
-import { Body, Controller, Get, Header, Inject, NotFoundException, Param, Post } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Header, Inject, NotFoundException, Param, Post } from '@nestjs/common';
 
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
 import type { PlatformStore } from '../../store/platform-store.js';
@@ -11,6 +11,7 @@ import { PLATFORM_STORE } from '../../tokens.js';
 import type {
   CreateServiceAccountInput,
   CreateUserInput,
+  ImportUserCenterUsersInput,
   IssueTokenInput,
   PrincipalContextInput,
   SiteSlotAccessAccount,
@@ -33,10 +34,14 @@ export class UserCenterController {
       authority: 'user-center',
       capabilities: [
         'oauth.authority',
+        'local-password.login',
+        'user.import',
+        'user.profile.attributes',
         'jwt.introspection',
         'principal.context',
         'rbac.policy',
-        'service-account'
+        'service-account',
+        'oversea.provisioning'
       ],
       sdkGateway: await this.store.sdkGatewayManifest()
     };
@@ -60,6 +65,11 @@ export class UserCenterController {
   @Post('internal/v1/user-center/users')
   async createUser(@Body() rawBody: unknown) {
     return { user: await this.store.createUserCenterUser(toCreateUserInput(asRecord(rawBody))) };
+  }
+
+  @Post('internal/v1/user-center/users/import')
+  async importUsers(@Body() rawBody: unknown) {
+    return { import: await this.store.importUserCenterUsers(toImportUsersInput(rawBody)) };
   }
 
   @Get('internal/v1/user-center/oversea-entitlements')
@@ -259,10 +269,43 @@ export function toTokenInput(body: Record<string, unknown>): TokenIntrospectionI
 function toCreateUserInput(body: Record<string, unknown>): CreateUserInput {
   return {
     userId: nullableString(body.userId),
+    account: nullableString(body.account),
+    username: nullableString(body.username) ?? nullableString(body.user_name),
     email: nullableString(body.email),
     displayName: nullableString(body.displayName),
-    roleIds: stringArray(body.roleIds),
-    orgIds: stringArray(body.orgIds),
+    password: nullableString(body.password),
+    roleIds: stringList(body.roleIds),
+    orgIds: stringList(body.orgIds),
+    status: nullableString(body.status),
+    profile: recordOrNull(body.profile),
+    attributes: recordOrNull(body.attributes),
+    externalIds: stringRecordOrNull(body.externalIds),
+    appAccess: recordOrNull(body.appAccess),
+    homeAppId: nullableString(body.homeAppId),
+    registeredByAppId: nullableString(body.registeredByAppId) ?? nullableString(body.sourceAppId),
+    allowedAppIds: stringList(body.allowedAppIds),
+    deniedAppIds: stringList(body.deniedAppIds),
+    defaultOverseaSiteIds: stringList(body.defaultOverseaSiteIds ?? body.overseaSiteIds ?? body.siteIds),
+    provisionOversea: booleanValue(body.provisionOversea ?? body.defaultOverseaAccess),
+    requestedBy: nullableString(body.requestedBy),
+    requestId: nullableString(body.requestId)
+  };
+}
+
+function toImportUsersInput(rawBody: unknown): ImportUserCenterUsersInput {
+  const body = asRecord(rawBody);
+  const rawUsers = Array.isArray(rawBody) ? rawBody : Array.isArray(body.users) ? body.users : null;
+  if (!rawUsers) throw new BadRequestException('users array is required');
+  return {
+    users: rawUsers.map((item) => asRecord(item)),
+    defaultRoleIds: stringList(body.defaultRoleIds ?? body.roleIds),
+    defaultOrgIds: stringList(body.defaultOrgIds ?? body.orgIds),
+    defaultHomeAppId: nullableString(body.defaultHomeAppId),
+    defaultRegisteredByAppId: nullableString(body.defaultRegisteredByAppId) ?? nullableString(body.sourceAppId),
+    defaultAllowedAppIds: stringList(body.defaultAllowedAppIds ?? body.allowedAppIds),
+    defaultOverseaSiteIds: stringList(body.defaultOverseaSiteIds ?? body.overseaSiteIds ?? body.siteIds),
+    provisionOversea: booleanValue(body.provisionOversea ?? body.defaultOverseaAccess),
+    requestedBy: nullableString(body.requestedBy) ?? 'user-import',
     requestId: nullableString(body.requestId)
   };
 }
@@ -270,7 +313,7 @@ function toCreateUserInput(body: Record<string, unknown>): CreateUserInput {
 function toUserOverseaEntitlementInput(body: Record<string, unknown>): UserOverseaEntitlementInput {
   return {
     userId: nullableString(body.userId),
-    siteIds: stringArray(body.siteIds),
+    siteIds: stringList(body.siteIds),
     requestedBy: nullableString(body.requestedBy),
     requestId: nullableString(body.requestId)
   };
@@ -310,6 +353,28 @@ function booleanValue(value: unknown): boolean | null {
     if (['0', 'false', 'no', 'n'].includes(normalized)) return false;
   }
   return null;
+}
+
+function stringList(value: unknown): string[] {
+  const raw = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(/[,;\n]/)
+      : [];
+  return [...new Set(raw.map((item) => String(item || '').trim()).filter(Boolean))];
+}
+
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function stringRecordOrNull(value: unknown): Record<string, string> | null {
+  const record = recordOrNull(value);
+  if (!record) return null;
+  const entries = Object.entries(record)
+    .map(([key, raw]) => [key, typeof raw === 'string' ? raw.trim() : raw === undefined || raw === null ? '' : String(raw)])
+    .filter(([, text]) => text);
+  return Object.fromEntries(entries) as Record<string, string>;
 }
 
 function remoteSyncTimeoutSeconds(value: unknown): number {

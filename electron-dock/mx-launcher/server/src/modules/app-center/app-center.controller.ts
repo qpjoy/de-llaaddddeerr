@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, Inject, NotFoundException, Param, Post } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
 
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
@@ -9,8 +9,20 @@ export class AppCenterController {
   constructor(@Inject(PLATFORM_STORE) private readonly store: PlatformStore) {}
 
   @Get('apps')
-  async listApps() {
-    return { apps: await this.store.listAppCenterApps() };
+  async listApps(
+    @Query('userId') userId?: string,
+    @Query('sourceAppId') sourceAppId?: string,
+    @Query('includeHidden') includeHidden?: string,
+    @Query('includeDisabled') includeDisabled?: string
+  ) {
+    return {
+      apps: await this.store.listAppCenterApps({
+        userId: nullableQuery(userId),
+        sourceAppId: nullableQuery(sourceAppId),
+        includeHidden: booleanQuery(includeHidden),
+        includeDisabled: booleanQuery(includeDisabled)
+      })
+    };
   }
 
   @Get('onboarding/defaults')
@@ -51,4 +63,13 @@ export class AppCenterController {
       throw new BadRequestException(error instanceof Error ? error.message : 'AppCenter app cannot be deleted');
     }
   }
+}
+
+function nullableQuery(value: string | undefined): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function booleanQuery(value: string | undefined): boolean | null {
+  if (value === undefined) return null;
+  return value === '1' || value.toLowerCase() === 'true';
 }

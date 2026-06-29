@@ -176,6 +176,9 @@ const state = {
     },
     openDropdown: null,
     drawer: null,
+    defaultOverseaOnCreate: true,
+    importBusy: false,
+    importFeedback: null,
     selectedOverseaUserId: null,
     overseaFeedback: null,
     overseaBusy: false,
@@ -2534,13 +2537,55 @@ async function bootstrapUserCenterFromAdmin() {
   }
 }
 
+async function importUserCenterJsonFile(file) {
+  if (!file || state.userCenter.importBusy) return;
+  state.userCenter.importBusy = true;
+  state.userCenter.importFeedback = { kind: 'info', message: `Importing ${file.name || 'users.json'}` };
+  renderUserCenterSurfaces();
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    const rows = Array.isArray(parsed) ? parsed : asArray(parsed?.users);
+    if (!rows.length) throw new Error('JSON must be an array or contain users[]');
+    const siteIds = state.userCenter.defaultOverseaOnCreate ? overseaAuthoritySites() : [];
+    const payload = await fetchJson('/internal/v1/user-center/users/import', {
+      method: 'POST',
+      body: {
+        users: rows,
+        defaultRoleIds: [defaultUserRoleId()].filter(Boolean),
+        defaultOrgIds: ['org_default'],
+        defaultHomeAppId: MX_H2I_PRODUCT_ID,
+        defaultRegisteredByAppId: MX_H2I_PRODUCT_ID,
+        defaultAllowedAppIds: [MX_H2I_PRODUCT_ID, APP_CENTER_PRODUCT_ID, 'h2o'],
+        defaultOverseaSiteIds: siteIds,
+        provisionOversea: siteIds.length > 0,
+        requestedBy: 'desktop-admin-import',
+        requestId: `desktop-user-import-${Date.now()}`
+      }
+    });
+    const result = payload.import || {};
+    state.userCenter.importFeedback = {
+      kind: result.failed ? 'warning' : 'success',
+      message: `Imported ${result.imported || 0}, updated ${result.updated || 0}${result.failed ? `, failed ${result.failed}` : ''}`
+    };
+    await refreshUserCenterPanels();
+  } catch (error) {
+    state.userCenter.importFeedback = { kind: 'error', message: error.message };
+    renderUserCenterSurfaces();
+  } finally {
+    state.userCenter.importBusy = false;
+    renderUserCenterSurfaces();
+  }
+}
+
 async function createUserFromAdmin() {
   if (state.userCenter.busy) return;
+  const account = blankToNull(foundationGrid.querySelector('[data-user-field="account"]')?.value);
   const email = blankToNull(foundationGrid.querySelector('[data-user-field="email"]')?.value);
   const displayName = blankToNull(foundationGrid.querySelector('[data-user-field="displayName"]')?.value);
   const roleId = blankToNull(foundationGrid.querySelector('[data-user-field="roleId"]')?.value);
-  if (!email || !displayName) {
-    state.userCenter.feedback = { kind: 'error', message: 'Email and display name are required' };
+  if (!(account || email) || !displayName) {
+    state.userCenter.feedback = { kind: 'error', message: 'Account or email and display name are required' };
     renderUserCenterSurfaces();
     return;
   }
@@ -2551,6 +2596,7 @@ async function createUserFromAdmin() {
     const payload = await fetchJson('/internal/v1/user-center/users', {
       method: 'POST',
       body: {
+        account,
         email,
         displayName,
         roleIds: roleId ? [roleId] : [],
@@ -2560,7 +2606,7 @@ async function createUserFromAdmin() {
     });
     state.userCenter.feedback = {
       kind: 'success',
-      message: `Created ${payload.user?.displayName || payload.user?.userId || email}`
+      message: `Created ${payload.user?.displayName || payload.user?.userId || account || email}`
     };
     await refreshUserCenterPanels();
   } catch (error) {
@@ -2594,11 +2640,25 @@ function defaultUserRoleId() {
 
 function createUserEditorDraft(mode = 'create', userId = '') {
   const user = mode === 'edit' ? userCenterUserById(userId) : null;
+  const profile = user?.profile || {};
+  const appAccess = user?.appAccess || {};
   return {
     userId: user?.userId || '',
+    account: user?.account || '',
     email: user?.email || '',
     displayName: user?.displayName || '',
-    roleId: asArray(user?.roleIds)[0] || defaultUserRoleId()
+    password: '',
+    roleId: asArray(user?.roleIds)[0] || defaultUserRoleId(),
+    title: profile.title || '',
+    department: profile.department || '',
+    location: profile.location || '',
+    address: profile.address || '',
+    attributesJson: formatJson(profile.attributes || {}),
+    homeAppId: appAccess.homeAppId || (mode === 'create' ? MX_H2I_PRODUCT_ID : ''),
+    registeredByAppId: appAccess.registeredByAppId || (mode === 'create' ? MX_H2I_PRODUCT_ID : ''),
+    allowedAppIds: textFromStringList(appAccess.allowedAppIds || (mode === 'create' ? [MX_H2I_PRODUCT_ID, APP_CENTER_PRODUCT_ID, 'h2o'] : [])),
+    deniedAppIds: textFromStringList(appAccess.deniedAppIds),
+    provisionOversea: mode === 'create' ? state.userCenter.defaultOverseaOnCreate : false
   };
 }
 
@@ -2617,7 +2677,7 @@ function openUserEditorDrawer(mode = 'edit', userId = '') {
   state.userCenter.selectedOverseaUserId = user?.userId || null;
   renderUserEditorDrawer();
   requestAnimationFrame(() => {
-    const firstField = userEditorDrawer?.querySelector('[data-user-editor-field="email"]:not([readonly]), [data-user-editor-field="displayName"]');
+    const firstField = userEditorDrawer?.querySelector('[data-user-editor-field="account"]:not([readonly]), [data-user-editor-field="displayName"]');
     firstField?.focus?.();
   });
 }
@@ -2646,17 +2706,48 @@ function userEditorDraftFromForm(root) {
   return {
     ...current,
     userId: editing ? current.userId : userEditorValue(root, 'userId') || current.userId || '',
+    account: userEditorValue(root, 'account') || '',
     email: userEditorValue(root, 'email') || '',
     displayName: userEditorValue(root, 'displayName') || '',
-    roleId: userEditorValue(root, 'roleId') || defaultUserRoleId()
+    password: userEditorValue(root, 'password') || '',
+    roleId: userEditorValue(root, 'roleId') || defaultUserRoleId(),
+    title: userEditorValue(root, 'title') || '',
+    department: userEditorValue(root, 'department') || '',
+    location: userEditorValue(root, 'location') || '',
+    address: userEditorValue(root, 'address') || '',
+    attributesJson: userEditorValue(root, 'attributesJson') || '{}',
+    homeAppId: userEditorValue(root, 'homeAppId') || '',
+    registeredByAppId: userEditorValue(root, 'registeredByAppId') || '',
+    allowedAppIds: userEditorValue(root, 'allowedAppIds') || '',
+    deniedAppIds: userEditorValue(root, 'deniedAppIds') || '',
+    provisionOversea: Boolean(userEditorValue(root, 'provisionOversea'))
   };
+}
+
+function parseUserAttributesJson(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return {};
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Attributes JSON must be an object');
+  }
+  return parsed;
 }
 
 async function saveUserCenterUserFromEditor(root) {
   if (state.userCenter.busy) return;
   const draft = userEditorDraftFromForm(root);
-  if (!draft.email || !draft.displayName) {
-    state.userCenter.feedback = { kind: 'error', message: 'Email and display name are required' };
+  if (!draft.account || !draft.displayName) {
+    state.userCenter.feedback = { kind: 'error', message: 'Account and display name are required' };
+    if (state.userCenter.drawer) state.userCenter.drawer.draft = draft;
+    renderUserEditorDrawer();
+    return;
+  }
+  let attributes = {};
+  try {
+    attributes = parseUserAttributesJson(draft.attributesJson);
+  } catch (error) {
+    state.userCenter.feedback = { kind: 'error', message: error.message };
     if (state.userCenter.drawer) state.userCenter.drawer.draft = draft;
     renderUserEditorDrawer();
     return;
@@ -2669,14 +2760,32 @@ async function saveUserCenterUserFromEditor(root) {
   if (state.userCenter.drawer) state.userCenter.drawer.draft = draft;
   renderUserEditorDrawer();
   try {
+    const createMode = state.userCenter.drawer?.mode !== 'edit';
+    const defaultOverseaSiteIds = createMode && draft.provisionOversea ? overseaAuthoritySites() : [];
     const payload = await fetchJson('/internal/v1/user-center/users', {
       method: 'POST',
       body: {
         userId: state.userCenter.drawer?.mode === 'edit' ? draft.userId : blankToNull(draft.userId),
-        email: draft.email,
+        account: draft.account,
+        email: blankToNull(draft.email),
         displayName: draft.displayName,
+        password: blankToNull(draft.password),
         roleIds: draft.roleId ? [draft.roleId] : [],
         orgIds: ['org_default'],
+        profile: {
+          title: blankToNull(draft.title),
+          department: blankToNull(draft.department),
+          location: blankToNull(draft.location),
+          address: blankToNull(draft.address),
+          attributes
+        },
+        homeAppId: blankToNull(draft.homeAppId),
+        registeredByAppId: blankToNull(draft.registeredByAppId),
+        allowedAppIds: stringListFromText(draft.allowedAppIds),
+        deniedAppIds: stringListFromText(draft.deniedAppIds),
+        defaultOverseaSiteIds,
+        provisionOversea: defaultOverseaSiteIds.length > 0,
+        requestedBy: 'desktop-admin',
         requestId: `desktop-user-${Date.now()}`
       }
     });
@@ -2687,9 +2796,21 @@ async function saveUserCenterUserFromEditor(root) {
       userId: savedUserId,
       draft: {
         userId: savedUserId,
+        account: saved.account || draft.account,
         email: saved.email || draft.email,
         displayName: saved.displayName || draft.displayName,
-        roleId: asArray(saved.roleIds)[0] || draft.roleId
+        password: '',
+        roleId: asArray(saved.roleIds)[0] || draft.roleId,
+        title: saved.profile?.title || draft.title,
+        department: saved.profile?.department || draft.department,
+        location: saved.profile?.location || draft.location,
+        address: saved.profile?.address || draft.address,
+        attributesJson: formatJson(saved.profile?.attributes || attributes),
+        homeAppId: saved.appAccess?.homeAppId || draft.homeAppId,
+        registeredByAppId: saved.appAccess?.registeredByAppId || draft.registeredByAppId,
+        allowedAppIds: textFromStringList(saved.appAccess?.allowedAppIds || stringListFromText(draft.allowedAppIds)),
+        deniedAppIds: textFromStringList(saved.appAccess?.deniedAppIds || stringListFromText(draft.deniedAppIds)),
+        provisionOversea: false
       }
     };
     state.userCenter.selectedOverseaUserId = savedUserId || null;
@@ -5373,6 +5494,21 @@ function renderFoundationGrid(overview) {
   if (bootstrapUsers) bootstrapUsers.addEventListener('click', () => void bootstrapUserCenterFromAdmin());
   const newUser = foundationGrid.querySelector('[data-user-new]');
   if (newUser) newUser.addEventListener('click', () => openUserEditorDrawer('create'));
+  const userDefaultOversea = foundationGrid.querySelector('[data-user-default-oversea]');
+  if (userDefaultOversea) {
+    userDefaultOversea.addEventListener('change', () => {
+      state.userCenter.defaultOverseaOnCreate = userDefaultOversea.checked;
+      renderUserCenterSurfaces();
+    });
+  }
+  const userImportFile = foundationGrid.querySelector('[data-user-import-file]');
+  if (userImportFile) {
+    userImportFile.addEventListener('change', () => {
+      const file = userImportFile.files?.[0];
+      userImportFile.value = '';
+      void importUserCenterJsonFile(file);
+    });
+  }
   const userSearch = foundationGrid.querySelector('[data-user-filter="search"]');
   if (userSearch) {
     userSearch.addEventListener('input', () => {
@@ -5692,12 +5828,19 @@ function filteredUserCenterUsers() {
   const filter = userCenterFilters();
   const query = String(filter.search || '').trim().toLowerCase();
   return asArray(state.userCenter.users).filter((user) => {
+    const profile = user.profile || {};
     const haystack = [
       user.displayName,
+      user.account,
       user.email,
       user.userId,
       user.status,
       userKind(user),
+      profile.title,
+      profile.department,
+      profile.location,
+      profile.address,
+      user.credential?.hasPassword ? 'password local-password' : '',
       ...asArray(user.roleIds).map(roleLabel)
     ].filter(Boolean).join(' ').toLowerCase();
     const matchesQuery = !query || haystack.includes(query);
@@ -5808,6 +5951,14 @@ function renderUserCenterPanel() {
             options: statusOptions,
             label: userDropdownLabel(statusOptions, filter.status || 'all', 'All status')
           })}
+          <label class="foundation-checkbox-option user-default-oversea">
+            <input type="checkbox" data-user-default-oversea ${state.userCenter.defaultOverseaOnCreate ? 'checked' : ''} ${overseaAuthoritySites().length ? '' : 'disabled'} />
+            <span>Default Oversea</span>
+          </label>
+          <label class="secondary-button user-import-button ${state.userCenter.importBusy ? 'is-disabled' : ''}">
+            ${state.userCenter.importBusy ? 'Importing' : 'Import JSON'}
+            <input type="file" accept="application/json,.json" data-user-import-file ${state.userCenter.importBusy ? 'disabled' : ''} />
+          </label>
           <button class="secondary-button" type="button" data-user-bootstrap ${state.userCenter.busy ? 'disabled' : ''} title="Initialize User Center seed records">Bootstrap</button>
           <button class="primary-button" type="button" data-user-new ${state.userCenter.busy ? 'disabled' : ''}>New User</button>
         </div>
@@ -5816,6 +5967,7 @@ function renderUserCenterPanel() {
         <span>${escapeHtml(String(filteredUsers.length))} shown</span>
         <span>${escapeHtml(String(users.length))} total</span>
         ${feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(feedback.kind)}">${escapeHtml(feedback.message)}</span>` : ''}
+        ${state.userCenter.importFeedback ? `<span class="profile-feedback" data-kind="${escapeHtml(state.userCenter.importFeedback.kind)}">${escapeHtml(state.userCenter.importFeedback.message)}</span>` : ''}
       </div>
       <div class="app-table user-admin-table">
         <article class="app-table-row is-header">
@@ -5832,11 +5984,15 @@ function renderUserCenterPanel() {
           const syncDisabled = state.userCenter.overseaBusy
             || state.userCenter.overseaSyncBusy
             || !asArray(entitlement?.accounts).length;
+          const identityLine = [user.account, user.email].filter(Boolean).join(' / ') || user.userId;
+          const credentialLine = user.credential?.hasPassword
+            ? `local password / ${user.credential.passwordUpdatedAt || 'set'}`
+            : 'no local password';
           return `
           <article class="app-table-row ${user.userId === state.userCenter.drawer?.userId ? 'is-selected' : ''}" data-user-select="${escapeHtml(user.userId)}" tabindex="0">
             <span>
               <strong>${escapeHtml(user.displayName || user.userId)}</strong>
-              <small>${escapeHtml(user.email || user.userId)}</small>
+              <small>${escapeHtml(identityLine)}</small>
             </span>
             <span>
               <strong>${escapeHtml(asArray(user.roleIds).map(roleLabel).join(' / ') || '-')}</strong>
@@ -5845,7 +6001,7 @@ function renderUserCenterPanel() {
             <span>${renderChipList(userEnabledServices(user).slice(0, 3), 'success')}</span>
             <span>
               <strong>${escapeHtml(userInternalUsage(user))}</strong>
-              <small>${escapeHtml(user.userId)}</small>
+              <small>${escapeHtml(credentialLine)}</small>
             </span>
             <span>
               <strong>${escapeHtml(userOverseaAccess(user))}</strong>
@@ -5894,7 +6050,7 @@ function renderUserOverseaEditor(user) {
   return `
     <section class="app-drawer-section">
       <div class="app-section-title">
-        <span>03</span>
+        <span>04</span>
         <strong>Oversea access</strong>
       </div>
       <div class="foundation-checkbox-grid user-drawer-sites">
@@ -5956,7 +6112,7 @@ function renderUserEditorDrawer() {
         <div>
           <span class="site-kind">User Center</span>
           <h2 id="user-editor-title">${escapeHtml(title)}</h2>
-          <p>${escapeHtml(editing ? `${user?.email || draft.email || '-'} / ${user?.status || 'active'}` : 'Create a User Center subject and assign access after saving.')}</p>
+          <p>${escapeHtml(editing ? `${user?.account || draft.account || user?.email || draft.email || '-'} / ${user?.status || 'active'}` : 'Create a User Center subject, local login, profile and optional Oversea access.')}</p>
         </div>
         <button class="icon-button app-drawer-close" type="button" data-user-editor-close aria-label="Close user editor">×</button>
       </header>
@@ -5970,15 +6126,23 @@ function renderUserEditorDrawer() {
           <div class="app-editor-grid">
             <label class="app-form-field">
               <span>User ID</span>
-              <input data-user-editor-field="userId" value="${escapeHtml(draft.userId || '')}" ${editing ? 'readonly' : ''} placeholder="auto from email" autocomplete="off" />
+              <input data-user-editor-field="userId" value="${escapeHtml(draft.userId || '')}" ${editing ? 'readonly' : ''} placeholder="auto from account" autocomplete="off" />
+            </label>
+            <label class="app-form-field">
+              <span>Account</span>
+              <input data-user-editor-field="account" value="${escapeHtml(draft.account || '')}" placeholder="bmyq" autocomplete="username" />
             </label>
             <label class="app-form-field">
               <span>Email</span>
-              <input data-user-editor-field="email" value="${escapeHtml(draft.email || '')}" placeholder="user@example.com" autocomplete="off" />
+              <input data-user-editor-field="email" value="${escapeHtml(draft.email || '')}" placeholder="optional@example.com" autocomplete="email" />
             </label>
             <label class="app-form-field">
               <span>Display Name</span>
               <input data-user-editor-field="displayName" value="${escapeHtml(draft.displayName || '')}" placeholder="MX User" autocomplete="off" />
+            </label>
+            <label class="app-form-field">
+              <span>Password</span>
+              <input type="password" data-user-editor-field="password" value="${escapeHtml(draft.password || '')}" placeholder="${editing ? 'leave blank to keep current' : 'optional local password'}" autocomplete="new-password" />
             </label>
             <label class="app-form-field">
               <span>Role</span>
@@ -5998,6 +6162,51 @@ function renderUserEditorDrawer() {
         <section class="app-drawer-section">
           <div class="app-section-title">
             <span>02</span>
+            <strong>Profile and attributes</strong>
+          </div>
+          <div class="app-editor-grid">
+            <label class="app-form-field">
+              <span>Title</span>
+              <input data-user-editor-field="title" value="${escapeHtml(draft.title || '')}" placeholder="operator / admin / visitor" autocomplete="off" />
+            </label>
+            <label class="app-form-field">
+              <span>Department</span>
+              <input data-user-editor-field="department" value="${escapeHtml(draft.department || '')}" placeholder="Internal / Domestic / Partner" autocomplete="off" />
+            </label>
+            <label class="app-form-field">
+              <span>Location</span>
+              <input data-user-editor-field="location" value="${escapeHtml(draft.location || '')}" placeholder="Shanghai / remote" autocomplete="off" />
+            </label>
+            <label class="app-form-field app-form-wide">
+              <span>Address</span>
+              <input data-user-editor-field="address" value="${escapeHtml(draft.address || '')}" placeholder="optional office or delivery address" autocomplete="off" />
+            </label>
+            <label class="app-form-field">
+              <span>Home App</span>
+              <input data-user-editor-field="homeAppId" value="${escapeHtml(draft.homeAppId || '')}" placeholder="mx-h2i / luopan" autocomplete="off" />
+            </label>
+            <label class="app-form-field">
+              <span>Registered By</span>
+              <input data-user-editor-field="registeredByAppId" value="${escapeHtml(draft.registeredByAppId || '')}" placeholder="mx-h2i / luopan" autocomplete="off" />
+            </label>
+            <label class="app-form-field app-form-wide">
+              <span>Allowed Apps</span>
+              <input data-user-editor-field="allowedAppIds" value="${escapeHtml(draft.allowedAppIds || '')}" placeholder="mx-h2i, appcenter, h2o, luopan" autocomplete="off" />
+            </label>
+            <label class="app-form-field app-form-wide">
+              <span>Denied Apps</span>
+              <input data-user-editor-field="deniedAppIds" value="${escapeHtml(draft.deniedAppIds || '')}" placeholder="optional explicit deny list" autocomplete="off" />
+            </label>
+            <label class="app-form-field app-form-wide">
+              <span>Attributes JSON</span>
+              <textarea data-user-editor-field="attributesJson" rows="5" spellcheck="false" placeholder="{ }">${escapeHtml(draft.attributesJson || '{}')}</textarea>
+            </label>
+          </div>
+        </section>
+
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>03</span>
             <strong>Service access</strong>
           </div>
           ${renderUserServiceSummary(user, draft)}
@@ -6009,10 +6218,18 @@ function renderUserEditorDrawer() {
         ${editing && user ? renderUserOverseaEditor(user) : `
           <section class="app-drawer-section">
             <div class="app-section-title">
-              <span>03</span>
+              <span>04</span>
               <strong>Oversea access</strong>
             </div>
-            <div class="empty-state">Save the user before assigning Oversea access.</div>
+            ${overseaAuthoritySites().length ? `
+              <label class="foundation-checkbox-option user-create-oversea">
+                <input type="checkbox" data-user-editor-field="provisionOversea" ${draft.provisionOversea ? 'checked' : ''} />
+                <span>Provision default Oversea access on save</span>
+              </label>
+              <div class="user-scope-list">
+                ${renderChipList(overseaAuthoritySites(), 'info')}
+              </div>
+            ` : '<div class="empty-state">Save the user before assigning Oversea access.</div>'}
           </section>
         `}
 
@@ -6275,6 +6492,14 @@ function applyServerAppOnboardingDefaultsToDraft(draft, defaults, options = {}) 
     channels: uniqueStringList(app.channels).length ? uniqueStringList(app.channels) : draft.channels,
     permissions: uniqueStringList(app.permissions).length ? uniqueStringList(app.permissions) : draft.permissions,
     requiredCapabilities: uniqueStringList(app.requiredCapabilities).length ? uniqueStringList(app.requiredCapabilities) : draft.requiredCapabilities,
+    accessDefaultDecision: app.accessPolicy?.defaultDecision || draft.accessDefaultDecision,
+    accessAllowAdmin: typeof app.accessPolicy?.allowAdmin === 'boolean' ? app.accessPolicy.allowAdmin : draft.accessAllowAdmin,
+    accessRequirePermissionGrant: typeof app.accessPolicy?.requirePermissionGrant === 'boolean' ? app.accessPolicy.requirePermissionGrant : draft.accessRequirePermissionGrant,
+    accessAllowRoles: textFromStringList(app.accessPolicy?.allowRoles || stringListFromText(draft.accessAllowRoles)),
+    accessAllowUserIds: textFromStringList(app.accessPolicy?.allowUserIds || stringListFromText(draft.accessAllowUserIds)),
+    accessAllowOrgIds: textFromStringList(app.accessPolicy?.allowOrgIds || stringListFromText(draft.accessAllowOrgIds)),
+    accessAllowRegisteredByAppIds: textFromStringList(app.accessPolicy?.allowRegisteredByAppIds || stringListFromText(draft.accessAllowRegisteredByAppIds)),
+    accessAllowHomeAppIds: textFromStringList(app.accessPolicy?.allowHomeAppIds || stringListFromText(draft.accessAllowHomeAppIds)),
     updatePolicy: app.updatePolicy || draft.updatePolicy,
     dnsRouteEnabled: defaults.template?.dnsRouteEnabled !== false,
     dnsRouteId: dnsRoute.routeId || draft.dnsRouteId,
@@ -6886,6 +7111,7 @@ function renderAppCatalogRow(app, selectedId) {
   const productId = productNetworkIdForApp(app);
   const product = launcherProductNetwork(productId);
   const isSystem = app?.builtin || app?.systemOwned;
+  const accessLabel = app?.accessPolicy?.defaultDecision || 'private';
   return `
     <article class="app-table-row ${app.appId === selectedId ? 'is-selected' : ''}" role="row" tabindex="0" data-app-select="${escapeHtml(app.appId)}">
       <span>
@@ -6896,7 +7122,7 @@ function renderAppCatalogRow(app, selectedId) {
       <span>${escapeHtml(mode === 'standalone' ? 'self' : launcherProductDisplayName(channelId, launcherProductNetwork(channelId)))}</span>
       <span>${escapeHtml(product.serviceVip || '-')}</span>
       <span>${escapeHtml(app.version || '-')}</span>
-      <span><mark data-kind="${escapeHtml(app.enabled === false ? 'muted' : isSystem ? 'system' : 'custom')}">${escapeHtml(appStatusLabel(app))}</mark></span>
+      <span><mark data-kind="${escapeHtml(app.enabled === false ? 'muted' : isSystem ? 'system' : 'custom')}">${escapeHtml(appStatusLabel(app))}</mark><small>${escapeHtml(accessLabel)}</small></span>
       <span class="app-table-actions">
         <button class="secondary-button" type="button" data-app-edit="${escapeHtml(app.appId)}">Edit</button>
         <button class="secondary-button" type="button" data-app-delete="${escapeHtml(app.appId)}" ${isSystem ? 'disabled title="System app"' : ''}>${isSystem ? 'System' : 'Delete'}</button>
@@ -6924,6 +7150,7 @@ function createAppCatalogEditorDraft(mode = 'create', appId = '') {
     || nextAvailableProductSecondOctet(normalizedAppId || null, appMode);
   const existingDnsRoute = editing ? launcherAppExistingDnsRoute(normalizedAppId) : null;
   const onboardingTemplate = editing ? inferLauncherAppTemplate(app) : 'standalone-service';
+  const accessPolicy = app?.accessPolicy || {};
   const draft = {
     appId: normalizedAppId,
     displayName: app?.displayName || '',
@@ -6942,6 +7169,14 @@ function createAppCatalogEditorDraft(mode = 'create', appId = '') {
     channels: asArray(app?.channels).length ? app.channels : ['shadow', 'beta', 'stable'],
     permissions: asArray(app?.permissions),
     requiredCapabilities: asArray(app?.requiredCapabilities),
+    accessDefaultDecision: accessPolicy.defaultDecision || (app?.appId === MX_H2I_PRODUCT_ID || app?.appId === APP_CENTER_PRODUCT_ID ? 'public' : 'private'),
+    accessAllowAdmin: accessPolicy.allowAdmin === false ? false : true,
+    accessRequirePermissionGrant: accessPolicy.requirePermissionGrant === true || app?.appId === 'h2o',
+    accessAllowRoles: textFromStringList(accessPolicy.allowRoles),
+    accessAllowUserIds: textFromStringList(accessPolicy.allowUserIds),
+    accessAllowOrgIds: textFromStringList(accessPolicy.allowOrgIds),
+    accessAllowRegisteredByAppIds: textFromStringList(accessPolicy.allowRegisteredByAppIds || (app?.appId === 'h2o' ? [MX_H2I_PRODUCT_ID] : [])),
+    accessAllowHomeAppIds: textFromStringList(accessPolicy.allowHomeAppIds || (app?.appId === 'h2o' ? [MX_H2I_PRODUCT_ID] : [])),
     updatePolicy: app?.updatePolicy || (appMode === 'standalone' ? 'app-managed' : 'launcher-managed'),
     dnsRouteEnabled: editing ? !!existingDnsRoute : true,
     dnsRouteId: existingDnsRoute?.routeId || launcherAppDnsRouteId(launcherAppDefaultDnsHost(normalizedAppId)),
@@ -6965,6 +7200,14 @@ function launcherAppDefaultDescription(draft) {
 
 function uniqueStringList(values) {
   return Array.from(new Set(asArray(values).map((value) => String(value || '').trim()).filter(Boolean)));
+}
+
+function stringListFromText(value) {
+  return Array.from(new Set(String(value || '').split(/[,;\n]/).map((item) => item.trim()).filter(Boolean)));
+}
+
+function textFromStringList(values) {
+  return uniqueStringList(values).join(', ');
 }
 
 function launcherAppKnownCapability(value) {
@@ -7208,6 +7451,14 @@ function renderAppEditorDrawer() {
         <section class="app-drawer-section">
           <div class="app-section-title">
             <span>05</span>
+            <strong>Access policy</strong>
+          </div>
+          ${renderAppAccessPolicySection(draftForPlan)}
+        </section>
+
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>06</span>
             <strong>Runtime defaults</strong>
           </div>
           <label class="app-check-row">
@@ -7283,6 +7534,55 @@ function renderAppOnboardingTemplateSection(draft) {
         <span>${escapeHtml(template.detail)}</span>
         <small>${escapeHtml(template.templateId === 'custom' ? '后续可由 SDK manifest 或 k8s admin 回填字段。' : '可以继续编辑名称、域名和 upstream；能力和权限由系统推导。')}</small>
       </div>
+    </div>
+  `;
+}
+
+function renderAppAccessPolicySection(draft) {
+  const decision = ['public', 'authenticated', 'private'].includes(draft.accessDefaultDecision)
+    ? draft.accessDefaultDecision
+    : 'private';
+  return `
+    <p class="app-section-copy">Public 应用所有用户可见；Authenticated 需要登录；Private 只允许命中角色、用户、注册来源、Home App 或已有授权的用户。</p>
+    <div class="app-editor-grid">
+      <label class="app-form-field">
+        <span>Default Decision</span>
+        <select data-app-field="accessDefaultDecision">
+          <option value="public" ${decision === 'public' ? 'selected' : ''}>Public</option>
+          <option value="authenticated" ${decision === 'authenticated' ? 'selected' : ''}>Authenticated</option>
+          <option value="private" ${decision === 'private' ? 'selected' : ''}>Private</option>
+        </select>
+      </label>
+      <label class="app-check-row">
+        <input data-app-field="accessAllowAdmin" type="checkbox" ${draft.accessAllowAdmin === false ? '' : 'checked'} />
+        <span aria-hidden="true"></span>
+        <strong>Admin can access</strong>
+      </label>
+      <label class="app-check-row">
+        <input data-app-field="accessRequirePermissionGrant" type="checkbox" ${draft.accessRequirePermissionGrant ? 'checked' : ''} />
+        <span aria-hidden="true"></span>
+        <strong>Accept permission grants</strong>
+      </label>
+      <label class="app-form-field">
+        <span>Allow Roles</span>
+        <input data-app-field="accessAllowRoles" value="${escapeHtml(draft.accessAllowRoles || '')}" placeholder="mx-user, mx-admin" autocomplete="off" />
+      </label>
+      <label class="app-form-field">
+        <span>Allow Users</span>
+        <input data-app-field="accessAllowUserIds" value="${escapeHtml(draft.accessAllowUserIds || '')}" placeholder="usr_test, usr_operator" autocomplete="off" />
+      </label>
+      <label class="app-form-field">
+        <span>Allow Orgs</span>
+        <input data-app-field="accessAllowOrgIds" value="${escapeHtml(draft.accessAllowOrgIds || '')}" placeholder="org_default" autocomplete="off" />
+      </label>
+      <label class="app-form-field">
+        <span>Registered By Apps</span>
+        <input data-app-field="accessAllowRegisteredByAppIds" value="${escapeHtml(draft.accessAllowRegisteredByAppIds || '')}" placeholder="mx-h2i, luopan" autocomplete="off" />
+      </label>
+      <label class="app-form-field">
+        <span>Home Apps</span>
+        <input data-app-field="accessAllowHomeAppIds" value="${escapeHtml(draft.accessAllowHomeAppIds || '')}" placeholder="mx-h2i, luopan" autocomplete="off" />
+      </label>
     </div>
   `;
 }
@@ -7489,6 +7789,14 @@ function appEditorDraftFromForm(root) {
     productSecondOctet: normalizeProductSecondOctet(appEditorValue(root, 'productSecondOctet') || fallbackSecondOctet, fallbackSecondOctet),
     enabled: appEditorValue(root, 'enabled') !== false,
     channels: uniqueStringList(current.channels).length ? uniqueStringList(current.channels) : ['shadow', 'beta', 'stable'],
+    accessDefaultDecision: appEditorValue(root, 'accessDefaultDecision') || current.accessDefaultDecision || 'private',
+    accessAllowAdmin: appEditorValue(root, 'accessAllowAdmin') !== false,
+    accessRequirePermissionGrant: appEditorValue(root, 'accessRequirePermissionGrant') === true,
+    accessAllowRoles: appEditorValue(root, 'accessAllowRoles') || current.accessAllowRoles || '',
+    accessAllowUserIds: appEditorValue(root, 'accessAllowUserIds') || current.accessAllowUserIds || '',
+    accessAllowOrgIds: appEditorValue(root, 'accessAllowOrgIds') || current.accessAllowOrgIds || '',
+    accessAllowRegisteredByAppIds: appEditorValue(root, 'accessAllowRegisteredByAppIds') || current.accessAllowRegisteredByAppIds || '',
+    accessAllowHomeAppIds: appEditorValue(root, 'accessAllowHomeAppIds') || current.accessAllowHomeAppIds || '',
     dnsRouteEnabled: appEditorValue(root, 'dnsRouteEnabled') !== false,
     dnsHost,
     dnsRouteId: launcherAppDnsRouteId(dnsHost),
@@ -7526,7 +7834,7 @@ function bindAppEditorDrawerControls() {
       renderAppEditorDrawer();
     });
   }
-  for (const control of appEditorDrawer.querySelectorAll('[data-app-field="launcherMode"], [data-app-field="standaloneChannelProductId"], [data-app-field="productSecondOctet"], [data-app-field="category"], [data-app-field="dnsRouteEnabled"], [data-app-field="onboardingTemplate"], [data-app-field="appId"], [data-app-field="displayName"], [data-app-field="dnsHost"], [data-app-field="dnsTargetUrl"]')) {
+  for (const control of appEditorDrawer.querySelectorAll('[data-app-field="launcherMode"], [data-app-field="standaloneChannelProductId"], [data-app-field="productSecondOctet"], [data-app-field="category"], [data-app-field="dnsRouteEnabled"], [data-app-field="onboardingTemplate"], [data-app-field="appId"], [data-app-field="displayName"], [data-app-field="dnsHost"], [data-app-field="dnsTargetUrl"], [data-app-field="accessDefaultDecision"], [data-app-field="accessAllowAdmin"], [data-app-field="accessRequirePermissionGrant"]')) {
     control.addEventListener('change', () => {
       const nextDraft = appEditorDraftFromForm(form);
       state.appCatalogEditor.draft = control.dataset.appField === 'onboardingTemplate'
@@ -7681,6 +7989,16 @@ async function saveAppCenterAppFromEditor(root) {
     channels: uniqueStringList(draft.channels).length ? uniqueStringList(draft.channels) : ['shadow', 'beta', 'stable'],
     permissions: launcherAppEffectivePermissions({ ...draft, appId, launcherMode }),
     requiredCapabilities: launcherAppEffectiveCapabilities({ ...draft, appId, launcherMode }),
+    accessPolicy: {
+      defaultDecision: ['public', 'authenticated', 'private'].includes(draft.accessDefaultDecision) ? draft.accessDefaultDecision : 'private',
+      allowAdmin: draft.accessAllowAdmin !== false,
+      allowRoles: stringListFromText(draft.accessAllowRoles),
+      allowUserIds: stringListFromText(draft.accessAllowUserIds),
+      allowOrgIds: stringListFromText(draft.accessAllowOrgIds),
+      allowRegisteredByAppIds: stringListFromText(draft.accessAllowRegisteredByAppIds),
+      allowHomeAppIds: stringListFromText(draft.accessAllowHomeAppIds),
+      requirePermissionGrant: draft.accessRequirePermissionGrant === true
+    },
     updatePolicy: launcherAppEffectiveUpdatePolicy({ ...draft, appId, launcherMode }),
     enabled: draft.enabled !== false,
     requestedBy: 'desktop-admin'
