@@ -56,7 +56,7 @@ export interface ElectronLauncherHostResolutionDiagnosticInput {
   lookup?: ((host: string) => Promise<Array<string | { address?: string | null; family?: number | null }>>) | null;
 }
 
-const DEFAULT_INTERNAL_CIDRS = ['10.88.0.0/16', '10.89.0.0/16', '10.90.0.0/16'];
+const DEFAULT_INTERNAL_CIDRS = ['10.88.0.0/13'];
 const DEFAULT_V1_HDO_CIDRS = ['100.88.0.0/16', '100.89.0.0/16', '100.90.0.0/16', '100.91.0.0/16'];
 const DEFAULT_PROXY_FAKE_IP_CIDRS = ['198.18.0.0/15'];
 const PRIVATE_CIDRS = [

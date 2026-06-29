@@ -1,3 +1,5 @@
+import type { ElectronLauncherStandaloneDataPlaneDiagnostics } from '@qpjoy/electron-launcher';
+
 export interface LuopanRuntimeConfig {
   baseUrl: string;
   productId: string;
@@ -7,12 +9,13 @@ export interface LuopanRuntimeConfig {
 }
 
 export interface LuopanRuntimeConnection {
-  status: 'idle' | 'connecting' | 'connected' | 'error';
+  status: 'idle' | 'connecting' | 'lease-active' | 'data-plane-pending' | 'network-ready' | 'error';
   leaseIp: string | null;
   serviceVip: string | null;
   dnsServer: string | null;
   routeCidrs: string[];
   snapshotDigest: string | null;
+  dataPlane: ElectronLauncherStandaloneDataPlaneDiagnostics | null;
   message: string | null;
   updatedAt: string | null;
 }

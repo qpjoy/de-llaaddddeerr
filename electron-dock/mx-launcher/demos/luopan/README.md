@@ -36,6 +36,12 @@ AppCenter. Turn it off to verify the real entitlement path:
 LUOPAN_SDK_TEST_MODE=0 pnpm --filter @qpjoy/luopan-demo dev
 ```
 
+During development the demo consumes `@qpjoy/electron-launcher` from
+`electron-dock/mx-launcher/packages/electron-launcher` through the workspace
+dependency. The packaged/online mode should switch to a published npm semver
+version, so the same launcher package can be reused by MX-H2I, Luopan, and
+future Electron apps without coupling them to this demo.
+
 ## Build
 
 ```sh
@@ -59,3 +65,13 @@ electron-builder packaging run.
 This shape is the intended compatibility contract for other Electron stacks:
 Quasar, Vite, electron-builder, electron-forge, or a custom builder can keep the
 same main/preload adapter and replace only the renderer framework.
+
+## Network State
+
+Luopan separates lease state from data-plane readiness. A successful lease means
+the MX Launcher control plane has accepted the app and assigned addresses. The
+runtime does not claim the local route is ready until the shared launcher package
+proves the host route, service VIP, DNS relay, and endpoint are on the expected
+WireGuard/direct path. In this demo, privileged WireGuard apply is still pending,
+so `data-plane-pending` is expected after a lease unless another runtime has
+already installed matching routes.

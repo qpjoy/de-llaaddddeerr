@@ -83,6 +83,16 @@ export {
   type ElectronLauncherNetworkOwnershipResource,
   type ElectronLauncherNetworkOwnershipRoute
 } from './network-ownership-registry.js';
+export {
+  diagnoseElectronLauncherStandaloneDataPlane,
+  type ElectronLauncherStandaloneDataPlaneDiagnostics,
+  type ElectronLauncherStandaloneDataPlaneInput,
+  type ElectronLauncherStandaloneDataPlaneProbeTarget,
+  type ElectronLauncherStandaloneDataPlaneSeverity,
+  type ElectronLauncherStandaloneDataPlaneState,
+  type ElectronLauncherStandaloneEndpointProbe,
+  type ElectronLauncherStandaloneRouteProbe
+} from './standalone-data-plane.js';
 
 export const ELECTRON_LAUNCHER_PACKAGE_NAME = '@qpjoy/electron-launcher';
 

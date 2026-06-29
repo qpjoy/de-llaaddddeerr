@@ -26,6 +26,10 @@
       "types": "./dist/network-ownership-registry.d.ts",
       "import": "./dist/network-ownership-registry.js"
     },
+    "./standalone-data-plane": {
+      "types": "./dist/standalone-data-plane.d.ts",
+      "import": "./dist/standalone-data-plane.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

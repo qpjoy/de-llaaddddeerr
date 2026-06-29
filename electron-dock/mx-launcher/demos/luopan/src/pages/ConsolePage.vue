@@ -127,8 +127,21 @@
                   <span>DNS</span>
                   <strong>{{ runtime.connection.dnsServer || '-' }}</strong>
                 </div>
+                <div>
+                  <span>Data Plane</span>
+                  <strong>{{ runtime.connection.dataPlane?.state || '-' }}</strong>
+                </div>
               </div>
               <p class="runtime-message">{{ runtime.connection.message }}</p>
+              <div v-if="dataPlaneProbes.length" class="data-plane-probes">
+                <div v-for="probe in dataPlaneProbes" :key="probe.target" class="data-plane-probe">
+                  <span>{{ probe.label }}</span>
+                  <strong>{{ probe.address }}</strong>
+                  <q-badge :color="probe.ok ? 'positive' : probe.viaProxyTun ? 'negative' : 'warning'" outline>
+                    {{ routeProbeHint(probe) }}
+                  </q-badge>
+                </div>
+              </div>
             </section>
 
             <section class="surface-panel config-panel">
@@ -197,6 +210,7 @@ const fallbackRuntime: LuopanRuntimeState = {
     dnsServer: null,
     routeCidrs: [],
     snapshotDigest: null,
+    dataPlane: null,
     message: 'Renderer fallback mode. Start with Quasar Electron to use launcher IPC.',
     updatedAt: null
   },
@@ -206,10 +220,12 @@ const fallbackRuntime: LuopanRuntimeState = {
 const runtime = ref<LuopanRuntimeState>(fallbackRuntime);
 const draft = reactive<LuopanRuntimeConfig>({ ...fallbackRuntime.config });
 const connecting = computed(() => runtime.value.connection.status === 'connecting');
+const dataPlaneProbes = computed(() => runtime.value.connection.dataPlane?.probes ?? []);
 const statusColor = computed(() => {
-  if (runtime.value.connection.status === 'connected') return 'positive';
+  if (runtime.value.connection.status === 'network-ready') return 'positive';
   if (runtime.value.connection.status === 'error') return 'negative';
-  if (runtime.value.connection.status === 'connecting') return 'warning';
+  if (runtime.value.connection.status === 'connecting' || runtime.value.connection.status === 'data-plane-pending') return 'warning';
+  if (runtime.value.connection.status === 'lease-active') return 'cyan';
   return 'grey-6';
 });
 
@@ -292,6 +308,12 @@ async function openInternalEntry() {
 function shortId(value: string) {
   if (!value || value === '-') return '-';
   return value.length > 18 ? `${value.slice(0, 10)}...${value.slice(-6)}` : value;
+}
+
+function routeProbeHint(probe: { ok: boolean; viaProxyTun: boolean; interfaceName: string | null; gateway: string | null }) {
+  if (probe.ok) return probe.interfaceName || 'ok';
+  if (probe.viaProxyTun) return `proxy ${probe.gateway || ''}`.trim();
+  return probe.interfaceName || probe.gateway || 'pending';
 }
 
 onMounted(() => {

@@ -35,6 +35,7 @@ const session = await launcher.connectNetwork({
 
 // Persist session.wireGuard.privateKey in the product's secure storage, then
 // apply session.routePlan through the product's WireGuard/runtime adapter.
+// A lease alone is not a data-plane-ready signal.
 const routePlan = session.routePlan;
 ```
 
@@ -51,6 +52,36 @@ can depend only on the capabilities they own:
 | `@qpjoy/electron-launcher` | launcher client, product definition, standalone/embed SDK facade |
 | `@qpjoy/electron-launcher/wireguard` | WireGuard profile rendering, route proof, and peer recovery |
 | `@qpjoy/electron-launcher/system-domain-proxy` | standalone local PAC/proxy edge plus OS PAC apply/restore/verify |
+| `@qpjoy/electron-launcher/standalone-data-plane` | read-only standalone lease/data-plane route diagnostics |
+
+For standalone products, keep the state model split into two phases:
+
+1. `connectNetwork()` proves the control plane accepted the app and issued a
+   lease.
+2. WireGuard/PAC/DNS apply and route proof prove the local data plane is ready.
+
+Products should not display `connected` only because a lease exists. Use the
+read-only data-plane diagnostic before claiming traffic is ready:
+
+```ts
+import { diagnoseElectronLauncherStandaloneDataPlane } from '@qpjoy/electron-launcher/standalone-data-plane';
+
+const dataPlane = diagnoseElectronLauncherStandaloneDataPlane({
+  routePlan: session.routePlan,
+  leaseIp: session.lease.leaseIp,
+  serviceVip: session.lease.serviceVip
+});
+
+if (!dataPlane.ok) {
+  console.warn(dataPlane.state, dataPlane.message);
+}
+```
+
+Inside the `electron-dock/mx-launcher` monorepo, demos depend on this package
+with `workspace:*`, so local package changes are used by MX-H2I, Luopan, and
+future launcher demos during development. Release builds should consume a
+published semver version from npm, matching the V1 HDO local-vs-published
+workflow.
 
 System PAC is intended for Launcher standalone owners. For MX-H2I the local edge
 listens on `127.0.0.1:2053` by default and serves both `/proxy.pac` and an

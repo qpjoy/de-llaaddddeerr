@@ -41,7 +41,7 @@ export interface ElectronLauncherWireGuardPeerInput extends ElectronLauncherWire
   pathPreference?: ElectronLauncherWireGuardPathPreference;
 }
 
-export interface ElectronLauncherWireGuardProbeInput extends ElectronLauncherWireGuardRuntimeOptions {
+export interface ElectronLauncherWireGuardProbeInput {
   targetIp: string;
   expectedInterfaceName?: string | null;
   expectedInterfaceAddresses?: string[] | null;

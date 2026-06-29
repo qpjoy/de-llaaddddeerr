@@ -267,6 +267,37 @@ body {
   line-height: 1.55;
 }
 
+.data-plane-probes {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.data-plane-probe {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(81, 108, 163, 0.34);
+  border-radius: 8px;
+  background: rgba(11, 15, 24, 0.38);
+}
+
+.data-plane-probe span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: rgba(229, 237, 248, 0.64);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.data-plane-probe strong {
+  color: #f9fbff;
+  font-size: 13px;
+}
+
 .config-panel {
   display: grid;
   gap: 12px;
@@ -310,7 +341,8 @@ body {
   }
 
   .boundary-grid,
-  .runtime-state {
+  .runtime-state,
+  .data-plane-probe {
     grid-template-columns: 1fr;
   }
 }

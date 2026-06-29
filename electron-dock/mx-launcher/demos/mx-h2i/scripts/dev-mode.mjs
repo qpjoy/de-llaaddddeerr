@@ -28,6 +28,7 @@ const requiredOutputs = [
   resolve(mxLauncherRoot, 'packages/launcher-embed-sdk/dist/index.js'),
   resolve(mxLauncherRoot, 'packages/launcher-standalone/dist/index.js'),
   resolve(mxLauncherRoot, 'packages/electron-launcher/dist/index.js'),
+  resolve(mxLauncherRoot, 'packages/electron-launcher/dist/standalone-data-plane.js'),
   resolve(mxLauncherRoot, 'packages/electron-launcher/dist/wireguard.js')
 ];
 

@@ -7,13 +7,16 @@ import { fileURLToPath } from 'node:url';
 
 import {
   createElectronLauncher,
+  diagnoseElectronLauncherStandaloneDataPlane,
   defineLauncherProduct,
+  routePlanFromSnapshot,
+  type ElectronLauncherStandaloneDataPlaneDiagnostics,
   type LauncherNetworkSession,
   type LauncherProductDefinition,
   type StandaloneLauncher
 } from '@qpjoy/electron-launcher';
 
-type RuntimeStatus = 'idle' | 'connecting' | 'connected' | 'error';
+type RuntimeStatus = 'idle' | 'connecting' | 'lease-active' | 'data-plane-pending' | 'network-ready' | 'error';
 
 interface RuntimeConfig {
   baseUrl: string;
@@ -30,6 +33,7 @@ interface RuntimeConnection {
   dnsServer: string | null;
   routeCidrs: string[];
   snapshotDigest: string | null;
+  dataPlane: ElectronLauncherStandaloneDataPlaneDiagnostics | null;
   message: string | null;
   updatedAt: string | null;
 }
@@ -90,6 +94,7 @@ function emptyConnection(): RuntimeConnection {
     dnsServer: null,
     routeCidrs: [],
     snapshotDigest: null,
+    dataPlane: null,
     message: 'Launcher adapter ready.',
     updatedAt: null
   };
@@ -275,16 +280,26 @@ function registerIpc(): void {
   });
   ipcMain.handle('luopan:refresh-snapshot', async () => {
     try {
+      const state = requireRuntime();
       const snapshot = await launcherClient().createSnapshot({
         requestId: `luopan-snapshot-${Date.now()}`
       });
+      const routePlan = routePlanFromSnapshot(snapshot);
+      const dataPlane = diagnoseElectronLauncherStandaloneDataPlane({
+        routePlan,
+        leaseIp: state.connection.leaseIp || routePlan.leaseIp,
+        serviceVip: snapshot.topology.product.serviceVip,
+        dnsServer: snapshot.topology.relayPlan.routes.dnsServer
+      });
       await setConnection({
-        status: 'connected',
+        status: runtimeStatusForDataPlane(dataPlane),
+        leaseIp: state.connection.leaseIp || routePlan.leaseIp,
         serviceVip: snapshot.topology.product.serviceVip,
         dnsServer: snapshot.topology.relayPlan.routes.dnsServer,
         routeCidrs: snapshot.topology.relayPlan.routes.internalCidrs,
         snapshotDigest: snapshot.signatures.digest,
-        message: 'Snapshot refreshed from Launcher control plane.'
+        dataPlane,
+        message: `Snapshot refreshed. ${dataPlane.message}`
       });
       pushEvent('snapshot refreshed');
     } catch (error) {
@@ -313,16 +328,23 @@ function registerIpc(): void {
 }
 
 async function applySession(session: LauncherNetworkSession): Promise<void> {
+  const dataPlane = diagnoseElectronLauncherStandaloneDataPlane({
+    routePlan: session.routePlan,
+    leaseIp: session.lease.leaseIp,
+    serviceVip: session.lease.serviceVip,
+    dnsServer: session.routePlan.dnsServer
+  });
   await setConnection({
-    status: 'connected',
+    status: runtimeStatusForDataPlane(dataPlane),
     leaseIp: session.lease.leaseIp,
     serviceVip: session.lease.serviceVip,
     dnsServer: session.routePlan.dnsServer,
     routeCidrs: session.routePlan.routeCidrs,
     snapshotDigest: session.snapshot.signatures.digest,
+    dataPlane,
     message: session.lease.productId === PRODUCT.productId
-      ? 'Luopan lease is active. This demo stops before privileged WireGuard apply.'
-      : `Lease is active on ${session.lease.productId}.`
+      ? dataPlane.message
+      : `Lease is active on ${session.lease.productId}. ${dataPlane.message}`
   });
 }
 
@@ -340,19 +362,52 @@ function normalizeConfig(input: unknown, fallback: RuntimeConfig = defaultConfig
 function normalizeConnection(input: unknown): RuntimeConnection {
   const fallback = emptyConnection();
   const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
-  const status = record.status === 'connecting' || record.status === 'connected' || record.status === 'error'
-    ? record.status
-    : fallback.status;
+  const leaseIp = stringValue(record.leaseIp);
+  const dataPlane = normalizeDataPlane(record.dataPlane);
+  const status = normalizeRuntimeStatus(record.status, leaseIp, dataPlane);
   return {
     status,
-    leaseIp: stringValue(record.leaseIp),
+    leaseIp,
     serviceVip: stringValue(record.serviceVip),
     dnsServer: stringValue(record.dnsServer),
     routeCidrs: Array.isArray(record.routeCidrs) ? record.routeCidrs.filter((item): item is string => typeof item === 'string') : [],
     snapshotDigest: stringValue(record.snapshotDigest),
+    dataPlane,
     message: stringValue(record.message) || fallback.message,
     updatedAt: stringValue(record.updatedAt)
   };
+}
+
+function runtimeStatusForDataPlane(dataPlane: ElectronLauncherStandaloneDataPlaneDiagnostics): RuntimeStatus {
+  if (dataPlane.ok) return 'network-ready';
+  if (dataPlane.state === 'lease-missing') return 'idle';
+  if (dataPlane.state === 'lease-active') return 'lease-active';
+  return 'data-plane-pending';
+}
+
+function isRuntimeStatus(value: unknown): value is RuntimeStatus {
+  return value === 'idle'
+    || value === 'connecting'
+    || value === 'lease-active'
+    || value === 'data-plane-pending'
+    || value === 'network-ready'
+    || value === 'error';
+}
+
+function normalizeRuntimeStatus(
+  value: unknown,
+  leaseIp: string | null,
+  dataPlane: ElectronLauncherStandaloneDataPlaneDiagnostics | null
+): RuntimeStatus {
+  if (value === 'connected') return dataPlane?.ok ? 'network-ready' : leaseIp ? 'data-plane-pending' : 'idle';
+  return isRuntimeStatus(value) ? value : 'idle';
+}
+
+function normalizeDataPlane(value: unknown): ElectronLauncherStandaloneDataPlaneDiagnostics | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Partial<ElectronLauncherStandaloneDataPlaneDiagnostics>;
+  if (typeof record.state !== 'string' || typeof record.message !== 'string') return null;
+  return record as ElectronLauncherStandaloneDataPlaneDiagnostics;
 }
 
 function normalizeBaseUrl(value: string): string {
