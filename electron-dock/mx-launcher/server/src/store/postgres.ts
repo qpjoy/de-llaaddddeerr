@@ -216,6 +216,14 @@ import {
 import { applyGatewayNginxConfigToHostRunner } from './host-runner.js';
 import { applyCoreDnsConfigMapToKubernetes, applyGatewayConfigMapToKubernetes } from './kubernetes.js';
 import type { PlatformOverview, PlatformStore } from './platform-store.js';
+import {
+  LEGACY_HDO_ALLOWED_APP_IDS,
+  LEGACY_HDO_HOME_APP_ID,
+  legacyHdoAdminSeed,
+  legacyHdoSeedUserIsComplete,
+  legacyHdoUserCenterSeedInput,
+  mergeUniqueUserCenterUsers
+} from './user-center-seed.js';
 
 type RecordKind =
   | 'site-heartbeat'
@@ -283,6 +291,7 @@ export class PostgresStore implements PlatformStore {
     await store.registerBuiltinDns();
     await store.registerBuiltinGatewayRuntimeConfig();
     await store.registerBuiltinDomesticRuntimeConfigs();
+    await store.bootstrapUserCenter();
     return store;
   }
 
@@ -801,8 +810,15 @@ export class PostgresStore implements PlatformStore {
       account: 'admin',
       email: 'admin@mx.local',
       displayName: 'MX Demo Admin',
-      password: 'adminsj8kx1sq6xc',
+      password: legacyHdoAdminSeed.password,
       roleIds: ['mx-admin'],
+      externalIds: {
+        legacyUserId: String(legacyHdoAdminSeed.id),
+        legacyUserName: legacyHdoAdminSeed.user_name
+      },
+      homeAppId: LEGACY_HDO_HOME_APP_ID,
+      registeredByAppId: LEGACY_HDO_HOME_APP_ID,
+      allowedAppIds: LEGACY_HDO_ALLOWED_APP_IDS,
       requestId: 'bootstrap-user-center'
     });
     const user = await this.createUserCenterUser({
@@ -812,6 +828,9 @@ export class PostgresStore implements PlatformStore {
       displayName: 'MX Demo User',
       password: 'user-demo-password',
       roleIds: ['mx-user'],
+      homeAppId: LEGACY_HDO_HOME_APP_ID,
+      registeredByAppId: LEGACY_HDO_HOME_APP_ID,
+      allowedAppIds: LEGACY_HDO_ALLOWED_APP_IDS,
       requestId: 'bootstrap-user-center'
     });
     const serviceAccount = await this.createUserCenterServiceAccount({
@@ -820,9 +839,23 @@ export class PostgresStore implements PlatformStore {
       roleIds: ['mx-service-account'],
       requestId: 'bootstrap-user-center'
     });
+    const legacySeedInput = legacyHdoUserCenterSeedInput();
+    const legacyRowsToImport: typeof legacySeedInput.users = [];
+    for (const row of legacySeedInput.users) {
+      const seedUserInput = normalizeImportUserCenterRow(row, legacySeedInput);
+      const previous = await this.findUserCenterUserForInput(seedUserInput);
+      const password = typeof row.password === 'string' ? row.password : '';
+      const credential = previous ? await this.getRecord<UserCenterUserCredential>('iam-user-credential', previous.userId) : null;
+      if (!legacyHdoSeedUserIsComplete(previous, verifyUserCenterCredential(password, credential))) {
+        legacyRowsToImport.push(row);
+      }
+    }
+    const legacyImport = legacyRowsToImport.length > 0
+      ? await this.importUserCenterUsers(legacyHdoUserCenterSeedInput(legacyRowsToImport))
+      : null;
     return createBootstrapResult(
       await this.listUserCenterRoles(),
-      [admin, user],
+      mergeUniqueUserCenterUsers([admin, user, ...(legacyImport?.users ?? [])]),
       [serviceAccount]
     );
   }

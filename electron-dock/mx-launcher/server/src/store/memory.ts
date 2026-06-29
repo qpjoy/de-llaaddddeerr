@@ -90,6 +90,14 @@ import {
 import { applyGatewayNginxConfigToHostRunner } from './host-runner.js';
 import { applyCoreDnsConfigMapToKubernetes, applyGatewayConfigMapToKubernetes } from './kubernetes.js';
 import type { PlatformStore } from './platform-store.js';
+import {
+  LEGACY_HDO_ALLOWED_APP_IDS,
+  LEGACY_HDO_HOME_APP_ID,
+  legacyHdoAdminSeed,
+  legacyHdoSeedUserIsComplete,
+  legacyHdoUserCenterSeedInput,
+  mergeUniqueUserCenterUsers
+} from './user-center-seed.js';
 import type {
   AnonymousEnrollment,
   AnonymousEnrollmentRequest,
@@ -709,8 +717,15 @@ export class MemoryStore implements PlatformStore {
       account: 'admin',
       email: 'admin@mx.local',
       displayName: 'MX Demo Admin',
-      password: 'adminsj8kx1sq6xc',
+      password: legacyHdoAdminSeed.password,
       roleIds: ['mx-admin'],
+      externalIds: {
+        legacyUserId: String(legacyHdoAdminSeed.id),
+        legacyUserName: legacyHdoAdminSeed.user_name
+      },
+      homeAppId: LEGACY_HDO_HOME_APP_ID,
+      registeredByAppId: LEGACY_HDO_HOME_APP_ID,
+      allowedAppIds: LEGACY_HDO_ALLOWED_APP_IDS,
       requestId: 'bootstrap-user-center'
     });
     const user = this.createUserCenterUser({
@@ -720,6 +735,9 @@ export class MemoryStore implements PlatformStore {
       displayName: 'MX Demo User',
       password: 'user-demo-password',
       roleIds: ['mx-user'],
+      homeAppId: LEGACY_HDO_HOME_APP_ID,
+      registeredByAppId: LEGACY_HDO_HOME_APP_ID,
+      allowedAppIds: LEGACY_HDO_ALLOWED_APP_IDS,
       requestId: 'bootstrap-user-center'
     });
     const serviceAccount = this.createUserCenterServiceAccount({
@@ -728,7 +746,22 @@ export class MemoryStore implements PlatformStore {
       roleIds: ['mx-service-account'],
       requestId: 'bootstrap-user-center'
     });
-    return createBootstrapResult([...this.roles.values()], [admin, user], [serviceAccount]);
+    const legacySeedInput = legacyHdoUserCenterSeedInput();
+    const legacyRowsToImport = legacySeedInput.users.filter((row) => {
+      const seedUserInput = normalizeImportUserCenterRow(row, legacySeedInput);
+      const previous = this.findUserCenterUserForInput(seedUserInput);
+      const password = typeof row.password === 'string' ? row.password : '';
+      const credential = previous ? this.userCredentials.get(previous.userId) ?? null : null;
+      return !legacyHdoSeedUserIsComplete(previous, verifyUserCenterCredential(password, credential));
+    });
+    const legacyImport = legacyRowsToImport.length > 0
+      ? this.importUserCenterUsers(legacyHdoUserCenterSeedInput(legacyRowsToImport))
+      : null;
+    return createBootstrapResult(
+      [...this.roles.values()],
+      mergeUniqueUserCenterUsers([admin, user, ...(legacyImport?.users ?? [])]),
+      [serviceAccount]
+    );
   }
 
   listUserCenterRoles(): UserCenterRole[] {
