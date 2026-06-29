@@ -261,6 +261,7 @@ function registerIpc() {
     const wireGuard = await stopWireGuardForRuntime({
       darwinExtraUninstallShell: systemDomainRestoreScript
     });
+    const standaloneOwnership = await releaseStandaloneOwnershipForRuntime('disconnect');
     const systemDomainProxy = systemDomainRestoreScript && wireGuard?.launchDaemon && wireGuard?.ok !== false
       ? await completeExternalSystemDomainProxyRestore('disconnect-combined')
       : await disableSystemDomainProxyForRuntime('disconnect');
@@ -272,6 +273,8 @@ function registerIpc() {
         ? `已断开 launcher channel，但 WireGuard 停止失败：${wireGuard.message || wireGuard.error || 'unknown'}`
         : systemDomainProxy?.error
           ? `已断开 MX-H2I standalone channel；系统 PAC 恢复失败：${systemDomainProxy.error}`
+          : standaloneOwnership?.error
+            ? `已断开 MX-H2I standalone channel；本机 ownership registry 释放失败：${standaloneOwnership.error}`
           : '已断开 MX-H2I standalone channel、系统 PAC 和客户端 WireGuard；IP lease 会保留并在下次连接时续租。'
     };
     touchRuntime('disconnected');
@@ -1333,6 +1336,81 @@ function systemDomainProxyOwnershipClaim(domains, reverseProxyRoutes) {
   };
 }
 
+async function registerStandaloneOwnershipForRuntime(reason = 'manual') {
+  const connection = runtime?.connection || {};
+  const routePlan = normalizeRoutePlan(connection.routePlan);
+  if (!routePlan) return null;
+  try {
+    const mod = await import('@qpjoy/electron-launcher/standalone-data-plane');
+    const claim = mxH2iStandaloneOwnershipClaim(mod, routePlan, connection);
+    const state = mod.upsertElectronLauncherStandaloneOwnershipClaim({
+      ...claim,
+      state: connection.state === 'connected' ? 'active' : 'connecting',
+      updatedAt: nowIso()
+    });
+    return compactStandaloneOwnershipState(state, reason);
+  } catch (err) {
+    return {
+      ok: false,
+      reason,
+      error: errorMessage(err),
+      updatedAt: nowIso()
+    };
+  }
+}
+
+async function releaseStandaloneOwnershipForRuntime(reason = 'manual') {
+  try {
+    const mod = await import('@qpjoy/electron-launcher/standalone-data-plane');
+    const state = mod.releaseElectronLauncherStandaloneOwnershipClaim(standaloneOwnershipOwnerId());
+    return compactStandaloneOwnershipState(state, reason);
+  } catch (err) {
+    return {
+      ok: false,
+      reason,
+      error: errorMessage(err),
+      updatedAt: nowIso()
+    };
+  }
+}
+
+function mxH2iStandaloneOwnershipClaim(mod, routePlan, connection) {
+  const reverseProxyRoutes = arrayValue(lastSystemPacReverseProxyRoutes, []);
+  const routeCidrs = routePlan.leaseCidr
+    ? [routePlan.leaseCidr]
+    : connection.localIp
+      ? [`${connection.localIp}/32`]
+      : [];
+  return mod.buildElectronLauncherStandaloneOwnershipClaim(routePlan, {
+    ownerId: standaloneOwnershipOwnerId(),
+    productId: launcherProductId(),
+    instanceId: nullableString(runtime?.installation?.installId) || nullableString(runtime?.installation?.deviceId),
+    displayName: launcherProductDisplayName(),
+    priority: 100,
+    dnsZones: splitDnsDomains(runtime?.config),
+    dnsHosts: reverseProxyRoutes.map((route) => nullableString(route?.host)).filter(Boolean),
+    routeCidrs,
+    reverseProxyRoutes
+  });
+}
+
+function standaloneOwnershipOwnerId() {
+  return `${launcherProductId()}:${nullableString(runtime?.installation?.installId) || nullableString(runtime?.installation?.deviceId) || 'local'}`;
+}
+
+function compactStandaloneOwnershipState(state, reason) {
+  const registry = state?.registry && typeof state.registry === 'object' ? state.registry : {};
+  const conflicts = arrayValue(registry.conflicts, []);
+  return {
+    ok: conflicts.length === 0,
+    reason,
+    statePath: nullableString(state?.statePath),
+    owners: arrayValue(registry.owners, []).map((owner) => nullableString(owner?.ownerId)).filter(Boolean),
+    conflicts,
+    updatedAt: nullableString(state?.updatedAt) || nowIso()
+  };
+}
+
 function networkEnvironmentSignature(diagnostics) {
   if (!diagnostics || typeof diagnostics !== 'object') return null;
   const resolution = diagnostics.resolution || {};
@@ -2298,6 +2376,9 @@ function normalizeDiagnostics(input) {
     systemDomainProxy: row.systemDomainProxy && typeof row.systemDomainProxy === 'object'
       ? row.systemDomainProxy
       : null,
+    standaloneOwnership: row.standaloneOwnership && typeof row.standaloneOwnership === 'object'
+      ? row.standaloneOwnership
+      : null,
     networkEnvironment: row.networkEnvironment && typeof row.networkEnvironment === 'object'
       ? row.networkEnvironment
       : null,
@@ -2550,11 +2631,15 @@ async function applyNetworkSession(session, options) {
     const networkEnvironment = await collectNetworkEnvironmentDiagnostics('post-connect', {
       phase: wireGuardResult.ready ? 'connected' : 'bootstrap'
     });
+    const standaloneOwnership = wireGuardResult.ready
+      ? await registerStandaloneOwnershipForRuntime('post-connect')
+      : null;
     runtime.connection = {
       ...runtime.connection,
       diagnostics: {
         ...(runtime.connection.diagnostics || {}),
         ...(systemDomainProxy ? { systemDomainProxy } : {}),
+        ...(standaloneOwnership ? { standaloneOwnership } : {}),
         networkEnvironment,
         updatedAt: nowIso()
       }

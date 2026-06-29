@@ -41,6 +41,22 @@
             </q-btn>
             <q-btn outline color="primary" icon="dns" label="Internal entry" @click="openInternalEntry" />
             <q-btn color="primary" icon="hub" :loading="connecting" label="Request lease" @click="connectTestMode" />
+            <q-btn
+              color="secondary"
+              icon="lan"
+              :disable="!runtime.connection.leaseIp || connecting"
+              :loading="connecting"
+              label="Apply data plane"
+              @click="applyDataPlane"
+            />
+            <q-btn
+              outline
+              color="grey-4"
+              icon="power_settings_new"
+              :disable="connecting"
+              label="Disconnect"
+              @click="disconnectDataPlane"
+            />
           </div>
         </header>
 
@@ -285,6 +301,19 @@ async function connectTestMode() {
   if (next?.connection.status === 'error') {
     $q.notify({ type: 'negative', message: next.connection.message || 'Launcher request failed' });
   }
+}
+
+async function applyDataPlane() {
+  const next = await window.luopanLauncher?.applyDataPlane();
+  if (next) applyRuntime(next);
+  if (next?.connection.status === 'error') {
+    $q.notify({ type: 'negative', message: next.connection.message || 'Launcher data-plane apply failed' });
+  }
+}
+
+async function disconnectDataPlane() {
+  const next = await window.luopanLauncher?.disconnectDataPlane();
+  if (next) applyRuntime(next);
 }
 
 async function refreshSnapshot() {

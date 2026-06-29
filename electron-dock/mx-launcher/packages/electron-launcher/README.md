@@ -64,7 +64,10 @@ Products should not display `connected` only because a lease exists. Use the
 read-only data-plane diagnostic before claiming traffic is ready:
 
 ```ts
-import { diagnoseElectronLauncherStandaloneDataPlane } from '@qpjoy/electron-launcher/standalone-data-plane';
+import {
+  applyElectronLauncherStandaloneDataPlane,
+  diagnoseElectronLauncherStandaloneDataPlane
+} from '@qpjoy/electron-launcher/standalone-data-plane';
 
 const dataPlane = diagnoseElectronLauncherStandaloneDataPlane({
   routePlan: session.routePlan,
@@ -75,6 +78,20 @@ const dataPlane = diagnoseElectronLauncherStandaloneDataPlane({
 if (!dataPlane.ok) {
   console.warn(dataPlane.state, dataPlane.message);
 }
+
+const applied = await applyElectronLauncherStandaloneDataPlane({
+  userDataDir: app.getPath('userData'),
+  profileName: `${product.productId}.conf`,
+  routePlan: session.routePlan,
+  privateKey: session.wireGuard.privateKey,
+  dnsDomains: ['mxinfo-inc.cn'],
+  ownerId: `${product.productId}:${installId}`,
+  productId: product.productId,
+  instanceId: installId,
+  dnsHosts: ['luopan.mxinfo-inc.cn'],
+  dnsZones: ['mxinfo-inc.cn'],
+  failOnOwnershipConflicts: true
+});
 ```
 
 Inside the `electron-dock/mx-launcher` monorepo, demos depend on this package

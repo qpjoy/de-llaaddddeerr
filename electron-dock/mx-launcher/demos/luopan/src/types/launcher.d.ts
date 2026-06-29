@@ -36,6 +36,8 @@ export interface LuopanLauncherApi {
   getRuntime(): Promise<LuopanRuntimeState>;
   saveConfig(input: Partial<LuopanRuntimeConfig>): Promise<LuopanRuntimeState>;
   connectTestMode(): Promise<LuopanRuntimeState>;
+  applyDataPlane(): Promise<LuopanRuntimeState>;
+  disconnectDataPlane(): Promise<LuopanRuntimeState>;
   refreshSnapshot(): Promise<LuopanRuntimeState>;
   resetSession(): Promise<LuopanRuntimeState>;
   openAdmin(): Promise<void>;

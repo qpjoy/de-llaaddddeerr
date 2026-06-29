@@ -72,6 +72,11 @@ Luopan separates lease state from data-plane readiness. A successful lease means
 the MX Launcher control plane has accepted the app and assigned addresses. The
 runtime does not claim the local route is ready until the shared launcher package
 proves the host route, service VIP, DNS relay, and endpoint are on the expected
-WireGuard/direct path. In this demo, privileged WireGuard apply is still pending,
-so `data-plane-pending` is expected after a lease unless another runtime has
-already installed matching routes.
+WireGuard/direct path.
+
+Use `Request lease` to verify the control-plane entitlement path. Then use
+`Apply data plane` to sync the Domestic peer, install the product-specific
+WireGuard profile, and wait for route proof. The demo keeps the WireGuard
+private key in memory only; after an app restart, request a fresh lease before
+applying the data plane again. A production app should persist key material in
+the OS credential store.

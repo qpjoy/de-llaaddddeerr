@@ -84,13 +84,25 @@ export {
   type ElectronLauncherNetworkOwnershipRoute
 } from './network-ownership-registry.js';
 export {
+  applyElectronLauncherStandaloneDataPlane,
+  buildElectronLauncherStandaloneOwnershipClaim,
   diagnoseElectronLauncherStandaloneDataPlane,
+  readElectronLauncherStandaloneOwnershipState,
+  releaseElectronLauncherStandaloneOwnershipClaim,
+  stopElectronLauncherStandaloneDataPlane,
+  upsertElectronLauncherStandaloneOwnershipClaim,
+  type ElectronLauncherStandaloneDataPlaneApplyInput,
+  type ElectronLauncherStandaloneDataPlaneApplyResult,
   type ElectronLauncherStandaloneDataPlaneDiagnostics,
   type ElectronLauncherStandaloneDataPlaneInput,
   type ElectronLauncherStandaloneDataPlaneProbeTarget,
   type ElectronLauncherStandaloneDataPlaneSeverity,
+  type ElectronLauncherStandaloneDataPlaneStopInput,
+  type ElectronLauncherStandaloneDataPlaneStopResult,
   type ElectronLauncherStandaloneDataPlaneState,
   type ElectronLauncherStandaloneEndpointProbe,
+  type ElectronLauncherStandaloneOwnershipInput,
+  type ElectronLauncherStandaloneOwnershipState,
   type ElectronLauncherStandaloneRouteProbe
 } from './standalone-data-plane.js';
 

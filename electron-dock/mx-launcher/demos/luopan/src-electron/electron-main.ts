@@ -6,10 +6,12 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import {
+  applyElectronLauncherStandaloneDataPlane,
   createElectronLauncher,
   diagnoseElectronLauncherStandaloneDataPlane,
   defineLauncherProduct,
   routePlanFromSnapshot,
+  stopElectronLauncherStandaloneDataPlane,
   type ElectronLauncherStandaloneDataPlaneDiagnostics,
   type LauncherNetworkSession,
   type LauncherProductDefinition,
@@ -70,9 +72,12 @@ const PRODUCT = defineLauncherProduct({
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = 'luopan-runtime.json';
+const LUOPAN_DNS_HOST = 'luopan.mxinfo-inc.cn';
+const LUOPAN_DNS_ZONE = 'mxinfo-inc.cn';
 
 let mainWindow: BrowserWindow | null = null;
 let runtime: RuntimeState | null = null;
+let activeSession: LauncherNetworkSession | null = null;
 
 app.setAppUserModelId('dev.qpjoy.luopan');
 
@@ -265,6 +270,7 @@ function registerIpc(): void {
         requestedBy: 'luopan-quasar-demo',
         requestId: `luopan-${Date.now()}`
       });
+      activeSession = session;
       await applySession(session);
       pushEvent(`lease active ${session.lease.leaseIp}`);
     } catch (error) {
@@ -276,6 +282,83 @@ function registerIpc(): void {
     }
     await saveRuntime();
     broadcastRuntime();
+    return visibleRuntime();
+  });
+  ipcMain.handle('luopan:apply-data-plane', async () => {
+    await setConnection({
+      status: 'connecting',
+      message: 'Syncing Domestic peer and applying local WireGuard data plane.'
+    });
+    pushEvent('data-plane apply started');
+    try {
+      if (!activeSession) throw new Error('Request a Luopan lease before applying the local data plane.');
+      const privateKey = stringValue(activeSession.wireGuard.privateKey);
+      if (!privateKey) throw new Error('Luopan WireGuard private key is missing; request a fresh lease.');
+      await syncLeasePeers(activeSession);
+      const result = await applyElectronLauncherStandaloneDataPlane({
+        userDataDir: app.getPath('userData'),
+        profileName: 'luopan.conf',
+        routePlan: activeSession.routePlan,
+        privateKey,
+        dnsDomains: [LUOPAN_DNS_ZONE],
+        ownerId: `${PRODUCT.productId}:${requireRuntime().installId}`,
+        productId: PRODUCT.productId,
+        instanceId: requireRuntime().installId,
+        displayName: PRODUCT.displayName,
+        dnsHosts: [LUOPAN_DNS_HOST],
+        failOnOwnershipConflicts: true,
+        allowSystemFallback: false,
+        darwinLaunchDaemon: true,
+        fallbackToAppManaged: false,
+        darwinServiceIdentity: luopanWireGuardServiceIdentity()
+      });
+      await setConnection({
+        status: runtimeStatusForDataPlane(result.diagnostics),
+        dataPlane: result.diagnostics,
+        message: result.message
+      });
+      pushEvent(result.ok ? 'data-plane ready' : `data-plane pending ${result.state}`);
+    } catch (error) {
+      await setConnection({
+        status: 'error',
+        message: errorMessage(error)
+      });
+      pushEvent(`data-plane failed ${errorMessage(error)}`);
+    }
+    return visibleRuntime();
+  });
+  ipcMain.handle('luopan:disconnect-data-plane', async () => {
+    pushEvent('data-plane disconnect started');
+    try {
+      const result = await stopElectronLauncherStandaloneDataPlane({
+        userDataDir: app.getPath('userData'),
+        profileName: 'luopan.conf',
+        ownerId: `${PRODUCT.productId}:${requireRuntime().installId}`,
+        darwinLaunchDaemon: true,
+        allowSystemFallback: false,
+        darwinServiceIdentity: luopanWireGuardServiceIdentity()
+      });
+      const nextDataPlane = activeSession
+        ? diagnoseElectronLauncherStandaloneDataPlane({
+            routePlan: activeSession.routePlan,
+            leaseIp: activeSession.lease.leaseIp,
+            serviceVip: activeSession.lease.serviceVip,
+            dnsServer: activeSession.routePlan.dnsServer
+          })
+        : null;
+      await setConnection({
+        status: nextDataPlane ? runtimeStatusForDataPlane(nextDataPlane) : 'idle',
+        dataPlane: nextDataPlane,
+        message: result.message
+      });
+      pushEvent(result.ok ? 'data-plane stopped' : `data-plane stop failed ${result.message}`);
+    } catch (error) {
+      await setConnection({
+        status: 'error',
+        message: errorMessage(error)
+      });
+      pushEvent(`data-plane stop failed ${errorMessage(error)}`);
+    }
     return visibleRuntime();
   });
   ipcMain.handle('luopan:refresh-snapshot', async () => {
@@ -346,6 +429,53 @@ async function applySession(session: LauncherNetworkSession): Promise<void> {
       ? dataPlane.message
       : `Lease is active on ${session.lease.productId}. ${dataPlane.message}`
   });
+}
+
+async function syncLeasePeers(session: LauncherNetworkSession): Promise<void> {
+  const leaseId = stringValue(session.lease.leaseId);
+  if (!leaseId) throw new Error('Launcher leaseId is missing; cannot sync Domestic peer.');
+  await postLauncherNetwork(`/leases/${encodeURIComponent(leaseId)}/domestic-peer/sync`, {
+    requestedBy: 'luopan-quasar-demo',
+    requestId: `luopan-domestic-peer-${Date.now()}`
+  });
+  try {
+    await postLauncherNetwork(`/leases/${encodeURIComponent(leaseId)}/internal-direct-peer/sync`, {
+      requestedBy: 'luopan-quasar-demo',
+      requestId: `luopan-internal-direct-peer-${Date.now()}`
+    });
+  } catch (error) {
+    pushEvent(`internal direct sync skipped ${errorMessage(error)}`);
+  }
+}
+
+async function postLauncherNetwork(pathname: string, body: Record<string, unknown>): Promise<unknown> {
+  const response = await fetch(`${requireRuntime().config.baseUrl}/internal/v1/launcher-network${pathname}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+  const text = await response.text();
+  const payload = text ? safeJson(text) : null;
+  if (!response.ok) {
+    const message = payload && typeof payload === 'object' && 'message' in payload
+      ? String((payload as { message?: unknown }).message)
+      : text || response.statusText;
+    throw new Error(`Launcher peer sync failed: ${response.status} ${message}`);
+  }
+  return payload;
+}
+
+function luopanWireGuardServiceIdentity() {
+  return {
+    displayName: 'Luopan WireGuard',
+    darwinLaunchDaemonLabelPrefix: 'com.qpjoy.luopan.wireguard',
+    darwinSupportRoot: '/Library/Application Support/QPJoy/Luopan',
+    darwinLogDir: '/Library/Logs/QPJoy-Luopan',
+    darwinDaemonScriptName: 'luopan-wireguard-daemon.sh',
+    staleDarwinLaunchDaemonLabelPrefixes: ['com.qpjoy.luopan.wireguard']
+  };
 }
 
 function normalizeConfig(input: unknown, fallback: RuntimeConfig = defaultConfig()): RuntimeConfig {
@@ -423,6 +553,14 @@ function stringValue(value: unknown): string | null {
 function booleanish(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined) return fallback;
   return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+function safeJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
 }
 
 function errorMessage(error: unknown): string {
