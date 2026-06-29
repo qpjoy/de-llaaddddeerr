@@ -14,6 +14,16 @@ matching platform engine package such as darwin-arm64, linux-x64, or win32-x64.
 The core WireGuard package is consumed as-is; this CLI does not modify its HDO
 plugin behavior.
 
+Mihomo itself is not installed as an npm dependency of this CLI package. During
+`qp-tunnel-cli install`, the Linux client script lazily downloads the matching
+npm engine package, for example
+`@qpjoy/electron-plugin-tunnel-engine-linux-x64`, and installs the bundled
+`resources/engine/<platform>/mihomo.gz`. If npm is unavailable, the package is
+missing, or that download fails, the script falls back to the upstream
+MetaCubeX/mihomo GitHub release. This keeps `npm i -g @qpjoy/tunnel-cli` small
+while avoiding GitHub during bootstrap when the npm registry or a registry mirror
+is reachable first.
+
 ## HDO Mesh Enrollment
 
 For macOS, Windows, or a headless Linux machine such as an Internal/company
@@ -97,6 +107,54 @@ handle user session JWTs.
 
 ## Server Usage
 
+### No-Node Bootstrap
+
+The npm package also ships a standalone shell bootstrapper at
+`resources/manage.sh`. It is designed for a fresh server that does not have Node
+yet, so you can upload just this file first:
+
+```bash
+scp electron-plugin/packages/tunnel-cli/resources/manage.sh root@server:/tmp/qp-tunnel-bootstrap.sh
+ssh root@server 'bash /tmp/qp-tunnel-bootstrap.sh'
+```
+
+The bootstrapper opens a small management panel. It prepares only the
+prerequisites for `npm i -g @qpjoy/tunnel-cli`; mirror settings are current
+script-session environment variables and do not write npm registry config or
+Docker daemon mirror config globally.
+
+- install nvm into `~/.nvm` when nvm is missing
+- run `nvm install`, `nvm use`, and `nvm alias default` for the requested Node version
+- choose Node download source for the current panel session
+- try nvm's official Node source first and retry
+  `https://mirrors.cloud.tencent.com/nodejs-release/` if the official source
+  fails
+- download nvm from the official GitHub tarball first, then fall back to the
+  Gitee `mirrors/nvm` tarball if GitHub is unavailable
+- choose npm registry for the current panel session
+- choose a Docker Hub mirror prefix and pull/tag images through that helper
+- apply common domestic env mirrors for Electron, Playwright, pip, uv, and Go
+- run `npm i -g @qpjoy/tunnel-cli@latest --force`
+
+Useful direct commands:
+
+```bash
+bash /tmp/qp-tunnel-bootstrap.sh
+bash /tmp/qp-tunnel-bootstrap.sh install-nvm
+bash /tmp/qp-tunnel-bootstrap.sh install-node 22
+bash /tmp/qp-tunnel-bootstrap.sh install-cli @qpjoy/tunnel-cli@latest
+bash /tmp/qp-tunnel-bootstrap.sh bootstrap 22 @qpjoy/tunnel-cli@latest
+bash /tmp/qp-tunnel-bootstrap.sh env
+```
+
+If both built-in nvm tarball sources are unavailable, upload a nvm tarball
+yourself and point the bootstrapper at it. You can pass one path/URL, or a
+comma/space/newline separated fallback list:
+
+```bash
+QP_TUNNEL_NVM_TARBALL_URLS=/tmp/nvm-v0.40.3.tar.gz bash /tmp/qp-tunnel-bootstrap.sh
+```
+
 Run commands directly through the bundled script:
 
 ```bash
@@ -135,6 +193,33 @@ sudo qp-tunnel-cli install \
   --file /opt/mx/current/qp-tunnel-cli/domestic-bootstrap-subscription.yaml
 sudo qp-tunnel-cli egress-on
 ```
+
+For Basic Auth subscription URLs, either pass credentials separately or embed
+them in the URL:
+
+```bash
+sudo qp-tunnel-cli install --url 'http://download:pass@example.com/peer.yaml'
+sudo qp-tunnel-cli install --url 'http://example.com/peer.yaml' --user download --password pass
+```
+
+`--no-auth` forces an unauthenticated fetch and also avoids prompting for saved
+credentials, so do not combine it with a URL that needs `user:pass@` auth.
+
+Mihomo core download fallback knobs:
+
+```bash
+# Disable npm engine package if you want GitHub-only behavior.
+MIHOMO_NPM_ENGINE_FALLBACK=false sudo -E qp-tunnel-cli install --url ...
+
+# Use a registry mirror or pin the engine package version/dist-tag.
+MIHOMO_NPM_REGISTRY=https://registry.npmmirror.com \
+MIHOMO_NPM_ENGINE_VERSION=latest \
+sudo -E qp-tunnel-cli install --url ...
+```
+
+The fallback uses a temporary npm cache by default, so it does not depend on a
+previous user's `~/.npm` permissions. Set `MIHOMO_NPM_CACHE` only if you want a
+persistent cache directory.
 
 Run any command through the active Mihomo local proxy:
 

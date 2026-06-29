@@ -33,7 +33,8 @@ const requiredFiles = [
   'dist/hdo.js',
   'dist/index.d.ts',
   'dist/hdo.d.ts',
-  'resources/mihomo-client.sh'
+  'resources/mihomo-client.sh',
+  'resources/manage.sh'
 ];
 
 const sourceDir = fromLocal ? resolve(fromLocal) : fromTarball ? fetchFromTarball(fromTarball) : fetchFromNpm();
@@ -114,7 +115,7 @@ function copyFallbackSource(sourceRoot, targetRoot) {
     const target = join(targetRoot, file);
     mkdirSync(dirname(target), { recursive: true });
     cpSync(source, target, { recursive: true });
-    if (file === 'resources/mihomo-client.sh') chmodSync(target, 0o755);
+    if (file === 'resources/mihomo-client.sh' || file === 'resources/manage.sh') chmodSync(target, 0o755);
   }
 }
 

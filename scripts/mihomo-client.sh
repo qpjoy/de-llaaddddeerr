@@ -30,6 +30,13 @@ MIHOMO_SSH_CONFIG_DIR="${MIHOMO_SSH_CONFIG_DIR:-/etc/ssh/ssh_config.d}"
 MIHOMO_SSH_CONFIG_FILE="${MIHOMO_SSH_CONFIG_FILE:-$MIHOMO_SSH_CONFIG_DIR/99-mihomo-proxy.conf}"
 MIHOMO_SSH_PROXY_HOSTS="${MIHOMO_SSH_PROXY_HOSTS:-github.com gitlab.com bitbucket.org ssh.dev.azure.com}"
 GITHUB_API_ROOT="${GITHUB_API_ROOT:-https://api.github.com/repos/MetaCubeX/mihomo/releases}"
+MIHOMO_GITHUB_CONNECT_TIMEOUT="${MIHOMO_GITHUB_CONNECT_TIMEOUT:-15}"
+MIHOMO_GITHUB_MAX_TIME="${MIHOMO_GITHUB_MAX_TIME:-90}"
+MIHOMO_NPM_ENGINE_FALLBACK="${MIHOMO_NPM_ENGINE_FALLBACK:-true}"
+MIHOMO_NPM_ENGINE_PACKAGE="${MIHOMO_NPM_ENGINE_PACKAGE:-}"
+MIHOMO_NPM_ENGINE_VERSION="${MIHOMO_NPM_ENGINE_VERSION:-latest}"
+MIHOMO_NPM_REGISTRY="${MIHOMO_NPM_REGISTRY:-}"
+MIHOMO_NPM_CACHE="${MIHOMO_NPM_CACHE:-}"
 MIHOMO_GEOX_GEOIP_URL="${MIHOMO_GEOX_GEOIP_URL:-https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat}"
 MIHOMO_GEOX_GEOSITE_URL="${MIHOMO_GEOX_GEOSITE_URL:-https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat}"
 MIHOMO_GEOX_MMDB_URL="${MIHOMO_GEOX_MMDB_URL:-https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb}"
@@ -73,12 +80,13 @@ Commands:
 
 Install options:
   --url URL            Subscription URL, e.g. http://IP:3434/peer_user01.mihomo.yaml
+                       URL userinfo is supported, e.g. http://user:pass@IP:3434/file.yaml
   --file FILE          Local subscription YAML file, for Internal-pushed bootstrap
   --user USER          Basic Auth username for subscription
   --password PASS      Basic Auth password for subscription
   --no-auth            Do not prompt for or send Basic Auth credentials
   --version TAG        Mihomo version tag. Default: latest stable release
-  --binary-path PATH   Use an existing Mihomo binary instead of downloading from GitHub
+  --binary-path PATH   Use an existing Mihomo binary instead of downloading
   --no-start           Install/update files but do not start the service
 
 Update options:
@@ -97,6 +105,22 @@ TUN safety environment:
                        Linux nft auto-redirect toggle, default false for server hosts
   MIHOMO_TUN_PRESERVE_SSH_CLIENT
                        Add the current SSH client IP to route-exclude-address, default true
+
+Mihomo core download environment:
+  MIHOMO_GITHUB_CONNECT_TIMEOUT
+                       GitHub curl connect timeout in seconds, default 15
+  MIHOMO_GITHUB_MAX_TIME
+                       GitHub curl max time in seconds, default 90
+  MIHOMO_NPM_ENGINE_FALLBACK
+                       Use npm engine package before GitHub fallback, default true
+  MIHOMO_NPM_ENGINE_PACKAGE
+                       Override npm package name, default @qpjoy/electron-plugin-tunnel-engine-<platform>
+  MIHOMO_NPM_ENGINE_VERSION
+                       npm engine package version or dist-tag, default latest
+  MIHOMO_NPM_REGISTRY
+                       Optional npm registry URL for the fallback package
+  MIHOMO_NPM_CACHE
+                       Optional npm cache directory. Defaults to a temporary fallback-only cache
 
 Uninstall options:
   --purge              Also remove config, env, downloaded YAML, and Mihomo binary
@@ -243,6 +267,22 @@ print(unquote(password))
 PY
 }
 
+url_has_userinfo() {
+	local url="$1"
+	local rest authority
+
+	case "$url" in
+		http://*|https://*) ;;
+		*) return 1 ;;
+	esac
+
+	rest="${url#*://}"
+	authority="${rest%%/*}"
+	authority="${authority%%\?*}"
+	authority="${authority%%#*}"
+	[[ "$authority" == *@* ]]
+}
+
 normalize_subscription_inputs() {
 	local url="$1"
 	local username="$2"
@@ -283,6 +323,28 @@ detect_asset_selector() {
 	esac
 }
 
+detect_npm_engine_target() {
+	case "$(uname -m)" in
+		x86_64|amd64) echo "linux-x64" ;;
+		aarch64|arm64) echo "linux-arm64" ;;
+		*) return 1 ;;
+	esac
+}
+
+npm_engine_fallback_enabled() {
+	case "$MIHOMO_NPM_ENGINE_FALLBACK" in
+		0|false|FALSE|no|NO|off|OFF) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+github_curl() {
+	curl -fsSL \
+		--connect-timeout "$MIHOMO_GITHUB_CONNECT_TIMEOUT" \
+		--max-time "$MIHOMO_GITHUB_MAX_TIME" \
+		"$@"
+}
+
 resolve_release_asset() {
 	local version="${1:-latest}"
 	local selector="$2"
@@ -298,8 +360,11 @@ resolve_release_asset() {
 	fi
 
 	if [[ "$version" == "latest" ]]; then
-		curl -fsSL "$api_url" -o "$json_file"
-		python3 - "$json_file" "$selector" <<'PY'
+		if ! github_curl "$api_url" -o "$json_file"; then
+			rm -f "$json_file"
+			return 1
+		fi
+		if ! python3 - "$json_file" "$selector" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -319,9 +384,16 @@ for rel in releases:
             sys.exit(0)
 raise SystemExit(1)
 PY
+		then
+			rm -f "$json_file"
+			return 1
+		fi
 	else
-		curl -fsSL "$api_url" -o "$json_file"
-		python3 - "$json_file" "$selector" <<'PY'
+		if ! github_curl "$api_url" -o "$json_file"; then
+			rm -f "$json_file"
+			return 1
+		fi
+		if ! python3 - "$json_file" "$selector" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -338,21 +410,37 @@ for asset in assets:
         sys.exit(0)
 raise SystemExit(1)
 PY
+		then
+			rm -f "$json_file"
+			return 1
+		fi
 	fi
 	rm -f "$json_file"
 }
 
-install_binary() {
+install_binary_from_github() {
 	local version="${1:-latest}"
 	local selector release_info tag download_url tmpdir archive tmpbin
 
-	require_cmd curl
-	require_cmd python3
-	require_cmd gzip
+	if ! command -v curl >/dev/null 2>&1; then
+		log "curl is unavailable; cannot download Mihomo from GitHub"
+		return 1
+	fi
+	if ! command -v python3 >/dev/null 2>&1; then
+		log "python3 is unavailable; cannot parse Mihomo release metadata from GitHub"
+		return 1
+	fi
+	if ! command -v gzip >/dev/null 2>&1; then
+		log "gzip is unavailable; cannot unpack Mihomo GitHub asset"
+		return 1
+	fi
 
 	selector="$(detect_asset_selector)"
-	mapfile -t release_info < <(resolve_release_asset "$version" "$selector") || die "Failed to resolve Mihomo release asset for $selector"
-	[[ "${#release_info[@]}" -ge 2 ]] || die "Unexpected release metadata returned from GitHub."
+	mapfile -t release_info < <(resolve_release_asset "$version" "$selector")
+	if [[ "${#release_info[@]}" -lt 2 ]]; then
+		log "Failed to resolve Mihomo release asset for $selector from GitHub"
+		return 1
+	fi
 	tag="${release_info[0]}"
 	download_url="${release_info[1]}"
 
@@ -361,14 +449,126 @@ install_binary() {
 	tmpbin="$tmpdir/mihomo"
 
 	log "Downloading Mihomo $tag from GitHub"
-	curl -fsSL "$download_url" -o "$archive"
-	gzip -dc "$archive" > "$tmpbin"
-	chmod 755 "$tmpbin"
-	mv "$tmpbin" "$MIHOMO_BIN"
+	if ! github_curl "$download_url" -o "$archive"; then
+		log "Failed to download Mihomo $tag from GitHub"
+		rm -rf "$tmpdir"
+		return 1
+	fi
+	if ! gzip -dc "$archive" > "$tmpbin"; then
+		log "Failed to unpack Mihomo GitHub asset"
+		rm -rf "$tmpdir"
+		return 1
+	fi
+	if ! chmod 755 "$tmpbin" || ! mv "$tmpbin" "$MIHOMO_BIN"; then
+		log "Failed to install Mihomo binary to $MIHOMO_BIN"
+		rm -rf "$tmpdir"
+		return 1
+	fi
 
 	set_env_value MIHOMO_VERSION "$tag"
 	echo "Installed Mihomo $tag to $MIHOMO_BIN"
 	rm -rf "$tmpdir"
+}
+
+install_binary_from_npm_engine() {
+	local target package_name package_version package_spec tmpdir npm_cache npm_output tarball archive tmpbin source_label
+	local -a npm_args tarballs
+
+	if ! command -v npm >/dev/null 2>&1; then
+		log "npm is unavailable; cannot use npm Mihomo engine package"
+		return 1
+	fi
+	if ! command -v tar >/dev/null 2>&1; then
+		log "tar is unavailable; cannot unpack npm Mihomo engine package"
+		return 1
+	fi
+	if ! command -v gzip >/dev/null 2>&1; then
+		log "gzip is unavailable; cannot unpack npm Mihomo engine package"
+		return 1
+	fi
+
+	target="$(detect_npm_engine_target)" || {
+		log "No npm Mihomo engine package mapping for CPU architecture: $(uname -m)"
+		return 1
+	}
+	package_name="${MIHOMO_NPM_ENGINE_PACKAGE:-@qpjoy/electron-plugin-tunnel-engine-$target}"
+	package_spec="$package_name@$MIHOMO_NPM_ENGINE_VERSION"
+	tmpdir="$(mktemp -d)"
+	npm_cache="${MIHOMO_NPM_CACHE:-$tmpdir/npm-cache}"
+
+	npm_args=(--pack-destination "$tmpdir" --silent --cache "$npm_cache")
+	if [[ -n "$MIHOMO_NPM_REGISTRY" ]]; then
+		npm_args+=(--registry "$MIHOMO_NPM_REGISTRY")
+	fi
+
+	log "Trying npm Mihomo engine package: $package_spec"
+	if ! npm_output="$(npm pack "$package_spec" "${npm_args[@]}" 2>&1)"; then
+		log "npm engine package failed while fetching $package_spec"
+		if [[ -n "$npm_output" ]]; then
+			printf "%s\n" "$npm_output" >&2
+		fi
+		rm -rf "$tmpdir"
+		return 1
+	fi
+
+	tarballs=("$tmpdir"/*.tgz)
+	if [[ ! -f "${tarballs[0]}" ]]; then
+		log "npm engine package did not produce a package tarball"
+		rm -rf "$tmpdir"
+		return 1
+	fi
+	tarball="${tarballs[0]}"
+
+	if ! tar -xzf "$tarball" -C "$tmpdir"; then
+		log "Failed to extract npm Mihomo engine package"
+		rm -rf "$tmpdir"
+		return 1
+	fi
+
+	archive="$tmpdir/package/resources/engine/$target/mihomo.gz"
+	if [[ ! -f "$archive" ]]; then
+		log "npm Mihomo engine package is missing resources/engine/$target/mihomo.gz"
+		rm -rf "$tmpdir"
+		return 1
+	fi
+
+	tmpbin="$tmpdir/mihomo"
+	if ! gzip -dc "$archive" > "$tmpbin"; then
+		log "Failed to unpack Mihomo binary from npm engine package"
+		rm -rf "$tmpdir"
+		return 1
+	fi
+	if ! chmod 755 "$tmpbin" || ! mv "$tmpbin" "$MIHOMO_BIN"; then
+		log "Failed to install npm Mihomo engine binary to $MIHOMO_BIN"
+		rm -rf "$tmpdir"
+		return 1
+	fi
+
+	package_version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tmpdir/package/package.json" | head -n 1)"
+	source_label="npm:$package_name"
+	if [[ -n "$package_version" ]]; then
+		source_label="$source_label@$package_version"
+	else
+		source_label="$source_label@$MIHOMO_NPM_ENGINE_VERSION"
+	fi
+	set_env_value MIHOMO_VERSION "$source_label"
+	echo "Installed Mihomo from $source_label to $MIHOMO_BIN"
+	rm -rf "$tmpdir"
+}
+
+install_binary() {
+	local version="${1:-latest}"
+
+	if npm_engine_fallback_enabled; then
+		if install_binary_from_npm_engine; then
+			return 0
+		fi
+		log "npm Mihomo engine install failed; falling back to GitHub"
+	else
+		log "npm Mihomo engine install is disabled; using GitHub"
+	fi
+
+	install_binary_from_github "$version" || die "Failed to install Mihomo from npm engine package or GitHub."
 }
 
 install_binary_from_path() {
@@ -1304,7 +1504,7 @@ main() {
 					*) die "Unknown install option: $1" ;;
 				esac
 			done
-			if [[ "$url_arg_provided" == "true" && -z "$username" && -z "$password" ]]; then
+			if [[ "$url_arg_provided" == "true" && "$no_auth" != "true" && -z "$username" && -z "$password" ]] && ! url_has_userinfo "$url"; then
 				no_auth="true"
 			fi
 			install_command "$url" "$username" "$password" "$version" "$autostart" "$binary_path" "$file_path" "$no_auth"
@@ -1326,7 +1526,7 @@ main() {
 					*) die "Unknown update-subscription option: $1" ;;
 				esac
 			done
-			if [[ "$url_arg_provided" == "true" && -z "$username" && -z "$password" ]]; then
+			if [[ "$url_arg_provided" == "true" && "$no_auth" != "true" && -z "$username" && -z "$password" ]] && ! url_has_userinfo "$url"; then
 				no_auth="true"
 			fi
 			update_subscription_command "$url" "$username" "$password" "$file_path" "$no_auth"
