@@ -207,8 +207,10 @@ Admin 的 AWX Gate 会把当前 Provider、Token、Timeout、Wait 选项合并�
 同一页的 `Internal 基础系统` 现在也承担 User Center 和 Home relay bootstrap：
 
 1. `User Center` 面板先执行 `Bootstrap Users`，再按需创建真实用户并绑定
-   `mx-admin` / `mx-user` / `mx-guest` 等角色。
-2. 旧 HDO 账号可以直接用 `Import JSON` 导入。当前兼容数组格式
+   `mx-admin` / `mx-user` / `mx-guest` 等角色。Postgres store 启动时也会执行同一套
+   User Center seed：内置 `admin` 保持 `mx-admin`，旧 HDO `user.json` 中其余账号会以
+   idempotent 方式补齐到数据库，已有且密码/应用域完整的账号不会重复导入。
+2. 旧 HDO 账号仍可以直接用 `Import JSON` 手动导入。当前兼容数组格式
    `{ "account": "...", "password": "...", "user_name": "..." }`，导入时会把
    `account` 作为登录名、`user_name` 作为展示名、`password` 写入 User Center
    `local-password` credential；后续可在抽屉里补 profile、地址、部门、外部 id 和
