@@ -1,0 +1,316 @@
+@import '@qpjoy/ui-design-neon-void/styles.css';
+
+body {
+  background: #171b28;
+  color: #eef3f8;
+}
+
+.luopan-shell {
+  min-height: 100vh;
+  background:
+    linear-gradient(90deg, rgba(43, 246, 210, 0.08) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(122, 147, 255, 0.05) 1px, transparent 1px),
+    #171b28;
+  background-size: 48px 48px;
+}
+
+.luopan-sidebar {
+  border-right: 1px solid rgba(81, 108, 163, 0.44);
+  background: rgba(18, 23, 34, 0.96);
+}
+
+.brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 26px 22px;
+}
+
+.brand-lockup h1 {
+  margin: 0;
+  color: #f7fafc;
+  font-size: 28px;
+  line-height: 1.05;
+  font-weight: 900;
+}
+
+.brand-lockup p {
+  margin: 4px 0 0;
+  color: rgba(229, 237, 248, 0.58);
+  font-size: 13px;
+}
+
+.brand-mark {
+  display: grid;
+  width: 52px;
+  height: 52px;
+  place-items: center;
+  border-radius: 8px;
+  background: #2bf6d2;
+  color: #061311;
+  font-weight: 900;
+  box-shadow: 0 0 26px rgba(43, 246, 210, 0.28);
+}
+
+.nav-list {
+  padding: 0 16px;
+}
+
+.nav-item {
+  min-height: 62px;
+  margin-bottom: 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: #dfe7f3;
+  font-weight: 800;
+}
+
+.nav-item.q-item--active {
+  border-color: rgba(43, 246, 210, 0.72);
+  background: rgba(43, 246, 210, 0.13);
+  color: #f8fffd;
+}
+
+.runtime-mini {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  left: 18px;
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid rgba(81, 108, 163, 0.48);
+  border-radius: 8px;
+  background: rgba(12, 16, 25, 0.72);
+}
+
+.runtime-mini span {
+  color: rgba(229, 237, 248, 0.56);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.runtime-mini strong {
+  overflow-wrap: anywhere;
+}
+
+.console-page {
+  min-height: 100vh;
+  padding: 28px;
+  color: #eef3f8;
+}
+
+.console-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 20px;
+}
+
+.console-toolbar h2 {
+  margin: 0;
+  font-size: 34px;
+  line-height: 1.12;
+  font-weight: 900;
+}
+
+.toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.metric-panel,
+.surface-panel {
+  border: 1px solid rgba(81, 108, 163, 0.5);
+  border-radius: 8px;
+  background: rgba(24, 29, 44, 0.88);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.metric-panel {
+  display: grid;
+  gap: 8px;
+  min-height: 116px;
+  padding: 16px;
+}
+
+.metric-panel span,
+.metric-panel small,
+.runtime-state span,
+.config-pair span {
+  color: rgba(229, 237, 248, 0.55);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.metric-panel strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #f9fbff;
+  font-size: 22px;
+  line-height: 1.15;
+}
+
+.work-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 0.42fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.main-column,
+.side-column {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.surface-panel {
+  padding: 20px;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.panel-heading h3 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.2;
+  font-weight: 900;
+}
+
+.operations-panel :deep(.q-table__container),
+.operations-panel :deep(.q-table__middle) {
+  background: transparent;
+}
+
+.task-table {
+  background: transparent;
+}
+
+.boundary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.boundary-node {
+  display: grid;
+  gap: 10px;
+  min-height: 146px;
+  padding: 16px;
+  border: 1px solid rgba(81, 108, 163, 0.44);
+  border-radius: 8px;
+  background: rgba(11, 15, 24, 0.48);
+}
+
+.boundary-node .q-icon {
+  color: #2bf6d2;
+  font-size: 28px;
+}
+
+.boundary-node strong {
+  font-size: 16px;
+}
+
+.boundary-node span {
+  color: rgba(229, 237, 248, 0.58);
+  line-height: 1.45;
+}
+
+.runtime-state {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.runtime-state div,
+.config-pair {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(81, 108, 163, 0.44);
+  border-radius: 8px;
+  background: rgba(11, 15, 24, 0.5);
+}
+
+.runtime-state strong,
+.config-pair strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #f9fbff;
+  font-size: 18px;
+}
+
+.runtime-message {
+  margin: 14px 0 0;
+  color: rgba(229, 237, 248, 0.72);
+  line-height: 1.55;
+}
+
+.config-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.event-log {
+  display: grid;
+  gap: 8px;
+  max-height: 214px;
+  overflow: auto;
+}
+
+.event-log p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: rgba(229, 237, 248, 0.72);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@media (max-width: 1120px) {
+  .work-grid,
+  .kpi-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .boundary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .console-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+@media (max-width: 720px) {
+  .console-page {
+    padding: 18px;
+  }
+
+  .boundary-grid,
+  .runtime-state {
+    grid-template-columns: 1fr;
+  }
+}

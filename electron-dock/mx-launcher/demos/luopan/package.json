@@ -1,0 +1,34 @@
+{
+  "name": "@qpjoy/luopan-demo",
+  "productName": "Luopan",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "author": "QPJoy",
+  "description": "Luopan Quasar Electron demo that consumes MX Launcher as a product-facing npm package.",
+  "scripts": {
+    "dev": "quasar dev -m electron",
+    "start": "pnpm dev",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
+    "check": "pnpm run typecheck",
+    "build": "quasar build -m electron --skip-pkg",
+    "package": "CI=true quasar build -m electron"
+  },
+  "dependencies": {
+    "@qpjoy/electron-launcher": "workspace:*",
+    "@qpjoy/ui-design-neon-void": "workspace:*",
+    "@quasar/extras": "1.18.0",
+    "quasar": "2.20.1",
+    "vue": "3.5.39",
+    "vue-router": "4.6.4"
+  },
+  "devDependencies": {
+    "@quasar/app-vite": "2.4.0",
+    "@types/node": "22.19.21",
+    "electron": "34.5.8",
+    "electron-builder": "25.1.8",
+    "typescript": "5.9.3",
+    "vite": "7.3.6",
+    "vue-tsc": "2.2.12"
+  }
+}

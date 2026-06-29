@@ -1,0 +1,4 @@
+.quasar/
+.vue-global-types/
+dist/
+node_modules/
