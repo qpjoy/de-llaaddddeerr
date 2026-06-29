@@ -1242,6 +1242,29 @@ select {
   background: var(--panel-quiet);
 }
 
+.user-default-oversea,
+.user-create-oversea {
+  min-height: 40px;
+}
+
+.user-import-button {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.user-import-button input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.user-import-button.is-disabled {
+  pointer-events: none;
+  opacity: 0.55;
+}
+
 .user-admin-table .app-table-row {
   grid-template-columns: minmax(190px, 1.1fr) minmax(150px, 0.85fr) minmax(190px, 1fr) minmax(170px, 0.9fr) minmax(160px, 0.82fr) minmax(90px, 0.48fr) minmax(142px, 0.72fr);
   min-width: 1120px;

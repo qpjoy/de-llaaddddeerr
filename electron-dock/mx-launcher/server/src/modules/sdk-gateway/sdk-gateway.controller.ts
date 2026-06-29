@@ -1,6 +1,7 @@
 import { BadRequestException, Body, Controller, Get, Inject, Post, UnauthorizedException } from '@nestjs/common';
 
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
+import { userMatchesLogin } from '../../store/domain.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
 import type { CreateServiceAccountInput, CreateUserInput, SdkGatewayAccessInput } from '../../types.js';
@@ -78,6 +79,7 @@ export class SdkGatewayController {
         appId: nullableString(body.appId) ?? 'h2o',
         installId: nullableString(body.installId),
         userId: nullableString(body.userId),
+        sourceAppId: nullableString(body.sourceAppId) ?? nullableString(body.source_app_id),
         requestedBy: nullableString(body.requestedBy) ?? 'sdk-gateway',
         scopes: stringArray(body.scopes),
         requestId: nullableString(body.requestId) ?? undefined
@@ -90,12 +92,14 @@ export class SdkGatewayController {
     const password = nullableString(body.password);
     if (!username || !password) throw new UnauthorizedException('username and password are required');
     const users = await this.store.listUserCenterUsers();
-    const normalized = username.toLowerCase();
-    const user = users.find((item) => (
-      item.status === 'active'
-      && [item.userId, item.email, item.displayName].some((value) => value.toLowerCase() === normalized)
-    ));
+    const user = users.find((item) => item.status === 'active' && userMatchesLogin(item, username));
     if (!user) throw new UnauthorizedException('User Center account is not active');
+    const verification = await this.store.verifyUserCenterPassword({
+      userId: user.userId,
+      password,
+      requestId: nullableString(body.requestId)
+    });
+    if (!verification.ok) throw new UnauthorizedException('invalid credentials');
     const issued = await this.store.issueUserCenterToken({
       subjectKind: 'user',
       subjectId: user.userId,
@@ -141,6 +145,8 @@ function toAccessInput(body: Record<string, unknown>): SdkGatewayAccessInput {
     token: nullableString(body.token),
     audience: nullableString(body.audience),
     routeId: nullableString(body.routeId) ?? 'sdk.identity.context',
+    appId: nullableString(body.appId),
+    sourceAppId: nullableString(body.sourceAppId) ?? nullableString(body.source_app_id),
     requestId: nullableString(body.requestId)
   };
 }
@@ -148,10 +154,19 @@ function toAccessInput(body: Record<string, unknown>): SdkGatewayAccessInput {
 function toCreateUserInput(body: Record<string, unknown>): CreateUserInput {
   return {
     userId: nullableString(body.userId),
+    account: nullableString(body.account),
+    username: nullableString(body.username) ?? nullableString(body.user_name),
     email: nullableString(body.email),
     displayName: nullableString(body.displayName),
+    password: nullableString(body.password),
     roleIds: stringArray(body.roleIds),
     orgIds: stringArray(body.orgIds),
+    appAccess: asRecord(body.appAccess),
+    homeAppId: nullableString(body.homeAppId),
+    registeredByAppId: nullableString(body.registeredByAppId) ?? nullableString(body.sourceAppId),
+    allowedAppIds: stringArray(body.allowedAppIds),
+    deniedAppIds: stringArray(body.deniedAppIds),
+    requestedBy: nullableString(body.requestedBy),
     requestId: nullableString(body.requestId)
   };
 }

@@ -208,12 +208,24 @@ Admin 的 AWX Gate 会把当前 Provider、Token、Timeout、Wait 选项合并�
 
 1. `User Center` 面板先执行 `Bootstrap Users`，再按需创建真实用户并绑定
    `mx-admin` / `mx-user` / `mx-guest` 等角色。
-2. `Home Relay Enrollment` 面板填入 Domestic site 和 Home WireGuard public key，创建匿名
+2. 旧 HDO 账号可以直接用 `Import JSON` 导入。当前兼容数组格式
+   `{ "account": "...", "password": "...", "user_name": "..." }`，导入时会把
+   `account` 作为登录名、`user_name` 作为展示名、`password` 写入 User Center
+   `local-password` credential；后续可在抽屉里补 profile、地址、部门、外部 id 和
+   attributes JSON。
+3. `Default Oversea` 打开时，新建或导入用户会自动绑定当前可用 Oversea site，
+   Internal 会生成用户级 entitlement/subscription runtime。没有 ready Oversea site 时，
+   账号仍会正常导入，之后再手动分配 `oversea-main`、`oversea-mx` 或其他站点。
+4. `AppCenter` 的应用编辑抽屉配置 `Access policy`：MX-H2I/AppCenter 可以 public，
+   H2O 默认 private 且绑定 MX-H2I 注册域，自定义业务应用默认 private。Luopan 注册用户写
+   `registeredByAppId=luopan` 或 `homeAppId=luopan` 后，只能看到 Luopan 和公开应用；
+   TEST 账号需要跨应用时，在用户 `Allowed Apps` 或应用 `Allow Users` 里显式加入。
+5. `Home Relay Enrollment` 面板填入 Domestic site 和 Home WireGuard public key，创建匿名
    HDO enrollment。Internal 会分配 `10.91.0.0/16` guest lease，登录用户后再走
    `10.89.0.0/16` user lease；不要使用 `100.88.*`。
-3. Enrollment 返回的 lease IP 和 public key 会回填到 Domestic peer draft。切回 Domestic
+6. Enrollment 返回的 lease IP 和 public key 会回填到 Domestic peer draft。切回 Domestic
    `Deployment Progress` 后，`Home relay peer` quick fields 会自动带出这些值。
-4. Domestic 的默认后台路径是 `Prepare Domestic Relay AWX` -> `Domestic relay readonly probe`
+7. Domestic 的默认后台路径是 `Prepare Domestic Relay AWX` -> `Domestic relay readonly probe`
    -> `Domestic relay peer append` handoff -> `AWX Sync Plan` -> `Sync AWX Credential`
    -> `Sync AWX Objects` -> `Launch AWX Job`。真实 WG mutation 由 AWX job 或 SSH fallback
    执行，Admin API 只负责 gate、审计、evidence 和参数组装。

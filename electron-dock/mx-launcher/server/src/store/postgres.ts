@@ -7,6 +7,9 @@ import { PlatformRecordEntity, type PlatformRecordRow } from '../db/entities.js'
 import type {
   AnonymousEnrollment,
   AnonymousEnrollmentRequest,
+  AppCenterAccessContextInput,
+  AppCenterAccessDecision,
+  AppCenterAccessInput,
   AppCenterApp,
   AppCenterAppInput,
   AppOnboardingDefaults,
@@ -39,6 +42,8 @@ import type {
   GatewayRuntimeConfig,
   GatewayRuntimeConfigInput,
   IdentityLinkRequest,
+  ImportUserCenterUsersInput,
+  ImportUserCenterUsersResult,
   IssueTokenInput,
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
@@ -107,6 +112,9 @@ import type {
   UserCenterTenant,
   UserCenterTokenRecord,
   UserCenterUser,
+  UserCenterUserCredential,
+  UserPasswordVerificationInput,
+  UserPasswordVerificationResult,
   UserOverseaEntitlement,
   UserOverseaEntitlementInput,
   UserOverseaAccountSyncReport,
@@ -164,6 +172,7 @@ import {
   createConfigSnapshot,
   createSdkGatewayManifest,
   defaultSiteSlotAccessAccountNames,
+  createUserCenterUserCredential,
   createServiceAccountPrincipalFromRecord,
   createUserCenterServiceAccount,
   createUserCenterTokenRecord,
@@ -171,13 +180,16 @@ import {
   createUserPrincipalFromRecord,
   evaluateCoreDnsConfigMapApplyGate,
   evaluateGatewayConfigMapApplyGate,
+  evaluateAppCenterAccess,
   gatewayRuntimeConfigRequestInput,
   gatewayRuntimeConfigForInput,
   evaluateSdkGatewayRoute,
   evaluateDnsPolicy,
+  emptyUserCredentialSummary,
   hashToken,
   introspectUserCenterToken,
   introspectShadowToken,
+  normalizeImportUserCenterRow,
   normalizeTestStatus,
   normalizeLauncherNetworkMihomoSite,
   normalizeUpdatePolicy,
@@ -187,8 +199,11 @@ import {
   renderCoreDnsConfigMap,
   renderGatewayConfigMap,
   resolvePrincipalContext,
+  userCredentialSummary,
+  userMatchesLogin,
   userOverseaAccountName,
   userOverseaEntitlementId,
+  verifyUserCenterCredential,
   required,
   MX_H2I_PRODUCT_ID,
   assertLauncherNetworkLeaseEntitlement,
@@ -213,6 +228,7 @@ type RecordKind =
   | 'iam-org'
   | 'iam-role'
   | 'iam-user'
+  | 'iam-user-credential'
   | 'user-oversea-entitlement'
   | 'user-oversea-account-sync-report'
   | 'iam-service-account'
@@ -782,15 +798,19 @@ export class PostgresStore implements PlatformStore {
     }
     const admin = await this.createUserCenterUser({
       userId: 'usr_demo_admin',
+      account: 'admin',
       email: 'admin@mx.local',
       displayName: 'MX Demo Admin',
+      password: 'adminsj8kx1sq6xc',
       roleIds: ['mx-admin'],
       requestId: 'bootstrap-user-center'
     });
     const user = await this.createUserCenterUser({
       userId: 'usr_demo_user',
+      account: 'user',
       email: 'user@mx.local',
       displayName: 'MX Demo User',
+      password: 'user-demo-password',
       roleIds: ['mx-user'],
       requestId: 'bootstrap-user-center'
     });
@@ -812,11 +832,20 @@ export class PostgresStore implements PlatformStore {
   }
 
   async listUserCenterUsers(): Promise<UserCenterUser[]> {
-    return (await this.listRecords<UserCenterUser>('iam-user')).sort((a, b) => a.userId.localeCompare(b.userId));
+    const users = await this.listRecords<UserCenterUser>('iam-user');
+    return (await Promise.all(users.map((user) => this.withUserCredentialSummary(user))))
+      .sort((a, b) => a.userId.localeCompare(b.userId));
   }
 
   async createUserCenterUser(input: CreateUserInput): Promise<UserCenterUser> {
-    const user = createUserCenterUser(input);
+    const previous = await this.findUserCenterUserForInput(input);
+    const draft = createUserCenterUser(input, previous, previous?.credential ?? emptyUserCredentialSummary());
+    const previousCredential = await this.getRecord<UserCenterUserCredential>('iam-user-credential', draft.userId);
+    const credential = input.password !== undefined && input.password !== null
+      ? createUserCenterUserCredential(draft.userId, input.password, input, previousCredential)
+      : previousCredential;
+    if (credential) await this.saveRecord('iam-user-credential', credential.userId, credential, this.config.siteId);
+    const user = createUserCenterUser(input, previous, userCredentialSummary(credential));
     await this.upsertRecord('iam-user', user.userId, user, this.config.siteId);
     await this.recordAudit({
       eventType: 'iam.user.upserted',
@@ -824,12 +853,85 @@ export class PostgresStore implements PlatformStore {
       userId: user.userId,
       requestId: input.requestId ?? null,
       metadata: {
+        account: user.account,
         email: user.email,
         roleIds: user.roleIds,
-        status: user.status
+        status: user.status,
+        hasPassword: user.credential.hasPassword
       }
     });
+    const siteIds = normalizeEntitlementSiteIds(input.defaultOverseaSiteIds);
+    if (input.provisionOversea === true && siteIds.length > 0) {
+      await this.upsertUserOverseaEntitlement({
+        userId: user.userId,
+        siteIds,
+        requestedBy: input.requestedBy ?? 'user-center',
+        requestId: input.requestId
+      });
+    }
     return user;
+  }
+
+  async importUserCenterUsers(input: ImportUserCenterUsersInput): Promise<ImportUserCenterUsersResult> {
+    const users: UserCenterUser[] = [];
+    const entitlements: UserOverseaEntitlement[] = [];
+    const failures: ImportUserCenterUsersResult['failures'] = [];
+    let imported = 0;
+    let updated = 0;
+    for (const [index, row] of input.users.entries()) {
+      const account = typeof row.account === 'string' ? row.account : typeof row.user_name === 'string' ? row.user_name : null;
+      try {
+        const userInput = normalizeImportUserCenterRow(row, input);
+        const previous = await this.findUserCenterUserForInput(userInput);
+        const user = await this.createUserCenterUser(userInput);
+        users.push(user);
+        if (previous) updated += 1;
+        else imported += 1;
+        const siteIds = normalizeEntitlementSiteIds(input.defaultOverseaSiteIds);
+        if (input.provisionOversea === true && siteIds.length > 0) {
+          const entitlement = await this.getUserOverseaEntitlement(user.userId);
+          if (entitlement) entitlements.push(entitlement);
+        }
+      } catch (error) {
+        failures.push({
+          index,
+          account,
+          reason: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    return {
+      imported,
+      updated,
+      failed: failures.length,
+      users,
+      entitlements,
+      failures,
+      generatedAt: new Date().toISOString()
+    };
+  }
+
+  async verifyUserCenterPassword(input: UserPasswordVerificationInput): Promise<UserPasswordVerificationResult> {
+    const userId = input.userId?.trim();
+    if (!userId) {
+      return { userId: '', ok: false, hasPassword: false, reason: 'userId is required' };
+    }
+    const credential = await this.getRecord<UserCenterUserCredential>('iam-user-credential', userId);
+    const hasPassword = Boolean(credential);
+    const ok = input.password ? verifyUserCenterCredential(input.password, credential) : false;
+    await this.recordAudit({
+      eventType: ok ? 'auth.password.verified' : 'auth.password.rejected',
+      actorKind: 'user',
+      userId,
+      requestId: input.requestId ?? null,
+      metadata: { hasPassword }
+    });
+    return {
+      userId,
+      ok,
+      hasPassword,
+      reason: ok ? 'password accepted' : hasPassword ? 'invalid credentials' : 'password is not configured'
+    };
   }
 
   async listUserOverseaEntitlements(): Promise<UserOverseaEntitlement[]> {
@@ -1168,7 +1270,25 @@ export class PostgresStore implements PlatformStore {
       audience: input.audience,
       requestId: input.requestId
     });
-    const decision = evaluateSdkGatewayRoute(introspection.principal, input.routeId);
+    const routeDecision = evaluateSdkGatewayRoute(introspection.principal, input.routeId);
+    const appAccess = input.appId
+      ? await this.evaluateAppCenterAccess({
+        appId: input.appId,
+        userId: introspection.principal?.userId,
+        sourceAppId: input.sourceAppId,
+        includeHidden: true,
+        includeDisabled: false,
+        requestId: input.requestId
+      })
+      : null;
+    const decision: SdkGatewayAccessDecision = appAccess && !appAccess.allowed
+      ? {
+        ...routeDecision,
+        allowed: false,
+        appAccess,
+        reason: `SDK route scope accepted but app access denied: ${appAccess.reason}`
+      }
+      : { ...routeDecision, appAccess };
     await this.recordAudit({
       eventType: 'sdk.gateway.access.evaluated',
       actorKind: decision.principal?.kind ?? 'unknown',
@@ -1179,6 +1299,8 @@ export class PostgresStore implements PlatformStore {
         allowed: decision.allowed,
         matchedScopes: decision.matchedScopes,
         missingScopes: decision.missingScopes,
+        appId: input.appId ?? null,
+        appAccessAllowed: appAccess?.allowed ?? null,
         reason: decision.reason
       }
     });
@@ -1198,6 +1320,14 @@ export class PostgresStore implements PlatformStore {
       requestId: input.requestId
     });
     const app = await this.getAppCenterApp(appId);
+    const appAccess = await this.evaluateAppCenterAccess({
+      appId,
+      userId: principalContext.principal.userId ?? enrollment?.userId ?? input.userId ?? null,
+      sourceAppId: input.sourceAppId,
+      includeHidden: true,
+      includeDisabled: false,
+      requestId: input.requestId
+    });
     const launcherNetwork = await this.createLauncherNetworkSnapshot({
       installId: enrollment?.installId ?? input.installId ?? undefined,
       deviceId: enrollment?.deviceId ?? input.deviceId ?? undefined,
@@ -1228,7 +1358,8 @@ export class PostgresStore implements PlatformStore {
     const snapshot = createConfigPolicySnapshot(this.config, input, {
       snapshotId: `polsnap_${randomUUID()}`,
       version: await this.countRecords('config-policy-snapshot') + 1,
-      app,
+      app: appAccess.allowed ? app : null,
+      appAccess,
       principal: principalContext.principal,
       enrollment,
       launcherNetwork,
@@ -1763,8 +1894,25 @@ export class PostgresStore implements PlatformStore {
     );
   }
 
-  async listAppCenterApps(): Promise<AppCenterApp[]> {
-    return (await this.listRecords<AppCenterApp>('app-center-app')).sort((a, b) => a.appId.localeCompare(b.appId));
+  async listAppCenterApps(input: AppCenterAccessContextInput = {}): Promise<AppCenterApp[]> {
+    const apps = (await this.listRecords<AppCenterApp>('app-center-app')).sort((a, b) => a.appId.localeCompare(b.appId));
+    if (!input.userId && !input.sourceAppId && input.includeHidden !== false && input.includeDisabled !== false) {
+      return apps;
+    }
+    const decisions = await Promise.all(apps.map((app) => this.evaluateAppCenterAccess({ ...input, appId: app.appId })));
+    const visibleAppIds = new Set(decisions.filter((decision) => decision.visible).map((decision) => decision.appId));
+    return apps.filter((app) => visibleAppIds.has(app.appId));
+  }
+
+  async evaluateAppCenterAccess(input: AppCenterAccessInput): Promise<AppCenterAccessDecision> {
+    const app = await this.getAppCenterApp(input.appId);
+    const user = input.userId ? await this.getRecord<UserCenterUser>('iam-user', input.userId) : null;
+    const principal = user ? createUserPrincipalFromRecord(user, await this.listUserCenterRoles()) : null;
+    const grants = (await this.listRecords<PermissionGrant>('permission-grant')).filter((grant) => (
+      grant.appId === input.appId
+      && (!input.userId || grant.userId === input.userId)
+    ));
+    return evaluateAppCenterAccess(app, input, principal, user, grants);
   }
 
   async getAppCenterApp(appId: string): Promise<AppCenterApp | null> {
@@ -2111,7 +2259,15 @@ export class PostgresStore implements PlatformStore {
   async requestPermission(input: PermissionRequestInput): Promise<PermissionGrant> {
     const app = await this.getAppCenterApp(input.appId);
     const requestedScopes = input.scopes.length > 0 ? input.scopes : [];
-    const allowedScopes = app
+    const access = await this.evaluateAppCenterAccess({
+      appId: input.appId,
+      userId: input.userId,
+      sourceAppId: input.sourceAppId,
+      includeHidden: true,
+      includeDisabled: true,
+      requestId: input.requestId ?? null
+    });
+    const allowedScopes = app && access.allowed
       ? requestedScopes.filter((scope) => app.permissions.includes(scope))
       : [];
     const deniedScopes = requestedScopes.filter((scope) => !allowedScopes.includes(scope));
@@ -2127,6 +2283,9 @@ export class PostgresStore implements PlatformStore {
       requestedBy: input.requestedBy,
       installId: input.installId ?? null,
       userId: input.userId ?? null,
+      sourceAppId: input.sourceAppId ?? null,
+      accessAllowed: access.allowed,
+      accessReason: access.reason,
       createdAt: new Date().toISOString()
     };
     await this.saveRecord('permission-grant', grant.grantId, grant, this.config.siteId);
@@ -2139,6 +2298,8 @@ export class PostgresStore implements PlatformStore {
       requestId: input.requestId ?? null,
       metadata: {
         decision,
+        accessAllowed: access.allowed,
+        accessReason: access.reason,
         scopes: requestedScopes,
         allowedScopes,
         deniedScopes,
@@ -3293,6 +3454,26 @@ export class PostgresStore implements PlatformStore {
   private async latestSiteSlotPlanForSite(siteId: string): Promise<SiteSlotPlan | null> {
     const plans = await this.listSiteSlotPlans();
     return plans.find((plan) => plan.siteId === siteId) ?? null;
+  }
+
+  private async findUserCenterUserForInput(input: CreateUserInput): Promise<UserCenterUser | null> {
+    const userId = input.userId?.trim();
+    if (userId) {
+      const user = await this.getRecord<UserCenterUser>('iam-user', userId);
+      if (user) return user;
+    }
+    const candidates = [input.account, input.username, input.email].filter((value): value is string => typeof value === 'string');
+    if (!candidates.length) return null;
+    const users = await this.listRecords<UserCenterUser>('iam-user');
+    return users.find((user) => candidates.some((candidate) => userMatchesLogin(user, candidate))) ?? null;
+  }
+
+  private async withUserCredentialSummary(user: UserCenterUser): Promise<UserCenterUser> {
+    const credential = await this.getRecord<UserCenterUserCredential>('iam-user-credential', user.userId);
+    return {
+      ...user,
+      credential: userCredentialSummary(credential)
+    };
   }
 
   private async principalForSubject(

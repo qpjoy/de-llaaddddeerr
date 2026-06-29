@@ -327,6 +327,7 @@ function toSnapshotInput(body: Record<string, unknown>): ConfigPolicySnapshotInp
     installId: nullableString(body.installId),
     deviceId: nullableString(body.deviceId),
     appId: nullableString(body.appId),
+    sourceAppId: nullableString(body.sourceAppId) ?? nullableString(body.source_app_id),
     productId: nullableString(body.productId),
     channel: nullableString(body.channel),
     userId: nullableString(body.userId),

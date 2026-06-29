@@ -46,6 +46,7 @@ import {
   createConfigPolicySnapshot,
   createSdkGatewayManifest,
   defaultSiteSlotAccessAccountNames,
+  createUserCenterUserCredential,
   createServiceAccountPrincipalFromRecord,
   createUserCenterServiceAccount,
   createUserCenterTokenRecord,
@@ -56,10 +57,13 @@ import {
   gatewayRuntimeConfigRequestInput,
   gatewayRuntimeConfigForInput,
   evaluateSdkGatewayRoute,
+  emptyUserCredentialSummary,
+  evaluateAppCenterAccess,
   evaluateDnsPolicy,
   hashToken,
   introspectUserCenterToken,
   introspectShadowToken,
+  normalizeImportUserCenterRow,
   normalizeTestStatus,
   normalizeLauncherNetworkMihomoSite,
   normalizeUpdatePolicy,
@@ -69,8 +73,11 @@ import {
   renderCoreDnsConfigMap,
   renderGatewayConfigMap,
   resolvePrincipalContext,
+  userCredentialSummary,
+  userMatchesLogin,
   userOverseaAccountName,
   userOverseaEntitlementId,
+  verifyUserCenterCredential,
   required,
   MX_H2I_PRODUCT_ID,
   assertLauncherNetworkLeaseEntitlement,
@@ -86,6 +93,9 @@ import type { PlatformStore } from './platform-store.js';
 import type {
   AnonymousEnrollment,
   AnonymousEnrollmentRequest,
+  AppCenterAccessContextInput,
+  AppCenterAccessDecision,
+  AppCenterAccessInput,
   AppCenterApp,
   AppCenterAppInput,
   AppOnboardingDefaults,
@@ -118,6 +128,8 @@ import type {
   GatewayRuntimeConfig,
   GatewayRuntimeConfigInput,
   IdentityLinkRequest,
+  ImportUserCenterUsersInput,
+  ImportUserCenterUsersResult,
   IssueTokenInput,
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
@@ -186,6 +198,9 @@ import type {
   UserCenterTenant,
   UserCenterTokenRecord,
   UserCenterUser,
+  UserCenterUserCredential,
+  UserPasswordVerificationInput,
+  UserPasswordVerificationResult,
   UserOverseaEntitlement,
   UserOverseaEntitlementInput,
   UserOverseaAccountSyncReport,
@@ -224,6 +239,7 @@ export class MemoryStore implements PlatformStore {
   private readonly orgs = new Map<string, UserCenterOrg>();
   private readonly roles = new Map<string, UserCenterRole>();
   private readonly users = new Map<string, UserCenterUser>();
+  private readonly userCredentials = new Map<string, UserCenterUserCredential>();
   private readonly userOverseaEntitlements = new Map<string, UserOverseaEntitlement>();
   private readonly userOverseaAccountSyncReports = new Map<string, UserOverseaAccountSyncReport>();
   private readonly serviceAccounts = new Map<string, UserCenterServiceAccount>();
@@ -690,15 +706,19 @@ export class MemoryStore implements PlatformStore {
     }
     const admin = this.createUserCenterUser({
       userId: 'usr_demo_admin',
+      account: 'admin',
       email: 'admin@mx.local',
       displayName: 'MX Demo Admin',
+      password: 'adminsj8kx1sq6xc',
       roleIds: ['mx-admin'],
       requestId: 'bootstrap-user-center'
     });
     const user = this.createUserCenterUser({
       userId: 'usr_demo_user',
+      account: 'user',
       email: 'user@mx.local',
       displayName: 'MX Demo User',
+      password: 'user-demo-password',
       roleIds: ['mx-user'],
       requestId: 'bootstrap-user-center'
     });
@@ -716,11 +736,20 @@ export class MemoryStore implements PlatformStore {
   }
 
   listUserCenterUsers(): UserCenterUser[] {
-    return [...this.users.values()].sort((a, b) => a.userId.localeCompare(b.userId));
+    return [...this.users.values()]
+      .map((user) => this.withUserCredentialSummary(user))
+      .sort((a, b) => a.userId.localeCompare(b.userId));
   }
 
   createUserCenterUser(input: CreateUserInput): UserCenterUser {
-    const user = createUserCenterUser(input);
+    const previous = this.findUserCenterUserForInput(input);
+    const draft = createUserCenterUser(input, previous, previous?.credential ?? emptyUserCredentialSummary());
+    const previousCredential = this.userCredentials.get(draft.userId) ?? null;
+    const credential = input.password !== undefined && input.password !== null
+      ? createUserCenterUserCredential(draft.userId, input.password, input, previousCredential)
+      : previousCredential;
+    if (credential) this.userCredentials.set(draft.userId, credential);
+    const user = createUserCenterUser(input, previous, userCredentialSummary(credential));
     this.users.set(user.userId, user);
     this.recordAudit({
       eventType: 'iam.user.upserted',
@@ -728,12 +757,100 @@ export class MemoryStore implements PlatformStore {
       userId: user.userId,
       requestId: input.requestId ?? null,
       metadata: {
+        account: user.account,
         email: user.email,
         roleIds: user.roleIds,
-        status: user.status
+        status: user.status,
+        hasPassword: user.credential.hasPassword
       }
     });
+    const siteIds = normalizeEntitlementSiteIds(input.defaultOverseaSiteIds);
+    if (input.provisionOversea === true && siteIds.length > 0) {
+      this.upsertUserOverseaEntitlement({
+        userId: user.userId,
+        siteIds,
+        requestedBy: input.requestedBy ?? 'user-center',
+        requestId: input.requestId
+      });
+    }
     return user;
+  }
+
+  importUserCenterUsers(input: ImportUserCenterUsersInput): ImportUserCenterUsersResult {
+    const users: UserCenterUser[] = [];
+    const entitlements: UserOverseaEntitlement[] = [];
+    const failures: ImportUserCenterUsersResult['failures'] = [];
+    let imported = 0;
+    let updated = 0;
+    input.users.forEach((row, index) => {
+      const account = typeof row.account === 'string' ? row.account : typeof row.user_name === 'string' ? row.user_name : null;
+      try {
+        const userInput = normalizeImportUserCenterRow(row, input);
+        const previous = this.findUserCenterUserForInput(userInput);
+        const user = this.createUserCenterUser(userInput);
+        users.push(user);
+        if (previous) updated += 1;
+        else imported += 1;
+        const siteIds = normalizeEntitlementSiteIds(input.defaultOverseaSiteIds);
+        if (input.provisionOversea === true && siteIds.length > 0) {
+          const entitlement = this.getUserOverseaEntitlement(user.userId);
+          if (entitlement) entitlements.push(entitlement);
+        }
+      } catch (error) {
+        failures.push({
+          index,
+          account,
+          reason: error instanceof Error ? error.message : String(error)
+        });
+      }
+    });
+    return {
+      imported,
+      updated,
+      failed: failures.length,
+      users,
+      entitlements,
+      failures,
+      generatedAt: new Date().toISOString()
+    };
+  }
+
+  verifyUserCenterPassword(input: UserPasswordVerificationInput): UserPasswordVerificationResult {
+    const userId = input.userId?.trim();
+    if (!userId) {
+      return { userId: '', ok: false, hasPassword: false, reason: 'userId is required' };
+    }
+    const credential = this.userCredentials.get(userId) ?? null;
+    const hasPassword = Boolean(credential);
+    const ok = input.password ? verifyUserCenterCredential(input.password, credential) : false;
+    this.recordAudit({
+      eventType: ok ? 'auth.password.verified' : 'auth.password.rejected',
+      actorKind: 'user',
+      userId,
+      requestId: input.requestId ?? null,
+      metadata: { hasPassword }
+    });
+    return {
+      userId,
+      ok,
+      hasPassword,
+      reason: ok ? 'password accepted' : hasPassword ? 'invalid credentials' : 'password is not configured'
+    };
+  }
+
+  private findUserCenterUserForInput(input: CreateUserInput): UserCenterUser | null {
+    const userId = input.userId?.trim();
+    if (userId && this.users.has(userId)) return this.users.get(userId) ?? null;
+    const candidates = [input.account, input.username, input.email].filter((value): value is string => typeof value === 'string');
+    return [...this.users.values()].find((user) => candidates.some((candidate) => userMatchesLogin(user, candidate))) ?? null;
+  }
+
+  private withUserCredentialSummary(user: UserCenterUser): UserCenterUser {
+    const credential = this.userCredentials.get(user.userId) ?? null;
+    return {
+      ...user,
+      credential: userCredentialSummary(credential)
+    };
   }
 
   listUserOverseaEntitlements(): UserOverseaEntitlement[] {
@@ -1066,7 +1183,25 @@ export class MemoryStore implements PlatformStore {
       audience: input.audience,
       requestId: input.requestId
     });
-    const decision = evaluateSdkGatewayRoute(introspection.principal, input.routeId);
+    const routeDecision = evaluateSdkGatewayRoute(introspection.principal, input.routeId);
+    const appAccess = input.appId
+      ? this.evaluateAppCenterAccess({
+        appId: input.appId,
+        userId: introspection.principal?.userId,
+        sourceAppId: input.sourceAppId,
+        includeHidden: true,
+        includeDisabled: false,
+        requestId: input.requestId
+      })
+      : null;
+    const decision: SdkGatewayAccessDecision = appAccess && !appAccess.allowed
+      ? {
+        ...routeDecision,
+        allowed: false,
+        appAccess,
+        reason: `SDK route scope accepted but app access denied: ${appAccess.reason}`
+      }
+      : { ...routeDecision, appAccess };
     this.recordAudit({
       eventType: 'sdk.gateway.access.evaluated',
       actorKind: decision.principal?.kind ?? 'unknown',
@@ -1077,6 +1212,8 @@ export class MemoryStore implements PlatformStore {
         allowed: decision.allowed,
         matchedScopes: decision.matchedScopes,
         missingScopes: decision.missingScopes,
+        appId: input.appId ?? null,
+        appAccessAllowed: appAccess?.allowed ?? null,
         reason: decision.reason
       }
     });
@@ -1094,6 +1231,14 @@ export class MemoryStore implements PlatformStore {
       requestId: input.requestId
     });
     const app = this.getAppCenterApp(appId);
+    const appAccess = this.evaluateAppCenterAccess({
+      appId,
+      userId: principalContext.principal.userId ?? enrollment?.userId ?? input.userId ?? null,
+      sourceAppId: input.sourceAppId,
+      includeHidden: true,
+      includeDisabled: false,
+      requestId: input.requestId
+    });
     const launcherNetwork = this.createLauncherNetworkSnapshot({
       installId: enrollment?.installId ?? input.installId ?? undefined,
       deviceId: enrollment?.deviceId ?? input.deviceId ?? undefined,
@@ -1124,7 +1269,8 @@ export class MemoryStore implements PlatformStore {
     const snapshot = createConfigPolicySnapshot(this.config, input, {
       snapshotId: `polsnap_${randomUUID()}`,
       version: this.configPolicySnapshots.size + 1,
-      app,
+      app: appAccess.allowed ? app : null,
+      appAccess,
       principal: principalContext.principal,
       enrollment,
       launcherNetwork,
@@ -1629,8 +1775,26 @@ export class MemoryStore implements PlatformStore {
     );
   }
 
-  listAppCenterApps(): AppCenterApp[] {
-    return [...this.appCatalog.values()].sort((a, b) => a.appId.localeCompare(b.appId));
+  listAppCenterApps(input: AppCenterAccessContextInput = {}): AppCenterApp[] {
+    const apps = [...this.appCatalog.values()].sort((a, b) => a.appId.localeCompare(b.appId));
+    if (!input.userId && !input.sourceAppId && input.includeHidden !== false && input.includeDisabled !== false) {
+      return apps;
+    }
+    return apps.filter((app) => this.evaluateAppCenterAccess({
+      ...input,
+      appId: app.appId
+    }).visible);
+  }
+
+  evaluateAppCenterAccess(input: AppCenterAccessInput): AppCenterAccessDecision {
+    const app = this.getAppCenterApp(input.appId);
+    const user = input.userId ? this.users.get(input.userId) ?? null : null;
+    const principal = user ? createUserPrincipalFromRecord(user, this.listUserCenterRoles()) : null;
+    const grants = [...this.permissionGrants.values()].filter((grant) => (
+      grant.appId === input.appId
+      && (!input.userId || grant.userId === input.userId)
+    ));
+    return evaluateAppCenterAccess(app, input, principal, user, grants);
   }
 
   getAppCenterApp(appId: string): AppCenterApp | null {
@@ -1966,7 +2130,15 @@ export class MemoryStore implements PlatformStore {
   requestPermission(input: PermissionRequestInput): PermissionGrant {
     const app = this.appCatalog.get(input.appId);
     const requestedScopes = input.scopes.length > 0 ? input.scopes : [];
-    const allowedScopes = app
+    const access = this.evaluateAppCenterAccess({
+      appId: input.appId,
+      userId: input.userId,
+      sourceAppId: input.sourceAppId,
+      includeHidden: true,
+      includeDisabled: true,
+      requestId: input.requestId ?? null
+    });
+    const allowedScopes = app && access.allowed
       ? requestedScopes.filter((scope) => app.permissions.includes(scope))
       : [];
     const deniedScopes = requestedScopes.filter((scope) => !allowedScopes.includes(scope));
@@ -1982,6 +2154,9 @@ export class MemoryStore implements PlatformStore {
       requestedBy: input.requestedBy,
       installId: input.installId ?? null,
       userId: input.userId ?? null,
+      sourceAppId: input.sourceAppId ?? null,
+      accessAllowed: access.allowed,
+      accessReason: access.reason,
       createdAt: new Date().toISOString()
     };
     this.permissionGrants.set(grant.grantId, grant);
@@ -1994,6 +2169,8 @@ export class MemoryStore implements PlatformStore {
       requestId: input.requestId ?? null,
       metadata: {
         decision,
+        accessAllowed: access.allowed,
+        accessReason: access.reason,
         scopes: requestedScopes,
         allowedScopes,
         deniedScopes,

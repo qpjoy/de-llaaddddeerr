@@ -52,12 +52,16 @@ curl -sS "$BASE/internal/v1/sdk/oauth/token" \
   -H 'content-type: application/json' \
   -d '{
     "grant_type": "password",
-    "username": "demo-user@mx.local",
-    "password": "unused-in-shadow",
+    "username": "admin",
+    "password": "adminsj8kx1sq6xc",
     "scope": "sdk.identity.read sdk.user.read permission.request",
     "audience": "mx-sdk"
   }'
 ```
+
+`username` 可以匹配 `userId`、`account`、`email`、`displayName` 或 legacy external id。
+密码模式会校验 User Center 保存的 `local-password` credential；导入旧系统账号时应把
+旧 `account/password/user_name` 写入 User Center，而不是继续让 Domestic 保存登录真相。
 
 Service account 模式：
 
@@ -96,8 +100,12 @@ Access evaluate：
 ```bash
 curl -sS "$BASE/internal/v1/sdk/gateway/access/evaluate" \
   -H 'content-type: application/json' \
-  -d "{\"token\":\"$TOKEN\",\"audience\":\"mx-sdk\",\"routeId\":\"sdk.users.list\"}"
+  -d "{\"token\":\"$TOKEN\",\"audience\":\"mx-sdk\",\"routeId\":\"sdk.users.list\",\"appId\":\"h2o\",\"sourceAppId\":\"mx-h2i\"}"
 ```
+
+如果传入 `appId`，SDK Gateway 会先按 route scope 判断，再按 AppCenter `accessPolicy`
+判断用户是否可访问该应用。返回里的 `appAccess.reason` 会区分 scope 不足、未登录、
+私有应用未授权、显式 deny 等情况。
 
 ## User Center
 
@@ -119,12 +127,81 @@ Create user:
 curl -sS "$BASE/internal/v1/sdk/users" \
   -H 'content-type: application/json' \
   -d '{
+    "account": "external-user",
     "email": "external-user@mx.local",
     "displayName": "External User",
+    "password": "change-me-after-import",
     "roleIds": ["mx-user"],
     "orgIds": ["org_default"],
+    "profile": {
+      "department": "Partner",
+      "location": "remote",
+      "attributes": {
+        "sourceSystem": "external"
+      }
+    },
+    "homeAppId": "mx-h2i",
+    "registeredByAppId": "mx-h2i",
+    "allowedAppIds": ["mx-h2i", "appcenter", "h2o"],
     "requestId": "ext-user-create-001"
   }'
+```
+
+Internal User Center 还提供批量导入接口，供平台运维把旧 HDO 或外部账号一次性导入：
+
+```bash
+curl -sS "$BASE/internal/v1/user-center/users/import" \
+  -H 'content-type: application/json' \
+  -d '{
+    "users": [
+      {
+        "account": "bmyq",
+        "password": "existing-password",
+        "user_name": "报名园区"
+      }
+    ],
+    "defaultRoleIds": ["mx-user"],
+    "defaultOrgIds": ["org_default"],
+    "defaultHomeAppId": "mx-h2i",
+    "defaultRegisteredByAppId": "mx-h2i",
+    "defaultAllowedAppIds": ["mx-h2i", "appcenter", "h2o"],
+    "defaultOverseaSiteIds": ["oversea-main"],
+    "provisionOversea": true,
+    "requestId": "legacy-hdo-import-001"
+  }'
+```
+
+导入行只要求能推导出 `account` 或 `email`；`profile`、`attributes`、`externalIds`、地址、
+部门、来源系统等扩展字段都会保存到 User Center profile，供 AppCenter、DNS、H2I、
+第三方系统和审计 read model 按需消费。`provisionOversea=true` 时，Internal 会在创建或更新
+用户后为默认 Oversea site 生成 entitlement 和订阅运行态，后续仍可在 Admin UI 手动调整节点。
+
+AppCenter 应用访问策略通过 app 记录保存。自定义应用不传策略时默认 private：
+
+```bash
+curl -sS "$BASE/internal/v1/app-center/apps/luopan" \
+  -H 'content-type: application/json' \
+  -d '{
+    "appId": "luopan",
+    "displayName": "Luopan",
+    "launcherMode": "embed",
+    "standaloneChannelProductId": "mx-h2i",
+    "accessPolicy": {
+      "defaultDecision": "private",
+      "allowAdmin": true,
+      "allowRoles": [],
+      "allowUserIds": ["usr_test"],
+      "allowRegisteredByAppIds": ["luopan"],
+      "allowHomeAppIds": ["luopan"],
+      "requirePermissionGrant": true
+    }
+  }'
+```
+
+查询用户可见应用：
+
+```bash
+curl -sS "$BASE/internal/v1/app-center/apps?userId=usr_test&sourceAppId=luopan&includeHidden=false"
 ```
 
 List service accounts:
