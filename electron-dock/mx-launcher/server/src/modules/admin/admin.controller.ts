@@ -139,6 +139,65 @@ export class AdminController {
     };
   }
 
+  @Post('launcher-service-vip-smokes/domestic-product-cidrs/sync')
+  async syncLauncherServiceVipDomesticProductCidrs(@Body() rawBody: unknown) {
+    const body = asRecord(rawBody);
+    const siteId = stringValue(body.siteId) ?? 'domestic-main';
+    const requestedBy = stringValue(body.requestedBy) ?? 'admin-ui';
+    const requestId = stringValue(body.requestId) ?? `launcher-service-vip-cidr-sync-${Date.now()}`;
+    const [products, previous] = await Promise.all([
+      this.store.listLauncherProductNetworks(),
+      this.store.getSiteSlotDomesticWireGuardSecret(siteId)
+    ]);
+    const plan = buildLauncherDomesticProductCidrSync(siteId, products, previous);
+    if (plan.status === 'blocked' || !previous) {
+      return {
+        domesticProductCidrSync: plan,
+        secret: previous ? redactAdminDomesticWireGuardSecret(previous) : null
+      };
+    }
+
+    const secret = plan.addedProductRelayCidrs.length
+      ? await this.store.upsertSiteSlotDomesticWireGuardSecret({
+        siteId,
+        productRelayCidrs: plan.productRelayCidrs,
+        requestedBy,
+        requestId
+      })
+      : previous;
+    const result = {
+      ...plan,
+      status: 'passed' as const,
+      changed: plan.addedProductRelayCidrs.length > 0,
+      productRelayCidrs: domesticSecretProductRelayCidrsForSync(secret),
+      materialDigest: secret.fingerprints.materialDigest,
+      nextActions: plan.addedProductRelayCidrs.length
+        ? [
+          'Re-materialize Domestic WG artifact so productRelayCidrs enter the deployable config.',
+          'Apply/restart the Domestic relay runtime and re-run Service VIP smoke.'
+        ]
+        : ['Domestic productRelayCidrs already cover registered standalone products.']
+    };
+    await this.store.recordAudit({
+      eventType: 'launcher.service_vip.domestic_product_cidrs_synced',
+      actorKind: 'admin-action',
+      siteId,
+      requestId,
+      metadata: {
+        requestedBy,
+        previousProductRelayCidrs: plan.previousProductRelayCidrs,
+        requiredProductRelayCidrs: plan.requiredProductRelayCidrs,
+        addedProductRelayCidrs: plan.addedProductRelayCidrs,
+        productRelayCidrs: result.productRelayCidrs,
+        productIds: plan.products.map((product) => product.productId)
+      }
+    });
+    return {
+      domesticProductCidrSync: result,
+      secret: redactAdminDomesticWireGuardSecret(secret)
+    };
+  }
+
   @Get('actions')
   async actions(
     @Headers('authorization') authorization?: string,
@@ -8324,6 +8383,56 @@ function buildLauncherServiceVipSmokes(input: {
   };
 }
 
+function buildLauncherDomesticProductCidrSync(
+  siteId: string,
+  products: LauncherProductNetwork[],
+  secret: SiteSlotDomesticWireGuardSecret | null
+) {
+  const scopedProducts = products
+    .filter((product) => product.enabled !== false)
+    .filter((product) => product.mode === 'standalone')
+    .filter((product) => (product.defaultDomesticSiteId || 'domestic-main') === siteId)
+    .sort((left, right) => left.productId.localeCompare(right.productId));
+  const rawRequiredCidrs = scopedProducts.flatMap((product) => [product.userCidr, product.anonymousCidr]);
+  const invalidRequiredCidrs = uniqueConfigStrings(rawRequiredCidrs.filter((cidr) => !parseIpv4Cidr(cidr)));
+  const requiredProductRelayCidrs = uniqueConfigStrings(rawRequiredCidrs.filter((cidr) => Boolean(parseIpv4Cidr(cidr))));
+  const previousProductRelayCidrs = secret ? domesticSecretProductRelayCidrsForSync(secret) : [];
+  const addedProductRelayCidrs = requiredProductRelayCidrs.filter((cidr) => {
+    return !previousProductRelayCidrs.some((relayCidr) => ipv4CidrContainsCidr(relayCidr, cidr));
+  });
+  const blockedReasons = [
+    ...(secret ? [] : [`Domestic WG secret is missing for ${siteId}. Materialize Domestic WG first.`]),
+    ...invalidRequiredCidrs.map((cidr) => `Invalid ProductNetwork CIDR: ${cidr}`)
+  ];
+  return {
+    syncId: `launcher_service_vip_domestic_product_cidrs_${siteId}`,
+    status: blockedReasons.length ? 'blocked' as const : addedProductRelayCidrs.length ? 'ready' as const : 'passed' as const,
+    siteId,
+    previousProductRelayCidrs,
+    requiredProductRelayCidrs,
+    addedProductRelayCidrs,
+    productRelayCidrs: uniqueConfigStrings([...previousProductRelayCidrs, ...addedProductRelayCidrs]),
+    products: scopedProducts.map((product) => ({
+      productId: product.productId,
+      displayName: product.displayName,
+      mode: product.mode,
+      serviceVip: product.serviceVip,
+      userCidr: product.userCidr,
+      anonymousCidr: product.anonymousCidr,
+      defaultDomesticSiteId: product.defaultDomesticSiteId,
+      enabled: product.enabled
+    })),
+    changed: false,
+    materialDigest: secret?.fingerprints.materialDigest ?? null,
+    blockedReasons,
+    nextActions: blockedReasons.length
+      ? ['Fix ProductNetwork/Domestic WG prerequisites and retry CIDR sync.']
+      : addedProductRelayCidrs.length
+        ? ['Sync will update Config Center only; materialize/apply Domestic relay runtime next.']
+        : ['Domestic productRelayCidrs already cover registered standalone products.']
+  };
+}
+
 function buildLauncherServiceVipSmoke(input: {
   app: AppCenterApp;
   product: LauncherProductNetwork | null;
@@ -8613,6 +8722,10 @@ function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.filter((value) => value.trim().length > 0))].slice(0, 12);
 }
 
+function uniqueConfigStrings(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter((value) => value.length > 0))];
+}
+
 function cidrListValue(value: unknown): string[] | null {
   const values = Array.isArray(value)
     ? value
@@ -8630,6 +8743,13 @@ function domesticSecretProductRelayCidrs(secret: SiteSlotDomesticWireGuardSecret
     ? secret.productRelayCidrs
     : [secret.userRelayCidr, secret.internalServiceCidr, secret.guestRelayCidr];
   return uniqueStrings(cidrs.filter((cidr) => Boolean(cidr)));
+}
+
+function domesticSecretProductRelayCidrsForSync(secret: SiteSlotDomesticWireGuardSecret): string[] {
+  const cidrs = secret.productRelayCidrs?.length
+    ? secret.productRelayCidrs
+    : [secret.userRelayCidr, secret.internalServiceCidr, secret.guestRelayCidr];
+  return uniqueConfigStrings(cidrs.filter((cidr) => Boolean(cidr)));
 }
 
 function numberValue(value: unknown, fallback: number): number {

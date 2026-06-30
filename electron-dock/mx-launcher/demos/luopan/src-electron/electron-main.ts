@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { createConnection } from 'node:net';
+import { networkInterfaces } from 'node:os';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -252,26 +253,38 @@ async function createWindow(): Promise<void> {
 
 async function loadDevRenderer(window: BrowserWindow): Promise<void> {
   const candidates = devRendererUrlCandidates();
-  const attempts: string[] = [];
+  const lastErrors = new Map<string, string>();
   const deadline = Date.now() + 15000;
-  for (const url of candidates) {
-    try {
-      await waitForDevServer(url, Math.max(1000, deadline - Date.now()));
-      await window.loadURL(url);
-      return;
-    } catch (error) {
-      attempts.push(`${url}: ${errorMessage(error)}`);
+  while (Date.now() < deadline) {
+    for (const url of candidates) {
+      try {
+        await probeDevServer(url);
+        await window.loadURL(url);
+        return;
+      } catch (error) {
+        lastErrors.set(url, errorMessage(error));
+      }
     }
+    await sleep(250);
   }
+  const attempts = candidates.map((url) => `${url}: ${lastErrors.get(url) || 'not-attempted'}`);
   await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(devRendererErrorHtml(attempts))}`);
   if (!window.isVisible()) window.show();
 }
 
 function devRendererUrlCandidates(): string[] {
+  const explicit = normalizeDevRendererUrl(process.env.LUOPAN_RENDERER_URL);
+  const appUrl = normalizeDevRendererUrl(process.env.APP_URL);
+  const ports = uniqueNumbers([
+    devRendererPort(explicit),
+    devRendererPort(appUrl),
+    9031
+  ].filter((port): port is number => Boolean(port)));
   return uniqueStrings([
-    normalizeDevRendererUrl(process.env.APP_URL),
-    'http://127.0.0.1:9031',
-    'http://localhost:9031'
+    explicit,
+    ...ports.flatMap((port) => devRendererNetworkHosts().map((host) => `http://${host}:${port}`)),
+    appUrl,
+    ...ports.flatMap((port) => [`http://127.0.0.1:${port}`, `http://localhost:${port}`])
   ].filter((url): url is string => Boolean(url)));
 }
 
@@ -280,28 +293,55 @@ function normalizeDevRendererUrl(value: string | undefined): string | null {
   if (!trimmed) return null;
   try {
     const url = new URL(trimmed);
+    if (url.hostname === '0.0.0.0' || url.hostname === '::') return null;
     return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : null;
   } catch {
     return null;
   }
 }
 
-async function waitForDevServer(rawUrl: string, timeoutMs: number): Promise<void> {
+function devRendererPort(rawUrl: string | null): number | null {
+  if (!rawUrl) return null;
+  try {
+    const url = new URL(rawUrl);
+    const port = Number(url.port || (url.protocol === 'https:' ? 443 : 80));
+    return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+function devRendererNetworkHosts(): string[] {
+  const addresses = Object.values(networkInterfaces())
+    .flatMap((entries) => entries ?? [])
+    .filter((entry) => entry.family === 'IPv4' && !entry.internal)
+    .map((entry) => entry.address)
+    .filter(isDevRendererAddress)
+    .sort((left, right) => devRendererAddressScore(left) - devRendererAddressScore(right));
+  return uniqueStrings(addresses);
+}
+
+function isDevRendererAddress(address: string): boolean {
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(address)) return false;
+  const parts = address.split('.').map(Number);
+  if (parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  if (parts[0] === 127 || (parts[0] === 169 && parts[1] === 254)) return false;
+  if (parts[0] === 198 && (parts[1] === 18 || parts[1] === 19)) return false;
+  return true;
+}
+
+function devRendererAddressScore(address: string): number {
+  if (address.startsWith('192.168.')) return 0;
+  if (address.startsWith('10.')) return 1;
+  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(address)) return 2;
+  return 3;
+}
+
+async function probeDevServer(rawUrl: string): Promise<void> {
   const url = new URL(rawUrl);
   const port = Number(url.port || (url.protocol === 'https:' ? 443 : 80));
   const host = url.hostname;
-  const startedAt = Date.now();
-  let lastError = 'not-ready';
-  while (Date.now() - startedAt < timeoutMs) {
-    try {
-      await tcpProbe(host, port);
-      return;
-    } catch (error) {
-      lastError = errorMessage(error);
-      await sleep(250);
-    }
-  }
-  throw new Error(`dev server not reachable on ${host}:${port} (${lastError})`);
+  await tcpProbe(host, port);
 }
 
 function tcpProbe(host: string, port: number): Promise<void> {
@@ -316,6 +356,10 @@ function tcpProbe(host: string, port: number): Promise<void> {
     socket.once('connect', () => finish());
     socket.once('error', finish);
   });
+}
+
+function uniqueNumbers(values: number[]): number[] {
+  return [...new Set(values)];
 }
 
 function devRendererErrorHtml(attempts: string[]): string {

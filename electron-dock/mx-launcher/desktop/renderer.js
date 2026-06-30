@@ -77,6 +77,8 @@ const state = {
   appOnboardingTemplatesError: null,
   launcherServiceVipSmokes: [],
   launcherServiceVipSmokesError: null,
+  launcherServiceVipCidrSyncBusy: null,
+  launcherServiceVipCidrSyncFeedback: null,
   appCatalogFilter: '',
   appCatalogModeFilter: 'all',
   appCatalogEditor: null,
@@ -8319,6 +8321,64 @@ function renderSelectedAppDetail() {
       });
     });
   }
+  const cidrSyncButton = appSelectedDetail.querySelector('[data-service-vip-sync-domestic-cidrs]');
+  if (cidrSyncButton) {
+    cidrSyncButton.addEventListener('click', () => {
+      void syncLauncherServiceVipDomesticCidrs(
+        cidrSyncButton.dataset.serviceVipSyncDomesticCidrs,
+        cidrSyncButton.dataset.serviceVipSyncApp
+      );
+    });
+  }
+}
+
+async function syncLauncherServiceVipDomesticCidrs(siteId, appId) {
+  const domesticSiteId = siteId || 'domestic-main';
+  if (state.launcherServiceVipCidrSyncBusy) return;
+  state.launcherServiceVipCidrSyncBusy = domesticSiteId;
+  state.launcherServiceVipCidrSyncFeedback = {
+    appId,
+    kind: 'info',
+    message: `Syncing Domestic product CIDRs for ${domesticSiteId}.`,
+    detail: ''
+  };
+  renderSelectedAppDetail();
+  try {
+    const payload = await fetchJson('/internal/v1/admin/launcher-service-vip-smokes/domestic-product-cidrs/sync', {
+      method: 'POST',
+      body: {
+        siteId: domesticSiteId,
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-launcher-service-vip-cidr-sync-${Date.now()}`
+      }
+    });
+    const result = payload.domesticProductCidrSync || {};
+    const added = asArray(result.addedProductRelayCidrs).join(', ') || 'none';
+    const finalCidrs = asArray(result.productRelayCidrs).join(', ') || '-';
+    const nextActions = asArray(result.nextActions).join(' ');
+    const blockedReasons = asArray(result.blockedReasons).join(' ');
+    state.launcherServiceVipCidrSyncFeedback = {
+      appId,
+      kind: result.status === 'blocked' ? 'error' : 'success',
+      message: result.status === 'blocked'
+        ? 'Domestic CIDR sync blocked.'
+        : result.changed
+        ? `Domestic CIDRs synced: added ${added}.`
+        : `Domestic CIDRs already cover this site.`,
+      detail: [blockedReasons, `final ${finalCidrs}`, nextActions].filter(Boolean).join(' / ')
+    };
+    await refreshAppCenterNetwork();
+  } catch (error) {
+    state.launcherServiceVipCidrSyncFeedback = {
+      appId,
+      kind: 'error',
+      message: error.message,
+      detail: ''
+    };
+  } finally {
+    state.launcherServiceVipCidrSyncBusy = null;
+    renderSelectedAppDetail();
+  }
 }
 
 function launcherServiceVipSmokeForApp(app) {
@@ -8347,6 +8407,10 @@ function renderSelectedAppServiceVipSmoke(app) {
   }
   const status = smoke.status || 'warning';
   const checks = asArray(smoke.checks);
+  const cidrBlocked = checks.some((check) => check.checkId === 'domestic-product-cidrs' && check.status === 'blocked');
+  const syncBusy = state.launcherServiceVipCidrSyncBusy === smoke.domesticSiteId;
+  const syncFeedback = state.launcherServiceVipCidrSyncFeedback;
+  const feedbackVisible = syncFeedback && (!syncFeedback.appId || syncFeedback.appId === smoke.appId);
   return `
     <section class="app-workbench-panel app-service-vip-smoke">
       <div class="app-workbench-panel-head">
@@ -8355,12 +8419,29 @@ function renderSelectedAppServiceVipSmoke(app) {
         <mark data-kind="${escapeHtml(status === 'passed' ? 'system' : status === 'blocked' ? 'custom' : 'muted')}">${escapeHtml(status)}</mark>
       </div>
       <p class="profile-feedback" data-kind="${escapeHtml(status === 'passed' ? 'success' : status === 'blocked' ? 'error' : 'warning')}">${escapeHtml(smoke.summary || '')}</p>
+      ${feedbackVisible ? `
+        <p class="profile-feedback" data-kind="${escapeHtml(syncFeedback.kind || 'info')}">
+          ${escapeHtml(syncFeedback.message || '')}${syncFeedback.detail ? ` / ${escapeHtml(syncFeedback.detail)}` : ''}
+        </p>
+      ` : ''}
       <div class="app-workbench-facts">
         <span><strong>${escapeHtml(smoke.serviceVip || '-')}</strong><small>service VIP</small></span>
         <span><strong>${escapeHtml(smoke.dnsHost || '-')}</strong><small>dns host</small></span>
         <span><strong>${escapeHtml(smoke.upstreamUrl || '-')}</strong><small>gateway upstream</small></span>
         <span><strong>${escapeHtml(smoke.latestLeaseIp || '-')}</strong><small>latest lease</small></span>
       </div>
+      ${cidrBlocked ? `
+        <div class="product-network-actions">
+          <button
+            class="primary-button"
+            type="button"
+            data-service-vip-sync-domestic-cidrs="${escapeHtml(smoke.domesticSiteId || 'domestic-main')}"
+            data-service-vip-sync-app="${escapeHtml(smoke.appId || '')}"
+            ${syncBusy ? 'disabled' : ''}
+          >${syncBusy ? 'Syncing CIDRs' : 'Sync Domestic CIDRs'}</button>
+          <span>Update Config Center productRelayCidrs from registered standalone ProductNetwork ranges.</span>
+        </div>
+      ` : ''}
       <div class="app-permission-rows">
         ${checks.map((check) => `
           <article>
