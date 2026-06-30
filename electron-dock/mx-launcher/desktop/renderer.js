@@ -79,6 +79,7 @@ const state = {
   launcherServiceVipSmokesError: null,
   launcherServiceVipCidrSyncBusy: null,
   launcherServiceVipCidrSyncFeedback: null,
+  launcherServiceVipSetupHint: null,
   appCatalogFilter: '',
   appCatalogModeFilter: 'all',
   appCatalogEditor: null,
@@ -4905,6 +4906,7 @@ function renderDomesticRelayPanel(site, pipeline) {
   const nextAction = preferredNextAction(asArray(summary.actionHints));
   const endpoint = domesticEndpointFromPlan(plan, summary);
   const legacy = domesticLegacyCleanupState(plan, summary);
+  const productRanges = domesticProductRelayCidrsForSite(site.siteId).join(', ') || '10.90.0.0/16 + registry';
   const profile = inspectorSshProfile('domestic', site.siteId);
   const canCreatePlan = Boolean(profile?.profileId || selectedSshProfileId());
   const status = isFailedOrRollbackPipeline(pipeline) ? 'blocked' : nextAction ? 'ready' : 'planned';
@@ -4929,11 +4931,31 @@ function renderDomesticRelayPanel(site, pipeline) {
         <span><small>relay gateway</small><strong>10.88.0.1</strong></span>
         <span><small>Internal service</small><strong>10.88.88.88</strong></span>
         <span><small>standalone users</small><strong>10.89.0.0/16</strong></span>
-        <span><small>product ranges</small><strong>10.90.0.0/16 + registry</strong></span>
+        <span><small>product ranges</small><strong>${escapeHtml(productRanges)}</strong></span>
         <span data-status="${escapeHtml(legacy.status)}"><small>legacy 1.0</small><strong>${escapeHtml(legacy.label)}</strong></span>
       </div>
     </section>
   `;
+}
+
+function launcherServiceVipSetupHintForSummary(summary) {
+  const hint = state.launcherServiceVipSetupHint;
+  if (!hint || summary?.kind !== 'domestic') return null;
+  const siteId = summary.siteId || 'domestic-main';
+  return hint.domesticSiteId === siteId ? hint : null;
+}
+
+function domesticProductRelayCidrsForSite(siteId) {
+  const cidrs = asArray(state.launcherServiceVipSmokes)
+    .filter((smoke) => (smoke.domesticSiteId || 'domestic-main') === siteId)
+    .flatMap((smoke) => {
+      const check = asArray(smoke.checks).find((item) => item.checkId === 'domestic-product-cidrs');
+      return String(check?.actual || '')
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean);
+    });
+  return [...new Set(cidrs)];
 }
 
 function bindDomesticWorkbenchActions(site) {
@@ -8330,6 +8352,45 @@ function renderSelectedAppDetail() {
       );
     });
   }
+  const domesticSetupButton = appSelectedDetail.querySelector('[data-service-vip-open-domestic-setup]');
+  if (domesticSetupButton) {
+    domesticSetupButton.addEventListener('click', () => {
+      openDomesticSetupFromServiceVip(app);
+    });
+  }
+}
+
+function openDomesticSetupFromServiceVip(app) {
+  const smoke = launcherServiceVipSmokeForApp(app);
+  const cidrCheck = asArray(smoke?.checks).find((check) => check.checkId === 'domestic-product-cidrs') || null;
+  const domesticSiteId = smoke?.domesticSiteId || 'domestic-main';
+  state.launcherServiceVipSetupHint = {
+    appId: smoke?.appId || app?.appId || '',
+    displayName: smoke?.displayName || app?.displayName || app?.appId || 'Launcher app',
+    domesticSiteId,
+    serviceVip: smoke?.serviceVip || null,
+    dnsHost: smoke?.dnsHost || null,
+    expectedProductRelayCidrs: cidrCheck?.expected || null,
+    productRelayCidrs: cidrCheck?.actual || null
+  };
+  state.selectedSiteId = domesticSiteId;
+  state.preferredActionFocus = {
+    actionIds: [
+      'site-slot.domestic-wg.materialize',
+      'site-slot.apply.confirm',
+      'site-slot.runner.remote-ssh',
+      'site-slot.worker-job.create',
+      'site-slot.worker-run.remote-ssh-gate',
+      'site-slot.worker-run.remote-ssh-execute',
+      'site-slot.worker-run.domestic-relay-readonly-probe'
+    ]
+  };
+  setActiveView('admin', {
+    menu: 'operations',
+    section: 'deployment',
+    subsection: 'domestic',
+    deploymentKind: 'domestic'
+  });
 }
 
 async function syncLauncherServiceVipDomesticCidrs(siteId, appId) {
@@ -8408,6 +8469,7 @@ function renderSelectedAppServiceVipSmoke(app) {
   const status = smoke.status || 'warning';
   const checks = asArray(smoke.checks);
   const cidrBlocked = checks.some((check) => check.checkId === 'domestic-product-cidrs' && check.status === 'blocked');
+  const needsDomesticRuntimeApply = !cidrBlocked && status !== 'passed';
   const syncBusy = state.launcherServiceVipCidrSyncBusy === smoke.domesticSiteId;
   const syncFeedback = state.launcherServiceVipCidrSyncFeedback;
   const feedbackVisible = syncFeedback && (!syncFeedback.appId || syncFeedback.appId === smoke.appId);
@@ -8440,6 +8502,16 @@ function renderSelectedAppServiceVipSmoke(app) {
             ${syncBusy ? 'disabled' : ''}
           >${syncBusy ? 'Syncing CIDRs' : 'Sync Domestic CIDRs'}</button>
           <span>Update Config Center productRelayCidrs from registered standalone ProductNetwork ranges.</span>
+        </div>
+      ` : ''}
+      ${needsDomesticRuntimeApply ? `
+        <div class="product-network-actions">
+          <button
+            class="primary-button"
+            type="button"
+            data-service-vip-open-domestic-setup
+          >Run Domestic Setup</button>
+          <span>Apply the updated Domestic relay runtime, then return to this app for client data-plane smoke.</span>
         </div>
       ` : ''}
       <div class="app-permission-rows">
@@ -11450,6 +11522,7 @@ function renderSetupGuidance(pipeline, actions) {
   const needsDomesticPlan = setupNeedsDomesticPlan(pipeline);
   const actionText = nextAction ? setupActionGuidanceText(pipeline, nextAction) : '当前没有可执行 gate。可以刷新或查看 Evidence History。';
   const runState = setupRunViewState(nextAction);
+  const serviceVipHint = launcherServiceVipSetupHintForSummary(summary);
   const primaryReady = needsDomesticPlan
     ? Boolean(selectedSshProfileId()) && !state.sshPlanBusy
     : Boolean(nextAction?.allowed && !state.actionBusy && !state.setupRun.active);
@@ -11465,6 +11538,11 @@ function renderSetupGuidance(pipeline, actions) {
         <span class="site-kind">Setup Assistant</span>
         <strong>${escapeHtml(setupTitle)}</strong>
         <p>${escapeHtml(runState.message || actionText)}</p>
+        ${serviceVipHint ? `
+          <p class="profile-feedback" data-kind="warning">
+            ${escapeHtml(serviceVipHint.displayName)} waits for Domestic relay apply: service VIP ${escapeHtml(serviceVipHint.serviceVip || '-')} / productRelayCidrs ${escapeHtml(serviceVipHint.productRelayCidrs || serviceVipHint.expectedProductRelayCidrs || '-')}.
+          </p>
+        ` : ''}
         ${renderSetupActionChain(pipeline, nextAction)}
         ${renderSetupRunProgress()}
         ${renderAwxSummaryPanel(setupAwxSummary(), 'setup')}

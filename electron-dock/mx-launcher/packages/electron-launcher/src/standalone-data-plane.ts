@@ -59,6 +59,7 @@ export interface ElectronLauncherStandaloneOwnershipInput {
   instanceId?: string | null;
   displayName?: string | null;
   priority?: number | null;
+  metadata?: Record<string, unknown> | null;
   dnsHosts?: string[] | null;
   dnsZones?: string[] | null;
   routeCidrs?: string[] | null;
@@ -404,7 +405,8 @@ export function buildElectronLauncherStandaloneOwnershipClaim(
       launcherMode: routePlan.launcherMode,
       serviceVip: routePlan.serviceVip,
       snapshotId: routePlan.snapshotId,
-      dnsServer: routePlan.dnsServer
+      dnsServer: routePlan.dnsServer,
+      ...(input.metadata ?? {})
     },
     updatedAt: new Date().toISOString()
   };

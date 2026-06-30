@@ -25,6 +25,7 @@ import {
 } from '@qpjoy/electron-launcher';
 
 type RuntimeStatus = 'idle' | 'connecting' | 'lease-active' | 'data-plane-pending' | 'network-ready' | 'error';
+type LuopanDataPlaneMode = 'auto' | 'reuse' | 'standalone';
 
 interface RuntimeConfig {
   baseUrl: string;
@@ -80,13 +81,30 @@ const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = 'luopan-runtime.json';
 const LUOPAN_DNS_HOST = 'luopan.mxinfo-inc.cn';
 const LUOPAN_DNS_ZONE = 'mxinfo-inc.cn';
-const FORCE_STANDALONE_WG = booleanish(process.env.LUOPAN_FORCE_STANDALONE_WG, false);
+const DATA_PLANE_MODE = luopanDataPlaneMode();
 
 let mainWindow: BrowserWindow | null = null;
 let runtime: RuntimeState | null = null;
 let activeSession: LauncherNetworkSession | null = null;
 
 app.setAppUserModelId('dev.qpjoy.luopan');
+
+function luopanDataPlaneMode(): LuopanDataPlaneMode {
+  if (booleanish(process.env.LUOPAN_FORCE_STANDALONE_WG, false)) return 'standalone';
+  const value = process.env.LUOPAN_DATA_PLANE_MODE?.trim().toLowerCase();
+  if (value === 'reuse' || value === 'standalone' || value === 'auto') return value;
+  return 'auto';
+}
+
+function initialDataPlaneApplyMessage(): string {
+  if (DATA_PLANE_MODE === 'standalone') {
+    return 'Syncing Domestic peer and applying Luopan as the standalone data-plane owner.';
+  }
+  if (DATA_PLANE_MODE === 'reuse') {
+    return 'Checking existing shared launcher data plane for Luopan reuse.';
+  }
+  return 'Checking shared launcher data plane; Luopan will become the owner if none is reusable.';
+}
 
 function defaultConfig(): RuntimeConfig {
   return {
@@ -431,17 +449,15 @@ function registerIpc(): void {
   ipcMain.handle('luopan:apply-data-plane', async () => {
     await setConnection({
       status: 'connecting',
-      message: FORCE_STANDALONE_WG
-        ? 'Syncing Domestic peer and applying isolated Luopan WireGuard data plane.'
-        : 'Checking existing MX-H2I/foundation data plane for Luopan reuse.'
+      message: initialDataPlaneApplyMessage()
     });
     pushEvent('data-plane apply started');
     try {
       if (!activeSession) throw new Error('Request a Luopan lease before applying the local data plane.');
       const privateKey = stringValue(activeSession.wireGuard.privateKey);
       if (!privateKey) throw new Error('Luopan WireGuard private key is missing; request a fresh lease.');
-      if (!FORCE_STANDALONE_WG) {
-        const attached = attachToFoundationDataPlane(activeSession);
+      if (DATA_PLANE_MODE !== 'standalone') {
+        const attached = attachToSharedDataPlane(activeSession);
         if (attached) {
           await setConnection({
             status: runtimeStatusForDataPlane(attached.dataPlane),
@@ -451,14 +467,16 @@ function registerIpc(): void {
           pushEvent(`data-plane attached ${attached.reason}`);
           return visibleRuntime();
         }
-        const dataPlane = diagnoseFoundationDataPlane(activeSession);
-        await setConnection({
-          status: runtimeStatusForDataPlane(dataPlane),
-          dataPlane,
-          message: dataPlane.message
-        });
-        pushEvent(`data-plane pending ${dataPlane.state}`);
-        return visibleRuntime();
+        if (DATA_PLANE_MODE === 'reuse') {
+          const dataPlane = diagnoseSharedDataPlane(activeSession);
+          await setConnection({
+            status: runtimeStatusForDataPlane(dataPlane),
+            dataPlane,
+            message: dataPlane.message
+          });
+          pushEvent(`data-plane pending ${dataPlane.state}`);
+          return visibleRuntime();
+        }
       }
       await syncLeasePeers(activeSession);
       const result = await applyElectronLauncherStandaloneDataPlane({
@@ -471,6 +489,10 @@ function registerIpc(): void {
         productId: PRODUCT.productId,
         instanceId: requireRuntime().installId,
         displayName: PRODUCT.displayName,
+        metadata: {
+          dataPlaneMode: 'standalone-wireguard',
+          dataPlaneOwner: true
+        },
         dnsHosts: [LUOPAN_DNS_HOST],
         failOnOwnershipConflicts: true,
         allowSystemFallback: false,
@@ -598,15 +620,17 @@ async function applySession(session: LauncherNetworkSession): Promise<void> {
   });
 }
 
-function diagnoseFoundationDataPlane(session: LauncherNetworkSession): ElectronLauncherStandaloneDataPlaneDiagnostics {
-  const routeProof = foundationRouteProof(session);
-  if (!foundationRoutesReady(routeProof)) {
+function diagnoseSharedDataPlane(session: LauncherNetworkSession): ElectronLauncherStandaloneDataPlaneDiagnostics {
+  const routeProof = sharedDataPlaneRouteProof(session);
+  if (!sharedCoreRoutesReady(routeProof)) {
     return {
       ...routeProof,
       ok: false,
       state: routeProof.state === 'proxy-tun-captured' ? routeProof.state : 'data-plane-pending',
       severity: routeProof.severity === 'error' ? routeProof.severity : 'warning',
-      message: `Foundation data plane is not ready for Luopan reuse. ${routeProof.message} Standalone WireGuard is disabled by default; set LUOPAN_FORCE_STANDALONE_WG=1 only for isolated tunnel testing.`
+      message: DATA_PLANE_MODE === 'reuse'
+        ? `No shared launcher data plane is ready for Luopan reuse. ${routeProof.message} Set LUOPAN_DATA_PLANE_MODE=auto or standalone when Luopan should become the owner.`
+        : `No shared launcher data plane is ready for reuse yet. ${routeProof.message}`
     };
   }
   const gatewayReachability = probeIcmpReachability(session.routePlan.domesticGatewayIp);
@@ -616,25 +640,25 @@ function diagnoseFoundationDataPlane(session: LauncherNetworkSession): ElectronL
       ok: false,
       state: 'data-plane-pending',
       severity: 'warning',
-      message: `Foundation routes are present, but Domestic gateway ${session.routePlan.domesticGatewayIp} is not reachable (${gatewayReachability.message}). Keep MX-H2I/foundation connected before Luopan reuses the shared data plane.`
+      message: `Shared launcher routes are present, but Domestic gateway ${session.routePlan.domesticGatewayIp} is not reachable (${gatewayReachability.message}). Keep the current data-plane owner connected before Luopan reuses it.`
     };
   }
-  return withServiceVipReachability(routeProof, session, 'foundation-reuse');
+  return withServiceVipReachability(routeProof, session, 'shared-reuse');
 }
 
-function attachToFoundationDataPlane(session: LauncherNetworkSession): {
+function attachToSharedDataPlane(session: LauncherNetworkSession): {
   dataPlane: ElectronLauncherStandaloneDataPlaneDiagnostics;
   message: string;
   reason: string;
 } | null {
-  const routeProof = foundationRouteProof(session);
-  if (!foundationRoutesReady(routeProof)) return null;
+  const routeProof = sharedDataPlaneRouteProof(session);
+  if (!sharedCoreRoutesReady(routeProof)) return null;
   const gatewayReachability = probeIcmpReachability(session.routePlan.domesticGatewayIp);
   if (!gatewayReachability.ok) return null;
 
   const state = readElectronLauncherStandaloneOwnershipState();
-  const foundationOwner = state.claims.find(isFoundationOwner) ?? null;
-  const dataPlane = withServiceVipReachability(routeProof, session, 'foundation-reuse');
+  const dataPlaneOwner = state.claims.find(isSharedDataPlaneOwner) ?? null;
+  const dataPlane = withServiceVipReachability(routeProof, session, 'shared-reuse');
   const claim = {
     ...buildElectronLauncherStandaloneOwnershipClaim(session.routePlan, {
       ownerId: `${PRODUCT.productId}:${requireRuntime().installId}`,
@@ -647,22 +671,22 @@ function attachToFoundationDataPlane(session: LauncherNetworkSession): {
     }),
     state: dataPlane.ok ? 'active' as const : 'connecting' as const,
     metadata: {
-      dataPlaneMode: 'foundation-reuse',
-      foundationOwnerId: foundationOwner?.ownerId ?? null,
+      dataPlaneMode: 'shared-reuse',
+      dataPlaneOwnerId: dataPlaneOwner?.ownerId ?? null,
       serviceVip: session.routePlan.serviceVip,
       dnsServer: session.routePlan.dnsServer
     }
   };
   upsertElectronLauncherStandaloneOwnershipClaim(claim);
-  const reason = foundationOwner?.ownerId ? `owner:${foundationOwner.ownerId}` : 'route-proof';
+  const reason = dataPlaneOwner?.ownerId ? `owner:${dataPlaneOwner.ownerId}` : 'route-proof';
   return {
     dataPlane,
     reason,
-    message: `Attached to existing foundation data plane (${reason}). ${dataPlane.message}`
+    message: `Attached to existing shared launcher data plane (${reason}). ${dataPlane.message}`
   };
 }
 
-function foundationRouteProof(session: LauncherNetworkSession): ElectronLauncherStandaloneDataPlaneDiagnostics {
+function sharedDataPlaneRouteProof(session: LauncherNetworkSession): ElectronLauncherStandaloneDataPlaneDiagnostics {
   return diagnoseElectronLauncherStandaloneDataPlane({
     routePlan: session.routePlan,
     leaseIp: session.lease.leaseIp,
@@ -672,14 +696,16 @@ function foundationRouteProof(session: LauncherNetworkSession): ElectronLauncher
   });
 }
 
-function foundationRoutesReady(dataPlane: ElectronLauncherStandaloneDataPlaneDiagnostics): boolean {
+function sharedCoreRoutesReady(dataPlane: ElectronLauncherStandaloneDataPlaneDiagnostics): boolean {
   const targets = new Set(['internal-control', 'domestic-gateway', 'dns-server']);
   const probes = dataPlane.probes.filter((probe) => targets.has(probe.target));
   return probes.length > 0 && probes.every((probe) => probe.ok && !probe.viaProxyTun);
 }
 
-function isFoundationOwner(claim: { ownerId?: string | null; productId?: string | null; state?: string | null; dnsZones?: string[] | null; routeCidrs?: string[] | null }): boolean {
+function isSharedDataPlaneOwner(claim: { ownerId?: string | null; productId?: string | null; state?: string | null; dnsZones?: string[] | null; routeCidrs?: string[] | null; metadata?: Record<string, unknown> | null }): boolean {
   if (!claim.ownerId || claim.state === 'released') return false;
+  const dataPlaneMode = claim.metadata?.dataPlaneMode;
+  if (dataPlaneMode === 'standalone-wireguard' || dataPlaneMode === 'shared-owner') return true;
   if (claim.productId === 'mx-h2i') return true;
   if ((claim.dnsZones ?? []).includes(LUOPAN_DNS_ZONE)) return true;
   return (claim.routeCidrs ?? []).some((cidr) => cidr === '10.88.0.0/16' || cidr === '10.89.0.0/16');
@@ -688,15 +714,15 @@ function isFoundationOwner(claim: { ownerId?: string | null; productId?: string 
 function withServiceVipReachability(
   dataPlane: ElectronLauncherStandaloneDataPlaneDiagnostics,
   session: LauncherNetworkSession,
-  mode: 'foundation-reuse' | 'standalone-wireguard'
+  mode: 'shared-reuse' | 'standalone-wireguard'
 ): ElectronLauncherStandaloneDataPlaneDiagnostics {
   const serviceVip = stringValue(session.lease.serviceVip) || stringValue(session.routePlan.serviceVip);
   const serviceRoute = dataPlane.probes.find((probe) => probe.target === 'service-vip');
   if (!serviceVip || serviceRoute?.ok !== true) return dataPlane;
   const reachable = probeIcmpReachability(serviceVip);
   if (reachable.ok) return dataPlane;
-  const prefix = mode === 'foundation-reuse'
-    ? 'Foundation routes are present'
+  const prefix = mode === 'shared-reuse'
+    ? 'Shared launcher routes are present'
     : 'Standalone WireGuard routes are present';
   return {
     ...dataPlane,
