@@ -78,6 +78,7 @@ const state = {
   launcherServiceVipSmokes: [],
   launcherServiceVipSmokesError: null,
   launcherServiceVipCidrSyncBusy: null,
+  launcherServiceVipReconcileBusy: null,
   launcherServiceVipCidrSyncFeedback: null,
   launcherServiceVipSetupHint: null,
   appCatalogFilter: '',
@@ -8413,6 +8414,15 @@ function renderSelectedAppDetail() {
       );
     });
   }
+  const reconcileButton = appSelectedDetail.querySelector('[data-service-vip-reconcile]');
+  if (reconcileButton) {
+    reconcileButton.addEventListener('click', () => {
+      void reconcileLauncherServiceVip(
+        reconcileButton.dataset.serviceVipReconcileSite,
+        reconcileButton.dataset.serviceVipReconcileApp
+      );
+    });
+  }
   const domesticSetupButton = appSelectedDetail.querySelector('[data-service-vip-open-domestic-setup]');
   if (domesticSetupButton) {
     domesticSetupButton.addEventListener('click', () => {
@@ -8503,6 +8513,62 @@ async function syncLauncherServiceVipDomesticCidrs(siteId, appId) {
   }
 }
 
+async function reconcileLauncherServiceVip(siteId, appId) {
+  const domesticSiteId = siteId || 'domestic-main';
+  const reconcileKey = appId || domesticSiteId;
+  if (state.launcherServiceVipReconcileBusy) return;
+  state.launcherServiceVipReconcileBusy = reconcileKey;
+  state.launcherServiceVipCidrSyncFeedback = {
+    appId,
+    kind: 'info',
+    message: `Syncing and applying Service VIP network for ${domesticSiteId}.`,
+    detail: 'Updating Config Center, re-materializing Domestic WG, applying Domestic runtime, and applying the Internal service peer.'
+  };
+  renderSelectedAppDetail();
+  try {
+    const payload = await fetchJson('/internal/v1/admin/launcher-service-vip-smokes/reconcile', {
+      method: 'POST',
+      body: {
+        siteId: domesticSiteId,
+        appId,
+        applyDomesticRuntime: true,
+        applyInternalServicePeer: true,
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-launcher-service-vip-reconcile-${Date.now()}`
+      }
+    });
+    const reconcile = payload.reconcile || {};
+    state.launcherServiceVipCidrSyncFeedback = {
+      appId,
+      kind: reconcile.status === 'passed' ? 'success' : ['ready', 'warning'].includes(reconcile.status) ? 'warning' : 'error',
+      message: reconcile.status === 'passed'
+        ? 'Service VIP network applied.'
+        : `Service VIP reconcile ${reconcile.status || 'finished'}.`,
+      detail: summarizeServiceVipReconcile(reconcile)
+    };
+    await refreshAppCenterNetwork();
+  } catch (error) {
+    state.launcherServiceVipCidrSyncFeedback = {
+      appId,
+      kind: 'error',
+      message: error.message,
+      detail: ''
+    };
+  } finally {
+    state.launcherServiceVipReconcileBusy = null;
+    renderSelectedAppDetail();
+  }
+}
+
+function summarizeServiceVipReconcile(reconcile) {
+  const steps = asArray(reconcile?.steps)
+    .map((step) => `${step.label || step.stepId}: ${step.status || 'unknown'}`)
+    .join(' / ');
+  const blocked = asArray(reconcile?.blockedReasons).join(' / ');
+  const next = asArray(reconcile?.nextActions).join(' / ');
+  return [steps, blocked, next].filter(Boolean).join(' / ');
+}
+
 function launcherServiceVipSmokeForApp(app) {
   const appId = normalizeLauncherProductId(app?.appId || '');
   const productId = productNetworkIdForApp(app || {});
@@ -8530,8 +8596,9 @@ function renderSelectedAppServiceVipSmoke(app) {
   const status = smoke.status || 'warning';
   const checks = asArray(smoke.checks);
   const cidrBlocked = checks.some((check) => check.checkId === 'domestic-product-cidrs' && check.status === 'blocked');
-  const needsDomesticRuntimeApply = !cidrBlocked && status !== 'passed';
   const syncBusy = state.launcherServiceVipCidrSyncBusy === smoke.domesticSiteId;
+  const reconcileBusy = state.launcherServiceVipReconcileBusy === smoke.appId || state.launcherServiceVipReconcileBusy === smoke.domesticSiteId;
+  const needsProductNetworkReconcile = status !== 'passed';
   const syncFeedback = state.launcherServiceVipCidrSyncFeedback;
   const feedbackVisible = syncFeedback && (!syncFeedback.appId || syncFeedback.appId === smoke.appId);
   return `
@@ -8556,23 +8623,32 @@ function renderSelectedAppServiceVipSmoke(app) {
       ${cidrBlocked ? `
         <div class="product-network-actions">
           <button
-            class="primary-button"
+            class="secondary-button"
             type="button"
             data-service-vip-sync-domestic-cidrs="${escapeHtml(smoke.domesticSiteId || 'domestic-main')}"
             data-service-vip-sync-app="${escapeHtml(smoke.appId || '')}"
-            ${syncBusy ? 'disabled' : ''}
+            ${syncBusy || reconcileBusy ? 'disabled' : ''}
           >${syncBusy ? 'Syncing CIDRs' : 'Sync Domestic CIDRs'}</button>
           <span>Update Config Center productRelayCidrs from registered standalone ProductNetwork ranges.</span>
         </div>
       ` : ''}
-      ${needsDomesticRuntimeApply ? `
+      ${needsProductNetworkReconcile ? `
         <div class="product-network-actions">
           <button
             class="primary-button"
             type="button"
+            data-service-vip-reconcile
+            data-service-vip-reconcile-site="${escapeHtml(smoke.domesticSiteId || 'domestic-main')}"
+            data-service-vip-reconcile-app="${escapeHtml(smoke.appId || '')}"
+            ${syncBusy || reconcileBusy ? 'disabled' : ''}
+          >${reconcileBusy ? 'Applying Service VIP' : 'Sync & Apply Service VIP'}</button>
+          <button
+            class="secondary-button"
+            type="button"
             data-service-vip-open-domestic-setup
-          >Run Domestic Setup</button>
-          <span>Apply the updated Domestic relay runtime, then return to this app for client data-plane smoke.</span>
+            ${reconcileBusy ? 'disabled' : ''}
+          >Open Domestic Setup</button>
+          <span>One product-level reconcile: CIDR sync, Domestic WG artifact, Domestic runtime, and Internal service peer.</span>
         </div>
       ` : ''}
       <div class="app-permission-rows">

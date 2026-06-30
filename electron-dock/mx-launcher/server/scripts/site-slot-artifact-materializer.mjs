@@ -583,10 +583,11 @@ function createWireGuardTemplate(artifactRoot) {
     targetPath: '/etc/wireguard/mx-domestic.conf',
     sourcePaths: [],
     files: ['mx-domestic-wg-relay.conf', 'mx-domestic-wg.conf', 'mx-internal-service-peer.conf', 'mx-internal-service-peer-apply.sh', 'mx-domestic-relay.env'],
-    metadata: {
-      domesticGatewayIp: material.domesticGatewayIp,
-      domesticGatewayCidr: material.domesticGatewayCidr,
-      internalServicePeerIp: material.internalServiceIp,
+	    metadata: {
+	      publicEndpoint: material.domesticEndpoint,
+	      domesticGatewayIp: material.domesticGatewayIp,
+	      domesticGatewayCidr: material.domesticGatewayCidr,
+	      internalServicePeerIp: material.internalServiceIp,
       listenPort: material.listenPortNumber,
       internalDirectEnabled: material.internalDirectEnabled,
       internalDirectEndpoint: material.internalDirectEndpoint,

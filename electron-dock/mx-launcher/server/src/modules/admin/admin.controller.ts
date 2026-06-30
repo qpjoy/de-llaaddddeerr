@@ -198,6 +198,110 @@ export class AdminController {
     };
   }
 
+  @Post('launcher-service-vip-smokes/reconcile')
+  async reconcileLauncherServiceVip(@Body() rawBody: unknown) {
+    const body = asRecord(rawBody);
+    const siteId = stringValue(body.siteId) ?? 'domestic-main';
+    const appId = stringValue(body.appId);
+    const requestedBy = stringValue(body.requestedBy) ?? 'admin-ui';
+    const requestId = stringValue(body.requestId) ?? `launcher-service-vip-reconcile-${Date.now()}`;
+    const [products, previous] = await Promise.all([
+      this.store.listLauncherProductNetworks(),
+      this.store.getSiteSlotDomesticWireGuardSecret(siteId)
+    ]);
+    const syncPlan = buildLauncherDomesticProductCidrSync(siteId, products, previous);
+    if (syncPlan.status === 'blocked' || !previous) {
+      return {
+        reconcile: launcherServiceVipReconcileResult({
+          siteId,
+          appId,
+          sync: syncPlan,
+          blockedReasons: syncPlan.blockedReasons
+        }),
+        domesticProductCidrSync: syncPlan,
+        secret: previous ? redactAdminDomesticWireGuardSecret(previous) : null
+      };
+    }
+
+    let secret = syncPlan.addedProductRelayCidrs.length
+      ? await this.store.upsertSiteSlotDomesticWireGuardSecret({
+        siteId,
+        productRelayCidrs: syncPlan.productRelayCidrs,
+        requestedBy,
+        requestId: `${requestId}-cidr-sync`
+      })
+      : previous;
+    const sync = {
+      ...syncPlan,
+      status: 'passed' as const,
+      changed: syncPlan.addedProductRelayCidrs.length > 0,
+      productRelayCidrs: domesticSecretProductRelayCidrsForSync(secret),
+      materialDigest: secret.fingerprints.materialDigest,
+      nextActions: syncPlan.addedProductRelayCidrs.length
+        ? ['Domestic productRelayCidrs synced; continuing with artifact and runtime apply.']
+        : ['Domestic productRelayCidrs already cover registered standalone products.']
+    };
+    const plan = stringValue(body.planId)
+      ? await this.store.getSiteSlotPlan(stringValue(body.planId) ?? '')
+      : await this.latestDomesticPlan(siteId);
+    const materialize = await this.materializeDomesticWireGuard(siteId, plan, secret, {
+      publicEndpoint: secret.publicEndpoint,
+      listenPort: secret.listenPort,
+      requestedBy,
+      requestId: `${requestId}-materialize`
+    });
+    secret = materialize.secret ?? secret;
+    const domesticRuntimeApply = booleanValue(body.applyDomesticRuntime) === false
+      ? null
+      : await this.adminDomesticRuntimeConfigApplyResult(siteId, {
+        siteId,
+        planId: plan?.planId ?? null,
+        saveBeforeApply: false,
+        confirmDomesticRuntimeApply: true,
+        requestedBy,
+        requestId: `${requestId}-domestic-runtime-apply`
+      });
+    const internalServicePeerApply = booleanValue(body.applyInternalServicePeer) === false
+      ? null
+      : await adminInternalServicePeerApplyResult(siteId, plan, secret, {
+        siteId,
+        planId: plan?.planId ?? null,
+        confirmInternalServicePeerApply: true,
+        requestedBy,
+        requestId: `${requestId}-internal-service-peer-apply`
+      }, this.store);
+    const reconcile = launcherServiceVipReconcileResult({
+      siteId,
+      appId,
+      sync,
+      materialize: materialize.result,
+      domesticRuntimeApply,
+      internalServicePeerApply
+    });
+    await this.store.recordAudit({
+      eventType: 'launcher.service_vip.reconciled',
+      actorKind: 'admin-action',
+      siteId,
+      requestId,
+      metadata: {
+        requestedBy,
+        appId: appId ?? null,
+        planId: plan?.planId ?? null,
+        status: reconcile.status,
+        steps: reconcile.steps,
+        productRelayCidrs: sync.productRelayCidrs
+      }
+    });
+    return {
+      reconcile,
+      domesticProductCidrSync: sync,
+      domesticWgMaterialize: materialize.result,
+      domesticRuntimeApply,
+      internalServicePeerApply,
+      secret: secret ? redactAdminDomesticWireGuardSecret(secret) : null
+    };
+  }
+
   @Get('actions')
   async actions(
     @Headers('authorization') authorization?: string,
@@ -4454,7 +4558,7 @@ function internalServicePeerHandoffFailures(
     const staleReason = plan ? domesticWireGuardStaleReason(plan, secret) : null;
     if (staleReason) failures.push(staleReason);
   }
-  if (!domesticWireGuardArtifactReady()) failures.push('Domestic WireGuard artifact manifest is not ready');
+  if (!domesticWireGuardArtifactReady(secret)) failures.push('Domestic WireGuard artifact manifest is not ready');
   if (!renderedArtifacts?.configContent && !existsSync(paths.configPath)) {
     failures.push(`Internal service peer config artifact is missing: ${paths.configPath}`);
   }
@@ -5202,11 +5306,24 @@ function redactAdminDomesticWireGuardSecret(secret: SiteSlotDomesticWireGuardSec
   };
 }
 
-function domesticWireGuardArtifactReady(): boolean {
+function domesticWireGuardArtifactReady(secret?: SiteSlotDomesticWireGuardSecret | null): boolean {
   const failures: string[] = [];
   const manifest = readArtifactManifest('domestic', resolveSiteSlotArtifactBaseDir(), failures);
   const module = manifest?.modules.find((item) => item.moduleId === 'wireguard-config') ?? null;
-  return failures.length === 0 && module?.status === 'ready';
+  return failures.length === 0 && module?.status === 'ready' && (!secret || domesticWireGuardArtifactMatchesSecret(module, secret));
+}
+
+function domesticWireGuardArtifactMatchesSecret(
+  module: NonNullable<ReturnType<typeof readArtifactManifest>>['modules'][number],
+  secret: SiteSlotDomesticWireGuardSecret
+): boolean {
+  const metadata = asRecord(module.metadata);
+  const artifactEndpoint = stringValue(metadata.publicEndpoint);
+  if (secret.publicEndpoint && artifactEndpoint !== secret.publicEndpoint) return false;
+  const artifactCidrs = uniqueConfigStrings((Array.isArray(metadata.productRelayCidrs) ? metadata.productRelayCidrs : [])
+    .filter((cidr): cidr is string => typeof cidr === 'string'));
+  const secretCidrs = domesticSecretProductRelayCidrs(secret);
+  return artifactCidrs.join(',') === secretCidrs.join(',');
 }
 
 function domesticRelayPeerAppendSshFailures(
@@ -6551,7 +6668,7 @@ function buildPipelineActionHints(
   }
 
   if (needsDomesticWgMaterialize) {
-    actions.push(domesticWgMaterializeAction(actionPolicy, plan, 'WG secret/materialized artifacts must exist before Domestic preflight and remote SSH'));
+    actions.push(domesticWgMaterializeAction(actionPolicy, plan, 'WG secret/materialized artifacts must exist before Domestic preflight and remote SSH', domesticWgSecret));
   } else if (plan.kind === 'domestic' && domesticWgSecret && confirmedApply && !hasPassedWorkerReport) {
     actions.push(internalServicePeerStatusAction(actionPolicy, plan));
     actions.push(internalServicePeerHandoffAction(actionPolicy, plan, domesticWgSecret));
@@ -6835,7 +6952,7 @@ function domesticWireGuardMaterializeNeeded(
   if (plan.kind !== 'domestic') return false;
   const expectedEndpoint = endpointFromPlanHost(plan, secret?.listenPort ?? 51280);
   return !secret
-    || !domesticWireGuardArtifactReady()
+    || !domesticWireGuardArtifactReady(secret)
     || secret.status !== 'active'
     || secret.readiness.secretMaterial !== 'injected'
     || secret.readiness.publicEndpointStatus !== 'ready'
@@ -6852,7 +6969,7 @@ function domesticWireGuardStaleReason(
   secret: SiteSlotDomesticWireGuardSecret
 ): string | null {
   if (!domesticWireGuardMaterializeNeeded(plan, secret)) return null;
-  if (!domesticWireGuardArtifactReady()) {
+  if (!domesticWireGuardArtifactReady(secret)) {
     return 'Domestic WireGuard artifact manifest is not ready; run Materialize Domestic WG first';
   }
   const expectedEndpoint = endpointFromPlanHost(plan, secret.listenPort ?? 51280);
@@ -6865,7 +6982,8 @@ function domesticWireGuardStaleReason(
 function domesticWgMaterializeAction(
   actionPolicy: AdminActionPolicy,
   plan: SiteSlotPlan,
-  blockedReason: string
+  blockedReason: string,
+  secret: SiteSlotDomesticWireGuardSecret | null = null
 ): AdminActionDescriptor {
   return contextualAction(
     actionPolicy,
@@ -6881,7 +6999,7 @@ function domesticWgMaterializeAction(
         internalDirectListenPort: 51280,
         domesticGatewayIp: '10.88.0.1',
         domesticGatewayCidr: '10.88.0.0/16',
-        productRelayCidrs: ['10.89.0.0/16', '10.90.0.0/16'],
+        productRelayCidrs: secret ? domesticSecretProductRelayCidrs(secret) : ['10.89.0.0/16', '10.90.0.0/16'],
         userRelayCidr: '10.89.0.0/16',
         internalServiceIp: '10.88.88.88',
         internalServiceCidr: '10.88.0.0/16',
@@ -8663,6 +8781,76 @@ function launcherServiceVipSmokeNextActions(checks: AdminLauncherServiceVipSmoke
     actions.push('Start the app client and request a launcher lease.');
   }
   return actions.length ? actions : ['Open Internal service peer actions and verify runtime apply evidence.'];
+}
+
+function launcherServiceVipReconcileResult(input: {
+  siteId: string;
+  appId?: string | null;
+  sync: unknown;
+  materialize?: unknown;
+  domesticRuntimeApply?: unknown;
+  internalServicePeerApply?: unknown;
+  blockedReasons?: string[];
+}) {
+  const steps = [
+    launcherServiceVipReconcileStep('domestic-product-cidrs', 'Sync Domestic product CIDRs', input.sync),
+    launcherServiceVipReconcileStep('domestic-wg-artifact', 'Materialize Domestic WG artifact', input.materialize),
+    launcherServiceVipReconcileStep('domestic-runtime', 'Apply Domestic relay runtime', input.domesticRuntimeApply),
+    launcherServiceVipReconcileStep('internal-service-peer', 'Apply Internal service peer', input.internalServicePeerApply)
+  ].filter((step) => step.status !== 'skipped');
+  const blockedReasons = uniqueStrings([
+    ...(input.blockedReasons ?? []).filter((item) => item.trim().length > 0),
+    ...steps.flatMap((step) => step.blockedReasons)
+  ]);
+  const failed = steps.some((step) => step.status === 'failed');
+  const blocked = blockedReasons.length > 0 || steps.some((step) => step.status === 'blocked');
+  const ready = steps.some((step) => ['ready', 'warning'].includes(step.status));
+  const status = blocked ? 'blocked' : failed ? 'failed' : ready ? 'ready' : 'passed';
+  return {
+    reconcileId: `launcher_service_vip_reconcile_${input.siteId}`,
+    status,
+    siteId: input.siteId,
+    appId: input.appId ?? null,
+    steps,
+    blockedReasons,
+    nextActions: status === 'passed'
+      ? ['Re-run the standalone launcher Apply Data Plane smoke.']
+      : blockedReasons.length
+        ? blockedReasons
+        : steps.flatMap((step) => step.nextActions),
+    finishedAt: new Date().toISOString()
+  };
+}
+
+function launcherServiceVipReconcileStep(stepId: string, label: string, result: unknown) {
+  if (!result) {
+    return {
+      stepId,
+      label,
+      status: 'skipped',
+      message: 'skipped',
+      blockedReasons: [] as string[],
+      nextActions: [] as string[]
+    };
+  }
+  const row = asRecord(result);
+  const status = stringValue(row.status) ?? 'ready';
+  const blockedReasons = (Array.isArray(row.blockedReasons) ? row.blockedReasons : [])
+    .filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+  const nextActions = (Array.isArray(row.nextActions) ? row.nextActions : [])
+    .filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+  const message = blockedReasons[0]
+    ?? nextActions[0]
+    ?? stringValue(row.mode)
+    ?? status;
+  return {
+    stepId,
+    label,
+    status,
+    message,
+    blockedReasons,
+    nextActions
+  };
 }
 
 function bearerToken(authorization?: string): string | null {

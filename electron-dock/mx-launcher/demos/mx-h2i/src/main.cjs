@@ -1941,9 +1941,13 @@ function normalizeConnection(input) {
   if (row.state === 'connecting') {
     return {
       ...idleConnection(),
-      state: 'connecting',
       mode: row.mode === 'employee' ? 'employee' : 'guest',
-      diagnostics: normalizeDiagnostics(row.diagnostics)
+      diagnostics: normalizeDiagnostics(row.diagnostics),
+      health: {
+        ...idleHealth(),
+        wireGuard: 'stale',
+        internalApi: 'idle'
+      }
     };
   }
   return {
@@ -1955,7 +1959,6 @@ function normalizeConnection(input) {
 function retainableConnectionSnapshot(connection) {
   if (!connection || typeof connection !== 'object') return null;
   if (isRetainedConnectionState(connection.state)) return connection;
-  if (connection.state === 'connecting' && (connection.leaseId || connection.localIp || connection.routePlan)) return connection;
   return null;
 }
 
@@ -4261,7 +4264,19 @@ async function saveAndBroadcast() {
 
 async function saveRuntime(next) {
   await fs.mkdir(path.dirname(runtimePath()), { recursive: true });
-  await fs.writeFile(runtimePath(), JSON.stringify(next, null, 2) + '\n', 'utf8');
+  await fs.writeFile(runtimePath(), JSON.stringify(persistableRuntime(next), null, 2) + '\n', 'utf8');
+}
+
+function persistableRuntime(input) {
+  const next = input && typeof input === 'object' ? { ...input } : {};
+  if (next.connection?.state === 'connecting') {
+    next.connection = {
+      ...idleConnection(),
+      mode: next.connection.mode === 'employee' ? 'employee' : 'guest',
+      diagnostics: normalizeDiagnostics(next.connection.diagnostics)
+    };
+  }
+  return next;
 }
 
 function broadcastState() {
