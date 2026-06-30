@@ -24,17 +24,27 @@ import {
   AWX_LAUNCH_FEATURE_KEY,
   AWX_OBJECT_SYNC_FEATURE_KEY
 } from './awx-runtime-gates.js';
+import {
+  MX_DEFAULT_APP_DNS_ZONE,
+  MX_H2I_PRODUCT_ID
+} from '../../store/domain.js';
 import type {
   AdminActionDescriptor,
   AdminActionPolicy,
   AdminDashboardSnapshot,
+  AdminLauncherServiceVipSmoke,
+  AdminLauncherServiceVipSmokeCheck,
+  AdminLauncherServiceVipSmokeStatus,
   AdminPipelineHealth,
   AdminSiteSlotPipeline,
   AdminSiteSlotPipelineSummary,
   AdminTimelineEntry,
+  AppCenterApp,
   AwxProviderCheckResult,
   AwxProviderConfig,
+  DnsReverseProxyRoute,
   LauncherNetworkLease,
+  LauncherProductNetwork,
   LauncherNetworkMihomoSite,
   PlatformPrincipal,
   ReleaseManagementPlan,
@@ -80,18 +90,43 @@ export class AdminController {
   ): Promise<AdminDashboardSnapshot> {
     const limit = numberValue(rawLimit, 10);
     const actionPolicy = await this.buildActionPolicy(authorization, rawToken, rawUserId);
-    const [overview, sites, releasePlans, pipelines, awxProviders, runtimeFeaturePolicies] = await Promise.all([
+    const [
+      overview,
+      sites,
+      releasePlans,
+      pipelines,
+      awxProviders,
+      runtimeFeaturePolicies,
+      launcherApps,
+      launcherProducts,
+      launcherLeases,
+      dnsRoutes,
+      domesticSecrets
+    ] = await Promise.all([
       this.store.overview(),
       this.store.listSites(),
       this.store.listReleaseManagementPlans(),
       this.buildSiteSlotPipelines(actionPolicy),
       this.store.listAwxProviderConfigs(),
-      this.listAwxRuntimePolicies()
+      this.listAwxRuntimePolicies(),
+      this.store.listAppCenterApps({ includeHidden: true, includeDisabled: true }),
+      this.store.listLauncherProductNetworks(),
+      this.store.listLauncherNetworkLeases(),
+      this.store.listDnsReverseProxyRoutes(),
+      this.store.listSiteSlotDomesticWireGuardSecrets()
     ]);
     const visiblePipelines = limitSiteSlotPipelines(pipelines, limit);
     const summaries = visiblePipelines.map((pipeline) => pipeline.summary);
+    const launcherServiceVipSmokes = buildLauncherServiceVipSmokes({
+      apps: launcherApps,
+      products: launcherProducts,
+      leases: launcherLeases,
+      dnsRoutes,
+      domesticSecrets,
+      generatedAt: new Date().toISOString()
+    });
     return {
-      generatedAt: new Date().toISOString(),
+      generatedAt: launcherServiceVipSmokes.generatedAt,
       overview: overview as unknown as Record<string, unknown>,
       actionPolicy,
       sites: sortSites(sites).slice(0, limit),
@@ -99,6 +134,7 @@ export class AdminController {
       siteSlotPipelines: summaries,
       awxProviders: sortAwxProviderConfigs(awxProviders).slice(0, limit),
       runtimeFeaturePolicies,
+      launcherServiceVipSmokes: launcherServiceVipSmokes.smokes,
       nextActions: adminDashboardNextActions(summaries)
     };
   }
@@ -8260,6 +8296,247 @@ function shadowAdminPrincipal(): PlatformPrincipal {
   };
 }
 
+function buildLauncherServiceVipSmokes(input: {
+  apps: AppCenterApp[];
+  products: LauncherProductNetwork[];
+  leases: LauncherNetworkLease[];
+  dnsRoutes: DnsReverseProxyRoute[];
+  domesticSecrets: SiteSlotDomesticWireGuardSecret[];
+  generatedAt: string;
+}): { generatedAt: string; smokes: AdminLauncherServiceVipSmoke[] } {
+  const products = new Map(input.products.map((product) => [normalizeLauncherId(product.productId), product]));
+  const dnsRoutes = input.dnsRoutes;
+  const domesticSecrets = input.domesticSecrets;
+  const smokes = input.apps
+    .map((app) => buildLauncherServiceVipSmoke({
+      app,
+      product: products.get(normalizeLauncherId(app.productNetworkId || app.appId)) ?? null,
+      channelProduct: products.get(launcherServiceVipSmokeChannelProductId(app)) ?? null,
+      leases: input.leases,
+      dnsRoutes,
+      domesticSecrets,
+      generatedAt: input.generatedAt
+    }))
+    .sort((left, right) => left.appId.localeCompare(right.appId));
+  return {
+    generatedAt: input.generatedAt,
+    smokes
+  };
+}
+
+function buildLauncherServiceVipSmoke(input: {
+  app: AppCenterApp;
+  product: LauncherProductNetwork | null;
+  channelProduct: LauncherProductNetwork | null;
+  leases: LauncherNetworkLease[];
+  dnsRoutes: DnsReverseProxyRoute[];
+  domesticSecrets: SiteSlotDomesticWireGuardSecret[];
+  generatedAt: string;
+}): AdminLauncherServiceVipSmoke {
+  const app = input.app;
+  const productId = normalizeLauncherId(app.productNetworkId || app.appId);
+  const product = input.product;
+  const mode = app.launcherMode === 'standalone' || product?.mode === 'standalone' ? 'standalone' : 'embed';
+  const channelProductId = mode === 'standalone'
+    ? productId
+    : normalizeLauncherId(app.standaloneChannelProductId || product?.standaloneChannelProductId || MX_H2I_PRODUCT_ID);
+  const serviceVip = product?.serviceVip ?? null;
+  const dnsHost = normalizeDomain(`${app.appId}.${MX_DEFAULT_APP_DNS_ZONE}`);
+  const dnsRoute = findLauncherServiceDnsRoute(input.dnsRoutes, dnsHost);
+  const domesticSiteId = product?.defaultDomesticSiteId || input.channelProduct?.defaultDomesticSiteId || 'domestic-main';
+  const domesticSecret = input.domesticSecrets.find((secret) => secret.siteId === domesticSiteId)
+    ?? input.domesticSecrets[0]
+    ?? null;
+  const latestLease = input.leases
+    .filter((lease) => lease.productId === channelProductId)
+    .sort((left, right) => String(right.updatedAt || right.createdAt || '').localeCompare(String(left.updatedAt || left.createdAt || '')))[0]
+    ?? null;
+  const expectedProductCidrs = uniqueStrings([
+    product?.userCidr,
+    product?.anonymousCidr
+  ].filter((cidr): cidr is string => Boolean(cidr)));
+  const relayCidrs = domesticSecret ? domesticSecretProductRelayCidrs(domesticSecret) : [];
+  const missingRelayCidrs = expectedProductCidrs.filter((cidr) => !relayCidrs.some((relayCidr) => ipv4CidrContainsCidr(relayCidr, cidr)));
+  const expectedInternalAllowedIps = uniqueStrings([
+    product?.internalControlIp ? `${product.internalControlIp}/32` : '10.88.88.88/32',
+    serviceVip ? `${serviceVip}/32` : ''
+  ].filter(Boolean));
+
+  const checks: AdminLauncherServiceVipSmokeCheck[] = [
+    serviceVipSmokeCheck(
+      'app-registry',
+      'App registry',
+      app.enabled === false ? 'blocked' : 'passed',
+      app.enabled === false ? 'App is registered but disabled.' : 'AppCenter registration is enabled.',
+      app.appId,
+      app.enabled === false ? 'disabled' : 'enabled'
+    ),
+    serviceVipSmokeCheck(
+      'product-network',
+      'ProductNetwork',
+      product ? 'passed' : 'blocked',
+      product ? 'ProductNetwork exists for this app.' : 'ProductNetwork is missing for this app.',
+      productId,
+      product?.productId ?? null
+    ),
+    serviceVipSmokeCheck(
+      'service-vip',
+      'Service VIP',
+      serviceVip ? 'passed' : 'blocked',
+      serviceVip ? 'Service VIP is assigned in ProductNetwork.' : 'Service VIP is not assigned.',
+      '10.88.100.x',
+      serviceVip
+    ),
+    serviceVipSmokeCheck(
+      'dns-route',
+      'DNS route',
+      dnsRoute?.enabled ? 'passed' : dnsRoute ? 'warning' : 'blocked',
+      dnsRoute?.enabled ? 'DNS route exists and is enabled.' : dnsRoute ? 'DNS route exists but is disabled.' : 'DNS route is missing.',
+      dnsHost,
+      dnsRoute?.host ?? null
+    ),
+    serviceVipSmokeCheck(
+      'dns-target',
+      'DNS target',
+      dnsRoute && product && dnsRoute.dnsTarget === product.internalControlIp ? 'passed' : dnsRoute ? 'warning' : 'blocked',
+      dnsRoute && product && dnsRoute.dnsTarget === product.internalControlIp
+        ? 'DNS route targets the Internal service peer.'
+        : dnsRoute
+          ? 'DNS route target does not match the product Internal control IP.'
+          : 'Cannot verify DNS target without a DNS route.',
+      product?.internalControlIp ?? '10.88.88.88',
+      dnsRoute?.dnsTarget ?? null
+    ),
+    serviceVipSmokeCheck(
+      'gateway-upstream',
+      'Gateway upstream',
+      dnsRoute?.targetUrl ? 'passed' : 'blocked',
+      dnsRoute?.targetUrl ? 'Gateway reverse proxy upstream is configured.' : 'Gateway upstream URL is missing.',
+      'http://service-host:port',
+      dnsRoute?.targetUrl ?? null
+    ),
+    serviceVipSmokeCheck(
+      'domestic-secret',
+      'Domestic relay secret',
+      domesticSecret ? 'passed' : 'blocked',
+      domesticSecret ? 'Domestic WireGuard relay material exists.' : 'Domestic WireGuard relay material is missing.',
+      domesticSiteId,
+      domesticSecret?.siteId ?? null
+    ),
+    serviceVipSmokeCheck(
+      'domestic-product-cidrs',
+      'Domestic product CIDRs',
+      !domesticSecret ? 'blocked' : missingRelayCidrs.length ? 'blocked' : 'passed',
+      !domesticSecret
+        ? 'Cannot verify product relay CIDRs without Domestic relay material.'
+        : missingRelayCidrs.length
+          ? `Domestic productRelayCidrs does not cover ${missingRelayCidrs.join(', ')}.`
+          : 'Domestic productRelayCidrs covers the app lease CIDRs.',
+      expectedProductCidrs.join(', ') || null,
+      relayCidrs.join(', ') || null
+    ),
+    serviceVipSmokeCheck(
+      'internal-service-peer-contract',
+      'Internal service peer contract',
+      serviceVip ? 'warning' : 'blocked',
+      serviceVip
+        ? 'Topology expects Internal service peer AllowedIPs to include the product service VIP; runtime apply evidence is checked by Internal service peer actions.'
+        : 'Cannot build Internal service peer AllowedIPs without a service VIP.',
+      expectedInternalAllowedIps.join(', ') || null,
+      'runtime evidence pending'
+    ),
+    serviceVipSmokeCheck(
+      'runtime-lease',
+      'Runtime lease',
+      latestLease ? 'passed' : 'warning',
+      latestLease ? 'At least one recent launcher lease exists for the standalone channel.' : 'No launcher runtime lease has been issued yet.',
+      channelProductId,
+      latestLease?.leaseIp ?? null
+    )
+  ];
+  const status = launcherServiceVipSmokeStatus(checks);
+  return {
+    appId: app.appId,
+    productId,
+    displayName: app.displayName || app.appId,
+    launcherMode: mode,
+    channelProductId,
+    serviceVip,
+    dnsHost,
+    dnsRouteId: dnsRoute?.routeId ?? null,
+    upstreamUrl: dnsRoute?.targetUrl ?? null,
+    latestLeaseIp: latestLease?.leaseIp ?? null,
+    domesticSiteId,
+    status,
+    summary: launcherServiceVipSmokeSummary(status, checks),
+    checks,
+    nextActions: launcherServiceVipSmokeNextActions(checks),
+    generatedAt: input.generatedAt
+  };
+}
+
+function findLauncherServiceDnsRoute(routes: DnsReverseProxyRoute[], dnsHost: string): DnsReverseProxyRoute | null {
+  const normalized = normalizeDomain(dnsHost);
+  return routes.find((route) => normalizeDomain(route.host) === normalized || route.routeId === `rp_${normalized}`) ?? null;
+}
+
+function launcherServiceVipSmokeChannelProductId(app: AppCenterApp): string {
+  const mode = app.launcherMode === 'standalone' ? 'standalone' : 'embed';
+  return mode === 'standalone'
+    ? normalizeLauncherId(app.productNetworkId || app.appId)
+    : normalizeLauncherId(app.standaloneChannelProductId || MX_H2I_PRODUCT_ID);
+}
+
+function serviceVipSmokeCheck(
+  checkId: string,
+  label: string,
+  status: AdminLauncherServiceVipSmokeStatus,
+  detail: string,
+  expected: string | null,
+  actual: string | null
+): AdminLauncherServiceVipSmokeCheck {
+  return {
+    checkId,
+    label,
+    status,
+    detail,
+    expected,
+    actual
+  };
+}
+
+function launcherServiceVipSmokeStatus(checks: AdminLauncherServiceVipSmokeCheck[]): AdminLauncherServiceVipSmokeStatus {
+  if (checks.some((check) => check.status === 'blocked')) return 'blocked';
+  if (checks.some((check) => check.status === 'warning')) return 'warning';
+  return 'passed';
+}
+
+function launcherServiceVipSmokeSummary(
+  status: AdminLauncherServiceVipSmokeStatus,
+  checks: AdminLauncherServiceVipSmokeCheck[]
+): string {
+  if (status === 'passed') return 'Service VIP is configured across App, DNS, relay CIDR, and lease layers.';
+  const first = checks.find((check) => check.status === status);
+  return first?.detail ?? 'Service VIP materialization needs operator attention.';
+}
+
+function launcherServiceVipSmokeNextActions(checks: AdminLauncherServiceVipSmokeCheck[]): string[] {
+  const actions: string[] = [];
+  if (checks.some((check) => check.checkId === 'domestic-product-cidrs' && check.status === 'blocked')) {
+    actions.push('Update Domestic WG productRelayCidrs and re-apply Internal service peer / Domestic relay runtime.');
+  }
+  if (checks.some((check) => check.checkId === 'dns-route' && check.status === 'blocked')) {
+    actions.push('Create the app DNS route and gateway upstream in DNS Center.');
+  }
+  if (checks.some((check) => check.checkId === 'gateway-upstream' && check.status === 'blocked')) {
+    actions.push('Set the route upstream URL to the service or host nginx/Caddy endpoint.');
+  }
+  if (checks.some((check) => check.checkId === 'runtime-lease' && check.status === 'warning')) {
+    actions.push('Start the app client and request a launcher lease.');
+  }
+  return actions.length ? actions : ['Open Internal service peer actions and verify runtime apply evidence.'];
+}
+
 function bearerToken(authorization?: string): string | null {
   if (!authorization) return null;
   const match = authorization.match(/^Bearer\s+(.+)$/i);
@@ -8268,6 +8545,48 @@ function bearerToken(authorization?: string): string | null {
 
 function stringValue(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function normalizeLauncherId(value: string | null | undefined): string {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized || MX_H2I_PRODUCT_ID;
+}
+
+function normalizeDomain(value: string | null | undefined): string {
+  return String(value || '').trim().toLowerCase().replace(/\.$/, '');
+}
+
+function ipv4CidrContainsCidr(container: string, member: string): boolean {
+  const left = parseIpv4Cidr(container);
+  const right = parseIpv4Cidr(member);
+  if (!left || !right || left.prefix > right.prefix) return false;
+  const mask = cidrMask(left.prefix);
+  return (left.address & mask) === (right.address & mask);
+}
+
+function parseIpv4Cidr(value: string | null | undefined): { address: number; prefix: number } | null {
+  const [addressText, prefixText = '32'] = String(value || '').trim().split('/');
+  const address = ipv4ToNumber(addressText);
+  const prefix = Number(prefixText);
+  if (address === null || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return null;
+  return { address, prefix };
+}
+
+function ipv4ToNumber(value: string | null | undefined): number | null {
+  const parts = String(value || '').trim().split('.');
+  if (parts.length !== 4) return null;
+  let output = 0;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const number = Number(part);
+    if (!Number.isInteger(number) || number < 0 || number > 255) return null;
+    output = (output << 8) + number;
+  }
+  return output >>> 0;
+}
+
+function cidrMask(prefix: number): number {
+  return prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
 }
 
 function sortSites(sites: SiteHeartbeat[]): SiteHeartbeat[] {

@@ -75,6 +75,7 @@ const state = {
   appCenterAppsError: null,
   appOnboardingTemplates: [],
   appOnboardingTemplatesError: null,
+  launcherServiceVipSmokes: [],
   appCatalogFilter: '',
   appCatalogModeFilter: 'all',
   appCatalogEditor: null,
@@ -1007,6 +1008,7 @@ async function refreshAdmin() {
     state.appCenterAppsError = appCenterAppsPayload.error || null;
     state.appOnboardingTemplates = asArray(appOnboardingTemplatesPayload.templates);
     state.appOnboardingTemplatesError = appOnboardingTemplatesPayload.error || null;
+    state.launcherServiceVipSmokes = asArray(dashboard.launcherServiceVipSmokes);
     state.launcherProducts = asArray(launcherProductsPayload.products);
     state.launcherProductsError = launcherProductsPayload.error || null;
     state.launcherLeases = asArray(launcherLeasesPayload.leases);
@@ -8172,6 +8174,8 @@ function renderSelectedAppDetail() {
         </div>
       </section>
 
+      ${renderSelectedAppServiceVipSmoke(app)}
+
       <div class="app-workbench-panels">
         <section class="app-workbench-panel">
           <div class="app-workbench-panel-head">
@@ -8301,6 +8305,59 @@ function renderSelectedAppDetail() {
       });
     });
   }
+}
+
+function launcherServiceVipSmokeForApp(app) {
+  const appId = normalizeLauncherProductId(app?.appId || '');
+  const productId = productNetworkIdForApp(app || {});
+  return asArray(state.launcherServiceVipSmokes)
+    .find((smoke) => smoke?.appId === appId || smoke?.productId === productId)
+    || null;
+}
+
+function renderSelectedAppServiceVipSmoke(app) {
+  const smoke = launcherServiceVipSmokeForApp(app);
+  if (!smoke) {
+    return `
+      <section class="app-workbench-panel app-service-vip-smoke">
+        <div class="app-workbench-panel-head">
+          <span>VIP</span>
+          <strong>Service VIP materialization</strong>
+        </div>
+        <div class="empty-state">Waiting for dashboard service VIP smoke.</div>
+      </section>
+    `;
+  }
+  const status = smoke.status || 'warning';
+  const checks = asArray(smoke.checks);
+  return `
+    <section class="app-workbench-panel app-service-vip-smoke">
+      <div class="app-workbench-panel-head">
+        <span>VIP</span>
+        <strong>Service VIP materialization</strong>
+        <mark data-kind="${escapeHtml(status === 'passed' ? 'system' : status === 'blocked' ? 'custom' : 'muted')}">${escapeHtml(status)}</mark>
+      </div>
+      <p class="profile-feedback" data-kind="${escapeHtml(status === 'passed' ? 'success' : status === 'blocked' ? 'error' : 'warning')}">${escapeHtml(smoke.summary || '')}</p>
+      <div class="app-workbench-facts">
+        <span><strong>${escapeHtml(smoke.serviceVip || '-')}</strong><small>service VIP</small></span>
+        <span><strong>${escapeHtml(smoke.dnsHost || '-')}</strong><small>dns host</small></span>
+        <span><strong>${escapeHtml(smoke.upstreamUrl || '-')}</strong><small>gateway upstream</small></span>
+        <span><strong>${escapeHtml(smoke.latestLeaseIp || '-')}</strong><small>latest lease</small></span>
+      </div>
+      <div class="app-permission-rows">
+        ${checks.map((check) => `
+          <article>
+            <strong>${escapeHtml(check.label || check.checkId || '-')}</strong>
+            <span>${escapeHtml(check.detail || '-')}</span>
+            <small>${escapeHtml([check.expected && `expect ${check.expected}`, check.actual && `actual ${check.actual}`].filter(Boolean).join(' / ') || check.status || '-')}</small>
+          </article>
+        `).join('')}
+      </div>
+      <div class="app-feature-chips">
+        ${asArray(smoke.nextActions).map((action) => `<span>${escapeHtml(action)}</span>`).join('')}
+      </div>
+    </section>
+  `;
 }
 
 function renderRbacPanel() {
@@ -10093,6 +10150,7 @@ function renderAdminDashboard(dashboard) {
   renderAdminShell();
   const overview = dashboard.overview || {};
   const principal = dashboard.actionPolicy?.principal;
+  state.launcherServiceVipSmokes = asArray(dashboard.launcherServiceVipSmokes);
   state.awxProviders = asArray(dashboard.awxProviders);
   state.awxRuntimePolicies = asArray(dashboard.runtimeFeaturePolicies);
   renderConsoleStatus({

@@ -642,6 +642,36 @@ export interface AdminSiteSlotPipeline {
   timeline: AdminTimelineEntry[];
 }
 
+export type AdminLauncherServiceVipSmokeStatus = 'passed' | 'warning' | 'blocked';
+
+export interface AdminLauncherServiceVipSmokeCheck {
+  checkId: string;
+  label: string;
+  status: AdminLauncherServiceVipSmokeStatus;
+  detail: string;
+  expected: string | null;
+  actual: string | null;
+}
+
+export interface AdminLauncherServiceVipSmoke {
+  appId: string;
+  productId: string;
+  displayName: string;
+  launcherMode: LauncherProductMode;
+  channelProductId: string;
+  serviceVip: string | null;
+  dnsHost: string;
+  dnsRouteId: string | null;
+  upstreamUrl: string | null;
+  latestLeaseIp: string | null;
+  domesticSiteId: string;
+  status: AdminLauncherServiceVipSmokeStatus;
+  summary: string;
+  checks: AdminLauncherServiceVipSmokeCheck[];
+  nextActions: string[];
+  generatedAt: string;
+}
+
 export interface AdminDashboardSnapshot {
   generatedAt: string;
   overview: Record<string, unknown>;
@@ -651,6 +681,7 @@ export interface AdminDashboardSnapshot {
   siteSlotPipelines: AdminSiteSlotPipelineSummary[];
   awxProviders: AwxProviderConfig[];
   runtimeFeaturePolicies: RuntimeFeaturePolicy[];
+  launcherServiceVipSmokes: AdminLauncherServiceVipSmoke[];
   nextActions: string[];
 }
 

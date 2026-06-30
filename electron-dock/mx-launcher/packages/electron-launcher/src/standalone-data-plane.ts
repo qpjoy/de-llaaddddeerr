@@ -28,6 +28,7 @@ export type ElectronLauncherStandaloneDataPlaneState =
   | 'proxy-tun-captured'
   | 'ownership-conflict'
   | 'route-mismatch'
+  | 'service-unreachable'
   | 'network-ready';
 
 export type ElectronLauncherStandaloneDataPlaneSeverity = 'ok' | 'info' | 'warning' | 'error';
@@ -469,7 +470,7 @@ function dataPlaneState(input: {
 function dataPlaneSeverity(state: ElectronLauncherStandaloneDataPlaneState): ElectronLauncherStandaloneDataPlaneSeverity {
   if (state === 'network-ready') return 'ok';
   if (state === 'lease-missing' || state === 'lease-active') return 'info';
-  if (state === 'ownership-conflict' || state === 'proxy-tun-captured' || state === 'route-mismatch') return 'error';
+  if (state === 'ownership-conflict' || state === 'proxy-tun-captured' || state === 'route-mismatch' || state === 'service-unreachable') return 'error';
   return 'warning';
 }
 
@@ -485,6 +486,9 @@ function dataPlaneMessage(input: {
   }
   if (input.state === 'ownership-conflict') {
     return 'Another launcher owner already claims the same DNS, route, or reverse-proxy resource.';
+  }
+  if (input.state === 'service-unreachable') {
+    return 'Launcher route proof is ready, but the product service VIP is not reachable yet.';
   }
   if (input.state === 'proxy-tun-captured') {
     if (input.proxyProbe) {

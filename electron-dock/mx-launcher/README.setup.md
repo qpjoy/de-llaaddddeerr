@@ -170,4 +170,11 @@ docker ps -a --filter name=mx-internal-postgres-shadow
 ## 3. 删除containerd
 crictl images | grep -E 'qpjoy/mx-launcher-server|caddy|coredns|postgres'
 crictl rmi --prune
+
+
+
+# Test Luopan
+LUOPAN_SDK_TEST_MODE=0 pnpm dev
+# force standalone wg，可能会抢MX-H2I的的route，需要其重新连接才会回复。
+LUOPAN_FORCE_STANDALONE_WG=1
 ```
