@@ -6652,6 +6652,22 @@ function serviceVipForProductSecondOctet(secondOctet, productId) {
   return `10.88.100.${Math.max(2, Math.min(254, 2 + index))}`;
 }
 
+function standaloneControlDefaults(productId, serviceVip) {
+  const normalized = normalizeStandaloneProductId(productId || '');
+  if (normalized === MX_H2I_PRODUCT_ID || normalized === LAUNCHER_FOUNDATION_PRODUCT_ID) {
+    return {
+      internalControlIp: MX_INTERNAL_DNS_IP,
+      domesticGatewayIp: MX_DOMESTIC_RELAY_IP,
+      dnsServer: MX_DOMESTIC_RELAY_IP
+    };
+  }
+  return {
+    internalControlIp: serviceVip,
+    domesticGatewayIp: serviceVip,
+    dnsServer: serviceVip
+  };
+}
+
 function materializedVipForStandaloneDraft(draft, appId) {
   const mode = draft?.launcherMode === 'standalone' ? 'standalone' : 'embed';
   if (mode === 'standalone') {
@@ -6665,7 +6681,8 @@ function materializedVipForStandaloneDraft(draft, appId) {
 
 function launcherAppEffectiveDnsTarget(draft, appId) {
   const materializedVip = materializedVipForStandaloneDraft(draft, appId);
-  return !draft?.dnsTarget || draft.dnsTarget === MX_INTERNAL_DNS_IP ? materializedVip : draft.dnsTarget;
+  const defaults = standaloneControlDefaults(appId, materializedVip);
+  return !draft?.dnsTarget || draft.dnsTarget === MX_INTERNAL_DNS_IP ? defaults.internalControlIp : draft.dnsTarget;
 }
 
 function relayEnrollmentDraftForRender(siteId, overrides = {}) {
@@ -6753,6 +6770,7 @@ function desiredRelayProductNetwork(draft) {
   const productIndex = productId === MX_H2I_PRODUCT_ID ? 0 : Math.max(0, Math.min(99, Number(secondOctet) - 90));
   const serviceHost = productId === MX_H2I_PRODUCT_ID ? 1 : Math.max(2, Math.min(254, 2 + productIndex));
   const materializedVip = `10.88.100.${serviceHost}`;
+  const controlDefaults = standaloneControlDefaults(productId, materializedVip);
   return {
     productId,
     displayName: launcherProductDisplayName(productId, launcherProductById(productId)),
@@ -6760,9 +6778,7 @@ function desiredRelayProductNetwork(draft) {
     standaloneChannelProductId: productId,
     productIndex,
     serviceVip: materializedVip,
-    internalControlIp: materializedVip,
-    domesticGatewayIp: materializedVip,
-    dnsServer: materializedVip,
+    ...controlDefaults,
     ...ranges,
     defaultDomesticSiteId: draft.siteId || 'domestic-main',
     updatePolicy: productId === MX_H2I_PRODUCT_ID || mode === 'embed' ? 'launcher-managed' : 'app-managed',
@@ -6842,9 +6858,9 @@ function fallbackLauncherProduct(productId) {
       mode: 'standalone',
       standaloneChannelProductId: MX_H2I_PRODUCT_ID,
       serviceVip: '10.88.100.1',
-      internalControlIp: '10.88.100.1',
-      domesticGatewayIp: '10.88.100.1',
-      dnsServer: '10.88.100.1',
+      internalControlIp: MX_INTERNAL_DNS_IP,
+      domesticGatewayIp: MX_DOMESTIC_RELAY_IP,
+      dnsServer: MX_DOMESTIC_RELAY_IP,
       userLeaseStart: '10.89.0.1',
       userLeaseEnd: '10.89.99.254',
       anonymousLeaseStart: '10.89.100.1',
@@ -6860,9 +6876,9 @@ function fallbackLauncherProduct(productId) {
       mode: 'embed',
       standaloneChannelProductId: MX_H2I_PRODUCT_ID,
       serviceVip: '10.88.100.9',
-      internalControlIp: '10.88.100.1',
-      domesticGatewayIp: '10.88.100.1',
-      dnsServer: '10.88.100.1',
+      internalControlIp: MX_INTERNAL_DNS_IP,
+      domesticGatewayIp: MX_DOMESTIC_RELAY_IP,
+      dnsServer: MX_DOMESTIC_RELAY_IP,
       userLeaseStart: '10.92.0.1',
       userLeaseEnd: '10.92.99.254',
       anonymousLeaseStart: '10.92.100.1',
@@ -6878,9 +6894,9 @@ function fallbackLauncherProduct(productId) {
       mode: 'embed',
       standaloneChannelProductId: MX_H2I_PRODUCT_ID,
       serviceVip: '10.88.100.10',
-      internalControlIp: '10.88.100.1',
-      domesticGatewayIp: '10.88.100.1',
-      dnsServer: '10.88.100.1',
+      internalControlIp: MX_INTERNAL_DNS_IP,
+      domesticGatewayIp: MX_DOMESTIC_RELAY_IP,
+      dnsServer: MX_DOMESTIC_RELAY_IP,
       userLeaseStart: '10.90.0.1',
       userLeaseEnd: '10.90.99.254',
       anonymousLeaseStart: '10.90.100.1',
@@ -6895,9 +6911,9 @@ function fallbackLauncherProduct(productId) {
     mode: 'embed',
     standaloneChannelProductId: MX_H2I_PRODUCT_ID,
     serviceVip: '',
-    internalControlIp: '10.88.100.1',
-    domesticGatewayIp: '10.88.100.1',
-    dnsServer: '10.88.100.1',
+    internalControlIp: MX_INTERNAL_DNS_IP,
+    domesticGatewayIp: MX_DOMESTIC_RELAY_IP,
+    dnsServer: MX_DOMESTIC_RELAY_IP,
     userLeaseStart: '',
     userLeaseEnd: '',
     anonymousLeaseStart: '',
@@ -7786,6 +7802,7 @@ function renderAppStandaloneNetworkSection(draft, conflict) {
   const suggestedOctet = nextAvailableProductSecondOctet(appId || null, 'standalone');
   const ranges = relayProductNetworkShape(secondOctet);
   const serviceVip = serviceVipForProductSecondOctet(secondOctet, appId);
+  const controlDefaults = standaloneControlDefaults(appId, serviceVip);
   const knownUsage = knownProductNetworkSecondOctets(appId || null)
     .slice(0, 5)
     .map((item) => `10.${item.secondOctet}.* ${launcherProductDisplayName(item.product.productId, item.product)}`)
@@ -7813,7 +7830,7 @@ function renderAppStandaloneNetworkSection(draft, conflict) {
         <span><strong>${escapeHtml(ranges.userLeaseStart)} - ${escapeHtml(ranges.userLeaseEnd)}</strong><small>login users</small></span>
         <span><strong>${escapeHtml(ranges.anonymousLeaseStart)} - ${escapeHtml(ranges.anonymousLeaseEnd)}</strong><small>anonymous users</small></span>
         <span><strong>${escapeHtml(serviceVip)}</strong><small>service VIP</small></span>
-        <span><strong>${escapeHtml(serviceVip)}</strong><small>control / DNS / proxy</small></span>
+        <span><strong>${escapeHtml(controlDefaults.internalControlIp)}</strong><small>control / DNS / proxy</small></span>
       </div>
     </div>
   `;
@@ -8093,6 +8110,7 @@ async function saveAppCenterAppFromEditor(root) {
     if (launcherMode === 'standalone') {
       const ranges = relayProductNetworkShape(secondOctet);
       const materializedVip = serviceVipForProductSecondOctet(secondOctet, appId);
+      const controlDefaults = standaloneControlDefaults(appId, materializedVip);
       const networkPayload = {
         productId: appId,
         displayName: body.displayName,
@@ -8100,9 +8118,7 @@ async function saveAppCenterAppFromEditor(root) {
         standaloneChannelProductId: appId,
         productIndex: productIndexForSecondOctet(secondOctet, appId),
         serviceVip: materializedVip,
-        internalControlIp: materializedVip,
-        domesticGatewayIp: materializedVip,
-        dnsServer: materializedVip,
+        ...controlDefaults,
         ...ranges,
         defaultDomesticSiteId: selectedDomesticSiteId() || 'domestic-main',
         updatePolicy: launcherProductEffectiveUpdatePolicy({ ...draft, appId, launcherMode }),

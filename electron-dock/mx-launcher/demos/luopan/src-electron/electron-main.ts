@@ -745,10 +745,40 @@ function withServiceVipReachability(
   const prefix = mode === 'shared-reuse'
     ? 'Shared launcher routes are present'
     : 'Standalone WireGuard routes are present';
+  const serviceHealth = probeServiceVipHealth(session, serviceVip);
+  if (!serviceHealth.ok) {
+    return {
+      ...dataPlane,
+      ok: false,
+      state: 'service-unreachable',
+      severity: 'warning',
+      message: `${prefix}; Luopan service VIP ${serviceVip} is routed through ${serviceRoute.interfaceName || 'WireGuard'}, but ${serviceHealth.url} is not reachable (${serviceHealth.message}). Apply Domestic relay/Internal service-peer materialization before treating this channel as network-ready.`
+    };
+  }
   return {
     ...dataPlane,
-    message: `${prefix}; Luopan service VIP ${serviceVip} is routed through ${serviceRoute.interfaceName || 'WireGuard'}. ICMP ping is not required for data-plane readiness; verify upstream service materialization with DNS/HTTP smoke checks.`
+    message: `${prefix}; Luopan service VIP ${serviceVip} is routed through ${serviceRoute.interfaceName || 'WireGuard'} and ${serviceHealth.url} is reachable.`
   };
+}
+
+function probeServiceVipHealth(session: LauncherNetworkSession, serviceVip: string): { ok: boolean; url: string; message: string } {
+  const url = serviceVipHealthUrl(session, serviceVip);
+  try {
+    execFileSync('curl', ['-fsS', '--max-time', '2', url], { stdio: 'pipe', timeout: 3000 });
+    return { ok: true, url, message: 'healthz ok' };
+  } catch (error) {
+    return { ok: false, url, message: errorMessage(error) };
+  }
+}
+
+function serviceVipHealthUrl(session: LauncherNetworkSession, serviceVip: string): string {
+  try {
+    const parsed = new URL(stringValue(session.routePlan.internalBaseUrl) || `http://${serviceVip}:18090`);
+    const port = parsed.port || (parsed.protocol === 'https:' ? '443' : parsed.protocol === 'http:' ? '80' : '18090');
+    return `${parsed.protocol}//${serviceVip}${port ? `:${port}` : ''}/healthz`;
+  } catch {
+    return `http://${serviceVip}:18090/healthz`;
+  }
 }
 
 function probeIcmpReachability(host: string): { ok: boolean; message: string } {

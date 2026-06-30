@@ -75,9 +75,13 @@ proves the host route, service VIP, DNS relay, and endpoint are on the expected
 WireGuard/direct path.
 
 Service VIP route proof is local data-plane evidence, not an ICMP contract. A
-VIP such as `10.88.100.3` may reject `ping` while the route is still correct;
-verify the upstream with DNS/HTTP smoke checks after Internal service
-materialization.
+VIP such as `10.88.100.3` may reject `ping` while the route is still correct.
+However, route proof alone is not enough to mark Luopan as network-ready: the
+demo also checks `http://10.88.100.3:18090/healthz` (or the materialized
+service VIP port from the route plan). If the `/32` route is present but HTTP
+health times out, the runtime stays `service-unreachable` /
+`data-plane-pending` until Domestic relay / Internal service-peer
+materialization publishes Luopan behind its product VIP.
 
 Use `Request lease` to verify the control-plane entitlement path. Then use
 `Apply data plane` to sync the Domestic peer, install the product-specific

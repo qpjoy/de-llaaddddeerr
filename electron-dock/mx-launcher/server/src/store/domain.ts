@@ -1359,9 +1359,19 @@ export function buildLauncherProductNetwork(
   const standaloneChannelProductId = launcherNetworkLeaseProductId(rawStandaloneChannel || (mode === 'standalone' ? productId : MX_H2I_PRODUCT_ID));
   const updatedBy = input.requestedBy?.trim() || 'config-center';
   const serviceVip = validIpv4OrFallback(input.serviceVip, previous?.serviceVip || defaults.serviceVip);
-  const internalControlIp = validIpv4OrFallback(input.internalControlIp, previous?.internalControlIp || defaults.internalControlIp || serviceVip);
-  const domesticGatewayIp = validIpv4OrFallback(input.domesticGatewayIp, previous?.domesticGatewayIp || defaults.domesticGatewayIp || internalControlIp);
-  const dnsServer = validIpv4OrFallback(input.dnsServer, previous?.dnsServer || defaults.dnsServer || internalControlIp);
+  const legacyFoundation = launcherNetworkProductUsesLegacyFoundation(productId);
+  const inputInternalControlIp = legacyFoundation ? null : input.internalControlIp;
+  const inputDomesticGatewayIp = legacyFoundation ? null : input.domesticGatewayIp;
+  const inputDnsServer = legacyFoundation ? null : input.dnsServer;
+  const previousInternalControlIp = legacyFoundation ? null : previous?.internalControlIp;
+  const previousDomesticGatewayIp = legacyFoundation ? null : previous?.domesticGatewayIp;
+  const previousDnsServer = legacyFoundation ? null : previous?.dnsServer;
+  const internalControlFallback = legacyFoundation ? defaults.internalControlIp || serviceVip : serviceVip;
+  const domesticGatewayFallback = legacyFoundation ? defaults.domesticGatewayIp || internalControlFallback : internalControlFallback;
+  const dnsServerFallback = legacyFoundation ? defaults.dnsServer || internalControlFallback : internalControlFallback;
+  const internalControlIp = validIpv4OrFallback(inputInternalControlIp, previousInternalControlIp || internalControlFallback);
+  const domesticGatewayIp = validIpv4OrFallback(inputDomesticGatewayIp, previousDomesticGatewayIp || domesticGatewayFallback);
+  const dnsServer = validIpv4OrFallback(inputDnsServer, previousDnsServer || dnsServerFallback);
   return {
     productId,
     displayName: input.displayName?.trim() || previous?.displayName || defaults.displayName,
@@ -2375,7 +2385,7 @@ function productRelayCidrs(input: string[] | null | undefined, previous: string[
   const candidates = input?.length ? input : previous?.length ? previous : ['10.89.0.0/16', '10.90.0.0/16'];
   const cidrs = candidates
     .map((cidr) => cidr.trim())
-    .filter((cidr) => /^10\.\d{1,3}\.0\.0\/16$/.test(cidr));
+    .filter((cidr) => /^10\.\d{1,3}\.0\.0\/16$/.test(cidr) || /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}\/32$/.test(cidr));
   return [...new Set(cidrs.length ? cidrs : ['10.89.0.0/16', '10.90.0.0/16'])];
 }
 
@@ -2411,9 +2421,9 @@ function defaultLauncherProductNetworkShape(productId: string, mode: LauncherPro
     return {
       displayName: productId === MX_H2I_PRODUCT_ID ? 'MX-H2I' : productId === LAUNCHER_FOUNDATION_PRODUCT_ID ? 'Launcher Foundation' : productId,
       serviceVip,
-      internalControlIp: serviceVip,
-      domesticGatewayIp: serviceVip,
-      dnsServer: serviceVip,
+      internalControlIp: launcherNetworkProductUsesLegacyFoundation(productId) ? '10.88.88.88' : serviceVip,
+      domesticGatewayIp: launcherNetworkProductUsesLegacyFoundation(productId) ? '10.88.0.1' : serviceVip,
+      dnsServer: launcherNetworkProductUsesLegacyFoundation(productId) ? '10.88.0.1' : serviceVip,
       userCidr: `10.${secondOctet}.0.0/16`,
       anonymousCidr: `10.${secondOctet}.0.0/16`,
       userLeaseStart: `10.${secondOctet}.0.1`,
@@ -2441,6 +2451,10 @@ function defaultLauncherProductNetworkShape(productId: string, mode: LauncherPro
     anonymousLeaseEnd: `10.${secondOctet}.254.254`,
     rateLimitProfile: 'product-default'
   };
+}
+
+function launcherNetworkProductUsesLegacyFoundation(productId: string): boolean {
+  return productId === MX_H2I_PRODUCT_ID || productId === LAUNCHER_FOUNDATION_PRODUCT_ID;
 }
 
 function launcherProductNetworkNotes(mode: LauncherProductMode): string[] {
@@ -3038,9 +3052,9 @@ export function buildLauncherNetworkTopology(
       requiresEnrollLease: true,
       relayPeer: {
         required: true,
-        fixedIp: product.internalControlIp,
+        fixedIp: '10.88.88.88',
         initiatedBy: 'internal-outbound-to-domestic-public-wg',
-        purpose: 'materialize product-scoped control, DNS, proxy, and service VIP without a shared client route'
+        purpose: 'make Internal reachable and materialize product-scoped control, DNS, proxy, and service VIP addresses'
       }
     },
     oversea: {
@@ -3089,8 +3103,9 @@ export function buildLauncherNetworkTopology(
       },
       internalServicePeer: {
         role: 'internal-service',
-        fixedIp: product.internalControlIp,
+        fixedIp: '10.88.88.88',
         allowedIps: uniqueStrings([
+          '10.88.88.88/32',
           `${product.internalControlIp}/32`,
           `${product.serviceVip}/32`,
           `${product.domesticGatewayIp}/32`,
@@ -3103,7 +3118,7 @@ export function buildLauncherNetworkTopology(
       internalDirectPeer: {
         role: 'internal-direct-service',
         enabled: false,
-        fixedIp: product.internalControlIp,
+        fixedIp: '10.88.88.88',
         endpoint: null,
         listenPort: 51280,
         publicKey: null,

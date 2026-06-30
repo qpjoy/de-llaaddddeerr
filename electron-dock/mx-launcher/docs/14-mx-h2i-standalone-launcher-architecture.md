@@ -92,21 +92,33 @@ Internal control/DNS/proxy materialize 到 Luopan 自己的产品地址或 servi
 `launcher-foundation` 作为产品无关的 shared foundation plane，单独承载
 `10.88.88.88/32`、`10.88.0.1/32` 这类公共地址，并按所有 standalone 产品的声明做引用计数。
 
-当前主线选择第一种：**product-scoped materialization**。`10.88.0.1` 和 `10.88.88.88`
-可以继续作为 Domestic/Internal 站点内部实现地址或迁移期诊断地址，但不再作为所有
-standalone 客户端必须安装的共享路由。客户端看到的是自己 channel 的 materialized VIP：
+当前主线选择第一种：**product-scoped materialization**。但落地必须分两层：
+
+- Foundation 兼容层：MX-H2I / `launcher-foundation` 在迁移期仍使用已经在线的
+  `10.88.88.88` Internal service peer 和 `10.88.0.1` Domestic relay/DNS 地址，并安装这些
+  `/32` priority route 来压过 Clash TUN。这是恢复现网 H2I 的兼容路径，不是新产品依赖。
+- Product materialization 层：Luopan、未来 H2O standalone 等新 standalone 产品只安装自己的
+  lease CIDR 和产品 service VIP `/32`。Internal control/DNS/proxy/user/permission/release
+  能力由服务端 materialize 到该产品 VIP 后再对外可用。
+
+因此 `10.88.0.1` 和 `10.88.88.88` 可以继续作为 Domestic/Internal 站点内部实现地址或
+H2I/foundation 迁移期诊断地址，但不能作为所有 standalone 客户端都重复安装的共享路由。
+客户端看到的是自己 channel 的 materialized VIP；只有 H2I/foundation 例外保留旧 foundation
+地址，直到 `10.88.100.1` 也完成同等健康验证：
 
 | 产品/channel | lease CIDR | materialized VIP | 客户端必须安装的路由 |
 | --- | --- | --- | --- |
-| MX-H2I standalone | `10.89.0.0/16` | `10.88.100.1` | `10.89.0.0/16` + `10.88.100.1/32` |
+| MX-H2I / launcher-foundation | `10.89.0.0/16` | `10.88.100.1` | `10.89.0.0/16` + `10.88.100.1/32` + `10.88.88.88/32` + `10.88.0.1/32` |
 | Luopan standalone | `10.91.0.0/16` | `10.88.100.3` | `10.91.0.0/16` + `10.88.100.3/32` |
 | H2O embed on MX-H2I | 不新建本机 WG | `10.88.100.1` | 由 MX-H2I channel 提供 |
 | H2O embed on Luopan | 不新建本机 WG | `10.88.100.3` | 由 Luopan channel 提供 |
 
 Save App / Upsert ProductNetwork 需要自动写入这些字段：`serviceVip`、`internalControlIp`、
-`domesticGatewayIp`、`dnsServer`。默认情况下四者都等于该 standalone channel 的
+`domesticGatewayIp`、`dnsServer`。新 standalone 产品默认四者都等于该 standalone channel 的
 materialized VIP；后续如果产品需要拆分 control/DNS/proxy，也可以显式配置成同一产品下的
-多个 `/32`，但仍不能回退到所有产品共享的 `10.88.0.1/10.88.88.88`。
+多个 `/32`。MX-H2I / `launcher-foundation` 是兼容例外：Save App 不能把它们自动改成
+`10.88.100.1` 控制面，除非服务端已经证明 `10.88.100.1:18090/healthz`、DNS 和 proxy 都
+materialize 完成。
 
 服务端 materialization 的职责：
 
@@ -116,17 +128,21 @@ materialized VIP；后续如果产品需要拆分 control/DNS/proxy，也可以�
   `serviceVip`、`dnsServer`、`domesticGatewayIp` 这些产品 VIP `/32`，并把它们接入同一个
   Internal gateway/control/DNS 实现。
 - Domestic relay：站点内部仍可使用 `10.88.0.1` 作为真实 WG relay gateway，但对 H 端只需要
-  转发产品 CIDR 和产品 VIP `/32`；不要要求 H 端安装 `10.88.0.0/16`。
+  转发产品 CIDR 和产品 VIP `/32`；`productRelayCidrs` 在落地配置里同时包含 lease `/16`
+  和 service/control/DNS VIP `/32`，不要要求 H 端安装 `10.88.0.0/16`。
 - 限速/审计/灰度：按 `productId`、`standaloneChannelProductId`、产品 lease CIDR 和产品 VIP
   归因。这样 H2I、Luopan、未来 H2O standalone 的流量天然可分开限速和诊断。
 
 客户端 routePlan 的不变量：
 
-- `routeCidrs` 只包含当前 lease product 的 user/anonymous CIDR 和 materialized VIP `/32`。
-- `internalBaseUrl` 使用 `http://{internalControlIp}:18090`，不是固定
-  `http://10.88.88.88:18090`。
+- 新 standalone 的 `routeCidrs` 只包含当前 lease product 的 user/anonymous CIDR 和
+  materialized VIP `/32`；H2I/foundation 迁移期可额外包含 `10.88.88.88/32` 和
+  `10.88.0.1/32`。
+- `internalBaseUrl` 使用 `http://{internalControlIp}:18090`。Luopan 这类产品应是自己的
+  service VIP；MX-H2I/foundation 迁移期仍是 `http://10.88.88.88:18090`。
 - `dnsServer` 使用产品 `dnsServer`，默认就是产品 VIP；WireGuard DNS 仍可被
-  system-domain-proxy suppress，但 split DNS/PAC 的上游目标也应是产品 VIP。
+  system-domain-proxy suppress，但 split DNS/PAC 的上游目标也应是产品 VIP。H2I/foundation
+  迁移期继续使用 `10.88.0.1`。
 - product WG 的 connect/disconnect 只安装/释放本产品路由；关闭 Luopan 不会删除 MX-H2I 的
   `10.89.*` 或 `10.88.100.1/32`，关闭 MX-H2I 也不会删除 Luopan 的 `10.91.*` 或
   `10.88.100.3/32`。
@@ -345,7 +361,8 @@ MX-H2I 客户端连接分两个阶段：
    作为公网 facade 转发到 Internal 的 gateway 接口，供 H 端登录、申请 lease、拉 routePlan。
 2. Overlay 阶段：客户端 WG 已连上 Domestic relay 后，Internal API 和后续应用流量走
    routePlan 下发的 `internalControlIp`。新产品默认是自己的 channel service VIP，例如
-   MX-H2I `10.88.100.1`、Luopan `10.88.100.3`。
+   Luopan `10.88.100.3`；MX-H2I / `launcher-foundation` 在迁移期继续使用
+   `10.88.88.88`，直到 `10.88.100.1` 的 service materialization 通过健康验证。
 
 `H2I direct endpoint is not configured in routePlan` 只表示 Internal direct peer
 没有在 Config Center 打开，默认 `auto` 会走 Domestic relay 的 `hdi-relay` 路径，不应直接判定
@@ -356,9 +373,13 @@ MX-H2I 不通。真正的 H2I ready 证据是：客户端 tunnel active、`route
 `h2i-direct` 的区别是是否绕过 Domestic relay 直连 Internal，不是 H2I 能力是否存在。
 如果 relay healthz 已 passed 但客户端仍是 `tunnel-only / blocked`，优先看 route proof 是否被
 `lo0`、其它 `utun` 或系统代理抢走。
-产品 service VIP 例如 `10.88.100.3` 的本地成功证据是 route proof 命中当前产品 WG interface，
-不是 ICMP ping 必须成功。service VIP 的真实上游可达性应由 DNS route / HTTP smoke /
-Internal service materialization 验证；很多 k8s/VIP/L4 场景不会响应 ping。
+产品 service VIP 例如 `10.88.100.3` 的本地第一层证据是 route proof 命中当前产品 WG
+interface，不是 ICMP ping 必须成功；很多 k8s/VIP/L4 场景不会响应 ping。但 route proof
+只能证明本机路由没有被 Clash 或其它 utun 抢走，不能证明服务端已经 materialize。最终 ready
+还必须通过 `http://<serviceVip>:18090/healthz`、DNS route 或等价 HTTP smoke 验证。
+如果 route proof 成功但 HTTP health timeout，UI 应显示 `service-unreachable` /
+`data-plane-pending`，提示执行 Domestic relay / Internal service-peer materialization，而不是
+宣称 `network-ready`。
 独立 standalone 产品默认只安装自己的 lease CIDR 和 materialized product VIP `/32`；公共 foundation
 地址如 `10.88.0.1`、`10.88.88.88`、`10.88.0.0/16` 不能由每个产品 WG 重复安装，否则
 macOS 全局路由表会让后启动的 utun 抢走前一个产品的 Internal route。公共 DNS/control

@@ -294,9 +294,12 @@ Split DNS 的目标形态是“每个 app 提交自己的域名需求，Internal
 2. 部署 Internal API / Config Center，能生成 DNS policy snapshot 和 CoreDNS zone snapshot。
 3. 暴露 Internal DNS endpoint：`mx-internal-coredns` 仍监听 Pod 内 `:53`，
    服务端 Save App / ProductNetwork materialization 把 control/DNS/proxy 映射到每个
-   standalone channel 自己的 service VIP，例如 MX-H2I `10.88.100.1`、Luopan
-   `10.88.100.3`；routePlan 下发产品 VIP，不再要求每个 H 端安装共享
-   `10.88.88.88` 或 `10.88.0.1` 路由。
+   standalone channel 自己的 service VIP，例如 Luopan `10.88.100.3`。MX-H2I /
+   `launcher-foundation` 是迁移兼容例外，routePlan 继续下发 `10.88.88.88` 和
+   `10.88.0.1`，直到 `10.88.100.1` 的 control/DNS/proxy materialization 通过健康验证。
+   Domestic WG materialization 需要把产品 lease `/16` 和产品 VIP `/32` 同步进
+   `productRelayCidrs`；新 standalone 产品不再要求每个 H 端安装共享 `10.88.88.88` 或
+   `10.88.0.1` 路由。
 4. Domestic relay ready 后，H 端只对命中白名单的域名安装 split DNS；未命中仍走本机原有
    系统 DNS、系统代理、fake-ip 或 H2O 规则。
 5. 最后再启用 AppCenter app 级 DNS policy，按 app 安装/授权状态合并到当前设备的最终
@@ -601,8 +604,8 @@ Release Center 可以集成 Jenkins 和自建工具链，但 release 真相留�
 
 1. H2O 首版是否只支持代理/TUN，还是同时接入 Oversea 订阅和节点 UI。
 2. 登录后是否一定切到当前 standalone channel 的登录 lease 段，还是允许同一 peer 从匿名段升级策略。
-   客户端可见的 Domestic/control/DNS 目标应使用 channel service VIP；`10.88.0.1` 只保留为
-   Domestic 站点内部 relay 实现地址。
+   新 standalone 客户端可见的 Domestic/control/DNS 目标应使用 channel service VIP；
+   `10.88.0.1` 只保留为 Domestic 站点内部 relay 实现地址和 MX-H2I/foundation 迁移兼容目标。
 3. Domestic 是否需要离线 DNS cache。如果不要，Internal 不可达时内部域名解析直接降级。
 4. AppCenter 是 Launcher 内置页面，还是可以独立升级为单独应用包。
 5. MX-3ks SDK Gateway 第一批给哪些系统用：只给同台服务，还是也给内网其他服务。

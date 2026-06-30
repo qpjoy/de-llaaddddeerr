@@ -1356,7 +1356,7 @@ export class AdminController {
       };
     }
 
-    const syncScript = domesticInternalServicePeerKeySyncScript(internalPublicKey, secret.internalServiceIp);
+    const syncScript = domesticInternalServicePeerKeySyncScript(internalPublicKey, secret);
     const syncStartedAt = new Date().toISOString();
     let syncExecution;
     try {
@@ -5729,9 +5729,13 @@ function domesticRelayPublicKeyReadScript(): string {
   ].join('; ');
 }
 
-function domesticInternalServicePeerKeySyncScript(internalPublicKey: string, internalServiceIp: string): string {
-  const allowedIp = `${internalServiceIp}/32`;
-  const relayRouteCidrs = domesticRelayRouteCidrsForAllowedIp('10.89.100.1/32');
+function domesticInternalServicePeerKeySyncScript(internalPublicKey: string, secret: SiteSlotDomesticWireGuardSecret): string {
+  const primaryAllowedIp = `${secret.internalServiceIp}/32`;
+  const allowedIps = domesticInternalServicePeerAllowedIps(secret);
+  const relayRouteCidrs = uniqueStrings([
+    ...domesticRelayRouteCidrsForAllowedIp('10.89.100.1/32'),
+    ...domesticSecretProductRelayCidrs(secret)
+  ]);
   return [
     'set -eu',
     'printf "mx-domestic-internal-service-peer-key-sync\\n"',
@@ -5741,10 +5745,11 @@ function domesticInternalServicePeerKeySyncScript(internalPublicKey: string, int
     'if ! command -v wg >/dev/null 2>&1; then echo "blocked: wg missing"; exit 1; fi',
     'wg show mx-domestic >/dev/null',
     `internal_peer=${shellQuote(internalPublicKey)}`,
-    `allowed_ip=${shellQuote(allowedIp)}`,
-    'stale_peers="$(wg show mx-domestic allowed-ips | awk -v keep="$internal_peer" -v ip="$allowed_ip" \'$1 != keep { for (i = 2; i <= NF; i += 1) if ($i == ip) print $1 }\')"',
+    `primary_allowed_ip=${shellQuote(primaryAllowedIp)}`,
+    `allowed_ips=${shellQuote(allowedIps.join(','))}`,
+    'stale_peers="$(wg show mx-domestic allowed-ips | awk -v keep="$internal_peer" -v ip="$primary_allowed_ip" \'$1 != keep { for (i = 2; i <= NF; i += 1) if ($i == ip) print $1 }\')"',
     'for peer in $stale_peers; do wg set mx-domestic peer "$peer" remove; done',
-    'wg set mx-domestic peer "$internal_peer" allowed-ips "$allowed_ip"',
+    'wg set mx-domestic peer "$internal_peer" allowed-ips "$allowed_ips"',
     'ip link set up dev mx-domestic',
     'sysctl -w net.ipv4.ip_forward=1 >/dev/null || true',
     ...domesticRelayFirewallEnsureCommands(),
@@ -8393,7 +8398,7 @@ function buildLauncherDomesticProductCidrSync(
     .filter((product) => product.mode === 'standalone')
     .filter((product) => (product.defaultDomesticSiteId || 'domestic-main') === siteId)
     .sort((left, right) => left.productId.localeCompare(right.productId));
-  const rawRequiredCidrs = scopedProducts.flatMap((product) => [product.userCidr, product.anonymousCidr]);
+  const rawRequiredCidrs = scopedProducts.flatMap((product) => launcherProductRelayCidrs(product));
   const invalidRequiredCidrs = uniqueConfigStrings(rawRequiredCidrs.filter((cidr) => !parseIpv4Cidr(cidr)));
   const requiredProductRelayCidrs = uniqueConfigStrings(rawRequiredCidrs.filter((cidr) => Boolean(parseIpv4Cidr(cidr))));
   const previousProductRelayCidrs = secret ? domesticSecretProductRelayCidrsForSync(secret) : [];
@@ -8417,6 +8422,7 @@ function buildLauncherDomesticProductCidrSync(
       displayName: product.displayName,
       mode: product.mode,
       serviceVip: product.serviceVip,
+      relayCidrs: launcherProductRelayCidrs(product),
       userCidr: product.userCidr,
       anonymousCidr: product.anonymousCidr,
       defaultDomesticSiteId: product.defaultDomesticSiteId,
@@ -8431,6 +8437,22 @@ function buildLauncherDomesticProductCidrSync(
         ? ['Sync will update Config Center only; materialize/apply Domestic relay runtime next.']
         : ['Domestic productRelayCidrs already cover registered standalone products.']
   };
+}
+
+function launcherProductRelayCidrs(product: LauncherProductNetwork): string[] {
+  return uniqueConfigStrings([
+    product.userCidr,
+    product.anonymousCidr,
+    ipv4HostCidr(product.serviceVip),
+    ipv4HostCidr(product.internalControlIp),
+    ipv4HostCidr(product.domesticGatewayIp),
+    ipv4HostCidr(product.dnsServer)
+  ].filter((cidr): cidr is string => Boolean(cidr)));
+}
+
+function ipv4HostCidr(value: string | null | undefined): string | null {
+  const ip = String(value || '').trim();
+  return ipv4ToNumber(ip) === null ? null : `${ip}/32`;
 }
 
 function buildLauncherServiceVipSmoke(input: {
@@ -8460,10 +8482,7 @@ function buildLauncherServiceVipSmoke(input: {
     .filter((lease) => lease.productId === channelProductId)
     .sort((left, right) => String(right.updatedAt || right.createdAt || '').localeCompare(String(left.updatedAt || left.createdAt || '')))[0]
     ?? null;
-  const expectedProductCidrs = uniqueStrings([
-    product?.userCidr,
-    product?.anonymousCidr
-  ].filter((cidr): cidr is string => Boolean(cidr)));
+  const expectedProductCidrs = product ? launcherProductRelayCidrs(product) : [];
   const relayCidrs = domesticSecret ? domesticSecretProductRelayCidrs(domesticSecret) : [];
   const missingRelayCidrs = expectedProductCidrs.filter((cidr) => !relayCidrs.some((relayCidr) => ipv4CidrContainsCidr(relayCidr, cidr)));
   const expectedInternalAllowedIps = uniqueStrings([
@@ -8750,6 +8769,15 @@ function domesticSecretProductRelayCidrsForSync(secret: SiteSlotDomesticWireGuar
     ? secret.productRelayCidrs
     : [secret.userRelayCidr, secret.internalServiceCidr, secret.guestRelayCidr];
   return uniqueConfigStrings(cidrs.filter((cidr) => Boolean(cidr)));
+}
+
+function domesticInternalServicePeerAllowedIps(secret: SiteSlotDomesticWireGuardSecret): string[] {
+  const domesticGatewayCidr = `${secret.domesticGatewayIp}/32`;
+  return uniqueConfigStrings([
+    `${secret.internalServiceIp}/32`,
+    ...domesticSecretProductRelayCidrs(secret)
+      .filter((cidr) => cidr.endsWith('/32') && cidr !== domesticGatewayCidr)
+  ]);
 }
 
 function numberValue(value: unknown, fallback: number): number {
