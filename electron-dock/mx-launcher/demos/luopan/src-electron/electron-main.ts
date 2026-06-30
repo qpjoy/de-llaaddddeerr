@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, nativeTheme, shell } from 'electron';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
+import { createConnection } from 'node:net';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -213,7 +214,7 @@ function resolvePreloadPath(): string {
 
 async function createWindow(): Promise<void> {
   nativeTheme.themeSource = 'dark';
-  mainWindow = new BrowserWindow({
+  const window = new BrowserWindow({
     width: 1240,
     height: 820,
     minWidth: 1040,
@@ -228,24 +229,118 @@ async function createWindow(): Promise<void> {
       preload: resolvePreloadPath()
     }
   });
+  mainWindow = window;
 
-  mainWindow.once('ready-to-show', () => {
+  window.once('ready-to-show', () => {
     mainWindow?.show();
     broadcastRuntime();
   });
-  mainWindow.on('closed', () => {
+  window.on('closed', () => {
     mainWindow = null;
   });
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  window.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: 'deny' };
   });
 
   if (process.env.DEV) {
-    await mainWindow.loadURL(process.env.APP_URL || 'http://127.0.0.1:9031');
+    await loadDevRenderer(window);
   } else {
-    await mainWindow.loadFile('index.html');
+    await window.loadFile('index.html');
   }
+}
+
+async function loadDevRenderer(window: BrowserWindow): Promise<void> {
+  const candidates = devRendererUrlCandidates();
+  const attempts: string[] = [];
+  const deadline = Date.now() + 15000;
+  for (const url of candidates) {
+    try {
+      await waitForDevServer(url, Math.max(1000, deadline - Date.now()));
+      await window.loadURL(url);
+      return;
+    } catch (error) {
+      attempts.push(`${url}: ${errorMessage(error)}`);
+    }
+  }
+  await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(devRendererErrorHtml(attempts))}`);
+  if (!window.isVisible()) window.show();
+}
+
+function devRendererUrlCandidates(): string[] {
+  return uniqueStrings([
+    normalizeDevRendererUrl(process.env.APP_URL),
+    'http://127.0.0.1:9031',
+    'http://localhost:9031'
+  ].filter((url): url is string => Boolean(url)));
+}
+
+function normalizeDevRendererUrl(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function waitForDevServer(rawUrl: string, timeoutMs: number): Promise<void> {
+  const url = new URL(rawUrl);
+  const port = Number(url.port || (url.protocol === 'https:' ? 443 : 80));
+  const host = url.hostname;
+  const startedAt = Date.now();
+  let lastError = 'not-ready';
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      await tcpProbe(host, port);
+      return;
+    } catch (error) {
+      lastError = errorMessage(error);
+      await sleep(250);
+    }
+  }
+  throw new Error(`dev server not reachable on ${host}:${port} (${lastError})`);
+}
+
+function tcpProbe(host: string, port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host, port });
+    const finish = (error?: Error) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      error ? reject(error) : resolve();
+    };
+    socket.setTimeout(1000, () => finish(new Error('tcp-timeout')));
+    socket.once('connect', () => finish());
+    socket.once('error', finish);
+  });
+}
+
+function devRendererErrorHtml(attempts: string[]): string {
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Luopan renderer unavailable</title>
+    <style>
+      body { margin: 0; min-height: 100vh; background: #171b28; color: #f4f7fb; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; display: grid; place-items: center; }
+      main { width: min(760px, calc(100vw - 64px)); border: 1px solid #33415f; border-radius: 8px; padding: 28px; background: #1d2333; }
+      h1 { margin: 0 0 12px; font-size: 28px; }
+      p, li { color: #b7bfce; line-height: 1.55; }
+      code { color: #34f5d2; }
+      pre { white-space: pre-wrap; color: #fda4af; background: #111624; border-radius: 6px; padding: 14px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Luopan renderer is not ready</h1>
+      <p>Electron could not load the Quasar dev server. Keep <code>pnpm dev</code> running and check that port <code>9031</code> is not blocked or occupied.</p>
+      <pre>${escapeHtml(attempts.join('\n') || 'No renderer URL was attempted.')}</pre>
+    </main>
+  </body>
+</html>`;
 }
 
 function registerIpc(): void {
@@ -704,6 +799,22 @@ function stringValue(value: unknown): string | null {
 function booleanish(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined) return fallback;
   return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter((value) => value.trim().length > 0))];
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 function safeJson(value: string): unknown {

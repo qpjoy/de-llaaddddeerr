@@ -76,6 +76,7 @@ const state = {
   appOnboardingTemplates: [],
   appOnboardingTemplatesError: null,
   launcherServiceVipSmokes: [],
+  launcherServiceVipSmokesError: null,
   appCatalogFilter: '',
   appCatalogModeFilter: 'all',
   appCatalogEditor: null,
@@ -920,17 +921,20 @@ async function refreshProducts() {
 }
 
 async function refreshAppCenterNetwork() {
-  const [appPayload, productPayload, leasePayload, dnsRoutesPayload, templatesPayload] = await Promise.all([
+  const [appPayload, productPayload, leasePayload, dnsRoutesPayload, templatesPayload, serviceVipSmokePayload] = await Promise.all([
     loadAppCenterApps(),
     loadLauncherProductNetworks(),
     loadLauncherNetworkLeases(),
     loadDnsReverseProxyRoutes(),
-    loadAppOnboardingTemplates()
+    loadAppOnboardingTemplates(),
+    loadLauncherServiceVipSmokes()
   ]);
   state.appCenterApps = asArray(appPayload.apps);
   state.appCenterAppsError = appPayload.error || null;
   state.appOnboardingTemplates = asArray(templatesPayload.templates);
   state.appOnboardingTemplatesError = templatesPayload.error || null;
+  state.launcherServiceVipSmokes = asArray(serviceVipSmokePayload.smokes);
+  state.launcherServiceVipSmokesError = serviceVipSmokePayload.error || null;
   state.launcherProducts = asArray(productPayload.products);
   state.launcherProductsError = productPayload.error || null;
   state.launcherLeases = asArray(leasePayload.leases);
@@ -1009,6 +1013,7 @@ async function refreshAdmin() {
     state.appOnboardingTemplates = asArray(appOnboardingTemplatesPayload.templates);
     state.appOnboardingTemplatesError = appOnboardingTemplatesPayload.error || null;
     state.launcherServiceVipSmokes = asArray(dashboard.launcherServiceVipSmokes);
+    state.launcherServiceVipSmokesError = null;
     state.launcherProducts = asArray(launcherProductsPayload.products);
     state.launcherProductsError = launcherProductsPayload.error || null;
     state.launcherLeases = asArray(launcherLeasesPayload.leases);
@@ -1165,6 +1170,15 @@ async function loadAppOnboardingTemplates() {
     return { templates: asArray(payload.templates), error: null };
   } catch (error) {
     return { templates: [], error: error.message };
+  }
+}
+
+async function loadLauncherServiceVipSmokes() {
+  try {
+    const dashboard = await fetchJson('/internal/v1/admin/dashboard?limit=1');
+    return { smokes: asArray(dashboard.launcherServiceVipSmokes), error: null };
+  } catch (error) {
+    return { smokes: [], error: error.message };
   }
 }
 
@@ -8318,13 +8332,16 @@ function launcherServiceVipSmokeForApp(app) {
 function renderSelectedAppServiceVipSmoke(app) {
   const smoke = launcherServiceVipSmokeForApp(app);
   if (!smoke) {
+    const message = state.launcherServiceVipSmokesError
+      ? `Service VIP smoke unavailable: ${state.launcherServiceVipSmokesError}`
+      : 'Waiting for dashboard service VIP smoke.';
     return `
       <section class="app-workbench-panel app-service-vip-smoke">
         <div class="app-workbench-panel-head">
           <span>VIP</span>
           <strong>Service VIP materialization</strong>
         </div>
-        <div class="empty-state">Waiting for dashboard service VIP smoke.</div>
+        <div class="empty-state">${escapeHtml(message)}</div>
       </section>
     `;
   }
@@ -10151,6 +10168,7 @@ function renderAdminDashboard(dashboard) {
   const overview = dashboard.overview || {};
   const principal = dashboard.actionPolicy?.principal;
   state.launcherServiceVipSmokes = asArray(dashboard.launcherServiceVipSmokes);
+  state.launcherServiceVipSmokesError = null;
   state.awxProviders = asArray(dashboard.awxProviders);
   state.awxRuntimePolicies = asArray(dashboard.runtimeFeaturePolicies);
   renderConsoleStatus({
