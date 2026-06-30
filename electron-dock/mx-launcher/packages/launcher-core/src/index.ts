@@ -103,6 +103,9 @@ export interface LauncherProductNetworkInput {
   displayName?: string | null;
   mode?: LauncherProductMode | string | null;
   productIndex?: number | null;
+  internalControlIp?: string | null;
+  domesticGatewayIp?: string | null;
+  dnsServer?: string | null;
   serviceVip?: string | null;
   userCidr?: string | null;
   anonymousCidr?: string | null;
@@ -127,7 +130,9 @@ export interface LauncherProductNetwork {
   mode: LauncherProductMode;
   productIndex: number;
   fabricCidr: '10.88.0.0/16';
-  internalControlIp: '10.88.88.88';
+  internalControlIp: string;
+  domesticGatewayIp: string;
+  dnsServer: string;
   serviceVip: string;
   userCidr: string;
   anonymousCidr: string;
@@ -164,8 +169,8 @@ export interface LauncherNetworkLease {
   cidr: string;
   leaseIp: string;
   serviceVip: string;
-  internalControlIp: '10.88.88.88';
-  domesticGatewayIp: '10.88.0.1';
+  internalControlIp: string;
+  domesticGatewayIp: string;
   domesticSiteId: string;
   overseaSiteId: string;
   publicKey: string | null;
@@ -225,6 +230,9 @@ export interface LauncherNetworkTopology {
     displayName: string;
     mode: LauncherProductMode;
     serviceVip: string;
+    internalControlIp: string;
+    domesticGatewayIp: string;
+    dnsServer: string;
     userCidr: string;
     anonymousCidr: string;
     updatePolicy: LauncherProductUpdatePolicy;
@@ -241,7 +249,7 @@ export interface LauncherNetworkTopology {
     siteId: string;
     role: 'relay-proxy-cache-forwarder';
     publicIpRequired: true;
-    gatewayIp: '10.88.0.1';
+    gatewayIp: string;
     overlayCidrs: string[];
     configSource: 'internal-signed-snapshot';
     storesAuthority: false;
@@ -256,9 +264,9 @@ export interface LauncherNetworkTopology {
     requiresEnrollLease: true;
     relayPeer: {
       required: true;
-      fixedIp: '10.88.88.88';
+      fixedIp: string;
       initiatedBy: 'internal-outbound-to-domestic-public-wg';
-      purpose: 'make-internal-reachable-without-public-ip';
+      purpose: string;
     };
   };
   oversea: {
@@ -283,7 +291,7 @@ export interface LauncherNetworkTopology {
       siteId: string;
       interfaceName: 'mx-domestic';
       listenPort: 51280;
-      gatewayIp: '10.88.0.1';
+      gatewayIp: string;
       publicEndpoint: string | null;
       publicKey: string | null;
       configArtifact: string;
@@ -300,7 +308,7 @@ export interface LauncherNetworkTopology {
     };
     internalServicePeer: {
       role: 'internal-service';
-      fixedIp: '10.88.88.88';
+      fixedIp: string;
       allowedIps: string[];
       configArtifact: string;
       privateKeyPlacement: 'internal-only';
@@ -309,7 +317,7 @@ export interface LauncherNetworkTopology {
     internalDirectPeer?: {
       role: 'internal-direct-service';
       enabled: boolean;
-      fixedIp: '10.88.88.88';
+      fixedIp: string;
       endpoint: string | null;
       listenPort: number;
       publicKey: string | null;
@@ -330,7 +338,7 @@ export interface LauncherNetworkTopology {
     };
     routes: {
       internalCidrs: string[];
-      dnsServer: '10.88.0.1';
+      dnsServer: string;
       subscriptionReachability: 'domestic-wg-relay+h2i-proxy';
       externalTraffic: 'direct-to-oversea-hysteria2-after-subscription';
     };
@@ -345,9 +353,9 @@ export interface LauncherRoutePlan {
   leaseIp: string;
   leaseCidr: string;
   serviceVip: string;
-  internalControlIp: '10.88.88.88';
+  internalControlIp: string;
   internalBaseUrl: string;
-  domesticGatewayIp: '10.88.0.1';
+  domesticGatewayIp: string;
   domesticRelayEndpoint: string | null;
   domesticRelayPublicKey: string | null;
   preferredPath: 'h2i-direct' | 'hdi-relay' | 'h2i-hybrid';
@@ -357,7 +365,7 @@ export interface LauncherRoutePlan {
   h2iDirectAllowedIps: string[];
   domesticSiteId: string;
   overseaSiteId: string;
-  dnsServer: '10.88.0.1';
+  dnsServer: string;
   routeCidrs: string[];
   allowedIps: string[];
   updatePolicy: LauncherProductUpdatePolicy;

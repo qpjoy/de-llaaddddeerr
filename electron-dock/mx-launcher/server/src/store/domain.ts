@@ -1038,7 +1038,7 @@ export function buildAppOnboardingDefaults(
   const dnsRoute = {
     routeId: existingRoute?.routeId || `rp_${dnsHost}`,
     host: existingRoute?.host || dnsHost,
-    dnsTarget: existingRoute?.dnsTarget || '10.88.88.88',
+    dnsTarget: existingRoute?.dnsTarget || productNetwork.internalControlIp,
     targetUrl: existingRoute?.targetUrl || input.targetUrl?.trim() || manifestString(manifest, 'targetUrl') || manifestString(manifest, 'upstreamUrl') || 'http://127.0.0.1:8080',
     enabled: true,
     tlsMode: existingRoute?.tlsMode || 'internal',
@@ -1076,6 +1076,9 @@ export function buildAppOnboardingDefaults(
       mode: productNetwork.mode,
       standaloneChannelProductId: productNetwork.standaloneChannelProductId,
       productIndex: productNetwork.productIndex,
+      internalControlIp: productNetwork.internalControlIp,
+      domesticGatewayIp: productNetwork.domesticGatewayIp,
+      dnsServer: productNetwork.dnsServer,
       serviceVip: productNetwork.serviceVip,
       userCidr: productNetwork.userCidr,
       anonymousCidr: productNetwork.anonymousCidr,
@@ -1355,6 +1358,10 @@ export function buildLauncherProductNetwork(
     : input.standaloneChannelProductId?.trim() || previous?.standaloneChannelProductId || MX_H2I_PRODUCT_ID;
   const standaloneChannelProductId = launcherNetworkLeaseProductId(rawStandaloneChannel || (mode === 'standalone' ? productId : MX_H2I_PRODUCT_ID));
   const updatedBy = input.requestedBy?.trim() || 'config-center';
+  const serviceVip = validIpv4OrFallback(input.serviceVip, previous?.serviceVip || defaults.serviceVip);
+  const internalControlIp = validIpv4OrFallback(input.internalControlIp, previous?.internalControlIp || defaults.internalControlIp || serviceVip);
+  const domesticGatewayIp = validIpv4OrFallback(input.domesticGatewayIp, previous?.domesticGatewayIp || defaults.domesticGatewayIp || internalControlIp);
+  const dnsServer = validIpv4OrFallback(input.dnsServer, previous?.dnsServer || defaults.dnsServer || internalControlIp);
   return {
     productId,
     displayName: input.displayName?.trim() || previous?.displayName || defaults.displayName,
@@ -1362,8 +1369,10 @@ export function buildLauncherProductNetwork(
     standaloneChannelProductId,
     productIndex,
     fabricCidr: '10.88.0.0/16',
-    internalControlIp: '10.88.88.88',
-    serviceVip: validIpv4OrFallback(input.serviceVip, previous?.serviceVip || defaults.serviceVip),
+    internalControlIp,
+    domesticGatewayIp,
+    dnsServer,
+    serviceVip,
     userCidr: input.userCidr?.trim() || previous?.userCidr || defaults.userCidr,
     anonymousCidr: input.anonymousCidr?.trim() || previous?.anonymousCidr || defaults.anonymousCidr,
     userLeaseStart: validIpv4OrFallback(input.userLeaseStart, previous?.userLeaseStart || defaults.userLeaseStart),
@@ -1489,7 +1498,7 @@ export function buildLauncherNetworkLease(
     leaseIp: previous?.leaseIp ?? launcherLeaseIpForProduct(product, identityKind, sequence),
     serviceVip: product.serviceVip,
     internalControlIp: product.internalControlIp,
-    domesticGatewayIp: '10.88.0.1',
+    domesticGatewayIp: product.domesticGatewayIp,
     domesticSiteId: product.defaultDomesticSiteId,
     overseaSiteId: product.defaultOverseaSiteId,
     publicKey: input.publicKey?.trim() || previous?.publicKey || null,
@@ -2398,9 +2407,13 @@ function defaultLauncherProductNetworkShape(productId: string, mode: LauncherPro
     const isMxH2i = launcherNetworkProductIsStandaloneDefault(productId);
     const secondOctet = isMxH2i ? 89 : 90 + index;
     const serviceOffset = isMxH2i ? 1 : 2 + (index % 198);
+    const serviceVip = `10.88.100.${serviceOffset}`;
     return {
       displayName: productId === MX_H2I_PRODUCT_ID ? 'MX-H2I' : productId === LAUNCHER_FOUNDATION_PRODUCT_ID ? 'Launcher Foundation' : productId,
-      serviceVip: `10.88.100.${serviceOffset}`,
+      serviceVip,
+      internalControlIp: serviceVip,
+      domesticGatewayIp: serviceVip,
+      dnsServer: serviceVip,
       userCidr: `10.${secondOctet}.0.0/16`,
       anonymousCidr: `10.${secondOctet}.0.0/16`,
       userLeaseStart: `10.${secondOctet}.0.1`,
@@ -2413,9 +2426,13 @@ function defaultLauncherProductNetworkShape(productId: string, mode: LauncherPro
   const index = Math.max(0, Math.min(99, Math.floor(productIndex)));
   const secondOctet = 90 + index;
   const serviceOffset = 10 + (index % 200);
+  const serviceVip = `10.88.100.${serviceOffset}`;
   return {
     displayName: productId.toUpperCase(),
-    serviceVip: `10.88.100.${serviceOffset}`,
+    serviceVip,
+    internalControlIp: serviceVip,
+    domesticGatewayIp: serviceVip,
+    dnsServer: serviceVip,
     userCidr: `10.${secondOctet}.0.0/16`,
     anonymousCidr: `10.${secondOctet}.0.0/16`,
     userLeaseStart: `10.${secondOctet}.0.1`,
@@ -2429,12 +2446,12 @@ function defaultLauncherProductNetworkShape(productId: string, mode: LauncherPro
 function launcherProductNetworkNotes(mode: LauncherProductMode): string[] {
   return mode === 'standalone'
     ? [
-        'Launcher standalone mode owns the product peer lease and uses 10.89.0.1+ for signed-in users.',
-        'Anonymous launcher standalone leases start at 10.89.100.1.'
+        'Launcher standalone mode owns a product-scoped peer lease CIDR and product service VIP.',
+        'Control, DNS, reverse-proxy, user, permission, and release decisions are materialized behind the product VIP instead of shared 10.88.0.1/10.88.88.88 client routes.'
       ]
     : [
         'Launcher embed mode does not allocate its own WG peer; it consumes the selected standalone channel context.',
-        'The product service VIP stays in 10.88.100.0/24 and routes back to Internal 10.88.88.88 through Domestic relay.'
+        'Embed apps use their selected standalone channel service VIP for network, DNS, user, permission, and release services.'
       ];
 }
 
@@ -2939,14 +2956,21 @@ export function buildLauncherNetworkTopology(
     publicKey?: string | null;
   }
 ): LauncherNetworkTopology {
-  const internalBaseUrl = trimTrailingSlash(config.internalBaseUrl);
   const product = input.product;
+  const internalBaseUrl = launcherProductInternalBaseUrl(config, product);
   const domesticSiteId = input.domesticSiteId?.trim() || product.defaultDomesticSiteId;
   const overseaSiteId = input.overseaSiteId?.trim() || product.defaultOverseaSiteId;
   const cidr = input.mode === 'user' ? product.userCidr : product.anonymousCidr;
   const publicKey = input.publicKey?.trim() || null;
   const subscriptionBaseUrl = `${internalBaseUrl}/internal/v1/site-slots/${overseaSiteId}/subscriptions/hysteria2`;
-  const internalCidrs = [...new Set(['10.88.0.0/16', product.userCidr, product.anonymousCidr])];
+  const productRouteCidrs = uniqueStrings([
+    product.userCidr,
+    product.anonymousCidr,
+    `${product.serviceVip}/32`,
+    `${product.internalControlIp}/32`,
+    `${product.domesticGatewayIp}/32`,
+    `${product.dnsServer}/32`
+  ]);
   return {
     model: 'internal-authority-domestic-relay-oversea-access-v1',
     product: {
@@ -2954,6 +2978,9 @@ export function buildLauncherNetworkTopology(
       displayName: product.displayName,
       mode: product.mode,
       serviceVip: product.serviceVip,
+      internalControlIp: product.internalControlIp,
+      domesticGatewayIp: product.domesticGatewayIp,
+      dnsServer: product.dnsServer,
       userCidr: product.userCidr,
       anonymousCidr: product.anonymousCidr,
       updatePolicy: product.updatePolicy,
@@ -2995,8 +3022,8 @@ export function buildLauncherNetworkTopology(
       role: 'relay-proxy-cache-forwarder',
       publicIpRequired: true,
       publicServices: ['api-facade', 'wg-relay', 'h2i-proxy', 'snapshot-cache', 'observability-forwarder'],
-      gatewayIp: '10.88.0.1',
-      overlayCidrs: internalCidrs,
+      gatewayIp: product.domesticGatewayIp,
+      overlayCidrs: productRouteCidrs,
       configSource: 'internal-signed-snapshot',
       storesAuthority: false,
       requiredFor: ['enroll-proxy', 'wg-relay', 'h2i-proxy', 'internal-dns', 'snapshot-cache']
@@ -3011,9 +3038,9 @@ export function buildLauncherNetworkTopology(
       requiresEnrollLease: true,
       relayPeer: {
         required: true,
-        fixedIp: '10.88.88.88',
+        fixedIp: product.internalControlIp,
         initiatedBy: 'internal-outbound-to-domestic-public-wg',
-        purpose: 'make-internal-reachable-without-public-ip'
+        purpose: 'materialize product-scoped control, DNS, proxy, and service VIP without a shared client route'
       }
     },
     oversea: {
@@ -3062,8 +3089,13 @@ export function buildLauncherNetworkTopology(
       },
       internalServicePeer: {
         role: 'internal-service',
-        fixedIp: '10.88.88.88',
-        allowedIps: ['10.88.88.88/32', `${product.serviceVip}/32`],
+        fixedIp: product.internalControlIp,
+        allowedIps: uniqueStrings([
+          `${product.internalControlIp}/32`,
+          `${product.serviceVip}/32`,
+          `${product.domesticGatewayIp}/32`,
+          `${product.dnsServer}/32`
+        ]),
         configArtifact: 'mx-internal-service-peer.conf',
         privateKeyPlacement: 'internal-only',
         direction: 'internal-outbound-to-domestic-public-wg'
@@ -3071,11 +3103,11 @@ export function buildLauncherNetworkTopology(
       internalDirectPeer: {
         role: 'internal-direct-service',
         enabled: false,
-        fixedIp: '10.88.88.88',
+        fixedIp: product.internalControlIp,
         endpoint: null,
         listenPort: 51280,
         publicKey: null,
-        allowedIps: internalCidrs,
+        allowedIps: productRouteCidrs,
         configArtifact: 'mx-internal-service-peer.conf',
         peerMutation: 'append-home-peer-after-enroll',
         fallback: 'domestic-wg-relay'
@@ -3091,8 +3123,8 @@ export function buildLauncherNetworkTopology(
         domesticMutation: 'append-peer-after-enroll'
       },
       routes: {
-        internalCidrs,
-        dnsServer: '10.88.0.1',
+        internalCidrs: productRouteCidrs,
+        dnsServer: product.dnsServer,
         subscriptionReachability: 'domestic-wg-relay+h2i-proxy',
         externalTraffic: 'direct-to-oversea-hysteria2-after-subscription'
       },
@@ -3151,6 +3183,17 @@ export function attachDomesticWireGuardRefreshHint(
 
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, '');
+}
+
+function launcherProductInternalBaseUrl(config: RuntimeConfig, product: LauncherProductNetwork): string {
+  const fallbackPort = '18090';
+  try {
+    const parsed = new URL(config.internalBaseUrl);
+    const port = parsed.port || (parsed.protocol === 'https:' ? '443' : parsed.protocol === 'http:' ? '80' : fallbackPort);
+    return `${parsed.protocol}//${product.internalControlIp}${port ? `:${port}` : ''}`;
+  } catch {
+    return `http://${product.internalControlIp}:${fallbackPort}`;
+  }
 }
 
 export function createConfigPolicySnapshot(

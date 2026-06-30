@@ -10,8 +10,9 @@ H2O，一个类似 Clash / Tunnel 的网络应用。
 1. MX Launcher 是大平台，Desktop 只是 Launcher 的一种形态。
 2. Launcher 应作为常驻守护程序和更新器，负责登录、设备身份、权限、配置下发、
    更新、回滚、网络协调和 AppCenter 宿主。
-3. HDI/H2I 是 Launcher Network 的基础能力，唯一拥有 WireGuard、DNS、PAC、TUN、
-   系统代理和服务权限的控制权。
+3. HDI/H2I 是 MX-H2I 这个 standalone 产品的 Launcher Network 基础能力；其它 standalone
+   产品可以拥有自己的 ProductNetwork、lease/IP 段和 WG。共享的是本机 ownership registry、
+   local edge、DNS/PAC/权限协调面，不是跨产品复用 IP 段。
 4. H2O 是首个 AppCenter 应用，提供 App 模式、全局模式、虚拟网卡模式、规则、订阅、
    节点和类 Clash 的用户体验。
 5. AppCenter 负责应用权限登记、授权展示、组织策略和权限审计；Launcher 负责向系统
@@ -77,8 +78,15 @@ HDI 和 Launcher 的运行时职责高度重合：
 - 更新、回滚、故障恢复和审计需要跨两个产品同步。
 - AppCenter 应用后续也难判断应调用谁的网络能力。
 
-因此建议只有 Launcher Network 拥有底层网络主权。H2O 和其他应用通过 AppCenter /
-Launcher runtime API 申请能力。
+因此建议同一个 standalone channel 内只有该 channel 的 Launcher Network 拥有底层网络主权。
+H2O 和其他 embed 应用通过 AppCenter / Launcher runtime API 申请能力。Luopan 这类独立
+standalone 产品应拥有自己的 channel、WG profile 和 product CIDR；MX-H2I 不能在重连时
+adopt Luopan 的 `10.91.*` 路由，Luopan 也不能复用 MX-H2I 的 `10.89.*` lease。
+
+多 standalone 共存时，本机只共享 ownership registry / local edge 协调状态。registry 用于
+记录 owner、DNS host/zone、reverse proxy route、产品 CIDR 和冲突 evidence；route CIDR
+不是其它 standalone WG 的 `AllowedIPs` 输入。关闭任意一个 standalone 只释放自己的 owner
+claim，不影响其它产品的 IP、WG 或用户/权限生命周期。
 
 ## H 端游客链路
 
@@ -285,7 +293,10 @@ Split DNS 的目标形态是“每个 app 提交自己的域名需求，Internal
 1. 部署 `mx-dns` namespace、CoreDNS ConfigMap writer RBAC 和 baseline CoreDNS Service。
 2. 部署 Internal API / Config Center，能生成 DNS policy snapshot 和 CoreDNS zone snapshot。
 3. 暴露 Internal DNS endpoint：`mx-internal-coredns` 仍监听 Pod 内 `:53`，
-   同时通过 hostPort 暴露 Internal host `10.88.88.88:50053`，并在 routePlan 中下发该 endpoint。
+   服务端 Save App / ProductNetwork materialization 把 control/DNS/proxy 映射到每个
+   standalone channel 自己的 service VIP，例如 MX-H2I `10.88.100.1`、Luopan
+   `10.88.100.3`；routePlan 下发产品 VIP，不再要求每个 H 端安装共享
+   `10.88.88.88` 或 `10.88.0.1` 路由。
 4. Domestic relay ready 后，H 端只对命中白名单的域名安装 split DNS；未命中仍走本机原有
    系统 DNS、系统代理、fake-ip 或 H2O 规则。
 5. 最后再启用 AppCenter app 级 DNS policy，按 app 安装/授权状态合并到当前设备的最终
@@ -589,7 +600,9 @@ Release Center 可以集成 Jenkins 和自建工具链，但 release 真相留�
 ## 还需要确认的问题
 
 1. H2O 首版是否只支持代理/TUN，还是同时接入 Oversea 订阅和节点 UI。
-2. 登录后是否一定切到 `10.89.*` 新 peer，还是允许同一 peer 从 `10.91.*` 升级策略。Domestic 默认网关为 `10.88.0.1`。
+2. 登录后是否一定切到当前 standalone channel 的登录 lease 段，还是允许同一 peer 从匿名段升级策略。
+   客户端可见的 Domestic/control/DNS 目标应使用 channel service VIP；`10.88.0.1` 只保留为
+   Domestic 站点内部 relay 实现地址。
 3. Domestic 是否需要离线 DNS cache。如果不要，Internal 不可达时内部域名解析直接降级。
 4. AppCenter 是 Launcher 内置页面，还是可以独立升级为单独应用包。
 5. MX-3ks SDK Gateway 第一批给哪些系统用：只给同台服务，还是也给内网其他服务。

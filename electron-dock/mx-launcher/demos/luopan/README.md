@@ -4,10 +4,10 @@ Luopan is a business Electron app demo for MX Launcher. It uses Quasar/Vue for
 the application shell and consumes `@qpjoy/electron-launcher` from Electron main
 through a small preload IPC boundary.
 
-The demo is intentionally not a copy of MX-H2I. MX-H2I is the VPN product and
-network owner. Luopan represents a future standalone business app that can be
-created from the Admin `Luopan` onboarding template and can request a Launcher
-Network lease when the app is registered.
+The demo is intentionally not a copy of MX-H2I. MX-H2I is a VPN product and one
+Launcher standalone owner; Luopan represents a future standalone business app
+that owns its own ProductNetwork, lease/IP segment, and WireGuard profile when
+it is registered from the Admin `Luopan` onboarding template.
 
 ## Run
 
@@ -74,9 +74,23 @@ runtime does not claim the local route is ready until the shared launcher packag
 proves the host route, service VIP, DNS relay, and endpoint are on the expected
 WireGuard/direct path.
 
+Service VIP route proof is local data-plane evidence, not an ICMP contract. A
+VIP such as `10.88.100.3` may reject `ping` while the route is still correct;
+verify the upstream with DNS/HTTP smoke checks after Internal service
+materialization.
+
 Use `Request lease` to verify the control-plane entitlement path. Then use
 `Apply data plane` to sync the Domestic peer, install the product-specific
-WireGuard profile, and wait for route proof. The demo keeps the WireGuard
-private key in memory only; after an app restart, request a fresh lease before
-applying the data plane again. A production app should persist key material in
-the OS credential store.
+WireGuard profile, and wait for route proof. The default standalone route scope
+is product-local: Luopan installs its lease CIDR and service VIP `/32`, but does
+not install shared foundation routes such as `10.88.0.1`, `10.88.88.88`, or
+`10.88.0.0/16`. If Luopan needs Internal control while MX-H2I is disconnected,
+that access must come from product-scoped service materialization: the AppCenter
+Save App flow assigns Luopan a channel VIP such as `10.88.100.3`, and the server
+materializes control, DNS, proxy, permission, user, release, and gray-test
+services behind that VIP. A product-neutral `launcher-foundation` shared plane
+is only a legacy/fallback pattern, not the normal standalone product dependency.
+`LUOPAN_DATA_PLANE_MODE=reuse` is only for embed/reuse smoke tests. The demo
+keeps the WireGuard private key in memory only; after an app restart, request a
+fresh lease before applying the data plane again. A production app should persist
+key material in the OS credential store.

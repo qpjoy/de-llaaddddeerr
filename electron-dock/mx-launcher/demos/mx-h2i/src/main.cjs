@@ -1324,9 +1324,7 @@ function systemDomainProxyOwnershipClaim(domains, reverseProxyRoutes) {
     gatewayIp: systemPacDnsFallbackTarget(),
     dnsZones: arrayValue(domains, []),
     dnsHosts: arrayValue(reverseProxyRoutes, []).map((route) => nullableString(route?.host)).filter(Boolean),
-    routeCidrs: arrayValue(connection.routeCidrs, []).length
-      ? arrayValue(connection.routeCidrs, [])
-      : arrayValue(connection.routePlan?.routeCidrs, []),
+    routeCidrs: productOwnershipRouteCidrs(connection.routePlan, connection),
     reverseProxyRoutes: arrayValue(reverseProxyRoutes, []),
     metadata: {
       channel: runtime?.config?.releaseChannel || null,
@@ -1376,11 +1374,6 @@ async function releaseStandaloneOwnershipForRuntime(reason = 'manual') {
 
 function mxH2iStandaloneOwnershipClaim(mod, routePlan, connection) {
   const reverseProxyRoutes = arrayValue(lastSystemPacReverseProxyRoutes, []);
-  const routeCidrs = routePlan.leaseCidr
-    ? [routePlan.leaseCidr]
-    : connection.localIp
-      ? [`${connection.localIp}/32`]
-      : [];
   return mod.buildElectronLauncherStandaloneOwnershipClaim(routePlan, {
     ownerId: standaloneOwnershipOwnerId(),
     productId: launcherProductId(),
@@ -1388,14 +1381,22 @@ function mxH2iStandaloneOwnershipClaim(mod, routePlan, connection) {
     displayName: launcherProductDisplayName(),
     priority: 100,
     metadata: {
-      dataPlaneMode: 'shared-owner',
-      dataPlaneOwner: true
+      dataPlaneMode: 'standalone-wireguard',
+      dataPlaneOwner: true,
+      foundationOwner: false
     },
     dnsZones: splitDnsDomains(runtime?.config),
     dnsHosts: reverseProxyRoutes.map((route) => nullableString(route?.host)).filter(Boolean),
-    routeCidrs,
+    routeCidrs: productOwnershipRouteCidrs(routePlan, connection),
     reverseProxyRoutes
   });
+}
+
+function productOwnershipRouteCidrs(routePlan, connection = {}) {
+  const plan = normalizeRoutePlan(routePlan || connection.routePlan);
+  if (plan?.leaseCidr) return [plan.leaseCidr];
+  const localIp = nullableString(connection.localIp);
+  return localIp ? [`${localIp}/32`] : [];
 }
 
 function standaloneOwnershipOwnerId() {
@@ -2741,8 +2742,8 @@ async function startWireGuardForSession(input) {
   if (!privateKey) return wireGuardFailure('本机 WireGuard privateKey 缺失。');
 
   try {
-    const ownershipRouteAdoption = await routePlanWithStandaloneOwnershipRoutes(baseRoutePlan, 'connect');
-    const routePlan = ownershipRouteAdoption.routePlan;
+    const standaloneOwnershipRegistry = await summarizeStandaloneOwnershipRegistry(baseRoutePlan, 'connect');
+    const routePlan = baseRoutePlan;
     const mod = await import('@qpjoy/electron-launcher/wireguard');
     const internalBaseUrl = internalOverlayBaseUrl(routePlan, input.internalBaseUrl);
     const configuredPreference = normalizeRoutePathPreference(runtime.config.routePathPreference);
@@ -2779,7 +2780,7 @@ async function startWireGuardForSession(input) {
         internalDirectPeerSync,
         domesticPeerSync,
         domesticRelayDiagnostics,
-        ownershipRouteAdoption: ownershipRouteAdoption.summary,
+        standaloneOwnershipRegistry,
         updatedAt: nowIso()
       },
       path: result.peer?.path || routePathFromPreference(attempt.pathPreference),
@@ -2790,75 +2791,62 @@ async function startWireGuardForSession(input) {
   }
 }
 
-async function routePlanWithStandaloneOwnershipRoutes(routePlan, reason = 'connect') {
+async function summarizeStandaloneOwnershipRegistry(routePlan, reason = 'connect') {
   const baseRoutePlan = normalizeRoutePlan(routePlan);
   if (!baseRoutePlan) {
     return {
-      routePlan,
-      summary: {
-        ok: false,
-        reason,
-        error: 'missing-route-plan',
-        addedCidrs: [],
-        updatedAt: nowIso()
-      }
+      ok: false,
+      reason,
+      error: 'missing-route-plan',
+      routeCidrs: [],
+      foreignRouteCidrs: [],
+      updatedAt: nowIso()
     };
   }
   try {
     const mod = await import('@qpjoy/electron-launcher/standalone-data-plane');
     const state = mod.readElectronLauncherStandaloneOwnershipState();
     const conflicts = arrayValue(state?.registry?.conflicts, []);
-    if (conflicts.length > 0) {
-      return {
-        routePlan: baseRoutePlan,
-        summary: {
-          ok: false,
-          reason,
-          error: 'ownership-conflict',
-          conflicts,
-          addedCidrs: [],
-          updatedAt: nowIso()
-        }
-      };
-    }
     const registeredCidrs = uniqueStrings(arrayValue(state?.registry?.routeCidrs, [])
       .map((entry) => nullableString(entry?.value) || nullableString(entry?.key))
-      .filter(isAdoptableStandaloneRouteCidr));
-    const mergedCidrs = uniqueStrings([
-      ...arrayValue(baseRoutePlan.routeCidrs, []),
-      ...registeredCidrs
-    ]);
-    const addedCidrs = registeredCidrs.filter((cidr) => !arrayValue(baseRoutePlan.routeCidrs, []).includes(cidr));
-    return {
-      routePlan: {
-        ...baseRoutePlan,
-        routeCidrs: mergedCidrs
-      },
-      summary: {
-        ok: true,
+      .filter(isRegisteredStandaloneRouteCidr));
+    const baseCidrs = arrayValue(baseRoutePlan.routeCidrs, []);
+    const foreignRouteCidrs = registeredCidrs.filter((cidr) => !baseCidrs.includes(cidr));
+    if (conflicts.length > 0) {
+      return {
+        ok: false,
         reason,
+        error: 'ownership-conflict',
         statePath: nullableString(state?.statePath),
         owners: arrayValue(state?.registry?.owners, []).map((owner) => nullableString(owner?.ownerId)).filter(Boolean),
-        addedCidrs,
-        routeCidrs: mergedCidrs,
+        conflicts,
+        routeCidrs: registeredCidrs,
+        foreignRouteCidrs,
         updatedAt: nowIso()
-      }
+      };
+    }
+    return {
+      ok: true,
+      reason,
+      statePath: nullableString(state?.statePath),
+      owners: arrayValue(state?.registry?.owners, []).map((owner) => nullableString(owner?.ownerId)).filter(Boolean),
+      routeCidrs: registeredCidrs,
+      foreignRouteCidrs,
+      updatedAt: nowIso()
     };
   } catch (err) {
     return {
-      routePlan: baseRoutePlan,
-      summary: {
-        ok: false,
-        reason,
-        error: errorMessage(err),
-        addedCidrs: [],
-        updatedAt: nowIso()
-      }
+      ok: false,
+      reason,
+      error: errorMessage(err),
+      routeCidrs: [],
+      foreignRouteCidrs: [],
+      updatedAt: nowIso()
     };
   }
 }
 
-function isAdoptableStandaloneRouteCidr(value) {
+function isRegisteredStandaloneRouteCidr(value) {
   const cidr = nullableString(value);
   if (!cidr || cidr === '0.0.0.0/0' || cidr === '::/0') return false;
   return /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}\/([1-9]|[1-2]\d|3[0-2])$/.test(cidr);
@@ -2892,13 +2880,14 @@ async function connectAndProbeWireGuardPath(mod, input) {
   const internalApi = routeReady
     ? await probeInternalApiViaOverlay(input.internalBaseUrl)
     : internalApiProbeBlockedByRoute(input.internalBaseUrl, targetIp, route);
+  const internalApiReady = internalApi?.ok === true;
   return {
     pathPreference: input.pathPreference,
     result,
     route,
     endpointRoute,
     internalApi,
-    ready: tunnelProofReady && routeReady
+    ready: tunnelProofReady && routeReady && internalApiReady
   };
 }
 
@@ -2932,7 +2921,8 @@ async function probeWireGuardForConnection(input) {
       ? await probeInternalApiViaOverlay(internalBaseUrl)
       : internalApiProbeBlockedByRoute(internalBaseUrl, targetIp, route);
     const tunnelReady = tunnelProofReady;
-    const ready = tunnelReady && routeReady;
+    const internalApiReady = internalApi?.ok === true;
+    const ready = tunnelReady && routeReady && internalApiReady;
     const domesticRelayReady = domesticRelayDiagnostics?.status === 'passed' || domesticPeerSync?.status === 'passed' || route.ok === true;
     const resultLike = {
       ok: tunnelReady,
@@ -3180,9 +3170,12 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
         } else if (!manual && connection.state === 'connected') {
           wireGuardBackgroundProbeFailures += 1;
         }
+        const routeProofLost = wireGuardResult.diagnostics?.route
+          && wireGuardResult.diagnostics.route.ok !== true;
         const preserveConnected = !manual
           && connection.state === 'connected'
           && !wireGuardResult.ready
+          && !routeProofLost
           && wireGuardBackgroundProbeFailures < WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD;
         const shouldPersistProbe = !preserveConnected
           && (wireGuardResult.state !== connection.state || reason !== 'interval');

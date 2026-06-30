@@ -48,6 +48,7 @@ export interface ElectronLauncherStandaloneDataPlaneInput {
   internalControlIp?: string | null;
   domesticGatewayIp?: string | null;
   endpoint?: string | null;
+  requiredProbeTargets?: ElectronLauncherStandaloneDataPlaneProbeTarget[] | null;
   expectedInterfaceName?: string | null;
   expectedInterfaceAddresses?: string[] | null;
   wireGuardActive?: boolean | null;
@@ -83,6 +84,7 @@ export interface ElectronLauncherStandaloneDataPlaneApplyInput
   mtu?: number | null;
   pathPreference?: ElectronLauncherWireGuardPathPreference;
   action?: 'up' | 'restart';
+  requiredProbeTargets?: ElectronLauncherStandaloneDataPlaneProbeTarget[] | null;
   failOnOwnershipConflicts?: boolean | null;
   dataPlaneProbeAttempts?: number | null;
   dataPlaneProbeIntervalMs?: number | null;
@@ -208,36 +210,41 @@ export function diagnoseElectronLauncherStandaloneDataPlane(
 
   const expectedInterfaceName = stringValue(input.expectedInterfaceName);
   const expectedInterfaceAddresses = input.expectedInterfaceAddresses ?? (leaseIp ? [leaseIp] : []);
+  const requiredTargets = input.requiredProbeTargets
+    ? new Set(input.requiredProbeTargets)
+    : null;
+  const requiredProbe = (target: ElectronLauncherStandaloneDataPlaneProbeTarget, address: string | null) =>
+    Boolean(address) && (!requiredTargets || requiredTargets.has(target));
   const probes = [
     probeRouteTarget({
       target: 'lease-ip',
       label: 'Lease IP self route',
       address: leaseIp,
-      required: Boolean(leaseIp)
+      required: requiredProbe('lease-ip', leaseIp)
     }, expectedInterfaceName, expectedInterfaceAddresses),
     probeRouteTarget({
       target: 'internal-control',
       label: 'Internal control plane',
       address: internalControlIp,
-      required: Boolean(internalControlIp)
+      required: requiredProbe('internal-control', internalControlIp)
     }, expectedInterfaceName, expectedInterfaceAddresses),
     probeRouteTarget({
       target: 'domestic-gateway',
       label: 'Domestic DNS relay',
       address: domesticGatewayIp,
-      required: Boolean(domesticGatewayIp)
+      required: requiredProbe('domestic-gateway', domesticGatewayIp)
     }, expectedInterfaceName, expectedInterfaceAddresses),
     probeRouteTarget({
       target: 'service-vip',
       label: 'Product service VIP',
       address: serviceVip,
-      required: Boolean(serviceVip)
+      required: requiredProbe('service-vip', serviceVip)
     }, expectedInterfaceName, expectedInterfaceAddresses),
     probeRouteTarget({
       target: 'dns-server',
       label: 'WireGuard DNS server',
       address: dnsServer,
-      required: Boolean(dnsServer)
+      required: requiredProbe('dns-server', dnsServer)
     }, expectedInterfaceName, expectedInterfaceAddresses)
   ].filter((probe): probe is ElectronLauncherStandaloneRouteProbe => Boolean(probe));
 
@@ -535,6 +542,7 @@ function standaloneDiagnosticsForWireGuard(
     serviceVip: input.routePlan.serviceVip,
     dnsServer: input.routePlan.dnsServer,
     endpoint: wireGuard.peer?.endpoint,
+    requiredProbeTargets: input.requiredProbeTargets,
     expectedInterfaceName: stringValue(status?.realInterfaceName) || stringValue(status?.interfaceName),
     expectedInterfaceAddresses: Array.isArray(status?.addresses) ? status.addresses.filter((item): item is string => typeof item === 'string') : [input.routePlan.leaseIp],
     wireGuardActive: wireGuard.ok === true || status?.active === true

@@ -6499,7 +6499,9 @@ function applyLauncherAppTemplateToDraft(draft, templateId, options = {}) {
   if (!nextDraft.dnsHost || options.refreshDns === true || forceIdentity) {
     nextDraft.dnsHost = launcherAppDefaultDnsHost(appId || draft.appId);
   }
-  if (!nextDraft.dnsTarget) nextDraft.dnsTarget = MX_INTERNAL_DNS_IP;
+  if (!nextDraft.dnsTarget || nextDraft.dnsTarget === MX_INTERNAL_DNS_IP) {
+    nextDraft.dnsTarget = materializedVipForStandaloneDraft(nextDraft, appId || draft.appId);
+  }
   if (!nextDraft.dnsTargetUrl || options.refreshDns === true || forceIdentity) {
     nextDraft.dnsTargetUrl = launcherAppDefaultUpstreamUrl(template.templateId);
   }
@@ -6544,7 +6546,7 @@ function applyServerAppOnboardingDefaultsToDraft(draft, defaults, options = {}) 
     dnsRouteEnabled: defaults.template?.dnsRouteEnabled !== false,
     dnsRouteId: dnsRoute.routeId || draft.dnsRouteId,
     dnsHost: dnsRoute.host || draft.dnsHost,
-    dnsTarget: dnsRoute.dnsTarget || draft.dnsTarget || MX_INTERNAL_DNS_IP,
+    dnsTarget: dnsRoute.dnsTarget || draft.dnsTarget || materializedVipForStandaloneDraft({ ...draft, appId, launcherMode }, appId),
     dnsTargetUrl: dnsRoute.targetUrl || draft.dnsTargetUrl,
     dnsRouteTlsMode: dnsRoute.tlsMode || draft.dnsRouteTlsMode || 'internal',
     dnsRouteAuthRequired: dnsRoute.authRequired !== false,
@@ -6650,6 +6652,22 @@ function serviceVipForProductSecondOctet(secondOctet, productId) {
   return `10.88.100.${Math.max(2, Math.min(254, 2 + index))}`;
 }
 
+function materializedVipForStandaloneDraft(draft, appId) {
+  const mode = draft?.launcherMode === 'standalone' ? 'standalone' : 'embed';
+  if (mode === 'standalone') {
+    const secondOctet = normalizeProductSecondOctet(draft?.productSecondOctet, nextAvailableProductSecondOctet(appId || null, 'standalone'));
+    return serviceVipForProductSecondOctet(secondOctet, appId);
+  }
+  const channelId = normalizeStandaloneProductId(draft?.standaloneChannelProductId || MX_H2I_PRODUCT_ID);
+  const channel = launcherProductNetwork(channelId);
+  return channel?.internalControlIp || channel?.serviceVip || MX_INTERNAL_DNS_IP;
+}
+
+function launcherAppEffectiveDnsTarget(draft, appId) {
+  const materializedVip = materializedVipForStandaloneDraft(draft, appId);
+  return !draft?.dnsTarget || draft.dnsTarget === MX_INTERNAL_DNS_IP ? materializedVip : draft.dnsTarget;
+}
+
 function relayEnrollmentDraftForRender(siteId, overrides = {}) {
   const previous = state.relayEnrollment.draft || {};
   const productId = normalizeStandaloneProductId(overrides.productId || previous.productId || MX_H2I_PRODUCT_ID);
@@ -6734,13 +6752,17 @@ function desiredRelayProductNetwork(draft) {
   const ranges = relayProductNetworkShape(secondOctet);
   const productIndex = productId === MX_H2I_PRODUCT_ID ? 0 : Math.max(0, Math.min(99, Number(secondOctet) - 90));
   const serviceHost = productId === MX_H2I_PRODUCT_ID ? 1 : Math.max(2, Math.min(254, 2 + productIndex));
+  const materializedVip = `10.88.100.${serviceHost}`;
   return {
     productId,
     displayName: launcherProductDisplayName(productId, launcherProductById(productId)),
     mode,
     standaloneChannelProductId: productId,
     productIndex,
-    serviceVip: `10.88.100.${serviceHost}`,
+    serviceVip: materializedVip,
+    internalControlIp: materializedVip,
+    domesticGatewayIp: materializedVip,
+    dnsServer: materializedVip,
     ...ranges,
     defaultDomesticSiteId: draft.siteId || 'domestic-main',
     updatePolicy: productId === MX_H2I_PRODUCT_ID || mode === 'embed' ? 'launcher-managed' : 'app-managed',
@@ -6754,6 +6776,10 @@ function relayProductNeedsUpsert(product, desired) {
   return [
     'mode',
     'standaloneChannelProductId',
+    'serviceVip',
+    'internalControlIp',
+    'domesticGatewayIp',
+    'dnsServer',
     'userCidr',
     'anonymousCidr',
     'userLeaseStart',
@@ -6816,7 +6842,9 @@ function fallbackLauncherProduct(productId) {
       mode: 'standalone',
       standaloneChannelProductId: MX_H2I_PRODUCT_ID,
       serviceVip: '10.88.100.1',
-      internalControlIp: '10.88.88.88',
+      internalControlIp: '10.88.100.1',
+      domesticGatewayIp: '10.88.100.1',
+      dnsServer: '10.88.100.1',
       userLeaseStart: '10.89.0.1',
       userLeaseEnd: '10.89.99.254',
       anonymousLeaseStart: '10.89.100.1',
@@ -6832,7 +6860,9 @@ function fallbackLauncherProduct(productId) {
       mode: 'embed',
       standaloneChannelProductId: MX_H2I_PRODUCT_ID,
       serviceVip: '10.88.100.9',
-      internalControlIp: '10.88.88.88',
+      internalControlIp: '10.88.100.1',
+      domesticGatewayIp: '10.88.100.1',
+      dnsServer: '10.88.100.1',
       userLeaseStart: '10.92.0.1',
       userLeaseEnd: '10.92.99.254',
       anonymousLeaseStart: '10.92.100.1',
@@ -6848,7 +6878,9 @@ function fallbackLauncherProduct(productId) {
       mode: 'embed',
       standaloneChannelProductId: MX_H2I_PRODUCT_ID,
       serviceVip: '10.88.100.10',
-      internalControlIp: '10.88.88.88',
+      internalControlIp: '10.88.100.1',
+      domesticGatewayIp: '10.88.100.1',
+      dnsServer: '10.88.100.1',
       userLeaseStart: '10.90.0.1',
       userLeaseEnd: '10.90.99.254',
       anonymousLeaseStart: '10.90.100.1',
@@ -6863,7 +6895,9 @@ function fallbackLauncherProduct(productId) {
     mode: 'embed',
     standaloneChannelProductId: MX_H2I_PRODUCT_ID,
     serviceVip: '',
-    internalControlIp: '10.88.88.88',
+    internalControlIp: '10.88.100.1',
+    domesticGatewayIp: '10.88.100.1',
+    dnsServer: '10.88.100.1',
     userLeaseStart: '',
     userLeaseEnd: '',
     anonymousLeaseStart: '',
@@ -7221,7 +7255,13 @@ function createAppCatalogEditorDraft(mode = 'create', appId = '') {
     dnsRouteEnabled: editing ? !!existingDnsRoute : true,
     dnsRouteId: existingDnsRoute?.routeId || launcherAppDnsRouteId(launcherAppDefaultDnsHost(normalizedAppId)),
     dnsHost: existingDnsRoute?.host || launcherAppDefaultDnsHost(normalizedAppId),
-    dnsTarget: existingDnsRoute?.dnsTarget || MX_INTERNAL_DNS_IP,
+    dnsTarget: existingDnsRoute?.dnsTarget || materializedVipForStandaloneDraft({
+      launcherMode: appMode,
+      standaloneChannelProductId: appMode === 'standalone'
+        ? normalizedAppId || MX_H2I_PRODUCT_ID
+        : standaloneChannelIdForApp(app || { standaloneChannelProductId: MX_H2I_PRODUCT_ID }),
+      productSecondOctet
+    }, normalizedAppId),
     dnsTargetUrl: existingDnsRoute?.targetUrl || launcherAppDefaultUpstreamUrl(onboardingTemplate),
     dnsRouteTlsMode: existingDnsRoute?.tlsMode || 'internal',
     dnsRouteAuthRequired: existingDnsRoute?.authRequired === false ? false : true
@@ -7773,7 +7813,7 @@ function renderAppStandaloneNetworkSection(draft, conflict) {
         <span><strong>${escapeHtml(ranges.userLeaseStart)} - ${escapeHtml(ranges.userLeaseEnd)}</strong><small>login users</small></span>
         <span><strong>${escapeHtml(ranges.anonymousLeaseStart)} - ${escapeHtml(ranges.anonymousLeaseEnd)}</strong><small>anonymous users</small></span>
         <span><strong>${escapeHtml(serviceVip)}</strong><small>service VIP</small></span>
-        <span><strong>10.88.88.88</strong><small>Internal control plane</small></span>
+        <span><strong>${escapeHtml(serviceVip)}</strong><small>control / DNS / proxy</small></span>
       </div>
     </div>
   `;
@@ -7794,6 +7834,7 @@ function renderAppEmbedNetworkSection(draft) {
       <div class="app-network-facts">
         <span><strong>${escapeHtml(launcherProductDisplayName(channelId, channel))}</strong><small>channel owner</small></span>
         <span><strong>${escapeHtml(channel.serviceVip || '10.88.100.1')}</strong><small>channel service VIP</small></span>
+        <span><strong>${escapeHtml(channel.internalControlIp || channel.serviceVip || '10.88.100.1')}</strong><small>control / DNS / proxy</small></span>
         <span><strong>${escapeHtml(channel.userLeaseStart || '10.89.0.1')} - ${escapeHtml(channel.userLeaseEnd || '10.89.99.254')}</strong><small>login users</small></span>
         <span><strong>${escapeHtml(channel.anonymousLeaseStart || '10.89.100.1')} - ${escapeHtml(channel.anonymousLeaseEnd || '10.89.254.254')}</strong><small>anonymous users</small></span>
       </div>
@@ -7974,7 +8015,7 @@ function launcherAppDnsRoutePayload(draft, appId) {
   return {
     routeId,
     host,
-    dnsTarget: draft.dnsTarget || MX_INTERNAL_DNS_IP,
+    dnsTarget: launcherAppEffectiveDnsTarget(draft, appId),
     targetUrl: blankToNull(draft.dnsTargetUrl) || launcherAppDefaultUpstreamUrl(draft.onboardingTemplate),
     enabled: true,
     tlsMode: draft.dnsRouteTlsMode || 'internal',
@@ -8051,13 +8092,17 @@ async function saveAppCenterAppFromEditor(root) {
     let savedDnsRoute = null;
     if (launcherMode === 'standalone') {
       const ranges = relayProductNetworkShape(secondOctet);
+      const materializedVip = serviceVipForProductSecondOctet(secondOctet, appId);
       const networkPayload = {
         productId: appId,
         displayName: body.displayName,
         mode: 'standalone',
         standaloneChannelProductId: appId,
         productIndex: productIndexForSecondOctet(secondOctet, appId),
-        serviceVip: serviceVipForProductSecondOctet(secondOctet, appId),
+        serviceVip: materializedVip,
+        internalControlIp: materializedVip,
+        domesticGatewayIp: materializedVip,
+        dnsServer: materializedVip,
         ...ranges,
         defaultDomesticSiteId: selectedDomesticSiteId() || 'domestic-main',
         updatePolicy: launcherProductEffectiveUpdatePolicy({ ...draft, appId, launcherMode }),

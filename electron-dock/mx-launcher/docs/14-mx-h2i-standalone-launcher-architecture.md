@@ -24,7 +24,7 @@ MX-H2I 应作为新的 H 端 VPN 产品，并使用 Launcher standalone 模式�
 | MX-H2I | VPN 产品，Launcher standalone 模式 | H 端入口、登录、游客模式、WG/H2I、AppCenter host、更新器、权限执行 |
 | AppCenter | 产品/host，Launcher embed 模式 | 应用列表、安装、授权展示、打开应用、应用更新入口，默认复用 MX-H2I 的 Launcher standalone 通道 |
 | H2O | 产品，Launcher embed 模式 | 类 Clash 应用，规则/订阅/节点/代理模式 UI，不直接拥有系统网络 |
-| Luopan 等独立产品 | 产品，可选 Launcher standalone 或 embed 模式 | 如果作为独立 Launcher standalone 通道发布，则 embed app 可以选择复用 Luopan 通道；否则默认 embed 到 MX-H2I |
+| Luopan 等独立产品 | 产品，可选 Launcher standalone 或 embed 模式 | 如果作为独立 Launcher standalone 通道发布，则拥有自己的 ProductNetwork、lease/IP 段和 WG；如果作为 embed 发布，才选择复用某个 standalone 通道 |
 
 ## 为什么 HDO 会安装 Launcher
 
@@ -79,8 +79,61 @@ Launcher embed 模式来消费已有能力。
 Launcher 必须解决两个问题：
 
 - embed 足够轻：业务应用不重复安装 native helper、不申请 TUN/WG/DNS 权限、不自建更新器。
-- 同机不打架：多个产品共存时，只有一个明确的 owner 修改系统网络，其它产品通过 broker
-  申请能力、读取上下文和拿 scoped token。
+- 同机不打架：多个 standalone 产品共存时，各自保留独立 ProductNetwork、lease/IP 段和
+  WG profile；共享的只是本机 ownership registry / local edge / resolver 这类系统级协调面。
+  embed 产品通过 broker 申请能力、读取上下文和拿 scoped token。
+- 产品不互相兜底：`shared owner` 不能语义上落到 MX-H2I、Luopan 或第一个启动的产品上；
+  它只能是 Launcher foundation 的产品无关本机服务，或服务端把共享能力 materialize 到各产品
+  自己的地址段后再由产品 WG 承载。否则关闭任意一个 standalone 产品仍会影响其它产品。
+
+如果 Luopan 只安装 `10.91.*` 和 `10.88.100.3/32`，它就不能再直接依赖 H2I 的
+`10.88.88.88` 路由。要保持产品独立，只有两种合法路径：服务端把
+Internal control/DNS/proxy materialize 到 Luopan 自己的产品地址或 service VIP 下；或者本机
+`launcher-foundation` 作为产品无关的 shared foundation plane，单独承载
+`10.88.88.88/32`、`10.88.0.1/32` 这类公共地址，并按所有 standalone 产品的声明做引用计数。
+
+当前主线选择第一种：**product-scoped materialization**。`10.88.0.1` 和 `10.88.88.88`
+可以继续作为 Domestic/Internal 站点内部实现地址或迁移期诊断地址，但不再作为所有
+standalone 客户端必须安装的共享路由。客户端看到的是自己 channel 的 materialized VIP：
+
+| 产品/channel | lease CIDR | materialized VIP | 客户端必须安装的路由 |
+| --- | --- | --- | --- |
+| MX-H2I standalone | `10.89.0.0/16` | `10.88.100.1` | `10.89.0.0/16` + `10.88.100.1/32` |
+| Luopan standalone | `10.91.0.0/16` | `10.88.100.3` | `10.91.0.0/16` + `10.88.100.3/32` |
+| H2O embed on MX-H2I | 不新建本机 WG | `10.88.100.1` | 由 MX-H2I channel 提供 |
+| H2O embed on Luopan | 不新建本机 WG | `10.88.100.3` | 由 Luopan channel 提供 |
+
+Save App / Upsert ProductNetwork 需要自动写入这些字段：`serviceVip`、`internalControlIp`、
+`domesticGatewayIp`、`dnsServer`。默认情况下四者都等于该 standalone channel 的
+materialized VIP；后续如果产品需要拆分 control/DNS/proxy，也可以显式配置成同一产品下的
+多个 `/32`，但仍不能回退到所有产品共享的 `10.88.0.1/10.88.88.88`。
+
+服务端 materialization 的职责：
+
+- CoreDNS / gateway route：应用域名 A 记录指向所选 standalone channel 的
+  `internalControlIp`，gateway 按 Host/path 反代到 app 的 `targetUrl`。
+- Internal service peer：为每个 standalone channel materialize `internalControlIp`、
+  `serviceVip`、`dnsServer`、`domesticGatewayIp` 这些产品 VIP `/32`，并把它们接入同一个
+  Internal gateway/control/DNS 实现。
+- Domestic relay：站点内部仍可使用 `10.88.0.1` 作为真实 WG relay gateway，但对 H 端只需要
+  转发产品 CIDR 和产品 VIP `/32`；不要要求 H 端安装 `10.88.0.0/16`。
+- 限速/审计/灰度：按 `productId`、`standaloneChannelProductId`、产品 lease CIDR 和产品 VIP
+  归因。这样 H2I、Luopan、未来 H2O standalone 的流量天然可分开限速和诊断。
+
+客户端 routePlan 的不变量：
+
+- `routeCidrs` 只包含当前 lease product 的 user/anonymous CIDR 和 materialized VIP `/32`。
+- `internalBaseUrl` 使用 `http://{internalControlIp}:18090`，不是固定
+  `http://10.88.88.88:18090`。
+- `dnsServer` 使用产品 `dnsServer`，默认就是产品 VIP；WireGuard DNS 仍可被
+  system-domain-proxy suppress，但 split DNS/PAC 的上游目标也应是产品 VIP。
+- product WG 的 connect/disconnect 只安装/释放本产品路由；关闭 Luopan 不会删除 MX-H2I 的
+  `10.89.*` 或 `10.88.100.1/32`，关闭 MX-H2I 也不会删除 Luopan 的 `10.91.*` 或
+  `10.88.100.3/32`。
+
+Clash 兼容也按这个边界处理：虚拟网卡模式下，客户端只对产品 VIP `/32` 和产品 CIDR 写更具体
+路由来压过 Clash TUN；系统代理模式下，PAC/split DNS 只把产品域名引到产品 VIP。两种模式都不
+再通过共享 `10.88.0.1` 抢 DNS，也不通过共享 `10.88.88.88` 抢 Internal route。
 
 ### 运行模式
 
@@ -96,8 +149,8 @@ Launcher standalone 在本机启动一个能力 broker，embed 只和 broker 交
 
 | 能力 | standalone owner | embed 行为 | 防冲突规则 |
 | --- | --- | --- | --- |
-| WG/TUN/route | 拥有接口、AllowedIPs、端口和 route table | 只读 network context，发起 connect/disconnect 请求 | 同一 channel 只有一个 network owner；route 由 owner 合并后一次性下发 |
-| Split DNS/PAC | 生成系统 DNS/PAC/mihomo 策略 | 提交 app-level DNS/代理需求 | broker 合并策略并保留 evidence；embed 不直接写系统 DNS |
+| WG/TUN/route | 拥有本产品接口、AllowedIPs、端口和 route table | 只读 network context，发起 connect/disconnect 请求 | 同一 channel 只有一个 network owner；不同 standalone channel 不互相 adopt route CIDR |
+| Split DNS/PAC | 生成或登记本产品 DNS/PAC/mihomo 需求 | 提交 app-level DNS/代理需求 | broker/registry 合并系统级策略并保留 evidence；embed 不直接写系统 DNS |
 | Auth/User | 维护匿名身份、登录态、refresh token、设备绑定 | 申请 app-scoped token 和 permission decision | token audience 绑定 app/product，不能跨 app 复用 |
 | Release/Gray | 管理底座和 standalone shell 更新 | 读取自身 update decision，触发 app update | 单机一个 update scheduler；每个 app 有独立 channel/skip/force 策略 |
 | Storage/Logs | 维护 runtime、cache、diagnostics | 写入 app namespace 下的日志和缓存 | 路径按 product 隔离，broker 汇总到 observability |
@@ -111,6 +164,20 @@ Launcher standalone 在本机启动一个能力 broker，embed 只和 broker 交
 ~/.qpjoy/mx-launcher/sockets/{standaloneChannelProductId}.sock
 ~/.qpjoy/mx-launcher/logs/{productId}/
 ```
+
+本机共享文件只保存“谁声明了什么资源”的事实，不改变任何产品的服务端 routePlan。默认路径是
+用户态、权限收敛的 registry，例如 macOS：
+
+```text
+~/Library/Application Support/QPJoy/Electron Launcher/standalone-ownership.json
+```
+
+每个 standalone launcher 启动/重连时写入自己的 owner claim；断开时只释放自己的 claim。
+claim 可以包含 `dnsHosts`、`dnsZones`、`reverseProxyRoutes` 和产品自己的 `routeCidrs`
+（通常是注册时固定的 product lease CIDR）。其它 standalone 可以读取它做冲突诊断、local edge
+合并和 UI evidence，但不能把这些 CIDR 合并进自己的 WG `AllowedIPs`。例如 Luopan 注册
+`10.91.0.0/16` 后，MX-H2I 只能在 diagnostics 里看到 Luopan claim，不能在重连时把
+`10.91.0.0/16` adopt 到 MX-H2I 的 routePlan。
 
 ### Admin 产品模型
 
@@ -132,8 +199,9 @@ Product Registry 不应把 `launcher` 当业务产品。它应登记业务产品
 - 使用 MX-Launcher 网络或服务器能力的产品必须声明 Launcher 模式。
 - `embed` 产品必须依赖一个 enabled 的 `standaloneChannelProductId`，默认 `mx-h2i`。
 - 只有 `standalone` channel 分配 H 端 peer lease；`embed` 产品返回 channel context。
-- 同一台机器允许多个 Launcher standalone channel，但同一时刻只有当前 owner 写系统网络；切换 owner
-  需要 broker 生成 route/DNS 差异和回滚 evidence。
+- 同一台机器允许多个 Launcher standalone channel；每个 channel 的 ProductNetwork、lease/IP
+  段和 WG profile 独立。系统 DNS/PAC/local edge 这种公共配置通过 ownership registry 合并，
+  断开一个应用只释放它自己的 claim，不能删除或改写其它 standalone 的 claim。
 - npm 包只提供 SDK 能力，不等于入网授权。`/internal/v1/launcher-network/enrollments`
   必须校验 ProductNetwork 和 AppCenter app 都已启用，并且 app 具备
   `launcher-network` + `launcher-standalone` 或 `launcher-network` + `launcher-embed-sdk`
@@ -215,7 +283,7 @@ V2 不再让 MX-H2I 直接依赖旧的 `@qpjoy/electron-plugin-hdo` 业务插件
 - `connectNetwork()` 只负责向 Internal 拿 lease、snapshot 和 routePlan。
 - `connectLauncherWireGuardPeer()` 用 routePlan、客户端 keyPair、Domestic relay 公钥/endpoint
   生成本机 WG profile，并启动客户端 tunnel。
-- MX-H2I 只有在 WG tunnel active、到 `10.88.88.88` 的 route probe 走 WG interface、
+- MX-H2I 只有在 WG tunnel active、到 `routePlan.internalControlIp` 的 route probe 走 WG interface、
   且 overlay `healthz` 成功后，才把 runtime 升级为 `connected`。
 - 如果只拿到 lease，或因为同机 Internal 本地路由冲突导致 route probe 不走 WG，客户端保持
   `lease-only`，AppCenter/H2O 不会被误认为已经具备内网通路。
@@ -228,8 +296,8 @@ V2 路由和 DNS 需要分层处理，不能把 bootstrap endpoint、overlay end
 | 层 | 用途 | 规则 |
 | --- | --- | --- |
 | Bootstrap API | 登录、拿 lease、拿 routePlan | 可以是本机 `127.0.0.1`、公网 gateway 或运维端口；不证明 H2I 已通 |
-| Overlay Internal IP | H2I 到 Internal peer server | 优先使用 routePlan 的 `internalControlIp`，默认 `10.88.88.88`；route probe 必须匹配 MX-H2I 自己的 WG interface |
-| Split DNS | app 域名、k8s/service 域名 | 在 WG 已通之后再启用；DNS server 可以是 Internal DNS 或 Domestic relay/cache，但查询路径必须走 MX-H2I WG route |
+| Overlay Internal IP | H2I 到 Internal peer server | 使用 routePlan 的 `internalControlIp`；新产品默认是 channel service VIP，`10.88.88.88` 只保留为 legacy/shared foundation 地址 |
+| Split DNS | app 域名、k8s/service 域名 | 在 WG 已通之后再启用；DNS server 使用 routePlan 的 product `dnsServer`，查询路径必须走当前产品 WG route |
 | 系统代理/Fake IP | Clash/mihomo/TUN | 不能作为 H2I 成功证据；`198.18.0.0/15`、非 MX-H2I `utun` 或 `lo0` 都应判为 not ready |
 
 ### DNS / PAC ownership 和本机 resolver 策略
@@ -261,8 +329,9 @@ DNS，把目标域名指到 `127.0.0.1:{localEdgePort}`；`/etc/resolver` 文件
 - 把 PAC、HTTP/CONNECT proxy、UDP DNS relay 放在同一个固定端口，减少端口和权限面。
 - 在 V1/V2 共存时，本机优先回答 V2 ownership claim 里的 host/zone，避免完全依赖 V1
   Domestic DNS 是否已有记录。
-- 合并多个 Launcher standalone/app 的 DNS zone、route CIDR 和 reverse proxy route，并在
-  registry 中暴露 owner 和 conflict evidence。
+- 合并多个 Launcher standalone/app 的 DNS zone、reverse proxy route 和系统级 resolver/PAC
+  需求，并在 registry 中暴露 owner 和 conflict evidence。registry 里的 route CIDR 是产品
+  ownership 证据，不是其它 WG owner 的 AllowedIPs 输入。
 - 关闭某个 launcher 时只释放自己的 owner claim；如果还有其它 owner，保留 local edge 和
   系统 resolver。
 
@@ -275,16 +344,36 @@ MX-H2I 客户端连接分两个阶段：
 1. Bootstrap 阶段：客户端还没有 WG route，只能访问 Domestic 公网 IP/公网域名。Domestic
    作为公网 facade 转发到 Internal 的 gateway 接口，供 H 端登录、申请 lease、拉 routePlan。
 2. Overlay 阶段：客户端 WG 已连上 Domestic relay 后，Internal API 和后续应用流量走
-   routePlan 下发的 `internalControlIp`，默认 `10.88.88.88`。
+   routePlan 下发的 `internalControlIp`。新产品默认是自己的 channel service VIP，例如
+   MX-H2I `10.88.100.1`、Luopan `10.88.100.3`。
 
 `H2I direct endpoint is not configured in routePlan` 只表示 Internal direct peer
 没有在 Config Center 打开，默认 `auto` 会走 Domestic relay 的 `hdi-relay` 路径，不应直接判定
-MX-H2I 不通。真正的 H2I ready 证据是：客户端 tunnel active、`route -n get 10.88.88.88`
-命中 MX-H2I 自己的 WG interface，且 `curl http://10.88.88.88:18090/healthz` 成功。
+MX-H2I 不通。真正的 H2I ready 证据是：客户端 tunnel active、`route -n get
+<routePlan.internalControlIp>` 命中 MX-H2I 自己的 WG interface，且
+`curl http://<routePlan.internalControlIp>:18090/healthz` 成功。
 `hdi-relay` 是 H2I 的 Domestic relay 数据路径，含义是 H -> Domestic -> Internal；它和
 `h2i-direct` 的区别是是否绕过 Domestic relay 直连 Internal，不是 H2I 能力是否存在。
 如果 relay healthz 已 passed 但客户端仍是 `tunnel-only / blocked`，优先看 route proof 是否被
 `lo0`、其它 `utun` 或系统代理抢走。
+产品 service VIP 例如 `10.88.100.3` 的本地成功证据是 route proof 命中当前产品 WG interface，
+不是 ICMP ping 必须成功。service VIP 的真实上游可达性应由 DNS route / HTTP smoke /
+Internal service materialization 验证；很多 k8s/VIP/L4 场景不会响应 ping。
+独立 standalone 产品默认只安装自己的 lease CIDR 和 materialized product VIP `/32`；公共 foundation
+地址如 `10.88.0.1`、`10.88.88.88`、`10.88.0.0/16` 不能由每个产品 WG 重复安装，否则
+macOS 全局路由表会让后启动的 utun 抢走前一个产品的 Internal route。公共 DNS/control
+默认应 materialize 到每个产品自己的 VIP；只有 legacy/fallback 场景才由 local edge 或显式
+shared foundation owner 协调。shared owner 必须是产品无关的 Launcher foundation 服务，
+不能是“当前正好在线的某个 standalone 产品”。
+`standalone-ownership.json` 可以作为这个协调面的 desired-state 文件，但不能只是由每个
+产品直接覆盖写 route。每个 standalone 产品写入自己的 claim：`productId`、`installId`、
+`pid`/heartbeat、product route CIDR、service VIP `/32`、需要的 foundation capability。
+`launcher-foundation` 持文件锁读取 claims，清理 stale owner，计算 refcount，并只由它安装或
+释放共享 foundation routes/DNS/PAC。产品断开时只释放自己的 claim 和产品 WG；只要还有其它
+claim 需要 foundation，`10.88.88.88/32`、`10.88.0.1/32` 就继续由 shared foundation plane
+保持。最后一个 claim 释放后，foundation plane 才卸载共享路由和系统 DNS/PAC。
+文件是仲裁输入，不是系统网络状态本身；系统网络状态必须由一个 reconciler 统一 apply，避免
+两个产品同时写文件后仍然各自抢 macOS 全局路由表。
 如果同一台 Mac 同时运行 Internal service peer 和 MX-H2I 客户端，`ping 10.88.88.88`
 可能比 `ping 10.88.0.1` 快很多，因为 `10.88.88.88` 是本机地址并走 `lo0`；这说明
 Internal service peer 本机存在，不等于完整 H -> Domestic relay -> Internal 的 H2I 路径已经由
@@ -409,10 +498,10 @@ Internal gateway `10.88.88.88`；更完整的生产形态是在 Domestic 部署 
 `mx-internal-coredns` 使用同一份 `mx-dns/coredns` ConfigMap，并通过 hostPort 暴露
 Internal host `10.88.88.88:53`；Domestic 53 可以是 V2 `dns-edge-cache`，也可以是现有
 V1 HDO DNS runtime。纯 V1 `hdo-coredns` 不理解 V2 `upstream URL`，但可以在过渡期承载
-V2-only 域名的 A 记录，把它们解析到 `10.88.88.88`，再由 V2 gateway 处理 Host/upstream。
+V2-only 域名的 A 记录，把它们解析到产品 materialized VIP，再由 V2 gateway 处理 Host/upstream。
 Domestic apply 发现 53 已占用时，可以复用端口层运行资源；V2 DNS ready 的证据是
-V2-only 域名查询能返回预期 `10.88.88.88`，或同名冲突域名能通过 source/view/forward
-拿到 V2 答案。routePlan 下发 `dnsServer=10.88.0.1` 时不带端口，WireGuard 原生 DNS、
+V2-only 域名查询能返回预期 product VIP，或同名冲突域名能通过 source/view/forward
+拿到 V2 答案。routePlan 下发的 `dnsServer` 不带端口，WireGuard 原生 DNS、
 macOS CLI split DNS 和本机 edge 都按 UDP/TCP 53 查询；`50053` 只作为旧 snapshot/旧环境
 的显式兼容值，不再是 V2 默认链路。
 如果生产 DNS 还没有准备好，Domestic runtime 的 `bootstrapHost` 可以先使用 Domestic

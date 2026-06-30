@@ -1537,6 +1537,9 @@ export class MemoryStore implements PlatformStore {
         mode: product.mode,
         standaloneChannelProductId: product.standaloneChannelProductId,
         serviceVip: product.serviceVip,
+        internalControlIp: product.internalControlIp,
+        domesticGatewayIp: product.domesticGatewayIp,
+        dnsServer: product.dnsServer,
         userCidr: product.userCidr,
         anonymousCidr: product.anonymousCidr,
         updatePolicy: product.updatePolicy
