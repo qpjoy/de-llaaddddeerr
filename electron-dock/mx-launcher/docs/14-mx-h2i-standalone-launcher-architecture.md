@@ -205,7 +205,8 @@ Product Registry 不应把 `launcher` 当业务产品。它应登记业务产品
 | `displayName` | 产品名 |
 | `launcherMode` / `mode` | Launcher 运行模式：`standalone` 或 `embed` |
 | `standaloneChannelProductId` | embed 依赖的 Launcher standalone channel；使用 standalone 模式的产品等于自身 |
-| `networkPolicy` | lease 段、service VIP、DNS/proxy/TUN 权限 |
+| `networkScope` | 本机网络所有权：`owner` 或 `broker-session` |
+| `networkPolicy` | standalone owner 的 lease 段、service VIP、DNS/proxy/TUN 权限；embed 只保留服务端路由/绑定元数据 |
 | `permissionManifest` | 产品暴露的功能、scope、resource/action |
 | `releasePolicy` | 版本、灰度、强制/可跳过、回滚策略 |
 | `runtimeIsolation` | storage/socket/protocol/port namespace |
@@ -214,7 +215,9 @@ Product Registry 不应把 `launcher` 当业务产品。它应登记业务产品
 
 - 使用 MX-Launcher 网络或服务器能力的产品必须声明 Launcher 模式。
 - `embed` 产品必须依赖一个 enabled 的 `standaloneChannelProductId`，默认 `mx-h2i`。
-- 只有 `standalone` channel 分配 H 端 peer lease；`embed` 产品返回 channel context。
+- 只有 `standalone` channel 分配 H 端 peer lease；`embed` 产品的 `networkScope` 固定为
+  `broker-session`，返回 channel context。AppCenter/H2O 可有 DNS/gateway service context，
+  但这不是本机 WG peer IP。
 - 同一台机器允许多个 Launcher standalone channel；每个 channel 的 ProductNetwork、lease/IP
   段和 WG profile 独立。系统 DNS/PAC/local edge 这种公共配置通过 ownership registry 合并，
   断开一个应用只释放它自己的 claim，不能删除或改写其它 standalone 的 claim。

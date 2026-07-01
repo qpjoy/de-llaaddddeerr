@@ -1045,6 +1045,381 @@ button:disabled {
   white-space: nowrap;
 }
 
+.appcenter-product {
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr) minmax(300px, 360px);
+  min-height: 620px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, rgba(94, 142, 236, 0.035) 1px, transparent 1px) 0 0 / 56px 56px,
+    rgba(20, 20, 23, 0.78);
+}
+
+.appcenter-rail {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-width: 0;
+  border-right: 1px solid var(--line);
+  background: rgba(17, 19, 25, 0.78);
+}
+
+.appcenter-account {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  min-height: 82px;
+  padding: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.avatar-mark,
+.app-icon-large {
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--primary);
+  color: #071311;
+  font-weight: 800;
+}
+
+.avatar-mark {
+  width: 42px;
+  height: 42px;
+}
+
+.app-icon-large {
+  width: 58px;
+  height: 58px;
+  box-shadow: 0 0 22px rgba(43, 246, 210, 0.18);
+}
+
+.appcenter-account strong,
+.appcenter-account span,
+.inspector-head h4,
+.inspector-head span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.appcenter-account span,
+.inspector-head span {
+  color: var(--text-3);
+}
+
+.appcenter-product .appcenter-nav {
+  gap: 8px;
+  border-right: 0;
+  padding: 14px;
+  background: transparent;
+}
+
+.appcenter-product .appcenter-nav button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 42px;
+  padding: 0 12px;
+}
+
+.appcenter-product .appcenter-nav small {
+  color: var(--text-3);
+}
+
+.appcenter-rail-foot {
+  display: grid;
+  gap: 4px;
+  padding: 16px 18px;
+  color: var(--text-4);
+  font-size: 11px;
+}
+
+.appcenter-main {
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  min-width: 0;
+}
+
+.appcenter-product .appcenter-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: rgba(33, 35, 45, 0.82);
+}
+
+.appcenter-titlebar h3,
+.appcenter-titlebar p {
+  margin: 0;
+}
+
+.appcenter-titlebar h3 {
+  font-size: 22px;
+}
+
+.appcenter-titlebar span:not(.status-pill) {
+  color: var(--text-3);
+}
+
+.appcenter-notice {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  min-height: 54px;
+  margin: 18px 18px 0;
+  border: 1px solid rgba(72, 188, 119, 0.58);
+  border-radius: 8px;
+  padding: 10px 14px;
+  background: rgba(72, 188, 119, 0.09);
+  color: var(--text-2);
+}
+
+.appcenter-notice strong {
+  color: var(--success);
+  white-space: nowrap;
+}
+
+.appcenter-marketbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 22px 18px 14px;
+}
+
+.appcenter-marketbar h4,
+.appcenter-marketbar p {
+  margin: 0;
+}
+
+.appcenter-marketbar h4 {
+  font-size: 18px;
+}
+
+.appcenter-marketbar p {
+  color: var(--text-3);
+}
+
+.appcenter-search {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  width: min(360px, 100%);
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0 12px;
+  background: var(--bg-input);
+  color: var(--text-3);
+}
+
+.appcenter-search input {
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-1);
+}
+
+.appcenter-search input::placeholder {
+  color: var(--text-4);
+}
+
+.appcenter-card-grid {
+  grid-template-columns: repeat(auto-fill, minmax(235px, 1fr));
+  padding-top: 0;
+}
+
+.appcenter-app-card {
+  position: relative;
+  min-height: 286px;
+}
+
+.appcenter-app-card.is-active {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 1px rgba(43, 246, 210, 0.18);
+}
+
+.catalog-card-select {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.appcenter-app-card .catalog-cover,
+.appcenter-app-card .catalog-card-body,
+.appcenter-app-card .catalog-card-foot {
+  position: relative;
+  z-index: 2;
+}
+
+.appcenter-app-card .catalog-cover {
+  display: flex;
+  align-items: flex-end;
+  min-height: 132px;
+  padding: 14px;
+}
+
+.catalog-cover span {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  border-radius: 8px;
+  background: rgba(20, 20, 23, 0.78);
+  color: var(--text-1);
+  font-weight: 800;
+}
+
+.catalog-cover[data-category="platform"] {
+  background:
+    radial-gradient(circle at 76% 22%, rgba(255, 255, 255, 0.72) 0 7px, transparent 8px),
+    linear-gradient(135deg, #5e8eec 0%, #263a70 46%, #2bf6d2 47%, #047b72 100%);
+}
+
+.catalog-cover[data-category="network"] {
+  background:
+    radial-gradient(circle at 20% 22%, rgba(255, 255, 255, 0.72) 0 7px, transparent 8px),
+    linear-gradient(135deg, #48bc77 0%, #076342 46%, #f8d06c 47%, #795d1b 100%);
+}
+
+.catalog-cover[data-category="bridge"] {
+  background:
+    radial-gradient(circle at 28% 24%, rgba(255, 255, 255, 0.72) 0 7px, transparent 8px),
+    linear-gradient(135deg, #b974ff 0%, #44256d 48%, #ee6067 49%, #67303b 100%);
+}
+
+.catalog-card-body {
+  display: grid;
+  gap: 10px;
+  min-height: 102px;
+}
+
+.catalog-card-body h4,
+.catalog-card-body p {
+  margin: 0;
+}
+
+.catalog-card-body p {
+  display: -webkit-box;
+  min-height: 42px;
+  overflow: hidden;
+  color: var(--text-3);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.package-line {
+  overflow: hidden;
+  border: 1px solid rgba(94, 142, 236, 0.24);
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: var(--text-2);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.status-dot::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--text-4);
+}
+
+.status-dot[data-state="ready"]::before,
+.status-dot[data-state="enabled"]::before,
+.status-dot[data-state="running"]::before {
+  background: var(--primary);
+  box-shadow: 0 0 12px rgba(43, 246, 210, 0.34);
+}
+
+.status-dot[data-state="reserved"]::before {
+  background: var(--warning);
+}
+
+.appcenter-inspector {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  min-width: 0;
+  border-left: 1px solid var(--line);
+  padding: 22px;
+  background: rgba(33, 35, 45, 0.82);
+}
+
+.inspector-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+}
+
+.inspector-head h4 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.inspector-summary {
+  margin: 0;
+  color: var(--text-2);
+}
+
+.permission-stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.permission-stack span {
+  border: 1px solid rgba(94, 142, 236, 0.3);
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: rgba(94, 142, 236, 0.08);
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.entrypoint-box {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(17, 19, 25, 0.48);
+}
+
+.entrypoint-box span {
+  overflow-wrap: anywhere;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.empty-catalog {
+  display: grid;
+  place-items: center;
+  min-height: 220px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--text-3);
+  text-align: center;
+}
+
 @media (max-width: 1080px) {
   body {
     overflow: auto;
@@ -1057,7 +1432,8 @@ button:disabled {
 
   .mx-shell.is-appcenter,
   .workbench-grid,
-  .appcenter-layout {
+  .appcenter-layout,
+  .appcenter-product {
     grid-template-columns: 1fr;
   }
 
@@ -1065,12 +1441,23 @@ button:disabled {
     overflow: visible;
   }
 
+  .appcenter-rail,
   .appcenter-nav,
-  .detail-panel {
+  .detail-panel,
+  .appcenter-inspector {
     border: 0;
   }
 
-  .catalog-grid {
+  .appcenter-rail {
+    grid-template-rows: auto auto;
+  }
+
+  .appcenter-rail-foot {
+    display: none;
+  }
+
+  .catalog-grid,
+  .appcenter-card-grid {
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   }
 }

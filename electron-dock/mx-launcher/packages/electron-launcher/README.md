@@ -6,6 +6,25 @@ Applications install this package directly and point it at an MX Launcher
 backend. The package hides the internal split between core, embed, and
 standalone adapters.
 
+For production SDK delivery, MX Launcher also supports role-specific packages:
+
+| Package | Use when |
+| --- | --- |
+| `@qpjoy/mx-launcher-core` | sharing protocol, manifest, capability, release, and ABI contracts |
+| `@qpjoy/mx-launcher-standalone` | building a capability owner such as MX-H2I or Luopan |
+| `@qpjoy/mx-launcher-embed-sdk` | building an embed app such as AppCenter, H2O, or an AppCenter-managed app |
+| `@qpjoy/electron-launcher` | using the unified Electron facade or existing compatibility exports |
+
+Both delivery styles are supported. The role-specific split is preferred for
+external teams because it keeps owner-only APIs out of embed apps. The unified
+Electron package remains useful for monorepo demos, legacy products, and apps
+that want a single import surface. Packages with the same major version must be
+protocol-compatible; breaking protocol or broker ABI changes require a new
+major version.
+
+See the package design notes in `../README.md`, `../launcher-core/README.md`,
+`../launcher-standalone/README.md`, and `../launcher-embed-sdk/README.md`.
+
 ```ts
 import { createElectronLauncher, defineLauncherProduct } from '@qpjoy/electron-launcher';
 
@@ -13,6 +32,7 @@ export const product = defineLauncherProduct({
   productId: 'h2o',
   displayName: 'H2O',
   mode: 'embed',
+  standaloneChannelProductId: 'mx-h2i',
   launcherActions: {
     network: true,
     release: true,
@@ -25,22 +45,24 @@ export const product = defineLauncherProduct({
 const launcher = createElectronLauncher({
   baseUrl: 'http://127.0.0.1:18090',
   productId: product.productId,
-  mode: product.mode
+  mode: product.mode,
+  standaloneChannelProductId: product.standaloneChannelProductId,
+  requiredCapabilities: ['user.session', 'network.proxy', 'network.status']
 });
 
-const session = await launcher.connectNetwork({
-  identityKind: 'anonymous',
-  deviceLabel: 'H2O Desktop'
-});
+const connection = launcher.mode === 'embed'
+  ? await launcher.connect()
+  : null;
 
-// Persist session.wireGuard.privateKey in the product's secure storage, then
-// apply session.routePlan through the product's WireGuard/runtime adapter.
-// A lease alone is not a data-plane-ready signal.
-const routePlan = session.routePlan;
+if (connection && !connection.ok) {
+  console.warn(connection.state, connection.message);
+}
 ```
 
 `standalone` mode is for the full Launcher shell. `embed` mode is for product
-apps that carry Launcher network capability inside the app.
+apps hosted by a standalone broker session. Embed apps do not allocate their own
+WireGuard peer lease or apply DNS/route state; call `launcher.connect()` and
+request scoped capabilities from the selected standalone channel.
 
 ## Runtime adapters
 

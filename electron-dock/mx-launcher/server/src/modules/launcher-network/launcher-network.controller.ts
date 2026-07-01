@@ -138,6 +138,7 @@ export class LauncherNetworkController {
         productId,
         displayName: nullableString(body.displayName),
         mode: nullableString(body.mode),
+        networkScope: nullableString(body.networkScope),
         standaloneChannelProductId: nullableString(body.standaloneChannelProductId),
         productIndex: numberValue(body.productIndex),
         internalControlIp: nullableString(body.internalControlIp),

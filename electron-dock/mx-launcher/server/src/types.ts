@@ -658,6 +658,7 @@ export interface AdminLauncherServiceVipSmoke {
   productId: string;
   displayName: string;
   launcherMode: LauncherProductMode;
+  networkScope: LauncherNetworkScope;
   channelProductId: string;
   serviceVip: string | null;
   dnsHost: string;
@@ -1653,6 +1654,7 @@ export interface AppCenterApp {
   displayName: string;
   builtin: boolean;
   systemOwned?: boolean;
+  packageName?: string | null;
   version: string;
   category: string;
   description: string;
@@ -1677,6 +1679,7 @@ export interface AppCenterAppInput {
   displayName?: string | null;
   builtin?: boolean | null;
   systemOwned?: boolean | null;
+  packageName?: string | null;
   version?: string | null;
   category?: string | null;
   description?: string | null;
@@ -1715,6 +1718,7 @@ export interface AppOnboardingDefaultsInput {
   displayName?: string | null;
   category?: string | null;
   description?: string | null;
+  packageName?: string | null;
   launcherMode?: LauncherProductMode | string | null;
   standaloneChannelProductId?: string | null;
   dnsHost?: string | null;
@@ -1730,6 +1734,7 @@ export interface AppOnboardingDefaults {
     displayName: string;
     category: string;
     description: string;
+    packageName: string | null;
     launcherMode: LauncherProductMode;
     standaloneChannelProductId: string;
     productNetworkId: string;
@@ -1803,11 +1808,13 @@ export interface LauncherNetworkSnapshotInput {
 export type LauncherProductMode = 'standalone' | 'embed';
 export type LauncherIdentityKind = 'user' | 'anonymous';
 export type LauncherProductUpdatePolicy = 'launcher-managed' | 'app-managed' | 'host-managed';
+export type LauncherNetworkScope = 'owner' | 'broker-session';
 
 export interface LauncherProductNetworkInput {
   productId?: string | null;
   displayName?: string | null;
   mode?: LauncherProductMode | string | null;
+  networkScope?: LauncherNetworkScope | string | null;
   standaloneChannelProductId?: string | null;
   productIndex?: number | null;
   internalControlIp?: string | null;
@@ -1835,6 +1842,7 @@ export interface LauncherProductNetwork {
   productId: string;
   displayName: string;
   mode: LauncherProductMode;
+  networkScope: LauncherNetworkScope;
   standaloneChannelProductId: string;
   productIndex: number;
   fabricCidr: '10.88.0.0/16';

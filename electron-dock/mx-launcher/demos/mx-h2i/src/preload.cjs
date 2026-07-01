@@ -8,6 +8,7 @@ const api = {
   disconnect: () => ipcRenderer.invoke('mx-h2i:disconnect'),
   installAppCenter: () => ipcRenderer.invoke('mx-h2i:install-appcenter'),
   enableH2o: () => ipcRenderer.invoke('mx-h2i:enable-h2o'),
+  launchH2o: () => ipcRenderer.invoke('mx-h2i:launch-h2o'),
   checkUpdates: () => ipcRenderer.invoke('mx-h2i:check-updates'),
   refreshDiagnostics: () => ipcRenderer.invoke('mx-h2i:refresh-diagnostics'),
   repairSystemNetwork: () => ipcRenderer.invoke('mx-h2i:repair-system-network'),

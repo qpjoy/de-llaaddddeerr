@@ -5,8 +5,9 @@ Electron app and owns one local network, auth, update, and permission channel.
 The Launcher foundation itself is modeled as a reusable plugin/socket layer:
 MX-H2I is the active standalone owner, while Luopan is reserved as a future
 peer standalone owner that can consume the same foundation capabilities.
-AppCenter and H2O are shown as Launcher embed apps that reuse the selected
-standalone channel instead of receiving separate WireGuard peers.
+AppCenter and H2O are shown as Launcher embed apps with
+`networkScope: broker-session`: they reuse the selected standalone broker
+channel instead of receiving separate WireGuard peer lease IPs.
 
 ## Run
 
@@ -15,6 +16,49 @@ From `electron-dock/mx-launcher`:
 ```sh
 pnpm --filter @qpjoy/mx-h2i-demo dev
 ```
+
+## Test AppCenter And H2O
+
+1. Start MX-H2I:
+
+   ```sh
+   pnpm --filter @qpjoy/mx-h2i-demo dev
+   ```
+
+2. Connect as guest or employee. The standalone channel must be connected
+   before AppCenter can install embed apps.
+
+3. Click `AppCenter -> Install/Enter`. AppCenter opens as an engineering
+   catalog view: search apps, select H2O, inspect `packageName`,
+   `installedVersion`, `latestVersion`, `networkScope`, permissions, and
+   entrypoints.
+
+4. Install H2O from AppCenter. MX-H2I records the local cache state on
+   `runtime.apps.h2o`: `packageName`, `installedVersion`, `latestVersion`,
+   `installSource`, `runtimeState`, and `lastAction`.
+
+5. Start the H2O embed app demo:
+
+   ```sh
+   pnpm --filter @qpjoy/electron-launcher-app-h2o dev
+   ```
+
+   The demo package is `@qpjoy/electron-launcher-app-h2o` and uses
+   `launcherMode: embed`, `standaloneChannelProductId: mx-h2i`, and
+   `networkScope: broker-session`. It never creates an independent
+   WireGuard peer.
+
+6. To test the denied embed path, run H2O with the dev broker disabled:
+
+   ```sh
+   MX_H2O_BROKER_MODE=off pnpm --filter @qpjoy/electron-launcher-app-h2o dev
+   ```
+
+For production, Internal admin should register the same AppCenter app record
+with `packageName: @qpjoy/electron-launcher-app-h2o`, the latest release
+version, access policy, permissions, and entrypoints. AppCenter reads that
+catalog record, compares it with local installed cache, installs or updates the
+npm package, then opens the app through MX-H2I broker-session.
 
 `pnpm dev` follows the V1 HDO local-development flow: it prepares the local
 Launcher workspace packages before starting Electron. This keeps

@@ -23,6 +23,10 @@
             <span>Overview</span>
             <span class="qp-tag qp-tag--primary">App</span>
           </a>
+          <a class="qp-list__item demo-nav-link" href="/demos/ui-design-neon-void/market" data-route-link="market">
+            <span>Market</span>
+            <span class="qp-status" data-status="success">apps</span>
+          </a>
           <a class="qp-list__item demo-nav-link" href="/demos/ui-design-neon-void/buttons" data-route-link="buttons">
             <span>Buttons</span>
             <span class="qp-status" data-status="success">states</span>
@@ -174,6 +178,89 @@
             </section>
 
           </aside>
+        </section>
+
+        <section class="demo-route demo-system" data-route="market" hidden>
+          <h2 class="qp-section-title">Market</h2>
+          <section class="qp-market-layout">
+            <aside class="qp-market-rail">
+              <div>
+                <p class="qp-kicker">APPCENTER</p>
+                <h3 class="qp-heading-2">MX-H2I</h3>
+              </div>
+              <nav class="qp-list">
+                <button class="qp-list__item is-selected" type="button"><span>All Apps</span><span class="qp-tag qp-tag--primary">4</span></button>
+                <button class="qp-list__item" type="button"><span>Network</span><span>1</span></button>
+                <button class="qp-list__item" type="button"><span>Platform</span><span>1</span></button>
+                <button class="qp-list__item" type="button"><span>Updates</span><span>2</span></button>
+              </nav>
+            </aside>
+            <section class="qp-market-main">
+              <div class="qp-row qp-row--between" style="margin-bottom: 16px">
+                <div>
+                  <h3 class="qp-heading-2">Internal Apps</h3>
+                  <p class="qp-caption">package registry / broker-session / local cache</p>
+                </div>
+                <span class="qp-input-group" style="width: min(100%, 320px)">
+                  <span class="qp-input-group__prefix">⌕</span>
+                  <input class="qp-input" value="@qpjoy/electron" />
+                </span>
+              </div>
+              <div class="qp-market-grid">
+                <article class="qp-market-card is-active">
+                  <div class="qp-market-card__media" data-category="network"><span class="qp-market-card__icon">H2O</span></div>
+                  <div class="qp-market-card__body">
+                    <strong class="qp-market-card__title">H2O</strong>
+                    <span class="qp-market-card__summary">PAC, Split DNS, proxy rules, and Internal network status.</span>
+                    <span class="qp-market-package">@qpjoy/electron-launcher-app-h2o</span>
+                  </div>
+                  <div class="qp-market-card__footer">
+                    <span class="qp-status" data-status="success">installed</span>
+                    <button class="qp-button qp-button--outline qp-button--sm" type="button">Open</button>
+                  </div>
+                </article>
+                <article class="qp-market-card">
+                  <div class="qp-market-card__media"><span class="qp-market-card__icon">APP</span></div>
+                  <div class="qp-market-card__body">
+                    <strong class="qp-market-card__title">AppCenter</strong>
+                    <span class="qp-market-card__summary">Application catalog, install cache, permission grants, and update lanes.</span>
+                    <span class="qp-market-package">@qpjoy/electron-launcher-appcenter</span>
+                  </div>
+                  <div class="qp-market-card__footer">
+                    <span class="qp-status" data-status="success">builtin</span>
+                    <button class="qp-button qp-button--outline qp-button--sm" type="button">Open</button>
+                  </div>
+                </article>
+                <article class="qp-market-card">
+                  <div class="qp-market-card__media" data-category="bridge"><span class="qp-market-card__icon">LP</span></div>
+                  <div class="qp-market-card__body">
+                    <strong class="qp-market-card__title">Luopan Bridge</strong>
+                    <span class="qp-market-card__summary">Reserved bridge app for future standalone channel tests.</span>
+                    <span class="qp-market-package">@qpjoy/electron-launcher-app-luopan-bridge</span>
+                  </div>
+                  <div class="qp-market-card__footer">
+                    <span class="qp-status" data-status="warning">reserved</span>
+                    <button class="qp-button qp-button--outline qp-button--sm" type="button" disabled>Reserved</button>
+                  </div>
+                </article>
+              </div>
+            </section>
+            <aside class="qp-market-inspector">
+              <h3 class="qp-heading-2">H2O Runtime</h3>
+              <div class="qp-data-list">
+                <div class="qp-data-cell"><span>Mode</span><small>embed</small></div>
+                <div class="qp-data-cell"><span>Channel</span><small>mx-h2i</small></div>
+                <div class="qp-data-cell"><span>Network</span><small>broker-session</small></div>
+                <div class="qp-data-cell"><span>Version</span><small>0.1.0</small></div>
+              </div>
+              <div class="qp-chip-list">
+                <span>network.status</span>
+                <span>network.proxy</span>
+                <span>network.dns.policy</span>
+                <span>app-center-runtime</span>
+              </div>
+            </aside>
+          </section>
         </section>
 
         <section class="demo-route demo-system" data-route="buttons" hidden>

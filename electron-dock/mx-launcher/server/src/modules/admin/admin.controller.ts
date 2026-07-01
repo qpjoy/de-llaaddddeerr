@@ -8613,13 +8613,17 @@ function buildLauncherServiceVipSmoke(input: {
   const productId = normalizeLauncherId(app.productNetworkId || app.appId);
   const product = input.product;
   const mode = app.launcherMode === 'standalone' || product?.mode === 'standalone' ? 'standalone' : 'embed';
+  const networkScope = mode === 'standalone' ? 'owner' : 'broker-session';
   const channelProductId = mode === 'standalone'
     ? productId
     : normalizeLauncherId(app.standaloneChannelProductId || product?.standaloneChannelProductId || MX_H2I_PRODUCT_ID);
-  const serviceVip = product?.serviceVip ?? null;
+  const channelProduct = input.channelProduct;
+  const appServiceVip = product?.serviceVip ?? null;
+  const channelServiceVip = channelProduct?.serviceVip ?? null;
+  const serviceVip = mode === 'standalone' ? appServiceVip : appServiceVip ?? channelServiceVip;
   const dnsHost = normalizeDomain(`${app.appId}.${MX_DEFAULT_APP_DNS_ZONE}`);
   const dnsRoute = findLauncherServiceDnsRoute(input.dnsRoutes, dnsHost);
-  const domesticSiteId = product?.defaultDomesticSiteId || input.channelProduct?.defaultDomesticSiteId || 'domestic-main';
+  const domesticSiteId = product?.defaultDomesticSiteId || channelProduct?.defaultDomesticSiteId || 'domestic-main';
   const domesticSecret = input.domesticSecrets.find((secret) => secret.siteId === domesticSiteId)
     ?? input.domesticSecrets[0]
     ?? null;
@@ -8627,11 +8631,15 @@ function buildLauncherServiceVipSmoke(input: {
     .filter((lease) => lease.productId === channelProductId)
     .sort((left, right) => String(right.updatedAt || right.createdAt || '').localeCompare(String(left.updatedAt || left.createdAt || '')))[0]
     ?? null;
-  const expectedProductCidrs = product ? launcherProductRelayCidrs(product) : [];
+  const expectedOwnerProduct = mode === 'standalone' ? product : channelProduct;
+  const expectedProductCidrs = expectedOwnerProduct ? launcherProductRelayCidrs(expectedOwnerProduct) : [];
   const relayCidrs = domesticSecret ? domesticSecretProductRelayCidrs(domesticSecret) : [];
   const missingRelayCidrs = expectedProductCidrs.filter((cidr) => !relayCidrs.some((relayCidr) => ipv4CidrContainsCidr(relayCidr, cidr)));
+  const expectedDnsTarget = mode === 'standalone'
+    ? product?.internalControlIp ?? null
+    : product?.internalControlIp ?? channelProduct?.internalControlIp ?? null;
   const expectedInternalAllowedIps = uniqueStrings([
-    product?.internalControlIp ? `${product.internalControlIp}/32` : '10.88.88.88/32',
+    expectedDnsTarget ? `${expectedDnsTarget}/32` : '10.88.88.88/32',
     serviceVip ? `${serviceVip}/32` : ''
   ].filter(Boolean));
 
@@ -8646,19 +8654,43 @@ function buildLauncherServiceVipSmoke(input: {
     ),
     serviceVipSmokeCheck(
       'product-network',
-      'ProductNetwork',
-      product ? 'passed' : 'blocked',
-      product ? 'ProductNetwork exists for this app.' : 'ProductNetwork is missing for this app.',
+      mode === 'standalone' ? 'ProductNetwork' : 'App binding',
+      product ? 'passed' : mode === 'standalone' ? 'blocked' : 'warning',
+      product
+        ? mode === 'standalone'
+          ? 'ProductNetwork exists for this standalone app.'
+          : 'Embed binding exists; it does not allocate a WireGuard peer.'
+        : mode === 'standalone'
+          ? 'ProductNetwork is missing for this standalone app.'
+          : 'Embed app has no product binding record; it can still use the selected standalone broker, but admin cannot inspect app service metadata.',
       productId,
       product?.productId ?? null
     ),
+    ...(mode === 'embed' ? [
+      serviceVipSmokeCheck(
+        'standalone-channel',
+        'Standalone channel',
+        channelProduct?.mode === 'standalone' && channelProduct.enabled !== false ? 'passed' : 'blocked',
+        channelProduct?.mode === 'standalone' && channelProduct.enabled !== false
+          ? 'Embed app is bound to an enabled standalone broker channel.'
+          : 'Embed app requires an enabled standalone broker channel.',
+        channelProductId,
+        channelProduct ? `${channelProduct.productId}:${channelProduct.mode}` : null
+      )
+    ] : []),
     serviceVipSmokeCheck(
       'service-vip',
-      'Service VIP',
-      serviceVip ? 'passed' : 'blocked',
-      serviceVip ? 'Service VIP is assigned in ProductNetwork.' : 'Service VIP is not assigned.',
-      '10.88.100.x',
-      serviceVip
+      mode === 'standalone' ? 'Service VIP' : 'Broker network scope',
+      mode === 'standalone'
+        ? serviceVip ? 'passed' : 'blocked'
+        : channelProduct ? 'passed' : 'blocked',
+      mode === 'standalone'
+        ? serviceVip ? 'Service VIP is assigned in ProductNetwork.' : 'Service VIP is not assigned.'
+        : appServiceVip
+          ? 'Embed app has an optional app service VIP, but runtime network ownership stays with the standalone broker.'
+          : 'Embed app does not allocate a runtime network IP; it uses the standalone broker session.',
+      mode === 'standalone' ? '10.88.100.x' : 'broker-session',
+      mode === 'standalone' ? serviceVip : appServiceVip ? `${appServiceVip} via ${channelProductId}` : channelProductId
     ),
     serviceVipSmokeCheck(
       'dns-route',
@@ -8671,13 +8703,13 @@ function buildLauncherServiceVipSmoke(input: {
     serviceVipSmokeCheck(
       'dns-target',
       'DNS target',
-      dnsRoute && product && dnsRoute.dnsTarget === product.internalControlIp ? 'passed' : dnsRoute ? 'warning' : 'blocked',
-      dnsRoute && product && dnsRoute.dnsTarget === product.internalControlIp
-        ? 'DNS route targets the Internal service peer.'
+      dnsRoute && expectedDnsTarget && dnsRoute.dnsTarget === expectedDnsTarget ? 'passed' : dnsRoute ? 'warning' : 'blocked',
+      dnsRoute && expectedDnsTarget && dnsRoute.dnsTarget === expectedDnsTarget
+        ? mode === 'standalone' ? 'DNS route targets the product Internal service peer.' : 'DNS route targets the app or channel service context.'
         : dnsRoute
-          ? 'DNS route target does not match the product Internal control IP.'
+          ? 'DNS route target does not match the expected Internal service context.'
           : 'Cannot verify DNS target without a DNS route.',
-      product?.internalControlIp ?? '10.88.88.88',
+      expectedDnsTarget ?? '10.88.88.88',
       dnsRoute?.dnsTarget ?? null
     ),
     serviceVipSmokeCheck(
@@ -8697,32 +8729,40 @@ function buildLauncherServiceVipSmoke(input: {
       domesticSecret?.siteId ?? null
     ),
     serviceVipSmokeCheck(
-      'domestic-product-cidrs',
-      'Domestic product CIDRs',
+      mode === 'standalone' ? 'domestic-product-cidrs' : 'channel-domestic-cidrs',
+      mode === 'standalone' ? 'Domestic product CIDRs' : 'Channel Domestic CIDRs',
       !domesticSecret ? 'blocked' : missingRelayCidrs.length ? 'blocked' : 'passed',
       !domesticSecret
         ? 'Cannot verify product relay CIDRs without Domestic relay material.'
         : missingRelayCidrs.length
           ? `Domestic productRelayCidrs does not cover ${missingRelayCidrs.join(', ')}.`
-          : 'Domestic productRelayCidrs covers the app lease CIDRs.',
+          : mode === 'standalone'
+            ? 'Domestic productRelayCidrs covers the app lease CIDRs.'
+            : 'Embed app adds no CIDR; Domestic productRelayCidrs covers the selected standalone channel.',
       expectedProductCidrs.join(', ') || null,
       relayCidrs.join(', ') || null
     ),
     serviceVipSmokeCheck(
       'internal-service-peer-contract',
       'Internal service peer contract',
-      serviceVip ? 'warning' : 'blocked',
-      serviceVip
-        ? 'Topology expects Internal service peer AllowedIPs to include the product service VIP; runtime apply evidence is checked by Internal service peer actions.'
-        : 'Cannot build Internal service peer AllowedIPs without a service VIP.',
+      mode === 'standalone' ? serviceVip ? 'warning' : 'blocked' : channelProduct ? 'passed' : 'blocked',
+      mode === 'standalone'
+        ? serviceVip
+          ? 'Topology expects Internal service peer AllowedIPs to include the product service VIP; runtime apply evidence is checked by Internal service peer actions.'
+          : 'Cannot build Internal service peer AllowedIPs without a service VIP.'
+        : 'Embed app reaches Internal services through the standalone broker session; Internal service peer ownership stays on the channel.',
       expectedInternalAllowedIps.join(', ') || null,
-      'runtime evidence pending'
+      mode === 'standalone' ? 'runtime evidence pending' : channelProductId
     ),
     serviceVipSmokeCheck(
-      'runtime-lease',
-      'Runtime lease',
+      mode === 'standalone' ? 'runtime-lease' : 'broker-channel-lease',
+      mode === 'standalone' ? 'Runtime lease' : 'Broker channel lease',
       latestLease ? 'passed' : 'warning',
-      latestLease ? 'At least one recent launcher lease exists for the standalone channel.' : 'No launcher runtime lease has been issued yet.',
+      latestLease
+        ? 'At least one recent launcher lease exists for the standalone channel.'
+        : mode === 'standalone'
+          ? 'No launcher runtime lease has been issued yet.'
+          : 'No channel runtime lease has been issued yet; start the standalone app to open broker sessions.',
       channelProductId,
       latestLease?.leaseIp ?? null
     )
@@ -8733,6 +8773,7 @@ function buildLauncherServiceVipSmoke(input: {
     productId,
     displayName: app.displayName || app.appId,
     launcherMode: mode,
+    networkScope,
     channelProductId,
     serviceVip,
     dnsHost,
@@ -8788,15 +8829,26 @@ function launcherServiceVipSmokeSummary(
   status: AdminLauncherServiceVipSmokeStatus,
   checks: AdminLauncherServiceVipSmokeCheck[]
 ): string {
-  if (status === 'passed') return 'Service VIP is configured across App, DNS, relay CIDR, and lease layers.';
+  const isEmbed = checks.some((check) => check.checkId === 'standalone-channel' || check.checkId === 'broker-channel-lease');
+  if (status === 'passed') {
+    return isEmbed
+      ? 'Embed app is bound to a standalone broker channel with DNS, upstream, and channel relay coverage.'
+      : 'Service VIP is configured across App, DNS, relay CIDR, and lease layers.';
+  }
   const first = checks.find((check) => check.status === status);
   return first?.detail ?? 'Service VIP materialization needs operator attention.';
 }
 
 function launcherServiceVipSmokeNextActions(checks: AdminLauncherServiceVipSmokeCheck[]): string[] {
   const actions: string[] = [];
+  if (checks.some((check) => check.checkId === 'standalone-channel' && check.status === 'blocked')) {
+    actions.push('Create or enable the selected standalone launcher channel, then refresh the embed app binding.');
+  }
   if (checks.some((check) => check.checkId === 'domestic-product-cidrs' && check.status === 'blocked')) {
     actions.push('Update Domestic WG productRelayCidrs and re-apply Internal service peer / Domestic relay runtime.');
+  }
+  if (checks.some((check) => check.checkId === 'channel-domestic-cidrs' && check.status === 'blocked')) {
+    actions.push('Fix the standalone channel Domestic relay material; embed apps should not add their own product CIDRs.');
   }
   if (checks.some((check) => check.checkId === 'dns-route' && check.status === 'blocked')) {
     actions.push('Create the app DNS route and gateway upstream in DNS Center.');
@@ -8806,6 +8858,9 @@ function launcherServiceVipSmokeNextActions(checks: AdminLauncherServiceVipSmoke
   }
   if (checks.some((check) => check.checkId === 'runtime-lease' && check.status === 'warning')) {
     actions.push('Start the app client and request a launcher lease.');
+  }
+  if (checks.some((check) => check.checkId === 'broker-channel-lease' && check.status === 'warning')) {
+    actions.push('Start the standalone launcher channel so embed broker sessions can inherit its network context.');
   }
   return actions.length ? actions : ['Open Internal service peer actions and verify runtime apply evidence.'];
 }

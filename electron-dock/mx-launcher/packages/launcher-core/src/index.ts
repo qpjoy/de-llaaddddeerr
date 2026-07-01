@@ -1,6 +1,26 @@
 export type LauncherProductMode = 'standalone' | 'embed';
 export type LauncherIdentityKind = 'user' | 'anonymous';
 export type LauncherProductUpdatePolicy = 'launcher-managed' | 'app-managed' | 'host-managed';
+export type LauncherNetworkScope = 'owner' | 'broker-session';
+
+export const launcherProtocolVersion = '2';
+export const launcherProtocolMajor = 2;
+export const brokerAbiVersion = '2';
+export const brokerAbiMajor = 2;
+
+export const launcherCapabilities = [
+  'catalog.read',
+  'app.install',
+  'app.launch',
+  'app.update.manage',
+  'user.session',
+  'network.proxy',
+  'network.status',
+  'release.resolve',
+  'audit.record'
+] as const;
+
+export type LauncherCapability = typeof launcherCapabilities[number] | (string & {});
 
 export interface LauncherClientOptions {
   baseUrl: string;
@@ -34,6 +54,120 @@ export interface LauncherWireGuardKeyMaterial {
 }
 
 export type LauncherWireGuardKeyProvider = () => LauncherWireGuardKeyPair | Promise<LauncherWireGuardKeyPair>;
+
+export interface LauncherManifest {
+  appId: string;
+  productId: string;
+  displayName?: string;
+  launcherMode: LauncherProductMode;
+  sdkVersion?: string;
+  appVersion?: string;
+  sdkAbiVersion?: string;
+  protocolVersion?: string;
+  requiredCapabilities: LauncherCapability[];
+  network?: {
+    scope?: LauncherNetworkScope;
+    serviceVip?: string | null;
+  };
+  standalone?: {
+    ownsNetwork: true;
+    brokerEnabled: boolean;
+  };
+  embed?: {
+    standaloneChannelProductId: string;
+    launchWithoutBroker: 'blocked' | 'prompt-open-standalone';
+  };
+}
+
+export interface LauncherChannelRecord {
+  productId: string;
+  instanceId: string;
+  pid: number;
+  socketPath: string;
+  brokerAbiVersion: string;
+  protocolVersion: string;
+  capabilities: LauncherCapability[];
+  heartbeatAt: string;
+  displayName?: string;
+}
+
+export type LauncherEmbedConnectionState =
+  | 'idle'
+  | 'discovering-broker'
+  | 'standalone-required'
+  | 'broker-incompatible'
+  | 'capability-denied'
+  | 'connected'
+  | 'network-ready'
+  | 'blocked'
+  | 'disconnected';
+
+export interface LauncherBrokerHandshakeRequest {
+  appId: string;
+  productId: string;
+  launcherMode: 'embed';
+  sdkVersion?: string;
+  appVersion?: string;
+  protocolVersion: string;
+  minBrokerAbiVersion: string;
+  standaloneChannelProductId: string;
+  requestedCapabilities: LauncherCapability[];
+  installId?: string | null;
+  deviceId?: string | null;
+  userId?: string | null;
+  requestId?: string | null;
+}
+
+export type LauncherBrokerHandshakeDeniedReason =
+  | 'standalone-required'
+  | 'broker-incompatible'
+  | 'capability-denied'
+  | 'policy-blocked';
+
+export interface LauncherBrokerCapabilitySession {
+  sessionId: string;
+  appId: string;
+  productId: string;
+  launcherMode: 'embed';
+  networkScope: 'broker-session';
+  standaloneChannelProductId: string;
+  channel: LauncherChannelRecord;
+  grantedCapabilities: LauncherCapability[];
+  deniedCapabilities: LauncherCapability[];
+  userId: string | null;
+  installId: string | null;
+  deviceId: string | null;
+  issuedAt: string;
+  expiresAt: string | null;
+}
+
+export type LauncherBrokerHandshakeResult =
+  | {
+      ok: true;
+      state: 'connected' | 'network-ready';
+      session: LauncherBrokerCapabilitySession;
+    }
+  | {
+      ok: false;
+      state: LauncherBrokerHandshakeDeniedReason;
+      reason: LauncherBrokerHandshakeDeniedReason;
+      message: string;
+      channel?: LauncherChannelRecord | null;
+      missingCapabilities?: LauncherCapability[];
+    };
+
+export interface LauncherBrokerCompatibilityInput {
+  embedProtocolVersion?: string | number | null;
+  brokerProtocolVersion?: string | number | null;
+  minBrokerAbiVersion?: string | number | null;
+  brokerAbiVersion?: string | number | null;
+}
+
+export interface LauncherBrokerCompatibilityResult {
+  compatible: boolean;
+  reason: 'compatible' | 'protocol-major-mismatch' | 'broker-abi-too-old' | 'invalid-version';
+  message: string;
+}
 
 export interface AnonymousEnrollmentRequest {
   productId?: string;
@@ -102,6 +236,7 @@ export interface LauncherProductNetworkInput {
   productId?: string | null;
   displayName?: string | null;
   mode?: LauncherProductMode | string | null;
+  networkScope?: LauncherNetworkScope | string | null;
   productIndex?: number | null;
   internalControlIp?: string | null;
   domesticGatewayIp?: string | null;
@@ -128,6 +263,7 @@ export interface LauncherProductNetwork {
   productId: string;
   displayName: string;
   mode: LauncherProductMode;
+  networkScope: LauncherNetworkScope;
   productIndex: number;
   fabricCidr: '10.88.0.0/16';
   internalControlIp: string;
@@ -609,6 +745,55 @@ export function shouldRefreshNetwork(
   return networkRefreshKey(previous) !== networkRefreshKey(next);
 }
 
+export function launcherNetworkScopeForMode(mode: LauncherProductMode | string | null | undefined): LauncherNetworkScope {
+  return mode === 'standalone' ? 'owner' : 'broker-session';
+}
+
+export function launcherBrokerCompatibility(input: LauncherBrokerCompatibilityInput): LauncherBrokerCompatibilityResult {
+  const embedProtocolMajor = majorVersion(input.embedProtocolVersion ?? launcherProtocolVersion);
+  const brokerProtocolMajorValue = majorVersion(input.brokerProtocolVersion ?? launcherProtocolVersion);
+  const minBrokerAbiMajor = majorVersion(input.minBrokerAbiVersion ?? brokerAbiVersion);
+  const brokerAbiMajorValue = majorVersion(input.brokerAbiVersion ?? brokerAbiVersion);
+  if (
+    embedProtocolMajor === null
+    || brokerProtocolMajorValue === null
+    || minBrokerAbiMajor === null
+    || brokerAbiMajorValue === null
+  ) {
+    return {
+      compatible: false,
+      reason: 'invalid-version',
+      message: 'Launcher protocol or broker ABI version is invalid.'
+    };
+  }
+  if (embedProtocolMajor !== brokerProtocolMajorValue) {
+    return {
+      compatible: false,
+      reason: 'protocol-major-mismatch',
+      message: `Embed protocol ${embedProtocolMajor} cannot connect to broker protocol ${brokerProtocolMajorValue}.`
+    };
+  }
+  if (brokerAbiMajorValue < minBrokerAbiMajor) {
+    return {
+      compatible: false,
+      reason: 'broker-abi-too-old',
+      message: `Broker ABI ${brokerAbiMajorValue} is older than required ABI ${minBrokerAbiMajor}.`
+    };
+  }
+  return {
+    compatible: true,
+    reason: 'compatible',
+    message: 'Broker protocol and ABI are compatible.'
+  };
+}
+
+export function assertCompatibleBroker(input: LauncherBrokerCompatibilityInput): void {
+  const result = launcherBrokerCompatibility(input);
+  if (!result.compatible) {
+    throw new Error(result.message);
+  }
+}
+
 export function normalizeLauncherBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim();
   if (!trimmed) throw new Error('Launcher baseUrl is required');
@@ -617,6 +802,15 @@ export function normalizeLauncherBaseUrl(baseUrl: string): string {
 
 function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
+function majorVersion(value: string | number | null | undefined): number | null {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  const match = text.match(/^v?(\d+)/i);
+  if (!match) return null;
+  const major = Number(match[1]);
+  return Number.isInteger(major) && major >= 0 ? major : null;
 }
 
 async function resolveWireGuardKeyMaterial(input: LauncherNetworkSessionInput): Promise<LauncherWireGuardKeyMaterial> {

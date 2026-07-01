@@ -1,0 +1,20 @@
+{
+  "name": "@qpjoy/electron-launcher-app-h2o",
+  "productName": "MX-H2I H2O",
+  "version": "0.1.0",
+  "private": true,
+  "author": "QPJoy",
+  "description": "H2O embed launcher demo app for MX-H2I AppCenter.",
+  "main": "src/main.cjs",
+  "scripts": {
+    "dev": "electron .",
+    "start": "pnpm dev",
+    "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js"
+  },
+  "dependencies": {
+    "@qpjoy/electron-launcher": "workspace:*"
+  },
+  "devDependencies": {
+    "electron": "^34.0.0"
+  }
+}

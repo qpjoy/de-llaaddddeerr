@@ -13,6 +13,10 @@ const routeMeta = {
     title: 'Project Console',
     kicker: 'EFFECTIVE CONTROL SURFACE'
   },
+  market: {
+    title: 'AppCenter Market',
+    kicker: 'CATALOG / PACKAGE / INSPECTOR'
+  },
   buttons: {
     title: 'Buttons',
     kicker: 'ACTIONS / STATES / DENSITY'

@@ -6954,6 +6954,7 @@ function fallbackAppCenterApps() {
       builtin: true,
       systemOwned: true,
       enabled: true,
+      packageName: '@qpjoy/mx-h2i-demo',
       version: '0.1.0',
       category: 'vpn',
       description: 'VPN product that owns the Launcher standalone channel and peer leases.',
@@ -6969,6 +6970,7 @@ function fallbackAppCenterApps() {
       builtin: true,
       systemOwned: true,
       enabled: true,
+      packageName: '@qpjoy/electron-launcher-appcenter',
       version: '0.1.0',
       category: 'platform',
       description: 'Application catalog and runtime access surface embedded through MX-H2I.',
@@ -6984,6 +6986,7 @@ function fallbackAppCenterApps() {
       builtin: true,
       systemOwned: true,
       enabled: true,
+      packageName: '@qpjoy/electron-launcher-app-h2o',
       version: '0.1.0',
       category: 'network',
       description: 'Network, split DNS, PAC, and Internal service access through MX-H2I.',
@@ -7183,7 +7186,7 @@ function renderAppCatalogPanel() {
           <span>App</span>
           <span>Launcher Mode</span>
           <span>Channel</span>
-          <span>Network</span>
+          <span>Network Scope</span>
           <span>Version</span>
           <span>Status</span>
           <span>Actions</span>
@@ -7201,17 +7204,18 @@ function renderAppCatalogRow(app, selectedId) {
   const channelId = standaloneChannelIdForApp(app);
   const productId = productNetworkIdForApp(app);
   const product = launcherProductNetwork(productId);
+  const network = appCatalogNetworkSummary(app, product, channelId, mode);
   const isSystem = app?.builtin || app?.systemOwned;
   const accessLabel = app?.accessPolicy?.defaultDecision || 'private';
   return `
     <article class="app-table-row ${app.appId === selectedId ? 'is-selected' : ''}" role="row" tabindex="0" data-app-select="${escapeHtml(app.appId)}">
       <span>
         <strong>${escapeHtml(app.displayName || app.appId)}</strong>
-        <small>${escapeHtml(app.category || app.appId)}</small>
+        <small>${escapeHtml(app.packageName || app.category || app.appId)}</small>
       </span>
       <span><b>${escapeHtml(mode)}</b><small>${mode === 'standalone' ? 'owns launcher channel' : 'uses launcher context'}</small></span>
       <span>${escapeHtml(mode === 'standalone' ? 'self' : launcherProductDisplayName(channelId, launcherProductNetwork(channelId)))}</span>
-      <span>${escapeHtml(product.serviceVip || '-')}</span>
+      <span><b>${escapeHtml(network.primary)}</b><small>${escapeHtml(network.detail)}</small></span>
       <span>${escapeHtml(app.version || '-')}</span>
       <span><mark data-kind="${escapeHtml(app.enabled === false ? 'muted' : isSystem ? 'system' : 'custom')}">${escapeHtml(appStatusLabel(app))}</mark><small>${escapeHtml(accessLabel)}</small></span>
       <span class="app-table-actions">
@@ -7220,6 +7224,19 @@ function renderAppCatalogRow(app, selectedId) {
       </span>
     </article>
   `;
+}
+
+function appCatalogNetworkSummary(app, product, channelId, mode) {
+  if (mode === 'standalone') {
+    return {
+      primary: product?.serviceVip || '-',
+      detail: 'owner / peer leases'
+    };
+  }
+  return {
+    primary: 'broker-session',
+    detail: `via ${launcherProductDisplayName(channelId, launcherProductNetwork(channelId))}`
+  };
 }
 
 function appCatalogEditorDraft() {
@@ -7496,6 +7513,10 @@ function renderAppEditorDrawer() {
             <label class="app-form-field">
               <span>Name</span>
               <input data-app-field="displayName" value="${escapeHtml(draft.displayName || '')}" placeholder="My App" autocomplete="off" />
+            </label>
+            <label class="app-form-field app-form-wide">
+              <span>Package</span>
+              <input data-app-field="packageName" value="${escapeHtml(draft.packageName || '')}" placeholder="@qpjoy/electron-launcher-app-my-app" autocomplete="off" />
             </label>
             <label class="app-form-field">
               <span>Category</span>
@@ -7877,6 +7898,7 @@ function appEditorDraftFromForm(root) {
     ...current,
     appId,
     displayName: appEditorValue(root, 'displayName') || current.displayName || '',
+    packageName: appEditorValue(root, 'packageName') || current.packageName || '',
     category: appEditorValue(root, 'category') || current.category || 'custom',
     version: appEditorValue(root, 'version') || current.version || '0.1.0',
     description: appEditorValue(root, 'description') || current.description || '',
@@ -8077,6 +8099,7 @@ async function saveAppCenterAppFromEditor(root) {
   const body = {
     appId,
     displayName: draft.displayName || appId,
+    packageName: draft.packageName || '',
     category: draft.category || 'custom',
     version: draft.version || '0.1.0',
     description: draft.description || launcherAppDefaultDescription({ ...draft, appId, launcherMode }),
@@ -8236,6 +8259,13 @@ function renderSelectedAppDetail() {
   const channelLabel = mode === 'standalone'
     ? 'self'
     : launcherProductDisplayName(channelProductId, channelProduct);
+  const isBrokerSession = mode !== 'standalone';
+  const networkBadge = isBrokerSession
+    ? 'broker-session'
+    : latestLease?.leaseIp || product?.serviceVip || channelProduct?.serviceVip || '10.88.100.1';
+  const serviceContext = isBrokerSession
+    ? product?.serviceVip || channelProduct?.serviceVip || 'channel context'
+    : product?.serviceVip || '-';
   const appName = app.displayName || launcherProductDisplayName(app.appId, null);
   appSelectedDetail.innerHTML = `
     <section class="app-workbench" aria-labelledby="selected-app-title">
@@ -8262,15 +8292,15 @@ function renderSelectedAppDetail() {
             <strong>Launcher Channel</strong>
             <span>${escapeHtml(mode === 'standalone' ? 'standalone owner' : `embed via ${channelLabel}`)}</span>
           </div>
-          <span class="product-network-badge">${escapeHtml(latestLease?.leaseIp || product.serviceVip || channelProduct.serviceVip || '10.88.100.1')}</span>
+          <span class="product-network-badge">${escapeHtml(networkBadge)}</span>
         </div>
         <div class="product-network-facts">
           <span><strong>${escapeHtml(mode)}</strong><small>launcher mode</small></span>
           <span><strong>${escapeHtml(channelLabel)}</strong><small>standalone channel</small></span>
-          <span><strong>${escapeHtml(product.serviceVip || '-')}</strong><small>service VIP</small></span>
-          <span><strong>${escapeHtml(product.internalControlIp || '10.88.88.88')}</strong><small>Internal</small></span>
-          <span><strong>${escapeHtml(formatLeaseRange(channelProduct.userLeaseStart, channelProduct.userLeaseEnd))}</strong><small>login users</small></span>
-          <span><strong>${escapeHtml(formatLeaseRange(channelProduct.anonymousLeaseStart, channelProduct.anonymousLeaseEnd))}</strong><small>anonymous users</small></span>
+          <span><strong>${escapeHtml(isBrokerSession ? 'broker-session' : 'owner')}</strong><small>network scope</small></span>
+          <span><strong>${escapeHtml(serviceContext)}</strong><small>${escapeHtml(isBrokerSession ? 'service context' : 'service VIP')}</small></span>
+          <span><strong>${escapeHtml(product?.internalControlIp || channelProduct?.internalControlIp || '10.88.88.88')}</strong><small>Internal</small></span>
+          <span><strong>${escapeHtml(formatLeaseRange(channelProduct?.userLeaseStart, channelProduct?.userLeaseEnd))}</strong><small>channel users</small></span>
         </div>
       </section>
 
@@ -8596,6 +8626,7 @@ function renderSelectedAppServiceVipSmoke(app) {
   const status = smoke.status || 'warning';
   const checks = asArray(smoke.checks);
   const cidrBlocked = checks.some((check) => check.checkId === 'domestic-product-cidrs' && check.status === 'blocked');
+  const isBrokerSession = smoke.networkScope === 'broker-session' || smoke.launcherMode === 'embed';
   const syncBusy = state.launcherServiceVipCidrSyncBusy === smoke.domesticSiteId;
   const reconcileBusy = state.launcherServiceVipReconcileBusy === smoke.appId || state.launcherServiceVipReconcileBusy === smoke.domesticSiteId;
   const needsProductNetworkReconcile = status !== 'passed';
@@ -8615,10 +8646,11 @@ function renderSelectedAppServiceVipSmoke(app) {
         </p>
       ` : ''}
       <div class="app-workbench-facts">
-        <span><strong>${escapeHtml(smoke.serviceVip || '-')}</strong><small>service VIP</small></span>
+        <span><strong>${escapeHtml(isBrokerSession ? 'broker-session' : smoke.serviceVip || '-')}</strong><small>network scope</small></span>
+        <span><strong>${escapeHtml(smoke.channelProductId || '-')}</strong><small>channel</small></span>
         <span><strong>${escapeHtml(smoke.dnsHost || '-')}</strong><small>dns host</small></span>
         <span><strong>${escapeHtml(smoke.upstreamUrl || '-')}</strong><small>gateway upstream</small></span>
-        <span><strong>${escapeHtml(smoke.latestLeaseIp || '-')}</strong><small>latest lease</small></span>
+        <span><strong>${escapeHtml(smoke.latestLeaseIp || '-')}</strong><small>${escapeHtml(isBrokerSession ? 'channel lease' : 'latest lease')}</small></span>
       </div>
       ${cidrBlocked ? `
         <div class="product-network-actions">
@@ -9154,7 +9186,7 @@ function renderLauncherProductNetworksPanel() {
     product.displayName || product.productId,
     product.mode,
     launcherProductDisplayName(standaloneChannelProductIdForProduct(product), standaloneChannelProductForProduct(product)),
-    product.serviceVip || '-',
+    product.mode === 'standalone' ? product.serviceVip || '-' : product.networkScope || 'broker-session',
     product.mode === 'standalone'
       ? `${formatLeaseRange(product.userLeaseStart, product.userLeaseEnd)} / ${formatLeaseRange(product.anonymousLeaseStart, product.anonymousLeaseEnd)}`
       : 'uses launcher standalone peer',
@@ -9182,7 +9214,7 @@ function renderLauncherProductNetworksPanel() {
             <strong>Product</strong>
             <span>Launcher Mode</span>
             <span>Channel</span>
-            <span>Service VIP</span>
+            <span>Network Scope</span>
             <span>Peer lease rule</span>
             <small>Foundation</small>
           </article>

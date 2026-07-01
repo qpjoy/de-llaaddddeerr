@@ -293,10 +293,13 @@ function registerIpc() {
     runtime.apps.appcenter.installed = true;
     runtime.apps.appcenter.enabled = true;
     runtime.apps.appcenter.status = 'ready';
+    runtime.apps.appcenter.installedVersion = runtime.apps.appcenter.version;
+    runtime.apps.appcenter.latestVersion = runtime.apps.appcenter.latestVersion || runtime.apps.appcenter.version;
+    runtime.apps.appcenter.runtimeState = 'ready';
     runtime.apps.appcenter.lastAction = nowIso();
     runtime.feedback = {
       tone: 'success',
-      message: 'AppCenter 已安装，正在复用 mx-h2i standalone channel。'
+      message: 'AppCenter 已安装，正在复用 mx-h2i standalone channel；本地缓存已记录 package/version。'
     };
     touchRuntime('appcenter installed');
     await saveAndBroadcast();
@@ -314,12 +317,36 @@ function registerIpc() {
     runtime.apps.h2o.installed = true;
     runtime.apps.h2o.enabled = true;
     runtime.apps.h2o.status = 'enabled';
+    runtime.apps.h2o.installedVersion = runtime.apps.h2o.version;
+    runtime.apps.h2o.latestVersion = runtime.apps.h2o.latestVersion || runtime.apps.h2o.version;
+    runtime.apps.h2o.runtimeState = 'ready';
     runtime.apps.h2o.lastAction = nowIso();
     runtime.feedback = {
       tone: 'success',
-      message: 'H2O 已启用，embed 运行时不会新建 WG peer。'
+      message: 'H2O 已启用，embed 运行时不会新建 WG peer；权限与网络状态经 MX-H2I broker-session 下发。'
     };
     touchRuntime('h2o enabled');
+    await saveAndBroadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('mx-h2i:launch-h2o', async () => {
+    if (!runtime.apps.h2o.installed) {
+      runtime.feedback = {
+        tone: 'warning',
+        message: '请先在 AppCenter 安装 H2O。开发态可运行 pnpm --filter @qpjoy/electron-launcher-app-h2o dev。'
+      };
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
+    runtime.apps.h2o.enabled = true;
+    runtime.apps.h2o.status = 'running';
+    runtime.apps.h2o.runtimeState = 'running';
+    runtime.apps.h2o.lastAction = nowIso();
+    runtime.feedback = {
+      tone: 'success',
+      message: 'H2O 运行态已就绪。开发态请从 mx-app-h2o 启动窗口，生产态由 AppCenter package runtime 打开入口。'
+    };
+    touchRuntime('h2o launched');
     await saveAndBroadcast();
     return visibleRuntime();
   });
@@ -2003,23 +2030,42 @@ function normalizeApps(input) {
       appId: 'appcenter',
       displayName: 'AppCenter',
       category: 'platform',
+      description: '内置应用市场，负责应用发现、安装、权限申请和版本状态。',
+      packageName: '@qpjoy/electron-launcher-appcenter',
       launcherMode: 'embed',
       standaloneChannelProductId: 'mx-h2i',
+      networkScope: 'broker-session',
       serviceVip: '10.88.100.9',
       version: '0.1.0',
+      latestVersion: '0.1.0',
       updatePolicy: 'launcher-managed',
-      permissions: ['auth.read', 'appcenter.read', 'permission.request']
+      permissions: ['auth.read', 'appcenter.read', 'permission.request'],
+      installSource: 'builtin',
+      entrypoints: {
+        desktop: 'app://appcenter/index.html',
+        settings: 'app://appcenter/settings.html'
+      }
     }),
     h2o: normalizeApp(row.h2o, {
       appId: 'h2o',
       displayName: 'H2O',
       category: 'network',
+      description: 'H2I 内置网络应用 demo，展示 PAC、Split DNS、代理规则和 Internal 服务状态。',
+      packageName: '@qpjoy/electron-launcher-app-h2o',
       launcherMode: 'embed',
       standaloneChannelProductId: 'mx-h2i',
+      networkScope: 'broker-session',
       serviceVip: '10.88.100.10',
       version: '0.1.0',
+      latestVersion: '0.1.0',
       updatePolicy: 'launcher-managed',
-      permissions: ['network.hdi.status', 'network.proxy.app', 'network.dns.policy', 'network.pac.policy']
+      permissions: ['network.hdi.status', 'network.proxy.app', 'network.dns.policy', 'network.pac.policy'],
+      installSource: 'npm',
+      entrypoints: {
+        desktop: 'app://h2o/index.html',
+        settings: 'app://h2o/settings.html',
+        dev: 'workspace:demos/mx-app-h2o'
+      }
     })
   };
 }
@@ -2030,6 +2076,14 @@ function normalizeApp(input, defaults) {
   const enabled = row.enabled === true;
   return {
     ...defaults,
+    networkScope: nullableString(row.networkScope) || defaults.networkScope || (defaults.launcherMode === 'embed' ? 'broker-session' : 'owner'),
+    packageName: nullableString(row.packageName) || defaults.packageName || null,
+    latestVersion: nullableString(row.latestVersion) || defaults.latestVersion || defaults.version,
+    installedVersion: nullableString(row.installedVersion),
+    description: nullableString(row.description) || defaults.description || '',
+    installSource: nullableString(row.installSource) || defaults.installSource || 'npm',
+    runtimeState: nullableString(row.runtimeState) || (enabled ? 'ready' : installed ? 'installed' : 'idle'),
+    entrypoints: normalizeStringRecord(row.entrypoints, defaults.entrypoints || {}),
     installed,
     enabled,
     status: stringValue(row.status, enabled ? 'ready' : installed ? 'installed' : 'available'),
@@ -4675,6 +4729,16 @@ function tailText(value, maxLength) {
 
 function arrayValue(value, fallback) {
   return Array.isArray(value) ? value.map((item) => String(item || '').trim()).filter(Boolean) : fallback;
+}
+
+function normalizeStringRecord(value, fallback = {}) {
+  const row = value && typeof value === 'object' && !Array.isArray(value) ? value : fallback;
+  return Object.entries(row).reduce((next, [key, raw]) => {
+    const normalizedKey = String(key || '').trim();
+    const text = typeof raw === 'string' ? raw.trim() : '';
+    if (normalizedKey && text) next[normalizedKey] = text;
+    return next;
+  }, {});
 }
 
 function normalizeBaseUrl(value) {

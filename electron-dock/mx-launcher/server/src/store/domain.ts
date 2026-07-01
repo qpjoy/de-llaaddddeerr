@@ -776,6 +776,12 @@ function appCenterRecordMap(value: AppCenterAppInput['entrypoints'], fallback: R
   }, {});
 }
 
+function defaultAppPackageName(appId: string): string {
+  if (appId === MX_H2I_PRODUCT_ID) return '@qpjoy/mx-h2i-demo';
+  if (appId === APP_CENTER_PRODUCT_ID) return '@qpjoy/electron-launcher-appcenter';
+  return `@qpjoy/electron-launcher-app-${safeIdPart(appId).toLowerCase() || 'app'}`;
+}
+
 export function buildAppCenterApp(
   input: AppCenterAppInput,
   previous: AppCenterApp | null = null
@@ -792,6 +798,7 @@ export function buildAppCenterApp(
     displayName: input.displayName?.trim() || previous?.displayName || launcherProductDisplayName(appId),
     builtin,
     systemOwned: typeof input.systemOwned === 'boolean' ? input.systemOwned : previous?.systemOwned ?? builtin,
+    packageName: input.packageName?.trim() || previous?.packageName || defaultAppPackageName(appId),
     version: input.version?.trim() || previous?.version || '0.1.0',
     category: input.category?.trim() || previous?.category || 'custom',
     description: input.description?.trim() || previous?.description || 'Launcher powered application.',
@@ -1007,6 +1014,10 @@ export function buildAppOnboardingDefaults(
     || manifestString(manifest, 'name')
     || template.displayName
     || launcherProductDisplayName(appId);
+  const packageName = input.packageName?.trim()
+    || manifestString(manifest, 'packageName')
+    || manifestString(manifest, 'npm')
+    || defaultAppPackageName(appId);
   const category = input.category?.trim() || manifestString(manifest, 'category') || template.category || 'custom';
   const description = input.description?.trim()
     || manifestString(manifest, 'description')
@@ -1023,6 +1034,7 @@ export function buildAppOnboardingDefaults(
     productId: appId,
     displayName,
     mode: launcherMode,
+    networkScope: launcherMode === 'standalone' ? 'owner' : 'broker-session',
     standaloneChannelProductId,
     productIndex,
     updatePolicy: launcherMode === 'standalone' ? 'app-managed' : 'launcher-managed',
@@ -1052,6 +1064,7 @@ export function buildAppOnboardingDefaults(
       displayName,
       category,
       description,
+      packageName,
       launcherMode,
       standaloneChannelProductId,
       productNetworkId: appId,
@@ -1074,6 +1087,7 @@ export function buildAppOnboardingDefaults(
       productId: productNetwork.productId,
       displayName: productNetwork.displayName,
       mode: productNetwork.mode,
+      networkScope: productNetwork.networkScope,
       standaloneChannelProductId: productNetwork.standaloneChannelProductId,
       productIndex: productNetwork.productIndex,
       internalControlIp: productNetwork.internalControlIp,
@@ -1184,6 +1198,7 @@ export function builtinAppCenterApps(): AppCenterApp[] {
       displayName: 'MX-H2I',
       builtin: true,
       systemOwned: true,
+      packageName: '@qpjoy/mx-h2i-demo',
       version: '0.1.0',
       category: 'vpn',
       description: 'VPN product that owns the Launcher standalone channel and peer leases.',
@@ -1213,6 +1228,7 @@ export function builtinAppCenterApps(): AppCenterApp[] {
       displayName: 'AppCenter',
       builtin: true,
       systemOwned: true,
+      packageName: '@qpjoy/electron-launcher-appcenter',
       version: '0.1.0',
       category: 'platform',
       description: 'Application catalog and runtime access surface, embedded through MX-H2I launcher channel.',
@@ -1242,6 +1258,7 @@ export function builtinAppCenterApps(): AppCenterApp[] {
       displayName: 'H2O',
       builtin: true,
       systemOwned: true,
+      packageName: '@qpjoy/electron-launcher-app-h2o',
       version: '0.1.0',
       category: 'network',
       description: 'Network, split DNS, PAC, and Internal service access through MX-H2I launcher channel.',
@@ -1285,6 +1302,7 @@ export function builtinLauncherProductNetworks(config: RuntimeConfig): LauncherP
       productId: MX_H2I_PRODUCT_ID,
       displayName: 'MX-H2I',
       mode: 'standalone',
+      networkScope: 'owner',
       standaloneChannelProductId: MX_H2I_PRODUCT_ID,
       productIndex: 0,
       serviceVip: '10.88.100.1',
@@ -1304,6 +1322,7 @@ export function builtinLauncherProductNetworks(config: RuntimeConfig): LauncherP
       productId: APP_CENTER_PRODUCT_ID,
       displayName: 'AppCenter',
       mode: 'embed',
+      networkScope: 'broker-session',
       standaloneChannelProductId: MX_H2I_PRODUCT_ID,
       productIndex: 1,
       serviceVip: '10.88.100.9',
@@ -1323,6 +1342,7 @@ export function builtinLauncherProductNetworks(config: RuntimeConfig): LauncherP
       productId: 'h2o',
       displayName: 'H2O',
       mode: 'embed',
+      networkScope: 'broker-session',
       standaloneChannelProductId: MX_H2I_PRODUCT_ID,
       productIndex: 2,
       serviceVip: '10.88.100.10',
@@ -1349,6 +1369,7 @@ export function buildLauncherProductNetwork(
 ): LauncherProductNetwork {
   const productId = normalizeLauncherNetworkProductId(input.productId?.trim() || previous?.productId);
   const mode = launcherProductMode(input.mode ?? previous?.mode ?? (launcherNetworkProductIsStandaloneDefault(productId) ? 'standalone' : 'embed'));
+  const networkScope = launcherNetworkScope(input.networkScope ?? previous?.networkScope, mode);
   const productIndex = Number.isFinite(input.productIndex ?? NaN)
     ? Math.max(0, Math.floor(Number(input.productIndex)))
     : previous?.productIndex ?? (mode === 'standalone' ? 0 : 0);
@@ -1376,6 +1397,7 @@ export function buildLauncherProductNetwork(
     productId,
     displayName: input.displayName?.trim() || previous?.displayName || defaults.displayName,
     mode,
+    networkScope,
     standaloneChannelProductId,
     productIndex,
     fabricCidr: '10.88.0.0/16',
@@ -1396,7 +1418,7 @@ export function buildLauncherProductNetwork(
     dnsPolicyId: input.dnsPolicyId?.trim() || previous?.dnsPolicyId || 'internal-default',
     licensePolicyId: input.licensePolicyId?.trim() || previous?.licensePolicyId || `${productId}-default`,
     enabled: typeof input.enabled === 'boolean' ? input.enabled : previous?.enabled ?? true,
-    notes: launcherProductNetworkNotes(mode),
+    notes: launcherProductNetworkNotes(mode, networkScope),
     createdBy: previous?.createdBy ?? updatedBy,
     createdAt: previous?.createdAt ?? now,
     updatedBy,
@@ -2393,6 +2415,14 @@ function launcherProductMode(value: LauncherProductNetworkInput['mode']): Launch
   return value === 'standalone' ? 'standalone' : 'embed';
 }
 
+function launcherNetworkScope(
+  _value: LauncherProductNetworkInput['networkScope'],
+  mode: LauncherProductMode
+): 'owner' | 'broker-session' {
+  if (mode === 'standalone') return 'owner';
+  return 'broker-session';
+}
+
 function launcherNetworkIdentityKind(value: LauncherNetworkLeaseInput['identityKind'], userId?: string | null): 'user' | 'anonymous' {
   if (value === 'user' || userId?.trim()) return 'user';
   return 'anonymous';
@@ -2457,15 +2487,15 @@ function launcherNetworkProductUsesLegacyFoundation(productId: string): boolean 
   return productId === MX_H2I_PRODUCT_ID || productId === LAUNCHER_FOUNDATION_PRODUCT_ID;
 }
 
-function launcherProductNetworkNotes(mode: LauncherProductMode): string[] {
-  return mode === 'standalone'
+function launcherProductNetworkNotes(mode: LauncherProductMode, networkScope: 'owner' | 'broker-session'): string[] {
+  return mode === 'standalone' || networkScope === 'owner'
     ? [
         'Launcher standalone mode owns a product-scoped peer lease CIDR and product service VIP.',
         'Control, DNS, reverse-proxy, user, permission, and release decisions are materialized behind the product VIP instead of shared 10.88.0.1/10.88.88.88 client routes.'
       ]
     : [
-        'Launcher embed mode does not allocate its own WG peer; it consumes the selected standalone channel context.',
-        'Embed apps use their selected standalone channel service VIP for network, DNS, user, permission, and release services.'
+        'Launcher embed mode does not allocate its own WireGuard peer or runtime lease IP.',
+        'Embed apps consume user, permission, network, release, and update state through the selected standalone broker session.'
       ];
 }
 

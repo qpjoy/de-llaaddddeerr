@@ -7,6 +7,9 @@ let busyAction = '';
 let screen = 'launcher';
 let modeDraft = 'guest';
 let windowDrag = null;
+let appSearch = '';
+let appCategory = 'all';
+let selectedAppId = 'h2o';
 
 void boot();
 
@@ -52,7 +55,24 @@ root.addEventListener('click', (event) => {
     }
     return;
   }
+  if (action === 'select-app') {
+    selectedAppId = button.dataset.appId || selectedAppId;
+    render();
+    return;
+  }
+  if (action === 'set-app-category') {
+    appCategory = button.dataset.category || 'all';
+    render();
+    return;
+  }
   void runAction(action);
+});
+
+root.addEventListener('input', (event) => {
+  const input = event.target.closest('[data-app-search]');
+  if (!input) return;
+  appSearch = input.value || '';
+  render();
 });
 
 root.addEventListener('submit', (event) => {
@@ -129,6 +149,7 @@ async function runAction(action, payload) {
       'save-config': () => api.saveConfig(payload),
       installAppCenter: () => api.installAppCenter(),
       enableH2o: () => api.enableH2o(),
+      launchH2o: () => api.launchH2o?.() || api.enableH2o(),
       checkUpdates: () => api.checkUpdates(),
       refreshDiagnostics: () => api.refreshDiagnostics?.(),
       repairSystemNetwork: () => api.repairSystemNetwork?.(),
@@ -597,6 +618,295 @@ function renderLauncherView(connected, connecting) {
 }
 
 function renderAppCenterView(connected) {
+  const apps = appCatalog();
+  const visibleApps = filteredAppCatalog(apps);
+  if (!apps.some((app) => app.appId === selectedAppId)) selectedAppId = apps[0]?.appId || 'h2o';
+  const selected = apps.find((app) => app.appId === selectedAppId) || visibleApps[0] || apps[0] || null;
+  const categories = appCenterCategories(apps);
+  return `
+    <section class="appcenter-window appcenter-product">
+      <aside class="appcenter-rail">
+        <div class="appcenter-account">
+          <div class="avatar-mark">${escapeHtml((state.identity?.displayName || 'V').slice(0, 1))}</div>
+          <div>
+            <strong>${escapeHtml(state.identity?.displayName || 'Visitor')}</strong>
+            <span>${escapeHtml(state.identity?.account || state.connection?.routePolicy || 'guest limited')}</span>
+          </div>
+        </div>
+        <nav class="appcenter-nav" aria-label="AppCenter sections">
+          ${categories.map((item) => `
+            <button class="${appCategory === item.id ? 'is-active' : ''}" type="button" data-action="set-app-category" data-category="${escapeAttr(item.id)}">
+              <span>${escapeHtml(item.label)}</span>
+              <small>${escapeHtml(String(item.count))}</small>
+            </button>
+          `).join('')}
+        </nav>
+        <div class="appcenter-rail-foot">
+          <span>Home ${escapeHtml(state.update?.currentVersion || '0.1.0')}</span>
+          <span>Channel ${escapeHtml(state.update?.channel || state.config?.releaseChannel || 'stable')}</span>
+        </div>
+      </aside>
+
+      <section class="appcenter-main">
+        <header class="appcenter-titlebar">
+          <div>
+            <p class="kicker">MX-H2I APPCENTER</p>
+            <h3>Internal 应用市场</h3>
+            <span>${escapeHtml(state.launcherContract?.packageName || '@qpjoy/electron-launcher')} / ${escapeHtml(state.connection?.subject || 'no active subject')}</span>
+          </div>
+          <div class="toolbar-actions">
+            <button class="icon-button" type="button" data-action="show-launcher" aria-label="Back">‹</button>
+            <button class="secondary-button" type="button" data-action="checkUpdates" ${busyAction === 'checkUpdates' ? 'disabled' : ''}>刷新版本</button>
+            <span class="status-pill" data-state="${connected ? 'connected' : 'idle'}">${connected ? 'broker ready' : 'offline'}</span>
+          </div>
+        </header>
+
+        <div class="appcenter-notice">
+          <strong>embed runtime</strong>
+          <span>AppCenter 与 H2O 通过 MX-H2I broker-session 共享网络、身份、权限和更新上下文，不再申请独立 WireGuard peer。</span>
+        </div>
+
+        <section class="appcenter-marketbar">
+          <div>
+            <h4>Apps</h4>
+            <p>${escapeHtml(visibleApps.length)} visible / ${escapeHtml(apps.length)} registered</p>
+          </div>
+          <label class="appcenter-search">
+            <span>⌕</span>
+            <input data-app-search value="${escapeAttr(appSearch)}" placeholder="Search package, app, permission" />
+          </label>
+        </section>
+
+        <section class="catalog-grid appcenter-card-grid">
+          ${visibleApps.length ? visibleApps.map((app) => renderAppCenterCard(app, connected, selected?.appId === app.appId)).join('') : renderEmptyCatalog()}
+        </section>
+      </section>
+
+      ${selected ? renderAppCenterInspector(selected, connected) : ''}
+    </section>
+  `;
+}
+
+function appCatalog() {
+  const appcenter = state.apps?.appcenter || {};
+  const h2o = state.apps?.h2o || {};
+  return [
+    normalizeCatalogApp(appcenter, {
+      appId: 'appcenter',
+      displayName: 'AppCenter',
+      category: 'platform',
+      description: '内置应用市场，负责安装、版本、权限和入口管理。',
+      packageName: '@qpjoy/electron-launcher-appcenter',
+      permissions: ['auth.read', 'appcenter.read', 'permission.request']
+    }),
+    normalizeCatalogApp(h2o, {
+      appId: 'h2o',
+      displayName: 'H2O',
+      category: 'network',
+      description: 'H2I 内置网络应用 demo，展示 PAC、Split DNS、代理规则和 Internal 状态。',
+      packageName: '@qpjoy/electron-launcher-app-h2o',
+      permissions: ['network.hdi.status', 'network.proxy.app', 'network.dns.policy', 'network.pac.policy']
+    }),
+    normalizeCatalogApp({
+      appId: 'diagnostics',
+      displayName: 'Diagnostics',
+      category: 'ops',
+      description: 'Route proof、H/D/I/O trace、broker smoke 和版本巡检。',
+      packageName: '@qpjoy/electron-launcher-app-diagnostics',
+      launcherMode: 'embed',
+      standaloneChannelProductId: 'mx-h2i',
+      networkScope: 'broker-session',
+      version: '0.1.0',
+      latestVersion: state.update?.latestVersion || '0.1.1',
+      installed: true,
+      enabled: true,
+      status: 'ready',
+      runtimeState: state.update?.status || 'idle',
+      installSource: 'builtin',
+      permissions: ['observability.read', 'release.read'],
+      entrypoints: { desktop: 'app://diagnostics/index.html' }
+    }, {}),
+    normalizeCatalogApp({
+      appId: 'luopan-bridge',
+      displayName: 'Luopan Bridge',
+      category: 'bridge',
+      description: '预留给 Luopan standalone channel 的桥接测试入口，不影响 Luopan 自己的 WG。',
+      packageName: '@qpjoy/electron-launcher-app-luopan-bridge',
+      launcherMode: 'embed',
+      standaloneChannelProductId: 'luopan',
+      networkScope: 'broker-session',
+      version: '0.1.0',
+      latestVersion: '0.1.0',
+      installed: false,
+      enabled: false,
+      status: 'reserved',
+      runtimeState: 'reserved',
+      installSource: 'registry',
+      permissions: ['launcher.bridge.read'],
+      entrypoints: { desktop: 'app://luopan-bridge/index.html' }
+    }, {})
+  ];
+}
+
+function normalizeCatalogApp(app, defaults) {
+  const row = app && typeof app === 'object' ? app : {};
+  return {
+    ...defaults,
+    ...row,
+    appId: row.appId || defaults.appId,
+    displayName: row.displayName || defaults.displayName,
+    category: row.category || defaults.category || 'custom',
+    description: row.description || defaults.description || '',
+    packageName: row.packageName || defaults.packageName || `@qpjoy/electron-launcher-app-${row.appId || defaults.appId}`,
+    launcherMode: row.launcherMode || defaults.launcherMode || 'embed',
+    standaloneChannelProductId: row.standaloneChannelProductId || defaults.standaloneChannelProductId || 'mx-h2i',
+    networkScope: row.networkScope || defaults.networkScope || 'broker-session',
+    version: row.version || defaults.version || '0.1.0',
+    latestVersion: row.latestVersion || defaults.latestVersion || row.version || defaults.version || '0.1.0',
+    installedVersion: row.installedVersion || defaults.installedVersion || null,
+    installSource: row.installSource || defaults.installSource || 'npm',
+    runtimeState: row.runtimeState || defaults.runtimeState || (row.enabled ? 'ready' : row.installed ? 'installed' : 'idle'),
+    permissions: Array.isArray(row.permissions) ? row.permissions : defaults.permissions || [],
+    entrypoints: row.entrypoints || defaults.entrypoints || {}
+  };
+}
+
+function filteredAppCatalog(apps) {
+  const query = appSearch.trim().toLowerCase();
+  return apps.filter((app) => {
+    const matchesCategory = appCategory === 'all'
+      || app.category === appCategory
+      || (appCategory === 'updates' && app.latestVersion && app.latestVersion !== (app.installedVersion || app.version));
+    if (!matchesCategory) return false;
+    if (!query) return true;
+    const haystack = [
+      app.appId,
+      app.displayName,
+      app.category,
+      app.packageName,
+      app.description,
+      app.networkScope,
+      app.standaloneChannelProductId,
+      ...(app.permissions || [])
+    ].join(' ').toLowerCase();
+    return haystack.includes(query);
+  });
+}
+
+function appCenterCategories(apps) {
+  return [
+    { id: 'all', label: 'All Apps', count: apps.length },
+    { id: 'network', label: 'Network', count: apps.filter((app) => app.category === 'network').length },
+    { id: 'platform', label: 'Platform', count: apps.filter((app) => app.category === 'platform').length },
+    { id: 'ops', label: 'Diagnostics', count: apps.filter((app) => app.category === 'ops').length },
+    { id: 'updates', label: 'Updates', count: apps.filter((app) => app.latestVersion && app.latestVersion !== (app.installedVersion || app.version)).length }
+  ];
+}
+
+function renderAppCenterCard(app, connected, selected) {
+  const action = appPrimaryAction(app, connected);
+  return `
+    <article class="catalog-card appcenter-app-card ${selected ? 'is-active' : ''}">
+      <button class="catalog-card-select" type="button" data-action="select-app" data-app-id="${escapeAttr(app.appId)}" aria-label="${escapeAttr(`Select ${app.displayName}`)}"></button>
+      <div class="catalog-cover" data-category="${escapeAttr(app.category)}">
+        <span>${escapeHtml(app.displayName.slice(0, 3).toUpperCase())}</span>
+      </div>
+      <div class="catalog-card-body">
+        <div>
+          <h4>${escapeHtml(app.displayName)}</h4>
+          <p>${escapeHtml(app.description)}</p>
+        </div>
+        <div class="package-line">${escapeHtml(app.packageName)}</div>
+      </div>
+      <div class="catalog-card-foot">
+        <span class="status-dot" data-state="${escapeAttr(app.status || app.runtimeState || 'available')}">${escapeHtml(appStatusLabel(app))}</span>
+        <button class="secondary-button" type="button" data-action="${escapeAttr(action.action)}" ${action.disabled ? 'disabled' : ''}>
+          ${escapeHtml(action.label)}
+        </button>
+      </div>
+    </article>
+  `;
+}
+
+function renderAppCenterInspector(app, connected) {
+  const action = appPrimaryAction(app, connected);
+  return `
+    <aside class="appcenter-inspector">
+      <div class="inspector-head">
+        <div class="app-icon-large">${escapeHtml(app.displayName.slice(0, 3).toUpperCase())}</div>
+        <div>
+          <p class="kicker">${escapeHtml(app.category)}</p>
+          <h4>${escapeHtml(app.displayName)}</h4>
+          <span>${escapeHtml(app.packageName)}</span>
+        </div>
+      </div>
+      <p class="inspector-summary">${escapeHtml(app.description)}</p>
+      <div class="detail-list">
+        <div><span>Mode</span><strong>${escapeHtml(app.launcherMode)}</strong></div>
+        <div><span>Channel</span><strong>${escapeHtml(app.standaloneChannelProductId || '-')}</strong></div>
+        <div><span>Network</span><strong>${escapeHtml(app.networkScope || '-')}</strong></div>
+        <div><span>Install</span><strong>${escapeHtml(app.installSource || 'npm')}</strong></div>
+        <div><span>Installed</span><strong>${escapeHtml(app.installedVersion || (app.installed ? app.version : 'not installed'))}</strong></div>
+        <div><span>Latest</span><strong>${escapeHtml(app.latestVersion || app.version)}</strong></div>
+        <div><span>Runtime</span><strong>${escapeHtml(app.runtimeState || app.status || 'idle')}</strong></div>
+        <div><span>Last Action</span><strong>${escapeHtml(formatDateTime(app.lastAction))}</strong></div>
+      </div>
+      <div class="permission-stack">
+        ${(app.permissions || []).map((item) => `<span>${escapeHtml(item)}</span>`).join('')}
+      </div>
+      <div class="entrypoint-box">
+        <strong>Entrypoints</strong>
+        ${Object.entries(app.entrypoints || {}).map(([key, value]) => `<span>${escapeHtml(key)}: ${escapeHtml(value)}</span>`).join('') || '<span>-</span>'}
+      </div>
+      <button class="primary-button block-button" type="button" data-action="${escapeAttr(action.action)}" ${action.disabled ? 'disabled' : ''}>
+        ${escapeHtml(action.label)}
+      </button>
+      <button class="secondary-button block-button" type="button" data-action="checkUpdates" ${busyAction === 'checkUpdates' ? 'disabled' : ''}>
+        Check Version
+      </button>
+    </aside>
+  `;
+}
+
+function appPrimaryAction(app, connected) {
+  if (app.appId === 'appcenter') {
+    return { action: 'show-appcenter', label: app.installed ? 'Open' : 'Install', disabled: !connected || busyAction === 'installAppCenter' };
+  }
+  if (app.appId === 'h2o') {
+    if (app.installed && app.enabled) return { action: 'launchH2o', label: app.runtimeState === 'running' ? 'Running' : 'Open', disabled: !connected || busyAction === 'launchH2o' };
+    return { action: 'enableH2o', label: 'Install', disabled: !connected || !state.apps?.appcenter?.installed || busyAction === 'enableH2o' };
+  }
+  if (app.appId === 'diagnostics') {
+    return { action: 'checkUpdates', label: 'Open', disabled: busyAction === 'checkUpdates' };
+  }
+  return { action: 'select-app', label: 'Reserved', disabled: true };
+}
+
+function appStatusLabel(app) {
+  if (app.status === 'reserved') return 'Reserved';
+  if (app.runtimeState === 'running') return 'Running';
+  if (app.installed && app.enabled) return 'Installed';
+  if (app.installed) return 'Cached';
+  return 'Available';
+}
+
+function renderEmptyCatalog() {
+  return `
+    <div class="empty-catalog">
+      <strong>No app matched</strong>
+      <span>Try another keyword or category.</span>
+    </div>
+  `;
+}
+
+function formatDateTime(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('zh-CN', { hour12: false });
+}
+
+function renderLegacyAppCenterView(connected) {
   return `
     <section class="appcenter-window">
       <header class="appcenter-titlebar">
@@ -623,8 +933,8 @@ function renderAppCenterView(connected) {
           <div class="detail-list">
             <div><span>Mode</span><strong>embed</strong></div>
             <div><span>Channel</span><strong>mx-h2i</strong></div>
-            <div><span>Peer lease</span><strong>shared</strong></div>
-            <div><span>Service VIP</span><strong>10.88.100.10</strong></div>
+            <div><span>Network scope</span><strong>broker-session</strong></div>
+            <div><span>Service context</span><strong>via MX-H2I</strong></div>
             <div><span>Permissions</span><strong>network / dns / pac</strong></div>
           </div>
           <button class="primary-button block-button" type="button" data-action="enableH2o" ${!state.apps?.appcenter?.installed ? 'disabled' : ''}>
@@ -665,7 +975,7 @@ function renderAppCard(app, options) {
         <p>${escapeHtml(app.launcherMode)} via ${escapeHtml(app.standaloneChannelProductId)}</p>
       </div>
       <div class="app-card-meta">
-        <span>${escapeHtml(app.serviceVip)}</span>
+        <span>${escapeHtml(app.networkScope || (app.launcherMode === 'embed' ? 'broker-session' : app.serviceVip))}</span>
         <strong>${escapeHtml(app.installed ? app.status : 'available')}</strong>
       </div>
       <button class="secondary-button" type="button" data-action="${escapeAttr(options.action)}" ${options.disabled ? 'disabled' : ''}>
@@ -837,12 +1147,22 @@ function createMockApi() {
         appId: 'appcenter',
         displayName: 'AppCenter',
         category: 'platform',
+        description: '内置应用市场，负责应用发现、安装、权限申请和版本状态。',
+        packageName: '@qpjoy/electron-launcher-appcenter',
         launcherMode: 'embed',
         standaloneChannelProductId: 'mx-h2i',
+        networkScope: 'broker-session',
         serviceVip: '10.88.100.9',
         version: '0.1.0',
+        latestVersion: '0.1.0',
         updatePolicy: 'launcher-managed',
         permissions: ['auth.read', 'appcenter.read'],
+        installSource: 'builtin',
+        runtimeState: 'idle',
+        entrypoints: {
+          desktop: 'app://appcenter/index.html',
+          settings: 'app://appcenter/settings.html'
+        },
         installed: false,
         enabled: false,
         status: 'available'
@@ -851,12 +1171,23 @@ function createMockApi() {
         appId: 'h2o',
         displayName: 'H2O',
         category: 'network',
+        description: 'H2I 内置网络应用 demo，展示 PAC、Split DNS、代理规则和 Internal 服务状态。',
+        packageName: '@qpjoy/electron-launcher-app-h2o',
         launcherMode: 'embed',
         standaloneChannelProductId: 'mx-h2i',
+        networkScope: 'broker-session',
         serviceVip: '10.88.100.10',
         version: '0.1.0',
+        latestVersion: '0.1.0',
         updatePolicy: 'launcher-managed',
         permissions: ['network.hdi.status', 'network.proxy.app'],
+        installSource: 'npm',
+        runtimeState: 'idle',
+        entrypoints: {
+          desktop: 'app://h2o/index.html',
+          settings: 'app://h2o/settings.html',
+          dev: 'workspace:demos/mx-app-h2o'
+        },
         installed: false,
         enabled: false,
         status: 'available'
@@ -973,10 +1304,14 @@ function createMockApi() {
           ...mockState.apps.appcenter,
           installed: true,
           enabled: true,
-          status: 'ready'
+          status: 'ready',
+          installedVersion: mockState.apps.appcenter.version,
+          latestVersion: mockState.apps.appcenter.latestVersion || mockState.apps.appcenter.version,
+          runtimeState: 'ready',
+          lastAction: new Date().toISOString()
         }
       },
-      feedback: { tone: 'success', message: 'AppCenter 已安装。' }
+      feedback: { tone: 'success', message: 'AppCenter 已安装，package/version 已写入本地缓存。' }
     }),
     enableH2o: async () => commit({
       apps: {
@@ -985,10 +1320,29 @@ function createMockApi() {
           ...mockState.apps.h2o,
           installed: true,
           enabled: true,
-          status: 'enabled'
+          status: 'enabled',
+          installedVersion: mockState.apps.h2o.version,
+          latestVersion: mockState.apps.h2o.latestVersion || mockState.apps.h2o.version,
+          runtimeState: 'ready',
+          lastAction: new Date().toISOString()
         }
       },
-      feedback: { tone: 'success', message: 'H2O 已启用。' }
+      feedback: { tone: 'success', message: 'H2O 已启用，broker-session 权限已就绪。' }
+    }),
+    launchH2o: async () => commit({
+      apps: {
+        ...mockState.apps,
+        h2o: {
+          ...mockState.apps.h2o,
+          installed: true,
+          enabled: true,
+          status: 'running',
+          runtimeState: 'running',
+          installedVersion: mockState.apps.h2o.installedVersion || mockState.apps.h2o.version,
+          lastAction: new Date().toISOString()
+        }
+      },
+      feedback: { tone: 'success', message: 'H2O 运行态已就绪。开发态从 mx-app-h2o 单独启动窗口。' }
     }),
     checkUpdates: async () => commit({
       update: {

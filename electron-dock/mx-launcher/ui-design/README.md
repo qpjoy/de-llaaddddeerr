@@ -58,7 +58,7 @@ Individual controls also support explicit sizes such as `qp-button--sm`, `qp-but
 - Form: `qp-field`, `qp-input`, `qp-select`, `qp-dropdown`, `qp-textarea`, `qp-input-group`.
 - Choice: `qp-choice--radio`, `qp-choice--checkbox`, `qp-switch`, `qp-slider`, `qp-segmented`.
 - Feedback: `qp-tag`, `qp-status`, `qp-toast`, `qp-dialog`, `qp-actionbar`.
-- App surfaces: `qp-menu`, `qp-list`, `qp-project-card`, `qp-user-card`, `qp-color-swatch`.
+- App surfaces: `qp-menu`, `qp-list`, `qp-project-card`, `qp-market-layout`, `qp-market-card`, `qp-market-inspector`, `qp-chip-list`, `qp-user-card`, `qp-color-swatch`.
 - Settings: `qp-appbar`, `qp-settings-view`, `qp-settings-nav`, `qp-setting-row`, `qp-version-card`, `qp-path-field`.
 - Properties: `qp-properties-panel`, `qp-property-section`, `qp-property-row`, `qp-axis-grid`, `qp-axis-field`, `qp-swatch-input`.
 - Editor panels: `qp-panel-tabs`, `qp-panel-tab`, `qp-split-panel`, `qp-anchor-grid`, `qp-anchor-preset`.

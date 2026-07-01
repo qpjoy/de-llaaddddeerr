@@ -1629,6 +1629,7 @@ export class PostgresStore implements PlatformStore {
       requestId: input.requestId ?? null,
       metadata: {
         mode: product.mode,
+        networkScope: product.networkScope,
         standaloneChannelProductId: product.standaloneChannelProductId,
         serviceVip: product.serviceVip,
         userCidr: product.userCidr,

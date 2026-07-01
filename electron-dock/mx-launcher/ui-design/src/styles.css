@@ -1036,6 +1036,154 @@
   font-size: var(--qp-font-caption-1);
 }
 
+.qp-market-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.24fr) minmax(0, 1fr) minmax(280px, 0.34fr);
+  min-height: 520px;
+  overflow: hidden;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-md);
+  background:
+    linear-gradient(90deg, rgba(94, 142, 236, 0.035) 1px, transparent 1px) 0 0 / 56px 56px,
+    var(--qp-bg-2);
+}
+
+.qp-market-rail,
+.qp-market-inspector {
+  display: grid;
+  align-content: start;
+  gap: var(--qp-space-4);
+  min-width: 0;
+  padding: var(--qp-space-4);
+  background: color-mix(in srgb, var(--qp-bg-1) 74%, transparent);
+}
+
+.qp-market-rail {
+  border-right: 1px solid var(--qp-line);
+}
+
+.qp-market-main {
+  min-width: 0;
+  padding: var(--qp-space-4);
+}
+
+.qp-market-inspector {
+  border-left: 1px solid var(--qp-line);
+  background: color-mix(in srgb, var(--qp-bg-4) 82%, transparent);
+}
+
+.qp-market-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 230px), 1fr));
+  gap: var(--qp-space-4);
+}
+
+.qp-market-card {
+  display: grid;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-md);
+  background: var(--qp-bg-3);
+  box-shadow: var(--qp-shadow-drop-1);
+}
+
+.qp-market-card.is-active {
+  border-color: var(--qp-primary);
+}
+
+.qp-market-card__media {
+  display: flex;
+  align-items: flex-end;
+  min-height: 124px;
+  padding: var(--qp-space-3);
+  background:
+    radial-gradient(circle at 18% 22%, rgba(255, 255, 255, 0.72) 0 7px, transparent 8px),
+    linear-gradient(135deg, var(--qp-info) 0%, #263a70 46%, var(--qp-primary) 47%, #047b72 100%);
+}
+
+.qp-market-card__media[data-category="network"] {
+  background:
+    radial-gradient(circle at 76% 22%, rgba(255, 255, 255, 0.72) 0 7px, transparent 8px),
+    linear-gradient(135deg, var(--qp-success) 0%, #076342 46%, var(--qp-warning) 47%, #795d1b 100%);
+}
+
+.qp-market-card__media[data-category="bridge"] {
+  background:
+    radial-gradient(circle at 28% 24%, rgba(255, 255, 255, 0.72) 0 7px, transparent 8px),
+    linear-gradient(135deg, var(--qp-archetype) 0%, #44256d 48%, var(--qp-danger) 49%, #67303b 100%);
+}
+
+.qp-market-card__icon {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  border-radius: var(--qp-radius-md);
+  background: color-mix(in srgb, var(--qp-bg-1) 78%, transparent);
+  color: var(--qp-text-1);
+  font-weight: 800;
+}
+
+.qp-market-card__body {
+  display: grid;
+  gap: var(--qp-space-2);
+  padding: var(--qp-space-3);
+}
+
+.qp-market-card__title,
+.qp-market-package {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qp-market-card__title {
+  color: var(--qp-text-1);
+  font-weight: var(--qp-weight-semibold);
+}
+
+.qp-market-card__summary {
+  display: -webkit-box;
+  min-height: 42px;
+  overflow: hidden;
+  color: var(--qp-text-3);
+  font-size: var(--qp-font-body-2);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.qp-market-package {
+  border: 1px solid color-mix(in srgb, var(--qp-info) 26%, transparent);
+  border-radius: var(--qp-radius-pill);
+  padding: 3px 8px;
+  color: var(--qp-text-2);
+  font-size: var(--qp-font-caption-1);
+}
+
+.qp-market-card__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--qp-space-2);
+  padding: 0 var(--qp-space-3) var(--qp-space-3);
+}
+
+.qp-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--qp-space-2);
+}
+
+.qp-chip-list span {
+  border: 1px solid color-mix(in srgb, var(--qp-info) 30%, transparent);
+  border-radius: var(--qp-radius-pill);
+  padding: 3px 8px;
+  background: color-mix(in srgb, var(--qp-info) 8%, transparent);
+  color: var(--qp-text-2);
+  font-size: var(--qp-font-caption-1);
+}
+
 .qp-avatar {
   display: inline-grid;
   place-items: center;
@@ -1707,8 +1855,14 @@ svg.qp-icon--solid {
 
   .qp-settings-view,
   .qp-split-panel,
-  .qp-property-row {
+  .qp-property-row,
+  .qp-market-layout {
     grid-template-columns: 1fr;
+  }
+
+  .qp-market-rail,
+  .qp-market-inspector {
+    border: 0;
   }
 
   .qp-anchor-grid {

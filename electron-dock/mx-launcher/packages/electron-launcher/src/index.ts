@@ -1,18 +1,32 @@
 import {
+  assertCompatibleBroker,
+  brokerAbiVersion,
   createLauncherClient,
   createLauncherNetworkSession,
   createLauncherWireGuardKeyPair,
+  launcherBrokerCompatibility,
+  launcherNetworkScopeForMode,
+  launcherProtocolVersion,
   networkDigest,
   networkRefreshKey,
   normalizeLauncherBaseUrl,
   routePlanFromSnapshot,
   shouldRefreshNetwork,
   type FetchLike,
+  type LauncherBrokerCapabilitySession,
+  type LauncherBrokerHandshakeDeniedReason,
+  type LauncherBrokerHandshakeRequest,
+  type LauncherBrokerHandshakeResult,
+  type LauncherCapability,
+  type LauncherChannelRecord,
   type LauncherClient,
   type LauncherClientOptions,
+  type LauncherEmbedConnectionState,
   type LauncherIdentityKind,
+  type LauncherManifest,
   type LauncherNetworkLease,
   type LauncherNetworkLeaseInput,
+  type LauncherNetworkScope,
   type LauncherNetworkSession,
   type LauncherNetworkSessionInput,
   type LauncherNetworkSnapshot,
@@ -28,12 +42,17 @@ import {
 } from '@qpjoy/mx-launcher-core';
 import {
   createEmbedLauncher,
-  type EmbedLeaseOptions,
-  type EmbedNetworkSessionOptions,
   type EmbedConnectOptions,
   type EmbedConnectionResult,
+  type EmbedBrokerConnectOptions,
+  type EmbedBrokerRequestHandler,
+  type EmbedLauncherConnection,
+  type EmbedLauncherEventHandler,
+  type EmbedLauncherEventName,
   type EmbedLauncher,
   type EmbedLauncherOptions,
+  type EmbedLegacyNetworkApi,
+  type LauncherChannelRegistrySource,
   type EmbedSnapshotOptions
 } from '@qpjoy/mx-launcher-embed-sdk';
 import {
@@ -112,7 +131,14 @@ export type ElectronLauncherMode = LauncherProductMode;
 
 export interface ElectronLauncherOptions extends LauncherClientOptions {
   productId?: string;
+  appId?: string;
   mode?: ElectronLauncherMode;
+  standaloneChannelProductId?: string;
+  requiredCapabilities?: LauncherCapability[];
+  sdkVersion?: string;
+  appVersion?: string;
+  channelRegistry?: LauncherChannelRegistrySource;
+  requestImpl?: EmbedBrokerRequestHandler;
   installId?: string;
   deviceId?: string;
   siteId?: string;
@@ -137,6 +163,8 @@ export interface LauncherProductDefinition {
   productId: string;
   displayName: string;
   mode: ElectronLauncherMode;
+  networkScope: LauncherNetworkScope;
+  standaloneChannelProductId: string;
   appCenter: {
     visible: boolean;
     category: string;
@@ -153,6 +181,7 @@ export interface LauncherProductDefinitionInput {
   productId: string;
   displayName?: string;
   mode?: ElectronLauncherMode;
+  standaloneChannelProductId?: string;
   appCenter?: {
     visible?: boolean;
     category?: string;
@@ -175,7 +204,8 @@ export function createElectronLauncher(options: ElectronLauncherOptions): Electr
   }
   return createEmbedLauncher({
     ...options,
-    productId: requiredProductId(options.productId)
+    productId: requiredProductId(options.productId ?? options.appId),
+    appId: options.appId ?? options.productId
   });
 }
 
@@ -183,11 +213,16 @@ export function defineLauncherProduct(input: LauncherProductDefinitionInput): La
   const productId = requiredProductId(input.productId);
   const displayName = input.displayName?.trim() || productId;
   const mode = input.mode ?? 'embed';
+  const standaloneChannelProductId = mode === 'standalone'
+    ? productId
+    : input.standaloneChannelProductId?.trim() || 'mx-h2i';
   const actions = input.launcherActions ?? {};
   return {
     productId,
     displayName,
     mode,
+    networkScope: launcherNetworkScopeForMode(mode),
+    standaloneChannelProductId,
     appCenter: {
       visible: input.appCenter?.visible ?? true,
       category: input.appCenter?.category?.trim() || 'app'
@@ -214,11 +249,16 @@ function requiredProductId(productId: string | undefined): string {
 }
 
 export {
+  assertCompatibleBroker,
+  brokerAbiVersion,
   createEmbedLauncher,
   createLauncherClient,
   createLauncherNetworkSession,
   createLauncherWireGuardKeyPair,
   createStandaloneLauncher,
+  launcherBrokerCompatibility,
+  launcherNetworkScopeForMode,
+  launcherProtocolVersion,
   networkDigest,
   networkRefreshKey,
   normalizeLauncherBaseUrl,
@@ -227,19 +267,33 @@ export {
 };
 
 export type {
+  EmbedBrokerConnectOptions,
+  EmbedBrokerRequestHandler,
   EmbedConnectOptions,
   EmbedConnectionResult,
+  EmbedLauncherConnection,
+  EmbedLauncherEventHandler,
+  EmbedLauncherEventName,
   EmbedLauncher,
   EmbedLauncherOptions,
-  EmbedLeaseOptions,
-  EmbedNetworkSessionOptions,
+  EmbedLegacyNetworkApi,
   EmbedSnapshotOptions,
   FetchLike,
+  LauncherBrokerCapabilitySession,
+  LauncherBrokerHandshakeDeniedReason,
+  LauncherBrokerHandshakeRequest,
+  LauncherBrokerHandshakeResult,
+  LauncherCapability,
+  LauncherChannelRegistrySource,
+  LauncherChannelRecord,
   LauncherClient,
   LauncherClientOptions,
+  LauncherEmbedConnectionState,
   LauncherIdentityKind,
+  LauncherManifest,
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
+  LauncherNetworkScope,
   LauncherNetworkSession,
   LauncherNetworkSessionInput,
   LauncherNetworkSnapshot,

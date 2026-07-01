@@ -17,9 +17,11 @@ H2O，一个类似 Clash / Tunnel 的网络应用。
    节点和类 Clash 的用户体验。
 5. AppCenter 负责应用权限登记、授权展示、组织策略和权限审计；Launcher 负责向系统
    申请和执行权限。
-6. Domestic 默认最小化：public API proxy、WG relay、H2I route、snapshot cache、
+6. AppCenter/H2O 这类 embed 应用的网络范围是 `broker-session`：它们可以通过
+   standalone broker 读取用户、权限、网络和更新状态，但不分配自己的 WG peer lease IP。
+7. Domestic 默认最小化：public API proxy、WG relay、H2I route、snapshot cache、
    observability forwarder。
-7. Internal MX-3ks 是用户、权限、配置、发布、测试、观测、审计、runner 和 SDK
+8. Internal MX-3ks 是用户、权限、配置、发布、测试、观测、审计、runner 和 SDK
    Gateway 的真相。
 
 ## 名词和边界

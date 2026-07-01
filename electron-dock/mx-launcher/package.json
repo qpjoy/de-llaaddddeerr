@@ -8,6 +8,8 @@
     "build:packages": "pnpm --filter @qpjoy/mx-launcher-core build && pnpm --filter @qpjoy/mx-launcher-embed-sdk build && pnpm --filter @qpjoy/mx-launcher-standalone build && pnpm --filter @qpjoy/electron-launcher build && pnpm --filter @qpjoy/ui-design-neon-void build",
     "ui-design:build": "pnpm --filter @qpjoy/ui-design-neon-void build",
     "ui-design:demo": "pnpm --filter @qpjoy/ui-design-neon-void-demo dev",
+    "h2o:dev": "pnpm --filter @qpjoy/electron-launcher-app-h2o dev",
+    "h2o:check": "pnpm --filter @qpjoy/electron-launcher-app-h2o check",
     "luopan:dev": "pnpm --filter @qpjoy/luopan-demo dev",
     "luopan:build": "pnpm --filter @qpjoy/luopan-demo build",
     "luopan:check": "pnpm --filter @qpjoy/luopan-demo check"
