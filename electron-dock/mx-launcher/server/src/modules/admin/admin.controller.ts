@@ -270,13 +270,24 @@ export class AdminController {
         requestedBy,
         requestId: `${requestId}-internal-service-peer-apply`
       }, this.store);
+    const domesticPeerKeySync = booleanValue(body.syncDomesticPeerKey) === false
+      ? null
+      : await this.adminInternalServicePeerDomesticKeySyncResult(siteId, plan, secret, {
+        siteId,
+        planId: plan?.planId ?? null,
+        confirmDomesticPeerKeySync: true,
+        requestedBy,
+        requestId: `${requestId}-domestic-peer-key-sync`
+      });
+    secret = await this.store.getSiteSlotDomesticWireGuardSecret(siteId) ?? secret;
     const reconcile = launcherServiceVipReconcileResult({
       siteId,
       appId,
       sync,
       materialize: materialize.result,
       domesticRuntimeApply,
-      internalServicePeerApply
+      internalServicePeerApply,
+      domesticPeerKeySync
     });
     await this.store.recordAudit({
       eventType: 'launcher.service_vip.reconciled',
@@ -298,6 +309,7 @@ export class AdminController {
       domesticWgMaterialize: materialize.result,
       domesticRuntimeApply,
       internalServicePeerApply,
+      domesticPeerKeySync,
       secret: secret ? redactAdminDomesticWireGuardSecret(secret) : null
     };
   }
@@ -4383,7 +4395,13 @@ function adminInternalServicePeerHostRunnerUnavailableStatus(
         url: `http://${internalServiceIp}:18090/healthz`,
         httpStatus: null,
         durationMs: null
-      }
+      },
+      serviceVipHealthz: domesticInternalServicePeerServiceVipIps(secret).map((ip) => ({
+        status: 'not-checked',
+        url: `http://${ip}:18090/healthz`,
+        httpStatus: null,
+        durationMs: null
+      }))
     },
     install: {
       available: false,
@@ -4638,6 +4656,9 @@ async function adminInternalServicePeerRuntimeStatus(
     ? await runLocalCommand(tools.ping.path ?? 'ping', ['-c', '1', domesticGatewayIp], 3000)
     : null;
   const internalHealthz = await httpHealthProbe(`http://${internalServiceIp}:18090/healthz`, 3000);
+  const serviceVipHealthz = await Promise.all(
+    domesticInternalServicePeerServiceVipIps(secret).map((ip) => httpHealthProbe(`http://${ip}:18090/healthz`, 3000))
+  );
   const handshake = parseWireGuardLatestHandshake(latestHandshakes?.stdout ?? '');
   const domesticRouteInterface = routeProbeInterface(routeToDomestic.stdout);
   const userRelayRouteInterface = routeProbeInterface(routeToUserRelay.stdout);
@@ -4646,7 +4667,8 @@ async function adminInternalServicePeerRuntimeStatus(
     && userRelayRouteInterface === domesticRouteInterface;
   const interfaceReady = wgShow?.status === 'passed';
   const linkReady = handshake.status === 'passed' || domesticGatewayPing?.status === 'passed';
-  const healthReady = internalHealthz.status === 'passed';
+  const healthReady = internalHealthz.status === 'passed'
+    && serviceVipHealthz.every((probe) => probe.status === 'passed');
   const blockedReasons = [
     ...(runtimeTarget.mode === 'api-pod' ? ['Internal service peer install must run on the Internal runtime host; this API is running inside a k8s pod'] : []),
     ...(hostRunnerError ? [`Internal host runner is not reachable: ${hostRunnerError}`] : []),
@@ -4691,7 +4713,8 @@ async function adminInternalServicePeerRuntimeStatus(
       routeToDomestic,
       routeToUserRelay,
       domesticGatewayPing,
-      internalHealthz
+      internalHealthz,
+      serviceVipHealthz
     },
     install: {
       available: blockedReasons.length === 0,
@@ -5774,11 +5797,13 @@ function domesticRelayReadOnlyProbeCommand(plan: SiteSlotPlan | null, secret: Si
 function domesticRelayReadOnlyProbeScript(secret: SiteSlotDomesticWireGuardSecret | null = null): string {
   const internalPublicKey = secret?.internalServicePublicKey ?? '<internal-service-public-key>';
   const internalServiceIp = secret?.internalServiceIp ?? '10.88.88.88';
+  const serviceVipIps = domesticInternalServicePeerServiceVipIps(secret);
   return [
     'set -eu',
     'printf "mx-domestic-relay-readonly-probe\\n"',
     `internal_peer=${shellQuote(internalPublicKey)}`,
     `internal_ip=${shellQuote(internalServiceIp)}`,
+    `service_vip_ips=${shellQuote(serviceVipIps.join(' '))}`,
     'id -u',
     'hostname',
     'uname -a',
@@ -5795,6 +5820,7 @@ function domesticRelayReadOnlyProbeScript(secret: SiteSlotDomesticWireGuardSecre
     'ip -4 address show dev mx-domestic | grep -q "10\\.88\\.0\\.1/" || { echo "blocked: mx-domestic missing 10.88.0.1/16"; exit 1; }',
     'ip route get "$internal_ip"',
     'if command -v curl >/dev/null 2>&1; then curl -fsS --max-time 5 "http://${internal_ip}:18090/healthz"; elif command -v wget >/dev/null 2>&1; then wget -qO- -T 5 "http://${internal_ip}:18090/healthz"; else echo "blocked: curl or wget is required for Internal healthz"; exit 1; fi',
+    'for service_vip_ip in $service_vip_ips; do ip route get "$service_vip_ip"; if command -v curl >/dev/null 2>&1; then curl -fsS --max-time 5 "http://${service_vip_ip}:18090/healthz"; elif command -v wget >/dev/null 2>&1; then wget -qO- -T 5 "http://${service_vip_ip}:18090/healthz"; fi; done',
     'systemctl status wg-quick@mx-domestic --no-pager 2>/dev/null || true'
   ].join('; ');
 }
@@ -8791,13 +8817,15 @@ function launcherServiceVipReconcileResult(input: {
   materialize?: unknown;
   domesticRuntimeApply?: unknown;
   internalServicePeerApply?: unknown;
+  domesticPeerKeySync?: unknown;
   blockedReasons?: string[];
 }) {
   const steps = [
     launcherServiceVipReconcileStep('domestic-product-cidrs', 'Sync Domestic product CIDRs', input.sync),
     launcherServiceVipReconcileStep('domestic-wg-artifact', 'Materialize Domestic WG artifact', input.materialize),
     launcherServiceVipReconcileStep('domestic-runtime', 'Apply Domestic relay runtime', input.domesticRuntimeApply),
-    launcherServiceVipReconcileStep('internal-service-peer', 'Apply Internal service peer', input.internalServicePeerApply)
+    launcherServiceVipReconcileStep('internal-service-peer', 'Apply Internal service peer', input.internalServicePeerApply),
+    launcherServiceVipReconcileStep('domestic-peer-allowed-ips', 'Sync Domestic peer AllowedIPs', input.domesticPeerKeySync)
   ].filter((step) => step.status !== 'skipped');
   const blockedReasons = uniqueStrings([
     ...(input.blockedReasons ?? []).filter((item) => item.trim().length > 0),
@@ -8967,6 +8995,13 @@ function domesticInternalServicePeerAllowedIps(secret: SiteSlotDomesticWireGuard
     ...domesticSecretProductRelayCidrs(secret)
       .filter((cidr) => cidr.endsWith('/32') && cidr !== domesticGatewayCidr)
   ]);
+}
+
+function domesticInternalServicePeerServiceVipIps(secret: SiteSlotDomesticWireGuardSecret | null): string[] {
+  if (!secret) return [];
+  return domesticInternalServicePeerAllowedIps(secret)
+    .map((cidr) => cidr.match(/^(\d+\.\d+\.\d+\.\d+)\/32$/)?.[1] ?? null)
+    .filter((ip): ip is string => Boolean(ip && ip !== secret.internalServiceIp));
 }
 
 function numberValue(value: unknown, fallback: number): number {

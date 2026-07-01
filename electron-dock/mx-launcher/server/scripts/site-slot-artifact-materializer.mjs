@@ -435,6 +435,7 @@ function createWireGuardTemplate(artifactRoot) {
     'Table = off',
     'SaveConfig = false',
     'PostUp = sysctl -w net.ipv4.ip_forward=1',
+    ...wireGuardForwardingCommands('PostUp'),
     ...wireGuardRouteCommands('PostUp', productRelayCidrs),
     ...wireGuardRouteCommands('PostDown', productRelayCidrs, true),
     '',
@@ -624,6 +625,13 @@ function wireGuardRouteCommands(prefix, cidrs, ignoreFailure = false) {
       : `ip route replace ${cidr} dev %i`;
     return `${prefix} = ${ignoreFailure ? `${command} || true` : command}`;
   });
+}
+
+function wireGuardForwardingCommands(prefix) {
+  if (prefix !== 'PostUp') return [];
+  return [
+    'PostUp = if command -v iptables >/dev/null 2>&1; then iptables -C FORWARD -i %i -o %i -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i %i -o %i -j ACCEPT; if iptables -S DOCKER-USER >/dev/null 2>&1; then iptables -C DOCKER-USER -i %i -o %i -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -i %i -o %i -j ACCEPT; fi; iptables -C INPUT -i %i -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i %i -p udp --dport 53 -j ACCEPT; iptables -C INPUT -i %i -p tcp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i %i -p tcp --dport 53 -j ACCEPT; fi'
+  ];
 }
 
 function domesticWireGuardMaterial() {

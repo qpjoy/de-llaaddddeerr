@@ -635,6 +635,29 @@ function wireGuardListenPortFromConfigContent(content) {
   return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
 }
 
+function wireGuardInterfaceAddressesFromConfigContent(content) {
+  if (typeof content !== 'string') return [];
+  const match = content.match(/^\s*Address\s*=\s*(.+)\s*$/im);
+  if (!match) return [];
+  return mergeCsvEntries(csvEntries(match[1]))
+    .filter((entry) => /^\d+\.\d+\.\d+\.\d+\/\d+$/.test(entry));
+}
+
+function serviceVipIpsFromConfigReadiness(configReadiness, internalServiceIp) {
+  const internalIp = stringValue(internalServiceIp, '10.88.88.88');
+  const seen = new Set();
+  const ips = [];
+  for (const address of Array.isArray(configReadiness?.addresses) ? configReadiness.addresses : []) {
+    const [ip, prefix] = String(address).split('/');
+    if (prefix !== '32') continue;
+    if (!ip || ip === internalIp) continue;
+    if (seen.has(ip)) continue;
+    seen.add(ip);
+    ips.push(ip);
+  }
+  return ips;
+}
+
 function wireGuardListenPortFromShow(output) {
   if (typeof output !== 'string') return null;
   const match = output.match(/^\s*listening port:\s*(\d+)\s*$/im);
@@ -701,6 +724,7 @@ function internalServicePeerConfigReadiness(artifacts) {
       configPath,
       privateKey: 'missing',
       listenPort: null,
+      addresses: [],
       summary: `missing config: ${configPath}`,
       blockedReasons: [`Internal service peer config artifact is missing: ${configPath}`]
     };
@@ -714,12 +738,14 @@ function internalServicePeerConfigReadiness(artifacts) {
       configPath,
       privateKey: 'unreadable',
       listenPort: null,
+      addresses: [],
       summary: `unreadable config: ${configPath}`,
       blockedReasons: [`Internal service peer config is unreadable: ${errorMessage(error)}`]
     };
   }
   const rawPrivateKey = wireGuardPrivateKeyRawFromConfig(configPath);
   const listenPort = wireGuardListenPortFromConfigContent(content);
+  const addresses = wireGuardInterfaceAddressesFromConfigContent(content);
   const blockedReasons = [];
   if (/<internal-service-private-key-from-internal-secret>|<[^>\n]+>/.test(content)) {
     blockedReasons.push(`Internal service peer config still contains template placeholders: ${configPath}`);
@@ -734,6 +760,7 @@ function internalServicePeerConfigReadiness(artifacts) {
     configPath,
     privateKey: rawPrivateKey ? validWireGuardPrivateKey(rawPrivateKey) ? 'configured' : 'invalid' : 'missing',
     listenPort,
+    addresses,
     summary: blockedReasons.length ? blockedReasons[0] : 'config key ready',
     blockedReasons
   };
@@ -1155,6 +1182,10 @@ async function buildStatus(payload) {
     ? await runCommand(tools.ping.path || 'ping', ['-c', '1', domesticGatewayIp], 3000)
     : null;
   const internalHealthz = await healthProbe(`http://${internalServiceIp}:18090/healthz`, 3000);
+  const serviceVipIps = serviceVipIpsFromConfigReadiness(configReadiness, internalServiceIp);
+  const serviceVipHealthz = await Promise.all(
+    serviceVipIps.map((ip) => healthProbe(`http://${ip}:18090/healthz`, 3000))
+  );
   const handshake = latestHandshakes?.status === 'not-checked'
     ? {
         status: 'not-checked',
@@ -1176,7 +1207,8 @@ async function buildStatus(payload) {
     && (!Array.isArray(wireGuardCore.tunnel?.missingRoutes) || wireGuardCore.tunnel.missingRoutes.length === 0);
   const interfaceReady = wgShow?.status === 'passed' || coreTunnelReady;
   const linkReady = handshake.status === 'passed' || domesticGatewayPing?.status === 'passed';
-  const healthReady = internalHealthz.status === 'passed';
+  const healthReady = internalHealthz.status === 'passed'
+    && serviceVipHealthz.every((probe) => probe.status === 'passed');
   const wireGuardRuntimeBlocked = applyBackend === 'electron-core-wireguard' && wireGuardCore.status === 'blocked';
   const status = blockedReasons.length > 0 || wireGuardRuntimeBlocked
     ? 'blocked'
@@ -1236,7 +1268,8 @@ async function buildStatus(payload) {
     link: {
       routeToDomestic,
       domesticGatewayPing,
-      internalHealthz
+      internalHealthz,
+      serviceVipHealthz
     },
     install: {
       available: installBlockedReasons.length === 0,
