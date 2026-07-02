@@ -5,6 +5,9 @@ const root = document.getElementById('app');
 let state = null;
 let busy = '';
 let view = 'runtime';
+let debugOpen = false;
+let shellMenuOpen = false;
+let shellNotice = '';
 
 void boot();
 
@@ -18,22 +21,56 @@ async function boot() {
 }
 
 root.addEventListener('click', (event) => {
+  const control = event.target.closest('[data-window-control]');
+  if (control) {
+    shellMenuOpen = false;
+    void api.windowControl?.(control.dataset.windowControl);
+    return;
+  }
   const button = event.target.closest('[data-action]');
   if (!button) return;
   const action = button.dataset.action;
+  if (action === 'toggle-shell-menu') {
+    shellMenuOpen = !shellMenuOpen;
+    render();
+    return;
+  }
+  if (action === 'switch-shell-target') {
+    shellMenuOpen = false;
+    const target = button.dataset.target || 'h2o';
+    if (target === 'close') {
+      void api.windowControl?.('close');
+      return;
+    }
+    shellNotice = target === 'h2i'
+      ? 'H2I（VPN）入口由 MX-H2I/AppCenter 容器承载；开发态请回到 MX-H2I 窗口。'
+      : 'AppCenter 入口由 MX-H2I 容器承载；开发态请回到 MX-H2I 窗口。';
+    render();
+    return;
+  }
   if (action === 'set-view') {
+    shellMenuOpen = false;
     view = button.dataset.view || 'runtime';
     render();
     return;
   }
   if (action === 'set-mode') {
+    shellMenuOpen = false;
     void run('setMode', button.dataset.mode || 'rule');
     return;
   }
+  if (action === 'toggle-debug') {
+    shellMenuOpen = false;
+    debugOpen = !debugOpen;
+    render();
+    return;
+  }
   if (action === 'request-proxy') {
+    shellMenuOpen = false;
     void run('requestBroker', 'network.proxy', { mode: state.policy.mode });
     return;
   }
+  shellMenuOpen = false;
   void run(action);
 });
 
@@ -62,97 +99,158 @@ function render() {
   if (!state) return;
   const connected = state.broker?.ok === true;
   root.innerHTML = `
-    <section class="h2o-shell">
+    <section class="h2o-shell ${debugOpen ? 'is-debug-open' : ''}">
+      ${renderAppShellBar(connected)}
       <aside class="h2o-sidebar">
         <div class="h2o-brand">
           <div class="h2o-mark">H2O</div>
           <div>
             <h1>H2O</h1>
-            <p>${escapeHtml(state.app.packageName)}</p>
+            <p>MX-H2I 网络助手</p>
           </div>
         </div>
         <nav class="h2o-nav">
-          ${navItem('runtime', 'Runtime')}
-          ${navItem('proxy', 'Proxy')}
+          ${navItem('runtime', '概览')}
+          ${navItem('proxy', '代理')}
           ${navItem('dns', 'DNS / PAC')}
-          ${navItem('permissions', 'Permissions')}
-          ${navItem('logs', 'Logs')}
+          ${navItem('logs', '记录')}
         </nav>
         <div class="h2o-version">
+          <button class="text-button" type="button" data-action="toggle-debug">${debugOpen ? '隐藏 Debug' : 'Debug'}</button>
           <span>App ${escapeHtml(state.app.version)}</span>
-          <span>Embed via ${escapeHtml(state.app.standaloneChannelProductId)}</span>
         </div>
       </aside>
 
       <section class="h2o-main">
         <header class="h2o-toolbar">
           <div>
-            <p class="kicker">MX-H2I EMBED APP</p>
-            <h2>Network Console</h2>
+            <p class="kicker">H2O</p>
+            <h2>网络助手</h2>
           </div>
           <div class="toolbar-actions">
-            <button class="secondary-button" type="button" data-action="connectBroker" ${busy === 'connectBroker' ? 'disabled' : ''}>
-              ${connected ? 'Reconnect' : 'Connect Broker'}
-            </button>
-            <button class="primary-button" type="button" data-action="refresh" ${!connected || busy === 'refresh' ? 'disabled' : ''}>Refresh</button>
+            <button class="secondary-button" type="button" data-action="toggle-debug">${debugOpen ? '关闭 Debug' : 'Debug'}</button>
+            <button class="primary-button" type="button" data-action="refresh" ${!connected || busy === 'refresh' ? 'disabled' : ''}>刷新</button>
           </div>
         </header>
 
         <section class="h2o-status-strip" data-state="${escapeAttr(state.broker.state)}">
-          <strong>${escapeHtml(state.broker.state)}</strong>
-          <span>${escapeHtml(state.broker.message)}</span>
+          <strong>${escapeHtml(connected ? '运行正常' : '需要连接')}</strong>
+          <span>${escapeHtml(shellNotice || (connected ? 'Internal 访问、代理规则和 DNS 策略已就绪。' : state.broker.message))}</span>
         </section>
 
         ${renderView()}
       </section>
 
-      <aside class="h2o-inspector">
-        <h3>Broker Session</h3>
-        <div class="detail-list">
-          ${detail('State', state.broker.state)}
-          ${detail('Scope', state.app.networkScope)}
-          ${detail('Channel', state.app.standaloneChannelProductId)}
-          ${detail('Session', state.broker.session?.sessionId || '-')}
-          ${detail('Socket', state.broker.channel?.socketPath || '-')}
-          ${detail('Local IP', state.network.localIp || '-')}
-          ${detail('Internal', state.network.internalApi)}
-        </div>
-        <div class="permission-list">
-          ${(state.broker.session?.grantedCapabilities || state.broker.channel?.capabilities || []).map((item) => `<span>${escapeHtml(item)}</span>`).join('') || '<span>pending</span>'}
-        </div>
-      </aside>
+      ${debugOpen ? renderDebugPanel() : renderUserPanel()}
     </section>
+  `;
+}
+
+function renderAppShellBar(connected) {
+  return `
+    <header class="app-shell-bar">
+      <div class="app-shell-identity">
+        <div class="app-shell-mark">H2O</div>
+        <div>
+          <strong>H2O</strong>
+          <span>${escapeHtml(connected ? 'MX-H2I broker-session 已连接' : '等待 MX-H2I broker-session')}</span>
+        </div>
+      </div>
+      <div class="app-shell-actions">
+        <button class="app-window-button" type="button" data-window-control="minimize" aria-label="Minimize">-</button>
+        <button class="app-window-button" type="button" data-window-control="zoom" aria-label="Zoom">□</button>
+        <div class="app-shell-menu">
+          <button class="app-window-button" type="button" data-action="toggle-shell-menu" aria-label="App menu">...</button>
+          ${shellMenuOpen ? `
+            <div class="app-shell-popover" role="menu">
+              <button type="button" data-action="switch-shell-target" data-target="h2i">
+                <span>H2I（VPN）</span>
+                <small>返回连接面板</small>
+              </button>
+              <button type="button" data-action="switch-shell-target" data-target="appcenter">
+                <span>AppCenter</span>
+                <small>应用中心</small>
+              </button>
+              <button type="button" data-action="switch-shell-target" data-target="close">
+                <span>关闭</span>
+                <small>关闭当前应用</small>
+              </button>
+            </div>
+          ` : ''}
+        </div>
+      </div>
+    </header>
   `;
 }
 
 function renderView() {
   if (view === 'proxy') return renderProxy();
   if (view === 'dns') return renderDns();
-  if (view === 'permissions') return renderPermissions();
   if (view === 'logs') return renderLogs();
   return renderRuntime();
+}
+
+function renderUserPanel() {
+  const connected = state.broker?.ok === true;
+  return `
+    <aside class="h2o-inspector h2o-user-panel">
+      <h3>当前状态</h3>
+      <div class="h2o-health-card" data-state="${escapeAttr(connected ? 'ok' : 'warning')}">
+        <strong>${escapeHtml(connected ? '已就绪' : '未连接')}</strong>
+        <span>${escapeHtml(connected ? '你可以直接访问 Internal 应用和服务。' : '请先通过 MX-H2I 打开 H2O。')}</span>
+      </div>
+      <div class="h2o-tip-list">
+        <div><strong>代理模式</strong><span>${escapeHtml(modeLabel(state.policy.mode))}</span></div>
+        <div><strong>规则数量</strong><span>${escapeHtml(String((state.rules || []).length))}</span></div>
+        <div><strong>最近刷新</strong><span>${escapeHtml(formatTime(state.updatedAt))}</span></div>
+      </div>
+      <button class="secondary-button" type="button" data-action="toggle-debug">Debug</button>
+    </aside>
+  `;
+}
+
+function renderDebugPanel() {
+  return `
+    <aside class="h2o-inspector h2o-debug-panel">
+      <h3>Debug</h3>
+      <div class="detail-list">
+        ${detail('State', state.broker.state)}
+        ${detail('Scope', state.app.networkScope)}
+        ${detail('Channel', state.app.standaloneChannelProductId)}
+        ${detail('Package', state.app.packageName)}
+        ${detail('Session', state.broker.session?.sessionId || '-')}
+        ${detail('Socket', state.broker.channel?.socketPath || '-')}
+        ${detail('Local IP', state.network.localIp || '-')}
+        ${detail('Internal', state.network.internalApi)}
+      </div>
+      <div class="permission-list">
+        ${(state.broker.session?.grantedCapabilities || state.broker.channel?.capabilities || []).map((item) => `<span>${escapeHtml(item)}</span>`).join('') || '<span>pending</span>'}
+      </div>
+      <button class="secondary-button" type="button" data-action="toggle-debug">关闭 Debug</button>
+    </aside>
+  `;
 }
 
 function renderRuntime() {
   return `
     <section class="h2o-grid">
-      ${metricCard('Route Policy', state.network.routePolicy)}
-      ${metricCard('Split DNS', state.network.splitDns)}
-      ${metricCard('PAC', state.network.pac)}
-      ${metricCard('Proxy Port', String(state.policy.proxyPort))}
+      ${metricCard('连接状态', state.broker.ok ? '已就绪' : '未连接')}
+      ${metricCard('代理模式', modeLabel(state.policy.mode))}
+      ${metricCard('规则数量', String((state.rules || []).length))}
+      ${metricCard('Internal', state.network.internalApi === 'ready' ? '可访问' : '待检查')}
     </section>
     <section class="h2o-panel">
       <div class="panel-head">
         <div>
-          <h3>Traffic Mode</h3>
-          <p>broker controlled proxy surface</p>
+          <h3>流量模式</h3>
+          <p>根据当前工作场景选择</p>
         </div>
-        <button class="secondary-button" type="button" data-action="request-proxy">Apply</button>
+        <button class="secondary-button" type="button" data-action="request-proxy">应用</button>
       </div>
       <div class="mode-segments">
-        ${modeButton('rule', 'Rule')}
-        ${modeButton('global', 'Global')}
-        ${modeButton('direct', 'Direct')}
+        ${modeButton('rule', '规则')}
+        ${modeButton('global', '全局')}
+        ${modeButton('direct', '直连')}
       </div>
     </section>
     ${renderRuleTable()}
@@ -164,16 +262,16 @@ function renderProxy() {
     <section class="h2o-panel">
       <div class="panel-head">
         <div>
-          <h3>Proxy Runtime</h3>
-          <p>${escapeHtml(state.policy.mode)} / ${escapeHtml(state.network.routePolicy)}</p>
+          <h3>代理</h3>
+          <p>${escapeHtml(modeLabel(state.policy.mode))}</p>
         </div>
-        <button class="primary-button" type="button" data-action="request-proxy">Apply Proxy</button>
+        <button class="primary-button" type="button" data-action="request-proxy">应用</button>
       </div>
       <div class="h2o-grid">
-        ${metricCard('Mixed Port', String(state.policy.proxyPort))}
-        ${metricCard('Broker', state.broker.ok ? 'connected' : 'blocked')}
-        ${metricCard('Scope', state.app.networkScope)}
-        ${metricCard('Channel', state.app.standaloneChannelProductId)}
+        ${metricCard('端口', String(state.policy.proxyPort))}
+        ${metricCard('状态', state.broker.ok ? '已连接' : '未连接')}
+        ${metricCard('模式', modeLabel(state.policy.mode))}
+        ${metricCard('Internal', state.network.internalApi === 'ready' ? '可访问' : '待检查')}
       </div>
     </section>
     ${renderRuleTable()}
@@ -185,16 +283,16 @@ function renderDns() {
     <section class="h2o-panel">
       <div class="panel-head">
         <div>
-          <h3>DNS / PAC Policy</h3>
-          <p>${escapeHtml(state.policy.dns)} / ${escapeHtml(state.policy.pac)}</p>
+          <h3>DNS / PAC</h3>
+          <p>Internal 域名自动接入</p>
         </div>
-        <button class="secondary-button" type="button" data-action="refresh">Probe</button>
+        <button class="secondary-button" type="button" data-action="refresh">检查</button>
       </div>
       <div class="h2o-grid">
         ${metricCard('api.mxinfo-inc.cn', '10.88.88.88')}
-        ${metricCard('DNS Mode', state.policy.dns)}
-        ${metricCard('PAC Mode', state.policy.pac)}
-        ${metricCard('Resolver', '127.0.0.1:2053')}
+        ${metricCard('DNS', '自动')}
+        ${metricCard('PAC', '动态')}
+        ${metricCard('解析器', '本机')}
       </div>
     </section>
   `;
@@ -237,8 +335,8 @@ function renderRuleTable() {
     <section class="h2o-panel">
       <div class="panel-head">
         <div>
-          <h3>Rules</h3>
-          <p>host policies resolved through broker-session</p>
+          <h3>规则</h3>
+          <p>常用 Internal 服务</p>
         </div>
       </div>
       <div class="rule-table">
@@ -260,6 +358,12 @@ function navItem(id, label) {
 
 function modeButton(mode, label) {
   return `<button class="${state.policy.mode === mode ? 'is-active' : ''}" type="button" data-action="set-mode" data-mode="${escapeAttr(mode)}">${escapeHtml(label)}</button>`;
+}
+
+function modeLabel(mode) {
+  if (mode === 'global') return '全局';
+  if (mode === 'direct') return '直连';
+  return '规则';
 }
 
 function metricCard(label, value) {

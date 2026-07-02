@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('h2o', {
   refresh: () => ipcRenderer.invoke('h2o:refresh'),
   setMode: (mode) => ipcRenderer.invoke('h2o:set-mode', mode),
   requestBroker: (name, payload) => ipcRenderer.invoke('h2o:request-broker', name, payload),
+  windowControl: (action) => ipcRenderer.invoke('h2o:window-control', action),
   onState: (listener) => {
     if (typeof listener !== 'function') return () => {};
     const wrapped = (_event, payload) => listener(payload);

@@ -39,6 +39,9 @@ const SYSTEM_DOMAIN_PROXY_ROUTE_REFRESH_TIMEOUT_MS = 2200;
 const SYSTEM_DOMAIN_PROXY_ROUTE_WARNING_MS = 60_000;
 const NETWORK_CHANGE_MONITOR_MS = 5000;
 const NETWORK_CHANGE_DEBOUNCE_MS = 1800;
+const DARWIN_ENDPOINT_ROUTE_PROBE_TIMEOUT_MS = 1800;
+const DARWIN_ENDPOINT_ROUTE_DELETE_TIMEOUT_MS = 2500;
+const DARWIN_ENDPOINT_ROUTE_REPAIR_COOLDOWN_MS = 20_000;
 const WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD = 3;
 const DEFAULT_CONFIG = {
   productId: defaultLauncherProductId(),
@@ -95,6 +98,7 @@ let lastSystemDomainProxyAuthorizationCanceledSignature = null;
 let lastSystemPacReverseProxyRoutes = [];
 let lastSystemPacReverseProxyRoutesWarningAt = 0;
 let lastNetworkEnvironmentSignature = null;
+let lastDarwinEndpointRouteRepairAt = 0;
 
 const TOP_DOCK_Y = 0;
 const TOP_REVEAL_ZONE = 18;
@@ -290,16 +294,23 @@ function registerIpc() {
       await saveAndBroadcast();
       return visibleRuntime();
     }
+    const catalogSync = await syncAppCenterCatalog('install-appcenter');
     runtime.apps.appcenter.installed = true;
     runtime.apps.appcenter.enabled = true;
     runtime.apps.appcenter.status = 'ready';
     runtime.apps.appcenter.installedVersion = runtime.apps.appcenter.version;
     runtime.apps.appcenter.latestVersion = runtime.apps.appcenter.latestVersion || runtime.apps.appcenter.version;
+    runtime.apps.appcenter.installPath = 'builtin://appcenter';
+    runtime.apps.appcenter.installSource = 'builtin';
+    runtime.apps.appcenter.installedAt = runtime.apps.appcenter.installedAt || nowIso();
     runtime.apps.appcenter.runtimeState = 'ready';
     runtime.apps.appcenter.lastAction = nowIso();
+    pushAppLog('appcenter', 'info', 'AppCenter builtin runtime is ready.');
     runtime.feedback = {
-      tone: 'success',
-      message: 'AppCenter 已安装，正在复用 mx-h2i standalone channel；本地缓存已记录 package/version。'
+      tone: catalogSync.ok === false ? 'warning' : 'success',
+      message: catalogSync.ok === false
+        ? `AppCenter 已安装，本地缓存已就绪；远程应用目录同步失败：${catalogSync.message}`
+        : `AppCenter 已安装，已同步 ${catalogSync.count} 个应用目录记录。`
     };
     touchRuntime('appcenter installed');
     await saveAndBroadcast();
@@ -314,18 +325,37 @@ function registerIpc() {
       await saveAndBroadcast();
       return visibleRuntime();
     }
-    runtime.apps.h2o.installed = true;
-    runtime.apps.h2o.enabled = true;
-    runtime.apps.h2o.status = 'enabled';
-    runtime.apps.h2o.installedVersion = runtime.apps.h2o.version;
-    runtime.apps.h2o.latestVersion = runtime.apps.h2o.latestVersion || runtime.apps.h2o.version;
-    runtime.apps.h2o.runtimeState = 'ready';
-    runtime.apps.h2o.lastAction = nowIso();
-    runtime.feedback = {
-      tone: 'success',
-      message: 'H2O 已启用，embed 运行时不会新建 WG peer；权限与网络状态经 MX-H2I broker-session 下发。'
-    };
-    touchRuntime('h2o enabled');
+    try {
+      const install = await installAppPackage(runtime.apps.h2o);
+      runtime.apps.h2o = normalizeApp({
+        ...runtime.apps.h2o,
+        ...install,
+        installed: true,
+        enabled: true,
+        status: 'enabled',
+        runtimeState: 'ready',
+        lastAction: nowIso(),
+        errorMessage: null
+      }, runtime.apps.h2o);
+      pushAppLog('h2o', 'info', `Installed ${runtime.apps.h2o.packageName} from ${install.installSource}.`);
+      runtime.feedback = {
+        tone: 'success',
+        message: 'H2O 已安装并启用。'
+      };
+      touchRuntime('h2o enabled');
+    } catch (error) {
+      const message = errorMessage(error);
+      runtime.apps.h2o.status = 'error';
+      runtime.apps.h2o.runtimeState = 'error';
+      runtime.apps.h2o.errorMessage = message;
+      runtime.apps.h2o.lastAction = nowIso();
+      pushAppLog('h2o', 'error', message);
+      runtime.feedback = {
+        tone: 'warning',
+        message: `H2O 安装失败：${message}`
+      };
+      touchRuntime('h2o install failed');
+    }
     await saveAndBroadcast();
     return visibleRuntime();
   });
@@ -351,6 +381,7 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:check-updates', async () => {
+    const catalogSync = await syncAppCenterCatalog('check-updates');
     runtime.update = {
       status: 'ready',
       currentVersion: app.getVersion(),
@@ -362,8 +393,10 @@ function registerIpc() {
       lastCheckedAt: nowIso()
     };
     runtime.feedback = {
-      tone: 'info',
-      message: '灰度更新策略已读取。'
+      tone: catalogSync.ok === false ? 'warning' : 'info',
+      message: catalogSync.ok === false
+        ? `灰度更新策略已读取；AppCenter 目录同步失败：${catalogSync.message}`
+        : `灰度更新策略已读取，AppCenter 目录已同步 ${catalogSync.count} 个应用。`
     };
     touchRuntime('update checked');
     await saveAndBroadcast();
@@ -726,7 +759,13 @@ function scheduleNetworkChangeRecovery(reason) {
 
 async function handleNetworkChange(reason) {
   const recoveryReason = `network-change-${reason || 'detected'}`;
-  scheduleWireGuardRecovery(recoveryReason, [1500, 5000, 15_000], { allowPrivileged: false });
+  const endpointRouteRepair = await repairDarwinStaleEndpointRoutesForRuntime(recoveryReason, { force: true });
+  await recordDarwinEndpointRouteRepairDiagnostics(endpointRouteRepair, recoveryReason);
+  scheduleWireGuardRecovery(
+    recoveryReason,
+    endpointRouteRepair?.repaired ? [500, 2500, 8000] : [1500, 5000, 15_000],
+    { allowPrivileged: false }
+  );
   if (runtime?.connection?.state !== 'connected') return;
   await refreshSystemDomainProxyAfterNetworkChange(recoveryReason);
 }
@@ -757,13 +796,15 @@ async function refreshSystemDomainProxyAfterNetworkChange(reason) {
 
 async function captureNetworkSignature() {
   if (process.platform !== 'darwin') return null;
-  const [route, services] = await Promise.all([
+  const [route, services, networkInfo] = await Promise.all([
     execFileText('/sbin/route', ['-n', 'get', 'default']).catch((err) => `route-error:${errorMessage(err)}`),
-    execFileText('/usr/sbin/networksetup', ['-listallnetworkservices']).catch((err) => `services-error:${errorMessage(err)}`)
+    execFileText('/usr/sbin/networksetup', ['-listallnetworkservices']).catch((err) => `services-error:${errorMessage(err)}`),
+    execFileText('/usr/sbin/scutil', ['--nwi']).catch((err) => `nwi-error:${errorMessage(err)}`)
   ]);
   return JSON.stringify({
     route: compactDarwinDefaultRoute(route),
-    services: compactDarwinNetworkServices(services)
+    services: compactDarwinNetworkServices(services),
+    networkInfo: compactDarwinNetworkInfo(networkInfo)
   });
 }
 
@@ -784,6 +825,14 @@ function compactDarwinNetworkServices(stdout) {
     .filter((line) => line && !line.startsWith('An asterisk'))
     .map((line) => line.replace(/^\*\s*/, ''))
     .sort();
+}
+
+function compactDarwinNetworkInfo(stdout) {
+  return String(stdout || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^(IPv4|Reachable|Network interfaces|utun|en\d|awdl|llw|flags|nwi-error:)/i.test(line))
+    .slice(0, 80);
 }
 
 function execFileText(command, args = [], options = {}) {
@@ -1121,6 +1170,7 @@ async function collectNetworkEnvironmentDiagnostics(reason = 'manual', options =
   const status = typeof systemDomainProxyManager?.status === 'function'
     ? systemDomainProxyManager.status()
     : null;
+  const endpointRoute = await collectDarwinEndpointRouteDiagnostics(reason, { phase });
   let resolution = null;
   try {
     const mod = await import('@qpjoy/electron-launcher/network-diagnostics');
@@ -1154,6 +1204,7 @@ async function collectNetworkEnvironmentDiagnostics(reason = 'manual', options =
     phase,
     host: host || null,
     resolution,
+    endpointRoute,
     systemDomainProxy: compactSystemDomainProxyStatus(status),
     priority: phase === 'connected'
       ? ['v2-split-dns', 'mx-h2i-wireguard', 'system-proxy-or-dns-for-unmatched', 'external-dns-for-unmatched']
@@ -1165,6 +1216,7 @@ async function collectNetworkEnvironmentDiagnostics(reason = 'manual', options =
 async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
   const connected = runtime?.connection?.state === 'connected';
   const before = await collectNetworkEnvironmentDiagnostics(`${reason}-before`);
+  const endpointRouteRepair = await repairDarwinStaleEndpointRoutesForRuntime(reason, { force: true });
   let systemDomainProxy = null;
   if (connected) {
     systemDomainProxy = await ensureSystemDomainProxyForRuntime(reason);
@@ -1198,6 +1250,7 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
         reason,
         connected,
         before,
+        endpointRouteRepair,
         systemDomainProxy,
         after,
         updatedAt: nowIso()
@@ -1206,17 +1259,423 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
     }
   };
   runtime.feedback = {
-    tone: systemDomainProxy?.error ? 'warning' : after?.resolution?.severity === 'error' ? 'warning' : 'success',
+    tone: systemDomainProxy?.error || (endpointRouteRepair?.stale === true && endpointRouteRepair?.repaired !== true)
+      ? 'warning'
+      : after?.resolution?.severity === 'error'
+        ? 'warning'
+        : 'success',
     message: connected
-      ? `已重新确认 MX-H2I PAC/DNS：${after?.resolution?.message || 'network ready'}`
-      : `已执行系统网络修复：${after?.resolution?.message || 'stale state cleared'}`
+      ? `已重新确认 MX-H2I PAC/DNS：${after?.resolution?.message || 'network ready'}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
+      : `已执行系统网络修复：${after?.resolution?.message || 'stale state cleared'}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
   };
   touchRuntime(`system network repaired: ${reason}`);
   return {
     before,
+    endpointRouteRepair,
     systemDomainProxy,
     after
   };
+}
+
+async function recordDarwinEndpointRouteRepairDiagnostics(result, reason) {
+  if (!runtime || !result || result.supported !== true) return false;
+  if (result.stale !== true && result.repaired !== true && !Array.isArray(result.repairs)) return false;
+  runtime.connection = {
+    ...(runtime.connection || idleConnection()),
+    diagnostics: {
+      ...(runtime.connection?.diagnostics || {}),
+      endpointRouteRepair: result,
+      updatedAt: nowIso()
+    }
+  };
+  if (result.repaired === true) {
+    runtime.feedback = {
+      tone: 'info',
+      message: `检测到网络切换后 relay endpoint 路由仍指向旧路径，已自动刷新：${darwinEndpointRouteRepairSummary(result)}`
+    };
+  } else if (result.stale === true) {
+    runtime.feedback = {
+      tone: 'warning',
+      message: `检测到 relay endpoint 路由疑似仍指向旧路径：${darwinEndpointRouteRepairSummary(result)}${darwinEndpointRouteRepairFailure(result)}`
+    };
+  } else {
+    return false;
+  }
+  touchRuntime(`endpoint route checked: ${reason}`);
+  await saveAndBroadcast();
+  return true;
+}
+
+async function collectDarwinEndpointRouteDiagnostics(reason = 'manual', options = {}) {
+  if (process.platform !== 'darwin') return null;
+  const targetSet = await darwinEndpointRouteTargets();
+  const defaultRoute = await darwinRouteGet('default');
+  const routes = [];
+  for (const target of targetSet.targets.slice(0, 8)) {
+    const route = await darwinRouteGet(target.address);
+    const classification = classifyDarwinEndpointRoute(route, defaultRoute);
+    routes.push({
+      target,
+      ok: route.ok === true,
+      routeTo: route.routeTo || null,
+      destination: route.destination || null,
+      gateway: route.gateway || null,
+      interfaceName: route.interfaceName || null,
+      ifscope: route.ifscope || null,
+      flags: arrayValue(route.flags, []),
+      stale: classification.stale,
+      staleReason: classification.reason,
+      error: route.error || null,
+      raw: route.raw || null
+    });
+  }
+  return {
+    supported: true,
+    platform: process.platform,
+    reason,
+    phase: options.phase || networkDiagnosticPhase(),
+    targets: targetSet.targets,
+    targetErrors: targetSet.errors,
+    defaultRoute: defaultRoute.ok === true
+      ? {
+          gateway: defaultRoute.gateway || null,
+          interfaceName: defaultRoute.interfaceName || null,
+          ifscope: defaultRoute.ifscope || null,
+          flags: arrayValue(defaultRoute.flags, [])
+        }
+      : {
+          ok: false,
+          error: defaultRoute.error || 'default route unavailable'
+        },
+    routes,
+    stale: routes.some((route) => route.stale === true),
+    updatedAt: nowIso()
+  };
+}
+
+async function repairDarwinStaleEndpointRoutesForRuntime(reason = 'manual', options = {}) {
+  if (process.platform !== 'darwin') return null;
+  const diagnostics = await collectDarwinEndpointRouteDiagnostics(reason, options);
+  if (!diagnostics || diagnostics.supported !== true) return diagnostics;
+  const staleRoutes = diagnostics.routes.filter((route) => route.stale === true && route.target?.address);
+  const now = Date.now();
+  const coolingDown = options.force !== true && now - lastDarwinEndpointRouteRepairAt < DARWIN_ENDPOINT_ROUTE_REPAIR_COOLDOWN_MS;
+  const repairs = [];
+  if (staleRoutes.length > 0 && !coolingDown) {
+    lastDarwinEndpointRouteRepairAt = now;
+  }
+  for (const route of staleRoutes) {
+    if (coolingDown) {
+      repairs.push({
+        target: route.target,
+        ok: false,
+        skipped: true,
+        skipReason: 'cooldown',
+        updatedAt: nowIso()
+      });
+      continue;
+    }
+    const repair = await deleteDarwinHostRoute(route.target.address);
+    let after = null;
+    if (repair.ok === true) {
+      const afterRoute = await darwinRouteGet(route.target.address);
+      const afterClassification = classifyDarwinEndpointRoute(afterRoute, diagnostics.defaultRoute);
+      after = {
+        ok: afterRoute.ok === true,
+        gateway: afterRoute.gateway || null,
+        interfaceName: afterRoute.interfaceName || null,
+        flags: arrayValue(afterRoute.flags, []),
+        stale: afterClassification.stale,
+        staleReason: afterClassification.reason,
+        error: afterRoute.error || null
+      };
+    }
+    repairs.push({
+      target: route.target,
+      before: {
+        gateway: route.gateway,
+        interfaceName: route.interfaceName,
+        flags: arrayValue(route.flags, []),
+        staleReason: route.staleReason
+      },
+      ...repair,
+      after,
+      updatedAt: nowIso()
+    });
+  }
+  return {
+    ...diagnostics,
+    repairs,
+    repaired: repairs.some((repair) => repair.ok === true && repair.after?.stale !== true),
+    skipped: coolingDown,
+    skipReason: coolingDown ? 'cooldown' : null,
+    updatedAt: nowIso()
+  };
+}
+
+async function darwinEndpointRouteTargets() {
+  const routePlan = normalizeRoutePlan(runtime?.connection?.routePlan);
+  const candidates = [
+    { source: 'connection.domesticRelayEndpoint', value: runtime?.connection?.domesticRelayEndpoint, endpoint: true },
+    { source: 'routePlan.domesticRelayEndpoint', value: routePlan?.domesticRelayEndpoint, endpoint: true },
+    { source: 'routePlan.h2iDirectEndpoint', value: routePlan?.h2iDirectEndpoint, endpoint: true },
+    { source: 'config.domesticRelayHost', value: runtime?.config?.domesticRelayHost, endpoint: false },
+    { source: 'default.domesticRelayHost', value: DEFAULT_CONFIG.domesticRelayHost, endpoint: false }
+  ];
+  const targets = [];
+  const errors = [];
+  for (const candidate of candidates) {
+    const resolved = await resolveDarwinEndpointRouteCandidate(candidate);
+    for (const row of resolved) {
+      if (row.error) errors.push(row);
+      else targets.push(row);
+    }
+  }
+  const seen = new Set();
+  return {
+    targets: targets.filter((target) => {
+      const key = target.address;
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }),
+    errors
+  };
+}
+
+async function resolveDarwinEndpointRouteCandidate(candidate) {
+  const text = nullableString(candidate.value);
+  if (!text) return [];
+  const host = candidate.endpoint ? publicHostFromEndpoint(text) : hostnameFromMaybeUrl(text);
+  if (!host || host === 'localhost' || net.isIP(host) === 6) return [];
+  if (net.isIP(host) === 4) {
+    return isPublicIpv4Address(host)
+      ? [{ source: candidate.source, value: text, host, address: host }]
+      : [];
+  }
+  try {
+    const rows = await dnsPromises.lookup(host, { family: 4, all: true });
+    return rows
+      .map((row) => nullableString(row?.address))
+      .filter((address) => address && isPublicIpv4Address(address))
+      .map((address) => ({ source: candidate.source, value: text, host, address }));
+  } catch (err) {
+    return [{
+      source: candidate.source,
+      value: text,
+      host,
+      address: null,
+      error: errorMessage(err)
+    }];
+  }
+}
+
+async function darwinRouteGet(target) {
+  const host = nullableString(target);
+  if (!host) return { ok: false, error: 'empty route target' };
+  try {
+    const stdout = await execFileText('/sbin/route', ['-n', 'get', host], {
+      timeoutMs: DARWIN_ENDPOINT_ROUTE_PROBE_TIMEOUT_MS
+    });
+    return {
+      ok: true,
+      ...parseDarwinRouteGet(stdout)
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: errorMessage(err),
+      stderr: tailText(err?.stderr, 800),
+      stdout: tailText(err?.stdout, 800)
+    };
+  }
+}
+
+function parseDarwinRouteGet(stdout) {
+  const text = String(stdout || '');
+  const flags = pickDarwinRouteField(text, 'flags')
+    ?.replace(/[<>]/g, '')
+    .split(',')
+    .map((flag) => flag.trim())
+    .filter(Boolean) || [];
+  return {
+    routeTo: pickDarwinRouteField(text, 'route to'),
+    destination: pickDarwinRouteField(text, 'destination'),
+    gateway: pickDarwinRouteField(text, 'gateway'),
+    interfaceName: pickDarwinRouteField(text, 'interface'),
+    ifscope: pickDarwinRouteField(text, 'ifscope'),
+    flags,
+    raw: tailText(text, 1200)
+  };
+}
+
+function pickDarwinRouteField(text, name) {
+  const escaped = String(name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return nullableString(String(text || '').match(new RegExp(`^\\s*${escaped}:\\s*(.+)$`, 'im'))?.[1]);
+}
+
+function classifyDarwinEndpointRoute(route, defaultRoute) {
+  if (!route || route.ok !== true) return { stale: false, reason: null };
+  const flags = new Set(arrayValue(route.flags, []));
+  if (!flags.has('HOST')) return { stale: false, reason: null };
+  const gateway = nullableString(route.gateway);
+  const interfaceName = nullableString(route.interfaceName);
+  const defaultGateway = nullableString(defaultRoute?.gateway);
+  const defaultInterfaceName = nullableString(defaultRoute?.interfaceName);
+  if (gateway && isDarwinProxyFakeGateway(gateway)) {
+    return { stale: true, reason: `proxy-fake-gateway:${gateway}` };
+  }
+  if (flags.has('WASCLONED') && gateway && defaultGateway && gateway !== defaultGateway) {
+    return { stale: true, reason: `gateway-mismatch:${gateway}->${defaultGateway}` };
+  }
+  if (flags.has('WASCLONED') && interfaceName && defaultInterfaceName && interfaceName !== defaultInterfaceName) {
+    return { stale: true, reason: `interface-mismatch:${interfaceName}->${defaultInterfaceName}` };
+  }
+  return { stale: false, reason: null };
+}
+
+async function deleteDarwinHostRoute(address) {
+  const target = nullableString(address);
+  if (!target) return { ok: false, error: 'empty route delete target' };
+  const attempts = [
+    ['delete', '-host', target],
+    ['delete', target]
+  ];
+  const failures = [];
+  for (const args of attempts) {
+    try {
+      const stdout = await execFileText('/sbin/route', args, {
+        timeoutMs: DARWIN_ENDPOINT_ROUTE_DELETE_TIMEOUT_MS
+      });
+      return {
+        ok: true,
+        command: `/sbin/route ${args.join(' ')}`,
+        stdout: tailText(stdout, 800)
+      };
+    } catch (err) {
+      const message = `${errorMessage(err)} ${err?.stderr || ''} ${err?.stdout || ''}`.trim();
+      const failure = {
+        command: `/sbin/route ${args.join(' ')}`,
+        error: errorMessage(err),
+        stderr: tailText(err?.stderr, 800),
+        stdout: tailText(err?.stdout, 800),
+        requiresPrivilege: /must be root|not permitted|operation not permitted|permission denied|权限/i.test(message)
+      };
+      if (/not in table|not found|no such process/i.test(message)) {
+        return {
+          ...failure,
+          ok: true,
+          notFound: true
+        };
+      }
+      failures.push(failure);
+    }
+  }
+  return {
+    ok: false,
+    failures,
+    error: failures[failures.length - 1]?.error || 'route delete failed',
+    requiresPrivilege: failures.some((failure) => failure.requiresPrivilege === true)
+  };
+}
+
+function darwinEndpointRouteRepairFeedback(result) {
+  if (!result || result.supported !== true) return '';
+  if (result.repaired === true) return ' 已检测并刷新 relay endpoint 的旧 host route，请重试连接。';
+  if (result.stale === true) return ` 检测到 relay endpoint host route 仍指向旧路径（${darwinEndpointRouteRepairSummary(result)}）${darwinEndpointRouteRepairFailure(result)}`;
+  return '';
+}
+
+function darwinEndpointRouteRepairSummary(result) {
+  const routes = objectList(result?.routes);
+  const route = routes.find((item) => item?.stale === true) || routes[0];
+  const target = route?.target?.address || route?.target?.host || 'unknown endpoint';
+  const via = [route?.gateway, route?.interfaceName].filter(Boolean).join(' / ') || 'unknown route';
+  return `${target} via ${via}`;
+}
+
+function darwinEndpointRouteRepairFailure(result) {
+  const unchanged = objectList(result?.repairs).find((repair) => repair?.ok === true && repair?.after?.stale === true);
+  if (unchanged) {
+    const via = [unchanged.after?.gateway, unchanged.after?.interfaceName].filter(Boolean).join(' / ') || 'unknown route';
+    return `，删除后系统仍解析到 ${via}。`;
+  }
+  const failed = objectList(result?.repairs).find((repair) => repair?.ok !== true && repair?.skipped !== true);
+  if (!failed) return '。';
+  if (failed.requiresPrivilege === true) return '，自动删除需要系统 route 权限。';
+  return failed.error ? `，自动删除失败：${failed.error}。` : '，自动删除失败。';
+}
+
+function compactDarwinEndpointRouteSignature(result) {
+  return {
+    stale: result?.stale === true,
+    repaired: result?.repaired === true,
+    routes: objectList(result?.routes)
+      .map((route) => ({
+        target: route?.target?.address || null,
+        gateway: route?.gateway || null,
+        interfaceName: route?.interfaceName || null,
+        flags: arrayValue(route?.flags, []).sort(),
+        stale: route?.stale === true,
+        staleReason: route?.staleReason || null
+      }))
+      .sort((a, b) => String(a.target || '').localeCompare(String(b.target || ''))),
+    repairs: objectList(result?.repairs)
+      .map((repair) => ({
+        target: repair?.target?.address || null,
+        ok: repair?.ok === true,
+        skipped: repair?.skipped === true,
+        notFound: repair?.notFound === true,
+        requiresPrivilege: repair?.requiresPrivilege === true,
+        error: repair?.error || null
+      }))
+  };
+}
+
+function objectList(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function isDarwinProxyFakeGateway(ip) {
+  return isIpv4InCidr(ip, '198.18.0.0/15');
+}
+
+function isPublicIpv4Address(ip) {
+  const value = ipv4ToInt(ip);
+  if (value === null) return false;
+  if (isIpv4InCidr(ip, '0.0.0.0/8')) return false;
+  if (isIpv4InCidr(ip, '10.0.0.0/8')) return false;
+  if (isIpv4InCidr(ip, '100.64.0.0/10')) return false;
+  if (isIpv4InCidr(ip, '127.0.0.0/8')) return false;
+  if (isIpv4InCidr(ip, '169.254.0.0/16')) return false;
+  if (isIpv4InCidr(ip, '172.16.0.0/12')) return false;
+  if (isIpv4InCidr(ip, '192.168.0.0/16')) return false;
+  if (isIpv4InCidr(ip, '198.18.0.0/15')) return false;
+  if (value >= ipv4ToInt('224.0.0.0')) return false;
+  return true;
+}
+
+function isIpv4InCidr(ip, cidr) {
+  const address = ipv4ToInt(ip);
+  const [baseText, bitsText] = String(cidr || '').split('/');
+  const base = ipv4ToInt(baseText);
+  const bits = Number(bitsText);
+  if (address === null || base === null || !Number.isInteger(bits) || bits < 0 || bits > 32) return false;
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  return (address & mask) === (base & mask);
+}
+
+function ipv4ToInt(ip) {
+  const parts = String(ip || '').split('.');
+  if (parts.length !== 4) return null;
+  let value = 0;
+  for (const part of parts) {
+    if (!/^\d+$/.test(part)) return null;
+    const number = Number(part);
+    if (!Number.isInteger(number) || number < 0 || number > 255) return null;
+    value = (value << 8) + number;
+  }
+  return value >>> 0;
 }
 
 function networkDiagnosticPhase() {
@@ -1454,6 +1913,9 @@ function networkEnvironmentSignature(diagnostics) {
     addresses: arrayValue(resolution.addresses, [])
       .map((row) => `${row.address}:${row.classification}`)
       .sort(),
+    endpointRoute: diagnostics.endpointRoute
+      ? compactDarwinEndpointRouteSignature(diagnostics.endpointRoute)
+      : null,
     systemDomainProxy: diagnostics.systemDomainProxy
       ? {
           applied: diagnostics.systemDomainProxy.applied === true,
@@ -2025,7 +2487,7 @@ function normalizeAuth(input) {
 
 function normalizeApps(input) {
   const row = input && typeof input === 'object' ? input : {};
-  return {
+  const apps = {
     appcenter: normalizeApp(row.appcenter, {
       appId: 'appcenter',
       displayName: 'AppCenter',
@@ -2041,6 +2503,7 @@ function normalizeApps(input) {
       updatePolicy: 'launcher-managed',
       permissions: ['auth.read', 'appcenter.read', 'permission.request'],
       installSource: 'builtin',
+      installPath: 'builtin://appcenter',
       entrypoints: {
         desktop: 'app://appcenter/index.html',
         settings: 'app://appcenter/settings.html'
@@ -2061,6 +2524,7 @@ function normalizeApps(input) {
       updatePolicy: 'launcher-managed',
       permissions: ['network.hdi.status', 'network.proxy.app', 'network.dns.policy', 'network.pac.policy'],
       installSource: 'npm',
+      installPath: null,
       entrypoints: {
         desktop: 'app://h2o/index.html',
         settings: 'app://h2o/settings.html',
@@ -2068,27 +2532,277 @@ function normalizeApps(input) {
       }
     })
   };
+  for (const [key, value] of Object.entries(row)) {
+    if (apps[key]) continue;
+    apps[key] = normalizeApp(value, defaultAppRecordFor(value, key));
+  }
+  return apps;
 }
 
 function normalizeApp(input, defaults) {
   const row = input && typeof input === 'object' ? input : {};
   const installed = row.installed === true;
   const enabled = row.enabled === true;
+  const version = nullableString(row.version) || defaults.version || '0.1.0';
+  const launcherMode = row.launcherMode === 'standalone' ? 'standalone' : row.launcherMode === 'embed' ? 'embed' : defaults.launcherMode || 'embed';
   return {
     ...defaults,
-    networkScope: nullableString(row.networkScope) || defaults.networkScope || (defaults.launcherMode === 'embed' ? 'broker-session' : 'owner'),
+    appId: nullableString(row.appId) || defaults.appId,
+    displayName: nullableString(row.displayName) || defaults.displayName || nullableString(row.appId) || defaults.appId || 'App',
+    category: nullableString(row.category) || defaults.category || 'custom',
+    version,
+    launcherMode,
+    standaloneChannelProductId: nullableString(row.standaloneChannelProductId) || defaults.standaloneChannelProductId || 'mx-h2i',
+    productNetworkId: nullableString(row.productNetworkId) || nullableString(defaults.productNetworkId),
+    serviceVip: nullableString(row.serviceVip) || nullableString(defaults.serviceVip),
+    updatePolicy: nullableString(row.updatePolicy) || defaults.updatePolicy || 'launcher-managed',
+    permissions: arrayValue(row.permissions, defaults.permissions || []),
+    requiredCapabilities: arrayValue(row.requiredCapabilities, defaults.requiredCapabilities || []),
+    channels: arrayValue(row.channels, defaults.channels || []),
+    networkScope: nullableString(row.networkScope) || defaults.networkScope || (launcherMode === 'embed' ? 'broker-session' : 'owner'),
     packageName: nullableString(row.packageName) || defaults.packageName || null,
-    latestVersion: nullableString(row.latestVersion) || defaults.latestVersion || defaults.version,
+    latestVersion: nullableString(row.latestVersion) || version || defaults.latestVersion || defaults.version,
     installedVersion: nullableString(row.installedVersion),
+    installedAt: nullableString(row.installedAt),
+    installPath: nullableString(row.installPath) || nullableString(defaults.installPath),
     description: nullableString(row.description) || defaults.description || '',
     installSource: nullableString(row.installSource) || defaults.installSource || 'npm',
     runtimeState: nullableString(row.runtimeState) || (enabled ? 'ready' : installed ? 'installed' : 'idle'),
     entrypoints: normalizeStringRecord(row.entrypoints, defaults.entrypoints || {}),
+    errorMessage: nullableString(row.errorMessage),
+    logs: normalizeAppLogs(row.logs),
     installed,
     enabled,
     status: stringValue(row.status, enabled ? 'ready' : installed ? 'installed' : 'available'),
     lastAction: typeof row.lastAction === 'string' ? row.lastAction : null
   };
+}
+
+function defaultAppRecordFor(input, fallbackAppId) {
+  const row = input && typeof input === 'object' ? input : {};
+  const appId = nullableString(row.appId) || safePathSegment(fallbackAppId);
+  return {
+    appId,
+    displayName: nullableString(row.displayName) || appId,
+    category: nullableString(row.category) || 'custom',
+    description: nullableString(row.description) || '',
+    packageName: nullableString(row.packageName) || `@qpjoy/electron-launcher-app-${safePathSegment(appId).toLowerCase()}`,
+    launcherMode: row.launcherMode === 'standalone' ? 'standalone' : 'embed',
+    standaloneChannelProductId: nullableString(row.standaloneChannelProductId) || 'mx-h2i',
+    networkScope: nullableString(row.networkScope) || (row.launcherMode === 'standalone' ? 'owner' : 'broker-session'),
+    version: nullableString(row.version) || '0.1.0',
+    latestVersion: nullableString(row.latestVersion) || nullableString(row.version) || '0.1.0',
+    updatePolicy: nullableString(row.updatePolicy) || 'launcher-managed',
+    permissions: arrayValue(row.permissions, []),
+    requiredCapabilities: arrayValue(row.requiredCapabilities, []),
+    installSource: nullableString(row.installSource) || 'npm',
+    entrypoints: normalizeStringRecord(row.entrypoints, {})
+  };
+}
+
+function normalizeAppLogs(value) {
+  return Array.isArray(value)
+    ? value.map((item) => {
+      const row = item && typeof item === 'object' ? item : {};
+      const level = ['info', 'warning', 'error'].includes(row.level) ? row.level : 'info';
+      const message = nullableString(row.message);
+      if (!message) return null;
+      return {
+        level,
+        message,
+        at: nullableString(row.at) || nowIso()
+      };
+    }).filter(Boolean).slice(0, 20)
+    : [];
+}
+
+function pushAppLog(appId, level, message) {
+  const appRecord = runtime?.apps?.[appId];
+  if (!appRecord) return;
+  appRecord.logs = normalizeAppLogs([
+    { level, message, at: nowIso() },
+    ...(appRecord.logs || [])
+  ]);
+}
+
+async function syncAppCenterCatalog(reason) {
+  try {
+    const baseUrl = appCenterCatalogBaseUrl();
+    if (!baseUrl) return { ok: false, count: 0, message: 'Internal API baseUrl 为空' };
+    const params = new URLSearchParams();
+    params.set('sourceAppId', PRODUCT_ID);
+    const userId = appCenterCatalogUserId();
+    if (userId) params.set('userId', userId);
+    const pathName = `/internal/v1/app-center/apps?${params.toString()}`;
+    const payload = await requestJson(joinApiUrl(baseUrl, pathName), {
+      timeoutMs: 4500,
+      headers: appCenterCatalogHeaders()
+    });
+    const apps = Array.isArray(payload?.apps) ? payload.apps : [];
+    mergeAppCenterCatalogApps(apps);
+    pushAppLog('appcenter', 'info', `Synced ${apps.length} apps from Internal catalog (${reason}).`);
+    touchRuntime(`appcenter catalog synced:${reason}`);
+    return { ok: true, count: apps.length, message: '' };
+  } catch (error) {
+    const message = errorMessage(error);
+    pushAppLog('appcenter', 'warning', `Catalog sync failed (${reason}): ${message}`);
+    return { ok: false, count: 0, message };
+  }
+}
+
+function mergeAppCenterCatalogApps(remoteApps) {
+  const next = { ...(runtime.apps || normalizeApps({})) };
+  for (const raw of remoteApps) {
+    const remote = raw && typeof raw === 'object' ? raw : {};
+    const appId = nullableString(remote.appId);
+    if (!appId) continue;
+    const local = next[appId] || {};
+    const entrypoints = {
+      ...(local.entrypoints || {}),
+      ...normalizeStringRecord(remote.entrypoints, {})
+    };
+    const merged = {
+      ...remote,
+      appId,
+      latestVersion: nullableString(remote.latestVersion) || nullableString(remote.version) || nullableString(local.latestVersion) || nullableString(local.version),
+      installSource: nullableString(local.installSource) || nullableString(remote.installSource) || (remote.builtin === true ? 'builtin' : 'npm'),
+      installPath: nullableString(local.installPath) || nullableString(remote.installPath),
+      installed: local.installed === true,
+      enabled: local.enabled === true,
+      installedVersion: nullableString(local.installedVersion),
+      installedAt: nullableString(local.installedAt),
+      runtimeState: nullableString(local.runtimeState) || 'idle',
+      status: nullableString(local.status) || (remote.enabled === false ? 'disabled' : 'available'),
+      lastAction: nullableString(local.lastAction),
+      logs: local.logs || [],
+      errorMessage: nullableString(local.errorMessage),
+      entrypoints
+    };
+    next[appId] = normalizeApp(merged, defaultAppRecordFor({ ...remote, entrypoints }, appId));
+  }
+  runtime.apps = next;
+}
+
+function appCenterCatalogBaseUrl() {
+  return normalizeBaseUrl(runtime?.connection?.internalBaseUrl)
+    || normalizeBaseUrl(runtime?.config?.internalApiBaseUrl)
+    || normalizeBaseUrl(runtime?.config?.bootstrapApiBaseUrl);
+}
+
+function appCenterCatalogHeaders() {
+  const token = nullableString(runtime?.auth?.accessToken);
+  if (!token) return {};
+  const type = nullableString(runtime?.auth?.tokenType) || 'Bearer';
+  return { authorization: `${type} ${token}` };
+}
+
+function appCenterCatalogUserId() {
+  return parseUserIdFromSubject(runtime?.auth?.subject)
+    || nullableString(runtime?.identity?.account)
+    || null;
+}
+
+async function installAppPackage(appRecord) {
+  const source = nullableString(appRecord?.installSource) || 'npm';
+  const packageName = nullableString(appRecord?.packageName);
+  const version = nullableString(appRecord?.latestVersion) || nullableString(appRecord?.version) || '0.1.0';
+  if (!packageName) throw new Error('缺少 packageName');
+  if (source === 'builtin') {
+    return {
+      installSource: 'builtin',
+      installPath: nullableString(appRecord.installPath) || `builtin://${appRecord.appId}`,
+      installedVersion: version,
+      installedAt: nowIso()
+    };
+  }
+  const workspacePath = await resolveWorkspaceEntrypoint(appRecord);
+  if (workspacePath) {
+    const packageJson = await readPackageJson(path.join(workspacePath, 'package.json'));
+    return {
+      installSource: 'workspace',
+      installPath: workspacePath,
+      installedVersion: nullableString(packageJson.version) || version,
+      installedAt: nowIso()
+    };
+  }
+  const targetDir = path.join(app.getPath('userData'), 'appcenter-cache', safePathSegment(appRecord.appId || packageName));
+  await fs.mkdir(targetDir, { recursive: true });
+  await fs.writeFile(path.join(targetDir, 'package.json'), JSON.stringify({
+    private: true,
+    dependencies: {
+      [packageName]: version
+    }
+  }, null, 2));
+  const packageSpec = `${packageName}@${version}`;
+  const packageManager = nullableString(process.env.MX_H2I_APPCENTER_PACKAGE_MANAGER) || 'npm';
+  await execPackageManagerInstall(packageManager, targetDir, packageSpec);
+  return {
+    installSource: source,
+    installPath: targetDir,
+    installedVersion: version,
+    installedAt: nowIso()
+  };
+}
+
+async function resolveWorkspaceEntrypoint(appRecord) {
+  const devEntrypoint = nullableString(appRecord?.entrypoints?.dev);
+  if (!devEntrypoint?.startsWith('workspace:')) return null;
+  const workspaceRelative = devEntrypoint.slice('workspace:'.length).trim();
+  if (!workspaceRelative) return null;
+  const demoRelative = path.resolve(__dirname, '..', '..', workspaceRelative.replace(/^demos\//, ''));
+  const rootRelative = path.resolve(__dirname, '..', '..', '..', workspaceRelative);
+  for (const candidate of [demoRelative, rootRelative]) {
+    try {
+      const stat = await fs.stat(path.join(candidate, 'package.json'));
+      if (stat.isFile()) return candidate;
+    } catch {
+      // try next candidate
+    }
+  }
+  return null;
+}
+
+async function readPackageJson(filePath) {
+  try {
+    return JSON.parse(await fs.readFile(filePath, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function execPackageManagerInstall(packageManager, cwd, packageSpec) {
+  const command = packageManager === 'pnpm' ? 'pnpm' : 'npm';
+  const args = command === 'pnpm'
+    ? ['add', packageSpec, '--prod']
+    : ['install', packageSpec, '--omit=dev', '--no-audit', '--no-fund'];
+  return new Promise((resolve, reject) => {
+    execFile(command, args, {
+      cwd,
+      timeout: 120_000,
+      maxBuffer: 1024 * 1024,
+      env: strippedInstallEnv()
+    }, (err, stdout, stderr) => {
+      if (err) {
+        reject(new Error(String(stderr || stdout || err.message).split(/\r?\n/).slice(-8).join('\n')));
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+function strippedInstallEnv() {
+  const next = { ...process.env };
+  delete next.ELECTRON_RUN_AS_NODE;
+  delete next.ELECTRON_NO_ATTACH_CONSOLE;
+  delete next.NODE_OPTIONS;
+  delete next.npm_config_node_options;
+  delete next.NPM_CONFIG_NODE_OPTIONS;
+  return next;
+}
+
+function safePathSegment(value) {
+  return String(value || 'app').trim().replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '') || 'app';
 }
 
 function normalizeUpdate(input, config) {
@@ -2738,6 +3452,9 @@ async function applyNetworkSession(session, options) {
 async function applyConnectionError(label, err) {
   const previous = retainableConnectionSnapshot(runtime.connection);
   const classified = classifyConnectionError(err);
+  const endpointRouteRepair = isBootstrapReachabilityState(classified.state)
+    ? await repairDarwinStaleEndpointRoutesForRuntime(`${label}-connect-error`, { force: true })
+    : null;
   const routePlan = normalizeRoutePlan(previous?.routePlan);
   if (previous && routePlan && isBootstrapReachabilityState(classified.state)) {
     const wireGuardResult = await probeWireGuardForConnection({
@@ -2759,15 +3476,16 @@ async function applyConnectionError(label, err) {
           label,
           message: classified.message,
           updatedAt: nowIso()
-        }
+        },
+        endpointRouteRepair
       }
     };
     runtime.auth = null;
     runtime.feedback = {
       tone: wireGuardResult.ready ? 'warning' : 'danger',
       message: wireGuardResult.ready
-        ? `${label}：bootstrap API 暂不可达，但本地 WireGuard overlay 仍可用；本次没有刷新租约。原始错误：${classified.message}`
-        : `${label}：bootstrap API 暂不可达，且本地 WireGuard 未 ready：${wireGuardResult.message}。原始错误：${classified.message}`
+        ? `${label}：bootstrap API 暂不可达，但本地 WireGuard overlay 仍可用；本次没有刷新租约。原始错误：${classified.message}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
+        : `${label}：bootstrap API 暂不可达，且本地 WireGuard 未 ready：${wireGuardResult.message}。原始错误：${classified.message}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
     };
     touchRuntime(`${label} bootstrap refresh failed`);
     return;
@@ -2775,12 +3493,24 @@ async function applyConnectionError(label, err) {
   runtime.connection = {
     ...(previous || idleConnection()),
     state: classified.state,
-    mode: previous?.mode || runtime.connection?.mode || 'guest'
+    mode: previous?.mode || runtime.connection?.mode || 'guest',
+    diagnostics: {
+      ...(previous?.diagnostics || runtime.connection?.diagnostics || {}),
+      bootstrapRefresh: {
+        ok: false,
+        state: classified.state,
+        label,
+        message: classified.message,
+        updatedAt: nowIso()
+      },
+      endpointRouteRepair,
+      updatedAt: nowIso()
+    }
   };
   runtime.auth = null;
   runtime.feedback = {
     tone: 'danger',
-    message: `${label}：${classified.message}`
+    message: `${label}：${classified.message}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
   };
   touchRuntime(`${label} failed`);
 }

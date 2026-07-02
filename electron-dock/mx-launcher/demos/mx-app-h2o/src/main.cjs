@@ -76,6 +76,23 @@ function createWindow() {
 
 function registerIpc() {
   ipcMain.handle('h2o:get-state', async () => visibleRuntime());
+  ipcMain.handle('h2o:window-control', (_event, action) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    if (action === 'close') {
+      mainWindow.close();
+      return true;
+    }
+    if (action === 'minimize') {
+      mainWindow.minimize();
+      return true;
+    }
+    if (action === 'zoom') {
+      if (mainWindow.isMaximized()) mainWindow.unmaximize();
+      else mainWindow.maximize();
+      return true;
+    }
+    return false;
+  });
   ipcMain.handle('h2o:connect-broker', async () => {
     await connectBroker();
     return visibleRuntime();

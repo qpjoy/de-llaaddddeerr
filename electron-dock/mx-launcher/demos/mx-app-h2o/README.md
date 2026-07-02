@@ -1,6 +1,15 @@
 # MX App H2O
 
-`@qpjoy/electron-launcher-app-h2o` is the first engineering demo for an MX-H2I embed launcher app. It is intentionally a normal npm-style Electron package: AppCenter can record the package name and version in Internal, cache the installed package locally, then open its entrypoint through the MX-H2I broker-session.
+`@qpjoy/electron-launcher-app-h2o` is the first MX-H2I embed launcher app demo.
+It is intentionally a normal npm-style Electron package: AppCenter can record
+the package name and version in Internal, cache the installed package locally,
+then open its entrypoint through the MX-H2I broker-session.
+
+The default screen is user-facing: connection health, proxy mode, DNS/PAC
+status, and recent activity are visible without exposing launcher internals.
+Developers and support users can click `Debug` to inspect inherited MX-H2I
+context such as broker session, socket path, package metadata, network scope,
+local IP, and capability bridge state.
 
 ## Development Test
 
@@ -28,6 +37,15 @@ MX-H2I ships H2O in its default AppCenter catalog:
 - `networkScope`: `broker-session`
 - `entrypoints.dev`: `workspace:demos/mx-app-h2o`
 
-In development, open MX-H2I, connect as guest or employee, install AppCenter, install H2O, then run this package with `pnpm --filter @qpjoy/electron-launcher-app-h2o dev`.
+In development, open MX-H2I, connect as guest or employee, install AppCenter,
+then install H2O from AppCenter. MX-H2I resolves `entrypoints.dev` to this
+workspace package, records the installed version and path in its local cache,
+and keeps operational details available from AppCenter's `Debug` button. Run
+this package with `pnpm --filter @qpjoy/electron-launcher-app-h2o dev` to test
+the embed UI directly.
 
-In production, Internal admin should upsert the AppCenter record with the same package name and the release version. The client-side AppCenter cache stores `installedVersion`, `latestVersion`, `installSource`, `entrypoints`, and `lastAction`; the remote DB keeps the authoritative latest package/version and access policy.
+In production, Internal admin should upsert the AppCenter record with the same
+package name and the release version. The client-side AppCenter cache stores
+`installedVersion`, `latestVersion`, `installSource`, `entrypoints`, install
+path, last action, and recent logs; the remote DB keeps the authoritative latest
+package/version and access policy.

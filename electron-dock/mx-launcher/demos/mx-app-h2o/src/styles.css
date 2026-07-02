@@ -28,6 +28,7 @@ button {
 
 .h2o-shell {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   grid-template-columns: 252px minmax(0, 1fr) minmax(300px, 360px);
   min-height: 100vh;
   background:
@@ -35,6 +36,122 @@ button {
     var(--h2o-bg-2);
   color: var(--h2o-text);
   font-family: Poppins, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.app-shell-bar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 48px;
+  border-bottom: 1px solid var(--h2o-line);
+  padding: 6px 10px 6px 14px;
+  background: rgba(20, 20, 23, 0.94);
+  -webkit-app-region: drag;
+}
+
+.app-shell-identity {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+
+.app-shell-mark {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--h2o-primary);
+  color: #071311;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.app-shell-identity strong,
+.app-shell-identity span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-shell-identity span {
+  color: var(--h2o-muted);
+  font-size: 11px;
+}
+
+.app-shell-actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  -webkit-app-region: no-drag;
+}
+
+.app-window-button {
+  display: grid;
+  min-width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid var(--h2o-line);
+  border-radius: 7px;
+  background: rgba(41, 44, 55, 0.9);
+  color: var(--h2o-text);
+  font-weight: 900;
+  line-height: 1;
+}
+
+.app-window-button:hover {
+  border-color: rgba(43, 246, 210, 0.5);
+  color: var(--h2o-primary);
+}
+
+.app-shell-menu {
+  position: relative;
+}
+
+.app-shell-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  display: grid;
+  width: 210px;
+  overflow: hidden;
+  border: 1px solid var(--h2o-line);
+  border-radius: 8px;
+  background: rgba(33, 35, 45, 0.98);
+  box-shadow: 0 18px 34px rgba(0, 0, 0, 0.28);
+}
+
+.app-shell-popover button {
+  display: grid;
+  gap: 2px;
+  border: 0;
+  border-bottom: 1px solid rgba(94, 142, 236, 0.12);
+  border-radius: 0;
+  padding: 11px 13px;
+  background: transparent;
+  color: var(--h2o-text);
+  text-align: left;
+}
+
+.app-shell-popover button:last-child {
+  border-bottom: 0;
+}
+
+.app-shell-popover button:hover {
+  background: rgba(43, 246, 210, 0.08);
+  color: var(--h2o-primary);
+}
+
+.app-shell-popover small {
+  color: var(--h2o-muted);
+  font-size: 11px;
 }
 
 .h2o-sidebar,
@@ -126,6 +243,15 @@ button {
   display: grid;
   gap: 4px;
   font-size: 11px;
+}
+
+.text-button {
+  width: max-content;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--h2o-primary);
+  font-weight: 800;
 }
 
 .h2o-main {
@@ -322,6 +448,55 @@ button {
   padding: 5px 10px;
 }
 
+.h2o-user-panel {
+  background: rgba(31, 33, 43, 0.82);
+}
+
+.h2o-debug-panel {
+  background: rgba(33, 35, 45, 0.92);
+}
+
+.h2o-health-card {
+  display: grid;
+  gap: 6px;
+  border: 1px solid rgba(72, 188, 119, 0.58);
+  border-radius: 8px;
+  padding: 14px;
+  background: rgba(72, 188, 119, 0.09);
+}
+
+.h2o-health-card[data-state="warning"] {
+  border-color: rgba(248, 208, 108, 0.58);
+  background: rgba(248, 208, 108, 0.08);
+}
+
+.h2o-health-card strong {
+  color: var(--h2o-primary);
+  font-size: 20px;
+}
+
+.h2o-health-card span {
+  color: var(--h2o-soft);
+}
+
+.h2o-tip-list {
+  display: grid;
+  gap: 10px;
+}
+
+.h2o-tip-list div {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--h2o-line);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(17, 19, 25, 0.34);
+}
+
+.h2o-tip-list span {
+  color: var(--h2o-muted);
+}
+
 .activity-list {
   display: grid;
   gap: 8px;
@@ -363,6 +538,15 @@ button {
 @media (max-width: 720px) {
   .h2o-main {
     padding: 14px;
+  }
+
+  .app-shell-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .app-shell-actions {
+    justify-content: flex-start;
   }
 
   .h2o-toolbar,

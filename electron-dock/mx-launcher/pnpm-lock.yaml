@@ -86,6 +86,16 @@ importers:
         specifier: 2.2.12
         version: 2.2.12(typescript@5.9.3)
 
+  demos/mx-app-h2o:
+    dependencies:
+      '@qpjoy/electron-launcher':
+        specifier: workspace:*
+        version: link:../../packages/electron-launcher
+    devDependencies:
+      electron:
+        specifier: ^34.0.0
+        version: 34.5.8
+
   demos/mx-h2i:
     dependencies:
       '@qpjoy/electron-launcher':

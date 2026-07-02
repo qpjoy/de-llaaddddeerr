@@ -9,6 +9,10 @@ bash electron-dock/mx-launcher/scripts/manage.sh ops local-shadow up
 bash electron-dock/mx-launcher/scripts/manage.sh ops local-shadow smoke
 bash electron-dock/mx-launcher/scripts/manage.sh ops local-shadow down
 
+# Launcher
+pnpm --dir electron-dock/mx-launcher --filter @qpjoy/mx-h2i-demo dev
+pnpm --dir electron-dock/mx-launcher --filter @qpjoy/electron-launcher-app-h2o dev
+
 # k8s install
 cd ~/mx/workspace/de-llaaddddeerr/electron-dock/mx-launcher
 

@@ -28,16 +28,26 @@ pnpm --filter @qpjoy/mx-h2i-demo dev
 2. Connect as guest or employee. The standalone channel must be connected
    before AppCenter can install embed apps.
 
-3. Click `AppCenter -> Install/Enter`. AppCenter opens as an engineering
-   catalog view: search apps, select H2O, inspect `packageName`,
-   `installedVersion`, `latestVersion`, `networkScope`, permissions, and
-   entrypoints.
+3. Click `AppCenter -> Install/Enter`. AppCenter opens as a user-facing
+   desktop app center: browse recommended apps, search by app name, select H2O,
+   then install or open it. Operational details stay hidden by default.
+   Installing AppCenter and running `Check Updates` both try to sync
+   `/internal/v1/app-center/apps` from Internal; sync success or failure is
+   written to the AppCenter debug log.
 
-4. Install H2O from AppCenter. MX-H2I records the local cache state on
-   `runtime.apps.h2o`: `packageName`, `installedVersion`, `latestVersion`,
-   `installSource`, `runtimeState`, and `lastAction`.
+4. Click `Debug` in AppCenter only when developing or troubleshooting. The
+   debug drawer shows `packageName`, `installedVersion`, `latestVersion`,
+   `networkScope`, permissions, entrypoints, local install path, and recent
+   install/runtime logs. Normal users only see install/open status and any
+   visible error message.
 
-5. Start the H2O embed app demo:
+5. Install H2O from AppCenter. In development MX-H2I resolves
+   `entrypoints.dev: workspace:demos/mx-app-h2o`, reads the local H2O package
+   version, and records the install cache on `runtime.apps.h2o`. Built-in
+   AppCenter records use `builtin://appcenter`; future registry/tarball records
+   are installed into the AppCenter cache directory under Electron `userData`.
+
+6. Start the H2O embed app demo:
 
    ```sh
    pnpm --filter @qpjoy/electron-launcher-app-h2o dev
@@ -48,7 +58,11 @@ pnpm --filter @qpjoy/mx-h2i-demo dev
    `networkScope: broker-session`. It never creates an independent
    WireGuard peer.
 
-6. To test the denied embed path, run H2O with the dev broker disabled:
+7. H2O also defaults to a user-facing network helper UI. Click `Debug` inside
+   H2O to inspect broker session, socket path, package metadata, local IP,
+   capability bridge, and inherited MX-H2I channel state.
+
+8. To test the denied embed path, run H2O with the dev broker disabled:
 
    ```sh
    MX_H2O_BROKER_MODE=off pnpm --filter @qpjoy/electron-launcher-app-h2o dev

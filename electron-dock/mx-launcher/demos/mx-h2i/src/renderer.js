@@ -10,6 +10,12 @@ let windowDrag = null;
 let appSearch = '';
 let appCategory = 'all';
 let selectedAppId = 'h2o';
+let appDebugOpen = false;
+let foundationOpen = false;
+let appShellMenuOpen = false;
+let phoneMenuOpen = false;
+let appInspectorCollapsed = false;
+let appGridScrollTop = 0;
 
 void boot();
 
@@ -34,20 +40,59 @@ root.addEventListener('click', (event) => {
   const button = event.target.closest('[data-action]');
   if (!button) return;
   const action = button.dataset.action;
+  rememberAppGridScroll();
+  if (button.dataset.appId && action !== 'select-app') {
+    selectedAppId = button.dataset.appId;
+  }
+  if (action === 'phone-back') {
+    handlePhoneBack();
+    return;
+  }
+  if (action === 'toggle-phone-menu') {
+    phoneMenuOpen = !phoneMenuOpen;
+    appShellMenuOpen = false;
+    render();
+    return;
+  }
+  if (action === 'switch-phone-shell') {
+    phoneMenuOpen = false;
+    const target = button.dataset.target || 'h2i';
+    if (target === 'appcenter') {
+      if (state.apps?.appcenter?.installed) {
+        void setScreen('appcenter');
+      } else {
+        void runAction('installAppCenter');
+      }
+      return;
+    }
+    if (target === 'close') {
+      void api.windowControl?.('close');
+      return;
+    }
+    void setScreen('launcher');
+    return;
+  }
   if (action === 'select-mode') {
+    phoneMenuOpen = false;
     modeDraft = button.dataset.mode === 'employee' ? 'employee' : 'guest';
     render();
     return;
   }
   if (action === 'show-launcher') {
+    phoneMenuOpen = false;
+    appShellMenuOpen = false;
     void setScreen('launcher');
     return;
   }
   if (action === 'show-advanced') {
+    phoneMenuOpen = false;
+    appShellMenuOpen = false;
     void setScreen('advanced');
     return;
   }
   if (action === 'show-appcenter') {
+    phoneMenuOpen = false;
+    appShellMenuOpen = false;
     if (state.apps?.appcenter?.installed) {
       void setScreen('appcenter');
     } else {
@@ -56,15 +101,62 @@ root.addEventListener('click', (event) => {
     return;
   }
   if (action === 'select-app') {
+    phoneMenuOpen = false;
     selectedAppId = button.dataset.appId || selectedAppId;
     render();
     return;
   }
-  if (action === 'set-app-category') {
-    appCategory = button.dataset.category || 'all';
+  if (action === 'toggle-foundation-panel') {
+    foundationOpen = !foundationOpen;
+    appShellMenuOpen = false;
     render();
     return;
   }
+  if (action === 'toggle-app-shell-menu') {
+    appShellMenuOpen = !appShellMenuOpen;
+    render();
+    return;
+  }
+  if (action === 'switch-app-shell') {
+    appShellMenuOpen = false;
+    const target = button.dataset.target || 'appcenter';
+    if (target === 'h2i') {
+      void setScreen('launcher');
+      return;
+    }
+    if (target === 'appcenter') {
+      void setScreen('appcenter');
+      return;
+    }
+    if (target === 'close') {
+      void setScreen('launcher');
+      return;
+    }
+  }
+  if (action === 'set-app-category') {
+    appCategory = button.dataset.category || 'all';
+    appGridScrollTop = 0;
+    appShellMenuOpen = false;
+    render();
+    return;
+  }
+  if (action === 'toggle-app-debug') {
+    appDebugOpen = !appDebugOpen;
+    appShellMenuOpen = false;
+    render();
+    return;
+  }
+  if (action === 'toggle-app-inspector') {
+    appInspectorCollapsed = !appInspectorCollapsed;
+    appShellMenuOpen = false;
+    render();
+    return;
+  }
+  if (action === 'connectGuest') {
+    modeDraft = 'guest';
+  }
+  appShellMenuOpen = false;
+  phoneMenuOpen = false;
   void runAction(action);
 });
 
@@ -72,7 +164,24 @@ root.addEventListener('input', (event) => {
   const input = event.target.closest('[data-app-search]');
   if (!input) return;
   appSearch = input.value || '';
+  appGridScrollTop = 0;
   render();
+});
+
+root.addEventListener('scroll', (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (target?.classList.contains('appcenter-card-grid')) {
+    appGridScrollTop = target.scrollTop;
+  }
+}, true);
+
+root.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  const target = event.target instanceof Element ? event.target : null;
+  const card = target?.closest('.appcenter-app-card[data-action="select-app"]');
+  if (!card || target.closest('button,input,select,a')) return;
+  event.preventDefault();
+  card.click();
 });
 
 root.addEventListener('submit', (event) => {
@@ -170,12 +279,35 @@ async function runAction(action, payload) {
 
 async function setScreen(nextScreen) {
   screen = nextScreen;
+  phoneMenuOpen = false;
   if (nextScreen === 'appcenter') {
     await api.setWindowMode?.('appcenter');
   } else {
     await api.setWindowMode?.('launcher');
   }
   render();
+}
+
+function handlePhoneBack() {
+  phoneMenuOpen = false;
+  appShellMenuOpen = false;
+  if (screen === 'advanced') {
+    void setScreen('launcher');
+    return;
+  }
+  if (isEmployeeLoginVisible()) {
+    modeDraft = state.connection?.mode === 'employee' ? 'employee' : 'guest';
+    if (modeDraft === 'employee' && state.connection?.state !== 'connected') modeDraft = 'guest';
+    render();
+    return;
+  }
+  void api.setWindowMode?.('launcher');
+  render();
+}
+
+function isEmployeeLoginVisible() {
+  const connected = state.connection?.state === 'connected';
+  return modeDraft === 'employee' && (!connected || state.connection?.mode !== 'employee');
 }
 
 function render() {
@@ -192,6 +324,18 @@ function render() {
       ${screen === 'appcenter' ? renderWorkbench(connected, connecting) : renderPhone(connected, connecting, leaseOnly, tunnelOnly, degraded)}
     </div>
   `;
+  restoreAppCenterScroll();
+}
+
+function rememberAppGridScroll() {
+  const grid = root.querySelector('.appcenter-card-grid');
+  if (grid) appGridScrollTop = grid.scrollTop;
+}
+
+function restoreAppCenterScroll() {
+  const grid = root.querySelector('.appcenter-card-grid');
+  if (!grid) return;
+  grid.scrollTop = appGridScrollTop;
 }
 
 function renderWindowChrome() {
@@ -211,7 +355,7 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
   if (screen === 'advanced') return renderAdvancedPhone();
   const mode = modeDraft;
   const activeLease = connected || leaseOnly || tunnelOnly || degraded;
-  const showEmployeeLogin = mode === 'employee' && (!connected || state.connection.mode !== 'employee');
+  const showEmployeeLogin = isEmployeeLoginVisible();
   const modeTitle = connected
     ? showEmployeeLogin
       ? '员工模式'
@@ -228,8 +372,8 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
   return `
     <section class="mx-phone" aria-label="MX-H2I standalone launcher">
       <header class="phone-bar" data-window-drag="true">
-        <button class="icon-button" type="button" data-action="show-launcher" aria-label="Back">‹</button>
-        <div class="window-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+        <button class="icon-button" type="button" data-action="phone-back" aria-label="Back">‹</button>
+        ${renderPhoneShellMenu('h2i')}
       </header>
 
       <section class="phone-hero">
@@ -281,7 +425,6 @@ function renderEmployeeLogin(connecting) {
       <button class="secondary-button block-button" type="button" data-action="connectGuest" ${connecting ? 'disabled' : ''}>
         使用飞书连接
       </button>
-      <button class="text-button" type="button" data-action="select-mode" data-mode="guest">返回访客模式</button>
     </form>
   `;
 }
@@ -305,8 +448,8 @@ function renderAdvancedPhone() {
   return `
     <section class="mx-phone advanced-phone" aria-label="MX-H2I advanced options">
       <header class="phone-bar" data-window-drag="true">
-        <button class="icon-button" type="button" data-action="show-launcher" aria-label="Back">‹</button>
-        <div class="window-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+        <button class="icon-button" type="button" data-action="phone-back" aria-label="Back">‹</button>
+        ${renderPhoneShellMenu('h2i')}
       </header>
       <section class="advanced-title">
         <p class="kicker">MX-H2I</p>
@@ -324,6 +467,34 @@ function renderAdvancedPhone() {
       ${renderWireGuardDiagnostics()}
       ${renderConfigForm()}
     </section>
+  `;
+}
+
+function renderPhoneShellMenu(activeTarget) {
+  const connected = state.connection?.state === 'connected';
+  const appCenterInstalled = state.apps?.appcenter?.installed;
+  return `
+    <div class="phone-shell-menu">
+      <button class="window-dots" type="button" data-action="toggle-phone-menu" aria-label="App menu">
+        <span></span><span></span><span></span>
+      </button>
+      ${phoneMenuOpen ? `
+        <div class="phone-shell-popover" role="menu">
+          <button type="button" data-action="switch-phone-shell" data-target="h2i" class="${activeTarget === 'h2i' ? 'is-active' : ''}">
+            <span>H2I（VPN）</span>
+            <small>连接与身份</small>
+          </button>
+          <button type="button" data-action="switch-phone-shell" data-target="appcenter" ${!connected && !appCenterInstalled ? 'disabled' : ''}>
+            <span>AppCenter</span>
+            <small>${appCenterInstalled ? '应用中心' : '连接后安装'}</small>
+          </button>
+          <button type="button" data-action="switch-phone-shell" data-target="close">
+            <span>关闭</span>
+            <small>关闭当前窗口</small>
+          </button>
+        </div>
+      ` : ''}
+    </div>
   `;
 }
 
@@ -534,21 +705,36 @@ function renderWorkbench(connected, connecting) {
   const foundation = contract.foundation || {};
   return `
     <section class="mx-workbench">
-      <header class="workbench-toolbar">
-        <div>
-          <p class="kicker">LAUNCHER FOUNDATION</p>
-          <h2>MX-H2I Desktop</h2>
-          <span>${escapeHtml(foundation.socketNamespace || 'launcher socket namespace')}</span>
-        </div>
-        <div class="toolbar-actions">
-          <button class="icon-text-button" type="button" data-action="show-launcher">Launcher</button>
-          <button class="icon-text-button ${screen === 'appcenter' ? 'is-active' : ''}" type="button" data-action="show-appcenter">AppCenter</button>
-          <button class="primary-button" type="button" data-action="checkUpdates" ${busyAction === 'checkUpdates' ? 'disabled' : ''}>Refresh</button>
-        </div>
-      </header>
+      ${screen === 'appcenter' ? renderAppShellBar('AppCenter', connected ? 'MX-H2I 已连接' : '等待 MX-H2I 连接', 'appcenter') : ''}
+      ${renderFoundationDrawer(contract, foundation)}
 
+      ${screen === 'appcenter' ? renderAppCenterView(connected) : renderLauncherView(connected, connecting)}
+    </section>
+  `;
+}
+
+function renderFoundationDrawer(contract, foundation) {
+  const feedback = state.feedback?.message || '';
+  const subject = state.connection?.subject || 'no active subject';
+  const summary = feedback || `${state.connection?.state || 'idle'} / ${state.connection?.localIp || 'no lease'} / ${subject}`;
+  return `
+    <section class="foundation-drawer ${foundationOpen ? 'is-open' : ''}">
+      <button class="foundation-toggle" type="button" data-action="toggle-foundation-panel">
+        <span class="foundation-toggle-copy">
+          <strong>MX-H2I Launcher Foundation</strong>
+          <small>${escapeHtml(summary)}</small>
+        </span>
+        <span class="foundation-toggle-state">${foundationOpen ? '收起' : '展开'} <b>${foundationOpen ? '⌃' : '⌄'}</b></span>
+      </button>
+      ${foundationOpen ? renderFoundationDetails(contract, foundation) : ''}
+    </section>
+  `;
+}
+
+function renderFoundationDetails(contract, foundation) {
+  return `
+    <div class="foundation-content">
       ${renderFeedback()}
-
       <section class="workbench-grid">
         <section class="panel foundation-panel">
           <div class="panel-head">
@@ -582,13 +768,49 @@ function renderWorkbench(connected, connecting) {
           </div>
         </section>
       </section>
+    </div>
+  `;
+}
 
-      ${screen === 'appcenter' ? renderAppCenterView(connected) : renderLauncherView(connected, connecting)}
-    </section>
+function renderAppShellBar(title, subtitle, activeTarget) {
+  return `
+    <header class="app-shell-bar" data-window-drag="true">
+      <div class="app-shell-identity">
+        <div class="app-shell-mark">MX</div>
+        <div>
+          <strong>${escapeHtml(title)}</strong>
+          <span>${escapeHtml(subtitle)}</span>
+        </div>
+      </div>
+      <div class="app-shell-actions">
+        <button class="app-window-button" type="button" data-window-control="minimize" aria-label="Minimize">-</button>
+        <button class="app-window-button" type="button" data-window-control="zoom" aria-label="Zoom">□</button>
+        <div class="app-shell-menu">
+          <button class="app-window-button" type="button" data-action="toggle-app-shell-menu" aria-label="App menu">...</button>
+          ${appShellMenuOpen ? `
+            <div class="app-shell-popover" role="menu">
+              <button type="button" data-action="switch-app-shell" data-target="h2i" class="${activeTarget === 'h2i' ? 'is-active' : ''}">
+                <span>H2I（VPN）</span>
+                <small>返回连接面板</small>
+              </button>
+              <button type="button" data-action="switch-app-shell" data-target="appcenter" class="${activeTarget === 'appcenter' ? 'is-active' : ''}">
+                <span>AppCenter</span>
+                <small>应用中心</small>
+              </button>
+              <button type="button" data-action="switch-app-shell" data-target="close">
+                <span>关闭</span>
+                <small>关闭当前应用</small>
+              </button>
+            </div>
+          ` : ''}
+        </div>
+      </div>
+    </header>
   `;
 }
 
 function renderLauncherView(connected, connecting) {
+  const appCenterInstalled = state.apps?.appcenter?.installed;
   return `
     <section class="panel app-registry-panel">
       <div class="panel-head">
@@ -596,15 +818,15 @@ function renderLauncherView(connected, connecting) {
           <p class="kicker">APPLICATIONS</p>
           <h3>Launcher app registry</h3>
         </div>
-        <button class="primary-button" type="button" data-action="installAppCenter" ${!connected || busyAction === 'installAppCenter' ? 'disabled' : ''}>
-          Install AppCenter
+        <button class="primary-button" type="button" data-action="${appCenterInstalled ? 'show-appcenter' : 'installAppCenter'}" ${!connected || busyAction === 'installAppCenter' ? 'disabled' : ''}>
+          ${appCenterInstalled ? 'Open AppCenter' : 'Install AppCenter'}
         </button>
       </div>
       <div class="app-grid">
         ${renderAppCard(state.apps?.appcenter, {
-          action: 'installAppCenter',
-          actionLabel: state.apps?.appcenter?.installed ? 'Ready' : 'Install',
-          disabled: !connected || connecting || state.apps?.appcenter?.installed
+          action: appCenterInstalled ? 'show-appcenter' : 'installAppCenter',
+          actionLabel: appCenterInstalled ? 'Open' : 'Install',
+          disabled: !connected || connecting
         })}
         ${renderAppCard(state.apps?.h2o, {
           action: 'enableH2o',
@@ -623,14 +845,15 @@ function renderAppCenterView(connected) {
   if (!apps.some((app) => app.appId === selectedAppId)) selectedAppId = apps[0]?.appId || 'h2o';
   const selected = apps.find((app) => app.appId === selectedAppId) || visibleApps[0] || apps[0] || null;
   const categories = appCenterCategories(apps);
+  const hasError = apps.some((app) => app.errorMessage || app.runtimeState === 'error' || app.status === 'error');
   return `
-    <section class="appcenter-window appcenter-product">
+    <section class="appcenter-window appcenter-product ${appDebugOpen ? 'is-debug-open' : ''} ${appInspectorCollapsed ? 'is-inspector-collapsed' : ''}">
       <aside class="appcenter-rail">
         <div class="appcenter-account">
           <div class="avatar-mark">${escapeHtml((state.identity?.displayName || 'V').slice(0, 1))}</div>
           <div>
             <strong>${escapeHtml(state.identity?.displayName || 'Visitor')}</strong>
-            <span>${escapeHtml(state.identity?.account || state.connection?.routePolicy || 'guest limited')}</span>
+            <span>${escapeHtml(state.identity?.account || 'MX-H2I workspace')}</span>
           </div>
         </div>
         <nav class="appcenter-nav" aria-label="AppCenter sections">
@@ -642,47 +865,43 @@ function renderAppCenterView(connected) {
           `).join('')}
         </nav>
         <div class="appcenter-rail-foot">
-          <span>Home ${escapeHtml(state.update?.currentVersion || '0.1.0')}</span>
-          <span>Channel ${escapeHtml(state.update?.channel || state.config?.releaseChannel || 'stable')}</span>
+          <button class="text-button" type="button" data-action="toggle-app-debug">${appDebugOpen ? '隐藏 Debug' : 'Debug'}</button>
+          <span>${escapeHtml(hasError ? '有应用需要处理' : '所有应用正常')}</span>
         </div>
       </aside>
 
       <section class="appcenter-main">
         <header class="appcenter-titlebar">
           <div>
-            <p class="kicker">MX-H2I APPCENTER</p>
-            <h3>Internal 应用市场</h3>
-            <span>${escapeHtml(state.launcherContract?.packageName || '@qpjoy/electron-launcher')} / ${escapeHtml(state.connection?.subject || 'no active subject')}</span>
+            <p class="kicker">APPCENTER</p>
+            <h3>应用中心</h3>
+            <span>${escapeHtml(connected ? 'MX-H2I 已连接，可以安装和打开应用' : '连接 MX-H2I 后可安装应用')}</span>
           </div>
           <div class="toolbar-actions">
-            <button class="icon-button" type="button" data-action="show-launcher" aria-label="Back">‹</button>
-            <button class="secondary-button" type="button" data-action="checkUpdates" ${busyAction === 'checkUpdates' ? 'disabled' : ''}>刷新版本</button>
-            <span class="status-pill" data-state="${connected ? 'connected' : 'idle'}">${connected ? 'broker ready' : 'offline'}</span>
+            <button class="secondary-button" type="button" data-action="toggle-app-debug">${appDebugOpen ? '关闭 Debug' : 'Debug'}</button>
+            <button class="primary-button" type="button" data-action="checkUpdates" ${busyAction === 'checkUpdates' ? 'disabled' : ''}>检查更新</button>
           </div>
         </header>
 
-        <div class="appcenter-notice">
-          <strong>embed runtime</strong>
-          <span>AppCenter 与 H2O 通过 MX-H2I broker-session 共享网络、身份、权限和更新上下文，不再申请独立 WireGuard peer。</span>
-        </div>
+        ${hasError ? renderAppCenterErrorBanner(apps) : ''}
 
         <section class="appcenter-marketbar">
           <div>
-            <h4>Apps</h4>
-            <p>${escapeHtml(visibleApps.length)} visible / ${escapeHtml(apps.length)} registered</p>
+            <h4>${escapeHtml(appCategory === 'all' ? '推荐应用' : categoryTitle(appCategory))}</h4>
+            <p>${escapeHtml(visibleApps.length)} 个应用</p>
           </div>
           <label class="appcenter-search">
             <span>⌕</span>
-            <input data-app-search value="${escapeAttr(appSearch)}" placeholder="Search package, app, permission" />
+            <input data-app-search value="${escapeAttr(appSearch)}" placeholder="搜索应用" />
           </label>
         </section>
 
-        <section class="catalog-grid appcenter-card-grid">
+        <section class="catalog-grid appcenter-card-grid mx-scrollbar">
           ${visibleApps.length ? visibleApps.map((app) => renderAppCenterCard(app, connected, selected?.appId === app.appId)).join('') : renderEmptyCatalog()}
         </section>
       </section>
 
-      ${selected ? renderAppCenterInspector(selected, connected) : ''}
+      ${selected ? renderAppCenterSidePanel(selected, connected) : ''}
     </section>
   `;
 }
@@ -690,6 +909,16 @@ function renderAppCenterView(connected) {
 function appCatalog() {
   const appcenter = state.apps?.appcenter || {};
   const h2o = state.apps?.h2o || {};
+  const staticAppIds = ['appcenter', 'h2o', 'diagnostics', 'luopan-bridge'];
+  const dynamicApps = Object.entries(state.apps || {})
+    .filter(([appId]) => !staticAppIds.includes(appId))
+    .map(([appId, app]) => normalizeCatalogApp(app, {
+      appId,
+      displayName: app?.displayName || appId,
+      category: app?.category || 'custom',
+      description: app?.description || '',
+      packageName: app?.packageName || `@qpjoy/electron-launcher-app-${appId}`
+    }));
   return [
     normalizeCatalogApp(appcenter, {
       appId: 'appcenter',
@@ -707,6 +936,7 @@ function appCatalog() {
       packageName: '@qpjoy/electron-launcher-app-h2o',
       permissions: ['network.hdi.status', 'network.proxy.app', 'network.dns.policy', 'network.pac.policy']
     }),
+    ...dynamicApps,
     normalizeCatalogApp({
       appId: 'diagnostics',
       displayName: 'Diagnostics',
@@ -795,19 +1025,41 @@ function filteredAppCatalog(apps) {
 
 function appCenterCategories(apps) {
   return [
-    { id: 'all', label: 'All Apps', count: apps.length },
-    { id: 'network', label: 'Network', count: apps.filter((app) => app.category === 'network').length },
-    { id: 'platform', label: 'Platform', count: apps.filter((app) => app.category === 'platform').length },
-    { id: 'ops', label: 'Diagnostics', count: apps.filter((app) => app.category === 'ops').length },
-    { id: 'updates', label: 'Updates', count: apps.filter((app) => app.latestVersion && app.latestVersion !== (app.installedVersion || app.version)).length }
+    { id: 'all', label: '全部应用', count: apps.length },
+    { id: 'network', label: '网络工具', count: apps.filter((app) => app.category === 'network').length },
+    { id: 'platform', label: '平台应用', count: apps.filter((app) => app.category === 'platform').length },
+    { id: 'ops', label: '工具箱', count: apps.filter((app) => app.category === 'ops').length },
+    { id: 'updates', label: '可更新', count: apps.filter((app) => app.latestVersion && app.latestVersion !== (app.installedVersion || app.version)).length }
   ];
+}
+
+function categoryTitle(category) {
+  return appCenterCategories(appCatalog()).find((item) => item.id === category)?.label || '应用';
+}
+
+function renderAppCenterErrorBanner(apps) {
+  const errored = apps.find((app) => app.errorMessage || app.runtimeState === 'error' || app.status === 'error');
+  if (!errored) return '';
+  return `
+    <div class="appcenter-error-banner">
+      <strong>${escapeHtml(errored.displayName)} 需要处理</strong>
+      <span>${escapeHtml(errored.errorMessage || '应用运行状态异常，打开 Debug 查看详情。')}</span>
+      <button class="secondary-button" type="button" data-action="toggle-app-debug">Debug</button>
+    </div>
+  `;
 }
 
 function renderAppCenterCard(app, connected, selected) {
   const action = appPrimaryAction(app, connected);
   return `
-    <article class="catalog-card appcenter-app-card ${selected ? 'is-active' : ''}">
-      <button class="catalog-card-select" type="button" data-action="select-app" data-app-id="${escapeAttr(app.appId)}" aria-label="${escapeAttr(`Select ${app.displayName}`)}"></button>
+    <article
+      class="catalog-card appcenter-app-card ${selected ? 'is-active' : ''}"
+      role="button"
+      tabindex="0"
+      data-action="select-app"
+      data-app-id="${escapeAttr(app.appId)}"
+      aria-label="${escapeAttr(`选择 ${app.displayName}`)}"
+    >
       <div class="catalog-cover" data-category="${escapeAttr(app.category)}">
         <span>${escapeHtml(app.displayName.slice(0, 3).toUpperCase())}</span>
       </div>
@@ -816,11 +1068,13 @@ function renderAppCenterCard(app, connected, selected) {
           <h4>${escapeHtml(app.displayName)}</h4>
           <p>${escapeHtml(app.description)}</p>
         </div>
-        <div class="package-line">${escapeHtml(app.packageName)}</div>
+        <div class="app-tag-row">
+          ${appUserTags(app).map((item) => `<span>${escapeHtml(item)}</span>`).join('')}
+        </div>
       </div>
       <div class="catalog-card-foot">
-        <span class="status-dot" data-state="${escapeAttr(app.status || app.runtimeState || 'available')}">${escapeHtml(appStatusLabel(app))}</span>
-        <button class="secondary-button" type="button" data-action="${escapeAttr(action.action)}" ${action.disabled ? 'disabled' : ''}>
+        <span class="status-dot" data-state="${escapeAttr(app.status || app.runtimeState || 'available')}">${escapeHtml(appUserStatus(app))}</span>
+        <button class="secondary-button" type="button" data-action="${escapeAttr(action.action)}" data-app-id="${escapeAttr(app.appId)}" ${action.disabled ? 'disabled' : ''}>
           ${escapeHtml(action.label)}
         </button>
       </div>
@@ -828,24 +1082,76 @@ function renderAppCenterCard(app, connected, selected) {
   `;
 }
 
-function renderAppCenterInspector(app, connected) {
+function renderAppCenterSidePanel(app, connected) {
+  if (appInspectorCollapsed) return renderCollapsedAppInspector(app);
+  return appDebugOpen ? renderAppCenterDebugPanel(app, connected) : renderAppCenterUserPanel(app, connected);
+}
+
+function renderCollapsedAppInspector(app) {
+  return `
+    <aside class="appcenter-inspector appcenter-inspector-rail">
+      <button class="inspector-rail-button" type="button" data-action="toggle-app-inspector" aria-label="展开应用详情">
+        <span class="app-icon-mini">${escapeHtml(app.displayName.slice(0, 3).toUpperCase())}</span>
+        <strong>${escapeHtml(app.displayName)}</strong>
+        <span aria-hidden="true">‹</span>
+      </button>
+    </aside>
+  `;
+}
+
+function renderAppCenterUserPanel(app, connected) {
   const action = appPrimaryAction(app, connected);
   return `
-    <aside class="appcenter-inspector">
+    <aside class="appcenter-inspector appcenter-user-panel mx-scrollbar">
       <div class="inspector-head">
         <div class="app-icon-large">${escapeHtml(app.displayName.slice(0, 3).toUpperCase())}</div>
         <div>
-          <p class="kicker">${escapeHtml(app.category)}</p>
+          <p class="kicker">${escapeHtml(categoryTitle(app.category))}</p>
+          <h4>${escapeHtml(app.displayName)}</h4>
+          <span>${escapeHtml(appUserStatus(app))}</span>
+        </div>
+        <button class="inspector-collapse-button" type="button" data-action="toggle-app-inspector" aria-label="收起应用详情">›</button>
+      </div>
+      <p class="inspector-summary">${escapeHtml(app.description)}</p>
+      ${app.errorMessage ? `<div class="app-inline-error">${escapeHtml(app.errorMessage)}</div>` : ''}
+      <div class="app-user-facts">
+        <div><span>版本</span><strong>${escapeHtml(app.installedVersion || app.version || '0.1.0')}</strong></div>
+        <div><span>更新</span><strong>${escapeHtml(app.latestVersion && app.latestVersion !== (app.installedVersion || app.version) ? `${app.latestVersion} 可用` : '已是最新')}</strong></div>
+        <div><span>状态</span><strong>${escapeHtml(appUserStatus(app))}</strong></div>
+      </div>
+      <div class="app-feature-list">
+        ${appUserFeatures(app).map((item) => `<div><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.detail)}</span></div>`).join('')}
+      </div>
+      <div class="app-user-actions">
+        <button class="primary-button block-button" type="button" data-action="${escapeAttr(action.action)}" ${action.disabled ? 'disabled' : ''}>
+          ${escapeHtml(action.label)}
+        </button>
+        <button class="secondary-button block-button" type="button" data-action="toggle-app-debug">Debug</button>
+      </div>
+      ${renderAppRecentLogs(app)}
+    </aside>
+  `;
+}
+
+function renderAppCenterDebugPanel(app, connected) {
+  const action = appPrimaryAction(app, connected);
+  return `
+    <aside class="appcenter-inspector appcenter-debug-panel mx-scrollbar">
+      <div class="inspector-head">
+        <div class="app-icon-large">${escapeHtml(app.displayName.slice(0, 3).toUpperCase())}</div>
+        <div>
+          <p class="kicker">DEBUG</p>
           <h4>${escapeHtml(app.displayName)}</h4>
           <span>${escapeHtml(app.packageName)}</span>
         </div>
+        <button class="inspector-collapse-button" type="button" data-action="toggle-app-inspector" aria-label="收起应用详情">›</button>
       </div>
-      <p class="inspector-summary">${escapeHtml(app.description)}</p>
       <div class="detail-list">
         <div><span>Mode</span><strong>${escapeHtml(app.launcherMode)}</strong></div>
         <div><span>Channel</span><strong>${escapeHtml(app.standaloneChannelProductId || '-')}</strong></div>
         <div><span>Network</span><strong>${escapeHtml(app.networkScope || '-')}</strong></div>
         <div><span>Install</span><strong>${escapeHtml(app.installSource || 'npm')}</strong></div>
+        <div><span>Path</span><strong>${escapeHtml(app.installPath || '-')}</strong></div>
         <div><span>Installed</span><strong>${escapeHtml(app.installedVersion || (app.installed ? app.version : 'not installed'))}</strong></div>
         <div><span>Latest</span><strong>${escapeHtml(app.latestVersion || app.version)}</strong></div>
         <div><span>Runtime</span><strong>${escapeHtml(app.runtimeState || app.status || 'idle')}</strong></div>
@@ -858,28 +1164,90 @@ function renderAppCenterInspector(app, connected) {
         <strong>Entrypoints</strong>
         ${Object.entries(app.entrypoints || {}).map(([key, value]) => `<span>${escapeHtml(key)}: ${escapeHtml(value)}</span>`).join('') || '<span>-</span>'}
       </div>
+      ${renderAppRecentLogs(app, true)}
       <button class="primary-button block-button" type="button" data-action="${escapeAttr(action.action)}" ${action.disabled ? 'disabled' : ''}>
         ${escapeHtml(action.label)}
       </button>
-      <button class="secondary-button block-button" type="button" data-action="checkUpdates" ${busyAction === 'checkUpdates' ? 'disabled' : ''}>
-        Check Version
-      </button>
+      <button class="secondary-button block-button" type="button" data-action="toggle-app-debug">关闭 Debug</button>
     </aside>
+  `;
+}
+
+function appUserTags(app) {
+  const tags = [];
+  if (app.category === 'network') tags.push('网络');
+  if (app.category === 'platform') tags.push('平台');
+  if (app.category === 'ops') tags.push('工具');
+  if (app.installed) tags.push('已安装');
+  if (app.latestVersion && app.latestVersion !== (app.installedVersion || app.version)) tags.push('可更新');
+  if (!tags.length) tags.push('应用');
+  return tags.slice(0, 3);
+}
+
+function appUserStatus(app) {
+  if (app.errorMessage || app.runtimeState === 'error' || app.status === 'error') return '需要处理';
+  if (app.status === 'reserved') return '即将推出';
+  if (app.runtimeState === 'running') return '运行中';
+  if (app.installed && app.enabled) return '已安装';
+  if (app.installed) return '已缓存';
+  return '可安装';
+}
+
+function appUserFeatures(app) {
+  if (app.appId === 'h2o') {
+    return [
+      { title: '网络面板', detail: '查看 Internal 访问、代理模式和规则状态。' },
+      { title: '一键打开', detail: '通过 MX-H2I 共享能力启动，不需要额外配置。' }
+    ];
+  }
+  if (app.appId === 'appcenter') {
+    return [
+      { title: '应用管理', detail: '安装、打开和更新内置应用。' },
+      { title: '轻量更新', detail: '应用以 package 形式分发，重启后即可生效。' }
+    ];
+  }
+  if (app.appId === 'diagnostics') {
+    return [
+      { title: '问题排查', detail: '网络和更新检查集中在这里。' },
+      { title: '日志收集', detail: '出现错误时可复制给开发人员。' }
+    ];
+  }
+  return [
+    { title: '预留应用', detail: '管理员开放后会出现在这里。' }
+  ];
+}
+
+function renderAppRecentLogs(app, verbose = false) {
+  const logs = Array.isArray(app.logs) ? app.logs : [];
+  if (!logs.length && !app.errorMessage) return '';
+  const rows = app.errorMessage
+    ? [{ level: 'error', message: app.errorMessage, at: app.lastAction || new Date().toISOString() }, ...logs]
+    : logs;
+  return `
+    <div class="app-log-list ${verbose ? 'is-verbose' : ''}">
+      <strong>${verbose ? 'Logs' : '最近状态'}</strong>
+      ${rows.slice(0, verbose ? 8 : 3).map((item) => `
+        <div data-level="${escapeAttr(item.level || 'info')}">
+          <span>${escapeHtml(item.message)}</span>
+          <small>${escapeHtml(formatDateTime(item.at))}</small>
+        </div>
+      `).join('')}
+    </div>
   `;
 }
 
 function appPrimaryAction(app, connected) {
   if (app.appId === 'appcenter') {
-    return { action: 'show-appcenter', label: app.installed ? 'Open' : 'Install', disabled: !connected || busyAction === 'installAppCenter' };
+    return { action: 'show-appcenter', label: app.installed ? '打开' : '安装', disabled: !connected || busyAction === 'installAppCenter' };
   }
   if (app.appId === 'h2o') {
-    if (app.installed && app.enabled) return { action: 'launchH2o', label: app.runtimeState === 'running' ? 'Running' : 'Open', disabled: !connected || busyAction === 'launchH2o' };
-    return { action: 'enableH2o', label: 'Install', disabled: !connected || !state.apps?.appcenter?.installed || busyAction === 'enableH2o' };
+    if (app.installed && app.enabled) return { action: 'launchH2o', label: app.runtimeState === 'running' ? '运行中' : '打开', disabled: !connected || busyAction === 'launchH2o' };
+    return { action: 'enableH2o', label: '安装', disabled: !connected || !state.apps?.appcenter?.installed || busyAction === 'enableH2o' };
   }
   if (app.appId === 'diagnostics') {
-    return { action: 'checkUpdates', label: 'Open', disabled: busyAction === 'checkUpdates' };
+    return { action: 'checkUpdates', label: '打开', disabled: busyAction === 'checkUpdates' };
   }
-  return { action: 'select-app', label: 'Reserved', disabled: true };
+  return { action: 'select-app', label: '即将推出', disabled: true };
 }
 
 function appStatusLabel(app) {
@@ -1158,7 +1526,9 @@ function createMockApi() {
         updatePolicy: 'launcher-managed',
         permissions: ['auth.read', 'appcenter.read'],
         installSource: 'builtin',
+        installPath: 'builtin://appcenter',
         runtimeState: 'idle',
+        logs: [],
         entrypoints: {
           desktop: 'app://appcenter/index.html',
           settings: 'app://appcenter/settings.html'
@@ -1182,7 +1552,9 @@ function createMockApi() {
         updatePolicy: 'launcher-managed',
         permissions: ['network.hdi.status', 'network.proxy.app'],
         installSource: 'npm',
+        installPath: null,
         runtimeState: 'idle',
+        logs: [],
         entrypoints: {
           desktop: 'app://h2o/index.html',
           settings: 'app://h2o/settings.html',
@@ -1307,8 +1679,11 @@ function createMockApi() {
           status: 'ready',
           installedVersion: mockState.apps.appcenter.version,
           latestVersion: mockState.apps.appcenter.latestVersion || mockState.apps.appcenter.version,
+          installPath: 'builtin://appcenter',
+          installedAt: new Date().toISOString(),
           runtimeState: 'ready',
-          lastAction: new Date().toISOString()
+          lastAction: new Date().toISOString(),
+          logs: [{ level: 'info', message: 'AppCenter builtin runtime is ready.', at: new Date().toISOString() }]
         }
       },
       feedback: { tone: 'success', message: 'AppCenter 已安装，package/version 已写入本地缓存。' }
@@ -1323,8 +1698,12 @@ function createMockApi() {
           status: 'enabled',
           installedVersion: mockState.apps.h2o.version,
           latestVersion: mockState.apps.h2o.latestVersion || mockState.apps.h2o.version,
+          installSource: 'workspace',
+          installPath: 'workspace:demos/mx-app-h2o',
+          installedAt: new Date().toISOString(),
           runtimeState: 'ready',
-          lastAction: new Date().toISOString()
+          lastAction: new Date().toISOString(),
+          logs: [{ level: 'info', message: 'Installed @qpjoy/electron-launcher-app-h2o from workspace.', at: new Date().toISOString() }]
         }
       },
       feedback: { tone: 'success', message: 'H2O 已启用，broker-session 权限已就绪。' }
