@@ -83,6 +83,11 @@ type LauncherManifest = {
 The same shape lets K8s admin, AppCenter, standalone products, and embed apps
 reason about bindings without bespoke per-package schemas.
 
+`createLauncherEmbedManifest()` produces the default embed variant for this
+shape. It sets `runtimeContractVersion: 0.1`, `launcherMode: embed`,
+`network.scope: broker-session`, and the configured
+`embed.standaloneChannelProductId`.
+
 `network.scope` is the important distinction for the embed IP question:
 standalone products are `owner` and may allocate peer leases; embed apps are
 `broker-session` and inherit network/user/permission/update state from their

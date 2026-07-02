@@ -931,10 +931,26 @@ function appCatalog() {
     normalizeCatalogApp(h2o, {
       appId: 'h2o',
       displayName: 'H2O',
+      fullName: 'Home To Oversea',
       category: 'network',
-      description: 'H2I 内置网络应用 demo，展示 PAC、Split DNS、代理规则和 Internal 状态。',
+      description: 'AppCenter 内置的 Home To Oversea 网络插件，提供类 Clash 的代理模式、PAC、Split DNS 和 Internal 出海状态面板。',
       packageName: '@qpjoy/electron-launcher-app-h2o',
-      permissions: ['network.hdi.status', 'network.proxy.app', 'network.dns.policy', 'network.pac.policy']
+      permissions: ['network.hdi.status', 'network.proxy.app', 'network.dns.policy', 'network.pac.policy'],
+      requiredCapabilities: ['user.session', 'network.status', 'network.proxy', 'network.dns.policy', 'network.pac.policy', 'app-center-runtime'],
+      manifest: {
+        appId: 'h2o',
+        productId: 'h2o',
+        displayName: 'H2O',
+        description: 'AppCenter 内置的 Home To Oversea 网络插件，提供类 Clash 的代理模式、PAC、Split DNS 和 Internal 出海状态面板。',
+        packageName: '@qpjoy/electron-launcher-app-h2o',
+        category: 'network',
+        launcherMode: 'embed',
+        protocolVersion: '2',
+        runtimeContractVersion: '0.1',
+        requiredCapabilities: ['user.session', 'network.status', 'network.proxy', 'network.dns.policy', 'network.pac.policy', 'app-center-runtime'],
+        network: { scope: 'broker-session' },
+        embed: { standaloneChannelProductId: 'mx-h2i', launchWithoutBroker: 'blocked' }
+      }
     }),
     ...dynamicApps,
     normalizeCatalogApp({
@@ -985,6 +1001,7 @@ function normalizeCatalogApp(app, defaults) {
     ...row,
     appId: row.appId || defaults.appId,
     displayName: row.displayName || defaults.displayName,
+    fullName: row.fullName || defaults.fullName || '',
     category: row.category || defaults.category || 'custom',
     description: row.description || defaults.description || '',
     packageName: row.packageName || defaults.packageName || `@qpjoy/electron-launcher-app-${row.appId || defaults.appId}`,
@@ -997,6 +1014,8 @@ function normalizeCatalogApp(app, defaults) {
     installSource: row.installSource || defaults.installSource || 'npm',
     runtimeState: row.runtimeState || defaults.runtimeState || (row.enabled ? 'ready' : row.installed ? 'installed' : 'idle'),
     permissions: Array.isArray(row.permissions) ? row.permissions : defaults.permissions || [],
+    requiredCapabilities: Array.isArray(row.requiredCapabilities) ? row.requiredCapabilities : defaults.requiredCapabilities || [],
+    manifest: row.manifest || defaults.manifest || null,
     entrypoints: row.entrypoints || defaults.entrypoints || {}
   };
 }
@@ -1150,6 +1169,7 @@ function renderAppCenterDebugPanel(app, connected) {
         <div><span>Mode</span><strong>${escapeHtml(app.launcherMode)}</strong></div>
         <div><span>Channel</span><strong>${escapeHtml(app.standaloneChannelProductId || '-')}</strong></div>
         <div><span>Network</span><strong>${escapeHtml(app.networkScope || '-')}</strong></div>
+        <div><span>Contract</span><strong>${escapeHtml(app.manifest?.runtimeContractVersion || '-')}</strong></div>
         <div><span>Install</span><strong>${escapeHtml(app.installSource || 'npm')}</strong></div>
         <div><span>Path</span><strong>${escapeHtml(app.installPath || '-')}</strong></div>
         <div><span>Installed</span><strong>${escapeHtml(app.installedVersion || (app.installed ? app.version : 'not installed'))}</strong></div>
@@ -1158,7 +1178,7 @@ function renderAppCenterDebugPanel(app, connected) {
         <div><span>Last Action</span><strong>${escapeHtml(formatDateTime(app.lastAction))}</strong></div>
       </div>
       <div class="permission-stack">
-        ${(app.permissions || []).map((item) => `<span>${escapeHtml(item)}</span>`).join('')}
+        ${[...(app.permissions || []), ...(app.requiredCapabilities || [])].filter((item, index, rows) => rows.indexOf(item) === index).map((item) => `<span>${escapeHtml(item)}</span>`).join('')}
       </div>
       <div class="entrypoint-box">
         <strong>Entrypoints</strong>
@@ -1196,8 +1216,8 @@ function appUserStatus(app) {
 function appUserFeatures(app) {
   if (app.appId === 'h2o') {
     return [
-      { title: '网络面板', detail: '查看 Internal 访问、代理模式和规则状态。' },
-      { title: '一键打开', detail: '通过 MX-H2I 共享能力启动，不需要额外配置。' }
+      { title: 'Home To Oversea', detail: '按规则、全局或直连模式托管出海策略。' },
+      { title: '共享底座', detail: '通过 MX-H2I broker-session 继承用户、网络和权限。' }
     ];
   }
   if (app.appId === 'appcenter') {
@@ -1540,8 +1560,9 @@ function createMockApi() {
       h2o: {
         appId: 'h2o',
         displayName: 'H2O',
+        fullName: 'Home To Oversea',
         category: 'network',
-        description: 'H2I 内置网络应用 demo，展示 PAC、Split DNS、代理规则和 Internal 服务状态。',
+        description: 'AppCenter 内置的 Home To Oversea 网络插件，提供类 Clash 的代理模式、PAC、Split DNS 和 Internal 出海状态面板。',
         packageName: '@qpjoy/electron-launcher-app-h2o',
         launcherMode: 'embed',
         standaloneChannelProductId: 'mx-h2i',
@@ -1550,7 +1571,22 @@ function createMockApi() {
         version: '0.1.0',
         latestVersion: '0.1.0',
         updatePolicy: 'launcher-managed',
-        permissions: ['network.hdi.status', 'network.proxy.app'],
+        permissions: ['network.hdi.status', 'network.proxy.app', 'network.dns.policy', 'network.pac.policy'],
+        requiredCapabilities: ['user.session', 'network.status', 'network.proxy', 'network.dns.policy', 'network.pac.policy', 'app-center-runtime'],
+        manifest: {
+          appId: 'h2o',
+          productId: 'h2o',
+          displayName: 'H2O',
+          description: 'AppCenter 内置的 Home To Oversea 网络插件，提供类 Clash 的代理模式、PAC、Split DNS 和 Internal 出海状态面板。',
+          packageName: '@qpjoy/electron-launcher-app-h2o',
+          category: 'network',
+          launcherMode: 'embed',
+          protocolVersion: '2',
+          runtimeContractVersion: '0.1',
+          requiredCapabilities: ['user.session', 'network.status', 'network.proxy', 'network.dns.policy', 'network.pac.policy', 'app-center-runtime'],
+          network: { scope: 'broker-session' },
+          embed: { standaloneChannelProductId: 'mx-h2i', launchWithoutBroker: 'blocked' }
+        },
         installSource: 'npm',
         installPath: null,
         runtimeState: 'idle',

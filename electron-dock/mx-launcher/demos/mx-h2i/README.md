@@ -41,7 +41,10 @@ pnpm --filter @qpjoy/mx-h2i-demo dev
    install/runtime logs. Normal users only see install/open status and any
    visible error message.
 
-5. Install H2O from AppCenter. In development MX-H2I resolves
+5. Install H2O from AppCenter. H2O means **Home To Oversea**: it is the
+   built-in AppCenter network plugin direction, similar to a Clash-style user
+   surface, but it inherits network/user/permission state from MX-H2I instead
+   of owning WireGuard itself. In development MX-H2I resolves
    `entrypoints.dev: workspace:demos/mx-app-h2o`, reads the local H2O package
    version, and records the install cache on `runtime.apps.h2o`. Built-in
    AppCenter records use `builtin://appcenter`; future registry/tarball records
@@ -53,14 +56,14 @@ pnpm --filter @qpjoy/mx-h2i-demo dev
    pnpm --filter @qpjoy/electron-launcher-app-h2o dev
    ```
 
-   The demo package is `@qpjoy/electron-launcher-app-h2o` and uses
+   The package is `@qpjoy/electron-launcher-app-h2o` and uses
    `launcherMode: embed`, `standaloneChannelProductId: mx-h2i`, and
-   `networkScope: broker-session`. It never creates an independent
-   WireGuard peer.
+   `networkScope: broker-session`. Its `runtimeContractVersion` is `0.1`, and
+   it never creates an independent WireGuard peer.
 
-7. H2O also defaults to a user-facing network helper UI. Click `Debug` inside
-   H2O to inspect broker session, socket path, package metadata, local IP,
-   capability bridge, and inherited MX-H2I channel state.
+7. H2O defaults to a user-facing Home To Oversea UI. Click `Debug` inside H2O
+   to inspect broker session, socket path, package metadata, local IP,
+   capability bridge, contract version, and inherited MX-H2I channel state.
 
 8. To test the denied embed path, run H2O with the dev broker disabled:
 

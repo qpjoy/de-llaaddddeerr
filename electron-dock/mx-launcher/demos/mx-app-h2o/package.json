@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "private": true,
   "author": "QPJoy",
-  "description": "H2O embed launcher demo app for MX-H2I AppCenter.",
+  "description": "Home To Oversea embed network plugin for MX-H2I AppCenter.",
   "main": "src/main.cjs",
   "scripts": {
     "dev": "electron .",

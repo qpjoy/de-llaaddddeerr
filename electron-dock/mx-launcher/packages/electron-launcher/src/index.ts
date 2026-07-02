@@ -1,10 +1,12 @@
 import {
   assertCompatibleBroker,
   brokerAbiVersion,
+  createLauncherEmbedManifest,
   createLauncherClient,
   createLauncherNetworkSession,
   createLauncherWireGuardKeyPair,
   launcherBrokerCompatibility,
+  launcherEmbedRuntimeContractVersion,
   launcherNetworkScopeForMode,
   launcherProtocolVersion,
   networkDigest,
@@ -22,6 +24,9 @@ import {
   type LauncherClient,
   type LauncherClientOptions,
   type LauncherEmbedConnectionState,
+  type LauncherEmbedBrokerRequestName,
+  type LauncherEmbedManifestInput,
+  type LauncherEmbedRuntimeEventName,
   type LauncherIdentityKind,
   type LauncherManifest,
   type LauncherNetworkLease,
@@ -137,6 +142,11 @@ export interface ElectronLauncherOptions extends LauncherClientOptions {
   requiredCapabilities?: LauncherCapability[];
   sdkVersion?: string;
   appVersion?: string;
+  displayName?: string;
+  description?: string;
+  packageName?: string;
+  category?: string;
+  runtimeContractVersion?: string;
   channelRegistry?: LauncherChannelRegistrySource;
   requestImpl?: EmbedBrokerRequestHandler;
   installId?: string;
@@ -253,10 +263,12 @@ export {
   brokerAbiVersion,
   createEmbedLauncher,
   createLauncherClient,
+  createLauncherEmbedManifest,
   createLauncherNetworkSession,
   createLauncherWireGuardKeyPair,
   createStandaloneLauncher,
   launcherBrokerCompatibility,
+  launcherEmbedRuntimeContractVersion,
   launcherNetworkScopeForMode,
   launcherProtocolVersion,
   networkDigest,
@@ -289,6 +301,9 @@ export type {
   LauncherClient,
   LauncherClientOptions,
   LauncherEmbedConnectionState,
+  LauncherEmbedBrokerRequestName,
+  LauncherEmbedManifestInput,
+  LauncherEmbedRuntimeEventName,
   LauncherIdentityKind,
   LauncherManifest,
   LauncherNetworkLease,

@@ -106,7 +106,7 @@ function render() {
           <div class="h2o-mark">H2O</div>
           <div>
             <h1>H2O</h1>
-            <p>MX-H2I 网络助手</p>
+            <p>Home To Oversea</p>
           </div>
         </div>
         <nav class="h2o-nav">
@@ -125,7 +125,7 @@ function render() {
         <header class="h2o-toolbar">
           <div>
             <p class="kicker">H2O</p>
-            <h2>网络助手</h2>
+            <h2>Home To Oversea</h2>
           </div>
           <div class="toolbar-actions">
             <button class="secondary-button" type="button" data-action="toggle-debug">${debugOpen ? '关闭 Debug' : 'Debug'}</button>
@@ -135,7 +135,7 @@ function render() {
 
         <section class="h2o-status-strip" data-state="${escapeAttr(state.broker.state)}">
           <strong>${escapeHtml(connected ? '运行正常' : '需要连接')}</strong>
-          <span>${escapeHtml(shellNotice || (connected ? 'Internal 访问、代理规则和 DNS 策略已就绪。' : state.broker.message))}</span>
+          <span>${escapeHtml(shellNotice || (connected ? 'Home To Oversea 规则、PAC 和 Split DNS 已就绪。' : state.broker.message))}</span>
         </section>
 
         ${renderView()}
@@ -197,7 +197,7 @@ function renderUserPanel() {
       <h3>当前状态</h3>
       <div class="h2o-health-card" data-state="${escapeAttr(connected ? 'ok' : 'warning')}">
         <strong>${escapeHtml(connected ? '已就绪' : '未连接')}</strong>
-        <span>${escapeHtml(connected ? '你可以直接访问 Internal 应用和服务。' : '请先通过 MX-H2I 打开 H2O。')}</span>
+        <span>${escapeHtml(connected ? '当前出海网络策略由 MX-H2I broker-session 托管。' : '请先通过 MX-H2I 打开 H2O。')}</span>
       </div>
       <div class="h2o-tip-list">
         <div><strong>代理模式</strong><span>${escapeHtml(modeLabel(state.policy.mode))}</span></div>
@@ -218,6 +218,7 @@ function renderDebugPanel() {
         ${detail('Scope', state.app.networkScope)}
         ${detail('Channel', state.app.standaloneChannelProductId)}
         ${detail('Package', state.app.packageName)}
+        ${detail('Contract', state.app.manifest?.runtimeContractVersion || '-')}
         ${detail('Session', state.broker.session?.sessionId || '-')}
         ${detail('Socket', state.broker.channel?.socketPath || '-')}
         ${detail('Local IP', state.network.localIp || '-')}
@@ -243,7 +244,7 @@ function renderRuntime() {
       <div class="panel-head">
         <div>
           <h3>流量模式</h3>
-          <p>根据当前工作场景选择</p>
+          <p>Home To Oversea policy</p>
         </div>
         <button class="secondary-button" type="button" data-action="request-proxy">应用</button>
       </div>
@@ -284,7 +285,7 @@ function renderDns() {
       <div class="panel-head">
         <div>
           <h3>DNS / PAC</h3>
-          <p>Internal 域名自动接入</p>
+          <p>Split DNS and PAC</p>
         </div>
         <button class="secondary-button" type="button" data-action="refresh">检查</button>
       </div>
@@ -397,11 +398,25 @@ function createMockApi() {
     app: {
       appId: 'h2o',
       displayName: 'H2O',
+      fullName: 'Home To Oversea',
+      description: 'AppCenter 内置的 Home To Oversea 网络插件，提供类 Clash 的代理模式、PAC、Split DNS 和 Internal 出海状态面板。',
       packageName: '@qpjoy/electron-launcher-app-h2o',
       version: '0.1.0',
       launcherMode: 'embed',
       standaloneChannelProductId: 'mx-h2i',
-      networkScope: 'broker-session'
+      networkScope: 'broker-session',
+      manifest: {
+        appId: 'h2o',
+        productId: 'h2o',
+        displayName: 'H2O',
+        description: 'AppCenter 内置的 Home To Oversea 网络插件，提供类 Clash 的代理模式、PAC、Split DNS 和 Internal 出海状态面板。',
+        packageName: '@qpjoy/electron-launcher-app-h2o',
+        launcherMode: 'embed',
+        runtimeContractVersion: '0.1',
+        requiredCapabilities: ['user.session', 'network.status', 'network.proxy', 'network.dns.policy', 'network.pac.policy', 'app-center-runtime'],
+        network: { scope: 'broker-session' },
+        embed: { standaloneChannelProductId: 'mx-h2i', launchWithoutBroker: 'blocked' }
+      }
     },
     broker: {
       state: 'network-ready',
@@ -414,12 +429,12 @@ function createMockApi() {
       channel: { socketPath: '~/.qpjoy/mx-launcher/sockets/mx-h2i.sock' },
       missingCapabilities: []
     },
-    policy: { mode: 'rule', pac: 'dynamic-split', dns: 'internal-first', proxyPort: 2053 },
-    network: { localIp: '10.89.100.12', routePolicy: 'guest limited', internalApi: 'ready', splitDns: 'internal-first', pac: 'dynamic-split' },
+    policy: { mode: 'rule', pac: 'dynamic-split', dns: 'internal-first', proxyPort: 2053, profile: 'home-to-oversea' },
+    network: { localIp: '10.89.100.12', routePolicy: 'guest limited', internalApi: 'ready', splitDns: 'internal-first', pac: 'dynamic-split', profile: 'home-to-oversea' },
     rules: [
-      { id: 'internal-api', host: 'api.mxinfo-inc.cn', target: '10.88.88.88', policy: 'internal' },
+      { id: 'internal-api', host: 'api.mxinfo-inc.cn', target: '10.88.88.88', policy: 'internal-direct' },
       { id: 'appcenter', host: 'appcenter.mxinfo-inc.cn', target: 'mx-h2i broker', policy: 'broker-session' },
-      { id: 'public-docs', host: 'docs.qpjoy.local', target: 'system proxy', policy: 'fallback' }
+      { id: 'oversea-default', host: '*.oversea', target: 'system proxy', policy: 'home-to-oversea' }
     ],
     activity: [],
     updatedAt: new Date().toISOString()

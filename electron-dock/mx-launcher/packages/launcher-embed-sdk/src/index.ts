@@ -1,7 +1,9 @@
 import {
   brokerAbiVersion,
+  createLauncherEmbedManifest,
   createLauncherClient,
   createLauncherNetworkSession,
+  launcherEmbedRuntimeContractVersion,
   launcherBrokerCompatibility,
   launcherProtocolVersion,
   routePlanFromSnapshot,
@@ -16,6 +18,7 @@ import {
   type LauncherClient,
   type LauncherClientOptions,
   type LauncherEmbedConnectionState,
+  type LauncherManifest,
   type LauncherNetworkLease,
   type LauncherNetworkLeaseInput,
   type LauncherNetworkSession,
@@ -34,8 +37,13 @@ export interface EmbedLauncherOptions extends LauncherClientOptions {
   requiredCapabilities?: LauncherCapability[];
   sdkVersion?: string;
   appVersion?: string;
+  displayName?: string;
+  description?: string;
+  packageName?: string;
+  category?: string;
   protocolVersion?: string;
   minBrokerAbiVersion?: string;
+  runtimeContractVersion?: string;
   launchWithoutBroker?: 'blocked' | 'prompt-open-standalone';
   channelRegistry?: LauncherChannelRegistrySource;
   maxChannelHeartbeatAgeMs?: number;
@@ -150,6 +158,7 @@ export interface EmbedLauncher {
   readonly appId: string;
   readonly standaloneChannelProductId: string;
   readonly requiredCapabilities: LauncherCapability[];
+  readonly manifest: LauncherManifest;
   readonly client: LauncherClient;
   readonly legacyNetwork: EmbedLegacyNetworkApi;
   connect(options?: EmbedBrokerConnectOptions): Promise<EmbedLauncherConnection>;
@@ -165,6 +174,22 @@ export function createEmbedLauncher(options: EmbedLauncherOptions): EmbedLaunche
   const standaloneChannelProductId = normalizeProductId(options.standaloneChannelProductId ?? 'mx-h2i');
   const requiredCapabilities = uniqueCapabilities(options.requiredCapabilities ?? ['user.session']);
   const client = createLauncherClient(options);
+  const manifest = createLauncherEmbedManifest({
+    appId,
+    productId,
+    displayName: options.displayName,
+    description: options.description,
+    packageName: options.packageName,
+    category: options.category,
+    sdkVersion: options.sdkVersion,
+    appVersion: options.appVersion,
+    protocolVersion: options.protocolVersion,
+    sdkAbiVersion: options.minBrokerAbiVersion ?? brokerAbiVersion,
+    runtimeContractVersion: options.runtimeContractVersion ?? launcherEmbedRuntimeContractVersion,
+    standaloneChannelProductId,
+    launchWithoutBroker: options.launchWithoutBroker,
+    requiredCapabilities
+  });
   const handlers = new Map<EmbedLauncherEventName, Set<EmbedLauncherEventHandler>>();
   let currentState: LauncherEmbedConnectionState = 'idle';
   let currentSession: LauncherBrokerCapabilitySession | null = null;
@@ -271,6 +296,7 @@ export function createEmbedLauncher(options: EmbedLauncherOptions): EmbedLaunche
     appId,
     standaloneChannelProductId,
     requiredCapabilities,
+    manifest,
     client,
     legacyNetwork,
 

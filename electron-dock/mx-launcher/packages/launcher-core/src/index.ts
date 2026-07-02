@@ -7,6 +7,7 @@ export const launcherProtocolVersion = '2';
 export const launcherProtocolMajor = 2;
 export const brokerAbiVersion = '2';
 export const brokerAbiMajor = 2;
+export const launcherEmbedRuntimeContractVersion = '0.1';
 
 export const launcherCapabilities = [
   'catalog.read',
@@ -21,6 +22,34 @@ export const launcherCapabilities = [
 ] as const;
 
 export type LauncherCapability = typeof launcherCapabilities[number] | (string & {});
+
+export const launcherEmbedRuntimeEvents = [
+  'embed.init',
+  'embed.ready',
+  'embed.error',
+  'embed.logs',
+  'auth.changed',
+  'network.changed',
+  'permission.changed',
+  'app.open',
+  'app.close'
+] as const;
+
+export type LauncherEmbedRuntimeEventName = typeof launcherEmbedRuntimeEvents[number] | (string & {});
+
+export const launcherEmbedBrokerRequests = [
+  'user.session',
+  'network.status',
+  'network.proxy',
+  'network.dns.policy',
+  'network.pac.policy',
+  'app.open',
+  'app.close',
+  'app.logs',
+  'app.update.check'
+] as const;
+
+export type LauncherEmbedBrokerRequestName = typeof launcherEmbedBrokerRequests[number] | (string & {});
 
 export interface LauncherClientOptions {
   baseUrl: string;
@@ -59,11 +88,15 @@ export interface LauncherManifest {
   appId: string;
   productId: string;
   displayName?: string;
+  description?: string;
+  packageName?: string;
+  category?: string;
   launcherMode: LauncherProductMode;
   sdkVersion?: string;
   appVersion?: string;
   sdkAbiVersion?: string;
   protocolVersion?: string;
+  runtimeContractVersion?: string;
   requiredCapabilities: LauncherCapability[];
   network?: {
     scope?: LauncherNetworkScope;
@@ -77,6 +110,24 @@ export interface LauncherManifest {
     standaloneChannelProductId: string;
     launchWithoutBroker: 'blocked' | 'prompt-open-standalone';
   };
+}
+
+export interface LauncherEmbedManifestInput {
+  appId: string;
+  productId?: string | null;
+  displayName?: string | null;
+  description?: string | null;
+  packageName?: string | null;
+  category?: string | null;
+  sdkVersion?: string | null;
+  appVersion?: string | null;
+  sdkAbiVersion?: string | null;
+  protocolVersion?: string | null;
+  runtimeContractVersion?: string | null;
+  standaloneChannelProductId?: string | null;
+  launchWithoutBroker?: 'blocked' | 'prompt-open-standalone' | null;
+  requiredCapabilities?: LauncherCapability[] | null;
+  serviceVip?: string | null;
 }
 
 export interface LauncherChannelRecord {
@@ -749,6 +800,36 @@ export function launcherNetworkScopeForMode(mode: LauncherProductMode | string |
   return mode === 'standalone' ? 'owner' : 'broker-session';
 }
 
+export function createLauncherEmbedManifest(input: LauncherEmbedManifestInput): LauncherManifest {
+  const appId = requiredManifestText(input.appId, 'embed appId');
+  const productId = optionalManifestText(input.productId) || appId;
+  const standaloneChannelProductId = optionalManifestText(input.standaloneChannelProductId) || 'mx-h2i';
+  const requiredCapabilities = uniqueLauncherCapabilities(input.requiredCapabilities ?? ['user.session']);
+  return {
+    appId,
+    productId,
+    displayName: optionalManifestText(input.displayName),
+    description: optionalManifestText(input.description),
+    packageName: optionalManifestText(input.packageName),
+    category: optionalManifestText(input.category),
+    launcherMode: 'embed',
+    sdkVersion: optionalManifestText(input.sdkVersion),
+    appVersion: optionalManifestText(input.appVersion),
+    sdkAbiVersion: optionalManifestText(input.sdkAbiVersion) || brokerAbiVersion,
+    protocolVersion: optionalManifestText(input.protocolVersion) || launcherProtocolVersion,
+    runtimeContractVersion: optionalManifestText(input.runtimeContractVersion) || launcherEmbedRuntimeContractVersion,
+    requiredCapabilities,
+    network: {
+      scope: launcherNetworkScopeForMode('embed'),
+      serviceVip: optionalManifestText(input.serviceVip)
+    },
+    embed: {
+      standaloneChannelProductId,
+      launchWithoutBroker: input.launchWithoutBroker === 'prompt-open-standalone' ? 'prompt-open-standalone' : 'blocked'
+    }
+  };
+}
+
 export function launcherBrokerCompatibility(input: LauncherBrokerCompatibilityInput): LauncherBrokerCompatibilityResult {
   const embedProtocolMajor = majorVersion(input.embedProtocolVersion ?? launcherProtocolVersion);
   const brokerProtocolMajorValue = majorVersion(input.brokerProtocolVersion ?? launcherProtocolVersion);
@@ -811,6 +892,21 @@ function majorVersion(value: string | number | null | undefined): number | null 
   if (!match) return null;
   const major = Number(match[1]);
   return Number.isInteger(major) && major >= 0 ? major : null;
+}
+
+function requiredManifestText(value: string | null | undefined, label: string): string {
+  const text = optionalManifestText(value);
+  if (!text) throw new Error(`Launcher manifest ${label} is required`);
+  return text;
+}
+
+function optionalManifestText(value: string | null | undefined): string | undefined {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return text || undefined;
+}
+
+function uniqueLauncherCapabilities(capabilities: LauncherCapability[]): LauncherCapability[] {
+  return [...new Set(capabilities.map((capability) => String(capability || '').trim()).filter(Boolean))] as LauncherCapability[];
 }
 
 async function resolveWireGuardKeyMaterial(input: LauncherNetworkSessionInput): Promise<LauncherWireGuardKeyMaterial> {

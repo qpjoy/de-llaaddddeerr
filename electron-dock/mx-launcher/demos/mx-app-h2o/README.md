@@ -1,6 +1,11 @@
 # MX App H2O
 
-`@qpjoy/electron-launcher-app-h2o` is the first MX-H2I embed launcher app demo.
+`@qpjoy/electron-launcher-app-h2o` is **H2O: Home To Oversea**, the first
+MX-H2I AppCenter built-in embed network plugin. The product direction is a
+Clash-like user tool for proxy mode, PAC, Split DNS, rule status, and Internal
+access visibility, while the actual privileged network work remains owned by
+the MX-H2I standalone broker.
+
 It is intentionally a normal npm-style Electron package: AppCenter can record
 the package name and version in Internal, cache the installed package locally,
 then open its entrypoint through the MX-H2I broker-session.
@@ -35,6 +40,9 @@ MX-H2I ships H2O in its default AppCenter catalog:
 - `launcherMode`: `embed`
 - `standaloneChannelProductId`: `mx-h2i`
 - `networkScope`: `broker-session`
+- `runtimeContractVersion`: `0.1`
+- `requiredCapabilities`: `user.session`, `network.status`, `network.proxy`,
+  `network.dns.policy`, `network.pac.policy`, `app-center-runtime`
 - `entrypoints.dev`: `workspace:demos/mx-app-h2o`
 
 In development, open MX-H2I, connect as guest or employee, install AppCenter,

@@ -72,6 +72,38 @@ await launcher.request('network.proxy', {
 Renderer APIs should be exposed through preload with explicit allowlists. Do not
 expose a raw IPC or transport object to untrusted renderer code.
 
+## Runtime Contract v0.1
+
+The shared core package exposes `createLauncherEmbedManifest()` and
+`launcherEmbedRuntimeContractVersion`. AppCenter records, admin records, and
+embed apps should use this shape for the first product-grade contract:
+
+- `runtimeContractVersion`: `0.1`
+- `launcherMode`: `embed`
+- `network.scope`: `broker-session`
+- `embed.standaloneChannelProductId`: the owning standalone channel, for
+  example `mx-h2i`
+- `requiredCapabilities`: the broker-scoped API surface the app needs
+
+The first event vocabulary is intentionally small:
+
+- `embed.init`, `embed.ready`, `embed.error`, `embed.logs`
+- `auth.changed`, `network.changed`, `permission.changed`
+- `app.open`, `app.close`
+
+The first request vocabulary is also broker-owned:
+
+- `user.session`
+- `network.status`
+- `network.proxy`
+- `network.dns.policy`
+- `network.pac.policy`
+- `app.open`, `app.close`, `app.logs`, `app.update.check`
+
+An embed app receives state through the broker session or through a preload
+bridge owned by its Electron main process. It should not read WireGuard keys,
+touch routes, apply PAC, or write DNS directly.
+
 The high-level embed API is broker-session based. The package still exposes a
 `legacyNetwork` object for migration tests that need to call the old
 Internal lease APIs explicitly, but production embed apps should not allocate a
@@ -103,10 +135,12 @@ AppCenter is an embed app with elevated capabilities such as `catalog.read`,
 `app.install`, `app.launch`, and `app.update.manage`. It still depends on the
 MX-H2I standalone broker for execution.
 
-H2O and other AppCenter applications should use the same embed SDK and should
-only request the capabilities needed by that app. They should not know whether
-MX-H2I uses WireGuard, PAC, system proxy, or another future data-plane
-implementation.
+H2O is **Home To Oversea**, an AppCenter built-in embed network plugin. It is a
+Clash-like user surface for proxy mode, PAC, Split DNS, and Internal/oversea
+status, but it should still use the same broker-session contract as other
+AppCenter applications. H2O should only request the capabilities it needs and
+should not know whether MX-H2I uses WireGuard, PAC, system proxy, or another
+future data-plane implementation.
 
 ## Release Behavior
 

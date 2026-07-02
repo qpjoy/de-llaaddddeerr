@@ -1,18 +1,36 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 
+const H2O_APP_ID = 'h2o';
+const H2O_DISPLAY_NAME = 'H2O';
+const H2O_FULL_NAME = 'Home To Oversea';
+const H2O_PACKAGE_NAME = '@qpjoy/electron-launcher-app-h2o';
+const H2O_DESCRIPTION = 'AppCenter 内置的 Home To Oversea 网络插件，提供类 Clash 的代理模式、PAC、Split DNS 和 Internal 出海状态面板。';
+const H2O_REQUIRED_CAPABILITIES = [
+  'user.session',
+  'network.status',
+  'network.proxy',
+  'network.dns.policy',
+  'network.pac.policy',
+  'app-center-runtime'
+];
+
 let mainWindow = null;
 let launcher = null;
 
 let runtime = {
   app: {
-    appId: 'h2o',
-    displayName: 'H2O',
-    packageName: '@qpjoy/electron-launcher-app-h2o',
+    appId: H2O_APP_ID,
+    displayName: H2O_DISPLAY_NAME,
+    fullName: H2O_FULL_NAME,
+    description: H2O_DESCRIPTION,
+    packageName: H2O_PACKAGE_NAME,
     version: app.getVersion(),
     launcherMode: 'embed',
     standaloneChannelProductId: 'mx-h2i',
-    networkScope: 'broker-session'
+    networkScope: 'broker-session',
+    requiredCapabilities: H2O_REQUIRED_CAPABILITIES,
+    manifest: null
   },
   broker: {
     state: 'idle',
@@ -26,7 +44,8 @@ let runtime = {
     mode: 'rule',
     pac: 'dynamic-split',
     dns: 'internal-first',
-    proxyPort: 2053
+    proxyPort: 2053,
+    profile: 'home-to-oversea'
   },
   network: {
     localIp: null,
@@ -36,9 +55,9 @@ let runtime = {
     pac: 'pending'
   },
   rules: [
-    { id: 'internal-api', host: 'api.mxinfo-inc.cn', target: '10.88.88.88', policy: 'internal' },
+    { id: 'internal-api', host: 'api.mxinfo-inc.cn', target: '10.88.88.88', policy: 'internal-direct' },
     { id: 'appcenter', host: 'appcenter.mxinfo-inc.cn', target: 'mx-h2i broker', policy: 'broker-session' },
-    { id: 'public-docs', host: 'docs.qpjoy.local', target: 'system proxy', policy: 'fallback' }
+    { id: 'oversea-default', host: '*.oversea', target: 'system proxy', policy: 'home-to-oversea' }
   ],
   activity: [],
   updatedAt: new Date().toISOString()
@@ -124,23 +143,41 @@ async function connectBroker() {
   broadcast();
   try {
     const mod = await import('@qpjoy/electron-launcher');
+    const manifest = typeof mod.createLauncherEmbedManifest === 'function'
+      ? mod.createLauncherEmbedManifest({
+          appId: H2O_APP_ID,
+          productId: H2O_APP_ID,
+          displayName: H2O_DISPLAY_NAME,
+          description: H2O_DESCRIPTION,
+          packageName: H2O_PACKAGE_NAME,
+          category: 'network',
+          appVersion: runtime.app.version,
+          standaloneChannelProductId: runtime.app.standaloneChannelProductId,
+          requiredCapabilities: H2O_REQUIRED_CAPABILITIES
+        })
+      : null;
+    runtime.app = {
+      ...runtime.app,
+      manifest,
+      requiredCapabilities: manifest?.requiredCapabilities || H2O_REQUIRED_CAPABILITIES
+    };
     launcher = mod.createElectronLauncher({
       mode: 'embed',
       appId: runtime.app.appId,
       productId: runtime.app.appId,
+      displayName: runtime.app.displayName,
+      description: runtime.app.description,
+      packageName: runtime.app.packageName,
+      category: 'network',
       standaloneChannelProductId: runtime.app.standaloneChannelProductId,
       appVersion: runtime.app.version,
-      requiredCapabilities: [
-        'user.session',
-        'network.status',
-        'network.proxy',
-        'network.dns.policy',
-        'network.pac.policy',
-        'app-center-runtime'
-      ],
+      requiredCapabilities: runtime.app.requiredCapabilities,
       channelRegistry: () => devChannelRegistry(mod),
       requestImpl: brokerRequest
     });
+    if (launcher.manifest) {
+      runtime.app.manifest = launcher.manifest;
+    }
     const result = await launcher.connect({
       installId: 'h2o-dev-install',
       deviceId: 'h2o-dev-device',
@@ -201,6 +238,7 @@ async function brokerRequest(_session, name, payload) {
       internalApi: 'ready',
       splitDns: runtime.policy.dns,
       pac: runtime.policy.pac,
+      profile: runtime.policy.profile,
       networkScope: runtime.app.networkScope,
       standaloneChannelProductId: runtime.app.standaloneChannelProductId
     };
@@ -210,6 +248,7 @@ async function brokerRequest(_session, name, payload) {
       ok: true,
       mode: payload && payload.mode ? payload.mode : runtime.policy.mode,
       mixedPort: runtime.policy.proxyPort,
+      profile: runtime.policy.profile,
       appliedAt: new Date().toISOString()
     };
   }
@@ -233,14 +272,10 @@ function devChannelRegistry(mod) {
     brokerAbiVersion: mod.brokerAbiVersion || '1.0',
     protocolVersion: mod.launcherProtocolVersion || '1.0',
     capabilities: [
-      'user.session',
-      'network.status',
-      'network.proxy',
-      'network.dns.policy',
-      'network.pac.policy',
+      ...H2O_REQUIRED_CAPABILITIES,
       'app-center-runtime',
       'observability.write'
-    ],
+    ].filter((capability, index, rows) => rows.indexOf(capability) === index),
     heartbeatAt: now,
     displayName: 'MX-H2I Dev Broker'
   }];
