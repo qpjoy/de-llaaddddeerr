@@ -8621,6 +8621,16 @@ function buildLauncherServiceVipSmoke(input: {
   const appServiceVip = product?.serviceVip ?? null;
   const channelServiceVip = channelProduct?.serviceVip ?? null;
   const serviceVip = mode === 'standalone' ? appServiceVip : appServiceVip ?? channelServiceVip;
+  const appManifest = app.manifest ?? null;
+  const manifestRuntimeContractVersion = appManifest?.runtimeContractVersion || app.runtimeContractVersion || null;
+  const manifestChannelProductId = appManifest?.embed?.standaloneChannelProductId
+    ? normalizeLauncherId(appManifest.embed.standaloneChannelProductId)
+    : null;
+  const embedManifestReady = mode === 'embed'
+    && appManifest?.launcherMode === 'embed'
+    && appManifest?.network?.scope === 'broker-session'
+    && manifestChannelProductId === channelProductId
+    && Boolean(manifestRuntimeContractVersion);
   const dnsHost = normalizeDomain(`${app.appId}.${MX_DEFAULT_APP_DNS_ZONE}`);
   const dnsRoute = findLauncherServiceDnsRoute(input.dnsRoutes, dnsHost);
   const domesticSiteId = product?.defaultDomesticSiteId || channelProduct?.defaultDomesticSiteId || 'domestic-main';
@@ -8652,6 +8662,20 @@ function buildLauncherServiceVipSmoke(input: {
       app.appId,
       app.enabled === false ? 'disabled' : 'enabled'
     ),
+    ...(mode === 'embed' ? [
+      serviceVipSmokeCheck(
+        'embed-manifest',
+        'Embed manifest',
+        embedManifestReady ? 'passed' : 'blocked',
+        embedManifestReady
+          ? 'Embed runtime manifest declares broker-session networking and matches the selected standalone channel.'
+          : 'Embed app manifest must declare launcherMode=embed, network.scope=broker-session, runtimeContractVersion, and the selected standalone channel.',
+        `embed broker-session ${channelProductId}`,
+        appManifest
+          ? `${appManifest.launcherMode || 'missing-mode'} ${appManifest.network?.scope || 'missing-scope'} ${manifestChannelProductId || 'missing-channel'} ${manifestRuntimeContractVersion || 'missing-contract'}`
+          : null
+      )
+    ] : []),
     serviceVipSmokeCheck(
       'product-network',
       mode === 'standalone' ? 'ProductNetwork' : 'App binding',
@@ -8841,6 +8865,9 @@ function launcherServiceVipSmokeSummary(
 
 function launcherServiceVipSmokeNextActions(checks: AdminLauncherServiceVipSmokeCheck[]): string[] {
   const actions: string[] = [];
+  if (checks.some((check) => check.checkId === 'embed-manifest' && check.status === 'blocked')) {
+    actions.push('Upsert the AppCenter embed manifest so launcherMode, broker-session scope, runtime contract, and standalone channel are aligned.');
+  }
   if (checks.some((check) => check.checkId === 'standalone-channel' && check.status === 'blocked')) {
     actions.push('Create or enable the selected standalone launcher channel, then refresh the embed app binding.');
   }

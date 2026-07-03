@@ -233,6 +233,17 @@ Product Registry 不应把 `launcher` 当业务产品。它应登记业务产品
 - `mx-h2i`、`appcenter`、`h2o` 是系统内置 App，启动时自动初始化到 DB。
 - 三者在 Admin 左侧应用导航中同级展示；App 分组可以收起。
 - 内置 App 可以编辑展示/策略元信息，但不能删除；自定义 App 支持新增、编辑、删除。
+- Admin 创建或更新 embed App 时必须沉淀 `manifest`，字段至少包含
+  `launcherMode=embed`、`runtimeContractVersion`、`network.scope=broker-session`、
+  `embed.standaloneChannelProductId` 和 `requiredCapabilities`。这份 manifest 是
+  AppCenter 列表、客户端安装缓存、灰度策略和 SDK runtime 握手的共同契约。
+- H2O 内置为 `Home To Oversea`，默认 package 为
+  `@qpjoy/electron-launcher-app-h2o`，作为 AppCenter 内置的类 Clash 网络应用；它通过
+  `mx-h2i` broker 读取 PAC、Split DNS、代理规则、Internal/Oversea 状态，不单独申请 H 端
+  WG lease。
+- `/admin` 的 Launcher service VIP smoke 对 embed App 额外校验 manifest、broker channel、
+  DNS/gateway 和 Domestic relay 覆盖。manifest 不完整时，后台应提示先修正 AppCenter 注册，
+  而不是让用户端自行猜测是否需要网络 IP。
 - `mx-h2i` 使用 Launcher `standalone` 模式；`appcenter`、`h2o` 默认使用 `embed` 并依赖 `mx-h2i`。
 
 ## Frontend

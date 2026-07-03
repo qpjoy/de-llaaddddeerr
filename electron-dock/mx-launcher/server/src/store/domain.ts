@@ -7,6 +7,7 @@ import type {
   AppCenterAccessInput,
   AppCenterAccessPolicy,
   AppCenterApp,
+  AppCenterAppManifest,
   AppCenterAppInput,
   AppOnboardingDefaults,
   AppOnboardingDefaultsInput,
@@ -49,6 +50,7 @@ import type {
   LauncherProductNetwork,
   LauncherProductNetworkInput,
   LauncherProductMode,
+  LauncherNetworkScope,
   LauncherProductUpdatePolicy,
   LauncherNetworkReachabilityPlan,
   LauncherNetworkSnapshot,
@@ -120,6 +122,9 @@ import type {
 } from '../types.js';
 
 export const GATEWAY_RUNTIME_CONFIG_ID = 'gateway_runtime_default';
+export const APP_CENTER_RUNTIME_CONTRACT_VERSION = '0.1';
+export const APP_CENTER_LAUNCHER_PROTOCOL_VERSION = '2';
+export const APP_CENTER_BROKER_ABI_VERSION = '2';
 
 const USER_SCOPES = [
   'auth.read',
@@ -776,44 +781,184 @@ function appCenterRecordMap(value: AppCenterAppInput['entrypoints'], fallback: R
   }, {});
 }
 
+function appCenterManifestRecord(value: AppCenterAppInput['manifest']): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? { ...value } as Record<string, unknown> : {};
+}
+
+function appCenterManifestString(value: Record<string, unknown>, key: string): string | null {
+  const raw = value[key];
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+}
+
+function appCenterManifestNestedString(value: Record<string, unknown>, section: string, key: string): string | null {
+  const row = value[section];
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+  const raw = (row as Record<string, unknown>)[key];
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+}
+
 function defaultAppPackageName(appId: string): string {
   if (appId === MX_H2I_PRODUCT_ID) return '@qpjoy/mx-h2i-demo';
   if (appId === APP_CENTER_PRODUCT_ID) return '@qpjoy/electron-launcher-appcenter';
   return `@qpjoy/electron-launcher-app-${safeIdPart(appId).toLowerCase() || 'app'}`;
 }
 
+function buildAppCenterManifest(input: {
+  appId: string;
+  productId: string;
+  displayName: string;
+  fullName: string | null;
+  packageName: string | null;
+  version: string;
+  category: string;
+  description: string;
+  launcherMode: LauncherProductMode;
+  standaloneChannelProductId: string | null;
+  requiredCapabilities: string[];
+  runtimeContractVersion: string | null;
+  manifest: Record<string, unknown>;
+  previous: AppCenterAppManifest | null | undefined;
+}): AppCenterAppManifest {
+  const previous = input.previous ?? null;
+  const protocolVersion = appCenterManifestString(input.manifest, 'protocolVersion')
+    || previous?.protocolVersion
+    || APP_CENTER_LAUNCHER_PROTOCOL_VERSION;
+  const sdkAbiVersion = appCenterManifestString(input.manifest, 'sdkAbiVersion')
+    || previous?.sdkAbiVersion
+    || APP_CENTER_BROKER_ABI_VERSION;
+  const runtimeContractVersion = input.runtimeContractVersion
+    || appCenterManifestString(input.manifest, 'runtimeContractVersion')
+    || previous?.runtimeContractVersion
+    || (input.launcherMode === 'embed' ? APP_CENTER_RUNTIME_CONTRACT_VERSION : undefined);
+  const networkScope: LauncherNetworkScope = input.launcherMode === 'standalone' ? 'owner' : 'broker-session';
+  const serviceVip = appCenterManifestNestedString(input.manifest, 'network', 'serviceVip')
+    || previous?.network?.serviceVip
+    || null;
+  return {
+    appId: input.appId,
+    productId: input.productId,
+    displayName: input.fullName || input.displayName,
+    description: input.description,
+    packageName: input.packageName || undefined,
+    category: input.category,
+    launcherMode: input.launcherMode,
+    sdkVersion: appCenterManifestString(input.manifest, 'sdkVersion') || previous?.sdkVersion,
+    appVersion: appCenterManifestString(input.manifest, 'appVersion') || previous?.appVersion || input.version,
+    sdkAbiVersion,
+    protocolVersion,
+    runtimeContractVersion,
+    requiredCapabilities: input.requiredCapabilities,
+    network: {
+      scope: networkScope,
+      serviceVip
+    },
+    ...(input.launcherMode === 'standalone'
+      ? {
+          standalone: {
+            ownsNetwork: true as const,
+            brokerEnabled: true
+          }
+        }
+      : {
+          embed: {
+            standaloneChannelProductId: input.standaloneChannelProductId || MX_H2I_PRODUCT_ID,
+            launchWithoutBroker: previous?.embed?.launchWithoutBroker === 'prompt-open-standalone'
+              || appCenterManifestNestedString(input.manifest, 'embed', 'launchWithoutBroker') === 'prompt-open-standalone'
+              ? 'prompt-open-standalone' as const
+              : 'blocked' as const
+          }
+        })
+  };
+}
+
 export function buildAppCenterApp(
   input: AppCenterAppInput,
   previous: AppCenterApp | null = null
 ): AppCenterApp {
-  const appId = safeIdPart(String(input.appId || previous?.appId || 'app').trim()).toLowerCase();
-  const launcherMode = launcherProductMode(input.launcherMode ?? previous?.launcherMode ?? (appId === MX_H2I_PRODUCT_ID ? 'standalone' : 'embed'));
+  const rawManifest = appCenterManifestRecord(input.manifest);
+  const appId = safeIdPart(String(input.appId || appCenterManifestString(rawManifest, 'appId') || previous?.appId || 'app').trim()).toLowerCase();
+  const launcherMode = launcherProductMode(input.launcherMode ?? appCenterManifestString(rawManifest, 'launcherMode') ?? previous?.launcherMode ?? (appId === MX_H2I_PRODUCT_ID ? 'standalone' : 'embed'));
   const productNetworkId = normalizeLauncherNetworkProductId(input.productNetworkId || previous?.productNetworkId || appId);
   const standaloneChannelProductId = launcherMode === 'standalone'
     ? productNetworkId
-    : launcherNetworkLeaseProductId(input.standaloneChannelProductId || previous?.standaloneChannelProductId || MX_H2I_PRODUCT_ID);
+    : launcherNetworkLeaseProductId(
+      input.standaloneChannelProductId
+      || appCenterManifestNestedString(rawManifest, 'embed', 'standaloneChannelProductId')
+      || appCenterManifestString(rawManifest, 'standaloneChannelProductId')
+      || previous?.standaloneChannelProductId
+      || MX_H2I_PRODUCT_ID
+    );
   const builtin = typeof input.builtin === 'boolean' ? input.builtin : previous?.builtin ?? false;
+  const displayName = input.displayName?.trim()
+    || appCenterManifestString(rawManifest, 'displayName')
+    || previous?.displayName
+    || launcherProductDisplayName(appId);
+  const fullName = input.fullName?.trim()
+    || appCenterManifestString(rawManifest, 'fullName')
+    || previous?.fullName
+    || null;
+  const packageName = input.packageName?.trim()
+    || appCenterManifestString(rawManifest, 'packageName')
+    || previous?.packageName
+    || defaultAppPackageName(appId);
+  const version = input.version?.trim()
+    || appCenterManifestString(rawManifest, 'appVersion')
+    || previous?.version
+    || '0.1.0';
+  const category = input.category?.trim()
+    || appCenterManifestString(rawManifest, 'category')
+    || previous?.category
+    || 'custom';
+  const description = input.description?.trim()
+    || appCenterManifestString(rawManifest, 'description')
+    || previous?.description
+    || 'Launcher powered application.';
+  const permissions = appCenterStringList(input.permissions, previous?.permissions ?? ['auth.read']);
+  const requiredCapabilities = appCenterStringList(
+    input.requiredCapabilities,
+    previous?.requiredCapabilities ?? (launcherMode === 'standalone'
+      ? ['launcher-network', 'launcher-standalone']
+      : ['launcher-network', 'launcher-embed-sdk'])
+  );
+  const runtimeContractVersion = input.runtimeContractVersion?.trim()
+    || appCenterManifestString(rawManifest, 'runtimeContractVersion')
+    || previous?.runtimeContractVersion
+    || (launcherMode === 'embed' ? APP_CENTER_RUNTIME_CONTRACT_VERSION : null);
+  const manifest = buildAppCenterManifest({
+    appId,
+    productId: productNetworkId,
+    displayName,
+    fullName,
+    packageName,
+    version,
+    category,
+    description,
+    launcherMode,
+    standaloneChannelProductId,
+    requiredCapabilities,
+    runtimeContractVersion,
+    manifest: rawManifest,
+    previous: previous?.manifest
+  });
   return {
     appId,
-    displayName: input.displayName?.trim() || previous?.displayName || launcherProductDisplayName(appId),
+    displayName,
+    fullName,
     builtin,
     systemOwned: typeof input.systemOwned === 'boolean' ? input.systemOwned : previous?.systemOwned ?? builtin,
-    packageName: input.packageName?.trim() || previous?.packageName || defaultAppPackageName(appId),
-    version: input.version?.trim() || previous?.version || '0.1.0',
-    category: input.category?.trim() || previous?.category || 'custom',
-    description: input.description?.trim() || previous?.description || 'Launcher powered application.',
+    packageName,
+    version,
+    category,
+    description,
     launcherMode,
     standaloneChannelProductId,
     productNetworkId,
     enabled: typeof input.enabled === 'boolean' ? input.enabled : previous?.enabled ?? true,
     channels: appCenterStringList(input.channels, previous?.channels ?? ['shadow', 'beta', 'stable']),
-    permissions: appCenterStringList(input.permissions, previous?.permissions ?? ['auth.read']),
-    requiredCapabilities: appCenterStringList(
-      input.requiredCapabilities,
-      previous?.requiredCapabilities ?? (launcherMode === 'standalone'
-        ? ['launcher-network', 'launcher-standalone']
-        : ['launcher-network', 'launcher-embed-sdk'])
-    ),
+    permissions,
+    requiredCapabilities,
+    runtimeContractVersion,
+    manifest,
     accessPolicy: normalizeAppCenterAccessPolicy(appId, launcherMode, input.accessPolicy, previous?.accessPolicy),
     updatePolicy: normalizeUpdatePolicy(String(input.updatePolicy || previous?.updatePolicy || 'app-managed')),
     entrypoints: appCenterRecordMap(input.entrypoints, previous?.entrypoints ?? {
@@ -1000,7 +1145,7 @@ export function buildAppOnboardingDefaults(
   products: LauncherProductNetwork[] = [],
   routes: DnsReverseProxyRoute[] = []
 ): AppOnboardingDefaults {
-  const manifest = input.manifest && typeof input.manifest === 'object' ? input.manifest : {};
+  const manifest = appCenterManifestRecord(input.manifest);
   const template = buildAppOnboardingTemplates().find((item) => item.templateId === (input.templateId?.trim() || manifestString(manifest, 'templateId')))
     ?? buildAppOnboardingTemplates()[0];
   const appId = safeIdPart(input.appId?.trim()
@@ -1047,6 +1192,25 @@ export function buildAppOnboardingDefaults(
   const appUpdatePolicy: AppOnboardingDefaults['app']['updatePolicy'] = appId === MX_H2I_PRODUCT_ID || launcherMode === 'embed'
     ? 'platform-ui'
     : 'app-managed';
+  const runtimeContractVersion = launcherMode === 'embed'
+    ? appCenterManifestString(manifest, 'runtimeContractVersion') || APP_CENTER_RUNTIME_CONTRACT_VERSION
+    : null;
+  const appManifest = buildAppCenterManifest({
+    appId,
+    productId: appId,
+    displayName,
+    fullName: appCenterManifestString(manifest, 'fullName'),
+    packageName,
+    version: '0.1.0',
+    category,
+    description,
+    launcherMode,
+    standaloneChannelProductId,
+    requiredCapabilities: capabilities,
+    runtimeContractVersion,
+    manifest,
+    previous: null
+  });
   const dnsRoute = {
     routeId: existingRoute?.routeId || `rp_${dnsHost}`,
     host: existingRoute?.host || dnsHost,
@@ -1072,6 +1236,8 @@ export function buildAppOnboardingDefaults(
       channels: ['shadow', 'beta', 'stable'],
       permissions,
       requiredCapabilities: capabilities,
+      runtimeContractVersion,
+      manifest: appManifest,
       updatePolicy: appUpdatePolicy,
       entrypoints: {
         desktop: `app://${appId}/index.html`,
@@ -1256,12 +1422,13 @@ export function builtinAppCenterApps(): AppCenterApp[] {
     buildAppCenterApp({
       appId: 'h2o',
       displayName: 'H2O',
+      fullName: 'Home To Oversea',
       builtin: true,
       systemOwned: true,
       packageName: '@qpjoy/electron-launcher-app-h2o',
       version: '0.1.0',
       category: 'network',
-      description: 'Network, split DNS, PAC, and Internal service access through MX-H2I launcher channel.',
+      description: 'AppCenter built-in Home To Oversea network plugin for proxy mode, PAC, Split DNS, and Internal/oversea status.',
       launcherMode: 'embed',
       standaloneChannelProductId: MX_H2I_PRODUCT_ID,
       productNetworkId: 'h2o',
@@ -1275,7 +1442,8 @@ export function builtinAppCenterApps(): AppCenterApp[] {
         'network.pac.policy',
         'observability.write'
       ],
-      requiredCapabilities: ['launcher-network', 'launcher-embed-sdk', 'app-center-runtime'],
+      requiredCapabilities: ['user.session', 'network.status', 'network.proxy', 'network.dns.policy', 'network.pac.policy', 'app-center-runtime'],
+      runtimeContractVersion: APP_CENTER_RUNTIME_CONTRACT_VERSION,
       accessPolicy: {
         defaultDecision: 'private',
         allowAdmin: true,

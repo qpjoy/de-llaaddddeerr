@@ -46,7 +46,19 @@ const checks = [
   {
     name: 'app-center apps',
     path: '/internal/v1/app-center/apps',
-    assert: (body) => Array.isArray(body?.apps) && body.apps.some((app) => app.appId === 'h2o')
+    assert: (body) => {
+      const h2o = Array.isArray(body?.apps) ? body.apps.find((app) => app?.appId === 'h2o') : null;
+      return h2o?.fullName === 'Home To Oversea'
+        && h2o?.launcherMode === 'embed'
+        && h2o?.standaloneChannelProductId === 'mx-h2i'
+        && h2o?.runtimeContractVersion === '0.1'
+        && h2o?.manifest?.launcherMode === 'embed'
+        && h2o?.manifest?.network?.scope === 'broker-session'
+        && h2o?.manifest?.embed?.standaloneChannelProductId === 'mx-h2i'
+        && h2o?.manifest?.runtimeContractVersion === '0.1'
+        && Array.isArray(h2o?.manifest?.requiredCapabilities)
+        && h2o.manifest.requiredCapabilities.includes('network.proxy');
+    }
   },
   {
     name: 'sdk gateway manifest',

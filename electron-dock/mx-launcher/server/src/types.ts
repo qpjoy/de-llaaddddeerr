@@ -1652,6 +1652,7 @@ export interface AppCenterAccessInput extends AppCenterAccessContextInput {
 export interface AppCenterApp {
   appId: string;
   displayName: string;
+  fullName?: string | null;
   builtin: boolean;
   systemOwned?: boolean;
   packageName?: string | null;
@@ -1665,6 +1666,8 @@ export interface AppCenterApp {
   channels: string[];
   permissions: string[];
   requiredCapabilities: string[];
+  runtimeContractVersion?: string | null;
+  manifest: AppCenterAppManifest | null;
   accessPolicy: AppCenterAccessPolicy;
   updatePolicy: UpdatePolicyKind;
   entrypoints: Record<string, string>;
@@ -1674,9 +1677,38 @@ export interface AppCenterApp {
   };
 }
 
+export interface AppCenterAppManifest {
+  appId: string;
+  productId: string;
+  displayName?: string;
+  description?: string;
+  packageName?: string;
+  category?: string;
+  launcherMode: LauncherProductMode;
+  sdkVersion?: string;
+  appVersion?: string;
+  sdkAbiVersion?: string;
+  protocolVersion?: string;
+  runtimeContractVersion?: string;
+  requiredCapabilities: string[];
+  network?: {
+    scope?: LauncherNetworkScope;
+    serviceVip?: string | null;
+  };
+  standalone?: {
+    ownsNetwork: true;
+    brokerEnabled: boolean;
+  };
+  embed?: {
+    standaloneChannelProductId: string;
+    launchWithoutBroker: 'blocked' | 'prompt-open-standalone';
+  };
+}
+
 export interface AppCenterAppInput {
   appId?: string | null;
   displayName?: string | null;
+  fullName?: string | null;
   builtin?: boolean | null;
   systemOwned?: boolean | null;
   packageName?: string | null;
@@ -1690,6 +1722,8 @@ export interface AppCenterAppInput {
   channels?: string[] | string | null;
   permissions?: string[] | string | null;
   requiredCapabilities?: string[] | string | null;
+  runtimeContractVersion?: string | null;
+  manifest?: Record<string, unknown> | AppCenterAppManifest | null;
   accessPolicy?: Partial<AppCenterAccessPolicy> | null;
   updatePolicy?: UpdatePolicyKind | string | null;
   entrypoints?: Record<string, string> | null;
@@ -1723,7 +1757,7 @@ export interface AppOnboardingDefaultsInput {
   standaloneChannelProductId?: string | null;
   dnsHost?: string | null;
   targetUrl?: string | null;
-  manifest?: Record<string, unknown> | null;
+  manifest?: Record<string, unknown> | AppCenterAppManifest | null;
   requestedBy?: string | null;
 }
 
@@ -1741,6 +1775,8 @@ export interface AppOnboardingDefaults {
     channels: string[];
     permissions: string[];
     requiredCapabilities: string[];
+    runtimeContractVersion?: string | null;
+    manifest: AppCenterAppManifest | null;
     updatePolicy: UpdatePolicyKind;
     enabled: boolean;
   };
