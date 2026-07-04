@@ -746,6 +746,43 @@ k8s_repair_flannel_cni() {
   fi
 }
 
+k8s_cluster_dns_diagnostics() {
+  say "cluster dns diagnostics: kube-dns service"
+  kubectl -n kube-system get svc kube-dns -o wide || true
+  kubectl -n kube-system describe svc kube-dns || true
+  say "cluster dns diagnostics: coredns workload"
+  kubectl -n kube-system get deployment coredns -o wide || true
+  kubectl -n kube-system describe deployment coredns || true
+  say "cluster dns diagnostics: coredns pods"
+  kubectl -n kube-system get pods -l k8s-app=kube-dns -o wide || true
+  kubectl -n kube-system get pods -l k8s-app=kube-dns -o name 2>/dev/null | while IFS= read -r pod; do
+    [ -n "$pod" ] || continue
+    kubectl -n kube-system describe "$pod" || true
+    kubectl -n kube-system logs "$pod" --all-containers --tail=120 || true
+  done
+  say "cluster dns diagnostics: recent kube-system events"
+  kubectl -n kube-system get events --sort-by=.lastTimestamp || true
+}
+
+k8s_recover_cluster_dns() {
+  [ "${MX_K8S_RECOVER_CLUSTER_DNS:-1}" = "1" ] || return 0
+  kubectl -n kube-system get deployment coredns >/dev/null 2>&1 || return 0
+  local desired available
+  desired="$(kubectl -n kube-system get deployment coredns -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+  available="$(kubectl -n kube-system get deployment coredns -o jsonpath='{.status.availableReplicas}' 2>/dev/null || true)"
+  desired="${desired:-1}"
+  available="${available:-0}"
+  if [ "$available" != "$desired" ]; then
+    say "restart kube-system coredns after network recovery: available=$available desired=$desired"
+    kubectl -n kube-system rollout restart deployment/coredns
+  fi
+  say "wait kube-system coredns rollout"
+  if ! k8s_rollout_status kube-system deployment coredns "${MX_K8S_CLUSTER_DNS_ROLLOUT_TIMEOUT:-180s}"; then
+    k8s_cluster_dns_diagnostics
+    die "kube-system coredns rollout failed"
+  fi
+}
+
 k8s_repair_kubeadm_endpoint() {
   [ "${MX_K8S_AUTO_REPAIR_KUBEADM_ENDPOINT:-1}" = "1" ] || return 0
   [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ] || return 0
@@ -1579,6 +1616,7 @@ k8s_apply() {
   [ -d "$dir" ] || die "missing k8s manifest directory: $dir"
   k8s_repair_kubeadm_endpoint
   k8s_repair_flannel_cni
+  k8s_recover_cluster_dns
 
   say "apply namespace"
   kubectl apply --validate=false -f "$dir/00-namespace.yaml"
@@ -4462,6 +4500,9 @@ Notes:
     When the Kubernetes service VIP is not reachable yet, deploy points Flannel
     directly at the repaired apiserver IP; disable this with
     MX_K8S_FLANNEL_DIRECT_APISERVER=0.
+  - Deploy waits for kube-system CoreDNS after Flannel recovery so Pods can
+    resolve services such as mx-internal-postgres before migrations start.
+    Disable this guard with MX_K8S_RECOVER_CLUSTER_DNS=0.
   - Existing mx-internal-gateway-caddy data is preserved during deploy so
     generated gateway routes are not reset to the bootstrap Caddyfile.
   - gateway-smoke is read-only and checks /healthz plus /readyz. Full HTTP
