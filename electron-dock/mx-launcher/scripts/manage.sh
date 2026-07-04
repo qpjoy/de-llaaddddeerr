@@ -281,6 +281,62 @@ k8s_cert_has_ip() {
     | grep -q "IP Address:$ip"
 }
 
+k8s_write_kubeadm_cert_repair_config() {
+  local current_ip="$1"
+  local path="$2"
+  local api_version="$3"
+  local node_name
+  node_name="$(hostname 2>/dev/null || true)"
+  [ -n "$node_name" ] || node_name="localhost"
+  cat >"$path" <<EOF
+apiVersion: kubeadm.k8s.io/${api_version}
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: ${current_ip}
+nodeRegistration:
+  name: ${node_name}
+---
+apiVersion: kubeadm.k8s.io/${api_version}
+kind: ClusterConfiguration
+etcd:
+  local:
+    dataDir: /var/lib/etcd
+EOF
+}
+
+k8s_kubeadm_phase_certs_with_repair_config() {
+  local phase="$1"
+  local current_ip="$2"
+  local backup_dir="$3"
+  local config api_version
+  config="$backup_dir/kubeadm-cert-repair.yaml"
+  for api_version in v1beta4 v1beta3; do
+    k8s_write_kubeadm_cert_repair_config "$current_ip" "$config" "$api_version"
+    if kubeadm init phase certs "$phase" --config "$config"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+k8s_kubeadm_cert_repair_needed_for_ip() {
+  local current_ip="$1"
+  if [ -f /etc/kubernetes/pki/apiserver.crt ] \
+    && ! k8s_apiserver_cert_has_ip "$current_ip"; then
+    return 0
+  fi
+  [ -f /etc/kubernetes/manifests/etcd.yaml ] || return 1
+  if [ -f /etc/kubernetes/pki/etcd/server.crt ] \
+    && ! k8s_cert_has_ip /etc/kubernetes/pki/etcd/server.crt "$current_ip"; then
+    return 0
+  fi
+  if [ -f /etc/kubernetes/pki/etcd/peer.crt ] \
+    && ! k8s_cert_has_ip /etc/kubernetes/pki/etcd/peer.crt "$current_ip"; then
+    return 0
+  fi
+  return 1
+}
+
 k8s_repair_apiserver_cert_if_needed() {
   local current_ip="$1"
   local old_ips="$2"
@@ -329,7 +385,7 @@ k8s_repair_etcd_cert_phase_if_needed() {
   k8s_backup_file_to_dir "$backup_dir" "$cert"
   [ -f "$key" ] && k8s_backup_file_to_dir "$backup_dir" "$key"
   rm -f "$cert" "$key"
-  if ! kubeadm init phase certs "$phase" --apiserver-advertise-address="$current_ip"; then
+  if ! k8s_kubeadm_phase_certs_with_repair_config "$phase" "$current_ip" "$backup_dir"; then
     cp -a "$backup_dir/${cert#/}" "$cert" 2>/dev/null || true
     cp -a "$backup_dir/${key#/}" "$key" 2>/dev/null || true
     die "failed to renew $phase certificate; restored previous certificate from $backup_dir"
@@ -372,7 +428,7 @@ k8s_wait_apiserver_after_endpoint_repair() {
 k8s_repair_kubeadm_endpoint() {
   [ "${MX_K8S_AUTO_REPAIR_KUBEADM_ENDPOINT:-1}" = "1" ] || return 0
   [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ] || return 0
-  local current_ip old_ips old_ip file escaped_old touched changed backup_dir stamp
+  local current_ip old_ips old_ip file escaped_old touched changed backup_dir stamp cert_repair_needed
   current_ip="$(k8s_detect_lan_ip | head -n 1)"
   if ! k8s_is_usable_lan_ip "$current_ip"; then
     say "skip kubeadm endpoint repair; cannot detect a usable LAN IP"
@@ -381,13 +437,21 @@ k8s_repair_kubeadm_endpoint() {
   old_ips="$(k8s_kubeadm_endpoint_ips \
     | grep -v -E "^(127\.0\.0\.1|0\.0\.0\.0|${current_ip//./\\.})$" \
     | sort -u || true)"
-  if [ -z "$old_ips" ]; then
+  cert_repair_needed=0
+  if k8s_kubeadm_cert_repair_needed_for_ip "$current_ip"; then
+    cert_repair_needed=1
+  fi
+  if [ -z "$old_ips" ] && [ "$cert_repair_needed" != "1" ]; then
     return 0
   fi
 
   stamp="$(date +%Y%m%d%H%M%S)"
   backup_dir="/etc/kubernetes/mx-kubeadm-endpoint-repair-$stamp"
-  say "repair kubeadm endpoint IP(s): $(printf '%s' "$old_ips" | tr '\n' ' ') -> $current_ip"
+  if [ -n "$old_ips" ]; then
+    say "repair kubeadm endpoint IP(s): $(printf '%s' "$old_ips" | tr '\n' ' ') -> $current_ip"
+  else
+    say "repair kubeadm certificate SANs for $current_ip"
+  fi
   say "backup kubeadm files to $backup_dir"
   mkdir -p "$backup_dir"
   changed=0
@@ -408,7 +472,7 @@ k8s_repair_kubeadm_endpoint() {
     say "updated $file"
   done < <(k8s_kubeadm_endpoint_files)
 
-  [ "$changed" = "1" ] || return 0
+  [ "$changed" = "1" ] || [ "$cert_repair_needed" = "1" ] || return 0
   k8s_repair_apiserver_cert_if_needed "$current_ip" "$old_ips" "$backup_dir"
   k8s_repair_etcd_certs_if_needed "$current_ip" "$backup_dir"
   if command -v systemctl >/dev/null 2>&1; then
