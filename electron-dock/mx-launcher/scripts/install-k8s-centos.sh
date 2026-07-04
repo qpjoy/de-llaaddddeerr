@@ -8,8 +8,8 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 K8S_VERSION="${K8S_VERSION:-v1.36}"
 K8S_IMAGE_REPOSITORY="${K8S_IMAGE_REPOSITORY:-registry.k8s.io}"
 K8S_PAUSE_VERSION="${K8S_PAUSE_VERSION:-3.10.2}"
-POD_CIDR="${POD_CIDR:-172.30.0.0/16}"
-SERVICE_CIDR="${SERVICE_CIDR:-172.31.0.0/16}"
+POD_CIDR="${POD_CIDR:-192.168.224.0/20}"
+SERVICE_CIDR="${SERVICE_CIDR:-192.168.240.0/20}"
 CRI_SOCKET="${CRI_SOCKET:-unix:///run/containerd/containerd.sock}"
 K8S_APISERVER_ADVERTISE_ADDRESS="${K8S_APISERVER_ADVERTISE_ADDRESS:-}"
 K8S_FLANNEL_URL="${K8S_FLANNEL_URL:-https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml}"
@@ -44,8 +44,8 @@ Usage:
 
 Options:
   --advertise-address IP   Internal CentOS LAN IP for kube-apiserver.
-  --pod-cidr CIDR          Pod CIDR. Default: 172.30.0.0/16.
-  --service-cidr CIDR      Service CIDR. Default: 172.31.0.0/16.
+  --pod-cidr CIDR          Pod CIDR. Default: 192.168.224.0/20.
+  --service-cidr CIDR      Service CIDR. Default: 192.168.240.0/20.
   --k8s-version VERSION    Kubernetes RPM minor repo. Default: v1.36.
   --image-repository REPO  Control-plane image registry. Default: registry.k8s.io.
   --flannel-image-repository REPO
@@ -70,8 +70,8 @@ Environment:
   K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel
   K8S_FLANNEL_VERSION=v0.28.5
   K8S_FLANNEL_CNI_PLUGIN_VERSION=v1.9.1-flannel1
-  POD_CIDR=172.30.0.0/16
-  SERVICE_CIDR=172.31.0.0/16
+  POD_CIDR=192.168.224.0/20
+  SERVICE_CIDR=192.168.240.0/20
   K8S_OPEN_FIREWALL=0
   K8S_DISABLE_SWAP=0
   K8S_SET_SELINUX_PERMISSIVE=0
@@ -561,6 +561,7 @@ install_flannel() {
   [ "$SKIP_INIT" = "0" ] || return 0
   say "install Flannel CNI"
   run kubectl apply -f "$K8S_FLANNEL_URL"
+  configure_flannel_pod_cidr
   if [ -n "$K8S_FLANNEL_IMAGE_REPOSITORY" ]; then
     say "override Flannel images with $K8S_FLANNEL_IMAGE_REPOSITORY"
     run kubectl -n kube-flannel set image daemonset/kube-flannel-ds \
@@ -568,6 +569,18 @@ install_flannel() {
       "install-cni=${K8S_FLANNEL_IMAGE_REPOSITORY}/flannel:${K8S_FLANNEL_VERSION}" \
       "kube-flannel=${K8S_FLANNEL_IMAGE_REPOSITORY}/flannel:${K8S_FLANNEL_VERSION}"
   fi
+}
+
+configure_flannel_pod_cidr() {
+  [ "$K8S_INSTALL_FLANNEL" = "1" ] || return 0
+  [ "$SKIP_INIT" = "0" ] || return 0
+  local net_conf escaped
+  net_conf="{\"Network\":\"${POD_CIDR}\",\"Backend\":{\"Type\":\"vxlan\"}}"
+  escaped="$(printf '%s' "$net_conf" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  say "configure Flannel pod CIDR: $POD_CIDR"
+  run kubectl -n kube-flannel patch configmap kube-flannel-cfg \
+    --type merge \
+    -p "{\"data\":{\"net-conf.json\":\"$escaped\"}}"
 }
 
 untaint_control_plane() {

@@ -205,8 +205,8 @@ K8S_VERSION=v1.36 \
 K8S_ALLOW_CGROUP_V1=auto \
 K8S_IMAGE_REPOSITORY=registry.aliyuncs.com/google_containers \
 K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel \
-POD_CIDR=172.30.0.0/16 \
-SERVICE_CIDR=172.31.0.0/16 \
+POD_CIDR=192.168.224.0/20 \
+SERVICE_CIDR=192.168.240.0/20 \
 bash scripts/install-k8s-centos.sh --advertise-address <IP>
 ```
 
@@ -265,16 +265,17 @@ yum install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
 systemctl enable --now kubelet
 ```
 
-初始化单节点集群。`172.30.0.0/16` 给 Flannel Pod 网段，`172.31.0.0/16` 给 K8s
-Service 网段；避免占用 HDO V1 的 `100.*`，也避免占用 MX-H2I / WG 规划里的
-`10.88.*` 到 `10.254.*`。
+初始化单节点集群。`192.168.224.0/20` 给 Flannel Pod 网段，`192.168.240.0/20`
+给 K8s Service 网段；避免占用 HDO V1 的 `100.*`，也避免占用 MX-H2I / WG 规划里的
+`10.88.*` 到 `10.254.*`。不要使用 `172.88.*` / `172.89.*`：它们不是 RFC1918
+私网段；`172.16.*` 到 `172.31.*` 才是私网，且 Docker 常用这些网段。
 
 ```bash
 CENTOS_LAN_IP=<这台 Internal CentOS 的内网 IP>
 kubeadm init \
   --apiserver-advertise-address="$CENTOS_LAN_IP" \
-  --pod-network-cidr=172.30.0.0/16 \
-  --service-cidr=172.31.0.0/16 \
+  --pod-network-cidr=192.168.224.0/20 \
+  --service-cidr=192.168.240.0/20 \
   --cri-socket=unix:///run/containerd/containerd.sock
 
 mkdir -p "$HOME/.kube"
@@ -282,6 +283,9 @@ cp -i /etc/kubernetes/admin.conf "$HOME/.kube/config"
 chown "$(id -u):$(id -g)" "$HOME/.kube/config"
 
 kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+kubectl -n kube-flannel patch configmap kube-flannel-cfg \
+  --type merge \
+  -p '{"data":{"net-conf.json":"{\"Network\":\"192.168.224.0/20\",\"Backend\":{\"Type\":\"vxlan\"}}"}}'
 kubectl taint nodes --all node-role.kubernetes.io/control-plane-
 kubectl get nodes -o wide
 kubectl -n kube-system get pods -o wide
@@ -295,6 +299,115 @@ K8s API `6443` 只开放给管理员机器；PostgreSQL、Docker daemon 和 cont
 firewall-cmd --permanent --add-port=18090/tcp
 firewall-cmd --permanent --add-port=6443/tcp
 firewall-cmd --reload
+```
+
+### 重建 CIDR 并迁移运行时数据到 /data
+
+K8s Service CIDR 不能在已有集群中安全原地修改。如果旧集群已经使用 `10.*` Service
+ClusterIP，需要先备份业务数据，停止服务，`kubeadm reset` 后用新的 Pod / Service CIDR
+重新初始化。不要手动删除 `/var/lib/docker/overlay2`、`/run/containerd`、
+`/var/lib/kubelet/pods` 或 `/var/lib/etcd` 里面的单个子目录。
+
+先做轻量清理，释放构建缓存和无用镜像：
+
+```bash
+docker system df
+docker container prune -f --filter until=24h
+docker image prune -f
+docker builder prune -f --filter until=24h --keep-storage 2GB
+command -v crictl >/dev/null 2>&1 && crictl rmi --prune || true
+journalctl --vacuum-time=7d
+```
+
+备份 MX 的 hostPath 数据；如果 PostgreSQL 仍可访问，也导出一份 SQL：
+
+```bash
+STAMP="$(date +%Y%m%d%H%M%S)"
+mkdir -p "/data/mx-backup/$STAMP"
+cp -a /var/lib/mx-launcher "/data/mx-backup/$STAMP/mx-launcher" 2>/dev/null || true
+kubectl -n mx-internal-shadow exec mx-internal-postgres-0 -- \
+  pg_dumpall -U mx_internal >"/data/mx-backup/$STAMP/pg_dumpall.sql"
+```
+
+停止当前 MX 服务和 kubeadm 集群：
+
+```bash
+bash scripts/manage.sh ops internal-production down || true
+kubectl -n mx-internal-shadow delete job mx-launcher-migrate --ignore-not-found
+systemctl stop kubelet
+kubeadm reset -f
+rm -rf /etc/cni/net.d /run/flannel /var/lib/cni
+```
+
+把 Docker、containerd、kubelet、etcd 和 MX hostPath 数据放到 `/data`。Kubelet、etcd
+和 MX hostPath 用 bind mount 保持原路径不变，避免 kubeadm 与 PV manifest 额外分叉：
+
+```bash
+systemctl stop docker containerd kubelet || true
+STAMP="${STAMP:-$(date +%Y%m%d%H%M%S)}"
+mkdir -p /data/docker /data/containerd /data/kubelet /data/etcd /data/mx-launcher
+rsync -aHAX --numeric-ids /var/lib/docker/ /data/docker/ 2>/dev/null || true
+rsync -aHAX --numeric-ids /var/lib/containerd/ /data/containerd/ 2>/dev/null || true
+rsync -aHAX --numeric-ids /var/lib/kubelet/ /data/kubelet/ 2>/dev/null || true
+rsync -aHAX --numeric-ids /var/lib/etcd/ /data/etcd/ 2>/dev/null || true
+rsync -aHAX --numeric-ids /var/lib/mx-launcher/ /data/mx-launcher/ 2>/dev/null || true
+
+mv /var/lib/docker /var/lib/docker.before-data-move 2>/dev/null || true
+mv /var/lib/containerd /var/lib/containerd.before-data-move 2>/dev/null || true
+mv /var/lib/kubelet /var/lib/kubelet.before-data-move 2>/dev/null || true
+mv /var/lib/etcd /var/lib/etcd.before-data-move 2>/dev/null || true
+mv /var/lib/mx-launcher /var/lib/mx-launcher.before-data-move 2>/dev/null || true
+mkdir -p /var/lib/docker /var/lib/containerd /var/lib/kubelet /var/lib/etcd /var/lib/mx-launcher
+
+mkdir -p /etc/docker
+cp -a /etc/docker/daemon.json "/etc/docker/daemon.json.before-data-move.$STAMP" 2>/dev/null || true
+cat >/etc/docker/daemon.json <<'EOF'
+{
+  "data-root": "/data/docker"
+}
+EOF
+
+mkdir -p /etc/containerd
+cp -a /etc/containerd/config.toml "/etc/containerd/config.toml.before-data-move.$STAMP" 2>/dev/null || true
+containerd config default >/etc/containerd/config.toml
+sed -i 's#^root = .*#root = "/data/containerd"#' /etc/containerd/config.toml
+sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+
+mount --bind /data/kubelet /var/lib/kubelet
+mount --bind /data/etcd /var/lib/etcd
+mount --bind /data/mx-launcher /var/lib/mx-launcher
+grep -q '^/data/kubelet ' /etc/fstab || echo '/data/kubelet /var/lib/kubelet none bind 0 0' >>/etc/fstab
+grep -q '^/data/etcd ' /etc/fstab || echo '/data/etcd /var/lib/etcd none bind 0 0' >>/etc/fstab
+grep -q '^/data/mx-launcher ' /etc/fstab || echo '/data/mx-launcher /var/lib/mx-launcher none bind 0 0' >>/etc/fstab
+
+systemctl daemon-reload
+systemctl enable --now containerd
+systemctl enable --now docker || true
+```
+
+重新初始化集群并部署 MX：
+
+```bash
+POD_CIDR=192.168.224.0/20 \
+SERVICE_CIDR=192.168.240.0/20 \
+K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel \
+bash scripts/install-k8s-centos.sh --advertise-address 192.168.1.4 --allow-cgroup-v1
+
+MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.4 \
+MX_SHADOW_BUILDKIT_KEEP_STORAGE=2GB \
+MX_SHADOW_BUILDKIT_PRUNE_UNTIL=24h \
+bash scripts/manage.sh ops internal-production deploy
+```
+
+确认 `kubectl get nodes -o wide`、`bash scripts/manage.sh ops internal-production status` 和
+`curl -fsS http://127.0.0.1:18090/healthz` 正常后，再删除旧运行时目录释放根分区空间：
+
+```bash
+rm -rf /var/lib/docker.before-data-move \
+  /var/lib/containerd.before-data-move \
+  /var/lib/kubelet.before-data-move \
+  /var/lib/etcd.before-data-move \
+  /var/lib/mx-launcher.before-data-move
 ```
 
 ### 安装当前 MX-H2I 服务

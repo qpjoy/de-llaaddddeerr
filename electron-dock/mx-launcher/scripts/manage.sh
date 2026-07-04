@@ -710,12 +710,72 @@ k8s_repair_flannel_apiserver_env() {
     "KUBERNETES_SERVICE_PORT=$port"
 }
 
+k8s_detect_cluster_pod_cidr() {
+  if [ -n "${MX_K8S_POD_CIDR:-}" ]; then
+    echo "$MX_K8S_POD_CIDR"
+    return
+  fi
+  if [ -n "${POD_CIDR:-}" ]; then
+    echo "$POD_CIDR"
+    return
+  fi
+  if [ -n "${K8S_POD_CIDR:-}" ]; then
+    echo "$K8S_POD_CIDR"
+    return
+  fi
+  local cidr
+  cidr="$(kubectl -n kube-system get configmap kubeadm-config \
+    -o go-template='{{ index .data "ClusterConfiguration" }}' 2>/dev/null \
+    | awk '/podSubnet:/ {print $2; exit}' || true)"
+  if [ -n "$cidr" ]; then
+    echo "$cidr"
+    return
+  fi
+  if [ -f /etc/kubernetes/manifests/kube-controller-manager.yaml ]; then
+    awk -F= '/--cluster-cidr=/ {
+      value = $2
+      gsub(/[",[:space:]]/, "", value)
+      print value
+      exit
+    }' /etc/kubernetes/manifests/kube-controller-manager.yaml
+  fi
+}
+
+k8s_patch_flannel_pod_cidr() {
+  local cidr current compact net_conf escaped
+  K8S_FLANNEL_POD_CIDR_PATCHED=0
+  kubectl -n kube-flannel get configmap kube-flannel-cfg >/dev/null 2>&1 || return 0
+  cidr="$(k8s_detect_cluster_pod_cidr | head -n 1 || true)"
+  if [ -z "$cidr" ]; then
+    say "skip Flannel pod CIDR patch; cannot detect cluster pod CIDR"
+    return 0
+  fi
+  current="$(kubectl -n kube-flannel get configmap kube-flannel-cfg \
+    -o jsonpath='{.data.net-conf\.json}' 2>/dev/null || true)"
+  compact="$(printf '%s' "$current" | tr -d '[:space:]')"
+  case "$compact" in
+    *"\"Network\":\"$cidr\""*)
+      say "Flannel pod CIDR already matches: $cidr"
+      return 0
+      ;;
+  esac
+  net_conf="{\"Network\":\"${cidr}\",\"Backend\":{\"Type\":\"vxlan\"}}"
+  escaped="$(printf '%s' "$net_conf" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  say "configure Flannel pod CIDR: $cidr"
+  kubectl -n kube-flannel patch configmap kube-flannel-cfg \
+    --type merge \
+    -p "{\"data\":{\"net-conf.json\":\"$escaped\"}}"
+  K8S_FLANNEL_POD_CIDR_PATCHED=1
+}
+
 k8s_repair_flannel_cni() {
   [ "${MX_K8S_REPAIR_FLANNEL:-1}" = "1" ] || return 0
   [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ] || return 0
-  local url repo version cni_version timeout
+  local url repo version cni_version timeout flannel_cidr_patched
   timeout="${MX_K8S_FLANNEL_ROLLOUT_TIMEOUT:-300s}"
-  if k8s_flannel_subnet_ready && k8s_flannel_daemonset_ready 5s; then
+  k8s_patch_flannel_pod_cidr
+  flannel_cidr_patched="${K8S_FLANNEL_POD_CIDR_PATCHED:-0}"
+  if [ "$flannel_cidr_patched" != "1" ] && k8s_flannel_subnet_ready && k8s_flannel_daemonset_ready 5s; then
     return 0
   fi
   url="$(k8s_flannel_url)"
@@ -725,6 +785,7 @@ k8s_repair_flannel_cni() {
   say "repair Flannel CNI"
   say "apply Flannel manifest: $url"
   kubectl apply --validate=false -f "$url"
+  k8s_patch_flannel_pod_cidr
   if [ -n "$repo" ]; then
     say "override Flannel images with $repo"
     kubectl -n kube-flannel set image daemonset/kube-flannel-ds \
