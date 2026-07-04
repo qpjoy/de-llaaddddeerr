@@ -425,6 +425,51 @@ k8s_wait_apiserver_after_endpoint_repair() {
   die "kube-apiserver did not become reachable after endpoint repair"
 }
 
+k8s_restart_static_pod_containers() {
+  [ "${MX_K8S_RESTART_STATIC_PODS:-1}" = "1" ] || return 1
+  local name ids id restarted
+  restarted=0
+  if command -v crictl >/dev/null 2>&1; then
+    for name in "$@"; do
+      ids="$(crictl ps --name "$name" -q 2>/dev/null || true)"
+      if [ -z "$ids" ]; then
+        say "no running $name static-pod container found via crictl"
+        continue
+      fi
+      say "restart $name static-pod container via crictl"
+      for id in $ids; do
+        crictl stop "$id" >/dev/null 2>&1 || true
+        restarted=1
+      done
+    done
+    [ "$restarted" = "1" ]
+    return
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    say "crictl unavailable; restart kubelet and wait for static pod reconciliation"
+    systemctl restart kubelet || true
+    return 0
+  fi
+  return 1
+}
+
+k8s_wait_control_plane_observers() {
+  local attempts="${MX_K8S_CONTROL_PLANE_WAIT_ATTEMPTS:-60}"
+  local i component phase
+  say "wait kube-controller-manager and kube-scheduler"
+  for i in $(seq 1 "$attempts"); do
+    for component in kube-controller-manager kube-scheduler; do
+      phase="$(kubectl -n kube-system get pods -l "component=$component" \
+        -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null \
+        | head -n 1 || true)"
+      [ "$phase" = "Running" ] || break
+    done
+    [ "$component" = "kube-scheduler" ] && [ "$phase" = "Running" ] && return 0
+    sleep 2
+  done
+  return 1
+}
+
 k8s_repair_kubeadm_endpoint() {
   [ "${MX_K8S_AUTO_REPAIR_KUBEADM_ENDPOINT:-1}" = "1" ] || return 0
   [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ] || return 0
@@ -479,6 +524,8 @@ k8s_repair_kubeadm_endpoint() {
     say "restart kubelet to reload kubeadm static pod manifests"
     systemctl restart kubelet || say "kubelet restart failed; waiting for static pod reconciliation anyway"
   fi
+  k8s_restart_static_pod_containers kube-controller-manager kube-scheduler || true
+  k8s_wait_control_plane_observers || say "control-plane observers did not report Running yet"
   k8s_wait_apiserver_after_endpoint_repair "$current_ip"
 }
 
@@ -1063,6 +1110,80 @@ k8s_workload_diagnostics() {
   kubectl -n "$ns" get events --sort-by=.lastTimestamp || true
 }
 
+k8s_control_plane_component_pods() {
+  local component="$1"
+  local pods
+  pods="$(kubectl -n kube-system get pods -l "component=$component" -o name 2>/dev/null || true)"
+  if [ -z "$pods" ]; then
+    pods="$(kubectl -n kube-system get pods -o name 2>/dev/null | grep "/$component-" || true)"
+  fi
+  printf '%s\n' "$pods"
+}
+
+k8s_control_plane_diagnostics() {
+  local component pods pod
+  say "control-plane diagnostics: nodes"
+  kubectl get nodes -o wide || true
+  say "control-plane diagnostics: kube-system pods"
+  kubectl -n kube-system get pods -o wide || true
+  for component in kube-apiserver kube-controller-manager kube-scheduler etcd; do
+    pods="$(k8s_control_plane_component_pods "$component")"
+    [ -n "$pods" ] || continue
+    for pod in $pods; do
+      say "control-plane diagnostics: describe $pod"
+      kubectl -n kube-system describe "$pod" || true
+      say "control-plane diagnostics: logs $pod"
+      kubectl -n kube-system logs "$pod" --all-containers --tail=120 || true
+    done
+  done
+}
+
+k8s_workload_generation_stale() {
+  local ns="$1"
+  local kind="$2"
+  local name="$3"
+  local generation observed
+  generation="$(kubectl -n "$ns" get "$kind/$name" -o jsonpath='{.metadata.generation}' 2>/dev/null || true)"
+  observed="$(kubectl -n "$ns" get "$kind/$name" -o jsonpath='{.status.observedGeneration}' 2>/dev/null || true)"
+  [ -n "$generation" ] && [ "$generation" != "$observed" ]
+}
+
+k8s_recover_stale_workload_controller() {
+  local ns="$1"
+  local kind="$2"
+  local name="$3"
+  local generation observed
+  generation="$(kubectl -n "$ns" get "$kind/$name" -o jsonpath='{.metadata.generation}' 2>/dev/null || true)"
+  observed="$(kubectl -n "$ns" get "$kind/$name" -o jsonpath='{.status.observedGeneration}' 2>/dev/null || true)"
+  say "$kind/$name update not observed by controller-manager yet: generation=${generation:-?}, observed=${observed:-none}"
+  k8s_control_plane_diagnostics
+  if [ "${K8S_STATIC_CONTROLLER_RESTART_ATTEMPTED:-0}" = "1" ]; then
+    return 0
+  fi
+  K8S_STATIC_CONTROLLER_RESTART_ATTEMPTED=1
+  k8s_restart_static_pod_containers kube-controller-manager kube-scheduler || return 0
+  k8s_wait_control_plane_observers || say "control-plane observers did not report Running after restart"
+}
+
+k8s_rollout_status() {
+  local ns="$1"
+  local kind="$2"
+  local name="$3"
+  local timeout="${4:-180s}"
+  if k8s_workload_generation_stale "$ns" "$kind" "$name"; then
+    k8s_recover_stale_workload_controller "$ns" "$kind" "$name"
+  fi
+  if kubectl -n "$ns" rollout status "$kind/$name" --timeout="$timeout"; then
+    return 0
+  fi
+  if k8s_workload_generation_stale "$ns" "$kind" "$name"; then
+    k8s_recover_stale_workload_controller "$ns" "$kind" "$name"
+    kubectl -n "$ns" rollout status "$kind/$name" --timeout="$timeout"
+    return
+  fi
+  return 1
+}
+
 k8s_cleanup_retired_internal_dns_edge() {
   local pods pod timeout
   timeout="${MX_K8S_RETIRED_DNS_EDGE_DELETE_TIMEOUT:-60s}"
@@ -1134,7 +1255,7 @@ k8s_apply() {
   kubectl apply --validate=false -f "$dir/15-dns-control-target.yaml"
   k8s_cleanup_retired_internal_dns_edge
   say "wait internal coredns rollout"
-  if ! kubectl -n mx-dns rollout status deployment/mx-internal-coredns --timeout=180s; then
+  if ! k8s_rollout_status mx-dns deployment mx-internal-coredns 180s; then
     k8s_workload_diagnostics mx-dns deployment mx-internal-coredns
     die "internal coredns rollout failed"
   fi
@@ -1150,7 +1271,7 @@ k8s_apply() {
   say "apply host runner rbac"
   kubectl apply --validate=false -f "$dir/27-host-runner-rbac.yaml"
   say "wait postgres rollout"
-  if ! kubectl -n "$ns" rollout status statefulset/mx-internal-postgres --timeout=180s; then
+  if ! k8s_rollout_status "$ns" statefulset mx-internal-postgres 180s; then
     k8s_postgres_diagnostics "$ns"
     die "postgres rollout failed"
   fi
@@ -1173,14 +1294,14 @@ k8s_apply() {
   say "apply internal api"
   kubectl apply --validate=false -f "$dir/40-internal-api.yaml"
   say "wait internal api rollout"
-  if ! kubectl -n "$ns" rollout status deployment/mx-launcher-internal --timeout=180s; then
+  if ! k8s_rollout_status "$ns" deployment mx-launcher-internal 180s; then
     k8s_workload_diagnostics "$ns" deployment mx-launcher-internal
     die "internal api rollout failed"
   fi
   say "apply internal gateway"
   k8s_apply_internal_gateway "$target"
   say "wait internal gateway rollout"
-  if ! kubectl -n "$ns" rollout status daemonset/mx-internal-gateway --timeout=180s; then
+  if ! k8s_rollout_status "$ns" daemonset mx-internal-gateway 180s; then
     k8s_workload_diagnostics "$ns" daemonset mx-internal-gateway
     die "internal gateway rollout failed"
   fi
@@ -1226,7 +1347,7 @@ k8s_remote_runner() {
     "SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=$value" \
     "SITE_SLOT_WORKER_REMOTE_SSH=$value" \
     "SITE_SLOT_CONFIRM_REMOTE_EXECUTION=$value"
-  kubectl -n "$ns" rollout status deployment/mx-launcher-internal --timeout=180s
+  k8s_rollout_status "$ns" deployment mx-launcher-internal 180s
 }
 
 k8s_ssh_bootstrap() {
@@ -1248,7 +1369,7 @@ k8s_ssh_bootstrap() {
   need_kubectl
   say "set SITE_SLOT_SSH_PASSWORD_BOOTSTRAP_ENABLED=$value on Internal API deployment"
   kubectl -n "$ns" set env deployment/mx-launcher-internal "SITE_SLOT_SSH_PASSWORD_BOOTSTRAP_ENABLED=$value"
-  kubectl -n "$ns" rollout status deployment/mx-launcher-internal --timeout=180s
+  k8s_rollout_status "$ns" deployment mx-launcher-internal 180s
 }
 
 k8s_readonly_probe() {
@@ -1270,7 +1391,7 @@ k8s_readonly_probe() {
   need_kubectl
   say "set SITE_SLOT_SSH_READONLY_PROBE_EXECUTE=$value on Internal API deployment"
   kubectl -n "$ns" set env deployment/mx-launcher-internal "SITE_SLOT_SSH_READONLY_PROBE_EXECUTE=$value"
-  kubectl -n "$ns" rollout status deployment/mx-launcher-internal --timeout=180s
+  k8s_rollout_status "$ns" deployment mx-launcher-internal 180s
 }
 
 k8s_db_summary() {
@@ -1449,7 +1570,7 @@ k8s_gateway_smoke() {
   local gateway_url="${2:-${MX_INTERNAL_GATEWAY_URL:-http://127.0.0.1:18090}}"
   need_kubectl
   say "gateway rollout status"
-  kubectl -n "$(k8s_namespace "$target")" rollout status daemonset/mx-internal-gateway --timeout=180s
+  k8s_rollout_status "$(k8s_namespace "$target")" daemonset mx-internal-gateway 180s
   say "read-only gateway health check: $gateway_url"
   node -e '
     const base = process.argv[1].replace(/\/+$/, "");
@@ -1963,7 +2084,7 @@ ops_local_platform_apply_native_host_runner_url() {
   kubectl -n "$namespace" set env deployment/mx-launcher-internal \
     MX_INTERNAL_HOST_RUNNER_URL="$url" \
     MX_INTERNAL_HOST_RUNNER_NATIVE_URL="$url" >/dev/null
-  kubectl -n "$namespace" rollout status deployment/mx-launcher-internal --timeout=180s
+  k8s_rollout_status "$namespace" deployment mx-launcher-internal 180s
 }
 
 ops_local_platform() {
@@ -3851,7 +3972,7 @@ k8s_restart_internal_api() {
   ns="$(k8s_namespace "$target")"
   need_kubectl
   kubectl -n "$ns" rollout restart deployment/mx-launcher-internal
-  kubectl -n "$ns" rollout status deployment/mx-launcher-internal --timeout=180s
+  k8s_rollout_status "$ns" deployment mx-launcher-internal 180s
 }
 
 k8s_apply_internal_gateway() {
