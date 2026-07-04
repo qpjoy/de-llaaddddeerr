@@ -217,6 +217,55 @@ k8s_is_usable_lan_ip() {
   esac
 }
 
+k8s_apply_requested_os_hostname() {
+  local requested="${MX_K8S_OS_HOSTNAME:-}"
+  local current
+  [ -n "$requested" ] || return 0
+  case "$requested" in
+    *[!a-zA-Z0-9.-]*|.*|*.|*-|*-.|*..*|"")
+      die "invalid MX_K8S_OS_HOSTNAME: $requested"
+      ;;
+  esac
+  current="$(hostname 2>/dev/null || true)"
+  [ "$current" != "$requested" ] || return 0
+  command -v hostnamectl >/dev/null 2>&1 || die "hostnamectl is required to set MX_K8S_OS_HOSTNAME"
+  say "set OS hostname: $current -> $requested"
+  hostnamectl set-hostname "$requested"
+}
+
+k8s_existing_node_name() {
+  kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+}
+
+k8s_etcd_manifest_node_name() {
+  local file=/etc/kubernetes/manifests/etcd.yaml
+  [ -f "$file" ] || return 0
+  sed -n 's/^[[:space:]]*-[[:space:]]*--name=\([^[:space:]]*\).*$/\1/p' "$file" | head -n 1
+}
+
+k8s_detect_node_name() {
+  local existing etcd_name
+  if [ -n "${MX_K8S_NODE_NAME:-}" ]; then
+    echo "$MX_K8S_NODE_NAME"
+    return
+  fi
+  if [ -n "${K8S_NODE_NAME:-}" ]; then
+    echo "$K8S_NODE_NAME"
+    return
+  fi
+  existing="$(k8s_existing_node_name | awk 'NF {print; exit}')"
+  if [ -n "$existing" ]; then
+    echo "$existing"
+    return
+  fi
+  etcd_name="$(k8s_etcd_manifest_node_name)"
+  if [ -n "$etcd_name" ]; then
+    echo "$etcd_name"
+    return
+  fi
+  hostname 2>/dev/null || echo "localhost"
+}
+
 k8s_kubeadm_endpoint_files() {
   local home_dir="${HOME:-}"
   local candidates=(
@@ -267,6 +316,115 @@ k8s_sed_ip_literal() {
   printf '%s\n' "$1" | sed 's/\./\\./g'
 }
 
+k8s_node_internal_ips() {
+  kubectl get nodes \
+    -o jsonpath='{range .items[*]}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{"\n"}{end}{end}' \
+    2>/dev/null || true
+}
+
+k8s_node_internal_ip_repair_needed() {
+  local current_ip="$1"
+  local ips ip has_current
+  ips="$(k8s_node_internal_ips)"
+  [ -n "$ips" ] || return 1
+  has_current=0
+  for ip in $ips; do
+    [ "$ip" = "$current_ip" ] && has_current=1
+    if k8s_is_usable_lan_ip "$ip" && [ "$ip" != "$current_ip" ]; then
+      return 0
+    fi
+  done
+  [ "$has_current" = "1" ] || return 0
+  return 1
+}
+
+k8s_kubelet_flags_need_repair() {
+  local current_ip="$1"
+  local node_name="$2"
+  local file="${MX_K8S_KUBELET_FLAGS_FILE:-/var/lib/kubelet/kubeadm-flags.env}"
+  [ -f "$file" ] || return 0
+  grep -Eq "(^|[[:space:]\"])--node-ip=${current_ip}([[:space:]\"]|$)" "$file" || return 0
+  grep -Eq "(^|[[:space:]\"])--hostname-override=${node_name}([[:space:]\"]|$)" "$file" || return 0
+  return 1
+}
+
+k8s_upsert_kubelet_identity_flags() {
+  local current_ip="$1"
+  local node_name="$2"
+  local backup_dir="$3"
+  local file="${MX_K8S_KUBELET_FLAGS_FILE:-/var/lib/kubelet/kubeadm-flags.env}"
+  local tmp
+  [ -n "$file" ] || return 0
+  [ -f "$file" ] && k8s_backup_file_to_dir "$backup_dir" "$file"
+  mkdir -p "$(dirname "$file")"
+  tmp="$(mktemp)"
+  if [ -f "$file" ]; then
+    awk -v ip="$current_ip" -v node_name="$node_name" '
+      function emit(line, raw) {
+        raw = substr(line, length("KUBELET_KUBEADM_ARGS=") + 1)
+        gsub(/^"/, "", raw)
+        gsub(/"$/, "", raw)
+        gsub(/(^|[[:space:]])--node-ip=[^[:space:]]+/, "", raw)
+        gsub(/(^|[[:space:]])--hostname-override=[^[:space:]]+/, "", raw)
+        gsub(/[[:space:]]+/, " ", raw)
+        sub(/^ /, "", raw)
+        sub(/ $/, "", raw)
+        if (raw != "") raw = raw " "
+        print "KUBELET_KUBEADM_ARGS=\"" raw "--node-ip=" ip " --hostname-override=" node_name "\""
+      }
+      /^KUBELET_KUBEADM_ARGS=/ { emit($0); found = 1; next }
+      { print }
+      END {
+        if (!found) print "KUBELET_KUBEADM_ARGS=\"--node-ip=" ip " --hostname-override=" node_name "\""
+      }
+    ' "$file" >"$tmp"
+  else
+    printf 'KUBELET_KUBEADM_ARGS="--node-ip=%s --hostname-override=%s"\n' "$current_ip" "$node_name" >"$tmp"
+  fi
+  mv "$tmp" "$file"
+  say "updated kubelet identity flags in $file"
+}
+
+k8s_wait_node_internal_ip() {
+  local current_ip="$1"
+  local attempts="${MX_K8S_NODE_IP_REPAIR_WAIT_ATTEMPTS:-60}"
+  local ips ip i ok
+  say "wait Kubernetes node InternalIP to become $current_ip"
+  for i in $(seq 1 "$attempts"); do
+    ips="$(k8s_node_internal_ips)"
+    ok=1
+    for ip in $ips; do
+      if k8s_is_usable_lan_ip "$ip" && [ "$ip" != "$current_ip" ]; then
+        ok=0
+      fi
+    done
+    if printf '%s\n' "$ips" | grep -Fxq "$current_ip" && [ "$ok" = "1" ]; then
+      say "Kubernetes node InternalIP is $current_ip"
+      return 0
+    fi
+    sleep 2
+  done
+  say "Kubernetes node InternalIP is still: $(printf '%s' "$(k8s_node_internal_ips)" | tr '\n' ' ')"
+  return 1
+}
+
+k8s_repair_kubelet_identity_if_needed() {
+  local current_ip="$1"
+  local node_name="$2"
+  local backup_dir="$3"
+  if ! k8s_node_internal_ip_repair_needed "$current_ip" \
+    && ! k8s_kubelet_flags_need_repair "$current_ip" "$node_name"; then
+    return 0
+  fi
+  say "repair kubelet identity to node=$node_name ip=$current_ip"
+  k8s_upsert_kubelet_identity_flags "$current_ip" "$node_name" "$backup_dir"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+    systemctl restart kubelet || say "kubelet restart failed while repairing kubelet identity"
+  fi
+  k8s_wait_node_internal_ip "$current_ip" || true
+}
+
 k8s_apiserver_cert_has_ip() {
   local ip="$1"
   k8s_cert_has_ip /etc/kubernetes/pki/apiserver.crt "$ip"
@@ -286,7 +444,7 @@ k8s_write_kubeadm_cert_repair_config() {
   local path="$2"
   local api_version="$3"
   local node_name
-  node_name="$(hostname 2>/dev/null || true)"
+  node_name="$(k8s_detect_node_name)"
   [ -n "$node_name" ] || node_name="localhost"
   cat >"$path" <<EOF
 apiVersion: kubeadm.k8s.io/${api_version}
@@ -445,12 +603,33 @@ k8s_restart_static_pod_containers() {
     [ "$restarted" = "1" ]
     return
   fi
+  if [ -d /etc/kubernetes/manifests ]; then
+    k8s_nudge_static_pod_manifests "$@"
+    return
+  fi
   if command -v systemctl >/dev/null 2>&1; then
     say "crictl unavailable; restart kubelet and wait for static pod reconciliation"
     systemctl restart kubelet || true
     return 0
   fi
   return 1
+}
+
+k8s_nudge_static_pod_manifests() {
+  local name file tmp moved
+  moved=0
+  say "crictl unavailable; nudge static pod manifests for: $*"
+  for name in "$@"; do
+    file="/etc/kubernetes/manifests/$name.yaml"
+    [ -f "$file" ] || continue
+    tmp="$file.mx-restart.$$"
+    mv "$file" "$tmp" || continue
+    sleep 2
+    mv "$tmp" "$file"
+    moved=1
+    say "nudged $file"
+  done
+  [ "$moved" = "1" ]
 }
 
 k8s_wait_control_plane_observers() {
@@ -473,8 +652,11 @@ k8s_wait_control_plane_observers() {
 k8s_repair_kubeadm_endpoint() {
   [ "${MX_K8S_AUTO_REPAIR_KUBEADM_ENDPOINT:-1}" = "1" ] || return 0
   [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ] || return 0
-  local current_ip old_ips old_ip file escaped_old touched changed backup_dir stamp cert_repair_needed
+  local current_ip desired_node_name old_ips old_ip file escaped_old touched changed backup_dir stamp cert_repair_needed kubelet_identity_repair_needed
+  k8s_apply_requested_os_hostname
   current_ip="$(k8s_detect_lan_ip | head -n 1)"
+  desired_node_name="$(k8s_detect_node_name | head -n 1)"
+  [ -n "$desired_node_name" ] || desired_node_name="localhost"
   if ! k8s_is_usable_lan_ip "$current_ip"; then
     say "skip kubeadm endpoint repair; cannot detect a usable LAN IP"
     return 0
@@ -486,7 +668,12 @@ k8s_repair_kubeadm_endpoint() {
   if k8s_kubeadm_cert_repair_needed_for_ip "$current_ip"; then
     cert_repair_needed=1
   fi
-  if [ -z "$old_ips" ] && [ "$cert_repair_needed" != "1" ]; then
+  kubelet_identity_repair_needed=0
+  if k8s_node_internal_ip_repair_needed "$current_ip" \
+    || k8s_kubelet_flags_need_repair "$current_ip" "$desired_node_name"; then
+    kubelet_identity_repair_needed=1
+  fi
+  if [ -z "$old_ips" ] && [ "$cert_repair_needed" != "1" ] && [ "$kubelet_identity_repair_needed" != "1" ]; then
     return 0
   fi
 
@@ -494,8 +681,10 @@ k8s_repair_kubeadm_endpoint() {
   backup_dir="/etc/kubernetes/mx-kubeadm-endpoint-repair-$stamp"
   if [ -n "$old_ips" ]; then
     say "repair kubeadm endpoint IP(s): $(printf '%s' "$old_ips" | tr '\n' ' ') -> $current_ip"
-  else
+  elif [ "$cert_repair_needed" = "1" ]; then
     say "repair kubeadm certificate SANs for $current_ip"
+  else
+    say "repair Kubernetes node identity: $desired_node_name / $current_ip"
   fi
   say "backup kubeadm files to $backup_dir"
   mkdir -p "$backup_dir"
@@ -517,16 +706,22 @@ k8s_repair_kubeadm_endpoint() {
     say "updated $file"
   done < <(k8s_kubeadm_endpoint_files)
 
-  [ "$changed" = "1" ] || [ "$cert_repair_needed" = "1" ] || return 0
+  [ "$changed" = "1" ] || [ "$cert_repair_needed" = "1" ] || [ "$kubelet_identity_repair_needed" = "1" ] || return 0
   k8s_repair_apiserver_cert_if_needed "$current_ip" "$old_ips" "$backup_dir"
   k8s_repair_etcd_certs_if_needed "$current_ip" "$backup_dir"
+  k8s_repair_kubelet_identity_if_needed "$current_ip" "$desired_node_name" "$backup_dir"
   if command -v systemctl >/dev/null 2>&1; then
     say "restart kubelet to reload kubeadm static pod manifests"
     systemctl restart kubelet || say "kubelet restart failed; waiting for static pod reconciliation anyway"
   fi
-  k8s_restart_static_pod_containers kube-controller-manager kube-scheduler || true
-  k8s_wait_control_plane_observers || say "control-plane observers did not report Running yet"
+  if [ "$changed" = "1" ] || [ "$kubelet_identity_repair_needed" = "1" ]; then
+    k8s_restart_static_pod_containers etcd kube-apiserver kube-controller-manager kube-scheduler || true
+  else
+    k8s_restart_static_pod_containers kube-controller-manager kube-scheduler || true
+  fi
   k8s_wait_apiserver_after_endpoint_repair "$current_ip"
+  k8s_wait_node_internal_ip "$current_ip" || true
+  k8s_wait_control_plane_observers || say "control-plane observers did not report Running yet"
 }
 
 k8s_namespace() {
@@ -4113,6 +4308,11 @@ Notes:
     /etc/kubernetes and kubeconfig before the first kubectl apply. Override the
     detected IP with MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.x.x, or disable
     this guard with MX_K8S_AUTO_REPAIR_KUBEADM_ENDPOINT=0.
+  - To change the Linux hostname safely, set MX_K8S_OS_HOSTNAME=mx-internal
+    and leave MX_K8S_NODE_NAME empty. Deploy keeps the existing Kubernetes node
+    identity pinned through kubelet --hostname-override, so a router/hostname
+    change does not create a second Node. Only set MX_K8S_NODE_NAME for a
+    planned Kubernetes node identity migration.
   - Existing mx-internal-gateway-caddy data is preserved during deploy so
     generated gateway routes are not reset to the bootstrap Caddyfile.
   - gateway-smoke is read-only and checks /healthz plus /readyz. Full HTTP
