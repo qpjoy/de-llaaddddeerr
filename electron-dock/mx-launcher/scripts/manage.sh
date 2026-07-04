@@ -1360,22 +1360,50 @@ k8s_repair_internal_local_pvs() {
 k8s_job_diagnostics() {
   local ns="$1"
   local job="$2"
-  local selector pod
+  local selector pod_selector pods pod uid
   say "$job diagnostics: job"
   kubectl -n "$ns" get job "$job" -o wide || true
-  selector="$(kubectl -n "$ns" get job "$job" -o jsonpath='{.spec.selector.matchLabels}' 2>/dev/null || true)"
-  say "$job diagnostics: pods"
-  kubectl -n "$ns" get pods -l "job-name=$job" -o wide || true
-  pod="$(kubectl -n "$ns" get pods -l "job-name=$job" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-  if [ -n "$pod" ]; then
-    say "$job diagnostics: pod detail"
-    kubectl -n "$ns" describe pod "$pod" || true
-    say "$job diagnostics: logs"
-    kubectl -n "$ns" logs "$pod" --all-containers --tail=200 || true
+  kubectl -n "$ns" describe job "$job" || true
+  uid="$(kubectl -n "$ns" get job "$job" -o go-template='{{ index .spec.selector.matchLabels "batch.kubernetes.io/controller-uid" }}' 2>/dev/null || true)"
+  if [ -n "$uid" ]; then
+    pod_selector="batch.kubernetes.io/controller-uid=$uid"
+  else
+    pod_selector="job-name=$job"
   fi
+  say "$job diagnostics: pods"
+  kubectl -n "$ns" get pods -l "$pod_selector" -o wide || true
+  pods="$(kubectl -n "$ns" get pods -l "$pod_selector" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+  for pod in $pods; do
+    say "$job diagnostics: pod detail $pod"
+    kubectl -n "$ns" describe pod "$pod" || true
+    say "$job diagnostics: logs $pod"
+    kubectl -n "$ns" logs "$pod" --all-containers --tail=200 || true
+    say "$job diagnostics: previous logs $pod"
+    kubectl -n "$ns" logs "$pod" --all-containers --previous --tail=200 || true
+  done
+  selector="$(kubectl -n "$ns" get job "$job" -o jsonpath='{.spec.selector.matchLabels}' 2>/dev/null || true)"
+  [ -n "$pod_selector" ] && say "$job diagnostics: pod selector $pod_selector"
   [ -n "$selector" ] && say "$job diagnostics: selector $selector"
   say "$job diagnostics: recent namespace events"
   kubectl -n "$ns" get events --sort-by=.lastTimestamp || true
+}
+
+k8s_wait_job_complete() {
+  local ns="$1"
+  local job="$2"
+  local attempts="${3:-90}"
+  local conditions i
+  for i in $(seq 1 "$attempts"); do
+    conditions="$(kubectl -n "$ns" get job "$job" -o jsonpath='{range .status.conditions[*]}{.type}{"="}{.status}{"\n"}{end}' 2>/dev/null || true)"
+    if printf '%s\n' "$conditions" | grep -Fxq 'Complete=True'; then
+      return 0
+    fi
+    if printf '%s\n' "$conditions" | grep -Fxq 'Failed=True'; then
+      return 1
+    fi
+    sleep 2
+  done
+  return 1
 }
 
 k8s_workload_diagnostics() {
@@ -1594,7 +1622,7 @@ k8s_apply() {
   say "run migration job"
   kubectl -n "$ns" delete job mx-launcher-migrate --ignore-not-found
   kubectl apply --validate=false -f "$dir/30-migration-job.yaml"
-  if ! kubectl -n "$ns" wait --for=condition=complete job/mx-launcher-migrate --timeout=180s; then
+  if ! k8s_wait_job_complete "$ns" mx-launcher-migrate "${MX_K8S_MIGRATION_WAIT_ATTEMPTS:-90}"; then
     k8s_job_diagnostics "$ns" mx-launcher-migrate
     die "migration job failed"
   fi
