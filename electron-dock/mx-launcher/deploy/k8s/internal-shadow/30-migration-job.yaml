@@ -16,6 +16,13 @@ spec:
         app.kubernetes.io/part-of: mx-3ks
     spec:
       restartPolicy: OnFailure
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
       containers:
         - name: migrate
           image: qpjoy/mx-launcher-server:shadow

@@ -70,6 +70,13 @@ spec:
         app.kubernetes.io/part-of: mx-3ks
     spec:
       serviceAccountName: mx-launcher-internal
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
       initContainers:
         - name: seed-site-slot-artifacts
           image: qpjoy/mx-launcher-server:shadow
