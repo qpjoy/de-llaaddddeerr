@@ -152,6 +152,11 @@ root.addEventListener('click', (event) => {
     render();
     return;
   }
+  if (action === 'setH2oMode') {
+    appShellMenuOpen = false;
+    void runAction('setH2oMode', button.dataset.mode || 'app-rule');
+    return;
+  }
   if (action === 'connectGuest') {
     modeDraft = 'guest';
   }
@@ -259,6 +264,8 @@ async function runAction(action, payload) {
       installAppCenter: () => api.installAppCenter(),
       enableH2o: () => api.enableH2o(),
       launchH2o: () => api.launchH2o?.() || api.enableH2o(),
+      stopH2o: () => api.stopH2o?.(),
+      setH2oMode: () => api.setH2oMode?.(payload),
       checkUpdates: () => api.checkUpdates(),
       refreshDiagnostics: () => api.refreshDiagnostics?.(),
       repairSystemNetwork: () => api.repairSystemNetwork?.(),
@@ -1141,10 +1148,14 @@ function renderAppCenterUserPanel(app, connected) {
       <div class="app-feature-list">
         ${appUserFeatures(app).map((item) => `<div><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.detail)}</span></div>`).join('')}
       </div>
+      ${app.appId === 'h2o' ? renderH2oPluginPanel(app) : ''}
       <div class="app-user-actions">
         <button class="primary-button block-button" type="button" data-action="${escapeAttr(action.action)}" ${action.disabled ? 'disabled' : ''}>
           ${escapeHtml(action.label)}
         </button>
+        ${app.appId === 'h2o' && app.runtimeState === 'running'
+          ? '<button class="secondary-button block-button" type="button" data-action="stopH2o">停止</button>'
+          : ''}
         <button class="secondary-button block-button" type="button" data-action="toggle-app-debug">Debug</button>
       </div>
       ${renderAppRecentLogs(app)}
@@ -1175,6 +1186,9 @@ function renderAppCenterDebugPanel(app, connected) {
         <div><span>Installed</span><strong>${escapeHtml(app.installedVersion || (app.installed ? app.version : 'not installed'))}</strong></div>
         <div><span>Latest</span><strong>${escapeHtml(app.latestVersion || app.version)}</strong></div>
         <div><span>Runtime</span><strong>${escapeHtml(app.runtimeState || app.status || 'idle')}</strong></div>
+        <div><span>Plugin Mode</span><strong>${escapeHtml(app.runtime?.mode || '-')}</strong></div>
+        <div><span>Plugin Admin</span><strong>${escapeHtml(app.runtime?.adminUrl || '-')}</strong></div>
+        <div><span>Plugin Ports</span><strong>${escapeHtml(app.runtime?.ports ? `mixed:${app.runtime.ports.mixed} dns:${app.runtime.ports.dns}` : '-')}</strong></div>
         <div><span>Last Action</span><strong>${escapeHtml(formatDateTime(app.lastAction))}</strong></div>
       </div>
       <div class="permission-stack">
@@ -1191,6 +1205,43 @@ function renderAppCenterDebugPanel(app, connected) {
       <button class="secondary-button block-button" type="button" data-action="toggle-app-debug">关闭 Debug</button>
     </aside>
   `;
+}
+
+function renderH2oPluginPanel(app) {
+  const runtime = app.runtime || {};
+  const ports = runtime.ports || {};
+  const subscription = runtime.activeSubscription || {};
+  return `
+    <div class="h2o-plugin-panel">
+      <div class="h2o-plugin-head">
+        <strong>代理模式</strong>
+        <span>${escapeHtml(h2oModeLabel(runtime.mode))}</span>
+      </div>
+      <div class="h2o-mode-row">
+        ${h2oModeButton('app-rule', runtime.mode, '规则')}
+        ${h2oModeButton('app-global', runtime.mode, '全局')}
+        ${h2oModeButton('system-tun', runtime.mode, 'TUN')}
+        ${h2oModeButton('direct', runtime.mode, '直连')}
+      </div>
+      <div class="h2o-runtime-facts">
+        <div><span>订阅</span><strong>${escapeHtml(subscription.name || 'Home To Oversea 默认策略')}</strong></div>
+        <div><span>节点</span><strong>${escapeHtml(String(subscription.nodes || 0))}</strong></div>
+        <div><span>延迟</span><strong>${escapeHtml(subscription.latencyMs ? `${subscription.latencyMs} ms` : '-')}</strong></div>
+        <div><span>端口</span><strong>${escapeHtml(`:${ports.mixed || 23458}`)}</strong></div>
+      </div>
+    </div>
+  `;
+}
+
+function h2oModeButton(mode, activeMode, label) {
+  return `<button class="${mode === activeMode ? 'is-active' : ''}" type="button" data-action="setH2oMode" data-mode="${escapeAttr(mode)}">${escapeHtml(label)}</button>`;
+}
+
+function h2oModeLabel(mode) {
+  if (mode === 'app-global') return '全局模式';
+  if (mode === 'system-tun') return '系统 TUN';
+  if (mode === 'direct') return '直连';
+  return '规则模式';
 }
 
 function appUserTags(app) {
@@ -1216,7 +1267,8 @@ function appUserStatus(app) {
 function appUserFeatures(app) {
   if (app.appId === 'h2o') {
     return [
-      { title: 'Home To Oversea', detail: '按规则、全局或直连模式托管出海策略。' },
+      { title: 'Home To Oversea', detail: '按规则、全局、TUN 或直连模式托管出海策略。' },
+      { title: '订阅和规则', detail: '沿用类 Clash 的订阅、规则、端口和日志模型。' },
       { title: '共享底座', detail: '通过 MX-H2I broker-session 继承用户、网络和权限。' }
     ];
   }
@@ -1261,7 +1313,13 @@ function appPrimaryAction(app, connected) {
     return { action: 'show-appcenter', label: app.installed ? '打开' : '安装', disabled: !connected || busyAction === 'installAppCenter' };
   }
   if (app.appId === 'h2o') {
-    if (app.installed && app.enabled) return { action: 'launchH2o', label: app.runtimeState === 'running' ? '运行中' : '打开', disabled: !connected || busyAction === 'launchH2o' };
+    if (app.installed && app.enabled) {
+      return {
+        action: 'launchH2o',
+        label: app.runtimeState === 'running' ? '打开管理' : '启动',
+        disabled: !connected || busyAction === 'launchH2o'
+      };
+    }
     return { action: 'enableH2o', label: '安装', disabled: !connected || !state.apps?.appcenter?.installed || busyAction === 'enableH2o' };
   }
   if (app.appId === 'diagnostics') {
@@ -1589,6 +1647,23 @@ function createMockApi() {
         },
         installSource: 'npm',
         installPath: null,
+        runtime: {
+          kind: 'h2o-plugin',
+          mode: 'app-rule',
+          running: false,
+          status: 'stopped',
+          tunInstalled: false,
+          adminUrl: 'http://127.0.0.1:23456',
+          ports: { admin: 23456, controller: 23457, mixed: 23458, dns: 1053 },
+          activeSubscription: {
+            id: 'h2o-default',
+            name: 'Home To Oversea 默认策略',
+            nodes: 6,
+            latencyMs: 42
+          },
+          startedAt: null,
+          lastAppliedAt: null
+        },
         runtimeState: 'idle',
         logs: [],
         entrypoints: {
@@ -1754,10 +1829,52 @@ function createMockApi() {
           status: 'running',
           runtimeState: 'running',
           installedVersion: mockState.apps.h2o.installedVersion || mockState.apps.h2o.version,
+          runtime: {
+            ...mockState.apps.h2o.runtime,
+            running: true,
+            status: 'running',
+            startedAt: mockState.apps.h2o.runtime?.startedAt || new Date().toISOString(),
+            lastAppliedAt: new Date().toISOString()
+          },
           lastAction: new Date().toISOString()
         }
       },
       feedback: { tone: 'success', message: 'H2O 运行态已就绪。开发态从 mx-app-h2o 单独启动窗口。' }
+    }),
+    stopH2o: async () => commit({
+      apps: {
+        ...mockState.apps,
+        h2o: {
+          ...mockState.apps.h2o,
+          status: 'enabled',
+          runtimeState: 'ready',
+          runtime: {
+            ...mockState.apps.h2o.runtime,
+            running: false,
+            status: 'stopped',
+            startedAt: null,
+            lastAppliedAt: new Date().toISOString()
+          },
+          lastAction: new Date().toISOString(),
+          logs: [{ level: 'info', message: 'H2O runtime stopped from AppCenter.', at: new Date().toISOString() }, ...(mockState.apps.h2o.logs || [])]
+        }
+      },
+      feedback: { tone: 'info', message: 'H2O 已停止，配置和订阅仍保留。' }
+    }),
+    setH2oMode: async (mode) => commit({
+      apps: {
+        ...mockState.apps,
+        h2o: {
+          ...mockState.apps.h2o,
+          runtime: {
+            ...mockState.apps.h2o.runtime,
+            mode,
+            lastAppliedAt: new Date().toISOString()
+          },
+          logs: [{ level: 'info', message: `H2O mode switched to ${mode}.`, at: new Date().toISOString() }, ...(mockState.apps.h2o.logs || [])]
+        }
+      },
+      feedback: { tone: 'success', message: 'H2O 模式已切换。' }
     }),
     checkUpdates: async () => commit({
       update: {

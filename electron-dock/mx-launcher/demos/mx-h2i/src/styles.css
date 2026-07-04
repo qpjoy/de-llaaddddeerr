@@ -1856,6 +1856,75 @@ button:disabled {
   white-space: nowrap;
 }
 
+.h2o-plugin-panel {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: linear-gradient(135deg, rgba(43, 246, 210, 0.08), rgba(94, 142, 236, 0.04)), rgba(17, 19, 25, 0.32);
+}
+
+.h2o-plugin-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.h2o-plugin-head span {
+  color: var(--brand);
+  font-weight: 800;
+}
+
+.h2o-mode-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.h2o-mode-row button {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(41, 44, 55, 0.72);
+  color: var(--text-2);
+  font-weight: 800;
+}
+
+.h2o-mode-row button.is-active {
+  border-color: var(--brand);
+  background: rgba(43, 246, 210, 0.12);
+  color: var(--brand);
+}
+
+.h2o-runtime-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.h2o-runtime-facts div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid rgba(94, 142, 236, 0.18);
+  border-radius: 7px;
+  padding: 10px;
+  background: rgba(20, 20, 23, 0.34);
+}
+
+.h2o-runtime-facts span {
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.h2o-runtime-facts strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .app-log-list {
   border-top: 1px solid var(--line);
   padding-top: 12px;

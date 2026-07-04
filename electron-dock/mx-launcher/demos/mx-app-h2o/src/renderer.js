@@ -56,7 +56,55 @@ root.addEventListener('click', (event) => {
   }
   if (action === 'set-mode') {
     shellMenuOpen = false;
-    void run('setMode', button.dataset.mode || 'rule');
+    void run('setMode', button.dataset.mode || 'app-rule');
+    return;
+  }
+  if (action === 'start-runtime') {
+    shellMenuOpen = false;
+    void run('startRuntime');
+    return;
+  }
+  if (action === 'stop-runtime') {
+    shellMenuOpen = false;
+    void run('stopRuntime');
+    return;
+  }
+  if (action === 'install-tun') {
+    shellMenuOpen = false;
+    void run('installTun');
+    return;
+  }
+  if (action === 'uninstall-tun') {
+    shellMenuOpen = false;
+    void run('uninstallTun');
+    return;
+  }
+  if (action === 'save-ports') {
+    shellMenuOpen = false;
+    void run('setPorts', readPortFields());
+    return;
+  }
+  if (action === 'add-demo-subscription') {
+    shellMenuOpen = false;
+    void run('addSubscription', {
+      name: 'Oversea backup policy',
+      url: 'mx-h2i://managed/home-to-oversea-backup'
+    });
+    return;
+  }
+  if (action === 'set-active-subscription') {
+    shellMenuOpen = false;
+    void run('setActiveSubscription', button.dataset.subscriptionId || '');
+    return;
+  }
+  if (action === 'refresh-subscription') {
+    shellMenuOpen = false;
+    void run('refreshSubscription', button.dataset.subscriptionId || '');
+    return;
+  }
+  if (action === 'toggle-rule') {
+    shellMenuOpen = false;
+    void run('toggleRule', button.dataset.ruleId || '');
     return;
   }
   if (action === 'toggle-debug') {
@@ -83,6 +131,15 @@ async function run(action, ...args) {
       connectBroker: () => api.connectBroker(),
       refresh: () => api.refresh(),
       setMode: (mode) => api.setMode(mode),
+      startRuntime: () => api.startRuntime(),
+      stopRuntime: () => api.stopRuntime(),
+      installTun: () => api.installTun(),
+      uninstallTun: () => api.uninstallTun(),
+      setPorts: (input) => api.setPorts(input),
+      addSubscription: (input) => api.addSubscription(input),
+      setActiveSubscription: (subscriptionId) => api.setActiveSubscription(subscriptionId),
+      refreshSubscription: (subscriptionId) => api.refreshSubscription(subscriptionId),
+      toggleRule: (ruleId) => api.toggleRule(ruleId),
       requestBroker: (name, payload) => api.requestBroker(name, payload)
     };
     if (handlers[action]) {
@@ -112,7 +169,8 @@ function render() {
         <nav class="h2o-nav">
           ${navItem('runtime', '概览')}
           ${navItem('proxy', '代理')}
-          ${navItem('dns', 'DNS / PAC')}
+          ${navItem('subscriptions', '订阅')}
+          ${navItem('rules', '规则')}
           ${navItem('logs', '记录')}
         </nav>
         <div class="h2o-version">
@@ -185,7 +243,8 @@ function renderAppShellBar(connected) {
 
 function renderView() {
   if (view === 'proxy') return renderProxy();
-  if (view === 'dns') return renderDns();
+  if (view === 'subscriptions') return renderSubscriptions();
+  if (view === 'rules') return renderRules();
   if (view === 'logs') return renderLogs();
   return renderRuntime();
 }
@@ -201,6 +260,8 @@ function renderUserPanel() {
       </div>
       <div class="h2o-tip-list">
         <div><strong>代理模式</strong><span>${escapeHtml(modeLabel(state.policy.mode))}</span></div>
+        <div><strong>引擎</strong><span>${escapeHtml(state.engine?.running ? '运行中' : runtimeStatusLabel(state.engine?.status))}</span></div>
+        <div><strong>订阅</strong><span>${escapeHtml(activeSubscription()?.name || '未选择')}</span></div>
         <div><strong>规则数量</strong><span>${escapeHtml(String((state.rules || []).length))}</span></div>
         <div><strong>最近刷新</strong><span>${escapeHtml(formatTime(state.updatedAt))}</span></div>
       </div>
@@ -223,6 +284,10 @@ function renderDebugPanel() {
         ${detail('Socket', state.broker.channel?.socketPath || '-')}
         ${detail('Local IP', state.network.localIp || '-')}
         ${detail('Internal', state.network.internalApi)}
+        ${detail('Engine', state.engine?.status || '-')}
+        ${detail('TUN', state.engine?.tunInstalled ? 'installed' : 'missing')}
+        ${detail('Mixed', `:${state.ports?.mixed || '-'}`)}
+        ${detail('DNS', `:${state.ports?.dns || '-'}`)}
       </div>
       <div class="permission-list">
         ${(state.broker.session?.grantedCapabilities || state.broker.channel?.capabilities || []).map((item) => `<span>${escapeHtml(item)}</span>`).join('') || '<span>pending</span>'}
@@ -233,67 +298,134 @@ function renderDebugPanel() {
 }
 
 function renderRuntime() {
+  const running = state.engine?.running === true;
+  const active = activeSubscription();
   return `
     <section class="h2o-grid">
-      ${metricCard('连接状态', state.broker.ok ? '已就绪' : '未连接')}
+      ${metricCard('引擎', running ? '运行中' : runtimeStatusLabel(state.engine?.status))}
       ${metricCard('代理模式', modeLabel(state.policy.mode))}
-      ${metricCard('规则数量', String((state.rules || []).length))}
+      ${metricCard('订阅', active?.name || '未选择')}
       ${metricCard('Internal', state.network.internalApi === 'ready' ? '可访问' : '待检查')}
     </section>
     <section class="h2o-panel">
       <div class="panel-head">
         <div>
-          <h3>流量模式</h3>
-          <p>Home To Oversea policy</p>
+          <h3>Home To Oversea</h3>
+          <p>${escapeHtml(running ? '当前策略已由 MX-H2I broker 托管' : '启动后接管当前应用的出海策略')}</p>
         </div>
-        <button class="secondary-button" type="button" data-action="request-proxy">应用</button>
+        <div class="toolbar-actions">
+          <button class="secondary-button" type="button" data-action="request-proxy" ${!running ? 'disabled' : ''}>应用策略</button>
+          <button class="${running ? 'secondary-button' : 'primary-button'}" type="button" data-action="${running ? 'stop-runtime' : 'start-runtime'}" ${busy === 'startRuntime' || busy === 'stopRuntime' ? 'disabled' : ''}>
+            ${running ? '停止' : '启动'}
+          </button>
+        </div>
       </div>
       <div class="mode-segments">
-        ${modeButton('rule', '规则')}
-        ${modeButton('global', '全局')}
+        ${modeButton('app-rule', '规则')}
+        ${modeButton('app-global', '全局')}
+        ${modeButton('system-tun', 'TUN')}
         ${modeButton('direct', '直连')}
       </div>
+      ${state.engine?.status === 'tun-required' ? '<p class="h2o-warning">TUN 模式需要先安装虚拟网卡助手。可以在“代理”页安装，或切回规则模式。</p>' : ''}
     </section>
-    ${renderRuleTable()}
+    <section class="h2o-panel h2o-managed-card">
+      <div class="panel-head">
+        <div>
+          <h3>当前订阅</h3>
+          <p>${escapeHtml(active?.url || '由 MX-H2I managed profile 提供')}</p>
+        </div>
+        <button class="secondary-button" type="button" data-action="refresh-subscription" data-subscription-id="${escapeAttr(active?.id || '')}">刷新</button>
+      </div>
+      <div class="h2o-grid is-compact">
+        ${metricCard('节点', String(active?.nodes || 0))}
+        ${metricCard('延迟', active ? `${active.latencyMs} ms` : '-')}
+        ${metricCard('规则', String((state.rules || []).filter((rule) => rule.enabled !== false).length))}
+        ${metricCard('端口', `:${state.ports?.mixed || state.policy.proxyPort}`)}
+      </div>
+    </section>
+    ${renderRules({ compact: true })}
   `;
 }
 
 function renderProxy() {
+  const running = state.engine?.running === true;
   return `
     <section class="h2o-panel">
       <div class="panel-head">
         <div>
           <h3>代理</h3>
-          <p>${escapeHtml(modeLabel(state.policy.mode))}</p>
+          <p>${escapeHtml(modeLabel(state.policy.mode))} / ${escapeHtml(runtimeStatusLabel(state.engine?.status))}</p>
         </div>
-        <button class="primary-button" type="button" data-action="request-proxy">应用</button>
+        <div class="toolbar-actions">
+          <button class="${running ? 'secondary-button' : 'primary-button'}" type="button" data-action="${running ? 'stop-runtime' : 'start-runtime'}">
+            ${running ? '停止' : '启动'}
+          </button>
+          <button class="primary-button" type="button" data-action="request-proxy" ${!running ? 'disabled' : ''}>切换</button>
+        </div>
       </div>
-      <div class="h2o-grid">
-        ${metricCard('端口', String(state.policy.proxyPort))}
-        ${metricCard('状态', state.broker.ok ? '已连接' : '未连接')}
-        ${metricCard('模式', modeLabel(state.policy.mode))}
-        ${metricCard('Internal', state.network.internalApi === 'ready' ? '可访问' : '待检查')}
+      <div class="mode-segments">
+        ${modeButton('app-rule', 'App 规则')}
+        ${modeButton('app-global', 'App 全局')}
+        ${modeButton('system-tun', '系统 TUN')}
+        ${modeButton('direct', '直连')}
       </div>
     </section>
-    ${renderRuleTable()}
+    <section class="h2o-panel">
+      <div class="panel-head">
+        <div>
+          <h3>TUN 助手</h3>
+          <p>${escapeHtml(state.engine?.tunInstalled ? '已安装，可以启用系统 TUN 模式' : '仅系统 TUN 模式需要安装')}</p>
+        </div>
+        <button class="secondary-button" type="button" data-action="${state.engine?.tunInstalled ? 'uninstall-tun' : 'install-tun'}">
+          ${state.engine?.tunInstalled ? '卸载 TUN' : '安装 TUN'}
+        </button>
+      </div>
+      <div class="h2o-grid">
+        ${metricCard('Mixed', `:${state.ports?.mixed || '-'}`)}
+        ${metricCard('DNS', `:${state.ports?.dns || '-'}`)}
+        ${metricCard('Controller', `:${state.ports?.controller || '-'}`)}
+        ${metricCard('Admin', `:${state.ports?.admin || '-'}`)}
+      </div>
+      <div class="port-editor">
+        ${portField('mixed', state.ports?.mixed)}
+        ${portField('dns', state.ports?.dns)}
+        ${portField('controller', state.ports?.controller)}
+        ${portField('admin', state.ports?.admin)}
+        <button class="secondary-button" type="button" data-action="save-ports">保存端口</button>
+      </div>
+    </section>
   `;
 }
 
-function renderDns() {
+function renderSubscriptions() {
+  const subscriptions = state.subscriptions || [];
   return `
     <section class="h2o-panel">
       <div class="panel-head">
         <div>
-          <h3>DNS / PAC</h3>
-          <p>Split DNS and PAC</p>
+          <h3>订阅</h3>
+          <p>Managed profile / local fallback</p>
         </div>
-        <button class="secondary-button" type="button" data-action="refresh">检查</button>
+        <button class="secondary-button" type="button" data-action="add-demo-subscription">添加示例</button>
       </div>
-      <div class="h2o-grid">
-        ${metricCard('api.mxinfo-inc.cn', '10.88.88.88')}
-        ${metricCard('DNS', '自动')}
-        ${metricCard('PAC', '动态')}
-        ${metricCard('解析器', '本机')}
+      <div class="subscription-list">
+        ${subscriptions.map((item) => `
+          <article class="${item.id === state.engine?.activeSubscriptionId ? 'is-active' : ''}">
+            <div>
+              <strong>${escapeHtml(item.name)}</strong>
+              <span>${escapeHtml(item.url)}</span>
+            </div>
+            <div class="subscription-meta">
+              <span>${escapeHtml(String(item.nodes || 0))} nodes</span>
+              <span>${escapeHtml(String(item.latencyMs || '-'))} ms</span>
+              <span>${escapeHtml(formatTime(item.lastUpdatedAt))}</span>
+            </div>
+            <div class="toolbar-actions">
+              <button class="secondary-button" type="button" data-action="refresh-subscription" data-subscription-id="${escapeAttr(item.id)}">刷新</button>
+              <button class="primary-button" type="button" data-action="set-active-subscription" data-subscription-id="${escapeAttr(item.id)}" ${item.id === state.engine?.activeSubscriptionId ? 'disabled' : ''}>使用</button>
+            </div>
+          </article>
+        `).join('') || '<p class="empty">暂无订阅</p>'}
       </div>
     </section>
   `;
@@ -331,21 +463,22 @@ function renderLogs() {
   `;
 }
 
-function renderRuleTable() {
+function renderRules(options = {}) {
   return `
     <section class="h2o-panel">
       <div class="panel-head">
         <div>
           <h3>规则</h3>
-          <p>常用 Internal 服务</p>
+          <p>${options.compact ? '常用 Internal 服务' : 'Internal direct / broker session / oversea policy'}</p>
         </div>
       </div>
       <div class="rule-table">
         ${(state.rules || []).map((rule) => `
-          <div>
+          <div class="${rule.enabled === false ? 'is-disabled' : ''}">
             <strong>${escapeHtml(rule.host)}</strong>
             <span>${escapeHtml(rule.target)}</span>
             <em>${escapeHtml(rule.policy)}</em>
+            ${options.compact ? '' : `<button class="secondary-button" type="button" data-action="toggle-rule" data-rule-id="${escapeAttr(rule.id)}">${rule.enabled === false ? '启用' : '停用'}</button>`}
           </div>
         `).join('')}
       </div>
@@ -362,9 +495,23 @@ function modeButton(mode, label) {
 }
 
 function modeLabel(mode) {
-  if (mode === 'global') return '全局';
+  if (mode === 'global' || mode === 'app-global') return '全局';
+  if (mode === 'system-tun') return '系统 TUN';
   if (mode === 'direct') return '直连';
   return '规则';
+}
+
+function runtimeStatusLabel(status) {
+  if (state.engine?.running) return '运行中';
+  if (status === 'tun-required') return '等待 TUN';
+  if (status === 'ready') return '就绪';
+  if (status === 'error') return '异常';
+  return '未启动';
+}
+
+function activeSubscription() {
+  const rows = state.subscriptions || [];
+  return rows.find((item) => item.id === state.engine?.activeSubscriptionId) || rows[0] || null;
 }
 
 function metricCard(label, value) {
@@ -373,6 +520,24 @@ function metricCard(label, value) {
 
 function detail(label, value) {
   return `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || '-')}</strong></div>`;
+}
+
+function portField(name, value) {
+  const label = name === 'mixed' ? 'Mixed' : name === 'dns' ? 'DNS' : name === 'controller' ? 'Controller' : 'Admin';
+  return `
+    <label>
+      <span>${escapeHtml(label)}</span>
+      <input data-port-field="${escapeAttr(name)}" inputmode="numeric" value="${escapeAttr(String(value || ''))}" />
+    </label>
+  `;
+}
+
+function readPortFields() {
+  const result = {};
+  for (const input of root.querySelectorAll('[data-port-field]')) {
+    result[input.dataset.portField] = Number(input.value || 0);
+  }
+  return result;
 }
 
 function formatTime(value) {
@@ -429,13 +594,29 @@ function createMockApi() {
       channel: { socketPath: '~/.qpjoy/mx-launcher/sockets/mx-h2i.sock' },
       missingCapabilities: []
     },
-    policy: { mode: 'rule', pac: 'dynamic-split', dns: 'internal-first', proxyPort: 2053, profile: 'home-to-oversea' },
+    policy: { mode: 'app-rule', pac: 'dynamic-split', dns: 'internal-first', proxyPort: 23458, profile: 'home-to-oversea' },
+    engine: {
+      running: false,
+      status: 'ready',
+      mode: 'app-rule',
+      tunInstalled: false,
+      activeSubscriptionId: 'h2o-default',
+      startedAt: null,
+      adminUrl: 'http://127.0.0.1:23456',
+      core: 'h2o-shim',
+      coreVersion: '0.1.0'
+    },
+    ports: { admin: 23456, controller: 23457, mixed: 23458, dns: 1053 },
     network: { localIp: '10.89.100.12', routePolicy: 'guest limited', internalApi: 'ready', splitDns: 'internal-first', pac: 'dynamic-split', profile: 'home-to-oversea' },
-    rules: [
-      { id: 'internal-api', host: 'api.mxinfo-inc.cn', target: '10.88.88.88', policy: 'internal-direct' },
-      { id: 'appcenter', host: 'appcenter.mxinfo-inc.cn', target: 'mx-h2i broker', policy: 'broker-session' },
-      { id: 'oversea-default', host: '*.oversea', target: 'system proxy', policy: 'home-to-oversea' }
+    subscriptions: [
+      { id: 'h2o-default', name: 'Home To Oversea 默认策略', url: 'mx-h2i://managed/home-to-oversea', nodes: 6, latencyMs: 42, status: 'ready', lastUpdatedAt: new Date().toISOString() }
     ],
+    rules: [
+      { id: 'internal-api', host: 'api.mxinfo-inc.cn', target: '10.88.88.88', policy: 'internal-direct', enabled: true, source: 'builtin' },
+      { id: 'appcenter', host: 'appcenter.mxinfo-inc.cn', target: 'mx-h2i broker', policy: 'broker-session', enabled: true, source: 'builtin' },
+      { id: 'oversea-default', host: '*.oversea', target: 'system proxy', policy: 'home-to-oversea', enabled: true, source: 'managed' }
+    ],
+    metrics: { uploadBytes: 0, downloadBytes: 0, lastProxyAppliedAt: null },
     activity: [],
     updatedAt: new Date().toISOString()
   };
@@ -447,7 +628,56 @@ function createMockApi() {
     getState: async () => JSON.parse(JSON.stringify(mock)),
     connectBroker: async () => commit({ broker: { ...mock.broker, state: 'network-ready', ok: true, message: 'Connected to MX-H2I mock broker.' } }),
     refresh: async () => commit({ network: { ...mock.network, internalApi: 'ready', localIp: '10.89.100.12' } }),
-    setMode: async (mode) => commit({ policy: { ...mock.policy, mode }, activity: [{ type: 'policy.mode', message: `Mode switched to ${mode}`, at: new Date().toISOString() }, ...mock.activity] }),
+    setMode: async (mode) => commit({
+      policy: { ...mock.policy, mode },
+      engine: { ...mock.engine, mode, status: mode === 'system-tun' && !mock.engine.tunInstalled ? 'tun-required' : mock.engine.running ? 'running' : 'ready' },
+      activity: [{ type: 'policy.mode', level: 'info', message: `Mode switched to ${mode}`, at: new Date().toISOString() }, ...mock.activity]
+    }),
+    startRuntime: async () => commit({
+      engine: mock.policy.mode === 'system-tun' && !mock.engine.tunInstalled
+        ? { ...mock.engine, running: false, status: 'tun-required' }
+        : { ...mock.engine, running: true, status: 'running', startedAt: mock.engine.startedAt || new Date().toISOString() },
+      activity: [{ type: 'runtime.start', level: 'info', message: 'H2O proxy runtime started.', at: new Date().toISOString() }, ...mock.activity]
+    }),
+    stopRuntime: async () => commit({
+      engine: { ...mock.engine, running: false, status: 'stopped', startedAt: null },
+      activity: [{ type: 'runtime.stop', level: 'info', message: 'H2O proxy runtime stopped.', at: new Date().toISOString() }, ...mock.activity]
+    }),
+    installTun: async () => commit({
+      engine: { ...mock.engine, tunInstalled: true, status: mock.engine.running ? 'running' : 'ready' },
+      activity: [{ type: 'tun.install', level: 'info', message: 'TUN helper installed.', at: new Date().toISOString() }, ...mock.activity]
+    }),
+    uninstallTun: async () => commit({
+      policy: { ...mock.policy, mode: mock.policy.mode === 'system-tun' ? 'app-rule' : mock.policy.mode },
+      engine: { ...mock.engine, tunInstalled: false, mode: mock.engine.mode === 'system-tun' ? 'app-rule' : mock.engine.mode, status: mock.engine.running ? 'running' : 'ready' },
+      activity: [{ type: 'tun.uninstall', level: 'info', message: 'TUN helper removed.', at: new Date().toISOString() }, ...mock.activity]
+    }),
+    setPorts: async (input) => commit({
+      ports: { ...mock.ports, ...input },
+      policy: { ...mock.policy, proxyPort: Number(input?.mixed || mock.ports.mixed) },
+      activity: [{ type: 'ports.save', level: 'info', message: 'Ports saved.', at: new Date().toISOString() }, ...mock.activity]
+    }),
+    addSubscription: async (input) => {
+      const id = `sub-${Date.now().toString(36)}`;
+      const row = { id, name: input?.name || 'Managed subscription', url: input?.url || 'mx-h2i://managed/custom', nodes: 3, latencyMs: 58, status: 'ready', lastUpdatedAt: new Date().toISOString() };
+      return commit({
+        subscriptions: [row, ...mock.subscriptions],
+        engine: { ...mock.engine, activeSubscriptionId: id },
+        activity: [{ type: 'subscription.add', level: 'info', message: `Subscription added: ${row.name}`, at: new Date().toISOString() }, ...mock.activity]
+      });
+    },
+    setActiveSubscription: async (subscriptionId) => commit({
+      engine: { ...mock.engine, activeSubscriptionId: subscriptionId },
+      activity: [{ type: 'subscription.active', level: 'info', message: `Active subscription switched to ${subscriptionId}`, at: new Date().toISOString() }, ...mock.activity]
+    }),
+    refreshSubscription: async (subscriptionId) => commit({
+      subscriptions: mock.subscriptions.map((item) => item.id === subscriptionId ? { ...item, latencyMs: 36, lastUpdatedAt: new Date().toISOString() } : item),
+      activity: [{ type: 'subscription.refresh', level: 'info', message: `Subscription refreshed: ${subscriptionId || mock.engine.activeSubscriptionId}`, at: new Date().toISOString() }, ...mock.activity]
+    }),
+    toggleRule: async (ruleId) => commit({
+      rules: mock.rules.map((rule) => rule.id === ruleId ? { ...rule, enabled: rule.enabled === false } : rule),
+      activity: [{ type: 'rule.toggle', level: 'info', message: `Rule toggled: ${ruleId}`, at: new Date().toISOString() }, ...mock.activity]
+    }),
     requestBroker: async (name, payload) => ({ state: commit({ activity: [{ type: name, message: JSON.stringify(payload || {}), at: new Date().toISOString() }, ...mock.activity] }), result: { ok: true } }),
     onState: () => () => {}
   };

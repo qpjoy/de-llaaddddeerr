@@ -22,10 +22,11 @@ systemctl restart containerd kubelet
 # 安装host-runner
 bash scripts/manage.sh ops site-slot native-host-runner install 19190
 curl -sS http://127.0.0.1:19190/capabilities
-curl -sS http://192.168.31.121:19190/capabilities
+CENTOS_LAN_IP="$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')"
+curl -sS "http://${CENTOS_LAN_IP}:19190/capabilities"
 
 bash scripts/install-k8s-centos.sh \
-  --advertise-address 192.168.31.121 \
+  --advertise-address "$CENTOS_LAN_IP" \
   --allow-cgroup-v1 \
   --image-repository registry.aliyuncs.com/google_containers
 
@@ -129,7 +130,7 @@ curl --noproxy '*' -v http://10.88.88.88:18090/healthz
 # Oversea SSH Profile
 # Worker URL 是 Internal worker 读取 job、回写 report 的 Internal API base。
 # 默认填 http://127.0.0.1:18090；Admin 触发的 worker 跟 Internal API 在同一运行面，不依赖外部网络。
-# 如果以后 worker 挪到独立宿主机，再填那个 worker 宿主机能访问到的 Internal gateway，例如 http://192.168.31.121:18090。
+# 如果以后 worker 挪到独立宿主机，再填那个 worker 宿主机能访问到的 Internal gateway，例如 http://${CENTOS_LAN_IP}:18090。
 # 不要填 http://mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090；
 # svc.cluster.local 只适合 K8s Pod 内部 DNS，不适合 Mac/browser/Oversea host。
 # Callback URL 可以留空，push-only 模式不要求 Oversea 反向访问 Internal。

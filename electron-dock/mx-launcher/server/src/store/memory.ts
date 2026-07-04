@@ -5,6 +5,7 @@ import {
   buildAppOnboardingDefaults,
   buildAppOnboardingTemplates,
   buildAppCenterApp,
+  buildAppCenterInstallation,
   builtinLauncherProductNetworks,
   buildLauncherProductNetwork,
   buildAwxProviderConfig,
@@ -59,6 +60,7 @@ import {
   evaluateSdkGatewayRoute,
   emptyUserCredentialSummary,
   evaluateAppCenterAccess,
+  appCenterInstallationMatchesQuery,
   evaluateDnsPolicy,
   hashToken,
   introspectUserCenterToken,
@@ -106,6 +108,9 @@ import type {
   AppCenterAccessInput,
   AppCenterApp,
   AppCenterAppInput,
+  AppCenterInstallation,
+  AppCenterInstallationInput,
+  AppCenterInstallationQuery,
   AppOnboardingDefaults,
   AppOnboardingDefaultsInput,
   AppOnboardingTemplate,
@@ -243,6 +248,7 @@ export class MemoryStore implements PlatformStore {
   private readonly runtimeFeaturePolicies = new Map<string, RuntimeFeaturePolicy>();
   private readonly awxProviderConfigs = new Map<string, AwxProviderConfig>();
   private readonly appCatalog = new Map<string, AppCenterApp>();
+  private readonly appCenterInstallations = new Map<string, AppCenterInstallation>();
   private readonly tenants = new Map<string, UserCenterTenant>();
   private readonly orgs = new Map<string, UserCenterOrg>();
   private readonly roles = new Map<string, UserCenterRole>();
@@ -1873,6 +1879,40 @@ export class MemoryStore implements PlatformStore {
       }
     });
     return true;
+  }
+
+  listAppCenterInstallations(input: AppCenterInstallationQuery = {}): AppCenterInstallation[] {
+    return [...this.appCenterInstallations.values()]
+      .filter((installation) => appCenterInstallationMatchesQuery(installation, input))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  upsertAppCenterInstallation(input: AppCenterInstallationInput): AppCenterInstallation {
+    const draft = buildAppCenterInstallation(input, null);
+    const app = this.getAppCenterApp(draft.appId);
+    if (!app) throw new Error(`AppCenter app ${draft.appId} is not registered`);
+    const previous = this.appCenterInstallations.get(draft.installationId) ?? null;
+    const installation = buildAppCenterInstallation(input, app, previous);
+    this.appCenterInstallations.set(installation.installationId, installation);
+    this.recordAudit({
+      eventType: previous ? 'app-center.installation.updated' : 'app-center.installation.created',
+      actorKind: 'app-center',
+      userId: installation.userId,
+      installId: installation.installId,
+      deviceId: installation.deviceId,
+      productId: installation.appId,
+      metadata: {
+        requestedBy: input.requestedBy?.trim() || 'desktop-appcenter',
+        sourceAppId: installation.sourceAppId,
+        packageName: installation.packageName,
+        installedVersion: installation.installedVersion,
+        latestVersion: installation.latestVersion,
+        status: installation.status,
+        runtimeState: installation.runtimeState,
+        installSource: installation.installSource
+      }
+    });
+    return installation;
   }
 
   listDnsPolicies(): DnsPolicy[] {

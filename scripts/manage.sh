@@ -15,6 +15,7 @@
 #   scripts/manage.sh status
 #   scripts/manage.sh market
 #   scripts/manage.sh prepare-plugin
+#   scripts/manage.sh prepare-mx-h2i-npm 0.1.1
 #   scripts/manage.sh sync-apps
 #   scripts/manage.sh deploy                 # 部署菜单
 #   scripts/manage.sh server <subcommand>   # → electron-server/scripts/manage.sh
@@ -52,6 +53,7 @@ header() { printf '\n%s%s%s\n' "$C_CYAN$C_BOLD" "$*" "$C_RESET"; hr; }
 # Category: host = marketplace runtime, plugin = installable plugin,
 #           core = reusable runtime library,
 #           design = reusable UI design package,
+#           app = AppCenter installable app package,
 #           engine = platform-specific tunnel engine resource package,
 #           tool = npm CLI/helper, game = installable game.
 #
@@ -68,6 +70,7 @@ PACKAGES=(
   "@qpjoy/mx-launcher-embed-sdk|electron-dock/mx-launcher/packages/launcher-embed-sdk|core|MX Launcher Embed SDK"
   "@qpjoy/mx-launcher-standalone|electron-dock/mx-launcher/packages/launcher-standalone|core|MX Launcher Standalone adapter"
   "@qpjoy/ui-design-neon-void|electron-dock/mx-launcher/ui-design|design|QPJoy UI Design Neon Void"
+  "@qpjoy/electron-launcher-app-h2o|electron-dock/mx-launcher/demos/mx-app-h2o|app|H2O Home To Oversea AppCenter app"
   "@qpjoy/electron-plugin-tunnel-engine-darwin-arm64|electron-plugin/packages/tunnel-engines/darwin-arm64|engine|Tunnel Engine macOS arm64"
   "@qpjoy/electron-plugin-tunnel-engine-darwin-x64|electron-plugin/packages/tunnel-engines/darwin-x64|engine|Tunnel Engine macOS x64"
   "@qpjoy/electron-plugin-tunnel-engine-linux-arm64|electron-plugin/packages/tunnel-engines/linux-arm64|engine|Tunnel Engine Linux arm64"
@@ -85,6 +88,15 @@ PACKAGES=(
   "@qpjoy/electron-game-suduku|electron-game/games/suduku|game|Suduku 数独游戏"
 )
 
+MX_H2I_NPM_PACKAGE_NAMES=(
+  "@qpjoy/mx-launcher-core"
+  "@qpjoy/mx-launcher-embed-sdk"
+  "@qpjoy/mx-launcher-standalone"
+  "@qpjoy/electron-launcher"
+  "@qpjoy/ui-design-neon-void"
+  "@qpjoy/electron-launcher-app-h2o"
+)
+
 # Filter PACKAGES by category. Outputs each matching row.
 pkgs_by_category() {
   local want="$1"
@@ -99,6 +111,18 @@ pkg_field() {
   local row="$1" idx="$2"
   IFS='|' read -r f1 f2 f3 f4 <<<"$row"
   case "$idx" in 1) echo "$f1";; 2) echo "$f2";; 3) echo "$f3";; 4) echo "$f4";; esac
+}
+
+pkg_row_by_name() {
+  local want="$1"
+  for row in "${PACKAGES[@]}"; do
+    IFS='|' read -r name _path _cat _label <<<"$row"
+    if [ "$name" = "$want" ]; then
+      echo "$row"
+      return 0
+    fi
+  done
+  return 1
 }
 
 # ── Package introspection ─────────────────────────────────────────────
@@ -142,6 +166,41 @@ semver_cmp() {
     console.log('equal');
   " 2>/dev/null) || cmp=unknown
   echo "$cmp"
+}
+
+valid_semver() {
+  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]
+}
+
+pkg_json_bool() {
+  local pkg_path="$1" key="$2"
+  node - "$ROOT/$pkg_path/package.json" "$key" <<'NODE'
+const fs = require('fs');
+const [pkgPath, key] = process.argv.slice(2);
+const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+console.log(pkg[key] === true ? 'true' : 'false');
+NODE
+}
+
+pkg_has_script() {
+  local pkg_path="$1" script_name="$2"
+  node - "$ROOT/$pkg_path/package.json" "$script_name" <<'NODE'
+const fs = require('fs');
+const [pkgPath, scriptName] = process.argv.slice(2);
+const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+process.exit(pkg.scripts && pkg.scripts[scriptName] ? 0 : 1);
+NODE
+}
+
+bump_pkg_version() {
+  local pkg_path="$1" version="$2"
+  node - "$ROOT/$pkg_path/package.json" "$version" <<'NODE'
+const fs = require('fs');
+const [pkgPath, version] = process.argv.slice(2);
+const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+pkg.version = version;
+fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+NODE
 }
 
 pkg_status_line() {
@@ -190,6 +249,9 @@ cmd_status() {
   header "样式组件库 (design systems)"
   while IFS= read -r row; do pkg_status_line "$row"; done < <(pkgs_by_category design)
 
+  header "AppCenter 应用包 (app packages)"
+  while IFS= read -r row; do pkg_status_line "$row"; done < <(pkgs_by_category app)
+
   header "市场上架插件 (plugins)"
   while IFS= read -r row; do pkg_status_line "$row"; done < <(pkgs_by_category plugin)
 
@@ -207,7 +269,7 @@ cmd_status() {
   fi
 
   echo
-  echo "${C_DIM}Tip: 'prepare-host' / 'prepare-core' / 'prepare-design' / 'prepare-plugin' / 'prepare-engine' / 'prepare-tool' / 'prepare-game' 准备发布；'sync-apps' 让 demo/test 用上本地最新包${C_RESET}"
+  echo "${C_DIM}Tip: 'prepare-mx-h2i-npm' 统一准备 MX-H2I npm 版本；'prepare-host' / 'prepare-core' / 'prepare-design' / 'prepare-app' / 'prepare-plugin' / 'prepare-engine' / 'prepare-tool' / 'prepare-game' 准备单包发布；'sync-apps' 让 demo/test 用上本地最新包${C_RESET}"
 }
 
 cmd_market() {
@@ -401,17 +463,11 @@ prepare_one() {
 
   read -r -p "新版本号 (回车 = 跳过 bump，直接打包当前版本): " new_ver
   if [ -n "$new_ver" ]; then
-    if [[ ! "$new_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+    if ! valid_semver "$new_ver"; then
       die "版本号格式不对（期望 x.y.z 或 x.y.z-tag）"
     fi
     say "bump $name → $new_ver"
-    node -e "
-      const fs = require('fs');
-      const p = '$ROOT/$path/package.json';
-      const pkg = JSON.parse(fs.readFileSync(p,'utf8'));
-      pkg.version = '$new_ver';
-      fs.writeFileSync(p, JSON.stringify(pkg,null,2)+'\n');
-    "
+    bump_pkg_version "$path" "$new_ver"
     # plugin.manifest.json — many plugins have a sibling manifest with its
     # own version. Sync it if present. Build script usually handles this,
     # but writing it now keeps the diff clean before the build runs.
@@ -524,10 +580,142 @@ pick_pkg_then_prepare() {
 cmd_prepare_plugin() { pick_pkg_then_prepare plugin "插件"; }
 cmd_prepare_core()   { pick_pkg_then_prepare core   "公共网络底座"; }
 cmd_prepare_design() { pick_pkg_then_prepare design "样式组件库"; }
+cmd_prepare_app()    { pick_pkg_then_prepare app    "AppCenter 应用包"; }
 cmd_prepare_engine() { pick_pkg_then_prepare engine "引擎资源包"; }
 cmd_prepare_host()   { pick_pkg_then_prepare host   "宿主组件"; }
 cmd_prepare_tool()   { pick_pkg_then_prepare tool   "命令行工具"; }
 cmd_prepare_game()   { pick_pkg_then_prepare game   "游戏"; }
+
+cmd_prepare_mx_h2i_npm() {
+  local requested_version="" no_bump=0 arg
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    case "$arg" in
+      --current|--no-bump)
+        no_bump=1
+        ;;
+      -h|--help)
+        cat <<EOF
+Usage:
+  scripts/manage.sh prepare-mx-h2i-npm [version]
+  scripts/manage.sh prepare-mx-h2i-npm --current
+
+统一准备 MX-H2I npm 包组：Launcher SDK、Electron Launcher、UI design、
+H2O AppCenter app。MX-H2I desktop 安装包仍走 electron-builder/发版链路。
+EOF
+        return
+        ;;
+      -*)
+        die "未知 prepare-mx-h2i-npm 参数: $arg"
+        ;;
+      *)
+        [ -z "$requested_version" ] || die "只能传一个版本号"
+        requested_version="$arg"
+        ;;
+    esac
+    shift || true
+  done
+
+  local rows=() row name path label
+  for name in "${MX_H2I_NPM_PACKAGE_NAMES[@]}"; do
+    row=$(pkg_row_by_name "$name") || die "MX-H2I npm 发布包未登记在 PACKAGES: $name"
+    rows+=("$row")
+  done
+
+  header "MX-H2I npm 版本发布组"
+  echo "${C_DIM}范围: Launcher SDK/runtime、UI design、H2O AppCenter app。MX-H2I desktop app 不作为 npm 包发布。${C_RESET}"
+  echo
+  printf '  %-32s  %-10s  %-14s  %s\n' "包名" "本地" "npm" "说明"
+  for row in "${rows[@]}"; do
+    name=$(pkg_field "$row" 1)
+    path=$(pkg_field "$row" 2)
+    label=$(pkg_field "$row" 4)
+    printf '  %-32s  %-10s  %-14s  %s\n' "$name" "$(pkg_local_version "$path")" "$(pkg_npm_version "$name")" "$label"
+  done
+  echo
+
+  if [ "$no_bump" -eq 0 ] && [ -z "$requested_version" ] && [ -t 0 ]; then
+    read -r -p "统一新版本号 (回车 = 不 bump，直接打包当前版本): " requested_version
+  fi
+  if [ -n "$requested_version" ]; then
+    valid_semver "$requested_version" || die "版本号格式不对（期望 x.y.z 或 x.y.z-tag）"
+    for row in "${rows[@]}"; do
+      path=$(pkg_field "$row" 2)
+      if [ "$(pkg_json_bool "$path" private)" = "true" ]; then
+        die "$(pkg_field "$row" 1) 仍是 private:true，不能发布到 npm"
+      fi
+      bump_pkg_version "$path" "$requested_version"
+    done
+    ok "MX-H2I npm 包组版本已统一更新为 $requested_version"
+  else
+    ok "跳过 bump，使用各包当前本地版本"
+  fi
+
+  local preview_dir="/tmp/qpjoy-publish-preview/mx-h2i-npm"
+  rm -rf "$preview_dir"
+  mkdir -p "$preview_dir"
+
+  for row in "${rows[@]}"; do
+    name=$(pkg_field "$row" 1)
+    path=$(pkg_field "$row" 2)
+    label=$(pkg_field "$row" 4)
+    [ "$(pkg_json_bool "$path" private)" = "false" ] || die "$name 仍是 private:true，不能发布到 npm"
+
+    header "MX-H2I npm: $name"
+    echo "  路径: $path"
+    echo "  说明: $label"
+    if pkg_has_script "$path" build; then
+      say "build: pnpm --filter $name build"
+      (cd "$ROOT/electron-dock/mx-launcher" && pnpm --filter "$name" build) || die "$name build 失败"
+    elif pkg_has_script "$path" check; then
+      say "check: pnpm --filter $name check"
+      (cd "$ROOT/electron-dock/mx-launcher" && pnpm --filter "$name" check) || die "$name check 失败"
+    else
+      warn "$name 没有 build/check script，直接 pack"
+    fi
+
+    say "pack: $preview_dir"
+    (cd "$ROOT/$path" && pnpm pack --pack-destination "$preview_dir") || die "$name pack 失败"
+  done
+
+  echo
+  ok "MX-H2I npm 包组准备完成"
+  echo
+  echo "${C_BOLD}pack 预览:${C_RESET}"
+  find "$preview_dir" -maxdepth 1 -type f -name '*.tgz' -print | sort | sed 's/^/  /'
+  echo
+  echo "${C_BOLD}下一步（手动发布命令）:${C_RESET}"
+  for row in "${rows[@]}"; do
+    path=$(pkg_field "$row" 2)
+    echo "  (cd $ROOT/$path && pnpm publish --no-git-checks --otp=${C_DIM}<authenticator 6 位>${C_RESET})"
+  done
+  echo
+  echo "${C_DIM}发布完成后，Internal/AppCenter 可以用这些 packageName + version 写入 catalog、灰度和安装缓存。${C_RESET}"
+
+  local publish_choice publish_otp
+  if [ -t 0 ]; then
+    read -r -p "现在逐包输入 OTP 并发布全部？[y/N] " publish_choice
+  else
+    publish_choice=""
+  fi
+  case "$publish_choice" in
+    y|Y|yes|YES)
+      for row in "${rows[@]}"; do
+        name=$(pkg_field "$row" 1)
+        path=$(pkg_field "$row" 2)
+        publish_otp="$(prompt_secret "npm OTP for $name（回车 = 跳过此包）: ")"
+        if [ -z "$publish_otp" ]; then
+          warn "已跳过发布: $name"
+          continue
+        fi
+        publish_one_with_otp "$name" "$path" "$publish_otp" || warn "发布失败或跳过: $name"
+      done
+      ;;
+    *)
+      echo "${C_DIM}已跳过自动发布，保留上面的手动发布命令。${C_RESET}"
+      ;;
+  esac
+}
 
 cmd_sync_apps() {
   header "把 electron-demo/hdo / electron-test 同步到本地最新包"
@@ -641,6 +829,8 @@ Subcommands:
   ${C_BOLD}prepare-plugin${C_RESET}    选择插件 → bump 版本 + build + pack 预览
   ${C_BOLD}prepare-core${C_RESET}      选择公共网络底座做同样操作
   ${C_BOLD}prepare-design${C_RESET}    选择样式组件库做同样操作
+  ${C_BOLD}prepare-app${C_RESET}       选择 AppCenter 应用包做同样操作
+  ${C_BOLD}prepare-mx-h2i-npm${C_RESET} 统一准备 MX-H2I npm 包组版本
   ${C_BOLD}prepare-engine${C_RESET}    选择平台引擎资源包做同样操作
   ${C_BOLD}prepare-host${C_RESET}      选择宿主组件（electron-market 等）做同样操作
   ${C_BOLD}prepare-tool${C_RESET}      选择命令行工具做同样操作
@@ -658,7 +848,9 @@ Subcommands:
 Examples:
   scripts/manage.sh                       # 交互菜单
   scripts/manage.sh status
+  scripts/manage.sh prepare-mx-h2i-npm 0.1.1
   scripts/manage.sh prepare-plugin
+  scripts/manage.sh prepare-app
   scripts/manage.sh prepare-tool
   scripts/manage.sh deploy hdo
   scripts/manage.sh hdo-device-conflicts
@@ -669,7 +861,8 @@ Examples:
   scripts/manage.sh hdo setup-domestic --server-url http://domestic:8080 --public-host domestic.example.com
 
 发布流程（每次手动 OTP）:
-  1. scripts/manage.sh prepare-plugin     # 或 prepare-core / prepare-design / prepare-engine / prepare-host / prepare-tool / prepare-game
+  1. scripts/manage.sh prepare-mx-h2i-npm 0.1.1
+     # 或 prepare-plugin / prepare-core / prepare-design / prepare-app / prepare-engine / prepare-host / prepare-tool / prepare-game
   2. 脚本会打印手动 publish 命令；也可输入 OTP 让脚本直接发布
      cd <package-dir> && pnpm publish --otp=XXXXXX --no-git-checks
   3. scripts/manage.sh sync-hdo-npm       # 发布后让 electron-demo/hdo 回到 npm 正式依赖
@@ -684,9 +877,11 @@ cmd_menu() {
   local options=(
     "status         市场 + 包版本一览"
     "market         查看市场卡片列表 (seed-index)"
+    "prepare-mx-h2i 准备发布: MX-H2I npm 包组"
     "prepare-plugin 准备发布: 插件"
     "prepare-core   准备发布: 公共网络底座"
     "prepare-design 准备发布: 样式组件库"
+    "prepare-app    准备发布: AppCenter 应用包"
     "prepare-engine 准备发布: Tunnel 引擎资源包"
     "prepare-host   准备发布: 市场宿主组件"
     "prepare-tool   准备发布: 命令行工具"
@@ -709,9 +904,11 @@ cmd_menu() {
     case "$cmd" in
       status)         cmd_status ;;
       market)         cmd_market ;;
+      prepare-mx-h2i) cmd_prepare_mx_h2i_npm ;;
       prepare-plugin) cmd_prepare_plugin ;;
       prepare-core)   cmd_prepare_core ;;
       prepare-design) cmd_prepare_design ;;
+      prepare-app)    cmd_prepare_app ;;
       prepare-engine) cmd_prepare_engine ;;
       prepare-host)   cmd_prepare_host ;;
       prepare-tool)   cmd_prepare_tool ;;
@@ -738,9 +935,11 @@ shift || true
 case "$sub" in
   status|st)                    cmd_status "$@" ;;
   market|cards|catalog)         cmd_market "$@" ;;
+  prepare-mx-h2i-npm|mx-h2i-npm|mx-h2i) cmd_prepare_mx_h2i_npm "$@" ;;
   prepare-plugin|plugin)        cmd_prepare_plugin "$@" ;;
   prepare-core|core)            cmd_prepare_core "$@" ;;
   prepare-design|design)        cmd_prepare_design "$@" ;;
+  prepare-app|app)              cmd_prepare_app "$@" ;;
   prepare-engine|engine)        cmd_prepare_engine "$@" ;;
   prepare-host|host)            cmd_prepare_host "$@" ;;
   prepare-tool|tool)            cmd_prepare_tool "$@" ;;

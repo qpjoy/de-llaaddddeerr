@@ -20,6 +20,9 @@
     "README.md",
     "package.json"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "sideEffects": [
     "./dist/styles.css",
     "./dist/tokens.css"

@@ -1734,6 +1734,70 @@ export interface AppCenterAppInput {
   requestedBy?: string | null;
 }
 
+export type AppCenterInstallationStatus =
+  | 'available'
+  | 'not-installed'
+  | 'installing'
+  | 'installed'
+  | 'enabled'
+  | 'ready'
+  | 'running'
+  | 'error'
+  | 'disabled';
+
+export interface AppCenterInstallation {
+  installationId: string;
+  appId: string;
+  installId: string | null;
+  deviceId: string | null;
+  userId: string | null;
+  sourceAppId: string | null;
+  packageName: string | null;
+  installedVersion: string | null;
+  latestVersion: string | null;
+  status: AppCenterInstallationStatus;
+  runtimeState: string | null;
+  installSource: string | null;
+  installPath: string | null;
+  manifest: AppCenterAppManifest | Record<string, unknown> | null;
+  manifestDigest: string | null;
+  installedAt: string | null;
+  lastSeenAt: string;
+  errorMessage: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AppCenterInstallationQuery extends AppCenterAccessContextInput {
+  appId?: string | null;
+  installId?: string | null;
+  deviceId?: string | null;
+  packageName?: string | null;
+}
+
+export interface AppCenterInstallationInput {
+  appId: string;
+  installId?: string | null;
+  deviceId?: string | null;
+  userId?: string | null;
+  sourceAppId?: string | null;
+  packageName?: string | null;
+  installedVersion?: string | null;
+  latestVersion?: string | null;
+  status?: AppCenterInstallationStatus | string | null;
+  runtimeState?: string | null;
+  installSource?: string | null;
+  installPath?: string | null;
+  manifest?: Record<string, unknown> | AppCenterAppManifest | null;
+  manifestDigest?: string | null;
+  installedAt?: string | null;
+  lastSeenAt?: string | null;
+  errorMessage?: string | null;
+  metadata?: Record<string, unknown> | null;
+  requestedBy?: string | null;
+}
+
 export interface AppOnboardingTemplate {
   templateId: string;
   label: string;

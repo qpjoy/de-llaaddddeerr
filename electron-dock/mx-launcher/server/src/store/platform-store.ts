@@ -6,6 +6,9 @@ import type {
   AppCenterAccessInput,
   AppCenterApp,
   AppCenterAppInput,
+  AppCenterInstallation,
+  AppCenterInstallationInput,
+  AppCenterInstallationQuery,
   AppOnboardingDefaults,
   AppOnboardingDefaultsInput,
   AppOnboardingTemplate,
@@ -256,6 +259,8 @@ export interface PlatformStore {
   getAppCenterApp(appId: string): MaybePromise<AppCenterApp | null>;
   upsertAppCenterApp(input: AppCenterAppInput): MaybePromise<AppCenterApp>;
   deleteAppCenterApp(appId: string): MaybePromise<boolean>;
+  listAppCenterInstallations(input?: AppCenterInstallationQuery): MaybePromise<AppCenterInstallation[]>;
+  upsertAppCenterInstallation(input: AppCenterInstallationInput): MaybePromise<AppCenterInstallation>;
   listDnsPolicies(): MaybePromise<DnsPolicy[]>;
   getEffectiveDnsPolicy(appId?: string | null): MaybePromise<DnsPolicy>;
   evaluateDnsQuery(input: DnsQueryInput): MaybePromise<DnsResolutionDecision>;

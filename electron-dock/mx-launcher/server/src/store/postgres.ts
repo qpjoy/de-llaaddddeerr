@@ -12,6 +12,9 @@ import type {
   AppCenterAccessInput,
   AppCenterApp,
   AppCenterAppInput,
+  AppCenterInstallation,
+  AppCenterInstallationInput,
+  AppCenterInstallationQuery,
   AppOnboardingDefaults,
   AppOnboardingDefaultsInput,
   AppOnboardingTemplate,
@@ -130,6 +133,7 @@ import {
   buildAppOnboardingDefaults,
   buildAppOnboardingTemplates,
   buildAppCenterApp,
+  buildAppCenterInstallation,
   builtinLauncherProductNetworks,
   buildLauncherProductNetwork,
   buildAwxProviderConfig,
@@ -181,6 +185,7 @@ import {
   evaluateCoreDnsConfigMapApplyGate,
   evaluateGatewayConfigMapApplyGate,
   evaluateAppCenterAccess,
+  appCenterInstallationMatchesQuery,
   gatewayRuntimeConfigRequestInput,
   gatewayRuntimeConfigForInput,
   evaluateSdkGatewayRoute,
@@ -267,6 +272,7 @@ type RecordKind =
   | 'runtime-feature-policy'
   | 'awx-provider-config'
   | 'app-center-app'
+  | 'app-center-installation'
   | 'permission-grant'
   | 'launcher-network-snapshot'
   | 'test-run'
@@ -1992,6 +1998,40 @@ export class PostgresStore implements PlatformStore {
       }
     });
     return true;
+  }
+
+  async listAppCenterInstallations(input: AppCenterInstallationQuery = {}): Promise<AppCenterInstallation[]> {
+    return (await this.listRecords<AppCenterInstallation>('app-center-installation'))
+      .filter((installation) => appCenterInstallationMatchesQuery(installation, input))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  async upsertAppCenterInstallation(input: AppCenterInstallationInput): Promise<AppCenterInstallation> {
+    const draft = buildAppCenterInstallation(input, null);
+    const app = await this.getAppCenterApp(draft.appId);
+    if (!app) throw new Error(`AppCenter app ${draft.appId} is not registered`);
+    const previous = await this.getRecord<AppCenterInstallation>('app-center-installation', draft.installationId);
+    const installation = buildAppCenterInstallation(input, app, previous);
+    await this.saveRecord('app-center-installation', installation.installationId, installation, this.config.siteId);
+    await this.recordAudit({
+      eventType: previous ? 'app-center.installation.updated' : 'app-center.installation.created',
+      actorKind: 'app-center',
+      userId: installation.userId,
+      installId: installation.installId,
+      deviceId: installation.deviceId,
+      productId: installation.appId,
+      metadata: {
+        requestedBy: input.requestedBy?.trim() || 'desktop-appcenter',
+        sourceAppId: installation.sourceAppId,
+        packageName: installation.packageName,
+        installedVersion: installation.installedVersion,
+        latestVersion: installation.latestVersion,
+        status: installation.status,
+        runtimeState: installation.runtimeState,
+        installSource: installation.installSource
+      }
+    });
+    return installation;
   }
 
   async listDnsPolicies(): Promise<DnsPolicy[]> {

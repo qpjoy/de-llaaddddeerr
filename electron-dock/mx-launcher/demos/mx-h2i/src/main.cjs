@@ -306,10 +306,15 @@ function registerIpc() {
     runtime.apps.appcenter.runtimeState = 'ready';
     runtime.apps.appcenter.lastAction = nowIso();
     pushAppLog('appcenter', 'info', 'AppCenter builtin runtime is ready.');
+    const installReport = await reportAppCenterInstallation(runtime.apps.appcenter, 'install-appcenter');
+    const warnings = [
+      catalogSync.ok === false ? `远程应用目录同步失败：${catalogSync.message}` : null,
+      installReport.ok === false ? `安装状态同步失败：${installReport.message}` : null
+    ].filter(Boolean);
     runtime.feedback = {
-      tone: catalogSync.ok === false ? 'warning' : 'success',
-      message: catalogSync.ok === false
-        ? `AppCenter 已安装，本地缓存已就绪；远程应用目录同步失败：${catalogSync.message}`
+      tone: warnings.length ? 'warning' : 'success',
+      message: warnings.length
+        ? `AppCenter 已安装，本地缓存已就绪；${warnings.join('；')}`
         : `AppCenter 已安装，已同步 ${catalogSync.count} 个应用目录记录。`
     };
     touchRuntime('appcenter installed');
@@ -334,13 +339,21 @@ function registerIpc() {
         enabled: true,
         status: 'enabled',
         runtimeState: 'ready',
+        runtime: h2oPluginRuntime({
+          ...runtime.apps.h2o.runtime,
+          running: false,
+          status: 'ready'
+        }),
         lastAction: nowIso(),
         errorMessage: null
       }, runtime.apps.h2o);
       pushAppLog('h2o', 'info', `Installed ${runtime.apps.h2o.packageName} from ${install.installSource}.`);
+      const installReport = await reportAppCenterInstallation(runtime.apps.h2o, 'enable-h2o');
       runtime.feedback = {
-        tone: 'success',
-        message: 'H2O 已安装并启用。'
+        tone: installReport.ok === false ? 'warning' : 'success',
+        message: installReport.ok === false
+          ? `H2O 已安装并启用；安装状态同步失败：${installReport.message}`
+          : 'H2O 已安装并启用。'
       };
       touchRuntime('h2o enabled');
     } catch (error) {
@@ -350,6 +363,7 @@ function registerIpc() {
       runtime.apps.h2o.errorMessage = message;
       runtime.apps.h2o.lastAction = nowIso();
       pushAppLog('h2o', 'error', message);
+      await reportAppCenterInstallation(runtime.apps.h2o, 'enable-h2o-error');
       runtime.feedback = {
         tone: 'warning',
         message: `H2O 安装失败：${message}`
@@ -371,12 +385,83 @@ function registerIpc() {
     runtime.apps.h2o.enabled = true;
     runtime.apps.h2o.status = 'running';
     runtime.apps.h2o.runtimeState = 'running';
+    runtime.apps.h2o.runtime = h2oPluginRuntime({
+      ...runtime.apps.h2o.runtime,
+      running: true,
+      status: 'running',
+      startedAt: runtime.apps.h2o.runtime?.startedAt || nowIso(),
+      lastAppliedAt: nowIso()
+    });
     runtime.apps.h2o.lastAction = nowIso();
+    const installReport = await reportAppCenterInstallation(runtime.apps.h2o, 'launch-h2o');
     runtime.feedback = {
-      tone: 'success',
-      message: 'H2O 运行态已就绪。开发态请从 mx-app-h2o 启动窗口，生产态由 AppCenter package runtime 打开入口。'
+      tone: installReport.ok === false ? 'warning' : 'success',
+      message: installReport.ok === false
+        ? `H2O 运行态已就绪；安装状态同步失败：${installReport.message}`
+        : 'H2O 运行态已就绪。开发态请从 mx-app-h2o 启动窗口，生产态由 AppCenter package runtime 打开入口。'
     };
     touchRuntime('h2o launched');
+    await saveAndBroadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('mx-h2i:stop-h2o', async () => {
+    if (!runtime.apps.h2o.installed) {
+      runtime.feedback = {
+        tone: 'warning',
+        message: 'H2O 尚未安装。'
+      };
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
+    runtime.apps.h2o.enabled = true;
+    runtime.apps.h2o.status = 'enabled';
+    runtime.apps.h2o.runtimeState = 'ready';
+    runtime.apps.h2o.runtime = h2oPluginRuntime({
+      ...runtime.apps.h2o.runtime,
+      running: false,
+      status: 'stopped',
+      startedAt: null,
+      lastAppliedAt: nowIso()
+    });
+    runtime.apps.h2o.lastAction = nowIso();
+    pushAppLog('h2o', 'info', 'H2O runtime stopped from AppCenter.');
+    const installReport = await reportAppCenterInstallation(runtime.apps.h2o, 'stop-h2o');
+    runtime.feedback = {
+      tone: installReport.ok === false ? 'warning' : 'info',
+      message: installReport.ok === false
+        ? `H2O 已停止；安装状态同步失败：${installReport.message}`
+        : 'H2O 已停止，配置和订阅仍保留。'
+    };
+    touchRuntime('h2o stopped');
+    await saveAndBroadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('mx-h2i:set-h2o-mode', async (_event, mode) => {
+    if (!runtime.apps.h2o.installed) {
+      runtime.feedback = {
+        tone: 'warning',
+        message: '请先安装 H2O。'
+      };
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
+    const nextMode = normalizeH2oMode(mode);
+    runtime.apps.h2o.runtime = h2oPluginRuntime({
+      ...runtime.apps.h2o.runtime,
+      mode: nextMode,
+      status: runtime.apps.h2o.runtimeState === 'running' ? 'running' : 'ready',
+      lastAppliedAt: nowIso()
+    });
+    runtime.apps.h2o.lastAction = nowIso();
+    pushAppLog('h2o', 'info', `H2O mode switched to ${nextMode}.`);
+    const installReport = await reportAppCenterInstallation(runtime.apps.h2o, 'set-h2o-mode');
+    runtime.feedback = {
+      tone: installReport.ok === false ? 'warning' : 'success',
+      message: installReport.ok === false
+        ? `H2O 模式已切换；安装状态同步失败：${installReport.message}`
+        : 'H2O 模式已切换。'
+    };
+    touchRuntime('h2o mode changed');
     await saveAndBroadcast();
     return visibleRuntime();
   });
@@ -2545,7 +2630,8 @@ function normalizeApps(input) {
         desktop: 'app://h2o/index.html',
         settings: 'app://h2o/settings.html',
         dev: 'workspace:demos/mx-app-h2o'
-      }
+      },
+      runtime: defaultH2oPluginRuntime()
     })
   };
   for (const [key, value] of Object.entries(row)) {
@@ -2587,6 +2673,7 @@ function normalizeApp(input, defaults) {
     runtimeState: nullableString(row.runtimeState) || (enabled ? 'ready' : installed ? 'installed' : 'idle'),
     entrypoints: normalizeStringRecord(row.entrypoints, defaults.entrypoints || {}),
     manifest: row.manifest && typeof row.manifest === 'object' ? row.manifest : defaults.manifest || null,
+    runtime: normalizeAppRuntime(row.runtime, defaults.runtime),
     errorMessage: nullableString(row.errorMessage),
     logs: normalizeAppLogs(row.logs),
     installed,
@@ -2594,6 +2681,65 @@ function normalizeApp(input, defaults) {
     status: stringValue(row.status, enabled ? 'ready' : installed ? 'installed' : 'available'),
     lastAction: typeof row.lastAction === 'string' ? row.lastAction : null
   };
+}
+
+function normalizeAppRuntime(input, defaults) {
+  if (defaults?.kind === 'h2o-plugin' || input?.kind === 'h2o-plugin') {
+    return h2oPluginRuntime({ ...(defaults || {}), ...(input || {}) });
+  }
+  if (input && typeof input === 'object' && !Array.isArray(input)) return { ...input };
+  if (defaults && typeof defaults === 'object' && !Array.isArray(defaults)) return { ...defaults };
+  return null;
+}
+
+function defaultH2oPluginRuntime() {
+  return h2oPluginRuntime({});
+}
+
+function h2oPluginRuntime(input) {
+  const row = input && typeof input === 'object' ? input : {};
+  const ports = row.ports && typeof row.ports === 'object' ? row.ports : {};
+  const subscription = row.activeSubscription && typeof row.activeSubscription === 'object' ? row.activeSubscription : {};
+  return {
+    kind: 'h2o-plugin',
+    mode: normalizeH2oMode(row.mode),
+    running: row.running === true,
+    status: nullableString(row.status) || (row.running === true ? 'running' : 'stopped'),
+    tunInstalled: row.tunInstalled === true,
+    adminUrl: nullableString(row.adminUrl) || 'http://127.0.0.1:23456',
+    ports: {
+      admin: normalizePort(ports.admin, 23456),
+      controller: normalizePort(ports.controller, 23457),
+      mixed: normalizePort(ports.mixed, 23458),
+      dns: normalizePort(ports.dns, 1053)
+    },
+    activeSubscription: {
+      id: nullableString(subscription.id) || 'h2o-default',
+      name: nullableString(subscription.name) || 'Home To Oversea 默认策略',
+      nodes: normalizeNonNegativeInteger(subscription.nodes, 6),
+      latencyMs: normalizeNonNegativeInteger(subscription.latencyMs, 42)
+    },
+    startedAt: nullableString(row.startedAt),
+    lastAppliedAt: nullableString(row.lastAppliedAt)
+  };
+}
+
+function normalizeH2oMode(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (text === 'rule') return 'app-rule';
+  if (text === 'global') return 'app-global';
+  if (text === 'tun') return 'system-tun';
+  return ['app-rule', 'app-global', 'system-tun', 'direct'].includes(text) ? text : 'app-rule';
+}
+
+function normalizePort(value, fallback) {
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback;
+}
+
+function normalizeNonNegativeInteger(value, fallback) {
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0 ? number : fallback;
 }
 
 function defaultAppRecordFor(input, fallbackAppId) {
@@ -2651,6 +2797,9 @@ async function syncAppCenterCatalog(reason) {
     params.set('sourceAppId', PRODUCT_ID);
     const userId = appCenterCatalogUserId();
     if (userId) params.set('userId', userId);
+    const identity = appCenterInstallationIdentity();
+    if (identity.installId) params.set('installId', identity.installId);
+    if (identity.deviceId) params.set('deviceId', identity.deviceId);
     const pathName = `/internal/v1/app-center/apps?${params.toString()}`;
     const payload = await requestJson(joinApiUrl(baseUrl, pathName), {
       timeoutMs: 4500,
@@ -2675,6 +2824,9 @@ function mergeAppCenterCatalogApps(remoteApps) {
     const appId = nullableString(remote.appId);
     if (!appId) continue;
     const local = next[appId] || {};
+    const installation = normalizeRemoteInstallation(remote.installation);
+    const installationStatus = nullableString(installation?.status);
+    const installationInstalledVersion = nullableString(installation?.installedVersion);
     const entrypoints = {
       ...(local.entrypoints || {}),
       ...normalizeStringRecord(remote.entrypoints, {})
@@ -2682,18 +2834,18 @@ function mergeAppCenterCatalogApps(remoteApps) {
     const merged = {
       ...remote,
       appId,
-      latestVersion: nullableString(remote.latestVersion) || nullableString(remote.version) || nullableString(local.latestVersion) || nullableString(local.version),
-      installSource: nullableString(local.installSource) || nullableString(remote.installSource) || (remote.builtin === true ? 'builtin' : 'npm'),
-      installPath: nullableString(local.installPath) || nullableString(remote.installPath),
-      installed: local.installed === true,
-      enabled: local.enabled === true,
-      installedVersion: nullableString(local.installedVersion),
-      installedAt: nullableString(local.installedAt),
-      runtimeState: nullableString(local.runtimeState) || 'idle',
-      status: nullableString(local.status) || (remote.enabled === false ? 'disabled' : 'available'),
+      latestVersion: nullableString(installation?.latestVersion) || nullableString(remote.latestVersion) || nullableString(remote.version) || nullableString(local.latestVersion) || nullableString(local.version),
+      installSource: nullableString(installation?.installSource) || nullableString(local.installSource) || nullableString(remote.installSource) || (remote.builtin === true ? 'builtin' : 'npm'),
+      installPath: nullableString(installation?.installPath) || nullableString(local.installPath) || nullableString(remote.installPath),
+      installed: installation ? appInstallationIsInstalled(installation) : local.installed === true,
+      enabled: installation ? appInstallationIsEnabled(installation) || local.enabled === true : local.enabled === true,
+      installedVersion: installationInstalledVersion || nullableString(local.installedVersion),
+      installedAt: nullableString(installation?.installedAt) || nullableString(local.installedAt),
+      runtimeState: nullableString(installation?.runtimeState) || nullableString(local.runtimeState) || 'idle',
+      status: installationStatus || nullableString(local.status) || (remote.enabled === false ? 'disabled' : 'available'),
       lastAction: nullableString(local.lastAction),
       logs: local.logs || [],
-      errorMessage: nullableString(local.errorMessage),
+      errorMessage: nullableString(installation?.errorMessage) || nullableString(local.errorMessage),
       entrypoints
     };
     next[appId] = normalizeApp(merged, defaultAppRecordFor({ ...remote, entrypoints }, appId));
@@ -2714,10 +2866,101 @@ function appCenterCatalogHeaders() {
   return { authorization: `${type} ${token}` };
 }
 
+function appCenterInstallationIdentity() {
+  return {
+    installId: nullableString(runtime?.installation?.installId),
+    deviceId: nullableString(runtime?.installation?.deviceId)
+  };
+}
+
 function appCenterCatalogUserId() {
   return parseUserIdFromSubject(runtime?.auth?.subject)
     || nullableString(runtime?.identity?.account)
     || null;
+}
+
+async function reportAppCenterInstallation(appRecord, eventName) {
+  try {
+    const appId = nullableString(appRecord?.appId);
+    if (!appId) return { ok: false, message: '缺少 appId' };
+    const baseUrl = appCenterCatalogBaseUrl();
+    if (!baseUrl) return { ok: false, message: 'Internal API baseUrl 为空' };
+    const identity = appCenterInstallationIdentity();
+    const status = nullableString(appRecord.status) || (appRecord.enabled ? 'enabled' : appRecord.installed ? 'installed' : 'not-installed');
+    const installedVersion = nullableString(appRecord.installedVersion)
+      || (appRecordStatusImpliesInstalled(status) ? nullableString(appRecord.version) : null);
+    const payload = await requestJson(joinApiUrl(baseUrl, `/internal/v1/app-center/apps/${encodeURIComponent(appId)}/installations`), {
+      method: 'POST',
+      timeoutMs: 4500,
+      headers: appCenterCatalogHeaders(),
+      body: {
+        appId,
+        installId: identity.installId,
+        deviceId: identity.deviceId,
+        userId: appCenterCatalogUserId(),
+        sourceAppId: PRODUCT_ID,
+        packageName: nullableString(appRecord.packageName),
+        installedVersion,
+        latestVersion: nullableString(appRecord.latestVersion) || nullableString(appRecord.version),
+        status,
+        runtimeState: nullableString(appRecord.runtimeState),
+        installSource: nullableString(appRecord.installSource),
+        installPath: nullableString(appRecord.installPath),
+        manifest: appRecord.manifest && typeof appRecord.manifest === 'object' ? appRecord.manifest : null,
+        installedAt: nullableString(appRecord.installedAt),
+        errorMessage: nullableString(appRecord.errorMessage),
+        metadata: {
+          event: eventName,
+          launcherMode: nullableString(appRecord.launcherMode),
+          standaloneChannelProductId: nullableString(appRecord.standaloneChannelProductId),
+          updatePolicy: nullableString(appRecord.updatePolicy)
+        },
+        requestedBy: 'mx-h2i'
+      }
+    });
+    const installation = normalizeRemoteInstallation(payload?.installation);
+    if (installation) {
+      applyAppCenterInstallationState(appRecord, installation);
+      pushAppLog(appId, 'info', `Installation state synced: ${installation.status || 'unknown'} ${installation.installedVersion || ''}`.trim());
+    }
+    return { ok: true, message: '', installation };
+  } catch (error) {
+    const message = errorMessage(error);
+    const appId = nullableString(appRecord?.appId);
+    if (appId) pushAppLog(appId, 'warning', `Installation state sync failed (${eventName}): ${message}`);
+    return { ok: false, message };
+  }
+}
+
+function normalizeRemoteInstallation(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+function applyAppCenterInstallationState(appRecord, installation) {
+  if (!appRecord || !installation) return;
+  appRecord.latestVersion = nullableString(installation.latestVersion) || appRecord.latestVersion;
+  appRecord.installedVersion = nullableString(installation.installedVersion) || appRecord.installedVersion;
+  appRecord.installedAt = nullableString(installation.installedAt) || appRecord.installedAt;
+  appRecord.installSource = nullableString(installation.installSource) || appRecord.installSource;
+  appRecord.installPath = nullableString(installation.installPath) || appRecord.installPath;
+  appRecord.runtimeState = nullableString(installation.runtimeState) || appRecord.runtimeState;
+  appRecord.status = nullableString(installation.status) || appRecord.status;
+  appRecord.installed = appInstallationIsInstalled(installation);
+  appRecord.enabled = appInstallationIsEnabled(installation) || appRecord.enabled === true;
+  appRecord.errorMessage = nullableString(installation.errorMessage) || (appRecord.status === 'error' ? appRecord.errorMessage : null);
+}
+
+function appInstallationIsInstalled(installation) {
+  const status = nullableString(installation?.status);
+  return appRecordStatusImpliesInstalled(status) || Boolean(nullableString(installation?.installedVersion));
+}
+
+function appInstallationIsEnabled(installation) {
+  return ['enabled', 'ready', 'running'].includes(nullableString(installation?.status));
+}
+
+function appRecordStatusImpliesInstalled(status) {
+  return ['installed', 'enabled', 'ready', 'running'].includes(nullableString(status));
 }
 
 async function installAppPackage(appRecord) {

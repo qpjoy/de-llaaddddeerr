@@ -2,14 +2,25 @@
   "name": "@qpjoy/electron-launcher-app-h2o",
   "productName": "MX-H2I H2O",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "author": "QPJoy",
   "description": "Home To Oversea embed network plugin for MX-H2I AppCenter.",
+  "license": "UNLICENSED",
   "main": "src/main.cjs",
+  "files": [
+    "README.md",
+    "package.json",
+    "src"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
+    "build": "pnpm run check",
     "dev": "electron .",
     "start": "pnpm dev",
-    "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js"
+    "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js",
+    "prepack": "pnpm run check"
   },
   "dependencies": {
     "@qpjoy/electron-launcher": "workspace:*"

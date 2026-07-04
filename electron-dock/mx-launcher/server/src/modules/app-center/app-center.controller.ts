@@ -2,7 +2,7 @@ import { BadRequestException, Body, Controller, Delete, Get, Inject, NotFoundExc
 
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
-import type { AppCenterAppInput, AppOnboardingDefaultsInput } from '../../types.js';
+import type { AppCenterApp, AppCenterAppInput, AppCenterInstallation, AppCenterInstallationInput, AppOnboardingDefaultsInput } from '../../types.js';
 
 @Controller('internal/v1/app-center')
 export class AppCenterController {
@@ -12,16 +12,30 @@ export class AppCenterController {
   async listApps(
     @Query('userId') userId?: string,
     @Query('sourceAppId') sourceAppId?: string,
+    @Query('installId') installId?: string,
+    @Query('deviceId') deviceId?: string,
     @Query('includeHidden') includeHidden?: string,
     @Query('includeDisabled') includeDisabled?: string
   ) {
+    const accessContext = {
+      userId: nullableQuery(userId),
+      sourceAppId: nullableQuery(sourceAppId),
+      includeHidden: booleanQuery(includeHidden),
+      includeDisabled: booleanQuery(includeDisabled)
+    };
+    const apps = await this.store.listAppCenterApps(accessContext);
+    const installationQuery = {
+      appId: null,
+      userId: accessContext.userId,
+      sourceAppId: accessContext.sourceAppId,
+      installId: nullableQuery(installId),
+      deviceId: nullableQuery(deviceId)
+    };
+    const installations = installationQuery.installId || installationQuery.deviceId || installationQuery.userId
+      ? await this.store.listAppCenterInstallations(installationQuery)
+      : [];
     return {
-      apps: await this.store.listAppCenterApps({
-        userId: nullableQuery(userId),
-        sourceAppId: nullableQuery(sourceAppId),
-        includeHidden: booleanQuery(includeHidden),
-        includeDisabled: booleanQuery(includeDisabled)
-      })
+      apps: attachInstallations(apps, installations)
     };
   }
 
@@ -52,6 +66,36 @@ export class AppCenterController {
     return { app: await this.store.upsertAppCenterApp({ ...(body || {}), appId }) };
   }
 
+  @Get('installations')
+  async listInstallations(
+    @Query('appId') appId?: string,
+    @Query('userId') userId?: string,
+    @Query('sourceAppId') sourceAppId?: string,
+    @Query('installId') installId?: string,
+    @Query('deviceId') deviceId?: string,
+    @Query('packageName') packageName?: string
+  ) {
+    return {
+      installations: await this.store.listAppCenterInstallations({
+        appId: nullableQuery(appId),
+        userId: nullableQuery(userId),
+        sourceAppId: nullableQuery(sourceAppId),
+        installId: nullableQuery(installId),
+        deviceId: nullableQuery(deviceId),
+        packageName: nullableQuery(packageName)
+      })
+    };
+  }
+
+  @Post('apps/:appId/installations')
+  async reportInstallation(@Param('appId') appId: string, @Body() body: AppCenterInstallationInput) {
+    try {
+      return { installation: await this.store.upsertAppCenterInstallation({ ...(body || {}), appId }) };
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'AppCenter installation cannot be recorded');
+    }
+  }
+
   @Delete('apps/:appId')
   async deleteApp(@Param('appId') appId: string) {
     try {
@@ -72,4 +116,32 @@ function nullableQuery(value: string | undefined): string | null {
 function booleanQuery(value: string | undefined): boolean | null {
   if (value === undefined) return null;
   return value === '1' || value.toLowerCase() === 'true';
+}
+
+function attachInstallations(apps: AppCenterApp[], installations: AppCenterInstallation[]) {
+  const byAppId = new Map<string, AppCenterInstallation>();
+  for (const installation of installations) {
+    if (!byAppId.has(installation.appId)) byAppId.set(installation.appId, installation);
+  }
+  return apps.map((app) => {
+    const installation = byAppId.get(app.appId);
+    if (!installation) return app;
+    return {
+      ...app,
+      latestVersion: installation.latestVersion || app.version,
+      installed: installationIsInstalled(installation),
+      installedVersion: installation.installedVersion,
+      installedAt: installation.installedAt,
+      installSource: installation.installSource,
+      installPath: installation.installPath,
+      runtimeState: installation.runtimeState,
+      status: installation.status,
+      errorMessage: installation.errorMessage,
+      installation
+    };
+  });
+}
+
+function installationIsInstalled(installation: AppCenterInstallation): boolean {
+  return ['installed', 'enabled', 'ready', 'running'].includes(installation.status) || Boolean(installation.installedVersion);
 }

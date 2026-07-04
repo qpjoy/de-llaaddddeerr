@@ -14,6 +14,7 @@ const H2O_REQUIRED_CAPABILITIES = [
   'network.pac.policy',
   'app-center-runtime'
 ];
+const H2O_MODES = ['app-rule', 'app-global', 'system-tun', 'direct'];
 
 let mainWindow = null;
 let launcher = null;
@@ -41,11 +42,28 @@ let runtime = {
     missingCapabilities: []
   },
   policy: {
-    mode: 'rule',
+    mode: 'app-rule',
     pac: 'dynamic-split',
     dns: 'internal-first',
-    proxyPort: 2053,
+    proxyPort: 23458,
     profile: 'home-to-oversea'
+  },
+  engine: {
+    running: false,
+    status: 'stopped',
+    mode: 'app-rule',
+    tunInstalled: false,
+    activeSubscriptionId: 'h2o-default',
+    startedAt: null,
+    adminUrl: 'http://127.0.0.1:23456',
+    core: 'h2o-shim',
+    coreVersion: '0.1.0'
+  },
+  ports: {
+    admin: 23456,
+    controller: 23457,
+    mixed: 23458,
+    dns: 1053
   },
   network: {
     localIp: null,
@@ -54,11 +72,27 @@ let runtime = {
     splitDns: 'pending',
     pac: 'pending'
   },
-  rules: [
-    { id: 'internal-api', host: 'api.mxinfo-inc.cn', target: '10.88.88.88', policy: 'internal-direct' },
-    { id: 'appcenter', host: 'appcenter.mxinfo-inc.cn', target: 'mx-h2i broker', policy: 'broker-session' },
-    { id: 'oversea-default', host: '*.oversea', target: 'system proxy', policy: 'home-to-oversea' }
+  subscriptions: [
+    {
+      id: 'h2o-default',
+      name: 'Home To Oversea 默认策略',
+      url: 'mx-h2i://managed/home-to-oversea',
+      nodes: 6,
+      latencyMs: 42,
+      status: 'ready',
+      lastUpdatedAt: new Date().toISOString()
+    }
   ],
+  rules: [
+    { id: 'internal-api', host: 'api.mxinfo-inc.cn', target: '10.88.88.88', policy: 'internal-direct', enabled: true, source: 'builtin' },
+    { id: 'appcenter', host: 'appcenter.mxinfo-inc.cn', target: 'mx-h2i broker', policy: 'broker-session', enabled: true, source: 'builtin' },
+    { id: 'oversea-default', host: '*.oversea', target: 'system proxy', policy: 'home-to-oversea', enabled: true, source: 'managed' }
+  ],
+  metrics: {
+    uploadBytes: 0,
+    downloadBytes: 0,
+    lastProxyAppliedAt: null
+  },
   activity: [],
   updatedAt: new Date().toISOString()
 };
@@ -121,9 +155,108 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('h2o:set-mode', async (_event, mode) => {
-    runtime.policy.mode = ['rule', 'global', 'direct'].includes(mode) ? mode : 'rule';
-    pushActivity('policy.mode', `Mode switched to ${runtime.policy.mode}`);
-    await requestBroker('network.proxy', { mode: runtime.policy.mode });
+    const nextMode = normalizeH2oMode(mode);
+    runtime.policy.mode = nextMode;
+    runtime.engine.mode = nextMode;
+    runtime.engine.status = nextMode === 'system-tun' && !runtime.engine.tunInstalled
+      ? 'tun-required'
+      : runtime.engine.running
+        ? 'running'
+        : 'ready';
+    pushActivity('policy.mode', `Mode switched to ${modeLabel(nextMode)}`);
+    if (runtime.engine.running) {
+      await applyProxyPolicy('mode-switch');
+    }
+    broadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('h2o:start-runtime', async () => {
+    await startRuntime();
+    return visibleRuntime();
+  });
+  ipcMain.handle('h2o:stop-runtime', async () => {
+    runtime.engine.running = false;
+    runtime.engine.status = 'stopped';
+    runtime.engine.startedAt = null;
+    pushActivity('runtime.stop', 'H2O proxy runtime stopped.');
+    await requestBroker('network.proxy', { mode: 'direct', reason: 'h2o-stop' });
+    broadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('h2o:install-tun', async () => {
+    runtime.engine.tunInstalled = true;
+    runtime.engine.status = runtime.engine.running ? 'running' : 'ready';
+    pushActivity('tun.install', 'System TUN helper marked as installed for this demo runtime.');
+    broadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('h2o:uninstall-tun', async () => {
+    runtime.engine.tunInstalled = false;
+    if (runtime.policy.mode === 'system-tun') {
+      runtime.policy.mode = 'app-rule';
+      runtime.engine.mode = 'app-rule';
+    }
+    runtime.engine.status = runtime.engine.running ? 'running' : 'ready';
+    pushActivity('tun.uninstall', 'System TUN helper removed; mode fell back to App rule.');
+    broadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('h2o:set-ports', async (_event, input) => {
+    const next = input && typeof input === 'object' ? input : {};
+    runtime.ports = {
+      admin: normalizePort(next.admin, runtime.ports.admin),
+      controller: normalizePort(next.controller, runtime.ports.controller),
+      mixed: normalizePort(next.mixed, runtime.ports.mixed),
+      dns: normalizePort(next.dns, runtime.ports.dns)
+    };
+    runtime.policy.proxyPort = runtime.ports.mixed;
+    runtime.engine.adminUrl = `http://127.0.0.1:${runtime.ports.admin}`;
+    pushActivity('ports.save', `Ports saved: mixed ${runtime.ports.mixed}, dns ${runtime.ports.dns}.`);
+    broadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('h2o:add-subscription', async (_event, input) => {
+    const row = input && typeof input === 'object' ? input : {};
+    const name = String(row.name || 'Managed subscription').trim().slice(0, 80) || 'Managed subscription';
+    const url = String(row.url || 'mx-h2i://managed/custom').trim().slice(0, 240) || 'mx-h2i://managed/custom';
+    const id = `sub-${Date.now().toString(36)}`;
+    runtime.subscriptions = [
+      { id, name, url, nodes: 3, latencyMs: 58, status: 'ready', lastUpdatedAt: new Date().toISOString() },
+      ...runtime.subscriptions
+    ].slice(0, 12);
+    runtime.engine.activeSubscriptionId = id;
+    pushActivity('subscription.add', `Subscription added: ${name}.`);
+    broadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('h2o:set-active-subscription', async (_event, subscriptionId) => {
+    const id = String(subscriptionId || '');
+    if (runtime.subscriptions.some((item) => item.id === id)) {
+      runtime.engine.activeSubscriptionId = id;
+      pushActivity('subscription.active', `Active subscription switched to ${activeSubscription()?.name || id}.`);
+    }
+    broadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('h2o:refresh-subscription', async (_event, subscriptionId) => {
+    const id = String(subscriptionId || runtime.engine.activeSubscriptionId || '');
+    runtime.subscriptions = runtime.subscriptions.map((item) => item.id === id
+      ? {
+          ...item,
+          latencyMs: 30 + Math.floor(Math.random() * 60),
+          status: 'ready',
+          lastUpdatedAt: new Date().toISOString()
+        }
+      : item);
+    pushActivity('subscription.refresh', `Subscription refreshed: ${activeSubscription()?.name || id}.`);
+    broadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('h2o:toggle-rule', async (_event, ruleId) => {
+    const id = String(ruleId || '');
+    runtime.rules = runtime.rules.map((rule) => rule.id === id ? { ...rule, enabled: rule.enabled === false } : rule);
+    const rule = runtime.rules.find((item) => item.id === id);
+    if (rule) pushActivity('rule.toggle', `${rule.host} ${rule.enabled ? 'enabled' : 'disabled'}.`);
     broadcast();
     return visibleRuntime();
   });
@@ -247,7 +380,8 @@ async function brokerRequest(_session, name, payload) {
     return {
       ok: true,
       mode: payload && payload.mode ? payload.mode : runtime.policy.mode,
-      mixedPort: runtime.policy.proxyPort,
+      mixedPort: runtime.ports.mixed,
+      dnsPort: runtime.ports.dns,
       profile: runtime.policy.profile,
       appliedAt: new Date().toISOString()
     };
@@ -259,6 +393,70 @@ async function brokerRequest(_session, name, payload) {
     return { ok: true, userId: 'developer', roles: ['mx-h2i-dev'] };
   }
   return { ok: true, name, echo: payload || null };
+}
+
+async function startRuntime() {
+  const nextMode = normalizeH2oMode(runtime.policy.mode);
+  runtime.policy.mode = nextMode;
+  runtime.engine.mode = nextMode;
+  if (nextMode === 'system-tun' && !runtime.engine.tunInstalled) {
+    runtime.engine.running = false;
+    runtime.engine.status = 'tun-required';
+    pushActivity('runtime.blocked', 'System TUN mode requires installing the TUN helper first.', 'warning');
+    broadcast();
+    return;
+  }
+  runtime.engine.running = true;
+  runtime.engine.status = 'running';
+  runtime.engine.startedAt = runtime.engine.startedAt || new Date().toISOString();
+  runtime.metrics.lastProxyAppliedAt = new Date().toISOString();
+  runtime.metrics.downloadBytes += 1024 * (4 + Math.floor(Math.random() * 24));
+  runtime.metrics.uploadBytes += 512 * (2 + Math.floor(Math.random() * 10));
+  pushActivity('runtime.start', `H2O started in ${modeLabel(nextMode)} with ${activeSubscription()?.name || 'no subscription'}.`);
+  await applyProxyPolicy('runtime-start');
+  broadcast();
+}
+
+async function applyProxyPolicy(reason) {
+  const result = await requestBroker('network.proxy', {
+    mode: runtime.policy.mode,
+    mixedPort: runtime.ports.mixed,
+    dnsPort: runtime.ports.dns,
+    profile: runtime.policy.profile,
+    subscriptionId: runtime.engine.activeSubscriptionId,
+    reason
+  });
+  runtime.metrics.lastProxyAppliedAt = new Date().toISOString();
+  if (result?.ok === false) {
+    runtime.engine.status = 'error';
+    pushActivity('broker.proxy.failed', result.message || 'Broker rejected proxy policy.', 'error');
+  } else {
+    pushActivity('broker.proxy.applied', `Proxy policy applied by MX-H2I broker (${reason}).`);
+  }
+}
+
+function activeSubscription() {
+  return runtime.subscriptions.find((item) => item.id === runtime.engine.activeSubscriptionId) || runtime.subscriptions[0] || null;
+}
+
+function normalizeH2oMode(mode) {
+  const value = String(mode || '').trim();
+  if (value === 'rule') return 'app-rule';
+  if (value === 'global') return 'app-global';
+  if (value === 'tun') return 'system-tun';
+  return H2O_MODES.includes(value) ? value : 'app-rule';
+}
+
+function normalizePort(value, fallback) {
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback;
+}
+
+function modeLabel(mode) {
+  if (mode === 'app-global') return '全局模式';
+  if (mode === 'system-tun') return '虚拟网卡';
+  if (mode === 'direct') return '直连';
+  return '规则模式';
 }
 
 function devChannelRegistry(mod) {
@@ -305,9 +503,9 @@ function serializeBrokerResult(result) {
   };
 }
 
-function pushActivity(type, message) {
+function pushActivity(type, message, level = 'info') {
   runtime.activity = [
-    { type, message, at: new Date().toISOString() },
+    { type, message, level, at: new Date().toISOString() },
     ...runtime.activity
   ].slice(0, 12);
   runtime.updatedAt = new Date().toISOString();

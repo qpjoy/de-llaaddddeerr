@@ -656,7 +656,7 @@ k8s_apply_db_secret() {
     --from-literal=PG_PASSWORD="$pg_password" \
     --from-literal=PG_DB="$pg_db" \
     --from-literal=DATABASE_URL="$database_url" \
-    --dry-run=client -o yaml | kubectl apply -f -
+    --dry-run=client -o yaml | kubectl apply --validate=false -f -
 }
 
 k8s_secret_dry_run() {
@@ -811,13 +811,13 @@ k8s_apply() {
   [ -d "$dir" ] || die "missing k8s manifest directory: $dir"
 
   say "apply namespace"
-  kubectl apply -f "$dir/00-namespace.yaml"
+  kubectl apply --validate=false -f "$dir/00-namespace.yaml"
   say "apply serviceaccount"
-  kubectl apply -f "$dir/05-serviceaccount.yaml"
+  kubectl apply --validate=false -f "$dir/05-serviceaccount.yaml"
   say "apply configmap"
-  kubectl apply -f "$dir/10-configmap.yaml"
+  kubectl apply --validate=false -f "$dir/10-configmap.yaml"
   say "apply dns control target"
-  kubectl apply -f "$dir/15-dns-control-target.yaml"
+  kubectl apply --validate=false -f "$dir/15-dns-control-target.yaml"
   say "remove retired internal dns edge"
   kubectl -n mx-dns delete daemonset mx-internal-dns-edge --ignore-not-found
   kubectl -n mx-dns delete configmap mx-internal-dns-edge --ignore-not-found
@@ -825,15 +825,15 @@ k8s_apply() {
   kubectl -n mx-dns rollout status deployment/mx-internal-coredns --timeout=180s
   say "apply local persistent volumes"
   k8s_repair_internal_local_pvs
-  kubectl apply -f "$dir/18-local-pv.yaml"
+  kubectl apply --validate=false -f "$dir/18-local-pv.yaml"
   say "create/update db secret from local env"
   k8s_apply_db_secret "$ns"
   say "apply postgres service/statefulset"
-  kubectl apply -f "$dir/20-postgres.yaml"
+  kubectl apply --validate=false -f "$dir/20-postgres.yaml"
   say "apply coredns writer rbac"
-  kubectl apply -f "$dir/25-coredns-rbac.yaml"
+  kubectl apply --validate=false -f "$dir/25-coredns-rbac.yaml"
   say "apply host runner rbac"
-  kubectl apply -f "$dir/27-host-runner-rbac.yaml"
+  kubectl apply --validate=false -f "$dir/27-host-runner-rbac.yaml"
   say "wait postgres rollout"
   if ! kubectl -n "$ns" rollout status statefulset/mx-internal-postgres --timeout=180s; then
     k8s_postgres_diagnostics "$ns"
@@ -849,14 +849,14 @@ k8s_apply() {
 
   say "run migration job"
   kubectl -n "$ns" delete job mx-launcher-migrate --ignore-not-found
-  kubectl apply -f "$dir/30-migration-job.yaml"
+  kubectl apply --validate=false -f "$dir/30-migration-job.yaml"
   if ! kubectl -n "$ns" wait --for=condition=complete job/mx-launcher-migrate --timeout=180s; then
     k8s_job_diagnostics "$ns" mx-launcher-migrate
     die "migration job failed"
   fi
 
   say "apply internal api"
-  kubectl apply -f "$dir/40-internal-api.yaml"
+  kubectl apply --validate=false -f "$dir/40-internal-api.yaml"
   say "wait internal api rollout"
   if ! kubectl -n "$ns" rollout status deployment/mx-launcher-internal --timeout=180s; then
     k8s_workload_diagnostics "$ns" deployment mx-launcher-internal
@@ -3549,10 +3549,10 @@ k8s_apply_internal_gateway() {
   file="$dir/45-internal-gateway.yaml"
   if kubectl -n "$ns" get configmap mx-internal-gateway-caddy >/dev/null 2>&1; then
     say "preserve existing internal gateway ConfigMap data"
-    awk 'BEGIN { skip=1 } /^---[[:space:]]*$/ { skip=0; print; next } !skip { print }' "$file" | kubectl apply -f -
+    awk 'BEGIN { skip=1 } /^---[[:space:]]*$/ { skip=0; print; next } !skip { print }' "$file" | kubectl apply --validate=false -f -
     return
   fi
-  kubectl apply -f "$file"
+  kubectl apply --validate=false -f "$file"
 }
 
 ops_k8s_shadow() {

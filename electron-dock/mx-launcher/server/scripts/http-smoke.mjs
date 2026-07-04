@@ -61,6 +61,69 @@ const checks = [
     }
   },
   {
+    name: 'app-center h2o installation report',
+    path: '/internal/v1/app-center/apps/h2o/installations',
+    method: 'POST',
+    body: {
+      installId: 'http-smoke-install',
+      deviceId: 'http-smoke-device',
+      userId: 'usr_demo_admin',
+      sourceAppId: 'mx-h2i',
+      packageName: '@qpjoy/electron-launcher-app-h2o',
+      installedVersion: '0.1.0',
+      latestVersion: '0.1.0',
+      status: 'running',
+      runtimeState: 'running',
+      installSource: 'workspace',
+      installPath: 'workspace:demos/mx-app-h2o',
+      manifest: {
+        appId: 'h2o',
+        productId: 'h2o',
+        packageName: '@qpjoy/electron-launcher-app-h2o',
+        launcherMode: 'embed',
+        runtimeContractVersion: '0.1',
+        requiredCapabilities: ['user.session', 'network.proxy', 'app-center-runtime'],
+        network: { scope: 'broker-session' },
+        embed: { standaloneChannelProductId: 'mx-h2i', launchWithoutBroker: 'blocked' }
+      },
+      metadata: { event: 'http-smoke' },
+      requestedBy: 'http-smoke'
+    },
+    assert: (body) => {
+      state.h2oInstallationId = body?.installation?.installationId;
+      return typeof state.h2oInstallationId === 'string'
+        && body?.installation?.appId === 'h2o'
+        && body?.installation?.installId === 'http-smoke-install'
+        && body?.installation?.deviceId === 'http-smoke-device'
+        && body?.installation?.sourceAppId === 'mx-h2i'
+        && body?.installation?.installedVersion === '0.1.0'
+        && body?.installation?.latestVersion === '0.1.0'
+        && body?.installation?.status === 'running'
+        && body?.installation?.manifest?.embed?.standaloneChannelProductId === 'mx-h2i';
+    }
+  },
+  {
+    name: 'app-center h2o installation query',
+    path: '/internal/v1/app-center/installations?appId=h2o&installId=http-smoke-install&deviceId=http-smoke-device',
+    assert: (body) => Array.isArray(body?.installations)
+      && body.installations.some((installation) => installation?.installationId === state.h2oInstallationId
+        && installation?.packageName === '@qpjoy/electron-launcher-app-h2o'
+        && installation?.runtimeState === 'running')
+  },
+  {
+    name: 'app-center apps include h2o installed state',
+    path: '/internal/v1/app-center/apps?installId=http-smoke-install&deviceId=http-smoke-device',
+    assert: (body) => {
+      const h2o = Array.isArray(body?.apps) ? body.apps.find((app) => app?.appId === 'h2o') : null;
+      return h2o?.installed === true
+        && h2o?.installedVersion === '0.1.0'
+        && h2o?.latestVersion === '0.1.0'
+        && h2o?.status === 'running'
+        && h2o?.runtimeState === 'running'
+        && h2o?.installation?.installationId === state.h2oInstallationId;
+    }
+  },
+  {
     name: 'sdk gateway manifest',
     path: '/internal/v1/sdk/gateway/manifest',
     assert: (body) => Array.isArray(body?.gateway?.routes)

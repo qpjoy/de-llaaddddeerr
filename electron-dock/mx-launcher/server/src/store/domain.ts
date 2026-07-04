@@ -9,6 +9,10 @@ import type {
   AppCenterApp,
   AppCenterAppManifest,
   AppCenterAppInput,
+  AppCenterInstallation,
+  AppCenterInstallationInput,
+  AppCenterInstallationQuery,
+  AppCenterInstallationStatus,
   AppOnboardingDefaults,
   AppOnboardingDefaultsInput,
   AppOnboardingTemplate,
@@ -970,6 +974,101 @@ export function buildAppCenterApp(
       launcher: input.protocol?.launcher?.trim() || previous?.protocol?.launcher || '1.0'
     }
   };
+}
+
+export function buildAppCenterInstallation(
+  input: AppCenterInstallationInput,
+  app: AppCenterApp | null,
+  previous: AppCenterInstallation | null = null,
+  now = new Date().toISOString()
+): AppCenterInstallation {
+  const appId = normalizeOptionalAppId(input.appId) || app?.appId || previous?.appId || 'app';
+  const installId = nullableTrimmed(input.installId) ?? previous?.installId ?? null;
+  const deviceId = nullableTrimmed(input.deviceId) ?? previous?.deviceId ?? null;
+  const userId = nullableTrimmed(input.userId) ?? previous?.userId ?? null;
+  const sourceAppId = normalizeOptionalAppId(input.sourceAppId) ?? previous?.sourceAppId ?? null;
+  const scopeId = installId || deviceId || userId || sourceAppId || 'global';
+  const installationId = previous?.installationId || `appinst_${safeIdPart(appId).toLowerCase()}_${safeIdPart(scopeId).toLowerCase()}`;
+  const manifest = appCenterInstallationManifest(input.manifest, app, previous);
+  const status = appCenterInstallationStatus(
+    input.status,
+    previous?.status ?? (input.installedVersion ? 'installed' : 'not-installed')
+  );
+  return {
+    installationId,
+    appId,
+    installId,
+    deviceId,
+    userId,
+    sourceAppId,
+    packageName: nullableTrimmed(input.packageName) || app?.packageName || previous?.packageName || null,
+    installedVersion: nullableTrimmed(input.installedVersion) ?? previous?.installedVersion ?? null,
+    latestVersion: nullableTrimmed(input.latestVersion) || app?.version || previous?.latestVersion || null,
+    status,
+    runtimeState: nullableTrimmed(input.runtimeState) ?? previous?.runtimeState ?? null,
+    installSource: nullableTrimmed(input.installSource) ?? previous?.installSource ?? null,
+    installPath: nullableTrimmed(input.installPath) ?? previous?.installPath ?? null,
+    manifest,
+    manifestDigest: nullableTrimmed(input.manifestDigest) ?? previous?.manifestDigest ?? (manifest ? shortDigest(JSON.stringify(manifest)) : null),
+    installedAt: nullableTrimmed(input.installedAt) ?? previous?.installedAt ?? null,
+    lastSeenAt: nullableTrimmed(input.lastSeenAt) || now,
+    errorMessage: nullableTrimmed(input.errorMessage) ?? previous?.errorMessage ?? null,
+    metadata: {
+      ...(previous?.metadata ?? {}),
+      ...recordValue(input.metadata)
+    },
+    createdAt: previous?.createdAt || now,
+    updatedAt: now
+  };
+}
+
+export function appCenterInstallationMatchesQuery(
+  installation: AppCenterInstallation,
+  input: AppCenterInstallationQuery = {}
+): boolean {
+  const appId = normalizeOptionalAppId(input.appId);
+  if (appId && installation.appId !== appId) return false;
+  const sourceAppId = normalizeOptionalAppId(input.sourceAppId);
+  if (sourceAppId && installation.sourceAppId !== sourceAppId) return false;
+  const installId = nullableTrimmed(input.installId);
+  if (installId && installation.installId !== installId) return false;
+  const deviceId = nullableTrimmed(input.deviceId);
+  if (deviceId && installation.deviceId !== deviceId) return false;
+  const userId = nullableTrimmed(input.userId);
+  if (userId && installation.userId !== userId) return false;
+  const packageName = nullableTrimmed(input.packageName);
+  if (packageName && installation.packageName !== packageName) return false;
+  return true;
+}
+
+function appCenterInstallationManifest(
+  input: AppCenterInstallationInput['manifest'],
+  app: AppCenterApp | null,
+  previous: AppCenterInstallation | null
+): AppCenterAppManifest | Record<string, unknown> | null {
+  if (input && typeof input === 'object' && !Array.isArray(input)) return { ...input } as Record<string, unknown>;
+  if (app?.manifest) return app.manifest;
+  return previous?.manifest ?? null;
+}
+
+function appCenterInstallationStatus(
+  value: AppCenterInstallationInput['status'],
+  fallback: AppCenterInstallationStatus
+): AppCenterInstallationStatus {
+  switch (String(value || '').trim()) {
+    case 'available':
+    case 'not-installed':
+    case 'installing':
+    case 'installed':
+    case 'enabled':
+    case 'ready':
+    case 'running':
+    case 'error':
+    case 'disabled':
+      return String(value).trim() as AppCenterInstallationStatus;
+    default:
+      return fallback;
+  }
 }
 
 function normalizeAppCenterAccessPolicy(

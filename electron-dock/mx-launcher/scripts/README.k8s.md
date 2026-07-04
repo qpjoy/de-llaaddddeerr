@@ -2,7 +2,7 @@
 # 设置硬盘pressure大小
 K8S_KUBELET_EVICTION_NODEFS_AVAILABLE=20Gi \
   K8S_KUBELET_EVICTION_IMAGEFS_AVAILABLE=20Gi \
-  bash scripts/install-k8s-centos.sh --skip-init --skip-flannel --skip-firewall --advertise-address 192.168.31.121
+  bash scripts/install-k8s-centos.sh --skip-init --skip-flannel --skip-firewall
 
 # 查看硬盘pressure大小
 grep -n '^evictionHard:' -A6 /var/lib/kubelet/config.yaml
