@@ -22,6 +22,10 @@ K8S_DISABLE_SWAP="${K8S_DISABLE_SWAP:-1}"
 K8S_SET_SELINUX_PERMISSIVE="${K8S_SET_SELINUX_PERMISSIVE:-1}"
 K8S_INSTALL_FLANNEL="${K8S_INSTALL_FLANNEL:-1}"
 K8S_UNTAINT_CONTROL_PLANE="${K8S_UNTAINT_CONTROL_PLANE:-1}"
+K8S_CONFIGURE_NO_PROXY="${K8S_CONFIGURE_NO_PROXY:-1}"
+K8S_CLEAN_STALE_CONTROL_PLANE="${K8S_CLEAN_STALE_CONTROL_PLANE:-1}"
+K8S_REINIT="${K8S_REINIT:-0}"
+K8S_REINIT_BACKUP_ROOT="${K8S_REINIT_BACKUP_ROOT:-/data/mx-backup}"
 K8S_ALLOW_CGROUP_V1="${K8S_ALLOW_CGROUP_V1:-auto}"
 K8S_CONFIGURE_KUBELET_EVICTION="${K8S_CONFIGURE_KUBELET_EVICTION:-1}"
 K8S_KUBELET_EVICTION_MEMORY_AVAILABLE="${K8S_KUBELET_EVICTION_MEMORY_AVAILABLE:-100Mi}"
@@ -56,6 +60,7 @@ Options:
   --skip-eviction-tuning   Do not tune kubelet DiskPressure hard eviction thresholds.
   --allow-cgroup-v1        Let kubeadm/kubelet run on cgroups v1 hosts.
   --no-cgroup-v1           Fail instead of applying cgroups v1 compatibility.
+  --reinit                 Reset and recreate kubeadm control plane. Preserves /var/lib/mx-launcher.
   --deploy-mx              After K8s is ready, run ops internal-production deploy.
   --mx-root DIR            mx-launcher root. Default: this script's parent dir.
   --dry-run                Print steps without changing the host.
@@ -77,6 +82,10 @@ Environment:
   K8S_SET_SELINUX_PERMISSIVE=0
   K8S_INSTALL_FLANNEL=0
   K8S_UNTAINT_CONTROL_PLANE=0
+  K8S_CONFIGURE_NO_PROXY=1
+  K8S_CLEAN_STALE_CONTROL_PLANE=1
+  K8S_REINIT=0
+  K8S_REINIT_BACKUP_ROOT=/data/mx-backup
   K8S_ALLOW_CGROUP_V1=auto|1|0
   K8S_CONFIGURE_KUBELET_EVICTION=1
   K8S_KUBELET_EVICTION_MEMORY_AVAILABLE=100Mi
@@ -135,6 +144,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-cgroup-v1)
       K8S_ALLOW_CGROUP_V1=0
+      shift
+      ;;
+    --reinit|--force-reinit)
+      K8S_REINIT=1
       shift
       ;;
     --deploy-mx)
@@ -335,6 +348,41 @@ configure_hostname_resolution() {
   fi
 }
 
+append_no_proxy_entries() {
+  local current entries result entry
+  local no_proxy_parts=()
+  current="${1:-}"
+  entries="$2"
+  result="$current"
+  IFS=',' read -r -a no_proxy_parts <<<"$entries"
+  for entry in "${no_proxy_parts[@]}"; do
+    [ -n "$entry" ] || continue
+    case ",$result," in
+      *",$entry,"*) ;;
+      *)
+        if [ -n "$result" ]; then
+          result="$result,$entry"
+        else
+          result="$entry"
+        fi
+        ;;
+    esac
+  done
+  printf '%s\n' "$result"
+}
+
+configure_proxy_bypass() {
+  [ "$K8S_CONFIGURE_NO_PROXY" = "1" ] || return 0
+  resolve_advertise_address
+  local entries
+  entries="localhost,127.0.0.1,::1,$K8S_APISERVER_ADVERTISE_ADDRESS,$POD_CIDR,$SERVICE_CIDR,192.168.0.0/16,.svc,.cluster.local,kubernetes.default.svc,kubernetes.default.svc.cluster.local"
+  export NO_PROXY
+  export no_proxy
+  NO_PROXY="$(append_no_proxy_entries "${NO_PROXY:-}" "$entries")"
+  no_proxy="$(append_no_proxy_entries "${no_proxy:-}" "$entries")"
+  say "NO_PROXY includes Kubernetes local ranges"
+}
+
 configure_selinux() {
   [ "$K8S_SET_SELINUX_PERMISSIVE" = "1" ] || return 0
   say "set SELinux to permissive for kubeadm"
@@ -525,6 +573,98 @@ prepull_kubeadm_images() {
     --cri-socket "$CRI_SOCKET"
 }
 
+kubeadm_control_plane_listener_pids() {
+  command -v ss >/dev/null 2>&1 || return 0
+  ss -H -lntp 2>/dev/null \
+    | awk '$4 ~ /:(6443|10259|10257|2379|2380)$/ {print}' \
+    | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' \
+    | sort -u
+}
+
+terminate_control_plane_listeners() {
+  local pids remaining
+  pids="$(kubeadm_control_plane_listener_pids | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)"
+  [ -n "$pids" ] || return 0
+  say "terminate stale kubeadm control-plane listeners: $pids"
+  if [ "$DRY_RUN" = "1" ]; then
+    say "would terminate stale control-plane listener PIDs: $pids"
+    return 0
+  fi
+  kill -TERM $pids 2>/dev/null || true
+  sleep 3
+  remaining="$(kubeadm_control_plane_listener_pids | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)"
+  if [ -n "$remaining" ]; then
+    say "force cleanup stale control-plane listener PIDs: $remaining"
+    kill -KILL $remaining 2>/dev/null || true
+    sleep 1
+  fi
+}
+
+cleanup_stale_control_plane_listeners() {
+  [ "$K8S_CLEAN_STALE_CONTROL_PLANE" = "1" ] || return 0
+  [ "$SKIP_INIT" = "0" ] || return 0
+  [ ! -f /etc/kubernetes/admin.conf ] || return 0
+  [ -n "$(kubeadm_control_plane_listener_pids | head -n 1 || true)" ] || return 0
+  say "cleanup stale kubeadm control-plane after reset"
+  run_allow_fail systemctl stop kubelet
+  run_allow_fail kubeadm reset -f
+  terminate_control_plane_listeners
+}
+
+backup_reinit_path() {
+  local source="$1"
+  local target="$2"
+  [ -e "$source" ] || return 0
+  if [ "$DRY_RUN" = "1" ]; then
+    say "would backup $source to $target"
+    return 0
+  fi
+  cp -a "$source" "$target"
+}
+
+reset_or_empty_reinit_path() {
+  local path="$1"
+  local backup_name="$2"
+  local stamp="$3"
+  [ -e "$path" ] || {
+    run mkdir -p "$path"
+    return 0
+  }
+  if findmnt -r "$path" >/dev/null 2>&1; then
+    say "empty mounted path for reinit: $path"
+    if [ "$DRY_RUN" = "1" ]; then
+      say "would remove children under mounted path $path"
+    else
+      find "$path" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+    fi
+    mkdir -p "$path"
+    return 0
+  fi
+  run_allow_fail mv "$path" "${path}.before-reinit-$stamp"
+  run mkdir -p "$path"
+  say "moved old $backup_name to ${path}.before-reinit-$stamp"
+}
+
+reinit_cluster_state() {
+  [ "$K8S_REINIT" = "1" ] || return 0
+  [ "$SKIP_INIT" = "0" ] || return 0
+  local stamp backup_dir
+  stamp="$(date +%Y%m%d%H%M%S)"
+  backup_dir="${K8S_REINIT_BACKUP_ROOT%/}/$stamp"
+  say "reinitialize kubeadm cluster; backup control-plane state to $backup_dir"
+  run mkdir -p "$backup_dir"
+  backup_reinit_path /etc/kubernetes "$backup_dir/kubernetes-conf"
+  backup_reinit_path /var/lib/etcd "$backup_dir/etcd-old-cluster-backup"
+  run_allow_fail systemctl stop kubelet
+  run_allow_fail kubeadm reset -f
+  terminate_control_plane_listeners
+  reset_or_empty_reinit_path /etc/kubernetes kubernetes "$stamp"
+  reset_or_empty_reinit_path /var/lib/etcd etcd "$stamp"
+  run rm -rf /etc/cni/net.d /run/flannel /var/lib/cni
+  run_allow_fail ip link delete cni0
+  run_allow_fail ip link delete flannel.1
+}
+
 init_cluster() {
   [ "$SKIP_INIT" = "0" ] || return 0
   if [ -f /etc/kubernetes/admin.conf ]; then
@@ -646,10 +786,13 @@ main() {
   configure_kernel_networking
   configure_containerd
   configure_hostname_resolution
+  configure_proxy_bypass
   configure_selinux
   install_kubernetes_packages
   configure_kubelet_eviction
   configure_firewall
+  reinit_cluster_state
+  cleanup_stale_control_plane_listeners
   prepull_kubeadm_images
   init_cluster
   install_flannel

@@ -30,6 +30,12 @@ bash scripts/install-k8s-centos.sh \
   --allow-cgroup-v1 \
   --image-repository registry.aliyuncs.com/google_containers
 
+# 重新初始化K8s
+POD_CIDR=192.168.224.0/20 \
+SERVICE_CIDR=192.168.240.0/20 \
+K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel \
+bash scripts/install-k8s-centos.sh --advertise-address 192.168.1.4 --allow-cgroup-v1
+
 # local test
 bash scripts/manage.sh ops k8s-shadow cycle
 bash scripts/manage.sh ops internal-local port-forward

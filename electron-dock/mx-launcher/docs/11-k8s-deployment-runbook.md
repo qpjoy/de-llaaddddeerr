@@ -388,15 +388,39 @@ systemctl enable --now docker || true
 重新初始化集群并部署 MX：
 
 ```bash
+export NO_PROXY="${NO_PROXY:-},localhost,127.0.0.1,::1,192.168.1.4,192.168.0.0/16,192.168.224.0/20,192.168.240.0/20,.svc,.cluster.local"
+export no_proxy="$NO_PROXY"
+
 POD_CIDR=192.168.224.0/20 \
 SERVICE_CIDR=192.168.240.0/20 \
 K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel \
-bash scripts/install-k8s-centos.sh --advertise-address 192.168.1.4 --allow-cgroup-v1
+bash scripts/install-k8s-centos.sh --advertise-address 192.168.1.4 --allow-cgroup-v1 --reinit
 
 MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.4 \
 MX_SHADOW_BUILDKIT_KEEP_STORAGE=2GB \
 MX_SHADOW_BUILDKIT_PRUNE_UNTIL=24h \
 bash scripts/manage.sh ops internal-production deploy
+```
+
+`--reinit` 会备份旧 `/etc/kubernetes` 和 `/var/lib/etcd` 到 `/data/mx-backup/<timestamp>`，
+停止 kubelet，执行 `kubeadm reset`，清理旧控制面监听端口和 CNI 残留，然后重新初始化。
+它不会删除 `/var/lib/mx-launcher`，因此 MX 的 hostPath/PVC 数据仍会被后续 deploy 复用。
+
+如果 `kubeadm init` 仍报 `Port-6443`、`Port-10259`、`Port-10257`、`Port-2379`
+或 `Port-2380` in use，说明 reset 后旧控制面静态 Pod 仍在监听。可以手动清掉这些旧监听再重试：
+
+```bash
+systemctl stop kubelet || true
+kubeadm reset -f || true
+ss -lntp | egrep ':(6443|10259|10257|2379|2380)\b' || true
+pids="$(ss -H -lntp 2>/dev/null \
+  | awk '$4 ~ /:(6443|10259|10257|2379|2380)$/ {print}' \
+  | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' \
+  | sort -u \
+  | tr '\n' ' ')"
+[ -n "$pids" ] && kill -TERM $pids || true
+sleep 3
+ss -lntp | egrep ':(6443|10259|10257|2379|2380)\b' || true
 ```
 
 确认 `kubectl get nodes -o wide`、`bash scripts/manage.sh ops internal-production status` 和
