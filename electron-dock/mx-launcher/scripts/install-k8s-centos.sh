@@ -26,6 +26,9 @@ K8S_CONFIGURE_NO_PROXY="${K8S_CONFIGURE_NO_PROXY:-1}"
 K8S_CLEAN_STALE_CONTROL_PLANE="${K8S_CLEAN_STALE_CONTROL_PLANE:-1}"
 K8S_REINIT="${K8S_REINIT:-0}"
 K8S_REINIT_BACKUP_ROOT="${K8S_REINIT_BACKUP_ROOT:-/data/mx-backup}"
+K8S_FLANNEL_SUBNET_TIMEOUT="${K8S_FLANNEL_SUBNET_TIMEOUT:-120s}"
+K8S_NODE_READY_TIMEOUT="${K8S_NODE_READY_TIMEOUT:-300s}"
+K8S_NODE_READY_RETRY_TIMEOUT="${K8S_NODE_READY_RETRY_TIMEOUT:-180s}"
 K8S_ALLOW_CGROUP_V1="${K8S_ALLOW_CGROUP_V1:-auto}"
 K8S_CONFIGURE_KUBELET_EVICTION="${K8S_CONFIGURE_KUBELET_EVICTION:-1}"
 K8S_KUBELET_EVICTION_MEMORY_AVAILABLE="${K8S_KUBELET_EVICTION_MEMORY_AVAILABLE:-100Mi}"
@@ -86,6 +89,9 @@ Environment:
   K8S_CLEAN_STALE_CONTROL_PLANE=1
   K8S_REINIT=0
   K8S_REINIT_BACKUP_ROOT=/data/mx-backup
+  K8S_FLANNEL_SUBNET_TIMEOUT=120s
+  K8S_NODE_READY_TIMEOUT=300s
+  K8S_NODE_READY_RETRY_TIMEOUT=180s
   K8S_ALLOW_CGROUP_V1=auto|1|0
   K8S_CONFIGURE_KUBELET_EVICTION=1
   K8S_KUBELET_EVICTION_MEMORY_AVAILABLE=100Mi
@@ -746,12 +752,77 @@ configure_firewall() {
   run firewall-cmd --reload
 }
 
+duration_to_seconds() {
+  local value="$1"
+  case "$value" in
+    *s) printf '%s\n' "${value%s}" ;;
+    *m) printf '%s\n' "$(( ${value%m} * 60 ))" ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
+
+wait_for_flannel_subnet_env() {
+  [ "$SKIP_INIT" = "0" ] || return 0
+  if [ "$DRY_RUN" = "1" ]; then
+    say "would wait for /run/flannel/subnet.env"
+    return 0
+  fi
+  local timeout seconds attempts i
+  timeout="$K8S_FLANNEL_SUBNET_TIMEOUT"
+  seconds="$(duration_to_seconds "$timeout")"
+  attempts="$(( seconds / 2 ))"
+  [ "$attempts" -gt 0 ] || attempts=1
+  say "wait for Flannel subnet env"
+  for i in $(seq 1 "$attempts"); do
+    if [ -s /run/flannel/subnet.env ]; then
+      say "Flannel subnet env is ready"
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+cluster_bootstrap_diagnostics() {
+  say "diagnostics: nodes"
+  kubectl get nodes -o wide || true
+  kubectl describe nodes || true
+  say "diagnostics: kube-system pods"
+  kubectl -n kube-system get pods -o wide || true
+  kubectl -n kube-system get events --sort-by=.lastTimestamp || true
+  say "diagnostics: kube-flannel"
+  kubectl -n kube-flannel get pods,daemonset,configmap -o wide || true
+  kubectl -n kube-flannel describe daemonset kube-flannel-ds || true
+  kubectl -n kube-flannel logs -l app=flannel --all-containers --tail=160 || true
+  say "diagnostics: local CNI files"
+  ls -la /etc/cni/net.d 2>/dev/null || true
+  ls -la /run/flannel 2>/dev/null || true
+  [ -f /run/flannel/subnet.env ] && cat /run/flannel/subnet.env || true
+  say "diagnostics: kubelet"
+  systemctl status kubelet --no-pager || true
+  journalctl -u kubelet -n 160 --no-pager || true
+}
+
 wait_for_cluster() {
   [ "$SKIP_INIT" = "0" ] || return 0
   say "wait for Flannel rollout"
-  run_allow_fail kubectl -n kube-flannel rollout status daemonset/kube-flannel-ds --timeout=300s
+  if ! run kubectl -n kube-flannel rollout status daemonset/kube-flannel-ds --timeout=300s; then
+    cluster_bootstrap_diagnostics
+    die "Flannel rollout failed"
+  fi
+  if ! wait_for_flannel_subnet_env; then
+    cluster_bootstrap_diagnostics
+    die "Flannel did not create /run/flannel/subnet.env"
+  fi
   say "wait for node readiness"
-  run_allow_fail kubectl wait --for=condition=Ready node --all --timeout=300s
+  if ! run kubectl wait --for=condition=Ready node --all --timeout="$K8S_NODE_READY_TIMEOUT"; then
+    say "node not ready yet; restart kubelet once after CNI installation"
+    run_allow_fail systemctl restart kubelet
+    if ! run kubectl wait --for=condition=Ready node --all --timeout="$K8S_NODE_READY_RETRY_TIMEOUT"; then
+      cluster_bootstrap_diagnostics
+      die "Kubernetes node did not become Ready"
+    fi
+  fi
   run kubectl get nodes -o wide
   run kubectl -n kube-system get pods -o wide
 }

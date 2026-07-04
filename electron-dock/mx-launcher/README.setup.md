@@ -31,10 +31,33 @@ bash scripts/install-k8s-centos.sh \
   --image-repository registry.aliyuncs.com/google_containers
 
 # 重新初始化K8s
+# --reinit 会做这些事：
+# 备份旧 /etc/kubernetes 到 /data/mx-backup/<timestamp>/kubernetes-conf
+# 备份旧 /var/lib/etcd 到 /data/mx-backup/<timestamp>/etcd-old-cluster-backup
+# 停止 kubelet
+# 执行 kubeadm reset -f
+# 清掉还占用 6443/10259/10257/2379/2380 的旧控制面进程
+# 清理 /etc/cni/net.d、/run/flannel、/var/lib/cni、cni0、flannel.1
+# 重新 kubeadm init
+# 安装 Flannel，并把 Flannel Network patch 成 192.168.224.0/20
+# 它不会删除 /var/lib/mx-launcher，所以 MX 的 PVC/Postgres/site-slots 数据还会留着给后续 deploy 使用。
 POD_CIDR=192.168.224.0/20 \
 SERVICE_CIDR=192.168.240.0/20 \
 K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel \
-bash scripts/install-k8s-centos.sh --advertise-address 192.168.1.4 --allow-cgroup-v1
+bash scripts/install-k8s-centos.sh --advertise-address 192.168.1.4 --allow-cgroup-v1 --reinit
+
+# 重新部署 MX：
+MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.4 \
+MX_SHADOW_BUILDKIT_KEEP_STORAGE=2GB \
+MX_SHADOW_BUILDKIT_PRUNE_UNTIL=24h \
+bash scripts/manage.sh ops internal-production deploy
+# 检查：
+kubectl -n mx-internal-shadow get pods,svc,pvc -o wide
+kubectl -n mx-dns get pods,svc -o wide
+bash scripts/manage.sh ops internal-production status
+curl -fsS http://127.0.0.1:18090/healthz
+
+
 
 # local test
 bash scripts/manage.sh ops k8s-shadow cycle

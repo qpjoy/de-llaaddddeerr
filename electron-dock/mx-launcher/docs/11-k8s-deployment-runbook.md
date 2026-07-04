@@ -423,6 +423,27 @@ sleep 3
 ss -lntp | egrep ':(6443|10259|10257|2379|2380)\b' || true
 ```
 
+如果 Flannel rollout 已成功但 node 仍是 `NotReady`，通常是 kubelet 还没有重新识别
+CNI 文件或 `/run/flannel/subnet.env`。先重启 kubelet，再看 node 条件：
+
+```bash
+ls -la /etc/cni/net.d /run/flannel
+cat /run/flannel/subnet.env
+systemctl restart kubelet
+kubectl wait --for=condition=Ready node --all --timeout=180s
+kubectl get nodes -o wide
+kubectl -n kube-system get pods -o wide
+```
+
+如果仍未 Ready，保留这些诊断输出再排查：
+
+```bash
+kubectl describe node mx-internal-server
+kubectl -n kube-flannel get pods,daemonset,configmap -o wide
+kubectl -n kube-flannel logs -l app=flannel --all-containers --tail=160
+journalctl -u kubelet -n 160 --no-pager
+```
+
 确认 `kubectl get nodes -o wide`、`bash scripts/manage.sh ops internal-production status` 和
 `curl -fsS http://127.0.0.1:18090/healthz` 正常后，再删除旧运行时目录释放根分区空间：
 
