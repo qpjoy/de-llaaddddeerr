@@ -1382,7 +1382,8 @@ k8s_apply_db_secret() {
   local pg_user="${PG_USER:-mx_internal}"
   local pg_password="${PG_PASSWORD:-mx_internal}"
   local pg_db="${PG_DB:-mx_internal_shadow}"
-  local database_url="${DATABASE_URL:-postgres://${pg_user}:${pg_password}@mx-internal-postgres:5432/${pg_db}}"
+  local database_host="${DATABASE_HOST:-mx-internal-postgres.${ns}.svc.cluster.local}"
+  local database_url="${DATABASE_URL:-postgres://${pg_user}:${pg_password}@${database_host}:5432/${pg_db}}"
   kubectl -n "$ns" create secret generic mx-launcher-db \
     --from-literal=PG_USER="$pg_user" \
     --from-literal=PG_PASSWORD="$pg_password" \
@@ -1396,7 +1397,8 @@ k8s_secret_dry_run() {
   local pg_user="${PG_USER:-mx_internal}"
   local pg_password="${PG_PASSWORD:-mx_internal}"
   local pg_db="${PG_DB:-mx_internal_shadow}"
-  local database_url="${DATABASE_URL:-postgres://${pg_user}:${pg_password}@mx-internal-postgres:5432/${pg_db}}"
+  local database_host="${DATABASE_HOST:-mx-internal-postgres.${ns}.svc.cluster.local}"
+  local database_url="${DATABASE_URL:-postgres://${pg_user}:${pg_password}@${database_host}:5432/${pg_db}}"
   kubectl -n "$ns" create secret generic mx-launcher-db \
     --from-literal=PG_USER="$pg_user" \
     --from-literal=PG_PASSWORD="$pg_password" \
@@ -1435,6 +1437,27 @@ k8s_node_disk_pressure_report() {
   say "recent namespace events"
   kubectl -n "$ns" get events --sort-by=.lastTimestamp | tail -n 80 || true
   return 0
+}
+
+k8s_postgres_service_ready() {
+  local ns="$1"
+  local attempts="${2:-60}"
+  local endpoints slices i
+  say "wait postgres service DNS target"
+  for i in $(seq 1 "$attempts"); do
+    if ! kubectl -n "$ns" get service mx-internal-postgres >/dev/null 2>&1; then
+      sleep 2
+      continue
+    fi
+    endpoints="$(kubectl -n "$ns" get endpoints mx-internal-postgres -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)"
+    slices="$(kubectl -n "$ns" get endpointslices -l kubernetes.io/service-name=mx-internal-postgres -o jsonpath='{range .items[*].endpoints[*]}{.addresses[*]}{" "}{end}' 2>/dev/null || true)"
+    if [ -n "$endpoints$slices" ]; then
+      say "postgres service has endpoint: ${endpoints:-$slices}"
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
 }
 
 k8s_repair_released_local_pv() {
@@ -1482,6 +1505,12 @@ k8s_job_diagnostics() {
   selector="$(kubectl -n "$ns" get job "$job" -o jsonpath='{.spec.selector.matchLabels}' 2>/dev/null || true)"
   [ -n "$pod_selector" ] && say "$job diagnostics: pod selector $pod_selector"
   [ -n "$selector" ] && say "$job diagnostics: selector $selector"
+  say "$job diagnostics: postgres service and endpoints"
+  kubectl -n "$ns" get service,endpoints,endpointslices -l app.kubernetes.io/name=mx-internal-postgres -o wide || true
+  kubectl -n "$ns" get service mx-internal-postgres -o wide || true
+  kubectl -n "$ns" get endpoints mx-internal-postgres -o wide || true
+  kubectl -n kube-system get service kube-dns -o wide || true
+  kubectl -n kube-system get pods -l k8s-app=kube-dns -o wide || true
   say "$job diagnostics: recent namespace events"
   kubectl -n "$ns" get events --sort-by=.lastTimestamp || true
 }
@@ -1709,6 +1738,10 @@ k8s_apply() {
   if ! k8s_rollout_status "$ns" statefulset mx-internal-postgres 180s; then
     k8s_postgres_diagnostics "$ns"
     die "postgres rollout failed"
+  fi
+  if ! k8s_postgres_service_ready "$ns" "${MX_K8S_POSTGRES_SERVICE_WAIT_ATTEMPTS:-60}"; then
+    k8s_postgres_diagnostics "$ns"
+    die "postgres service endpoints not ready"
   fi
 
   say "check node disk pressure before migration"

@@ -23,6 +23,49 @@ spec:
         - key: node-role.kubernetes.io/master
           operator: Exists
           effect: NoSchedule
+      initContainers:
+        - name: wait-postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -ec
+            - |
+              short_host="mx-internal-postgres"
+              fqdn_host="mx-internal-postgres.mx-internal-shadow.svc.cluster.local"
+              until getent hosts "$short_host" || getent hosts "$fqdn_host"; do
+                echo "waiting for postgres DNS: ${short_host} / ${fqdn_host}"
+                sleep 2
+              done
+              until pg_isready -h "$fqdn_host" -p 5432 -U "$PG_USER" -d "$PG_DB"; do
+                echo "waiting for postgres readiness: ${fqdn_host}:5432"
+                sleep 2
+              done
+          env:
+            - name: PG_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mx-launcher-db
+                  key: PG_USER
+            - name: PG_DB
+              valueFrom:
+                secretKeyRef:
+                  name: mx-launcher-db
+                  key: PG_DB
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mx-launcher-db
+                  key: PG_PASSWORD
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+              ephemeral-storage: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+              ephemeral-storage: 128Mi
       containers:
         - name: migrate
           image: qpjoy/mx-launcher-server:shadow
