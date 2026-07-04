@@ -187,6 +187,237 @@ need_kubectl() {
   command -v kubectl >/dev/null 2>&1 || die "kubectl is required for k8s actions"
 }
 
+k8s_detect_lan_ip() {
+  if [ -n "${MX_K8S_APISERVER_ADVERTISE_ADDRESS:-}" ]; then
+    echo "$MX_K8S_APISERVER_ADVERTISE_ADDRESS"
+    return
+  fi
+  if [ -n "${K8S_APISERVER_ADVERTISE_ADDRESS:-}" ]; then
+    echo "$K8S_APISERVER_ADVERTISE_ADDRESS"
+    return
+  fi
+  if command -v ip >/dev/null 2>&1; then
+    ip -4 route get "${MX_K8S_LAN_PROBE_IP:-1.1.1.1}" 2>/dev/null \
+      | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}'
+    return
+  fi
+  if command -v hostname >/dev/null 2>&1; then
+    hostname -I 2>/dev/null | awk '{print $1; exit}'
+  fi
+}
+
+k8s_is_usable_lan_ip() {
+  case "$1" in
+    ""|0.*|127.*|169.254.*)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+k8s_kubeadm_endpoint_files() {
+  local home_dir="${HOME:-}"
+  local candidates=(
+    /root/.kube/config
+    /etc/kubernetes/admin.conf
+    /etc/kubernetes/super-admin.conf
+    /etc/kubernetes/kubelet.conf
+    /etc/kubernetes/controller-manager.conf
+    /etc/kubernetes/scheduler.conf
+    /etc/kubernetes/manifests/kube-apiserver.yaml
+    /etc/kubernetes/manifests/etcd.yaml
+    /etc/kubernetes/manifests/kube-controller-manager.yaml
+    /etc/kubernetes/manifests/kube-scheduler.yaml
+    /var/lib/kubelet/kubeadm-flags.env
+    /etc/sysconfig/kubelet
+    /etc/default/kubelet
+  )
+  local file
+  for file in "${candidates[@]}"; do
+    [ -f "$file" ] && printf '%s\n' "$file"
+  done
+  if [ -n "$home_dir" ] && [ "$home_dir" != "/root" ] && [ -f "$home_dir/.kube/config" ]; then
+    printf '%s\n' "$home_dir/.kube/config"
+  fi
+}
+
+k8s_kubeadm_endpoint_ips() {
+  local file
+  while IFS= read -r file; do
+    grep -Eho \
+      'https://([0-9]{1,3}\.){3}[0-9]{1,3}:(6443|2379|2380)|--advertise-address=([0-9]{1,3}\.){3}[0-9]{1,3}|advertiseAddress:[[:space:]]*([0-9]{1,3}\.){3}[0-9]{1,3}|host:[[:space:]]*([0-9]{1,3}\.){3}[0-9]{1,3}|--node-ip=([0-9]{1,3}\.){3}[0-9]{1,3}' \
+      "$file" 2>/dev/null \
+      | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' || true
+  done < <(k8s_kubeadm_endpoint_files)
+}
+
+k8s_backup_file_to_dir() {
+  local backup_dir="$1"
+  local file="$2"
+  local rel dst
+  rel="${file#/}"
+  dst="$backup_dir/$rel"
+  mkdir -p "$(dirname "$dst")"
+  cp -a "$file" "$dst"
+}
+
+k8s_sed_ip_literal() {
+  printf '%s\n' "$1" | sed 's/\./\\./g'
+}
+
+k8s_apiserver_cert_has_ip() {
+  local ip="$1"
+  k8s_cert_has_ip /etc/kubernetes/pki/apiserver.crt "$ip"
+}
+
+k8s_cert_has_ip() {
+  local cert="$1"
+  local ip="$2"
+  [ -f "$cert" ] || return 1
+  command -v openssl >/dev/null 2>&1 || return 1
+  openssl x509 -in "$cert" -noout -text 2>/dev/null \
+    | grep -q "IP Address:$ip"
+}
+
+k8s_repair_apiserver_cert_if_needed() {
+  local current_ip="$1"
+  local old_ips="$2"
+  local backup_dir="$3"
+  local extra_sans old_ip
+  [ -f /etc/kubernetes/pki/apiserver.crt ] || return 0
+  if k8s_apiserver_cert_has_ip "$current_ip"; then
+    return 0
+  fi
+  command -v kubeadm >/dev/null 2>&1 || {
+    say "apiserver cert does not include $current_ip, but kubeadm is unavailable; skip cert repair"
+    return 0
+  }
+  say "renew apiserver certificate SAN for $current_ip"
+  k8s_backup_file_to_dir "$backup_dir" /etc/kubernetes/pki/apiserver.crt
+  [ -f /etc/kubernetes/pki/apiserver.key ] && k8s_backup_file_to_dir "$backup_dir" /etc/kubernetes/pki/apiserver.key
+  rm -f /etc/kubernetes/pki/apiserver.crt /etc/kubernetes/pki/apiserver.key
+  extra_sans="$current_ip,127.0.0.1,localhost"
+  for old_ip in $old_ips; do
+    extra_sans="$extra_sans,$old_ip"
+  done
+  if ! kubeadm init phase certs apiserver \
+    --apiserver-advertise-address="$current_ip" \
+    --apiserver-cert-extra-sans="$extra_sans"; then
+    cp -a "$backup_dir/etc/kubernetes/pki/apiserver.crt" /etc/kubernetes/pki/apiserver.crt 2>/dev/null || true
+    cp -a "$backup_dir/etc/kubernetes/pki/apiserver.key" /etc/kubernetes/pki/apiserver.key 2>/dev/null || true
+    die "failed to renew apiserver certificate; restored previous certificate from $backup_dir"
+  fi
+}
+
+k8s_repair_etcd_cert_phase_if_needed() {
+  local phase="$1"
+  local cert="$2"
+  local key="$3"
+  local current_ip="$4"
+  local backup_dir="$5"
+  [ -f "$cert" ] || return 0
+  if k8s_cert_has_ip "$cert" "$current_ip"; then
+    return 0
+  fi
+  command -v kubeadm >/dev/null 2>&1 || {
+    say "$phase cert does not include $current_ip, but kubeadm is unavailable; skip cert repair"
+    return 0
+  }
+  say "renew $phase certificate SAN for $current_ip"
+  k8s_backup_file_to_dir "$backup_dir" "$cert"
+  [ -f "$key" ] && k8s_backup_file_to_dir "$backup_dir" "$key"
+  rm -f "$cert" "$key"
+  if ! kubeadm init phase certs "$phase" --apiserver-advertise-address="$current_ip"; then
+    cp -a "$backup_dir/${cert#/}" "$cert" 2>/dev/null || true
+    cp -a "$backup_dir/${key#/}" "$key" 2>/dev/null || true
+    die "failed to renew $phase certificate; restored previous certificate from $backup_dir"
+  fi
+}
+
+k8s_repair_etcd_certs_if_needed() {
+  local current_ip="$1"
+  local backup_dir="$2"
+  [ -f /etc/kubernetes/manifests/etcd.yaml ] || return 0
+  k8s_repair_etcd_cert_phase_if_needed \
+    etcd-server \
+    /etc/kubernetes/pki/etcd/server.crt \
+    /etc/kubernetes/pki/etcd/server.key \
+    "$current_ip" \
+    "$backup_dir"
+  k8s_repair_etcd_cert_phase_if_needed \
+    etcd-peer \
+    /etc/kubernetes/pki/etcd/peer.crt \
+    /etc/kubernetes/pki/etcd/peer.key \
+    "$current_ip" \
+    "$backup_dir"
+}
+
+k8s_wait_apiserver_after_endpoint_repair() {
+  local current_ip="$1"
+  local attempts="${MX_K8S_APISERVER_REPAIR_WAIT_ATTEMPTS:-60}"
+  local i
+  say "wait kube-apiserver on $current_ip:6443"
+  for i in $(seq 1 "$attempts"); do
+    if kubectl --request-timeout=5s get --raw=/version >/dev/null 2>&1; then
+      say "kube-apiserver endpoint is healthy"
+      return 0
+    fi
+    sleep 2
+  done
+  die "kube-apiserver did not become reachable after endpoint repair"
+}
+
+k8s_repair_kubeadm_endpoint() {
+  [ "${MX_K8S_AUTO_REPAIR_KUBEADM_ENDPOINT:-1}" = "1" ] || return 0
+  [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ] || return 0
+  local current_ip old_ips old_ip file escaped_old touched changed backup_dir stamp
+  current_ip="$(k8s_detect_lan_ip | head -n 1)"
+  if ! k8s_is_usable_lan_ip "$current_ip"; then
+    say "skip kubeadm endpoint repair; cannot detect a usable LAN IP"
+    return 0
+  fi
+  old_ips="$(k8s_kubeadm_endpoint_ips \
+    | grep -v -E "^(127\.0\.0\.1|0\.0\.0\.0|${current_ip//./\\.})$" \
+    | sort -u || true)"
+  if [ -z "$old_ips" ]; then
+    return 0
+  fi
+
+  stamp="$(date +%Y%m%d%H%M%S)"
+  backup_dir="/etc/kubernetes/mx-kubeadm-endpoint-repair-$stamp"
+  say "repair kubeadm endpoint IP(s): $(printf '%s' "$old_ips" | tr '\n' ' ') -> $current_ip"
+  say "backup kubeadm files to $backup_dir"
+  mkdir -p "$backup_dir"
+  changed=0
+  while IFS= read -r file; do
+    touched=0
+    for old_ip in $old_ips; do
+      if grep -Fq "$old_ip" "$file" 2>/dev/null; then
+        touched=1
+      fi
+    done
+    [ "$touched" = "1" ] || continue
+    k8s_backup_file_to_dir "$backup_dir" "$file"
+    for old_ip in $old_ips; do
+      escaped_old="$(k8s_sed_ip_literal "$old_ip")"
+      sed -i "s#${escaped_old}#${current_ip}#g" "$file"
+    done
+    changed=1
+    say "updated $file"
+  done < <(k8s_kubeadm_endpoint_files)
+
+  [ "$changed" = "1" ] || return 0
+  k8s_repair_apiserver_cert_if_needed "$current_ip" "$old_ips" "$backup_dir"
+  k8s_repair_etcd_certs_if_needed "$current_ip" "$backup_dir"
+  if command -v systemctl >/dev/null 2>&1; then
+    say "restart kubelet to reload kubeadm static pod manifests"
+    systemctl restart kubelet || say "kubelet restart failed; waiting for static pod reconciliation anyway"
+  fi
+  k8s_wait_apiserver_after_endpoint_repair "$current_ip"
+}
+
 k8s_namespace() {
   case "$1" in
     internal-local|internal-shadow)
@@ -809,6 +1040,7 @@ k8s_apply() {
   dir="$(k8s_manifest_dir "$target")"
   need_kubectl
   [ -d "$dir" ] || die "missing k8s manifest directory: $dir"
+  k8s_repair_kubeadm_endpoint
 
   say "apply namespace"
   kubectl apply --validate=false -f "$dir/00-namespace.yaml"
@@ -3675,6 +3907,10 @@ Notes:
     Docker build.
   - It also preloads postgres/coredns/caddy runtime images through Docker and
     imports them into containerd so Docker proxy/TUN egress can be reused.
+  - On kubeadm Internal hosts, deploy auto-repairs stale LAN IPs in
+    /etc/kubernetes and kubeconfig before the first kubectl apply. Override the
+    detected IP with MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.x.x, or disable
+    this guard with MX_K8S_AUTO_REPAIR_KUBEADM_ENDPOINT=0.
   - Existing mx-internal-gateway-caddy data is preserved during deploy so
     generated gateway routes are not reset to the bootstrap Caddyfile.
   - gateway-smoke is read-only and checks /healthz plus /readyz. Full HTTP
@@ -3701,6 +3937,7 @@ ops_internal_production() {
     deploy|cycle)
       [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops internal-production deploy [gateway-url]"
       ops_internal_production_plan
+      k8s_repair_kubeadm_endpoint
       say "build Internal image"
       MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT="${MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT:-1}"
       shadow_image_build
