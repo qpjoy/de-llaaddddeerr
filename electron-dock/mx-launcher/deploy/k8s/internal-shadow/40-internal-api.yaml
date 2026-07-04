@@ -126,6 +126,11 @@ spec:
                 secretKeyRef:
                   name: mx-launcher-db
                   key: PG_DB
+            - name: DATABASE_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: mx-launcher-db
+                  key: DATABASE_HOST
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:

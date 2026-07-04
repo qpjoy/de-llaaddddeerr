@@ -93,6 +93,19 @@ MX_K8S_IGNORE_DISK_PRESSURE=1 \
   bash scripts/manage.sh ops internal-production deploy
 ```
 
+部署脚本会在 migration 前从集群内探测 Postgres 可达地址：默认先测
+`mx-internal-postgres` 的 ClusterIP；如果 Service VIP 暂时不可达，但 Endpoint Pod IP
+可达，会把 `DATABASE_HOST` 写成 Endpoint IP 继续部署，避免 kube-proxy/Service 规则异常
+把整条发布链路卡死。需要强制指定时可用：
+
+```bash
+MX_K8S_POSTGRES_HOST_MODE=endpoint \
+  bash scripts/manage.sh ops internal-production deploy
+```
+
+可选值为 `auto`、`dns`、`service`、`endpoint`。`endpoint` 是现场恢复手段；长期仍应
+检查 kube-proxy / iptables / firewalld，使 ClusterIP 访问恢复正常。
+
 ### Deployment 和 Probes
 
 Internal API 是无状态 HTTP 服务，用 Deployment。K8s 通过 probes 判断 Pod 状态：

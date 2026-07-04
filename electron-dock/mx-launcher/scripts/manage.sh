@@ -1388,6 +1388,7 @@ k8s_apply_db_secret() {
     --from-literal=PG_USER="$pg_user" \
     --from-literal=PG_PASSWORD="$pg_password" \
     --from-literal=PG_DB="$pg_db" \
+    --from-literal=DATABASE_HOST="$database_host" \
     --from-literal=DATABASE_URL="$database_url" \
     --dry-run=client -o yaml | kubectl apply --validate=false -f -
 }
@@ -1403,6 +1404,7 @@ k8s_secret_dry_run() {
     --from-literal=PG_USER="$pg_user" \
     --from-literal=PG_PASSWORD="$pg_password" \
     --from-literal=PG_DB="$pg_db" \
+    --from-literal=DATABASE_HOST="$database_host" \
     --from-literal=DATABASE_URL="$database_url" \
     --dry-run=client -o yaml >/dev/null
 }
@@ -1457,6 +1459,102 @@ k8s_postgres_service_ready() {
     fi
     sleep 2
   done
+  return 1
+}
+
+k8s_postgres_endpoint_ip() {
+  local ns="$1"
+  local endpoints slices
+  endpoints="$(kubectl -n "$ns" get endpoints mx-internal-postgres -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null || true)"
+  if [ -n "$endpoints" ]; then
+    printf '%s\n' "$endpoints"
+    return 0
+  fi
+  slices="$(kubectl -n "$ns" get endpointslices -l kubernetes.io/service-name=mx-internal-postgres -o jsonpath='{range .items[*].endpoints[*]}{.addresses[0]}{"\n"}{end}' 2>/dev/null | head -n 1 || true)"
+  [ -n "$slices" ] && printf '%s\n' "$slices"
+}
+
+k8s_probe_postgres_host() {
+  local ns="$1"
+  local host="$2"
+  local pod phase i
+  pod="mx-postgres-probe-$(date +%s)-$$"
+  say "probe postgres from cluster: $host"
+  kubectl -n "$ns" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  if ! kubectl -n "$ns" run "$pod" \
+    --image=postgres:16-alpine \
+    --image-pull-policy=IfNotPresent \
+    --restart=Never \
+    --labels=app.kubernetes.io/name=mx-postgres-probe \
+    --env="PGHOST=$host" \
+    --overrides='{"spec":{"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node-role.kubernetes.io/master","operator":"Exists","effect":"NoSchedule"}]}}' \
+    --command -- sh -ec 'for i in 1 2 3; do pg_isready -h "$PGHOST" -p 5432 -t 2 && exit 0; sleep 1; done; exit 1' >/dev/null; then
+    kubectl -n "$ns" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    return 1
+  fi
+  for i in $(seq 1 "${MX_K8S_POSTGRES_PROBE_WAIT_ATTEMPTS:-30}"); do
+    phase="$(kubectl -n "$ns" get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    case "$phase" in
+      Succeeded)
+        kubectl -n "$ns" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+        return 0
+        ;;
+      Failed)
+        kubectl -n "$ns" logs "$pod" --tail=60 || true
+        kubectl -n "$ns" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+        return 1
+        ;;
+    esac
+    sleep 1
+  done
+  kubectl -n "$ns" logs "$pod" --tail=60 || true
+  kubectl -n "$ns" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  return 1
+}
+
+K8S_SELECTED_POSTGRES_HOST=""
+k8s_select_postgres_database_host() {
+  local ns="$1"
+  local mode service_host endpoint_host dns_host
+  mode="${MX_K8S_POSTGRES_HOST_MODE:-auto}"
+  dns_host="mx-internal-postgres.${ns}.svc.cluster.local"
+  service_host="$(kubectl -n "$ns" get service mx-internal-postgres -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)"
+  endpoint_host="$(k8s_postgres_endpoint_ip "$ns")"
+  case "$mode" in
+    dns)
+      K8S_SELECTED_POSTGRES_HOST="$dns_host"
+      say "use postgres DNS host by MX_K8S_POSTGRES_HOST_MODE=dns: $K8S_SELECTED_POSTGRES_HOST"
+      return 0
+      ;;
+    service|clusterip)
+      [ -n "$service_host" ] && [ "$service_host" != "None" ] || return 1
+      K8S_SELECTED_POSTGRES_HOST="$service_host"
+      say "use postgres ClusterIP by MX_K8S_POSTGRES_HOST_MODE=$mode: $K8S_SELECTED_POSTGRES_HOST"
+      return 0
+      ;;
+    endpoint|pod)
+      [ -n "$endpoint_host" ] || return 1
+      K8S_SELECTED_POSTGRES_HOST="$endpoint_host"
+      say "use postgres endpoint by MX_K8S_POSTGRES_HOST_MODE=$mode: $K8S_SELECTED_POSTGRES_HOST"
+      return 0
+      ;;
+    auto)
+      ;;
+    *)
+      die "unknown MX_K8S_POSTGRES_HOST_MODE=$mode; use auto|dns|service|endpoint"
+      ;;
+  esac
+  if [ -n "$service_host" ] && [ "$service_host" != "None" ] && k8s_probe_postgres_host "$ns" "$service_host"; then
+    K8S_SELECTED_POSTGRES_HOST="$service_host"
+    say "postgres ClusterIP is reachable: $K8S_SELECTED_POSTGRES_HOST"
+    return 0
+  fi
+  if [ -n "$endpoint_host" ] && k8s_probe_postgres_host "$ns" "$endpoint_host"; then
+    K8S_SELECTED_POSTGRES_HOST="$endpoint_host"
+    say "postgres ClusterIP is unreachable; fallback to endpoint: $K8S_SELECTED_POSTGRES_HOST"
+    return 0
+  fi
+  say "postgres host selection failed: service=${service_host:-none}, endpoint=${endpoint_host:-none}"
   return 1
 }
 
@@ -1743,6 +1841,12 @@ k8s_apply() {
     k8s_postgres_diagnostics "$ns"
     die "postgres service endpoints not ready"
   fi
+  if ! k8s_select_postgres_database_host "$ns"; then
+    k8s_postgres_diagnostics "$ns"
+    die "postgres is not reachable from a cluster probe pod"
+  fi
+  say "update db secret with postgres host: $K8S_SELECTED_POSTGRES_HOST"
+  DATABASE_HOST="$K8S_SELECTED_POSTGRES_HOST" k8s_apply_db_secret "$ns"
 
   say "check node disk pressure before migration"
   if [ "${MX_K8S_IGNORE_DISK_PRESSURE:-0}" = "1" ]; then
