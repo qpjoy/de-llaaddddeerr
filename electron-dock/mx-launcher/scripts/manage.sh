@@ -1063,6 +1063,24 @@ k8s_workload_diagnostics() {
   kubectl -n "$ns" get events --sort-by=.lastTimestamp || true
 }
 
+k8s_cleanup_retired_internal_dns_edge() {
+  local pods pod timeout
+  timeout="${MX_K8S_RETIRED_DNS_EDGE_DELETE_TIMEOUT:-60s}"
+  say "remove retired internal dns edge"
+  kubectl -n mx-dns delete daemonset mx-internal-dns-edge --ignore-not-found --wait=false
+  kubectl -n mx-dns delete configmap mx-internal-dns-edge --ignore-not-found
+  pods="$(kubectl -n mx-dns get pods -o name 2>/dev/null | awk '/mx-internal-dns-edge/ {print}' || true)"
+  [ -n "$pods" ] || return 0
+  say "wait retired internal dns edge pods to exit"
+  if kubectl -n mx-dns wait --for=delete $pods --timeout="$timeout"; then
+    return 0
+  fi
+  say "force delete retired internal dns edge pods after $timeout"
+  for pod in $pods; do
+    kubectl -n mx-dns delete "$pod" --grace-period=0 --force --ignore-not-found || true
+  done
+}
+
 k8s_dry_run() {
   local target="$1"
   local ns dir
@@ -1114,11 +1132,12 @@ k8s_apply() {
   kubectl apply --validate=false -f "$dir/10-configmap.yaml"
   say "apply dns control target"
   kubectl apply --validate=false -f "$dir/15-dns-control-target.yaml"
-  say "remove retired internal dns edge"
-  kubectl -n mx-dns delete daemonset mx-internal-dns-edge --ignore-not-found
-  kubectl -n mx-dns delete configmap mx-internal-dns-edge --ignore-not-found
+  k8s_cleanup_retired_internal_dns_edge
   say "wait internal coredns rollout"
-  kubectl -n mx-dns rollout status deployment/mx-internal-coredns --timeout=180s
+  if ! kubectl -n mx-dns rollout status deployment/mx-internal-coredns --timeout=180s; then
+    k8s_workload_diagnostics mx-dns deployment mx-internal-coredns
+    die "internal coredns rollout failed"
+  fi
   say "apply local persistent volumes"
   k8s_repair_internal_local_pvs
   kubectl apply --validate=false -f "$dir/18-local-pv.yaml"
@@ -1537,9 +1556,7 @@ k8s_down() {
   dir="$(k8s_manifest_dir "$target")"
   need_kubectl
   [ -d "$dir" ] || die "missing k8s manifest directory: $dir"
-  say "delete retired internal dns edge"
-  kubectl -n mx-dns delete daemonset mx-internal-dns-edge --ignore-not-found
-  kubectl -n mx-dns delete configmap mx-internal-dns-edge --ignore-not-found
+  k8s_cleanup_retired_internal_dns_edge
   say "delete internal gateway"
   kubectl delete -f "$dir/45-internal-gateway.yaml" --ignore-not-found
   say "delete internal api"
