@@ -27,6 +27,8 @@ K8S_CLEAN_STALE_CONTROL_PLANE="${K8S_CLEAN_STALE_CONTROL_PLANE:-1}"
 K8S_REINIT="${K8S_REINIT:-0}"
 K8S_REINIT_BACKUP_ROOT="${K8S_REINIT_BACKUP_ROOT:-/data/mx-backup}"
 K8S_FLANNEL_SUBNET_TIMEOUT="${K8S_FLANNEL_SUBNET_TIMEOUT:-120s}"
+K8S_CNI_FILES_TIMEOUT="${K8S_CNI_FILES_TIMEOUT:-120s}"
+K8S_RESTART_RUNTIME_AFTER_CNI="${K8S_RESTART_RUNTIME_AFTER_CNI:-1}"
 K8S_NODE_READY_TIMEOUT="${K8S_NODE_READY_TIMEOUT:-300s}"
 K8S_NODE_READY_RETRY_TIMEOUT="${K8S_NODE_READY_RETRY_TIMEOUT:-180s}"
 K8S_ALLOW_CGROUP_V1="${K8S_ALLOW_CGROUP_V1:-auto}"
@@ -90,6 +92,8 @@ Environment:
   K8S_REINIT=0
   K8S_REINIT_BACKUP_ROOT=/data/mx-backup
   K8S_FLANNEL_SUBNET_TIMEOUT=120s
+  K8S_CNI_FILES_TIMEOUT=120s
+  K8S_RESTART_RUNTIME_AFTER_CNI=1
   K8S_NODE_READY_TIMEOUT=300s
   K8S_NODE_READY_RETRY_TIMEOUT=180s
   K8S_ALLOW_CGROUP_V1=auto|1|0
@@ -412,11 +416,15 @@ gpgcheck=1
 gpgkey=https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/rpm/repodata/repomd.xml.key
 exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
 EOF
-  say "install kubelet kubeadm kubectl"
+  say "install kubelet kubeadm kubectl and CNI tools"
   if [ "$DRY_RUN" = "1" ]; then
-    say "would install kubelet kubeadm kubectl"
-  elif ! "$pm" install -y kubelet kubeadm kubectl --disableexcludes=kubernetes; then
-    "$pm" install -y kubelet kubeadm kubectl --setopt=disable_excludes=kubernetes
+    say "would install kubelet kubeadm kubectl cri-tools kubernetes-cni"
+  elif ! "$pm" install -y kubelet kubeadm kubectl cri-tools kubernetes-cni --disableexcludes=kubernetes; then
+    if ! "$pm" install -y kubelet kubeadm kubectl cri-tools kubernetes-cni --setopt=disable_excludes=kubernetes; then
+      say "kubernetes-cni/cri-tools install fallback failed; install kubeadm core packages only"
+      "$pm" install -y kubelet kubeadm kubectl --disableexcludes=kubernetes \
+        || "$pm" install -y kubelet kubeadm kubectl --setopt=disable_excludes=kubernetes
+    fi
   fi
   run systemctl enable kubelet
   run_allow_fail systemctl start kubelet
@@ -783,6 +791,63 @@ wait_for_flannel_subnet_env() {
   return 1
 }
 
+cni_config_ready() {
+  find /etc/cni/net.d -maxdepth 1 -type f \
+    \( -name '*.conf' -o -name '*.conflist' -o -name '*.json' \) \
+    -print -quit 2>/dev/null | grep -q .
+}
+
+missing_cni_plugins() {
+  local plugin missing=""
+  for plugin in flannel loopback bridge host-local portmap; do
+    if [ ! -x "/opt/cni/bin/$plugin" ]; then
+      missing="$missing $plugin"
+    fi
+  done
+  printf '%s\n' "${missing# }"
+}
+
+cni_plugins_ready() {
+  [ -z "$(missing_cni_plugins)" ]
+}
+
+wait_for_cni_installation() {
+  [ "$SKIP_INIT" = "0" ] || return 0
+  if [ "$DRY_RUN" = "1" ]; then
+    say "would wait for Flannel CNI config and plugin binaries"
+    return 0
+  fi
+  local timeout seconds attempts i missing
+  timeout="$K8S_CNI_FILES_TIMEOUT"
+  seconds="$(duration_to_seconds "$timeout")"
+  attempts="$(( seconds / 2 ))"
+  [ "$attempts" -gt 0 ] || attempts=1
+  say "wait for CNI config and plugin binaries"
+  for i in $(seq 1 "$attempts"); do
+    if cni_config_ready && cni_plugins_ready; then
+      say "CNI config and plugin binaries are ready"
+      return 0
+    fi
+    sleep 2
+  done
+  missing="$(missing_cni_plugins)"
+  if ! cni_config_ready; then
+    say "CNI config is still missing under /etc/cni/net.d"
+  fi
+  if [ -n "$missing" ]; then
+    say "CNI plugin binaries missing under /opt/cni/bin: $missing"
+  fi
+  return 1
+}
+
+restart_runtime_after_cni() {
+  [ "$SKIP_INIT" = "0" ] || return 0
+  [ "$K8S_RESTART_RUNTIME_AFTER_CNI" = "1" ] || return 0
+  say "restart containerd and kubelet after CNI files are installed"
+  run_allow_fail systemctl restart containerd
+  run_allow_fail systemctl restart kubelet
+}
+
 cluster_bootstrap_diagnostics() {
   say "diagnostics: nodes"
   kubectl get nodes -o wide || true
@@ -796,8 +861,21 @@ cluster_bootstrap_diagnostics() {
   kubectl -n kube-flannel logs -l app=flannel --all-containers --tail=160 || true
   say "diagnostics: local CNI files"
   ls -la /etc/cni/net.d 2>/dev/null || true
+  for file in /etc/cni/net.d/*; do
+    [ -f "$file" ] || continue
+    printf '### %s\n' "$file"
+    sed -n '1,160p' "$file" || true
+  done
+  ls -la /opt/cni/bin 2>/dev/null || true
   ls -la /run/flannel 2>/dev/null || true
   [ -f /run/flannel/subnet.env ] && cat /run/flannel/subnet.env || true
+  say "diagnostics: containerd"
+  systemctl status containerd --no-pager || true
+  journalctl -u containerd -n 160 --no-pager || true
+  if [ -f /etc/containerd/config.toml ]; then
+    grep -nE 'disabled_plugins|SystemdCgroup|sandbox_image|conf_dir|bin_dir|root =' /etc/containerd/config.toml || true
+  fi
+  command -v crictl >/dev/null 2>&1 && crictl info || true
   say "diagnostics: kubelet"
   systemctl status kubelet --no-pager || true
   journalctl -u kubelet -n 160 --no-pager || true
@@ -814,6 +892,11 @@ wait_for_cluster() {
     cluster_bootstrap_diagnostics
     die "Flannel did not create /run/flannel/subnet.env"
   fi
+  if ! wait_for_cni_installation; then
+    cluster_bootstrap_diagnostics
+    die "CNI files were not installed correctly"
+  fi
+  restart_runtime_after_cni
   say "wait for node readiness"
   if ! run kubectl wait --for=condition=Ready node --all --timeout="$K8S_NODE_READY_TIMEOUT"; then
     say "node not ready yet; restart kubelet once after CNI installation"

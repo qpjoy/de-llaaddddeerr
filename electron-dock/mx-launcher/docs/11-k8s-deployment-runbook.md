@@ -261,7 +261,7 @@ gpgkey=https://pkgs.k8s.io/core:/stable:/v1.36/rpm/repodata/repomd.xml.key
 exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
 EOF
 
-yum install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
+yum install -y kubelet kubeadm kubectl cri-tools kubernetes-cni --disableexcludes=kubernetes
 systemctl enable --now kubelet
 ```
 
@@ -423,17 +423,42 @@ sleep 3
 ss -lntp | egrep ':(6443|10259|10257|2379|2380)\b' || true
 ```
 
-如果 Flannel rollout 已成功但 node 仍是 `NotReady`，通常是 kubelet 还没有重新识别
-CNI 文件或 `/run/flannel/subnet.env`。先重启 kubelet，再看 node 条件：
+如果 Flannel rollout 已成功、`NetworkUnavailable=False / FlannelIsUp`，但 node 仍是
+`NotReady`，并且 kubelet 日志反复出现
+`NetworkPluginNotReady message:Network plugin returns error: cni plugin not initialized`，
+说明 Flannel 本体已经跑起来了，但 containerd/kubelet 还没有识别完整 CNI 链路。先确认
+三类文件都存在：
 
 ```bash
-ls -la /etc/cni/net.d /run/flannel
+ls -la /etc/cni/net.d /run/flannel /opt/cni/bin
+cat /etc/cni/net.d/* 2>/dev/null || true
 cat /run/flannel/subnet.env
+for p in flannel loopback bridge host-local portmap; do test -x "/opt/cni/bin/$p" || echo "missing /opt/cni/bin/$p"; done
+grep -nE 'disabled_plugins|SystemdCgroup|sandbox_image|conf_dir|bin_dir|root =' /etc/containerd/config.toml || true
+```
+
+如果缺少 `loopback`、`bridge`、`host-local` 或 `portmap`，补装 CNI 插件：
+
+```bash
+yum install -y kubernetes-cni cri-tools --disableexcludes=kubernetes \
+  || yum install -y kubernetes-cni cri-tools --setopt=disable_excludes=kubernetes
+kubectl -n kube-flannel delete pod -l app=flannel
+kubectl -n kube-flannel rollout status daemonset/kube-flannel-ds --timeout=300s
+```
+
+CNI 文件落盘后，重启 containerd 和 kubelet，让 CRI 重新加载 CNI 配置：
+
+```bash
+systemctl restart containerd
 systemctl restart kubelet
 kubectl wait --for=condition=Ready node --all --timeout=180s
 kubectl get nodes -o wide
 kubectl -n kube-system get pods -o wide
 ```
+
+安装脚本默认会自动做这几步：等待 `/run/flannel/subnet.env`，等待 `/etc/cni/net.d`
+和 `/opt/cni/bin` 就绪，然后重启 containerd/kubelet。可以用
+`K8S_RESTART_RUNTIME_AFTER_CNI=0` 关闭自动重启。
 
 如果仍未 Ready，保留这些诊断输出再排查：
 
@@ -441,6 +466,8 @@ kubectl -n kube-system get pods -o wide
 kubectl describe node mx-internal-server
 kubectl -n kube-flannel get pods,daemonset,configmap -o wide
 kubectl -n kube-flannel logs -l app=flannel --all-containers --tail=160
+systemctl status containerd --no-pager
+journalctl -u containerd -n 160 --no-pager
 journalctl -u kubelet -n 160 --no-pager
 ```
 
