@@ -31,14 +31,10 @@ spec:
             - sh
             - -ec
             - |
-              short_host="mx-internal-postgres"
-              fqdn_host="mx-internal-postgres.mx-internal-shadow.svc.cluster.local"
-              until getent hosts "$short_host" || getent hosts "$fqdn_host"; do
-                echo "waiting for postgres DNS: ${short_host} / ${fqdn_host}"
-                sleep 2
-              done
-              until pg_isready -h "$fqdn_host" -p 5432 -U "$PG_USER" -d "$PG_DB"; do
-                echo "waiting for postgres readiness: ${fqdn_host}:5432"
+              db_host="${DATABASE_HOST:-${MX_INTERNAL_POSTGRES_SERVICE_HOST:-mx-internal-postgres.mx-internal-shadow.svc.cluster.local}}"
+              echo "using postgres host: ${db_host}"
+              until pg_isready -h "$db_host" -p 5432 -U "$PG_USER" -d "$PG_DB"; do
+                echo "waiting for postgres readiness: ${db_host}:5432"
                 sleep 2
               done
           env:
@@ -71,12 +67,32 @@ spec:
           image: qpjoy/mx-launcher-server:shadow
           imagePullPolicy: Never
           command:
-            - node
-            - dist/src/migrate.js
+            - sh
+            - -ec
+            - |
+              db_host="${DATABASE_HOST:-${MX_INTERNAL_POSTGRES_SERVICE_HOST:-mx-internal-postgres.mx-internal-shadow.svc.cluster.local}}"
+              export DATABASE_URL="postgres://${PG_USER}:${PG_PASSWORD}@${db_host}:5432/${PG_DB}"
+              echo "running migrations against ${db_host}:5432/${PG_DB}"
+              exec node dist/src/migrate.js
           envFrom:
             - configMapRef:
                 name: mx-launcher-internal-config
           env:
+            - name: PG_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mx-launcher-db
+                  key: PG_USER
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mx-launcher-db
+                  key: PG_PASSWORD
+            - name: PG_DB
+              valueFrom:
+                secretKeyRef:
+                  name: mx-launcher-db
+                  key: PG_DB
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:

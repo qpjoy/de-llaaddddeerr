@@ -96,6 +96,14 @@ spec:
         - name: internal-api
           image: qpjoy/mx-launcher-server:shadow
           imagePullPolicy: Never
+          command:
+            - sh
+            - -ec
+            - |
+              db_host="${DATABASE_HOST:-${MX_INTERNAL_POSTGRES_SERVICE_HOST:-mx-internal-postgres.mx-internal-shadow.svc.cluster.local}}"
+              export DATABASE_URL="postgres://${PG_USER}:${PG_PASSWORD}@${db_host}:5432/${PG_DB}"
+              echo "starting internal api against ${db_host}:5432/${PG_DB}"
+              exec node dist/src/index.js
           ports:
             - name: http
               containerPort: 18090
@@ -103,6 +111,21 @@ spec:
             - configMapRef:
                 name: mx-launcher-internal-config
           env:
+            - name: PG_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mx-launcher-db
+                  key: PG_USER
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mx-launcher-db
+                  key: PG_PASSWORD
+            - name: PG_DB
+              valueFrom:
+                secretKeyRef:
+                  name: mx-launcher-db
+                  key: PG_DB
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
