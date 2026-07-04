@@ -205,8 +205,8 @@ K8S_VERSION=v1.36 \
 K8S_ALLOW_CGROUP_V1=auto \
 K8S_IMAGE_REPOSITORY=registry.aliyuncs.com/google_containers \
 K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel \
-POD_CIDR=10.244.0.0/16 \
-SERVICE_CIDR=10.96.0.0/12 \
+POD_CIDR=172.30.0.0/16 \
+SERVICE_CIDR=172.31.0.0/16 \
 bash scripts/install-k8s-centos.sh --advertise-address <IP>
 ```
 
@@ -265,16 +265,16 @@ yum install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
 systemctl enable --now kubelet
 ```
 
-初始化单节点集群。`10.244.0.0/16` 给 Flannel Pod 网段，`10.96.0.0/12` 给 K8s
-Service 网段；它们不占用 HDO V1 的 `100.*`，也不占用 MX-H2I service peer 的
-`10.88.*` / `10.89.*`。
+初始化单节点集群。`172.30.0.0/16` 给 Flannel Pod 网段，`172.31.0.0/16` 给 K8s
+Service 网段；避免占用 HDO V1 的 `100.*`，也避免占用 MX-H2I / WG 规划里的
+`10.88.*` 到 `10.254.*`。
 
 ```bash
 CENTOS_LAN_IP=<这台 Internal CentOS 的内网 IP>
 kubeadm init \
   --apiserver-advertise-address="$CENTOS_LAN_IP" \
-  --pod-network-cidr=10.244.0.0/16 \
-  --service-cidr=10.96.0.0/12 \
+  --pod-network-cidr=172.30.0.0/16 \
+  --service-cidr=172.31.0.0/16 \
   --cri-socket=unix:///run/containerd/containerd.sock
 
 mkdir -p "$HOME/.kube"

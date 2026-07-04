@@ -8,8 +8,8 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 K8S_VERSION="${K8S_VERSION:-v1.36}"
 K8S_IMAGE_REPOSITORY="${K8S_IMAGE_REPOSITORY:-registry.k8s.io}"
 K8S_PAUSE_VERSION="${K8S_PAUSE_VERSION:-3.10.2}"
-POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
-SERVICE_CIDR="${SERVICE_CIDR:-10.96.0.0/12}"
+POD_CIDR="${POD_CIDR:-172.30.0.0/16}"
+SERVICE_CIDR="${SERVICE_CIDR:-172.31.0.0/16}"
 CRI_SOCKET="${CRI_SOCKET:-unix:///run/containerd/containerd.sock}"
 K8S_APISERVER_ADVERTISE_ADDRESS="${K8S_APISERVER_ADVERTISE_ADDRESS:-}"
 K8S_FLANNEL_URL="${K8S_FLANNEL_URL:-https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml}"
@@ -44,8 +44,8 @@ Usage:
 
 Options:
   --advertise-address IP   Internal CentOS LAN IP for kube-apiserver.
-  --pod-cidr CIDR          Pod CIDR. Default: 10.244.0.0/16.
-  --service-cidr CIDR      Service CIDR. Default: 10.96.0.0/12.
+  --pod-cidr CIDR          Pod CIDR. Default: 172.30.0.0/16.
+  --service-cidr CIDR      Service CIDR. Default: 172.31.0.0/16.
   --k8s-version VERSION    Kubernetes RPM minor repo. Default: v1.36.
   --image-repository REPO  Control-plane image registry. Default: registry.k8s.io.
   --flannel-image-repository REPO
@@ -70,8 +70,8 @@ Environment:
   K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel
   K8S_FLANNEL_VERSION=v0.28.5
   K8S_FLANNEL_CNI_PLUGIN_VERSION=v1.9.1-flannel1
-  POD_CIDR=10.244.0.0/16
-  SERVICE_CIDR=10.96.0.0/12
+  POD_CIDR=172.30.0.0/16
+  SERVICE_CIDR=172.31.0.0/16
   K8S_OPEN_FIREWALL=0
   K8S_DISABLE_SWAP=0
   K8S_SET_SELINUX_PERMISSIVE=0

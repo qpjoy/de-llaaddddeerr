@@ -1494,6 +1494,20 @@ k8s_cleanup_retired_internal_dns_edge() {
   done
 }
 
+k8s_restart_internal_coredns_if_unavailable() {
+  [ "${MX_K8S_RESTART_INTERNAL_COREDNS_IF_UNAVAILABLE:-1}" = "1" ] || return 0
+  local desired available
+  desired="$(kubectl -n mx-dns get deployment mx-internal-coredns -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+  available="$(kubectl -n mx-dns get deployment mx-internal-coredns -o jsonpath='{.status.availableReplicas}' 2>/dev/null || true)"
+  desired="${desired:-1}"
+  available="${available:-0}"
+  if [ "$available" = "$desired" ]; then
+    return 0
+  fi
+  say "restart internal coredns after Flannel recovery: available=$available desired=$desired"
+  kubectl -n mx-dns rollout restart deployment/mx-internal-coredns
+}
+
 k8s_dry_run() {
   local target="$1"
   local ns dir
@@ -1547,6 +1561,7 @@ k8s_apply() {
   say "apply dns control target"
   kubectl apply --validate=false -f "$dir/15-dns-control-target.yaml"
   k8s_cleanup_retired_internal_dns_edge
+  k8s_restart_internal_coredns_if_unavailable
   say "wait internal coredns rollout"
   if ! k8s_rollout_status mx-dns deployment mx-internal-coredns 180s; then
     k8s_workload_diagnostics mx-dns deployment mx-internal-coredns
@@ -4416,7 +4431,7 @@ Notes:
     not ready. Disable with MX_K8S_REPAIR_FLANNEL=0, override the manifest with
     MX_K8S_FLANNEL_URL=/path/to/kube-flannel.yml, or set
     MX_K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel when GHCR is blocked.
-    When the service VIP 10.96.0.1 is not reachable yet, deploy points Flannel
+    When the Kubernetes service VIP is not reachable yet, deploy points Flannel
     directly at the repaired apiserver IP; disable this with
     MX_K8S_FLANNEL_DIRECT_APISERVER=0.
   - Existing mx-internal-gateway-caddy data is preserved during deploy so
