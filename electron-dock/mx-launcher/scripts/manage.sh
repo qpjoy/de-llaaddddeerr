@@ -649,6 +649,87 @@ k8s_wait_control_plane_observers() {
   return 1
 }
 
+k8s_flannel_url() {
+  echo "${K8S_FLANNEL_URL:-${MX_K8S_FLANNEL_URL:-https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml}}"
+}
+
+k8s_flannel_subnet_ready() {
+  [ -s "${MX_K8S_FLANNEL_SUBNET_ENV:-/run/flannel/subnet.env}" ]
+}
+
+k8s_flannel_daemonset_ready() {
+  kubectl -n kube-flannel rollout status daemonset/kube-flannel-ds --timeout="${1:-5s}" >/dev/null 2>&1
+}
+
+k8s_flannel_diagnostics() {
+  local pods pod
+  say "flannel diagnostics: subnet env"
+  ls -la /run/flannel 2>/dev/null || true
+  [ -f /run/flannel/subnet.env ] && cat /run/flannel/subnet.env || true
+  say "flannel diagnostics: namespace resources"
+  kubectl -n kube-flannel get pods,daemonset,configmap -o wide || true
+  say "flannel diagnostics: daemonset detail"
+  kubectl -n kube-flannel describe daemonset kube-flannel-ds || true
+  pods="$(kubectl -n kube-flannel get pods -o name 2>/dev/null || true)"
+  for pod in $pods; do
+    say "flannel diagnostics: describe $pod"
+    kubectl -n kube-flannel describe "$pod" || true
+    say "flannel diagnostics: logs $pod"
+    kubectl -n kube-flannel logs "$pod" --all-containers --tail=160 || true
+  done
+  say "flannel diagnostics: recent events"
+  kubectl -n kube-flannel get events --sort-by=.lastTimestamp || true
+}
+
+k8s_wait_flannel_subnet_env() {
+  local attempts="${MX_K8S_FLANNEL_SUBNET_WAIT_ATTEMPTS:-60}"
+  local i
+  say "wait Flannel subnet env"
+  for i in $(seq 1 "$attempts"); do
+    if k8s_flannel_subnet_ready; then
+      say "Flannel subnet env is ready"
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+k8s_repair_flannel_cni() {
+  [ "${MX_K8S_REPAIR_FLANNEL:-1}" = "1" ] || return 0
+  [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ] || return 0
+  local url repo version cni_version timeout
+  timeout="${MX_K8S_FLANNEL_ROLLOUT_TIMEOUT:-300s}"
+  if k8s_flannel_subnet_ready && k8s_flannel_daemonset_ready 5s; then
+    return 0
+  fi
+  url="$(k8s_flannel_url)"
+  repo="${K8S_FLANNEL_IMAGE_REPOSITORY:-${MX_K8S_FLANNEL_IMAGE_REPOSITORY:-}}"
+  version="${K8S_FLANNEL_VERSION:-${MX_K8S_FLANNEL_VERSION:-v0.28.5}}"
+  cni_version="${K8S_FLANNEL_CNI_PLUGIN_VERSION:-${MX_K8S_FLANNEL_CNI_PLUGIN_VERSION:-v1.9.1-flannel1}}"
+  say "repair Flannel CNI"
+  say "apply Flannel manifest: $url"
+  kubectl apply --validate=false -f "$url"
+  if [ -n "$repo" ]; then
+    say "override Flannel images with $repo"
+    kubectl -n kube-flannel set image daemonset/kube-flannel-ds \
+      "install-cni-plugin=${repo}/flannel-cni-plugin:${cni_version}" \
+      "install-cni=${repo}/flannel:${version}" \
+      "kube-flannel=${repo}/flannel:${version}"
+  fi
+  if kubectl -n kube-flannel get daemonset kube-flannel-ds >/dev/null 2>&1; then
+    kubectl -n kube-flannel rollout restart daemonset/kube-flannel-ds || true
+    if ! kubectl -n kube-flannel rollout status daemonset/kube-flannel-ds --timeout="$timeout"; then
+      k8s_flannel_diagnostics
+      die "Flannel rollout failed"
+    fi
+  fi
+  if ! k8s_wait_flannel_subnet_env; then
+    k8s_flannel_diagnostics
+    die "Flannel did not create /run/flannel/subnet.env"
+  fi
+}
+
 k8s_repair_kubeadm_endpoint() {
   [ "${MX_K8S_AUTO_REPAIR_KUBEADM_ENDPOINT:-1}" = "1" ] || return 0
   [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ] || return 0
@@ -1439,6 +1520,7 @@ k8s_apply() {
   need_kubectl
   [ -d "$dir" ] || die "missing k8s manifest directory: $dir"
   k8s_repair_kubeadm_endpoint
+  k8s_repair_flannel_cni
 
   say "apply namespace"
   kubectl apply --validate=false -f "$dir/00-namespace.yaml"
@@ -4313,6 +4395,11 @@ Notes:
     identity pinned through kubelet --hostname-override, so a router/hostname
     change does not create a second Node. Only set MX_K8S_NODE_NAME for a
     planned Kubernetes node identity migration.
+  - On kubeadm Internal hosts, deploy also repairs Flannel before Internal
+    workloads start when /run/flannel/subnet.env is missing or the daemonset is
+    not ready. Disable with MX_K8S_REPAIR_FLANNEL=0, override the manifest with
+    MX_K8S_FLANNEL_URL=/path/to/kube-flannel.yml, or set
+    MX_K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel when GHCR is blocked.
   - Existing mx-internal-gateway-caddy data is preserved during deploy so
     generated gateway routes are not reset to the bootstrap Caddyfile.
   - gateway-smoke is read-only and checks /healthz plus /readyz. Full HTTP
