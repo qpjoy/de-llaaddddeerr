@@ -132,6 +132,12 @@ CentOS/Ubuntu Internal K8s 上，DaemonSet 实际只运行一个 Pod；如果以
 应给真正拥有 `mx-internal-svc` / `10.88.88.88` 的节点打 label，再把 gateway 约束到
 那台节点。
 
+如果现场 kube-proxy / Service VIP 转发异常，deploy 会像 Postgres 一样先从集群内探测
+`mx-launcher-internal` 的 ClusterIP；ClusterIP 不通但 Endpoint 可达时，会刷新
+`mx-internal-gateway-caddy` 的第一条 `reverse_proxy` 到当前 API Pod Endpoint。可用
+`MX_K8S_GATEWAY_UPSTREAM_MODE=endpoint` 强制该恢复路径。这个 fallback 不会重置
+`mx-gateway-routes.json` 中的动态应用路由。
+
 ## 部署顺序
 
 ### CentOS 单节点 K8s Bootstrap

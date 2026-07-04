@@ -1558,6 +1558,104 @@ k8s_select_postgres_database_host() {
   return 1
 }
 
+k8s_service_endpoint_ip() {
+  local ns="$1"
+  local service="$2"
+  local endpoints slices
+  endpoints="$(kubectl -n "$ns" get endpoints "$service" -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null || true)"
+  if [ -n "$endpoints" ]; then
+    printf '%s\n' "$endpoints"
+    return 0
+  fi
+  slices="$(kubectl -n "$ns" get endpointslices -l "kubernetes.io/service-name=$service" -o jsonpath='{range .items[*].endpoints[*]}{.addresses[0]}{"\n"}{end}' 2>/dev/null | head -n 1 || true)"
+  [ -n "$slices" ] && printf '%s\n' "$slices"
+}
+
+k8s_probe_http_host() {
+  local ns="$1"
+  local host="$2"
+  local path="${3:-/healthz}"
+  local pod phase i
+  pod="mx-http-probe-$(date +%s)-$$"
+  say "probe HTTP from cluster: http://$host$path"
+  kubectl -n "$ns" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  if ! kubectl -n "$ns" run "$pod" \
+    --image=qpjoy/mx-launcher-server:shadow \
+    --image-pull-policy=IfNotPresent \
+    --restart=Never \
+    --labels=app.kubernetes.io/name=mx-http-probe \
+    --env="HTTP_TARGET=http://$host$path" \
+    --overrides='{"spec":{"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},{"key":"node-role.kubernetes.io/master","operator":"Exists","effect":"NoSchedule"}]}}' \
+    --command -- node -e 'fetch(process.env.HTTP_TARGET).then(async (res) => { const text = await res.text(); if (!res.ok) { console.error(`${res.status} ${text}`); process.exit(1); } process.exit(0); }).catch((error) => { console.error(error.message || error); process.exit(1); });' >/dev/null; then
+    kubectl -n "$ns" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    return 1
+  fi
+  for i in $(seq 1 "${MX_K8S_HTTP_PROBE_WAIT_ATTEMPTS:-30}"); do
+    phase="$(kubectl -n "$ns" get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    case "$phase" in
+      Succeeded)
+        kubectl -n "$ns" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+        return 0
+        ;;
+      Failed)
+        kubectl -n "$ns" logs "$pod" --tail=60 || true
+        kubectl -n "$ns" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+        return 1
+        ;;
+    esac
+    sleep 1
+  done
+  kubectl -n "$ns" logs "$pod" --tail=60 || true
+  kubectl -n "$ns" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  return 1
+}
+
+K8S_SELECTED_INTERNAL_API_UPSTREAM=""
+k8s_select_internal_api_gateway_upstream() {
+  local ns="$1"
+  local mode service_host endpoint_host dns_upstream
+  mode="${MX_K8S_GATEWAY_UPSTREAM_MODE:-auto}"
+  dns_upstream="mx-launcher-internal.${ns}.svc.cluster.local:18090"
+  service_host="$(kubectl -n "$ns" get service mx-launcher-internal -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)"
+  endpoint_host="$(k8s_service_endpoint_ip "$ns" mx-launcher-internal)"
+  case "$mode" in
+    dns)
+      K8S_SELECTED_INTERNAL_API_UPSTREAM="$dns_upstream"
+      say "use gateway DNS upstream by MX_K8S_GATEWAY_UPSTREAM_MODE=dns: $K8S_SELECTED_INTERNAL_API_UPSTREAM"
+      return 0
+      ;;
+    service|clusterip)
+      [ -n "$service_host" ] && [ "$service_host" != "None" ] || return 1
+      K8S_SELECTED_INTERNAL_API_UPSTREAM="$service_host:18090"
+      say "use gateway ClusterIP upstream by MX_K8S_GATEWAY_UPSTREAM_MODE=$mode: $K8S_SELECTED_INTERNAL_API_UPSTREAM"
+      return 0
+      ;;
+    endpoint|pod)
+      [ -n "$endpoint_host" ] || return 1
+      K8S_SELECTED_INTERNAL_API_UPSTREAM="$endpoint_host:18090"
+      say "use gateway endpoint upstream by MX_K8S_GATEWAY_UPSTREAM_MODE=$mode: $K8S_SELECTED_INTERNAL_API_UPSTREAM"
+      return 0
+      ;;
+    auto)
+      ;;
+    *)
+      die "unknown MX_K8S_GATEWAY_UPSTREAM_MODE=$mode; use auto|dns|service|endpoint"
+      ;;
+  esac
+  if [ -n "$service_host" ] && [ "$service_host" != "None" ] && k8s_probe_http_host "$ns" "$service_host:18090" /healthz; then
+    K8S_SELECTED_INTERNAL_API_UPSTREAM="$service_host:18090"
+    say "gateway ClusterIP upstream is reachable: $K8S_SELECTED_INTERNAL_API_UPSTREAM"
+    return 0
+  fi
+  if [ -n "$endpoint_host" ] && k8s_probe_http_host "$ns" "$endpoint_host:18090" /healthz; then
+    K8S_SELECTED_INTERNAL_API_UPSTREAM="$endpoint_host:18090"
+    say "gateway ClusterIP upstream is unreachable; fallback to endpoint: $K8S_SELECTED_INTERNAL_API_UPSTREAM"
+    return 0
+  fi
+  say "gateway upstream selection failed: service=${service_host:-none}, endpoint=${endpoint_host:-none}"
+  return 1
+}
+
 k8s_repair_released_local_pv() {
   local pv="$1"
   local phase
@@ -4549,16 +4647,55 @@ k8s_restart_internal_api() {
 
 k8s_apply_internal_gateway() {
   local target="$1"
-  local ns dir file
+  local ns dir file upstream tmp
   ns="$(k8s_namespace "$target")"
   dir="$(k8s_manifest_dir "$target")"
   file="$dir/45-internal-gateway.yaml"
-  if kubectl -n "$ns" get configmap mx-internal-gateway-caddy >/dev/null 2>&1; then
-    say "preserve existing internal gateway ConfigMap data"
-    awk 'BEGIN { skip=1 } /^---[[:space:]]*$/ { skip=0; print; next } !skip { print }' "$file" | kubectl apply --validate=false -f -
-    return
+  if ! k8s_select_internal_api_gateway_upstream "$ns"; then
+    k8s_workload_diagnostics "$ns" deployment mx-launcher-internal
+    die "internal gateway upstream is not reachable from a cluster probe pod"
   fi
-  kubectl apply --validate=false -f "$file"
+  if kubectl -n "$ns" get configmap mx-internal-gateway-caddy >/dev/null 2>&1; then
+    say "preserve existing internal gateway routes and refresh upstream"
+    awk 'BEGIN { skip=1 } /^---[[:space:]]*$/ { skip=0; print; next } !skip { print }' "$file" | kubectl apply --validate=false -f -
+  else
+    kubectl apply --validate=false -f "$file"
+  fi
+  upstream="$K8S_SELECTED_INTERNAL_API_UPSTREAM"
+  tmp="$(mktemp -d)"
+  kubectl -n "$ns" get configmap mx-internal-gateway-caddy -o go-template='{{ index .data "Caddyfile" }}' >"$tmp/Caddyfile"
+  kubectl -n "$ns" get configmap mx-internal-gateway-caddy -o go-template='{{ index .data "mx-gateway-routes.json" }}' >"$tmp/mx-gateway-routes.json"
+  awk -v upstream="$upstream" '
+    BEGIN { replaced = 0 }
+    !replaced && /^[[:space:]]*reverse_proxy[[:space:]].*:18090[[:space:]]*$/ {
+      indent = $0
+      sub(/reverse_proxy.*/, "", indent)
+      print indent "reverse_proxy " upstream
+      replaced = 1
+      next
+    }
+    { print }
+    END {
+      if (!replaced) {
+        exit 2
+      }
+    }
+  ' "$tmp/Caddyfile" >"$tmp/Caddyfile.next" || {
+    rm -rf "$tmp"
+    die "failed to patch internal gateway Caddyfile upstream"
+  }
+  say "set internal gateway upstream: $upstream"
+  kubectl -n "$ns" create configmap mx-internal-gateway-caddy \
+    --from-file=Caddyfile="$tmp/Caddyfile.next" \
+    --from-file=mx-gateway-routes.json="$tmp/mx-gateway-routes.json" \
+    --dry-run=client -o yaml | kubectl apply --validate=false -f -
+  kubectl -n "$ns" label configmap mx-internal-gateway-caddy \
+    app.kubernetes.io/name=mx-internal-gateway \
+    app.kubernetes.io/part-of=mx-3ks \
+    mx.qpjoy.com/component=internal-gateway \
+    --overwrite >/dev/null
+  kubectl -n "$ns" rollout restart daemonset/mx-internal-gateway >/dev/null 2>&1 || true
+  rm -rf "$tmp"
 }
 
 ops_k8s_shadow() {
@@ -4583,6 +4720,9 @@ ops_k8s_shadow() {
       k8s_apply "$target"
       say "restart internal api for rebuilt local image"
       k8s_restart_internal_api "$target"
+      say "refresh internal gateway upstream"
+      k8s_apply_internal_gateway "$target"
+      k8s_rollout_status "$(k8s_namespace "$target")" daemonset mx-internal-gateway 180s
       say "status"
       k8s_status "$target"
       say "smoke"
@@ -4746,6 +4886,9 @@ ops_internal_production() {
       fi
       say "configure Internal API native host-runner URL"
       ops_local_platform_apply_native_host_runner_url
+      say "refresh Internal gateway upstream"
+      k8s_apply_internal_gateway internal-shadow
+      k8s_rollout_status "$(k8s_namespace internal-shadow)" daemonset mx-internal-gateway 180s
       say "status"
       k8s_status internal-shadow
       say "gateway smoke"
