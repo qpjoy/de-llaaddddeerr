@@ -695,6 +695,21 @@ k8s_wait_flannel_subnet_env() {
   return 1
 }
 
+k8s_repair_flannel_apiserver_env() {
+  [ "${MX_K8S_FLANNEL_DIRECT_APISERVER:-1}" = "1" ] || return 0
+  local host port
+  host="${MX_K8S_FLANNEL_APISERVER_HOST:-$(k8s_detect_lan_ip | head -n 1)}"
+  port="${MX_K8S_FLANNEL_APISERVER_PORT:-6443}"
+  if ! k8s_is_usable_lan_ip "$host"; then
+    say "skip Flannel direct apiserver env; cannot detect a usable LAN IP"
+    return 0
+  fi
+  say "point Flannel at kube-apiserver $host:$port"
+  kubectl -n kube-flannel set env daemonset/kube-flannel-ds -c kube-flannel \
+    "KUBERNETES_SERVICE_HOST=$host" \
+    "KUBERNETES_SERVICE_PORT=$port"
+}
+
 k8s_repair_flannel_cni() {
   [ "${MX_K8S_REPAIR_FLANNEL:-1}" = "1" ] || return 0
   [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ] || return 0
@@ -718,6 +733,7 @@ k8s_repair_flannel_cni() {
       "kube-flannel=${repo}/flannel:${version}"
   fi
   if kubectl -n kube-flannel get daemonset kube-flannel-ds >/dev/null 2>&1; then
+    k8s_repair_flannel_apiserver_env
     kubectl -n kube-flannel rollout restart daemonset/kube-flannel-ds || true
     if ! kubectl -n kube-flannel rollout status daemonset/kube-flannel-ds --timeout="$timeout"; then
       k8s_flannel_diagnostics
@@ -4400,6 +4416,9 @@ Notes:
     not ready. Disable with MX_K8S_REPAIR_FLANNEL=0, override the manifest with
     MX_K8S_FLANNEL_URL=/path/to/kube-flannel.yml, or set
     MX_K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel when GHCR is blocked.
+    When the service VIP 10.96.0.1 is not reachable yet, deploy points Flannel
+    directly at the repaired apiserver IP; disable this with
+    MX_K8S_FLANNEL_DIRECT_APISERVER=0.
   - Existing mx-internal-gateway-caddy data is preserved during deploy so
     generated gateway routes are not reset to the bootstrap Caddyfile.
   - gateway-smoke is read-only and checks /healthz plus /readyz. Full HTTP
