@@ -139,8 +139,9 @@ MX_RELEASE_OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com
 MX_RELEASE_OSS_BUCKET=mx-release
 MX_RELEASE_OSS_ACCESS_KEY_ID=...
 MX_RELEASE_OSS_ACCESS_KEY_SECRET=...
+MX_RELEASE_OSS_SECURITY_TOKEN=
 MX_RELEASE_OSS_PREFIX=mx-h2i/releases
-MX_RELEASE_OSS_PUBLIC_BASE_URL=https://release-cdn.example.com/mx-h2i/releases
+MX_RELEASE_OSS_PUBLIC_BASE_URL=
 ```
 
 In k8s, create an optional `mx-release-oss` secret in `mx-internal-shadow` with the same keys.
@@ -152,13 +153,23 @@ kubectl -n mx-internal-shadow create secret generic mx-release-oss \
   --from-literal=MX_RELEASE_OSS_BUCKET=mx-release \
   --from-literal=MX_RELEASE_OSS_ACCESS_KEY_ID=... \
   --from-literal=MX_RELEASE_OSS_ACCESS_KEY_SECRET=... \
+  --from-literal=MX_RELEASE_OSS_SECURITY_TOKEN= \
   --from-literal=MX_RELEASE_OSS_PREFIX=mx-h2i/releases \
-  --from-literal=MX_RELEASE_OSS_PUBLIC_BASE_URL=https://release-cdn.example.com/mx-h2i/releases
+  --from-literal=MX_RELEASE_OSS_PUBLIC_BASE_URL=
 ```
 
 If `MX_RELEASE_OSS_PUBLIC_BASE_URL` is set, release plans use the direct OSS/CDN URL. Without
 it, the plan uses the Internal download endpoint, which redirects to a short-lived OSS signed
-URL.
+URL. Keep the bucket private unless a separate CDN/public-read release channel is intentionally
+configured.
+
+`MX_RELEASE_OSS_ENDPOINT` can be either the region endpoint (`https://oss-cn-hangzhou.aliyuncs.com`)
+or the bucket host (`https://mx-launcher.oss-cn-hangzhou.aliyuncs.com`). Keep
+`MX_RELEASE_OSS_BUCKET=mx-launcher` in both cases.
+
+For temporary STS credentials, fill `MX_RELEASE_OSS_ACCESS_KEY_ID`,
+`MX_RELEASE_OSS_ACCESS_KEY_SECRET`, and `MX_RELEASE_OSS_SECURITY_TOKEN` with the STS values. This is
+useful for short-lived server runs; production should prefer a RAM role / Secret that can be rotated.
 
 Register and upload the artifact:
 

@@ -263,6 +263,7 @@ interface ReleaseOssConfig {
   bucket: string;
   accessKeyId: string;
   accessKeySecret: string;
+  securityToken: string | null;
   prefix: string;
   publicBaseUrl: string | null;
   signedUrlTtlSeconds: number;
@@ -377,12 +378,18 @@ function releaseOssConfig(): ReleaseOssConfig | null {
       ?? process.env.OSS_ACCESS_KEY_SECRET
       ?? process.env.ALIBABA_CLOUD_ACCESS_KEY_SECRET
   );
+  const securityToken = nullableString(
+    process.env.MX_RELEASE_OSS_SECURITY_TOKEN
+      ?? process.env.OSS_SECURITY_TOKEN
+      ?? process.env.ALIBABA_CLOUD_SECURITY_TOKEN
+  );
   if (!endpoint || !bucket || !accessKeyId || !accessKeySecret) return null;
   return {
     endpoint: normalizeOssEndpoint(endpoint),
     bucket,
     accessKeyId,
     accessKeySecret,
+    securityToken,
     prefix: safeOssPrefix(process.env.MX_RELEASE_OSS_PREFIX || 'mx-h2i/releases'),
     publicBaseUrl: nullableString(process.env.MX_RELEASE_OSS_PUBLIC_BASE_URL),
     signedUrlTtlSeconds: nullableNumber(process.env.MX_RELEASE_OSS_SIGNED_URL_TTL_SECONDS) ?? 3600
@@ -398,8 +405,10 @@ async function putReleaseArtifactToOss(
 ): Promise<void> {
   const date = new Date().toUTCString();
   const url = releaseOssEndpointUrl(config, objectKey);
+  const ossHeaders = releaseOssSecurityHeaders(config);
   const headers = {
-    authorization: releaseOssAuthorization(config, 'PUT', objectKey, date, contentType),
+    ...ossHeaders,
+    authorization: releaseOssAuthorization(config, 'PUT', objectKey, date, contentType, ossHeaders),
     date,
     'content-type': contentType,
     'content-length': String(sizeBytes)
@@ -428,32 +437,66 @@ function releaseOssAuthorization(
   method: 'PUT' | 'GET',
   objectKey: string,
   dateOrExpires: string,
-  contentType = ''
+  contentType = '',
+  ossHeaders: Record<string, string> = {}
 ): string {
-  const canonicalResource = `/${config.bucket}/${objectKey}`;
-  const stringToSign = `${method}\n\n${contentType}\n${dateOrExpires}\n${canonicalResource}`;
+  const canonicalResource = releaseOssCanonicalResource(config, objectKey);
+  const stringToSign = `${method}\n\n${contentType}\n${dateOrExpires}\n${canonicalizedOssHeaders(ossHeaders)}${canonicalResource}`;
   const signature = createHmac('sha1', config.accessKeySecret).update(stringToSign).digest('base64');
   return `OSS ${config.accessKeyId}:${signature}`;
 }
 
 function releaseOssSignedUrl(config: ReleaseOssConfig, objectKey: string): string {
   const expires = String(Math.floor(Date.now() / 1000) + config.signedUrlTtlSeconds);
-  const canonicalResource = `/${config.bucket}/${objectKey}`;
+  const securityTokenParam = config.securityToken ? [['security-token', config.securityToken] as const] : [];
+  const canonicalResource = releaseOssCanonicalResource(config, objectKey, securityTokenParam);
   const stringToSign = `GET\n\n\n${expires}\n${canonicalResource}`;
   const signature = createHmac('sha1', config.accessKeySecret).update(stringToSign).digest('base64');
   const url = new URL(releaseOssEndpointUrl(config, objectKey));
   url.searchParams.set('OSSAccessKeyId', config.accessKeyId);
   url.searchParams.set('Expires', expires);
+  if (config.securityToken) url.searchParams.set('security-token', config.securityToken);
   url.searchParams.set('Signature', signature);
   return url.toString();
 }
 
 function releaseOssEndpointUrl(config: ReleaseOssConfig, objectKey: string): string {
   const endpoint = new URL(config.endpoint);
-  endpoint.hostname = `${config.bucket}.${endpoint.hostname}`;
+  const hostname = endpoint.hostname.toLowerCase();
+  const bucketPrefix = `${config.bucket.toLowerCase()}.`;
+  if (!hostname.startsWith(bucketPrefix)) {
+    endpoint.hostname = `${config.bucket}.${endpoint.hostname}`;
+  }
   endpoint.pathname = `/${objectKey.split('/').map(encodeURIComponent).join('/')}`;
   endpoint.search = '';
   return endpoint.toString();
+}
+
+function releaseOssSecurityHeaders(config: ReleaseOssConfig): Record<string, string> {
+  return config.securityToken ? { 'x-oss-security-token': config.securityToken } : {};
+}
+
+function releaseOssCanonicalResource(
+  config: ReleaseOssConfig,
+  objectKey: string,
+  subresources: ReadonlyArray<readonly [string, string]> = []
+): string {
+  const resource = `/${config.bucket}/${objectKey}`;
+  if (subresources.length === 0) return resource;
+  const query = [...subresources]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`)
+    .join('&');
+  return `${resource}?${query}`;
+}
+
+function canonicalizedOssHeaders(headers: Record<string, string>): string {
+  return Object.entries(headers)
+    .map(([key, value]) => [key.toLowerCase(), value.trim()] as const)
+    .filter(([key]) => key.startsWith('x-oss-'))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}:${value}\n`)
+    .join('');
 }
 
 function releaseOssPublicUrl(config: ReleaseOssConfig, objectKey: string): string | null {
