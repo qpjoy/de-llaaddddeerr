@@ -1592,7 +1592,15 @@ export interface ReleaseTask {
   taskId: string;
   productId: string;
   installId: string;
-  kind: 'config-refresh' | 'artifact-update' | 'service-repair' | 'runner-job';
+  kind:
+    | 'config-refresh'
+    | 'artifact-update'
+    | 'npm-package-update'
+    | 'asar-update'
+    | 'installer-update'
+    | 'feature-flag-update'
+    | 'service-repair'
+    | 'runner-job';
   state: 'pending' | 'leased' | 'completed' | 'failed';
   createdAt: string;
   payload: Record<string, unknown>;
@@ -1611,7 +1619,83 @@ export type UpdatePolicyKind =
   | 'platform-ui'
   | 'app-managed'
   | 'mandatory-app'
-  | 'config-snapshot';
+  | 'config-snapshot'
+  | 'feature-flag'
+  | 'renderer-ui'
+  | 'launcher-npm'
+  | 'launcher-asar'
+  | 'app-asar'
+  | 'appcenter-app'
+  | 'mx-h2i-installer'
+  | 'native-helper';
+
+export type ReleaseArtifactKind =
+  | 'config-snapshot'
+  | 'feature-flag'
+  | 'renderer-ui'
+  | 'launcher-npm'
+  | 'launcher-asar'
+  | 'app-asar'
+  | 'appcenter-app'
+  | 'mx-h2i-installer'
+  | 'native-helper';
+
+export type ReleaseActivationMode =
+  | 'hot-auto'
+  | 'hot-manual'
+  | 'restart-auto'
+  | 'restart-manual'
+  | 'installer-manual';
+
+export type ReleaseRolloutStrategy =
+  | 'all'
+  | 'canary'
+  | 'gray'
+  | 'manual-ring'
+  | 'feature-flag';
+
+export interface ReleaseArtifactRef {
+  artifactId: string;
+  kind: ReleaseArtifactKind;
+  componentId: string;
+  version: string;
+  source: 'internal-postgres' | 'npm-sync' | 'ci-artifact' | 'manual-upload' | 'config-center';
+  url: string | null;
+  digest: string | null;
+  signature: string | null;
+  sizeBytes: number | null;
+  activation: ReleaseActivationMode;
+  autoApply: boolean;
+  restartRequired: boolean;
+  requiredAppRestart: boolean;
+  notes: string[];
+}
+
+export interface ReleaseRolloutPolicy {
+  strategy: ReleaseRolloutStrategy;
+  percentage: number;
+  segmentId: string;
+  rings: string[];
+  featureKeys: string[];
+  channels: string[];
+  audience: {
+    installIds: string[];
+    userIds: string[];
+    siteIds: string[];
+  };
+  allowAutoPromote: boolean;
+  canaryMetricGate: string;
+}
+
+export interface ReleaseActivationPolicy {
+  checkSource: 'internal-postgres';
+  hotUpdateAuto: boolean;
+  hotUpdateToast: boolean;
+  majorUpdateRequiresInstaller: boolean;
+  restartAfterApply: boolean;
+  manualConfirmRequired: boolean;
+  connectionSafeMode: boolean;
+}
 
 export type AppCenterAccessDefaultDecision = 'public' | 'authenticated' | 'private';
 
@@ -2744,10 +2828,25 @@ export interface ReleaseManagementPlanInput {
   userId?: string | null;
   productId?: string | null;
   appId?: string | null;
+  launcherComponentId?: string | null;
+  appComponentId?: string | null;
+  launcherUpdatePolicy?: UpdatePolicyKind | string | null;
+  appUpdatePolicy?: UpdatePolicyKind | string | null;
   launcherCurrentVersion?: string | null;
   launcherTargetVersion?: string | null;
   appCurrentVersion?: string | null;
   appTargetVersion?: string | null;
+  artifactKind?: ReleaseArtifactKind | string | null;
+  artifactVersion?: string | null;
+  artifactUrl?: string | null;
+  artifactDigest?: string | null;
+  artifactSignature?: string | null;
+  activationMode?: ReleaseActivationMode | string | null;
+  rolloutStrategy?: ReleaseRolloutStrategy | string | null;
+  rolloutPercentage?: number | null;
+  rolloutSegment?: string | null;
+  rolloutRings?: string[];
+  featureKeys?: string[];
   suiteId?: string | null;
   topology?: string | null;
   sites?: string[];
@@ -2768,6 +2867,9 @@ export interface ReleaseManagementPlan {
     launcher: ReleasePolicyDecision;
     app: ReleasePolicyDecision;
   };
+  artifacts: ReleaseArtifactRef[];
+  rollout: ReleaseRolloutPolicy;
+  activation: ReleaseActivationPolicy;
   test: {
     suiteId: string;
     topology: string;

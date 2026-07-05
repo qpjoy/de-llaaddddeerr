@@ -639,17 +639,32 @@ button:disabled {
   width: 100%;
 }
 
-.phone-action-card {
+.phone-footer-info {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 14px;
+  min-height: 54px;
   border-top: 1px solid rgba(94, 142, 236, 0.14);
   padding-top: 16px;
 }
 
-.phone-action-card h2 {
+.phone-footer-info h2 {
   font-size: 16px;
+}
+
+.phone-footer-info span {
+  display: inline-grid;
+  min-width: 72px;
+  min-height: 34px;
+  place-items: center;
+  border-radius: 6px;
+  padding: 0 12px;
+  background: rgba(43, 246, 210, 0.1);
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
 }
 
 .advanced-phone {

@@ -1280,6 +1280,145 @@ select {
   color: var(--red);
 }
 
+.release-catalog-controls {
+  grid-template-columns: minmax(220px, 1fr) minmax(130px, 0.42fr) minmax(130px, 0.42fr) minmax(150px, 0.5fr) auto auto auto;
+  width: min(1120px, 100%);
+}
+
+.release-catalog-controls select {
+  width: 100%;
+  min-width: 0;
+}
+
+.release-strategy-strip,
+.release-drawer-summary,
+.release-rollout-grid,
+.release-artifact-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.release-strategy-strip {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.release-strategy-strip article,
+.release-drawer-summary article,
+.release-rollout-grid article,
+.release-artifact-grid article {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(18, 20, 28, 0.48);
+}
+
+.release-strategy-strip span,
+.release-drawer-summary span,
+.release-rollout-grid span,
+.release-artifact-grid span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.release-strategy-strip strong,
+.release-drawer-summary strong,
+.release-rollout-grid strong,
+.release-artifact-grid strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.release-strategy-strip small,
+.release-drawer-summary small,
+.release-rollout-grid small,
+.release-artifact-grid small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.release-admin-table .app-table-row {
+  grid-template-columns: minmax(190px, 1.05fr) minmax(210px, 1.15fr) minmax(170px, 0.85fr) minmax(150px, 0.75fr) minmax(130px, 0.65fr) minmax(92px, 0.45fr) minmax(150px, 0.68fr);
+  min-width: 1160px;
+}
+
+.release-admin-table .app-table-row mark[data-kind="ready"] {
+  border-color: color-mix(in srgb, var(--green) 50%, transparent);
+  color: var(--green);
+}
+
+.release-admin-table .app-table-row mark[data-kind="planned"] {
+  border-color: color-mix(in srgb, var(--mx-primary) 45%, transparent);
+  color: var(--mx-primary);
+}
+
+.release-admin-table .app-table-row mark[data-kind="blocked"] {
+  border-color: color-mix(in srgb, var(--yellow) 55%, transparent);
+  color: var(--yellow);
+}
+
+.release-admin-table .app-table-row mark[data-kind="failed"] {
+  border-color: color-mix(in srgb, var(--red) 52%, transparent);
+  color: var(--red);
+}
+
+.release-drawer-summary,
+.release-rollout-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.release-artifact-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.release-artifact-grid code {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: var(--mx-bg-input);
+  color: var(--mx-text-soft);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.release-client-table .foundation-table-row {
+  grid-template-columns: minmax(140px, 0.7fr) minmax(160px, 0.72fr) minmax(320px, 1.4fr);
+}
+
+.release-next-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.release-next-actions span {
+  border: 1px solid color-mix(in srgb, var(--mx-primary) 35%, var(--line));
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--mx-primary) 8%, transparent);
+  color: var(--mx-text);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .user-editor-drawer {
   width: min(56vw, 1040px);
   min-width: min(720px, calc(100vw - 28px));
@@ -5858,6 +5997,10 @@ select {
   .dns-metric-grid,
   .dns-result-grid,
   .dns-zone-summary,
+  .release-strategy-strip,
+  .release-drawer-summary,
+  .release-rollout-grid,
+  .release-artifact-grid,
   .product-network-facts,
   .app-workbench-panels,
   .app-workbench-facts,
@@ -5887,6 +6030,8 @@ select {
   .foundation-table-row,
   .product-network-table .foundation-table-row,
   .user-admin-table .app-table-row,
+  .release-admin-table .app-table-row,
+  .release-client-table .foundation-table-row,
   .module-contract-table .foundation-table-row,
   .rbac-role-table .foundation-table-row,
   .permission-registry-table .foundation-table-row {
@@ -5926,6 +6071,7 @@ select {
   .foundation-operation-grid,
   .user-oversea-grid,
   .user-catalog-controls,
+  .release-catalog-controls,
   .relay-operation-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }

@@ -187,7 +187,7 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:connect-guest', async () => {
-    await recoverRetainedWireGuardBeforeBootstrap('guest-pre-bootstrap');
+    await recoverRetainedWireGuardBeforeBootstrap('guest-pre-bootstrap', { allowPrivileged: false });
     setConnecting('guest');
     await refreshNetworkEnvironmentDiagnostics('guest-pre-connect', { phase: 'bootstrap', persist: false });
     await saveAndBroadcast();
@@ -225,7 +225,7 @@ function registerIpc() {
       };
       return visibleRuntime();
     }
-    await recoverRetainedWireGuardBeforeBootstrap('employee-pre-bootstrap');
+    await recoverRetainedWireGuardBeforeBootstrap('employee-pre-bootstrap', { allowPrivileged: false });
     setConnecting('employee');
     await refreshNetworkEnvironmentDiagnostics('employee-pre-connect', { phase: 'bootstrap', persist: false });
     await saveAndBroadcast();
@@ -2131,6 +2131,26 @@ function currentSystemDomainProxyStatus(reason, extra = {}) {
   };
 }
 
+function deferredSystemDomainProxyRestoreStatus(reason, prepared = null) {
+  const status = typeof systemDomainProxyManager?.status === 'function'
+    ? systemDomainProxyManager.status()
+    : null;
+  const preparedStatus = prepared?.status && typeof prepared.status === 'object'
+    ? prepared.status
+    : null;
+  return {
+    supported: true,
+    platform: process.platform,
+    ...(status && typeof status === 'object' ? status : {}),
+    reason,
+    skipped: true,
+    skipReason: 'wireguard-not-ready-no-privileged-restore',
+    pending: preparedStatus?.pending === true || status?.pending === true,
+    externalApply: preparedStatus?.externalApply === true || status?.externalApply === true,
+    error: preparedStatus?.error || status?.error || null
+  };
+}
+
 function isSystemDomainProxyAuthorizationCanceled(status) {
   const text = status instanceof Error
     ? `${status.message || ''}\n${status.stack || ''}`
@@ -3489,15 +3509,17 @@ async function connectLauncherNetwork(input) {
   };
 }
 
-async function recoverRetainedWireGuardBeforeBootstrap(reason) {
+async function recoverRetainedWireGuardBeforeBootstrap(reason, options = {}) {
   if (!runtime || !shouldRecoverWireGuardConnection(runtime.connection)) return null;
   const connection = runtime.connection || {};
   if (!normalizeRoutePlan(connection.routePlan)) return null;
-  const result = await recoverWireGuardForRuntime(reason, { allowPrivileged: true });
+  const result = await recoverWireGuardForRuntime(reason, {
+    allowPrivileged: options.allowPrivileged === true
+  });
   if (result?.ready) {
     runtime.feedback = {
       tone: 'info',
-      message: '已先恢复本地保留的 WireGuard，接下来通过 Internal overlay 刷新 bootstrap。'
+      message: '已检测到本地保留的 WireGuard ready，接下来通过 Internal overlay 刷新 bootstrap。'
     };
     touchRuntime(`wireguard pre-bootstrap ready: ${reason}`);
     await saveAndBroadcast();
@@ -3666,7 +3688,7 @@ async function applyNetworkSession(session, options) {
       ? (combinedSystemDomainProxy?.shell
           ? await completeExternalSystemDomainProxyApply('post-connect-combined')
           : await ensureSystemDomainProxyForRuntime('post-connect'))
-      : await disableSystemDomainProxyForRuntime('wireguard-not-ready');
+      : deferredSystemDomainProxyRestoreStatus('wireguard-not-ready', combinedSystemDomainProxy);
     const networkEnvironment = await collectNetworkEnvironmentDiagnostics('post-connect', {
       phase: wireGuardResult.ready ? 'connected' : 'bootstrap'
     });
@@ -3795,7 +3817,8 @@ async function startWireGuardForSession(input) {
     const mod = await import('@qpjoy/electron-launcher/wireguard');
     const internalBaseUrl = internalOverlayBaseUrl(routePlan, input.internalBaseUrl);
     const configuredPreference = normalizeRoutePathPreference(runtime.config.routePathPreference);
-    const pathPreference = effectiveWireGuardPathPreference(routePlan, internalDirectPeerSync, configuredPreference);
+    const pathSelection = selectWireGuardPathPreference(mod, routePlan, internalDirectPeerSync, configuredPreference);
+    const pathPreference = pathSelection.pathPreference;
     let attempt = await connectAndProbeWireGuardPath(mod, {
       routePlan,
       privateKey,
@@ -3828,6 +3851,7 @@ async function startWireGuardForSession(input) {
         internalDirectPeerSync,
         domesticPeerSync,
         domesticRelayDiagnostics,
+        pathSelection,
         standaloneOwnershipRegistry,
         updatedAt: nowIso()
       },
@@ -4398,6 +4422,36 @@ function effectiveWireGuardPathPreference(routePlan, _internalDirectPeerSync, co
   return routePlanHasDirect(routePlan) ? 'direct' : 'relay';
 }
 
+function selectWireGuardPathPreference(mod, routePlan, internalDirectPeerSync, configuredPreference) {
+  const configured = normalizeRoutePathPreference(configuredPreference);
+  const selected = effectiveWireGuardPathPreference(routePlan, internalDirectPeerSync, configured);
+  const endpoint = endpointForRoutePreference(routePlan, selected);
+  const endpointRoute = endpoint ? mod.probeLauncherWireGuardEndpoint({ endpoint }) : null;
+  const shouldFallbackToRelay = (configured === 'auto' || configured === 'hybrid')
+    && selected !== 'relay'
+    && endpointRoute?.viaProxyTun === true
+    && routePlanHasRelay(routePlan);
+  if (!shouldFallbackToRelay) {
+    return {
+      configuredPreference: configured,
+      pathPreference: selected,
+      endpointRoute,
+      fallbackReason: null
+    };
+  }
+  const relayEndpointRoute = mod.probeLauncherWireGuardEndpoint({
+    endpoint: routePlan.domesticRelayEndpoint
+  });
+  return {
+    configuredPreference: configured,
+    pathPreference: 'relay',
+    endpointRoute: relayEndpointRoute,
+    fallbackFrom: selected,
+    fallbackReason: `direct endpoint route captured by proxy TUN gateway ${endpointRoute.gateway || 'unknown'}`,
+    directEndpointRoute: endpointRoute
+  };
+}
+
 function routePathFromPreference(preference) {
   const normalized = normalizeRoutePathPreference(preference);
   if (normalized === 'direct') return 'h2i-direct';
@@ -4423,6 +4477,11 @@ function routePlanHasDirect(routePlan) {
   return plan?.h2iDirectEnabled === true
     && Boolean(plan.h2iDirectEndpoint)
     && Boolean(plan.h2iDirectPublicKey);
+}
+
+function routePlanHasRelay(routePlan) {
+  const plan = normalizeRoutePlan(routePlan);
+  return Boolean(plan?.domesticRelayEndpoint && plan.domesticRelayPublicKey);
 }
 
 async function probeInternalApiViaOverlay(baseUrl) {

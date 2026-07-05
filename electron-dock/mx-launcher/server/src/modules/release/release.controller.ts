@@ -69,10 +69,25 @@ function toReleaseManagementPlanInput(body: Record<string, unknown>): ReleaseMan
     userId: nullableString(body.userId),
     productId: nullableString(body.productId),
     appId: nullableString(body.appId),
+    launcherComponentId: nullableString(body.launcherComponentId),
+    appComponentId: nullableString(body.appComponentId),
+    launcherUpdatePolicy: nullableString(body.launcherUpdatePolicy),
+    appUpdatePolicy: nullableString(body.appUpdatePolicy),
     launcherCurrentVersion: nullableString(body.launcherCurrentVersion),
     launcherTargetVersion: nullableString(body.launcherTargetVersion),
     appCurrentVersion: nullableString(body.appCurrentVersion),
     appTargetVersion: nullableString(body.appTargetVersion),
+    artifactKind: nullableString(body.artifactKind),
+    artifactVersion: nullableString(body.artifactVersion),
+    artifactUrl: nullableString(body.artifactUrl),
+    artifactDigest: nullableString(body.artifactDigest),
+    artifactSignature: nullableString(body.artifactSignature),
+    activationMode: nullableString(body.activationMode),
+    rolloutStrategy: nullableString(body.rolloutStrategy),
+    rolloutPercentage: nullableNumber(body.rolloutPercentage),
+    rolloutSegment: nullableString(body.rolloutSegment),
+    rolloutRings: stringArray(body.rolloutRings),
+    featureKeys: stringArray(body.featureKeys),
     suiteId: nullableString(body.suiteId),
     topology: nullableString(body.topology),
     sites: stringArray(body.sites),
@@ -85,4 +100,13 @@ function toReleaseManagementPlanInput(body: Record<string, unknown>): ReleaseMan
 function releaseManagementE2eResult(value: unknown): ReleaseManagementE2eResult | null {
   if (value === 'passed' || value === 'failed' || value === 'blocked' || value === 'running') return value;
   return null;
+}
+
+function nullableNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  if (!normalized) return null;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
 }

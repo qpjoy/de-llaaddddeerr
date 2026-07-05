@@ -594,6 +594,11 @@ Internal 是唯一真相：
 | Site Slots | Domestic/Oversea profile、artifact、worker、evidence |
 | Observability | 设备心跳、连接质量、审计、错误诊断 |
 
+Release Center 的更新决策详见
+[`17-mx-h2i-release-center-update-system.md`](./17-mx-h2i-release-center-update-system.md)。
+客户端只查询 Internal/Postgres 中的 release decision；npm、asar、UI bundle、配置快照和完整安装包
+先由 CI/Admin 同步为 Release Center artifact，再按灰度、gate 和签名策略下发。
+
 Domestic 是最小 edge：
 
 | 能力 | 说明 |

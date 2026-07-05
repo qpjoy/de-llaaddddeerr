@@ -393,7 +393,7 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
 
       ${showEmployeeLogin ? renderEmployeeLogin(connecting) : renderGuestConnect(connected, connecting, activeLease && !connected)}
       ${renderConnectionStrip()}
-      ${renderPhoneAppCenterAction(connected, connecting)}
+      ${renderPhoneFooterInfo(connected)}
     </section>
   `;
 }
@@ -420,7 +420,7 @@ function renderEmployeeLogin(connecting) {
     <form class="login-panel" data-form-action="login-employee">
       <label class="field">
         <span>账号</span>
-        <input name="account" value="${escapeAttr(state.identity?.account || 'talentzhong@lilith.com')}" autocomplete="username" />
+        <input name="account" value="${escapeAttr(state.identity?.account || '')}" autocomplete="username" placeholder="Username/Email/Phone" />
       </label>
       <label class="field">
         <span>密码</span>
@@ -436,17 +436,18 @@ function renderEmployeeLogin(connecting) {
   `;
 }
 
-function renderPhoneAppCenterAction(connected, connecting) {
-  const installed = state.apps?.appcenter?.installed;
+function renderPhoneFooterInfo(connected) {
+  const update = state.update || {};
+  const version = update.currentVersion || '0.1.0';
+  const channel = update.channel || state.config?.releaseChannel || 'stable';
+  const status = connected ? 'ready' : (update.status || state.connection?.state || 'idle');
   return `
-    <section class="phone-action-card">
+    <section class="phone-footer-info">
       <div>
-        <h2>AppCenter</h2>
-        <p>${installed ? '宽屏桌面应用已就绪' : '安装后进入宽屏桌面应用'}</p>
+        <h2>MX-H2I</h2>
+        <p>版本 ${escapeHtml(version)} · ${escapeHtml(channel)}</p>
       </div>
-      <button class="primary-button" type="button" data-action="${installed ? 'show-appcenter' : 'installAppCenter'}" ${!connected || connecting || busyAction === 'installAppCenter' ? 'disabled' : ''}>
-        ${installed ? '进入' : '安装'}
-      </button>
+      <span>${escapeHtml(status)}</span>
     </section>
   `;
 }

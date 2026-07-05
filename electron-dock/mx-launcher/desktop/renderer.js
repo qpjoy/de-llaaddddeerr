@@ -192,6 +192,17 @@ const state = {
     feedback: null,
     busy: false
   },
+  releaseCenter: {
+    filter: {
+      search: '',
+      channel: 'all',
+      status: 'all',
+      artifactKind: 'all'
+    },
+    drawer: null,
+    feedback: null,
+    busy: false
+  },
   dnsCenter: {
     policies: [],
     policy: null,
@@ -778,7 +789,13 @@ if (appEditorBackdrop) {
 }
 
 if (userEditorBackdrop) {
-  userEditorBackdrop.addEventListener('click', () => closeUserEditorDrawer());
+  userEditorBackdrop.addEventListener('click', () => {
+    if (state.releaseCenter.drawer) {
+      closeReleaseCenterDrawer();
+      return;
+    }
+    closeUserEditorDrawer();
+  });
 }
 
 document.addEventListener('click', (event) => {
@@ -794,6 +811,10 @@ window.addEventListener('keydown', (event) => {
     return;
   }
   if (event.key === 'Escape' && userEditorDrawer && !userEditorDrawer.hidden) {
+    if (state.releaseCenter.drawer) {
+      closeReleaseCenterDrawer();
+      return;
+    }
     closeUserEditorDrawer();
     return;
   }
@@ -5491,6 +5512,9 @@ function renderFoundationGrid(overview) {
   if (activeId !== 'user-center' && state.userCenter.drawer) {
     closeUserEditorDrawer();
   }
+  if (activeId !== 'release' && state.releaseCenter.drawer) {
+    closeReleaseCenterDrawer();
+  }
   if (activeId !== 'dns' && state.dnsCenter.drawer) {
     closeDnsRouteEditorDrawer();
   }
@@ -5517,6 +5541,8 @@ function renderFoundationGrid(overview) {
     body = renderDnsCenterPanel();
   } else if (activeId === 'awx-provider') {
     body = renderOptionalAwxProviderPanel();
+  } else if (activeId === 'release') {
+    body = renderReleaseCenterPanel();
   } else {
     body = renderInternalModulePanel(activeId, overview || {});
   }
@@ -5588,6 +5614,8 @@ function renderFoundationGrid(overview) {
     });
   }
   renderUserEditorDrawer();
+  bindReleaseCenterControls(foundationGrid);
+  renderReleaseCenterDrawer();
   bindDnsCenterControls(foundationGrid);
   renderDnsRouteEditorDrawer();
   bindDomesticRuntimeControls(foundationGrid);
@@ -6058,6 +6086,548 @@ function renderUserCenterPanel() {
       </div>
     </section>
   `;
+}
+
+function releaseCenterFilters() {
+  if (!state.releaseCenter.filter) {
+    state.releaseCenter.filter = { search: '', channel: 'all', status: 'all', artifactKind: 'all' };
+  }
+  return state.releaseCenter.filter;
+}
+
+function releaseCenterPlans() {
+  return asArray(state.dashboard?.latestReleasePlans);
+}
+
+function releasePlanById(planId) {
+  return releaseCenterPlans().find((plan) => plan?.planId === planId) || null;
+}
+
+function releaseDecisionList(plan) {
+  return [plan?.components?.launcher, plan?.components?.app].filter(Boolean);
+}
+
+function releasePlanArtifacts(plan) {
+  const artifacts = asArray(plan?.artifacts);
+  if (artifacts.length) return artifacts;
+  return releaseDecisionList(plan)
+    .filter((decision) => decision.updateAvailable)
+    .map((decision) => ({
+      artifactId: `${plan.planId}-${decision.componentId}`,
+      kind: decision.componentKind,
+      componentId: decision.componentId,
+      version: decision.targetVersion,
+      source: 'internal-postgres',
+      activation: decision.updateMode === 'mandatory' ? 'installer-manual' : 'hot-auto',
+      autoApply: decision.updateMode === 'automatic',
+      restartRequired: decision.updateMode === 'mandatory',
+      requiredAppRestart: decision.updateMode === 'mandatory'
+    }));
+}
+
+function releasePlanStatus(plan) {
+  const gate = plan?.test?.gate?.verdict || 'blocked';
+  if (gate === 'failed') return 'failed';
+  if (gate === 'blocked') return 'blocked';
+  if (plan?.decisions?.readyToPromote) return 'ready';
+  if (releaseDecisionList(plan).some((decision) => decision.updateAvailable)) return 'planned';
+  return 'idle';
+}
+
+function releaseStatusLabel(status) {
+  const labels = {
+    ready: 'ready',
+    planned: 'planned',
+    blocked: 'blocked',
+    failed: 'failed',
+    idle: 'idle'
+  };
+  return labels[status] || status || 'unknown';
+}
+
+function renderReleaseStatusBadge(status) {
+  return `<mark data-kind="${escapeHtml(status)}">${escapeHtml(releaseStatusLabel(status))}</mark>`;
+}
+
+function releaseArtifactKinds(plan) {
+  return releasePlanArtifacts(plan)
+    .map((artifact) => artifact.kind || artifact.componentKind)
+    .filter(Boolean);
+}
+
+function releaseDeliveryLabel(plan) {
+  const activation = plan?.activation || {};
+  if (activation.majorUpdateRequiresInstaller) return 'full installer';
+  if (activation.restartAfterApply) return 'staged restart';
+  if (activation.hotUpdateAuto) return 'hot auto';
+  return 'manual review';
+}
+
+function releaseComponentSummary(plan) {
+  const decisions = releaseDecisionList(plan);
+  return decisions.map((decision) => `${decision.componentId} ${decision.currentVersion}->${decision.targetVersion}`).join(' / ') || '-';
+}
+
+function filteredReleaseCenterPlans() {
+  const filter = releaseCenterFilters();
+  const search = (filter.search || '').trim().toLowerCase();
+  return releaseCenterPlans().filter((plan) => {
+    const status = releasePlanStatus(plan);
+    const artifactKinds = releaseArtifactKinds(plan);
+    const haystack = [
+      plan.planId,
+      plan.releaseId,
+      plan.channel,
+      plan.createdBy,
+      releaseComponentSummary(plan),
+      artifactKinds.join(' ')
+    ].filter(Boolean).join(' ').toLowerCase();
+    if (search && !haystack.includes(search)) return false;
+    if (filter.channel !== 'all' && plan.channel !== filter.channel) return false;
+    if (filter.status !== 'all' && status !== filter.status) return false;
+    if (filter.artifactKind !== 'all' && !artifactKinds.includes(filter.artifactKind)) return false;
+    return true;
+  });
+}
+
+function renderReleaseCenterPanel() {
+  const plans = releaseCenterPlans();
+  const filteredPlans = filteredReleaseCenterPlans();
+  const filter = releaseCenterFilters();
+  const channels = [...new Set(plans.map((plan) => plan.channel).filter(Boolean))];
+  const artifactKinds = [...new Set(plans.flatMap((plan) => releaseArtifactKinds(plan)).filter(Boolean))];
+  const feedback = state.releaseCenter.feedback;
+  return `
+    <section class="foundation-panel foundation-wide user-workbench release-workbench">
+      <div class="app-catalog-toolbar user-catalog-toolbar release-catalog-toolbar">
+        <div>
+          <span class="site-kind">Release Center</span>
+          <strong>Release registry</strong>
+          <small>MX-H2I installer、UI bundle、launcher npm、asar、配置快照和 feature flag 都由 Internal 决策。</small>
+        </div>
+        <div class="app-catalog-controls user-catalog-controls release-catalog-controls">
+          <input data-release-filter="search" value="${escapeHtml(filter.search || '')}" autocomplete="off" placeholder="Search release..." />
+          <select data-release-filter="channel" aria-label="Release channel">
+            <option value="all" ${filter.channel === 'all' ? 'selected' : ''}>All channels</option>
+            ${channels.map((channel) => `<option value="${escapeHtml(channel)}" ${filter.channel === channel ? 'selected' : ''}>${escapeHtml(channel)}</option>`).join('')}
+          </select>
+          <select data-release-filter="status" aria-label="Release status">
+            ${['all', 'ready', 'planned', 'blocked', 'failed', 'idle'].map((status) => `<option value="${escapeHtml(status)}" ${filter.status === status ? 'selected' : ''}>${escapeHtml(status === 'all' ? 'All status' : status)}</option>`).join('')}
+          </select>
+          <select data-release-filter="artifactKind" aria-label="Artifact kind">
+            <option value="all" ${filter.artifactKind === 'all' ? 'selected' : ''}>All artifacts</option>
+            ${artifactKinds.map((kind) => `<option value="${escapeHtml(kind)}" ${filter.artifactKind === kind ? 'selected' : ''}>${escapeHtml(kind)}</option>`).join('')}
+          </select>
+          <button class="secondary-button" type="button" data-release-refresh ${state.releaseCenter.busy ? 'disabled' : ''}>Refresh plans</button>
+          <button class="secondary-button" type="button" data-release-create="hot" ${state.releaseCenter.busy ? 'disabled' : ''}>Plan hot update</button>
+          <button class="primary-button" type="button" data-release-create="major" ${state.releaseCenter.busy ? 'disabled' : ''}>Plan MX-H2I</button>
+        </div>
+      </div>
+      <div class="user-workbench-meta">
+        <span>${escapeHtml(String(filteredPlans.length))} shown</span>
+        <span>${escapeHtml(String(plans.length))} total</span>
+        ${feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(feedback.kind)}">${escapeHtml(feedback.message)}</span>` : ''}
+      </div>
+      <div class="release-strategy-strip">
+        ${renderReleaseStrategyFact('Update source', 'Internal/Postgres', 'clients never resolve npm directly')}
+        ${renderReleaseStrategyFact('Hot path', 'auto + toast', 'UI, npm, asar, config, feature flag')}
+        ${renderReleaseStrategyFact('Major path', 'manual installer', 'DMG / EXE with signature and restart')}
+        ${renderReleaseStrategyFact('Connection guard', 'safe mode', 'no WG / PAC mutation while checking updates')}
+      </div>
+      <div class="app-table user-admin-table release-admin-table">
+        <article class="app-table-row is-header">
+          <strong>Release</strong>
+          <span>Components</span>
+          <span>Artifacts</span>
+          <span>Rollout</span>
+          <span>Gate</span>
+          <span>Status</span>
+          <b>Actions</b>
+        </article>
+        ${filteredPlans.map((plan) => {
+          const artifacts = releasePlanArtifacts(plan);
+          const status = releasePlanStatus(plan);
+          const rollout = plan.rollout || {};
+          return `
+            <article class="app-table-row ${plan.planId === state.releaseCenter.drawer?.planId ? 'is-selected' : ''}" data-release-select="${escapeHtml(plan.planId)}" tabindex="0">
+              <span>
+                <strong>${escapeHtml(plan.releaseId || plan.planId)}</strong>
+                <small>${escapeHtml(`${plan.channel || 'shadow'} / ${formatTime(plan.createdAt)}`)}</small>
+              </span>
+              <span>
+                <strong>${escapeHtml(releaseComponentSummary(plan))}</strong>
+                <small>${escapeHtml(releaseDeliveryLabel(plan))}</small>
+              </span>
+              <span>${renderChipList(artifacts.map((artifact) => artifact.kind || artifact.componentKind).slice(0, 3), 'info')}</span>
+              <span>
+                <strong>${escapeHtml(`${rollout.strategy || 'gray'} ${rollout.percentage ?? 10}%`)}</strong>
+                <small>${escapeHtml(rollout.segmentId || 'default segment')}</small>
+              </span>
+              <span>
+                <strong>${escapeHtml(plan.test?.gate?.verdict || 'blocked')}</strong>
+                <small>${escapeHtml(plan.test?.suiteId || 'hdi-shadow-e2e')}</small>
+              </span>
+              <span>${renderReleaseStatusBadge(status)}</span>
+              <span class="app-table-actions">
+                <button class="secondary-button" type="button" data-release-open="${escapeHtml(plan.planId)}">Open</button>
+                <button class="secondary-button" type="button" data-release-evaluate="${escapeHtml(plan.planId)}" ${state.releaseCenter.busy ? 'disabled' : ''}>Evaluate</button>
+              </span>
+            </article>
+          `;
+        }).join('') || '<div class="empty-state">No release plans match the current filters.</div>'}
+      </div>
+    </section>
+  `;
+}
+
+function renderReleaseStrategyFact(label, value, detail) {
+  return `
+    <article>
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <small>${escapeHtml(detail)}</small>
+    </article>
+  `;
+}
+
+function bindReleaseCenterControls(root) {
+  if (!root) return;
+  const releaseSearch = root.querySelector('[data-release-filter="search"]');
+  if (releaseSearch) {
+    releaseSearch.addEventListener('input', () => {
+      const cursor = releaseSearch.selectionStart;
+      releaseCenterFilters().search = releaseSearch.value;
+      renderFoundationGrid(state.dashboard?.overview || {});
+      requestAnimationFrame(() => {
+        const nextSearch = foundationGrid.querySelector('[data-release-filter="search"]');
+        nextSearch?.focus?.();
+        if (typeof cursor === 'number') nextSearch?.setSelectionRange?.(cursor, cursor);
+      });
+    });
+  }
+  for (const control of root.querySelectorAll('select[data-release-filter]')) {
+    control.addEventListener('change', () => {
+      releaseCenterFilters()[control.dataset.releaseFilter] = control.value || 'all';
+      renderFoundationGrid(state.dashboard?.overview || {});
+    });
+  }
+  const refresh = root.querySelector('[data-release-refresh]');
+  if (refresh) refresh.addEventListener('click', () => void refreshReleaseCenterPlans());
+  for (const button of root.querySelectorAll('[data-release-create]')) {
+    button.addEventListener('click', () => void createReleasePlanFromAdmin(button.dataset.releaseCreate));
+  }
+  for (const row of root.querySelectorAll('[data-release-select]')) {
+    row.addEventListener('click', (event) => {
+      if (event.target.closest('button')) return;
+      openReleaseCenterDrawer(row.dataset.releaseSelect);
+    });
+    row.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      openReleaseCenterDrawer(row.dataset.releaseSelect);
+    });
+  }
+  for (const button of root.querySelectorAll('[data-release-open]')) {
+    button.addEventListener('click', () => openReleaseCenterDrawer(button.dataset.releaseOpen));
+  }
+  for (const button of root.querySelectorAll('[data-release-evaluate]')) {
+    button.addEventListener('click', () => void evaluateReleasePlanFromAdmin(button.dataset.releaseEvaluate));
+  }
+}
+
+async function refreshReleaseCenterPlans() {
+  if (state.releaseCenter.busy) return;
+  state.releaseCenter.busy = true;
+  state.releaseCenter.feedback = { kind: 'info', message: 'Refreshing release plans' };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    const payload = await fetchJson('/internal/v1/release-management/plans');
+    const plans = asArray(payload.plans);
+    state.dashboard = {
+      ...(state.dashboard || {}),
+      latestReleasePlans: plans,
+      overview: {
+        ...(state.dashboard?.overview || {}),
+        releaseManagementPlans: plans.length
+      }
+    };
+    state.releaseCenter.feedback = { kind: 'success', message: `Loaded ${plans.length} release plans` };
+  } catch (error) {
+    state.releaseCenter.feedback = { kind: 'error', message: error.message };
+  } finally {
+    state.releaseCenter.busy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+    renderInspector();
+  }
+}
+
+async function createReleasePlanFromAdmin(kind = 'hot') {
+  if (state.releaseCenter.busy) return;
+  const major = kind === 'major';
+  const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const suffix = String(Date.now()).slice(-6);
+  const body = major
+    ? {
+        releaseId: `mx-h2i-major-${stamp}-${suffix}`,
+        channel: 'stable',
+        productId: MX_H2I_PRODUCT_ID,
+        appId: MX_H2I_PRODUCT_ID,
+        launcherComponentId: MX_H2I_PRODUCT_ID,
+        launcherUpdatePolicy: 'mx-h2i-installer',
+        launcherCurrentVersion: '0.1.0',
+        launcherTargetVersion: '0.2.0',
+        appUpdatePolicy: 'app-managed',
+        appCurrentVersion: '0.1.0',
+        appTargetVersion: '0.1.0',
+        artifactKind: 'mx-h2i-installer',
+        artifactVersion: '0.2.0',
+        activationMode: 'installer-manual',
+        rolloutStrategy: 'manual-ring',
+        rolloutPercentage: 0,
+        rolloutRings: ['internal-dogfood', 'stable'],
+        suiteId: 'mx-h2i-major-e2e',
+        topology: 'h-d-i-installer',
+        sites: ['internal-main', 'domestic-main'],
+        e2eResult: 'running',
+        createdBy: 'desktop-admin',
+        requestId: `desktop-release-major-${Date.now()}`
+      }
+    : {
+        releaseId: `mx-h2i-hot-${stamp}-${suffix}`,
+        channel: 'stable',
+        productId: MX_H2I_PRODUCT_ID,
+        appId: MX_H2I_PRODUCT_ID,
+        launcherComponentId: 'mx-h2i-renderer',
+        launcherUpdatePolicy: 'renderer-ui',
+        launcherCurrentVersion: '0.1.0',
+        launcherTargetVersion: '0.1.1',
+        appComponentId: 'mx-h2i-config',
+        appUpdatePolicy: 'config-snapshot',
+        appCurrentVersion: '0.1.0',
+        appTargetVersion: '0.1.1',
+        artifactKind: 'renderer-ui',
+        artifactVersion: '0.1.1',
+        activationMode: 'hot-auto',
+        rolloutStrategy: 'gray',
+        rolloutPercentage: 10,
+        rolloutRings: ['internal-dogfood', 'canary', 'stable'],
+        featureKeys: ['mx-h2i.release.hot-update'],
+        suiteId: 'mx-h2i-hot-e2e',
+        topology: 'h-d-i-hot-update',
+        sites: ['internal-main', 'domestic-main'],
+        e2eResult: 'running',
+        createdBy: 'desktop-admin',
+        requestId: `desktop-release-hot-${Date.now()}`
+      };
+  state.releaseCenter.busy = true;
+  state.releaseCenter.feedback = { kind: 'info', message: major ? 'Creating MX-H2I installer plan' : 'Creating hot update plan' };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    const payload = await fetchJson('/internal/v1/release-management/plans', { method: 'POST', body });
+    const plan = payload.plan;
+    const currentPlans = releaseCenterPlans().filter((item) => item.planId !== plan.planId);
+    const plans = [plan, ...currentPlans];
+    state.dashboard = {
+      ...(state.dashboard || {}),
+      latestReleasePlans: plans,
+      overview: {
+        ...(state.dashboard?.overview || {}),
+        releaseManagementPlans: Math.max(plans.length, state.dashboard?.overview?.releaseManagementPlans || 0)
+      }
+    };
+    state.releaseCenter.drawer = { planId: plan.planId };
+    state.releaseCenter.feedback = { kind: 'success', message: `Created ${plan.releaseId}` };
+  } catch (error) {
+    state.releaseCenter.feedback = { kind: 'error', message: error.message };
+  } finally {
+    state.releaseCenter.busy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+    renderInspector();
+  }
+}
+
+async function evaluateReleasePlanFromAdmin(planId) {
+  const plan = releasePlanById(planId);
+  if (!plan || state.releaseCenter.busy) return;
+  const decision = plan.components?.launcher?.updateAvailable ? plan.components.launcher : plan.components?.app;
+  if (!decision) return;
+  state.releaseCenter.busy = true;
+  state.releaseCenter.feedback = { kind: 'info', message: `Evaluating ${decision.componentId}` };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    const payload = await fetchJson('/internal/v1/releases/policy/evaluate', {
+      method: 'POST',
+      body: {
+        componentKind: decision.componentKind,
+        componentId: decision.componentId,
+        currentVersion: decision.currentVersion,
+        targetVersion: decision.targetVersion,
+        channel: plan.channel,
+        installId: plan.installId,
+        userId: plan.userId
+      }
+    });
+    state.releaseCenter.feedback = {
+      kind: 'success',
+      message: `${payload.decision?.componentId || decision.componentId}: ${payload.decision?.updateMode || decision.updateMode}`
+    };
+    state.releaseCenter.drawer = { planId };
+  } catch (error) {
+    state.releaseCenter.feedback = { kind: 'error', message: error.message };
+  } finally {
+    state.releaseCenter.busy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+    renderInspector();
+  }
+}
+
+function openReleaseCenterDrawer(planId) {
+  if (!planId) return;
+  state.releaseCenter.drawer = { planId };
+  state.releaseCenter.feedback = null;
+  renderFoundationGrid(state.dashboard?.overview || {});
+}
+
+function closeReleaseCenterDrawer() {
+  state.releaseCenter.drawer = null;
+  if (userEditorBackdrop) userEditorBackdrop.hidden = true;
+  if (userEditorDrawer) {
+    userEditorDrawer.hidden = true;
+    userEditorDrawer.innerHTML = '';
+  }
+  renderFoundationGrid(state.dashboard?.overview || {});
+}
+
+function renderReleaseCenterDrawer() {
+  if (!userEditorBackdrop || !userEditorDrawer) return;
+  const drawer = state.releaseCenter.drawer;
+  if (!drawer) {
+    if (!state.userCenter.drawer) {
+      userEditorBackdrop.hidden = true;
+      userEditorDrawer.hidden = true;
+      userEditorDrawer.innerHTML = '';
+    }
+    return;
+  }
+  const plan = releasePlanById(drawer.planId);
+  if (!plan) {
+    closeReleaseCenterDrawer();
+    return;
+  }
+  const status = releasePlanStatus(plan);
+  const artifacts = releasePlanArtifacts(plan);
+  userEditorBackdrop.hidden = false;
+  userEditorDrawer.hidden = false;
+  userEditorDrawer.innerHTML = `
+    <div class="app-editor-form release-drawer" data-release-drawer>
+      <header class="app-drawer-header">
+        <div>
+          <span class="site-kind">Release Center</span>
+          <h2>${escapeHtml(plan.releaseId || plan.planId)}</h2>
+          <p>${escapeHtml(`${plan.channel || 'shadow'} / ${releaseDeliveryLabel(plan)} / ${plan.test?.gate?.verdict || 'blocked'}`)}</p>
+        </div>
+        <button class="icon-button app-drawer-close" type="button" data-release-drawer-close aria-label="Close release drawer">×</button>
+      </header>
+      <div class="app-drawer-scroll">
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>01</span>
+            <strong>Release state</strong>
+          </div>
+          <div class="release-drawer-summary">
+            ${renderReleaseDrawerMetric('Status', releaseStatusLabel(status), plan.decisions?.readyToPromote ? 'ready to promote' : 'waiting gate or approval')}
+            ${renderReleaseDrawerMetric('Source', plan.activation?.checkSource || 'internal-postgres', 'client checks Internal')}
+            ${renderReleaseDrawerMetric('Created', formatTime(plan.createdAt), plan.createdBy || 'release-admin')}
+            ${renderReleaseDrawerMetric('Policy', plan.activation?.majorUpdateRequiresInstaller ? 'installer' : 'hot update', plan.activation?.connectionSafeMode ? 'connection-safe' : 'standard')}
+          </div>
+        </section>
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>02</span>
+            <strong>Artifacts</strong>
+          </div>
+          <div class="release-artifact-grid">
+            ${artifacts.map((artifact) => `
+              <article>
+                <span>${escapeHtml(artifact.kind || 'artifact')}</span>
+                <strong>${escapeHtml(artifact.componentId || '-')}</strong>
+                <small>${escapeHtml(`${artifact.version || '-'} / ${artifact.activation || 'hot-auto'}`)}</small>
+                <code>${escapeHtml(artifact.digest || artifact.url || artifact.source || 'Internal release record')}</code>
+              </article>
+            `).join('') || '<div class="empty-state">No artifact has been attached to this plan yet.</div>'}
+          </div>
+        </section>
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>03</span>
+            <strong>Rollout and gate</strong>
+          </div>
+          <div class="release-rollout-grid">
+            ${renderReleaseDrawerMetric('Strategy', `${plan.rollout?.strategy || 'gray'} ${plan.rollout?.percentage ?? 10}%`, plan.rollout?.segmentId || 'default segment')}
+            ${renderReleaseDrawerMetric('Rings', asArray(plan.rollout?.rings).join(' / ') || 'internal-dogfood / canary / stable', 'future gray rollout')}
+            ${renderReleaseDrawerMetric('E2E', plan.test?.gate?.verdict || 'blocked', plan.test?.gate?.reason || plan.test?.suiteId || 'release gate')}
+            ${renderReleaseDrawerMetric('Metric gate', plan.rollout?.canaryMetricGate || 'release.e2e.passed', 'auto promote guard')}
+          </div>
+        </section>
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>04</span>
+            <strong>Client behavior</strong>
+          </div>
+          <div class="foundation-table release-client-table">
+            ${renderReleaseClientRow('Check update', 'Internal Release Center', 'Postgres plan + policy decision; npm is synced input, not client truth.')}
+            ${renderReleaseClientRow('Hot update', plan.activation?.hotUpdateAuto ? 'automatic' : 'manual', 'Stage, verify digest/signature, swap bundle/config, toast user, report status.')}
+            ${renderReleaseClientRow('Major update', plan.activation?.majorUpdateRequiresInstaller ? 'manual installer' : 'not required', 'Download signed DMG/EXE, user confirms, install, then app restarts.')}
+            ${renderReleaseClientRow('Connection safety', plan.activation?.connectionSafeMode ? 'enabled' : 'standard', 'Do not restart WireGuard/PAC/DNS while a connect flow is active.')}
+          </div>
+        </section>
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>05</span>
+            <strong>Next actions</strong>
+          </div>
+          <div class="release-next-actions">
+            ${asArray(plan.decisions?.nextActions).map((action) => `<span>${escapeHtml(action)}</span>`).join('') || '<span>no pending action</span>'}
+          </div>
+        </section>
+      </div>
+      <footer class="app-drawer-actions">
+        <button class="secondary-button" type="button" data-release-evaluate="${escapeHtml(plan.planId)}" ${state.releaseCenter.busy ? 'disabled' : ''}>Evaluate policy</button>
+        <button class="primary-button" type="button" data-release-drawer-close>Done</button>
+      </footer>
+    </div>
+  `;
+  bindReleaseDrawerControls();
+}
+
+function renderReleaseDrawerMetric(label, value, detail) {
+  return `
+    <article>
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value || '-')}</strong>
+      <small>${escapeHtml(detail || '')}</small>
+    </article>
+  `;
+}
+
+function renderReleaseClientRow(boundary, behavior, detail) {
+  return `
+    <article class="foundation-table-row">
+      <strong>${escapeHtml(boundary)}</strong>
+      <span>${escapeHtml(behavior)}</span>
+      <small>${escapeHtml(detail)}</small>
+    </article>
+  `;
+}
+
+function bindReleaseDrawerControls() {
+  if (!userEditorDrawer || userEditorDrawer.hidden) return;
+  for (const close of userEditorDrawer.querySelectorAll('[data-release-drawer-close]')) {
+    close.addEventListener('click', () => closeReleaseCenterDrawer());
+  }
+  for (const button of userEditorDrawer.querySelectorAll('[data-release-evaluate]')) {
+    button.addEventListener('click', () => void evaluateReleasePlanFromAdmin(button.dataset.releaseEvaluate));
+  }
 }
 
 function renderUserServiceSummary(user, draft) {

@@ -2394,9 +2394,11 @@ export class MemoryStore implements PlatformStore {
     const channel = input.channel?.trim() || 'shadow';
     const appId = input.appId?.trim() || 'h2o';
     const productId = input.productId?.trim() || appId;
+    const launcherUpdatePolicy = normalizeUpdatePolicy(input.launcherUpdatePolicy ?? 'platform-critical');
+    const appUpdatePolicy = normalizeUpdatePolicy(input.appUpdatePolicy ?? 'app-managed');
     const launcherDecision = this.evaluateReleaseUpdate({
-      componentKind: 'platform-critical',
-      componentId: 'mx-launcher',
+      componentKind: launcherUpdatePolicy,
+      componentId: input.launcherComponentId?.trim() || (launcherUpdatePolicy === 'mx-h2i-installer' ? 'mx-h2i' : 'mx-launcher'),
       currentVersion: input.launcherCurrentVersion?.trim() || '0.1.0',
       targetVersion: input.launcherTargetVersion?.trim() || '0.1.1',
       channel,
@@ -2404,8 +2406,8 @@ export class MemoryStore implements PlatformStore {
       userId: input.userId
     });
     const appDecision = this.evaluateReleaseUpdate({
-      componentKind: 'app-managed',
-      componentId: appId,
+      componentKind: appUpdatePolicy,
+      componentId: input.appComponentId?.trim() || appId,
       currentVersion: input.appCurrentVersion?.trim() || '0.1.0',
       targetVersion: input.appTargetVersion?.trim() || '0.1.1',
       channel,

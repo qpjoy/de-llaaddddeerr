@@ -63,10 +63,14 @@ import type {
   PermissionGrant,
   PrincipalContext,
   PrincipalContextInput,
+  ReleaseActivationMode,
+  ReleaseArtifactKind,
+  ReleaseArtifactRef,
   PlatformPrincipal,
   ReleasePolicyDecision,
   ReleaseManagementPlan,
   ReleaseManagementPlanInput,
+  ReleaseRolloutStrategy,
   RuntimeConfig,
   RuntimeFeaturePolicy,
   RuntimeFeaturePolicyInput,
@@ -3604,10 +3608,141 @@ export function normalizeUpdatePolicy(value: string): UpdatePolicyKind {
     || value === 'app-managed'
     || value === 'mandatory-app'
     || value === 'config-snapshot'
+    || value === 'feature-flag'
+    || value === 'renderer-ui'
+    || value === 'launcher-npm'
+    || value === 'launcher-asar'
+    || value === 'app-asar'
+    || value === 'appcenter-app'
+    || value === 'mx-h2i-installer'
+    || value === 'native-helper'
   ) {
     return value;
   }
   return 'app-managed';
+}
+
+export function normalizeReleaseArtifactKind(value: unknown): ReleaseArtifactKind {
+  if (
+    value === 'config-snapshot'
+    || value === 'feature-flag'
+    || value === 'renderer-ui'
+    || value === 'launcher-npm'
+    || value === 'launcher-asar'
+    || value === 'app-asar'
+    || value === 'appcenter-app'
+    || value === 'mx-h2i-installer'
+    || value === 'native-helper'
+  ) {
+    return value;
+  }
+  return 'renderer-ui';
+}
+
+export function normalizeReleaseActivationMode(value: unknown): ReleaseActivationMode {
+  if (
+    value === 'hot-auto'
+    || value === 'hot-manual'
+    || value === 'restart-auto'
+    || value === 'restart-manual'
+    || value === 'installer-manual'
+  ) {
+    return value;
+  }
+  return 'hot-auto';
+}
+
+export function normalizeReleaseRolloutStrategy(value: unknown): ReleaseRolloutStrategy {
+  if (
+    value === 'all'
+    || value === 'canary'
+    || value === 'gray'
+    || value === 'manual-ring'
+    || value === 'feature-flag'
+  ) {
+    return value;
+  }
+  return 'gray';
+}
+
+function releaseActivationForArtifact(kind: ReleaseArtifactKind, requested?: ReleaseActivationMode | null): ReleaseActivationMode {
+  if (requested) return requested;
+  if (kind === 'mx-h2i-installer') return 'installer-manual';
+  if (kind === 'native-helper') return 'restart-manual';
+  if (kind === 'launcher-asar' || kind === 'app-asar') return 'restart-auto';
+  return 'hot-auto';
+}
+
+function releaseArtifactSource(kind: ReleaseArtifactKind): ReleaseArtifactRef['source'] {
+  if (kind === 'config-snapshot' || kind === 'feature-flag') return 'config-center';
+  if (kind === 'launcher-npm') return 'npm-sync';
+  if (kind === 'renderer-ui' || kind === 'launcher-asar' || kind === 'app-asar' || kind === 'appcenter-app') return 'ci-artifact';
+  return 'manual-upload';
+}
+
+function releaseActivationNeedsRestart(mode: ReleaseActivationMode): boolean {
+  return mode === 'restart-auto' || mode === 'restart-manual' || mode === 'installer-manual';
+}
+
+function releaseArtifactKindForPolicy(kind: UpdatePolicyKind): ReleaseArtifactKind {
+  if (
+    kind === 'config-snapshot'
+    || kind === 'feature-flag'
+    || kind === 'renderer-ui'
+    || kind === 'launcher-npm'
+    || kind === 'launcher-asar'
+    || kind === 'app-asar'
+    || kind === 'appcenter-app'
+    || kind === 'mx-h2i-installer'
+    || kind === 'native-helper'
+  ) {
+    return kind;
+  }
+  if (kind === 'platform-ui') return 'renderer-ui';
+  if (kind === 'platform-critical') return 'launcher-asar';
+  return 'appcenter-app';
+}
+
+function buildReleaseArtifactRef(
+  input: ReleaseManagementPlanInput,
+  decision: ReleasePolicyDecision,
+  role: 'launcher' | 'app',
+  releaseId: string
+): ReleaseArtifactRef | null {
+  if (!decision.updateAvailable) return null;
+  const requestedKind = role === 'launcher' && input.artifactKind
+    ? normalizeReleaseArtifactKind(input.artifactKind)
+    : null;
+  const kind = requestedKind ?? releaseArtifactKindForPolicy(decision.componentKind);
+  const requestedActivation = role === 'launcher' && input.activationMode
+    ? normalizeReleaseActivationMode(input.activationMode)
+    : null;
+  const activation = releaseActivationForArtifact(kind, requestedActivation);
+  const version = role === 'launcher'
+    ? input.artifactVersion?.trim() || decision.targetVersion
+    : decision.targetVersion;
+  const artifactId = `artifact_${safeIdPart(releaseId)}_${safeIdPart(role)}_${safeIdPart(kind)}_${safeIdPart(version)}`;
+  return {
+    artifactId,
+    kind,
+    componentId: decision.componentId,
+    version,
+    source: releaseArtifactSource(kind),
+    url: role === 'launcher' ? input.artifactUrl?.trim() || null : null,
+    digest: role === 'launcher' ? input.artifactDigest?.trim() || null : null,
+    signature: role === 'launcher' ? input.artifactSignature?.trim() || null : null,
+    sizeBytes: null,
+    activation,
+    autoApply: decision.updateMode === 'automatic' && activation !== 'installer-manual',
+    restartRequired: releaseActivationNeedsRestart(activation),
+    requiredAppRestart: activation === 'restart-auto' || activation === 'restart-manual' || activation === 'installer-manual',
+    notes: [
+      decision.reason,
+      activation === 'installer-manual'
+        ? 'full installer download is explicit and restarts after user confirmation'
+        : 'staged update reports status back to Internal Release Center'
+    ]
+  };
 }
 
 export function releasePolicyByKind(
@@ -3633,6 +3768,26 @@ export function releasePolicyByKind(
       reason: 'platform UI updates are automatic with maintenance-window deferral'
     };
   }
+  if (kind === 'renderer-ui' || kind === 'launcher-npm' || kind === 'launcher-asar' || kind === 'app-asar') {
+    return {
+      updateMode: 'automatic',
+      canSkip: false,
+      canDefer: true,
+      requiresGate: true,
+      rollbackRequired: true,
+      reason: `${kind} updates are staged by Internal Release Center and applied automatically after gate`
+    };
+  }
+  if (kind === 'feature-flag') {
+    return {
+      updateMode: 'automatic',
+      canSkip: false,
+      canDefer: false,
+      requiresGate: false,
+      rollbackRequired: true,
+      reason: 'feature flags are hot-applied from signed Internal config snapshots'
+    };
+  }
   if (kind === 'mandatory-app') {
     return {
       updateMode: 'mandatory',
@@ -3643,6 +3798,26 @@ export function releasePolicyByKind(
       reason: 'app update is marked mandatory'
     };
   }
+  if (kind === 'mx-h2i-installer') {
+    return {
+      updateMode: 'mandatory',
+      canSkip: false,
+      canDefer: true,
+      requiresGate: true,
+      rollbackRequired: true,
+      reason: 'MX-H2I major updates require a signed full installer and explicit user confirmation'
+    };
+  }
+  if (kind === 'native-helper') {
+    return {
+      updateMode: 'mandatory',
+      canSkip: false,
+      canDefer: true,
+      requiresGate: true,
+      rollbackRequired: true,
+      reason: 'native helper updates are privileged and gated before activation'
+    };
+  }
   if (kind === 'config-snapshot') {
     return {
       updateMode: 'automatic',
@@ -3651,6 +3826,16 @@ export function releasePolicyByKind(
       requiresGate: false,
       rollbackRequired: true,
       reason: 'config snapshots are signed and automatically applied'
+    };
+  }
+  if (kind === 'appcenter-app') {
+    return {
+      updateMode: 'manual',
+      canSkip: true,
+      canDefer: true,
+      requiresGate: true,
+      rollbackRequired: true,
+      reason: 'AppCenter app updates follow app-scoped rollout and rollback policy'
     };
   }
   return {
@@ -3680,9 +3865,9 @@ export function buildReleaseManagementPlan(
     || parts.appDecision.requiresGate
     || parts.launcherDecision.updateMode === 'mandatory'
     || parts.appDecision.updateMode === 'mandatory';
+  const hasUpdate = parts.launcherDecision.updateAvailable || parts.appDecision.updateAvailable;
   const readyToPromote = parts.gate.verdict === 'passed'
-    && parts.launcherDecision.updateAvailable
-    && parts.appDecision.updateAvailable;
+    && hasUpdate;
   const nextActions: string[] = [];
   if (parts.gate.verdict !== 'passed') {
     nextActions.push('complete-required-e2e-gate');
@@ -3696,6 +3881,16 @@ export function buildReleaseManagementPlan(
   if (parts.launcherDecision.rollbackRequired || parts.appDecision.rollbackRequired) {
     nextActions.push('prepare-rollback-slot');
   }
+  const artifacts = [
+    buildReleaseArtifactRef(input, parts.launcherDecision, 'launcher', parts.releaseId),
+    buildReleaseArtifactRef(input, parts.appDecision, 'app', parts.releaseId)
+  ].filter((artifact): artifact is ReleaseArtifactRef => Boolean(artifact));
+  const rolloutStrategy = normalizeReleaseRolloutStrategy(input.rolloutStrategy);
+  const rolloutPercentage = typeof input.rolloutPercentage === 'number' && Number.isFinite(input.rolloutPercentage)
+    ? Math.max(0, Math.min(100, input.rolloutPercentage))
+    : rolloutStrategy === 'all' ? 100 : 10;
+  const activationModes = artifacts.map((artifact) => artifact.activation);
+  const majorUpdateRequiresInstaller = artifacts.some((artifact) => artifact.kind === 'mx-h2i-installer' || artifact.activation === 'installer-manual');
   return {
     planId: parts.planId,
     releaseId: parts.releaseId,
@@ -3707,6 +3902,31 @@ export function buildReleaseManagementPlan(
     components: {
       launcher: parts.launcherDecision,
       app: parts.appDecision
+    },
+    artifacts,
+    rollout: {
+      strategy: rolloutStrategy,
+      percentage: rolloutPercentage,
+      segmentId: input.rolloutSegment?.trim() || `${input.channel?.trim() || 'shadow'}-${rolloutStrategy}`,
+      rings: input.rolloutRings?.length ? input.rolloutRings : ['internal-dogfood', 'canary', 'stable'],
+      featureKeys: input.featureKeys ?? [],
+      channels: [input.channel?.trim() || 'shadow'],
+      audience: {
+        installIds: input.installId ? [input.installId] : [],
+        userIds: input.userId ? [input.userId] : [],
+        siteIds: input.sites ?? []
+      },
+      allowAutoPromote: rolloutStrategy !== 'manual-ring' && parts.gate.verdict === 'passed',
+      canaryMetricGate: 'release.e2e.passed && update.error_rate < 0.02'
+    },
+    activation: {
+      checkSource: 'internal-postgres',
+      hotUpdateAuto: artifacts.some((artifact) => artifact.autoApply && !artifact.restartRequired),
+      hotUpdateToast: artifacts.some((artifact) => artifact.autoApply),
+      majorUpdateRequiresInstaller,
+      restartAfterApply: activationModes.includes('restart-auto') || activationModes.includes('installer-manual'),
+      manualConfirmRequired: majorUpdateRequiresInstaller || activationModes.includes('restart-manual'),
+      connectionSafeMode: true
     },
     test: {
       suiteId: parts.testRun.suiteId,
