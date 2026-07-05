@@ -842,6 +842,17 @@ button:disabled {
   line-height: 1.45;
 }
 
+.update-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.update-actions .primary-button,
+.update-actions .secondary-button {
+  min-width: 108px;
+}
+
 .settings-panel {
   margin-top: 2px;
   border-top: 1px solid rgba(94, 142, 236, 0.14);

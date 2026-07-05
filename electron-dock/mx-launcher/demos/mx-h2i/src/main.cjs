@@ -7,7 +7,7 @@ const dnsPromises = require('node:dns').promises;
 const net = require('node:net');
 const { execFile } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
-const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: electronScreen, powerMonitor, net: electronNet } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: electronScreen, powerMonitor, net: electronNet, dialog } = require('electron');
 
 loadDotEnvFiles();
 
@@ -488,8 +488,11 @@ function registerIpc() {
       updateMode: releaseDecision?.updateMode || null,
       reason: releaseSync.ok ? releaseResult.reason : releaseSync.message,
       artifactKind: releaseArtifact?.kind || null,
+      artifactId: releaseArtifact?.artifactId || null,
       artifactUrl: releaseArtifact?.url || null,
       artifactDigest: releaseArtifact?.digest || null,
+      artifactSignature: releaseArtifact?.signature || null,
+      artifactSizeBytes: Number.isFinite(releaseArtifact?.sizeBytes) ? releaseArtifact.sizeBytes : null,
       activation: releaseArtifact?.activation || null,
       restartRequired: releaseArtifact?.restartRequired === true,
       majorUpdateRequiresInstaller: releasePlan?.activation?.majorUpdateRequiresInstaller === true,
@@ -509,6 +512,11 @@ function registerIpc() {
         : `${releaseMessage} AppCenter 目录已同步 ${catalogSync.count} 个应用。`
     };
     touchRuntime('update checked');
+    await saveAndBroadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('mx-h2i:apply-update', async () => {
+    await applyLauncherUpdate('manual-apply');
     await saveAndBroadcast();
     return visibleRuntime();
   });
@@ -2982,6 +2990,181 @@ function releaseCenterUserId() {
     || null;
 }
 
+async function applyLauncherUpdate(reason) {
+  const update = runtime.update || {};
+  const artifact = releaseArtifactFromUpdate(update);
+  if (!artifact.url) {
+    runtime.feedback = {
+      tone: 'warning',
+      message: '当前没有可下载的 Release artifact，请先检查更新。'
+    };
+    return;
+  }
+  const installer = artifact.activation === 'installer-manual' || update.majorUpdateRequiresInstaller === true;
+  if (installer) {
+    const choice = await dialog.showMessageBox(mainWindow || undefined, {
+      type: 'info',
+      buttons: ['下载并打开', '取消'],
+      defaultId: 0,
+      cancelId: 1,
+      title: 'MX-H2I 更新',
+      message: `发现 MX-H2I ${update.latestVersion || artifact.version || ''} 更新`,
+      detail: '将下载 Release Center 中登记的安装包，校验 sha256 后交给系统打开。当前连接不会被重启或断开。'
+    });
+    if (choice.response !== 0) {
+      runtime.feedback = { tone: 'info', message: '已取消下载更新。' };
+      return;
+    }
+  }
+  const baseUrl = appCenterCatalogBaseUrl();
+  const mod = await import('@qpjoy/electron-launcher');
+  const updater = baseUrl && typeof mod.createElectronLauncherReleaseUpdater === 'function'
+    ? mod.createElectronLauncherReleaseUpdater({
+        baseUrl,
+        fetchImpl: launcherFetchForBootstrap(runtime.config.bootstrapResolveMode),
+        reportInstallId: runtime.installation?.installId
+      })
+    : null;
+  const targetPath = updateArtifactTargetPath(update, artifact);
+  runtime.update = normalizeUpdate({
+    ...update,
+    status: 'downloading'
+  }, runtime.config);
+  runtime.feedback = {
+    tone: 'info',
+    message: installer ? '正在下载 MX-H2I 安装包。' : '正在下载热更新包。'
+  };
+  touchRuntime('update download started');
+  await saveAndBroadcast();
+  await updater?.report?.({
+    installId: runtime.installation?.installId,
+    status: 'download-started',
+    metadata: releaseReportMetadata(reason, update, artifact, { targetPath })
+  }).catch((error) => {
+    pushAppLog('appcenter', 'warning', `Release download-started report failed: ${errorMessage(error)}`);
+  });
+  try {
+    const result = await mod.downloadElectronLauncherReleaseArtifactToFile({
+      artifact,
+      targetPath
+    });
+    runtime.update = normalizeUpdate({
+      ...runtime.update,
+      status: installer ? 'ready-to-install' : 'staged',
+      stagedPath: result.targetPath,
+      downloadedAt: nowIso(),
+      downloadedBytes: result.bytes,
+      downloadedDigest: result.digest
+    }, runtime.config);
+    await updater?.report?.({
+      installId: runtime.installation?.installId,
+      status: installer ? 'installer-downloaded' : 'artifact-staged',
+      metadata: releaseReportMetadata(reason, runtime.update, artifact, result)
+    }).catch((error) => {
+      pushAppLog('appcenter', 'warning', `Release downloaded report failed: ${errorMessage(error)}`);
+    });
+    if (installer) {
+      const openError = await shell.openPath(result.targetPath);
+      if (openError) throw new Error(openError);
+      runtime.feedback = {
+        tone: 'success',
+        message: '安装包已校验并打开。请按系统安装器完成更新。'
+      };
+      await updater?.report?.({
+        installId: runtime.installation?.installId,
+        status: 'installer-opened',
+        metadata: releaseReportMetadata(reason, runtime.update, artifact, result)
+      }).catch((error) => {
+        pushAppLog('appcenter', 'warning', `Release installer-opened report failed: ${errorMessage(error)}`);
+      });
+    } else {
+      runtime.feedback = {
+        tone: 'success',
+        message: '更新包已下载并校验，等待后续热更新激活器处理。'
+      };
+    }
+    touchRuntime('update downloaded');
+  } catch (error) {
+    const message = errorMessage(error);
+    runtime.update = normalizeUpdate({
+      ...runtime.update,
+      status: 'download-failed',
+      reason: message
+    }, runtime.config);
+    runtime.feedback = {
+      tone: 'danger',
+      message: `更新下载失败：${message}`
+    };
+    await updater?.report?.({
+      installId: runtime.installation?.installId,
+      status: 'download-failed',
+      error: message,
+      metadata: releaseReportMetadata(reason, runtime.update, artifact, { targetPath })
+    }).catch((reportError) => {
+      pushAppLog('appcenter', 'warning', `Release download-failed report failed: ${errorMessage(reportError)}`);
+    });
+    touchRuntime('update download failed');
+  }
+}
+
+function releaseArtifactFromUpdate(update) {
+  const version = nullableString(update.latestVersion) || app.getVersion();
+  const activation = nullableString(update.activation) || (update.majorUpdateRequiresInstaller ? 'installer-manual' : 'hot-auto');
+  return {
+    artifactId: nullableString(update.artifactId) || `${nullableString(update.releaseId) || 'release'}-${nullableString(update.artifactKind) || 'artifact'}-${version}`,
+    kind: nullableString(update.artifactKind) || nullableString(update.componentKind) || 'mx-h2i-installer',
+    componentId: nullableString(update.componentId) || launcherProductId(),
+    version,
+    source: 'internal-postgres',
+    url: nullableString(update.artifactUrl),
+    digest: nullableString(update.artifactDigest),
+    signature: nullableString(update.artifactSignature),
+    sizeBytes: Number.isFinite(update.artifactSizeBytes) ? update.artifactSizeBytes : null,
+    activation,
+    autoApply: update.hotUpdateAuto === true,
+    restartRequired: update.restartRequired === true,
+    requiredAppRestart: update.restartRequired === true || activation === 'installer-manual',
+    notes: []
+  };
+}
+
+function updateArtifactTargetPath(update, artifact) {
+  const releaseId = safePathSegment(nullableString(update.releaseId) || nullableString(update.planId) || 'release');
+  const fileName = safeUpdateArtifactFileName(artifact.url, artifact.kind, artifact.version);
+  return path.join(app.getPath('userData'), 'updates', releaseId, fileName);
+}
+
+function safeUpdateArtifactFileName(url, artifactKind, version) {
+  try {
+    const parsed = new URL(url);
+    const baseName = safePathSegment(decodeURIComponent(path.basename(parsed.pathname)));
+    if (baseName && baseName !== 'app') return baseName;
+  } catch {
+    // fallback below
+  }
+  return `${safePathSegment(artifactKind || 'artifact')}-${safePathSegment(version || app.getVersion())}.bin`;
+}
+
+function releaseReportMetadata(reason, update, artifact, extra = {}) {
+  return {
+    reason,
+    productId: launcherProductId(),
+    planId: nullableString(update.planId),
+    releaseId: nullableString(update.releaseId),
+    componentId: artifact.componentId,
+    componentKind: nullableString(update.componentKind),
+    artifactId: artifact.artifactId,
+    artifactKind: artifact.kind,
+    artifactUrl: artifact.url,
+    artifactDigest: artifact.digest,
+    activation: artifact.activation,
+    currentVersion: nullableString(update.currentVersion),
+    latestVersion: nullableString(update.latestVersion),
+    platform: process.platform,
+    ...extra
+  };
+}
+
 function mergeAppCenterCatalogApps(remoteApps) {
   const next = { ...(runtime.apps || normalizeApps({})) };
   for (const raw of remoteApps) {
@@ -3249,12 +3432,19 @@ function normalizeUpdate(input, config) {
     updateMode: nullableString(row.updateMode),
     reason: nullableString(row.reason),
     artifactKind: nullableString(row.artifactKind),
+    artifactId: nullableString(row.artifactId),
     artifactUrl: nullableString(row.artifactUrl),
     artifactDigest: nullableString(row.artifactDigest),
+    artifactSignature: nullableString(row.artifactSignature),
+    artifactSizeBytes: Number.isFinite(row.artifactSizeBytes) ? row.artifactSizeBytes : null,
     activation: nullableString(row.activation),
     restartRequired: row.restartRequired === true,
     majorUpdateRequiresInstaller: row.majorUpdateRequiresInstaller === true,
-    hotUpdateAuto: row.hotUpdateAuto === true
+    hotUpdateAuto: row.hotUpdateAuto === true,
+    stagedPath: nullableString(row.stagedPath),
+    downloadedAt: nullableString(row.downloadedAt),
+    downloadedBytes: Number.isFinite(row.downloadedBytes) ? row.downloadedBytes : null,
+    downloadedDigest: nullableString(row.downloadedDigest)
   };
 }
 

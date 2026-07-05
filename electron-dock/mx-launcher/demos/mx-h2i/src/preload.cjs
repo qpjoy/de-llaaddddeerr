@@ -12,6 +12,7 @@ const api = {
   stopH2o: () => ipcRenderer.invoke('mx-h2i:stop-h2o'),
   setH2oMode: (mode) => ipcRenderer.invoke('mx-h2i:set-h2o-mode', mode),
   checkUpdates: () => ipcRenderer.invoke('mx-h2i:check-updates'),
+  applyUpdate: () => ipcRenderer.invoke('mx-h2i:apply-update'),
   refreshDiagnostics: () => ipcRenderer.invoke('mx-h2i:refresh-diagnostics'),
   repairSystemNetwork: () => ipcRenderer.invoke('mx-h2i:repair-system-network'),
   openAdmin: () => ipcRenderer.invoke('mx-h2i:open-admin'),

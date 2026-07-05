@@ -157,15 +157,14 @@ export function createElectronLauncherReleaseUpdater(options: ElectronLauncherRe
       );
       const plans = Array.isArray(plansPayload.plans) ? plansPayload.plans : [];
       const plan = selectReleasePlan(plans, input);
-      const fallbackTargetVersion = plan?.components?.launcher?.targetVersion
-        || plan?.components?.app?.targetVersion
-        || input.currentVersion;
+      const planDecision = plan ? selectPlanDecision(plan, input) : null;
+      const fallbackTargetVersion = planDecision?.targetVersion || input.currentVersion;
       const decisionPayload = await requestJson<{ decision: ElectronLauncherReleasePolicyDecision }>(
         fetchImpl,
         joinUrl(baseUrl, '/internal/v1/releases/policy/evaluate'),
         'POST',
         {
-          componentKind: plan?.components?.launcher?.componentKind || input.componentKind || 'app-managed',
+          componentKind: planDecision?.componentKind || input.componentKind || 'app-managed',
           componentId: input.componentId,
           currentVersion: input.currentVersion,
           targetVersion: fallbackTargetVersion,
@@ -222,17 +221,25 @@ export async function downloadElectronLauncherReleaseArtifactToFile(
   await rm(tempPath, { force: true });
   const hash = createHash('sha256');
   let bytes = 0;
-  const response = await openDownloadStream(url, input.maxRedirects ?? 3);
-  response.stream.on('data', (chunk: Buffer) => {
-    bytes += chunk.length;
-    hash.update(chunk);
-  });
-  await pipeline(response.stream, createWriteStream(tempPath, { flags: 'wx' }));
-  const digest = `sha256:${hash.digest('hex')}`;
+  let digest: string | null = null;
   const expectedDigest = normalizeDigest(input.artifact.digest);
-  if (expectedDigest && digest !== expectedDigest) {
+  try {
+    const response = await openDownloadStream(url, input.maxRedirects ?? 3);
+    response.stream.on('data', (chunk: Buffer) => {
+      bytes += chunk.length;
+      hash.update(chunk);
+    });
+    await pipeline(response.stream, createWriteStream(tempPath, { flags: 'wx' }));
+    digest = `sha256:${hash.digest('hex')}`;
+    if (Number.isFinite(input.artifact.sizeBytes) && bytes !== input.artifact.sizeBytes) {
+      throw new Error(`Release artifact size mismatch: expected ${input.artifact.sizeBytes}, got ${bytes}`);
+    }
+    if (expectedDigest && digest !== expectedDigest) {
+      throw new Error(`Release artifact digest mismatch: expected ${expectedDigest}, got ${digest}`);
+    }
+  } catch (error) {
     await rm(tempPath, { force: true });
-    throw new Error(`Release artifact digest mismatch: expected ${expectedDigest}, got ${digest}`);
+    throw error;
   }
   await rename(tempPath, input.targetPath);
   return {
@@ -250,15 +257,23 @@ function selectReleasePlan(
 ): ElectronLauncherReleasePlan | null {
   return plans.find((plan) => {
     if (plan.channel !== input.channel) return false;
-    if (plan.installId && input.installId && plan.installId !== input.installId) return false;
-    if (plan.userId && input.userId && plan.userId !== input.userId) return false;
-    const decisions = [plan.components?.launcher, plan.components?.app].filter(Boolean);
-    return decisions.some((decision) => {
-      if (!decision) return false;
-      if (decision.componentId !== input.componentId) return false;
-      if (decision.currentVersion && decision.currentVersion !== input.currentVersion) return true;
-      return decision.targetVersion !== input.currentVersion;
-    });
+    if (plan.installId && plan.installId !== input.installId) return false;
+    if (plan.userId && plan.userId !== input.userId) return false;
+    return Boolean(selectPlanDecision(plan, input));
+  }) ?? null;
+}
+
+function selectPlanDecision(
+  plan: ElectronLauncherReleasePlan,
+  input: ElectronLauncherUpdateCheckInput
+): ElectronLauncherReleasePolicyDecision | null {
+  const decisions = [plan.components?.launcher, plan.components?.app].filter(Boolean);
+  return decisions.find((decision) => {
+    if (!decision) return false;
+    if (decision.componentId !== input.componentId) return false;
+    if (input.componentKind && decision.componentKind !== input.componentKind) return false;
+    if (decision.currentVersion && decision.currentVersion !== input.currentVersion) return true;
+    return decision.targetVersion !== input.currentVersion;
   }) ?? null;
 }
 

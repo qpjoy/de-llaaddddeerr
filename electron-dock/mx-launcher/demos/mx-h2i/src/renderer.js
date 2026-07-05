@@ -267,6 +267,7 @@ async function runAction(action, payload) {
       stopH2o: () => api.stopH2o?.(),
       setH2oMode: () => api.setH2oMode?.(payload),
       checkUpdates: () => api.checkUpdates(),
+      applyUpdate: () => api.applyUpdate?.(),
       refreshDiagnostics: () => api.refreshDiagnostics?.(),
       repairSystemNetwork: () => api.repairSystemNetwork?.(),
       openAdmin: () => api.openAdmin()
@@ -1450,6 +1451,10 @@ function renderCatalogCard(name, category, summary, status, action) {
 
 function renderUpdatePanel() {
   const update = state.update || {};
+  const hasArtifact = Boolean(update.artifactUrl);
+  const downloading = busyAction === 'applyUpdate' || update.status === 'downloading';
+  const installer = update.activation === 'installer-manual' || update.majorUpdateRequiresInstaller === true;
+  const actionLabel = downloading ? '下载中' : installer ? '下载并打开' : '下载更新包';
   return `
     <section class="panel update-panel">
       <div class="panel-head">
@@ -1468,6 +1473,10 @@ function renderUpdatePanel() {
         ${metric('Release', update.releaseId)}
         ${metric('Artifact', update.artifactKind || update.componentKind)}
         ${metric('Activation', update.activation || (update.majorUpdateRequiresInstaller ? 'installer-manual' : update.hotUpdateAuto ? 'hot-auto' : '-'))}
+      </div>
+      <div class="update-actions">
+        <button class="secondary-button" type="button" data-action="checkUpdates" ${busyAction === 'checkUpdates' ? 'disabled' : ''}>检查更新</button>
+        <button class="primary-button" type="button" data-action="applyUpdate" ${!hasArtifact || downloading ? 'disabled' : ''}>${escapeHtml(actionLabel)}</button>
       </div>
       ${update.reason ? `<p class="panel-note">${escapeHtml(update.reason)}</p>` : ''}
     </section>
@@ -1887,10 +1896,33 @@ function createMockApi() {
         ...mockState.update,
         status: 'ready',
         latestVersion: '0.1.1',
+        planId: 'mock_release_plan',
+        releaseId: 'mock_release_0_1_1',
+        componentId: 'mx-h2i',
+        componentKind: 'mx-h2i-installer',
+        artifactKind: 'dmg',
+        artifactId: 'mock_mx_h2i_0_1_1_dmg',
+        artifactUrl: 'https://example.invalid/mx-h2i-0.1.1.dmg',
+        artifactDigest: 'sha256:mock',
+        activation: 'installer-manual',
+        restartRequired: true,
+        majorUpdateRequiresInstaller: true,
         canSkip: true,
-        lastCheckedAt: new Date().toISOString()
+        lastCheckedAt: new Date().toISOString(),
+        reason: 'mock Release Center 发现安装包更新。'
       },
       feedback: { tone: 'info', message: '更新策略已刷新。' }
+    }),
+    applyUpdate: async () => commit({
+      update: {
+        ...mockState.update,
+        status: 'ready-to-install',
+        stagedPath: '/tmp/mx-h2i-0.1.1.dmg',
+        downloadedAt: new Date().toISOString(),
+        downloadedBytes: 42,
+        downloadedDigest: mockState.update.artifactDigest || 'sha256:mock'
+      },
+      feedback: { tone: 'success', message: '安装包已下载并校验。' }
     }),
     refreshDiagnostics: async () => commit({
       connection: {

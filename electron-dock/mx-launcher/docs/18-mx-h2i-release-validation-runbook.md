@@ -14,8 +14,8 @@ Ready now:
 
 Not complete yet:
 
-- MX-H2I client does not yet poll Release Center and automatically download/apply installer
-  artifacts.
+- MX-H2I client does not yet hot-swap renderer/asar/config artifacts or restart itself after
+  applying a full installer.
 - Release Center does not yet host uploaded MX-H2I installers itself; use an internal HTTP
   object store, nginx/Caddy path, OSS, or CDN URL as `artifactUrl` for now.
 
@@ -67,8 +67,22 @@ On an MX-H2I client pointed at the same Internal server:
 - for major plans, expect `Policy=mandatory` and `Activation=installer-manual`;
 - no WireGuard/PAC/DNS permission prompt should appear during this check.
 
-At this layer MX-H2I only checks, selects, and reports release state. It does not yet install or
-restart automatically.
+Then validate the updater executor:
+
+- click `下载并打开` for an installer plan;
+- confirm the native dialog;
+- expect `Status=ready-to-install` after the file downloads and sha256 matches;
+- the installer should open through the OS, but MX-H2I should not restart by itself;
+- for hot artifacts, expect `Status=staged`; hot replacement is intentionally still deferred.
+
+Downloaded files are staged under the MX-H2I user data directory:
+
+```text
+<userData>/updates/<releaseId>/<artifact-file>
+```
+
+The client reports `download-started`, `installer-downloaded` or `artifact-staged`, and
+`installer-opened` or `download-failed` to `/internal/v1/release/reports`.
 
 ## Layer 4: Build A Test Package
 
@@ -146,18 +160,16 @@ Checklist:
 
 ## Layer 7: Toward No Manual Distribution
 
-To stop manually sending files, implement the MX-H2I client updater executor:
+To stop manually sending files completely, finish the remaining updater executor work:
 
-1. Poll `/internal/v1/releases/policy/evaluate` or a dedicated update-decision endpoint with
-   current versions, install id, user id, platform, and channel.
-2. Download `ReleaseArtifactRef.url`.
-3. Verify digest/signature.
-4. Stage atomically.
-5. Apply hot artifacts immediately when `activation.hotUpdateAuto=true`, then show a toast.
-6. For `installer-manual`, show an update prompt; after the user clicks update, install and
-   restart.
-7. Report every phase to `/internal/v1/release/reports`.
-8. Defer activation while MX-H2I is connecting, recovering, or asking for network permission.
+1. Add Release Center artifact upload or OSS-backed signed URL issuance.
+2. Poll periodically or on app startup, with backoff and quiet hours.
+3. Verify artifact signatures in addition to sha256 digests.
+4. Apply hot renderer/config/asar artifacts from the staged slot when
+   `activation.hotUpdateAuto=true`, then show a dismissible toast.
+5. For `installer-manual`, keep the current explicit prompt and OS-open flow; add a clear
+   restart/install completion report after the new app version starts.
+6. Defer activation while MX-H2I is connecting, recovering, or asking for network permission.
 
 After that executor exists, normal releases become:
 
