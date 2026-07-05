@@ -1460,11 +1460,16 @@ function renderUpdatePanel() {
         <button class="secondary-button" type="button" data-action="openAdmin">Admin</button>
       </div>
       <div class="metric-grid">
+        ${metric('Status', update.status)}
         ${metric('Current', update.currentVersion)}
         ${metric('Latest', update.latestVersion)}
         ${metric('Policy', update.policy)}
         ${metric('Gray', update.rolloutGroup)}
+        ${metric('Release', update.releaseId)}
+        ${metric('Artifact', update.artifactKind || update.componentKind)}
+        ${metric('Activation', update.activation || (update.majorUpdateRequiresInstaller ? 'installer-manual' : update.hotUpdateAuto ? 'hot-auto' : '-'))}
       </div>
+      ${update.reason ? `<p class="panel-note">${escapeHtml(update.reason)}</p>` : ''}
     </section>
   `;
 }

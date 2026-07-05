@@ -1,0 +1,158 @@
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { access } from 'node:fs/promises';
+
+const args = parseArgs(process.argv.slice(2));
+const baseUrl = requiredArg('base-url', args.baseUrl || process.env.MX_RELEASE_BASE_URL || process.env.MX_SMOKE_BASE_URL)
+  .replace(/\/+$/, '');
+const artifactPath = requiredArg('artifact', args.artifact || process.env.MX_RELEASE_ARTIFACT);
+const artifactUrl = requiredArg('artifact-url', args.artifactUrl || process.env.MX_RELEASE_ARTIFACT_URL);
+const version = requiredArg('version', args.version || process.env.MX_RELEASE_VERSION);
+const channel = args.channel || process.env.MX_RELEASE_CHANNEL || 'stable';
+const currentVersion = args.currentVersion || process.env.MX_RELEASE_CURRENT_VERSION || '0.1.0';
+const kind = args.kind || process.env.MX_RELEASE_KIND || 'installer';
+const e2eResult = args.e2eResult || process.env.MX_RELEASE_E2E_RESULT || 'running';
+const runId = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
+
+await access(artifactPath);
+const digest = `sha256:${await sha256File(artifactPath)}`;
+const body = kind === 'hot' ? hotUpdateBody() : installerBody();
+const payload = await requestJson('/internal/v1/release-management/plans', {
+  method: 'POST',
+  body
+});
+
+console.log(JSON.stringify({
+  ok: true,
+  baseUrl,
+  artifact: {
+    path: artifactPath,
+    url: artifactUrl,
+    digest
+  },
+  plan: {
+    planId: payload.plan?.planId,
+    releaseId: payload.plan?.releaseId,
+    channel: payload.plan?.channel,
+    artifactKinds: payload.plan?.artifacts?.map((artifact) => artifact.kind) || [],
+    activation: payload.plan?.activation,
+    gate: payload.plan?.test?.gate?.verdict
+  }
+}, null, 2));
+
+function installerBody() {
+  return {
+    releaseId: args.releaseId || `mx-h2i-installer-${version}-${runId}`,
+    channel,
+    productId: 'mx-h2i',
+    appId: 'mx-h2i',
+    launcherComponentId: 'mx-h2i',
+    launcherUpdatePolicy: 'mx-h2i-installer',
+    launcherCurrentVersion: currentVersion,
+    launcherTargetVersion: version,
+    appUpdatePolicy: 'app-managed',
+    appCurrentVersion: currentVersion,
+    appTargetVersion: currentVersion,
+    artifactKind: 'mx-h2i-installer',
+    artifactVersion: version,
+    artifactUrl,
+    artifactDigest: digest,
+    activationMode: 'installer-manual',
+    rolloutStrategy: args.rolloutStrategy || 'manual-ring',
+    rolloutPercentage: numberArg(args.rolloutPercentage, 0),
+    rolloutRings: listArg(args.rolloutRings, ['internal-dogfood', 'stable']),
+    suiteId: args.suiteId || 'mx-h2i-installer-release',
+    topology: args.topology || 'h-d-i-installer-release',
+    sites: listArg(args.sites, ['internal-main', 'domestic-main']),
+    e2eResult,
+    createdBy: args.createdBy || 'release-center-publish',
+    requestId: `release-center-publish-installer-${runId}`
+  };
+}
+
+function hotUpdateBody() {
+  return {
+    releaseId: args.releaseId || `mx-h2i-hot-${version}-${runId}`,
+    channel,
+    productId: 'mx-h2i',
+    appId: 'mx-h2i',
+    launcherComponentId: args.componentId || 'mx-h2i-renderer',
+    launcherUpdatePolicy: 'renderer-ui',
+    launcherCurrentVersion: currentVersion,
+    launcherTargetVersion: version,
+    appComponentId: 'mx-h2i-config',
+    appUpdatePolicy: 'config-snapshot',
+    appCurrentVersion: currentVersion,
+    appTargetVersion: version,
+    artifactKind: 'renderer-ui',
+    artifactVersion: version,
+    artifactUrl,
+    artifactDigest: digest,
+    activationMode: 'hot-auto',
+    rolloutStrategy: args.rolloutStrategy || 'gray',
+    rolloutPercentage: numberArg(args.rolloutPercentage, 10),
+    rolloutRings: listArg(args.rolloutRings, ['internal-dogfood', 'canary', 'stable']),
+    featureKeys: listArg(args.featureKeys, ['mx-h2i.release.hot-update']),
+    suiteId: args.suiteId || 'mx-h2i-hot-release',
+    topology: args.topology || 'h-d-i-hot-release',
+    sites: listArg(args.sites, ['internal-main', 'domestic-main']),
+    e2eResult,
+    createdBy: args.createdBy || 'release-center-publish',
+    requestId: `release-center-publish-hot-${runId}`
+  };
+}
+
+function parseArgs(argv) {
+  const parsed = {};
+  for (let index = 0; index < argv.length; index += 1) {
+    const item = argv[index];
+    if (!item.startsWith('--')) continue;
+    const [rawKey, inlineValue] = item.slice(2).split('=');
+    const key = rawKey.replace(/-([a-z])/g, (_, char) => char.toUpperCase());
+    parsed[key] = inlineValue ?? argv[index + 1];
+    if (inlineValue === undefined) index += 1;
+  }
+  return parsed;
+}
+
+function requiredArg(name, value) {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  throw new Error(`Missing --${name}`);
+}
+
+function listArg(value, fallback) {
+  if (!value) return fallback;
+  return String(value).split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function numberArg(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw new Error(`Invalid number: ${value}`);
+  return parsed;
+}
+
+async function sha256File(path) {
+  const hash = createHash('sha256');
+  await new Promise((resolve, reject) => {
+    createReadStream(path)
+      .on('data', (chunk) => hash.update(chunk))
+      .on('error', reject)
+      .on('end', resolve);
+  });
+  return hash.digest('hex');
+}
+
+async function requestJson(path, options = {}) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: options.method || 'GET',
+    headers: { 'content-type': 'application/json' },
+    body: options.body ? JSON.stringify(options.body) : undefined
+  });
+  const text = await response.text();
+  const body = text ? JSON.parse(text) : null;
+  if (!response.ok) {
+    throw new Error(`${options.method || 'GET'} ${path} failed ${response.status}: ${JSON.stringify(body)}`);
+  }
+  return body;
+}

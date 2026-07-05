@@ -835,6 +835,13 @@ button:disabled {
   white-space: nowrap;
 }
 
+.panel-note {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .settings-panel {
   margin-top: 2px;
   border-top: 1px solid rgba(94, 142, 236, 0.14);

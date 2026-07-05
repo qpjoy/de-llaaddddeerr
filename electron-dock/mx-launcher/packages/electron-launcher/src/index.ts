@@ -129,6 +129,22 @@ export {
   type ElectronLauncherStandaloneOwnershipState,
   type ElectronLauncherStandaloneRouteProbe
 } from './standalone-data-plane.js';
+export {
+  createElectronLauncherReleaseUpdater,
+  downloadElectronLauncherReleaseArtifactToFile,
+  type ElectronLauncherArtifactDownloadInput,
+  type ElectronLauncherArtifactDownloadResult,
+  type ElectronLauncherReleaseActivationMode,
+  type ElectronLauncherReleaseArtifactRef,
+  type ElectronLauncherReleasePlan,
+  type ElectronLauncherReleasePolicyDecision,
+  type ElectronLauncherReleaseReportInput,
+  type ElectronLauncherReleaseUpdateMode,
+  type ElectronLauncherReleaseUpdater,
+  type ElectronLauncherReleaseUpdaterOptions,
+  type ElectronLauncherUpdateCheckInput,
+  type ElectronLauncherUpdateCheckResult
+} from './release-updater.js';
 
 export const ELECTRON_LAUNCHER_PACKAGE_NAME = '@qpjoy/electron-launcher';
 

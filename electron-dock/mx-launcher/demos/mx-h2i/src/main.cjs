@@ -467,21 +467,46 @@ function registerIpc() {
   });
   ipcMain.handle('mx-h2i:check-updates', async () => {
     const catalogSync = await syncAppCenterCatalog('check-updates');
+    const releaseSync = await checkReleaseCenterUpdate('manual-check');
+    const releaseResult = releaseSync.result;
+    const releasePlan = releaseResult?.plan || null;
+    const releaseDecision = releaseResult?.decision || null;
+    const releaseArtifact = releaseResult?.artifacts?.[0] || null;
     runtime.update = {
-      status: 'ready',
+      status: releaseSync.ok ? releaseResult.status : 'failed',
       currentVersion: app.getVersion(),
-      latestVersion: '0.1.1',
-      policy: 'launcher-managed',
+      latestVersion: releaseDecision?.targetVersion || app.getVersion(),
+      policy: releaseDecision?.updateMode || 'launcher-managed',
       channel: runtime.config.releaseChannel,
-      rolloutGroup: runtime.config.rolloutGroup,
-      canSkip: true,
-      lastCheckedAt: nowIso()
+      rolloutGroup: releasePlan?.rollout?.segmentId || runtime.config.rolloutGroup,
+      canSkip: releaseDecision?.canSkip === true,
+      lastCheckedAt: releaseResult?.checkedAt || nowIso(),
+      planId: releasePlan?.planId || null,
+      releaseId: releasePlan?.releaseId || null,
+      componentId: releaseDecision?.componentId || launcherProductId(),
+      componentKind: releaseDecision?.componentKind || null,
+      updateMode: releaseDecision?.updateMode || null,
+      reason: releaseSync.ok ? releaseResult.reason : releaseSync.message,
+      artifactKind: releaseArtifact?.kind || null,
+      artifactUrl: releaseArtifact?.url || null,
+      artifactDigest: releaseArtifact?.digest || null,
+      activation: releaseArtifact?.activation || null,
+      restartRequired: releaseArtifact?.restartRequired === true,
+      majorUpdateRequiresInstaller: releasePlan?.activation?.majorUpdateRequiresInstaller === true,
+      hotUpdateAuto: releasePlan?.activation?.hotUpdateAuto === true
     };
+    const failures = [
+      catalogSync.ok === false ? `AppCenter 目录同步失败：${catalogSync.message}` : null,
+      releaseSync.ok === false ? `Release Center 检查失败：${releaseSync.message}` : null
+    ].filter(Boolean);
+    const releaseMessage = releaseSync.ok
+      ? releaseUpdateMessage(releaseResult)
+      : 'Release Center 更新策略读取失败。';
     runtime.feedback = {
-      tone: catalogSync.ok === false ? 'warning' : 'info',
-      message: catalogSync.ok === false
-        ? `灰度更新策略已读取；AppCenter 目录同步失败：${catalogSync.message}`
-        : `灰度更新策略已读取，AppCenter 目录已同步 ${catalogSync.count} 个应用。`
+      tone: failures.length ? 'warning' : (releaseResult?.status === 'update-available' ? 'success' : 'info'),
+      message: failures.length
+        ? `${releaseMessage} ${failures.join('；')}`
+        : `${releaseMessage} AppCenter 目录已同步 ${catalogSync.count} 个应用。`
     };
     touchRuntime('update checked');
     await saveAndBroadcast();
@@ -2837,6 +2862,126 @@ async function syncAppCenterCatalog(reason) {
   }
 }
 
+async function checkReleaseCenterUpdate(reason) {
+  try {
+    const baseUrl = appCenterCatalogBaseUrl();
+    if (!baseUrl) return { ok: false, result: null, message: 'Internal API baseUrl 为空' };
+    const mod = await import('@qpjoy/electron-launcher');
+    if (typeof mod.createElectronLauncherReleaseUpdater !== 'function') {
+      return { ok: false, result: null, message: '当前 Launcher 包不包含 release updater。' };
+    }
+    const identity = appCenterInstallationIdentity();
+    const userId = releaseCenterUserId();
+    const updater = mod.createElectronLauncherReleaseUpdater({
+      baseUrl,
+      fetchImpl: launcherFetchForBootstrap(runtime.config.bootstrapResolveMode),
+      reportInstallId: identity.installId
+    });
+    const currentVersion = app.getVersion();
+    const checks = [];
+    const productId = launcherProductId();
+    for (const target of [
+      { componentId: productId, componentKind: 'mx-h2i-installer' },
+      { componentId: `${productId}-renderer`, componentKind: 'renderer-ui' }
+    ]) {
+      try {
+        checks.push(await updater.check({
+          ...target,
+          currentVersion,
+          channel: runtime.config.releaseChannel,
+          installId: identity.installId,
+          userId,
+          platform: process.platform
+        }));
+      } catch (error) {
+        checks.push({ status: 'failed', error: errorMessage(error), target });
+      }
+    }
+    const result = chooseReleaseUpdateResult(checks, currentVersion, baseUrl);
+    await updater.report({
+      installId: identity.installId,
+      status: result.status === 'failed' ? 'check-failed' : 'checked',
+      error: result.status === 'failed' ? result.reason : null,
+      metadata: {
+        reason,
+        productId,
+        currentVersion,
+        channel: runtime.config.releaseChannel,
+        platform: process.platform,
+        releaseId: result.plan?.releaseId || null,
+        planId: result.plan?.planId || null,
+        componentId: result.decision?.componentId || null,
+        componentKind: result.decision?.componentKind || null,
+        updateMode: result.decision?.updateMode || null,
+        status: result.status
+      }
+    }).catch((error) => {
+      pushAppLog('appcenter', 'warning', `Release report failed (${reason}): ${errorMessage(error)}`);
+    });
+    pushAppLog('appcenter', result.status === 'failed' ? 'warning' : 'info', `Release check ${result.status}: ${result.reason}`);
+    return { ok: result.status !== 'failed', result, message: result.reason };
+  } catch (error) {
+    const message = errorMessage(error);
+    pushAppLog('appcenter', 'warning', `Release check failed (${reason}): ${message}`);
+    return { ok: false, result: null, message };
+  }
+}
+
+function chooseReleaseUpdateResult(results, currentVersion, baseUrl) {
+  const successful = results.filter((result) => result && !result.error && result.decision);
+  const available = successful.filter((result) => result.status === 'update-available');
+  const blocked = successful.filter((result) => result.status === 'blocked');
+  const selected = available.find((result) => result.decision?.updateMode === 'mandatory')
+    || available[0]
+    || blocked.find((result) => result.decision?.updateMode === 'mandatory')
+    || blocked[0]
+    || successful[0];
+  if (selected) return selected;
+  const firstFailure = results.find((result) => result?.error);
+  return {
+    checkedAt: nowIso(),
+    baseUrl,
+    status: 'failed',
+    plan: null,
+    decision: {
+      componentKind: firstFailure?.target?.componentKind || 'app-managed',
+      componentId: firstFailure?.target?.componentId || launcherProductId(),
+      currentVersion,
+      targetVersion: currentVersion,
+      updateAvailable: false,
+      updateMode: 'none',
+      canSkip: true,
+      canDefer: true,
+      requiresGate: false,
+      rollbackRequired: false,
+      reason: firstFailure?.error || 'Release Center check failed'
+    },
+    artifacts: [],
+    reason: firstFailure?.error || 'Release Center check failed'
+  };
+}
+
+function releaseUpdateMessage(result) {
+  if (!result) return 'Release Center 没有返回更新策略。';
+  if (result.status === 'up-to-date') return '当前已是最新版本。';
+  if (result.status === 'blocked') return `发现更新但门禁未通过：${result.reason}`;
+  if (result.status === 'update-available') {
+    const decision = result.decision || {};
+    const plan = result.plan || {};
+    if (decision.updateMode === 'mandatory') {
+      return `发现 MX-H2I 大版本 ${decision.targetVersion}，需要手动下载安装包（${plan.releaseId || 'release plan'}）。`;
+    }
+    return `发现可自动更新版本 ${decision.targetVersion}（${decision.componentKind || 'component'}）。`;
+  }
+  return result.reason || 'Release Center 更新策略已读取。';
+}
+
+function releaseCenterUserId() {
+  return parseUserIdFromSubject(runtime?.auth?.subject)
+    || nullableString(runtime?.auth?.user?.userId)
+    || null;
+}
+
 function mergeAppCenterCatalogApps(remoteApps) {
   const next = { ...(runtime.apps || normalizeApps({})) };
   for (const raw of remoteApps) {
@@ -3092,11 +3237,24 @@ function normalizeUpdate(input, config) {
     status: stringValue(row.status, 'idle'),
     currentVersion: stringValue(row.currentVersion, app.getVersion()),
     latestVersion: stringValue(row.latestVersion, app.getVersion()),
-    policy: 'launcher-managed',
+    policy: stringValue(row.policy, 'launcher-managed'),
     channel: config.releaseChannel,
     rolloutGroup: config.rolloutGroup,
     canSkip: row.canSkip === true,
-    lastCheckedAt: typeof row.lastCheckedAt === 'string' ? row.lastCheckedAt : null
+    lastCheckedAt: typeof row.lastCheckedAt === 'string' ? row.lastCheckedAt : null,
+    planId: nullableString(row.planId),
+    releaseId: nullableString(row.releaseId),
+    componentId: nullableString(row.componentId),
+    componentKind: nullableString(row.componentKind),
+    updateMode: nullableString(row.updateMode),
+    reason: nullableString(row.reason),
+    artifactKind: nullableString(row.artifactKind),
+    artifactUrl: nullableString(row.artifactUrl),
+    artifactDigest: nullableString(row.artifactDigest),
+    activation: nullableString(row.activation),
+    restartRequired: row.restartRequired === true,
+    majorUpdateRequiresInstaller: row.majorUpdateRequiresInstaller === true,
+    hotUpdateAuto: row.hotUpdateAuto === true
   };
 }
 

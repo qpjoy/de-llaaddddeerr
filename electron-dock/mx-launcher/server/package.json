@@ -12,7 +12,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "migrate:up": "node dist/src/migrate.js",
     "smoke:platform-kernel": "pnpm run build && node dist/scripts/platform-kernel-smoke.js",
-    "smoke:http": "node scripts/http-smoke.mjs"
+    "smoke:http": "node scripts/http-smoke.mjs",
+    "smoke:release-center": "node scripts/release-center-smoke.mjs",
+    "release:publish": "node scripts/release-center-publish.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.19",

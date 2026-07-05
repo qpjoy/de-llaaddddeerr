@@ -30,6 +30,10 @@
       "types": "./dist/standalone-data-plane.d.ts",
       "import": "./dist/standalone-data-plane.js"
     },
+    "./release-updater": {
+      "types": "./dist/release-updater.d.ts",
+      "import": "./dist/release-updater.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

@@ -14,6 +14,21 @@ gates, and admin management without touching the already-stable connection path.
 - MX-H2I clients only consume signed Internal release decisions and artifact refs.
 - Update checks must not restart WireGuard, PAC, DNS, lease refresh, or the employee/guest
   connect flow.
+- The updater executor lives in the shared Electron Launcher package. Standalone products such
+  as MX-H2I call the shared updater, while embed apps only consume app-scoped decisions.
+
+## Storage Plan
+
+Release Center should not store long-lived OSS keys in the client.
+
+- CI/Admin receives OSS credentials and uploads artifacts.
+- Release Center stores artifact URL, digest, signature, platform, channel, notes, and rollout.
+- Client downloads from a short-lived signed URL, Internal reverse proxy URL, Domestic cache URL,
+  OSS/CDN public URL, or another object-store URL selected by the release plan.
+- If OSS keys are provided later, add them to CI/server secret management only; never package
+  them into MX-H2I.
+- Internal can later expose an upload endpoint that writes to OSS and returns the immutable
+  `ReleaseArtifactRef`.
 
 ## Artifact Classes
 
