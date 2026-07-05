@@ -43,6 +43,27 @@ spec:
 apiVersion: v1
 kind: PersistentVolume
 metadata:
+  name: mx-launcher-release-artifacts-local-pv
+  labels:
+    app.kubernetes.io/name: mx-launcher-internal
+    app.kubernetes.io/part-of: mx-3ks
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  volumeMode: Filesystem
+  hostPath:
+    path: /var/lib/mx-launcher/k8s/release-artifacts
+    type: DirectoryOrCreate
+  claimRef:
+    namespace: mx-internal-shadow
+    name: mx-launcher-release-artifacts
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
   name: mx-launcher-site-slots-local-pv
   labels:
     app.kubernetes.io/name: mx-launcher-internal

@@ -1671,6 +1671,7 @@ k8s_repair_released_local_pv() {
 k8s_repair_internal_local_pvs() {
   k8s_repair_released_local_pv mx-internal-postgres-local-pv
   k8s_repair_released_local_pv mx-launcher-internal-ssh-local-pv
+  k8s_repair_released_local_pv mx-launcher-release-artifacts-local-pv
   k8s_repair_released_local_pv mx-launcher-site-slots-local-pv
 }
 

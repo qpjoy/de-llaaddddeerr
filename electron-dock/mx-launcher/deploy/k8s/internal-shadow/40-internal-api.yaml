@@ -151,11 +151,13 @@ spec:
                 secretKeyRef:
                   name: mx-launcher-db
                   key: DATABASE_HOST
+                  optional: true
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: mx-launcher-db
                   key: DATABASE_URL
+                  optional: true
           startupProbe:
             httpGet:
               path: /healthz
