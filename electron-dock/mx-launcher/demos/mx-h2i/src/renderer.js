@@ -1472,6 +1472,7 @@ function renderUpdatePanel() {
         ${metric('Gray', update.rolloutGroup)}
         ${metric('Release', update.releaseId)}
         ${metric('Artifact', update.artifactKind || update.componentKind)}
+        ${metric('Platform', update.artifactPlatform || '-')}
         ${metric('Activation', update.activation || (update.majorUpdateRequiresInstaller ? 'installer-manual' : update.hotUpdateAuto ? 'hot-auto' : '-'))}
       </div>
       <div class="update-actions">
@@ -1904,6 +1905,7 @@ function createMockApi() {
         artifactId: 'mock_mx_h2i_0_1_1_dmg',
         artifactUrl: 'https://example.invalid/mx-h2i-0.1.1.dmg',
         artifactDigest: 'sha256:mock',
+        artifactPlatform: 'darwin',
         activation: 'installer-manual',
         restartRequired: true,
         majorUpdateRequiresInstaller: true,

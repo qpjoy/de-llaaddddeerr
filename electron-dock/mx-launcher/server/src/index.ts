@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import './env.js';
 
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';

@@ -3731,7 +3731,10 @@ function buildReleaseArtifactRef(
     url: role === 'launcher' ? input.artifactUrl?.trim() || null : null,
     digest: role === 'launcher' ? input.artifactDigest?.trim() || null : null,
     signature: role === 'launcher' ? input.artifactSignature?.trim() || null : null,
-    sizeBytes: null,
+    sizeBytes: role === 'launcher' && typeof input.artifactSizeBytes === 'number' && Number.isFinite(input.artifactSizeBytes)
+      ? input.artifactSizeBytes
+      : null,
+    platform: role === 'launcher' ? input.artifactPlatform?.trim() || null : null,
     activation,
     autoApply: decision.updateMode === 'automatic' && activation !== 'installer-manual',
     restartRequired: releaseActivationNeedsRestart(activation),

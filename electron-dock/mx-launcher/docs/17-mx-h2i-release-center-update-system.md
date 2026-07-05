@@ -21,14 +21,16 @@ gates, and admin management without touching the already-stable connection path.
 
 Release Center should not store long-lived OSS keys in the client.
 
-- CI/Admin receives OSS credentials and uploads artifacts.
-- Release Center stores artifact URL, digest, signature, platform, channel, notes, and rollout.
+- CI/Admin receives OSS credentials and uploads artifacts; clients never receive OSS keys.
+- Release Center can store artifacts in OSS first, or in the Internal artifact store when
+  selected, and returns an immutable download URL in the release plan.
+- Release Center stores artifact URL, digest, size, signature, platform, channel, notes, and rollout.
 - Client downloads from a short-lived signed URL, Internal reverse proxy URL, Domestic cache URL,
   OSS/CDN public URL, or another object-store URL selected by the release plan.
 - If OSS keys are provided later, add them to CI/server secret management only; never package
   them into MX-H2I.
-- Internal can later expose an upload endpoint that writes to OSS and returns the immutable
-  `ReleaseArtifactRef`.
+- If the OSS bucket is private, Release Center can keep the plan URL on Internal and redirect to
+  a short-lived signed OSS URL at download time.
 
 ## Artifact Classes
 

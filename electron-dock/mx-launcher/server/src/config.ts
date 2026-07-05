@@ -1,3 +1,5 @@
+import './env.js';
+
 import type { ObservabilitySink, RuntimeConfig, SiteRole, StoreDriver } from './types.js';
 
 function intFromEnv(name: string, fallback: number): number {

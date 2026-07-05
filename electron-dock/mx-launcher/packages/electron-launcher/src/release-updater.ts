@@ -35,6 +35,7 @@ export interface ElectronLauncherReleaseArtifactRef {
   digest: string | null;
   signature: string | null;
   sizeBytes: number | null;
+  platform?: string | null;
   activation: ElectronLauncherReleaseActivationMode;
   autoApply: boolean;
   restartRequired: boolean;
@@ -174,7 +175,7 @@ export function createElectronLauncherReleaseUpdater(options: ElectronLauncherRe
         }
       );
       const decision = decisionPayload.decision;
-      const artifacts = plan ? matchingArtifacts(plan, input.componentId) : [];
+      const artifacts = plan ? matchingArtifacts(plan, input.componentId, input.platform) : [];
       const gateVerdict = plan?.test?.gate?.verdict;
       const status = !decision.updateAvailable
         ? 'up-to-date'
@@ -277,9 +278,15 @@ function selectPlanDecision(
   }) ?? null;
 }
 
-function matchingArtifacts(plan: ElectronLauncherReleasePlan, componentId: string): ElectronLauncherReleaseArtifactRef[] {
+function matchingArtifacts(
+  plan: ElectronLauncherReleasePlan,
+  componentId: string,
+  platform?: string | null
+): ElectronLauncherReleaseArtifactRef[] {
+  const normalizedPlatform = platform?.trim() || null;
   return (Array.isArray(plan.artifacts) ? plan.artifacts : [])
-    .filter((artifact) => artifact.componentId === componentId || !artifact.componentId);
+    .filter((artifact) => artifact.componentId === componentId || !artifact.componentId)
+    .filter((artifact) => !artifact.platform || !normalizedPlatform || artifact.platform === normalizedPlatform);
 }
 
 async function requestJson<T>(

@@ -6219,6 +6219,7 @@ function renderReleaseCenterPanel() {
             ${artifactKinds.map((kind) => `<option value="${escapeHtml(kind)}" ${filter.artifactKind === kind ? 'selected' : ''}>${escapeHtml(kind)}</option>`).join('')}
           </select>
           <button class="secondary-button" type="button" data-release-refresh ${state.releaseCenter.busy ? 'disabled' : ''}>Refresh plans</button>
+          <button class="secondary-button" type="button" data-release-upload ${state.releaseCenter.busy ? 'disabled' : ''}>Upload version</button>
           <button class="secondary-button" type="button" data-release-create="hot" ${state.releaseCenter.busy ? 'disabled' : ''}>Plan hot update</button>
           <button class="primary-button" type="button" data-release-create="major" ${state.releaseCenter.busy ? 'disabled' : ''}>Plan MX-H2I</button>
         </div>
@@ -6313,6 +6314,8 @@ function bindReleaseCenterControls(root) {
   }
   const refresh = root.querySelector('[data-release-refresh]');
   if (refresh) refresh.addEventListener('click', () => void refreshReleaseCenterPlans());
+  const upload = root.querySelector('[data-release-upload]');
+  if (upload) upload.addEventListener('click', () => openReleaseUploadDrawer());
   for (const button of root.querySelectorAll('[data-release-create]')) {
     button.addEventListener('click', () => void createReleasePlanFromAdmin(button.dataset.releaseCreate));
   }
@@ -6488,6 +6491,23 @@ function openReleaseCenterDrawer(planId) {
   renderFoundationGrid(state.dashboard?.overview || {});
 }
 
+function openReleaseUploadDrawer() {
+  state.releaseCenter.drawer = {
+    mode: 'upload',
+    draft: {
+      kind: 'installer',
+      platform: navigator.platform?.toLowerCase().includes('win') ? 'win32' : 'darwin',
+      storage: 'oss',
+      channel: 'stable',
+      currentVersion: '0.1.0',
+      version: '0.2.0',
+      e2eResult: 'running'
+    }
+  };
+  state.releaseCenter.feedback = null;
+  renderFoundationGrid(state.dashboard?.overview || {});
+}
+
 function closeReleaseCenterDrawer() {
   state.releaseCenter.drawer = null;
   if (userEditorBackdrop) userEditorBackdrop.hidden = true;
@@ -6507,6 +6527,10 @@ function renderReleaseCenterDrawer() {
       userEditorDrawer.hidden = true;
       userEditorDrawer.innerHTML = '';
     }
+    return;
+  }
+  if (drawer.mode === 'upload') {
+    renderReleaseUploadDrawer();
     return;
   }
   const plan = releasePlanById(drawer.planId);
@@ -6600,6 +6624,106 @@ function renderReleaseCenterDrawer() {
   bindReleaseDrawerControls();
 }
 
+function renderReleaseUploadDrawer() {
+  if (!userEditorBackdrop || !userEditorDrawer) return;
+  const draft = state.releaseCenter.drawer?.draft || {};
+  userEditorBackdrop.hidden = false;
+  userEditorDrawer.hidden = false;
+  userEditorDrawer.innerHTML = `
+    <form class="app-editor-form release-drawer release-upload-form" data-release-upload-form>
+      <header class="app-drawer-header">
+        <div>
+          <span class="site-kind">Release Center</span>
+          <h2>Upload MX-H2I Version</h2>
+          <p>上传 DMG/EXE/renderer 包，默认直传 OSS；也可以选择 Internal server storage。</p>
+        </div>
+        <button class="icon-button app-drawer-close" type="button" data-release-drawer-close aria-label="Close release drawer">×</button>
+      </header>
+      <div class="app-drawer-scroll">
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>01</span>
+            <strong>Artifact</strong>
+          </div>
+          <div class="release-upload-grid">
+            <label>
+              <span>File</span>
+              <input name="artifactFile" type="file" required />
+            </label>
+            <label>
+              <span>Type</span>
+              <select name="kind">
+                <option value="installer" ${draft.kind === 'installer' ? 'selected' : ''}>MX-H2I installer</option>
+                <option value="hot" ${draft.kind === 'hot' ? 'selected' : ''}>Hot update bundle</option>
+              </select>
+            </label>
+            <label>
+              <span>Platform</span>
+              <select name="platform">
+                ${[
+                  ['darwin', 'macOS'],
+                  ['win32', 'Windows'],
+                  ['linux', 'Linux'],
+                  ['all', 'All platforms']
+                ].map(([value, label]) => `<option value="${value}" ${draft.platform === value ? 'selected' : ''}>${label}</option>`).join('')}
+              </select>
+            </label>
+            <label>
+              <span>Storage</span>
+              <select name="storage">
+                <option value="oss" ${draft.storage === 'oss' ? 'selected' : ''}>OSS direct</option>
+                <option value="server" ${draft.storage === 'server' ? 'selected' : ''}>Internal server</option>
+                <option value="auto" ${draft.storage === 'auto' ? 'selected' : ''}>Auto</option>
+              </select>
+            </label>
+          </div>
+        </section>
+        <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>02</span>
+            <strong>Release Plan</strong>
+          </div>
+          <div class="release-upload-grid">
+            <label>
+              <span>Version</span>
+              <input name="version" value="${escapeHtml(draft.version || '0.2.0')}" autocomplete="off" required />
+            </label>
+            <label>
+              <span>Current</span>
+              <input name="currentVersion" value="${escapeHtml(draft.currentVersion || '0.1.0')}" autocomplete="off" required />
+            </label>
+            <label>
+              <span>Channel</span>
+              <select name="channel">
+                ${['stable', 'canary', 'internal', 'shadow'].map((channel) => `<option value="${channel}" ${draft.channel === channel ? 'selected' : ''}>${channel}</option>`).join('')}
+              </select>
+            </label>
+            <label>
+              <span>Gate</span>
+              <select name="e2eResult">
+                ${['running', 'passed', 'blocked', 'failed'].map((result) => `<option value="${result}" ${draft.e2eResult === result ? 'selected' : ''}>${result}</option>`).join('')}
+              </select>
+            </label>
+          </div>
+        </section>
+        <section class="app-drawer-section">
+          <div class="release-strategy-strip">
+            ${renderReleaseStrategyFact('Default storage', 'OSS direct', 'requires server-side MX_RELEASE_OSS_* secrets')}
+            ${renderReleaseStrategyFact('Fallback', 'Internal server', 'stores under artifacts/release-center')}
+            ${renderReleaseStrategyFact('Client source', 'plan URL', 'MX-H2I downloads whatever the version records')}
+            ${renderReleaseStrategyFact('Safety', 'digest + size', 'client verifies before open/stage')}
+          </div>
+        </section>
+      </div>
+      <footer class="app-drawer-actions">
+        <button class="secondary-button" type="button" data-release-drawer-close>Cancel</button>
+        <button class="primary-button" type="submit" ${state.releaseCenter.busy ? 'disabled' : ''}>Upload and create</button>
+      </footer>
+    </form>
+  `;
+  bindReleaseDrawerControls();
+}
+
 function renderReleaseDrawerMetric(label, value, detail) {
   return `
     <article>
@@ -6625,9 +6749,193 @@ function bindReleaseDrawerControls() {
   for (const close of userEditorDrawer.querySelectorAll('[data-release-drawer-close]')) {
     close.addEventListener('click', () => closeReleaseCenterDrawer());
   }
+  const uploadForm = userEditorDrawer.querySelector('[data-release-upload-form]');
+  if (uploadForm) {
+    uploadForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      void uploadReleaseArtifactFromAdmin(uploadForm);
+    });
+  }
   for (const button of userEditorDrawer.querySelectorAll('[data-release-evaluate]')) {
     button.addEventListener('click', () => void evaluateReleasePlanFromAdmin(button.dataset.releaseEvaluate));
   }
+}
+
+async function uploadReleaseArtifactFromAdmin(form) {
+  if (state.releaseCenter.busy) return;
+  const file = form.elements.artifactFile?.files?.[0] || null;
+  if (!file) {
+    state.releaseCenter.feedback = { kind: 'error', message: 'Select a release artifact file first' };
+    renderFoundationGrid(state.dashboard?.overview || {});
+    renderReleaseCenterDrawer();
+    return;
+  }
+  const input = releaseUploadInputFromForm(form, file);
+  state.releaseCenter.busy = true;
+  state.releaseCenter.feedback = { kind: 'info', message: `Uploading ${file.name} to ${input.storage}` };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  renderReleaseCenterDrawer();
+  try {
+    const artifactPayload = await uploadReleaseArtifactFile(input, file);
+    const artifact = artifactPayload.artifact || {};
+    const planPayload = await fetchJson('/internal/v1/release-management/plans', {
+      method: 'POST',
+      body: releasePlanBodyFromUpload(input, artifact)
+    });
+    const plan = planPayload.plan;
+    const currentPlans = releaseCenterPlans().filter((item) => item.planId !== plan.planId);
+    const plans = [plan, ...currentPlans];
+    state.dashboard = {
+      ...(state.dashboard || {}),
+      latestReleasePlans: plans,
+      overview: {
+        ...(state.dashboard?.overview || {}),
+        releaseManagementPlans: Math.max(plans.length, state.dashboard?.overview?.releaseManagementPlans || 0)
+      }
+    };
+    state.releaseCenter.drawer = { planId: plan.planId };
+    state.releaseCenter.feedback = {
+      kind: 'success',
+      message: `Uploaded ${artifact.storage || input.storage} artifact and created ${plan.releaseId}`
+    };
+  } catch (error) {
+    state.releaseCenter.feedback = { kind: 'error', message: error.message };
+  } finally {
+    state.releaseCenter.busy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+    renderInspector();
+  }
+}
+
+function releaseUploadInputFromForm(form, file) {
+  const kind = form.elements.kind?.value === 'hot' ? 'hot' : 'installer';
+  const platform = form.elements.platform?.value || 'darwin';
+  const version = form.elements.version?.value?.trim() || '0.2.0';
+  const currentVersion = form.elements.currentVersion?.value?.trim() || '0.1.0';
+  const channel = form.elements.channel?.value || 'stable';
+  const storage = form.elements.storage?.value || 'oss';
+  const e2eResult = form.elements.e2eResult?.value || 'running';
+  const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const suffix = String(Date.now()).slice(-6);
+  const releaseId = kind === 'hot'
+    ? `mx-h2i-hot-${version}-${stamp}-${suffix}`
+    : `mx-h2i-${platform}-${version}-${stamp}-${suffix}`;
+  return {
+    fileName: file.name,
+    contentType: file.type || 'application/octet-stream',
+    kind,
+    artifactKind: kind === 'hot' ? 'renderer-ui' : 'mx-h2i-installer',
+    componentId: kind === 'hot' ? 'mx-h2i-renderer' : MX_H2I_PRODUCT_ID,
+    releaseId,
+    platform: platform === 'all' ? null : platform,
+    version,
+    currentVersion,
+    channel,
+    storage,
+    e2eResult
+  };
+}
+
+async function uploadReleaseArtifactFile(input, file) {
+  const params = new URLSearchParams({
+    releaseId: input.releaseId,
+    kind: input.artifactKind,
+    version: input.version,
+    componentId: input.componentId,
+    fileName: input.fileName,
+    storage: input.storage
+  });
+  if (input.platform) params.set('platform', input.platform);
+  const url = `${normalizedServerBase()}/internal/v1/release-artifacts?${params}`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': input.contentType },
+    body: file
+  });
+  const text = await response.text();
+  let payload = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error('Release artifact upload returned invalid JSON');
+  }
+  if (!response.ok) {
+    throw new Error(payload?.message || `Artifact upload failed HTTP ${response.status}`);
+  }
+  return payload;
+}
+
+function releasePlanBodyFromUpload(input, artifact) {
+  const artifactUrl = absoluteReleaseArtifactUrl(artifact.url || artifact.downloadPath);
+  const major = input.kind !== 'hot';
+  return major
+    ? {
+        releaseId: input.releaseId,
+        channel: input.channel,
+        productId: MX_H2I_PRODUCT_ID,
+        appId: MX_H2I_PRODUCT_ID,
+        launcherComponentId: MX_H2I_PRODUCT_ID,
+        launcherUpdatePolicy: 'mx-h2i-installer',
+        launcherCurrentVersion: input.currentVersion,
+        launcherTargetVersion: input.version,
+        appUpdatePolicy: 'app-managed',
+        appCurrentVersion: input.currentVersion,
+        appTargetVersion: input.currentVersion,
+        artifactKind: 'mx-h2i-installer',
+        artifactVersion: input.version,
+        artifactUrl,
+        artifactDigest: artifact.digest,
+        artifactSizeBytes: artifact.sizeBytes,
+        artifactPlatform: input.platform,
+        activationMode: 'installer-manual',
+        rolloutStrategy: 'manual-ring',
+        rolloutPercentage: 0,
+        rolloutRings: ['internal-dogfood', 'stable'],
+        suiteId: 'mx-h2i-installer-release',
+        topology: 'h-d-i-installer-release',
+        sites: ['internal-main', 'domestic-main'],
+        e2eResult: input.e2eResult,
+        createdBy: 'desktop-admin',
+        requestId: `desktop-release-upload-${Date.now()}`
+      }
+    : {
+        releaseId: input.releaseId,
+        channel: input.channel,
+        productId: MX_H2I_PRODUCT_ID,
+        appId: MX_H2I_PRODUCT_ID,
+        launcherComponentId: input.componentId,
+        launcherUpdatePolicy: 'renderer-ui',
+        launcherCurrentVersion: input.currentVersion,
+        launcherTargetVersion: input.version,
+        appComponentId: 'mx-h2i-config',
+        appUpdatePolicy: 'config-snapshot',
+        appCurrentVersion: input.currentVersion,
+        appTargetVersion: input.version,
+        artifactKind: 'renderer-ui',
+        artifactVersion: input.version,
+        artifactUrl,
+        artifactDigest: artifact.digest,
+        artifactSizeBytes: artifact.sizeBytes,
+        artifactPlatform: input.platform,
+        activationMode: 'hot-auto',
+        rolloutStrategy: 'gray',
+        rolloutPercentage: 10,
+        rolloutRings: ['internal-dogfood', 'canary', 'stable'],
+        featureKeys: ['mx-h2i.release.hot-update'],
+        suiteId: 'mx-h2i-hot-release',
+        topology: 'h-d-i-hot-release',
+        sites: ['internal-main', 'domestic-main'],
+        e2eResult: input.e2eResult,
+        createdBy: 'desktop-admin',
+        requestId: `desktop-release-upload-${Date.now()}`
+      };
+}
+
+function absoluteReleaseArtifactUrl(value) {
+  if (!value) return null;
+  const text = String(value);
+  if (/^https?:\/\//i.test(text)) return text;
+  return `${normalizedServerBase()}${text.startsWith('/') ? text : `/${text}`}`;
 }
 
 function renderUserServiceSummary(user, draft) {

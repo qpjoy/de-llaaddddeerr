@@ -16,6 +16,21 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
+  name: mx-launcher-release-artifacts
+  namespace: mx-internal-shadow
+  labels:
+    app.kubernetes.io/name: mx-launcher-internal
+    app.kubernetes.io/part-of: mx-3ks
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
   name: mx-launcher-site-slots
   namespace: mx-internal-shadow
   labels:
@@ -110,7 +125,12 @@ spec:
           envFrom:
             - configMapRef:
                 name: mx-launcher-internal-config
+            - secretRef:
+                name: mx-release-oss
+                optional: true
           env:
+            - name: MX_RELEASE_ARTIFACT_STORE_DIR
+              value: /app/artifacts/release-center
             - name: PG_USER
               valueFrom:
                 secretKeyRef:
@@ -170,12 +190,17 @@ spec:
           volumeMounts:
             - name: internal-ssh
               mountPath: /app/artifacts/ssh
+            - name: release-artifacts
+              mountPath: /app/artifacts/release-center
             - name: site-slots
               mountPath: /app/runtime-artifacts/site-slots
       volumes:
         - name: internal-ssh
           persistentVolumeClaim:
             claimName: mx-launcher-internal-ssh
+        - name: release-artifacts
+          persistentVolumeClaim:
+            claimName: mx-launcher-release-artifacts
         - name: site-slots
           persistentVolumeClaim:
             claimName: mx-launcher-site-slots

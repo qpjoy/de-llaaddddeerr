@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 const baseUrl = (
   firstPositionalArg()
   || process.env.MX_RELEASE_SMOKE_BASE_URL
@@ -10,6 +12,7 @@ const runId = `${stamp}_${Math.random().toString(16).slice(2, 8)}`;
 const summary = {
   baseUrl,
   runId,
+  artifacts: [],
   plans: [],
   decisions: []
 };
@@ -17,6 +20,7 @@ const summary = {
 await checkHealth();
 await checkPolicy('renderer-ui', 'mx-h2i-renderer', 'automatic');
 await checkPolicy('mx-h2i-installer', 'mx-h2i', 'mandatory');
+const uploadedInstallerArtifact = await uploadSmokeArtifact();
 
 const hotPlan = await createPlan({
   releaseId: `rel_smoke_hot_${runId}`,
@@ -73,8 +77,10 @@ const majorPlan = await createPlan({
   appTargetVersion: '0.1.0',
   artifactKind: 'mx-h2i-installer',
   artifactVersion: '0.2.0',
-  artifactUrl: `https://release.invalid/mx-h2i/${runId}/MX-H2I-0.2.0.dmg`,
-  artifactDigest: `sha256:smoke-major-${runId}`,
+  artifactUrl: absoluteUrl(uploadedInstallerArtifact.downloadPath),
+  artifactDigest: uploadedInstallerArtifact.digest,
+  artifactSizeBytes: uploadedInstallerArtifact.sizeBytes,
+  artifactPlatform: 'darwin',
   activationMode: 'installer-manual',
   rolloutStrategy: 'manual-ring',
   rolloutPercentage: 0,
@@ -95,7 +101,9 @@ assertPlan(majorPlan, {
   updateMode: 'mandatory',
   hotUpdateAuto: false,
   majorUpdateRequiresInstaller: true,
-  rolloutStrategy: 'manual-ring'
+  rolloutStrategy: 'manual-ring',
+  sizeBytes: uploadedInstallerArtifact.sizeBytes,
+  platform: 'darwin'
 });
 
 await checkListIncludes(hotPlan.planId, majorPlan.planId);
@@ -159,10 +167,49 @@ function assertPlan(plan, expected) {
   assert(plan.decisions?.readyToPromote === expected.readyToPromote, `${plan.releaseId} readyToPromote mismatch`);
   assert(plan.components?.launcher?.updateMode === expected.updateMode, `${plan.releaseId} launcher updateMode mismatch`);
   assert(plan.artifacts?.some((artifact) => artifact.kind === expected.artifactKind), `${plan.releaseId} missing artifact kind ${expected.artifactKind}`);
+  if (expected.sizeBytes !== undefined) {
+    assert(plan.artifacts?.some((artifact) => artifact.sizeBytes === expected.sizeBytes), `${plan.releaseId} missing artifact size ${expected.sizeBytes}`);
+  }
+  if (expected.platform !== undefined) {
+    assert(plan.artifacts?.some((artifact) => artifact.platform === expected.platform), `${plan.releaseId} missing artifact platform ${expected.platform}`);
+  }
   assert(plan.activation?.hotUpdateAuto === expected.hotUpdateAuto, `${plan.releaseId} hotUpdateAuto mismatch`);
   assert(plan.activation?.majorUpdateRequiresInstaller === expected.majorUpdateRequiresInstaller, `${plan.releaseId} major installer flag mismatch`);
   assert(plan.activation?.connectionSafeMode === true, `${plan.releaseId} must keep connectionSafeMode=true`);
   assert(plan.rollout?.strategy === expected.rolloutStrategy, `${plan.releaseId} rollout strategy mismatch`);
+}
+
+async function uploadSmokeArtifact() {
+  const body = Buffer.from(`mx-h2i release smoke artifact ${runId}\n`, 'utf8');
+  const digest = `sha256:${createHash('sha256').update(body).digest('hex')}`;
+  const params = new URLSearchParams({
+    releaseId: `rel_smoke_major_${runId}`,
+    kind: 'mx-h2i-installer',
+    version: '0.2.0',
+    componentId: 'mx-h2i',
+    fileName: `MX-H2I-0.2.0-${runId}.dmg`,
+    digest,
+    platform: 'darwin'
+  });
+  const payload = await requestJson(`/internal/v1/release-artifacts?${params}`, {
+    method: 'POST',
+    body,
+    raw: true
+  });
+  const artifact = payload?.artifact;
+  assert(artifact?.downloadPath, 'artifact upload did not return downloadPath');
+  assert(artifact?.digest === digest, `artifact upload digest mismatch: ${artifact?.digest}`);
+  const downloaded = await fetch(absoluteUrl(artifact.downloadPath));
+  const downloadedBytes = Buffer.from(await downloaded.arrayBuffer());
+  assert(downloaded.ok, `artifact download failed ${downloaded.status}`);
+  assert(downloadedBytes.equals(body), 'artifact download content mismatch');
+  summary.artifacts.push({
+    artifactId: artifact.artifactId,
+    downloadPath: artifact.downloadPath,
+    digest: artifact.digest,
+    sizeBytes: artifact.sizeBytes
+  });
+  return artifact;
 }
 
 async function checkListIncludes(...planIds) {
@@ -176,8 +223,8 @@ async function checkListIncludes(...planIds) {
 async function requestJson(path, options = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: options.method || 'GET',
-    headers: options.body ? { 'content-type': 'application/json' } : undefined,
-    body: options.body ? JSON.stringify(options.body) : undefined
+    headers: options.body ? { 'content-type': options.raw ? 'application/octet-stream' : 'application/json' } : undefined,
+    body: options.body ? options.raw ? options.body : JSON.stringify(options.body) : undefined
   });
   const text = await response.text();
   let body = null;
@@ -190,6 +237,11 @@ async function requestJson(path, options = {}) {
     throw new Error(`${options.method || 'GET'} ${path} failed ${response.status}: ${JSON.stringify(body)}`);
   }
   return body;
+}
+
+function absoluteUrl(path) {
+  if (/^https?:\/\//i.test(path)) return path;
+  return `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
 }
 
 function assert(condition, message) {

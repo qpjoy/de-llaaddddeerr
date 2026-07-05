@@ -1664,6 +1664,7 @@ export interface ReleaseArtifactRef {
   digest: string | null;
   signature: string | null;
   sizeBytes: number | null;
+  platform: string | null;
   activation: ReleaseActivationMode;
   autoApply: boolean;
   restartRequired: boolean;
@@ -2841,6 +2842,8 @@ export interface ReleaseManagementPlanInput {
   artifactUrl?: string | null;
   artifactDigest?: string | null;
   artifactSignature?: string | null;
+  artifactSizeBytes?: number | null;
+  artifactPlatform?: string | null;
   activationMode?: ReleaseActivationMode | string | null;
   rolloutStrategy?: ReleaseRolloutStrategy | string | null;
   rolloutPercentage?: number | null;

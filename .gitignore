@@ -49,6 +49,8 @@ electron-demo/**/.env
 # MX Launcher generated site-slot artifact evidence
 electron-dock/mx-launcher/artifacts/
 electron-dock/mx-launcher/server/artifacts/
+electron-dock/mx-launcher/server/.env
+electron-dock/mx-launcher/server/.env.local
 electron-dock/mx-launcher/.tmp/
 electron-dock/mx-launcher/demos/mx-h2i/.env
 electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli/refresh-metadata.json

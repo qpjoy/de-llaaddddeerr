@@ -1281,7 +1281,7 @@ select {
 }
 
 .release-catalog-controls {
-  grid-template-columns: minmax(220px, 1fr) minmax(130px, 0.42fr) minmax(130px, 0.42fr) minmax(150px, 0.5fr) auto auto auto;
+  grid-template-columns: minmax(220px, 1fr) minmax(130px, 0.42fr) minmax(130px, 0.42fr) minmax(150px, 0.5fr) auto auto auto auto;
   width: min(1120px, 100%);
 }
 
@@ -1383,6 +1383,26 @@ select {
 
 .release-artifact-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.release-upload-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.release-upload-grid label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.release-upload-grid input,
+.release-upload-grid select {
+  width: 100%;
 }
 
 .release-artifact-grid code {

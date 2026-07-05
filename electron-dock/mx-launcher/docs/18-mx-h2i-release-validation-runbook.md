@@ -11,13 +11,13 @@ Ready now:
 - Admin Release Center can list plans and create hot-update or MX-H2I installer plans.
 - Release policy can distinguish hot updates from full installer updates.
 - Release plans can carry artifact URL, digest, rollout, gate, and activation metadata.
+- Release Center can host uploaded artifacts in OSS or the Internal artifact store.
 
 Not complete yet:
 
 - MX-H2I client does not yet hot-swap renderer/asar/config artifacts or restart itself after
   applying a full installer.
-- Release Center does not yet host uploaded MX-H2I installers itself; use an internal HTTP
-  object store, nginx/Caddy path, OSS, or CDN URL as `artifactUrl` for now.
+- Real OSS credentials still need to be supplied and verified in the target k8s environment.
 
 ## Layer 1: Server Smoke
 
@@ -111,28 +111,73 @@ For Windows, build on Windows or a configured CI worker:
 pnpm --dir electron-dock/mx-launcher/demos/mx-h2i make:win
 ```
 
-## Layer 5: Publish Artifact URL
+## Layer 5: Publish Artifact
 
-Until the Release Center artifact upload endpoint exists, put the installer somewhere users can
-download from the H2I network path, for example:
+By default, the publish script uploads the local file to the Internal Release Center artifact
+store, receives a download URL, then creates the release plan with that URL, sha256 digest, and
+size. The default store path is:
 
-- Internal nginx/Caddy static directory;
-- OSS/CDN with private token or signed URL;
-- a Domestic cache URL reachable before/after H2I connection.
+```text
+artifacts/release-center/
+```
 
-Register the artifact in Release Center:
+Storage behavior:
+
+- k8s Admin upload defaults to `storage=oss`; choose `Internal server` in the drawer to store
+  the artifact under the server.
+- CLI publish defaults to `storage=auto`: use OSS when configured, otherwise server storage.
+- Local server runs can put these values in `electron-dock/mx-launcher/server/.env`. Runtime
+  environment variables and k8s Secrets take precedence over `.env` values.
+- Set `MX_RELEASE_ARTIFACT_STORE_DIR` on the server if Internal server storage needs a
+  persistent mounted volume.
+- Set `MX_RELEASE_ARTIFACT_MAX_BYTES` to override the default 2 GiB upload limit.
+
+OSS server-side configuration:
+
+```bash
+MX_RELEASE_OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com
+MX_RELEASE_OSS_BUCKET=mx-release
+MX_RELEASE_OSS_ACCESS_KEY_ID=...
+MX_RELEASE_OSS_ACCESS_KEY_SECRET=...
+MX_RELEASE_OSS_PREFIX=mx-h2i/releases
+MX_RELEASE_OSS_PUBLIC_BASE_URL=https://release-cdn.example.com/mx-h2i/releases
+```
+
+In k8s, create an optional `mx-release-oss` secret in `mx-internal-shadow` with the same keys.
+The Internal API deployment already imports that secret when present:
+
+```bash
+kubectl -n mx-internal-shadow create secret generic mx-release-oss \
+  --from-literal=MX_RELEASE_OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com \
+  --from-literal=MX_RELEASE_OSS_BUCKET=mx-release \
+  --from-literal=MX_RELEASE_OSS_ACCESS_KEY_ID=... \
+  --from-literal=MX_RELEASE_OSS_ACCESS_KEY_SECRET=... \
+  --from-literal=MX_RELEASE_OSS_PREFIX=mx-h2i/releases \
+  --from-literal=MX_RELEASE_OSS_PUBLIC_BASE_URL=https://release-cdn.example.com/mx-h2i/releases
+```
+
+If `MX_RELEASE_OSS_PUBLIC_BASE_URL` is set, release plans use the direct OSS/CDN URL. Without
+it, the plan uses the Internal download endpoint, which redirects to a short-lived OSS signed
+URL.
+
+Register and upload the artifact:
 
 ```bash
 pnpm --dir electron-dock/mx-launcher/server release:publish -- \
   --base-url http://100.89.0.12:18090 \
   --kind installer \
+  --storage oss \
+  --platform darwin \
   --artifact electron-dock/mx-launcher/demos/mx-h2i/out/electron-builder/MX-H2I-0.2.0-mac-universal.dmg \
-  --artifact-url https://release.example.internal/mx-h2i/MX-H2I-0.2.0-mac-universal.dmg \
   --current-version 0.1.0 \
   --version 0.2.0 \
   --channel stable \
   --e2e-result running
 ```
+
+For Windows, use `--platform win32` and point `--artifact` at the EXE/MSI. If an external object
+store or CDN URL is already available, pass `--artifact-url <url>` to skip upload. Pass
+`--upload=internal` to force upload even when an external URL is provided.
 
 The script computes `sha256:<digest>` from the local file and creates an MX-H2I installer
 release plan with:
@@ -142,6 +187,8 @@ release plan with:
 - `activationMode=installer-manual`
 - `artifactUrl=<download-url>`
 - `artifactDigest=sha256:<digest>`
+- `artifactSizeBytes=<bytes>`
+- `artifactPlatform=darwin|win32|linux`
 - `rolloutStrategy=manual-ring` for first testers.
 
 ## Layer 6: First External Tester
