@@ -71,6 +71,24 @@ export class ReleaseController {
     return { plan };
   }
 
+  @Post('internal/v1/release-management/plans/:planId/gate')
+  async completeManagementGate(
+    @Param('planId') planId: string,
+    @Body() rawBody: unknown
+  ) {
+    const body = asRecord(rawBody);
+    const status = releaseManagementE2eResult(body.status ?? body.e2eResult) ?? 'passed';
+    return {
+      plan: await this.store.completeReleaseManagementGate(planId, {
+        status,
+        message: nullableString(body.message),
+        evidence: asRecord(body.evidence),
+        requestedBy: nullableString(body.requestedBy),
+        requestId: nullableString(body.requestId)
+      })
+    };
+  }
+
   @Post('internal/v1/release-artifacts')
   async uploadArtifact(
     @Req() req: IncomingMessage,

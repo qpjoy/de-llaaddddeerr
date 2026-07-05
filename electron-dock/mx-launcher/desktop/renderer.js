@@ -6616,6 +6616,7 @@ function renderReleaseCenterDrawer() {
         </section>
       </div>
       <footer class="app-drawer-actions">
+        ${plan.test?.gate?.verdict !== 'passed' ? `<button class="secondary-button" type="button" data-release-complete-gate="${escapeHtml(plan.planId)}" ${state.releaseCenter.busy ? 'disabled' : ''}>Complete gate</button>` : ''}
         <button class="secondary-button" type="button" data-release-evaluate="${escapeHtml(plan.planId)}" ${state.releaseCenter.busy ? 'disabled' : ''}>Evaluate policy</button>
         <button class="primary-button" type="button" data-release-drawer-close>Done</button>
       </footer>
@@ -6758,6 +6759,51 @@ function bindReleaseDrawerControls() {
   }
   for (const button of userEditorDrawer.querySelectorAll('[data-release-evaluate]')) {
     button.addEventListener('click', () => void evaluateReleasePlanFromAdmin(button.dataset.releaseEvaluate));
+  }
+  for (const button of userEditorDrawer.querySelectorAll('[data-release-complete-gate]')) {
+    button.addEventListener('click', () => void completeReleaseGateFromAdmin(button.dataset.releaseCompleteGate));
+  }
+}
+
+async function completeReleaseGateFromAdmin(planId) {
+  const plan = releasePlanById(planId);
+  if (!plan || state.releaseCenter.busy) return;
+  state.releaseCenter.busy = true;
+  state.releaseCenter.feedback = { kind: 'info', message: `Completing gate for ${plan.releaseId}` };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  renderReleaseCenterDrawer();
+  try {
+    const payload = await fetchJson(`/internal/v1/release-management/plans/${encodeURIComponent(planId)}/gate`, {
+      method: 'POST',
+      body: {
+        status: 'passed',
+        message: 'release gate manually completed from admin',
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-release-gate-${Date.now()}`,
+        evidence: {
+          source: 'admin-release-center',
+          releaseId: plan.releaseId
+        }
+      }
+    });
+    const updatedPlan = payload.plan;
+    const plans = [updatedPlan, ...releaseCenterPlans().filter((item) => item.planId !== updatedPlan.planId)];
+    state.dashboard = {
+      ...(state.dashboard || {}),
+      latestReleasePlans: plans,
+      overview: {
+        ...(state.dashboard?.overview || {}),
+        releaseManagementPlans: Math.max(plans.length, state.dashboard?.overview?.releaseManagementPlans || 0)
+      }
+    };
+    state.releaseCenter.drawer = { planId: updatedPlan.planId };
+    state.releaseCenter.feedback = { kind: 'success', message: `${updatedPlan.releaseId} gate passed` };
+  } catch (error) {
+    state.releaseCenter.feedback = { kind: 'error', message: error.message };
+  } finally {
+    state.releaseCenter.busy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+    renderInspector();
   }
 }
 

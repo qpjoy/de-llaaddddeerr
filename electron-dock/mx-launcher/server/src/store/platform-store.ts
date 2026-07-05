@@ -60,6 +60,7 @@ import type {
   ReleasePolicyDecision,
   ReleasePolicyInput,
   ReleaseManagementPlan,
+  ReleaseManagementGateInput,
   ReleaseManagementPlanInput,
   ReleaseReportInput,
   ReleaseTask,
@@ -280,6 +281,7 @@ export interface PlatformStore {
   createLauncherNetworkSnapshot(input: LauncherNetworkSnapshotInput): MaybePromise<LauncherNetworkSnapshot>;
   evaluateReleaseUpdate(input: ReleasePolicyInput): MaybePromise<ReleasePolicyDecision>;
   createReleaseManagementPlan(input: ReleaseManagementPlanInput): MaybePromise<ReleaseManagementPlan>;
+  completeReleaseManagementGate(planId: string, input: ReleaseManagementGateInput): MaybePromise<ReleaseManagementPlan>;
   getReleaseManagementPlan(planId: string): MaybePromise<ReleaseManagementPlan | null>;
   listReleaseManagementPlans(): MaybePromise<ReleaseManagementPlan[]>;
   createTestRun(input: TestRunInput): MaybePromise<TestRun>;

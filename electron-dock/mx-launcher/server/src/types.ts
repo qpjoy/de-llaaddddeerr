@@ -2858,6 +2858,14 @@ export interface ReleaseManagementPlanInput {
   requestId?: string | null;
 }
 
+export interface ReleaseManagementGateInput {
+  status: ReleaseManagementE2eResult;
+  message?: string | null;
+  evidence?: Record<string, unknown>;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
 export interface ReleaseManagementPlan {
   planId: string;
   releaseId: string;

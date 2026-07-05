@@ -65,6 +65,7 @@ import {
   hashToken,
   introspectUserCenterToken,
   introspectShadowToken,
+  buildReleaseManagementDecisions,
   normalizeImportUserCenterRow,
   normalizeTestStatus,
   normalizeLauncherNetworkMihomoSite,
@@ -164,6 +165,7 @@ import type {
   ReleasePolicyDecision,
   ReleasePolicyInput,
   ReleaseManagementPlan,
+  ReleaseManagementGateInput,
   ReleaseManagementPlanInput,
   ReleaseReportInput,
   ReleaseTask,
@@ -2471,6 +2473,53 @@ export class MemoryStore implements PlatformStore {
 
   getReleaseManagementPlan(planId: string): ReleaseManagementPlan | null {
     return this.releaseManagementPlans.get(planId) ?? null;
+  }
+
+  completeReleaseManagementGate(planId: string, input: ReleaseManagementGateInput): ReleaseManagementPlan {
+    const plan = this.getReleaseManagementPlan(planId);
+    if (!plan) throw new Error(`Unknown releaseManagementPlanId: ${planId}`);
+    const run = this.recordTestStep(plan.test.run.testRunId, {
+      caseId: 'release-gate:e2e',
+      status: input.status,
+      message: input.message ?? `release management E2E gate ${input.status}`,
+      evidence: {
+        source: 'release-management-gate-action',
+        releaseId: plan.releaseId,
+        planId: plan.planId,
+        ...(input.evidence ?? {})
+      }
+    });
+    const gate = this.evaluateTestGate({
+      gateId: plan.test.gate.gateId,
+      releaseId: plan.releaseId,
+      runIds: [run.testRunId]
+    });
+    const updated: ReleaseManagementPlan = {
+      ...plan,
+      test: {
+        ...plan.test,
+        run,
+        gate
+      },
+      decisions: buildReleaseManagementDecisions(plan.components.launcher, plan.components.app, gate)
+    };
+    this.releaseManagementPlans.set(updated.planId, updated);
+    this.recordAudit({
+      eventType: 'release.management_gate.completed',
+      actorKind: 'release-center',
+      requestId: input.requestId ?? null,
+      installId: updated.installId,
+      userId: updated.userId,
+      productId: updated.components.launcher.componentId,
+      metadata: {
+        planId: updated.planId,
+        releaseId: updated.releaseId,
+        gateVerdict: updated.test.gate.verdict,
+        readyToPromote: updated.decisions.readyToPromote,
+        requestedBy: input.requestedBy ?? null
+      }
+    });
+    return updated;
   }
 
   listReleaseManagementPlans(): ReleaseManagementPlan[] {

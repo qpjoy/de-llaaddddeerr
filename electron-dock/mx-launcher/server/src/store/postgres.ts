@@ -66,6 +66,7 @@ import type {
   PrincipalContextInput,
   PlatformKernelSmokeResult,
   ReleaseManagementPlan,
+  ReleaseManagementGateInput,
   ReleaseManagementPlanInput,
   ReleasePolicyDecision,
   ReleasePolicyInput,
@@ -152,6 +153,7 @@ import {
   launcherNetworkLeaseIsActive,
   launcherNetworkLeaseKey,
   releaseLauncherNetworkLease,
+  buildReleaseManagementDecisions,
   buildSiteSlotAccessAccount,
   buildSiteSlotExecutionRun,
   buildSiteSlotPlan,
@@ -2605,6 +2607,53 @@ export class PostgresStore implements PlatformStore {
 
   async getReleaseManagementPlan(planId: string): Promise<ReleaseManagementPlan | null> {
     return this.getRecord<ReleaseManagementPlan>('release-management-plan', planId);
+  }
+
+  async completeReleaseManagementGate(planId: string, input: ReleaseManagementGateInput): Promise<ReleaseManagementPlan> {
+    const plan = await this.getReleaseManagementPlan(planId);
+    if (!plan) throw new Error(`Unknown releaseManagementPlanId: ${planId}`);
+    const run = await this.recordTestStep(plan.test.run.testRunId, {
+      caseId: 'release-gate:e2e',
+      status: input.status,
+      message: input.message ?? `release management E2E gate ${input.status}`,
+      evidence: {
+        source: 'release-management-gate-action',
+        releaseId: plan.releaseId,
+        planId: plan.planId,
+        ...(input.evidence ?? {})
+      }
+    });
+    const gate = await this.evaluateTestGate({
+      gateId: plan.test.gate.gateId,
+      releaseId: plan.releaseId,
+      runIds: [run.testRunId]
+    });
+    const updated: ReleaseManagementPlan = {
+      ...plan,
+      test: {
+        ...plan.test,
+        run,
+        gate
+      },
+      decisions: buildReleaseManagementDecisions(plan.components.launcher, plan.components.app, gate)
+    };
+    await this.saveRecord('release-management-plan', updated.planId, updated, this.config.siteId);
+    await this.recordAudit({
+      eventType: 'release.management_gate.completed',
+      actorKind: 'release-center',
+      requestId: input.requestId ?? null,
+      installId: updated.installId,
+      userId: updated.userId,
+      productId: updated.components.launcher.componentId,
+      metadata: {
+        planId: updated.planId,
+        releaseId: updated.releaseId,
+        gateVerdict: updated.test.gate.verdict,
+        readyToPromote: updated.decisions.readyToPromote,
+        requestedBy: input.requestedBy ?? null
+      }
+    });
+    return updated;
   }
 
   async listReleaseManagementPlans(): Promise<ReleaseManagementPlan[]> {

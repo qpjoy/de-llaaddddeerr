@@ -222,4 +222,23 @@ kubectl -n mx-internal-shadow create secret generic mx-release-oss \
   --from-literal=MX_RELEASE_OSS_PREFIX=mx-h2i/releases \
   --from-literal=MX_RELEASE_OSS_PUBLIC_BASE_URL= \
   --dry-run=client -o yaml | kubectl apply -f -
+
+# 打包
+pnpm --dir electron-dock/mx-launcher/demos/mx-h2i make:mac:dmg
+pnpm --dir electron-dock/mx-launcher/demos/mx-h2i make:win
+
+
+printf "mx-h2i oss smoke\n" > /private/tmp/mx-h2i-oss-smoke.txt
+
+pnpm --dir electron-dock/mx-launcher/server release:publish -- \
+  --base-url http://100.89.0.12:18090 \
+  --kind installer \
+  --storage oss \
+  --platform darwin \
+  --artifact /private/tmp/mx-h2i-oss-smoke.txt \
+  --current-version 0.1.0 \
+  --version 0.1.1-smoke \
+  --channel smoke \
+  --e2e-result passed
+
 ```

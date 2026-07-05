@@ -3869,21 +3869,7 @@ export function buildReleaseManagementPlan(
     || parts.launcherDecision.updateMode === 'mandatory'
     || parts.appDecision.updateMode === 'mandatory';
   const hasUpdate = parts.launcherDecision.updateAvailable || parts.appDecision.updateAvailable;
-  const readyToPromote = parts.gate.verdict === 'passed'
-    && hasUpdate;
-  const nextActions: string[] = [];
-  if (parts.gate.verdict !== 'passed') {
-    nextActions.push('complete-required-e2e-gate');
-  }
-  if (requiresApproval) {
-    nextActions.push('request-release-approval');
-  }
-  if (readyToPromote) {
-    nextActions.push('open-canary-or-shadow-rollout');
-  }
-  if (parts.launcherDecision.rollbackRequired || parts.appDecision.rollbackRequired) {
-    nextActions.push('prepare-rollback-slot');
-  }
+  const decisions = buildReleaseManagementDecisions(parts.launcherDecision, parts.appDecision, parts.gate);
   const artifacts = [
     buildReleaseArtifactRef(input, parts.launcherDecision, 'launcher', parts.releaseId),
     buildReleaseArtifactRef(input, parts.appDecision, 'app', parts.releaseId)
@@ -3939,13 +3925,43 @@ export function buildReleaseManagementPlan(
       gate: parts.gate
     },
     decisions: {
-      readyToPromote,
-      requiresApproval,
-      canaryAllowed: readyToPromote,
-      rollbackRequired: parts.launcherDecision.rollbackRequired || parts.appDecision.rollbackRequired,
-      nextActions
+      ...decisions
     },
     createdAt: parts.createdAt
+  };
+}
+
+export function buildReleaseManagementDecisions(
+  launcherDecision: ReleasePolicyDecision,
+  appDecision: ReleasePolicyDecision,
+  gate: TestGateVerdict
+): ReleaseManagementPlan['decisions'] {
+  const requiresApproval = launcherDecision.requiresGate
+    || appDecision.requiresGate
+    || launcherDecision.updateMode === 'mandatory'
+    || appDecision.updateMode === 'mandatory';
+  const hasUpdate = launcherDecision.updateAvailable || appDecision.updateAvailable;
+  const readyToPromote = gate.verdict === 'passed' && hasUpdate;
+  const rollbackRequired = launcherDecision.rollbackRequired || appDecision.rollbackRequired;
+  const nextActions: string[] = [];
+  if (gate.verdict !== 'passed') {
+    nextActions.push('complete-required-e2e-gate');
+  }
+  if (requiresApproval) {
+    nextActions.push('request-release-approval');
+  }
+  if (readyToPromote) {
+    nextActions.push('open-canary-or-shadow-rollout');
+  }
+  if (rollbackRequired) {
+    nextActions.push('prepare-rollback-slot');
+  }
+  return {
+    readyToPromote,
+    requiresApproval,
+    canaryAllowed: readyToPromote,
+    rollbackRequired,
+    nextActions
   };
 }
 

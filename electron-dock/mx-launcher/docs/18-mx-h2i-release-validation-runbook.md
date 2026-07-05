@@ -209,6 +209,31 @@ The `--base-url` above is only the admin/control-plane address used by the publi
 the server has `MX_PUBLIC_BASE_URL=http://10.88.88.88:18090`, uploaded private OSS/server artifacts
 are recorded with the V2-reachable download URL.
 
+## Layer 5.5: Complete Release Gate
+
+An uploaded installer plan is `blocked` until the required E2E gate is completed. This is expected:
+the artifact has been registered, but it is not yet eligible for rollout.
+
+From Admin, open the release drawer and click `Complete gate` after the DMG/EXE has passed the
+manual smoke checklist. The plan should change from `blocked` to `ready`; the remaining next action
+is release approval / rollout selection.
+
+Without the Admin action, create a replacement plan with `--e2e-result passed` after testing the
+artifact:
+
+```bash
+pnpm --dir electron-dock/mx-launcher/server release:publish -- \
+  --base-url http://192.168.1.4:18090 \
+  --kind installer \
+  --storage oss \
+  --platform darwin \
+  --artifact electron-dock/mx-launcher/demos/mx-h2i/out/electron-builder/MX-H2I-0.2.0-mac-universal.dmg \
+  --current-version 0.1.0 \
+  --version 0.2.0 \
+  --channel smoke \
+  --e2e-result passed
+```
+
 ## Layer 6: First External Tester
 
 Give the first tester only the signed DMG/EXE link.
