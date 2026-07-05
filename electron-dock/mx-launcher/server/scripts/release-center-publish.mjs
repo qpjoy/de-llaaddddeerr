@@ -33,7 +33,7 @@ let uploadedArtifact = null;
 
 if (!artifactUrl || boolArg(args.uploadArtifact, false) || args.upload === 'internal') {
   uploadedArtifact = await uploadArtifact();
-  artifactUrl = absoluteArtifactUrl(uploadedArtifact.artifact?.downloadPath || uploadedArtifact.artifact?.url);
+  artifactUrl = absoluteArtifactUrl(uploadedArtifact.artifact?.url || uploadedArtifact.artifact?.downloadPath);
   artifactSizeBytes = uploadedArtifact.artifact?.sizeBytes || artifactSizeBytes;
 }
 

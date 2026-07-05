@@ -23,10 +23,10 @@ or:
 pnpm luopan:dev
 ```
 
-The default server is `http://100.89.0.12:18090`. Override it with:
+The default server is `http://10.88.88.88:18090`. Override it with:
 
 ```sh
-LUOPAN_LAUNCHER_BASE_URL=http://127.0.0.1:18090 pnpm --filter @qpjoy/luopan-demo dev
+LUOPAN_LAUNCHER_BASE_URL=http://192.168.1.4:18090 pnpm --filter @qpjoy/luopan-demo dev
 ```
 
 `LUOPAN_SDK_TEST_MODE=1` keeps the demo usable before Luopan is registered in

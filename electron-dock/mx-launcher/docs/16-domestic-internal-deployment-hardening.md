@@ -138,7 +138,7 @@ Key is not the correct length or format: '<internal-service-private-key-from-int
 正确 break-glass 顺序：
 
 ```bash
-MX_INTERNAL_BASE_URL=http://100.89.0.12:18090 \
+MX_INTERNAL_BASE_URL=http://10.88.88.88:18090 \
   bash scripts/manage.sh ops site-slot materialize-domestic-ready domestic-main
 
 grep -n '<internal-service' artifacts/site-slots/domestic/mx-internal-service-peer.conf

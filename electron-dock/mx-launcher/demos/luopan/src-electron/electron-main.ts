@@ -105,7 +105,7 @@ function initialDataPlaneApplyMessage(): string {
 
 function defaultConfig(): RuntimeConfig {
   return {
-    baseUrl: normalizeBaseUrl(process.env.LUOPAN_LAUNCHER_BASE_URL || process.env.MX_LAUNCHER_BASE_URL || 'http://100.89.0.12:18090'),
+    baseUrl: normalizeBaseUrl(process.env.LUOPAN_LAUNCHER_BASE_URL || process.env.MX_LAUNCHER_BASE_URL || 'http://10.88.88.88:18090'),
     productId: 'luopan',
     mode: 'standalone',
     sdkTestMode: booleanish(process.env.LUOPAN_SDK_TEST_MODE, true),
@@ -906,7 +906,7 @@ function normalizeDataPlane(value: unknown): ElectronLauncherStandaloneDataPlane
 
 function normalizeBaseUrl(value: string): string {
   const trimmed = value.trim().replace(/\/+$/, '');
-  if (!trimmed) return 'http://100.89.0.12:18090';
+  if (!trimmed) return 'http://10.88.88.88:18090';
   return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
 }
 

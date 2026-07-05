@@ -211,4 +211,15 @@ crictl rmi --prune
 LUOPAN_SDK_TEST_MODE=0 pnpm dev
 # force standalone wg，可能会抢MX-H2I的的route，需要其重新连接才会回复。
 LUOPAN_FORCE_STANDALONE_WG=1
+
+
+# 测试发版功能
+kubectl -n mx-internal-shadow create secret generic mx-release-oss \
+  --from-literal=MX_RELEASE_OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com \
+  --from-literal=MX_RELEASE_OSS_BUCKET=mx-launcher \
+  --from-literal=MX_RELEASE_OSS_ACCESS_KEY_ID=... \
+  --from-literal=MX_RELEASE_OSS_ACCESS_KEY_SECRET=... \
+  --from-literal=MX_RELEASE_OSS_PREFIX=mx-h2i/releases \
+  --from-literal=MX_RELEASE_OSS_PUBLIC_BASE_URL= \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```

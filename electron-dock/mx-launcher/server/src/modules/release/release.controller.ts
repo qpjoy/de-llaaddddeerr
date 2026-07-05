@@ -122,6 +122,7 @@ export class ReleaseController {
       await rename(tempPath, artifactPath);
     }
     const downloadPath = `/internal/v1/release-artifacts/${encodeURIComponent(artifactId)}/download`;
+    const artifactUrl = publicUrl || publicReleaseUrl(downloadPath) || downloadPath;
     const metadata: StoredReleaseArtifactMetadata = {
       artifactId,
       releaseId,
@@ -137,7 +138,7 @@ export class ReleaseController {
       contentType: metadataContentType(req),
       objectKey: ossObjectKey,
       publicUrl,
-      url: publicUrl || downloadPath,
+      url: artifactUrl,
       createdAt: new Date().toISOString()
     };
     await writeFile(resolve(artifactDir, 'artifact.json'), `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
@@ -358,6 +359,12 @@ function releaseArtifactStorageForRequest(value: string | null): 'server' | 'oss
   if (configured === 'server') return 'server';
   if (configured === 'oss') return 'oss';
   return releaseOssConfig() ? 'oss' : 'server';
+}
+
+function publicReleaseUrl(path: string): string | null {
+  const baseUrl = nullableString(process.env.MX_PUBLIC_BASE_URL);
+  if (!baseUrl) return null;
+  return `${baseUrl.replace(/\/+$/, '')}${path.startsWith('/') ? path : `/${path}`}`;
 }
 
 function releaseArtifactMaxBytes(): number {

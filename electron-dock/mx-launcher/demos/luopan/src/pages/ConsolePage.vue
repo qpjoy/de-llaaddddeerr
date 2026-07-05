@@ -213,7 +213,7 @@ const fallbackRuntime: LuopanRuntimeState = {
   installId: '-',
   deviceId: '-',
   config: {
-    baseUrl: 'http://100.89.0.12:18090',
+    baseUrl: 'http://10.88.88.88:18090',
     productId: 'luopan',
     mode: 'standalone',
     sdkTestMode: true,

@@ -24,7 +24,7 @@ Not complete yet:
 Run this against the updated Internal server:
 
 ```bash
-pnpm --dir electron-dock/mx-launcher/server smoke:release-center http://100.89.0.12:18090
+pnpm --dir electron-dock/mx-launcher/server smoke:release-center http://10.88.88.88:18090
 ```
 
 Expected result:
@@ -44,8 +44,11 @@ WireGuard/PAC/DNS.
 Open:
 
 ```text
-http://100.89.0.12:18090/admin/
+http://192.168.1.4:18090/admin/
 ```
+
+`192.168.1.4` is the LAN/admin entrance. `10.88.88.88` is the V2 launcher-network
+entrance that should be recorded in release artifact URLs through `MX_PUBLIC_BASE_URL`.
 
 Verify:
 
@@ -175,7 +178,7 @@ Register and upload the artifact:
 
 ```bash
 pnpm --dir electron-dock/mx-launcher/server release:publish -- \
-  --base-url http://100.89.0.12:18090 \
+  --base-url http://192.168.1.4:18090 \
   --kind installer \
   --storage oss \
   --platform darwin \
@@ -201,6 +204,10 @@ release plan with:
 - `artifactSizeBytes=<bytes>`
 - `artifactPlatform=darwin|win32|linux`
 - `rolloutStrategy=manual-ring` for first testers.
+
+The `--base-url` above is only the admin/control-plane address used by the publish script. When
+the server has `MX_PUBLIC_BASE_URL=http://10.88.88.88:18090`, uploaded private OSS/server artifacts
+are recorded with the V2-reachable download URL.
 
 ## Layer 6: First External Tester
 
