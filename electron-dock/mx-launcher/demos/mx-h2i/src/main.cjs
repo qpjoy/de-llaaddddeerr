@@ -37,7 +37,7 @@ const DARWIN_WIREGUARD_SERVICE_IDENTITY = {
   darwinDaemonScriptName: 'mx-h2i-wireguard-daemon.sh',
   staleDarwinLaunchDaemonLabelPrefixes: ['com.qpjoy.mx-h2i.wireguard']
 };
-const SYSTEM_DOMAIN_PROXY_REFRESH_MS = 30_000;
+const SYSTEM_DOMAIN_PROXY_REFRESH_MS = process.platform === 'win32' ? 5_000 : 30_000;
 const SYSTEM_DOMAIN_PROXY_ROUTE_REFRESH_TIMEOUT_MS = 2200;
 const SYSTEM_DOMAIN_PROXY_ROUTE_WARNING_MS = 60_000;
 const NETWORK_CHANGE_MONITOR_MS = 5000;
@@ -2087,6 +2087,7 @@ function maybeSkipSystemDomainProxyApply(reason, policySignature) {
   if (!isBackgroundSystemDomainProxyReason(reason) || !policySignature || policySignature !== lastSystemDomainProxyPolicySignature) {
     return null;
   }
+  if (process.platform === 'win32') return null;
   const status = typeof systemDomainProxyManager?.status === 'function'
     ? systemDomainProxyManager.status()
     : null;
@@ -2133,6 +2134,7 @@ function isBackgroundSystemDomainProxyReason(reason) {
 
 function shouldApplySystemDomainProxyForReason(reason) {
   const text = String(reason || '');
+  if (process.platform === 'win32' && isBackgroundSystemDomainProxyReason(text)) return true;
   return text === 'post-connect' || text.startsWith('manual');
 }
 

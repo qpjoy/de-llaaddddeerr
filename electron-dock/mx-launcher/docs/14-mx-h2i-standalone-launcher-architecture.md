@@ -527,6 +527,9 @@ route 的 `targetUrl`/`dnsTarget`；没有 route 时再使用 routePlan 的 `int
 交给 Clash/mihomo 系统代理或 TUN。`10.88.0.1` 是 Domestic gateway/relay，只能作为 DNS relay/cache fallback。未命中域名应
 回落到原 Clash/mihomo 本地代理或系统默认路径。这样浏览器/PAC 流量、MX-H2I DNS 解析和
 WG 白名单路由都优先于系统代理、Clash fake-ip 和其它应用的默认网络路径。
+Windows 上 Clash/mihomo 切换系统代理或 TUN 模式时可能重写 WinINet PAC；MX-H2I connected
+状态下应周期性重写自身 PAC，确保浏览器继续按 WG CIDR `DIRECT` 和 Internal 域名 local edge
+规则访问。`ping`/CLI 不读浏览器 PAC，仍以系统路由和 WG AllowedIPs 为准。
 macOS 上，浏览器通不代表系统 resolver 已接管：`ping`、CLI 和不支持 PAC 的应用不会读取
 PAC 文件。因此 standalone 本机入口在 H2I ready 后默认安装运行态 SystemConfiguration
 supplemental DNS，把这些域名动态指向本机 `127.0.0.1:2053`；这不写 `/etc/hosts`，也不写
