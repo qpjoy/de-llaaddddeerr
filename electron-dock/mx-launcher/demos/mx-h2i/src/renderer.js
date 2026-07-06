@@ -157,6 +157,12 @@ root.addEventListener('click', (event) => {
     void runAction('setH2oMode', button.dataset.mode || 'app-rule');
     return;
   }
+  if (action === 'openRollback') {
+    appShellMenuOpen = false;
+    phoneMenuOpen = false;
+    void runAction('openRollback', button.dataset.rollbackId || '');
+    return;
+  }
   if (action === 'connectGuest') {
     modeDraft = 'guest';
   }
@@ -268,6 +274,8 @@ async function runAction(action, payload) {
       setH2oMode: () => api.setH2oMode?.(payload),
       checkUpdates: () => api.checkUpdates(),
       applyUpdate: () => api.applyUpdate?.(),
+      restartApp: () => api.restartApp?.(),
+      openRollback: () => api.openRollbackInstaller?.(payload),
       refreshDiagnostics: () => api.refreshDiagnostics?.(),
       repairSystemNetwork: () => api.repairSystemNetwork?.(),
       openAdmin: () => api.openAdmin()
@@ -316,6 +324,30 @@ function handlePhoneBack() {
 function isEmployeeLoginVisible() {
   const connected = state.connection?.state === 'connected';
   return modeDraft === 'employee' && (!connected || state.connection?.mode !== 'employee');
+}
+
+function isInternalConnected() {
+  return state?.connection?.state === 'connected';
+}
+
+function updateNeedsAttention() {
+  if (!isInternalConnected()) return false;
+  const update = state?.update || {};
+  return update.updateAvailable === true
+    || ['update-available', 'blocked', 'downloading', 'download-failed', 'ready-to-install', 'installer-opened', 'staged'].includes(update.status);
+}
+
+function renderCheckUpdatesButton(className = 'text-button') {
+  const connected = isInternalConnected();
+  const label = connected ? '检查更新' : '连接后检查';
+  const attention = updateNeedsAttention();
+  const disabled = busyAction === 'checkUpdates';
+  return `
+    <button class="${escapeAttr(className)} update-check-button ${attention ? 'has-update-attention' : ''}" type="button" data-action="checkUpdates" ${disabled ? 'disabled' : ''}>
+      <span>${escapeHtml(label)}</span>
+      ${attention ? '<span class="update-dot" aria-hidden="true"></span>' : ''}
+    </button>
+  `;
 }
 
 function render() {
@@ -409,7 +441,7 @@ function renderGuestConnect(connected, connecting, leaseOnly = false) {
       </button>
       <div class="connect-actions">
         <button class="text-button" type="button" data-action="select-mode" data-mode="employee">员工登录</button>
-        <button class="text-button" type="button" data-action="checkUpdates">检查更新</button>
+        ${renderCheckUpdatesButton('text-button')}
         <button class="text-button" type="button" data-action="show-advanced">高级选项</button>
       </div>
     </section>
@@ -441,14 +473,32 @@ function renderPhoneFooterInfo(connected) {
   const update = state.update || {};
   const version = update.currentVersion || '0.1.0';
   const channel = update.channel || state.config?.releaseChannel || 'stable';
-  const status = connected ? 'ready' : (update.status || state.connection?.state || 'idle');
+  const status = update.status || (connected ? 'ready' : state.connection?.state || 'idle');
+  const latest = update.latestVersion || version;
+  const hasArtifact = Boolean(update.artifactUrl);
+  const canApply = hasArtifact && !['downloading', 'staged', 'installer-opened'].includes(status);
+  const canRestart = update.restartPrompt || ['installer-opened', 'ready-to-install', 'staged'].includes(status) && update.restartRequired;
   return `
-    <section class="phone-footer-info">
-      <div>
-        <h2>MX-H2I</h2>
-        <p>版本 ${escapeHtml(version)} · ${escapeHtml(channel)}</p>
+    <section class="phone-footer-info update-surface">
+      <div class="update-surface-head">
+        <div>
+          <h2>MX-H2I</h2>
+          <p>当前 ${escapeHtml(version)} · ${escapeHtml(channel)}</p>
+        </div>
+        <span class="status-pill" data-state="${escapeAttr(status)}">${escapeHtml(updateStatusLabel(status))}</span>
       </div>
-      <span>${escapeHtml(status)}</span>
+      <div class="update-summary-line">
+        <strong>${escapeHtml(latest === version && !update.updateAvailable ? '已是最新版本' : `目标 ${latest}`)}</strong>
+        <span>${escapeHtml(updateSummaryText(update))}</span>
+      </div>
+      ${renderUpdateProgress(update)}
+      <div class="update-surface-actions">
+        ${renderCheckUpdatesButton('secondary-button')}
+        <button class="primary-button" type="button" data-action="applyUpdate" ${!canApply || busyAction === 'applyUpdate' ? 'disabled' : ''}>${escapeHtml(updateApplyLabel(update))}</button>
+        ${canRestart ? '<button class="secondary-button" type="button" data-action="restartApp">重启</button>' : ''}
+      </div>
+      ${renderReleaseHistory(update)}
+      ${renderRollbackSlots(update)}
     </section>
   `;
 }
@@ -518,6 +568,130 @@ function renderAdvancedRow(title, detail, icon) {
       <span class="advanced-row__arrow">›</span>
     </button>
   `;
+}
+
+function updateStatusLabel(status) {
+  if (status === 'update-available') return 'UPDATE';
+  if (status === 'blocked') return 'BLOCKED';
+  if (status === 'downloading') return 'DOWNLOADING';
+  if (status === 'ready-to-install') return 'READY';
+  if (status === 'installer-opened') return 'INSTALL';
+  if (status === 'staged') return 'STAGED';
+  if (status === 'download-failed' || status === 'failed') return 'FAILED';
+  if (status === 'needs-connection') return 'LOGIN';
+  if (status === 'up-to-date') return 'LATEST';
+  return status || 'READY';
+}
+
+function updateSummaryText(update) {
+  if (!isInternalConnected()) return '连接 Internal 后自动检查 Release Center';
+  if (update.status === 'downloading') return '正在下载并校验 artifact';
+  if (update.status === 'installer-opened') return '安装包已打开，完成安装后可重启';
+  if (update.status === 'ready-to-install') return '安装包已下载，可打开安装器';
+  if (update.status === 'staged') return update.restartRequired ? '热更新已暂存，等待重启激活' : '热更新已暂存';
+  if (update.status === 'blocked') return '发现新版本，等待 Release Gate';
+  if (update.status === 'update-available') return update.activation === 'installer-manual' ? '发现大版本安装包' : '发现可自动更新版本';
+  if (update.lastCheckedAt) return `上次检查 ${formatDateTime(update.lastCheckedAt)}`;
+  return '尚未检查更新';
+}
+
+function updateApplyLabel(update) {
+  if (busyAction === 'applyUpdate' || update.status === 'downloading') return '下载中';
+  if (update.status === 'ready-to-install') return '打开安装包';
+  if (update.status === 'installer-opened') return '已打开';
+  if (update.status === 'staged') return update.restartRequired ? '等待重启' : '已暂存';
+  if (update.status === 'download-failed') return '重新下载';
+  if (update.activation === 'installer-manual' || update.majorUpdateRequiresInstaller) return '下载大版本';
+  return '下载更新';
+}
+
+function renderUpdateProgress(update) {
+  const progress = update.downloadProgress || null;
+  if (!progress || !['downloading', 'downloaded', 'failed'].includes(progress.state)) return '';
+  const percent = Number.isFinite(progress.percent) ? progress.percent : null;
+  const width = percent == null ? 18 : Math.max(2, Math.min(100, percent));
+  return `
+    <div class="update-progress" data-state="${escapeAttr(progress.state)}">
+      <div class="update-progress-track"><span style="width:${escapeAttr(String(width))}%"></span></div>
+      <p>${escapeHtml(progressLabel(progress))}</p>
+    </div>
+  `;
+}
+
+function progressLabel(progress) {
+  const bytes = formatBytes(progress.bytes);
+  const total = progress.totalBytes ? formatBytes(progress.totalBytes) : '';
+  const percent = Number.isFinite(progress.percent) ? `${progress.percent}%` : '下载中';
+  if (progress.state === 'failed') return `下载失败 · ${bytes}${total ? ` / ${total}` : ''}`;
+  if (progress.state === 'downloaded') return `已下载 · ${bytes}`;
+  return `${percent} · ${bytes}${total ? ` / ${total}` : ''}`;
+}
+
+function renderReleaseHistory(update) {
+  const releases = Array.isArray(update.availableReleases) ? update.availableReleases : [];
+  const history = Array.isArray(update.history) ? update.history : [];
+  const rows = releases.length
+    ? releases.slice(0, 3).map((item) => ({
+        title: item.version || item.releaseId || 'release',
+        meta: [item.componentKind, item.artifactKind, item.channel].filter(Boolean).join(' · '),
+        status: item.status || item.gate || '-',
+        at: item.createdAt
+      }))
+    : history.slice(0, 3).map((item) => ({
+        title: item.version || item.releaseId || item.kind,
+        meta: [item.kind, item.componentKind, item.updateMode].filter(Boolean).join(' · '),
+        status: item.status,
+        at: item.at
+      }));
+  if (!rows.length) return '';
+  return `
+    <div class="update-mini-list">
+      <div class="update-mini-list-head">
+        <strong>版本记录</strong>
+        <span>${escapeHtml(releases.length ? `${releases.length} releases` : `${history.length} events`)}</span>
+      </div>
+      ${rows.map((item) => `
+        <div class="update-mini-row">
+          <div>
+            <strong>${escapeHtml(item.title)}</strong>
+            <small>${escapeHtml(item.meta || formatDateTime(item.at))}</small>
+          </div>
+          <span>${escapeHtml(item.status || '-')}</span>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderRollbackSlots(update) {
+  const slots = Array.isArray(update.rollbackSlots) ? update.rollbackSlots.slice(0, 3) : [];
+  if (!slots.length) return '';
+  return `
+    <div class="rollback-slots">
+      <div class="update-mini-list-head">
+        <strong>可回滚大版本</strong>
+        <span>最近 ${escapeHtml(String(slots.length))} 个</span>
+      </div>
+      ${slots.map((slot) => `
+        <div class="rollback-row">
+          <div>
+            <strong>${escapeHtml(slot.version || slot.releaseId || 'installer')}</strong>
+            <small>${escapeHtml(`${formatBytes(slot.sizeBytes)} · ${formatDateTime(slot.downloadedAt)}`)}</small>
+          </div>
+          <button class="secondary-button" type="button" data-action="openRollback" data-rollback-id="${escapeAttr(slot.id || slot.artifactId || slot.path)}">打开</button>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes <= 0) return '-';
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
 }
 
 function renderConnectionStrip() {
@@ -888,7 +1062,7 @@ function renderAppCenterView(connected) {
           </div>
           <div class="toolbar-actions">
             <button class="secondary-button" type="button" data-action="toggle-app-debug">${appDebugOpen ? '关闭 Debug' : 'Debug'}</button>
-            <button class="primary-button" type="button" data-action="checkUpdates" ${busyAction === 'checkUpdates' ? 'disabled' : ''}>检查更新</button>
+            ${renderCheckUpdatesButton('primary-button')}
           </div>
         </header>
 
@@ -1325,7 +1499,7 @@ function appPrimaryAction(app, connected) {
     return { action: 'enableH2o', label: '安装', disabled: !connected || !state.apps?.appcenter?.installed || busyAction === 'enableH2o' };
   }
   if (app.appId === 'diagnostics') {
-    return { action: 'checkUpdates', label: '打开', disabled: busyAction === 'checkUpdates' };
+    return { action: 'checkUpdates', label: connected ? '检查' : '连接后检查', disabled: busyAction === 'checkUpdates' };
   }
   return { action: 'select-app', label: '即将推出', disabled: true };
 }
@@ -1453,8 +1627,8 @@ function renderUpdatePanel() {
   const update = state.update || {};
   const hasArtifact = Boolean(update.artifactUrl);
   const downloading = busyAction === 'applyUpdate' || update.status === 'downloading';
-  const installer = update.activation === 'installer-manual' || update.majorUpdateRequiresInstaller === true;
-  const actionLabel = downloading ? '下载中' : installer ? '下载并打开' : '下载更新包';
+  const applyDisabled = !hasArtifact || downloading || ['staged', 'installer-opened'].includes(update.status);
+  const actionLabel = updateApplyLabel(update);
   return `
     <section class="panel update-panel">
       <div class="panel-head">
@@ -1476,9 +1650,13 @@ function renderUpdatePanel() {
         ${metric('Activation', update.activation || (update.majorUpdateRequiresInstaller ? 'installer-manual' : update.hotUpdateAuto ? 'hot-auto' : '-'))}
       </div>
       <div class="update-actions">
-        <button class="secondary-button" type="button" data-action="checkUpdates" ${busyAction === 'checkUpdates' ? 'disabled' : ''}>检查更新</button>
-        <button class="primary-button" type="button" data-action="applyUpdate" ${!hasArtifact || downloading ? 'disabled' : ''}>${escapeHtml(actionLabel)}</button>
+        ${renderCheckUpdatesButton('secondary-button')}
+        <button class="primary-button" type="button" data-action="applyUpdate" ${applyDisabled ? 'disabled' : ''}>${escapeHtml(actionLabel)}</button>
+        ${update.restartPrompt ? '<button class="secondary-button" type="button" data-action="restartApp">重启</button>' : ''}
       </div>
+      ${renderUpdateProgress(update)}
+      ${renderReleaseHistory(update)}
+      ${renderRollbackSlots(update)}
       ${update.reason ? `<p class="panel-note">${escapeHtml(update.reason)}</p>` : ''}
     </section>
   `;
@@ -1700,7 +1878,13 @@ function createMockApi() {
       channel: 'stable',
       rolloutGroup: 'staff-ring',
       canSkip: false,
-      lastCheckedAt: null
+      lastCheckedAt: null,
+      updateAvailable: false,
+      history: [],
+      availableReleases: [],
+      rollbackSlots: [],
+      downloadProgress: null,
+      restartPrompt: false
     },
     launcherContract: {
       packageName: '@qpjoy/electron-launcher',
@@ -1895,8 +2079,9 @@ function createMockApi() {
     checkUpdates: async () => commit({
       update: {
         ...mockState.update,
-        status: 'ready',
+        status: 'update-available',
         latestVersion: '0.1.1',
+        updateAvailable: true,
         planId: 'mock_release_plan',
         releaseId: 'mock_release_0_1_1',
         componentId: 'mx-h2i',
@@ -1911,21 +2096,53 @@ function createMockApi() {
         majorUpdateRequiresInstaller: true,
         canSkip: true,
         lastCheckedAt: new Date().toISOString(),
-        reason: 'mock Release Center 发现安装包更新。'
+        reason: 'mock Release Center 发现安装包更新。',
+        availableReleases: [
+          {
+            id: 'mock_release_plan',
+            releaseId: 'mock_release_0_1_1',
+            planId: 'mock_release_plan',
+            version: '0.1.1',
+            channel: 'stable',
+            status: 'ready',
+            componentKind: 'mx-h2i-installer',
+            artifactKind: 'dmg',
+            activation: 'installer-manual',
+            sizeBytes: 189695362,
+            createdAt: new Date().toISOString(),
+            gate: 'passed'
+          }
+        ],
+        history: [
+          { id: 'mock_check', kind: 'check', status: 'update-available', version: '0.1.1', fromVersion: '0.1.0', componentKind: 'mx-h2i-installer', updateMode: 'mandatory', message: '发现安装包更新。', at: new Date().toISOString() },
+          ...(mockState.update.history || [])
+        ].slice(0, 12)
       },
-      feedback: { tone: 'info', message: '更新策略已刷新。' }
+      feedback: { tone: 'success', message: '发现 MX-H2I 大版本 0.1.1，当前 0.1.0，通道 stable。' }
     }),
     applyUpdate: async () => commit({
       update: {
         ...mockState.update,
-        status: 'ready-to-install',
+        status: 'installer-opened',
         stagedPath: '/tmp/mx-h2i-0.1.1.dmg',
         downloadedAt: new Date().toISOString(),
-        downloadedBytes: 42,
-        downloadedDigest: mockState.update.artifactDigest || 'sha256:mock'
+        downloadedBytes: 189695362,
+        downloadedDigest: mockState.update.artifactDigest || 'sha256:mock',
+        downloadProgress: { state: 'downloaded', bytes: 189695362, totalBytes: 189695362, percent: 100, updatedAt: new Date().toISOString() },
+        restartPrompt: true,
+        rollbackSlots: [
+          { id: 'mock_mx_h2i_0_1_1_dmg', version: '0.1.1', releaseId: 'mock_release_0_1_1', artifactId: 'mock_mx_h2i_0_1_1_dmg', artifactKind: 'dmg', path: '/tmp/mx-h2i-0.1.1.dmg', digest: 'sha256:mock', sizeBytes: 189695362, platform: 'darwin', downloadedAt: new Date().toISOString() },
+          ...(mockState.update.rollbackSlots || [])
+        ].slice(0, 3),
+        history: [
+          { id: 'mock_download', kind: 'major-download', status: 'downloaded', version: '0.1.1', fromVersion: '0.1.0', componentKind: 'mx-h2i-installer', updateMode: 'mandatory', message: '大版本安装包已下载并校验。', at: new Date().toISOString() },
+          ...(mockState.update.history || [])
+        ].slice(0, 12)
       },
-      feedback: { tone: 'success', message: '安装包已下载并校验。' }
+      feedback: { tone: 'success', message: '安装包已校验并打开。安装完成后可以立即重启 MX-H2I，也可以稍后手动重启。' }
     }),
+    restartApp: async () => commit({ feedback: { tone: 'info', message: '正在重启 MX-H2I。' } }),
+    openRollbackInstaller: async () => commit({ feedback: { tone: 'success', message: '已打开历史版本安装包。' } }),
     refreshDiagnostics: async () => commit({
       connection: {
         ...mockState.connection,

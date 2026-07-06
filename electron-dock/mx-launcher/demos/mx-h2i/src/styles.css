@@ -615,6 +615,24 @@ span {
   text-decoration: underline;
 }
 
+.update-check-button {
+  display: inline-flex;
+  position: relative;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.update-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #ff5b63;
+  box-shadow: 0 0 0 3px rgba(255, 91, 99, 0.16), 0 0 12px rgba(255, 91, 99, 0.32);
+  flex: 0 0 auto;
+}
+
 .icon-button {
   display: grid;
   width: 32px;
@@ -641,19 +659,32 @@ button:disabled {
 
 .phone-footer-info {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 14px;
+  gap: 10px;
   min-height: 54px;
   border-top: 1px solid rgba(94, 142, 236, 0.14);
   padding-top: 16px;
 }
 
+.update-surface-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
 .phone-footer-info h2 {
+  margin: 0;
   font-size: 16px;
 }
 
-.phone-footer-info span {
+.phone-footer-info p {
+  margin: 2px 0 0;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.phone-footer-info > span {
   display: inline-grid;
   min-width: 72px;
   min-height: 34px;
@@ -665,6 +696,144 @@ button:disabled {
   font-size: 12px;
   font-weight: 800;
   text-transform: uppercase;
+}
+
+.update-summary-line {
+  display: grid;
+  gap: 2px;
+  border: 1px solid rgba(94, 142, 236, 0.14);
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: rgba(14, 16, 24, 0.46);
+}
+
+.update-summary-line strong {
+  overflow: hidden;
+  color: var(--text-1);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-summary-line span {
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-surface-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+  gap: 8px;
+}
+
+.update-surface-actions .secondary-button,
+.update-surface-actions .primary-button {
+  min-width: 0;
+  padding: 0 8px;
+}
+
+.update-progress {
+  display: grid;
+  gap: 5px;
+}
+
+.update-progress-track {
+  overflow: hidden;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(94, 142, 236, 0.18);
+}
+
+.update-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #5affdf, #18d7bd);
+  transition: width 160ms ease;
+}
+
+.update-progress[data-state="failed"] .update-progress-track span {
+  background: #ff5b63;
+}
+
+.update-progress p {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.update-mini-list,
+.rollback-slots {
+  display: grid;
+  gap: 6px;
+}
+
+.update-mini-list-head,
+.update-mini-row,
+.rollback-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.update-mini-list-head strong {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.update-mini-list-head span {
+  color: var(--text-4);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.update-mini-row,
+.rollback-row {
+  min-height: 38px;
+  border: 1px solid rgba(94, 142, 236, 0.12);
+  border-radius: 6px;
+  padding: 7px 9px;
+  background: rgba(14, 16, 24, 0.38);
+}
+
+.update-mini-row strong,
+.rollback-row strong,
+.update-mini-row small,
+.rollback-row small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-mini-row strong,
+.rollback-row strong {
+  color: var(--text-1);
+  font-size: 12px;
+}
+
+.update-mini-row small,
+.rollback-row small {
+  color: var(--text-3);
+  font-size: 10px;
+}
+
+.update-mini-row > span {
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.rollback-row .secondary-button {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 11px;
 }
 
 .advanced-phone {

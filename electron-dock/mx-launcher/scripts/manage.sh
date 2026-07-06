@@ -4857,6 +4857,12 @@ Notes:
 EOF
 }
 
+ops_internal_production_repair_kubeadm_endpoint_if_requested() {
+  if [ -n "${MX_K8S_APISERVER_ADVERTISE_ADDRESS:-${K8S_APISERVER_ADVERTISE_ADDRESS:-}}" ]; then
+    k8s_repair_kubeadm_endpoint
+  fi
+}
+
 ops_internal_production() {
   local action="$1"
   shift || true
@@ -4900,22 +4906,27 @@ ops_internal_production() {
       ;;
     apply)
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production apply"
+      ops_internal_production_repair_kubeadm_endpoint_if_requested
       k8s_apply internal-shadow
       ;;
     status)
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production status"
+      ops_internal_production_repair_kubeadm_endpoint_if_requested
       k8s_status internal-shadow
       ;;
     gateway-smoke|smoke)
       [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops internal-production gateway-smoke [gateway-url]"
+      ops_internal_production_repair_kubeadm_endpoint_if_requested
       k8s_gateway_smoke internal-shadow "${1:-}"
       ;;
     cleanup-smoke-fixtures)
       [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures [--apply]"
+      ops_internal_production_repair_kubeadm_endpoint_if_requested
       k8s_cleanup_smoke_fixtures internal-shadow "${1:-plan}"
       ;;
     down)
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production down"
+      ops_internal_production_repair_kubeadm_endpoint_if_requested
       k8s_down internal-shadow
       ;;
     *)

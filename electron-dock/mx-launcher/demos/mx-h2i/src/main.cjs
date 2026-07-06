@@ -6,7 +6,7 @@ const https = require('node:https');
 const dnsPromises = require('node:dns').promises;
 const net = require('node:net');
 const { execFile } = require('node:child_process');
-const { randomUUID } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: electronScreen, powerMonitor, net: electronNet, dialog } = require('electron');
 
 loadDotEnvFiles();
@@ -99,6 +99,8 @@ let lastSystemPacReverseProxyRoutes = [];
 let lastSystemPacReverseProxyRoutesWarningAt = 0;
 let lastNetworkEnvironmentSignature = null;
 let lastDarwinEndpointRouteRepairAt = 0;
+let releaseUpdateCheckInFlight = null;
+let postConnectUpdateTimer = null;
 
 const TOP_DOCK_Y = 0;
 const TOP_REVEAL_ZONE = 18;
@@ -261,6 +263,10 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:disconnect', async () => {
+    if (postConnectUpdateTimer) {
+      clearTimeout(postConnectUpdateTimer);
+      postConnectUpdateTimer = null;
+    }
     const systemDomainRestoreScript = systemDomainProxyManager?.darwinRestoreScript?.() || null;
     const wireGuard = await stopWireGuardForRuntime({
       darwinExtraUninstallShell: systemDomainRestoreScript
@@ -466,58 +472,29 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:check-updates', async () => {
-    const catalogSync = await syncAppCenterCatalog('check-updates');
-    const releaseSync = await checkReleaseCenterUpdate('manual-check');
-    const releaseResult = releaseSync.result;
-    const releasePlan = releaseResult?.plan || null;
-    const releaseDecision = releaseResult?.decision || null;
-    const releaseArtifact = releaseResult?.artifacts?.[0] || null;
-    runtime.update = {
-      status: releaseSync.ok ? releaseResult.status : 'failed',
-      currentVersion: app.getVersion(),
-      latestVersion: releaseDecision?.targetVersion || app.getVersion(),
-      policy: releaseDecision?.updateMode || 'launcher-managed',
-      channel: runtime.config.releaseChannel,
-      rolloutGroup: releasePlan?.rollout?.segmentId || runtime.config.rolloutGroup,
-      canSkip: releaseDecision?.canSkip === true,
-      lastCheckedAt: releaseResult?.checkedAt || nowIso(),
-      planId: releasePlan?.planId || null,
-      releaseId: releasePlan?.releaseId || null,
-      componentId: releaseDecision?.componentId || launcherProductId(),
-      componentKind: releaseDecision?.componentKind || null,
-      updateMode: releaseDecision?.updateMode || null,
-      reason: releaseSync.ok ? releaseResult.reason : releaseSync.message,
-      artifactKind: releaseArtifact?.kind || null,
-      artifactId: releaseArtifact?.artifactId || null,
-      artifactUrl: releaseArtifact?.url || null,
-      artifactDigest: releaseArtifact?.digest || null,
-      artifactSignature: releaseArtifact?.signature || null,
-      artifactSizeBytes: Number.isFinite(releaseArtifact?.sizeBytes) ? releaseArtifact.sizeBytes : null,
-      artifactPlatform: releaseArtifact?.platform || null,
-      activation: releaseArtifact?.activation || null,
-      restartRequired: releaseArtifact?.restartRequired === true,
-      majorUpdateRequiresInstaller: releasePlan?.activation?.majorUpdateRequiresInstaller === true,
-      hotUpdateAuto: releasePlan?.activation?.hotUpdateAuto === true
-    };
-    const failures = [
-      catalogSync.ok === false ? `AppCenter 目录同步失败：${catalogSync.message}` : null,
-      releaseSync.ok === false ? `Release Center 检查失败：${releaseSync.message}` : null
-    ].filter(Boolean);
-    const releaseMessage = releaseSync.ok
-      ? releaseUpdateMessage(releaseResult)
-      : 'Release Center 更新策略读取失败。';
-    runtime.feedback = {
-      tone: failures.length ? 'warning' : (releaseResult?.status === 'update-available' ? 'success' : 'info'),
-      message: failures.length
-        ? `${releaseMessage} ${failures.join('；')}`
-        : `${releaseMessage} AppCenter 目录已同步 ${catalogSync.count} 个应用。`
-    };
-    touchRuntime('update checked');
-    await saveAndBroadcast();
+    await checkUpdatesWithConnectionGuard('manual-check', { manual: true });
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:apply-update', async () => {
     await applyLauncherUpdate('manual-apply');
+    await saveAndBroadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('mx-h2i:restart-app', async () => {
+    runtime.feedback = {
+      tone: 'info',
+      message: '正在重启 MX-H2I。'
+    };
+    touchRuntime('app restart requested');
+    await saveAndBroadcast();
+    setTimeout(() => {
+      app.relaunch();
+      app.exit(0);
+    }, 120);
+    return visibleRuntime();
+  });
+  ipcMain.handle('mx-h2i:open-rollback', async (_event, rollbackId) => {
+    await openRollbackInstaller(rollbackId);
     await saveAndBroadcast();
     return visibleRuntime();
   });
@@ -2496,7 +2473,7 @@ function normalizeConfig(input) {
     productId,
     productDisplayName,
     bootstrapApiBaseUrl,
-    internalApiBaseUrl: stringValue(row.internalApiBaseUrl, DEFAULT_CONFIG.internalApiBaseUrl),
+    internalApiBaseUrl: normalizeInternalApiBaseUrlConfig(row.internalApiBaseUrl),
     domesticRelayHost: stringValue(row.domesticRelayHost, DEFAULT_CONFIG.domesticRelayHost),
     domesticRelayPort: Number.isInteger(domesticRelayPort) && domesticRelayPort > 0 ? domesticRelayPort : DEFAULT_CONFIG.domesticRelayPort,
     sdkGatewayBaseUrl: stringValue(row.sdkGatewayBaseUrl, DEFAULT_CONFIG.sdkGatewayBaseUrl || sdkGatewayBaseUrl(bootstrapApiBaseUrl)),
@@ -2510,6 +2487,20 @@ function normalizeConfig(input) {
     useLocalEngineResources: row.useLocalEngineResources !== false,
     restartAfterCodeUpdate: row.restartAfterCodeUpdate !== false
   };
+}
+
+function normalizeInternalApiBaseUrlConfig(value) {
+  const normalized = normalizeBaseUrl(value);
+  if (!normalized) return DEFAULT_CONFIG.internalApiBaseUrl;
+  if (process.env.MX_H2I_KEEP_LOCAL_INTERNAL === '1') return normalized;
+  try {
+    const parsed = new URL(normalized);
+    const host = parsed.hostname.toLowerCase();
+    const isLegacyLocal = (host === '127.0.0.1' || host === 'localhost') && (parsed.port || '80') === '18090';
+    return isLegacyLocal ? DEFAULT_CONFIG.internalApiBaseUrl : normalized;
+  } catch {
+    return normalized;
+  }
 }
 
 function normalizeInstallation(input) {
@@ -2871,6 +2862,198 @@ async function syncAppCenterCatalog(reason) {
   }
 }
 
+function releaseCenterConnectionReady() {
+  return runtime?.connection?.state === 'connected'
+    && Boolean(normalizeBaseUrl(runtime.connection.internalBaseUrl) || normalizeBaseUrl(runtime?.config?.internalApiBaseUrl));
+}
+
+function releaseCenterConnectionPrompt() {
+  return '更新服务部署在 Internal 上，请先点击连接进入访客模式，或使用员工登录。连接成功后 MX-H2I 会自动检查更新。';
+}
+
+async function checkUpdatesWithConnectionGuard(reason, options = {}) {
+  const manual = options.manual === true;
+  if (!releaseCenterConnectionReady()) {
+    const message = releaseCenterConnectionPrompt();
+    runtime.update = normalizeUpdate({
+      ...(runtime.update || {}),
+      status: 'needs-connection',
+      updateAvailable: false,
+      reason: message
+    }, runtime.config);
+    if (manual) {
+      runtime.feedback = {
+        tone: 'info',
+        message
+      };
+    }
+    pushAppLog('appcenter', 'info', `Release check skipped (${reason}): Internal not connected.`);
+    touchRuntime('update check waiting for internal');
+    await saveAndBroadcast();
+    return { ok: false, skipped: true, message };
+  }
+  if (releaseUpdateCheckInFlight) {
+    if (manual) {
+      runtime.feedback = {
+        tone: 'info',
+        message: '正在检查更新，请稍候。'
+      };
+      touchRuntime('update check already running');
+      await saveAndBroadcast();
+    }
+    return releaseUpdateCheckInFlight;
+  }
+  releaseUpdateCheckInFlight = performUpdateCheck(reason, options).finally(() => {
+    releaseUpdateCheckInFlight = null;
+  });
+  return releaseUpdateCheckInFlight;
+}
+
+async function performUpdateCheck(reason, options = {}) {
+  const quiet = options.quiet === true;
+  const catalogSync = await syncAppCenterCatalog(reason);
+  const releaseSync = await checkReleaseCenterUpdate(reason);
+  const releaseCatalog = await fetchReleaseHistory(reason);
+  const releaseResult = releaseSync.result;
+  const releasePlan = releaseResult?.plan || null;
+  const releaseDecision = releaseResult?.decision || null;
+  const releaseArtifact = releaseResult?.artifacts?.[0] || null;
+  const updateAvailable = releaseResult?.status === 'update-available' || releaseResult?.status === 'blocked';
+  const checkedAt = releaseResult?.checkedAt || nowIso();
+  const historyEntry = updateHistoryEntry({
+    kind: 'check',
+    status: releaseResult?.status || (releaseSync.ok ? 'checked' : 'failed'),
+    version: releaseDecision?.targetVersion || app.getVersion(),
+    fromVersion: app.getVersion(),
+    releaseId: releasePlan?.releaseId || null,
+    planId: releasePlan?.planId || null,
+    componentKind: releaseDecision?.componentKind || null,
+    updateMode: releaseDecision?.updateMode || null,
+    message: releaseSync.ok ? releaseUpdateMessage(releaseResult) : userFacingUpdateFailure(releaseSync.message),
+    at: checkedAt
+  });
+  runtime.update = normalizeUpdate({
+    ...(runtime.update || {}),
+    status: releaseSync.ok ? releaseResult.status : 'failed',
+    currentVersion: app.getVersion(),
+    latestVersion: releaseDecision?.targetVersion || app.getVersion(),
+    policy: releaseDecision?.updateMode || 'launcher-managed',
+    channel: runtime.config.releaseChannel,
+    rolloutGroup: releasePlan?.rollout?.segmentId || runtime.config.rolloutGroup,
+    updateAvailable,
+    canSkip: releaseDecision?.canSkip === true,
+    lastCheckedAt: checkedAt,
+    planId: releasePlan?.planId || null,
+    releaseId: releasePlan?.releaseId || null,
+    componentId: releaseDecision?.componentId || launcherProductId(),
+    componentKind: releaseDecision?.componentKind || null,
+    updateMode: releaseDecision?.updateMode || null,
+    reason: releaseSync.ok ? releaseResult.reason : userFacingUpdateFailure(releaseSync.message),
+    artifactKind: releaseArtifact?.kind || null,
+    artifactId: releaseArtifact?.artifactId || null,
+    artifactUrl: releaseArtifact?.url || null,
+    artifactDigest: releaseArtifact?.digest || null,
+    artifactSignature: releaseArtifact?.signature || null,
+    artifactSizeBytes: Number.isFinite(releaseArtifact?.sizeBytes) ? releaseArtifact.sizeBytes : null,
+    artifactPlatform: releaseArtifact?.platform || null,
+    activation: releaseArtifact?.activation || null,
+    restartRequired: releaseArtifact?.restartRequired === true,
+    majorUpdateRequiresInstaller: releasePlan?.activation?.majorUpdateRequiresInstaller === true,
+    hotUpdateAuto: releasePlan?.activation?.hotUpdateAuto === true,
+    downloadProgress: null,
+    availableReleases: releaseCatalog.ok
+      ? releaseCatalog.releases
+      : mergeAvailableRelease(runtime.update?.availableReleases, availableReleaseFromPlan(releasePlan, releaseDecision, releaseArtifact, releaseResult?.status)),
+    history: prependUpdateHistory(runtime.update?.history, historyEntry)
+  }, runtime.config);
+  const failures = [
+    catalogSync.ok === false ? `AppCenter 目录同步失败：${userFacingUpdateFailure(catalogSync.message)}` : null,
+    releaseSync.ok === false ? `Release Center 检查失败：${userFacingUpdateFailure(releaseSync.message)}` : null
+  ].filter(Boolean);
+  const releaseMessage = releaseSync.ok
+    ? releaseUpdateMessage(releaseResult)
+    : 'Release Center 更新策略读取失败。';
+  const hasUpdateSignal = ['update-available', 'blocked'].includes(releaseResult?.status);
+  if (!quiet || hasUpdateSignal) {
+    runtime.feedback = {
+      tone: failures.length ? 'warning' : (releaseResult?.status === 'update-available' ? 'success' : 'info'),
+      message: failures.length
+        ? `${releaseMessage} ${failures.join('；')}`
+        : `${releaseMessage} 当前 ${app.getVersion()}，目标 ${releaseDecision?.targetVersion || app.getVersion()}，通道 ${runtime.config.releaseChannel}。AppCenter 目录已同步 ${catalogSync.count} 个应用。`
+    };
+  }
+  touchRuntime('update checked');
+  await saveAndBroadcast();
+  return { ok: failures.length === 0, skipped: false, releaseResult, catalogSync, releaseSync };
+}
+
+async function fetchReleaseHistory(reason) {
+  try {
+    const baseUrl = appCenterCatalogBaseUrl();
+    if (!baseUrl) return { ok: false, releases: [], message: 'Internal API baseUrl 为空' };
+    const payload = await requestJson(joinApiUrl(baseUrl, '/internal/v1/release-management/plans'), {
+      timeoutMs: 4500,
+      headers: appCenterCatalogHeaders()
+    });
+    const plans = Array.isArray(payload?.plans) ? payload.plans : [];
+    const releases = plans
+      .map((plan) => availableReleaseFromPlan(plan))
+      .filter(Boolean)
+      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+      .slice(0, 8);
+    pushAppLog('appcenter', 'info', `Loaded ${releases.length} release plans (${reason}).`);
+    return { ok: true, releases, message: '' };
+  } catch (error) {
+    const message = userFacingUpdateFailure(errorMessage(error));
+    pushAppLog('appcenter', 'warning', `Release history sync failed (${reason}): ${message}`);
+    return { ok: false, releases: [], message };
+  }
+}
+
+function availableReleaseFromPlan(plan, decision = null, artifact = null, status = null) {
+  if (!plan && !decision && !artifact) return null;
+  const productId = launcherProductId();
+  const selectedDecision = decision
+    || [plan?.components?.launcher, plan?.components?.app].filter(Boolean).find((item) => item.componentId === productId)
+    || plan?.components?.launcher
+    || plan?.components?.app
+    || null;
+  const selectedArtifact = artifact
+    || arrayValue(plan?.artifacts, []).find((item) => {
+      if (item.componentId && item.componentId !== productId) return false;
+      return !item.platform || item.platform === process.platform;
+    })
+    || arrayValue(plan?.artifacts, [])[0]
+    || null;
+  const gate = nullableString(plan?.test?.gate?.verdict);
+  return {
+    id: nullableString(plan?.planId) || nullableString(plan?.releaseId) || nullableString(selectedArtifact?.artifactId) || makeRequestId('release'),
+    releaseId: nullableString(plan?.releaseId),
+    planId: nullableString(plan?.planId),
+    version: nullableString(selectedDecision?.targetVersion) || nullableString(selectedArtifact?.version),
+    channel: nullableString(plan?.channel) || runtime?.config?.releaseChannel || null,
+    status: nullableString(status) || (gate && gate !== 'passed' ? 'blocked' : gate === 'passed' ? 'ready' : 'planned'),
+    componentKind: nullableString(selectedDecision?.componentKind) || nullableString(selectedArtifact?.kind),
+    updateMode: nullableString(selectedDecision?.updateMode),
+    artifactKind: nullableString(selectedArtifact?.kind),
+    activation: nullableString(selectedArtifact?.activation),
+    sizeBytes: Number.isFinite(selectedArtifact?.sizeBytes) ? selectedArtifact.sizeBytes : null,
+    createdAt: nullableString(plan?.createdAt),
+    gate
+  };
+}
+
+function mergeAvailableRelease(existing, nextRelease) {
+  const rows = normalizeAvailableReleases(existing);
+  if (!nextRelease) return rows;
+  const normalized = normalizeAvailableReleases([nextRelease])[0];
+  if (!normalized) return rows;
+  return [
+    normalized,
+    ...rows.filter((item) => item.id !== normalized.id && item.releaseId !== normalized.releaseId)
+  ].slice(0, 8);
+}
+
 async function checkReleaseCenterUpdate(reason) {
   try {
     const baseUrl = appCenterCatalogBaseUrl();
@@ -2972,7 +3155,7 @@ function chooseReleaseUpdateResult(results, currentVersion, baseUrl) {
 
 function releaseUpdateMessage(result) {
   if (!result) return 'Release Center 没有返回更新策略。';
-  if (result.status === 'up-to-date') return '当前已是最新版本。';
+  if (result.status === 'up-to-date') return `当前已是最新版本 ${result.decision?.currentVersion || app.getVersion()}。`;
   if (result.status === 'blocked') return `发现更新但门禁未通过：${result.reason}`;
   if (result.status === 'update-available') {
     const decision = result.decision || {};
@@ -2983,6 +3166,53 @@ function releaseUpdateMessage(result) {
     return `发现可自动更新版本 ${decision.targetVersion}（${decision.componentKind || 'component'}）。`;
   }
   return result.reason || 'Release Center 更新策略已读取。';
+}
+
+function updateHistoryEntry(input) {
+  return normalizeUpdateHistory([{
+    id: makeRequestId('update-history'),
+    kind: input.kind,
+    status: input.status,
+    version: input.version,
+    fromVersion: input.fromVersion,
+    releaseId: input.releaseId,
+    planId: input.planId,
+    componentKind: input.componentKind,
+    updateMode: input.updateMode,
+    message: input.message,
+    at: input.at || nowIso()
+  }])[0];
+}
+
+function prependUpdateHistory(existing, entry) {
+  const normalized = normalizeUpdateHistory(existing);
+  if (!entry) return normalized;
+  return [
+    entry,
+    ...normalized.filter((item) => {
+      if (entry.releaseId && item.releaseId === entry.releaseId && item.kind === entry.kind && item.status === entry.status) return false;
+      return item.id !== entry.id;
+    })
+  ].slice(0, 12);
+}
+
+function userFacingUpdateFailure(message) {
+  const value = nullableString(message) || 'Internal 更新服务暂不可达。';
+  if (/ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|fetch failed|network/i.test(value)) {
+    return 'Internal 更新服务暂不可达，请确认已连接 MX-H2I 后重试。';
+  }
+  return value;
+}
+
+function schedulePostConnectUpdateCheck(reason) {
+  if (postConnectUpdateTimer) clearTimeout(postConnectUpdateTimer);
+  postConnectUpdateTimer = setTimeout(() => {
+    postConnectUpdateTimer = null;
+    void checkUpdatesWithConnectionGuard(reason, { quiet: true }).catch((error) => {
+      pushAppLog('appcenter', 'warning', `Post-connect release check failed (${reason}): ${errorMessage(error)}`);
+    });
+  }, 900);
+  postConnectUpdateTimer.unref?.();
 }
 
 function releaseCenterUserId() {
@@ -3027,9 +3257,28 @@ async function applyLauncherUpdate(reason) {
       })
     : null;
   const targetPath = updateArtifactTargetPath(update, artifact);
+  let lastProgressBroadcastAt = 0;
   runtime.update = normalizeUpdate({
     ...update,
-    status: 'downloading'
+    status: 'downloading',
+    downloadProgress: {
+      state: 'downloading',
+      bytes: 0,
+      totalBytes: artifact.sizeBytes,
+      percent: artifact.sizeBytes ? 0 : null,
+      updatedAt: nowIso()
+    },
+    history: prependUpdateHistory(update.history, updateHistoryEntry({
+      kind: installer ? 'major-download' : 'hot-download',
+      status: 'started',
+      version: update.latestVersion || artifact.version,
+      fromVersion: update.currentVersion || app.getVersion(),
+      releaseId: update.releaseId,
+      planId: update.planId,
+      componentKind: update.componentKind || artifact.kind,
+      updateMode: update.updateMode,
+      message: installer ? '开始下载大版本安装包。' : '开始下载热更新包。'
+    }))
   }, runtime.config);
   runtime.feedback = {
     tone: 'info',
@@ -3045,9 +3294,27 @@ async function applyLauncherUpdate(reason) {
     pushAppLog('appcenter', 'warning', `Release download-started report failed: ${errorMessage(error)}`);
   });
   try {
-    const result = await mod.downloadElectronLauncherReleaseArtifactToFile({
+    const result = await downloadReleaseArtifactToFileWithProgress({
       artifact,
-      targetPath
+      targetPath,
+      onProgress: (progress) => {
+        const now = Date.now();
+        runtime.update = normalizeUpdate({
+          ...runtime.update,
+          downloadedBytes: progress.bytes,
+          downloadProgress: {
+            state: 'downloading',
+            bytes: progress.bytes,
+            totalBytes: progress.totalBytes,
+            percent: progress.percent,
+            updatedAt: nowIso()
+          }
+        }, runtime.config);
+        if (now - lastProgressBroadcastAt > 450 || progress.percent === 100) {
+          lastProgressBroadcastAt = now;
+          broadcastState();
+        }
+      }
     });
     runtime.update = normalizeUpdate({
       ...runtime.update,
@@ -3055,7 +3322,39 @@ async function applyLauncherUpdate(reason) {
       stagedPath: result.targetPath,
       downloadedAt: nowIso(),
       downloadedBytes: result.bytes,
-      downloadedDigest: result.digest
+      downloadedDigest: result.digest,
+      downloadProgress: {
+        state: 'downloaded',
+        bytes: result.bytes,
+        totalBytes: result.bytes,
+        percent: 100,
+        updatedAt: nowIso()
+      },
+      history: prependUpdateHistory(runtime.update?.history, updateHistoryEntry({
+        kind: installer ? 'major-download' : 'hot-download',
+        status: 'downloaded',
+        version: runtime.update?.latestVersion || artifact.version,
+        fromVersion: runtime.update?.currentVersion || app.getVersion(),
+        releaseId: runtime.update?.releaseId,
+        planId: runtime.update?.planId,
+        componentKind: runtime.update?.componentKind || artifact.kind,
+        updateMode: runtime.update?.updateMode,
+        message: installer ? '大版本安装包已下载并校验。' : '热更新包已下载并校验。'
+      })),
+      rollbackSlots: installer
+        ? rememberRollbackSlot(runtime.update?.rollbackSlots, {
+            version: runtime.update?.latestVersion || artifact.version,
+            releaseId: runtime.update?.releaseId,
+            planId: runtime.update?.planId,
+            artifactId: artifact.artifactId,
+            artifactKind: artifact.kind,
+            path: result.targetPath,
+            digest: result.digest,
+            sizeBytes: result.bytes,
+            platform: artifact.platform,
+            downloadedAt: runtime.update?.downloadedAt || nowIso()
+          })
+        : runtime.update?.rollbackSlots
     }, runtime.config);
     await updater?.report?.({
       installId: runtime.installation?.installId,
@@ -3067,9 +3366,25 @@ async function applyLauncherUpdate(reason) {
     if (installer) {
       const openError = await shell.openPath(result.targetPath);
       if (openError) throw new Error(openError);
+      runtime.update = normalizeUpdate({
+        ...runtime.update,
+        status: 'installer-opened',
+        restartPrompt: true,
+        history: prependUpdateHistory(runtime.update?.history, updateHistoryEntry({
+          kind: 'major-install',
+          status: 'installer-opened',
+          version: runtime.update?.latestVersion || artifact.version,
+          fromVersion: runtime.update?.currentVersion || app.getVersion(),
+          releaseId: runtime.update?.releaseId,
+          planId: runtime.update?.planId,
+          componentKind: runtime.update?.componentKind || artifact.kind,
+          updateMode: runtime.update?.updateMode,
+          message: '安装包已打开，等待用户完成系统安装。'
+        }))
+      }, runtime.config);
       runtime.feedback = {
         tone: 'success',
-        message: '安装包已校验并打开。请按系统安装器完成更新。'
+        message: '安装包已校验并打开。安装完成后可以立即重启 MX-H2I，也可以稍后手动重启。'
       };
       await updater?.report?.({
         installId: runtime.installation?.installId,
@@ -3079,9 +3394,15 @@ async function applyLauncherUpdate(reason) {
         pushAppLog('appcenter', 'warning', `Release installer-opened report failed: ${errorMessage(error)}`);
       });
     } else {
+      runtime.update = normalizeUpdate({
+        ...runtime.update,
+        restartPrompt: runtime.update.restartRequired === true
+      }, runtime.config);
       runtime.feedback = {
         tone: 'success',
-        message: '更新包已下载并校验，等待后续热更新激活器处理。'
+        message: runtime.update.restartRequired
+          ? '热更新包已下载并校验，激活后需要重启 MX-H2I。'
+          : '热更新包已下载并校验，等待热更新激活器处理。'
       };
     }
     touchRuntime('update downloaded');
@@ -3090,7 +3411,23 @@ async function applyLauncherUpdate(reason) {
     runtime.update = normalizeUpdate({
       ...runtime.update,
       status: 'download-failed',
-      reason: message
+      reason: message,
+      downloadProgress: {
+        ...(runtime.update?.downloadProgress || {}),
+        state: 'failed',
+        updatedAt: nowIso()
+      },
+      history: prependUpdateHistory(runtime.update?.history, updateHistoryEntry({
+        kind: installer ? 'major-download' : 'hot-download',
+        status: 'failed',
+        version: runtime.update?.latestVersion || artifact.version,
+        fromVersion: runtime.update?.currentVersion || app.getVersion(),
+        releaseId: runtime.update?.releaseId,
+        planId: runtime.update?.planId,
+        componentKind: runtime.update?.componentKind || artifact.kind,
+        updateMode: runtime.update?.updateMode,
+        message
+      }))
     }, runtime.config);
     runtime.feedback = {
       tone: 'danger',
@@ -3128,6 +3465,169 @@ function releaseArtifactFromUpdate(update) {
     requiredAppRestart: update.restartRequired === true || activation === 'installer-manual',
     notes: []
   };
+}
+
+async function downloadReleaseArtifactToFileWithProgress(input) {
+  const artifact = input.artifact || {};
+  const url = nullableString(artifact.url);
+  if (!url) throw new Error(`Release artifact ${artifact.artifactId || 'artifact'} has no URL`);
+  await fs.mkdir(path.dirname(input.targetPath), { recursive: true });
+  const tempPath = `${input.targetPath}.download`;
+  await fs.rm(tempPath, { force: true });
+  const hash = createHash('sha256');
+  const expectedDigest = normalizeReleaseDigest(artifact.digest);
+  let bytes = 0;
+  try {
+    const response = await openReleaseDownloadStream(url, input.maxRedirects ?? 3);
+    const headerLength = Number(response.headers?.['content-length']);
+    const totalBytes = Number.isFinite(artifact.sizeBytes) && artifact.sizeBytes > 0
+      ? artifact.sizeBytes
+      : Number.isFinite(headerLength) && headerLength > 0
+        ? headerLength
+        : null;
+    await new Promise((resolve, reject) => {
+      const output = fsSync.createWriteStream(tempPath, { flags: 'wx' });
+      let settled = false;
+      const fail = (error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+      response.stream.on('data', (chunk) => {
+        bytes += chunk.length;
+        hash.update(chunk);
+        const percent = totalBytes ? Math.min(100, Math.round((bytes / totalBytes) * 100)) : null;
+        input.onProgress?.({ bytes, totalBytes, percent });
+      });
+      response.stream.on('error', fail);
+      output.on('error', fail);
+      output.on('finish', () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      });
+      response.stream.pipe(output);
+    });
+    const digest = `sha256:${hash.digest('hex')}`;
+    if (Number.isFinite(artifact.sizeBytes) && bytes !== artifact.sizeBytes) {
+      throw new Error(`Release artifact size mismatch: expected ${artifact.sizeBytes}, got ${bytes}`);
+    }
+    if (expectedDigest && digest !== expectedDigest) {
+      throw new Error(`Release artifact digest mismatch: expected ${expectedDigest}, got ${digest}`);
+    }
+    await fs.rename(tempPath, input.targetPath);
+    input.onProgress?.({ bytes, totalBytes: bytes, percent: 100 });
+    return {
+      ok: true,
+      targetPath: input.targetPath,
+      digest,
+      expectedDigest,
+      bytes
+    };
+  } catch (error) {
+    await fs.rm(tempPath, { force: true });
+    throw error;
+  }
+}
+
+function openReleaseDownloadStream(url, redirectsLeft) {
+  const parsed = new URL(url);
+  const getter = parsed.protocol === 'https:' ? https.get : parsed.protocol === 'http:' ? http.get : null;
+  if (!getter) throw new Error(`Unsupported release artifact URL protocol: ${parsed.protocol}`);
+  return new Promise((resolve, reject) => {
+    const req = getter(parsed, (response) => {
+      const status = response.statusCode || 0;
+      const location = response.headers.location;
+      if (status >= 300 && status < 400 && location) {
+        response.resume();
+        if (redirectsLeft <= 0) {
+          reject(new Error(`Too many redirects while downloading release artifact: ${url}`));
+          return;
+        }
+        openReleaseDownloadStream(new URL(location, parsed).toString(), redirectsLeft - 1).then(resolve, reject);
+        return;
+      }
+      if (status < 200 || status >= 300) {
+        response.resume();
+        reject(new Error(`Release artifact download failed: HTTP ${status}`));
+        return;
+      }
+      resolve({ stream: response, headers: response.headers });
+    });
+    req.on('error', reject);
+  });
+}
+
+function normalizeReleaseDigest(value) {
+  const digest = nullableString(value)?.toLowerCase();
+  if (!digest) return null;
+  return digest.startsWith('sha256:') ? digest : `sha256:${digest}`;
+}
+
+function rememberRollbackSlot(existing, slot) {
+  const normalizedSlot = normalizeRollbackSlots([{
+    id: nullableString(slot.artifactId) || makeRequestId('rollback'),
+    ...slot
+  }])[0];
+  if (!normalizedSlot) return normalizeRollbackSlots(existing);
+  return [
+    normalizedSlot,
+    ...normalizeRollbackSlots(existing).filter((item) => {
+      if (normalizedSlot.artifactId && item.artifactId === normalizedSlot.artifactId) return false;
+      if (normalizedSlot.releaseId && item.releaseId === normalizedSlot.releaseId) return false;
+      return item.path !== normalizedSlot.path;
+    })
+  ].slice(0, 3);
+}
+
+async function openRollbackInstaller(rollbackId) {
+  const id = nullableString(rollbackId);
+  const slot = normalizeRollbackSlots(runtime.update?.rollbackSlots)
+    .find((item) => item.id === id || item.artifactId === id || item.releaseId === id || item.path === id);
+  if (!slot?.path) {
+    runtime.feedback = {
+      tone: 'warning',
+      message: '没有找到可回滚的大版本安装包。'
+    };
+    return;
+  }
+  if (!fsSync.existsSync(slot.path)) {
+    runtime.update = normalizeUpdate({
+      ...(runtime.update || {}),
+      rollbackSlots: normalizeRollbackSlots(runtime.update?.rollbackSlots).filter((item) => item.path !== slot.path)
+    }, runtime.config);
+    runtime.feedback = {
+      tone: 'warning',
+      message: `回滚安装包已不存在：${slot.version || slot.releaseId || 'unknown'}。`
+    };
+    return;
+  }
+  const openError = await shell.openPath(slot.path);
+  if (openError) {
+    runtime.feedback = {
+      tone: 'danger',
+      message: `打开回滚安装包失败：${openError}`
+    };
+    return;
+  }
+  runtime.update = normalizeUpdate({
+    ...(runtime.update || {}),
+    restartPrompt: true,
+    history: prependUpdateHistory(runtime.update?.history, updateHistoryEntry({
+      kind: 'rollback',
+      status: 'installer-opened',
+      version: slot.version,
+      releaseId: slot.releaseId,
+      planId: slot.planId,
+      componentKind: slot.artifactKind,
+      message: `已打开 ${slot.version || slot.releaseId || '历史版本'} 回滚安装包。`
+    }))
+  }, runtime.config);
+  runtime.feedback = {
+    tone: 'success',
+    message: `已打开 ${slot.version || slot.releaseId || '历史版本'} 回滚安装包。完成安装后可以重启 MX-H2I。`
+  };
+  touchRuntime('rollback installer opened');
 }
 
 function updateArtifactTargetPath(update, artifact) {
@@ -3426,6 +3926,7 @@ function normalizeUpdate(input, config) {
     policy: stringValue(row.policy, 'launcher-managed'),
     channel: config.releaseChannel,
     rolloutGroup: config.rolloutGroup,
+    updateAvailable: row.updateAvailable === true,
     canSkip: row.canSkip === true,
     lastCheckedAt: typeof row.lastCheckedAt === 'string' ? row.lastCheckedAt : null,
     planId: nullableString(row.planId),
@@ -3448,8 +3949,96 @@ function normalizeUpdate(input, config) {
     stagedPath: nullableString(row.stagedPath),
     downloadedAt: nullableString(row.downloadedAt),
     downloadedBytes: Number.isFinite(row.downloadedBytes) ? row.downloadedBytes : null,
-    downloadedDigest: nullableString(row.downloadedDigest)
+    downloadedDigest: nullableString(row.downloadedDigest),
+    downloadProgress: normalizeUpdateDownloadProgress(row.downloadProgress),
+    history: normalizeUpdateHistory(row.history),
+    availableReleases: normalizeAvailableReleases(row.availableReleases),
+    rollbackSlots: normalizeRollbackSlots(row.rollbackSlots),
+    restartPrompt: row.restartPrompt === true
   };
+}
+
+function normalizeUpdateDownloadProgress(input) {
+  const row = input && typeof input === 'object' ? input : null;
+  if (!row) return null;
+  const bytes = Number(row.bytes);
+  const totalBytes = Number(row.totalBytes);
+  const percent = Number(row.percent);
+  return {
+    state: nullableString(row.state) || 'idle',
+    bytes: Number.isFinite(bytes) ? bytes : 0,
+    totalBytes: Number.isFinite(totalBytes) && totalBytes > 0 ? totalBytes : null,
+    percent: Number.isFinite(percent) ? clamp(percent, 0, 100) : null,
+    updatedAt: nullableString(row.updatedAt) || nowIso()
+  };
+}
+
+function normalizeUpdateHistory(input) {
+  return arrayValue(input, [])
+    .map((item) => {
+      const row = item && typeof item === 'object' ? item : {};
+      return {
+        id: nullableString(row.id) || makeRequestId('update-history'),
+        kind: nullableString(row.kind) || 'check',
+        status: nullableString(row.status) || 'unknown',
+        version: nullableString(row.version),
+        fromVersion: nullableString(row.fromVersion),
+        releaseId: nullableString(row.releaseId),
+        planId: nullableString(row.planId),
+        componentKind: nullableString(row.componentKind),
+        updateMode: nullableString(row.updateMode),
+        message: nullableString(row.message),
+        at: nullableString(row.at) || nowIso()
+      };
+    })
+    .slice(0, 12);
+}
+
+function normalizeAvailableReleases(input) {
+  return arrayValue(input, [])
+    .map((item) => {
+      const row = item && typeof item === 'object' ? item : {};
+      const sizeBytes = Number(row.sizeBytes);
+      return {
+        id: nullableString(row.id) || nullableString(row.planId) || makeRequestId('release'),
+        releaseId: nullableString(row.releaseId),
+        planId: nullableString(row.planId),
+        version: nullableString(row.version),
+        channel: nullableString(row.channel),
+        status: nullableString(row.status) || 'unknown',
+        componentKind: nullableString(row.componentKind),
+        updateMode: nullableString(row.updateMode),
+        artifactKind: nullableString(row.artifactKind),
+        activation: nullableString(row.activation),
+        sizeBytes: Number.isFinite(sizeBytes) ? sizeBytes : null,
+        createdAt: nullableString(row.createdAt),
+        gate: nullableString(row.gate)
+      };
+    })
+    .slice(0, 8);
+}
+
+function normalizeRollbackSlots(input) {
+  return arrayValue(input, [])
+    .map((item) => {
+      const row = item && typeof item === 'object' ? item : {};
+      const sizeBytes = Number(row.sizeBytes);
+      return {
+        id: nullableString(row.id) || nullableString(row.artifactId) || makeRequestId('rollback'),
+        version: nullableString(row.version),
+        releaseId: nullableString(row.releaseId),
+        planId: nullableString(row.planId),
+        artifactId: nullableString(row.artifactId),
+        artifactKind: nullableString(row.artifactKind),
+        path: nullableString(row.path),
+        digest: nullableString(row.digest),
+        sizeBytes: Number.isFinite(sizeBytes) ? sizeBytes : null,
+        platform: nullableString(row.platform),
+        downloadedAt: nullableString(row.downloadedAt) || nowIso()
+      };
+    })
+    .filter((item) => item.path)
+    .slice(0, 3);
 }
 
 async function launcherContract(config) {
@@ -4076,6 +4665,9 @@ async function applyNetworkSession(session, options) {
     touchRuntime(wireGuardResult.ready
       ? (options.mode === 'employee' ? 'employee wireguard connected' : 'guest wireguard connected')
       : 'wireguard lease only');
+    if (wireGuardResult.ready) {
+      schedulePostConnectUpdateCheck(`${options.mode}-connected`);
+    }
     if (!wireGuardResult.ready) {
       scheduleWireGuardRecovery('post-connect-probe', [1500, 4000, 9000]);
     }
@@ -4564,6 +5156,14 @@ async function refreshWireGuardDiagnostics() {
   touchRuntime('wireguard diagnostics refreshed');
 }
 
+function feedbackIsWireGuardWarning(feedback) {
+  if (!feedback || typeof feedback !== 'object') return false;
+  const message = nullableString(feedback.message);
+  if (!message) return false;
+  return /WireGuard|隧道|overlay|Internal API/.test(message)
+    && /未 ready|暂未确认|探测失败|ECONNREFUSED|恢复后仍未 ready/.test(message);
+}
+
 async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
   if (!runtime || !shouldRecoverWireGuardConnection(runtime.connection)) {
     return { ok: true, skipped: true, reason: 'connection-not-desired' };
@@ -4633,6 +5233,27 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
             };
           }
           touchRuntime(`wireguard probed: ${reason}`);
+          await saveAndBroadcast();
+        } else if (wireGuardResult.ready && feedbackIsWireGuardWarning(runtime.feedback)) {
+          runtime.feedback = null;
+          runtime.connection = {
+            ...connection,
+            state: wireGuardResult.state,
+            health: wireGuardResult.health,
+            wireGuard: wireGuardResult.wireGuard,
+            diagnostics: {
+              ...wireGuardResult.diagnostics,
+              recovery: {
+                ok: true,
+                action: 'probe-only',
+                reason,
+                message: 'ready',
+                missingRoutes: [],
+                updatedAt: nowIso()
+              }
+            }
+          };
+          touchRuntime(`wireguard ready warning cleared: ${reason}`);
           await saveAndBroadcast();
         } else if (preserveConnected && reason !== 'interval') {
           runtime.connection = {
