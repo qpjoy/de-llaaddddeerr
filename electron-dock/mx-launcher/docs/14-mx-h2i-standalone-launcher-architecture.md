@@ -504,7 +504,7 @@ Domestic 公网 DNS endpoint。这里的 `host:port` 只属于 MX-H2I bootstrap 
 如果公网 DNS 命中了云厂商备案/合规拦截页，H2I bootstrap 应使用 Host Resolve：配置
 `Bootstrap API=http://h2i.mxinfo-inc.cn:18090`，再配置
 `Host Resolve=h2i.mxinfo-inc.cn=<可达的 Domestic/Internal gateway IP>`。客户端实际拨号到
-该 IP，HTTP `Host` 使用 gateway IP，并通过 `X-Forwarded-Host` / `X-MX-Bootstrap-Host`
+该 IP，HTTP `Host` 使用 gateway IP，并通过 `X-Forwarded-Host` / `X-MX-Original-Host` / `X-MX-Bootstrap-Host`
 传递原始域名，避免公网备案层按 Host 拦截。
 `MX_H2I_BOOTSTRAP_DNS_SERVERS` 是 resolver 地址：只有当 `116.62.51.154:53` 真有
 Domestic DNS edge 在回答时，才应把它填成 `116.62.51.154`。如果 `116.62.51.154` 只是

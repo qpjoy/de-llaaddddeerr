@@ -6207,6 +6207,7 @@ function requestTextWithHostOverride(override, options = {}) {
       host: override.hostHeader,
       ...(override.originalHostHeader ? {
         'x-forwarded-host': override.originalHostHeader,
+        'x-mx-original-host': override.originalHostHeader,
         'x-mx-bootstrap-host': override.originalHostHeader,
         'x-mx-bootstrap-domain': hostnameFromUrl(override.originalUrl || '')
       } : {})
@@ -6946,11 +6947,11 @@ function classifyConnectionError(err) {
   const message = errorMessage(err);
   const status = Number(err?.status || err?.statusCode || err?.payload?.statusCode || 0);
   const lower = message.toLowerCase();
-  if (status === 403 && isPublicIcpBlockedError(err)) {
+  if (isPublicIcpBlockedError(err)) {
     const host = publicHostFromUrl(runtime?.config?.bootstrapApiBaseUrl) || DEFAULT_BOOTSTRAP_HOST;
     return {
       state: 'network-unavailable',
-      message: `公网域名被备案/公网入口拦截（403），不是 Internal 权限拒绝。请保留 Bootstrap API 域名，并在高级选项 Host Resolve 设置 ${host}=<正式 Domestic gateway IP>；客户端会连接该 IP，HTTP Host 使用 gateway IP，原始域名放在 X-Forwarded-Host/X-MX-Bootstrap-Host。原始错误：${message}`
+      message: `公网域名被备案/公网入口拦截，不是 Internal 权限拒绝。请保留 Bootstrap API 域名，并使用 Host Resolve ${host}=<正式 Domestic gateway IP>；客户端会连接该 IP，HTTP Host 使用 gateway IP，原始域名放在 X-Forwarded-Host/X-MX-Original-Host/X-MX-Bootstrap-Host。原始错误：${message}`
     };
   }
   if (status === 403 || lower.includes('403 forbidden') || lower.includes('forbidden')) {

@@ -3195,10 +3195,16 @@ function windowsElevatedStartProcessScripts(
   ];
   const waitForServiceRunning = () => [
     '$deadline = (Get-Date).AddSeconds(35)',
+    '$stableUntil = $null',
     'while ($true) {',
     `  $svc = Get-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`,
-    "  if ($null -ne $svc -and $svc.Status -eq 'Running') { break }",
-    `  if ($null -ne $svc -and $svc.Status -eq 'Stopped') { Start-Service -Name ${serviceArg} -ErrorAction SilentlyContinue }`,
+    "  if ($null -ne $svc -and $svc.Status -eq 'Running') {",
+    "    if ($null -eq $stableUntil) { $stableUntil = (Get-Date).AddSeconds(4) }",
+    '    if ((Get-Date) -gt $stableUntil) { break }',
+    '  } else {',
+    '    $stableUntil = $null',
+    `    if ($null -ne $svc -and $svc.Status -eq 'Stopped') { Start-Service -Name ${serviceArg} -ErrorAction SilentlyContinue }`,
+    '  }',
     `  if ((Get-Date) -gt $deadline) { throw ${powerShellString(`Timed out waiting for ${serviceName} to be running`)} }`,
     '  Start-Sleep -Milliseconds 500',
     '}'
@@ -3213,13 +3219,20 @@ function windowsElevatedStartProcessScripts(
   ];
   if (action === 'up') {
     elevatedLines.push(
-      "if ($null -ne $svc -and $svc.Status -eq 'Running') { Write-HdoAudit 'service already running; applying routes and NRPT rules'; Add-HdoOverlayRoutes; Add-HdoNrptRules; exit 0 }",
+      "if ($null -ne $svc -and $svc.Status -eq 'Running') {",
+      "  Write-HdoAudit 'service already running; applying routes and NRPT rules'",
+      '  Add-HdoOverlayRoutes',
+      '  Add-HdoNrptRules',
+      ...waitForServiceRunning(),
+      '  exit 0',
+      '}',
       `if ($null -ne $svc) {`,
       `  Write-HdoAudit ${powerShellString(`service exists; ensuring ${serviceName} is running`)}`,
       `  Start-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`,
       ...waitForServiceRunning(),
       '  Add-HdoOverlayRoutes',
       '  Add-HdoNrptRules',
+      ...waitForServiceRunning(),
       '  exit 0',
       '}'
     );
@@ -3250,6 +3263,7 @@ function windowsElevatedStartProcessScripts(
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
     ...(action === 'down' ? waitForServiceAbsent() : waitForServiceRunning()),
     ...(action === 'down' ? [] : ['Add-HdoOverlayRoutes', 'Add-HdoNrptRules']),
+    ...(action === 'down' ? [] : waitForServiceRunning()),
     `Write-HdoAudit ${powerShellString(`elevated complete action=${action} tunnel=${tunnelName}`)}`,
     'exit 0'
   );
