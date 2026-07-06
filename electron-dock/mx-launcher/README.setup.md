@@ -47,6 +47,7 @@ K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel \
 bash scripts/install-k8s-centos.sh --advertise-address 192.168.1.4 --allow-cgroup-v1 --reinit
 
 # 重新部署 MX：
+MX_K8S_OS_HOSTNAME=mx-internal-server \
 MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.4 \
 MX_SHADOW_BUILDKIT_KEEP_STORAGE=2GB \
 MX_SHADOW_BUILDKIT_PRUNE_UNTIL=24h \

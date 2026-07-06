@@ -243,27 +243,54 @@ k8s_etcd_manifest_node_name() {
   sed -n 's/^[[:space:]]*-[[:space:]]*--name=\([^[:space:]]*\).*$/\1/p' "$file" | head -n 1
 }
 
+k8s_is_valid_node_name() {
+  local value="$1"
+  [ -n "$value" ] || return 1
+  [ "${#value}" -le 253 ] || return 1
+  printf '%s\n' "$value" \
+    | grep -Eq '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+}
+
+k8s_sanitize_node_name() {
+  local value="$1"
+  value="$(printf '%s' "$value" \
+    | tr '[:upper:]_' '[:lower:]-' \
+    | sed -E 's/[^a-z0-9.-]+/-/g; s/[.][.-]+/./g; s/[-][.-]+/-/g; s/^[^a-z0-9]+//; s/[^a-z0-9]+$//')"
+  value="$(printf '%.253s' "$value" | sed -E 's/[^a-z0-9]+$//')"
+  if k8s_is_valid_node_name "$value"; then
+    echo "$value"
+  else
+    echo "localhost"
+  fi
+}
+
 k8s_detect_node_name() {
-  local existing etcd_name
+  local requested existing etcd_name host_name
   if [ -n "${MX_K8S_NODE_NAME:-}" ]; then
-    echo "$MX_K8S_NODE_NAME"
+    requested="$MX_K8S_NODE_NAME"
+    k8s_is_valid_node_name "$requested" || die "invalid MX_K8S_NODE_NAME: $requested"
+    echo "$requested"
     return
   fi
   if [ -n "${K8S_NODE_NAME:-}" ]; then
-    echo "$K8S_NODE_NAME"
+    requested="$K8S_NODE_NAME"
+    k8s_is_valid_node_name "$requested" || die "invalid K8S_NODE_NAME: $requested"
+    echo "$requested"
     return
   fi
   existing="$(k8s_existing_node_name | awk 'NF {print; exit}')"
   if [ -n "$existing" ]; then
-    echo "$existing"
+    k8s_is_valid_node_name "$existing" && echo "$existing" || k8s_sanitize_node_name "$existing"
     return
   fi
   etcd_name="$(k8s_etcd_manifest_node_name)"
   if [ -n "$etcd_name" ]; then
-    echo "$etcd_name"
+    k8s_is_valid_node_name "$etcd_name" && echo "$etcd_name" || k8s_sanitize_node_name "$etcd_name"
     return
   fi
-  hostname 2>/dev/null || echo "localhost"
+  host_name="$(hostname 2>/dev/null || true)"
+  [ -n "$host_name" ] || host_name="localhost"
+  k8s_is_valid_node_name "$host_name" && echo "$host_name" || k8s_sanitize_node_name "$host_name"
 }
 
 k8s_kubeadm_endpoint_files() {
@@ -443,7 +470,8 @@ k8s_write_kubeadm_cert_repair_config() {
   local current_ip="$1"
   local path="$2"
   local api_version="$3"
-  local node_name
+  local extra_sans="${4:-}"
+  local node_name san
   node_name="$(k8s_detect_node_name)"
   [ -n "$node_name" ] || node_name="localhost"
   cat >"$path" <<EOF
@@ -456,6 +484,15 @@ nodeRegistration:
 ---
 apiVersion: kubeadm.k8s.io/${api_version}
 kind: ClusterConfiguration
+apiServer:
+  certSANs:
+EOF
+  [ -n "$extra_sans" ] || extra_sans="$current_ip,127.0.0.1,localhost"
+  for san in $(printf '%s' "$extra_sans" | tr ',' ' '); do
+    [ -n "$san" ] || continue
+    printf '  - "%s"\n' "$san" >>"$path"
+  done
+  cat >>"$path" <<EOF
 etcd:
   local:
     dataDir: /var/lib/etcd
@@ -466,10 +503,11 @@ k8s_kubeadm_phase_certs_with_repair_config() {
   local phase="$1"
   local current_ip="$2"
   local backup_dir="$3"
+  local extra_sans="${4:-}"
   local config api_version
   config="$backup_dir/kubeadm-cert-repair.yaml"
   for api_version in v1beta4 v1beta3; do
-    k8s_write_kubeadm_cert_repair_config "$current_ip" "$config" "$api_version"
+    k8s_write_kubeadm_cert_repair_config "$current_ip" "$config" "$api_version" "$extra_sans"
     if kubeadm init phase certs "$phase" --config "$config"; then
       return 0
     fi
@@ -516,9 +554,7 @@ k8s_repair_apiserver_cert_if_needed() {
   for old_ip in $old_ips; do
     extra_sans="$extra_sans,$old_ip"
   done
-  if ! kubeadm init phase certs apiserver \
-    --apiserver-advertise-address="$current_ip" \
-    --apiserver-cert-extra-sans="$extra_sans"; then
+  if ! k8s_kubeadm_phase_certs_with_repair_config apiserver "$current_ip" "$backup_dir" "$extra_sans"; then
     cp -a "$backup_dir/etc/kubernetes/pki/apiserver.crt" /etc/kubernetes/pki/apiserver.crt 2>/dev/null || true
     cp -a "$backup_dir/etc/kubernetes/pki/apiserver.key" /etc/kubernetes/pki/apiserver.key 2>/dev/null || true
     die "failed to renew apiserver certificate; restored previous certificate from $backup_dir"
