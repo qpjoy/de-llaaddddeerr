@@ -389,7 +389,8 @@ configure_hostname_resolution() {
   resolve_advertise_address
   node_name="$(resolve_node_name)"
   [ -n "$node_name" ] || return 0
-  if command -v getent >/dev/null 2>&1 && getent hosts "$node_name" >/dev/null 2>&1; then
+  if command -v getent >/dev/null 2>&1 \
+    && getent hosts "$node_name" 2>/dev/null | awk -v ip="$K8S_APISERVER_ADVERTISE_ADDRESS" '$1 == ip {found = 1} END {exit !found}'; then
     return 0
   fi
   say "add hostname resolution for $node_name -> $K8S_APISERVER_ADVERTISE_ADDRESS"
@@ -590,6 +591,11 @@ localAPIEndpoint:
 nodeRegistration:
   name: ${node_name}
   criSocket: ${CRI_SOCKET}
+  kubeletExtraArgs:
+    - name: node-ip
+      value: "${K8S_APISERVER_ADVERTISE_ADDRESS}"
+    - name: hostname-override
+      value: "${node_name}"
 ---
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
@@ -705,6 +711,34 @@ reset_or_empty_reinit_path() {
   say "moved old $backup_name to ${path}.before-reinit-$stamp"
 }
 
+backup_and_remove_kubelet_reinit_path() {
+  local path="$1"
+  local backup_dir="$2"
+  local rel target
+  [ -e "$path" ] || return 0
+  rel="${path#/var/lib/kubelet/}"
+  target="$backup_dir/kubelet-state/$rel"
+  say "reset kubelet reinit state: $path"
+  if [ "$DRY_RUN" = "1" ]; then
+    say "would backup $path to $target and remove it"
+    return 0
+  fi
+  mkdir -p "$(dirname "$target")"
+  cp -a "$path" "$target"
+  rm -rf "$path"
+}
+
+reset_kubelet_reinit_state() {
+  local backup_dir="$1"
+  run mkdir -p /var/lib/kubelet
+  backup_and_remove_kubelet_reinit_path /var/lib/kubelet/pki "$backup_dir"
+  backup_and_remove_kubelet_reinit_path /var/lib/kubelet/kubeadm-flags.env "$backup_dir"
+  backup_and_remove_kubelet_reinit_path /var/lib/kubelet/config.yaml "$backup_dir"
+  backup_and_remove_kubelet_reinit_path /var/lib/kubelet/instance-config.yaml "$backup_dir"
+  backup_and_remove_kubelet_reinit_path /var/lib/kubelet/cpu_manager_state "$backup_dir"
+  backup_and_remove_kubelet_reinit_path /var/lib/kubelet/memory_manager_state "$backup_dir"
+}
+
 reinit_cluster_state() {
   [ "$K8S_REINIT" = "1" ] || return 0
   [ "$SKIP_INIT" = "0" ] || return 0
@@ -718,6 +752,7 @@ reinit_cluster_state() {
   run_allow_fail systemctl stop kubelet
   run_allow_fail kubeadm reset -f
   terminate_control_plane_listeners
+  reset_kubelet_reinit_state "$backup_dir"
   reset_or_empty_reinit_path /etc/kubernetes kubernetes "$stamp"
   reset_or_empty_reinit_path /var/lib/etcd etcd "$stamp"
   run rm -rf /etc/cni/net.d /run/flannel /var/lib/cni

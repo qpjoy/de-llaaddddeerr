@@ -4880,9 +4880,9 @@ Notes:
   - Deploy waits for kube-system CoreDNS after Flannel recovery so Pods can
     resolve services such as mx-internal-postgres before migrations start.
     Disable this guard with MX_K8S_RECOVER_CLUSTER_DNS=0.
-  - reinit-kubeadm resets only kubeadm control-plane state and CNI state. It
-    preserves /var/lib/mx-launcher hostPath data such as Postgres, release
-    artifacts, site-slots, and Internal SSH material. It defaults
+  - reinit-kubeadm resets kubeadm control-plane, kubelet registration, and CNI
+    state. It preserves /var/lib/mx-launcher hostPath data such as Postgres,
+    release artifacts, site-slots, and Internal SSH material. It defaults
     K8S_CONFIGURE_CONTAINERD=0 and K8S_RESTART_RUNTIME_AFTER_CNI=0 so Docker
     and containerd are not restarted by the reinit wrapper.
   - repair-cni is the explicit follow-up when Flannel is running and CNI files
