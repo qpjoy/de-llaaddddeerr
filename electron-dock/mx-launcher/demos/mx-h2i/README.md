@@ -95,12 +95,15 @@ before invoking electron-builder, so clean Windows workspaces do not start with
 an empty `@qpjoy/electron-launcher/dist`.
 
 Bootstrap resolution can be selected with `MX_H2I_BOOTSTRAP_RESOLVE_MODE`:
-`env-first`, `dns-first`, `env-only`, or `dns-only`. The bootstrap phase may use
-`MX_H2I_HOST_RESOLVE=api.mxinfo-inc.cn=<Domestic public IP>` to bypass public
-DNS, or `MX_H2I_BOOTSTRAP_DNS_SERVERS=223.5.5.5,119.29.29.29` to resolve the
-bootstrap domain through an explicit resolver before dialing the resolved IP
-with the original Host header. The connected WireGuard phase still relies on
-the launcher route plan and split DNS.
+`env-first`, `dns-first`, `env-only`, or `dns-only`. Use the V2 bootstrap host
+`http://h2i.mxinfo-inc.cn:18090` when V1 HDO and V2 H2I DNS coexist. The
+bootstrap phase may use `MX_H2I_HOST_RESOLVE=h2i.mxinfo-inc.cn=<Domestic public IP>`
+to bypass public DNS, or `MX_H2I_BOOTSTRAP_DNS_SERVERS=223.5.5.5,119.29.29.29`
+to resolve the bootstrap domain through an explicit resolver before dialing the
+resolved IP with the original Host header. `MX_H2I_BOOTSTRAP_DNS_SERVERS` must
+point at a DNS resolver, not merely at the A record returned for the bootstrap
+host. The connected WireGuard phase still relies on the launcher route plan and
+split DNS.
 
 When `dns-first` is selected, MX-H2I retries the bootstrap DNS resolver three
 times. If DNS still fails, the connection warns the user and temporarily falls

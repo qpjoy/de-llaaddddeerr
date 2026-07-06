@@ -25,6 +25,7 @@ const DEFAULT_LOCAL_EDGE_PORT = 2053;
 const DEFAULT_DOMESTIC_DNS_EDGE_PORT = 53;
 const DEFAULT_INTERNAL_DNS_EDGE_PORT = 53;
 const DEFAULT_INTERNAL_GATEWAY_APP_PORT = 80;
+const DEFAULT_BOOTSTRAP_HOST = 'h2i.mxinfo-inc.cn';
 const DEFAULT_SPLIT_DNS_DOMAINS = 'mx.cn mxinfo-inc.cn internal.mx corp.mx h2i.mx';
 const DARWIN_WIREGUARD_SERVICE_IDENTITY = {
   displayName: 'MX-H2I WireGuard',
@@ -5879,17 +5880,26 @@ function bootstrapResolveModeShortLabel(mode) {
 }
 
 function bootstrapHostResolveHint(failures) {
-  const apiFailures = failures.filter((failure) => {
-    try {
-      return new URL(failure.candidate).hostname === 'api.mxinfo-inc.cn';
-    } catch {
-      return false;
-    }
-  });
+  const host = bootstrapHintHost(failures);
+  if (!host) return '';
+  const apiFailures = failures.filter((failure) => hostnameFromUrl(failure.candidate) === host);
   if (!apiFailures.length) return '';
   const hasOverride = apiFailures.some((failure) => failure.override);
   if (hasOverride) return '';
-  return '；Host Resolve 未命中 api.mxinfo-inc.cn，请在 .env 或高级选项设置 MX_H2I_HOST_RESOLVE=api.mxinfo-inc.cn=<Domestic公网IP>';
+  return `；Host Resolve 未命中 ${host}，请在 .env 或高级选项设置 MX_H2I_HOST_RESOLVE=${host}=<Domestic公网IP>`;
+}
+
+function bootstrapHintHost(failures) {
+  const preferred = [
+    process.env.MX_H2I_BOOTSTRAP_HOST,
+    process.env.MX_H2I_BOOTSTRAP_DOMAIN,
+    hostnameFromUrl(process.env.MX_H2I_BOOTSTRAP_BASE_URL),
+    hostnameFromUrl(runtime?.config?.bootstrapApiBaseUrl),
+    DEFAULT_BOOTSTRAP_HOST,
+    'api.mxinfo-inc.cn'
+  ].map(nullableString).filter(Boolean);
+  const failureHosts = new Set(failures.map((failure) => hostnameFromUrl(failure.candidate)).filter(Boolean));
+  return preferred.find((host) => failureHosts.has(host)) || null;
 }
 
 async function probeBootstrapApiBaseUrl(baseUrl, options = {}) {
@@ -6478,8 +6488,8 @@ function defaultBootstrapApiBaseUrl() {
     || normalizeBaseUrl(process.env.MX_H2I_PUBLIC_BASE_URL);
   if (explicit) return explicit;
   const host = nullableString(process.env.MX_H2I_BOOTSTRAP_HOST)
-    || nullableString(process.env.MX_H2I_BOOTSTRAP_DOMAIN);
-  if (!host) return '';
+    || nullableString(process.env.MX_H2I_BOOTSTRAP_DOMAIN)
+    || DEFAULT_BOOTSTRAP_HOST;
   const protocol = stringValue(process.env.MX_H2I_BOOTSTRAP_PROTOCOL, 'http').replace(/:$/, '');
   const port = nullableString(process.env.MX_H2I_BOOTSTRAP_PORT) || '18090';
   return `${protocol}://${host}${port ? `:${port}` : ''}`;
@@ -6825,9 +6835,10 @@ function classifyConnectionError(err) {
   const status = Number(err?.status || err?.statusCode || err?.payload?.statusCode || 0);
   const lower = message.toLowerCase();
   if (status === 403 && isPublicIcpBlockedError(err)) {
+    const host = publicHostFromUrl(runtime?.config?.bootstrapApiBaseUrl) || DEFAULT_BOOTSTRAP_HOST;
     return {
       state: 'network-unavailable',
-      message: `公网域名被备案/公网入口拦截（403），不是 Internal 权限拒绝。请保留 Bootstrap API 域名，并在高级选项 Host Resolve 设置 api.mxinfo-inc.cn=<正式 Domestic gateway IP>；客户端会连接该 IP，HTTP Host 使用 gateway IP，原始域名放在 X-Forwarded-Host/X-MX-Bootstrap-Host。原始错误：${message}`
+      message: `公网域名被备案/公网入口拦截（403），不是 Internal 权限拒绝。请保留 Bootstrap API 域名，并在高级选项 Host Resolve 设置 ${host}=<正式 Domestic gateway IP>；客户端会连接该 IP，HTTP Host 使用 gateway IP，原始域名放在 X-Forwarded-Host/X-MX-Bootstrap-Host。原始错误：${message}`
     };
   }
   if (status === 403 || lower.includes('403 forbidden') || lower.includes('forbidden')) {

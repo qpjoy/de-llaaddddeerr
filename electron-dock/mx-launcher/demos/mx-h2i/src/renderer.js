@@ -829,7 +829,7 @@ function renderConfigForm() {
       </label>
       <label class="field">
         <span>Host Resolve</span>
-        <input name="hostResolve" value="${escapeAttr(config.hostResolve || '')}" placeholder="api.mxinfo-inc.cn=<gateway-ip>" />
+        <input name="hostResolve" value="${escapeAttr(config.hostResolve || '')}" placeholder="h2i.mxinfo-inc.cn=<gateway-ip>" />
       </label>
       <label class="field">
         <span>Bootstrap DNS</span>
@@ -855,7 +855,7 @@ function renderConfigForm() {
       </label>
       <label class="field">
         <span>Split DNS Domains</span>
-        <input name="splitDnsDomains" value="${escapeAttr(config.splitDnsDomains || '')}" placeholder="mxinfo-inc.cn, api.mxinfo-inc.cn" />
+        <input name="splitDnsDomains" value="${escapeAttr(config.splitDnsDomains || '')}" placeholder="mxinfo-inc.cn, h2i.mxinfo-inc.cn" />
       </label>
       <div class="field-row">
         <label class="field">
@@ -1746,16 +1746,16 @@ function clone(value) {
 function createMockApi() {
   let mockState = {
     config: {
-      bootstrapApiBaseUrl: 'http://api.mxinfo-inc.cn:18090',
+      bootstrapApiBaseUrl: 'http://h2i.mxinfo-inc.cn:18090',
       internalApiBaseUrl: 'http://10.88.88.88:18090',
       domesticRelayHost: '121.43.253.179',
       domesticRelayPort: 51280,
-      sdkGatewayBaseUrl: 'http://api.mxinfo-inc.cn:18090/internal/v1/sdk',
+      sdkGatewayBaseUrl: 'http://h2i.mxinfo-inc.cn:18090/internal/v1/sdk',
       hostResolve: '',
       bootstrapResolveMode: 'env-first',
       bootstrapDnsServers: '',
       routePathPreference: 'auto',
-      splitDnsDomains: 'mxinfo-inc.cn,api.mxinfo-inc.cn',
+      splitDnsDomains: 'mxinfo-inc.cn,h2i.mxinfo-inc.cn',
       releaseChannel: 'stable',
       rolloutGroup: 'staff-ring',
       useLocalEngineResources: true,

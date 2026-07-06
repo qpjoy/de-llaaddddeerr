@@ -484,15 +484,15 @@ Docker systemd proxy 环境和 Oversea hysteria2 订阅，而不是把它归因�
 开发和私有部署可以用 MX-H2I 客户端 `.env` 配置 bootstrap 域名和临时解析，不需要把公网 IP 写死进包体：
 
 ```dotenv
-MX_H2I_BOOTSTRAP_BASE_URL=http://api.mxinfo-inc.cn:18090
-MX_H2I_HOST_RESOLVE=api.mxinfo-inc.cn=<gateway-ip>
+MX_H2I_BOOTSTRAP_BASE_URL=http://h2i.mxinfo-inc.cn:18090
+MX_H2I_HOST_RESOLVE=h2i.mxinfo-inc.cn=<gateway-ip>
 MX_H2I_BOOTSTRAP_RESOLVE_MODE=dns-first
 MX_H2I_BOOTSTRAP_DNS_SERVERS=<domestic-public-ip>:<dns-port>
 MX_H2I_INTERNAL_BASE_URL=http://10.88.88.88:18090
-MX_H2I_SPLIT_DNS_DOMAINS=mx.cn,mxinfo-inc.cn,api.mxinfo-inc.cn
+MX_H2I_SPLIT_DNS_DOMAINS=mx.cn,mxinfo-inc.cn,h2i.mxinfo-inc.cn
 ```
 
-正式部署时，公网 DNS 可以把 `api.mxinfo-inc.cn` 解析到 Domestic 公网入口；连上 WG 后，
+正式部署时，公网 DNS 可以把 `h2i.mxinfo-inc.cn` 解析到 Domestic 公网入口；连上 WG 后，
 Internal DNS/split DNS 可以把同一域名或内网服务域名解析到 Internal overlay IP。这样用户不需要
 手动填 IP，Admin 只需要管理公网解析、Internal DNS policy 和 routePlan。
 H 端还没有建立 WG 时，不能依赖 `10.88.0.1` 或 `10.88.88.88` 解析 bootstrap 域名。
@@ -500,10 +500,13 @@ H 端还没有建立 WG 时，不能依赖 `10.88.0.1` 或 `10.88.88.88` 解析 
 Domestic 公网 DNS endpoint。这里的 `host:port` 只属于 MX-H2I bootstrap resolver，
 不进入 WireGuard profile；连上 WG 后仍回到 routePlan 的标准 53 DNS。
 如果公网 DNS 命中了云厂商备案/合规拦截页，H2I bootstrap 应使用 Host Resolve：配置
-`Bootstrap API=http://api.mxinfo-inc.cn:18090`，再配置
-`Host Resolve=api.mxinfo-inc.cn=<可达的 Domestic/Internal gateway IP>`。客户端实际拨号到
+`Bootstrap API=http://h2i.mxinfo-inc.cn:18090`，再配置
+`Host Resolve=h2i.mxinfo-inc.cn=<可达的 Domestic/Internal gateway IP>`。客户端实际拨号到
 该 IP，HTTP `Host` 使用 gateway IP，并通过 `X-Forwarded-Host` / `X-MX-Bootstrap-Host`
 传递原始域名，避免公网备案层按 Host 拦截。
+`MX_H2I_BOOTSTRAP_DNS_SERVERS` 是 resolver 地址：只有当 `116.62.51.154:53` 真有
+Domestic DNS edge 在回答时，才应把它填成 `116.62.51.154`。如果 `116.62.51.154` 只是
+`h2i.mxinfo-inc.cn` 的公网 A 记录，应改用系统 DNS 或 `MX_H2I_HOST_RESOLVE`。
 若客户端选择 `dns-first` bootstrap，但显式 resolver 未启动、超时或中断，MX-H2I 应先做
 3 次 DNS 探测重试；仍不可用时在 UI 提示本次已降级，然后按 Host Resolve/env、系统默认网络/
 系统代理的顺序继续获取 lease。这个降级只用于 bootstrap，不应作为 H2I ready 证据；ready 仍以
@@ -830,8 +833,8 @@ H 端 bootstrap 路径：
 ```text
 MX-H2I before WG
 -> MX_H2I_BOOTSTRAP_DNS_SERVERS=<domestic-public-ip>:<dns-port>
--> 解析 api.mxinfo-inc.cn / bootstrapHost
--> http://api.mxinfo-inc.cn:18090 或 Host Resolve 到 Domestic public edge
+-> 解析 h2i.mxinfo-inc.cn / bootstrapHost
+-> http://h2i.mxinfo-inc.cn:18090 或 Host Resolve 到 Domestic public edge
 -> 获取 lease / routePlan
 ```
 
