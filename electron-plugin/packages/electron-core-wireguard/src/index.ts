@@ -3337,6 +3337,7 @@ function windowsRoutePowerShellLines(
   tunnelName: string,
   interfaceAddresses: string[]
 ): string[] {
+  const product = windowsTunnelProductLabels(tunnelName);
   if (rules.length === 0) {
     return [
       `Write-HdoAudit ${powerShellString(`route skipped tunnel=${tunnelName} rules=0`)}`,
@@ -3379,7 +3380,7 @@ function windowsRoutePowerShellLines(
     '}',
     'function Add-HdoOverlayRoutes {',
     '  $iface = Resolve-HdoOverlayInterface',
-    "  if ($null -eq $iface) { throw ('HDO WireGuard interface not found for ' + $hdoRouteTunnelName) }",
+    `  if ($null -eq $iface) { throw (${powerShellString(`${product.shortName} WireGuard interface not found for `)} + $hdoRouteTunnelName) }`,
     '  try {',
     '    Set-NetIPInterface -AddressFamily IPv4 -InterfaceIndex $iface.InterfaceIndex -InterfaceMetric 1 -ErrorAction Stop | Out-Null',
     "    Write-HdoAudit ('route interface metric set if=' + [string]$iface.InterfaceIndex)",
@@ -3397,13 +3398,14 @@ function windowsRoutePowerShellLines(
     "      Write-HdoAudit ('route add kept existing prefix=' + $rule.DestinationPrefix + ' if=' + [string]$iface.InterfaceIndex)",
     '    }',
     '    $verified = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $rule.DestinationPrefix -InterfaceIndex $iface.InterfaceIndex -ErrorAction SilentlyContinue)',
-    "    if ($verified.Count -eq 0) { throw ('HDO route missing after add: ' + $rule.DestinationPrefix) }",
+    `    if ($verified.Count -eq 0) { throw (${powerShellString(`${product.shortName} route missing after add: `)} + $rule.DestinationPrefix) }`,
     '  }',
     '}'
   ];
 }
 
 function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string): string[] {
+  const product = windowsTunnelProductLabels(tunnelName);
   if (rules.length === 0) {
     return [
       `Write-HdoAudit ${powerShellString(`nrpt skipped tunnel=${tunnelName} rules=0`)}`,
@@ -3415,12 +3417,12 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     const servers = rule.nameServers.map(powerShellString).join(',');
     return `[pscustomobject]@{ Namespace = ${powerShellString(rule.namespace)}; NameServers = @(${servers}) }`;
   });
-  const comment = `MX HDO / QPJoy HDO ${tunnelName}`;
+  const comment = `${product.commentPrefix} ${tunnelName}`;
   const stateFileName = `nrpt-global-${tunnelName}.json`;
   return [
     `$hdoNrptRules = @(${entries.join(', ')})`,
     `$hdoNrptComment = ${powerShellString(comment)}`,
-    `$hdoNrptStateDir = Join-Path $env:ProgramData ${powerShellString('QPJoy\\HDO')}`,
+    `$hdoNrptStateDir = Join-Path $env:ProgramData ${powerShellString(product.programDataDir)}`,
     `$hdoNrptGlobalStatePath = Join-Path $hdoNrptStateDir ${powerShellString(stateFileName)}`,
     `$hdoNrptTunnelName = ${powerShellString(tunnelName)}`,
     "$hdoNrptEnableAttempts = @('EnableAlways', 'EnableDA', 'Enable', $true)",
@@ -3470,12 +3472,12 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     "        Write-HdoAudit ('nrpt global set failed enable=' + [string]$enableAll + ' error=' + $msg)",
     '      }',
     '    }',
-    "    if (-not $setOk) { throw ('HDO NRPT global policy failed: ' + ($setErrors -join ' | ')) }",
+    `    if (-not $setOk) { throw (${powerShellString(`${product.shortName} NRPT global policy failed: `)} + ($setErrors -join ' | ')) }`,
     '  }',
     '  $verified = Get-DnsClientNrptGlobal -ErrorAction SilentlyContinue',
     "  Write-HdoAudit ('nrpt global verified=' + (Format-HdoNrptGlobalForLog))",
     "  if ($null -eq $verified -or [string]$verified.QueryPolicy -ne 'QueryBoth' -or -not (Test-HdoNrptEnableAllNetworks $verified)) {",
-    "    throw ('HDO NRPT global policy is not enabled: ' + (Format-HdoNrptGlobalForLog))",
+    `    throw (${powerShellString(`${product.shortName} NRPT global policy is not enabled: `)} + (Format-HdoNrptGlobalForLog))`,
     '  }',
     '}',
     'function Restore-HdoNrptGlobalQueryPolicy {',
@@ -3506,7 +3508,7 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     "    Write-HdoAudit ('nrpt assert namespace=' + $rule.Namespace + ' count=' + [string]$installed.Count)",
     '    if ($installed.Count -eq 0) { $missing += $rule.Namespace }',
     '  }',
-    "  if ($missing.Count -gt 0) { throw ('HDO NRPT rules missing after add: ' + ($missing -join ', ')) }",
+    `  if ($missing.Count -gt 0) { throw (${powerShellString(`${product.shortName} NRPT rules missing after add: `)} + ($missing -join ', ')) }`,
     '}',
     'function Remove-HdoNrptRules {',
     '  param([bool]$RestoreGlobal = $true)',
@@ -3544,6 +3546,25 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     "  Write-HdoAudit ('nrpt add complete global=' + (Format-HdoNrptGlobalForLog))",
     '}'
   ];
+}
+
+function windowsTunnelProductLabels(tunnelName: string): {
+  shortName: string;
+  commentPrefix: string;
+  programDataDir: string;
+} {
+  if (/^mx-h2i(?:$|[-_.])/i.test(tunnelName)) {
+    return {
+      shortName: 'MX-H2I',
+      commentPrefix: 'MX-H2I / QPJoy MX-H2I',
+      programDataDir: 'QPJoy\\MX-H2I'
+    };
+  }
+  return {
+    shortName: 'HDO',
+    commentPrefix: 'MX HDO / QPJoy HDO',
+    programDataDir: 'QPJoy\\HDO'
+  };
 }
 
 function windowsPowerShellScriptPaths(

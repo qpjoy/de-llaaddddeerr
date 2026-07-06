@@ -712,6 +712,7 @@ function routeInterfaceMatchesExpected(
   expectedAddresses: string[]
 ): boolean {
   if (!interfaceName) return false;
+  if (expectedAddresses.includes(interfaceName)) return true;
   if (!expectedInterfaceName) {
     return expectedAddresses.length > 0
       ? interfaceHasExpectedAddress(interfaceName, expectedAddresses)

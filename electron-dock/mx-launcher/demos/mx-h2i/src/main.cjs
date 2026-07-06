@@ -5652,7 +5652,7 @@ function wireGuardNotReadyMessage(result, route, internalApi, internalDirectPeer
   if (route?.ok !== true) {
     if (route?.viaLoopback) return `到 ${route?.targetIp || INTERNAL_PEER_IP} 当前走 lo0，本机 Internal/客户端同机测试会覆盖 overlay 路由。`;
     if (route?.interfaceName && route?.expectedInterfaceName) {
-      return `到 ${route.targetIp || INTERNAL_PEER_IP} 当前走 ${route.interfaceName}，期望 ${route.expectedInterfaceName}；可能被系统代理或其它 utun 规则抢先。`;
+      return `到 ${route.targetIp || INTERNAL_PEER_IP} 当前走 ${route.interfaceName}，期望 ${route.expectedInterfaceName}；可能被系统代理、TUN 或其它路由规则抢先。`;
     }
     return `到 ${route?.targetIp || INTERNAL_PEER_IP} 的路由没有走 MX-H2I WireGuard。`;
   }
