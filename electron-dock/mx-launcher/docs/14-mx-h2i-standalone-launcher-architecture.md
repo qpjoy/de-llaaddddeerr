@@ -522,7 +522,9 @@ standalone owner 在 H2I ready 后安装、断开时恢复。MX-H2I 默认占用
 域名或 DNS route host 时 PAC 返回 `PROXY 127.0.0.1:2053`。本机 proxy 会先匹配
 route 的 `targetUrl`/`dnsTarget`；没有 route 时再使用 routePlan 的 `internalControlIp`
 （默认 `10.88.88.88`）或 Internal DNS 解析，最后交给 WG AllowedIPs 进入 Internal。
-`10.88.0.1` 是 Domestic gateway/relay，只能作为 DNS relay/cache fallback。未命中域名应
+浏览器直接访问 IP literal 时，PAC 必须先判断 owner route CIDR，命中 `10.88.88.88/32`、
+`10.89.0.0/16` 等 WG 内网地址时返回 `DIRECT`，避免 Windows/Chrome 把 Internal IP
+交给 Clash/mihomo 系统代理或 TUN。`10.88.0.1` 是 Domestic gateway/relay，只能作为 DNS relay/cache fallback。未命中域名应
 回落到原 Clash/mihomo 本地代理或系统默认路径。这样浏览器/PAC 流量、MX-H2I DNS 解析和
 WG 白名单路由都优先于系统代理、Clash fake-ip 和其它应用的默认网络路径。
 macOS 上，浏览器通不代表系统 resolver 已接管：`ping`、CLI 和不支持 PAC 的应用不会读取

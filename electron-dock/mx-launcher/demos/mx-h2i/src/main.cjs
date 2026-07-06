@@ -2066,6 +2066,10 @@ function systemDomainProxyPolicySignature(policy) {
     systemResolver: nullableString(policy.systemResolver),
     domains: arrayValue(policy.domains, []).map(String).sort(),
     dnsServers: arrayValue(policy.dnsServers, []).map(String).sort(),
+    directCidrs: arrayValue(policy.ownershipClaim?.routeCidrs, [])
+      .map((cidr) => nullableString(cidr))
+      .filter(Boolean)
+      .sort(),
     reverseProxyRoutes: arrayValue(policy.reverseProxyRoutes, [])
       .map((route) => ({
         host: nullableString(route?.host),

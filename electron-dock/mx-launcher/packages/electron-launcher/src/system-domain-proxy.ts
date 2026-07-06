@@ -255,6 +255,7 @@ export function createElectronLauncherSystemDomainProxy(
       dnsFallbackTarget: pac.dnsFallbackTarget,
       reverseProxyRoutes: pac.reverseProxyRoutes,
       ownershipClaim: pac.ownershipClaim?.ownerId || null,
+      directCidrs: pacDirectCidrs(pac.ownershipClaim ? [pac.ownershipClaim] : []),
       pacPort: pac.pacPort || null
     });
     if (localPacServer && localPacPort && localPacKey === key) {
@@ -949,6 +950,7 @@ export function renderElectronLauncherPacScript(input: {
   proxy?: ElectronLauncherPacProxy | null;
   matchMode?: ElectronLauncherPacMatchMode | null;
   fallbackProxy?: ElectronLauncherPacProxy | null;
+  ownershipClaims?: ElectronLauncherNetworkOwnershipClaim[] | null;
 }): string {
   const matchDirective = input.matchMode === 'proxy' && input.proxy
     ? input.proxy.directive
@@ -956,9 +958,19 @@ export function renderElectronLauncherPacScript(input: {
   const fallbackDirective = input.fallbackProxy
     ? `${input.fallbackProxy.directive}; DIRECT`
     : 'DIRECT';
+  const directCidrs = pacDirectCidrs(input.ownershipClaims);
   return `// ${PAC_MARKER}
 function FindProxyForURL(url, host) {
   var h = String(host || '').toLowerCase();
+  var directCidrs = ${JSON.stringify(directCidrs)};
+  if (isIpv4Literal(h)) {
+    for (var j = 0; j < directCidrs.length; j++) {
+      var c = directCidrs[j];
+      if (isInNet(h, c.base, c.mask)) {
+        return 'DIRECT';
+      }
+    }
+  }
   var domains = ${JSON.stringify(normalizeDomains(input.domains))};
   for (var i = 0; i < domains.length; i++) {
     var d = domains[i];
@@ -967,6 +979,16 @@ function FindProxyForURL(url, host) {
     }
   }
   return ${JSON.stringify(fallbackDirective)};
+}
+
+function isIpv4Literal(value) {
+  if (!/^\\d{1,3}(?:\\.\\d{1,3}){3}$/.test(value)) return false;
+  var parts = value.split('.');
+  for (var i = 0; i < parts.length; i++) {
+    var n = Number(parts[i]);
+    if (!isFinite(n) || n < 0 || n > 255 || Math.floor(n) !== n) return false;
+  }
+  return true;
 }
 `;
 }
@@ -2178,6 +2200,39 @@ function localConfigOwnershipRegistry(config: LocalPacServerConfig): ElectronLau
   return buildElectronLauncherNetworkOwnershipRegistry(config.ownershipClaims);
 }
 
+function pacDirectCidrs(claims: unknown): Array<{ base: string; mask: string }> {
+  return uniqueList(normalizeOwnershipClaims(claims)
+    .flatMap((claim) => claim.routeCidrs || [])
+    .map(normalizeIpv4Cidr)
+    .filter(Boolean))
+    .map((cidr) => {
+      const [base, prefix] = cidr.split('/');
+      return {
+        base,
+        mask: prefixToIpv4Mask(Number(prefix))
+      };
+    });
+}
+
+function normalizeIpv4Cidr(value: unknown): string {
+  const text = stringValue(value);
+  if (!text) return '';
+  const [ip, rawPrefix] = text.split('/');
+  const prefix = rawPrefix === undefined ? 32 : Number(rawPrefix);
+  if (isIP(ip) !== 4 || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return '';
+  return `${ip}/${prefix}`;
+}
+
+function prefixToIpv4Mask(prefix: number): string {
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return [
+    (mask >>> 24) & 255,
+    (mask >>> 16) & 255,
+    (mask >>> 8) & 255,
+    mask & 255
+  ].join('.');
+}
+
 function requiresManagedRelease(state: StoredState, config: LocalPacServerConfig | null): boolean {
   const ownerId = stateOwnershipOwnerId(state);
   if (!ownerId) return false;
@@ -2222,6 +2277,7 @@ function localPacConfigKey(config: LocalPacServerConfig, port: number | null): s
     dnsFallbackTarget: config.dnsFallbackTarget,
     reverseProxyRoutes: config.reverseProxyRoutes,
     ownershipClaims: config.ownershipClaims.map((claim) => claim.ownerId).sort(),
+    directCidrs: pacDirectCidrs(config.ownershipClaims),
     pacPort: port || null
   });
 }
