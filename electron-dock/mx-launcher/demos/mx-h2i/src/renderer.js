@@ -1748,7 +1748,7 @@ function createMockApi() {
     config: {
       bootstrapApiBaseUrl: 'http://h2i.mxinfo-inc.cn:18090',
       internalApiBaseUrl: 'http://10.88.88.88:18090',
-      domesticRelayHost: '121.43.253.179',
+      domesticRelayHost: '116.62.51.154',
       domesticRelayPort: 51280,
       sdkGatewayBaseUrl: 'http://h2i.mxinfo-inc.cn:18090/internal/v1/sdk',
       hostResolve: '',

@@ -96,8 +96,10 @@ an empty `@qpjoy/electron-launcher/dist`.
 
 Bootstrap resolution can be selected with `MX_H2I_BOOTSTRAP_RESOLVE_MODE`:
 `env-first`, `dns-first`, `env-only`, or `dns-only`. Use the V2 bootstrap host
-`http://h2i.mxinfo-inc.cn:18090` when V1 HDO and V2 H2I DNS coexist. The
-bootstrap phase may use `MX_H2I_HOST_RESOLVE=h2i.mxinfo-inc.cn=<Domestic public IP>`
+`http://h2i.mxinfo-inc.cn:18090` when V1 HDO and V2 H2I DNS coexist. The current
+Domestic public host is `116.62.51.154`; older `121.43.253.179` / `121.43.254.179`
+runtime settings are treated as stale defaults. The bootstrap phase may use
+`MX_H2I_HOST_RESOLVE=h2i.mxinfo-inc.cn=116.62.51.154`
 to bypass public DNS, or `MX_H2I_BOOTSTRAP_DNS_SERVERS=223.5.5.5,119.29.29.29`
 to resolve the bootstrap domain through an explicit resolver before dialing the
 resolved IP with the original Host header. `MX_H2I_BOOTSTRAP_DNS_SERVERS` must

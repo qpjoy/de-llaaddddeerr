@@ -26,6 +26,8 @@ const DEFAULT_DOMESTIC_DNS_EDGE_PORT = 53;
 const DEFAULT_INTERNAL_DNS_EDGE_PORT = 53;
 const DEFAULT_INTERNAL_GATEWAY_APP_PORT = 80;
 const DEFAULT_BOOTSTRAP_HOST = 'h2i.mxinfo-inc.cn';
+const DEFAULT_DOMESTIC_RELAY_HOST = '116.62.51.154';
+const STALE_DOMESTIC_RELAY_HOSTS = new Set(['121.43.253.179', '121.43.254.179']);
 const DEFAULT_SPLIT_DNS_DOMAINS = 'mx.cn mxinfo-inc.cn internal.mx corp.mx h2i.mx';
 const DARWIN_WIREGUARD_SERVICE_IDENTITY = {
   displayName: 'MX-H2I WireGuard',
@@ -49,7 +51,7 @@ const DEFAULT_CONFIG = {
   productDisplayName: defaultLauncherProductDisplayName(),
   bootstrapApiBaseUrl: defaultBootstrapApiBaseUrl(),
   internalApiBaseUrl: 'http://10.88.88.88:18090',
-  domesticRelayHost: '121.43.253.179',
+  domesticRelayHost: defaultDomesticRelayHost(),
   domesticRelayPort: 51280,
   sdkGatewayBaseUrl: '',
   hostResolve: defaultHostResolve(),
@@ -2465,7 +2467,8 @@ async function normalizeRuntime(input) {
 function normalizeConfig(input) {
   const row = input && typeof input === 'object' ? input : {};
   const domesticRelayPort = Number(row.domesticRelayPort);
-  const bootstrapApiBaseUrl = stringValue(row.bootstrapApiBaseUrl, DEFAULT_CONFIG.bootstrapApiBaseUrl);
+  const bootstrapApiBaseUrl = normalizeBootstrapApiBaseUrlConfig(row.bootstrapApiBaseUrl);
+  const domesticRelayHost = normalizeDomesticRelayHost(row.domesticRelayHost);
   const productId = normalizeLauncherProductId(row.productId || DEFAULT_CONFIG.productId);
   const productDisplayName = nullableString(row.productDisplayName)
     || (productId === DEFAULT_CONFIG.productId ? DEFAULT_CONFIG.productDisplayName : null)
@@ -2475,10 +2478,10 @@ function normalizeConfig(input) {
     productDisplayName,
     bootstrapApiBaseUrl,
     internalApiBaseUrl: normalizeInternalApiBaseUrlConfig(row.internalApiBaseUrl),
-    domesticRelayHost: stringValue(row.domesticRelayHost, DEFAULT_CONFIG.domesticRelayHost),
+    domesticRelayHost,
     domesticRelayPort: Number.isInteger(domesticRelayPort) && domesticRelayPort > 0 ? domesticRelayPort : DEFAULT_CONFIG.domesticRelayPort,
     sdkGatewayBaseUrl: stringValue(row.sdkGatewayBaseUrl, DEFAULT_CONFIG.sdkGatewayBaseUrl || sdkGatewayBaseUrl(bootstrapApiBaseUrl)),
-    hostResolve: stringValue(row.hostResolve, DEFAULT_CONFIG.hostResolve),
+    hostResolve: normalizeHostResolveConfig(row.hostResolve, bootstrapApiBaseUrl, domesticRelayHost),
     bootstrapResolveMode: normalizeBootstrapResolveMode(row.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode),
     bootstrapDnsServers: stringValue(row.bootstrapDnsServers, DEFAULT_CONFIG.bootstrapDnsServers),
     splitDnsDomains: stringValue(row.splitDnsDomains, DEFAULT_CONFIG.splitDnsDomains),
@@ -2488,6 +2491,40 @@ function normalizeConfig(input) {
     useLocalEngineResources: row.useLocalEngineResources !== false,
     restartAfterCodeUpdate: row.restartAfterCodeUpdate !== false
   };
+}
+
+function normalizeBootstrapApiBaseUrlConfig(value) {
+  const normalized = normalizeBaseUrl(value) || DEFAULT_CONFIG.bootstrapApiBaseUrl;
+  if (isLegacyDefaultBootstrapApiBaseUrl(normalized)) return DEFAULT_CONFIG.bootstrapApiBaseUrl;
+  return normalized;
+}
+
+function isLegacyDefaultBootstrapApiBaseUrl(value) {
+  try {
+    const parsed = new URL(normalizeBaseUrl(value) || '');
+    return parsed.hostname === 'api.mxinfo-inc.cn' && (parsed.port || '80') === '18090';
+  } catch {
+    return false;
+  }
+}
+
+function normalizeDomesticRelayHost(value) {
+  const host = nullableString(value);
+  if (!host || STALE_DOMESTIC_RELAY_HOSTS.has(host)) return DEFAULT_CONFIG.domesticRelayHost;
+  return host;
+}
+
+function normalizeHostResolveConfig(value, bootstrapApiBaseUrl, domesticRelayHost) {
+  const text = nullableString(value);
+  if (!text) return DEFAULT_CONFIG.hostResolve;
+  if (!hostResolveHasStaleDomesticRelay(text)) return text;
+  if (DEFAULT_CONFIG.hostResolve) return DEFAULT_CONFIG.hostResolve;
+  const host = publicHostFromUrl(bootstrapApiBaseUrl) || DEFAULT_BOOTSTRAP_HOST;
+  return `${host}=${domesticRelayHost}`;
+}
+
+function hostResolveHasStaleDomesticRelay(value) {
+  return Array.from(STALE_DOMESTIC_RELAY_HOSTS).some((host) => String(value || '').includes(host));
 }
 
 function normalizeInternalApiBaseUrlConfig(value) {
@@ -6504,6 +6541,13 @@ function defaultHostResolve() {
   const ip = nullableString(process.env.MX_H2I_BOOTSTRAP_RESOLVE_IP)
     || nullableString(process.env.MX_H2I_BOOTSTRAP_IP);
   return host && ip ? `${host}=${ip}` : '';
+}
+
+function defaultDomesticRelayHost() {
+  return nullableString(process.env.MX_H2I_DOMESTIC_RELAY_HOST)
+    || nullableString(process.env.MX_H2I_DOMESTIC_HOST)
+    || nullableString(process.env.MX_H2I_DOMESTIC_PUBLIC_HOST)
+    || DEFAULT_DOMESTIC_RELAY_HOST;
 }
 
 function defaultBootstrapResolveMode() {

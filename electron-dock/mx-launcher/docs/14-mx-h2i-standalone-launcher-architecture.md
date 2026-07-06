@@ -485,14 +485,16 @@ Docker systemd proxy 环境和 Oversea hysteria2 订阅，而不是把它归因�
 
 ```dotenv
 MX_H2I_BOOTSTRAP_BASE_URL=http://h2i.mxinfo-inc.cn:18090
-MX_H2I_HOST_RESOLVE=h2i.mxinfo-inc.cn=<gateway-ip>
+MX_H2I_HOST_RESOLVE=h2i.mxinfo-inc.cn=116.62.51.154
 MX_H2I_BOOTSTRAP_RESOLVE_MODE=dns-first
-MX_H2I_BOOTSTRAP_DNS_SERVERS=<domestic-public-ip>:<dns-port>
+MX_H2I_BOOTSTRAP_DNS_SERVERS=<domestic-public-dns-resolver>:<dns-port>
 MX_H2I_INTERNAL_BASE_URL=http://10.88.88.88:18090
 MX_H2I_SPLIT_DNS_DOMAINS=mx.cn,mxinfo-inc.cn,h2i.mxinfo-inc.cn
 ```
 
-正式部署时，公网 DNS 可以把 `h2i.mxinfo-inc.cn` 解析到 Domestic 公网入口；连上 WG 后，
+正式部署时，公网 DNS 可以把 `h2i.mxinfo-inc.cn` 解析到 Domestic 公网入口。当前入口为
+`116.62.51.154`；`121.43.253.179` / `121.43.254.179` 只属于早期临时测试 Domestic，
+客户端启动时应迁移掉。连上 WG 后，
 Internal DNS/split DNS 可以把同一域名或内网服务域名解析到 Internal overlay IP。这样用户不需要
 手动填 IP，Admin 只需要管理公网解析、Internal DNS policy 和 routePlan。
 H 端还没有建立 WG 时，不能依赖 `10.88.0.1` 或 `10.88.88.88` 解析 bootstrap 域名。
