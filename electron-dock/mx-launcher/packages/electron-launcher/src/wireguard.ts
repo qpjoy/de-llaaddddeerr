@@ -318,7 +318,7 @@ async function waitForLauncherWireGuardStatus(
   configPath: string
 ): Promise<ReturnType<typeof getWireGuardTunnelStatus> | null> {
   const attempts = runtime.platform === 'win32'
-    ? 16
+    ? 40
     : runtime.platform === 'darwin' && runtime.method === 'darwin-userspace'
       ? 12
       : 1;

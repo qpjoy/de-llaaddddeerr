@@ -104,8 +104,10 @@ to bypass public DNS, or `MX_H2I_BOOTSTRAP_DNS_SERVERS=223.5.5.5,119.29.29.29`
 to resolve the bootstrap domain through an explicit resolver before dialing the
 resolved IP with the original Host header. `MX_H2I_BOOTSTRAP_DNS_SERVERS` must
 point at a DNS resolver, not merely at the A record returned for the bootstrap
-host. The connected WireGuard phase still relies on the launcher route plan and
-split DNS.
+host. If the Domestic public host is used as the direct bootstrap endpoint,
+prefer Host Resolve/env mode and leave `MX_H2I_BOOTSTRAP_DNS_SERVERS` empty
+unless that host also serves DNS on port 53. The connected WireGuard phase
+still relies on the launcher route plan and split DNS.
 
 When `dns-first` is selected, MX-H2I retries the bootstrap DNS resolver three
 times. If DNS still fails, the connection warns the user and temporarily falls

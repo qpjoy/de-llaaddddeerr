@@ -486,8 +486,8 @@ Docker systemd proxy 环境和 Oversea hysteria2 订阅，而不是把它归因�
 ```dotenv
 MX_H2I_BOOTSTRAP_BASE_URL=http://h2i.mxinfo-inc.cn:18090
 MX_H2I_HOST_RESOLVE=h2i.mxinfo-inc.cn=116.62.51.154
-MX_H2I_BOOTSTRAP_RESOLVE_MODE=dns-first
-MX_H2I_BOOTSTRAP_DNS_SERVERS=<domestic-public-dns-resolver>:<dns-port>
+MX_H2I_BOOTSTRAP_RESOLVE_MODE=env-first
+# MX_H2I_BOOTSTRAP_DNS_SERVERS=<domestic-public-dns-resolver>:<dns-port>
 MX_H2I_INTERNAL_BASE_URL=http://10.88.88.88:18090
 MX_H2I_SPLIT_DNS_DOMAINS=mx.cn,mxinfo-inc.cn,h2i.mxinfo-inc.cn
 ```
@@ -498,7 +498,7 @@ MX_H2I_SPLIT_DNS_DOMAINS=mx.cn,mxinfo-inc.cn,h2i.mxinfo-inc.cn
 Internal DNS/split DNS 可以把同一域名或内网服务域名解析到 Internal overlay IP。这样用户不需要
 手动填 IP，Admin 只需要管理公网解析、Internal DNS policy 和 routePlan。
 H 端还没有建立 WG 时，不能依赖 `10.88.0.1` 或 `10.88.88.88` 解析 bootstrap 域名。
-这个阶段允许用 `MX_H2I_BOOTSTRAP_DNS_SERVERS=<domestic-public-ip>:<dns-port>` 指向
+这个阶段允许用 `MX_H2I_BOOTSTRAP_DNS_SERVERS=<domestic-public-dns-resolver>:<dns-port>` 指向
 Domestic 公网 DNS endpoint。这里的 `host:port` 只属于 MX-H2I bootstrap resolver，
 不进入 WireGuard profile；连上 WG 后仍回到 routePlan 的标准 53 DNS。
 如果公网 DNS 命中了云厂商备案/合规拦截页，H2I bootstrap 应使用 Host Resolve：配置

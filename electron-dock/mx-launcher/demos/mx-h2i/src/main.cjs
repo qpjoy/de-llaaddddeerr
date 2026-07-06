@@ -2469,6 +2469,7 @@ function normalizeConfig(input) {
   const domesticRelayPort = Number(row.domesticRelayPort);
   const bootstrapApiBaseUrl = normalizeBootstrapApiBaseUrlConfig(row.bootstrapApiBaseUrl);
   const domesticRelayHost = normalizeDomesticRelayHost(row.domesticRelayHost);
+  const hostResolve = normalizeHostResolveConfig(row.hostResolve, bootstrapApiBaseUrl, domesticRelayHost);
   const productId = normalizeLauncherProductId(row.productId || DEFAULT_CONFIG.productId);
   const productDisplayName = nullableString(row.productDisplayName)
     || (productId === DEFAULT_CONFIG.productId ? DEFAULT_CONFIG.productDisplayName : null)
@@ -2480,9 +2481,9 @@ function normalizeConfig(input) {
     internalApiBaseUrl: normalizeInternalApiBaseUrlConfig(row.internalApiBaseUrl),
     domesticRelayHost,
     domesticRelayPort: Number.isInteger(domesticRelayPort) && domesticRelayPort > 0 ? domesticRelayPort : DEFAULT_CONFIG.domesticRelayPort,
-    sdkGatewayBaseUrl: stringValue(row.sdkGatewayBaseUrl, DEFAULT_CONFIG.sdkGatewayBaseUrl || sdkGatewayBaseUrl(bootstrapApiBaseUrl)),
-    hostResolve: normalizeHostResolveConfig(row.hostResolve, bootstrapApiBaseUrl, domesticRelayHost),
-    bootstrapResolveMode: normalizeBootstrapResolveMode(row.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode),
+    sdkGatewayBaseUrl: normalizeSdkGatewayBaseUrlConfig(row.sdkGatewayBaseUrl, bootstrapApiBaseUrl),
+    hostResolve,
+    bootstrapResolveMode: normalizeBootstrapResolveModeConfig(row.bootstrapResolveMode, bootstrapApiBaseUrl, hostResolve),
     bootstrapDnsServers: stringValue(row.bootstrapDnsServers, DEFAULT_CONFIG.bootstrapDnsServers),
     splitDnsDomains: stringValue(row.splitDnsDomains, DEFAULT_CONFIG.splitDnsDomains),
     routePathPreference: normalizeRoutePathPreference(row.routePathPreference || DEFAULT_CONFIG.routePathPreference),
@@ -2508,6 +2509,24 @@ function isLegacyDefaultBootstrapApiBaseUrl(value) {
   }
 }
 
+function normalizeSdkGatewayBaseUrlConfig(value, bootstrapApiBaseUrl) {
+  const fallback = DEFAULT_CONFIG.sdkGatewayBaseUrl || sdkGatewayBaseUrl(bootstrapApiBaseUrl);
+  const normalized = normalizeBaseUrl(value);
+  if (!normalized || isLegacyDefaultSdkGatewayBaseUrl(normalized)) return fallback;
+  return normalized;
+}
+
+function isLegacyDefaultSdkGatewayBaseUrl(value) {
+  try {
+    const parsed = new URL(normalizeBaseUrl(value) || '');
+    return parsed.hostname === 'api.mxinfo-inc.cn'
+      && (parsed.port || '80') === '18090'
+      && parsed.pathname.replace(/\/+$/, '') === '/internal/v1/sdk';
+  } catch {
+    return false;
+  }
+}
+
 function normalizeDomesticRelayHost(value) {
   const host = nullableString(value);
   if (!host || STALE_DOMESTIC_RELAY_HOSTS.has(host)) return DEFAULT_CONFIG.domesticRelayHost;
@@ -2515,16 +2534,57 @@ function normalizeDomesticRelayHost(value) {
 }
 
 function normalizeHostResolveConfig(value, bootstrapApiBaseUrl, domesticRelayHost) {
-  const text = nullableString(value);
-  if (!text) return DEFAULT_CONFIG.hostResolve;
-  if (!hostResolveHasStaleDomesticRelay(text)) return text;
-  if (DEFAULT_CONFIG.hostResolve) return DEFAULT_CONFIG.hostResolve;
   const host = publicHostFromUrl(bootstrapApiBaseUrl) || DEFAULT_BOOTSTRAP_HOST;
-  return `${host}=${domesticRelayHost}`;
+  const explicitDefault = explicitDefaultHostResolve();
+  let text = nullableString(value) || explicitDefault;
+  if (hostResolveHasStaleDomesticRelay(text)) {
+    text = hostResolveHasStaleDomesticRelay(explicitDefault) ? '' : explicitDefault;
+  }
+  if (!shouldAutoBootstrapHostResolve(host)) return text || '';
+  if (!text) return `${host}=${domesticRelayHost}`;
+  if (hostResolveMentionsHost(text, host)) return text;
+  if (host === DEFAULT_BOOTSTRAP_HOST && hostResolveMentionsHost(text, 'api.mxinfo-inc.cn')) {
+    const legacyTarget = parseHostResolve(text).get('api.mxinfo-inc.cn');
+    if (legacyTarget?.host) {
+      const migrated = `${host}=${legacyTarget.host}${legacyTarget.port ? `:${legacyTarget.port}` : ''}`;
+      return uniqueValues([migrated, text]).join(',');
+    }
+  }
+  return uniqueValues([`${host}=${domesticRelayHost}`, text]).join(',');
 }
 
 function hostResolveHasStaleDomesticRelay(value) {
   return Array.from(STALE_DOMESTIC_RELAY_HOSTS).some((host) => String(value || '').includes(host));
+}
+
+function shouldAutoBootstrapHostResolve(host) {
+  return String(host || '').trim().toLowerCase() === DEFAULT_BOOTSTRAP_HOST;
+}
+
+function normalizeBootstrapResolveModeConfig(value, bootstrapApiBaseUrl, hostResolve) {
+  const mode = normalizeBootstrapResolveMode(value || DEFAULT_CONFIG.bootstrapResolveMode);
+  const host = publicHostFromUrl(bootstrapApiBaseUrl) || DEFAULT_BOOTSTRAP_HOST;
+  if (
+    mode === 'dns-first'
+    && !hasExplicitBootstrapResolveModeEnv()
+    && shouldAutoBootstrapHostResolve(host)
+    && hostResolveMentionsHost(hostResolve, host)
+  ) {
+    return 'env-first';
+  }
+  return mode;
+}
+
+function hasExplicitBootstrapResolveModeEnv() {
+  return Boolean(
+    nullableString(process.env.MX_H2I_BOOTSTRAP_RESOLVE_MODE)
+    || nullableString(process.env.MX_H2I_BOOTSTRAP_DNS_MODE)
+  );
+}
+
+function hostResolveMentionsHost(value, host) {
+  const normalized = String(host || '').trim().toLowerCase();
+  return normalized ? parseHostResolve(value).has(normalized) : false;
 }
 
 function normalizeInternalApiBaseUrlConfig(value) {
@@ -6533,14 +6593,22 @@ function defaultBootstrapApiBaseUrl() {
 }
 
 function defaultHostResolve() {
-  const explicit = nullableString(process.env.MX_H2I_HOST_RESOLVE)
-    || nullableString(process.env.MX_H2I_BOOTSTRAP_HOST_RESOLVE);
+  const explicit = explicitDefaultHostResolve();
   if (explicit) return explicit;
   const host = nullableString(process.env.MX_H2I_BOOTSTRAP_HOST)
-    || nullableString(process.env.MX_H2I_BOOTSTRAP_DOMAIN);
+    || nullableString(process.env.MX_H2I_BOOTSTRAP_DOMAIN)
+    || hostnameFromUrl(process.env.MX_H2I_BOOTSTRAP_BASE_URL)
+    || hostnameFromUrl(process.env.MX_H2I_PUBLIC_BASE_URL)
+    || DEFAULT_BOOTSTRAP_HOST;
   const ip = nullableString(process.env.MX_H2I_BOOTSTRAP_RESOLVE_IP)
     || nullableString(process.env.MX_H2I_BOOTSTRAP_IP);
-  return host && ip ? `${host}=${ip}` : '';
+  if (host && ip) return `${host}=${ip}`;
+  return shouldAutoBootstrapHostResolve(host) ? `${host}=${defaultDomesticRelayHost()}` : '';
+}
+
+function explicitDefaultHostResolve() {
+  return nullableString(process.env.MX_H2I_HOST_RESOLVE)
+    || nullableString(process.env.MX_H2I_BOOTSTRAP_HOST_RESOLVE);
 }
 
 function defaultDomesticRelayHost() {
@@ -6554,7 +6622,7 @@ function defaultBootstrapResolveMode() {
   return normalizeBootstrapResolveMode(
     process.env.MX_H2I_BOOTSTRAP_RESOLVE_MODE
       || process.env.MX_H2I_BOOTSTRAP_DNS_MODE
-      || (defaultHostResolve() ? 'env-first' : 'dns-first')
+      || 'env-first'
   );
 }
 

@@ -217,6 +217,7 @@ export interface WireGuardTunnelStatus {
   ifconfig: string | null;
   rawDump: string | null;
   runtime: WireGuardConnectionRuntimeStatus;
+  serviceState?: string | null;
   error?: string | null;
 }
 
@@ -1198,6 +1199,7 @@ export function getWireGuardTunnelStatus(input: {
     return {
       ...status,
       active: serviceState === 'RUNNING',
+      serviceState,
       routes: detectInterfaceRoutes(profile.interfaceName),
       ifconfig: readInterfaceState(profile.interfaceName),
       error: serviceState ? null : `WireGuard tunnel service WireGuardTunnel$${profile.interfaceName} 未安装`
@@ -3192,7 +3194,7 @@ function windowsElevatedStartProcessScripts(
     '}'
   ];
   const waitForServiceRunning = () => [
-    '$deadline = (Get-Date).AddSeconds(20)',
+    '$deadline = (Get-Date).AddSeconds(35)',
     'while ($true) {',
     `  $svc = Get-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`,
     "  if ($null -ne $svc -and $svc.Status -eq 'Running') { break }",
