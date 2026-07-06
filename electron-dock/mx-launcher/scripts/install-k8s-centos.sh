@@ -17,6 +17,8 @@ K8S_FLANNEL_IMAGE_REPOSITORY="${K8S_FLANNEL_IMAGE_REPOSITORY:-}"
 K8S_FLANNEL_VERSION="${K8S_FLANNEL_VERSION:-v0.28.5}"
 K8S_FLANNEL_CNI_PLUGIN_VERSION="${K8S_FLANNEL_CNI_PLUGIN_VERSION:-v1.9.1-flannel1}"
 K8S_GATEWAY_PORT="${K8S_GATEWAY_PORT:-18090}"
+K8S_NODE_NAME="${K8S_NODE_NAME:-}"
+K8S_CONFIGURE_CONTAINERD="${K8S_CONFIGURE_CONTAINERD:-1}"
 K8S_OPEN_FIREWALL="${K8S_OPEN_FIREWALL:-1}"
 K8S_DISABLE_SWAP="${K8S_DISABLE_SWAP:-1}"
 K8S_SET_SELINUX_PERMISSIVE="${K8S_SET_SELINUX_PERMISSIVE:-1}"
@@ -74,6 +76,7 @@ Options:
 Environment:
   PG_PASSWORD=...          Required with --deploy-mx unless existing secret is enough.
   K8S_APISERVER_ADVERTISE_ADDRESS=IP
+  K8S_NODE_NAME=mx-internal-server
   K8S_VERSION=v1.36
   K8S_IMAGE_REPOSITORY=registry.aliyuncs.com/google_containers
   K8S_PAUSE_VERSION=3.10.2
@@ -82,6 +85,7 @@ Environment:
   K8S_FLANNEL_CNI_PLUGIN_VERSION=v1.9.1-flannel1
   POD_CIDR=192.168.224.0/20
   SERVICE_CIDR=192.168.240.0/20
+  K8S_CONFIGURE_CONTAINERD=1
   K8S_OPEN_FIREWALL=0
   K8S_DISABLE_SWAP=0
   K8S_SET_SELINUX_PERMISSIVE=0
@@ -261,6 +265,41 @@ resolve_advertise_address() {
   fi
 }
 
+k8s_is_valid_node_name() {
+  local value="$1"
+  [ -n "$value" ] || return 1
+  [ "${#value}" -le 253 ] || return 1
+  printf '%s\n' "$value" \
+    | grep -Eq '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+}
+
+k8s_sanitize_node_name() {
+  local value="$1"
+  value="$(printf '%s' "$value" \
+    | tr '[:upper:]_' '[:lower:]-' \
+    | sed -E 's/[^a-z0-9.-]+/-/g; s/[.][.-]+/./g; s/[-][.-]+/-/g; s/^[^a-z0-9]+//; s/[^a-z0-9]+$//')"
+  value="$(printf '%.253s' "$value" | sed -E 's/[^a-z0-9]+$//')"
+  if k8s_is_valid_node_name "$value"; then
+    echo "$value"
+  else
+    echo "localhost"
+  fi
+}
+
+resolve_node_name() {
+  local value
+  value="${K8S_NODE_NAME:-}"
+  if [ -z "$value" ]; then
+    value="$(hostname 2>/dev/null || true)"
+  fi
+  [ -n "$value" ] || value="localhost"
+  if k8s_is_valid_node_name "$value"; then
+    echo "$value"
+  else
+    k8s_sanitize_node_name "$value"
+  fi
+}
+
 using_cgroup_v1() {
   [ "$DRY_RUN" = "1" ] && [ "$K8S_ALLOW_CGROUP_V1" = "1" ] && return 0
   [ -f /sys/fs/cgroup/cgroup.controllers ] && return 1
@@ -321,6 +360,10 @@ EOF
 
 configure_containerd() {
   local pm
+  if [ "$K8S_CONFIGURE_CONTAINERD" = "0" ]; then
+    say "skip containerd configure/restart because K8S_CONFIGURE_CONTAINERD=0"
+    return 0
+  fi
   pm="$(package_manager)"
   if ! command -v containerd >/dev/null 2>&1; then
     say "containerd is missing; install containerd.io from configured repositories"
@@ -344,7 +387,7 @@ configure_containerd() {
 configure_hostname_resolution() {
   local node_name
   resolve_advertise_address
-  node_name="$(hostname)"
+  node_name="$(resolve_node_name)"
   [ -n "$node_name" ] || return 0
   if command -v getent >/dev/null 2>&1 && getent hosts "$node_name" >/dev/null 2>&1; then
     return 0
@@ -537,12 +580,15 @@ configure_kubectl() {
 kubeadm_init_config() {
   local path="$1"
   local include_cgroup_v1="$2"
+  local node_name
+  node_name="$(resolve_node_name)"
   write_file "$path" <<EOF
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: InitConfiguration
 localAPIEndpoint:
   advertiseAddress: ${K8S_APISERVER_ADVERTISE_ADDRESS}
 nodeRegistration:
+  name: ${node_name}
   criSocket: ${CRI_SOCKET}
 ---
 apiVersion: kubeadm.k8s.io/v1beta4
@@ -701,6 +747,7 @@ init_cluster() {
   else
     run kubeadm init \
       --apiserver-advertise-address="$K8S_APISERVER_ADVERTISE_ADDRESS" \
+      --node-name="$(resolve_node_name)" \
       --pod-network-cidr="$POD_CIDR" \
       --service-cidr="$SERVICE_CIDR" \
       --cri-socket="$CRI_SOCKET" \

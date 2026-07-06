@@ -74,7 +74,7 @@ Usage:
   bash scripts/manage.sh ops awx-shadow plan|dry-run|install|status|port-forward [local-port]|logs|password|down
   bash scripts/manage.sh ops awx-provider list|upsert [provider-id] [base-url]|check <provider-id>
   bash scripts/manage.sh ops local-platform plan|dry-run|cycle [local-port]|status|down
-  bash scripts/manage.sh ops internal-production plan|deploy|apply|status|gateway-smoke [gateway-url]|down
+  bash scripts/manage.sh ops internal-production plan|deploy|apply|status|gateway-smoke [gateway-url]|reinit-kubeadm|down
   bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures [--apply]
   bash scripts/manage.sh k8s plan internal-shadow
   bash scripts/manage.sh k8s explain internal-shadow
@@ -4850,6 +4850,7 @@ Commands:
   bash scripts/manage.sh ops internal-production status
   bash scripts/manage.sh ops internal-production gateway-smoke
   bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures
+  bash scripts/manage.sh ops internal-production reinit-kubeadm
   bash scripts/manage.sh ops internal-production down
 
 Notes:
@@ -4878,6 +4879,11 @@ Notes:
   - Deploy waits for kube-system CoreDNS after Flannel recovery so Pods can
     resolve services such as mx-internal-postgres before migrations start.
     Disable this guard with MX_K8S_RECOVER_CLUSTER_DNS=0.
+  - reinit-kubeadm resets only kubeadm control-plane state and CNI state. It
+    preserves /var/lib/mx-launcher hostPath data such as Postgres, release
+    artifacts, site-slots, and Internal SSH material. It defaults
+    K8S_CONFIGURE_CONTAINERD=0 and K8S_RESTART_RUNTIME_AFTER_CNI=0 so Docker
+    and containerd are not restarted by the reinit wrapper.
   - Existing mx-internal-gateway-caddy data is preserved during deploy so
     generated gateway routes are not reset to the bootstrap Caddyfile.
   - gateway-smoke is read-only and checks /healthz plus /readyz. Full HTTP
@@ -4897,6 +4903,36 @@ ops_internal_production_repair_kubeadm_endpoint_if_requested() {
   if [ -n "${MX_K8S_APISERVER_ADVERTISE_ADDRESS:-${K8S_APISERVER_ADVERTISE_ADDRESS:-}}" ]; then
     k8s_repair_kubeadm_endpoint
   fi
+}
+
+ops_internal_production_reinit_kubeadm() {
+  local current_ip node_name host_name configure_containerd restart_runtime_after_cni
+  current_ip="$(k8s_detect_lan_ip | head -n 1)"
+  if ! k8s_is_usable_lan_ip "$current_ip"; then
+    die "cannot detect usable LAN IP; set MX_K8S_APISERVER_ADVERTISE_ADDRESS=<current-lan-ip>"
+  fi
+  node_name="${MX_K8S_NODE_NAME:-}"
+  if [ -z "$node_name" ]; then
+    node_name="$(k8s_etcd_manifest_node_name | head -n 1)"
+  fi
+  if [ -z "$node_name" ]; then
+    host_name="$(hostname 2>/dev/null || true)"
+    node_name="${host_name:-mx-internal-server}"
+  fi
+  if ! k8s_is_valid_node_name "$node_name"; then
+    node_name="$(k8s_sanitize_node_name "$node_name")"
+  fi
+  [ -n "$node_name" ] || node_name="mx-internal-server"
+  configure_containerd="${MX_K8S_CONFIGURE_CONTAINERD:-0}"
+  restart_runtime_after_cni="${MX_K8S_RESTART_RUNTIME_AFTER_CNI:-0}"
+  say "reinit kubeadm at $current_ip with node=$node_name"
+  say "preserve /var/lib/mx-launcher; K8S_CONFIGURE_CONTAINERD=$configure_containerd K8S_RESTART_RUNTIME_AFTER_CNI=$restart_runtime_after_cni"
+  K8S_APISERVER_ADVERTISE_ADDRESS="$current_ip" \
+    K8S_NODE_NAME="$node_name" \
+    K8S_REINIT=1 \
+    K8S_CONFIGURE_CONTAINERD="$configure_containerd" \
+    K8S_RESTART_RUNTIME_AFTER_CNI="$restart_runtime_after_cni" \
+    bash "$ROOT/scripts/install-k8s-centos.sh" --reinit --advertise-address "$current_ip" --mx-root "$ROOT"
 }
 
 ops_internal_production() {
@@ -4960,13 +4996,17 @@ ops_internal_production() {
       ops_internal_production_repair_kubeadm_endpoint_if_requested
       k8s_cleanup_smoke_fixtures internal-shadow "${1:-plan}"
       ;;
+    reinit-kubeadm|reinit)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production reinit-kubeadm"
+      ops_internal_production_reinit_kubeadm
+      ;;
     down)
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production down"
       ops_internal_production_repair_kubeadm_endpoint_if_requested
       k8s_down internal-shadow
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops internal-production plan|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|down"
+      die "Usage: bash scripts/manage.sh ops internal-production plan|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|down"
       ;;
   esac
 }
@@ -5584,7 +5624,7 @@ case "$cmd" in
         ops_local_platform "$@"
         ;;
       internal-production)
-        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-production plan|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|down"
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-production plan|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|down"
         ops_internal_production "$@"
         ;;
       *)
