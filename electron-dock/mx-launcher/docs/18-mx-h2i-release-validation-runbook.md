@@ -111,8 +111,23 @@ shasum -a 256 electron-dock/mx-launcher/demos/mx-h2i/out/electron-builder/*.dmg
 For Windows, build on Windows or a configured CI worker:
 
 ```bash
+corepack enable
+pnpm --dir electron-dock/mx-launcher install --frozen-lockfile
+pnpm --dir electron-dock/mx-launcher ignored-builds
 pnpm --dir electron-dock/mx-launcher/demos/mx-h2i make:win
 ```
+
+`ignored-builds` should print no pending packages. The mx-launcher workspace records the
+required pnpm build-script approvals in `package.json` so Windows workers with strict dependency
+build policy do not stop on `ERR_PNPM_IGNORED_BUILDS` for Quasar/Vite's `@parcel/watcher`.
+Do not use an interactive `pnpm approve-builds` result as the release source of truth.
+
+The Windows package still runs the Electron UI as `asInvoker`. WireGuard, NRPT split DNS, and
+route-priority repair are owned by the WireGuard service/UAC path. The launcher keeps Internal
+domains on the standalone-owned local PAC edge and suppresses interface DNS when that resolver
+policy is prepared, so Clash/mihomo TUN or system proxy can keep owning unmatched traffic. The
+Windows UAC wrapper uses the HDO V1 hidden `RunAs` pattern; macOS LaunchDaemon/PAC behavior is
+not changed by this packaging gate.
 
 ## Layer 5: Publish Artifact
 

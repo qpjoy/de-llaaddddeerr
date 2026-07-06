@@ -2,6 +2,7 @@
   "name": "@qpjoy/mx-launcher-workspace",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@10.24.0",
   "type": "module",
   "scripts": {
     "typecheck": "pnpm --filter @qpjoy/mx-launcher-core build && pnpm --filter @qpjoy/mx-launcher-embed-sdk build && pnpm --filter @qpjoy/mx-launcher-standalone build && pnpm --filter @qpjoy/electron-launcher typecheck && pnpm --filter @qpjoy/ui-design-neon-void typecheck && pnpm --dir server typecheck && pnpm --dir desktop typecheck",
@@ -13,5 +14,12 @@
     "luopan:dev": "pnpm --filter @qpjoy/luopan-demo dev",
     "luopan:build": "pnpm --filter @qpjoy/luopan-demo build",
     "luopan:check": "pnpm --filter @qpjoy/luopan-demo check"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@parcel/watcher",
+      "electron",
+      "esbuild"
+    ]
   }
 }

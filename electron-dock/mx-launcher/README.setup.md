@@ -46,6 +46,16 @@ SERVICE_CIDR=192.168.240.0/20 \
 K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel \
 bash scripts/install-k8s-centos.sh --advertise-address 192.168.1.4 --allow-cgroup-v1 --reinit
 
+# 不重启docker，只重启k8s
+export MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.2
+export PG_USER=mx_internal
+export PG_PASSWORD=mx_internal
+export PG_DB=mx_internal_shadow
+
+bash scripts/manage.sh ops internal-production reinit-kubeadm
+# 另起一个终端，repair-cni
+bash scripts/manage.sh ops internal-production repair-cni
+
 # 重新部署 MX：
 MX_K8S_OS_HOSTNAME=mx-internal-server \
 MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.4 \

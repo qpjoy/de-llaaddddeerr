@@ -3311,7 +3311,7 @@ function windowsElevatedPowerShellWrapperScript(
     `$quotedElevatedScript = '"' + $elevatedScript.Replace('"', '\\"') + '"'`,
     `$argLine = '-NoProfile -ExecutionPolicy Bypass -File ' + $quotedElevatedScript`,
     "Write-HdoAudit ('wrapper argLine=' + $argLine)",
-    `$p = Start-Process -FilePath $pwsh -ArgumentList $argLine -Verb RunAs -Wait -PassThru`,
+    `$p = Start-Process -FilePath $pwsh -ArgumentList $argLine -Verb RunAs -WindowStyle Hidden -Wait -PassThru`,
     "Write-HdoAudit ('wrapper elevated exitCode=' + [string]$p.ExitCode)",
     'if ($null -ne $p.ExitCode) { exit $p.ExitCode }'
   ].join('\n');
