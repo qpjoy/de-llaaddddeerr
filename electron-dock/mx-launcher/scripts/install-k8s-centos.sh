@@ -928,6 +928,34 @@ cluster_bootstrap_diagnostics() {
   journalctl -u kubelet -n 160 --no-pager || true
 }
 
+cni_runtime_cache_stale() {
+  local crictl_status
+  [ "$DRY_RUN" = "0" ] || return 1
+  cni_config_ready || return 1
+  cni_plugins_ready || return 1
+  [ -s /run/flannel/subnet.env ] || return 1
+  command -v crictl >/dev/null 2>&1 || return 1
+  crictl_status="$(crictl info 2>/dev/null || true)"
+  case "$crictl_status" in
+    *'cni plugin not initialized'*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+print_cni_runtime_cache_hint() {
+  if ! cni_runtime_cache_stale; then
+    return 0
+  fi
+  say "CNI files are present, but containerd CRI still reports: cni plugin not initialized"
+  if [ -f "$MX_ROOT/scripts/manage.sh" ]; then
+    say "Run: bash $MX_ROOT/scripts/manage.sh ops internal-production repair-cni"
+  else
+    say "Restart containerd and kubelet once so containerd reloads /etc/cni/net.d"
+  fi
+}
+
 wait_for_cluster() {
   [ "$SKIP_INIT" = "0" ] || return 0
   say "wait for Flannel rollout"
@@ -949,6 +977,7 @@ wait_for_cluster() {
     say "node not ready yet; restart kubelet once after CNI installation"
     run_allow_fail systemctl restart kubelet
     if ! run kubectl wait --for=condition=Ready node --all --timeout="$K8S_NODE_READY_RETRY_TIMEOUT"; then
+      print_cni_runtime_cache_hint
       cluster_bootstrap_diagnostics
       die "Kubernetes node did not become Ready"
     fi

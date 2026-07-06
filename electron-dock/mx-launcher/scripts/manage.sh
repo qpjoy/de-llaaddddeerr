@@ -74,7 +74,7 @@ Usage:
   bash scripts/manage.sh ops awx-shadow plan|dry-run|install|status|port-forward [local-port]|logs|password|down
   bash scripts/manage.sh ops awx-provider list|upsert [provider-id] [base-url]|check <provider-id>
   bash scripts/manage.sh ops local-platform plan|dry-run|cycle [local-port]|status|down
-  bash scripts/manage.sh ops internal-production plan|deploy|apply|status|gateway-smoke [gateway-url]|reinit-kubeadm|down
+  bash scripts/manage.sh ops internal-production plan|deploy|apply|status|gateway-smoke [gateway-url]|reinit-kubeadm|repair-cni|down
   bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures [--apply]
   bash scripts/manage.sh k8s plan internal-shadow
   bash scripts/manage.sh k8s explain internal-shadow
@@ -4851,6 +4851,7 @@ Commands:
   bash scripts/manage.sh ops internal-production gateway-smoke
   bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures
   bash scripts/manage.sh ops internal-production reinit-kubeadm
+  bash scripts/manage.sh ops internal-production repair-cni
   bash scripts/manage.sh ops internal-production down
 
 Notes:
@@ -4884,6 +4885,9 @@ Notes:
     artifacts, site-slots, and Internal SSH material. It defaults
     K8S_CONFIGURE_CONTAINERD=0 and K8S_RESTART_RUNTIME_AFTER_CNI=0 so Docker
     and containerd are not restarted by the reinit wrapper.
+  - repair-cni is the explicit follow-up when Flannel is running and CNI files
+    exist, but containerd still reports "cni plugin not initialized". It
+    restarts containerd and kubelet once so the CRI reloads /etc/cni/net.d.
   - Existing mx-internal-gateway-caddy data is preserved during deploy so
     generated gateway routes are not reset to the bootstrap Caddyfile.
   - gateway-smoke is read-only and checks /healthz plus /readyz. Full HTTP
@@ -4933,6 +4937,46 @@ ops_internal_production_reinit_kubeadm() {
     K8S_CONFIGURE_CONTAINERD="$configure_containerd" \
     K8S_RESTART_RUNTIME_AFTER_CNI="$restart_runtime_after_cni" \
     bash "$ROOT/scripts/install-k8s-centos.sh" --reinit --advertise-address "$current_ip" --mx-root "$ROOT"
+}
+
+ops_internal_production_repair_cni() {
+  local timeout crictl_status
+  timeout="${MX_K8S_NODE_READY_RETRY_TIMEOUT:-180s}"
+  [ -d /etc/cni/net.d ] || die "missing /etc/cni/net.d; run reinit-kubeadm or repair Flannel first"
+  if ! find /etc/cni/net.d -maxdepth 1 -type f \
+    \( -name '*.conf' -o -name '*.conflist' -o -name '*.json' \) \
+    -print -quit 2>/dev/null | grep -q .; then
+    die "no CNI config under /etc/cni/net.d; run reinit-kubeadm or repair Flannel first"
+  fi
+  for plugin in flannel loopback bridge host-local portmap; do
+    [ -x "/opt/cni/bin/$plugin" ] || die "missing CNI plugin /opt/cni/bin/$plugin"
+  done
+  [ -s /run/flannel/subnet.env ] || die "missing /run/flannel/subnet.env; Flannel has not created a subnet lease"
+
+  say "CNI files are present; restart containerd so CRI reloads /etc/cni/net.d"
+  systemctl restart containerd
+  say "restart kubelet after containerd CNI reload"
+  systemctl restart kubelet
+
+  if command -v crictl >/dev/null 2>&1; then
+    crictl_status="$(crictl info 2>/dev/null || true)"
+    case "$crictl_status" in
+      *'"NetworkReady"'*)
+      printf '%s\n' "$crictl_status" \
+        | sed -n '/"NetworkReady"/,+8p;/lastCNILoadStatus/p' || true
+        ;;
+    esac
+  fi
+
+  say "wait for node readiness"
+  if ! kubectl wait --for=condition=Ready node --all --timeout="$timeout"; then
+    kubectl get nodes -o wide || true
+    kubectl describe nodes || true
+    command -v crictl >/dev/null 2>&1 && crictl info || true
+    die "Kubernetes node did not become Ready after CNI repair"
+  fi
+  kubectl get nodes -o wide
+  kubectl -n kube-system get pods -o wide || true
 }
 
 ops_internal_production() {
@@ -5000,13 +5044,17 @@ ops_internal_production() {
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production reinit-kubeadm"
       ops_internal_production_reinit_kubeadm
       ;;
+    repair-cni|cni-repair)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production repair-cni"
+      ops_internal_production_repair_cni
+      ;;
     down)
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production down"
       ops_internal_production_repair_kubeadm_endpoint_if_requested
       k8s_down internal-shadow
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops internal-production plan|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|down"
+      die "Usage: bash scripts/manage.sh ops internal-production plan|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|repair-cni|down"
       ;;
   esac
 }
@@ -5624,7 +5672,7 @@ case "$cmd" in
         ops_local_platform "$@"
         ;;
       internal-production)
-        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-production plan|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|down"
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-production plan|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|repair-cni|down"
         ops_internal_production "$@"
         ;;
       *)
