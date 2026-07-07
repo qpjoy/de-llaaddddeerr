@@ -193,7 +193,9 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:connect-guest', async () => {
-    await recoverRetainedWireGuardBeforeBootstrap('guest-pre-bootstrap', { allowPrivileged: false });
+    await recoverRetainedWireGuardBeforeBootstrap('guest-pre-bootstrap', {
+      allowPrivileged: shouldAllowPrivilegedPreBootstrapRecovery()
+    });
     setConnecting('guest');
     await refreshNetworkEnvironmentDiagnostics('guest-pre-connect', { phase: 'bootstrap', persist: false });
     await saveAndBroadcast();
@@ -231,7 +233,9 @@ function registerIpc() {
       };
       return visibleRuntime();
     }
-    await recoverRetainedWireGuardBeforeBootstrap('employee-pre-bootstrap', { allowPrivileged: false });
+    await recoverRetainedWireGuardBeforeBootstrap('employee-pre-bootstrap', {
+      allowPrivileged: shouldAllowPrivilegedPreBootstrapRecovery()
+    });
     setConnecting('employee');
     await refreshNetworkEnvironmentDiagnostics('employee-pre-connect', { phase: 'bootstrap', persist: false });
     await saveAndBroadcast();
@@ -5078,6 +5082,7 @@ async function applyNetworkSession(session, options) {
   const lease = session.lease || {};
   const bootstrapResolution = normalizeBootstrapResolution(session.bootstrapResolution);
   const bootstrapResolveMode = bootstrapResolution?.resolveMode || runtime.config.bootstrapResolveMode;
+  const bootstrapBaseUrl = bootstrapResolution?.baseUrl || runtime.config.bootstrapApiBaseUrl;
   const feedback = bootstrapResolution?.fallback?.message
     ? `${options.feedback} ${bootstrapResolution.fallback.message}`
     : options.feedback;
@@ -5125,9 +5130,9 @@ async function applyNetworkSession(session, options) {
     };
     touchRuntime(options.mode === 'employee' ? 'employee lease ready' : 'guest lease ready');
 
-    const domesticPeerSync = await syncDomesticPeerForLease(lease, { bootstrapResolveMode });
-    const internalDirectPeerSync = await syncInternalDirectPeerForLease(lease, routePlan, { bootstrapResolveMode });
-    const domesticRelayDiagnostics = await diagnoseDomesticRelayForLease(lease, { bootstrapResolveMode });
+    const domesticPeerSync = await syncDomesticPeerForLease(lease, { bootstrapResolveMode, bootstrapBaseUrl });
+    const internalDirectPeerSync = await syncInternalDirectPeerForLease(lease, routePlan, { bootstrapResolveMode, bootstrapBaseUrl });
+    const domesticRelayDiagnostics = await diagnoseDomesticRelayForLease(lease, { bootstrapResolveMode, bootstrapBaseUrl });
     const combinedSystemDomainProxy = await prepareSystemDomainProxyForWireGuardInstall('pre-connect');
     const wireGuardResult = await startWireGuardForSession({
       routePlan,
@@ -5541,7 +5546,8 @@ async function syncDomesticPeerForLease(lease, options = {}) {
     };
   }
   try {
-    const payload = await requestJson(joinApiUrl(runtime.config.bootstrapApiBaseUrl, `/internal/v1/launcher-network/leases/${encodeURIComponent(leaseId)}/domestic-peer/sync`), {
+    const baseUrl = normalizeBaseUrl(options.bootstrapBaseUrl) || runtime.config.bootstrapApiBaseUrl;
+    const payload = await requestJson(joinApiUrl(baseUrl, `/internal/v1/launcher-network/leases/${encodeURIComponent(leaseId)}/domestic-peer/sync`), {
       method: 'POST',
       body: {
         requestedBy: REQUESTED_BY,
@@ -5588,7 +5594,8 @@ async function syncInternalDirectPeerForLease(lease, routePlan, options = {}) {
     };
   }
   try {
-    const payload = await requestJson(joinApiUrl(runtime.config.bootstrapApiBaseUrl, `/internal/v1/launcher-network/leases/${encodeURIComponent(leaseId)}/internal-direct-peer/sync`), {
+    const baseUrl = normalizeBaseUrl(options.bootstrapBaseUrl) || runtime.config.bootstrapApiBaseUrl;
+    const payload = await requestJson(joinApiUrl(baseUrl, `/internal/v1/launcher-network/leases/${encodeURIComponent(leaseId)}/internal-direct-peer/sync`), {
       method: 'POST',
       body: {
         requestedBy: REQUESTED_BY,
@@ -5625,7 +5632,8 @@ async function diagnoseDomesticRelayForLease(lease, options = {}) {
     };
   }
   try {
-    const payload = await requestJson(joinApiUrl(runtime.config.bootstrapApiBaseUrl, `/internal/v1/launcher-network/leases/${encodeURIComponent(leaseId)}/domestic-relay/diagnostics`), {
+    const baseUrl = normalizeBaseUrl(options.bootstrapBaseUrl) || runtime.config.bootstrapApiBaseUrl;
+    const payload = await requestJson(joinApiUrl(baseUrl, `/internal/v1/launcher-network/leases/${encodeURIComponent(leaseId)}/domestic-relay/diagnostics`), {
       method: 'POST',
       body: {
         requestedBy: REQUESTED_BY,
@@ -6225,6 +6233,7 @@ async function resolveBootstrapEndpoint(config) {
     normalizeBaseUrl(process.env.MX_H2I_BOOTSTRAP_BASE_URL),
     normalizeBaseUrl(config.bootstrapApiBaseUrl),
     defaultBootstrapApiBaseUrl(),
+    defaultPublicBootstrapBaseUrl(config),
     normalizeBaseUrl(process.env.MX_H2I_PUBLIC_BASE_URL),
     normalizeBaseUrl(process.env.MX_H2I_INTERNAL_BASE_URL),
     normalizeBaseUrl(config.internalApiBaseUrl)
@@ -6238,7 +6247,8 @@ async function resolveBootstrapEndpoint(config) {
         return {
           baseUrl: candidate,
           resolveMode,
-          fallback: bootstrapResolveFallback(requestedMode, resolveMode, failures)
+          fallback: bootstrapResolveFallback(requestedMode, resolveMode, failures),
+          preserveConfigBaseUrl: shouldPreserveConfiguredBootstrapBaseUrl(candidate, config)
         };
       } catch (err) {
         failures.push({
@@ -6267,6 +6277,12 @@ function shouldPreferRetainedOverlayBootstrap(connection) {
   if (connection.health?.wireGuard === 'ready') return true;
   if (connection.wireGuard?.active === true) return true;
   return false;
+}
+
+function shouldAllowPrivilegedPreBootstrapRecovery() {
+  const override = nullableString(process.env.MX_H2I_PREBOOTSTRAP_PRIVILEGED_RECOVERY);
+  if (override) return !['0', 'false', 'no', 'off'].includes(override.toLowerCase());
+  return process.platform === 'win32';
 }
 
 function bootstrapResolveAttempts(candidate, config) {
@@ -6298,6 +6314,21 @@ function bootstrapCandidateShouldPreferDirect(candidate) {
   try {
     const hostname = new URL(candidate).hostname;
     return hostname === 'localhost' || net.isIP(hostname) !== 0;
+  } catch {
+    return false;
+  }
+}
+
+function shouldPreserveConfiguredBootstrapBaseUrl(candidate, config) {
+  const configured = normalizeBaseUrl(config?.bootstrapApiBaseUrl);
+  if (!configured || normalizeBaseUrl(candidate) === configured) return false;
+  return isDirectPublicBootstrapUrl(candidate);
+}
+
+function isDirectPublicBootstrapUrl(value) {
+  try {
+    const parsed = new URL(normalizeBaseUrl(value) || '');
+    return publicBootstrapDialHosts().includes(parsed.hostname.toLowerCase());
   } catch {
     return false;
   }
@@ -6355,6 +6386,28 @@ function parseBootstrapPortList(value) {
     .split(/[,\s]+/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function defaultPublicBootstrapBaseUrl(config = {}) {
+  const explicit = normalizeBaseUrl(process.env.MX_H2I_PUBLIC_BOOTSTRAP_BASE_URL)
+    || normalizeBaseUrl(process.env.MX_H2I_DOMESTIC_BOOTSTRAP_BASE_URL);
+  if (explicit) return explicit;
+  const host = nullableString(config?.domesticRelayHost)
+    || defaultDomesticRelayHost();
+  if (!host) return null;
+  const reference = normalizeBaseUrl(config?.bootstrapApiBaseUrl)
+    || defaultBootstrapApiBaseUrl();
+  let protocol = 'http';
+  let port = nullableString(process.env.MX_H2I_BOOTSTRAP_PORT) || '18090';
+  try {
+    const parsed = new URL(reference);
+    protocol = parsed.protocol.replace(/:$/, '') || protocol;
+    port = parsed.port || port;
+  } catch {
+    // Keep the default public bootstrap shape.
+  }
+  const formattedHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  return `${protocol}://${formattedHost}${port ? `:${port}` : ''}`;
 }
 
 function bootstrapResolveFallback(requestedMode, resolveMode, failures) {
@@ -6481,7 +6534,7 @@ async function applyResolvedBootstrapBaseUrl(baseUrl) {
 async function applyResolvedBootstrapEndpoint(bootstrap) {
   const resolution = normalizeBootstrapResolution(bootstrap);
   if (!resolution?.baseUrl) return;
-  await applyResolvedBootstrapBaseUrl(resolution.baseUrl);
+  if (!resolution.preserveConfigBaseUrl) await applyResolvedBootstrapBaseUrl(resolution.baseUrl);
   if (!resolution.fallback?.message) return;
   runtime.feedback = {
     tone: 'warning',
@@ -6503,7 +6556,8 @@ function normalizeBootstrapResolution(input) {
       to: normalizeBootstrapResolveMode(fallback.to),
       retryCount: Number.isFinite(fallback.retryCount) ? fallback.retryCount : null,
       message: nullableString(fallback.message)
-    } : null
+    } : null,
+    preserveConfigBaseUrl: row.preserveConfigBaseUrl === true
   };
 }
 
@@ -6635,12 +6689,7 @@ function requestTextWithHostOverride(override, options = {}) {
       ...normalizeRequestHeaders(options.headers),
       accept: 'application/json',
       host: override.hostHeader,
-      ...(override.originalHostHeader ? {
-        'x-forwarded-host': override.originalHostHeader,
-        'x-mx-original-host': override.originalHostHeader,
-        'x-mx-bootstrap-host': override.originalHostHeader,
-        'x-mx-bootstrap-domain': hostnameFromUrl(override.originalUrl || '')
-      } : {})
+      ...bootstrapForwardHeaders(override, target)
     };
     if (body !== undefined) {
       if (!hasRequestHeader(headers, 'content-type')) headers['content-type'] = 'application/json';
@@ -7100,10 +7149,12 @@ async function requestHostOverride(url, options = {}) {
   );
   if (resolveMode === 'system-only') return null;
   if (resolveMode === 'env-first' || resolveMode === 'env-only') {
-    return hostResolveOverride(url, { bootstrapResolveMode: resolveMode });
+    return hostResolveOverride(url, { bootstrapResolveMode: resolveMode })
+      || directPublicBootstrapOverride(url, { bootstrapResolveMode: resolveMode });
   }
   if (resolveMode === 'dns-first' || resolveMode === 'dns-only') {
-    return bootstrapDnsResolveOverride(url, { bootstrapResolveMode: resolveMode });
+    return await bootstrapDnsResolveOverride(url, { bootstrapResolveMode: resolveMode })
+      || directPublicBootstrapOverride(url, { bootstrapResolveMode: resolveMode });
   }
   return null;
 }
@@ -7211,6 +7262,65 @@ function hostResolveOverride(url, options = {}) {
   });
 }
 
+function directPublicBootstrapOverride(url, options = {}) {
+  const resolveMode = normalizeBootstrapResolveMode(options.bootstrapResolveMode || runtime?.config?.bootstrapResolveMode || DEFAULT_CONFIG.bootstrapResolveMode);
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (!shouldAttachOriginalHostForDirectBootstrap(parsed)) return null;
+  const originalHostHeader = bootstrapOriginalHostHeader(parsed);
+  if (!originalHostHeader) return null;
+  const original = new URL(parsed.toString());
+  original.host = originalHostHeader;
+  return {
+    originalUrl: original.toString(),
+    url: parsed.toString(),
+    hostHeader: parsed.host,
+    originalHostHeader,
+    resolveMode,
+    source: 'direct-public-bootstrap',
+    servername: undefined
+  };
+}
+
+function shouldAttachOriginalHostForDirectBootstrap(parsed) {
+  if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) return false;
+  if (parsed.hostname === 'localhost' || net.isIP(parsed.hostname) === 0) return false;
+  return publicBootstrapDialHosts().includes(parsed.hostname.toLowerCase());
+}
+
+function publicBootstrapDialHosts() {
+  return uniqueValues([
+    runtime?.config?.domesticRelayHost,
+    DEFAULT_CONFIG.domesticRelayHost,
+    defaultDomesticRelayHost(),
+    DEFAULT_DOMESTIC_RELAY_HOST
+  ].map((host) => String(host || '').trim().toLowerCase()).filter(Boolean));
+}
+
+function bootstrapOriginalHostHeader(parsed) {
+  const host = bootstrapOriginalHostname();
+  if (!host) return null;
+  const formattedHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  const defaultPort = parsed.protocol === 'https:' ? '443' : '80';
+  return parsed.port && parsed.port !== defaultPort ? `${formattedHost}:${parsed.port}` : formattedHost;
+}
+
+function bootstrapOriginalHostname() {
+  return [
+    process.env.MX_H2I_BOOTSTRAP_ORIGINAL_HOST,
+    process.env.MX_H2I_BOOTSTRAP_HOST,
+    process.env.MX_H2I_BOOTSTRAP_DOMAIN,
+    hostnameFromUrl(process.env.MX_H2I_BOOTSTRAP_BASE_URL),
+    hostnameFromUrl(process.env.MX_H2I_PUBLIC_BASE_URL),
+    hostnameFromUrl(runtime?.config?.bootstrapApiBaseUrl),
+    DEFAULT_BOOTSTRAP_HOST
+  ].map(nullableString).find((host) => host && host !== 'localhost' && net.isIP(host) === 0) || null;
+}
+
 function buildHostOverride(parsed, mapped, resolveMode, options = {}) {
   const target = new URL(parsed.toString());
   target.hostname = mapped.host;
@@ -7224,6 +7334,24 @@ function buildHostOverride(parsed, mapped, resolveMode, options = {}) {
     resolveMode,
     source: options.source || 'host-resolve',
     servername: useOriginalHostHeader ? parsed.hostname : undefined
+  };
+}
+
+function bootstrapForwardHeaders(override, target) {
+  if (!override.originalHostHeader) return {};
+  const originalProtocol = protocolFromUrl(override.originalUrl) || target.protocol.replace(/:$/, '') || 'http';
+  const originalPort = portFromHostHeader(override.originalHostHeader)
+    || portFromUrl(override.originalUrl)
+    || String(target.port || (target.protocol === 'https:' ? 443 : 80));
+  return {
+    'x-forwarded-host': override.originalHostHeader,
+    'x-forwarded-proto': originalProtocol,
+    'x-forwarded-port': originalPort,
+    'x-mx-original-host': override.originalHostHeader,
+    'x-mx-bootstrap-host': override.originalHostHeader,
+    'x-mx-bootstrap-domain': hostnameFromUrl(override.originalUrl || ''),
+    'x-mx-bootstrap-dial-host': target.host,
+    'x-mx-bootstrap-source': override.source || 'host-resolve'
   };
 }
 
@@ -7328,6 +7456,33 @@ function hostnameFromUrl(value) {
   } catch {
     return '';
   }
+}
+
+function protocolFromUrl(value) {
+  try {
+    return new URL(value).protocol.replace(/:$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function portFromUrl(value) {
+  try {
+    return new URL(value).port;
+  } catch {
+    return '';
+  }
+}
+
+function portFromHostHeader(value) {
+  const text = nullableString(value);
+  if (!text) return '';
+  if (text.startsWith('[')) {
+    const close = text.indexOf(']');
+    return close > 0 ? text.slice(close + 1).replace(/^:/, '') : '';
+  }
+  const match = /:(\d+)$/.exec(text);
+  return match?.[1] || '';
 }
 
 function joinApiUrl(baseUrl, pathName) {

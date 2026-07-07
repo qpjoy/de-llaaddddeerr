@@ -506,6 +506,11 @@ Domestic 公网 DNS endpoint。这里的 `host:port` 只属于 MX-H2I bootstrap 
 `Host Resolve=h2i.mxinfo-inc.cn=<可达的 Domestic/Internal gateway IP>`。客户端实际拨号到
 该 IP，HTTP `Host` 使用 gateway IP，并通过 `X-Forwarded-Host` / `X-MX-Original-Host` / `X-MX-Bootstrap-Host`
 传递原始域名，避免公网备案层按 Host 拦截。
+V2 客户端还会把当前 Domestic 公网入口 `http://116.62.51.154:18090` 作为 public bootstrap
+候选，但仍通过 `X-MX-Original-Host` / `X-MX-Bootstrap-Host` 保留 `h2i.mxinfo-inc.cn` 的逻辑身份；
+V2 Domestic facade 应透传这些头给 Internal bootstrap API，再退回 `X-Forwarded-Host`。因此 V1 下线后，
+`116.62.51.154:18090` 可以只承载 V2 public bootstrap facade，首连不要求用户先开启 Clash/mihomo
+TUN。
 `MX_H2I_BOOTSTRAP_DNS_SERVERS` 是 resolver 地址：只有当 `116.62.51.154:53` 真有
 Domestic DNS edge 在回答时，才应把它填成 `116.62.51.154`。如果 `116.62.51.154` 只是
 `h2i.mxinfo-inc.cn` 的公网 A 记录，应改用系统 DNS 或 `MX_H2I_HOST_RESOLVE`。
@@ -844,6 +849,13 @@ MX-H2I before WG
 -> http://h2i.mxinfo-inc.cn:18090 或 Host Resolve 到 Domestic public edge
 -> 获取 lease / routePlan
 ```
+
+如果本地已有保留 lease/routePlan 和 WireGuard config，Windows 用户点击连接时可以先做一次
+privileged pre-bootstrap recovery：拉起 retained WG tunnel 后，bootstrap 优先走
+`10.88.88.88` Internal overlay 刷新租约。这样重启后即使公网域名命中 ICP 页面、`116.*:18090`
+被本地网络拦截，或现场没有 V1 DNS 残留，也不需要依赖 Clash/mihomo TUN 才能恢复。Clash TUN
+打开时可能通过代理链路变相绕过公网备案/端口阻断，因此现象上“开 TUN 能连”；但这只能作为外联
+fallback，不应成为 MX-H2I bootstrap 的主路径。
 
 H 端稳定态路径：
 

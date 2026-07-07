@@ -100,7 +100,12 @@ Bootstrap resolution can be selected with `MX_H2I_BOOTSTRAP_RESOLVE_MODE`:
 Domestic public host is `116.62.51.154`; older `121.43.253.179` / `121.43.254.179`
 runtime settings are treated as stale defaults. The bootstrap phase may use
 `MX_H2I_HOST_RESOLVE=h2i.mxinfo-inc.cn=116.62.51.154`
-to bypass public DNS, or `MX_H2I_BOOTSTRAP_DNS_SERVERS=223.5.5.5,119.29.29.29`
+to bypass public DNS; the client also auto-adds `http://116.62.51.154:18090`
+as a public bootstrap candidate when the Domestic relay host is unchanged. For
+direct-IP bootstrap, the HTTP `Host` stays on the gateway IP while
+`X-MX-Original-Host` / `X-MX-Bootstrap-Host` carry `h2i.mxinfo-inc.cn`, matching
+the V1/HDO public bootstrap flow. Use
+`MX_H2I_BOOTSTRAP_DNS_SERVERS=223.5.5.5,119.29.29.29`
 to resolve the bootstrap domain through an explicit resolver before dialing the
 resolved IP with the original Host header. `MX_H2I_BOOTSTRAP_DNS_SERVERS` must
 point at a DNS resolver, not merely at the A record returned for the bootstrap
@@ -113,6 +118,13 @@ When `dns-first` is selected, MX-H2I retries the bootstrap DNS resolver three
 times. If DNS still fails, the connection warns the user and temporarily falls
 back to Host Resolve/env mode when configured, then to the system default
 network path, so the launcher can continue toward the HDI/WireGuard phase.
+On Windows, a user-initiated connect also attempts a privileged pre-bootstrap
+recovery when a retained MX-H2I lease and WireGuard config are present. If that
+local tunnel is restored, bootstrap is refreshed through the retained Internal
+overlay first, which avoids depending on public DNS, ICP-sensitive domain
+routing, or Clash/mihomo TUN during reboot recovery. Set
+`MX_H2I_PREBOOTSTRAP_PRIVILEGED_RECOVERY=0` only when testing the public
+bootstrap path in isolation.
 The system path is intended to coexist with Clash/mihomo system proxy and TUN
 mode. Fake-IP or proxy TUN routes are not treated as H2I proof; the connected
 phase still requires the MX-H2I WireGuard route and Internal healthz.
