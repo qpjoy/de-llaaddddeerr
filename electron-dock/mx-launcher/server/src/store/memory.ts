@@ -806,7 +806,7 @@ export class MemoryStore implements PlatformStore {
       }
     });
     const siteIds = normalizeEntitlementSiteIds(input.defaultOverseaSiteIds);
-    if (input.provisionOversea === true && siteIds.length > 0) {
+    if (input.provisionOversea === true) {
       this.upsertUserOverseaEntitlement({
         userId: user.userId,
         siteIds,
@@ -833,7 +833,7 @@ export class MemoryStore implements PlatformStore {
         if (previous) updated += 1;
         else imported += 1;
         const siteIds = normalizeEntitlementSiteIds(input.defaultOverseaSiteIds);
-        if (input.provisionOversea === true && siteIds.length > 0) {
+        if (input.provisionOversea === true) {
           const entitlement = this.getUserOverseaEntitlement(user.userId);
           if (entitlement) entitlements.push(entitlement);
         }
@@ -994,8 +994,9 @@ export class MemoryStore implements PlatformStore {
     const user = this.users.get(userId);
     if (!user) throw new Error(`User not found: ${userId}`);
     const siteIds = normalizeEntitlementSiteIds(input.siteIds);
+    const effectiveSiteIds = siteIds.length ? siteIds : this.defaultUserOverseaSiteIds();
     const previous = this.getUserOverseaEntitlement(user.userId);
-    const accounts = siteIds.map((siteId) => {
+    const accounts = effectiveSiteIds.map((siteId) => {
       const accountName = userOverseaAccountName(user, siteId);
       const issued = this.issueSiteSlotAccessAccounts({
         siteId,
@@ -1021,9 +1022,9 @@ export class MemoryStore implements PlatformStore {
       userId: user.userId,
       environment: this.config.environment,
       service: 'hysteria2',
-      siteIds,
+      siteIds: effectiveSiteIds,
       accounts,
-      status: siteIds.length ? 'active' : 'disabled',
+      status: effectiveSiteIds.length ? 'active' : 'disabled',
       subscriptionPath: `/internal/v1/user-center/users/${encodeURIComponent(user.userId)}/oversea/subscription.yaml`,
       createdBy: previous?.createdBy ?? input.requestedBy ?? 'user-center',
       createdAt: previous?.createdAt ?? now,
@@ -1037,7 +1038,7 @@ export class MemoryStore implements PlatformStore {
       userId: user.userId,
       requestId: input.requestId ?? null,
       metadata: {
-        siteIds,
+        siteIds: effectiveSiteIds,
         accounts: accounts.map((account) => ({ siteId: account.siteId, username: account.username })),
         status: entitlement.status
       }
@@ -3308,6 +3309,52 @@ export class MemoryStore implements PlatformStore {
     return [...this.siteSlotPlans.values()]
       .filter((plan) => plan.siteId === siteId)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
+  }
+
+  private defaultUserOverseaSiteIds(): string[] {
+    const siteId = this.defaultUserOverseaSiteId();
+    return siteId ? [siteId] : [];
+  }
+
+  private defaultUserOverseaSiteId(): string | null {
+    const configured = this.configuredDefaultOverseaSiteCandidates();
+    const explicit = configured.find((item) => item.explicit);
+    if (explicit) return explicit.siteId;
+    if (configured.some((item) => item.siteId === 'oversea-main')) return 'oversea-main';
+    const siteIds = new Set<string>([
+      ...configured.map((item) => item.siteId),
+      ...[...this.launcherNetworkMihomoSites.keys()],
+      ...[...this.siteSlotPlans.values()]
+        .filter((plan) => plan.kind === 'oversea')
+        .map((plan) => plan.siteId),
+      'oversea-main'
+    ]);
+    const candidates = [...siteIds]
+      .map((siteId) => {
+        const site = this.getLauncherNetworkMihomoSite(siteId);
+        const plan = this.latestSiteSlotPlanForSite(siteId);
+        const accountCount = this.listSiteSlotAccessAccounts(siteId).length;
+        const lastSyncedAt = this.latestOverseaAccountSyncAt(siteId);
+        return {
+          siteId,
+          score: (lastSyncedAt ? 500 : 0)
+            + (site?.publicHost || plan?.host ? 120 : 0)
+            + (accountCount > 0 ? 80 : 0)
+            + (plan?.kind === 'oversea' ? 40 : 0),
+          updatedAt: latestIsoString([lastSyncedAt, site?.updatedAt, plan?.createdAt]) ?? ''
+        };
+      })
+      .sort((a, b) => b.score - a.score || b.updatedAt.localeCompare(a.updatedAt) || a.siteId.localeCompare(b.siteId));
+    return candidates[0]?.siteId ?? 'oversea-main';
+  }
+
+  private configuredDefaultOverseaSiteCandidates(): Array<{ siteId: string; explicit: boolean }> {
+    return this.listLauncherProductNetworks()
+      .map((product) => ({
+        siteId: product.defaultOverseaSiteId,
+        explicit: product.updatedBy !== 'builtin' || product.createdBy !== 'builtin'
+      }))
+      .filter((item) => item.siteId);
   }
 
   private registerBuiltinApps(): void {

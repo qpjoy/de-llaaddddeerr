@@ -902,7 +902,7 @@ export class PostgresStore implements PlatformStore {
       }
     });
     const siteIds = normalizeEntitlementSiteIds(input.defaultOverseaSiteIds);
-    if (input.provisionOversea === true && siteIds.length > 0) {
+    if (input.provisionOversea === true) {
       await this.upsertUserOverseaEntitlement({
         userId: user.userId,
         siteIds,
@@ -929,7 +929,7 @@ export class PostgresStore implements PlatformStore {
         if (previous) updated += 1;
         else imported += 1;
         const siteIds = normalizeEntitlementSiteIds(input.defaultOverseaSiteIds);
-        if (input.provisionOversea === true && siteIds.length > 0) {
+        if (input.provisionOversea === true) {
           const entitlement = await this.getUserOverseaEntitlement(user.userId);
           if (entitlement) entitlements.push(entitlement);
         }
@@ -1078,9 +1078,10 @@ export class PostgresStore implements PlatformStore {
     const user = await this.getRecord<UserCenterUser>('iam-user', userId);
     if (!user) throw new Error(`User not found: ${userId}`);
     const siteIds = normalizeEntitlementSiteIds(input.siteIds);
+    const effectiveSiteIds = siteIds.length ? siteIds : await this.defaultUserOverseaSiteIds();
     const previous = await this.getUserOverseaEntitlement(user.userId);
     const accounts: UserOverseaEntitlement['accounts'] = [];
-    for (const siteId of siteIds) {
+    for (const siteId of effectiveSiteIds) {
       const accountName = userOverseaAccountName(user, siteId);
       const issued = await this.issueSiteSlotAccessAccounts({
         siteId,
@@ -1106,9 +1107,9 @@ export class PostgresStore implements PlatformStore {
       userId: user.userId,
       environment: this.config.environment,
       service: 'hysteria2',
-      siteIds,
+      siteIds: effectiveSiteIds,
       accounts,
-      status: siteIds.length ? 'active' : 'disabled',
+      status: effectiveSiteIds.length ? 'active' : 'disabled',
       subscriptionPath: `/internal/v1/user-center/users/${encodeURIComponent(user.userId)}/oversea/subscription.yaml`,
       createdBy: previous?.createdBy ?? input.requestedBy ?? 'user-center',
       createdAt: previous?.createdAt ?? now,
@@ -1122,7 +1123,7 @@ export class PostgresStore implements PlatformStore {
       userId: user.userId,
       requestId: input.requestId ?? null,
       metadata: {
-        siteIds,
+        siteIds: effectiveSiteIds,
         accounts: accounts.map((account) => ({ siteId: account.siteId, username: account.username })),
         status: entitlement.status
       }
@@ -3579,6 +3580,52 @@ export class PostgresStore implements PlatformStore {
   private async latestSiteSlotPlanForSite(siteId: string): Promise<SiteSlotPlan | null> {
     const plans = await this.listSiteSlotPlans();
     return plans.find((plan) => plan.siteId === siteId) ?? null;
+  }
+
+  private async defaultUserOverseaSiteIds(): Promise<string[]> {
+    const siteId = await this.defaultUserOverseaSiteId();
+    return siteId ? [siteId] : [];
+  }
+
+  private async defaultUserOverseaSiteId(): Promise<string | null> {
+    const configured = await this.configuredDefaultOverseaSiteCandidates();
+    const explicit = configured.find((item) => item.explicit);
+    if (explicit) return explicit.siteId;
+    if (configured.some((item) => item.siteId === 'oversea-main')) return 'oversea-main';
+    const sites = await this.listRecords<LauncherNetworkMihomoSite>('launcher-network-mihomo-site');
+    const plans = await this.listSiteSlotPlans();
+    const siteIds = new Set<string>([
+      ...configured.map((item) => item.siteId),
+      ...sites.map((site) => site.siteId),
+      ...plans.filter((plan) => plan.kind === 'oversea').map((plan) => plan.siteId),
+      'oversea-main'
+    ]);
+    const candidates = [];
+    for (const siteId of siteIds) {
+      const site = await this.getLauncherNetworkMihomoSite(siteId);
+      const plan = plans.find((item) => item.siteId === siteId) ?? null;
+      const accountCount = (await this.listSiteSlotAccessAccounts(siteId)).length;
+      const lastSyncedAt = await this.latestOverseaAccountSyncAt(siteId);
+      candidates.push({
+        siteId,
+        score: (lastSyncedAt ? 500 : 0)
+          + (site?.publicHost || plan?.host ? 120 : 0)
+          + (accountCount > 0 ? 80 : 0)
+          + (plan?.kind === 'oversea' ? 40 : 0),
+        updatedAt: latestIsoString([lastSyncedAt, site?.updatedAt, plan?.createdAt]) ?? ''
+      });
+    }
+    candidates.sort((a, b) => b.score - a.score || b.updatedAt.localeCompare(a.updatedAt) || a.siteId.localeCompare(b.siteId));
+    return candidates[0]?.siteId ?? 'oversea-main';
+  }
+
+  private async configuredDefaultOverseaSiteCandidates(): Promise<Array<{ siteId: string; explicit: boolean }>> {
+    return (await this.listLauncherProductNetworks())
+      .map((product) => ({
+        siteId: product.defaultOverseaSiteId,
+        explicit: product.updatedBy !== 'builtin' || product.createdBy !== 'builtin'
+      }))
+      .filter((item) => item.siteId);
   }
 
   private async findUserCenterUserForInput(input: CreateUserInput): Promise<UserCenterUser | null> {

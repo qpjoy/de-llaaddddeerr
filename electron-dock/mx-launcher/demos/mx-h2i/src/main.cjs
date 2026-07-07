@@ -4491,7 +4491,6 @@ async function provisionH2oOverseaForCurrentUser(input = {}) {
     || nullableString(runtime?.auth?.user?.userId);
   if (!userId) throw new Error('Internal OAuth token 没有返回 userId，无法分配 oversea 订阅。');
   const siteIds = defaultH2oOverseaSiteIds(input);
-  if (!siteIds.length) throw new Error('没有可用的 oversea siteId，无法分配默认订阅。');
   const baseUrl = normalizeBaseUrl(input?.baseUrl)
     || normalizeBaseUrl(runtime.connection?.internalBaseUrl)
     || await resolveBootstrapBaseUrl(runtime.config);
@@ -4504,7 +4503,7 @@ async function provisionH2oOverseaForCurrentUser(input = {}) {
       timeoutMs: 6000,
       bootstrapResolveMode: input.bootstrapResolveMode,
       body: {
-        siteIds,
+        ...(siteIds.length ? { siteIds } : {}),
         requestedBy,
         requestId
       }
@@ -4542,11 +4541,14 @@ async function provisionH2oOverseaForCurrentUser(input = {}) {
       pushAppLog('h2o', 'warning', `H2O user oversea runtime sync failed after entitlement assignment: ${errorMessage(err)}`);
     }
   }
-  await hydrateH2oSystemSubscriptionsForUser({
-    userId,
-    baseUrl,
-    bootstrapResolveMode: input.bootstrapResolveMode
-  });
+  if (input.skipHydrate !== true) {
+    await hydrateH2oSystemSubscriptionsForUser({
+      userId,
+      baseUrl,
+      bootstrapResolveMode: input.bootstrapResolveMode,
+      autoProvision: false
+    });
+  }
   return { siteIds: assignedSiteIds, syncStatus };
 }
 
@@ -4555,12 +4557,7 @@ function defaultH2oOverseaSiteIds(input = {}) {
     ...arrayValue(input?.siteIds, []),
     nullableString(input?.siteId)
   ].map((item) => String(item || '').trim()).filter(Boolean);
-  if (explicit.length) return [...new Set(explicit)];
-  const routePlan = normalizeRoutePlan(runtime?.connection?.routePlan);
-  return [...new Set([
-    nullableString(routePlan?.overseaSiteId),
-    'oversea-main'
-  ].filter(Boolean))];
+  return explicit.length ? [explicit[0]] : [];
 }
 
 async function refreshH2oExternalSubscription(subscriptionId) {
@@ -4694,6 +4691,28 @@ async function hydrateH2oSystemSubscriptionsForUser(options = {}) {
       ? entitlementPayload.entitlement
       : null;
     if (!entitlement || entitlement.status !== 'active') {
+      if (options.autoProvision !== false) {
+        try {
+          await provisionH2oOverseaForCurrentUser({
+            baseUrl,
+            bootstrapResolveMode: options.bootstrapResolveMode,
+            skipHydrate: true
+          });
+          return await hydrateH2oSystemSubscriptionsForUser({
+            ...options,
+            userId,
+            baseUrl,
+            autoProvision: false
+          });
+        } catch (err) {
+          applyH2oManagedSubscriptionState(current, {
+            status: 'error',
+            syncStatus: 'auto-provision-failed',
+            errorMessage: `当前用户没有 oversea 订阅，自动分配默认订阅失败：${errorMessage(err)}`
+          });
+          return;
+        }
+      }
       applyH2oManagedSubscriptionState(current, {
         status: 'pending',
         syncStatus: 'missing-entitlement',
