@@ -10,6 +10,8 @@ let windowDrag = null;
 let appSearch = '';
 let appCategory = 'all';
 let selectedAppId = 'h2o';
+let appCenterRoute = 'catalog';
+let h2oManagerView = 'overview';
 let appDebugOpen = false;
 let foundationOpen = false;
 let appShellMenuOpen = false;
@@ -102,7 +104,30 @@ root.addEventListener('click', (event) => {
   }
   if (action === 'select-app') {
     phoneMenuOpen = false;
+    appCenterRoute = 'catalog';
+    appInspectorCollapsed = false;
     selectedAppId = button.dataset.appId || selectedAppId;
+    render();
+    return;
+  }
+  if (action === 'show-app-catalog') {
+    appCenterRoute = 'catalog';
+    appInspectorCollapsed = false;
+    appShellMenuOpen = false;
+    render();
+    return;
+  }
+  if (action === 'showH2oManager') {
+    selectedAppId = 'h2o';
+    appCenterRoute = 'h2o';
+    appInspectorCollapsed = true;
+    appShellMenuOpen = false;
+    render();
+    return;
+  }
+  if (action === 'set-h2o-view') {
+    h2oManagerView = button.dataset.view || 'overview';
+    appShellMenuOpen = false;
     render();
     return;
   }
@@ -135,6 +160,8 @@ root.addEventListener('click', (event) => {
   }
   if (action === 'set-app-category') {
     appCategory = button.dataset.category || 'all';
+    appCenterRoute = 'catalog';
+    appInspectorCollapsed = false;
     appGridScrollTop = 0;
     appShellMenuOpen = false;
     render();
@@ -153,8 +180,190 @@ root.addEventListener('click', (event) => {
     return;
   }
   if (action === 'setH2oMode') {
+    const runtime = h2oRuntime();
+    const nextMode = normalizeH2oModeUi(button.dataset.mode || 'app-rule');
     appShellMenuOpen = false;
-    void runAction('setH2oMode', button.dataset.mode || 'app-rule');
+    if (!h2oHasUsableSubscription(runtime)) {
+      h2oManagerView = 'subscriptions';
+      void runAction('updateH2oRuntime', {
+        ...runtime,
+        status: 'subscription-required',
+        lastAppliedAt: new Date().toISOString(),
+        logLevel: 'warning',
+        logMessage: 'H2O mode change blocked: no usable oversea subscription for current user.'
+      });
+      return;
+    }
+    if (nextMode === 'system-tun' && !runtime.tunInstalled) {
+      h2oManagerView = 'proxy';
+      void runAction('updateH2oRuntime', {
+        ...runtime,
+        status: 'tun-required',
+        lastAppliedAt: new Date().toISOString(),
+        logLevel: 'warning',
+        logMessage: 'H2O system TUN mode requires TUN helper installation first.'
+      });
+      return;
+    }
+    void runAction('setH2oMode', nextMode);
+    return;
+  }
+  if (action === 'installH2oTun' || action === 'uninstallH2oTun') {
+    const runtime = h2oRuntime();
+    const tunInstalled = action === 'installH2oTun';
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      tunInstalled,
+      mode: !tunInstalled && runtime.mode === 'system-tun' ? 'app-rule' : runtime.mode,
+      status: runtime.running ? 'running' : 'ready',
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: tunInstalled ? 'H2O TUN helper installed by AppCenter.' : 'H2O TUN helper removed by AppCenter.'
+    });
+    return;
+  }
+  if (action === 'saveH2oPorts') {
+    const runtime = h2oRuntime();
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      ports: { ...runtime.ports, ...readH2oPortFields() },
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: 'H2O ports saved from AppCenter.'
+    });
+    return;
+  }
+  if (action === 'setH2oSubscription') {
+    const runtime = h2oRuntime();
+    const subscriptionId = button.dataset.subscriptionId || runtime.activeSubscription.id;
+    const activeSubscription = runtime.subscriptions.find((item) => item.id === subscriptionId) || runtime.activeSubscription;
+    if (!h2oSubscriptionUsable(activeSubscription)) {
+      h2oManagerView = 'subscriptions';
+      void runAction('updateH2oRuntime', {
+        ...runtime,
+        status: 'subscription-required',
+        lastAppliedAt: new Date().toISOString(),
+        logLevel: 'warning',
+        logMessage: `H2O subscription is not usable for current identity: ${activeSubscription.name}.`
+      });
+      return;
+    }
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      activeSubscription,
+      activeSubscriptionId: activeSubscription.id,
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: `H2O active subscription switched to ${activeSubscription.name}.`
+    });
+    return;
+  }
+  if (action === 'refreshH2oSubscription') {
+    const runtime = h2oRuntime();
+    const subscriptionId = button.dataset.subscriptionId || runtime.activeSubscription.id;
+    const current = runtime.subscriptions.find((item) => item.id === subscriptionId) || runtime.activeSubscription;
+    if (current.requiresUser && !isUserIdentity()) {
+      h2oManagerView = 'subscriptions';
+      const subscriptions = runtime.subscriptions.map((item) => item.id === subscriptionId
+        ? { ...item, status: 'login-required', lastUpdatedAt: new Date().toISOString() }
+        : item);
+      void runAction('updateH2oRuntime', {
+        ...runtime,
+        subscriptions,
+        activeSubscription: subscriptions.find((item) => item.id === runtime.activeSubscription.id) || runtime.activeSubscription,
+        lastAppliedAt: new Date().toISOString(),
+        logLevel: 'warning',
+        logMessage: `H2O subscription refresh requires logged-in user: ${current.name}.`
+      });
+      return;
+    }
+    const nextLatency = 28 + (Date.now() % 42);
+    const subscriptions = runtime.subscriptions.map((item) => item.id === subscriptionId
+      ? { ...item, latencyMs: nextLatency, status: 'ready', lastUpdatedAt: new Date().toISOString() }
+      : item);
+    const activeSubscription = subscriptions.find((item) => item.id === subscriptionId) || runtime.activeSubscription;
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      subscriptions,
+      activeSubscription,
+      activeSubscriptionId: activeSubscription.id,
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: `H2O subscription refreshed: ${activeSubscription.name}.`
+    });
+    return;
+  }
+  if (action === 'toggleH2oRule') {
+    const runtime = h2oRuntime();
+    const ruleId = button.dataset.ruleId || '';
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      rules: runtime.rules.map((rule) => rule.id === ruleId ? { ...rule, enabled: rule.enabled === false } : rule),
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: `H2O rule toggled: ${ruleId}.`
+    });
+    return;
+  }
+  if (action === 'addH2oQuickRule') {
+    const runtime = h2oRuntime();
+    const host = button.dataset.host || 'example.com';
+    const kind = button.dataset.kind || 'allow';
+    const rule = h2oRuleFromInput({ host, kind, source: 'preset' });
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      rules: upsertH2oRule(runtime.rules, rule),
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: `H2O rule added: ${rule.host} -> ${rule.kind}.`
+    });
+    return;
+  }
+  if (action === 'launchH2o') {
+    const runtime = h2oRuntime();
+    if (!h2oHasUsableSubscription(runtime)) {
+      h2oManagerView = 'subscriptions';
+      void runAction('updateH2oRuntime', {
+        ...runtime,
+        status: 'subscription-required',
+        lastAppliedAt: new Date().toISOString(),
+        logLevel: 'warning',
+        logMessage: 'H2O start blocked: no usable oversea subscription for current user.'
+      });
+      return;
+    }
+    if (runtime.mode === 'system-tun' && !runtime.tunInstalled) {
+      h2oManagerView = 'proxy';
+      void runAction('updateH2oRuntime', {
+        ...runtime,
+        status: 'tun-required',
+        lastAppliedAt: new Date().toISOString(),
+        logLevel: 'warning',
+        logMessage: 'H2O start blocked: system TUN helper is not installed.'
+      });
+      return;
+    }
+  }
+  if (action === 'requestH2oProxy') {
+    const runtime = h2oRuntime();
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      metrics: {
+        ...runtime.metrics,
+        connections: runtime.running ? runtime.metrics.connections + 1 : runtime.metrics.connections,
+        lastProxyAppliedAt: new Date().toISOString()
+      },
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: `H2O broker policy applied in ${h2oModeLabel(runtime.mode)}.`
+    });
+    return;
+  }
+  if (action === 'runH2oTest') {
+    const runtime = h2oRuntime();
+    const targetUrl = readH2oTestUrl();
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      metrics: {
+        ...runtime.metrics,
+        lastProxyAppliedAt: new Date().toISOString()
+      },
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: `H2O test opened through broker profile: ${targetUrl}.`
+    });
     return;
   }
   if (action === 'openRollback') {
@@ -208,6 +417,16 @@ root.addEventListener('submit', (event) => {
     void runAction(action, {
       account: String(payload.account || ''),
       password: String(payload.password || '')
+    });
+  }
+  if (action === 'add-h2o-rule') {
+    const runtime = h2oRuntime();
+    const rule = h2oRuleFromInput(readH2oRuleForm(form));
+    void runAction('updateH2oRuntime', {
+      ...runtime,
+      rules: upsertH2oRule(runtime.rules, rule),
+      lastAppliedAt: new Date().toISOString(),
+      logMessage: `H2O rule added: ${rule.host} -> ${rule.kind}.`
     });
   }
 });
@@ -272,6 +491,7 @@ async function runAction(action, payload) {
       launchH2o: () => api.launchH2o?.() || api.enableH2o(),
       stopH2o: () => api.stopH2o?.(),
       setH2oMode: () => api.setH2oMode?.(payload),
+      updateH2oRuntime: () => api.updateH2oRuntime?.(payload),
       checkUpdates: () => api.checkUpdates(),
       applyUpdate: () => api.applyUpdate?.(),
       restartApp: () => api.restartApp?.(),
@@ -285,6 +505,11 @@ async function runAction(action, payload) {
       if (next && typeof next === 'object' && 'connection' in next) state = next;
       if (action === 'installAppCenter' && state.apps?.appcenter?.installed) {
         await setScreen('appcenter');
+      }
+      if (action === 'launchH2o' && state.apps?.h2o?.installed) {
+        selectedAppId = 'h2o';
+        appCenterRoute = 'h2o';
+        appInspectorCollapsed = true;
       }
     }
   } finally {
@@ -1026,12 +1251,14 @@ function renderAppCenterView(connected) {
   const apps = appCatalog();
   const visibleApps = filteredAppCatalog(apps);
   if (!apps.some((app) => app.appId === selectedAppId)) selectedAppId = apps[0]?.appId || 'h2o';
-  const selected = apps.find((app) => app.appId === selectedAppId) || visibleApps[0] || apps[0] || null;
+  const h2o = apps.find((app) => app.appId === 'h2o');
+  const route = appCenterRoute === 'h2o' && h2o ? 'h2o' : 'catalog';
+  const selected = route === 'h2o' ? h2o : apps.find((app) => app.appId === selectedAppId) || visibleApps[0] || apps[0] || null;
   const categories = appCenterCategories(apps);
   const hasError = apps.some((app) => app.errorMessage || app.runtimeState === 'error' || app.status === 'error');
   return `
-    <section class="appcenter-window appcenter-product ${appDebugOpen ? 'is-debug-open' : ''} ${appInspectorCollapsed ? 'is-inspector-collapsed' : ''}">
-      <aside class="appcenter-rail">
+    <section class="appcenter-window appcenter-product ${route === 'h2o' ? 'is-app-managing' : ''} ${appDebugOpen ? 'is-debug-open' : ''} ${appInspectorCollapsed ? 'is-inspector-collapsed' : ''}">
+      ${route === 'h2o' ? '' : `<aside class="appcenter-rail">
         <div class="appcenter-account">
           <div class="avatar-mark">${escapeHtml((state.identity?.displayName || 'V').slice(0, 1))}</div>
           <div>
@@ -1051,16 +1278,19 @@ function renderAppCenterView(connected) {
           <button class="text-button" type="button" data-action="toggle-app-debug">${appDebugOpen ? '隐藏 Debug' : 'Debug'}</button>
           <span>${escapeHtml(hasError ? '有应用需要处理' : '所有应用正常')}</span>
         </div>
-      </aside>
+      </aside>`}
 
-      <section class="appcenter-main">
+      <section class="appcenter-main ${route === 'h2o' ? 'is-h2o-manager' : ''}">
         <header class="appcenter-titlebar">
           <div>
-            <p class="kicker">APPCENTER</p>
-            <h3>应用中心</h3>
-            <span>${escapeHtml(connected ? 'MX-H2I 已连接，可以安装和打开应用' : '连接 MX-H2I 后可安装应用')}</span>
+            <p class="kicker">${route === 'h2o' ? 'APPCENTER / H2O' : 'APPCENTER'}</p>
+            <h3>${route === 'h2o' ? 'H2O 管理' : '应用中心'}</h3>
+            <span>${escapeHtml(route === 'h2o'
+              ? 'Home To Oversea 通过 MX-H2I broker-session 托管出海策略'
+              : connected ? 'MX-H2I 已连接，可以安装和打开应用' : '连接 MX-H2I 后可安装应用')}</span>
           </div>
           <div class="toolbar-actions">
+            ${route === 'h2o' ? '<button class="secondary-button" type="button" data-action="show-app-catalog">返回市场</button>' : ''}
             <button class="secondary-button" type="button" data-action="toggle-app-debug">${appDebugOpen ? '关闭 Debug' : 'Debug'}</button>
             ${renderCheckUpdatesButton('primary-button')}
           </div>
@@ -1068,20 +1298,22 @@ function renderAppCenterView(connected) {
 
         ${hasError ? renderAppCenterErrorBanner(apps) : ''}
 
-        <section class="appcenter-marketbar">
-          <div>
-            <h4>${escapeHtml(appCategory === 'all' ? '推荐应用' : categoryTitle(appCategory))}</h4>
-            <p>${escapeHtml(visibleApps.length)} 个应用</p>
-          </div>
-          <label class="appcenter-search">
-            <span>⌕</span>
-            <input data-app-search value="${escapeAttr(appSearch)}" placeholder="搜索应用" />
-          </label>
-        </section>
+        ${route === 'h2o' ? renderH2oManager(h2o, connected) : `
+          <section class="appcenter-marketbar">
+            <div>
+              <h4>${escapeHtml(appCategory === 'all' ? '推荐应用' : categoryTitle(appCategory))}</h4>
+              <p>${escapeHtml(visibleApps.length)} 个应用</p>
+            </div>
+            <label class="appcenter-search">
+              <span>⌕</span>
+              <input data-app-search value="${escapeAttr(appSearch)}" placeholder="搜索应用" />
+            </label>
+          </section>
 
-        <section class="catalog-grid appcenter-card-grid mx-scrollbar">
-          ${visibleApps.length ? visibleApps.map((app) => renderAppCenterCard(app, connected, selected?.appId === app.appId)).join('') : renderEmptyCatalog()}
-        </section>
+          <section class="catalog-grid appcenter-card-grid mx-scrollbar">
+            ${visibleApps.length ? visibleApps.map((app) => renderAppCenterCard(app, connected, selected?.appId === app.appId)).join('') : renderEmptyCatalog()}
+          </section>
+        `}
       </section>
 
       ${selected ? renderAppCenterSidePanel(selected, connected) : ''}
@@ -1383,8 +1615,264 @@ function renderAppCenterDebugPanel(app, connected) {
   `;
 }
 
+function renderH2oManager(app, connected) {
+  const runtime = h2oRuntime(app);
+  const running = runtime.running === true;
+  const activeSubscriptionReady = h2oHasUsableSubscription(runtime);
+  const actionDisabled = !connected || !app.installed || !activeSubscriptionReady;
+  return `
+    <section class="h2o-manager mx-scrollbar">
+      <section class="h2o-manager-hero" data-state="${escapeAttr(running ? 'running' : runtime.status)}">
+        <div>
+          <p class="kicker">HOME TO OVERSEA</p>
+          <h4>${escapeHtml(runtime.activeSubscription.name)}</h4>
+          <span>${escapeHtml(h2oSubscriptionStatusText(runtime, connected))}</span>
+        </div>
+        <div class="h2o-manager-actions">
+          <button class="secondary-button" type="button" data-action="refreshH2oSubscription" data-subscription-id="${escapeAttr(runtime.activeSubscription.id)}" ${actionDisabled ? 'disabled' : ''}>刷新订阅</button>
+          <button class="${running ? 'secondary-button' : 'primary-button'}" type="button" data-action="${running ? 'stopH2o' : 'launchH2o'}" ${!connected || !activeSubscriptionReady || busyAction === 'launchH2o' || busyAction === 'stopH2o' ? 'disabled' : ''}>
+            ${running ? '停止' : '启动'}
+          </button>
+        </div>
+      </section>
+
+      <nav class="h2o-manager-tabs" aria-label="H2O sections">
+        ${h2oManagerTab('overview', '首页')}
+        ${h2oManagerTab('proxy', '代理')}
+        ${h2oManagerTab('subscriptions', '订阅')}
+        ${h2oManagerTab('rules', '规则')}
+        ${h2oManagerTab('test', '测试')}
+        ${h2oManagerTab('logs', '日志')}
+      </nav>
+
+      ${renderH2oManagerBody(runtime, app, connected)}
+    </section>
+  `;
+}
+
+function h2oManagerTab(id, label) {
+  return `<button class="${h2oManagerView === id ? 'is-active' : ''}" type="button" data-action="set-h2o-view" data-view="${escapeAttr(id)}">${escapeHtml(label)}</button>`;
+}
+
+function renderH2oManagerBody(runtime, app, connected) {
+  if (h2oManagerView === 'proxy') return renderH2oProxyManager(runtime, connected);
+  if (h2oManagerView === 'subscriptions') return renderH2oSubscriptionManager(runtime, connected);
+  if (h2oManagerView === 'rules') return renderH2oRuleManager(runtime, connected);
+  if (h2oManagerView === 'test') return renderH2oTestManager(runtime, connected);
+  if (h2oManagerView === 'logs') return renderH2oLogManager(runtime, app);
+  return renderH2oOverviewManager(runtime, app, connected);
+}
+
+function renderH2oOverviewManager(runtime, app, connected) {
+  const activeSubscriptionReady = h2oHasUsableSubscription(runtime);
+  return `
+    <section class="h2o-manager-view">
+      <div class="h2o-stat-grid">
+        ${h2oStat('运行状态', h2oRuntimeStatusLabel(runtime))}
+        ${h2oStat('当前模式', h2oModeLabel(runtime.mode))}
+        ${h2oStat('当前订阅', runtime.activeSubscription.name)}
+        ${h2oStat('连接数', String(runtime.metrics.connections || 0))}
+        ${h2oStat('上传总量', formatBytes(runtime.metrics.uploadBytes))}
+        ${h2oStat('下载总量', formatBytes(runtime.metrics.downloadBytes))}
+        ${h2oStat('本地代理', `:${runtime.ports.mixed}`)}
+        ${h2oStat('管理后台', `:${runtime.ports.admin}`)}
+      </div>
+      <section class="h2o-action-band">
+        <div>
+          <strong>${escapeHtml(runtime.running ? '策略运行中' : '策略未启动')}</strong>
+          <span>${escapeHtml(runtime.running ? 'PAC、Split DNS 和代理规则由 MX-H2I broker-session 合并执行。' : '启动后 H2O 会使用当前 AppCenter 权限和 managed profile。')}</span>
+        </div>
+        <div class="toolbar-actions">
+          <button class="secondary-button" type="button" data-action="requestH2oProxy" ${!runtime.running || !connected || !activeSubscriptionReady ? 'disabled' : ''}>应用策略</button>
+          <button class="primary-button" type="button" data-action="${runtime.running ? 'stopH2o' : 'launchH2o'}" ${!connected || !activeSubscriptionReady ? 'disabled' : ''}>${runtime.running ? '停止' : '启动'}</button>
+        </div>
+      </section>
+      <section class="h2o-rule-preview">
+        <div class="panel-head">
+          <div>
+            <h4>常用规则</h4>
+            <p>${escapeHtml(`${runtime.rules.filter((rule) => rule.enabled !== false).length} 条启用`)}</p>
+          </div>
+          <button class="secondary-button" type="button" data-action="set-h2o-view" data-view="rules">管理规则</button>
+        </div>
+        ${renderH2oRuleRows(runtime.rules.slice(0, 4), true)}
+      </section>
+      ${!app.installed ? '<p class="h2o-manager-note">H2O 尚未安装，先从右侧详情安装后再启动。</p>' : ''}
+    </section>
+  `;
+}
+
+function renderH2oProxyManager(runtime, connected) {
+  const activeSubscriptionReady = h2oHasUsableSubscription(runtime);
+  return `
+    <section class="h2o-manager-view">
+      <section class="h2o-action-band">
+        <div>
+          <strong>${escapeHtml(h2oModeLabel(runtime.mode))}</strong>
+          <span>${escapeHtml(h2oModeGuidance(runtime.mode, runtime))}</span>
+        </div>
+        <div class="toolbar-actions">
+          <button class="secondary-button" type="button" data-action="requestH2oProxy" ${!runtime.running || !connected || !activeSubscriptionReady ? 'disabled' : ''}>切换</button>
+          <button class="primary-button" type="button" data-action="${runtime.tunInstalled ? 'uninstallH2oTun' : 'installH2oTun'}" ${!connected ? 'disabled' : ''}>${runtime.tunInstalled ? '卸载 TUN' : '安装 TUN'}</button>
+        </div>
+      </section>
+      <div class="h2o-mode-grid">
+        ${h2oManagerModeButton('app-rule', runtime.mode, 'App 模式')}
+        ${h2oManagerModeButton('app-global', runtime.mode, '全局模式')}
+        ${h2oManagerModeButton('system-tun', runtime.mode, '系统 TUN')}
+      </div>
+      <section class="h2o-port-panel">
+        <div class="panel-head">
+          <div>
+            <h4>端口</h4>
+            <p>推荐 mixed 23458 / DNS 1053</p>
+          </div>
+          <button class="secondary-button" type="button" data-action="saveH2oPorts">保存端口</button>
+        </div>
+        <div class="h2o-port-grid">
+          ${h2oPortField('mixed', 'Mixed', runtime.ports.mixed)}
+          ${h2oPortField('dns', 'DNS', runtime.ports.dns)}
+          ${h2oPortField('controller', 'Controller', runtime.ports.controller)}
+          ${h2oPortField('admin', 'Admin', runtime.ports.admin)}
+        </div>
+      </section>
+      <div class="h2o-stat-grid is-compact">
+        ${h2oStat('引擎来源', '内置 mihomo')}
+        ${h2oStat('TUN', runtime.tunInstalled ? '已安装' : '未安装')}
+        ${h2oStat('控制接口', `:${runtime.ports.controller}`)}
+        ${h2oStat('最近应用', formatDateTime(runtime.lastAppliedAt))}
+      </div>
+    </section>
+  `;
+}
+
+function renderH2oSubscriptionManager(runtime, connected) {
+  const currentUserReady = isUserIdentity();
+  return `
+    <section class="h2o-manager-view">
+      <section class="h2o-action-band">
+        <div>
+          <strong>Managed Oversea Profile</strong>
+          <span>${escapeHtml(currentUserReady ? '已使用当前用户从 Internal / k8s admin 获取系统 oversea 配置。' : '系统 oversea 默认订阅需要登录用户；Visitor 不会自动获得 admin 指派节点。')}</span>
+        </div>
+        <button class="secondary-button" type="button" data-action="refreshH2oSubscription" data-subscription-id="${escapeAttr(runtime.activeSubscription.id)}" ${!connected || !h2oSubscriptionUsable(runtime.activeSubscription) ? 'disabled' : ''}>刷新当前</button>
+      </section>
+      <div class="h2o-subscription-list">
+        ${runtime.subscriptions.map((item) => {
+          const usable = h2oSubscriptionUsable(item);
+          return `
+          <article class="${item.id === runtime.activeSubscription.id ? 'is-active' : ''} ${usable ? '' : 'is-disabled'}">
+            <div>
+              <strong>${escapeHtml(item.name)}</strong>
+              <span>${escapeHtml(item.url)}</span>
+            </div>
+            <div class="h2o-subscription-meta">
+              <span>${escapeHtml(h2oSubscriptionBadge(item))}</span>
+              <span>${escapeHtml(String(item.nodes || 0))} nodes</span>
+              <span>${escapeHtml(String(item.latencyMs || '-'))} ms</span>
+              <span>${escapeHtml(formatDateTime(item.lastUpdatedAt))}</span>
+            </div>
+            <div class="toolbar-actions">
+              <button class="secondary-button" type="button" data-action="refreshH2oSubscription" data-subscription-id="${escapeAttr(item.id)}" ${!connected || !usable ? 'disabled' : ''}>刷新</button>
+              <button class="primary-button" type="button" data-action="setH2oSubscription" data-subscription-id="${escapeAttr(item.id)}" ${item.id === runtime.activeSubscription.id || !connected || !usable ? 'disabled' : ''}>使用</button>
+            </div>
+          </article>
+        `; }).join('')}
+      </div>
+    </section>
+  `;
+}
+
+function renderH2oRuleManager(runtime, connected) {
+  return `
+    <section class="h2o-manager-view">
+      <section class="h2o-quick-rules">
+        <button class="secondary-button" type="button" data-action="addH2oQuickRule" data-host="google.com" data-kind="allow" ${!connected ? 'disabled' : ''}>Google</button>
+        <button class="secondary-button" type="button" data-action="addH2oQuickRule" data-host="youtube.com" data-kind="allow" ${!connected ? 'disabled' : ''}>YouTube</button>
+        <button class="secondary-button" type="button" data-action="addH2oQuickRule" data-host="x.com" data-kind="allow" ${!connected ? 'disabled' : ''}>X / Twitter</button>
+        <button class="secondary-button" type="button" data-action="addH2oQuickRule" data-host="telegram.org" data-kind="allow" ${!connected ? 'disabled' : ''}>Telegram</button>
+      </section>
+      <form class="h2o-rule-form" data-form-action="add-h2o-rule">
+        <input name="host" placeholder="example.com" />
+        <select name="kind">
+          <option value="allow">白名单</option>
+          <option value="block">黑名单</option>
+        </select>
+        <button class="primary-button" type="submit" ${!connected ? 'disabled' : ''}>添加</button>
+      </form>
+      ${renderH2oRuleRows(runtime.rules, false)}
+    </section>
+  `;
+}
+
+function renderH2oTestManager(runtime, connected) {
+  return `
+    <section class="h2o-manager-view">
+      <section class="h2o-test-panel">
+        <input data-h2o-test-url value="https://www.google.com" />
+        <button class="primary-button" type="button" data-action="runH2oTest" ${!connected ? 'disabled' : ''}>打开测试窗口</button>
+      </section>
+      <div class="h2o-stat-grid is-compact">
+        ${h2oStat('当前模式', h2oModeLabel(runtime.mode))}
+        ${h2oStat('本地代理', `:${runtime.ports.mixed}`)}
+        ${h2oStat('运行状态', h2oRuntimeStatusLabel(runtime))}
+      </div>
+    </section>
+  `;
+}
+
+function renderH2oLogManager(runtime, app) {
+  const rows = h2oLogRows(runtime, app);
+  return `
+    <section class="h2o-manager-view">
+      <div class="h2o-log-stream">
+        ${rows.map((item) => `
+          <div data-level="${escapeAttr(item.level || 'info')}">
+            <strong>${escapeHtml(item.message)}</strong>
+            <span>${escapeHtml(formatDateTime(item.at))}</span>
+          </div>
+        `).join('') || '<p class="empty">暂无日志</p>'}
+      </div>
+    </section>
+  `;
+}
+
+function renderH2oRuleRows(rules, compact) {
+  return `
+    <div class="h2o-rule-list ${compact ? 'is-compact' : ''}">
+      ${rules.map((rule) => `
+        <article class="${rule.enabled === false ? 'is-disabled' : ''}" data-kind="${escapeAttr(rule.kind)}">
+          <div>
+            <strong>${escapeHtml(rule.host)}</strong>
+            <span>${escapeHtml(rule.target)}</span>
+          </div>
+          <em>${escapeHtml(h2oRuleKindLabel(rule.kind))}</em>
+          ${compact ? '' : `<button class="secondary-button" type="button" data-action="toggleH2oRule" data-rule-id="${escapeAttr(rule.id)}">${rule.enabled === false ? '启用' : '停用'}</button>`}
+        </article>
+      `).join('') || '<p class="empty">暂无规则</p>'}
+    </div>
+  `;
+}
+
+function h2oStat(label, value) {
+  return `<article class="h2o-stat-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || '-')}</strong></article>`;
+}
+
+function h2oManagerModeButton(mode, activeMode, label) {
+  return `<button class="${mode === activeMode ? 'is-active' : ''}" type="button" data-action="setH2oMode" data-mode="${escapeAttr(mode)}">${escapeHtml(label)}</button>`;
+}
+
+function h2oPortField(name, label, value) {
+  return `
+    <label>
+      <span>${escapeHtml(label)}</span>
+      <input data-h2o-port="${escapeAttr(name)}" inputmode="numeric" value="${escapeAttr(String(value || ''))}" />
+    </label>
+  `;
+}
+
 function renderH2oPluginPanel(app) {
-  const runtime = app.runtime || {};
+  const runtime = h2oRuntime(app);
   const ports = runtime.ports || {};
   const subscription = runtime.activeSubscription || {};
   return `
@@ -1397,10 +1885,9 @@ function renderH2oPluginPanel(app) {
         ${h2oModeButton('app-rule', runtime.mode, '规则')}
         ${h2oModeButton('app-global', runtime.mode, '全局')}
         ${h2oModeButton('system-tun', runtime.mode, 'TUN')}
-        ${h2oModeButton('direct', runtime.mode, '直连')}
       </div>
       <div class="h2o-runtime-facts">
-        <div><span>订阅</span><strong>${escapeHtml(subscription.name || 'Home To Oversea 默认策略')}</strong></div>
+        <div><span>订阅</span><strong>${escapeHtml(subscription.name || 'System Oversea 默认订阅')}</strong></div>
         <div><span>节点</span><strong>${escapeHtml(String(subscription.nodes || 0))}</strong></div>
         <div><span>延迟</span><strong>${escapeHtml(subscription.latencyMs ? `${subscription.latencyMs} ms` : '-')}</strong></div>
         <div><span>端口</span><strong>${escapeHtml(`:${ports.mixed || 23458}`)}</strong></div>
@@ -1416,8 +1903,278 @@ function h2oModeButton(mode, activeMode, label) {
 function h2oModeLabel(mode) {
   if (mode === 'app-global') return '全局模式';
   if (mode === 'system-tun') return '系统 TUN';
-  if (mode === 'direct') return '直连';
-  return '规则模式';
+  return 'App 模式';
+}
+
+function h2oRuntimeStatusLabel(runtime) {
+  if (runtime.running) return '运行中';
+  if (runtime.status === 'ready') return '就绪';
+  if (runtime.status === 'error') return '异常';
+  if (runtime.status === 'tun-required') return '等待 TUN';
+  if (runtime.status === 'subscription-required') return '等待订阅';
+  return '已停止';
+}
+
+function h2oModeGuidance(mode, runtime) {
+  if (mode === 'system-tun') {
+    return runtime.tunInstalled
+      ? '系统 TUN 会覆盖当前应用、应用内通道以及系统浏览器和其他应用。'
+      : '系统 TUN 需要先安装本机 helper。';
+  }
+  if (mode === 'app-global') return '全局模式覆盖当前应用和后续新建 BrowserWindow，黑名单域名不代理。';
+  return 'App 模式只覆盖当前应用；配置白名单后，仅白名单域名代理。';
+}
+
+function h2oRuleKindLabel(kind) {
+  return kind === 'block' ? '黑名单' : '白名单';
+}
+
+function h2oSubscriptionBadge(item) {
+  if (item.requiresUser && !isUserIdentity()) return '等待登录';
+  if (item.status === 'login-required') return '等待登录';
+  if (item.status === 'error') return '异常';
+  if (item.status === 'pending') return '待分配';
+  if (item.source === 'demo') return 'Demo';
+  return '系统';
+}
+
+function h2oSubscriptionStatusText(runtime, connected) {
+  if (!connected) return '等待 MX-H2I standalone channel。';
+  if (!h2oHasUsableSubscription(runtime)) {
+    return runtime.activeSubscription.requiresUser
+      ? '当前系统 oversea 订阅等待登录用户，暂不可启动 H2O。'
+      : '当前订阅未就绪，先在订阅页选择可用 profile。';
+  }
+  return 'Internal broker 已连接，H2O 使用当前用户的 managed oversea profile。';
+}
+
+function h2oHasUsableSubscription(runtime) {
+  return h2oSubscriptionUsable(runtime?.activeSubscription);
+}
+
+function h2oSubscriptionUsable(item) {
+  if (!item) return false;
+  if (item.requiresUser && !isUserIdentity()) return false;
+  if (['login-required', 'pending', 'error'].includes(item.status)) return false;
+  return Boolean(item.url) && Number(item.nodes || 0) > 0;
+}
+
+function isUserIdentity() {
+  return state?.identity?.kind === 'user' || state?.connection?.mode === 'employee';
+}
+
+function h2oRuntime(app = state.apps?.h2o) {
+  const runtime = app?.runtime && typeof app.runtime === 'object' ? app.runtime : {};
+  const ports = runtime.ports && typeof runtime.ports === 'object' ? runtime.ports : {};
+  const activeSeed = runtime.activeSubscription && typeof runtime.activeSubscription === 'object'
+    ? runtime.activeSubscription
+    : {};
+  const subscriptions = normalizeH2oSubscriptions(runtime.subscriptions, activeSeed);
+  const activeId = runtime.activeSubscriptionId || activeSeed.id || subscriptions[0]?.id || 'h2o-default';
+  const activeSubscription = subscriptions.find((item) => item.id === activeId) || subscriptions[0] || normalizeH2oSubscription(activeSeed);
+  return {
+    kind: 'h2o-plugin',
+    mode: normalizeH2oModeUi(runtime.mode),
+    running: runtime.running === true,
+    status: runtime.status || (runtime.running === true ? 'running' : 'stopped'),
+    tunInstalled: runtime.tunInstalled === true,
+    adminUrl: runtime.adminUrl || 'http://127.0.0.1:23456',
+    ports: {
+      admin: normalizePortUi(ports.admin, 23456),
+      controller: normalizePortUi(ports.controller, 23457),
+      mixed: normalizePortUi(ports.mixed, 23458),
+      dns: normalizePortUi(ports.dns, 1053)
+    },
+    activeSubscription,
+    activeSubscriptionId: activeSubscription.id,
+    subscriptions,
+    rules: normalizeH2oRules(runtime.rules),
+    metrics: normalizeH2oMetrics(runtime.metrics),
+    startedAt: runtime.startedAt || null,
+    lastAppliedAt: runtime.lastAppliedAt || null
+  };
+}
+
+function normalizeH2oModeUi(value) {
+  const text = String(value || '').trim();
+  if (text === 'global') return 'app-global';
+  if (text === 'rule') return 'app-rule';
+  if (text === 'tun') return 'system-tun';
+  if (text === 'direct') return 'app-rule';
+  return ['app-rule', 'app-global', 'system-tun'].includes(text) ? text : 'app-rule';
+}
+
+function normalizeH2oSubscriptions(value, activeSeed) {
+  const rows = Array.isArray(value) ? value : [];
+  const subscriptions = rows.map((item) => normalizeH2oSubscription(item)).filter(Boolean);
+  const active = normalizeH2oSubscription(activeSeed);
+  if (!subscriptions.some((item) => item.id === active.id)) subscriptions.unshift(active);
+  if (!subscriptions.some((item) => item.id === 'h2o-default')) {
+    subscriptions.unshift(normalizeH2oSubscription({
+      id: 'h2o-default',
+      name: 'System Oversea 默认订阅',
+      url: 'mx-h2i://managed/home-to-oversea',
+      nodes: 6,
+      latencyMs: 42,
+      status: isUserIdentity() ? 'ready' : 'login-required',
+      source: 'internal',
+      requiresUser: true
+    }));
+  }
+  if (!subscriptions.some((item) => item.id === 'h2o-oversea-backup')) {
+    subscriptions.push(normalizeH2oSubscription({
+      id: 'h2o-oversea-backup',
+      name: 'System Oversea 备用订阅',
+      url: 'mx-h2i://managed/home-to-oversea-backup',
+      nodes: 3,
+      latencyMs: 58,
+      status: isUserIdentity() ? 'ready' : 'login-required',
+      source: 'internal',
+      requiresUser: true
+    }));
+  }
+  return subscriptions.slice(0, 12);
+}
+
+function normalizeH2oSubscription(input) {
+  const row = input && typeof input === 'object' ? input : {};
+  const id = String(row.id || 'h2o-default');
+  const requiresUser = row.requiresUser === true || (row.source !== 'demo' && id.startsWith('h2o-'));
+  const status = requiresUser && !isUserIdentity()
+    ? 'login-required'
+    : String(row.status || 'ready');
+  return {
+    id,
+    name: String(row.name || 'System Oversea 默认订阅'),
+    url: String(row.url || 'mx-h2i://managed/home-to-oversea'),
+    nodes: normalizeNonNegativeUi(row.nodes, 6),
+    latencyMs: normalizeNonNegativeUi(row.latencyMs, 42),
+    status,
+    source: String(row.source || 'internal'),
+    requiresUser,
+    assignable: row.assignable !== false,
+    lastUpdatedAt: row.lastUpdatedAt || new Date().toISOString()
+  };
+}
+
+function normalizeH2oRules(value) {
+  const rows = Array.isArray(value) ? value : [];
+  const normalized = rows.map((item) => {
+    const row = item && typeof item === 'object' ? item : {};
+    const host = String(row.host || '').trim();
+    if (!host) return null;
+    const kind = normalizeH2oRuleKind(row.kind || policyToRuleKind(row.policy));
+    return {
+      id: String(row.id || ruleIdFromHost(host)),
+      host,
+      target: String(row.target || defaultRuleTarget(kind)),
+      kind,
+      enabled: row.enabled !== false,
+      source: String(row.source || 'managed'),
+      hitCount: normalizeNonNegativeUi(row.hitCount, 0)
+    };
+  }).filter(Boolean);
+  if (normalized.length) return normalized.slice(0, 24);
+  return [
+    { id: 'google', host: 'google.com', target: 'App 模式白名单', kind: 'allow', enabled: true, source: 'preset:google', hitCount: 0 },
+    { id: 'youtube', host: 'youtube.com', target: 'App 模式白名单', kind: 'allow', enabled: true, source: 'preset:youtube', hitCount: 0 },
+    { id: 'telegram', host: 'telegram.org', target: 'App 模式白名单', kind: 'allow', enabled: true, source: 'preset:telegram', hitCount: 0 },
+    { id: 'internal-api', host: 'api.mxinfo-inc.cn', target: '全局/TUN 黑名单', kind: 'block', enabled: true, source: 'builtin', hitCount: 0 }
+  ];
+}
+
+function normalizeH2oMetrics(value) {
+  const row = value && typeof value === 'object' ? value : {};
+  return {
+    uploadBytes: normalizeNonNegativeUi(row.uploadBytes, 0),
+    downloadBytes: normalizeNonNegativeUi(row.downloadBytes, 0),
+    connections: normalizeNonNegativeUi(row.connections, 0),
+    lastProxyAppliedAt: row.lastProxyAppliedAt || null
+  };
+}
+
+function normalizePortUi(value, fallback) {
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback;
+}
+
+function normalizeNonNegativeUi(value, fallback) {
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0 ? number : fallback;
+}
+
+function readH2oPortFields() {
+  const ports = {};
+  for (const input of root.querySelectorAll('[data-h2o-port]')) {
+    ports[input.dataset.h2oPort] = Number(input.value || 0);
+  }
+  return ports;
+}
+
+function readH2oRuleForm(form) {
+  const payload = Object.fromEntries(new FormData(form).entries());
+  return {
+    host: String(payload.host || ''),
+    kind: String(payload.kind || 'allow')
+  };
+}
+
+function readH2oTestUrl() {
+  const input = root.querySelector('[data-h2o-test-url]');
+  return input?.value || 'https://www.google.com';
+}
+
+function h2oRuleFromInput(input) {
+  const host = String(input?.host || '').trim() || 'example.com';
+  const kind = normalizeH2oRuleKind(input?.kind || policyToRuleKind(input?.policy));
+  return {
+    id: ruleIdFromHost(host),
+    host,
+    target: defaultRuleTarget(kind),
+    kind,
+    enabled: true,
+    source: input?.source || 'manual',
+    hitCount: 0
+  };
+}
+
+function upsertH2oRule(rules, rule) {
+  const next = normalizeH2oRules(rules).filter((item) => item.id !== rule.id);
+  return [rule, ...next].slice(0, 24);
+}
+
+function ruleIdFromHost(host) {
+  return String(host || 'rule').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'rule';
+}
+
+function defaultRuleTarget(kind) {
+  return kind === 'block' ? '全局/TUN 黑名单' : 'App 模式白名单';
+}
+
+function normalizeH2oRuleKind(value) {
+  return String(value || '').trim() === 'block' ? 'block' : 'allow';
+}
+
+function policyToRuleKind(policy) {
+  return ['internal-direct', 'direct', 'block', 'blacklist'].includes(String(policy || '').trim()) ? 'block' : 'allow';
+}
+
+function h2oLogRows(runtime, app) {
+  const logs = Array.isArray(app.logs) ? app.logs : [];
+  const synthetic = [
+    runtime.lastAppliedAt ? { level: 'info', message: `Runtime applied: ${h2oModeLabel(runtime.mode)}`, at: runtime.lastAppliedAt } : null,
+    runtime.startedAt ? { level: 'info', message: 'H2O runtime started.', at: runtime.startedAt } : null,
+    runtime.metrics.lastProxyAppliedAt ? { level: 'info', message: 'Broker proxy policy applied.', at: runtime.metrics.lastProxyAppliedAt } : null
+  ].filter(Boolean);
+  return [...logs, ...synthetic].slice(0, 20);
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
 }
 
 function appUserTags(app) {
@@ -1443,7 +2200,7 @@ function appUserStatus(app) {
 function appUserFeatures(app) {
   if (app.appId === 'h2o') {
     return [
-      { title: 'Home To Oversea', detail: '按规则、全局、TUN 或直连模式托管出海策略。' },
+      { title: 'Home To Oversea', detail: '按 App、全局或系统 TUN 模式托管出海策略。' },
       { title: '订阅和规则', detail: '沿用类 Clash 的订阅、规则、端口和日志模型。' },
       { title: '共享底座', detail: '通过 MX-H2I broker-session 继承用户、网络和权限。' }
     ];
@@ -1491,7 +2248,7 @@ function appPrimaryAction(app, connected) {
   if (app.appId === 'h2o') {
     if (app.installed && app.enabled) {
       return {
-        action: 'launchH2o',
+        action: app.runtimeState === 'running' ? 'showH2oManager' : 'launchH2o',
         label: app.runtimeState === 'running' ? '打开管理' : '启动',
         disabled: !connected || busyAction === 'launchH2o'
       };
@@ -1849,12 +2606,29 @@ function createMockApi() {
           tunInstalled: false,
           adminUrl: 'http://127.0.0.1:23456',
           ports: { admin: 23456, controller: 23457, mixed: 23458, dns: 1053 },
+          subscriptions: [
+            { id: 'h2o-default', name: 'System Oversea 默认订阅', url: 'mx-h2i://managed/home-to-oversea', nodes: 6, latencyMs: 42, status: 'login-required', source: 'internal', requiresUser: true, lastUpdatedAt: new Date().toISOString() },
+            { id: 'h2o-oversea-backup', name: 'System Oversea 备用订阅', url: 'mx-h2i://managed/home-to-oversea-backup', nodes: 3, latencyMs: 58, status: 'login-required', source: 'internal', requiresUser: true, lastUpdatedAt: new Date().toISOString() }
+          ],
+          activeSubscriptionId: 'h2o-default',
           activeSubscription: {
             id: 'h2o-default',
-            name: 'Home To Oversea 默认策略',
+            name: 'System Oversea 默认订阅',
+            url: 'mx-h2i://managed/home-to-oversea',
             nodes: 6,
-            latencyMs: 42
+            latencyMs: 42,
+            status: 'login-required',
+            source: 'internal',
+            requiresUser: true,
+            lastUpdatedAt: new Date().toISOString()
           },
+          rules: [
+            { id: 'google', host: 'google.com', target: 'App 模式白名单', kind: 'allow', enabled: true, source: 'preset:google', hitCount: 0 },
+            { id: 'youtube', host: 'youtube.com', target: 'App 模式白名单', kind: 'allow', enabled: true, source: 'preset:youtube', hitCount: 0 },
+            { id: 'telegram', host: 'telegram.org', target: 'App 模式白名单', kind: 'allow', enabled: true, source: 'preset:telegram', hitCount: 0 },
+            { id: 'internal-api', host: 'api.mxinfo-inc.cn', target: '全局/TUN 黑名单', kind: 'block', enabled: true, source: 'builtin', hitCount: 0 }
+          ],
+          metrics: { uploadBytes: 0, downloadBytes: 0, connections: 0, lastProxyAppliedAt: null },
           startedAt: null,
           lastAppliedAt: null
         },
@@ -1939,30 +2713,51 @@ function createMockApi() {
       },
       feedback: null
     }),
-    loginEmployee: async (input) => commit({
-      connection: {
-        ...mockState.connection,
-        state: 'connected',
-        mode: 'employee',
-        localIp: '10.89.8.24',
-        routePolicy: 'user full',
-        subject: `user:${String(input.account || 'employee').split('@')[0]}`,
-        health: {
-          wireGuard: 'ready',
-          domesticRelay: 'ready',
-          internalApi: 'ready',
-          splitDns: 'ready',
-          appBroker: 'ready'
-        }
-      },
-      identity: {
-        kind: 'user',
-        displayName: String(input.account || 'employee').split('@')[0],
-        account: input.account || 'employee@qpjoy.local',
-        scopes: ['auth.read', 'appcenter.read', 'network.hdi.status']
-      },
-      feedback: null
-    }),
+    loginEmployee: async (input) => {
+      const now = new Date().toISOString();
+      const subscriptions = (mockState.apps.h2o.runtime?.subscriptions || []).map((item) => item.requiresUser
+        ? { ...item, status: 'ready', lastUpdatedAt: now }
+        : item);
+      const activeSubscription = subscriptions.find((item) => item.id === 'h2o-default') || mockState.apps.h2o.runtime.activeSubscription;
+      return commit({
+        connection: {
+          ...mockState.connection,
+          state: 'connected',
+          mode: 'employee',
+          localIp: '10.89.8.24',
+          routePolicy: 'user full',
+          subject: `user:${String(input.account || 'employee').split('@')[0]}`,
+          health: {
+            wireGuard: 'ready',
+            domesticRelay: 'ready',
+            internalApi: 'ready',
+            splitDns: 'ready',
+            appBroker: 'ready'
+          }
+        },
+        identity: {
+          kind: 'user',
+          displayName: String(input.account || 'employee').split('@')[0],
+          account: input.account || 'employee@qpjoy.local',
+          scopes: ['auth.read', 'appcenter.read', 'network.hdi.status']
+        },
+        apps: {
+          ...mockState.apps,
+          h2o: {
+            ...mockState.apps.h2o,
+            runtime: {
+              ...mockState.apps.h2o.runtime,
+              subscriptions,
+              activeSubscription,
+              activeSubscriptionId: activeSubscription.id,
+              status: mockState.apps.h2o.runtime?.running ? 'running' : 'ready',
+              lastAppliedAt: now
+            }
+          }
+        },
+        feedback: null
+      });
+    },
     disconnect: async () => commit({
       connection: {
         ...mockState.connection,
@@ -2034,12 +2829,18 @@ function createMockApi() {
             running: true,
             status: 'running',
             startedAt: mockState.apps.h2o.runtime?.startedAt || new Date().toISOString(),
-            lastAppliedAt: new Date().toISOString()
+            lastAppliedAt: new Date().toISOString(),
+            metrics: {
+              ...(mockState.apps.h2o.runtime?.metrics || {}),
+              connections: 1,
+              lastProxyAppliedAt: new Date().toISOString()
+            }
           },
-          lastAction: new Date().toISOString()
+          lastAction: new Date().toISOString(),
+          logs: [{ level: 'info', message: 'H2O runtime started from AppCenter.', at: new Date().toISOString() }, ...(mockState.apps.h2o.logs || [])]
         }
       },
-      feedback: { tone: 'success', message: 'H2O 运行态已就绪。开发态从 mx-app-h2o 单独启动窗口。' }
+      feedback: { tone: 'success', message: 'H2O 运行态已就绪，已在 AppCenter 内打开管理页。' }
     }),
     stopH2o: async () => commit({
       apps: {
@@ -2076,6 +2877,25 @@ function createMockApi() {
       },
       feedback: { tone: 'success', message: 'H2O 模式已切换。' }
     }),
+    updateH2oRuntime: async (patch) => {
+      const runtime = h2oRuntime({ runtime: { ...mockState.apps.h2o.runtime, ...(patch || {}) } });
+      const logMessage = patch?.logMessage || 'H2O runtime updated from AppCenter.';
+      return commit({
+        apps: {
+          ...mockState.apps,
+          h2o: {
+            ...mockState.apps.h2o,
+            enabled: true,
+            status: runtime.running ? 'running' : 'enabled',
+            runtimeState: runtime.running ? 'running' : 'ready',
+            runtime,
+            lastAction: new Date().toISOString(),
+            logs: [{ level: patch?.logLevel || 'info', message: logMessage, at: new Date().toISOString() }, ...(mockState.apps.h2o.logs || [])]
+          }
+        },
+        feedback: { tone: 'success', message: 'H2O 运行配置已更新。' }
+      });
+    },
     checkUpdates: async () => commit({
       update: {
         ...mockState.update,

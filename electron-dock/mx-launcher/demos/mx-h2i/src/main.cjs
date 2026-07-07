@@ -259,6 +259,7 @@ function registerIpc() {
         auth,
         feedback: '员工账号已绑定 Internal User Center，并续租固定 user IP。'
       });
+      hydrateH2oSystemSubscriptionsForUser();
     } catch (err) {
       await applyConnectionError('员工登录失败', err);
     }
@@ -391,23 +392,63 @@ function registerIpc() {
       await saveAndBroadcast();
       return visibleRuntime();
     }
+    const currentH2oRuntime = h2oPluginRuntime(runtime.apps.h2o.runtime);
+    if (!h2oHasUsableSubscription(currentH2oRuntime.activeSubscription)) {
+      runtime.apps.h2o.runtime = h2oPluginRuntime({
+        ...currentH2oRuntime,
+        running: false,
+        status: 'subscription-required',
+        lastAppliedAt: nowIso()
+      });
+      runtime.apps.h2o.runtimeState = 'ready';
+      runtime.apps.h2o.status = 'enabled';
+      runtime.apps.h2o.lastAction = nowIso();
+      pushAppLog('h2o', 'warn', 'H2O start blocked: no usable oversea subscription for current user.');
+      runtime.feedback = {
+        tone: 'warning',
+        message: 'H2O 需要登录用户获得 Internal / k8s admin 指派的 oversea 订阅后才能启动。'
+      };
+      touchRuntime('h2o subscription required');
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
+    if (currentH2oRuntime.mode === 'system-tun' && !currentH2oRuntime.tunInstalled) {
+      runtime.apps.h2o.runtime = h2oPluginRuntime({
+        ...currentH2oRuntime,
+        running: false,
+        status: 'tun-required',
+        lastAppliedAt: nowIso()
+      });
+      runtime.apps.h2o.runtimeState = 'ready';
+      runtime.apps.h2o.status = 'enabled';
+      runtime.apps.h2o.lastAction = nowIso();
+      pushAppLog('h2o', 'warn', 'H2O start blocked: system TUN helper is not installed.');
+      runtime.feedback = {
+        tone: 'warning',
+        message: '系统 TUN 模式需要先安装本机 TUN helper。'
+      };
+      touchRuntime('h2o tun required');
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
     runtime.apps.h2o.enabled = true;
     runtime.apps.h2o.status = 'running';
     runtime.apps.h2o.runtimeState = 'running';
     runtime.apps.h2o.runtime = h2oPluginRuntime({
-      ...runtime.apps.h2o.runtime,
+      ...currentH2oRuntime,
       running: true,
       status: 'running',
-      startedAt: runtime.apps.h2o.runtime?.startedAt || nowIso(),
+      startedAt: currentH2oRuntime.startedAt || nowIso(),
       lastAppliedAt: nowIso()
     });
     runtime.apps.h2o.lastAction = nowIso();
+    pushAppLog('h2o', 'info', 'H2O runtime started from AppCenter.');
     const installReport = await reportAppCenterInstallation(runtime.apps.h2o, 'launch-h2o');
     runtime.feedback = {
       tone: installReport.ok === false ? 'warning' : 'success',
       message: installReport.ok === false
         ? `H2O 运行态已就绪；安装状态同步失败：${installReport.message}`
-        : 'H2O 运行态已就绪。开发态请从 mx-app-h2o 启动窗口，生产态由 AppCenter package runtime 打开入口。'
+        : 'H2O 运行态已就绪，已在 AppCenter 内打开管理入口。'
     };
     touchRuntime('h2o launched');
     await saveAndBroadcast();
@@ -455,8 +496,39 @@ function registerIpc() {
       return visibleRuntime();
     }
     const nextMode = normalizeH2oMode(mode);
+    const currentH2oRuntime = h2oPluginRuntime(runtime.apps.h2o.runtime);
+    if (!h2oHasUsableSubscription(currentH2oRuntime.activeSubscription)) {
+      runtime.apps.h2o.runtime = h2oPluginRuntime({
+        ...currentH2oRuntime,
+        status: 'subscription-required',
+        lastAppliedAt: nowIso()
+      });
+      runtime.feedback = {
+        tone: 'warning',
+        message: 'H2O 需要先获得可用 oversea 订阅后才能切换模式。'
+      };
+      pushAppLog('h2o', 'warn', `H2O mode switch blocked without usable subscription: ${nextMode}.`);
+      touchRuntime('h2o subscription required');
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
+    if (nextMode === 'system-tun' && !currentH2oRuntime.tunInstalled) {
+      runtime.apps.h2o.runtime = h2oPluginRuntime({
+        ...currentH2oRuntime,
+        status: 'tun-required',
+        lastAppliedAt: nowIso()
+      });
+      runtime.feedback = {
+        tone: 'warning',
+        message: '切换系统 TUN 前需要先安装本机 TUN helper。'
+      };
+      pushAppLog('h2o', 'warn', 'H2O system TUN mode blocked before TUN helper installation.');
+      touchRuntime('h2o tun required');
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
     runtime.apps.h2o.runtime = h2oPluginRuntime({
-      ...runtime.apps.h2o.runtime,
+      ...currentH2oRuntime,
       mode: nextMode,
       status: runtime.apps.h2o.runtimeState === 'running' ? 'running' : 'ready',
       lastAppliedAt: nowIso()
@@ -471,6 +543,50 @@ function registerIpc() {
         : 'H2O 模式已切换。'
     };
     touchRuntime('h2o mode changed');
+    await saveAndBroadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('mx-h2i:update-h2o-runtime', async (_event, patch) => {
+    if (!runtime.apps.h2o.installed) {
+      runtime.feedback = {
+        tone: 'warning',
+        message: '请先安装 H2O。'
+      };
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
+    const row = patch && typeof patch === 'object' && !Array.isArray(patch) ? patch : {};
+    const current = h2oPluginRuntime(runtime.apps.h2o.runtime);
+    const nextRuntime = h2oPluginRuntime({
+      ...current,
+      ...row,
+      ports: {
+        ...current.ports,
+        ...(row.ports && typeof row.ports === 'object' ? row.ports : {})
+      },
+      activeSubscription: {
+        ...current.activeSubscription,
+        ...(row.activeSubscription && typeof row.activeSubscription === 'object' ? row.activeSubscription : {})
+      },
+      metrics: {
+        ...current.metrics,
+        ...(row.metrics && typeof row.metrics === 'object' ? row.metrics : {})
+      },
+      subscriptions: Array.isArray(row.subscriptions) ? row.subscriptions : current.subscriptions,
+      rules: Array.isArray(row.rules) ? row.rules : current.rules,
+      lastAppliedAt: nullableString(row.lastAppliedAt) || nowIso()
+    });
+    runtime.apps.h2o.enabled = true;
+    runtime.apps.h2o.status = nextRuntime.running ? 'running' : 'enabled';
+    runtime.apps.h2o.runtimeState = nextRuntime.running ? 'running' : 'ready';
+    runtime.apps.h2o.runtime = nextRuntime;
+    runtime.apps.h2o.lastAction = nowIso();
+    pushAppLog('h2o', ['info', 'warning', 'error'].includes(row.logLevel) ? row.logLevel : 'info', nullableString(row.logMessage) || 'H2O runtime updated from AppCenter.');
+    runtime.feedback = {
+      tone: 'success',
+      message: 'H2O 运行配置已更新。'
+    };
+    touchRuntime('h2o runtime updated');
     await saveAndBroadcast();
     return visibleRuntime();
   });
@@ -2849,6 +2965,12 @@ function h2oPluginRuntime(input) {
   const row = input && typeof input === 'object' ? input : {};
   const ports = row.ports && typeof row.ports === 'object' ? row.ports : {};
   const subscription = row.activeSubscription && typeof row.activeSubscription === 'object' ? row.activeSubscription : {};
+  const subscriptions = normalizeH2oSubscriptions(row.subscriptions, subscription);
+  const activeSubscriptionId = nullableString(row.activeSubscriptionId)
+    || nullableString(subscription.id)
+    || subscriptions[0]?.id
+    || 'h2o-default';
+  const activeSubscription = subscriptions.find((item) => item.id === activeSubscriptionId) || subscriptions[0] || normalizeH2oSubscription(subscription, {});
   return {
     kind: 'h2o-plugin',
     mode: normalizeH2oMode(row.mode),
@@ -2862,15 +2984,120 @@ function h2oPluginRuntime(input) {
       mixed: normalizePort(ports.mixed, 23458),
       dns: normalizePort(ports.dns, 1053)
     },
-    activeSubscription: {
-      id: nullableString(subscription.id) || 'h2o-default',
-      name: nullableString(subscription.name) || 'Home To Oversea 默认策略',
-      nodes: normalizeNonNegativeInteger(subscription.nodes, 6),
-      latencyMs: normalizeNonNegativeInteger(subscription.latencyMs, 42)
-    },
+    activeSubscriptionId: activeSubscription.id,
+    activeSubscription,
+    subscriptions,
+    rules: normalizeH2oRules(row.rules),
+    metrics: normalizeH2oMetrics(row.metrics),
     startedAt: nullableString(row.startedAt),
     lastAppliedAt: nullableString(row.lastAppliedAt)
   };
+}
+
+function normalizeH2oSubscriptions(value, activeSubscription) {
+  const rows = Array.isArray(value) ? value : [];
+  const normalized = rows.map((item) => normalizeH2oSubscription(item, {})).filter(Boolean);
+  const active = normalizeH2oSubscription(activeSubscription, {});
+  if (!normalized.some((item) => item.id === active.id)) normalized.unshift(active);
+  if (!normalized.some((item) => item.id === 'h2o-default')) {
+    normalized.unshift(normalizeH2oSubscription({
+      id: 'h2o-default',
+      name: 'System Oversea 默认订阅',
+      url: 'mx-h2i://managed/home-to-oversea',
+      nodes: 6,
+      latencyMs: 42,
+      status: runtimeHasUserIdentity() ? 'ready' : 'login-required',
+      source: 'internal',
+      requiresUser: true
+    }, {}));
+  }
+  if (!normalized.some((item) => item.id === 'h2o-oversea-backup')) {
+    normalized.push(normalizeH2oSubscription({
+      id: 'h2o-oversea-backup',
+      name: 'System Oversea 备用订阅',
+      url: 'mx-h2i://managed/home-to-oversea-backup',
+      nodes: 3,
+      latencyMs: 58,
+      status: runtimeHasUserIdentity() ? 'ready' : 'login-required',
+      source: 'internal',
+      requiresUser: true
+    }, {}));
+  }
+  return normalized.slice(0, 12);
+}
+
+function normalizeH2oSubscription(input, defaults) {
+  const row = input && typeof input === 'object' ? input : {};
+  const id = nullableString(row.id) || nullableString(defaults.id) || 'h2o-default';
+  const source = nullableString(row.source) || nullableString(defaults.source) || 'internal';
+  const requiresUser = row.requiresUser === true || defaults.requiresUser === true || (source !== 'demo' && id.startsWith('h2o-'));
+  const status = requiresUser && !runtimeHasUserIdentity()
+    ? 'login-required'
+    : nullableString(row.status) || nullableString(defaults.status) || 'ready';
+  return {
+    id,
+    name: nullableString(row.name) || nullableString(defaults.name) || 'System Oversea 默认订阅',
+    url: nullableString(row.url) || nullableString(defaults.url) || 'mx-h2i://managed/home-to-oversea',
+    nodes: normalizeNonNegativeInteger(row.nodes, normalizeNonNegativeInteger(defaults.nodes, 6)),
+    latencyMs: normalizeNonNegativeInteger(row.latencyMs, normalizeNonNegativeInteger(defaults.latencyMs, 42)),
+    status,
+    source,
+    requiresUser,
+    assignable: row.assignable !== false && defaults.assignable !== false,
+    lastUpdatedAt: nullableString(row.lastUpdatedAt) || nullableString(defaults.lastUpdatedAt) || nowIso()
+  };
+}
+
+function normalizeH2oRules(value) {
+  const rows = Array.isArray(value) ? value : [];
+  const normalized = rows.map((item) => {
+    const row = item && typeof item === 'object' ? item : {};
+    const host = nullableString(row.host);
+    if (!host) return null;
+    const kind = normalizeH2oRuleKind(nullableString(row.kind) || policyToH2oRuleKind(row.policy));
+    return {
+      id: nullableString(row.id) || h2oRuleIdFromHost(host),
+      host,
+      target: nullableString(row.target) || defaultH2oRuleTarget(kind),
+      kind,
+      enabled: row.enabled !== false,
+      source: nullableString(row.source) || 'managed',
+      hitCount: normalizeNonNegativeInteger(row.hitCount, 0)
+    };
+  }).filter(Boolean);
+  if (normalized.length) return normalized.slice(0, 24);
+  return [
+    { id: 'google', host: 'google.com', target: 'App 模式白名单', kind: 'allow', enabled: true, source: 'preset:google', hitCount: 0 },
+    { id: 'youtube', host: 'youtube.com', target: 'App 模式白名单', kind: 'allow', enabled: true, source: 'preset:youtube', hitCount: 0 },
+    { id: 'telegram', host: 'telegram.org', target: 'App 模式白名单', kind: 'allow', enabled: true, source: 'preset:telegram', hitCount: 0 },
+    { id: 'internal-api', host: 'api.mxinfo-inc.cn', target: '全局/TUN 黑名单', kind: 'block', enabled: true, source: 'builtin', hitCount: 0 }
+  ];
+}
+
+function normalizeH2oMetrics(value) {
+  const row = value && typeof value === 'object' ? value : {};
+  return {
+    uploadBytes: normalizeNonNegativeInteger(row.uploadBytes, 0),
+    downloadBytes: normalizeNonNegativeInteger(row.downloadBytes, 0),
+    connections: normalizeNonNegativeInteger(row.connections, 0),
+    lastProxyAppliedAt: nullableString(row.lastProxyAppliedAt)
+  };
+}
+
+function h2oRuleIdFromHost(host) {
+  return String(host || 'rule').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'rule';
+}
+
+function defaultH2oRuleTarget(kind) {
+  return kind === 'block' ? '全局/TUN 黑名单' : 'App 模式白名单';
+}
+
+function normalizeH2oRuleKind(value) {
+  return String(value || '').trim() === 'block' ? 'block' : 'allow';
+}
+
+function policyToH2oRuleKind(policy) {
+  return ['internal-direct', 'direct', 'block', 'blacklist'].includes(String(policy || '').trim()) ? 'block' : 'allow';
 }
 
 function normalizeH2oMode(value) {
@@ -2878,7 +3105,38 @@ function normalizeH2oMode(value) {
   if (text === 'rule') return 'app-rule';
   if (text === 'global') return 'app-global';
   if (text === 'tun') return 'system-tun';
-  return ['app-rule', 'app-global', 'system-tun', 'direct'].includes(text) ? text : 'app-rule';
+  if (text === 'direct') return 'app-rule';
+  return ['app-rule', 'app-global', 'system-tun'].includes(text) ? text : 'app-rule';
+}
+
+function h2oHasUsableSubscription(subscription) {
+  if (!subscription) return false;
+  if (subscription.requiresUser && !runtimeHasUserIdentity()) return false;
+  if (['login-required', 'pending', 'error'].includes(subscription.status)) return false;
+  return Boolean(subscription.url) && Number(subscription.nodes || 0) > 0;
+}
+
+function runtimeHasUserIdentity() {
+  return runtime?.identity?.kind === 'user' || runtime?.connection?.mode === 'employee';
+}
+
+function hydrateH2oSystemSubscriptionsForUser() {
+  if (!runtime?.apps?.h2o?.runtime || !runtimeHasUserIdentity()) return;
+  const current = h2oPluginRuntime(runtime.apps.h2o.runtime);
+  const subscriptions = current.subscriptions.map((item) => item.requiresUser
+    ? { ...item, status: 'ready', lastUpdatedAt: item.lastUpdatedAt || nowIso() }
+    : item);
+  const activeSubscription = subscriptions.find((item) => item.id === current.activeSubscriptionId)
+    || subscriptions.find((item) => item.id === 'h2o-default')
+    || current.activeSubscription;
+  runtime.apps.h2o.runtime = h2oPluginRuntime({
+    ...current,
+    subscriptions,
+    activeSubscription,
+    activeSubscriptionId: activeSubscription.id,
+    status: current.running ? 'running' : 'ready',
+    lastAppliedAt: nowIso()
+  });
 }
 
 function normalizePort(value, fallback) {
