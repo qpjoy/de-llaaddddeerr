@@ -531,6 +531,17 @@ span {
   padding: 26px 0 12px;
 }
 
+.login-notice {
+  border: 1px solid rgba(248, 208, 108, 0.52);
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: rgba(248, 208, 108, 0.12);
+  color: var(--text-1);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
 .connect-dial {
   display: grid;
   place-items: center;
@@ -2201,7 +2212,9 @@ button:disabled {
 .h2o-manager-tabs,
 .h2o-mode-grid,
 .h2o-quick-rules,
+.h2o-test-presets,
 .h2o-rule-form,
+.h2o-subscription-form,
 .h2o-test-panel,
 .h2o-subscription-meta {
   display: flex;
@@ -2307,6 +2320,8 @@ button:disabled {
 .h2o-port-grid label,
 .h2o-rule-form input,
 .h2o-rule-form select,
+.h2o-subscription-form input,
+.h2o-subscription-form select,
 .h2o-test-panel input {
   min-width: 0;
 }
@@ -2325,6 +2340,8 @@ button:disabled {
 .h2o-port-grid input,
 .h2o-rule-form input,
 .h2o-rule-form select,
+.h2o-subscription-form input,
+.h2o-subscription-form select,
 .h2o-test-panel input {
   min-height: 38px;
   border: 1px solid var(--line);
@@ -2332,6 +2349,16 @@ button:disabled {
   padding: 0 11px;
   background: var(--bg-input);
   color: var(--text-1);
+}
+
+.h2o-subscription-form {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.9fr) minmax(260px, 1.6fr) 130px minmax(120px, 0.8fr) minmax(120px, 0.8fr) repeat(2, auto);
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(17, 19, 25, 0.32);
 }
 
 .h2o-rule-form {
@@ -2343,8 +2370,37 @@ button:disabled {
   align-items: stretch;
 }
 
-.h2o-quick-rules .secondary-button {
+.h2o-quick-rules .secondary-button,
+.h2o-test-presets .secondary-button {
   min-width: 118px;
+}
+
+.h2o-rule-packs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.h2o-rule-packs article {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(17, 19, 25, 0.32);
+}
+
+.h2o-rule-packs strong,
+.h2o-rule-packs span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.h2o-rule-packs span {
+  color: var(--text-3);
+  font-size: 12px;
 }
 
 .h2o-subscription-list,
@@ -2396,6 +2452,17 @@ button:disabled {
 .h2o-log-stream span {
   color: var(--text-3);
   font-size: 12px;
+}
+
+.h2o-subscription-reason {
+  grid-column: 1 / 3;
+  min-width: 0;
+  color: var(--warning);
+  font-size: 12px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .h2o-rule-list article {
@@ -2608,7 +2675,9 @@ button:disabled {
   .h2o-stat-grid.is-compact,
   .h2o-mode-grid,
   .h2o-port-grid,
+  .h2o-rule-packs,
   .h2o-rule-form,
+  .h2o-subscription-form,
   .app-card {
     grid-template-columns: 1fr;
   }

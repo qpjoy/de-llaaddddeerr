@@ -23,6 +23,8 @@ if (mode !== 'local') {
 }
 
 const requiredOutputs = [
+  resolve(repoRoot, 'electron-plugin/packages/electron-core-mihomo/dist/index.js'),
+  resolve(repoRoot, 'electron-plugin/packages/electron-plugin-tunnel/dist/mihomo/MihomoManager.js'),
   resolve(repoRoot, 'electron-plugin/packages/electron-core-wireguard/dist/index.js'),
   resolve(mxLauncherRoot, 'packages/launcher-core/dist/index.js'),
   resolve(mxLauncherRoot, 'packages/launcher-embed-sdk/dist/index.js'),
@@ -47,6 +49,8 @@ if (!existsSync(resolve(mxLauncherRoot, 'node_modules')) || !existsSync(resolve(
   shell('pnpm install --prefer-offline --frozen-lockfile=false', mxLauncherRoot);
 }
 
+shell('pnpm --filter @qpjoy/electron-core-mihomo build', mxLauncherRoot);
+shell('pnpm --filter @qpjoy/electron-plugin-tunnel build', mxLauncherRoot);
 shell('pnpm --filter @qpjoy/electron-core-wireguard build', mxLauncherRoot);
 shell('pnpm --filter @qpjoy/mx-launcher-core build', mxLauncherRoot);
 shell('pnpm --filter @qpjoy/mx-launcher-embed-sdk build', mxLauncherRoot);

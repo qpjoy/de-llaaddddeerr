@@ -50,6 +50,7 @@ export interface RenderRuntimeConfigInput {
   settings: MihomoRuntimeSettings;
   rules: MihomoDomainRule[];
   geoxUrl?: Record<string, string>;
+  useGeoRules?: boolean;
   meshServices?: MihomoMeshServiceRoute[];
 }
 
@@ -78,6 +79,25 @@ export const PRIVATE_DIRECT_RULES = [
   'IP-CIDR6,fe80::/10,DIRECT,no-resolve'
 ];
 
+export const BOOTSTRAP_CN_DIRECT_RULES = [
+  'DOMAIN-SUFFIX,cn,DIRECT',
+  'DOMAIN-SUFFIX,中国,DIRECT',
+  'DOMAIN-SUFFIX,baidu.com,DIRECT',
+  'DOMAIN-SUFFIX,bdstatic.com,DIRECT',
+  'DOMAIN-SUFFIX,qq.com,DIRECT',
+  'DOMAIN-SUFFIX,weixin.qq.com,DIRECT',
+  'DOMAIN-SUFFIX,alicdn.com,DIRECT',
+  'DOMAIN-SUFFIX,taobao.com,DIRECT',
+  'DOMAIN-SUFFIX,tmall.com,DIRECT',
+  'DOMAIN-SUFFIX,alipay.com,DIRECT',
+  'DOMAIN-SUFFIX,aliyun.com,DIRECT',
+  'DOMAIN-SUFFIX,jd.com,DIRECT',
+  'DOMAIN-SUFFIX,mi.com,DIRECT',
+  'DOMAIN-SUFFIX,bilibili.com,DIRECT',
+  'DOMAIN-SUFFIX,douyin.com,DIRECT',
+  'DOMAIN-SUFFIX,bytedance.com,DIRECT'
+];
+
 export function validateSubscriptionYaml(content: string): void {
   let parsed: unknown;
   try {
@@ -103,6 +123,7 @@ export function renderRuntimeConfig(input: RenderRuntimeConfigInput): RenderedRu
   const parsed = parse(input.baseYaml) as unknown;
   const config: MihomoConfig = isRecord(parsed) ? parsed : {};
   const proxyPolicyName = findProxyPolicyName(config);
+  const useGeoRules = input.useGeoRules !== false;
 
   ensureProxyGroup(config, proxyPolicyName);
 
@@ -113,16 +134,28 @@ export function renderRuntimeConfig(input: RenderRuntimeConfigInput): RenderedRu
   config['log-level'] = 'info';
   config['external-controller'] = `127.0.0.1:${input.settings.ports.controller}`;
   config.secret = input.settings.controllerSecret;
-  config['geodata-mode'] = true;
-  config['geo-auto-update'] = true;
-  config['geo-update-interval'] = 24;
-  config['geox-url'] = input.geoxUrl ?? DEFAULT_GEOX_URL;
+  if (useGeoRules) {
+    config['geodata-mode'] = true;
+    config['geo-auto-update'] = true;
+    config['geo-update-interval'] = 24;
+    config['geox-url'] = input.geoxUrl ?? DEFAULT_GEOX_URL;
+  } else {
+    delete config['geodata-mode'];
+    delete config['geo-auto-update'];
+    delete config['geo-update-interval'];
+    delete config['geox-url'];
+  }
   config.dns = {
     ...(isRecord(config.dns) ? config.dns : {}),
-    ...dnsOverlay(input.settings.ports.dns)
+    ...dnsOverlay(input.settings.ports.dns, useGeoRules)
   };
+  if (!useGeoRules && isRecord(config.dns)) {
+    delete config.dns.fallback;
+    delete config.dns['fallback-filter'];
+    delete config.dns['nameserver-policy'];
+  }
   config.tun = tunOverlay(input.settings.mode === 'system-tun' && input.settings.tunInstalled);
-  config.rules = buildRules(input.settings.mode, proxyPolicyName, input.rules, input.meshServices ?? []);
+  config.rules = buildRules(input.settings.mode, proxyPolicyName, input.rules, input.meshServices ?? [], useGeoRules);
 
   return {
     yaml: stringify(config, { lineWidth: 0 }),
@@ -142,11 +175,16 @@ function buildRules(
   mode: string,
   proxyPolicyName: string,
   rules: MihomoDomainRule[],
-  meshServices: MihomoMeshServiceRoute[]
+  meshServices: MihomoMeshServiceRoute[],
+  useGeoRules: boolean
 ): string[] {
   const enabled = rules.filter((rule) => rule.enabled);
   const blockRules = enabled.filter((rule) => rule.kind === 'block').map((rule) => domainRule(rule.domain, 'REJECT'));
   const allowRules = enabled.filter((rule) => rule.kind === 'allow').map((rule) => domainRule(rule.domain, proxyPolicyName));
+  const cnDirectRules = useGeoRules ? [
+    'GEOSITE,CN,DIRECT',
+    'GEOIP,CN,DIRECT'
+  ] : BOOTSTRAP_CN_DIRECT_RULES;
   const meshRules = meshServices.flatMap((service) => {
     const target = service.routeTo || 'DIRECT';
     const domainRules = (service.domains ?? []).map((domain) => domainRule(domain, target));
@@ -161,6 +199,7 @@ function buildRules(
       ...PRIVATE_DIRECT_RULES,
       ...meshRules,
       ...blockRules,
+      ...cnDirectRules,
       `MATCH,${proxyPolicyName}`
     ];
   }
@@ -170,8 +209,7 @@ function buildRules(
     ...meshRules,
     ...blockRules,
     ...allowRules,
-    'GEOSITE,CN,DIRECT',
-    'GEOIP,CN,DIRECT',
+    ...cnDirectRules,
     'MATCH,REJECT'
   ];
 }
@@ -232,8 +270,8 @@ function ensureProxyGroup(config: MihomoConfig, proxyPolicyName: string): void {
   ];
 }
 
-function dnsOverlay(dnsPort: number): Record<string, unknown> {
-  return {
+function dnsOverlay(dnsPort: number, useGeoRules: boolean): Record<string, unknown> {
+  const overlay: Record<string, unknown> = {
     enable: true,
     listen: `0.0.0.0:${dnsPort}`,
     ipv6: false,
@@ -243,14 +281,20 @@ function dnsOverlay(dnsPort: number): Record<string, unknown> {
     'enhanced-mode': 'fake-ip',
     'fake-ip-range': '198.18.0.1/16',
     'default-nameserver': ['223.5.5.5', '119.29.29.29', '1.1.1.1'],
-    nameserver: ['https://dns.alidns.com/dns-query', 'https://doh.pub/dns-query'],
-    fallback: ['tls://1.1.1.1', 'tls://8.8.8.8'],
-    'fallback-filter': {
+    nameserver: ['https://dns.alidns.com/dns-query', 'https://doh.pub/dns-query']
+  };
+  if (useGeoRules) {
+    overlay.fallback = ['tls://1.1.1.1', 'tls://8.8.8.8'];
+    overlay['fallback-filter'] = {
       geoip: true,
       'geoip-code': 'CN',
       geosite: ['gfw']
-    }
-  };
+    };
+  } else {
+    delete overlay.fallback;
+    delete overlay['fallback-filter'];
+  }
+  return overlay;
 }
 
 function tunOverlay(enable: boolean): Record<string, unknown> {

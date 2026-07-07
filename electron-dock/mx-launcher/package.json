@@ -14,12 +14,5 @@
     "luopan:dev": "pnpm --filter @qpjoy/luopan-demo dev",
     "luopan:build": "pnpm --filter @qpjoy/luopan-demo build",
     "luopan:check": "pnpm --filter @qpjoy/luopan-demo check"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "@parcel/watcher",
-      "electron",
-      "esbuild"
-    ]
   }
 }

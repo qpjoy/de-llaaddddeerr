@@ -4,5 +4,23 @@ packages:
   - "packages/*"
   - "ui-design"
   - "demos/*"
+  - "../../electron-plugin/packages/electron-core-mihomo"
   - "../../electron-plugin/packages/electron-core-wireguard"
+  - "../../electron-plugin/packages/electron-plugin-tunnel"
+  - "../../electron-plugin/packages/tunnel-engines/*"
   - "../../electron-plugin/packages/wireguard-engines/*"
+allowBuilds:
+  '@nestjs/core': true
+  '@parcel/watcher': true
+  better-sqlite3: true
+  electron: true
+  esbuild: true
+onlyBuiltDependencies:
+  - "@nestjs/core"
+  - "@parcel/watcher"
+  - "better-sqlite3"
+  - "electron"
+  - "electron-winstaller"
+  - "esbuild"
+  - "fs-xattr"
+  - "macos-alias"

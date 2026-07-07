@@ -18,7 +18,16 @@
     "make:win": "node scripts/dev-mode.mjs local && pnpm run check && node scripts/run-clean-env.mjs electron-builder --config electron-builder.config.cjs --win --x64"
   },
   "dependencies": {
-    "@qpjoy/electron-launcher": "workspace:*"
+    "@qpjoy/electron-core-mihomo": "workspace:^",
+    "@qpjoy/electron-launcher": "workspace:*",
+    "@qpjoy/electron-plugin-tunnel": "workspace:^"
+  },
+  "optionalDependencies": {
+    "@qpjoy/electron-plugin-tunnel-engine-darwin-arm64": "workspace:^",
+    "@qpjoy/electron-plugin-tunnel-engine-darwin-x64": "workspace:^",
+    "@qpjoy/electron-plugin-tunnel-engine-linux-arm64": "workspace:^",
+    "@qpjoy/electron-plugin-tunnel-engine-linux-x64": "workspace:^",
+    "@qpjoy/electron-plugin-tunnel-engine-win32-x64": "workspace:^"
   },
   "devDependencies": {
     "electron": "^34.0.0",

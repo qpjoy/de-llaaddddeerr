@@ -540,14 +540,27 @@ export class MihomoManager extends EventEmitter {
       throw new Error('active subscription has no downloaded content');
     }
 
+    const useGeoRules = this.runtimeGeoDataReady();
     const rendered = renderRuntimeConfig({
       baseYaml: active.content,
       settings,
-      rules: this.db.listRules()
+      rules: this.db.listRules(),
+      useGeoRules
     });
     writeFileSync(this.paths.config, rendered.yaml, 'utf8');
-    this.log('info', `Runtime config rendered with policy ${rendered.proxyPolicyName}`);
+    this.log('info', `Runtime config rendered with policy ${rendered.proxyPolicyName}${useGeoRules ? '' : ' (bootstrap without Geo rules)'}`);
     return this.paths.config;
+  }
+
+  private runtimeGeoDataReady(): boolean {
+    const candidates = [
+      ['GeoIP.dat', 'GeoSite.dat'],
+      ['geoip.dat', 'geosite.dat']
+    ];
+    return candidates.some(([geoip, geosite]) => (
+      existsSync(join(this.paths.runtime, geoip))
+      && existsSync(join(this.paths.runtime, geosite))
+    ));
   }
 
   private runExclusive<T>(task: () => Promise<T>): Promise<T> {
