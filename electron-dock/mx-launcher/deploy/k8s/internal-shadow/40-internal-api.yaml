@@ -129,6 +129,8 @@ spec:
                 name: mx-release-oss
                 optional: true
           env:
+            - name: SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED
+              value: "1"
             - name: MX_RELEASE_ARTIFACT_STORE_DIR
               value: /app/artifacts/release-center
             - name: PG_USER

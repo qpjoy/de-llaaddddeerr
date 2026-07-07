@@ -107,10 +107,11 @@ requires `confirmApply=true` before it becomes ready. The current boundary is
 manifest-only: no SSH/SCP/root mutation is performed by this API.
 `POST /internal/v1/site-slots/executions/:runId/runner-sessions` creates a
 Runner V1.1 session. `simulate` mode records every step as simulated evidence.
-`remote-ssh` mode is disabled by default and requires both
-`SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=true` and
-`confirmRemoteExecution=true`; otherwise it is blocked before any remote work is
-queued. `awx-shadow` mode records a queued provider session without opening SSH
+`remote-ssh` mode is enabled by default for Internal-managed site delivery and
+still requires `confirmRemoteExecution=true`; set
+`SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=false` to freeze remote runner
+creation. Without confirmation or when explicitly disabled, it is blocked before
+any remote work is queued. `awx-shadow` mode records a queued provider session without opening SSH
 or calling AWX; it lets Admin and CLI map Worker Contract V1 steps to AWX
 inventory, credential, job template, extra vars, and task-event evidence before
 real launch. `site-slot.worker-run.awx-launch` is the gated real provider action:

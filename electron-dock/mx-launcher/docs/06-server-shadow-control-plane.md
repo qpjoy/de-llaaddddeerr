@@ -499,8 +499,8 @@ V1 API 包括 `POST /internal/v1/site-slots/plans`、
 `POST /internal/v1/site-slots/plans/:planId/preflight` 和
 `POST /internal/v1/site-slots/plans/:planId/apply`。Runner V1.1 增加
 `POST /internal/v1/site-slots/executions/:runId/runner-sessions`。它生成计划、执行清单、
-runner 会话和审计记录，不直接远程执行。`remote-ssh` 需要服务端开关和请求确认；真实命令
-执行应由 Admin action、runner worker 或 site-agent 承接。
+runner 会话和审计记录，不直接远程执行。`remote-ssh` 默认启用服务端远程 runner 能力，
+仍需要请求确认；真实命令执行应由 Admin action、runner worker 或 site-agent 承接。
 
 Worker Contract V1 增加 `/runner-sessions/:sessionId/worker-jobs` 和
 `/worker-jobs/:jobId/reports`。job 是执行器输入，report 是执行器输出；两者都写审计。
@@ -521,7 +521,7 @@ summary 会附带 action hints，供 CLI/Desktop/Admin UI 展示下一步动作�
 K8s 或发版状态时仍调用原领域 API，并继续经过确认、审计、变更窗口和 worker report。
 `POST /internal/v1/admin/actions/execute` 是 V1 执行桥接入口：先校验 RBAC 和确认字段，
 再把上下文 action 分发到 site-slot execution、runner session、worker job 或 rollback
-execution。它不新增远程 SSH 能力；`remote-ssh` 仍受服务端开关和确认字段门禁限制。
+execution。它不新增远程 SSH 能力；`remote-ssh` 仍受服务端显式冻结开关和确认字段门禁限制。
 
 ### Release Center 模型
 

@@ -35,7 +35,8 @@ Namespace 类似一个逻辑隔离空间。`internal-shadow` 使用 `mx-internal
 Compose 里环境变量都写在一个 service 下。K8s 中要拆开：
 
 - ConfigMap 放 `MX_ENVIRONMENT`、`MX_SITE_ROLE`、`INTERNAL_STORE_DRIVER`、
-  `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED` 这类非敏感值。远程执行开关默认关闭。
+  `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED` 这类非敏感值。远程执行开关默认开启，可用
+  `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=0` 显式冻结。
 - Secret 放 `PG_PASSWORD`、`DATABASE_URL` 这类敏感值。
 
 `manage.sh k8s apply internal-shadow` 会从本地环境变量生成 Secret，不把密码写进 git：

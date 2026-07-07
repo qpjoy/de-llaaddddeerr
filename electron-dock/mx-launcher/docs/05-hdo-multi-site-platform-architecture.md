@@ -112,8 +112,9 @@ Domestic 和 Oversea 不再是配置真相源，而是 Internal 的可插拔 sit
 - apply manifest 需要 `confirmApply=true` 才会进入 ready；未确认时返回
   `requires-confirmation`，用于 Admin 审批、证据复核和变更窗口确认。
 - Internal 通过 `POST /internal/v1/site-slots/executions/:runId/runner-sessions` 启动
-  Runner V1.1 session。`simulate` 只记录模拟结果；`remote-ssh` 需要服务端
-  `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED` 和请求侧 `confirmRemoteExecution=true` 双门禁。
+  Runner V1.1 session。`simulate` 只记录模拟结果；`remote-ssh` 默认可生成远程 runner，
+  仍需要请求侧 `confirmRemoteExecution=true`，并可由服务端
+  `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=0` 显式冻结。
 - Internal 通过 `/runner-sessions/:sessionId/worker-jobs` 生成 Worker Contract V1 job，
   通过 `/worker-jobs/:jobId/reports` 接收 worker/site-agent 回报。job 包含 approval、
   change window、retry、rollback、step timeout、stop-on-failure 和 redaction policy。
@@ -429,14 +430,14 @@ SSH fallback 仍可调用
 `site-slot.domestic-relay-peer-append-ssh.prepare`，从已确认的 Domestic apply execution
 创建 `remote-ssh` runner session 和 worker job。这个 prepare 动作只排队和记录 gates：
 要求 `confirmRemoteExecution`、`confirmRelayPeerAppendSshPrepare`、`approvalId` 和
-change window；默认 shadow 下如果 `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED` 未开启，
-它会返回 blocked runner session 且不会创建 job，也不会触发 SSH/AWX。
+change window；如果服务端显式关闭 `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED`，它会返回
+blocked runner session 且不会创建 job，也不会触发 SSH/AWX。
 
 真实 SSH 执行入口是 `site-slot.worker-run.domestic-relay-peer-append-ssh`。它复用
 remote SSH gate，并额外要求 `confirmRemoteExecution` 和
 `confirmRelayPeerAppendSsh`。只要 job 不是 `remote-ssh`、缺 managed SSH profile、缺
-identity/known_hosts，或远程执行 env gate 未开启，该动作都会返回 `blocked`，不打开
-SSH、不写 worker report。只有 Internal operator 显式开启远程执行 gate，并使用带 SSH
+identity/known_hosts，或远程执行 env gate 被显式关闭，该动作都会返回 `blocked`，不打开
+SSH、不写 worker report。只有 Internal operator 保持远程执行 gate 可用，并使用带 SSH
 profile 的 remote worker job 后，它才会执行同一条 `wg set` 命令，并把 stdout/stderr、
 diagnosis、tcp probe 和 post-append evidence 记录到 worker report。
 

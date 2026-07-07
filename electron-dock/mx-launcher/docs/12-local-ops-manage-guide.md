@@ -411,8 +411,8 @@ MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
   bash scripts/manage.sh ops site-slot runner-start slotexec_xxx
 ```
 
-`remote-ssh` 模式默认会被门禁挡住。真实打开时需要服务端配置
-`SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=1`，脚本侧还要显式确认：
+`remote-ssh` 模式默认允许 Internal 生成远程 runner，但脚本侧仍要显式确认；需要临时冻结时可在
+服务端设置 `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=0`：
 
 ```bash
 SITE_SLOT_CONFIRM_REMOTE_EXECUTION=1 MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
@@ -436,9 +436,9 @@ MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
 ```
 
 Domestic relay peer append 的真实 SSH 路径可以先从 apply execution 一键准备
-`remote-ssh` runner session 和 worker job。默认 shadow 仍会被
-`SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED` 挡住，只返回 blocked session；打开远程执行
-gate 后，才会生成可继续审阅和执行的 job：
+`remote-ssh` runner session 和 worker job。默认 shadow 会在确认字段、审批、变更窗口和 SSH
+profile 齐备后生成可继续审阅和执行的 job；如果服务端显式设置
+`SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=0`，则只返回 blocked session：
 
 ```bash
 SITE_SLOT_APPROVAL_ID=approval-domestic-relay-peer-append \
@@ -476,7 +476,6 @@ dry-run 证据确认后，才可以进入真正远程推送。`artifact-push-rem
 remote gate、approvalId 和 change window 都齐全：
 
 ```bash
-SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=1 \
 SITE_SLOT_CONFIRM_REMOTE_EXECUTION=1 \
 MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
   bash scripts/manage.sh ops site-slot runner-start slotexec_xxx remote-ssh

@@ -41,9 +41,9 @@ export class SiteSlotsController {
         runnerModes: ['simulate', 'remote-ssh', 'awx-shadow'],
         executionProviders: ['internal-simulate', 'remote-ssh', 'awx-shadow'],
         executionBoundary: 'runner-session-v1',
-        remoteExecution: 'disabled-by-default',
+        remoteExecution: 'enabled-by-default',
         applyGate: 'confirmApply-required',
-        remoteExecutionGate: 'SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED-and-confirmRemoteExecution-required',
+        remoteExecutionGate: 'remote-execution-enabled-by-default-and-confirmRemoteExecution-required',
         workerContract: {
           version: 'site-slot-worker-v1',
           endpoints: ['worker-jobs', 'remote-ssh-gate', 'remote-ssh-handoff', 'worker-reports'],
