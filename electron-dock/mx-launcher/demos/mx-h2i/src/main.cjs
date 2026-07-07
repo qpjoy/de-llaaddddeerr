@@ -1430,6 +1430,7 @@ async function collectNetworkEnvironmentDiagnostics(reason = 'manual', options =
   const host = options.host || networkDiagnosticHost();
   const status = await systemDomainProxyStatusForDiagnostics(phase);
   const endpointRoute = await collectDarwinEndpointRouteDiagnostics(reason, { phase });
+  const windowsNrpt = collectWindowsNrptDiagnostics();
   let resolution = null;
   try {
     const mod = await import('@qpjoy/electron-launcher/network-diagnostics');
@@ -1458,12 +1459,14 @@ async function collectNetworkEnvironmentDiagnostics(reason = 'manual', options =
       updatedAt: nowIso()
     };
   }
+  resolution = annotateResolutionWithWindowsNrpt(resolution, windowsNrpt);
   return {
     reason,
     phase,
     host: host || null,
     resolution,
     endpointRoute,
+    windowsNrpt,
     systemDomainProxy: compactSystemDomainProxyStatus(status),
     priority: phase === 'connected'
       ? ['v2-split-dns', 'mx-h2i-wireguard', 'system-proxy-or-dns-for-unmatched', 'external-dns-for-unmatched']
@@ -1480,6 +1483,80 @@ async function systemDomainProxyStatusForDiagnostics(phase) {
     return status;
   }
   return systemDomainProxyManager.statusVerified().catch(() => status);
+}
+
+function collectWindowsNrptDiagnostics() {
+  if (process.platform !== 'win32') return null;
+  const wireGuard = runtime?.connection?.wireGuard || {};
+  const text = nullableString(wireGuard.routeLogTail) || nullableString(wireGuard.statusError) || '';
+  if (!text) return null;
+  const legacyComment = /comment=MX HDO \/ QPJoy HDO\s+mx-h2i/i.test(text);
+  const currentComment = /comment=MX-H2I \/ QPJoy MX-H2I\s+mx-h2i/i.test(text);
+  const addComplete = /nrpt add complete global=/i.test(text);
+  const addStarted = /nrpt add start rules=/i.test(text);
+  const removeComplete = /nrpt remove complete global=/i.test(text);
+  const rulesMissing = /NRPT rules missing after add|nrpt assert namespace=.* count=0/i.test(text);
+  const globalDisabled = /QueryPolicy=Disable|EnableDAForAllNetworks=Disable/i.test(text);
+  const globalReady = /nrpt add complete global=.*QueryPolicy=QueryBoth/i.test(text)
+    && /nrpt add complete global=.*EnableDAForAllNetworks=(EnableAlways|EnableDA|True|Enable|Enabled)/i.test(text);
+  const state = legacyComment
+    ? 'legacy-hdo-script'
+    : rulesMissing
+      ? 'rules-missing'
+      : globalDisabled && !globalReady
+        ? 'global-disabled'
+        : removeComplete && !addStarted && !addComplete
+          ? 'restart-remove-only'
+          : globalReady
+            ? 'ready'
+            : currentComment
+              ? 'current-script'
+              : 'unknown';
+  return {
+    platform: 'win32',
+    state,
+    legacyComment,
+    currentComment,
+    addStarted,
+    addComplete,
+    removeComplete,
+    rulesMissing,
+    globalDisabled,
+    globalReady,
+    serviceState: nullableString(wireGuard.serviceState),
+    routeLogPath: nullableString(wireGuard.routeLogPath)
+  };
+}
+
+function annotateResolutionWithWindowsNrpt(resolution, windowsNrpt) {
+  if (!resolution || typeof resolution !== 'object' || !windowsNrpt) return resolution;
+  if (resolution.ok === true) return resolution;
+  const hint = windowsNrptResolutionHint(windowsNrpt);
+  if (!hint) return resolution;
+  return {
+    ...resolution,
+    message: `${resolution.message || ''}${hint}`
+  };
+}
+
+function windowsNrptResolutionHint(windowsNrpt) {
+  if (!windowsNrpt || typeof windowsNrpt !== 'object') return '';
+  if (windowsNrpt.state === 'legacy-hdo-script') {
+    return '；检测到旧 HDO Windows NRPT 脚本标记（comment=MX HDO / QPJoy HDO），这台机器大概率不是最新 MX-H2I 安装包或旧服务脚本未覆盖，请安装最新包后重连。';
+  }
+  if (windowsNrpt.state === 'restart-remove-only') {
+    return '；当前日志只看到重启时移除 NRPT，尚未看到 nrpt add complete，可能正处于重启窗口期或服务脚本未继续安装规则，请稍等数秒后重新诊断，仍失败则重新连接/修复网络。';
+  }
+  if (windowsNrpt.state === 'global-disabled') {
+    return '；Windows NRPT 全局策略仍为 Disable，split DNS 不会接管所有网络，请用管理员授权重新连接或修复网络。';
+  }
+  if (windowsNrpt.state === 'rules-missing') {
+    return '；Windows NRPT 规则安装后校验缺失，请用管理员授权重新连接或修复网络，并检查是否有安全软件/组策略拦截 NRPT。';
+  }
+  if (windowsNrpt.state === 'ready') {
+    return '；Windows NRPT 日志显示规则已安装，若仍外部解析，请检查浏览器 Secure DNS/DoH、系统 DNS 缓存或第三方代理残留。';
+  }
+  return '';
 }
 
 async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
