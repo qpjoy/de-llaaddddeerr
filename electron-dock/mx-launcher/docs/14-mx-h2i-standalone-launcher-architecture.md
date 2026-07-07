@@ -994,9 +994,14 @@ DNS Routes 面板里编辑。V2 默认仍保留 k8s Caddy 作为可回退 backen
 - `Build Zone` 只生成 zone snapshot；只有 `Apply CoreDNS ConfigMap` 后才会更新
   `mx-dns/coredns` 并影响新的解析结果。本机 edge 会在 H2I ready 后拉取最新 DNS route。
 - macOS Wi-Fi/网络切换时，MX-H2I 会监控默认路由和 network service 签名变化；变化后先做
-  无权限 WireGuard probe，再验证系统 PAC 与 dynamic split DNS。网络变化不会自动执行
-  privileged apply；若 PAC/DNS 或 WG route 确实丢失，应通过明确的手动修复动作触发权限，
-  避免连接完成后或后台 route-refresh 周期反复弹权限框。
+  无权限 WireGuard probe，再验证系统 PAC 与 dynamic split DNS。连接已成立时，后台
+  `route-refresh` 会用真实系统状态验证 PAC 和 dynamic resolver；若睡眠唤醒、Clash/mihomo
+  系统代理或 TUN 模式切换覆盖了 MX-H2I 设置，默认自动重新写入 PAC/split DNS；macOS 可能
+  弹出管理员授权框，这是写 `networksetup` 与 SystemConfiguration dynamic DNS 的系统要求。
+  网络变化签名包含各 network service 的 Auto Proxy URL/state，因此 Clash 系统代理切换会被
+  近实时识别，而不只依赖 30 秒兜底刷新。测试环境可用
+  `MX_H2I_MAC_BACKGROUND_PROXY_REPAIR=0` 改成只诊断不修复。启动时仍不自动恢复 stale macOS
+  PAC/split DNS，避免用户尚未选择连接前弹权限框。
 - macOS 权限申请应收敛为 Launcher network transaction。当前 V2 可能出现两次授权：
   第一次安装/刷新 WireGuard LaunchDaemon 和 route，第二次写系统 PAC 与 dynamic split
   DNS。短期应把 UI 文案合并为一次“即将修改 WireGuard、DNS、PAC”的连接动作，并尽量只在

@@ -131,11 +131,19 @@ Startup does not restore stale macOS PAC/split DNS state by default, because
 that repair requires an administrator prompt before the user has chosen to
 connect. Reconnect or disconnect performs the explicit repair path. Set
 `MX_H2I_RESTORE_SYSTEM_PROXY_ON_STARTUP=1` only for break-glass cleanup runs.
+While already connected, the periodic route refresh verifies the live macOS PAC
+and dynamic split DNS state before trusting the saved state; if sleep/wake or a
+Clash/mihomo mode switch removes the MX-H2I entries, MX-H2I automatically
+reapplies the connected PAC/split DNS state. macOS may show an administrator
+authorization prompt for that repair because `networksetup` and dynamic DNS are
+system settings. Set `MX_H2I_MAC_BACKGROUND_PROXY_REPAIR=0` only for controlled
+test builds that should detect the overwrite without repairing it.
 
 On macOS, the WireGuard runtime prefers a product-owned LaunchDaemon
 (`com.qpjoy.mx-h2i.wireguard.*`) after the user approves connect. This mirrors
 the V1 HDO keep-alive path: launchd keeps the tunnel alive across lock, unlock,
-and sleep/resume, while the app process only probes and reports health.
+and sleep/resume, while the app process probes health and revalidates the
+browser PAC plus CLI dynamic resolver path.
 
 The Electron entry is intentionally light for the reservation phase:
 

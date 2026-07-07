@@ -42,6 +42,7 @@ const SYSTEM_DOMAIN_PROXY_ROUTE_REFRESH_TIMEOUT_MS = 2200;
 const SYSTEM_DOMAIN_PROXY_ROUTE_WARNING_MS = 60_000;
 const NETWORK_CHANGE_MONITOR_MS = 5000;
 const NETWORK_CHANGE_DEBOUNCE_MS = 1800;
+const DARWIN_PROXY_SIGNATURE_TIMEOUT_MS = 1200;
 const DARWIN_ENDPOINT_ROUTE_PROBE_TIMEOUT_MS = 1800;
 const DARWIN_ENDPOINT_ROUTE_DELETE_TIMEOUT_MS = 2500;
 const DARWIN_ENDPOINT_ROUTE_REPAIR_COOLDOWN_MS = 20_000;
@@ -918,7 +919,9 @@ function scheduleWireGuardRecovery(reason, delays = [2500, 12_000, 25_000], opti
     const timer = setTimeout(() => {
       const index = wireGuardRecoveryTimers.indexOf(timer);
       if (index >= 0) wireGuardRecoveryTimers.splice(index, 1);
-      void recoverWireGuardForRuntime(reason, { allowPrivileged }).catch(() => undefined);
+      void recoverWireGuardForRuntime(reason, { allowPrivileged })
+        .then((result) => maybeRefreshSystemDomainProxyAfterWireGuardRecovery(reason, result))
+        .catch(() => undefined);
     }, Math.max(0, delay));
     timer.unref?.();
     wireGuardRecoveryTimers.push(timer);
@@ -1000,13 +1003,27 @@ async function refreshSystemDomainProxyAfterNetworkChange(reason) {
       return verified;
     }
   }
-  const status = currentSystemDomainProxyStatus('network-change', {
-    skipped: true,
-    skipReason: 'network-change-no-privileged-apply',
-    verified: false
-  });
-  await recordSystemDomainProxyDiagnostics(status, `system domain proxy network change: ${reason}`);
+  const status = await ensureSystemDomainProxyForRuntime('route-refresh');
+  await recordSystemDomainProxyDiagnostics({
+    ...(status && typeof status === 'object' ? status : {}),
+    reason,
+    verified: false,
+    repairReason: 'network-change'
+  }, `system domain proxy checked after network change: ${reason}`);
   return status;
+}
+
+async function maybeRefreshSystemDomainProxyAfterWireGuardRecovery(reason, result) {
+  if (!result?.ready || runtime?.connection?.state !== 'connected') return null;
+  if (!shouldRefreshSystemDomainProxyAfterWireGuardRecovery(reason)) return null;
+  return refreshSystemDomainProxyForRuntime('route-refresh');
+}
+
+function shouldRefreshSystemDomainProxyAfterWireGuardRecovery(reason) {
+  const text = String(reason || '');
+  return text === 'unlock-screen'
+    || text === 'power-resume'
+    || text.startsWith('network-change-');
 }
 
 async function captureNetworkSignature() {
@@ -1016,9 +1033,12 @@ async function captureNetworkSignature() {
     execFileText('/usr/sbin/networksetup', ['-listallnetworkservices']).catch((err) => `services-error:${errorMessage(err)}`),
     execFileText('/usr/sbin/scutil', ['--nwi']).catch((err) => `nwi-error:${errorMessage(err)}`)
   ]);
+  const serviceNames = compactDarwinNetworkServices(services);
+  const autoProxy = await captureDarwinAutoProxySignature(serviceNames);
   return JSON.stringify({
     route: compactDarwinDefaultRoute(route),
-    services: compactDarwinNetworkServices(services),
+    services: serviceNames,
+    autoProxy,
     networkInfo: compactDarwinNetworkInfo(networkInfo)
   });
 }
@@ -1040,6 +1060,32 @@ function compactDarwinNetworkServices(stdout) {
     .filter((line) => line && !line.startsWith('An asterisk'))
     .map((line) => line.replace(/^\*\s*/, ''))
     .sort();
+}
+
+async function captureDarwinAutoProxySignature(services) {
+  const names = arrayValue(services, []).slice(0, 12);
+  const rows = await Promise.all(names.map(async (name) => {
+    const result = await execFileText('/usr/sbin/networksetup', ['-getautoproxyurl', name], {
+      timeoutMs: DARWIN_PROXY_SIGNATURE_TIMEOUT_MS
+    }).catch((err) => `autoproxy-error:${errorMessage(err)}`);
+    return compactDarwinAutoProxyStatus(name, result);
+  }));
+  return rows.filter(Boolean).sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function compactDarwinAutoProxyStatus(name, stdout) {
+  const service = nullableString(name);
+  if (!service) return null;
+  const text = String(stdout || '');
+  const url = nullableString(text.match(/URL:\s*(.*)$/im)?.[1]);
+  const enabled = nullableString(text.match(/Enabled:\s*(.*)$/im)?.[1]);
+  if (!url && !enabled && !/autoproxy-error:/i.test(text)) return null;
+  return {
+    name: service,
+    enabled: enabled || null,
+    url: url || null,
+    error: /autoproxy-error:/i.test(text) ? text.slice(0, 160) : null
+  };
 }
 
 function compactDarwinNetworkInfo(stdout) {
@@ -1150,7 +1196,7 @@ async function ensureSystemDomainProxyForRuntimeOnce(reason = 'manual') {
       ownershipClaim: systemDomainProxyOwnershipClaim(domains, reverseProxyRoutes)
     };
     const policySignature = systemDomainProxyPolicySignature(policy);
-    const skipped = maybeSkipSystemDomainProxyApply(reason, policySignature);
+    const skipped = await maybeSkipSystemDomainProxyApply(reason, policySignature);
     if (skipped) return skipped;
     if (!shouldApplySystemDomainProxyForReason(reason)) {
       return currentSystemDomainProxyStatus(reason, {
@@ -1382,9 +1428,7 @@ async function refreshNetworkEnvironmentDiagnostics(reason = 'manual', options =
 async function collectNetworkEnvironmentDiagnostics(reason = 'manual', options = {}) {
   const phase = options.phase || networkDiagnosticPhase();
   const host = options.host || networkDiagnosticHost();
-  const status = typeof systemDomainProxyManager?.status === 'function'
-    ? systemDomainProxyManager.status()
-    : null;
+  const status = await systemDomainProxyStatusForDiagnostics(phase);
   const endpointRoute = await collectDarwinEndpointRouteDiagnostics(reason, { phase });
   let resolution = null;
   try {
@@ -1426,6 +1470,16 @@ async function collectNetworkEnvironmentDiagnostics(reason = 'manual', options =
       : ['bootstrap-dns-or-host-resolve', 'system-proxy-or-dns', 'external-dns'],
     updatedAt: nowIso()
   };
+}
+
+async function systemDomainProxyStatusForDiagnostics(phase) {
+  const status = typeof systemDomainProxyManager?.status === 'function'
+    ? systemDomainProxyManager.status()
+    : null;
+  if (phase !== 'connected' || typeof systemDomainProxyManager?.statusVerified !== 'function') {
+    return status;
+  }
+  return systemDomainProxyManager.statusVerified().catch(() => status);
 }
 
 async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
@@ -2199,7 +2253,7 @@ function systemDomainProxyPolicySignature(policy) {
   });
 }
 
-function maybeSkipSystemDomainProxyApply(reason, policySignature) {
+async function maybeSkipSystemDomainProxyApply(reason, policySignature) {
   if (!isBackgroundSystemDomainProxyReason(reason) || !policySignature || policySignature !== lastSystemDomainProxyPolicySignature) {
     return null;
   }
@@ -2221,9 +2275,28 @@ function maybeSkipSystemDomainProxyApply(reason, policySignature) {
     };
   }
   if (!status || typeof status !== 'object') return null;
-  const resolverMode = nullableString(status.systemResolverMode);
-  const resolverDomains = arrayValue(status.resolverDomains, []);
-  if (status.applied && (resolverMode !== 'dynamic' || resolverDomains.length === 0 || status.resolverApplied === true)) {
+  const verified = shouldVerifySystemDomainProxyBeforeBackgroundSkip(reason)
+    ? await systemDomainProxyManager?.statusVerified?.().catch(() => null)
+    : null;
+  if (verified && typeof verified === 'object') {
+    if (systemDomainProxyStatusLooksApplied(verified)) {
+      return {
+        ...verified,
+        reason,
+        skipped: true
+      };
+    }
+    if (policySignature === lastSystemDomainProxyAuthorizationCanceledSignature) {
+      return {
+        ...verified,
+        reason,
+        skipped: true,
+        skipReason: 'authorization-canceled'
+      };
+    }
+    return null;
+  }
+  if (systemDomainProxyStatusLooksApplied(status)) {
     return {
       ...status,
       reason,
@@ -2248,10 +2321,26 @@ function isBackgroundSystemDomainProxyReason(reason) {
   return text === 'route-refresh' || text === 'app-startup' || text === 'app-startup-refresh';
 }
 
+function shouldVerifySystemDomainProxyBeforeBackgroundSkip(reason) {
+  return process.platform === 'darwin' && String(reason || '') === 'route-refresh';
+}
+
+function systemDomainProxyStatusLooksApplied(status) {
+  if (!status || typeof status !== 'object' || status.applied !== true) return false;
+  const resolverMode = nullableString(status.systemResolverMode);
+  const resolverDomains = arrayValue(status.resolverDomains, []);
+  return resolverMode !== 'dynamic' || resolverDomains.length === 0 || status.resolverApplied === true;
+}
+
 function shouldApplySystemDomainProxyForReason(reason) {
   const text = String(reason || '');
   if (process.platform === 'win32' && isBackgroundSystemDomainProxyReason(text)) return true;
+  if (process.platform === 'darwin' && text === 'route-refresh' && allowMacBackgroundSystemDomainProxyRepair()) return true;
   return text === 'post-connect' || text.startsWith('manual');
+}
+
+function allowMacBackgroundSystemDomainProxyRepair() {
+  return !['0', 'false', 'no', 'off'].includes(String(process.env.MX_H2I_MAC_BACKGROUND_PROXY_REPAIR || '').trim().toLowerCase());
 }
 
 function currentSystemDomainProxyStatus(reason, extra = {}) {
