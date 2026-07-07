@@ -1032,7 +1032,14 @@ export class PostgresStore implements PlatformStore {
         reason: 'No successful single-account or full configure evidence has been recorded for this Oversea account.'
       };
     }
-    const synced = Date.parse(lastSyncedAt) >= Date.parse(accountUpdatedAt);
+    const accountUpdatedMs = Date.parse(accountUpdatedAt);
+    const incrementalSyncMs = Date.parse(incrementalSync?.createdAt ?? '');
+    const fullSyncMs = Date.parse(fullSyncAt ?? '');
+    const incrementalSynced = Number.isFinite(incrementalSyncMs) && Number.isFinite(accountUpdatedMs)
+      && incrementalSyncMs + 60_000 >= accountUpdatedMs;
+    const fullSynced = Number.isFinite(fullSyncMs) && Number.isFinite(accountUpdatedMs)
+      && fullSyncMs + 60_000 >= accountUpdatedMs;
+    const synced = incrementalSynced || fullSynced;
     return {
       status: synced ? 'synced' : 'pending-sync',
       checkedAt,
@@ -1040,7 +1047,7 @@ export class PostgresStore implements PlatformStore {
       lastSyncedAt,
       requiredAction: synced ? 'none' : 'run-user-oversea-remote-sync',
       reason: synced
-        ? (incrementalSync?.createdAt === lastSyncedAt
+        ? (incrementalSynced
           ? 'The latest successful single-account remote sync is newer than this account material.'
           : 'The latest successful Oversea configure evidence is newer than this account material.')
         : 'This account was issued after the latest successful single-account or full configure evidence.'
@@ -3591,32 +3598,7 @@ export class PostgresStore implements PlatformStore {
     const configured = await this.configuredDefaultOverseaSiteCandidates();
     const explicit = configured.find((item) => item.explicit);
     if (explicit) return explicit.siteId;
-    if (configured.some((item) => item.siteId === 'oversea-main')) return 'oversea-main';
-    const sites = await this.listRecords<LauncherNetworkMihomoSite>('launcher-network-mihomo-site');
-    const plans = await this.listSiteSlotPlans();
-    const siteIds = new Set<string>([
-      ...configured.map((item) => item.siteId),
-      ...sites.map((site) => site.siteId),
-      ...plans.filter((plan) => plan.kind === 'oversea').map((plan) => plan.siteId),
-      'oversea-main'
-    ]);
-    const candidates = [];
-    for (const siteId of siteIds) {
-      const site = await this.getLauncherNetworkMihomoSite(siteId);
-      const plan = plans.find((item) => item.siteId === siteId) ?? null;
-      const accountCount = (await this.listSiteSlotAccessAccounts(siteId)).length;
-      const lastSyncedAt = await this.latestOverseaAccountSyncAt(siteId);
-      candidates.push({
-        siteId,
-        score: (lastSyncedAt ? 500 : 0)
-          + (site?.publicHost || plan?.host ? 120 : 0)
-          + (accountCount > 0 ? 80 : 0)
-          + (plan?.kind === 'oversea' ? 40 : 0),
-        updatedAt: latestIsoString([lastSyncedAt, site?.updatedAt, plan?.createdAt]) ?? ''
-      });
-    }
-    candidates.sort((a, b) => b.score - a.score || b.updatedAt.localeCompare(a.updatedAt) || a.siteId.localeCompare(b.siteId));
-    return candidates[0]?.siteId ?? 'oversea-main';
+    return 'oversea-main';
   }
 
   private async configuredDefaultOverseaSiteCandidates(): Promise<Array<{ siteId: string; explicit: boolean }>> {

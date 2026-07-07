@@ -2353,7 +2353,7 @@ function normalizeH2oSubscription(input) {
   const row = input && typeof input === 'object' ? input : {};
   const id = String(row.id || 'h2o-default');
   const source = String(row.source || 'internal');
-  const requiresUser = row.requiresUser === true || (source !== 'demo' && source !== 'custom' && id.startsWith('h2o-'));
+  const requiresUser = row.requiresUser === true || (source !== 'demo' && source !== 'custom' && source !== 'external' && id.startsWith('h2o-'));
   const status = requiresUser && !isUserIdentity()
     ? 'login-required'
     : String(row.status || (requiresUser && source === 'internal' ? 'pending' : 'ready'));

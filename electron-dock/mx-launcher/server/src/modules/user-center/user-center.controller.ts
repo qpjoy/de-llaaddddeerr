@@ -110,6 +110,20 @@ export class UserCenterController {
       account.status === 'active'
       && (siteFilter.size === 0 || siteFilter.has(account.siteId))
     ));
+    if (accounts.length === 0) {
+      const refreshed = await this.store.getUserOverseaEntitlement(userId);
+      return {
+        sync: {
+          status: 'blocked',
+          reports: [],
+          generatedAt: new Date().toISOString(),
+          reason: siteFilter.size
+            ? `No active Oversea access account matched requested siteIds: ${[...siteFilter].join(', ')}.`
+            : 'No active Oversea access account is available for this user entitlement.'
+        },
+        entitlement: refreshed
+      };
+    }
     const profiles = await this.store.listSiteSlotSshProfiles();
     const reports: UserOverseaAccountSyncReport[] = [];
     for (const accountRef of accounts) {

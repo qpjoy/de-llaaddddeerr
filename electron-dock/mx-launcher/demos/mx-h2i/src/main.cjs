@@ -3633,7 +3633,9 @@ function normalizeH2oSubscription(input, defaults) {
   const row = input && typeof input === 'object' ? input : {};
   const id = nullableString(row.id) || nullableString(defaults.id) || 'h2o-default';
   const source = nullableString(row.source) || nullableString(defaults.source) || 'internal';
-  const requiresUser = row.requiresUser === true || defaults.requiresUser === true || (source !== 'demo' && id.startsWith('h2o-'));
+  const requiresUser = row.requiresUser === true
+    || defaults.requiresUser === true
+    || (source !== 'demo' && source !== 'custom' && source !== 'external' && id.startsWith('h2o-'));
   const status = requiresUser && !runtimeHasUserIdentity()
     ? 'login-required'
     : nullableString(row.status) || nullableString(defaults.status) || 'ready';
@@ -4557,7 +4559,7 @@ function defaultH2oOverseaSiteIds(input = {}) {
     ...arrayValue(input?.siteIds, []),
     nullableString(input?.siteId)
   ].map((item) => String(item || '').trim()).filter(Boolean);
-  return explicit.length ? [explicit[0]] : [];
+  return explicit.length ? [explicit[0]] : ['oversea-main'];
 }
 
 async function refreshH2oExternalSubscription(subscriptionId) {
@@ -4810,7 +4812,7 @@ function applyH2oManagedSubscriptionState(current, input = {}) {
     lastUpdatedAt: now
   }));
   const byId = new Map();
-  for (const item of [defaultSubscription, ...siteSubscriptions, ...current.subscriptions.filter((item) => !item.requiresUser || item.source === 'demo')]) {
+  for (const item of [defaultSubscription, ...siteSubscriptions, ...current.subscriptions.filter(shouldPreserveH2oLocalSubscription)]) {
     byId.set(item.id, item);
   }
   const subscriptions = [...byId.values()];
@@ -4830,6 +4832,11 @@ function applyH2oManagedSubscriptionState(current, input = {}) {
   } else if (input.errorMessage) {
     pushAppLog('h2o', input.status === 'error' ? 'error' : 'warning', input.errorMessage);
   }
+}
+
+function shouldPreserveH2oLocalSubscription(item) {
+  const source = nullableString(item?.source);
+  return source === 'custom' || source === 'external' || source === 'demo' || item?.requiresUser === false;
 }
 
 function firstH2oOverseaSyncReason(accounts) {
