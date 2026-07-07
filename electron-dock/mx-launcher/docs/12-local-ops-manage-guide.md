@@ -411,8 +411,11 @@ MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \
   bash scripts/manage.sh ops site-slot runner-start slotexec_xxx
 ```
 
-`remote-ssh` 模式默认允许 Internal 生成远程 runner，但脚本侧仍要显式确认；需要临时冻结时可在
-服务端设置 `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=0`：
+`remote-ssh` 模式默认允许 Internal 生成远程 runner；K8s Internal Pod 还会默认开启
+`SITE_SLOT_WORKER_REMOTE_SSH=1` 和 `SITE_SLOT_CONFIRM_REMOTE_EXECUTION=1`，供 Admin
+Sync Remote / Remote Terminal / managed oversea account sync 使用。三项远程执行 env
+缺省即开启，设置为 `0`/`false`/`off` 才关闭。离开 Pod 手工执行脚本时仍要显式确认；
+需要临时冻结时可在服务端设置 `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=0`：
 
 ```bash
 SITE_SLOT_CONFIRM_REMOTE_EXECUTION=1 MX_INTERNAL_BASE_URL=http://127.0.0.1:18090 \

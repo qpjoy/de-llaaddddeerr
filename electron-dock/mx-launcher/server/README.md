@@ -108,7 +108,12 @@ manifest-only: no SSH/SCP/root mutation is performed by this API.
 `POST /internal/v1/site-slots/executions/:runId/runner-sessions` creates a
 Runner V1.1 session. `simulate` mode records every step as simulated evidence.
 `remote-ssh` mode is enabled by default for Internal-managed site delivery and
-still requires `confirmRemoteExecution=true`; set
+the K8s Internal deployment also enables the worker SSH gate
+(`SITE_SLOT_WORKER_REMOTE_SSH=1`, `SITE_SLOT_CONFIRM_REMOTE_EXECUTION=1`) so
+Admin Sync Remote, Remote Terminal, and managed oversea account sync can run
+through Internal. These gates are enabled by default when unset; use
+`0`/`false`/`off` to disable them explicitly. Requests still require
+`confirmRemoteExecution=true`; set
 `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=false` to freeze remote runner
 creation. Without confirmation or when explicitly disabled, it is blocked before
 any remote work is queued. `awx-shadow` mode records a queued provider session without opening SSH

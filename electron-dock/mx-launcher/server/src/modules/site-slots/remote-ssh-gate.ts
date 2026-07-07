@@ -6,6 +6,16 @@ import { fileURLToPath } from 'node:url';
 import { asRecord } from '../../lib/http.js';
 import type { SiteSlotPlan, SiteSlotSshProfile, SiteSlotWorkerJob } from '../../types.js';
 
+const REMOTE_EXECUTION_DISABLED_ENV_VALUES = new Set(['0', 'false', 'no', 'off', 'disabled']);
+
+export function remoteExecutionEnvEnabledByDefault(envName: string) {
+  const value = process.env[envName];
+  if (!value) {
+    return true;
+  }
+  return !REMOTE_EXECUTION_DISABLED_ENV_VALUES.has(value.trim().toLowerCase());
+}
+
 export interface SiteSlotRemoteSshGateInput {
   confirmRemoteExecution: boolean;
   requestedBy: string | null;
@@ -45,8 +55,8 @@ export function buildSiteSlotRemoteSshGate(
     checkedAt,
     confirmRemoteExecution: input.confirmRemoteExecution,
     environmentGates: {
-      SITE_SLOT_WORKER_REMOTE_SSH: process.env.SITE_SLOT_WORKER_REMOTE_SSH === '1' ? 'present' : 'missing',
-      SITE_SLOT_CONFIRM_REMOTE_EXECUTION: process.env.SITE_SLOT_CONFIRM_REMOTE_EXECUTION === '1' ? 'present' : 'missing'
+      SITE_SLOT_WORKER_REMOTE_SSH: remoteExecutionEnvEnabledByDefault('SITE_SLOT_WORKER_REMOTE_SSH') ? 'present' : 'missing',
+      SITE_SLOT_CONFIRM_REMOTE_EXECUTION: remoteExecutionEnvEnabledByDefault('SITE_SLOT_CONFIRM_REMOTE_EXECUTION') ? 'present' : 'missing'
     },
     sshProfile: siteSlotSshProfileEvidence(plan, sshProfile),
     summary: {
@@ -212,8 +222,8 @@ function remoteSshJobGateFailures(
     ...(job.approval.required && job.approval.status !== 'recorded' ? ['remote worker job approval is not recorded'] : []),
     ...(job.changeWindow.required && (!job.changeWindow.start || !job.changeWindow.end) ? ['remote worker job requires changeWindowStart and changeWindowEnd'] : []),
     ...(!confirmRemoteExecution ? ['confirmRemoteExecution=true is required for remote SSH gate review'] : []),
-    ...(process.env.SITE_SLOT_WORKER_REMOTE_SSH !== '1' ? ['SITE_SLOT_WORKER_REMOTE_SSH=1 is required before artifact-push-remote-ssh can execute'] : []),
-    ...(process.env.SITE_SLOT_CONFIRM_REMOTE_EXECUTION !== '1' ? ['SITE_SLOT_CONFIRM_REMOTE_EXECUTION=1 is required after Admin approval and change-window review'] : []),
+    ...(remoteExecutionEnvEnabledByDefault('SITE_SLOT_WORKER_REMOTE_SSH') ? [] : ['SITE_SLOT_WORKER_REMOTE_SSH=1 is required before artifact-push-remote-ssh can execute']),
+    ...(remoteExecutionEnvEnabledByDefault('SITE_SLOT_CONFIRM_REMOTE_EXECUTION') ? [] : ['SITE_SLOT_CONFIRM_REMOTE_EXECUTION=1 is required after Admin approval and change-window review']),
     ...(plan ? [] : ['plan not found while building remote SSH gate']),
     ...(plan && !plan.host ? [`${plan.kind} host is required before remote SSH execution`] : []),
     ...(!plan?.ssh.profileId ? ['managed SSH profile is required before Admin remote SSH execution'] : []),

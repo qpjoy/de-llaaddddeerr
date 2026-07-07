@@ -8,6 +8,7 @@ import { BadRequestException, Body, Controller, Get, Header, Inject, NotFoundExc
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
+import { remoteExecutionEnvEnabledByDefault } from '../site-slots/remote-ssh-gate.js';
 import type {
   CreateServiceAccountInput,
   CreateUserInput,
@@ -190,7 +191,7 @@ export class UserCenterController {
       ...(!account ? ['Internal access account is missing'] : []),
       ...(account?.status === 'active' ? [] : ['Internal access account is not active']),
       ...(!input.profile ? ['active Oversea SSH profile is required'] : []),
-      ...(process.env.SITE_SLOT_WORKER_REMOTE_SSH === '1' ? [] : ['SITE_SLOT_WORKER_REMOTE_SSH=1 is required before remote account sync']),
+      ...(remoteExecutionEnvEnabledByDefault('SITE_SLOT_WORKER_REMOTE_SSH') ? [] : ['SITE_SLOT_WORKER_REMOTE_SSH=1 is required before remote account sync']),
       ...(input.confirmed ? [] : ['confirmRemoteExecution=true is required']),
       ...(input.profile?.host ? [] : ['SSH host is required']),
       ...(input.profile?.identityFile && !existsSync(input.profile.identityFile) ? [`SSH identity file does not exist: ${input.profile.identityFile}`] : []),

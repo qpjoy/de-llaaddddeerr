@@ -15,7 +15,7 @@ import { PLATFORM_STORE } from '../../tokens.js';
 import { checkAwxProvider } from '../config-center/awx-provider-check.js';
 import { buildAwxProviderSyncPlan } from '../config-center/awx-provider-sync-plan.js';
 import { deriveWireGuardPublicKey, generateWireGuardKeyPair } from '../config-center/wireguard-keys.js';
-import { buildSiteSlotRemoteSshGate, buildSiteSlotRemoteSshReadOnlyProbe, buildSiteSlotRemoteSshWorkerHandoff } from '../site-slots/remote-ssh-gate.js';
+import { buildSiteSlotRemoteSshGate, buildSiteSlotRemoteSshReadOnlyProbe, buildSiteSlotRemoteSshWorkerHandoff, remoteExecutionEnvEnabledByDefault } from '../site-slots/remote-ssh-gate.js';
 import { runAwxApiLaunch } from './awx-api-launch.js';
 import { runAwxCredentialSync } from './awx-credential-sync.js';
 import { runAwxObjectSync } from './awx-object-sync.js';
@@ -805,7 +805,7 @@ export class AdminController {
     const profile = latestByUpdatedAt(profiles.filter((item) => item.kind === 'oversea' && item.siteId === siteId && item.status === 'active'));
     const gateFailures = [
       ...(!profile ? ['active Oversea SSH profile is required'] : []),
-      ...(process.env.SITE_SLOT_WORKER_REMOTE_SSH === '1' ? [] : ['SITE_SLOT_WORKER_REMOTE_SSH=1 is required before remote terminal execution']),
+      ...(remoteExecutionEnvEnabledByDefault('SITE_SLOT_WORKER_REMOTE_SSH') ? [] : ['SITE_SLOT_WORKER_REMOTE_SSH=1 is required before remote terminal execution']),
       ...(booleanValue(body.confirmRemoteExecution) === true ? [] : ['confirmRemoteExecution=true is required']),
       ...(booleanValue(body.confirmManualCommand) === true ? [] : ['confirmManualCommand=true is required']),
       ...(!command ? ['command is required'] : []),
@@ -3585,8 +3585,8 @@ function adminDomesticRelayPeerAppendSshResult(
       confirmRelayPeerAppend: relayPeerAppend.gates.confirmRelayPeerAppend,
       confirmRelayReadOnlyProbeReviewed: relayPeerAppend.gates.confirmRelayReadOnlyProbeReviewed,
       confirmRelayPeerPlanReviewed: relayPeerAppend.gates.confirmRelayPeerPlanReviewed,
-      environmentRemoteSsh: process.env.SITE_SLOT_WORKER_REMOTE_SSH === '1',
-      environmentConfirmRemoteExecution: process.env.SITE_SLOT_CONFIRM_REMOTE_EXECUTION === '1'
+      environmentRemoteSsh: remoteExecutionEnvEnabledByDefault('SITE_SLOT_WORKER_REMOTE_SSH'),
+      environmentConfirmRemoteExecution: remoteExecutionEnvEnabledByDefault('SITE_SLOT_CONFIRM_REMOTE_EXECUTION')
     },
     blockedReasons,
     notes: [

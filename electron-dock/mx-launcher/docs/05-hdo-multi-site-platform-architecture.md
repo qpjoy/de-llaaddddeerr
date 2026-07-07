@@ -113,7 +113,10 @@ Domestic 和 Oversea 不再是配置真相源，而是 Internal 的可插拔 sit
   `requires-confirmation`，用于 Admin 审批、证据复核和变更窗口确认。
 - Internal 通过 `POST /internal/v1/site-slots/executions/:runId/runner-sessions` 启动
   Runner V1.1 session。`simulate` 只记录模拟结果；`remote-ssh` 默认可生成远程 runner，
-  仍需要请求侧 `confirmRemoteExecution=true`，并可由服务端
+  K8s Internal 默认同时开启 worker SSH gate（`SITE_SLOT_WORKER_REMOTE_SSH=1` 和
+  `SITE_SLOT_CONFIRM_REMOTE_EXECUTION=1`），用于 Admin Sync Remote、Remote Terminal
+  和 managed oversea account sync。三项远程执行 env 缺省即开启；设置为 `0`/`false`/`off`
+  才显式关闭。请求侧仍需要 `confirmRemoteExecution=true`，并可由服务端
   `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=0` 显式冻结。
 - Internal 通过 `/runner-sessions/:sessionId/worker-jobs` 生成 Worker Contract V1 job，
   通过 `/worker-jobs/:jobId/reports` 接收 worker/site-agent 回报。job 包含 approval、

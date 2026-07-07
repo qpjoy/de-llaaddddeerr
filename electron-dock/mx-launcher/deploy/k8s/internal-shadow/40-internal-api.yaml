@@ -131,6 +131,10 @@ spec:
           env:
             - name: SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED
               value: "1"
+            - name: SITE_SLOT_WORKER_REMOTE_SSH
+              value: "1"
+            - name: SITE_SLOT_CONFIRM_REMOTE_EXECUTION
+              value: "1"
             - name: MX_RELEASE_ARTIFACT_STORE_DIR
               value: /app/artifacts/release-center
             - name: PG_USER
