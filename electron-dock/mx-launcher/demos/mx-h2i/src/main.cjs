@@ -710,10 +710,15 @@ function registerIpc() {
     runtime.apps.h2o.lastAction = nowIso();
     pushAppLog('h2o', ['info', 'warning', 'error'].includes(row.logLevel) ? row.logLevel : 'info', nullableString(row.logMessage) || 'H2O runtime updated from AppCenter.');
     await applyH2oAppNetworkPriority(nextRuntime, 'update-h2o-runtime');
+    const profileSync = await saveH2oUserRuntimeProfileForCurrentUser(runtime.apps.h2o.runtime, {
+      reason: 'update-h2o-runtime'
+    });
     runtime.feedback = {
-      tone: row.logLevel === 'error' ? 'error' : 'success',
+      tone: row.logLevel === 'error' ? 'error' : profileSync?.ok === false ? 'warning' : 'success',
       message: row.logLevel === 'error'
         ? `H2O 运行配置已保存，但 mihomo 应用失败：${nullableString(row.logMessage) || 'unknown'}`
+        : profileSync?.ok === false
+          ? `H2O 运行配置已保存到本机，但同步 Internal 用户配置失败：${profileSync.message}`
         : 'H2O 运行配置已更新。'
     };
     touchRuntime('h2o runtime updated');
@@ -739,9 +744,14 @@ function registerIpc() {
       const refreshedSubscription = refreshed.subscriptions.find((item) => item.id === targetSubscription.id)
         || refreshed.activeSubscription;
       const ready = h2oHasUsableSubscription(refreshedSubscription);
+      const profileSync = await saveH2oUserRuntimeProfileForCurrentUser(runtime.apps.h2o.runtime, {
+        reason: 'refresh-h2o-external-subscription'
+      });
       runtime.feedback = {
-        tone: ready ? 'success' : 'warning',
-        message: ready ? 'H2O 自定义订阅已刷新。' : 'H2O 自定义订阅刷新失败，请检查订阅地址或认证信息。'
+        tone: ready && profileSync?.ok !== false ? 'success' : 'warning',
+        message: profileSync?.ok === false
+          ? `H2O 自定义订阅已刷新到本机，但同步 Internal 用户配置失败：${profileSync.message}`
+          : ready ? 'H2O 自定义订阅已刷新。' : 'H2O 自定义订阅刷新失败，请检查订阅地址或认证信息。'
       };
       touchRuntime('h2o custom subscription refreshed');
       await saveAndBroadcast();
@@ -4166,6 +4176,11 @@ function h2oRuntimeWithTunnelStatus(h2oRuntime, tunnelStatus) {
 
 async function restoreH2oRuntimeAfterStartup() {
   if (!runtime?.apps?.h2o?.installed) return;
+  if (runtimeHasUserIdentity()) {
+    await loadH2oUserRuntimeProfileForCurrentUser({ reason: 'startup-restore' }).catch((err) => {
+      pushAppLog('h2o', 'warning', `H2O user runtime profile startup load skipped: ${errorMessage(err)}`);
+    });
+  }
   const current = h2oPluginRuntime(runtime.apps.h2o.runtime);
   if (!current.running && h2oLooksLikeIdleProxyError(runtime.apps.h2o.errorMessage)) {
     runtime.apps.h2o.runtime = h2oPluginRuntime({
@@ -5272,9 +5287,163 @@ function safeDecodeUrlPart(value) {
   }
 }
 
+async function loadH2oUserRuntimeProfileForCurrentUser(options = {}) {
+  if (!runtime?.apps?.h2o?.runtime || !runtimeHasUserIdentity()) {
+    return { ok: true, skipped: true, reason: 'no-user-runtime' };
+  }
+  const baseUrl = normalizeBaseUrl(options.baseUrl)
+    || normalizeBaseUrl(runtime.connection?.internalBaseUrl)
+    || normalizeBaseUrl(runtime.config?.internalApiBaseUrl)
+    || await resolveBootstrapBaseUrl(runtime.config);
+  const userId = nullableString(options.userId)
+    || await h2oCurrentUserId({
+      baseUrl,
+      bootstrapResolveMode: options.bootstrapResolveMode
+    });
+  if (!userId) return { ok: false, message: 'missing userId' };
+  const payload = await requestJson(
+    joinApiUrl(baseUrl, `/internal/v1/user-center/users/${encodeURIComponent(userId)}/h2o/runtime-profile`),
+    {
+      timeoutMs: 5000,
+      bootstrapResolveMode: options.bootstrapResolveMode,
+      headers: appCenterCatalogHeaders()
+    }
+  );
+  const profile = payload?.profile && typeof payload.profile === 'object' ? payload.profile : null;
+  if (!profile) return { ok: true, skipped: true, reason: 'no-profile' };
+  const applied = applyH2oUserRuntimeProfile(profile);
+  if (applied) {
+    pushAppLog('h2o', 'info', `H2O user runtime profile loaded from Internal for ${userId}.`);
+  }
+  return { ok: true, profile, applied };
+}
+
+async function saveH2oUserRuntimeProfileForCurrentUser(currentRuntime, options = {}) {
+  if (!runtimeHasUserIdentity()) return { ok: true, skipped: true, reason: 'no-user' };
+  const baseUrl = normalizeBaseUrl(options.baseUrl)
+    || normalizeBaseUrl(runtime.connection?.internalBaseUrl)
+    || normalizeBaseUrl(runtime.config?.internalApiBaseUrl)
+    || await resolveBootstrapBaseUrl(runtime.config);
+  const userId = nullableString(options.userId)
+    || await h2oCurrentUserId({
+      baseUrl,
+      bootstrapResolveMode: options.bootstrapResolveMode
+    });
+  if (!userId) return { ok: false, message: 'missing userId' };
+  const payload = h2oUserRuntimeProfilePayload(currentRuntime);
+  try {
+    const response = await requestJson(
+      joinApiUrl(baseUrl, `/internal/v1/user-center/users/${encodeURIComponent(userId)}/h2o/runtime-profile`),
+      {
+        method: 'POST',
+        timeoutMs: 5000,
+        bootstrapResolveMode: options.bootstrapResolveMode,
+        headers: appCenterCatalogHeaders(),
+        body: {
+          ...payload,
+          userId,
+          appId: 'h2o',
+          requestedBy: 'mx-h2i-h2o',
+          requestId: makeRequestId('h2o-runtime-profile')
+        }
+      }
+    );
+    pushAppLog('h2o', 'info', `H2O user runtime profile synced to Internal for ${userId}; local subscriptions=${payload.subscriptions.length}.`);
+    return { ok: true, profile: response?.profile };
+  } catch (err) {
+    const message = errorMessage(err);
+    pushAppLog('h2o', 'warning', `H2O user runtime profile sync failed: ${message}`);
+    return { ok: false, message };
+  }
+}
+
+function h2oUserRuntimeProfilePayload(currentRuntime) {
+  const current = h2oPluginRuntime(currentRuntime);
+  const subscriptions = h2oPreservedLocalSubscriptions(current)
+    .filter((item) => h2oLooksLikeHttpSubscriptionUrl(item.url))
+    .map((item) => ({
+      ...item,
+      source: nullableString(item.source) || 'custom',
+      requiresUser: false
+    }));
+  const activeLocal = h2oPreservedLocalSubscription(current.activeSubscription);
+  const activeSubscription = activeLocal && subscriptions.some((item) => item.id === activeLocal.id)
+    ? activeLocal
+    : subscriptions.find((item) => item.id === current.activeSubscriptionId) || null;
+  return {
+    mode: current.mode,
+    activeSubscriptionId: activeSubscription?.id || null,
+    activeSubscription,
+    subscriptions,
+    ports: current.ports,
+    rules: current.rules
+  };
+}
+
+function applyH2oUserRuntimeProfile(profile) {
+  const current = h2oPluginRuntime(runtime.apps.h2o.runtime);
+  const profileSubscriptions = h2oUserRuntimeProfileSubscriptions(profile);
+  const subscriptions = profileSubscriptions.length
+    ? mergeH2oRuntimeSubscriptions(profileSubscriptions, current.subscriptions)
+    : current.subscriptions.filter((item) => !h2oPreservedLocalSubscription(item));
+  const activeSubscription = h2oUserRuntimeProfileActiveSubscription(profile, subscriptions)
+    || (subscriptions.some((item) => item.id === current.activeSubscriptionId) ? current.activeSubscription : null)
+    || subscriptions.find((item) => item.id === 'h2o-default')
+    || subscriptions[0]
+    || current.activeSubscription;
+  runtime.apps.h2o.runtime = h2oPluginRuntime({
+    ...current,
+    mode: nullableString(profile?.mode) || current.mode,
+    ports: {
+      ...current.ports,
+      ...(profile?.ports && typeof profile.ports === 'object' ? profile.ports : {})
+    },
+    rules: Array.isArray(profile?.rules) && profile.rules.length ? profile.rules : current.rules,
+    subscriptions,
+    activeSubscription,
+    activeSubscriptionId: activeSubscription.id,
+    status: current.running ? 'running' : h2oHasUsableSubscription(activeSubscription) ? 'ready' : current.status,
+    lastAppliedAt: nowIso()
+  });
+  return profileSubscriptions.length > 0 || Array.isArray(profile?.subscriptions);
+}
+
+function h2oUserRuntimeProfileSubscriptions(profile) {
+  const byId = new Map();
+  const rows = [
+    ...(profile?.activeSubscription ? [profile.activeSubscription] : []),
+    ...arrayValue(profile?.subscriptions, [])
+  ];
+  for (const row of rows) {
+    const subscription = h2oPreservedLocalSubscription(row);
+    if (subscription && h2oLooksLikeHttpSubscriptionUrl(subscription.url)) {
+      byId.set(subscription.id, {
+        ...subscription,
+        source: nullableString(subscription.source) || 'custom',
+        requiresUser: false
+      });
+    }
+  }
+  return [...byId.values()];
+}
+
+function h2oUserRuntimeProfileActiveSubscription(profile, subscriptions) {
+  const activeId = nullableString(profile?.activeSubscriptionId)
+    || nullableString(profile?.activeSubscription?.id);
+  if (activeId) {
+    const byId = subscriptions.find((item) => item.id === activeId);
+    if (byId) return byId;
+  }
+  const activeUrl = h2oComparableSubscriptionUrl(profile?.activeSubscription?.url);
+  if (activeUrl) {
+    return subscriptions.find((item) => h2oComparableSubscriptionUrl(item.url) === activeUrl) || null;
+  }
+  return null;
+}
+
 async function hydrateH2oSystemSubscriptionsForUser(options = {}) {
   if (!runtime?.apps?.h2o?.runtime || !runtimeHasUserIdentity()) return;
-  const current = h2oPluginRuntime(runtime.apps.h2o.runtime);
+  let current = h2oPluginRuntime(runtime.apps.h2o.runtime);
   const baseUrl = normalizeBaseUrl(options.baseUrl)
     || normalizeBaseUrl(runtime.connection?.internalBaseUrl)
     || await resolveBootstrapBaseUrl(runtime.config);
@@ -5290,6 +5459,17 @@ async function hydrateH2oSystemSubscriptionsForUser(options = {}) {
       errorMessage: 'Internal OAuth token 没有返回 userId，无法获取 oversea 订阅。'
     });
     return;
+  }
+  if (options.loadRuntimeProfile !== false) {
+    await loadH2oUserRuntimeProfileForCurrentUser({
+      userId,
+      baseUrl,
+      bootstrapResolveMode: options.bootstrapResolveMode,
+      reason: 'hydrate-h2o-system-subscriptions'
+    }).catch((err) => {
+      pushAppLog('h2o', 'warning', `H2O user runtime profile hydrate load skipped: ${errorMessage(err)}`);
+    });
+    current = h2oPluginRuntime(runtime.apps.h2o.runtime);
   }
   if (options.showInitializing === true) {
     applyH2oManagedSubscriptionState(current, {

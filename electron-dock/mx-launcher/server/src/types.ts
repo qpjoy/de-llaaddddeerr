@@ -2492,6 +2492,63 @@ export interface UserOverseaSubscriptionRender {
   generatedAt: string;
 }
 
+export interface UserH2oSubscriptionAuth {
+  type: 'none' | 'basic' | string;
+  username?: string | null;
+  password?: string | null;
+}
+
+export interface UserH2oSubscription {
+  id: string;
+  name: string;
+  url: string;
+  nodes: number;
+  latencyMs: number;
+  status: string;
+  source: string;
+  requiresUser: boolean;
+  assignable: boolean;
+  entitlementId: string | null;
+  siteIds: string[];
+  syncStatus: string | null;
+  errorMessage: string | null;
+  yamlBytes: number;
+  auth: UserH2oSubscriptionAuth;
+  headers: Record<string, string>;
+  pinnedAt: string | null;
+  lastUpdatedAt: string;
+}
+
+export interface UserH2oRuntimeProfileInput {
+  userId?: string | null;
+  appId?: string | null;
+  mode?: string | null;
+  activeSubscriptionId?: string | null;
+  activeSubscription?: Partial<UserH2oSubscription> | null;
+  subscriptions?: Array<Partial<UserH2oSubscription>> | null;
+  ports?: Record<string, number> | null;
+  rules?: Array<Record<string, unknown>> | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface UserH2oRuntimeProfile {
+  profileId: string;
+  userId: string;
+  appId: string;
+  mode: string;
+  activeSubscriptionId: string | null;
+  activeSubscription: UserH2oSubscription | null;
+  subscriptions: UserH2oSubscription[];
+  ports: Record<string, number>;
+  rules: Array<Record<string, unknown>>;
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string;
+  updatedAt: string;
+  requestId: string | null;
+}
+
 export interface UserOverseaAccountSyncReportInput {
   userId?: string | null;
   siteId?: string | null;

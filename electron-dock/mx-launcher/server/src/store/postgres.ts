@@ -119,6 +119,8 @@ import type {
   UserCenterUserCredential,
   UserPasswordVerificationInput,
   UserPasswordVerificationResult,
+  UserH2oRuntimeProfile,
+  UserH2oRuntimeProfileInput,
   UserOverseaEntitlement,
   UserOverseaEntitlementInput,
   UserOverseaAccountSyncReport,
@@ -170,6 +172,7 @@ import {
   buildDnsZoneSnapshot,
   builtinDnsPolicies,
   builtinDnsReverseProxyRoutes,
+  buildUserH2oRuntimeProfile,
   builtinUserCenterOrg,
   builtinUserCenterRoles,
   builtinUserCenterTenant,
@@ -208,6 +211,7 @@ import {
   renderGatewayConfigMap,
   resolvePrincipalContext,
   userCredentialSummary,
+  userH2oRuntimeProfileId,
   userMatchesLogin,
   userOverseaAccountName,
   userOverseaEntitlementId,
@@ -245,6 +249,7 @@ type RecordKind =
   | 'iam-role'
   | 'iam-user'
   | 'iam-user-credential'
+  | 'user-h2o-runtime-profile'
   | 'user-oversea-entitlement'
   | 'user-oversea-account-sync-report'
   | 'iam-service-account'
@@ -1218,6 +1223,33 @@ export class PostgresStore implements PlatformStore {
     }
     if (!entries.length) return null;
     return renderUserOverseaMihomoSubscription(user, entitlement, entries);
+  }
+
+  async getUserH2oRuntimeProfile(userId: string, appId = 'h2o'): Promise<UserH2oRuntimeProfile | null> {
+    return this.getRecord<UserH2oRuntimeProfile>('user-h2o-runtime-profile', userH2oRuntimeProfileId(userId, appId));
+  }
+
+  async upsertUserH2oRuntimeProfile(input: UserH2oRuntimeProfileInput): Promise<UserH2oRuntimeProfile> {
+    const userId = input.userId?.trim();
+    const user = userId ? await this.getRecord<UserCenterUser>('iam-user', userId) : null;
+    if (!userId || !user) throw new Error(`User not found: ${userId || '<missing>'}`);
+    const appId = input.appId?.trim() || 'h2o';
+    const previous = await this.getUserH2oRuntimeProfile(userId, appId);
+    const profile = buildUserH2oRuntimeProfile(input, previous);
+    await this.saveRecord('user-h2o-runtime-profile', profile.profileId, profile, this.config.siteId);
+    await this.recordAudit({
+      eventType: previous ? 'user.h2o_runtime.updated' : 'user.h2o_runtime.created',
+      actorKind: 'user-center',
+      userId: profile.userId,
+      productId: profile.appId,
+      metadata: {
+        requestedBy: input.requestedBy?.trim() || 'mx-h2i-h2o',
+        subscriptions: profile.subscriptions.length,
+        activeSubscriptionId: profile.activeSubscriptionId,
+        mode: profile.mode
+      }
+    });
+    return profile;
   }
 
   async listUserCenterServiceAccounts(): Promise<UserCenterServiceAccount[]> {

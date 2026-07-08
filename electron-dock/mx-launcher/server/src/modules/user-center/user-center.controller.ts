@@ -18,6 +18,7 @@ import type {
   SiteSlotAccessAccount,
   SiteSlotSshProfile,
   TokenIntrospectionInput,
+  UserH2oRuntimeProfileInput,
   UserOverseaAccountSyncReport,
   UserOverseaEntitlement,
   UserOverseaEntitlementInput
@@ -42,7 +43,8 @@ export class UserCenterController {
         'principal.context',
         'rbac.policy',
         'service-account',
-        'oversea.provisioning'
+        'oversea.provisioning',
+        'h2o.runtime-profile'
       ],
       sdkGateway: await this.store.sdkGatewayManifest()
     };
@@ -90,6 +92,22 @@ export class UserCenterController {
       entitlement: await this.store.upsertUserOverseaEntitlement({
         ...toUserOverseaEntitlementInput(asRecord(rawBody)),
         userId
+      })
+    };
+  }
+
+  @Get('internal/v1/user-center/users/:userId/h2o/runtime-profile')
+  async userH2oRuntimeProfile(@Param('userId') userId: string) {
+    return { profile: await this.store.getUserH2oRuntimeProfile(userId, 'h2o') };
+  }
+
+  @Post('internal/v1/user-center/users/:userId/h2o/runtime-profile')
+  async upsertUserH2oRuntimeProfile(@Param('userId') userId: string, @Body() rawBody: unknown) {
+    return {
+      profile: await this.store.upsertUserH2oRuntimeProfile({
+        ...toUserH2oRuntimeProfileInput(asRecord(rawBody)),
+        userId,
+        appId: 'h2o'
       })
     };
   }
@@ -398,6 +416,21 @@ function toUserOverseaEntitlementInput(body: Record<string, unknown>): UserOvers
   };
 }
 
+function toUserH2oRuntimeProfileInput(body: Record<string, unknown>): UserH2oRuntimeProfileInput {
+  return {
+    userId: nullableString(body.userId),
+    appId: nullableString(body.appId),
+    mode: nullableString(body.mode),
+    activeSubscriptionId: nullableString(body.activeSubscriptionId),
+    activeSubscription: recordOrNull(body.activeSubscription),
+    subscriptions: Array.isArray(body.subscriptions) ? body.subscriptions.map((item) => asRecord(item)) : null,
+    ports: numberRecordOrNull(body.ports),
+    rules: Array.isArray(body.rules) ? body.rules.map((item) => asRecord(item)) : null,
+    requestedBy: nullableString(body.requestedBy),
+    requestId: nullableString(body.requestId)
+  };
+}
+
 function toCreateServiceAccountInput(body: Record<string, unknown>): CreateServiceAccountInput {
   return {
     serviceAccountId: nullableString(body.serviceAccountId),
@@ -454,6 +487,15 @@ function stringRecordOrNull(value: unknown): Record<string, string> | null {
     .map(([key, raw]) => [key, typeof raw === 'string' ? raw.trim() : raw === undefined || raw === null ? '' : String(raw)])
     .filter(([, text]) => text);
   return Object.fromEntries(entries) as Record<string, string>;
+}
+
+function numberRecordOrNull(value: unknown): Record<string, number> | null {
+  const record = recordOrNull(value);
+  if (!record) return null;
+  const entries = Object.entries(record)
+    .map(([key, raw]) => [key, typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() ? Number(raw) : NaN] as const)
+    .filter(([key, number]) => key && Number.isFinite(number));
+  return Object.fromEntries(entries) as Record<string, number>;
 }
 
 function remoteSyncTimeoutSeconds(value: unknown): number {

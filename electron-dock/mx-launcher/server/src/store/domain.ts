@@ -121,6 +121,9 @@ import type {
   UserCenterUserCredential,
   UserCenterUserCredentialSummary,
   UserCenterUserProfile,
+  UserH2oRuntimeProfile,
+  UserH2oRuntimeProfileInput,
+  UserH2oSubscription,
   UserOverseaEntitlement,
   UserOverseaSubscriptionRender,
   TestStep,
@@ -6542,6 +6545,130 @@ export function userOverseaAccountName(user: UserCenterUser, siteId: string): st
 
 export function userOverseaEntitlementId(userId: string): string {
   return `useroversea_${safeAccountName(userId)}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+export function userH2oRuntimeProfileId(userId: string, appId = 'h2o'): string {
+  return `userh2o_${safeAccountName(appId)}_${safeAccountName(userId)}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+export function buildUserH2oRuntimeProfile(
+  input: UserH2oRuntimeProfileInput,
+  previous: UserH2oRuntimeProfile | null = null,
+  now = new Date().toISOString()
+): UserH2oRuntimeProfile {
+  const userId = nullableTrimmed(input.userId) ?? previous?.userId;
+  if (!userId) throw new Error('userId is required for H2O runtime profile');
+  const appId = safeIdPart(nullableTrimmed(input.appId) ?? previous?.appId ?? 'h2o').toLowerCase();
+  const hasSubscriptionInput = input.subscriptions !== undefined && input.subscriptions !== null;
+  const subscriptions = normalizeUserH2oSubscriptions(hasSubscriptionInput ? input.subscriptions : previous?.subscriptions ?? []);
+  const activeInput = input.activeSubscription
+    ? normalizeUserH2oSubscription(input.activeSubscription)
+    : null;
+  const activeSubscriptionId = nullableTrimmed(input.activeSubscriptionId)
+    ?? activeInput?.id
+    ?? (hasSubscriptionInput ? null : previous?.activeSubscriptionId)
+    ?? subscriptions[0]?.id
+    ?? null;
+  const activeSubscription = (activeSubscriptionId
+    ? subscriptions.find((subscription) => subscription.id === activeSubscriptionId)
+    : null)
+    ?? (activeInput && subscriptions.some((subscription) => subscription.id === activeInput.id) ? activeInput : null)
+    ?? subscriptions[0]
+    ?? null;
+  return {
+    profileId: previous?.profileId ?? userH2oRuntimeProfileId(userId, appId),
+    userId,
+    appId,
+    mode: normalizeUserH2oMode(input.mode ?? previous?.mode),
+    activeSubscriptionId: activeSubscription?.id ?? activeSubscriptionId,
+    activeSubscription,
+    subscriptions,
+    ports: normalizeUserH2oPorts(input.ports ?? previous?.ports),
+    rules: Array.isArray(input.rules) ? input.rules.map(recordValue) : previous?.rules ?? [],
+    createdBy: previous?.createdBy ?? nullableTrimmed(input.requestedBy) ?? 'mx-h2i-h2o',
+    createdAt: previous?.createdAt ?? now,
+    updatedBy: nullableTrimmed(input.requestedBy) ?? 'mx-h2i-h2o',
+    updatedAt: now,
+    requestId: nullableTrimmed(input.requestId)
+  };
+}
+
+function normalizeUserH2oSubscriptions(value: unknown): UserH2oSubscription[] {
+  const rows = Array.isArray(value) ? value : [];
+  const byId = new Map<string, UserH2oSubscription>();
+  for (const row of rows) {
+    const subscription = normalizeUserH2oSubscription(row);
+    if (subscription) byId.set(subscription.id, subscription);
+  }
+  return [...byId.values()].slice(0, 24);
+}
+
+function normalizeUserH2oSubscription(value: unknown): UserH2oSubscription | null {
+  const row = recordValue(value);
+  const rawUrl = nullableTrimmed(row.url);
+  if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) return null;
+  const id = safeIdPart(nullableTrimmed(row.id) ?? `custom-${createHash('sha1').update(rawUrl).digest('hex').slice(0, 12)}`).toLowerCase();
+  const source = nullableTrimmed(row.source) ?? 'custom';
+  return {
+    id,
+    name: nullableTrimmed(row.name) ?? rawUrl,
+    url: rawUrl,
+    nodes: normalizeNonNegativeInteger(row.nodes, 0),
+    latencyMs: normalizeNonNegativeInteger(row.latencyMs, 0),
+    status: nullableTrimmed(row.status) ?? 'ready',
+    source,
+    requiresUser: row.requiresUser === true ? true : false,
+    assignable: row.assignable !== false,
+    entitlementId: nullableTrimmed(row.entitlementId),
+    siteIds: uniqueStrings(Array.isArray(row.siteIds) ? row.siteIds : []),
+    syncStatus: nullableTrimmed(row.syncStatus),
+    errorMessage: nullableTrimmed(row.errorMessage),
+    yamlBytes: normalizeNonNegativeInteger(row.yamlBytes, 0),
+    auth: normalizeUserH2oSubscriptionAuth(row.auth),
+    headers: stringRecordValue(recordValue(row.headers)),
+    pinnedAt: nullableTrimmed(row.pinnedAt),
+    lastUpdatedAt: nullableTrimmed(row.lastUpdatedAt) ?? new Date().toISOString()
+  };
+}
+
+function normalizeUserH2oSubscriptionAuth(value: unknown): UserH2oSubscription['auth'] {
+  const row = recordValue(value);
+  if (nullableTrimmed(row.type) === 'basic') {
+    return {
+      type: 'basic',
+      username: nullableTrimmed(row.username),
+      password: nullableTrimmed(row.password)
+    };
+  }
+  return { type: 'none', username: null, password: null };
+}
+
+function normalizeUserH2oPorts(value: unknown): Record<string, number> {
+  const row = recordValue(value);
+  return {
+    mixed: normalizePortNumber(row.mixed, 23458),
+    dns: normalizePortNumber(row.dns, 1053),
+    controller: normalizePortNumber(row.controller, 23457),
+    admin: normalizePortNumber(row.admin, 23456)
+  };
+}
+
+function normalizeUserH2oMode(value: unknown): string {
+  const text = nullableTrimmed(value)?.toLowerCase();
+  if (text === 'rule') return 'app-rule';
+  if (text === 'global' || text === 'direct') return 'app-global';
+  if (text === 'tun') return 'system-tun';
+  return text && ['app-rule', 'app-global', 'system-tun'].includes(text) ? text : 'app-global';
+}
+
+function normalizePortNumber(value: unknown, fallback: number): number {
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback;
+}
+
+function normalizeNonNegativeInteger(value: unknown, fallback: number): number {
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0 ? number : fallback;
 }
 
 export function renderUserOverseaMihomoSubscription(

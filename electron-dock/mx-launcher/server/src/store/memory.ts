@@ -37,6 +37,7 @@ import {
   applySiteSlotWorkerReportState,
   buildDnsZoneSnapshot,
   buildDnsReverseProxyRoute,
+  buildUserH2oRuntimeProfile,
   builtinDnsPolicies,
   builtinDnsReverseProxyRoutes,
   builtinUserCenterOrg,
@@ -78,6 +79,7 @@ import {
   renderGatewayConfigMap,
   resolvePrincipalContext,
   userCredentialSummary,
+  userH2oRuntimeProfileId,
   userMatchesLogin,
   userOverseaAccountName,
   userOverseaEntitlementId,
@@ -217,6 +219,8 @@ import type {
   UserCenterUserCredential,
   UserPasswordVerificationInput,
   UserPasswordVerificationResult,
+  UserH2oRuntimeProfile,
+  UserH2oRuntimeProfileInput,
   UserOverseaEntitlement,
   UserOverseaEntitlementInput,
   UserOverseaAccountSyncReport,
@@ -257,6 +261,7 @@ export class MemoryStore implements PlatformStore {
   private readonly roles = new Map<string, UserCenterRole>();
   private readonly users = new Map<string, UserCenterUser>();
   private readonly userCredentials = new Map<string, UserCenterUserCredential>();
+  private readonly userH2oRuntimeProfiles = new Map<string, UserH2oRuntimeProfile>();
   private readonly userOverseaEntitlements = new Map<string, UserOverseaEntitlement>();
   private readonly userOverseaAccountSyncReports = new Map<string, UserOverseaAccountSyncReport>();
   private readonly serviceAccounts = new Map<string, UserCenterServiceAccount>();
@@ -1134,6 +1139,32 @@ export class MemoryStore implements PlatformStore {
       .filter((entry): entry is { site: LauncherNetworkMihomoSite; account: SiteSlotAccessAccount } => Boolean(entry));
     if (!entries.length) return null;
     return renderUserOverseaMihomoSubscription(user, entitlement, entries);
+  }
+
+  getUserH2oRuntimeProfile(userId: string, appId = 'h2o'): UserH2oRuntimeProfile | null {
+    return this.userH2oRuntimeProfiles.get(userH2oRuntimeProfileId(userId, appId)) ?? null;
+  }
+
+  upsertUserH2oRuntimeProfile(input: UserH2oRuntimeProfileInput): UserH2oRuntimeProfile {
+    const userId = input.userId?.trim();
+    if (!userId || !this.users.has(userId)) throw new Error(`User not found: ${userId || '<missing>'}`);
+    const appId = input.appId?.trim() || 'h2o';
+    const previous = this.getUserH2oRuntimeProfile(userId, appId);
+    const profile = buildUserH2oRuntimeProfile(input, previous);
+    this.userH2oRuntimeProfiles.set(profile.profileId, profile);
+    this.recordAudit({
+      eventType: previous ? 'user.h2o_runtime.updated' : 'user.h2o_runtime.created',
+      actorKind: 'user-center',
+      userId: profile.userId,
+      productId: profile.appId,
+      metadata: {
+        requestedBy: input.requestedBy?.trim() || 'mx-h2i-h2o',
+        subscriptions: profile.subscriptions.length,
+        activeSubscriptionId: profile.activeSubscriptionId,
+        mode: profile.mode
+      }
+    });
+    return profile;
   }
 
   listUserCenterServiceAccounts(): UserCenterServiceAccount[] {
