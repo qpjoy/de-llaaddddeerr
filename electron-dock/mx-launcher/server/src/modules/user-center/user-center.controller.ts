@@ -470,6 +470,12 @@ function userOverseaAccountSyncCommand(account: SiteSlotAccessAccount, upRate: s
     'cd /opt/mx/current/hysteria2-access-stack 2>/dev/null || cd /opt/mx/releases/oversea-access-stack 2>/dev/null || { echo "access stack missing; run full Sync Remote once before per-user sync"; exit 2; }',
     'grep -q -- "--auth|--auth-token" ./manage.sh || { echo "legacy access stack artifact; run full Sync Remote once before per-user sync"; exit 3; }',
     `./manage.sh add-user --names ${shellQuote(account.username)} --auth-token ${shellQuote(account.authToken)} --up-ceil ${shellQuote(upRate)} --down-ceil ${shellQuote(downRate)}`,
+    `runtime_auth="$(awk -F, -v name=${shellQuote(account.username)} '$1 == name { print $2 }' data/hysteria/users.csv)"`,
+    'if [ -z "$runtime_auth" ]; then echo "runtime-user auth material missing"; exit 4; fi',
+    'if ! docker inspect -f "{{.State.Running}}" mx-oversea-hysteria2 >/dev/null 2>&1; then ./manage.sh start hysteria; fi',
+    `runtime_user="$(docker exec mx-oversea-hysteria2 /etc/hysteria/auth.sh 1.2.3.4:1234 "$runtime_auth" 1000 2>/dev/null || true)"`,
+    `if [ "$runtime_user" != ${shellQuote(account.username)} ]; then echo "runtime-user account material drift; recreating hysteria"; ./manage.sh start hysteria; runtime_user="$(docker exec mx-oversea-hysteria2 /etc/hysteria/auth.sh 1.2.3.4:1234 "$runtime_auth" 1000 2>/dev/null || true)"; fi`,
+    `if [ "$runtime_user" != ${shellQuote(account.username)} ]; then echo "runtime-user auth failed after recreate"; exit 5; fi`,
     `./manage.sh list-users | awk -v name=${shellQuote(account.username)} '$1 == name { print "runtime-user " $1 " " $2 " " $3; found = 1 } END { exit(found ? 0 : 4) }'`
   ].join('; ');
 }

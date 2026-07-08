@@ -448,10 +448,16 @@ H2O 运行时订阅策略：
   请求里完成默认 `oversea-main` entitlement 分配、runtime sync 尝试和订阅 YAML 渲染状态返回；
   调用方只需检查 `ensure.ready` 和 `subscription.path`，不需要再手动刷新默认订阅。如果
   `site-slots/plans` 里没有可用的 `oversea-main`，客户端应选择最近的非 blocked
-  oversea plan，或退回 Internal server-default site 分配。只要 Internal 已能生成 active
-  account 的 YAML，就可以先应用给本机 mihomo，`pending-runtime-sync` 只作为 UI/诊断提示保留。
-- 如果 entitlement 已存在但账号的 `runtimeSync` 不是 `synced`，H2O 水合 managed profile 时
-  应自动对当前用户调用一次 `/oversea/sync-runtime`，等同于用户中心里手动同步单个用户。
+  oversea plan，或退回 Internal server-default site 分配。`ensure.ready` 必须代表远端
+  Hysteria2 runtime 已能用该账号 auth，而不仅是 Internal 已生成 YAML 或 host
+  `users.csv` 有记录；否则 H2O 应保留 initializing/诊断状态，避免给用户一个看似可用但无法
+  出网的订阅。
+- 如果 entitlement 已存在但账号缺失或 `runtimeSync` 不是 `synced`，H2O 水合 managed profile
+  时也应优先调用 `ensure-subscription`，让一次请求同时补 entitlement、site access account、
+  remote runtime sync 和 YAML 可渲染性；`/oversea/sync-runtime` 只作为已有 active account
+  的轻量补同步回退。
+- H2O 默认使用 `app-global`，即 AppCenter/嵌入 App 里除黑名单外都走 H2O；`app-rule`
+  是显式选择的白名单模式，不能作为新用户或缺省配置的回退。
 - 用户手动保存的外部订阅、Basic Auth、headers 和置顶/active 选择属于本机偏好，不应被
   Internal managed profile 刷新覆盖。历史上写进 `h2o-default` 的外部 URL 应迁移成
   `custom-*` 订阅，并在下一次启动时继续自动 active。

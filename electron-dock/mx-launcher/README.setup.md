@@ -254,4 +254,7 @@ pnpm --dir electron-dock/mx-launcher/server release:publish -- \
 
 # 删除mihomo pid
 pkill -TERM -f "$HOME/Library/Application Support/MX-H2I/h2o/mihomo-tunnel/bin/mihomo"
+
+# Subscriptions
+POST /internal/v1/user-center/users/{userId}/oversea/ensure-subscription
 ```

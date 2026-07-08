@@ -637,6 +637,28 @@ ensure_hysteria_published_port() {
 	recreate_full_stack
 }
 
+hysteria_runtime_users_file_matches() {
+	container_running "$HYSTERIA_CONTAINER" || return 0
+	[[ -f "$USERS_FILE" ]] || return 1
+	docker exec "$HYSTERIA_CONTAINER" sh -c 'test -f /var/lib/hysteria/users.csv && cat /var/lib/hysteria/users.csv' 2>/dev/null | cmp -s "$USERS_FILE" -
+}
+
+ensure_hysteria_runtime_users_current() {
+	container_running "$HYSTERIA_CONTAINER" || return 0
+	if hysteria_runtime_users_file_matches; then
+		return 0
+	fi
+
+	echo "Docker hysteria users.csv drift detected; recreating hysteria service to mount current account material."
+	render_runtime_files
+	safe_recreate_service hysteria
+	wait_for_container "$HYSTERIA_CONTAINER"
+	ensure_hysteria_published_port
+	if ! hysteria_runtime_users_file_matches; then
+		die "Docker hysteria users.csv still differs after recreate; check bind mount source for $HYSTERIA_CONTAINER."
+	fi
+}
+
 wait_for_subscription_http_ready() {
 	local port="${1:-$HY2_EXPORT_FALLBACK_PORT}"
 	local deadline=$((SECONDS + 60))
@@ -1469,6 +1491,16 @@ docker_status_command() {
 		fi
 		die "Docker hysteria2 access stack defaults drift from Internal-managed values; run setup or Internal Install / Sync."
 	fi
+	echo
+	echo "Docker Hysteria2 account material:"
+	if hysteria_runtime_users_file_matches; then
+		echo "passed"
+	elif [[ "$soft" == "true" ]]; then
+		echo "status: users-drift"
+		echo "next action: run sync-internal-defaults or per-user ensure-subscription to recreate hysteria with current users.csv."
+	else
+		die "Docker hysteria users.csv differs from current account material; run sync-internal-defaults or Internal Install / Sync."
+	fi
 }
 
 sync_internal_defaults_command() {
@@ -1487,6 +1519,8 @@ sync_internal_defaults_command() {
 		recreate_full_stack
 	elif ! hysteria_published_port_matches_env; then
 		ensure_hysteria_published_port
+	elif ! hysteria_runtime_users_file_matches; then
+		ensure_hysteria_runtime_users_current
 	else
 		refresh_subscriptions
 	fi
@@ -1772,6 +1806,7 @@ add_user_command() {
 	done
 
 	sync_env_user_list_from_file
+	ensure_hysteria_runtime_users_current
 	refresh_subscriptions
 	echo "Upserted users: $(array_join_csv "${additions[@]}")"
 }
@@ -1794,6 +1829,7 @@ del_user_command() {
 	done
 
 	sync_env_user_list_from_file
+	ensure_hysteria_runtime_users_current
 	refresh_subscriptions
 	echo "Deleted users: $(array_join_csv "${removals[@]}")"
 }
@@ -1820,6 +1856,7 @@ set_limit_command() {
 		upsert_user_record "$name" "$auth_token" "${up_value:-$current_up}" "${down_value:-$current_down}"
 	done
 
+	ensure_hysteria_runtime_users_current
 	refresh_subscriptions
 	echo "Updated Hysteria2 advertised up/down values for: $(array_join_csv "${names[@]}")"
 }
@@ -1844,6 +1881,7 @@ clear_limit_command() {
 		upsert_user_record "$name" "$auth_token" "${HY2_DEFAULT_UP:-$(default_hy2_upload_rate)}" "${HY2_DEFAULT_DOWN:-$(default_hy2_download_rate)}"
 	done
 
+	ensure_hysteria_runtime_users_current
 	refresh_subscriptions
 	echo "Reset users to stack default up/down values: $(array_join_csv "${names[@]}")"
 }
@@ -1946,6 +1984,8 @@ reconcile_from_json_command() {
 		recreate_full_stack
 	elif ! hysteria_published_port_matches_env; then
 		ensure_hysteria_published_port
+	elif ! hysteria_runtime_users_file_matches; then
+		ensure_hysteria_runtime_users_current
 	else
 		refresh_subscriptions
 	fi

@@ -14,6 +14,7 @@ loadDotEnvFiles();
 
 const APP_ID = 'dev.qpjoy.mx-h2i';
 const STATE_FILE = 'mx-h2i-runtime.json';
+const H2O_RUNTIME_STORE_FILE = 'mx-h2i-h2o-runtime.json';
 const PRODUCT_ID = 'mx-h2i';
 const PRODUCT_DISPLAY_NAME = 'MX-H2I';
 const REQUESTED_BY = 'mx-h2i-desktop';
@@ -102,6 +103,7 @@ let systemDomainProxyManager = null;
 let systemDomainProxyRefreshInterval = null;
 let systemDomainProxyRefreshInFlight = false;
 let systemDomainProxyEnsureInFlight = null;
+let h2oManagedHydrateInFlight = null;
 let lastSystemDomainProxySignature = null;
 let lastSystemDomainProxyPolicySignature = null;
 let lastSystemDomainProxyAuthorizationCanceledSignature = null;
@@ -120,6 +122,7 @@ const TOP_LEAVE_HIDE_MS = 180;
 const WINDOW_BOUNDS_SAVE_DELAY_MS = 420;
 const H2O_PROXY_START_TIMEOUT_MS = 12_000;
 const H2O_PORT_RELEASE_TIMEOUT_MS = 8_000;
+const H2O_MANAGED_SUBSCRIPTION_REFRESH_MS = 30_000;
 
 app.setAppUserModelId(APP_ID);
 
@@ -2870,10 +2873,40 @@ function deferredSystemDomainProxyRestoreStatus(reason, prepared = null) {
 }
 
 function isSystemDomainProxyAuthorizationCanceled(status) {
-  const text = status instanceof Error
-    ? `${status.message || ''}\n${status.stack || ''}`
-    : `${status?.error || ''}\n${status?.resolverError || ''}`;
-  return /authorization canceled|administrator authorization canceled|user canceled|用户已取消|\(-128\)/i.test(text);
+  return isUserAuthorizationCanceledError(status);
+}
+
+function isUserAuthorizationCanceledError(value) {
+  const text = authorizationErrorText(value);
+  return /authorization canceled|administrator authorization canceled|user canceled|user cancelled|用户已取消|取消授权|已取消|\(-128\)|osascript.*canceled|osascript.*cancelled/i.test(text);
+}
+
+function authorizationErrorText(value) {
+  if (!value) return '';
+  if (value instanceof Error) {
+    return [
+      value.message,
+      value.stack,
+      value.stderr,
+      value.stdout,
+      value.cause?.message,
+      value.cause?.stderr,
+      value.cause?.stdout
+    ].filter(Boolean).join('\n');
+  }
+  if (typeof value === 'string') return value;
+  if (typeof value === 'object') {
+    return [
+      value.error,
+      value.resolverError,
+      value.message,
+      value.stderr,
+      value.stdout,
+      value.reason,
+      value.skipReason
+    ].filter(Boolean).join('\n');
+  }
+  return String(value);
 }
 
 function systemPacFallbackProxy() {
@@ -3142,12 +3175,15 @@ function clamp(value, min, max) {
 }
 
 async function loadRuntime() {
+  let loaded;
   try {
     const raw = await fs.readFile(runtimePath(), 'utf8');
-    return await normalizeRuntime(JSON.parse(raw));
+    loaded = await normalizeRuntime(JSON.parse(raw));
   } catch {
-    return await normalizeRuntime({});
+    loaded = await normalizeRuntime({});
   }
+  const persistedH2oRuntime = await loadPersistedH2oRuntime();
+  return mergePersistedH2oRuntime(loaded, persistedH2oRuntime);
 }
 
 async function normalizeRuntime(input) {
@@ -3784,8 +3820,8 @@ function normalizeH2oMode(value) {
   if (text === 'rule') return 'app-rule';
   if (text === 'global') return 'app-global';
   if (text === 'tun') return 'system-tun';
-  if (text === 'direct') return 'app-rule';
-  return ['app-rule', 'app-global', 'system-tun'].includes(text) ? text : 'app-rule';
+  if (text === 'direct') return 'app-global';
+  return ['app-rule', 'app-global', 'system-tun'].includes(text) ? text : 'app-global';
 }
 
 function h2oHasUsableSubscription(subscription) {
@@ -3857,11 +3893,14 @@ async function resolveH2oUserIdFromAccount(options = {}) {
 
 async function ensureH2oActiveSubscriptionReady(currentRuntime, options = {}) {
   let current = h2oPluginRuntime(currentRuntime);
-  if (h2oHasUsableSubscription(current.activeSubscription)) return current;
+  if (h2oHasUsableSubscription(current.activeSubscription)) {
+    return ensureH2oManagedSubscriptionsReady(current, options);
+  }
 
   const localPreferred = firstUsableH2oLocalSubscription(current);
   if (localPreferred) {
-    return activateH2oSubscription(current, localPreferred, options.reason || 'restore-local-subscription');
+    const restored = activateH2oSubscription(current, localPreferred, options.reason || 'restore-local-subscription');
+    return ensureH2oManagedSubscriptionsReady(restored, options);
   }
 
   if (h2oCanAutoHydrateManagedSubscription(current.activeSubscription)) {
@@ -3886,6 +3925,60 @@ async function ensureH2oActiveSubscriptionReady(currentRuntime, options = {}) {
   }
 
   return current;
+}
+
+async function ensureH2oManagedSubscriptionsReady(currentRuntime, options = {}) {
+  const current = h2oPluginRuntime(currentRuntime);
+  if (!h2oManagedSubscriptionNeedsEnsure(current)) return current;
+  if (!h2oManagedHydrateInFlight) {
+    h2oManagedHydrateInFlight = (async () => {
+      await hydrateH2oSystemSubscriptionsForUser({
+        ...options,
+        autoProvision: options.autoProvision !== false,
+        autoSyncRuntime: options.autoSyncRuntime !== false,
+        showInitializing: options.showInitializing === true
+      });
+    })().catch((err) => {
+      pushAppLog('h2o', 'warning', `H2O managed oversea ensure skipped: ${errorMessage(err)}`);
+    }).finally(() => {
+      h2oManagedHydrateInFlight = null;
+    });
+  }
+  await h2oManagedHydrateInFlight;
+  return h2oPluginRuntime(runtime?.apps?.h2o?.runtime || current);
+}
+
+function h2oManagedSubscriptionNeedsEnsure(h2oRuntime) {
+  if (!runtimeHasUserIdentity()) return false;
+  const current = h2oPluginRuntime(h2oRuntime);
+  const managed = current.subscriptions.filter((item) => h2oIsHydratableManagedSubscription(item));
+  if (!managed.length) return true;
+  if (
+    h2oIsHydratableManagedSubscription(current.activeSubscription)
+    && h2oManagedSubscriptionIsStale(current.activeSubscription)
+  ) {
+    return true;
+  }
+  return managed.some((item) => {
+    const syncStatus = nullableString(item.syncStatus);
+    return !h2oHasUsableSubscription(item)
+      || ['login-required', 'pending', 'error'].includes(nullableString(item.status))
+      || h2oManagedSubscriptionIsStale(item)
+      || ['missing-entitlement', 'missing-active-account', 'pending-runtime-sync', 'initializing', 'auto-provision-failed', 'fetch-failed', 'missing-user'].includes(syncStatus);
+  });
+}
+
+function h2oIsHydratableManagedSubscription(item) {
+  const id = nullableString(item?.id);
+  return id === 'h2o-default'
+    || (/^h2o-oversea-/i.test(id || '') && id !== 'h2o-oversea-backup');
+}
+
+function h2oManagedSubscriptionIsStale(item) {
+  if (!h2oHasUsableSubscription(item)) return false;
+  const updatedAt = Date.parse(nullableString(item?.lastUpdatedAt) || '');
+  return Number.isFinite(updatedAt)
+    && Date.now() - updatedAt > H2O_MANAGED_SUBSCRIPTION_REFRESH_MS;
 }
 
 async function markH2oSystemSubscriptionInitializing(currentRuntime, reason = 'h2o-subscription-initializing') {
@@ -4074,8 +4167,23 @@ function h2oRuntimeWithTunnelStatus(h2oRuntime, tunnelStatus) {
 async function restoreH2oRuntimeAfterStartup() {
   if (!runtime?.apps?.h2o?.installed) return;
   const current = h2oPluginRuntime(runtime.apps.h2o.runtime);
-  const shouldRestore = current.running
-    || (Boolean(runtime.apps.h2o.errorMessage) && h2oHasUsableSubscription(current.activeSubscription));
+  if (!current.running && h2oLooksLikeIdleProxyError(runtime.apps.h2o.errorMessage)) {
+    runtime.apps.h2o.runtime = h2oPluginRuntime({
+      ...current,
+      status: h2oHasUsableSubscription(current.activeSubscription) ? 'ready' : 'subscription-required',
+      metrics: {
+        ...normalizeH2oMetrics(current.metrics),
+        connections: 0
+      }
+    });
+    runtime.apps.h2o.status = 'enabled';
+    runtime.apps.h2o.runtimeState = 'ready';
+    runtime.apps.h2o.errorMessage = null;
+    touchRuntime('h2o idle proxy error cleared');
+    await saveAndBroadcast();
+    return;
+  }
+  const shouldRestore = current.running || current.status === 'starting';
   if (!shouldRestore) return;
   runtime.apps.h2o.runtime = h2oPluginRuntime({
     ...current,
@@ -4502,7 +4610,7 @@ async function openH2oTestWindow(input = {}) {
   win.focus();
   if (
     !current.running
-    && ['starting', 'proxy-unavailable'].includes(current.status)
+    && current.status === 'starting'
     && h2oHasUsableSubscription(current.activeSubscription)
   ) {
     await ensureH2oProxyReady({ ...current, running: true }, 'test-window-preflight');
@@ -4566,6 +4674,19 @@ function isH2oTestLoadCurrent(loadId, win) {
   return loadId === h2oTestWindowLoadId
     && win
     && !win.isDestroyed();
+}
+
+function h2oTestWindowSession(win) {
+  if (!win || win.isDestroyed()) return null;
+  try {
+    const webContents = win.webContents;
+    if (!webContents || (typeof webContents.isDestroyed === 'function' && webContents.isDestroyed())) {
+      return null;
+    }
+    return webContents.session || null;
+  } catch (_err) {
+    return null;
+  }
 }
 
 function isH2oTestAbortError(err) {
@@ -4639,13 +4760,15 @@ async function loadH2oTestWindowUrlWithRetry(win, targetUrl, proxyMode, loadId) 
   } catch (err) {
     if (!isH2oTestLoadCurrent(loadId, win) || isH2oTestAbortError(err)) throw err;
     if (!await shouldRetryH2oTestLoad(win, proxyMode, err)) throw err;
-    const before = await h2oResolveProxyDecision(win.webContents.session, targetUrl);
+    const beforeSession = h2oTestWindowSession(win);
+    const before = beforeSession ? await h2oResolveProxyDecision(beforeSession, targetUrl) : '';
     pushAppLog('h2o', 'warning', `H2O test load failed once, recovering mihomo and retrying: ${errorMessage(err)}; before=${before || 'unknown'}`);
     const recovered = await recoverH2oProxyForTestLoad(win, targetUrl, loadId);
     if (!recovered) throw err;
     await delay(260);
     if (!isH2oTestLoadCurrent(loadId, win)) throw err;
-    const after = await h2oResolveProxyDecision(win.webContents.session, targetUrl);
+    const afterSession = h2oTestWindowSession(win);
+    const after = afterSession ? await h2oResolveProxyDecision(afterSession, targetUrl) : '';
     pushAppLog('h2o', 'info', `H2O test retry proxy decision: ${after || 'unknown'}.`);
     await win.loadURL(targetUrl);
   }
@@ -4663,14 +4786,17 @@ async function recoverH2oProxyForTestLoad(win, targetUrl, loadId) {
   if (!ensured.ready || !isH2oTestLoadCurrent(loadId, win)) return false;
   const readyRuntime = h2oPluginRuntime(runtime.apps.h2o.runtime);
   const readyPort = normalizePort(readyRuntime?.ports?.mixed, current?.ports?.mixed || 23458);
-  await applyH2oTestSessionProxy(win.webContents.session, readyPort, targetUrl);
+  const session = h2oTestWindowSession(win);
+  if (!session) return false;
+  await applyH2oTestSessionProxy(session, readyPort, targetUrl);
   return isH2oTestLoadCurrent(loadId, win);
 }
 
 async function h2oTestWindowFailureDiagnostics(win, targetUrl, proxyMode) {
-  if (!win || win.isDestroyed()) return '';
+  const session = h2oTestWindowSession(win);
+  if (!session) return '';
   const parts = [];
-  const decision = await h2oResolveProxyDecision(win.webContents.session, targetUrl);
+  const decision = await h2oResolveProxyDecision(session, targetUrl);
   if (decision) parts.push(`resolveProxy=${decision}`);
   if (proxyMode === 'proxy') {
     const current = h2oPluginRuntime(runtime.apps.h2o.runtime);
@@ -4715,7 +4841,8 @@ async function configureH2oTestWindowProxy(win, h2oRuntime, targetUrl, loadId) {
   if (!win || win.isDestroyed()) return 'direct';
   if (loadId !== undefined && !isH2oTestLoadCurrent(loadId, win)) return 'stale';
   const mode = h2oTestProxyMode(h2oRuntime, targetUrl);
-  const ses = win.webContents.session;
+  const ses = h2oTestWindowSession(win);
+  if (!ses) return 'stale';
   if (mode !== 'proxy') {
     if (loadId !== undefined && !isH2oTestLoadCurrent(loadId, win)) return 'stale';
     await configureH2oTestWindowFallbackProxy(ses, mode, targetUrl);
@@ -5224,6 +5351,28 @@ async function hydrateH2oSystemSubscriptionsForUser(options = {}) {
     let accounts = Array.isArray(entitlement.accounts) ? entitlement.accounts : [];
     let activeAccounts = accounts.filter((account) => account?.status === 'active');
     let syncedAccounts = activeAccounts.filter((account) => account?.runtimeSync?.status === 'synced');
+    const entitlementSiteIds = arrayValue(entitlement?.siteIds, accounts.map((account) => account.siteId))
+      .map((item) => String(item || '').trim())
+      .filter(Boolean);
+    if (options.autoProvision !== false && (!activeAccounts.length || !syncedAccounts.length)) {
+      try {
+        await provisionH2oOverseaForCurrentUser({
+          baseUrl,
+          bootstrapResolveMode: options.bootstrapResolveMode,
+          siteIds: entitlementSiteIds,
+          skipHydrate: true
+        });
+        return await hydrateH2oSystemSubscriptionsForUser({
+          ...options,
+          userId,
+          baseUrl,
+          autoProvision: false,
+          showInitializing: false
+        });
+      } catch (err) {
+        pushAppLog('h2o', 'warning', `H2O existing oversea entitlement ensure failed during hydrate: ${errorMessage(err)}`);
+      }
+    }
     const subscriptionPath = nullableString(entitlement.subscriptionPath)
       || `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea/subscription.yaml`;
     const subscriptionFetchUrl = h2oManagedSubscriptionUrl(subscriptionPath, { baseUrl })
@@ -7384,6 +7533,10 @@ async function applyNetworkSession(session, options) {
       darwinExtraInstallShell: combinedSystemDomainProxy?.shell || null,
       suppressWireGuardDns: shouldSuppressWireGuardDnsForSystemDomainProxy(combinedSystemDomainProxy)
     });
+    if (wireGuardResult.authorizationCanceled === true) {
+      applyWireGuardAuthorizationCanceled(options, wireGuardResult);
+      return;
+    }
     runtime.connection = {
       ...runtime.connection,
       state: wireGuardResult.state,
@@ -7447,6 +7600,29 @@ async function applyNetworkSession(session, options) {
   } finally {
     wireGuardConnectInFlight = false;
   }
+}
+
+function applyWireGuardAuthorizationCanceled(options, wireGuardResult) {
+  runtime.connection = {
+    ...idleConnection(),
+    mode: options.mode === 'employee' ? 'employee' : 'guest',
+    diagnostics: {
+      authorizationCanceled: {
+        ok: false,
+        message: wireGuardResult.message || '用户取消了系统授权。',
+        updatedAt: nowIso()
+      },
+      wireGuard: wireGuardResult.wireGuard,
+      updatedAt: nowIso()
+    }
+  };
+  runtime.identity = normalizeIdentity(null);
+  runtime.auth = null;
+  runtime.feedback = {
+    tone: 'warning',
+    message: '已取消系统授权，MX-H2I 连接已停止；没有继续启动 WireGuard、PAC 或后台恢复。'
+  };
+  touchRuntime(options.mode === 'employee' ? 'employee authorization canceled' : 'guest authorization canceled');
 }
 
 async function applyConnectionError(label, err) {
@@ -7576,6 +7752,9 @@ async function startWireGuardForSession(input) {
       message: ready ? 'ready' : wireGuardNotReadyMessage(result, route, internalApi, internalDirectPeerSync, domesticPeerSync, domesticRelayDiagnostics)
     };
   } catch (err) {
+    if (isUserAuthorizationCanceledError(err)) {
+      return wireGuardAuthorizationCanceledFailure(errorMessage(err));
+    }
     return wireGuardFailure(errorMessage(err));
   }
 }
@@ -8311,6 +8490,23 @@ function wireGuardFailure(message) {
       updatedAt: nowIso()
     },
     message
+  };
+}
+
+function wireGuardAuthorizationCanceledFailure(message) {
+  const failure = wireGuardFailure(message || '用户取消了系统授权。');
+  return {
+    ...failure,
+    state: 'authorization-canceled',
+    authorizationCanceled: true,
+    diagnostics: {
+      ...failure.diagnostics,
+      authorizationCanceled: {
+        ok: false,
+        message: failure.message,
+        updatedAt: nowIso()
+      }
+    }
   };
 }
 
@@ -9185,8 +9381,10 @@ async function saveAndBroadcast() {
 }
 
 async function saveRuntime(next) {
+  const persistable = persistableRuntime(next);
   await fs.mkdir(path.dirname(runtimePath()), { recursive: true });
-  await fs.writeFile(runtimePath(), JSON.stringify(persistableRuntime(next), null, 2) + '\n', 'utf8');
+  await fs.writeFile(runtimePath(), JSON.stringify(persistable, null, 2) + '\n', 'utf8');
+  await savePersistedH2oRuntime(persistable.apps?.h2o?.runtime);
 }
 
 function persistableRuntime(input) {
@@ -9199,6 +9397,119 @@ function persistableRuntime(input) {
     };
   }
   return next;
+}
+
+async function loadPersistedH2oRuntime() {
+  try {
+    const raw = await fs.readFile(h2oRuntimeStorePath(), 'utf8');
+    return h2oPluginRuntime(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+async function savePersistedH2oRuntime(input) {
+  if (!input) return;
+  const current = h2oPluginRuntime(input);
+  const store = {
+    kind: 'h2o-plugin',
+    mode: current.mode,
+    running: false,
+    status: h2oHasUsableSubscription(current.activeSubscription) ? 'ready' : 'subscription-required',
+    tunInstalled: current.tunInstalled,
+    adminUrl: current.adminUrl,
+    ports: current.ports,
+    activeSubscriptionId: current.activeSubscriptionId,
+    activeSubscription: current.activeSubscription,
+    subscriptions: current.subscriptions,
+    rules: current.rules,
+    metrics: current.metrics,
+    startedAt: null,
+    lastAppliedAt: current.lastAppliedAt
+  };
+  await fs.mkdir(path.dirname(h2oRuntimeStorePath()), { recursive: true });
+  await fs.writeFile(h2oRuntimeStorePath(), JSON.stringify(store, null, 2) + '\n', 'utf8');
+}
+
+function mergePersistedH2oRuntime(source, persistedRuntime) {
+  const next = source && typeof source === 'object' ? { ...source } : source;
+  const appRecord = next?.apps?.h2o;
+  if (!appRecord?.runtime) return next;
+  const current = h2oPluginRuntime(appRecord.runtime);
+  const persisted = persistedRuntime ? h2oPluginRuntime(persistedRuntime) : null;
+  const subscriptions = persisted
+    ? mergeH2oRuntimeSubscriptions(persisted.subscriptions, current.subscriptions)
+    : current.subscriptions;
+  const activeSubscription = subscriptions.find((item) => persisted && item.id === persisted.activeSubscriptionId)
+    || subscriptions.find((item) => item.id === current.activeSubscriptionId)
+    || subscriptions[0]
+    || current.activeSubscription;
+  const shouldClearIdleProxyError = current.running !== true && h2oLooksLikeIdleProxyError(appRecord.errorMessage);
+  const status = current.running
+    ? current.status
+    : shouldClearIdleProxyError || ['starting', 'proxy-unavailable'].includes(current.status)
+      ? h2oHasUsableSubscription(activeSubscription) ? 'ready' : 'subscription-required'
+      : current.status;
+  const mergedRuntime = h2oPluginRuntime({
+    ...current,
+    ...(persisted ? {
+      mode: persisted.mode,
+      tunInstalled: persisted.tunInstalled,
+      adminUrl: persisted.adminUrl,
+      ports: persisted.ports,
+      rules: persisted.rules
+    } : {}),
+    running: current.running === true,
+    status,
+    subscriptions,
+    activeSubscription,
+    activeSubscriptionId: activeSubscription.id,
+    startedAt: current.running === true ? current.startedAt : null
+  });
+  next.apps = {
+    ...next.apps,
+    h2o: {
+      ...appRecord,
+      runtime: mergedRuntime,
+      status: current.running === true ? 'running' : shouldClearIdleProxyError && appRecord.installed ? 'enabled' : appRecord.status,
+      runtimeState: current.running === true ? 'running' : shouldClearIdleProxyError && appRecord.installed ? 'ready' : appRecord.runtimeState,
+      errorMessage: shouldClearIdleProxyError ? null : appRecord.errorMessage
+    }
+  };
+  return next;
+}
+
+function mergeH2oRuntimeSubscriptions(primary, secondary) {
+  const byId = new Map();
+  const add = (item) => {
+    const normalized = normalizeH2oSubscription(item, {});
+    const existing = byId.get(normalized.id);
+    byId.set(normalized.id, chooseH2oSubscription(existing, normalized));
+  };
+  for (const item of arrayValue(primary, [])) add(item);
+  for (const item of arrayValue(secondary, [])) add(item);
+  return orderH2oSubscriptions([...byId.values()]).slice(0, 12);
+}
+
+function chooseH2oSubscription(existing, incoming) {
+  if (!existing) return incoming;
+  const existingUsable = h2oHasUsableSubscription(existing);
+  const incomingUsable = h2oHasUsableSubscription(incoming);
+  if (incomingUsable && !existingUsable) return incoming;
+  if (existingUsable && !incomingUsable) return existing;
+  const existingHttp = h2oLooksLikeHttpSubscriptionUrl(existing.url);
+  const incomingHttp = h2oLooksLikeHttpSubscriptionUrl(incoming.url);
+  if (incomingHttp && !existingHttp) return incoming;
+  if (existingHttp && !incomingHttp) return existing;
+  return existing;
+}
+
+function h2oLooksLikeIdleProxyError(message) {
+  return /mixed-port|未监听|proxy-unavailable|H2O mihomo 恢复失败/i.test(nullableString(message) || '');
+}
+
+function h2oRuntimeStorePath() {
+  return path.join(app.getPath('userData'), 'h2o', H2O_RUNTIME_STORE_FILE);
 }
 
 function broadcastState() {

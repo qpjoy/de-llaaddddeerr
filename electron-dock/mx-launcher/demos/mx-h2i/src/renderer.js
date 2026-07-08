@@ -223,7 +223,7 @@ root.addEventListener('click', (event) => {
   }
   if (action === 'setH2oMode') {
     const runtime = h2oRuntime();
-    const nextMode = normalizeH2oModeUi(button.dataset.mode || 'app-rule');
+    const nextMode = normalizeH2oModeUi(button.dataset.mode || 'app-global');
     appShellMenuOpen = false;
     if (!h2oHasUsableSubscription(runtime)) {
       h2oManagerView = 'subscriptions';
@@ -256,7 +256,7 @@ root.addEventListener('click', (event) => {
     void runAction('updateH2oRuntime', {
       ...runtime,
       tunInstalled,
-      mode: !tunInstalled && runtime.mode === 'system-tun' ? 'app-rule' : runtime.mode,
+      mode: !tunInstalled && runtime.mode === 'system-tun' ? 'app-global' : runtime.mode,
       status: runtime.running ? 'running' : 'ready',
       applyTunnelRuntime: true,
       lastAppliedAt: new Date().toISOString(),
@@ -1470,7 +1470,7 @@ function renderAppCenterView(connected) {
   const h2o = apps.find((app) => app.appId === 'h2o');
   const route = appCenterRoute === 'h2o' && h2o ? 'h2o' : 'catalog';
   const selected = route === 'h2o' ? h2o : apps.find((app) => app.appId === selectedAppId) || visibleApps[0] || apps[0] || null;
-  const hasError = apps.some((app) => app.errorMessage || app.runtimeState === 'error' || app.status === 'error');
+  const hasError = apps.some((app) => appNeedsAttention(app));
   return `
     <section class="appcenter-window appcenter-product ${route === 'h2o' ? 'is-app-managing' : ''} ${appDebugOpen ? 'is-debug-open' : ''} ${appInspectorCollapsed ? 'is-inspector-collapsed' : ''}">
       ${route === 'h2o' ? '' : `<aside class="appcenter-rail">
@@ -1706,12 +1706,13 @@ function categoryTitle(category) {
 }
 
 function renderAppCenterErrorBanner(apps) {
-  const errored = apps.find((app) => app.errorMessage || app.runtimeState === 'error' || app.status === 'error');
+  const errored = apps.find((app) => appNeedsAttention(app));
   if (!errored) return '';
+  const errorMessage = appVisibleErrorMessage(errored);
   return `
     <div class="appcenter-error-banner">
       <strong>${escapeHtml(errored.displayName)} 需要处理</strong>
-      <span>${escapeHtml(errored.errorMessage || '应用运行状态异常，打开 Debug 查看详情。')}</span>
+      <span>${escapeHtml(errorMessage || '应用运行状态异常，打开 Debug 查看详情。')}</span>
       <button class="secondary-button" type="button" data-action="toggle-app-debug">Debug</button>
     </div>
   `;
@@ -1769,6 +1770,7 @@ function renderCollapsedAppInspector(app) {
 
 function renderAppCenterUserPanel(app, connected) {
   const action = appPrimaryAction(app, connected);
+  const errorMessage = appVisibleErrorMessage(app);
   return `
     <aside class="appcenter-inspector appcenter-user-panel mx-scrollbar">
       <div class="inspector-head">
@@ -1781,7 +1783,7 @@ function renderAppCenterUserPanel(app, connected) {
         <button class="inspector-collapse-button" type="button" data-action="toggle-app-inspector" aria-label="收起应用详情">›</button>
       </div>
       <p class="inspector-summary">${escapeHtml(app.description)}</p>
-      ${app.errorMessage ? `<div class="app-inline-error">${escapeHtml(app.errorMessage)}</div>` : ''}
+      ${errorMessage ? `<div class="app-inline-error">${escapeHtml(errorMessage)}</div>` : ''}
       <div class="app-user-facts">
         <div><span>版本</span><strong>${escapeHtml(app.installedVersion || app.version || '0.1.0')}</strong></div>
         <div><span>更新</span><strong>${escapeHtml(app.latestVersion && app.latestVersion !== (app.installedVersion || app.version) ? `${app.latestVersion} 可用` : '已是最新')}</strong></div>
@@ -2339,8 +2341,8 @@ function normalizeH2oModeUi(value) {
   if (text === 'global') return 'app-global';
   if (text === 'rule') return 'app-rule';
   if (text === 'tun') return 'system-tun';
-  if (text === 'direct') return 'app-rule';
-  return ['app-rule', 'app-global', 'system-tun'].includes(text) ? text : 'app-rule';
+  if (text === 'direct') return 'app-global';
+  return ['app-rule', 'app-global', 'system-tun'].includes(text) ? text : 'app-global';
 }
 
 function normalizeH2oSubscriptions(value, activeSeed) {
@@ -2784,7 +2786,7 @@ function appUserTags(app) {
 }
 
 function appUserStatus(app) {
-  if (app.errorMessage || app.runtimeState === 'error' || app.status === 'error') return '需要处理';
+  if (appNeedsAttention(app)) return '需要处理';
   if (app.status === 'reserved') return '即将推出';
   if (app.runtimeState === 'running') return '运行中';
   if (app.installed && app.enabled) return '已安装';
@@ -2819,9 +2821,10 @@ function appUserFeatures(app) {
 
 function renderAppRecentLogs(app, verbose = false) {
   const logs = Array.isArray(app.logs) ? app.logs : [];
-  if (!logs.length && !app.errorMessage) return '';
-  const rows = app.errorMessage
-    ? [{ level: 'error', message: app.errorMessage, at: app.lastAction || new Date().toISOString() }, ...logs]
+  const errorMessage = appVisibleErrorMessage(app);
+  if (!logs.length && !errorMessage) return '';
+  const rows = errorMessage
+    ? [{ level: 'error', message: errorMessage, at: app.lastAction || new Date().toISOString() }, ...logs]
     : logs;
   return `
     <div class="app-log-list ${verbose ? 'is-verbose' : ''}">
@@ -2834,6 +2837,23 @@ function renderAppRecentLogs(app, verbose = false) {
       `).join('')}
     </div>
   `;
+}
+
+function appNeedsAttention(app) {
+  if (!app) return false;
+  if (h2oHasIdleProxyError(app)) return false;
+  return Boolean(app.errorMessage || app.runtimeState === 'error' || app.status === 'error');
+}
+
+function appVisibleErrorMessage(app) {
+  if (h2oHasIdleProxyError(app)) return '';
+  return app?.errorMessage || '';
+}
+
+function h2oHasIdleProxyError(app) {
+  if (app?.appId !== 'h2o' || !app.errorMessage) return false;
+  const runtime = h2oRuntime(app);
+  return runtime.running !== true && /mixed-port|未监听|proxy-unavailable|H2O mihomo 恢复失败/i.test(String(app.errorMessage || ''));
 }
 
 function appPrimaryAction(app, connected) {
@@ -3209,7 +3229,7 @@ function createMockApi() {
         installPath: null,
         runtime: {
           kind: 'h2o-plugin',
-          mode: 'app-rule',
+          mode: 'app-global',
           running: false,
           status: 'stopped',
           tunInstalled: false,
