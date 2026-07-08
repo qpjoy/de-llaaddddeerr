@@ -400,31 +400,6 @@ root.addEventListener('click', (event) => {
     });
     return;
   }
-  if (action === 'launchH2o') {
-    const runtime = h2oRuntime();
-    if (!h2oHasUsableSubscription(runtime)) {
-      h2oManagerView = 'subscriptions';
-      void runAction('updateH2oRuntime', {
-        ...runtime,
-        status: 'subscription-required',
-        lastAppliedAt: new Date().toISOString(),
-        logLevel: 'warning',
-        logMessage: 'H2O start blocked: no usable oversea subscription for current user.'
-      });
-      return;
-    }
-    if (runtime.mode === 'system-tun' && !runtime.tunInstalled) {
-      h2oManagerView = 'proxy';
-      void runAction('updateH2oRuntime', {
-        ...runtime,
-        status: 'tun-required',
-        lastAppliedAt: new Date().toISOString(),
-        logLevel: 'warning',
-        logMessage: 'H2O start blocked: system TUN helper is not installed.'
-      });
-      return;
-    }
-  }
   if (action === 'requestH2oProxy') {
     const runtime = h2oRuntime();
     void runAction('updateH2oRuntime', {
@@ -1872,6 +1847,7 @@ function renderH2oManager(app, connected) {
   const runtime = h2oRuntime(app);
   const running = runtime.running === true;
   const activeSubscriptionReady = h2oHasUsableSubscription(runtime);
+  const canLaunch = activeSubscriptionReady || h2oCanAutoHydrateSubscription(runtime);
   const refreshDisabled = !connected || (runtime.activeSubscription.requiresUser && !isUserIdentity()) || busyAction === 'refreshH2oSubscription';
   return `
     <section class="h2o-manager mx-scrollbar">
@@ -1883,7 +1859,7 @@ function renderH2oManager(app, connected) {
         </div>
         <div class="h2o-manager-actions">
           <button class="secondary-button" type="button" data-action="refreshH2oSubscription" data-subscription-id="${escapeAttr(runtime.activeSubscription.id)}" ${refreshDisabled ? 'disabled' : ''}>刷新订阅</button>
-          <button class="${running ? 'secondary-button' : 'primary-button'}" type="button" data-action="${running ? 'stopH2o' : 'launchH2o'}" ${!connected || !activeSubscriptionReady || busyAction === 'launchH2o' || busyAction === 'stopH2o' ? 'disabled' : ''}>
+          <button class="${running ? 'secondary-button' : 'primary-button'}" type="button" data-action="${running ? 'stopH2o' : 'launchH2o'}" ${!connected || (!running && !canLaunch) || busyAction === 'launchH2o' || busyAction === 'stopH2o' ? 'disabled' : ''}>
             ${running ? '停止' : '启动'}
           </button>
         </div>
@@ -1918,6 +1894,7 @@ function renderH2oManagerBody(runtime, app, connected) {
 
 function renderH2oOverviewManager(runtime, app, connected) {
   const activeSubscriptionReady = h2oHasUsableSubscription(runtime);
+  const canLaunch = activeSubscriptionReady || h2oCanAutoHydrateSubscription(runtime);
   return `
     <section class="h2o-manager-view">
       <div class="h2o-stat-grid">
@@ -1937,7 +1914,7 @@ function renderH2oOverviewManager(runtime, app, connected) {
         </div>
         <div class="toolbar-actions">
           <button class="secondary-button" type="button" data-action="requestH2oProxy" ${!runtime.running || !connected || !activeSubscriptionReady ? 'disabled' : ''}>应用策略</button>
-          <button class="primary-button" type="button" data-action="${runtime.running ? 'stopH2o' : 'launchH2o'}" ${!connected || !activeSubscriptionReady ? 'disabled' : ''}>${runtime.running ? '停止' : '启动'}</button>
+          <button class="primary-button" type="button" data-action="${runtime.running ? 'stopH2o' : 'launchH2o'}" ${!connected || (!runtime.running && !canLaunch) ? 'disabled' : ''}>${runtime.running ? '停止' : '启动'}</button>
         </div>
       </section>
       <section class="h2o-rule-preview">
@@ -2259,6 +2236,12 @@ function h2oSubscriptionStatusText(runtime, connected) {
 
 function h2oHasUsableSubscription(runtime) {
   return h2oSubscriptionUsable(runtime?.activeSubscription);
+}
+
+function h2oCanAutoHydrateSubscription(runtime) {
+  const subscription = runtime?.activeSubscription || {};
+  return isUserIdentity()
+    && (subscription.requiresUser === true || subscription.source === 'internal' || /^mx-h2i:\/\//i.test(String(subscription.url || '')));
 }
 
 function h2oSubscriptionUsable(item) {

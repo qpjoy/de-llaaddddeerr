@@ -252,4 +252,6 @@ pnpm --dir electron-dock/mx-launcher/server release:publish -- \
   --channel smoke \
   --e2e-result passed
 
+# 删除mihomo pid
+pkill -TERM -f "$HOME/Library/Application Support/MX-H2I/h2o/mihomo-tunnel/bin/mihomo"
 ```

@@ -436,6 +436,21 @@ H2O 是用户体验和策略 UI；Launcher Network 是底层执行者。
 - Oversea site-agent 只接收 Internal runner job，更新本地 hysteria2/mihomo stack。
 - 用户连上 Domestic 后即可通过 H2I 到 Internal 获取配置，不要求 Domestic 保存订阅真相。
 
+H2O 运行时订阅策略：
+
+- 默认订阅来自当前用户在 Internal User Center 的 oversea entitlement，默认站点是
+  `oversea-main`。H2O 启动前先水合该 managed profile，把
+  `/internal/v1/user-center/users/{userId}/oversea/subscription.yaml` 作为 mihomo 订阅源。
+- 如果当前用户还没有 active entitlement，H2O 可以代表当前用户向 Internal 申请默认
+  `oversea-main` entitlement，触发 runtime sync，并再次拉取订阅 YAML；只要 Internal 已能
+  生成 active account 的 YAML，就可以先应用给本机 mihomo，`pending-runtime-sync` 只作为
+  UI/诊断提示保留。
+- 用户手动保存的外部订阅、Basic Auth、headers 和置顶/active 选择属于本机偏好，不应被
+  Internal managed profile 刷新覆盖。历史上写进 `h2o-default` 的外部 URL 应迁移成
+  `custom-*` 订阅，并在下一次启动时继续自动 active。
+- H2O 只把可用的 `http/https` 订阅交给 mihomo；`mx-h2i://managed/...` 仅是 UI/状态占位，
+  不能直接作为 mihomo runtime 的订阅输入。
+
 ## MX-3ks 平台能力
 
 MX-3ks 是 Internal K8s + 可插拔站点的总称。即使没有 Domestic/Oversea，也应能对内
