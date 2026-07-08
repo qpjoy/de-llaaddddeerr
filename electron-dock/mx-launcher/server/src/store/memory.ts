@@ -70,6 +70,7 @@ import {
   normalizeTestStatus,
   normalizeLauncherNetworkMihomoSite,
   normalizeUpdatePolicy,
+  siteSlotWorkerReportTlsFingerprint,
   releasePolicyByKind,
   renderHysteria2MihomoSubscription,
   renderUserOverseaMihomoSubscription,
@@ -498,6 +499,7 @@ export class MemoryStore implements PlatformStore {
       this.siteSlotRunnerSessions.set(state.session.sessionId, state.session);
     }
     this.siteSlotWorkerReports.set(report.reportId, report);
+    this.applySiteSlotWorkerReportMihomoEvidence(report);
     this.recordAudit({
       eventType: 'site_slot.worker_report.recorded',
       actorKind: 'runner-worker',
@@ -516,6 +518,19 @@ export class MemoryStore implements PlatformStore {
       }
     });
     return report;
+  }
+
+  private applySiteSlotWorkerReportMihomoEvidence(report: SiteSlotWorkerReport): void {
+    const tlsFingerprint = siteSlotWorkerReportTlsFingerprint(report);
+    if (!tlsFingerprint) return;
+    const previous = this.getLauncherNetworkMihomoSite(report.siteId);
+    if (!previous || previous.tlsFingerprint === tlsFingerprint) return;
+    this.upsertLauncherNetworkMihomoSite({
+      siteId: report.siteId,
+      tlsFingerprint,
+      requestedBy: report.workerId,
+      requestId: `worker-report:${report.reportId}:tls-fingerprint`
+    });
   }
 
   getSiteSlotWorkerReport(reportId: string): SiteSlotWorkerReport | null {

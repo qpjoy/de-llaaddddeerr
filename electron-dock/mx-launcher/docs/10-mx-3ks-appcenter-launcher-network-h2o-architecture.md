@@ -441,15 +441,34 @@ H2O 运行时订阅策略：
 - 默认订阅来自当前用户在 Internal User Center 的 oversea entitlement，默认站点是
   `oversea-main`。H2O 启动前先水合该 managed profile，把
   `/internal/v1/user-center/users/{userId}/oversea/subscription.yaml` 作为 mihomo 订阅源。
-- 如果当前用户还没有 active entitlement，H2O 可以代表当前用户向 Internal 申请默认
-  `oversea-main` entitlement，触发 runtime sync，并再次拉取订阅 YAML；只要 Internal 已能
-  生成 active account 的 YAML，就可以先应用给本机 mihomo，`pending-runtime-sync` 只作为
-  UI/诊断提示保留。
+  这里的 `{userId}` 必须是 User Center 的真实 id，例如 `usr_bmcq`，不能用展示账号
+  `bmcq` 直接拼 URL；缺少 OAuth principal 时，客户端应按当前账号向 User Center 反查。
+- 如果当前用户还没有 active entitlement，H2O 或其它系统应优先调用
+  `POST /internal/v1/user-center/users/{userId}/oversea/ensure-subscription`。这个 API 在一次
+  请求里完成默认 `oversea-main` entitlement 分配、runtime sync 尝试和订阅 YAML 渲染状态返回；
+  调用方只需检查 `ensure.ready` 和 `subscription.path`，不需要再手动刷新默认订阅。如果
+  `site-slots/plans` 里没有可用的 `oversea-main`，客户端应选择最近的非 blocked
+  oversea plan，或退回 Internal server-default site 分配。只要 Internal 已能生成 active
+  account 的 YAML，就可以先应用给本机 mihomo，`pending-runtime-sync` 只作为 UI/诊断提示保留。
+- 如果 entitlement 已存在但账号的 `runtimeSync` 不是 `synced`，H2O 水合 managed profile 时
+  应自动对当前用户调用一次 `/oversea/sync-runtime`，等同于用户中心里手动同步单个用户。
 - 用户手动保存的外部订阅、Basic Auth、headers 和置顶/active 选择属于本机偏好，不应被
   Internal managed profile 刷新覆盖。历史上写进 `h2o-default` 的外部 URL 应迁移成
   `custom-*` 订阅，并在下一次启动时继续自动 active。
+- 手动保存新的外部订阅只写入本机订阅列表，不应自动替换正在使用的 active 订阅；只有当前
+  active 不可用，或用户正在编辑当前 active 订阅时，H2O 才可自动应用该订阅。
 - H2O 只把可用的 `http/https` 订阅交给 mihomo；`mx-h2i://managed/...` 仅是 UI/状态占位，
   不能直接作为 mihomo runtime 的订阅输入。
+- 交给 mihomo 的 managed subscription URL 应使用 Domestic/bootstrap 可达地址，例如
+  `http://<domestic-host>:18090/internal/v1/...`。`10.88.88.88` 依赖 WG，k8s service URL
+  只适合集群内部，二者都不应作为默认 runtime 下载 URL 持久化给 H2O。
+- 订阅 YAML 里的 `mixed-port` 只是上游模板值，H2O runtime 会在渲染本机 mihomo config 时
+  覆盖成本地端口（默认 `23458`）。系统订阅能下载但不能连时，应优先检查 Internal 是否已经
+  同步 Oversea `serverPorts` 和 `TLS fingerprint`；`Stack Status` / worker report 里的
+  `TLS fingerprint:` 应回写到 `launcher-network/mihomo/sites/{siteId}`，这样系统订阅会输出
+  `fingerprint:` 字段。
+- 自动分配或水合订阅期间，H2O 应展示 initializing 状态；如果没有可分配的 oversea，
+  仍进入 H2O 订阅页并提示用户手动添加外部订阅，而不是把占位订阅交给 mihomo 启动。
 
 ## MX-3ks 平台能力
 

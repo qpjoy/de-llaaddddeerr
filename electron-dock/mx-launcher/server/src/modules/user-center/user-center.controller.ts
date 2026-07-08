@@ -94,14 +94,78 @@ export class UserCenterController {
     };
   }
 
+  @Post('internal/v1/user-center/users/:userId/oversea/ensure-subscription')
+  async ensureUserOverseaSubscription(@Param('userId') userId: string, @Body() rawBody: unknown) {
+    const body = asRecord(rawBody);
+    const requestedBy = nullableString(body.requestedBy) ?? 'user-oversea-ensure';
+    const requestId = nullableString(body.requestId) ?? `user-oversea-ensure-${Date.now()}`;
+    const entitlement = await this.store.upsertUserOverseaEntitlement({
+      ...toUserOverseaEntitlementInput(body),
+      userId,
+      requestedBy,
+      requestId
+    });
+    const shouldSyncRuntime = booleanValue(body.syncRuntime ?? body.ensureRuntime ?? body.remoteSync) !== false;
+    const syncPayload = shouldSyncRuntime
+      ? await this.syncUserOverseaRuntimePayload(userId, {
+          ...body,
+          requestedBy,
+          requestId: `${requestId}-sync`
+        }, entitlement)
+      : {
+          sync: {
+            status: 'skipped',
+            reports: [],
+            generatedAt: new Date().toISOString(),
+            reason: 'syncRuntime=false'
+          },
+          entitlement
+        };
+    const refreshed = syncPayload.entitlement ?? await this.store.getUserOverseaEntitlement(userId);
+    const subscription = await this.store.renderUserOverseaMihomoSubscription(userId);
+    const activeAccounts = (refreshed?.accounts ?? []).filter((account) => account.status === 'active');
+    const unsyncedAccounts = activeAccounts.filter((account) => account.runtimeSync.status !== 'synced');
+    const ready = Boolean(subscription)
+      && activeAccounts.length > 0
+      && unsyncedAccounts.length === 0;
+    return {
+      ensure: {
+        ready,
+        status: ready ? 'ready' : subscription ? 'pending-runtime-sync' : 'blocked',
+        reason: ready
+          ? 'User Oversea subscription is ready.'
+          : subscription
+            ? `Subscription YAML is renderable, but ${unsyncedAccounts.length} account(s) still require runtime sync.`
+            : 'User Oversea subscription could not be rendered.',
+        generatedAt: new Date().toISOString()
+      },
+      entitlement: refreshed,
+      sync: syncPayload.sync,
+      subscription: subscription ? {
+        path: refreshed?.subscriptionPath ?? `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea/subscription.yaml`,
+        contentType: subscription.contentType,
+        generatedAt: subscription.generatedAt,
+        yamlBytes: Buffer.byteLength(subscription.yaml, 'utf8'),
+        yaml: booleanValue(body.includeYaml) === true ? subscription.yaml : undefined
+      } : null
+    };
+  }
+
   @Post('internal/v1/user-center/users/:userId/oversea/sync-runtime')
   async syncUserOverseaRuntime(@Param('userId') userId: string, @Body() rawBody: unknown) {
-    const body = asRecord(rawBody);
+    return this.syncUserOverseaRuntimePayload(userId, asRecord(rawBody));
+  }
+
+  private async syncUserOverseaRuntimePayload(
+    userId: string,
+    body: Record<string, unknown>,
+    seedEntitlement?: UserOverseaEntitlement | null
+  ) {
     const requestedBy = nullableString(body.requestedBy) ?? 'desktop-admin';
     const requestId = nullableString(body.requestId) ?? `user-oversea-sync-${Date.now()}`;
     const timeoutSeconds = remoteSyncTimeoutSeconds(body.timeoutSeconds);
     const confirmed = booleanValue(body.confirmRemoteExecution) === true;
-    const entitlement = await this.store.getUserOverseaEntitlement(userId);
+    const entitlement = seedEntitlement ?? await this.store.getUserOverseaEntitlement(userId);
     if (!entitlement || entitlement.status !== 'active') {
       throw new NotFoundException('Active user Oversea entitlement not found');
     }

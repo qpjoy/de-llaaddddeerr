@@ -200,6 +200,7 @@ import {
   normalizeTestStatus,
   normalizeLauncherNetworkMihomoSite,
   normalizeUpdatePolicy,
+  siteSlotWorkerReportTlsFingerprint,
   releasePolicyByKind,
   renderHysteria2MihomoSubscription,
   renderUserOverseaMihomoSubscription,
@@ -583,6 +584,7 @@ export class PostgresStore implements PlatformStore {
       await this.saveRecord('site-slot-runner-session', state.session.sessionId, state.session, state.session.siteId);
     }
     await this.saveRecord('site-slot-worker-report', report.reportId, report, report.siteId);
+    await this.applySiteSlotWorkerReportMihomoEvidence(report);
     await this.recordAudit({
       eventType: 'site_slot.worker_report.recorded',
       actorKind: 'runner-worker',
@@ -601,6 +603,19 @@ export class PostgresStore implements PlatformStore {
       }
     });
     return report;
+  }
+
+  private async applySiteSlotWorkerReportMihomoEvidence(report: SiteSlotWorkerReport): Promise<void> {
+    const tlsFingerprint = siteSlotWorkerReportTlsFingerprint(report);
+    if (!tlsFingerprint) return;
+    const previous = await this.getLauncherNetworkMihomoSite(report.siteId);
+    if (!previous || previous.tlsFingerprint === tlsFingerprint) return;
+    await this.upsertLauncherNetworkMihomoSite({
+      siteId: report.siteId,
+      tlsFingerprint,
+      requestedBy: report.workerId,
+      requestId: `worker-report:${report.reportId}:tls-fingerprint`
+    });
   }
 
   async getSiteSlotWorkerReport(reportId: string): Promise<SiteSlotWorkerReport | null> {

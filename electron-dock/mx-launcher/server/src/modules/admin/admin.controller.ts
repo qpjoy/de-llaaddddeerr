@@ -26,7 +26,8 @@ import {
 } from './awx-runtime-gates.js';
 import {
   MX_DEFAULT_APP_DNS_ZONE,
-  MX_H2I_PRODUCT_ID
+  MX_H2I_PRODUCT_ID,
+  tlsFingerprintFromSiteSlotOutput
 } from '../../store/domain.js';
 import type {
   AdminActionDescriptor,
@@ -863,6 +864,7 @@ export class AdminController {
         startedAt,
         finishedAt: new Date().toISOString()
       };
+      await this.applyOverseaTerminalMihomoEvidence(siteId, `${stdout}\n${stderr}`, requestedBy, requestId);
       return { terminal, oversea: await this.buildOverseaOverview(actionPolicy) };
     } catch (error) {
       const execError = error as Error & { code?: number | string; stdout?: string; stderr?: string };
@@ -881,6 +883,19 @@ export class AdminController {
       };
       return { terminal, oversea: await this.buildOverseaOverview(actionPolicy) };
     }
+  }
+
+  private async applyOverseaTerminalMihomoEvidence(siteId: string, output: string, requestedBy: string, requestId: string): Promise<void> {
+    const tlsFingerprint = tlsFingerprintFromSiteSlotOutput(output);
+    if (!tlsFingerprint) return;
+    const previous = await this.store.getLauncherNetworkMihomoSite(siteId);
+    if (!previous || previous.tlsFingerprint === tlsFingerprint) return;
+    await this.store.upsertLauncherNetworkMihomoSite({
+      siteId,
+      tlsFingerprint,
+      requestedBy,
+      requestId: `${requestId}:tls-fingerprint`
+    });
   }
 
   private async findReusableOverseaPlan(

@@ -6651,6 +6651,24 @@ function normalizeTlsFingerprint(value: string | null | undefined): string | nul
   return trimmed.toUpperCase();
 }
 
+export function tlsFingerprintFromSiteSlotOutput(value: string | null | undefined): string | null {
+  const text = value ?? '';
+  const match = text.match(/(?:TLS\s+)?fingerprint:\s*["']?([0-9a-f]{2}(?::[0-9a-f]{2}){15,})["']?/i);
+  return match ? normalizeTlsFingerprint(match[1]) : null;
+}
+
+export function siteSlotWorkerReportTlsFingerprint(report: Pick<SiteSlotWorkerReport, 'message' | 'stepReports'>): string | null {
+  const chunks = [
+    report.message,
+    ...report.stepReports.flatMap((step) => [step.stdout, step.stderr])
+  ];
+  for (const chunk of chunks) {
+    const fingerprint = tlsFingerprintFromSiteSlotOutput(chunk);
+    if (fingerprint) return fingerprint;
+  }
+  return null;
+}
+
 function yamlQuote(value: string): string {
   return JSON.stringify(value);
 }

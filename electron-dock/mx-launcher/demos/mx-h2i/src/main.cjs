@@ -294,7 +294,8 @@ function registerIpc() {
       await hydrateH2oSystemSubscriptionsForUser({
         userId: auth.user.userId,
         baseUrl,
-        bootstrapResolveMode: bootstrap.resolveMode
+        bootstrapResolveMode: bootstrap.resolveMode,
+        showInitializing: true
       });
     } catch (err) {
       await applyConnectionError('员工登录失败', err);
@@ -756,7 +757,7 @@ function registerIpc() {
       await saveAndBroadcast();
       return visibleRuntime();
     }
-    await hydrateH2oSystemSubscriptionsForUser();
+    await hydrateH2oSystemSubscriptionsForUser({ showInitializing: true });
     const ready = h2oHasUsableSubscription(runtime.apps.h2o.runtime?.activeSubscription);
     runtime.feedback = {
       tone: ready ? 'success' : 'warning',
@@ -792,6 +793,7 @@ function registerIpc() {
       return visibleRuntime();
     }
     try {
+      await markH2oSystemSubscriptionInitializing(h2oPluginRuntime(runtime.apps.h2o.runtime), 'h2o oversea provision initializing');
       const provisionResult = await provisionH2oOverseaForCurrentUser(input);
       const ready = h2oHasUsableSubscription(runtime.apps.h2o.runtime?.activeSubscription);
       const syncStatus = nullableString(provisionResult?.syncStatus);
@@ -3585,11 +3587,15 @@ function h2oPluginRuntime(input) {
     || subscriptions[0]?.id
     || 'h2o-default';
   const activeSubscription = subscriptions.find((item) => item.id === activeSubscriptionId) || subscriptions[0] || normalizeH2oSubscription(subscription, {});
+  const rawStatus = nullableString(row.status) || (row.running === true ? 'running' : 'stopped');
+  const status = !row.running && rawStatus === 'ready' && !h2oHasUsableSubscription(activeSubscription)
+    ? 'subscription-required'
+    : rawStatus;
   return {
     kind: 'h2o-plugin',
     mode: normalizeH2oMode(row.mode),
     running: row.running === true,
-    status: nullableString(row.status) || (row.running === true ? 'running' : 'stopped'),
+    status,
     tunInstalled: row.tunInstalled === true,
     adminUrl: nullableString(row.adminUrl) || 'http://127.0.0.1:23456',
     ports: {
@@ -3651,13 +3657,28 @@ function normalizeH2oSubscription(input, defaults) {
   const requiresUser = row.requiresUser === true
     || defaults.requiresUser === true
     || (source !== 'demo' && source !== 'custom' && source !== 'external' && id.startsWith('h2o-'));
-  const status = requiresUser && !runtimeHasUserIdentity()
+  let status = requiresUser && !runtimeHasUserIdentity()
     ? 'login-required'
     : nullableString(row.status) || nullableString(defaults.status) || 'ready';
+  if (requiresUser && runtimeHasUserIdentity() && status === 'login-required') {
+    status = source === 'internal' || h2oIsManagedSubscriptionId(id) ? 'pending' : status;
+  }
+  const rawSyncStatus = nullableString(row.syncStatus) || nullableString(defaults.syncStatus);
+  const syncStatus = status === 'pending' && rawSyncStatus === 'login-required'
+    ? 'missing-entitlement'
+    : rawSyncStatus;
+  const rawErrorMessage = nullableString(row.errorMessage) || nullableString(defaults.errorMessage);
+  const errorMessage = status === 'pending' && /登录员工用户|等待登录|login/i.test(rawErrorMessage || '')
+    ? '当前用户还没有可用的系统 oversea 订阅。'
+    : rawErrorMessage;
+  const rawUrl = nullableString(row.url) || nullableString(defaults.url) || 'mx-h2i://managed/home-to-oversea';
+  const url = source === 'internal' || h2oIsManagedSubscriptionId(id)
+    ? h2oManagedSubscriptionUrl(rawUrl) || rawUrl
+    : rawUrl;
   return {
     id,
     name: nullableString(row.name) || nullableString(defaults.name) || 'System Oversea 默认订阅',
-    url: nullableString(row.url) || nullableString(defaults.url) || 'mx-h2i://managed/home-to-oversea',
+    url,
     nodes: normalizeNonNegativeInteger(row.nodes, normalizeNonNegativeInteger(defaults.nodes, 6)),
     latencyMs: normalizeNonNegativeInteger(row.latencyMs, normalizeNonNegativeInteger(defaults.latencyMs, 42)),
     status,
@@ -3666,8 +3687,8 @@ function normalizeH2oSubscription(input, defaults) {
     assignable: row.assignable !== false && defaults.assignable !== false,
     entitlementId: nullableString(row.entitlementId) || nullableString(defaults.entitlementId),
     siteIds: arrayValue(row.siteIds, arrayValue(defaults.siteIds, [])).map((item) => String(item || '').trim()).filter(Boolean),
-    syncStatus: nullableString(row.syncStatus) || nullableString(defaults.syncStatus),
-    errorMessage: nullableString(row.errorMessage) || nullableString(defaults.errorMessage),
+    syncStatus,
+    errorMessage,
     yamlBytes: normalizeNonNegativeInteger(row.yamlBytes, normalizeNonNegativeInteger(defaults.yamlBytes, 0)),
     auth: normalizeH2oSubscriptionAuth(row.auth, defaults.auth),
     headers: normalizeStringRecord(row.headers, defaults.headers || {}),
@@ -3771,11 +3792,67 @@ function h2oHasUsableSubscription(subscription) {
   if (!subscription) return false;
   if (subscription.requiresUser && !runtimeHasUserIdentity()) return false;
   if (['login-required', 'pending', 'error'].includes(subscription.status)) return false;
-  return Boolean(subscription.url) && Number(subscription.nodes || 0) > 0;
+  if (!h2oLooksLikeHttpSubscriptionUrl(subscription.url)) return false;
+  return Number(subscription.nodes || 0) > 0;
 }
 
 function runtimeHasUserIdentity() {
-  return runtime?.identity?.kind === 'user' || runtime?.connection?.mode === 'employee';
+  return runtime?.identity?.kind === 'user'
+    || runtime?.connection?.mode === 'employee'
+    || h2oSubjectLooksLikeUser(runtime?.auth?.subject)
+    || h2oSubjectLooksLikeUser(runtime?.connection?.subject);
+}
+
+function h2oSubjectLooksLikeUser(subject) {
+  const text = nullableString(subject);
+  return Boolean(text && text.startsWith('user:'));
+}
+
+async function h2oCurrentUserId(options = {}) {
+  return h2oKnownUserId() || await resolveH2oUserIdFromAccount(options);
+}
+
+function h2oKnownUserId() {
+  return nullableString(runtime?.auth?.user?.userId)
+    || h2oUserIdFromSubject(runtime?.auth?.subject)
+    || h2oUserIdFromSubject(runtime?.connection?.subject);
+}
+
+function h2oUserIdFromSubject(subject) {
+  const text = nullableString(subject);
+  if (!text) return null;
+  if (text.startsWith('user:')) return nullableString(text.slice('user:'.length));
+  return /^usr[_-]/i.test(text) ? text : null;
+}
+
+async function resolveH2oUserIdFromAccount(options = {}) {
+  const account = nullableString(runtime?.identity?.account)
+    || nullableString(runtime?.identity?.displayName);
+  if (!account || account === 'Visitor') return null;
+  const baseUrl = normalizeBaseUrl(options.baseUrl)
+    || normalizeBaseUrl(runtime.connection?.internalBaseUrl)
+    || normalizeBaseUrl(runtime.config?.internalApiBaseUrl)
+    || normalizeBaseUrl(runtime.config?.bootstrapApiBaseUrl);
+  if (!baseUrl) return null;
+  try {
+    const payload = await requestJson(joinApiUrl(baseUrl, '/internal/v1/user-center/users'), {
+      timeoutMs: 3500,
+      bootstrapResolveMode: options.bootstrapResolveMode,
+      headers: appCenterCatalogHeaders()
+    });
+    const users = Array.isArray(payload?.users) ? payload.users : [];
+    const target = account.trim().toLowerCase();
+    const user = users.find((item) => [
+      item?.userId,
+      item?.account,
+      item?.email,
+      item?.displayName
+    ].map((value) => String(value || '').trim().toLowerCase()).includes(target));
+    return nullableString(user?.userId);
+  } catch (err) {
+    pushAppLog('h2o', 'warning', `H2O userId lookup failed for account ${account}: ${errorMessage(err)}`);
+    return null;
+  }
 }
 
 async function ensureH2oActiveSubscriptionReady(currentRuntime, options = {}) {
@@ -3788,9 +3865,11 @@ async function ensureH2oActiveSubscriptionReady(currentRuntime, options = {}) {
   }
 
   if (h2oCanAutoHydrateManagedSubscription(current.activeSubscription)) {
+    await markH2oSystemSubscriptionInitializing(current, options.reason || 'hydrate-managed-subscription');
     await hydrateH2oSystemSubscriptionsForUser({
       ...options,
-      autoProvision: options.autoProvision !== false
+      autoProvision: options.autoProvision !== false,
+      showInitializing: false
     });
     current = h2oPluginRuntime(runtime.apps.h2o.runtime);
     if (h2oHasUsableSubscription(current.activeSubscription)) return current;
@@ -3807,6 +3886,23 @@ async function ensureH2oActiveSubscriptionReady(currentRuntime, options = {}) {
   }
 
   return current;
+}
+
+async function markH2oSystemSubscriptionInitializing(currentRuntime, reason = 'h2o-subscription-initializing') {
+  applyH2oManagedSubscriptionState(h2oPluginRuntime(currentRuntime), {
+    status: 'pending',
+    syncStatus: 'initializing',
+    errorMessage: '正在为当前用户初始化系统 oversea 订阅。'
+  });
+  runtime.apps.h2o.status = 'enabled';
+  runtime.apps.h2o.runtimeState = 'ready';
+  runtime.apps.h2o.lastAction = nowIso();
+  runtime.feedback = {
+    tone: 'info',
+    message: '正在为当前用户初始化 H2O oversea 订阅，请稍等。'
+  };
+  touchRuntime(reason);
+  await saveAndBroadcast();
 }
 
 function h2oCanAutoHydrateManagedSubscription(subscription) {
@@ -4800,61 +4896,67 @@ function normalizeH2oTestUrl(value) {
 }
 
 async function provisionH2oOverseaForCurrentUser(input = {}) {
-  const userId = parseUserIdFromSubject(runtime?.auth?.subject)
-    || nullableString(runtime?.auth?.user?.userId);
-  if (!userId) throw new Error('Internal OAuth token 没有返回 userId，无法分配 oversea 订阅。');
-  const siteIds = defaultH2oOverseaSiteIds(input);
   const baseUrl = normalizeBaseUrl(input?.baseUrl)
     || normalizeBaseUrl(runtime.connection?.internalBaseUrl)
     || await resolveBootstrapBaseUrl(runtime.config);
+  const userId = await h2oCurrentUserId({
+    baseUrl,
+    bootstrapResolveMode: input.bootstrapResolveMode
+  });
+  if (!userId) throw new Error('Internal OAuth token 没有返回 userId，无法分配 oversea 订阅。');
+  const siteAttempts = await h2oOverseaProvisionSiteAttempts(input, {
+    baseUrl,
+    bootstrapResolveMode: input.bootstrapResolveMode
+  });
   const requestedBy = 'mx-h2i-h2o';
   const requestId = makeRequestId('h2o-oversea');
-  const entitlementPayload = await requestJson(
-    joinApiUrl(baseUrl, `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea`),
-    {
-      method: 'POST',
-      timeoutMs: 6000,
-      bootstrapResolveMode: input.bootstrapResolveMode,
-      headers: appCenterCatalogHeaders(),
-      body: {
-        ...(siteIds.length ? { siteIds } : {}),
-        requestedBy,
-        requestId
-      }
-    }
-  );
-  const entitlement = entitlementPayload?.entitlement && typeof entitlementPayload.entitlement === 'object'
-    ? entitlementPayload.entitlement
-    : null;
-  const assignedSiteIds = arrayValue(entitlement?.siteIds, siteIds)
-    .map((item) => String(item || '').trim())
-    .filter(Boolean);
+  let entitlementPayload = null;
+  let entitlement = null;
+  let assignedSiteIds = [];
   let syncStatus = 'skipped';
-  if (assignedSiteIds.length) {
+  let lastProvisionError = null;
+  for (const siteIds of siteAttempts) {
     try {
-      const syncPayload = await requestJson(
-        joinApiUrl(baseUrl, `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea/sync-runtime`),
+      entitlementPayload = await requestJson(
+        joinApiUrl(baseUrl, `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea/ensure-subscription`),
         {
           method: 'POST',
-          timeoutMs: 15000,
+          timeoutMs: 22000,
           bootstrapResolveMode: input.bootstrapResolveMode,
           headers: appCenterCatalogHeaders(),
           body: {
-            siteIds: assignedSiteIds,
+            ...(siteIds.length ? { siteIds } : {}),
+            syncRuntime: true,
             confirmRemoteExecution: true,
             requestedBy,
-            requestId: `${requestId}-sync`
+            requestId: siteIds.length ? requestId : `${requestId}-default`
           }
         }
       );
-      syncStatus = nullableString(syncPayload?.sync?.status) || 'unknown';
-      if (syncStatus !== 'passed') {
-        pushAppLog('h2o', 'warning', `H2O user oversea runtime sync is ${syncStatus}.`);
+      entitlement = entitlementPayload?.entitlement && typeof entitlementPayload.entitlement === 'object'
+        ? entitlementPayload.entitlement
+        : null;
+      assignedSiteIds = arrayValue(entitlement?.siteIds, siteIds)
+        .map((item) => String(item || '').trim())
+        .filter(Boolean);
+      if (!entitlement || entitlement.status !== 'active' || !assignedSiteIds.length) {
+        throw new Error('Internal 没有返回可用的 active oversea entitlement。');
       }
+      syncStatus = nullableString(entitlementPayload?.sync?.status)
+        || nullableString(entitlementPayload?.ensure?.status)
+        || 'unknown';
+      if (syncStatus !== 'passed' && syncStatus !== 'ready') {
+        pushAppLog('h2o', 'warning', `H2O user oversea ensure result is ${syncStatus}.`);
+      }
+      break;
     } catch (err) {
-      syncStatus = 'failed';
-      pushAppLog('h2o', 'warning', `H2O user oversea runtime sync failed after entitlement assignment: ${errorMessage(err)}`);
+      lastProvisionError = err;
+      const target = siteIds.length ? siteIds.join(',') : 'server-default';
+      pushAppLog('h2o', 'warning', `H2O oversea ensure attempt failed for ${target}: ${errorMessage(err)}`);
     }
+  }
+  if (!entitlement || !assignedSiteIds.length) {
+    throw lastProvisionError || new Error('Internal 没有可分配的 oversea 站点。');
   }
   if (input.skipHydrate !== true) {
     await hydrateH2oSystemSubscriptionsForUser({
@@ -4867,12 +4969,78 @@ async function provisionH2oOverseaForCurrentUser(input = {}) {
   return { siteIds: assignedSiteIds, syncStatus };
 }
 
-function defaultH2oOverseaSiteIds(input = {}) {
+async function h2oOverseaProvisionSiteAttempts(input = {}, options = {}) {
   const explicit = [
     ...arrayValue(input?.siteIds, []),
     nullableString(input?.siteId)
   ].map((item) => String(item || '').trim()).filter(Boolean);
-  return explicit.length ? [explicit[0]] : ['oversea-main'];
+  if (explicit.length) return [[explicit[0]]];
+
+  const discoveredSiteIds = await discoverH2oOverseaSiteIds(options);
+  const hasOverseaMain = discoveredSiteIds.includes('oversea-main');
+  const candidates = hasOverseaMain || !discoveredSiteIds.length
+    ? ['oversea-main', '', ...discoveredSiteIds.filter((item) => item !== 'oversea-main')]
+    : [discoveredSiteIds[0], '', ...discoveredSiteIds.slice(1), 'oversea-main'];
+  const seen = new Set();
+  return candidates
+    .filter((siteId) => {
+      const key = siteId || '<server-default>';
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map((siteId) => siteId ? [siteId] : []);
+}
+
+async function discoverH2oOverseaSiteIds(options = {}) {
+  const baseUrl = normalizeBaseUrl(options.baseUrl)
+    || normalizeBaseUrl(runtime.connection?.internalBaseUrl)
+    || normalizeBaseUrl(runtime.config?.internalApiBaseUrl)
+    || normalizeBaseUrl(runtime.config?.bootstrapApiBaseUrl);
+  if (!baseUrl) return [];
+  try {
+    const payload = await requestJson(joinApiUrl(baseUrl, '/internal/v1/site-slots/plans'), {
+      timeoutMs: 3500,
+      bootstrapResolveMode: options.bootstrapResolveMode,
+      headers: appCenterCatalogHeaders()
+    });
+    const plans = Array.isArray(payload?.plans) ? payload.plans : [];
+    const seen = new Set();
+    return plans
+      .filter((plan) => plan?.kind === 'oversea' && plan?.status !== 'blocked')
+      .map((plan) => String(plan?.siteId || '').trim())
+      .filter((siteId) => {
+        if (!siteId || seen.has(siteId)) return false;
+        seen.add(siteId);
+        return true;
+      });
+  } catch (err) {
+    pushAppLog('h2o', 'warning', `H2O oversea site discovery failed, falling back to default site: ${errorMessage(err)}`);
+    return [];
+  }
+}
+
+async function syncH2oOverseaRuntimeForUser(input = {}) {
+  const userId = nullableString(input.userId);
+  if (!userId) throw new Error('缺少 userId，无法同步 oversea runtime。');
+  const baseUrl = normalizeBaseUrl(input.baseUrl)
+    || normalizeBaseUrl(runtime.connection?.internalBaseUrl)
+    || await resolveBootstrapBaseUrl(runtime.config);
+  return requestJson(
+    joinApiUrl(baseUrl, `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea/sync-runtime`),
+    {
+      method: 'POST',
+      timeoutMs: 15000,
+      bootstrapResolveMode: input.bootstrapResolveMode,
+      headers: appCenterCatalogHeaders(),
+      body: {
+        siteIds: arrayValue(input.siteIds, []),
+        confirmRemoteExecution: true,
+        requestedBy: nullableString(input.requestedBy) || 'mx-h2i-h2o',
+        requestId: nullableString(input.requestId) || makeRequestId('h2o-oversea-sync')
+      }
+    }
+  );
 }
 
 async function refreshH2oExternalSubscription(subscriptionId) {
@@ -4980,9 +5148,14 @@ function safeDecodeUrlPart(value) {
 async function hydrateH2oSystemSubscriptionsForUser(options = {}) {
   if (!runtime?.apps?.h2o?.runtime || !runtimeHasUserIdentity()) return;
   const current = h2oPluginRuntime(runtime.apps.h2o.runtime);
+  const baseUrl = normalizeBaseUrl(options.baseUrl)
+    || normalizeBaseUrl(runtime.connection?.internalBaseUrl)
+    || await resolveBootstrapBaseUrl(runtime.config);
   const userId = nullableString(options.userId)
-    || parseUserIdFromSubject(runtime?.auth?.subject)
-    || nullableString(runtime?.auth?.user?.userId);
+    || await h2oCurrentUserId({
+      baseUrl,
+      bootstrapResolveMode: options.bootstrapResolveMode
+    });
   if (!userId) {
     applyH2oManagedSubscriptionState(current, {
       status: 'error',
@@ -4991,9 +5164,19 @@ async function hydrateH2oSystemSubscriptionsForUser(options = {}) {
     });
     return;
   }
-  const baseUrl = normalizeBaseUrl(options.baseUrl)
-    || normalizeBaseUrl(runtime.connection?.internalBaseUrl)
-    || await resolveBootstrapBaseUrl(runtime.config);
+  if (options.showInitializing === true) {
+    applyH2oManagedSubscriptionState(current, {
+      status: 'pending',
+      syncStatus: 'initializing',
+      errorMessage: '正在为当前用户初始化系统 oversea 订阅。'
+    });
+    runtime.feedback = {
+      tone: 'info',
+      message: '正在为当前用户初始化 H2O oversea 订阅，请稍等。'
+    };
+    touchRuntime('h2o subscription initializing');
+    await saveAndBroadcast();
+  }
   try {
     const entitlementPayload = await requestJson(
       joinApiUrl(baseUrl, `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea`),
@@ -5003,7 +5186,7 @@ async function hydrateH2oSystemSubscriptionsForUser(options = {}) {
         headers: appCenterCatalogHeaders()
       }
     );
-    const entitlement = entitlementPayload?.entitlement && typeof entitlementPayload.entitlement === 'object'
+    let entitlement = entitlementPayload?.entitlement && typeof entitlementPayload.entitlement === 'object'
       ? entitlementPayload.entitlement
       : null;
     if (!entitlement || entitlement.status !== 'active') {
@@ -5018,7 +5201,8 @@ async function hydrateH2oSystemSubscriptionsForUser(options = {}) {
             ...options,
             userId,
             baseUrl,
-            autoProvision: false
+            autoProvision: false,
+            showInitializing: false
           });
         } catch (err) {
           applyH2oManagedSubscriptionState(current, {
@@ -5037,13 +5221,15 @@ async function hydrateH2oSystemSubscriptionsForUser(options = {}) {
       return;
     }
 
-    const accounts = Array.isArray(entitlement.accounts) ? entitlement.accounts : [];
-    const activeAccounts = accounts.filter((account) => account?.status === 'active');
-    const syncedAccounts = activeAccounts.filter((account) => account?.runtimeSync?.status === 'synced');
+    let accounts = Array.isArray(entitlement.accounts) ? entitlement.accounts : [];
+    let activeAccounts = accounts.filter((account) => account?.status === 'active');
+    let syncedAccounts = activeAccounts.filter((account) => account?.runtimeSync?.status === 'synced');
     const subscriptionPath = nullableString(entitlement.subscriptionPath)
       || `/internal/v1/user-center/users/${encodeURIComponent(userId)}/oversea/subscription.yaml`;
-    const subscriptionUrl = joinApiUrl(baseUrl, subscriptionPath);
-    const syncReason = firstH2oOverseaSyncReason(activeAccounts);
+    const subscriptionFetchUrl = h2oManagedSubscriptionUrl(subscriptionPath, { baseUrl })
+      || joinApiUrl(baseUrl, subscriptionPath);
+    const subscriptionRuntimeUrl = h2oManagedSubscriptionUrl(subscriptionPath, { baseUrl: subscriptionFetchUrl })
+      || subscriptionFetchUrl;
 
     if (!activeAccounts.length) {
       applyH2oManagedSubscriptionState(current, {
@@ -5055,20 +5241,56 @@ async function hydrateH2oSystemSubscriptionsForUser(options = {}) {
       return;
     }
 
-    const yaml = await requestText(subscriptionUrl, {
-      timeoutMs: 5000,
-      bootstrapResolveMode: options.bootstrapResolveMode,
-      headers: { ...appCenterCatalogHeaders(), accept: 'text/yaml, text/plain, */*' }
-    });
+    if (!syncedAccounts.length && options.autoSyncRuntime !== false) {
+      try {
+        const syncPayload = await syncH2oOverseaRuntimeForUser({
+          userId,
+          baseUrl,
+          siteIds: activeAccounts.map((account) => account.siteId).filter(Boolean),
+          requestedBy: 'mx-h2i-h2o',
+          requestId: makeRequestId('h2o-oversea-hydrate-sync'),
+          bootstrapResolveMode: options.bootstrapResolveMode
+        });
+        const refreshedEntitlement = syncPayload?.entitlement && typeof syncPayload.entitlement === 'object'
+          ? syncPayload.entitlement
+          : null;
+        if (refreshedEntitlement) {
+          entitlement = refreshedEntitlement;
+          accounts = Array.isArray(entitlement.accounts) ? entitlement.accounts : [];
+          activeAccounts = accounts.filter((account) => account?.status === 'active');
+          syncedAccounts = activeAccounts.filter((account) => account?.runtimeSync?.status === 'synced');
+        }
+      } catch (err) {
+        pushAppLog('h2o', 'warning', `H2O user oversea runtime sync failed during hydrate: ${errorMessage(err)}`);
+      }
+    }
+
+    let yaml;
+    try {
+      yaml = await requestText(subscriptionFetchUrl, {
+        timeoutMs: 5000,
+        bootstrapResolveMode: options.bootstrapResolveMode,
+        headers: { ...appCenterCatalogHeaders(), accept: 'text/yaml, text/plain, */*' }
+      });
+    } catch (err) {
+      const internalSubscriptionUrl = joinApiUrl(baseUrl, subscriptionPath);
+      if (internalSubscriptionUrl === subscriptionFetchUrl) throw err;
+      pushAppLog('h2o', 'warning', `H2O public subscription fetch failed, retrying Internal URL: ${errorMessage(err)}`);
+      yaml = await requestText(internalSubscriptionUrl, {
+        timeoutMs: 5000,
+        bootstrapResolveMode: options.bootstrapResolveMode,
+        headers: { ...appCenterCatalogHeaders(), accept: 'text/yaml, text/plain, */*' }
+      });
+    }
     applyH2oManagedSubscriptionState(current, {
       entitlement,
       status: 'ready',
       syncStatus: syncedAccounts.length ? 'synced' : 'pending-runtime-sync',
-      subscriptionUrl,
+      subscriptionUrl: subscriptionRuntimeUrl,
       yaml,
       errorMessage: syncedAccounts.length
         ? null
-        : syncReason || '订阅已由 Internal 生成；oversea runtime 同步仍在等待，可先应用到 H2O。'
+        : firstH2oOverseaSyncReason(activeAccounts) || '订阅已由 Internal 生成；oversea runtime 同步仍在等待，可先应用到 H2O。'
     });
   } catch (err) {
     applyH2oManagedSubscriptionState(current, {
@@ -5113,7 +5335,7 @@ function applyH2oManagedSubscriptionState(current, input = {}) {
   const siteSubscriptions = activeAccounts.map((account) => ({
     id: `h2o-${String(account.siteId || 'oversea').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
     name: `${account.siteId || 'Oversea'} 用户订阅`,
-    url: nullableString(account.siteSubscriptionUrl) || defaultUrl,
+    url: h2oManagedSubscriptionUrl(account.subscriptionPath || account.siteSubscriptionUrl) || defaultUrl,
     nodes: account.runtimeSync?.status === 'synced' ? 1 : 0,
     latencyMs: 42,
     status: account.runtimeSync?.status === 'synced' ? 'ready' : 'pending',
@@ -5137,16 +5359,21 @@ function applyH2oManagedSubscriptionState(current, input = {}) {
   const activeSubscription = subscriptions.find((item) => item.id === (activeLocal?.id || current.activeSubscriptionId))
     || subscriptions.find((item) => item.id === 'h2o-default')
     || current.activeSubscription;
+  const nextStatus = input.syncStatus === 'initializing'
+    ? 'subscription-initializing'
+    : current.running ? 'running' : h2oHasUsableSubscription(activeSubscription) ? 'ready' : 'subscription-required';
   runtime.apps.h2o.runtime = h2oPluginRuntime({
     ...current,
     subscriptions,
     activeSubscription,
     activeSubscriptionId: activeSubscription.id,
-    status: current.running ? 'running' : h2oHasUsableSubscription(activeSubscription) ? 'ready' : 'subscription-required',
+    status: nextStatus,
     lastAppliedAt: now
   });
   if (input.status === 'ready') {
     pushAppLog('h2o', 'info', `H2O user oversea subscription is ready for ${siteIds.join(',') || 'default site'}.`);
+  } else if (input.syncStatus === 'initializing' && input.errorMessage) {
+    pushAppLog('h2o', 'info', input.errorMessage);
   } else if (input.errorMessage) {
     pushAppLog('h2o', input.status === 'error' ? 'error' : 'warning', input.errorMessage);
   }
@@ -5200,6 +5427,10 @@ function h2oLooksLikeExternalSubscriptionUrl(url) {
   return /^https?:\/\//i.test(text || '') && !h2oLooksLikeManagedSubscriptionUrl(text);
 }
 
+function h2oLooksLikeHttpSubscriptionUrl(url) {
+  return /^https?:\/\//i.test(nullableString(url) || '');
+}
+
 function h2oLooksLikeManagedSubscriptionUrl(url) {
   const text = nullableString(url);
   if (!text) return false;
@@ -5242,14 +5473,54 @@ function firstH2oOverseaSyncReason(accounts) {
   return nullableString(account?.runtimeSync?.reason);
 }
 
-function h2oManagedSubscriptionUrl(pathName) {
-  const pathText = nullableString(pathName);
-  const baseUrl = normalizeBaseUrl(runtime.connection?.internalBaseUrl)
-    || normalizeBaseUrl(runtime.config?.internalApiBaseUrl)
-    || normalizeBaseUrl(DEFAULT_CONFIG.internalApiBaseUrl);
+function h2oManagedSubscriptionUrl(pathName, options = {}) {
+  const pathText = h2oManagedSubscriptionPath(pathName);
+  const baseUrl = h2oSubscriptionDeliveryBaseUrl(options.baseUrl);
   if (!pathText || !baseUrl) return null;
   try {
     return joinApiUrl(baseUrl, pathText);
+  } catch (_err) {
+    return null;
+  }
+}
+
+function h2oManagedSubscriptionPath(value) {
+  const text = nullableString(value);
+  if (!text) return null;
+  if (/^mx-h2i:\/\//i.test(text)) return null;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return text;
+  try {
+    const parsed = new URL(text);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    return `${parsed.pathname}${parsed.search || ''}`;
+  } catch (_err) {
+    return null;
+  }
+}
+
+function h2oSubscriptionDeliveryBaseUrl(fallbackBaseUrl) {
+  return h2oDomesticApiBaseUrl(fallbackBaseUrl)
+    || normalizeBaseUrl(runtime?.config?.bootstrapApiBaseUrl)
+    || normalizeBaseUrl(fallbackBaseUrl)
+    || normalizeBaseUrl(runtime?.connection?.internalBaseUrl)
+    || normalizeBaseUrl(runtime?.config?.internalApiBaseUrl)
+    || normalizeBaseUrl(DEFAULT_CONFIG.internalApiBaseUrl);
+}
+
+function h2oDomesticApiBaseUrl(fallbackBaseUrl) {
+  const bootstrapBaseUrl = normalizeBaseUrl(runtime?.config?.bootstrapApiBaseUrl)
+    || normalizeBaseUrl(fallbackBaseUrl)
+    || normalizeBaseUrl(DEFAULT_CONFIG.bootstrapApiBaseUrl);
+  const domesticHost = publicHostFromEndpoint(runtime?.config?.domesticRelayHost)
+    || publicHostFromEndpoint(DEFAULT_CONFIG.domesticRelayHost)
+    || publicHostFromUrl(bootstrapBaseUrl);
+  if (!bootstrapBaseUrl || !domesticHost) return null;
+  try {
+    const parsed = new URL(bootstrapBaseUrl);
+    parsed.hostname = domesticHost;
+    parsed.username = '';
+    parsed.password = '';
+    return normalizeBaseUrl(parsed.toString());
   } catch (_err) {
     return null;
   }
