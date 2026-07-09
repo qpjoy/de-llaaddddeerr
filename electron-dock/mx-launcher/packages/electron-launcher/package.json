@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-launcher",
-  "version": "0.2.0",
+  "version": "2.0.0",
   "description": "Product-facing Electron Launcher client for MX Launcher release, update, rollout, AppCenter, and network integration.",
   "type": "module",
   "main": "dist/index.js",
@@ -33,6 +33,14 @@
     "./release-updater": {
       "types": "./dist/release-updater.d.ts",
       "import": "./dist/release-updater.js"
+    },
+    "./local-ports": {
+      "types": "./dist/local-ports.d.ts",
+      "import": "./dist/local-ports.js"
+    },
+    "./release-update-executor": {
+      "types": "./dist/release-update-executor.d.ts",
+      "import": "./dist/release-update-executor.js"
     },
     "./package.json": "./package.json"
   },

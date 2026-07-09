@@ -37,9 +37,11 @@ materialization 规则）、[17-mx-h2i-release-center-update-system.md](17-mx-h2
 
 状态更新（2026-07-09）：
 
-- G1 基本解决：`mx-launcher-core / -embed-sdk / -standalone / electron-launcher` 已以 0.2.0 lockstep
-  发布到 npmjs（`workspace:^` 改写验证通过）。组内剩余 `@qpjoy/ui-design-neon-void` 和
-  `@qpjoy/electron-launcher-app-h2o` 未发布，阻塞 luopan 的 npm 模式。
+- G1 已解决：MX-H2I npm 包组 6 个包全部以 **2.0.0** lockstep 发布到 npmjs（`workspace:^`
+  改写验证通过），本地版本已同步。luopan 在 npm 模式下从 registry 安装并 quasar build 成功。
+- P1 已交付：`demos/luopan/HANDOFF.md`（注册网络值、红线、npm/local 模式、验收标准），
+  README 顶部有指引。注意：Admin 新建 standalone 应用时 service VIP 必须唯一分配，
+  不能沿用 `10.88.100.3` 默认值（服务端待加自动分配 + 重复拒绝）。
 - G2 已解决：共享 `scripts/dev-mode.mjs` 支持 `local|npm|ensure` 三模式；mx-h2i 在 npm 模式下
   从 registry 安装并用 electron-builder 打出 win-unpacked 验证通过；demo 的 `package/make*`
   改用 `ensure`，不再在打包时悄悄切回 local。npm 模式会在 demo 目录生成独立的
@@ -47,6 +49,29 @@ materialization 规则）、[17-mx-h2i-release-center-update-system.md](17-mx-h2
 - 发布入口：`scripts/manage.sh prepare-mx-h2i`（统一 bump 版本 → build → pack 预览 → 一个 OTP
   发布全组，已发布版本自动跳过）；`electron-dock/mx-launcher/scripts/publish-packages.mjs` 是
   CI 侧非交互路径（默认 dry-run，`--publish` 才真发）。
+- P2 进展：三个薄弱点摸底结果——(a) Windows NRPT 的 Add/Remove 原来只按 namespace 匹配、
+  无视 Comment 归属，已在 `electron-core-wireguard` 修复为"只动自己标签（或完全无标签的
+  legacy）规则"，并在 Add 时对外部同 namespace 规则写 `nrpt conflict` 审计；产品标签也不再
+  让非 mx-h2i tunnel 一律伪装成 HDO（Luopan 会得到 `MX-LUOPAN / QPJoy Luopan` 标签和自己的
+  ProgramData 目录）。(b) mihomo 端口 23457/23458 写死：`@qpjoy/electron-launcher/local-ports`
+  新增按 productId+service 哈希的稳定端口分配器（21000–40999，探测+扫描），mx-h2i 的
+  `prepareH2oRuntimePortsForStart` 在清理自家孤儿进程后仍冲突时改为重分配自己的端口，而不是
+  报错放弃（孤儿匹配本就按自己 userData 的二进制全路径，不会误杀其他产品）。(c) macOS PAC
+  合并早已在 `system-domain-proxy` 内实现（ownership claims 并入 PAC 域/路由），断开交接为
+  运行时验证项。共存断言工具 `scripts/coexist-check.mjs`：`snapshot / assert / diff / run`
+  四个命令，内置 C1–C12 半自动场景，已在真机对 mx-h2i 双向验证（connected PASS，
+  disconnected 正确检出泄漏路由与 registry 残留）。
+- P3 进展：`@qpjoy/electron-launcher/release-update-executor` 落地 doc 17 状态机与四条管线：
+  config/flag 热应用（current/previous 槽位 + 回滚）、renderer 槽位 + applyRenderer 回调、
+  npm 包 staged→next-start adoption（`adoptPendingElectronLauncherPackages`）、installer
+  手动打开 + 新版本首启 `installer-completed` 回报
+  （`reportElectronLauncherInstallCompletionIfUpgraded`）。激活门禁按 networkGate 注入，
+  connecting/recovering/permission-required 时 defer 并回报。执行器已通过本地假 Release
+  Center 的端到端 smoke（四条管线 + 门禁 defer + 回滚 + 9 类 report 链）。mx-h2i 接线完成：
+  启动时 adoption + installer-completed 回报；下载分支通过 `executor.activateStaged` 热激活
+  （config → 槽位替换 + 广播，renderer → 槽位 + reload，npm/asar → next-start 指针；
+  WireGuard connecting 时自动 defer 并提示）。剩余（P3 收尾项）：renderer bundle 的产品侧
+  解包约定（当前按单文件 bundle 处理）、真实发布一次热更走全链路验证（doc 18 Layer 6.5）。
 
 ## 1. npm 发布规划
 

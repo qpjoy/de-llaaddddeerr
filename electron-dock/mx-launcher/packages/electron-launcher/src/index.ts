@@ -145,6 +145,26 @@ export {
   type ElectronLauncherUpdateCheckInput,
   type ElectronLauncherUpdateCheckResult
 } from './release-updater.js';
+export {
+  allocateElectronLauncherLocalPort,
+  electronLauncherDefaultBasePort,
+  type ElectronLauncherLocalPortLease,
+  type ElectronLauncherLocalPortRequest
+} from './local-ports.js';
+export {
+  adoptPendingElectronLauncherPackages,
+  classifyElectronLauncherUpdateArtifact,
+  createElectronLauncherReleaseUpdateExecutor,
+  reportElectronLauncherInstallCompletionIfUpgraded,
+  type ElectronLauncherArtifactActivation,
+  type ElectronLauncherArtifactExecution,
+  type ElectronLauncherNetworkGateState,
+  type ElectronLauncherReleaseUpdateExecutor,
+  type ElectronLauncherUpdateArtifactClass,
+  type ElectronLauncherUpdateExecutionResult,
+  type ElectronLauncherUpdateExecutorOptions,
+  type ElectronLauncherUpdateExecutorPhase
+} from './release-update-executor.js';
 
 export const ELECTRON_LAUNCHER_PACKAGE_NAME = '@qpjoy/electron-launcher';
 

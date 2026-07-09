@@ -148,10 +148,43 @@ app.whenReady().then(async () => {
   void restoreH2oRuntimeAfterStartup().catch((err) => {
     console.warn('[mx-h2i] H2O startup restore failed:', errorMessage(err));
   });
+  void reportInstallCompletionAndAdoptPendingUpdates().catch((err) => {
+    console.warn('[mx-h2i] startup update bookkeeping failed:', errorMessage(err));
+  });
   startTopRevealWatcher();
   startWireGuardRecoveryWatcher();
   startNetworkChangeWatcher();
 });
+
+// Closes the installer loop and promotes staged npm-package artifacts: on the
+// first start after a version change, report installer-completed to Release
+// Center; pending launcher-package pointers written by the update executor
+// switch to current so this run resolves the new build output.
+async function reportInstallCompletionAndAdoptPendingUpdates() {
+  const executorMod = await import('@qpjoy/electron-launcher/release-update-executor');
+  const baseDir = app.getPath('userData');
+  const adopted = await executorMod.adoptPendingElectronLauncherPackages(baseDir);
+  for (const pointer of adopted) {
+    pushAppLog('appcenter', 'info', `Launcher package update adopted on start: ${pointer.version} (${pointer.path}).`);
+  }
+  const baseUrl = appCenterCatalogBaseUrl();
+  if (!baseUrl) return;
+  const mod = await import('@qpjoy/electron-launcher');
+  const updater = mod.createElectronLauncherReleaseUpdater({
+    baseUrl,
+    fetchImpl: launcherFetchForBootstrap(runtime?.config?.bootstrapResolveMode),
+    reportInstallId: runtime?.installation?.installId
+  });
+  const completion = await executorMod.reportElectronLauncherInstallCompletionIfUpgraded({
+    updater,
+    baseDir,
+    currentVersion: app.getVersion(),
+    installId: runtime?.installation?.installId
+  });
+  if (completion.upgraded) {
+    pushAppLog('appcenter', 'info', `Installer completion reported: ${completion.from} -> ${completion.to}.`);
+  }
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
@@ -4282,8 +4315,46 @@ async function prepareH2oRuntimePortsForStart(h2oRuntime, reason = 'start') {
   await waitForH2oRequiredPortsAvailable(h2oRuntime, H2O_PORT_RELEASE_TIMEOUT_MS);
   conflicts = await h2oRequiredPortConflicts(h2oRuntime);
   if (!conflicts.length) return;
+  // The occupant is not our own orphan (those were just cleaned), so it is most
+  // likely another standalone launcher product on this machine. Ports are ours
+  // to move; the other product's listener is not ours to kill.
+  const reallocated = await reallocateConflictedH2oPorts(h2oRuntime, conflicts);
+  if (reallocated.length) {
+    pushAppLog('h2o', 'warning', `H2O 端口被其他进程占用，已改用新端口：${reallocated.map((item) => `${item.label} ${item.from}->${item.to}`).join('、')}（${reason}）。`);
+    conflicts = await h2oRequiredPortConflicts(h2oRuntime);
+    if (!conflicts.length) return;
+  }
   const detail = await h2oPortOccupancySummary(h2oRuntime);
   throw new Error(`H2O 端口仍被占用，无法启动 mihomo：${h2oPortConflictText(conflicts)}${detail ? `。占用详情：${detail}` : ''}`);
+}
+
+async function reallocateConflictedH2oPorts(h2oRuntime, conflicts) {
+  let allocate;
+  try {
+    ({ allocateElectronLauncherLocalPort: allocate } = await import('@qpjoy/electron-launcher/local-ports'));
+  } catch {
+    return [];
+  }
+  const portKeyByConflictId = { controller: 'controller', mixed: 'mixed', 'dns-tcp': 'dns', 'dns-udp': 'dns' };
+  const moved = [];
+  const movedKeys = new Set();
+  for (const conflict of conflicts) {
+    const key = portKeyByConflictId[conflict.id];
+    if (!key || movedKeys.has(key)) continue;
+    try {
+      const lease = await allocate({
+        productId: 'mx-h2i',
+        service: `mihomo-${key}`,
+        host: conflict.host === '0.0.0.0' ? '127.0.0.1' : conflict.host
+      });
+      moved.push({ label: conflict.label, from: h2oRuntime.ports[key], to: lease.port });
+      h2oRuntime.ports[key] = lease.port;
+      movedKeys.add(key);
+    } catch {
+      // Leave the original port in place; the caller reports the conflict.
+    }
+  }
+  return moved;
 }
 
 async function h2oRuntimePortDiagnosticHint(h2oRuntime) {
@@ -6477,16 +6548,42 @@ async function applyLauncherUpdate(reason) {
         pushAppLog('appcenter', 'warning', `Release installer-opened report failed: ${errorMessage(error)}`);
       });
     } else {
+      let activation = null;
+      try {
+        activation = await activateStagedHotArtifact(updater, artifact, result.targetPath, runtime.update);
+      } catch (activationError) {
+        pushAppLog('appcenter', 'warning', `Hot activation failed, artifact stays staged: ${errorMessage(activationError)}`);
+      }
+      const applied = activation?.activated === true;
+      const pendingRestart = /restart|next start/i.test(activation?.deferredReason || '');
       runtime.update = normalizeUpdate({
         ...runtime.update,
-        restartPrompt: runtime.update.restartRequired === true
+        status: applied ? 'applied' : runtime.update.status,
+        restartPrompt: runtime.update.restartRequired === true || pendingRestart,
+        history: applied
+          ? prependUpdateHistory(runtime.update?.history, updateHistoryEntry({
+              kind: 'hot-apply',
+              status: 'applied',
+              version: runtime.update?.latestVersion || artifact.version,
+              fromVersion: runtime.update?.currentVersion || app.getVersion(),
+              releaseId: runtime.update?.releaseId,
+              planId: runtime.update?.planId,
+              componentKind: runtime.update?.componentKind || artifact.kind,
+              updateMode: runtime.update?.updateMode,
+              message: '热更新已自动激活。'
+            }))
+          : runtime.update?.history
       }, runtime.config);
-      runtime.feedback = {
-        tone: 'success',
-        message: runtime.update.restartRequired
-          ? '热更新包已下载并校验，激活后需要重启 MX-H2I。'
-          : '热更新包已下载并校验，等待热更新激活器处理。'
-      };
+      runtime.feedback = applied
+        ? { tone: 'success', message: '热更新已下载校验并自动激活。' }
+        : {
+            tone: activation?.deferredReason ? 'info' : 'success',
+            message: pendingRestart
+              ? '热更新包已下载并校验，将在下次启动时生效。'
+              : activation?.deferredReason
+                ? `热更新包已下载并校验，激活已推迟：${activation.deferredReason}。`
+                : '热更新包已下载并校验，等待热更新激活器处理。'
+          };
     }
     touchRuntime('update downloaded');
   } catch (error) {
@@ -6526,6 +6623,29 @@ async function applyLauncherUpdate(reason) {
     });
     touchRuntime('update download failed');
   }
+}
+
+// Hot activation goes through the shared update executor: config/renderer
+// artifacts swap into update-slots with a previous slot for rollback; npm/asar
+// artifacts stage a next-start pointer. Activation defers automatically while
+// WireGuard is connecting.
+async function activateStagedHotArtifact(updater, artifact, stagedPath, update) {
+  const executorMod = await import('@qpjoy/electron-launcher/release-update-executor');
+  const executor = executorMod.createElectronLauncherReleaseUpdateExecutor({
+    updater: updater || { async check() { throw new Error('release updater unavailable'); }, async report() { return {}; } },
+    baseDir: app.getPath('userData'),
+    installId: runtime.installation?.installId,
+    networkGate: () => (wireGuardConnectInFlight || runtime.connection?.state === 'connecting' ? 'connecting' : 'idle'),
+    applyConfig: (activePath) => {
+      pushAppLog('appcenter', 'info', `Hot config snapshot activated: ${activePath}.`);
+      broadcastState();
+    },
+    applyRenderer: (activePath) => {
+      pushAppLog('appcenter', 'info', `Renderer bundle activated, reloading window: ${activePath}.`);
+      mainWindow?.webContents?.reload();
+    }
+  });
+  return executor.activateStaged(artifact, stagedPath, { releaseId: update?.releaseId ?? null });
 }
 
 function releaseArtifactFromUpdate(update) {

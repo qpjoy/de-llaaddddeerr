@@ -3443,6 +3443,18 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     `$hdoNrptTunnelName = ${powerShellString(tunnelName)}`,
     "$hdoNrptEnableAttempts = @('EnableAlways', 'EnableDA', 'Enable', $true)",
     "Write-HdoAudit ('nrpt prepared tunnel=' + $hdoNrptTunnelName + ' rules=' + [string]$hdoNrptRules.Count + ' comment=' + $hdoNrptComment)",
+    // NRPT is a machine-global table shared by every standalone launcher product.
+    // Only rules tagged with our own comment (or fully untagged legacy rules) are
+    // ours to remove or count; another product's tagged rule for the same
+    // namespace must never be touched, or disconnecting one product strips the
+    // other product's split DNS.
+    'function Test-HdoNrptRuleOwned {',
+    '  param([object]$Rule)',
+    '  $comment = [string]$Rule.Comment',
+    '  $display = [string]$Rule.DisplayName',
+    '  if ($comment -eq $hdoNrptComment -or $display -eq $hdoNrptComment) { return $true }',
+    '  return ([string]::IsNullOrEmpty($comment) -and [string]::IsNullOrEmpty($display))',
+    '}',
     'function Format-HdoNrptGlobalForLog {',
     '  $global = Get-DnsClientNrptGlobal -ErrorAction SilentlyContinue',
     "  if ($null -eq $global) { return '<null>' }",
@@ -3520,7 +3532,7 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     "  Write-HdoAudit ('nrpt assert global=' + (Format-HdoNrptGlobalForLog))",
     '  $missing = @()',
     '  foreach ($rule in $hdoNrptRules) {',
-    '    $installed = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Namespace -eq $rule.Namespace })',
+    '    $installed = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Namespace -eq $rule.Namespace -and (Test-HdoNrptRuleOwned $_) })',
     "    Write-HdoAudit ('nrpt assert namespace=' + $rule.Namespace + ' count=' + [string]$installed.Count)",
     '    if ($installed.Count -eq 0) { $missing += $rule.Namespace }',
     '  }',
@@ -3530,7 +3542,7 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     '  param([bool]$RestoreGlobal = $true)',
     "  Write-HdoAudit ('nrpt remove start restoreGlobal=' + [string]$RestoreGlobal)",
     '  foreach ($rule in $hdoNrptRules) {',
-    '    $matches = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Namespace -eq $rule.Namespace })',
+    '    $matches = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Namespace -eq $rule.Namespace -and (Test-HdoNrptRuleOwned $_) })',
     "    Write-HdoAudit ('nrpt remove namespace=' + $rule.Namespace + ' matches=' + [string]$matches.Count)",
     '    $matches | ForEach-Object {',
     '      Remove-DnsClientNrptRule -Name $_.Name -Force -ErrorAction SilentlyContinue',
@@ -3545,6 +3557,8 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     '  Enable-HdoNrptGlobalQueryPolicy',
     '  Remove-HdoNrptRules -RestoreGlobal:$false',
     '  foreach ($rule in $hdoNrptRules) {',
+    '    $foreign = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Namespace -eq $rule.Namespace -and -not (Test-HdoNrptRuleOwned $_) })',
+    "    if ($foreign.Count -gt 0) { Write-HdoAudit ('nrpt conflict namespace=' + $rule.Namespace + ' foreignOwners=' + (($foreign | ForEach-Object { if ([string]$_.Comment) { [string]$_.Comment } else { [string]$_.DisplayName } }) -join ';')) }",
     "    Write-HdoAudit ('nrpt add namespace=' + $rule.Namespace + ' servers=' + ($rule.NameServers -join ','))",
     '    try {',
     '      Add-DnsClientNrptRule -Namespace $rule.Namespace -NameServers $rule.NameServers -DisplayName $hdoNrptComment -Comment $hdoNrptComment -ErrorAction Stop | Out-Null',
@@ -3574,6 +3588,20 @@ function windowsTunnelProductLabels(tunnelName: string): {
       shortName: 'MX-H2I',
       commentPrefix: 'MX-H2I / QPJoy MX-H2I',
       programDataDir: 'QPJoy\\MX-H2I'
+    };
+  }
+  // Every standalone launcher product needs its own label: the NRPT comment
+  // decides rule ownership on the shared machine-global table, and the
+  // ProgramData dir keeps per-product global-state files apart. Only legacy
+  // HDO-era tunnel names keep the historical HDO label.
+  const token = /^(?!hdo(?:$|[-_.]))([a-z][a-z0-9]{2,23})(?:$|[-_.])/i.exec(tunnelName)?.[1];
+  if (token) {
+    const upper = token.toUpperCase();
+    const title = token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
+    return {
+      shortName: upper,
+      commentPrefix: `MX-${upper} / QPJoy ${title}`,
+      programDataDir: `QPJoy\\${title}`
     };
   }
   return {

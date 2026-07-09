@@ -1,5 +1,9 @@
 # Luopan Quasar Electron Demo
 
+> Taking over Luopan for real product development? Start with
+> [HANDOFF.md](HANDOFF.md) — registered network values, hard boundaries,
+> npm/local dev modes, and acceptance criteria live there.
+
 Luopan is a business Electron app demo for MX Launcher. It uses Quasar/Vue for
 the application shell and consumes `@qpjoy/electron-launcher` from Electron main
 through a small preload IPC boundary.

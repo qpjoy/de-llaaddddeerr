@@ -263,6 +263,30 @@ Checklist:
 - disconnect/reconnect does not remove other standalone products' routes;
 - logs/reporting show the tester install id.
 
+## Layer 6.5: Update Executor Pipelines
+
+The shared executor lives in `@qpjoy/electron-launcher/release-update-executor` and follows the
+docs/17 state machine (`idle -> checking -> downloading -> verifying -> staged -> activating ->
+reported`). Validate each artifact class end to end before rolling it out:
+
+1. **Config / feature flag**: publish a `config-snapshot` plan with `hotUpdateAuto=true`; expect
+   the client to report `artifact-staged` then `artifact-applied`, the active file to land under
+   `<userData>/update-slots/config/`, and `rollback('config')` to restore the previous slot with
+   an `artifact-rolled-back` report.
+2. **Renderer bundle**: same flow against the `renderer` slot; the product's `applyRenderer`
+   callback reloads the window.
+3. **npm package**: publish a `launcher-npm` artifact; expect `artifact-staged-pending-restart`,
+   a pointer under `<userData>/launcher-packages/<component>.pending.json`, and adoption on next
+   start (`adoptPendingElectronLauncherPackages`).
+4. **Installer completion**: after the user installs a staged DMG/EXE and the new version starts,
+   expect one `installer-completed` report carrying `{ from, to }` — Release Center marks the
+   install as upgraded; missing reports count against gray-rollout health.
+
+Stability boundary: while the product is `connecting` / `recovering` / `permission-required`,
+activation defers with an `artifact-activation-deferred` report and the staged slot stays intact.
+Re-run pipelines 1 and 3 in the dual-standalone coexistence scenarios (C11 in
+`scripts/coexist-check.mjs run`) to prove per-channel update schedulers do not interfere.
+
 ## Layer 7: Toward No Manual Distribution
 
 To stop manually sending files completely, finish the remaining updater executor work:
