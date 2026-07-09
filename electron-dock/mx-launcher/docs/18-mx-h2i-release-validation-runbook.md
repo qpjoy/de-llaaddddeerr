@@ -287,6 +287,34 @@ activation defers with an `artifact-activation-deferred` report and the staged s
 Re-run pipelines 1 and 3 in the dual-standalone coexistence scenarios (C11 in
 `scripts/coexist-check.mjs run`) to prove per-channel update schedulers do not interfere.
 
+## Layer 6.6: Ten-Minute Gray Release Sanity Check
+
+Lightest end-to-end proof that targeting + notes + hot pipeline work on a real
+deployment. Uses only the Admin form and one dev-run client. Prerequisites: the
+redeployed Internal server (has `/release/check`) and an mx-h2i started from
+the workspace (`pnpm dev` — the packaged 2.0.0 client predates the executor
+wiring and only shows check/download/staged).
+
+1. **发一版只给自己**：Admin → Release Center → `Upload version` → Type
+   `Hot update bundle`，随便选一个小文件当 renderer bundle，Version 填一个比
+   当前高的号，`目标用户` 只填自己的 userId，Release notes 写两行 → Upload and
+   create → 行内 `Open` → `Complete gate`。
+2. **被圈中的客户端**：自己的 mx-h2i 点检查更新 → Release/Gray 面板应出现
+   目标版本、`Matched by = 指定用户`、Release notes 原文 → 点下载 → 热更自动
+   激活（状态 `applied`，历史里有 `hot-apply`）。
+3. **未被圈中的客户端**：另一个账号（或把 targets 改掉再查）→ 检查更新显示
+   已是最新，看不到任何计划信息。
+4. **百分比灰度（可选）**：CLI 发一个 `--rollout-percentage 50 --rollout-strategy
+   gray` 不带 targets 的 plan，多台 install 各自检查更新 → 约一半命中，面板
+   显示 `灰度命中（bucket N）`；把百分比提到 100 重发同 series，之前命中的
+   仍命中（sticky）。
+5. **证据链**：服务端每次 check 落 `release-check` report，客户端沿途上报
+   `download-started / artifact-staged / artifact-applied`，在 Internal 审计里
+   能按 installId 串起来。
+
+Installer 类走同样的目标圈选，但激活永远手动：`ready-to-install` 后由用户确认
+打开，新版本首启回报 `installer-completed`。
+
 ## Layer 7: Toward No Manual Distribution
 
 To stop manually sending files completely, finish the remaining updater executor work:
@@ -305,3 +333,26 @@ After that executor exists, normal releases become:
 ```text
 build -> upload artifact -> create Release Center plan -> gate -> gray rollout -> auto client update
 ```
+
+## Appendix: H2O State Snapshot & Restore
+
+客户端在每次持久化 runtime 时，会把 `runtime.apps`（含 H2O 订阅、当前订阅、
+分流规则）快照到 `<userData>/state-backups/apps-<timestamp>.json`，按 H2O
+客户端自有字段去重，只保留最近 5 份。用途：当 merge/normalize 回归把 H2O
+订阅清空并覆写持久化文件时（历史案例：`mergeAppCenterCatalogApps` 回归），
+可以从快照恢复。
+
+恢复步骤（任选其一）：
+
+1. **应用内恢复**：打开 mx-h2i 的 DevTools 控制台执行：
+
+   ```js
+   await window.mxH2i.listStateBackups()          // 列出快照及订阅/规则数量
+   await window.mxH2i.restoreStateBackup('<file>') // 恢复指定快照并持久化
+   ```
+
+2. **手工恢复**：关闭应用，把快照文件里的 `apps` 对象覆盖到
+   `<userData>/mx-h2i-runtime.json` 的 `apps` 字段后重启。
+
+`<userData>` 位置：macOS `~/Library/Application Support/mx-h2i`，Windows
+`%APPDATA%/mx-h2i`（以 Electron `app.getPath('userData')` 实际值为准）。

@@ -6,16 +6,18 @@
 
 总体设计见 [docs/19](../../docs/19-formal-delivery-npm-packaging-and-luopan-handoff.md)
 （交付方案）与 [docs/14](../../docs/14-mx-h2i-standalone-launcher-architecture.md)
-（共存与网络边界）。
+（共存与网络边界）。**开发指南（从零到验收的完整走读，先读这份）：
+[docs/20](../../docs/20-luopan-standalone-development-guide.md)。**
 
 ## 依赖
 
-只需要从 npm 安装（当前 2.0.0）：
+只需要从 npm 安装（当前 **2.2.0**，全组 lockstep 发布。`/release/check` 服务端灰度
+决策、更新执行器 `activateStaged` 都是 2.2.0 才有的，不要降级）：
 
 | 包 | 用途 |
 | --- | --- |
-| `@qpjoy/electron-launcher@^2.0.0` | 唯一必装。WG/网络、ownership registry、release-updater、诊断都从它的子路径导入 |
-| `@qpjoy/ui-design-neon-void@^2.0.0` | 可选，UI 组件库 |
+| `@qpjoy/electron-launcher@^2.2.0` | 唯一必装。WG/网络、ownership registry、release-updater、release-update-executor、local-ports、诊断都从它（或其子路径）导入 |
+| `@qpjoy/ui-design-neon-void@^2.2.0` | 可选，UI 组件库 |
 
 开发/打包双模式（仓库内开发时）：
 
@@ -57,9 +59,13 @@ VIP——它是 Luopan 到达 Internal 的**唯一路由**，不是装饰性标�
    system-domain-proxy 声明，由本机合并面统一落地。不直接调 `networksetup`、NRPT、
    PAC URL 设置。
 3. **不自建更新器、不带 native helper**：更新走
-   `@qpjoy/electron-launcher/release-updater`，`componentId=luopan`。大版本安装包由
-   Release Center 下发（installer-manual），热更（npm artifact / 配置 / feature flag）
-   自动生效。
+   `@qpjoy/electron-launcher` 的 release-updater（检查/上报）+
+   release-update-executor（下载/staged/激活/回滚），`componentId=luopan`。大版本
+   安装包由 Release Center 下发（installer-manual，永远手动确认），热更
+   （npm artifact / 配置 / feature flag）自动生效。**本 demo 的
+   `src-electron/electron-main.ts` 已带完整接线**（`luopan:check-updates` /
+   `apply-update` / `open-staged-installer` / `rollback-update-slot` 四个 IPC +
+   启动期 adoption/installer-completed 回报），逐段讲解见 docs/20 §5。
 4. **端口不 hardcode**：mihomo、local edge、broker socket 等经包 API 申请，带冲突退避；
    本机目录/socket 按 `luopan` 产品命名空间隔离。
 5. **正式包 = npm 模式构建**（见上）。
@@ -81,7 +87,12 @@ VIP——它是 Luopan 到达 Internal 的**唯一路由**，不是装饰性标�
 
 ## 参考
 
+- [docs/20](../../docs/20-luopan-standalone-development-guide.md)：**Luopan 开发指南**——
+  V2 MX-H2I 工作原理走读 + 照着开发 Luopan 的完整路线（含更新执行器接线逐段讲解、
+  embed launcher 可选章节）。
 - `../mx-h2i`：standalone 全量参考（连接状态机、AppCenter host、更新检查 UI）。
+  注意 main.cjs 里 AppCenter host / broker 属于**尚未下沉**的平台逻辑——遇到
+  "demo 里有但包里没有"的能力，找平台方下沉，不要复制 main.cjs。
 - [docs/15](../../docs/15-sdk-gateway-api.md)：SDK gateway API。
 - [docs/18](../../docs/18-mx-h2i-release-validation-runbook.md)：发布验证 runbook。
 - Internal base URL、测试账号：向平台方索取。

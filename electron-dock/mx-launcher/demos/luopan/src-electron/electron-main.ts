@@ -9,16 +9,25 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import {
+  adoptPendingElectronLauncherPackages,
   applyElectronLauncherStandaloneDataPlane,
   buildElectronLauncherStandaloneOwnershipClaim,
+  classifyElectronLauncherUpdateArtifact,
   createElectronLauncher,
+  createElectronLauncherReleaseUpdateExecutor,
+  createElectronLauncherReleaseUpdater,
   diagnoseElectronLauncherStandaloneDataPlane,
   defineLauncherProduct,
   readElectronLauncherStandaloneOwnershipState,
+  reportElectronLauncherInstallCompletionIfUpgraded,
   routePlanFromSnapshot,
   stopElectronLauncherStandaloneDataPlane,
   upsertElectronLauncherStandaloneOwnershipClaim,
+  type ElectronLauncherNetworkGateState,
+  type ElectronLauncherReleaseUpdater,
   type ElectronLauncherStandaloneDataPlaneDiagnostics,
+  type ElectronLauncherUpdateCheckResult,
+  type ElectronLauncherUpdateExecutionResult,
   type LauncherNetworkSession,
   type LauncherProductDefinition,
   type StandaloneLauncher
@@ -47,11 +56,47 @@ interface RuntimeConnection {
   updatedAt: string | null;
 }
 
+type RuntimeUpdateStatus = 'idle' | 'checking' | 'up-to-date' | 'update-available' | 'blocked' | 'failed';
+
+interface RuntimeUpdateArtifact {
+  artifactId: string;
+  kind: string;
+  artifactClass: string;
+  version: string;
+  activation: string;
+  autoApply: boolean;
+  sizeBytes: number | null;
+}
+
+interface RuntimeUpdateExecution {
+  artifactId: string;
+  artifactClass: string;
+  phase: string;
+  activated: boolean;
+  deferredReason: string | null;
+  error: string | null;
+}
+
+interface RuntimeUpdate {
+  status: RuntimeUpdateStatus;
+  checkedAt: string | null;
+  currentVersion: string;
+  targetVersion: string | null;
+  releaseId: string | null;
+  releaseNotes: string | null;
+  matchedBy: string | null;
+  featureFlags: string[];
+  artifacts: RuntimeUpdateArtifact[];
+  execution: RuntimeUpdateExecution[];
+  message: string | null;
+}
+
 interface RuntimeState {
   installId: string;
   deviceId: string;
   config: RuntimeConfig;
   connection: RuntimeConnection;
+  update: RuntimeUpdate;
   events: string[];
 }
 
@@ -105,7 +150,10 @@ function initialDataPlaneApplyMessage(): string {
 
 function defaultConfig(): RuntimeConfig {
   return {
-    baseUrl: normalizeBaseUrl(process.env.LUOPAN_LAUNCHER_BASE_URL || process.env.MX_LAUNCHER_BASE_URL || 'http://10.88.88.88:18090'),
+    // Luopan's registered product VIP (docs/19, HANDOFF §网络注册). Never fall
+    // back to 10.88.88.88 / 10.88.0.1 — those are MX-H2I/foundation migration
+    // compatibility addresses and are off-limits to Luopan.
+    baseUrl: normalizeBaseUrl(process.env.LUOPAN_LAUNCHER_BASE_URL || process.env.MX_LAUNCHER_BASE_URL || 'http://10.88.100.3:18090'),
     productId: 'luopan',
     mode: 'standalone',
     sdkTestMode: booleanish(process.env.LUOPAN_SDK_TEST_MODE, true),
@@ -127,12 +175,29 @@ function emptyConnection(): RuntimeConnection {
   };
 }
 
+function emptyUpdate(): RuntimeUpdate {
+  return {
+    status: 'idle',
+    checkedAt: null,
+    currentVersion: app.getVersion(),
+    targetVersion: null,
+    releaseId: null,
+    releaseNotes: null,
+    matchedBy: null,
+    featureFlags: [],
+    artifacts: [],
+    execution: [],
+    message: 'Release Center not checked yet.'
+  };
+}
+
 async function loadRuntime(): Promise<RuntimeState> {
   const fallback: RuntimeState = {
     installId: `luopan-inst-${randomUUID()}`,
     deviceId: `luopan-dev-${randomUUID()}`,
     config: defaultConfig(),
     connection: emptyConnection(),
+    update: emptyUpdate(),
     events: []
   };
   const file = runtimeStateFile();
@@ -143,6 +208,7 @@ async function loadRuntime(): Promise<RuntimeState> {
       deviceId: stringValue(parsed.deviceId) || fallback.deviceId,
       config: normalizeConfig(parsed.config, fallback.config),
       connection: normalizeConnection(parsed.connection),
+      update: normalizeUpdate(parsed.update),
       events: Array.isArray(parsed.events) ? parsed.events.filter((item): item is string => typeof item === 'string').slice(-12) : []
     };
   } catch {
@@ -171,6 +237,7 @@ function visibleRuntime() {
     deviceId: state.deviceId,
     config: state.config,
     connection: state.connection,
+    update: state.update,
     events: state.events
   };
 }
@@ -194,6 +261,114 @@ function launcherClient(): StandaloneLauncher {
     throw new Error('Luopan demo requires standalone launcher mode');
   }
   return launcher;
+}
+
+// --- Release update wiring (docs/19 §3+§5, docs/17 state machine) ----------
+// Everything below consumes @qpjoy/electron-launcher; no update logic lives in
+// the product. The last check result is kept in memory only: `apply-update`
+// must always execute a fresh Release Center decision, never a persisted one.
+let lastUpdateCheck: ElectronLauncherUpdateCheckResult | null = null;
+
+function releaseUpdater(): ElectronLauncherReleaseUpdater {
+  const state = requireRuntime();
+  return createElectronLauncherReleaseUpdater({
+    baseUrl: state.config.baseUrl,
+    reportInstallId: state.installId
+  });
+}
+
+// docs/17 stability boundary: never activate artifacts while the product's
+// network path is busy. Luopan maps its connection status onto the gate; the
+// executor re-checks this before every activation and defers with a report.
+function updateNetworkGate(): ElectronLauncherNetworkGateState {
+  const status = requireRuntime().connection.status;
+  if (status === 'connecting') return 'connecting';
+  if (status === 'data-plane-pending') return 'recovering';
+  return 'idle';
+}
+
+function updateExecutor(updater: ElectronLauncherReleaseUpdater) {
+  return createElectronLauncherReleaseUpdateExecutor({
+    updater,
+    baseDir: app.getPath('userData'),
+    installId: requireRuntime().installId,
+    networkGate: () => updateNetworkGate(),
+    onPhase: (phase, detail) => {
+      const artifactId = typeof detail.artifactId === 'string' ? ` ${detail.artifactId}` : '';
+      pushEvent(`update ${phase}${artifactId}`);
+      broadcastRuntime();
+    },
+    applyConfig: (activePath) => {
+      pushEvent(`config snapshot activated ${path.basename(activePath)}`);
+      broadcastRuntime();
+    },
+    applyRenderer: (activePath) => {
+      pushEvent(`renderer bundle activated ${path.basename(activePath)}`);
+      mainWindow?.webContents.reload();
+    },
+    openInstaller: async (filePath) => {
+      await shell.openPath(filePath);
+    }
+  });
+}
+
+function updateFromCheck(check: ElectronLauncherUpdateCheckResult): RuntimeUpdate {
+  return {
+    status: check.status,
+    checkedAt: check.checkedAt,
+    currentVersion: app.getVersion(),
+    targetVersion: check.decision.targetVersion || null,
+    releaseId: check.plan?.releaseId ?? null,
+    releaseNotes: check.releaseNotes ?? null,
+    matchedBy: check.rollout?.matchedBy ?? null,
+    featureFlags: check.featureFlags ?? [],
+    artifacts: check.artifacts.map((artifact) => ({
+      artifactId: artifact.artifactId,
+      kind: artifact.kind,
+      artifactClass: classifyElectronLauncherUpdateArtifact(artifact.kind),
+      version: artifact.version,
+      activation: artifact.activation,
+      autoApply: artifact.autoApply,
+      sizeBytes: artifact.sizeBytes
+    })),
+    execution: [],
+    message: check.reason
+  };
+}
+
+function executionSummary(result: ElectronLauncherUpdateExecutionResult): RuntimeUpdateExecution[] {
+  return result.artifacts.map((artifact) => ({
+    artifactId: artifact.artifactId,
+    artifactClass: artifact.artifactClass,
+    phase: artifact.phase,
+    activated: artifact.activated,
+    deferredReason: artifact.deferredReason,
+    error: artifact.error
+  }));
+}
+
+// Boot-time update bookkeeping (docs/19 §5 pipelines 3+4): promote staged
+// npm-package pointers to current, then report installer-completed on the
+// first start after a version change so Release Center closes the loop.
+async function adoptUpdatesAndReportInstallCompletion(): Promise<void> {
+  const baseDir = app.getPath('userData');
+  const adopted = await adoptPendingElectronLauncherPackages(baseDir);
+  for (const pointer of adopted) {
+    pushEvent(`launcher package adopted ${pointer.version}`);
+  }
+  const completion = await reportElectronLauncherInstallCompletionIfUpgraded({
+    updater: releaseUpdater(),
+    baseDir,
+    currentVersion: app.getVersion(),
+    installId: requireRuntime().installId
+  });
+  if (completion.upgraded) {
+    pushEvent(`installer completed ${completion.from} -> ${completion.to}`);
+  }
+  if (adopted.length > 0 || completion.upgraded) {
+    await saveRuntime();
+    broadcastRuntime();
+  }
 }
 
 function pushEvent(message: string): void {
@@ -589,6 +764,97 @@ function registerIpc(): void {
     broadcastRuntime();
     return visibleRuntime();
   });
+  ipcMain.handle('luopan:check-updates', async () => {
+    const state = requireRuntime();
+    state.update = { ...state.update, status: 'checking', message: 'Checking Release Center decision.' };
+    broadcastRuntime();
+    try {
+      const check = await releaseUpdater().check({
+        componentId: PRODUCT.release.componentId,
+        currentVersion: app.getVersion(),
+        channel: PRODUCT.release.channel,
+        installId: state.installId,
+        platform: process.platform
+      });
+      lastUpdateCheck = check;
+      state.update = updateFromCheck(check);
+      pushEvent(`update check ${check.status}`);
+    } catch (error) {
+      lastUpdateCheck = null;
+      state.update = { ...emptyUpdate(), status: 'failed', message: errorMessage(error) };
+      pushEvent(`update check failed ${errorMessage(error)}`);
+    }
+    await saveRuntime();
+    broadcastRuntime();
+    return visibleRuntime();
+  });
+  ipcMain.handle('luopan:apply-update', async () => {
+    const state = requireRuntime();
+    if (!lastUpdateCheck || lastUpdateCheck.status !== 'update-available') {
+      state.update = { ...state.update, message: 'No update-available decision in memory; run check first.' };
+      broadcastRuntime();
+      return visibleRuntime();
+    }
+    try {
+      const result = await updateExecutor(releaseUpdater()).execute(lastUpdateCheck);
+      state.update = {
+        ...state.update,
+        execution: executionSummary(result),
+        message: result.executed
+          ? `Executed release ${result.releaseId}: ${result.artifacts.length} artifact(s) processed.`
+          : result.reason
+      };
+      pushEvent(`update executed ${result.releaseId ?? 'none'}`);
+    } catch (error) {
+      state.update = { ...state.update, status: 'failed', message: errorMessage(error) };
+      pushEvent(`update execute failed ${errorMessage(error)}`);
+    }
+    await saveRuntime();
+    broadcastRuntime();
+    return visibleRuntime();
+  });
+  ipcMain.handle('luopan:open-staged-installer', async () => {
+    const state = requireRuntime();
+    const artifact = lastUpdateCheck?.artifacts.find(
+      (candidate) => classifyElectronLauncherUpdateArtifact(candidate.kind) === 'installer'
+    );
+    if (!artifact) {
+      state.update = { ...state.update, message: 'No installer artifact in the last check.' };
+      broadcastRuntime();
+      return visibleRuntime();
+    }
+    try {
+      const installerPath = await updateExecutor(releaseUpdater()).openStagedInstaller(artifact);
+      state.update = { ...state.update, message: `Installer opened: ${path.basename(installerPath)}. Confirm the OS prompt to install.` };
+      pushEvent('installer opened');
+    } catch (error) {
+      state.update = { ...state.update, message: errorMessage(error) };
+      pushEvent(`installer open failed ${errorMessage(error)}`);
+    }
+    await saveRuntime();
+    broadcastRuntime();
+    return visibleRuntime();
+  });
+  ipcMain.handle('luopan:rollback-update-slot', async (_event, slot) => {
+    const state = requireRuntime();
+    const normalizedSlot = slot === 'renderer' ? 'renderer' : 'config';
+    try {
+      const pointer = await updateExecutor(releaseUpdater()).rollback(normalizedSlot);
+      state.update = {
+        ...state.update,
+        message: pointer
+          ? `Rolled ${normalizedSlot} slot back to ${pointer.version}.`
+          : `No previous ${normalizedSlot} slot to roll back to.`
+      };
+      pushEvent(pointer ? `update slot rolled back ${normalizedSlot} ${pointer.version}` : `rollback skipped ${normalizedSlot}`);
+    } catch (error) {
+      state.update = { ...state.update, message: errorMessage(error) };
+      pushEvent(`rollback failed ${errorMessage(error)}`);
+    }
+    await saveRuntime();
+    broadcastRuntime();
+    return visibleRuntime();
+  });
   ipcMain.handle('luopan:open-admin', async () => {
     await shell.openExternal(`${requireRuntime().config.baseUrl}/admin/`);
   });
@@ -872,6 +1138,27 @@ function normalizeConnection(input: unknown): RuntimeConnection {
   };
 }
 
+function normalizeUpdate(input: unknown): RuntimeUpdate {
+  const fallback = emptyUpdate();
+  const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+  const status = record.status;
+  return {
+    // A persisted 'checking' means the app died mid-check; reset to idle. The
+    // execution summary is kept for display, but apply always re-checks.
+    status: status === 'up-to-date' || status === 'update-available' || status === 'blocked' || status === 'failed' ? status : 'idle',
+    checkedAt: stringValue(record.checkedAt),
+    currentVersion: app.getVersion(),
+    targetVersion: stringValue(record.targetVersion),
+    releaseId: stringValue(record.releaseId),
+    releaseNotes: stringValue(record.releaseNotes),
+    matchedBy: stringValue(record.matchedBy),
+    featureFlags: Array.isArray(record.featureFlags) ? record.featureFlags.filter((item): item is string => typeof item === 'string') : [],
+    artifacts: Array.isArray(record.artifacts) ? record.artifacts.filter((item): item is RuntimeUpdateArtifact => Boolean(item) && typeof item === 'object') : [],
+    execution: Array.isArray(record.execution) ? record.execution.filter((item): item is RuntimeUpdateExecution => Boolean(item) && typeof item === 'object') : [],
+    message: stringValue(record.message) || fallback.message
+  };
+}
+
 function runtimeStatusForDataPlane(dataPlane: ElectronLauncherStandaloneDataPlaneDiagnostics): RuntimeStatus {
   if (dataPlane.ok) return 'network-ready';
   if (dataPlane.state === 'lease-missing') return 'idle';
@@ -951,6 +1238,9 @@ app.whenReady().then(async () => {
   runtime = await loadRuntime();
   registerIpc();
   await createWindow();
+  void adoptUpdatesAndReportInstallCompletion().catch((error) => {
+    console.warn('[luopan] startup update bookkeeping failed:', errorMessage(error));
+  });
 });
 
 app.on('activate', () => {

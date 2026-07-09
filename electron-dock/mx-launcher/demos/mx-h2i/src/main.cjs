@@ -15,6 +15,8 @@ loadDotEnvFiles();
 const APP_ID = 'dev.qpjoy.mx-h2i';
 const STATE_FILE = 'mx-h2i-runtime.json';
 const H2O_RUNTIME_STORE_FILE = 'mx-h2i-h2o-runtime.json';
+const STATE_BACKUP_DIR_NAME = 'state-backups';
+const STATE_BACKUP_LIMIT = 5;
 const PRODUCT_ID = 'mx-h2i';
 const PRODUCT_DISPLAY_NAME = 'MX-H2I';
 const REQUESTED_BY = 'mx-h2i-desktop';
@@ -911,6 +913,14 @@ function registerIpc() {
     await recoverWireGuardForRuntime('manual-diagnostics', { allowPrivileged: false });
     await refreshWireGuardDiagnostics();
     await refreshNetworkEnvironmentDiagnostics('manual-diagnostics', { persist: false });
+    await saveAndBroadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('mx-h2i:list-state-backups', async () => listAppsStateBackups());
+  ipcMain.handle('mx-h2i:restore-state-backup', async (_event, fileName) => {
+    const snapshot = await readAppsStateBackup(fileName);
+    runtime.apps = normalizeApps(snapshot.apps);
+    touchRuntime(`apps state restored from ${snapshot.file}`);
     await saveAndBroadcast();
     return visibleRuntime();
   });
@@ -3226,7 +3236,9 @@ async function loadRuntime() {
     loaded = await normalizeRuntime({});
   }
   const persistedH2oRuntime = await loadPersistedH2oRuntime();
-  return mergePersistedH2oRuntime(loaded, persistedH2oRuntime);
+  const merged = mergePersistedH2oRuntime(loaded, persistedH2oRuntime);
+  await maybeSnapshotAppsState(merged.apps);
+  return merged;
 }
 
 async function normalizeRuntime(input) {
@@ -6904,6 +6916,11 @@ function mergeAppCenterCatalogApps(remoteApps) {
       lastAction: nullableString(local.lastAction),
       logs: local.logs || [],
       errorMessage: nullableString(installation?.errorMessage) || nullableString(local.errorMessage),
+      // App runtime is client-owned state (H2O subscriptions, active profile,
+      // rules, ports, running flag). The catalog record only carries a default
+      // template, so a sync must never replace what the user configured
+      // locally — that wiped saved/applied subscriptions on every update check.
+      runtime: local.runtime && typeof local.runtime === 'object' ? local.runtime : remote.runtime,
       entrypoints
     };
     next[appId] = normalizeApp(merged, defaultAppRecordFor({ ...remote, entrypoints }, appId));
@@ -9685,6 +9702,7 @@ async function saveRuntime(next) {
   await fs.mkdir(path.dirname(runtimePath()), { recursive: true });
   await fs.writeFile(runtimePath(), JSON.stringify(persistable, null, 2) + '\n', 'utf8');
   await savePersistedH2oRuntime(persistable.apps?.h2o?.runtime);
+  await maybeSnapshotAppsState(persistable.apps);
 }
 
 function persistableRuntime(input) {
@@ -9729,6 +9747,109 @@ async function savePersistedH2oRuntime(input) {
   };
   await fs.mkdir(path.dirname(h2oRuntimeStorePath()), { recursive: true });
   await fs.writeFile(h2oRuntimeStorePath(), JSON.stringify(store, null, 2) + '\n', 'utf8');
+}
+
+// Apps 状态备份环：每次持久化时在 <userData>/state-backups/ 保留最近 STATE_BACKUP_LIMIT
+// 份 runtime.apps 快照（按 H2O 订阅/规则等客户端自有字段去重），用于在 merge/normalize
+// 回归清空 H2O 订阅后恢复。恢复方式：
+//   1) 应用内 DevTools 控制台执行 await window.mxH2i.listStateBackups() 查看快照，
+//      再执行 await window.mxH2i.restoreStateBackup('<file>') 恢复；
+//   2) 或关闭应用后，把快照文件里的 apps 对象手工覆盖到 <userData>/mx-h2i-runtime.json 的 apps 字段。
+let lastAppsBackupFingerprint;
+
+function stateBackupsDirPath() {
+  return path.join(app.getPath('userData'), STATE_BACKUP_DIR_NAME);
+}
+
+function appsStateBackupFingerprint(apps) {
+  const h2o = apps?.h2o?.runtime;
+  if (!h2o) return null;
+  return JSON.stringify({
+    mode: h2o.mode ?? null,
+    tunInstalled: h2o.tunInstalled ?? null,
+    activeSubscriptionId: h2o.activeSubscriptionId ?? null,
+    activeSubscription: h2o.activeSubscription ?? null,
+    subscriptions: h2o.subscriptions ?? [],
+    rules: h2o.rules ?? []
+  });
+}
+
+async function maybeSnapshotAppsState(apps) {
+  try {
+    const fingerprint = appsStateBackupFingerprint(apps);
+    if (!fingerprint) return;
+    if (lastAppsBackupFingerprint === undefined) lastAppsBackupFingerprint = await latestAppsStateBackupFingerprint();
+    if (fingerprint === lastAppsBackupFingerprint) return;
+    const dir = stateBackupsDirPath();
+    await fs.mkdir(dir, { recursive: true });
+    const createdAt = nowIso();
+    const fileName = `apps-${createdAt.replace(/[:.]/g, '-')}.json`;
+    await fs.writeFile(path.join(dir, fileName), JSON.stringify({ kind: 'mx-h2i-apps-backup', createdAt, apps }, null, 2) + '\n', 'utf8');
+    lastAppsBackupFingerprint = fingerprint;
+    await pruneAppsStateBackups();
+  } catch (err) {
+    console.warn('[mx-h2i] apps state backup failed:', errorMessage(err));
+  }
+}
+
+async function latestAppsStateBackupFingerprint() {
+  try {
+    const names = await listAppsStateBackupFiles();
+    if (!names.length) return null;
+    const snapshot = await readAppsStateBackup(names[names.length - 1]);
+    return appsStateBackupFingerprint(snapshot.apps);
+  } catch {
+    return null;
+  }
+}
+
+async function listAppsStateBackupFiles() {
+  try {
+    const names = await fs.readdir(stateBackupsDirPath());
+    return names.filter((name) => /^apps-[\w.-]+\.json$/.test(name)).sort();
+  } catch {
+    return [];
+  }
+}
+
+async function listAppsStateBackups() {
+  const names = await listAppsStateBackupFiles();
+  const backups = [];
+  for (const name of names.slice().reverse()) {
+    try {
+      const snapshot = await readAppsStateBackup(name);
+      const h2o = snapshot.apps?.h2o?.runtime || {};
+      backups.push({
+        file: name,
+        createdAt: snapshot.createdAt || null,
+        h2oMode: h2o.mode || null,
+        h2oActiveSubscriptionId: h2o.activeSubscriptionId || null,
+        h2oSubscriptionCount: Array.isArray(h2o.subscriptions) ? h2o.subscriptions.length : 0,
+        h2oRuleCount: Array.isArray(h2o.rules) ? h2o.rules.length : 0
+      });
+    } catch {
+      backups.push({ file: name, createdAt: null, error: 'unreadable' });
+    }
+  }
+  return backups;
+}
+
+async function readAppsStateBackup(fileName) {
+  const name = path.basename(String(fileName || ''));
+  if (!/^apps-[\w.-]+\.json$/.test(name)) throw new Error(`无效的备份文件名: ${fileName}`);
+  const raw = await fs.readFile(path.join(stateBackupsDirPath(), name), 'utf8');
+  const snapshot = JSON.parse(raw);
+  if (!snapshot || typeof snapshot !== 'object' || !snapshot.apps || typeof snapshot.apps !== 'object') {
+    throw new Error(`备份文件缺少 apps 数据: ${name}`);
+  }
+  return { ...snapshot, file: name };
+}
+
+async function pruneAppsStateBackups() {
+  const names = await listAppsStateBackupFiles();
+  for (const name of names.slice(0, Math.max(0, names.length - STATE_BACKUP_LIMIT))) {
+    await fs.rm(path.join(stateBackupsDirPath(), name), { force: true });
+  }
 }
 
 function mergePersistedH2oRuntime(source, persistedRuntime) {
