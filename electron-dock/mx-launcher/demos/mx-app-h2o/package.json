@@ -1,7 +1,7 @@
 {
   "name": "@qpjoy/electron-launcher-app-h2o",
   "productName": "MX-H2I H2O",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": false,
   "author": "QPJoy",
   "description": "Home To Oversea embed network plugin for MX-H2I AppCenter.",
