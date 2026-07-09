@@ -3904,8 +3904,8 @@ export function buildReleaseManagementPlan(
       featureKeys: input.featureKeys ?? [],
       channels: [input.channel?.trim() || 'shadow'],
       audience: {
-        installIds: input.installId ? [input.installId] : [],
-        userIds: input.userId ? [input.userId] : [],
+        installIds: uniqueAudienceIds([input.installId, ...(input.targetInstallIds ?? [])]),
+        userIds: uniqueAudienceIds([input.userId, ...(input.targetUserIds ?? [])]),
         siteIds: input.sites ?? []
       },
       allowAutoPromote: rolloutStrategy !== 'manual-ring' && parts.gate.verdict === 'passed',
@@ -3920,6 +3920,7 @@ export function buildReleaseManagementPlan(
       manualConfirmRequired: majorUpdateRequiresInstaller || activationModes.includes('restart-manual'),
       connectionSafeMode: true
     },
+    releaseNotes: input.releaseNotes?.trim() || null,
     test: {
       suiteId: parts.testRun.suiteId,
       topology: parts.testRun.topology,
@@ -3932,6 +3933,12 @@ export function buildReleaseManagementPlan(
     },
     createdAt: parts.createdAt
   };
+}
+
+function uniqueAudienceIds(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values
+    .map((value) => value?.trim())
+    .filter((value): value is string => Boolean(value)))];
 }
 
 export function buildReleaseManagementDecisions(

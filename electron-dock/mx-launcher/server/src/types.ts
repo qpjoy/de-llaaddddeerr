@@ -2907,6 +2907,10 @@ export interface ReleaseManagementPlanInput {
   rolloutSegment?: string | null;
   rolloutRings?: string[];
   featureKeys?: string[];
+  /** Explicit per-user / per-install targeting; a one-user gray release is a single entry here. */
+  targetUserIds?: string[];
+  targetInstallIds?: string[];
+  releaseNotes?: string | null;
   suiteId?: string | null;
   topology?: string | null;
   sites?: string[];
@@ -2938,6 +2942,7 @@ export interface ReleaseManagementPlan {
   artifacts: ReleaseArtifactRef[];
   rollout: ReleaseRolloutPolicy;
   activation: ReleaseActivationPolicy;
+  releaseNotes: string | null;
   test: {
     suiteId: string;
     topology: string;

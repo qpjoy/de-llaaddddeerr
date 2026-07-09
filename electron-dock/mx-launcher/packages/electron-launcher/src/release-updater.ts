@@ -110,6 +110,18 @@ export interface ElectronLauncherUpdateCheckResult {
   decision: ElectronLauncherReleasePolicyDecision;
   artifacts: ElectronLauncherReleaseArtifactRef[];
   reason: string;
+  /** Markdown release notes from the server-side decision, when provided. */
+  releaseNotes?: string | null;
+  /** Feature keys granted to this install by the matched plan. */
+  featureFlags?: string[];
+  /** Why this install did (not) receive the release; shown in the update panel. */
+  rollout?: {
+    matchedBy?: string | null;
+    bucket?: number | null;
+    percentage?: number | null;
+  } | null;
+  /** Which check path produced this result. */
+  checkSource?: 'release-check' | 'plans-legacy';
 }
 
 export interface ElectronLauncherReleaseUpdaterOptions {
@@ -151,6 +163,32 @@ export function createElectronLauncherReleaseUpdater(options: ElectronLauncherRe
   return {
     async check(input) {
       const checkedAt = new Date().toISOString();
+      // Preferred path: server-side single-install decision (docs/19 §6). The
+      // server owns target lists and rollout bucketing; the full plans list is
+      // being withdrawn to admin-only. Fall back to the legacy flow against
+      // older servers that do not expose /release/check yet.
+      const installId = input.installId ?? options.reportInstallId ?? null;
+      if (installId) {
+        try {
+          const payload = await requestJson<ReleaseCheckPayload>(
+            fetchImpl,
+            joinUrl(baseUrl, '/internal/v1/release/check'),
+            'POST',
+            {
+              installId,
+              userId: input.userId ?? null,
+              channel: input.channel,
+              platform: input.platform ?? null,
+              components: { [input.componentId]: input.currentVersion }
+            }
+          );
+          if (payload && typeof payload.status === 'string') {
+            return mapReleaseCheckPayload(payload, input, baseUrl, checkedAt);
+          }
+        } catch {
+          // Older server without /release/check; use the legacy plans flow.
+        }
+      }
       const plansPayload = await requestJson<{ plans?: ElectronLauncherReleasePlan[] }>(
         fetchImpl,
         joinUrl(baseUrl, '/internal/v1/release-management/plans'),
@@ -191,7 +229,8 @@ export function createElectronLauncherReleaseUpdater(options: ElectronLauncherRe
         artifacts,
         reason: status === 'blocked'
           ? plan?.test?.gate?.reason || `release gate is ${gateVerdict}`
-          : decision.reason
+          : decision.reason,
+        checkSource: 'plans-legacy'
       };
     },
     async report(input) {
@@ -249,6 +288,75 @@ export async function downloadElectronLauncherReleaseArtifactToFile(
     digest,
     expectedDigest,
     bytes
+  };
+}
+
+interface ReleaseCheckPayload {
+  status: 'up-to-date' | 'update-available' | 'blocked';
+  reason: string;
+  planId: string | null;
+  releaseId: string | null;
+  channel: string;
+  decision: ElectronLauncherReleasePolicyDecision | null;
+  artifacts: ElectronLauncherReleaseArtifactRef[];
+  activation: ElectronLauncherReleasePlan['activation'] | null;
+  releaseNotes: string | null;
+  featureFlags: string[];
+  rollout: { matchedBy: string | null; bucket: number | null; percentage: number | null };
+  signedAt: string;
+  signature: { algorithm: string; keyId: string; value: string };
+}
+
+function mapReleaseCheckPayload(
+  payload: ReleaseCheckPayload,
+  input: ElectronLauncherUpdateCheckInput,
+  baseUrl: string,
+  checkedAt: string
+): ElectronLauncherUpdateCheckResult {
+  const decision: ElectronLauncherReleasePolicyDecision = payload.decision ?? {
+    componentKind: input.componentKind || 'app-managed',
+    componentId: input.componentId,
+    currentVersion: input.currentVersion,
+    targetVersion: input.currentVersion,
+    updateAvailable: false,
+    updateMode: 'none',
+    canSkip: true,
+    canDefer: true,
+    requiresGate: false,
+    rollbackRequired: false,
+    reason: payload.reason
+  };
+  const plan: ElectronLauncherReleasePlan | null = payload.planId && payload.releaseId
+    ? {
+        planId: payload.planId,
+        releaseId: payload.releaseId,
+        environment: 'internal',
+        channel: payload.channel,
+        installId: input.installId ?? null,
+        userId: input.userId ?? null,
+        createdBy: 'release-check',
+        components: decision.componentKind === 'app-managed' ? { app: decision } : { launcher: decision },
+        artifacts: payload.artifacts ?? [],
+        rollout: {
+          percentage: payload.rollout?.percentage ?? undefined,
+          featureKeys: payload.featureFlags ?? []
+        },
+        activation: payload.activation ?? undefined,
+        createdAt: payload.signedAt
+      }
+    : null;
+  return {
+    checkedAt,
+    baseUrl,
+    status: payload.status,
+    plan,
+    decision,
+    artifacts: payload.artifacts ?? [],
+    reason: payload.reason,
+    releaseNotes: payload.releaseNotes ?? null,
+    featureFlags: payload.featureFlags ?? [],
+    rollout: payload.rollout ?? null,
+    checkSource: 'release-check'
   };
 }
 

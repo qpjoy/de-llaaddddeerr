@@ -72,6 +72,22 @@ materialization 规则）、[17-mx-h2i-release-center-update-system.md](17-mx-h2
   （config → 槽位替换 + 广播，renderer → 槽位 + reload，npm/asar → next-start 指针；
   WireGuard connecting 时自动 defer 并提示）。剩余（P3 收尾项）：renderer bundle 的产品侧
   解包约定（当前按单文件 bundle 处理）、真实发布一次热更走全链路验证（doc 18 Layer 6.5）。
+- P4 核心落地（6.0–6.2 实现，2026-07-09）：服务端新增 `POST /internal/v1/release/check`
+  （`server/src/modules/release/release-check.ts` 纯评估函数）——评估顺序 targets 显式列表
+  （`rollout.audience.userIds/installIds`，给 1 个用户灰度就是列表里放 1 个人）→ percentage
+  sticky 分桶（`sha256(componentId:channel:installId) % 10000`，series 级 sticky，扩量单调）
+  → all；gate 未过返回 `blocked`；响应带 `releaseNotes`、`featureFlags`、
+  `rollout.matchedBy/bucket`（可解释），HMAC-SHA256 签名（`MX_RELEASE_DECISION_SECRET`）。
+  每次 check 记录 `release-check` report 供灰度健康度聚合。plan 创建入参新增
+  `targetUserIds/targetInstallIds/releaseNotes`（postgres JSONB 自动落库，无迁移）；
+  `release:publish` CLI 新增 `--target-user/--target-install/--notes`。plans 列表端点在设置
+  `MX_RELEASE_PLANS_ADMIN_TOKEN` 后收敛 admin-only（未设置保持兼容）。客户端
+  `release-updater.check()` 优先走新端点（旧服务器 404 时自动回退 legacy plans 流程，
+  `checkSource` 字段标注路径）；mx-h2i 的 update 面板数据带上
+  releaseNotes/rolloutMatchedBy/rolloutBucket/featureFlags。单测覆盖：单用户命中/未命中、
+  5%→20%→100% 扩量 sticky 单调、gate blocked、平台过滤、签名校验、客户端新旧路径。
+  剩余（P4 收尾项）：Admin UI 的"目标（全部/指定用户）+ release notes"表单（6.0 概念收敛）、
+  签名的客户端校验（需分发验签密钥）、renderer 侧展示 releaseNotes。
 
 ## 1. npm 发布规划
 

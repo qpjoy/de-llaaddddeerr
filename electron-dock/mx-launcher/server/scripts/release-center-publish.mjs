@@ -25,6 +25,11 @@ const releaseId = args.releaseId || (kind === 'hot'
   : `mx-h2i-installer-${version}-${runId}`);
 const artifactKind = kind === 'hot' ? 'renderer-ui' : 'mx-h2i-installer';
 const artifactComponentId = kind === 'hot' ? args.componentId || 'mx-h2i-renderer' : 'mx-h2i';
+// Point-targeting (docs/19 §6.1): a one-user gray release is
+// `--target-user usr_xxx`; repeat or comma-separate for more.
+const targetUserIds = listArg(args.targetUser ?? args.targetUsers, []);
+const targetInstallIds = listArg(args.targetInstall ?? args.targetInstalls, []);
+const releaseNotes = optionalArg(args.notes ?? args.releaseNotes ?? process.env.MX_RELEASE_NOTES);
 
 const artifactStat = await stat(artifactPath);
 const digest = `sha256:${await sha256File(artifactPath)}`;
@@ -91,6 +96,9 @@ function installerBody() {
     rolloutStrategy: args.rolloutStrategy || 'manual-ring',
     rolloutPercentage: numberArg(args.rolloutPercentage, 0),
     rolloutRings: listArg(args.rolloutRings, ['internal-dogfood', 'stable']),
+    targetUserIds,
+    targetInstallIds,
+    releaseNotes,
     suiteId: args.suiteId || 'mx-h2i-installer-release',
     topology: args.topology || 'h-d-i-installer-release',
     sites: listArg(args.sites, ['internal-main', 'domestic-main']),
@@ -125,6 +133,9 @@ function hotUpdateBody() {
     rolloutPercentage: numberArg(args.rolloutPercentage, 10),
     rolloutRings: listArg(args.rolloutRings, ['internal-dogfood', 'canary', 'stable']),
     featureKeys: listArg(args.featureKeys, ['mx-h2i.release.hot-update']),
+    targetUserIds,
+    targetInstallIds,
+    releaseNotes,
     suiteId: args.suiteId || 'mx-h2i-hot-release',
     topology: args.topology || 'h-d-i-hot-release',
     sites: listArg(args.sites, ['internal-main', 'domestic-main']),

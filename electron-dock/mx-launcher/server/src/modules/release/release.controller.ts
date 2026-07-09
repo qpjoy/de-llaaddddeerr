@@ -8,13 +8,14 @@ import { request as httpsRequest } from 'node:https';
 import { basename, extname, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 
-import { BadRequestException, Body, Controller, Get, Header, Inject, NotFoundException, Param, Post, Query, Req, Res, StreamableFile } from '@nestjs/common';
+import { BadRequestException, Body, Controller, ForbiddenException, Get, Header, Inject, NotFoundException, Param, Post, Query, Req, Res, StreamableFile } from '@nestjs/common';
 
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { normalizeReleaseArtifactKind } from '../../store/domain.js';
 import { PLATFORM_STORE } from '../../tokens.js';
 import type { ReleaseArtifactKind, ReleaseManagementE2eResult, ReleaseManagementPlanInput, ReleaseReportInput } from '../../types.js';
+import { evaluateReleaseCheck, signReleaseCheckResult } from './release-check.js';
 
 @Controller()
 export class ReleaseController {
@@ -54,8 +55,44 @@ export class ReleaseController {
     };
   }
 
+  /**
+   * Single-install release decision (docs/19 §6). The server owns targeting
+   * and rollout evaluation; clients no longer read the full plans list.
+   */
+  @Post('internal/v1/release/check')
+  async checkRelease(@Body() rawBody: unknown) {
+    const body = asRecord(rawBody);
+    const installId = nullableString(body.installId);
+    if (!installId) throw new BadRequestException('release check requires installId');
+    const components = releaseCheckComponents(body);
+    if (Object.keys(components).length === 0) {
+      throw new BadRequestException('release check requires components: { componentId: currentVersion }');
+    }
+    const plans = await this.store.listReleaseManagementPlans();
+    const result = evaluateReleaseCheck(plans, {
+      installId,
+      userId: nullableString(body.userId),
+      channel: nullableString(body.channel) ?? 'stable',
+      platform: nullableString(body.platform),
+      components
+    });
+    await this.store.recordReleaseReport({
+      installId,
+      status: 'release-check',
+      metadata: {
+        status: result.status,
+        planId: result.planId,
+        releaseId: result.releaseId,
+        matchedBy: result.rollout.matchedBy,
+        bucket: result.rollout.bucket
+      }
+    });
+    return signReleaseCheckResult(result, releaseDecisionSecret());
+  }
+
   @Get('internal/v1/release-management/plans')
-  async listManagementPlans() {
+  async listManagementPlans(@Req() req: IncomingMessage) {
+    assertReleasePlansAccess(req);
     return { plans: await this.store.listReleaseManagementPlans() };
   }
 
@@ -235,6 +272,9 @@ function toReleaseManagementPlanInput(body: Record<string, unknown>): ReleaseMan
     rolloutSegment: nullableString(body.rolloutSegment),
     rolloutRings: stringArray(body.rolloutRings),
     featureKeys: stringArray(body.featureKeys),
+    targetUserIds: stringArray(body.targetUserIds),
+    targetInstallIds: stringArray(body.targetInstallIds),
+    releaseNotes: nullableString(body.releaseNotes),
     suiteId: nullableString(body.suiteId),
     topology: nullableString(body.topology),
     sites: stringArray(body.sites),
@@ -242,6 +282,38 @@ function toReleaseManagementPlanInput(body: Record<string, unknown>): ReleaseMan
     createdBy: nullableString(body.createdBy),
     requestId: nullableString(body.requestId)
   };
+}
+
+function releaseCheckComponents(body: Record<string, unknown>): Record<string, string> {
+  const components: Record<string, string> = {};
+  const raw = asRecord(body.components);
+  for (const [componentId, version] of Object.entries(raw)) {
+    const normalizedVersion = nullableString(version);
+    if (componentId.trim() && normalizedVersion) components[componentId.trim()] = normalizedVersion;
+  }
+  // Single-component fallback so curl-level checks stay simple.
+  const componentId = nullableString(body.componentId);
+  const currentVersion = nullableString(body.currentVersion);
+  if (componentId && currentVersion && !components[componentId]) components[componentId] = currentVersion;
+  return components;
+}
+
+function releaseDecisionSecret(): string {
+  return nullableString(process.env.MX_RELEASE_DECISION_SECRET) ?? 'mx-release-decision-dev-secret';
+}
+
+// The full plans list leaks unreleased versions and rollout intent; once
+// MX_RELEASE_PLANS_ADMIN_TOKEN is set, only Admin callers may read it and
+// clients must use POST /internal/v1/release/check. Unset keeps the legacy
+// open behavior for migration.
+function assertReleasePlansAccess(req: IncomingMessage): void {
+  const requiredToken = nullableString(process.env.MX_RELEASE_PLANS_ADMIN_TOKEN);
+  if (!requiredToken) return;
+  const provided = req.headers['x-mx-admin-token'];
+  const token = Array.isArray(provided) ? provided[0] : provided;
+  if (token !== requiredToken) {
+    throw new ForbiddenException('release plans listing is admin-only; clients must use POST /internal/v1/release/check');
+  }
 }
 
 function releaseManagementE2eResult(value: unknown): ReleaseManagementE2eResult | null {

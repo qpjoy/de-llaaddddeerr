@@ -6114,6 +6114,10 @@ async function performUpdateCheck(reason, options = {}) {
     restartRequired: releaseArtifact?.restartRequired === true,
     majorUpdateRequiresInstaller: releasePlan?.activation?.majorUpdateRequiresInstaller === true,
     hotUpdateAuto: releasePlan?.activation?.hotUpdateAuto === true,
+    releaseNotes: releaseResult?.releaseNotes || null,
+    rolloutMatchedBy: releaseResult?.rollout?.matchedBy || null,
+    rolloutBucket: Number.isFinite(releaseResult?.rollout?.bucket) ? releaseResult.rollout.bucket : null,
+    featureFlags: Array.isArray(releaseResult?.featureFlags) ? releaseResult.featureFlags : [],
     downloadProgress: null,
     availableReleases: releaseCatalog.ok
       ? releaseCatalog.releases
@@ -7157,7 +7161,11 @@ function normalizeUpdate(input, config) {
     history: normalizeUpdateHistory(row.history),
     availableReleases: normalizeAvailableReleases(row.availableReleases),
     rollbackSlots: normalizeRollbackSlots(row.rollbackSlots),
-    restartPrompt: row.restartPrompt === true
+    restartPrompt: row.restartPrompt === true,
+    releaseNotes: nullableString(row.releaseNotes),
+    rolloutMatchedBy: nullableString(row.rolloutMatchedBy),
+    rolloutBucket: Number.isFinite(row.rolloutBucket) ? row.rolloutBucket : null,
+    featureFlags: Array.isArray(row.featureFlags) ? row.featureFlags.filter((key) => typeof key === 'string' && key) : []
   };
 }
 
