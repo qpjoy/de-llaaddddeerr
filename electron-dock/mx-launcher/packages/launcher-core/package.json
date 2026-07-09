@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/mx-launcher-core",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Shared MX Launcher core for product network enroll, snapshots, routes, DNS, license, and rate-limit policy contracts.",
   "type": "module",
   "main": "dist/index.js",

@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@qpjoy/electron-launcher':
-        specifier: ^2.0.0
-        version: 2.0.0
+        specifier: ^2.2.0
+        version: 2.2.0
       '@qpjoy/electron-market':
         specifier: ^0.4.2
         version: 0.4.2(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)
@@ -123,11 +123,11 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@qpjoy/electron-core-wireguard@0.2.1':
-    resolution: {integrity: sha512-/SGkvJYcHerk0PqIOJRpHItu25kd16yQEF8o5eQhjK4Q643qKSS4s/DTSbPIN4PyQMuGb+CuOgiyQ2J8pNhxOQ==}
+  '@qpjoy/electron-core-wireguard@2.1.0':
+    resolution: {integrity: sha512-N6Tdr+Iy8UVOXUp2CJnKzv8rhNA4o7B+yvtgGBGolpA3ZbJBGWot3o+I7XXIZEd5JaeoKK6oi6IRBQjFL22lrg==}
 
-  '@qpjoy/electron-launcher@2.0.0':
-    resolution: {integrity: sha512-e2YkOiHgb3tL/OssZEZQONUjxZzC85rnf+io9LAmmAgDEx9VpBrzlK0px6v3WwrJ8ldZcuf5o/1ipetTrs8yYQ==}
+  '@qpjoy/electron-launcher@2.2.0':
+    resolution: {integrity: sha512-4jAk6AeZw87rBxe1OXHa30KY9XwN92ddQXG2wmBk53vqYHM5A4bj7RPg8EQxqG0mPgLYlWfXidkdGcmlSGr9AA==}
 
   '@qpjoy/electron-market@0.4.2':
     resolution: {integrity: sha512-5+nUlRaoTYjP0koBh8Y5sZ9yTD4uVEAkJ827dQbZ6MUMwcWmEcnlTb031iKc6FWLMqu/RRZ8cYPUKa/I26x5cw==}
@@ -185,14 +185,14 @@ packages:
   '@qpjoy/marketplace-db@0.1.1':
     resolution: {integrity: sha512-3eL0XkHVe3zaEH97z0hL88OZDIT30/k5LOI5bhgZ6M9xfIVeP+L5CahjAZ/DAoVTfH4vb7ZjjXIzHTJMrnbqPA==}
 
-  '@qpjoy/mx-launcher-core@2.0.0':
-    resolution: {integrity: sha512-dyf7SM295NROaLedW2uUT71q2L8JrBzEcJcamPCnTcwSIL4ENuyYROGkAix1RHfityldkgvRwPFQRUJg3zp7eg==}
+  '@qpjoy/mx-launcher-core@2.2.0':
+    resolution: {integrity: sha512-eyOIGep+C2Fb4eMDb5YMfiUBw8y3t5a2dlxnt986Rve4/05ecpVOAGBk+1CBEC9G+PJKsd2s1FPkQ2x5CE8Rsg==}
 
-  '@qpjoy/mx-launcher-embed-sdk@2.0.0':
-    resolution: {integrity: sha512-891SsXzPj1VaAP3hk5+2NdDpZR/EHxSv9ovnVv07ZtjwZvKMBTpCUZlMjS/2RLEtr3jgP/g4oOio8tb3XR4g9w==}
+  '@qpjoy/mx-launcher-embed-sdk@2.2.0':
+    resolution: {integrity: sha512-ZRaEcs033m5iNeTCxhft3ScqcQs3HfxVx2innTIPGlsrZURD8SRbj8e0G31KSze9tSGXaa+KAVCZR+ORmoUGcg==}
 
-  '@qpjoy/mx-launcher-standalone@2.0.0':
-    resolution: {integrity: sha512-kRMr9Tj/o427H48JCDIh7wQ7hrIDC7Iuv3VvD+SefAIkcIs07XvbXj8YAtdooiORib6pUEu/yXudhmlzeo5Ihw==}
+  '@qpjoy/mx-launcher-standalone@2.2.0':
+    resolution: {integrity: sha512-goTKRW+pynjGAXrcVWwRMmd/uJ8KFuQy0vpsGuf4ZbtHlidI1p6WnQ4j8vhaRyL09lIqex3rNzJIw7RbsXw77A==}
 
   '@sindresorhus/is@4.6.0':
     resolution: {integrity: sha512-t09vSN3MdfsyCHoFcTRCH/iUtG7OJ0CsjzB8cjAmKc/va/kIgeDI/TxsigdncE/4be734m0cvIYwNaV4i2XqAw==}
@@ -1663,7 +1663,7 @@ snapshots:
   '@qpjoy/electron-core-wireguard-engine-win32-x64@0.1.2':
     optional: true
 
-  '@qpjoy/electron-core-wireguard@0.2.1':
+  '@qpjoy/electron-core-wireguard@2.1.0':
     optionalDependencies:
       '@qpjoy/electron-core-wireguard-engine-darwin-arm64': 0.1.2
       '@qpjoy/electron-core-wireguard-engine-darwin-x64': 0.1.2
@@ -1671,12 +1671,12 @@ snapshots:
       '@qpjoy/electron-core-wireguard-engine-linux-x64': 0.1.2
       '@qpjoy/electron-core-wireguard-engine-win32-x64': 0.1.2
 
-  '@qpjoy/electron-launcher@2.0.0':
+  '@qpjoy/electron-launcher@2.2.0':
     dependencies:
-      '@qpjoy/electron-core-wireguard': 0.2.1
-      '@qpjoy/mx-launcher-core': 2.0.0
-      '@qpjoy/mx-launcher-embed-sdk': 2.0.0
-      '@qpjoy/mx-launcher-standalone': 2.0.0
+      '@qpjoy/electron-core-wireguard': 2.1.0
+      '@qpjoy/mx-launcher-core': 2.2.0
+      '@qpjoy/mx-launcher-embed-sdk': 2.2.0
+      '@qpjoy/mx-launcher-standalone': 2.2.0
 
   '@qpjoy/electron-market@0.4.2(@qpjoy/electron-plugin-sdk@0.1.4(electron@34.5.8))(electron@34.5.8)':
     dependencies:
@@ -1729,15 +1729,15 @@ snapshots:
     dependencies:
       better-sqlite3: 11.10.0
 
-  '@qpjoy/mx-launcher-core@2.0.0': {}
+  '@qpjoy/mx-launcher-core@2.2.0': {}
 
-  '@qpjoy/mx-launcher-embed-sdk@2.0.0':
+  '@qpjoy/mx-launcher-embed-sdk@2.2.0':
     dependencies:
-      '@qpjoy/mx-launcher-core': 2.0.0
+      '@qpjoy/mx-launcher-core': 2.2.0
 
-  '@qpjoy/mx-launcher-standalone@2.0.0':
+  '@qpjoy/mx-launcher-standalone@2.2.0':
     dependencies:
-      '@qpjoy/mx-launcher-core': 2.0.0
+      '@qpjoy/mx-launcher-core': 2.2.0
 
   '@sindresorhus/is@4.6.0': {}
 
