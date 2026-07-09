@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-launcher",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Product-facing Electron Launcher client for MX Launcher release, update, rollout, AppCenter, and network integration.",
   "type": "module",
   "main": "dist/index.js",
@@ -51,9 +51,9 @@
   },
   "dependencies": {
     "@qpjoy/electron-core-wireguard": "workspace:^",
-    "@qpjoy/mx-launcher-core": "workspace:*",
-    "@qpjoy/mx-launcher-embed-sdk": "workspace:*",
-    "@qpjoy/mx-launcher-standalone": "workspace:*"
+    "@qpjoy/mx-launcher-core": "workspace:^",
+    "@qpjoy/mx-launcher-embed-sdk": "workspace:^",
+    "@qpjoy/mx-launcher-standalone": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",

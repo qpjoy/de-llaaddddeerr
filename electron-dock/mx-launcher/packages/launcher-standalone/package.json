@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/mx-launcher-standalone",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Standalone MX Launcher shell adapter that uses launcher-core for AppCenter-wide network control.",
   "type": "module",
   "main": "dist/index.js",
@@ -25,7 +25,7 @@
     "prepack": "pnpm build"
   },
   "dependencies": {
-    "@qpjoy/mx-launcher-core": "workspace:*"
+    "@qpjoy/mx-launcher-core": "workspace:^"
   },
   "devDependencies": {
     "typescript": "^5.7.3"
