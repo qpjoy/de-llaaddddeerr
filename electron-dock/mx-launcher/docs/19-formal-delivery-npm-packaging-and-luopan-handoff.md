@@ -88,6 +88,23 @@ materialization 规则）、[17-mx-h2i-release-center-update-system.md](17-mx-h2
   5%→20%→100% 扩量 sticky 单调、gate blocked、平台过滤、签名校验、客户端新旧路径。
   剩余（P4 收尾项）：Admin UI 的"目标（全部/指定用户）+ release notes"表单（6.0 概念收敛）、
   签名的客户端校验（需分发验签密钥）、renderer 侧展示 releaseNotes。
+- P4 收尾完成（2026-07-09，包已发 2.2.0）：Admin Release Center 的 Upload version 抽屉即
+  三概念表单——版本/Current/Channel + **目标与发布说明**（目标用户/目标安装留空 = 全部用户，
+  逗号分隔可只填 1 个；功能开关；Release notes textarea）；plan 抽屉 Rollout 区展示 Target
+  （"全部用户"或"指定：N 个用户"）和 notes 原文。部署零配置：`MX_RELEASE_DECISION_SECRET`
+  未设置时服务端首次使用自动生成 64 hex 密钥并持久化在 artifact store 的
+  `decision-secret.json`（0600），env 设置则优先。已对真实 server 跑通端到端：Admin 表单体
+  建 targeted plan（notes+audience 落库）→ 被圈中用户 check 得 update-available
+  （matchedBy=target-list、带 notes/flags/签名）→ 未圈中用户 up-to-date → 密钥文件自动生成。
+  仍待做：决策签名的客户端验签、renderer 更新弹窗渲染 notes。
+- P5 接线完成（2026-07-09）：mx-h2i 的 electron-builder 签名/公证配置原已就绪（env 驱动），
+  luopan 的 quasar builder 配置补齐到同等（hardenedRuntime + entitlements + env 驱动
+  notarize + win signAndEditExecutable），运维步骤见 §7.1——Windows 配 `CSC_LINK` +
+  `CSC_KEY_PASSWORD`（内部分发用内部 CA 即可，暂不需要买证书），macOS 需要 Apple
+  Developer Program（$99/年）后配 `APPLE_ID`+`APPLE_APP_SPECIFIC_PASSWORD`+`APPLE_TEAM_ID`。
+  mx-h2i 更新面板已渲染 releaseNotes 和 Matched by（指定用户/灰度命中 bucket/全部用户）。
+  P5 剩余：拿到 Apple 账号后跑一次真机公证验收（§7.1 第 4 步）；决策签名客户端验签
+  （需转非对称密钥再做）。
 
 ## 1. npm 发布规划
 
@@ -372,6 +389,41 @@ bucket = sha256(releaseSeriesKey + ":" + installId) 的前 8 hex → uint32 % 10
 | 验收 | 干净机安装→游客连接→一次提权→重启不再 UAC | 干净机安装→Gatekeeper 无警告→一次授权 |
 
 灰度/更新的平台差异只体现在 artifact 的 `platform` 字段和激活方式，决策逻辑平台无关。
+
+### 7.1 签名/公证运维指南（P5 落地步骤）
+
+**先分清两件事**：包签名（SmartScreen/Gatekeeper/防篡改）和 UAC 弹窗显示是两回事。当前
+Windows 提权走隐藏 RunAs 拉起 `powershell.exe`，UAC 显示"Windows PowerShell / Microsoft"
+——这是借微软的签名，包签名不改变它；想让 UAC 显示产品名需要自带签名的 helper exe
+（doc 00 Phase 1 的 `MxService.exe`，P5 之后的独立事项）。
+
+**Windows（electron-builder 管线已就绪，配 env 即生效）**：
+
+- 触发方式：设置 `CSC_LINK`（.pfx 路径或 base64）+ `CSC_KEY_PASSWORD`，`make:win` 会自动签
+  所有 exe/dll（当前日志里的 `signing is skipped cscInfo=null` 就会消失）。
+- 证书选择：
+  - **内部分发（当前阶段推荐）**：内部 CA / 自签代码签名证书 + 组策略/手动分发根证书，
+    零成本。正式渠道走 Release Center 更新器下载（Node http 不写 Mark-of-the-Web），
+    SmartScreen 不触发；只有首次通过浏览器/IM 传包才可能弹，且首装本就走人工交付。
+  - **对外公开分发**：OV 代码签名（年费低、SmartScreen 信誉需积累）或 EV / Azure Trusted
+    Signing（即时信誉）。等 Luopan 面向外部用户时再买。
+
+**macOS（配置已就绪，需要 Apple Developer Program $99/年，绕不开）**：
+
+1. 公司主体注册 Apple Developer Program，创建 **Developer ID Application** 证书装入构建机
+   钥匙串（一个账号覆盖 mx-h2i 和 luopan）。
+2. 生成 App 专用密码，构建时设置 `APPLE_ID` + `APPLE_APP_SPECIFIC_PASSWORD` +
+   `APPLE_TEAM_ID`（或 App Store Connect API key 三件套）。
+3. `make:mac:dmg` 自动完成 codesign（hardened runtime + entitlements）→ notarytool 提交
+   → staple。两个 demo 的 electron-builder 配置都已按此接好（env 缺省时跳过，纯本地构建
+   不受影响）。
+4. 验收：干净 Mac 从浏览器下载 DMG，直接双击打开无 Gatekeeper 警告；
+   `spctl -a -vv MX-H2I.app` 显示 `accepted / Notarized Developer ID`。
+   未公证的包用户必须右键打开或 `xattr -d com.apple.quarantine` 绕过——首装体验不可接受，
+   所以 macOS 这 $99 是必须花的。
+
+热更 artifact（renderer/config/npm dist）由更新器下载，不带 quarantine/MOTW，不需要
+逐个公证；完整性由 Release Center 的 sha256 + 决策签名保障。
 
 ## 8. 阶段计划
 

@@ -2721,3 +2721,27 @@ button:disabled {
     justify-content: flex-start;
   }
 }
+
+.update-release-notes {
+  margin-top: 10px;
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted, #9aa3b2);
+  font-weight: 700;
+}
+
+.update-release-notes pre {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.35);
+  color: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow-y: auto;
+}

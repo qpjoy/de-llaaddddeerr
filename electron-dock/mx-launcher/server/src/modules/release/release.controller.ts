@@ -1,6 +1,6 @@
-import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { request as httpRequest } from 'node:http';
@@ -298,8 +298,35 @@ function releaseCheckComponents(body: Record<string, unknown>): Record<string, s
   return components;
 }
 
+// Decision-signing secret: MX_RELEASE_DECISION_SECRET wins when set; otherwise
+// a random secret is generated once and persisted next to the artifact store,
+// so a default deployment signs decisions without any extra configuration.
+let cachedDecisionSecret: string | null = null;
+
 function releaseDecisionSecret(): string {
-  return nullableString(process.env.MX_RELEASE_DECISION_SECRET) ?? 'mx-release-decision-dev-secret';
+  const fromEnv = nullableString(process.env.MX_RELEASE_DECISION_SECRET);
+  if (fromEnv) return fromEnv;
+  if (cachedDecisionSecret) return cachedDecisionSecret;
+  const secretPath = resolve(releaseArtifactStoreDir(), 'decision-secret.json');
+  try {
+    const stored = nullableString((JSON.parse(readFileSync(secretPath, 'utf8')) as Record<string, unknown>).secret as string);
+    if (stored) {
+      cachedDecisionSecret = stored;
+      return stored;
+    }
+  } catch {
+    // First run or unreadable file: generate below.
+  }
+  const generated = randomBytes(32).toString('hex');
+  try {
+    mkdirSync(releaseArtifactStoreDir(), { recursive: true });
+    writeFileSync(secretPath, `${JSON.stringify({ secret: generated, createdAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
+  } catch {
+    // Persisting failed (read-only fs): keep the in-memory secret; decisions
+    // stay signed for this process lifetime.
+  }
+  cachedDecisionSecret = generated;
+  return generated;
 }
 
 // The full plans list leaks unreleased versions and rollout intent; once

@@ -6587,11 +6587,18 @@ function renderReleaseCenterDrawer() {
             <strong>Rollout and gate</strong>
           </div>
           <div class="release-rollout-grid">
+            ${renderReleaseDrawerMetric('Target', releasePlanTargetLabel(plan), releasePlanTargetDetail(plan))}
             ${renderReleaseDrawerMetric('Strategy', `${plan.rollout?.strategy || 'gray'} ${plan.rollout?.percentage ?? 10}%`, plan.rollout?.segmentId || 'default segment')}
             ${renderReleaseDrawerMetric('Rings', asArray(plan.rollout?.rings).join(' / ') || 'internal-dogfood / canary / stable', 'future gray rollout')}
             ${renderReleaseDrawerMetric('E2E', plan.test?.gate?.verdict || 'blocked', plan.test?.gate?.reason || plan.test?.suiteId || 'release gate')}
             ${renderReleaseDrawerMetric('Metric gate', plan.rollout?.canaryMetricGate || 'release.e2e.passed', 'auto promote guard')}
           </div>
+          ${plan.releaseNotes ? `
+            <div class="release-notes-view">
+              <span>Release notes</span>
+              <pre>${escapeHtml(plan.releaseNotes)}</pre>
+            </div>
+          ` : ''}
         </section>
         <section class="app-drawer-section">
           <div class="app-section-title">
@@ -6708,6 +6715,30 @@ function renderReleaseUploadDrawer() {
           </div>
         </section>
         <section class="app-drawer-section">
+          <div class="app-section-title">
+            <span>03</span>
+            <strong>目标与发布说明</strong>
+          </div>
+          <div class="release-upload-grid">
+            <label>
+              <span>目标用户</span>
+              <input name="targetUserIds" value="${escapeHtml(draft.targetUserIds || '')}" autocomplete="off" placeholder="留空 = 全部用户；userId 逗号分隔，可只填 1 个" />
+            </label>
+            <label>
+              <span>目标安装（高级）</span>
+              <input name="targetInstallIds" value="${escapeHtml(draft.targetInstallIds || '')}" autocomplete="off" placeholder="installId 逗号分隔" />
+            </label>
+            <label>
+              <span>功能开关（高级）</span>
+              <input name="featureKeys" value="${escapeHtml(draft.featureKeys || '')}" autocomplete="off" placeholder="feature key 逗号分隔" />
+            </label>
+          </div>
+          <label class="release-notes-field">
+            <span>Release notes</span>
+            <textarea name="releaseNotes" rows="4" placeholder="更新说明（Markdown），客户端更新弹窗原文展示">${escapeHtml(draft.releaseNotes || '')}</textarea>
+          </label>
+        </section>
+        <section class="app-drawer-section">
           <div class="release-strategy-strip">
             ${renderReleaseStrategyFact('Default storage', 'OSS direct', 'requires server-side MX_RELEASE_OSS_* secrets')}
             ${renderReleaseStrategyFact('Fallback', 'Internal server', 'stores under artifacts/release-center')}
@@ -6723,6 +6754,24 @@ function renderReleaseUploadDrawer() {
     </form>
   `;
   bindReleaseDrawerControls();
+}
+
+function releasePlanTargetLabel(plan) {
+  const audience = plan.rollout?.audience || {};
+  const users = asArray(audience.userIds);
+  const installs = asArray(audience.installIds);
+  if (!users.length && !installs.length) return '全部用户';
+  const parts = [];
+  if (users.length) parts.push(`${users.length} 个用户`);
+  if (installs.length) parts.push(`${installs.length} 个安装`);
+  return `指定：${parts.join(' + ')}`;
+}
+
+function releasePlanTargetDetail(plan) {
+  const audience = plan.rollout?.audience || {};
+  const ids = [...asArray(audience.userIds), ...asArray(audience.installIds)];
+  if (!ids.length) return '按 percentage/ring 灰度';
+  return ids.slice(0, 3).join(', ') + (ids.length > 3 ? ` 等 ${ids.length} 个` : '');
 }
 
 function renderReleaseDrawerMetric(label, value, detail) {
@@ -6861,6 +6910,10 @@ function releaseUploadInputFromForm(form, file) {
   const channel = form.elements.channel?.value || 'stable';
   const storage = form.elements.storage?.value || 'oss';
   const e2eResult = form.elements.e2eResult?.value || 'running';
+  const targetUserIds = commaList(form.elements.targetUserIds?.value);
+  const targetInstallIds = commaList(form.elements.targetInstallIds?.value);
+  const featureKeys = commaList(form.elements.featureKeys?.value);
+  const releaseNotes = form.elements.releaseNotes?.value?.trim() || null;
   const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const suffix = String(Date.now()).slice(-6);
   const releaseId = kind === 'hot'
@@ -6878,8 +6931,19 @@ function releaseUploadInputFromForm(form, file) {
     currentVersion,
     channel,
     storage,
-    e2eResult
+    e2eResult,
+    targetUserIds,
+    targetInstallIds,
+    featureKeys,
+    releaseNotes
   };
+}
+
+function commaList(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 async function uploadReleaseArtifactFile(input, file) {
@@ -6937,6 +7001,10 @@ function releasePlanBodyFromUpload(input, artifact) {
         rolloutStrategy: 'manual-ring',
         rolloutPercentage: 0,
         rolloutRings: ['internal-dogfood', 'stable'],
+        targetUserIds: input.targetUserIds,
+        targetInstallIds: input.targetInstallIds,
+        featureKeys: input.featureKeys,
+        releaseNotes: input.releaseNotes,
         suiteId: 'mx-h2i-installer-release',
         topology: 'h-d-i-installer-release',
         sites: ['internal-main', 'domestic-main'],
@@ -6967,7 +7035,10 @@ function releasePlanBodyFromUpload(input, artifact) {
         rolloutStrategy: 'gray',
         rolloutPercentage: 10,
         rolloutRings: ['internal-dogfood', 'canary', 'stable'],
-        featureKeys: ['mx-h2i.release.hot-update'],
+        featureKeys: input.featureKeys?.length ? input.featureKeys : ['mx-h2i.release.hot-update'],
+        targetUserIds: input.targetUserIds,
+        targetInstallIds: input.targetInstallIds,
+        releaseNotes: input.releaseNotes,
         suiteId: 'mx-h2i-hot-release',
         topology: 'h-d-i-hot-release',
         sites: ['internal-main', 'domestic-main'],

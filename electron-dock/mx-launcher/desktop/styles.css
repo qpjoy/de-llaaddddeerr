@@ -6258,3 +6258,46 @@ select {
     grid-template-columns: 1fr;
   }
 }
+
+.release-notes-field {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.release-notes-field textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--mx-bg-input);
+  color: var(--mx-text-soft);
+  font: inherit;
+  font-weight: 500;
+}
+
+.release-notes-view {
+  margin-top: 12px;
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.release-notes-view pre {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--mx-bg-input);
+  color: var(--mx-text-soft);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

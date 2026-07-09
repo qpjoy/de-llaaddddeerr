@@ -3011,7 +3011,14 @@ function renderUpdatePanel() {
         ${metric('Artifact', update.artifactKind || update.componentKind)}
         ${metric('Platform', update.artifactPlatform || '-')}
         ${metric('Activation', update.activation || (update.majorUpdateRequiresInstaller ? 'installer-manual' : update.hotUpdateAuto ? 'hot-auto' : '-'))}
+        ${metric('Matched by', rolloutMatchedByLabel(update))}
       </div>
+      ${update.releaseNotes ? `
+        <div class="update-release-notes">
+          <span>Release notes</span>
+          <pre>${escapeHtml(update.releaseNotes)}</pre>
+        </div>
+      ` : ''}
       <div class="update-actions">
         ${renderCheckUpdatesButton('secondary-button')}
         <button class="primary-button" type="button" data-action="applyUpdate" ${applyDisabled ? 'disabled' : ''}>${escapeHtml(actionLabel)}</button>
@@ -3027,6 +3034,17 @@ function renderUpdatePanel() {
 
 function metric(label, value) {
   return `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || '-')}</strong></div>`;
+}
+
+// docs/19 §6: the decision explains why this install did (not) receive the
+// release, so the panel can answer "为什么我(没)拿到这个版本".
+function rolloutMatchedByLabel(update) {
+  if (update.rolloutMatchedBy === 'target-list') return '指定用户/安装';
+  if (update.rolloutMatchedBy === 'percentage') {
+    return Number.isFinite(update.rolloutBucket) ? `灰度命中（bucket ${update.rolloutBucket}）` : '灰度命中';
+  }
+  if (update.rolloutMatchedBy === 'all') return '全部用户';
+  return '-';
 }
 
 function pathLabel(value) {
