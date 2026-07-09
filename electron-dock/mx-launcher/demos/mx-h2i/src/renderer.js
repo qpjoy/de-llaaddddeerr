@@ -2347,9 +2347,11 @@ function normalizeH2oModeUi(value) {
 
 function normalizeH2oSubscriptions(value, activeSeed) {
   const rows = Array.isArray(value) ? value : [];
-  const subscriptions = rows.map((item) => normalizeH2oSubscription(item)).filter(Boolean);
+  const subscriptions = rows
+    .map((item) => normalizeH2oSubscription(item))
+    .filter((item) => item && !h2oShouldDropSubscription(item));
   const active = normalizeH2oSubscription(activeSeed);
-  if (!subscriptions.some((item) => item.id === active.id)) subscriptions.unshift(active);
+  if (!h2oShouldDropSubscription(active) && !subscriptions.some((item) => item.id === active.id)) subscriptions.unshift(active);
   if (!subscriptions.some((item) => item.id === 'h2o-default')) {
     subscriptions.unshift(normalizeH2oSubscription({
       id: 'h2o-default',
@@ -2362,20 +2364,6 @@ function normalizeH2oSubscriptions(value, activeSeed) {
       requiresUser: true,
       syncStatus: isUserIdentity() ? 'missing-entitlement' : 'login-required',
       errorMessage: isUserIdentity() ? '当前用户还没有可用的系统 oversea 订阅。' : '系统 oversea 订阅需要先登录员工用户。'
-    }));
-  }
-  if (!subscriptions.some((item) => item.id === 'h2o-oversea-backup')) {
-    subscriptions.push(normalizeH2oSubscription({
-      id: 'h2o-oversea-backup',
-      name: 'System Oversea 备用订阅',
-      url: 'mx-h2i://managed/home-to-oversea-backup',
-      nodes: 3,
-      latencyMs: 58,
-      status: isUserIdentity() ? 'pending' : 'login-required',
-      source: 'internal',
-      requiresUser: true,
-      syncStatus: isUserIdentity() ? 'missing-entitlement' : 'login-required',
-      errorMessage: isUserIdentity() ? '当前用户还没有可用的备用 oversea 订阅。' : '系统 oversea 订阅需要先登录员工用户。'
     }));
   }
   return orderH2oSubscriptions(subscriptions).slice(0, 12);
@@ -2425,6 +2413,10 @@ function h2oIsManagedSubscriptionIdUi(id) {
   return text === 'h2o-default'
     || text === 'h2o-oversea-backup'
     || /^h2o-oversea-/i.test(text);
+}
+
+function h2oShouldDropSubscription(item) {
+  return String(item?.id || '') === 'h2o-oversea-backup';
 }
 
 function orderH2oSubscriptions(subscriptions) {
@@ -2852,8 +2844,7 @@ function appVisibleErrorMessage(app) {
 
 function h2oHasIdleProxyError(app) {
   if (app?.appId !== 'h2o' || !app.errorMessage) return false;
-  const runtime = h2oRuntime(app);
-  return runtime.running !== true && /mixed-port|未监听|proxy-unavailable|H2O mihomo 恢复失败/i.test(String(app.errorMessage || ''));
+  return /mixed-port|未监听|proxy-unavailable|H2O mihomo 恢复失败/i.test(String(app.errorMessage || ''));
 }
 
 function appPrimaryAction(app, connected) {
@@ -3236,8 +3227,7 @@ function createMockApi() {
           adminUrl: 'http://127.0.0.1:23456',
           ports: { admin: 23456, controller: 23457, mixed: 23458, dns: 1053 },
           subscriptions: [
-            { id: 'h2o-default', name: 'System Oversea 默认订阅', url: 'mx-h2i://managed/home-to-oversea', nodes: 6, latencyMs: 42, status: 'login-required', source: 'internal', requiresUser: true, lastUpdatedAt: new Date().toISOString() },
-            { id: 'h2o-oversea-backup', name: 'System Oversea 备用订阅', url: 'mx-h2i://managed/home-to-oversea-backup', nodes: 3, latencyMs: 58, status: 'login-required', source: 'internal', requiresUser: true, lastUpdatedAt: new Date().toISOString() }
+            { id: 'h2o-default', name: 'System Oversea 默认订阅', url: 'mx-h2i://managed/home-to-oversea', nodes: 6, latencyMs: 42, status: 'login-required', source: 'internal', requiresUser: true, lastUpdatedAt: new Date().toISOString() }
           ],
           activeSubscriptionId: 'h2o-default',
           activeSubscription: {

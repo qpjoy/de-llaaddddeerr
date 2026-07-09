@@ -3662,9 +3662,11 @@ function h2oPluginRuntime(input) {
 
 function normalizeH2oSubscriptions(value, activeSubscription) {
   const rows = Array.isArray(value) ? value : [];
-  const normalized = rows.map((item) => normalizeH2oSubscription(item, {})).filter(Boolean);
+  const normalized = rows
+    .map((item) => normalizeH2oSubscription(item, {}))
+    .filter((item) => item && !h2oShouldDropSubscription(item));
   const active = normalizeH2oSubscription(activeSubscription, {});
-  if (!normalized.some((item) => item.id === active.id)) normalized.unshift(active);
+  if (!h2oShouldDropSubscription(active) && !normalized.some((item) => item.id === active.id)) normalized.unshift(active);
   if (!normalized.some((item) => item.id === 'h2o-default')) {
     normalized.unshift(normalizeH2oSubscription({
       id: 'h2o-default',
@@ -3677,20 +3679,6 @@ function normalizeH2oSubscriptions(value, activeSubscription) {
       requiresUser: true,
       syncStatus: runtimeHasUserIdentity() ? 'missing-entitlement' : 'login-required',
       errorMessage: runtimeHasUserIdentity() ? '当前用户还没有可用的系统 oversea 订阅。' : '系统 oversea 订阅需要先登录员工用户。'
-    }, {}));
-  }
-  if (!normalized.some((item) => item.id === 'h2o-oversea-backup')) {
-    normalized.push(normalizeH2oSubscription({
-      id: 'h2o-oversea-backup',
-      name: 'System Oversea 备用订阅',
-      url: 'mx-h2i://managed/home-to-oversea-backup',
-      nodes: 3,
-      latencyMs: 58,
-      status: runtimeHasUserIdentity() ? 'pending' : 'login-required',
-      source: 'internal',
-      requiresUser: true,
-      syncStatus: runtimeHasUserIdentity() ? 'missing-entitlement' : 'login-required',
-      errorMessage: runtimeHasUserIdentity() ? '当前用户还没有可用的备用 oversea 订阅。' : '系统 oversea 订阅需要先登录员工用户。'
     }, {}));
   }
   return orderH2oSubscriptions(normalized).slice(0, 12);
@@ -5749,6 +5737,10 @@ function h2oIsManagedSubscriptionId(id) {
   return text === 'h2o-default'
     || text === 'h2o-oversea-backup'
     || /^h2o-oversea-/i.test(text || '');
+}
+
+function h2oShouldDropSubscription(item) {
+  return nullableString(item?.id) === 'h2o-oversea-backup';
 }
 
 function h2oLooksLikeExternalSubscriptionUrl(url) {
