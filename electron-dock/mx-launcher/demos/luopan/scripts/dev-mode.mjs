@@ -13,5 +13,5 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const shared = resolve(here, '..', '..', '..', 'scripts', 'dev-mode.mjs');
 const mode = process.argv[2] || 'local';
-const result = spawnSync(process.execPath, [shared, mode, '--app', 'demos/mx-h2i'], { stdio: 'inherit' });
+const result = spawnSync(process.execPath, [shared, mode, '--app', 'demos/luopan'], { stdio: 'inherit' });
 process.exit(result.status ?? 1);

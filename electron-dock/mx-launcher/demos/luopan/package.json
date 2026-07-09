@@ -7,6 +7,8 @@
   "author": "QPJoy",
   "description": "Luopan Quasar Electron demo that consumes MX Launcher as a product-facing npm package.",
   "scripts": {
+    "setup": "node scripts/dev-mode.mjs local",
+    "setup:npm": "node scripts/dev-mode.mjs npm",
     "dev": "quasar dev -m electron",
     "start": "pnpm dev",
     "typecheck": "vue-tsc --noEmit -p tsconfig.json",

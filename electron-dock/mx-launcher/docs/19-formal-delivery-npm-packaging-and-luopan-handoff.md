@@ -35,6 +35,19 @@ materialization 规则）、[17-mx-h2i-release-center-update-system.md](17-mx-h2
       AppCenter host 等应下沉到包的平台逻辑 | Luopan 会被迫复制粘贴 main.cjs，两边行为漂移 |
 | G7 | Windows 签名 / macOS 公证在 CI 中未闭环 | 外发包触发 SmartScreen/Gatekeeper，手动分发无法消除 |
 
+状态更新（2026-07-09）：
+
+- G1 基本解决：`mx-launcher-core / -embed-sdk / -standalone / electron-launcher` 已以 0.2.0 lockstep
+  发布到 npmjs（`workspace:^` 改写验证通过）。组内剩余 `@qpjoy/ui-design-neon-void` 和
+  `@qpjoy/electron-launcher-app-h2o` 未发布，阻塞 luopan 的 npm 模式。
+- G2 已解决：共享 `scripts/dev-mode.mjs` 支持 `local|npm|ensure` 三模式；mx-h2i 在 npm 模式下
+  从 registry 安装并用 electron-builder 打出 win-unpacked 验证通过；demo 的 `package/make*`
+  改用 `ensure`，不再在打包时悄悄切回 local。npm 模式会在 demo 目录生成独立的
+  `pnpm-workspace.yaml`（承载 pnpm 11 的 `allowBuilds` 审批）和本地 lockfile，切回 local 时清理。
+- 发布入口：`scripts/manage.sh prepare-mx-h2i`（统一 bump 版本 → build → pack 预览 → 一个 OTP
+  发布全组，已发布版本自动跳过）；`electron-dock/mx-launcher/scripts/publish-packages.mjs` 是
+  CI 侧非交互路径（默认 dry-run，`--publish` 才真发）。
+
 ## 1. npm 发布规划
 
 ### 1.1 Registry 与 scope

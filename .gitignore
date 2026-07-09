@@ -56,3 +56,8 @@ electron-dock/mx-launcher/demos/mx-h2i/.env
 electron-dock/mx-launcher/site-slots/domestic/qp-tunnel-cli/refresh-metadata.json
 
 deploy-demo/
+
+# MX Launcher demo dev-mode (local|npm) switch state
+electron-dock/mx-launcher/demos/*/.dev-mode.json
+electron-dock/mx-launcher/demos/*/pnpm-lock.yaml
+electron-dock/mx-launcher/demos/*/pnpm-workspace.yaml

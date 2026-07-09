@@ -692,24 +692,38 @@ EOF
   echo
   echo "${C_DIM}发布完成后，Internal/AppCenter 可以用这些 packageName + version 写入 catalog、灰度和安装缓存。${C_RESET}"
 
-  local publish_choice publish_otp
+  local publish_choice publish_otp local_v npm_v
   if [ -t 0 ]; then
-    read -r -p "现在逐包输入 OTP 并发布全部？[y/N] " publish_choice
+    read -r -p "现在一起发布全组？[y/N] " publish_choice
   else
     publish_choice=""
   fi
   case "$publish_choice" in
     y|Y|yes|YES)
-      for row in "${rows[@]}"; do
-        name=$(pkg_field "$row" 1)
-        path=$(pkg_field "$row" 2)
-        publish_otp="$(prompt_secret "npm OTP for $name（回车 = 跳过此包）: ")"
-        if [ -z "$publish_otp" ]; then
-          warn "已跳过发布: $name"
-          continue
-        fi
-        publish_one_with_otp "$name" "$path" "$publish_otp" || warn "发布失败或跳过: $name"
-      done
+      publish_otp="$(prompt_secret "npm OTP（全组共用一个，回车 = 取消自动发布）: ")"
+      if [ -z "$publish_otp" ]; then
+        warn "未输入 OTP，已跳过自动发布，保留上面的手动发布命令。"
+      else
+        for row in "${rows[@]}"; do
+          name=$(pkg_field "$row" 1)
+          path=$(pkg_field "$row" 2)
+          local_v=$(pkg_local_version "$path")
+          npm_v=$(pkg_npm_version "$name")
+          if [ -n "$local_v" ] && [ "$npm_v" = "$local_v" ]; then
+            say "跳过 $name@$local_v：registry 已有同版本"
+            continue
+          fi
+          if publish_one_with_otp "$name" "$path" "$publish_otp"; then
+            continue
+          fi
+          publish_otp="$(prompt_secret "OTP 可能已过期，重新输入以重试 $name（回车 = 停止自动发布）: ")"
+          if [ -z "$publish_otp" ]; then
+            warn "已停止自动发布；剩余包用上面的手动发布命令。"
+            break
+          fi
+          publish_one_with_otp "$name" "$path" "$publish_otp" || warn "发布失败: $name"
+        done
+      fi
       ;;
     *)
       echo "${C_DIM}已跳过自动发布，保留上面的手动发布命令。${C_RESET}"
