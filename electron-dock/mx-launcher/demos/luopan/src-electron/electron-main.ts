@@ -156,7 +156,10 @@ function defaultConfig(): RuntimeConfig {
     baseUrl: normalizeBaseUrl(process.env.LUOPAN_LAUNCHER_BASE_URL || process.env.MX_LAUNCHER_BASE_URL || 'http://10.88.100.3:18090'),
     productId: 'luopan',
     mode: 'standalone',
-    sdkTestMode: booleanish(process.env.LUOPAN_SDK_TEST_MODE, true),
+    // Registered mode by default: the lease request must pass the server-side
+    // ProductNetwork + AppCenter entitlement gate. SDK test mode bypasses that
+    // gate and only works when the server enables it — dev opt-in via env.
+    sdkTestMode: booleanish(process.env.LUOPAN_SDK_TEST_MODE, false),
     deviceLabel: process.env.LUOPAN_DEVICE_LABEL?.trim() || 'Luopan Quasar Demo'
   };
 }
@@ -588,105 +591,26 @@ function registerIpc(): void {
     return visibleRuntime();
   });
   ipcMain.handle('luopan:connect-test-mode', async () => {
-    const state = requireRuntime();
-    await setConnection({
-      status: 'connecting',
-      message: state.config.sdkTestMode
-        ? 'Requesting Launcher Network lease in SDK test mode.'
-        : 'Requesting registered Luopan Launcher Network lease.'
-    });
-    pushEvent('lease request started');
-    try {
-      const session = await launcherClient().connectNetwork({
-        identityKind: 'anonymous',
-        platform: 'quasar-electron',
-        sdkTestMode: state.config.sdkTestMode,
-        requestedBy: 'luopan-quasar-demo',
-        requestId: `luopan-${Date.now()}`
-      });
-      activeSession = session;
-      await applySession(session);
-      pushEvent(`lease active ${session.lease.leaseIp}`);
-    } catch (error) {
-      await setConnection({
-        status: 'error',
-        message: errorMessage(error)
-      });
-      pushEvent(`lease failed ${errorMessage(error)}`);
-    }
+    await requestLuopanLease();
     await saveRuntime();
     broadcastRuntime();
     return visibleRuntime();
   });
   ipcMain.handle('luopan:apply-data-plane', async () => {
-    await setConnection({
-      status: 'connecting',
-      message: initialDataPlaneApplyMessage()
-    });
-    pushEvent('data-plane apply started');
-    try {
-      if (!activeSession) throw new Error('Request a Luopan lease before applying the local data plane.');
-      const privateKey = stringValue(activeSession.wireGuard.privateKey);
-      if (!privateKey) throw new Error('Luopan WireGuard private key is missing; request a fresh lease.');
-      if (DATA_PLANE_MODE === 'reuse') {
-        const attached = attachToSharedDataPlane(activeSession);
-        if (attached) {
-          await setConnection({
-            status: runtimeStatusForDataPlane(attached.dataPlane),
-            dataPlane: attached.dataPlane,
-            message: attached.message
-          });
-          pushEvent(`data-plane attached ${attached.reason}`);
-          return visibleRuntime();
-        }
-        const dataPlane = diagnoseSharedDataPlane(activeSession);
-        await setConnection({
-          status: runtimeStatusForDataPlane(dataPlane),
-          dataPlane,
-          message: dataPlane.message
-        });
-        pushEvent(`data-plane pending ${dataPlane.state}`);
-        return visibleRuntime();
-      }
-      await syncLeasePeers(activeSession);
-      const dataPlaneRoutePlan = luopanStandaloneDataPlaneRoutePlan(activeSession.routePlan);
-      const result = await applyElectronLauncherStandaloneDataPlane({
-        userDataDir: app.getPath('userData'),
-        profileName: 'luopan.conf',
-        routePlan: dataPlaneRoutePlan,
-        privateKey,
-        dnsDomains: [LUOPAN_DNS_ZONE],
-        suppressWireGuardDns: true,
-        requiredProbeTargets: ['lease-ip', 'service-vip'],
-        ownerId: `${PRODUCT.productId}:${requireRuntime().installId}`,
-        productId: PRODUCT.productId,
-        instanceId: requireRuntime().installId,
-        displayName: PRODUCT.displayName,
-        metadata: {
-          dataPlaneMode: 'standalone-wireguard',
-          dataPlaneOwner: true
-        },
-        dnsHosts: [LUOPAN_DNS_HOST],
-        failOnOwnershipConflicts: true,
-        allowSystemFallback: false,
-        darwinLaunchDaemon: true,
-        fallbackToAppManaged: false,
-        darwinServiceIdentity: luopanWireGuardServiceIdentity()
-      });
-      const dataPlane = withServiceVipReachability(result.diagnostics, activeSession, 'standalone-wireguard');
-      await setConnection({
-        status: runtimeStatusForDataPlane(dataPlane),
-        dataPlane,
-        message: dataPlane.ok ? result.message : dataPlane.message
-      });
-      pushEvent(result.ok && dataPlane.ok ? 'data-plane ready' : `data-plane pending ${dataPlane.state}`);
-    } catch (error) {
-      await setConnection({
-        status: 'error',
-        message: errorMessage(error)
-      });
-      pushEvent(`data-plane failed ${errorMessage(error)}`);
+    await applyLuopanDataPlane();
+    return visibleRuntime();
+  });
+  // One-click "connect into Internal": registered lease -> WG data plane ->
+  // in-tunnel service VIP reachability. Same building blocks as the two-step
+  // buttons; success means the product path to Internal is proven end to end.
+  ipcMain.handle('luopan:connect-internal', async () => {
+    const leased = await requestLuopanLease();
+    if (leased) {
+      const ready = await applyLuopanDataPlane();
+      pushEvent(ready ? 'connect internal complete' : 'connect internal pending data plane');
     }
+    await saveRuntime();
+    broadcastRuntime();
     return visibleRuntime();
   });
   ipcMain.handle('luopan:disconnect-data-plane', async () => {
@@ -861,6 +785,118 @@ function registerIpc(): void {
   ipcMain.handle('luopan:open-internal-entry', async () => {
     await shell.openExternal('http://luopan.mxinfo-inc.cn/');
   });
+}
+
+// Step 1 of connecting into Internal: enroll a lease against the registered
+// ProductNetwork (identityKind anonymous -> anonymous lease range). In
+// registered mode the server enforces the entitlement gate: ProductNetwork
+// enabled + AppCenter app `luopan` enabled with launcher-network +
+// launcher-standalone capabilities.
+async function requestLuopanLease(): Promise<boolean> {
+  const state = requireRuntime();
+  await setConnection({
+    status: 'connecting',
+    message: state.config.sdkTestMode
+      ? 'Requesting Launcher Network lease in SDK test mode.'
+      : 'Requesting registered Luopan Launcher Network lease.'
+  });
+  pushEvent('lease request started');
+  try {
+    const session = await launcherClient().connectNetwork({
+      identityKind: 'anonymous',
+      platform: 'quasar-electron',
+      sdkTestMode: state.config.sdkTestMode,
+      requestedBy: 'luopan-quasar-demo',
+      requestId: `luopan-${Date.now()}`
+    });
+    activeSession = session;
+    await applySession(session);
+    pushEvent(`lease active ${session.lease.leaseIp}`);
+    return true;
+  } catch (error) {
+    await setConnection({
+      status: 'error',
+      message: errorMessage(error)
+    });
+    pushEvent(`lease failed ${errorMessage(error)}`);
+    return false;
+  }
+}
+
+// Step 2: bring up the local WG data plane for the active lease and verify the
+// product service VIP is reachable in-tunnel. Returns true only when the data
+// plane is fully ready (routes installed + VIP healthz answered).
+async function applyLuopanDataPlane(): Promise<boolean> {
+  await setConnection({
+    status: 'connecting',
+    message: initialDataPlaneApplyMessage()
+  });
+  pushEvent('data-plane apply started');
+  try {
+    if (!activeSession) throw new Error('Request a Luopan lease before applying the local data plane.');
+    const privateKey = stringValue(activeSession.wireGuard.privateKey);
+    if (!privateKey) throw new Error('Luopan WireGuard private key is missing; request a fresh lease.');
+    if (DATA_PLANE_MODE === 'reuse') {
+      const attached = attachToSharedDataPlane(activeSession);
+      if (attached) {
+        await setConnection({
+          status: runtimeStatusForDataPlane(attached.dataPlane),
+          dataPlane: attached.dataPlane,
+          message: attached.message
+        });
+        pushEvent(`data-plane attached ${attached.reason}`);
+        return attached.dataPlane.ok;
+      }
+      const dataPlane = diagnoseSharedDataPlane(activeSession);
+      await setConnection({
+        status: runtimeStatusForDataPlane(dataPlane),
+        dataPlane,
+        message: dataPlane.message
+      });
+      pushEvent(`data-plane pending ${dataPlane.state}`);
+      return dataPlane.ok;
+    }
+    await syncLeasePeers(activeSession);
+    const dataPlaneRoutePlan = luopanStandaloneDataPlaneRoutePlan(activeSession.routePlan);
+    const result = await applyElectronLauncherStandaloneDataPlane({
+      userDataDir: app.getPath('userData'),
+      profileName: 'luopan.conf',
+      routePlan: dataPlaneRoutePlan,
+      privateKey,
+      dnsDomains: [LUOPAN_DNS_ZONE],
+      suppressWireGuardDns: true,
+      requiredProbeTargets: ['lease-ip', 'service-vip'],
+      ownerId: `${PRODUCT.productId}:${requireRuntime().installId}`,
+      productId: PRODUCT.productId,
+      instanceId: requireRuntime().installId,
+      displayName: PRODUCT.displayName,
+      metadata: {
+        dataPlaneMode: 'standalone-wireguard',
+        dataPlaneOwner: true
+      },
+      dnsHosts: [LUOPAN_DNS_HOST],
+      failOnOwnershipConflicts: true,
+      allowSystemFallback: false,
+      darwinLaunchDaemon: true,
+      fallbackToAppManaged: false,
+      darwinServiceIdentity: luopanWireGuardServiceIdentity()
+    });
+    const dataPlane = withServiceVipReachability(result.diagnostics, activeSession, 'standalone-wireguard');
+    await setConnection({
+      status: runtimeStatusForDataPlane(dataPlane),
+      dataPlane,
+      message: dataPlane.ok ? result.message : dataPlane.message
+    });
+    pushEvent(result.ok && dataPlane.ok ? 'data-plane ready' : `data-plane pending ${dataPlane.state}`);
+    return result.ok && dataPlane.ok;
+  } catch (error) {
+    await setConnection({
+      status: 'error',
+      message: errorMessage(error)
+    });
+    pushEvent(`data-plane failed ${errorMessage(error)}`);
+    return false;
+  }
 }
 
 async function applySession(session: LauncherNetworkSession): Promise<void> {

@@ -4,6 +4,7 @@ const api = {
   getRuntime: () => ipcRenderer.invoke('luopan:get-runtime'),
   saveConfig: (input: unknown) => ipcRenderer.invoke('luopan:save-config', input),
   connectTestMode: () => ipcRenderer.invoke('luopan:connect-test-mode'),
+  connectInternal: () => ipcRenderer.invoke('luopan:connect-internal'),
   applyDataPlane: () => ipcRenderer.invoke('luopan:apply-data-plane'),
   disconnectDataPlane: () => ipcRenderer.invoke('luopan:disconnect-data-plane'),
   refreshSnapshot: () => ipcRenderer.invoke('luopan:refresh-snapshot'),

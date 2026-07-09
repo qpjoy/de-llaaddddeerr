@@ -40,8 +40,10 @@
               <q-tooltip>Open MX Launcher Admin</q-tooltip>
             </q-btn>
             <q-btn outline color="primary" icon="dns" label="Internal entry" @click="openInternalEntry" />
-            <q-btn color="primary" icon="hub" :loading="connecting" label="Request lease" @click="connectTestMode" />
+            <q-btn color="positive" icon="vpn_lock" :loading="connecting" label="Connect Internal" @click="connectInternal" />
+            <q-btn outline color="primary" icon="hub" :loading="connecting" label="Request lease" @click="connectTestMode" />
             <q-btn
+              outline
               color="secondary"
               icon="lan"
               :disable="!runtime.connection.leaseIp || connecting"
@@ -213,10 +215,10 @@ const fallbackRuntime: LuopanRuntimeState = {
   installId: '-',
   deviceId: '-',
   config: {
-    baseUrl: 'http://10.88.88.88:18090',
+    baseUrl: 'http://10.88.100.3:18090',
     productId: 'luopan',
     mode: 'standalone',
-    sdkTestMode: true,
+    sdkTestMode: false,
     deviceLabel: 'Luopan Quasar Demo'
   },
   connection: {
@@ -229,6 +231,19 @@ const fallbackRuntime: LuopanRuntimeState = {
     dataPlane: null,
     message: 'Renderer fallback mode. Start with Quasar Electron to use launcher IPC.',
     updatedAt: null
+  },
+  update: {
+    status: 'idle',
+    checkedAt: null,
+    currentVersion: '0.0.0',
+    targetVersion: null,
+    releaseId: null,
+    releaseNotes: null,
+    matchedBy: null,
+    featureFlags: [],
+    artifacts: [],
+    execution: [],
+    message: 'Release Center not checked yet.'
   },
   events: []
 };
@@ -300,6 +315,16 @@ async function connectTestMode() {
   if (next) applyRuntime(next);
   if (next?.connection.status === 'error') {
     $q.notify({ type: 'negative', message: next.connection.message || 'Launcher request failed' });
+  }
+}
+
+async function connectInternal() {
+  const next = await window.luopanLauncher?.connectInternal();
+  if (next) applyRuntime(next);
+  if (next?.connection.status === 'error') {
+    $q.notify({ type: 'negative', message: next.connection.message || 'Connect Internal failed' });
+  } else if (next?.connection.status === 'network-ready') {
+    $q.notify({ type: 'positive', message: `Connected: lease ${next.connection.leaseIp}, service VIP ${next.connection.serviceVip} reachable.` });
   }
 }
 

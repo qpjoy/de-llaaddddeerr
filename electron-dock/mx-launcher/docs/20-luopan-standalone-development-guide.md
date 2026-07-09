@@ -218,8 +218,9 @@ mx-h2i 的约定，建议 Luopan 照搬（luopan demo 已具备前两条）：
 | --- | --- | --- |
 | PRODUCT 定义 | `defineLauncherProduct({ productId: 'luopan', release: { componentId: 'luopan', channel: 'shadow', ... } })`——产品身份的唯一来源，更新检查/ownership 都从这取值 | `defineLauncherProduct` |
 | runtime state | `RuntimeState`（installId/deviceId/config/connection/update/events），loadRuntime/saveRuntime/normalize 三件套 | — |
-| lease 获取 | `luopan:connect-test-mode` → `launcherClient().connectNetwork(...)` | `createElectronLauncher` |
+| lease 获取 | `luopan:connect-test-mode` → `launcherClient().connectNetwork(...)`（registered/test 模式由 `sdkTestMode` 决定，默认 registered） | `createElectronLauncher` |
 | 数据面 apply | `luopan:apply-data-plane`：standalone 模式走 `applyElectronLauncherStandaloneDataPlane`（profile `luopan.conf`、ownerId `luopan:<installId>`、`failOnOwnershipConflicts: true`）；reuse 模式（`LUOPAN_DATA_PLANE_MODE=reuse`）尝试挂到已有共享数据面 | `/standalone-data-plane` |
+| 一键连入 | `luopan:connect-internal` = lease + 数据面 + 隧道内 VIP healthz，成功即 `network-ready`（§4.5 客户端部分） | 同上 |
 | 断开 | `luopan:disconnect-data-plane` → `stopElectronLauncherStandaloneDataPlane`（只释放自己的 claim） | 同上 |
 | snapshot | `luopan:refresh-snapshot` → `createSnapshot` + `routePlanFromSnapshot` + diagnose | 主入口 |
 | **更新** | `luopan:check-updates` / `apply-update` / `open-staged-installer` / `rollback-update-slot` + 启动期簿记 | §5 逐段讲解 |
@@ -249,6 +250,90 @@ pnpm dev / build  # quasar dev / build -m electron
   `node ../../scripts/coexist-check.mjs run` 跑 C1–C12 双产品矩阵全绿
   （Windows 10/11 + macOS）。开发期建议每次动网络相关代码都跑
   `assert --product luopan --expect connected` 冒烟。
+
+### 4.5 接入 Internal 的开通流程（平台侧 + 客户端）
+
+一个新 standalone 产品从"代码能跑"到"真正连入 Internal"，服务端要过四道，客户端
+一道。Luopan 平台侧已由我们完成，此节既是记录，也是未来新产品的模板。
+
+#### 平台侧 ①：Admin 注册应用与 ProductNetwork（一次性）
+
+Admin → Apps → 新建应用，选 **Luopan 模板**（或通用 `Standalone business app`
+模板）。Save App 会一次创建：
+
+- **AppCenter app**：`appId=luopan`、`launcherMode=standalone`、
+  `productNetworkId=luopan`、`requiredCapabilities` 含
+  `launcher-network` + `launcher-standalone`、`enabled=true`。
+- **ProductNetwork**：二段位自动取下一个空闲值（跳过 88）——lease
+  `10.<octet>.0.0/16`，登录段 `.0.1–.99.254`、匿名段 `.100.1–.254.254`；
+  `serviceVip / internalControlIp / dnsServer / domesticGatewayIp` 四字段默认同一
+  个 materialized VIP（Luopan = `10.88.100.3`）。**VIP 必须唯一**，不同产品不得
+  复用（Admin 曾有默认沿用 `10.88.100.3` 的缺陷，新建其他产品时务必检查）。
+- **DNS route + gateway upstream**：`luopan.mxinfo-inc.cn` A → VIP，gateway 按
+  Host 反代到应用 targetUrl。
+
+这四样就是服务端 lease 校验链逐条检查的东西（`enrollLease` →
+`assertLauncherNetworkLeaseEntitlement`）：ProductNetwork 存在且 enabled → app
+存在且 enabled → app 绑定该 ProductNetwork 且 mode 匹配 → capabilities 齐全。
+少任何一样，客户端 enroll 会收到对应的明文错误（见下面对照表）。
+
+#### 平台侧 ②：mx-internal-svc / Domestic relay 要不要设置？
+
+**不需要手工编辑任何 WG conf，但注册后必须触发一次 reconcile。** 背景
+（docs/14）：`mx-internal-svc` 是 Internal 侧的 WG service peer interface（固定
+`10.88.88.88/32`），它生成配置里的 peer `AllowedIPs` = `10.88.0.1/32` +
+`10.88.0.0/16` + **各产品 relay CIDR**。新产品的 lease `/16` 和 VIP `/32` 不进这
+份配置，VIP 就不通。
+
+操作：Admin → 该 App 详情 → Service VIP 面板 → **Reconcile**
+（`POST /internal/v1/admin/launcher-service-vip-smokes/reconcile`）。一次完成：
+
+1. productRelayCidrs 同步：把 `10.91.0.0/16` + `10.88.100.3/32` 写进 Domestic WG
+   secret；
+2. 重新 materialize Domestic WG artifact；
+3. apply Domestic relay runtime（`mx-domestic`）；
+4. apply Internal service peer（`mx-internal-svc`）；
+5. domestic peer key sync。
+
+分步版：先点 `Sync domestic CIDRs`
+（`launcher-service-vip-smokes/domestic-product-cidrs/sync`），按返回的
+nextActions 再做 re-materialize + apply。另外跑一次
+`manage.sh ops internal-production deploy` 也会自动带出最新 productRelayCidrs
+（docs/14：不要求手工改线上配置）。
+
+#### 平台侧 ③：交付 base URL 前的三步自查
+
+1. `http://10.88.100.3:18090/healthz` 通（经隧道，从一台已连接的机器验证）；
+2. DNS：`luopan.mxinfo-inc.cn` 解析到 `10.88.100.3`；
+3. gateway 反代该域名可达应用页面。
+   工具：`node scripts/coexist-check.mjs assert --product luopan --expect connected`。
+
+#### 客户端：首连语义
+
+demo 默认 **registered 模式**（`sdkTestMode=false`），工具栏 **Connect Internal**
+一键完成：注册 lease（匿名段）→ 本机 WG 数据面 apply → 隧道内 VIP healthz 探测，
+`network-ready` 即证明产品到 Internal 的路径端到端可用。分步按钮
+（Request lease / Apply data plane）保留用于教学与排障。
+
+- **bootstrap 先有鸡还是先有蛋**：第一次 enroll 时 WG 还没起，`baseUrl` 必须是
+  当下就可达的地址——同网/LAN 直达 server，或平台提供的公网 bootstrap 代理
+  （转发 enroll/lease/snapshot，参照 mx-h2i 的 `h2i.mxinfo-inc.cn` 模式）。连上
+  之后产品流量一律走自己的 VIP。开发期用 `LUOPAN_LAUNCHER_BASE_URL` 覆盖。
+- **SDK test mode 的真实语义**：server 侧 `launcherNetworkSdkTestModeEnabled=true`
+  **且**客户端显式传 `sdkTestMode: true` 才生效，作用是跳过 ProductNetwork/App
+  注册校验（服务端现场造一个临时 product）。只用于未注册环境的本地开发；生产
+  Internal 不开这个开关，正式构建禁止出现 `LUOPAN_SDK_TEST_MODE`。
+
+#### enroll 常见错误对照
+
+| 客户端报错 | 缺的东西 |
+| --- | --- |
+| `Launcher product luopan is not registered` | ProductNetwork 未创建（或 productId 拼错） |
+| `Launcher product/channel ... is disabled` | ProductNetwork `enabled=false` |
+| `Launcher app luopan is not registered in AppCenter` | AppCenter app 未创建 |
+| `Launcher app ... lacks required capabilities: ...` | app 的 requiredCapabilities 缺 `launcher-network` / `launcher-standalone` |
+| `Launcher app ... is bound to X, not luopan` | app 的 productNetworkId 绑错 |
+| lease 拿到了但 VIP healthz 不通 | 平台侧 ② 的 reconcile 没跑（mx-internal-svc / Domestic 配置里没有产品 CIDR），或本机数据面 apply 失败（看 dataPlane probes） |
 
 ## 5. 更新执行器接线逐段讲解
 

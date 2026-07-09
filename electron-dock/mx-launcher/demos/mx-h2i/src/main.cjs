@@ -2034,7 +2034,10 @@ function windowsNrptResolutionHint(windowsNrpt) {
 async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
   const connected = runtime?.connection?.state === 'connected';
   const before = await collectNetworkEnvironmentDiagnostics(`${reason}-before`);
-  const endpointRouteRepair = await repairDarwinStaleEndpointRoutesForRuntime(reason, { force: true });
+  // User-triggered repair: allow one macOS admin prompt to delete stale
+  // endpoint routes (route delete needs root). Background recovery paths keep
+  // allowPrivileged off so no surprise auth dialogs appear.
+  const endpointRouteRepair = await repairDarwinStaleEndpointRoutesForRuntime(reason, { force: true, allowPrivileged: true });
   let systemDomainProxy = null;
   if (connected) {
     systemDomainProxy = await ensureSystemDomainProxyForRuntime(reason);
@@ -2217,18 +2220,71 @@ async function repairDarwinStaleEndpointRoutesForRuntime(reason = 'manual', opti
         staleReason: route.staleReason
       },
       ...repair,
+      requiresPrivilege: repair.ok !== true && arrayValue(repair.failures, []).some((failure) => failure?.requiresPrivilege === true),
       after,
       updatedAt: nowIso()
     });
   }
+  // `route delete` needs root; the unprivileged attempt above almost always
+  // fails with EPERM. For user-triggered repairs we escalate once via the
+  // macOS admin prompt and delete every stale route in a single batch.
+  let privilegedEscalation = null;
+  if (options.allowPrivileged === true) {
+    const candidates = repairs.filter((repair) => repair.ok !== true && repair.requiresPrivilege === true && repair.target?.address);
+    if (candidates.length > 0) {
+      privilegedEscalation = await deleteDarwinHostRoutesPrivileged(candidates.map((repair) => repair.target.address));
+      for (const repair of candidates) {
+        if (privilegedEscalation.ok !== true) {
+          repair.privilegedError = privilegedEscalation.error;
+          continue;
+        }
+        const afterRoute = await darwinRouteGet(repair.target.address);
+        const afterClassification = classifyDarwinEndpointRoute(afterRoute, diagnostics.defaultRoute);
+        repair.ok = true;
+        repair.privileged = true;
+        repair.after = {
+          ok: afterRoute.ok === true,
+          gateway: afterRoute.gateway || null,
+          interfaceName: afterRoute.interfaceName || null,
+          flags: arrayValue(afterRoute.flags, []),
+          stale: afterClassification.stale,
+          staleReason: afterClassification.reason,
+          error: afterRoute.error || null
+        };
+        repair.updatedAt = nowIso();
+      }
+    }
+  }
   return {
     ...diagnostics,
     repairs,
+    privilegedEscalation,
     repaired: repairs.some((repair) => repair.ok === true && repair.after?.stale !== true),
     skipped: coolingDown,
     skipReason: coolingDown ? 'cooldown' : null,
     updatedAt: nowIso()
   };
+}
+
+async function deleteDarwinHostRoutesPrivileged(addresses) {
+  const targets = [...new Set(arrayValue(addresses, [])
+    .map((address) => nullableString(address))
+    .filter((address) => address && net.isIP(address) === 4))];
+  if (targets.length === 0) return { ok: false, error: 'no privileged route delete targets' };
+  const shellCommand = targets.map((address) => `/sbin/route -q -n delete -host ${address}`).join('; ');
+  const script = `do shell script "${shellCommand}" with administrator privileges`;
+  try {
+    await execFileText('/usr/bin/osascript', ['-e', script], { timeoutMs: 30_000 });
+    return { ok: true, targets, command: shellCommand };
+  } catch (err) {
+    return {
+      ok: false,
+      targets,
+      command: shellCommand,
+      canceled: isUserAuthorizationCanceledError(err),
+      error: errorMessage(err)
+    };
+  }
 }
 
 async function darwinEndpointRouteTargets() {
@@ -2343,10 +2399,15 @@ function classifyDarwinEndpointRoute(route, defaultRoute) {
   if (gateway && isDarwinProxyFakeGateway(gateway)) {
     return { stale: true, reason: `proxy-fake-gateway:${gateway}` };
   }
-  if (flags.has('WASCLONED') && gateway && defaultGateway && gateway !== defaultGateway) {
+  // These targets are public relay endpoints; a pinned host route must follow
+  // the current default path. The WG daemon installs a STATIC bypass route (no
+  // WASCLONED flag), so a mismatch is stale regardless of how the route was
+  // created — after a Wi-Fi switch it black-holes the bootstrap API until
+  // deleted. Only IPv4 gateways are compared: direct/link routes stay valid.
+  if (gateway && defaultGateway && net.isIP(gateway) === 4 && net.isIP(defaultGateway) === 4 && gateway !== defaultGateway) {
     return { stale: true, reason: `gateway-mismatch:${gateway}->${defaultGateway}` };
   }
-  if (flags.has('WASCLONED') && interfaceName && defaultInterfaceName && interfaceName !== defaultInterfaceName) {
+  if (interfaceName && defaultInterfaceName && interfaceName !== defaultInterfaceName) {
     return { stale: true, reason: `interface-mismatch:${interfaceName}->${defaultInterfaceName}` };
   }
   return { stale: false, reason: null };

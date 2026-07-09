@@ -1955,6 +1955,37 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
   ];
   const dnsRestoreCommands = darwinDnsRestoreCommands('"$DNS_STATE_FILE"', '"$ROUTE_LOG"');
   const dnsSetCommands = darwinDnsSetCommands(profile.dnsServers, profile.dnsDomains, '"$DNS_STATE_FILE"', '"$ROUTE_LOG"');
+  const endpointBypassCommands = darwinEndpointBypassCommands(profile.endpointHosts, '"$ROUTE_LOG"');
+  const endpointBypassFunctionLines = endpointBypassCommands.length > 0
+    ? [
+        'apply_endpoint_bypass() {',
+        ...endpointBypassCommands.map((line) => `  ${line}`),
+        '}'
+      ]
+    : [];
+  // The endpoint bypass host routes are pinned to the default gateway captured
+  // at tunnel start. After a Wi-Fi/network switch they keep pointing at the old
+  // gateway and black-hole the relay endpoint (bootstrap API included) until
+  // deleted with root. This daemon is the only resident root process, so it
+  // watches the default path and re-applies the bypass when it changes.
+  const endpointBypassWatchdogLines = endpointBypassCommands.length > 0
+    ? [
+        '(',
+        "  __hdo_bypass_path=\"$(route -n get default 2>/dev/null | awk '/gateway:|interface:/{printf \"%s \", $2}')\"",
+        '  while kill -0 "$WG_PID" >/dev/null 2>&1; do',
+        '    sleep 5',
+        "    __hdo_bypass_next=\"$(route -n get default 2>/dev/null | awk '/gateway:|interface:/{printf \"%s \", $2}')\"",
+        '    if [ -n "$__hdo_bypass_next" ] && [ "$__hdo_bypass_next" != "$__hdo_bypass_path" ]; then',
+        '      log_action "endpoint-bypass-refresh"',
+        '      log_route "defaultPathChanged=${__hdo_bypass_path}-> ${__hdo_bypass_next}"',
+        '      apply_endpoint_bypass',
+        '      __hdo_bypass_path="$__hdo_bypass_next"',
+        '    fi',
+        '  done',
+        ') &',
+        'ENDPOINT_WATCHDOG_PID="$!"'
+      ]
+    : [];
   return [
     '#!/bin/sh',
     'set -u',
@@ -1975,10 +2006,12 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     'chmod 644 "$ROUTE_LOG" "$WG_GO_LOG" >/dev/null 2>&1 || true',
     'log_route() { printf "%s\\n" "$*" >> "$ROUTE_LOG" 2>&1; }',
     'log_action() { log_route "---"; log_route "action=$1"; log_route "timestamp=$(date -u \'+%Y-%m-%dT%H:%M:%SZ\')"; log_route "interface=$INTERFACE_NAME"; }',
+    ...endpointBypassFunctionLines,
     'cleanup() {',
     '  code="${1:-0}"',
     '  log_action "launchdaemon-cleanup"',
     '  log_route "exit=$code"',
+    '  if [ -n "${ENDPOINT_WATCHDOG_PID:-}" ]; then kill "$ENDPOINT_WATCHDOG_PID" >/dev/null 2>&1 || true; ENDPOINT_WATCHDOG_PID=""; fi',
     '  REAL_INTERFACE="$(cat "$NAME_FILE" 2>/dev/null || true)"',
     '  if [ -z "$REAL_INTERFACE" ] && [ -n "$PRIMARY_ADDRESS" ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q "inet $PRIMARY_ADDRESS"; then REAL_INTERFACE="$candidate"; break; fi; done; fi',
     '  if [ -z "$REAL_INTERFACE" ] && [ -n "$ANCHOR_ADDRESS" ]; then for candidate in $(ifconfig -l 2>/dev/null); do if ifconfig "$candidate" 2>/dev/null | grep -q "inet $ANCHOR_ADDRESS"; then REAL_INTERFACE="$candidate"; break; fi; done; fi',
@@ -2002,7 +2035,7 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     'trap \'exit 0\' INT TERM HUP',
     'cleanup 0 >/dev/null 2>&1 || true',
     'log_action "launchdaemon-start"',
-    ...darwinEndpointBypassCommands(profile.endpointHosts, '"$ROUTE_LOG"'),
+    ...(endpointBypassFunctionLines.length > 0 ? ['apply_endpoint_bypass'] : []),
     'rm -f "$NAME_FILE" "$PID_FILE"',
     'BEFORE_INTERFACES="$("$WG" show interfaces 2>/dev/null || true)"',
     'WG_PROCESS_FOREGROUND=1 WG_TUN_NAME_FILE="$NAME_FILE" "$WIREGUARD_GO" utun >> "$WG_GO_LOG" 2>&1 &',
@@ -2031,6 +2064,7 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     ...selfRouteUpCommands,
     ...dnsSetCommands,
     ...finalStartValidationCommands,
+    ...endpointBypassWatchdogLines,
     'wait "$WG_PID"',
     'exit "$?"'
   ].join('\n') + '\n';
@@ -3251,7 +3285,7 @@ function windowsElevatedStartProcessScripts(
       `  if ($svc.Status -ne 'Stopped') { Stop-Service -Name ${serviceArg} -Force -ErrorAction SilentlyContinue }`,
       `  ${runWireGuard(['/uninstalltunnelservice', tunnelName])}`,
       "  Write-HdoAudit ('wireguard uninstall exitCode=' + [string]$LASTEXITCODE)",
-      '  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
+      "  if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) { Write-HdoAudit ('wireguard uninstall failed exitCode=' + [string]$LASTEXITCODE); exit 1 }",
       ...waitForServiceAbsent(),
       '}'
     );
@@ -3260,7 +3294,12 @@ function windowsElevatedStartProcessScripts(
     `Write-HdoAudit ${powerShellString(`wireguard command action=${action}`)}`,
     runWireGuard(args),
     "Write-HdoAudit ('wireguard exitCode=' + [string]$LASTEXITCODE)",
-    'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
+    // $LASTEXITCODE stays $null when the native command never ran; the old
+    // `exit $LASTEXITCODE` then exited 0 — reported success with NRPT/routes
+    // removed and the tunnel service gone, leaving *.mxinfo-inc.cn NXDOMAIN
+    // until a manual repair. A null/non-zero code must fail loudly so the
+    // caller retries and the NRPT re-add is never silently skipped.
+    "if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) { Write-HdoAudit ('wireguard command failed exitCode=' + [string]$LASTEXITCODE); exit 1 }",
     ...(action === 'down' ? waitForServiceAbsent() : waitForServiceRunning()),
     ...(action === 'down' ? [] : ['Add-HdoOverlayRoutes', 'Add-HdoNrptRules']),
     ...(action === 'down' ? [] : waitForServiceRunning()),

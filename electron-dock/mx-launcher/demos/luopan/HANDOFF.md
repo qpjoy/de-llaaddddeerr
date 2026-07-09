@@ -50,6 +50,9 @@ VIP——它是 Luopan 到达 Internal 的**唯一路由**，不是装饰性标�
 
 开发期未入网时：`LUOPAN_LAUNCHER_BASE_URL=<lan-admin-url>` 覆盖 base URL，
 `LUOPAN_SDK_TEST_MODE=1` 走服务端测试模式；两者都不允许出现在正式构建里。
+demo 默认 registered 模式，工具栏 **Connect Internal** 一键完成
+lease → 数据面 → VIP healthz。平台侧开通的完整操作（Admin 注册、Service VIP
+Reconcile、`mx-internal-svc` 语义、enroll 报错对照）见 docs/20 §4.5。
 
 ## 五条红线（验收会逐条检查）
 
