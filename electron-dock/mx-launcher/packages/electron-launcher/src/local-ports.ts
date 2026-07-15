@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { createSocket } from 'node:dgram';
 import { createServer } from 'node:net';
 
 /**
@@ -25,6 +26,8 @@ export interface ElectronLauncherLocalPortRequest {
   maxAttempts?: number | null;
   /** Bind host used for probing. Default 127.0.0.1. */
   host?: string | null;
+  /** Listener protocol to probe. DNS should use tcp+udp. Default tcp. */
+  protocol?: 'tcp' | 'udp' | 'tcp+udp' | null;
 }
 
 export interface ElectronLauncherLocalPortLease {
@@ -50,6 +53,7 @@ export async function allocateElectronLauncherLocalPort(
   const service = request.service?.trim();
   if (!productId || !service) throw new Error('allocateElectronLauncherLocalPort requires productId and service');
   const host = request.host?.trim() || '127.0.0.1';
+  const protocol = request.protocol === 'udp' || request.protocol === 'tcp+udp' ? request.protocol : 'tcp';
   const maxAttempts = normalizeAttempts(request.maxAttempts);
   const basePort = normalizePort(request.basePort) ?? electronLauncherDefaultBasePort(productId, service);
 
@@ -57,7 +61,7 @@ export async function allocateElectronLauncherLocalPort(
   let attempts = 0;
   if (preferred) {
     attempts += 1;
-    if (await portIsFree(host, preferred)) {
+    if (await portIsFree(host, preferred, protocol)) {
       return { port: preferred, source: 'preferred', basePort, attempts };
     }
   }
@@ -65,7 +69,7 @@ export async function allocateElectronLauncherLocalPort(
     const candidate = PORT_RANGE_START + ((basePort - PORT_RANGE_START + i) % PORT_RANGE_SIZE);
     if (candidate === preferred) continue;
     attempts += 1;
-    if (await portIsFree(host, candidate)) {
+    if (await portIsFree(host, candidate, protocol)) {
       return { port: candidate, source: i === 0 ? 'base' : 'scan', basePort, attempts };
     }
   }
@@ -74,13 +78,33 @@ export async function allocateElectronLauncherLocalPort(
   );
 }
 
-function portIsFree(host: string, port: number): Promise<boolean> {
+async function portIsFree(host: string, port: number, protocol: 'tcp' | 'udp' | 'tcp+udp'): Promise<boolean> {
+  if (protocol === 'tcp') return tcpPortIsFree(host, port);
+  if (protocol === 'udp') return udpPortIsFree(host, port);
+  return (await tcpPortIsFree(host, port)) && (await udpPortIsFree(host, port));
+}
+
+function tcpPortIsFree(host: string, port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const server = createServer();
     server.unref();
     server.once('error', () => resolve(false));
     server.listen({ host, port, exclusive: true }, () => {
       server.close(() => resolve(true));
+    });
+  });
+}
+
+function udpPortIsFree(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createSocket(host.includes(':') ? 'udp6' : 'udp4');
+    socket.unref();
+    socket.once('error', () => {
+      socket.close();
+      resolve(false);
+    });
+    socket.bind({ address: host, port, exclusive: true }, () => {
+      socket.close(() => resolve(true));
     });
   });
 }

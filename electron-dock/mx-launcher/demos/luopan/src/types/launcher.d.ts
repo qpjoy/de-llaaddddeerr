@@ -33,6 +33,58 @@ export interface LuopanRuntimeConnection {
   updatedAt: string | null;
 }
 
+export type LuopanOverseaStatus =
+  | 'waiting-login'
+  | 'waiting-internal'
+  | 'ensuring'
+  | 'pending-sync'
+  | 'starting'
+  | 'ready'
+  | 'running'
+  | 'stopped'
+  | 'error';
+
+export type LuopanOverseaMode = 'app-global' | 'app-rule';
+
+export interface LuopanOverseaTunnelEvent {
+  id: number;
+  level: 'info' | 'warn' | 'error';
+  message: string;
+  createdAt: string;
+}
+
+export interface LuopanOverseaRuntime {
+  status: LuopanOverseaStatus;
+  autoConnect: boolean;
+  mode: LuopanOverseaMode;
+  userId: string | null;
+  entitlementId: string | null;
+  subscriptionPath: string | null;
+  subscriptionName: string | null;
+  siteIds: string[];
+  syncStatus: string | null;
+  nodeCount: number;
+  ensuredAt: string | null;
+  startedAt: string | null;
+  lastTestUrl: string;
+  lastTestAt: string | null;
+  lastProxyDecision: string | null;
+  message: string;
+  tunnel: {
+    running: boolean;
+    health: { ok: boolean; level: 'ok' | 'warning' | 'error'; message: string | null };
+    mode: LuopanOverseaMode;
+    ports: { admin: number; controller: number; mixed: number; dns: number };
+    engine: {
+      target: string;
+      available: boolean;
+      source: 'custom' | 'installed' | 'bundled' | 'missing';
+    };
+    activeSubscription: { id: number; name: string; lastUpdatedAt: string | null } | null;
+    events: LuopanOverseaTunnelEvent[];
+  };
+}
+
 export interface LuopanRuntimeUpdateArtifact {
   artifactId: string;
   kind: string;
@@ -76,6 +128,7 @@ export interface LuopanRuntimeState {
   config: LuopanRuntimeConfig;
   identity: LuopanRuntimeIdentity;
   connection: LuopanRuntimeConnection;
+  oversea: LuopanOverseaRuntime;
   update: LuopanRuntimeUpdate;
   events: string[];
 }
@@ -91,6 +144,12 @@ export interface LuopanLauncherApi {
   disconnectDataPlane(): Promise<LuopanRuntimeState>;
   refreshSnapshot(): Promise<LuopanRuntimeState>;
   resetSession(): Promise<LuopanRuntimeState>;
+  refreshOverseaSubscription(): Promise<LuopanRuntimeState>;
+  startOversea(): Promise<LuopanRuntimeState>;
+  stopOversea(): Promise<LuopanRuntimeState>;
+  setOverseaMode(mode: LuopanOverseaMode): Promise<LuopanRuntimeState>;
+  setOverseaAutoConnect(enabled: boolean): Promise<LuopanRuntimeState>;
+  openOverseaTestWindow(input: { url: string }): Promise<LuopanRuntimeState>;
   checkUpdates(): Promise<LuopanRuntimeState>;
   applyUpdate(): Promise<LuopanRuntimeState>;
   openStagedInstaller(): Promise<LuopanRuntimeState>;

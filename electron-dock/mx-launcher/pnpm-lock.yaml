@@ -115,6 +115,9 @@ importers:
       '@qpjoy/electron-launcher':
         specifier: workspace:*
         version: link:../../packages/electron-launcher
+      '@qpjoy/electron-plugin-tunnel':
+        specifier: workspace:*
+        version: link:../../../../electron-plugin/packages/electron-plugin-tunnel
       '@qpjoy/ui-design-neon-void':
         specifier: workspace:*
         version: link:../../ui-design

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, nativeTheme, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, nativeTheme, session, shell, type Session } from 'electron';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   adoptPendingElectronLauncherPackages,
+  allocateElectronLauncherLocalPort,
   loadElectronLauncherEnvFiles,
   parseElectronLauncherBootstrapUrls,
   resolveElectronLauncherBootstrap,
@@ -21,6 +22,7 @@ import {
   createElectronLauncherReleaseUpdateExecutor,
   createElectronLauncherReleaseUpdater,
   diagnoseElectronLauncherStandaloneDataPlane,
+  ensureElectronLauncherUserOverseaSubscription,
   defineLauncherProduct,
   readElectronLauncherStandaloneOwnershipState,
   reportElectronLauncherInstallCompletionIfUpgraded,
@@ -36,6 +38,13 @@ import {
   type LauncherProductDefinition,
   type StandaloneLauncher
 } from '@qpjoy/electron-launcher';
+import {
+  createElectronTunnel,
+  type ElectronTunnelHandle,
+  type EventRecord,
+  type RuntimeMode,
+  type TunnelStatus
+} from '@qpjoy/electron-plugin-tunnel';
 
 type RuntimeStatus = 'idle' | 'connecting' | 'lease-active' | 'data-plane-pending' | 'network-ready' | 'error';
 type LuopanDataPlaneMode = 'reuse' | 'standalone';
@@ -46,8 +55,8 @@ interface RuntimeConfig {
    * Bootstrap candidates probed BEFORE the tunnel exists (docs/20 §4.5): the
    * registered baseUrl is the in-tunnel VIP and is unreachable on first
    * enroll. Sourced from LUOPAN_BOOTSTRAP_URLS (env or .env file) or edited
-   * in the CONFIG panel; the resolved one serves enroll/login/update until
-   * the data plane reports network-ready.
+   * in the CONFIG panel; the resolved one serves anonymous bootstrap traffic
+   * until the data plane reports network-ready. Login credentials never use it.
    */
   bootstrapUrls: string[];
   productId: string;
@@ -117,14 +126,60 @@ interface RuntimeIdentity {
   loginAt: string | null;
 }
 
+type RuntimeOverseaStatus =
+  | 'waiting-login'
+  | 'waiting-internal'
+  | 'ensuring'
+  | 'pending-sync'
+  | 'starting'
+  | 'ready'
+  | 'running'
+  | 'stopped'
+  | 'error';
+
+type RuntimeOverseaMode = Extract<RuntimeMode, 'app-global' | 'app-rule'>;
+
+interface RuntimeOversea {
+  status: RuntimeOverseaStatus;
+  autoConnect: boolean;
+  mode: RuntimeOverseaMode;
+  userId: string | null;
+  entitlementId: string | null;
+  subscriptionPath: string | null;
+  subscriptionName: string | null;
+  siteIds: string[];
+  syncStatus: string | null;
+  nodeCount: number;
+  ensuredAt: string | null;
+  startedAt: string | null;
+  lastTestUrl: string;
+  lastTestAt: string | null;
+  lastProxyDecision: string | null;
+  message: string;
+}
+
 interface RuntimeState {
   installId: string;
   deviceId: string;
   config: RuntimeConfig;
   identity: RuntimeIdentity;
   connection: RuntimeConnection;
+  oversea: RuntimeOversea;
   update: RuntimeUpdate;
   events: string[];
+}
+
+interface OverseaSessionContext {
+  generation: number;
+  userId: string;
+  accessToken: string;
+}
+
+interface OverseaReconcileFlight {
+  generation: number;
+  controller: AbortController;
+  startWhenReady: boolean;
+  promise: Promise<void>;
 }
 
 const PRODUCT = defineLauncherProduct({
@@ -153,11 +208,40 @@ const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = 'luopan-runtime.json';
 const LUOPAN_DNS_HOST = 'luopan.mxinfo-inc.cn';
 const LUOPAN_DNS_ZONE = 'mxinfo-inc.cn';
-const DATA_PLANE_MODE = luopanDataPlaneMode();
+const OVERSEA_SUBSCRIPTION_NAME = 'System Oversea 默认订阅';
+const OVERSEA_SESSION_PARTITION = 'persist:luopan-oversea';
+const OVERSEA_ALLOWLIST = [
+  'google.com',
+  'googleapis.com',
+  'gstatic.com',
+  'googleusercontent.com',
+  'googlevideo.com',
+  'youtube.com',
+  'youtu.be',
+  'ytimg.com',
+  'x.com',
+  'twitter.com',
+  't.co',
+  'twimg.com',
+  'telegram.org',
+  'telegram.me',
+  't.me'
+];
 
 let mainWindow: BrowserWindow | null = null;
 let runtime: RuntimeState | null = null;
 let activeSession: LauncherNetworkSession | null = null;
+let overseaSession: Session | null = null;
+let overseaTunnel: ElectronTunnelHandle | null = null;
+let overseaReconcileFlight: OverseaReconcileFlight | null = null;
+let overseaSessionGeneration = 0;
+let overseaReadyContext: Pick<OverseaSessionContext, 'generation' | 'userId'> | null = null;
+let overseaBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
+let overseaClosePromise: Promise<void> | null = null;
+let overseaClosed = false;
+let sessionOperation: Promise<unknown> = Promise.resolve();
+let runtimeSaveQueue: Promise<void> = Promise.resolve();
+let runtimeSaveSequence = 0;
 // In-memory only: never persisted, cleared on logout/restart.
 let activeAccessToken: string | null = null;
 // Pinned by the last successful bootstrap resolution; serves every API call
@@ -165,16 +249,25 @@ let activeAccessToken: string | null = null;
 let activeBootstrapBaseUrl: string | null = null;
 
 app.setAppUserModelId('dev.qpjoy.luopan');
+const ownsSingleInstanceLock = app.requestSingleInstanceLock();
+if (!ownsSingleInstanceLock) app.quit();
+
+app.on('second-instance', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+});
 
 function luopanDataPlaneMode(): LuopanDataPlaneMode {
-  if (booleanish(process.env.LUOPAN_FORCE_STANDALONE_WG, false)) return 'standalone';
-  const value = process.env.LUOPAN_DATA_PLANE_MODE?.trim().toLowerCase();
+  if (booleanish(environmentValue('LUOPAN_FORCE_STANDALONE_WG'), false)) return 'standalone';
+  const value = environmentValue('LUOPAN_DATA_PLANE_MODE')?.trim().toLowerCase();
   if (value === 'reuse') return 'reuse';
   return 'standalone';
 }
 
 function initialDataPlaneApplyMessage(): string {
-  if (DATA_PLANE_MODE === 'reuse') {
+  if (luopanDataPlaneMode() === 'reuse') {
     return 'Checking existing shared launcher data plane for Luopan reuse.';
   }
   return 'Syncing Domestic peer and applying Luopan as an independent standalone data-plane owner.';
@@ -185,15 +278,15 @@ function defaultConfig(): RuntimeConfig {
     // Luopan's registered product VIP (docs/19, HANDOFF §网络注册). Never fall
     // back to 10.88.88.88 / 10.88.0.1 — those are MX-H2I/foundation migration
     // compatibility addresses and are off-limits to Luopan.
-    baseUrl: normalizeBaseUrl(process.env.LUOPAN_LAUNCHER_BASE_URL || process.env.MX_LAUNCHER_BASE_URL || 'http://10.88.100.3:18090'),
-    bootstrapUrls: parseElectronLauncherBootstrapUrls(process.env.LUOPAN_BOOTSTRAP_URLS),
+    baseUrl: normalizeBaseUrl(environmentValue('LUOPAN_LAUNCHER_BASE_URL') || environmentValue('MX_LAUNCHER_BASE_URL') || 'http://10.88.100.3:18090'),
+    bootstrapUrls: parseElectronLauncherBootstrapUrls(environmentValue('LUOPAN_BOOTSTRAP_URLS')),
     productId: 'luopan',
     mode: 'standalone',
     // Registered mode by default: the lease request must pass the server-side
     // ProductNetwork + AppCenter entitlement gate. SDK test mode bypasses that
     // gate and only works when the server enables it — dev opt-in via env.
-    sdkTestMode: booleanish(process.env.LUOPAN_SDK_TEST_MODE, false),
-    deviceLabel: process.env.LUOPAN_DEVICE_LABEL?.trim() || 'Luopan Quasar Demo'
+    sdkTestMode: booleanish(environmentValue('LUOPAN_SDK_TEST_MODE'), false),
+    deviceLabel: environmentValue('LUOPAN_DEVICE_LABEL')?.trim() || 'Luopan Quasar Demo'
   };
 }
 
@@ -224,6 +317,35 @@ function emptyIdentity(): RuntimeIdentity {
   };
 }
 
+function emptyOversea(): RuntimeOversea {
+  return {
+    status: 'waiting-login',
+    autoConnect: true,
+    mode: 'app-global',
+    userId: null,
+    entitlementId: null,
+    subscriptionPath: null,
+    subscriptionName: null,
+    siteIds: [],
+    syncStatus: null,
+    nodeCount: 0,
+    ensuredAt: null,
+    startedAt: null,
+    lastTestUrl: 'https://www.google.com',
+    lastTestAt: null,
+    lastProxyDecision: null,
+    message: '先匿名连接 Internal，再通过隧道内 VIP 登录 User Center；随后会自动确保 Oversea 订阅并启动应用代理。'
+  };
+}
+
+function hasActiveUserIdentity(state = requireRuntime()): state is RuntimeState & {
+  identity: RuntimeIdentity & { kind: 'user'; userId: string };
+} {
+  if (state.identity.kind !== 'user' || !state.identity.userId || !activeAccessToken) return false;
+  const expiresAt = state.identity.tokenExpiresAt ? Date.parse(state.identity.tokenExpiresAt) : Number.NaN;
+  return !Number.isFinite(expiresAt) || expiresAt > Date.now();
+}
+
 function emptyUpdate(): RuntimeUpdate {
   return {
     status: 'idle',
@@ -247,6 +369,7 @@ async function loadRuntime(): Promise<RuntimeState> {
     config: defaultConfig(),
     identity: emptyIdentity(),
     connection: emptyConnection(),
+    oversea: emptyOversea(),
     update: emptyUpdate(),
     events: []
   };
@@ -256,11 +379,18 @@ async function loadRuntime(): Promise<RuntimeState> {
     return {
       installId: stringValue(parsed.installId) || fallback.installId,
       deviceId: stringValue(parsed.deviceId) || fallback.deviceId,
-      config: normalizeConfig(parsed.config, fallback.config),
-      identity: normalizeIdentity(parsed.identity),
+      // Explicit process/.env values are deployment configuration and win
+      // over CONFIG-panel values persisted by an older app run.
+      config: applyEnvironmentConfigOverrides(normalizeConfig(parsed.config, fallback.config)),
+      // Access tokens are memory-only, so persisted user metadata must never
+      // survive a process restart as an authenticated identity.
+      identity: emptyIdentity(),
       connection: normalizeConnection(parsed.connection),
+      oversea: normalizeOversea(parsed.oversea),
       update: normalizeUpdate(parsed.update),
-      events: Array.isArray(parsed.events) ? parsed.events.filter((item): item is string => typeof item === 'string').slice(-12) : []
+      // Runtime events can contain user/site identifiers; a fresh process has
+      // no authenticated user and must not expose the previous user's trail.
+      events: []
     };
   } catch {
     return fallback;
@@ -269,8 +399,27 @@ async function loadRuntime(): Promise<RuntimeState> {
 
 async function saveRuntime(): Promise<void> {
   if (!runtime) return;
-  await fs.mkdir(app.getPath('userData'), { recursive: true });
-  await fs.writeFile(runtimeStateFile(), JSON.stringify(runtime, null, 2));
+  const file = runtimeStateFile();
+  const snapshot = JSON.stringify(runtime, null, 2);
+  const sequence = ++runtimeSaveSequence;
+  const next = runtimeSaveQueue.catch(() => undefined).then(async () => {
+    await fs.mkdir(app.getPath('userData'), { recursive: true });
+    const temporary = `${file}.${process.pid}.${sequence}.tmp`;
+    try {
+      await fs.writeFile(temporary, snapshot, { mode: 0o600 });
+      await fs.rename(temporary, file);
+    } finally {
+      await fs.unlink(temporary).catch(() => undefined);
+    }
+  });
+  runtimeSaveQueue = next;
+  await next;
+}
+
+function runSessionExclusive<T>(task: () => Promise<T>): Promise<T> {
+  const next = sessionOperation.then(task, task);
+  sessionOperation = next.catch(() => undefined);
+  return next;
 }
 
 function runtimeStateFile(): string {
@@ -287,10 +436,50 @@ function visibleRuntime() {
     installId: state.installId,
     deviceId: state.deviceId,
     config: state.config,
-    identity: { ...state.identity, tokenPresent: Boolean(activeAccessToken) },
+    identity: { ...state.identity, tokenPresent: hasActiveUserIdentity(state) },
     connection: state.connection,
+    oversea: {
+      ...state.oversea,
+      tunnel: visibleOverseaTunnel()
+    },
     update: state.update,
     events: state.events
+  };
+}
+
+function visibleOverseaTunnel() {
+  const status = overseaTunnel?.status() ?? null;
+  const active = status?.activeSubscription ?? null;
+  const events = overseaTunnel?.manager.listEvents().slice(0, 30).map(visibleOverseaEvent) ?? [];
+  return {
+    running: status?.running ?? false,
+    health: status?.health ?? { ok: false, level: 'warning' as const, message: 'Oversea tunnel runtime is initializing.' },
+    mode: (status?.mode === 'app-rule' ? 'app-rule' : 'app-global') as RuntimeOverseaMode,
+    ports: status?.ports ?? { admin: 23456, controller: 23457, mixed: 23458, dns: 1053 },
+    engine: status?.engine
+      ? {
+          target: status.engine.target,
+          available: status.engine.available,
+          source: status.engine.source
+        }
+      : { target: `${process.platform}-${process.arch}`, available: false, source: 'missing' as const },
+    activeSubscription: active
+      ? {
+          id: active.id,
+          name: active.name,
+          lastUpdatedAt: active.lastUpdatedAt
+        }
+      : null,
+    events
+  };
+}
+
+function visibleOverseaEvent(event: EventRecord) {
+  return {
+    id: event.id,
+    level: event.level,
+    message: event.message,
+    createdAt: event.createdAt
   };
 }
 
@@ -458,6 +647,12 @@ async function adoptUpdatesAndReportInstallCompletion(): Promise<void> {
   for (const pointer of adopted) {
     pushEvent(`launcher package adopted ${pointer.version}`);
   }
+  // A first start after installer activation occurs before the data plane is
+  // ready. Resolve the public/LAN entrance before constructing the updater so
+  // installer-completed evidence is not sent to the unreachable in-tunnel VIP.
+  if (requireRuntime().connection.status !== 'network-ready') {
+    await ensureBootstrapResolved();
+  }
   const completion = await reportElectronLauncherInstallCompletionIfUpgraded({
     updater: releaseUpdater(),
     baseDir,
@@ -565,7 +760,7 @@ async function loadDevRenderer(window: BrowserWindow): Promise<void> {
 }
 
 function devRendererUrlCandidates(): string[] {
-  const explicit = normalizeDevRendererUrl(process.env.LUOPAN_RENDERER_URL);
+  const explicit = normalizeDevRendererUrl(environmentValue('LUOPAN_RENDERER_URL'));
   const appUrl = normalizeDevRendererUrl(process.env.APP_URL);
   const ports = uniqueNumbers([
     devRendererPort(explicit),
@@ -679,6 +874,490 @@ function devRendererErrorHtml(attempts: string[]): string {
 </html>`;
 }
 
+async function initializeOverseaTunnel(): Promise<void> {
+  overseaSession = session.fromPartition(OVERSEA_SESSION_PARTITION, { cache: true });
+  await clearOverseaBrowserSession();
+  overseaTunnel = createElectronTunnel({ app, ipcMain, session: overseaSession }, {
+    appName: 'Luopan Oversea',
+    userDataPath: path.join(app.getPath('userData'), 'oversea'),
+    startAdminServer: false,
+    registerIpc: false,
+    adminPort: 23456,
+    controllerPort: 23457,
+    mixedPort: 23458,
+    dnsPort: 1053
+  });
+  const allocatedPorts = await allocateOverseaPorts(overseaTunnel.status());
+  await overseaTunnel.manager.setLocalPorts(allocatedPorts);
+  const desiredMode = requireRuntime().oversea.mode;
+  if (overseaTunnel.status().mode !== desiredMode) {
+    overseaTunnel.manager.setMode(desiredMode);
+  }
+  await overseaTunnel.applyProxy();
+  clearOverseaManagedSubscriptions('startup');
+  overseaTunnel.manager.clearEvents();
+  overseaTunnel.manager.on('event', scheduleOverseaBroadcast);
+  const state = requireRuntime();
+  state.oversea = {
+    ...state.oversea,
+    status: 'waiting-login',
+    userId: null,
+    entitlementId: null,
+    subscriptionPath: null,
+    subscriptionName: null,
+    siteIds: [],
+    syncStatus: null,
+    nodeCount: 0,
+    ensuredAt: null,
+    startedAt: null,
+    lastProxyDecision: 'DIRECT',
+    message: '先匿名连接 Internal，再通过隧道内 VIP 登录 User Center；随后会自动确保 Oversea 订阅并启动应用代理。'
+  };
+  await saveRuntime();
+}
+
+async function allocateOverseaPorts(status: TunnelStatus): Promise<TunnelStatus['ports']> {
+  const requests = [
+    ['admin', 'mihomo-admin', status.ports.admin, 'tcp'],
+    ['controller', 'mihomo-controller', status.ports.controller, 'tcp'],
+    ['mixed', 'mihomo-mixed', status.ports.mixed, 'tcp'],
+    ['dns', 'mihomo-dns', status.ports.dns, 'tcp+udp']
+  ] as const;
+  const allocated = { ...status.ports };
+  for (const [key, service, preferredPort, protocol] of requests) {
+    const lease = await allocateElectronLauncherLocalPort({
+      productId: PRODUCT.productId,
+      service,
+      preferredPort,
+      protocol
+    });
+    allocated[key] = lease.port;
+  }
+  return allocated;
+}
+
+function scheduleOverseaBroadcast(): void {
+  if (overseaBroadcastTimer) return;
+  overseaBroadcastTimer = setTimeout(() => {
+    overseaBroadcastTimer = null;
+    if (runtime && runtime.oversea.status === 'running' && overseaTunnel && !overseaTunnel.status().running) {
+      void overseaSession?.setProxy({ mode: 'direct' }).catch(() => undefined);
+      runtime.oversea = {
+        ...runtime.oversea,
+        status: 'error',
+        lastProxyDecision: 'DIRECT',
+        message: overseaTunnel.status().health.message || 'mihomo 已意外退出；请查看日志并重新启动。'
+      };
+      void saveRuntime();
+    }
+    if (runtime) broadcastRuntime();
+  }, 120);
+}
+
+function requireOverseaTunnel(): ElectronTunnelHandle {
+  if (!overseaTunnel || !overseaSession) throw new Error('Luopan Oversea tunnel runtime is not ready.');
+  return overseaTunnel;
+}
+
+async function setOversea(patch: Partial<RuntimeOversea>): Promise<void> {
+  const state = requireRuntime();
+  state.oversea = { ...state.oversea, ...patch };
+  await saveRuntime();
+  broadcastRuntime();
+}
+
+function captureOverseaSessionContext(): OverseaSessionContext | null {
+  const state = requireRuntime();
+  const accessToken = activeAccessToken;
+  if (!hasActiveUserIdentity(state) || !accessToken) {
+    return null;
+  }
+  return {
+    generation: overseaSessionGeneration,
+    userId: state.identity.userId,
+    accessToken
+  };
+}
+
+function isCurrentOverseaSession(context: OverseaSessionContext): boolean {
+  const state = requireRuntime();
+  return context.generation === overseaSessionGeneration
+    && hasActiveUserIdentity(state)
+    && state.identity.userId === context.userId
+    && activeAccessToken === context.accessToken;
+}
+
+function hasReadyOverseaSubscription(context: OverseaSessionContext): boolean {
+  return isCurrentOverseaSession(context)
+    && overseaReadyContext?.generation === context.generation
+    && overseaReadyContext.userId === context.userId
+    && Boolean(overseaTunnel?.status().activeSubscription);
+}
+
+async function setOverseaForSession(context: OverseaSessionContext, patch: Partial<RuntimeOversea>): Promise<boolean> {
+  if (!isCurrentOverseaSession(context)) return false;
+  await setOversea(patch);
+  return isCurrentOverseaSession(context);
+}
+
+function clearOverseaManagedSubscriptions(reason: string): void {
+  if (!overseaTunnel) return;
+  const subscriptions = overseaTunnel.manager.listSubscriptions();
+  for (const subscription of subscriptions) {
+    overseaTunnel.manager.deleteSubscription(subscription.id);
+  }
+  overseaReadyContext = null;
+  if (subscriptions.length > 0) pushEvent(`oversea subscriptions cleared ${reason}`);
+}
+
+async function deactivateOverseaTunnel(): Promise<void> {
+  if (overseaTunnel) await overseaTunnel.manager.stop();
+  await overseaSession?.setProxy({ mode: 'direct' });
+}
+
+async function clearOverseaBrowserSession(): Promise<void> {
+  if (!overseaSession) return;
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window !== mainWindow && !window.isDestroyed() && window.webContents.session === overseaSession) {
+      window.destroy();
+    }
+  }
+  await overseaSession.clearStorageData();
+  await overseaSession.clearCache();
+}
+
+async function invalidateOverseaIdentitySession(reason: string): Promise<void> {
+  const flight = overseaReconcileFlight;
+  activeAccessToken = null;
+  overseaSessionGeneration += 1;
+  overseaReadyContext = null;
+  flight?.controller.abort();
+  await flight?.promise.catch(() => undefined);
+  const failures: string[] = [];
+  try {
+    await deactivateOverseaTunnel();
+  } catch (error) {
+    failures.push(`stop: ${errorMessage(error)}`);
+  }
+  try {
+    clearOverseaManagedSubscriptions(reason);
+  } catch (error) {
+    failures.push(`subscription purge: ${errorMessage(error)}`);
+  }
+  try {
+    overseaTunnel?.manager.clearEvents();
+  } catch (error) {
+    failures.push(`event purge: ${errorMessage(error)}`);
+  }
+  try {
+    await clearOverseaBrowserSession();
+  } catch (error) {
+    failures.push(`browser session purge: ${errorMessage(error)}`);
+  }
+  if (failures.length > 0) throw new Error(failures.join('; '));
+}
+
+async function abortOverseaReconcile(): Promise<void> {
+  const flight = overseaReconcileFlight;
+  if (!flight) return;
+  flight.controller.abort();
+  await flight.promise.catch(() => undefined);
+}
+
+function reconcileOversea(reason: string, startWhenReady = false): Promise<void> {
+  const state = requireRuntime();
+  const context = captureOverseaSessionContext();
+  if (!context) {
+    return setOversea({
+      status: 'waiting-login',
+      userId: null,
+      message: '请先登录 User Center；Oversea 订阅只为当前登录用户自动创建。'
+    });
+  }
+  if (state.connection.status !== 'network-ready') {
+    return setOversea({
+      status: 'waiting-internal',
+      userId: context.userId,
+      message: '登录已完成；连接 Internal 后会自动确保 Oversea 订阅并启动代理。'
+    });
+  }
+
+  const current = overseaReconcileFlight;
+  if (current?.generation === context.generation) {
+    current.startWhenReady ||= startWhenReady;
+    return current.promise;
+  }
+
+  current?.controller.abort();
+  const controller = new AbortController();
+  const flight: OverseaReconcileFlight = {
+    generation: context.generation,
+    controller,
+    startWhenReady,
+    promise: Promise.resolve()
+  };
+  const previous = current?.promise.catch(() => undefined) ?? Promise.resolve();
+  const promise = previous.then(() => runOverseaReconcile(reason, context, flight));
+  flight.promise = promise.finally(() => {
+    if (overseaReconcileFlight === flight) overseaReconcileFlight = null;
+  });
+  overseaReconcileFlight = flight;
+  return flight.promise;
+}
+
+function reconcileOverseaInBackground(reason: string): void {
+  void reconcileOversea(reason).catch((error) => {
+    console.warn(`[luopan] automatic Oversea reconcile failed (${reason}):`, errorMessage(error));
+  });
+}
+
+async function runOverseaReconcile(
+  reason: string,
+  context: OverseaSessionContext,
+  flight: OverseaReconcileFlight
+): Promise<void> {
+  if (!isCurrentOverseaSession(context) || requireRuntime().connection.status !== 'network-ready') return;
+
+  pushEvent(`oversea ensure started ${reason}`);
+  if (!await setOverseaForSession(context, {
+    status: 'ensuring',
+    userId: context.userId,
+    message: '正在通过 Internal 为当前用户确保 Oversea 订阅并同步远端账号。'
+  })) return;
+  try {
+    const state = requireRuntime();
+    const result = await ensureElectronLauncherUserOverseaSubscription({
+      baseUrl: state.config.baseUrl,
+      userId: context.userId,
+      accessToken: context.accessToken,
+      siteIds: configuredOverseaSiteIds(),
+      requestedBy: 'luopan-oversea',
+      requestId: `luopan-oversea-${context.generation}-${Date.now()}`,
+      signal: flight.controller.signal
+    });
+    if (!isCurrentOverseaSession(context) || flight.controller.signal.aborted) return;
+    const common = {
+      userId: context.userId,
+      entitlementId: result.entitlementId,
+      subscriptionPath: result.ready ? result.subscription?.path ?? null : null,
+      subscriptionName: result.ready && result.subscription ? OVERSEA_SUBSCRIPTION_NAME : null,
+      siteIds: result.siteIds,
+      syncStatus: result.syncStatus || result.status,
+      nodeCount: result.ready && result.subscription ? countOverseaNodes(result.subscription.yaml) : 0,
+      ensuredAt: result.generatedAt || new Date().toISOString()
+    };
+    if (!result.ready || !result.subscription) {
+      await deactivateOverseaTunnel();
+      if (!isCurrentOverseaSession(context)) return;
+      clearOverseaManagedSubscriptions(`ensure-${result.status}`);
+      pushEvent(`oversea ensure ${result.status}`);
+      await setOverseaForSession(context, {
+        ...common,
+        status: result.status === 'pending-runtime-sync' ? 'pending-sync' : 'error',
+        message: result.reason
+      });
+      return;
+    }
+
+    const tunnel = requireOverseaTunnel();
+    const subscriptionUrl = joinApiUrl(state.config.baseUrl, result.subscription.path);
+    await tunnel.manager.applyManagedConfig({
+      subscription: {
+        name: OVERSEA_SUBSCRIPTION_NAME,
+        url: subscriptionUrl
+      },
+      subscriptionContent: result.subscription.yaml,
+      mode: state.oversea.mode,
+      autoStart: false,
+      rules: { allowlist: OVERSEA_ALLOWLIST },
+      source: 'luopan-oversea'
+    });
+    if (!isCurrentOverseaSession(context)) return;
+    overseaReadyContext = { generation: context.generation, userId: context.userId };
+    pushEvent(`oversea subscription ready ${result.siteIds.join(',') || 'default'}`);
+    if (!await setOverseaForSession(context, {
+      ...common,
+      status: tunnel.status().running ? 'running' : 'ready',
+      message: result.reason
+    })) return;
+    if (requireRuntime().oversea.autoConnect || flight.startWhenReady) {
+      await startOverseaRuntime(`auto:${reason}`);
+    }
+  } catch (error) {
+    if (flight.controller.signal.aborted || !isCurrentOverseaSession(context)) return;
+    const message = errorMessage(error);
+    await deactivateOverseaTunnel().catch(() => undefined);
+    if (!isCurrentOverseaSession(context)) return;
+    clearOverseaManagedSubscriptions('ensure-error');
+    pushEvent(`oversea ensure failed ${message}`);
+    await setOverseaForSession(context, { status: 'error', message });
+  }
+}
+
+async function startOverseaRuntime(reason: string): Promise<boolean> {
+  const state = requireRuntime();
+  let context = captureOverseaSessionContext();
+  if (!context) {
+    await setOversea({ status: 'waiting-login', message: '请先登录 User Center 再启动 Oversea。' });
+    return false;
+  }
+  if (state.connection.status !== 'network-ready') {
+    await setOversea({ status: 'waiting-internal', message: '请先连接 Internal 再启动 Oversea。' });
+    return false;
+  }
+  const tunnel = requireOverseaTunnel();
+  if (!hasReadyOverseaSubscription(context)) {
+    await reconcileOversea(`start:${reason}`, true);
+    context = captureOverseaSessionContext();
+    if (!context || !hasReadyOverseaSubscription(context)) return false;
+    if (tunnel.status().running) return true;
+  }
+  if (tunnel.status().running) {
+    await tunnel.applyProxy();
+    if (!isCurrentOverseaSession(context)) {
+      await deactivateOverseaTunnel();
+      return false;
+    }
+    const decision = await resolveOverseaProxyDecision();
+    await setOverseaForSession(context, { status: 'running', lastProxyDecision: decision, message: `Oversea 应用代理已连接（${decision}）。` });
+    return true;
+  }
+
+  pushEvent(`oversea start ${reason}`);
+  if (!await setOverseaForSession(context, { status: 'starting', message: '正在启动 mihomo 并等待本地 mixed 代理就绪。' })) return false;
+  try {
+    await tunnel.manager.start();
+    await waitForOverseaProxy(tunnel.status().ports.mixed);
+    if (!isCurrentOverseaSession(context)) {
+      await deactivateOverseaTunnel();
+      return false;
+    }
+    await tunnel.applyProxy();
+    const decision = await resolveOverseaProxyDecision();
+    pushEvent(`oversea running :${tunnel.status().ports.mixed}`);
+    await setOverseaForSession(context, {
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      lastProxyDecision: decision,
+      message: `Oversea 应用代理已自动连接（${decision}）。`
+    });
+    return true;
+  } catch (error) {
+    await tunnel.manager.stop().catch(() => undefined);
+    await overseaSession?.setProxy({ mode: 'direct' }).catch(() => undefined);
+    if (!isCurrentOverseaSession(context)) return false;
+    const message = errorMessage(error);
+    pushEvent(`oversea start failed ${message}`);
+    await setOverseaForSession(context, { status: 'error', message });
+    return false;
+  }
+}
+
+async function stopOverseaRuntime(reason: string): Promise<void> {
+  if (!overseaTunnel) return;
+  await deactivateOverseaTunnel();
+  await setOversea({
+    status: 'stopped',
+    ...(reason === 'manual' ? { autoConnect: false } : {}),
+    lastProxyDecision: 'DIRECT',
+    message: `Oversea 应用代理已停止（${reason}）。`
+  });
+  pushEvent(`oversea stopped ${reason}`);
+}
+
+async function setOverseaMode(mode: RuntimeOverseaMode): Promise<void> {
+  if (mode !== 'app-global' && mode !== 'app-rule') throw new Error('Luopan only supports app-global or app-rule Oversea mode.');
+  const tunnel = requireOverseaTunnel();
+  const changed = tunnel.manager.setMode(mode);
+  if (changed) await tunnel.manager.applyRuntimeConfigChange();
+  await tunnel.applyProxy();
+  const running = tunnel.status().running;
+  if (running) await waitForOverseaProxy(tunnel.status().ports.mixed);
+  const currentStatus = requireRuntime().oversea.status;
+  await setOversea({
+    mode,
+    status: running ? 'running' : currentStatus,
+    lastProxyDecision: running ? await resolveOverseaProxyDecision() : requireRuntime().oversea.lastProxyDecision,
+    message: mode === 'app-global'
+      ? '已切换为应用全局代理：外网测试窗口默认走 Oversea，Internal/本地控制面保持直连。'
+      : '已切换为规则代理：仅 Google、YouTube、X/Twitter、Telegram 等允许域名走 Oversea。'
+  });
+  pushEvent(`oversea mode ${mode}`);
+}
+
+async function openOverseaTestWindow(rawUrl: unknown): Promise<void> {
+  const url = normalizeOverseaTestUrl(rawUrl);
+  const context = captureOverseaSessionContext();
+  if (!context) throw new Error('请先通过 Internal 登录 User Center。');
+  if (!requireOverseaTunnel().status().running) {
+    const started = await startOverseaRuntime('test-window');
+    if (!started) throw new Error(requireRuntime().oversea.message);
+  }
+  if (!isCurrentOverseaSession(context)) throw new Error('登录会话已变化，请重新打开测试窗口。');
+  const decision = await resolveOverseaProxyDecision(url);
+  if (!await setOverseaForSession(context, {
+    lastTestUrl: url,
+    lastTestAt: new Date().toISOString(),
+    lastProxyDecision: decision,
+    message: `测试窗口将使用 ${decision} 打开 ${new URL(url).hostname}。`
+  })) throw new Error('登录会话已变化，请重新打开测试窗口。');
+  await requireOverseaTunnel().openTestWindow(url);
+  if (!isCurrentOverseaSession(context)) await clearOverseaBrowserSession();
+}
+
+async function resolveOverseaProxyDecision(url = 'https://www.google.com'): Promise<string> {
+  if (!overseaSession) return 'DIRECT';
+  try {
+    return await overseaSession.resolveProxy(url);
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function waitForOverseaProxy(port: number, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = 'not listening';
+  while (Date.now() < deadline) {
+    try {
+      await tcpProbe('127.0.0.1', port);
+      return;
+    } catch (error) {
+      lastError = errorMessage(error);
+      await sleep(180);
+    }
+  }
+  throw new Error(`mihomo mixed proxy 127.0.0.1:${port} did not become ready (${lastError}).`);
+}
+
+function normalizeOverseaTestUrl(value: unknown): string {
+  const text = stringValue(value) || 'https://www.google.com';
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(text) ? text : `https://${text}`;
+  try {
+    const parsed = new URL(withScheme);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('unsupported protocol');
+    return parsed.toString();
+  } catch {
+    throw new Error('测试地址必须是有效的 HTTP 或 HTTPS URL。');
+  }
+}
+
+function configuredOverseaSiteIds(): string[] {
+  return uniqueStrings((environmentValue('LUOPAN_OVERSEA_SITE_IDS') || '').split(/[\s,;]+/));
+}
+
+function countOverseaNodes(yaml: string): number {
+  return Math.max(0, (yaml.match(/^\s+type:\s*hysteria2\s*$/gim) || []).length);
+}
+
+function joinApiUrl(baseUrl: string, pathName: string): string {
+  const base = new URL(`${normalizeBaseUrl(baseUrl)}/`);
+  const resolved = new URL(pathName, base);
+  if (resolved.origin !== base.origin) {
+    throw new Error('Oversea subscription URL must stay on the configured Internal service origin.');
+  }
+  return resolved.toString();
+}
+
 function registerIpc(): void {
   ipcMain.handle('luopan:get-runtime', () => visibleRuntime());
   ipcMain.handle('luopan:save-config', async (_event, input) => {
@@ -691,7 +1370,7 @@ function registerIpc(): void {
   });
   // User Center: password login via SDK gateway -> identityKind 'user'. The
   // next connect (or reconnect) picks up the login lease range automatically.
-  ipcMain.handle('luopan:login', async (_event, input) => {
+  ipcMain.handle('luopan:login', (_event, input) => runSessionExclusive(async () => {
     const state = requireRuntime();
     const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
     const account = stringValue(record.account);
@@ -702,9 +1381,24 @@ function registerIpc(): void {
       broadcastRuntime();
       return visibleRuntime();
     }
+    if (state.connection.status !== 'network-ready') {
+      pushEvent('login rejected: Internal data plane is not ready');
+      state.connection.message = '安全限制：请先匿名 Connect Internal，再通过隧道内 VIP 登录 User Center。';
+      await saveRuntime();
+      broadcastRuntime();
+      return visibleRuntime();
+    }
+    let auth: Awaited<ReturnType<typeof authenticateLuopanUser>>;
     try {
-      if (state.connection.status !== 'network-ready') await ensureBootstrapResolved();
-      const auth = await authenticateLuopanUser(account, password);
+      auth = await authenticateLuopanUser(account, password);
+    } catch (error) {
+      pushEvent(`login failed ${errorMessage(error)}`);
+      await saveRuntime();
+      broadcastRuntime();
+      return visibleRuntime();
+    }
+    try {
+      await invalidateOverseaIdentitySession('login-rotation');
       activeAccessToken = auth.accessToken;
       state.identity = {
         kind: 'user',
@@ -715,82 +1409,97 @@ function registerIpc(): void {
         tokenExpiresAt: auth.expiresAt,
         loginAt: new Date().toISOString()
       };
+      state.oversea = {
+        ...emptyOversea(),
+        autoConnect: state.oversea.autoConnect,
+        mode: state.oversea.mode,
+        status: 'ensuring',
+        userId: auth.userId,
+        message: '登录成功；正在通过 Internal 确保当前用户的 Oversea 订阅。'
+      };
+      state.events = [];
       pushEvent(`user login ${auth.userId}`);
     } catch (error) {
       activeAccessToken = null;
-      pushEvent(`login failed ${errorMessage(error)}`);
+      state.identity = emptyIdentity();
+      state.oversea = {
+        ...emptyOversea(),
+        autoConnect: state.oversea.autoConnect,
+        mode: state.oversea.mode,
+        message: `登录会话切换失败，已保持匿名安全状态：${errorMessage(error)}`
+      };
+      await deactivateOverseaTunnel().catch(() => undefined);
+      try {
+        clearOverseaManagedSubscriptions('login-rotation-failed');
+      } catch {
+        // The failure is already surfaced in the runtime event below.
+      }
+      pushEvent(`login session rotation failed ${errorMessage(error)}`);
     }
     await saveRuntime();
     broadcastRuntime();
+    if (activeAccessToken) {
+      reconcileOverseaInBackground('login');
+    }
     return visibleRuntime();
-  });
-  ipcMain.handle('luopan:logout', async () => {
+  }));
+  ipcMain.handle('luopan:logout', () => runSessionExclusive(async () => {
     const state = requireRuntime();
+    let cleanupError: string | null = null;
+    try {
+      await invalidateOverseaIdentitySession('logout');
+    } catch (error) {
+      cleanupError = errorMessage(error);
+    }
     activeAccessToken = null;
     state.identity = emptyIdentity();
+    state.events = [];
+    await disconnectLuopanDataPlane('logout');
+    state.oversea = {
+      ...emptyOversea(),
+      autoConnect: state.oversea.autoConnect,
+      mode: state.oversea.mode,
+      lastProxyDecision: 'DIRECT',
+      message: cleanupError
+        ? `已退出登录并清除身份；部分本地清理失败，请退出罗盘后重试：${cleanupError}`
+        : '已退出登录；Oversea 代理、订阅密钥与测试站点会话均已清除。'
+    };
+    if (cleanupError) pushEvent(`logout cleanup failed ${cleanupError}`);
     pushEvent('user logged out');
     await saveRuntime();
     broadcastRuntime();
     return visibleRuntime();
-  });
-  ipcMain.handle('luopan:connect-test-mode', async () => {
+  }));
+  ipcMain.handle('luopan:connect-test-mode', () => runSessionExclusive(async () => {
     await requestLuopanLease();
     await saveRuntime();
     broadcastRuntime();
     return visibleRuntime();
-  });
-  ipcMain.handle('luopan:apply-data-plane', async () => {
-    await applyLuopanDataPlane();
+  }));
+  ipcMain.handle('luopan:apply-data-plane', () => runSessionExclusive(async () => {
+    const ready = await applyLuopanDataPlane();
+    if (ready) reconcileOverseaInBackground('data-plane-ready');
     return visibleRuntime();
-  });
+  }));
   // One-click "connect into Internal": registered lease -> WG data plane ->
   // in-tunnel service VIP reachability. Same building blocks as the two-step
   // buttons; success means the product path to Internal is proven end to end.
-  ipcMain.handle('luopan:connect-internal', async () => {
+  ipcMain.handle('luopan:connect-internal', () => runSessionExclusive(async () => {
     const leased = await requestLuopanLease();
     if (leased) {
       const ready = await applyLuopanDataPlane();
       pushEvent(ready ? 'connect internal complete' : 'connect internal pending data plane');
+      if (ready) reconcileOverseaInBackground('connect-internal');
     }
     await saveRuntime();
     broadcastRuntime();
     return visibleRuntime();
-  });
-  ipcMain.handle('luopan:disconnect-data-plane', async () => {
-    pushEvent('data-plane disconnect started');
-    try {
-      const result = await stopElectronLauncherStandaloneDataPlane({
-        userDataDir: app.getPath('userData'),
-        profileName: 'luopan.conf',
-        ownerId: `${PRODUCT.productId}:${requireRuntime().installId}`,
-        darwinLaunchDaemon: true,
-        allowSystemFallback: false,
-        darwinServiceIdentity: luopanWireGuardServiceIdentity()
-      });
-      const nextDataPlane = activeSession
-        ? diagnoseElectronLauncherStandaloneDataPlane({
-            routePlan: activeSession.routePlan,
-            leaseIp: activeSession.lease.leaseIp,
-            serviceVip: activeSession.lease.serviceVip,
-            dnsServer: activeSession.routePlan.dnsServer
-          })
-        : null;
-      await setConnection({
-        status: nextDataPlane ? runtimeStatusForDataPlane(nextDataPlane) : 'idle',
-        dataPlane: nextDataPlane,
-        message: result.message
-      });
-      pushEvent(result.ok ? 'data-plane stopped' : `data-plane stop failed ${result.message}`);
-    } catch (error) {
-      await setConnection({
-        status: 'error',
-        message: errorMessage(error)
-      });
-      pushEvent(`data-plane stop failed ${errorMessage(error)}`);
-    }
+  }));
+  ipcMain.handle('luopan:disconnect-data-plane', () => runSessionExclusive(async () => {
+    await disconnectLuopanDataPlane('manual');
     return visibleRuntime();
-  });
-  ipcMain.handle('luopan:refresh-snapshot', async () => {
+  }));
+  ipcMain.handle('luopan:refresh-snapshot', () => runSessionExclusive(async () => {
     try {
       const state = requireRuntime();
       const snapshot = await launcherClient().createSnapshot({
@@ -814,6 +1523,7 @@ function registerIpc(): void {
         message: `Snapshot refreshed. ${dataPlane.message}`
       });
       pushEvent('snapshot refreshed');
+      if (dataPlane.ok) reconcileOverseaInBackground('snapshot-ready');
     } catch (error) {
       await setConnection({
         status: 'error',
@@ -822,13 +1532,53 @@ function registerIpc(): void {
       pushEvent(`snapshot failed ${errorMessage(error)}`);
     }
     return visibleRuntime();
-  });
-  ipcMain.handle('luopan:reset-session', async () => {
+  }));
+  ipcMain.handle('luopan:reset-session', () => runSessionExclusive(async () => {
     const state = requireRuntime();
+    activeSession = null;
     state.connection = emptyConnection();
+    await abortOverseaReconcile().catch(() => undefined);
+    await deactivateOverseaTunnel().catch(() => undefined);
+    state.oversea = {
+      ...state.oversea,
+      status: hasActiveUserIdentity(state) ? 'waiting-internal' : 'waiting-login',
+      lastProxyDecision: 'DIRECT',
+      message: hasActiveUserIdentity(state)
+        ? '本地连接状态已重置；重新连接 Internal 后会重新校验 Oversea。'
+        : '本地连接状态已重置；请先连接 Internal，再登录 User Center。'
+    };
     pushEvent('local runtime session reset');
     await saveRuntime();
     broadcastRuntime();
+    return visibleRuntime();
+  }));
+  ipcMain.handle('luopan:refresh-oversea-subscription', async () => {
+    await reconcileOversea('manual-refresh');
+    return visibleRuntime();
+  });
+  ipcMain.handle('luopan:start-oversea', async () => {
+    await startOverseaRuntime('manual');
+    return visibleRuntime();
+  });
+  ipcMain.handle('luopan:stop-oversea', async () => {
+    await stopOverseaRuntime('manual');
+    return visibleRuntime();
+  });
+  ipcMain.handle('luopan:set-oversea-mode', async (_event, mode) => {
+    await setOverseaMode(mode === 'app-rule' ? 'app-rule' : 'app-global');
+    return visibleRuntime();
+  });
+  ipcMain.handle('luopan:set-oversea-auto-connect', async (_event, enabled) => {
+    const autoConnect = enabled === true;
+    await setOversea({ autoConnect, message: autoConnect
+      ? '自动连接已开启；登录且 Internal 就绪后会自动确保订阅并启动代理。'
+      : '自动连接已关闭；订阅仍可手动刷新和启动。' });
+    if (autoConnect) reconcileOverseaInBackground('auto-connect-enabled');
+    return visibleRuntime();
+  });
+  ipcMain.handle('luopan:open-oversea-test-window', async (_event, input) => {
+    const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    await openOverseaTestWindow(record.url);
     return visibleRuntime();
   });
   ipcMain.handle('luopan:check-updates', async () => {
@@ -842,7 +1592,7 @@ function registerIpc(): void {
       // both namespaces and keep the strongest decision. userId is passed so
       // per-user targeted releases (docs/20 §5.8) match logged-in users.
       const updater = releaseUpdater();
-      const userId = state.identity.kind === 'user' ? state.identity.userId : null;
+      const userId = hasActiveUserIdentity(state) ? state.identity.userId : null;
       const checks: ElectronLauncherUpdateCheckResult[] = [];
       for (const componentId of [PRODUCT.release.componentId, `${PRODUCT.release.componentId}-renderer`]) {
         checks.push(await updater.check({
@@ -942,6 +1692,61 @@ function registerIpc(): void {
   });
 }
 
+async function disconnectLuopanDataPlane(reason: 'manual' | 'logout'): Promise<void> {
+  const state = requireRuntime();
+  pushEvent(`data-plane disconnect started ${reason}`);
+  activeSession = null;
+  state.connection = {
+    ...state.connection,
+    status: 'connecting',
+    message: '正在断开 Internal，并先停止 Oversea 应用代理。',
+    updatedAt: new Date().toISOString()
+  };
+  broadcastRuntime();
+  await abortOverseaReconcile().catch((error) => {
+    pushEvent(`oversea ensure abort failed ${errorMessage(error)}`);
+  });
+  await deactivateOverseaTunnel().catch((error) => {
+    pushEvent(`oversea stop before Internal disconnect failed ${errorMessage(error)}`);
+  });
+  await setOversea({
+    status: hasActiveUserIdentity(state) ? 'waiting-internal' : 'waiting-login',
+    lastProxyDecision: 'DIRECT',
+    message: hasActiveUserIdentity(state)
+      ? 'Internal 已断开；重新连接后会重新校验订阅并恢复 Oversea。'
+      : 'Internal 已断开；请先重新连接，再通过隧道内 VIP 登录 User Center。'
+  });
+  try {
+    const result = await stopElectronLauncherStandaloneDataPlane({
+      userDataDir: app.getPath('userData'),
+      profileName: 'luopan.conf',
+      ownerId: `${PRODUCT.productId}:${state.installId}`,
+      darwinLaunchDaemon: true,
+      allowSystemFallback: false,
+      darwinServiceIdentity: luopanWireGuardServiceIdentity()
+    });
+    state.connection = {
+      ...emptyConnection(),
+      status: result.ok ? 'idle' : 'error',
+      bootstrapBaseUrl: activeBootstrapBaseUrl,
+      message: result.message,
+      updatedAt: new Date().toISOString()
+    };
+    pushEvent(result.ok ? 'data-plane stopped' : `data-plane stop failed ${result.message}`);
+  } catch (error) {
+    state.connection = {
+      ...emptyConnection(),
+      status: 'error',
+      bootstrapBaseUrl: activeBootstrapBaseUrl,
+      message: errorMessage(error),
+      updatedAt: new Date().toISOString()
+    };
+    pushEvent(`data-plane stop failed ${errorMessage(error)}`);
+  }
+  await saveRuntime();
+  broadcastRuntime();
+}
+
 // Step 1 of connecting into Internal: enroll a lease against the registered
 // ProductNetwork (identityKind anonymous -> anonymous lease range). In
 // registered mode the server enforces the entitlement gate: ProductNetwork
@@ -949,7 +1754,7 @@ function registerIpc(): void {
 // launcher-standalone capabilities.
 async function requestLuopanLease(): Promise<boolean> {
   const state = requireRuntime();
-  const loggedIn = state.identity.kind === 'user' && Boolean(state.identity.userId);
+  const loggedIn = hasActiveUserIdentity(state);
   await setConnection({
     status: 'connecting',
     message: state.config.sdkTestMode
@@ -1003,7 +1808,7 @@ async function applyLuopanDataPlane(): Promise<boolean> {
     if (!activeSession) throw new Error('Request a Luopan lease before applying the local data plane.');
     const privateKey = stringValue(activeSession.wireGuard.privateKey);
     if (!privateKey) throw new Error('Luopan WireGuard private key is missing; request a fresh lease.');
-    if (DATA_PLANE_MODE === 'reuse') {
+    if (luopanDataPlaneMode() === 'reuse') {
       const attached = attachToSharedDataPlane(activeSession);
       if (attached) {
         await setConnection({
@@ -1302,24 +2107,27 @@ async function postLauncherNetwork(pathname: string, body: Record<string, unknow
 }
 
 // User Center login via the SDK gateway OAuth password grant (docs/15). The
-// returned principal.userId is the key for the login-range lease
-// (identityKind 'user') and for Release Center user targeting.
+// This is intentionally called only after Internal is network-ready, so the
+// password is sent to the in-tunnel product VIP rather than a public
+// bootstrap endpoint. The returned principal.userId is the key for the
+// login-range lease and Release Center user targeting.
 async function authenticateLuopanUser(account: string, password: string): Promise<{
   userId: string;
   displayName: string | null;
   scopes: string[];
-  accessToken: string | null;
+  accessToken: string;
   expiresAt: string | null;
 }> {
   const response = await fetch(`${effectiveApiBaseUrl()}/internal/v1/sdk/oauth/token`, {
     method: 'POST',
+    signal: AbortSignal.timeout(20_000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       grant_type: 'password',
       username: account,
       password,
       audience: 'mx-sdk',
-      scope: 'auth.read network.hdi.status',
+      scope: 'auth.read network.hdi.status oversea.subscription.ensure',
       requestId: `luopan-oauth-${Date.now()}`
     })
   });
@@ -1336,11 +2144,17 @@ async function authenticateLuopanUser(account: string, password: string): Promis
   const userId = stringValue(principal.userId)
     || (subject?.startsWith('user:') ? stringValue(subject.slice('user:'.length)) : null);
   if (!userId) throw new Error('User Center login did not return a user principal.');
+  const accessToken = stringValue(token.access_token);
+  if (!accessToken) throw new Error('User Center login did not return an access token.');
+  const scopes = typeof token.scope === 'string' ? token.scope.split(/\s+/).filter(Boolean) : [];
+  if (!scopes.includes('oversea.subscription.ensure')) {
+    throw new Error('User Center login token is missing oversea.subscription.ensure scope.');
+  }
   return {
     userId,
     displayName: stringValue(principal.displayName),
-    scopes: typeof token.scope === 'string' ? token.scope.split(/\s+/).filter(Boolean) : [],
-    accessToken: stringValue(token.access_token),
+    scopes,
+    accessToken,
     expiresAt: stringValue(token.expires_at)
   };
 }
@@ -1365,6 +2179,26 @@ function normalizeConfig(input: unknown, fallback: RuntimeConfig = defaultConfig
     mode: 'standalone',
     sdkTestMode: typeof record.sdkTestMode === 'boolean' ? record.sdkTestMode : fallback.sdkTestMode,
     deviceLabel: stringValue(record.deviceLabel) || fallback.deviceLabel
+  };
+}
+
+function applyEnvironmentConfigOverrides(config: RuntimeConfig): RuntimeConfig {
+  const baseUrl = stringValue(environmentValue('LUOPAN_LAUNCHER_BASE_URL'))
+    || stringValue(environmentValue('MX_LAUNCHER_BASE_URL'));
+  const bootstrapValue = environmentValue('LUOPAN_BOOTSTRAP_URLS');
+  const bootstrapUrls = bootstrapValue === undefined
+    ? []
+    : parseElectronLauncherBootstrapUrls(bootstrapValue);
+  const sdkTestMode = environmentValue('LUOPAN_SDK_TEST_MODE');
+  const deviceLabel = stringValue(environmentValue('LUOPAN_DEVICE_LABEL'));
+  return {
+    ...config,
+    baseUrl: baseUrl ? normalizeBaseUrl(baseUrl) : config.baseUrl,
+    bootstrapUrls: bootstrapUrls.length > 0 ? bootstrapUrls : config.bootstrapUrls,
+    sdkTestMode: sdkTestMode === undefined
+      ? config.sdkTestMode
+      : booleanish(sdkTestMode, false),
+    deviceLabel: deviceLabel || config.deviceLabel
   };
 }
 
@@ -1414,6 +2248,40 @@ function normalizeIdentity(input: unknown): RuntimeIdentity {
     tokenExpiresAt: stringValue(record.tokenExpiresAt),
     loginAt: stringValue(record.loginAt)
   };
+}
+
+function normalizeOversea(input: unknown): RuntimeOversea {
+  const fallback = emptyOversea();
+  const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+  const status = normalizeOverseaStatus(record.status);
+  return {
+    status,
+    autoConnect: typeof record.autoConnect === 'boolean' ? record.autoConnect : fallback.autoConnect,
+    mode: record.mode === 'app-rule' ? 'app-rule' : 'app-global',
+    userId: stringValue(record.userId),
+    entitlementId: stringValue(record.entitlementId),
+    subscriptionPath: stringValue(record.subscriptionPath),
+    subscriptionName: stringValue(record.subscriptionName),
+    siteIds: Array.isArray(record.siteIds) ? record.siteIds.filter((item): item is string => typeof item === 'string') : [],
+    syncStatus: stringValue(record.syncStatus),
+    nodeCount: Number.isInteger(record.nodeCount) && Number(record.nodeCount) >= 0 ? Number(record.nodeCount) : 0,
+    ensuredAt: stringValue(record.ensuredAt),
+    startedAt: stringValue(record.startedAt),
+    lastTestUrl: stringValue(record.lastTestUrl) || fallback.lastTestUrl,
+    lastTestAt: stringValue(record.lastTestAt),
+    lastProxyDecision: stringValue(record.lastProxyDecision),
+    message: stringValue(record.message) || fallback.message
+  };
+}
+
+function normalizeOverseaStatus(value: unknown): RuntimeOverseaStatus {
+  if (value === 'waiting-login'
+    || value === 'waiting-internal'
+    || value === 'pending-sync'
+    || value === 'ready'
+    || value === 'stopped'
+    || value === 'error') return value;
+  return 'waiting-login';
 }
 
 function normalizeUpdate(input: unknown): RuntimeUpdate {
@@ -1471,7 +2339,7 @@ function normalizeDataPlane(value: unknown): ElectronLauncherStandaloneDataPlane
 
 function normalizeBaseUrl(value: string): string {
   const trimmed = value.trim().replace(/\/+$/, '');
-  if (!trimmed) return 'http://10.88.88.88:18090';
+  if (!trimmed) return 'http://10.88.100.3:18090';
   return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
 }
 
@@ -1482,6 +2350,13 @@ function stringValue(value: unknown): string | null {
 function booleanish(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined) return fallback;
   return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+// Dynamic access deliberately prevents Quasar/Vite from replacing project
+// .env values with build-time string literals in Electron main. Packaged apps
+// must still be able to load <userData>/.env before defaultConfig() runs.
+function environmentValue(name: string): string | undefined {
+  return process.env[name];
 }
 
 function uniqueStrings(values: string[]): string[] {
@@ -1513,6 +2388,7 @@ function errorMessage(error: unknown): string {
 }
 
 app.whenReady().then(async () => {
+  if (!ownsSingleInstanceLock) return;
   // .env support for packaged builds (no shell env there). Real env vars win;
   // then per-machine <userData>/.env; then the .env shipped inside the app
   // (electron-builder extraResources); then the project .env during dev.
@@ -1526,6 +2402,14 @@ app.whenReady().then(async () => {
     console.log(`[luopan] env file loaded: ${envResult.loadedFrom} (${envResult.applied.join(', ') || 'no new keys'})`);
   }
   runtime = await loadRuntime();
+  try {
+    await initializeOverseaTunnel();
+  } catch (error) {
+    const message = `Oversea runtime initialization failed: ${errorMessage(error)}`;
+    requireRuntime().oversea = { ...requireRuntime().oversea, status: 'error', message };
+    pushEvent(message);
+    await saveRuntime();
+  }
   registerIpc();
   await createWindow();
   void adoptUpdatesAndReportInstallCompletion().catch((error) => {
@@ -1541,4 +2425,21 @@ app.on('activate', () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', (event) => {
+  if (!overseaTunnel || overseaClosed) return;
+  event.preventDefault();
+  if (!overseaClosePromise) {
+    const tunnel = overseaTunnel;
+    overseaClosePromise = tunnel.close()
+      .catch((error) => {
+        console.warn('[luopan] Oversea tunnel shutdown failed:', errorMessage(error));
+      })
+      .finally(() => {
+        overseaClosed = true;
+        overseaTunnel = null;
+        app.quit();
+      });
+  }
 });

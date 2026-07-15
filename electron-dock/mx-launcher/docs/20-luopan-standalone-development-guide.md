@@ -16,6 +16,60 @@
 > demo 行为与包 API 冲突时以包为准；遇到"demo 里有但包里没有"的能力，
 > 找平台方下沉进包，**不要复制 main.cjs**。
 
+## 0. 当前环境的最短独立启动路径
+
+Luopan 已在现网 Internal 注册，不需要 SDK test mode。在
+`demos/luopan` 执行：
+
+```sh
+cp .env.example .env
+curl -fsS http://116.62.51.154:18090/bootstrap-healthz
+curl -fsS http://116.62.51.154:18090/internal/v1/launcher-network/products/luopan
+curl -fsS http://116.62.51.154:18090/internal/v1/app-center/apps/luopan
+pnpm run setup
+pnpm run dev
+```
+
+`.env` 的正式配置是两个阶段的地址：
+
+```dotenv
+LUOPAN_BOOTSTRAP_URLS=http://116.62.51.154:18090
+LUOPAN_LAUNCHER_BASE_URL=http://10.88.100.3:18090
+```
+
+- 这是隧道建立前就可达的公网 facade，仅用于 `/healthz`、匿名 enroll、
+  snapshot、peer sync 和无用户凭证的连网前请求。账号、密码与 bearer token
+  只允许在 `network-ready` 后发往隧道内 VIP。多个候选可用逗号或空格
+  排序，第一个 `/healthz` 成功的 URL 被选中。
+- `LUOPAN_LAUNCHER_BASE_URL` 只允许是注册的产品 VIP
+  `http://10.88.100.3:18090`，并且只在网络进入 `network-ready` 后使用；不得把
+  bootstrap 公网地址或 MX-H2I/foundation 地址填进来。
+- 不要设 `LUOPAN_SDK_TEST_MODE=1`；它会绕过正式 ProductNetwork /
+  AppCenter entitlement 验收路径。
+- MX-H2I `.env` 的 `HOST_RESOLVE`、`DNS_SERVERS`、`RESOLVE_MODE` 不是
+  Luopan 配置项。MX-H2I 当前仍在 `main.cjs` 保留了更复杂的 Host/DNS
+  解析；下沉的 `@qpjoy/electron-launcher/bootstrap` 2.3.2 是有序 URL
+  `/healthz` 探测模型，不能整套复制 MX-H2I 的变量。
+
+窗口出现后点 **Connect Internal**：bootstrap 探测 → registered anonymous
+lease → Domestic peer sync → 系统授权安装 `luopan.conf` → 路由与
+`10.88.100.3:18090/healthz` 验证。终态必须是 `network-ready`。随后才登录
+User Center；若要使用登录 lease 段，再执行一次 Disconnect → Connect Internal。
+
+当前骨架直接覆盖网络 lease/WireGuard/VIP、User Center、内嵌 Oversea 和 Release
+Center；还没有专用的 permission/grant 测试 IPC 或页面。登录与 `network-ready`
+两项齐备后，主进程会自动确保当前用户的 Oversea 订阅，等待远端同步 ready，再启动
+隔离测试 Session 的应用代理。独立网络的成功判据目前也是 VIP
+`/healthz`：代码会登记 DNS ownership，但仍设置 `suppressWireGuardDns: true`，因此
+`luopan.mxinfo-inc.cn` 的系统解析尚不属于这条已验证路径。这两项是后续功能接线，
+不能把“窗口可启动 / VIP network-ready”误报为权限与域名链路也已验收。
+
+旧版 demo 已经生成过 `<userData>/luopan-runtime.json` 时，CONFIG 面板可能保留旧
+URL；显式的 process/`.env` 值优先于这些持久值。无 `.env` 运行时，应在 CONFIG
+把 Base URL 改为 `10.88.100.3:18090`、Bootstrap URLs 改为
+`116.62.51.154:18090`。不要只为修改 URL 删除 runtime；删除会同时更换
+installId/deviceId，导致已有 Release Center 定向和证据链失去连续性。
+
 ## 1. V2 总体架构
 
 ### 1.1 三层结构
@@ -29,10 +83,10 @@
 └──────────────────────────▲──────────────────────────────────┘
                            │ 每产品仅经由自己的 VIP（HTTP/WG）
 ┌──────────────────────────┴──────────────────────────────────┐
-│ @qpjoy/* npm 包（契约层，2.2.0 lockstep）                     │
-│   electron-launcher（唯一必装 facade，见 §1.3 子路径地图）      │
+│ @qpjoy/* npm 包（契约层，2.3.3 lockstep）                     │
+│   electron-launcher（网络/身份/Oversea ensure facade）         │
 │   底层：electron-core-wireguard / electron-plugin-tunnel /    │
-│         electron-core-mihomo（一般不直接依赖）                 │
+│         electron-core-mihomo（Luopan 的代理 runtime 直接消费） │
 └──────────────────────────▲──────────────────────────────────┘
                            │ import
 ┌──────────────────────────┴──────────────────────────────────┐
@@ -68,6 +122,7 @@ mx-h2i 用子路径动态 import（CJS 环境）。
 | 子路径 | 职责 | Luopan 用到 |
 | --- | --- | --- |
 | `.`（主入口） | `createElectronLauncher`（enroll/lease/snapshot）、`defineLauncherProduct`、下列全部 re-export | ✅ |
+| `/bootstrap` | 首连 URL 解析、`/healthz` 探测与打包版 `.env` 加载 | ✅（经主入口） |
 | `/standalone-data-plane` | WG 数据面 apply/stop/diagnose、ownership claim 构建/读写 | ✅ |
 | `/network-ownership-registry` | 本机多产品共存仲裁（路由/DNS/PAC claim 的登记与合并） | ✅（经 data-plane 间接） |
 | `/wireguard` | WG profile/service 底层操作（一般经 data-plane 间接使用） | 按需 |
@@ -76,6 +131,7 @@ mx-h2i 用子路径动态 import（CJS 环境）。
 | `/release-updater` | Release Center `check()`（服务端决策）+ `report()`（证据链） | ✅ |
 | `/release-update-executor` | docs/17 状态机执行器：下载/校验/staged/激活/回滚/adoption | ✅ |
 | `/local-ports` | 稳定哈希端口分配（按 productId 命名空间，冲突退避） | ✅ |
+| `/oversea`（主入口 re-export） | 登录用户 ensure-subscription，Bearer 只用于换取 inline YAML | ✅ |
 
 ## 2. MX-H2I 工作原理走读
 
@@ -93,7 +149,8 @@ mx-h2i 用子路径动态 import（CJS 环境）。
 2. `initializeSystemDomainProxy()`：恢复系统域名代理归并面。
 3. 启动网络诊断（异步、失败仅告警）。
 4. `registerIpc()` → 托盘 → 主窗口。
-5. `restoreH2oRuntimeAfterStartup()`：恢复 embed H2O（Luopan 无此步）。
+5. `restoreH2oRuntimeAfterStartup()`：恢复 embed H2O。Luopan 不恢复旧用户代理，而是
+   初始化隔离 tunnel runtime；重启后因 token 不落盘，必须重新登录再自动恢复。
 6. `reportInstallCompletionAndAdoptPendingUpdates()`：**更新系统的启动期簿记**
    （§2.5 第 4 步），luopan demo 已有对应实现。
 7. 三个 watcher：窗口 reveal、WG 恢复、网络变化（睡眠唤醒/切网自愈）。
@@ -196,6 +253,12 @@ MX-H2I 除了自己是 standalone launcher，还承载 embed 应用（H2O 插件
 
 对 Luopan 的含义见 §6。
 
+这里的“未下沉”只指 **通用 AppCenter host/broker/第三方 embed 应用**。Luopan
+现在内置的 Home to Oversea 不是把 `mx-app-h2o` 嵌入进来：身份/ensure 契约已下沉到
+`@qpjoy/electron-launcher`，mihomo 生命周期/inline YAML/测试窗口复用
+`@qpjoy/electron-plugin-tunnel`，产品壳只保留窄状态机与 `luopan:*` IPC。因此仍保持
+`launcherActions.appCenter=false`，也没有复制 `mx-h2i/main.cjs`。
+
 ### 2.7 状态持久化与防回归快照
 
 mx-h2i 的约定，建议 Luopan 照搬（luopan demo 已具备前两条）：
@@ -211,19 +274,20 @@ mx-h2i 的约定，建议 Luopan 照搬（luopan demo 已具备前两条）：
 
 ## 3. Luopan 骨架走读（demo 现状）
 
-`demos/luopan/src-electron/electron-main.ts`（约 1200 行，全部是产品壳 + 包 API
+`demos/luopan/src-electron/electron-main.ts`（全部是产品壳 + 包 API
 编排，无复制的平台逻辑），按块读：
 
 | 块 | 内容 | 关键 API |
 | --- | --- | --- |
 | PRODUCT 定义 | `defineLauncherProduct({ productId: 'luopan', release: { componentId: 'luopan', channel: 'shadow', ... } })`——产品身份的唯一来源，更新检查/ownership 都从这取值 | `defineLauncherProduct` |
-| runtime state | `RuntimeState`（installId/deviceId/config/connection/update/events），loadRuntime/saveRuntime/normalize 三件套 | — |
+| runtime state | `RuntimeState`（installId/deviceId/config/connection/oversea/update/events），loadRuntime/saveRuntime/normalize 三件套 | — |
 | lease 获取 | `luopan:connect-test-mode` → `launcherClient().connectNetwork(...)`（registered/test 模式由 `sdkTestMode` 决定，默认 registered；登录后自动带 `identityKind: 'user'` + userId 切登录 lease 段） | `createElectronLauncher` |
-| 用户中心 | `luopan:login` / `luopan:logout`：SDK gateway OAuth password grant（docs/15 `/internal/v1/sdk/oauth/token`）→ `principal.userId` 存入 runtime.identity；access token 只留内存。登录用户可命中 Release Center 按 userId 定向的发版 | SDK gateway |
+| 用户中心 | `network-ready` 后，`luopan:login` / `luopan:logout` 才经隧道内 VIP 执行 SDK gateway OAuth password grant（docs/15 `/internal/v1/sdk/oauth/token`）→ `principal.userId` 存入 runtime.identity；access token 只留内存。登录用户可命中 Release Center 按 userId 定向的发版 | SDK gateway |
 | 数据面 apply | `luopan:apply-data-plane`：standalone 模式走 `applyElectronLauncherStandaloneDataPlane`（profile `luopan.conf`、ownerId `luopan:<installId>`、`failOnOwnershipConflicts: true`）；reuse 模式（`LUOPAN_DATA_PLANE_MODE=reuse`）尝试挂到已有共享数据面 | `/standalone-data-plane` |
 | 一键连入 | `luopan:connect-internal` = lease + 数据面 + 隧道内 VIP healthz，成功即 `network-ready`（§4.5 客户端部分） | 同上 |
 | 断开 | `luopan:disconnect-data-plane` → `stopElectronLauncherStandaloneDataPlane`（只释放自己的 claim） | 同上 |
 | snapshot | `luopan:refresh-snapshot` → `createSnapshot` + `routePlanFromSnapshot` + diagnose | 主入口 |
+| **Oversea** | 登录 + Internal ready 双门 → ensure ready → inline YAML → 应用级 mihomo → 隔离测试窗口；登出/断网停止 | launcher `/oversea` + `electron-plugin-tunnel` |
 | **更新** | `luopan:check-updates` / `apply-update` / `open-staged-installer` / `rollback-update-slot` + 启动期簿记 | §5 逐段讲解 |
 
 正式开发 = 保留这个骨架的结构，替换 UI 与产品逻辑，把 `connect-test-mode` 换成
@@ -232,9 +296,10 @@ mx-h2i 的约定，建议 Luopan 照搬（luopan demo 已具备前两条）：
 开发/打包模式（红线 5）：
 
 ```sh
-pnpm setup        # local：workspace 直连，日常开发
-pnpm setup:npm    # npm：从 registry 装 2.2.0（正式打包前必须）
-pnpm dev / build  # quasar dev / build -m electron
+pnpm run setup        # local：workspace 直连，日常开发；不能省略 run
+pnpm run setup:npm    # npm：从 registry 装 2.3.3（正式打包前必须）
+pnpm run dev          # quasar dev -m electron
+pnpm run build        # quasar build -m electron --skip-pkg
 ```
 
 ## 4. 网络与共存：开发要点
@@ -324,8 +389,8 @@ demo 默认 **registered 模式**（`sdkTestMode=false`），工具栏 **Connect
   `resolveElectronLauncherBootstrap`（候选 URL 顺序探测 `/healthz`，命中即钉住）、
   `parseElectronLauncherBootstrapUrls`（env 值解析）、`loadElectronLauncherEnvFiles`
   （打包版 .env 加载，真实 env 优先）。luopan demo 的接线：`.env` 写
-  `LUOPAN_BOOTSTRAP_URLS`（或 CONFIG 面板填），enroll/登录/更新在
-  `network-ready` 前走解析出的 bootstrap URL，之后切回 VIP；每次 Connect 重新
+  `LUOPAN_BOOTSTRAP_URLS`（或 CONFIG 面板填），匿名 enroll/bootstrap 在
+  `network-ready` 前走解析出的 bootstrap URL；登录只在网络就绪后走 VIP。每次 Connect 重新
   探测以适应切网。新产品照抄 demo 的 `ensureBootstrapResolved` /
   `effectiveApiBaseUrl` 两个函数即可。
 - **SDK test mode 的真实语义**：server 侧 `launcherNetworkSdkTestModeEnabled=true`
@@ -493,9 +558,9 @@ artifact 的 execution 状态（含 deferredReason/error），按钮四个对应
 
 ## 6. embed launcher（可选章节）
 
-**Luopan 不承载 embed 应用**（预期的第一阶段）：§2.6 与 mx-h2i 里所有
-AppCenter host / broker / H2O 相关代码与你无关，`defineLauncherProduct` 里
-`appCenter: false` 保持即可。上面 1–5 节就是全部工作量。
+**Luopan 不承载 embed 应用**：§2.6 的 AppCenter host/broker 代码仍与 Luopan
+无关，`defineLauncherProduct` 里 `appCenter: false` 保持。内嵌 Home to Oversea
+是产品能力，不是 hosted `mx-app-h2o`，两者不要重新耦合。
 
 **如果 Luopan 之后要承载 embed 应用**（在 Luopan 里跑第三方插件）：
 
@@ -511,15 +576,18 @@ AppCenter host / broker / H2O 相关代码与你无关，`defineLauncherProduct`
 
 ## 7. 从零到验收的里程碑
 
-1. **跑通模板**：`pnpm setup && pnpm dev`，测试模式拿 lease、apply 数据面、
-   snapshot 刷新全绿（未入网用 `LUOPAN_LAUNCHER_BASE_URL` 指向平台给的地址）。
+1. **跑通模板**：按 §0 配置 `LUOPAN_BOOTSTRAP_URLS`，`pnpm run setup && pnpm run dev`，
+   registered 模式拿 lease、apply 数据面、snapshot 刷新全绿。
 2. **连真实 VIP**：平台方自查 healthz/DNS/gateway 后给 base URL；enroll 成功、
    `routeCidrs` 只含自己的两段。
 3. **共存矩阵**：与 MX-H2I 同机跑 `coexist-check.mjs run` C1–C12 全绿
    （Windows + macOS）。← **第一个正式验收里程碑**
-4. **更新链路**：§5.8 端到端自测全过；面板字段齐全。
-5. **产品化**：换 UI/登录/业务；期间任何"想抄 main.cjs"的冲动 → 找平台方下沉。
-6. **发布**：`pnpm setup:npm` 切 npm 模式构建正式包（红线 5）、签名
+4. **Oversea 链路**：先匿名连接 Internal，再登录；用户 ensure 返回 ready，mixed 端口监听，隔离测试窗口
+   `resolveProxy` 命中；pending sync 不误报成功，登出后端口释放。
+5. **更新链路**：§5.8 端到端自测全过；面板字段齐全。
+6. **产品化**：换 UI/登录/业务；期间任何"想抄 main.cjs"的冲动 → 找平台方下沉。
+7. **发布**：依次发布 tunnel engine `0.1.6`、core-mihomo `0.1.2`、tunnel `0.1.18`，
+   再发布 launcher 六包 train `2.3.3`；随后 `pnpm run setup:npm` 构建正式包（红线 5）、签名
    （Windows 内部 CA / macOS Developer ID + notarize，见 docs/19 §7.1）、注册进
    Release Center 走灰度。
 
@@ -536,5 +604,6 @@ AppCenter host / broker / H2O 相关代码与你无关，`defineLauncherProduct`
   激活被 gate defer 后再次 apply 即可；报表缺口服务端可见，不需要客户端补偿。
 - **两个产品同时检查更新会互相干扰吗？** 不会：per-channel 独立 scheduler、
   独立 userData 目录、独立 installId（共存矩阵 C11 验证这一点）。
-- **pnpm 版本**：仓库用 pnpm 11（npm 模式 workspace 文件里是 `allowBuilds`
-  审批字段）；本机 pnpm ≥11 即可。
+- **pnpm 版本**：仓库 `packageManager` 锁定 `pnpm@10.24.0`，优先通过
+  Corepack 使用该版本。npm 模式生成的 workspace 同时兼容 pnpm 10 的
+  `onlyBuiltDependencies` 与新版的 `allowBuilds`。

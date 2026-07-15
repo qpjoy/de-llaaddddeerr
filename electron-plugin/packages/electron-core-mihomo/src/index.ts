@@ -147,7 +147,7 @@ export function renderRuntimeConfig(input: RenderRuntimeConfigInput): RenderedRu
   }
   config.dns = {
     ...(isRecord(config.dns) ? config.dns : {}),
-    ...dnsOverlay(input.settings.ports.dns, useGeoRules)
+    ...dnsOverlay(input.settings.ports.dns, useGeoRules, input.settings.mode === 'system-tun' ? '0.0.0.0' : '127.0.0.1')
   };
   if (!useGeoRules && isRecord(config.dns)) {
     delete config.dns.fallback;
@@ -270,10 +270,10 @@ function ensureProxyGroup(config: MihomoConfig, proxyPolicyName: string): void {
   ];
 }
 
-function dnsOverlay(dnsPort: number, useGeoRules: boolean): Record<string, unknown> {
+function dnsOverlay(dnsPort: number, useGeoRules: boolean, listenHost: string): Record<string, unknown> {
   const overlay: Record<string, unknown> = {
     enable: true,
-    listen: `0.0.0.0:${dnsPort}`,
+    listen: `${listenHost}:${dnsPort}`,
     ipv6: false,
     'use-hosts': true,
     'use-system-hosts': true,

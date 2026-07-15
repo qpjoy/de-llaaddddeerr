@@ -75,6 +75,28 @@ can depend only on the capabilities they own:
 | `@qpjoy/electron-launcher/wireguard` | WireGuard profile rendering, route proof, and peer recovery |
 | `@qpjoy/electron-launcher/system-domain-proxy` | standalone local PAC/proxy edge plus OS PAC apply/restore/verify |
 | `@qpjoy/electron-launcher/standalone-data-plane` | read-only standalone lease/data-plane route diagnostics |
+| `@qpjoy/electron-launcher/oversea` | logged-in user ensure-subscription exchange with inline YAML and no persisted bearer |
+
+An Internal-ready standalone product can exchange its in-memory login token for
+the current user's Oversea subscription. Only start a proxy runtime when
+`ready` is true; `pending-runtime-sync` means Internal can render YAML but the
+remote account has not yet passed synchronization.
+
+```ts
+import { ensureElectronLauncherUserOverseaSubscription } from '@qpjoy/electron-launcher/oversea';
+
+const result = await ensureElectronLauncherUserOverseaSubscription({
+  baseUrl: 'http://10.88.100.3:18090',
+  userId,
+  accessToken,
+  requestedBy: 'luopan-oversea'
+});
+
+if (result.ready && result.subscription) {
+  // Pass result.subscription.yaml directly to a trusted Electron main-process
+  // runtime. Do not expose it to the renderer or put the token in its URL.
+}
+```
 
 For standalone products, keep the state model split into two phases:
 

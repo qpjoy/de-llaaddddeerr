@@ -9011,7 +9011,7 @@ async function authenticateUserViaGateway(baseUrl, account, password, requestOpt
       username: account,
       password,
       audience: 'mx-sdk',
-      scope: 'auth.read appcenter.read network.hdi.status network.proxy.app network.dns.policy',
+      scope: 'auth.read appcenter.read network.hdi.status network.proxy.app network.dns.policy oversea.subscription.ensure',
       requestId: makeRequestId('oauth')
     }
   });

@@ -21,12 +21,14 @@ export interface CreateElectronTunnelHost {
 export interface CreateElectronTunnelOptions extends Partial<Omit<TunnelManagerOptions, 'userDataPath'>> {
   userDataPath?: string;
   startAdminServer?: boolean;
+  registerIpc?: boolean;
 }
 
 export interface ElectronTunnelHandle {
   manager: MihomoManager;
   admin: AdminServer;
   applyProxy: () => Promise<void>;
+  openTestWindow: (url: string) => Promise<void>;
   status: () => TunnelStatus;
   /**
    * Async on purpose: the plugin host awaits this disposer during
@@ -111,6 +113,9 @@ export function createElectronTunnel(host: CreateElectronTunnelHost, options: Cr
     userDataPath: options.userDataPath ?? host.app.getPath('userData'),
     bundledEngineDir: options.bundledEngineDir ?? defaultBundledEngineDir()
   });
+  const testWindows = new Set<BrowserWindow>();
+  let closePromise: Promise<void> | null = null;
+  let ipcDisposed = false;
   async function applyProxy(): Promise<void> {
     const status = manager.status();
     if (!status.running) {
@@ -147,6 +152,8 @@ export function createElectronTunnel(host: CreateElectronTunnelHost, options: Cr
         nodeIntegration: false
       }
     });
+    testWindows.add(win);
+    win.once('closed', () => testWindows.delete(win));
 
     win.webContents.setWindowOpenHandler(({ url: childUrl }) => {
       if (/^https?:\/\//i.test(childUrl)) {
@@ -173,9 +180,11 @@ export function createElectronTunnel(host: CreateElectronTunnelHost, options: Cr
     admin.start();
   }
 
-  const disposeIpc = registerTunnelIpc(host.ipcMain, manager, {
-    afterSettingsChange: applyProxy
-  });
+  const disposeIpc = options.registerIpc === false
+    ? () => undefined
+    : registerTunnelIpc(host.ipcMain, manager, {
+        afterSettingsChange: applyProxy
+      });
 
   // Self-register in the shared marketplace.db so the panel (when it shows
   // up later) knows the tunnel is here. Best-effort; failure is silent —
@@ -189,15 +198,45 @@ export function createElectronTunnel(host: CreateElectronTunnelHost, options: Cr
     manager,
     admin,
     applyProxy,
+    openTestWindow,
     status: () => manager.status(),
-    close: async () => {
-      // Order matters:
-      //   1. Unregister IPC first so renderers stop sending fresh requests.
-      //   2. Stop the admin HTTP server and AWAIT the port release.
-      //   3. Tear down the mihomo child process.
-      disposeIpc();
-      await admin.stop();
-      await manager.close();
+    close: () => {
+      if (closePromise) return closePromise;
+      closePromise = (async () => {
+        const failures: unknown[] = [];
+        if (!ipcDisposed) {
+          try {
+            disposeIpc();
+            ipcDisposed = true;
+          } catch (error) {
+            failures.push(error);
+          }
+        }
+        try {
+          await host.session.setProxy({ mode: 'direct' });
+        } catch (error) {
+          failures.push(error);
+        }
+        for (const win of testWindows) {
+          if (!win.isDestroyed()) win.destroy();
+        }
+        testWindows.clear();
+        try {
+          await admin.stop();
+        } catch (error) {
+          failures.push(error);
+        }
+        try {
+          await manager.close();
+        } catch (error) {
+          failures.push(error);
+        }
+        if (failures.length > 0) throw new AggregateError(failures, 'electron tunnel close failed');
+      })().catch((error) => {
+        closePromise = null;
+        throw error;
+      });
+      return closePromise;
     }
   };
 }

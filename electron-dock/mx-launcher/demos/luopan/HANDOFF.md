@@ -11,21 +11,26 @@
 
 ## 依赖
 
-只需要从 npm 安装（当前 **2.2.0**，全组 lockstep 发布。`/release/check` 服务端灰度
-决策、更新执行器 `activateStaged` 都是 2.2.0 才有的，不要降级）：
+只需要从 npm 安装（当前 **2.3.3**，全组 lockstep 发布。bootstrap URL
+解析与打包版 `.env` 加载从 2.3.2 起提供，不要降级）：
 
 | 包 | 用途 |
 | --- | --- |
-| `@qpjoy/electron-launcher@^2.2.0` | 唯一必装。WG/网络、ownership registry、release-updater、release-update-executor、local-ports、诊断都从它（或其子路径）导入 |
-| `@qpjoy/ui-design-neon-void@^2.2.0` | 可选，UI 组件库 |
+| `@qpjoy/electron-launcher@^2.3.3` | bootstrap、WG/网络、ownership registry、release、local-ports，以及登录用户 `ensure-subscription` 客户端 |
+| `@qpjoy/electron-plugin-tunnel@^0.1.18` | mihomo 生命周期、inline YAML、隔离 Session 代理和测试窗口；传递安装当前平台 engine |
+| `@qpjoy/ui-design-neon-void@^2.3.3` | 可选，UI 组件库 |
+
+表中版本是当前 workspace 基线。正式切 `setup:npm` 前，必须先发布包含本次
+Oversea API（inline YAML、`openTestWindow`、可关闭通用 IPC、四端口持久化）的下一批
+npm 包；不能拿 registry 上同版本的旧产物冒充本次 workspace 实现。
 
 开发/打包双模式（仓库内开发时）：
 
 ```sh
-pnpm setup        # local: workspace 包直连（日常开发）
-pnpm setup:npm    # npm: 从 registry 安装已发布版本（正式打包前必须切到此模式）
-pnpm dev          # quasar dev -m electron
-pnpm build        # quasar build -m electron --skip-pkg
+pnpm run setup        # local: workspace 包直连（日常开发；不能省略 run）
+pnpm run setup:npm    # npm: 从 registry 安装已发布版本（正式打包前必须切到此模式）
+pnpm run dev          # quasar dev -m electron
+pnpm run build        # quasar build -m electron --skip-pkg
 ```
 
 **红线：对外分发的安装包必须在 npm 模式下构建**；workspace/tarball 构建的包不得注册进
@@ -50,25 +55,35 @@ VIP——它是 Luopan 到达 Internal 的**唯一路由**，不是装饰性标�
 
 **Bootstrap 首连（开发与打包版通用）**：注册的 base URL（`10.88.100.3`）是隧道内
 VIP，首次 enroll 时不可达。把 bootstrap 可达入口写进 `.env`
-（`LUOPAN_BOOTSTRAP_URLS=http://<lan>:18090`，逗号分隔多候选，见 `.env.example`）：
-连接/登录/更新在 `network-ready` 之前走首个探测通过的 bootstrap URL，之后自动切回
-VIP。加载顺序：真实 env > `<userData>/.env`（每台机器可覆盖）> 打包内
+（当前可用 `LUOPAN_BOOTSTRAP_URLS=http://116.62.51.154:18090`，也可按优先级
+追加 LAN 入口，逗号分隔，见 `.env.example`）：
+`network-ready` 之前仅匿名 enroll/bootstrap 与无凭证请求走首个探测通过的
+bootstrap URL；账号、密码和 bearer token 必须等 Internal 就绪后才发往 VIP。加载顺序：真实 env > `<userData>/.env`（每台机器可覆盖）> 打包内
 `Resources/.env`（构建时项目根有 `.env` 会自动带入）> 开发目录 `.env`。能力由
 `@qpjoy/electron-launcher/bootstrap`（≥2.3.2）提供：`resolveElectronLauncherBootstrap`
 / `parseElectronLauncherBootstrapUrls` / `loadElectronLauncherEnvFiles`，其他产品
 照此接入即可。
 
-开发期未入网时：`LUOPAN_LAUNCHER_BASE_URL=<lan-admin-url>` 覆盖 base URL，
-`LUOPAN_SDK_TEST_MODE=1` 走服务端测试模式；两者都不允许出现在正式构建里
-（bootstrap URL 允许，它本来就是产品的公开入口配置）。
+开发期未注册时才允许用非 VIP 的 `LUOPAN_LAUNCHER_BASE_URL=<lan-admin-url>` 覆盖
+base URL，并配合 `LUOPAN_SDK_TEST_MODE=1` 走服务端测试模式；两者都不允许进入正式
+构建。正式 `.env` 可以显式把 base URL 固定为注册 VIP `10.88.100.3`，bootstrap URL
+则本来就是产品的公开入口配置。
 demo 默认 registered 模式，工具栏 **Connect Internal** 一键完成
 lease → 数据面 → VIP healthz。平台侧开通的完整操作（Admin 注册、Service VIP
 Reconcile、`mx-internal-svc` 语义、enroll 报错对照）见 docs/20 §4.5。
 
-用户中心：侧栏面板 `luopan:login` 走 SDK gateway OAuth password grant
-（docs/15），登录后 lease 自动切登录段（`10.91.0.1-.99.254`），且检查更新携带
-userId——Release Center 按用户定向的计划只对登录用户可见。access token 只留
-内存，登出或重启即失效。
+用户中心：先匿名 **Connect Internal**，侧栏面板才允许 `luopan:login` 通过隧道内
+VIP 走 SDK gateway OAuth password grant（docs/15）。登录后下一次 Connect 才把 lease 切到登录段
+（`10.91.0.1-.99.254`）；检查更新立即携带 userId。access token 只留内存，登出或
+重启即失效。
+
+Oversea：登录与 `network-ready` 是一个双条件门，但安全顺序固定为先匿名连接
+Internal、再登录。登录成功后主进程自动调用
+`POST /internal/v1/user-center/users/:userId/oversea/ensure-subscription`。只有服务端返回
+`ensure.ready=true` 才将 inline YAML 写入 tunnel runtime 并启动应用级代理；
+`pending-runtime-sync` 只显示等待/刷新，不做假成功。测试窗口使用
+`persist:luopan-oversea` 隔离 Session，首版只允许 `app-global | app-rule`，禁止
+system TUN 抢 Internal WireGuard。登出和断开 Internal 都会停止代理。
 
 ## 五条红线（验收会逐条检查）
 
@@ -91,7 +106,7 @@ userId——Release Center 按用户定向的计划只对登录用户可见。ac
 
 ## 验收标准
 
-- 干净机器（无 workspace）上 `pnpm setup:npm && pnpm build` 成功，应用能连上
+- 干净机器（无 workspace）上 `pnpm run setup:npm && pnpm run build` 成功，应用能连上
   `10.88.100.3` 完成 enroll。
 - 与 MX-H2I 同机共存矩阵（docs/19 §4，C1–C12）全绿：双连、任意顺序、断开/杀进程互不
   影响、与 Clash TUN / 系统 PAC 共存。Windows 10/11 与 macOS 都要过。断言用仓库里的
@@ -103,6 +118,8 @@ userId——Release Center 按用户定向的计划只对登录用户可见。ac
   node ../../scripts/coexist-check.mjs assert --product luopan --expect connected
   ```
 - 检查更新面板能显示 Release Center 决策；被 targets 圈中的测试用户能收到定向版本。
+- 登录用户在 Internal ready 后能达到 `oversea.status=running`，mixed 端口监听，测试
+  窗口 `resolveProxy` 命中 `127.0.0.1:<mixed>`；登出后端口释放且测试 Session 回 DIRECT。
 
 ## 参考
 

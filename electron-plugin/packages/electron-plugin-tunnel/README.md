@@ -26,6 +26,21 @@ app.on('before-quit', () => {
 });
 ```
 
+Hosts that obtain a subscription through an authenticated control plane can
+pass the returned YAML directly without placing bearer credentials in a URL:
+
+```ts
+await tunnel.manager.applyManagedConfig({
+  subscription: { name: 'System Oversea', url: internalSubscriptionUrl },
+  subscriptionContent: subscriptionYaml,
+  mode: 'app-global',
+  autoStart: true,
+  source: 'launcher-oversea'
+});
+await tunnel.applyProxy();
+await tunnel.openTestWindow('https://www.google.com');
+```
+
 The package starts a browser admin backend by default. Keep mode switching,
 subscription management, local ports, start/stop, and TUN install/uninstall in
 that admin UI so the host Electron app does not need tunnel-specific screens:

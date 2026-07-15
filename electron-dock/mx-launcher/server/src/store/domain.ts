@@ -137,12 +137,15 @@ export const APP_CENTER_RUNTIME_CONTRACT_VERSION = '0.1';
 export const APP_CENTER_LAUNCHER_PROTOCOL_VERSION = '2';
 export const APP_CENTER_BROKER_ABI_VERSION = '2';
 
+export const USER_OVERSEA_SUBSCRIPTION_SCOPE = 'oversea.subscription.ensure';
+
 const USER_SCOPES = [
   'auth.read',
   'appcenter.read',
   'permission.request',
   'network.dns.policy',
-  'observability.write'
+  'observability.write',
+  USER_OVERSEA_SUBSCRIPTION_SCOPE
 ];
 
 const GUEST_SCOPES = ['auth.read', 'network.dns.policy'];

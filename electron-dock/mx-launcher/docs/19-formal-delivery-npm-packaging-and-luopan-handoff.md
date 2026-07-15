@@ -19,8 +19,9 @@ materialization 规则）、[17-mx-h2i-release-center-update-system.md](17-mx-h2
 - Internal Release Center：plan 创建、artifact 上传（OSS/Internal store）、policy 区分 hot/installer、
   Admin drawer、`release:publish` CLI。
 - `@qpjoy/electron-launcher` 的 `release-updater`：check、sha256 校验下载、staged、report。
-- 底层插件包已在公网 npm：`@qpjoy/electron-plugin-tunnel@0.1.17`、`@qpjoy/electron-core-wireguard@0.2.1`、
-  `@qpjoy/electron-core-mihomo@0.1.1`、wireguard/tunnel 平台 engine 包。
+- 本次待发布基线：`@qpjoy/electron-plugin-tunnel@0.1.18`、`@qpjoy/electron-core-wireguard@0.2.1`、
+  `@qpjoy/electron-core-mihomo@0.1.2`，以及 Darwin ARM64 tunnel engine `0.1.6`；
+  其他 wireguard/tunnel 平台 engine 包保持各自未变版本。
 
 未完成（本文档要收敛的）：
 

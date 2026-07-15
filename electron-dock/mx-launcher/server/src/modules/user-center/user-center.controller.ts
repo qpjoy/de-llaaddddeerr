@@ -3,9 +3,10 @@ import { existsSync } from 'node:fs';
 import { connect as netConnect } from 'node:net';
 import { promisify } from 'node:util';
 
-import { BadRequestException, Body, Controller, Get, Header, Inject, NotFoundException, Param, Post } from '@nestjs/common';
+import { BadRequestException, Body, Controller, ForbiddenException, Get, Header, Headers, Inject, NotFoundException, Param, Post, UnauthorizedException } from '@nestjs/common';
 
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
+import { USER_OVERSEA_SUBSCRIPTION_SCOPE } from '../../store/domain.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
 import { remoteExecutionEnvEnabledByDefault } from '../site-slots/remote-ssh-gate.js';
@@ -25,6 +26,7 @@ import type {
 } from '../../types.js';
 
 const execFileAsync = promisify(execFile);
+const USER_OVERSEA_ADMIN_SCOPES = ['site-slot.manage', 'site-slot.execute'];
 
 @Controller()
 export class UserCenterController {
@@ -113,7 +115,12 @@ export class UserCenterController {
   }
 
   @Post('internal/v1/user-center/users/:userId/oversea/ensure-subscription')
-  async ensureUserOverseaSubscription(@Param('userId') userId: string, @Body() rawBody: unknown) {
+  async ensureUserOverseaSubscription(
+    @Param('userId') userId: string,
+    @Headers('authorization') authorization: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    await this.assertUserOverseaAuthorization(userId, authorization);
     const body = asRecord(rawBody);
     const requestedBy = nullableString(body.requestedBy) ?? 'user-oversea-ensure';
     const requestId = nullableString(body.requestId) ?? `user-oversea-ensure-${Date.now()}`;
@@ -237,10 +244,37 @@ export class UserCenterController {
 
   @Get('internal/v1/user-center/users/:userId/oversea/subscription.yaml')
   @Header('content-type', 'text/yaml; charset=utf-8')
-  async userOverseaSubscription(@Param('userId') userId: string) {
+  async userOverseaSubscription(
+    @Param('userId') userId: string,
+    @Headers('authorization') authorization: string | undefined
+  ) {
+    await this.assertUserOverseaAuthorization(userId, authorization);
     const subscription = await this.store.renderUserOverseaMihomoSubscription(userId);
     if (!subscription) throw new NotFoundException('User Oversea subscription not found');
     return subscription.yaml;
+  }
+
+  private async assertUserOverseaAuthorization(userId: string, authorization?: string): Promise<void> {
+    const token = bearerToken(authorization);
+    if (!token) throw new UnauthorizedException('Bearer access token is required');
+    if (token.startsWith('mx-shadow-')) throw new UnauthorizedException('Shadow tokens cannot access user Oversea subscriptions');
+    const auth = await this.store.introspectToken({
+      token,
+      audience: 'mx-sdk',
+      requestId: `user-oversea-authorize-${userId}`
+    });
+    if (!auth.active || !auth.principal || (auth.tokenKind !== 'jwt' && auth.tokenKind !== 'service-token')) {
+      throw new UnauthorizedException('Bearer access token is not active');
+    }
+    const scopes = new Set(auth.scopes);
+    const adminAllowed = USER_OVERSEA_ADMIN_SCOPES.every((scope) => scopes.has(scope));
+    if (adminAllowed) return;
+    if (auth.principal.kind !== 'user' || auth.principal.userId !== userId) {
+      throw new ForbiddenException('Bearer subject cannot access the requested Oversea user');
+    }
+    if (!scopes.has(USER_OVERSEA_SUBSCRIPTION_SCOPE)) {
+      throw new ForbiddenException(`missing scope: ${USER_OVERSEA_SUBSCRIPTION_SCOPE}`);
+    }
   }
 
   @Get('internal/v1/user-center/service-accounts')
@@ -546,6 +580,12 @@ function userCenterOverseaSshArgv(profile: SiteSlotSshProfile, command: string):
   }
   args.push('-p', String(profile.sshPort ?? 22), `${profile.sshUser ?? 'root'}@${profile.host ?? '<host>'}`, command);
   return args;
+}
+
+function bearerToken(authorization?: string): string | null {
+  if (!authorization) return null;
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : null;
 }
 
 function internalSshConfigFile(profile?: SiteSlotSshProfile | null): string {

@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/ui-design-neon-void",
-  "version": "2.3.2",
+  "version": "2.3.3",
   "description": "QPJoy Neon Void dark cyan design tokens and CSS component library.",
   "type": "module",
   "main": "dist/index.js",

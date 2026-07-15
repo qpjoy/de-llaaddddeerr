@@ -94,6 +94,9 @@ export class TunnelDatabase {
   constructor(dbPath: string, ports: Partial<TunnelPorts> = {}) {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
+    // Subscription rows may contain proxy credentials. Overwrite deleted
+    // payloads instead of leaving them recoverable in SQLite free pages.
+    this.db.pragma('secure_delete = ON');
     this.db.exec(SCHEMA_SQL);
     const mergedPorts = mergePorts(ports);
     this.ensureDefaultSettings(mergedPorts);
@@ -138,18 +141,24 @@ export class TunnelDatabase {
     return this.getSettings();
   }
 
-  updatePorts(patch: Partial<Pick<TunnelPorts, 'mixed' | 'dns'>>): RuntimeSettings {
+  updatePorts(patch: Partial<TunnelPorts>): RuntimeSettings {
     const current = this.getSettings();
+    const adminPort = patch.admin ?? current.ports.admin;
+    const controllerPort = patch.controller ?? current.ports.controller;
     const mixedPort = patch.mixed ?? current.ports.mixed;
     const dnsPort = patch.dns ?? current.ports.dns;
 
     this.db.prepare(`
       UPDATE runtime_settings
-      SET mixed_port = @mixedPort,
+      SET admin_port = @adminPort,
+          controller_port = @controllerPort,
+          mixed_port = @mixedPort,
           dns_port = @dnsPort,
           updated_at = @updatedAt
       WHERE id = 1
     `).run({
+      adminPort,
+      controllerPort,
       mixedPort,
       dnsPort,
       updatedAt: nowIso()
@@ -245,10 +254,22 @@ export class TunnelDatabase {
   }
 
   deleteSubscription(id: number): void {
-    this.db.prepare('DELETE FROM subscriptions WHERE id = ?').run(id);
-    const active = this.getActiveSubscription();
-    if (!active) {
-      this.updateSettings({ activeSubscriptionId: null });
+    const remove = this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE subscriptions
+        SET username = '', password = '', content = '', local_path = NULL
+        WHERE id = ?
+      `).run(id);
+      this.db.prepare('DELETE FROM subscriptions WHERE id = ?').run(id);
+      const active = this.getActiveSubscription();
+      if (!active) this.updateSettings({ activeSubscriptionId: null });
+    });
+    remove();
+    try {
+      this.db.pragma('wal_checkpoint(TRUNCATE)');
+    } catch {
+      // A concurrent reader can defer the checkpoint; secure_delete still
+      // protects the main database pages and a later close checkpoints WAL.
     }
   }
 
@@ -350,6 +371,15 @@ export class TunnelDatabase {
       message: String(row.message),
       createdAt: String(row.created_at)
     }));
+  }
+
+  clearEvents(): void {
+    this.db.prepare('DELETE FROM events').run();
+    try {
+      this.db.pragma('wal_checkpoint(TRUNCATE)');
+    } catch {
+      // Best effort; the connection will checkpoint again when it closes.
+    }
   }
 
   private ensureDefaultSettings(ports: TunnelPorts): void {

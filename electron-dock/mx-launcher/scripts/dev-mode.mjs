@@ -49,6 +49,8 @@ const APPS = {
   },
   'demos/luopan': {
     localFilters: [
+      '@qpjoy/electron-core-mihomo',
+      '@qpjoy/electron-plugin-tunnel',
       '@qpjoy/electron-core-wireguard',
       '@qpjoy/mx-launcher-core',
       '@qpjoy/mx-launcher-embed-sdk',
@@ -57,6 +59,8 @@ const APPS = {
       '@qpjoy/ui-design-neon-void'
     ],
     requiredOutputs: [
+      'electron-plugin/packages/electron-core-mihomo/dist/index.js',
+      'electron-plugin/packages/electron-plugin-tunnel/dist/index.js',
       'electron-dock/mx-launcher/packages/electron-launcher/dist/index.js',
       'electron-dock/mx-launcher/ui-design/dist/index.js'
     ]

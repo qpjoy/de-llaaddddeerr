@@ -76,6 +76,27 @@ Then call `/healthz`, `/internal/v1/app-center/apps`,
 `/internal/v1/dns/coredns/configmap/apply`,
 `/internal/v1/sdk/dns/evaluate`, or `/internal/v1/platform-kernel/smoke`.
 
+### Authentication boundaries
+
+User-facing clients obtain an `mx-sdk` Bearer token from
+`POST /internal/v1/sdk/oauth/token`. The following Oversea subscription routes
+require a real, active token and reject `mx-shadow-*` tokens:
+
+- `POST /internal/v1/user-center/users/:userId/oversea/ensure-subscription`
+- `GET /internal/v1/user-center/users/:userId/oversea/subscription.yaml`
+
+Ordinary user tokens may access only the `userId` matching their token subject
+and must include `oversea.subscription.ensure`. A cross-user Internal/Admin
+operation is allowed only when the token includes both `site-slot.manage` and
+`site-slot.execute`.
+
+`POST /internal/v1/user-center/tokens/issue` is an Internal/ops bootstrap and
+smoke-test endpoint, not a public authentication endpoint. It must remain
+reachable only inside the trusted Internal/ops network and must never be
+published through Domestic, H, or other public ingress. Its current security
+boundary is network isolation; production hardening must add mTLS or a
+dedicated ops credential and then enforce that identity on the route.
+
 `POST /internal/v1/config-center/snapshots/effective` and
 `POST /internal/v1/sdk/config/snapshot` issue the V1 signed policy snapshot.
 This is separate from the lightweight enrollment config snapshot: enrollment

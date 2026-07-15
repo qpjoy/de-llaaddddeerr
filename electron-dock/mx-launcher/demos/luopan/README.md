@@ -13,38 +13,71 @@ Launcher standalone owner; Luopan represents a future standalone business app
 that owns its own ProductNetwork, lease/IP segment, and WireGuard profile when
 it is registered from the Admin `Luopan` onboarding template.
 
-## Run
+## Run as an independent standalone launcher
 
-From `electron-dock/mx-launcher`:
-
-```sh
-pnpm --filter @qpjoy/luopan-demo dev
-```
-
-or:
+From `demos/luopan`:
 
 ```sh
-pnpm luopan:dev
+cp .env.example .env
+curl -fsS http://116.62.51.154:18090/bootstrap-healthz
+curl -fsS http://116.62.51.154:18090/internal/v1/launcher-network/products/luopan
+curl -fsS http://116.62.51.154:18090/internal/v1/app-center/apps/luopan
+pnpm run setup
+pnpm run dev
 ```
 
-The default server is `http://10.88.88.88:18090`. Override it with:
+The two URLs have different phases: `LUOPAN_BOOTSTRAP_URLS` is an ordered list
+of LAN/public entrances reachable before WireGuard is up, while
+`LUOPAN_LAUNCHER_BASE_URL` is the registered in-tunnel Luopan VIP and must stay
+`http://10.88.100.3:18090`. Never set it to the MX-H2I compatibility addresses
+`10.88.88.88` or `10.88.0.1`.
 
-```sh
-LUOPAN_LAUNCHER_BASE_URL=http://192.168.1.4:18090 pnpm --filter @qpjoy/luopan-demo dev
-```
+After the window opens, use **Connect Internal**. The demo probes the bootstrap
+`/healthz`, enrolls the registered `luopan` ProductNetwork, obtains an anonymous
+lease, syncs the Domestic peer, asks for OS authorization to install the
+product-scoped WireGuard service, and finally proves the in-tunnel VIP
+`/healthz`. `network-ready` is the successful terminal state. Then log in
+through the in-tunnel VIP; the public bootstrap endpoint never receives an
+account, password, or bearer token. If a user-range lease is required, use
+**Disconnect → Connect Internal** once after login.
 
-`LUOPAN_SDK_TEST_MODE=1` keeps the demo usable before Luopan is registered in
-AppCenter. Turn it off to verify the real entitlement path:
+The current shell directly exercises network lease/WireGuard/VIP, User Center,
+Oversea, and Release Center. When both a logged-in access token and
+`network-ready` Internal path exist, Luopan automatically calls the shared
+`ensure-subscription` client, waits until Internal reports the user's Oversea
+runtime fully synchronized, stores the returned YAML through the shared tunnel
+runtime, starts mihomo, and connects an isolated Electron test session to the
+local mixed proxy. The login token is kept in memory and is never copied into
+the subscription URL, SQLite record, renderer state, or `.env`.
 
-```sh
-LUOPAN_SDK_TEST_MODE=0 pnpm --filter @qpjoy/luopan-demo dev
-```
+The embedded **Home to Oversea** panel provides subscription refresh,
+start/stop, application-global/rule mode, subscription and rule inspection,
+structured logs, a URL test window, and Google/YouTube/X/Telegram shortcuts.
+It deliberately does not expose system TUN in this first version: the proxy is
+scoped to the isolated Oversea test session, so it cannot capture Luopan's
+Internal WireGuard route or replace the machine's system PAC. Log out or
+disconnect Internal to stop the running proxy.
 
-During development the demo consumes `@qpjoy/electron-launcher` from
-`electron-dock/mx-launcher/packages/electron-launcher` through the workspace
-dependency. The packaged/online mode should switch to a published npm semver
-version, so the same launcher package can be reused by MX-H2I, Luopan, and
-future Electron apps without coupling them to this demo.
+There is still no dedicated permission/grant test IPC or page. Also,
+standalone readiness is proved with the VIP address; the
+Luopan path records DNS ownership but currently suppresses WireGuard DNS, so
+opening `luopan.mxinfo-inc.cn` is not part of this verified path yet.
+
+The CONFIG panel is persisted in `<userData>/luopan-runtime.json`. Explicit
+process/`.env` values take precedence, so this checked configuration also fixes
+URLs saved by an older run. If operating without `.env`, correct the two values
+in CONFIG. Do not delete the runtime merely to change URLs: doing so also
+replaces installId/deviceId and breaks existing Release Center targeting and
+evidence continuity.
+
+A non-VIP `LUOPAN_LAUNCHER_BASE_URL` and `LUOPAN_SDK_TEST_MODE=1` are
+development escape hatches only. The checked-in example uses the registered
+production coordinates.
+
+During development the demo consumes `@qpjoy/electron-launcher` 2.3.3 and
+`@qpjoy/electron-plugin-tunnel` 0.1.18 through workspace dependencies. The
+packaged/online mode must use published versions containing the same Oversea
+ensure/inline-YAML/test-window contracts and the matching platform engine.
 
 ## Build
 
@@ -65,6 +98,11 @@ electron-builder packaging run.
 - `src-electron/electron-preload.ts` exposes a renderer-safe API.
 - `src/pages/ConsolePage.vue` is a Quasar/Vue business UI that never imports
   Node or launcher internals directly.
+- `src/components/OverseaPanel.vue` is the embedded H2O-style control and test
+  surface; it only consumes the narrow `luopan:*` preload API.
+- `@qpjoy/electron-launcher` owns the authenticated Internal ensure contract;
+  `@qpjoy/electron-plugin-tunnel` owns mihomo lifecycle and the isolated test
+  session proxy. Luopan does not copy `mx-h2i/src/main.cjs`.
 
 This shape is the intended compatibility contract for other Electron stacks:
 Quasar, Vite, electron-builder, electron-forge, or a custom builder can keep the

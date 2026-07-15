@@ -35,6 +35,12 @@ export interface SubscriptionUpdateInput extends SubscriptionInput {
 
 export interface ManagedTunnelConfigInput {
   subscription?: SubscriptionInput | null;
+  /**
+   * Already-authenticated subscription YAML supplied by the host. This lets
+   * an Electron app exchange a short-lived bearer token for YAML without
+   * persisting that token in a subscription URL or in the tunnel database.
+   */
+  subscriptionContent?: string | null;
   mode?: RuntimeMode | null;
   /** Defaults to true for managed backend profiles. Pass false to only save config. */
   autoStart?: boolean | null;

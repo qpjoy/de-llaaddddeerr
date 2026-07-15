@@ -70,52 +70,10 @@
           </article>
         </section>
 
+        <OverseaPanel :runtime="runtime" @runtime="applyRuntime" />
+
         <section class="work-grid">
           <main class="main-column">
-            <section class="surface-panel operations-panel">
-              <div class="panel-heading">
-                <div>
-                  <p class="qp-kicker">INTELLIGENCE PIPELINE</p>
-                  <h3>任务队列</h3>
-                </div>
-                <q-btn dense flat round icon="refresh" @click="refreshSnapshot">
-                  <q-tooltip>Refresh launcher snapshot</q-tooltip>
-                </q-btn>
-              </div>
-              <q-table
-                flat
-                dark
-                hide-bottom
-                row-key="id"
-                :rows="tasks"
-                :columns="taskColumns"
-                table-class="task-table"
-              >
-                <template #body-cell-state="props">
-                  <q-td :props="props">
-                    <q-badge :color="props.row.color" outline>{{ props.row.state }}</q-badge>
-                  </q-td>
-                </template>
-              </q-table>
-            </section>
-
-            <section class="surface-panel topology-panel">
-              <div class="panel-heading">
-                <div>
-                  <p class="qp-kicker">LAUNCHER ADAPTER</p>
-                  <h3>通用 Electron 接入边界</h3>
-                </div>
-                <q-toggle v-model="draft.sdkTestMode" color="primary" label="SDK test mode" @update:model-value="saveConfig" />
-              </div>
-              <div class="boundary-grid">
-                <article v-for="item in boundary" :key="item.title" class="boundary-node">
-                  <q-icon :name="item.icon" />
-                  <strong>{{ item.title }}</strong>
-                  <span>{{ item.detail }}</span>
-                </article>
-              </div>
-            </section>
-
             <section class="surface-panel release-panel">
               <div class="panel-heading">
                 <div>
@@ -260,11 +218,11 @@
                   <p class="qp-kicker">USER CENTER</p>
                   <h3>用户中心</h3>
                 </div>
-                <q-badge :color="runtime.identity.kind === 'user' ? 'positive' : 'grey-6'" outline>
-                  {{ runtime.identity.kind === 'user' ? '已登录' : '匿名' }}
+                <q-badge :color="authenticatedUser ? 'positive' : 'grey-6'" outline>
+                  {{ authenticatedUser ? '已登录' : '匿名' }}
                 </q-badge>
               </div>
-              <template v-if="runtime.identity.kind === 'user'">
+              <template v-if="authenticatedUser">
                 <div class="runtime-state">
                   <div>
                     <span>用户</span>
@@ -276,7 +234,7 @@
                   </div>
                   <div>
                     <span>Lease 段</span>
-                    <strong>登录段（user range）</strong>
+                    <strong>user range（重连生效）</strong>
                   </div>
                   <div>
                     <span>Token</span>
@@ -289,10 +247,14 @@
                 <q-btn outline color="grey-4" icon="logout" label="登出" @click="logout" />
               </template>
               <template v-else>
-                <q-input v-model="loginDraft.account" dark outlined dense label="账号 / 邮箱" @keyup.enter="login" />
-                <q-input v-model="loginDraft.password" dark outlined dense type="password" label="密码" @keyup.enter="login" />
-                <q-btn color="primary" icon="login" :loading="loggingIn" label="登录 User Center" @click="login" />
-                <p class="runtime-message">登录后重新 Connect Internal，lease 切到登录段并可命中定向发版。</p>
+                <q-input v-model="loginDraft.account" dark outlined dense :disable="!internalReady" label="账号 / 邮箱" @keyup.enter="login" />
+                <q-input v-model="loginDraft.password" dark outlined dense :disable="!internalReady" type="password" label="密码" @keyup.enter="login" />
+                <q-btn color="primary" icon="login" :loading="loggingIn" :disable="!internalReady" label="登录 User Center" @click="login" />
+                <p class="runtime-message">
+                  {{ internalReady
+                    ? '登录只通过隧道内 VIP；成功后自动确保订阅并连接 Oversea。若需 user range，再 Disconnect / Connect 一次。'
+                    : '安全流程：先匿名 Connect Internal，再在隧道内登录；公网 bootstrap 不承载账号或密码。' }}
+                </p>
               </template>
             </section>
 
@@ -314,6 +276,12 @@
                 @blur="saveConfig"
               />
               <q-input v-model="draft.deviceLabel" dark outlined dense label="Device label" @blur="saveConfig" />
+              <q-toggle
+                v-model="draft.sdkTestMode"
+                color="primary"
+                label="SDK test mode（跳过注册资格，仅用于本地联调）"
+                @update:model-value="saveConfig"
+              />
               <div class="config-pair">
                 <span>App ID</span>
                 <strong>{{ runtime.config.productId }}</strong>
@@ -345,9 +313,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { copyToClipboard, useQuasar, type QTableColumn } from 'quasar';
 
+import OverseaPanel from 'src/components/OverseaPanel.vue';
 import type { LuopanRuntimeConfig, LuopanRuntimeState } from 'src/types/launcher';
 
 const $q = useQuasar();
@@ -388,6 +357,33 @@ const fallbackRuntime: LuopanRuntimeState = {
     message: 'Renderer fallback mode. Start with Quasar Electron to use launcher IPC.',
     updatedAt: null
   },
+  oversea: {
+    status: 'waiting-login',
+    autoConnect: true,
+    mode: 'app-global',
+    userId: null,
+    entitlementId: null,
+    subscriptionPath: null,
+    subscriptionName: null,
+    siteIds: [],
+    syncStatus: null,
+    nodeCount: 0,
+    ensuredAt: null,
+    startedAt: null,
+    lastTestUrl: 'https://www.google.com',
+    lastTestAt: null,
+    lastProxyDecision: null,
+    message: '先匿名连接 Internal，再通过隧道内 VIP 登录；随后自动确保 Oversea 订阅。',
+    tunnel: {
+      running: false,
+      health: { ok: false, level: 'warning', message: 'Renderer fallback mode.' },
+      mode: 'app-global',
+      ports: { admin: 23456, controller: 23457, mixed: 23458, dns: 1053 },
+      engine: { target: 'unknown', available: false, source: 'missing' },
+      activeSubscription: null,
+      events: []
+    }
+  },
   update: {
     status: 'idle',
     checkedAt: null,
@@ -408,6 +404,8 @@ const runtime = ref<LuopanRuntimeState>(fallbackRuntime);
 const draft = reactive<LuopanRuntimeConfig>({ ...fallbackRuntime.config });
 const bootstrapDraft = ref('');
 const connecting = computed(() => runtime.value.connection.status === 'connecting');
+const internalReady = computed(() => runtime.value.connection.status === 'network-ready');
+const authenticatedUser = computed(() => runtime.value.identity.kind === 'user' && runtime.value.identity.tokenPresent);
 const dataPlaneProbes = computed(() => runtime.value.connection.dataPlane?.probes ?? []);
 const statusColor = computed(() => {
   if (runtime.value.connection.status === 'network-ready') return 'positive';
@@ -424,13 +422,6 @@ const navItems = [
   { label: '审计', caption: 'evidence / export', icon: 'fact_check', active: false }
 ];
 
-const taskColumns: QTableColumn[] = [
-  { name: 'name', label: '对象', field: 'name', align: 'left' },
-  { name: 'owner', label: '负责人', field: 'owner', align: 'left' },
-  { name: 'state', label: '状态', field: 'state', align: 'left' },
-  { name: 'risk', label: '风险', field: 'risk', align: 'right' }
-];
-
 const artifactColumns: QTableColumn[] = [
   { name: 'artifactClass', label: '类型', field: 'artifactClass', align: 'left' },
   { name: 'kind', label: 'Kind', field: 'kind', align: 'left' },
@@ -439,24 +430,10 @@ const artifactColumns: QTableColumn[] = [
   { name: 'sizeBytes', label: '大小', field: 'sizeBytes', align: 'right', format: (value: number | null) => (value ? `${(value / 1024 / 1024).toFixed(1)} MB` : '-') }
 ];
 
-const tasks = [
-  { id: 'case-2048', name: '境外节点异常聚合', owner: 'analyst-a', state: 'review', risk: '86', color: 'orange' },
-  { id: 'case-2173', name: '企业画像更新', owner: 'analyst-b', state: 'running', risk: '42', color: 'cyan' },
-  { id: 'case-2191', name: 'OpenVPN 入口线索', owner: 'network', state: 'verified', risk: '71', color: 'positive' },
-  { id: 'case-2207', name: '资产侧写补全', owner: 'model', state: 'queued', risk: '24', color: 'grey-6' }
-];
-
-const boundary = [
-  { title: 'Electron main', detail: 'imports @qpjoy/electron-launcher', icon: 'integration_instructions' },
-  { title: 'Preload IPC', detail: 'safe runtime bridge for any renderer', icon: 'terminal' },
-  { title: 'Quasar Vue', detail: 'business UI without Node access', icon: 'view_quilt' },
-  { title: 'Admin registry', detail: 'entitlement owns real network access', icon: 'verified_user' }
-];
-
 const kpis = computed(() => [
   { label: 'Application', value: runtime.value.displayName, hint: runtime.value.launcherMode },
   { label: 'Lease', value: runtime.value.connection.leaseIp || 'not issued', hint: runtime.value.connection.status },
-  { label: 'DNS Route', value: 'luopan.mxinfo-inc.cn', hint: 'Internal gateway upstream' },
+  { label: 'Oversea', value: runtime.value.oversea.tunnel.running ? 'connected' : runtime.value.oversea.status, hint: runtime.value.oversea.siteIds.join(', ') || 'user subscription' },
   { label: 'SDK Mode', value: draft.sdkTestMode ? 'test' : 'registered', hint: 'entitlement gate' }
 ]);
 
@@ -510,11 +487,6 @@ async function disconnectDataPlane() {
   if (next) applyRuntime(next);
 }
 
-async function refreshSnapshot() {
-  const next = await window.luopanLauncher?.refreshSnapshot();
-  if (next) applyRuntime(next);
-}
-
 async function resetSession() {
   const next = await window.luopanLauncher?.resetSession();
   if (next) applyRuntime(next);
@@ -525,6 +497,10 @@ const loggingIn = ref(false);
 const updateBusy = ref(false);
 
 async function login() {
+  if (!internalReady.value) {
+    $q.notify({ type: 'warning', message: '请先匿名 Connect Internal；登录凭证只允许通过隧道内 VIP 发送。' });
+    return;
+  }
   if (!loginDraft.account || !loginDraft.password) {
     $q.notify({ type: 'warning', message: '请输入账号和密码。' });
     return;
@@ -535,7 +511,9 @@ async function login() {
     if (next) applyRuntime(next);
     if (next?.identity.kind === 'user') {
       loginDraft.password = '';
-      $q.notify({ type: 'positive', message: `已登录 ${next.identity.displayName || next.identity.userId}。重新 Connect Internal 可切换到登录 lease 段。` });
+      $q.notify({ type: 'positive', message: next.oversea.status === 'running'
+        ? `已登录 ${next.identity.displayName || next.identity.userId}，Oversea 代理已自动连接。`
+        : `已登录 ${next.identity.displayName || next.identity.userId}；正在确保 Oversea 订阅。需要 user range 时请 Disconnect / Connect 一次。` });
     } else {
       $q.notify({ type: 'negative', message: next?.events[0] || '登录失败' });
     }
@@ -616,8 +594,14 @@ function routeProbeHint(probe: { ok: boolean; viaProxyTun: boolean; interfaceNam
   return probe.interfaceName || probe.gateway || 'pending';
 }
 
+let removeRuntimeListener: (() => void) | undefined;
+
 onMounted(() => {
   void getRuntime();
-  window.luopanLauncher?.onRuntime(applyRuntime);
+  removeRuntimeListener = window.luopanLauncher?.onRuntime(applyRuntime);
+});
+
+onUnmounted(() => {
+  removeRuntimeListener?.();
 });
 </script>

@@ -161,15 +161,17 @@ function dedupeCandidates(
 
 /**
  * Minimal .env loader for packaged Electron apps (no shell env there).
- * Reads the first existing file from `paths`, parses KEY=VALUE lines
- * (`#` comments, optional single/double quotes), and merges them into
- * `process.env` WITHOUT overriding keys that are already set — real
- * environment variables always win over .env files.
+ * Reads existing files from `paths` in precedence order, parses KEY=VALUE
+ * lines (`#` comments, optional single/double quotes), and merges them into
+ * `process.env` WITHOUT overriding keys that are already set. Real environment
+ * variables win, then the first file that defines each key wins.
  */
 export function loadElectronLauncherEnvFiles(paths: Array<string | null | undefined>): {
   loadedFrom: string | null;
   applied: string[];
 } {
+  let loadedFrom: string | null = null;
+  const applied: string[] = [];
   for (const path of paths) {
     if (!path) continue;
     let text: string;
@@ -178,7 +180,7 @@ export function loadElectronLauncherEnvFiles(paths: Array<string | null | undefi
     } catch {
       continue;
     }
-    const applied: string[] = [];
+    loadedFrom ??= path;
     for (const line of text.split(/\r?\n/)) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('#')) continue;
@@ -193,7 +195,6 @@ export function loadElectronLauncherEnvFiles(paths: Array<string | null | undefi
       process.env[key] = value;
       applied.push(key);
     }
-    return { loadedFrom: path, applied };
   }
-  return { loadedFrom: null, applied: [] };
+  return { loadedFrom, applied };
 }

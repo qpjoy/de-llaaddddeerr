@@ -201,6 +201,8 @@ export class MihomoManager extends EventEmitter {
   private elevatedPid: number | null = null;
   private operation: Promise<unknown> = Promise.resolve();
   private lastRuntimeError: string | null = null;
+  private closed = false;
+  private closePromise: Promise<void> | null = null;
 
   constructor(private readonly options: TunnelManagerOptions) {
     super();
@@ -215,6 +217,7 @@ export class MihomoManager extends EventEmitter {
       mixed: options.mixedPort,
       dns: options.dnsPort
     });
+    this.secureRuntimeFiles();
     this.api = new MihomoApi(() => this.db.getSettings());
   }
 
@@ -295,18 +298,35 @@ export class MihomoManager extends EventEmitter {
     return this.db.listEvents();
   }
 
+  clearEvents(): void {
+    this.db.clearEvents();
+  }
+
   async createSubscription(input: SubscriptionInput): Promise<SubscriptionRecord> {
     const normalized = normalizeSubscriptionInput(input);
     const content = await this.fetchSubscriptionContent(normalized);
+    return this.createSubscriptionWithContent(normalized, content);
+  }
+
+  private createSubscriptionWithContent(input: SubscriptionInput, content: string): SubscriptionRecord {
+    validateSubscriptionYaml(content);
+    const normalized = normalizeSubscriptionInput(input);
     const subscription = this.db.createSubscription(normalized);
 
     try {
       const localPath = this.localSubscriptionPath(subscription.id);
       writeFileSync(localPath, content, 'utf8');
+      chmodSync(localPath, 0o600);
       const updated = this.db.updateSubscriptionContent(subscription.id, content, localPath);
+      this.secureRuntimeFiles();
       this.log('info', `Subscription created: ${updated.name}`);
       return updated;
     } catch (error) {
+      try {
+        this.removeLocalSubscriptionFile(subscription.id);
+      } catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], 'subscription creation and credential cleanup failed');
+      }
       this.db.deleteSubscription(subscription.id);
       throw error;
     }
@@ -320,10 +340,18 @@ export class MihomoManager extends EventEmitter {
 
     const normalized = normalizeSubscriptionInput(input);
     const content = await this.fetchSubscriptionContent(normalized);
-    const subscription = this.db.updateSubscription(input.id, normalized);
+    return this.editSubscriptionWithContent(input.id, normalized, content);
+  }
+
+  private editSubscriptionWithContent(id: number, input: SubscriptionInput, content: string): SubscriptionRecord {
+    validateSubscriptionYaml(content);
+    const normalized = normalizeSubscriptionInput(input);
+    const subscription = this.db.updateSubscription(id, normalized);
     const localPath = this.localSubscriptionPath(subscription.id);
     writeFileSync(localPath, content, 'utf8');
+    chmodSync(localPath, 0o600);
     const updated = this.db.updateSubscriptionContent(subscription.id, content, localPath);
+    this.secureRuntimeFiles();
     this.log('info', `Subscription edited: ${updated.name}`);
     return updated;
   }
@@ -354,8 +382,27 @@ export class MihomoManager extends EventEmitter {
   }
 
   deleteSubscription(id: number): void {
+    const subscription = this.db.getSubscription(id);
+    this.removeLocalSubscriptionFile(id);
+    if (subscription?.active) this.removeRuntimeConfigFile();
     this.db.deleteSubscription(id);
     this.log('info', `Subscription deleted: ${id}`);
+  }
+
+  private removeLocalSubscriptionFile(id: number): void {
+    try {
+      unlinkSync(this.localSubscriptionPath(id));
+    } catch (error) {
+      if (!isRecord(error) || error.code !== 'ENOENT') throw error;
+    }
+  }
+
+  private removeRuntimeConfigFile(): void {
+    try {
+      unlinkSync(this.paths.config);
+    } catch (error) {
+      if (!isRecord(error) || error.code !== 'ENOENT') throw error;
+    }
   }
 
   setActiveSubscription(id: number): SubscriptionRecord {
@@ -377,13 +424,15 @@ export class MihomoManager extends EventEmitter {
     return true;
   }
 
-  async setLocalPorts(ports: Partial<Pick<TunnelPorts, 'mixed' | 'dns'>>): Promise<void> {
+  async setLocalPorts(ports: Partial<TunnelPorts>): Promise<void> {
+    const admin = ports.admin === undefined ? undefined : normalizePort(ports.admin, 'admin port');
+    const controller = ports.controller === undefined ? undefined : normalizePort(ports.controller, 'controller port');
     const mixed = ports.mixed === undefined ? undefined : normalizePort(ports.mixed, 'mixed port');
     const dns = ports.dns === undefined ? undefined : normalizePort(ports.dns, 'dns port');
     const before = this.db.getSettings().ports;
-    const after = this.db.updatePorts({ mixed, dns }).ports;
+    const after = this.db.updatePorts({ admin, controller, mixed, dns }).ports;
 
-    this.log('info', `Local ports updated: mixed ${before.mixed}->${after.mixed}, dns ${before.dns}->${after.dns}`);
+    this.log('info', `Local ports updated: admin ${before.admin}->${after.admin}, controller ${before.controller}->${after.controller}, mixed ${before.mixed}->${after.mixed}, dns ${before.dns}->${after.dns}`);
 
     await this.applyRuntimeConfigChange();
   }
@@ -431,7 +480,9 @@ export class MihomoManager extends EventEmitter {
 
     const localPath = this.localSubscriptionPath(subscription.id);
     writeFileSync(localPath, content, 'utf8');
+    chmodSync(localPath, 0o600);
     const updated = this.db.updateSubscriptionContent(subscription.id, content, localPath);
+    this.secureRuntimeFiles();
     this.log('info', `Subscription updated: ${subscription.name}`);
     return updated;
   }
@@ -453,15 +504,21 @@ export class MihomoManager extends EventEmitter {
       const existing = this.listSubscriptions().find((row) => (
         row.url === normalized.url || row.name === normalized.name
       ));
-      subscription = existing
-        ? await this.editSubscription({
-            id: existing.id,
-            name: normalized.name,
-            url: normalized.url,
-            username: normalized.username ?? existing.username,
-            password: normalized.password ?? existing.password
-          })
-        : await this.createSubscription(normalized);
+      const nextInput = {
+        name: normalized.name,
+        url: normalized.url,
+        username: normalized.username ?? existing?.username,
+        password: normalized.password ?? existing?.password
+      };
+      if (typeof input.subscriptionContent === 'string') {
+        subscription = existing
+          ? this.editSubscriptionWithContent(existing.id, nextInput, input.subscriptionContent)
+          : this.createSubscriptionWithContent(nextInput, input.subscriptionContent);
+      } else {
+        subscription = existing
+          ? await this.editSubscription({ id: existing.id, ...nextInput })
+          : await this.createSubscription(nextInput);
+      }
       if (!subscription.active) {
         subscription = this.setActiveSubscription(subscription.id);
       }
@@ -548,6 +605,7 @@ export class MihomoManager extends EventEmitter {
       useGeoRules
     });
     writeFileSync(this.paths.config, rendered.yaml, 'utf8');
+    chmodSync(this.paths.config, 0o600);
     this.log('info', `Runtime config rendered with policy ${rendered.proxyPolicyName}${useGeoRules ? '' : ' (bootstrap without Geo rules)'}`);
     return this.paths.config;
   }
@@ -561,6 +619,17 @@ export class MihomoManager extends EventEmitter {
       existsSync(join(this.paths.runtime, geoip))
       && existsSync(join(this.paths.runtime, geosite))
     ));
+  }
+
+  private secureRuntimeFiles(): void {
+    for (const file of [this.paths.db, `${this.paths.db}-wal`, `${this.paths.db}-shm`]) {
+      if (!existsSync(file)) continue;
+      try {
+        chmodSync(file, 0o600);
+      } catch {
+        // Best effort on platforms that do not expose POSIX file modes.
+      }
+    }
   }
 
   private runExclusive<T>(task: () => Promise<T>): Promise<T> {
@@ -599,22 +668,41 @@ export class MihomoManager extends EventEmitter {
       return;
     }
 
-    this.child = spawn(corePath, ['-d', this.paths.runtime, '-f', configPath], {
+    const child = spawn(corePath, ['-d', this.paths.runtime, '-f', configPath], {
       cwd: this.paths.runtime,
       env: {
         ...process.env,
         NO_COLOR: '1'
       }
     });
-
-    this.child.stdout.on('data', (chunk) => this.handleCoreOutput('info', chunk.toString()));
-    this.child.stderr.on('data', (chunk) => this.handleCoreOutput('warn', chunk.toString()));
-    this.child.on('exit', (code, signal) => {
+    this.child = child;
+    child.stdout.on('data', (chunk) => this.handleCoreOutput('info', chunk.toString()));
+    child.stderr.on('data', (chunk) => this.handleCoreOutput('warn', chunk.toString()));
+    child.on('error', (error) => {
+      const message = `Mihomo process error: ${error.message}`;
+      this.lastRuntimeError = message;
+      this.log('error', message);
+      if (this.child === child && !child.pid) this.child = null;
+    });
+    child.on('exit', (code, signal) => {
       this.log(code === 0 ? 'info' : 'warn', `Mihomo exited code=${code ?? 'null'} signal=${signal ?? 'null'}`);
-      this.child = null;
+      if (this.child === child) this.child = null;
+    });
+    await new Promise<void>((resolvePromise, reject) => {
+      const onSpawn = () => {
+        child.off('error', onInitialError);
+        resolvePromise();
+      };
+      const onInitialError = (error: Error) => {
+        child.off('spawn', onSpawn);
+        if (this.child === child) this.child = null;
+        reject(error);
+      };
+      child.once('spawn', onSpawn);
+      child.once('error', onInitialError);
     });
 
-    this.log('info', `Mihomo started pid=${this.child.pid ?? 'unknown'}`);
+    this.log('info', `Mihomo started pid=${child.pid ?? 'unknown'}`);
 
     if (this.shouldWatchWindowsTun(settings)) {
       await delay(1200);
@@ -959,7 +1047,7 @@ export class MihomoManager extends EventEmitter {
   }
 
   private isRunning(): boolean {
-    if (this.child && !this.child.killed) {
+    if (this.child && this.child.exitCode === null && this.child.signalCode === null) {
       return true;
     }
 
@@ -1041,12 +1129,59 @@ export class MihomoManager extends EventEmitter {
       return;
     }
 
-    if (!this.child || this.child.killed) {
+    const child = this.child;
+    if (!child || child.exitCode !== null || child.signalCode !== null) {
+      if (this.child === child) this.child = null;
       return;
     }
-    this.child.kill('SIGTERM');
-    this.lastRuntimeError = null;
     this.log('info', 'Mihomo stop requested');
+    await this.waitForChildClose(child);
+    if (this.child === child) this.child = null;
+    this.lastRuntimeError = null;
+  }
+
+  private async waitForChildClose(child: ChildProcessWithoutNullStreams): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    await new Promise<void>((resolvePromise, reject) => {
+      let settled = false;
+      let termTimer: ReturnType<typeof setTimeout> | null = null;
+      let killTimer: ReturnType<typeof setTimeout> | null = null;
+      const cleanup = () => {
+        if (termTimer) clearTimeout(termTimer);
+        if (killTimer) clearTimeout(killTimer);
+        child.off('close', onClose);
+        child.off('error', onError);
+      };
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error) reject(error);
+        else resolvePromise();
+      };
+      const onClose = () => finish();
+      const onError = (error: Error) => finish(error);
+      child.once('close', onClose);
+      child.once('error', onError);
+      try {
+        child.kill('SIGTERM');
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      termTimer = setTimeout(() => {
+        this.log('warn', 'Mihomo did not exit after SIGTERM; requesting SIGKILL');
+        try {
+          child.kill('SIGKILL');
+        } catch (error) {
+          finish(error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
+        killTimer = setTimeout(() => {
+          finish(new Error('Mihomo did not close after SIGKILL'));
+        }, 2_000);
+      }, 3_000);
+    });
   }
 
   async restart(): Promise<void> {
@@ -1062,7 +1197,6 @@ export class MihomoManager extends EventEmitter {
       }
 
       await this.stopUnlocked();
-      await delay(400);
       await this.startUnlocked();
     });
   }
@@ -1077,7 +1211,6 @@ export class MihomoManager extends EventEmitter {
       this.assertRuntimeModeAvailable(settings);
       if (needsElevatedTun(settings) && !this.isElevatedRunning()) {
         await this.stopUnlocked();
-        await delay(400);
         await this.startUnlocked();
         return;
       }
@@ -1085,7 +1218,6 @@ export class MihomoManager extends EventEmitter {
       const reloaded = await this.reloadRuntimeConfig();
       if (!reloaded && !this.isElevatedRunning()) {
         await this.stopUnlocked();
-        await delay(400);
         await this.startUnlocked();
       }
     });
@@ -1102,14 +1234,23 @@ export class MihomoManager extends EventEmitter {
   }
 
   async close(): Promise<void> {
-    await this.stopUnlocked({ allowElevatedPrompt: false }).catch((err) => {
-      this.log('warn', `Mihomo close stop failed: ${err instanceof Error ? err.message : String(err)}`);
+    if (this.closed) return;
+    if (this.closePromise) return this.closePromise;
+    const closing = this.runExclusive(async () => {
+      if (this.closed) return;
+      await this.stopUnlocked({ allowElevatedPrompt: false });
+      this.closed = true;
+      this.db.close();
     });
-    await delay(300);
-    this.db.close();
+    this.closePromise = closing.catch((error) => {
+      this.closePromise = null;
+      throw error;
+    });
+    return this.closePromise;
   }
 
   private log(level: 'info' | 'warn' | 'error', message: string): void {
+    if (this.closed) return;
     const clean = message.trim();
     if (!clean) {
       return;

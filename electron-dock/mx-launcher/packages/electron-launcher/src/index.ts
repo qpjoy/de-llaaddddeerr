@@ -162,6 +162,13 @@ export {
   type ElectronLauncherLocalPortRequest
 } from './local-ports.js';
 export {
+  ensureElectronLauncherUserOverseaSubscription,
+  type ElectronLauncherOverseaEnsureStatus,
+  type ElectronLauncherUserOverseaEnsureResult,
+  type ElectronLauncherUserOverseaSubscription,
+  type EnsureElectronLauncherUserOverseaSubscriptionInput
+} from './oversea.js';
+export {
   adoptPendingElectronLauncherPackages,
   classifyElectronLauncherUpdateArtifact,
   createElectronLauncherReleaseUpdateExecutor,

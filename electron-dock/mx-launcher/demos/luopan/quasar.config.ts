@@ -33,6 +33,12 @@ export default configure(() => ({
   },
   electron: {
     bundler: 'builder',
+    // Keep the CommonJS tunnel runtime external to Quasar's ESM main bundle.
+    // Bundling it rewrites Node built-ins (http/net/crypto) into dynamic
+    // require() calls, which Electron's ESM loader cannot execute.
+    extendElectronMainConf(config) {
+      config.external = [...(config.external ?? []), '@qpjoy/electron-plugin-tunnel'];
+    },
     // The UnPackaged production install must NOT climb to the demo's own
     // pnpm-workspace.yaml (npm mode): a workspace-scoped `install --prod`
     // prunes the demo's devDependencies (electron-builder included) and the

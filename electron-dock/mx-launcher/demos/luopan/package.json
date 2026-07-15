@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@qpjoy/electron-launcher": "workspace:*",
+    "@qpjoy/electron-plugin-tunnel": "workspace:*",
     "@qpjoy/ui-design-neon-void": "workspace:*",
     "@quasar/extras": "1.18.0",
     "quasar": "2.20.1",
