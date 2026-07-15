@@ -218,7 +218,8 @@ mx-h2i 的约定，建议 Luopan 照搬（luopan demo 已具备前两条）：
 | --- | --- | --- |
 | PRODUCT 定义 | `defineLauncherProduct({ productId: 'luopan', release: { componentId: 'luopan', channel: 'shadow', ... } })`——产品身份的唯一来源，更新检查/ownership 都从这取值 | `defineLauncherProduct` |
 | runtime state | `RuntimeState`（installId/deviceId/config/connection/update/events），loadRuntime/saveRuntime/normalize 三件套 | — |
-| lease 获取 | `luopan:connect-test-mode` → `launcherClient().connectNetwork(...)`（registered/test 模式由 `sdkTestMode` 决定，默认 registered） | `createElectronLauncher` |
+| lease 获取 | `luopan:connect-test-mode` → `launcherClient().connectNetwork(...)`（registered/test 模式由 `sdkTestMode` 决定，默认 registered；登录后自动带 `identityKind: 'user'` + userId 切登录 lease 段） | `createElectronLauncher` |
+| 用户中心 | `luopan:login` / `luopan:logout`：SDK gateway OAuth password grant（docs/15 `/internal/v1/sdk/oauth/token`）→ `principal.userId` 存入 runtime.identity；access token 只留内存。登录用户可命中 Release Center 按 userId 定向的发版 | SDK gateway |
 | 数据面 apply | `luopan:apply-data-plane`：standalone 模式走 `applyElectronLauncherStandaloneDataPlane`（profile `luopan.conf`、ownerId `luopan:<installId>`、`failOnOwnershipConflicts: true`）；reuse 模式（`LUOPAN_DATA_PLANE_MODE=reuse`）尝试挂到已有共享数据面 | `/standalone-data-plane` |
 | 一键连入 | `luopan:connect-internal` = lease + 数据面 + 隧道内 VIP healthz，成功即 `network-ready`（§4.5 客户端部分） | 同上 |
 | 断开 | `luopan:disconnect-data-plane` → `stopElectronLauncherStandaloneDataPlane`（只释放自己的 claim） | 同上 |
@@ -318,7 +319,15 @@ demo 默认 **registered 模式**（`sdkTestMode=false`），工具栏 **Connect
 - **bootstrap 先有鸡还是先有蛋**：第一次 enroll 时 WG 还没起，`baseUrl` 必须是
   当下就可达的地址——同网/LAN 直达 server，或平台提供的公网 bootstrap 代理
   （转发 enroll/lease/snapshot，参照 mx-h2i 的 `h2i.mxinfo-inc.cn` 模式）。连上
-  之后产品流量一律走自己的 VIP。开发期用 `LUOPAN_LAUNCHER_BASE_URL` 覆盖。
+  之后产品流量一律走自己的 VIP。
+  这套语义已下沉进包（≥2.3.2）：`@qpjoy/electron-launcher/bootstrap` 提供
+  `resolveElectronLauncherBootstrap`（候选 URL 顺序探测 `/healthz`，命中即钉住）、
+  `parseElectronLauncherBootstrapUrls`（env 值解析）、`loadElectronLauncherEnvFiles`
+  （打包版 .env 加载，真实 env 优先）。luopan demo 的接线：`.env` 写
+  `LUOPAN_BOOTSTRAP_URLS`（或 CONFIG 面板填），enroll/登录/更新在
+  `network-ready` 前走解析出的 bootstrap URL，之后切回 VIP；每次 Connect 重新
+  探测以适应切网。新产品照抄 demo 的 `ensureBootstrapResolved` /
+  `effectiveApiBaseUrl` 两个函数即可。
 - **SDK test mode 的真实语义**：server 侧 `launcherNetworkSdkTestModeEnabled=true`
   **且**客户端显式传 `sdkTestMode: true` 才生效，作用是跳过 ProductNetwork/App
   注册校验（服务端现场造一个临时 product）。只用于未注册环境的本地开发；生产
@@ -390,6 +399,10 @@ state.update = updateFromCheck(check);       // 提炼给面板的字段
 
 - `check()` 优先打 `/release/check`（服务端单 install 决策），老 server 自动
   fallback。检查是**只读**的，不下载任何东西。
+- demo 与 mx-h2i 同约定检查**两个组件命名空间**：installer 计划 target
+  `luopan`，热更计划 target `luopan-renderer`，择优取 update-available（发版时
+  注意 componentId 对应）。登录态下 check 会带 `userId`，按用户定向的计划只对
+  登录用户可见。
 - 结果里给面板用的字段：`status`（up-to-date / update-available / blocked /
   failed）、`decision.targetVersion`、`releaseNotes`（markdown 原文）、
   `rollout.matchedBy`（如 `指定用户`——验收要求面板展示）、`featureFlags`。
@@ -461,7 +474,15 @@ artifact 的 execution 状态（含 deferredReason/error），按钮四个对应
 
 1. Admin → Release Center → Upload version：Type 选热更类（如 config/renderer），
    Version 高于当前，`目标用户` 只填你自己的 userId，写两行 release notes →
-   Complete gate。
+   Complete gate。CLI 等价（publish 脚本已支持 `--product`）：
+
+   ```sh
+   pnpm --dir server release:publish -- \
+     --base-url <admin-url> --product luopan --kind hot \
+     --artifact <bundle> --version 0.1.1 --current-version 0.1.0 \
+     --channel shadow --target-user <你的 userId> --e2e-result passed
+   # installer 类：--kind installer --platform darwin|win32（component 自动为 luopan）
+   ```
 2. luopan 面板点检查更新 → 应显示 update-available + notes + `Matched by=指定用户`
    → 点应用 → 面板出现 execution 结果（renderer 类会看到窗口 reload）。
 3. 换一个不在 targets 里的账号/installId 复查 → up-to-date，看不到计划信息。

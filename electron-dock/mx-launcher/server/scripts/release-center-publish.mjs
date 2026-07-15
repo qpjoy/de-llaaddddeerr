@@ -7,6 +7,13 @@ import { fileURLToPath } from 'node:url';
 const args = parseArgs(process.argv.slice(2));
 const serverRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workspaceRoot = resolve(serverRoot, '../../..');
+// Product selector: `--product luopan` publishes plans for any standalone
+// launcher product. Component naming follows the launcher convention the
+// clients check against: installer plans target `<product>`, hot plans target
+// `<product>-renderer` (override with --component-id). Release matching is
+// componentId-based, so AppCenter registration is irrelevant here.
+const product = safeProductId(args.product || process.env.MX_RELEASE_PRODUCT || 'mx-h2i');
+const isDefaultProduct = product === 'mx-h2i';
 const baseUrl = requiredArg('base-url', args.baseUrl || process.env.MX_RELEASE_BASE_URL || process.env.MX_SMOKE_BASE_URL)
   .replace(/\/+$/, '');
 const artifactPathInput = requiredArg('artifact', args.artifact || process.env.MX_RELEASE_ARTIFACT);
@@ -21,10 +28,13 @@ const storage = args.storage || process.env.MX_RELEASE_ARTIFACT_STORAGE || 'auto
 const artifactPlatform = normalizePlatform(args.platform || process.env.MX_RELEASE_PLATFORM || (kind === 'hot' ? 'all' : process.platform));
 const runId = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
 const releaseId = args.releaseId || (kind === 'hot'
-  ? `mx-h2i-hot-${version}-${runId}`
-  : `mx-h2i-installer-${version}-${runId}`);
+  ? `${product}-hot-${version}-${runId}`
+  : `${product}-installer-${version}-${runId}`);
+// `mx-h2i-installer` is the server's closed-enum installer kind (historical
+// name); clients classify it by the `installer` substring, so it is the right
+// kind for every product's DMG/EXE.
 const artifactKind = kind === 'hot' ? 'renderer-ui' : 'mx-h2i-installer';
-const artifactComponentId = kind === 'hot' ? args.componentId || 'mx-h2i-renderer' : 'mx-h2i';
+const artifactComponentId = kind === 'hot' ? args.componentId || `${product}-renderer` : product;
 // Point-targeting (docs/19 §6.1): a one-user gray release is
 // `--target-user usr_xxx`; repeat or comma-separate for more.
 const targetUserIds = listArg(args.targetUser ?? args.targetUsers, []);
@@ -77,9 +87,9 @@ function installerBody() {
   return {
     releaseId,
     channel,
-    productId: 'mx-h2i',
-    appId: 'mx-h2i',
-    launcherComponentId: 'mx-h2i',
+    productId: product,
+    appId: product,
+    launcherComponentId: product,
     launcherUpdatePolicy: 'mx-h2i-installer',
     launcherCurrentVersion: currentVersion,
     launcherTargetVersion: version,
@@ -99,8 +109,8 @@ function installerBody() {
     targetUserIds,
     targetInstallIds,
     releaseNotes,
-    suiteId: args.suiteId || 'mx-h2i-installer-release',
-    topology: args.topology || 'h-d-i-installer-release',
+    suiteId: args.suiteId || `${product}-installer-release`,
+    topology: args.topology || (isDefaultProduct ? 'h-d-i-installer-release' : `${product}-installer-release`),
     sites: listArg(args.sites, ['internal-main', 'domestic-main']),
     e2eResult,
     createdBy: args.createdBy || 'release-center-publish',
@@ -112,13 +122,13 @@ function hotUpdateBody() {
   return {
     releaseId,
     channel,
-    productId: 'mx-h2i',
-    appId: 'mx-h2i',
+    productId: product,
+    appId: product,
     launcherComponentId: artifactComponentId,
     launcherUpdatePolicy: 'renderer-ui',
     launcherCurrentVersion: currentVersion,
     launcherTargetVersion: version,
-    appComponentId: 'mx-h2i-config',
+    appComponentId: `${product}-config`,
     appUpdatePolicy: 'config-snapshot',
     appCurrentVersion: currentVersion,
     appTargetVersion: version,
@@ -132,12 +142,12 @@ function hotUpdateBody() {
     rolloutStrategy: args.rolloutStrategy || 'gray',
     rolloutPercentage: numberArg(args.rolloutPercentage, 10),
     rolloutRings: listArg(args.rolloutRings, ['internal-dogfood', 'canary', 'stable']),
-    featureKeys: listArg(args.featureKeys, ['mx-h2i.release.hot-update']),
+    featureKeys: listArg(args.featureKeys, [`${product}.release.hot-update`]),
     targetUserIds,
     targetInstallIds,
     releaseNotes,
-    suiteId: args.suiteId || 'mx-h2i-hot-release',
-    topology: args.topology || 'h-d-i-hot-release',
+    suiteId: args.suiteId || `${product}-hot-release`,
+    topology: args.topology || (isDefaultProduct ? 'h-d-i-hot-release' : `${product}-hot-release`),
     sites: listArg(args.sites, ['internal-main', 'domestic-main']),
     e2eResult,
     createdBy: args.createdBy || 'release-center-publish',
@@ -184,6 +194,14 @@ function numberArg(value, fallback) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) throw new Error(`Invalid number: ${value}`);
   return parsed;
+}
+
+function safeProductId(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(normalized)) {
+    throw new Error(`Invalid --product: ${value}`);
+  }
+  return normalized;
 }
 
 function normalizePlatform(value) {

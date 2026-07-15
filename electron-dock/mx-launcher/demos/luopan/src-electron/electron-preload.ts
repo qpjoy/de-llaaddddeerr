@@ -3,6 +3,8 @@ import { contextBridge, ipcRenderer } from 'electron';
 const api = {
   getRuntime: () => ipcRenderer.invoke('luopan:get-runtime'),
   saveConfig: (input: unknown) => ipcRenderer.invoke('luopan:save-config', input),
+  login: (input: { account: string; password: string }) => ipcRenderer.invoke('luopan:login', input),
+  logout: () => ipcRenderer.invoke('luopan:logout'),
   connectTestMode: () => ipcRenderer.invoke('luopan:connect-test-mode'),
   connectInternal: () => ipcRenderer.invoke('luopan:connect-internal'),
   applyDataPlane: () => ipcRenderer.invoke('luopan:apply-data-plane'),

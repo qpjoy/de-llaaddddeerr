@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+
 import { configure } from 'quasar/wrappers';
 
 // Signing/notarization activates automatically when release credentials are
@@ -31,6 +33,11 @@ export default configure(() => ({
   },
   electron: {
     bundler: 'builder',
+    // The UnPackaged production install must NOT climb to the demo's own
+    // pnpm-workspace.yaml (npm mode): a workspace-scoped `install --prod`
+    // prunes the demo's devDependencies (electron-builder included) and the
+    // packaging step then crashes on `bundlerResult.default`.
+    unPackagedInstallParams: ['install', '--prod', '--ignore-workspace'],
     preloadScripts: ['electron-preload'],
     builder: {
       appId: 'dev.qpjoy.luopan',
@@ -38,6 +45,10 @@ export default configure(() => ({
       directories: {
         output: 'dist/electron'
       },
+      // Ship the project .env (bootstrap URLs etc.) into Resources/.env so a
+      // packaged build reads the same config as dev. Per-machine overrides go
+      // to <userData>/.env; real env vars win over both.
+      ...(existsSync('.env') ? { extraResources: [{ from: '.env', to: '.env' }] } : {}),
       mac: {
         target: ['dmg'],
         category: 'public.app-category.business',

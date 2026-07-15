@@ -1967,7 +1967,12 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
   // at tunnel start. After a Wi-Fi/network switch they keep pointing at the old
   // gateway and black-hole the relay endpoint (bootstrap API included) until
   // deleted with root. This daemon is the only resident root process, so it
-  // watches the default path and re-applies the bypass when it changes.
+  // watches the default path and re-applies the bypass when it changes. The
+  // routes are also shared kernel state: another product's daemon cleanup can
+  // delete them while this tunnel is still up (multiple standalone launchers
+  // may point at the same relay IP), so when the default path is stable the
+  // watchdog verifies each applied host route still exists and still follows
+  // the current default gateway, restoring it otherwise.
   const endpointBypassWatchdogLines = endpointBypassCommands.length > 0
     ? [
         '(',
@@ -1980,6 +1985,21 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
         '      log_route "defaultPathChanged=${__hdo_bypass_path}-> ${__hdo_bypass_next}"',
         '      apply_endpoint_bypass',
         '      __hdo_bypass_path="$__hdo_bypass_next"',
+        '    elif [ -n "$__hdo_bypass_next" ]; then',
+        "      __hdo_bypass_gw=\"$(route -n get default 2>/dev/null | awk '/gateway:/{print $2; exit}')\"",
+        '      case "$__hdo_bypass_gw" in *[!0-9.]*|"") __hdo_bypass_gw="" ;; esac',
+        '      if [ -n "$__hdo_bypass_gw" ]; then',
+        '        for __hdo_bypass_ip in ${__hdo_bypass_applied_ips:-}; do',
+        "          __hdo_bypass_dest=\"$(route -n get \"$__hdo_bypass_ip\" 2>/dev/null | awk '/destination:/{print $2; exit}')\"",
+        "          __hdo_bypass_rgw=\"$(route -n get \"$__hdo_bypass_ip\" 2>/dev/null | awk '/gateway:/{print $2; exit}')\"",
+        '          if [ "$__hdo_bypass_dest" != "$__hdo_bypass_ip" ] || { [ -n "$__hdo_bypass_rgw" ] && [ "$__hdo_bypass_rgw" != "$__hdo_bypass_gw" ]; }; then',
+        '            log_action "endpoint-bypass-restore"',
+        '            log_route "bypassRouteDrift=${__hdo_bypass_ip} dest=${__hdo_bypass_dest:-missing} gateway=${__hdo_bypass_rgw:-none}->${__hdo_bypass_gw}"',
+        '            apply_endpoint_bypass',
+        '            break',
+        '          fi',
+        '        done',
+        '      fi',
         '    fi',
         '  done',
         ') &',
@@ -2231,6 +2251,7 @@ function darwinEndpointBypassCommands(endpointHosts: string[], logArg: string): 
   return [
     '__hdo_endpoint_gateway="$(route -n get default 2>/dev/null | awk \'/gateway:/{print $2; exit}\')"',
     '__hdo_endpoint_interface="$(route -n get default 2>/dev/null | awk \'/interface:/{print $2; exit}\')"',
+    '__hdo_bypass_applied_ips=""',
     'if [ -n "$__hdo_endpoint_gateway" ]; then',
     `  for __hdo_endpoint_host in ${hosts.map(shellQuote).join(' ')}; do`,
     '    case "$__hdo_endpoint_host" in',
@@ -2246,6 +2267,7 @@ function darwinEndpointBypassCommands(endpointHosts: string[], logArg: string): 
     '    for __hdo_endpoint_ip in $__hdo_endpoint_ips; do',
     '      route -q -n delete -host "$__hdo_endpoint_ip" >/dev/null 2>&1 || true',
     '      route -q -n add -host "$__hdo_endpoint_ip" "$__hdo_endpoint_gateway" >/dev/null 2>&1 || route -q -n change -host "$__hdo_endpoint_ip" "$__hdo_endpoint_gateway" >/dev/null 2>&1 || true',
+    '      __hdo_bypass_applied_ips="$__hdo_bypass_applied_ips $__hdo_endpoint_ip"',
     `      route -n get "$__hdo_endpoint_ip" >> ${logArg} 2>&1 || true`,
     '    done',
     '  done',

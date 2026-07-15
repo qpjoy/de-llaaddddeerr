@@ -253,6 +253,14 @@ body {
   background: rgba(11, 15, 24, 0.5);
 }
 
+.config-pair--copy {
+  cursor: pointer;
+}
+
+.config-pair--copy:hover {
+  border-color: rgba(52, 245, 210, 0.6);
+}
+
 .runtime-state strong,
 .config-pair strong {
   min-width: 0;
@@ -298,9 +306,17 @@ body {
   font-size: 13px;
 }
 
-.config-panel {
+.config-panel,
+.identity-panel,
+.release-panel {
   display: grid;
   gap: 12px;
+}
+
+.release-notes {
+  white-space: pre-wrap;
+  border-left: 2px solid rgba(52, 245, 210, 0.5);
+  padding-left: 10px;
 }
 
 .event-log {

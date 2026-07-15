@@ -48,11 +48,27 @@ VIP——它是 Luopan 到达 Internal 的**唯一路由**，不是装饰性标�
 `10.88.0.1` 是 MX-H2I/foundation 的迁移期兼容地址，**Luopan 一律不得使用**（包括
 默认 base URL、诊断、兜底逻辑）。
 
+**Bootstrap 首连（开发与打包版通用）**：注册的 base URL（`10.88.100.3`）是隧道内
+VIP，首次 enroll 时不可达。把 bootstrap 可达入口写进 `.env`
+（`LUOPAN_BOOTSTRAP_URLS=http://<lan>:18090`，逗号分隔多候选，见 `.env.example`）：
+连接/登录/更新在 `network-ready` 之前走首个探测通过的 bootstrap URL，之后自动切回
+VIP。加载顺序：真实 env > `<userData>/.env`（每台机器可覆盖）> 打包内
+`Resources/.env`（构建时项目根有 `.env` 会自动带入）> 开发目录 `.env`。能力由
+`@qpjoy/electron-launcher/bootstrap`（≥2.3.2）提供：`resolveElectronLauncherBootstrap`
+/ `parseElectronLauncherBootstrapUrls` / `loadElectronLauncherEnvFiles`，其他产品
+照此接入即可。
+
 开发期未入网时：`LUOPAN_LAUNCHER_BASE_URL=<lan-admin-url>` 覆盖 base URL，
-`LUOPAN_SDK_TEST_MODE=1` 走服务端测试模式；两者都不允许出现在正式构建里。
+`LUOPAN_SDK_TEST_MODE=1` 走服务端测试模式；两者都不允许出现在正式构建里
+（bootstrap URL 允许，它本来就是产品的公开入口配置）。
 demo 默认 registered 模式，工具栏 **Connect Internal** 一键完成
 lease → 数据面 → VIP healthz。平台侧开通的完整操作（Admin 注册、Service VIP
 Reconcile、`mx-internal-svc` 语义、enroll 报错对照）见 docs/20 §4.5。
+
+用户中心：侧栏面板 `luopan:login` 走 SDK gateway OAuth password grant
+（docs/15），登录后 lease 自动切登录段（`10.91.0.1-.99.254`），且检查更新携带
+userId——Release Center 按用户定向的计划只对登录用户可见。access token 只留
+内存，登出或重启即失效。
 
 ## 五条红线（验收会逐条检查）
 

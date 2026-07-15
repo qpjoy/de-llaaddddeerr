@@ -72,6 +72,16 @@ import {
   type StandaloneUserConnectOptions
 } from '@qpjoy/mx-launcher-standalone';
 export {
+  loadElectronLauncherEnvFiles,
+  normalizeElectronLauncherBootstrapUrl,
+  parseElectronLauncherBootstrapUrls,
+  resolveElectronLauncherBootstrap,
+  type ElectronLauncherBootstrapCandidate,
+  type ElectronLauncherBootstrapProbe,
+  type ElectronLauncherBootstrapResolution,
+  type ResolveElectronLauncherBootstrapOptions
+} from './bootstrap.js';
+export {
   createElectronLauncherSystemDomainProxy,
   renderElectronLauncherPacScript,
   type ElectronLauncherPacProxy,

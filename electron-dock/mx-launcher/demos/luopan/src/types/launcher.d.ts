@@ -2,14 +2,27 @@ import type { ElectronLauncherStandaloneDataPlaneDiagnostics } from '@qpjoy/elec
 
 export interface LuopanRuntimeConfig {
   baseUrl: string;
+  bootstrapUrls: string[];
   productId: string;
   mode: 'standalone';
   sdkTestMode: boolean;
   deviceLabel: string;
 }
 
+export interface LuopanRuntimeIdentity {
+  kind: 'anonymous' | 'user';
+  userId: string | null;
+  displayName: string | null;
+  account: string | null;
+  scopes: string[];
+  tokenExpiresAt: string | null;
+  loginAt: string | null;
+  tokenPresent: boolean;
+}
+
 export interface LuopanRuntimeConnection {
   status: 'idle' | 'connecting' | 'lease-active' | 'data-plane-pending' | 'network-ready' | 'error';
+  bootstrapBaseUrl: string | null;
   leaseIp: string | null;
   serviceVip: string | null;
   dnsServer: string | null;
@@ -61,6 +74,7 @@ export interface LuopanRuntimeState {
   installId: string;
   deviceId: string;
   config: LuopanRuntimeConfig;
+  identity: LuopanRuntimeIdentity;
   connection: LuopanRuntimeConnection;
   update: LuopanRuntimeUpdate;
   events: string[];
@@ -69,6 +83,8 @@ export interface LuopanRuntimeState {
 export interface LuopanLauncherApi {
   getRuntime(): Promise<LuopanRuntimeState>;
   saveConfig(input: Partial<LuopanRuntimeConfig>): Promise<LuopanRuntimeState>;
+  login(input: { account: string; password: string }): Promise<LuopanRuntimeState>;
+  logout(): Promise<LuopanRuntimeState>;
   connectTestMode(): Promise<LuopanRuntimeState>;
   connectInternal(): Promise<LuopanRuntimeState>;
   applyDataPlane(): Promise<LuopanRuntimeState>;

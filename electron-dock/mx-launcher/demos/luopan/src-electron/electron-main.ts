@@ -10,6 +10,10 @@ import { fileURLToPath } from 'node:url';
 
 import {
   adoptPendingElectronLauncherPackages,
+  loadElectronLauncherEnvFiles,
+  parseElectronLauncherBootstrapUrls,
+  resolveElectronLauncherBootstrap,
+  type ElectronLauncherBootstrapResolution,
   applyElectronLauncherStandaloneDataPlane,
   buildElectronLauncherStandaloneOwnershipClaim,
   classifyElectronLauncherUpdateArtifact,
@@ -38,6 +42,14 @@ type LuopanDataPlaneMode = 'reuse' | 'standalone';
 
 interface RuntimeConfig {
   baseUrl: string;
+  /**
+   * Bootstrap candidates probed BEFORE the tunnel exists (docs/20 §4.5): the
+   * registered baseUrl is the in-tunnel VIP and is unreachable on first
+   * enroll. Sourced from LUOPAN_BOOTSTRAP_URLS (env or .env file) or edited
+   * in the CONFIG panel; the resolved one serves enroll/login/update until
+   * the data plane reports network-ready.
+   */
+  bootstrapUrls: string[];
   productId: string;
   mode: 'standalone';
   sdkTestMode: boolean;
@@ -46,6 +58,7 @@ interface RuntimeConfig {
 
 interface RuntimeConnection {
   status: RuntimeStatus;
+  bootstrapBaseUrl: string | null;
   leaseIp: string | null;
   serviceVip: string | null;
   dnsServer: string | null;
@@ -91,10 +104,24 @@ interface RuntimeUpdate {
   message: string | null;
 }
 
+// User Center identity (docs/15 SDK gateway). The access token stays in
+// memory only; the persisted identity is display metadata + the userId used
+// for the login-range lease and release targeting.
+interface RuntimeIdentity {
+  kind: 'anonymous' | 'user';
+  userId: string | null;
+  displayName: string | null;
+  account: string | null;
+  scopes: string[];
+  tokenExpiresAt: string | null;
+  loginAt: string | null;
+}
+
 interface RuntimeState {
   installId: string;
   deviceId: string;
   config: RuntimeConfig;
+  identity: RuntimeIdentity;
   connection: RuntimeConnection;
   update: RuntimeUpdate;
   events: string[];
@@ -131,6 +158,11 @@ const DATA_PLANE_MODE = luopanDataPlaneMode();
 let mainWindow: BrowserWindow | null = null;
 let runtime: RuntimeState | null = null;
 let activeSession: LauncherNetworkSession | null = null;
+// In-memory only: never persisted, cleared on logout/restart.
+let activeAccessToken: string | null = null;
+// Pinned by the last successful bootstrap resolution; serves every API call
+// made before the data plane is network-ready.
+let activeBootstrapBaseUrl: string | null = null;
 
 app.setAppUserModelId('dev.qpjoy.luopan');
 
@@ -154,6 +186,7 @@ function defaultConfig(): RuntimeConfig {
     // back to 10.88.88.88 / 10.88.0.1 — those are MX-H2I/foundation migration
     // compatibility addresses and are off-limits to Luopan.
     baseUrl: normalizeBaseUrl(process.env.LUOPAN_LAUNCHER_BASE_URL || process.env.MX_LAUNCHER_BASE_URL || 'http://10.88.100.3:18090'),
+    bootstrapUrls: parseElectronLauncherBootstrapUrls(process.env.LUOPAN_BOOTSTRAP_URLS),
     productId: 'luopan',
     mode: 'standalone',
     // Registered mode by default: the lease request must pass the server-side
@@ -167,6 +200,7 @@ function defaultConfig(): RuntimeConfig {
 function emptyConnection(): RuntimeConnection {
   return {
     status: 'idle',
+    bootstrapBaseUrl: null,
     leaseIp: null,
     serviceVip: null,
     dnsServer: null,
@@ -175,6 +209,18 @@ function emptyConnection(): RuntimeConnection {
     dataPlane: null,
     message: 'Launcher adapter ready.',
     updatedAt: null
+  };
+}
+
+function emptyIdentity(): RuntimeIdentity {
+  return {
+    kind: 'anonymous',
+    userId: null,
+    displayName: null,
+    account: null,
+    scopes: [],
+    tokenExpiresAt: null,
+    loginAt: null
   };
 }
 
@@ -199,6 +245,7 @@ async function loadRuntime(): Promise<RuntimeState> {
     installId: `luopan-inst-${randomUUID()}`,
     deviceId: `luopan-dev-${randomUUID()}`,
     config: defaultConfig(),
+    identity: emptyIdentity(),
     connection: emptyConnection(),
     update: emptyUpdate(),
     events: []
@@ -210,6 +257,7 @@ async function loadRuntime(): Promise<RuntimeState> {
       installId: stringValue(parsed.installId) || fallback.installId,
       deviceId: stringValue(parsed.deviceId) || fallback.deviceId,
       config: normalizeConfig(parsed.config, fallback.config),
+      identity: normalizeIdentity(parsed.identity),
       connection: normalizeConnection(parsed.connection),
       update: normalizeUpdate(parsed.update),
       events: Array.isArray(parsed.events) ? parsed.events.filter((item): item is string => typeof item === 'string').slice(-12) : []
@@ -239,6 +287,7 @@ function visibleRuntime() {
     installId: state.installId,
     deviceId: state.deviceId,
     config: state.config,
+    identity: { ...state.identity, tokenPresent: Boolean(activeAccessToken) },
     connection: state.connection,
     update: state.update,
     events: state.events
@@ -253,7 +302,7 @@ function requireRuntime(): RuntimeState {
 function launcherClient(): StandaloneLauncher {
   const state = requireRuntime();
   const launcher = createElectronLauncher({
-    baseUrl: state.config.baseUrl,
+    baseUrl: effectiveApiBaseUrl(),
     productId: state.config.productId,
     mode: 'standalone',
     installId: state.installId,
@@ -266,6 +315,44 @@ function launcherClient(): StandaloneLauncher {
   return launcher;
 }
 
+/**
+ * API base for the current phase: once the data plane is network-ready the
+ * product talks to its own VIP; before that (enroll, login, update check,
+ * peer sync) everything goes through the resolved bootstrap URL.
+ */
+function effectiveApiBaseUrl(): string {
+  const state = requireRuntime();
+  if (state.connection.status === 'network-ready') return state.config.baseUrl;
+  return activeBootstrapBaseUrl || state.config.baseUrl;
+}
+
+/**
+ * Probe bootstrap candidates (env/.env/config order) and pin the first
+ * healthy one. `force` re-probes even when one is already pinned — used when
+ * a connect attempt starts, so a network change picks a new entrance.
+ */
+async function ensureBootstrapResolved(force = false): Promise<ElectronLauncherBootstrapResolution | null> {
+  const state = requireRuntime();
+  if (!force && activeBootstrapBaseUrl) return null;
+  const resolution = await resolveElectronLauncherBootstrap({
+    candidates: [
+      ...state.config.bootstrapUrls.map((url) => ({ url, source: 'bootstrap-urls' })),
+      { url: state.config.baseUrl, source: 'config.baseUrl' }
+    ],
+    timeoutMs: 3000
+  });
+  if (resolution.ok && resolution.baseUrl) {
+    activeBootstrapBaseUrl = resolution.baseUrl;
+    state.connection.bootstrapBaseUrl = resolution.baseUrl;
+    pushEvent(`bootstrap resolved ${resolution.baseUrl} (${resolution.source})`);
+  } else {
+    activeBootstrapBaseUrl = null;
+    state.connection.bootstrapBaseUrl = null;
+    pushEvent('bootstrap resolve failed');
+  }
+  return resolution;
+}
+
 // --- Release update wiring (docs/19 §3+§5, docs/17 state machine) ----------
 // Everything below consumes @qpjoy/electron-launcher; no update logic lives in
 // the product. The last check result is kept in memory only: `apply-update`
@@ -275,7 +362,9 @@ let lastUpdateCheck: ElectronLauncherUpdateCheckResult | null = null;
 function releaseUpdater(): ElectronLauncherReleaseUpdater {
   const state = requireRuntime();
   return createElectronLauncherReleaseUpdater({
-    baseUrl: state.config.baseUrl,
+    // In-tunnel VIP once connected; bootstrap URL before that, so the update
+    // panel (and startup bookkeeping) works pre-connect too.
+    baseUrl: effectiveApiBaseUrl(),
     reportInstallId: state.installId
   });
 }
@@ -313,6 +402,16 @@ function updateExecutor(updater: ElectronLauncherReleaseUpdater) {
       await shell.openPath(filePath);
     }
   });
+}
+
+// Ranking across the installer/hot component namespaces: an actionable
+// decision wins; blocked beats up-to-date so gate state stays visible.
+function chooseUpdateCheck(checks: ElectronLauncherUpdateCheckResult[]): ElectronLauncherUpdateCheckResult {
+  if (checks.length === 0) throw new Error('Release check returned no results');
+  return checks.find((check) => check.status === 'update-available')
+    ?? checks.find((check) => check.status === 'blocked')
+    ?? checks.find((check) => check.status === 'up-to-date')
+    ?? checks[0];
 }
 
 function updateFromCheck(check: ElectronLauncherUpdateCheckResult): RuntimeUpdate {
@@ -590,6 +689,50 @@ function registerIpc(): void {
     broadcastRuntime();
     return visibleRuntime();
   });
+  // User Center: password login via SDK gateway -> identityKind 'user'. The
+  // next connect (or reconnect) picks up the login lease range automatically.
+  ipcMain.handle('luopan:login', async (_event, input) => {
+    const state = requireRuntime();
+    const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    const account = stringValue(record.account);
+    const password = typeof record.password === 'string' ? record.password : '';
+    if (!account || !password) {
+      pushEvent('login rejected: missing account or password');
+      await saveRuntime();
+      broadcastRuntime();
+      return visibleRuntime();
+    }
+    try {
+      if (state.connection.status !== 'network-ready') await ensureBootstrapResolved();
+      const auth = await authenticateLuopanUser(account, password);
+      activeAccessToken = auth.accessToken;
+      state.identity = {
+        kind: 'user',
+        userId: auth.userId,
+        displayName: auth.displayName || account,
+        account,
+        scopes: auth.scopes,
+        tokenExpiresAt: auth.expiresAt,
+        loginAt: new Date().toISOString()
+      };
+      pushEvent(`user login ${auth.userId}`);
+    } catch (error) {
+      activeAccessToken = null;
+      pushEvent(`login failed ${errorMessage(error)}`);
+    }
+    await saveRuntime();
+    broadcastRuntime();
+    return visibleRuntime();
+  });
+  ipcMain.handle('luopan:logout', async () => {
+    const state = requireRuntime();
+    activeAccessToken = null;
+    state.identity = emptyIdentity();
+    pushEvent('user logged out');
+    await saveRuntime();
+    broadcastRuntime();
+    return visibleRuntime();
+  });
   ipcMain.handle('luopan:connect-test-mode', async () => {
     await requestLuopanLease();
     await saveRuntime();
@@ -693,13 +836,25 @@ function registerIpc(): void {
     state.update = { ...state.update, status: 'checking', message: 'Checking Release Center decision.' };
     broadcastRuntime();
     try {
-      const check = await releaseUpdater().check({
-        componentId: PRODUCT.release.componentId,
-        currentVersion: app.getVersion(),
-        channel: PRODUCT.release.channel,
-        installId: state.installId,
-        platform: process.platform
-      });
+      if (state.connection.status !== 'network-ready') await ensureBootstrapResolved();
+      // Launcher convention (same as mx-h2i): installer plans target
+      // `<componentId>`, hot plans target `<componentId>-renderer`. Check
+      // both namespaces and keep the strongest decision. userId is passed so
+      // per-user targeted releases (docs/20 §5.8) match logged-in users.
+      const updater = releaseUpdater();
+      const userId = state.identity.kind === 'user' ? state.identity.userId : null;
+      const checks: ElectronLauncherUpdateCheckResult[] = [];
+      for (const componentId of [PRODUCT.release.componentId, `${PRODUCT.release.componentId}-renderer`]) {
+        checks.push(await updater.check({
+          componentId,
+          currentVersion: app.getVersion(),
+          channel: PRODUCT.release.channel,
+          installId: state.installId,
+          userId,
+          platform: process.platform
+        }));
+      }
+      const check = chooseUpdateCheck(checks);
       lastUpdateCheck = check;
       state.update = updateFromCheck(check);
       pushEvent(`update check ${check.status}`);
@@ -794,16 +949,28 @@ function registerIpc(): void {
 // launcher-standalone capabilities.
 async function requestLuopanLease(): Promise<boolean> {
   const state = requireRuntime();
+  const loggedIn = state.identity.kind === 'user' && Boolean(state.identity.userId);
   await setConnection({
     status: 'connecting',
     message: state.config.sdkTestMode
       ? 'Requesting Launcher Network lease in SDK test mode.'
-      : 'Requesting registered Luopan Launcher Network lease.'
+      : loggedIn
+        ? `Requesting user-range Luopan lease for ${state.identity.userId}.`
+        : 'Requesting registered Luopan Launcher Network lease.'
   });
   pushEvent('lease request started');
   try {
+    // First hop must be bootstrap-reachable: re-probe candidates on every
+    // connect attempt so a network change picks a working entrance.
+    const resolution = await ensureBootstrapResolved(true);
+    if (resolution && !resolution.ok) {
+      throw new Error(resolution.message);
+    }
     const session = await launcherClient().connectNetwork({
-      identityKind: 'anonymous',
+      // Logged-in users land in the user lease range, anonymous sessions in
+      // the anonymous range (docs/20 §1.2). Same API, different identityKind.
+      identityKind: loggedIn ? 'user' : 'anonymous',
+      userId: loggedIn ? state.identity.userId : undefined,
       platform: 'quasar-electron',
       sdkTestMode: state.config.sdkTestMode,
       requestedBy: 'luopan-quasar-demo',
@@ -1115,7 +1282,8 @@ async function syncLeasePeers(session: LauncherNetworkSession): Promise<void> {
 }
 
 async function postLauncherNetwork(pathname: string, body: Record<string, unknown>): Promise<unknown> {
-  const response = await fetch(`${requireRuntime().config.baseUrl}/internal/v1/launcher-network${pathname}`, {
+  // Called during data-plane bring-up (pre-tunnel): must use the bootstrap URL.
+  const response = await fetch(`${effectiveApiBaseUrl()}/internal/v1/launcher-network${pathname}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
@@ -1133,6 +1301,50 @@ async function postLauncherNetwork(pathname: string, body: Record<string, unknow
   return payload;
 }
 
+// User Center login via the SDK gateway OAuth password grant (docs/15). The
+// returned principal.userId is the key for the login-range lease
+// (identityKind 'user') and for Release Center user targeting.
+async function authenticateLuopanUser(account: string, password: string): Promise<{
+  userId: string;
+  displayName: string | null;
+  scopes: string[];
+  accessToken: string | null;
+  expiresAt: string | null;
+}> {
+  const response = await fetch(`${effectiveApiBaseUrl()}/internal/v1/sdk/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      grant_type: 'password',
+      username: account,
+      password,
+      audience: 'mx-sdk',
+      scope: 'auth.read network.hdi.status',
+      requestId: `luopan-oauth-${Date.now()}`
+    })
+  });
+  const text = await response.text();
+  const payload = text ? safeJson(text) : null;
+  const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+  if (!response.ok) {
+    const message = stringValue(record.message) || text || response.statusText;
+    throw new Error(`User Center login failed: ${response.status} ${message}`);
+  }
+  const token = (record.token && typeof record.token === 'object' ? record.token : record) as Record<string, unknown>;
+  const principal = token.principal && typeof token.principal === 'object' ? token.principal as Record<string, unknown> : {};
+  const subject = stringValue(token.subject);
+  const userId = stringValue(principal.userId)
+    || (subject?.startsWith('user:') ? stringValue(subject.slice('user:'.length)) : null);
+  if (!userId) throw new Error('User Center login did not return a user principal.');
+  return {
+    userId,
+    displayName: stringValue(principal.displayName),
+    scopes: typeof token.scope === 'string' ? token.scope.split(/\s+/).filter(Boolean) : [],
+    accessToken: stringValue(token.access_token),
+    expiresAt: stringValue(token.expires_at)
+  };
+}
+
 function luopanWireGuardServiceIdentity() {
   return {
     displayName: 'Luopan WireGuard',
@@ -1148,11 +1360,25 @@ function normalizeConfig(input: unknown, fallback: RuntimeConfig = defaultConfig
   const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
   return {
     baseUrl: normalizeBaseUrl(stringValue(record.baseUrl) || fallback.baseUrl),
+    bootstrapUrls: normalizeBootstrapUrls(record.bootstrapUrls, fallback.bootstrapUrls),
     productId: 'luopan',
     mode: 'standalone',
     sdkTestMode: typeof record.sdkTestMode === 'boolean' ? record.sdkTestMode : fallback.sdkTestMode,
     deviceLabel: stringValue(record.deviceLabel) || fallback.deviceLabel
   };
+}
+
+// Empty input falls back (usually to LUOPAN_BOOTSTRAP_URLS from env/.env):
+// an explicit list wins, a cleared field re-enables the environment default.
+function normalizeBootstrapUrls(input: unknown, fallback: string[]): string[] {
+  const raw = typeof input === 'string'
+    ? input
+    : Array.isArray(input)
+      ? input.filter((item): item is string => typeof item === 'string').join(',')
+      : null;
+  if (raw === null) return fallback;
+  const parsed = parseElectronLauncherBootstrapUrls(raw);
+  return parsed.length > 0 ? parsed : fallback;
 }
 
 function normalizeConnection(input: unknown): RuntimeConnection {
@@ -1163,6 +1389,7 @@ function normalizeConnection(input: unknown): RuntimeConnection {
   const status = normalizeRuntimeStatus(record.status, leaseIp, dataPlane);
   return {
     status,
+    bootstrapBaseUrl: stringValue(record.bootstrapBaseUrl),
     leaseIp,
     serviceVip: stringValue(record.serviceVip),
     dnsServer: stringValue(record.dnsServer),
@@ -1171,6 +1398,21 @@ function normalizeConnection(input: unknown): RuntimeConnection {
     dataPlane,
     message: stringValue(record.message) || fallback.message,
     updatedAt: stringValue(record.updatedAt)
+  };
+}
+
+function normalizeIdentity(input: unknown): RuntimeIdentity {
+  const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+  const userId = stringValue(record.userId);
+  if (record.kind !== 'user' || !userId) return emptyIdentity();
+  return {
+    kind: 'user',
+    userId,
+    displayName: stringValue(record.displayName),
+    account: stringValue(record.account),
+    scopes: Array.isArray(record.scopes) ? record.scopes.filter((item): item is string => typeof item === 'string') : [],
+    tokenExpiresAt: stringValue(record.tokenExpiresAt),
+    loginAt: stringValue(record.loginAt)
   };
 }
 
@@ -1271,6 +1513,18 @@ function errorMessage(error: unknown): string {
 }
 
 app.whenReady().then(async () => {
+  // .env support for packaged builds (no shell env there). Real env vars win;
+  // then per-machine <userData>/.env; then the .env shipped inside the app
+  // (electron-builder extraResources); then the project .env during dev.
+  const envResult = loadElectronLauncherEnvFiles([
+    path.join(app.getPath('userData'), '.env'),
+    process.resourcesPath ? path.join(process.resourcesPath, '.env') : null,
+    path.join(app.getAppPath(), '.env'),
+    path.resolve(currentDir, '..', '..', '.env')
+  ]);
+  if (envResult.loadedFrom) {
+    console.log(`[luopan] env file loaded: ${envResult.loadedFrom} (${envResult.applied.join(', ') || 'no new keys'})`);
+  }
   runtime = await loadRuntime();
   registerIpc();
   await createWindow();
