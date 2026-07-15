@@ -22,6 +22,7 @@ export interface CreateElectronTunnelOptions extends Partial<Omit<TunnelManagerO
   userDataPath?: string;
   startAdminServer?: boolean;
   registerIpc?: boolean;
+  registerMarketplace?: boolean;
 }
 
 export interface ElectronTunnelHandle {
@@ -189,10 +190,12 @@ export function createElectronTunnel(host: CreateElectronTunnelHost, options: Cr
   // Self-register in the shared marketplace.db so the panel (when it shows
   // up later) knows the tunnel is here. Best-effort; failure is silent —
   // tunnel must keep working even if marketplace-db is missing.
-  registerSelfInMarketplaceDb(host.app, options).catch((err) => {
-    // eslint-disable-next-line no-console
-    console.warn('[electron-tunnel] marketplace-db self-register failed:', err);
-  });
+  if (options.registerMarketplace !== false) {
+    registerSelfInMarketplaceDb(host.app, options).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.warn('[electron-tunnel] marketplace-db self-register failed:', err);
+    });
+  }
 
   return {
     manager,

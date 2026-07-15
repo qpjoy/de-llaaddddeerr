@@ -1,4 +1,5 @@
 .quasar/
+.electron-native/
 .vue-global-types/
 dist/
 node_modules/

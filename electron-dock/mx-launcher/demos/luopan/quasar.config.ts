@@ -13,6 +13,11 @@ const shouldNotarize = Boolean(
   process.env.APPLE_API_KEY_ID
 );
 
+const extraResources = [
+  { from: '.electron-native', to: 'luopan-native' },
+  ...(existsSync('.env') ? [{ from: '.env', to: '.env' }] : [])
+];
+
 export default configure(() => ({
   supportTS: true,
   css: ['app.scss'],
@@ -54,7 +59,7 @@ export default configure(() => ({
       // Ship the project .env (bootstrap URLs etc.) into Resources/.env so a
       // packaged build reads the same config as dev. Per-machine overrides go
       // to <userData>/.env; real env vars win over both.
-      ...(existsSync('.env') ? { extraResources: [{ from: '.env', to: '.env' }] } : {}),
+      extraResources,
       mac: {
         target: ['dmg'],
         category: 'public.app-category.business',

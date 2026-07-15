@@ -1,7 +1,7 @@
 {
   "id": "qpjoy.electron-tunnel",
   "name": "QPJoy Tunnel",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "author": "qpjoy",
   "description": "Mihomo-based tunnel runtime with TUN / system-proxy / rule modes. Provides outbound networking for other plugins.",
   "engines": {

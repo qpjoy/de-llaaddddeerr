@@ -9,11 +9,15 @@
   "scripts": {
     "setup": "node scripts/dev-mode.mjs local",
     "setup:npm": "node scripts/dev-mode.mjs npm",
+    "prepare:electron-native": "node scripts/prepare-electron-native.mjs",
+    "predev": "pnpm run prepare:electron-native",
     "dev": "quasar dev -m electron",
     "start": "pnpm dev",
     "typecheck": "vue-tsc --noEmit -p tsconfig.json",
-    "check": "pnpm run typecheck",
+    "check": "node --check scripts/prepare-electron-native.mjs && pnpm run typecheck",
+    "prebuild": "pnpm run prepare:electron-native",
     "build": "quasar build -m electron --skip-pkg",
+    "prepackage": "pnpm run prepare:electron-native",
     "package": "CI=true quasar build -m electron"
   },
   "dependencies": {

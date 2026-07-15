@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
 import { mkdirSync } from 'fs';
 import { dirname } from 'path';
 
@@ -23,6 +23,15 @@ import { hashPassword } from '../security';
 import { SCHEMA_SQL } from './schema';
 
 type Row = Record<string, unknown>;
+type DatabaseConstructor = typeof Database;
+
+function loadDatabaseConstructor(): DatabaseConstructor {
+  const overridePath = process.env.QPJOY_TUNNEL_BETTER_SQLITE3_PATH?.trim();
+  // Electron and the workspace Node runtime can require different native
+  // ABIs. Consumers may point at an app-local Electron rebuild without
+  // mutating the shared better-sqlite3 installation used by Node services.
+  return require(overridePath || 'better-sqlite3') as DatabaseConstructor;
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -93,6 +102,7 @@ export class TunnelDatabase {
 
   constructor(dbPath: string, ports: Partial<TunnelPorts> = {}) {
     mkdirSync(dirname(dbPath), { recursive: true });
+    const Database = loadDatabaseConstructor();
     this.db = new Database(dbPath);
     // Subscription rows may contain proxy credentials. Overwrite deleted
     // payloads instead of leaving them recoverable in SQLite free pages.

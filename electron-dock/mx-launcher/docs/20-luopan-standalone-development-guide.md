@@ -164,6 +164,9 @@ mx-h2i 用子路径动态 import（CJS 环境）。
   灰度分桶、ownership ownerId、更新上报的主键，**换了等于换机器**。
 - 两种会话：guest（匿名 lease 段）与 employee（登录 lease 段）。Luopan demo 目前
   走 `connectNetwork({ identityKind: 'anonymous' })`，正式版按产品需求接登录。
+- V1 → V2 迁移期可设置 `LUOPAN_LEGACY_HDO_BASE_URL`：正常登录仍先走隧道内 VIP；只有
+  V2 明确返回账号未激活/不存在的 401 时，才用同一凭据向 V1 HDO 验证，并经 VIP 把账号
+  以固定 `mx-user` 权限导入 V2 后重试。V1 token 不落盘，迁移完成应删除该配置。
 - 对 server 的所有调用带 `requestedBy` 与 requestId，便于审计串链。
 
 ### 2.3 连接与数据面（connect 的完整链路）
@@ -390,7 +393,9 @@ demo 默认 **registered 模式**（`sdkTestMode=false`），工具栏 **Connect
   `parseElectronLauncherBootstrapUrls`（env 值解析）、`loadElectronLauncherEnvFiles`
   （打包版 .env 加载，真实 env 优先）。luopan demo 的接线：`.env` 写
   `LUOPAN_BOOTSTRAP_URLS`（或 CONFIG 面板填），匿名 enroll/bootstrap 在
-  `network-ready` 前走解析出的 bootstrap URL；登录只在网络就绪后走 VIP。每次 Connect 重新
+  `network-ready` 前走解析出的 bootstrap URL；V2 登录只在网络就绪后走 VIP。显式配置的
+  `LUOPAN_LEGACY_HDO_BASE_URL` 仅用于账号缺失时的一次性 V1 身份验证，不是 bootstrap。
+  每次 Connect 重新
   探测以适应切网。新产品照抄 demo 的 `ensureBootstrapResolved` /
   `effectiveApiBaseUrl` 两个函数即可。
 - **SDK test mode 的真实语义**：server 侧 `launcherNetworkSdkTestModeEnabled=true`

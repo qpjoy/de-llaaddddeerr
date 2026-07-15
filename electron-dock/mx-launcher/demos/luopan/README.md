@@ -26,6 +26,12 @@ pnpm run setup
 pnpm run dev
 ```
 
+`predev`, `prebuild`, and `prepackage` automatically prepare an app-local
+`better-sqlite3` build for the current Electron ABI. This copy lives under
+`.electron-native/` and is packaged as an extra resource; it deliberately does
+not rebuild the workspace's Node-native copy. If Electron is upgraded, the
+fingerprint changes and the native copy is rebuilt on the next command.
+
 The two URLs have different phases: `LUOPAN_BOOTSTRAP_URLS` is an ordered list
 of LAN/public entrances reachable before WireGuard is up, while
 `LUOPAN_LAUNCHER_BASE_URL` is the registered in-tunnel Luopan VIP and must stay
@@ -40,6 +46,14 @@ product-scoped WireGuard service, and finally proves the in-tunnel VIP
 through the in-tunnel VIP; the public bootstrap endpoint never receives an
 account, password, or bearer token. If a user-range lease is required, use
 **Disconnect → Connect Internal** once after login.
+
+During the V1-to-V2 transition, an operator may explicitly set
+`LUOPAN_LEGACY_HDO_BASE_URL`. If V2 reports that an account is not active,
+Luopan validates the credentials once against that legacy HDO API, imports the
+identity through the in-tunnel User Center endpoint with the fixed `mx-user`
+role and `luopan`/`h2o` app access, then retries the V2 password grant. V1
+tokens are discarded. Remove the setting after all users are migrated; use
+HTTPS when the legacy deployment supports it.
 
 The current shell directly exercises network lease/WireGuard/VIP, User Center,
 Oversea, and Release Center. When both a logged-in access token and
@@ -70,12 +84,18 @@ in CONFIG. Do not delete the runtime merely to change URLs: doing so also
 replaces installId/deviceId and breaks existing Release Center targeting and
 evidence continuity.
 
+Changing the VIP base URL or SDK mode in development invalidates the current
+identity, subscription, browser session, and data plane before the new channel
+can be used. Packaged builds force `http://10.88.100.3:18090` with SDK test mode
+off, and login rechecks that the configured host equals the connected service
+VIP and that its `/healthz` is reachable before sending a password.
+
 A non-VIP `LUOPAN_LAUNCHER_BASE_URL` and `LUOPAN_SDK_TEST_MODE=1` are
 development escape hatches only. The checked-in example uses the registered
 production coordinates.
 
 During development the demo consumes `@qpjoy/electron-launcher` 2.3.3 and
-`@qpjoy/electron-plugin-tunnel` 0.1.18 through workspace dependencies. The
+`@qpjoy/electron-plugin-tunnel` 0.1.19 through workspace dependencies. The
 packaged/online mode must use published versions containing the same Oversea
 ensure/inline-YAML/test-window contracts and the matching platform engine.
 

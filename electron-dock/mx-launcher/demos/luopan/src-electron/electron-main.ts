@@ -208,6 +208,7 @@ const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = 'luopan-runtime.json';
 const LUOPAN_DNS_HOST = 'luopan.mxinfo-inc.cn';
 const LUOPAN_DNS_ZONE = 'mxinfo-inc.cn';
+const LUOPAN_REGISTERED_BASE_URL = 'http://10.88.100.3:18090';
 const OVERSEA_SUBSCRIPTION_NAME = 'System Oversea 默认订阅';
 const OVERSEA_SESSION_PARTITION = 'persist:luopan-oversea';
 const OVERSEA_ALLOWLIST = [
@@ -278,7 +279,7 @@ function defaultConfig(): RuntimeConfig {
     // Luopan's registered product VIP (docs/19, HANDOFF §网络注册). Never fall
     // back to 10.88.88.88 / 10.88.0.1 — those are MX-H2I/foundation migration
     // compatibility addresses and are off-limits to Luopan.
-    baseUrl: normalizeBaseUrl(environmentValue('LUOPAN_LAUNCHER_BASE_URL') || environmentValue('MX_LAUNCHER_BASE_URL') || 'http://10.88.100.3:18090'),
+    baseUrl: normalizeBaseUrl(environmentValue('LUOPAN_LAUNCHER_BASE_URL') || environmentValue('MX_LAUNCHER_BASE_URL') || LUOPAN_REGISTERED_BASE_URL),
     bootstrapUrls: parseElectronLauncherBootstrapUrls(environmentValue('LUOPAN_BOOTSTRAP_URLS')),
     productId: 'luopan',
     mode: 'standalone',
@@ -381,7 +382,7 @@ async function loadRuntime(): Promise<RuntimeState> {
       deviceId: stringValue(parsed.deviceId) || fallback.deviceId,
       // Explicit process/.env values are deployment configuration and win
       // over CONFIG-panel values persisted by an older app run.
-      config: applyEnvironmentConfigOverrides(normalizeConfig(parsed.config, fallback.config)),
+      config: constrainRuntimeConfig(applyEnvironmentConfigOverrides(normalizeConfig(parsed.config, fallback.config))),
       // Access tokens are memory-only, so persisted user metadata must never
       // survive a process restart as an authenticated identity.
       identity: emptyIdentity(),
@@ -882,6 +883,7 @@ async function initializeOverseaTunnel(): Promise<void> {
     userDataPath: path.join(app.getPath('userData'), 'oversea'),
     startAdminServer: false,
     registerIpc: false,
+    registerMarketplace: false,
     adminPort: 23456,
     controllerPort: 23457,
     mixedPort: 23458,
@@ -914,6 +916,22 @@ async function initializeOverseaTunnel(): Promise<void> {
     message: '先匿名连接 Internal，再通过隧道内 VIP 登录 User Center；随后会自动确保 Oversea 订阅并启动应用代理。'
   };
   await saveRuntime();
+}
+
+function configureOverseaNativeRuntime(): void {
+  if (process.env.QPJOY_TUNNEL_BETTER_SQLITE3_PATH?.trim()) return;
+  const packageRelativePath = path.join('node_modules', 'better-sqlite3');
+  const candidates = app.isPackaged
+    ? [path.join(process.resourcesPath, 'luopan-native', packageRelativePath)]
+    : [
+        path.resolve(currentDir, '..', '..', '.electron-native', packageRelativePath),
+        path.resolve(process.cwd(), '.electron-native', packageRelativePath)
+      ];
+  const selected = candidates.find((candidate) => existsSync(path.join(candidate, 'package.json')));
+  if (!selected) {
+    throw new Error('Electron native runtime is missing. Run `pnpm run prepare:electron-native` in demos/luopan.');
+  }
+  process.env.QPJOY_TUNNEL_BETTER_SQLITE3_PATH = selected;
 }
 
 async function allocateOverseaPorts(status: TunnelStatus): Promise<TunnelStatus['ports']> {
@@ -1360,14 +1378,47 @@ function joinApiUrl(baseUrl: string, pathName: string): string {
 
 function registerIpc(): void {
   ipcMain.handle('luopan:get-runtime', () => visibleRuntime());
-  ipcMain.handle('luopan:save-config', async (_event, input) => {
+  ipcMain.handle('luopan:save-config', (_event, input) => runSessionExclusive(async () => {
     const state = requireRuntime();
-    state.config = normalizeConfig(input, state.config);
+    const current = state.config;
+    const next = constrainRuntimeConfig(applyEnvironmentConfigOverrides(normalizeConfig(input, current)));
+    const channelChanged = current.baseUrl !== next.baseUrl || current.sdkTestMode !== next.sdkTestMode;
+    const bootstrapChanged = current.bootstrapUrls.join('\n') !== next.bootstrapUrls.join('\n');
+    let cleanupError: string | null = null;
+    if (channelChanged) {
+      try {
+        await invalidateOverseaIdentitySession('config-channel-changed');
+      } catch (error) {
+        cleanupError = errorMessage(error);
+      }
+      activeAccessToken = null;
+      state.identity = emptyIdentity();
+      state.events = [];
+    }
+    state.config = next;
+    if (bootstrapChanged || channelChanged) activeBootstrapBaseUrl = null;
+    if (channelChanged && (state.connection.status !== 'idle' || activeSession)) {
+      try {
+        await disconnectLuopanDataPlane('config-change');
+      } catch (error) {
+        cleanupError = [cleanupError, errorMessage(error)].filter(Boolean).join('; ');
+      }
+    }
+    if (channelChanged) {
+      state.oversea = {
+        ...emptyOversea(),
+        autoConnect: state.oversea.autoConnect,
+        mode: state.oversea.mode,
+        message: cleanupError
+          ? `连接配置已变更并清除登录态；本地清理有异常：${cleanupError}`
+          : '连接配置已变更；请重新匿名 Connect Internal，再通过隧道内 VIP 登录。'
+      };
+    }
     pushEvent('runtime config saved');
     await saveRuntime();
     broadcastRuntime();
     return visibleRuntime();
-  });
+  }));
   // User Center: password login via SDK gateway -> identityKind 'user'. The
   // next connect (or reconnect) picks up the login lease range automatically.
   ipcMain.handle('luopan:login', (_event, input) => runSessionExclusive(async () => {
@@ -1384,6 +1435,20 @@ function registerIpc(): void {
     if (state.connection.status !== 'network-ready') {
       pushEvent('login rejected: Internal data plane is not ready');
       state.connection.message = '安全限制：请先匿名 Connect Internal，再通过隧道内 VIP 登录 User Center。';
+      await saveRuntime();
+      broadcastRuntime();
+      return visibleRuntime();
+    }
+    try {
+      await assertLuopanSecureLoginChannel();
+    } catch (error) {
+      state.connection = {
+        ...state.connection,
+        status: 'data-plane-pending',
+        message: errorMessage(error),
+        updatedAt: new Date().toISOString()
+      };
+      pushEvent(`login channel rejected ${errorMessage(error)}`);
       await saveRuntime();
       broadcastRuntime();
       return visibleRuntime();
@@ -1692,7 +1757,7 @@ function registerIpc(): void {
   });
 }
 
-async function disconnectLuopanDataPlane(reason: 'manual' | 'logout'): Promise<void> {
+async function disconnectLuopanDataPlane(reason: 'manual' | 'logout' | 'config-change'): Promise<void> {
   const state = requireRuntime();
   pushEvent(`data-plane disconnect started ${reason}`);
   activeSession = null;
@@ -2106,18 +2171,51 @@ async function postLauncherNetwork(pathname: string, body: Record<string, unknow
   return payload;
 }
 
-// User Center login via the SDK gateway OAuth password grant (docs/15). The
+async function assertLuopanSecureLoginChannel(): Promise<void> {
+  const state = requireRuntime();
+  const serviceVip = stringValue(state.connection.serviceVip);
+  if (!serviceVip) throw new Error('安全登录通道缺少已验证的 Internal service VIP，请重新 Connect Internal。');
+  const base = new URL(state.config.baseUrl);
+  if (base.hostname !== serviceVip) {
+    throw new Error(`安全登录通道拒绝非当前 service VIP 的地址：${base.hostname}（期望 ${serviceVip}）。`);
+  }
+  try {
+    const response = await fetch(new URL('/healthz', base), {
+      method: 'GET',
+      signal: AbortSignal.timeout(4_000),
+      cache: 'no-store'
+    });
+    await response.text();
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  } catch (error) {
+    throw new Error(`安全登录通道尚未就绪：${errorMessage(error)}。请重新 Connect Internal。`);
+  }
+}
+
+// User Center login via the SDK gateway OAuth password grant (docs/15).
 // This is intentionally called only after Internal is network-ready, so the
 // password is sent to the in-tunnel product VIP rather than a public
 // bootstrap endpoint. The returned principal.userId is the key for the
 // login-range lease and Release Center user targeting.
-async function authenticateLuopanUser(account: string, password: string): Promise<{
+interface LuopanUserAuthentication {
   userId: string;
   displayName: string | null;
   scopes: string[];
   accessToken: string;
   expiresAt: string | null;
-}> {
+}
+
+class UserCenterLoginError extends Error {
+  constructor(
+    readonly status: number,
+    readonly serverMessage: string
+  ) {
+    super(`User Center login failed: ${status} ${serverMessage}`);
+    this.name = 'UserCenterLoginError';
+  }
+}
+
+async function requestLuopanUserToken(account: string, password: string): Promise<LuopanUserAuthentication> {
   const response = await fetch(`${effectiveApiBaseUrl()}/internal/v1/sdk/oauth/token`, {
     method: 'POST',
     signal: AbortSignal.timeout(20_000),
@@ -2136,7 +2234,7 @@ async function authenticateLuopanUser(account: string, password: string): Promis
   const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
   if (!response.ok) {
     const message = stringValue(record.message) || text || response.statusText;
-    throw new Error(`User Center login failed: ${response.status} ${message}`);
+    throw new UserCenterLoginError(response.status, message);
   }
   const token = (record.token && typeof record.token === 'object' ? record.token : record) as Record<string, unknown>;
   const principal = token.principal && typeof token.principal === 'object' ? token.principal as Record<string, unknown> : {};
@@ -2157,6 +2255,134 @@ async function authenticateLuopanUser(account: string, password: string): Promis
     accessToken,
     expiresAt: stringValue(token.expires_at)
   };
+}
+
+function legacyHdoMigrationBaseUrl(): string | null {
+  const configured = stringValue(environmentValue('LUOPAN_LEGACY_HDO_BASE_URL'));
+  if (!configured) return null;
+  try {
+    const parsed = new URL(configured.includes('://') ? configured : `https://${configured}`);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function shouldMigrateLegacyHdoUser(error: unknown): error is UserCenterLoginError {
+  return error instanceof UserCenterLoginError
+    && error.status === 401
+    && error.serverMessage.toLowerCase().includes('account is not active');
+}
+
+/**
+ * Transitional V1 -> V2 identity bridge.
+ *
+ * The normal password grant always stays on the verified Internal service
+ * VIP. Only when V2 reports that the account is absent/inactive, and an
+ * operator explicitly configured LUOPAN_LEGACY_HDO_BASE_URL, do we validate
+ * the same credentials against V1 HDO. A successful V1 response is then
+ * imported through the in-tunnel V2 User Center endpoint as an ordinary
+ * mx-user. V1 bearer/refresh tokens are deliberately ignored.
+ */
+async function migrateLegacyHdoUser(account: string, password: string, legacyBaseUrl: string): Promise<void> {
+  const legacyResponse = await fetch(`${legacyBaseUrl}/api/v1/auth/login`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(20_000),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ identifier: account, password })
+  });
+  const legacyText = await legacyResponse.text();
+  const legacyPayload = legacyText ? safeJson(legacyText) : null;
+  const legacyRecord = legacyPayload && typeof legacyPayload === 'object'
+    ? legacyPayload as Record<string, unknown>
+    : {};
+  if (!legacyResponse.ok) {
+    const message = stringValue(legacyRecord.error)
+      || stringValue(legacyRecord.message)
+      || legacyText
+      || legacyResponse.statusText;
+    throw new Error(`Legacy HDO login failed: ${legacyResponse.status} ${message}`);
+  }
+  const legacyUser = legacyRecord.user && typeof legacyRecord.user === 'object'
+    ? legacyRecord.user as Record<string, unknown>
+    : null;
+  if (!legacyUser) throw new Error('Legacy HDO login did not return a user.');
+  if (stringValue(legacyUser.role)?.toLowerCase() === 'banned') {
+    throw new Error('Legacy HDO account is banned.');
+  }
+
+  const legacyUserId = stringValue(legacyUser.id);
+  const legacyUsername = stringValue(legacyUser.username) || account;
+  const legacyEmail = stringValue(legacyUser.email);
+  const legacyDisplayName = stringValue(legacyUser.displayName) || legacyUsername;
+  const siteIds = configuredOverseaSiteIds();
+  const importResponse = await fetch(`${effectiveApiBaseUrl()}/internal/v1/user-center/users/import`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(20_000),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      users: [{
+        ...(legacyUserId ? { id: legacyUserId } : {}),
+        account: legacyUsername,
+        username: legacyUsername,
+        ...(legacyEmail ? { email: legacyEmail } : {}),
+        displayName: legacyDisplayName,
+        user_name: legacyUsername,
+        password
+      }],
+      defaultRoleIds: ['mx-user'],
+      defaultOrgIds: ['org_default'],
+      defaultHomeAppId: 'luopan',
+      defaultRegisteredByAppId: 'luopan',
+      defaultAllowedAppIds: ['luopan', 'h2o'],
+      ...(siteIds.length ? { defaultOverseaSiteIds: siteIds } : {}),
+      provisionOversea: true,
+      requestedBy: 'luopan-legacy-hdo-migration',
+      requestId: `luopan-legacy-hdo-migration-${Date.now()}`
+    })
+  });
+  const importText = await importResponse.text();
+  const importPayload = importText ? safeJson(importText) : null;
+  const importRecord = importPayload && typeof importPayload === 'object'
+    ? importPayload as Record<string, unknown>
+    : {};
+  if (!importResponse.ok) {
+    const message = stringValue(importRecord.message) || importText || importResponse.statusText;
+    throw new Error(`User Center migration failed: ${importResponse.status} ${message}`);
+  }
+  const result = importRecord.import && typeof importRecord.import === 'object'
+    ? importRecord.import as Record<string, unknown>
+    : importRecord;
+  const failed = typeof result.failed === 'number' ? result.failed : 0;
+  if (failed > 0) {
+    const failures = Array.isArray(result.failures) ? result.failures : [];
+    const first = failures[0] && typeof failures[0] === 'object'
+      ? failures[0] as Record<string, unknown>
+      : {};
+    throw new Error(`User Center migration failed: ${stringValue(first.reason) || `${failed} row(s) rejected`}`);
+  }
+  const importedUsers = Array.isArray(result.users) ? result.users : [];
+  const importedUser = importedUsers[0] && typeof importedUsers[0] === 'object'
+    ? importedUsers[0] as Record<string, unknown>
+    : null;
+  if (!importedUser) throw new Error('User Center migration did not return an imported user.');
+  if (stringValue(importedUser.status) !== 'active') {
+    throw new Error('User Center account is disabled; an administrator must activate it.');
+  }
+}
+
+async function authenticateLuopanUser(account: string, password: string): Promise<LuopanUserAuthentication> {
+  try {
+    return await requestLuopanUserToken(account, password);
+  } catch (error) {
+    const legacyBaseUrl = legacyHdoMigrationBaseUrl();
+    if (!legacyBaseUrl || !shouldMigrateLegacyHdoUser(error)) throw error;
+    pushEvent('legacy HDO identity verification started');
+    await migrateLegacyHdoUser(account, password, legacyBaseUrl);
+    pushEvent('legacy HDO identity migrated to User Center');
+    return requestLuopanUserToken(account, password);
+  }
 }
 
 function luopanWireGuardServiceIdentity() {
@@ -2199,6 +2425,15 @@ function applyEnvironmentConfigOverrides(config: RuntimeConfig): RuntimeConfig {
       ? config.sdkTestMode
       : booleanish(sdkTestMode, false),
     deviceLabel: deviceLabel || config.deviceLabel
+  };
+}
+
+function constrainRuntimeConfig(config: RuntimeConfig): RuntimeConfig {
+  if (!app.isPackaged) return config;
+  return {
+    ...config,
+    baseUrl: LUOPAN_REGISTERED_BASE_URL,
+    sdkTestMode: false
   };
 }
 
@@ -2338,9 +2573,15 @@ function normalizeDataPlane(value: unknown): ElectronLauncherStandaloneDataPlane
 }
 
 function normalizeBaseUrl(value: string): string {
-  const trimmed = value.trim().replace(/\/+$/, '');
-  if (!trimmed) return 'http://10.88.100.3:18090';
-  return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+  const trimmed = value.trim();
+  if (!trimmed) return LUOPAN_REGISTERED_BASE_URL;
+  try {
+    const parsed = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return LUOPAN_REGISTERED_BASE_URL;
+    return parsed.origin;
+  } catch {
+    return LUOPAN_REGISTERED_BASE_URL;
+  }
 }
 
 function stringValue(value: unknown): string | null {
@@ -2403,6 +2644,7 @@ app.whenReady().then(async () => {
   }
   runtime = await loadRuntime();
   try {
+    configureOverseaNativeRuntime();
     await initializeOverseaTunnel();
   } catch (error) {
     const message = `Oversea runtime initialization failed: ${errorMessage(error)}`;

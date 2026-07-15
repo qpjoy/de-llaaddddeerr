@@ -17,7 +17,7 @@
 | 包 | 用途 |
 | --- | --- |
 | `@qpjoy/electron-launcher@^2.3.3` | bootstrap、WG/网络、ownership registry、release、local-ports，以及登录用户 `ensure-subscription` 客户端 |
-| `@qpjoy/electron-plugin-tunnel@^0.1.18` | mihomo 生命周期、inline YAML、隔离 Session 代理和测试窗口；传递安装当前平台 engine |
+| `@qpjoy/electron-plugin-tunnel@^0.1.19` | mihomo 生命周期、inline YAML、隔离 Session 代理和测试窗口；支持 Electron/Node 双 ABI 隔离加载；传递安装当前平台 engine |
 | `@qpjoy/ui-design-neon-void@^2.3.3` | 可选，UI 组件库 |
 
 表中版本是当前 workspace 基线。正式切 `setup:npm` 前，必须先发布包含本次
@@ -32,6 +32,11 @@ pnpm run setup:npm    # npm: 从 registry 安装已发布版本（正式打包�
 pnpm run dev          # quasar dev -m electron
 pnpm run build        # quasar build -m electron --skip-pkg
 ```
+
+上述 `dev/build/package` 都会先执行 `prepare:electron-native`：在
+`.electron-native/` 单独准备当前 Electron ABI 的 `better-sqlite3`，并在打包时放入
+Resources。不得直接对 workspace 共享的 `better-sqlite3` 执行 electron-rebuild，否则会
+把 Node 服务/测试需要的 ABI 覆盖掉。
 
 **红线：对外分发的安装包必须在 npm 模式下构建**；workspace/tarball 构建的包不得注册进
 Release Center。
@@ -64,6 +69,10 @@ bootstrap URL；账号、密码和 bearer token 必须等 Internal 就绪后才�
 / `parseElectronLauncherBootstrapUrls` / `loadElectronLauncherEnvFiles`，其他产品
 照此接入即可。
 
+当前公网 facade 的 `http://` 只用于现有联调环境。正式发布应把 bootstrap 换成 HTTPS
+并配置可信证书/签名校验；无论 bootstrap 协议如何，凭据仍只允许在当前连接的 service
+VIP 主机与 `/healthz` 二次校验通过后发送。
+
 开发期未注册时才允许用非 VIP 的 `LUOPAN_LAUNCHER_BASE_URL=<lan-admin-url>` 覆盖
 base URL，并配合 `LUOPAN_SDK_TEST_MODE=1` 走服务端测试模式；两者都不允许进入正式
 构建。正式 `.env` 可以显式把 base URL 固定为注册 VIP `10.88.100.3`，bootstrap URL
@@ -77,6 +86,11 @@ VIP 走 SDK gateway OAuth password grant（docs/15）。登录后下一次 Conne
 （`10.91.0.1-.99.254`）；检查更新立即携带 userId。access token 只留内存，登出或
 重启即失效。
 
+V1 迁移期可显式配置 `LUOPAN_LEGACY_HDO_BASE_URL`。仅当 V2 返回账号未激活/不存在的
+401 时，Luopan 才向 V1 HDO 验证同一组凭据；成功后经隧道内 VIP 导入 V2，角色固定为
+`mx-user`，只授予 `luopan` / `h2o` app access，然后重试 V2 登录。V1 token 不保存，迁移
+结束后应移除该变量；旧部署仅有 HTTP 时属于临时兼容路径。
+
 Oversea：登录与 `network-ready` 是一个双条件门，但安全顺序固定为先匿名连接
 Internal、再登录。登录成功后主进程自动调用
 `POST /internal/v1/user-center/users/:userId/oversea/ensure-subscription`。只有服务端返回
@@ -84,6 +98,8 @@ Internal、再登录。登录成功后主进程自动调用
 `pending-runtime-sync` 只显示等待/刷新，不做假成功。测试窗口使用
 `persist:luopan-oversea` 隔离 Session，首版只允许 `app-global | app-rule`，禁止
 system TUN 抢 Internal WireGuard。登出和断开 Internal 都会停止代理。
+开发期修改 base URL 或 SDK test mode 会先清登录态、订阅、隔离 Session 和数据面；正式
+包则强制注册 VIP `10.88.100.3` 且关闭 SDK test mode。
 
 ## 五条红线（验收会逐条检查）
 

@@ -252,7 +252,7 @@
                 <q-btn color="primary" icon="login" :loading="loggingIn" :disable="!internalReady" label="登录 User Center" @click="login" />
                 <p class="runtime-message">
                   {{ internalReady
-                    ? '登录只通过隧道内 VIP；成功后自动确保订阅并连接 Oversea。若需 user range，再 Disconnect / Connect 一次。'
+                    ? 'V2 登录通过隧道内 VIP；未迁移的 V1 HDO 账号会按运维配置验证并一次性导入 V2。成功后自动确保订阅并连接 Oversea。'
                     : '安全流程：先匿名 Connect Internal，再在隧道内登录；公网 bootstrap 不承载账号或密码。' }}
                 </p>
               </template>
