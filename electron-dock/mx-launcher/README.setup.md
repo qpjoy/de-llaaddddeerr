@@ -57,8 +57,9 @@ bash scripts/manage.sh ops internal-production reinit-kubeadm
 bash scripts/manage.sh ops internal-production repair-cni
 
 # 重新部署 MX：
+TMPDIR=/data/tmp \
 MX_K8S_OS_HOSTNAME=mx-internal-server \
-MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.4 \
+MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.2 \
 MX_SHADOW_BUILDKIT_KEEP_STORAGE=2GB \
 MX_SHADOW_BUILDKIT_PRUNE_UNTIL=24h \
 bash scripts/manage.sh ops internal-production deploy
