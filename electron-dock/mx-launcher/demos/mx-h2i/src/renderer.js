@@ -584,6 +584,7 @@ root.addEventListener('pointerdown', (event) => {
     startScreenY: event.screenY,
     totalDy: 0
   };
+  void api.startWindowDrag?.();
   dragHandle.setPointerCapture?.(event.pointerId);
   document.body.classList.add('is-window-dragging');
   event.preventDefault();
@@ -3823,6 +3824,7 @@ function createMockApi() {
     exportDiagnostics: async () => commit({ feedback: { tone: 'success', message: '诊断包已导出：MX-H2I-diagnostics-mock。' } }),
     openAdmin: async () => true,
     setWindowMode: async () => true,
+    startWindowDrag: async () => true,
     moveWindowBy: async () => true,
     finishWindowDrag: async () => true,
     hideTopDockIfPending: async () => true,

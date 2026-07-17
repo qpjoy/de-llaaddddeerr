@@ -28,6 +28,7 @@ const api = {
   repairSystemNetwork: () => ipcRenderer.invoke('mx-h2i:repair-system-network'),
   openAdmin: () => ipcRenderer.invoke('mx-h2i:open-admin'),
   setWindowMode: (mode) => ipcRenderer.invoke('mx-h2i:set-window-mode', mode),
+  startWindowDrag: () => ipcRenderer.invoke('mx-h2i:start-window-drag'),
   moveWindowBy: (delta) => ipcRenderer.invoke('mx-h2i:move-window-by', delta),
   finishWindowDrag: (input) => ipcRenderer.invoke('mx-h2i:finish-window-drag', input),
   hideTopDockIfPending: () => ipcRenderer.invoke('mx-h2i:hide-top-dock-if-pending'),

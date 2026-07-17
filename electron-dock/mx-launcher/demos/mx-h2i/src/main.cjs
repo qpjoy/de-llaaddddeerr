@@ -100,6 +100,8 @@ let wireGuardConnectInFlight = false;
 let wireGuardDisconnectInFlight = false;
 let windowBoundsSaveTimer = null;
 let windowBoundsTrackingSuppressed = false;
+let activeWindowDrag = null;
+let windowDragSizeBatchTimer = null;
 let lastWireGuardRecoveryFailureAt = 0;
 let wireGuardBackgroundProbeFailures = 0;
 const wireGuardRecoveryTimers = [];
@@ -132,6 +134,7 @@ const TOP_ANIMATION_STEPS = 24;
 const TOP_REVEAL_HOLD_MS = 900;
 const TOP_LEAVE_HIDE_MS = 180;
 const WINDOW_BOUNDS_SAVE_DELAY_MS = 420;
+const WINDOW_DRAG_SIZE_BATCH_MS = 80;
 const H2O_PROXY_START_TIMEOUT_MS = 12_000;
 const H2O_PORT_RELEASE_TIMEOUT_MS = 8_000;
 const H2O_MANAGED_SUBSCRIPTION_REFRESH_MS = 30_000;
@@ -1178,6 +1181,11 @@ function registerIpc() {
     }
     return false;
   });
+  ipcMain.handle('mx-h2i:start-window-drag', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    if (currentWindowMode !== 'launcher' || isTopHidden) return false;
+    return beginWindowDragSnapshot();
+  });
   ipcMain.handle('mx-h2i:move-window-by', (_event, input) => {
     if (!mainWindow || mainWindow.isDestroyed()) return false;
     if (currentWindowMode !== 'launcher' || isTopHidden) return false;
@@ -1185,7 +1193,9 @@ function registerIpc() {
     const dy = Number(input?.dy);
     const totalDy = Number(input?.totalDy);
     if (!Number.isFinite(dx) || !Number.isFinite(dy)) return false;
-    const bounds = mainWindow.getBounds();
+    const bounds = process.platform === 'win32'
+      ? activeWindowDrag || beginWindowDragSnapshot().bounds
+      : mainWindow.getBounds();
     const nextBounds = {
       x: Math.round(bounds.x + dx),
       y: Math.round(bounds.y + dy),
@@ -1209,11 +1219,17 @@ function registerIpc() {
       topDockHidePending = false;
     }
     stopTopAnimation();
-    // Moving a frameless window by repeatedly writing its full outer bounds can
-    // make Windows/DPI constraints feed a slightly larger size back on every
-    // pointer event. A drag changes position only; never round-trip width/height.
+    // Pointer events change position only. Windows size correction always uses
+    // the drag-start snapshot, so DPI-adjusted width/height never feed the next move.
     mainWindow.setPosition(nextBounds.x, nextBounds.y, false);
-    lastVisibleBounds = mainWindow.getBounds();
+    if (process.platform === 'win32' && activeWindowDrag) {
+      activeWindowDrag.x = nextBounds.x;
+      activeWindowDrag.y = nextBounds.y;
+      lastVisibleBounds = { ...nextBounds };
+      scheduleWindowDragSizeCorrection();
+    } else {
+      lastVisibleBounds = mainWindow.getBounds();
+    }
     return {
       bounds: lastVisibleBounds,
       docked: isTopDocked
@@ -1222,7 +1238,7 @@ function registerIpc() {
   ipcMain.handle('mx-h2i:finish-window-drag', (_event, input) => {
     if (!mainWindow || mainWindow.isDestroyed()) return false;
     if (currentWindowMode !== 'launcher' || isTopHidden) return false;
-    const bounds = mainWindow.getBounds();
+    const bounds = finishWindowDragSnapshot() || mainWindow.getBounds();
     const display = electronScreen.getDisplayMatching(bounds);
     const totalDy = Number(input?.totalDy);
     const releaseDock = isTopDocked && Number.isFinite(totalDy) && totalDy >= dockReleaseDistance(bounds, display);
@@ -1232,7 +1248,11 @@ function registerIpc() {
       topDockHidePending = false;
       topDockHoldUntil = 0;
       topDockLeaveStartedAt = 0;
-      lastVisibleBounds = mainWindow.getBounds();
+      lastVisibleBounds = { ...bounds };
+      if (process.platform === 'win32') {
+        rememberWindowBoundsForMode('launcher', bounds);
+        persistWindowStateSoon();
+      }
       return { docked: false, bounds: lastVisibleBounds };
     }
     return snapToTopEdge();
@@ -1241,6 +1261,52 @@ function registerIpc() {
     maybeHideTopDock();
     return true;
   });
+}
+
+function beginWindowDragSnapshot() {
+  const bounds = mainWindow.getBounds();
+  if (process.platform !== 'win32') return { bounds };
+  if (windowDragSizeBatchTimer) {
+    clearTimeout(windowDragSizeBatchTimer);
+    windowDragSizeBatchTimer = null;
+  }
+  activeWindowDrag = { ...bounds };
+  return { bounds: { ...activeWindowDrag } };
+}
+
+function scheduleWindowDragSizeCorrection() {
+  if (process.platform !== 'win32' || !activeWindowDrag || windowDragSizeBatchTimer) return;
+  windowDragSizeBatchTimer = setTimeout(() => {
+    windowDragSizeBatchTimer = null;
+    applyWindowDragSizeSnapshot();
+  }, WINDOW_DRAG_SIZE_BATCH_MS);
+}
+
+function applyWindowDragSizeSnapshot() {
+  if (!activeWindowDrag || !mainWindow || mainWindow.isDestroyed()) return null;
+  const current = mainWindow.getBounds();
+  const target = {
+    x: current.x,
+    y: current.y,
+    width: activeWindowDrag.width,
+    height: activeWindowDrag.height
+  };
+  activeWindowDrag.x = target.x;
+  activeWindowDrag.y = target.y;
+  if (!sameBounds(current, target)) setWindowBoundsWithoutTracking(target);
+  lastVisibleBounds = { ...target };
+  return target;
+}
+
+function finishWindowDragSnapshot() {
+  if (process.platform !== 'win32' || !activeWindowDrag) return null;
+  if (windowDragSizeBatchTimer) {
+    clearTimeout(windowDragSizeBatchTimer);
+    windowDragSizeBatchTimer = null;
+  }
+  const bounds = applyWindowDragSizeSnapshot();
+  activeWindowDrag = null;
+  return bounds;
 }
 
 function resizeWindowForMode(mode) {
@@ -1312,6 +1378,7 @@ function persistWindowStateSoon() {
 
 function shouldPersistWindowBounds() {
   if (windowBoundsTrackingSuppressed) return false;
+  if (activeWindowDrag) return false;
   if (!runtime || !mainWindow || mainWindow.isDestroyed()) return false;
   if (mainWindow.isMinimized()) return false;
   if (currentWindowMode === 'launcher' && (isTopHidden || isTopHideAnimating || isTopDocked || topDockHidePending || topAnimationTimer)) {
