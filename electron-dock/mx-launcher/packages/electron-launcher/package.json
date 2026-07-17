@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-launcher",
-  "version": "2.3.3",
+  "version": "2.3.4",
   "description": "Product-facing Electron Launcher client for MX Launcher release, update, rollout, AppCenter, and network integration.",
   "type": "module",
   "main": "dist/index.js",
@@ -25,6 +25,10 @@
     "./network-ownership-registry": {
       "types": "./dist/network-ownership-registry.d.ts",
       "import": "./dist/network-ownership-registry.js"
+    },
+    "./network-mode-events": {
+      "types": "./dist/network-mode-events.d.ts",
+      "import": "./dist/network-mode-events.js"
     },
     "./standalone-data-plane": {
       "types": "./dist/standalone-data-plane.d.ts",

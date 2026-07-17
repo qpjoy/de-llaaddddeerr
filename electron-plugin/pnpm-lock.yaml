@@ -164,6 +164,9 @@ importers:
       electron:
         specifier: ^34.0.0
         version: 34.5.8
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
 
   packages/tunnel-cli:
     dependencies:

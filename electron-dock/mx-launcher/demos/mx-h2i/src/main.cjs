@@ -17,6 +17,11 @@ const STATE_FILE = 'mx-h2i-runtime.json';
 const H2O_RUNTIME_STORE_FILE = 'mx-h2i-h2o-runtime.json';
 const STATE_BACKUP_DIR_NAME = 'state-backups';
 const STATE_BACKUP_LIMIT = 5;
+const DIAGNOSTIC_LOG_DIR_NAME = 'logs';
+const DIAGNOSTIC_LOG_FILE_NAME = 'mx-h2i-runtime.ndjson';
+const DIAGNOSTIC_LOG_MAX_BYTES = 2 * 1024 * 1024;
+const DIAGNOSTIC_LOG_ROTATIONS = 2;
+const DIAGNOSTIC_RECENT_LIMIT = 40;
 const PRODUCT_ID = 'mx-h2i';
 const PRODUCT_DISPLAY_NAME = 'MX-H2I';
 const REQUESTED_BY = 'mx-h2i-desktop';
@@ -92,6 +97,7 @@ let topDockLeaveStartedAt = 0;
 let wireGuardRecoveryInterval = null;
 let wireGuardRecoveryInFlight = null;
 let wireGuardConnectInFlight = false;
+let wireGuardDisconnectInFlight = false;
 let windowBoundsSaveTimer = null;
 let windowBoundsTrackingSuppressed = false;
 let lastWireGuardRecoveryFailureAt = 0;
@@ -115,6 +121,10 @@ let lastNetworkEnvironmentSignature = null;
 let lastDarwinEndpointRouteRepairAt = 0;
 let releaseUpdateCheckInFlight = null;
 let postConnectUpdateTimer = null;
+let diagnosticLogQueue = Promise.resolve();
+let diagnosticLogBytes = null;
+let diagnosticLogDirReady = false;
+let recentDiagnosticLogs = [];
 
 const TOP_DOCK_Y = 0;
 const TOP_REVEAL_ZONE = 18;
@@ -140,18 +150,28 @@ app.on('second-instance', () => {
 
 app.whenReady().then(async () => {
   runtime = await loadRuntime();
+  queueDiagnosticLog('info', 'app.started', 'MX-H2I main process started.', {
+    version: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    packaged: app.isPackaged
+  });
   await initializeSystemDomainProxy();
+  await reconcileExistingWireGuardAfterStartup();
   void refreshNetworkEnvironmentDiagnostics('app-startup').catch((err) => {
     console.warn('[mx-h2i] startup network diagnostics failed:', errorMessage(err));
+    queueDiagnosticError('startup.network-diagnostics', err);
   });
   registerIpc();
   createTray();
   createMainWindow();
   void restoreH2oRuntimeAfterStartup().catch((err) => {
     console.warn('[mx-h2i] H2O startup restore failed:', errorMessage(err));
+    queueDiagnosticError('startup.h2o-restore', err);
   });
   void reportInstallCompletionAndAdoptPendingUpdates().catch((err) => {
     console.warn('[mx-h2i] startup update bookkeeping failed:', errorMessage(err));
+    queueDiagnosticError('startup.update-bookkeeping', err);
   });
   startTopRevealWatcher();
   startWireGuardRecoveryWatcher();
@@ -193,9 +213,18 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  queueDiagnosticLog('info', 'app.before-quit', 'MX-H2I is shutting down.');
   stopNetworkChangeWatcher();
   stopWireGuardRecoveryWatcher();
   void closeSystemDomainProxy();
+});
+
+app.on('render-process-gone', (_event, _contents, details) => {
+  queueDiagnosticLog('error', 'process.renderer-gone', 'Renderer process exited unexpectedly.', details);
+});
+
+app.on('child-process-gone', (_event, details) => {
+  queueDiagnosticLog('error', 'process.child-gone', 'Electron child process exited unexpectedly.', details);
 });
 
 app.on('activate', () => {
@@ -249,10 +278,39 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:connect-guest', async () => {
+    const transitionStartedAt = Date.now();
+    const transitionId = makeRequestId('visit-connect');
+    if (isModeConnectionActive(runtime.connection, 'employee')) {
+      runtime.feedback = {
+        tone: 'info',
+        message: '员工网络已经连接；本次访客连接请求已忽略，不会断开或重启员工网络。'
+      };
+      touchRuntime('visit connect skipped: staff active');
+      await publishNetworkModeEvent('visit:connect', 'skipped', {
+        reason: 'staff-active',
+        transitionId
+      });
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
+    if (isModeConnectionActive(runtime.connection, 'guest')) {
+      runtime.feedback = {
+        tone: 'info',
+        message: '访客网络已经连接；本次重复连接请求已忽略。'
+      };
+      touchRuntime('visit connect skipped: visit active');
+      await publishNetworkModeEvent('visit:connect', 'skipped', {
+        reason: 'visit-active',
+        transitionId
+      });
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
     await recoverRetainedWireGuardBeforeBootstrap('guest-pre-bootstrap', {
       allowPrivileged: shouldAllowPrivilegedPreBootstrapRecovery()
     });
     setConnecting('guest');
+    await publishNetworkModeEvent('visit:connect', 'connecting', { transitionId });
     await refreshNetworkEnvironmentDiagnostics('guest-pre-connect', { phase: 'bootstrap', persist: false });
     await saveAndBroadcast();
     try {
@@ -271,15 +329,23 @@ function registerIpc() {
           scopes: ['auth.read', 'network.hdi.status', 'network.proxy.app']
         },
         auth: null,
-        feedback: '访客 lease 已由 Internal 下发，并保留 180 天未续租回收。'
+        feedback: '访客 lease 已由 Internal 下发，并保留 180 天未续租回收。',
+        transitionId,
+        transitionStartedAt
       });
     } catch (err) {
       await applyConnectionError('访客连接失败', err);
+      await publishNetworkModeEvent('visit:connect', 'failed', {
+        reason: errorMessage(err),
+        transitionId
+      });
     }
     await saveAndBroadcast();
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:login-employee', async (_event, input) => {
+    const transitionStartedAt = Date.now();
+    const transitionId = makeRequestId('staff-connect');
     const account = typeof input?.account === 'string' ? input.account.trim() : '';
     const password = typeof input?.password === 'string' ? input.password : '';
     if (!account || !password) {
@@ -289,21 +355,24 @@ function registerIpc() {
       };
       return visibleRuntime();
     }
-    if (isGuestConnectionActiveForEmployeeLogin(runtime.connection)) {
-      runtime.feedback = {
-        tone: 'warning',
-        message: guestConnectionEmployeeLoginMessage(runtime.connection)
-      };
-      touchRuntime('employee login blocked by guest connection');
-      await saveAndBroadcast();
-      return visibleRuntime();
-    }
+    const guestFallback = isModeConnectionActive(runtime.connection, 'guest')
+      ? retainableConnectionSnapshot(runtime.connection)
+      : null;
+    const identityFallback = guestFallback ? runtime.identity : null;
+    const authFallback = guestFallback ? runtime.auth : null;
     await recoverRetainedWireGuardBeforeBootstrap('employee-pre-bootstrap', {
       allowPrivileged: shouldAllowPrivilegedPreBootstrapRecovery()
     });
-    setConnecting('employee');
+    setConnecting('employee', { replacingGuest: Boolean(guestFallback) });
+    await publishNetworkModeEvent('staff:connect', 'connecting', {
+      reason: guestFallback ? 'visit-to-staff' : null,
+      transitionId
+    });
     await refreshNetworkEnvironmentDiagnostics('employee-pre-connect', { phase: 'bootstrap', persist: false });
     await saveAndBroadcast();
+    let authenticated = null;
+    let resolvedBootstrap = null;
+    let dataPlaneApplyStarted = false;
     try {
       const bootstrap = await resolveBootstrapEndpoint(runtime.config);
       const baseUrl = bootstrap.baseUrl;
@@ -311,11 +380,22 @@ function registerIpc() {
       const auth = await authenticateUserViaGateway(baseUrl, account, password, {
         bootstrapResolveMode: bootstrap.resolveMode
       });
+      authenticated = auth;
+      resolvedBootstrap = bootstrap;
+      if (guestFallback) {
+        runtime.feedback = {
+          tone: 'info',
+          message: '员工身份验证通过，正在申请员工 lease；访客网络会保持到员工通道 ready 后再自动释放。'
+        };
+        touchRuntime('employee authenticated; visit retained until staff ready');
+        await saveAndBroadcast();
+      }
       const session = await connectLauncherNetwork({
         identityKind: 'user',
         userId: auth.user.userId,
         requestTag: 'employee'
       });
+      dataPlaneApplyStarted = true;
       await applyNetworkSession(session, {
         mode: 'employee',
         subject: `user:${auth.user.userId}`,
@@ -327,48 +407,151 @@ function registerIpc() {
           scopes: ['auth.read', 'appcenter.read', 'network.hdi.status', 'network.proxy.app', 'network.dns.policy']
         },
         auth,
-        feedback: '员工账号已绑定 Internal User Center，并续租固定 user IP。'
-      });
-      await hydrateH2oSystemSubscriptionsForUser({
-        userId: auth.user.userId,
-        baseUrl,
-        bootstrapResolveMode: bootstrap.resolveMode,
-        showInitializing: true
+        feedback: '员工账号已绑定 Internal User Center，并续租固定 user IP。',
+        replacedMode: guestFallback ? 'guest' : null,
+        fallbackConnection: guestFallback,
+        fallbackIdentity: identityFallback,
+        fallbackAuth: authFallback,
+        transitionId,
+        transitionStartedAt
       });
     } catch (err) {
-      await applyConnectionError('员工登录失败', err);
+      if (guestFallback && !dataPlaneApplyStarted) {
+        runtime.connection = guestFallback;
+        runtime.identity = identityFallback;
+        runtime.auth = authFallback;
+        runtime.feedback = {
+          tone: 'danger',
+          message: `员工登录失败：${errorMessage(err)}；原访客网络保持连接。`
+        };
+        touchRuntime('staff connect failed; visit retained');
+      } else {
+        await applyConnectionError('员工登录失败', err);
+      }
+      await publishNetworkModeEvent('staff:connect', 'failed', {
+        reason: errorMessage(err),
+        transitionId
+      });
+    }
+    if (authenticated && resolvedBootstrap && runtime.connection?.mode === 'employee' && runtime.connection?.state === 'connected') {
+      try {
+        await hydrateH2oSystemSubscriptionsForUser({
+          userId: authenticated.user.userId,
+          baseUrl: resolvedBootstrap.baseUrl,
+          bootstrapResolveMode: resolvedBootstrap.resolveMode,
+          showInitializing: true
+        });
+      } catch (err) {
+        runtime.feedback = {
+          tone: 'warning',
+          message: `员工网络已连接，但 H2O 系统订阅刷新失败：${errorMessage(err)}`
+        };
+        touchRuntime('employee connected; h2o subscription refresh failed');
+      }
     }
     await saveAndBroadcast();
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:disconnect', async () => {
-    if (postConnectUpdateTimer) {
-      clearTimeout(postConnectUpdateTimer);
-      postConnectUpdateTimer = null;
+    if (wireGuardDisconnectInFlight) return visibleRuntime();
+    wireGuardDisconnectInFlight = true;
+    const disconnectedMode = runtime.connection?.mode === 'employee' ? 'employee' : 'guest';
+    const disconnectedIp = nullableString(runtime.connection?.localIp);
+    const retainedConnection = runtime.connection;
+    const retainedAuth = runtime.auth;
+    try {
+      if (postConnectUpdateTimer) {
+        clearTimeout(postConnectUpdateTimer);
+        postConnectUpdateTimer = null;
+      }
+      const systemDomainRestoreScript = systemDomainProxyManager?.darwinRestoreScript?.() || null;
+      const wireGuard = await stopWireGuardForRuntime({
+        darwinExtraUninstallShell: systemDomainRestoreScript
+      });
+      const authorizationCanceled = wireGuard?.authorizationCanceled === true
+        || isUserAuthorizationCanceledError(wireGuard);
+      const wireGuardStillActive = wireGuardRuntimeIsActive(wireGuard);
+      const wireGuardStopUnknown = wireGuard?.ok === false
+        && typeof wireGuard?.status?.active !== 'boolean'
+        && !wireGuardStillActive;
+
+      if (authorizationCanceled || wireGuardStillActive || wireGuardStopUnknown) {
+        if (authorizationCanceled && lastSystemDomainProxyPolicySignature) {
+          lastSystemDomainProxyAuthorizationCanceledSignature = lastSystemDomainProxyPolicySignature;
+        }
+        runtime.connection = retainedConnection;
+        runtime.auth = retainedAuth;
+        const reason = authorizationCanceled
+          ? 'authorization-canceled'
+          : wireGuardStillActive
+            ? 'wireguard-still-active'
+            : 'wireguard-stop-unverified';
+        const detail = wireGuard?.message || wireGuard?.error || '无法确认 WireGuard 已停止';
+        runtime.feedback = {
+          tone: 'warning',
+          message: authorizationCanceled
+            ? '已取消断开；WireGuard、PAC、split DNS 和员工/访客连接均保持原状态。'
+            : wireGuardStillActive
+              ? `断开未完成，检测到 WireGuard 仍在运行：${detail}`
+              : `断开未完成，无法确认 WireGuard 已停止：${detail}`
+        };
+        queueDiagnosticLog('warning', `wireguard.disconnect-${reason}`, detail, {
+          mode: disconnectedMode,
+          leaseIp: disconnectedIp,
+          status: wireGuard?.status,
+          launchDaemon: wireGuard?.launchDaemon
+        });
+        touchRuntime(`disconnect failed; connection retained: ${reason}`);
+        await publishNetworkModeEvent(
+          disconnectedMode === 'employee' ? 'staff:disconnect' : 'visit:disconnect',
+          'failed',
+          { leaseIp: disconnectedIp, reason }
+        );
+        await saveAndBroadcast();
+        return visibleRuntime();
+      }
+
+      const standaloneOwnership = await releaseStandaloneOwnershipForRuntime('disconnect');
+      const systemDomainProxy = wireGuard?.ok === false
+        ? {
+            supported: true,
+            applied: true,
+            skipped: true,
+            reason: 'wireguard-stop-partial-failure',
+            error: 'WireGuard 已停止，但 PAC / split DNS 清理未确认；请在高级选项中执行网络修复。'
+          }
+        : systemDomainRestoreScript && wireGuard?.launchDaemon
+          ? await completeExternalSystemDomainProxyRestore('disconnect-combined')
+          : await disableSystemDomainProxyForRuntime('disconnect');
+      runtime.connection = idleConnection();
+      runtime.auth = null;
+      runtime.feedback = {
+        tone: wireGuard?.ok === false || systemDomainProxy?.error ? 'warning' : 'info',
+        message: wireGuard?.ok === false
+          ? `WireGuard 已停止，但系统网络清理未全部确认：${wireGuard.message || wireGuard.error || 'unknown'}。请在高级选项中执行网络修复。`
+          : systemDomainProxy?.error
+            ? `已断开 MX-H2I standalone channel；系统 PAC 恢复失败：${systemDomainProxy.error}`
+            : standaloneOwnership?.error
+              ? `已断开 MX-H2I standalone channel；本机 ownership registry 释放失败：${standaloneOwnership.error}`
+              : '已断开 MX-H2I standalone channel、系统 PAC 和客户端 WireGuard；IP lease 会保留并在下次连接时续租。'
+      };
+      queueDiagnosticLog(
+        wireGuard?.ok === false || systemDomainProxy?.error ? 'warning' : 'info',
+        'wireguard.disconnected',
+        runtime.feedback.message,
+        { mode: disconnectedMode, leaseIp: disconnectedIp, wireGuard, systemDomainProxy, standaloneOwnership }
+      );
+      touchRuntime('disconnected');
+      await publishNetworkModeEvent(
+        disconnectedMode === 'employee' ? 'staff:disconnect' : 'visit:disconnect',
+        'disconnected',
+        { leaseIp: disconnectedIp, reason: wireGuard?.ok === false ? 'manual-disconnect-partial-cleanup' : 'manual-disconnect' }
+      );
+      await saveAndBroadcast();
+      return visibleRuntime();
+    } finally {
+      wireGuardDisconnectInFlight = false;
     }
-    const systemDomainRestoreScript = systemDomainProxyManager?.darwinRestoreScript?.() || null;
-    const wireGuard = await stopWireGuardForRuntime({
-      darwinExtraUninstallShell: systemDomainRestoreScript
-    });
-    const standaloneOwnership = await releaseStandaloneOwnershipForRuntime('disconnect');
-    const systemDomainProxy = systemDomainRestoreScript && wireGuard?.launchDaemon && wireGuard?.ok !== false
-      ? await completeExternalSystemDomainProxyRestore('disconnect-combined')
-      : await disableSystemDomainProxyForRuntime('disconnect');
-    runtime.connection = idleConnection();
-    runtime.auth = null;
-    runtime.feedback = {
-      tone: wireGuard?.ok === false || systemDomainProxy?.error ? 'warning' : 'info',
-      message: wireGuard?.ok === false
-        ? `已断开 launcher channel，但 WireGuard 停止失败：${wireGuard.message || wireGuard.error || 'unknown'}`
-        : systemDomainProxy?.error
-          ? `已断开 MX-H2I standalone channel；系统 PAC 恢复失败：${systemDomainProxy.error}`
-          : standaloneOwnership?.error
-            ? `已断开 MX-H2I standalone channel；本机 ownership registry 释放失败：${standaloneOwnership.error}`
-          : '已断开 MX-H2I standalone channel、系统 PAC 和客户端 WireGuard；IP lease 会保留并在下次连接时续租。'
-    };
-    touchRuntime('disconnected');
-    await saveAndBroadcast();
-    return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:install-appcenter', async () => {
     if (runtime.connection.state !== 'connected') {
@@ -916,6 +1099,39 @@ function registerIpc() {
     await saveAndBroadcast();
     return visibleRuntime();
   });
+  ipcMain.handle('mx-h2i:open-diagnostic-logs', async () => {
+    await fs.mkdir(diagnosticLogDirPath(), { recursive: true });
+    const openError = await shell.openPath(diagnosticLogDirPath());
+    if (openError) {
+      runtime.feedback = { tone: 'danger', message: `打开日志目录失败：${openError}` };
+      queueDiagnosticLog('error', 'diagnostics.open-log-dir-failed', openError);
+      await saveAndBroadcast();
+    }
+    return visibleRuntime();
+  });
+  ipcMain.handle('mx-h2i:export-diagnostics', async () => {
+    const selection = await dialog.showOpenDialog(mainWindow, {
+      title: '选择 MX-H2I 诊断包保存位置',
+      buttonLabel: '导出到这里',
+      properties: ['openDirectory', 'createDirectory']
+    });
+    if (selection.canceled || !selection.filePaths[0]) return visibleRuntime();
+    try {
+      const bundle = await exportDiagnosticBundle(selection.filePaths[0]);
+      runtime.feedback = {
+        tone: 'success',
+        message: `诊断包已导出：${bundle.folderName}。其中可能包含本机网络、DNS 和路由信息，分享前请确认接收方。`
+      };
+      touchRuntime('diagnostic bundle exported');
+      await saveAndBroadcast();
+      shell.showItemInFolder(path.join(bundle.folderPath, 'summary.json'));
+    } catch (err) {
+      runtime.feedback = { tone: 'danger', message: `诊断包导出失败：${errorMessage(err)}` };
+      queueDiagnosticError('diagnostics.export-failed', err);
+      await saveAndBroadcast();
+    }
+    return visibleRuntime();
+  });
   ipcMain.handle('mx-h2i:list-state-backups', async () => listAppsStateBackups());
   ipcMain.handle('mx-h2i:restore-state-backup', async (_event, fileName) => {
     const snapshot = await readAppsStateBackup(fileName);
@@ -993,12 +1209,10 @@ function registerIpc() {
       topDockHidePending = false;
     }
     stopTopAnimation();
-    mainWindow.setBounds({
-      x: nextBounds.x,
-      y: nextBounds.y,
-      width: nextBounds.width,
-      height: nextBounds.height
-    }, false);
+    // Moving a frameless window by repeatedly writing its full outer bounds can
+    // make Windows/DPI constraints feed a slightly larger size back on every
+    // pointer event. A drag changes position only; never round-trip width/height.
+    mainWindow.setPosition(nextBounds.x, nextBounds.y, false);
     lastVisibleBounds = mainWindow.getBounds();
     return {
       bounds: lastVisibleBounds,
@@ -1172,8 +1386,13 @@ function constrainWindowBounds(input, mode) {
   const display = electronScreen.getDisplayMatching(normalized);
   const workArea = display.workArea;
   const minimum = windowMinimumSizeForMode(normalizedMode, normalized);
-  const width = clamp(normalized.width, minimum.width, Math.max(minimum.width, workArea.width));
-  const height = clamp(normalized.height, minimum.height, Math.max(minimum.height, workArea.height));
+  const launcherDefault = normalizedMode === 'launcher'
+    ? defaultWindowBoundsForMode('launcher', normalized)
+    : null;
+  const width = launcherDefault?.width
+    ?? clamp(normalized.width, minimum.width, Math.max(minimum.width, workArea.width));
+  const height = launcherDefault?.height
+    ?? clamp(normalized.height, minimum.height, Math.max(minimum.height, workArea.height));
   return {
     x: clamp(normalized.x, workArea.x, workArea.x + Math.max(0, workArea.width - width)),
     y: clamp(normalized.y, workArea.y, workArea.y + Math.max(0, workArea.height - height)),
@@ -1322,7 +1541,7 @@ function showFromTopEdge() {
     y: display.workArea.y + TOP_DOCK_Y
   };
   stopTopAnimation();
-  mainWindow.setBounds(start, false);
+  mainWindow.setPosition(start.x, start.y, false);
   mainWindow.showInactive();
   isTopHidden = false;
   isTopDocked = true;
@@ -1592,7 +1811,7 @@ async function initializeSystemDomainProxy() {
     systemDomainProxyManager = mod.createElectronLauncherSystemDomainProxy({
       userDataDir: app.getPath('userData'),
       pacPort: localEdgePort(),
-      log: console
+      log: systemDomainProxyLogger()
     });
     if (process.env.MX_H2I_RESTORE_SYSTEM_PROXY_ON_STARTUP === '1') {
       await systemDomainProxyManager.restoreStale('app-startup');
@@ -1607,8 +1826,24 @@ async function initializeSystemDomainProxy() {
     startSystemDomainProxyRefreshWatcher();
   } catch (err) {
     console.warn('[mx-h2i] system domain proxy unavailable:', errorMessage(err));
+    queueDiagnosticError('system-domain-proxy.initialize-failed', err);
     systemDomainProxyManager = null;
   }
+}
+
+function systemDomainProxyLogger() {
+  return {
+    log: (...args) => console.log(...args),
+    info: (...args) => console.info(...args),
+    warn: (...args) => {
+      console.warn(...args);
+      queueDiagnosticLog('warning', 'system-domain-proxy.warning', args.map(String).join(' '));
+    },
+    error: (...args) => {
+      console.error(...args);
+      queueDiagnosticLog('error', 'system-domain-proxy.error', args.map(String).join(' '));
+    }
+  };
 }
 
 async function ensureSystemDomainProxyForRuntime(reason = 'manual') {
@@ -1848,6 +2083,14 @@ function stopSystemDomainProxyRefreshWatcher() {
 }
 
 async function refreshSystemDomainProxyForRuntime(reason = 'manual') {
+  if (wireGuardDisconnectInFlight) {
+    return {
+      supported: true,
+      skipped: true,
+      reason,
+      skipReason: 'disconnect-in-flight'
+    };
+  }
   if (systemDomainProxyRefreshInFlight || !systemDomainProxyManager) return null;
   if (runtime?.connection?.state !== 'connected') return null;
   systemDomainProxyRefreshInFlight = true;
@@ -1864,6 +2107,14 @@ async function recordSystemDomainProxyDiagnostics(status, touchReason) {
   const signature = systemDomainProxyStatusSignature(status);
   if (!signature || signature === lastSystemDomainProxySignature) return false;
   lastSystemDomainProxySignature = signature;
+  if (status?.error || status?.resolverError) {
+    queueDiagnosticLog('error', 'system-domain-proxy.status-error', status.error || status.resolverError, {
+      reason: status.reason,
+      applied: status.applied,
+      resolverApplied: status.resolverApplied,
+      platform: status.platform
+    });
+  }
   runtime.connection = {
     ...runtime.connection,
     diagnostics: {
@@ -1932,7 +2183,7 @@ async function collectNetworkEnvironmentDiagnostics(reason = 'manual', options =
     };
   }
   resolution = annotateResolutionWithWindowsNrpt(resolution, windowsNrpt);
-  return {
+  const diagnostics = {
     reason,
     phase,
     host: host || null,
@@ -1945,6 +2196,15 @@ async function collectNetworkEnvironmentDiagnostics(reason = 'manual', options =
       : ['bootstrap-dns-or-host-resolve', 'system-proxy-or-dns', 'external-dns'],
     updatedAt: nowIso()
   };
+  if (resolution?.severity === 'error' || (windowsNrpt && !['ready', 'current-script'].includes(windowsNrpt.state))) {
+    queueDiagnosticLog(
+      resolution?.severity === 'error' ? 'error' : 'warning',
+      'network.diagnostics-problem',
+      resolution?.message || `Windows NRPT state: ${windowsNrpt.state}`,
+      { reason, phase, host, resolution, windowsNrpt, systemDomainProxy: diagnostics.systemDomainProxy }
+    );
+  }
+  return diagnostics;
 }
 
 async function systemDomainProxyStatusForDiagnostics(phase) {
@@ -3260,12 +3520,18 @@ function animateWindow(from, to, steps, onDone) {
     }
     step += 1;
     const t = easeOutCubic(step / steps);
-    mainWindow.setBounds({
-      x: Math.round(from.x + (to.x - from.x) * t),
-      y: Math.round(from.y + (to.y - from.y) * t),
-      width: Math.round(from.width + (to.width - from.width) * t),
-      height: Math.round(from.height + (to.height - from.height) * t)
-    }, false);
+    const x = Math.round(from.x + (to.x - from.x) * t);
+    const y = Math.round(from.y + (to.y - from.y) * t);
+    if (from.width === to.width && from.height === to.height) {
+      mainWindow.setPosition(x, y, false);
+    } else {
+      mainWindow.setBounds({
+        x,
+        y,
+        width: Math.round(from.width + (to.width - from.width) * t),
+        height: Math.round(from.height + (to.height - from.height) * t)
+      }, false);
+    }
     if (step >= steps) {
       stopTopAnimation();
       onDone?.();
@@ -3316,8 +3582,32 @@ async function normalizeRuntime(input) {
     launcherContract: await launcherContract(config),
     window: normalizeWindowState(row.window),
     feedback: null,
+    networkEvent: normalizeNetworkModeEvent(row.networkEvent),
     activity: Array.isArray(row.activity) ? row.activity.slice(0, 8) : defaultActivity(),
     updatedAt: typeof row.updatedAt === 'string' ? row.updatedAt : nowIso()
+  };
+}
+
+function normalizeNetworkModeEvent(input) {
+  const row = input && typeof input === 'object' ? input : null;
+  if (!row) return null;
+  const name = ['visit:connect', 'visit:disconnect', 'staff:connect', 'staff:disconnect'].includes(row.name)
+    ? row.name
+    : null;
+  const phase = ['connecting', 'connected', 'disconnected', 'skipped', 'failed'].includes(row.phase)
+    ? row.phase
+    : null;
+  if (!name || !phase) return null;
+  return {
+    name,
+    phase,
+    sequence: Number.isInteger(row.sequence) ? row.sequence : null,
+    productId: nullableString(row.productId) || launcherProductId(),
+    instanceId: nullableString(row.instanceId),
+    leaseIp: nullableString(row.leaseIp),
+    reason: nullableString(row.reason),
+    transitionId: nullableString(row.transitionId),
+    occurredAt: nullableString(row.occurredAt) || nowIso()
   };
 }
 
@@ -6059,6 +6349,9 @@ function pushAppLog(appId, level, message) {
     { level, message, at: nowIso() },
     ...(appRecord.logs || [])
   ]);
+  if (level === 'warning' || level === 'error') {
+    queueDiagnosticLog(level, `app.${appId}`, message);
+  }
 }
 
 async function syncAppCenterCatalog(reason) {
@@ -7461,14 +7754,9 @@ function idleConnection() {
   };
 }
 
-function isGuestConnectionActiveForEmployeeLogin(connection = runtime.connection) {
-  return connection?.mode === 'guest'
+function isModeConnectionActive(connection, mode) {
+  return connection?.mode === mode
     && ['connecting', 'connected', 'lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable', 'forbidden'].includes(connection.state);
-}
-
-function guestConnectionEmployeeLoginMessage(connection = runtime.connection) {
-  const ip = connection?.localIp ? `（当前访客 IP：${connection.localIp}）` : '';
-  return `当前已连接访客模式${ip}，请先断开访客模式后再进行员工登录。`;
 }
 
 function idleHealth() {
@@ -7682,6 +7970,9 @@ function normalizeDiagnostics(input) {
     networkRepair: row.networkRepair && typeof row.networkRepair === 'object'
       ? row.networkRepair
       : null,
+    transitionTiming: row.transitionTiming && typeof row.transitionTiming === 'object'
+      ? row.transitionTiming
+      : null,
     updatedAt: nullableString(row.updatedAt) || nowIso()
   };
 }
@@ -7712,7 +8003,7 @@ function connectedState(input) {
   };
 }
 
-function setConnecting(mode) {
+function setConnecting(mode, options = {}) {
   const previous = retainableConnectionSnapshot(runtime.connection);
   runtime.connection = {
     ...(previous || idleConnection()),
@@ -7721,7 +8012,11 @@ function setConnecting(mode) {
   };
   runtime.feedback = {
     tone: 'info',
-    message: mode === 'employee' ? '正在刷新员工 lease。' : '正在申请游客 relay lease。'
+    message: mode === 'employee'
+      ? options.replacingGuest
+        ? '正在验证员工账号；认证成功后将自动断开访客模式并切换员工网络。'
+        : '正在验证员工账号并刷新员工 lease。'
+      : '正在申请游客 relay lease。'
   };
   touchRuntime(mode === 'employee' ? 'employee connecting' : 'guest connecting');
 }
@@ -7846,6 +8141,8 @@ async function ensureLauncherProduct(launcher, productId, productDisplayName) {
 
 async function applyNetworkSession(session, options) {
   wireGuardConnectInFlight = true;
+  const transitionStartedAt = Number.isFinite(options.transitionStartedAt) ? options.transitionStartedAt : Date.now();
+  const applyStartedAt = Date.now();
   const lease = session.lease || {};
   const bootstrapResolution = normalizeBootstrapResolution(session.bootstrapResolution);
   const bootstrapResolveMode = bootstrapResolution?.resolveMode || runtime.config.bootstrapResolveMode;
@@ -7893,26 +8190,55 @@ async function applyNetworkSession(session, options) {
     runtime.auth = normalizeAuth(options.auth);
     runtime.feedback = {
       tone: 'info',
-      message: `${feedback} 正在启动客户端 WireGuard。`
+      message: `${feedback} 正在并行同步 relay peer 和准备 PAC / split DNS。`
     };
     touchRuntime(options.mode === 'employee' ? 'employee lease ready' : 'guest lease ready');
+    await saveAndBroadcast();
 
-    const domesticPeerSync = await syncDomesticPeerForLease(lease, { bootstrapResolveMode, bootstrapBaseUrl });
-    const internalDirectPeerSync = await syncInternalDirectPeerForLease(lease, routePlan, { bootstrapResolveMode, bootstrapBaseUrl });
-    const domesticRelayDiagnostics = await diagnoseDomesticRelayForLease(lease, { bootstrapResolveMode, bootstrapBaseUrl });
-    const combinedSystemDomainProxy = await prepareSystemDomainProxyForWireGuardInstall('pre-connect');
+    const preflightStartedAt = Date.now();
+    const [domesticPeerSync, internalDirectPeerSync, combinedSystemDomainProxy] = await Promise.all([
+      syncDomesticPeerForLease(lease, { bootstrapResolveMode, bootstrapBaseUrl }),
+      syncInternalDirectPeerForLease(lease, routePlan, { bootstrapResolveMode, bootstrapBaseUrl }),
+      prepareSystemDomainProxyForWireGuardInstall('pre-connect')
+    ]);
+    const preflightFinishedAt = Date.now();
+    runtime.feedback = {
+      tone: 'info',
+      message: `${feedback} relay peer 已准备，正在原子切换 WireGuard、PAC 和 split DNS。`
+    };
+    touchRuntime(options.mode === 'employee' ? 'employee data-plane switching' : 'guest data-plane switching');
+    await saveAndBroadcast();
+
+    const wireGuardStartedAt = Date.now();
     const wireGuardResult = await startWireGuardForSession({
       routePlan,
       privateKey,
       internalBaseUrl: overlayInternalBaseUrl,
       internalDirectPeerSync,
       domesticPeerSync,
-      domesticRelayDiagnostics,
+      domesticRelayDiagnostics: null,
       darwinExtraInstallShell: combinedSystemDomainProxy?.shell || null,
       suppressWireGuardDns: shouldSuppressWireGuardDnsForSystemDomainProxy(combinedSystemDomainProxy)
     });
+    const wireGuardFinishedAt = Date.now();
     if (wireGuardResult.authorizationCanceled === true) {
-      applyWireGuardAuthorizationCanceled(options, wireGuardResult);
+      if (options.fallbackConnection) {
+        runtime.connection = options.fallbackConnection;
+        runtime.identity = options.fallbackIdentity;
+        runtime.auth = options.fallbackAuth;
+        runtime.feedback = {
+          tone: 'warning',
+          message: '已取消员工网络切换；原访客网络保持连接。'
+        };
+        touchRuntime('staff authorization canceled; visit retained');
+      } else {
+        applyWireGuardAuthorizationCanceled(options, wireGuardResult);
+      }
+      await publishNetworkModeEvent(
+        options.mode === 'employee' ? 'staff:connect' : 'visit:connect',
+        'failed',
+        { reason: 'authorization-canceled', transitionId: options.transitionId }
+      );
       return;
     }
     runtime.connection = {
@@ -7928,6 +8254,15 @@ async function applyNetworkSession(session, options) {
     if (wireGuardResult.ready) {
       wireGuardBackgroundProbeFailures = 0;
       lastWireGuardRecoveryFailureAt = 0;
+    } else {
+      queueDiagnosticLog('error', 'wireguard.not-ready', wireGuardResult.message || 'WireGuard did not become ready.', {
+        state: wireGuardResult.state,
+        path: wireGuardResult.path,
+        statusError: wireGuardResult.wireGuard?.statusError,
+        routeLogPath: wireGuardResult.wireGuard?.routeLogPath,
+        routeLogTail: wireGuardResult.wireGuard?.routeLogTail,
+        diagnostics: wireGuardResult.diagnostics
+      });
     }
     const systemDomainProxy = wireGuardResult.ready
       ? (combinedSystemDomainProxy?.shell
@@ -7940,6 +8275,7 @@ async function applyNetworkSession(session, options) {
     const standaloneOwnership = wireGuardResult.ready
       ? await registerStandaloneOwnershipForRuntime('post-connect')
       : null;
+    const finishedAt = Date.now();
     runtime.connection = {
       ...runtime.connection,
       diagnostics: {
@@ -7947,6 +8283,15 @@ async function applyNetworkSession(session, options) {
         ...(systemDomainProxy ? { systemDomainProxy } : {}),
         ...(standaloneOwnership ? { standaloneOwnership } : {}),
         networkEnvironment,
+        transitionTiming: {
+          transitionId: options.transitionId || null,
+          startedAt: new Date(transitionStartedAt).toISOString(),
+          controlPlaneMs: Math.max(0, applyStartedAt - transitionStartedAt),
+          preflightMs: preflightFinishedAt - preflightStartedAt,
+          wireGuardMs: wireGuardFinishedAt - wireGuardStartedAt,
+          postConnectMs: finishedAt - wireGuardFinishedAt,
+          totalMs: finishedAt - transitionStartedAt
+        },
         updatedAt: nowIso()
       }
     };
@@ -7970,7 +8315,32 @@ async function applyNetworkSession(session, options) {
       ? (options.mode === 'employee' ? 'employee wireguard connected' : 'guest wireguard connected')
       : 'wireguard lease only');
     if (wireGuardResult.ready) {
+      if (options.replacedMode === 'guest') {
+        await publishNetworkModeEvent('visit:disconnect', 'disconnected', {
+          reason: 'staff-preempted-visit',
+          transitionId: options.transitionId
+        });
+      }
+      await publishNetworkModeEvent(
+        options.mode === 'employee' ? 'staff:connect' : 'visit:connect',
+        'connected',
+        {
+          leaseIp: runtime.connection.localIp,
+          reason: options.replacedMode === 'guest' ? 'visit-to-staff' : null,
+          transitionId: options.transitionId
+        }
+      );
+      scheduleDomesticRelayDiagnostics(lease, {
+        bootstrapResolveMode,
+        bootstrapBaseUrl
+      });
       schedulePostConnectUpdateCheck(`${options.mode}-connected`);
+    } else {
+      await publishNetworkModeEvent(
+        options.mode === 'employee' ? 'staff:connect' : 'visit:connect',
+        'failed',
+        { reason: wireGuardResult.message, transitionId: options.transitionId }
+      );
     }
     if (!wireGuardResult.ready) {
       scheduleWireGuardRecovery('post-connect-probe', [1500, 4000, 9000]);
@@ -8006,6 +8376,13 @@ function applyWireGuardAuthorizationCanceled(options, wireGuardResult) {
 async function applyConnectionError(label, err) {
   const previous = retainableConnectionSnapshot(runtime.connection);
   const classified = classifyConnectionError(err);
+  queueDiagnosticError('connection.failed', err, {
+    label,
+    classifiedState: classified.state,
+    classifiedMessage: classified.message,
+    previousMode: previous?.mode,
+    previousState: previous?.state
+  });
   const endpointRouteRepair = isBootstrapReachabilityState(classified.state)
     ? await repairDarwinStaleEndpointRoutesForRuntime(`${label}-connect-error`, { force: true })
     : null;
@@ -8456,6 +8833,24 @@ async function diagnoseDomesticRelayForLease(lease, options = {}) {
   }
 }
 
+function scheduleDomesticRelayDiagnostics(lease, options = {}) {
+  const leaseId = nullableString(lease?.leaseId);
+  if (!leaseId) return;
+  void diagnoseDomesticRelayForLease(lease, options).then(async (diagnostics) => {
+    if (runtime?.connection?.leaseId !== leaseId) return;
+    runtime.connection = {
+      ...runtime.connection,
+      diagnostics: {
+        ...(runtime.connection.diagnostics || {}),
+        domesticRelayDiagnostics: diagnostics,
+        updatedAt: nowIso()
+      }
+    };
+    touchRuntime('domestic relay diagnostics completed');
+    await saveAndBroadcast();
+  }).catch(() => undefined);
+}
+
 async function refreshWireGuardDiagnostics() {
   const connection = runtime.connection || {};
   const routePlan = normalizeRoutePlan(connection.routePlan);
@@ -8501,8 +8896,12 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
   if (!runtime || !shouldRecoverWireGuardConnection(runtime.connection)) {
     return { ok: true, skipped: true, reason: 'connection-not-desired' };
   }
-  if (wireGuardConnectInFlight || runtime.connection?.state === 'connecting') {
-    return { ok: true, skipped: true, reason: 'connect-in-flight' };
+  if (wireGuardConnectInFlight || wireGuardDisconnectInFlight || runtime.connection?.state === 'connecting') {
+    return {
+      ok: true,
+      skipped: true,
+      reason: wireGuardDisconnectInFlight ? 'disconnect-in-flight' : 'connect-in-flight'
+    };
   }
   if (wireGuardRecoveryInFlight) return wireGuardRecoveryInFlight;
   const manual = String(reason || '').startsWith('manual');
@@ -8698,6 +9097,74 @@ async function stopWireGuardForRuntime(options = {}) {
       ok: false,
       message: errorMessage(err)
     };
+  }
+}
+
+function wireGuardRuntimeIsActive(result) {
+  return result?.status?.active === true
+    || result?.launchDaemon?.running === true
+    || result?.launchDaemon?.loaded === true;
+}
+
+async function reconcileExistingWireGuardAfterStartup() {
+  try {
+    const mod = await import('@qpjoy/electron-launcher/wireguard');
+    const status = mod.getLauncherWireGuardPeerStatus(wireGuardRuntimeOptions());
+    if (status?.active !== true) return { ok: true, active: false };
+    if (isRetainedConnectionState(runtime?.connection?.state)) {
+      return { ok: true, active: true, retained: true };
+    }
+    const employee = runtime?.identity?.kind === 'user'
+      || String(runtime?.networkEvent?.name || '').startsWith('staff:');
+    const localIp = arrayValue(status.addresses, [])
+      .map((address) => String(address || '').split('/')[0])
+      .find(Boolean) || nullableString(runtime?.networkEvent?.leaseIp);
+    const mode = employee ? 'employee' : 'guest';
+    const previousDiagnostics = normalizeDiagnostics(runtime?.connection?.diagnostics);
+    runtime.connection = connectedState({
+      state: 'tunnel-only',
+      mode,
+      localIp,
+      routePolicy: employee ? 'user full' : 'guest limited',
+      subject: employee
+        ? nullableString(runtime?.identity?.account) || 'retainedEmployee'
+        : 'anonymousPrincipal:retained',
+      connectedAt: nowIso(),
+      wireGuard: summarizeWireGuardStatus(status, runtime?.connection),
+      diagnostics: {
+        ...(previousDiagnostics || {}),
+        startupReconciliation: {
+          ok: false,
+          action: 'retained-active-tunnel',
+          message: '持久化状态为 idle，但系统 WireGuard 仍在运行。',
+          updatedAt: nowIso()
+        },
+        updatedAt: nowIso()
+      },
+      health: {
+        ...leasedHealth(),
+        wireGuard: 'ready',
+        internalApi: 'pending',
+        splitDns: 'pending'
+      }
+    });
+    runtime.feedback = {
+      tone: 'warning',
+      message: '检测到上次取消授权后系统 WireGuard 仍在运行；已恢复真实状态。点击“断开连接”并允许一次管理员授权即可完整清理。'
+    };
+    queueDiagnosticLog('warning', 'wireguard.startup-state-reconciled', runtime.feedback.message, {
+      mode,
+      localIp,
+      interfaceName: status.interfaceName,
+      realInterfaceName: status.realInterfaceName,
+      launchDaemon: status.launchDaemon
+    });
+    touchRuntime('startup reconciled active WireGuard from idle state');
+    await saveRuntime(runtime);
+    return { ok: true, active: true, reconciled: true };
+  } catch (err) {
+    queueDiagnosticError('wireguard.startup-state-reconcile-failed', err);
+    return { ok: false, active: null, error: errorMessage(err) };
   }
 }
 
@@ -9718,11 +10185,331 @@ function hasRequestHeader(headers, name) {
   return Object.keys(headers || {}).some((key) => key.toLowerCase() === lowerName);
 }
 
+function diagnosticLogDirPath() {
+  return path.join(app.getPath('userData'), DIAGNOSTIC_LOG_DIR_NAME);
+}
+
+function diagnosticLogFilePath(rotation = 0) {
+  const suffix = rotation > 0 ? `.${rotation}` : '';
+  return path.join(diagnosticLogDirPath(), `${DIAGNOSTIC_LOG_FILE_NAME}${suffix}`);
+}
+
+function queueDiagnosticLog(level, event, message, details = null) {
+  const entry = {
+    at: nowIso(),
+    level: ['warning', 'error'].includes(level) ? level : 'info',
+    event: nullableString(event) || 'runtime',
+    message: sanitizeDiagnosticText(message),
+    details: sanitizeDiagnosticValue(details)
+  };
+  recentDiagnosticLogs = [entry, ...recentDiagnosticLogs].slice(0, DIAGNOSTIC_RECENT_LIMIT);
+  const line = `${JSON.stringify(entry)}\n`;
+  diagnosticLogQueue = diagnosticLogQueue
+    .then(() => appendDiagnosticLogLine(line))
+    .catch((err) => {
+      console.warn('[mx-h2i] diagnostic log write failed:', errorMessage(err));
+    });
+}
+
+function queueDiagnosticError(event, err, details = null) {
+  queueDiagnosticLog('error', event, errorMessage(err), {
+    ...(details && typeof details === 'object' ? details : {}),
+    name: nullableString(err?.name),
+    code: nullableString(err?.code),
+    signal: nullableString(err?.signal),
+    killed: err?.killed === true,
+    stderr: diagnosticOutputTail(err?.stderr),
+    stdout: diagnosticOutputTail(err?.stdout),
+    stack: diagnosticOutputTail(err?.stack, 6000)
+  });
+}
+
+async function appendDiagnosticLogLine(line) {
+  if (!diagnosticLogDirReady) {
+    await fs.mkdir(diagnosticLogDirPath(), { recursive: true });
+    diagnosticLogDirReady = true;
+  }
+  if (!Number.isFinite(diagnosticLogBytes)) {
+    diagnosticLogBytes = await fs.stat(diagnosticLogFilePath()).then((stat) => stat.size).catch(() => 0);
+  }
+  const bytes = Buffer.byteLength(line);
+  if (diagnosticLogBytes + bytes > DIAGNOSTIC_LOG_MAX_BYTES) {
+    await rotateDiagnosticLogs();
+    diagnosticLogBytes = 0;
+  }
+  await fs.appendFile(diagnosticLogFilePath(), line, 'utf8');
+  diagnosticLogBytes += bytes;
+}
+
+async function rotateDiagnosticLogs() {
+  for (let index = DIAGNOSTIC_LOG_ROTATIONS; index >= 1; index -= 1) {
+    const source = diagnosticLogFilePath(index - 1);
+    const target = diagnosticLogFilePath(index);
+    await fs.rm(target, { force: true }).catch(() => undefined);
+    await fs.rename(source, target).catch((err) => {
+      if (err?.code !== 'ENOENT') throw err;
+    });
+  }
+}
+
+function diagnosticLogStatus() {
+  return {
+    enabled: true,
+    fileName: DIAGNOSTIC_LOG_FILE_NAME,
+    maxBytes: DIAGNOSTIC_LOG_MAX_BYTES,
+    rotations: DIAGNOSTIC_LOG_ROTATIONS,
+    recent: recentDiagnosticLogs.slice(0, 12)
+  };
+}
+
+function sanitizeDiagnosticValue(value, key = '', depth = 0) {
+  if (value === undefined || value === null) return null;
+  if (/token|password|private.?key|secret|authorization|cookie/i.test(key)) return '[redacted]';
+  if (typeof value === 'string') return sanitizeDiagnosticText(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (depth >= 6) return '[truncated]';
+  if (Array.isArray(value)) {
+    return value.slice(0, 80).map((item) => sanitizeDiagnosticValue(item, key, depth + 1));
+  }
+  if (typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).slice(0, 120).map(([childKey, childValue]) => [
+      childKey,
+      sanitizeDiagnosticValue(childValue, childKey, depth + 1)
+    ]));
+  }
+  return sanitizeDiagnosticText(String(value));
+}
+
+function sanitizeDiagnosticText(value) {
+  const text = String(value ?? '')
+    .replace(/(authorization:\s*bearer\s+)[^\s]+/ig, '$1[redacted]')
+    .replace(/([?&](?:token|access_token|password|secret|key)=)[^&\s]+/ig, '$1[redacted]');
+  return text.length > 8000 ? `${text.slice(0, 7997)}...` : text;
+}
+
+function diagnosticOutputTail(value, limit = 3000) {
+  const text = sanitizeDiagnosticText(value);
+  return text.length > limit ? text.slice(-limit) : text;
+}
+
+async function exportDiagnosticBundle(parentDir) {
+  queueDiagnosticLog('info', 'diagnostics.export-started', 'User requested a diagnostic bundle.');
+  await diagnosticLogQueue;
+  const folderName = `MX-H2I-diagnostics-${nowIso().replace(/[:.]/g, '-').replace('T', '_').replace('Z', '')}-${randomUUID().slice(0, 6)}`;
+  const folderPath = path.join(parentDir, folderName);
+  await fs.mkdir(folderPath, { recursive: false });
+  const networkDiagnostics = await collectNetworkEnvironmentDiagnostics('diagnostic-export', {
+    phase: networkDiagnosticPhase()
+  });
+  const summary = diagnosticBundleSummary(networkDiagnostics);
+  await Promise.all([
+    writeDiagnosticJson(path.join(folderPath, 'summary.json'), summary),
+    writeDiagnosticJson(path.join(folderPath, 'network-diagnostics.json'), networkDiagnostics),
+    copyDiagnosticRuntimeLogs(folderPath),
+    copyWireGuardRouteLog(folderPath),
+    collectPlatformDiagnosticFiles(folderPath),
+    fs.writeFile(path.join(folderPath, 'README.txt'), diagnosticBundleReadme(), 'utf8')
+  ]);
+  queueDiagnosticLog('info', 'diagnostics.export-completed', 'Diagnostic bundle exported.', { folderName });
+  return { folderName, folderPath };
+}
+
+function diagnosticBundleSummary(networkDiagnostics) {
+  const connection = runtime?.connection || {};
+  const wireGuard = connection.wireGuard || {};
+  return {
+    exportedAt: nowIso(),
+    app: {
+      name: PRODUCT_DISPLAY_NAME,
+      version: app.getVersion(),
+      electron: process.versions.electron,
+      node: process.versions.node,
+      platform: process.platform,
+      release: require('node:os').release(),
+      arch: process.arch,
+      packaged: app.isPackaged
+    },
+    connection: {
+      state: connection.state,
+      mode: connection.mode,
+      localIp: connection.localIp,
+      routePolicy: connection.routePolicy,
+      health: connection.health,
+      routeCidrs: connection.routeCidrs,
+      wireGuard: {
+        active: wireGuard.active,
+        ready: wireGuard.ready,
+        path: wireGuard.path,
+        interfaceName: wireGuard.interfaceName,
+        realInterfaceName: wireGuard.realInterfaceName,
+        endpoint: wireGuard.endpoint,
+        allowedIps: wireGuard.allowedIps,
+        serviceState: wireGuard.serviceState,
+        statusError: wireGuard.statusError,
+        routeLogPath: wireGuard.routeLogPath
+      }
+    },
+    networkEvent: runtime?.networkEvent || null,
+    networkDiagnostics,
+    recentLogs: recentDiagnosticLogs,
+    activity: runtime?.activity || []
+  };
+}
+
+async function writeDiagnosticJson(filePath, value) {
+  await fs.writeFile(filePath, `${JSON.stringify(sanitizeDiagnosticValue(value), null, 2)}\n`, 'utf8');
+}
+
+async function copyDiagnosticRuntimeLogs(folderPath) {
+  const targetDir = path.join(folderPath, 'runtime-logs');
+  await fs.mkdir(targetDir, { recursive: true });
+  for (let rotation = 0; rotation <= DIAGNOSTIC_LOG_ROTATIONS; rotation += 1) {
+    const source = diagnosticLogFilePath(rotation);
+    const target = path.join(targetDir, path.basename(source));
+    await fs.copyFile(source, target).catch((err) => {
+      if (err?.code !== 'ENOENT') throw err;
+    });
+  }
+}
+
+async function copyWireGuardRouteLog(folderPath) {
+  const routeLogPath = nullableString(runtime?.connection?.wireGuard?.routeLogPath);
+  if (!routeLogPath || !path.isAbsolute(routeLogPath)) return;
+  await fs.copyFile(routeLogPath, path.join(folderPath, 'wireguard-route-audit.log')).catch((err) => {
+    if (err?.code !== 'ENOENT') throw err;
+  });
+}
+
+async function collectPlatformDiagnosticFiles(folderPath) {
+  if (process.platform === 'win32') {
+    await collectWindowsDiagnosticFiles(folderPath);
+    return;
+  }
+  if (process.platform === 'darwin') {
+    const [dns, proxy, route] = await Promise.all([
+      captureDiagnosticCommand('/usr/sbin/scutil', ['--dns'], 8000),
+      captureDiagnosticCommand('/usr/sbin/scutil', ['--proxy'], 4000),
+      captureDiagnosticCommand('/sbin/route', ['-n', 'get', 'default'], 4000)
+    ]);
+    await writeDiagnosticJson(path.join(folderPath, 'macos-network.json'), { dns, proxy, route });
+  }
+}
+
+async function collectWindowsDiagnosticFiles(folderPath) {
+  const powershellScript = [
+    "$ErrorActionPreference = 'Stop'",
+    'function Invoke-MxCapture([scriptblock]$Action) {',
+    '  try { return @{ ok = $true; value = @(& $Action); error = $null } }',
+    '  catch { return @{ ok = $false; value = @(); error = $_.Exception.Message } }',
+    '}',
+    '$result = [ordered]@{',
+    "  capturedAt = (Get-Date).ToUniversalTime().ToString('o')",
+    '  nrptGlobal = Invoke-MxCapture { Get-DnsClientNrptGlobal | Select-Object * }',
+    '  nrptPolicy = Invoke-MxCapture { Get-DnsClientNrptPolicy -Effective | Select-Object Namespace,NameServers,Comment,DisplayName,DirectAccessEnabled }',
+    '  nrptRules = Invoke-MxCapture { Get-DnsClientNrptRule | Select-Object Namespace,NameServers,Comment,DisplayName,DirectAccessEnabled }',
+    '  dnsServers = Invoke-MxCapture { Get-DnsClientServerAddress | Select-Object InterfaceAlias,InterfaceIndex,AddressFamily,ServerAddresses }',
+    '  dnsGlobal = Invoke-MxCapture { Get-DnsClientGlobalSetting | Select-Object * }',
+    '  ipConfiguration = Invoke-MxCapture { Get-NetIPConfiguration | Select-Object InterfaceAlias,InterfaceIndex,NetProfile,IPv4Address,IPv6Address,IPv4DefaultGateway,DNSServer }',
+    '}',
+    '$result | ConvertTo-Json -Depth 8'
+  ].join('\r\n');
+  const powershell = await captureDiagnosticCommand(windowsPowerShellCommandForDiagnostics(), [
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    powershellScript
+  ], 15_000);
+  const ipconfig = await captureDiagnosticCommand(windowsSystemCommand('ipconfig.exe'), ['/all'], 12_000);
+  const route = await captureDiagnosticCommand(windowsSystemCommand('route.exe'), ['print'], 12_000);
+  const parsedPowershell = powershell.ok
+    ? parseJsonText(powershell.stdout) || { parseError: 'PowerShell output was not valid JSON.', raw: powershell.stdout }
+    : powershell;
+  await Promise.all([
+    writeDiagnosticJson(path.join(folderPath, 'windows-dns-nrpt.json'), parsedPowershell),
+    fs.writeFile(path.join(folderPath, 'windows-ipconfig-all.txt'), diagnosticCommandText(ipconfig), 'utf8'),
+    fs.writeFile(path.join(folderPath, 'windows-route-print.txt'), diagnosticCommandText(route), 'utf8')
+  ]);
+}
+
+async function captureDiagnosticCommand(command, args, timeoutMs) {
+  try {
+    const stdout = await execFileText(command, args, { timeoutMs });
+    return { ok: true, command: path.basename(command), stdout, stderr: '', capturedAt: nowIso() };
+  } catch (err) {
+    const result = {
+      ok: false,
+      command: path.basename(command),
+      code: nullableString(err?.code),
+      signal: nullableString(err?.signal),
+      error: errorMessage(err),
+      stdout: diagnosticOutputTail(err?.stdout, 16_000),
+      stderr: diagnosticOutputTail(err?.stderr, 16_000),
+      capturedAt: nowIso()
+    };
+    queueDiagnosticLog('error', 'diagnostics.command-failed', result.error, result);
+    return result;
+  }
+}
+
+function windowsSystemCommand(fileName) {
+  const systemRoot = nullableString(process.env.SystemRoot);
+  if (!systemRoot) return fileName;
+  const candidate = path.join(systemRoot, 'System32', fileName);
+  return fsSync.existsSync(candidate) ? candidate : fileName;
+}
+
+function windowsPowerShellCommandForDiagnostics() {
+  const systemRoot = nullableString(process.env.SystemRoot);
+  if (!systemRoot) return 'powershell.exe';
+  const candidate = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  return fsSync.existsSync(candidate) ? candidate : 'powershell.exe';
+}
+
+function diagnosticCommandText(result) {
+  const lines = [
+    `ok=${result.ok}`,
+    `command=${result.command || '-'}`,
+    `capturedAt=${result.capturedAt || '-'}`,
+    result.error ? `error=${result.error}` : '',
+    result.stderr ? `stderr:\n${result.stderr}` : '',
+    result.stdout ? `stdout:\n${result.stdout}` : ''
+  ];
+  return `${lines.filter(Boolean).join('\n')}\n`;
+}
+
+function parseJsonText(value) {
+  try {
+    return JSON.parse(String(value || '').trim());
+  } catch {
+    return null;
+  }
+}
+
+function diagnosticBundleReadme() {
+  return [
+    'MX-H2I 运行诊断包',
+    '',
+    'summary.json：应用、连接、最近错误和活动摘要。',
+    'network-diagnostics.json：MX-H2I DNS、PAC、WireGuard 与域名解析诊断。',
+    'runtime-logs/：异步滚动运行日志（NDJSON，每行一个事件）。',
+    'wireguard-route-audit.log：WireGuard 服务审计；Windows 上包含 NRPT add/remove/assert 和失败原因。',
+    'windows-dns-nrpt.json：Windows 当前 NRPT 全局策略、有效策略、规则和网卡 DNS。',
+    'windows-ipconfig-all.txt / windows-route-print.txt：Windows 网络与路由快照。',
+    '',
+    '日志会自动隐藏常见 token、密码、私钥和 Authorization 字段。',
+    '诊断包仍可能包含本机 IP、网卡、DNS 后缀、路由和员工账号相关网络信息，请仅发送给可信的排查人员。',
+    ''
+  ].join('\n');
+}
+
 function visibleRuntime(source = runtime) {
   return {
     ...source,
     installation: visibleInstallation(source.installation),
-    auth: visibleAuth(source.auth)
+    auth: visibleAuth(source.auth),
+    diagnosticLog: diagnosticLogStatus()
   };
 }
 
@@ -9756,6 +10543,31 @@ function visibleAuth(input) {
 async function saveAndBroadcast() {
   await saveRuntime(runtime);
   broadcastState();
+}
+
+async function publishNetworkModeEvent(name, phase, options = {}) {
+  const fallback = normalizeNetworkModeEvent({
+    name,
+    phase,
+    productId: launcherProductId(),
+    instanceId: runtime?.installation?.installId || runtime?.installation?.deviceId,
+    leaseIp: options.leaseIp || runtime?.connection?.localIp,
+    reason: options.reason,
+    transitionId: options.transitionId,
+    occurredAt: nowIso()
+  });
+  try {
+    const mod = await import('@qpjoy/electron-launcher/network-mode-events');
+    const state = mod.publishElectronLauncherNetworkModeEvent(fallback);
+    runtime.networkEvent = normalizeNetworkModeEvent(state.current) || fallback;
+    return state;
+  } catch (err) {
+    runtime.networkEvent = {
+      ...fallback,
+      reason: fallback?.reason || `shared-event-publish-failed: ${errorMessage(err)}`
+    };
+    return null;
+  }
 }
 
 async function saveRuntime(next) {
@@ -10012,6 +10824,12 @@ function touchRuntime(label) {
     },
     ...runtime.activity
   ].slice(0, 8);
+  queueDiagnosticLog('info', 'runtime.activity', label, {
+    connectionState: runtime.connection?.state,
+    connectionMode: runtime.connection?.mode,
+    networkEvent: runtime.networkEvent?.name,
+    networkEventPhase: runtime.networkEvent?.phase
+  });
 }
 
 function defaultActivity() {

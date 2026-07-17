@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/mx-launcher-standalone",
-  "version": "2.3.3",
+  "version": "2.3.4",
   "description": "Standalone MX Launcher shell adapter that uses launcher-core for AppCenter-wide network control.",
   "type": "module",
   "main": "dist/index.js",

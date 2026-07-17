@@ -1716,6 +1716,7 @@ interface DarwinLaunchDaemonAssets {
   rootWireGuardGoPath: string;
   nameFile: string;
   pidFile: string;
+  cleanStartMarkerPath: string;
   dnsStatePath: string;
   staleLaunchDaemonLabelPrefixes: string[];
   profile: DarwinUserspaceProfile;
@@ -1780,6 +1781,7 @@ function darwinLaunchDaemonAssets(
     rootWireGuardGoPath: `${binDir}/wireguard-go`,
     nameFile: `/var/run/wireguard/${profile.interfaceName}.name`,
     pidFile: `/var/run/wireguard/${profile.interfaceName}.pid`,
+    cleanStartMarkerPath: `/var/run/wireguard/${profile.interfaceName}.clean-start`,
     dnsStatePath: `${supportDir}/${profile.interfaceName}.dns.state`,
     staleLaunchDaemonLabelPrefixes: identity.staleDarwinLaunchDaemonLabelPrefixes,
     profile
@@ -1831,11 +1833,15 @@ function darwinLaunchDaemonInstallShell(assets: DarwinLaunchDaemonAssets, extraS
     `BIN_DIR=${shellQuote(assets.binDir)}`,
     `LOG_DIR=${shellQuote(assets.logDir)}`,
     `PRIMARY_ADDRESS=${shellQuote(assets.profile.addresses[0]?.split('/')[0] ?? '')}`,
+    `CLEAN_START_MARKER=${shellQuote(assets.cleanStartMarkerPath)}`,
     ...darwinStaleLaunchDaemonCleanupLines(assets.staleLaunchDaemonLabelPrefixes),
+    '__hdo_previous_loaded=0',
+    'if launchctl print "system/$LABEL" >/dev/null 2>&1; then __hdo_previous_loaded=1; fi',
     'launchctl bootout "system/$LABEL" >/dev/null 2>&1 || launchctl bootout system "$PLIST" >/dev/null 2>&1 || true',
     '__hdo_bootout_i=0',
     'while launchctl print "system/$LABEL" >/dev/null 2>&1 && [ "$__hdo_bootout_i" -lt 40 ]; do sleep 0.25; __hdo_bootout_i=$((__hdo_bootout_i + 1)); done',
     'mkdir -p "$SUPPORT_DIR" "$BIN_DIR" "$LOG_DIR" /var/run/wireguard',
+    'if [ "$__hdo_previous_loaded" = "1" ] && ! launchctl print "system/$LABEL" >/dev/null 2>&1; then touch "$CLEAN_START_MARKER"; fi',
     `cp ${shellQuote(assets.sourceConfigPath)} ${shellQuote(assets.rootConfigPath)}`,
     `cp ${shellQuote(assets.sourceSetConfigPath)} ${shellQuote(assets.rootSetConfigPath)}`,
     `cp ${shellQuote(assets.sourceWgPath)} ${shellQuote(assets.rootWgPath)}`,
@@ -1896,7 +1902,11 @@ function darwinLaunchDaemonUninstallShell(assets: DarwinLaunchDaemonAssets, extr
     `SUPPORT_DIR=${shellQuote(assets.supportDir)}`,
     `PID_FILE=${shellQuote(assets.pidFile)}`,
     `WIREGUARD_GO=${shellQuote(assets.rootWireGuardGoPath)}`,
+    `CLEAN_START_MARKER=${shellQuote(assets.cleanStartMarkerPath)}`,
     'launchctl bootout "system/$LABEL" >/dev/null 2>&1 || launchctl bootout system "$PLIST" >/dev/null 2>&1 || true',
+    '__hdo_bootout_i=0',
+    'while launchctl print "system/$LABEL" >/dev/null 2>&1 && [ "$__hdo_bootout_i" -lt 40 ]; do sleep 0.25; __hdo_bootout_i=$((__hdo_bootout_i + 1)); done',
+    'if ! launchctl print "system/$LABEL" >/dev/null 2>&1; then mkdir -p /var/run/wireguard; touch "$CLEAN_START_MARKER"; else rm -f "$CLEAN_START_MARKER"; fi',
     'if [ -s "$PID_FILE" ]; then WG_PID="$(cat "$PID_FILE" 2>/dev/null || true)"; if [ -n "$WG_PID" ]; then kill "$WG_PID" >/dev/null 2>&1 || true; sleep 0.2; kill -9 "$WG_PID" >/dev/null 2>&1 || true; fi; fi',
     'if command -v pgrep >/dev/null 2>&1; then for stale_pid in $(pgrep -x wireguard-go 2>/dev/null || true); do stale_command="$(ps -p "$stale_pid" -o command= 2>/dev/null || true)"; printf \'%s\\n\' "$stale_command" | grep -F "$WIREGUARD_GO" >/dev/null 2>&1 && kill "$stale_pid" >/dev/null 2>&1 || true; done; fi',
     extraShell ? `# extra uninstall cleanup\n${extraShell}` : null,
@@ -2016,6 +2026,7 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     `NAME_FILE=${shellQuote(assets.nameFile)}`,
     `PID_FILE=${shellQuote(assets.pidFile)}`,
     `DNS_STATE_FILE=${shellQuote(assets.dnsStatePath)}`,
+    `CLEAN_START_MARKER=${shellQuote(assets.cleanStartMarkerPath)}`,
     `HDO_DNS_SERVERS=${shellQuote(profile.dnsServers.join(' '))}`,
     `ROUTE_LOG=${shellQuote(assets.routeLogPath)}`,
     `WG_GO_LOG=${shellQuote(assets.wireGuardGoLogPath)}`,
@@ -2053,7 +2064,12 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     '}',
     'trap \'code=$?; cleanup "$code"; exit "$code"\' EXIT',
     'trap \'exit 0\' INT TERM HUP',
-    'cleanup 0 >/dev/null 2>&1 || true',
+    'if [ -f "$CLEAN_START_MARKER" ]; then',
+    '  rm -f "$CLEAN_START_MARKER"',
+    '  log_action "launchdaemon-clean-start"',
+    'else',
+    '  cleanup 0 >/dev/null 2>&1 || true',
+    'fi',
     'log_action "launchdaemon-start"',
     ...(endpointBypassFunctionLines.length > 0 ? ['apply_endpoint_bypass'] : []),
     'rm -f "$NAME_FILE" "$PID_FILE"',

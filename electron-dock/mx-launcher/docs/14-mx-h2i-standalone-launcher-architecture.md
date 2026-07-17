@@ -1,5 +1,8 @@
 # MX-H2I Product on MX-Launcher Architecture
 
+> 访客 / 员工快速切换、互斥规则、跨进程事件与实测性能基线见
+> [21-network-mode-switch-events-and-performance.md](./21-network-mode-switch-events-and-performance.md)。
+
 本文档定义新的 MX-H2I 客户端、Launcher standalone/embed 两种运行模式、AppCenter/H2O
 接入方式、Mesh/IP 规划，以及本地开发、npm 发版和桌面打包方案。
 

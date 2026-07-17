@@ -201,7 +201,7 @@ importers:
         version: link:../../../../electron-plugin/packages/electron-plugin-tunnel
     devDependencies:
       electron:
-        specifier: ^34.0.0
+        specifier: 34.5.8
         version: 34.5.8
       electron-builder:
         specifier: ^25.1.8

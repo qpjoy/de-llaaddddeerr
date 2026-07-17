@@ -360,8 +360,10 @@ export async function stopLauncherWireGuardPeer(input: ElectronLauncherWireGuard
         serviceIdentity: launcherDarwinServiceIdentity(input)
       });
       const status = safeWireGuardStatus(runtime, configPath);
+      const authorizationCanceled = isDarwinAuthorizationCancelled(launchDaemon);
       return {
         ok: launchDaemon.ok === true,
+        authorizationCanceled,
         skipped: false,
         configPath,
         runtime,
@@ -657,7 +659,7 @@ function launcherDarwinServiceIdentity(input: ElectronLauncherWireGuardRuntimeOp
 
 function isDarwinAuthorizationCancelled(result: unknown): boolean {
   const message = stringValue(objectRecord(result).message) || stringValue(objectRecord(result).error) || '';
-  return /user canceled|用户已取消|-128/i.test(message);
+  return /user canceled|user cancelled|用户已取消|已取消.*管理员授权|-128/i.test(message);
 }
 
 function launcherWireGuardNotReadyMessage(tunnel: unknown, status: unknown): string {

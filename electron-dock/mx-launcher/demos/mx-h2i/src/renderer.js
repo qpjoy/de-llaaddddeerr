@@ -499,17 +499,6 @@ root.addEventListener('submit', (event) => {
       account: String(payload.account || ''),
       password: String(payload.password || '')
     };
-    if (isGuestConnectionActive()) {
-      state = {
-        ...state,
-        feedback: {
-          tone: 'warning',
-          message: guestConnectionPrompt()
-        }
-      };
-      render();
-      return;
-    }
     rememberEmployeeAccount(employeeLoginDraft.account);
     void runAction(action, { ...employeeLoginDraft });
   }
@@ -648,6 +637,8 @@ async function runAction(action, payload) {
       openRollback: () => api.openRollbackInstaller?.(payload),
       refreshDiagnostics: () => api.refreshDiagnostics?.(),
       repairSystemNetwork: () => api.repairSystemNetwork?.(),
+      openDiagnosticLogs: () => api.openDiagnosticLogs?.(),
+      exportDiagnostics: () => api.exportDiagnostics?.(),
       openAdmin: () => api.openAdmin()
     };
     if (handlers[action]) {
@@ -756,7 +747,19 @@ function isGuestConnectionActive() {
 
 function guestConnectionPrompt() {
   const ip = state?.connection?.localIp ? `（当前访客 IP：${state.connection.localIp}）` : '';
-  return `当前已连接访客模式${ip}，请先断开访客模式后再进行员工登录。`;
+  return `当前已连接访客模式${ip}。员工认证成功后会自动切换到员工网络；认证失败或取消授权时保留访客连接。`;
+}
+
+function isConnectionPending() {
+  return state?.connection?.state === 'connecting'
+    || busyAction === 'connectGuest'
+    || busyAction === 'login-employee';
+}
+
+function pendingConnectionLabel() {
+  if (state?.connection?.state === 'lease-only') return '等待系统授权';
+  if (busyAction === 'login-employee') return '正在连接员工模式';
+  return '等待连接中';
 }
 
 function isInternalConnected() {
@@ -788,7 +791,7 @@ function render() {
   const connected = state.connection?.state === 'connected';
   const leaseOnly = state.connection?.state === 'lease-only';
   const tunnelOnly = state.connection?.state === 'tunnel-only';
-  const connecting = state.connection?.state === 'connecting';
+  const connecting = isConnectionPending();
   const degraded = ['server-unavailable', 'network-unavailable', 'forbidden'].includes(state.connection?.state);
   const shellClass = screen === 'appcenter' ? 'is-appcenter' : 'is-phone';
   root.innerHTML = `
@@ -829,7 +832,13 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
   const mode = modeDraft;
   const activeLease = connected || leaseOnly || tunnelOnly || degraded;
   const showEmployeeLogin = isEmployeeLoginVisible();
-  const modeTitle = connected
+  const disconnecting = busyAction === 'disconnect';
+  const pendingMode = busyAction === 'login-employee' ? 'employee' : state.connection?.mode;
+  const modeTitle = disconnecting
+    ? `${state.connection?.mode === 'employee' ? '员工' : '访客'}模式 正在断开`
+    : connecting
+    ? `${pendingMode === 'employee' ? '员工' : '访客'}模式 连接中`
+    : connected
     ? showEmployeeLogin
       ? '员工模式'
       : `${state.connection.mode === 'employee' ? '员工' : '访客'}模式 已连接`
@@ -865,11 +874,14 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
 }
 
 function renderGuestConnect(connected, connecting, leaseOnly = false) {
-  const label = connected ? '断开连接' : connecting ? '连接中' : leaseOnly ? '重新连接' : '连接';
-  const action = connected ? 'disconnect' : 'connectGuest';
+  const disconnecting = busyAction === 'disconnect';
+  const disconnectable = connected || state.connection?.wireGuard?.active === true;
+  const label = disconnecting ? '正在断开' : disconnectable ? '断开连接' : connecting ? pendingConnectionLabel() : leaseOnly ? '重新连接' : '连接';
+  const action = disconnectable ? 'disconnect' : 'connectGuest';
+  const disabled = connecting || disconnecting;
   return `
     <section class="connect-panel">
-      <button class="connect-dial ${connected && !leaseOnly ? 'is-connected' : ''}" type="button" data-action="${action}" ${connecting ? 'disabled' : ''}>
+      <button class="connect-dial ${disconnectable ? 'is-connected' : ''} ${connecting ? 'is-connecting' : ''} ${disconnecting ? 'is-disconnecting' : ''}" type="button" data-action="${action}" aria-busy="${disabled ? 'true' : 'false'}" ${disabled ? 'disabled' : ''}>
         <span>${escapeHtml(label)}</span>
       </button>
       <div class="connect-actions">
@@ -883,26 +895,34 @@ function renderGuestConnect(connected, connecting, leaseOnly = false) {
 
 function renderEmployeeLogin(connecting) {
   const guestActive = isGuestConnectionActive();
+  const loginPending = busyAction === 'login-employee';
+  const replacingGuest = guestActive || (
+    loginPending
+    && state.networkEvent?.name === 'staff:connect'
+    && state.networkEvent?.reason === 'visit-to-staff'
+  );
   const historyOptions = employeeAccountHistory
     .map((account) => `<option value="${escapeAttr(account)}"></option>`)
     .join('');
   return `
     <form class="login-panel" data-form-action="login-employee">
-      ${guestActive ? `<div class="login-notice">${escapeHtml(guestConnectionPrompt())}</div>` : ''}
+      ${loginPending
+        ? `<div class="login-transition" role="status" aria-live="polite"><span class="login-transition-wave" aria-hidden="true"></span><span>${escapeHtml(replacingGuest ? '正在验证员工身份；认证成功后将自动接管访客网络。' : '正在验证员工身份并建立员工网络。')}</span></div>`
+        : guestActive ? `<div class="login-notice">${escapeHtml(guestConnectionPrompt())}</div>` : ''}
       <label class="field">
         <span>账号</span>
-        <input name="account" data-employee-login-field="account" value="${escapeAttr(employeeLoginDraft.account)}" list="employee-account-history" autocomplete="username" placeholder="Username/Email/Phone" />
+        <input name="account" data-employee-login-field="account" value="${escapeAttr(employeeLoginDraft.account)}" list="employee-account-history" autocomplete="username" placeholder="Username/Email/Phone" ${loginPending ? 'disabled' : ''} />
         <datalist id="employee-account-history">${historyOptions}</datalist>
       </label>
       <label class="field">
         <span>密码</span>
-        <input name="password" data-employee-login-field="password" value="${escapeAttr(employeeLoginDraft.password)}" type="password" autocomplete="current-password" placeholder="Password" />
+        <input name="password" data-employee-login-field="password" value="${escapeAttr(employeeLoginDraft.password)}" type="password" autocomplete="current-password" placeholder="Password" ${loginPending ? 'disabled' : ''} />
       </label>
-      <button class="primary-button block-button" type="submit" ${connecting || guestActive ? 'disabled' : ''}>
-        ${guestActive ? '先断开访客模式' : connecting ? '连接中' : '连接'}
+      <button class="primary-button block-button" type="submit" aria-busy="${loginPending ? 'true' : 'false'}" ${connecting ? 'disabled' : ''}>
+        ${loginPending ? (replacingGuest ? '正在切换员工模式' : '正在连接员工模式') : guestActive ? '登录并切换员工模式' : connecting ? '连接处理中' : '连接'}
       </button>
       <button class="secondary-button block-button" type="button" data-action="${guestActive ? 'disconnect' : 'connectGuest'}" ${connecting ? 'disabled' : ''}>
-        ${guestActive ? '断开访客模式' : '使用飞书连接'}
+        ${guestActive ? '仅断开访客模式' : '使用飞书连接'}
       </button>
     </form>
   `;
@@ -962,6 +982,7 @@ function renderAdvancedPhone() {
         ${renderAdvancedRow('应用设置', 'AppCenter / H2O embed defaults', '⚙')}
         ${renderAdvancedRow('更多设置', 'network, release, diagnostics', '…')}
       </section>
+      ${renderDiagnosticLogPanel()}
       ${renderWireGuardDiagnostics()}
       ${renderConfigForm()}
     </section>
@@ -1006,6 +1027,45 @@ function renderAdvancedRow(title, detail, icon) {
       </span>
       <span class="advanced-row__arrow">›</span>
     </button>
+  `;
+}
+
+function renderDiagnosticLogPanel() {
+  const log = state.diagnosticLog || {};
+  const recent = Array.isArray(log.recent) ? log.recent : [];
+  const notable = recent.filter((entry) => entry?.level === 'error' || entry?.level === 'warning').slice(0, 5);
+  const windowsNrpt = state.connection?.diagnostics?.networkEnvironment?.windowsNrpt;
+  const nrptSummary = windowsNrpt
+    ? `Windows NRPT：${windowsNrpt.state || 'unknown'}`
+    : 'Windows 导出包会额外采集 NRPT、网卡 DNS、ipconfig 和路由。';
+  return `
+    <section class="settings-panel diagnostic-log-panel">
+      <div class="panel-head">
+        <div>
+          <h2>运行日志与诊断包</h2>
+          <p>异步滚动日志 / Windows DNS & NRPT</p>
+        </div>
+        <span class="status-pill" data-state="${log.enabled === false ? 'failed' : 'ready'}">${log.enabled === false ? 'OFF' : 'ON'}</span>
+      </div>
+      <p class="diagnostic-log-hint">${escapeHtml(nrptSummary)} 日志达到 ${escapeHtml(formatBytes(log.maxBytes || 2 * 1024 * 1024))} 后自动轮转，不阻塞连接主流程。</p>
+      <div class="diagnostic-log-list">
+        ${notable.length ? notable.map((entry) => `
+          <div class="diagnostic-log-row" data-level="${escapeAttr(entry.level)}">
+            <span>${escapeHtml(entry.level)}</span>
+            <div>
+              <strong>${escapeHtml(entry.event || 'runtime')}</strong>
+              <p>${escapeHtml(entry.message || '')}</p>
+              <small>${escapeHtml(formatDateTime(entry.at))}</small>
+            </div>
+          </div>
+        `).join('') : '<p class="empty">当前会话暂无 warning / error。</p>'}
+      </div>
+      <div class="toolbar-actions diagnostic-log-actions">
+        <button class="secondary-button" type="button" data-action="openDiagnosticLogs" ${busyAction === 'openDiagnosticLogs' ? 'disabled' : ''}>打开日志目录</button>
+        <button class="primary-button" type="button" data-action="exportDiagnostics" ${busyAction === 'exportDiagnostics' ? 'disabled' : ''}>${busyAction === 'exportDiagnostics' ? '正在采集…' : '导出诊断包'}</button>
+      </div>
+      <p class="diagnostic-log-privacy">诊断包可能包含本机 IP、网卡、DNS 后缀和路由信息；常见 token、密码、私钥字段会自动隐藏。</p>
+    </section>
   `;
 }
 
@@ -3073,6 +3133,12 @@ function compactText(value, limit = 90) {
 
 function connectionCaption() {
   const connection = state.connection || {};
+  if (busyAction === 'disconnect') return '正在等待一次系统授权，以原子停止 WireGuard 并恢复 PAC / split DNS';
+  if (isConnectionPending()) {
+    if (connection.state === 'lease-only') return `${connection.localIp || '已分配租约'} / 等待系统授权完成`;
+    if (busyAction === 'login-employee' && connection.mode === 'guest') return `${connection.localIp || '访客网络'} / 正在验证员工身份，访客连接保持中`;
+    return '正在准备 WireGuard、DNS、PAC 和权限上下文';
+  }
   if (connection.state === 'connecting') return '正在准备 WireGuard、DNS、PAC 和权限上下文';
   if (connection.state === 'connected') return `${connection.localIp} / ${connection.routePolicy}`;
   if (connection.state === 'tunnel-only') return `${connection.localIp} / tunnel only / ${connection.health?.internalApi || 'internal pending'}`;
@@ -3315,6 +3381,15 @@ function createMockApi() {
         ]
       }
     },
+    diagnosticLog: {
+      enabled: true,
+      fileName: 'mx-h2i-runtime.ndjson',
+      maxBytes: 2 * 1024 * 1024,
+      rotations: 2,
+      recent: [
+        { at: new Date().toISOString(), level: 'warning', event: 'network.diagnostics-problem', message: 'Mock Windows NRPT global policy is disabled.' }
+      ]
+    },
     feedback: null,
     activity: [],
     updatedAt: new Date().toISOString()
@@ -3351,17 +3426,6 @@ function createMockApi() {
       feedback: null
     }),
     loginEmployee: async (input) => {
-      const guestActive = mockState.connection?.mode === 'guest'
-        && ['connecting', 'connected', 'lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable', 'forbidden'].includes(mockState.connection.state);
-      if (guestActive) {
-        const ip = mockState.connection?.localIp ? `（当前访客 IP：${mockState.connection.localIp}）` : '';
-        return commit({
-          feedback: {
-            tone: 'warning',
-            message: `当前已连接访客模式${ip}，请先断开访客模式后再进行员工登录。`
-          }
-        });
-      }
       const now = new Date().toISOString();
       const subscriptions = (mockState.apps.h2o.runtime?.subscriptions || []).map((item) => item.requiresUser
         ? {
@@ -3751,6 +3815,8 @@ function createMockApi() {
       },
       feedback: { tone: 'success', message: '系统网络状态已修复。' }
     }),
+    openDiagnosticLogs: async () => commit({ feedback: { tone: 'info', message: '已打开 MX-H2I 日志目录。' } }),
+    exportDiagnostics: async () => commit({ feedback: { tone: 'success', message: '诊断包已导出：MX-H2I-diagnostics-mock。' } }),
     openAdmin: async () => true,
     setWindowMode: async () => true,
     moveWindowBy: async () => true,

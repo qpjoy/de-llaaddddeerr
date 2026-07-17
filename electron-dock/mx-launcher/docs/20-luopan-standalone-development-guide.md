@@ -1,5 +1,10 @@
 # Luopan Standalone 开发指南：V2 MX-H2I 工作原理走读与照做路线
 
+> Luopan 与 MX-H2I 共存时，启动前应读取共享 network mode snapshot，并监听
+> `visit:connect / staff:connect` 事件；staff 已连接时不得用默认 visit 初始化去断开或重启
+> 系统数据面。完整契约见
+> [21-network-mode-switch-events-and-performance.md](./21-network-mode-switch-events-and-performance.md)。
+
 给接手 Luopan 的开发者。目标：读完本文 + 跑通 `demos/luopan`，你能理解 V2 MX-H2I
 的完整工作原理，并在此基础上独立开发 Luopan——**不管 Luopan 要不要承载 embed
 应用都适用**（不承载：跳过 §6；要承载：按 §6 的流程找平台方）。

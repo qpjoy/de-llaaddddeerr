@@ -118,6 +118,19 @@ export {
   type ElectronLauncherNetworkOwnershipRoute
 } from './network-ownership-registry.js';
 export {
+  defaultElectronLauncherNetworkModeEventStatePath,
+  publishElectronLauncherNetworkModeEvent,
+  readElectronLauncherNetworkModeEventState,
+  subscribeElectronLauncherNetworkModeEvents,
+  type ElectronLauncherNetworkMode,
+  type ElectronLauncherNetworkModeEvent,
+  type ElectronLauncherNetworkModeEventInput,
+  type ElectronLauncherNetworkModeEventName,
+  type ElectronLauncherNetworkModeEventPhase,
+  type ElectronLauncherNetworkModeEventPublishOptions,
+  type ElectronLauncherNetworkModeEventState
+} from './network-mode-events.js';
+export {
   applyElectronLauncherStandaloneDataPlane,
   buildElectronLauncherStandaloneOwnershipClaim,
   diagnoseElectronLauncherStandaloneDataPlane,
