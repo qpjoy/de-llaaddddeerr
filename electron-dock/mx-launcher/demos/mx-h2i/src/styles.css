@@ -51,8 +51,8 @@ body.is-window-dragging * {
   cursor: grabbing !important;
 }
 
-html[data-platform="win32"] [data-window-drag] {
-  -webkit-app-region: drag;
+html[data-platform="win32"] .mx-shell.is-phone [data-window-drag] {
+  -webkit-app-region: no-drag;
 }
 
 html[data-platform="win32"] button,

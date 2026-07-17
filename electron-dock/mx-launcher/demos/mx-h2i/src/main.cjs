@@ -1180,7 +1180,6 @@ function registerIpc() {
   });
   ipcMain.handle('mx-h2i:move-window-by', (_event, input) => {
     if (!mainWindow || mainWindow.isDestroyed()) return false;
-    if (process.platform === 'win32') return false;
     if (currentWindowMode !== 'launcher' || isTopHidden) return false;
     const dx = Number(input?.dx);
     const dy = Number(input?.dy);
@@ -1222,7 +1221,6 @@ function registerIpc() {
   });
   ipcMain.handle('mx-h2i:finish-window-drag', (_event, input) => {
     if (!mainWindow || mainWindow.isDestroyed()) return false;
-    if (process.platform === 'win32') return false;
     if (currentWindowMode !== 'launcher' || isTopHidden) return false;
     const bounds = mainWindow.getBounds();
     const display = electronScreen.getDisplayMatching(bounds);

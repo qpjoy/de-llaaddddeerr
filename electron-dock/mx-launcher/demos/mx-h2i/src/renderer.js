@@ -571,7 +571,7 @@ root.addEventListener('submit', (event) => {
 });
 
 root.addEventListener('pointerdown', (event) => {
-  if (isWindows) return;
+  if (isWindows && screen === 'appcenter') return;
   const target = event.target instanceof Element ? event.target : null;
   if (!target || event.button !== 0) return;
   if (target.closest('button,input,select,a')) return;
