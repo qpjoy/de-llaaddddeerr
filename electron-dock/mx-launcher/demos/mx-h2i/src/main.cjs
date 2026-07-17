@@ -309,6 +309,11 @@ function registerIpc() {
       await saveAndBroadcast();
       return visibleRuntime();
     }
+    const guestEndpointRouteRepair = await repairDarwinEndpointRouteBeforeBootstrap('guest-pre-bootstrap');
+    if (guestEndpointRouteRepair?.stale === true && guestEndpointRouteRepair?.repaired !== true) {
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
     await recoverRetainedWireGuardBeforeBootstrap('guest-pre-bootstrap', {
       allowPrivileged: shouldAllowPrivilegedPreBootstrapRecovery()
     });
@@ -363,6 +368,11 @@ function registerIpc() {
       : null;
     const identityFallback = guestFallback ? runtime.identity : null;
     const authFallback = guestFallback ? runtime.auth : null;
+    const employeeEndpointRouteRepair = await repairDarwinEndpointRouteBeforeBootstrap('employee-pre-bootstrap');
+    if (employeeEndpointRouteRepair?.stale === true && employeeEndpointRouteRepair?.repaired !== true) {
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
     await recoverRetainedWireGuardBeforeBootstrap('employee-pre-bootstrap', {
       allowPrivileged: shouldAllowPrivilegedPreBootstrapRecovery()
     });
@@ -1787,28 +1797,25 @@ function shouldRefreshSystemDomainProxyAfterWireGuardRecovery(reason) {
 async function captureNetworkSignature() {
   if (process.platform !== 'darwin') return null;
   const [route, services, networkInfo] = await Promise.all([
-    execFileText('/sbin/route', ['-n', 'get', 'default']).catch((err) => `route-error:${errorMessage(err)}`),
+    darwinRouteGet('default'),
     execFileText('/usr/sbin/networksetup', ['-listallnetworkservices']).catch((err) => `services-error:${errorMessage(err)}`),
     execFileText('/usr/sbin/scutil', ['--nwi']).catch((err) => `nwi-error:${errorMessage(err)}`)
   ]);
   const serviceNames = compactDarwinNetworkServices(services);
   const autoProxy = await captureDarwinAutoProxySignature(serviceNames);
   return JSON.stringify({
-    route: compactDarwinDefaultRoute(route),
+    route: route?.ok === true
+      ? {
+          gateway: route.gateway || null,
+          interfaceName: route.interfaceName || null,
+          ifscope: route.ifscope || null,
+          sourceAddress: route.sourceAddress || null
+        }
+      : { error: route?.error || 'default route unavailable' },
     services: serviceNames,
     autoProxy,
     networkInfo: compactDarwinNetworkInfo(networkInfo)
   });
-}
-
-function compactDarwinDefaultRoute(stdout) {
-  const text = String(stdout || '');
-  const pick = (name) => nullableString(text.match(new RegExp(`^\\s*${name}:\\s*(.+)$`, 'im'))?.[1]);
-  return {
-    gateway: pick('gateway'),
-    interfaceName: pick('interface'),
-    ifscope: pick('ifscope')
-  };
 }
 
 function compactDarwinNetworkServices(stdout) {
@@ -2470,6 +2477,7 @@ async function collectDarwinEndpointRouteDiagnostics(reason = 'manual', options 
       gateway: route.gateway || null,
       interfaceName: route.interfaceName || null,
       ifscope: route.ifscope || null,
+      sourceAddress: route.sourceAddress || null,
       flags: arrayValue(route.flags, []),
       stale: classification.stale,
       staleReason: classification.reason,
@@ -2489,6 +2497,7 @@ async function collectDarwinEndpointRouteDiagnostics(reason = 'manual', options 
           gateway: defaultRoute.gateway || null,
           interfaceName: defaultRoute.interfaceName || null,
           ifscope: defaultRoute.ifscope || null,
+          sourceAddress: defaultRoute.sourceAddress || null,
           flags: arrayValue(defaultRoute.flags, [])
         }
       : {
@@ -2532,6 +2541,7 @@ async function repairDarwinStaleEndpointRoutesForRuntime(reason = 'manual', opti
         ok: afterRoute.ok === true,
         gateway: afterRoute.gateway || null,
         interfaceName: afterRoute.interfaceName || null,
+        sourceAddress: afterRoute.sourceAddress || null,
         flags: arrayValue(afterRoute.flags, []),
         stale: afterClassification.stale,
         staleReason: afterClassification.reason,
@@ -2543,6 +2553,7 @@ async function repairDarwinStaleEndpointRoutesForRuntime(reason = 'manual', opti
       before: {
         gateway: route.gateway,
         interfaceName: route.interfaceName,
+        sourceAddress: route.sourceAddress,
         flags: arrayValue(route.flags, []),
         staleReason: route.staleReason
       },
@@ -2573,6 +2584,7 @@ async function repairDarwinStaleEndpointRoutesForRuntime(reason = 'manual', opti
           ok: afterRoute.ok === true,
           gateway: afterRoute.gateway || null,
           interfaceName: afterRoute.interfaceName || null,
+          sourceAddress: afterRoute.sourceAddress || null,
           flags: arrayValue(afterRoute.flags, []),
           stale: afterClassification.stale,
           staleReason: afterClassification.reason,
@@ -2675,9 +2687,16 @@ async function darwinRouteGet(target) {
   const host = nullableString(target);
   if (!host) return { ok: false, error: 'empty route target' };
   try {
-    const stdout = await execFileText('/sbin/route', ['-n', 'get', host], {
-      timeoutMs: DARWIN_ENDPOINT_ROUTE_PROBE_TIMEOUT_MS
-    });
+    let stdout;
+    try {
+      stdout = await execFileText('/sbin/route', ['-vn', 'get', host], {
+        timeoutMs: DARWIN_ENDPOINT_ROUTE_PROBE_TIMEOUT_MS
+      });
+    } catch {
+      stdout = await execFileText('/sbin/route', ['-n', 'get', host], {
+        timeoutMs: DARWIN_ENDPOINT_ROUTE_PROBE_TIMEOUT_MS
+      });
+    }
     return {
       ok: true,
       ...parseDarwinRouteGet(stdout)
@@ -2705,9 +2724,25 @@ function parseDarwinRouteGet(stdout) {
     gateway: pickDarwinRouteField(text, 'gateway'),
     interfaceName: pickDarwinRouteField(text, 'interface'),
     ifscope: pickDarwinRouteField(text, 'ifscope'),
+    sourceAddress: parseDarwinRouteSourceAddress(text),
     flags,
     raw: tailText(text, 1200)
   };
+}
+
+function parseDarwinRouteSourceAddress(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    const fields = lines[index].match(/^\s*sockaddrs:\s*<([^>]+)>/i)?.[1]
+      ?.split(',')
+      .map((field) => field.trim().toUpperCase());
+    const sourceIndex = fields?.indexOf('IFA') ?? -1;
+    if (sourceIndex < 0) continue;
+    const values = lines[index + 1].trim().split(/\s+/);
+    const source = nullableString(values[sourceIndex]);
+    if (source && net.isIP(source)) return source;
+  }
+  return null;
 }
 
 function pickDarwinRouteField(text, name) {
@@ -2721,8 +2756,10 @@ function classifyDarwinEndpointRoute(route, defaultRoute) {
   if (!flags.has('HOST')) return { stale: false, reason: null };
   const gateway = nullableString(route.gateway);
   const interfaceName = nullableString(route.interfaceName);
+  const sourceAddress = nullableString(route.sourceAddress);
   const defaultGateway = nullableString(defaultRoute?.gateway);
   const defaultInterfaceName = nullableString(defaultRoute?.interfaceName);
+  const defaultSourceAddress = nullableString(defaultRoute?.sourceAddress);
   if (gateway && isDarwinProxyFakeGateway(gateway)) {
     return { stale: true, reason: `proxy-fake-gateway:${gateway}` };
   }
@@ -2730,12 +2767,16 @@ function classifyDarwinEndpointRoute(route, defaultRoute) {
   // the current default path. The WG daemon installs a STATIC bypass route (no
   // WASCLONED flag), so a mismatch is stale regardless of how the route was
   // created — after a Wi-Fi switch it black-holes the bootstrap API until
-  // deleted. Only IPv4 gateways are compared: direct/link routes stay valid.
+  // deleted. IPv4 gateway and IFA/source mismatches are compared; direct/link
+  // routes without those fields stay valid.
   if (gateway && defaultGateway && net.isIP(gateway) === 4 && net.isIP(defaultGateway) === 4 && gateway !== defaultGateway) {
     return { stale: true, reason: `gateway-mismatch:${gateway}->${defaultGateway}` };
   }
   if (interfaceName && defaultInterfaceName && interfaceName !== defaultInterfaceName) {
     return { stale: true, reason: `interface-mismatch:${interfaceName}->${defaultInterfaceName}` };
+  }
+  if (sourceAddress && defaultSourceAddress && net.isIP(sourceAddress) === 4 && net.isIP(defaultSourceAddress) === 4 && sourceAddress !== defaultSourceAddress) {
+    return { stale: true, reason: `source-mismatch:${sourceAddress}->${defaultSourceAddress}` };
   }
   return { stale: false, reason: null };
 }
@@ -2796,14 +2837,14 @@ function darwinEndpointRouteRepairSummary(result) {
   const routes = objectList(result?.routes);
   const route = routes.find((item) => item?.stale === true) || routes[0];
   const target = route?.target?.address || route?.target?.host || 'unknown endpoint';
-  const via = [route?.gateway, route?.interfaceName].filter(Boolean).join(' / ') || 'unknown route';
+  const via = [route?.gateway, route?.interfaceName, route?.sourceAddress ? `source=${route.sourceAddress}` : null].filter(Boolean).join(' / ') || 'unknown route';
   return `${target} via ${via}`;
 }
 
 function darwinEndpointRouteRepairFailure(result) {
   const unchanged = objectList(result?.repairs).find((repair) => repair?.ok === true && repair?.after?.stale === true);
   if (unchanged) {
-    const via = [unchanged.after?.gateway, unchanged.after?.interfaceName].filter(Boolean).join(' / ') || 'unknown route';
+    const via = [unchanged.after?.gateway, unchanged.after?.interfaceName, unchanged.after?.sourceAddress ? `source=${unchanged.after.sourceAddress}` : null].filter(Boolean).join(' / ') || 'unknown route';
     return `，删除后系统仍解析到 ${via}。`;
   }
   const failed = objectList(result?.repairs).find((repair) => repair?.ok !== true && repair?.skipped !== true);
@@ -2821,6 +2862,7 @@ function compactDarwinEndpointRouteSignature(result) {
         target: route?.target?.address || null,
         gateway: route?.gateway || null,
         interfaceName: route?.interfaceName || null,
+        sourceAddress: route?.sourceAddress || null,
         flags: arrayValue(route?.flags, []).sort(),
         stale: route?.stale === true,
         staleReason: route?.staleReason || null
@@ -8157,6 +8199,21 @@ async function recoverRetainedWireGuardBeforeBootstrap(reason, options = {}) {
   return result;
 }
 
+async function repairDarwinEndpointRouteBeforeBootstrap(reason) {
+  if (process.platform !== 'darwin') return null;
+  try {
+    const result = await repairDarwinStaleEndpointRoutesForRuntime(reason, {
+      force: true,
+      allowPrivileged: true
+    });
+    await recordDarwinEndpointRouteRepairDiagnostics(result, reason);
+    return result;
+  } catch (err) {
+    queueDiagnosticError('bootstrap.endpoint-route-repair-failed', err, { reason });
+    return null;
+  }
+}
+
 async function launcherContext() {
   const bootstrap = await resolveBootstrapEndpoint(runtime.config);
   const baseUrl = bootstrap.baseUrl;
@@ -11509,7 +11566,7 @@ function classifyConnectionError(err) {
       message: `Internal 已响应但拒绝请求（403）。请检查 launcher-network 产品、租约或当前 principal 权限；原始错误：${message}`
     };
   }
-  if (lower.includes('econnrefused') || lower.includes('enotfound') || lower.includes('enetunreach') || lower.includes('ehostunreach') || lower.includes('etimedout') || lower.includes('fetch failed') || lower.includes('timeout') || lower.includes('请求超时')) {
+  if (lower.includes('econnrefused') || lower.includes('enotfound') || lower.includes('enetunreach') || lower.includes('ehostunreach') || lower.includes('eaddrnotavail') || lower.includes('etimedout') || lower.includes('fetch failed') || lower.includes('timeout') || lower.includes('请求超时')) {
     return {
       state: 'network-unavailable',
       message: `网络或 bootstrap API 暂不可达，已保留本机租约并等待恢复；原始错误：${message}`

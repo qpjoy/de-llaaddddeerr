@@ -425,6 +425,26 @@ MX_SHADOW_BUILDKIT_PRUNE_UNTIL=24h \
 bash scripts/manage.sh ops internal-production deploy
 ```
 
+`internal-production` 命令会自动把当前 API Server 地址、`192.168.0.0/16`、Pod/Service
+CIDR 和集群域名同时补进 `NO_PROXY`、`no_proxy`。这是必要的：服务器若配置了
+`HTTPS_PROXY` 或 `ALL_PROXY`，而 `192.168.1.x:6443` 没有显式绕过代理，`kubectl`
+常会表现为访问正确地址却持续 `EOF` / `context deadline exceeded`。`deploy` 现在会在
+耗时的 Docker 构建前和 Flannel/apply 前各完成一次 API Server 探活；探活失败会输出
+本机 6443/2379/2380 监听和 control-plane 容器摘要，然后立即停止。只有明确由外层环境
+统一管理代理绕行时，才使用 `MX_K8S_CONFIGURE_NO_PROXY=0` 关闭自动补齐。
+
+可在服务器上单独确认直连与 kubeconfig 是否正常：
+
+```bash
+curl --noproxy '*' -kfsS --connect-timeout 3 https://192.168.1.2:6443/livez
+kubectl --request-timeout=5s get --raw=/version
+ss -lntp | egrep ':(6443|2379|2380)\b' || true
+crictl ps -a --name 'kube-apiserver|etcd' || true
+```
+
+第一条直连成功、第二条仍走代理失败时，检查当前 shell 的 `NO_PROXY/no_proxy`；两条都
+失败且 6443 没有监听时，问题在 kubelet/static Pod 或 etcd，不应继续重试 Flannel。
+
 `--reinit` 会备份旧 `/etc/kubernetes` 和 `/var/lib/etcd` 到 `/data/mx-backup/<timestamp>`，
 停止 kubelet，执行 `kubeadm reset`，清理旧控制面监听端口和 CNI 残留，然后重新初始化。
 它不会删除 `/var/lib/mx-launcher`，因此 MX 的 hostPath/PVC 数据仍会被后续 deploy 复用。

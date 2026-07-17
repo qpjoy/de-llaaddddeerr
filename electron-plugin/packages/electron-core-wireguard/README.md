@@ -18,6 +18,8 @@ Current scope:
 - WireGuard runtime discovery for `wg-quick`, `wireguard-go`, macOS Bash 4+,
   and Windows `wireguard.exe`
 - macOS userspace up/down via bundled `wireguard-go` + `wg`
+- macOS LaunchDaemon endpoint bypass watchdog across gateway, interface, and
+  DHCP source/IFA changes
 - macOS/Linux `wg-quick up/down` command generation and execution when the
   full quick runtime is available
 

@@ -206,6 +206,43 @@ k8s_detect_lan_ip() {
   fi
 }
 
+k8s_append_no_proxy_entries() {
+  local current="$1"
+  local entries="$2"
+  local result entry
+  local parts=()
+  result="$current"
+  IFS=',' read -r -a parts <<<"$entries"
+  for entry in "${parts[@]}"; do
+    [ -n "$entry" ] || continue
+    case ",$result," in
+      *",$entry,"*) ;;
+      *)
+        if [ -n "$result" ]; then
+          result="$result,$entry"
+        else
+          result="$entry"
+        fi
+        ;;
+    esac
+  done
+  printf '%s\n' "$result"
+}
+
+k8s_configure_proxy_bypass() {
+  [ "${MX_K8S_CONFIGURE_NO_PROXY:-1}" = "1" ] || return 0
+  local current_ip pod_cidr service_cidr entries
+  current_ip="$(k8s_detect_lan_ip | head -n 1)"
+  k8s_is_usable_lan_ip "$current_ip" || return 0
+  pod_cidr="${MX_K8S_POD_CIDR:-${POD_CIDR:-${K8S_POD_CIDR:-}}}"
+  service_cidr="${MX_K8S_SERVICE_CIDR:-${SERVICE_CIDR:-${K8S_SERVICE_CIDR:-}}}"
+  entries="localhost,127.0.0.1,::1,$current_ip,$pod_cidr,$service_cidr,192.168.0.0/16,.svc,.cluster.local,kubernetes.default.svc,kubernetes.default.svc.cluster.local"
+  export NO_PROXY no_proxy
+  NO_PROXY="$(k8s_append_no_proxy_entries "${NO_PROXY:-}" "$entries")"
+  no_proxy="$(k8s_append_no_proxy_entries "${no_proxy:-}" "$entries")"
+  say "NO_PROXY includes kube-apiserver $current_ip and Kubernetes local ranges"
+}
+
 k8s_is_usable_lan_ip() {
   case "$1" in
     ""|0.*|127.*|169.254.*)
@@ -617,6 +654,31 @@ k8s_wait_apiserver_after_endpoint_repair() {
     sleep 2
   done
   die "kube-apiserver did not become reachable after endpoint repair"
+}
+
+k8s_require_apiserver_ready() {
+  local current_ip attempts timeout i
+  need_kubectl
+  current_ip="$(k8s_detect_lan_ip | head -n 1)"
+  attempts="${MX_K8S_APISERVER_PREFLIGHT_ATTEMPTS:-6}"
+  timeout="${MX_K8S_APISERVER_PREFLIGHT_TIMEOUT:-5s}"
+  say "preflight kube-apiserver on $current_ip:6443"
+  for i in $(seq 1 "$attempts"); do
+    if kubectl --request-timeout="$timeout" get --raw=/version >/dev/null 2>&1; then
+      say "kube-apiserver preflight OK"
+      return 0
+    fi
+    [ "$i" = "$attempts" ] || sleep 2
+  done
+  say "kube-apiserver preflight diagnostics"
+  if command -v ss >/dev/null 2>&1; then
+    ss -lntp 2>/dev/null | grep -E ':(6443|2379|2380)[[:space:]]' || true
+  fi
+  if command -v crictl >/dev/null 2>&1; then
+    crictl ps -a --name 'kube-apiserver|etcd' || true
+  fi
+  kubectl --request-timeout="$timeout" get --raw=/version || true
+  die "kube-apiserver $current_ip:6443 is unreachable after NO_PROXY setup; check kubelet/static-pod status before building or applying MX"
 }
 
 k8s_restart_static_pod_containers() {
@@ -4864,6 +4926,11 @@ Notes:
     /etc/kubernetes and kubeconfig before the first kubectl apply. Override the
     detected IP with MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.x.x, or disable
     this guard with MX_K8S_AUTO_REPAIR_KUBEADM_ENDPOINT=0.
+  - Production commands add the apiserver and Kubernetes local ranges to both
+    NO_PROXY and no_proxy so kubectl never sends the private control-plane
+    endpoint through HTTPS_PROXY/ALL_PROXY. Disable with
+    MX_K8S_CONFIGURE_NO_PROXY=0. Deploy also checks the apiserver before the
+    expensive image build.
   - To change the Linux hostname safely, set MX_K8S_OS_HOSTNAME=mx-internal
     and leave MX_K8S_NODE_NAME empty. Deploy keeps the existing Kubernetes node
     identity pinned through kubelet --hostname-override, so a router/hostname
@@ -4983,6 +5050,10 @@ ops_internal_production() {
   local action="$1"
   shift || true
   case "$action" in
+    plan) ;;
+    *) k8s_configure_proxy_bypass ;;
+  esac
+  case "$action" in
     plan)
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production plan"
       ops_internal_production_plan
@@ -4991,12 +5062,14 @@ ops_internal_production() {
       [ "$#" -le 1 ] || die "Usage: bash scripts/manage.sh ops internal-production deploy [gateway-url]"
       ops_internal_production_plan
       k8s_repair_kubeadm_endpoint
+      k8s_require_apiserver_ready
       say "build Internal image"
       MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT="${MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT:-1}"
       shadow_image_build
       shadow_image_import_containerd
       say "preload K8s runtime images"
       k8s_preload_runtime_images
+      k8s_require_apiserver_ready
       say "apply Internal K8s production stack"
       k8s_apply internal-shadow
       say "restart Internal API for rebuilt image"
@@ -5023,6 +5096,7 @@ ops_internal_production() {
     apply)
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production apply"
       ops_internal_production_repair_kubeadm_endpoint_if_requested
+      k8s_require_apiserver_ready
       k8s_apply internal-shadow
       ;;
     status)

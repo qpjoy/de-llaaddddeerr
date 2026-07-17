@@ -159,7 +159,13 @@ On macOS, the WireGuard runtime prefers a product-owned LaunchDaemon
 (`com.qpjoy.mx-h2i.wireguard.*`) after the user approves connect. This mirrors
 the V1 HDO keep-alive path: launchd keeps the tunnel alive across lock, unlock,
 and sleep/resume, while the app process probes health and revalidates the
-browser PAC plus CLI dynamic resolver path.
+browser PAC plus CLI dynamic resolver path. Its endpoint-route watchdog compares
+the default gateway, interface, and local source/IFA address. This last value is
+required when the Mac moves between two Wi-Fi networks that both use `en0` and
+the same gateway address but assign different DHCP addresses; otherwise the
+public bootstrap host route can retain the old source and fail with
+`EADDRNOTAVAIL`. A user-initiated reconnect detects and removes an older stale
+route with one administrator authorization, then installs the current watchdog.
 
 The Electron entry is intentionally light for the reservation phase:
 

@@ -1978,36 +1978,62 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     : [];
   // The endpoint bypass host routes are pinned to the default gateway captured
   // at tunnel start. After a Wi-Fi/network switch they keep pointing at the old
-  // gateway and black-hole the relay endpoint (bootstrap API included) until
-  // deleted with root. This daemon is the only resident root process, so it
-  // watches the default path and re-applies the bypass when it changes. The
+  // gateway/source address and black-hole the relay endpoint (bootstrap API
+  // included) until deleted with root. This daemon is the only resident root
+  // process, so it watches the default path and re-applies the bypass when it
+  // changes. Source address matters when two Wi-Fi networks use the same
+  // interface and gateway but DHCP assigns a different local address. The
   // routes are also shared kernel state: another product's daemon cleanup can
   // delete them while this tunnel is still up (multiple standalone launchers
   // may point at the same relay IP), so when the default path is stable the
   // watchdog verifies each applied host route still exists and still follows
-  // the current default gateway, restoring it otherwise.
+  // the current default gateway/interface/source, restoring it otherwise.
   const endpointBypassWatchdogLines = endpointBypassCommands.length > 0
     ? [
+        'current_endpoint_bypass_path() {',
+        "  route -vn get default 2>/dev/null | awk '",
+        "    /^[[:space:]]*gateway:/ { gateway=$2 }",
+        "    /^[[:space:]]*interface:/ { interfaceName=$2 }",
+        "    /sockaddrs: .*IFA/ { getline; source=$NF }",
+        "    END { if (gateway != \"\" && interfaceName != \"\") printf \"%s %s %s\", gateway, interfaceName, source != \"\" ? source : \"-\" }",
+        "  '",
+        '}',
+        'endpoint_bypass_route_state() {',
+        "  route -vn get \"$1\" 2>/dev/null | awk '",
+        "    /^[[:space:]]*destination:/ { destination=$2 }",
+        "    /^[[:space:]]*gateway:/ { gateway=$2 }",
+        "    /^[[:space:]]*interface:/ { interfaceName=$2 }",
+        "    /sockaddrs: .*IFA/ { getline; source=$NF }",
+        "    END { printf \"%s %s %s %s\", destination != \"\" ? destination : \"-\", gateway != \"\" ? gateway : \"-\", interfaceName != \"\" ? interfaceName : \"-\", source != \"\" ? source : \"-\" }",
+        "  '",
+        '}',
         '(',
-        "  __hdo_bypass_path=\"$(route -n get default 2>/dev/null | awk '/gateway:|interface:/{printf \"%s \", $2}')\"",
+        '  __hdo_bypass_path="$(current_endpoint_bypass_path)"',
         '  while kill -0 "$WG_PID" >/dev/null 2>&1; do',
         '    sleep 5',
-        "    __hdo_bypass_next=\"$(route -n get default 2>/dev/null | awk '/gateway:|interface:/{printf \"%s \", $2}')\"",
+        '    __hdo_bypass_next="$(current_endpoint_bypass_path)"',
         '    if [ -n "$__hdo_bypass_next" ] && [ "$__hdo_bypass_next" != "$__hdo_bypass_path" ]; then',
         '      log_action "endpoint-bypass-refresh"',
         '      log_route "defaultPathChanged=${__hdo_bypass_path}-> ${__hdo_bypass_next}"',
         '      apply_endpoint_bypass',
         '      __hdo_bypass_path="$__hdo_bypass_next"',
         '    elif [ -n "$__hdo_bypass_next" ]; then',
-        "      __hdo_bypass_gw=\"$(route -n get default 2>/dev/null | awk '/gateway:/{print $2; exit}')\"",
+        '      set -- $__hdo_bypass_next',
+        '      __hdo_bypass_gw="${1:-}"',
+        '      __hdo_bypass_interface="${2:-}"',
+        '      __hdo_bypass_source="${3:-}"',
         '      case "$__hdo_bypass_gw" in *[!0-9.]*|"") __hdo_bypass_gw="" ;; esac',
         '      if [ -n "$__hdo_bypass_gw" ]; then',
         '        for __hdo_bypass_ip in ${__hdo_bypass_applied_ips:-}; do',
-        "          __hdo_bypass_dest=\"$(route -n get \"$__hdo_bypass_ip\" 2>/dev/null | awk '/destination:/{print $2; exit}')\"",
-        "          __hdo_bypass_rgw=\"$(route -n get \"$__hdo_bypass_ip\" 2>/dev/null | awk '/gateway:/{print $2; exit}')\"",
-        '          if [ "$__hdo_bypass_dest" != "$__hdo_bypass_ip" ] || { [ -n "$__hdo_bypass_rgw" ] && [ "$__hdo_bypass_rgw" != "$__hdo_bypass_gw" ]; }; then',
+        '          __hdo_bypass_route_state="$(endpoint_bypass_route_state "$__hdo_bypass_ip")"',
+        '          set -- $__hdo_bypass_route_state',
+        '          __hdo_bypass_dest="${1:--}"',
+        '          __hdo_bypass_rgw="${2:--}"',
+        '          __hdo_bypass_rinterface="${3:--}"',
+        '          __hdo_bypass_rsource="${4:--}"',
+        '          if [ "$__hdo_bypass_dest" != "$__hdo_bypass_ip" ] || { [ "$__hdo_bypass_rgw" != "-" ] && [ "$__hdo_bypass_rgw" != "$__hdo_bypass_gw" ]; } || { [ "$__hdo_bypass_rinterface" != "-" ] && [ "$__hdo_bypass_rinterface" != "$__hdo_bypass_interface" ]; } || { [ "$__hdo_bypass_rsource" != "-" ] && [ "$__hdo_bypass_source" != "-" ] && [ "$__hdo_bypass_rsource" != "$__hdo_bypass_source" ]; }; then',
         '            log_action "endpoint-bypass-restore"',
-        '            log_route "bypassRouteDrift=${__hdo_bypass_ip} dest=${__hdo_bypass_dest:-missing} gateway=${__hdo_bypass_rgw:-none}->${__hdo_bypass_gw}"',
+        '            log_route "bypassRouteDrift=${__hdo_bypass_ip} dest=${__hdo_bypass_dest:-missing} gateway=${__hdo_bypass_rgw:-none}->${__hdo_bypass_gw} interface=${__hdo_bypass_rinterface:-none}->${__hdo_bypass_interface} source=${__hdo_bypass_rsource:-none}->${__hdo_bypass_source}"',
         '            apply_endpoint_bypass',
         '            break',
         '          fi',

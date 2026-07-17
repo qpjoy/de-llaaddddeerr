@@ -1017,6 +1017,14 @@ DNS Routes 面板里编辑。V2 默认仍保留 k8s Caddy 作为可回退 backen
   近实时识别，而不只依赖 30 秒兜底刷新。测试环境可用
   `MX_H2I_MAC_BACKGROUND_PROXY_REPAIR=0` 改成只诊断不修复。启动时仍不自动恢复 stale macOS
   PAC/split DNS，避免用户尚未选择连接前弹权限框。
+- macOS Domestic/bootstrap endpoint 的 `/32` bypass route 不能只比较 gateway/interface。
+  两个 Wi-Fi 都使用 `en0 + 192.168.0.1`、但 DHCP source 从 `192.168.0.104` 变化到另一地址时，
+  旧 host route 的 `IFA` 会继续绑定已经不存在的 source，Node/Electron 报
+  `connect EADDRNOTAVAIL ... Local (192.168.0.104:port)`，而手工删除 endpoint route 后立即恢复。
+  root WireGuard LaunchDaemon 因此每 5 秒用 verbose route 同时比较 gateway、interface、IFA；
+  任一变化都会删除并重建 endpoint bypass。App 网络签名和诊断也记录 sourceAddress；用户主动
+  点击访客连接/员工登录时若发现旧版本 daemon 遗留的 source route，只在确有 stale route 时
+  请求一次管理员授权删除，连接成功后再刷新当前 LaunchDaemon。
 - macOS 权限申请应收敛为 Launcher network transaction。当前 V2 可能出现两次授权：
   第一次安装/刷新 WireGuard LaunchDaemon 和 route，第二次写系统 PAC 与 dynamic split
   DNS。短期应把 UI 文案合并为一次“即将修改 WireGuard、DNS、PAC”的连接动作，并尽量只在

@@ -249,7 +249,7 @@ mx-h2i 的 `main.cjs` 应收敛为"产品壳"：窗口、产品 UI IPC、产品�
 | C9 | 双连 + 系统代理(PAC)模式 | PAC 只把各自产品域名引到各自 VIP |
 | C10 | H2O embed on H2I，同时 Luopan standalone 在线 | H2O 流量归因到 mx-h2i channel，不借用 `10.91.*` |
 | C11 | 双产品同时"检查更新" | 单机 update 下载不互相干扰；激活门禁互不阻塞（每 channel 一个 scheduler） |
-| C12 | 系统睡眠/网络切换（Wi-Fi→有线）后双产品恢复 | network-change 恢复只 repair 自己的路由 |
+| C12 | 系统睡眠/网络切换（Wi-Fi→有线，或两个 Wi-Fi gateway/interface 相同但 DHCP source 不同）后双产品恢复 | network-change 按 gateway/interface/IFA 恢复且只 repair 自己的路由 |
 
 ### 4.3 已知薄弱点（矩阵预计会暴露的）
 
