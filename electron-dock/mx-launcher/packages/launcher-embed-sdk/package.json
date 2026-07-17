@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/mx-launcher-embed-sdk",
-  "version": "2.3.4",
+  "version": "2.3.5",
   "description": "Embed SDK shell for products that carry MX Launcher network capability inside the app.",
   "type": "module",
   "main": "dist/index.js",

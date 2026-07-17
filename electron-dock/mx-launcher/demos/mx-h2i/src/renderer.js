@@ -1,6 +1,8 @@
 const electronApi = window.mxH2i || null;
 const api = electronApi || createMockApi();
 const root = document.getElementById('app');
+const isWindows = api.platform === 'win32';
+document.documentElement.dataset.platform = api.platform || 'browser';
 const H2O_DEFAULT_TEST_URL = 'https://www.google.com';
 const H2O_TEST_PRESETS = [
   { id: 'google', label: 'Google', url: H2O_DEFAULT_TEST_URL },
@@ -63,6 +65,7 @@ void boot();
 
 async function boot() {
   state = await api.getState();
+  if (isWindows) await api.setWindowMode?.('launcher');
   modeDraft = state.connection?.mode === 'employee' ? 'employee' : 'guest';
   syncEmployeeLoginDraftFromState();
   render();
@@ -568,6 +571,7 @@ root.addEventListener('submit', (event) => {
 });
 
 root.addEventListener('pointerdown', (event) => {
+  if (isWindows) return;
   const target = event.target instanceof Element ? event.target : null;
   if (!target || event.button !== 0) return;
   if (target.closest('button,input,select,a')) return;

@@ -47,8 +47,10 @@ pnpm --filter @qpjoy/mx-h2i-demo dev
    of owning WireGuard itself. In development MX-H2I resolves
    `entrypoints.dev: workspace:demos/mx-app-h2o`, reads the local H2O package
    version, and records the install cache on `runtime.apps.h2o`. Built-in
-   AppCenter records use `builtin://appcenter`; future registry/tarball records
-   are installed into the AppCenter cache directory under Electron `userData`.
+   AppCenter records use `builtin://appcenter` and `builtin://h2o`; the packaged
+   H2O runtime is activated directly and never requires Node.js/npm on the end
+   user's machine. Future registry/tarball records are installed into the
+   AppCenter cache directory under Electron `userData`.
 
 6. Start the H2O embed app demo:
 
@@ -73,9 +75,11 @@ pnpm --filter @qpjoy/mx-h2i-demo dev
 
 For production, Internal admin should register the same AppCenter app record
 with `packageName: @qpjoy/electron-launcher-app-h2o`, the latest release
-version, access policy, permissions, and entrypoints. AppCenter reads that
-catalog record, compares it with local installed cache, installs or updates the
-npm package, then opens the app through MX-H2I broker-session.
+version, access policy, permissions, and entrypoints. The built-in H2O record
+activates the runtime shipped with MX-H2I and opens it through the broker
+session. A separately released registry/tarball app must be delivered by the
+trusted Release Center artifact flow; the desktop client must not assume that
+Node.js/npm exists on an end user's machine.
 
 `pnpm dev` follows the V1 HDO local-development flow: it prepares the local
 Launcher workspace packages before starting Electron. This keeps

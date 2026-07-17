@@ -1180,6 +1180,7 @@ function registerIpc() {
   });
   ipcMain.handle('mx-h2i:move-window-by', (_event, input) => {
     if (!mainWindow || mainWindow.isDestroyed()) return false;
+    if (process.platform === 'win32') return false;
     if (currentWindowMode !== 'launcher' || isTopHidden) return false;
     const dx = Number(input?.dx);
     const dy = Number(input?.dy);
@@ -1221,6 +1222,7 @@ function registerIpc() {
   });
   ipcMain.handle('mx-h2i:finish-window-drag', (_event, input) => {
     if (!mainWindow || mainWindow.isDestroyed()) return false;
+    if (process.platform === 'win32') return false;
     if (currentWindowMode !== 'launcher' || isTopHidden) return false;
     const bounds = mainWindow.getBounds();
     const display = electronScreen.getDisplayMatching(bounds);
@@ -3947,8 +3949,8 @@ function normalizeApps(input) {
         },
         embed: { standaloneChannelProductId: 'mx-h2i', launchWithoutBroker: 'blocked' }
       },
-      installSource: 'npm',
-      installPath: null,
+      installSource: 'builtin',
+      installPath: 'builtin://h2o',
       entrypoints: {
         desktop: 'app://h2o/index.html',
         settings: 'app://h2o/settings.html',
@@ -7397,7 +7399,8 @@ async function installAppPackage(appRecord) {
   const packageName = nullableString(appRecord?.packageName);
   const version = nullableString(appRecord?.latestVersion) || nullableString(appRecord?.version) || '0.1.0';
   if (!packageName) throw new Error('缺少 packageName');
-  if (source === 'builtin') {
+  const bundledRuntime = isBundledAppRuntime(appRecord, packageName);
+  if (source === 'builtin' && !bundledRuntime) {
     return {
       installSource: 'builtin',
       installPath: nullableString(appRecord.installPath) || `builtin://${appRecord.appId}`,
@@ -7412,6 +7415,14 @@ async function installAppPackage(appRecord) {
       installSource: 'workspace',
       installPath: workspacePath,
       installedVersion: nullableString(packageJson.version) || version,
+      installedAt: nowIso()
+    };
+  }
+  if (bundledRuntime) {
+    return {
+      installSource: 'builtin',
+      installPath: `builtin://${appRecord.appId}`,
+      installedVersion: version,
       installedAt: nowIso()
     };
   }
@@ -7465,20 +7476,39 @@ function execPackageManagerInstall(packageManager, cwd, packageSpec) {
   const args = command === 'pnpm'
     ? ['add', packageSpec, '--prod']
     : ['install', packageSpec, '--omit=dev', '--no-audit', '--no-fund'];
+  const invocation = packageManagerInvocation(command, args);
   return new Promise((resolve, reject) => {
-    execFile(command, args, {
+    execFile(invocation.command, invocation.args, {
       cwd,
       timeout: 120_000,
       maxBuffer: 1024 * 1024,
       env: strippedInstallEnv()
     }, (err, stdout, stderr) => {
       if (err) {
-        reject(new Error(String(stderr || stdout || err.message).split(/\r?\n/).slice(-8).join('\n')));
+        const output = String(stderr || stdout || err.message).split(/\r?\n/).slice(-8).join('\n');
+        const packageManagerMissing = err.code === 'ENOENT'
+          || /(?:not recognized as an internal or external command|不是内部或外部命令)/i.test(output);
+        reject(new Error(packageManagerMissing
+          ? `未找到 ${command}${process.platform === 'win32' ? '.cmd' : ''}。请安装 Node.js/${command} 并确认其已加入 PATH；MX-H2I 内置应用不应依赖系统 npm。`
+          : output));
         return;
       }
       resolve();
     });
   });
+}
+
+function isBundledAppRuntime(appRecord, packageName) {
+  return nullableString(appRecord?.appId) === 'h2o'
+    && packageName === '@qpjoy/electron-launcher-app-h2o';
+}
+
+function packageManagerInvocation(command, args) {
+  if (process.platform !== 'win32') return { command, args };
+  return {
+    command: windowsSystemCommand('cmd.exe'),
+    args: ['/d', '/s', '/c', `${command}.cmd`, ...args]
+  };
 }
 
 function strippedInstallEnv() {

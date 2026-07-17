@@ -304,6 +304,7 @@ export async function connectLauncherWireGuardPeer(
   const ok = tunnel.ok === true && status?.active === true && missingRoutes === 0;
   return {
     ok,
+    authorizationCanceled: tunnel.authorizationCanceled === true,
     action,
     peer,
     runtime,
@@ -388,6 +389,7 @@ export async function stopLauncherWireGuardPeer(input: ElectronLauncherWireGuard
   const status = safeWireGuardStatus(runtime, configPath);
   return {
     ok: tunnel.ok === true,
+    authorizationCanceled: tunnel.authorizationCanceled === true,
     skipped: false,
     configPath,
     runtime,
@@ -499,6 +501,7 @@ export async function recoverLauncherWireGuardPeer(
   const ok = tunnel.ok === true && nextStatus?.active === true && nextMissingRouteCount === 0;
   return {
     ok,
+    authorizationCanceled: tunnel.authorizationCanceled === true,
     action: 'recover-up',
     recoveryReason: input.reason ?? null,
     configPath,

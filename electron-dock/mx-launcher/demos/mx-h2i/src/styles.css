@@ -51,6 +51,17 @@ body.is-window-dragging * {
   cursor: grabbing !important;
 }
 
+html[data-platform="win32"] [data-window-drag] {
+  -webkit-app-region: drag;
+}
+
+html[data-platform="win32"] button,
+html[data-platform="win32"] input,
+html[data-platform="win32"] select,
+html[data-platform="win32"] a {
+  -webkit-app-region: no-drag;
+}
+
 button,
 input,
 select {

@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 const api = {
+  platform: process.platform,
   getState: () => ipcRenderer.invoke('mx-h2i:get-state'),
   saveConfig: (input) => ipcRenderer.invoke('mx-h2i:save-config', input),
   connectGuest: () => ipcRenderer.invoke('mx-h2i:connect-guest'),

@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-launcher",
-  "version": "2.3.4",
+  "version": "2.3.5",
   "description": "Product-facing Electron Launcher client for MX Launcher release, update, rollout, AppCenter, and network integration.",
   "type": "module",
   "main": "dist/index.js",

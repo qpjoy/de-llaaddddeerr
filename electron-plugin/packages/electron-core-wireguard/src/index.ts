@@ -126,6 +126,7 @@ export interface WireGuardTunnelCommand {
 
 export interface WireGuardTunnelResult {
   ok: boolean;
+  authorizationCanceled?: boolean;
   action: WireGuardTunnelAction;
   mode: string;
   configPath: string;
@@ -781,8 +782,10 @@ export async function setWireGuardTunnelState(input: {
       env: command.env ? { ...process.env, ...command.env } : process.env
     });
   } catch (err) {
+    const authorizationCanceled = isWireGuardAuthorizationCancelled(command, err);
     return {
       ok: false,
+      authorizationCanceled,
       action: input.action,
       mode: command.runtime.method,
       configPath: input.configPath,
@@ -3404,7 +3407,17 @@ function windowsElevatedPowerShellWrapperScript(
     `$quotedElevatedScript = '"' + $elevatedScript.Replace('"', '\\"') + '"'`,
     `$argLine = '-NoProfile -ExecutionPolicy Bypass -File ' + $quotedElevatedScript`,
     "Write-HdoAudit ('wrapper argLine=' + $argLine)",
-    `$p = Start-Process -FilePath $pwsh -ArgumentList $argLine -Verb RunAs -WindowStyle Hidden -Wait -PassThru`,
+    'try {',
+    `  $p = Start-Process -FilePath $pwsh -ArgumentList $argLine -Verb RunAs -WindowStyle Hidden -Wait -PassThru`,
+    '} catch {',
+    "  Write-HdoAudit ('wrapper elevation failed: ' + $_.Exception.Message)",
+    '  $nativeErrorCode = $null',
+    "  if ($null -ne $_.Exception.PSObject.Properties['NativeErrorCode']) { $nativeErrorCode = $_.Exception.NativeErrorCode }",
+    "  if ($null -eq $nativeErrorCode -and $null -ne $_.Exception.InnerException -and $null -ne $_.Exception.InnerException.PSObject.Properties['NativeErrorCode']) { $nativeErrorCode = $_.Exception.InnerException.NativeErrorCode }",
+    "  $authorizationCanceled = ($nativeErrorCode -eq 1223) -or ($_.Exception.Message -match '(?i)cancel(?:ed|led)|用户.*取消|取消.*用户')",
+    "  if ($authorizationCanceled) { [Console]::Error.WriteLine('MX_WIREGUARD_AUTHORIZATION_CANCELED'); exit 1223 }",
+    '  throw',
+    '}',
     "Write-HdoAudit ('wrapper elevated exitCode=' + [string]$p.ExitCode)",
     'if ($null -ne $p.ExitCode) { exit $p.ExitCode }'
   ].join('\n');
@@ -3722,7 +3735,7 @@ function windowsPowerShellCommand(): string {
 function wireGuardCommandErrorMessage(command: WireGuardTunnelCommand, err: unknown): string {
   const detail = errorMessage(err);
   const output = commandOutputMessage(err);
-  if (command.platform === 'darwin' && isAppleScriptAuthorizationCancelled(detail)) {
+  if (isWireGuardAuthorizationCancelled(command, err)) {
     return '已取消 WireGuard 管理员授权。';
   }
   if (command.platform === 'win32') {
@@ -3734,6 +3747,17 @@ function wireGuardCommandErrorMessage(command: WireGuardTunnelCommand, err: unkn
     ].filter(Boolean).join(' ');
   }
   return [detail, output].filter(Boolean).join(' ');
+}
+
+function isWireGuardAuthorizationCancelled(command: WireGuardTunnelCommand, err: unknown): boolean {
+  const detail = [
+    errorMessage(err),
+    commandOutputMessage(err),
+    typeof err === 'object' && err && 'code' in err ? String(err.code) : ''
+  ].filter(Boolean).join('\n');
+  if (command.platform === 'darwin') return isAppleScriptAuthorizationCancelled(detail);
+  if (command.platform !== 'win32') return false;
+  return /MX_WIREGUARD_AUTHORIZATION_CANCELED|\b1223\b|operation was cancel(?:ed|led) by the user|用户.*取消|取消.*用户/i.test(detail);
 }
 
 function commandOutputMessage(err: unknown): string | null {
