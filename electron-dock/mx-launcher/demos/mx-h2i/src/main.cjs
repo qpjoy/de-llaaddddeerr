@@ -102,6 +102,7 @@ let windowBoundsSaveTimer = null;
 let windowBoundsTrackingSuppressed = false;
 let activeWindowDrag = null;
 let windowDragSizeBatchTimer = null;
+let displayTopologyRecoveryTimer = null;
 let lastWireGuardRecoveryFailureAt = 0;
 let wireGuardBackgroundProbeFailures = 0;
 const wireGuardRecoveryTimers = [];
@@ -135,6 +136,9 @@ const TOP_REVEAL_HOLD_MS = 900;
 const TOP_LEAVE_HIDE_MS = 180;
 const WINDOW_BOUNDS_SAVE_DELAY_MS = 420;
 const WINDOW_DRAG_SIZE_BATCH_MS = 80;
+const DISPLAY_TOPOLOGY_RECOVERY_DELAY_MS = 180;
+const MIN_NATIVE_WINDOW_COORDINATE = -2147483648;
+const MAX_NATIVE_WINDOW_COORDINATE = 2147483647;
 const H2O_PROXY_START_TIMEOUT_MS = 12_000;
 const H2O_PORT_RELEASE_TIMEOUT_MS = 8_000;
 const H2O_MANAGED_SUBSCRIPTION_REFRESH_MS = 30_000;
@@ -168,6 +172,7 @@ app.whenReady().then(async () => {
   registerIpc();
   createTray();
   createMainWindow();
+  startDisplayTopologyWatcher();
   void restoreH2oRuntimeAfterStartup().catch((err) => {
     console.warn('[mx-h2i] H2O startup restore failed:', errorMessage(err));
     queueDiagnosticError('startup.h2o-restore', err);
@@ -217,6 +222,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   queueDiagnosticLog('info', 'app.before-quit', 'MX-H2I is shutting down.');
+  stopDisplayTopologyWatcher();
   stopNetworkChangeWatcher();
   stopWireGuardRecoveryWatcher();
   void closeSystemDomainProxy();
@@ -1231,7 +1237,7 @@ function registerIpc() {
     stopTopAnimation();
     // Pointer events change position only. Windows size correction always uses
     // the drag-start snapshot, so DPI-adjusted width/height never feed the next move.
-    mainWindow.setPosition(nextBounds.x, nextBounds.y, false);
+    if (!setWindowPositionSafely(nextBounds.x, nextBounds.y, 'window-drag')) return false;
     if (process.platform === 'win32' && activeWindowDrag) {
       activeWindowDrag.x = nextBounds.x;
       activeWindowDrag.y = nextBounds.y;
@@ -1497,9 +1503,53 @@ function windowMinimumSizeForMode(mode, referenceBounds = null) {
 
 function setWindowBoundsWithoutTracking(bounds) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
+  const normalized = normalizeWindowBounds(bounds);
+  if (!normalized) {
+    queueDiagnosticError('window.invalid-bounds', new TypeError('Window bounds are not valid native coordinates.'), { bounds });
+    return false;
+  }
   windowBoundsTrackingSuppressed = true;
-  mainWindow.setBounds(bounds, false);
-  windowBoundsTrackingSuppressed = false;
+  try {
+    mainWindow.setBounds(normalized, false);
+    return true;
+  } catch (err) {
+    console.warn('[mx-h2i] native window bounds update failed:', errorMessage(err));
+    queueDiagnosticError('window.set-bounds-failed', err, { bounds: normalized });
+    return false;
+  } finally {
+    windowBoundsTrackingSuppressed = false;
+  }
+}
+
+function setWindowPositionSafely(x, y, reason = 'window-position') {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  const nextX = normalizeNativeWindowCoordinate(x);
+  const nextY = normalizeNativeWindowCoordinate(y);
+  if (nextX === null || nextY === null) {
+    queueDiagnosticError('window.invalid-position', new TypeError('Window position is not a valid native coordinate.'), {
+      reason,
+      x,
+      y
+    });
+    scheduleDisplayTopologyRecovery(reason);
+    return false;
+  }
+  try {
+    mainWindow.setPosition(nextX, nextY, false);
+    return true;
+  } catch (err) {
+    console.warn('[mx-h2i] native window position update failed:', errorMessage(err));
+    queueDiagnosticError('window.set-position-failed', err, { reason, x: nextX, y: nextY });
+    scheduleDisplayTopologyRecovery(reason);
+    return false;
+  }
+}
+
+function normalizeNativeWindowCoordinate(value) {
+  const rounded = Math.round(Number(value));
+  if (!Number.isFinite(rounded)) return null;
+  if (rounded < MIN_NATIVE_WINDOW_COORDINATE || rounded > MAX_NATIVE_WINDOW_COORDINATE) return null;
+  return rounded;
 }
 
 function sameBounds(a, b) {
@@ -1618,7 +1668,7 @@ function showFromTopEdge() {
     y: display.workArea.y + TOP_DOCK_Y
   };
   stopTopAnimation();
-  mainWindow.setPosition(start.x, start.y, false);
+  if (!setWindowPositionSafely(start.x, start.y, 'top-reveal-start')) return;
   mainWindow.showInactive();
   isTopHidden = false;
   isTopDocked = true;
@@ -1650,6 +1700,64 @@ function startTopRevealWatcher() {
     }
     if (withinX && nearTop) showFromTopEdge();
   }, 160);
+}
+
+function startDisplayTopologyWatcher() {
+  electronScreen.on('display-added', onDisplayTopologyChanged);
+  electronScreen.on('display-removed', onDisplayTopologyChanged);
+  electronScreen.on('display-metrics-changed', onDisplayTopologyChanged);
+}
+
+function stopDisplayTopologyWatcher() {
+  electronScreen.off('display-added', onDisplayTopologyChanged);
+  electronScreen.off('display-removed', onDisplayTopologyChanged);
+  electronScreen.off('display-metrics-changed', onDisplayTopologyChanged);
+  if (displayTopologyRecoveryTimer) clearTimeout(displayTopologyRecoveryTimer);
+  displayTopologyRecoveryTimer = null;
+}
+
+function onDisplayTopologyChanged() {
+  scheduleDisplayTopologyRecovery('display-topology-change');
+}
+
+function scheduleDisplayTopologyRecovery(reason = 'display-topology-change') {
+  stopTopAnimation();
+  isTopHidden = false;
+  isTopHideAnimating = false;
+  isTopDocked = false;
+  topDockHidePending = false;
+  topDockHoldUntil = 0;
+  topDockLeaveStartedAt = 0;
+  needsRevealZoneReentry = false;
+  if (windowDragSizeBatchTimer) clearTimeout(windowDragSizeBatchTimer);
+  windowDragSizeBatchTimer = null;
+  activeWindowDrag = null;
+  if (displayTopologyRecoveryTimer) clearTimeout(displayTopologyRecoveryTimer);
+  displayTopologyRecoveryTimer = setTimeout(() => {
+    displayTopologyRecoveryTimer = null;
+    recoverWindowAfterDisplayTopologyChange(reason);
+  }, DISPLAY_TOPOLOGY_RECOVERY_DELAY_MS);
+}
+
+function recoverWindowAfterDisplayTopologyChange(reason) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    const current = normalizeWindowBounds(mainWindow.getBounds());
+    const remembered = normalizeWindowState(runtime?.window).bounds[currentWindowMode];
+    const target = constrainWindowBounds(current || remembered || defaultWindowBoundsForMode(currentWindowMode), currentWindowMode);
+    if (setWindowBoundsWithoutTracking(target) === false) return;
+    lastVisibleBounds = mainWindow.getBounds();
+    rememberWindowBoundsForMode(currentWindowMode, lastVisibleBounds);
+    persistWindowStateSoon();
+    if (!mainWindow.isVisible() && !mainWindow.isMinimized()) mainWindow.showInactive();
+    queueDiagnosticLog('info', 'window.display-topology-recovered', 'Window bounds were reconciled after a display topology change.', {
+      reason,
+      bounds: lastVisibleBounds
+    });
+  } catch (err) {
+    console.warn('[mx-h2i] display topology recovery failed:', errorMessage(err));
+    queueDiagnosticError('window.display-topology-recovery-failed', err, { reason });
+  }
 }
 
 function startWireGuardRecoveryWatcher() {
@@ -3621,6 +3729,18 @@ function dockReleaseDistance(bounds, display) {
 function animateWindow(from, to, steps, onDone) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   stopTopAnimation();
+  const start = normalizeWindowBounds(from);
+  const target = normalizeWindowBounds(to);
+  const totalSteps = Math.round(Number(steps));
+  if (!start || !target || !Number.isFinite(totalSteps) || totalSteps < 1) {
+    queueDiagnosticError('window.invalid-animation', new TypeError('Window animation contains invalid bounds or steps.'), {
+      from,
+      to,
+      steps
+    });
+    scheduleDisplayTopologyRecovery('invalid-window-animation');
+    return;
+  }
   let step = 0;
   topAnimationTimer = setInterval(() => {
     if (!mainWindow || mainWindow.isDestroyed()) {
@@ -3628,20 +3748,31 @@ function animateWindow(from, to, steps, onDone) {
       return;
     }
     step += 1;
-    const t = easeOutCubic(step / steps);
-    const x = Math.round(from.x + (to.x - from.x) * t);
-    const y = Math.round(from.y + (to.y - from.y) * t);
-    if (from.width === to.width && from.height === to.height) {
-      mainWindow.setPosition(x, y, false);
-    } else {
-      mainWindow.setBounds({
-        x,
-        y,
-        width: Math.round(from.width + (to.width - from.width) * t),
-        height: Math.round(from.height + (to.height - from.height) * t)
-      }, false);
+    const t = easeOutCubic(step / totalSteps);
+    const next = normalizeWindowBounds({
+      x: start.x + (target.x - start.x) * t,
+      y: start.y + (target.y - start.y) * t,
+      width: start.width + (target.width - start.width) * t,
+      height: start.height + (target.height - start.height) * t
+    });
+    if (!next) {
+      stopTopAnimation();
+      scheduleDisplayTopologyRecovery('invalid-window-animation-frame');
+      return;
     }
-    if (step >= steps) {
+    if (start.width === target.width && start.height === target.height) {
+      if (!setWindowPositionSafely(next.x, next.y, 'top-animation')) {
+        stopTopAnimation();
+        return;
+      }
+    } else {
+      if (setWindowBoundsWithoutTracking(next) === false) {
+        stopTopAnimation();
+        scheduleDisplayTopologyRecovery('top-animation-bounds');
+        return;
+      }
+    }
+    if (step >= totalSteps) {
       stopTopAnimation();
       onDone?.();
     }
@@ -3739,6 +3870,8 @@ function normalizeWindowBounds(input) {
   const width = Math.round(Number(row.width));
   const height = Math.round(Number(row.height));
   if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) return null;
+  if (x < MIN_NATIVE_WINDOW_COORDINATE || x > MAX_NATIVE_WINDOW_COORDINATE) return null;
+  if (y < MIN_NATIVE_WINDOW_COORDINATE || y > MAX_NATIVE_WINDOW_COORDINATE) return null;
   if (width < 320 || height < 420 || width > 10000 || height > 10000) return null;
   return { x, y, width, height };
 }
