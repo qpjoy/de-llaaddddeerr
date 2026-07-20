@@ -1023,6 +1023,9 @@ export interface SdkGatewayManifest {
     dnsCoreDnsConfigMapUrl: string;
     auditUrl: string;
     observabilityLogsUrl: string;
+    documentationUrl: string;
+    openApiUrl: string;
+    markdownUrl: string;
   };
 }
 

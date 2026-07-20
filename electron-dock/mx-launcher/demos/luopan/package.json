@@ -32,8 +32,10 @@
   "devDependencies": {
     "@quasar/app-vite": "2.4.0",
     "@types/node": "22.19.21",
+    "dmg-builder": "25.1.8",
     "electron": "34.5.8",
     "electron-builder": "25.1.8",
+    "electron-builder-squirrel-windows": "25.1.8",
     "typescript": "5.9.3",
     "vite": "7.3.6",
     "vue-tsc": "2.2.12"

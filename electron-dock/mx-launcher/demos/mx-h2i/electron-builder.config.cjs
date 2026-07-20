@@ -39,6 +39,12 @@ module.exports = {
       to: 'wireguard/win32-x64'
     }
   ],
+  toolsets: {
+    // The legacy winCodeSign archive contains macOS symlinks and requires
+    // elevated Windows privileges just to unpack. The Windows Kits bundle
+    // avoids that host-specific extraction failure.
+    winCodeSign: '1.0.0'
+  },
   publish: null,
   mac: {
     target: ['zip', 'dmg'],

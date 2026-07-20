@@ -4,6 +4,24 @@ SDK Gateway 是 Internal 对外部系统开放的稳定集成面。外部系统�
 User Center、Permission Center 或 Config Center 的内部表结构；优先调用
 `/internal/v1/sdk/*`。
 
+## Online Delivery
+
+Internal 18090 服务直接交付在线版与两种可导出格式：
+
+```text
+http://<internal-host>:18090/docs/api/
+http://<internal-host>:18090/docs/api/openapi.json
+http://<internal-host>:18090/docs/api/mx-launcher-api.md
+```
+
+在线页面支持搜索、复制 curl 和打印为 PDF。Internal gateway 的 18090 listener 会原样
+reverse proxy 到 mx-launcher server，因此不需要额外增加 gateway path；SDK Gateway
+manifest 的 `sdk.documentationUrl`、`sdk.openApiUrl`、`sdk.markdownUrl` 也可用于运行时发现。
+
+该入口属于 Internal/Domestic relay 网络面，不得直接暴露到公网。当前 V1 shadow 除用户
+Oversea 订阅接口外，尚未对全部 SDK route 强制 Bearer header guard；生产集成仍必须保留
+网络隔离，并先按 `routeId` 调用 access evaluate。
+
 ## Base URL
 
 开发机可继续使用 port-forward：
@@ -52,8 +70,8 @@ curl -sS "$BASE/internal/v1/sdk/oauth/token" \
   -H 'content-type: application/json' \
   -d '{
     "grant_type": "password",
-    "username": "admin",
-    "password": "adminsj8kx1sq6xc",
+    "username": "<user-account>",
+    "password": "<password>",
     "scope": "sdk.identity.read sdk.user.read permission.request",
     "audience": "mx-sdk"
   }'

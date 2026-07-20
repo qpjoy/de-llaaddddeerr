@@ -31,7 +31,9 @@
     "@qpjoy/electron-plugin-tunnel-engine-win32-x64": "workspace:^"
   },
   "devDependencies": {
+    "dmg-builder": "26.8.0",
     "electron": "34.5.8",
-    "electron-builder": "^25.1.8"
+    "electron-builder": "26.8.0",
+    "electron-builder-squirrel-windows": "26.8.0"
   }
 }

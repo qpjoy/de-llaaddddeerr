@@ -30,6 +30,15 @@ const checks = [
     assert: (body) => body && body.ok === true && body.service === 'mx-launcher-server'
   },
   {
+    name: 'api docs openapi export',
+    path: '/docs/api/openapi.json',
+    assert: (body) => body?.openapi === '3.1.0'
+      && body?.info?.title === 'MX Launcher Integration API'
+      && body?.paths?.['/internal/v1/sdk/users']?.get?.['x-route-id'] === 'sdk.users.list'
+      && body?.paths?.['/internal/v1/sdk/permissions/requests']?.post?.['x-route-id'] === 'sdk.permissions.request'
+      && body?.paths?.['/internal/v1/user-center/users/{userId}/oversea/ensure-subscription']?.post,
+  },
+  {
     name: 'large evidence body accepted',
     path: '/internal/v1/observability/logs',
     method: 'POST',
@@ -135,6 +144,9 @@ const checks = [
       && body.gateway.routes.some((route) => route.routeId === 'sdk.dns.zone')
       && body.gateway.routes.some((route) => route.routeId === 'sdk.dns.coredns-configmap')
       && body.gateway.authAuthority === 'user-center'
+      && body.gateway.sdk?.documentationUrl === '/docs/api/'
+      && body.gateway.sdk?.openApiUrl === '/docs/api/openapi.json'
+      && body.gateway.sdk?.markdownUrl === '/docs/api/mx-launcher-api.md'
   },
   {
     name: 'anonymous enroll',

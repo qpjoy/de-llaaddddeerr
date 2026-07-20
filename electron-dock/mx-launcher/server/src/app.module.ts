@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AdminModule } from './modules/admin/admin.module.js';
+import { ApiDocsModule } from './modules/api-docs/api-docs.module.js';
 import { AppCenterModule } from './modules/app-center/app-center.module.js';
 import { AuditModule } from './modules/audit/audit.module.js';
 import { ConfigCenterModule } from './modules/config-center/config-center.module.js';
@@ -20,6 +21,7 @@ import { SharedModule } from './shared.module.js';
 @Module({
   imports: [
     SharedModule,
+    ApiDocsModule,
     AdminModule,
     PlatformModule,
     EnrollmentsModule,

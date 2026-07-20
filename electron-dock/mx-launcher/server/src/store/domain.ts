@@ -2983,7 +2983,10 @@ export function createSdkGatewayManifest(config: RuntimeConfig): SdkGatewayManif
       dnsZoneUrl: '/internal/v1/sdk/dns/zone',
       dnsCoreDnsConfigMapUrl: '/internal/v1/sdk/dns/coredns-configmap',
       auditUrl: '/internal/v1/audit/events',
-      observabilityLogsUrl: '/internal/v1/observability/logs'
+      observabilityLogsUrl: '/internal/v1/observability/logs',
+      documentationUrl: '/docs/api/',
+      openApiUrl: '/docs/api/openapi.json',
+      markdownUrl: '/docs/api/mx-launcher-api.md'
     }
   };
 }

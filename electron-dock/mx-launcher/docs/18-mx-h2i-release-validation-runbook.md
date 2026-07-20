@@ -122,6 +122,12 @@ required pnpm build-script approvals in `package.json` so Windows workers with s
 build policy do not stop on `ERR_PNPM_IGNORED_BUILDS` for Quasar/Vite's `@parcel/watcher`.
 Do not use an interactive `pnpm approve-builds` result as the release source of truth.
 
+MX-H2I pins electron-builder's Windows Kits `winCodeSign` toolset. It does not unpack the legacy
+`winCodeSign-2.6.0` combo archive, whose macOS `.dylib` symbolic links require Administrator or
+Developer Mode on Windows. If a worker previously failed while extracting that archive, the stale
+`%LOCALAPPDATA%\electron-builder\Cache\winCodeSign` directory may be removed once; the next
+`make:win` downloads the configured Windows-only bundle without requiring an elevated terminal.
+
 The Windows package still runs the Electron UI as `asInvoker`. WireGuard, NRPT split DNS, and
 route-priority repair are owned by the WireGuard service/UAC path. The launcher keeps Internal
 domains on the standalone-owned local PAC edge and suppresses interface DNS when that resolver

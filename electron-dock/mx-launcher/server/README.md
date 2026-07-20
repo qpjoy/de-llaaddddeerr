@@ -76,6 +76,11 @@ Then call `/healthz`, `/internal/v1/app-center/apps`,
 `/internal/v1/dns/coredns/configmap/apply`,
 `/internal/v1/sdk/dns/evaluate`, or `/internal/v1/platform-kernel/smoke`.
 
+Integration documentation is served by the same 18090 process at `/docs/api/`.
+The page is self-contained and provides `/docs/api/openapi.json` and
+`/docs/api/mx-launcher-api.md` exports. The SDK Gateway manifest publishes all
+three discovery paths.
+
 ### Authentication boundaries
 
 User-facing clients obtain an `mx-sdk` Bearer token from
