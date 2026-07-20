@@ -187,6 +187,18 @@ need_kubectl() {
   command -v kubectl >/dev/null 2>&1 || die "kubectl is required for k8s actions"
 }
 
+k8s_crictl() {
+  command -v crictl >/dev/null 2>&1 || return 127
+  if [ -S /run/containerd/containerd.sock ]; then
+    crictl \
+      --runtime-endpoint=unix:///run/containerd/containerd.sock \
+      --image-endpoint=unix:///run/containerd/containerd.sock \
+      "$@"
+    return
+  fi
+  crictl "$@"
+}
+
 k8s_detect_lan_ip() {
   if [ -n "${MX_K8S_APISERVER_ADVERTISE_ADDRESS:-}" ]; then
     echo "$MX_K8S_APISERVER_ADVERTISE_ADDRESS"
@@ -647,13 +659,48 @@ k8s_wait_apiserver_after_endpoint_repair() {
   local i
   say "wait kube-apiserver on $current_ip:6443"
   for i in $(seq 1 "$attempts"); do
-    if kubectl --request-timeout=5s get --raw=/version >/dev/null 2>&1; then
+    if k8s_apiserver_endpoint_healthy; then
       say "kube-apiserver endpoint is healthy"
       return 0
     fi
     sleep 2
   done
+  k8s_apiserver_failure_diagnostics
   die "kube-apiserver did not become reachable after endpoint repair"
+}
+
+k8s_apiserver_endpoint_healthy() {
+  command -v kubectl >/dev/null 2>&1 || return 1
+  kubectl --request-timeout=5s get --raw=/version >/dev/null 2>&1
+}
+
+k8s_static_pod_logs() {
+  local name="$1"
+  local ids id
+  ids="$(k8s_crictl ps -a --name "$name" -q 2>/dev/null || true)"
+  id="$(printf '%s\n' "$ids" | awk 'NF {print; exit}')"
+  if [ -z "$id" ]; then
+    say "no $name static-pod container found via crictl"
+    return 0
+  fi
+  say "latest $name static-pod logs: $id"
+  k8s_crictl logs --tail=120 "$id" 2>&1 || true
+}
+
+k8s_apiserver_failure_diagnostics() {
+  say "kube-apiserver control-plane diagnostics"
+  if command -v ss >/dev/null 2>&1; then
+    ss -lntp 2>/dev/null | grep -E ':(6443|2379|2380)[[:space:]]' || true
+  fi
+  if command -v crictl >/dev/null 2>&1; then
+    k8s_crictl ps -a --name 'kube-apiserver|etcd' || true
+    k8s_static_pod_logs kube-apiserver
+    k8s_static_pod_logs etcd
+  fi
+  if command -v journalctl >/dev/null 2>&1; then
+    say "recent kubelet logs"
+    journalctl -u kubelet -n 120 --no-pager || true
+  fi
 }
 
 k8s_require_apiserver_ready() {
@@ -670,13 +717,7 @@ k8s_require_apiserver_ready() {
     fi
     [ "$i" = "$attempts" ] || sleep 2
   done
-  say "kube-apiserver preflight diagnostics"
-  if command -v ss >/dev/null 2>&1; then
-    ss -lntp 2>/dev/null | grep -E ':(6443|2379|2380)[[:space:]]' || true
-  fi
-  if command -v crictl >/dev/null 2>&1; then
-    crictl ps -a --name 'kube-apiserver|etcd' || true
-  fi
+  k8s_apiserver_failure_diagnostics
   kubectl --request-timeout="$timeout" get --raw=/version || true
   die "kube-apiserver $current_ip:6443 is unreachable after NO_PROXY setup; check kubelet/static-pod status before building or applying MX"
 }
@@ -687,14 +728,14 @@ k8s_restart_static_pod_containers() {
   restarted=0
   if command -v crictl >/dev/null 2>&1; then
     for name in "$@"; do
-      ids="$(crictl ps --name "$name" -q 2>/dev/null || true)"
+      ids="$(k8s_crictl ps --name "$name" -q 2>/dev/null || true)"
       if [ -z "$ids" ]; then
         say "no running $name static-pod container found via crictl"
         continue
       fi
       say "restart $name static-pod container via crictl"
       for id in $ids; do
-        crictl stop "$id" >/dev/null 2>&1 || true
+        k8s_crictl stop "$id" >/dev/null 2>&1 || true
         restarted=1
       done
     done
@@ -967,6 +1008,14 @@ k8s_repair_kubeadm_endpoint() {
     kubelet_identity_repair_needed=1
   fi
   if [ -z "$old_ips" ] && [ "$cert_repair_needed" != "1" ] && [ "$kubelet_identity_repair_needed" != "1" ]; then
+    if ! k8s_apiserver_endpoint_healthy; then
+      say "kubeadm endpoint is current, but kube-apiserver is unavailable; recycle control-plane static pods once"
+      if command -v systemctl >/dev/null 2>&1; then
+        systemctl restart kubelet || say "kubelet restart failed; waiting for static pod reconciliation anyway"
+      fi
+      k8s_restart_static_pod_containers etcd kube-apiserver kube-controller-manager kube-scheduler || true
+      k8s_wait_apiserver_after_endpoint_repair "$current_ip"
+    fi
     return 0
   fi
 
@@ -1007,7 +1056,7 @@ k8s_repair_kubeadm_endpoint() {
     say "restart kubelet to reload kubeadm static pod manifests"
     systemctl restart kubelet || say "kubelet restart failed; waiting for static pod reconciliation anyway"
   fi
-  if [ "$changed" = "1" ] || [ "$kubelet_identity_repair_needed" = "1" ]; then
+  if [ "$changed" = "1" ] || [ "$cert_repair_needed" = "1" ] || [ "$kubelet_identity_repair_needed" = "1" ]; then
     k8s_restart_static_pod_containers etcd kube-apiserver kube-controller-manager kube-scheduler || true
   else
     k8s_restart_static_pod_containers kube-controller-manager kube-scheduler || true

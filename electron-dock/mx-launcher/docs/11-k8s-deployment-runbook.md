@@ -439,11 +439,18 @@ CIDR 和集群域名同时补进 `NO_PROXY`、`no_proxy`。这是必要的：服
 curl --noproxy '*' -kfsS --connect-timeout 3 https://192.168.1.2:6443/livez
 kubectl --request-timeout=5s get --raw=/version
 ss -lntp | egrep ':(6443|2379|2380)\b' || true
-crictl ps -a --name 'kube-apiserver|etcd' || true
+crictl --runtime-endpoint=unix:///run/containerd/containerd.sock \
+  ps -a --name 'kube-apiserver|etcd' || true
 ```
 
 第一条直连成功、第二条仍走代理失败时，检查当前 shell 的 `NO_PROXY/no_proxy`；两条都
 失败且 6443 没有监听时，问题在 kubelet/static Pod 或 etcd，不应继续重试 Flannel。
+
+当 endpoint、证书和 kubelet identity 已经是目标值，但 6443 仍不可达时，后续
+`internal-production deploy` 会自动回收一次 etcd、kube-apiserver、controller-manager 和
+scheduler static pod。这覆盖了上一次 endpoint/certificate repair 已落盘、但控制面容器
+仍加载旧证书或停在 CrashLoop 的恢复场景。若回收后仍失败，命令会直接输出显式
+containerd endpoint 下的 apiserver/etcd 最近日志以及 kubelet journal，不再只显示容器表。
 
 `--reinit` 会备份旧 `/etc/kubernetes` 和 `/var/lib/etcd` 到 `/data/mx-backup/<timestamp>`，
 停止 kubelet，执行 `kubeadm reset`，清理旧控制面监听端口和 CNI 残留，然后重新初始化。
