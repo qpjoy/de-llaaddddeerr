@@ -331,6 +331,12 @@ ClusterIP，需要先备份业务数据，停止服务，`kubeadm reset` 后用�
 重新初始化。不要手动删除 `/var/lib/docker/overlay2`、`/run/containerd`、
 `/var/lib/kubelet/pods` 或 `/var/lib/etcd` 里面的单个子目录。
 
+本节流程以随后执行仓库脚本的 `--reinit` 为前提，因此不会迁移旧 `/etc/kubernetes`。如果
+目标是保留现有集群而不是重新初始化，必须在停止 kubelet 后完整保留 `/etc/kubernetes`，尤其是
+`pki/ca.crt`、`pki/ca.key`、`pki/apiserver.crt`、`pki/apiserver.key` 和 `manifests/`；不要只
+迁移 `/var/lib/kubelet`、containerd 或 Docker 数据。缺少 apiserver 证书时，etcd 仍可能正常
+监听 2379/2380，但 kube-apiserver 会持续退出，6443 不会监听。
+
 先做轻量清理，释放构建缓存和无用镜像：
 
 ```bash
@@ -451,6 +457,9 @@ crictl --runtime-endpoint=unix:///run/containerd/containerd.sock \
 scheduler static pod。这覆盖了上一次 endpoint/certificate repair 已落盘、但控制面容器
 仍加载旧证书或停在 CrashLoop 的恢复场景。若回收后仍失败，命令会直接输出显式
 containerd endpoint 下的 apiserver/etcd 最近日志以及 kubelet journal，不再只显示容器表。
+若 `/etc/kubernetes/pki/apiserver.crt` 或对应 key 缺失、而原 CA 的 cert/key 仍在，deploy
+会使用原 CA 重新签发 apiserver 证书；它不会自动创建或替换 CA。CA 材料也缺失时必须从
+迁移前备份恢复，或者明确执行 `reinit-kubeadm`。
 
 `--reinit` 会备份旧 `/etc/kubernetes` 和 `/var/lib/etcd` 到 `/data/mx-backup/<timestamp>`，
 停止 kubelet，执行 `kubeadm reset`，清理旧控制面监听端口和 CNI 残留，然后重新初始化。

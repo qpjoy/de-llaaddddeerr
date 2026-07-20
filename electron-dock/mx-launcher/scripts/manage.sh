@@ -520,9 +520,13 @@ k8s_write_kubeadm_cert_repair_config() {
   local path="$2"
   local api_version="$3"
   local extra_sans="${4:-}"
-  local node_name san
+  local node_name san service_cidr
   node_name="$(k8s_detect_node_name)"
   [ -n "$node_name" ] || node_name="localhost"
+  service_cidr="${MX_K8S_SERVICE_CIDR:-${SERVICE_CIDR:-${K8S_SERVICE_CIDR:-}}}"
+  if [ -z "$service_cidr" ] && [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ]; then
+    service_cidr="$(sed -n 's#.*--service-cluster-ip-range=\([^[:space:]]*\).*#\1#p' /etc/kubernetes/manifests/kube-apiserver.yaml | head -n 1)"
+  fi
   cat >"$path" <<EOF
 apiVersion: kubeadm.k8s.io/${api_version}
 kind: InitConfiguration
@@ -541,6 +545,12 @@ EOF
     [ -n "$san" ] || continue
     printf '  - "%s"\n' "$san" >>"$path"
   done
+  if [ -n "$service_cidr" ]; then
+    cat >>"$path" <<EOF
+networking:
+  serviceSubnet: ${service_cidr}
+EOF
+  fi
   cat >>"$path" <<EOF
 etcd:
   local:
@@ -566,8 +576,11 @@ k8s_kubeadm_phase_certs_with_repair_config() {
 
 k8s_kubeadm_cert_repair_needed_for_ip() {
   local current_ip="$1"
-  if [ -f /etc/kubernetes/pki/apiserver.crt ] \
-    && ! k8s_apiserver_cert_has_ip "$current_ip"; then
+  if [ ! -f /etc/kubernetes/pki/apiserver.crt ] \
+    || [ ! -f /etc/kubernetes/pki/apiserver.key ]; then
+    return 0
+  fi
+  if ! k8s_apiserver_cert_has_ip "$current_ip"; then
     return 0
   fi
   [ -f /etc/kubernetes/manifests/etcd.yaml ] || return 1
@@ -586,17 +599,26 @@ k8s_repair_apiserver_cert_if_needed() {
   local current_ip="$1"
   local old_ips="$2"
   local backup_dir="$3"
-  local extra_sans old_ip
-  [ -f /etc/kubernetes/pki/apiserver.crt ] || return 0
-  if k8s_apiserver_cert_has_ip "$current_ip"; then
+  local extra_sans old_ip cert_material_missing action
+  cert_material_missing=0
+  if [ ! -f /etc/kubernetes/pki/apiserver.crt ] \
+    || [ ! -f /etc/kubernetes/pki/apiserver.key ]; then
+    cert_material_missing=1
+  elif k8s_apiserver_cert_has_ip "$current_ip"; then
     return 0
   fi
-  command -v kubeadm >/dev/null 2>&1 || {
-    say "apiserver cert does not include $current_ip, but kubeadm is unavailable; skip cert repair"
-    return 0
-  }
-  say "renew apiserver certificate SAN for $current_ip"
-  k8s_backup_file_to_dir "$backup_dir" /etc/kubernetes/pki/apiserver.crt
+  command -v kubeadm >/dev/null 2>&1 \
+    || die "cannot repair apiserver certificate: kubeadm is unavailable"
+  [ -f /etc/kubernetes/pki/ca.crt ] \
+    || die "cannot repair apiserver certificate: /etc/kubernetes/pki/ca.crt is missing; restore /etc/kubernetes from the pre-migration backup or reinitialize kubeadm"
+  [ -f /etc/kubernetes/pki/ca.key ] \
+    || die "cannot repair apiserver certificate: /etc/kubernetes/pki/ca.key is missing; restore it from the pre-migration backup or reinitialize kubeadm"
+  action="renew"
+  if [ "$cert_material_missing" = "1" ]; then
+    action="regenerate missing"
+  fi
+  say "$action apiserver certificate for $current_ip"
+  [ -f /etc/kubernetes/pki/apiserver.crt ] && k8s_backup_file_to_dir "$backup_dir" /etc/kubernetes/pki/apiserver.crt
   [ -f /etc/kubernetes/pki/apiserver.key ] && k8s_backup_file_to_dir "$backup_dir" /etc/kubernetes/pki/apiserver.key
   rm -f /etc/kubernetes/pki/apiserver.crt /etc/kubernetes/pki/apiserver.key
   extra_sans="$current_ip,127.0.0.1,localhost"
@@ -606,7 +628,7 @@ k8s_repair_apiserver_cert_if_needed() {
   if ! k8s_kubeadm_phase_certs_with_repair_config apiserver "$current_ip" "$backup_dir" "$extra_sans"; then
     cp -a "$backup_dir/etc/kubernetes/pki/apiserver.crt" /etc/kubernetes/pki/apiserver.crt 2>/dev/null || true
     cp -a "$backup_dir/etc/kubernetes/pki/apiserver.key" /etc/kubernetes/pki/apiserver.key 2>/dev/null || true
-    die "failed to renew apiserver certificate; restored previous certificate from $backup_dir"
+    die "failed to $action apiserver certificate; restored any previous certificate material from $backup_dir"
   fi
 }
 
@@ -1024,7 +1046,7 @@ k8s_repair_kubeadm_endpoint() {
   if [ -n "$old_ips" ]; then
     say "repair kubeadm endpoint IP(s): $(printf '%s' "$old_ips" | tr '\n' ' ') -> $current_ip"
   elif [ "$cert_repair_needed" = "1" ]; then
-    say "repair kubeadm certificate SANs for $current_ip"
+    say "repair kubeadm control-plane certificates for $current_ip"
   else
     say "repair Kubernetes node identity: $desired_node_name / $current_ip"
   fi
