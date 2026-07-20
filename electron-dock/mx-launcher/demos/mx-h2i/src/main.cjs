@@ -135,8 +135,6 @@ const TOP_REVEAL_HOLD_MS = 900;
 const TOP_LEAVE_HIDE_MS = 180;
 const WINDOW_BOUNDS_SAVE_DELAY_MS = 420;
 const WINDOW_DRAG_SIZE_BATCH_MS = 80;
-const MIN_NATIVE_WINDOW_COORDINATE = -2147483648;
-const MAX_NATIVE_WINDOW_COORDINATE = 2147483647;
 const H2O_PROXY_START_TIMEOUT_MS = 12_000;
 const H2O_PORT_RELEASE_TIMEOUT_MS = 8_000;
 const H2O_MANAGED_SUBSCRIPTION_REFRESH_MS = 30_000;
@@ -1620,7 +1618,12 @@ function showFromTopEdge() {
     y: display.workArea.y + TOP_DOCK_Y
   };
   stopTopAnimation();
-  if (!setTopWindowPosition(start.x, start.y, 'top-reveal-start')) return;
+  try {
+    mainWindow.setPosition(start.x, start.y, false);
+  } catch (err) {
+    recoverTopWindowAnimation('top-reveal-start', err, target);
+    return;
+  }
   mainWindow.showInactive();
   isTopHidden = false;
   isTopDocked = true;
@@ -3623,17 +3626,6 @@ function dockReleaseDistance(bounds, display) {
 function animateWindow(from, to, steps, onDone) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   stopTopAnimation();
-  const start = normalizeWindowBounds(from);
-  const target = normalizeWindowBounds(to);
-  const totalSteps = Math.round(Number(steps));
-  if (!start || !target || !Number.isFinite(totalSteps) || totalSteps < 1) {
-    recoverTopWindowAnimation('invalid-top-animation', new TypeError('Top window animation contains invalid bounds or steps.'), {
-      from,
-      to,
-      steps
-    });
-    return;
-  }
   let step = 0;
   topAnimationTimer = setInterval(() => {
     if (!mainWindow || mainWindow.isDestroyed()) {
@@ -3641,41 +3633,33 @@ function animateWindow(from, to, steps, onDone) {
       return;
     }
     step += 1;
-    const t = easeOutCubic(step / totalSteps);
-    const x = Math.round(start.x + (target.x - start.x) * t);
-    const y = Math.round(start.y + (target.y - start.y) * t);
-    if (!setTopWindowPosition(x, y, 'top-animation')) return;
-    if (step >= totalSteps) {
+    const t = easeOutCubic(step / steps);
+    const x = Math.round(from.x + (to.x - from.x) * t);
+    const y = Math.round(from.y + (to.y - from.y) * t);
+    try {
+      if (from.width === to.width && from.height === to.height) {
+        mainWindow.setPosition(x, y, false);
+      } else {
+        mainWindow.setBounds({
+          x,
+          y,
+          width: Math.round(from.width + (to.width - from.width) * t),
+          height: Math.round(from.height + (to.height - from.height) * t)
+        }, false);
+      }
+    } catch (err) {
+      const visibleFallback = to.y < from.y ? from : to;
+      recoverTopWindowAnimation('top-animation', err, visibleFallback);
+      return;
+    }
+    if (step >= steps) {
       stopTopAnimation();
       onDone?.();
     }
   }, 18);
 }
 
-function setTopWindowPosition(x, y, reason) {
-  if (!mainWindow || mainWindow.isDestroyed()) return false;
-  const nextX = Math.round(Number(x));
-  const nextY = Math.round(Number(y));
-  const valid = Number.isFinite(nextX)
-    && Number.isFinite(nextY)
-    && nextX >= MIN_NATIVE_WINDOW_COORDINATE
-    && nextX <= MAX_NATIVE_WINDOW_COORDINATE
-    && nextY >= MIN_NATIVE_WINDOW_COORDINATE
-    && nextY <= MAX_NATIVE_WINDOW_COORDINATE;
-  if (!valid) {
-    recoverTopWindowAnimation(reason, new TypeError('Top window position is not a valid native coordinate.'), { x, y });
-    return false;
-  }
-  try {
-    mainWindow.setPosition(nextX, nextY, false);
-    return true;
-  } catch (err) {
-    recoverTopWindowAnimation(reason, err, { x: nextX, y: nextY });
-    return false;
-  }
-}
-
-function recoverTopWindowAnimation(reason, err, details = null) {
+function recoverTopWindowAnimation(reason, err, visibleFallback) {
   stopTopAnimation();
   isTopHidden = false;
   isTopHideAnimating = false;
@@ -3685,23 +3669,25 @@ function recoverTopWindowAnimation(reason, err, details = null) {
   topDockLeaveStartedAt = 0;
   needsRevealZoneReentry = false;
   console.warn('[mx-h2i] top window animation stopped:', errorMessage(err));
-  queueDiagnosticError('window.top-animation-failed', err, {
-    reason,
-    ...(details && typeof details === 'object' ? details : {})
-  });
+  queueDiagnosticError('window.top-animation-failed', err, { reason });
   if (!mainWindow || mainWindow.isDestroyed()) return;
   try {
-    const fallback = normalizeWindowBounds(lastVisibleBounds) || normalizeWindowBounds(mainWindow.getBounds());
+    const fallback = normalizeWindowBounds(visibleFallback) || normalizeWindowBounds(lastVisibleBounds);
     if (fallback) {
-      const workArea = electronScreen.getDisplayMatching(fallback).workArea;
-      const x = clamp(fallback.x, workArea.x, workArea.x + Math.max(0, workArea.width - fallback.width));
-      mainWindow.setPosition(Math.round(x), Math.round(workArea.y + TOP_DOCK_Y), false);
-      lastVisibleBounds = mainWindow.getBounds();
+      windowBoundsTrackingSuppressed = true;
+      try {
+        mainWindow.setPosition(fallback.x, fallback.y, false);
+        if (process.platform === 'win32') mainWindow.setSize(fallback.width, fallback.height, false);
+      } finally {
+        windowBoundsTrackingSuppressed = false;
+      }
+      lastVisibleBounds = { ...fallback };
     }
     if (!mainWindow.isVisible()) mainWindow.showInactive();
   } catch (recoveryError) {
     console.warn('[mx-h2i] top window recovery failed:', errorMessage(recoveryError));
     queueDiagnosticError('window.top-animation-recovery-failed', recoveryError, { reason });
+    if (!mainWindow.isVisible()) mainWindow.showInactive();
   }
 }
 
