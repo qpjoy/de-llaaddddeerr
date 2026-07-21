@@ -15,7 +15,8 @@ module.exports = {
   },
   files: [
     'package.json',
-    'src/**/*'
+    'src/**/*',
+    '!**/node_modules/better-sqlite3/build/Release/test_extension.node'
   ],
   extraResources: [
     {
