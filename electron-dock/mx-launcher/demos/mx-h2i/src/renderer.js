@@ -902,7 +902,9 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
 
 function renderGuestConnect(connected, connecting, leaseOnly = false) {
   const disconnecting = busyAction === 'disconnect';
-  const disconnectable = connected || state.connection?.wireGuard?.active === true;
+  const disconnectable = connected;
+  const retainedGuest = state.connection?.mode === 'guest'
+    && ['lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable', 'forbidden'].includes(state.connection?.state);
   const label = disconnecting ? '正在断开' : disconnectable ? '断开连接' : connecting ? pendingConnectionLabel() : leaseOnly ? '重新连接' : '连接';
   const action = disconnectable ? 'disconnect' : 'connectGuest';
   const disabled = connecting || disconnecting;
@@ -915,6 +917,7 @@ function renderGuestConnect(connected, connecting, leaseOnly = false) {
         <button class="text-button" type="button" data-action="select-mode" data-mode="employee">员工登录</button>
         ${renderCheckUpdatesButton('text-button')}
         <button class="text-button" type="button" data-action="show-advanced">高级选项</button>
+        ${retainedGuest ? '<button class="text-button" type="button" data-action="disconnect">清理旧连接</button>' : ''}
       </div>
     </section>
   `;

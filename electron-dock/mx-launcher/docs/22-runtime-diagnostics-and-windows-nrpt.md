@@ -45,6 +45,17 @@ Windows 会监控非 loopback 网卡地址、掩码和 MAC 组成的网络签名
 
 `network-unavailable`、`lease-only` 和 `tunnel-only` 是可恢复状态，不再被“已经连接”的重复请求保护拦截；用户点击“重新连接”会真正进入恢复流程。
 
+## 启动状态对账与连接性能
+
+磁盘里的 `connected` 只是上次运行快照，不是本次启动的 ready 证明。启动时必须与系统 WireGuard 状态对账：
+
+- WireGuard 未运行时，所有 retained 状态都会刷新 `wireGuard.active=false`；旧 `connected/tunnel-only` 降为 `lease-only` 或 `idle`，并发布对应的 `staff/visit:disconnect / disconnected`。
+- WireGuard 仍运行时，还要实时检查 route 和 Internal API；三项都通过才恢复 `connected`，否则保持 `tunnel-only/lease-only`。
+- 真实员工 WireGuard 仍 active 时，`visit:connect` 只返回 `skipped / staff-active`，不抢占或重启员工数据面。
+- 异常状态在访客页的主操作是“重新连接”，同时保留“清理旧连接”入口，不需要先进入员工页。
+
+DNS/NRPT、PAC 和 endpoint-route 诊断不得阻塞 lease 申请。启动、连接前和连接后诊断都在后台执行，DNS lookup 有 2.5 秒上限；如果诊断返回时连接已切换，结果会被丢弃，不覆盖新状态。
+
 ## macOS 长时间运行后切换网络
 
 如果 Mac 未关机、未待机，直接从一个网络进入另一个网络，优先使用 MX-H2I 自带脚本：
