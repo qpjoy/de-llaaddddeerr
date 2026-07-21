@@ -102,6 +102,7 @@ let windowBoundsSaveTimer = null;
 let windowBoundsTrackingSuppressed = false;
 let activeWindowDrag = null;
 let windowDragSizeBatchTimer = null;
+let lastWindowDragId = 0;
 let lastWireGuardRecoveryFailureAt = 0;
 let wireGuardBackgroundProbeFailures = 0;
 const wireGuardRecoveryTimers = [];
@@ -1191,24 +1192,30 @@ function registerIpc() {
     }
     return false;
   });
-  ipcMain.handle('mx-h2i:start-window-drag', () => {
+  ipcMain.handle('mx-h2i:start-window-drag', (_event, input) => {
     if (!mainWindow || mainWindow.isDestroyed()) return false;
     if (currentWindowMode !== 'launcher' || isTopHidden) return false;
-    return beginWindowDragSnapshot();
+    return beginWindowDragSnapshot(input?.dragId);
   });
   ipcMain.handle('mx-h2i:move-window-by', (_event, input) => {
     if (!mainWindow || mainWindow.isDestroyed()) return false;
     if (currentWindowMode !== 'launcher' || isTopHidden) return false;
     const dx = Number(input?.dx);
     const dy = Number(input?.dy);
+    const totalDx = Number(input?.totalDx);
     const totalDy = Number(input?.totalDy);
-    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return false;
-    const bounds = process.platform === 'win32'
-      ? activeWindowDrag || beginWindowDragSnapshot().bounds
-      : mainWindow.getBounds();
+    const windowsDrag = process.platform === 'win32';
+    if (windowsDrag) {
+      const dragId = normalizeWindowDragId(input?.dragId);
+      if (!activeWindowDrag || dragId === null || activeWindowDrag.id !== dragId) return false;
+      if (!Number.isFinite(totalDx) || !Number.isFinite(totalDy)) return false;
+    } else if (!Number.isFinite(dx) || !Number.isFinite(dy)) {
+      return false;
+    }
+    const bounds = windowsDrag ? activeWindowDrag : mainWindow.getBounds();
     const nextBounds = {
-      x: Math.round(bounds.x + dx),
-      y: Math.round(bounds.y + dy),
+      x: Math.round(windowsDrag ? bounds.startX + totalDx : bounds.x + dx),
+      y: Math.round(windowsDrag ? bounds.startY + totalDy : bounds.y + dy),
       width: bounds.width,
       height: bounds.height
     };
@@ -1232,7 +1239,7 @@ function registerIpc() {
     // Pointer events change position only. Windows size correction always uses
     // the drag-start snapshot, so DPI-adjusted width/height never feed the next move.
     mainWindow.setPosition(nextBounds.x, nextBounds.y, false);
-    if (process.platform === 'win32' && activeWindowDrag) {
+    if (windowsDrag) {
       activeWindowDrag.x = nextBounds.x;
       activeWindowDrag.y = nextBounds.y;
       lastVisibleBounds = { ...nextBounds };
@@ -1248,7 +1255,11 @@ function registerIpc() {
   ipcMain.handle('mx-h2i:finish-window-drag', (_event, input) => {
     if (!mainWindow || mainWindow.isDestroyed()) return false;
     if (currentWindowMode !== 'launcher' || isTopHidden) return false;
-    const bounds = finishWindowDragSnapshot() || mainWindow.getBounds();
+    if (process.platform === 'win32') {
+      const dragId = normalizeWindowDragId(input?.dragId);
+      if (!activeWindowDrag || dragId === null || activeWindowDrag.id !== dragId) return false;
+    }
+    const bounds = finishWindowDragSnapshot(input) || mainWindow.getBounds();
     const display = electronScreen.getDisplayMatching(bounds);
     const totalDy = Number(input?.totalDy);
     const releaseDock = isTopDocked && Number.isFinite(totalDy) && totalDy >= dockReleaseDistance(bounds, display);
@@ -1273,19 +1284,41 @@ function registerIpc() {
   });
 }
 
-function beginWindowDragSnapshot() {
-  const bounds = mainWindow.getBounds();
+function beginWindowDragSnapshot(inputDragId) {
+  let bounds = mainWindow.getBounds();
   if (process.platform !== 'win32') return { bounds };
+  const dragId = normalizeWindowDragId(inputDragId);
+  if (dragId === null) return false;
+  if (activeWindowDrag?.id === dragId) return { bounds: { ...activeWindowDrag } };
+  if (dragId <= lastWindowDragId) return false;
   if (windowDragSizeBatchTimer) {
     clearTimeout(windowDragSizeBatchTimer);
     windowDragSizeBatchTimer = null;
   }
-  activeWindowDrag = { ...bounds };
+  if (activeWindowDrag) {
+    applyWindowDragSizeSnapshot();
+    bounds = mainWindow.getBounds();
+  }
+  lastWindowDragId = dragId;
+  activeWindowDrag = {
+    id: dragId,
+    startX: bounds.x,
+    startY: bounds.y,
+    ...bounds
+  };
   return { bounds: { ...activeWindowDrag } };
 }
 
+function normalizeWindowDragId(value) {
+  const dragId = Number(value);
+  return Number.isSafeInteger(dragId) && dragId > 0 ? dragId : null;
+}
+
 function scheduleWindowDragSizeCorrection() {
-  if (process.platform !== 'win32' || !activeWindowDrag || windowDragSizeBatchTimer) return;
+  if (process.platform !== 'win32' || !activeWindowDrag) return;
+  // This must stay a trailing debounce. Repeated setBounds calls while a
+  // frameless Windows window is moving can accumulate non-client/DPI width.
+  if (windowDragSizeBatchTimer) clearTimeout(windowDragSizeBatchTimer);
   windowDragSizeBatchTimer = setTimeout(() => {
     windowDragSizeBatchTimer = null;
     applyWindowDragSizeSnapshot();
@@ -1303,16 +1336,47 @@ function applyWindowDragSizeSnapshot() {
   };
   activeWindowDrag.x = target.x;
   activeWindowDrag.y = target.y;
-  if (!sameBounds(current, target)) setWindowBoundsWithoutTracking(target);
-  lastVisibleBounds = { ...target };
-  return target;
+  if (current.width !== target.width || current.height !== target.height) {
+    windowBoundsTrackingSuppressed = true;
+    try {
+      mainWindow.setSize(target.width, target.height, false);
+      mainWindow.setPosition(target.x, target.y, false);
+    } catch (err) {
+      console.warn('[mx-h2i] window drag size restore failed:', errorMessage(err));
+      queueDiagnosticError('window.drag-size-restore-failed', err, { target });
+    } finally {
+      windowBoundsTrackingSuppressed = false;
+    }
+  }
+  const restored = mainWindow.getBounds();
+  activeWindowDrag.x = restored.x;
+  activeWindowDrag.y = restored.y;
+  lastVisibleBounds = { ...restored };
+  return restored;
 }
 
-function finishWindowDragSnapshot() {
+function finishWindowDragSnapshot(input) {
   if (process.platform !== 'win32' || !activeWindowDrag) return null;
+  const dragId = normalizeWindowDragId(input?.dragId);
+  if (dragId === null || activeWindowDrag.id !== dragId) return null;
   if (windowDragSizeBatchTimer) {
     clearTimeout(windowDragSizeBatchTimer);
     windowDragSizeBatchTimer = null;
+  }
+  const totalDx = Number(input?.totalDx);
+  const totalDy = Number(input?.totalDy);
+  if (Number.isFinite(totalDx) && Number.isFinite(totalDy)) {
+    activeWindowDrag.x = Math.round(activeWindowDrag.startX + totalDx);
+    activeWindowDrag.y = Math.round(activeWindowDrag.startY + totalDy);
+    try {
+      mainWindow.setPosition(activeWindowDrag.x, activeWindowDrag.y, false);
+    } catch (err) {
+      console.warn('[mx-h2i] final window drag position failed:', errorMessage(err));
+      queueDiagnosticError('window.drag-position-restore-failed', err, {
+        x: activeWindowDrag.x,
+        y: activeWindowDrag.y
+      });
+    }
   }
   const bounds = applyWindowDragSizeSnapshot();
   activeWindowDrag = null;
@@ -1498,8 +1562,11 @@ function windowMinimumSizeForMode(mode, referenceBounds = null) {
 function setWindowBoundsWithoutTracking(bounds) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   windowBoundsTrackingSuppressed = true;
-  mainWindow.setBounds(bounds, false);
-  windowBoundsTrackingSuppressed = false;
+  try {
+    mainWindow.setBounds(bounds, false);
+  } finally {
+    windowBoundsTrackingSuppressed = false;
+  }
 }
 
 function sameBounds(a, b) {

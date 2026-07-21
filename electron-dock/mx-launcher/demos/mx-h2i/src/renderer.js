@@ -42,6 +42,7 @@ let busyAction = '';
 let screen = 'launcher';
 let modeDraft = 'guest';
 let windowDrag = null;
+let windowDragSequence = 0;
 let appSearch = '';
 let appCategory = 'all';
 let selectedAppId = 'h2o';
@@ -577,14 +578,19 @@ root.addEventListener('pointerdown', (event) => {
   if (target.closest('button,input,select,a')) return;
   const dragHandle = target.closest('[data-window-drag]');
   if (!dragHandle || typeof api.moveWindowBy !== 'function') return;
+  windowDragSequence = (windowDragSequence + 1) % 1000;
+  const dragId = Date.now() * 1000 + windowDragSequence;
   windowDrag = {
+    dragId,
     pointerId: event.pointerId,
     screenX: event.screenX,
     screenY: event.screenY,
+    startScreenX: event.screenX,
     startScreenY: event.screenY,
+    totalDx: 0,
     totalDy: 0
   };
-  void api.startWindowDrag?.();
+  void api.startWindowDrag?.({ dragId });
   dragHandle.setPointerCapture?.(event.pointerId);
   document.body.classList.add('is-window-dragging');
   event.preventDefault();
@@ -597,8 +603,15 @@ window.addEventListener('pointermove', (event) => {
   if (!dx && !dy) return;
   windowDrag.screenX = event.screenX;
   windowDrag.screenY = event.screenY;
+  windowDrag.totalDx = Math.round(event.screenX - windowDrag.startScreenX);
   windowDrag.totalDy = Math.round(event.screenY - windowDrag.startScreenY);
-  void api.moveWindowBy?.({ dx, dy, totalDy: windowDrag.totalDy });
+  void api.moveWindowBy?.({
+    dragId: windowDrag.dragId,
+    dx,
+    dy,
+    totalDx: windowDrag.totalDx,
+    totalDy: windowDrag.totalDy
+  });
   event.preventDefault();
 });
 
@@ -611,10 +624,19 @@ root.addEventListener('mouseleave', () => {
 function finishWindowDrag(event) {
   if (!windowDrag) return;
   if (event && windowDrag && event.pointerId !== windowDrag.pointerId) return;
-  const totalDy = windowDrag.totalDy;
+  const dragId = windowDrag.dragId;
+  const hasFinalCoordinates = event?.type === 'pointerup'
+    && Number.isFinite(event.screenX)
+    && Number.isFinite(event.screenY);
+  const totalDx = hasFinalCoordinates
+    ? Math.round(event.screenX - windowDrag.startScreenX)
+    : windowDrag.totalDx;
+  const totalDy = hasFinalCoordinates
+    ? Math.round(event.screenY - windowDrag.startScreenY)
+    : windowDrag.totalDy;
   windowDrag = null;
   document.body.classList.remove('is-window-dragging');
-  void api.finishWindowDrag?.({ totalDy });
+  void api.finishWindowDrag?.({ dragId, totalDx, totalDy });
 }
 
 async function runAction(action, payload) {
