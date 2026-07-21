@@ -220,6 +220,11 @@ bash ../scripts/manage.sh shadow down
 - `postgres`: a local PostgreSQL 16 instance for the future durable store.
 - `internal`: the NestJS Internal API image, exposed on `127.0.0.1:18090`.
 
+User lifecycle changes can be checked independently with
+`pnpm smoke:user-lifecycle`; it covers password replacement, token revocation,
+Bootstrap password preservation, explicit Oversea disable, safe deletion, and
+built-in user protection.
+
 The current smoke checks `/healthz`, `/internal/v1/app-center/apps`,
 `/internal/v1/user-center/bootstrap`, `/internal/v1/user-center/tokens/issue`,
 `/internal/v1/sdk/gateway/manifest`, `/internal/v1/sdk/identity/introspect`,

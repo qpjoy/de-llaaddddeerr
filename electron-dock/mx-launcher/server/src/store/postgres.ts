@@ -116,7 +116,12 @@ import type {
   UserCenterTenant,
   UserCenterTokenRecord,
   UserCenterUser,
+  UserCenterUserDeleteInput,
+  UserCenterUserDeleteResult,
+  UserCenterUserDeletionTombstone,
   UserCenterUserCredential,
+  UserPasswordUpdateInput,
+  UserPasswordUpdateResult,
   UserPasswordVerificationInput,
   UserPasswordVerificationResult,
   UserH2oRuntimeProfile,
@@ -212,6 +217,7 @@ import {
   resolvePrincipalContext,
   userCredentialSummary,
   userH2oRuntimeProfileId,
+  userCenterDeleteProtectionReason,
   userMatchesLogin,
   userOverseaAccountName,
   userOverseaEntitlementId,
@@ -249,6 +255,7 @@ type RecordKind =
   | 'iam-role'
   | 'iam-user'
   | 'iam-user-credential'
+  | 'iam-user-deletion-tombstone'
   | 'user-h2o-runtime-profile'
   | 'user-oversea-entitlement'
   | 'user-oversea-account-sync-report'
@@ -833,12 +840,13 @@ export class PostgresStore implements PlatformStore {
     for (const role of builtinUserCenterRoles()) {
       await this.upsertRecord('iam-role', role.roleId, role, this.config.siteId);
     }
+    const adminCredential = await this.getRecord<UserCenterUserCredential>('iam-user-credential', 'usr_demo_admin');
     const admin = await this.createUserCenterUser({
       userId: 'usr_demo_admin',
       account: 'admin',
       email: 'admin@mx.local',
       displayName: 'MX Demo Admin',
-      password: legacyHdoAdminSeed.password,
+      password: adminCredential ? null : legacyHdoAdminSeed.password,
       roleIds: ['mx-admin'],
       externalIds: {
         legacyUserId: String(legacyHdoAdminSeed.id),
@@ -849,12 +857,13 @@ export class PostgresStore implements PlatformStore {
       allowedAppIds: LEGACY_HDO_ALLOWED_APP_IDS,
       requestId: 'bootstrap-user-center'
     });
+    const demoUserCredential = await this.getRecord<UserCenterUserCredential>('iam-user-credential', 'usr_demo_user');
     const user = await this.createUserCenterUser({
       userId: 'usr_demo_user',
       account: 'user',
       email: 'user@mx.local',
       displayName: 'MX Demo User',
-      password: 'user-demo-password',
+      password: demoUserCredential ? null : 'user-demo-password',
       roleIds: ['mx-user'],
       homeAppId: LEGACY_HDO_HOME_APP_ID,
       registeredByAppId: LEGACY_HDO_HOME_APP_ID,
@@ -868,14 +877,16 @@ export class PostgresStore implements PlatformStore {
       requestId: 'bootstrap-user-center'
     });
     const legacySeedInput = legacyHdoUserCenterSeedInput();
+    const deletionTombstones = await this.listRecords<UserCenterUserDeletionTombstone>('iam-user-deletion-tombstone');
+    const deletedAccounts = new Set(deletionTombstones.map((item) => item.account.trim().toLowerCase()));
     const legacyRowsToImport: typeof legacySeedInput.users = [];
     for (const row of legacySeedInput.users) {
       const seedUserInput = normalizeImportUserCenterRow(row, legacySeedInput);
+      if (deletedAccounts.has(seedUserInput.account?.trim().toLowerCase() ?? '')) continue;
       const previous = await this.findUserCenterUserForInput(seedUserInput);
-      const password = typeof row.password === 'string' ? row.password : '';
       const credential = previous ? await this.getRecord<UserCenterUserCredential>('iam-user-credential', previous.userId) : null;
-      if (!legacyHdoSeedUserIsComplete(previous, verifyUserCenterCredential(password, credential))) {
-        legacyRowsToImport.push(row);
+      if (!legacyHdoSeedUserIsComplete(previous, Boolean(credential))) {
+        legacyRowsToImport.push({ ...row, password: credential ? null : row.password });
       }
     }
     const legacyImport = legacyRowsToImport.length > 0
@@ -969,6 +980,133 @@ export class PostgresStore implements PlatformStore {
       entitlements,
       failures,
       generatedAt: new Date().toISOString()
+    };
+  }
+
+  async updateUserCenterPassword(input: UserPasswordUpdateInput): Promise<UserPasswordUpdateResult> {
+    const userId = input.userId?.trim();
+    if (!userId) throw new Error('userId is required');
+    const user = await this.getRecord<UserCenterUser>('iam-user', userId);
+    if (!user) throw new Error(`User not found: ${userId}`);
+    const password = input.password?.trim();
+    if (!password) throw new Error('password is required');
+    const now = new Date().toISOString();
+    const previousCredential = await this.getRecord<UserCenterUserCredential>('iam-user-credential', userId);
+    const credential = createUserCenterUserCredential(userId, password, input, previousCredential, now);
+    await this.saveRecord('iam-user-credential', userId, credential, this.config.siteId);
+    const tokens = await this.listRecords<UserCenterTokenRecord>('iam-token');
+    const activeTokens = tokens.filter((token) => (
+      token.subjectKind === 'user' && token.subjectId === userId && !token.revokedAt
+    ));
+    for (const token of activeTokens) {
+      await this.saveRecord('iam-token', token.tokenHash, { ...token, revokedAt: now }, this.config.siteId);
+    }
+    const updated = {
+      ...user,
+      credential: userCredentialSummary(credential),
+      updatedAt: now
+    };
+    await this.saveRecord('iam-user', userId, updated, this.config.siteId);
+    await this.recordAudit({
+      eventType: 'iam.user.password.updated',
+      actorKind: 'user-center',
+      userId,
+      requestId: input.requestId ?? null,
+      metadata: {
+        requestedBy: input.requestedBy ?? 'user-center',
+        tokensRevoked: activeTokens.length
+      }
+    });
+    return { user: updated, tokensRevoked: activeTokens.length, updatedAt: now };
+  }
+
+  async deleteUserCenterUser(input: UserCenterUserDeleteInput): Promise<UserCenterUserDeleteResult> {
+    const userId = input.userId?.trim();
+    if (!userId) throw new Error('userId is required');
+    const user = await this.getRecord<UserCenterUser>('iam-user', userId);
+    if (!user) throw new Error(`User not found: ${userId}`);
+    const users = await this.listUserCenterUsers();
+    const protectedReason = userCenterDeleteProtectionReason(user, users);
+    if (protectedReason) throw new Error(protectedReason);
+    const activeLease = (await this.listRecords<LauncherNetworkLease>('launcher-network-lease'))
+      .find((lease) => lease.userId === userId && launcherNetworkLeaseIsActive(lease));
+    if (activeLease) throw new Error(`User has an active launcher network lease: ${activeLease.leaseId}`);
+    const linkedEnrollment = (await this.listRecords<AnonymousEnrollment>('anonymous-enrollment'))
+      .find((enrollment) => enrollment.userId === userId);
+    if (linkedEnrollment) throw new Error(`User is linked to device enrollment: ${linkedEnrollment.installId}`);
+    const entitlement = await this.getUserOverseaEntitlement(userId);
+    if (entitlement?.status === 'active' || entitlement?.siteIds.length) {
+      throw new Error('Disable Oversea access before deleting this user');
+    }
+
+    const tokens = (await this.listRecords<UserCenterTokenRecord>('iam-token'))
+      .filter((token) => token.subjectKind === 'user' && token.subjectId === userId);
+    const h2oProfiles = (await this.listRecords<UserH2oRuntimeProfile>('user-h2o-runtime-profile'))
+      .filter((profile) => profile.userId === userId);
+    const installations = (await this.listRecords<AppCenterInstallation>('app-center-installation'))
+      .filter((installation) => installation.userId === userId);
+    const grants = (await this.listRecords<PermissionGrant>('permission-grant'))
+      .filter((grant) => grant.userId === userId);
+    const credential = await this.getRecord<UserCenterUserCredential>('iam-user-credential', userId);
+    const deletedAt = new Date().toISOString();
+    const tombstone: UserCenterUserDeletionTombstone = {
+      tombstoneId: user.account.trim().toLowerCase(),
+      userId,
+      account: user.account,
+      deletedAt,
+      requestedBy: input.requestedBy ?? 'user-center'
+    };
+    const targets: Array<{ kind: RecordKind; id: string }> = [
+      ...(credential ? [{ kind: 'iam-user-credential' as const, id: userId }] : []),
+      ...tokens.map((token) => ({ kind: 'iam-token' as const, id: token.tokenHash })),
+      ...(entitlement ? [{ kind: 'user-oversea-entitlement' as const, id: entitlement.entitlementId }] : []),
+      ...h2oProfiles.map((profile) => ({ kind: 'user-h2o-runtime-profile' as const, id: profile.profileId })),
+      ...installations.map((installation) => ({ kind: 'app-center-installation' as const, id: installation.installationId })),
+      ...grants.map((grant) => ({ kind: 'permission-grant' as const, id: grant.grantId })),
+      { kind: 'iam-user', id: userId }
+    ];
+    await this.dataSource.transaction(async (manager) => {
+      const records = manager.getRepository(PlatformRecordEntity);
+      for (const target of targets) {
+        await records.delete({
+          kind: target.kind,
+          id: target.id,
+          environment: this.config.environment
+        });
+      }
+      await this.saveRecordTo(
+        records,
+        'iam-user-deletion-tombstone',
+        tombstone.tombstoneId,
+        tombstone,
+        this.config.siteId
+      );
+    });
+    const deletedRecords: UserCenterUserDeleteResult['deletedRecords'] = {
+      credential: credential ? 1 : 0,
+      tokens: tokens.length,
+      overseaEntitlements: entitlement ? 1 : 0,
+      h2oRuntimeProfiles: h2oProfiles.length,
+      appInstallations: installations.length,
+      permissionGrants: grants.length
+    };
+    await this.recordAudit({
+      eventType: 'iam.user.deleted',
+      actorKind: 'user-center',
+      userId,
+      requestId: input.requestId ?? null,
+      metadata: {
+        account: user.account,
+        requestedBy: input.requestedBy ?? 'user-center',
+        deletedRecords
+      }
+    });
+    return {
+      deleted: true,
+      userId,
+      account: user.account,
+      deletedRecords,
+      deletedAt
     };
   }
 
@@ -1105,7 +1243,9 @@ export class PostgresStore implements PlatformStore {
     const user = await this.getRecord<UserCenterUser>('iam-user', userId);
     if (!user) throw new Error(`User not found: ${userId}`);
     const siteIds = normalizeEntitlementSiteIds(input.siteIds);
-    const effectiveSiteIds = siteIds.length ? siteIds : await this.defaultUserOverseaSiteIds();
+    const effectiveSiteIds = input.siteIds !== undefined && input.siteIds !== null
+      ? siteIds
+      : await this.defaultUserOverseaSiteIds();
     const previous = await this.getUserOverseaEntitlement(user.userId);
     const accounts: UserOverseaEntitlement['accounts'] = [];
     for (const siteId of effectiveSiteIds) {

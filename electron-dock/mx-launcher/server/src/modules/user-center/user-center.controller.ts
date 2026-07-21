@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { connect as netConnect } from 'node:net';
 import { promisify } from 'node:util';
 
-import { BadRequestException, Body, Controller, ForbiddenException, Get, Header, Headers, Inject, NotFoundException, Param, Post, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Header, Headers, Inject, NotFoundException, Param, Post, UnauthorizedException } from '@nestjs/common';
 
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
 import { USER_OVERSEA_SUBSCRIPTION_SCOPE } from '../../store/domain.js';
@@ -20,6 +20,8 @@ import type {
   SiteSlotSshProfile,
   TokenIntrospectionInput,
   UserH2oRuntimeProfileInput,
+  UserCenterUserDeleteInput,
+  UserPasswordUpdateInput,
   UserOverseaAccountSyncReport,
   UserOverseaEntitlement,
   UserOverseaEntitlementInput
@@ -39,7 +41,9 @@ export class UserCenterController {
       capabilities: [
         'oauth.authority',
         'local-password.login',
+        'local-password.update',
         'user.import',
+        'user.delete',
         'user.profile.attributes',
         'jwt.introspection',
         'principal.context',
@@ -75,6 +79,28 @@ export class UserCenterController {
   @Post('internal/v1/user-center/users/import')
   async importUsers(@Body() rawBody: unknown) {
     return { import: await this.store.importUserCenterUsers(toImportUsersInput(rawBody)) };
+  }
+
+  @Post('internal/v1/user-center/users/:userId/password')
+  async updateUserPassword(@Param('userId') userId: string, @Body() rawBody: unknown) {
+    try {
+      return {
+        password: await this.store.updateUserCenterPassword(toUserPasswordUpdateInput(userId, asRecord(rawBody)))
+      };
+    } catch (error) {
+      throw userCenterMutationException(error);
+    }
+  }
+
+  @Delete('internal/v1/user-center/users/:userId')
+  async deleteUser(@Param('userId') userId: string, @Body() rawBody: unknown) {
+    try {
+      return {
+        deletion: await this.store.deleteUserCenterUser(toUserDeleteInput(userId, asRecord(rawBody)))
+      };
+    } catch (error) {
+      throw userCenterMutationException(error);
+    }
   }
 
   @Get('internal/v1/user-center/oversea-entitlements')
@@ -441,10 +467,34 @@ function toImportUsersInput(rawBody: unknown): ImportUserCenterUsersInput {
   };
 }
 
+function toUserPasswordUpdateInput(userId: string, body: Record<string, unknown>): UserPasswordUpdateInput {
+  return {
+    userId,
+    password: nullableString(body.password),
+    requestedBy: nullableString(body.requestedBy) ?? 'user-center-password-update',
+    requestId: nullableString(body.requestId)
+  };
+}
+
+function toUserDeleteInput(userId: string, body: Record<string, unknown>): UserCenterUserDeleteInput {
+  return {
+    userId,
+    requestedBy: nullableString(body.requestedBy) ?? 'user-center-delete',
+    requestId: nullableString(body.requestId)
+  };
+}
+
+function userCenterMutationException(error: unknown): BadRequestException | NotFoundException {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.startsWith('User not found:')
+    ? new NotFoundException(message)
+    : new BadRequestException(message);
+}
+
 function toUserOverseaEntitlementInput(body: Record<string, unknown>): UserOverseaEntitlementInput {
   return {
     userId: nullableString(body.userId),
-    siteIds: stringList(body.siteIds),
+    siteIds: body.siteIds === undefined || body.siteIds === null ? null : stringList(body.siteIds),
     requestedBy: nullableString(body.requestedBy),
     requestId: nullableString(body.requestId)
   };

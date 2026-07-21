@@ -406,7 +406,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       post: operation({
         tag: 'Internal User Operations',
         summary: '批量导入旧 HDO 或外部用户',
-        description: 'Internal 运维接口。支持 legacy account/password/user_name，并可同时配置默认角色、应用访问和 Oversea entitlement。不要经 Domestic 公网入口开放。',
+        description: 'Internal 运维接口。支持 legacy account/password/user_name，并可同时配置默认角色、应用访问和 Oversea entitlement。匹配已有账号时，显式 password 会覆盖 credential，省略则保留。不要经 Domestic 公网入口开放。',
         operationId: 'importInternalUsers',
         auth: 'internal',
         request: {
@@ -436,6 +436,59 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
             entitlements: [entitlementExample],
             failures: [],
             generatedAt: '2026-07-20T00:00:00.000Z'
+          }
+        }
+      })
+    },
+    '/internal/v1/user-center/users/{userId}/password': {
+      post: operation({
+        tag: 'Internal User Operations',
+        summary: '更新用户本地密码',
+        description: 'Internal 管理操作。重新生成 local-password credential，并撤销该用户尚未撤销的 token；不会修改用户 profile、角色或应用权限。',
+        operationId: 'updateInternalUserPassword',
+        auth: 'internal',
+        pathParams: ['userId'],
+        request: {
+          password: '<new-password>',
+          requestedBy: 'internal-admin',
+          requestId: 'user-password-update-001'
+        },
+        required: ['password'],
+        response: {
+          password: {
+            user: userExample,
+            tokensRevoked: 2,
+            updatedAt: '2026-07-20T00:00:00.000Z'
+          }
+        }
+      })
+    },
+    '/internal/v1/user-center/users/{userId}': {
+      delete: operation({
+        tag: 'Internal User Operations',
+        summary: '安全删除用户',
+        description: '删除本地 credential、token、disabled Oversea entitlement、H2O profile、用户应用安装和 permission grant，并写入删除墓碑，避免历史 seed 在 Bootstrap 时复活。内置用户、最后一个 active mx-admin、仍有关联设备/活动 lease 或 active Oversea access 的用户会被拒绝。',
+        operationId: 'deleteInternalUser',
+        auth: 'internal',
+        pathParams: ['userId'],
+        request: {
+          requestedBy: 'internal-admin',
+          requestId: 'user-delete-001'
+        },
+        response: {
+          deletion: {
+            deleted: true,
+            userId: 'usr_partner_alice',
+            account: 'partner-alice',
+            deletedRecords: {
+              credential: 1,
+              tokens: 2,
+              overseaEntitlements: 1,
+              h2oRuntimeProfiles: 1,
+              appInstallations: 1,
+              permissionGrants: 1
+            },
+            deletedAt: '2026-07-20T00:00:00.000Z'
           }
         }
       })

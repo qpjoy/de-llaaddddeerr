@@ -912,6 +912,48 @@ export interface UserPasswordVerificationResult {
   reason: string;
 }
 
+export interface UserPasswordUpdateInput {
+  userId?: string | null;
+  password?: string | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface UserPasswordUpdateResult {
+  user: UserCenterUser;
+  tokensRevoked: number;
+  updatedAt: string;
+}
+
+export interface UserCenterUserDeleteInput {
+  userId?: string | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface UserCenterUserDeleteResult {
+  deleted: true;
+  userId: string;
+  account: string;
+  deletedRecords: {
+    credential: number;
+    tokens: number;
+    overseaEntitlements: number;
+    h2oRuntimeProfiles: number;
+    appInstallations: number;
+    permissionGrants: number;
+  };
+  deletedAt: string;
+}
+
+export interface UserCenterUserDeletionTombstone {
+  tombstoneId: string;
+  userId: string;
+  account: string;
+  deletedAt: string;
+  requestedBy: string;
+}
+
 export interface CreateServiceAccountInput {
   serviceAccountId?: string | null;
   displayName?: string | null;

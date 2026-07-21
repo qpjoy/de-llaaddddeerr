@@ -189,6 +189,29 @@ curl -sS "$BASE/internal/v1/user-center/users/import" \
   }'
 ```
 
+导入是按用户标识 upsert：匹配到已有账号时，row 中显式提供 `password` 会覆盖当前密码；
+省略 `password` 会保留当前 credential。单用户日常改密优先使用下面的专用接口，以便同时
+撤销既有 token。
+
+用户资料保存、密码更新和删除是三个独立操作。更新密码会撤销该用户已有 token，但不会改变
+profile、角色或应用权限：
+
+```bash
+curl -sS "$BASE/internal/v1/user-center/users/usr_partner_alice/password" \
+  -H 'content-type: application/json' \
+  -d '{"password":"new-password","requestedBy":"internal-admin"}'
+```
+
+删除用户使用 `DELETE`。内置用户、最后一个 active `mx-admin`、有关联设备或活动网络 lease、
+以及仍启用 Oversea access 的用户会返回拒绝；先断开客户端并禁用 Oversea access。历史
+seed 用户删除后会记录墓碑，Bootstrap 不会自动恢复：
+
+```bash
+curl -sS -X DELETE "$BASE/internal/v1/user-center/users/usr_partner_alice" \
+  -H 'content-type: application/json' \
+  -d '{"requestedBy":"internal-admin"}'
+```
+
 导入行只要求能推导出 `account` 或 `email`；`profile`、`attributes`、`externalIds`、地址、
 部门、来源系统等扩展字段都会保存到 User Center profile，供 AppCenter、DNS、H2I、
 第三方系统和审计 read model 按需消费。`provisionOversea=true` 时，Internal 会在创建或更新

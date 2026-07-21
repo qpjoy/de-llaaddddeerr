@@ -684,6 +684,16 @@ select {
   background: var(--mx-bg-hover);
 }
 
+.danger-button {
+  border-color: color-mix(in srgb, var(--red) 48%, var(--line));
+  color: var(--red);
+}
+
+.danger-button:hover:not(:disabled) {
+  border-color: var(--red);
+  background: color-mix(in srgb, var(--red) 10%, var(--mx-bg-hover));
+}
+
 .primary-button:disabled,
 .secondary-button:disabled {
   cursor: not-allowed;
@@ -2082,6 +2092,10 @@ select {
   border-top: 1px solid var(--line);
   background: rgba(33, 35, 45, 0.92);
   backdrop-filter: blur(18px);
+}
+
+.user-drawer-action-spacer {
+  flex: 1;
 }
 
 .feedback {

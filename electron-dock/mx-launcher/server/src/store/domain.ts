@@ -353,6 +353,19 @@ export function userMatchesLogin(user: UserCenterUser, login: string): boolean {
   ].some((value) => normalizeUserLogin(value) === normalized);
 }
 
+export function userCenterDeleteProtectionReason(user: UserCenterUser, users: UserCenterUser[]): string | null {
+  if (user.userId === 'usr_demo_admin' || user.userId === 'usr_demo_user') {
+    return `Built-in bootstrap user cannot be deleted: ${user.userId}`;
+  }
+  if (user.status === 'active' && user.roleIds.includes('mx-admin')) {
+    const activeAdmins = users.filter((candidate) => (
+      candidate.status === 'active' && candidate.roleIds.includes('mx-admin')
+    ));
+    if (activeAdmins.length <= 1) return 'The last active mx-admin user cannot be deleted';
+  }
+  return null;
+}
+
 export function normalizeImportUserCenterRow(
   row: ImportUserCenterUserRow,
   input: Pick<ImportUserCenterUsersInput, 'defaultRoleIds' | 'defaultOrgIds' | 'defaultHomeAppId' | 'defaultRegisteredByAppId' | 'defaultAllowedAppIds' | 'defaultOverseaSiteIds' | 'provisionOversea' | 'requestedBy' | 'requestId'>

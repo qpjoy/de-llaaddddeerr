@@ -106,7 +106,11 @@ import type {
   ImportUserCenterUsersResult,
   UserCenterRole,
   UserCenterServiceAccount,
+  UserCenterUserDeleteInput,
+  UserCenterUserDeleteResult,
   UserCenterUser,
+  UserPasswordUpdateInput,
+  UserPasswordUpdateResult,
   UserPasswordVerificationInput,
   UserPasswordVerificationResult,
   UserH2oRuntimeProfile,
@@ -203,6 +207,8 @@ export interface PlatformStore {
   listUserCenterUsers(): MaybePromise<UserCenterUser[]>;
   createUserCenterUser(input: CreateUserInput): MaybePromise<UserCenterUser>;
   importUserCenterUsers(input: ImportUserCenterUsersInput): MaybePromise<ImportUserCenterUsersResult>;
+  updateUserCenterPassword(input: UserPasswordUpdateInput): MaybePromise<UserPasswordUpdateResult>;
+  deleteUserCenterUser(input: UserCenterUserDeleteInput): MaybePromise<UserCenterUserDeleteResult>;
   verifyUserCenterPassword(input: UserPasswordVerificationInput): MaybePromise<UserPasswordVerificationResult>;
   listUserOverseaEntitlements(): MaybePromise<UserOverseaEntitlement[]>;
   getUserOverseaEntitlement(userId: string): MaybePromise<UserOverseaEntitlement | null>;

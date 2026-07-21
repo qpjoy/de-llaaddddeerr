@@ -2689,6 +2689,7 @@ function createUserEditorDraft(mode = 'create', userId = '') {
     email: user?.email || '',
     displayName: user?.displayName || '',
     password: '',
+    passwordConfirm: '',
     roleId: asArray(user?.roleIds)[0] || defaultUserRoleId(),
     title: profile.title || '',
     department: profile.department || '',
@@ -2751,6 +2752,7 @@ function userEditorDraftFromForm(root) {
     email: userEditorValue(root, 'email') || '',
     displayName: userEditorValue(root, 'displayName') || '',
     password: userEditorValue(root, 'password') || '',
+    passwordConfirm: userEditorValue(root, 'passwordConfirm') || '',
     roleId: userEditorValue(root, 'roleId') || defaultUserRoleId(),
     title: userEditorValue(root, 'title') || '',
     department: userEditorValue(root, 'department') || '',
@@ -2778,8 +2780,21 @@ function parseUserAttributesJson(value) {
 async function saveUserCenterUserFromEditor(root) {
   if (state.userCenter.busy) return;
   const draft = userEditorDraftFromForm(root);
+  const createMode = state.userCenter.drawer?.mode !== 'edit';
   if (!draft.account || !draft.displayName) {
     state.userCenter.feedback = { kind: 'error', message: 'Account and display name are required' };
+    if (state.userCenter.drawer) state.userCenter.drawer.draft = draft;
+    renderUserEditorDrawer();
+    return;
+  }
+  if (createMode && (draft.password || draft.passwordConfirm) && draft.password !== draft.passwordConfirm) {
+    state.userCenter.feedback = { kind: 'error', message: 'Password confirmation does not match' };
+    if (state.userCenter.drawer) state.userCenter.drawer.draft = draft;
+    renderUserEditorDrawer();
+    return;
+  }
+  if (!createMode && (draft.password || draft.passwordConfirm)) {
+    state.userCenter.feedback = { kind: 'warning', message: 'Use Update Password before saving profile changes, or clear both password fields' };
     if (state.userCenter.drawer) state.userCenter.drawer.draft = draft;
     renderUserEditorDrawer();
     return;
@@ -2801,7 +2816,6 @@ async function saveUserCenterUserFromEditor(root) {
   if (state.userCenter.drawer) state.userCenter.drawer.draft = draft;
   renderUserEditorDrawer();
   try {
-    const createMode = state.userCenter.drawer?.mode !== 'edit';
     const defaultOverseaSiteIds = createMode && draft.provisionOversea ? overseaAuthoritySites() : [];
     const payload = await fetchJson('/internal/v1/user-center/users', {
       method: 'POST',
@@ -2810,7 +2824,7 @@ async function saveUserCenterUserFromEditor(root) {
         account: draft.account,
         email: blankToNull(draft.email),
         displayName: draft.displayName,
-        password: blankToNull(draft.password),
+        ...(createMode && draft.password ? { password: draft.password } : {}),
         roleIds: draft.roleId ? [draft.roleId] : [],
         orgIds: ['org_default'],
         profile: {
@@ -2841,6 +2855,7 @@ async function saveUserCenterUserFromEditor(root) {
         email: saved.email || draft.email,
         displayName: saved.displayName || draft.displayName,
         password: '',
+        passwordConfirm: '',
         roleId: asArray(saved.roleIds)[0] || draft.roleId,
         title: saved.profile?.title || draft.title,
         department: saved.profile?.department || draft.department,
@@ -2863,6 +2878,83 @@ async function saveUserCenterUserFromEditor(root) {
   } catch (error) {
     state.userCenter.feedback = { kind: 'error', message: error.message };
     renderUserEditorDrawer();
+  } finally {
+    state.userCenter.busy = false;
+    renderUserCenterSurfaces();
+  }
+}
+
+async function updateUserCenterPasswordFromEditor(root) {
+  if (state.userCenter.busy || state.userCenter.drawer?.mode !== 'edit') return;
+  const draft = userEditorDraftFromForm(root);
+  if (!draft.password) {
+    state.userCenter.feedback = { kind: 'error', message: 'Enter a new password' };
+    state.userCenter.drawer.draft = draft;
+    renderUserEditorDrawer();
+    return;
+  }
+  if (draft.password !== draft.passwordConfirm) {
+    state.userCenter.feedback = { kind: 'error', message: 'Password confirmation does not match' };
+    state.userCenter.drawer.draft = draft;
+    renderUserEditorDrawer();
+    return;
+  }
+  const userId = state.userCenter.drawer.userId;
+  state.userCenter.busy = true;
+  state.userCenter.drawer.draft = draft;
+  state.userCenter.feedback = { kind: 'info', message: 'Updating password and revoking existing tokens' };
+  renderUserEditorDrawer();
+  try {
+    const payload = await fetchJson(`/internal/v1/user-center/users/${encodeURIComponent(userId)}/password`, {
+      method: 'POST',
+      body: {
+        password: draft.password,
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-user-password-${Date.now()}`
+      }
+    });
+    state.userCenter.drawer.draft = {
+      ...draft,
+      password: '',
+      passwordConfirm: ''
+    };
+    state.userCenter.feedback = {
+      kind: 'success',
+      message: `Password updated; ${payload.password?.tokensRevoked || 0} existing token(s) revoked`
+    };
+    await refreshUserCenterPanels();
+  } catch (error) {
+    state.userCenter.feedback = { kind: 'error', message: error.message };
+  } finally {
+    state.userCenter.busy = false;
+    renderUserCenterSurfaces();
+  }
+}
+
+async function deleteUserCenterUserFromEditor() {
+  if (state.userCenter.busy || state.userCenter.drawer?.mode !== 'edit') return;
+  const userId = state.userCenter.drawer.userId;
+  const user = userCenterUserById(userId);
+  if (!user) return;
+  const label = user.account || user.displayName || userId;
+  if (!window.confirm(`Delete user ${label}? This removes the local credential, tokens and user-scoped app records. This action cannot be undone.`)) return;
+  state.userCenter.busy = true;
+  state.userCenter.feedback = { kind: 'info', message: `Deleting ${label}` };
+  renderUserEditorDrawer();
+  try {
+    await fetchJson(`/internal/v1/user-center/users/${encodeURIComponent(userId)}`, {
+      method: 'DELETE',
+      body: {
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-user-delete-${Date.now()}`
+      }
+    });
+    state.userCenter.drawer = null;
+    state.userCenter.selectedOverseaUserId = null;
+    await refreshUserCenterPanels();
+    state.userCenter.feedback = { kind: 'success', message: `Deleted ${label}` };
+  } catch (error) {
+    state.userCenter.feedback = { kind: 'error', message: error.message };
   } finally {
     state.userCenter.busy = false;
     renderUserCenterSurfaces();
@@ -7140,6 +7232,7 @@ function renderUserEditorDrawer() {
   if (!draft.roleId && draftRoleId) draft.roleId = draftRoleId;
   const title = editing ? `Edit ${user?.displayName || draft.displayName || draft.userId}` : 'New User';
   const feedback = state.userCenter.feedback;
+  const protectedUser = editing && ['usr_demo_admin', 'usr_demo_user'].includes(drawer.userId);
   userEditorBackdrop.hidden = false;
   userEditorDrawer.hidden = false;
   userEditorDrawer.innerHTML = `
@@ -7177,8 +7270,12 @@ function renderUserEditorDrawer() {
               <input data-user-editor-field="displayName" value="${escapeHtml(draft.displayName || '')}" placeholder="MX User" autocomplete="off" />
             </label>
             <label class="app-form-field">
-              <span>Password</span>
-              <input type="password" data-user-editor-field="password" value="${escapeHtml(draft.password || '')}" placeholder="${editing ? 'leave blank to keep current' : 'optional local password'}" autocomplete="new-password" />
+              <span>${editing ? 'New Password' : 'Password'}</span>
+              <input type="password" data-user-editor-field="password" value="${escapeHtml(draft.password || '')}" placeholder="${editing ? 'enter only when changing password' : 'optional local password'}" autocomplete="new-password" />
+            </label>
+            <label class="app-form-field">
+              <span>Confirm Password</span>
+              <input type="password" data-user-editor-field="passwordConfirm" value="${escapeHtml(draft.passwordConfirm || '')}" placeholder="repeat the new password" autocomplete="new-password" />
             </label>
             <label class="app-form-field">
               <span>Role</span>
@@ -7273,6 +7370,9 @@ function renderUserEditorDrawer() {
       </div>
 
       <footer class="app-drawer-actions">
+        ${editing ? `<button class="secondary-button danger-button user-delete-button" type="button" data-user-editor-delete ${state.userCenter.busy || protectedUser ? 'disabled' : ''} title="${protectedUser ? 'Built-in bootstrap users cannot be deleted' : 'Delete this user and local user-scoped records'}">Delete User</button>` : ''}
+        <span class="user-drawer-action-spacer"></span>
+        ${editing ? `<button class="secondary-button" type="button" data-user-editor-password ${state.userCenter.busy ? 'disabled' : ''}>Update Password</button>` : ''}
         <button class="secondary-button" type="button" data-user-editor-cancel>Cancel</button>
         <button class="primary-button" type="submit" ${state.userCenter.busy ? 'disabled' : ''}>${state.userCenter.busy ? 'Saving...' : 'Save User'}</button>
       </footer>
@@ -7292,6 +7392,10 @@ function bindUserEditorDrawerControls() {
   for (const close of userEditorDrawer.querySelectorAll('[data-user-editor-close], [data-user-editor-cancel]')) {
     close.addEventListener('click', () => closeUserEditorDrawer());
   }
+  const updatePassword = userEditorDrawer.querySelector('[data-user-editor-password]');
+  if (updatePassword) updatePassword.addEventListener('click', () => void updateUserCenterPasswordFromEditor(form));
+  const deleteUser = userEditorDrawer.querySelector('[data-user-editor-delete]');
+  if (deleteUser) deleteUser.addEventListener('click', () => void deleteUserCenterUserFromEditor());
   bindUserDropdownControls(userEditorDrawer);
   for (const control of userEditorDrawer.querySelectorAll('[data-user-editor-field]')) {
     control.addEventListener('input', () => {

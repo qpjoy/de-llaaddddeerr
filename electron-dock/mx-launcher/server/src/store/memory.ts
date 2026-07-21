@@ -80,6 +80,7 @@ import {
   resolvePrincipalContext,
   userCredentialSummary,
   userH2oRuntimeProfileId,
+  userCenterDeleteProtectionReason,
   userMatchesLogin,
   userOverseaAccountName,
   userOverseaEntitlementId,
@@ -216,7 +217,12 @@ import type {
   UserCenterTenant,
   UserCenterTokenRecord,
   UserCenterUser,
+  UserCenterUserDeleteInput,
+  UserCenterUserDeleteResult,
+  UserCenterUserDeletionTombstone,
   UserCenterUserCredential,
+  UserPasswordUpdateInput,
+  UserPasswordUpdateResult,
   UserPasswordVerificationInput,
   UserPasswordVerificationResult,
   UserH2oRuntimeProfile,
@@ -261,6 +267,7 @@ export class MemoryStore implements PlatformStore {
   private readonly roles = new Map<string, UserCenterRole>();
   private readonly users = new Map<string, UserCenterUser>();
   private readonly userCredentials = new Map<string, UserCenterUserCredential>();
+  private readonly userDeletionTombstones = new Map<string, UserCenterUserDeletionTombstone>();
   private readonly userH2oRuntimeProfiles = new Map<string, UserH2oRuntimeProfile>();
   private readonly userOverseaEntitlements = new Map<string, UserOverseaEntitlement>();
   private readonly userOverseaAccountSyncReports = new Map<string, UserOverseaAccountSyncReport>();
@@ -745,7 +752,7 @@ export class MemoryStore implements PlatformStore {
       account: 'admin',
       email: 'admin@mx.local',
       displayName: 'MX Demo Admin',
-      password: legacyHdoAdminSeed.password,
+      password: this.userCredentials.has('usr_demo_admin') ? null : legacyHdoAdminSeed.password,
       roleIds: ['mx-admin'],
       externalIds: {
         legacyUserId: String(legacyHdoAdminSeed.id),
@@ -761,7 +768,7 @@ export class MemoryStore implements PlatformStore {
       account: 'user',
       email: 'user@mx.local',
       displayName: 'MX Demo User',
-      password: 'user-demo-password',
+      password: this.userCredentials.has('usr_demo_user') ? null : 'user-demo-password',
       roleIds: ['mx-user'],
       homeAppId: LEGACY_HDO_HOME_APP_ID,
       registeredByAppId: LEGACY_HDO_HOME_APP_ID,
@@ -775,12 +782,14 @@ export class MemoryStore implements PlatformStore {
       requestId: 'bootstrap-user-center'
     });
     const legacySeedInput = legacyHdoUserCenterSeedInput();
-    const legacyRowsToImport = legacySeedInput.users.filter((row) => {
+    const legacyRowsToImport = legacySeedInput.users.flatMap((row) => {
       const seedUserInput = normalizeImportUserCenterRow(row, legacySeedInput);
+      const accountKey = seedUserInput.account?.trim().toLowerCase() ?? '';
+      if (this.userDeletionTombstones.has(accountKey)) return [];
       const previous = this.findUserCenterUserForInput(seedUserInput);
-      const password = typeof row.password === 'string' ? row.password : '';
       const credential = previous ? this.userCredentials.get(previous.userId) ?? null : null;
-      return !legacyHdoSeedUserIsComplete(previous, verifyUserCenterCredential(password, credential));
+      if (legacyHdoSeedUserIsComplete(previous, Boolean(credential))) return [];
+      return [{ ...row, password: credential ? null : row.password }];
     });
     const legacyImport = legacyRowsToImport.length > 0
       ? this.importUserCenterUsers(legacyHdoUserCenterSeedInput(legacyRowsToImport))
@@ -873,6 +882,102 @@ export class MemoryStore implements PlatformStore {
       entitlements,
       failures,
       generatedAt: new Date().toISOString()
+    };
+  }
+
+  updateUserCenterPassword(input: UserPasswordUpdateInput): UserPasswordUpdateResult {
+    const userId = input.userId?.trim();
+    if (!userId) throw new Error('userId is required');
+    const user = this.users.get(userId);
+    if (!user) throw new Error(`User not found: ${userId}`);
+    const password = input.password?.trim();
+    if (!password) throw new Error('password is required');
+    const now = new Date().toISOString();
+    const credential = createUserCenterUserCredential(
+      userId,
+      password,
+      input,
+      this.userCredentials.get(userId) ?? null,
+      now
+    );
+    this.userCredentials.set(userId, credential);
+    let tokensRevoked = 0;
+    for (const [tokenHash, token] of this.tokens.entries()) {
+      if (token.subjectKind !== 'user' || token.subjectId !== userId || token.revokedAt) continue;
+      this.tokens.set(tokenHash, { ...token, revokedAt: now });
+      tokensRevoked += 1;
+    }
+    const updated = {
+      ...user,
+      credential: userCredentialSummary(credential),
+      updatedAt: now
+    };
+    this.users.set(userId, updated);
+    this.recordAudit({
+      eventType: 'iam.user.password.updated',
+      actorKind: 'user-center',
+      userId,
+      requestId: input.requestId ?? null,
+      metadata: {
+        requestedBy: input.requestedBy ?? 'user-center',
+        tokensRevoked
+      }
+    });
+    return { user: updated, tokensRevoked, updatedAt: now };
+  }
+
+  deleteUserCenterUser(input: UserCenterUserDeleteInput): UserCenterUserDeleteResult {
+    const userId = input.userId?.trim();
+    if (!userId) throw new Error('userId is required');
+    const user = this.users.get(userId);
+    if (!user) throw new Error(`User not found: ${userId}`);
+    const protectedReason = userCenterDeleteProtectionReason(user, [...this.users.values()]);
+    if (protectedReason) throw new Error(protectedReason);
+    const activeLease = [...this.launcherNetworkLeases.values()]
+      .find((lease) => lease.userId === userId && launcherNetworkLeaseIsActive(lease));
+    if (activeLease) throw new Error(`User has an active launcher network lease: ${activeLease.leaseId}`);
+    const linkedEnrollment = [...this.enrollments.values()].find((enrollment) => enrollment.userId === userId);
+    if (linkedEnrollment) throw new Error(`User is linked to device enrollment: ${linkedEnrollment.installId}`);
+    const entitlement = this.getUserOverseaEntitlement(userId);
+    if (entitlement?.status === 'active' || entitlement?.siteIds.length) {
+      throw new Error('Disable Oversea access before deleting this user');
+    }
+
+    const deletedAt = new Date().toISOString();
+    const tombstone: UserCenterUserDeletionTombstone = {
+      tombstoneId: user.account.trim().toLowerCase(),
+      userId,
+      account: user.account,
+      deletedAt,
+      requestedBy: input.requestedBy ?? 'user-center'
+    };
+    this.userDeletionTombstones.set(tombstone.tombstoneId, tombstone);
+    const deletedRecords: UserCenterUserDeleteResult['deletedRecords'] = {
+      credential: this.userCredentials.delete(userId) ? 1 : 0,
+      tokens: deleteMapValues(this.tokens, (token) => token.subjectKind === 'user' && token.subjectId === userId),
+      overseaEntitlements: this.userOverseaEntitlements.delete(userOverseaEntitlementId(userId)) ? 1 : 0,
+      h2oRuntimeProfiles: deleteMapValues(this.userH2oRuntimeProfiles, (profile) => profile.userId === userId),
+      appInstallations: deleteMapValues(this.appCenterInstallations, (installation) => installation.userId === userId),
+      permissionGrants: deleteMapValues(this.permissionGrants, (grant) => grant.userId === userId)
+    };
+    this.users.delete(userId);
+    this.recordAudit({
+      eventType: 'iam.user.deleted',
+      actorKind: 'user-center',
+      userId,
+      requestId: input.requestId ?? null,
+      metadata: {
+        account: user.account,
+        requestedBy: input.requestedBy ?? 'user-center',
+        deletedRecords
+      }
+    });
+    return {
+      deleted: true,
+      userId,
+      account: user.account,
+      deletedRecords,
+      deletedAt
     };
   }
 
@@ -1021,7 +1126,9 @@ export class MemoryStore implements PlatformStore {
     const user = this.users.get(userId);
     if (!user) throw new Error(`User not found: ${userId}`);
     const siteIds = normalizeEntitlementSiteIds(input.siteIds);
-    const effectiveSiteIds = siteIds.length ? siteIds : this.defaultUserOverseaSiteIds();
+    const effectiveSiteIds = input.siteIds !== undefined && input.siteIds !== null
+      ? siteIds
+      : this.defaultUserOverseaSiteIds();
     const previous = this.getUserOverseaEntitlement(user.userId);
     const accounts = effectiveSiteIds.map((siteId) => {
       const accountName = userOverseaAccountName(user, siteId);
@@ -3445,6 +3552,16 @@ function resolveIssueAccountNames(input: SiteSlotAccessAccountIssueInput, siteId
     ? requested
     : [...defaultSiteSlotAccessAccountNames(siteId), ...requested];
   return [...new Set(names.map((name) => String(name).trim().toLowerCase()).filter(Boolean))];
+}
+
+function deleteMapValues<K, V>(values: Map<K, V>, predicate: (value: V) => boolean): number {
+  let deleted = 0;
+  for (const [key, value] of values.entries()) {
+    if (!predicate(value)) continue;
+    values.delete(key);
+    deleted += 1;
+  }
+  return deleted;
 }
 
 function normalizeEntitlementSiteIds(value: UserOverseaEntitlementInput['siteIds']): string[] {

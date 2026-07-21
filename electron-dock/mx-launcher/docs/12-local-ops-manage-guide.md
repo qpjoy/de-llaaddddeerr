@@ -209,25 +209,32 @@ Admin 的 AWX Gate 会把当前 Provider、Token、Timeout、Wait 选项合并�
 1. `User Center` 面板先执行 `Bootstrap Users`，再按需创建真实用户并绑定
    `mx-admin` / `mx-user` / `mx-guest` 等角色。Postgres store 启动时也会执行同一套
    User Center seed：内置 `admin` 保持 `mx-admin`，旧 HDO `user.json` 中其余账号会以
-   idempotent 方式补齐到数据库，已有且密码/应用域完整的账号不会重复导入。
+   idempotent 方式补齐到数据库；已有 credential 会被保留，不会为了匹配 seed 明文而重置密码。
 2. 旧 HDO 账号仍可以直接用 `Import JSON` 手动导入。当前兼容数组格式
    `{ "account": "...", "password": "...", "user_name": "..." }`，导入时会把
    `account` 作为登录名、`user_name` 作为展示名、`password` 写入 User Center
-   `local-password` credential；后续可在抽屉里补 profile、地址、部门、外部 id 和
-   attributes JSON。
-3. `Default Oversea` 打开时，新建或导入用户会自动绑定当前可用 Oversea site，
+   `local-password` credential；匹配到已有账号时，JSON 中显式携带的新 `password` 会覆盖
+   原密码，不携带则保留。单个用户日常改密应使用抽屉中的 `Update Password`。后续可在
+   抽屉里补 profile、地址、部门、外部 id 和 attributes JSON。
+3. 用户编辑抽屉中的资料保存与密码更新互相独立。`Update Password` 需要两次输入一致，
+   更新后会撤销该用户已有 token；服务重启执行 Bootstrap 时不会再把已设置的内置账号密码
+   覆盖回 seed 值。`Delete User` 会二次确认并清理本地用户级记录，但内置账号、最后一个
+   active `mx-admin`、仍有关联设备/活动网络 lease 或未禁用 Oversea access 的用户不能删除。
+   应先让客户端断开并在抽屉中执行 `Disable Access`。删除历史 seed 用户会留下本地删除
+   墓碑，后续 Bootstrap 不会把它自动补回；显式重新创建或导入仍然可用。
+4. `Default Oversea` 打开时，新建或导入用户会自动绑定当前可用 Oversea site，
    Internal 会生成用户级 entitlement/subscription runtime。没有 ready Oversea site 时，
    账号仍会正常导入，之后再手动分配 `oversea-main`、`oversea-mx` 或其他站点。
-4. `AppCenter` 的应用编辑抽屉配置 `Access policy`：MX-H2I/AppCenter 可以 public，
+5. `AppCenter` 的应用编辑抽屉配置 `Access policy`：MX-H2I/AppCenter 可以 public，
    H2O 默认 private 且绑定 MX-H2I 注册域，自定义业务应用默认 private。Luopan 注册用户写
    `registeredByAppId=luopan` 或 `homeAppId=luopan` 后，只能看到 Luopan 和公开应用；
    TEST 账号需要跨应用时，在用户 `Allowed Apps` 或应用 `Allow Users` 里显式加入。
-5. `Home Relay Enrollment` 面板填入 Domestic site 和 Home WireGuard public key，创建匿名
+6. `Home Relay Enrollment` 面板填入 Domestic site 和 Home WireGuard public key，创建匿名
    HDO enrollment。Internal 会分配 `10.91.0.0/16` guest lease，登录用户后再走
    `10.89.0.0/16` user lease；不要使用 `100.88.*`。
-6. Enrollment 返回的 lease IP 和 public key 会回填到 Domestic peer draft。切回 Domestic
+7. Enrollment 返回的 lease IP 和 public key 会回填到 Domestic peer draft。切回 Domestic
    `Deployment Progress` 后，`Home relay peer` quick fields 会自动带出这些值。
-7. Domestic 的默认后台路径是 `Prepare Domestic Relay AWX` -> `Domestic relay readonly probe`
+8. Domestic 的默认后台路径是 `Prepare Domestic Relay AWX` -> `Domestic relay readonly probe`
    -> `Domestic relay peer append` handoff -> `AWX Sync Plan` -> `Sync AWX Credential`
    -> `Sync AWX Objects` -> `Launch AWX Job`。真实 WG mutation 由 AWX job 或 SSH fallback
    执行，Admin API 只负责 gate、审计、evidence 和参数组装。

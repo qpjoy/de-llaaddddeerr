@@ -19,6 +19,10 @@ module.exports = {
   ],
   extraResources: [
     {
+      from: 'scripts/repair-macos-dns.sh',
+      to: 'repair/repair-macos-dns.sh'
+    },
+    {
       from: '../../../../electron-plugin/packages/wireguard-engines/darwin-arm64/resources/wireguard/darwin-arm64',
       to: 'wireguard/darwin-arm64'
     },

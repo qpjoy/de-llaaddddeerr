@@ -456,7 +456,7 @@ export function createElectronLauncherSystemDomainProxy(
     }
     const routeTarget = dnsTargetForHost(host, config);
     if (routeTarget && isIP(routeTarget) === 4) {
-      const directResponse = dnsAResponse(message, routeTarget);
+      const directResponse = dnsSyntheticIpv4Response(message, routeTarget);
       if (directResponse.length) {
         socket.send(directResponse, remote.port, remote.address);
         return;
@@ -464,7 +464,7 @@ export function createElectronLauncherSystemDomainProxy(
     }
     const ownershipTarget = dnsOwnershipTargetForHost(host, config);
     if (ownershipTarget && isIP(ownershipTarget) === 4) {
-      const directResponse = dnsAResponse(message, ownershipTarget);
+      const directResponse = dnsSyntheticIpv4Response(message, ownershipTarget);
       if (directResponse.length) {
         socket.send(directResponse, remote.port, remote.address);
         return;
@@ -478,7 +478,7 @@ export function createElectronLauncherSystemDomainProxy(
     try {
       const response = await forwardDnsPacket(message, config.dnsServers);
       if (shouldUseDnsFallbackResponse(message, response, config.dnsFallbackTarget)) {
-        const fallbackResponse = dnsAResponse(message, config.dnsFallbackTarget || '');
+        const fallbackResponse = dnsSyntheticIpv4Response(message, config.dnsFallbackTarget || '');
         if (fallbackResponse.length) {
           socket.send(fallbackResponse, remote.port, remote.address);
           return;
@@ -487,7 +487,7 @@ export function createElectronLauncherSystemDomainProxy(
       socket.send(response, remote.port, remote.address);
     } catch {
       if (config.dnsFallbackTarget && isIP(config.dnsFallbackTarget) === 4) {
-        const fallbackResponse = dnsAResponse(message, config.dnsFallbackTarget);
+        const fallbackResponse = dnsSyntheticIpv4Response(message, config.dnsFallbackTarget);
         if (fallbackResponse.length) {
           socket.send(fallbackResponse, remote.port, remote.address);
           return;
@@ -922,15 +922,17 @@ export function createElectronLauncherSystemDomainProxy(
       try {
         const pacVerification = await verifyPlatformPac(state.pacUrl, state.previous);
         const resolverVerification = await verifySystemResolvers(state);
+        const localDnsVerification = await verifyLocalDnsRelay(state);
         return publicState(state, {
-          applied: pacVerification.applied && resolverVerification.applied,
+          applied: pacVerification.applied && resolverVerification.applied && localDnsVerification.applied,
           verified: true,
           actual: {
             pac: pacVerification,
-            resolver: resolverVerification
+            resolver: resolverVerification,
+            localDns: localDnsVerification
           },
-          resolverApplied: resolverVerification.applied,
-          resolverError: resolverVerification.error || null
+          resolverApplied: resolverVerification.applied && localDnsVerification.applied,
+          resolverError: resolverVerification.error || localDnsVerification.error || null
         });
       } catch (err) {
         return publicState(state, {
@@ -1171,6 +1173,53 @@ async function verifySystemResolvers(state: StoredState): Promise<{ applied: boo
   return mode === 'dynamic'
     ? verifyDarwinDynamicResolvers(domains, port)
     : verifyDarwinFileResolvers(domains, port);
+}
+
+async function verifyLocalDnsRelay(state: StoredState): Promise<{
+  applied: boolean;
+  host?: string;
+  server?: string;
+  aRecords?: string[];
+  aaaaAnswerTypes?: number[];
+  skipped?: boolean;
+  error?: string | null;
+}> {
+  const mode = storedSystemResolverMode(state);
+  const port = normalizePort(state.resolverPort);
+  if (process.platform !== 'darwin' || mode === 'off' || !port) {
+    return { applied: true, skipped: true };
+  }
+  const route = normalizeReverseProxyRoutes(state.reverseProxyRoutes)
+    .find((item) => item.enabled !== false && isIP(item.dnsTarget || '') === 4);
+  const host = route?.host || normalizeDomains(state.resolverDomains)[0] || normalizeDomains(state.domains)[0];
+  if (!host) return { applied: true, skipped: true };
+  const server = `127.0.0.1:${port}`;
+  try {
+    const [aResult, aaaaResult] = await Promise.all([
+      queryDnsPacket(host, server, 1),
+      queryDnsPacket(host, server, 28)
+    ]);
+    const aRecords = parseDnsARecords(aResult.response, aResult.id);
+    const aaaaAnswerTypes = parseDnsAnswerTypes(aaaaResult.response, aaaaResult.id);
+    if (!aRecords.length) throw new Error(`DNS A record missing for ${host}`);
+    if (aaaaAnswerTypes.includes(1)) {
+      throw new Error(`DNS relay returned an A answer to an AAAA query for ${host}`);
+    }
+    return {
+      applied: true,
+      host,
+      server,
+      aRecords,
+      aaaaAnswerTypes
+    };
+  } catch (err) {
+    return {
+      applied: false,
+      host,
+      server,
+      error: errorMessage(err)
+    };
+  }
 }
 
 async function restoreSystemResolvers(state: StoredState, log: Pick<Console, 'warn'>): Promise<void> {
@@ -2418,7 +2467,15 @@ function normalizeHttpJsonBody(body: unknown): Record<string, unknown> {
 }
 
 function resolveDnsA(hostname: string, server: string): Promise<string> {
-  const query = buildDnsAQuery(hostname);
+  return queryDnsPacket(hostname, server, 1).then(({ response, id }) => {
+    const address = parseDnsAResponse(response, id);
+    if (!address) throw new Error(`DNS A record missing for ${hostname}`);
+    return address;
+  });
+}
+
+function queryDnsPacket(hostname: string, server: string, questionType: number): Promise<{ id: number; response: Buffer }> {
+  const query = buildDnsQuery(hostname, questionType);
   const endpoint = parseDnsServerEndpoint(server);
   if (!endpoint) return Promise.reject(new Error(`Invalid DNS server endpoint: ${server}`));
   return new Promise((resolve, reject) => {
@@ -2431,9 +2488,12 @@ function resolveDnsA(hostname: string, server: string): Promise<string> {
       clearTimeout(timer);
       socket.close();
       try {
-        const address = parseDnsAResponse(message, query.id);
-        if (!address) throw new Error(`DNS A record missing for ${hostname}`);
-        resolve(address);
+        if (message.length < 12 || message.readUInt16BE(0) !== query.id) {
+          throw new Error(`DNS response id mismatch for ${hostname}`);
+        }
+        const rcode = message.readUInt16BE(2) & 0x000f;
+        if (rcode !== 0) throw new Error(`DNS response code ${rcode}`);
+        resolve({ id: query.id, response: message });
       } catch (err) {
         reject(err);
       }
@@ -2486,7 +2546,26 @@ function dnsFailureResponse(query: Buffer): Buffer {
   if (query.length < 12) return Buffer.alloc(0);
   const response = Buffer.from(query);
   const flags = query.readUInt16BE(2);
-  response.writeUInt16BE((flags | 0x8000) & 0xfff0 | 0x0002, 2);
+  response.writeUInt16BE(0x8082 | (flags & 0x0100), 2);
+  response.writeUInt16BE(0, 6);
+  response.writeUInt16BE(0, 8);
+  response.writeUInt16BE(0, 10);
+  return response;
+}
+
+function dnsSyntheticIpv4Response(query: Buffer, address: string): Buffer {
+  const questionType = dnsQuestionType(query);
+  if (questionType === 1 || questionType === 255) return dnsAResponse(query, address);
+  return dnsNoDataResponse(query);
+}
+
+function dnsNoDataResponse(query: Buffer): Buffer {
+  if (query.length < 12) return Buffer.alloc(0);
+  const questionEnd = dnsQuestionEndOffset(query);
+  if (!questionEnd) return Buffer.alloc(0);
+  const response = Buffer.from(query.subarray(0, questionEnd));
+  const flags = query.readUInt16BE(2);
+  response.writeUInt16BE(0x8080 | (flags & 0x0100), 2);
   response.writeUInt16BE(0, 6);
   response.writeUInt16BE(0, 8);
   response.writeUInt16BE(0, 10);
@@ -2500,7 +2579,7 @@ function dnsAResponse(query: Buffer, address: string): Buffer {
   const response = Buffer.alloc(questionEnd + 16);
   query.copy(response, 0, 0, questionEnd);
   const flags = query.readUInt16BE(2);
-  response.writeUInt16BE((flags | 0x8000 | 0x0080) & 0xfff0, 2);
+  response.writeUInt16BE(0x8080 | (flags & 0x0100), 2);
   response.writeUInt16BE(1, 6);
   response.writeUInt16BE(0, 8);
   response.writeUInt16BE(0, 10);
@@ -2522,6 +2601,11 @@ function dnsAResponse(query: Buffer, address: string): Buffer {
   return response;
 }
 
+/** @internal Protocol smoke-test seam for the local DNS relay. */
+export function buildElectronLauncherDnsRelayFallbackResponse(query: Uint8Array, address: string): Buffer {
+  return dnsSyntheticIpv4Response(Buffer.from(query), address);
+}
+
 function dnsQuestionEndOffset(packet: Buffer): number | null {
   if (packet.length < 13 || packet.readUInt16BE(4) < 1) return null;
   let offset = 12;
@@ -2532,6 +2616,11 @@ function dnsQuestionEndOffset(packet: Buffer): number | null {
     offset += length + 1;
   }
   return null;
+}
+
+function dnsQuestionType(packet: Buffer): number | null {
+  const questionEnd = dnsQuestionEndOffset(packet);
+  return questionEnd ? packet.readUInt16BE(questionEnd - 4) : null;
 }
 
 function dnsQuestionHost(packet: Buffer): string | null {
@@ -2548,7 +2637,7 @@ function dnsQuestionHost(packet: Buffer): string | null {
   return null;
 }
 
-function buildDnsAQuery(hostname: string): { id: number; packet: Buffer } {
+function buildDnsQuery(hostname: string, questionType: number): { id: number; packet: Buffer } {
   const id = Math.floor(Math.random() * 0xffff);
   const labels = hostname.split('.').filter(Boolean);
   const question = Buffer.concat([
@@ -2556,7 +2645,7 @@ function buildDnsAQuery(hostname: string): { id: number; packet: Buffer } {
       const bytes = Buffer.from(label, 'ascii');
       return Buffer.concat([Buffer.from([bytes.length]), bytes]);
     }),
-    Buffer.from([0, 0, 1, 0, 1])
+    Buffer.from([0, (questionType >> 8) & 0xff, questionType & 0xff, 0, 1])
   ]);
   const header = Buffer.alloc(12);
   header.writeUInt16BE(id, 0);
@@ -2595,6 +2684,31 @@ function parseDnsARecords(packet: Buffer, expectedId: number): string[] {
     offset += length;
   }
   return records;
+}
+
+function parseDnsAnswerTypes(packet: Buffer, expectedId: number): number[] {
+  if (packet.length < 12 || packet.readUInt16BE(0) !== expectedId) return [];
+  const rcode = packet.readUInt16BE(2) & 0x000f;
+  if (rcode !== 0) throw new Error(`DNS response code ${rcode}`);
+  const questions = packet.readUInt16BE(4);
+  const answers = packet.readUInt16BE(6);
+  let offset = 12;
+  for (let i = 0; i < questions; i += 1) {
+    offset = skipDnsName(packet, offset);
+    offset += 4;
+  }
+  const types: number[] = [];
+  for (let i = 0; i < answers; i += 1) {
+    offset = skipDnsName(packet, offset);
+    if (offset + 10 > packet.length) throw new Error('truncated DNS answer');
+    const type = packet.readUInt16BE(offset);
+    const length = packet.readUInt16BE(offset + 8);
+    offset += 10;
+    if (offset + length > packet.length) throw new Error('truncated DNS answer data');
+    types.push(type);
+    offset += length;
+  }
+  return types;
 }
 
 function shouldUseDnsFallbackResponse(query: Buffer, response: Buffer, fallbackTarget: string | null): boolean {

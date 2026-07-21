@@ -148,12 +148,32 @@ that repair requires an administrator prompt before the user has chosen to
 connect. Reconnect or disconnect performs the explicit repair path. Set
 `MX_H2I_RESTORE_SYSTEM_PROXY_ON_STARTUP=1` only for break-glass cleanup runs.
 While already connected, the periodic route refresh verifies the live macOS PAC
-and dynamic split DNS state before trusting the saved state; if sleep/wake or a
-Clash/mihomo mode switch removes the MX-H2I entries, MX-H2I automatically
-reapplies the connected PAC/split DNS state. macOS may show an administrator
-authorization prompt for that repair because `networksetup` and dynamic DNS are
-system settings. Set `MX_H2I_MAC_BACKGROUND_PROXY_REPAIR=0` only for controlled
-test builds that should detect the overwrite without repairing it.
+and dynamic split DNS state before trusting the saved state. Verification sends
+both A and AAAA queries to the local relay instead of merely checking that the
+resolver entry exists. Synthetic IPv4 ownership answers are returned only for A
+or ANY; AAAA receives NOERROR/NODATA and never a mismatched A answer. If
+sleep/wake, a physical network change, or a Clash/mihomo mode switch removes the
+MX-H2I entries, MX-H2I automatically reapplies the connected PAC/split DNS
+state. macOS may show an administrator authorization prompt for that repair
+because `networksetup` and dynamic DNS are system settings. Set
+`MX_H2I_MAC_BACKGROUND_PROXY_REPAIR=0` only for controlled test builds that
+should detect the overwrite without repairing it.
+
+For a Mac that stayed powered on while moving between networks, run the
+standalone repair script while the updated MX-H2I app is running:
+
+```sh
+electron-dock/mx-launcher/demos/mx-h2i/scripts/repair-macos-dns.sh
+```
+
+Packaged builds include the same script at
+`MX-H2I.app/Contents/Resources/repair/repair-macos-dns.sh`. It validates the
+local `127.0.0.1:2053` relay, reapplies the dynamic resolver, flushes the macOS
+DNS caches, and verifies A/AAAA behavior. It only reports V1 HDO resolver files
+by default. After HDO is disconnected, use
+`--remove-legacy-hdo-resolvers` to move confirmed legacy files into a recoverable
+`/var/tmp/mx-h2i-dns-repair-*` backup. `--check-only` never changes system
+state.
 
 On macOS, the WireGuard runtime prefers a product-owned LaunchDaemon
 (`com.qpjoy.mx-h2i.wireguard.*`) after the user approves connect. This mirrors
@@ -166,6 +186,13 @@ the same gateway address but assign different DHCP addresses; otherwise the
 public bootstrap host route can retain the old source and fail with
 `EADDRNOTAVAIL`. A user-initiated reconnect detects and removes an older stale
 route with one administrator authorization, then installs the current watchdog.
+The same physical-network signature watcher now runs on Windows. Background
+checks never request elevation; the user-facing Repair Network action performs
+the privileged recovery. On macOS it rebinds routes to the current utun and
+refreshes split DNS. On Windows it restores the WireGuard service when needed,
+re-adds overlay routes and NRPT namespaces, and clears the Windows DNS client
+cache. Retained `lease-only`, `tunnel-only`, and `network-unavailable` states no
+longer suppress an explicit reconnect.
 
 The Electron entry is intentionally light for the reservation phase:
 

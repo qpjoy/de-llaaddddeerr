@@ -67,6 +67,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke:dns-relay": "pnpm build && node scripts/dns-relay-protocol-smoke.mjs",
     "prepack": "pnpm build"
   },
   "dependencies": {

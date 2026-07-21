@@ -54,8 +54,8 @@ export function mergeUniqueUserCenterUsers(users: UserCenterUser[]): UserCenterU
   }, new Map()).values()];
 }
 
-export function legacyHdoSeedUserIsComplete(user: UserCenterUser | null, passwordAccepted: boolean): boolean {
-  if (!user || !passwordAccepted) return false;
+export function legacyHdoSeedUserIsComplete(user: UserCenterUser | null, hasPasswordCredential: boolean): boolean {
+  if (!user || !hasPasswordCredential) return false;
   const allowed = new Set(user.appAccess.allowedAppIds);
   return (
     user.appAccess.homeAppId === LEGACY_HDO_HOME_APP_ID

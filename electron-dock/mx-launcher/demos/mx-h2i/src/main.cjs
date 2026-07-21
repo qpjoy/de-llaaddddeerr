@@ -1,4 +1,5 @@
 const path = require('node:path');
+const os = require('node:os');
 const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
 const http = require('node:http');
@@ -1770,7 +1771,7 @@ function scheduleWireGuardRecovery(reason, delays = [2500, 12_000, 25_000], opti
 
 function startNetworkChangeWatcher() {
   stopNetworkChangeWatcher();
-  if (process.platform !== 'darwin') return;
+  if (!['darwin', 'win32'].includes(process.platform)) return;
   void pollNetworkSignature('startup').catch(() => undefined);
   networkChangeMonitorInterval = setInterval(() => {
     void pollNetworkSignature('interval').catch(() => undefined);
@@ -1867,6 +1868,12 @@ function shouldRefreshSystemDomainProxyAfterWireGuardRecovery(reason) {
 }
 
 async function captureNetworkSignature() {
+  if (process.platform === 'win32') {
+    return JSON.stringify({
+      online: electronNet.isOnline(),
+      interfaces: compactWindowsNetworkInterfaces(os.networkInterfaces())
+    });
+  }
   if (process.platform !== 'darwin') return null;
   const [route, services, networkInfo] = await Promise.all([
     darwinRouteGet('default'),
@@ -1888,6 +1895,20 @@ async function captureNetworkSignature() {
     autoProxy,
     networkInfo: compactDarwinNetworkInfo(networkInfo)
   });
+}
+
+function compactWindowsNetworkInterfaces(interfaces) {
+  return Object.entries(interfaces || {})
+    .flatMap(([name, addresses]) => (Array.isArray(addresses) ? addresses : [])
+      .filter((address) => !address?.internal)
+      .map((address) => ({
+        name,
+        address: nullableString(address?.address),
+        family: nullableString(address?.family),
+        netmask: nullableString(address?.netmask),
+        mac: nullableString(address?.mac)
+      })))
+    .sort((left, right) => `${left.name}:${left.address}`.localeCompare(`${right.name}:${right.address}`));
 }
 
 function compactDarwinNetworkServices(stdout) {
@@ -2438,12 +2459,31 @@ function windowsNrptResolutionHint(windowsNrpt) {
 }
 
 async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
-  const connected = runtime?.connection?.state === 'connected';
   const before = await collectNetworkEnvironmentDiagnostics(`${reason}-before`);
   // User-triggered repair: allow one macOS admin prompt to delete stale
   // endpoint routes (route delete needs root). Background recovery paths keep
   // allowPrivileged off so no surprise auth dialogs appear.
   const endpointRouteRepair = await repairDarwinStaleEndpointRoutesForRuntime(reason, { force: true, allowPrivileged: true });
+  const wireGuardSystemRepair = await repairWireGuardSystemStateForRuntime(reason);
+  let wireGuardProbe = null;
+  if (shouldRecoverWireGuardConnection(runtime?.connection)) {
+    wireGuardProbe = await probeWireGuardForConnection({
+      connection: runtime.connection,
+      routePlan: runtime.connection.routePlan,
+      internalBaseUrl: runtime.connection.internalBaseUrl
+    });
+    runtime.connection = {
+      ...runtime.connection,
+      state: wireGuardProbe.state,
+      health: wireGuardProbe.health,
+      wireGuard: wireGuardProbe.wireGuard,
+      diagnostics: {
+        ...(runtime.connection?.diagnostics || {}),
+        ...(wireGuardProbe.diagnostics || {})
+      }
+    };
+  }
+  const connected = runtime?.connection?.state === 'connected';
   let systemDomainProxy = null;
   if (connected) {
     systemDomainProxy = await ensureSystemDomainProxyForRuntime(reason);
@@ -2464,6 +2504,7 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
   }
   lastSystemDomainProxySignature = null;
   lastNetworkEnvironmentSignature = null;
+  lastNetworkSignature = null;
   const after = await collectNetworkEnvironmentDiagnostics(`${reason}-after`, {
     phase: connected ? 'connected' : 'disconnected'
   });
@@ -2478,6 +2519,8 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
         connected,
         before,
         endpointRouteRepair,
+        wireGuardSystemRepair,
+        wireGuardProbe,
         systemDomainProxy,
         after,
         updatedAt: nowIso()
@@ -2486,22 +2529,48 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
     }
   };
   runtime.feedback = {
-    tone: systemDomainProxy?.error || (endpointRouteRepair?.stale === true && endpointRouteRepair?.repaired !== true)
+    tone: systemDomainProxy?.error
+      || wireGuardSystemRepair?.ok === false
+      || (endpointRouteRepair?.stale === true && endpointRouteRepair?.repaired !== true)
       ? 'warning'
       : after?.resolution?.severity === 'error'
         ? 'warning'
         : 'success',
     message: connected
-      ? `已重新确认 MX-H2I PAC/DNS：${after?.resolution?.message || 'network ready'}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
-      : `已执行系统网络修复：${after?.resolution?.message || 'stale state cleared'}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
+      ? `已重新确认 MX-H2I WireGuard 路由和 PAC/DNS：${after?.resolution?.message || 'network ready'}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
+      : `已执行系统网络修复，但 WireGuard 尚未恢复 ready：${after?.resolution?.message || wireGuardProbe?.message || 'stale state cleared'}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
   };
   touchRuntime(`system network repaired: ${reason}`);
   return {
     before,
     endpointRouteRepair,
+    wireGuardSystemRepair,
+    wireGuardProbe,
     systemDomainProxy,
     after
   };
+}
+
+async function repairWireGuardSystemStateForRuntime(reason) {
+  if (!shouldRecoverWireGuardConnection(runtime?.connection)) {
+    return { ok: true, skipped: true, reason: 'connection-not-retained' };
+  }
+  try {
+    const mod = await import('@qpjoy/electron-launcher/wireguard');
+    const options = wireGuardRuntimeOptions();
+    const status = mod.getLauncherWireGuardPeerStatus(options);
+    if (status?.active === true) {
+      return await mod.repairLauncherWireGuardPeerRoutes(options);
+    }
+    return await mod.recoverLauncherWireGuardPeer({ ...options, reason });
+  } catch (err) {
+    queueDiagnosticError('wireguard.system-route-repair-failed', err, { reason });
+    return {
+      ok: false,
+      reason,
+      message: errorMessage(err)
+    };
+  }
 }
 
 async function recordDarwinEndpointRouteRepairDiagnostics(result, reason) {
@@ -4023,7 +4092,7 @@ function normalizeConnection(input) {
     return connectedState({
       state: row.state,
       mode: row.mode === 'employee' ? 'employee' : 'guest',
-      localIp: stringValue(row.localIp, '10.89.120.24'),
+      localIp: nullableString(row.localIp),
       routePolicy: stringValue(row.routePolicy, 'guest limited'),
       subject: stringValue(row.subject, 'anonymousPrincipal:h2i-demo'),
       connectedAt: typeof row.connectedAt === 'string' ? row.connectedAt : nowIso(),
@@ -8003,7 +8072,7 @@ function idleConnection() {
 
 function isModeConnectionActive(connection, mode) {
   return connection?.mode === mode
-    && ['connecting', 'connected', 'lease-only', 'tunnel-only', 'server-unavailable', 'network-unavailable', 'forbidden'].includes(connection.state);
+    && ['connecting', 'connected'].includes(connection.state);
 }
 
 function idleHealth() {
