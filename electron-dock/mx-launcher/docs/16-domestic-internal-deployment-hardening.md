@@ -194,3 +194,23 @@ curl -fsS --max-time 5 http://10.88.88.88:18090/healthz
 ```
 
 只有第 6、7 步都通过，Domestic/Internal 2.0 链路才算真正完成。
+
+## AWS 上的 legacy `wireguard.sh`
+
+根目录 `scripts/wireguard.sh` 是 legacy/传统 road-warrior WireGuard 的兼容安装入口，生成
+`wg0` 和 `10.7.0.0/24` 客户端配置。它不是 V2 `mx-domestic` / `mx-internal-svc` 的配置
+真相；V2 仍应由 Internal 的 plan、artifact 和 host-runner 驱动。
+
+EC2 的公网 IPv4 是 AWS NAT 映射，不会出现在实例网卡列表中。例如实例同时显示
+`172.31.4.205`、`10.8.0.1`，AWS 控制台显示公网 `44.222.88.94` 时：
+
+1. 在 `Which local IPv4 address...` 菜单输入私网出口地址对应的**编号**，通常是
+   `172.31.4.205` 对应的 `1`，不能输入 `44.222.88.94`。
+2. 脚本判断该地址位于私网后，会单独询问 public IPv4/hostname。它会先用 IMDSv2
+   自动读取 EC2 public-ipv4；若 metadata 不可用，再使用外部地址探测，并允许手工覆盖。
+3. 客户端配置中的 `Endpoint` 使用公网地址，服务端 SNAT 仍使用 EC2 网卡上的私网地址。
+
+安装后还需要在 AWS Security Group 放通所选 WireGuard UDP 端口（默认 `51820`）。如果
+隧道有 handshake 但不能转发流量，再检查 EC2 source/destination check、系统
+`ip_forward`、iptables/firewalld 和 VPC/子网路由；不要把公网 NAT 地址写成服务端本地
+SNAT 地址。

@@ -182,6 +182,30 @@ PersistentKeepalive = 25
 EOF
 }
 
+get_public_ipv4 () {
+	local aws_token detected_ip
+
+	# AWS public IPv4 addresses are NAT mappings and do not appear on the instance
+	# interface. Prefer IMDSv2 so EC2 instances with IMDSv1 disabled are supported.
+	if command -v curl >/dev/null 2>&1; then
+		aws_token=$(curl --noproxy '*' -m 2 -fsS -X PUT \
+			-H 'X-aws-ec2-metadata-token-ttl-seconds: 60' \
+			'http://169.254.169.254/latest/api/token' 2>/dev/null)
+		if [[ -n "$aws_token" ]]; then
+			detected_ip=$(curl --noproxy '*' -m 2 -fsS \
+				-H "X-aws-ec2-metadata-token: $aws_token" \
+				'http://169.254.169.254/latest/meta-data/public-ipv4' 2>/dev/null)
+		fi
+	fi
+
+	if ! grep -qxE '[0-9]{1,3}(\.[0-9]{1,3}){3}' <<< "$detected_ip"; then
+		detected_ip=$(wget -T 10 -t 1 -4qO- 'http://ip1.dynupdate.no-ip.com/' 2>/dev/null \
+			|| curl -m 10 -4Ls 'http://ip1.dynupdate.no-ip.com/' 2>/dev/null)
+	fi
+
+	grep -m 1 -oE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' <<< "$detected_ip"
+}
+
 if [[ ! -e /etc/wireguard/wg0.conf ]]; then
 	# Detect some Debian minimal setups where neither wget nor curl are installed
 	if ! hash wget 2>/dev/null && ! hash curl 2>/dev/null; then
@@ -198,12 +222,17 @@ if [[ ! -e /etc/wireguard/wg0.conf ]]; then
 	else
 		number_of_ip=$(ip -4 addr | grep inet | grep -vEc '127(\.[0-9]{1,3}){3}')
 		echo
-		echo "Which IPv4 address should be used?"
+		echo "Which local IPv4 address should be used for outbound traffic?"
 		ip -4 addr | grep inet | grep -vE '127(\.[0-9]{1,3}){3}' | cut -d '/' -f 1 | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | nl -s ') '
-		read -p "IPv4 address [1]: " ip_number
-		until [[ -z "$ip_number" || "$ip_number" =~ ^[0-9]+$ && "$ip_number" -le "$number_of_ip" ]]; do
-			echo "$ip_number: invalid selection."
-			read -p "IPv4 address [1]: " ip_number
+		echo "Enter a selection number. A public NAT address (for example, an AWS EC2 public IP) is requested next."
+		read -p "Local IPv4 selection [1]: " ip_number
+		until [[ -z "$ip_number" || "$ip_number" =~ ^[0-9]+$ && "$ip_number" -ge 1 && "$ip_number" -le "$number_of_ip" ]]; do
+			if [[ "$ip_number" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+				echo "$ip_number is not a selection number. Select the local address here; the public address is requested next."
+			else
+				echo "$ip_number: invalid selection."
+			fi
+			read -p "Local IPv4 selection [1]: " ip_number
 		done
 		[[ -z "$ip_number" ]] && ip_number="1"
 		ip=$(ip -4 addr | grep inet | grep -vE '127(\.[0-9]{1,3}){3}' | cut -d '/' -f 1 | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | sed -n "$ip_number"p)
@@ -212,8 +241,8 @@ if [[ ! -e /etc/wireguard/wg0.conf ]]; then
 	if echo "$ip" | grep -qE '^(10\.|172\.1[6789]\.|172\.2[0-9]\.|172\.3[01]\.|192\.168)'; then
 		echo
 		echo "This server is behind NAT. What is the public IPv4 address or hostname?"
-		# Get public IP and sanitize with grep
-		get_public_ip=$(grep -m 1 -oE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' <<< "$(wget -T 10 -t 1 -4qO- "http://ip1.dynupdate.no-ip.com/" || curl -m 10 -4Ls "http://ip1.dynupdate.no-ip.com/")")
+		# Detect AWS through IMDSv2 first, then fall back to an external check.
+		get_public_ip=$(get_public_ipv4)
 		read -p "Public IPv4 address / hostname [$get_public_ip]: " public_ip
 		# If the checkip service is unavailable and user didn't provide input, ask again
 		until [[ -n "$get_public_ip" || -n "$public_ip" ]]; do
