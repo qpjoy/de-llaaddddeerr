@@ -175,7 +175,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       post: operation({
         tag: 'Authentication',
         summary: '获取用户或服务账号 token',
-        description: '支持 password 与 client_credentials。用户凭据只由 Internal User Center 校验；不要在 Domestic 或业务应用保存密码副本。服务账号 secret 的正式校验仍需在生产加固完成后启用。',
+        description: '支持 password 与 client_credentials。password access token 默认且最长有效 7 天；client_credentials 默认有效 1 小时。用户凭据只由 Internal User Center 校验；不要在 Domestic 或业务应用保存密码副本。服务账号 secret 的正式校验仍需在生产加固完成后启用。',
         operationId: 'issueSdkToken',
         routeId: 'sdk.oauth.token',
         auth: 'public',
@@ -193,13 +193,13 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
             access_token: '<access-token>',
             token_type: 'Bearer',
             issued_token_type: 'urn:ietf:params:oauth:token-type:jwt',
-            expires_in: 3600,
+            expires_in: 604800,
             scope: 'sdk.identity.read sdk.user.read permission.request',
             issuer: 'mx-user-center:production',
             audience: 'mx-sdk',
             subject: 'user:usr_partner_alice',
             principal: { kind: 'user', userId: 'usr_partner_alice', roles: ['mx-user'] },
-            expires_at: '2026-07-20T01:00:00.000Z'
+            expires_at: '2026-07-27T00:00:00.000Z'
           }
         }
       })

@@ -81,6 +81,11 @@ curl -sS "$BASE/internal/v1/sdk/oauth/token" \
 密码模式会校验 User Center 保存的 `local-password` credential；导入旧系统账号时应把
 旧 `account/password/user_name` 写入 User Center，而不是继续让 Domestic 保存登录真相。
 
+password grant 签发的用户 access token 默认有效 `604800` 秒（7 天），并以 7 天为上限；
+MX-H2I、Luopan 和其他未显式传入更短 `expires_in` 的 standalone 都使用这个周期。当前尚未
+实现 refresh token grant，token 到期、被撤销或用户修改密码后需要重新登录。修改默认值
+不会延长已经签发的 token，客户端应重新登录以获得新的 7 天 token。
+
 Service account 模式：
 
 ```bash
@@ -94,6 +99,9 @@ curl -sS "$BASE/internal/v1/sdk/oauth/token" \
     "audience": "mx-sdk"
   }'
 ```
+
+client credentials access token 默认仍为 `3600` 秒（1 小时），不随 Electron 用户登录
+周期延长。
 
 ## Identity
 

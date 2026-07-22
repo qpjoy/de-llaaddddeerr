@@ -7,6 +7,9 @@ import { PLATFORM_STORE } from '../../tokens.js';
 import type { CreateServiceAccountInput, CreateUserInput, SdkGatewayAccessInput } from '../../types.js';
 import { toPrincipalInput, toTokenInput } from '../user-center/user-center.controller.js';
 
+const USER_ACCESS_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
+const SERVICE_ACCOUNT_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
+
 @Controller()
 export class SdkGatewayController {
   constructor(@Inject(PLATFORM_STORE) private readonly store: PlatformStore) {}
@@ -105,7 +108,10 @@ export class SdkGatewayController {
       subjectId: user.userId,
       audience: nullableString(body.audience) ?? 'mx-sdk',
       scopes: oauthScopes(body.scope, body.scopes),
-      ttlSeconds: numberValue(body.expires_in) ?? numberValue(body.ttlSeconds) ?? 3600,
+      ttlSeconds: Math.min(
+        numberValue(body.expires_in) ?? numberValue(body.ttlSeconds) ?? USER_ACCESS_TOKEN_TTL_SECONDS,
+        USER_ACCESS_TOKEN_TTL_SECONDS
+      ),
       requestId: nullableString(body.requestId)
     });
     const introspection = await this.store.introspectToken({
@@ -128,7 +134,9 @@ export class SdkGatewayController {
       subjectId: serviceAccount.serviceAccountId,
       audience: nullableString(body.audience) ?? 'mx-sdk',
       scopes: oauthScopes(body.scope, body.scopes),
-      ttlSeconds: numberValue(body.expires_in) ?? numberValue(body.ttlSeconds) ?? 3600,
+      ttlSeconds: numberValue(body.expires_in)
+        ?? numberValue(body.ttlSeconds)
+        ?? SERVICE_ACCOUNT_ACCESS_TOKEN_TTL_SECONDS,
       requestId: nullableString(body.requestId)
     });
     const introspection = await this.store.introspectToken({
