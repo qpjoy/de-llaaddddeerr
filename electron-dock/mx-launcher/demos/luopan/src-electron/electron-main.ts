@@ -1666,7 +1666,8 @@ function registerIpc(): void {
           channel: PRODUCT.release.channel,
           installId: state.installId,
           userId,
-          platform: process.platform
+          platform: process.platform,
+          arch: process.arch
         }));
       }
       const check = chooseUpdateCheck(checks);

@@ -1021,10 +1021,16 @@ DNS Routes 面板里编辑。V2 默认仍保留 k8s Caddy 作为可回退 backen
   两个 Wi-Fi 都使用 `en0 + 192.168.0.1`、但 DHCP source 从 `192.168.0.104` 变化到另一地址时，
   旧 host route 的 `IFA` 会继续绑定已经不存在的 source，Node/Electron 报
   `connect EADDRNOTAVAIL ... Local (192.168.0.104:port)`，而手工删除 endpoint route 后立即恢复。
-  root WireGuard LaunchDaemon 因此每 5 秒用 verbose route 同时比较 gateway、interface、IFA；
-  任一变化都会删除并重建 endpoint bypass。App 网络签名和诊断也记录 sourceAddress；用户主动
-  点击访客连接/员工登录时若发现旧版本 daemon 遗留的 source route，只在确有 stale route 时
-  请求一次管理员授权删除，连接成功后再刷新当前 LaunchDaemon。
+  Clash/Mihomo TUN 开启时，`route get default` 可能只返回 `utun + link#`，也可能返回
+  `198.18.0.1` fake gateway，不能用作公网 endpoint 的下一跳。Launcher 必须从
+  `netstat -rn -f inet` 的多条 default 中选择“IPv4 gateway + 非 198.18/15 + 非 utun/lo”的
+  物理路径，再从该接口读取当前 IPv4 source。root WireGuard LaunchDaemon 每 5 秒用同一判据
+  比较 gateway、interface、source/IFA；任一变化都会删除并重建 endpoint bypass。App 网络
+  诊断也使用同一物理 default，避免把正常的 `endpoint -> en0` 误判成偏离 TUN default。
+  用户主动点击访客连接、员工登录或“修复网络”时若发现旧 route，只请求一次管理员授权，
+  在同一批命令中执行 best-effort delete，再 `add/change -host endpoint physical-gateway`；
+  `not in table` 只表示 clone route 不能按普通 host entry 删除，不再被当成修复成功或最终失败。
+  后台 watcher 只诊断，不执行一次必然报 `must be root` 的无权限删除。
 - macOS 权限申请应收敛为 Launcher network transaction。当前 V2 可能出现两次授权：
   第一次安装/刷新 WireGuard LaunchDaemon 和 route，第二次写系统 PAC 与 dynamic split
   DNS。短期应把 UI 文案合并为一次“即将修改 WireGuard、DNS、PAC”的连接动作，并尽量只在

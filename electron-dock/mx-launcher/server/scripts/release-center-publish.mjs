@@ -26,19 +26,18 @@ const kind = args.kind || process.env.MX_RELEASE_KIND || 'installer';
 const e2eResult = args.e2eResult || process.env.MX_RELEASE_E2E_RESULT || 'running';
 const storage = args.storage || process.env.MX_RELEASE_ARTIFACT_STORAGE || 'auto';
 const artifactPlatform = normalizePlatform(args.platform || process.env.MX_RELEASE_PLATFORM || (kind === 'hot' ? 'all' : process.platform));
+const artifactArch = normalizeArch(args.arch || process.env.MX_RELEASE_ARCH || (kind === 'hot' ? 'all' : process.arch));
 const runId = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
 const releaseId = args.releaseId || (kind === 'hot'
   ? `${product}-hot-${version}-${runId}`
   : `${product}-installer-${version}-${runId}`);
-// `mx-h2i-installer` is the server's closed-enum installer kind (historical
-// name); clients classify it by the `installer` substring, so it is the right
-// kind for every product's DMG/EXE.
-const artifactKind = kind === 'hot' ? 'renderer-ui' : 'mx-h2i-installer';
+const artifactKind = kind === 'hot' ? 'renderer-ui' : 'app-installer';
 const artifactComponentId = kind === 'hot' ? args.componentId || `${product}-renderer` : product;
 // Point-targeting (docs/19 §6.1): a one-user gray release is
 // `--target-user usr_xxx`; repeat or comma-separate for more.
 const targetUserIds = listArg(args.targetUser ?? args.targetUsers, []);
 const targetInstallIds = listArg(args.targetInstall ?? args.targetInstalls, []);
+const hasExplicitTargets = targetUserIds.length > 0 || targetInstallIds.length > 0;
 const releaseNotes = optionalArg(args.notes ?? args.releaseNotes ?? process.env.MX_RELEASE_NOTES);
 
 const artifactStat = await stat(artifactPath);
@@ -69,6 +68,7 @@ console.log(JSON.stringify({
     digest,
     sizeBytes: artifactSizeBytes,
     platform: artifactPlatform,
+    arch: artifactArch,
     storage: uploadedArtifact?.artifact?.storage || (uploadedArtifact ? storage : 'external-url'),
     uploaded: Boolean(uploadedArtifact),
     uploadArtifactId: uploadedArtifact?.artifact?.artifactId || null
@@ -90,21 +90,23 @@ function installerBody() {
     productId: product,
     appId: product,
     launcherComponentId: product,
-    launcherUpdatePolicy: 'mx-h2i-installer',
+    launcherUpdatePolicy: 'app-installer',
     launcherCurrentVersion: currentVersion,
     launcherTargetVersion: version,
     appUpdatePolicy: 'app-managed',
     appCurrentVersion: currentVersion,
     appTargetVersion: currentVersion,
-    artifactKind: 'mx-h2i-installer',
+    artifactKind: 'app-installer',
     artifactVersion: version,
     artifactUrl,
     artifactDigest: digest,
     artifactSizeBytes,
     artifactPlatform,
+    artifactArch,
+    artifactFileName: basename(artifactPath),
     activationMode: 'installer-manual',
-    rolloutStrategy: args.rolloutStrategy || 'manual-ring',
-    rolloutPercentage: numberArg(args.rolloutPercentage, 0),
+    rolloutStrategy: args.rolloutStrategy || (hasExplicitTargets ? 'manual-ring' : 'all'),
+    rolloutPercentage: numberArg(args.rolloutPercentage, hasExplicitTargets ? 0 : 100),
     rolloutRings: listArg(args.rolloutRings, ['internal-dogfood', 'stable']),
     targetUserIds,
     targetInstallIds,
@@ -138,6 +140,8 @@ function hotUpdateBody() {
     artifactDigest: digest,
     artifactSizeBytes,
     artifactPlatform,
+    artifactArch,
+    artifactFileName: basename(artifactPath),
     activationMode: 'hot-auto',
     rolloutStrategy: args.rolloutStrategy || 'gray',
     rolloutPercentage: numberArg(args.rolloutPercentage, 10),
@@ -213,6 +217,16 @@ function normalizePlatform(value) {
   return normalized;
 }
 
+function normalizeArch(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized || normalized === 'all') return null;
+  if (normalized === 'amd64' || normalized === 'x86_64') return 'x64';
+  if (normalized === 'aarch64') return 'arm64';
+  if (normalized === 'x86') return 'ia32';
+  if (normalized === 'universal2') return 'universal';
+  return normalized;
+}
+
 async function resolveArtifactPath(value) {
   const candidates = isAbsolute(value)
     ? [value]
@@ -246,13 +260,16 @@ async function sha256File(path) {
 async function uploadArtifact() {
   const params = new URLSearchParams({
     releaseId,
+    productId: product,
+    channel,
     kind: artifactKind,
     version,
     componentId: artifactComponentId,
     fileName: basename(artifactPath),
     digest,
     storage,
-    ...(artifactPlatform ? { platform: artifactPlatform } : {})
+    ...(artifactPlatform ? { platform: artifactPlatform } : {}),
+    ...(artifactArch ? { arch: artifactArch } : {})
   });
   const response = await fetch(`${baseUrl}/internal/v1/release-artifacts?${params}`, {
     method: 'POST',

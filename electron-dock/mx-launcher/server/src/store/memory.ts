@@ -2561,7 +2561,8 @@ export class MemoryStore implements PlatformStore {
     const appUpdatePolicy = normalizeUpdatePolicy(input.appUpdatePolicy ?? 'app-managed');
     const launcherDecision = this.evaluateReleaseUpdate({
       componentKind: launcherUpdatePolicy,
-      componentId: input.launcherComponentId?.trim() || (launcherUpdatePolicy === 'mx-h2i-installer' ? 'mx-h2i' : 'mx-launcher'),
+      componentId: input.launcherComponentId?.trim()
+        || (launcherUpdatePolicy === 'app-installer' || launcherUpdatePolicy === 'mx-h2i-installer' ? productId : 'mx-launcher'),
       currentVersion: input.launcherCurrentVersion?.trim() || '0.1.0',
       targetVersion: input.launcherTargetVersion?.trim() || '0.1.1',
       channel,

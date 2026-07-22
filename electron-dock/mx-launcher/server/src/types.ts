@@ -1671,6 +1671,7 @@ export type UpdatePolicyKind =
   | 'launcher-asar'
   | 'app-asar'
   | 'appcenter-app'
+  | 'app-installer'
   | 'mx-h2i-installer'
   | 'native-helper';
 
@@ -1682,6 +1683,7 @@ export type ReleaseArtifactKind =
   | 'launcher-asar'
   | 'app-asar'
   | 'appcenter-app'
+  | 'app-installer'
   | 'mx-h2i-installer'
   | 'native-helper';
 
@@ -1710,6 +1712,8 @@ export interface ReleaseArtifactRef {
   signature: string | null;
   sizeBytes: number | null;
   platform: string | null;
+  arch: string | null;
+  fileName: string | null;
   activation: ReleaseActivationMode;
   autoApply: boolean;
   restartRequired: boolean;
@@ -2946,6 +2950,8 @@ export interface ReleaseManagementPlanInput {
   artifactSignature?: string | null;
   artifactSizeBytes?: number | null;
   artifactPlatform?: string | null;
+  artifactArch?: string | null;
+  artifactFileName?: string | null;
   activationMode?: ReleaseActivationMode | string | null;
   rolloutStrategy?: ReleaseRolloutStrategy | string | null;
   rolloutPercentage?: number | null;
@@ -2975,6 +2981,8 @@ export interface ReleaseManagementGateInput {
 export interface ReleaseManagementPlan {
   planId: string;
   releaseId: string;
+  /** Standalone launcher product. Optional only for records created before V2. */
+  productId?: string;
   environment: string;
   channel: string;
   installId: string | null;

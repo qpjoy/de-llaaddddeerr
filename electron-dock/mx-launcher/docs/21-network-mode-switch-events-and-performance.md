@@ -30,6 +30,9 @@ V2 的慢切换不是 Clash 模式本身在切换，也不是单纯等待 Intern
    lease，再由 launcher 原子替换数据面。
 5. UI 分开显示 lease ready、preflight、data-plane switching，不再把所有阶段都显示成
    “正在申请 relay lease”。
+6. macOS endpoint bypass 不再读取 Clash/Mihomo utun 的逻辑 default；LaunchDaemon、诊断和
+   主动修复统一从完整路由表选择物理 IPv4 default。主动修复直接在一次管理员事务中把 relay
+   endpoint `/32` 绑定到物理 gateway，后台检测不再产生预期内的 `must be root` 噪声。
 
 这会显著缩短已安装、已授权机器上的切换；首次连接、系统授权、异常残留清理仍不是
 零耗时。最终数值以 `connection.diagnostics.transitionTiming` 的真机 P50 / P95 为准。

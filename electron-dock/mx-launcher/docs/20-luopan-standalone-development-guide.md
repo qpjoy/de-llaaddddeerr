@@ -556,7 +556,8 @@ artifact 的 execution 状态（含 deferredReason/error），按钮四个对应
      --base-url <admin-url> --product luopan --kind hot \
      --artifact <bundle> --version 0.1.1 --current-version 0.1.0 \
      --channel shadow --target-user <你的 userId> --e2e-result passed
-   # installer 类：--kind installer --platform darwin|win32（component 自动为 luopan）
+   # installer 类：--kind installer --platform darwin|win32 \
+   #   --arch x64|arm64|universal（component 自动为 luopan，artifactKind=app-installer）
    ```
 2. luopan 面板点检查更新 → 应显示 update-available + notes + `Matched by=指定用户`
    → 点应用 → 面板出现 execution 结果（renderer 类会看到窗口 reload）。

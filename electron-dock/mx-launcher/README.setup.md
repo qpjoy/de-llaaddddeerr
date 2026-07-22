@@ -233,7 +233,7 @@ kubectl -n mx-internal-shadow create secret generic mx-release-oss \
   --from-literal=MX_RELEASE_OSS_BUCKET=mx-launcher \
   --from-literal=MX_RELEASE_OSS_ACCESS_KEY_ID=... \
   --from-literal=MX_RELEASE_OSS_ACCESS_KEY_SECRET=... \
-  --from-literal=MX_RELEASE_OSS_PREFIX=mx-h2i/releases \
+  --from-literal=MX_RELEASE_OSS_PREFIX=mx-launcher/releases \
   --from-literal=MX_RELEASE_OSS_PUBLIC_BASE_URL= \
   --dry-run=client -o yaml | kubectl apply -f -
 

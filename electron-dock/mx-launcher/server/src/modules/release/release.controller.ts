@@ -14,7 +14,7 @@ import { asRecord, nullableString, stringArray } from '../../lib/http.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { normalizeReleaseArtifactKind } from '../../store/domain.js';
 import { PLATFORM_STORE } from '../../tokens.js';
-import type { ReleaseArtifactKind, ReleaseManagementE2eResult, ReleaseManagementPlanInput, ReleaseReportInput } from '../../types.js';
+import type { ReleaseArtifactKind, ReleaseManagementE2eResult, ReleaseManagementPlan, ReleaseManagementPlanInput, ReleaseReportInput } from '../../types.js';
 import { evaluateReleaseCheck, signReleaseCheckResult } from './release-check.js';
 
 @Controller()
@@ -74,6 +74,7 @@ export class ReleaseController {
       userId: nullableString(body.userId),
       channel: nullableString(body.channel) ?? 'stable',
       platform: nullableString(body.platform),
+      arch: normalizeReleaseArch(nullableString(body.arch)),
       components
     });
     await this.store.recordReleaseReport({
@@ -88,6 +89,30 @@ export class ReleaseController {
       }
     });
     return signReleaseCheckResult(result, releaseDecisionSecret());
+  }
+
+  /**
+   * Sanitized client history. Unlike the admin plans endpoint this only shows
+   * globally published, gate-passed releases for one product/platform/arch.
+   */
+  @Get('internal/v1/releases/history')
+  async releaseHistory(@Query() rawQuery: Record<string, unknown>) {
+    const query = asRecord(rawQuery);
+    const componentId = nullableString(query.componentId) ?? nullableString(query.productId);
+    if (!componentId) throw new BadRequestException('release history requires componentId or productId');
+    const channel = nullableString(query.channel) ?? 'stable';
+    const platform = normalizeReleasePlatform(nullableString(query.platform));
+    const arch = normalizeReleaseArch(nullableString(query.arch));
+    const limit = Math.max(1, Math.min(50, Math.floor(nullableNumber(query.limit) ?? 8)));
+    const plans = await this.store.listReleaseManagementPlans();
+    const releases = plans
+      .filter((plan) => plan.channel === channel && plan.test?.gate?.verdict === 'passed')
+      .filter((plan) => releasePlanIsGlobal(plan))
+      .map((plan) => releaseHistoryRow(plan, componentId, platform, arch))
+      .filter((row): row is ReleaseHistoryRow => row !== null)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, limit);
+    return { releases };
   }
 
   @Get('internal/v1/release-management/plans')
@@ -132,13 +157,17 @@ export class ReleaseController {
     @Query() rawQuery: Record<string, unknown>
   ) {
     const query = asRecord(rawQuery);
-    const kind = normalizeReleaseArtifactKind(nullableString(query.kind) ?? 'mx-h2i-installer');
+    const kind = normalizeReleaseArtifactKind(nullableString(query.kind) ?? 'app-installer');
     const version = nullableString(query.version) ?? '0.0.0';
     const componentId = nullableString(query.componentId) ?? 'mx-h2i';
+    const productId = nullableString(query.productId) ?? componentId;
+    const channel = nullableString(query.channel) ?? 'stable';
     const releaseId = nullableString(query.releaseId) ?? 'manual-upload';
     const platform = normalizeReleasePlatform(nullableString(query.platform));
+    const arch = normalizeReleaseArch(nullableString(query.arch));
     const expectedDigest = normalizeSha256Digest(nullableString(query.digest));
     const fileName = safeArtifactFileName(nullableString(query.fileName) ?? `${kind}-${version}.bin`);
+    validateInstallerArtifact(kind, platform, arch, fileName);
     const maxBytes = releaseArtifactMaxBytes();
     const storage = releaseArtifactStorageForRequest(nullableString(query.storage));
     const contentLength = nullableNumberHeader(req.headers['content-length']);
@@ -156,7 +185,7 @@ export class ReleaseController {
       throw new BadRequestException(`Release artifact digest mismatch: expected ${expectedDigest}, got ${uploaded.digest}`);
     }
 
-    const artifactId = releaseArtifactId(releaseId, kind, version, uploaded.digest);
+    const artifactId = releaseArtifactId(productId, releaseId, kind, version, uploaded.digest);
     const artifactDir = resolve(storeDir, artifactId);
     await mkdir(artifactDir, { recursive: true });
     const artifactPath = resolve(artifactDir, fileName);
@@ -168,7 +197,7 @@ export class ReleaseController {
         await rm(tempPath, { force: true });
         throw new BadRequestException('Release artifact storage=oss requires MX_RELEASE_OSS_* configuration');
       }
-      ossObjectKey = releaseOssObjectKey(oss, releaseId, artifactId, fileName);
+      ossObjectKey = releaseOssObjectKey(oss, productId, channel, version, platform, arch, releaseId, fileName);
       await putReleaseArtifactToOss(oss, ossObjectKey, tempPath, metadataContentType(req), uploaded.bytes);
       await rm(tempPath, { force: true });
       publicUrl = releaseOssPublicUrl(oss, ossObjectKey);
@@ -181,6 +210,8 @@ export class ReleaseController {
     const metadata: StoredReleaseArtifactMetadata = {
       artifactId,
       releaseId,
+      productId,
+      channel,
       kind,
       componentId,
       version,
@@ -188,6 +219,7 @@ export class ReleaseController {
       digest: uploaded.digest,
       sizeBytes: uploaded.bytes,
       platform,
+      arch,
       source: 'manual-upload',
       storage,
       contentType: metadataContentType(req),
@@ -203,10 +235,10 @@ export class ReleaseController {
         url: metadata.url,
         downloadPath,
         signature: null,
-        activation: kind === 'mx-h2i-installer' ? 'installer-manual' : 'hot-auto',
-        autoApply: kind !== 'mx-h2i-installer',
-        restartRequired: kind === 'mx-h2i-installer' || kind === 'launcher-asar' || kind === 'app-asar' || kind === 'native-helper',
-        requiredAppRestart: kind === 'mx-h2i-installer' || kind === 'launcher-asar' || kind === 'app-asar' || kind === 'native-helper',
+        activation: isInstallerArtifactKind(kind) ? 'installer-manual' : 'hot-auto',
+        autoApply: !isInstallerArtifactKind(kind),
+        restartRequired: isInstallerArtifactKind(kind) || kind === 'launcher-asar' || kind === 'app-asar' || kind === 'native-helper',
+        requiredAppRestart: isInstallerArtifactKind(kind) || kind === 'launcher-asar' || kind === 'app-asar' || kind === 'native-helper',
         notes: ['stored by Internal Release Center artifact store']
       }
     };
@@ -266,6 +298,8 @@ function toReleaseManagementPlanInput(body: Record<string, unknown>): ReleaseMan
     artifactSignature: nullableString(body.artifactSignature),
     artifactSizeBytes: nullableNumber(body.artifactSizeBytes),
     artifactPlatform: normalizeReleasePlatform(nullableString(body.artifactPlatform)),
+    artifactArch: normalizeReleaseArch(nullableString(body.artifactArch)),
+    artifactFileName: nullableString(body.artifactFileName),
     activationMode: nullableString(body.activationMode),
     rolloutStrategy: nullableString(body.rolloutStrategy),
     rolloutPercentage: nullableNumber(body.rolloutPercentage),
@@ -296,6 +330,71 @@ function releaseCheckComponents(body: Record<string, unknown>): Record<string, s
   const currentVersion = nullableString(body.currentVersion);
   if (componentId && currentVersion && !components[componentId]) components[componentId] = currentVersion;
   return components;
+}
+
+interface ReleaseHistoryRow {
+  id: string;
+  releaseId: string;
+  planId: string;
+  productId: string;
+  version: string;
+  channel: string;
+  status: 'ready';
+  componentKind: string;
+  updateMode: string;
+  artifactKind: string;
+  activation: string;
+  platform: string | null;
+  arch: string | null;
+  fileName: string | null;
+  sizeBytes: number | null;
+  createdAt: string;
+  gate: 'passed';
+}
+
+function releasePlanIsGlobal(plan: ReleaseManagementPlan): boolean {
+  const audience = plan.rollout?.audience;
+  const hasTargets = Boolean(
+    audience?.installIds?.length
+    || audience?.userIds?.length
+  );
+  return !hasTargets && (plan.rollout?.percentage ?? 0) >= 100;
+}
+
+function releaseHistoryRow(
+  plan: ReleaseManagementPlan,
+  componentId: string,
+  platform: string | null,
+  arch: string | null
+): ReleaseHistoryRow | null {
+  const decision = [plan.components?.launcher, plan.components?.app]
+    .find((item) => item?.componentId === componentId);
+  if (!decision) return null;
+  const artifact = (plan.artifacts ?? [])
+    .filter((item) => !item.componentId || item.componentId === componentId)
+    .filter((item) => !item.platform || !platform || item.platform === platform)
+    .filter((item) => !item.arch || item.arch === 'universal' || !arch || item.arch === arch)
+    .find((item) => Boolean(item.url));
+  if (!artifact) return null;
+  return {
+    id: plan.planId,
+    releaseId: plan.releaseId,
+    planId: plan.planId,
+    productId: plan.productId || componentId,
+    version: decision.targetVersion || artifact.version,
+    channel: plan.channel,
+    status: 'ready',
+    componentKind: decision.componentKind,
+    updateMode: decision.updateMode,
+    artifactKind: artifact.kind,
+    activation: artifact.activation,
+    platform: artifact.platform,
+    arch: artifact.arch,
+    fileName: artifact.fileName,
+    sizeBytes: artifact.sizeBytes,
+    createdAt: plan.createdAt,
+    gate: 'passed'
+  };
 }
 
 // Decision-signing secret: MX_RELEASE_DECISION_SECRET wins when set; otherwise
@@ -360,6 +459,8 @@ function nullableNumber(value: unknown): number | null {
 interface StoredReleaseArtifactMetadata {
   artifactId: string;
   releaseId: string;
+  productId: string;
+  channel: string;
   kind: ReleaseArtifactKind;
   componentId: string;
   version: string;
@@ -367,6 +468,7 @@ interface StoredReleaseArtifactMetadata {
   digest: string;
   sizeBytes: number;
   platform: string | null;
+  arch: string | null;
   source: 'manual-upload';
   storage: 'server' | 'oss';
   contentType: string;
@@ -435,6 +537,8 @@ async function readStoredArtifactMetadata(artifactId: string): Promise<StoredRel
   const metadata: StoredReleaseArtifactMetadata = {
     artifactId: assertSafeArtifactId(nullableString(row.artifactId) ?? ''),
     releaseId: safePathPart(nullableString(row.releaseId) ?? 'release'),
+    productId: safePathPart(nullableString(row.productId) ?? nullableString(row.componentId) ?? 'mx-h2i'),
+    channel: safePathPart(nullableString(row.channel) ?? 'stable'),
     kind: normalizeReleaseArtifactKind(row.kind),
     componentId: nullableString(row.componentId) ?? 'mx-h2i',
     version: nullableString(row.version) ?? '0.0.0',
@@ -442,6 +546,7 @@ async function readStoredArtifactMetadata(artifactId: string): Promise<StoredRel
     digest: normalizeSha256Digest(nullableString(row.digest)) ?? '',
     sizeBytes: nullableNumber(row.sizeBytes) ?? 0,
     platform: normalizeReleasePlatform(nullableString(row.platform)),
+    arch: normalizeReleaseArch(nullableString(row.arch)),
     source: 'manual-upload',
     storage: row.storage === 'oss' ? 'oss' : 'server',
     contentType: nullableString(row.contentType) ?? 'application/octet-stream',
@@ -514,7 +619,7 @@ function releaseOssConfig(): ReleaseOssConfig | null {
     accessKeyId,
     accessKeySecret,
     securityToken,
-    prefix: safeOssPrefix(process.env.MX_RELEASE_OSS_PREFIX || 'mx-h2i/releases'),
+    prefix: safeOssPrefix(process.env.MX_RELEASE_OSS_PREFIX || 'mx-launcher/releases'),
     publicBaseUrl: nullableString(process.env.MX_RELEASE_OSS_PUBLIC_BASE_URL),
     signedUrlTtlSeconds: nullableNumber(process.env.MX_RELEASE_OSS_SIGNED_URL_TTL_SECONDS) ?? 3600
   };
@@ -630,22 +735,31 @@ function releaseOssPublicUrl(config: ReleaseOssConfig, objectKey: string): strin
 
 function releaseOssObjectKey(
   config: ReleaseOssConfig,
+  productId: string,
+  channel: string,
+  version: string,
+  platform: string | null,
+  arch: string | null,
   releaseId: string,
-  artifactId: string,
   fileName: string
 ): string {
   return [
     config.prefix,
+    safePathPart(productId),
+    safePathPart(channel),
+    safePathPart(version),
+    safePathPart(platform || 'all'),
+    safePathPart(arch || 'universal'),
     safePathPart(releaseId),
-    safePathPart(artifactId),
     safeArtifactFileName(fileName)
   ].filter(Boolean).join('/');
 }
 
-function releaseArtifactId(releaseId: string, kind: ReleaseArtifactKind, version: string, digest: string): string {
+function releaseArtifactId(productId: string, releaseId: string, kind: ReleaseArtifactKind, version: string, digest: string): string {
   const digestPart = digest.replace(/^sha256:/, '').slice(0, 12);
   return [
     'artifact',
+    safePathPart(productId),
     safePathPart(releaseId),
     safePathPart(kind),
     safePathPart(version),
@@ -711,6 +825,40 @@ function normalizeReleasePlatform(value: string | null): string | null {
   if (normalized === 'win' || normalized === 'windows' || normalized === 'win32') return 'win32';
   if (normalized === 'linux') return 'linux';
   return safePathPart(normalized);
+}
+
+function normalizeReleaseArch(value: string | null): string | null {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === 'all') return null;
+  if (normalized === 'amd64' || normalized === 'x86_64') return 'x64';
+  if (normalized === 'aarch64') return 'arm64';
+  if (normalized === 'x86') return 'ia32';
+  if (normalized === 'universal' || normalized === 'universal2') return 'universal';
+  return safePathPart(normalized);
+}
+
+function isInstallerArtifactKind(kind: ReleaseArtifactKind): boolean {
+  return kind === 'app-installer' || kind === 'mx-h2i-installer';
+}
+
+function validateInstallerArtifact(
+  kind: ReleaseArtifactKind,
+  platform: string | null,
+  arch: string | null,
+  fileName: string
+): void {
+  if (kind !== 'app-installer') return;
+  if (!platform) throw new BadRequestException('app-installer requires platform');
+  if (!arch) throw new BadRequestException('app-installer requires arch (x64, arm64, ia32, or universal)');
+  const extension = extname(fileName).toLowerCase();
+  const allowed = platform === 'darwin'
+    ? ['.dmg', '.pkg']
+    : platform === 'win32'
+      ? ['.exe', '.msi']
+      : ['.appimage', '.deb', '.rpm'];
+  if (!allowed.includes(extension)) {
+    throw new BadRequestException(`app-installer ${platform} file must use: ${allowed.join(', ')}`);
+  }
 }
 
 function nullableNumberHeader(value: string | string[] | undefined): number | null {

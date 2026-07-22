@@ -36,6 +36,8 @@ export interface ElectronLauncherReleaseArtifactRef {
   signature: string | null;
   sizeBytes: number | null;
   platform?: string | null;
+  arch?: string | null;
+  fileName?: string | null;
   activation: ElectronLauncherReleaseActivationMode;
   autoApply: boolean;
   restartRequired: boolean;
@@ -46,6 +48,7 @@ export interface ElectronLauncherReleaseArtifactRef {
 export interface ElectronLauncherReleasePlan {
   planId: string;
   releaseId: string;
+  productId?: string;
   environment: string;
   channel: string;
   installId: string | null;
@@ -100,6 +103,7 @@ export interface ElectronLauncherUpdateCheckInput {
   installId?: string | null;
   userId?: string | null;
   platform?: string | null;
+  arch?: string | null;
 }
 
 export interface ElectronLauncherUpdateCheckResult {
@@ -179,6 +183,7 @@ export function createElectronLauncherReleaseUpdater(options: ElectronLauncherRe
               userId: input.userId ?? null,
               channel: input.channel,
               platform: input.platform ?? null,
+              arch: input.arch ?? null,
               components: { [input.componentId]: input.currentVersion }
             }
           );
@@ -213,7 +218,7 @@ export function createElectronLauncherReleaseUpdater(options: ElectronLauncherRe
         }
       );
       const decision = decisionPayload.decision;
-      const artifacts = plan ? matchingArtifacts(plan, input.componentId, input.platform) : [];
+      const artifacts = plan ? matchingArtifacts(plan, input.componentId, input.platform, input.arch) : [];
       const gateVerdict = plan?.test?.gate?.verdict;
       const status = !decision.updateAvailable
         ? 'up-to-date'
@@ -368,7 +373,10 @@ function selectReleasePlan(
     if (plan.channel !== input.channel) return false;
     if (plan.installId && plan.installId !== input.installId) return false;
     if (plan.userId && plan.userId !== input.userId) return false;
-    return Boolean(selectPlanDecision(plan, input));
+    const decision = selectPlanDecision(plan, input);
+    if (!decision) return false;
+    const artifacts = matchingArtifacts(plan, input.componentId, input.platform, input.arch);
+    return !decisionRequiresDownload(decision) || artifacts.some((artifact) => Boolean(artifact.url));
   }) ?? null;
 }
 
@@ -380,7 +388,7 @@ function selectPlanDecision(
   return decisions.find((decision) => {
     if (!decision) return false;
     if (decision.componentId !== input.componentId) return false;
-    if (input.componentKind && decision.componentKind !== input.componentKind) return false;
+    if (input.componentKind && !releasePolicyKindsMatch(decision.componentKind, input.componentKind)) return false;
     if (decision.currentVersion && decision.currentVersion !== input.currentVersion) return true;
     return decision.targetVersion !== input.currentVersion;
   }) ?? null;
@@ -389,12 +397,34 @@ function selectPlanDecision(
 function matchingArtifacts(
   plan: ElectronLauncherReleasePlan,
   componentId: string,
-  platform?: string | null
+  platform?: string | null,
+  arch?: string | null
 ): ElectronLauncherReleaseArtifactRef[] {
   const normalizedPlatform = platform?.trim() || null;
+  const normalizedArch = arch?.trim() || null;
   return (Array.isArray(plan.artifacts) ? plan.artifacts : [])
     .filter((artifact) => artifact.componentId === componentId || !artifact.componentId)
-    .filter((artifact) => !artifact.platform || !normalizedPlatform || artifact.platform === normalizedPlatform);
+    .filter((artifact) => !artifact.platform || !normalizedPlatform || artifact.platform === normalizedPlatform)
+    .filter((artifact) => !artifact.arch || artifact.arch === 'universal' || !normalizedArch || artifact.arch === normalizedArch);
+}
+
+function releasePolicyKindsMatch(left: string, right: string): boolean {
+  if (left === right) return true;
+  const installerKinds = new Set(['app-installer', 'mx-h2i-installer']);
+  return installerKinds.has(left) && installerKinds.has(right);
+}
+
+function decisionRequiresDownload(decision: ElectronLauncherReleasePolicyDecision): boolean {
+  return [
+    'app-installer',
+    'mx-h2i-installer',
+    'renderer-ui',
+    'launcher-npm',
+    'launcher-asar',
+    'app-asar',
+    'appcenter-app',
+    'native-helper'
+  ].includes(decision.componentKind);
 }
 
 async function requestJson<T>(

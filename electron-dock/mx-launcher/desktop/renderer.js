@@ -6269,6 +6269,7 @@ function filteredReleaseCenterPlans() {
     const haystack = [
       plan.planId,
       plan.releaseId,
+      plan.productId,
       plan.channel,
       plan.createdBy,
       releaseComponentSummary(plan),
@@ -6295,7 +6296,7 @@ function renderReleaseCenterPanel() {
         <div>
           <span class="site-kind">Release Center</span>
           <strong>Release registry</strong>
-          <small>MX-H2I installer、UI bundle、launcher npm、asar、配置快照和 feature flag 都由 Internal 决策。</small>
+          <small>MX-H2I、Luopan 和其他 standalone launcher 的安装器与热更都由 Internal 决策。</small>
         </div>
         <div class="app-catalog-controls user-catalog-controls release-catalog-controls">
           <input data-release-filter="search" value="${escapeHtml(filter.search || '')}" autocomplete="off" placeholder="Search release..." />
@@ -6312,8 +6313,8 @@ function renderReleaseCenterPanel() {
           </select>
           <button class="secondary-button" type="button" data-release-refresh ${state.releaseCenter.busy ? 'disabled' : ''}>Refresh plans</button>
           <button class="secondary-button" type="button" data-release-upload ${state.releaseCenter.busy ? 'disabled' : ''}>Upload version</button>
-          <button class="secondary-button" type="button" data-release-create="hot" ${state.releaseCenter.busy ? 'disabled' : ''}>Plan hot update</button>
-          <button class="primary-button" type="button" data-release-create="major" ${state.releaseCenter.busy ? 'disabled' : ''}>Plan MX-H2I</button>
+          <button class="secondary-button" type="button" data-release-create="hot" ${state.releaseCenter.busy ? 'disabled' : ''}>Upload hot update</button>
+          <button class="primary-button" type="button" data-release-create="installer" ${state.releaseCenter.busy ? 'disabled' : ''}>Upload installer</button>
         </div>
       </div>
       <div class="user-workbench-meta">
@@ -6345,7 +6346,7 @@ function renderReleaseCenterPanel() {
             <article class="app-table-row ${plan.planId === state.releaseCenter.drawer?.planId ? 'is-selected' : ''}" data-release-select="${escapeHtml(plan.planId)}" tabindex="0">
               <span>
                 <strong>${escapeHtml(plan.releaseId || plan.planId)}</strong>
-                <small>${escapeHtml(`${plan.channel || 'shadow'} / ${formatTime(plan.createdAt)}`)}</small>
+                <small>${escapeHtml(`${plan.productId || 'legacy'} / ${plan.channel || 'shadow'} / ${formatTime(plan.createdAt)}`)}</small>
               </span>
               <span>
                 <strong>${escapeHtml(releaseComponentSummary(plan))}</strong>
@@ -6409,7 +6410,7 @@ function bindReleaseCenterControls(root) {
   const upload = root.querySelector('[data-release-upload]');
   if (upload) upload.addEventListener('click', () => openReleaseUploadDrawer());
   for (const button of root.querySelectorAll('[data-release-create]')) {
-    button.addEventListener('click', () => void createReleasePlanFromAdmin(button.dataset.releaseCreate));
+    button.addEventListener('click', () => openReleaseUploadDrawer(button.dataset.releaseCreate));
   }
   for (const row of root.querySelectorAll('[data-release-select]')) {
     row.addEventListener('click', (event) => {
@@ -6447,91 +6448,6 @@ async function refreshReleaseCenterPlans() {
       }
     };
     state.releaseCenter.feedback = { kind: 'success', message: `Loaded ${plans.length} release plans` };
-  } catch (error) {
-    state.releaseCenter.feedback = { kind: 'error', message: error.message };
-  } finally {
-    state.releaseCenter.busy = false;
-    renderFoundationGrid(state.dashboard?.overview || {});
-    renderInspector();
-  }
-}
-
-async function createReleasePlanFromAdmin(kind = 'hot') {
-  if (state.releaseCenter.busy) return;
-  const major = kind === 'major';
-  const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const suffix = String(Date.now()).slice(-6);
-  const body = major
-    ? {
-        releaseId: `mx-h2i-major-${stamp}-${suffix}`,
-        channel: 'stable',
-        productId: MX_H2I_PRODUCT_ID,
-        appId: MX_H2I_PRODUCT_ID,
-        launcherComponentId: MX_H2I_PRODUCT_ID,
-        launcherUpdatePolicy: 'mx-h2i-installer',
-        launcherCurrentVersion: '0.1.0',
-        launcherTargetVersion: '0.2.0',
-        appUpdatePolicy: 'app-managed',
-        appCurrentVersion: '0.1.0',
-        appTargetVersion: '0.1.0',
-        artifactKind: 'mx-h2i-installer',
-        artifactVersion: '0.2.0',
-        activationMode: 'installer-manual',
-        rolloutStrategy: 'manual-ring',
-        rolloutPercentage: 0,
-        rolloutRings: ['internal-dogfood', 'stable'],
-        suiteId: 'mx-h2i-major-e2e',
-        topology: 'h-d-i-installer',
-        sites: ['internal-main', 'domestic-main'],
-        e2eResult: 'running',
-        createdBy: 'desktop-admin',
-        requestId: `desktop-release-major-${Date.now()}`
-      }
-    : {
-        releaseId: `mx-h2i-hot-${stamp}-${suffix}`,
-        channel: 'stable',
-        productId: MX_H2I_PRODUCT_ID,
-        appId: MX_H2I_PRODUCT_ID,
-        launcherComponentId: 'mx-h2i-renderer',
-        launcherUpdatePolicy: 'renderer-ui',
-        launcherCurrentVersion: '0.1.0',
-        launcherTargetVersion: '0.1.1',
-        appComponentId: 'mx-h2i-config',
-        appUpdatePolicy: 'config-snapshot',
-        appCurrentVersion: '0.1.0',
-        appTargetVersion: '0.1.1',
-        artifactKind: 'renderer-ui',
-        artifactVersion: '0.1.1',
-        activationMode: 'hot-auto',
-        rolloutStrategy: 'gray',
-        rolloutPercentage: 10,
-        rolloutRings: ['internal-dogfood', 'canary', 'stable'],
-        featureKeys: ['mx-h2i.release.hot-update'],
-        suiteId: 'mx-h2i-hot-e2e',
-        topology: 'h-d-i-hot-update',
-        sites: ['internal-main', 'domestic-main'],
-        e2eResult: 'running',
-        createdBy: 'desktop-admin',
-        requestId: `desktop-release-hot-${Date.now()}`
-      };
-  state.releaseCenter.busy = true;
-  state.releaseCenter.feedback = { kind: 'info', message: major ? 'Creating MX-H2I installer plan' : 'Creating hot update plan' };
-  renderFoundationGrid(state.dashboard?.overview || {});
-  try {
-    const payload = await fetchJson('/internal/v1/release-management/plans', { method: 'POST', body });
-    const plan = payload.plan;
-    const currentPlans = releaseCenterPlans().filter((item) => item.planId !== plan.planId);
-    const plans = [plan, ...currentPlans];
-    state.dashboard = {
-      ...(state.dashboard || {}),
-      latestReleasePlans: plans,
-      overview: {
-        ...(state.dashboard?.overview || {}),
-        releaseManagementPlans: Math.max(plans.length, state.dashboard?.overview?.releaseManagementPlans || 0)
-      }
-    };
-    state.releaseCenter.drawer = { planId: plan.planId };
-    state.releaseCenter.feedback = { kind: 'success', message: `Created ${plan.releaseId}` };
   } catch (error) {
     state.releaseCenter.feedback = { kind: 'error', message: error.message };
   } finally {
@@ -6583,17 +6499,19 @@ function openReleaseCenterDrawer(planId) {
   renderFoundationGrid(state.dashboard?.overview || {});
 }
 
-function openReleaseUploadDrawer() {
+function openReleaseUploadDrawer(kind = 'installer') {
   state.releaseCenter.drawer = {
     mode: 'upload',
     draft: {
-      kind: 'installer',
+      productId: MX_H2I_PRODUCT_ID,
+      kind: kind === 'hot' ? 'hot' : 'installer',
       platform: navigator.platform?.toLowerCase().includes('win') ? 'win32' : 'darwin',
+      arch: navigator.platform?.toLowerCase().includes('win') ? 'x64' : 'universal',
       storage: 'oss',
       channel: 'stable',
-      currentVersion: '0.1.0',
-      version: '0.2.0',
-      e2eResult: 'running'
+      currentVersion: '2.0.1',
+      version: '2.0.3',
+      e2eResult: 'passed'
     }
   };
   state.releaseCenter.feedback = null;
@@ -6734,8 +6652,8 @@ function renderReleaseUploadDrawer() {
       <header class="app-drawer-header">
         <div>
           <span class="site-kind">Release Center</span>
-          <h2>Upload MX-H2I Version</h2>
-          <p>上传 DMG/EXE/renderer 包，默认直传 OSS；也可以选择 Internal server storage。</p>
+          <h2>Upload Launcher Version</h2>
+          <p>按应用、系统和 CPU 架构上传 DMG/PKG/EXE/MSI，默认由 Internal 直传 OSS。</p>
         </div>
         <button class="icon-button app-drawer-close" type="button" data-release-drawer-close aria-label="Close release drawer">×</button>
       </header>
@@ -6747,14 +6665,29 @@ function renderReleaseUploadDrawer() {
           </div>
           <div class="release-upload-grid">
             <label>
+              <span>Product</span>
+              <input name="productId" value="${escapeHtml(draft.productId || MX_H2I_PRODUCT_ID)}" autocomplete="off" required pattern="[a-z0-9][a-z0-9-]*" placeholder="mx-h2i / luopan" />
+            </label>
+            <label>
               <span>File</span>
               <input name="artifactFile" type="file" required />
             </label>
             <label>
               <span>Type</span>
               <select name="kind">
-                <option value="installer" ${draft.kind === 'installer' ? 'selected' : ''}>MX-H2I installer</option>
+                <option value="installer" ${draft.kind === 'installer' ? 'selected' : ''}>Full installer</option>
                 <option value="hot" ${draft.kind === 'hot' ? 'selected' : ''}>Hot update bundle</option>
+              </select>
+            </label>
+            <label>
+              <span>Architecture</span>
+              <select name="arch">
+                ${[
+                  ['x64', 'x64 / Intel'],
+                  ['arm64', 'ARM64 / Apple Silicon'],
+                  ['ia32', 'Windows x86'],
+                  ['universal', 'Universal']
+                ].map(([value, label]) => `<option value="${value}" ${draft.arch === value ? 'selected' : ''}>${label}</option>`).join('')}
               </select>
             </label>
             <label>
@@ -6763,8 +6696,7 @@ function renderReleaseUploadDrawer() {
                 ${[
                   ['darwin', 'macOS'],
                   ['win32', 'Windows'],
-                  ['linux', 'Linux'],
-                  ['all', 'All platforms']
+                  ['linux', 'Linux']
                 ].map(([value, label]) => `<option value="${value}" ${draft.platform === value ? 'selected' : ''}>${label}</option>`).join('')}
               </select>
             </label>
@@ -6786,11 +6718,11 @@ function renderReleaseUploadDrawer() {
           <div class="release-upload-grid">
             <label>
               <span>Version</span>
-              <input name="version" value="${escapeHtml(draft.version || '0.2.0')}" autocomplete="off" required />
+              <input name="version" value="${escapeHtml(draft.version || '2.0.3')}" autocomplete="off" required />
             </label>
             <label>
               <span>Current</span>
-              <input name="currentVersion" value="${escapeHtml(draft.currentVersion || '0.1.0')}" autocomplete="off" required />
+              <input name="currentVersion" value="${escapeHtml(draft.currentVersion || '2.0.1')}" autocomplete="off" required />
             </label>
             <label>
               <span>Channel</span>
@@ -6834,7 +6766,7 @@ function renderReleaseUploadDrawer() {
           <div class="release-strategy-strip">
             ${renderReleaseStrategyFact('Default storage', 'OSS direct', 'requires server-side MX_RELEASE_OSS_* secrets')}
             ${renderReleaseStrategyFact('Fallback', 'Internal server', 'stores under artifacts/release-center')}
-            ${renderReleaseStrategyFact('Client source', 'plan URL', 'MX-H2I downloads whatever the version records')}
+            ${renderReleaseStrategyFact('Client source', 'Release Center', 'each product only receives its matching OS/architecture')}
             ${renderReleaseStrategyFact('Safety', 'digest + size', 'client verifies before open/stage')}
           </div>
         </section>
@@ -6995,10 +6927,12 @@ async function uploadReleaseArtifactFromAdmin(form) {
 }
 
 function releaseUploadInputFromForm(form, file) {
+  const productId = (form.elements.productId?.value || MX_H2I_PRODUCT_ID).trim().toLowerCase();
   const kind = form.elements.kind?.value === 'hot' ? 'hot' : 'installer';
   const platform = form.elements.platform?.value || 'darwin';
-  const version = form.elements.version?.value?.trim() || '0.2.0';
-  const currentVersion = form.elements.currentVersion?.value?.trim() || '0.1.0';
+  const arch = form.elements.arch?.value || 'x64';
+  const version = form.elements.version?.value?.trim() || '2.0.3';
+  const currentVersion = form.elements.currentVersion?.value?.trim() || '2.0.1';
   const channel = form.elements.channel?.value || 'stable';
   const storage = form.elements.storage?.value || 'oss';
   const e2eResult = form.elements.e2eResult?.value || 'running';
@@ -7009,16 +6943,18 @@ function releaseUploadInputFromForm(form, file) {
   const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const suffix = String(Date.now()).slice(-6);
   const releaseId = kind === 'hot'
-    ? `mx-h2i-hot-${version}-${stamp}-${suffix}`
-    : `mx-h2i-${platform}-${version}-${stamp}-${suffix}`;
+    ? `${productId}-hot-${version}-${stamp}-${suffix}`
+    : `${productId}-${platform}-${arch}-${version}-${stamp}-${suffix}`;
   return {
+    productId,
     fileName: file.name,
     contentType: file.type || 'application/octet-stream',
     kind,
-    artifactKind: kind === 'hot' ? 'renderer-ui' : 'mx-h2i-installer',
-    componentId: kind === 'hot' ? 'mx-h2i-renderer' : MX_H2I_PRODUCT_ID,
+    artifactKind: kind === 'hot' ? 'renderer-ui' : 'app-installer',
+    componentId: kind === 'hot' ? `${productId}-renderer` : productId,
     releaseId,
     platform: platform === 'all' ? null : platform,
+    arch: arch === 'all' ? null : arch,
     version,
     currentVersion,
     channel,
@@ -7041,6 +6977,8 @@ function commaList(value) {
 async function uploadReleaseArtifactFile(input, file) {
   const params = new URLSearchParams({
     releaseId: input.releaseId,
+    productId: input.productId,
+    channel: input.channel,
     kind: input.artifactKind,
     version: input.version,
     componentId: input.componentId,
@@ -7048,6 +6986,7 @@ async function uploadReleaseArtifactFile(input, file) {
     storage: input.storage
   });
   if (input.platform) params.set('platform', input.platform);
+  if (input.arch) params.set('arch', input.arch);
   const url = `${normalizedServerBase()}/internal/v1/release-artifacts?${params}`;
   const response = await fetch(url, {
     method: 'POST',
@@ -7070,35 +7009,38 @@ async function uploadReleaseArtifactFile(input, file) {
 function releasePlanBodyFromUpload(input, artifact) {
   const artifactUrl = absoluteReleaseArtifactUrl(artifact.url || artifact.downloadPath);
   const major = input.kind !== 'hot';
+  const hasExplicitTargets = input.targetUserIds.length > 0 || input.targetInstallIds.length > 0;
   return major
     ? {
         releaseId: input.releaseId,
         channel: input.channel,
-        productId: MX_H2I_PRODUCT_ID,
-        appId: MX_H2I_PRODUCT_ID,
-        launcherComponentId: MX_H2I_PRODUCT_ID,
-        launcherUpdatePolicy: 'mx-h2i-installer',
+        productId: input.productId,
+        appId: input.productId,
+        launcherComponentId: input.productId,
+        launcherUpdatePolicy: 'app-installer',
         launcherCurrentVersion: input.currentVersion,
         launcherTargetVersion: input.version,
         appUpdatePolicy: 'app-managed',
         appCurrentVersion: input.currentVersion,
         appTargetVersion: input.currentVersion,
-        artifactKind: 'mx-h2i-installer',
+        artifactKind: 'app-installer',
         artifactVersion: input.version,
         artifactUrl,
         artifactDigest: artifact.digest,
         artifactSizeBytes: artifact.sizeBytes,
         artifactPlatform: input.platform,
+        artifactArch: input.arch,
+        artifactFileName: artifact.fileName || input.fileName,
         activationMode: 'installer-manual',
-        rolloutStrategy: 'manual-ring',
-        rolloutPercentage: 0,
+        rolloutStrategy: hasExplicitTargets ? 'manual-ring' : 'all',
+        rolloutPercentage: hasExplicitTargets ? 0 : 100,
         rolloutRings: ['internal-dogfood', 'stable'],
         targetUserIds: input.targetUserIds,
         targetInstallIds: input.targetInstallIds,
         featureKeys: input.featureKeys,
         releaseNotes: input.releaseNotes,
-        suiteId: 'mx-h2i-installer-release',
-        topology: 'h-d-i-installer-release',
+        suiteId: `${input.productId}-installer-release`,
+        topology: `${input.productId}-installer-release`,
         sites: ['internal-main', 'domestic-main'],
         e2eResult: input.e2eResult,
         createdBy: 'desktop-admin',
@@ -7107,13 +7049,13 @@ function releasePlanBodyFromUpload(input, artifact) {
     : {
         releaseId: input.releaseId,
         channel: input.channel,
-        productId: MX_H2I_PRODUCT_ID,
-        appId: MX_H2I_PRODUCT_ID,
+        productId: input.productId,
+        appId: input.productId,
         launcherComponentId: input.componentId,
         launcherUpdatePolicy: 'renderer-ui',
         launcherCurrentVersion: input.currentVersion,
         launcherTargetVersion: input.version,
-        appComponentId: 'mx-h2i-config',
+        appComponentId: `${input.productId}-config`,
         appUpdatePolicy: 'config-snapshot',
         appCurrentVersion: input.currentVersion,
         appTargetVersion: input.version,
@@ -7123,16 +7065,18 @@ function releasePlanBodyFromUpload(input, artifact) {
         artifactDigest: artifact.digest,
         artifactSizeBytes: artifact.sizeBytes,
         artifactPlatform: input.platform,
+        artifactArch: input.arch,
+        artifactFileName: artifact.fileName || input.fileName,
         activationMode: 'hot-auto',
         rolloutStrategy: 'gray',
         rolloutPercentage: 10,
         rolloutRings: ['internal-dogfood', 'canary', 'stable'],
-        featureKeys: input.featureKeys?.length ? input.featureKeys : ['mx-h2i.release.hot-update'],
+        featureKeys: input.featureKeys?.length ? input.featureKeys : [`${input.productId}.release.hot-update`],
         targetUserIds: input.targetUserIds,
         targetInstallIds: input.targetInstallIds,
         releaseNotes: input.releaseNotes,
-        suiteId: 'mx-h2i-hot-release',
-        topology: 'h-d-i-hot-release',
+        suiteId: `${input.productId}-hot-release`,
+        topology: `${input.productId}-hot-release`,
         sites: ['internal-main', 'domestic-main'],
         e2eResult: input.e2eResult,
         createdBy: 'desktop-admin',

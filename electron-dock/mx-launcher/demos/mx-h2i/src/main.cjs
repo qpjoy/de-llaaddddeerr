@@ -54,7 +54,6 @@ const NETWORK_CHANGE_MONITOR_MS = 5000;
 const NETWORK_CHANGE_DEBOUNCE_MS = 1800;
 const DARWIN_PROXY_SIGNATURE_TIMEOUT_MS = 1200;
 const DARWIN_ENDPOINT_ROUTE_PROBE_TIMEOUT_MS = 1800;
-const DARWIN_ENDPOINT_ROUTE_DELETE_TIMEOUT_MS = 2500;
 const DARWIN_ENDPOINT_ROUTE_REPAIR_COOLDOWN_MS = 20_000;
 const NETWORK_DIAGNOSTIC_LOOKUP_TIMEOUT_MS = 2500;
 const WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD = 3;
@@ -2052,6 +2051,10 @@ function execFileText(command, args = [], options = {}) {
   });
 }
 
+function appleScriptString(value) {
+  return `"${String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
 async function initializeSystemDomainProxy() {
   try {
     const mod = await import('@qpjoy/electron-launcher/system-domain-proxy');
@@ -2709,7 +2712,7 @@ async function recordDarwinEndpointRouteRepairDiagnostics(result, reason) {
 async function collectDarwinEndpointRouteDiagnostics(reason = 'manual', options = {}) {
   if (process.platform !== 'darwin') return null;
   const targetSet = await darwinEndpointRouteTargets();
-  const defaultRoute = await darwinRouteGet('default');
+  const defaultRoute = await darwinPhysicalDefaultRoute();
   const routes = [];
   for (const target of targetSet.targets.slice(0, 8)) {
     const route = await darwinRouteGet(target.address);
@@ -2767,32 +2770,6 @@ async function repairDarwinStaleEndpointRoutesForRuntime(reason = 'manual', opti
     lastDarwinEndpointRouteRepairAt = now;
   }
   for (const route of staleRoutes) {
-    if (coolingDown) {
-      repairs.push({
-        target: route.target,
-        ok: false,
-        skipped: true,
-        skipReason: 'cooldown',
-        updatedAt: nowIso()
-      });
-      continue;
-    }
-    const repair = await deleteDarwinHostRoute(route.target.address);
-    let after = null;
-    if (repair.ok === true) {
-      const afterRoute = await darwinRouteGet(route.target.address);
-      const afterClassification = classifyDarwinEndpointRoute(afterRoute, diagnostics.defaultRoute);
-      after = {
-        ok: afterRoute.ok === true,
-        gateway: afterRoute.gateway || null,
-        interfaceName: afterRoute.interfaceName || null,
-        sourceAddress: afterRoute.sourceAddress || null,
-        flags: arrayValue(afterRoute.flags, []),
-        stale: afterClassification.stale,
-        staleReason: afterClassification.reason,
-        error: afterRoute.error || null
-      };
-    }
     repairs.push({
       target: route.target,
       before: {
@@ -2802,20 +2779,22 @@ async function repairDarwinStaleEndpointRoutesForRuntime(reason = 'manual', opti
         flags: arrayValue(route.flags, []),
         staleReason: route.staleReason
       },
-      ...repair,
-      requiresPrivilege: repair.ok !== true && arrayValue(repair.failures, []).some((failure) => failure?.requiresPrivilege === true),
-      after,
+      ok: false,
+      skipped: coolingDown || options.allowPrivileged !== true,
+      skipReason: coolingDown ? 'cooldown' : options.allowPrivileged !== true ? 'privileged-repair-required' : null,
+      requiresPrivilege: true,
+      after: null,
       updatedAt: nowIso()
     });
   }
-  // `route delete` needs root; the unprivileged attempt above almost always
-  // fails with EPERM. For user-triggered repairs we escalate once via the
-  // macOS admin prompt and delete every stale route in a single batch.
+  // Route mutation always needs root. User-triggered repair installs a
+  // deterministic physical-gateway /32 in one privileged batch; background
+  // checks stay diagnostic-only and never surface an expected EPERM failure.
   let privilegedEscalation = null;
   if (options.allowPrivileged === true) {
-    const candidates = repairs.filter((repair) => repair.ok !== true && repair.requiresPrivilege === true && repair.target?.address);
+    const candidates = repairs.filter((repair) => repair.skipped !== true && repair.target?.address);
     if (candidates.length > 0) {
-      privilegedEscalation = await deleteDarwinHostRoutesPrivileged(candidates.map((repair) => repair.target.address));
+      privilegedEscalation = await repairDarwinHostRoutesPrivileged(candidates, diagnostics.defaultRoute);
       for (const repair of candidates) {
         if (privilegedEscalation.ok !== true) {
           repair.privilegedError = privilegedEscalation.error;
@@ -2823,7 +2802,7 @@ async function repairDarwinStaleEndpointRoutesForRuntime(reason = 'manual', opti
         }
         const afterRoute = await darwinRouteGet(repair.target.address);
         const afterClassification = classifyDarwinEndpointRoute(afterRoute, diagnostics.defaultRoute);
-        repair.ok = true;
+        repair.ok = afterRoute.ok === true && afterClassification.stale !== true;
         repair.privileged = true;
         repair.after = {
           ok: afterRoute.ok === true,
@@ -2835,6 +2814,9 @@ async function repairDarwinStaleEndpointRoutesForRuntime(reason = 'manual', opti
           staleReason: afterClassification.reason,
           error: afterRoute.error || null
         };
+        if (repair.ok !== true) {
+          repair.privilegedError = afterRoute.error || afterClassification.reason || 'route remained stale after privileged repair';
+        }
         repair.updatedAt = nowIso();
       }
     }
@@ -2850,20 +2832,38 @@ async function repairDarwinStaleEndpointRoutesForRuntime(reason = 'manual', opti
   };
 }
 
-async function deleteDarwinHostRoutesPrivileged(addresses) {
-  const targets = [...new Set(arrayValue(addresses, [])
-    .map((address) => nullableString(address))
-    .filter((address) => address && net.isIP(address) === 4))];
-  if (targets.length === 0) return { ok: false, error: 'no privileged route delete targets' };
-  const shellCommand = targets.map((address) => `/sbin/route -q -n delete -host ${address}`).join('; ');
-  const script = `do shell script "${shellCommand}" with administrator privileges`;
+async function repairDarwinHostRoutesPrivileged(repairs, defaultRoute) {
+  const gateway = nullableString(defaultRoute?.gateway);
+  if (!gateway || net.isIP(gateway) !== 4 || isDarwinProxyFakeGateway(gateway)) {
+    return { ok: false, error: 'physical IPv4 default gateway is unavailable' };
+  }
+  const routes = arrayValue(repairs, []).filter((repair) => net.isIP(repair?.target?.address) === 4);
+  if (routes.length === 0) return { ok: false, error: 'no privileged route repair targets' };
+  const commands = routes.map((repair) => {
+    const address = repair.target.address;
+    const previousGateway = net.isIP(repair?.before?.gateway) === 4 ? repair.before.gateway : null;
+    const deleteExact = previousGateway
+      ? `/sbin/route -q -n delete -host ${address} ${previousGateway}`
+      : `/sbin/route -q -n delete -host ${address}`;
+    return `${deleteExact} >/dev/null 2>&1 || /sbin/route -q -n delete -host ${address} >/dev/null 2>&1 || true; /sbin/route -q -n add -host ${address} ${gateway} >/dev/null 2>&1 || /sbin/route -q -n change -host ${address} ${gateway}`;
+  });
+  const shellCommand = commands.join('; ');
+  const script = `do shell script ${appleScriptString(shellCommand)} with administrator privileges`;
   try {
     await execFileText('/usr/bin/osascript', ['-e', script], { timeoutMs: 30_000 });
-    return { ok: true, targets, command: shellCommand };
+    return {
+      ok: true,
+      targets: routes.map((repair) => repair.target.address),
+      gateway,
+      interfaceName: defaultRoute?.interfaceName || null,
+      sourceAddress: defaultRoute?.sourceAddress || null,
+      command: shellCommand
+    };
   } catch (err) {
     return {
       ok: false,
-      targets,
+      targets: routes.map((repair) => repair.target.address),
+      gateway,
       command: shellCommand,
       canceled: isUserAuthorizationCanceledError(err),
       error: errorMessage(err)
@@ -2977,6 +2977,23 @@ async function darwinRouteGet(target) {
   }
 }
 
+async function darwinPhysicalDefaultRoute() {
+  try {
+    const mod = await import('@qpjoy/electron-launcher/wireguard');
+    return mod.probeDarwinPhysicalDefaultRoute();
+  } catch (err) {
+    return {
+      ok: false,
+      gateway: null,
+      interfaceName: null,
+      sourceAddress: null,
+      flags: [],
+      raw: null,
+      error: errorMessage(err)
+    };
+  }
+}
+
 function parseDarwinRouteGet(stdout) {
   const text = String(stdout || '');
   const flags = pickDarwinRouteField(text, 'flags')
@@ -3047,51 +3064,6 @@ function classifyDarwinEndpointRoute(route, defaultRoute) {
   return { stale: false, reason: null };
 }
 
-async function deleteDarwinHostRoute(address) {
-  const target = nullableString(address);
-  if (!target) return { ok: false, error: 'empty route delete target' };
-  const attempts = [
-    ['delete', '-host', target],
-    ['delete', target]
-  ];
-  const failures = [];
-  for (const args of attempts) {
-    try {
-      const stdout = await execFileText('/sbin/route', args, {
-        timeoutMs: DARWIN_ENDPOINT_ROUTE_DELETE_TIMEOUT_MS
-      });
-      return {
-        ok: true,
-        command: `/sbin/route ${args.join(' ')}`,
-        stdout: tailText(stdout, 800)
-      };
-    } catch (err) {
-      const message = `${errorMessage(err)} ${err?.stderr || ''} ${err?.stdout || ''}`.trim();
-      const failure = {
-        command: `/sbin/route ${args.join(' ')}`,
-        error: errorMessage(err),
-        stderr: tailText(err?.stderr, 800),
-        stdout: tailText(err?.stdout, 800),
-        requiresPrivilege: /must be root|not permitted|operation not permitted|permission denied|权限/i.test(message)
-      };
-      if (/not in table|not found|no such process/i.test(message)) {
-        return {
-          ...failure,
-          ok: true,
-          notFound: true
-        };
-      }
-      failures.push(failure);
-    }
-  }
-  return {
-    ok: false,
-    failures,
-    error: failures[failures.length - 1]?.error || 'route delete failed',
-    requiresPrivilege: failures.some((failure) => failure.requiresPrivilege === true)
-  };
-}
-
 function darwinEndpointRouteRepairFeedback(result) {
   if (!result || result.supported !== true) return '';
   if (result.repaired === true) return ' 已检测并刷新 relay endpoint 的旧 host route，请重试连接。';
@@ -3115,6 +3087,7 @@ function darwinEndpointRouteRepairFailure(result) {
   }
   const failed = objectList(result?.repairs).find((repair) => repair?.ok !== true && repair?.skipped !== true);
   if (!failed) return '。';
+  if (failed.privilegedError) return `，系统路由修复失败：${failed.privilegedError}。`;
   if (failed.requiresPrivilege === true) return '，自动删除需要系统 route 权限。';
   return failed.error ? `，自动删除失败：${failed.error}。` : '，自动删除失败。';
 }
@@ -6889,6 +6862,8 @@ async function performUpdateCheck(reason, options = {}) {
     artifactSignature: releaseArtifact?.signature || null,
     artifactSizeBytes: Number.isFinite(releaseArtifact?.sizeBytes) ? releaseArtifact.sizeBytes : null,
     artifactPlatform: releaseArtifact?.platform || null,
+    artifactArch: releaseArtifact?.arch || null,
+    artifactFileName: releaseArtifact?.fileName || null,
     activation: releaseArtifact?.activation || null,
     restartRequired: releaseArtifact?.restartRequired === true,
     majorUpdateRequiresInstaller: releasePlan?.activation?.majorUpdateRequiresInstaller === true,
@@ -6898,9 +6873,10 @@ async function performUpdateCheck(reason, options = {}) {
     rolloutBucket: Number.isFinite(releaseResult?.rollout?.bucket) ? releaseResult.rollout.bucket : null,
     featureFlags: Array.isArray(releaseResult?.featureFlags) ? releaseResult.featureFlags : [],
     downloadProgress: null,
-    availableReleases: releaseCatalog.ok
-      ? releaseCatalog.releases
-      : mergeAvailableRelease(runtime.update?.availableReleases, availableReleaseFromPlan(releasePlan, releaseDecision, releaseArtifact, releaseResult?.status)),
+    availableReleases: mergeAvailableRelease(
+      releaseCatalog.ok ? releaseCatalog.releases : runtime.update?.availableReleases,
+      availableReleaseFromPlan(releasePlan, releaseDecision, releaseArtifact, releaseResult?.status)
+    ),
     history: prependUpdateHistory(runtime.update?.history, historyEntry)
   }, runtime.config);
   const failures = [
@@ -6928,16 +6904,33 @@ async function fetchReleaseHistory(reason) {
   try {
     const baseUrl = appCenterCatalogBaseUrl();
     if (!baseUrl) return { ok: false, releases: [], message: 'Internal API baseUrl 为空' };
-    const payload = await requestJson(joinApiUrl(baseUrl, '/internal/v1/release-management/plans'), {
-      timeoutMs: 4500,
-      headers: appCenterCatalogHeaders()
+    const productId = launcherProductId();
+    const params = new URLSearchParams({
+      componentId: productId,
+      channel: runtime.config.releaseChannel,
+      platform: process.platform,
+      arch: process.arch,
+      limit: '8'
     });
-    const plans = Array.isArray(payload?.plans) ? payload.plans : [];
-    const releases = plans
-      .map((plan) => availableReleaseFromPlan(plan))
-      .filter(Boolean)
-      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
-      .slice(0, 8);
+    let releases;
+    try {
+      const payload = await requestJson(joinApiUrl(baseUrl, `/internal/v1/releases/history?${params}`), {
+        timeoutMs: 4500,
+        headers: appCenterCatalogHeaders()
+      });
+      releases = normalizeAvailableReleases(payload?.releases);
+    } catch {
+      // Compatibility with an older Internal server during rolling upgrade.
+      const payload = await requestJson(joinApiUrl(baseUrl, '/internal/v1/release-management/plans'), {
+        timeoutMs: 4500,
+        headers: appCenterCatalogHeaders()
+      });
+      releases = (Array.isArray(payload?.plans) ? payload.plans : [])
+        .map((plan) => availableReleaseFromPlan(plan))
+        .filter(Boolean)
+        .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+        .slice(0, 8);
+    }
     pushAppLog('appcenter', 'info', `Loaded ${releases.length} release plans (${reason}).`);
     return { ok: true, releases, message: '' };
   } catch (error) {
@@ -6952,16 +6945,15 @@ function availableReleaseFromPlan(plan, decision = null, artifact = null, status
   const productId = launcherProductId();
   const selectedDecision = decision
     || [plan?.components?.launcher, plan?.components?.app].filter(Boolean).find((item) => item.componentId === productId)
-    || plan?.components?.launcher
-    || plan?.components?.app
     || null;
   const selectedArtifact = artifact
     || arrayValue(plan?.artifacts, []).find((item) => {
       if (item.componentId && item.componentId !== productId) return false;
-      return !item.platform || item.platform === process.platform;
+      if (item.platform && item.platform !== process.platform) return false;
+      return !item.arch || item.arch === 'universal' || item.arch === process.arch;
     })
-    || arrayValue(plan?.artifacts, [])[0]
     || null;
+  if (!selectedDecision && !selectedArtifact) return null;
   const gate = nullableString(plan?.test?.gate?.verdict);
   return {
     id: nullableString(plan?.planId) || nullableString(plan?.releaseId) || nullableString(selectedArtifact?.artifactId) || makeRequestId('release'),
@@ -6975,6 +6967,9 @@ function availableReleaseFromPlan(plan, decision = null, artifact = null, status
     artifactKind: nullableString(selectedArtifact?.kind),
     activation: nullableString(selectedArtifact?.activation),
     sizeBytes: Number.isFinite(selectedArtifact?.sizeBytes) ? selectedArtifact.sizeBytes : null,
+    platform: nullableString(selectedArtifact?.platform),
+    arch: nullableString(selectedArtifact?.arch),
+    fileName: nullableString(selectedArtifact?.fileName),
     createdAt: nullableString(plan?.createdAt),
     gate
   };
@@ -7010,7 +7005,7 @@ async function checkReleaseCenterUpdate(reason) {
     const checks = [];
     const productId = launcherProductId();
     for (const target of [
-      { componentId: productId, componentKind: 'mx-h2i-installer' },
+      { componentId: productId, componentKind: 'app-installer' },
       { componentId: `${productId}-renderer`, componentKind: 'renderer-ui' }
     ]) {
       try {
@@ -7020,7 +7015,8 @@ async function checkReleaseCenterUpdate(reason) {
           channel: runtime.config.releaseChannel,
           installId: identity.installId,
           userId,
-          platform: process.platform
+          platform: process.platform,
+          arch: process.arch
         }));
       } catch (error) {
         checks.push({ status: 'failed', error: errorMessage(error), target });
@@ -7037,6 +7033,7 @@ async function checkReleaseCenterUpdate(reason) {
         currentVersion,
         channel: runtime.config.releaseChannel,
         platform: process.platform,
+        arch: process.arch,
         releaseId: result.plan?.releaseId || null,
         planId: result.plan?.planId || null,
         componentId: result.decision?.componentId || null,
@@ -7436,7 +7433,7 @@ function releaseArtifactFromUpdate(update) {
   const activation = nullableString(update.activation) || (update.majorUpdateRequiresInstaller ? 'installer-manual' : 'hot-auto');
   return {
     artifactId: nullableString(update.artifactId) || `${nullableString(update.releaseId) || 'release'}-${nullableString(update.artifactKind) || 'artifact'}-${version}`,
-    kind: nullableString(update.artifactKind) || nullableString(update.componentKind) || 'mx-h2i-installer',
+    kind: nullableString(update.artifactKind) || nullableString(update.componentKind) || 'app-installer',
     componentId: nullableString(update.componentId) || launcherProductId(),
     version,
     source: 'internal-postgres',
@@ -7445,6 +7442,8 @@ function releaseArtifactFromUpdate(update) {
     signature: nullableString(update.artifactSignature),
     sizeBytes: Number.isFinite(update.artifactSizeBytes) ? update.artifactSizeBytes : null,
     platform: nullableString(update.artifactPlatform),
+    arch: nullableString(update.artifactArch),
+    fileName: nullableString(update.artifactFileName),
     activation,
     autoApply: update.hotUpdateAuto === true,
     restartRequired: update.restartRequired === true,
@@ -7618,11 +7617,13 @@ async function openRollbackInstaller(rollbackId) {
 
 function updateArtifactTargetPath(update, artifact) {
   const releaseId = safePathSegment(nullableString(update.releaseId) || nullableString(update.planId) || 'release');
-  const fileName = safeUpdateArtifactFileName(artifact.url, artifact.kind, artifact.version);
+  const fileName = safeUpdateArtifactFileName(artifact.fileName, artifact.url, artifact.kind, artifact.version);
   return path.join(app.getPath('userData'), 'updates', releaseId, fileName);
 }
 
-function safeUpdateArtifactFileName(url, artifactKind, version) {
+function safeUpdateArtifactFileName(fileName, url, artifactKind, version) {
+  const declaredName = safePathSegment(nullableString(fileName));
+  if (declaredName && declaredName !== 'app') return declaredName;
   try {
     const parsed = new URL(url);
     const baseName = safePathSegment(decodeURIComponent(path.basename(parsed.pathname)));
@@ -7646,10 +7647,13 @@ function releaseReportMetadata(reason, update, artifact, extra = {}) {
     artifactUrl: artifact.url,
     artifactDigest: artifact.digest,
     artifactPlatform: artifact.platform,
+    artifactArch: artifact.arch,
+    artifactFileName: artifact.fileName,
     activation: artifact.activation,
     currentVersion: nullableString(update.currentVersion),
     latestVersion: nullableString(update.latestVersion),
     platform: process.platform,
+    arch: process.arch,
     ...extra
   };
 }
@@ -7961,6 +7965,8 @@ function normalizeUpdate(input, config) {
     artifactSignature: nullableString(row.artifactSignature),
     artifactSizeBytes: Number.isFinite(row.artifactSizeBytes) ? row.artifactSizeBytes : null,
     artifactPlatform: nullableString(row.artifactPlatform),
+    artifactArch: nullableString(row.artifactArch),
+    artifactFileName: nullableString(row.artifactFileName),
     activation: nullableString(row.activation),
     restartRequired: row.restartRequired === true,
     majorUpdateRequiresInstaller: row.majorUpdateRequiresInstaller === true,
@@ -8034,6 +8040,9 @@ function normalizeAvailableReleases(input) {
         artifactKind: nullableString(row.artifactKind),
         activation: nullableString(row.activation),
         sizeBytes: Number.isFinite(sizeBytes) ? sizeBytes : null,
+        platform: nullableString(row.platform),
+        arch: nullableString(row.arch),
+        fileName: nullableString(row.fileName),
         createdAt: nullableString(row.createdAt),
         gate: nullableString(row.gate)
       };

@@ -3636,6 +3636,7 @@ export function normalizeUpdatePolicy(value: string): UpdatePolicyKind {
     || value === 'launcher-asar'
     || value === 'app-asar'
     || value === 'appcenter-app'
+    || value === 'app-installer'
     || value === 'mx-h2i-installer'
     || value === 'native-helper'
   ) {
@@ -3653,6 +3654,7 @@ export function normalizeReleaseArtifactKind(value: unknown): ReleaseArtifactKin
     || value === 'launcher-asar'
     || value === 'app-asar'
     || value === 'appcenter-app'
+    || value === 'app-installer'
     || value === 'mx-h2i-installer'
     || value === 'native-helper'
   ) {
@@ -3689,7 +3691,7 @@ export function normalizeReleaseRolloutStrategy(value: unknown): ReleaseRolloutS
 
 function releaseActivationForArtifact(kind: ReleaseArtifactKind, requested?: ReleaseActivationMode | null): ReleaseActivationMode {
   if (requested) return requested;
-  if (kind === 'mx-h2i-installer') return 'installer-manual';
+  if (kind === 'app-installer' || kind === 'mx-h2i-installer') return 'installer-manual';
   if (kind === 'native-helper') return 'restart-manual';
   if (kind === 'launcher-asar' || kind === 'app-asar') return 'restart-auto';
   return 'hot-auto';
@@ -3715,6 +3717,7 @@ function releaseArtifactKindForPolicy(kind: UpdatePolicyKind): ReleaseArtifactKi
     || kind === 'launcher-asar'
     || kind === 'app-asar'
     || kind === 'appcenter-app'
+    || kind === 'app-installer'
     || kind === 'mx-h2i-installer'
     || kind === 'native-helper'
   ) {
@@ -3757,6 +3760,8 @@ function buildReleaseArtifactRef(
       ? input.artifactSizeBytes
       : null,
     platform: role === 'launcher' ? input.artifactPlatform?.trim() || null : null,
+    arch: role === 'launcher' ? input.artifactArch?.trim() || null : null,
+    fileName: role === 'launcher' ? input.artifactFileName?.trim() || null : null,
     activation,
     autoApply: decision.updateMode === 'automatic' && activation !== 'installer-manual',
     restartRequired: releaseActivationNeedsRestart(activation),
@@ -3821,6 +3826,16 @@ export function releasePolicyByKind(
       requiresGate: true,
       rollbackRequired: true,
       reason: 'app update is marked mandatory'
+    };
+  }
+  if (kind === 'app-installer') {
+    return {
+      updateMode: 'mandatory',
+      canSkip: false,
+      canDefer: true,
+      requiresGate: true,
+      rollbackRequired: true,
+      reason: 'standalone launcher updates require a signed full installer and explicit user confirmation'
     };
   }
   if (kind === 'mx-h2i-installer') {
@@ -3901,10 +3916,11 @@ export function buildReleaseManagementPlan(
     ? Math.max(0, Math.min(100, input.rolloutPercentage))
     : rolloutStrategy === 'all' ? 100 : 10;
   const activationModes = artifacts.map((artifact) => artifact.activation);
-  const majorUpdateRequiresInstaller = artifacts.some((artifact) => artifact.kind === 'mx-h2i-installer' || artifact.activation === 'installer-manual');
+  const majorUpdateRequiresInstaller = artifacts.some((artifact) => artifact.activation === 'installer-manual');
   return {
     planId: parts.planId,
     releaseId: parts.releaseId,
+    productId: input.productId?.trim() || input.launcherComponentId?.trim() || input.appId?.trim() || 'mx-h2i',
     environment: config.environment,
     channel: input.channel?.trim() || 'shadow',
     installId: input.installId ?? null,

@@ -230,6 +230,13 @@ export interface HdoLocalRoute {
   raw?: string | null;
 }
 
+export interface DarwinDefaultRoute {
+  gateway: string;
+  interfaceName: string;
+  flags: string;
+  raw: string;
+}
+
 export interface HdoRouteConflict {
   localCidr: string;
   hdoCidr: string;
@@ -1472,6 +1479,31 @@ export function parseDarwinNetstatRoutes(raw: string): HdoLocalRoute[] {
   return uniqueRoutes(routes);
 }
 
+export function parseDarwinDefaultRoutes(raw: string): DarwinDefaultRoute[] {
+  const routes: DarwinDefaultRoute[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('Destination')) continue;
+    const columns = trimmed.split(/\s+/);
+    if (columns[0] !== 'default' || columns.length < 4) continue;
+    routes.push({
+      gateway: columns[1] ?? '',
+      flags: columns[2] ?? '',
+      interfaceName: columns[3] ?? '',
+      raw: trimmed
+    });
+  }
+  return routes;
+}
+
+export function selectDarwinPhysicalDefaultRoute(raw: string): DarwinDefaultRoute | null {
+  return parseDarwinDefaultRoutes(raw).find((route) =>
+    isIpv4(route.gateway)
+      && !isProxyTunIpv4(route.gateway)
+      && !/^(?:utun|lo)\d*$/i.test(route.interfaceName)
+  ) ?? null;
+}
+
 export function parseLinuxIpRoutes(raw: string): HdoLocalRoute[] {
   const routes: HdoLocalRoute[] = [];
   for (const line of raw.split(/\r?\n/)) {
@@ -1976,8 +2008,9 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
         '}'
       ]
     : [];
-  // The endpoint bypass host routes are pinned to the default gateway captured
-  // at tunnel start. After a Wi-Fi/network switch they keep pointing at the old
+  // The endpoint bypass host routes are pinned to the physical IPv4 default
+  // selected from netstat, not the logical default reported by a Clash/mihomo
+  // utun. After a Wi-Fi/network switch they keep pointing at the old
   // gateway/source address and black-hole the relay endpoint (bootstrap API
   // included) until deleted with root. This daemon is the only resident root
   // process, so it watches the default path and re-applies the bypass when it
@@ -1991,12 +2024,13 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
   const endpointBypassWatchdogLines = endpointBypassCommands.length > 0
     ? [
         'current_endpoint_bypass_path() {',
-        "  route -vn get default 2>/dev/null | awk '",
-        "    /^[[:space:]]*gateway:/ { gateway=$2 }",
-        "    /^[[:space:]]*interface:/ { interfaceName=$2 }",
-        "    /sockaddrs: .*IFA/ { getline; source=$NF }",
-        "    END { if (gateway != \"\" && interfaceName != \"\") printf \"%s %s %s\", gateway, interfaceName, source != \"\" ? source : \"-\" }",
-        "  '",
+        "  __hdo_physical_path=\"$(/usr/sbin/netstat -rn -f inet 2>/dev/null | awk '$1 == \"default\" && $2 ~ /^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$/ && $2 !~ /^198\\.(18|19)\\./ && $4 !~ /^(utun|lo)[0-9]*$/ { print $2, $4; exit }')\"",
+        '  set -- $__hdo_physical_path',
+        '  __hdo_physical_gateway="${1:-}"',
+        '  __hdo_physical_interface="${2:-}"',
+        '  [ -n "$__hdo_physical_gateway" ] && [ -n "$__hdo_physical_interface" ] || return 0',
+        "  __hdo_physical_source=\"$(/sbin/ifconfig \"$__hdo_physical_interface\" 2>/dev/null | awk '/^[[:space:]]*inet[[:space:]]/ { print $2; exit }')\"",
+        '  printf "%s %s %s" "$__hdo_physical_gateway" "$__hdo_physical_interface" "${__hdo_physical_source:--}"',
         '}',
         'endpoint_bypass_route_state() {',
         "  route -vn get \"$1\" 2>/dev/null | awk '",
@@ -2294,10 +2328,13 @@ function darwinEndpointBypassCommands(endpointHosts: string[], logArg: string): 
   const hosts = uniqueStrings(endpointHosts.filter((host) => isIpv4(host) || /^[a-zA-Z0-9.-]+$/.test(host)));
   if (hosts.length === 0) return [];
   return [
-    '__hdo_endpoint_gateway="$(route -n get default 2>/dev/null | awk \'/gateway:/{print $2; exit}\')"',
-    '__hdo_endpoint_interface="$(route -n get default 2>/dev/null | awk \'/interface:/{print $2; exit}\')"',
+    "__hdo_endpoint_path=\"$(/usr/sbin/netstat -rn -f inet 2>/dev/null | awk '$1 == \"default\" && $2 ~ /^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$/ && $2 !~ /^198\\.(18|19)\\./ && $4 !~ /^(utun|lo)[0-9]*$/ { print $2, $4; exit }')\"",
+    'set -- $__hdo_endpoint_path',
+    '__hdo_endpoint_gateway="${1:-}"',
+    '__hdo_endpoint_interface="${2:-}"',
+    "__hdo_endpoint_source=\"$(/sbin/ifconfig \"$__hdo_endpoint_interface\" 2>/dev/null | awk '/^[[:space:]]*inet[[:space:]]/ { print $2; exit }')\"",
     '__hdo_bypass_applied_ips=""',
-    'if [ -n "$__hdo_endpoint_gateway" ]; then',
+    'if [ -n "$__hdo_endpoint_gateway" ] && [ -n "$__hdo_endpoint_interface" ]; then',
     `  for __hdo_endpoint_host in ${hosts.map(shellQuote).join(' ')}; do`,
     '    case "$__hdo_endpoint_host" in',
     '      *[!0-9.]*|"")',
@@ -2308,7 +2345,7 @@ function darwinEndpointBypassCommands(endpointHosts: string[], logArg: string): 
     '        __hdo_endpoint_ips="$__hdo_endpoint_host"',
     '        ;;',
     '    esac',
-    `    { echo "endpointBypass=$__hdo_endpoint_host"; echo "endpointIps=$__hdo_endpoint_ips"; echo "gateway=$__hdo_endpoint_gateway"; echo "defaultInterface=$__hdo_endpoint_interface"; } >> ${logArg} 2>&1`,
+    `    { echo "endpointBypass=$__hdo_endpoint_host"; echo "endpointIps=$__hdo_endpoint_ips"; echo "gateway=$__hdo_endpoint_gateway"; echo "defaultInterface=$__hdo_endpoint_interface"; echo "defaultSource=$__hdo_endpoint_source"; } >> ${logArg} 2>&1`,
     '    for __hdo_endpoint_ip in $__hdo_endpoint_ips; do',
     '      route -q -n delete -host "$__hdo_endpoint_ip" >/dev/null 2>&1 || true',
     '      route -q -n add -host "$__hdo_endpoint_ip" "$__hdo_endpoint_gateway" >/dev/null 2>&1 || route -q -n change -host "$__hdo_endpoint_ip" "$__hdo_endpoint_gateway" >/dev/null 2>&1 || true',
@@ -2953,14 +2990,20 @@ function routeLooksLikeExistingHdoRoute(
 
 function routeLooksLikeProxyTunCaptureRoute(route: HdoLocalRoute): boolean {
   const range = cidrRange(route.cidr);
-  const gateway = route.gateway ? ipv4ToInt(route.gateway) : null;
-  if (!range || gateway === null) return false;
-  const proxyGatewayStart = ipv4ToInt('198.18.0.0');
-  const proxyGatewayEnd = ipv4ToInt('198.19.255.255');
-  if (proxyGatewayStart === null || proxyGatewayEnd === null) return false;
-  if (gateway < proxyGatewayStart || gateway > proxyGatewayEnd) return false;
+  if (!range || !isProxyTunIpv4(route.gateway)) return false;
   const prefix = prefixFromRange(range);
   return prefix !== null && prefix <= 8;
+}
+
+function isProxyTunIpv4(value: string | null | undefined): boolean {
+  const gateway = value ? ipv4ToInt(value) : null;
+  const proxyGatewayStart = ipv4ToInt('198.18.0.0');
+  const proxyGatewayEnd = ipv4ToInt('198.19.255.255');
+  return gateway !== null
+    && proxyGatewayStart !== null
+    && proxyGatewayEnd !== null
+    && gateway >= proxyGatewayStart
+    && gateway <= proxyGatewayEnd;
 }
 
 function isWireGuardLikeInterface(value: string | null | undefined): boolean {

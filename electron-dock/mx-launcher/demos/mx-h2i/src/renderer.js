@@ -1162,7 +1162,7 @@ function renderReleaseHistory(update) {
   const rows = releases.length
     ? releases.slice(0, 3).map((item) => ({
         title: item.version || item.releaseId || 'release',
-        meta: [item.componentKind, item.artifactKind, item.channel].filter(Boolean).join(' · '),
+        meta: [item.componentKind, item.artifactKind, item.platform, item.arch, item.channel].filter(Boolean).join(' · '),
         status: item.status || item.gate || '-',
         at: item.createdAt
       }))
@@ -3099,7 +3099,7 @@ function renderUpdatePanel() {
         ${metric('Gray', update.rolloutGroup)}
         ${metric('Release', update.releaseId)}
         ${metric('Artifact', update.artifactKind || update.componentKind)}
-        ${metric('Platform', update.artifactPlatform || '-')}
+        ${metric('Platform', [update.artifactPlatform, update.artifactArch].filter(Boolean).join(' / ') || '-')}
         ${metric('Activation', update.activation || (update.majorUpdateRequiresInstaller ? 'installer-manual' : update.hotUpdateAuto ? 'hot-auto' : '-'))}
         ${metric('Matched by', rolloutMatchedByLabel(update))}
       </div>

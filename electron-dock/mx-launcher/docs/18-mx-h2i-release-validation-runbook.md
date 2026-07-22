@@ -1,7 +1,8 @@
 # MX-H2I Release Validation Runbook
 
 This runbook is for validating Release Center before giving MX-H2I packages to other users.
-It separates the current control-plane validation from the future client updater executor.
+The concise production procedure is in
+[23-release-center-full-installer-operations.md](./23-release-center-full-installer-operations.md).
 
 ## Current State
 
@@ -12,12 +13,12 @@ Ready now:
 - Release policy can distinguish hot updates from full installer updates.
 - Release plans can carry artifact URL, digest, rollout, gate, and activation metadata.
 - Release Center can host uploaded artifacts in OSS or the Internal artifact store.
+- MX-H2I and Luopan send product, platform, and CPU architecture to the single-install decision API.
+- The shared client executor downloads, verifies, stages, and opens full installers while preserving
+  the DMG/EXE file name.
 
-Not complete yet:
-
-- MX-H2I client does not yet hot-swap renderer/asar/config artifacts or restart itself after
-  applying a full installer.
-- Real OSS credentials still need to be supplied and verified in the target k8s environment.
+Environment work still required: real OSS credentials must be supplied and verified in the target
+k8s environment before choosing `OSS direct`.
 
 ## Layer 1: Server Smoke
 
@@ -31,10 +32,13 @@ Expected result:
 
 - health check passes;
 - `renderer-ui` policy returns `automatic`;
-- `mx-h2i-installer` policy returns `mandatory`;
+- `app-installer` policy returns `mandatory`;
 - one hot-update plan is created with `hotUpdateAuto=true`;
-- one installer plan is created with `majorUpdateRequiresInstaller=true`;
-- both plans appear in `/internal/v1/release-management/plans`.
+- macOS/arm64 and Windows/x64 installer plans are created with
+  `majorUpdateRequiresInstaller=true`;
+- a macOS check never receives the Windows artifact (and vice versa);
+- a client newer than the target is not downgraded;
+- sanitized client history contains version/artifact/platform/arch instead of `UNKNOWN` rows.
 
 This smoke creates `rel_smoke_*` plans. It does not download, install, restart, or touch
 WireGuard/PAC/DNS.
@@ -54,8 +58,8 @@ Verify:
 
 - Internal -> Release Center opens the registry table.
 - `Refresh plans` reloads without error.
-- `Plan hot update` creates a hot plan and opens the drawer.
-- `Plan MX-H2I` creates an installer plan and opens the drawer.
+- `Upload hot update` opens a hot artifact form.
+- `Upload installer` opens the product/platform/architecture installer form.
 - Drawer shows artifact, rollout, gate, client behavior, and next actions.
 - Status is `ready` only when E2E gate is passed.
 
@@ -164,7 +168,7 @@ MX_RELEASE_OSS_BUCKET=mx-release
 MX_RELEASE_OSS_ACCESS_KEY_ID=...
 MX_RELEASE_OSS_ACCESS_KEY_SECRET=...
 MX_RELEASE_OSS_SECURITY_TOKEN=
-MX_RELEASE_OSS_PREFIX=mx-h2i/releases
+MX_RELEASE_OSS_PREFIX=mx-launcher/releases
 MX_RELEASE_OSS_PUBLIC_BASE_URL=
 ```
 
@@ -178,7 +182,7 @@ kubectl -n mx-internal-shadow create secret generic mx-release-oss \
   --from-literal=MX_RELEASE_OSS_ACCESS_KEY_ID=... \
   --from-literal=MX_RELEASE_OSS_ACCESS_KEY_SECRET=... \
   --from-literal=MX_RELEASE_OSS_SECURITY_TOKEN= \
-  --from-literal=MX_RELEASE_OSS_PREFIX=mx-h2i/releases \
+  --from-literal=MX_RELEASE_OSS_PREFIX=mx-launcher/releases \
   --from-literal=MX_RELEASE_OSS_PUBLIC_BASE_URL=
 ```
 
@@ -201,8 +205,10 @@ Register and upload the artifact:
 pnpm --dir electron-dock/mx-launcher/server release:publish -- \
   --base-url http://192.168.1.4:18090 \
   --kind installer \
+  --product mx-h2i \
   --storage oss \
   --platform darwin \
+  --arch universal \
   --artifact electron-dock/mx-launcher/demos/mx-h2i/out/electron-builder/MX-H2I-0.2.0-mac-universal.dmg \
   --current-version 0.1.0 \
   --version 0.2.0 \
@@ -210,21 +216,23 @@ pnpm --dir electron-dock/mx-launcher/server release:publish -- \
   --e2e-result running
 ```
 
-For Windows, use `--platform win32` and point `--artifact` at the EXE/MSI. If an external object
+For Windows, use `--platform win32 --arch x64` and point `--artifact` at the EXE/MSI. If an external object
 store or CDN URL is already available, pass `--artifact-url <url>` to skip upload. Pass
 `--upload=internal` to force upload even when an external URL is provided.
 
 The script computes `sha256:<digest>` from the local file and creates an MX-H2I installer
 release plan with:
 
-- `launcherUpdatePolicy=mx-h2i-installer`
-- `artifactKind=mx-h2i-installer`
+- `launcherUpdatePolicy=app-installer`
+- `artifactKind=app-installer`
 - `activationMode=installer-manual`
 - `artifactUrl=<download-url>`
 - `artifactDigest=sha256:<digest>`
 - `artifactSizeBytes=<bytes>`
 - `artifactPlatform=darwin|win32|linux`
-- `rolloutStrategy=manual-ring` for first testers.
+- `artifactArch=x64|arm64|ia32|universal`
+- no targets means `rolloutStrategy=all` and `rolloutPercentage=100`;
+- explicit user/install targets mean a point-targeted manual ring.
 
 The `--base-url` above is only the admin/control-plane address used by the publish script. When
 the server has `MX_PUBLIC_BASE_URL=http://10.88.88.88:18090`, uploaded private OSS/server artifacts
@@ -246,8 +254,10 @@ artifact:
 pnpm --dir electron-dock/mx-launcher/server release:publish -- \
   --base-url http://192.168.1.4:18090 \
   --kind installer \
+  --product mx-h2i \
   --storage oss \
   --platform darwin \
+  --arch universal \
   --artifact electron-dock/mx-launcher/demos/mx-h2i/out/electron-builder/MX-H2I-0.2.0-mac-universal.dmg \
   --current-version 0.1.0 \
   --version 0.2.0 \
@@ -321,24 +331,18 @@ wiring and only shows check/download/staged).
 Installer 类走同样的目标圈选，但激活永远手动：`ready-to-install` 后由用户确认
 打开，新版本首启回报 `installer-completed`。
 
-## Layer 7: Toward No Manual Distribution
+## Layer 7: Normal Release Pipeline
 
-To stop manually sending files completely, finish the remaining updater executor work:
-
-1. Add Release Center artifact upload or OSS-backed signed URL issuance.
-2. Poll periodically or on app startup, with backoff and quiet hours.
-3. Verify artifact signatures in addition to sha256 digests.
-4. Apply hot renderer/config/asar artifacts from the staged slot when
-   `activation.hotUpdateAuto=true`, then show a dismissible toast.
-5. For `installer-manual`, keep the current explicit prompt and OS-open flow; add a clear
-   restart/install completion report after the new app version starts.
-6. Defer activation while MX-H2I is connecting, recovering, or asking for network permission.
-
-After that executor exists, normal releases become:
+The V1 full-installer path is now:
 
 ```text
 build -> upload artifact -> create Release Center plan -> gate -> gray rollout -> auto client update
 ```
+
+`auto client update` here means automatic discovery/download/verification plus an explicit
+OS installer confirmation; Release Center does not silently install privileged DMG/EXE packages.
+Future hardening can add platform code-signature verification on top of the existing sha256/size
+verification.
 
 ## Appendix: H2O State Snapshot & Restore
 

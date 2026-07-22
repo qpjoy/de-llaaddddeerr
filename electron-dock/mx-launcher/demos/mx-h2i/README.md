@@ -180,8 +180,11 @@ On macOS, the WireGuard runtime prefers a product-owned LaunchDaemon
 the V1 HDO keep-alive path: launchd keeps the tunnel alive across lock, unlock,
 and sleep/resume, while the app process probes health and revalidates the
 browser PAC plus CLI dynamic resolver path. Its endpoint-route watchdog compares
-the default gateway, interface, and local source/IFA address. This last value is
-required when the Mac moves between two Wi-Fi networks that both use `en0` and
+the physical IPv4 default gateway, interface, and local source/IFA address. It
+selects that path from the complete macOS route table instead of trusting
+`route get default`, which may point at a Clash/mihomo utun or its
+`198.18.0.0/15` fake gateway. The source value is required when the Mac moves
+between two Wi-Fi networks that both use `en0` and
 the same gateway address but assign different DHCP addresses; otherwise the
 public bootstrap host route can retain the old source and fail with
 `EADDRNOTAVAIL`. A user-initiated reconnect detects and removes an older stale

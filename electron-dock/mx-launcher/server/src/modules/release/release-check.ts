@@ -15,6 +15,7 @@ export interface ReleaseCheckInput {
   userId?: string | null;
   channel: string;
   platform?: string | null;
+  arch?: string | null;
   /** componentId -> currently running version. */
   components: Record<string, string>;
 }
@@ -72,6 +73,8 @@ export function evaluateReleaseCheck(
   for (const plan of candidates) {
     const decision = matchComponentDecision(plan, input.components);
     if (!decision) continue;
+    const artifacts = matchingArtifacts(plan, decision.componentId, input.platform, input.arch);
+    if (decisionRequiresDownload(decision) && !artifacts.some((artifact) => Boolean(artifact.url))) continue;
     const match = matchRollout(plan, input, decision.componentId);
     if (!match) continue;
 
@@ -86,7 +89,7 @@ export function evaluateReleaseCheck(
       releaseId: plan.releaseId,
       channel: plan.channel,
       decision,
-      artifacts: matchingArtifacts(plan, decision.componentId, input.platform),
+      artifacts,
       activation: plan.activation,
       releaseNotes: plan.releaseNotes ?? null,
       featureFlags: plan.rollout?.featureKeys ?? [],
@@ -126,7 +129,10 @@ export function signReleaseCheckResult(
       artifactId: artifact.artifactId,
       url: artifact.url,
       digest: artifact.digest,
-      version: artifact.version
+      version: artifact.version,
+      platform: artifact.platform,
+      arch: artifact.arch,
+      fileName: artifact.fileName
     })),
     featureFlags: result.featureFlags,
     signedAt
@@ -151,7 +157,7 @@ function matchComponentDecision(
   for (const decision of decisions) {
     const runningVersion = components[decision.componentId];
     if (runningVersion === undefined) continue;
-    if (decision.targetVersion && decision.targetVersion !== runningVersion) {
+    if (decision.targetVersion && isReleaseVersionNewer(decision.targetVersion, runningVersion)) {
       // Recompute against the caller's real running version instead of the
       // version recorded when the plan was created.
       return {
@@ -187,10 +193,51 @@ function matchRollout(
 function matchingArtifacts(
   plan: ReleaseManagementPlan,
   componentId: string,
-  platform: string | null | undefined
+  platform: string | null | undefined,
+  arch: string | null | undefined
 ): ReleaseManagementPlan['artifacts'] {
   const normalizedPlatform = platform?.trim() || null;
+  const normalizedArch = arch?.trim() || null;
   return (plan.artifacts ?? [])
     .filter((artifact) => !artifact.componentId || artifact.componentId === componentId)
-    .filter((artifact) => !artifact.platform || !normalizedPlatform || artifact.platform === normalizedPlatform);
+    .filter((artifact) => !artifact.platform || !normalizedPlatform || artifact.platform === normalizedPlatform)
+    .filter((artifact) => !artifact.arch || artifact.arch === 'universal' || !normalizedArch || artifact.arch === normalizedArch);
+}
+
+function decisionRequiresDownload(decision: ReleasePolicyDecision): boolean {
+  return [
+    'app-installer',
+    'mx-h2i-installer',
+    'renderer-ui',
+    'launcher-npm',
+    'launcher-asar',
+    'app-asar',
+    'appcenter-app',
+    'native-helper'
+  ].includes(decision.componentKind);
+}
+
+/**
+ * Update checks must never turn a newer client into an older one. For normal
+ * dotted versions we compare numeric identifiers; opaque build versions keep
+ * the legacy unequal-version behavior so existing internal channels continue
+ * to work.
+ */
+function isReleaseVersionNewer(target: string, current: string): boolean {
+  if (target === current) return false;
+  const targetParts = numericVersionParts(target);
+  const currentParts = numericVersionParts(current);
+  if (!targetParts || !currentParts) return true;
+  const length = Math.max(targetParts.length, currentParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const left = targetParts[index] ?? 0;
+    const right = currentParts[index] ?? 0;
+    if (left !== right) return left > right;
+  }
+  return false;
+}
+
+function numericVersionParts(value: string): number[] | null {
+  const match = value.trim().match(/^v?(\d+(?:\.\d+)*)(?:[-+].*)?$/i);
+  return match ? match[1].split('.').map(Number) : null;
 }

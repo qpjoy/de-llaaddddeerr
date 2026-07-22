@@ -132,7 +132,11 @@ export function createElectronLauncherReleaseUpdateExecutor(
   };
 
   async function stageArtifact(releaseId: string, artifact: ElectronLauncherReleaseArtifactRef): Promise<string> {
-    const fileName = artifact.url ? basename(new URL(artifact.url).pathname) || artifact.artifactId : artifact.artifactId;
+    const fileName = artifact.fileName
+      ? basename(artifact.fileName)
+      : artifact.url
+        ? basename(new URL(artifact.url).pathname) || artifact.artifactId
+        : artifact.artifactId;
     const targetPath = join(baseDir, STAGING_DIR, releaseId, fileName);
     phase('downloading', { artifactId: artifact.artifactId, targetPath });
     await report('download-started', { artifactId: artifact.artifactId, releaseId });

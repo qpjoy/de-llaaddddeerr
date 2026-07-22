@@ -11,6 +11,7 @@ import {
   repairWireGuardTunnelRoutes,
   renderWireGuardInterface,
   resolveWireGuardConnectionRuntime,
+  selectDarwinPhysicalDefaultRoute,
   setWireGuardTunnelState,
   uninstallDarwinWireGuardLaunchDaemon,
   type WireGuardServiceIdentity
@@ -49,6 +50,16 @@ export interface ElectronLauncherWireGuardProbeInput {
 
 export interface ElectronLauncherWireGuardEndpointProbeInput {
   endpoint: string | null | undefined;
+}
+
+export interface ElectronLauncherDarwinPhysicalDefaultRoute {
+  ok: boolean;
+  gateway: string | null;
+  interfaceName: string | null;
+  sourceAddress: string | null;
+  flags: string[];
+  raw: string | null;
+  error: string | null;
 }
 
 export interface ElectronLauncherWireGuardPeer {
@@ -258,6 +269,57 @@ export function resolveLauncherWireGuardRuntime(input: ElectronLauncherWireGuard
     bundledDir: input.bundledDir ?? defaultBundledWireGuardDir(),
     allowSystemFallback: input.allowSystemFallback ?? false
   });
+}
+
+export function probeDarwinPhysicalDefaultRoute(): ElectronLauncherDarwinPhysicalDefaultRoute {
+  if (process.platform !== 'darwin') {
+    return {
+      ok: false,
+      gateway: null,
+      interfaceName: null,
+      sourceAddress: null,
+      flags: [],
+      raw: null,
+      error: `physical default route probe is not implemented on ${process.platform}`
+    };
+  }
+  try {
+    const raw = execFileSync('/usr/sbin/netstat', ['-rn', '-f', 'inet'], {
+      encoding: 'utf8',
+      timeout: 2500
+    });
+    const route = selectDarwinPhysicalDefaultRoute(raw);
+    if (!route) {
+      return {
+        ok: false,
+        gateway: null,
+        interfaceName: null,
+        sourceAddress: null,
+        flags: [],
+        raw,
+        error: 'no physical IPv4 default route found outside proxy TUN interfaces'
+      };
+    }
+    return {
+      ok: true,
+      gateway: route.gateway,
+      interfaceName: route.interfaceName,
+      sourceAddress: readDarwinInterfaceIpv4Address(route.interfaceName),
+      flags: route.flags.split('').filter(Boolean),
+      raw: route.raw,
+      error: null
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      gateway: null,
+      interfaceName: null,
+      sourceAddress: null,
+      flags: [],
+      raw: null,
+      error: err instanceof Error ? err.message : String(err)
+    };
+  }
 }
 
 export async function connectLauncherWireGuardPeer(
@@ -746,6 +808,15 @@ function interfaceHasExpectedAddress(interfaceName: string, expectedAddresses: s
     return ips.some((ip) => raw.includes(`inet ${ip}`));
   } catch {
     return false;
+  }
+}
+
+function readDarwinInterfaceIpv4Address(interfaceName: string): string | null {
+  try {
+    const raw = execFileSync('/sbin/ifconfig', [interfaceName], { encoding: 'utf8', timeout: 2000 });
+    return raw.match(/^\s*inet\s+(\d{1,3}(?:\.\d{1,3}){3})\b/im)?.[1] ?? null;
+  } catch {
+    return null;
   }
 }
 
