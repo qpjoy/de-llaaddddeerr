@@ -959,6 +959,34 @@ button:disabled {
   text-transform: uppercase;
 }
 
+.update-mini-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.update-mini-row-actions > span {
+  color: var(--primary);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.update-mini-row-actions .secondary-button {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+
+.update-mini-empty {
+  margin: 0;
+  border: 1px dashed rgba(94, 142, 236, 0.16);
+  border-radius: 6px;
+  padding: 10px;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
 .rollback-row .secondary-button {
   min-height: 28px;
   padding: 0 10px;

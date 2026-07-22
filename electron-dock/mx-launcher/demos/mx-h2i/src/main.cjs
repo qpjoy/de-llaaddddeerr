@@ -1168,6 +1168,16 @@ function registerIpc() {
     await saveAndBroadcast();
     return visibleRuntime();
   });
+  ipcMain.handle('mx-h2i:install-release', async (_event, releaseId) => {
+    await applyLauncherUpdate('history-install', releaseId);
+    await saveAndBroadcast();
+    return visibleRuntime();
+  });
+  ipcMain.handle('mx-h2i:show-downloaded-installer', async () => {
+    await showDownloadedInstaller();
+    await saveAndBroadcast();
+    return visibleRuntime();
+  });
   ipcMain.handle('mx-h2i:restart-app', async () => {
     runtime.feedback = {
       tone: 'info',
@@ -6970,6 +6980,11 @@ function availableReleaseFromPlan(plan, decision = null, artifact = null, status
     platform: nullableString(selectedArtifact?.platform),
     arch: nullableString(selectedArtifact?.arch),
     fileName: nullableString(selectedArtifact?.fileName),
+    artifactId: nullableString(selectedArtifact?.artifactId),
+    artifactUrl: nullableString(selectedArtifact?.url),
+    artifactDigest: nullableString(selectedArtifact?.digest),
+    artifactSignature: nullableString(selectedArtifact?.signature),
+    restartRequired: selectedArtifact?.restartRequired === true,
     createdAt: nullableString(plan?.createdAt),
     gate
   };
@@ -7155,32 +7170,73 @@ function releaseCenterUserId() {
     || null;
 }
 
-async function applyLauncherUpdate(reason) {
-  const update = runtime.update || {};
+function availableReleaseById(releaseId) {
+  const id = nullableString(releaseId);
+  if (!id) return null;
+  return normalizeAvailableReleases(runtime.update?.availableReleases)
+    .find((item) => item.id === id || item.releaseId === id || item.planId === id || item.artifactId === id)
+    || null;
+}
+
+function updateForAvailableRelease(update, release) {
+  const activation = nullableString(release.activation) || 'installer-manual';
+  return normalizeUpdate({
+    ...update,
+    status: 'update-available',
+    latestVersion: release.version || update.latestVersion || app.getVersion(),
+    planId: release.planId,
+    releaseId: release.releaseId,
+    componentId: launcherProductId(),
+    componentKind: release.componentKind || release.artifactKind || 'app-installer',
+    artifactKind: release.artifactKind || release.componentKind || 'app-installer',
+    artifactId: release.artifactId,
+    artifactUrl: release.artifactUrl,
+    artifactDigest: release.artifactDigest,
+    artifactSignature: release.artifactSignature,
+    artifactSizeBytes: release.sizeBytes,
+    artifactPlatform: release.platform,
+    artifactArch: release.arch,
+    artifactFileName: release.fileName,
+    activation,
+    restartRequired: release.restartRequired === true || activation === 'installer-manual',
+    majorUpdateRequiresInstaller: activation === 'installer-manual',
+    hotUpdateAuto: activation === 'hot-auto',
+    updateAvailable: true,
+    stagedPath: null,
+    downloadedAt: null,
+    downloadedBytes: null,
+    downloadedDigest: null,
+    downloadProgress: null,
+    installerOpenError: null,
+    restartPrompt: false
+  }, runtime.config);
+}
+
+async function applyLauncherUpdate(reason, requestedReleaseId = null) {
+  let update = runtime.update || {};
+  const selectedRelease = requestedReleaseId ? availableReleaseById(requestedReleaseId) : null;
+  if (requestedReleaseId && !selectedRelease) {
+    runtime.feedback = {
+      tone: 'warning',
+      message: '没有找到该大版本记录，请重新检查更新。'
+    };
+    return;
+  }
+  if (selectedRelease) {
+    update = updateForAvailableRelease(update, selectedRelease);
+    runtime.update = update;
+  }
   const artifact = releaseArtifactFromUpdate(update);
   if (!artifact.url) {
     runtime.feedback = {
       tone: 'warning',
-      message: '当前没有可下载的 Release artifact，请先检查更新。'
+      message: selectedRelease
+        ? '该历史版本没有可下载的安装包。'
+        : '当前没有可下载的 Release artifact，请先检查更新。'
     };
     return;
   }
   const installer = artifact.activation === 'installer-manual' || update.majorUpdateRequiresInstaller === true;
-  if (installer) {
-    const choice = await dialog.showMessageBox(mainWindow || undefined, {
-      type: 'info',
-      buttons: ['下载并打开', '取消'],
-      defaultId: 0,
-      cancelId: 1,
-      title: 'MX-H2I 更新',
-      message: `发现 MX-H2I ${update.latestVersion || artifact.version || ''} 更新`,
-      detail: '将下载 Release Center 中登记的安装包，校验 sha256 后交给系统打开。当前连接不会被重启或断开。'
-    });
-    if (choice.response !== 0) {
-      runtime.feedback = { tone: 'info', message: '已取消下载更新。' };
-      return;
-    }
-  }
   const baseUrl = appCenterCatalogBaseUrl();
   const mod = await import('@qpjoy/electron-launcher');
   const updater = baseUrl && typeof mod.createElectronLauncherReleaseUpdater === 'function'
@@ -7190,6 +7246,40 @@ async function applyLauncherUpdate(reason) {
         reportInstallId: runtime.installation?.installId
       })
     : null;
+  if (
+    installer
+    && !selectedRelease
+    && update.status === 'ready-to-install'
+    && update.stagedPath
+    && fsSync.existsSync(update.stagedPath)
+  ) {
+    await openDownloadedInstaller({
+      updater,
+      reason,
+      artifact,
+      targetPath: update.stagedPath,
+      bytes: update.downloadedBytes,
+      digest: update.downloadedDigest
+    });
+    return;
+  }
+  if (installer) {
+    const choice = await dialog.showMessageBox(mainWindow || undefined, {
+      type: 'info',
+      buttons: ['下载并打开', '取消'],
+      defaultId: 0,
+      cancelId: 1,
+      title: 'MX-H2I 更新',
+      message: selectedRelease
+        ? `安装 MX-H2I 指定版本 ${update.latestVersion || artifact.version || ''}`
+        : `发现 MX-H2I ${update.latestVersion || artifact.version || ''} 更新`,
+      detail: `${selectedRelease ? '将下载所选历史版本；安装旧版本会覆盖当前应用。' : '将下载 Release Center 中登记的安装包。'}校验 sha256 后交给系统打开，当前连接不会被重启或断开。`
+    });
+    if (choice.response !== 0) {
+      runtime.feedback = { tone: 'info', message: '已取消下载更新。' };
+      return;
+    }
+  }
   const targetPath = updateArtifactTargetPath(update, artifact);
   let lastProgressBroadcastAt = 0;
   runtime.update = normalizeUpdate({
@@ -7257,6 +7347,7 @@ async function applyLauncherUpdate(reason) {
       downloadedAt: nowIso(),
       downloadedBytes: result.bytes,
       downloadedDigest: result.digest,
+      installerOpenError: null,
       downloadProgress: {
         state: 'downloaded',
         bytes: result.bytes,
@@ -7298,35 +7389,7 @@ async function applyLauncherUpdate(reason) {
       pushAppLog('appcenter', 'warning', `Release downloaded report failed: ${errorMessage(error)}`);
     });
     if (installer) {
-      const openError = await shell.openPath(result.targetPath);
-      if (openError) throw new Error(openError);
-      runtime.update = normalizeUpdate({
-        ...runtime.update,
-        status: 'installer-opened',
-        restartPrompt: true,
-        history: prependUpdateHistory(runtime.update?.history, updateHistoryEntry({
-          kind: 'major-install',
-          status: 'installer-opened',
-          version: runtime.update?.latestVersion || artifact.version,
-          fromVersion: runtime.update?.currentVersion || app.getVersion(),
-          releaseId: runtime.update?.releaseId,
-          planId: runtime.update?.planId,
-          componentKind: runtime.update?.componentKind || artifact.kind,
-          updateMode: runtime.update?.updateMode,
-          message: '安装包已打开，等待用户完成系统安装。'
-        }))
-      }, runtime.config);
-      runtime.feedback = {
-        tone: 'success',
-        message: '安装包已校验并打开。安装完成后可以立即重启 MX-H2I，也可以稍后手动重启。'
-      };
-      await updater?.report?.({
-        installId: runtime.installation?.installId,
-        status: 'installer-opened',
-        metadata: releaseReportMetadata(reason, runtime.update, artifact, result)
-      }).catch((error) => {
-        pushAppLog('appcenter', 'warning', `Release installer-opened report failed: ${errorMessage(error)}`);
-      });
+      await openDownloadedInstaller({ updater, reason, artifact, ...result });
     } else {
       let activation = null;
       try {
@@ -7402,6 +7465,120 @@ async function applyLauncherUpdate(reason) {
       pushAppLog('appcenter', 'warning', `Release download-failed report failed: ${errorMessage(reportError)}`);
     });
     touchRuntime('update download failed');
+  }
+}
+
+function installerPathValidationError(targetPath) {
+  if (!targetPath || !fsSync.existsSync(targetPath)) return '安装包文件不存在';
+  const extension = path.extname(targetPath).toLowerCase();
+  const allowed = process.platform === 'darwin'
+    ? ['.dmg', '.pkg']
+    : process.platform === 'win32'
+      ? ['.exe', '.msi']
+      : ['.appimage', '.deb', '.rpm'];
+  if (!allowed.includes(extension)) {
+    return `安装包文件名无效（需要 ${allowed.join(' / ')}，实际为 ${path.basename(targetPath)}）`;
+  }
+  return null;
+}
+
+async function openDownloadedInstaller(input) {
+  let openError = installerPathValidationError(input.targetPath);
+  if (!openError) {
+    try {
+      openError = await shell.openPath(input.targetPath);
+    } catch (error) {
+      openError = errorMessage(error);
+    }
+  }
+  if (openError) {
+    runtime.update = normalizeUpdate({
+      ...runtime.update,
+      status: 'ready-to-install',
+      restartPrompt: false,
+      installerOpenError: openError,
+      history: prependUpdateHistory(runtime.update?.history, updateHistoryEntry({
+        kind: 'major-install',
+        status: 'open-failed',
+        version: runtime.update?.latestVersion || input.artifact.version,
+        fromVersion: runtime.update?.currentVersion || app.getVersion(),
+        releaseId: runtime.update?.releaseId,
+        planId: runtime.update?.planId,
+        componentKind: runtime.update?.componentKind || input.artifact.kind,
+        updateMode: runtime.update?.updateMode,
+        message: openError
+      }))
+    }, runtime.config);
+    runtime.feedback = {
+      tone: 'danger',
+      message: `安装包已下载，但打开失败：${openError}。可以打开所在文件夹后手动安装。`
+    };
+    await input.updater?.report?.({
+      installId: runtime.installation?.installId,
+      status: 'installer-open-failed',
+      error: openError,
+      metadata: releaseReportMetadata(input.reason, runtime.update, input.artifact, input)
+    }).catch((error) => {
+      pushAppLog('appcenter', 'warning', `Release installer-open-failed report failed: ${errorMessage(error)}`);
+    });
+    touchRuntime('installer open failed');
+    return false;
+  }
+  runtime.update = normalizeUpdate({
+    ...runtime.update,
+    status: 'installer-opened',
+    restartPrompt: true,
+    installerOpenError: null,
+    history: prependUpdateHistory(runtime.update?.history, updateHistoryEntry({
+      kind: 'major-install',
+      status: 'installer-opened',
+      version: runtime.update?.latestVersion || input.artifact.version,
+      fromVersion: runtime.update?.currentVersion || app.getVersion(),
+      releaseId: runtime.update?.releaseId,
+      planId: runtime.update?.planId,
+      componentKind: runtime.update?.componentKind || input.artifact.kind,
+      updateMode: runtime.update?.updateMode,
+      message: '安装包已打开，等待用户完成系统安装。'
+    }))
+  }, runtime.config);
+  runtime.feedback = {
+    tone: 'success',
+    message: '安装包已校验并打开。安装完成后可以立即重启 MX-H2I，也可以稍后手动重启。'
+  };
+  await input.updater?.report?.({
+    installId: runtime.installation?.installId,
+    status: 'installer-opened',
+    metadata: releaseReportMetadata(input.reason, runtime.update, input.artifact, input)
+  }).catch((error) => {
+    pushAppLog('appcenter', 'warning', `Release installer-opened report failed: ${errorMessage(error)}`);
+  });
+  touchRuntime('installer opened');
+  return true;
+}
+
+async function showDownloadedInstaller() {
+  const targetPath = nullableString(runtime.update?.stagedPath)
+    || normalizeRollbackSlots(runtime.update?.rollbackSlots)[0]?.path
+    || null;
+  if (!targetPath || !fsSync.existsSync(targetPath)) {
+    runtime.feedback = {
+      tone: 'warning',
+      message: '没有找到已下载的安装包，请先下载版本。'
+    };
+    return;
+  }
+  try {
+    shell.showItemInFolder(targetPath);
+    runtime.feedback = {
+      tone: 'info',
+      message: `已在文件夹中显示安装包：${path.basename(targetPath)}`
+    };
+    touchRuntime('installer revealed in folder');
+  } catch (error) {
+    runtime.feedback = {
+      tone: 'danger',
+      message: `打开安装包所在文件夹失败：${errorMessage(error)}`
+    };
   }
 }
 
@@ -7617,21 +7794,38 @@ async function openRollbackInstaller(rollbackId) {
 
 function updateArtifactTargetPath(update, artifact) {
   const releaseId = safePathSegment(nullableString(update.releaseId) || nullableString(update.planId) || 'release');
-  const fileName = safeUpdateArtifactFileName(artifact.fileName, artifact.url, artifact.kind, artifact.version);
+  const catalogRelease = normalizeAvailableReleases(update.availableReleases)
+    .find((item) => item.releaseId === update.releaseId || item.artifactId === artifact.artifactId || item.version === artifact.version);
+  const fileName = safeUpdateArtifactFileName(
+    artifact.fileName || catalogRelease?.fileName,
+    artifact.url,
+    artifact.kind,
+    artifact.version,
+    artifact.platform
+  );
   return path.join(app.getPath('userData'), 'updates', releaseId, fileName);
 }
 
-function safeUpdateArtifactFileName(fileName, url, artifactKind, version) {
+function safeUpdateArtifactFileName(fileName, url, artifactKind, version, platform) {
+  const installer = artifactKind === 'app-installer' || artifactKind === 'mx-h2i-installer';
   const declaredName = safePathSegment(nullableString(fileName));
-  if (declaredName && declaredName !== 'app') return declaredName;
+  if (declaredName && !['app', 'download'].includes(declaredName.toLowerCase()) && (!installer || path.extname(declaredName))) {
+    return declaredName;
+  }
   try {
     const parsed = new URL(url);
     const baseName = safePathSegment(decodeURIComponent(path.basename(parsed.pathname)));
-    if (baseName && baseName !== 'app') return baseName;
+    if (baseName && !['app', 'download'].includes(baseName.toLowerCase()) && (!installer || path.extname(baseName))) {
+      return baseName;
+    }
   } catch {
     // fallback below
   }
-  return `${safePathSegment(artifactKind || 'artifact')}-${safePathSegment(version || app.getVersion())}.bin`;
+  const targetPlatform = nullableString(platform) || process.platform;
+  const extension = installer
+    ? targetPlatform === 'darwin' ? 'dmg' : targetPlatform === 'win32' ? 'exe' : 'AppImage'
+    : 'bin';
+  return `${safePathSegment(artifactKind || 'artifact')}-${safePathSegment(version || app.getVersion())}.${extension}`;
 }
 
 function releaseReportMetadata(reason, update, artifact, extra = {}) {
@@ -7975,6 +8169,7 @@ function normalizeUpdate(input, config) {
     downloadedAt: nullableString(row.downloadedAt),
     downloadedBytes: Number.isFinite(row.downloadedBytes) ? row.downloadedBytes : null,
     downloadedDigest: nullableString(row.downloadedDigest),
+    installerOpenError: nullableString(row.installerOpenError),
     downloadProgress: normalizeUpdateDownloadProgress(row.downloadProgress),
     history: normalizeUpdateHistory(row.history),
     availableReleases: normalizeAvailableReleases(row.availableReleases),
@@ -8020,6 +8215,7 @@ function normalizeUpdateHistory(input) {
         at: nullableString(row.at) || nowIso()
       };
     })
+    .filter((item) => item.version || item.releaseId || item.message)
     .slice(0, 12);
 }
 
@@ -8043,10 +8239,16 @@ function normalizeAvailableReleases(input) {
         platform: nullableString(row.platform),
         arch: nullableString(row.arch),
         fileName: nullableString(row.fileName),
+        artifactId: nullableString(row.artifactId),
+        artifactUrl: nullableString(row.artifactUrl),
+        artifactDigest: nullableString(row.artifactDigest),
+        artifactSignature: nullableString(row.artifactSignature),
+        restartRequired: row.restartRequired === true,
         createdAt: nullableString(row.createdAt),
         gate: nullableString(row.gate)
       };
     })
+    .filter((item) => item.version || item.releaseId)
     .slice(0, 8);
 }
 

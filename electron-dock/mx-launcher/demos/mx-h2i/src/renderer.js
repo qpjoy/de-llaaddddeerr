@@ -430,6 +430,12 @@ root.addEventListener('click', (event) => {
     void runAction('openRollback', button.dataset.rollbackId || '');
     return;
   }
+  if (action === 'installRelease') {
+    appShellMenuOpen = false;
+    phoneMenuOpen = false;
+    void runAction('installRelease', button.dataset.releaseId || '');
+    return;
+  }
   if (action === 'connectGuest') {
     modeDraft = 'guest';
   }
@@ -660,6 +666,8 @@ async function runAction(action, payload) {
       openH2oTestWindow: () => api.openH2oTestWindow?.(payload),
       checkUpdates: () => api.checkUpdates(),
       applyUpdate: () => api.applyUpdate?.(),
+      installRelease: () => api.installRelease?.(payload),
+      showDownloadedInstaller: () => api.showDownloadedInstaller?.(),
       restartApp: () => api.restartApp?.(),
       openRollback: () => api.openRollbackInstaller?.(payload),
       refreshDiagnostics: () => api.refreshDiagnostics?.(),
@@ -966,7 +974,8 @@ function renderPhoneFooterInfo(connected) {
   const latest = update.latestVersion || version;
   const hasArtifact = Boolean(update.artifactUrl);
   const canApply = hasArtifact && !['downloading', 'staged', 'installer-opened'].includes(status);
-  const canRestart = update.restartPrompt || ['installer-opened', 'ready-to-install', 'staged'].includes(status) && update.restartRequired;
+  const canRestart = update.restartPrompt || (status === 'staged' && update.restartRequired);
+  const canRevealInstaller = Boolean(update.stagedPath);
   return `
     <section class="phone-footer-info update-surface">
       <div class="update-surface-head">
@@ -983,7 +992,8 @@ function renderPhoneFooterInfo(connected) {
       ${renderUpdateProgress(update)}
       <div class="update-surface-actions">
         ${renderCheckUpdatesButton('secondary-button')}
-        <button class="primary-button" type="button" data-action="applyUpdate" ${!canApply || busyAction === 'applyUpdate' ? 'disabled' : ''}>${escapeHtml(updateApplyLabel(update))}</button>
+        <button class="primary-button" type="button" data-action="applyUpdate" ${!canApply || busyAction ? 'disabled' : ''}>${escapeHtml(updateApplyLabel(update))}</button>
+        ${canRevealInstaller ? '<button class="secondary-button" type="button" data-action="showDownloadedInstaller">打开文件夹</button>' : ''}
         ${canRestart ? '<button class="secondary-button" type="button" data-action="restartApp">重启</button>' : ''}
       </div>
       ${renderReleaseHistory(update)}
@@ -1115,6 +1125,7 @@ function updateStatusLabel(status) {
 function updateSummaryText(update) {
   if (!isInternalConnected()) return '连接 Internal 后自动检查 Release Center';
   if (update.status === 'downloading') return '正在下载并校验 artifact';
+  if (update.installerOpenError) return `安装包已下载，但打开失败：${update.installerOpenError}`;
   if (update.status === 'installer-opened') return '安装包已打开，完成安装后可重启';
   if (update.status === 'ready-to-install') return '安装包已下载，可打开安装器';
   if (update.status === 'staged') return update.restartRequired ? '热更新已暂存，等待重启激活' : '热更新已暂存';
@@ -1126,6 +1137,7 @@ function updateSummaryText(update) {
 
 function updateApplyLabel(update) {
   if (busyAction === 'applyUpdate' || update.status === 'downloading') return '下载中';
+  if (update.status === 'ready-to-install' && update.installerOpenError) return '重新打开';
   if (update.status === 'ready-to-install') return '打开安装包';
   if (update.status === 'installer-opened') return '已打开';
   if (update.status === 'staged') return update.restartRequired ? '等待重启' : '已暂存';
@@ -1157,39 +1169,55 @@ function progressLabel(progress) {
 }
 
 function renderReleaseHistory(update) {
-  const releases = Array.isArray(update.availableReleases) ? update.availableReleases : [];
-  const history = Array.isArray(update.history) ? update.history : [];
-  const rows = releases.length
-    ? releases.slice(0, 3).map((item) => ({
-        title: item.version || item.releaseId || 'release',
-        meta: [item.componentKind, item.artifactKind, item.platform, item.arch, item.channel].filter(Boolean).join(' · '),
-        status: item.status || item.gate || '-',
-        at: item.createdAt
-      }))
-    : history.slice(0, 3).map((item) => ({
-        title: item.version || item.releaseId || item.kind,
-        meta: [item.kind, item.componentKind, item.updateMode].filter(Boolean).join(' · '),
-        status: item.status,
-        at: item.at
-      }));
-  if (!rows.length) return '';
+  const releases = (Array.isArray(update.availableReleases) ? update.availableReleases : [])
+    .filter((item) => item?.version || item?.releaseId)
+    .slice(0, 8);
   return `
     <div class="update-mini-list">
       <div class="update-mini-list-head">
-        <strong>版本记录</strong>
-        <span>${escapeHtml(releases.length ? `${releases.length} releases` : `${history.length} events`)}</span>
+        <strong>大版本与回退</strong>
+        <span>${escapeHtml(releases.length ? `${releases.length} 个可安装版本` : '暂无版本')}</span>
       </div>
-      ${rows.map((item) => `
+      ${releases.length ? releases.map((item) => `
         <div class="update-mini-row">
           <div>
-            <strong>${escapeHtml(item.title)}</strong>
-            <small>${escapeHtml(item.meta || formatDateTime(item.at))}</small>
+            <strong>${escapeHtml(item.version || item.releaseId)}</strong>
+            <small>${escapeHtml([
+              [item.platform, item.arch].filter(Boolean).join('/'),
+              formatBytes(item.sizeBytes),
+              formatDateTime(item.createdAt)
+            ].filter((value) => value && value !== '-').join(' · '))}</small>
           </div>
-          <span>${escapeHtml(item.status || '-')}</span>
+          <div class="update-mini-row-actions">
+            <span>${escapeHtml(item.version === update.currentVersion ? '当前版本' : item.status || item.gate || '-')}</span>
+            ${item.artifactUrl ? `
+              <button class="secondary-button" type="button" data-action="installRelease" data-release-id="${escapeAttr(item.id || item.releaseId || item.planId)}" ${busyAction ? 'disabled' : ''}>
+                ${escapeHtml(releaseInstallLabel(item.version, update.currentVersion))}
+              </button>
+            ` : ''}
+          </div>
         </div>
-      `).join('')}
+      `).join('') : '<p class="update-mini-empty">尚无适用于本机平台和架构的已发布安装包。</p>'}
     </div>
   `;
+}
+
+function releaseInstallLabel(version, currentVersion) {
+  const comparison = compareReleaseVersions(version, currentVersion);
+  if (comparison < 0) return '回退';
+  if (comparison === 0) return '重装';
+  return '安装';
+}
+
+function compareReleaseVersions(left, right) {
+  const leftParts = String(left || '').split(/[.+-]/).slice(0, 3).map((value) => Number(value));
+  const rightParts = String(right || '').split(/[.+-]/).slice(0, 3).map((value) => Number(value));
+  for (let index = 0; index < 3; index += 1) {
+    const difference = (Number.isFinite(leftParts[index]) ? leftParts[index] : 0)
+      - (Number.isFinite(rightParts[index]) ? rightParts[index] : 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
 }
 
 function renderRollbackSlots(update) {
@@ -3079,7 +3107,7 @@ function renderCatalogCard(name, category, summary, status, action) {
 function renderUpdatePanel() {
   const update = state.update || {};
   const hasArtifact = Boolean(update.artifactUrl);
-  const downloading = busyAction === 'applyUpdate' || update.status === 'downloading';
+  const downloading = Boolean(busyAction) || update.status === 'downloading';
   const applyDisabled = !hasArtifact || downloading || ['staged', 'installer-opened'].includes(update.status);
   const actionLabel = updateApplyLabel(update);
   return `
@@ -3112,6 +3140,7 @@ function renderUpdatePanel() {
       <div class="update-actions">
         ${renderCheckUpdatesButton('secondary-button')}
         <button class="primary-button" type="button" data-action="applyUpdate" ${applyDisabled ? 'disabled' : ''}>${escapeHtml(actionLabel)}</button>
+        ${update.stagedPath ? '<button class="secondary-button" type="button" data-action="showDownloadedInstaller">打开文件夹</button>' : ''}
         ${update.restartPrompt ? '<button class="secondary-button" type="button" data-action="restartApp">重启</button>' : ''}
       </div>
       ${renderUpdateProgress(update)}
@@ -3778,6 +3807,13 @@ function createMockApi() {
             artifactKind: 'dmg',
             activation: 'installer-manual',
             sizeBytes: 189695362,
+            artifactId: 'mock_mx_h2i_0_1_1_dmg',
+            artifactUrl: 'https://example.invalid/mx-h2i-0.1.1.dmg',
+            artifactDigest: 'sha256:mock',
+            restartRequired: true,
+            platform: 'darwin',
+            arch: 'universal',
+            fileName: 'MX-H2I-0.1.1-mac-universal.dmg',
             createdAt: new Date().toISOString(),
             gate: 'passed'
           }
@@ -3810,6 +3846,8 @@ function createMockApi() {
       },
       feedback: { tone: 'success', message: '安装包已校验并打开。安装完成后可以立即重启 MX-H2I，也可以稍后手动重启。' }
     }),
+    installRelease: async () => commit({ feedback: { tone: 'info', message: '正在下载指定的大版本安装包。' } }),
+    showDownloadedInstaller: async () => commit({ feedback: { tone: 'info', message: '已在文件夹中显示安装包。' } }),
     restartApp: async () => commit({ feedback: { tone: 'info', message: '正在重启 MX-H2I。' } }),
     openRollbackInstaller: async () => commit({ feedback: { tone: 'success', message: '已打开历史版本安装包。' } }),
     refreshDiagnostics: async () => commit({

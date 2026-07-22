@@ -263,6 +263,7 @@ async function uploadSmokeArtifact(platform, arch, extension) {
   });
   const artifact = payload?.artifact;
   assert(artifact?.downloadPath, 'artifact upload did not return downloadPath');
+  assert(artifact.downloadPath.endsWith(`/${encodeURIComponent(artifact.fileName)}`), 'artifact downloadPath must preserve the installer file name');
   assert(artifact?.digest === digest, `artifact upload digest mismatch: ${artifact?.digest}`);
   const downloaded = await fetch(absoluteUrl(artifact.downloadPath));
   const downloadedBytes = Buffer.from(await downloaded.arrayBuffer());
@@ -298,6 +299,7 @@ async function checkReleaseDecision(platform, arch, releaseId, extension) {
   assert(artifact.platform === platform, `${platform}/${arch} artifact platform mismatch`);
   assert(artifact.arch === arch, `${platform}/${arch} artifact arch mismatch`);
   assert(artifact.fileName?.endsWith(`.${extension}`), `${platform}/${arch} artifact extension mismatch`);
+  assert(artifact.url?.endsWith(`/${encodeURIComponent(artifact.fileName)}`), `${platform}/${arch} artifact URL lost the installer file name`);
 }
 
 async function checkReleaseIsCurrentVersionSafe() {
@@ -325,6 +327,8 @@ async function checkReleaseHistory(platform, arch, releaseId) {
   const releases = Array.isArray(payload?.releases) ? payload.releases : [];
   assert(releases.some((release) => release.releaseId === releaseId), 'release history missing platform release');
   assert(releases.every((release) => release.version && release.artifactKind && release.status !== 'unknown'), 'release history contains incomplete rows');
+  assert(releases.every((release) => release.artifactId && release.artifactUrl && release.artifactDigest && release.fileName), 'release history is missing rollback artifact metadata');
+  assert(releases.every((release) => release.artifactUrl.endsWith(`/${encodeURIComponent(release.fileName)}`)), 'release history artifact URL lost the installer file name');
   assert(releases.every((release) => !release.platform || release.platform === platform), 'release history leaked another platform');
   assert(releases.every((release) => !release.arch || release.arch === 'universal' || release.arch === arch), 'release history leaked another architecture');
 }

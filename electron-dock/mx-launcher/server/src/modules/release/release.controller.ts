@@ -16,6 +16,7 @@ import { normalizeReleaseArtifactKind } from '../../store/domain.js';
 import { PLATFORM_STORE } from '../../tokens.js';
 import type { ReleaseArtifactKind, ReleaseManagementE2eResult, ReleaseManagementPlan, ReleaseManagementPlanInput, ReleaseReportInput } from '../../types.js';
 import { evaluateReleaseCheck, signReleaseCheckResult } from './release-check.js';
+import type { ReleaseCheckResult } from './release-check.js';
 
 @Controller()
 export class ReleaseController {
@@ -69,14 +70,14 @@ export class ReleaseController {
       throw new BadRequestException('release check requires components: { componentId: currentVersion }');
     }
     const plans = await this.store.listReleaseManagementPlans();
-    const result = evaluateReleaseCheck(plans, {
+    const result = releaseCheckWithNamedArtifactUrls(evaluateReleaseCheck(plans, {
       installId,
       userId: nullableString(body.userId),
       channel: nullableString(body.channel) ?? 'stable',
       platform: nullableString(body.platform),
       arch: normalizeReleaseArch(nullableString(body.arch)),
       components
-    });
+    }));
     await this.store.recordReleaseReport({
       installId,
       status: 'release-check',
@@ -205,7 +206,7 @@ export class ReleaseController {
       await rm(artifactPath, { force: true });
       await rename(tempPath, artifactPath);
     }
-    const downloadPath = `/internal/v1/release-artifacts/${encodeURIComponent(artifactId)}/download`;
+    const downloadPath = `/internal/v1/release-artifacts/${encodeURIComponent(artifactId)}/download/${encodeURIComponent(fileName)}`;
     const artifactUrl = publicUrl || publicReleaseUrl(downloadPath) || downloadPath;
     const metadata: StoredReleaseArtifactMetadata = {
       artifactId,
@@ -256,6 +257,7 @@ export class ReleaseController {
     @Res({ passthrough: true }) res: ServerResponse
   ) {
     const metadata = await readStoredArtifactMetadata(artifactId);
+    res.setHeader('Content-Disposition', `attachment; filename="${metadata.fileName.replace(/"/g, '')}"`);
     if (metadata.storage === 'oss') {
       const oss = releaseOssConfig();
       const redirectUrl = metadata.publicUrl || (oss && metadata.objectKey ? releaseOssSignedUrl(oss, metadata.objectKey) : null);
@@ -272,6 +274,16 @@ export class ReleaseController {
     res.setHeader('Content-Disposition', `attachment; filename="${metadata.fileName.replace(/"/g, '')}"`);
     res.setHeader('X-MX-Artifact-Digest', metadata.digest);
     return new StreamableFile(createReadStream(artifactPath));
+  }
+
+  @Get('internal/v1/release-artifacts/:artifactId/download/:fileName')
+  @Header('Cache-Control', 'private, max-age=31536000, immutable')
+  async downloadArtifactWithFileName(
+    @Param('artifactId') artifactId: string,
+    @Param('fileName') _fileName: string,
+    @Res({ passthrough: true }) res: ServerResponse
+  ) {
+    return this.downloadArtifact(artifactId, res);
   }
 }
 
@@ -332,6 +344,23 @@ function releaseCheckComponents(body: Record<string, unknown>): Record<string, s
   return components;
 }
 
+function releaseCheckWithNamedArtifactUrls(result: ReleaseCheckResult): ReleaseCheckResult {
+  return {
+    ...result,
+    artifacts: result.artifacts.map((artifact) => ({
+      ...artifact,
+      url: artifact.url ? releaseArtifactUrlWithFileName(artifact.url, artifact.fileName) : null
+    }))
+  };
+}
+
+function releaseArtifactUrlWithFileName(url: string, fileName: string | null): string {
+  if (!fileName) return url;
+  const match = url.match(/^([^?#]*\/download)(\?[^#]*)?(#.*)?$/);
+  if (!match) return url;
+  return `${match[1]}/${encodeURIComponent(fileName)}${match[2] || ''}${match[3] || ''}`;
+}
+
 interface ReleaseHistoryRow {
   id: string;
   releaseId: string;
@@ -348,6 +377,11 @@ interface ReleaseHistoryRow {
   arch: string | null;
   fileName: string | null;
   sizeBytes: number | null;
+  artifactId: string;
+  artifactUrl: string;
+  artifactDigest: string | null;
+  artifactSignature: string | null;
+  restartRequired: boolean;
   createdAt: string;
   gate: 'passed';
 }
@@ -392,6 +426,11 @@ function releaseHistoryRow(
     arch: artifact.arch,
     fileName: artifact.fileName,
     sizeBytes: artifact.sizeBytes,
+    artifactId: artifact.artifactId,
+    artifactUrl: releaseArtifactUrlWithFileName(artifact.url!, artifact.fileName),
+    artifactDigest: artifact.digest,
+    artifactSignature: artifact.signature,
+    restartRequired: artifact.restartRequired,
     createdAt: plan.createdAt,
     gate: 'passed'
   };

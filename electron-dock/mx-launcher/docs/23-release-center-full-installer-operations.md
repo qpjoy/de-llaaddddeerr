@@ -308,8 +308,10 @@ pnpm --dir electron-dock/mx-launcher/server release:publish -- \
 7. 新版本首次启动上报 `installer-completed {from,to}`；
 8. 再次检查应显示“已经是最新版本”。
 
-客户端版本高于后台目标版本时，Release Center 不会自动降级。回滚使用客户端保留的历史
-安装包手工打开，或发布一个版本号更高的修复版。
+客户端版本高于后台目标版本时，Release Center 不会自动降级。“大版本与回退”只展示同
+channel、同 platform/arch、Gate passed 且全量发布的安装包；可选择旧版本执行明确的
+“回退”，也可打开已经下载的安装包所在文件夹。需要回退到某个旧版本时，该版本必须仍有
+Release Plan 和可下载 artifact。
 
 运行服务端 smoke 可同时验证 macOS/Windows 选包、架构隔离、下载文件名、历史记录以及
 禁止自动降级：
@@ -325,8 +327,11 @@ pnpm --dir electron-dock/mx-launcher/server smoke:release-center http://10.88.88
 - 下载按钮不可用：plan 中通常缺 artifact URL，删除空计划并用 Upload installer 重发。
 - macOS 拿不到包：检查 `darwin + process.arch`；单架构包不要标 universal 以外的错误架构。
 - Windows 拿到 macOS 包：这是旧计划缺少 platform/arch；用新 Admin 分平台重发。
-- 下载后文件无扩展名：新计划必须带 `artifactFileName`；使用 Upload installer 或新版 CLI。
+- 下载后文件无扩展名：新版 Server 会把原始文件名放入 download URL，新版客户端还会按
+  platform 补 `.dmg/.exe`。旧的无扩展名文件可以打开文件夹后按原始安装包名补扩展名。
+- 安装包打开失败：客户端保持 `ready-to-install`，显示真实错误并允许“重新打开”或“打开
+  文件夹”，不会再误报 `installer-opened` 或提示重启。
 - OSS 403：检查 Internal server 的 RAM GetObject 权限和系统时间；私有桶不要把裸 OSS URL
   手填进计划，使用 Internal artifact download URL。
-- 历史出现 `release / UNKNOWN`：升级 Internal server 和客户端后，客户端使用
-  `/internal/v1/releases/history` 的过滤结果，不再读取后台完整计划列表。
+- 历史出现 `release / UNKNOWN`：升级 Internal server 和客户端后，旧空行会在状态迁移时
+  自动移除，客户端使用 `/internal/v1/releases/history` 的平台过滤结果。
