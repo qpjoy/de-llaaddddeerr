@@ -98,6 +98,12 @@ The package and make scripts run the same local Launcher preparation step
 before invoking electron-builder, so clean Windows workspaces do not start with
 an empty `@qpjoy/electron-launcher/dist`.
 
+Windows packaging uses electron-builder's PowerShell-backed pnpm dependency
+collector. `make:win` automatically prepends the inbox Windows PowerShell 5.1
+directory to `PATH` and fails early with a focused message if
+`powershell.exe` is actually unavailable. The expected executable is
+`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`.
+
 Bootstrap resolution can be selected with `MX_H2I_BOOTSTRAP_RESOLVE_MODE`:
 `env-first`, `dns-first`, `env-only`, or `dns-only`. Use the V2 bootstrap host
 `http://h2i.mxinfo-inc.cn:18090` when V1 HDO and V2 H2I DNS coexist. The current

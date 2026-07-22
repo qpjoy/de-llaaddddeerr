@@ -131,6 +131,18 @@ pnpm --dir electron-dock/mx-launcher install --frozen-lockfile
 pnpm --dir electron-dock/mx-launcher/demos/mx-h2i make:win
 ```
 
+electron-builder 会调用 Windows PowerShell 5.1 收集 pnpm 生产依赖。构建脚本会自动补入
+`%SystemRoot%\System32\WindowsPowerShell\v1.0`；若预检仍失败，执行：
+
+```powershell
+$env:Path = "$env:SystemRoot\System32\WindowsPowerShell\v1.0;$env:SystemRoot\System32;$env:Path"
+where.exe powershell.exe
+powershell.exe -NoProfile -Command '$PSVersionTable.PSVersion'
+```
+
+如果最后一条仍无法运行，需要先恢复该 Windows 主机自带的 PowerShell 5.1，再重新执行
+`make:win`。
+
 当前命令产出 x64 安装器，对应：
 
 ```text

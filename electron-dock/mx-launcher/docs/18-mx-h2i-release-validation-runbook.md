@@ -121,6 +121,20 @@ pnpm --dir electron-dock/mx-launcher ignored-builds
 pnpm --dir electron-dock/mx-launcher/demos/mx-h2i make:win
 ```
 
+electron-builder 26.15.3 uses `powershell.exe` to run pnpm's production dependency collector.
+`make:win` now prepends the inbox Windows PowerShell 5.1 and System32 directories before packaging.
+If its preflight still reports that PowerShell is unavailable, verify the host installation:
+
+```powershell
+$env:Path = "$env:SystemRoot\System32\WindowsPowerShell\v1.0;$env:SystemRoot\System32;$env:Path"
+where.exe powershell.exe
+powershell.exe -NoProfile -Command '$PSVersionTable.PSVersion'
+```
+
+The expected executable is
+`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`. A machine where that file is
+actually absent must restore Windows PowerShell before electron-builder can collect pnpm modules.
+
 `ignored-builds` should print no pending packages. The mx-launcher workspace records the
 required pnpm build-script approvals in `package.json` so Windows workers with strict dependency
 build policy do not stop on `ERR_PNPM_IGNORED_BUILDS` for Quasar/Vite's `@parcel/watcher`.
