@@ -24,6 +24,8 @@ import type {
   AwxProviderConfigInput,
   ConfigPolicySnapshot,
   ConfigPolicySnapshotInput,
+  ConfigSecretReference,
+  ConfigSecretReferenceInput,
   ConfigSnapshot,
   CoreDnsConfigMapApplyInput,
   CoreDnsConfigMapApplyResult,
@@ -73,6 +75,8 @@ import type {
   ReleaseReportInput,
   ReleaseTask,
   RuntimeConfig,
+  SecretProviderConfig,
+  SecretProviderConfigInput,
   RuntimeFeaturePolicy,
   RuntimeFeaturePolicyInput,
   SdkGatewayAccessDecision,
@@ -138,6 +142,7 @@ import type {
 } from '../types.js';
 import {
   builtinAppCenterApps,
+  builtinConfigSecretReferences,
   buildAppOnboardingDefaults,
   buildAppOnboardingTemplates,
   buildAppCenterApp,
@@ -145,10 +150,13 @@ import {
   builtinLauncherProductNetworks,
   buildLauncherProductNetwork,
   buildAwxProviderConfig,
+  buildConfigSecretReference,
   buildReleaseManagementPlan,
   buildRuntimeFeaturePolicy,
+  buildSecretProviderConfig,
   GATEWAY_RUNTIME_CONFIG_ID,
   builtinGatewayRuntimeConfig,
+  builtinSecretProviderConfigs,
   buildGatewayRuntimeConfig,
   buildDnsReverseProxyRoute,
   attachDomesticWireGuardRefreshHint,
@@ -286,6 +294,8 @@ type RecordKind =
   | 'launcher-network-lease'
   | 'runtime-feature-policy'
   | 'awx-provider-config'
+  | 'secret-provider-config'
+  | 'config-secret-reference'
   | 'app-center-app'
   | 'app-center-installation'
   | 'permission-grant'
@@ -312,6 +322,7 @@ export class PostgresStore implements PlatformStore {
     await store.registerBuiltinDns();
     await store.registerBuiltinGatewayRuntimeConfig();
     await store.registerBuiltinDomesticRuntimeConfigs();
+    await store.registerBuiltinSecretRegistry();
     await store.bootstrapUserCenter();
     return store;
   }
@@ -322,6 +333,8 @@ export class PostgresStore implements PlatformStore {
       enrollments,
       snapshots,
       configPolicySnapshots,
+      secretProviderConfigs,
+      configSecretReferences,
       appCenterApps,
       userCenterUsers,
       userCenterServiceAccounts,
@@ -352,6 +365,8 @@ export class PostgresStore implements PlatformStore {
       this.countRecords('anonymous-enrollment'),
       this.countRecords('config-snapshot'),
       this.countRecords('config-policy-snapshot'),
+      this.countRecords('secret-provider-config'),
+      this.countRecords('config-secret-reference'),
       this.countRecords('app-center-app'),
       this.countRecords('iam-user'),
       this.countRecords('iam-service-account'),
@@ -390,6 +405,8 @@ export class PostgresStore implements PlatformStore {
       enrollments,
       snapshots,
       configPolicySnapshots,
+      secretProviderConfigs,
+      configSecretReferences,
       appCenterApps,
       userCenterUsers,
       userCenterServiceAccounts,
@@ -1629,6 +1646,71 @@ export class PostgresStore implements PlatformStore {
 
   async getConfigPolicySnapshot(snapshotId: string): Promise<ConfigPolicySnapshot | null> {
     return this.getRecord<ConfigPolicySnapshot>('config-policy-snapshot', snapshotId);
+  }
+
+  async listSecretProviderConfigs(): Promise<SecretProviderConfig[]> {
+    const providers = await this.listRecords<SecretProviderConfig>('secret-provider-config');
+    return providers.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  async getSecretProviderConfig(providerId: string): Promise<SecretProviderConfig | null> {
+    return this.getRecord<SecretProviderConfig>('secret-provider-config', providerId);
+  }
+
+  async upsertSecretProviderConfig(input: SecretProviderConfigInput): Promise<SecretProviderConfig> {
+    const previous = input.providerId ? await this.getSecretProviderConfig(input.providerId) : null;
+    const provider = buildSecretProviderConfig(this.config, input, previous);
+    await this.saveRecord('secret-provider-config', provider.providerId, provider, this.config.siteId);
+    await this.recordAudit({
+      eventType: 'config.secret_provider.upserted',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        providerId: provider.providerId,
+        kind: provider.kind,
+        status: provider.status,
+        authMode: provider.authMode,
+        region: provider.region,
+        warnings: provider.warnings
+      }
+    });
+    return provider;
+  }
+
+  async listConfigSecretReferences(): Promise<ConfigSecretReference[]> {
+    const references = await this.listRecords<ConfigSecretReference>('config-secret-reference');
+    return references.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  async getConfigSecretReference(secretRefId: string): Promise<ConfigSecretReference | null> {
+    return this.getRecord<ConfigSecretReference>('config-secret-reference', secretRefId);
+  }
+
+  async upsertConfigSecretReference(input: ConfigSecretReferenceInput): Promise<ConfigSecretReference> {
+    const previous = input.secretRefId ? await this.getConfigSecretReference(input.secretRefId) : null;
+    const providerId = input.providerId?.trim() || previous?.providerId || '';
+    const provider = providerId ? await this.getSecretProviderConfig(providerId) : null;
+    const reference = buildConfigSecretReference(this.config, input, previous, Boolean(provider));
+    await this.saveRecord('config-secret-reference', reference.secretRefId, reference, this.config.siteId);
+    await this.recordAudit({
+      eventType: 'config.secret_reference.upserted',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      productId: reference.productId,
+      metadata: {
+        secretRefId: reference.secretRefId,
+        providerId: reference.providerId,
+        remoteRef: reference.remoteRef,
+        appId: reference.appId,
+        consumerIds: reference.consumerIds,
+        exposure: reference.exposure,
+        versionStage: reference.versionStage,
+        target: reference.target,
+        containsSecretMaterial: false,
+        warnings: reference.warnings
+      }
+    });
+    return reference;
   }
 
   async listSiteSlotSshProfiles(): Promise<SiteSlotSshProfile[]> {
@@ -3676,6 +3758,21 @@ export class PostgresStore implements PlatformStore {
     if (existing) return;
     const config = buildSiteSlotDomesticRuntimeConfig(this.config, { siteId, requestedBy: 'pg-seed' }, null);
     await this.saveRecord('site-slot-domestic-runtime-config', config.siteId, config, config.siteId);
+  }
+
+  private async registerBuiltinSecretRegistry(): Promise<void> {
+    for (const provider of builtinSecretProviderConfigs(this.config)) {
+      const existing = await this.getSecretProviderConfig(provider.providerId);
+      if (!existing) {
+        await this.saveRecord('secret-provider-config', provider.providerId, provider, this.config.siteId);
+      }
+    }
+    for (const reference of builtinConfigSecretReferences(this.config)) {
+      const existing = await this.getConfigSecretReference(reference.secretRefId);
+      if (!existing) {
+        await this.saveRecord('config-secret-reference', reference.secretRefId, reference, this.config.siteId);
+      }
+    }
   }
 
   private createSnapshot(

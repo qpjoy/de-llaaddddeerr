@@ -1375,6 +1375,87 @@ export interface SiteSlotDomesticRuntimeConfig {
   updatedAt: string;
 }
 
+export type SecretProviderKind = 'kubernetes' | 'alibaba-kms' | 'vault';
+export type SecretProviderStatus = 'active' | 'paused';
+export type SecretProviderAuthMode = 'native-secret' | 'ecs-ram-role' | 'rrsa' | 'application-access-point' | 'token';
+
+export interface SecretProviderConfigInput {
+  providerId?: string | null;
+  name?: string | null;
+  kind?: SecretProviderKind | string | null;
+  status?: SecretProviderStatus | string | null;
+  endpoint?: string | null;
+  region?: string | null;
+  authMode?: SecretProviderAuthMode | string | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface SecretProviderConfig {
+  providerId: string;
+  name: string;
+  kind: SecretProviderKind;
+  environment: string;
+  status: SecretProviderStatus;
+  endpoint: string | null;
+  region: string | null;
+  authMode: SecretProviderAuthMode;
+  source: 'config-center';
+  capabilities: Array<'reference' | 'version' | 'rotation' | 'kubernetes-materialization'>;
+  warnings: string[];
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export type ConfigSecretExposure = 'internal-only' | 'signed-url' | 'temporary-sts';
+export type ConfigSecretRotationMode = 'manual' | 'provider-managed';
+
+export interface ConfigSecretReferenceInput {
+  secretRefId?: string | null;
+  name?: string | null;
+  providerId?: string | null;
+  remoteRef?: string | null;
+  status?: 'active' | 'paused' | string | null;
+  productId?: string | null;
+  appId?: string | null;
+  consumerIds?: string[] | string | null;
+  exposure?: ConfigSecretExposure | string | null;
+  versionStage?: string | null;
+  rotationMode?: ConfigSecretRotationMode | string | null;
+  targetNamespace?: string | null;
+  targetSecretName?: string | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface ConfigSecretReference {
+  secretRefId: string;
+  name: string;
+  providerId: string;
+  remoteRef: string;
+  environment: string;
+  status: 'active' | 'paused';
+  productId: string | null;
+  appId: string | null;
+  consumerIds: string[];
+  exposure: ConfigSecretExposure;
+  versionStage: string;
+  rotationMode: ConfigSecretRotationMode;
+  target: {
+    namespace: string;
+    secretName: string;
+  };
+  source: 'config-center';
+  containsSecretMaterial: false;
+  warnings: string[];
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
 export type RuntimeFeaturePolicyScopeKind = 'global' | 'site' | 'profile';
 export type RuntimeFeaturePolicyMode = 'disabled' | 'plan-only' | 'readonly-execute' | 'remote-execute';
 

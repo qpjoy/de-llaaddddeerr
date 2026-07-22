@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
 
 import { asRecord, nullableString } from '../../lib/http.js';
 import type { PlatformStore } from '../../store/platform-store.js';
@@ -7,11 +7,13 @@ import type {
   AwxProviderCheckInput,
   AwxProviderConfigInput,
   AwxProviderSyncPlanInput,
+  ConfigSecretReferenceInput,
   ConfigPolicySnapshotInput,
   GatewayRuntimeConfigInput,
   RuntimeConfig,
   RuntimeFeaturePolicy,
   RuntimeFeaturePolicyInput,
+  SecretProviderConfigInput,
   SiteSlotKind,
   SiteSlotDomesticRuntimeConfigInput,
   SiteSlotDomesticWireGuardSecret,
@@ -40,6 +42,10 @@ export class ConfigCenterController {
       capabilities: [
         'policy-snapshot.issue',
         'policy-snapshot.sign',
+        'secret-provider.manage',
+        'secret-reference.manage',
+        'secret-material.reject',
+        'secret-runtime.readiness',
         'launcher-network.aggregate',
         'dns-policy.aggregate',
         'release-policy.aggregate',
@@ -56,6 +62,66 @@ export class ConfigCenterController {
         'runtime-feature-policy.manage'
       ]
     };
+  }
+
+  @Get('internal/v1/config-center/secret-providers')
+  async listSecretProviders() {
+    return { providers: await this.store.listSecretProviderConfigs() };
+  }
+
+  @Get('internal/v1/config-center/secret-providers/:providerId')
+  async getSecretProvider(@Param('providerId') providerId: string) {
+    const provider = await this.store.getSecretProviderConfig(providerId);
+    if (!provider) throw new NotFoundException('Secret provider not found');
+    return { provider };
+  }
+
+  @Post('internal/v1/config-center/secret-providers')
+  async upsertSecretProvider(@Body() rawBody: unknown) {
+    const body = asRecord(rawBody);
+    assertNoSecretMaterial(body);
+    return { provider: await this.store.upsertSecretProviderConfig(toSecretProviderConfigInput(body)) };
+  }
+
+  @Get('internal/v1/config-center/secret-references')
+  async listSecretReferences(
+    @Query('providerId') providerId?: string,
+    @Query('productId') productId?: string,
+    @Query('appId') appId?: string
+  ) {
+    const references = await this.store.listConfigSecretReferences();
+    return {
+      references: references.filter((reference) => {
+        if (providerId?.trim() && reference.providerId !== providerId.trim()) return false;
+        if (productId?.trim() && reference.productId !== productId.trim()) return false;
+        if (appId?.trim() && reference.appId !== appId.trim()) return false;
+        return true;
+      })
+    };
+  }
+
+  @Get('internal/v1/config-center/secret-references/:secretRefId')
+  async getSecretReference(@Param('secretRefId') secretRefId: string) {
+    const reference = await this.store.getConfigSecretReference(secretRefId);
+    if (!reference) throw new NotFoundException('Secret reference not found');
+    return { reference };
+  }
+
+  @Post('internal/v1/config-center/secret-references')
+  async upsertSecretReference(@Body() rawBody: unknown) {
+    const body = asRecord(rawBody);
+    assertNoSecretMaterial(body);
+    const input = toConfigSecretReferenceInput(body);
+    const providerId = input.providerId?.trim();
+    if (!providerId || !(await this.store.getSecretProviderConfig(providerId))) {
+      throw new NotFoundException('Secret provider not found');
+    }
+    return { reference: await this.store.upsertConfigSecretReference(input) };
+  }
+
+  @Get('internal/v1/config-center/secret-runtime-bindings')
+  secretRuntimeBindings() {
+    return { bindings: [releaseOssRuntimeBinding()] };
   }
 
   @Get('internal/v1/config-center/gateway-runtime-config')
@@ -604,6 +670,93 @@ function domesticWireGuardMaterializerEnv(secret: SiteSlotDomesticWireGuardSecre
   };
 }
 
+function toSecretProviderConfigInput(body: Record<string, unknown>): SecretProviderConfigInput {
+  return {
+    providerId: nullableString(body.providerId),
+    name: nullableString(body.name),
+    kind: nullableString(body.kind),
+    status: nullableString(body.status),
+    endpoint: nullableString(body.endpoint),
+    region: nullableString(body.region),
+    authMode: nullableString(body.authMode),
+    requestedBy: nullableString(body.requestedBy),
+    requestId: nullableString(body.requestId)
+  };
+}
+
+function releaseOssRuntimeBinding() {
+  const requiredKeys = [
+    'MX_RELEASE_OSS_ENDPOINT',
+    'MX_RELEASE_OSS_BUCKET',
+    'MX_RELEASE_OSS_ACCESS_KEY_ID',
+    'MX_RELEASE_OSS_ACCESS_KEY_SECRET'
+  ];
+  const optionalKeys = [
+    'MX_RELEASE_OSS_SECURITY_TOKEN',
+    'MX_RELEASE_OSS_PREFIX',
+    'MX_RELEASE_OSS_PUBLIC_BASE_URL',
+    'MX_RELEASE_OSS_SIGNED_URL_TTL_SECONDS'
+  ];
+  const configuredKeys = [...requiredKeys, ...optionalKeys].filter((key) => Boolean(process.env[key]?.trim()));
+  const missingKeys = requiredKeys.filter((key) => !process.env[key]?.trim());
+  return {
+    bindingId: 'runtime_release_oss',
+    secretRefId: 'secretref_release_oss',
+    consumerId: 'release-center',
+    target: {
+      namespace: 'mx-internal-shadow',
+      secretName: 'mx-release-oss'
+    },
+    source: 'process-env',
+    status: missingKeys.length === 0 ? 'ready' : 'blocked',
+    configuredKeys,
+    missingKeys,
+    containsSecretMaterial: false
+  };
+}
+
+function toConfigSecretReferenceInput(body: Record<string, unknown>): ConfigSecretReferenceInput {
+  const target = asRecord(body.target);
+  return {
+    secretRefId: nullableString(body.secretRefId),
+    name: nullableString(body.name),
+    providerId: nullableString(body.providerId),
+    remoteRef: nullableString(body.remoteRef),
+    status: nullableString(body.status),
+    productId: nullableString(body.productId),
+    appId: nullableString(body.appId),
+    consumerIds: stringListValue(body.consumerIds),
+    exposure: nullableString(body.exposure),
+    versionStage: nullableString(body.versionStage),
+    rotationMode: nullableString(body.rotationMode),
+    targetNamespace: nullableString(body.targetNamespace) ?? nullableString(target.namespace),
+    targetSecretName: nullableString(body.targetSecretName) ?? nullableString(target.secretName),
+    requestedBy: nullableString(body.requestedBy),
+    requestId: nullableString(body.requestId)
+  };
+}
+
+function assertNoSecretMaterial(body: Record<string, unknown>): void {
+  const forbidden = [
+    'accessKeyId',
+    'accessKeySecret',
+    'secretValue',
+    'secretMaterial',
+    'privateKey',
+    'password',
+    'token',
+    'data',
+    'stringData',
+    'value'
+  ];
+  const found = forbidden.filter((key) => key in body);
+  if (found.length > 0) {
+    throw new BadRequestException(
+      `Config Center stores secret references only; remove secret material fields: ${found.join(', ')}`
+    );
+  }
+}
+
 function toRuntimeFeaturePolicyInput(body: Record<string, unknown>): RuntimeFeaturePolicyInput {
   return {
     featureKey: nullableString(body.featureKey),
@@ -706,6 +859,13 @@ function cidrListValue(value: unknown): string[] | null {
     .map((item) => typeof item === 'string' ? item.trim() : '')
     .filter((item) => item.length > 0);
   return cidrs.length ? [...new Set(cidrs)] : null;
+}
+
+function stringListValue(value: unknown): string[] | string | null {
+  if (Array.isArray(value)) {
+    return [...new Set(value.map((item) => String(item || '').trim()).filter(Boolean))];
+  }
+  return nullableString(value);
 }
 
 function domesticSecretProductRelayCidrs(secret: SiteSlotDomesticWireGuardSecret): string[] {

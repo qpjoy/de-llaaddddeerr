@@ -228,14 +228,10 @@ LUOPAN_FORCE_STANDALONE_WG=1
 
 
 # 测试发版功能
-kubectl -n mx-internal-shadow create secret generic mx-release-oss \
-  --from-literal=MX_RELEASE_OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com \
-  --from-literal=MX_RELEASE_OSS_BUCKET=mx-launcher \
-  --from-literal=MX_RELEASE_OSS_ACCESS_KEY_ID=... \
-  --from-literal=MX_RELEASE_OSS_ACCESS_KEY_SECRET=... \
-  --from-literal=MX_RELEASE_OSS_PREFIX=mx-launcher/releases \
-  --from-literal=MX_RELEASE_OSS_PUBLIC_BASE_URL= \
-  --dry-run=client -o yaml | kubectl apply -f -
+# 在 server/.env 填写 MX_RELEASE_OSS_SECRET_SOURCE=env 和完整 MX_RELEASE_OSS_*。
+# 正常 internal-production deploy 会创建/更新 mx-release-oss 并按版本触发 rollout，
+# 不再需要手工执行 kubectl create secret。
+bash scripts/manage.sh ops internal-production deploy
 
 # 打包
 pnpm --dir electron-dock/mx-launcher/demos/mx-h2i make:mac:dmg

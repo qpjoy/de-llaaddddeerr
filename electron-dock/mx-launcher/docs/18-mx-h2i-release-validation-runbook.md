@@ -170,6 +170,8 @@ Storage behavior:
 - CLI publish defaults to `storage=auto`: use OSS when configured, otherwise server storage.
 - Local server runs can put these values in `electron-dock/mx-launcher/server/.env`. Runtime
   environment variables and k8s Secrets take precedence over `.env` values.
+- `ops internal-production deploy` reads only `MX_RELEASE_OSS_*` from that file and materializes
+  `mx-internal-shadow/mx-release-oss`; the `.env` file is never copied into the image.
 - Set `MX_RELEASE_ARTIFACT_STORE_DIR` on the server if Internal server storage needs a
   persistent mounted volume.
 - Set `MX_RELEASE_ARTIFACT_MAX_BYTES` to override the default 2 GiB upload limit.
@@ -177,6 +179,7 @@ Storage behavior:
 OSS server-side configuration:
 
 ```bash
+MX_RELEASE_OSS_SECRET_SOURCE=env
 MX_RELEASE_OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com
 MX_RELEASE_OSS_BUCKET=mx-release
 MX_RELEASE_OSS_ACCESS_KEY_ID=...
@@ -186,19 +189,16 @@ MX_RELEASE_OSS_PREFIX=mx-launcher/releases
 MX_RELEASE_OSS_PUBLIC_BASE_URL=
 ```
 
-In k8s, create an optional `mx-release-oss` secret in `mx-internal-shadow` with the same keys.
-The Internal API deployment already imports that secret when present:
+For Internal production, do not manually copy these values with `kubectl`. Put them in
+`server/.env`, then use the normal deployment command. It creates/updates the Secret before the
+Internal API rollout:
 
 ```bash
-kubectl -n mx-internal-shadow create secret generic mx-release-oss \
-  --from-literal=MX_RELEASE_OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com \
-  --from-literal=MX_RELEASE_OSS_BUCKET=mx-release \
-  --from-literal=MX_RELEASE_OSS_ACCESS_KEY_ID=... \
-  --from-literal=MX_RELEASE_OSS_ACCESS_KEY_SECRET=... \
-  --from-literal=MX_RELEASE_OSS_SECURITY_TOKEN= \
-  --from-literal=MX_RELEASE_OSS_PREFIX=mx-launcher/releases \
-  --from-literal=MX_RELEASE_OSS_PUBLIC_BASE_URL=
+bash scripts/manage.sh ops internal-production deploy
 ```
+
+Use `MX_RELEASE_OSS_SECRET_SOURCE=external` only after a KMS/Vault materializer is installed. In
+that mode deploy waits for the external provider to create `mx-release-oss` and never overwrites it.
 
 If `MX_RELEASE_OSS_PUBLIC_BASE_URL` is set, release plans use the direct OSS/CDN URL. Without
 it, the plan uses the Internal download endpoint, which redirects to a short-lived OSS signed

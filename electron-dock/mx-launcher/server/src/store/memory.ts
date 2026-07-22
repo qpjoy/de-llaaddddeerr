@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import {
   builtinAppCenterApps,
+  builtinConfigSecretReferences,
   buildAppOnboardingDefaults,
   buildAppOnboardingTemplates,
   buildAppCenterApp,
@@ -9,9 +10,12 @@ import {
   builtinLauncherProductNetworks,
   buildLauncherProductNetwork,
   buildAwxProviderConfig,
+  buildConfigSecretReference,
   buildReleaseManagementPlan,
   buildRuntimeFeaturePolicy,
+  buildSecretProviderConfig,
   builtinGatewayRuntimeConfig,
+  builtinSecretProviderConfigs,
   buildGatewayRuntimeConfig,
   attachDomesticWireGuardRefreshHint,
   buildLauncherNetworkMihomoSite,
@@ -125,6 +129,8 @@ import type {
   AwxProviderConfigInput,
   ConfigPolicySnapshot,
   ConfigPolicySnapshotInput,
+  ConfigSecretReference,
+  ConfigSecretReferenceInput,
   ConfigSnapshot,
   CoreDnsConfigMapApplyInput,
   CoreDnsConfigMapApplyResult,
@@ -174,6 +180,8 @@ import type {
   ReleaseReportInput,
   ReleaseTask,
   RuntimeConfig,
+  SecretProviderConfig,
+  SecretProviderConfigInput,
   RuntimeFeaturePolicy,
   RuntimeFeaturePolicyInput,
   SdkGatewayAccessDecision,
@@ -260,6 +268,8 @@ export class MemoryStore implements PlatformStore {
   private readonly launcherNetworkLeases = new Map<string, LauncherNetworkLease>();
   private readonly runtimeFeaturePolicies = new Map<string, RuntimeFeaturePolicy>();
   private readonly awxProviderConfigs = new Map<string, AwxProviderConfig>();
+  private readonly secretProviderConfigs = new Map<string, SecretProviderConfig>();
+  private readonly configSecretReferences = new Map<string, ConfigSecretReference>();
   private readonly appCatalog = new Map<string, AppCenterApp>();
   private readonly appCenterInstallations = new Map<string, AppCenterInstallation>();
   private readonly tenants = new Map<string, UserCenterTenant>();
@@ -293,6 +303,7 @@ export class MemoryStore implements PlatformStore {
     this.registerBuiltinProductNetworks();
     this.registerBuiltinDns();
     this.registerBuiltinDomesticRuntimeConfigs();
+    this.registerBuiltinSecretRegistry();
   }
 
   overview() {
@@ -308,6 +319,8 @@ export class MemoryStore implements PlatformStore {
       enrollments: this.enrollments.size,
       snapshots: this.snapshots.size,
       configPolicySnapshots: this.configPolicySnapshots.size,
+      secretProviderConfigs: this.secretProviderConfigs.size,
+      configSecretReferences: this.configSecretReferences.size,
       appCenterApps: this.appCatalog.size,
       userCenterUsers: this.users.size,
       userCenterServiceAccounts: this.serviceAccounts.size,
@@ -1506,6 +1519,73 @@ export class MemoryStore implements PlatformStore {
 
   getConfigPolicySnapshot(snapshotId: string): ConfigPolicySnapshot | null {
     return this.configPolicySnapshots.get(snapshotId) ?? null;
+  }
+
+  listSecretProviderConfigs(): SecretProviderConfig[] {
+    return [...this.secretProviderConfigs.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  getSecretProviderConfig(providerId: string): SecretProviderConfig | null {
+    return this.secretProviderConfigs.get(providerId) ?? null;
+  }
+
+  upsertSecretProviderConfig(input: SecretProviderConfigInput): SecretProviderConfig {
+    const previous = input.providerId ? this.secretProviderConfigs.get(input.providerId) ?? null : null;
+    const provider = buildSecretProviderConfig(this.config, input, previous);
+    this.secretProviderConfigs.set(provider.providerId, provider);
+    this.recordAudit({
+      eventType: 'config.secret_provider.upserted',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        providerId: provider.providerId,
+        kind: provider.kind,
+        status: provider.status,
+        authMode: provider.authMode,
+        region: provider.region,
+        warnings: provider.warnings
+      }
+    });
+    return provider;
+  }
+
+  listConfigSecretReferences(): ConfigSecretReference[] {
+    return [...this.configSecretReferences.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  getConfigSecretReference(secretRefId: string): ConfigSecretReference | null {
+    return this.configSecretReferences.get(secretRefId) ?? null;
+  }
+
+  upsertConfigSecretReference(input: ConfigSecretReferenceInput): ConfigSecretReference {
+    const previous = input.secretRefId ? this.configSecretReferences.get(input.secretRefId) ?? null : null;
+    const providerId = input.providerId?.trim() || previous?.providerId || '';
+    const reference = buildConfigSecretReference(
+      this.config,
+      input,
+      previous,
+      this.secretProviderConfigs.has(providerId)
+    );
+    this.configSecretReferences.set(reference.secretRefId, reference);
+    this.recordAudit({
+      eventType: 'config.secret_reference.upserted',
+      actorKind: 'config-center',
+      requestId: input.requestId ?? null,
+      productId: reference.productId,
+      metadata: {
+        secretRefId: reference.secretRefId,
+        providerId: reference.providerId,
+        remoteRef: reference.remoteRef,
+        appId: reference.appId,
+        consumerIds: reference.consumerIds,
+        exposure: reference.exposure,
+        versionStage: reference.versionStage,
+        target: reference.target,
+        containsSecretMaterial: false,
+        warnings: reference.warnings
+      }
+    });
+    return reference;
   }
 
   listSiteSlotSshProfiles(): SiteSlotSshProfile[] {
@@ -3517,6 +3597,15 @@ export class MemoryStore implements PlatformStore {
   private registerBuiltinDomesticRuntimeConfigs(): void {
     const config = buildSiteSlotDomesticRuntimeConfig(this.config, { siteId: 'domestic-main' }, null);
     this.siteSlotDomesticRuntimeConfigs.set(config.siteId, config);
+  }
+
+  private registerBuiltinSecretRegistry(): void {
+    for (const provider of builtinSecretProviderConfigs(this.config)) {
+      this.secretProviderConfigs.set(provider.providerId, provider);
+    }
+    for (const reference of builtinConfigSecretReferences(this.config)) {
+      this.configSecretReferences.set(reference.secretRefId, reference);
+    }
   }
 
   private principalForSubject(

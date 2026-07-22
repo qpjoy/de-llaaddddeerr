@@ -18,6 +18,8 @@ import type {
   AwxProviderConfigInput,
   ConfigPolicySnapshot,
   ConfigPolicySnapshotInput,
+  ConfigSecretReference,
+  ConfigSecretReferenceInput,
   ConfigSnapshot,
   CoreDnsConfigMapApplyInput,
   CoreDnsConfigMapApplyResult,
@@ -67,6 +69,8 @@ import type {
   RuntimeFeaturePolicy,
   RuntimeFeaturePolicyInput,
   RuntimeConfig,
+  SecretProviderConfig,
+  SecretProviderConfigInput,
   SdkGatewayAccessDecision,
   SdkGatewayAccessInput,
   SdkGatewayManifest,
@@ -139,6 +143,8 @@ export interface PlatformOverview {
   enrollments: number;
   snapshots: number;
   configPolicySnapshots: number;
+  secretProviderConfigs: number;
+  configSecretReferences: number;
   appCenterApps: number;
   userCenterUsers: number;
   userCenterServiceAccounts: number;
@@ -227,6 +233,12 @@ export interface PlatformStore {
   evaluateSdkGatewayAccess(input: SdkGatewayAccessInput): MaybePromise<SdkGatewayAccessDecision>;
   createConfigPolicySnapshot(input: ConfigPolicySnapshotInput): MaybePromise<ConfigPolicySnapshot>;
   getConfigPolicySnapshot(snapshotId: string): MaybePromise<ConfigPolicySnapshot | null>;
+  listSecretProviderConfigs(): MaybePromise<SecretProviderConfig[]>;
+  getSecretProviderConfig(providerId: string): MaybePromise<SecretProviderConfig | null>;
+  upsertSecretProviderConfig(input: SecretProviderConfigInput): MaybePromise<SecretProviderConfig>;
+  listConfigSecretReferences(): MaybePromise<ConfigSecretReference[]>;
+  getConfigSecretReference(secretRefId: string): MaybePromise<ConfigSecretReference | null>;
+  upsertConfigSecretReference(input: ConfigSecretReferenceInput): MaybePromise<ConfigSecretReference>;
   listSiteSlotSshProfiles(): MaybePromise<SiteSlotSshProfile[]>;
   getSiteSlotSshProfile(profileId: string): MaybePromise<SiteSlotSshProfile | null>;
   getSiteSlotSshProfileForSite(siteId: string): MaybePromise<SiteSlotSshProfile | null>;

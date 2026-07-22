@@ -40,6 +40,7 @@ AccessKey。RAM 身份至少需要目标前缀的 PutObject/GetObject 权限。
 
 ```bash
 MX_RELEASE_ARTIFACT_STORAGE=oss
+MX_RELEASE_OSS_SECRET_SOURCE=env
 MX_RELEASE_OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com
 MX_RELEASE_OSS_BUCKET=mx-launcher
 MX_RELEASE_OSS_ACCESS_KEY_ID=...
@@ -51,24 +52,73 @@ MX_RELEASE_OSS_SIGNED_URL_TTL_SECONDS=3600
 MX_PUBLIC_BASE_URL=http://10.88.88.88:18090
 ```
 
+把这些值写入 Internal 服务器上的 `electron-dock/mx-launcher/server/.env`。文件已被
+gitignore，不要提交；AccessKey 轮换后只更新该文件并重新运行部署命令。
+
 私有 bucket 必须让 `MX_RELEASE_OSS_PUBLIC_BASE_URL` 保持为空。计划保存 Internal 下载
 地址；客户端下载时先到 Internal，再 302 到一条短期 OSS 签名 URL。只有配置了公开读
 CDN 时才填写 public base URL。
 
-k8s 示例：
+`internal-production deploy` 会在构建镜像后执行以下动作：
+
+1. 只从 `server/.env` 提取 `MX_RELEASE_OSS_*`，不会把其他密码复制到 Secret；
+2. 校验 endpoint、bucket、必填凭据和 signed URL TTL；
+3. 幂等创建或更新 `mx-internal-shadow/mx-release-oss`；
+4. Secret 内容版本变化时触发 Internal Deployment rollout；
+5. 全新集群中 Secret 不存在时也会由同一条 deploy 命令重新创建。
+
+正式部署仍只需：
 
 ```bash
-kubectl -n mx-internal-shadow create secret generic mx-release-oss \
-  --from-literal=MX_RELEASE_OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com \
-  --from-literal=MX_RELEASE_OSS_BUCKET=mx-launcher \
-  --from-literal=MX_RELEASE_OSS_ACCESS_KEY_ID='<access-key-id>' \
-  --from-literal=MX_RELEASE_OSS_ACCESS_KEY_SECRET='<access-key-secret>' \
-  --from-literal=MX_RELEASE_OSS_SECURITY_TOKEN='' \
-  --from-literal=MX_RELEASE_OSS_PREFIX=mx-launcher/releases \
-  --from-literal=MX_RELEASE_OSS_PUBLIC_BASE_URL=''
+TMPDIR=/data/tmp \
+MX_K8S_OS_HOSTNAME=mx-internal-server \
+MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.2 \
+MX_SHADOW_BUILDKIT_KEEP_STORAGE=2GB \
+MX_SHADOW_BUILDKIT_PRUNE_UNTIL=24h \
+bash scripts/manage.sh ops internal-production deploy
 ```
 
-若 Secret 已存在，用当前集群的 Secret 更新流程替换，不要先删除生产 Secret。
+`MX_RELEASE_OSS_SECRET_SOURCE` 支持：
+
+- `env`：生产推荐的当前落地；必须由 `server/.env` 提供完整配置，每次 deploy 都可恢复；
+- `auto`：有完整 `.env` 就同步，否则保留集群内已有 Secret；
+- `external`：等待 KMS/Vault controller 生成 `mx-release-oss`，部署脚本不覆盖；
+- `disabled`：部署脚本不创建、更新或删除 OSS Secret；若集群已有 Secret，Pod 仍可读取它。
+
+## 2.1 Config Center / Secret Center 边界
+
+Config Center 提供 `secret-providers`、`secret-references` 和 runtime readiness API。Postgres
+只保存 provider、remote ref、consumer、exposure、rotation 和 K8s target；接口主动拒绝
+AccessKey、token、password、private key、`data`/`stringData` 等明文字段。
+
+内置引用为：
+
+```text
+secretref_release_oss
+  provider: secretprov_kubernetes_runtime
+  consumer: release-center
+  target: mx-internal-shadow/mx-release-oss
+  exposure: signed-url
+```
+
+后续切换 Alibaba KMS 时，在 Admin / Config Center / Secret Center 登记 KMS provider 和
+remote ref，再把 `MX_RELEASE_OSS_SECRET_SOURCE` 改为 `external`。KMS/ExternalSecret 的实际
+认证和 materializer 必须先部署并能生成同名 K8s Secret；MX 不在 Postgres 中保存 KMS
+明文。
+
+其他应用的 Key 按“一应用、一用途、一引用”规划，不要继续追加到 `mx-release-oss`：
+
+```text
+KMS remote ref:  mx-launcher/<environment>/<appId>/<purpose>
+Config ref ID:   secretref_<appId>_<purpose>
+K8s Secret:      mx-app-<appId>-<purpose>
+Consumers:       只列实际读取它的 server/worker/app service account
+```
+
+例如 Luopan 的第三方 API Key 使用 `secretref_luopan_partner_api`，MX-H2I 的独立签名服务
+使用 `secretref_mx_h2i_signing`。应用客户端不能读取 K8s Secret；需要外部访问时只允许
+`signed-url` 或受限、短期的 `temporary-sts`，不设计 raw-secret 下发模式。`server/.env`
+当前只承担 Internal 基础设施的 bootstrap；应用 Key 最终都应迁入 KMS/Vault provider。
 
 ## 3. OSS 对象目录
 

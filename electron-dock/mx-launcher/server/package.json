@@ -12,6 +12,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "migrate:up": "node dist/src/migrate.js",
     "smoke:platform-kernel": "pnpm run build && node dist/scripts/platform-kernel-smoke.js",
+    "smoke:config-secret-registry": "pnpm run build && node dist/scripts/config-secret-registry-smoke.js",
     "smoke:user-oversea-auth": "pnpm run build && node dist/scripts/user-oversea-auth-smoke.js",
     "smoke:user-lifecycle": "pnpm run build && node dist/scripts/user-lifecycle-smoke.js",
     "smoke:http": "node scripts/http-smoke.mjs",

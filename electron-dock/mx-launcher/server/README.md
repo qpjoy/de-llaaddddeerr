@@ -107,6 +107,15 @@ dedicated ops credential and then enforce that identity on the route.
 This is separate from the lightweight enrollment config snapshot: enrollment
 bootstraps the install, while Config Center aggregates platform policy after
 identity, DNS, AppCenter, release, and Launcher Network decisions are known.
+`GET/POST /internal/v1/config-center/secret-providers` and
+`GET/POST /internal/v1/config-center/secret-references` manage the Secret Center
+metadata plane. Records contain only provider kind, remote reference, consumer,
+exposure, rotation, product/app scope, and Kubernetes target. Requests containing
+AccessKey, token, password, private key, `data`, or `stringData` material are
+rejected. `GET /internal/v1/config-center/secret-runtime-bindings` reports only
+configured/missing environment key names so Admin can prove readiness without
+reading secret values. The built-in `secretref_release_oss` points Release Center
+at `mx-internal-shadow/mx-release-oss`.
 `POST /internal/v1/dns/zones/build` and `POST /internal/v1/sdk/dns/zone`
 build a signed DNS zone snapshot from the split DNS policy. The snapshot
 contains CoreDNS server blocks, records, fallback order, reverse proxy routes,

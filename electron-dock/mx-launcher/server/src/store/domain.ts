@@ -20,6 +20,10 @@ import type {
   AwxProviderConfigInput,
   AwxProviderKind,
   AwxProviderStatus,
+  ConfigSecretExposure,
+  ConfigSecretReference,
+  ConfigSecretReferenceInput,
+  ConfigSecretRotationMode,
   ConfigPolicySnapshot,
   ConfigPolicySnapshotInput,
   ConfigSnapshot,
@@ -76,6 +80,11 @@ import type {
   RuntimeFeaturePolicyInput,
   RuntimeFeaturePolicyMode,
   RuntimeFeaturePolicyScopeKind,
+  SecretProviderAuthMode,
+  SecretProviderConfig,
+  SecretProviderConfigInput,
+  SecretProviderKind,
+  SecretProviderStatus,
   SdkGatewayAccessDecision,
   SdkGatewayManifest,
   SiteSlotExecutionInput,
@@ -4568,6 +4577,120 @@ export function buildAwxProviderConfig(
   };
 }
 
+export function buildSecretProviderConfig(
+  config: RuntimeConfig,
+  input: SecretProviderConfigInput,
+  previous: SecretProviderConfig | null,
+  now = new Date().toISOString()
+): SecretProviderConfig {
+  const kind = secretProviderKind(input.kind ?? previous?.kind);
+  const providerId = input.providerId?.trim() || previous?.providerId || `secretprov_${safeIdPart(kind)}`;
+  const status = secretProviderStatus(input.status ?? previous?.status);
+  const endpoint = input.endpoint?.trim() || previous?.endpoint || null;
+  const region = input.region?.trim() || previous?.region || null;
+  const authMode = secretProviderAuthMode(input.authMode ?? previous?.authMode, kind);
+  const warnings: string[] = [];
+  if (kind === 'alibaba-kms' && !region) warnings.push('missing: region is required before Alibaba KMS materialization');
+  if (kind === 'vault' && !endpoint) warnings.push('missing: endpoint is required before Vault materialization');
+  if (status === 'paused') warnings.push('paused: provider cannot materialize new secret versions');
+  return {
+    providerId,
+    name: input.name?.trim() || previous?.name || defaultSecretProviderName(kind),
+    kind,
+    environment: config.environment,
+    status,
+    endpoint,
+    region,
+    authMode,
+    source: 'config-center',
+    capabilities: secretProviderCapabilities(kind),
+    warnings,
+    createdBy: previous?.createdBy || input.requestedBy?.trim() || 'config-center',
+    createdAt: previous?.createdAt || now,
+    updatedBy: input.requestedBy?.trim() || previous?.updatedBy || 'config-center',
+    updatedAt: now
+  };
+}
+
+export function buildConfigSecretReference(
+  config: RuntimeConfig,
+  input: ConfigSecretReferenceInput,
+  previous: ConfigSecretReference | null,
+  providerExists = true,
+  now = new Date().toISOString()
+): ConfigSecretReference {
+  const providerId = required(
+    input.providerId?.trim() || previous?.providerId || null,
+    'providerId is required'
+  );
+  const remoteRef = required(
+    input.remoteRef?.trim() || previous?.remoteRef || null,
+    'remoteRef is required'
+  );
+  const consumerIds = configSecretConsumerIds(input.consumerIds, previous?.consumerIds);
+  const status = input.status
+    ? input.status === 'paused' ? 'paused' : 'active'
+    : previous?.status ?? 'active';
+  const exposure = configSecretExposure(input.exposure ?? previous?.exposure);
+  const warnings: string[] = [];
+  if (!providerExists) warnings.push(`provider-not-found: ${providerId}`);
+  if (consumerIds.length === 0) warnings.push('missing: at least one consumerId is required before materialization');
+  if (status === 'paused') warnings.push('paused: reference is not available to consumers');
+  return {
+    secretRefId: input.secretRefId?.trim() || previous?.secretRefId || `secretref_${safeIdPart(remoteRef)}`,
+    name: input.name?.trim() || previous?.name || remoteRef,
+    providerId,
+    remoteRef,
+    environment: config.environment,
+    status,
+    productId: input.productId?.trim() || previous?.productId || null,
+    appId: input.appId?.trim() || previous?.appId || null,
+    consumerIds,
+    exposure,
+    versionStage: input.versionStage?.trim() || previous?.versionStage || 'ACSCurrent',
+    rotationMode: configSecretRotationMode(input.rotationMode ?? previous?.rotationMode),
+    target: {
+      namespace: input.targetNamespace?.trim() || previous?.target.namespace || 'mx-internal-shadow',
+      secretName: input.targetSecretName?.trim() || previous?.target.secretName || 'mx-app-secrets'
+    },
+    source: 'config-center',
+    containsSecretMaterial: false,
+    warnings,
+    createdBy: previous?.createdBy || input.requestedBy?.trim() || 'config-center',
+    createdAt: previous?.createdAt || now,
+    updatedBy: input.requestedBy?.trim() || previous?.updatedBy || 'config-center',
+    updatedAt: now
+  };
+}
+
+export function builtinSecretProviderConfigs(config: RuntimeConfig): SecretProviderConfig[] {
+  return [buildSecretProviderConfig(config, {
+    providerId: 'secretprov_kubernetes_runtime',
+    name: 'Kubernetes Runtime Secret',
+    kind: 'kubernetes',
+    status: 'active',
+    authMode: 'native-secret',
+    requestedBy: 'builtin'
+  }, null)];
+}
+
+export function builtinConfigSecretReferences(config: RuntimeConfig): ConfigSecretReference[] {
+  return [buildConfigSecretReference(config, {
+    secretRefId: 'secretref_release_oss',
+    name: 'Release Center OSS',
+    providerId: 'secretprov_kubernetes_runtime',
+    remoteRef: 'mx-release-oss',
+    status: 'active',
+    consumerIds: ['release-center'],
+    exposure: 'signed-url',
+    versionStage: 'runtime',
+    rotationMode: 'manual',
+    targetNamespace: 'mx-internal-shadow',
+    targetSecretName: 'mx-release-oss',
+    requestedBy: 'builtin'
+  }, null)];
+}
+
 export function buildSiteSlotExecutionRun(
   config: RuntimeConfig,
   plan: SiteSlotPlan,
@@ -6229,6 +6352,60 @@ function awxProviderKind(value: AwxProviderConfigInput['defaultKind']): AwxProvi
 
 function awxProviderStatus(value: AwxProviderConfigInput['status']): AwxProviderStatus {
   return value === 'paused' ? 'paused' : 'active';
+}
+
+function secretProviderKind(value: SecretProviderConfigInput['kind']): SecretProviderKind {
+  if (value === 'alibaba-kms' || value === 'vault') return value;
+  return 'kubernetes';
+}
+
+function secretProviderStatus(value: SecretProviderConfigInput['status']): SecretProviderStatus {
+  return value === 'paused' ? 'paused' : 'active';
+}
+
+function secretProviderAuthMode(
+  value: SecretProviderConfigInput['authMode'],
+  kind: SecretProviderKind
+): SecretProviderAuthMode {
+  if (
+    value === 'native-secret'
+    || value === 'ecs-ram-role'
+    || value === 'rrsa'
+    || value === 'application-access-point'
+    || value === 'token'
+  ) return value;
+  if (kind === 'alibaba-kms') return 'ecs-ram-role';
+  if (kind === 'vault') return 'token';
+  return 'native-secret';
+}
+
+function defaultSecretProviderName(kind: SecretProviderKind): string {
+  if (kind === 'alibaba-kms') return 'Alibaba KMS Secrets Manager';
+  if (kind === 'vault') return 'HashiCorp Vault';
+  return 'Kubernetes Secret';
+}
+
+function secretProviderCapabilities(kind: SecretProviderKind): SecretProviderConfig['capabilities'] {
+  if (kind === 'kubernetes') return ['reference', 'kubernetes-materialization'];
+  return ['reference', 'version', 'rotation', 'kubernetes-materialization'];
+}
+
+function configSecretConsumerIds(
+  value: ConfigSecretReferenceInput['consumerIds'],
+  previous: string[] | undefined
+): string[] {
+  if (Array.isArray(value)) return uniqueStrings(value);
+  if (typeof value === 'string') return uniqueStrings(value.split(/[,;\n]/));
+  return previous ? [...previous] : [];
+}
+
+function configSecretExposure(value: ConfigSecretReferenceInput['exposure']): ConfigSecretExposure {
+  if (value === 'signed-url' || value === 'temporary-sts') return value;
+  return 'internal-only';
+}
+
+function configSecretRotationMode(value: ConfigSecretReferenceInput['rotationMode']): ConfigSecretRotationMode {
+  return value === 'provider-managed' ? 'provider-managed' : 'manual';
 }
 
 function safeIdPart(value: string): string {

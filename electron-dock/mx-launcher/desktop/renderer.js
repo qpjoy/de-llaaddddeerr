@@ -258,6 +258,14 @@ const state = {
     applyResult: null,
     error: null
   },
+  secretCenter: {
+    providers: [],
+    references: [],
+    runtimeBindings: [],
+    error: null,
+    feedback: null,
+    busy: false
+  },
   awxProviders: [],
   selectedAwxProviderId: null,
   launcherProducts: [],
@@ -1007,6 +1015,7 @@ async function refreshAdmin() {
       launcherProductsPayload,
       launcherLeasesPayload,
       domesticRuntimePayload,
+      secretCenterPayload,
       dnsPolicyPayload,
       dnsRoutesPayload,
       gatewayRuntimePayload
@@ -1020,6 +1029,7 @@ async function refreshAdmin() {
       loadLauncherProductNetworks(),
       loadLauncherNetworkLeases(),
       loadDomesticRuntimeConfigs(),
+      loadSecretCenter(),
       loadDnsPolicyCenter(),
       loadDnsReverseProxyRoutes(),
       loadGatewayRuntimeConfig()
@@ -1045,6 +1055,7 @@ async function refreshAdmin() {
     state.launcherLeasesError = launcherLeasesPayload.error || null;
     state.domesticRuntime.configs = asArray(domesticRuntimePayload.configs);
     state.domesticRuntime.error = domesticRuntimePayload.error || null;
+    applySecretCenterPayload(secretCenterPayload);
     state.dnsCenter.policy = dnsPolicyPayload.policy || null;
     state.dnsCenter.policies = asArray(dnsPolicyPayload.policies);
     state.dnsCenter.policyError = dnsPolicyPayload.error || null;
@@ -1090,6 +1101,10 @@ async function refreshAdmin() {
     state.launcherLeasesError = error.message;
     state.domesticRuntime.configs = [];
     state.domesticRuntime.error = error.message;
+    state.secretCenter.providers = [];
+    state.secretCenter.references = [];
+    state.secretCenter.runtimeBindings = [];
+    state.secretCenter.error = error.message;
     state.dnsCenter.policy = null;
     state.dnsCenter.policies = [];
     state.dnsCenter.policyError = error.message;
@@ -1136,6 +1151,31 @@ async function loadDomesticRuntimeConfigs() {
   } catch (error) {
     return { configs: [], error: error.message };
   }
+}
+
+async function loadSecretCenter() {
+  try {
+    const [providerPayload, referencePayload, runtimePayload] = await Promise.all([
+      fetchJson('/internal/v1/config-center/secret-providers'),
+      fetchJson('/internal/v1/config-center/secret-references'),
+      fetchJson('/internal/v1/config-center/secret-runtime-bindings')
+    ]);
+    return {
+      providers: asArray(providerPayload.providers),
+      references: asArray(referencePayload.references),
+      runtimeBindings: asArray(runtimePayload.bindings),
+      error: null
+    };
+  } catch (error) {
+    return { providers: [], references: [], runtimeBindings: [], error: error.message };
+  }
+}
+
+function applySecretCenterPayload(payload) {
+  state.secretCenter.providers = asArray(payload?.providers);
+  state.secretCenter.references = asArray(payload?.references);
+  state.secretCenter.runtimeBindings = asArray(payload?.runtimeBindings);
+  state.secretCenter.error = payload?.error || null;
 }
 
 async function loadDnsPolicyCenter() {
@@ -5710,6 +5750,7 @@ function renderFoundationGrid(overview) {
   renderReleaseCenterDrawer();
   bindDnsCenterControls(foundationGrid);
   renderDnsRouteEditorDrawer();
+  bindSecretCenterControls(foundationGrid);
   bindDomesticRuntimeControls(foundationGrid);
   bindRelayEnrollmentControls(foundationGrid);
 }
@@ -6666,7 +6707,7 @@ function renderReleaseUploadDrawer() {
           <div class="release-upload-grid">
             <label>
               <span>Product</span>
-              <input name="productId" value="${escapeHtml(draft.productId || MX_H2I_PRODUCT_ID)}" autocomplete="off" required pattern="[a-z0-9][a-z0-9-]*" placeholder="mx-h2i / luopan" />
+              <input name="productId" value="${escapeHtml(draft.productId || MX_H2I_PRODUCT_ID)}" autocomplete="off" required pattern="[a-z0-9][a-z0-9\\-]*" placeholder="mx-h2i / luopan" />
             </label>
             <label>
               <span>File</span>
@@ -9861,6 +9902,7 @@ function renderExternalSystemContractPanel() {
 
 function renderConfigCenterPanel(overview) {
   const rows = [
+    ['Secret References', `${asArray(state.secretCenter.references).length} refs`, '只保存 provider/ref/consumer/exposure 元数据，不保存密钥明文。'],
     ['SSH Profiles', `${asArray(state.sshProfiles).length} profiles`, 'Remote SSH runner、host key、identity、site binding。'],
     ['Runtime Policies', `${asArray(state.awxRuntimePolicies).length} feature gates`, '远程执行、artifact push、rollback、AWX optional gate。'],
     ['Subscription Defaults', `${overview.siteSlotPlans || 0} site plans`, 'hysteria2 port、DNS、rate limit、mihomo YAML 模板。'],
@@ -9877,6 +9919,7 @@ function renderConfigCenterPanel(overview) {
       </div>
       ${renderFoundationRows(rows)}
     </section>
+    ${renderSecretCenterPanel()}
     ${renderDomesticRuntimeConfigPanel()}
     ${renderLauncherProductNetworksPanel()}
     <section class="foundation-panel">
@@ -9893,6 +9936,220 @@ function renderConfigCenterPanel(overview) {
       ])}
     </section>
   `;
+}
+
+function renderSecretCenterPanel() {
+  const center = state.secretCenter;
+  const providers = asArray(center.providers);
+  const references = asArray(center.references);
+  const runtime = asArray(center.runtimeBindings).find((item) => item.secretRefId === 'secretref_release_oss') || null;
+  const runtimeReady = runtime?.status === 'ready';
+  const providerOptions = providers.length
+    ? providers.map((provider) => `<option value="${escapeHtml(provider.providerId)}">${escapeHtml(provider.name)} (${escapeHtml(provider.kind)})</option>`).join('')
+    : '<option value="">Create a provider first</option>';
+  return `
+    <section class="foundation-panel foundation-wide secret-center-panel">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>Secret Center</h4>
+          <p>这里只登记 Secret Provider 和引用关系；AccessKey、token、password、private key 不进入 Config Center/Postgres。</p>
+        </div>
+        <span>${runtimeReady ? 'release OSS ready' : 'release OSS blocked'}</span>
+      </div>
+      ${center.error ? `<div class="feedback error">${escapeHtml(center.error)}</div>` : ''}
+      <div class="foundation-operation-grid">
+        <label class="form-field">
+          <span>Provider ID</span>
+          <input data-secret-provider-field="providerId" autocomplete="off" value="secretprov_alibaba_kms" />
+        </label>
+        <label class="form-field">
+          <span>Provider Name</span>
+          <input data-secret-provider-field="name" autocomplete="off" value="Alibaba KMS Secrets Manager" />
+        </label>
+        <label class="form-field compact-field">
+          <span>Kind</span>
+          <select data-secret-provider-field="kind">
+            <option value="alibaba-kms">alibaba-kms</option>
+            <option value="kubernetes">kubernetes</option>
+            <option value="vault">vault</option>
+          </select>
+        </label>
+        <label class="form-field compact-field">
+          <span>Status</span>
+          <select data-secret-provider-field="status">
+            <option value="active">active</option>
+            <option value="paused">paused</option>
+          </select>
+        </label>
+        <label class="form-field">
+          <span>Region</span>
+          <input data-secret-provider-field="region" autocomplete="off" placeholder="cn-hangzhou" />
+        </label>
+        <label class="form-field wide-field">
+          <span>Endpoint (metadata)</span>
+          <input data-secret-provider-field="endpoint" autocomplete="off" placeholder="KMS/Vault endpoint; no credentials" />
+        </label>
+        <label class="form-field">
+          <span>Auth Mode</span>
+          <select data-secret-provider-field="authMode">
+            <option value="ecs-ram-role">ecs-ram-role</option>
+            <option value="rrsa">rrsa</option>
+            <option value="application-access-point">application-access-point</option>
+            <option value="native-secret">native-secret</option>
+            <option value="token">token</option>
+          </select>
+        </label>
+      </div>
+      <div class="foundation-operation-actions">
+        <button class="secondary-button" type="button" data-secret-provider-save ${center.busy ? 'disabled' : ''}>Save Provider Metadata</button>
+      </div>
+      <div class="foundation-operation-grid">
+        <label class="form-field">
+          <span>Reference ID</span>
+          <input data-secret-reference-field="secretRefId" autocomplete="off" value="secretref_release_oss" />
+        </label>
+        <label class="form-field">
+          <span>Name</span>
+          <input data-secret-reference-field="name" autocomplete="off" value="Release Center OSS" />
+        </label>
+        <label class="form-field">
+          <span>Provider</span>
+          <select data-secret-reference-field="providerId">${providerOptions}</select>
+        </label>
+        <label class="form-field wide-field">
+          <span>Remote Ref</span>
+          <input data-secret-reference-field="remoteRef" autocomplete="off" value="mx-launcher/prod/release/oss" />
+        </label>
+        <label class="form-field">
+          <span>Product ID (optional)</span>
+          <input data-secret-reference-field="productId" autocomplete="off" placeholder="mx-h2i" />
+        </label>
+        <label class="form-field">
+          <span>App ID (optional)</span>
+          <input data-secret-reference-field="appId" autocomplete="off" placeholder="luopan" />
+        </label>
+        <label class="form-field wide-field">
+          <span>Consumers</span>
+          <input data-secret-reference-field="consumerIds" autocomplete="off" value="release-center" placeholder="release-center, app-id" />
+        </label>
+        <label class="form-field compact-field">
+          <span>Exposure</span>
+          <select data-secret-reference-field="exposure">
+            <option value="internal-only">internal-only</option>
+            <option value="signed-url" selected>signed-url</option>
+            <option value="temporary-sts">temporary-sts</option>
+          </select>
+        </label>
+        <label class="form-field compact-field">
+          <span>Rotation</span>
+          <select data-secret-reference-field="rotationMode">
+            <option value="provider-managed">provider-managed</option>
+            <option value="manual">manual</option>
+          </select>
+        </label>
+        <label class="form-field compact-field">
+          <span>Version Stage</span>
+          <input data-secret-reference-field="versionStage" autocomplete="off" value="ACSCurrent" />
+        </label>
+        <label class="form-field">
+          <span>Target Namespace</span>
+          <input data-secret-reference-field="targetNamespace" autocomplete="off" value="mx-internal-shadow" />
+        </label>
+        <label class="form-field">
+          <span>Target Secret</span>
+          <input data-secret-reference-field="targetSecretName" autocomplete="off" value="mx-release-oss" />
+        </label>
+      </div>
+      <div class="foundation-operation-actions">
+        <button class="primary-button" type="button" data-secret-reference-save ${center.busy ? 'disabled' : ''}>Save Secret Reference</button>
+        ${center.feedback ? `<span class="profile-feedback" data-kind="${escapeHtml(center.feedback.kind)}">${escapeHtml(center.feedback.message)}</span>` : ''}
+      </div>
+      <div class="foundation-list">
+        <article>
+          <strong>Release OSS runtime: ${runtimeReady ? 'ready' : 'blocked'}</strong>
+          <span>${runtimeReady ? 'Required environment keys are injected into Release Center.' : `Missing ${asArray(runtime?.missingKeys).join(', ') || 'runtime binding evidence'}`}</span>
+          <small>Secret values are never returned by this endpoint.</small>
+        </article>
+        ${references.map((reference) => `
+          <article>
+            <strong>${escapeHtml(reference.name)} · ${escapeHtml(reference.exposure)}</strong>
+            <span>${escapeHtml(reference.providerId)} / ${escapeHtml(reference.remoteRef)}</span>
+            <small>${escapeHtml(asArray(reference.consumerIds).join(', ') || 'no consumers')} → ${escapeHtml(reference.target?.namespace || '-')} / ${escapeHtml(reference.target?.secretName || '-')}</small>
+          </article>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
+
+function bindSecretCenterControls(root) {
+  const providerSave = root.querySelector('[data-secret-provider-save]');
+  if (providerSave) providerSave.addEventListener('click', () => void saveSecretProviderMetadata(root));
+  const referenceSave = root.querySelector('[data-secret-reference-save]');
+  if (referenceSave) referenceSave.addEventListener('click', () => void saveSecretReferenceMetadata(root));
+}
+
+async function saveSecretProviderMetadata(root) {
+  const body = secretCenterFormBody(root, 'secret-provider');
+  state.secretCenter.busy = true;
+  state.secretCenter.feedback = { kind: 'info', message: 'Saving provider metadata…' };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    const payload = await fetchJson('/internal/v1/config-center/secret-providers', {
+      method: 'POST',
+      body: {
+        ...body,
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-secret-provider-${Date.now()}`
+      }
+    });
+    applySecretCenterPayload(await loadSecretCenter());
+    state.secretCenter.feedback = {
+      kind: 'success',
+      message: `Saved ${payload.provider?.providerId || body.providerId}; no secret material was stored.`
+    };
+  } catch (error) {
+    state.secretCenter.feedback = { kind: 'error', message: error.message };
+  } finally {
+    state.secretCenter.busy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+  }
+}
+
+async function saveSecretReferenceMetadata(root) {
+  const body = secretCenterFormBody(root, 'secret-reference');
+  state.secretCenter.busy = true;
+  state.secretCenter.feedback = { kind: 'info', message: 'Saving secret reference…' };
+  renderFoundationGrid(state.dashboard?.overview || {});
+  try {
+    const payload = await fetchJson('/internal/v1/config-center/secret-references', {
+      method: 'POST',
+      body: {
+        ...body,
+        requestedBy: 'desktop-admin',
+        requestId: `desktop-secret-reference-${Date.now()}`
+      }
+    });
+    applySecretCenterPayload(await loadSecretCenter());
+    state.secretCenter.feedback = {
+      kind: 'success',
+      message: `Saved ${payload.reference?.secretRefId || body.secretRefId}; consumers receive references only.`
+    };
+  } catch (error) {
+    state.secretCenter.feedback = { kind: 'error', message: error.message };
+  } finally {
+    state.secretCenter.busy = false;
+    renderFoundationGrid(state.dashboard?.overview || {});
+  }
+}
+
+function secretCenterFormBody(root, prefix) {
+  const fields = {};
+  const datasetKey = prefix === 'secret-provider' ? 'secretProviderField' : 'secretReferenceField';
+  for (const input of root.querySelectorAll(`[data-${prefix}-field]`)) {
+    fields[input.dataset[datasetKey]] = blankToNull(input.value);
+  }
+  return fields;
 }
 
 function renderDomesticRuntimeConfigPanel() {
