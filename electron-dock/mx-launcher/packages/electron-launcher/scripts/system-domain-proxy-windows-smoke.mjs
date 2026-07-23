@@ -16,6 +16,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { runInNewContext } from 'node:vm';
 
 const testDir = mkdtempSync(join(tmpdir(), 'mx-system-domain-proxy-windows-'));
@@ -24,14 +25,45 @@ const windowsDir = join(testDir, 'windows');
 const powerShellDir = join(windowsDir, 'System32', 'WindowsPowerShell', 'v1.0');
 const registryPath = join(testDir, 'registry.json');
 const notifyLogPath = join(testDir, 'proxy-notify.log');
+const windowsCommandMockRunnerPath = join(testDir, 'windows-command-mock-runner.cjs');
+const windowsCommandMockLoaderPath = join(testDir, 'windows-command-mock-loader.mjs');
 mkdirSync(binDir);
 mkdirSync(powerShellDir, { recursive: true });
 
-writeExecutable(join(binDir, 'reg.exe'), `#!/usr/bin/env node
+writeFileSync(join(binDir, 'reg.exe'), 'intercepted by windows-command-mock-loader.mjs\n');
+writeFileSync(join(powerShellDir, 'powershell.exe'), 'intercepted by windows-command-mock-loader.mjs\n');
+writeFileSync(windowsCommandMockRunnerPath, `
 const { existsSync, readFileSync, writeFileSync } = require('node:fs');
+const { basename } = require('node:path');
+const command = basename(String(process.argv[2] || '')).toLowerCase();
+const args = process.argv.slice(3);
+if (command === 'powershell.exe') {
+  const { appendFileSync } = require('node:fs');
+  const commandIndex = args.findIndex((arg) => String(arg).toLowerCase() === '-command');
+  const powerShellCommand = commandIndex >= 0 ? String(args[commandIndex + 1] || '') : '';
+  if (/@['"][^\\r\\n]/.test(powerShellCommand)) {
+    process.stderr.write('UnexpectedCharactersAfterHereStringHeader\\n');
+    process.exit(1);
+  }
+  if (!powerShellCommand.includes('$sig = \\'[DllImport("wininet.dll", SetLastError=true)]')) {
+    process.stderr.write('WinINet signature must use a PowerShell 5.1-safe string literal\\n');
+    process.exit(1);
+  }
+  if (process.env.MX_TEST_PROXY_NOTIFY_LOG) {
+    appendFileSync(process.env.MX_TEST_PROXY_NOTIFY_LOG, 'notify\\n');
+  }
+  if (process.env.MX_TEST_PROXY_NOTIFY_FAILURE === '1') {
+    process.stderr.write('InternetSetOption failed\\n');
+    process.exit(5);
+  }
+  process.exit(0);
+}
+if (command !== 'reg.exe') {
+  process.stderr.write('Unexpected mocked Windows command: ' + command + '\\n');
+  process.exit(1);
+}
 const registryPath = process.env.MX_TEST_WINDOWS_REGISTRY;
 const state = existsSync(registryPath) ? JSON.parse(readFileSync(registryPath, 'utf8')) : {};
-const args = process.argv.slice(2);
 const operation = String(args[0] || '').toLowerCase();
 const valueIndex = args.indexOf('/v');
 const name = valueIndex >= 0 ? args[valueIndex + 1] : '';
@@ -90,36 +122,38 @@ if (operation === 'delete') {
 }
 process.exit(1);
 `);
-writeExecutable(join(powerShellDir, 'powershell.exe'), `#!/usr/bin/env node
-const { appendFileSync } = require('node:fs');
-const args = process.argv.slice(2);
-const commandIndex = args.findIndex((arg) => String(arg).toLowerCase() === '-command');
-const command = commandIndex >= 0 ? String(args[commandIndex + 1] || '') : '';
-if (/@['"][^\\r\\n]/.test(command)) {
-  process.stderr.write('UnexpectedCharactersAfterHereStringHeader\\n');
-  process.exit(1);
-}
-if (!command.includes('$sig = \\'[DllImport("wininet.dll", SetLastError=true)]')) {
-  process.stderr.write('WinINet signature must use a PowerShell 5.1-safe string literal\\n');
-  process.exit(1);
-}
-if (process.env.MX_TEST_PROXY_NOTIFY_LOG) {
-  appendFileSync(process.env.MX_TEST_PROXY_NOTIFY_LOG, 'notify\\n');
-}
-if (process.env.MX_TEST_PROXY_NOTIFY_FAILURE === '1') {
-  process.stderr.write('InternetSetOption failed\\n');
-  process.exit(5);
-}
-process.exit(0);
+writeFileSync(windowsCommandMockLoaderPath, `
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { basename } from 'node:path';
+
+const originalExecFile = childProcess.execFile;
+const runnerPath = process.env.MX_TEST_WINDOWS_COMMAND_RUNNER;
+childProcess.execFile = function(command, args, options, callback) {
+  const name = basename(String(command)).toLowerCase();
+  if (runnerPath && (name === 'reg.exe' || name === 'powershell.exe')) {
+    return originalExecFile(
+      process.execPath,
+      [runnerPath, String(command), ...(args || [])],
+      options,
+      callback
+    );
+  }
+  return originalExecFile(command, args, options, callback);
+};
+syncBuiltinESMExports();
 `);
 
 process.env.MX_TEST_WINDOWS_REGISTRY = registryPath;
 process.env.MX_TEST_PROXY_NOTIFY_LOG = notifyLogPath;
+process.env.MX_TEST_WINDOWS_COMMAND_RUNNER = windowsCommandMockRunnerPath;
+process.env.MX_TEST_WINDOWS_COMMAND_LOADER = pathToFileURL(windowsCommandMockLoaderPath).href;
 process.env.LOCALAPPDATA = join(testDir, 'local-app-data');
 process.env.SystemRoot = windowsDir;
 process.env.PATH = `${binDir}${delimiter}${process.env.PATH || ''}`;
 Object.defineProperty(process, 'platform', { value: 'win32' });
 
+await import(process.env.MX_TEST_WINDOWS_COMMAND_LOADER);
 const {
   buildElectronLauncherDnsRelayFallbackResponse,
   createElectronLauncherSystemDomainProxy,
@@ -1089,6 +1123,7 @@ function startGateRaceChild({ moduleUrl, userDataDir, pacUrl, releasePath }) {
 const [moduleUrl, userDataDir, pacUrl, releasePath] = process.argv.slice(1);
 const { existsSync } = await import('node:fs');
 Object.defineProperty(process, 'platform', { value: 'win32' });
+await import(process.env.MX_TEST_WINDOWS_COMMAND_LOADER);
 const { createElectronLauncherSystemDomainProxy } = await import(moduleUrl);
 const manager = createElectronLauncherSystemDomainProxy({
   userDataDir,

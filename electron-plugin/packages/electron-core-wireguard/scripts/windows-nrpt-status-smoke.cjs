@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const childProcess = require('node:child_process');
 const {
   chmodSync,
   mkdirSync,
@@ -8,8 +9,35 @@ const {
   rmSync,
   writeFileSync
 } = require('node:fs');
+const { syncBuiltinESMExports } = require('node:module');
 const { tmpdir } = require('node:os');
-const { join } = require('node:path');
+const { join, resolve } = require('node:path');
+
+const originalExecFile = childProcess.execFile;
+const originalSpawnSync = childProcess.spawnSync;
+
+function mappedPowerShellCommand(command, args) {
+  const expected = process.env.MX_TEST_WIREGUARD_POWERSHELL;
+  if (!expected || resolve(String(command)) !== resolve(expected)) return null;
+  return {
+    command: process.execPath,
+    args: [String(command), ...(args || [])]
+  };
+}
+
+childProcess.execFile = function(command, args, options, callback) {
+  const mapped = mappedPowerShellCommand(command, args);
+  return mapped
+    ? originalExecFile(mapped.command, mapped.args, options, callback)
+    : originalExecFile(command, args, options, callback);
+};
+childProcess.spawnSync = function(command, args, options) {
+  const mapped = mappedPowerShellCommand(command, args);
+  return mapped
+    ? originalSpawnSync(mapped.command, mapped.args, options)
+    : originalSpawnSync(command, args, options);
+};
+syncBuiltinESMExports();
 
 const {
   buildWireGuardTunnelCommand,
@@ -337,6 +365,7 @@ async function verifyAsyncLiveProbe() {
   );
   chmodSync(powerShell, 0o755);
   process.env.SystemRoot = root;
+  process.env.MX_TEST_WIREGUARD_POWERSHELL = powerShell;
   const runtime = { platform: 'win32' };
   try {
     let timerFired = false;
@@ -744,6 +773,7 @@ async function verifyAsyncLiveProbe() {
     assert.equal(timedOut.state, 'probe-failed');
     assert.ok(Date.now() - startedAt < 600, 'NRPT probe timeout should be bounded');
   } finally {
+    delete process.env.MX_TEST_WIREGUARD_POWERSHELL;
     if (previousSystemRoot === undefined) delete process.env.SystemRoot;
     else process.env.SystemRoot = previousSystemRoot;
     rmSync(root, { recursive: true, force: true });
