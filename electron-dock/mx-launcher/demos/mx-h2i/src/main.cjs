@@ -9,6 +9,11 @@ const net = require('node:net');
 const dgram = require('node:dgram');
 const { execFile } = require('node:child_process');
 const { createHash, randomUUID } = require('node:crypto');
+const {
+  retainedGuestRecoveryDecision,
+  wireGuardRecoveryGate,
+  wireGuardRecoveryTurn
+} = require('./network-recovery-policy.cjs');
 const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: electronScreen, powerMonitor, net: electronNet, dialog, session: electronSession } = require('electron');
 
 loadDotEnvFiles();
@@ -532,7 +537,7 @@ function registerIpc() {
     }
     if (runtime.connection?.mode === 'guest' && runtime.connection?.state === 'connected') {
       const guestProbe = await probeConnectedModeBeforeTransition('guest', 'visit-connect-guest-guard');
-      retainedConnectionWasProbed = true;
+      retainedConnectionWasProbed = guestProbe.ready;
       if (guestProbe.superseded) return visibleRuntime();
       if (guestProbe.ready) {
         runtime.feedback = {
@@ -558,6 +563,65 @@ function registerIpc() {
       retainedRecovery = await recoverRetainedWireGuardBeforeBootstrap('guest-pre-bootstrap', {
         allowPrivileged: shouldAllowPrivilegedPreBootstrapRecovery()
       });
+    }
+    if (retainedRecovery?.authorizationCanceled === true) {
+      runtime.feedback = {
+        tone: 'warning',
+        message: '已取消 WireGuard 修复授权；MX-H2I 已保留当前网络状态，不会再次弹窗或继续重装隧道。'
+      };
+      touchRuntime('visit connect authorization canceled during retained repair');
+      await publishNetworkModeEvent('visit:connect', 'failed', {
+        reason: 'authorization-canceled',
+        transitionId
+      });
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
+    let recoveredGuestProbe = null;
+    if (
+      runtime.connection?.mode === 'guest'
+      && shouldRecoverWireGuardConnection(runtime.connection)
+    ) {
+      recoveredGuestProbe = await probeConnectedModeBeforeTransition(
+        'guest',
+        'visit-connect-recovered-guard',
+        { allowRecoverableState: true }
+      );
+      if (recoveredGuestProbe.superseded) return visibleRuntime();
+    }
+    const recoveredGuestDecision = retainedGuestRecoveryDecision({
+      ready: recoveredGuestProbe?.ready === true,
+      liveWireGuardActive: recoveredGuestProbe?.result?.wireGuard?.active === true
+    });
+    if (runtime.connection?.mode === 'guest' && recoveredGuestDecision === 'recovered') {
+      runtime.feedback = {
+        tone: 'success',
+        message: '访客网络已通过原位修复恢复；本次重新连接没有卸载或重装正在运行的 WireGuard 服务。'
+      };
+      touchRuntime('visit connect recovered retained tunnel');
+      await publishNetworkModeEvent('visit:connect', 'connected', {
+        leaseIp: runtime.connection.localIp,
+        reason: 'retained-tunnel-recovered',
+        transitionId
+      });
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
+    if (runtime.connection?.mode === 'guest' && recoveredGuestDecision === 'preserve') {
+      const recoveryMessage = nullableString(retainedRecovery?.message)
+        || nullableString(runtime.feedback?.message)
+        || 'Windows split DNS 原位修复尚未通过。';
+      runtime.feedback = {
+        tone: 'warning',
+        message: `访客 WireGuard 仍在运行，已停止破坏性重装，避免把可用隧道卸掉。${recoveryMessage}`
+      };
+      touchRuntime('visit connect preserved active tunnel after repair failure');
+      await publishNetworkModeEvent('visit:connect', 'skipped', {
+        reason: 'retained-tunnel-repair-pending',
+        transitionId
+      });
+      await saveAndBroadcast();
+      return visibleRuntime();
     }
     if (
       runtime.connection?.mode === 'employee'
@@ -9786,9 +9850,17 @@ function idleConnection() {
   };
 }
 
-async function probeConnectedModeBeforeTransition(mode, reason) {
+async function probeConnectedModeBeforeTransition(mode, reason, options = {}) {
   const connection = runtime?.connection;
-  if (connection?.mode !== mode || connection?.state !== 'connected') {
+  const probeable = connection?.mode === mode
+    && (
+      connection?.state === 'connected'
+      || (
+        options.allowRecoverableState === true
+        && shouldRecoverWireGuardConnection(connection)
+      )
+    );
+  if (!probeable) {
     return { ready: false, superseded: true, result: null };
   }
   const routePlan = normalizeRoutePlan(connection.routePlan);
@@ -10187,7 +10259,8 @@ async function recoverRetainedWireGuardBeforeBootstrap(reason, options = {}) {
   const connection = runtime.connection || {};
   if (!normalizeRoutePlan(connection.routePlan)) return null;
   const result = await recoverWireGuardForRuntime(reason, {
-    allowPrivileged: options.allowPrivileged === true
+    allowPrivileged: options.allowPrivileged === true,
+    foreground: true
   });
   if (result?.ready) {
     runtime.feedback = {
@@ -11145,19 +11218,39 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
   if (!runtime || !shouldRecoverWireGuardConnection(runtime.connection)) {
     return { ok: true, skipped: true, reason: 'connection-not-desired' };
   }
-  if (wireGuardConnectInFlight || wireGuardDisconnectInFlight || runtime.connection?.state === 'connecting') {
+  const manual = options.foreground === true || String(reason || '').startsWith('manual');
+  const currentRecoveryGate = () => wireGuardRecoveryGate({
+    connectOperationCount: wireGuardConnectOperations.size,
+    disconnectInFlight: wireGuardDisconnectInFlight,
+    connectionState: runtime.connection?.state,
+    foreground: options.foreground === true,
+    manual,
+    lastFailureAt: lastWireGuardRecoveryFailureAt
+  });
+  let recoveryGate = currentRecoveryGate();
+  if (recoveryGate) {
     return {
       ok: true,
       skipped: true,
-      reason: wireGuardDisconnectInFlight ? 'disconnect-in-flight' : 'connect-in-flight'
+      reason: recoveryGate
     };
   }
-  if (wireGuardRecoveryInFlight) return wireGuardRecoveryInFlight;
-  const manual = String(reason || '').startsWith('manual');
-  const allowPrivileged = options.allowPrivileged !== false;
-  if (!manual && lastWireGuardRecoveryFailureAt && Date.now() - lastWireGuardRecoveryFailureAt < 5 * 60 * 1000) {
-    return { ok: true, skipped: true, reason: 'failure-cooldown' };
+  if (wireGuardRecoveryInFlight) {
+    const backgroundRecovery = wireGuardRecoveryInFlight;
+    const recoveryTurn = await wireGuardRecoveryTurn(
+      backgroundRecovery,
+      options.foreground === true
+    );
+    if (recoveryTurn.action === 'reuse') return recoveryTurn.recovery;
+    if (!runtime || !shouldRecoverWireGuardConnection(runtime.connection)) {
+      return { ok: true, skipped: true, reason: 'connection-not-desired' };
+    }
+    recoveryGate = currentRecoveryGate();
+    if (recoveryGate) {
+      return { ok: true, skipped: true, reason: recoveryGate };
+    }
   }
+  const allowPrivileged = options.allowPrivileged !== false;
   wireGuardRecoveryInFlight = (async () => {
     const connection = runtime.connection || {};
     const routePlan = normalizeRoutePlan(connection.routePlan);

@@ -164,9 +164,9 @@ declared Internal/app domains, and unmatched names retain the original system re
 
 ### Windows Clash/DNS Regression Gate
 
-Run these cases on Windows 11 with live Clash/mihomo. Record live route/NRPT/WinINet state before
-and after each transition; `wireguard-route-audit.log` is supporting history, not current-state
-proof.
+Run these cases on both Windows 10 and Windows 11 with live Clash/mihomo. Record live
+route/NRPT/WinINet state before and after each transition; `wireguard-route-audit.log` is supporting
+history, not current-state proof.
 
 | Case | Operation | Required result |
 | --- | --- | --- |
@@ -174,7 +174,7 @@ proof.
 | W2 | Connect with Clash static system proxy | A live loopback listener is wrapped as `PROXY <Clash>; DIRECT`; Internal exact/suffix still returns `PROXY 127.0.0.1:2053`; public smoke passes |
 | W3 | Connect with Clash PAC, WPAD, or dead listener | Readable/valid loopback PAC is wrapped first; otherwise a representable live static proxy can continue. AutoDetect/WPAD fails closed only when it is the sole applicable owner and neither live static nor PAC continuation exists; unreadable/non-loopback PAC or dead listener also fails closed without registry mutation or browser-ready |
 | W4 | While connected, switch TUN ↔ system proxy, restart Clash, or change port | The normal five-second path is read-only. A newly observed owner signature may trigger one bounded reconciliation and an `AutoConfigURL` write; later ticks for the same signature remain read-only. Owner-state changes/reconnect/manual repair may reconcile again |
-| W5 | Upgrade old MX-H2I while preserving WG service/tunnel | Live NRPT/system DNS, PAC readback, Chromium `resolveProxy` to `2053`, CONNECT, route, and Internal health all pass before runtime returns `connected` |
+| W5 | Install the new package over an old MX-H2I without uninstalling, preserving WG service/tunnel and a prior `AutoConfigURL`; then click reconnect once | PAC notification uses the inbox PowerShell absolute path even when its directory is absent from process `PATH`; an active tunnel is repaired in place and never uninstalled; if replacement is actually required, audit shows stop/release followed by `/installtunnelservice` with no explicit uninstall; live NRPT/system DNS, PAC readback, Chromium `resolveProxy` to `2053`, CONNECT, route, and Internal health all pass before runtime returns `connected` |
 | W6 | Disconnect and normal exit | While `2053` stays live, restore the external value captured by the most recent successful negotiation only if MX still owns `AutoConfigURL`; preserve a value already installed by another owner. Then stop WG and verify owned NRPT cleanup, and only then close `2053`; any failure cancels disconnect/exit and leaves a recoverable path |
 
 Also run once with `MX_H2I_WINDOWS_SYSTEM_PAC=0`; the expected result is diagnostic

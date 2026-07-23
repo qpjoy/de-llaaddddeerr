@@ -1,7 +1,7 @@
 {
   "name": "@qpjoy/mx-h2i-demo",
   "productName": "MX-H2I",
-  "version": "2.0.6",
+  "version": "2.0.7",
   "private": true,
   "author": "QPJoy",
   "description": "MX-H2I Electron standalone launcher demo.",
@@ -12,7 +12,7 @@
     "dev": "node scripts/dev-mode.mjs local && node scripts/run-clean-env.mjs electron-builder install-app-deps && node scripts/run-electron-dev.mjs",
     "start": "pnpm dev",
     "build": "pnpm run package",
-    "check": "node --check scripts/dev-mode.mjs && node --check scripts/node-env.mjs && node scripts/node-env.test.mjs && node --check scripts/run-clean-env.mjs && node --check scripts/run-electron-dev.mjs && node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check electron-builder.config.cjs",
+    "check": "node --check scripts/dev-mode.mjs && node --check scripts/node-env.mjs && node scripts/node-env.test.mjs && node scripts/windows-reconnect-safety.test.mjs && node --check scripts/run-clean-env.mjs && node --check scripts/run-electron-dev.mjs && node --check src/main.cjs && node --check src/preload.cjs && node --check src/renderer.js && node --check electron-builder.config.cjs",
     "package": "node scripts/dev-mode.mjs ensure && pnpm run check && node scripts/run-clean-env.mjs electron-builder --config electron-builder.config.cjs --dir",
     "make": "node scripts/dev-mode.mjs ensure && pnpm run check && node scripts/run-clean-env.mjs electron-builder --config electron-builder.config.cjs",
     "make:mac:dmg": "node scripts/dev-mode.mjs ensure && pnpm run check && node scripts/run-clean-env.mjs electron-builder --config electron-builder.config.cjs --mac dmg --universal",

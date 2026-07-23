@@ -88,6 +88,11 @@ DNS 查询。
 Chromium `resolveProxy` 和 CONNECT；缺任一项就保持可恢复状态并提示重新连接/修复，
 不能因为历史 audit 完整而跳过。
 
+运行时调用 Windows PowerShell 不依赖 Electron 进程的 `PATH`，必须从
+`%SystemRoot%\Sysnative|System32|SysWOW64\WindowsPowerShell\v1.0\powershell.exe`
+解析绝对路径。`spawn powershell.exe ENOENT` 表示命令路径失败，不表示 NRPT cmdlet
+失败；覆盖安装保留的 `AutoConfigURL` 会让这类通知/恢复错误在启动后立即暴露。
+
 ## Windows 公网应用、WinINet PAC 与 Clash
 
 微信、豆包、Steam、浏览器图片等普通公网异常默认按 PAC/代理路径排查，而不是按 MX NRPT
@@ -152,6 +157,15 @@ Windows 会监控非 loopback 网卡地址、掩码和 MAC 组成的网络签名
 6. 对 MX PAC 做 readback，再验证 Chromium `resolveProxy -> 2053` 和真实 CONNECT。
 
 `network-unavailable`、`lease-only` 和 `tunnel-only` 是可恢复状态，不再被“已经连接”的重复请求保护拦截；用户点击“重新连接”会真正进入恢复流程。
+该前台恢复只绕过当前这一个 connect operation 自身和后台失败 cooldown；并发 connect
+仍被阻止。是否保留隧道以修复后的 live service probe 为准，不能继续使用点击前缓存的
+`wireGuard.active`。
+若 live probe 仍确认 WireGuard service active，“重新连接”只允许原位修复
+route/NRPT/PAC；修复未通过时保留现有隧道，不能继续进入 destructive restart。确需
+restart 时先 Stop 并释放所有 `ServiceController` 句柄，再直接调用
+`/installtunnelservice`，让 WireGuard 自己完成 delete/wait/create；只有显式断开才调用
+`/uninstalltunnelservice`。这样避免 Windows 10/11 SCM 的
+`ERROR_SERVICE_MARKED_FOR_DELETE` 竞态最终被误报为 `service=NOT_FOUND`。
 
 ## Windows 断开与正常退出
 

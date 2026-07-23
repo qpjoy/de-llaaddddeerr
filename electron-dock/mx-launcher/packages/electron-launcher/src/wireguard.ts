@@ -20,6 +20,7 @@ import {
   type WireGuardWindowsNrptStatus
 } from '@qpjoy/electron-core-wireguard';
 import type { LauncherRoutePlan } from '@qpjoy/mx-launcher-core';
+import { windowsPowerShellCommand } from './windows-command.js';
 
 export type ElectronLauncherWireGuardAction = 'up' | 'down' | 'restart';
 export type ElectronLauncherWireGuardPathPreference = 'auto' | 'direct' | 'relay' | 'hybrid';
@@ -1100,7 +1101,7 @@ function readWindowsRouteToTarget(targetIp: string): {
     '} | ConvertTo-Json -Compress'
   ].join('; ');
   try {
-    const raw = execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+    const raw = execFileSync(windowsPowerShellCommand(), ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
       encoding: 'utf8',
       timeout: 3500,
       windowsHide: true

@@ -3858,7 +3858,15 @@ function windowsElevatedStartProcessScripts(
     && !isMxH2iTunnel(tunnelName);
   const preflightLines = !canPreflight ? [] : (action === 'up'
     ? [serviceLookup, "if ($null -ne $svc -and $svc.Status -eq 'Running') { exit 0 }"]
-    : (action === 'down' ? [serviceLookup, 'if ($null -eq $svc) { exit 0 }'] : []));
+    : (action === 'down'
+      ? [
+          serviceLookup,
+          'if ($null -eq $svc) { exit 0 }',
+          'try { $svc.Close() } catch { }',
+          'try { $svc.Dispose() } catch { }',
+          '$svc = $null'
+        ]
+      : []));
   const runWireGuard = (wireGuardArgs: string[]) => `& ${powerShellString(command)} ${wireGuardArgs.map(powerShellString).join(' ')}`;
   const nrptLines = windowsNrptPowerShellLines(
     nrptRules,
@@ -3869,9 +3877,26 @@ function windowsElevatedStartProcessScripts(
   const waitForServiceAbsent = () => [
     '$deadline = (Get-Date).AddSeconds(12)',
     'while ($true) {',
-    `  $svc = Get-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`,
-    '  if ($null -eq $svc) { break }',
+    `  $serviceProbe = Get-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`,
+    '  if ($null -eq $serviceProbe) { break }',
+    '  try { $serviceProbe.Close() } catch { }',
+    '  try { $serviceProbe.Dispose() } catch { }',
+    '  $serviceProbe = $null',
     `  if ((Get-Date) -gt $deadline) { throw ${powerShellString(`Timed out waiting for ${serviceName} to be removed`)} }`,
+    '  Start-Sleep -Milliseconds 250',
+    '}'
+  ];
+  const waitForServiceStopped = () => [
+    '$deadline = (Get-Date).AddSeconds(12)',
+    'while ($true) {',
+    `  $serviceProbe = Get-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`,
+    '  if ($null -eq $serviceProbe) { break }',
+    '  $serviceProbeState = [string]$serviceProbe.Status',
+    '  try { $serviceProbe.Close() } catch { }',
+    '  try { $serviceProbe.Dispose() } catch { }',
+    '  $serviceProbe = $null',
+    "  if ($serviceProbeState -eq 'Stopped') { break }",
+    `  if ((Get-Date) -gt $deadline) { throw ${powerShellString(`Timed out waiting for ${serviceName} to stop`)} }`,
     '  Start-Sleep -Milliseconds 250',
     '}'
   ];
@@ -3894,6 +3919,7 @@ function windowsElevatedStartProcessScripts(
   const elevatedLines: string[] = [
     "$ErrorActionPreference = 'Stop'",
     ...windowsAuditPowerShellLines(auditLogPath),
+    "trap { $failure = ($_ | Out-String).Trim(); try { Write-HdoAudit ('elevated failed: ' + $failure) } catch { }; exit 1 }",
     `Write-HdoAudit ${powerShellString(`elevated start action=${action} tunnel=${tunnelName} service=${serviceName} nrptRules=${nrptRules.length}`)}`,
     ...nrptLines,
     ...routeLines,
@@ -3923,18 +3949,22 @@ function windowsElevatedStartProcessScripts(
     elevatedLines.push('Remove-HdoNrptRules');
     elevatedLines.push('Remove-HdoOverlayRoutes');
     elevatedLines.push('if ($null -eq $svc) { exit 0 }');
+    elevatedLines.push('try { $svc.Close() } catch { }');
+    elevatedLines.push('try { $svc.Dispose() } catch { }');
+    elevatedLines.push('$svc = $null');
   } else {
     elevatedLines.push(`Write-HdoAudit ${powerShellString(`restart removing NRPT rules for ${serviceName}`)}`);
     elevatedLines.push('Remove-HdoNrptRules');
     elevatedLines.push('Remove-HdoOverlayRoutes');
     elevatedLines.push(
       'if ($null -ne $svc) {',
-      `  Write-HdoAudit ${powerShellString(`stopping and uninstalling ${serviceName}`)}`,
+      `  Write-HdoAudit ${powerShellString(`stopping ${serviceName} before WireGuard-managed replacement`)}`,
       `  if ($svc.Status -ne 'Stopped') { Stop-Service -Name ${serviceArg} -Force -ErrorAction SilentlyContinue }`,
-      `  ${runWireGuard(['/uninstalltunnelservice', tunnelName])}`,
-      "  Write-HdoAudit ('wireguard uninstall exitCode=' + [string]$LASTEXITCODE)",
-      "  if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) { Write-HdoAudit ('wireguard uninstall failed exitCode=' + [string]$LASTEXITCODE); exit 1 }",
-      ...waitForServiceAbsent(),
+      ...waitForServiceStopped(),
+      '  try { $svc.Close() } catch { }',
+      '  try { $svc.Dispose() } catch { }',
+      '  $svc = $null',
+      "  Write-HdoAudit 'service stopped; wireguard install will replace it transactionally'",
       '}'
     );
   }

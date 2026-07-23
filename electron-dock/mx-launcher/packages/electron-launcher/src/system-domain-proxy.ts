@@ -31,6 +31,7 @@ import {
   releaseElectronLauncherProcessLease,
   type ElectronLauncherProcessLease
 } from './process-lease.js';
+import { windowsPowerShellCommand } from './windows-command.js';
 
 const STATE_VERSION = 1;
 const DEFAULT_STATE_FILE = 'electron-launcher-system-domain-proxy.json';
@@ -2837,15 +2838,16 @@ async function notifyWindowsProxyChanged(): Promise<ExecTextResult> {
     'if (-not $refresh) { $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error(); throw "InternetSetOption(37) failed: $code"; }'
   ].join(' ');
   const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script];
+  const powershell = windowsPowerShellCommand();
   try {
     return await execFileText(
-      'powershell.exe',
+      powershell,
       args,
       { timeoutMs: WINDOWS_PROXY_NOTIFY_TIMEOUT_MS }
     );
   } catch {
     return execFileText(
-      'powershell.exe',
+      powershell,
       args,
       { timeoutMs: WINDOWS_PROXY_NOTIFY_TIMEOUT_MS }
     );

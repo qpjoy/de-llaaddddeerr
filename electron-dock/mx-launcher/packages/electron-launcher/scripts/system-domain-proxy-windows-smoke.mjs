@@ -20,9 +20,12 @@ import { runInNewContext } from 'node:vm';
 
 const testDir = mkdtempSync(join(tmpdir(), 'mx-system-domain-proxy-windows-'));
 const binDir = join(testDir, 'bin');
+const windowsDir = join(testDir, 'windows');
+const powerShellDir = join(windowsDir, 'System32', 'WindowsPowerShell', 'v1.0');
 const registryPath = join(testDir, 'registry.json');
 const notifyLogPath = join(testDir, 'proxy-notify.log');
 mkdirSync(binDir);
+mkdirSync(powerShellDir, { recursive: true });
 
 writeExecutable(join(binDir, 'reg.exe'), `#!/usr/bin/env node
 const { existsSync, readFileSync, writeFileSync } = require('node:fs');
@@ -87,7 +90,7 @@ if (operation === 'delete') {
 }
 process.exit(1);
 `);
-writeExecutable(join(binDir, 'powershell.exe'), `#!/usr/bin/env node
+writeExecutable(join(powerShellDir, 'powershell.exe'), `#!/usr/bin/env node
 const { appendFileSync } = require('node:fs');
 if (process.env.MX_TEST_PROXY_NOTIFY_LOG) {
   appendFileSync(process.env.MX_TEST_PROXY_NOTIFY_LOG, 'notify\\n');
@@ -102,6 +105,7 @@ process.exit(0);
 process.env.MX_TEST_WINDOWS_REGISTRY = registryPath;
 process.env.MX_TEST_PROXY_NOTIFY_LOG = notifyLogPath;
 process.env.LOCALAPPDATA = join(testDir, 'local-app-data');
+process.env.SystemRoot = windowsDir;
 process.env.PATH = `${binDir}${delimiter}${process.env.PATH || ''}`;
 Object.defineProperty(process, 'platform', { value: 'win32' });
 
@@ -110,7 +114,23 @@ const {
   createElectronLauncherSystemDomainProxy,
   renderElectronLauncherPacScript
 } = await import('../dist/system-domain-proxy.js');
+const { windowsPowerShellCommand } = await import('../dist/windows-command.js');
 const systemDomainProxyModuleUrl = new URL('../dist/system-domain-proxy.js', import.meta.url).href;
+
+assert.equal(
+  windowsPowerShellCommand(),
+  join(powerShellDir, 'powershell.exe'),
+  'PowerShell must resolve from System32 even when its directory is absent from PATH'
+);
+const sysnativePowerShellDir = join(windowsDir, 'Sysnative', 'WindowsPowerShell', 'v1.0');
+mkdirSync(sysnativePowerShellDir, { recursive: true });
+writeExecutable(join(sysnativePowerShellDir, 'powershell.exe'), '#!/usr/bin/env node\nprocess.exit(0);\n');
+assert.equal(
+  windowsPowerShellCommand(),
+  join(sysnativePowerShellDir, 'powershell.exe'),
+  'Sysnative must win for a 32-bit process on 64-bit Windows'
+);
+rmSync(join(windowsDir, 'Sysnative'), { recursive: true, force: true });
 
 const oldClash = windowsProxyState('http://clash.invalid/old.pac', '127.0.0.1:7890', '<local>;old.test');
 const newClash = windowsProxyState('http://clash.invalid/new.pac', '127.0.0.1:7891', '<local>;new.test');

@@ -388,6 +388,50 @@ async function verifyAsyncLiveProbe() {
     assert.equal(residual.totalOwnedRuleCount, 1);
     assert.deepEqual(residual.unexpectedOwnedNamespaces, [legacyNamespace]);
 
+    const scriptDir = join(root, 'scripts');
+    mkdirSync(scriptDir, { recursive: true });
+    const scriptsBeforeRestart = new Set(readdirSync(scriptDir));
+    const restartCommand = buildWireGuardTunnelCommand({
+      runtime: {
+        platform: 'win32',
+        windowsWireGuard: { command: 'wireguard.exe' }
+      },
+      configPath,
+      action: 'restart'
+    });
+    const restartElevatedName = readdirSync(scriptDir)
+      .find((name) => (
+        !scriptsBeforeRestart.has(name)
+        && name.includes('.restart.')
+        && name.endsWith('.elevated.ps1')
+      ));
+    assert.ok(restartElevatedName, 'restart must write an elevated service replacement script');
+    const restartElevated = readFileSync(join(scriptDir, restartElevatedName), 'utf8');
+    assert.match(restartElevated, /Stop-Service -Name/);
+    assert.match(restartElevated, /\$svc\.Close\(\)/);
+    assert.match(restartElevated, /\$svc\.Dispose\(\)/);
+    assert.match(
+      restartElevated,
+      /elevated failed:/,
+      'restart failures must be preserved in the route audit log'
+    );
+    assert.match(restartElevated, /\/installtunnelservice/);
+    assert.doesNotMatch(
+      restartElevated,
+      /\/uninstalltunnelservice/,
+      'restart must let WireGuard replace a stopped service so SCM marked-for-delete state cannot race a second install'
+    );
+    assert.ok(
+      restartElevated.indexOf('Stop-Service -Name')
+        < restartElevated.indexOf('/installtunnelservice'),
+      'restart must stop and release the old service handle before WireGuard replaces it'
+    );
+    assert.match(
+      restartCommand.displayCommand,
+      /wireguard-uac-wrapper/,
+      'restart still requires the existing single UAC transaction'
+    );
+
     const command = buildWireGuardTunnelCommand({
       runtime: {
         platform: 'win32',
@@ -403,11 +447,21 @@ async function verifyAsyncLiveProbe() {
       /if \(\$null -eq \$svc\) \{ exit 0 \}/,
       'MX-H2I down must not skip elevated cleanup when the profile has no DNS namespaces'
     );
-    const scriptDir = join(root, 'scripts');
     const elevatedName = readdirSync(scriptDir)
       .find((name) => name.includes('.down.') && name.endsWith('.elevated.ps1'));
     assert.ok(elevatedName, 'down command should write an elevated reconciliation script');
     const elevated = readFileSync(join(scriptDir, elevatedName), 'utf8');
+    const downReleaseIndex = elevated.indexOf('$svc.Close()');
+    const downUninstallIndex = elevated.indexOf('/uninstalltunnelservice');
+    assert.ok(
+      downReleaseIndex >= 0 && downReleaseIndex < downUninstallIndex,
+      'down must release its ServiceController before WireGuard deletes the service'
+    );
+    assert.match(
+      elevated.slice(downUninstallIndex),
+      /\$serviceProbe\.Close\(\)[\s\S]*\$serviceProbe\.Dispose\(\)/,
+      'down must release every status-probe handle while waiting for SCM deletion'
+    );
     assert.match(elevated, /\$hdoNrptRules = @\(.+mxinfo-inc\.cn/s);
     assert.match(elevated, /\$hdoNrptOwnershipEvidenceComplete = \$false/);
     assert.match(elevated, /function Test-HdoNrptRuleTaggedOwner/);
