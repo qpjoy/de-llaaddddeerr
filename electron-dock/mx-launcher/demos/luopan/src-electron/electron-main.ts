@@ -25,6 +25,7 @@ import {
   ensureElectronLauncherUserOverseaSubscription,
   defineLauncherProduct,
   readElectronLauncherStandaloneOwnershipState,
+  releaseElectronLauncherStandaloneOwnershipClaim,
   reportElectronLauncherInstallCompletionIfUpgraded,
   routePlanFromSnapshot,
   stopElectronLauncherStandaloneDataPlane,
@@ -206,8 +207,6 @@ const PRODUCT = defineLauncherProduct({
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = 'luopan-runtime.json';
-const LUOPAN_DNS_HOST = 'luopan.mxinfo-inc.cn';
-const LUOPAN_DNS_ZONE = 'mxinfo-inc.cn';
 const LUOPAN_REGISTERED_BASE_URL = 'http://10.88.100.3:18090';
 const OVERSEA_SUBSCRIPTION_NAME = 'System Oversea 默认订阅';
 const OVERSEA_SESSION_PARTITION = 'persist:luopan-oversea';
@@ -238,8 +237,9 @@ let overseaReconcileFlight: OverseaReconcileFlight | null = null;
 let overseaSessionGeneration = 0;
 let overseaReadyContext: Pick<OverseaSessionContext, 'generation' | 'userId'> | null = null;
 let overseaBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
-let overseaClosePromise: Promise<void> | null = null;
-let overseaClosed = false;
+let activeDataPlaneMode: LuopanDataPlaneMode | null = null;
+let shutdownInFlight: Promise<void> | null = null;
+let shutdownComplete = false;
 let sessionOperation: Promise<unknown> = Promise.resolve();
 let runtimeSaveQueue: Promise<void> = Promise.resolve();
 let runtimeSaveSequence = 0;
@@ -719,6 +719,27 @@ async function createWindow(): Promise<void> {
     }
   });
   mainWindow = window;
+
+  if (process.platform === 'win32') {
+    // Windows logoff/shutdown does not emit app.before-quit. Hold the session
+    // open until the same strict Internal/Oversea cleanup transaction settles.
+    (window as unknown as {
+      on(eventName: 'query-session-end', listener: (event: { preventDefault(): void }) => void): void;
+    }).on('query-session-end', (event) => {
+      if (shutdownComplete) return;
+      event.preventDefault();
+      if (shutdownInFlight) return;
+      shutdownInFlight = runSessionExclusive(shutdownLuopanApplication)
+        .then(() => {
+          shutdownComplete = true;
+          app.quit();
+        })
+        .catch(surfaceShutdownFailure)
+        .finally(() => {
+          if (!shutdownComplete) shutdownInFlight = null;
+        });
+    });
+  }
 
   window.once('ready-to-show', () => {
     mainWindow?.show();
@@ -1600,10 +1621,12 @@ function registerIpc(): void {
   }));
   ipcMain.handle('luopan:reset-session', () => runSessionExclusive(async () => {
     const state = requireRuntime();
-    activeSession = null;
+    const stopped = await disconnectLuopanDataPlane('reset');
+    if (!stopped) {
+      pushEvent('local runtime session reset blocked by data-plane cleanup');
+      return visibleRuntime();
+    }
     state.connection = emptyConnection();
-    await abortOverseaReconcile().catch(() => undefined);
-    await deactivateOverseaTunnel().catch(() => undefined);
     state.oversea = {
       ...state.oversea,
       status: hasActiveUserIdentity(state) ? 'waiting-internal' : 'waiting-login',
@@ -1758,8 +1781,11 @@ function registerIpc(): void {
   });
 }
 
-async function disconnectLuopanDataPlane(reason: 'manual' | 'logout' | 'config-change'): Promise<void> {
+async function disconnectLuopanDataPlane(reason: 'manual' | 'logout' | 'config-change' | 'reset' | 'shutdown'): Promise<boolean> {
   const state = requireRuntime();
+  const dataPlaneMode = currentLuopanDataPlaneMode();
+  const sessionToStop = activeSession;
+  const connectionToRestore = state.connection;
   pushEvent(`data-plane disconnect started ${reason}`);
   activeSession = null;
   state.connection = {
@@ -1782,17 +1808,32 @@ async function disconnectLuopanDataPlane(reason: 'manual' | 'logout' | 'config-c
       ? 'Internal 已断开；重新连接后会重新校验订阅并恢复 Oversea。'
       : 'Internal 已断开；请先重新连接，再通过隧道内 VIP 登录 User Center。'
   });
+  let stopped = false;
   try {
-    const result = await stopElectronLauncherStandaloneDataPlane({
-      userDataDir: app.getPath('userData'),
-      profileName: 'luopan.conf',
-      ownerId: `${PRODUCT.productId}:${state.installId}`,
-      darwinLaunchDaemon: true,
-      allowSystemFallback: false,
-      darwinServiceIdentity: luopanWireGuardServiceIdentity()
-    });
+    const result = dataPlaneMode === 'reuse'
+      ? {
+          ok: true,
+          message: releaseLuopanReuseClaim(state.installId)
+        }
+      : await stopElectronLauncherStandaloneDataPlane({
+          userDataDir: app.getPath('userData'),
+          profileName: 'luopan.conf',
+          routePlan: sessionToStop
+            ? luopanStandaloneDataPlaneRoutePlan(sessionToStop.routePlan)
+            : undefined,
+          ownerId: `${PRODUCT.productId}:${state.installId}`,
+          darwinLaunchDaemon: true,
+          allowSystemFallback: false,
+          darwinServiceIdentity: luopanWireGuardServiceIdentity()
+        });
+    stopped = result.ok;
+    if (stopped) {
+      activeDataPlaneMode = null;
+    } else {
+      activeSession = sessionToStop;
+    }
     state.connection = {
-      ...emptyConnection(),
+      ...(result.ok ? emptyConnection() : connectionToRestore),
       status: result.ok ? 'idle' : 'error',
       bootstrapBaseUrl: activeBootstrapBaseUrl,
       message: result.message,
@@ -1800,8 +1841,9 @@ async function disconnectLuopanDataPlane(reason: 'manual' | 'logout' | 'config-c
     };
     pushEvent(result.ok ? 'data-plane stopped' : `data-plane stop failed ${result.message}`);
   } catch (error) {
+    activeSession = sessionToStop;
     state.connection = {
-      ...emptyConnection(),
+      ...connectionToRestore,
       status: 'error',
       bootstrapBaseUrl: activeBootstrapBaseUrl,
       message: errorMessage(error),
@@ -1811,6 +1853,7 @@ async function disconnectLuopanDataPlane(reason: 'manual' | 'logout' | 'config-c
   }
   await saveRuntime();
   broadcastRuntime();
+  return stopped;
 }
 
 // Step 1 of connecting into Internal: enroll a lease against the registered
@@ -1874,7 +1917,11 @@ async function applyLuopanDataPlane(): Promise<boolean> {
     if (!activeSession) throw new Error('Request a Luopan lease before applying the local data plane.');
     const privateKey = stringValue(activeSession.wireGuard.privateKey);
     if (!privateKey) throw new Error('Luopan WireGuard private key is missing; request a fresh lease.');
-    if (luopanDataPlaneMode() === 'reuse') {
+    // A retained claim describes the data plane that is actually live. Do not
+    // let a changed environment variable relabel an existing standalone owner
+    // as reuse (or vice versa) before the old mode has been torn down.
+    activeDataPlaneMode = currentLuopanDataPlaneMode();
+    if (activeDataPlaneMode === 'reuse') {
       const attached = attachToSharedDataPlane(activeSession);
       if (attached) {
         await setConnection({
@@ -1901,7 +1948,9 @@ async function applyLuopanDataPlane(): Promise<boolean> {
       profileName: 'luopan.conf',
       routePlan: dataPlaneRoutePlan,
       privateKey,
-      dnsDomains: [LUOPAN_DNS_ZONE],
+      // Luopan is intentionally route-only today. Do not advertise DNS
+      // namespaces that this process neither installs nor serves.
+      dnsDomains: [],
       suppressWireGuardDns: true,
       requiredProbeTargets: ['lease-ip', 'service-vip'],
       ownerId: `${PRODUCT.productId}:${requireRuntime().installId}`,
@@ -1912,7 +1961,7 @@ async function applyLuopanDataPlane(): Promise<boolean> {
         dataPlaneMode: 'standalone-wireguard',
         dataPlaneOwner: true
       },
-      dnsHosts: [LUOPAN_DNS_HOST],
+      routeCidrs: luopanOwnershipRouteCidrs(dataPlaneRoutePlan),
       failOnOwnershipConflicts: true,
       allowSystemFallback: false,
       darwinLaunchDaemon: true,
@@ -2011,8 +2060,7 @@ function attachToSharedDataPlane(session: LauncherNetworkSession): {
       productId: PRODUCT.productId,
       instanceId: requireRuntime().installId,
       displayName: PRODUCT.displayName,
-      dnsHosts: [LUOPAN_DNS_HOST],
-      routeCidrs: session.routePlan.leaseCidr ? [session.routePlan.leaseCidr] : [],
+      routeCidrs: luopanOwnershipRouteCidrs(session.routePlan),
       priority: 90
     }),
     state: dataPlane.ok ? 'active' as const : 'connecting' as const,
@@ -2033,16 +2081,38 @@ function attachToSharedDataPlane(session: LauncherNetworkSession): {
 }
 
 function luopanStandaloneDataPlaneRoutePlan(routePlan: LauncherNetworkSession['routePlan']): LauncherNetworkSession['routePlan'] {
-  const routeCidrs = uniqueStrings([
-    routePlan.leaseCidr,
-    routePlan.serviceVip ? `${routePlan.serviceVip}/32` : ''
-  ].filter((value): value is string => Boolean(value)));
+  const routeCidrs = luopanOwnershipRouteCidrs(routePlan);
   return {
     ...routePlan,
     routeCidrs,
     allowedIps: routeCidrs,
     h2iDirectAllowedIps: routeCidrs
   };
+}
+
+function luopanOwnershipRouteCidrs(routePlan: LauncherNetworkSession['routePlan']): string[] {
+  return uniqueStrings([
+    routePlan.leaseCidr,
+    routePlan.serviceVip ? `${routePlan.serviceVip}/32` : ''
+  ].filter((value): value is string => Boolean(value)));
+}
+
+function currentLuopanDataPlaneMode(): LuopanDataPlaneMode {
+  if (activeDataPlaneMode) return activeDataPlaneMode;
+  const ownerId = runtime ? `${PRODUCT.productId}:${runtime.installId}` : null;
+  if (ownerId) {
+    const ownClaim = readElectronLauncherStandaloneOwnershipState().claims.find(
+      (claim) => claim.ownerId === ownerId
+    );
+    if (ownClaim?.metadata?.dataPlaneMode === 'standalone-wireguard') return 'standalone';
+    if (ownClaim?.metadata?.dataPlaneMode === 'shared-reuse') return 'reuse';
+  }
+  return luopanDataPlaneMode();
+}
+
+function releaseLuopanReuseClaim(installId: string): string {
+  releaseElectronLauncherStandaloneOwnershipClaim(`${PRODUCT.productId}:${installId}`);
+  return 'Luopan detached from the shared launcher data plane; the shared owner was left running.';
 }
 
 function sharedDataPlaneRouteProof(session: LauncherNetworkSession): ElectronLauncherStandaloneDataPlaneDiagnostics {
@@ -2629,6 +2699,58 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+async function shutdownLuopanApplication(): Promise<void> {
+  if (!runtime) return;
+  const stopped = await disconnectLuopanDataPlane('shutdown');
+  if (!stopped) {
+    throw new Error(requireRuntime().connection.message || 'Luopan Internal data-plane cleanup did not complete.');
+  }
+  await abortOverseaReconcile();
+  if (overseaBroadcastTimer) {
+    clearTimeout(overseaBroadcastTimer);
+    overseaBroadcastTimer = null;
+  }
+  const tunnel = overseaTunnel;
+  if (tunnel) {
+    await tunnel.close();
+    if (overseaTunnel === tunnel) {
+      overseaTunnel = null;
+      overseaSession = null;
+    }
+  }
+  await runtimeSaveQueue;
+}
+
+async function surfaceShutdownFailure(error: unknown): Promise<void> {
+  const message = `退出清理失败，Luopan 将保持运行以便重试：${errorMessage(error)}`;
+  console.warn('[luopan] shutdown failed:', errorMessage(error));
+  if (runtime) {
+    runtime.connection = {
+      ...runtime.connection,
+      status: 'error',
+      message,
+      updatedAt: new Date().toISOString()
+    };
+    pushEvent(`shutdown failed ${errorMessage(error)}`);
+    await saveRuntime().catch((saveError) => {
+      console.warn('[luopan] failed to persist shutdown error:', errorMessage(saveError));
+    });
+    broadcastRuntime();
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    try {
+      await createWindow();
+    } catch (windowError) {
+      console.warn('[luopan] failed to recreate shutdown error window:', errorMessage(windowError));
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+    }
+  } else {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+}
+
 app.whenReady().then(async () => {
   if (!ownsSingleInstanceLock) return;
   // .env support for packaged builds (no shell env there). Real env vars win;
@@ -2671,18 +2793,16 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', (event) => {
-  if (!overseaTunnel || overseaClosed) return;
+  if (!ownsSingleInstanceLock || shutdownComplete) return;
   event.preventDefault();
-  if (!overseaClosePromise) {
-    const tunnel = overseaTunnel;
-    overseaClosePromise = tunnel.close()
-      .catch((error) => {
-        console.warn('[luopan] Oversea tunnel shutdown failed:', errorMessage(error));
-      })
-      .finally(() => {
-        overseaClosed = true;
-        overseaTunnel = null;
-        app.quit();
-      });
-  }
+  if (shutdownInFlight) return;
+  shutdownInFlight = runSessionExclusive(shutdownLuopanApplication)
+    .then(() => {
+      shutdownComplete = true;
+      app.quit();
+    })
+    .catch(surfaceShutdownFailure)
+    .finally(() => {
+      if (!shutdownComplete) shutdownInFlight = null;
+    });
 });

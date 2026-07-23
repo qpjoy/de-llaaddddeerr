@@ -20,6 +20,11 @@ MX-H2I 应作为新的 H 端 VPN 产品，并使用 Launcher standalone 模式�
 - `@qpjoy/electron-launcher` 已经拆出 `core`、`standalone`、`embed-sdk` 和产品门面，
   新项目可以直接消费这些包，避免 HDO 历史负担。
 
+这里的 “Internal 管理” 指 desired state 和审计真相在 Internal，不表示 Internal 直接修改
+用户电脑。Windows UAC、WireGuard service、NRPT、route 和 WinINet PAC，以及 macOS
+LaunchDaemon、route、PAC 和 supplemental resolver，仍由当前 standalone network owner
+在本机收敛、验证和回滚；embed 应用只提交需求或读取结果。
+
 推荐定位：
 
 | 名称 | 类型 | 责任 |
@@ -143,9 +148,11 @@ materialize 完成。
   `10.88.0.1/32`。
 - `internalBaseUrl` 使用 `http://{internalControlIp}:18090`。Luopan 这类产品应是自己的
   service VIP；MX-H2I/foundation 迁移期仍是 `http://10.88.88.88:18090`。
-- `dnsServer` 使用产品 `dnsServer`，默认就是产品 VIP；WireGuard DNS 仍可被
-  system-domain-proxy suppress，但 split DNS/PAC 的上游目标也应是产品 VIP。H2I/foundation
-  迁移期继续使用 `10.88.0.1`。
+- `dnsServer` 使用产品 `dnsServer`，默认就是产品 VIP。macOS 的目标门禁是在
+  supplemental resolver 准备好后才 suppress WireGuard interface DNS；当前 suppression
+  判定不能单独充当 prepared 证据。Windows 必须保留 profile domain 供 core-wireguard
+  生成 NRPT。split DNS/PAC 的上游目标都应是产品 VIP。H2I/foundation 迁移期继续使用
+  `10.88.0.1`。
 - product WG 的 connect/disconnect 只安装/释放本产品路由；关闭 Luopan 不会删除 MX-H2I 的
   `10.89.*` 或 `10.88.100.1/32`，关闭 MX-H2I 也不会删除 Luopan 的 `10.91.*` 或
   `10.88.100.3/32`。
@@ -193,7 +200,11 @@ Launcher standalone 在本机启动一个能力 broker，embed 只和 broker 交
 
 每个 standalone launcher 启动/重连时写入自己的 owner claim；断开时只释放自己的 claim。
 claim 可以包含 `dnsHosts`、`dnsZones`、`reverseProxyRoutes` 和产品自己的 `routeCidrs`
-（通常是注册时固定的 product lease CIDR）。其它 standalone 可以读取它做冲突诊断、local edge
+（必须等于实际写入 profile 的 product-scoped routes，例如 lease CIDR + service VIP `/32`）。
+registry 更新通过规范化 state path 对应的稳定队列完成：每个进程写自己的候选文件，
+用 ticket/token 仲裁唯一 writer，活 owner 争用在有界等待后 fail closed；只删除已确认
+dead PID 的唯一候选，且不删除稳定队列目录，避免 stale recovery 误删新 owner。状态用
+临时文件 `fsync` 后原子 rename。其它 standalone 可以读取它做冲突诊断、local edge
 合并和 UI evidence，但不能把这些 CIDR 合并进自己的 WG `AllowedIPs`。例如 Luopan 注册
 `10.91.0.0/16` 后，MX-H2I 只能在 diagnostics 里看到 Luopan claim，不能在重连时把
 `10.91.0.0/16` adopt 到 MX-H2I 的 routePlan。
@@ -316,8 +327,14 @@ V2 不再让 MX-H2I 直接依赖旧的 `@qpjoy/electron-plugin-hdo` 业务插件
 - `connectNetwork()` 只负责向 Internal 拿 lease、snapshot 和 routePlan。
 - `connectLauncherWireGuardPeer()` 用 routePlan、客户端 keyPair、Domestic relay 公钥/endpoint
   生成本机 WG profile，并启动客户端 tunnel。
-- MX-H2I 只有在 WG tunnel active、到 `routePlan.internalControlIp` 的 route probe 走 WG interface、
-  且 overlay `healthz` 成功后，才把 runtime 升级为 `connected`。
+- MX-H2I 只有在 WG tunnel active、到 `routePlan.internalControlIp` 的 route probe 走 WG
+  interface、overlay `healthz` 成功且平台 DNS/PAC gate 完整后，才把 runtime 升级为
+  `connected`。Windows gate 同时要求 live NRPT + 系统 DNS、WinINet PAC readback、
+  Electron Chromium `session.resolveProxy()` 指向 `127.0.0.1:2053`，以及实际 local-edge
+  CONNECT 成功；任何一项失败都保持 `tunnel-only`。
+- 从旧版本升级后即使保留的 WireGuard tunnel/service 仍 active，也不能直接沿用旧
+  `connected`：route、Internal health 和上述平台 DNS/PAC gate 必须重新做 live 校验。
+  Windows 不能只接受旧 `wireguard-route-audit.log` 中的 `nrpt add complete`。
 - 如果只拿到 lease，或因为同机 Internal 本地路由冲突导致 route probe 不走 WG，客户端保持
   `lease-only`，AppCenter/H2O 不会被误认为已经具备内网通路。
 - Electron 打包时必须把 `wireguard-engines/*/resources/wireguard` 复制到 app
@@ -340,6 +357,20 @@ proxy routes；客户端只消费 snapshot，并把本机网络修改收敛到�
 当前共存期 Domestic `:53` 仍可能由 HDO V1 服务，因此 MX-H2I 必须兼容“远端 DNS 还是
 V1，但本机 V2 已能根据 Internal route/ownership claim 直接回答已知 host”的模式。
 
+平台 resolver 边界固定如下：
+
+- Windows：`electron-core-wireguard` 只为 WG profile 声明的 app/internal domain 和其
+  suffix 安装 NRPT，并把这些规则指向产品 DNS；NRPT 不修改微信、豆包、Steam 等未命中
+  namespace 的公网解析。MX-H2I 默认还安装 WinINet local-edge PAC：同一批 exact/suffix
+  命中固定返回 `PROXY 127.0.0.1:2053`，再由 local edge 使用 Internal DNS/route。
+  `MX_H2I_WINDOWS_SYSTEM_PAC=0` 仅用于诊断/降级，不能标记完整 ready。
+- macOS：目标门禁是只有 standalone 的 local edge 和 SystemConfiguration supplemental
+  resolver 已准备好时才 suppress WG profile 的 interface DNS；supplemental resolver
+  也只接管声明的 app/internal domain。当前 suppression 布尔判定本身不是 prepared/ready
+  证据；在它显式消费 prepared 结果前，发布门禁必须用 live local-edge 和 supplemental
+  resolver evidence 兜住。未命中域名继续走原系统 resolver，`/etc/resolver` 仅作显式
+  fallback/旧状态清理，不是默认实现。
+
 推荐优先级：
 
 1. 命中当前 Launcher ownership registry 的 exact host 或 DNS zone：本机 local DNS edge
@@ -348,8 +379,13 @@ V1，但本机 V2 已能根据 Internal route/ownership claim 直接回答已知
    再按 `upstreamUrl` 反代到 Internal nginx/Caddy 或实际服务端口。
 3. 命中 split DNS zone 但本机没有直接答案：转发到 routePlan 下发的 Internal/Domestic
    DNS server，通常是 `10.88.0.1:53` 或迁移期 Domestic `:53`。
-4. 未命中 Launcher 白名单：回落原系统 PAC/系统 DNS/用户代理；Clash/mihomo fake-ip 的
-   `198.18.0.0/15` 只能说明代理接管，不作为 Internal 解析成功。
+4. 未命中 Launcher 白名单：DNS 回到原系统 resolver。Windows 优先包装可读且校验通过的
+   loopback explicit PAC；没有该 PAC 时，可用的 live loopback 静态 proxy 作为
+   `PROXY ...; DIRECT` fallback；两者都没有且处于 TUN/无 owner 时返回 `DIRECT`。
+   AutoDetect/WPAD 只有在它是唯一适用的 automatic-config owner、且不存在可表达的 live
+   static/PAC continuation 时才 fail closed。不可读/非 loopback PAC 或 dead listener
+   同样 fail closed，不修改 WinINet registry。macOS 继续沿用原有 PAC fallback。
+   Clash/mihomo fake-ip 的 `198.18.0.0/15` 只能说明代理接管，不作为 Internal 解析成功。
 
 客户端不应把 `/etc/hosts` 作为产品路径。写 hosts 容易触发 EDR/杀毒软件告警，也难以表达
 zone、TTL、owner 和恢复状态。macOS 默认使用 SystemConfiguration dynamic supplemental
@@ -368,9 +404,11 @@ DNS，把目标域名指到 `127.0.0.1:{localEdgePort}`；`/etc/resolver` 文件
 - 关闭某个 launcher 时只释放自己的 owner claim；如果还有其它 owner，保留 local edge 和
   系统 resolver。
 
-Windows 后续不应写 hosts；应优先走受控 helper/service 管理 NRPT、WinHTTP/WinINET PAC
-和 WireGuard route。macOS 和 Windows 都需要代码签名、notarization/可信 publisher、清晰的
-权限说明和可诊断的 restore 按钮，降低安全软件误报概率。
+Windows 不应写 hosts。当前 NRPT/route 由带 UAC 的 WireGuard service path 落地，
+WinINet PAC 由用户态 `system-domain-proxy` 落地；二者必须分开记录 owner 和 live evidence，
+不能把 PAC 成功当作 NRPT 成功。长期可以再收敛到受控 helper/service。macOS 和 Windows
+都需要代码签名、notarization/可信 publisher、清晰的权限说明和可诊断的 restore 按钮，
+降低安全软件误报概率。
 
 MX-H2I 客户端连接分两个阶段：
 
@@ -525,19 +563,39 @@ Clash/mihomo 开启系统代理或 TUN/fake-ip 时，bootstrap 可以复用系�
 访问；但 overlay 阶段必须排除 `198.18.0.0/15` fake-ip、proxy TUN、其它 `utun` 和 `lo0`
 造成的假阳性。它们只能说明外联被代理接管，不等于 H -> Domestic -> Internal 的 H2I 路径成功。
 系统 PAC/本机入口能力抽象在 `@qpjoy/electron-launcher/system-domain-proxy`，由
-standalone owner 在 H2I ready 后安装、断开时恢复。MX-H2I 默认占用或复用
-`127.0.0.1:2053`，同一端口同时提供 `/proxy.pac` 和 HTTP/CONNECT proxy；命中 Internal
-域名或 DNS route host 时 PAC 返回 `PROXY 127.0.0.1:2053`。本机 proxy 会先匹配
+standalone owner 在 WG/route/Internal 基础数据面 ready 后安装，并在完整 browser gate
+通过后才发布 `connected`。MX-H2I 默认由本应用进程持有 `127.0.0.1:2053`，不把它当作
+可跨进程复用的 broker；同一端口同时提供 `/proxy.pac` 和 HTTP/CONNECT proxy。命中
+Internal 域名或 DNS route host 时 PAC 返回 `PROXY 127.0.0.1:2053`。本机 proxy 会先匹配
 route 的 `targetUrl`/`dnsTarget`；没有 route 时再使用 routePlan 的 `internalControlIp`
 （默认 `10.88.88.88`）或 Internal DNS 解析，最后交给 WG AllowedIPs 进入 Internal。
 浏览器直接访问 IP literal 时，PAC 必须先判断 owner route CIDR，命中 `10.88.88.88/32`、
 `10.89.0.0/16` 等 WG 内网地址时返回 `DIRECT`，避免 Windows/Chrome 把 Internal IP
-交给 Clash/mihomo 系统代理或 TUN。`10.88.0.1` 是 Domestic gateway/relay，只能作为 DNS relay/cache fallback。未命中域名应
-回落到原 Clash/mihomo 本地代理或系统默认路径。这样浏览器/PAC 流量、MX-H2I DNS 解析和
-WG 白名单路由都优先于系统代理、Clash fake-ip 和其它应用的默认网络路径。
-Windows 上 Clash/mihomo 切换系统代理或 TUN 模式时可能重写 WinINet PAC；MX-H2I connected
-状态下应周期性重写自身 PAC，确保浏览器继续按 WG CIDR `DIRECT` 和 Internal 域名 local edge
-规则访问。`ping`/CLI 不读浏览器 PAC，仍以系统路由和 WG AllowedIPs 为准。
+交给 Clash/mihomo 系统代理或 TUN。`10.88.0.1` 是 Domestic gateway/relay，只能作为 DNS
+relay/cache fallback。
+
+Windows 默认同时启用 NRPT 与上述 local-edge PAC。接管 WinINet 前先读取当前 owner：
+
+- 没有 owner 或 Clash 处于 TUN 模式：PAC 未命中返回 `DIRECT`；
+- 可读取、可编译且来自 loopback 的 PAC：包装其 `FindProxyForURL`，但 Internal
+  exact/suffix 规则始终优先；
+- 没有可用 explicit PAC 时，live loopback 静态 proxy 包装成
+  `PROXY <listener>; DIRECT`；
+- AutoDetect/WPAD 只有在它是唯一适用 owner、且不存在可表达的 live static/PAC
+  continuation 时 fail closed；
+- 不可读/非 loopback PAC、无法安全表达的 proxy 或 dead listener：
+  fail closed，不修改 registry，也不报告 browser-ready。
+
+Windows 5 秒 watcher 的常态路径只做 WinINet PAC readback、Chromium `resolveProxy` 和
+local-edge CONNECT 等 live 验证。检测到新的外部 owner signature 时，允许触发一次有界
+重新协商，并可按协商结果写回 `AutoConfigURL`；同一 signature 后续 tick 保持只读，不再
+周期抢写。owner 状态变化、重连或手动 repair 才能开始下一次协商。
+apply/restore 会在写前重读并比较捕获的五个 WinINet 字段，写后再 readback；检测到 Clash
+切换 owner 就 fail closed。但 Windows registry 没有跨厂商原子 compare-and-set：
+不遵守同一 lease 的进程仍可能在“最后一次读取—写入”的极窄窗口抢写。因此 watcher/CAS
+是检测与恢复机制，两个完整 PAC owner 的严格保证仍必须来自单一 broker 或共同 lease。
+`MX_H2I_WINDOWS_SYSTEM_PAC=0` 只用于诊断/降级，连接保持 `tunnel-only`，不能绕过
+browser-ready gate。`ping`/CLI 不读浏览器 PAC，仍以系统路由、NRPT 和 WG AllowedIPs 为准。
 macOS 上，浏览器通不代表系统 resolver 已接管：`ping`、CLI 和不支持 PAC 的应用不会读取
 PAC 文件。因此 standalone 本机入口在 H2I ready 后默认安装运行态 SystemConfiguration
 supplemental DNS，把这些域名动态指向本机 `127.0.0.1:2053`；这不写 `/etc/hosts`，也不写
@@ -903,30 +961,40 @@ V2-only 稳定期的解析优先级：
 - `connected / H2I ready`：它是 V2 split 内网域名，必须优先解析到 `10.88.88.88`，再走
   MX-H2I WG route。这个阶段不应因为 Internal DNS 暂时失败而静默落回 `116.*` 或
   `198.18.*`。
-- `disconnect / repair`：MX-H2I 必须撤销自己写入的 PAC、dynamic split DNS 和 local edge
-  状态，让域名重新回到连接前的系统 DNS/代理行为。若用户直接杀进程或系统网络切换导致
-  stale resolver 留存，下一次启动应能检测 marker 并提供一次性修复。
+- `disconnect / repair`：Windows 先进入 PAC 恢复阶段，同时保持 `2053` 存活。如果
+  `AutoConfigURL` 仍由 MX 持有，则恢复最近一次成功协商时捕获的 external value 并 readback；
+  如果外部 owner 已接管，则保留其值，不覆盖，只做 notification/readback。随后停止 WG、
+  清理并 live 核验自有 NRPT，最后才关闭 `2053`；任一步失败都阻止断开并保留可恢复路径。
+  Windows 正常退出使用同一两阶段顺序。macOS 保持原有联合恢复事务。若进程异常导致
+  stale resolver/PAC 留存，下一次启动应检测 owner/marker 并提供一次性修复。
 
 Clash/mihomo 兼容原则不是按模式写两套逻辑，而是统一优先级 + 模式证据：
 
 | 场景 | 期望行为 |
 | --- | --- |
-| Clash system proxy | bootstrap 和普通公网流量可走原系统代理；V2 split 域名由 MX-H2I PAC/local edge 接管 |
+| Clash system proxy | Windows 默认仍安装 MX-H2I PAC；live loopback 静态 proxy 被复用为 fallback，可读取的 loopback PAC 被包装，Internal exact/suffix 始终先走 `PROXY 127.0.0.1:2053` |
 | Clash TUN/fake-ip | `198.18.0.0/15` 只作为代理 fake-ip 证据，不算 H2I ready；route proof 必须命中 MX-H2I WG interface |
+| Clash TUN ↔ system proxy 在线切换 | 5 秒巡检常态只读验证；新 owner signature 可触发一次有界协商并按结果写回，同一 signature 后续 tick 不周期抢回；状态变化、重连或手动 repair 可再次协商 |
+| Clash PAC/WPAD 不可安全包装 | 不可读/非 loopback PAC 或 dead listener fail closed；AutoDetect/WPAD 仅在没有可表达的 live static/PAC owner 时 fail closed；均不误报 browser-ready |
 | Clash 关闭 | MX-H2I 断开后应恢复到系统 DNS/公网解析；如果仍返回 `198.18.*`，优先查系统 DNS cache、Clash 残留 TUN/DNS 或 stale MX-H2I resolver |
 | V2 connected | 对 `10.88.88.88`、`10.88.0.1`、Domestic relay endpoint、DNS server 写更具体 route/priority，压过 TUN 默认路由 |
+| 微信/豆包/Steam 等公网应用异常 | 先查 WinINet/PAC、Clash 当前模式和本地 fallback listener；只有其域名命中 V2 NRPT namespace 时才归入 split-DNS 故障 |
 
 因此客户端需要检测 Clash/TUN/fake-ip，但检测结果只用于诊断、route proof 和针对性修复提示；
-主行为仍是同一套确定优先级：`V2 split DNS/PAC/local edge -> V2 WG route -> 原系统代理/系统 DNS -> 外部 DNS`。
+Windows 主行为是 `Internal PAC -> local edge -> Internal DNS/WG route` 与
+`NRPT -> system DNS -> Internal DNS/WG route` 两条同时成立；未命中 PAC 再进入
+`wrapped Clash owner 或 DIRECT`。macOS 行为不变。
 对 split 域名，`原系统代理/系统 DNS -> 外部 DNS` 只在 disconnected/bootstrap 状态参与。
 
-浏览器 PAC 是体验优化，不是唯一入口。V2 连接后应同时保证：
+浏览器 PAC 不是 NRPT 的替代品；Windows V2 连接后必须同时保证：
 
-- 浏览器通过 PAC 访问内网域名可用。
+- WinINet readback 是 MX-H2I PAC，Electron Chromium `resolveProxy` 指向
+  `127.0.0.1:2053`，且实际 CONNECT 成功。
 - 不走浏览器代理的程序，例如 `ping`、`curl` 和普通 HTTP client，也能通过系统 DNS
   解析到 `10.88.88.88` 并走 MX-H2I WG。
-- V2 断开或 route proof 失败时，不继续保留 V2 split DNS/PAC；客户端回退到连接前系统
-  DNS、系统代理或其它已存在的代理。
+- V2 主动断开或 route proof 失败触发回滚时，只有严格 teardown 全部成功后才清除 V2
+  split DNS/PAC，并回到连接前系统 DNS、系统代理或其它已存在的代理；回滚任一步失败则
+  保持 `recovering` 和可恢复路径，不误报 `disconnected`。
 
 开发期建议：
 
@@ -1102,7 +1170,7 @@ egress-on 都落在同一个真实 Internal runtime host 上。
 | `10.88.88.88` | Internal service peer 固定 IP |
 | `10.88.100.x` | 产品 service VIP / gateway alias |
 | `10.89.0.0/16` | MX-H2I standalone H 端 lease |
-| `10.90.0.0/16+` | 非 MX-H2I、但使用 Launcher standalone 模式的产品 lease，默认从 Luopan 类产品开始 |
+| `10.90.0.0/16+` | 非 MX-H2I 的 Launcher standalone 产品 lease 池；当前 Luopan 明确使用 `10.91.0.0/16` |
 
 MX-H2I：
 
@@ -1128,17 +1196,23 @@ Luopan 这类独立产品：
 - Luopan 的 embed app 可以选择 `luopan` 作为 Launcher standalone channel
 - v1 仍共用 `mx-domestic` 和 Internal `10.88.88.88`
 - 可分配独立 gateway alias/service VIP，例如 `10.88.0.2` / `10.88.101.1`
-- H 端 lease 使用独立段，未手填时默认从 `10.90.0.0/16` 开始
+- H 端 lease 使用独立段；当前 Luopan 固定为 `10.91.0.0/16`
 
 同机多个 standalone 的本机网络规则：
 
-- 本机系统网络只能有一个 active writer。MX-H2I 和 Luopan 可以同时运行 UI，但 WG route、
-  PAC、dynamic split DNS、local edge port 和 previous-state 回滚必须由 Launcher broker
-  合并后一次性写入。
+- 本机共享资源只能有一个 active writer：Windows `AutoConfigURL` 与应用托管的 `2053`、
+  macOS shared PAC/resolver，以及 machine-global NRPT baseline/回滚。互不重叠的
+  product-scoped WG service/routes 可由各 standalone owner 分别写入；AllowedIPs 或 route
+  重叠时必须由 ownership gate 拒绝，不能抢写。
+- **当前实现边界**：Luopan demo 使用 `suppressWireGuardDns: true`，尚不安装 NRPT、PAC 或
+  `127.0.0.1:2053`，所以它与 MX-H2I 同时开启时不会争抢这三项资源。Windows 上
+  `system-domain-proxy` 目前仍由应用进程持有；若第二个 standalone 也尝试创建 local edge，
+  会 fail closed，不会“复用”一个无法保证生命周期和回滚的外部进程。双 DNS/PAC owner
+  只有在单一、长生命周期 Launcher network broker 落地后才算支持。
 - 多个 standalone 可以共享同一个 Domestic fabric：Internal 仍是 `10.88.88.88`，Domestic
   gateway 仍是 `10.88.0.1`；产品差异放在 H 端 lease 段、service VIP、DNS suffix/route 和
   auth policy。
-- IP 段必须不重叠：MX-H2I 使用 `10.89.0.0/16`，Luopan 默认从 `10.90.0.0/16` 开始。
+- IP 段必须不重叠：MX-H2I 使用 `10.89.0.0/16`，当前 Luopan 使用 `10.91.0.0/16`。
   broker 对重叠 AllowedIPs 应拒绝 apply 或要求切换 owner。
 - DNS policy 可以合并：`mx-h2i` 的域名、`luopan` 的域名、AppCenter embed app 的域名
   汇总成一个 local edge / PAC / dynamic split DNS 配置；每条 route 带 owner 和可回滚 evidence。

@@ -147,11 +147,43 @@ Developer Mode on Windows. If a worker previously failed while extracting that a
 `make:win` downloads the configured Windows-only bundle without requiring an elevated terminal.
 
 The Windows package still runs the Electron UI as `asInvoker`. WireGuard, NRPT split DNS, and
-route-priority repair are owned by the WireGuard service/UAC path. The launcher keeps Internal
-domains on the standalone-owned local PAC edge and suppresses interface DNS when that resolver
-policy is prepared, so Clash/mihomo TUN or system proxy can keep owning unmatched traffic. The
-Windows UAC wrapper uses the HDO V1 hidden `RunAs` pattern; macOS LaunchDaemon/PAC behavior is
-not changed by this packaging gate.
+route-priority repair are owned by the WireGuard service/UAC path. Windows connects with both
+NRPT and the MX local-edge WinINet PAC by default. Internal exact/suffix matches must resolve through
+the product DNS and return `PROXY 127.0.0.1:2053` in PAC. Full ready requires live system DNS,
+WinINet PAC readback, Chromium `session.resolveProxy()` selecting `2053`, and an actual CONNECT
+through the local edge. `MX_H2I_WINDOWS_SYSTEM_PAC=0` is diagnostic/degraded only and must remain
+`tunnel-only`. An NRPT warning still does not explain WeChat/Doubao/Steam failures unless their
+queried name matches an MX namespace. The Windows UAC wrapper uses the HDO V1 hidden `RunAs`
+pattern.
+
+On macOS, the required gate is that the local edge and SystemConfiguration supplemental resolver
+must both be live before suppressed interface DNS can count as ready. The current suppression
+boolean alone is not proof that this gate passed; release evidence must verify both components
+until the implementation explicitly consumes the prepared result. That resolver is scoped to
+declared Internal/app domains, and unmatched names retain the original system resolver.
+
+### Windows Clash/DNS Regression Gate
+
+Run these cases on Windows 11 with live Clash/mihomo. Record live route/NRPT/WinINet state before
+and after each transition; `wireguard-route-audit.log` is supporting history, not current-state
+proof.
+
+| Case | Operation | Required result |
+| --- | --- | --- |
+| W1 | Connect with Clash TUN already enabled | VIP/CIDR uses WG; NRPT/system DNS is live; MX PAC readback + Chromium `resolveProxy` + CONNECT are live; unmatched PAC result is `DIRECT` while public traffic stays on TUN |
+| W2 | Connect with Clash static system proxy | A live loopback listener is wrapped as `PROXY <Clash>; DIRECT`; Internal exact/suffix still returns `PROXY 127.0.0.1:2053`; public smoke passes |
+| W3 | Connect with Clash PAC, WPAD, or dead listener | Readable/valid loopback PAC is wrapped first; otherwise a representable live static proxy can continue. AutoDetect/WPAD fails closed only when it is the sole applicable owner and neither live static nor PAC continuation exists; unreadable/non-loopback PAC or dead listener also fails closed without registry mutation or browser-ready |
+| W4 | While connected, switch TUN ↔ system proxy, restart Clash, or change port | The normal five-second path is read-only. A newly observed owner signature may trigger one bounded reconciliation and an `AutoConfigURL` write; later ticks for the same signature remain read-only. Owner-state changes/reconnect/manual repair may reconcile again |
+| W5 | Upgrade old MX-H2I while preserving WG service/tunnel | Live NRPT/system DNS, PAC readback, Chromium `resolveProxy` to `2053`, CONNECT, route, and Internal health all pass before runtime returns `connected` |
+| W6 | Disconnect and normal exit | While `2053` stays live, restore the external value captured by the most recent successful negotiation only if MX still owns `AutoConfigURL`; preserve a value already installed by another owner. Then stop WG and verify owned NRPT cleanup, and only then close `2053`; any failure cancels disconnect/exit and leaves a recoverable path |
+
+Also run once with `MX_H2I_WINDOWS_SYSTEM_PAC=0`; the expected result is diagnostic
+`tunnel-only`, never a passed release gate.
+
+For every case, separately assert that an Internal hostname resolves to the expected product VIP
+and that unrelated public DNS remains outside MX NRPT. If WeChat, Doubao, Steam, browser images or
+equivalent public traffic fail, capture WinINet/PAC/Clash mode and listener state first; do not
+classify the failure as NRPT from the MX hostname warning alone.
 
 ## Layer 5: Publish Artifact
 
@@ -289,6 +321,11 @@ Checklist:
 - guest connect succeeds with one permission flow;
 - employee login succeeds without repeated permission prompts;
 - AppCenter entry opens;
+- Windows: Clash TUN/system-proxy live switching and strict teardown pass the W1-W6 gate above,
+  including a public app/browser-resource smoke;
+- an upgraded Windows install that preserves a running WG service only returns `connected` after
+  live NRPT/system DNS, PAC readback, Chromium `resolveProxy`, CONNECT, route and Internal checks;
+  an old `nrpt add complete` audit line is insufficient;
 - Release Center plan can target the tester `installId` or channel;
 - disconnect/reconnect does not remove other standalone products' routes;
 - logs/reporting show the tester install id.

@@ -14,6 +14,9 @@
   --success: #48bc77;
   --info: #5e8eec;
   --purple: #b974ff;
+  --brand-black: #020303;
+  --brand-white: #f6f7f5;
+  --brand-outline: rgba(246, 247, 245, 0.16);
   --text-1: #e2e2e2;
   --text-2: rgba(226, 226, 226, 0.72);
   --text-3: rgba(226, 226, 226, 0.5);
@@ -438,7 +441,6 @@ select {
   text-align: center;
 }
 
-.app-mark,
 .product-icon {
   display: grid;
   place-items: center;
@@ -451,16 +453,34 @@ select {
 }
 
 .app-mark {
+  display: block;
   width: 58px;
   height: 58px;
   margin-bottom: 8px;
-  box-shadow: 0 0 26px rgba(43, 246, 210, 0.2);
+  border-radius: 14px;
+  box-shadow:
+    0 0 0 1px var(--brand-outline),
+    0 10px 24px rgba(0, 0, 0, 0.34),
+    0 0 22px rgba(43, 246, 210, 0.1);
 }
 
 .product-icon {
   width: 42px;
   height: 42px;
   font-size: 11px;
+}
+
+.brand-logo {
+  object-fit: cover;
+  overflow: hidden;
+  border: 1px solid var(--brand-outline);
+  background: var(--brand-black);
+}
+
+.product-icon.brand-logo {
+  display: block;
+  padding: 0;
+  box-shadow: 0 0 14px rgba(43, 246, 210, 0.08);
 }
 
 .kicker,
@@ -476,6 +496,11 @@ p {
   color: var(--primary);
   font-size: 12px;
   font-weight: 800;
+}
+
+.phone-hero .kicker {
+  color: var(--brand-white);
+  letter-spacing: 0.08em;
 }
 
 h1 {
@@ -1320,15 +1345,11 @@ button:disabled {
 }
 
 .app-shell-mark {
-  display: grid;
+  display: block;
   width: 26px;
   height: 26px;
-  place-items: center;
   border-radius: 6px;
-  background: var(--primary);
-  color: #071311;
-  font-size: 11px;
-  font-weight: 900;
+  box-shadow: 0 0 0 1px rgba(43, 246, 210, 0.13);
 }
 
 .app-shell-identity strong,

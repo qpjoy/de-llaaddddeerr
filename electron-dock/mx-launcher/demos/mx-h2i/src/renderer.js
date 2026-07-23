@@ -894,7 +894,7 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
       </header>
 
       <section class="phone-hero">
-        <div class="app-mark">H2I</div>
+        <img class="brand-logo app-mark" src="./assets/mingxi-logo.png" alt="" aria-hidden="true" draggable="false" />
         <p class="kicker">MX-H2I</p>
         <h1>${escapeHtml(modeTitle)}</h1>
         <p>${escapeHtml(connectionCaption())}</p>
@@ -1516,7 +1516,7 @@ function renderAppShellBar(title, subtitle, activeTarget) {
   return `
     <header class="app-shell-bar" data-window-drag="true">
       <div class="app-shell-identity">
-        <div class="app-shell-mark">MX</div>
+        <img class="brand-logo app-shell-mark" src="./assets/mingxi-logo.png" alt="" aria-hidden="true" draggable="false" />
         <div>
           <strong>${escapeHtml(title)}</strong>
           <span>${escapeHtml(subtitle)}</span>
@@ -3058,7 +3058,9 @@ function renderFeedback() {
 function renderOwner(owner) {
   return `
     <article class="owner-row ${owner.state === 'active' ? 'is-active' : ''}">
-      <div class="product-icon">${escapeHtml(owner.productId === 'mx-h2i' ? 'H2I' : 'LP')}</div>
+      ${owner.productId === 'mx-h2i'
+        ? '<img class="brand-logo product-icon" src="./assets/mingxi-logo.png" alt="" aria-hidden="true" draggable="false" />'
+        : '<div class="product-icon">LP</div>'}
       <div>
         <strong>${escapeHtml(owner.displayName)}</strong>
         <span>${escapeHtml(owner.productId)} / ${escapeHtml(owner.serviceVip)}</span>

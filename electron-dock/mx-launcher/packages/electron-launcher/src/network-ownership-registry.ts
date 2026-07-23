@@ -220,7 +220,17 @@ function duplicateKeyConflicts(
 }
 
 function duplicateRouteConflicts(entries: ElectronLauncherNetworkOwnershipEntry[]): ElectronLauncherNetworkOwnershipConflict[] {
-  const conflicts = duplicateKeyConflicts('route-cidr', entries);
+  const conflicts: ElectronLauncherNetworkOwnershipConflict[] = [];
+  for (const group of groupEntries(entries).values()) {
+    const owners = uniqueStrings(group.map((entry) => entry.ownerId));
+    if (owners.length <= 1) continue;
+    conflicts.push({
+      resource: 'route-cidr',
+      key: group[0].key,
+      owners,
+      reason: 'multiple owners claim the same route CIDR'
+    });
+  }
   for (let i = 0; i < entries.length; i += 1) {
     for (let j = i + 1; j < entries.length; j += 1) {
       const left = entries[i];

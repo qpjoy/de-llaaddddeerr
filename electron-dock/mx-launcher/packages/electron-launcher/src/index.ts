@@ -133,6 +133,7 @@ export {
 export {
   applyElectronLauncherStandaloneDataPlane,
   buildElectronLauncherStandaloneOwnershipClaim,
+  claimElectronLauncherStandaloneOwnershipClaim,
   diagnoseElectronLauncherStandaloneDataPlane,
   readElectronLauncherStandaloneOwnershipState,
   releaseElectronLauncherStandaloneOwnershipClaim,
@@ -148,6 +149,8 @@ export {
   type ElectronLauncherStandaloneDataPlaneStopResult,
   type ElectronLauncherStandaloneDataPlaneState,
   type ElectronLauncherStandaloneEndpointProbe,
+  type ElectronLauncherStandaloneOwnershipClaimOptions,
+  type ElectronLauncherStandaloneOwnershipClaimResult,
   type ElectronLauncherStandaloneOwnershipInput,
   type ElectronLauncherStandaloneOwnershipState,
   type ElectronLauncherStandaloneRouteProbe

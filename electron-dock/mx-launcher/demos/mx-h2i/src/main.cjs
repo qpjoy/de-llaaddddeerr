@@ -48,6 +48,7 @@ const DARWIN_WIREGUARD_SERVICE_IDENTITY = {
   staleDarwinLaunchDaemonLabelPrefixes: ['com.qpjoy.mx-h2i.wireguard']
 };
 const SYSTEM_DOMAIN_PROXY_REFRESH_MS = process.platform === 'win32' ? 5_000 : 30_000;
+const WINDOWS_SYSTEM_PROXY_CONTINUATION_REFRESH_MS = 30_000;
 const SYSTEM_DOMAIN_PROXY_ROUTE_REFRESH_TIMEOUT_MS = 2200;
 const SYSTEM_DOMAIN_PROXY_ROUTE_WARNING_MS = 60_000;
 const NETWORK_CHANGE_MONITOR_MS = 5000;
@@ -57,6 +58,7 @@ const DARWIN_ENDPOINT_ROUTE_PROBE_TIMEOUT_MS = 1800;
 const DARWIN_ENDPOINT_ROUTE_REPAIR_COOLDOWN_MS = 20_000;
 const NETWORK_DIAGNOSTIC_LOOKUP_TIMEOUT_MS = 2500;
 const WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD = 3;
+const WINDOWS_BROWSER_PROOF_SESSION_ID = randomUUID();
 const DEFAULT_CONFIG = {
   productId: defaultLauncherProductId(),
   productDisplayName: defaultLauncherProductDisplayName(),
@@ -98,7 +100,9 @@ let topDockLeaveStartedAt = 0;
 let wireGuardRecoveryInterval = null;
 let wireGuardRecoveryInFlight = null;
 let wireGuardConnectInFlight = false;
+const wireGuardConnectOperations = new Set();
 let wireGuardDisconnectInFlight = false;
+let networkMutationEpoch = 0;
 let windowBoundsSaveTimer = null;
 let windowBoundsTrackingSuppressed = false;
 let activeWindowDrag = null;
@@ -119,6 +123,9 @@ let h2oManagedHydrateInFlight = null;
 let lastSystemDomainProxySignature = null;
 let lastSystemDomainProxyPolicySignature = null;
 let lastSystemDomainProxyAuthorizationCanceledSignature = null;
+let lastWindowsSystemProxyTakeoverSignature = null;
+let pendingWindowsSystemProxyTakeoverSignature = null;
+let lastWindowsSystemProxyContinuationRefreshAt = 0;
 let lastSystemPacReverseProxyRoutes = [];
 let lastSystemPacReverseProxyRoutesWarningAt = 0;
 let lastNetworkEnvironmentSignature = null;
@@ -129,6 +136,10 @@ let diagnosticLogQueue = Promise.resolve();
 let diagnosticLogBytes = null;
 let diagnosticLogDirReady = false;
 let recentDiagnosticLogs = [];
+let appShutdownInFlight = null;
+let appShutdownRequested = false;
+let appShutdownCompleted = false;
+let appRelaunchRequested = false;
 
 const TOP_DOCK_Y = 0;
 const TOP_REVEAL_ZONE = 18;
@@ -153,34 +164,41 @@ app.on('second-instance', () => {
   showMainWindow();
 });
 
-app.whenReady().then(async () => {
-  runtime = await loadRuntime();
-  queueDiagnosticLog('info', 'app.started', 'MX-H2I main process started.', {
-    version: app.getVersion(),
-    platform: process.platform,
-    arch: process.arch,
-    packaged: app.isPackaged
+if (gotSingleInstanceLock) {
+  app.whenReady().then(async () => {
+    runtime = await loadRuntime();
+    if (process.platform === 'darwin' && app.dock) {
+      app.dock.setIcon(productIconPath());
+    }
+    queueDiagnosticLog('info', 'app.started', 'MX-H2I main process started.', {
+      version: app.getVersion(),
+      platform: process.platform,
+      arch: process.arch,
+      packaged: app.isPackaged
+    });
+    await initializeSystemDomainProxy();
+    await reconcileExistingWireGuardAfterStartup();
+    await refreshSystemDomainProxyForRuntime('app-startup');
+    startSystemDomainProxyRefreshWatcher();
+    scheduleNetworkEnvironmentDiagnostics('app-startup', {
+      lookupTimeoutMs: NETWORK_DIAGNOSTIC_LOOKUP_TIMEOUT_MS
+    });
+    registerIpc();
+    createTray();
+    createMainWindow();
+    void restoreH2oRuntimeAfterStartup().catch((err) => {
+      console.warn('[mx-h2i] H2O startup restore failed:', errorMessage(err));
+      queueDiagnosticError('startup.h2o-restore', err);
+    });
+    void reportInstallCompletionAndAdoptPendingUpdates().catch((err) => {
+      console.warn('[mx-h2i] startup update bookkeeping failed:', errorMessage(err));
+      queueDiagnosticError('startup.update-bookkeeping', err);
+    });
+    startTopRevealWatcher();
+    startWireGuardRecoveryWatcher();
+    startNetworkChangeWatcher();
   });
-  await initializeSystemDomainProxy();
-  await reconcileExistingWireGuardAfterStartup();
-  scheduleNetworkEnvironmentDiagnostics('app-startup', {
-    lookupTimeoutMs: NETWORK_DIAGNOSTIC_LOOKUP_TIMEOUT_MS
-  });
-  registerIpc();
-  createTray();
-  createMainWindow();
-  void restoreH2oRuntimeAfterStartup().catch((err) => {
-    console.warn('[mx-h2i] H2O startup restore failed:', errorMessage(err));
-    queueDiagnosticError('startup.h2o-restore', err);
-  });
-  void reportInstallCompletionAndAdoptPendingUpdates().catch((err) => {
-    console.warn('[mx-h2i] startup update bookkeeping failed:', errorMessage(err));
-    queueDiagnosticError('startup.update-bookkeeping', err);
-  });
-  startTopRevealWatcher();
-  startWireGuardRecoveryWatcher();
-  startNetworkChangeWatcher();
-});
+}
 
 // Closes the installer loop and promotes staged npm-package artifacts: on the
 // first start after a version change, report installer-completed to Release
@@ -216,12 +234,178 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', () => {
-  queueDiagnosticLog('info', 'app.before-quit', 'MX-H2I is shutting down.');
+app.on('before-quit', (event) => {
+  if (!gotSingleInstanceLock || (!runtime && !systemDomainProxyManager)) {
+    appShutdownCompleted = true;
+    return;
+  }
+  if (appShutdownCompleted) return;
+  event.preventDefault();
+  beginApplicationShutdown();
+});
+
+function beginApplicationShutdown() {
+  if (appShutdownCompleted || appShutdownInFlight) return;
+  appShutdownRequested = true;
+  networkMutationEpoch += 1;
+  appShutdownInFlight = shutdownApplication();
+}
+
+async function shutdownApplication() {
+  queueDiagnosticLog('info', 'app.before-quit', 'MX-H2I is shutting down.', {
+    relaunch: appRelaunchRequested
+  });
   stopNetworkChangeWatcher();
   stopWireGuardRecoveryWatcher();
-  void closeSystemDomainProxy();
-});
+  stopSystemDomainProxyRefreshWatcher();
+  if (process.platform === 'win32') {
+    wireGuardDisconnectInFlight = true;
+    let proxyRestored = false;
+    let wireGuard = null;
+    try {
+      // These mutations are intentionally awaited to settlement. Promise
+      // timeouts do not cancel reg.exe/PowerShell/UAC work and would allow a
+      // late restore to race the rollback watcher after shutdown is canceled.
+      await drainWireGuardConnectOperations();
+      await drainWireGuardRecoveryOperation();
+      await drainSystemDomainProxyApply('app-before-quit', 0);
+      await disableSystemDomainProxyForRuntimeStrict(
+        'app-before-quit',
+        2,
+        { keepLocalEdgeAlive: true }
+      );
+      proxyRestored = true;
+      wireGuard = await stopWireGuardForRuntime();
+      if (wireGuard?.cleanupReady !== true) {
+        const err = new Error(
+          wireGuard?.message
+          || wireGuard?.windowsNrpt?.error
+          || 'Windows WireGuard/NRPT cleanup was not verified.'
+        );
+        err.wireGuard = wireGuard;
+        throw err;
+      }
+      await disableSystemDomainProxyForRuntimeStrict('app-before-quit-finalize');
+      const standaloneOwnership = await releaseStandaloneOwnershipForRuntime('app-before-quit');
+      if (standaloneOwnership?.error) {
+        const err = new Error(`Standalone ownership release failed: ${standaloneOwnership.error}`);
+        err.wireGuard = wireGuard;
+        err.standaloneOwnership = standaloneOwnership;
+        throw err;
+      }
+      await closeSystemDomainProxy();
+    } catch (err) {
+      queueDiagnosticError(
+        proxyRestored
+          ? 'wireguard.shutdown-cleanup-failed'
+          : 'system-domain-proxy.shutdown-restore-failed',
+        err
+      );
+      appShutdownRequested = false;
+      appShutdownCompleted = false;
+      wireGuardDisconnectInFlight = false;
+      let browserRollback = null;
+      const cleanupWireGuard = err?.wireGuard || wireGuard;
+      if (
+        proxyRestored
+        && wireGuardRuntimeIsActive(cleanupWireGuard)
+      ) {
+        browserRollback = await attachWindowsBrowserAccessProof(
+          await ensureSystemDomainProxyForRuntimeOnce('manual-shutdown-rollback'),
+          'manual-shutdown-rollback'
+        ).catch((rollbackErr) => ({
+          browserReady: false,
+          error: errorMessage(rollbackErr)
+        }));
+      }
+      const wireGuardCleanupPending = proxyRestored
+        && !wireGuardRuntimeIsActive(cleanupWireGuard);
+      if (wireGuardCleanupPending) {
+        const connection = runtime?.connection || idleConnection();
+        const routePlan = normalizeRoutePlan(connection.routePlan);
+        const shutdownCleanup = {
+          ok: false,
+          cleanupReady: cleanupWireGuard?.cleanupReady === true,
+          localEdgeClosePending: cleanupWireGuard?.cleanupReady === true
+            && !err?.standaloneOwnership?.error,
+          ownershipReleasePending: Boolean(err?.standaloneOwnership?.error),
+          stage: err?.standaloneOwnership?.error
+            ? 'standalone-ownership-release'
+            : cleanupWireGuard?.cleanupReady === true
+              ? 'local-edge-finalize'
+              : 'wireguard-nrpt-stop',
+          message: errorMessage(err),
+          wireGuard: cleanupWireGuard,
+          standaloneOwnership: err?.standaloneOwnership || null,
+          updatedAt: nowIso()
+        };
+        runtime.connection = isRetainedConnectionState(connection.state) && routePlan
+          ? {
+              ...connection,
+              state: 'lease-only',
+              wireGuard: summarizeWireGuardStatus(cleanupWireGuard?.status, connection),
+              health: {
+                ...normalizeHealth(connection.health, leasedHealth()),
+                wireGuard: 'stale',
+                internalApi: 'idle',
+                splitDns: 'stale'
+              },
+              diagnostics: {
+                ...(connection.diagnostics || {}),
+                shutdownCleanup,
+                updatedAt: nowIso()
+              }
+            }
+          : {
+              ...idleConnection(),
+              mode: connection.mode === 'employee' ? 'employee' : 'guest',
+              diagnostics: {
+                ...(connection.diagnostics || {}),
+                shutdownCleanup,
+                updatedAt: nowIso()
+              }
+            };
+      }
+      runtime.feedback = {
+        tone: 'warning',
+        message: proxyRestored
+          ? wireGuardCleanupPending
+            ? `应用未退出：WireGuard 已停止或状态无法确认，Windows 服务/NRPT、local edge 或 ownership 收尾尚未完成；PAC 保持已恢复，不会指向 2053。请执行“修复网络”后再退出。${errorMessage(err)}`
+            : browserRollback?.browserAccess?.ready === true
+            ? `应用未退出：Windows WireGuard/NRPT 尚未确认清理，已恢复浏览器 Internal 路径。${errorMessage(err)}`
+            : `应用未退出：Windows WireGuard/NRPT 尚未确认清理；浏览器 PAC 恢复状态也未确认。${browserRollback?.error || browserRollback?.browserAccess?.error || errorMessage(err)}`
+          : `应用未退出：Windows 系统代理恢复失败，本机 2053 继续运行，避免留下失效 PAC。${errorMessage(err)}`
+      };
+      touchRuntime('windows shutdown canceled by network cleanup');
+      await saveAndBroadcast().catch(() => undefined);
+      startSystemDomainProxyRefreshWatcher();
+      startWireGuardRecoveryWatcher();
+      startNetworkChangeWatcher();
+      appRelaunchRequested = false;
+      appShutdownInFlight = null;
+      return;
+    }
+  } else {
+    await withTimeout(
+      closeSystemDomainProxy(),
+      3000,
+      'Timed out closing the local system proxy during shutdown.',
+      'MX_SYSTEM_PROXY_SHUTDOWN_CLOSE_TIMEOUT'
+    ).catch((err) => {
+      queueDiagnosticError('system-domain-proxy.shutdown-close-failed', err);
+    });
+  }
+  await withTimeout(
+    diagnosticLogQueue,
+    1500,
+    'Timed out flushing the diagnostic log during shutdown.',
+    'MX_DIAGNOSTIC_SHUTDOWN_TIMEOUT'
+  ).catch(() => undefined);
+  appShutdownCompleted = true;
+  wireGuardDisconnectInFlight = false;
+  if (appRelaunchRequested) app.relaunch();
+  app.exit(0);
+}
 
 app.on('render-process-gone', (_event, _contents, details) => {
   queueDiagnosticLog('error', 'process.renderer-gone', 'Renderer process exited unexpectedly.', details);
@@ -252,6 +436,7 @@ function createMainWindow() {
     minHeight: initialMinimum.height,
     resizable: false,
     title: 'MX-H2I',
+    icon: productIconPath(),
     backgroundColor: '#242734',
     frame: false,
     hasShadow: true,
@@ -264,6 +449,15 @@ function createMainWindow() {
   });
 
   mainWindow.removeMenu();
+  if (process.platform === 'win32') {
+    // Windows does not emit app.before-quit during logoff/shutdown. Delay the
+    // session end until the same PAC -> WG/NRPT -> local-edge teardown settles.
+    mainWindow.on('query-session-end', (event) => {
+      if (appShutdownCompleted) return;
+      event.preventDefault();
+      beginApplicationShutdown();
+    });
+  }
   mainWindow.once('closed', () => {
     mainWindow = null;
   });
@@ -282,9 +476,13 @@ function registerIpc() {
     return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:connect-guest', async () => {
+    const connectOperation = beginWireGuardConnectOperation();
+    const lifecycleEpoch = networkMutationEpoch;
     const transitionStartedAt = Date.now();
     const transitionId = makeRequestId('visit-connect');
     let retainedConnectionWasProbed = false;
+    try {
+      assertNetworkTransitionCurrent(lifecycleEpoch);
     if (runtime.connection?.mode === 'employee' && runtime.connection?.state === 'connecting') {
       runtime.feedback = {
         tone: 'info',
@@ -381,9 +579,11 @@ function registerIpc() {
       await saveAndBroadcast();
       return visibleRuntime();
     }
+    assertNetworkTransitionCurrent(lifecycleEpoch);
     setConnecting('guest');
     await publishNetworkModeEvent('visit:connect', 'connecting', { transitionId });
     await saveAndBroadcast();
+    assertNetworkTransitionCurrent(lifecycleEpoch);
     scheduleNetworkEnvironmentDiagnostics('guest-pre-connect', {
       phase: 'bootstrap',
       persist: false,
@@ -394,6 +594,7 @@ function registerIpc() {
         identityKind: 'anonymous',
         requestTag: 'guest'
       });
+      assertNetworkTransitionCurrent(lifecycleEpoch);
       await applyNetworkSession(session, {
         mode: 'guest',
         subject: `anonymous:${session.lease.installId}`,
@@ -406,10 +607,12 @@ function registerIpc() {
         },
         auth: null,
         feedback: '访客 lease 已由 Internal 下发，并保留 180 天未续租回收。',
+        lifecycleEpoch,
         transitionId,
         transitionStartedAt
       });
     } catch (err) {
+      if (isSupersededNetworkTransitionError(err)) return visibleRuntime();
       await applyConnectionError('访客连接失败', err);
       await publishNetworkModeEvent('visit:connect', 'failed', {
         reason: errorMessage(err),
@@ -418,12 +621,22 @@ function registerIpc() {
     }
     await saveAndBroadcast();
     return visibleRuntime();
+    } catch (err) {
+      if (isSupersededNetworkTransitionError(err)) return visibleRuntime();
+      throw err;
+    } finally {
+      connectOperation.finish();
+    }
   });
   ipcMain.handle('mx-h2i:login-employee', async (_event, input) => {
+    const connectOperation = beginWireGuardConnectOperation();
+    const lifecycleEpoch = networkMutationEpoch;
     const transitionStartedAt = Date.now();
     const transitionId = makeRequestId('staff-connect');
     const account = typeof input?.account === 'string' ? input.account.trim() : '';
     const password = typeof input?.password === 'string' ? input.password : '';
+    try {
+      assertNetworkTransitionCurrent(lifecycleEpoch);
     if (!account || !password) {
       runtime.feedback = {
         tone: 'danger',
@@ -453,12 +666,14 @@ function registerIpc() {
       : null;
     const identityFallback = guestFallback ? runtime.identity : null;
     const authFallback = guestFallback ? runtime.auth : null;
+    assertNetworkTransitionCurrent(lifecycleEpoch);
     setConnecting('employee', { replacingGuest: Boolean(guestFallback) });
     await publishNetworkModeEvent('staff:connect', 'connecting', {
       reason: guestFallback ? 'visit-to-staff' : null,
       transitionId
     });
     await saveAndBroadcast();
+    assertNetworkTransitionCurrent(lifecycleEpoch);
     scheduleNetworkEnvironmentDiagnostics('employee-pre-connect', {
       phase: 'bootstrap',
       persist: false,
@@ -469,11 +684,14 @@ function registerIpc() {
     let dataPlaneApplyStarted = false;
     try {
       const bootstrap = await resolveBootstrapEndpoint(runtime.config);
+      assertNetworkTransitionCurrent(lifecycleEpoch);
       const baseUrl = bootstrap.baseUrl;
       await applyResolvedBootstrapEndpoint(bootstrap);
+      assertNetworkTransitionCurrent(lifecycleEpoch);
       const auth = await authenticateUserViaGateway(baseUrl, account, password, {
         bootstrapResolveMode: bootstrap.resolveMode
       });
+      assertNetworkTransitionCurrent(lifecycleEpoch);
       authenticated = auth;
       resolvedBootstrap = bootstrap;
       if (guestFallback) {
@@ -489,6 +707,7 @@ function registerIpc() {
         userId: auth.user.userId,
         requestTag: 'employee'
       });
+      assertNetworkTransitionCurrent(lifecycleEpoch);
       dataPlaneApplyStarted = true;
       await applyNetworkSession(session, {
         mode: 'employee',
@@ -506,10 +725,12 @@ function registerIpc() {
         fallbackConnection: guestFallback,
         fallbackIdentity: identityFallback,
         fallbackAuth: authFallback,
+        lifecycleEpoch,
         transitionId,
         transitionStartedAt
       });
     } catch (err) {
+      if (isSupersededNetworkTransitionError(err)) return visibleRuntime();
       if (guestFallback && !dataPlaneApplyStarted) {
         runtime.connection = guestFallback;
         runtime.identity = identityFallback;
@@ -545,18 +766,67 @@ function registerIpc() {
     }
     await saveAndBroadcast();
     return visibleRuntime();
+    } catch (err) {
+      if (isSupersededNetworkTransitionError(err)) return visibleRuntime();
+      throw err;
+    } finally {
+      connectOperation.finish();
+    }
   });
   ipcMain.handle('mx-h2i:disconnect', async () => {
     if (wireGuardDisconnectInFlight) return visibleRuntime();
     wireGuardDisconnectInFlight = true;
-    const disconnectedMode = runtime.connection?.mode === 'employee' ? 'employee' : 'guest';
-    const disconnectedIp = nullableString(runtime.connection?.localIp);
-    const retainedConnection = runtime.connection;
-    const retainedAuth = runtime.auth;
+    networkMutationEpoch += 1;
+    let disconnectedMode = runtime.connection?.mode === 'employee' ? 'employee' : 'guest';
+    let disconnectedIp = nullableString(runtime.connection?.localIp);
+    let retainedConnection = runtime.connection;
+    let retainedAuth = runtime.auth;
     try {
+      await drainWireGuardConnectOperations();
+      await drainWireGuardRecoveryOperation();
+      disconnectedMode = runtime.connection?.mode === 'employee' ? 'employee' : 'guest';
+      disconnectedIp = nullableString(runtime.connection?.localIp);
+      retainedConnection = runtime.connection;
+      retainedAuth = runtime.auth;
       if (postConnectUpdateTimer) {
         clearTimeout(postConnectUpdateTimer);
         postConnectUpdateTimer = null;
+      }
+      try {
+        await drainSystemDomainProxyApply('disconnect');
+      } catch (err) {
+        runtime.connection = retainedConnection;
+        runtime.auth = retainedAuth;
+        runtime.feedback = {
+          tone: 'warning',
+          message: `断开尚未开始：等待正在执行的 Windows PAC 切换超时，现有连接保持不变。${errorMessage(err)}`
+        };
+        touchRuntime('disconnect blocked by active system proxy apply');
+        await saveAndBroadcast();
+        return visibleRuntime();
+      }
+      let windowsSystemDomainProxy = null;
+      if (process.platform === 'win32') {
+        try {
+          // Remove the browser interception while WireGuard is still usable.
+          // If restore fails, keep the connection and 2053 alive.
+          windowsSystemDomainProxy = await disableSystemDomainProxyForRuntimeStrict(
+            'disconnect-before-wireguard-stop',
+            2,
+            { keepLocalEdgeAlive: true }
+          );
+        } catch (err) {
+          runtime.connection = retainedConnection;
+          runtime.auth = retainedAuth;
+          runtime.feedback = {
+            tone: 'warning',
+            message: `断开未执行：Windows 系统代理恢复失败，WireGuard 和本机 2053 保持运行，避免留下失效 PAC。${errorMessage(err)}`
+          };
+          queueDiagnosticError('system-domain-proxy.disconnect-restore-failed', err);
+          touchRuntime('disconnect blocked by system proxy restore failure');
+          await saveAndBroadcast();
+          return visibleRuntime();
+        }
       }
       const systemDomainRestoreScript = systemDomainProxyManager?.darwinRestoreScript?.() || null;
       const wireGuard = await stopWireGuardForRuntime({
@@ -565,11 +835,19 @@ function registerIpc() {
       const authorizationCanceled = wireGuard?.authorizationCanceled === true
         || isUserAuthorizationCanceledError(wireGuard);
       const wireGuardStillActive = wireGuardRuntimeIsActive(wireGuard);
-      const wireGuardStopUnknown = wireGuard?.ok === false
+      const wireGuardStopUnknown = process.platform !== 'win32'
+        && wireGuard?.ok === false
         && typeof wireGuard?.status?.active !== 'boolean'
         && !wireGuardStillActive;
 
       if (authorizationCanceled || wireGuardStillActive || wireGuardStopUnknown) {
+        let browserRollback = null;
+        if (process.platform === 'win32' && windowsSystemDomainProxy) {
+          browserRollback = await attachWindowsBrowserAccessProof(
+            await ensureSystemDomainProxyForRuntimeOnce('manual-disconnect-rollback'),
+            'manual-disconnect-rollback'
+          );
+        }
         if (authorizationCanceled && lastSystemDomainProxyPolicySignature) {
           lastSystemDomainProxyAuthorizationCanceledSignature = lastSystemDomainProxyPolicySignature;
         }
@@ -583,8 +861,10 @@ function registerIpc() {
         const detail = wireGuard?.message || wireGuard?.error || '无法确认 WireGuard 已停止';
         runtime.feedback = {
           tone: 'warning',
-          message: authorizationCanceled
-            ? '已取消断开；WireGuard、PAC、split DNS 和员工/访客连接均保持原状态。'
+          message: browserRollback?.browserAccess?.ready !== true && process.platform === 'win32'
+            ? `断开未完成，WireGuard 仍在，但 Windows 浏览器 PAC 恢复也失败：${browserRollback?.browserAccess?.error || browserRollback?.error || detail}`
+            : authorizationCanceled
+              ? '已取消断开；WireGuard、PAC、split DNS 和员工/访客连接均保持原状态。'
             : wireGuardStillActive
               ? `断开未完成，检测到 WireGuard 仍在运行：${detail}`
               : `断开未完成，无法确认 WireGuard 已停止：${detail}`
@@ -605,18 +885,158 @@ function registerIpc() {
         return visibleRuntime();
       }
 
-      const standaloneOwnership = await releaseStandaloneOwnershipForRuntime('disconnect');
-      const systemDomainProxy = wireGuard?.ok === false
-        ? {
-            supported: true,
-            applied: true,
-            skipped: true,
-            reason: 'wireguard-stop-partial-failure',
-            error: 'WireGuard 已停止，但 PAC / split DNS 清理未确认；请在高级选项中执行网络修复。'
+      if (process.platform === 'win32' && wireGuard?.cleanupReady !== true) {
+        const detail = wireGuard?.message
+          || wireGuard?.windowsNrpt?.error
+          || 'Windows WireGuard/NRPT cleanup was not verified.';
+        runtime.connection = {
+          ...retainedConnection,
+          state: 'lease-only',
+          wireGuard: summarizeWireGuardStatus(wireGuard?.status, retainedConnection),
+          health: {
+            ...normalizeHealth(retainedConnection?.health, leasedHealth()),
+            wireGuard: 'stale',
+            internalApi: 'idle',
+            splitDns: 'stale'
+          },
+          diagnostics: {
+            ...(retainedConnection?.diagnostics || {}),
+            disconnectCleanup: {
+              ok: false,
+              cleanupReady: false,
+              message: detail,
+              wireGuard,
+              updatedAt: nowIso()
+            },
+            updatedAt: nowIso()
           }
+        };
+        runtime.auth = retainedAuth;
+        runtime.feedback = {
+          tone: 'warning',
+          message: `WireGuard 已停止且浏览器 PAC 已恢复，但 Windows 服务/NRPT 清理尚未确认；未发布“已断开”，也未释放 ownership。${detail} 请再次点击“清理旧连接”或在高级选项执行“修复网络”。`
+        };
+        queueDiagnosticLog('warning', 'wireguard.disconnect-cleanup-required', detail, {
+          mode: disconnectedMode,
+          leaseIp: disconnectedIp,
+          status: wireGuard?.status,
+          windowsNrpt: wireGuard?.windowsNrpt
+        });
+        touchRuntime('disconnect requires Windows cleanup retry');
+        await publishNetworkModeEvent(
+          disconnectedMode === 'employee' ? 'staff:disconnect' : 'visit:disconnect',
+          'failed',
+          { leaseIp: disconnectedIp, reason: 'windows-cleanup-unverified' }
+        );
+        await saveAndBroadcast();
+        return visibleRuntime();
+      }
+
+      if (process.platform === 'win32') {
+        try {
+          windowsSystemDomainProxy = await disableSystemDomainProxyForRuntimeStrict(
+            'disconnect-after-wireguard-cleanup'
+          );
+        } catch (err) {
+          const detail = errorMessage(err);
+          runtime.connection = {
+            ...retainedConnection,
+            state: 'lease-only',
+            wireGuard: summarizeWireGuardStatus(wireGuard?.status, retainedConnection),
+            health: {
+              ...normalizeHealth(retainedConnection?.health, leasedHealth()),
+              wireGuard: 'stale',
+              internalApi: 'idle',
+              splitDns: 'stale'
+            },
+            diagnostics: {
+              ...(retainedConnection?.diagnostics || {}),
+              disconnectCleanup: {
+                ok: false,
+                cleanupReady: true,
+                localEdgeClosePending: true,
+                message: detail,
+                wireGuard,
+                updatedAt: nowIso()
+              },
+              updatedAt: nowIso()
+            }
+          };
+          runtime.auth = retainedAuth;
+          runtime.feedback = {
+            tone: 'warning',
+            message: `WireGuard/NRPT 已清理且浏览器 PAC 已恢复，但本机 2053/state 收尾未确认；未发布“已断开”。${detail} 请再次点击“清理旧连接”或执行“修复网络”。`
+          };
+          queueDiagnosticError('system-domain-proxy.disconnect-finalize-failed', err, {
+            mode: disconnectedMode,
+            leaseIp: disconnectedIp,
+            wireGuard
+          });
+          touchRuntime('disconnect requires local edge cleanup retry');
+          await publishNetworkModeEvent(
+            disconnectedMode === 'employee' ? 'staff:disconnect' : 'visit:disconnect',
+            'failed',
+            { leaseIp: disconnectedIp, reason: 'windows-local-edge-cleanup-unverified' }
+          );
+          await saveAndBroadcast();
+          return visibleRuntime();
+        }
+      }
+
+      const standaloneOwnership = await releaseStandaloneOwnershipForRuntime('disconnect');
+      const systemDomainProxy = process.platform === 'win32'
+        ? windowsSystemDomainProxy
         : systemDomainRestoreScript && wireGuard?.launchDaemon
           ? await completeExternalSystemDomainProxyRestore('disconnect-combined')
           : await disableSystemDomainProxyForRuntime('disconnect');
+      if (process.platform === 'win32' && standaloneOwnership?.error) {
+        runtime.connection = {
+          ...retainedConnection,
+          state: 'lease-only',
+          wireGuard: summarizeWireGuardStatus(wireGuard?.status, retainedConnection),
+          health: {
+            ...normalizeHealth(retainedConnection?.health, leasedHealth()),
+            wireGuard: 'stale',
+            internalApi: 'idle',
+            splitDns: 'stale'
+          },
+          diagnostics: {
+            ...(retainedConnection?.diagnostics || {}),
+            disconnectCleanup: {
+              ok: false,
+              cleanupReady: true,
+              localEdgeClosePending: false,
+              ownershipReleasePending: true,
+              stage: 'standalone-ownership-release',
+              message: standaloneOwnership.error,
+              wireGuard,
+              systemDomainProxy,
+              standaloneOwnership,
+              updatedAt: nowIso()
+            },
+            updatedAt: nowIso()
+          }
+        };
+        runtime.auth = retainedAuth;
+        runtime.feedback = {
+          tone: 'warning',
+          message: `WireGuard、NRPT、浏览器 PAC 和本机 2053 已清理，但 standalone ownership 释放失败；未发布“已断开”。${standaloneOwnership.error} 请再次点击“清理旧连接”或执行“修复网络”。`
+        };
+        queueDiagnosticLog(
+          'warning',
+          'standalone-ownership.disconnect-release-failed',
+          standaloneOwnership.error,
+          { mode: disconnectedMode, leaseIp: disconnectedIp, wireGuard, systemDomainProxy, standaloneOwnership }
+        );
+        touchRuntime('disconnect requires standalone ownership cleanup retry');
+        await publishNetworkModeEvent(
+          disconnectedMode === 'employee' ? 'staff:disconnect' : 'visit:disconnect',
+          'failed',
+          { leaseIp: disconnectedIp, reason: 'standalone-ownership-release-unverified' }
+        );
+        await saveAndBroadcast();
+        return visibleRuntime();
+      }
       runtime.connection = idleConnection();
       runtime.auth = null;
       runtime.feedback = {
@@ -1185,9 +1605,9 @@ function registerIpc() {
     };
     touchRuntime('app restart requested');
     await saveAndBroadcast();
+    appRelaunchRequested = true;
     setTimeout(() => {
-      app.relaunch();
-      app.exit(0);
+      app.quit();
     }, 120);
     return visibleRuntime();
   });
@@ -1682,13 +2102,20 @@ function createTray() {
 }
 
 function createTrayIcon() {
-  const svg = encodeURIComponent(`
-    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
-      <rect x="2" y="2" width="18" height="18" rx="5" fill="#2bf6d2"/>
-      <path d="M6.2 7.3h2v3h5.6v-3h2v7.4h-2v-3H8.2v3h-2V7.3Z" fill="#071311"/>
-    </svg>
-  `);
-  return nativeImage.createFromDataURL(`data:image/svg+xml;charset=utf-8,${svg}`);
+  const assetPath = process.platform === 'darwin'
+    ? path.join(__dirname, 'assets', 'mingxi-trayTemplate.png')
+    : productIconPath();
+  const icon = nativeImage.createFromPath(assetPath).resize({
+    width: 22,
+    height: 22,
+    quality: 'best'
+  });
+  if (process.platform === 'darwin') icon.setTemplateImage(true);
+  return icon;
+}
+
+function productIconPath() {
+  return path.join(__dirname, 'assets', 'mingxi-logo.png');
 }
 
 function snapToTopEdge() {
@@ -1914,23 +2341,24 @@ async function handleNetworkChange(reason) {
     endpointRouteRepair?.repaired ? [500, 2500, 8000] : [1500, 5000, 15_000],
     { allowPrivileged: false }
   );
-  if (runtime?.connection?.state !== 'connected') return;
+  if (!systemDomainProxyRuntimeEligible()) return;
   await refreshSystemDomainProxyAfterNetworkChange(recoveryReason);
 }
 
 async function refreshSystemDomainProxyAfterNetworkChange(reason) {
-  if (!systemDomainProxyManager || runtime?.connection?.state !== 'connected') return null;
+  if (!systemDomainProxyManager || !systemDomainProxyRuntimeEligible()) return null;
   if (typeof systemDomainProxyManager.statusVerified === 'function') {
     const verified = await systemDomainProxyManager.statusVerified().catch(() => null);
-    if (verified?.applied === true) {
+    const withBrowserProof = await attachWindowsBrowserAccessProof(verified, reason);
+    if (withBrowserProof?.applied === true && windowsBrowserAccessReady(withBrowserProof)) {
       await recordSystemDomainProxyDiagnostics({
-        ...verified,
+        ...withBrowserProof,
         reason,
         verified: true,
         skipped: true,
         skipReason: 'network-change-verified'
       }, `system domain proxy verified: ${reason}`);
-      return verified;
+      return withBrowserProof;
     }
   }
   const status = await ensureSystemDomainProxyForRuntime('route-refresh');
@@ -1944,7 +2372,8 @@ async function refreshSystemDomainProxyAfterNetworkChange(reason) {
 }
 
 async function maybeRefreshSystemDomainProxyAfterWireGuardRecovery(reason, result) {
-  if (!result?.ready || runtime?.connection?.state !== 'connected') return null;
+  if (appShutdownRequested || wireGuardDisconnectInFlight) return null;
+  if (!result?.ready || !systemDomainProxyRuntimeEligible()) return null;
   if (!shouldRefreshSystemDomainProxyAfterWireGuardRecovery(reason)) return null;
   return refreshSystemDomainProxyForRuntime('route-refresh');
 }
@@ -2073,7 +2502,15 @@ async function initializeSystemDomainProxy() {
       pacPort: localEdgePort(),
       log: systemDomainProxyLogger()
     });
-    if (process.env.MX_H2I_RESTORE_SYSTEM_PROXY_ON_STARTUP === '1') {
+  } catch (err) {
+    console.warn('[mx-h2i] system domain proxy unavailable:', errorMessage(err));
+    queueDiagnosticError('system-domain-proxy.initialize-failed', err);
+    systemDomainProxyManager = null;
+    return;
+  }
+
+  try {
+    if (process.platform === 'win32' || process.env.MX_H2I_RESTORE_SYSTEM_PROXY_ON_STARTUP === '1') {
       await systemDomainProxyManager.restoreStale('app-startup');
     } else {
       const status = typeof systemDomainProxyManager.status === 'function'
@@ -2083,11 +2520,12 @@ async function initializeSystemDomainProxy() {
         console.warn('[mx-h2i] system domain proxy state exists; startup restore skipped to avoid a macOS authorization prompt. Disconnect or reconnect MX-H2I to repair it.');
       }
     }
-    startSystemDomainProxyRefreshWatcher();
   } catch (err) {
-    console.warn('[mx-h2i] system domain proxy unavailable:', errorMessage(err));
-    queueDiagnosticError('system-domain-proxy.initialize-failed', err);
-    systemDomainProxyManager = null;
+    // Keep the manager and its durable state. A transient registry/UAC/owner
+    // failure must remain retryable from startup refresh, manual repair, or
+    // strict quit cleanup.
+    console.warn('[mx-h2i] system domain proxy startup restore failed:', errorMessage(err));
+    queueDiagnosticError('system-domain-proxy.startup-restore-failed', err);
   }
 }
 
@@ -2107,20 +2545,26 @@ function systemDomainProxyLogger() {
 }
 
 async function ensureSystemDomainProxyForRuntime(reason = 'manual') {
+  if (appShutdownRequested) return shutdownSystemDomainProxyStatus(reason);
   if (systemDomainProxyEnsureInFlight) {
     const status = await systemDomainProxyEnsureInFlight;
+    if (appShutdownRequested) return shutdownSystemDomainProxyStatus(reason);
     if (
       shouldApplySystemDomainProxyForReason(reason)
       && status?.skipped === true
       && status?.skipReason === 'background-refresh-no-privileged-apply'
     ) {
-      return ensureSystemDomainProxyForRuntimeOnce(reason);
+      return attachWindowsBrowserAccessProof(
+        await ensureSystemDomainProxyForRuntimeOnce(reason),
+        reason
+      );
     }
     return status && typeof status === 'object'
       ? { ...status, reason, coalesced: true }
       : status;
   }
-  const pending = ensureSystemDomainProxyForRuntimeOnce(reason);
+  const pending = ensureSystemDomainProxyForRuntimeOnce(reason)
+    .then((status) => attachWindowsBrowserAccessProof(status, reason));
   systemDomainProxyEnsureInFlight = pending;
   try {
     return await pending;
@@ -2132,8 +2576,21 @@ async function ensureSystemDomainProxyForRuntime(reason = 'manual') {
 }
 
 async function ensureSystemDomainProxyForRuntimeOnce(reason = 'manual') {
+  if (appShutdownRequested) return shutdownSystemDomainProxyStatus(reason);
   if (!systemDomainProxyManager) return null;
-  if (runtime?.connection?.state !== 'connected') {
+  if (process.platform === 'win32' && !windowsSystemPacEnabled()) {
+    const disabled = await disableSystemDomainProxyForRuntime(`${reason}-windows-nrpt-only`);
+    return {
+      ...(disabled && typeof disabled === 'object' ? disabled : {}),
+      supported: true,
+      applied: false,
+      platform: process.platform,
+      reason,
+      skipped: true,
+      skipReason: 'windows-nrpt-only'
+    };
+  }
+  if (!systemDomainProxyRuntimeEligible()) {
     return disableSystemDomainProxyForRuntime(`${reason}-not-connected`);
   }
   try {
@@ -2176,6 +2633,10 @@ async function ensureSystemDomainProxyForRuntimeOnce(reason = 'manual') {
     try {
       const status = await systemDomainProxyManager.apply(policy);
       lastSystemDomainProxyPolicySignature = policySignature;
+      if (process.platform === 'win32' && pendingWindowsSystemProxyTakeoverSignature) {
+        lastWindowsSystemProxyTakeoverSignature = pendingWindowsSystemProxyTakeoverSignature;
+        pendingWindowsSystemProxyTakeoverSignature = null;
+      }
       if (isSystemDomainProxyAuthorizationCanceled(status)) {
         lastSystemDomainProxyAuthorizationCanceledSignature = policySignature;
       } else if (status?.applied && !status?.error && !status?.resolverError) {
@@ -2184,6 +2645,7 @@ async function ensureSystemDomainProxyForRuntimeOnce(reason = 'manual') {
       return status;
     } catch (err) {
       lastSystemDomainProxyPolicySignature = policySignature;
+      pendingWindowsSystemProxyTakeoverSignature = null;
       if (isSystemDomainProxyAuthorizationCanceled(err)) {
         lastSystemDomainProxyAuthorizationCanceledSignature = policySignature;
       }
@@ -2206,6 +2668,194 @@ async function ensureSystemDomainProxyForRuntimeOnce(reason = 'manual') {
       error: errorMessage(err)
     };
   }
+}
+
+async function attachWindowsBrowserAccessProof(status, reason = 'manual') {
+  if (process.platform !== 'win32') return status;
+  const base = status && typeof status === 'object'
+    ? status
+    : {
+        supported: Boolean(systemDomainProxyManager),
+        applied: false,
+        platform: process.platform,
+        reason
+      };
+  const domains = splitDnsDomains(runtime?.config);
+  const host = windowsSplitDnsDiagnosticHost(domains);
+  if (domains.length === 0) {
+    return {
+      ...base,
+      browserReady: true,
+      browserAccess: {
+        supported: true,
+        ready: true,
+        host: null,
+        port: null,
+        pacApplied: base.applied === true,
+        proxyReachable: false,
+        skipped: true,
+        skipReason: 'split-dns-not-configured',
+        proofSessionId: WINDOWS_BROWSER_PROOF_SESSION_ID,
+        checkedAt: nowIso()
+      }
+    };
+  }
+  if (!host || base.applied !== true || typeof systemDomainProxyManager?.probeBrowserAccess !== 'function') {
+    return {
+      ...base,
+      browserReady: false,
+      browserAccess: {
+        supported: Boolean(systemDomainProxyManager),
+        ready: false,
+        host,
+        port: windowsBrowserDiagnosticPort(host),
+        pacApplied: base.applied === true,
+        proxyReachable: false,
+        proofSessionId: WINDOWS_BROWSER_PROOF_SESSION_ID,
+        checkedAt: nowIso(),
+        error: base.error
+          || (!host
+            ? '没有位于当前 split-DNS namespace 内的浏览器诊断主机。'
+            : 'Windows Internal 浏览器 PAC 尚未应用。')
+      }
+    };
+  }
+  try {
+    const browserAccess = await systemDomainProxyManager.probeBrowserAccess({
+      host,
+      port: windowsBrowserDiagnosticPort(host),
+      timeoutMs: normalizePort(process.env.MX_H2I_WINDOWS_BROWSER_PROBE_TIMEOUT_MS, 12_000)
+    });
+    const chromiumProxy = browserAccess?.ready === true
+      ? await probeWindowsChromiumSystemProxyDecision(
+          host,
+          windowsBrowserDiagnosticPort(host),
+          browserAccess.proxy || localEdgeProxy()
+        )
+      : {
+          ready: false,
+          decision: null,
+          error: browserAccess?.error || 'Local edge CONNECT proof failed.'
+        };
+    return {
+      ...base,
+      browserReady: browserAccess?.ready === true && chromiumProxy.ready === true,
+      browserAccess: {
+        ...browserAccess,
+        ready: browserAccess?.ready === true && chromiumProxy.ready === true,
+        chromiumProxy,
+        proofSessionId: WINDOWS_BROWSER_PROOF_SESSION_ID,
+        checkedAt: nowIso()
+      }
+    };
+  } catch (err) {
+    return {
+      ...base,
+      browserReady: false,
+      browserAccess: {
+        supported: true,
+        ready: false,
+        host,
+        port: windowsBrowserDiagnosticPort(host),
+        pacApplied: base.applied === true,
+        proxyReachable: false,
+        proofSessionId: WINDOWS_BROWSER_PROOF_SESSION_ID,
+        checkedAt: nowIso(),
+        error: errorMessage(err)
+      }
+    };
+  }
+}
+
+async function probeWindowsChromiumSystemProxyDecision(host, port, expectedProxy) {
+  if (process.platform !== 'win32' || !electronSession?.fromPartition) {
+    return {
+      ready: false,
+      decision: null,
+      expectedProxy,
+      error: 'Chromium system-proxy session is unavailable.'
+    };
+  }
+  try {
+    const ses = electronSession.fromPartition('mx-h2i-windows-browser-proof', { cache: false });
+    await ses.setProxy({ mode: 'system' });
+    if (typeof ses.forceReloadProxyConfig === 'function') {
+      await ses.forceReloadProxyConfig();
+    }
+    if (typeof ses.closeAllConnections === 'function') {
+      await ses.closeAllConnections();
+    }
+    const targetUrl = `https://${host}:${port}/`;
+    const decision = await withTimeout(
+      ses.resolveProxy(targetUrl),
+      5000,
+      `Chromium system proxy decision timed out for ${targetUrl}`,
+      'MX_WINDOWS_BROWSER_PROXY_DECISION_TIMEOUT'
+    );
+    const ready = proxyDecisionUsesEndpoint(decision, expectedProxy);
+    return {
+      ready,
+      decision,
+      expectedProxy,
+      targetUrl,
+      error: ready
+        ? null
+        : `Chromium resolved ${targetUrl} as ${decision || 'unknown'}, expected PROXY ${expectedProxy}.`
+    };
+  } catch (err) {
+    return {
+      ready: false,
+      decision: null,
+      expectedProxy,
+      error: errorMessage(err)
+    };
+  }
+}
+
+function proxyDecisionUsesEndpoint(decision, expectedProxy) {
+  const expected = nullableString(expectedProxy)?.replace(/^https?:\/\//i, '').toLowerCase();
+  if (!expected) return false;
+  return String(decision || '')
+    .split(';')
+    .map((part) => part.trim().toLowerCase())
+    .some((part) => part === `proxy ${expected}` || part === `https ${expected}`);
+}
+
+function windowsBrowserDiagnosticPort(host) {
+  const configured = normalizePort(process.env.MX_H2I_WINDOWS_BROWSER_DIAGNOSTIC_PORT, null);
+  if (configured) return configured;
+  for (const value of [
+    runtime?.config?.bootstrapApiBaseUrl,
+    process.env.MX_H2I_BOOTSTRAP_API_BASE_URL,
+    `https://${DEFAULT_BOOTSTRAP_HOST}`
+  ]) {
+    const text = nullableString(value);
+    if (!text || !/^https?:\/\//i.test(text)) continue;
+    try {
+      const url = new URL(text);
+      if (host && url.hostname !== host) continue;
+      return normalizePort(url.port, url.protocol === 'http:' ? 80 : 443);
+    } catch {
+      // Try the next configured URL.
+    }
+  }
+  return 443;
+}
+
+function windowsBrowserAccessReady(status) {
+  if (process.platform !== 'win32') return true;
+  if (splitDnsDomains(runtime?.config).length === 0) return true;
+  return status?.applied === true
+    && status?.browserReady === true
+    && status?.browserAccess?.ready === true
+    && status?.browserAccess?.proofSessionId === WINDOWS_BROWSER_PROOF_SESSION_ID;
+}
+
+function systemDomainProxyRuntimeEligible() {
+  const connection = runtime?.connection || {};
+  if (connection.state === 'connected') return true;
+  if (process.platform !== 'win32' || connection.state !== 'tunnel-only') return false;
+  return windowsNonBrowserDataPlaneReady(connection);
 }
 
 async function prepareSystemDomainProxyForWireGuardInstall(reason = 'pre-connect') {
@@ -2259,19 +2909,39 @@ async function prepareSystemDomainProxyForWireGuardInstall(reason = 'pre-connect
   }
 }
 
-function shouldSuppressWireGuardDnsForSystemDomainProxy(_prepared = null) {
-  return process.platform === 'darwin' && Boolean(systemDomainProxyManager);
+function shouldSuppressWireGuardDnsForSystemDomainProxy(prepared = null) {
+  if (process.platform !== 'darwin') return false;
+  const status = prepared?.status;
+  const expectedDomains = splitDnsDomains(runtime?.config);
+  const resolverDomains = arrayValue(status?.resolverDomains, []);
+  return Boolean(
+    nullableString(prepared?.shell)
+    && status?.applied === true
+    && status?.pending === true
+    && status?.externalApply === true
+    && !status?.error
+    && !status?.resolverError
+    && nullableString(status?.proxy) === localEdgeProxy()
+    && Number(status?.pacPort) === localEdgePort()
+    && status?.systemResolverMode === 'dynamic'
+    && Number(status?.resolverPort) === localEdgePort()
+    && expectedDomains.length > 0
+    && expectedDomains.every((domain) => resolverDomains.includes(domain))
+  );
 }
 
-async function disableSystemDomainProxyForRuntime(reason = 'manual') {
+async function disableSystemDomainProxyForRuntime(reason = 'manual', options = {}) {
   if (!systemDomainProxyManager) return null;
   lastSystemDomainProxySignature = null;
   lastSystemDomainProxyPolicySignature = null;
   lastSystemDomainProxyAuthorizationCanceledSignature = null;
+  lastWindowsSystemProxyTakeoverSignature = null;
+  pendingWindowsSystemProxyTakeoverSignature = null;
+  lastWindowsSystemProxyContinuationRefreshAt = 0;
   lastSystemPacReverseProxyRoutes = [];
   lastSystemPacReverseProxyRoutesWarningAt = 0;
   try {
-    return await systemDomainProxyManager.disable(reason);
+    return await systemDomainProxyManager.disable(reason, options);
   } catch (err) {
     return {
       supported: true,
@@ -2280,6 +2950,97 @@ async function disableSystemDomainProxyForRuntime(reason = 'manual') {
       reason,
       error: errorMessage(err)
     };
+  }
+}
+
+async function disableSystemDomainProxyForRuntimeStrict(reason, attempts = 2, options = {}) {
+  let status = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    status = await disableSystemDomainProxyForRuntime(reason, options);
+    if (status && status.applied !== true && !status.error) return status;
+    if (status?.actual?.sharedPacRetained === true) {
+      const err = new Error(
+        '本进程仍承载其他 Launcher owner 的 2053 local edge，无法安全关闭；请先断开依赖该 edge 的应用。'
+      );
+      err.status = status;
+      throw err;
+    }
+    if (attempt < attempts) await delay(250);
+  }
+  const err = new Error(
+    status?.error
+    || `System proxy restore did not complete (${reason}).`
+  );
+  err.status = status;
+  throw err;
+}
+
+async function drainSystemDomainProxyApply(reason, timeoutMs = 15_000) {
+  const pending = systemDomainProxyEnsureInFlight;
+  if (!pending) return { drained: true, pending: false };
+  if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+    await withTimeout(
+      pending,
+      timeoutMs,
+      `Timed out waiting for the active system proxy apply (${reason}).`,
+      'MX_SYSTEM_PROXY_DRAIN_TIMEOUT'
+    );
+  } else {
+    await pending;
+  }
+  return { drained: true, pending: true };
+}
+
+async function drainWireGuardConnectOperations() {
+  while (wireGuardConnectOperations.size > 0) {
+    await Promise.allSettled([...wireGuardConnectOperations]);
+  }
+  return { drained: true };
+}
+
+async function drainWireGuardRecoveryOperation() {
+  while (wireGuardRecoveryInFlight) {
+    await Promise.allSettled([wireGuardRecoveryInFlight]);
+  }
+  return { drained: true };
+}
+
+function beginWireGuardConnectOperation() {
+  let settled = false;
+  let settle;
+  const promise = new Promise((resolve) => {
+    settle = resolve;
+  });
+  wireGuardConnectOperations.add(promise);
+  wireGuardConnectInFlight = true;
+  return {
+    finish() {
+      if (settled) return;
+      settled = true;
+      wireGuardConnectOperations.delete(promise);
+      wireGuardConnectInFlight = wireGuardConnectOperations.size > 0;
+      settle();
+    }
+  };
+}
+
+function supersededNetworkTransitionError() {
+  const err = new Error('The network transition was superseded by disconnect or shutdown.');
+  err.code = 'MX_NETWORK_TRANSITION_SUPERSEDED';
+  return err;
+}
+
+function isSupersededNetworkTransitionError(value) {
+  return value?.code === 'MX_NETWORK_TRANSITION_SUPERSEDED';
+}
+
+function assertNetworkTransitionCurrent(epoch) {
+  if (
+    wireGuardDisconnectInFlight
+    || appShutdownRequested
+    || epoch !== networkMutationEpoch
+  ) {
+    throw supersededNetworkTransitionError();
   }
 }
 
@@ -2307,6 +3068,9 @@ async function completeExternalSystemDomainProxyRestore(reason = 'external') {
   lastSystemDomainProxySignature = null;
   lastSystemDomainProxyPolicySignature = null;
   lastSystemDomainProxyAuthorizationCanceledSignature = null;
+  lastWindowsSystemProxyTakeoverSignature = null;
+  pendingWindowsSystemProxyTakeoverSignature = null;
+  lastWindowsSystemProxyContinuationRefreshAt = 0;
   lastSystemPacReverseProxyRoutes = [];
   lastSystemPacReverseProxyRoutesWarningAt = 0;
   try {
@@ -2325,11 +3089,12 @@ async function completeExternalSystemDomainProxyRestore(reason = 'external') {
 async function closeSystemDomainProxy() {
   stopSystemDomainProxyRefreshWatcher();
   if (!systemDomainProxyManager) return;
-  await systemDomainProxyManager.close?.().catch(() => undefined);
+  await systemDomainProxyManager.close?.();
 }
 
 function startSystemDomainProxyRefreshWatcher() {
   if (systemDomainProxyRefreshInterval) return;
+  if (process.platform === 'win32' && !windowsSystemPacEnabled()) return;
   systemDomainProxyRefreshInterval = setInterval(() => {
     void refreshSystemDomainProxyForRuntime('route-refresh').catch(() => undefined);
   }, SYSTEM_DOMAIN_PROXY_REFRESH_MS);
@@ -2343,6 +3108,7 @@ function stopSystemDomainProxyRefreshWatcher() {
 }
 
 async function refreshSystemDomainProxyForRuntime(reason = 'manual') {
+  if (appShutdownRequested) return shutdownSystemDomainProxyStatus(reason);
   if (wireGuardDisconnectInFlight) {
     return {
       supported: true,
@@ -2352,7 +3118,12 @@ async function refreshSystemDomainProxyForRuntime(reason = 'manual') {
     };
   }
   if (systemDomainProxyRefreshInFlight || !systemDomainProxyManager) return null;
-  if (runtime?.connection?.state !== 'connected') return null;
+  if (!systemDomainProxyRuntimeEligible()) {
+    if (process.platform !== 'win32') return null;
+    const status = await disableSystemDomainProxyForRuntime(`${reason}-not-eligible`);
+    await recordSystemDomainProxyDiagnostics(status, `system domain proxy restored while inactive: ${reason}`);
+    return status;
+  }
   systemDomainProxyRefreshInFlight = true;
   try {
     const status = await ensureSystemDomainProxyForRuntime(reason);
@@ -2361,6 +3132,17 @@ async function refreshSystemDomainProxyForRuntime(reason = 'manual') {
   } finally {
     systemDomainProxyRefreshInFlight = false;
   }
+}
+
+function shutdownSystemDomainProxyStatus(reason) {
+  return {
+    supported: true,
+    applied: false,
+    platform: process.platform,
+    reason,
+    skipped: true,
+    skipReason: 'app-shutdown'
+  };
 }
 
 async function recordSystemDomainProxyDiagnostics(status, touchReason) {
@@ -2375,16 +3157,60 @@ async function recordSystemDomainProxyDiagnostics(status, touchReason) {
       platform: status.platform
     });
   }
+  const previousState = runtime.connection?.state;
+  const browserReady = windowsBrowserAccessReady(status);
+  const promote = process.platform === 'win32'
+    && previousState === 'tunnel-only'
+    && browserReady
+    && windowsNonBrowserDataPlaneReady(runtime.connection);
+  const downgrade = process.platform === 'win32'
+    && previousState === 'connected'
+    && !browserReady;
   runtime.connection = {
     ...runtime.connection,
+    state: promote ? 'connected' : downgrade ? 'tunnel-only' : runtime.connection?.state,
+    health: promote || downgrade
+      ? {
+          ...runtime.connection?.health,
+          splitDns: promote ? 'ready' : 'blocked'
+        }
+      : runtime.connection?.health,
     diagnostics: {
       ...(runtime.connection?.diagnostics || {}),
       systemDomainProxy: status
     }
   };
+  if (promote) {
+    runtime.feedback = {
+      tone: 'success',
+      message: `Windows 浏览器已通过 ${status?.browserAccess?.proxy || localEdgeProxy()} 访问 Internal，完整网络已 ready。`
+    };
+  } else if (downgrade) {
+    runtime.feedback = {
+      tone: 'warning',
+      message: `Windows 浏览器 Internal 路径已失效，连接降级为 tunnel-only：${status?.browserAccess?.error || status?.error || 'PAC/local edge 未通过'}`
+    };
+  }
   touchRuntime(touchReason);
   await saveAndBroadcast();
+  if (promote || downgrade) {
+    await publishNetworkModeEvent(
+      runtime.connection?.mode === 'employee' ? 'staff:connect' : 'visit:connect',
+      promote ? 'connected' : 'failed',
+      {
+        reason: promote ? 'windows-browser-path-ready' : 'windows-browser-path-lost',
+        transitionId: makeRequestId('browser-path')
+      }
+    );
+  }
   return true;
+}
+
+function windowsNonBrowserDataPlaneReady(connection) {
+  return connection?.health?.wireGuard === 'ready'
+    && connection?.health?.internalApi === 'ready'
+    && connection?.diagnostics?.windowsNrpt?.ready === true
+    && connection?.diagnostics?.windowsDnsResolution?.ready === true;
 }
 
 async function refreshNetworkEnvironmentDiagnostics(reason = 'manual', options = {}) {
@@ -2427,7 +3253,7 @@ async function collectNetworkEnvironmentDiagnostics(reason = 'manual', options =
   const host = options.host || networkDiagnosticHost();
   const status = await systemDomainProxyStatusForDiagnostics(phase);
   const endpointRoute = await collectDarwinEndpointRouteDiagnostics(reason, { phase });
-  const windowsNrpt = collectWindowsNrptDiagnostics();
+  const windowsNrpt = await collectWindowsNrptDiagnostics();
   let resolution = null;
   try {
     const mod = await import('@qpjoy/electron-launcher/network-diagnostics');
@@ -2480,7 +3306,7 @@ async function collectNetworkEnvironmentDiagnostics(reason = 'manual', options =
       : ['bootstrap-dns-or-host-resolve', 'system-proxy-or-dns', 'external-dns'],
     updatedAt: nowIso()
   };
-  if (resolution?.severity === 'error' || (windowsNrpt && !['ready', 'current-script'].includes(windowsNrpt.state))) {
+  if (resolution?.severity === 'error' || windowsNrpt?.ready === false) {
     queueDiagnosticLog(
       resolution?.severity === 'error' ? 'error' : 'warning',
       'network.diagnostics-problem',
@@ -2498,10 +3324,37 @@ async function systemDomainProxyStatusForDiagnostics(phase) {
   if (phase !== 'connected' || typeof systemDomainProxyManager?.statusVerified !== 'function') {
     return status;
   }
-  return systemDomainProxyManager.statusVerified().catch(() => status);
+  const verified = await systemDomainProxyManager.statusVerified().catch(() => status);
+  return attachWindowsBrowserAccessProof(verified, 'diagnostics');
 }
 
-function collectWindowsNrptDiagnostics() {
+async function collectWindowsNrptDiagnostics() {
+  if (process.platform !== 'win32') return null;
+  const audit = collectWindowsNrptAuditDiagnostics();
+  try {
+    const mod = await import('@qpjoy/electron-launcher/wireguard');
+    const live = await launcherWindowsNrptStatus(mod);
+    if (!live) return audit;
+    return {
+      platform: 'win32',
+      ...live,
+      source: 'live-powershell',
+      audit
+    };
+  } catch (err) {
+    return {
+      platform: 'win32',
+      configured: true,
+      state: 'probe-failed',
+      ready: false,
+      source: 'live-powershell',
+      error: errorMessage(err),
+      audit
+    };
+  }
+}
+
+function collectWindowsNrptAuditDiagnostics() {
   if (process.platform !== 'win32') return null;
   const wireGuard = runtime?.connection?.wireGuard || {};
   const text = nullableString(wireGuard.routeLogTail) || nullableString(wireGuard.statusError) || '';
@@ -2530,7 +3383,9 @@ function collectWindowsNrptDiagnostics() {
               : 'unknown';
   return {
     platform: 'win32',
+    source: 'audit-derived',
     state,
+    ready: state === 'ready',
     legacyComment,
     currentComment,
     addStarted,
@@ -2558,19 +3413,28 @@ function annotateResolutionWithWindowsNrpt(resolution, windowsNrpt) {
 function windowsNrptResolutionHint(windowsNrpt) {
   if (!windowsNrpt || typeof windowsNrpt !== 'object') return '';
   if (windowsNrpt.state === 'legacy-hdo-script') {
-    return '；检测到旧 HDO Windows NRPT 脚本标记（comment=MX HDO / QPJoy HDO），这台机器大概率不是最新 MX-H2I 安装包或旧服务脚本未覆盖，请安装最新包后重连。';
+    return '；审计日志检测到旧 MX-H2I NRPT 标记，请安装最新包后用管理员授权重连。NRPT 只接管配置的 Internal 域名，不会接管微信、豆包或 Steam 等公网域名。';
   }
   if (windowsNrpt.state === 'restart-remove-only') {
-    return '；当前日志只看到重启时移除 NRPT，尚未看到 nrpt add complete，可能正处于重启窗口期或服务脚本未继续安装规则，请稍等数秒后重新诊断，仍失败则重新连接/修复网络。';
+    return '；审计日志只看到移除 NRPT，尚未看到重新添加；请刷新实时诊断，仍失败则用管理员授权重连或修复网络。';
   }
   if (windowsNrpt.state === 'global-disabled') {
-    return '；Windows NRPT 全局策略仍为 Disable，split DNS 不会接管所有网络，请用管理员授权重新连接或修复网络。';
+    return '；Windows 实时 NRPT 全局策略为 Disable，配置的 Internal 域名无法进入 split DNS；请用管理员授权重连或修复网络。该策略不负责公网应用域名。';
   }
   if (windowsNrpt.state === 'rules-missing') {
-    return '；Windows NRPT 规则安装后校验缺失，请用管理员授权重新连接或修复网络，并检查是否有安全软件/组策略拦截 NRPT。';
+    if (windowsNrpt.profileMissingSplitDns === true) {
+      return '；当前 WireGuard profile 的 Windows split-DNS namespace 或 DNS 地址与 Internal 当前配置不一致，请重新连接生成最新 profile；仅修复旧 profile 的路由不能补齐。';
+    }
+    return '；Windows 实时 NRPT 缺少 Internal namespace 规则；请用管理员授权重连或修复网络，并检查安全软件或组策略。';
+  }
+  if (windowsNrpt.state === 'name-server-mismatch') {
+    return '；Windows 实时 NRPT 的 Internal namespace 仍指向旧 DNS，请用管理员授权修复；公网域名不在这组规则范围内。';
   }
   if (windowsNrpt.state === 'ready') {
-    return '；Windows NRPT 日志显示规则已安装，若仍外部解析，请检查浏览器 Secure DNS/DoH、系统 DNS 缓存或第三方代理残留。';
+    return '；Windows 实时 NRPT 已就绪，若 Internal 域名仍外部解析，请检查 Secure DNS/DoH、系统 DNS 缓存或第三方代理。';
+  }
+  if (windowsNrpt.state === 'probe-failed') {
+    return '；无法读取 Windows 实时 NRPT，本条审计结论不能作为当前系统状态；请导出诊断包后再判断。';
   }
   return '';
 }
@@ -2581,6 +3445,15 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
   // endpoint routes (route delete needs root). Background recovery paths keep
   // allowPrivileged off so no surprise auth dialogs appear.
   const endpointRouteRepair = await repairDarwinStaleEndpointRoutesForRuntime(reason, { force: true, allowPrivileged: true });
+  const pendingCleanup = pendingWindowsCleanupDiagnostic(runtime?.connection);
+  if (pendingCleanup) {
+    return repairPendingWindowsCleanupForRuntime(
+      reason,
+      before,
+      endpointRouteRepair,
+      pendingCleanup
+    );
+  }
   const wireGuardSystemRepair = await repairWireGuardSystemStateForRuntime(reason);
   let wireGuardProbe = null;
   if (shouldRecoverWireGuardConnection(runtime?.connection)) {
@@ -2600,9 +3473,8 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
       }
     };
   }
-  const connected = runtime?.connection?.state === 'connected';
   let systemDomainProxy = null;
-  if (connected) {
+  if (systemDomainProxyRuntimeEligible()) {
     systemDomainProxy = await ensureSystemDomainProxyForRuntime(reason);
   } else if (systemDomainProxyManager?.restoreStale) {
     try {
@@ -2619,6 +3491,22 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
   } else {
     systemDomainProxy = await disableSystemDomainProxyForRuntime(reason);
   }
+  if (
+    process.platform === 'win32'
+    && runtime?.connection?.state === 'tunnel-only'
+    && windowsNonBrowserDataPlaneReady(runtime.connection)
+    && windowsBrowserAccessReady(systemDomainProxy)
+  ) {
+    runtime.connection = {
+      ...runtime.connection,
+      state: 'connected',
+      health: {
+        ...runtime.connection.health,
+        splitDns: 'ready'
+      }
+    };
+  }
+  const connected = runtime?.connection?.state === 'connected';
   lastSystemDomainProxySignature = null;
   lastNetworkEnvironmentSignature = null;
   lastNetworkSignature = null;
@@ -2668,9 +3556,269 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
   };
 }
 
+function pendingWindowsCleanupDiagnostic(connection = runtime?.connection) {
+  if (process.platform !== 'win32') return null;
+  const diagnostics = connection?.diagnostics;
+  if (!diagnostics || typeof diagnostics !== 'object') return null;
+  for (const key of ['disconnectCleanup', 'shutdownCleanup', 'startupCleanup']) {
+    const value = diagnostics[key];
+    if (!value || typeof value !== 'object') continue;
+    if (
+      value.ok !== true
+      || value.cleanupReady !== true
+      || value.localEdgeClosePending === true
+      || value.ownershipReleasePending === true
+    ) {
+      return { key, value };
+    }
+  }
+  return null;
+}
+
+async function runWindowsNetworkCleanupOnly(reason) {
+  if (process.platform !== 'win32') {
+    return {
+      ok: false,
+      cleanupReady: false,
+      stage: 'unsupported-platform',
+      message: 'Windows cleanup-only flow is unavailable on this platform.'
+    };
+  }
+  let systemDomainProxy = null;
+  let wireGuard = null;
+  let standaloneOwnership = null;
+  try {
+    systemDomainProxy = await disableSystemDomainProxyForRuntimeStrict(
+      `${reason}-before-wireguard-stop`,
+      2,
+      { keepLocalEdgeAlive: true }
+    );
+  } catch (err) {
+    return {
+      ok: false,
+      cleanupReady: false,
+      stage: 'system-domain-proxy-restore',
+      message: errorMessage(err),
+      systemDomainProxy: err?.status || systemDomainProxy,
+      wireGuard,
+      standaloneOwnership
+    };
+  }
+  wireGuard = await stopWireGuardForRuntime();
+  if (wireGuard?.cleanupReady !== true) {
+    return {
+      ok: false,
+      cleanupReady: false,
+      stage: 'wireguard-nrpt-stop',
+      message: wireGuard?.message
+        || wireGuard?.windowsNrpt?.error
+        || 'Windows WireGuard/NRPT cleanup could not be verified.',
+      systemDomainProxy,
+      wireGuard,
+      standaloneOwnership
+    };
+  }
+  try {
+    systemDomainProxy = await disableSystemDomainProxyForRuntimeStrict(`${reason}-finalize`);
+  } catch (err) {
+    return {
+      ok: false,
+      cleanupReady: true,
+      stage: 'local-edge-finalize',
+      message: errorMessage(err),
+      systemDomainProxy: err?.status || systemDomainProxy,
+      wireGuard,
+      standaloneOwnership
+    };
+  }
+  standaloneOwnership = await releaseStandaloneOwnershipForRuntime(`${reason}-cleanup`);
+  if (standaloneOwnership?.error) {
+    return {
+      ok: false,
+      cleanupReady: true,
+      stage: 'standalone-ownership-release',
+      message: standaloneOwnership.error,
+      systemDomainProxy,
+      wireGuard,
+      standaloneOwnership
+    };
+  }
+  return {
+    ok: true,
+    cleanupReady: true,
+    stage: 'complete',
+    message: 'Windows WireGuard, NRPT, PAC/local edge and standalone ownership cleanup completed.',
+    systemDomainProxy,
+    wireGuard,
+    standaloneOwnership
+  };
+}
+
+async function repairPendingWindowsCleanupForRuntime(
+  reason,
+  before,
+  endpointRouteRepair,
+  pendingCleanup
+) {
+  const connection = runtime?.connection || idleConnection();
+  const disconnectedMode = connection.mode === 'employee' ? 'employee' : 'guest';
+  const disconnectedIp = nullableString(connection.localIp);
+  const cleanup = await runWindowsNetworkCleanupOnly(reason);
+  const cleanupDiagnostic = {
+    ...pendingCleanup.value,
+    ok: cleanup.ok === true,
+    action: 'cleanup-only-retry',
+    cleanupReady: cleanup.cleanupReady === true,
+    localEdgeClosePending: cleanup.stage === 'local-edge-finalize',
+    ownershipReleasePending: cleanup.stage === 'standalone-ownership-release',
+    stage: cleanup.stage,
+    message: cleanup.message,
+    wireGuard: cleanup.wireGuard || pendingCleanup.value?.wireGuard || null,
+    systemDomainProxy: cleanup.systemDomainProxy || null,
+    standaloneOwnership: cleanup.standaloneOwnership || null,
+    updatedAt: nowIso()
+  };
+  if (cleanup.ok === true) {
+    runtime.connection = {
+      ...idleConnection(),
+      mode: disconnectedMode,
+      diagnostics: {
+        [pendingCleanup.key]: cleanupDiagnostic,
+        updatedAt: nowIso()
+      }
+    };
+    runtime.auth = null;
+    await publishNetworkModeEvent(
+      disconnectedMode === 'employee' ? 'staff:disconnect' : 'visit:disconnect',
+      'disconnected',
+      {
+        leaseIp: disconnectedIp,
+        reason: 'manual-cleanup-complete',
+        transitionId: makeRequestId('manual-cleanup')
+      }
+    ).catch((err) => {
+      queueDiagnosticError('network-mode.manual-cleanup-publish-failed', err);
+    });
+  } else {
+    const routePlan = normalizeRoutePlan(connection.routePlan);
+    runtime.connection = isRetainedConnectionState(connection.state) && routePlan
+      ? {
+          ...connection,
+          state: 'lease-only',
+          wireGuard: summarizeWireGuardStatus(cleanup.wireGuard?.status, connection),
+          health: {
+            ...normalizeHealth(connection.health, leasedHealth()),
+            wireGuard: 'stale',
+            internalApi: 'idle',
+            splitDns: 'stale'
+          },
+          diagnostics: {
+            ...(connection.diagnostics || {}),
+            [pendingCleanup.key]: cleanupDiagnostic,
+            updatedAt: nowIso()
+          }
+        }
+      : {
+          ...idleConnection(),
+          mode: disconnectedMode,
+          diagnostics: {
+            ...(connection.diagnostics || {}),
+            [pendingCleanup.key]: cleanupDiagnostic,
+            updatedAt: nowIso()
+          }
+        };
+  }
+  lastSystemDomainProxySignature = null;
+  lastNetworkEnvironmentSignature = null;
+  lastNetworkSignature = null;
+  const after = await collectNetworkEnvironmentDiagnostics(`${reason}-after`, {
+    phase: 'disconnected'
+  });
+  const wireGuardSystemRepair = {
+    ...cleanup,
+    action: 'cleanup-only'
+  };
+  runtime.connection = {
+    ...runtime.connection,
+    diagnostics: {
+      ...(runtime.connection?.diagnostics || {}),
+      networkEnvironment: after,
+      networkRepair: {
+        reason,
+        connected: false,
+        cleanupOnly: true,
+        cleanupDiagnostic: pendingCleanup.key,
+        before,
+        endpointRouteRepair,
+        wireGuardSystemRepair,
+        wireGuardProbe: null,
+        systemDomainProxy: cleanup.systemDomainProxy || null,
+        standaloneOwnership: cleanup.standaloneOwnership || null,
+        after,
+        updatedAt: nowIso()
+      },
+      updatedAt: nowIso()
+    }
+  };
+  runtime.feedback = {
+    tone: cleanup.ok === true ? 'success' : 'warning',
+    message: cleanup.ok === true
+      ? 'Windows WireGuard、NRPT、PAC/local edge 和 standalone ownership 已清理完成，当前为未连接。'
+      : `Windows 清理仍未完成（${cleanup.stage}）：${cleanup.message}。本次修复没有恢复或启动 WireGuard。`
+  };
+  touchRuntime(
+    cleanup.ok === true
+      ? `Windows cleanup completed: ${reason}`
+      : `Windows cleanup remains pending: ${reason}`
+  );
+  return {
+    before,
+    endpointRouteRepair,
+    wireGuardSystemRepair,
+    wireGuardProbe: null,
+    systemDomainProxy: cleanup.systemDomainProxy || null,
+    standaloneOwnership: cleanup.standaloneOwnership || null,
+    after
+  };
+}
+
 async function repairWireGuardSystemStateForRuntime(reason) {
   if (!shouldRecoverWireGuardConnection(runtime?.connection)) {
-    return { ok: true, skipped: true, reason: 'connection-not-retained' };
+    if (process.platform !== 'win32') {
+      return { ok: true, skipped: true, reason: 'connection-not-retained' };
+    }
+    try {
+      const mod = await import('@qpjoy/electron-launcher/wireguard');
+      const options = wireGuardRuntimeOptions();
+      const status = mod.getLauncherWireGuardPeerStatus(options);
+      const windowsNrpt = typeof mod.getLauncherWireGuardNrptStatus === 'function'
+        ? await mod.getLauncherWireGuardNrptStatus(options).catch(() => null)
+        : null;
+      if (windowsWireGuardCleanupConfirmed(
+        { status },
+        windowsNrpt,
+        mod.launcherWindowsWireGuardCleanupReady,
+        mod.launcherWindowsWireGuardTunnelCleanupReady
+      )) {
+        return {
+          ok: true,
+          skipped: true,
+          reason: 'connection-not-retained-system-clean',
+          status,
+          windowsNrpt,
+          cleanupReady: true
+        };
+      }
+      return stopWireGuardForRuntime();
+    } catch (err) {
+      queueDiagnosticError('wireguard.idle-system-cleanup-failed', err, { reason });
+      return {
+        ok: false,
+        reason,
+        cleanupReady: false,
+        message: errorMessage(err)
+      };
+    }
   }
   try {
     const mod = await import('@qpjoy/electron-launcher/wireguard');
@@ -3222,20 +4370,24 @@ function hostnameFromMaybeUrl(value) {
   return text.replace(/:\d{1,5}$/, '') || null;
 }
 
-function expectedInternalDnsTargets() {
-  const routePlan = normalizeRoutePlan(runtime?.connection?.routePlan);
+function expectedInternalDnsTargets(
+  routePlanInput = runtime?.connection?.routePlan,
+  connectionInput = runtime?.connection
+) {
+  const routePlan = normalizeRoutePlan(routePlanInput);
+  const connection = connectionInput || {};
   return uniqueStrings([
     nullableString(routePlan?.internalControlIp),
     ipv4HostFromBaseUrl(routePlan?.internalBaseUrl),
-    nullableString(runtime?.connection?.internalControlIp),
-    ipv4HostFromBaseUrl(runtime?.connection?.internalBaseUrl),
+    nullableString(connection?.internalControlIp),
+    ipv4HostFromBaseUrl(connection?.internalBaseUrl),
     systemPacDnsFallbackTarget(),
     INTERNAL_PEER_IP
   ].filter(Boolean));
 }
 
-function internalDiagnosticCidrs() {
-  const routePlan = normalizeRoutePlan(runtime?.connection?.routePlan);
+function internalDiagnosticCidrs(routePlanInput = runtime?.connection?.routePlan) {
+  const routePlan = normalizeRoutePlan(routePlanInput);
   return uniqueStrings([
     ...configuredCidrList(process.env.MX_H2I_INTERNAL_CIDRS),
     ...arrayValue(routePlan?.routeCidrs, []).filter(isLikelyInternalDiagnosticCidr),
@@ -3243,6 +4395,102 @@ function internalDiagnosticCidrs() {
     '10.89.0.0/16',
     '10.90.0.0/16'
   ].filter(Boolean));
+}
+
+async function probeWindowsSplitDnsResolution(routePlanInput, windowsNrpt) {
+  if (process.platform !== 'win32') return null;
+  const routePlan = normalizeRoutePlan(routePlanInput);
+  const domains = splitDnsDomains(runtime?.config);
+  if (domains.length === 0) {
+    return {
+      host: null,
+      state: 'not-configured',
+      severity: 'ok',
+      ok: true,
+      ready: true,
+      skipped: true,
+      skipReason: 'split-dns-not-configured',
+      updatedAt: nowIso()
+    };
+  }
+  const host = windowsSplitDnsDiagnosticHost(domains);
+  if (!windowsNrptReadyForConnection(windowsNrpt)) {
+    return {
+      host,
+      state: 'nrpt-not-ready',
+      severity: 'error',
+      ok: false,
+      ready: false,
+      skipped: true,
+      skipReason: windowsNrpt?.state || 'nrpt-not-ready',
+      message: 'Windows NRPT 元数据尚未 ready，未执行端到端系统解析证明。',
+      updatedAt: nowIso()
+    };
+  }
+  if (!host) {
+    return {
+      host: null,
+      state: 'invalid-host',
+      severity: 'error',
+      ok: false,
+      ready: false,
+      skipped: false,
+      message: '没有位于当前 split-DNS namespace 内的可诊断主机，不能证明 Windows 系统解析已切到 Internal。',
+      updatedAt: nowIso()
+    };
+  }
+  try {
+    const mod = await import('@qpjoy/electron-launcher/network-diagnostics');
+    let result = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      result = await mod.diagnoseLauncherHostResolution({
+        host,
+        phase: 'connected',
+        expectedInternalTargets: expectedInternalDnsTargets(routePlan),
+        internalCidrs: internalDiagnosticCidrs(routePlan),
+        v1HdoCidrs: configuredCidrList(process.env.MX_H2I_V1_HDO_CIDRS),
+        proxyFakeIpCidrs: configuredCidrList(process.env.MX_H2I_PROXY_FAKE_IP_CIDRS),
+        lookup: (lookupHost) => withTimeout(
+          dnsPromises.lookup(lookupHost, { all: true, family: 4 }),
+          1200,
+          `Windows split DNS proof timeout for ${lookupHost}`,
+          'MX_WINDOWS_SPLIT_DNS_PROOF_TIMEOUT'
+        )
+      });
+      if (result?.ok === true || attempt === 3) break;
+      await delay(250);
+    }
+    return {
+      ...result,
+      ready: result?.ok === true,
+      proof: 'system-dns-lookup'
+    };
+  } catch (err) {
+    return {
+      host,
+      state: 'unresolved',
+      severity: 'error',
+      ok: false,
+      ready: false,
+      proof: 'system-dns-lookup',
+      error: errorMessage(err),
+      message: `Windows split DNS 端到端解析失败：${errorMessage(err)}`,
+      updatedAt: nowIso()
+    };
+  }
+}
+
+function windowsSplitDnsDiagnosticHost(domains) {
+  const candidates = [
+    process.env.MX_H2I_DNS_DIAGNOSTIC_HOST,
+    runtime?.config?.bootstrapApiBaseUrl,
+    DEFAULT_BOOTSTRAP_HOST,
+    runtime?.config?.internalApiBaseUrl
+  ];
+  return candidates
+    .map(hostnameFromMaybeUrl)
+    .find((host) => host && domains.some((domain) => host === domain || host.endsWith(`.${domain}`)))
+    || null;
 }
 
 function configuredCidrList(value) {
@@ -3273,9 +4521,26 @@ function compactSystemDomainProxyStatus(status) {
   return {
     supported: status.supported === true,
     applied: status.applied === true,
+    verified: status.verified === true,
+    skipped: status.skipped === true,
+    reason: nullableString(status.reason),
+    skipReason: nullableString(status.skipReason),
     pacUrl: nullableString(status.pacUrl),
     proxy: nullableString(status.proxy),
     fallbackProxy: nullableString(status.fallbackProxy),
+    fallbackPacUrl: nullableString(status.fallbackPacUrl),
+    browserReady: status.browserReady === true,
+    browserAccess: status.browserAccess && typeof status.browserAccess === 'object'
+      ? {
+          ready: status.browserAccess.ready === true,
+          host: nullableString(status.browserAccess.host),
+          port: status.browserAccess.port || null,
+          pacApplied: status.browserAccess.pacApplied === true,
+          proxyReachable: status.browserAccess.proxyReachable === true,
+          proxyStatusCode: status.browserAccess.proxyStatusCode || null,
+          error: nullableString(status.browserAccess.error)
+        }
+      : null,
     systemResolverMode: nullableString(status.systemResolverMode),
     resolverApplied: status.resolverApplied === true,
     resolverError: nullableString(status.resolverError),
@@ -3288,6 +4553,8 @@ function compactSystemDomainProxyStatus(status) {
         }
       : null,
     staleState: status.staleState === true,
+    stalePreviousPacSkipped: status.stalePreviousPacSkipped === true,
+    stalePreviousProxySkipped: status.stalePreviousProxySkipped === true,
     error: nullableString(status.error)
   };
 }
@@ -3317,19 +4584,21 @@ function systemDomainProxyOwnershipClaim(domains, reverseProxyRoutes) {
   };
 }
 
-async function registerStandaloneOwnershipForRuntime(reason = 'manual') {
-  const connection = runtime?.connection || {};
-  const routePlan = normalizeRoutePlan(connection.routePlan);
-  if (!routePlan) return null;
+async function upsertStandaloneOwnershipForRoutePlan(
+  routePlan,
+  connection = {},
+  reason = 'manual',
+  ownerState = 'connecting'
+) {
   try {
     const mod = await import('@qpjoy/electron-launcher/standalone-data-plane');
     const claim = mxH2iStandaloneOwnershipClaim(mod, routePlan, connection);
-    const state = mod.upsertElectronLauncherStandaloneOwnershipClaim({
+    const ownershipState = mod.claimElectronLauncherStandaloneOwnershipClaim({
       ...claim,
-      state: connection.state === 'connected' ? 'active' : 'connecting',
+      state: ownerState,
       updatedAt: nowIso()
     });
-    return compactStandaloneOwnershipState(state, reason);
+    return compactStandaloneOwnershipState(ownershipState, reason);
   } catch (err) {
     return {
       ok: false,
@@ -3377,7 +4646,12 @@ function mxH2iStandaloneOwnershipClaim(mod, routePlan, connection) {
 
 function productOwnershipRouteCidrs(routePlan, connection = {}) {
   const plan = normalizeRoutePlan(routePlan || connection.routePlan);
-  if (plan?.leaseCidr) return [plan.leaseCidr];
+  const installed = uniqueStrings(arrayValue(plan?.routeCidrs, [])
+    .map(nullableString)
+    .filter(isRegisteredStandaloneRouteCidr));
+  if (plan?.leaseCidr) installed.push(plan.leaseCidr);
+  const normalized = uniqueStrings(installed);
+  if (normalized.length > 0) return normalized;
   const localIp = nullableString(connection.localIp);
   return localIp ? [`${localIp}/32`] : [];
 }
@@ -3390,7 +4664,8 @@ function compactStandaloneOwnershipState(state, reason) {
   const registry = state?.registry && typeof state.registry === 'object' ? state.registry : {};
   const conflicts = arrayValue(registry.conflicts, []);
   return {
-    ok: conflicts.length === 0,
+    ok: state?.claimed !== false && conflicts.length === 0,
+    claimed: state?.claimed !== false,
     reason,
     statePath: nullableString(state?.statePath),
     owners: arrayValue(registry.owners, []).map((owner) => nullableString(owner?.ownerId)).filter(Boolean),
@@ -3413,10 +4688,23 @@ function networkEnvironmentSignature(diagnostics) {
     endpointRoute: diagnostics.endpointRoute
       ? compactDarwinEndpointRouteSignature(diagnostics.endpointRoute)
       : null,
+    windowsNrpt: diagnostics.windowsNrpt
+      ? {
+          source: diagnostics.windowsNrpt.source || null,
+          state: diagnostics.windowsNrpt.state || null,
+          ready: diagnostics.windowsNrpt.ready === true,
+          globalReady: diagnostics.windowsNrpt.globalReady === true,
+          missingNamespaces: arrayValue(diagnostics.windowsNrpt.missingNamespaces, []).sort(),
+          mismatchedNamespaces: arrayValue(diagnostics.windowsNrpt.mismatchedNamespaces, []).sort()
+        }
+      : null,
     systemDomainProxy: diagnostics.systemDomainProxy
       ? {
           applied: diagnostics.systemDomainProxy.applied === true,
+          skipReason: diagnostics.systemDomainProxy.skipReason || null,
           pacUrl: diagnostics.systemDomainProxy.pacUrl || null,
+          browserReady: diagnostics.systemDomainProxy.browserReady === true,
+          browserProxyStatusCode: diagnostics.systemDomainProxy.browserAccess?.proxyStatusCode || null,
           systemResolverMode: diagnostics.systemDomainProxy.systemResolverMode || null,
           resolverApplied: diagnostics.systemDomainProxy.resolverApplied === true,
           resolverDomains: arrayValue(diagnostics.systemDomainProxy.resolverDomains, []).sort()
@@ -3429,9 +4717,16 @@ function systemDomainProxyStatusSignature(status) {
   if (!status || typeof status !== 'object') return null;
   return JSON.stringify({
     applied: status.applied === true,
+    skipped: status.skipped === true,
+    skipReason: nullableString(status.skipReason),
     pacUrl: nullableString(status.pacUrl),
     proxy: nullableString(status.proxy),
     fallbackProxy: nullableString(status.fallbackProxy),
+    fallbackPacUrl: nullableString(status.fallbackPacUrl),
+    browserReady: status.browserReady === true,
+    browserHost: nullableString(status.browserAccess?.host),
+    browserProxyStatusCode: status.browserAccess?.proxyStatusCode || null,
+    browserError: nullableString(status.browserAccess?.error),
     dnsFallbackTarget: nullableString(status.dnsFallbackTarget),
     systemResolverMode: nullableString(status.systemResolverMode),
     resolverPort: status.resolverPort || null,
@@ -3482,14 +4777,16 @@ function systemDomainProxyPolicySignature(policy) {
 }
 
 async function maybeSkipSystemDomainProxyApply(reason, policySignature) {
-  if (!isBackgroundSystemDomainProxyReason(reason) || !policySignature || policySignature !== lastSystemDomainProxyPolicySignature) {
-    return null;
-  }
-  if (process.platform === 'win32') return null;
+  if (!isBackgroundSystemDomainProxyReason(reason) || !policySignature) return null;
+  const policyUnchanged = policySignature === lastSystemDomainProxyPolicySignature;
   const status = typeof systemDomainProxyManager?.status === 'function'
     ? systemDomainProxyManager.status()
     : null;
+  if (!policyUnchanged && process.platform !== 'win32') return null;
+  if (!policyUnchanged && (!status || typeof status !== 'object' || status.applied !== true)) return null;
   if (
+    policyUnchanged
+    &&
     policySignature === lastSystemDomainProxyAuthorizationCanceledSignature
     && (!status || typeof status !== 'object')
   ) {
@@ -3507,13 +4804,57 @@ async function maybeSkipSystemDomainProxyApply(reason, policySignature) {
     ? await systemDomainProxyManager?.statusVerified?.().catch(() => null)
     : null;
   if (verified && typeof verified === 'object') {
-    if (systemDomainProxyStatusLooksApplied(verified)) {
+    if (policyUnchanged && systemDomainProxyStatusLooksApplied(verified)) {
+      if (
+        process.platform === 'win32'
+        && typeof systemDomainProxyManager?.refreshWindowsContinuation === 'function'
+        && Date.now() - lastWindowsSystemProxyContinuationRefreshAt >= WINDOWS_SYSTEM_PROXY_CONTINUATION_REFRESH_MS
+      ) {
+        lastWindowsSystemProxyContinuationRefreshAt = Date.now();
+        const refreshed = await systemDomainProxyManager
+          .refreshWindowsContinuation(reason)
+          .catch((err) => ({
+            ...verified,
+            reason,
+            error: `Windows proxy continuation refresh failed: ${errorMessage(err)}`
+          }));
+        return {
+          ...refreshed,
+          reason,
+          skipped: true
+        };
+      }
       return {
         ...verified,
         reason,
         skipped: true
       };
     }
+    if (process.platform === 'win32' && policyUnchanged) {
+      const pacStillOwned = verified?.actual?.pac?.applied === true;
+      if (!pacStillOwned) {
+        const takeoverSignature = windowsSystemProxyTakeoverSignature(verified);
+        if (
+          takeoverSignature
+          && takeoverSignature === lastWindowsSystemProxyTakeoverSignature
+        ) {
+          return {
+            ...verified,
+            reason,
+            skipped: true,
+            skipReason: 'external-system-proxy-owner-stable',
+            error: verified.error
+              || 'Windows 系统代理被同一个外部 owner 持续占用；MX-H2I 不会周期抢写。请切换代理模式、重连或执行网络修复。'
+          };
+        }
+        // Suppress a stable owner only after coordination succeeds. A Clash
+        // PAC/listener may start a few seconds after login; failed read-only
+        // continuation discovery must remain retryable without touching the
+        // registry.
+        pendingWindowsSystemProxyTakeoverSignature = takeoverSignature;
+      }
+    }
+    if (!policyUnchanged) return null;
     if (policySignature === lastSystemDomainProxyAuthorizationCanceledSignature) {
       return {
         ...verified,
@@ -3524,6 +4865,7 @@ async function maybeSkipSystemDomainProxyApply(reason, policySignature) {
     }
     return null;
   }
+  if (!policyUnchanged) return null;
   if (systemDomainProxyStatusLooksApplied(status)) {
     return {
       ...status,
@@ -3544,12 +4886,35 @@ async function maybeSkipSystemDomainProxyApply(reason, policySignature) {
   return null;
 }
 
+function windowsSystemProxyTakeoverSignature(status) {
+  if (process.platform !== 'win32') return null;
+  const pac = status?.actual?.pac;
+  if (!pac || typeof pac !== 'object') return null;
+  return JSON.stringify({
+    autoConfigUrl: windowsRegistryValueSignature(pac.autoConfigUrl),
+    proxyEnable: windowsRegistryValueSignature(pac.proxyEnable),
+    proxyServer: windowsRegistryValueSignature(pac.proxyServer),
+    proxyOverride: windowsRegistryValueSignature(pac.proxyOverride),
+    autoDetect: windowsRegistryValueSignature(pac.autoDetect)
+  });
+}
+
+function windowsRegistryValueSignature(value) {
+  if (!value || typeof value !== 'object') return null;
+  return {
+    exists: value.exists === true,
+    type: nullableString(value.type),
+    value: value.value ?? null
+  };
+}
+
 function isBackgroundSystemDomainProxyReason(reason) {
   const text = String(reason || '');
   return text === 'route-refresh' || text === 'app-startup' || text === 'app-startup-refresh';
 }
 
 function shouldVerifySystemDomainProxyBeforeBackgroundSkip(reason) {
+  if (process.platform === 'win32') return isBackgroundSystemDomainProxyReason(reason);
   return process.platform === 'darwin' && String(reason || '') === 'route-refresh';
 }
 
@@ -3562,7 +4927,13 @@ function systemDomainProxyStatusLooksApplied(status) {
 
 function shouldApplySystemDomainProxyForReason(reason) {
   const text = String(reason || '');
-  if (process.platform === 'win32' && isBackgroundSystemDomainProxyReason(text)) return true;
+  if (
+    process.platform === 'win32'
+    && windowsSystemPacEnabled()
+    && isBackgroundSystemDomainProxyReason(text)
+  ) {
+    return true;
+  }
   if (process.platform === 'darwin' && text === 'route-refresh' && allowMacBackgroundSystemDomainProxyRepair()) return true;
   return text === 'post-connect' || text.startsWith('manual');
 }
@@ -3648,6 +5019,14 @@ function systemPacFallbackProxy() {
     || null;
 }
 
+function windowsSystemPacEnabled() {
+  const configured = nullableString(process.env.MX_H2I_WINDOWS_SYSTEM_PAC);
+  if (configured) {
+    return ['1', 'true', 'yes', 'on'].includes(configured.toLowerCase());
+  }
+  return process.platform === 'win32' || Boolean(systemPacFallbackProxy());
+}
+
 function localEdgePort() {
   const port = Number(
     nullableString(process.env.MX_H2I_LOCAL_EDGE_PORT)
@@ -3664,14 +5043,14 @@ function localEdgeProxy() {
 function systemPacDnsServers() {
   return arrayValue([
     process.env.MX_H2I_LOCAL_EDGE_DNS_SERVER,
-    process.env.MX_H2I_DOMESTIC_DNS_SERVER,
-    process.env.MX_H2I_DOMESTIC_DNS_EDGE,
-    domesticPublicDnsServer(),
     dnsServerWithDefaultPort(runtime?.connection?.routePlan?.dnsServer, DEFAULT_DOMESTIC_DNS_EDGE_PORT),
-    domesticGatewayDnsServer(),
     internalDnsEdgeServer(runtime?.connection?.routePlan?.internalControlIp),
     internalDnsEdgeServer(runtime?.connection?.internalControlIp),
-    internalDnsEdgeServer(INTERNAL_PEER_IP)
+    internalDnsEdgeServer(INTERNAL_PEER_IP),
+    process.env.MX_H2I_DOMESTIC_DNS_SERVER,
+    process.env.MX_H2I_DOMESTIC_DNS_EDGE,
+    domesticGatewayDnsServer(),
+    domesticPublicDnsServer()
   ], [])
     .map((item) => String(item || '').trim())
     .filter(Boolean)
@@ -5478,6 +6857,7 @@ function createH2oTestWindow(targetUrl) {
     minWidth: 760,
     minHeight: 520,
     title: `H2O Test - ${hostnameFromUrl(targetUrl) || 'browser'}`,
+    icon: productIconPath(),
     backgroundColor: '#11131a',
     show: false,
     parent: mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined,
@@ -8423,28 +9803,39 @@ async function probeConnectedModeBeforeTransition(mode, reason) {
   if (!sameConnectionTransitionIdentity(current, connection)) {
     return { ready: false, superseded: true, result };
   }
+  const systemDomainProxy = result.ready
+    ? await ensureSystemDomainProxyForRuntime('manual-connect-guard')
+    : null;
+  const ready = result.ready && windowsBrowserAccessReady(systemDomainProxy);
   runtime.connection = {
     ...current,
-    state: result.state,
-    health: result.health,
+    state: ready ? result.state : result.ready ? 'tunnel-only' : result.state,
+    health: result.ready && !ready
+      ? { ...result.health, splitDns: 'blocked' }
+      : result.health,
     wireGuard: result.wireGuard,
     diagnostics: {
       ...(current.diagnostics || {}),
       ...(result.diagnostics || {}),
+      ...(systemDomainProxy ? { systemDomainProxy } : {}),
       connectGuard: {
-        ok: result.ready === true,
+        ok: ready,
         mode,
         reason,
-        message: result.message,
+        message: ready
+          ? result.message
+          : result.ready
+            ? systemDomainProxy?.browserAccess?.error || systemDomainProxy?.error || 'Windows browser path is not ready.'
+            : result.message,
         updatedAt: nowIso()
       },
       updatedAt: nowIso()
     }
   };
   queueDiagnosticLog(
-    result.ready ? 'info' : 'warning',
+    ready ? 'info' : 'warning',
     'connection.pre-connect-guard',
-    result.ready
+    ready
       ? `${mode} connection is still ready; preserving it.`
       : `${mode} persisted connection is not ready; allowing a fresh connection.`,
     {
@@ -8454,10 +9845,13 @@ async function probeConnectedModeBeforeTransition(mode, reason) {
       wireGuardActive: result.wireGuard?.active === true,
       routeReady: result.diagnostics?.route?.ok === true,
       internalApiReady: result.diagnostics?.internalApi?.ok === true,
+      splitDnsReady: result.health?.splitDns === 'ready',
+      browserReady: systemDomainProxy?.browserAccess?.ready === true,
+      windowsNrpt: result.diagnostics?.windowsNrpt || null,
       message: result.message
     }
   );
-  return { ready: result.ready === true, superseded: false, result };
+  return { ready, superseded: false, result, systemDomainProxy };
 }
 
 function sameConnectionTransitionIdentity(left, right) {
@@ -8485,7 +9879,13 @@ function connectionHasReadyDataPlaneProof(connection) {
   return connection?.health?.wireGuard === 'ready'
     && connection?.wireGuard?.active === true
     && connection?.diagnostics?.route?.ok === true
-    && connection?.diagnostics?.internalApi?.ok === true;
+    && connection?.diagnostics?.internalApi?.ok === true
+    && connection?.health?.splitDns === 'ready'
+    && (
+      process.platform !== 'win32'
+      || splitDnsDomains(runtime?.config).length === 0
+      || windowsBrowserAccessReady(connection?.diagnostics?.systemDomainProxy)
+    );
 }
 
 function idleHealth() {
@@ -8702,6 +10102,15 @@ function normalizeDiagnostics(input) {
     transitionTiming: row.transitionTiming && typeof row.transitionTiming === 'object'
       ? row.transitionTiming
       : null,
+    startupCleanup: row.startupCleanup && typeof row.startupCleanup === 'object'
+      ? row.startupCleanup
+      : null,
+    disconnectCleanup: row.disconnectCleanup && typeof row.disconnectCleanup === 'object'
+      ? row.disconnectCleanup
+      : null,
+    shutdownCleanup: row.shutdownCleanup && typeof row.shutdownCleanup === 'object'
+      ? row.shutdownCleanup
+      : null,
     updatedAt: nullableString(row.updatedAt) || nowIso()
   };
 }
@@ -8884,7 +10293,7 @@ async function ensureLauncherProduct(launcher, productId, productDisplayName) {
 }
 
 async function applyNetworkSession(session, options) {
-  wireGuardConnectInFlight = true;
+  assertNetworkTransitionCurrent(options.lifecycleEpoch);
   const transitionStartedAt = Number.isFinite(options.transitionStartedAt) ? options.transitionStartedAt : Date.now();
   const applyStartedAt = Date.now();
   const lease = session.lease || {};
@@ -8894,8 +10303,7 @@ async function applyNetworkSession(session, options) {
   const feedback = bootstrapResolution?.fallback?.message
     ? `${options.feedback} ${bootstrapResolution.fallback.message}`
     : options.feedback;
-  try {
-    const routePlan = normalizeRoutePlan(session.routePlan);
+  const routePlan = normalizeRoutePlan(session.routePlan);
     const wireGuard = session.wireGuard || {};
     const privateKey = nullableString(wireGuard.privateKey) || runtime.installation?.keyPair?.privateKey;
     const publicKey = nullableString(wireGuard.publicKey) || runtime.installation?.keyPair?.publicKey || lease.publicKey;
@@ -8938,6 +10346,7 @@ async function applyNetworkSession(session, options) {
     };
     touchRuntime(options.mode === 'employee' ? 'employee lease ready' : 'guest lease ready');
     await saveAndBroadcast();
+    assertNetworkTransitionCurrent(options.lifecycleEpoch);
 
     const preflightStartedAt = Date.now();
     const [domesticPeerSync, internalDirectPeerSync, combinedSystemDomainProxy] = await Promise.all([
@@ -8945,6 +10354,7 @@ async function applyNetworkSession(session, options) {
       syncInternalDirectPeerForLease(lease, routePlan, { bootstrapResolveMode, bootstrapBaseUrl }),
       prepareSystemDomainProxyForWireGuardInstall('pre-connect')
     ]);
+    assertNetworkTransitionCurrent(options.lifecycleEpoch);
     const preflightFinishedAt = Date.now();
     runtime.feedback = {
       tone: 'info',
@@ -8964,6 +10374,7 @@ async function applyNetworkSession(session, options) {
       darwinExtraInstallShell: combinedSystemDomainProxy?.shell || null,
       suppressWireGuardDns: shouldSuppressWireGuardDnsForSystemDomainProxy(combinedSystemDomainProxy)
     });
+    assertNetworkTransitionCurrent(options.lifecycleEpoch);
     const wireGuardFinishedAt = Date.now();
     if (wireGuardResult.authorizationCanceled === true) {
       if (options.fallbackConnection) {
@@ -9013,12 +10424,26 @@ async function applyNetworkSession(session, options) {
           ? await completeExternalSystemDomainProxyApply('post-connect-combined')
           : await ensureSystemDomainProxyForRuntime('post-connect'))
       : deferredSystemDomainProxyRestoreStatus('wireguard-not-ready', combinedSystemDomainProxy);
-    const standaloneOwnership = wireGuardResult.ready
-      ? await registerStandaloneOwnershipForRuntime('post-connect')
-      : null;
+    assertNetworkTransitionCurrent(options.lifecycleEpoch);
+    const standaloneOwnership = wireGuardResult.diagnostics?.standaloneOwnershipRegistry || null;
+    assertNetworkTransitionCurrent(options.lifecycleEpoch);
+    const browserReady = windowsBrowserAccessReady(systemDomainProxy);
+    const ownershipReady = standaloneOwnership?.ok === true;
+    const connectionReady = wireGuardResult.ready && browserReady && ownershipReady;
     const finishedAt = Date.now();
     runtime.connection = {
       ...runtime.connection,
+      state: connectionReady
+        ? runtime.connection.state
+        : wireGuardResult.ready
+          ? 'tunnel-only'
+          : runtime.connection.state,
+      health: wireGuardResult.ready && !browserReady
+        ? {
+            ...runtime.connection.health,
+            splitDns: 'blocked'
+          }
+        : runtime.connection.health,
       diagnostics: {
         ...(runtime.connection.diagnostics || {}),
         ...(systemDomainProxy ? { systemDomainProxy } : {}),
@@ -9040,21 +10465,36 @@ async function applyNetworkSession(session, options) {
       : systemDomainProxy?.resolverError
         ? ` 系统 split DNS 未启用：${systemDomainProxy.resolverError}`
         : '';
+    const publicTrafficFeedback = systemDomainProxy?.fallbackProxy
+      ? `其它流量回落到当前仍在监听的 ${systemDomainProxy.fallbackProxy}。`
+      : systemDomainProxy?.fallbackPacUrl
+        ? `其它流量继续使用连接前的 PAC ${systemDomainProxy.fallbackPacUrl}。`
+      : process.platform === 'win32'
+        ? '其它流量保持 DIRECT。'
+        : '其它流量回落到原系统代理。';
     const pacFeedback = systemDomainProxy?.applied
-      ? ` 系统 PAC 已将 Internal 域名接入本机 ${localEdgeProxy()}，其它流量回落到原系统代理。${resolverFeedback}`
+      ? systemDomainProxy?.browserAccess?.ready
+        ? ` 系统 PAC 已将 Internal 域名接入本机 ${localEdgeProxy()}，浏览器 CONNECT 探测通过；${publicTrafficFeedback}${resolverFeedback}`
+        : ` 系统 PAC 已写入，但浏览器 Internal 路径未通过：${systemDomainProxy?.browserAccess?.error || 'unknown'}。`
       : systemDomainProxy?.error
         ? ` 系统 PAC 未启用：${systemDomainProxy.error}`
-        : '';
+        : systemDomainProxy?.skipReason === 'windows-nrpt-only'
+          ? ' Windows 浏览器 PAC 被显式关闭，当前只能提供 NRPT，不能保证浏览器访问 Internal。'
+          : '';
     runtime.feedback = {
-      tone: wireGuardResult.ready ? 'success' : 'warning',
-      message: wireGuardResult.ready
+      tone: connectionReady ? 'success' : 'warning',
+      message: connectionReady
         ? `${feedback} 客户端 WireGuard 已通过 ${wireGuardPathLabel(wireGuardResult.path)} 探测 Internal。${pacFeedback}`
-        : `${feedback} 已保留租约，但客户端 WireGuard 还未 ready：${wireGuardResult.message}`
+        : wireGuardResult.ready
+          ? `${feedback} WireGuard、NRPT 和系统 DNS 已就绪，但 Windows 浏览器路径未 ready：${systemDomainProxy?.browserAccess?.error || systemDomainProxy?.error || 'PAC/local edge 未通过'}。${pacFeedback}`
+          : `${feedback} 已保留租约，但客户端 WireGuard 还未 ready：${wireGuardResult.message}`
     };
-    touchRuntime(wireGuardResult.ready
+    touchRuntime(connectionReady
       ? (options.mode === 'employee' ? 'employee wireguard connected' : 'guest wireguard connected')
-      : 'wireguard lease only');
-    if (wireGuardResult.ready) {
+      : wireGuardResult.ready
+        ? 'wireguard ready; browser path blocked'
+        : 'wireguard lease only');
+    if (connectionReady) {
       if (options.replacedMode === 'guest') {
         await publishNetworkModeEvent('visit:disconnect', 'disconnected', {
           reason: 'staff-preempted-visit',
@@ -9079,20 +10519,22 @@ async function applyNetworkSession(session, options) {
       await publishNetworkModeEvent(
         options.mode === 'employee' ? 'staff:connect' : 'visit:connect',
         'failed',
-        { reason: wireGuardResult.message, transitionId: options.transitionId }
+        {
+          reason: wireGuardResult.ready
+            ? systemDomainProxy?.browserAccess?.error || systemDomainProxy?.error || 'windows-browser-path-not-ready'
+            : wireGuardResult.message,
+          transitionId: options.transitionId
+        }
       );
     }
-    if (!wireGuardResult.ready) {
+    if (!connectionReady) {
       scheduleWireGuardRecovery('post-connect-probe', [1500, 4000, 9000]);
     }
     await saveAndBroadcast();
-    scheduleNetworkEnvironmentDiagnostics('post-connect', {
-      phase: wireGuardResult.ready ? 'connected' : 'bootstrap',
-      lookupTimeoutMs: NETWORK_DIAGNOSTIC_LOOKUP_TIMEOUT_MS
-    });
-  } finally {
-    wireGuardConnectInFlight = false;
-  }
+  scheduleNetworkEnvironmentDiagnostics('post-connect', {
+    phase: wireGuardResult.ready ? 'connected' : 'bootstrap',
+    lookupTimeoutMs: NETWORK_DIAGNOSTIC_LOOKUP_TIMEOUT_MS
+  });
 }
 
 function applyWireGuardAuthorizationCanceled(options, wireGuardResult) {
@@ -9205,8 +10647,29 @@ async function startWireGuardForSession(input) {
   if (!privateKey) return wireGuardFailure('本机 WireGuard privateKey 缺失。');
 
   try {
-    const standaloneOwnershipRegistry = await summarizeStandaloneOwnershipRegistry(baseRoutePlan, 'connect');
     const routePlan = baseRoutePlan;
+    const connectingOwnership = await upsertStandaloneOwnershipForRoutePlan(
+      routePlan,
+      {
+        ...(runtime?.connection || {}),
+        routePlan,
+        state: 'connecting'
+      },
+      'connect-preflight',
+      'connecting'
+    );
+    if (connectingOwnership?.ok !== true) {
+      const message = connectingOwnership?.error === 'ownership-conflict'
+        || arrayValue(connectingOwnership?.conflicts, []).length > 0
+        ? '本机 Launcher network ownership 存在冲突，未安装 WireGuard；请先断开冲突产品或修复旧 claim。'
+        : `无法原子登记本机 Launcher network ownership，未安装 WireGuard：${connectingOwnership?.error || 'unknown error'}`;
+      const failure = wireGuardFailure(message);
+      failure.diagnostics = {
+        ...failure.diagnostics,
+        standaloneOwnershipRegistry: connectingOwnership
+      };
+      return failure;
+    }
     const mod = await import('@qpjoy/electron-launcher/wireguard');
     const internalBaseUrl = internalOverlayBaseUrl(routePlan, input.internalBaseUrl);
     const configuredPreference = normalizeRoutePathPreference(runtime.config.routePathPreference);
@@ -9220,8 +10683,38 @@ async function startWireGuardForSession(input) {
       darwinExtraInstallShell: input.darwinExtraInstallShell,
       suppressWireGuardDns: input.suppressWireGuardDns
     });
-    const { result, route, endpointRoute, internalApi, ready } = attempt;
+    const {
+      result,
+      route,
+      endpointRoute,
+      internalApi,
+      windowsNrpt,
+      windowsDnsResolution,
+      splitDnsReady,
+      ready: dataPlaneReady
+    } = attempt;
     const tunnelReady = result.ok === true;
+    const wireGuard = summarizeWireGuardResult(result);
+    const tunnelAbsenceProven = launcherConnectResultProvesTunnelAbsent(mod, result, windowsNrpt);
+    const tunnelMayBeLive = tunnelReady
+      || wireGuard.active
+      || result?.tunnel?.ok === true
+      || result?.launchDaemon?.ok === true
+      || !tunnelAbsenceProven;
+    const standaloneOwnershipRegistry = tunnelMayBeLive
+      ? await upsertStandaloneOwnershipForRoutePlan(
+          routePlan,
+          {
+            ...(runtime?.connection || {}),
+            routePlan,
+            state: 'connected'
+          },
+          tunnelReady || wireGuard.active ? 'connect-active' : 'connect-preserve-ambiguous',
+          tunnelReady || wireGuard.active ? 'active' : 'connecting'
+        )
+      : await releaseStandaloneOwnershipForRuntime('connect-no-live-tunnel');
+    const ownershipReady = standaloneOwnershipRegistry?.ok === true;
+    const ready = dataPlaneReady && ownershipReady;
     const domesticRelayReady = domesticRelayDiagnostics?.status === 'passed' || domesticPeerSync?.status === 'passed' || route.ok === true;
     return {
       state: ready ? 'connected' : (tunnelReady ? 'tunnel-only' : 'lease-only'),
@@ -9234,13 +10727,16 @@ async function startWireGuardForSession(input) {
         domesticRelayReady,
         route,
         internalApi,
+        splitDnsReady,
         domesticPeerSync
       }),
-      wireGuard: summarizeWireGuardResult(result),
+      wireGuard,
       diagnostics: {
         route,
         endpointRoute,
         internalApi,
+        windowsNrpt,
+        windowsDnsResolution,
         internalDirectPeerSync,
         domesticPeerSync,
         domesticRelayDiagnostics,
@@ -9249,7 +10745,21 @@ async function startWireGuardForSession(input) {
         updatedAt: nowIso()
       },
       path: result.peer?.path || routePathFromPreference(attempt.pathPreference),
-      message: ready ? 'ready' : wireGuardNotReadyMessage(result, route, internalApi, internalDirectPeerSync, domesticPeerSync, domesticRelayDiagnostics)
+      message: ready
+        ? 'ready'
+        : !ownershipReady
+          ? `WireGuard 已启动，但本机 Launcher network ownership 未确认：${standaloneOwnershipRegistry?.error || 'ownership conflict'}。`
+        : wireGuardConnectionNotReadyMessage(
+            result,
+            route,
+            internalApi,
+            windowsNrpt,
+            windowsDnsResolution,
+            null,
+            internalDirectPeerSync,
+            domesticPeerSync,
+            domesticRelayDiagnostics
+          )
     };
   } catch (err) {
     if (isUserAuthorizationCanceledError(err)) {
@@ -9259,59 +10769,16 @@ async function startWireGuardForSession(input) {
   }
 }
 
-async function summarizeStandaloneOwnershipRegistry(routePlan, reason = 'connect') {
-  const baseRoutePlan = normalizeRoutePlan(routePlan);
-  if (!baseRoutePlan) {
-    return {
-      ok: false,
-      reason,
-      error: 'missing-route-plan',
-      routeCidrs: [],
-      foreignRouteCidrs: [],
-      updatedAt: nowIso()
-    };
+function launcherConnectResultProvesTunnelAbsent(mod, result, windowsNrpt) {
+  const status = result?.status || null;
+  if (process.platform === 'win32') {
+    return typeof mod?.launcherWindowsWireGuardCleanupReady === 'function'
+      && mod.launcherWindowsWireGuardCleanupReady(status, windowsNrpt) === true;
   }
-  try {
-    const mod = await import('@qpjoy/electron-launcher/standalone-data-plane');
-    const state = mod.readElectronLauncherStandaloneOwnershipState();
-    const conflicts = arrayValue(state?.registry?.conflicts, []);
-    const registeredCidrs = uniqueStrings(arrayValue(state?.registry?.routeCidrs, [])
-      .map((entry) => nullableString(entry?.value) || nullableString(entry?.key))
-      .filter(isRegisteredStandaloneRouteCidr));
-    const baseCidrs = arrayValue(baseRoutePlan.routeCidrs, []);
-    const foreignRouteCidrs = registeredCidrs.filter((cidr) => !baseCidrs.includes(cidr));
-    if (conflicts.length > 0) {
-      return {
-        ok: false,
-        reason,
-        error: 'ownership-conflict',
-        statePath: nullableString(state?.statePath),
-        owners: arrayValue(state?.registry?.owners, []).map((owner) => nullableString(owner?.ownerId)).filter(Boolean),
-        conflicts,
-        routeCidrs: registeredCidrs,
-        foreignRouteCidrs,
-        updatedAt: nowIso()
-      };
-    }
-    return {
-      ok: true,
-      reason,
-      statePath: nullableString(state?.statePath),
-      owners: arrayValue(state?.registry?.owners, []).map((owner) => nullableString(owner?.ownerId)).filter(Boolean),
-      routeCidrs: registeredCidrs,
-      foreignRouteCidrs,
-      updatedAt: nowIso()
-    };
-  } catch (err) {
-    return {
-      ok: false,
-      reason,
-      error: errorMessage(err),
-      routeCidrs: [],
-      foreignRouteCidrs: [],
-      updatedAt: nowIso()
-    };
-  }
+  return status?.ok === true
+    && status?.active === false
+    && result?.tunnel?.ok !== true
+    && result?.launchDaemon?.ok !== true;
 }
 
 function isRegisteredStandaloneRouteCidr(value) {
@@ -9349,13 +10816,20 @@ async function connectAndProbeWireGuardPath(mod, input) {
     ? await probeInternalApiViaOverlay(input.internalBaseUrl)
     : internalApiProbeBlockedByRoute(input.internalBaseUrl, targetIp, route);
   const internalApiReady = internalApi?.ok === true;
+  const windowsNrpt = await launcherWindowsNrptStatus(mod, input.routePlan);
+  const windowsDnsResolution = await probeWindowsSplitDnsResolution(input.routePlan, windowsNrpt);
+  const splitDnsReady = windowsNrptReadyForConnection(windowsNrpt)
+    && (process.platform !== 'win32' || windowsDnsResolution?.ready === true);
   return {
     pathPreference: input.pathPreference,
     result,
     route,
     endpointRoute,
     internalApi,
-    ready: tunnelProofReady && routeReady && internalApiReady
+    windowsNrpt,
+    windowsDnsResolution,
+    splitDnsReady,
+    ready: tunnelProofReady && routeReady && internalApiReady && splitDnsReady
   };
 }
 
@@ -9390,7 +10864,17 @@ async function probeWireGuardForConnection(input) {
       : internalApiProbeBlockedByRoute(internalBaseUrl, targetIp, route);
     const tunnelReady = tunnelProofReady;
     const internalApiReady = internalApi?.ok === true;
-    const ready = tunnelReady && routeReady && internalApiReady;
+    const windowsNrpt = await launcherWindowsNrptStatus(mod, routePlan);
+    const windowsDnsResolution = await probeWindowsSplitDnsResolution(routePlan, windowsNrpt);
+    const systemDnsReady = windowsNrptReadyForConnection(windowsNrpt)
+      && (process.platform !== 'win32' || windowsDnsResolution?.ready === true);
+    const systemDomainProxy = connection.diagnostics?.systemDomainProxy || null;
+    const browserAccess = systemDomainProxy?.browserAccess || null;
+    const browserReady = process.platform !== 'win32'
+      || splitDnsDomains(runtime?.config).length === 0
+      || windowsBrowserAccessReady(systemDomainProxy);
+    const splitDnsReady = systemDnsReady && browserReady;
+    const ready = tunnelReady && routeReady && internalApiReady && splitDnsReady;
     const domesticRelayReady = domesticRelayDiagnostics?.status === 'passed' || domesticPeerSync?.status === 'passed' || route.ok === true;
     const resultLike = {
       ok: tunnelReady,
@@ -9415,6 +10899,7 @@ async function probeWireGuardForConnection(input) {
         domesticRelayReady,
         route,
         internalApi,
+        splitDnsReady,
         domesticPeerSync
       }),
       wireGuard,
@@ -9422,12 +10907,27 @@ async function probeWireGuardForConnection(input) {
         route,
         endpointRoute,
         internalApi,
+        windowsNrpt,
+        windowsDnsResolution,
+        systemDomainProxy: connection.diagnostics?.systemDomainProxy || null,
         internalDirectPeerSync,
         domesticPeerSync,
         domesticRelayDiagnostics,
         updatedAt: nowIso()
       },
-      message: ready ? 'ready' : wireGuardNotReadyMessage(resultLike, route, internalApi, internalDirectPeerSync, domesticPeerSync, domesticRelayDiagnostics)
+      message: ready
+        ? 'ready'
+        : wireGuardConnectionNotReadyMessage(
+            resultLike,
+            route,
+            internalApi,
+            windowsNrpt,
+            windowsDnsResolution,
+            browserAccess,
+            internalDirectPeerSync,
+            domesticPeerSync,
+            domesticRelayDiagnostics
+          )
     };
   } catch (err) {
     return wireGuardFailure(errorMessage(err));
@@ -9440,7 +10940,7 @@ function launcherNetworkHealth(input) {
       wireGuard: 'ready',
       domesticRelay: input.domesticRelayReady ? 'ready' : 'pending',
       internalApi: internalApiHealthStatus(input.route, input.internalApi),
-      splitDns: input.route?.ok === true ? 'ready' : 'pending',
+      splitDns: input.splitDnsReady === false ? 'blocked' : 'ready',
       appBroker: 'ready'
     };
   }
@@ -9449,7 +10949,11 @@ function launcherNetworkHealth(input) {
     wireGuard: input.wireGuardReady ? 'ready' : 'blocked',
     domesticRelay: input.domesticRelayReady ? 'ready' : domesticPeerSync?.status === 'failed' || domesticPeerSync?.status === 'blocked' ? 'blocked' : 'pending',
     internalApi: internalApiHealthStatus(input.route, input.internalApi),
-    splitDns: input.route?.ok === true ? 'ready' : 'pending',
+    splitDns: input.splitDnsReady === false
+      ? 'blocked'
+      : input.route?.ok === true
+        ? 'ready'
+        : 'pending',
     appBroker: 'ready'
   };
 }
@@ -9673,10 +11177,20 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
         }
         const routeProofLost = wireGuardResult.diagnostics?.route
           && wireGuardResult.diagnostics.route.ok !== true;
+        const splitDnsProofLost = (
+          wireGuardResult.diagnostics?.windowsNrpt?.configured === true
+          && wireGuardResult.diagnostics.windowsNrpt.ready !== true
+          && wireGuardResult.diagnostics.windowsNrpt.state !== 'probe-failed'
+        ) || (
+          process.platform === 'win32'
+          && wireGuardResult.diagnostics?.windowsDnsResolution?.proof === 'system-dns-lookup'
+          && wireGuardResult.diagnostics.windowsDnsResolution.ready !== true
+        );
         const preserveConnected = !manual
           && connection.state === 'connected'
           && !wireGuardResult.ready
           && !routeProofLost
+          && !splitDnsProofLost
           && wireGuardBackgroundProbeFailures < WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD;
         const shouldPersistProbe = !preserveConnected
           && (wireGuardResult.state !== connection.state || reason !== 'interval');
@@ -9828,6 +11342,7 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
 }
 
 function shouldRecoverWireGuardConnection(connection) {
+  if (pendingWindowsCleanupDiagnostic(connection)) return false;
   const state = connection?.state;
   return (state === 'connected' || state === 'tunnel-only' || state === 'lease-only' || state === 'server-unavailable' || state === 'network-unavailable')
     && Boolean(normalizeRoutePlan(connection.routePlan));
@@ -9836,13 +11351,86 @@ function shouldRecoverWireGuardConnection(connection) {
 async function stopWireGuardForRuntime(options = {}) {
   try {
     const mod = await import('@qpjoy/electron-launcher/wireguard');
-    return await mod.stopLauncherWireGuardPeer(wireGuardRuntimeOptions(options));
+    const runtimeOptions = wireGuardRuntimeOptions(options);
+    if (
+      process.platform === 'win32'
+      && typeof mod.getLauncherWireGuardNrptStatus === 'function'
+    ) {
+      try {
+        const beforeStatus = mod.getLauncherWireGuardPeerStatus(runtimeOptions);
+        const beforeNrpt = await mod.getLauncherWireGuardNrptStatus(runtimeOptions).catch(() => null);
+        if (windowsWireGuardCleanupConfirmed(
+          { status: beforeStatus },
+          beforeNrpt,
+          mod.launcherWindowsWireGuardCleanupReady,
+          mod.launcherWindowsWireGuardTunnelCleanupReady
+        )) {
+          return {
+            ok: true,
+            skipped: true,
+            reason: 'windows-wireguard-already-clean',
+            status: beforeStatus,
+            windowsNrpt: beforeNrpt,
+            cleanupReady: true
+          };
+        }
+      } catch {
+        // Let stopLauncherWireGuardPeer handle a missing or unreadable profile.
+      }
+    }
+    const result = await mod.stopLauncherWireGuardPeer(runtimeOptions);
+    if (process.platform !== 'win32') return result;
+    const windowsNrpt = typeof mod.getLauncherWireGuardNrptStatus === 'function'
+      ? await mod.getLauncherWireGuardNrptStatus(runtimeOptions).catch((err) => ({
+          ready: false,
+          state: 'probe-failed',
+          error: errorMessage(err),
+          namespaces: []
+        }))
+      : null;
+    return {
+      ...result,
+      windowsNrpt,
+      cleanupReady: windowsWireGuardCleanupConfirmed(
+        result,
+        windowsNrpt,
+        mod.launcherWindowsWireGuardCleanupReady,
+        mod.launcherWindowsWireGuardTunnelCleanupReady
+      )
+    };
   } catch (err) {
     return {
       ok: false,
+      cleanupReady: false,
       message: errorMessage(err)
     };
   }
+}
+
+function windowsWireGuardCleanupConfirmed(result, windowsNrpt, cleanupReady, tunnelCleanupReady) {
+  if (process.platform !== 'win32') return true;
+  if (typeof cleanupReady === 'function') {
+    return cleanupReady(result?.status || null, windowsNrpt || null);
+  }
+  const tunnelClean = typeof tunnelCleanupReady === 'function'
+    ? tunnelCleanupReady(result?.status || null)
+    : result?.status?.ok === true
+      && result.status.active === false
+      && ['NOT_FOUND', 'DOES_NOT_EXIST', 'MISSING'].includes(
+        String(result.status.serviceState).toUpperCase()
+      )
+      && arrayValue(result.status.routes, []).length === 0
+      && !nullableString(result.status.ifconfig);
+  if (!tunnelClean || !windowsNrpt) return false;
+  if (windowsNrpt.state === 'probe-failed') return false;
+  if (windowsNrpt.globalRestorePending === true) return false;
+  if (Number(windowsNrpt.totalOwnedRuleCount || 0) !== 0) return false;
+  if (Number(windowsNrpt.legacyAmbiguousRuleCount || 0) !== 0) return false;
+  if (arrayValue(windowsNrpt.unexpectedOwnedNamespaces, []).length > 0) return false;
+  return arrayValue(windowsNrpt.namespaces, []).every(
+    (namespace) => Number(namespace?.ownedRuleCount || 0) === 0
+      && Number(namespace?.legacyAmbiguousRuleCount || 0) === 0
+  );
 }
 
 function wireGuardRuntimeIsActive(result) {
@@ -9854,8 +11442,158 @@ function wireGuardRuntimeIsActive(result) {
 async function reconcileExistingWireGuardAfterStartup() {
   try {
     const mod = await import('@qpjoy/electron-launcher/wireguard');
-    const status = mod.getLauncherWireGuardPeerStatus(wireGuardRuntimeOptions());
-    const connection = runtime?.connection || idleConnection();
+    const runtimeOptions = wireGuardRuntimeOptions();
+    let status = mod.getLauncherWireGuardPeerStatus(runtimeOptions);
+    let connection = runtime?.connection || idleConnection();
+    const retainedStartupConnection = isRetainedConnectionState(connection.state)
+      && Boolean(normalizeRoutePlan(connection.routePlan));
+    const activeIdleOrphan = process.platform === 'win32'
+      && status?.active === true
+      && !retainedStartupConnection;
+    const pendingCleanupAtStartup = pendingWindowsCleanupDiagnostic(connection);
+    if (
+      process.platform === 'win32'
+      && (status?.active !== true || activeIdleOrphan || pendingCleanupAtStartup)
+    ) {
+      const cleanup = await runWindowsNetworkCleanupOnly('app-startup-orphan');
+      const startupCleanup = {
+        ok: cleanup.ok === true,
+        action: activeIdleOrphan
+          ? 'stopped-active-idle-orphan'
+          : 'windows-orphan-cleanup',
+        cleanupReady: cleanup.cleanupReady === true,
+        localEdgeClosePending: cleanup.stage === 'local-edge-finalize',
+        ownershipReleasePending: cleanup.stage === 'standalone-ownership-release',
+        stage: cleanup.stage,
+        message: cleanup.message,
+        wireGuard: cleanup.wireGuard || null,
+        systemDomainProxy: cleanup.systemDomainProxy || null,
+        standaloneOwnership: cleanup.standaloneOwnership || null,
+        updatedAt: nowIso()
+      };
+      if (cleanup.ok !== true) {
+        const routePlan = normalizeRoutePlan(connection.routePlan);
+        const nextState = !activeIdleOrphan
+          && isRetainedConnectionState(connection.state)
+          && routePlan
+          ? 'lease-only'
+          : 'idle';
+        runtime.connection = nextState === 'idle'
+          ? {
+              ...idleConnection(),
+              mode: connection.mode === 'employee' ? 'employee' : 'guest',
+              diagnostics: {
+                ...(connection.diagnostics || {}),
+                startupCleanup,
+                updatedAt: nowIso()
+              }
+            }
+          : {
+              ...connection,
+              state: nextState,
+              wireGuard: summarizeWireGuardStatus(cleanup.wireGuard?.status || status, connection),
+              health: {
+                ...normalizeHealth(connection.health, leasedHealth()),
+                wireGuard: 'stale',
+                internalApi: 'idle',
+                splitDns: 'stale'
+              },
+              diagnostics: {
+                ...(connection.diagnostics || {}),
+                startupCleanup,
+                updatedAt: nowIso()
+              }
+            };
+        if (nextState === 'idle') runtime.auth = null;
+        runtime.feedback = {
+          tone: 'warning',
+          message: `检测到 Windows WireGuard、NRPT、PAC/local edge 或 ownership 遗留，但启动清理未确认完成：${startupCleanup.message}。请在高级选项执行“修复网络”。`
+        };
+        queueDiagnosticLog('warning', 'wireguard.startup-orphan-cleanup-failed', startupCleanup.message, {
+          previousState: connection.state,
+          nextState,
+          activeIdleOrphan,
+          stage: cleanup.stage,
+          status: cleanup.wireGuard?.status || status,
+          windowsNrpt: cleanup.wireGuard?.windowsNrpt || null,
+          systemDomainProxy: cleanup.systemDomainProxy || null,
+          standaloneOwnership: cleanup.standaloneOwnership || null
+        });
+        touchRuntime('startup Windows orphan cleanup required');
+        await saveRuntime(runtime);
+        return {
+          ok: false,
+          active: activeIdleOrphan,
+          cleanupReady: false,
+          cleanup,
+          state: runtime.connection.state
+        };
+      }
+      status = cleanup.wireGuard?.status || status;
+      const resolvedDiagnostics = {
+        ...(connection.diagnostics || {}),
+        ...(pendingCleanupAtStartup ? {
+          [pendingCleanupAtStartup.key]: {
+            ...pendingCleanupAtStartup.value,
+            ok: true,
+            cleanupReady: true,
+            localEdgeClosePending: false,
+            ownershipReleasePending: false,
+            action: 'startup-cleanup-complete',
+            stage: 'complete',
+            message: cleanup.message,
+            updatedAt: nowIso()
+          }
+        } : {}),
+        startupCleanup,
+        updatedAt: nowIso()
+      };
+      connection = {
+        ...connection,
+        diagnostics: resolvedDiagnostics
+      };
+      queueDiagnosticLog('info', 'wireguard.startup-orphan-cleanup-complete', startupCleanup.message, {
+        previousState: connection.state,
+        activeIdleOrphan,
+        status,
+        windowsNrpt: cleanup.wireGuard?.windowsNrpt || null,
+        standaloneOwnership: cleanup.standaloneOwnership || null
+      });
+      if (activeIdleOrphan || pendingCleanupAtStartup) {
+        runtime.connection = {
+          ...idleConnection(),
+          mode: connection.mode === 'employee' ? 'employee' : 'guest',
+          diagnostics: resolvedDiagnostics
+        };
+        runtime.auth = null;
+        runtime.feedback = {
+          tone: 'info',
+          message: activeIdleOrphan
+            ? '检测到 idle 状态下仍运行的 Windows WireGuard，已主动停止并完成 NRPT、PAC/local edge 与 ownership 清理。'
+            : 'Windows 启动遗留清理已完成，当前为未连接。'
+        };
+        await publishNetworkModeEvent(
+          connection.mode === 'employee' ? 'staff:disconnect' : 'visit:disconnect',
+          'disconnected',
+          {
+            leaseIp: connection.localIp,
+            reason: activeIdleOrphan ? 'startup-active-idle-orphan-cleaned' : 'startup-cleanup-complete',
+            transitionId: makeRequestId('startup-cleanup')
+          }
+        ).catch((err) => {
+          queueDiagnosticError('network-mode.startup-cleanup-publish-failed', err);
+        });
+        touchRuntime('startup Windows orphan cleanup complete');
+        await saveRuntime(runtime);
+        return {
+          ok: true,
+          active: false,
+          cleanupReady: true,
+          cleaned: true,
+          state: 'idle'
+        };
+      }
+    }
     if (status?.active !== true) {
       if (!isRetainedConnectionState(connection.state)) {
         return { ok: true, active: false };
@@ -9944,7 +11682,7 @@ async function reconcileExistingWireGuardAfterStartup() {
             ok: probe.ready === true,
             action: 'probed-retained-tunnel',
             message: probe.ready
-              ? '已根据系统 WireGuard、路由和 Internal API 实时探测恢复连接。'
+              ? '已根据系统 WireGuard、路由、Internal API 和 split DNS 实时探测恢复连接。'
               : `系统 WireGuard 存在，但未达到 ready：${probe.message}`,
             updatedAt: nowIso()
           },
@@ -9954,7 +11692,7 @@ async function reconcileExistingWireGuardAfterStartup() {
       if (!probe.ready) {
         runtime.feedback = {
           tone: 'warning',
-          message: '检测到上次的 WireGuard 仍在，但路由或 Internal 已失效。可直接重新连接或断开清理。'
+          message: `检测到上次的 WireGuard 仍在，但完整网络证据未 ready：${probe.message}`
         };
       }
       queueDiagnosticLog(
@@ -9968,6 +11706,8 @@ async function reconcileExistingWireGuardAfterStartup() {
           wireGuardActive: probe.wireGuard?.active === true,
           routeReady: probe.diagnostics?.route?.ok === true,
           internalApiReady: probe.diagnostics?.internalApi?.ok === true,
+          splitDnsReady: probe.health?.splitDns === 'ready',
+          windowsNrpt: probe.diagnostics?.windowsNrpt || null,
           message: probe.message
         }
       );
@@ -10030,6 +11770,7 @@ async function reconcileExistingWireGuardAfterStartup() {
 }
 
 function wireGuardRuntimeOptions(options = {}) {
+  const retainedRoutePlan = normalizeRoutePlan(runtime?.connection?.routePlan);
   const darwinServiceIdentity = {
     ...DARWIN_WIREGUARD_SERVICE_IDENTITY,
     ...(options.darwinExtraInstallShell ? {
@@ -10044,7 +11785,9 @@ function wireGuardRuntimeOptions(options = {}) {
     profileName: WIREGUARD_PROFILE_NAME,
     allowSystemFallback: false,
     darwinLaunchDaemon: true,
-    darwinServiceIdentity
+    darwinServiceIdentity,
+    nrptCleanupDnsDomains: splitDnsDomains(runtime?.config),
+    nrptCleanupDnsServer: retainedRoutePlan?.dnsServer || null
   };
 }
 
@@ -10268,6 +12011,117 @@ function summarizeWireGuardStatus(status, connection = {}) {
     error: status?.ok === false ? message : null,
     updatedAt: nowIso()
   };
+}
+
+async function launcherWindowsNrptStatus(mod, routePlanInput = runtime?.connection?.routePlan) {
+  if (process.platform !== 'win32') return null;
+  try {
+    if (typeof mod?.getLauncherWireGuardNrptStatus !== 'function') {
+      throw new Error('electron-launcher does not expose live Windows NRPT status');
+    }
+    if (typeof mod?.validateLauncherWindowsNrptDesiredState !== 'function') {
+      throw new Error('electron-launcher does not expose Windows NRPT desired-state validation');
+    }
+    const status = await mod.getLauncherWireGuardNrptStatus(wireGuardRuntimeOptions()) || {
+      supported: true,
+      configured: false,
+      ready: true,
+      source: 'live-powershell',
+      state: 'not-configured',
+      tunnelName: WIREGUARD_PROFILE_NAME.replace(/\.conf$/i, ''),
+      comment: null,
+      queryPolicy: null,
+      enableDaForAllNetworks: null,
+      globalReady: true,
+      namespaces: [],
+      missingNamespaces: [],
+      mismatchedNamespaces: [],
+      error: null
+    };
+    const routePlan = normalizeRoutePlan(routePlanInput);
+    return mod.validateLauncherWindowsNrptDesiredState(status, {
+      dnsDomains: splitDnsDomains(runtime?.config),
+      dnsServer: routePlan?.dnsServer || null
+    });
+  } catch (err) {
+    return {
+      supported: true,
+      configured: true,
+      ready: false,
+      source: 'live-powershell',
+      state: 'probe-failed',
+      error: errorMessage(err)
+    };
+  }
+}
+
+function windowsNrptReadyForConnection(status) {
+  return process.platform !== 'win32' || status?.ready === true;
+}
+
+function wireGuardConnectionNotReadyMessage(
+  result,
+  route,
+  internalApi,
+  windowsNrpt,
+  windowsDnsResolution,
+  browserAccess,
+  internalDirectPeerSync,
+  domesticPeerSync,
+  domesticRelayDiagnostics
+) {
+  if (
+    result?.ok === true
+    && route?.ok === true
+    && internalApi?.ok === true
+    && !windowsNrptReadyForConnection(windowsNrpt)
+  ) {
+    if (windowsNrpt?.profileMissingSplitDns === true) {
+      return '当前 Windows WireGuard profile 与 Internal 下发的 split-DNS 域名或 DNS 地址不一致；请重新连接以生成最新 profile。仅修复旧 profile 的路由不能补齐该配置。';
+    }
+    if (windowsNrpt?.state === 'probe-failed') {
+      return `Windows NRPT 实时校验失败：${windowsNrpt.error || '无法读取系统策略'}。当前仅确认隧道与 Internal API 可用，不能把 split DNS 标记为 ready。`;
+    }
+    const details = [
+      arrayValue(windowsNrpt?.missingNamespaces, []).length
+        ? `缺少 ${windowsNrpt.missingNamespaces.join(', ')}`
+        : null,
+      arrayValue(windowsNrpt?.mismatchedNamespaces, []).length
+        ? `DNS 不匹配 ${windowsNrpt.mismatchedNamespaces.join(', ')}`
+        : null
+    ].filter(Boolean).join('；');
+    return `Windows split DNS 未 ready（${windowsNrpt?.state || 'unknown'}${details ? `：${details}` : ''}）。请使用“重新连接”或“修复网络”并允许管理员授权。`;
+  }
+  if (
+    process.platform === 'win32'
+    && result?.ok === true
+    && route?.ok === true
+    && internalApi?.ok === true
+    && windowsNrptReadyForConnection(windowsNrpt)
+    && windowsDnsResolution?.ready !== true
+  ) {
+    return `Windows NRPT 规则已就绪，但系统端到端解析仍未进入 Internal：${windowsDnsResolution?.message || windowsDnsResolution?.error || '未知解析错误'} 当前连接保持 tunnel-only，不会把 split DNS 标记为 ready。`;
+  }
+  if (
+    process.platform === 'win32'
+    && result?.ok === true
+    && route?.ok === true
+    && internalApi?.ok === true
+    && windowsNrptReadyForConnection(windowsNrpt)
+    && windowsDnsResolution?.ready === true
+    && splitDnsDomains(runtime?.config).length > 0
+    && browserAccess?.ready !== true
+  ) {
+    return `Windows 系统 DNS 已进入 Internal，但 Chromium/WinINet PAC 或本机 2053 CONNECT 未 ready：${browserAccess?.error || browserAccess?.chromiumProxy?.error || '未知浏览器路径错误'}。当前连接保持 tunnel-only。`;
+  }
+  return wireGuardNotReadyMessage(
+    result,
+    route,
+    internalApi,
+    internalDirectPeerSync,
+    domesticPeerSync,
+    domesticRelayDiagnostics
+  );
 }
 
 function wireGuardNotReadyMessage(result, route, internalApi, internalDirectPeerSync, domesticPeerSync, domesticRelayDiagnostics) {
@@ -11269,6 +13123,9 @@ async function collectWindowsDiagnosticFiles(folderPath) {
     '  dnsServers = Invoke-MxCapture { Get-DnsClientServerAddress | Select-Object InterfaceAlias,InterfaceIndex,AddressFamily,ServerAddresses }',
     '  dnsGlobal = Invoke-MxCapture { Get-DnsClientGlobalSetting | Select-Object * }',
     '  ipConfiguration = Invoke-MxCapture { Get-NetIPConfiguration | Select-Object InterfaceAlias,InterfaceIndex,NetProfile,IPv4Address,IPv6Address,IPv4DefaultGateway,DNSServer }',
+    "  internetSettings = Invoke-MxCapture { Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' | Select-Object AutoConfigURL,ProxyEnable,ProxyServer,ProxyOverride,AutoDetect }",
+    '  tcpListeners = Invoke-MxCapture { Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -in @(2053,8080,23455,23456,23457,23458) } | Select-Object LocalAddress,LocalPort,OwningProcess,State }',
+    '  networkAdapters = Invoke-MxCapture { Get-NetAdapter | Select-Object Name,InterfaceDescription,Status,ifIndex,LinkSpeed,MacAddress }',
     '}',
     '$result | ConvertTo-Json -Depth 8'
   ].join('\r\n');
@@ -11282,13 +13139,15 @@ async function collectWindowsDiagnosticFiles(folderPath) {
   ], 15_000);
   const ipconfig = await captureDiagnosticCommand(windowsSystemCommand('ipconfig.exe'), ['/all'], 12_000);
   const route = await captureDiagnosticCommand(windowsSystemCommand('route.exe'), ['print'], 12_000);
+  const winHttp = await captureDiagnosticCommand(windowsSystemCommand('netsh.exe'), ['winhttp', 'show', 'proxy'], 8000);
   const parsedPowershell = powershell.ok
     ? parseJsonText(powershell.stdout) || { parseError: 'PowerShell output was not valid JSON.', raw: powershell.stdout }
     : powershell;
   await Promise.all([
     writeDiagnosticJson(path.join(folderPath, 'windows-dns-nrpt.json'), parsedPowershell),
     fs.writeFile(path.join(folderPath, 'windows-ipconfig-all.txt'), diagnosticCommandText(ipconfig), 'utf8'),
-    fs.writeFile(path.join(folderPath, 'windows-route-print.txt'), diagnosticCommandText(route), 'utf8')
+    fs.writeFile(path.join(folderPath, 'windows-route-print.txt'), diagnosticCommandText(route), 'utf8'),
+    fs.writeFile(path.join(folderPath, 'windows-winhttp-proxy.txt'), diagnosticCommandText(winHttp), 'utf8')
   ]);
 }
 
@@ -11354,8 +13213,8 @@ function diagnosticBundleReadme() {
     'network-diagnostics.json：MX-H2I DNS、PAC、WireGuard 与域名解析诊断。',
     'runtime-logs/：异步滚动运行日志（NDJSON，每行一个事件）。',
     'wireguard-route-audit.log：WireGuard 服务审计；Windows 上包含 NRPT add/remove/assert 和失败原因。',
-    'windows-dns-nrpt.json：Windows 当前 NRPT 全局策略、有效策略、规则和网卡 DNS。',
-    'windows-ipconfig-all.txt / windows-route-print.txt：Windows 网络与路由快照。',
+    'windows-dns-nrpt.json：Windows 实时 NRPT、WinINET 系统代理、关键本地监听端口、网卡和 DNS。',
+    'windows-ipconfig-all.txt / windows-route-print.txt / windows-winhttp-proxy.txt：Windows 网络、路由和 WinHTTP 代理快照。',
     '',
     '日志会自动隐藏常见 token、密码、私钥和 Authorization 字段。',
     '诊断包仍可能包含本机 IP、网卡、DNS 后缀、路由和员工账号相关网络信息，请仅发送给可信的排查人员。',

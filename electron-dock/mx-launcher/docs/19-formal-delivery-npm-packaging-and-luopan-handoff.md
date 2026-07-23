@@ -220,16 +220,30 @@ mx-h2i 的 `main.cjs` 应收敛为"产品壳"：窗口、产品 UI IPC、产品�
 
 ## 4. 同机共存：不变量与冲突测试矩阵（修 G5）
 
+先区分“当前可用”和“目标形态”：当前 Luopan
+`suppressWireGuardDns: true`，不安装 NRPT、WinINet PAC 或 `2053` local edge，因此可以与
+MX-H2I 同时开启并验证各自 WG route/ownership。I2-I5 中涉及两个 DNS/PAC owner 的部分是
+broker 交付门禁，不是当前已实现能力。Windows 的应用内 local edge 不做跨进程共享；第二个
+PAC owner 由稳定 current-user lease queue 在任何 state/registry 修改前 fail closed（不同
+端口或 state path 也不能绕过）。每个进程使用唯一候选文件和 ticket/token 仲裁，dead
+candidate 回收不会删除新 owner；直到单一 Launcher network broker 落地，不支持两个完整
+DNS/PAC owner。
+
 ### 4.1 不变量（doc 14 的可断言化）
 
 - I1 路由隔离：任一产品 connect/disconnect 只增删自己 lease CIDR + 自己 VIP `/32`
   （H2I 迁移期额外 `10.88.88.88/32`、`10.88.0.1/32`）。
-- I2 DNS/PAC 归并：系统级 DNS/PAC 由 ownership registry 合并生成；断开一个产品只释放它的
-  claim，合并结果里其余产品条目原样保留。
+- I2 DNS/PAC 归并：目标形态由 ownership registry 合并生成；断开一个产品只释放它的
+  claim，合并结果里其余产品条目原样保留。当前 Windows NRPT 仍由各产品
+  `electron-core-wireguard` 按 Comment 标签落地；MX-H2I 默认同时由
+  `system-domain-proxy` 落地 local-edge PAC。两条路径都必须 live-ready，不能用其中一条
+  代替另一条。
 - I3 无兜底 owner：关闭任意一个 standalone，另一个的连通性（控制面 healthz + 数据面 ping VIP）不受影响。
 - I4 崩溃恢复：一个产品被 kill -9 后，重启的是它自己的 claim 清理/重建，不触碰对方。
-- I5 端口无争抢：mihomo、local edge、broker socket 都按 `{standaloneChannelProductId}` 命名空间
-  隔离（socket/目录布局见 doc 14），端口动态申请。
+- I5 端口无争抢：product-local mihomo 和 broker socket 按
+  `{standaloneChannelProductId}` 命名空间隔离；系统 PAC 指向的 local edge 是单写者资源，
+  目标形态由 broker 持有一个共享实例。当前 MX-H2I 使用 `2053`，Luopan 不创建第二个
+  local edge。
 
 ### 4.2 测试矩阵
 
@@ -239,26 +253,49 @@ mx-h2i 的 `main.cjs` 应收敛为"产品壳"：窗口、产品 UI IPC、产品�
 | # | 场景 | 断言 |
 | --- | --- | --- |
 | C1 | 仅 MX-H2I 连接 | 基线：路由/DNS/PAC 快照 |
-| C2 | 仅 Luopan 连接 | 只有 `10.91.*` + `10.88.100.3/32`；解析 Luopan 域名走 `10.88.100.3` |
-| C3 | H2I 先连，Luopan 后连 | 两组路由并存；I2 合并正确 |
-| C4 | Luopan 先连，H2I 后连 | 同上（顺序无关） |
-| C5 | 双连后断开 H2I | Luopan 连通性不变（I3）；H2I 路由全清 |
-| C6 | 双连后断开 Luopan | 对称 |
+| C2 | 仅 Luopan 连接 | 只有 Luopan lease CIDR + service VIP `/32`；VIP `/healthz` 可达。当前不安装 NRPT/PAC，系统/浏览器域名解析不是此格 green gate |
+| C3 | H2I 先连，Luopan 后连 | 两组路由/claim 并存；PAC/NRPT/`2053` 仍只由 H2I 持有 |
+| C4 | Luopan 先连，H2I 后连 | 同上（顺序无关），Luopan 不接管或覆盖 H2I PAC |
+| C5 | 双连后断开 H2I | Luopan WG/VIP 连通性不变，H2I 路由/PAC/NRPT/`2053` 全部清理；当前 Luopan 浏览器域名解析不保证继续可用 |
+| C6 | 双连后断开 Luopan | H2I 的 WG、Internal DNS、PAC 和浏览器 CONNECT 证据不变；Luopan 只清自己的 route/claim |
 | C7 | 双连后 kill -9 Luopan，再重启 Luopan | I4；重启后 claim 重建，无重复条目 |
 | C8 | 双连 + Clash/mihomo TUN 开启 | 两产品 VIP `/32` 与 CIDR 更具体路由压过 TUN；unmatched 流量仍归 Clash |
-| C9 | 双连 + 系统代理(PAC)模式 | PAC 只把各自产品域名引到各自 VIP |
+| C9 | 双连 + 系统代理(PAC)模式 | MX-H2I PAC 对 Internal exact/suffix 固定返回 `PROXY 127.0.0.1:2053`；unmatched 包装可验证的 Clash owner 或 `DIRECT`；两产品 claim 不互相删除 |
 | C10 | H2O embed on H2I，同时 Luopan standalone 在线 | H2O 流量归因到 mx-h2i channel，不借用 `10.91.*` |
 | C11 | 双产品同时"检查更新" | 单机 update 下载不互相干扰；激活门禁互不阻塞（每 channel 一个 scheduler） |
 | C12 | 系统睡眠/网络切换（Wi-Fi→有线，或两个 Wi-Fi gateway/interface 相同但 DHCP source 不同）后双产品恢复 | network-change 按 gateway/interface/IFA 恢复且只 repair 自己的路由 |
 
+Windows 还必须在真实 Clash/mihomo 上补一组动态门禁；它不由 Luopan 当前
+`coexist-check` 的 route/claim 结果替代：
+
+| # | 操作 | live 断言 |
+| --- | --- | --- |
+| W1 | Clash TUN 开启后连接 MX-H2I | VIP/CIDR、NRPT/system DNS、PAC readback、Chromium `resolveProxy` 到 `2053` 和 CONNECT 同时 ready；unmatched PAC 为 `DIRECT` |
+| W2 | Clash 静态 system proxy | live loopback listener 被包装为 `PROXY <Clash>; DIRECT`，Internal exact/suffix 仍优先走 `2053`；公网 smoke 通过 |
+| W3 | Clash PAC / WPAD / dead listener | 优先包装可读、有效的 loopback PAC；没有 PAC 时可延续可表达的 live static proxy。AutoDetect/WPAD 仅在它是唯一适用 owner 且两种 continuation 都不存在时 fail closed；不可读/非 loopback PAC 或 dead listener 也不写 registry、不报 browser-ready |
+| W4 | TUN ↔ system proxy、Clash 重启/换端口 | 5 秒 tick 常态只读；每个新 owner signature 可触发一次有界协商并按结果写 `AutoConfigURL`，同一 signature 后续 tick 不重复写；状态变化、重连或手动 repair 可再次协商 |
+| W5 | 从旧客户端升级且保留 WG tunnel/service | live NRPT/system DNS、PAC readback、Chromium `resolveProxy`、CONNECT、route 与 Internal health 全部通过；历史 audit 的 `add complete` 不算当前证据 |
+| W6 | 断开或 Windows 正常退出 | 保持 `2053` 存活；若 MX 仍持有 `AutoConfigURL`，恢复最近成功协商捕获的 external value，若外部 owner 已接管则保留其值。再停止 WG/清 owned NRPT 并核验，最后关闭 `2053`；任一步失败都阻止断开/退出并保留恢复入口 |
+
+`MX_H2I_WINDOWS_SYSTEM_PAC=0` 只跑诊断/降级负例，预期必须是 `tunnel-only`。
+
 ### 4.3 已知薄弱点（矩阵预计会暴露的）
 
 - Windows NRPT 规则合并：两个产品同时下发 split DNS 时，NRPT 是全局表，必须由 registry 合并
-  后统一写入，谁最后写谁覆盖的现状要改。
+  后统一写入。当前规则按产品 Comment 区分、全局 baseline/owner 做引用计数并由
+  machine-wide mutex 串行事务；仍需用 C3-C7 的真实双产品门禁证明。
 - mihomo 端口：H2O 与 Luopan 若都拉起 mihomo，`external-controller`/mixed-port 需要动态分配 +
   registry 登记，当前 demo 有固定端口倾向。
 - macOS PAC：`networksetup -setautoproxyurl` 全局只有一个 PAC URL，必须收敛到 launcher 的
   local edge 单点出 PAC、按 registry 聚合两产品规则。
+- Windows WinINet PAC：`AutoConfigURL` 是单写者资源；MX-H2I 只读
+  `ProxyEnable`/`ProxyServer`/`ProxyOverride`/`AutoDetect`。回归门禁必须保证当前实现只包装
+  可验证的 loopback PAC，或在没有该 PAC 时包装 live loopback static proxy；AutoDetect/WPAD
+  仅在没有可表达 continuation 时 fail closed，不可读 PAC 和 dead listener 同样 fail closed。
+  5 秒 tick 常态只读，但新 owner signature 可触发一次有界协商/写回；同一 signature 不能被
+  周期抢写。写前五字段比较与写后 readback 能检测常见竞争，但不是 Windows registry 的
+  跨厂商原子 CAS；不合作的 Clash 仍可在最后 read/write 窄窗切换。两个 Launcher PAC owner
+  仍须收敛到独立 broker。
 
 ## 5. 更新系统收尾（修 G3）
 
@@ -432,7 +469,7 @@ Windows 提权走隐藏 RunAs 拉起 `powershell.exe`，UAC 显示"Windows Power
 | --- | --- | --- |
 | P0 npm 就绪 | 1.2-1.4：改 `workspace:^`、发布 L2/L3（0.2.0）、共享 dev-mode `npm` 模式、publish 脚本 | `npm view @qpjoy/electron-launcher` 有版本；mx-h2i 与 luopan 均能在 npm 模式下 make 出可运行包 |
 | P1 Handoff | 2.1-2.3：Luopan ProductNetwork 注册 + materialization 验证、handoff README、demo tag | 对方开发者在无 workspace 的干净环境跑起 Luopan 骨架并连上 `10.88.100.3` |
-| P2 共存加固 | 第 4 节矩阵 C1-C12 双平台跑通，修 NRPT/PAC/mihomo 端口三个薄弱点 | 矩阵全绿，断言脚本进 manage.sh |
+| P2 共存加固 | 第 4 节 C1-C12 双平台矩阵和 Windows W1-W6 真机门禁跑通，修 NRPT/PAC/mihomo 端口三个薄弱点 | 自动断言 + live 系统证据全绿，脚本进 manage.sh |
 | P3 更新执行器 | 第 5 节四条管线 + doc 18 Layer 7 的 6 项 | 一次真实发布从 build 到客户端自动生效全程无人工传包 |
 | P4 灰度服务端化 | 6.0-6.2 优先：/release/check、targets 单用户定向、feature flag 快照、release notes、installer 强制 OSS；分桶/ring（6.3）为规模化预留不实装 UI | 给 1 个真实用户定向发一版、热开/热关一个 flag 全程无需重打包；plans 列表端点收回 admin-only |
 | P5 GA | 平台签名闭环（第 7 节）+ 停止一切手动分发 | doc 18 Layer 7 的目标流水线成为唯一发布方式 |

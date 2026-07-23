@@ -53,6 +53,7 @@ module.exports = {
   publish: null,
   mac: {
     target: ['zip', 'dmg'],
+    icon: 'build/icon.icns',
     category: 'public.app-category.business',
     hardenedRuntime: true,
     gatekeeperAssess: false,
@@ -65,6 +66,7 @@ module.exports = {
     sign: true
   },
   win: {
+    icon: 'build/icon.ico',
     target: [
       {
         target: 'zip',
@@ -85,6 +87,7 @@ module.exports = {
     allowToChangeInstallationDirectory: true
   },
   linux: {
+    icon: 'build/icons',
     target: ['dir']
   }
 };

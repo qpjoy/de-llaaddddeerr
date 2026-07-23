@@ -1,10 +1,26 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync
+} from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { isIP } from 'node:net';
 import type { LauncherRoutePlan } from '@qpjoy/mx-launcher-core';
 
 import { classifyLauncherIpv4Address } from './network-diagnostics.js';
+import {
+  acquireElectronLauncherProcessLease,
+  releaseElectronLauncherProcessLease
+} from './process-lease.js';
 import {
   buildElectronLauncherNetworkOwnershipRegistry,
   type ElectronLauncherNetworkOwnershipClaim,
@@ -75,6 +91,17 @@ export interface ElectronLauncherStandaloneOwnershipState {
   updatedAt: string;
 }
 
+export interface ElectronLauncherStandaloneOwnershipClaimOptions {
+  statePath?: string | null;
+  existingClaims?: ElectronLauncherNetworkOwnershipClaim[] | null;
+  failOnOwnershipConflicts?: boolean | null;
+}
+
+export interface ElectronLauncherStandaloneOwnershipClaimResult
+  extends ElectronLauncherStandaloneOwnershipState {
+  claimed: boolean;
+}
+
 export interface ElectronLauncherStandaloneDataPlaneApplyInput
   extends ElectronLauncherWireGuardRuntimeOptions, ElectronLauncherStandaloneOwnershipInput {
   routePlan: LauncherRoutePlan;
@@ -129,6 +156,24 @@ interface StandaloneOwnershipStateFile {
   claims: ElectronLauncherNetworkOwnershipClaim[];
   updatedAt: string;
 }
+
+interface StandaloneOwnershipLockFile {
+  version: 1;
+  pid: number;
+  token: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+interface StandaloneOwnershipClaimRegistration {
+  claimed: boolean;
+  claims: ElectronLauncherNetworkOwnershipClaim[];
+  registry: ElectronLauncherNetworkOwnershipRegistry;
+}
+
+const STANDALONE_OWNERSHIP_LOCK_WAIT_MS = 2_000;
+const STANDALONE_OWNERSHIP_LOCK_LEASE_MS = 15_000;
+const STANDALONE_OWNERSHIP_LOCK_RETRY_MS = 20;
 
 export interface ElectronLauncherStandaloneRouteProbe {
   target: ElectronLauncherStandaloneDataPlaneProbeTarget;
@@ -285,13 +330,21 @@ export async function applyElectronLauncherStandaloneDataPlane(
   input: ElectronLauncherStandaloneDataPlaneApplyInput
 ): Promise<ElectronLauncherStandaloneDataPlaneApplyResult> {
   const ownershipClaim = buildElectronLauncherStandaloneOwnershipClaim(input.routePlan, input);
-  const stateClaims = input.skipOwnershipState === true ? [] : readStandaloneOwnershipClaims(input.ownershipStatePath);
-  const ownershipRegistry = buildElectronLauncherNetworkOwnershipRegistry([
-    ...stateClaims.filter((claim) => claim.ownerId !== ownershipClaim.ownerId),
-    ...(input.existingClaims ?? []),
-    ownershipClaim
-  ]);
-  if (ownershipRegistry.conflicts.length > 0 && input.failOnOwnershipConflicts !== false) {
+  const registration = input.skipOwnershipState === true
+    ? standaloneOwnershipClaimRegistration(
+        [],
+        ownershipClaim,
+        input.existingClaims ?? [],
+        input.failOnOwnershipConflicts !== false
+      )
+    : registerStandaloneOwnershipClaim(
+        input.ownershipStatePath,
+        ownershipClaim,
+        input.existingClaims ?? [],
+        input.failOnOwnershipConflicts !== false
+      );
+  if (!registration.claimed) {
+    const ownershipRegistry = registration.registry;
     const diagnostics = ownershipConflictDiagnostics(input.routePlan, ownershipRegistry);
     return {
       ok: false,
@@ -302,9 +355,6 @@ export async function applyElectronLauncherStandaloneDataPlane(
       wireGuard: null,
       message: diagnostics.message
     };
-  }
-  if (input.skipOwnershipState !== true) {
-    writeStandaloneOwnershipClaim(input.ownershipStatePath, ownershipClaim);
   }
 
   const wireGuard = await connectLauncherWireGuardPeer({
@@ -320,11 +370,12 @@ export async function applyElectronLauncherStandaloneDataPlane(
     state: diagnostics.ok ? 'active' : 'connecting',
     updatedAt: new Date().toISOString()
   };
+  let finalStateClaims = registration.claims;
   if (input.skipOwnershipState !== true) {
-    writeStandaloneOwnershipClaim(input.ownershipStatePath, finalOwnershipClaim);
+    finalStateClaims = writeStandaloneOwnershipClaim(input.ownershipStatePath, finalOwnershipClaim);
   }
   const finalOwnershipRegistry = buildElectronLauncherNetworkOwnershipRegistry([
-    ...stateClaims.filter((claim) => claim.ownerId !== ownershipClaim.ownerId),
+    ...finalStateClaims.filter((claim) => claim.ownerId !== ownershipClaim.ownerId),
     ...(input.existingClaims ?? []),
     finalOwnershipClaim
   ]);
@@ -343,7 +394,10 @@ export async function stopElectronLauncherStandaloneDataPlane(
   input: ElectronLauncherStandaloneDataPlaneStopInput
 ): Promise<ElectronLauncherStandaloneDataPlaneStopResult> {
   const wireGuard = await stopLauncherWireGuardPeer(input);
-  if (input.skipOwnershipState !== true && input.ownerId) {
+  // Keep the claim when teardown is incomplete. Releasing it early lets a
+  // second product make decisions from a false "owner is gone" snapshot while
+  // the first product's service, routes, or NRPT rules are still live.
+  if (wireGuard.ok === true && input.skipOwnershipState !== true && input.ownerId) {
     releaseStandaloneOwnershipClaim(input.ownershipStatePath, input.ownerId);
   }
   return {
@@ -354,30 +408,45 @@ export async function stopElectronLauncherStandaloneDataPlane(
 }
 
 export function readElectronLauncherStandaloneOwnershipState(statePath?: string | null): ElectronLauncherStandaloneOwnershipState {
-  const file = statePath || defaultStandaloneOwnershipStatePath();
-  const claims = readStandaloneOwnershipClaims(file);
-  return {
-    statePath: file,
-    claims,
-    registry: buildElectronLauncherNetworkOwnershipRegistry(claims),
-    updatedAt: new Date().toISOString()
-  };
+  const file = canonicalStandaloneOwnershipStatePath(statePath, false);
+  const claims = readStandaloneOwnershipClaimsFromFile(file, false);
+  return standaloneOwnershipState(file, claims);
 }
 
 export function upsertElectronLauncherStandaloneOwnershipClaim(
   claim: ElectronLauncherNetworkOwnershipClaim,
   statePath?: string | null
 ): ElectronLauncherStandaloneOwnershipState {
-  writeStandaloneOwnershipClaim(statePath, claim);
-  return readElectronLauncherStandaloneOwnershipState(statePath);
+  const file = canonicalStandaloneOwnershipStatePath(statePath, true);
+  const claims = writeStandaloneOwnershipClaim(file, claim);
+  return standaloneOwnershipState(file, claims);
+}
+
+export function claimElectronLauncherStandaloneOwnershipClaim(
+  claim: ElectronLauncherNetworkOwnershipClaim,
+  options: ElectronLauncherStandaloneOwnershipClaimOptions = {}
+): ElectronLauncherStandaloneOwnershipClaimResult {
+  const file = canonicalStandaloneOwnershipStatePath(options.statePath, true);
+  const registration = registerStandaloneOwnershipClaim(
+    file,
+    claim,
+    options.existingClaims ?? [],
+    options.failOnOwnershipConflicts !== false
+  );
+  return {
+    ...standaloneOwnershipState(file, registration.claims),
+    claimed: registration.claimed,
+    registry: registration.registry
+  };
 }
 
 export function releaseElectronLauncherStandaloneOwnershipClaim(
   ownerId: string,
   statePath?: string | null
 ): ElectronLauncherStandaloneOwnershipState {
-  releaseStandaloneOwnershipClaim(statePath, ownerId);
-  return readElectronLauncherStandaloneOwnershipState(statePath);
+  const file = canonicalStandaloneOwnershipStatePath(statePath, true);
+  const claims = releaseStandaloneOwnershipClaim(file, ownerId);
+  return standaloneOwnershipState(file, claims);
 }
 
 export function buildElectronLauncherStandaloneOwnershipClaim(
@@ -392,9 +461,7 @@ export function buildElectronLauncherStandaloneOwnershipClaim(
   const routeCidrs = uniqueStrings(input.routeCidrs ?? []);
   const productRouteCidrs = routeCidrs.length
     ? routeCidrs
-    : routePlan.leaseCidr
-      ? [routePlan.leaseCidr]
-      : uniqueStrings(routePlan.routeCidrs ?? []);
+    : uniqueStrings(routePlan.routeCidrs ?? []);
   return {
     ownerId,
     productId,
@@ -581,39 +648,256 @@ function defaultStandaloneOwnershipStatePath(): string {
   return join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'qpjoy-electron-launcher', 'standalone-ownership.json');
 }
 
-function readStandaloneOwnershipClaims(statePath?: string | null): ElectronLauncherNetworkOwnershipClaim[] {
+function readStandaloneOwnershipClaimsFromFile(
+  file: string,
+  failOnInvalidState: boolean
+): ElectronLauncherNetworkOwnershipClaim[] {
   try {
-    const parsed = JSON.parse(readFileSync(statePath || defaultStandaloneOwnershipStatePath(), 'utf8')) as Partial<StandaloneOwnershipStateFile>;
-    return Array.isArray(parsed.claims)
-      ? parsed.claims.filter((claim): claim is ElectronLauncherNetworkOwnershipClaim => Boolean(claim?.ownerId))
-      : [];
-  } catch {
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<StandaloneOwnershipStateFile>;
+    if (!Array.isArray(parsed.claims)) {
+      if (failOnInvalidState) throw new Error('claims must be an array');
+      return [];
+    }
+    const claims = parsed.claims.filter(
+      (claim): claim is ElectronLauncherNetworkOwnershipClaim => Boolean(claim?.ownerId)
+    );
+    if (failOnInvalidState && claims.length !== parsed.claims.length) {
+      throw new Error('one or more claims are missing ownerId');
+    }
+    return claims;
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return [];
+    if (failOnInvalidState) {
+      throw new Error(`Cannot safely update standalone ownership state ${file}: ${errorMessage(error)}`);
+    }
     return [];
   }
 }
 
-function writeStandaloneOwnershipClaim(statePath: string | null | undefined, claim: ElectronLauncherNetworkOwnershipClaim): void {
-  const file = statePath || defaultStandaloneOwnershipStatePath();
-  const claims = [
-    ...readStandaloneOwnershipClaims(file).filter((row) => row.ownerId !== claim.ownerId),
-    claim
-  ];
-  writeStandaloneOwnershipState(file, claims);
+function registerStandaloneOwnershipClaim(
+  statePath: string | null | undefined,
+  claim: ElectronLauncherNetworkOwnershipClaim,
+  existingClaims: ElectronLauncherNetworkOwnershipClaim[],
+  failOnOwnershipConflicts: boolean
+): StandaloneOwnershipClaimRegistration {
+  const file = canonicalStandaloneOwnershipStatePath(statePath, true);
+  return withStandaloneOwnershipLock(file, () => {
+    const currentClaims = readStandaloneOwnershipClaimsFromFile(file, true);
+    const registration = standaloneOwnershipClaimRegistration(
+      currentClaims,
+      claim,
+      existingClaims,
+      failOnOwnershipConflicts
+    );
+    if (registration.claimed) {
+      writeStandaloneOwnershipState(file, registration.claims);
+    }
+    return registration;
+  });
 }
 
-function releaseStandaloneOwnershipClaim(statePath: string | null | undefined, ownerId: string): void {
-  const file = statePath || defaultStandaloneOwnershipStatePath();
-  const claims = readStandaloneOwnershipClaims(file).filter((row) => row.ownerId !== ownerId);
-  writeStandaloneOwnershipState(file, claims);
+function standaloneOwnershipClaimRegistration(
+  currentClaims: ElectronLauncherNetworkOwnershipClaim[],
+  claim: ElectronLauncherNetworkOwnershipClaim,
+  existingClaims: ElectronLauncherNetworkOwnershipClaim[],
+  failOnOwnershipConflicts: boolean
+): StandaloneOwnershipClaimRegistration {
+  const candidateClaims = [
+    ...currentClaims.filter((row) => row.ownerId !== claim.ownerId),
+    claim
+  ];
+  const registry = buildElectronLauncherNetworkOwnershipRegistry([
+    ...currentClaims.filter((row) => row.ownerId !== claim.ownerId),
+    ...existingClaims,
+    claim
+  ]);
+  const claimed = !failOnOwnershipConflicts || registry.conflicts.length === 0;
+  return {
+    claimed,
+    claims: claimed ? candidateClaims : currentClaims,
+    registry
+  };
+}
+
+function writeStandaloneOwnershipClaim(
+  statePath: string | null | undefined,
+  claim: ElectronLauncherNetworkOwnershipClaim
+): ElectronLauncherNetworkOwnershipClaim[] {
+  const file = canonicalStandaloneOwnershipStatePath(statePath, true);
+  return withStandaloneOwnershipLock(file, () => {
+    const claims = [
+      ...readStandaloneOwnershipClaimsFromFile(file, true).filter((row) => row.ownerId !== claim.ownerId),
+      claim
+    ];
+    writeStandaloneOwnershipState(file, claims);
+    return claims;
+  });
+}
+
+function releaseStandaloneOwnershipClaim(
+  statePath: string | null | undefined,
+  ownerId: string
+): ElectronLauncherNetworkOwnershipClaim[] {
+  const file = canonicalStandaloneOwnershipStatePath(statePath, true);
+  return withStandaloneOwnershipLock(file, () => {
+    const claims = readStandaloneOwnershipClaimsFromFile(file, true).filter((row) => row.ownerId !== ownerId);
+    writeStandaloneOwnershipState(file, claims);
+    return claims;
+  });
 }
 
 function writeStandaloneOwnershipState(file: string, claims: ElectronLauncherNetworkOwnershipClaim[]): void {
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify({
+  const directory = dirname(file);
+  mkdirSync(directory, { recursive: true });
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  const payload = JSON.stringify({
     version: 1,
     claims,
     updatedAt: new Date().toISOString()
-  }, null, 2), { mode: 0o600 });
+  }, null, 2);
+  let descriptor: number | null = null;
+  try {
+    descriptor = openSync(temporary, 'wx', 0o600);
+    writeFileSync(descriptor, payload, { encoding: 'utf8' });
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = null;
+    renameSync(temporary, file);
+    fsyncDirectory(directory);
+  } finally {
+    if (descriptor !== null) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // Preserve the original write error.
+      }
+    }
+    try {
+      unlinkSync(temporary);
+    } catch (error) {
+      if (errorCode(error) !== 'ENOENT') throw error;
+    }
+  }
+}
+
+function standaloneOwnershipState(
+  file: string,
+  claims: ElectronLauncherNetworkOwnershipClaim[]
+): ElectronLauncherStandaloneOwnershipState {
+  return {
+    statePath: file,
+    claims,
+    registry: buildElectronLauncherNetworkOwnershipRegistry(claims),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function canonicalStandaloneOwnershipStatePath(
+  statePath: string | null | undefined,
+  ensureDirectory: boolean
+): string {
+  const absolute = resolve(statePath || defaultStandaloneOwnershipStatePath());
+  const directory = dirname(absolute);
+  if (ensureDirectory) mkdirSync(directory, { recursive: true });
+  try {
+    return join(realpathSync.native(directory), basename(absolute));
+  } catch {
+    return absolute;
+  }
+}
+
+function withStandaloneOwnershipLock<T>(file: string, task: () => T): T {
+  const legacyLockPath = `${file}.lock`;
+  const lock = acquireElectronLauncherProcessLease(legacyLockPath, {
+    waitMs: STANDALONE_OWNERSHIP_LOCK_WAIT_MS,
+    retryMs: STANDALONE_OWNERSHIP_LOCK_RETRY_MS,
+    metadata: { statePath: file }
+  });
+  try {
+    reconcileLegacyStandaloneOwnershipLock(legacyLockPath);
+    return task();
+  } finally {
+    releaseElectronLauncherProcessLease(lock);
+  }
+}
+
+function reconcileLegacyStandaloneOwnershipLock(lockPath: string): void {
+  let raw = '';
+  let modifiedAt = 0;
+  try {
+    raw = readFileSync(lockPath, 'utf8');
+    modifiedAt = statSync(lockPath).mtimeMs;
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return;
+    throw error;
+  }
+  const parsed = parseStandaloneOwnershipLock(raw);
+  const stale = parsed
+    ? !processExists(parsed.pid)
+    : Date.now() - modifiedAt >= STANDALONE_OWNERSHIP_LOCK_LEASE_MS;
+  if (!stale) {
+    throw new Error(
+      `Timed out acquiring standalone ownership lock ${lockPath}; a legacy launcher process still holds it.`
+    );
+  }
+  unlinkSync(lockPath);
+}
+
+function parseStandaloneOwnershipLock(raw: string): StandaloneOwnershipLockFile | null {
+  try {
+    const parsed = JSON.parse(raw) as Partial<StandaloneOwnershipLockFile>;
+    return parsed.version === 1
+      && Number.isInteger(parsed.pid)
+      && Number(parsed.pid) > 0
+      && typeof parsed.token === 'string'
+      && Boolean(parsed.token)
+      && typeof parsed.createdAt === 'string'
+      && Number.isFinite(Date.parse(parsed.createdAt))
+      && typeof parsed.expiresAt === 'string'
+      && Number.isFinite(Date.parse(parsed.expiresAt))
+      ? parsed as StandaloneOwnershipLockFile
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return errorCode(error) !== 'ESRCH';
+  }
+}
+
+function fsyncDirectory(directory: string): void {
+  let descriptor: number | null = null;
+  try {
+    descriptor = openSync(directory, 'r');
+    fsyncSync(descriptor);
+  } catch {
+    // Windows does not consistently allow opening/fsyncing directories. The
+    // state file itself was fsynced before the atomic rename.
+  } finally {
+    if (descriptor !== null) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // Best-effort durability barrier only.
+      }
+    }
+  }
+}
+
+function errorCode(error: unknown): string | null {
+  return error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+    ? error.code
+    : null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function delay(ms: number): Promise<void> {

@@ -1,6 +1,6 @@
 {
   "name": "@qpjoy/electron-launcher",
-  "version": "2.3.7",
+  "version": "2.3.8",
   "description": "Product-facing Electron Launcher client for MX Launcher release, update, rollout, AppCenter, and network integration.",
   "type": "module",
   "main": "dist/index.js",
@@ -68,6 +68,10 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "smoke:dns-relay": "pnpm build && node scripts/dns-relay-protocol-smoke.mjs",
+    "smoke:network-diagnostics": "pnpm build && node scripts/network-diagnostics-smoke.mjs",
+    "smoke:standalone-ownership": "pnpm build && node scripts/standalone-ownership-concurrency-smoke.mjs",
+    "smoke:system-domain-proxy-windows": "pnpm build && node scripts/system-domain-proxy-windows-smoke.mjs",
+    "smoke:wireguard-windows-nrpt": "pnpm build && node scripts/wireguard-windows-nrpt-smoke.mjs",
     "prepack": "pnpm build"
   },
   "dependencies": {

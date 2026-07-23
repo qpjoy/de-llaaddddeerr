@@ -5,6 +5,8 @@ import {
   buildHdoRouteProbe,
   excludeLocalRoutesFromAllowedIps,
   getDarwinWireGuardLaunchDaemonStatus,
+  getWindowsWireGuardNrptStatus,
+  getWindowsWireGuardTunnelStatusByName,
   getWireGuardTunnelStatus,
   installDarwinWireGuardLaunchDaemon,
   localCidrsForAllowedIpExclusion,
@@ -14,7 +16,8 @@ import {
   selectDarwinPhysicalDefaultRoute,
   setWireGuardTunnelState,
   uninstallDarwinWireGuardLaunchDaemon,
-  type WireGuardServiceIdentity
+  type WireGuardServiceIdentity,
+  type WireGuardWindowsNrptStatus
 } from '@qpjoy/electron-core-wireguard';
 import type { LauncherRoutePlan } from '@qpjoy/mx-launcher-core';
 
@@ -31,7 +34,25 @@ export interface ElectronLauncherWireGuardRuntimeOptions {
   darwinLaunchDaemon?: boolean | null;
   darwinServiceIdentity?: WireGuardServiceIdentity;
   fallbackToAppManaged?: boolean | null;
+  nrptProbeTimeoutMs?: number;
+  nrptCleanupDnsDomains?: string[] | null;
+  nrptCleanupDnsServer?: string | null;
 }
+
+export interface ElectronLauncherWindowsNrptDesiredState {
+  dnsDomains?: string[] | null;
+  dnsServer?: string | null;
+}
+
+export type ElectronLauncherWindowsNrptStatus = WireGuardWindowsNrptStatus & {
+  profileDesiredStateMismatch?: boolean;
+  profileMissingSplitDns?: boolean;
+  profileMissingNamespaces?: string[];
+  profileUnexpectedNamespaces?: string[];
+  profileMismatchedNamespaces?: string[];
+  desiredNamespaces?: string[];
+  desiredNameServers?: string[];
+};
 
 export interface ElectronLauncherWireGuardPeerInput extends ElectronLauncherWireGuardRuntimeOptions {
   routePlan: LauncherRoutePlan;
@@ -401,15 +422,17 @@ function delay(ms: number): Promise<void> {
 
 export async function stopLauncherWireGuardPeer(input: ElectronLauncherWireGuardRuntimeOptions) {
   const configPath = launcherWireGuardConfigPath(input);
-  if (!existsSync(configPath)) {
+  const runtime = resolveLauncherWireGuardRuntime(input);
+  if (!existsSync(configPath) && runtime.platform !== 'win32') {
     return {
       ok: true,
       skipped: true,
       reason: 'missing-wireguard-config',
-      configPath
+      configPath,
+      cleanupReady: true,
+      message: 'WireGuard config is missing.'
     };
   }
-  const runtime = resolveLauncherWireGuardRuntime(input);
   if (shouldUseDarwinLaunchDaemon(input, runtime)) {
     const launchDaemonStatus = getDarwinWireGuardLaunchDaemonStatus({
       runtime,
@@ -446,18 +469,40 @@ export async function stopLauncherWireGuardPeer(input: ElectronLauncherWireGuard
   const tunnel = await setWireGuardTunnelState({
     runtime,
     configPath,
-    action: 'down'
+    action: 'down',
+    windowsNrptRules: launcherWindowsCleanupNrptRules(input)
   });
-  const status = safeWireGuardStatus(runtime, configPath);
+  // Teardown proof must not depend on a still-readable profile. An upgrade can
+  // leave a missing or malformed config while the Windows service/adapter
+  // remains installed; the exact tunnel-name probe still verifies all three
+  // machine artifacts after the uninstall command.
+  const status = runtime.platform === 'win32'
+    ? getWindowsWireGuardTunnelStatusByName({ runtime, configPath })
+    : safeWireGuardStatus(runtime, configPath);
+  const windowsNrpt = runtime.platform === 'win32'
+    ? await getWindowsWireGuardNrptStatus({
+        runtime,
+        configPath,
+        probeTimeoutMs: input.nrptProbeTimeoutMs,
+        expectedRules: launcherWindowsCleanupNrptRules(input)
+      })
+    : null;
+  const cleanupReady = runtime.platform === 'win32'
+    ? launcherWindowsWireGuardCleanupReady(status, windowsNrpt)
+    : status?.active !== true;
   return {
-    ok: tunnel.ok === true,
+    ok: tunnel.ok === true && cleanupReady,
     authorizationCanceled: tunnel.authorizationCanceled === true,
     skipped: false,
     configPath,
     runtime,
     status,
+    windowsNrpt,
     tunnel,
-    message: tunnel.message
+    cleanupReady,
+    message: tunnel.ok === true && !cleanupReady
+      ? 'WireGuard stop command completed, but the Windows tunnel service, interface, or routes are still installed.'
+      : tunnel.message
   };
 }
 
@@ -475,7 +520,9 @@ export async function repairLauncherWireGuardPeerRoutes(input: ElectronLauncherW
   const repaired = await repairWireGuardTunnelRoutes({ runtime, configPath });
   const status = safeWireGuardStatus(runtime, configPath);
   const missingRoutes = Array.isArray(status?.missingRoutes) ? status.missingRoutes : [];
-  const ok = repaired.ok === true && (status?.active !== true || missingRoutes.length === 0);
+  const windowsNrpt = await launcherWindowsNrptStatus(runtime, configPath, input.nrptProbeTimeoutMs);
+  const nrptReady = !launcherWindowsNrptBlocksReady(windowsNrpt);
+  const ok = repaired.ok === true && (status?.active !== true || missingRoutes.length === 0) && nrptReady;
   return {
     ...repaired,
     ok,
@@ -483,9 +530,10 @@ export async function repairLauncherWireGuardPeerRoutes(input: ElectronLauncherW
     runtime,
     status,
     missingRoutes,
+    windowsNrpt,
     message: ok
       ? repaired.message
-      : `${repaired.message || 'WireGuard route repair completed, but route probes are still not ready.'}${missingRoutes.length ? ` missingRoutes=${missingRoutes.join(', ')}` : ''}`
+      : `${repaired.message || 'WireGuard route repair completed, but system network probes are still not ready.'}${missingRoutes.length ? ` missingRoutes=${missingRoutes.join(', ')}` : ''}${windowsNrpt && !nrptReady ? ` windowsNrpt=${windowsNrpt.state}${windowsNrpt.error ? ` (${windowsNrpt.error})` : ''}` : ''}`
   };
 }
 
@@ -505,7 +553,10 @@ export async function recoverLauncherWireGuardPeer(
   const runtime = resolveLauncherWireGuardRuntime(input);
   const status = safeWireGuardStatus(runtime, configPath);
   const missingRoutes = Array.isArray(status?.missingRoutes) ? status.missingRoutes : [];
-  if (status?.active === true && missingRoutes.length === 0) {
+  const windowsNrpt = await launcherWindowsNrptStatus(runtime, configPath, input.nrptProbeTimeoutMs);
+  const nrptBlocksReady = launcherWindowsNrptBlocksReady(windowsNrpt);
+  const nrptNeedsRepair = launcherWindowsNrptNeedsRepair(windowsNrpt);
+  if (status?.active === true && missingRoutes.length === 0 && !nrptBlocksReady) {
     return {
       ok: true,
       skipped: true,
@@ -513,14 +564,28 @@ export async function recoverLauncherWireGuardPeer(
       recoveryReason: input.reason ?? null,
       configPath,
       runtime,
-      status
+      status,
+      windowsNrpt
     };
   }
-  if (status?.active === true && missingRoutes.length > 0) {
+  if (status?.active === true && missingRoutes.length === 0 && windowsNrpt?.state === 'probe-failed') {
+    return {
+      ok: false,
+      skipped: true,
+      reason: 'nrpt-probe-failed',
+      recoveryReason: input.reason ?? null,
+      configPath,
+      runtime,
+      status,
+      windowsNrpt,
+      message: `Windows split DNS status probe failed: ${windowsNrpt.error || 'unknown error'}`
+    };
+  }
+  if (status?.active === true && (missingRoutes.length > 0 || nrptNeedsRepair)) {
     const repaired = await repairLauncherWireGuardPeerRoutes(input);
     return {
       ...repaired,
-      action: 'repair-routes',
+      action: missingRoutes.length > 0 ? 'repair-routes' : 'repair-nrpt',
       recoveryReason: input.reason ?? null
     };
   }
@@ -560,7 +625,11 @@ export async function recoverLauncherWireGuardPeer(
   });
   const nextStatus = await waitForLauncherWireGuardStatus(runtime, configPath);
   const nextMissingRouteCount = Array.isArray(nextStatus?.missingRoutes) ? nextStatus.missingRoutes.length : 0;
-  const ok = tunnel.ok === true && nextStatus?.active === true && nextMissingRouteCount === 0;
+  const nextWindowsNrpt = await launcherWindowsNrptStatus(runtime, configPath, input.nrptProbeTimeoutMs);
+  const ok = tunnel.ok === true
+    && nextStatus?.active === true
+    && nextMissingRouteCount === 0
+    && !launcherWindowsNrptBlocksReady(nextWindowsNrpt);
   return {
     ok,
     authorizationCanceled: tunnel.authorizationCanceled === true,
@@ -569,14 +638,23 @@ export async function recoverLauncherWireGuardPeer(
     configPath,
     runtime,
     status: nextStatus,
+    windowsNrpt: nextWindowsNrpt,
     tunnel,
-    message: ok ? tunnel.message : launcherWireGuardNotReadyMessage(tunnel, nextStatus)
+    message: ok
+      ? tunnel.message
+      : nextWindowsNrpt && launcherWindowsNrptBlocksReady(nextWindowsNrpt)
+        ? `${launcherWireGuardNotReadyMessage(tunnel, nextStatus)} Windows split DNS is not ready: ${nextWindowsNrpt.state}${nextWindowsNrpt.error ? ` (${nextWindowsNrpt.error})` : ''}.`
+        : launcherWireGuardNotReadyMessage(tunnel, nextStatus)
   };
 }
 
 export function getLauncherWireGuardPeerStatus(input: ElectronLauncherWireGuardRuntimeOptions) {
   const configPath = launcherWireGuardConfigPath(input);
+  const runtime = resolveLauncherWireGuardRuntime(input);
   if (!existsSync(configPath)) {
+    if (runtime.platform === 'win32') {
+      return getWindowsWireGuardTunnelStatusByName({ runtime, configPath });
+    }
     return {
       ok: false,
       active: false,
@@ -584,7 +662,6 @@ export function getLauncherWireGuardPeerStatus(input: ElectronLauncherWireGuardR
       error: 'WireGuard config missing'
     };
   }
-  const runtime = resolveLauncherWireGuardRuntime(input);
   const status = safeWireGuardStatus(runtime, configPath);
   if (!shouldUseDarwinLaunchDaemon(input, runtime)) return status;
   const launchDaemon = getDarwinWireGuardLaunchDaemonStatus({
@@ -600,6 +677,117 @@ export function getLauncherWireGuardPeerStatus(input: ElectronLauncherWireGuardR
       error: 'WireGuard status unavailable'
     }),
     launchDaemon
+  };
+}
+
+export async function getLauncherWireGuardNrptStatus(
+  input: ElectronLauncherWireGuardRuntimeOptions
+): Promise<WireGuardWindowsNrptStatus | null> {
+  const configPath = launcherWireGuardConfigPath(input);
+  const runtime = resolveLauncherWireGuardRuntime(input);
+  if (runtime.platform !== 'win32') return null;
+  return getWindowsWireGuardNrptStatus({
+    runtime,
+    configPath,
+    probeTimeoutMs: input.nrptProbeTimeoutMs,
+    expectedRules: launcherWindowsCleanupNrptRules(input)
+  });
+}
+
+export function launcherWindowsWireGuardTunnelCleanupReady(
+  status: ReturnType<typeof getWireGuardTunnelStatus> | null
+): boolean {
+  if (!status || status.ok !== true || status.active !== false) return false;
+  const serviceState = stringValue(status.serviceState)?.toUpperCase() ?? null;
+  if (!serviceState || !['NOT_FOUND', 'DOES_NOT_EXIST', 'MISSING'].includes(serviceState)) return false;
+  if (Array.isArray(status.routes) && status.routes.length > 0) return false;
+  if (stringValue(status.ifconfig)) return false;
+  return true;
+}
+
+export function launcherWindowsWireGuardCleanupReady(
+  status: ReturnType<typeof getWireGuardTunnelStatus> | null,
+  nrpt: WireGuardWindowsNrptStatus | null
+): boolean {
+  if (!launcherWindowsWireGuardTunnelCleanupReady(status) || !nrpt) return false;
+  if (nrpt.state === 'probe-failed' || nrpt.globalRestorePending) return false;
+  if (nrpt.totalOwnedRuleCount !== 0 || nrpt.legacyAmbiguousRuleCount !== 0) return false;
+  if (nrpt.unexpectedOwnedNamespaces.length > 0) return false;
+  return nrpt.namespaces.every(
+    (namespace) => namespace.ownedRuleCount === 0
+      && namespace.legacyAmbiguousRuleCount === 0
+  );
+}
+
+export function validateLauncherWindowsNrptDesiredState(
+  status: WireGuardWindowsNrptStatus,
+  desired: ElectronLauncherWindowsNrptDesiredState
+): ElectronLauncherWindowsNrptStatus {
+  const desiredNameServers = wireGuardDnsServers(desired.dnsServer);
+  const desiredNamespaces = uniqueStrings((desired.dnsDomains ?? [])
+    .map((domain) => normalizeNrptDomain(domain))
+    .filter((domain): domain is string => Boolean(domain))
+    .flatMap((domain) => [domain, `.${domain}`]));
+  const profileNamespaces = new Map(status.namespaces.map((row) => [
+    normalizeNrptNamespace(row.namespace),
+    uniqueStrings(row.expectedNameServers)
+  ]));
+  const profileMissingNamespaces = desiredNamespaces.filter((namespace) => !profileNamespaces.has(namespace));
+  const profileUnexpectedNamespaces = [...profileNamespaces.keys()]
+    .filter((namespace) => !desiredNamespaces.includes(namespace));
+  const profileMismatchedNamespaces = desiredNamespaces.filter((namespace) => {
+    const expected = profileNamespaces.get(namespace);
+    return Boolean(expected && !stringSetsEqual(expected, desiredNameServers));
+  });
+  const profileDesiredStateMismatch = profileMissingNamespaces.length > 0
+    || profileUnexpectedNamespaces.length > 0
+    || profileMismatchedNamespaces.length > 0;
+  if (!profileDesiredStateMismatch) {
+    return {
+      ...status,
+      desiredNamespaces,
+      desiredNameServers,
+      profileDesiredStateMismatch: false,
+      profileMissingSplitDns: false,
+      profileMissingNamespaces: [],
+      profileUnexpectedNamespaces: [],
+      profileMismatchedNamespaces: []
+    };
+  }
+  const missingNamespaces = uniqueStrings([
+    ...status.missingNamespaces,
+    ...profileMissingNamespaces
+  ]);
+  const mismatchedNamespaces = uniqueStrings([
+    ...status.mismatchedNamespaces,
+    ...profileMismatchedNamespaces,
+    ...profileUnexpectedNamespaces
+  ]);
+  return {
+    ...status,
+    configured: desiredNamespaces.length > 0 || status.configured,
+    ready: false,
+    state: profileMissingNamespaces.length > 0 ? 'rules-missing' : 'name-server-mismatch',
+    missingNamespaces,
+    mismatchedNamespaces,
+    desiredNamespaces,
+    desiredNameServers,
+    profileDesiredStateMismatch: true,
+    profileMissingSplitDns: true,
+    profileMissingNamespaces,
+    profileUnexpectedNamespaces,
+    profileMismatchedNamespaces,
+    error: [
+      profileMissingNamespaces.length
+        ? `profile missing namespaces: ${profileMissingNamespaces.join(', ')}`
+        : null,
+      profileUnexpectedNamespaces.length
+        ? `profile has stale namespaces: ${profileUnexpectedNamespaces.join(', ')}`
+        : null,
+      profileMismatchedNamespaces.length
+        ? `profile DNS differs from current routePlan for: ${profileMismatchedNamespaces.join(', ')}`
+        : null
+    ].filter(Boolean).join('; ')
   };
 }
 
@@ -700,6 +888,35 @@ function safeWireGuardStatus(
   } catch {
     return null;
   }
+}
+
+async function launcherWindowsNrptStatus(
+  runtime: ReturnType<typeof resolveWireGuardConnectionRuntime>,
+  configPath: string,
+  probeTimeoutMs?: number
+): Promise<WireGuardWindowsNrptStatus | null> {
+  if (runtime.platform !== 'win32') return null;
+  return getWindowsWireGuardNrptStatus({ runtime, configPath, probeTimeoutMs });
+}
+
+function launcherWindowsCleanupNrptRules(
+  input: ElectronLauncherWireGuardRuntimeOptions
+): Array<{ namespace: string; nameServers: string[] }> {
+  const nameServers = wireGuardDnsServers(input.nrptCleanupDnsServer);
+  if (nameServers.length === 0) return [];
+  const namespaces = uniqueStrings((input.nrptCleanupDnsDomains ?? [])
+    .map((domain) => normalizeNrptDomain(domain))
+    .filter((domain): domain is string => Boolean(domain))
+    .flatMap((domain) => [domain, `.${domain}`]));
+  return namespaces.map((namespace) => ({ namespace, nameServers }));
+}
+
+function launcherWindowsNrptNeedsRepair(status: WireGuardWindowsNrptStatus | null): boolean {
+  return status?.configured === true && status.ready !== true && status.state !== 'probe-failed';
+}
+
+function launcherWindowsNrptBlocksReady(status: WireGuardWindowsNrptStatus | null): boolean {
+  return status !== null && status.ready !== true && (status.configured === true || status.state === 'probe-failed');
 }
 
 function shouldUseDarwinLaunchDaemon(
@@ -1020,6 +1237,25 @@ function requiredString(value: string | null | undefined, field: string): string
 
 function uniqueStrings(values: readonly string[] | null | undefined): string[] {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
+}
+
+function normalizeNrptDomain(value: string | null | undefined): string | null {
+  const domain = value?.trim().toLowerCase().replace(/^\.+/, '').replace(/\.+$/, '');
+  return domain || null;
+}
+
+function normalizeNrptNamespace(value: string | null | undefined): string {
+  const text = value?.trim().toLowerCase() ?? '';
+  if (!text) return '';
+  const suffix = text.startsWith('.');
+  const domain = normalizeNrptDomain(text);
+  return domain ? `${suffix ? '.' : ''}${domain}` : '';
+}
+
+function stringSetsEqual(left: readonly string[], right: readonly string[]): boolean {
+  const leftSet = new Set(uniqueStrings(left).map((value) => value.toLowerCase()));
+  const rightSet = new Set(uniqueStrings(right).map((value) => value.toLowerCase()));
+  return leftSet.size === rightSet.size && [...leftSet].every((value) => rightSet.has(value));
 }
 
 function sanitizeProfileName(value: string): string {

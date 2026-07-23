@@ -103,6 +103,10 @@ installId/deviceId，导致已有 Release Center 定向和证据链失去连续�
 └─────────────────────────────────────────────────────────────┘
 ```
 
+Internal 是用户、权限、ProductNetwork、DNS/代理策略和 release policy 的 desired-state
+中心；它不直接修改用户电脑。每个 standalone 仍负责在本机执行并回滚 UAC/LaunchDaemon、
+WireGuard、route、平台 resolver 和 PAC，embed 只通过 broker 消费结果。
+
 ### 1.2 两个产品的网络坐标（Admin 已注册，不要改）
 
 | 项 | MX-H2I | Luopan |
@@ -131,7 +135,7 @@ mx-h2i 用子路径动态 import（CJS 环境）。
 | `/standalone-data-plane` | WG 数据面 apply/stop/diagnose、ownership claim 构建/读写 | ✅ |
 | `/network-ownership-registry` | 本机多产品共存仲裁（路由/DNS/PAC claim 的登记与合并） | ✅（经 data-plane 间接） |
 | `/wireguard` | WG profile/service 底层操作（一般经 data-plane 间接使用） | 按需 |
-| `/system-domain-proxy` | 系统级域名代理/PAC/NRPT 的声明式归并 | 按需 |
+| `/system-domain-proxy` | local edge/PAC；macOS dynamic supplemental DNS。Windows NRPT 由 `/wireguard` 安装，MX-H2I 默认同时启用 Windows local-edge PAC | MX-H2I 使用；Luopan 当前未接 |
 | `/network-diagnostics` | healthz/DNS/路由探测 | ✅ |
 | `/release-updater` | Release Center `check()`（服务端决策）+ `report()`（证据链） | ✅ |
 | `/release-update-executor` | docs/17 状态机执行器：下载/校验/staged/激活/回滚/adoption | ✅ |
@@ -167,8 +171,9 @@ mx-h2i 用子路径动态 import（CJS 环境）。
 
 - 首启生成 `installation`（installId/deviceId/密钥对）并持久化；installId 是
   灰度分桶、ownership ownerId、更新上报的主键，**换了等于换机器**。
-- 两种会话：guest（匿名 lease 段）与 employee（登录 lease 段）。Luopan demo 目前
-  走 `connectNetwork({ identityKind: 'anonymous' })`，正式版按产品需求接登录。
+- 两种会话：guest（匿名 lease 段）与 employee（登录 lease 段）。Luopan 未登录时先拿
+  anonymous lease；User Center 登录后，后续连接会带 `identityKind: 'user'` 和 `userId`
+  申请登录 lease。不能再把当前 demo 描述成 anonymous-only。
 - V1 → V2 迁移期可设置 `LUOPAN_LEGACY_HDO_BASE_URL`：正常登录仍先走隧道内 VIP；只有
   V2 明确返回账号未激活/不存在的 401 时，才用同一凭据向 V1 HDO 验证，并经 VIP 把账号
   以固定 `mx-user` 权限导入 V2 后重试。V1 token 不落盘，迁移完成应删除该配置。
@@ -188,24 +193,49 @@ bootstrap resolve（域名→IP，可配 DNS server / hostResolve 表）
 对应包 API（luopan demo 全部已接）：`connectNetwork` →
 `applyElectronLauncherStandaloneDataPlane`（内部完成 WG + ownership + 探测）→
 `diagnoseElectronLauncherStandaloneDataPlane`。断开对称：
-`stopElectronLauncherStandaloneDataPlane` 释放自己的 claim，**绝不触碰其他产品的**。
+`stopElectronLauncherStandaloneDataPlane` 仅在本产品 WG/route/NRPT 清理验证成功后释放
+自己的 claim；失败时保留 claim 供 repair，且**绝不触碰其他产品的**。
 
 MX-H2I 额外有 Luopan 用不到的部分：domestic relay、split DNS 多域、bootstrap
 DNS 重试链、迁移期 `10.88.88.88` 兼容路由。读到这些直接跳过。
 
 ### 2.4 系统面共存归并（红线 1、2 的机制）
 
-系统级资源（路由表、Windows NRPT、macOS PAC/DNS）是全局的，多产品必须经
-**ownership registry** 仲裁：
+系统级资源（路由表、Windows NRPT、WinINet/macOS PAC 和 macOS DNS）是全局的，目标架构
+要求多产品经 **ownership registry** 仲裁：
 
 - 每产品把自己的 claim（ownerId=`{productId}:{installId}`、routeCidrs、dnsZones、
   metadata）写进本机 registry（包 API：`upsertElectronLauncherStandaloneOwnershipClaim`
-  / `releaseElectronLauncherStandaloneOwnershipClaim`）。
-- 落地由合并面统一执行：NRPT 规则带产品 Comment 标签，各产品只增删自己标签的
-  规则（electron-core-wireguard ≥2.1.0 修复了跨产品误删）；PAC 由 local edge 单点
-  聚合出全量规则。
+  / `releaseElectronLauncherStandaloneOwnershipClaim`）。包以规范化 state path 派生稳定
+  跨进程队列；每个进程使用唯一候选文件，通过 ticket/token 在短租约内完成“读取、冲突
+  检查、写 connecting claim”。活 owner 争用在有界等待后 fail closed；仅回收已确认 dead
+  PID 的唯一候选，不删除稳定队列目录。状态写入使用临时文件、`fsync` 和原子 rename，
+  不能用产品代码自行 read-modify-write。
+- Windows NRPT 当前由每个产品的 `electron-core-wireguard` profile/service path 落地，
+  规则带产品 Comment 标签并只增删自己的规则；registry 尚未成为统一的 NRPT writer。
+  PAC/local edge 也只有实际创建 `system-domain-proxy` manager 的 owner 才会落地。
+- 互不重叠的 product-scoped WG service/routes 可以由各 standalone owner 分别写入；
+  ownership gate 必须拒绝重叠 AllowedIPs/routes。单写者约束针对 Windows
+  `AutoConfigURL`/应用托管 `2053`、macOS shared PAC/resolver 和 machine-global NRPT
+  baseline/回滚，不禁止两组隔离的 WG route 并存。
 - **产品代码永远不直接调 `netsh`/`networksetup`/NRPT**。luopan demo 里
   `failOnOwnershipConflicts: true` 就是验收态：有冲突宁可失败也不抢。
+
+当前 Luopan 调用 standalone data plane 时使用 `suppressWireGuardDns: true`，且没有创建
+`system-domain-proxy` manager；它也不登记自己并未实际持有的 DNS namespace，不安装
+Windows NRPT，也不接管系统 PAC。因此 Luopan 当前可验证 ProductNetwork、WG/route、
+用户/权限、更新和 claim
+隔离，不等于 NRPT/PAC E2E。需要验证这些系统面时，必须使用 MX-H2I 或先为 Luopan 显式接入
+同等能力，再执行 docs/18、docs/19 的 Windows 真机矩阵。MX-H2I 的 Windows 完整 ready
+同时要求 live NRPT/system DNS、WinINet PAC readback、Chromium `resolveProxy` 指向
+`127.0.0.1:2053` 和实际 CONNECT；Luopan 的 route/claim green 不能替代其中任何一项。
+
+因此，**当前 Luopan 与 MX-H2I 可以同时开启**：Luopan 不会写 NRPT/PAC，也不会占用
+`2053`。但这不等于支持两个完整 network owner。若未来 Luopan 也启用 DNS/PAC，Windows
+当前用户级 lease queue 会在任何 state/registry 修改前安全拒绝第二个进程，即使它改用不同的
+PAC 端口或 state path；不得用两个进程分别写 `AutoConfigURL`。应先把
+owner claim、PAC 合并、NRPT 全局状态和最后一个 owner 退出时的回滚下沉到单一、长生命周期
+Launcher network broker。
 
 验收工具：`scripts/coexist-check.mjs`（snapshot/assert/diff/run，内置 C1–C12
 双产品矩阵，见 docs/19 §4.2 与 HANDOFF 验收标准）。
@@ -293,7 +323,7 @@ mx-h2i 的约定，建议 Luopan 照搬（luopan demo 已具备前两条）：
 | 用户中心 | `network-ready` 后，`luopan:login` / `luopan:logout` 才经隧道内 VIP 执行 SDK gateway OAuth password grant（docs/15 `/internal/v1/sdk/oauth/token`）→ `principal.userId` 存入 runtime.identity；access token 只留内存。登录用户可命中 Release Center 按 userId 定向的发版 | SDK gateway |
 | 数据面 apply | `luopan:apply-data-plane`：standalone 模式走 `applyElectronLauncherStandaloneDataPlane`（profile `luopan.conf`、ownerId `luopan:<installId>`、`failOnOwnershipConflicts: true`）；reuse 模式（`LUOPAN_DATA_PLANE_MODE=reuse`）尝试挂到已有共享数据面 | `/standalone-data-plane` |
 | 一键连入 | `luopan:connect-internal` = lease + 数据面 + 隧道内 VIP healthz，成功即 `network-ready`（§4.5 客户端部分） | 同上 |
-| 断开 | `luopan:disconnect-data-plane` → `stopElectronLauncherStandaloneDataPlane`（只释放自己的 claim） | 同上 |
+| 断开/退出 | standalone 调 `stopElectronLauncherStandaloneDataPlane`，仅在本产品 WG/route 清理证明成功后释放 claim；reuse 只 release `luopan:<installId>` attach claim，不停止 shared owner。`before-quit` 会阻止 Electron 直接退出并等待同一套清理，失败则保存错误并重新显示窗口 | 同上 |
 | snapshot | `luopan:refresh-snapshot` → `createSnapshot` + `routePlanFromSnapshot` + diagnose | 主入口 |
 | **Oversea** | 登录 + Internal ready 双门 → ensure ready → inline YAML → 应用级 mihomo → 隔离测试窗口；登出/断网停止 | launcher `/oversea` + `electron-plugin-tunnel` |
 | **更新** | `luopan:check-updates` / `apply-update` / `open-staged-installer` / `rollback-update-slot` + 启动期簿记 | §5 逐段讲解 |
@@ -315,9 +345,11 @@ pnpm run build        # quasar build -m electron --skip-pkg
 - **routeCidrs 白名单心态**：连接成功后自查 `connection.routeCidrs` ⊆
   `{10.91.0.0/16, 10.88.100.3/32}`，超出即 bug。重连/恢复路径同样约束——
   "恢复"= 重建自己的 claim，不是 adopt 现场发现的路由。
-- **诊断顺序**：control 面 `http://10.88.100.3:18090/healthz` → DNS
-  （`luopan.mxinfo-inc.cn` → 10.88.100.3）→ 数据面（ping VIP）。平台侧交付前会
-  给你验证过的 base URL；接入问题先跑这三步再上报。
+- **诊断顺序**：control 面 `http://10.88.100.3:18090/healthz` → 数据面 route/ping VIP
+  → DNS policy/materialization。当前 demo suppress WG DNS 且未接 system-domain-proxy，
+  所以 `luopan.mxinfo-inc.cn → 10.88.100.3` 只能验证服务端 materialization/claim，不能
+  证明客户端系统 resolver 已接管。平台侧交付前会给你验证过的 base URL；接入问题先区分
+  route-ready 与 resolver-ready 再上报。
 - **端口**：任何本地监听端口经 `/local-ports` 申请（productId 命名空间 + 稳定
   哈希 + 冲突重分配），不 hardcode。
 - **验收节奏**：骨架连上 `10.88.100.3` 后，第一个里程碑就是

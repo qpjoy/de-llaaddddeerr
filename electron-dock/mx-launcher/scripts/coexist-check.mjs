@@ -234,8 +234,8 @@ function assertProduct(snapshot, productId, expect) {
       if (!owned.length) warnings.push(`I2: 未发现带 ${productId} 归属标签的 NRPT 规则（若本场景不下发 split DNS 可忽略）`);
     }
     const claims = ownershipClaims(snapshot);
-    if (claims && !claims.some((claim) => claimBelongsTo(claim, productId))) {
-      warnings.push(`I2: ownership registry 中没有 ${productId} 的 claim（${snapshot.ownership.path}）`);
+    if (!claims || !claims.some((claim) => claimBelongsTo(claim, productId) && ['connecting', 'active'].includes(claim.state))) {
+      failures.push(`I2: ownership registry 中没有 ${productId} 的 live claim（${snapshot.ownership.path}）`);
     }
   } else {
     if (ifaceRoutes.length > 0) {
@@ -249,8 +249,8 @@ function assertProduct(snapshot, productId, expect) {
       if (owned.length) failures.push(`I2: 断开后仍残留 ${owned.length} 条 ${productId} 的 NRPT 规则：${owned.map((r) => r.Namespace).join(', ')}`);
     }
     const claims = ownershipClaims(snapshot);
-    if (claims && claims.some((claim) => claimBelongsTo(claim, productId) && claim.state === 'active')) {
-      warnings.push(`I2: 断开后 ownership registry 仍有 ${productId} 的 active claim`);
+    if (claims && claims.some((claim) => claimBelongsTo(claim, productId) && claim.state !== 'released')) {
+      failures.push(`I2: 断开后 ownership registry 仍有 ${productId} 的 live/stale claim`);
     }
   }
   return { productId, expect, failures, warnings };

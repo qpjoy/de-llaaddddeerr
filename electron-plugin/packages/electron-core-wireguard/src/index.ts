@@ -222,6 +222,60 @@ export interface WireGuardTunnelStatus {
   error?: string | null;
 }
 
+export interface WireGuardWindowsNrptNamespaceStatus {
+  namespace: string;
+  expectedNameServers: string[];
+  installedNameServers: string[];
+  ownedRuleCount: number;
+  legacyAmbiguousRuleCount: number;
+  foreignOwners: string[];
+  ready: boolean;
+}
+
+export interface WireGuardWindowsNrptExpectedRule {
+  namespace: string;
+  nameServers: string[];
+}
+
+export interface WireGuardWindowsNrptRuleSnapshot {
+  namespace?: string | null;
+  nameServers?: string[] | string | null;
+  comment?: string | null;
+  displayName?: string | null;
+}
+
+export interface WireGuardWindowsNrptSnapshot {
+  queryPolicy?: string | null;
+  enableDaForAllNetworks?: string | null;
+  rules?: WireGuardWindowsNrptRuleSnapshot[] | WireGuardWindowsNrptRuleSnapshot | null;
+  pendingOwners?: string[] | string | null;
+  legacyMigrationAuthorized?: boolean | null;
+}
+
+export interface WireGuardWindowsNrptStatus {
+  supported: boolean;
+  configured: boolean;
+  ready: boolean;
+  source: 'live-powershell';
+  state: 'ready' | 'not-configured' | 'global-disabled' | 'global-restore-pending' | 'rules-missing' | 'name-server-mismatch' | 'owned-rules-stale' | 'legacy-ambiguous' | 'probe-failed';
+  tunnelName: string;
+  comment: string;
+  queryPolicy: string | null;
+  enableDaForAllNetworks: string | null;
+  globalReady: boolean;
+  globalRestorePending: boolean;
+  pendingGlobalOwners: string[];
+  totalOwnedRuleCount: number;
+  unexpectedOwnedNamespaces: string[];
+  legacyMigrationAuthorized: boolean;
+  legacyAmbiguousRuleCount: number;
+  legacyAmbiguousNamespaces: string[];
+  namespaces: WireGuardWindowsNrptNamespaceStatus[];
+  missingNamespaces: string[];
+  mismatchedNamespaces: string[];
+  error: string | null;
+}
+
 export interface HdoLocalRoute {
   cidr: string;
   source: 'darwin-netstat' | 'linux-ip-route' | 'windows-route-print';
@@ -288,6 +342,8 @@ export const HDO_MESH_ROUTE_CIDRS = [
 const DARWIN_HDO_PRIORITY_ROUTE_PREFIX = 20;
 const DARWIN_HDO_MIN_PRIORITY_ROUTE_PREFIX = 16;
 const DARWIN_HDO_MAX_PRIORITY_ROUTES_PER_CIDR = 64;
+const WINDOWS_NRPT_SHARED_STATE_RELATIVE_PATH = 'QPJoy\\NRPT\\global-state.json';
+const WINDOWS_NRPT_MUTEX_NAME = 'Global\\QPJoy.MXLauncher.NRPT.v1';
 
 export const HDO_COMMON_TRUSTED_PORTS: HdoSharedPort[] = [
   { label: 'SSH', port: 22, protocol: 'tcp', visibility: 'trusted-mesh' },
@@ -617,6 +673,7 @@ export function buildWireGuardTunnelCommand(input: {
   runtime: WireGuardConnectionRuntimeStatus;
   configPath: string;
   action: WireGuardTunnelAction;
+  windowsNrptRules?: WireGuardWindowsNrptExpectedRule[] | null;
 }): WireGuardTunnelCommand {
   const { runtime, configPath, action } = input;
   if (!configPath.trim()) throw new Error('configPath is required');
@@ -624,21 +681,32 @@ export function buildWireGuardTunnelCommand(input: {
   if (runtime.platform === 'win32') {
     const command = runtime.windowsWireGuard?.command;
     if (!command) throw new Error(runtime.error ?? 'wireguard.exe unavailable');
-    const profile = parseWireGuardProfile(configPath);
-    const tunnelName = pathWin32.basename(configPath).replace(/\.[^.]+$/, '');
-    const routeLogPath = wireGuardRouteLogPath(configPath, profile.interfaceName);
+    let profile: ReturnType<typeof parseWireGuardProfile> | null = null;
+    try {
+      profile = parseWireGuardProfile(configPath);
+    } catch (err) {
+      if (action !== 'down') throw err;
+    }
+    const tunnelName = profile?.interfaceName ?? wireGuardInterfaceName(configPath);
+    const routeLogPath = wireGuardRouteLogPath(configPath, tunnelName);
     const wireGuardArgs = action === 'down'
       ? ['/uninstalltunnelservice', tunnelName]
       : ['/installtunnelservice', configPath];
     const scriptPaths = windowsPowerShellScriptPaths(configPath, tunnelName, action);
+    const profileNrptRules = profile ? windowsNrptRulesFromProfile(profile) : [];
+    const suppliedNrptRules = normalizeWindowsNrptExpectedRules(input.windowsNrptRules ?? []);
+    const nrptRules = action === 'down' && profileNrptRules.length === 0
+      ? suppliedNrptRules
+      : profileNrptRules;
     const scripts = windowsElevatedStartProcessScripts(
       command,
       wireGuardArgs,
       action,
       tunnelName,
-      windowsNrptRulesFromProfile(profile),
-      windowsRouteRulesFromProfile(profile),
-      profile.addresses,
+      nrptRules,
+      profileNrptRules.length > 0,
+      profile ? windowsRouteRulesFromProfile(profile) : [],
+      profile?.addresses ?? [],
       scriptPaths.elevated,
       routeLogPath
     );
@@ -739,6 +807,7 @@ export async function setWireGuardTunnelState(input: {
   runtime: WireGuardConnectionRuntimeStatus;
   configPath: string;
   action: WireGuardTunnelAction;
+  windowsNrptRules?: WireGuardWindowsNrptExpectedRule[] | null;
 }): Promise<WireGuardTunnelResult> {
   let command: WireGuardTunnelCommand;
   try {
@@ -846,7 +915,7 @@ export async function repairWireGuardTunnelRoutes(input: {
   if (input.runtime.platform === 'win32') {
     const nrptRules = windowsNrptRulesFromProfile(profile);
     const routeRules = windowsRouteRulesFromProfile(profile);
-    if (nrptRules.length === 0 && routeRules.length === 0) {
+    if (nrptRules.length === 0 && routeRules.length === 0 && !isMxH2iTunnel(profile.interfaceName)) {
       return {
         ...baseResult,
         ok: false,
@@ -1158,6 +1227,15 @@ export function getWireGuardTunnelStatus(input: {
   configPath: string;
 }): WireGuardTunnelStatus {
   const profile = parseWireGuardProfile(input.configPath);
+  if (input.runtime.platform === 'win32') {
+    return getWindowsWireGuardTunnelStatusByName({
+      runtime: input.runtime,
+      configPath: input.configPath,
+      tunnelName: profile.interfaceName,
+      addresses: profile.addresses,
+      allowedIps: profile.allowedIps
+    });
+  }
   const realInterfaceName = resolveWireGuardRealInterface(
     input.runtime,
     profile.interfaceName,
@@ -1187,32 +1265,6 @@ export function getWireGuardTunnelStatus(input: {
       ...status,
       ok: false,
       error: input.runtime.error ?? input.runtime.warnings[0] ?? 'WireGuard runtime unavailable'
-    };
-  }
-  if (input.runtime.platform === 'win32') {
-    const wg = input.runtime.wg.command;
-    if (wg) {
-      const dump = tryExecFile(wg, ['show', profile.interfaceName, 'dump']);
-      if (dump.ok) {
-        const rawDump = dump.stdout.trim();
-        return {
-          ...status,
-          active: true,
-          peers: parseWireGuardDump(rawDump),
-          rawDump,
-          routes: detectInterfaceRoutes(profile.interfaceName),
-          ifconfig: readInterfaceState(profile.interfaceName)
-        };
-      }
-    }
-    const serviceState = readWindowsTunnelServiceState(profile.interfaceName);
-    return {
-      ...status,
-      active: serviceState === 'RUNNING',
-      serviceState,
-      routes: detectInterfaceRoutes(profile.interfaceName),
-      ifconfig: readInterfaceState(profile.interfaceName),
-      error: serviceState ? null : `WireGuard tunnel service WireGuardTunnel$${profile.interfaceName} 未安装`
     };
   }
   if (!realInterfaceName) return status;
@@ -1280,6 +1332,406 @@ export function getWireGuardTunnelStatus(input: {
     routeLogTail: readTextTail(status.routeLogPath),
     ifconfig
   };
+}
+
+export function getWindowsWireGuardTunnelStatusByName(input: {
+  runtime: WireGuardConnectionRuntimeStatus;
+  configPath: string;
+  tunnelName?: string | null;
+  addresses?: string[] | null;
+  allowedIps?: string[] | null;
+}): WireGuardTunnelStatus {
+  const interfaceName = input.tunnelName?.trim() || wireGuardInterfaceName(input.configPath);
+  const addresses = uniqueStrings(input.addresses ?? []);
+  const allowedIps = uniqueStrings(input.allowedIps ?? []);
+  const routeLogPath = wireGuardRouteLogPath(input.configPath, interfaceName);
+  const base: WireGuardTunnelStatus = {
+    ok: true,
+    active: false,
+    mode: input.runtime.method,
+    interfaceName,
+    realInterfaceName: interfaceName,
+    configPath: input.configPath,
+    addresses,
+    allowedIps,
+    missingRoutes: [],
+    routeProbes: [],
+    routeLogPath,
+    routeLogTail: readTextTail(routeLogPath),
+    peers: [],
+    routes: [],
+    ifconfig: null,
+    rawDump: null,
+    runtime: input.runtime
+  };
+  if (input.runtime.platform !== 'win32') {
+    return {
+      ...base,
+      ok: false,
+      error: `Windows tunnel status is unavailable on ${input.runtime.platform}`
+    };
+  }
+  const wg = input.runtime.wg?.command;
+  if (wg) {
+    const dump = tryExecFile(wg, ['show', interfaceName, 'dump']);
+    if (dump.ok) {
+      const rawDump = dump.stdout.trim();
+      return {
+        ...base,
+        active: true,
+        serviceState: 'RUNNING',
+        peers: parseWireGuardDump(rawDump),
+        rawDump,
+        routes: detectInterfaceRoutes(interfaceName),
+        ifconfig: readInterfaceState(interfaceName)
+      };
+    }
+  }
+  const machineState = readWindowsTunnelMachineState(interfaceName);
+  return {
+    ...base,
+    ok: machineState.ok,
+    active: machineState.serviceState === 'RUNNING',
+    serviceState: machineState.serviceState,
+    routes: machineState.routes,
+    ifconfig: machineState.adapters.length > 0
+      ? JSON.stringify(machineState.adapters)
+      : null,
+    error: machineState.error
+  };
+}
+
+export async function getWindowsWireGuardNrptStatus(input: {
+  runtime: WireGuardConnectionRuntimeStatus;
+  configPath: string;
+  probeTimeoutMs?: number;
+  expectedRules?: WireGuardWindowsNrptExpectedRule[] | null;
+}): Promise<WireGuardWindowsNrptStatus | null> {
+  if (input.runtime.platform !== 'win32') return null;
+  let profile: ReturnType<typeof parseWireGuardProfile> | null = null;
+  try {
+    profile = parseWireGuardProfile(input.configPath);
+  } catch {
+    // A profile may already be gone during upgrade/uninstall. The tunnel name
+    // still gives us an exact ownership tag, so continue probing the live
+    // machine-wide NRPT table with an empty desired state.
+  }
+  const profileRules = profile ? windowsNrptRulesFromProfile(profile) : [];
+  const expectedRules = profileRules.length > 0
+    ? profileRules
+    : normalizeWindowsNrptExpectedRules(input.expectedRules ?? []);
+  const tunnelName = profile?.interfaceName ?? wireGuardInterfaceName(input.configPath);
+  const product = windowsTunnelProductLabels(tunnelName);
+  const comment = `${product.commentPrefix} ${tunnelName}`;
+  const legacyStateRelativePath = `${product.programDataDir}\\nrpt-global-${tunnelName}.json`;
+  const probeTimeoutMs = normalizeTimeoutMs(input.probeTimeoutMs, 3000);
+  const mutexTimeoutMs = Math.max(25, Math.min(1500, probeTimeoutMs - 250));
+
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$ProgressPreference = 'SilentlyContinue'",
+    ...windowsNrptMutexPowerShellLines(),
+    `$hdoNrptMutex = Enter-HdoNrptMutex ${mutexTimeoutMs}`,
+    'try {',
+    '$global = Get-DnsClientNrptGlobal -ErrorAction Stop',
+    '$rules = @(Get-DnsClientNrptRule -ErrorAction Stop)',
+    '$rows = @($rules | ForEach-Object { [pscustomobject]@{ namespace = [string]$_.Namespace; nameServers = @($_.NameServers | ForEach-Object { [string]$_ }); comment = [string]$_.Comment; displayName = [string]$_.DisplayName } })',
+    `$statePath = Join-Path $env:ProgramData ${powerShellString(WINDOWS_NRPT_SHARED_STATE_RELATIVE_PATH)}`,
+    `$legacyStatePath = Join-Path $env:ProgramData ${powerShellString(legacyStateRelativePath)}`,
+    '$legacyMigrationAuthorized = Test-Path $legacyStatePath -ErrorAction Stop',
+    '$pendingOwners = @()',
+    'if (Test-Path $statePath -ErrorAction Stop) {',
+    '  $state = Get-Content -Path $statePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop',
+    '  $pendingOwners = @($state.Owners | ForEach-Object { [string]$_ } | Where-Object { $_ })',
+    '} elseif (Test-Path $legacyStatePath -ErrorAction Stop) {',
+    '  Get-Content -Path $legacyStatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop | Out-Null',
+    `  $pendingOwners = @(${powerShellString(comment)})`,
+    '}',
+    '[pscustomobject]@{',
+    '  queryPolicy = if ($null -eq $global) { $null } else { [string]$global.QueryPolicy }',
+    '  enableDaForAllNetworks = if ($null -eq $global) { $null } else { [string]$global.EnableDAForAllNetworks }',
+    '  pendingOwners = $pendingOwners',
+    '  legacyMigrationAuthorized = [bool]$legacyMigrationAuthorized',
+    '  rules = $rows',
+    '} | ConvertTo-Json -Depth 8 -Compress',
+    '} finally {',
+    '  Exit-HdoNrptMutex $hdoNrptMutex',
+    '}'
+  ].join('\r\n');
+  let result: { stdout: string; stderr: string };
+  try {
+    result = await execFileAsync(windowsPowerShellCommand(), [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      script
+    ], {
+      timeoutMs: probeTimeoutMs
+    });
+  } catch (err) {
+    return windowsNrptProbeFailure(
+      tunnelName,
+      comment,
+      commandOutputMessage(err) || errorMessage(err) || 'Get-DnsClientNrptRule failed',
+      expectedRules
+    );
+  }
+  try {
+    return parseWindowsNrptProbeResult(JSON.parse(result.stdout), tunnelName, expectedRules);
+  } catch (err) {
+    return windowsNrptProbeFailure(
+      tunnelName,
+      comment,
+      `Invalid Windows NRPT probe output: ${errorMessage(err)}`,
+      expectedRules
+    );
+  }
+}
+
+export function evaluateWindowsWireGuardNrptStatus(input: {
+  tunnelName: string;
+  expectedRules: WireGuardWindowsNrptExpectedRule[];
+  snapshot: WireGuardWindowsNrptSnapshot;
+}): WireGuardWindowsNrptStatus {
+  const tunnelName = input.tunnelName;
+  const comment = `${windowsTunnelProductLabels(tunnelName).commentPrefix} ${tunnelName}`;
+  const legacyComment = windowsLegacyNrptComment(tunnelName);
+  const ownsUntaggedRules = false;
+  const ownedComments = new Set(
+    [comment, legacyComment]
+      .filter((value): value is string => Boolean(value))
+      .map((value) => value.toLowerCase())
+  );
+  const rules = normalizeWindowsNrptRuleSnapshots(input.snapshot.rules);
+  const expectedRules = input.expectedRules.map((rule) => ({
+    namespace: normalizeWindowsNrptNamespace(rule.namespace),
+    nameServers: normalizeWindowsNrptNameServers(rule.nameServers)
+  })).filter((rule) => Boolean(rule.namespace && rule.nameServers.length));
+  const legacyMigrationAuthorized = input.snapshot.legacyMigrationAuthorized === true;
+  const expectedNamespaceSet = new Set(expectedRules.map((rule) => rule.namespace));
+  const isLegacyMigrationCandidate = (
+    rule: Required<WireGuardWindowsNrptRuleSnapshot>
+  ): boolean => {
+    if (!legacyMigrationAuthorized || rule.comment || rule.displayName) {
+      return false;
+    }
+    const expected = expectedRules.find((row) => row.namespace === rule.namespace);
+    return Boolean(expected && stringSetsEqual(expected.nameServers, normalizeWindowsNrptNameServers(rule.nameServers)));
+  };
+  const isOwnedRule = (rule: Required<WireGuardWindowsNrptRuleSnapshot>): boolean => {
+    const ruleComment = rule.comment ?? '';
+    const displayName = rule.displayName ?? '';
+    return ownedComments.has(ruleComment.toLowerCase())
+      || ownedComments.has(displayName.toLowerCase())
+      || (ownsUntaggedRules && !ruleComment && !displayName && expectedNamespaceSet.has(rule.namespace ?? ''))
+      || isLegacyMigrationCandidate(rule);
+  };
+  const ownedRules = rules.filter(isOwnedRule);
+  const unexpectedOwnedNamespaces = uniqueStrings(ownedRules
+    .flatMap((rule) => rule.namespace ? [rule.namespace] : [])
+    .filter((namespace) => !expectedNamespaceSet.has(namespace)))
+    .sort();
+  const pendingGlobalOwners = normalizeWindowsNrptTextList(input.snapshot.pendingOwners);
+  const globalRestorePending = legacyMigrationAuthorized || pendingGlobalOwners
+    .some((owner) => ownedComments.has(owner.toLowerCase()));
+
+  const namespaces = expectedRules.map((expected): WireGuardWindowsNrptNamespaceStatus => {
+    const matches = rules.filter((rule) => rule.namespace === expected.namespace);
+    const owned = matches.filter(isOwnedRule);
+    const legacyAmbiguous = matches.filter((rule) =>
+      !rule.comment
+      && !rule.displayName
+      && !isLegacyMigrationCandidate(rule)
+    );
+    const installedNameServers = normalizeWindowsNrptNameServers(owned.flatMap((rule) => rule.nameServers));
+    const foreign = matches.filter((rule) => !owned.includes(rule));
+    const foreignOwners = uniqueStrings(foreign
+      .map((rule) => rule.comment || rule.displayName || '<untagged>'))
+      .sort();
+    const foreignNameServerConflict = foreign.some(
+      (rule) => !stringSetsEqual(expected.nameServers, normalizeWindowsNrptNameServers(rule.nameServers))
+    );
+    return {
+      namespace: expected.namespace,
+      expectedNameServers: expected.nameServers,
+      installedNameServers,
+      ownedRuleCount: owned.length,
+      legacyAmbiguousRuleCount: legacyAmbiguous.length,
+      foreignOwners,
+      ready: owned.length > 0
+        && stringSetsEqual(expected.nameServers, installedNameServers)
+        && !foreignNameServerConflict
+        && legacyAmbiguous.length === 0
+    };
+  });
+  const queryPolicy = nullableText(input.snapshot.queryPolicy);
+  const enableDaForAllNetworks = nullableText(input.snapshot.enableDaForAllNetworks);
+  const configured = expectedRules.length > 0 || ownedRules.length > 0 || globalRestorePending;
+  const globalReady = expectedRules.length === 0 || (
+    queryPolicy?.toLowerCase() === 'queryboth'
+    && /^(enablealways|enableda|true|enable|enabled)$/i.test(enableDaForAllNetworks ?? '')
+  );
+  const missingNamespaces = namespaces.filter((row) => row.ownedRuleCount === 0).map((row) => row.namespace);
+  const mismatchedNamespaces = namespaces
+    .filter((row) => row.ownedRuleCount > 0 && !row.ready)
+    .map((row) => row.namespace);
+  const legacyAmbiguousNamespaces = namespaces
+    .filter((row) => row.legacyAmbiguousRuleCount > 0)
+    .map((row) => row.namespace);
+  const legacyAmbiguousRuleCount = namespaces
+    .reduce((total, row) => total + row.legacyAmbiguousRuleCount, 0);
+  const ready = globalReady
+    && missingNamespaces.length === 0
+    && mismatchedNamespaces.length === 0
+    && unexpectedOwnedNamespaces.length === 0
+    && legacyAmbiguousRuleCount === 0
+    && !(expectedRules.length === 0 && globalRestorePending);
+  const state: WireGuardWindowsNrptStatus['state'] = !configured
+    ? 'not-configured'
+    : !globalReady
+    ? 'global-disabled'
+    : expectedRules.length === 0 && globalRestorePending
+      ? 'global-restore-pending'
+      : legacyAmbiguousRuleCount > 0
+        ? 'legacy-ambiguous'
+        : missingNamespaces.length > 0
+          ? 'rules-missing'
+          : mismatchedNamespaces.length > 0
+            ? 'name-server-mismatch'
+            : unexpectedOwnedNamespaces.length > 0
+              ? 'owned-rules-stale'
+              : 'ready';
+  return {
+    supported: true,
+    configured,
+    ready,
+    source: 'live-powershell',
+    state,
+    tunnelName,
+    comment,
+    queryPolicy,
+    enableDaForAllNetworks,
+    globalReady,
+    globalRestorePending,
+    pendingGlobalOwners,
+    totalOwnedRuleCount: ownedRules.length,
+    unexpectedOwnedNamespaces,
+    legacyMigrationAuthorized,
+    legacyAmbiguousRuleCount,
+    legacyAmbiguousNamespaces,
+    namespaces,
+    missingNamespaces,
+    mismatchedNamespaces,
+    error: null
+  };
+}
+
+function parseWindowsNrptProbeResult(
+  value: unknown,
+  tunnelName: string,
+  expectedRules: WireGuardWindowsNrptExpectedRule[]
+): WireGuardWindowsNrptStatus {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('NRPT probe result is not an object');
+  }
+  const row = value as Record<string, unknown>;
+  return evaluateWindowsWireGuardNrptStatus({
+    tunnelName,
+    expectedRules,
+    snapshot: {
+      queryPolicy: nullableText(row.queryPolicy),
+      enableDaForAllNetworks: nullableText(row.enableDaForAllNetworks),
+      pendingOwners: normalizeWindowsNrptTextList(row.pendingOwners),
+      legacyMigrationAuthorized: row.legacyMigrationAuthorized === true,
+      rules: normalizeWindowsNrptRuleSnapshots(row.rules)
+    }
+  });
+}
+
+function windowsNrptProbeFailure(
+  tunnelName: string,
+  comment: string,
+  error: string,
+  expectedRules: WireGuardWindowsNrptExpectedRule[] = []
+): WireGuardWindowsNrptStatus {
+  const namespaces = expectedRules.map((rule) => ({
+    namespace: normalizeWindowsNrptNamespace(rule.namespace),
+    expectedNameServers: normalizeWindowsNrptNameServers(rule.nameServers),
+    installedNameServers: [],
+    ownedRuleCount: 0,
+    legacyAmbiguousRuleCount: 0,
+    foreignOwners: [],
+    ready: false
+  }));
+  return {
+    supported: true,
+    configured: expectedRules.length > 0,
+    ready: false,
+    source: 'live-powershell',
+    state: 'probe-failed',
+    tunnelName,
+    comment,
+    queryPolicy: null,
+    enableDaForAllNetworks: null,
+    globalReady: false,
+    globalRestorePending: false,
+    pendingGlobalOwners: [],
+    totalOwnedRuleCount: 0,
+    unexpectedOwnedNamespaces: [],
+    legacyMigrationAuthorized: false,
+    legacyAmbiguousRuleCount: 0,
+    legacyAmbiguousNamespaces: [],
+    namespaces,
+    missingNamespaces: namespaces.map((row) => row.namespace),
+    mismatchedNamespaces: [],
+    error
+  };
+}
+
+function normalizeWindowsNrptRuleSnapshots(value: unknown): Array<Required<WireGuardWindowsNrptRuleSnapshot>> {
+  const rows = Array.isArray(value) ? value : value ? [value] : [];
+  return rows.flatMap((entry): Array<Required<WireGuardWindowsNrptRuleSnapshot>> => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+    const row = entry as Record<string, unknown>;
+    const namespace = normalizeWindowsNrptNamespace(row.namespace);
+    if (!namespace) return [];
+    return [{
+      namespace,
+      nameServers: normalizeWindowsNrptNameServers(row.nameServers),
+      comment: nullableText(row.comment) ?? '',
+      displayName: nullableText(row.displayName) ?? ''
+    }];
+  });
+}
+
+function normalizeWindowsNrptNamespace(value: unknown): string {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function normalizeWindowsNrptNameServers(value: unknown): string[] {
+  const rows = Array.isArray(value) ? value.flat(Infinity) : value === null || value === undefined ? [] : [value];
+  return uniqueStrings(rows
+    .flatMap((entry) => String(entry).split(','))
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean))
+    .sort();
+}
+
+function normalizeWindowsNrptTextList(value: unknown): string[] {
+  const rows = Array.isArray(value) ? value.flat(Infinity) : value === null || value === undefined ? [] : [value];
+  return uniqueStrings(rows.map((entry) => String(entry).trim()).filter(Boolean)).sort();
+}
+
+function stringSetsEqual(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value) => right.includes(value));
+}
+
+function nullableText(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text || null;
 }
 
 export function findBundledWireGuardCli(bundledDir?: string | null): string | null {
@@ -2660,7 +3112,7 @@ function wireGuardRouteLogPathFromConfig(configPath: string): string | null {
     const profile = parseWireGuardProfile(configPath);
     return wireGuardRouteLogPath(configPath, profile.interfaceName);
   } catch {
-    return null;
+    return wireGuardRouteLogPath(configPath, wireGuardInterfaceName(configPath));
   }
 }
 
@@ -2956,11 +3408,73 @@ function readWindowsTunnelServiceState(interfaceName: string): string | null {
   const script = [
     "$ErrorActionPreference = 'SilentlyContinue'",
     `$svc = Get-Service -Name ${powerShellString(serviceName)}`,
-    "if ($null -ne $svc) { [string]$svc.Status }"
+    "if ($null -eq $svc) { 'NOT_FOUND' } else { [string]$svc.Status }"
   ].join('; ');
   const ps = tryExecFile(windowsPowerShellCommand(), ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script]);
   const status = ps.stdout.trim().toUpperCase();
   return status || null;
+}
+
+function readWindowsTunnelMachineState(interfaceName: string): {
+  ok: boolean;
+  serviceState: string | null;
+  adapters: string[];
+  routes: string[];
+  error: string | null;
+} {
+  const serviceName = `WireGuardTunnel$${interfaceName}`;
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$ProgressPreference = 'SilentlyContinue'",
+    `$svc = Get-Service -Name ${powerShellString(serviceName)} -ErrorAction SilentlyContinue`,
+    `$adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object { [string]$_.Name -eq ${powerShellString(interfaceName)} })`,
+    '$routes = @($adapters | ForEach-Object {',
+    '  $index = [int]$_.InterfaceIndex',
+    "  Get-NetRoute -InterfaceIndex $index -ErrorAction Stop | ForEach-Object { ([string]$_.DestinationPrefix) + '|if=' + [string]$_.InterfaceIndex + '|nextHop=' + [string]$_.NextHop }",
+    '})',
+    '[pscustomobject]@{',
+    "  serviceState = if ($null -eq $svc) { 'NOT_FOUND' } else { ([string]$svc.Status).ToUpperInvariant() }",
+    '  adapters = @($adapters | ForEach-Object { ([string]$_.Name) + \'|if=\' + [string]$_.InterfaceIndex + \'|status=\' + [string]$_.Status })',
+    '  routes = $routes',
+    '} | ConvertTo-Json -Depth 5 -Compress'
+  ].join('\r\n');
+  const result = tryExecFile(windowsPowerShellCommand(), [
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    script
+  ], 5000);
+  if (!result.ok) {
+    return {
+      ok: false,
+      serviceState: null,
+      adapters: [],
+      routes: [],
+      error: result.stderr.trim() || result.error || `Unable to query ${serviceName}`
+    };
+  }
+  try {
+    const row = JSON.parse(result.stdout) as Record<string, unknown>;
+    const serviceState = nullableText(row.serviceState)?.toUpperCase() ?? null;
+    if (!serviceState) throw new Error('serviceState is missing');
+    return {
+      ok: true,
+      serviceState,
+      adapters: normalizeWindowsNrptTextList(row.adapters),
+      routes: normalizeWindowsNrptTextList(row.routes),
+      error: null
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      serviceState: null,
+      adapters: [],
+      routes: [],
+      error: `Invalid Windows tunnel cleanup probe: ${errorMessage(err)}`
+    };
+  }
 }
 
 function routeLooksLikeExistingHdoRoute(
@@ -3030,11 +3544,15 @@ function safeExecFile(command: string, args: string[]): string | null {
   return result.ok ? result.stdout.trim() : null;
 }
 
-function tryExecFile(command: string, args: string[]): { ok: boolean; stdout: string; stderr: string; error?: string } {
+function tryExecFile(
+  command: string,
+  args: string[],
+  timeoutMs = 3000
+): { ok: boolean; stdout: string; stderr: string; error?: string } {
   try {
     const result = spawnSync(command, args, {
       encoding: 'utf8',
-      timeout: 3000,
+      timeout: timeoutMs,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
     });
@@ -3272,10 +3790,7 @@ function powerShellString(value: string): string {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-type WindowsNrptRule = {
-  namespace: string;
-  nameServers: string[];
-};
+type WindowsNrptRule = WireGuardWindowsNrptExpectedRule;
 
 type WindowsRouteRule = {
   destinationPrefix: string;
@@ -3289,6 +3804,22 @@ function windowsNrptRulesFromProfile(profile: ReturnType<typeof parseWireGuardPr
   return namespaces.map((namespace) => ({
     namespace,
     nameServers: servers
+  }));
+}
+
+function normalizeWindowsNrptExpectedRules(
+  rules: WireGuardWindowsNrptExpectedRule[]
+): WindowsNrptRule[] {
+  const byNamespace = new Map<string, string[]>();
+  for (const rule of rules) {
+    const namespace = normalizeWindowsNrptNamespace(rule?.namespace);
+    const nameServers = normalizeWindowsNrptNameServers(rule?.nameServers);
+    if (!namespace || nameServers.length === 0) continue;
+    byNamespace.set(namespace, nameServers);
+  }
+  return [...byNamespace.entries()].map(([namespace, nameServers]) => ({
+    namespace,
+    nameServers
   }));
 }
 
@@ -3313,6 +3844,7 @@ function windowsElevatedStartProcessScripts(
   action: WireGuardTunnelAction,
   tunnelName: string,
   nrptRules: WindowsNrptRule[] = [],
+  nrptOwnershipEvidenceComplete = true,
   routeRules: WindowsRouteRule[] = [],
   interfaceAddresses: string[] = [],
   elevatedScriptPath: string,
@@ -3321,12 +3853,18 @@ function windowsElevatedStartProcessScripts(
   const serviceName = `WireGuardTunnel$${tunnelName}`;
   const serviceArg = powerShellString(serviceName);
   const serviceLookup = `$svc = Get-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`;
-  const canPreflight = nrptRules.length === 0 && routeRules.length === 0;
+  const canPreflight = nrptRules.length === 0
+    && routeRules.length === 0
+    && !isMxH2iTunnel(tunnelName);
   const preflightLines = !canPreflight ? [] : (action === 'up'
     ? [serviceLookup, "if ($null -ne $svc -and $svc.Status -eq 'Running') { exit 0 }"]
     : (action === 'down' ? [serviceLookup, 'if ($null -eq $svc) { exit 0 }'] : []));
   const runWireGuard = (wireGuardArgs: string[]) => `& ${powerShellString(command)} ${wireGuardArgs.map(powerShellString).join(' ')}`;
-  const nrptLines = windowsNrptPowerShellLines(nrptRules, tunnelName);
+  const nrptLines = windowsNrptPowerShellLines(
+    nrptRules,
+    tunnelName,
+    nrptOwnershipEvidenceComplete
+  );
   const routeLines = windowsRoutePowerShellLines(routeRules, tunnelName, interfaceAddresses);
   const waitForServiceAbsent = () => [
     '$deadline = (Get-Date).AddSeconds(12)',
@@ -3579,62 +4117,161 @@ function windowsRoutePowerShellLines(
   ];
 }
 
-function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string): string[] {
+function windowsNrptMutexPowerShellLines(): string[] {
+  return [
+    `$hdoNrptMutexName = ${powerShellString(WINDOWS_NRPT_MUTEX_NAME)}`,
+    'function Enter-HdoNrptMutex {',
+    '  param([int]$TimeoutMs = 30000)',
+    '  $mutex = [System.Threading.Mutex]::new($false, $hdoNrptMutexName)',
+    '  $acquired = $false',
+    '  try {',
+    '    $acquired = $mutex.WaitOne($TimeoutMs)',
+    '  } catch [System.Threading.AbandonedMutexException] {',
+    '    $acquired = $true',
+    '  }',
+    '  if (-not $acquired) {',
+    '    $mutex.Dispose()',
+    '    throw ("Timed out waiting for machine-wide NRPT transaction mutex " + $hdoNrptMutexName)',
+    '  }',
+    '  return $mutex',
+    '}',
+    'function Exit-HdoNrptMutex {',
+    '  param([System.Threading.Mutex]$Mutex)',
+    '  if ($null -eq $Mutex) { return }',
+    '  try { $Mutex.ReleaseMutex() } finally { $Mutex.Dispose() }',
+    '}'
+  ];
+}
+
+function windowsNrptPowerShellLines(
+  rules: WindowsNrptRule[],
+  tunnelName: string,
+  ownershipEvidenceComplete = true
+): string[] {
   const product = windowsTunnelProductLabels(tunnelName);
-  if (rules.length === 0) {
-    return [
-      `Write-HdoAudit ${powerShellString(`nrpt skipped tunnel=${tunnelName} rules=0`)}`,
-      "function Add-HdoNrptRules { Write-HdoAudit 'nrpt add skipped rules=0' }",
-      "function Remove-HdoNrptRules { Write-HdoAudit 'nrpt remove skipped rules=0' }"
-    ];
-  }
   const entries = rules.map((rule) => {
     const servers = rule.nameServers.map(powerShellString).join(',');
     return `[pscustomobject]@{ Namespace = ${powerShellString(rule.namespace)}; NameServers = @(${servers}) }`;
   });
   const comment = `${product.commentPrefix} ${tunnelName}`;
-  const stateFileName = `nrpt-global-${tunnelName}.json`;
+  const legacyComment = windowsLegacyNrptComment(tunnelName);
+  const ownsUntaggedRules = false;
+  const legacyStateFileName = `nrpt-global-${tunnelName}.json`;
   return [
     `$hdoNrptRules = @(${entries.join(', ')})`,
     `$hdoNrptComment = ${powerShellString(comment)}`,
-    `$hdoNrptStateDir = Join-Path $env:ProgramData ${powerShellString(product.programDataDir)}`,
-    `$hdoNrptGlobalStatePath = Join-Path $hdoNrptStateDir ${powerShellString(stateFileName)}`,
+    `$hdoNrptLegacyComment = ${legacyComment ? powerShellString(legacyComment) : '$null'}`,
+    `$hdoNrptOwnsUntagged = ${ownsUntaggedRules ? '$true' : '$false'}`,
+    `$hdoNrptOwnershipEvidenceComplete = ${ownershipEvidenceComplete ? '$true' : '$false'}`,
+    `$hdoNrptGlobalStatePath = Join-Path $env:ProgramData ${powerShellString(WINDOWS_NRPT_SHARED_STATE_RELATIVE_PATH)}`,
+    '$hdoNrptStateDir = Split-Path -Parent $hdoNrptGlobalStatePath',
+    `$hdoNrptLegacyStateDir = Join-Path $env:ProgramData ${powerShellString(product.programDataDir)}`,
+    `$hdoNrptLegacyGlobalStatePath = Join-Path $hdoNrptLegacyStateDir ${powerShellString(legacyStateFileName)}`,
+    '$hdoNrptLegacyOwnerKey = "legacy-state:" + $hdoNrptLegacyGlobalStatePath.ToLowerInvariant()',
+    '$hdoNrptMayMigrateUntagged = Test-Path $hdoNrptLegacyGlobalStatePath -ErrorAction Stop',
+    "$hdoNrptLegacySearchRoot = Join-Path $env:ProgramData 'QPJoy'",
     `$hdoNrptTunnelName = ${powerShellString(tunnelName)}`,
     "$hdoNrptEnableAttempts = @('EnableAlways', 'EnableDA', 'Enable', $true)",
+    ...windowsNrptMutexPowerShellLines(),
     "Write-HdoAudit ('nrpt prepared tunnel=' + $hdoNrptTunnelName + ' rules=' + [string]$hdoNrptRules.Count + ' comment=' + $hdoNrptComment)",
     // NRPT is a machine-global table shared by every standalone launcher product.
-    // Only rules tagged with our own comment (or fully untagged legacy rules) are
-    // ours to remove or count; another product's tagged rule for the same
-    // namespace must never be touched, or disconnecting one product strips the
-    // other product's split DNS.
-    'function Test-HdoNrptRuleOwned {',
+    // MX-H2I may migrate its exact historical tag, or an exact namespace/DNS
+    // match backed by its legacy state file. Other products retain the old
+    // untagged fallback; an untagged rule alone never proves MX-H2I ownership.
+    'function Test-HdoNrptRuleTaggedOwner {',
     '  param([object]$Rule)',
     '  $comment = [string]$Rule.Comment',
     '  $display = [string]$Rule.DisplayName',
     '  if ($comment -eq $hdoNrptComment -or $display -eq $hdoNrptComment) { return $true }',
-    '  return ([string]::IsNullOrEmpty($comment) -and [string]::IsNullOrEmpty($display))',
+    '  if ($null -ne $hdoNrptLegacyComment -and ($comment -eq $hdoNrptLegacyComment -or $display -eq $hdoNrptLegacyComment)) { return $true }',
+    '  return $false',
+    '}',
+    'function Test-HdoNrptRuleLegacyMigrationCandidate {',
+    '  param([object]$Rule)',
+    '  if (-not $hdoNrptMayMigrateUntagged -or $hdoNrptOwnsUntagged) { return $false }',
+    '  if (-not [string]::IsNullOrEmpty([string]$Rule.Comment) -or -not [string]::IsNullOrEmpty([string]$Rule.DisplayName)) { return $false }',
+    '  foreach ($expected in $hdoNrptRules) {',
+    '    if ([string]$Rule.Namespace -eq [string]$expected.Namespace -and (Test-HdoNrptRuleNameServers $Rule $expected.NameServers)) { return $true }',
+    '  }',
+    '  return $false',
+    '}',
+    'function Test-HdoNrptRuleOwned {',
+    '  param([object]$Rule)',
+    '  if (Test-HdoNrptRuleTaggedOwner $Rule) { return $true }',
+    '  $comment = [string]$Rule.Comment',
+    '  $display = [string]$Rule.DisplayName',
+    '  return (($hdoNrptOwnsUntagged -and [string]::IsNullOrEmpty($comment) -and [string]::IsNullOrEmpty($display)) -or (Test-HdoNrptRuleLegacyMigrationCandidate $Rule))',
+    '}',
+    'function Get-HdoOwnedNrptRules {',
+    '  $expectedNamespaces = @($hdoNrptRules | ForEach-Object { [string]$_.Namespace })',
+    '  return @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object {',
+    '    (Test-HdoNrptRuleTaggedOwner $_) -or',
+    '      (Test-HdoNrptRuleLegacyMigrationCandidate $_) -or',
+    '      ($hdoNrptOwnsUntagged -and $expectedNamespaces -contains ([string]$_.Namespace) -and',
+    '        [string]::IsNullOrEmpty([string]$_.Comment) -and [string]::IsNullOrEmpty([string]$_.DisplayName))',
+    '  })',
     '}',
     'function Format-HdoNrptGlobalForLog {',
     '  $global = Get-DnsClientNrptGlobal -ErrorAction SilentlyContinue',
     "  if ($null -eq $global) { return '<null>' }",
     "  return ('QueryPolicy={0}; EnableDAForAllNetworks={1}; SecureNameQueryFallback={2}' -f [string]$global.QueryPolicy, [string]$global.EnableDAForAllNetworks, [string]$global.SecureNameQueryFallback)",
     '}',
+    'function Get-HdoLegacyNrptGlobalState {',
+    '  if (-not (Test-Path $hdoNrptLegacyGlobalStatePath -ErrorAction SilentlyContinue)) { return $null }',
+    '  try {',
+    '    $state = Get-Content -Path $hdoNrptLegacyGlobalStatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop',
+    '    if ([string]$state.QueryPolicy -and [string]$state.EnableDAForAllNetworks) { return $state }',
+    '  } catch {',
+    "    Write-HdoAudit ('nrpt legacy state ignored path=' + $hdoNrptLegacyGlobalStatePath + ' error=' + ($_ | Out-String).Trim())",
+    '  }',
+    '  return $null',
+    '}',
+    'function Test-HdoLegacyStateOwnerActive {',
+    '  param([string]$StatePath)',
+    '  if (-not $StatePath -or -not (Test-Path $StatePath -ErrorAction SilentlyContinue)) { return $false }',
+    '  $baseName = [System.IO.Path]::GetFileNameWithoutExtension($StatePath)',
+    "  if ($baseName -notmatch '^nrpt-global-(.+)$') { return $false }",
+    '  $legacyTunnelName = [string]$Matches[1]',
+    "  $legacyService = Get-Service -Name ('WireGuardTunnel$' + $legacyTunnelName) -ErrorAction SilentlyContinue",
+    '  return $null -ne $legacyService',
+    '}',
+    'function Write-HdoNrptGlobalState {',
+    '  param([string]$QueryPolicy, [string]$EnableDAForAllNetworks, [object[]]$Owners)',
+    '  if (-not $QueryPolicy -or -not $EnableDAForAllNetworks) { throw "NRPT baseline is incomplete" }',
+    '  New-Item -ItemType Directory -Path $hdoNrptStateDir -Force -ErrorAction Stop | Out-Null',
+    '  $normalizedOwners = @($Owners | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ } | Sort-Object -Unique)',
+    '  $tempPath = $hdoNrptGlobalStatePath + ".tmp"',
+    '  [pscustomobject]@{ QueryPolicy = $QueryPolicy; EnableDAForAllNetworks = $EnableDAForAllNetworks; Owners = $normalizedOwners } | ConvertTo-Json -Depth 4 -Compress | Set-Content -Path $tempPath -Encoding UTF8 -ErrorAction Stop',
+    '  Move-Item -Path $tempPath -Destination $hdoNrptGlobalStatePath -Force -ErrorAction Stop',
+    '  $verified = Get-Content -Path $hdoNrptGlobalStatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop',
+    '  $verifiedOwners = @($verified.Owners | ForEach-Object { [string]$_ })',
+    '  if ([string]$verified.QueryPolicy -ne $QueryPolicy -or [string]$verified.EnableDAForAllNetworks -ne $EnableDAForAllNetworks) { throw "NRPT baseline state read-back mismatch" }',
+    '  foreach ($owner in $normalizedOwners) { if ($verifiedOwners -notcontains $owner) { throw ("NRPT owner state read-back missing " + $owner) } }',
+    '}',
     'function Save-HdoNrptGlobalState {',
     "  Write-HdoAudit ('nrpt save global before=' + (Format-HdoNrptGlobalForLog))",
-    '  New-Item -ItemType Directory -Path $hdoNrptStateDir -Force -ErrorAction SilentlyContinue | Out-Null',
-    '  $global = Get-DnsClientNrptGlobal -ErrorAction SilentlyContinue',
-    "  if ($null -eq $global) { Write-HdoAudit 'nrpt save global skipped: no global state'; return }",
+    '  $global = Get-DnsClientNrptGlobal -ErrorAction Stop',
+    '  if ($null -eq $global) { throw "NRPT global baseline is unavailable" }',
     '  $queryPolicy = [string]$global.QueryPolicy',
     '  $enableAll = [string]$global.EnableDAForAllNetworks',
-    '  if (Test-Path $hdoNrptGlobalStatePath) {',
-    '    $existing = Get-Content -Path $hdoNrptGlobalStatePath -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json -ErrorAction SilentlyContinue',
-    '    if ($null -ne $existing) {',
-    '      if ([string]$existing.QueryPolicy) { $queryPolicy = [string]$existing.QueryPolicy }',
-    "      if ([string]$existing.EnableDAForAllNetworks) { Write-HdoAudit 'nrpt save global kept existing state'; return }",
+    '  $owners = @()',
+    '  if (Test-Path $hdoNrptGlobalStatePath -ErrorAction Stop) {',
+    '    $existing = Get-Content -Path $hdoNrptGlobalStatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop',
+    '    if (-not [string]$existing.QueryPolicy -or -not [string]$existing.EnableDAForAllNetworks) { throw "Existing NRPT baseline state is incomplete" }',
+    '    $queryPolicy = [string]$existing.QueryPolicy',
+    '    $enableAll = [string]$existing.EnableDAForAllNetworks',
+    '    $owners = @($existing.Owners | ForEach-Object { [string]$_ })',
+    '  } else {',
+    '    $legacy = Get-HdoLegacyNrptGlobalState',
+    '    if ($null -ne $legacy) {',
+    '      $queryPolicy = [string]$legacy.QueryPolicy',
+    '      $enableAll = [string]$legacy.EnableDAForAllNetworks',
+    "      Write-HdoAudit ('nrpt migrated first-owner legacy baseline queryPolicy=' + $queryPolicy + ' enableAll=' + $enableAll)",
     '    }',
     '  }',
-    '  [pscustomobject]@{ QueryPolicy = $queryPolicy; EnableDAForAllNetworks = $enableAll } | ConvertTo-Json -Compress | Set-Content -Path $hdoNrptGlobalStatePath -Encoding UTF8 -ErrorAction SilentlyContinue',
-    "  Write-HdoAudit ('nrpt saved global state path=' + $hdoNrptGlobalStatePath + ' queryPolicy=' + $queryPolicy + ' enableAll=' + $enableAll)",
+    '  $owners = @($owners + $hdoNrptComment | Sort-Object -Unique)',
+    '  Write-HdoNrptGlobalState $queryPolicy $enableAll $owners',
+    "  Write-HdoAudit ('nrpt saved first-owner baseline path=' + $hdoNrptGlobalStatePath + ' queryPolicy=' + $queryPolicy + ' enableAll=' + $enableAll + ' owners=' + ($owners -join ','))",
     '}',
     'function Test-HdoNrptEnableAllNetworks {',
     '  param([object]$GlobalState)',
@@ -3668,53 +4305,128 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     '  }',
     '}',
     'function Restore-HdoNrptGlobalQueryPolicy {',
-    '  if (-not (Test-Path $hdoNrptGlobalStatePath)) { return }',
-    '  $otherRules = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -ne $hdoNrptComment -and $_.Comment -ne $hdoNrptComment })',
-    "  if ($otherRules.Count -gt 0) { Write-HdoAudit ('nrpt restore skipped otherRules=' + [string]$otherRules.Count); return }",
-    '  $state = Get-Content -Path $hdoNrptGlobalStatePath -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json -ErrorAction SilentlyContinue',
+    '  if (-not (Test-Path $hdoNrptGlobalStatePath -ErrorAction Stop)) {',
+    '    $legacy = Get-HdoLegacyNrptGlobalState',
+    '    if ($null -eq $legacy) { throw "NRPT baseline state is missing; refusing to report cleanup complete" }',
+    '    Write-HdoNrptGlobalState ([string]$legacy.QueryPolicy) ([string]$legacy.EnableDAForAllNetworks) @($hdoNrptComment)',
+    '  }',
+    '  $state = Get-Content -Path $hdoNrptGlobalStatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop',
     '  $queryPolicy = [string]$state.QueryPolicy',
     '  $enableAllText = [string]$state.EnableDAForAllNetworks',
+    '  if (-not $queryPolicy -or -not $enableAllText) { throw "NRPT baseline state is incomplete" }',
+    '  $otherRules = @(Get-DnsClientNrptRule -ErrorAction Stop)',
+    "  $otherQpjoyOwnerTags = @($otherRules | ForEach-Object { @(([string]$_.Comment), ([string]$_.DisplayName)) } | Where-Object { $_ -match '^MX(?:-[A-Z0-9]+)?(?:\\s+[^/]*)?\\s*/\\s*QPJoy\\s+' -and $_ -ne $hdoNrptComment -and ($null -eq $hdoNrptLegacyComment -or $_ -ne $hdoNrptLegacyComment) })",
+    '  $remainingOwners = @($state.Owners | ForEach-Object { [string]$_ } | Where-Object {',
+    '    $owner = [string]$_',
+    '    $keep = $owner -and $owner -ne $hdoNrptComment -and $owner -ne $hdoNrptLegacyOwnerKey -and ($null -eq $hdoNrptLegacyComment -or $owner -ne $hdoNrptLegacyComment)',
+    "    if ($keep -and $owner.StartsWith('legacy-state:', [System.StringComparison]::OrdinalIgnoreCase)) { $keep = Test-HdoLegacyStateOwnerActive ($owner.Substring(13)) }",
+    "    elseif ($keep -and $owner -match '^MX(?:-[A-Z0-9]+)?(?:\\s+[^/]*)?\\s*/\\s*QPJoy\\s+') { $keep = $otherQpjoyOwnerTags -contains $owner }",
+    '    $keep',
+    '  })',
+    "  $otherLegacyOwnerKeys = @(Get-ChildItem -Path $hdoNrptLegacySearchRoot -Filter 'nrpt-global-*.json' -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $hdoNrptLegacyGlobalStatePath -and (Test-HdoLegacyStateOwnerActive ($_.FullName)) } | ForEach-Object { 'legacy-state:' + $_.FullName.ToLowerInvariant() })",
+    '  $remainingOwners = @($remainingOwners + $otherQpjoyOwnerTags + $otherLegacyOwnerKeys | Sort-Object -Unique)',
+    '  if ($remainingOwners.Count -gt 0) {',
+    '    Write-HdoNrptGlobalState $queryPolicy $enableAllText $remainingOwners',
+    '    if (Test-Path $hdoNrptLegacyGlobalStatePath -ErrorAction Stop) { Remove-Item -Path $hdoNrptLegacyGlobalStatePath -Force -ErrorAction Stop }',
+    "    Write-HdoAudit ('nrpt restore deferred remainingOwners=' + ($remainingOwners -join ',') + ' otherRules=' + [string]$otherRules.Count)",
+    '    return',
+    '  }',
     '  $enableAll = $null',
     "  if (@('EnableOnNetworkID', 'EnableAlways', 'EnableDA', 'Disable', 'DisableDA') -contains $enableAllText) { $enableAll = $enableAllText }",
     "  if ($enableAllText -match '^(True|Enable|Enabled)$') { $enableAll = 'EnableAlways' }",
     "  if ($enableAllText -match '^(False|Disabled)$') { $enableAll = 'Disable' }",
-    "  if (@('Disable', 'QueryIPv6Only', 'QueryBoth') -contains $queryPolicy) {",
-    '    Set-DnsClientNrptGlobal -QueryPolicy $queryPolicy -ErrorAction SilentlyContinue | Out-Null',
+    "  if (@('Disable', 'QueryIPv6Only', 'QueryBoth') -notcontains $queryPolicy) { throw ('Unsupported NRPT QueryPolicy baseline: ' + $queryPolicy) }",
+    "  if ($null -eq $enableAll) { throw ('Unsupported NRPT EnableDAForAllNetworks baseline: ' + $enableAllText) }",
+    '  Set-DnsClientNrptGlobal -QueryPolicy $queryPolicy -ErrorAction Stop | Out-Null',
+    '  Set-DnsClientNrptGlobal -EnableDAForAllNetworks $enableAll -ErrorAction Stop | Out-Null',
+    '  $verified = Get-DnsClientNrptGlobal -ErrorAction Stop',
+    '  $verifiedQueryPolicy = [string]$verified.QueryPolicy',
+    '  $verifiedEnableAll = [string]$verified.EnableDAForAllNetworks',
+    '  $enableVerified = $verifiedEnableAll -eq $enableAll',
+    "  if ($enableAll -eq 'EnableAlways') { $enableVerified = $verifiedEnableAll -match '^(EnableAlways|EnableDA|True|Enable|Enabled)$' }",
+    "  if ($enableAll -eq 'Disable') { $enableVerified = $verifiedEnableAll -match '^(Disable|DisableDA|False|Disabled)$' }",
+    '  if ($verifiedQueryPolicy -ne $queryPolicy -or -not $enableVerified) {',
+    `    throw (${powerShellString(`${product.shortName} NRPT global restore read-back mismatch: `)} + ('expected=' + $queryPolicy + '/' + $enableAll + ' actual=' + $verifiedQueryPolicy + '/' + $verifiedEnableAll))`,
     '  }',
-    '  if ($null -ne $enableAll) {',
-    '    Set-DnsClientNrptGlobal -EnableDAForAllNetworks $enableAll -ErrorAction SilentlyContinue | Out-Null',
-    '  }',
-    '  Remove-Item -Path $hdoNrptGlobalStatePath -Force -ErrorAction SilentlyContinue',
+    '  if (Test-Path $hdoNrptLegacyGlobalStatePath -ErrorAction SilentlyContinue) { Remove-Item -Path $hdoNrptLegacyGlobalStatePath -Force -ErrorAction Stop }',
+    '  Remove-Item -Path $hdoNrptGlobalStatePath -Force -ErrorAction Stop',
+    '  if (Test-Path $hdoNrptGlobalStatePath -ErrorAction Stop) { throw "NRPT baseline state remains after verified restore" }',
     "  Write-HdoAudit ('nrpt restored global queryPolicy=' + $queryPolicy + ' enableAll=' + [string]$enableAll)",
+    '}',
+    'function Get-HdoNormalizedNameServers {',
+    '  param([object[]]$Values)',
+    '  return @($Values | ForEach-Object { @(([string]$_).Split(",")) } | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } | Where-Object { $_ } | Sort-Object -Unique)',
+    '}',
+    'function Test-HdoNrptRuleNameServers {',
+    '  param([object]$InstalledRule, [object[]]$ExpectedValues)',
+    '  $expected = @(Get-HdoNormalizedNameServers $ExpectedValues)',
+    '  $actual = @(Get-HdoNormalizedNameServers @($InstalledRule.NameServers))',
+    '  if ($expected.Count -ne $actual.Count) { return $false }',
+    '  foreach ($server in $expected) { if ($actual -notcontains $server) { return $false } }',
+    '  return $true',
     '}',
     'function Assert-HdoNrptRules {',
     "  Write-HdoAudit ('nrpt assert global=' + (Format-HdoNrptGlobalForLog))",
     '  $missing = @()',
+    '  $mismatched = @()',
     '  foreach ($rule in $hdoNrptRules) {',
     '    $installed = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Namespace -eq $rule.Namespace -and (Test-HdoNrptRuleOwned $_) })',
-    "    Write-HdoAudit ('nrpt assert namespace=' + $rule.Namespace + ' count=' + [string]$installed.Count)",
+    '    $matching = @($installed | Where-Object { Test-HdoNrptRuleNameServers $_ $rule.NameServers })',
+    "    Write-HdoAudit ('nrpt assert namespace=' + $rule.Namespace + ' count=' + [string]$installed.Count + ' matchingNameServers=' + [string]$matching.Count)",
     '    if ($installed.Count -eq 0) { $missing += $rule.Namespace }',
+    '    elseif ($matching.Count -ne $installed.Count) { $mismatched += $rule.Namespace }',
     '  }',
+    '  $expectedNamespaces = @($hdoNrptRules | ForEach-Object { [string]$_.Namespace })',
+    '  $unexpected = @(Get-HdoOwnedNrptRules | Where-Object { $expectedNamespaces -notcontains ([string]$_.Namespace) })',
     `  if ($missing.Count -gt 0) { throw (${powerShellString(`${product.shortName} NRPT rules missing after add: `)} + ($missing -join ', ')) }`,
+    `  if ($mismatched.Count -gt 0) { throw (${powerShellString(`${product.shortName} NRPT name servers mismatch after add: `)} + ($mismatched -join ', ')) }`,
+    `  if ($unexpected.Count -gt 0) { throw (${powerShellString(`${product.shortName} stale NRPT namespaces remain after add: `)} + (($unexpected | ForEach-Object { [string]$_.Namespace } | Sort-Object -Unique) -join ', ')) }`,
     '}',
-    'function Remove-HdoNrptRules {',
+    'function Remove-HdoNrptRulesUnlocked {',
     '  param([bool]$RestoreGlobal = $true)',
     "  Write-HdoAudit ('nrpt remove start restoreGlobal=' + [string]$RestoreGlobal)",
-    '  foreach ($rule in $hdoNrptRules) {',
-    '    $matches = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Namespace -eq $rule.Namespace -and (Test-HdoNrptRuleOwned $_) })',
-    "    Write-HdoAudit ('nrpt remove namespace=' + $rule.Namespace + ' matches=' + [string]$matches.Count)",
-    '    $matches | ForEach-Object {',
-    '      Remove-DnsClientNrptRule -Name $_.Name -Force -ErrorAction SilentlyContinue',
+    '  $ownerStatePresent = [bool]$hdoNrptMayMigrateUntagged',
+    '  if (-not $ownerStatePresent -and (Test-Path $hdoNrptGlobalStatePath -ErrorAction SilentlyContinue)) {',
+    '    $ownerState = Get-Content -Path $hdoNrptGlobalStatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop',
+    '    $ownerStatePresent = @($ownerState.Owners | ForEach-Object { [string]$_ }) -contains $hdoNrptComment',
+    '  }',
+    '  if ($RestoreGlobal -and $ownerStatePresent) {',
+    '    $expectedNamespaces = @($hdoNrptRules | ForEach-Object { [string]$_.Namespace })',
+    '    $ambiguousUntagged = @(Get-DnsClientNrptRule -ErrorAction Stop | Where-Object {',
+    '      [string]::IsNullOrEmpty([string]$_.Comment) -and',
+    '      [string]::IsNullOrEmpty([string]$_.DisplayName) -and',
+    '      (-not $hdoNrptOwnershipEvidenceComplete -or $expectedNamespaces -contains ([string]$_.Namespace)) -and',
+    '      -not (Test-HdoNrptRuleLegacyMigrationCandidate $_)',
+    '    })',
+    '    if ($ambiguousUntagged.Count -gt 0) {',
+    '      throw "WireGuard ownership evidence is incomplete and untagged NRPT rules are ambiguous; refusing to delete rollback evidence"',
     '    }',
     '  }',
-    '  if ($RestoreGlobal) { Restore-HdoNrptGlobalQueryPolicy }',
+    '  $matches = @(Get-HdoOwnedNrptRules)',
+    "  Write-HdoAudit ('nrpt remove ownedMatches=' + [string]$matches.Count + ' namespaces=' + (($matches | ForEach-Object { [string]$_.Namespace } | Sort-Object -Unique) -join ','))",
+    '  if ($RestoreGlobal -and $matches.Count -gt 0 -and -not (Test-Path $hdoNrptGlobalStatePath -ErrorAction Stop)) {',
+    '    $legacy = Get-HdoLegacyNrptGlobalState',
+    '    if ($null -eq $legacy) { throw "NRPT baseline state is missing; refusing to remove owned rules without recoverable cleanup evidence" }',
+    '    Write-HdoNrptGlobalState ([string]$legacy.QueryPolicy) ([string]$legacy.EnableDAForAllNetworks) @($hdoNrptComment)',
+    '  }',
+    '  $matches | ForEach-Object {',
+    '    Remove-DnsClientNrptRule -Name $_.Name -Force -ErrorAction SilentlyContinue',
+    '  }',
+    '  $remaining = @(Get-HdoOwnedNrptRules)',
+    `  if ($remaining.Count -gt 0) { throw (${powerShellString(`${product.shortName} owned NRPT rules remain after remove: `)} + (($remaining | ForEach-Object { [string]$_.Namespace } | Sort-Object -Unique) -join ', ')) }`,
+    '  if ($RestoreGlobal -and ($matches.Count -gt 0 -or (Test-Path $hdoNrptGlobalStatePath -ErrorAction SilentlyContinue) -or (Test-Path $hdoNrptLegacyGlobalStatePath -ErrorAction SilentlyContinue))) { Restore-HdoNrptGlobalQueryPolicy }',
     '  Clear-DnsClientCache -ErrorAction SilentlyContinue',
     "  Write-HdoAudit ('nrpt remove complete global=' + (Format-HdoNrptGlobalForLog))",
     '}',
-    'function Add-HdoNrptRules {',
+    'function Add-HdoNrptRulesUnlocked {',
     "  Write-HdoAudit ('nrpt add start rules=' + [string]$hdoNrptRules.Count)",
+    '  if ($hdoNrptRules.Count -eq 0) {',
+    '    Remove-HdoNrptRulesUnlocked',
+    "    Write-HdoAudit 'nrpt add reconciled empty desired state'",
+    '    return',
+    '  }',
     '  Enable-HdoNrptGlobalQueryPolicy',
-    '  Remove-HdoNrptRules -RestoreGlobal:$false',
+    '  Remove-HdoNrptRulesUnlocked -RestoreGlobal:$false',
     '  foreach ($rule in $hdoNrptRules) {',
     '    $foreign = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Namespace -eq $rule.Namespace -and -not (Test-HdoNrptRuleOwned $_) })',
     "    if ($foreign.Count -gt 0) { Write-HdoAudit ('nrpt conflict namespace=' + $rule.Namespace + ' foreignOwners=' + (($foreign | ForEach-Object { if ([string]$_.Comment) { [string]$_.Comment } else { [string]$_.DisplayName } }) -join ';')) }",
@@ -3725,6 +4437,7 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     '    } catch {',
     '      $msg = ($_ | Out-String).Trim()',
     "      Write-HdoAudit ('nrpt add metadata failed namespace=' + $rule.Namespace + ' error=' + $msg)",
+    '      if (-not $hdoNrptOwnsUntagged) { throw }',
     '      Add-DnsClientNrptRule -Namespace $rule.Namespace -NameServers $rule.NameServers -ErrorAction Stop | Out-Null',
     "      Write-HdoAudit ('nrpt add ok namespace=' + $rule.Namespace + ' metadata=false')",
     '    }',
@@ -3733,8 +4446,27 @@ function windowsNrptPowerShellLines(rules: WindowsNrptRule[], tunnelName: string
     '  Assert-HdoNrptRules',
     '  Clear-DnsClientCache -ErrorAction SilentlyContinue',
     "  Write-HdoAudit ('nrpt add complete global=' + (Format-HdoNrptGlobalForLog))",
+    '}',
+    'function Remove-HdoNrptRules {',
+    '  param([bool]$RestoreGlobal = $true)',
+    '  $mutex = Enter-HdoNrptMutex',
+    '  try { Remove-HdoNrptRulesUnlocked -RestoreGlobal:$RestoreGlobal } finally { Exit-HdoNrptMutex $mutex }',
+    '}',
+    'function Add-HdoNrptRules {',
+    '  $mutex = Enter-HdoNrptMutex',
+    '  try { Add-HdoNrptRulesUnlocked } finally { Exit-HdoNrptMutex $mutex }',
     '}'
   ];
+}
+
+function windowsLegacyNrptComment(tunnelName: string): string | null {
+  return tunnelName.toLowerCase() === 'mx-h2i'
+    ? 'MX HDO / QPJoy HDO mx-h2i'
+    : null;
+}
+
+function isMxH2iTunnel(tunnelName: string): boolean {
+  return /^mx-h2i(?:$|[-_.])/i.test(tunnelName);
 }
 
 function windowsTunnelProductLabels(tunnelName: string): {
@@ -3742,7 +4474,7 @@ function windowsTunnelProductLabels(tunnelName: string): {
   commentPrefix: string;
   programDataDir: string;
 } {
-  if (/^mx-h2i(?:$|[-_.])/i.test(tunnelName)) {
+  if (isMxH2iTunnel(tunnelName)) {
     return {
       shortName: 'MX-H2I',
       commentPrefix: 'MX-H2I / QPJoy MX-H2I',
@@ -3851,13 +4583,14 @@ function isPathLike(value: string): boolean {
 function execFileAsync(
   command: string,
   args: string[],
-  options: { env?: NodeJS.ProcessEnv } = {}
+  options: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     execFile(command, args, {
       encoding: 'utf8',
       env: options.env,
-      windowsHide: true
+      windowsHide: true,
+      ...(options.timeoutMs ? { timeout: options.timeoutMs } : {})
     }, (err, stdout, stderr) => {
       if (err) {
         (err as NodeJS.ErrnoException & { stdout?: string; stderr?: string }).stdout =
@@ -3873,6 +4606,12 @@ function execFileAsync(
       });
     });
   });
+}
+
+function normalizeTimeoutMs(value: number | undefined, fallback: number): number {
+  return Number.isFinite(value) && Number(value) > 0
+    ? Math.max(1, Math.floor(Number(value)))
+    : fallback;
 }
 
 function assertNonEmpty(value: string, label: string): void {

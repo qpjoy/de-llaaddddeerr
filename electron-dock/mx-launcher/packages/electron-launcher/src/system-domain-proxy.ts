@@ -1,10 +1,22 @@
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { createSocket, type RemoteInfo, type Socket as DgramSocket } from 'node:dgram';
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { connect as netConnect, isIP, type Socket } from 'node:net';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs';
 import {
   buildElectronLauncherNetworkOwnershipRegistry,
   mergedElectronLauncherDnsZones,
@@ -13,6 +25,12 @@ import {
   type ElectronLauncherNetworkOwnershipClaim,
   type ElectronLauncherNetworkOwnershipRegistry
 } from './network-ownership-registry.js';
+import {
+  acquireElectronLauncherProcessLease,
+  ElectronLauncherProcessLeaseBusyError,
+  releaseElectronLauncherProcessLease,
+  type ElectronLauncherProcessLease
+} from './process-lease.js';
 
 const STATE_VERSION = 1;
 const DEFAULT_STATE_FILE = 'electron-launcher-system-domain-proxy.json';
@@ -27,7 +45,14 @@ const DARWIN_DYNAMIC_DNS_KEY = 'State:/Network/Service/com.qpjoy.electron-launch
 const WINDOWS_PROXY_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
 const DNS_QUERY_TIMEOUT_MS = 1500;
 const PROXY_CONNECT_TIMEOUT_MS = 10_000;
+const WINDOWS_REGISTRY_COMMAND_TIMEOUT_MS = 2500;
+const WINDOWS_PROXY_NOTIFY_TIMEOUT_MS = 5000;
+const WINDOWS_BROWSER_PROXY_PROBE_TIMEOUT_MS = 12_000;
+const WINDOWS_FALLBACK_PAC_TIMEOUT_MS = 1800;
+const WINDOWS_FALLBACK_PAC_MAX_BYTES = 512 * 1024;
+const WINDOWS_CURRENT_USER_GATE_FILE = 'windows-system-domain-proxy-owner-v1.json';
 const INTERNAL_GATEWAY_APP_PORTS = new Set([80, 8008]);
+let stateWriteSequence = 0;
 
 export type ElectronLauncherPacMatchMode = 'direct' | 'proxy';
 export type ElectronLauncherSystemResolverMode = 'off' | 'dynamic' | 'file';
@@ -62,6 +87,7 @@ export interface ElectronLauncherSystemDomainProxyStatus {
   proxy?: string | null;
   matchMode?: ElectronLauncherPacMatchMode | null;
   fallbackProxy?: string | null;
+  fallbackPacUrl?: string | null;
   pacPort?: number | null;
   sharedPac?: boolean;
   dnsServers?: string[];
@@ -90,6 +116,22 @@ export interface ElectronLauncherSystemDomainProxyStatus {
   error?: string;
 }
 
+export interface ElectronLauncherBrowserAccessStatus {
+  supported: boolean;
+  ready: boolean;
+  platform: NodeJS.Platform;
+  host: string | null;
+  port: number | null;
+  pacApplied: boolean;
+  proxyReachable: boolean;
+  proxyStatusCode?: number | null;
+  proxyStatusLine?: string | null;
+  pacUrl?: string | null;
+  proxy?: string | null;
+  skipped?: boolean;
+  error?: string | null;
+}
+
 export interface ElectronLauncherPacProxy {
   address: string;
   directive: string;
@@ -107,7 +149,10 @@ export interface ElectronLauncherSystemDomainProxyRoute {
 
 export interface ElectronLauncherSystemDomainProxyManager {
   apply(policy: ElectronLauncherSystemDomainProxyPolicy): Promise<ElectronLauncherSystemDomainProxyStatus>;
-  disable(reason?: string): Promise<ElectronLauncherSystemDomainProxyStatus>;
+  disable(
+    reason?: string,
+    options?: { keepLocalEdgeAlive?: boolean }
+  ): Promise<ElectronLauncherSystemDomainProxyStatus>;
   restoreStale(reason?: string): Promise<ElectronLauncherSystemDomainProxyStatus>;
   darwinPrepareApply?(policy: ElectronLauncherSystemDomainProxyPolicy): Promise<ElectronLauncherSystemDomainProxyStatus>;
   completeExternalApply?(reason?: string): Promise<ElectronLauncherSystemDomainProxyStatus>;
@@ -115,6 +160,12 @@ export interface ElectronLauncherSystemDomainProxyManager {
   completeExternalRestore?(reason?: string): Promise<ElectronLauncherSystemDomainProxyStatus>;
   status(): ElectronLauncherSystemDomainProxyStatus;
   statusVerified(): Promise<ElectronLauncherSystemDomainProxyStatus>;
+  refreshWindowsContinuation?(reason?: string): Promise<ElectronLauncherSystemDomainProxyStatus>;
+  probeBrowserAccess(input: {
+    host: string;
+    port?: number | null;
+    timeoutMs?: number | null;
+  }): Promise<ElectronLauncherBrowserAccessStatus>;
   close(): Promise<void>;
 }
 
@@ -126,6 +177,8 @@ interface ResolvedPacSource {
   proxy: PacProxy | null;
   matchMode: ElectronLauncherPacMatchMode;
   fallbackProxy: PacProxy | null;
+  fallbackPacUrl: string | null;
+  fallbackPacScript: string | null;
   pacPort: number | null;
   sharedLocalPac: boolean;
   dnsServers: string[];
@@ -145,6 +198,7 @@ interface StoredState {
   proxy: string | null;
   matchMode: ElectronLauncherPacMatchMode;
   fallbackProxy: string | null;
+  fallbackPacUrl?: string | null;
   pacPort: number | null;
   sharedLocalPac?: boolean;
   dnsServers: string[];
@@ -161,6 +215,7 @@ interface StoredState {
   ownershipRegistry?: ElectronLauncherNetworkOwnershipRegistry | null;
   previous: unknown;
   pending?: boolean;
+  continuationNotifyPending?: boolean;
   updatedAt: string;
 }
 
@@ -169,6 +224,8 @@ interface LocalPacServerConfig {
   proxy: PacProxy | null;
   matchMode: ElectronLauncherPacMatchMode;
   fallbackProxy: PacProxy | null;
+  fallbackPacUrl: string | null;
+  fallbackPacScript: string | null;
   dnsServers: string[];
   dnsFallbackTarget: string | null;
   reverseProxyRoutes: ElectronLauncherSystemDomainProxyRoute[];
@@ -191,6 +248,7 @@ interface SystemResolverApplyResult {
 interface PreparedSystemDomainProxyApply {
   existing: StoredState | null;
   previous: unknown;
+  windowsApplySnapshot: Record<string, RegistryValue> | null;
   pac: ResolvedPacSource;
   resolverPlan: {
     mode: ElectronLauncherSystemResolverMode;
@@ -201,16 +259,41 @@ interface PreparedSystemDomainProxyApply {
   changed: boolean;
 }
 
+interface WindowsCurrentUserProxyLease {
+  version: 1;
+  pid: number;
+  token: string;
+  statePath: string;
+  createdAt: string;
+}
+
 export function createElectronLauncherSystemDomainProxy(
   options: ElectronLauncherSystemDomainProxyOptions
 ): ElectronLauncherSystemDomainProxyManager {
   const statePath = options.statePath || join(options.userDataDir, DEFAULT_STATE_FILE);
   const log = options.log || console;
+  const windowsOwnershipGatePath = windowsCurrentUserProxyGatePath();
+  let windowsOwnershipGateLease: ElectronLauncherProcessLease | null = null;
   let localPacServer: Server | null = null;
   let localDnsServer: DgramSocket | null = null;
   let localPacPort: number | null = null;
   let localPacKey: string | null = null;
   let localPacConfig: LocalPacServerConfig | null = null;
+  const localPacSockets = new Set<Socket>();
+
+  function acquireWindowsOwnershipGate(): void {
+    if (process.platform !== 'win32' || windowsOwnershipGateLease) return;
+    windowsOwnershipGateLease = acquireWindowsCurrentUserProxyLease(
+      windowsOwnershipGatePath,
+      statePath
+    );
+  }
+
+  function releaseWindowsOwnershipGate(): void {
+    if (process.platform !== 'win32' || !windowsOwnershipGateLease) return;
+    releaseElectronLauncherProcessLease(windowsOwnershipGateLease);
+    windowsOwnershipGateLease = null;
+  }
 
   function localConfigFromPac(pac: Omit<ResolvedPacSource, 'pacUrl' | 'usesLocalPac' | 'sharedLocalPac'>): LocalPacServerConfig {
     return applyOwnershipRegistryToLocalConfig({
@@ -218,6 +301,8 @@ export function createElectronLauncherSystemDomainProxy(
       proxy: pac.proxy,
       matchMode: pac.matchMode,
       fallbackProxy: pac.fallbackProxy,
+      fallbackPacUrl: pac.fallbackPacUrl,
+      fallbackPacScript: pac.fallbackPacScript,
       dnsServers: pac.dnsServers,
       dnsFallbackTarget: pac.dnsFallbackTarget,
       reverseProxyRoutes: pac.reverseProxyRoutes,
@@ -237,7 +322,10 @@ export function createElectronLauncherSystemDomainProxy(
       await new Promise<void>((resolve) => dnsServer.close(() => resolve()));
     }
     if (!server) return;
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+    for (const socket of localPacSockets) socket.destroy();
+    localPacSockets.clear();
+    await closed;
   }
 
   async function ensureLocalPacServer(pac: Omit<ResolvedPacSource, 'pacUrl' | 'usesLocalPac' | 'sharedLocalPac'>): Promise<{
@@ -251,6 +339,8 @@ export function createElectronLauncherSystemDomainProxy(
       matchMode: pac.matchMode,
       proxy: pac.proxy?.directive || null,
       fallbackProxy: pac.fallbackProxy?.directive || null,
+      fallbackPacUrl: pac.fallbackPacUrl,
+      fallbackPacScript: pac.fallbackPacScript,
       dnsServers: pac.dnsServers,
       dnsFallbackTarget: pac.dnsFallbackTarget,
       reverseProxyRoutes: pac.reverseProxyRoutes,
@@ -285,6 +375,10 @@ export function createElectronLauncherSystemDomainProxy(
     server.on('connect', (req, socket, head) => {
       void handleProxyConnectRequest(req, socket as Socket, head);
     });
+    server.on('connection', (socket) => {
+      localPacSockets.add(socket);
+      socket.once('close', () => localPacSockets.delete(socket));
+    });
 
     try {
       await new Promise<void>((resolve, reject) => {
@@ -306,11 +400,20 @@ export function createElectronLauncherSystemDomainProxy(
       await ensureLocalDnsServer(localPacPort || preferredPort);
     } catch (err) {
       try {
-        await new Promise<void>((resolve) => server.close(() => resolve()));
+        const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+        for (const socket of localPacSockets) socket.destroy();
+        localPacSockets.clear();
+        await closed;
       } catch {
         // The server may have failed before entering the listening state.
       }
       if (preferredPort > 0 && isAddressInUseError(err)) {
+        if (process.platform === 'win32') {
+          throw new Error(
+            `Windows local edge 127.0.0.1:${preferredPort} is already owned by another process; `
+            + 'cross-process PAC sharing cannot guarantee safe browser cleanup.'
+          );
+        }
         const shared = await registerSharedLocalPacServer(preferredPort, nextConfig);
         const sharedConfig = normalizeSharedLocalPacConfig(shared.config || shared);
         return {
@@ -360,6 +463,7 @@ export function createElectronLauncherSystemDomainProxy(
         matchMode: localPacConfig?.matchMode || null,
         fallbackProxy: localPacConfig?.fallbackProxy?.address || null,
         fallbackProxyDirective: localPacConfig?.fallbackProxy?.directive || null,
+        fallbackPacUrl: localPacConfig?.fallbackPacUrl || null,
         dnsServers: localPacConfig?.dnsServers || [],
         dnsFallbackTarget: localPacConfig?.dnsFallbackTarget || null,
         reverseProxyRoutes: localPacConfig?.reverseProxyRoutes || [],
@@ -369,6 +473,13 @@ export function createElectronLauncherSystemDomainProxy(
       return;
     }
     if (controlPath === SHARED_APPLY_PATH && req.method === 'POST') {
+      if (process.platform === 'win32') {
+        writeJsonResponse(res, 409, {
+          marker: PAC_MARKER,
+          error: 'Windows application-process PAC sharing is disabled; use one Launcher network broker.'
+        });
+        return;
+      }
       const body = await readRequestJson(req);
       localPacConfig = mergeLocalPacConfigs(localPacConfig, normalizeSharedLocalPacConfig(body));
       localPacKey = localPacConfigKey(localPacConfig, localPacPort);
@@ -382,6 +493,7 @@ export function createElectronLauncherSystemDomainProxy(
         matchMode: localPacConfig.matchMode,
         fallbackProxy: localPacConfig.fallbackProxy?.address || null,
         fallbackProxyDirective: localPacConfig.fallbackProxy?.directive || null,
+        fallbackPacUrl: localPacConfig.fallbackPacUrl,
         dnsServers: localPacConfig.dnsServers,
         dnsFallbackTarget: localPacConfig.dnsFallbackTarget,
         reverseProxyRoutes: localPacConfig.reverseProxyRoutes,
@@ -391,6 +503,13 @@ export function createElectronLauncherSystemDomainProxy(
       return;
     }
     if (controlPath === SHARED_RELEASE_PATH && req.method === 'POST') {
+      if (process.platform === 'win32') {
+        writeJsonResponse(res, 409, {
+          marker: PAC_MARKER,
+          error: 'Windows application-process PAC sharing is disabled; use one Launcher network broker.'
+        });
+        return;
+      }
       const body = await readRequestJson(req);
       const ownerId = normalizeOwnerId((body as Record<string, unknown>)?.ownerId);
       if (ownerId && localPacConfig) {
@@ -407,6 +526,7 @@ export function createElectronLauncherSystemDomainProxy(
         matchMode: localPacConfig?.matchMode || null,
         fallbackProxy: localPacConfig?.fallbackProxy?.address || null,
         fallbackProxyDirective: localPacConfig?.fallbackProxy?.directive || null,
+        fallbackPacUrl: localPacConfig?.fallbackPacUrl || null,
         dnsServers: localPacConfig?.dnsServers || [],
         dnsFallbackTarget: localPacConfig?.dnsFallbackTarget || null,
         reverseProxyRoutes: localPacConfig?.reverseProxyRoutes || [],
@@ -537,7 +657,13 @@ export function createElectronLauncherSystemDomainProxy(
     const dnsFallbackTarget = normalizeDnsTarget(policy.dnsFallbackTarget);
     const systemResolverMode = normalizeSystemResolverMode(policy.systemResolver);
     const reverseProxyRoutes = normalizeReverseProxyRoutes(policy.reverseProxyRoutes);
-    const fallbackProxy = normalizeProxyAddress(policy.fallbackProxy) || fallbackProxyForPac(previous);
+    const explicitFallbackProxy = normalizeProxyAddress(policy.fallbackProxy);
+    const continuation = pacUrl
+      ? { fallbackProxy: explicitFallbackProxy, fallbackPacUrl: null, fallbackPacScript: null }
+      : explicitFallbackProxy
+        ? { fallbackProxy: explicitFallbackProxy, fallbackPacUrl: null, fallbackPacScript: null }
+        : await fallbackForPac(previous);
+    const fallbackProxy = continuation.fallbackProxy;
     const ownershipClaim = normalizeOwnershipClaim(policy.ownershipClaim);
     if (pacUrl) {
       return {
@@ -546,6 +672,8 @@ export function createElectronLauncherSystemDomainProxy(
         proxy: normalizeProxyAddress(policy.proxy),
         matchMode: normalizeMatchMode(policy.matchMode, policy.proxy),
         fallbackProxy,
+        fallbackPacUrl: continuation.fallbackPacUrl,
+        fallbackPacScript: continuation.fallbackPacScript,
         pacPort: null,
         sharedLocalPac: false,
         dnsServers,
@@ -566,6 +694,8 @@ export function createElectronLauncherSystemDomainProxy(
       proxy,
       matchMode,
       fallbackProxy,
+      fallbackPacUrl: continuation.fallbackPacUrl,
+      fallbackPacScript: continuation.fallbackPacScript,
       pacPort,
       sharedLocalPac: false,
       dnsServers,
@@ -593,9 +723,7 @@ export function createElectronLauncherSystemDomainProxy(
 
   async function prepareApplyState(policy: ElectronLauncherSystemDomainProxyPolicy): Promise<PreparedSystemDomainProxyApply | null> {
     const existing = readState(statePath);
-    const previous = existing?.applied === true && existing.platform === process.platform
-      ? existing.previous
-      : await capturePlatformState();
+    const { previous, windowsApplySnapshot } = await platformStatesForApply(existing);
     const pac = await resolvePacSource(policy, previous);
     if (!pac) return null;
 
@@ -608,6 +736,7 @@ export function createElectronLauncherSystemDomainProxy(
       proxy: pac.proxy?.address || null,
       matchMode: pac.matchMode,
       fallbackProxy: pac.fallbackProxy?.directive || null,
+      fallbackPacUrl: pac.fallbackPacUrl,
       pacPort: pac.pacPort,
       sharedLocalPac: pac.sharedLocalPac,
       dnsServers: pac.dnsServers,
@@ -636,6 +765,7 @@ export function createElectronLauncherSystemDomainProxy(
     return {
       existing,
       previous,
+      windowsApplySnapshot,
       pac,
       resolverPlan,
       next,
@@ -644,9 +774,12 @@ export function createElectronLauncherSystemDomainProxy(
   }
 
   async function releaseSharedOwnerForState(state: StoredState): Promise<LocalPacServerConfig | null> {
+    if (state.sharedLocalPac !== true) return null;
     const ownerId = stateOwnershipOwnerId(state);
     const port = normalizePort(state.pacPort);
-    if (state.sharedLocalPac !== true || !ownerId || !port) return null;
+    if (!ownerId || !port) {
+      throw new Error('Shared local PAC state is missing the owner id or port required for a safe release.');
+    }
     const response = await releaseSharedLocalPacServer(port, ownerId);
     return normalizeSharedLocalPacConfig(response);
   }
@@ -666,7 +799,16 @@ export function createElectronLauncherSystemDomainProxy(
       storedSystemResolverMode(state),
       nextConfig
     );
-    const resolver = await applyPlatformPacAndSystemResolvers(pac, state.previous, state, log);
+    const windowsApplySnapshot = process.platform === 'win32'
+      ? await captureWindowsState()
+      : null;
+    const resolver = await applyPlatformPacAndSystemResolvers(
+      pac,
+      state.previous,
+      state,
+      log,
+      windowsApplySnapshot
+    );
     const next: StoredState = {
       ...state,
       applied: true,
@@ -674,6 +816,7 @@ export function createElectronLauncherSystemDomainProxy(
       proxy: pac.proxy?.address || null,
       matchMode: pac.matchMode,
       fallbackProxy: pac.fallbackProxy?.directive || null,
+      fallbackPacUrl: pac.fallbackPacUrl,
       pacPort: pac.pacPort,
       sharedLocalPac: false,
       dnsServers: pac.dnsServers,
@@ -699,24 +842,83 @@ export function createElectronLauncherSystemDomainProxy(
   return {
     async apply(policy) {
       if (!isSupportedPlatform()) return unsupportedStatus();
-      const prepared = await prepareApplyState(policy);
+      const gateWasHeld = Boolean(windowsOwnershipGateLease);
+      const localServerBeforePrepare = localPacServer;
+      const localPortBeforePrepare = localPacPort;
+      const localKeyBeforePrepare = localPacKey;
+      const localConfigBeforePrepare = localPacConfig;
+      const hadWorkingLocalEdge = Boolean(localServerBeforePrepare);
+      acquireWindowsOwnershipGate();
+      let prepared: PreparedSystemDomainProxyApply | null;
+      try {
+        prepared = await prepareApplyState(policy);
+      } catch (err) {
+        if (gateWasHeld || hadWorkingLocalEdge) {
+          // A reapply may update the in-memory continuation on the existing
+          // edge before its pending state write fails. Keep the established
+          // owner alive and restore the last known working local config.
+          if (localPacServer && localPacServer !== localServerBeforePrepare) {
+            await closeLocalPacServer();
+          }
+          localPacServer = localServerBeforePrepare;
+          localPacPort = localPortBeforePrepare;
+          localPacKey = localKeyBeforePrepare;
+          localPacConfig = localConfigBeforePrepare;
+        } else {
+          await closeLocalPacServer();
+          releaseWindowsOwnershipGate();
+        }
+        throw err;
+      }
       if (!prepared) {
-        await closeLocalPacServer();
         return this.disable('domain-proxy-disabled');
       }
-      const { pac, previous, existing, next, changed } = prepared;
-      const resolver = await applyPlatformPacAndSystemResolvers(pac, previous, existing, log);
-      next.systemResolver = resolver.mode !== 'off';
-      next.systemResolverMode = resolver.mode;
-      next.resolverDomains = resolver.domains;
-      next.resolverPort = resolver.port;
-      next.resolverApplied = resolver.applied;
-      next.resolverError = resolver.error || null;
-      if (pac.usesLocalPac !== true) await closeLocalPacServer();
-      delete next.pending;
-      next.updatedAt = new Date().toISOString();
-      writeState(statePath, next);
-      return publicState(next, { changed });
+      const { pac, previous, windowsApplySnapshot, existing, next, changed } = prepared;
+      try {
+        const resolver = await applyPlatformPacAndSystemResolvers(
+          pac,
+          previous,
+          existing,
+          log,
+          windowsApplySnapshot
+        );
+        next.systemResolver = resolver.mode !== 'off';
+        next.systemResolverMode = resolver.mode;
+        next.resolverDomains = resolver.domains;
+        next.resolverPort = resolver.port;
+        next.resolverApplied = resolver.applied;
+        next.resolverError = resolver.error || null;
+        if (pac.usesLocalPac !== true) await closeLocalPacServer();
+        delete next.pending;
+        next.updatedAt = new Date().toISOString();
+        writeState(statePath, next);
+        return publicState(next, { changed });
+      } catch (applyErr) {
+        // AutoConfigURL can commit before the WinINet change notification or
+        // its read-back verification fails. Roll back from the pending state
+        // before reporting failure so shutdown cannot inherit a dead PAC.
+        try {
+          if (process.platform === 'win32') {
+            await rollbackWindowsPartialApply(previous, pac.pacUrl);
+          } else {
+            await restorePlatformAndSystemState(next, log);
+          }
+          if (next.sharedLocalPac === true) {
+            await releaseSharedOwnerForState(next);
+          }
+          await closeLocalPacServer();
+          removeState(statePath, log);
+          releaseWindowsOwnershipGate();
+        } catch (rollbackErr) {
+          log.warn('[electron-launcher] failed to roll back partial system domain proxy apply', rollbackErr);
+          const error = new Error(
+            `System domain proxy apply failed (${errorMessage(applyErr)}); rollback also failed (${errorMessage(rollbackErr)})`
+          );
+          Object.assign(error, { cause: applyErr, rollbackError: rollbackErr });
+          throw error;
+        }
+        throw applyErr;
+      }
     },
 
     async darwinPrepareApply(policy) {
@@ -798,11 +1000,12 @@ export function createElectronLauncherSystemDomainProxy(
       });
     },
 
-    async disable(reason = 'manual') {
+    async disable(reason = 'manual', disableOptions = {}) {
       if (!isSupportedPlatform()) return unsupportedStatus({ reason });
       const existing = readState(statePath);
       if (!existing?.applied || existing.platform !== process.platform) {
         await closeLocalPacServer();
+        releaseWindowsOwnershipGate();
         return {
           supported: true,
           applied: false,
@@ -810,6 +1013,49 @@ export function createElectronLauncherSystemDomainProxy(
           reason,
           skipped: true
         };
+      }
+
+      acquireWindowsOwnershipGate();
+      if (existing.sharedLocalPac === true) {
+        const shared = await releaseSharedOwnerForState(existing);
+        const remainingOwners = normalizeOwnershipClaims(shared?.ownershipClaims).map((claim) => claim.ownerId);
+        let restored = false;
+        if (remainingOwners.length === 0) {
+          const restore = process.platform === 'win32'
+            ? await sanitizeWindowsStaleRestoreState(existing, log)
+            : { state: existing, skippedDeadPac: false, skippedDeadProxy: false };
+          await restorePlatformAndSystemState(restore.state, log);
+          restored = true;
+        }
+        await closeLocalPacServer();
+        removeState(statePath, log);
+        releaseWindowsOwnershipGate();
+        return {
+          supported: true,
+          applied: false,
+          platform: process.platform,
+          reason,
+          restored,
+          skipped: !restored,
+          sharedPac: true,
+          actual: {
+            sharedPacRetained: remainingOwners.length > 0,
+            remainingOwners
+          }
+        };
+      }
+
+      if (process.platform === 'win32') {
+        const ownerId = stateOwnershipOwnerId(existing);
+        const otherOwnerIds = normalizeOwnershipClaims(localPacConfig?.ownershipClaims)
+          .map((claim) => claim.ownerId)
+          .filter((candidate) => candidate && candidate !== ownerId);
+        if (otherOwnerIds.length > 0) {
+          throw new Error(
+            `Windows local edge still has other Launcher owners (${otherOwnerIds.join(', ')}); `
+            + 'disconnect them or move all owners to one Launcher network broker.'
+          );
+        }
       }
 
       const retained = await releaseLocalOwnerAndRetainSharedEdge(existing).catch((err) => {
@@ -820,50 +1066,129 @@ export function createElectronLauncherSystemDomainProxy(
         return publicState(retained, {
           reason,
           changed: true,
-          skipped: true
+          skipped: true,
+          actual: {
+            localOwnerReleased: true,
+            sharedPacRetained: true,
+            remainingOwners: arrayValue(retained.ownershipRegistry?.owners, [])
+              .map((owner) => normalizeOwnerId((owner as { ownerId?: unknown }).ownerId))
+              .filter(Boolean)
+          }
         });
       }
-      await releaseSharedOwnerForState(existing).catch((err) => {
-        log.warn('[electron-launcher] failed to release shared PAC owner before restore', err);
-      });
-      await restorePlatformAndSystemState(existing, log);
-      await closeLocalPacServer();
-      removeState(statePath, log);
-      return {
-        supported: true,
-        applied: false,
-        platform: process.platform,
-        reason,
-        restored: true
-      };
-    },
-
-    async restoreStale(reason = 'startup') {
-      if (!isSupportedPlatform()) return unsupportedStatus({ reason });
-      const existing = readState(statePath);
-      if (existing?.applied === true && existing.platform === process.platform) {
-        await restorePlatformAndSystemState(existing, log);
-        await closeLocalPacServer();
-        removeState(statePath, log);
+      const restore = process.platform === 'win32'
+        ? await sanitizeWindowsStaleRestoreState(existing, log)
+        : { state: existing, skippedDeadPac: false, skippedDeadProxy: false };
+      await restorePlatformAndSystemState(restore.state, log);
+      if (disableOptions.keepLocalEdgeAlive === true && localPacServer) {
         return {
           supported: true,
           applied: false,
           platform: process.platform,
           reason,
           restored: true,
-          staleState: true
+          stalePreviousPacSkipped: restore.skippedDeadPac,
+          stalePreviousProxySkipped: restore.skippedDeadProxy,
+          actual: {
+            localEdgeRetained: true,
+            pacUrl: existing.pacUrl,
+            pacPort: existing.pacPort
+          }
         };
       }
-      const orphanCleanup = await restoreOrphanSystemResolvers(log);
       await closeLocalPacServer();
+      removeState(statePath, log);
+      releaseWindowsOwnershipGate();
       return {
         supported: true,
         applied: false,
         platform: process.platform,
         reason,
-        skipped: !orphanCleanup,
-        restored: orphanCleanup,
-        orphanCleanup
+        restored: true,
+        stalePreviousPacSkipped: restore.skippedDeadPac,
+        stalePreviousProxySkipped: restore.skippedDeadProxy
+      };
+    },
+
+    async restoreStale(reason = 'startup') {
+      if (!isSupportedPlatform()) return unsupportedStatus({ reason });
+      acquireWindowsOwnershipGate();
+      const existing = readState(statePath);
+      if (existing?.applied === true && existing.platform === process.platform) {
+        if (existing.sharedLocalPac === true) {
+          try {
+            const shared = await releaseSharedOwnerForState(existing);
+            const remainingOwners = normalizeOwnershipClaims(shared?.ownershipClaims).map((claim) => claim.ownerId);
+            let restored = false;
+            if (remainingOwners.length === 0) {
+              const staleRestore = process.platform === 'win32'
+                ? await sanitizeWindowsStaleRestoreState(existing, log)
+                : { state: existing, skippedDeadPac: false, skippedDeadProxy: false };
+              await restorePlatformAndSystemState(staleRestore.state, log);
+              restored = true;
+            }
+            await closeLocalPacServer();
+            removeState(statePath, log);
+            releaseWindowsOwnershipGate();
+            return {
+              supported: true,
+              applied: false,
+              platform: process.platform,
+              reason,
+              restored,
+              skipped: !restored,
+              staleState: true,
+              sharedPac: true,
+              actual: {
+                sharedPacRetained: remainingOwners.length > 0,
+                remainingOwners
+              }
+            };
+          } catch (err) {
+            const port = normalizePort(existing.pacPort);
+            const liveShared = port
+              ? await sharedLocalPacStatus(port).catch(() => null)
+              : null;
+            if (liveShared?.marker === PAC_MARKER) throw err;
+            // The former host is gone. Fall through to the normal stale
+            // restore, which uses compare-and-swap on Windows AutoConfigURL.
+          }
+        }
+        const staleRestore = process.platform === 'win32'
+          ? await sanitizeWindowsStaleRestoreState(existing, log)
+          : { state: existing, skippedDeadPac: false, skippedDeadProxy: false };
+        await restorePlatformAndSystemState(staleRestore.state, log);
+        await closeLocalPacServer();
+        removeState(statePath, log);
+        releaseWindowsOwnershipGate();
+        return {
+          supported: true,
+          applied: false,
+          platform: process.platform,
+          reason,
+          restored: true,
+          staleState: true,
+          stalePreviousPacSkipped: staleRestore.skippedDeadPac,
+          stalePreviousProxySkipped: staleRestore.skippedDeadProxy
+        };
+      }
+      const orphanWindowsPac = process.platform === 'win32'
+        ? await restoreOrphanWindowsPac(normalizePort(options.pacPort), log)
+        : false;
+      const orphanCleanup = await restoreOrphanSystemResolvers(log);
+      await closeLocalPacServer();
+      releaseWindowsOwnershipGate();
+      return {
+        supported: true,
+        applied: false,
+        platform: process.platform,
+        reason,
+        skipped: !orphanCleanup && !orphanWindowsPac,
+        restored: orphanCleanup || orphanWindowsPac,
+        orphanCleanup,
+        actual: {
+          orphanWindowsPac
+        }
       };
     },
 
@@ -886,6 +1211,7 @@ export function createElectronLauncherSystemDomainProxy(
       }
       await closeLocalPacServer();
       removeState(statePath, log);
+      releaseWindowsOwnershipGate();
       return {
         supported: true,
         applied: false,
@@ -943,7 +1269,173 @@ export function createElectronLauncherSystemDomainProxy(
       }
     },
 
-    close: closeLocalPacServer
+    async refreshWindowsContinuation(reason = 'background') {
+      if (process.platform !== 'win32') {
+        return unsupportedStatus({ reason, platform: process.platform });
+      }
+      const state = readState(statePath);
+      if (!state?.applied || state.platform !== process.platform || !state.pacPort) {
+        return {
+          supported: true,
+          applied: false,
+          platform: process.platform,
+          reason,
+          skipped: true
+        };
+      }
+      if (state.sharedLocalPac === true || !localPacConfig || !localPacServer) {
+        return publicState(state, {
+          reason,
+          skipped: true,
+          changed: false,
+          actual: { continuationRefresh: 'shared-or-nonlocal-edge' }
+        });
+      }
+      let changed = false;
+      let retriedPendingNotification = false;
+      try {
+        if (state.continuationNotifyPending === true) {
+          await notifyWindowsProxyChanged();
+          delete state.continuationNotifyPending;
+          state.updatedAt = new Date().toISOString();
+          writeState(statePath, state);
+          retriedPendingNotification = true;
+        }
+        const current = await captureWindowsState() as Record<string, RegistryValue>;
+        const continuationPrevious = windowsContinuationPrevious(state.previous, current);
+        const continuation = await fallbackForPac(continuationPrevious);
+        changed = (
+          localPacConfig.fallbackProxy?.directive !== continuation.fallbackProxy?.directive
+          || localPacConfig.fallbackPacUrl !== continuation.fallbackPacUrl
+          || localPacConfig.fallbackPacScript !== continuation.fallbackPacScript
+        );
+        if (changed) {
+          localPacConfig = {
+            ...localPacConfig,
+            fallbackProxy: continuation.fallbackProxy,
+            fallbackPacUrl: continuation.fallbackPacUrl,
+            fallbackPacScript: continuation.fallbackPacScript
+          };
+          localPacKey = localPacConfigKey(localPacConfig, localPacPort);
+          state.fallbackProxy = continuation.fallbackProxy?.directive || null;
+          state.fallbackPacUrl = continuation.fallbackPacUrl;
+          state.continuationNotifyPending = true;
+          state.updatedAt = new Date().toISOString();
+          writeState(statePath, state);
+          await notifyWindowsProxyChanged();
+          delete state.continuationNotifyPending;
+          state.updatedAt = new Date().toISOString();
+          writeState(statePath, state);
+        }
+        return publicState(state, {
+          reason,
+          changed,
+          verified: true,
+          pending: false,
+          actual: {
+            continuationRefresh: changed
+              ? 'updated'
+              : retriedPendingNotification
+                ? 'notification-retried'
+                : 'unchanged'
+          }
+        });
+      } catch (err) {
+        const persisted = readState(statePath) || state;
+        return publicState(persisted, {
+          reason,
+          changed,
+          pending: persisted.continuationNotifyPending === true,
+          error: `Windows proxy continuation refresh failed: ${errorMessage(err)}`,
+          actual: {
+            continuationRefresh: 'failed'
+          }
+        });
+      }
+    },
+
+    async probeBrowserAccess(input) {
+      const host = normalizeDomainName(input?.host);
+      const port = normalizePort(input?.port) || 443;
+      if (process.platform !== 'win32') {
+        return {
+          supported: false,
+          ready: false,
+          platform: process.platform,
+          host,
+          port,
+          pacApplied: false,
+          proxyReachable: false,
+          skipped: true
+        };
+      }
+      const state = readState(statePath);
+      if (
+        !host
+        || !state?.applied
+        || state.platform !== process.platform
+        || state.matchMode !== 'proxy'
+        || !hostMatchesDomains(host, state.domains)
+      ) {
+        return {
+          supported: true,
+          ready: false,
+          platform: process.platform,
+          host,
+          port,
+          pacApplied: false,
+          proxyReachable: false,
+          pacUrl: state?.pacUrl || null,
+          proxy: state?.proxy || null,
+          error: !host
+            ? 'Invalid browser diagnostic host.'
+            : 'The Internal host is not covered by an applied proxy-mode PAC.'
+        };
+      }
+      const verified = await this.statusVerified();
+      const endpoint = proxyTargetEndpoint(state.proxy || '');
+      if (verified.applied !== true || !endpoint || !isLoopbackProxyHost(endpoint.host)) {
+        return {
+          supported: true,
+          ready: false,
+          platform: process.platform,
+          host,
+          port,
+          pacApplied: verified.applied === true,
+          proxyReachable: false,
+          pacUrl: state.pacUrl,
+          proxy: state.proxy,
+          error: verified.error || verified.resolverError || 'Windows PAC is not applied to the local edge.'
+        };
+      }
+      const connect = await probeHttpConnectProxy(
+        {
+          host: normalizeLoopbackProxyHost(endpoint.host),
+          port: endpoint.port
+        },
+        { host, port },
+        normalizeInteger(input?.timeoutMs) || WINDOWS_BROWSER_PROXY_PROBE_TIMEOUT_MS
+      );
+      return {
+        supported: true,
+        ready: connect.statusCode === 200,
+        platform: process.platform,
+        host,
+        port,
+        pacApplied: true,
+        proxyReachable: connect.proxyReachable,
+        proxyStatusCode: connect.statusCode,
+        proxyStatusLine: connect.statusLine,
+        pacUrl: state.pacUrl,
+        proxy: state.proxy,
+        error: connect.statusCode === 200 ? null : connect.error || connect.statusLine || 'Internal proxy CONNECT failed.'
+      };
+    },
+
+    async close() {
+      await closeLocalPacServer();
+      releaseWindowsOwnershipGate();
+    }
   };
 }
 
@@ -952,6 +1444,7 @@ export function renderElectronLauncherPacScript(input: {
   proxy?: ElectronLauncherPacProxy | null;
   matchMode?: ElectronLauncherPacMatchMode | null;
   fallbackProxy?: ElectronLauncherPacProxy | null;
+  fallbackPacScript?: string | null;
   ownershipClaims?: ElectronLauncherNetworkOwnershipClaim[] | null;
 }): string {
   const matchDirective = input.matchMode === 'proxy' && input.proxy
@@ -961,7 +1454,16 @@ export function renderElectronLauncherPacScript(input: {
     ? `${input.fallbackProxy.directive}; DIRECT`
     : 'DIRECT';
   const directCidrs = pacDirectCidrs(input.ownershipClaims);
+  const fallbackPacScript = stringValue(input.fallbackPacScript);
+  const previousPac = fallbackPacScript
+    ? `var __mxPreviousFindProxyForURL = (function() {
+  var FindProxyForURL;
+${fallbackPacScript.replace(/^\uFEFF/, '').split(/\r?\n/).map((line) => `  ${line}`).join('\n')}
+  return typeof FindProxyForURL === 'function' ? FindProxyForURL : null;
+})();`
+    : 'var __mxPreviousFindProxyForURL = null;';
   return `// ${PAC_MARKER}
+${previousPac}
 function FindProxyForURL(url, host) {
   var h = String(host || '').toLowerCase();
   var directCidrs = ${JSON.stringify(directCidrs)};
@@ -978,6 +1480,15 @@ function FindProxyForURL(url, host) {
     var d = domains[i];
     if (h === d || h.slice(-(d.length + 1)) === '.' + d) {
       return ${JSON.stringify(matchDirective)};
+    }
+  }
+  if (__mxPreviousFindProxyForURL) {
+    try {
+      var previousDecision = __mxPreviousFindProxyForURL(url, host);
+      if (typeof previousDecision === 'string' && previousDecision) {
+        return previousDecision;
+      }
+    } catch (ignored) {
     }
   }
   return ${JSON.stringify(fallbackDirective)};
@@ -1014,13 +1525,49 @@ async function capturePlatformState(): Promise<unknown> {
   return {};
 }
 
-async function applyPlatformPac(pacUrl: string, previous: unknown): Promise<void> {
+async function platformStatesForApply(existing: StoredState | null): Promise<{
+  previous: unknown;
+  windowsApplySnapshot: Record<string, RegistryValue> | null;
+}> {
+  if (process.platform !== 'win32') {
+    return {
+      previous: !existing?.applied || existing.platform !== process.platform
+        ? await capturePlatformState()
+        : existing.previous,
+      windowsApplySnapshot: null
+    };
+  }
+  const current = await captureWindowsState() as Record<string, RegistryValue>;
+  if (!existing?.applied || existing.platform !== process.platform) {
+    return { previous: current, windowsApplySnapshot: current };
+  }
+  const autoConfigUrl = current.autoConfigUrl;
+  if (!autoConfigUrl?.exists || autoConfigUrl.value !== existing.pacUrl) {
+    return { previous: current, windowsApplySnapshot: current };
+  }
+  const previous = existing.previous && typeof existing.previous === 'object'
+    ? existing.previous as Record<string, RegistryValue>
+    : {};
+  return {
+    previous: {
+      ...current,
+      autoConfigUrl: previous.autoConfigUrl ?? { exists: false, name: 'AutoConfigURL' }
+    },
+    windowsApplySnapshot: current
+  };
+}
+
+async function applyPlatformPac(
+  pacUrl: string,
+  previous: unknown,
+  windowsApplySnapshot: Record<string, RegistryValue> | null
+): Promise<void> {
   if (process.platform === 'darwin') {
     await applyDarwinPac(pacUrl, previous);
     return;
   }
   if (process.platform === 'win32') {
-    await applyWindowsPac(pacUrl);
+    await applyWindowsPac(pacUrl, previous, windowsApplySnapshot);
   }
 }
 
@@ -1028,23 +1575,24 @@ async function applyPlatformPacAndSystemResolvers(
   pac: ResolvedPacSource,
   previous: unknown,
   existing: StoredState | null,
-  log: Pick<Console, 'warn'>
+  log: Pick<Console, 'warn'>,
+  windowsApplySnapshot: Record<string, RegistryValue> | null
 ): Promise<SystemResolverApplyResult> {
   const plan = systemResolverPlan(pac);
   if (process.platform === 'darwin' && plan.mode === 'dynamic' && plan.port && plan.domains.length > 0) {
     return applyDarwinPacAndDynamicResolvers(pac.pacUrl, previous, existing, { ...plan, port: plan.port }, log);
   }
-  await applyPlatformPac(pac.pacUrl, previous);
+  await applyPlatformPac(pac.pacUrl, previous, windowsApplySnapshot);
   return applySystemResolversWithPlan(pac, existing, plan, log);
 }
 
-async function restorePlatformState(previous: unknown): Promise<void> {
+async function restorePlatformState(previous: unknown, pacUrl: string): Promise<void> {
   if (process.platform === 'darwin') {
     await restoreDarwinState(previous);
     return;
   }
   if (process.platform === 'win32') {
-    await restoreWindowsState(previous);
+    await restoreWindowsState(previous, pacUrl);
   }
 }
 
@@ -1053,7 +1601,7 @@ async function restorePlatformAndSystemState(state: StoredState, log: Pick<Conso
     await restoreDarwinPlatformAndSystemState(state, log);
     return;
   }
-  await restorePlatformState(state.previous);
+  await restorePlatformState(state.previous, state.pacUrl);
   await restoreSystemResolvers(state, log);
 }
 
@@ -1070,7 +1618,7 @@ async function restoreOrphanSystemResolvers(log: Pick<Console, 'warn'>): Promise
 
 async function verifyPlatformPac(pacUrl: string, previous: unknown): Promise<{ applied: boolean; platform: NodeJS.Platform; [key: string]: unknown }> {
   if (process.platform === 'darwin') return verifyDarwinPac(pacUrl, previous);
-  if (process.platform === 'win32') return verifyWindowsPac(pacUrl);
+  if (process.platform === 'win32') return verifyWindowsPac(pacUrl, previous);
   return { applied: false, platform: process.platform };
 }
 
@@ -1800,40 +2348,207 @@ async function runDarwinNetworksetupSetBatch(commands: string[][]): Promise<void
   }
 }
 
-async function captureWindowsState(): Promise<Record<string, unknown>> {
+async function captureWindowsState(): Promise<Record<string, RegistryValue>> {
+  const [autoConfigUrl, proxyEnable, proxyServer, proxyOverride, autoDetect] = await Promise.all([
+    queryWindowsRegistryValue('AutoConfigURL'),
+    queryWindowsRegistryValue('ProxyEnable'),
+    queryWindowsRegistryValue('ProxyServer'),
+    queryWindowsRegistryValue('ProxyOverride'),
+    queryWindowsRegistryValue('AutoDetect')
+  ]);
   return {
-    autoConfigUrl: await queryWindowsRegistryValue('AutoConfigURL'),
-    proxyEnable: await queryWindowsRegistryValue('ProxyEnable'),
-    proxyServer: await queryWindowsRegistryValue('ProxyServer'),
-    proxyOverride: await queryWindowsRegistryValue('ProxyOverride'),
-    autoDetect: await queryWindowsRegistryValue('AutoDetect')
+    autoConfigUrl,
+    proxyEnable,
+    proxyServer,
+    proxyOverride,
+    autoDetect
   };
 }
 
-async function applyWindowsPac(pacUrl: string): Promise<void> {
+async function applyWindowsPac(
+  pacUrl: string,
+  previous: unknown,
+  expectedCurrent: Record<string, RegistryValue> | null
+): Promise<void> {
+  if (!expectedCurrent) {
+    throw new Error('Windows PAC apply is missing its captured WinINet state; refusing to overwrite AutoConfigURL.');
+  }
+  const current = await captureWindowsState() as Record<string, RegistryValue>;
+  if (!windowsRegistrySnapshotEquals(current, expectedCurrent)) {
+    throw new Error('Windows proxy settings changed while MX-H2I was preparing its PAC; refusing to overwrite AutoConfigURL.');
+  }
   await addWindowsRegistryValue('AutoConfigURL', 'REG_SZ', pacUrl);
-  await addWindowsRegistryValue('ProxyEnable', 'REG_DWORD', '0');
   await notifyWindowsProxyChanged();
+  const verified = await verifyWindowsPac(pacUrl, previous);
+  if (!verified.applied) {
+    throw new Error('Windows did not retain the MX-H2I PAC after apply.');
+  }
 }
 
-async function verifyWindowsPac(pacUrl: string): Promise<{ applied: boolean; platform: NodeJS.Platform; pacUrl: string; autoConfigUrl: unknown }> {
-  const autoConfigUrl = await queryWindowsRegistryValue('AutoConfigURL');
+async function verifyWindowsPac(pacUrl: string, _previous: unknown): Promise<{
+  applied: boolean;
+  platform: NodeJS.Platform;
+  pacUrl: string;
+  autoConfigUrl: unknown;
+  proxyEnable: unknown;
+  proxyServer: unknown;
+  proxyOverride: unknown;
+  autoDetect: unknown;
+}> {
+  const [autoConfigUrl, proxyEnable, proxyServer, proxyOverride, autoDetect] = await Promise.all([
+    queryWindowsRegistryValue('AutoConfigURL'),
+    queryWindowsRegistryValue('ProxyEnable'),
+    queryWindowsRegistryValue('ProxyServer'),
+    queryWindowsRegistryValue('ProxyOverride'),
+    queryWindowsRegistryValue('AutoDetect')
+  ]);
   return {
-    applied: Boolean(autoConfigUrl.exists && autoConfigUrl.value === pacUrl),
+    applied: Boolean(
+      autoConfigUrl.exists
+      && autoConfigUrl.value === pacUrl
+    ),
     platform: process.platform,
     pacUrl,
-    autoConfigUrl
+    autoConfigUrl,
+    proxyEnable,
+    proxyServer,
+    proxyOverride,
+    autoDetect
   };
 }
 
-async function restoreWindowsState(previous: unknown): Promise<void> {
+async function restoreWindowsState(previous: unknown, pacUrl: string): Promise<void> {
+  const autoConfigUrl = await queryWindowsRegistryValue('AutoConfigURL');
+  if (!autoConfigUrl.exists || autoConfigUrl.value !== pacUrl) {
+    // An external owner may have won the compare-and-swap, or a previous
+    // restore attempt may have committed before its WinINet notification
+    // failed. Notify again before allowing the local edge to close.
+    await notifyWindowsProxyChanged();
+    return;
+  }
+  const row = previous && typeof previous === 'object' ? previous as Record<string, RegistryValue> : {};
+  // AutoConfigURL is the only WinINet value owned by MX-H2I. Keeping
+  // ProxyEnable/ProxyServer/ProxyOverride read-only preserves Clash system
+  // proxy behavior for non-PAC applications and removes the multi-write race.
+  await restoreWindowsRegistryValue('AutoConfigURL', row.autoConfigUrl, 'REG_SZ');
+  await notifyWindowsProxyChanged();
+  const after = await queryWindowsRegistryValue('AutoConfigURL');
+  if (after.exists && after.value === pacUrl) {
+    throw new Error('Windows still references the MX-H2I PAC after restore.');
+  }
+}
+
+async function rollbackWindowsPartialApply(previous: unknown, pacUrl: string): Promise<void> {
+  const autoConfigUrl = await queryWindowsRegistryValue('AutoConfigURL');
+  if (!autoConfigUrl.exists || autoConfigUrl.value !== pacUrl) return;
   const row = previous && typeof previous === 'object' ? previous as Record<string, RegistryValue> : {};
   await restoreWindowsRegistryValue('AutoConfigURL', row.autoConfigUrl, 'REG_SZ');
-  await restoreWindowsRegistryValue('ProxyServer', row.proxyServer, 'REG_SZ');
-  await restoreWindowsRegistryValue('ProxyOverride', row.proxyOverride, 'REG_SZ');
-  await restoreWindowsRegistryValue('AutoDetect', row.autoDetect, 'REG_DWORD');
-  await restoreWindowsRegistryValue('ProxyEnable', row.proxyEnable, 'REG_DWORD');
   await notifyWindowsProxyChanged();
+}
+
+async function sanitizeWindowsStaleRestoreState(
+  state: StoredState,
+  log: Pick<Console, 'warn'>
+): Promise<{ state: StoredState; skippedDeadPac: boolean; skippedDeadProxy: boolean }> {
+  const previous = state.previous && typeof state.previous === 'object'
+    ? state.previous as Record<string, RegistryValue>
+    : {};
+  const nextPrevious: Record<string, RegistryValue> = { ...previous };
+  let skippedDeadPac = false;
+  let skippedDeadProxy = false;
+
+  const previousPacEndpoint = loopbackUrlEndpoint(previous.autoConfigUrl?.value);
+  let loopbackProxyEndpoints: TcpEndpoint[] | null = null;
+  if (previous.proxyEnable?.exists && !windowsRegistryDwordEquals(previous.proxyEnable, 0)) {
+    // ProxyEnable would activate the live ProxyServer value, not the saved
+    // snapshot. If that live value is unreadable, abort stale restore rather
+    // than guessing listener liveness from an unrelated old port.
+    const currentProxyServer = await queryWindowsRegistryValue('ProxyServer');
+    loopbackProxyEndpoints = windowsLoopbackProxyEndpoints(currentProxyServer?.value);
+  }
+  // During Windows login MX-H2I can start slightly before Clash. Give loopback
+  // owners a short grace window before deciding that an old listener is stale.
+  const [previousPacReady, previousProxyReady] = await Promise.all([
+    previousPacEndpoint ? tcpEndpointReadyWithGrace(previousPacEndpoint) : Promise.resolve(true),
+    loopbackProxyEndpoints
+      ? loopbackProxyEndpoints.length > 0
+        ? Promise.all(loopbackProxyEndpoints.map(tcpEndpointReadyWithGrace)).then((rows) => rows.every(Boolean))
+        : Promise.resolve(false)
+      : Promise.resolve(true)
+  ]);
+  if (previousPacEndpoint && !previousPacReady) {
+    nextPrevious.autoConfigUrl = { exists: false, name: 'AutoConfigURL' };
+    skippedDeadPac = true;
+    log.warn(
+      `[electron-launcher] skipped stale Windows PAC restore because ${previousPacEndpoint.host}:${previousPacEndpoint.port} is not listening`
+    );
+  }
+
+  if (loopbackProxyEndpoints && !previousProxyReady) {
+    nextPrevious.proxyEnable = {
+      exists: true,
+      name: 'ProxyEnable',
+      type: 'REG_DWORD',
+      value: '0'
+    };
+    skippedDeadProxy = true;
+    log.warn('[electron-launcher] skipped stale Windows static proxy enable because its loopback listener is unavailable');
+  }
+
+  if (!skippedDeadPac && !skippedDeadProxy) {
+    return { state, skippedDeadPac, skippedDeadProxy };
+  }
+  return {
+    state: {
+      ...state,
+      previous: nextPrevious
+    },
+    skippedDeadPac,
+    skippedDeadProxy
+  };
+}
+
+async function restoreOrphanWindowsPac(
+  expectedPort: number | null,
+  log: Pick<Console, 'warn'>
+): Promise<boolean> {
+  if (process.platform !== 'win32' || !expectedPort) return false;
+  const current = await queryWindowsRegistryValue('AutoConfigURL');
+  const value = current.exists ? stringValue(current.value) : null;
+  if (!value) return false;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  const port = Number(url.port || (url.protocol === 'https:' ? 443 : 80));
+  if (
+    !['http:', 'https:'].includes(url.protocol)
+    || !isLoopbackProxyHost(url.hostname)
+    || port !== expectedPort
+    || url.pathname !== PAC_PATH
+  ) {
+    return false;
+  }
+  try {
+    const script = await httpTextRequest(url, 1000, WINDOWS_FALLBACK_PAC_MAX_BYTES);
+    // A live marked edge may belong to another launcher process. Without a
+    // state/owner claim this process must not remove its system PAC.
+    if (script.includes(PAC_MARKER)) return false;
+    return false;
+  } catch {
+    const endpoint = { host: normalizeLoopbackProxyHost(url.hostname), port };
+    if (await tcpEndpointReady(endpoint)) return false;
+  }
+  await deleteWindowsRegistryValue('AutoConfigURL');
+  await notifyWindowsProxyChanged();
+  const after = await queryWindowsRegistryValue('AutoConfigURL');
+  if (after.exists && after.value === value) {
+    throw new Error('Windows orphan MX-H2I PAC cleanup did not clear AutoConfigURL.');
+  }
+  log.warn(`[electron-launcher] removed orphan Windows PAC ${value} because its local edge is unavailable`);
+  return true;
 }
 
 interface RegistryValue {
@@ -1841,6 +2556,159 @@ interface RegistryValue {
   name?: string;
   type?: string;
   value?: string;
+}
+
+interface TcpEndpoint {
+  host: string;
+  port: number;
+}
+
+function windowsRegistryDwordEquals(value: RegistryValue, expected: number): boolean {
+  const text = String(value.value || '').trim();
+  return value.exists === true && text !== '' && Number(text) === expected;
+}
+
+function loopbackUrlEndpoint(value: string | undefined): TcpEndpoint | null {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    if (!isLoopbackProxyHost(parsed.hostname)) return null;
+    const port = Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80));
+    return Number.isInteger(port) && port > 0 && port <= 65535
+      ? { host: normalizeLoopbackProxyHost(parsed.hostname), port }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function windowsLoopbackProxyEndpoints(value: string | undefined): TcpEndpoint[] | null {
+  const text = String(value || '').trim();
+  if (!text) return [];
+  const targets = text.includes('=')
+    ? text.split(';').map((part) => part.slice(part.indexOf('=') + 1).trim()).filter(Boolean)
+    : [text];
+  const endpoints: TcpEndpoint[] = [];
+  for (const target of targets) {
+    const endpoint = proxyTargetEndpoint(target);
+    if (!endpoint || !isLoopbackProxyHost(endpoint.host)) return null;
+    endpoints.push({
+      host: normalizeLoopbackProxyHost(endpoint.host),
+      port: endpoint.port
+    });
+  }
+  return endpoints.filter((endpoint, index, rows) => (
+    rows.findIndex((row) => row.host === endpoint.host && row.port === endpoint.port) === index
+  ));
+}
+
+function proxyTargetEndpoint(value: string): TcpEndpoint | null {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  try {
+    const parsed = new URL(text.includes('://') ? text : `http://${text}`);
+    const port = Number(parsed.port);
+    if (!parsed.hostname || !Number.isInteger(port) || port <= 0 || port > 65535) return null;
+    return { host: parsed.hostname, port };
+  } catch {
+    return null;
+  }
+}
+
+function isLoopbackProxyHost(value: string): boolean {
+  const host = String(value || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return host === 'localhost' || host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host);
+}
+
+function normalizeLoopbackProxyHost(value: string): string {
+  const host = String(value || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return host === 'localhost' ? '127.0.0.1' : host;
+}
+
+function tcpEndpointReady(endpoint: TcpEndpoint): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = netConnect({ host: endpoint.host, port: endpoint.port });
+    let settled = false;
+    const finish = (ready: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(ready);
+    };
+    const timer = setTimeout(() => finish(false), 500);
+    socket.once('connect', () => finish(true));
+    socket.once('error', () => finish(false));
+  });
+}
+
+async function tcpEndpointReadyWithGrace(endpoint: TcpEndpoint): Promise<boolean> {
+  for (let attempt = 1; attempt <= 7; attempt += 1) {
+    if (await tcpEndpointReady(endpoint)) return true;
+    if (attempt < 7) await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return false;
+}
+
+function probeHttpConnectProxy(
+  proxy: TcpEndpoint,
+  target: TcpEndpoint,
+  timeoutMs: number
+): Promise<{
+  proxyReachable: boolean;
+  statusCode: number | null;
+  statusLine: string | null;
+  error: string | null;
+}> {
+  return new Promise((resolve) => {
+    const socket = netConnect({ host: proxy.host, port: proxy.port });
+    let settled = false;
+    let proxyReachable = false;
+    let response = '';
+    const finish = (result: {
+      statusCode?: number | null;
+      statusLine?: string | null;
+      error?: string | null;
+    }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve({
+        proxyReachable,
+        statusCode: result.statusCode ?? null,
+        statusLine: result.statusLine ?? null,
+        error: result.error ?? null
+      });
+    };
+    const timer = setTimeout(() => {
+      finish({ error: `Browser proxy CONNECT timed out after ${timeoutMs} ms.` });
+    }, Math.max(250, timeoutMs));
+    socket.once('connect', () => {
+      proxyReachable = true;
+      socket.write(
+        `CONNECT ${target.host}:${target.port} HTTP/1.1\r\n`
+        + `Host: ${target.host}:${target.port}\r\n`
+        + 'Proxy-Connection: close\r\n\r\n'
+      );
+    });
+    socket.on('data', (chunk) => {
+      if (response.length < 4096) response += chunk.toString('latin1');
+      const lineEnd = response.indexOf('\r\n');
+      if (lineEnd < 0) return;
+      const statusLine = response.slice(0, lineEnd);
+      const match = statusLine.match(/^HTTP\/\d(?:\.\d)?\s+(\d{3})\b/i);
+      finish({
+        statusCode: match ? Number(match[1]) : null,
+        statusLine,
+        error: match ? null : `Invalid proxy response: ${statusLine}`
+      });
+    });
+    socket.once('error', (err) => finish({ error: errorMessage(err) }));
+    socket.once('end', () => {
+      if (!settled) finish({ error: 'Browser proxy closed before returning a CONNECT response.' });
+    });
+  });
 }
 
 async function restoreWindowsRegistryValue(name: string, value: RegistryValue | undefined, fallbackType: string): Promise<void> {
@@ -1853,10 +2721,29 @@ async function restoreWindowsRegistryValue(name: string, value: RegistryValue | 
 
 async function queryWindowsRegistryValue(name: string): Promise<RegistryValue> {
   try {
-    const result = await execFileText('reg.exe', ['query', WINDOWS_PROXY_KEY, '/v', name]);
+    const result = await execFileText(
+      'reg.exe',
+      ['query', WINDOWS_PROXY_KEY, '/v', name],
+      { timeoutMs: WINDOWS_REGISTRY_COMMAND_TIMEOUT_MS }
+    );
     return parseWindowsRegistryValue(result.stdout, name) || { exists: false, name };
-  } catch {
-    return { exists: false, name };
+  } catch (err) {
+    if (execFileTimedOut(err)) throw err;
+    // `reg query /v` uses the same non-zero exit status for a missing value
+    // and for operational failures such as access denial. Re-query the whole
+    // key: a readable key with no matching row proves absence; another failure
+    // is unknown state and must abort CAS/restore instead of closing a PAC that
+    // may still be registered.
+    try {
+      const result = await execFileText(
+        'reg.exe',
+        ['query', WINDOWS_PROXY_KEY],
+        { timeoutMs: WINDOWS_REGISTRY_COMMAND_TIMEOUT_MS }
+      );
+      return parseWindowsRegistryValue(result.stdout, name) || { exists: false, name };
+    } catch (keyErr) {
+      throw keyErr;
+    }
   }
 }
 
@@ -1875,62 +2762,321 @@ function parseWindowsRegistryValue(stdout: string, name: string): RegistryValue 
   return null;
 }
 
-function addWindowsRegistryValue(name: string, type: string, value: string): Promise<ExecTextResult> {
-  return execFileText('reg.exe', ['add', WINDOWS_PROXY_KEY, '/v', name, '/t', type, '/d', String(value), '/f']);
+async function addWindowsRegistryValue(name: string, type: string, value: string): Promise<ExecTextResult> {
+  try {
+    return await execFileText(
+      'reg.exe',
+      ['add', WINDOWS_PROXY_KEY, '/v', name, '/t', type, '/d', String(value), '/f'],
+      { timeoutMs: WINDOWS_REGISTRY_COMMAND_TIMEOUT_MS }
+    );
+  } catch (err) {
+    // A timed-out or interrupted reg.exe may have committed before reporting
+    // failure. Only accept that ambiguous result when a read-back proves the
+    // exact target value; otherwise preserve state and surface the write error.
+    const current = await queryWindowsRegistryValue(name);
+    if (windowsRegistryValueEquals(current, type, value)) {
+      return { stdout: '', stderr: '' };
+    }
+    throw err;
+  }
 }
 
-function deleteWindowsRegistryValue(name: string): Promise<ExecTextResult | undefined> {
-  return execFileText('reg.exe', ['delete', WINDOWS_PROXY_KEY, '/v', name, '/f']).catch(() => undefined);
+async function deleteWindowsRegistryValue(name: string): Promise<ExecTextResult | undefined> {
+  try {
+    return await execFileText(
+      'reg.exe',
+      ['delete', WINDOWS_PROXY_KEY, '/v', name, '/f'],
+      { timeoutMs: WINDOWS_REGISTRY_COMMAND_TIMEOUT_MS }
+    );
+  } catch (err) {
+    // Missing is an idempotent delete success, including the case where
+    // reg.exe removed the value and then returned an error. A readable value
+    // that still exists means restore did not complete and must not be hidden.
+    const current = await queryWindowsRegistryValue(name);
+    if (!current.exists) return undefined;
+    throw err;
+  }
 }
 
-function notifyWindowsProxyChanged(): Promise<ExecTextResult | undefined> {
+function windowsRegistryValueEquals(value: RegistryValue, type: string, expected: string): boolean {
+  if (!value.exists || String(value.type || '').toUpperCase() !== type.toUpperCase()) return false;
+  if (type.toUpperCase() === 'REG_DWORD') {
+    const actualNumber = Number(String(value.value || '').trim());
+    const expectedNumber = Number(String(expected).trim());
+    return Number.isFinite(actualNumber)
+      && Number.isFinite(expectedNumber)
+      && actualNumber === expectedNumber;
+  }
+  return String(value.value ?? '') === String(expected);
+}
+
+function windowsRegistrySnapshotEquals(
+  current: Record<string, RegistryValue>,
+  expected: Record<string, RegistryValue>
+): boolean {
+  for (const key of ['autoConfigUrl', 'proxyEnable', 'proxyServer', 'proxyOverride', 'autoDetect']) {
+    const currentValue = current[key];
+    const expectedValue = expected[key];
+    if (currentValue?.exists !== expectedValue?.exists) return false;
+    if (currentValue?.exists !== true) continue;
+    if (!expectedValue?.type || expectedValue.value === undefined) return false;
+    if (!windowsRegistryValueEquals(currentValue, expectedValue.type, expectedValue.value)) return false;
+  }
+  return true;
+}
+
+async function notifyWindowsProxyChanged(): Promise<ExecTextResult> {
   const script = [
     '$sig = @\'',
     '[DllImport("wininet.dll", SetLastError=true)] public static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);',
     '\'@;',
     '$type = Add-Type -MemberDefinition $sig -Name WinInetNotify -Namespace QPJoy -PassThru;',
-    '[void]$type::InternetSetOption([IntPtr]::Zero, 39, [IntPtr]::Zero, 0);',
-    '[void]$type::InternetSetOption([IntPtr]::Zero, 37, [IntPtr]::Zero, 0);'
+    '$settingsChanged = $type::InternetSetOption([IntPtr]::Zero, 39, [IntPtr]::Zero, 0);',
+    'if (-not $settingsChanged) { $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error(); throw "InternetSetOption(39) failed: $code"; }',
+    '$refresh = $type::InternetSetOption([IntPtr]::Zero, 37, [IntPtr]::Zero, 0);',
+    'if (-not $refresh) { $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error(); throw "InternetSetOption(37) failed: $code"; }'
   ].join(' ');
-  return execFileText('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script])
-    .catch(() => undefined);
+  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script];
+  try {
+    return await execFileText(
+      'powershell.exe',
+      args,
+      { timeoutMs: WINDOWS_PROXY_NOTIFY_TIMEOUT_MS }
+    );
+  } catch {
+    return execFileText(
+      'powershell.exe',
+      args,
+      { timeoutMs: WINDOWS_PROXY_NOTIFY_TIMEOUT_MS }
+    );
+  }
 }
 
-function fallbackProxyForPac(previous: unknown): PacProxy | null {
+async function fallbackForPac(previous: unknown): Promise<{
+  fallbackProxy: PacProxy | null;
+  fallbackPacUrl: string | null;
+  fallbackPacScript: string | null;
+}> {
   if (process.platform === 'darwin') {
     for (const service of previousServices(previous)) {
       const proxy = service.secureWebProxy || service.webProxy || service.socksProxy;
-      if (proxy?.directive) return proxy as PacProxy;
+      if (proxy?.directive) {
+        return {
+          fallbackProxy: proxy as PacProxy,
+          fallbackPacUrl: null,
+          fallbackPacScript: null
+        };
+      }
     }
-    return null;
+    return { fallbackProxy: null, fallbackPacUrl: null, fallbackPacScript: null };
   }
-  if (process.platform !== 'win32' || !previous || typeof previous !== 'object') return null;
-  const row = previous as Record<string, RegistryValue>;
-  const enabled = row.proxyEnable;
-  const server = row.proxyServer;
-  if (!enabled?.exists || String(enabled.value || '').trim() === '0') return null;
-  if (!server?.exists || !server.value) return null;
-  return normalizeWindowsProxyServer(server.value);
+  if (process.platform !== 'win32') {
+    return { fallbackProxy: null, fallbackPacUrl: null, fallbackPacScript: null };
+  }
+
+  const row = previous && typeof previous === 'object'
+    ? previous as Record<string, RegistryValue>
+    : {};
+  // Chromium gives automatic settings precedence over manual proxy rules.
+  // Preserve a configured PAC before considering ProxyEnable/ProxyServer.
+  // platformStatesForApply removes our own PAC URL when Clash toggles
+  // ProxyEnable while MX-H2I is active, so that transition still becomes a
+  // static-proxy continuation rather than recursively wrapping our PAC.
+  const fallbackPacUrl = row.autoConfigUrl?.exists
+    ? stringValue(row.autoConfigUrl.value)
+    : null;
+  if (fallbackPacUrl) {
+    const fallbackPacScript = await readWindowsFallbackPac(fallbackPacUrl);
+    return { fallbackProxy: null, fallbackPacUrl, fallbackPacScript };
+  }
+  if (windowsRegistryDwordEquals(row.proxyEnable, 1)) {
+    const proxy = windowsStaticProxyForPac(row.proxyServer?.value);
+    if (!proxy) {
+      throw new Error('Active Windows static proxy cannot be represented safely in the MX-H2I PAC.');
+    }
+    const endpoints = windowsLoopbackProxyEndpoints(row.proxyServer?.value);
+    if (!endpoints?.length) {
+      throw new Error('Active Windows static proxy is not a supported loopback proxy; MX-H2I did not replace it.');
+    }
+    const ready = await Promise.all(endpoints.map(tcpEndpointReadyWithGrace));
+    const unavailable = endpoints.find((_endpoint, index) => ready[index] !== true);
+    if (unavailable) {
+      throw new Error(`Active Windows proxy ${unavailable.host}:${unavailable.port} is not listening; MX-H2I did not replace it.`);
+    }
+    return {
+      fallbackProxy: proxy,
+      fallbackPacUrl: null,
+      fallbackPacScript: windowsStaticProxyPacScript(
+        row.proxyServer?.value,
+        row.proxyOverride?.value
+      )
+    };
+  }
+  if (windowsRegistryDwordEquals(row.autoDetect, 1)) {
+    throw new Error('Windows WPAD/AutoDetect is active and cannot be preserved by the MX-H2I PAC.');
+  }
+  return { fallbackProxy: null, fallbackPacUrl: null, fallbackPacScript: null };
 }
 
-function normalizeWindowsProxyServer(value: string): PacProxy | null {
-  const text = stringValue(value);
-  if (!text) return null;
-  if (!text.includes('=')) return normalizeProxyAddress(text);
-
-  const entries: Record<string, string> = {};
-  for (const part of text.split(';')) {
-    const [rawKey, ...rawValue] = part.split('=');
-    const key = String(rawKey || '').trim().toLowerCase();
-    const candidate = rawValue.join('=').trim();
-    if (!key || !candidate) continue;
-    entries[key] = candidate;
+function windowsContinuationPrevious(
+  previous: unknown,
+  current: Record<string, RegistryValue>
+): Record<string, RegistryValue> {
+  const row = previous && typeof previous === 'object'
+    ? previous as Record<string, RegistryValue>
+    : {};
+  // AutoConfigURL is currently the MX PAC, so retain the captured external
+  // PAC URL. Manual proxy fields are inactive for that automatic owner.
+  if (row.autoConfigUrl?.exists && stringValue(row.autoConfigUrl.value)) {
+    return row;
   }
+  return {
+    ...row,
+    autoConfigUrl: { exists: false, name: 'AutoConfigURL' },
+    proxyEnable: current.proxyEnable,
+    proxyServer: current.proxyServer,
+    proxyOverride: current.proxyOverride,
+    autoDetect: current.autoDetect
+  };
+}
 
-  return normalizeProxyAddress(entries.https)
-    || normalizeProxyAddress(entries.http)
-    || normalizeProxyAddress(entries.socks ? `socks://${entries.socks}` : null)
-    || normalizeProxyAddress(Object.values(entries).find(Boolean));
+function windowsStaticProxyForPac(value: string | undefined): PacProxy | null {
+  const entries = windowsStaticProxyEntries(value);
+  for (const scheme of ['https', 'http', 'socks', 'socks5', 'all']) {
+    const entry = entries.find((candidate) => candidate.scheme === scheme);
+    if (!entry) continue;
+    if (entry.proxy) return entry.proxy;
+  }
+  return null;
+}
+
+function windowsStaticProxyEntries(
+  value: string | undefined
+): Array<{ scheme: string; target: string; proxy: PacProxy | null }> {
+  const text = stringValue(value);
+  if (!text) return [];
+  const rows = text.includes('=')
+    ? text.split(';').map((part) => {
+        const separator = part.indexOf('=');
+        return separator > 0
+          ? {
+              scheme: part.slice(0, separator).trim().toLowerCase(),
+              target: part.slice(separator + 1).trim()
+            }
+          : null;
+      }).filter((entry): entry is { scheme: string; target: string } => Boolean(entry?.target))
+    : [{ scheme: 'all', target: text }];
+  return rows.map((entry) => ({
+    ...entry,
+    proxy: normalizeProxyAddress(
+      entry.scheme.startsWith('socks') ? `socks://${entry.target}` : entry.target
+    )
+  }));
+}
+
+function windowsStaticProxyPacScript(
+  proxyServer: string | undefined,
+  proxyOverride: string | undefined
+): string {
+  const entries = windowsStaticProxyEntries(proxyServer)
+    .filter((entry) => entry.proxy);
+  const rules: Record<string, string> = {};
+  for (const entry of entries) {
+    if (!['all', 'http', 'https', 'ftp', 'socks', 'socks5'].includes(entry.scheme)) continue;
+    rules[entry.scheme === 'socks5' ? 'socks' : entry.scheme] = entry.proxy
+      ? `${entry.proxy.directive}; DIRECT`
+      : 'DIRECT';
+  }
+  const bypass = String(proxyOverride || '')
+    .split(';')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+  return `function FindProxyForURL(url, host) {
+  var h = String(host || '').toLowerCase();
+  var u = String(url || '');
+  var bypass = ${JSON.stringify(bypass)};
+  for (var i = 0; i < bypass.length; i++) {
+    var pattern = bypass[i];
+    if (pattern === '<local>' && h.indexOf('.') < 0) return 'DIRECT';
+    if (pattern === '<-loopback>') continue;
+    if (pattern.indexOf('://') >= 0) {
+      if (shExpMatch(u.toLowerCase(), pattern)) return 'DIRECT';
+    } else if (shExpMatch(h, pattern)) {
+      return 'DIRECT';
+    }
+  }
+  var rules = ${JSON.stringify(rules)};
+  var separator = u.indexOf(':');
+  var scheme = separator > 0 ? u.slice(0, separator).toLowerCase() : '';
+  return rules[scheme] || rules.all || rules.socks || 'DIRECT';
+}`;
+}
+
+async function readWindowsFallbackPac(value: string): Promise<string> {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`Existing Windows PAC URL is invalid: ${value}`);
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol) || !isLoopbackProxyHost(parsed.hostname)) {
+    throw new Error(`Existing Windows PAC must be a readable loopback HTTP(S) URL: ${value}`);
+  }
+  let script: string;
+  try {
+    script = await httpTextRequest(
+      parsed,
+      WINDOWS_FALLBACK_PAC_TIMEOUT_MS,
+      WINDOWS_FALLBACK_PAC_MAX_BYTES
+    );
+  } catch (err) {
+    throw new Error(`Existing Windows PAC could not be read: ${errorMessage(err)}`);
+  }
+  if (!/\bFindProxyForURL\b/.test(script)) {
+    throw new Error(`Existing Windows PAC does not define FindProxyForURL: ${value}`);
+  }
+  try {
+    // Compile only. The existing PAC already runs in the browser PAC sandbox;
+    // wrapping it must not execute it inside the launcher process.
+    new Function(`return function () {\nvar FindProxyForURL;\n${script}\nreturn FindProxyForURL;\n};`);
+  } catch (err) {
+    throw new Error(`Existing Windows PAC cannot be wrapped safely: ${errorMessage(err)}`);
+  }
+  return script;
+}
+
+function httpTextRequest(url: URL, timeoutMs: number, maxBytes: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const requestImpl = url.protocol === 'https:' ? httpsRequest : httpRequest;
+    const req = requestImpl({
+      hostname: url.hostname,
+      port: url.port,
+      path: `${url.pathname}${url.search}`,
+      method: 'GET',
+      timeout: timeoutMs
+    }, (res) => {
+      if ((res.statusCode || 500) >= 400) {
+        res.resume();
+        reject(new Error(`Existing Windows PAC returned HTTP ${res.statusCode}`));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      res.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > maxBytes) {
+          res.destroy(new Error(`Existing Windows PAC exceeds ${maxBytes} bytes`));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      res.on('error', reject);
+    });
+    req.on('timeout', () => req.destroy(new Error(`Existing Windows PAC request timed out: ${url.href}`)));
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 async function handleProxyHttpRequest(
@@ -2150,6 +3296,8 @@ function resolvedPacSourceFromLocalConfig(
     proxy: effective.proxy,
     matchMode: effective.matchMode,
     fallbackProxy: effective.fallbackProxy,
+    fallbackPacUrl: effective.fallbackPacUrl,
+    fallbackPacScript: effective.fallbackPacScript,
     pacPort,
     sharedLocalPac: false,
     dnsServers: effective.dnsServers,
@@ -2169,6 +3317,8 @@ function normalizeSharedLocalPacConfig(value: unknown): LocalPacServerConfig {
     proxy: normalizeProxyAddress(row.proxyDirective) || normalizeProxyAddress(row.proxy),
     matchMode: normalizeMatchMode(row.matchMode, row.proxy),
     fallbackProxy: normalizeProxyAddress(row.fallbackProxyDirective) || normalizeProxyAddress(row.fallbackProxy),
+    fallbackPacUrl: stringValue(row.fallbackPacUrl),
+    fallbackPacScript: stringValue(row.fallbackPacScript),
     dnsServers: normalizeDnsServers(row.dnsServers),
     dnsFallbackTarget: normalizeDnsTarget(row.dnsFallbackTarget),
     reverseProxyRoutes: normalizeReverseProxyRoutes(row.reverseProxyRoutes),
@@ -2189,6 +3339,8 @@ function mergeLocalPacConfigs(
     proxy: incoming.proxy || current.proxy,
     matchMode: current.matchMode === 'proxy' || incoming.matchMode === 'proxy' ? 'proxy' : incoming.matchMode,
     fallbackProxy: incoming.fallbackProxy || current.fallbackProxy,
+    fallbackPacUrl: incoming.fallbackPacUrl || current.fallbackPacUrl,
+    fallbackPacScript: incoming.fallbackPacScript || current.fallbackPacScript,
     dnsServers: uniqueList([...current.dnsServers, ...incoming.dnsServers]),
     dnsFallbackTarget: incoming.dnsFallbackTarget || current.dnsFallbackTarget,
     reverseProxyRoutes: mergeReverseProxyRoutes(current.reverseProxyRoutes, incoming.reverseProxyRoutes),
@@ -2322,6 +3474,8 @@ function localPacConfigKey(config: LocalPacServerConfig, port: number | null): s
     matchMode: config.matchMode,
     proxy: config.proxy?.directive || null,
     fallbackProxy: config.fallbackProxy?.directive || null,
+    fallbackPacUrl: config.fallbackPacUrl,
+    fallbackPacScript: config.fallbackPacScript,
     dnsServers: config.dnsServers,
     dnsFallbackTarget: config.dnsFallbackTarget,
     reverseProxyRoutes: config.reverseProxyRoutes,
@@ -2391,7 +3545,7 @@ function readRequestJson(req: IncomingMessage): Promise<unknown> {
     let size = 0;
     req.on('data', (chunk: Buffer) => {
       size += chunk.length;
-      if (size > 32_768) {
+      if (size > WINDOWS_FALLBACK_PAC_MAX_BYTES + 32_768) {
         reject(new Error('request body too large'));
         req.destroy();
         return;
@@ -2459,6 +3613,8 @@ function normalizeHttpJsonBody(body: unknown): Record<string, unknown> {
     matchMode: (body as LocalPacServerConfig).matchMode,
     fallbackProxy: (body as LocalPacServerConfig).fallbackProxy?.address || null,
     fallbackProxyDirective: (body as LocalPacServerConfig).fallbackProxy?.directive || null,
+    fallbackPacUrl: stringValue((body as LocalPacServerConfig).fallbackPacUrl),
+    fallbackPacScript: stringValue((body as LocalPacServerConfig).fallbackPacScript),
     dnsServers: normalizeDnsServers((body as LocalPacServerConfig).dnsServers),
     dnsFallbackTarget: normalizeDnsTarget((body as LocalPacServerConfig).dnsFallbackTarget),
     reverseProxyRoutes: normalizeReverseProxyRoutes((body as LocalPacServerConfig).reverseProxyRoutes),
@@ -2468,8 +3624,8 @@ function normalizeHttpJsonBody(body: unknown): Record<string, unknown> {
 
 function resolveDnsA(hostname: string, server: string): Promise<string> {
   return queryDnsPacket(hostname, server, 1).then(({ response, id }) => {
-    const address = parseDnsAResponse(response, id);
-    if (!address) throw new Error(`DNS A record missing for ${hostname}`);
+    const address = parseUsableInternalDnsAResponse(response, id);
+    if (!address) throw new Error(`DNS returned no private/overlay A record for ${hostname}`);
     return address;
   });
 }
@@ -2511,7 +3667,13 @@ async function forwardDnsPacket(packet: Buffer, servers: string[]): Promise<Buff
   const failures: string[] = [];
   for (const server of servers) {
     try {
-      return await forwardDnsPacketToServer(packet, server);
+      const response = await forwardDnsPacketToServer(packet, server);
+      const expectedId = packet.length >= 2 ? packet.readUInt16BE(0) : -1;
+      if (!parseUsableInternalDnsAResponse(response, expectedId)) {
+        failures.push(`${server}: DNS returned no private/overlay A record`);
+        continue;
+      }
+      return response;
     } catch (err) {
       failures.push(`${server}: ${errorMessage(err)}`);
     }
@@ -2654,8 +3816,10 @@ function buildDnsQuery(hostname: string, questionType: number): { id: number; pa
   return { id, packet: Buffer.concat([header, question]) };
 }
 
-function parseDnsAResponse(packet: Buffer, expectedId: number): string | null {
-  return parseDnsARecords(packet, expectedId)[0] || null;
+function parseUsableInternalDnsAResponse(packet: Buffer, expectedId: number): string | null {
+  const records = parseDnsARecords(packet, expectedId);
+  if (!records.length || records.some(isPublicOrProxyFakeIp)) return null;
+  return records[0] || null;
 }
 
 function parseDnsARecords(packet: Buffer, expectedId: number): string[] {
@@ -2713,15 +3877,11 @@ function parseDnsAnswerTypes(packet: Buffer, expectedId: number): number[] {
 
 function shouldUseDnsFallbackResponse(query: Buffer, response: Buffer, fallbackTarget: string | null): boolean {
   if (!fallbackTarget || isIP(fallbackTarget) !== 4) return false;
-  let records: string[] = [];
   try {
-    records = parseDnsARecords(response, query.readUInt16BE(0));
+    return !parseUsableInternalDnsAResponse(response, query.readUInt16BE(0));
   } catch {
     return true;
   }
-  if (records.length === 0) return true;
-  if (records.includes(fallbackTarget)) return false;
-  return records.every((record) => isPublicOrProxyFakeIp(record));
 }
 
 function isPublicOrProxyFakeIp(value: string): boolean {
@@ -2774,9 +3934,16 @@ function skipDnsName(packet: Buffer, offset: number): number {
   return cursor;
 }
 
-function execFileText(command: string, args: string[]): Promise<ExecTextResult> {
+function execFileText(
+  command: string,
+  args: string[],
+  options: { timeoutMs?: number } = {}
+): Promise<ExecTextResult> {
   return new Promise((resolve, reject) => {
-    execFile(command, args, { windowsHide: true }, (err, stdout, stderr) => {
+    execFile(command, args, {
+      windowsHide: true,
+      ...(options.timeoutMs ? { timeout: options.timeoutMs } : {})
+    }, (err, stdout, stderr) => {
       if (err) {
         reject(Object.assign(err, { stdout, stderr }));
         return;
@@ -2784,6 +3951,15 @@ function execFileText(command: string, args: string[]): Promise<ExecTextResult> 
       resolve({ stdout, stderr });
     });
   });
+}
+
+function execFileTimedOut(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const error = value as { code?: unknown; killed?: unknown; signal?: unknown };
+  return error.code === 'ETIMEDOUT'
+    || error.killed === true
+    || error.signal === 'SIGTERM'
+    || error.signal === 'SIGKILL';
 }
 
 function readState(statePath: string): StoredState | null {
@@ -2795,9 +3971,135 @@ function readState(statePath: string): StoredState | null {
   }
 }
 
+function windowsCurrentUserProxyGatePath(): string {
+  const userRoot = stringValue(process.env.LOCALAPPDATA)
+    || stringValue(process.env.APPDATA)
+    || join(homedir(), 'AppData', 'Local');
+  return join(userRoot, 'QPJoy', 'MXLauncher', 'network', WINDOWS_CURRENT_USER_GATE_FILE);
+}
+
+function acquireWindowsCurrentUserProxyLease(
+  gatePath: string,
+  statePath: string
+): ElectronLauncherProcessLease {
+  let lease: ElectronLauncherProcessLease;
+  try {
+    lease = acquireElectronLauncherProcessLease(gatePath, {
+      waitMs: 1_000,
+      metadata: {
+        kind: 'windows-current-user-proxy',
+        statePath
+      }
+    });
+  } catch (err) {
+    if (err instanceof ElectronLauncherProcessLeaseBusyError) {
+      const holder = err.candidates
+        .filter((candidate) => !candidate.choosing)
+        .sort((left, right) => left.ticket - right.ticket || left.token.localeCompare(right.token))[0];
+      const ownerState = typeof holder?.metadata?.statePath === 'string'
+        ? holder.metadata.statePath
+        : 'unknown';
+      throw new Error(
+        `Another Windows Launcher process (pid ${holder?.pid ?? 'unknown'}) owns current-user AutoConfigURL; `
+        + `owner state: ${ownerState}.`
+      );
+    }
+    throw err;
+  }
+  try {
+    reconcileLegacyWindowsCurrentUserProxyLease(gatePath);
+    return lease;
+  } catch (err) {
+    releaseElectronLauncherProcessLease(lease);
+    throw err;
+  }
+}
+
+function reconcileLegacyWindowsCurrentUserProxyLease(gatePath: string): void {
+  let raw: string;
+  try {
+    raw = readFileSync(gatePath, 'utf8');
+  } catch (err) {
+    if (isFileMissingError(err)) return;
+    throw err;
+  }
+  const existing = parseWindowsCurrentUserProxyLease(raw);
+  if (!existing) {
+    throw new Error(
+      `Windows current-user proxy ownership gate ${gatePath} is unreadable; refusing to overwrite AutoConfigURL.`
+    );
+  }
+  if (isProcessAlive(existing.pid)) {
+    throw new Error(
+      `Another Windows Launcher process (pid ${existing.pid}) owns current-user AutoConfigURL; `
+      + `owner state: ${existing.statePath}.`
+    );
+  }
+  rmSync(gatePath);
+}
+
+function parseWindowsCurrentUserProxyLease(raw: string): WindowsCurrentUserProxyLease | null {
+  try {
+    const value = JSON.parse(raw) as Partial<WindowsCurrentUserProxyLease>;
+    if (
+      value?.version !== 1
+      || !Number.isInteger(value.pid)
+      || Number(value.pid) <= 0
+      || typeof value.token !== 'string'
+      || !value.token
+      || typeof value.statePath !== 'string'
+      || !value.statePath
+    ) {
+      return null;
+    }
+    return value as WindowsCurrentUserProxyLease;
+  } catch {
+    return null;
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return Boolean(
+      err
+      && typeof err === 'object'
+      && (err as NodeJS.ErrnoException).code === 'EPERM'
+    );
+  }
+}
+
+function isFileMissingError(err: unknown): boolean {
+  return Boolean(
+    err
+    && typeof err === 'object'
+    && (err as NodeJS.ErrnoException).code === 'ENOENT'
+  );
+}
+
 function writeState(statePath: string, state: StoredState): void {
   mkdirSync(dirname(statePath), { recursive: true });
-  writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+  const tempPath = `${statePath}.${process.pid}.${++stateWriteSequence}.tmp`;
+  try {
+    writeFileSync(tempPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+    const fd = openSync(tempPath, 'r');
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tempPath, statePath);
+  } catch (err) {
+    try {
+      rmSync(tempPath, { force: true });
+    } catch {
+      // Preserve the original state file if temporary cleanup also fails.
+    }
+    throw err;
+  }
 }
 
 function removeState(statePath: string, log: Pick<Console, 'warn'>): void {
@@ -2811,6 +4113,8 @@ function removeState(statePath: string, log: Pick<Console, 'warn'>): void {
 function systemDomainProxyStateChanged(existing: StoredState | null, next: StoredState): boolean {
   return !existing
     || existing.pacUrl !== next.pacUrl
+    || existing.fallbackProxy !== next.fallbackProxy
+    || existing.fallbackPacUrl !== next.fallbackPacUrl
     || storedSystemResolverMode(existing) !== next.systemResolverMode
     || existing.resolverPort !== next.resolverPort
     || JSON.stringify(normalizeDomains(existing.resolverDomains)) !== JSON.stringify(normalizeDomains(next.resolverDomains));
@@ -2825,6 +4129,7 @@ function publicState(state: StoredState, extra: Partial<ElectronLauncherSystemDo
     proxy: state.proxy || null,
     matchMode: state.matchMode || null,
     fallbackProxy: state.fallbackProxy || null,
+    fallbackPacUrl: state.fallbackPacUrl || null,
     pacPort: state.pacPort || null,
     sharedPac: state.sharedLocalPac === true,
     dnsServers: normalizeDnsServers(state.dnsServers),
@@ -2840,6 +4145,7 @@ function publicState(state: StoredState, extra: Partial<ElectronLauncherSystemDo
     ownershipRegistry: state.ownershipRegistry || (state.ownershipClaim
       ? buildElectronLauncherNetworkOwnershipRegistry([state.ownershipClaim])
       : null),
+    pending: state.pending === true || state.continuationNotifyPending === true,
     updatedAt: state.updatedAt || null,
     ...extra
   };
