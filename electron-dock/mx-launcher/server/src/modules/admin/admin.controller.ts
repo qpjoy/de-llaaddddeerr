@@ -5925,7 +5925,10 @@ function domesticRuntimeConfigApplyScript(config: SiteSlotDomesticRuntimeConfig)
   const envLines = Object.entries(config.env)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `${key}=${value}`);
+  const dnsBind = coreDnsBindHost(config.dns.bind);
   const dnsPort = String(config.dns.port || 53);
+  const dnsProbeName = 'h2i.mxinfo-inc.cn.';
+  const dnsExpectedAnswer = '10.88.88.88';
   const caddyfileBase64 = Buffer.from(domesticServicesCaddyfileContent()).toString('base64');
   const dnsEdgeCorefileBase64 = Buffer.from(domesticDnsEdgeCorefileContent(config)).toString('base64');
   const dnsEdgeComposeBase64 = Buffer.from(domesticDnsEdgeComposeContent()).toString('base64');
@@ -5933,9 +5936,13 @@ function domesticRuntimeConfigApplyScript(config: SiteSlotDomesticRuntimeConfig)
     'set -eu',
     'printf "mx-domestic-runtime-config-apply\\n"',
     'stack_dir=/opt/mx/current/domestic',
+    `dns_bind=${shellQuote(dnsBind)}`,
     `dns_port=${shellQuote(dnsPort)}`,
+    `dns_probe_name=${shellQuote(dnsProbeName)}`,
+    `dns_expected_answer=${shellQuote(dnsExpectedAnswer)}`,
     'test -d "$stack_dir" || { echo "blocked: Domestic edge stack is not installed at $stack_dir"; exit 1; }',
     'test -f "$stack_dir/manage.sh" || { echo "blocked: Domestic manage.sh is missing; run Install / Sync first"; exit 1; }',
+    'command -v dig >/dev/null 2>&1 || { echo "blocked: dig is required for Domestic DNS UDP/TCP verification" >&2; exit 1; }',
     `printf "%s\\n" ${envLines.map(shellQuote).join(' ')} > "$stack_dir/.env.tmp"`,
     'mv "$stack_dir/.env.tmp" "$stack_dir/.env"',
     `if command -v base64 >/dev/null 2>&1; then printf "%s" ${shellQuote(caddyfileBase64)} | base64 -d > "$stack_dir/Caddyfile.tmp"; mv "$stack_dir/Caddyfile.tmp" "$stack_dir/Caddyfile"; else echo "blocked: base64 is required to refresh Domestic Caddyfile"; exit 1; fi`,
@@ -5946,14 +5953,17 @@ function domesticRuntimeConfigApplyScript(config: SiteSlotDomesticRuntimeConfig)
     'cd "$stack_dir"',
     'chmod +x ./manage.sh || true',
     'mx_dc() { if docker compose version >/dev/null 2>&1; then docker compose "$@"; elif command -v docker-compose >/dev/null 2>&1; then docker-compose "$@"; else echo "blocked: docker compose is missing"; return 127; fi; }',
-    'mx_dns_port_busy() { p="$1"; if command -v ss >/dev/null 2>&1 && ss -H -lntu 2>/dev/null | awk -v p=":$p" \'$5 ~ p "$" { found=1 } END { exit found ? 0 : 1 }\'; then return 0; fi; if command -v lsof >/dev/null 2>&1 && { lsof -nP -iTCP:"$p" -sTCP:LISTEN 2>/dev/null | awk \'NR > 1 { found=1 } END { exit found ? 0 : 1 }\' || lsof -nP -iUDP:"$p" 2>/dev/null | awk \'NR > 1 { found=1 } END { exit found ? 0 : 1 }\'; }; then return 0; fi; return 1; }',
+    'mx_dns_query_once() { protocol="$1"; if [ "$protocol" = "tcp" ]; then answer="$(dig @"$dns_bind" -p "$dns_port" "$dns_probe_name" A +tcp +time=3 +tries=1 +short 2>/dev/null || true)"; else answer="$(dig @"$dns_bind" -p "$dns_port" "$dns_probe_name" A +time=3 +tries=1 +short 2>/dev/null || true)"; fi; printf "%s\\n" "$answer" | grep -Fx "$dns_expected_answer" >/dev/null; }',
+    'mx_dns_verify() { protocol="$1"; attempt=1; while [ "$attempt" -le 5 ]; do if mx_dns_query_once "$protocol"; then echo "Domestic DNS $protocol probe passed: $dns_probe_name -> $dns_expected_answer via $dns_bind:$dns_port"; return 0; fi; sleep 1; attempt=$((attempt + 1)); done; echo "failed: Domestic DNS $protocol probe did not return $dns_expected_answer from $dns_bind:$dns_port" >&2; return 1; }',
     './manage.sh up',
     'mx_dc --profile dns stop dns-forwarder >/dev/null 2>&1 || true',
-    'dns_edge_container_id="$(mx_dc -f docker-compose.yml -f docker-compose.dns-edge.yml ps -q mx-domestic-dns-edge 2>/dev/null || true)"',
-    'if [ -n "$dns_edge_container_id" ]; then echo "updating managed Domestic DNS edge on :$dns_port"; mx_dc -f docker-compose.yml -f docker-compose.dns-edge.yml up -d mx-domestic-dns-edge; elif mx_dns_port_busy "$dns_port"; then echo "Domestic DNS :$dns_port already has a listener; reusing existing V1/host DNS runtime"; else echo "starting managed Domestic DNS edge on :$dns_port"; mx_dc -f docker-compose.yml -f docker-compose.dns-edge.yml up -d mx-domestic-dns-edge; fi',
+    'echo "recreating managed Domestic DNS edge on $dns_bind:$dns_port"',
+    'mx_dc -f docker-compose.yml -f docker-compose.dns-edge.yml up -d --force-recreate --no-deps mx-domestic-dns-edge',
     'mx_dc -f docker-compose.yml -f docker-compose.dns-edge.yml ps mx-domestic-dns-edge || true',
     './manage.sh status || true',
-    './manage.sh health'
+    './manage.sh health',
+    'mx_dns_verify udp',
+    'mx_dns_verify tcp'
   ].join('; ');
 }
 
@@ -6054,8 +6064,8 @@ function domesticDnsEdgeComposeContent(): string {
 }
 
 function coreDnsBindHost(value: string | null | undefined): string {
-  const text = stringValue(value) || '0.0.0.0';
-  return /^(?:\d{1,3}\.){3}\d{1,3}$/.test(text) || text === 'localhost' ? text : '0.0.0.0';
+  const text = stringValue(value) || '10.88.0.1';
+  return /^(?:\d{1,3}\.){3}\d{1,3}$/.test(text) || text === 'localhost' ? text : '10.88.0.1';
 }
 
 async function runSshScriptWithProfile(profile: SiteSlotSshProfile, script: string, timeoutMs: number) {
@@ -7819,7 +7829,7 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         internalBaseUrl: 'http://10.88.88.88:18090',
         internalApiUpstream: 'http://10.88.88.88:18090',
         internalH2iUpstream: 'http://10.88.88.88:18090',
-        dnsBind: '0.0.0.0',
+        dnsBind: '10.88.0.1',
         dnsPort: 53,
         requestedBy: 'admin-ui'
       }
@@ -7847,7 +7857,7 @@ function adminActionTemplates(): Array<Omit<AdminActionDescriptor, 'allowed' | '
         internalBaseUrl: 'http://10.88.88.88:18090',
         internalApiUpstream: 'http://10.88.88.88:18090',
         internalH2iUpstream: 'http://10.88.88.88:18090',
-        dnsBind: '0.0.0.0',
+        dnsBind: '10.88.0.1',
         dnsPort: 53,
         confirmDomesticRuntimeApply: true,
         requestedBy: 'admin-ui'

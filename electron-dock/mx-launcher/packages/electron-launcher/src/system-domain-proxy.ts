@@ -2828,9 +2828,7 @@ function windowsRegistrySnapshotEquals(
 
 async function notifyWindowsProxyChanged(): Promise<ExecTextResult> {
   const script = [
-    '$sig = @\'',
-    '[DllImport("wininet.dll", SetLastError=true)] public static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);',
-    '\'@;',
+    `$sig = '[DllImport("wininet.dll", SetLastError=true)] public static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);';`,
     '$type = Add-Type -MemberDefinition $sig -Name WinInetNotify -Namespace QPJoy -PassThru;',
     '$settingsChanged = $type::InternetSetOption([IntPtr]::Zero, 39, [IntPtr]::Zero, 0);',
     'if (-not $settingsChanged) { $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error(); throw "InternetSetOption(39) failed: $code"; }',

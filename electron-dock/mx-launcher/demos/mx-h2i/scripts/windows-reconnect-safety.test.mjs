@@ -128,4 +128,60 @@ assert.match(
   'only a fresh live active result may preserve a not-ready tunnel instead of restarting it'
 );
 
+assert.match(
+  source,
+  /Resolve-DnsName -Name \$name -Server \$server -Type A -DnsOnly -NoHostsFile -ErrorAction Stop/,
+  'Windows split-DNS diagnostics must query the Internal DNS server directly'
+);
+assert.match(
+  source,
+  /Resolve-DnsName -Name \$name -Type A -DnsOnly -NoHostsFile -ErrorAction Stop/,
+  'Windows split-DNS diagnostics must also exercise the default NRPT-aware resolver'
+);
+assert.match(
+  source,
+  /const \[directDns, nrpt\] = await Promise\.all\(\[/,
+  'direct DNS and default NRPT resolution must run independently in parallel'
+);
+assert.match(
+  source,
+  /async function probeWindowsResolveDnsNameLayer\(input\)[\s\S]*?\{ timeoutMs: 3500 \}/,
+  'each Windows DNS proof layer must have its own bounded PowerShell timeout'
+);
+assert.doesNotMatch(
+  source,
+  /\$directDns = [\s\S]*?\$nrpt = [\s\S]*?ConvertTo-Json/,
+  'a timeout in the default resolver must not discard a completed direct-DNS result'
+);
+assert.match(
+  source,
+  /proofLayers:\s*await collectWindowsDnsProofLayers\([\s\S]*?directDns[\s\S]*?nrpt[\s\S]*?nodeGetaddrinfo/,
+  'Windows split-DNS proof must distinguish direct DNS, NRPT and Node getaddrinfo layers'
+);
+assert.match(
+  source,
+  /ready:\s*windowsNrptReadyForConnection\(windowsNrpt\)\s*&&\s*result\?\.ok === true/,
+  'direct DNS success alone must not lower the existing NRPT plus Node readiness gate'
+);
+assert.doesNotMatch(
+  source,
+  /Get-DnsClient(?:NrptGlobal|GlobalSetting)\s*\|\s*Select-Object\s+\*/,
+  'the Windows diagnostic export must not serialize unbounded CIM metadata'
+);
+assert.match(
+  source,
+  /Get-DnsClientNrptGlobal \| Select-Object -Property EnableDAForAllNetworks,QueryPolicy,SecureNameQueryFallback -First 1/,
+  'the Windows diagnostic export must select only the NRPT global fields it uses'
+);
+assert.match(
+  source,
+  /Get-DnsClientGlobalSetting \| Select-Object -Property SuffixSearchList,UseDevolution,DevolutionLevel -First 1/,
+  'the Windows diagnostic export must select only bounded DNS global fields'
+);
+assert.match(
+  source,
+  /\$result \| ConvertTo-Json -Depth 5 -Compress/,
+  'the Windows diagnostic export must emit bounded compact JSON'
+);
+
 console.log('Windows retained-tunnel reconnect safety tests passed');

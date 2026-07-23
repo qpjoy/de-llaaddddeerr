@@ -33,7 +33,8 @@ MX-H2I 默认同时启用两条链路；NRPT 正常但 PAC/browser proof 缺失�
 Windows 额外文件：
 
 - `windows-dns-nrpt.json`：live `Get-DnsClientNrptGlobal`/rules、WinINet proxy
-  registry、关键本地 listener、网卡 DNS 和 IP 配置
+  registry、关键本地 listener、网卡 DNS 和 IP 配置。只导出排障所需字段并限制记录数，
+  不得使用 `Select-Object *` 序列化 CIM 元数据，以免超过子进程 stdout 上限
 - `windows-ipconfig-all.txt`：`ipconfig /all`
 - `windows-route-print.txt`：`route print`
 - `windows-winhttp-proxy.txt`：WinHTTP proxy 快照；它与当前用户的 WinINet 设置不是同一状态
@@ -92,6 +93,34 @@ Chromium `resolveProxy` 和 CONNECT；缺任一项就保持可恢复状态并提
 `%SystemRoot%\Sysnative|System32|SysWOW64\WindowsPowerShell\v1.0\powershell.exe`
 解析绝对路径。`spawn powershell.exe ENOENT` 表示命令路径失败，不表示 NRPT cmdlet
 失败；覆盖安装保留的 `AutoConfigURL` 会让这类通知/恢复错误在启动后立即暴露。
+
+Windows split-DNS 诊断必须分别记录三层证据，不能把其中一层成功写成整条链路 ready：
+
+1. `directDns`：`Resolve-DnsName -Server <routePlan.dnsServer>`，证明产品 DNS 自身有记录；
+2. `nrpt`：默认 `Resolve-DnsName` 加 live NRPT metadata，证明 Windows namespace 路径；
+3. `nodeGetaddrinfo`：Electron/Node 系统解析，作为最终应用层证明。
+
+WinINet change notification 的 `Add-Type` 声明必须使用 PowerShell 5.1 可解析的普通字符串
+或保留真实换行的 here-string。不能把 `@'`、声明正文和 `'@` 用空格拼成一行，否则覆盖
+安装留下旧 PAC 时会持续出现 `UnexpectedCharactersAfterHereStringHeader`，PAC readback
+永远无法进入 ready。
+
+## V1/V2 Domestic DNS 共存
+
+V1 与 V2 都由客户端直连 Domestic 的标准 DNS 端口，但使用不同的 WireGuard 地址：
+
+- V1 HDO：`100.88.0.1:53`；
+- V2 MX-H2I：`10.88.0.1:53`，只绑定该 V2 地址，再转发到当前 Internal authority
+  `10.88.88.88:53`。
+
+因此两个 `:53` 不冲突，也不得用“宿主机已有任意 53 listener”作为复用或跳过 V2 DNS
+启动的依据。Internal 理论上可以使用任意双方一致且可达的端口，但当前线上只监听 53；
+仅把 Domestic upstream 改成 50053 会直接导致查询失败。
+
+CoreDNS 的 Corefile 采用单文件 bind mount 时，不能在宿主机用 `mv` 原子替换后只执行普通
+`compose up -d`：运行中容器仍可能固定在旧 inode。配置 apply 必须精确
+`--force-recreate --no-deps` DNS service 以重新挂载文件，并在报告成功前分别对配置的
+bind/port 执行 UDP、TCP 查询，确认 `h2i.mxinfo-inc.cn -> 10.88.88.88`。
 
 ## Windows 公网应用、WinINet PAC 与 Clash
 
@@ -166,6 +195,10 @@ restart 时先 Stop 并释放所有 `ServiceController` 句柄，再直接调用
 `/installtunnelservice`，让 WireGuard 自己完成 delete/wait/create；只有显式断开才调用
 `/uninstalltunnelservice`。这样避免 Windows 10/11 SCM 的
 `ERROR_SERVICE_MARKED_FOR_DELETE` 竞态最终被误报为 `service=NOT_FOUND`。
+`wireguard.exe` 是 Windows GUI subsystem 程序，PowerShell 5.1 直接调用后
+`$LASTEXITCODE` 可能仍为空；提升权限脚本必须用
+`Start-Process -Wait -PassThru` 并检查返回对象的 `ExitCode`，随后再以 live service
+状态验证结果。空 `$LASTEXITCODE` 不能再被解释成 UAC 未授权。
 
 ## Windows 断开与正常退出
 

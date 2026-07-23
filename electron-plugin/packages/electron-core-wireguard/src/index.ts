@@ -3790,6 +3790,15 @@ function powerShellString(value: string): string {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
+function windowsCommandLineArgument(value: string): string {
+  const text = String(value);
+  if (text.length === 0) return '""';
+  if (!/[\s"]/u.test(text)) return text;
+  return `"${text
+    .replace(/(\\*)"/g, '$1$1\\"')
+    .replace(/(\\+)$/u, '$1$1')}"`;
+}
+
 type WindowsNrptRule = WireGuardWindowsNrptExpectedRule;
 
 type WindowsRouteRule = {
@@ -3867,7 +3876,7 @@ function windowsElevatedStartProcessScripts(
           '$svc = $null'
         ]
       : []));
-  const runWireGuard = (wireGuardArgs: string[]) => `& ${powerShellString(command)} ${wireGuardArgs.map(powerShellString).join(' ')}`;
+  const wireGuardArgumentLine = args.map(windowsCommandLineArgument).join(' ');
   const nrptLines = windowsNrptPowerShellLines(
     nrptRules,
     tunnelName,
@@ -3970,14 +3979,10 @@ function windowsElevatedStartProcessScripts(
   }
   elevatedLines.push(
     `Write-HdoAudit ${powerShellString(`wireguard command action=${action}`)}`,
-    runWireGuard(args),
-    "Write-HdoAudit ('wireguard exitCode=' + [string]$LASTEXITCODE)",
-    // $LASTEXITCODE stays $null when the native command never ran; the old
-    // `exit $LASTEXITCODE` then exited 0 — reported success with NRPT/routes
-    // removed and the tunnel service gone, leaving *.mxinfo-inc.cn NXDOMAIN
-    // until a manual repair. A null/non-zero code must fail loudly so the
-    // caller retries and the NRPT re-add is never silently skipped.
-    "if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) { Write-HdoAudit ('wireguard command failed exitCode=' + [string]$LASTEXITCODE); exit 1 }",
+    `$wireGuardProcess = Start-Process -FilePath ${powerShellString(command)} -ArgumentList ${powerShellString(wireGuardArgumentLine)} -WindowStyle Hidden -Wait -PassThru`,
+    '$wireGuardExitCode = $wireGuardProcess.ExitCode',
+    "Write-HdoAudit ('wireguard exitCode=' + [string]$wireGuardExitCode)",
+    "if ($null -eq $wireGuardExitCode -or $wireGuardExitCode -ne 0) { Write-HdoAudit ('wireguard command failed exitCode=' + [string]$wireGuardExitCode); exit 1 }",
     ...(action === 'down' ? waitForServiceAbsent() : waitForServiceRunning()),
     ...(action === 'down' ? [] : ['Add-HdoOverlayRoutes', 'Add-HdoNrptRules']),
     ...(action === 'down' ? [] : waitForServiceRunning()),
@@ -4571,8 +4576,7 @@ function wireGuardCommandErrorMessage(command: WireGuardTunnelCommand, err: unkn
   }
   if (command.platform === 'win32') {
     return [
-      'Windows 启停 WireGuard 需要管理员授权。',
-      '请在弹出的 UAC 窗口点击“是”；如果没有弹窗，请用“以管理员身份运行”启动 QPJoy 后重试。',
+      'Windows WireGuard 系统命令执行失败（未检测到用户取消 UAC）。',
       detail,
       output
     ].filter(Boolean).join(' ');

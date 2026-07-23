@@ -121,6 +121,10 @@ pnpm --dir electron-dock/mx-launcher ignored-builds
 pnpm --dir electron-dock/mx-launcher/demos/mx-h2i make:win
 ```
 
+`make:win` 会先执行 Windows 网络回归门禁：WinINet notification 必须通过 PowerShell
+5.1 安全脚本测试，WireGuard 提升权限脚本必须等待真实进程并读取 `ExitCode`。任一失败
+都会在 electron-builder 启动前终止打包。
+
 electron-builder 26.15.3 uses `powershell.exe` to run pnpm's production dependency collector.
 `make:win` now prepends the inbox Windows PowerShell 5.1 and System32 directories before packaging.
 If its preflight still reports that PowerShell is unavailable, verify the host installation:
@@ -174,7 +178,7 @@ history, not current-state proof.
 | W2 | Connect with Clash static system proxy | A live loopback listener is wrapped as `PROXY <Clash>; DIRECT`; Internal exact/suffix still returns `PROXY 127.0.0.1:2053`; public smoke passes |
 | W3 | Connect with Clash PAC, WPAD, or dead listener | Readable/valid loopback PAC is wrapped first; otherwise a representable live static proxy can continue. AutoDetect/WPAD fails closed only when it is the sole applicable owner and neither live static nor PAC continuation exists; unreadable/non-loopback PAC or dead listener also fails closed without registry mutation or browser-ready |
 | W4 | While connected, switch TUN ↔ system proxy, restart Clash, or change port | The normal five-second path is read-only. A newly observed owner signature may trigger one bounded reconciliation and an `AutoConfigURL` write; later ticks for the same signature remain read-only. Owner-state changes/reconnect/manual repair may reconcile again |
-| W5 | Install the new package over an old MX-H2I without uninstalling, preserving WG service/tunnel and a prior `AutoConfigURL`; then click reconnect once | PAC notification uses the inbox PowerShell absolute path even when its directory is absent from process `PATH`; an active tunnel is repaired in place and never uninstalled; if replacement is actually required, audit shows stop/release followed by `/installtunnelservice` with no explicit uninstall; live NRPT/system DNS, PAC readback, Chromium `resolveProxy` to `2053`, CONNECT, route, and Internal health all pass before runtime returns `connected` |
+| W5 | Install the new package over an old MX-H2I without uninstalling, preserving WG service/tunnel and a prior `AutoConfigURL`; then click reconnect once | PAC notification uses the inbox PowerShell absolute path and a PowerShell 5.1-safe `Add-Type` string even when its directory is absent from process `PATH`; `/installtunnelservice` is awaited with `Start-Process -Wait -PassThru` and its `ExitCode`, never an empty `$LASTEXITCODE`; an active tunnel is repaired in place and never uninstalled; if replacement is actually required, audit shows stop/release followed by `/installtunnelservice` with no explicit uninstall; live NRPT/system DNS, PAC readback, Chromium `resolveProxy` to `2053`, CONNECT, route, and Internal health all pass before runtime returns `connected` |
 | W6 | Disconnect and normal exit | While `2053` stays live, restore the external value captured by the most recent successful negotiation only if MX still owns `AutoConfigURL`; preserve a value already installed by another owner. Then stop WG and verify owned NRPT cleanup, and only then close `2053`; any failure cancels disconnect/exit and leaves a recoverable path |
 
 Also run once with `MX_H2I_WINDOWS_SYSTEM_PAC=0`; the expected result is diagnostic

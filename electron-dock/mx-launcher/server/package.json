@@ -17,6 +17,7 @@
     "smoke:user-lifecycle": "pnpm run build && node dist/scripts/user-lifecycle-smoke.js",
     "smoke:http": "node scripts/http-smoke.mjs",
     "smoke:release-center": "node scripts/release-center-smoke.mjs",
+    "smoke:site-slot-domestic-dns": "node scripts/site-slot-domestic-dns-artifact-smoke.mjs",
     "release:publish": "node scripts/release-center-publish.mjs"
   },
   "dependencies": {

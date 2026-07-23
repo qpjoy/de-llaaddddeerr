@@ -92,6 +92,17 @@ process.exit(1);
 `);
 writeExecutable(join(powerShellDir, 'powershell.exe'), `#!/usr/bin/env node
 const { appendFileSync } = require('node:fs');
+const args = process.argv.slice(2);
+const commandIndex = args.findIndex((arg) => String(arg).toLowerCase() === '-command');
+const command = commandIndex >= 0 ? String(args[commandIndex + 1] || '') : '';
+if (/@['"][^\\r\\n]/.test(command)) {
+  process.stderr.write('UnexpectedCharactersAfterHereStringHeader\\n');
+  process.exit(1);
+}
+if (!command.includes('$sig = \\'[DllImport("wininet.dll", SetLastError=true)]')) {
+  process.stderr.write('WinINet signature must use a PowerShell 5.1-safe string literal\\n');
+  process.exit(1);
+}
 if (process.env.MX_TEST_PROXY_NOTIFY_LOG) {
   appendFileSync(process.env.MX_TEST_PROXY_NOTIFY_LOG, 'notify\\n');
 }

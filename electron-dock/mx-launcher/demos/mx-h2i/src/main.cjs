@@ -3357,6 +3357,17 @@ async function collectNetworkEnvironmentDiagnostics(reason = 'manual', options =
     };
   }
   resolution = annotateResolutionWithWindowsNrpt(resolution, windowsNrpt);
+  if (process.platform === 'win32' && phase === 'connected' && host) {
+    resolution = {
+      ...resolution,
+      proofLayers: await collectWindowsDnsProofLayers({
+        host,
+        routePlan: runtime?.connection?.routePlan,
+        windowsNrpt,
+        nodeResolution: resolution
+      })
+    };
+  }
   const diagnostics = {
     reason,
     phase,
@@ -4478,19 +4489,6 @@ async function probeWindowsSplitDnsResolution(routePlanInput, windowsNrpt) {
     };
   }
   const host = windowsSplitDnsDiagnosticHost(domains);
-  if (!windowsNrptReadyForConnection(windowsNrpt)) {
-    return {
-      host,
-      state: 'nrpt-not-ready',
-      severity: 'error',
-      ok: false,
-      ready: false,
-      skipped: true,
-      skipReason: windowsNrpt?.state || 'nrpt-not-ready',
-      message: 'Windows NRPT 元数据尚未 ready，未执行端到端系统解析证明。',
-      updatedAt: nowIso()
-    };
-  }
   if (!host) {
     return {
       host: null,
@@ -4503,9 +4501,28 @@ async function probeWindowsSplitDnsResolution(routePlanInput, windowsNrpt) {
       updatedAt: nowIso()
     };
   }
+  if (!windowsNrptReadyForConnection(windowsNrpt)) {
+    return {
+      host,
+      state: 'nrpt-not-ready',
+      severity: 'error',
+      ok: false,
+      ready: false,
+      skipped: true,
+      skipReason: windowsNrpt?.state || 'nrpt-not-ready',
+      message: 'Windows NRPT 元数据尚未 ready；已记录 Internal DNS 直查和默认解析，仅跳过 Node 端到端 ready 证明。',
+      proofLayers: await collectWindowsDnsProofLayers({
+        host,
+        routePlan,
+        windowsNrpt,
+        nodeSkipReason: 'nrpt-not-ready'
+      }),
+      updatedAt: nowIso()
+    };
+  }
+  let result = null;
   try {
     const mod = await import('@qpjoy/electron-launcher/network-diagnostics');
-    let result = null;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       result = await mod.diagnoseLauncherHostResolution({
         host,
@@ -4524,24 +4541,28 @@ async function probeWindowsSplitDnsResolution(routePlanInput, windowsNrpt) {
       if (result?.ok === true || attempt === 3) break;
       await delay(250);
     }
-    return {
-      ...result,
-      ready: result?.ok === true,
-      proof: 'system-dns-lookup'
-    };
   } catch (err) {
-    return {
+    result = {
       host,
       state: 'unresolved',
       severity: 'error',
       ok: false,
-      ready: false,
-      proof: 'system-dns-lookup',
       error: errorMessage(err),
       message: `Windows split DNS 端到端解析失败：${errorMessage(err)}`,
       updatedAt: nowIso()
     };
   }
+  return {
+    ...result,
+    ready: windowsNrptReadyForConnection(windowsNrpt) && result?.ok === true,
+    proof: 'system-dns-lookup',
+    proofLayers: await collectWindowsDnsProofLayers({
+      host,
+      routePlan,
+      windowsNrpt,
+      nodeResolution: result
+    })
+  };
 }
 
 function windowsSplitDnsDiagnosticHost(domains) {
@@ -4555,6 +4576,155 @@ function windowsSplitDnsDiagnosticHost(domains) {
     .map(hostnameFromMaybeUrl)
     .find((host) => host && domains.some((domain) => host === domain || host.endsWith(`.${domain}`)))
     || null;
+}
+
+async function collectWindowsDnsProofLayers(input) {
+  const host = nullableString(input?.host);
+  const routePlan = normalizeRoutePlan(input?.routePlan);
+  const powershellLayers = await probeWindowsResolveDnsNameLayers(host, routePlan?.dnsServer);
+  const nodeResolution = input?.nodeResolution;
+  return {
+    directDns: powershellLayers.directDns,
+    nrpt: {
+      ...powershellLayers.nrpt,
+      metadataReady: windowsNrptReadyForConnection(input?.windowsNrpt),
+      metadataState: nullableString(input?.windowsNrpt?.state)
+    },
+    nodeGetaddrinfo: {
+      proof: 'node-getaddrinfo',
+      host,
+      ok: nodeResolution?.ok === true,
+      skipped: Boolean(input?.nodeSkipReason),
+      skipReason: nullableString(input?.nodeSkipReason),
+      state: nullableString(nodeResolution?.state) || (input?.nodeSkipReason ? 'skipped' : 'unknown'),
+      addresses: Array.isArray(nodeResolution?.addresses) ? nodeResolution.addresses.slice(0, 16) : [],
+      error: nullableString(nodeResolution?.error),
+      message: nullableString(nodeResolution?.message)
+    }
+  };
+}
+
+async function probeWindowsResolveDnsNameLayers(hostInput, dnsServerInput) {
+  const host = nullableString(hostInput);
+  const dnsServer = nullableString(dnsServerInput);
+  const failed = (proof, server, error, state = 'query-failed') => ({
+    proof,
+    host,
+    server,
+    ok: false,
+    state,
+    addresses: [],
+    records: [],
+    error
+  });
+  if (!host) {
+    return {
+      directDns: failed('internal-dns-direct', dnsServer, 'diagnostic host is missing', 'invalid-host'),
+      nrpt: failed('windows-nrpt-default-resolver', null, 'diagnostic host is missing', 'invalid-host')
+    };
+  }
+
+  const [directDns, nrpt] = await Promise.all([
+    dnsServer
+      ? probeWindowsResolveDnsNameLayer({
+          host,
+          dnsServer,
+          proof: 'internal-dns-direct'
+        })
+      : Promise.resolve(
+          failed('internal-dns-direct', null, 'routePlan.dnsServer is missing', 'dns-server-not-configured')
+        ),
+    probeWindowsResolveDnsNameLayer({
+      host,
+      dnsServer: null,
+      proof: 'windows-nrpt-default-resolver'
+    })
+  ]);
+  return { directDns, nrpt };
+}
+
+async function probeWindowsResolveDnsNameLayer(input) {
+  const host = input.host;
+  const dnsServer = input.dnsServer;
+  const identity = {
+    proof: input.proof,
+    host,
+    server: dnsServer
+  };
+  const query = dnsServer
+    ? 'Resolve-DnsName -Name $name -Server $server -Type A -DnsOnly -NoHostsFile -ErrorAction Stop'
+    : 'Resolve-DnsName -Name $name -Type A -DnsOnly -NoHostsFile -ErrorAction Stop';
+  const powershellScript = [
+    "$ErrorActionPreference = 'Stop'",
+    '$result = $null',
+    'try {',
+    `$name = ${windowsPowerShellLiteral(host)}`,
+    `$server = ${dnsServer ? windowsPowerShellLiteral(dnsServer) : '$null'}`,
+    `  $records = @(${query} | Select-Object -Property Name,Type,TTL,Section,IPAddress,NameHost -First 16)`,
+    '  $addresses = @($records | ForEach-Object { $_.IPAddress } | Where-Object { $_ })',
+    "  $state = if ($addresses.Count -gt 0) { 'resolved' } else { 'no-a-records' }",
+    '  $result = [ordered]@{ ok = ($addresses.Count -gt 0); state = $state; addresses = $addresses; records = $records; error = $null }',
+    '} catch {',
+    "  $result = [ordered]@{ ok = $false; state = 'query-failed'; addresses = @(); records = @(); error = $_.Exception.Message }",
+    '}',
+    '$result | ConvertTo-Json -Depth 5 -Compress'
+  ].join('\r\n');
+
+  try {
+    const stdout = await execFileText(windowsPowerShellCommandForDiagnostics(), [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      powershellScript
+    ], { timeoutMs: 3500 });
+    const parsed = parseJsonText(stdout);
+    if (!parsed || typeof parsed !== 'object') {
+      throw new Error('Resolve-DnsName output was not valid JSON.');
+    }
+    return normalizeWindowsDnsProofLayer(parsed, identity);
+  } catch (err) {
+    return {
+      ...identity,
+      ok: false,
+      state: 'query-failed',
+      addresses: [],
+      records: [],
+      error: errorMessage(err)
+    };
+  }
+}
+
+function normalizeWindowsDnsProofLayer(value, identity) {
+  const row = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const records = Array.isArray(row.records)
+    ? row.records
+    : row.records && typeof row.records === 'object'
+      ? [row.records]
+      : [];
+  const addresses = uniqueStrings(Array.isArray(row.addresses) ? row.addresses : [row.addresses]);
+  return {
+    proof: identity.proof,
+    host: identity.host,
+    server: identity.server,
+    ok: row.ok === true && addresses.length > 0,
+    state: nullableString(row.state) || (addresses.length > 0 ? 'resolved' : 'query-failed'),
+    addresses,
+    records: records.slice(0, 16).map((record) => ({
+      name: nullableString(record?.Name),
+      type: nullableString(String(record?.Type ?? '')),
+      ttl: Number.isFinite(record?.TTL) ? record.TTL : null,
+      section: nullableString(String(record?.Section ?? '')),
+      ipAddress: nullableString(record?.IPAddress),
+      nameHost: nullableString(record?.NameHost)
+    })),
+    error: nullableString(row.error)
+  };
+}
+
+function windowsPowerShellLiteral(value) {
+  return `'${String(value ?? '').replace(/'/g, "''")}'`;
 }
 
 function configuredCidrList(value) {
@@ -13210,17 +13380,17 @@ async function collectWindowsDiagnosticFiles(folderPath) {
     '}',
     '$result = [ordered]@{',
     "  capturedAt = (Get-Date).ToUniversalTime().ToString('o')",
-    '  nrptGlobal = Invoke-MxCapture { Get-DnsClientNrptGlobal | Select-Object * }',
-    '  nrptPolicy = Invoke-MxCapture { Get-DnsClientNrptPolicy -Effective | Select-Object Namespace,NameServers,Comment,DisplayName,DirectAccessEnabled }',
-    '  nrptRules = Invoke-MxCapture { Get-DnsClientNrptRule | Select-Object Namespace,NameServers,Comment,DisplayName,DirectAccessEnabled }',
-    '  dnsServers = Invoke-MxCapture { Get-DnsClientServerAddress | Select-Object InterfaceAlias,InterfaceIndex,AddressFamily,ServerAddresses }',
-    '  dnsGlobal = Invoke-MxCapture { Get-DnsClientGlobalSetting | Select-Object * }',
-    '  ipConfiguration = Invoke-MxCapture { Get-NetIPConfiguration | Select-Object InterfaceAlias,InterfaceIndex,NetProfile,IPv4Address,IPv6Address,IPv4DefaultGateway,DNSServer }',
+    '  nrptGlobal = Invoke-MxCapture { Get-DnsClientNrptGlobal | Select-Object -Property EnableDAForAllNetworks,QueryPolicy,SecureNameQueryFallback -First 1 }',
+    '  nrptPolicy = Invoke-MxCapture { Get-DnsClientNrptPolicy -Effective | Select-Object -Property Namespace,NameServers,Comment,DisplayName,DirectAccessEnabled -First 256 }',
+    '  nrptRules = Invoke-MxCapture { Get-DnsClientNrptRule | Select-Object -Property Namespace,NameServers,Comment,DisplayName,DirectAccessEnabled -First 256 }',
+    '  dnsServers = Invoke-MxCapture { Get-DnsClientServerAddress | Select-Object -Property InterfaceAlias,InterfaceIndex,AddressFamily,ServerAddresses -First 128 }',
+    '  dnsGlobal = Invoke-MxCapture { Get-DnsClientGlobalSetting | Select-Object -Property SuffixSearchList,UseDevolution,DevolutionLevel -First 1 }',
+    '  ipConfiguration = Invoke-MxCapture { Get-NetIPConfiguration | Select-Object -Property InterfaceAlias,InterfaceIndex,@{ Name = "NetworkCategory"; Expression = { $_.NetProfile.NetworkCategory } },@{ Name = "IPv4Addresses"; Expression = { @($_.IPv4Address | ForEach-Object { $_.IPAddress }) } },@{ Name = "IPv6Addresses"; Expression = { @($_.IPv6Address | ForEach-Object { $_.IPAddress }) } },@{ Name = "IPv4DefaultGateways"; Expression = { @($_.IPv4DefaultGateway | ForEach-Object { $_.NextHop }) } },@{ Name = "DnsServers"; Expression = { @($_.DNSServer | ForEach-Object { $_.ServerAddresses }) } } -First 128 }',
     "  internetSettings = Invoke-MxCapture { Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' | Select-Object AutoConfigURL,ProxyEnable,ProxyServer,ProxyOverride,AutoDetect }",
-    '  tcpListeners = Invoke-MxCapture { Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -in @(2053,8080,23455,23456,23457,23458) } | Select-Object LocalAddress,LocalPort,OwningProcess,State }',
-    '  networkAdapters = Invoke-MxCapture { Get-NetAdapter | Select-Object Name,InterfaceDescription,Status,ifIndex,LinkSpeed,MacAddress }',
+    '  tcpListeners = Invoke-MxCapture { Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -in @(2053,8080,23455,23456,23457,23458) } | Select-Object -Property LocalAddress,LocalPort,OwningProcess,State -First 64 }',
+    '  networkAdapters = Invoke-MxCapture { Get-NetAdapter | Select-Object -Property Name,InterfaceDescription,Status,ifIndex,LinkSpeed,MacAddress -First 128 }',
     '}',
-    '$result | ConvertTo-Json -Depth 8'
+    '$result | ConvertTo-Json -Depth 5 -Compress'
   ].join('\r\n');
   const powershell = await captureDiagnosticCommand(windowsPowerShellCommandForDiagnostics(), [
     '-NoProfile',

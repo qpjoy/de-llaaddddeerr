@@ -307,7 +307,7 @@ assert.equal(singletonSnapshot.state, 'rules-missing');
 assert.deepEqual(singletonSnapshot.missingNamespaces, [expectedRules[1].namespace]);
 
 async function verifyAsyncLiveProbe() {
-  const root = mkdtempSync(join(tmpdir(), 'mx-nrpt-probe-'));
+  const root = mkdtempSync(join(tmpdir(), "mx nrpt user's probe-"));
   const powerShellDir = join(root, 'System32', 'WindowsPowerShell', 'v1.0');
   const powerShell = join(powerShellDir, 'powershell.exe');
   const probeScriptCapture = join(root, 'nrpt-probe-command.ps1');
@@ -416,6 +416,26 @@ async function verifyAsyncLiveProbe() {
       'restart failures must be preserved in the route audit log'
     );
     assert.match(restartElevated, /\/installtunnelservice/);
+    assert.match(
+      restartElevated,
+      /\$wireGuardProcess = Start-Process -FilePath .+ -ArgumentList .+ -WindowStyle Hidden -Wait -PassThru/,
+      'WireGuard GUI commands must be awaited through Start-Process on Windows PowerShell 5.1'
+    );
+    const expectedArgumentLine = `/installtunnelservice "${configPath}"`.replace(/'/g, "''");
+    assert.ok(
+      restartElevated.includes(`-ArgumentList '${expectedArgumentLine}'`),
+      'a WireGuard config path containing spaces and apostrophes must remain one quoted native argument'
+    );
+    assert.match(
+      restartElevated,
+      /\$wireGuardExitCode = \$wireGuardProcess\.ExitCode/,
+      'WireGuard command success must use the waited process exit code'
+    );
+    assert.doesNotMatch(
+      restartElevated,
+      /\$LASTEXITCODE/,
+      'WireGuard GUI commands do not reliably populate LASTEXITCODE'
+    );
     assert.doesNotMatch(
       restartElevated,
       /\/uninstalltunnelservice/,

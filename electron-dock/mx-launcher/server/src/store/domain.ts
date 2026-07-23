@@ -4306,7 +4306,7 @@ export function buildSiteSlotDomesticRuntimeConfig(
   const internalBaseUrl = normalizeHttpUrl(input.internalBaseUrl || previous?.upstreams.internalBaseUrl || 'http://10.88.88.88:18090');
   const internalApi = normalizeHttpUrl(input.internalApiUpstream || previous?.upstreams.internalApi || internalBaseUrl);
   const internalH2i = normalizeHttpUrl(input.internalH2iUpstream || previous?.upstreams.internalH2i || internalBaseUrl);
-  const dnsBind = input.dnsBind?.trim() || previous?.dns.bind || '0.0.0.0';
+  const dnsBind = input.dnsBind?.trim() || previous?.dns.bind || '10.88.0.1';
   const dnsPort = positivePort(input.dnsPort, previous?.dns.port, 53);
   const publicBaseUrl = `${bootstrapProtocol}://${bootstrapHost}${defaultPortForProtocol(bootstrapProtocol) === bootstrapPort ? '' : `:${bootstrapPort}`}`;
   const env = domesticRuntimeEnv({
