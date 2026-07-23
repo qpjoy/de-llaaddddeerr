@@ -4085,7 +4085,8 @@ function writeState(statePath: string, state: StoredState): void {
   const tempPath = `${statePath}.${process.pid}.${++stateWriteSequence}.tmp`;
   try {
     writeFileSync(tempPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
-    const fd = openSync(tempPath, 'r');
+    // Windows FlushFileBuffers, used by fsyncSync, requires a writable handle.
+    const fd = openSync(tempPath, 'r+');
     try {
       fsyncSync(fd);
     } finally {
