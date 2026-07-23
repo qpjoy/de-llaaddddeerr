@@ -21,6 +21,17 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      network: ${MX_SHADOW_BUILD_NETWORK:-default}
+      args:
+        MX_SHADOW_NPM_REGISTRY: ${MX_SHADOW_NPM_REGISTRY:-https://registry.npmmirror.com}
+        HTTP_PROXY: ${BUILD_CONTAINER_HTTP_PROXY:-}
+        HTTPS_PROXY: ${BUILD_CONTAINER_HTTPS_PROXY:-}
+        NO_PROXY: ${BUILD_CONTAINER_NO_PROXY:-}
+        http_proxy: ${BUILD_CONTAINER_HTTP_PROXY:-}
+        https_proxy: ${BUILD_CONTAINER_HTTPS_PROXY:-}
+        no_proxy: ${BUILD_CONTAINER_NO_PROXY:-}
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
     image: qpjoy/mx-launcher-server:shadow
     container_name: mx-launcher-server-shadow
     restart: unless-stopped

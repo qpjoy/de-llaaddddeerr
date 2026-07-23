@@ -592,6 +592,39 @@ Internal 管理网、Domestic relay 或 `mx-internal-svc` overlay 访问 TCP `18
 `caddy:2.8.4-alpine`，再导入 containerd 的 `k8s.io` namespace，复用 Docker 已经可用的
 代理/TUN 出站能力。可通过 `MX_K8S_PRELOAD_RUNTIME_IMAGES=0` 关闭，或用
 `MX_K8S_RUNTIME_IMAGES="..."` 覆盖镜像列表。
+
+Internal server 镜像构建时，Corepack 下载 pnpm 与随后 `pnpm install` 默认统一使用
+`https://registry.npmmirror.com`，避免容器构建网络无法访问
+`registry.npmjs.org` 时停在 `corepack prepare`。需要改用企业仓库或官方源时，在
+`server/.env` 或命令环境中设置 `MX_SHADOW_NPM_REGISTRY`；该值只进入 build stage，
+不会写入运行时镜像：
+
+```bash
+MX_SHADOW_NPM_REGISTRY=https://registry.npmjs.org \
+  bash scripts/manage.sh ops internal-production deploy
+```
+
+若构建容器完全没有直连出站，而宿主机代理只监听
+`127.0.0.1:7788`，可让 build stage 使用宿主网络：
+
+```bash
+MX_SHADOW_BUILD_NETWORK=host \
+BUILD_CONTAINER_HTTP_PROXY=http://127.0.0.1:7788 \
+BUILD_CONTAINER_HTTPS_PROXY=http://127.0.0.1:7788 \
+  bash scripts/manage.sh ops internal-production deploy
+```
+
+Internal deploy 只更新 Internal API/K8s 和镜像内的 Domestic artifact 模板，不会自动覆盖
+Domestic 主机，也不会覆盖已有 artifact 持久卷。若 Domestic 已安装且当前运行态正常，
+部署后只需在 Admin UI 执行一次 `Apply Domestic Runtime`：新版 Internal 会经 SSH 写入
+runtime 配置、精确重建 DNS service，并以 UDP/TCP 查询验收。
+
+只有 Domestic 尚未安装、提示 `run Install / Sync first`，或需要同步新版
+`manage.sh`、基础 compose/Corefile、WireGuard/materializer bundle 时，才走完整的
+`Materialize Domestic WG → Domestic plan/preflight → Remote SSH Worker Execute →
+Apply Domestic Runtime`。不要绕过 Config Center 直接裸跑 materializer，以免新 artifact
+缺少现有 WireGuard secret。
+
 构建镜像前，脚本会检查 `site-slots/domestic/qp-tunnel-cli` fallback 是否包含
 `dist/index.js`、`dist/hdo.js` 和声明文件。CentOS/Internal runtime 主机默认不安装或编译
 `electron-plugin` workspace，避免触发 `better-sqlite3`、Electron native module、

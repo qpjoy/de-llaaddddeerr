@@ -1,5 +1,14 @@
 FROM node:22-alpine AS build
 WORKDIR /app
+ARG MX_SHADOW_NPM_REGISTRY=https://registry.npmmirror.com
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+ENV COREPACK_NPM_REGISTRY=${MX_SHADOW_NPM_REGISTRY} \
+    NPM_CONFIG_REGISTRY=${MX_SHADOW_NPM_REGISTRY}
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile=false
