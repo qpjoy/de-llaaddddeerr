@@ -153,12 +153,14 @@ Developer Mode on Windows. If a worker previously failed while extracting that a
 The Windows package still runs the Electron UI as `asInvoker`. WireGuard, NRPT split DNS, and
 route-priority repair are owned by the WireGuard service/UAC path. Windows connects with both
 NRPT and the MX local-edge WinINet PAC by default. Internal exact/suffix matches must resolve through
-the product DNS and return `PROXY 127.0.0.1:2053` in PAC. Full ready requires live system DNS,
-WinINet PAC readback, Chromium `session.resolveProxy()` selecting `2053`, and an actual CONNECT
-through the local edge. `MX_H2I_WINDOWS_SYSTEM_PAC=0` is diagnostic/degraded only and must remain
-`tunnel-only`. An NRPT warning still does not explain WeChat/Doubao/Steam failures unless their
-queried name matches an MX namespace. The Windows UAC wrapper uses the HDO V1 hidden `RunAs`
-pattern.
+the product DNS and return `PROXY 127.0.0.1:2053` in PAC. The preferred full-ready proof includes
+live system DNS, WinINet PAC readback, Chromium `session.resolveProxy()` selecting `2053`, and an
+actual CONNECT through the local edge. With Clash TUN/DoH, live NRPT plus verified PAC/CONNECT may
+keep browser access connected even while system DNS is explicitly reported degraded; non-PAC
+programs are not counted as ready in that state. `MX_H2I_WINDOWS_SYSTEM_PAC=0` is diagnostic/degraded
+only and must remain `tunnel-only`. An NRPT warning still does not explain WeChat/Doubao/Steam
+failures unless their queried name matches an MX namespace. The Windows UAC wrapper uses the HDO V1
+hidden `RunAs` pattern.
 
 On macOS, the required gate is that the local edge and SystemConfiguration supplemental resolver
 must both be live before suppressed interface DNS can count as ready. The current suppression
@@ -174,7 +176,7 @@ history, not current-state proof.
 
 | Case | Operation | Required result |
 | --- | --- | --- |
-| W1 | Connect with Clash TUN already enabled | VIP/CIDR uses WG; NRPT/system DNS is live; MX PAC readback + Chromium `resolveProxy` + CONNECT are live; unmatched PAC result is `DIRECT` while public traffic stays on TUN |
+| W1 | Connect with Clash TUN already enabled | Domestic WG endpoint has a physical-gateway `/32` bypass; standalone cross-process ownership is confirmed; VIP/CIDR uses WG; NRPT is live; MX PAC readback + Chromium `resolveProxy` + CONNECT are live; unmatched PAC result is `DIRECT` while public traffic stays on TUN. If system DNS still returns public/fake-IP, browser remains usable but diagnostics must mark non-PAC DNS degraded |
 | W2 | Connect with Clash static system proxy | A live loopback listener is wrapped as `PROXY <Clash>; DIRECT`; Internal exact/suffix still returns `PROXY 127.0.0.1:2053`; public smoke passes |
 | W3 | Connect with Clash PAC, WPAD, or dead listener | Readable/valid loopback PAC is wrapped first; otherwise a representable live static proxy can continue. AutoDetect/WPAD fails closed only when it is the sole applicable owner and neither live static nor PAC continuation exists; unreadable/non-loopback PAC or dead listener also fails closed without registry mutation or browser-ready |
 | W4 | While connected, switch TUN ↔ system proxy, restart Clash, or change port | The normal five-second path is read-only. A newly observed owner signature may trigger one bounded reconciliation and an `AutoConfigURL` write; later ticks for the same signature remain read-only. Owner-state changes/reconnect/manual repair may reconcile again |

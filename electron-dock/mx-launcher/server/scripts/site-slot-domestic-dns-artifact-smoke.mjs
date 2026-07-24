@@ -62,7 +62,12 @@ try {
   assert.match(compose, /\$\{MX_DOMESTIC_DNS_BIND:-10\.88\.0\.1\}:\$\{MX_DOMESTIC_DNS_PORT:-53\}:53\/tcp/);
   assert.doesNotMatch(compose, /MX_DOMESTIC_DNS_BIND:-0\.0\.0\.0/);
   assert.doesNotMatch(compose, /MX_DOMESTIC_DNS_PORT:-50053/);
-  assert.match(corefile, /forward \. 10\.88\.88\.88:53(?:\s|$)/);
+  assert.match(corefile, /^\s*forward \. 10\.88\.88\.88:53\s*$/m);
+  assert.doesNotMatch(
+    corefile,
+    /223\.5\.5\.5|119\.29\.29\.29|1\.1\.1\.1|8\.8\.8\.8/,
+    'Internal split-DNS names must fail closed instead of falling back to public DNS'
+  );
   assert.match(envExample, /^MX_DOMESTIC_DNS_BIND=10\.88\.0\.1$/m);
   assert.match(envExample, /^MX_DOMESTIC_DNS_PORT=53$/m);
   assert.doesNotMatch(envExample, /^MX_DOMESTIC_DNS_BIND=0\.0\.0\.0$/m);

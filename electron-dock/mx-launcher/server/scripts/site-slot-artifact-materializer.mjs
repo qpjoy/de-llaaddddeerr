@@ -777,6 +777,7 @@ function writeDomesticServicesReadme(staging) {
     '- relay API and H2I traffic back to Internal over the Domestic WireGuard path;',
     '- expose health, evidence, and snapshot-cache files for diagnostics;',
     '- optionally run a CoreDNS edge cache on `10.88.0.1:53` and forward Internal lookups to the live authority on `10.88.88.88:53`.',
+    '- fail closed when the Internal DNS authority is unavailable; never return a public bootstrap A record for an Internal split-DNS query.',
     '',
     'Internal remains the source of truth for users, RBAC, DNS authority, subscriptions, config snapshots, release state, and evidence history.',
     '',
@@ -929,10 +930,8 @@ function writeDomesticServicesCorefile(staging) {
     '  health :8080',
     '  ready :8181',
     '  cache 30',
-    '  forward . 10.88.88.88:53 223.5.5.5 119.29.29.29 1.1.1.1 8.8.8.8 {',
-    '    policy sequential',
-    '    health_check 5s',
-    '  }',
+    '  forward . 10.88.88.88:53',
+    '  reload',
     '}',
     ''
   ].join('\n'));

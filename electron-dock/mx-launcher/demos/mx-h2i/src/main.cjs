@@ -14,6 +14,15 @@ const {
   wireGuardRecoveryGate,
   wireGuardRecoveryTurn
 } = require('./network-recovery-policy.cjs');
+const {
+  postConnectDataPlaneReady,
+  standaloneOwnershipReady,
+  windowsBrowserFallbackState,
+  windowsBrowserPromotionPrerequisitesReady,
+  windowsLocalEdgePrerequisitesReady,
+  windowsSplitDnsPathReady,
+  windowsSystemDnsDataPlaneReady
+} = require('./windows-network-readiness.cjs');
 const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: electronScreen, powerMonitor, net: electronNet, dialog, session: electronSession } = require('electron');
 
 loadDotEnvFiles();
@@ -2917,9 +2926,11 @@ function windowsBrowserAccessReady(status) {
 
 function systemDomainProxyRuntimeEligible() {
   const connection = runtime?.connection || {};
-  if (connection.state === 'connected') return true;
+  if (connection.state === 'connected') {
+    return process.platform !== 'win32' || standaloneOwnershipReady(connection);
+  }
   if (process.platform !== 'win32' || connection.state !== 'tunnel-only') return false;
-  return windowsNonBrowserDataPlaneReady(connection);
+  return windowsBrowserPromotionPrerequisitesReady(connection);
 }
 
 async function prepareSystemDomainProxyForWireGuardInstall(reason = 'pre-connect') {
@@ -3210,8 +3221,22 @@ function shutdownSystemDomainProxyStatus(reason) {
 }
 
 async function recordSystemDomainProxyDiagnostics(status, touchReason) {
-  const signature = systemDomainProxyStatusSignature(status);
-  if (!signature || signature === lastSystemDomainProxySignature) return false;
+  const proxySignature = systemDomainProxyStatusSignature(status);
+  if (!proxySignature) return false;
+  const previousState = runtime.connection?.state;
+  const browserReady = windowsBrowserAccessReady(status);
+  const localEdgePrerequisitesReady = windowsLocalEdgePrerequisitesReady(runtime.connection);
+  const browserPromotionPrerequisitesReady =
+    windowsBrowserPromotionPrerequisitesReady(runtime.connection);
+  const systemDnsReady = process.platform !== 'win32'
+    || windowsSystemDnsDataPlaneReady(runtime.connection);
+  const systemDnsDegraded = process.platform === 'win32'
+    && localEdgePrerequisitesReady
+    && !systemDnsReady;
+  const signature = process.platform === 'win32'
+    ? `${proxySignature}|state=${previousState || 'none'}|systemDns=${systemDnsReady}|ownership=${standaloneOwnershipReady(runtime.connection)}|localEdge=${localEdgePrerequisitesReady}`
+    : proxySignature;
+  if (signature === lastSystemDomainProxySignature) return false;
   lastSystemDomainProxySignature = signature;
   if (status?.error || status?.resolverError) {
     queueDiagnosticLog('error', 'system-domain-proxy.status-error', status.error || status.resolverError, {
@@ -3221,18 +3246,29 @@ async function recordSystemDomainProxyDiagnostics(status, touchReason) {
       platform: status.platform
     });
   }
-  const previousState = runtime.connection?.state;
-  const browserReady = windowsBrowserAccessReady(status);
   const promote = process.platform === 'win32'
     && previousState === 'tunnel-only'
     && browserReady
-    && windowsNonBrowserDataPlaneReady(runtime.connection);
+    && browserPromotionPrerequisitesReady;
   const downgrade = process.platform === 'win32'
     && previousState === 'connected'
     && !browserReady;
+  const nextState = promote ? 'connected' : downgrade ? 'tunnel-only' : runtime.connection?.state;
+  const browserFallback = process.platform === 'win32'
+    ? windowsBrowserFallbackState({
+        connection: runtime.connection,
+        browserReady,
+        connected: nextState === 'connected'
+      })
+    : null;
+  const previousBrowserFallback =
+    runtime.connection?.diagnostics?.windowsBrowserFallback || {};
+  const browserFallbackChanged = process.platform === 'win32'
+    && ['active', 'browserReady', 'systemDnsReady', 'nonPacProgramsReady']
+      .some((key) => previousBrowserFallback[key] !== browserFallback[key]);
   runtime.connection = {
     ...runtime.connection,
-    state: promote ? 'connected' : downgrade ? 'tunnel-only' : runtime.connection?.state,
+    state: nextState,
     health: promote || downgrade
       ? {
           ...runtime.connection?.health,
@@ -3241,19 +3277,41 @@ async function recordSystemDomainProxyDiagnostics(status, touchReason) {
       : runtime.connection?.health,
     diagnostics: {
       ...(runtime.connection?.diagnostics || {}),
-      systemDomainProxy: status
+      systemDomainProxy: status,
+      ...(process.platform === 'win32'
+        ? {
+            windowsBrowserFallback: {
+              ...browserFallback,
+              updatedAt: nowIso()
+            }
+          }
+        : {})
     }
   };
   if (promote) {
     runtime.feedback = {
       tone: 'success',
-      message: `Windows 浏览器已通过 ${status?.browserAccess?.proxy || localEdgeProxy()} 访问 Internal，完整网络已 ready。`
+      message: systemDnsDegraded
+        ? `Windows 浏览器已通过 ${status?.browserAccess?.proxy || localEdgeProxy()} 访问 Internal；浏览器路径 ready，系统 DNS 未通过，非 PAC 程序仍为 degraded。`
+        : `Windows 浏览器已通过 ${status?.browserAccess?.proxy || localEdgeProxy()} 访问 Internal，完整网络已 ready。`
     };
   } else if (downgrade) {
     runtime.feedback = {
       tone: 'warning',
       message: `Windows 浏览器 Internal 路径已失效，连接降级为 tunnel-only：${status?.browserAccess?.error || status?.error || 'PAC/local edge 未通过'}`
     };
+  } else if (browserFallbackChanged && nextState === 'connected') {
+    runtime.feedback = browserFallback.active
+      ? {
+          tone: 'warning',
+          message: `Windows 浏览器仍通过 ${status?.browserAccess?.proxy || localEdgeProxy()} 访问 Internal；系统 DNS 已降级，非 PAC 程序尚未 ready。`
+        }
+      : browserFallback.systemDnsReady
+        ? {
+            tone: 'success',
+            message: `Windows 浏览器与系统 DNS 均已恢复 Internal 路径，完整网络 ready。`
+          }
+        : runtime.feedback;
   }
   touchRuntime(touchReason);
   await saveAndBroadcast();
@@ -3268,13 +3326,6 @@ async function recordSystemDomainProxyDiagnostics(status, touchReason) {
     );
   }
   return true;
-}
-
-function windowsNonBrowserDataPlaneReady(connection) {
-  return connection?.health?.wireGuard === 'ready'
-    && connection?.health?.internalApi === 'ready'
-    && connection?.diagnostics?.windowsNrpt?.ready === true
-    && connection?.diagnostics?.windowsDnsResolution?.ready === true;
 }
 
 async function refreshNetworkEnvironmentDiagnostics(reason = 'manual', options = {}) {
@@ -3566,11 +3617,14 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
   } else {
     systemDomainProxy = await disableSystemDomainProxyForRuntime(reason);
   }
+  let windowsSystemDnsDegraded = false;
+  const windowsBrowserReady = process.platform === 'win32'
+    && windowsBrowserAccessReady(systemDomainProxy);
   if (
     process.platform === 'win32'
     && runtime?.connection?.state === 'tunnel-only'
-    && windowsNonBrowserDataPlaneReady(runtime.connection)
-    && windowsBrowserAccessReady(systemDomainProxy)
+    && windowsBrowserPromotionPrerequisitesReady(runtime.connection)
+    && windowsBrowserReady
   ) {
     runtime.connection = {
       ...runtime.connection,
@@ -3578,6 +3632,24 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
       health: {
         ...runtime.connection.health,
         splitDns: 'ready'
+      }
+    };
+  }
+  if (process.platform === 'win32') {
+    const browserFallback = windowsBrowserFallbackState({
+      connection: runtime.connection,
+      browserReady: windowsBrowserReady,
+      connected: runtime.connection?.state === 'connected'
+    });
+    windowsSystemDnsDegraded = Boolean(browserFallback.reason);
+    runtime.connection = {
+      ...runtime.connection,
+      diagnostics: {
+        ...(runtime.connection?.diagnostics || {}),
+        windowsBrowserFallback: {
+          ...browserFallback,
+          updatedAt: nowIso()
+        }
       }
     };
   }
@@ -3617,7 +3689,7 @@ async function repairSystemNetworkForRuntime(reason = 'manual-repair') {
         ? 'warning'
         : 'success',
     message: connected
-      ? `已重新确认 MX-H2I WireGuard 路由和 PAC/DNS：${after?.resolution?.message || 'network ready'}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
+      ? `已重新确认 MX-H2I WireGuard 路由和 PAC/DNS：${after?.resolution?.message || 'network ready'}${windowsSystemDnsDegraded && windowsBrowserReady ? ' 浏览器路径 ready，非 PAC 程序的系统 DNS 仍为 degraded。' : ''}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
       : `已执行系统网络修复，但 WireGuard 尚未恢复 ready：${after?.resolution?.message || wireGuardProbe?.message || 'stale state cleared'}${darwinEndpointRouteRepairFeedback(endpointRouteRepair)}`
   };
   touchRuntime(`system network repaired: ${reason}`);
@@ -10649,7 +10721,12 @@ async function applyNetworkSession(session, options) {
       domesticPeerSync,
       diagnostics: wireGuardResult.diagnostics
     };
-    if (wireGuardResult.ready) {
+    const postConnectReady = postConnectDataPlaneReady({
+      platform: process.platform,
+      wireGuardReady: wireGuardResult.ready,
+      connection: runtime.connection
+    });
+    if (postConnectReady) {
       wireGuardBackgroundProbeFailures = 0;
       lastWireGuardRecoveryFailureAt = 0;
     } else {
@@ -10662,7 +10739,7 @@ async function applyNetworkSession(session, options) {
         diagnostics: wireGuardResult.diagnostics
       });
     }
-    const systemDomainProxy = wireGuardResult.ready
+    const systemDomainProxy = postConnectReady
       ? (combinedSystemDomainProxy?.shell
           ? await completeExternalSystemDomainProxyApply('post-connect-combined')
           : await ensureSystemDomainProxyForRuntime('post-connect'))
@@ -10672,16 +10749,33 @@ async function applyNetworkSession(session, options) {
     assertNetworkTransitionCurrent(options.lifecycleEpoch);
     const browserReady = windowsBrowserAccessReady(systemDomainProxy);
     const ownershipReady = standaloneOwnership?.ok === true;
-    const connectionReady = wireGuardResult.ready && browserReady && ownershipReady;
+    const connectionReady = postConnectReady && browserReady && ownershipReady;
+    const browserFallback = process.platform === 'win32'
+      ? windowsBrowserFallbackState({
+          connection: runtime.connection,
+          browserReady,
+          connected: connectionReady
+        })
+      : null;
+    const systemDnsReady = process.platform !== 'win32'
+      || browserFallback.systemDnsReady;
+    const systemDnsDegraded = process.platform === 'win32'
+      && postConnectReady
+      && !systemDnsReady;
     const finishedAt = Date.now();
     runtime.connection = {
       ...runtime.connection,
       state: connectionReady
-        ? runtime.connection.state
-        : wireGuardResult.ready
+        ? 'connected'
+        : postConnectReady
           ? 'tunnel-only'
           : runtime.connection.state,
-      health: wireGuardResult.ready && !browserReady
+      health: connectionReady
+        ? {
+            ...runtime.connection.health,
+            splitDns: 'ready'
+          }
+        : postConnectReady && !browserReady
         ? {
             ...runtime.connection.health,
             splitDns: 'blocked'
@@ -10691,6 +10785,14 @@ async function applyNetworkSession(session, options) {
         ...(runtime.connection.diagnostics || {}),
         ...(systemDomainProxy ? { systemDomainProxy } : {}),
         ...(standaloneOwnership ? { standaloneOwnership } : {}),
+        ...(process.platform === 'win32'
+          ? {
+              windowsBrowserFallback: {
+                ...browserFallback,
+                updatedAt: nowIso()
+              }
+            }
+          : {}),
         transitionTiming: {
           transitionId: options.transitionId || null,
           startedAt: new Date(transitionStartedAt).toISOString(),
@@ -10721,20 +10823,23 @@ async function applyNetworkSession(session, options) {
         : ` 系统 PAC 已写入，但浏览器 Internal 路径未通过：${systemDomainProxy?.browserAccess?.error || 'unknown'}。`
       : systemDomainProxy?.error
         ? ` 系统 PAC 未启用：${systemDomainProxy.error}`
-        : systemDomainProxy?.skipReason === 'windows-nrpt-only'
+      : systemDomainProxy?.skipReason === 'windows-nrpt-only'
           ? ' Windows 浏览器 PAC 被显式关闭，当前只能提供 NRPT，不能保证浏览器访问 Internal。'
           : '';
+    const systemDnsFeedback = systemDnsDegraded
+      ? ' Windows 系统 DNS 仍受第三方 TUN/DoH 或上游 DNS 影响；浏览器已由 PAC/local edge 兜底，非 PAC 程序保持 degraded。'
+      : '';
     runtime.feedback = {
       tone: connectionReady ? 'success' : 'warning',
       message: connectionReady
-        ? `${feedback} 客户端 WireGuard 已通过 ${wireGuardPathLabel(wireGuardResult.path)} 探测 Internal。${pacFeedback}`
-        : wireGuardResult.ready
-          ? `${feedback} WireGuard、NRPT 和系统 DNS 已就绪，但 Windows 浏览器路径未 ready：${systemDomainProxy?.browserAccess?.error || systemDomainProxy?.error || 'PAC/local edge 未通过'}。${pacFeedback}`
+        ? `${feedback} 客户端 WireGuard 已通过 ${wireGuardPathLabel(wireGuardResult.path)} 探测 Internal。${pacFeedback}${systemDnsFeedback}`
+        : postConnectReady
+          ? `${feedback} WireGuard、Internal API 和 NRPT 已就绪，但 Windows 浏览器路径未 ready：${systemDomainProxy?.browserAccess?.error || systemDomainProxy?.error || 'PAC/local edge 未通过'}。${pacFeedback}${systemDnsFeedback}`
           : `${feedback} 已保留租约，但客户端 WireGuard 还未 ready：${wireGuardResult.message}`
     };
     touchRuntime(connectionReady
       ? (options.mode === 'employee' ? 'employee wireguard connected' : 'guest wireguard connected')
-      : wireGuardResult.ready
+      : postConnectReady
         ? 'wireguard ready; browser path blocked'
         : 'wireguard lease only');
     if (connectionReady) {
@@ -10763,7 +10868,7 @@ async function applyNetworkSession(session, options) {
         options.mode === 'employee' ? 'staff:connect' : 'visit:connect',
         'failed',
         {
-          reason: wireGuardResult.ready
+          reason: postConnectReady
             ? systemDomainProxy?.browserAccess?.error || systemDomainProxy?.error || 'windows-browser-path-not-ready'
             : wireGuardResult.message,
           transitionId: options.transitionId
@@ -10775,7 +10880,7 @@ async function applyNetworkSession(session, options) {
     }
     await saveAndBroadcast();
   scheduleNetworkEnvironmentDiagnostics('post-connect', {
-    phase: wireGuardResult.ready ? 'connected' : 'bootstrap',
+    phase: connectionReady ? 'connected' : postConnectReady ? 'tunnel-only' : 'bootstrap',
     lookupTimeoutMs: NETWORK_DIAGNOSTIC_LOOKUP_TIMEOUT_MS
   });
 }
@@ -11116,8 +11221,43 @@ async function probeWireGuardForConnection(input) {
     const browserReady = process.platform !== 'win32'
       || splitDnsDomains(runtime?.config).length === 0
       || windowsBrowserAccessReady(systemDomainProxy);
-    const splitDnsReady = systemDnsReady && browserReady;
-    const ready = tunnelReady && routeReady && internalApiReady && splitDnsReady;
+    const splitDnsReady = process.platform === 'win32'
+      ? windowsSplitDnsPathReady({
+          nrptReady: windowsNrptReadyForConnection(windowsNrpt),
+          systemDnsReady,
+          browserReady
+        })
+      : systemDnsReady && browserReady;
+    const standaloneOwnershipRegistry =
+      connection.diagnostics?.standaloneOwnershipRegistry
+      || connection.diagnostics?.standaloneOwnership
+      || null;
+    const ownershipReady = standaloneOwnershipReady(connection);
+    const ready = tunnelReady
+      && routeReady
+      && internalApiReady
+      && splitDnsReady
+      && ownershipReady;
+    const browserFallback = process.platform === 'win32'
+      ? windowsBrowserFallbackState({
+          connection: {
+            ...connection,
+            health: {
+              ...(connection.health || {}),
+              wireGuard: tunnelReady ? 'ready' : 'blocked',
+              internalApi: internalApiReady ? 'ready' : 'blocked'
+            },
+            diagnostics: {
+              ...(connection.diagnostics || {}),
+              windowsNrpt,
+              windowsDnsResolution,
+              standaloneOwnershipRegistry
+            }
+          },
+          browserReady,
+          connected: ready
+        })
+      : null;
     const domesticRelayReady = domesticRelayDiagnostics?.status === 'passed' || domesticPeerSync?.status === 'passed' || route.ok === true;
     const resultLike = {
       ok: tunnelReady,
@@ -11153,6 +11293,15 @@ async function probeWireGuardForConnection(input) {
         windowsNrpt,
         windowsDnsResolution,
         systemDomainProxy: connection.diagnostics?.systemDomainProxy || null,
+        standaloneOwnershipRegistry,
+        ...(browserFallback
+          ? {
+              windowsBrowserFallback: {
+                ...browserFallback,
+                updatedAt: nowIso()
+              }
+            }
+          : {}),
         internalDirectPeerSync,
         domesticPeerSync,
         domesticRelayDiagnostics,
@@ -11160,6 +11309,8 @@ async function probeWireGuardForConnection(input) {
       },
       message: ready
         ? 'ready'
+        : !ownershipReady
+          ? `WireGuard 数据面可达，但本机 Launcher network ownership 未确认：${standaloneOwnershipRegistry?.error || 'ownership registry missing or conflicted'}。`
         : wireGuardConnectionNotReadyMessage(
             resultLike,
             route,
@@ -11369,9 +11520,15 @@ async function refreshWireGuardDiagnostics() {
     domesticPeerSync,
     diagnostics: wireGuardResult.diagnostics
   };
+  const browserFallbackActive =
+    wireGuardResult.diagnostics?.windowsBrowserFallback?.active === true;
   runtime.feedback = {
     tone: wireGuardResult.ready ? 'success' : 'warning',
-    message: wireGuardResult.ready ? 'WireGuard 诊断通过，Domestic 和 Internal overlay 可达。' : `WireGuard 仍未 ready：${wireGuardResult.message}`
+    message: wireGuardResult.ready
+      ? browserFallbackActive
+        ? 'WireGuard、Domestic、Internal 与浏览器 PAC 路径已通过；Windows 系统 DNS 仍为 degraded，非 PAC 程序尚未 ready。'
+        : 'WireGuard 诊断通过，Domestic 和 Internal overlay 可达。'
+      : `WireGuard 仍未 ready：${wireGuardResult.message}`
   };
   touchRuntime('wireguard diagnostics refreshed');
 }
@@ -11440,6 +11597,8 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
         }
         const routeProofLost = wireGuardResult.diagnostics?.route
           && wireGuardResult.diagnostics.route.ok !== true;
+        const ownershipProofLost =
+          wireGuardResult.diagnostics?.standaloneOwnershipRegistry?.ok !== true;
         const splitDnsProofLost = (
           wireGuardResult.diagnostics?.windowsNrpt?.configured === true
           && wireGuardResult.diagnostics.windowsNrpt.ready !== true
@@ -11448,15 +11607,26 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
           process.platform === 'win32'
           && wireGuardResult.diagnostics?.windowsDnsResolution?.proof === 'system-dns-lookup'
           && wireGuardResult.diagnostics.windowsDnsResolution.ready !== true
+          && !windowsBrowserAccessReady(connection.diagnostics?.systemDomainProxy)
         );
         const preserveConnected = !manual
           && connection.state === 'connected'
           && !wireGuardResult.ready
           && !routeProofLost
+          && !ownershipProofLost
           && !splitDnsProofLost
           && wireGuardBackgroundProbeFailures < WIREGUARD_BACKGROUND_PROBE_DOWNGRADE_THRESHOLD;
+        const currentBrowserFallback = connection.diagnostics?.windowsBrowserFallback || {};
+        const nextBrowserFallback = wireGuardResult.diagnostics?.windowsBrowserFallback || {};
+        const browserFallbackChanged = process.platform === 'win32'
+          && ['active', 'browserReady', 'systemDnsReady', 'nonPacProgramsReady']
+            .some((key) => currentBrowserFallback[key] !== nextBrowserFallback[key]);
         const shouldPersistProbe = !preserveConnected
-          && (wireGuardResult.state !== connection.state || reason !== 'interval');
+          && (
+            wireGuardResult.state !== connection.state
+            || reason !== 'interval'
+            || browserFallbackChanged
+          );
         if (shouldPersistProbe) {
           runtime.connection = {
             ...connection,
@@ -11464,6 +11634,7 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
             health: wireGuardResult.health,
             wireGuard: wireGuardResult.wireGuard,
             diagnostics: {
+              ...(connection.diagnostics || {}),
               ...wireGuardResult.diagnostics,
               recovery: {
                 ok: wireGuardResult.ready,
@@ -11476,15 +11647,34 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
             }
           };
           if (wireGuardResult.ready && reason !== 'interval') {
+            const browserFallbackActive =
+              wireGuardResult.diagnostics?.windowsBrowserFallback?.active === true;
             runtime.feedback = {
               tone: 'success',
-              message: `MX-H2I 已检测到 WireGuard ready（${reason}）。`
+              message: browserFallbackActive
+                ? `MX-H2I 已检测到 WireGuard 与浏览器 PAC 路径 ready（${reason}）；Windows 系统 DNS 仍为 degraded，非 PAC 程序尚未 ready。`
+                : `MX-H2I 已检测到 WireGuard ready（${reason}）。`
             };
           } else if (!wireGuardResult.ready && reason !== 'interval') {
             runtime.feedback = {
               tone: 'warning',
               message: `MX-H2I 检测到 WireGuard 未 ready：${wireGuardResult.message}。请点击重新连接进行授权修复，或刷新诊断查看当前路由。`
             };
+          } else if (browserFallbackChanged) {
+            runtime.feedback = nextBrowserFallback.active === true
+              ? {
+                  tone: 'warning',
+                  message: 'Clash TUN/DoH 已使 Windows 系统 DNS 降级；浏览器继续通过 PAC/local edge 访问 Internal，非 PAC 程序尚未 ready。'
+                }
+              : nextBrowserFallback.systemDnsReady === true && wireGuardResult.ready
+                ? {
+                    tone: 'success',
+                    message: 'Windows 系统 DNS 已恢复 Internal 解析；浏览器与非 PAC 程序均 ready。'
+                  }
+                : {
+                    tone: 'warning',
+                    message: `Windows Internal 网络状态已变化：${wireGuardResult.message}`
+                  };
           }
           touchRuntime(`wireguard probed: ${reason}`);
           await saveAndBroadcast();
@@ -11496,6 +11686,7 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
             health: wireGuardResult.health,
             wireGuard: wireGuardResult.wireGuard,
             diagnostics: {
+              ...(connection.diagnostics || {}),
               ...wireGuardResult.diagnostics,
               recovery: {
                 ok: true,
@@ -12362,8 +12553,9 @@ function wireGuardConnectionNotReadyMessage(
     && internalApi?.ok === true
     && windowsNrptReadyForConnection(windowsNrpt)
     && windowsDnsResolution?.ready !== true
+    && browserAccess?.ready !== true
   ) {
-    return `Windows NRPT 规则已就绪，但系统端到端解析仍未进入 Internal：${windowsDnsResolution?.message || windowsDnsResolution?.error || '未知解析错误'} 当前连接保持 tunnel-only，不会把 split DNS 标记为 ready。`;
+    return `Windows NRPT 规则已就绪，但系统端到端解析仍未进入 Internal，且浏览器 PAC/local edge 尚未通过：${windowsDnsResolution?.message || windowsDnsResolution?.error || browserAccess?.error || '未知解析错误'} 当前连接保持 tunnel-only。`;
   }
   if (
     process.platform === 'win32'

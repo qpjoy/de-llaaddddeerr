@@ -1,6 +1,6 @@
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, win32 as pathWin32 } from 'node:path';
+import { basename, dirname, join, resolve, win32 as pathWin32 } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 
 export type HdoMeshRole = 'domestic' | 'home' | 'user' | 'oversea' | 'service';
@@ -698,6 +698,7 @@ export function buildWireGuardTunnelCommand(input: {
     const nrptRules = action === 'down' && profileNrptRules.length === 0
       ? suppliedNrptRules
       : profileNrptRules;
+    const endpointBypassOwnerKey = windowsEndpointBypassOwnerKey(configPath, tunnelName);
     const scripts = windowsElevatedStartProcessScripts(
       command,
       wireGuardArgs,
@@ -707,6 +708,8 @@ export function buildWireGuardTunnelCommand(input: {
       profileNrptRules.length > 0,
       profile ? windowsRouteRulesFromProfile(profile) : [],
       profile?.addresses ?? [],
+      profile?.endpointHosts ?? [],
+      endpointBypassOwnerKey,
       scriptPaths.elevated,
       routeLogPath
     );
@@ -930,7 +933,14 @@ export async function repairWireGuardTunnelRoutes(input: {
         message: 'WireGuard 未运行，请先连接 HDO 网络。'
       };
     }
-    const command = buildWindowsRepairCommand(input.runtime, input.configPath, nrptRules, routeRules, profile.addresses);
+    const command = buildWindowsRepairCommand(
+      input.runtime,
+      input.configPath,
+      nrptRules,
+      routeRules,
+      profile.addresses,
+      profile.endpointHosts
+    );
     try {
       const result = await execFileAsync(command.command, command.args, {
         env: command.env ? { ...process.env, ...command.env } : process.env
@@ -3852,30 +3862,26 @@ function windowsElevatedStartProcessScripts(
   args: string[],
   action: WireGuardTunnelAction,
   tunnelName: string,
-  nrptRules: WindowsNrptRule[] = [],
-  nrptOwnershipEvidenceComplete = true,
-  routeRules: WindowsRouteRule[] = [],
-  interfaceAddresses: string[] = [],
+  nrptRules: WindowsNrptRule[],
+  nrptOwnershipEvidenceComplete: boolean,
+  routeRules: WindowsRouteRule[],
+  interfaceAddresses: string[],
+  endpointHosts: string[],
+  endpointBypassOwnerKey: string,
   elevatedScriptPath: string,
   auditLogPath?: string | null
 ): { wrapper: string; elevated: string } {
   const serviceName = `WireGuardTunnel$${tunnelName}`;
   const serviceArg = powerShellString(serviceName);
   const serviceLookup = `$svc = Get-Service -Name ${serviceArg} -ErrorAction SilentlyContinue`;
-  const canPreflight = nrptRules.length === 0
+  const canPreflight = action === 'up'
+    && endpointHosts.length === 0
+    && nrptRules.length === 0
     && routeRules.length === 0
     && !isMxH2iTunnel(tunnelName);
-  const preflightLines = !canPreflight ? [] : (action === 'up'
-    ? [serviceLookup, "if ($null -ne $svc -and $svc.Status -eq 'Running') { exit 0 }"]
-    : (action === 'down'
-      ? [
-          serviceLookup,
-          'if ($null -eq $svc) { exit 0 }',
-          'try { $svc.Close() } catch { }',
-          'try { $svc.Dispose() } catch { }',
-          '$svc = $null'
-        ]
-      : []));
+  const preflightLines = !canPreflight
+    ? []
+    : [serviceLookup, "if ($null -ne $svc -and $svc.Status -eq 'Running') { exit 0 }"];
   const wireGuardArgumentLine = args.map(windowsCommandLineArgument).join(' ');
   const nrptLines = windowsNrptPowerShellLines(
     nrptRules,
@@ -3883,6 +3889,11 @@ function windowsElevatedStartProcessScripts(
     nrptOwnershipEvidenceComplete
   );
   const routeLines = windowsRoutePowerShellLines(routeRules, tunnelName, interfaceAddresses);
+  const endpointBypassLines = windowsEndpointBypassPowerShellLines(
+    endpointHosts,
+    tunnelName,
+    endpointBypassOwnerKey
+  );
   const waitForServiceAbsent = () => [
     '$deadline = (Get-Date).AddSeconds(12)',
     'while ($true) {',
@@ -3932,9 +3943,11 @@ function windowsElevatedStartProcessScripts(
     `Write-HdoAudit ${powerShellString(`elevated start action=${action} tunnel=${tunnelName} service=${serviceName} nrptRules=${nrptRules.length}`)}`,
     ...nrptLines,
     ...routeLines,
+    ...endpointBypassLines,
     serviceLookup
   ];
   if (action === 'up') {
+    elevatedLines.push('Add-HdoEndpointBypass');
     elevatedLines.push(
       "if ($null -ne $svc -and $svc.Status -eq 'Running') {",
       "  Write-HdoAudit 'service already running; applying routes and NRPT rules'",
@@ -3957,6 +3970,7 @@ function windowsElevatedStartProcessScripts(
     elevatedLines.push(`Write-HdoAudit ${powerShellString(`removing NRPT rules for ${serviceName}`)}`);
     elevatedLines.push('Remove-HdoNrptRules');
     elevatedLines.push('Remove-HdoOverlayRoutes');
+    elevatedLines.push('Remove-HdoEndpointBypass');
     elevatedLines.push('if ($null -eq $svc) { exit 0 }');
     elevatedLines.push('try { $svc.Close() } catch { }');
     elevatedLines.push('try { $svc.Dispose() } catch { }');
@@ -3965,6 +3979,7 @@ function windowsElevatedStartProcessScripts(
     elevatedLines.push(`Write-HdoAudit ${powerShellString(`restart removing NRPT rules for ${serviceName}`)}`);
     elevatedLines.push('Remove-HdoNrptRules');
     elevatedLines.push('Remove-HdoOverlayRoutes');
+    elevatedLines.push('Add-HdoEndpointBypass');
     elevatedLines.push(
       'if ($null -ne $svc) {',
       `  Write-HdoAudit ${powerShellString(`stopping ${serviceName} before WireGuard-managed replacement`)}`,
@@ -4000,7 +4015,8 @@ function buildWindowsRepairCommand(
   configPath: string,
   nrptRules: WindowsNrptRule[],
   routeRules: WindowsRouteRule[],
-  interfaceAddresses: string[]
+  interfaceAddresses: string[],
+  endpointHosts: string[]
 ): WireGuardTunnelCommand {
   const tunnelName = pathWin32.basename(configPath).replace(/\.[^.]+$/, '');
   const profile = parseWireGuardProfile(configPath);
@@ -4012,6 +4028,12 @@ function buildWindowsRepairCommand(
     `Write-HdoAudit ${powerShellString(`repair start tunnel=${tunnelName} nrptRules=${nrptRules.length} routeRules=${routeRules.length}`)}`,
     ...windowsNrptPowerShellLines(nrptRules, tunnelName),
     ...windowsRoutePowerShellLines(routeRules, tunnelName, interfaceAddresses),
+    ...windowsEndpointBypassPowerShellLines(
+      endpointHosts,
+      tunnelName,
+      windowsEndpointBypassOwnerKey(configPath, tunnelName)
+    ),
+    'Add-HdoEndpointBypass',
     'Add-HdoOverlayRoutes',
     'Add-HdoNrptRules',
     `Write-HdoAudit ${powerShellString(`repair complete tunnel=${tunnelName}`)}`,
@@ -4148,6 +4170,263 @@ function windowsRoutePowerShellLines(
     '    $verified = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $rule.DestinationPrefix -InterfaceIndex $iface.InterfaceIndex -ErrorAction SilentlyContinue)',
     `    if ($verified.Count -eq 0) { throw (${powerShellString(`${product.shortName} route missing after add: `)} + $rule.DestinationPrefix) }`,
     '  }',
+    '}'
+  ];
+}
+
+function windowsEndpointBypassOwnerKey(configPath: string, tunnelName: string): string {
+  const normalizedPath = resolve(configPath).replace(/\\/g, '/').toLowerCase();
+  return `${tunnelName.trim().toLowerCase()}|${normalizedPath}`;
+}
+
+function windowsEndpointBypassPowerShellLines(
+  endpointHosts: string[],
+  tunnelName: string,
+  ownerKey: string
+): string[] {
+  const hosts = uniqueStrings(endpointHosts
+    .map((host) => host.trim())
+    .filter((host) => isIpv4(host) || /^[a-zA-Z0-9.-]+$/.test(host)));
+  const hostEntries = hosts.map(powerShellString);
+  return [
+    `$hdoEndpointBypassHosts = @(${hostEntries.join(', ')})`,
+    `$hdoEndpointBypassTunnelName = ${powerShellString(tunnelName)}`,
+    `$hdoEndpointBypassOwner = ${powerShellString(ownerKey)}`,
+    '$hdoEndpointBypassRouteMetric = 3',
+    "$hdoEndpointBypassMutexName = 'Global\\QPJoy.WireGuard.EndpointBypass.v1'",
+    '$hdoEndpointBypassCommonData = [Environment]::GetFolderPath([System.Environment+SpecialFolder]::CommonApplicationData)',
+    'if ([string]::IsNullOrWhiteSpace($hdoEndpointBypassCommonData)) { throw "Windows CommonApplicationData is unavailable for endpoint bypass ownership" }',
+    '$hdoEndpointBypassStateDir = Join-Path $hdoEndpointBypassCommonData "QPJoy\\WireGuard"',
+    '$hdoEndpointBypassRegistryPath = Join-Path $hdoEndpointBypassStateDir "endpoint-bypass-registry.json"',
+    `Write-HdoAudit ${powerShellString(`endpoint bypass prepared tunnel=${tunnelName} hosts=${hosts.length}`)}`,
+    'function Enter-HdoEndpointBypassMutex {',
+    '  param([int]$TimeoutMs = 30000)',
+    '  $mutex = [System.Threading.Mutex]::new($false, $hdoEndpointBypassMutexName)',
+    '  $acquired = $false',
+    '  try {',
+    '    $acquired = $mutex.WaitOne($TimeoutMs)',
+    '  } catch [System.Threading.AbandonedMutexException] {',
+    '    $acquired = $true',
+    '  } catch {',
+    '    $mutex.Dispose()',
+    '    throw',
+    '  }',
+    '  if (-not $acquired) {',
+    '    $mutex.Dispose()',
+    '    throw ("Timed out waiting for machine-wide endpoint bypass mutex " + $hdoEndpointBypassMutexName)',
+    '  }',
+    '  return $mutex',
+    '}',
+    'function Exit-HdoEndpointBypassMutex {',
+    '  param([System.Threading.Mutex]$Mutex)',
+    '  if ($null -eq $Mutex) { return }',
+    '  try { $Mutex.ReleaseMutex() } finally { $Mutex.Dispose() }',
+    '}',
+    'function Test-HdoEndpointIpv4 {',
+    '  param([string]$Address)',
+    "  if ($Address -notmatch '^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$') { return $false }",
+    '  $parts = @($Address.Split(".") | ForEach-Object { [int]$_ })',
+    '  return $parts.Count -eq 4 -and @($parts | Where-Object { $_ -lt 0 -or $_ -gt 255 }).Count -eq 0',
+    '}',
+    'function Test-HdoPublicEndpointIpv4 {',
+    '  param([string]$Address)',
+    '  if (-not (Test-HdoEndpointIpv4 $Address)) { return $false }',
+    '  $parts = @($Address.Split(".") | ForEach-Object { [int]$_ })',
+    '  if ($parts[0] -eq 0 -or $parts[0] -eq 10 -or $parts[0] -eq 127 -or $parts[0] -ge 224) { return $false }',
+    '  if ($parts[0] -eq 100 -and $parts[1] -ge 64 -and $parts[1] -le 127) { return $false }',
+    '  if ($parts[0] -eq 169 -and $parts[1] -eq 254) { return $false }',
+    '  if ($parts[0] -eq 172 -and $parts[1] -ge 16 -and $parts[1] -le 31) { return $false }',
+    '  if ($parts[0] -eq 192 -and $parts[1] -eq 168) { return $false }',
+    '  if ($parts[0] -eq 198 -and ($parts[1] -eq 18 -or $parts[1] -eq 19)) { return $false }',
+    '  return $true',
+    '}',
+    'function Get-HdoEndpointBypassIps {',
+    '  $ips = New-Object System.Collections.Generic.List[string]',
+    '  foreach ($hostName in $hdoEndpointBypassHosts) {',
+    '    if (Test-HdoEndpointIpv4 $hostName) {',
+    '      if (Test-HdoPublicEndpointIpv4 $hostName) { $ips.Add($hostName) }',
+    '      continue',
+    '    }',
+    '    try {',
+    '      $resolved = @([System.Net.Dns]::GetHostAddresses($hostName) | Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork } | ForEach-Object { $_.IPAddressToString })',
+    '      foreach ($ip in $resolved) { if (Test-HdoPublicEndpointIpv4 $ip) { $ips.Add($ip) } }',
+    '    } catch {',
+    "      Write-HdoAudit ('endpoint bypass resolve failed host=' + $hostName + ' error=' + ($_ | Out-String).Trim())",
+    '    }',
+    '  }',
+    '  return @($ips | Sort-Object -Unique)',
+    '}',
+    'function Get-HdoPhysicalDefaultRoute {',
+    '  $interfaces = @{}',
+    '  @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue) | ForEach-Object { $interfaces[[string]$_.InterfaceIndex] = $_ }',
+    '  $candidates = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | ForEach-Object {',
+    '    $iface = $interfaces[[string]$_.InterfaceIndex]',
+    '    $nextHop = [string]$_.NextHop',
+    '    if ($null -eq $iface -or -not (Test-HdoEndpointIpv4 $nextHop) -or $nextHop -eq "0.0.0.0") { return }',
+    '    $nextParts = @($nextHop.Split(".") | ForEach-Object { [int]$_ })',
+    '    if ($nextParts[0] -eq 198 -and ($nextParts[1] -eq 18 -or $nextParts[1] -eq 19)) { return }',
+    '    $alias = [string]$iface.InterfaceAlias',
+    '    if ($alias -eq $hdoEndpointBypassTunnelName -or $alias -match "(?i)(clash|mihomo|sing-box|wintun|proxy[ -]?tun)") { return }',
+    '    if ([string]$iface.ConnectionState -eq "Disconnected") { return }',
+    '    [pscustomobject]@{',
+    '      InterfaceIndex = [int]$_.InterfaceIndex',
+    '      InterfaceAlias = $alias',
+    '      NextHop = $nextHop',
+    '      Cost = ([int]$_.RouteMetric + [int]$iface.InterfaceMetric)',
+    '    }',
+    '  })',
+    '  return $candidates | Sort-Object -Property Cost,InterfaceIndex | Select-Object -First 1',
+    '}',
+    'function New-HdoEndpointBypassRegistry {',
+    '  return [pscustomobject]@{ Version = 1; Routes = @() }',
+    '}',
+    'function Read-HdoEndpointBypassRegistry {',
+    '  if (-not (Test-Path $hdoEndpointBypassRegistryPath -ErrorAction SilentlyContinue)) { return (New-HdoEndpointBypassRegistry) }',
+    '  try {',
+    '    $registry = Get-Content -Path $hdoEndpointBypassRegistryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop',
+    '  } catch {',
+    '    throw ("Endpoint bypass registry is unreadable; refusing unowned route cleanup: " + $hdoEndpointBypassRegistryPath + ": " + $_.Exception.Message)',
+    '  }',
+    '  if ([int]$registry.Version -ne 1) { throw ("Unsupported endpoint bypass registry version: " + [string]$registry.Version) }',
+    '  if ($null -eq $registry.Routes) { $registry.Routes = @() }',
+    '  return $registry',
+    '}',
+    'function Write-HdoEndpointBypassRegistry {',
+    '  param([object]$Registry)',
+    '  $routes = @($Registry.Routes | ForEach-Object {',
+    '    [pscustomobject]@{',
+    '      DestinationPrefix = [string]$_.DestinationPrefix',
+    '      InterfaceIndex = [int]$_.InterfaceIndex',
+    '      NextHop = [string]$_.NextHop',
+    '      RouteMetric = [int]$_.RouteMetric',
+    '      Managed = [bool]$_.Managed',
+    '      Owners = @($_.Owners | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } | Where-Object { $_ } | Sort-Object -Unique)',
+    '    }',
+    '  })',
+    '  if ($routes.Count -eq 0) {',
+    '    if (Test-Path $hdoEndpointBypassRegistryPath -ErrorAction SilentlyContinue) { Remove-Item -Path $hdoEndpointBypassRegistryPath -Force -ErrorAction Stop }',
+    '    return',
+    '  }',
+    '  New-Item -ItemType Directory -Path $hdoEndpointBypassStateDir -Force -ErrorAction Stop | Out-Null',
+    '  $payload = [ordered]@{ Version = 1; Routes = $routes }',
+    '  $temporary = $hdoEndpointBypassRegistryPath + ".tmp." + [string]$PID + "." + [guid]::NewGuid().ToString("N")',
+    '  try {',
+    '    $payload | ConvertTo-Json -Depth 7 | Set-Content -Path $temporary -Encoding UTF8 -ErrorAction Stop',
+    '    Move-Item -Path $temporary -Destination $hdoEndpointBypassRegistryPath -Force -ErrorAction Stop',
+    '  } finally {',
+    '    if (Test-Path $temporary -ErrorAction SilentlyContinue) { Remove-Item -Path $temporary -Force -ErrorAction SilentlyContinue }',
+    '  }',
+    '}',
+    'function Get-HdoEndpointBypassRouteKey {',
+    '  param([string]$DestinationPrefix, [int]$InterfaceIndex, [string]$NextHop)',
+    '  return ($DestinationPrefix.ToLowerInvariant() + "|" + [string]$InterfaceIndex + "|" + $NextHop.ToLowerInvariant())',
+    '}',
+    'function Get-HdoEndpointBypassExactRoutes {',
+    '  param([object]$Entry)',
+    '  return @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix ([string]$Entry.DestinationPrefix) -InterfaceIndex ([int]$Entry.InterfaceIndex) -ErrorAction SilentlyContinue | Where-Object {',
+    '    [string]$_.NextHop -eq [string]$Entry.NextHop -and [int]$_.RouteMetric -eq [int]$Entry.RouteMetric',
+    '  })',
+    '}',
+    'function Remove-HdoEndpointBypassRoute {',
+    '  param([object]$Entry)',
+    '  if (-not [bool]$Entry.Managed) { return }',
+    '  $matches = @(Get-HdoEndpointBypassExactRoutes $Entry)',
+    "  Write-HdoAudit ('endpoint bypass last-owner remove prefix=' + [string]$Entry.DestinationPrefix + ' if=' + [string]$Entry.InterfaceIndex + ' nextHop=' + [string]$Entry.NextHop + ' count=' + [string]$matches.Count)",
+    '  foreach ($match in $matches) { $match | Remove-NetRoute -Confirm:$false -ErrorAction Stop }',
+    '  $remaining = @(Get-HdoEndpointBypassExactRoutes $Entry)',
+    '  if ($remaining.Count -gt 0) { throw ("Endpoint bypass route remains after last-owner cleanup: " + [string]$Entry.DestinationPrefix) }',
+    '}',
+    'function Release-HdoEndpointBypassOwnerUnlocked {',
+    '  param([object]$Registry, [string[]]$KeepKeys = @())',
+    '  $kept = @()',
+    '  foreach ($entry in @($Registry.Routes)) {',
+    '    $key = Get-HdoEndpointBypassRouteKey ([string]$entry.DestinationPrefix) ([int]$entry.InterfaceIndex) ([string]$entry.NextHop)',
+    '    $owners = @($entry.Owners | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } | Where-Object { $_ } | Sort-Object -Unique)',
+    '    if ($KeepKeys -notcontains $key) { $owners = @($owners | Where-Object { $_ -ne $hdoEndpointBypassOwner }) }',
+    '    $entry.Owners = @($owners)',
+    '    if ($owners.Count -eq 0) {',
+    '      Remove-HdoEndpointBypassRoute $entry',
+    '      continue',
+    '    }',
+    '    $kept += $entry',
+    '  }',
+    '  $Registry.Routes = @($kept)',
+    '}',
+    'function Ensure-HdoEndpointBypassRouteUnlocked {',
+    '  param([object]$Registry, [string]$DestinationPrefix, [object]$Physical)',
+    '  $interfaceIndex = [int]$Physical.InterfaceIndex',
+    '  $nextHop = [string]$Physical.NextHop',
+    '  $entry = @($Registry.Routes | Where-Object {',
+    '    [string]$_.DestinationPrefix -eq $DestinationPrefix -and [int]$_.InterfaceIndex -eq $interfaceIndex -and [string]$_.NextHop -eq $nextHop',
+    '  } | Select-Object -First 1)[0]',
+    '  $created = $false',
+    '  if ($null -eq $entry) {',
+    '    $existing = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $DestinationPrefix -InterfaceIndex $interfaceIndex -ErrorAction SilentlyContinue | Where-Object { [string]$_.NextHop -eq $nextHop } | Sort-Object -Property RouteMetric)',
+    '    if ($existing.Count -gt 0) {',
+    '      $entry = [pscustomobject]@{ DestinationPrefix = $DestinationPrefix; InterfaceIndex = $interfaceIndex; NextHop = $nextHop; RouteMetric = [int]$existing[0].RouteMetric; Managed = $false; Owners = @() }',
+    '    } else {',
+    '      New-NetRoute -AddressFamily IPv4 -DestinationPrefix $DestinationPrefix -InterfaceIndex $interfaceIndex -NextHop $nextHop -RouteMetric $hdoEndpointBypassRouteMetric -PolicyStore ActiveStore -ErrorAction Stop | Out-Null',
+    '      $entry = [pscustomobject]@{ DestinationPrefix = $DestinationPrefix; InterfaceIndex = $interfaceIndex; NextHop = $nextHop; RouteMetric = $hdoEndpointBypassRouteMetric; Managed = $true; Owners = @() }',
+    '      $created = $true',
+    '    }',
+    '    $Registry.Routes = @($Registry.Routes) + $entry',
+    '  } elseif (@(Get-HdoEndpointBypassExactRoutes $entry).Count -eq 0) {',
+    '    $existing = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $DestinationPrefix -InterfaceIndex $interfaceIndex -ErrorAction SilentlyContinue | Where-Object { [string]$_.NextHop -eq $nextHop } | Sort-Object -Property RouteMetric)',
+    '    if ($existing.Count -gt 0) {',
+    '      $entry.RouteMetric = [int]$existing[0].RouteMetric',
+    '      $entry.Managed = $false',
+    '    } else {',
+    '      New-NetRoute -AddressFamily IPv4 -DestinationPrefix $DestinationPrefix -InterfaceIndex $interfaceIndex -NextHop $nextHop -RouteMetric $hdoEndpointBypassRouteMetric -PolicyStore ActiveStore -ErrorAction Stop | Out-Null',
+    '      $entry.RouteMetric = $hdoEndpointBypassRouteMetric',
+    '      $entry.Managed = $true',
+    '      $created = $true',
+    '    }',
+    '  }',
+    '  $entry.Owners = @(@($entry.Owners | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() }) + $hdoEndpointBypassOwner | Where-Object { $_ } | Sort-Object -Unique)',
+    '  try {',
+    '    Write-HdoEndpointBypassRegistry $Registry',
+    '  } catch {',
+    '    if ($created) { try { Remove-HdoEndpointBypassRoute $entry } catch { } }',
+    '    throw',
+    '  }',
+    '  $verified = @(Get-HdoEndpointBypassExactRoutes $entry)',
+    '  if ($verified.Count -eq 0) { throw ("Endpoint bypass route missing after shared registration: " + $DestinationPrefix) }',
+    "  Write-HdoAudit ('endpoint bypass registered prefix=' + $DestinationPrefix + ' if=' + [string]$interfaceIndex + ' nextHop=' + $nextHop + ' managed=' + [string]$entry.Managed + ' owners=' + [string](@($entry.Owners).Count))",
+    '  return (Get-HdoEndpointBypassRouteKey $DestinationPrefix $interfaceIndex $nextHop)',
+    '}',
+    'function Remove-HdoEndpointBypassUnlocked {',
+    '  $registry = Read-HdoEndpointBypassRegistry',
+    '  Release-HdoEndpointBypassOwnerUnlocked $registry',
+    '  Write-HdoEndpointBypassRegistry $registry',
+    "  Write-HdoAudit 'endpoint bypass owner release complete'",
+    '}',
+    'function Add-HdoEndpointBypassUnlocked {',
+    '  $endpointIps = @(Get-HdoEndpointBypassIps)',
+    '  if ($endpointIps.Count -eq 0) {',
+    '    if ($hdoEndpointBypassHosts.Count -gt 0) { throw "No public IPv4 WireGuard endpoint could be resolved for physical bypass" }',
+    '    Remove-HdoEndpointBypassUnlocked',
+    "    Write-HdoAudit 'endpoint bypass reconciled empty desired state'",
+    '    return',
+    '  }',
+    '  $physical = Get-HdoPhysicalDefaultRoute',
+    '  if ($null -eq $physical) { throw "Physical IPv4 default route is unavailable for WireGuard endpoint bypass" }',
+    "  Write-HdoAudit ('endpoint bypass physical if=' + [string]$physical.InterfaceIndex + ' alias=' + [string]$physical.InterfaceAlias + ' nextHop=' + [string]$physical.NextHop)",
+    '  $registry = Read-HdoEndpointBypassRegistry',
+    '  $desiredKeys = @()',
+    '  foreach ($ip in $endpointIps) {',
+    '    $desiredKeys += Ensure-HdoEndpointBypassRouteUnlocked $registry ($ip + "/32") $physical',
+    '  }',
+    '  Release-HdoEndpointBypassOwnerUnlocked $registry $desiredKeys',
+    '  Write-HdoEndpointBypassRegistry $registry',
+    "  Write-HdoAudit ('endpoint bypass owner reconcile complete desired=' + ($desiredKeys -join ','))",
+    '}',
+    'function Remove-HdoEndpointBypass {',
+    '  $mutex = Enter-HdoEndpointBypassMutex',
+    '  try { Remove-HdoEndpointBypassUnlocked } finally { Exit-HdoEndpointBypassMutex $mutex }',
+    '}',
+    'function Add-HdoEndpointBypass {',
+    '  $mutex = Enter-HdoEndpointBypassMutex',
+    '  try { Add-HdoEndpointBypassUnlocked } finally { Exit-HdoEndpointBypassMutex $mutex }',
     '}'
   ];
 }

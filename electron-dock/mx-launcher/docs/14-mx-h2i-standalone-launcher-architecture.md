@@ -329,9 +329,11 @@ V2 不再让 MX-H2I 直接依赖旧的 `@qpjoy/electron-plugin-hdo` 业务插件
   生成本机 WG profile，并启动客户端 tunnel。
 - MX-H2I 只有在 WG tunnel active、到 `routePlan.internalControlIp` 的 route probe 走 WG
   interface、overlay `healthz` 成功且平台 DNS/PAC gate 完整后，才把 runtime 升级为
-  `connected`。Windows gate 同时要求 live NRPT + 系统 DNS、WinINet PAC readback、
-  Electron Chromium `session.resolveProxy()` 指向 `127.0.0.1:2053`，以及实际 local-edge
-  CONNECT 成功；任何一项失败都保持 `tunnel-only`。
+  `connected`。Windows 先要求 live NRPT，再接受两种有证据的 Internal 域名路径：
+  系统 DNS 已返回 Internal 地址，或 WinINet PAC readback + Electron Chromium
+  `session.resolveProxy()` 指向 `127.0.0.1:2053` + 实际 local-edge CONNECT 成功。
+  两条都通过才是完整的系统级 ready；Clash TUN/DoH 仍劫持系统 resolver 时，后一条可以保证
+  浏览器访问并解除 PAC 启动死锁，但必须在 diagnostics/feedback 标出非 PAC 程序 degraded。
 - 从旧版本升级后即使保留的 WireGuard tunnel/service 仍 active，也不能直接沿用旧
   `connected`：route、Internal health 和上述平台 DNS/PAC gate 必须重新做 live 校验。
   Windows 不能只接受旧 `wireguard-route-audit.log` 中的 `nrpt add complete`。
@@ -606,8 +608,13 @@ V2 不应假设 TCP facade 会自动转发传统 DNS：UDP/53 与 HTTP/TCP rever
 Internal gateway `10.88.88.88`；更完整的生产形态是在 Domestic 部署 `dns-edge-cache`，
 由 Internal 同步 signed zone snapshot，Domestic 只做缓存/转发而不拥有 DNS 真相。当前推荐
 沿用标准 DNS 53 的稳定语义，而不是沿用 V1 HDO 的 zone 数据模型。Internal
-`mx-internal-coredns` 使用同一份 `mx-dns/coredns` ConfigMap，并通过 hostPort 暴露
-Internal host `10.88.88.88:53`；Domestic 53 可以是 V2 `dns-edge-cache`，也可以是现有
+`mx-internal-coredns` 使用同一份 `mx-dns/coredns` ConfigMap，并通过 `hostNetwork`
+同时监听 Internal host 的 UDP/TCP `10.88.88.88:53`；重复部署只在 ConfigMap 不存在时
+创建带 `h2i.mxinfo-inc.cn -> 10.88.88.88` 的 baseline，不能覆盖 Config Center 已应用的
+动态 zone；读取 ConfigMap 出现 RBAC/API/timeout 错误时必须中止，不能按“不存在”处理。
+生产 apply 还必须确认宿主机已拥有 `10.88.88.88`，并对该地址执行 UDP/TCP A 查询；只在
+local/dev 中允许显式用 `MX_INTERNAL_DNS_PROBE_SERVER=<node-ip>` 改查 node IP。Domestic 53 可以是 V2
+`dns-edge-cache`，也可以是现有
 V1 HDO DNS runtime。纯 V1 `hdo-coredns` 不理解 V2 `upstream URL`，但可以在过渡期承载
 V2-only 域名的 A 记录，把它们解析到产品 materialized VIP，再由 V2 gateway 处理 Host/upstream。
 Domestic apply 发现 53 已占用时，可以复用端口层运行资源；V2 DNS ready 的证据是
@@ -973,7 +980,7 @@ Clash/mihomo 兼容原则不是按模式写两套逻辑，而是统一优先级 
 | 场景 | 期望行为 |
 | --- | --- |
 | Clash system proxy | Windows 默认仍安装 MX-H2I PAC；live loopback 静态 proxy 被复用为 fallback，可读取的 loopback PAC 被包装，Internal exact/suffix 始终先走 `PROXY 127.0.0.1:2053` |
-| Clash TUN/fake-ip | `198.18.0.0/15` 只作为代理 fake-ip 证据，不算 H2I ready；route proof 必须命中 MX-H2I WG interface |
+| Clash TUN/fake-ip | `198.18.0.0/15` 只作为代理 fake-ip 证据，不算系统 DNS ready；WG endpoint 必须先写物理网关 `/32` bypass，Internal route proof 必须命中 MX-H2I WG interface；若 resolver 仍被劫持，PAC/local-edge 浏览器 proof 可进入 browser-ready，但非 PAC 程序保持 degraded |
 | Clash TUN ↔ system proxy 在线切换 | 5 秒巡检常态只读验证；新 owner signature 可触发一次有界协商并按结果写回，同一 signature 后续 tick 不周期抢回；状态变化、重连或手动 repair 可再次协商 |
 | Clash PAC/WPAD 不可安全包装 | 不可读/非 loopback PAC 或 dead listener fail closed；AutoDetect/WPAD 仅在没有可表达的 live static/PAC owner 时 fail closed；均不误报 browser-ready |
 | Clash 关闭 | MX-H2I 断开后应恢复到系统 DNS/公网解析；如果仍返回 `198.18.*`，优先查系统 DNS cache、Clash 残留 TUN/DNS 或 stale MX-H2I resolver |
@@ -981,17 +988,22 @@ Clash/mihomo 兼容原则不是按模式写两套逻辑，而是统一优先级 
 | 微信/豆包/Steam 等公网应用异常 | 先查 WinINet/PAC、Clash 当前模式和本地 fallback listener；只有其域名命中 V2 NRPT namespace 时才归入 split-DNS 故障 |
 
 因此客户端需要检测 Clash/TUN/fake-ip，但检测结果只用于诊断、route proof 和针对性修复提示；
-Windows 主行为是 `Internal PAC -> local edge -> Internal DNS/WG route` 与
+Windows 主行为仍是 `Internal PAC -> local edge -> Internal DNS/WG route` 与
 `NRPT -> system DNS -> Internal DNS/WG route` 两条同时成立；未命中 PAC 再进入
-`wrapped Clash owner 或 DIRECT`。macOS 行为不变。
+`wrapped Clash owner 或 DIRECT`。但 PAC 的启动前置只要求 WG、Internal API、live NRPT
+和已确认的跨进程 standalone ownership，不能反向依赖系统 DNS 已返回 Internal，否则
+Clash DNS 劫持会造成 PAC 永远不启动；ownership 冲突时也不能启动或保留 PAC。
+macOS 行为不变。
 对 split 域名，`原系统代理/系统 DNS -> 外部 DNS` 只在 disconnected/bootstrap 状态参与。
 
-浏览器 PAC 不是 NRPT 的替代品；Windows V2 连接后必须同时保证：
+浏览器 PAC 不是 NRPT 的替代品；Windows V2 连接后按两级证据报告：
 
 - WinINet readback 是 MX-H2I PAC，Electron Chromium `resolveProxy` 指向
-  `127.0.0.1:2053`，且实际 CONNECT 成功。
+  `127.0.0.1:2053`，且实际 CONNECT 成功；这是浏览器 ready 的硬门禁。
 - 不走浏览器代理的程序，例如 `ping`、`curl` 和普通 HTTP client，也能通过系统 DNS
-  解析到 `10.88.88.88` 并走 MX-H2I WG。
+  解析到 `10.88.88.88` 并走 MX-H2I WG；这是完整系统级 ready。若 Clash TUN/DoH 使该项
+  仍返回公网或 `198.18.*`，浏览器可以保持 connected，但 diagnostics 必须保留
+  `windowsDnsResolution.ready=false`，并提示非 PAC 程序 degraded。
 - V2 主动断开或 route proof 失败触发回滚时，只有严格 teardown 全部成功后才清除 V2
   split DNS/PAC，并回到连接前系统 DNS、系统代理或其它已存在的代理；回滚任一步失败则
   保持 `recovering` 和可恢复路径，不误报 `disconnected`。

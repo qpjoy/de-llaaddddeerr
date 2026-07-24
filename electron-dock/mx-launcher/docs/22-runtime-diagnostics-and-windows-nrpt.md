@@ -67,13 +67,15 @@ DNS 查询。
 3. 再用 `wireguard-route-audit.log` 解释安装过程：是否完整出现 `nrpt add start`、每个
    namespace 的 `nrpt assert ... count=1` 和 `nrpt add complete`。它是
    `audit-derived`，不能反向覆盖第 2 步。
-4. live rule 正确后仍必须用系统 resolver 查询 namespace 内的内部 hostname；返回 Internal
-   目标才可标记 `splitDns=ready`。若仍解析到公网，保持 `tunnel-only`，再检查 Secure
-   DNS/DoH、DNS cache、安全软件和企业组策略。
+4. live rule 正确后仍必须用系统 resolver 查询 namespace 内的内部 hostname。返回 Internal
+   目标表示系统级 DNS ready；若仍解析到公网或 `198.18.*`，检查 Secure DNS/DoH、DNS
+   cache、安全软件、Clash TUN 和企业组策略。同时继续启动 PAC/local edge：只有 Chromium
+   `resolveProxy` 与真实 CONNECT 通过后，才可把浏览器路径恢复为 connected；非 PAC 程序仍
+   标记 degraded。
 5. 若日志出现 `rules missing after add`、`global policy failed` 或 PowerShell stderr，
    按错误原文检查管理员权限、安全软件和组策略拦截。
 
-系统 DNS ready 只是 Windows gate 的一半。完整 `connected` 还必须同时满足：
+Windows 浏览器 gate 必须满足：
 
 1. WinINet readback 的 `AutoConfigURL` 指向 MX-H2I PAC；`ProxyEnable`、
    `ProxyServer`、`ProxyOverride`、`AutoDetect` 只读，不作为 MX 写入值；
@@ -81,13 +83,18 @@ DNS 查询。
    `PROXY 127.0.0.1:2053`；
 3. 经 `2053` 向 Internal host 发出的真实 CONNECT 返回成功。
 
+系统 DNS 同时返回 Internal 地址时，才是包含 `ping`、`curl` 等非 PAC 程序的完整系统级
+ready。若系统 DNS 仍受 Clash TUN/DoH 影响，浏览器 proof 可以解除 `tunnel-only`，但
+`windowsDnsResolution.ready=false` 必须保留，不能把非 PAC 程序误报为 ready。
+
 `MX_H2I_WINDOWS_SYSTEM_PAC=0` 会刻意关闭这半条链路，只能用于诊断/降级，预期状态是
 `tunnel-only`，不得视为修复或完整 ready。
 
 从旧安装包升级且保留 tunnel/service 时，WG active 只是 tunnel 证据。启动恢复
 `connected` 前必须重新读取 live NRPT/system DNS、route、Internal health、PAC readback、
-Chromium `resolveProxy` 和 CONNECT；缺任一项就保持可恢复状态并提示重新连接/修复，
-不能因为历史 audit 完整而跳过。
+Chromium `resolveProxy` 和 CONNECT。route、Internal health、NRPT 或浏览器 proof 缺失时
+保持可恢复状态；只有 system DNS 失败而浏览器 proof 成功时允许 browser-connected，并明确
+保留非 PAC DNS degraded，不能因为历史 audit 完整而跳过。
 
 运行时调用 Windows PowerShell 不依赖 Electron 进程的 `PATH`，必须从
 `%SystemRoot%\Sysnative|System32|SysWOW64\WindowsPowerShell\v1.0\powershell.exe`
@@ -121,6 +128,10 @@ CoreDNS 的 Corefile 采用单文件 bind mount 时，不能在宿主机用 `mv`
 `compose up -d`：运行中容器仍可能固定在旧 inode。配置 apply 必须精确
 `--force-recreate --no-deps` DNS service 以重新挂载文件，并在报告成功前分别对配置的
 bind/port 执行 UDP、TCP 查询，确认 `h2i.mxinfo-inc.cn -> 10.88.88.88`。
+Internal K8s apply 同样不能只检查 Pod/Service：必须保留 Config Center 已发布的动态
+ConfigMap，确认宿主机实际拥有 `10.88.88.88`，并直接向
+`10.88.88.88:53` 做 UDP/TCP 查询。只有明确 NotFound 才能创建 baseline；RBAC、API 或
+timeout 等不确定读取错误必须 fail closed，避免部署把动态 zone 覆盖成公网 fallback。
 
 ## Windows 公网应用、WinINet PAC 与 Clash
 
@@ -228,10 +239,10 @@ repair。若 WireGuard 已被系统停止、但清理 readback 仍失败，PAC �
 - 真实员工 WireGuard 仍 active 时，`visit:connect` 只返回 `skipped / staff-active`，不抢占或重启员工数据面。
 - 异常状态在访客页的主操作是“重新连接”，同时保留“清理旧连接”入口，不需要先进入员工页。
 
-DNS/NRPT、PAC 和 endpoint-route 诊断不得阻塞 lease 申请。Windows 连接后的 live
-NRPT/system DNS、PAC readback、Chromium `resolveProxy` 与 CONNECT 是发布 `connected`
-前的有界 ready gate；其它诊断在后台执行。诊断返回时若连接已切换，结果会被丢弃，不覆盖
-新状态。
+DNS/NRPT、PAC 和 endpoint-route 诊断不得阻塞 lease 申请。Windows 连接后的 live NRPT、
+PAC readback、Chromium `resolveProxy` 与 CONNECT 是发布 browser-connected 前的有界
+ready gate；system DNS proof 决定是否同时报告非 PAC 程序 ready。其它诊断在后台执行。
+诊断返回时若连接已切换，结果会被丢弃，不覆盖新状态。
 
 ## macOS 长时间运行后切换网络
 

@@ -48,6 +48,10 @@ data:
     }
     .:53 {
       errors
+      hosts {
+        10.88.88.88 h2i.mxinfo-inc.cn
+        fallthrough
+      }
       cache 30
       reload
       forward . /etc/resolv.conf
@@ -71,11 +75,11 @@ spec:
   ports:
     - name: dns-udp
       port: 53
-      targetPort: dns-udp
+      targetPort: 53
       protocol: UDP
     - name: dns-tcp
       port: 53
-      targetPort: dns-tcp
+      targetPort: 53
       protocol: TCP
 ---
 apiVersion: apps/v1
@@ -103,6 +107,8 @@ spec:
         mx.qpjoy.com/component: dns-authority
         mx.qpjoy.com/environment: shadow
     spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       tolerations:
         - key: node-role.kubernetes.io/control-plane
           operator: Exists
@@ -115,25 +121,16 @@ spec:
           image: coredns/coredns:1.11.3
           imagePullPolicy: IfNotPresent
           args: ["-conf", "/etc/coredns/Corefile"]
-          ports:
-            - name: dns-udp
-              containerPort: 53
-              hostPort: 53
-              protocol: UDP
-            - name: dns-tcp
-              containerPort: 53
-              hostPort: 53
-              protocol: TCP
           livenessProbe:
             tcpSocket:
-              port: dns-tcp
+              port: 53
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 2
             failureThreshold: 6
           readinessProbe:
             tcpSocket:
-              port: dns-tcp
+              port: 53
             initialDelaySeconds: 2
             periodSeconds: 5
             timeoutSeconds: 2

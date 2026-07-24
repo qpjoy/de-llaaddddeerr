@@ -695,6 +695,12 @@ Internal API 使用 `mx-launcher-internal` ServiceAccount，通过 `mx-dns` name
 RoleBinding 更新这个固定 ConfigMap。RBAC 只允许 get/update/patch `coredns`，不授予
 创建任意 ConfigMap 的权限。
 
+重复部署会保留 Config Center 已发布的动态 `mx-dns/coredns`；只有明确 NotFound 才创建
+baseline，读取失败时禁止覆盖。生产 apply 默认要求 Internal service peer 已把
+`10.88.88.88` 分配到宿主机，并直接验证该地址 UDP/TCP 53 都返回
+`h2i.mxinfo-inc.cn -> 10.88.88.88`。不拥有 overlay 地址的 local/dev 环境必须显式设置
+`MX_INTERNAL_DNS_PROBE_SERVER=<node-ip>`，不能让生产路径自动退化成 node-IP 假验证。
+
 HTTP smoke 在 K8s 模式下会设置 `MX_SMOKE_EXPECT_K8S_APPLY=1`，并调用
 `POST /internal/v1/dns/coredns/configmap/apply` 验证真实写入。Compose 本地模式不打开
 `COREDNS_K8S_APPLY_ENABLED`，因此只验证 apply gate 会被阻断。

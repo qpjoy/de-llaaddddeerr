@@ -9,6 +9,134 @@ const {
   wireGuardRecoveryGate,
   wireGuardRecoveryTurn
 } = require('../src/network-recovery-policy.cjs');
+const {
+  postConnectDataPlaneReady,
+  standaloneOwnershipReady,
+  windowsBrowserFallbackState,
+  windowsBrowserPromotionPrerequisitesReady,
+  windowsLocalEdgePrerequisitesReady,
+  windowsSplitDnsPathReady,
+  windowsSystemDnsDataPlaneReady
+} = require('../src/windows-network-readiness.cjs');
+
+const clashTunDnsDegradedConnection = {
+  health: {
+    wireGuard: 'ready',
+    internalApi: 'ready'
+  },
+  diagnostics: {
+    windowsNrpt: { ready: true },
+    windowsDnsResolution: {
+      ready: false,
+      addresses: ['116.62.51.154']
+    },
+    standaloneOwnershipRegistry: { ok: true }
+  }
+};
+assert.equal(
+  windowsLocalEdgePrerequisitesReady(clashTunDnsDegradedConnection),
+  true,
+  'WG, Internal API and NRPT are sufficient to start the Windows PAC/local edge'
+);
+assert.equal(
+  windowsSystemDnsDataPlaneReady(clashTunDnsDegradedConnection),
+  false,
+  'a public or Clash fake-IP system DNS answer remains explicitly degraded'
+);
+assert.equal(
+  standaloneOwnershipReady(clashTunDnsDegradedConnection),
+  true,
+  'the persisted cross-process ownership claim is still a hard readiness gate'
+);
+assert.equal(
+  windowsBrowserPromotionPrerequisitesReady(clashTunDnsDegradedConnection),
+  true,
+  'browser fallback promotion requires both local-edge prerequisites and ownership'
+);
+assert.equal(
+  windowsBrowserPromotionPrerequisitesReady({
+    ...clashTunDnsDegradedConnection,
+    diagnostics: {
+      ...clashTunDnsDegradedConnection.diagnostics,
+      standaloneOwnershipRegistry: { ok: false, error: 'ownership-conflict' }
+    }
+  }),
+  false,
+  'a verified PAC path must not bypass an MX-H2I/Luopan ownership conflict'
+);
+assert.equal(
+  postConnectDataPlaneReady({
+    platform: 'win32',
+    wireGuardReady: false,
+    connection: clashTunDnsDegradedConnection
+  }),
+  true,
+  'Windows may continue to the PAC proof when only system DNS is degraded'
+);
+const ownershipConflictConnection = {
+  ...clashTunDnsDegradedConnection,
+  diagnostics: {
+    ...clashTunDnsDegradedConnection.diagnostics,
+    standaloneOwnershipRegistry: { ok: false, error: 'ownership-conflict' }
+  }
+};
+assert.equal(
+  postConnectDataPlaneReady({
+    platform: 'win32',
+    wireGuardReady: false,
+    connection: ownershipConflictConnection
+  }),
+  false,
+  'system-DNS fallback must not start or retain PAC when ownership is conflicted'
+);
+assert.deepEqual(
+  windowsBrowserFallbackState({
+    connection: clashTunDnsDegradedConnection,
+    browserReady: true,
+    connected: true
+  }),
+  {
+    active: true,
+    browserReady: true,
+    systemDnsReady: false,
+    nonPacProgramsReady: false,
+    reason: 'system DNS did not resolve the Internal target; verified PAC/local edge carries browser traffic'
+  },
+  'Clash TUN may leave the verified browser path active while non-PAC DNS stays degraded'
+);
+assert.equal(
+  windowsBrowserFallbackState({
+    connection: {
+      ...clashTunDnsDegradedConnection,
+      diagnostics: {
+        ...clashTunDnsDegradedConnection.diagnostics,
+        windowsDnsResolution: { ready: true, addresses: ['10.88.88.88'] }
+      }
+    },
+    browserReady: true,
+    connected: true
+  }).active,
+  false,
+  'switching away from Clash DNS must clear the fallback even when PAC status is unchanged'
+);
+assert.equal(
+  windowsSplitDnsPathReady({
+    nrptReady: true,
+    systemDnsReady: false,
+    browserReady: true
+  }),
+  true,
+  'a verified PAC/local-edge browser path breaks the Clash TUN DNS deadlock'
+);
+assert.equal(
+  windowsSplitDnsPathReady({
+    nrptReady: true,
+    systemDnsReady: false,
+    browserReady: false
+  }),
+  false,
+  'NRPT metadata alone must never be reported as a ready browser path'
+);
 
 assert.equal(
   wireGuardRecoveryGate({
@@ -82,6 +210,16 @@ assert.deepEqual(
 const source = readFileSync(
   fileURLToPath(new URL('../src/main.cjs', import.meta.url)),
   'utf8'
+);
+assert.match(
+  source,
+  /function systemDomainProxyRuntimeEligible\(\)[\s\S]*?windowsBrowserPromotionPrerequisitesReady\(connection\)/,
+  'the PAC/local-edge runtime must not bypass the cross-process ownership gate'
+);
+assert.match(
+  source,
+  /browserFallbackChanged[\s\S]*?reason !== 'interval'[\s\S]*?\|\| browserFallbackChanged/,
+  'an unchanged PAC signature must still persist Clash TUN system-DNS fallback transitions'
 );
 const handlerStart = source.indexOf("ipcMain.handle('mx-h2i:connect-guest'");
 const handlerEnd = source.indexOf("ipcMain.handle('mx-h2i:login-employee'", handlerStart);

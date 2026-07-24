@@ -2180,6 +2180,78 @@ k8s_restart_internal_coredns_if_unavailable() {
   kubectl -n mx-dns rollout restart deployment/mx-internal-coredns
 }
 
+k8s_apply_internal_dns_control_target() {
+  local dir="$1"
+  local manifest="$dir/15-dns-control-target.yaml"
+  local configmap_read_error
+  kubectl apply --validate=false -f "$manifest" \
+    -l 'app.kubernetes.io/name=mx-dns'
+  if configmap_read_error="$(kubectl -n mx-dns get configmap coredns -o name 2>&1)"; then
+    say "preserve Internal CoreDNS ConfigMap managed by Config Center"
+  else
+    case "$configmap_read_error" in
+      *"(NotFound)"*|*" not found"*)
+        say "create baseline Internal CoreDNS ConfigMap"
+        kubectl apply --validate=false -f "$manifest" \
+          -l 'mx.qpjoy.com/component=dns-control'
+        ;;
+      *)
+        die "cannot read Internal CoreDNS ConfigMap; refusing an ambiguous baseline overwrite: $configmap_read_error"
+        ;;
+    esac
+  fi
+  kubectl apply --validate=false -f "$manifest" \
+    -l 'mx.qpjoy.com/component=dns-authority'
+}
+
+k8s_verify_internal_coredns_host_network() {
+  local host_network pod_ip host_ip service_protocols
+  local probe_server probe_host expected_ip udp_answers tcp_answers
+  host_network="$(kubectl -n mx-dns get deployment mx-internal-coredns \
+    -o jsonpath='{.spec.template.spec.hostNetwork}' 2>/dev/null || true)"
+  [ "$host_network" = "true" ] \
+    || die "internal coredns is not using the host network; 10.88.88.88:53 cannot be authoritative"
+  pod_ip="$(kubectl -n mx-dns get pods \
+    -l app.kubernetes.io/name=mx-internal-coredns \
+    -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)"
+  host_ip="$(kubectl -n mx-dns get pods \
+    -l app.kubernetes.io/name=mx-internal-coredns \
+    -o jsonpath='{.items[0].status.hostIP}' 2>/dev/null || true)"
+  [ -n "$pod_ip" ] && [ "$pod_ip" = "$host_ip" ] \
+    || die "internal coredns host-network verification failed: podIP=${pod_ip:-none} hostIP=${host_ip:-none}"
+  service_protocols="$(kubectl -n mx-dns get service mx-internal-coredns \
+    -o jsonpath='{range .spec.ports[*]}{.protocol}{" "}{end}' 2>/dev/null || true)"
+  case " $service_protocols " in
+    *" UDP "*) ;;
+    *) die "internal coredns service must expose UDP 53: protocols=${service_protocols:-none}" ;;
+  esac
+  case " $service_protocols " in
+    *" TCP "*) ;;
+    *) die "internal coredns service must expose TCP 53: protocols=${service_protocols:-none}" ;;
+  esac
+  probe_host="${MX_INTERNAL_DNS_PROBE_HOST:-h2i.mxinfo-inc.cn}"
+  expected_ip="${MX_INTERNAL_DNS_EXPECTED_IP:-10.88.88.88}"
+  probe_server="${MX_INTERNAL_DNS_PROBE_SERVER:-$expected_ip}"
+  if [ -z "${MX_INTERNAL_DNS_PROBE_SERVER:-}" ]; then
+    command -v ip >/dev/null 2>&1 \
+      || die "ip is required to verify that Internal owns $expected_ip; local/dev may explicitly set MX_INTERNAL_DNS_PROBE_SERVER=$host_ip"
+    if ! ip -o -4 addr show \
+      | awk '{sub(/\/.*/, "", $4); print $4}' \
+      | grep -Fxq "$expected_ip"; then
+      die "Internal overlay DNS address $expected_ip is not assigned on this host; apply the Internal service peer first. Local/dev may explicitly set MX_INTERNAL_DNS_PROBE_SERVER=$host_ip"
+    fi
+  fi
+  command -v dig >/dev/null 2>&1 \
+    || die "dig is required to verify Internal CoreDNS UDP/TCP answers"
+  udp_answers="$(dig +time=3 +tries=1 "@$probe_server" "$probe_host" A +short 2>/dev/null || true)"
+  printf '%s\n' "$udp_answers" | grep -Fxq "$expected_ip" \
+    || die "internal coredns UDP answer is not ready: server=$probe_server host=$probe_host expected=$expected_ip answers=${udp_answers:-none}; apply the current Config Center signed zone"
+  tcp_answers="$(dig +tcp +time=3 +tries=1 "@$probe_server" "$probe_host" A +short 2>/dev/null || true)"
+  printf '%s\n' "$tcp_answers" | grep -Fxq "$expected_ip" \
+    || die "internal coredns TCP answer is not ready: server=$probe_server host=$probe_host expected=$expected_ip answers=${tcp_answers:-none}; apply the current Config Center signed zone"
+  say "internal coredns owns node network DNS: podIP=$pod_ip hostIP=$host_ip UDP/TCP 53; $probe_host -> $expected_ip via $probe_server"
+}
+
 k8s_dry_run() {
   local target="$1"
   local ns dir
@@ -2235,7 +2307,7 @@ k8s_apply() {
   say "apply configmap"
   kubectl apply --validate=false -f "$dir/10-configmap.yaml"
   say "apply dns control target"
-  kubectl apply --validate=false -f "$dir/15-dns-control-target.yaml"
+  k8s_apply_internal_dns_control_target "$dir"
   k8s_cleanup_retired_internal_dns_edge
   k8s_restart_internal_coredns_if_unavailable
   say "wait internal coredns rollout"
@@ -2243,6 +2315,7 @@ k8s_apply() {
     k8s_workload_diagnostics mx-dns deployment mx-internal-coredns
     die "internal coredns rollout failed"
   fi
+  k8s_verify_internal_coredns_host_network
   say "apply local persistent volumes"
   k8s_repair_internal_local_pvs
   kubectl apply --validate=false -f "$dir/18-local-pv.yaml"
