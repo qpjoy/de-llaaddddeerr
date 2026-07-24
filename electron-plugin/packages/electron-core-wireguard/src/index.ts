@@ -1293,7 +1293,12 @@ export function getWireGuardTunnelStatus(input: {
     const rawDump = dump.stdout.trim();
     const peers = parseWireGuardDump(rawDump);
     const routes = detectInterfaceRoutes(realInterfaceName);
-    const routeProbes = darwinRouteProbeResults(profile.allowedIps, realInterfaceName, profile.routePriorityCidrs);
+    const routeProbes = darwinRouteProbeResults(
+      profile.allowedIps,
+      realInterfaceName,
+      profile.routePriorityCidrs,
+      profile.addresses
+    );
     return {
       ...status,
       active: true,
@@ -1311,7 +1316,12 @@ export function getWireGuardTunnelStatus(input: {
 
   const routes = detectInterfaceRoutes(realInterfaceName);
   const ifconfig = readInterfaceState(realInterfaceName);
-  const routeProbes = darwinRouteProbeResults(profile.allowedIps, realInterfaceName, profile.routePriorityCidrs);
+  const routeProbes = darwinRouteProbeResults(
+    profile.allowedIps,
+    realInterfaceName,
+    profile.routePriorityCidrs,
+    profile.addresses
+  );
   const hasConfiguredAddress = Boolean(
     ifconfig && profile.addresses.some((address) => ifconfig.includes(`inet ${address.split('/')[0]}`))
   );
@@ -2494,15 +2504,7 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
         "  __hdo_physical_source=\"$(/sbin/ifconfig \"$__hdo_physical_interface\" 2>/dev/null | awk '/^[[:space:]]*inet[[:space:]]/ { print $2; exit }')\"",
         '  printf "%s %s %s" "$__hdo_physical_gateway" "$__hdo_physical_interface" "${__hdo_physical_source:--}"',
         '}',
-        'endpoint_bypass_route_state() {',
-        "  route -vn get \"$1\" 2>/dev/null | awk '",
-        "    /^[[:space:]]*destination:/ { destination=$2 }",
-        "    /^[[:space:]]*gateway:/ { gateway=$2 }",
-        "    /^[[:space:]]*interface:/ { interfaceName=$2 }",
-        "    /sockaddrs: .*IFA/ { getline; source=$NF }",
-        "    END { printf \"%s %s %s %s\", destination != \"\" ? destination : \"-\", gateway != \"\" ? gateway : \"-\", interfaceName != \"\" ? interfaceName : \"-\", source != \"\" ? source : \"-\" }",
-        "  '",
-        '}',
+        ...renderDarwinEndpointBypassRouteStateFunctionLines(),
         '(',
         '  __hdo_bypass_path="$(current_endpoint_bypass_path)"',
         '  while kill -0 "$WG_PID" >/dev/null 2>&1; do',
@@ -2629,6 +2631,26 @@ function darwinLaunchDaemonScript(assets: DarwinLaunchDaemonAssets): string {
     'wait "$WG_PID"',
     'exit "$?"'
   ].join('\n') + '\n';
+}
+
+export function renderDarwinEndpointBypassRouteStateFunctionLines(): string[] {
+  return [
+    'endpoint_bypass_route_state() {',
+    "  route -vn get \"$1\" 2>/dev/null | awk '",
+    "    /^[[:space:]]*destination:/ { destination=$2 }",
+    "    /^[[:space:]]*gateway:/ { gateway=$2 }",
+    "    /^[[:space:]]*interface:/ { interfaceName=$2 }",
+    "    /sockaddrs: .*IFA/ { getline; source=$NF }",
+    '    END {',
+    '      if (destination == "") destination="-"',
+    '      if (gateway == "") gateway="-"',
+    '      if (interfaceName == "") interfaceName="-"',
+    '      if (source == "") source="-"',
+    '      printf "%s %s %s %s", destination, gateway, interfaceName, source',
+    '    }',
+    "  '",
+    '}'
+  ];
 }
 
 function darwinLaunchDaemonPlist(assets: DarwinLaunchDaemonAssets): string {
@@ -3032,10 +3054,35 @@ function darwinRouteInterfaceCheckCommand(cidr: string, interfaceArg: string): s
 }
 
 function darwinRouteProbeTarget(cidr: string): string | null {
+  return selectDarwinWireGuardRouteProbeTarget(cidr);
+}
+
+export function selectDarwinWireGuardRouteProbeTarget(
+  cidr: string,
+  interfaceAddresses: string[] = []
+): string | null {
   const parsed = parseIpv4Cidr(normalizeCidr(cidr) ?? cidr);
   if (!parsed) return null;
-  if (parsed.prefix >= 31) return intToIpv4(parsed.network);
-  return intToIpv4((parsed.network + 1) >>> 0);
+  const firstOffset = parsed.prefix >= 31 ? 0 : 1;
+  const addressCount = 2 ** (32 - parsed.prefix);
+  const lastOffset = parsed.prefix === 32
+    ? 0
+    : parsed.prefix === 31
+      ? 1
+      : addressCount - 2;
+  const excluded = new Set(interfaceAddresses
+    .map((address) => address.split('/')[0] ?? address)
+    .filter(isIpv4));
+  const fallback = intToIpv4((parsed.network + firstOffset) >>> 0);
+  const candidates = Math.min(
+    lastOffset - firstOffset + 1,
+    excluded.size + 1
+  );
+  for (let index = 0; index < candidates; index += 1) {
+    const target = intToIpv4((parsed.network + firstOffset + index) >>> 0);
+    if (!excluded.has(target)) return target;
+  }
+  return fallback;
 }
 
 function darwinRouteLogSetupLines(configPath: string, interfaceName: string, action: string): string[] {
@@ -3083,13 +3130,14 @@ function escapeAwkRegex(value: string): string {
 function darwinRouteProbeResults(
   allowedIps: string[],
   expectedInterface: string,
-  priorityCidrs: string[] = []
+  priorityCidrs: string[] = [],
+  interfaceAddresses: string[] = []
 ): WireGuardRouteProbeStatus[] {
   return darwinRequiredHealthyRouteCidrs(allowedIps, priorityCidrs)
     .map((cidr) => normalizeCidr(cidr) ?? cidr)
     .filter((cidr) => cidr.includes('/'))
     .flatMap((cidr): WireGuardRouteProbeStatus[] => {
-      const target = darwinRouteProbeTarget(cidr);
+      const target = selectDarwinWireGuardRouteProbeTarget(cidr, interfaceAddresses);
       if (!target) {
         return [];
       }

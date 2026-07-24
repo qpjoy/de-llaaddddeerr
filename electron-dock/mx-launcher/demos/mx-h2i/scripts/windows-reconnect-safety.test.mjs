@@ -5,7 +5,9 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const {
+  DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS,
   retainedGuestRecoveryDecision,
+  shouldRepairDarwinRetainedOwnership,
   wireGuardRecoveryGate,
   wireGuardRecoveryTurn
 } = require('../src/network-recovery-policy.cjs');
@@ -181,6 +183,42 @@ assert.equal(
   'fresh-connect',
   'a fresh live inactive result must override stale cached active state'
 );
+const retainedDataPlaneProof = {
+  ownershipReady: false,
+  tunnelReady: true,
+  routeReady: true,
+  internalApiReady: true,
+  splitDnsReady: true
+};
+assert.equal(
+  shouldRepairDarwinRetainedOwnership({
+    ...retainedDataPlaneProof,
+    platform: 'darwin'
+  }),
+  true,
+  'macOS upgrades must reconstruct a missing ownership claim from a fully proven retained tunnel'
+);
+assert.equal(
+  shouldRepairDarwinRetainedOwnership({
+    ...retainedDataPlaneProof,
+    platform: 'win32'
+  }),
+  false,
+  'macOS retained-ownership migration must not alter the Windows recovery path'
+);
+assert.equal(
+  shouldRepairDarwinRetainedOwnership({
+    ...retainedDataPlaneProof,
+    platform: 'darwin',
+    routeReady: false
+  }),
+  false,
+  'a retained tunnel must not claim ownership without complete route and Internal API proof'
+);
+assert.ok(
+  DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS > 90_000,
+  'the client must outlive the server default SSH connect plus execution timeout'
+);
 let finishBackgroundRecovery;
 const backgroundRecovery = new Promise((resolve) => {
   finishBackgroundRecovery = resolve;
@@ -210,6 +248,21 @@ assert.deepEqual(
 const source = readFileSync(
   fileURLToPath(new URL('../src/main.cjs', import.meta.url)),
   'utf8'
+);
+assert.match(
+  source,
+  /shouldRepairDarwinRetainedOwnership\(\{[\s\S]*?upsertStandaloneOwnershipForRoutePlan\([\s\S]*?'darwin-retained-data-plane-recovery'/,
+  'a proven retained macOS tunnel must atomically reconstruct its ownership claim'
+);
+assert.match(
+  source,
+  /async function syncDomesticPeerForLease\([\s\S]*?timeoutMs: DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS/,
+  'Domestic peer sync must use the deadline that covers the server SSH operation'
+);
+assert.match(
+  source,
+  /owners:\s*Array\.isArray\(registry\.owners\)[\s\S]*?owner\?\.ownerId/,
+  'ownership diagnostics must preserve owner objects instead of stringifying them'
 );
 assert.match(
   source,

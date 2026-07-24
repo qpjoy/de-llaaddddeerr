@@ -10,7 +10,9 @@ const dgram = require('node:dgram');
 const { execFile } = require('node:child_process');
 const { createHash, randomUUID } = require('node:crypto');
 const {
+  DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS,
   retainedGuestRecoveryDecision,
+  shouldRepairDarwinRetainedOwnership,
   wireGuardRecoveryGate,
   wireGuardRecoveryTurn
 } = require('./network-recovery-policy.cjs');
@@ -23,6 +25,7 @@ const {
   windowsSplitDnsPathReady,
   windowsSystemDnsDataPlaneReady
 } = require('./windows-network-readiness.cjs');
+const { resolverRootsCoverDomains } = require('./split-dns-policy.cjs');
 const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: electronScreen, powerMonitor, net: electronNet, dialog, session: electronSession } = require('electron');
 
 loadDotEnvFiles();
@@ -3000,8 +3003,7 @@ function shouldSuppressWireGuardDnsForSystemDomainProxy(prepared = null) {
     && Number(status?.pacPort) === localEdgePort()
     && status?.systemResolverMode === 'dynamic'
     && Number(status?.resolverPort) === localEdgePort()
-    && expectedDomains.length > 0
-    && expectedDomains.every((domain) => resolverDomains.includes(domain))
+    && resolverRootsCoverDomains(expectedDomains, resolverDomains)
   );
 }
 
@@ -4854,8 +4856,12 @@ function compactSystemDomainProxyStatus(status) {
     resolverPort: status.resolverPort || null,
     ownershipRegistry: status.ownershipRegistry && typeof status.ownershipRegistry === 'object'
       ? {
-          owners: arrayValue(status.ownershipRegistry.owners, []).map((owner) => nullableString(owner?.ownerId)).filter(Boolean),
-          conflicts: arrayValue(status.ownershipRegistry.conflicts, [])
+          owners: Array.isArray(status.ownershipRegistry.owners)
+            ? status.ownershipRegistry.owners.map((owner) => nullableString(owner?.ownerId)).filter(Boolean)
+            : [],
+          conflicts: Array.isArray(status.ownershipRegistry.conflicts)
+            ? status.ownershipRegistry.conflicts
+            : []
         }
       : null,
     staleState: status.staleState === true,
@@ -4968,13 +4974,15 @@ function standaloneOwnershipOwnerId() {
 
 function compactStandaloneOwnershipState(state, reason) {
   const registry = state?.registry && typeof state.registry === 'object' ? state.registry : {};
-  const conflicts = arrayValue(registry.conflicts, []);
+  const conflicts = Array.isArray(registry.conflicts) ? registry.conflicts : [];
   return {
     ok: state?.claimed !== false && conflicts.length === 0,
     claimed: state?.claimed !== false,
     reason,
     statePath: nullableString(state?.statePath),
-    owners: arrayValue(registry.owners, []).map((owner) => nullableString(owner?.ownerId)).filter(Boolean),
+    owners: Array.isArray(registry.owners)
+      ? registry.owners.map((owner) => nullableString(owner?.ownerId)).filter(Boolean)
+      : [],
     conflicts,
     updatedAt: nullableString(state?.updatedAt) || nowIso()
   };
@@ -11228,11 +11236,26 @@ async function probeWireGuardForConnection(input) {
           browserReady
         })
       : systemDnsReady && browserReady;
-    const standaloneOwnershipRegistry =
+    let standaloneOwnershipRegistry =
       connection.diagnostics?.standaloneOwnershipRegistry
       || connection.diagnostics?.standaloneOwnership
       || null;
-    const ownershipReady = standaloneOwnershipReady(connection);
+    if (shouldRepairDarwinRetainedOwnership({
+      platform: process.platform,
+      ownershipReady: standaloneOwnershipRegistry?.ok === true,
+      tunnelReady,
+      routeReady,
+      internalApiReady,
+      splitDnsReady
+    })) {
+      standaloneOwnershipRegistry = await upsertStandaloneOwnershipForRoutePlan(
+        routePlan,
+        connection,
+        'darwin-retained-data-plane-recovery',
+        'active'
+      );
+    }
+    const ownershipReady = standaloneOwnershipRegistry?.ok === true;
     const ready = tunnelReady
       && routeReady
       && internalApiReady
@@ -11370,7 +11393,7 @@ async function syncDomesticPeerForLease(lease, options = {}) {
         requestedBy: REQUESTED_BY,
         requestId: makeRequestId('domestic-peer-sync')
       },
-      timeoutMs: 18000,
+      timeoutMs: DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS,
       bootstrapResolveMode: options.bootstrapResolveMode || runtime.config.bootstrapResolveMode
     });
     return normalizeDomesticPeerSync(payload?.domesticPeerSync) || {

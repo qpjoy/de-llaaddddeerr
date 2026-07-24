@@ -54,6 +54,7 @@ let appShellMenuOpen = false;
 let phoneMenuOpen = false;
 let appInspectorCollapsed = false;
 let appGridScrollTop = 0;
+const phoneScrollTops = new Map();
 let h2oTestUrlDraft = H2O_DEFAULT_TEST_URL;
 let h2oSubscriptionEditId = '';
 let h2oSubscriptionDraft = defaultH2oSubscriptionDraft();
@@ -823,6 +824,7 @@ function renderCheckUpdatesButton(className = 'text-button') {
 
 function render() {
   if (!state) return;
+  rememberPhoneScroll();
   const connected = state.connection?.state === 'connected';
   const leaseOnly = state.connection?.state === 'lease-only';
   const tunnelOnly = state.connection?.state === 'tunnel-only';
@@ -835,7 +837,23 @@ function render() {
       ${screen === 'appcenter' ? renderWorkbench(connected, connecting) : renderPhone(connected, connecting, leaseOnly, tunnelOnly, degraded)}
     </div>
   `;
+  restorePhoneScroll();
   restoreAppCenterScroll();
+}
+
+function rememberPhoneScroll() {
+  const phone = root.querySelector('.mx-phone[data-scroll-key]');
+  const key = phone?.dataset.scrollKey;
+  if (!key) return;
+  phoneScrollTops.set(key, phone.scrollTop);
+}
+
+function restorePhoneScroll() {
+  const phone = root.querySelector('.mx-phone[data-scroll-key]');
+  const key = phone?.dataset.scrollKey;
+  if (!key) return;
+  const scrollTop = phoneScrollTops.get(key);
+  if (Number.isFinite(scrollTop)) phone.scrollTop = scrollTop;
 }
 
 function rememberAppGridScroll() {
@@ -887,7 +905,7 @@ function renderPhone(connected, connecting, leaseOnly = false, tunnelOnly = fals
       ? '员工模式'
       : '访客模式';
   return `
-    <section class="mx-phone" aria-label="MX-H2I standalone launcher">
+    <section class="mx-phone" data-scroll-key="phone:launcher" aria-label="MX-H2I standalone launcher">
       <header class="phone-bar" data-window-drag="true">
         <button class="icon-button" type="button" data-action="phone-back" aria-label="Back">‹</button>
         ${renderPhoneShellMenu('h2i')}
@@ -1004,7 +1022,7 @@ function renderPhoneFooterInfo(connected) {
 
 function renderAdvancedPhone() {
   return `
-    <section class="mx-phone advanced-phone" aria-label="MX-H2I advanced options">
+    <section class="mx-phone advanced-phone" data-scroll-key="phone:advanced" aria-label="MX-H2I advanced options">
       <header class="phone-bar" data-window-drag="true">
         <button class="icon-button" type="button" data-action="phone-back" aria-label="Back">‹</button>
         ${renderPhoneShellMenu('h2i')}

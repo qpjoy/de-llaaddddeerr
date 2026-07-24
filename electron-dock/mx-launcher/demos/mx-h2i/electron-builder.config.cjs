@@ -1,3 +1,7 @@
+const { rm } = require('node:fs/promises');
+const { createRequire } = require('node:module');
+const path = require('node:path');
+
 const shouldNotarize = Boolean(
   process.env.MX_H2I_NOTARIZE === '1' ||
   process.env.APPLE_ID ||
@@ -5,10 +9,25 @@ const shouldNotarize = Boolean(
   process.env.APPLE_API_KEY_ID
 );
 
+async function invalidateBetterSqlite3RebuildMarker() {
+  const tunnelPackagePath = require.resolve('@qpjoy/electron-plugin-tunnel/package.json');
+  const tunnelRequire = createRequire(tunnelPackagePath);
+  const betterSqlitePackagePath = tunnelRequire.resolve('better-sqlite3/package.json');
+
+  // electron-rebuild 4.2.0 omits the target platform from this marker, so a
+  // win32-x64 build can otherwise be reused incorrectly by a darwin-x64 build.
+  await rm(
+    path.join(path.dirname(betterSqlitePackagePath), 'build', 'Release', '.forge-meta'),
+    { force: true }
+  );
+  return true;
+}
+
 module.exports = {
   appId: 'dev.qpjoy.mx-h2i',
   productName: 'MX-H2I',
   artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
+  beforeBuild: invalidateBetterSqlite3RebuildMarker,
   asar: true,
   directories: {
     output: 'out/electron-builder'

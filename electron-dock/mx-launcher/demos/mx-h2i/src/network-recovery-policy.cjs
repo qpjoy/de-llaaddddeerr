@@ -1,4 +1,5 @@
 const DEFAULT_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
+const DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS = 105 * 1000;
 
 function wireGuardRecoveryGate(input = {}) {
   if (input.disconnectInFlight === true) return 'disconnect-in-flight';
@@ -31,6 +32,15 @@ function retainedGuestRecoveryDecision(input = {}) {
   return 'fresh-connect';
 }
 
+function shouldRepairDarwinRetainedOwnership(input = {}) {
+  return input.platform === 'darwin'
+    && input.ownershipReady !== true
+    && input.tunnelReady === true
+    && input.routeReady === true
+    && input.internalApiReady === true
+    && input.splitDnsReady === true;
+}
+
 async function wireGuardRecoveryTurn(inFlight, foreground) {
   if (!inFlight) return { action: 'start', waited: false, recovery: null };
   if (foreground !== true) {
@@ -41,8 +51,10 @@ async function wireGuardRecoveryTurn(inFlight, foreground) {
 }
 
 module.exports = {
+  DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS,
   DEFAULT_FAILURE_COOLDOWN_MS,
   retainedGuestRecoveryDecision,
+  shouldRepairDarwinRetainedOwnership,
   wireGuardRecoveryGate,
   wireGuardRecoveryTurn
 };
