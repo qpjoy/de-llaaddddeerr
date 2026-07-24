@@ -75,10 +75,16 @@ function buildAndRead(tunnel, action) {
       [
         '-NoProfile',
         '-Command',
-        '[void][scriptblock]::Create([IO.File]::ReadAllText($args[0]))',
-        scriptPath
+        '[void][scriptblock]::Create([IO.File]::ReadAllText($env:QPJOY_WG_SMOKE_SCRIPT_PATH))'
       ],
-      { encoding: 'utf8', windowsHide: true }
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        env: {
+          ...process.env,
+          QPJOY_WG_SMOKE_SCRIPT_PATH: scriptPath
+        }
+      }
     );
     assert.equal(
       parsed.status,
