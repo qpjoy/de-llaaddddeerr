@@ -95,11 +95,14 @@ export interface ElectronLauncherStandaloneOwnershipClaimOptions {
   statePath?: string | null;
   existingClaims?: ElectronLauncherNetworkOwnershipClaim[] | null;
   failOnOwnershipConflicts?: boolean | null;
+  supersedeClaims?: ElectronLauncherNetworkOwnershipClaim[] | null;
 }
 
 export interface ElectronLauncherStandaloneOwnershipClaimResult
   extends ElectronLauncherStandaloneOwnershipState {
   claimed: boolean;
+  supersededOwnerIds: string[];
+  supersessionRejectedReason: string | null;
 }
 
 export interface ElectronLauncherStandaloneDataPlaneApplyInput
@@ -169,6 +172,8 @@ interface StandaloneOwnershipClaimRegistration {
   claimed: boolean;
   claims: ElectronLauncherNetworkOwnershipClaim[];
   registry: ElectronLauncherNetworkOwnershipRegistry;
+  supersededOwnerIds: string[];
+  supersessionRejectedReason: string | null;
 }
 
 const STANDALONE_OWNERSHIP_LOCK_WAIT_MS = 2_000;
@@ -335,13 +340,15 @@ export async function applyElectronLauncherStandaloneDataPlane(
         [],
         ownershipClaim,
         input.existingClaims ?? [],
-        input.failOnOwnershipConflicts !== false
+        input.failOnOwnershipConflicts !== false,
+        []
       )
     : registerStandaloneOwnershipClaim(
         input.ownershipStatePath,
         ownershipClaim,
         input.existingClaims ?? [],
-        input.failOnOwnershipConflicts !== false
+        input.failOnOwnershipConflicts !== false,
+        []
       );
   if (!registration.claimed) {
     const ownershipRegistry = registration.registry;
@@ -431,11 +438,14 @@ export function claimElectronLauncherStandaloneOwnershipClaim(
     file,
     claim,
     options.existingClaims ?? [],
-    options.failOnOwnershipConflicts !== false
+    options.failOnOwnershipConflicts !== false,
+    options.supersedeClaims ?? []
   );
   return {
     ...standaloneOwnershipState(file, registration.claims),
     claimed: registration.claimed,
+    supersededOwnerIds: registration.supersededOwnerIds,
+    supersessionRejectedReason: registration.supersessionRejectedReason,
     registry: registration.registry
   };
 }
@@ -678,7 +688,8 @@ function registerStandaloneOwnershipClaim(
   statePath: string | null | undefined,
   claim: ElectronLauncherNetworkOwnershipClaim,
   existingClaims: ElectronLauncherNetworkOwnershipClaim[],
-  failOnOwnershipConflicts: boolean
+  failOnOwnershipConflicts: boolean,
+  supersedeClaims: ElectronLauncherNetworkOwnershipClaim[]
 ): StandaloneOwnershipClaimRegistration {
   const file = canonicalStandaloneOwnershipStatePath(statePath, true);
   return withStandaloneOwnershipLock(file, () => {
@@ -687,7 +698,8 @@ function registerStandaloneOwnershipClaim(
       currentClaims,
       claim,
       existingClaims,
-      failOnOwnershipConflicts
+      failOnOwnershipConflicts,
+      supersedeClaims
     );
     if (registration.claimed) {
       writeStandaloneOwnershipState(file, registration.claims);
@@ -700,14 +712,65 @@ function standaloneOwnershipClaimRegistration(
   currentClaims: ElectronLauncherNetworkOwnershipClaim[],
   claim: ElectronLauncherNetworkOwnershipClaim,
   existingClaims: ElectronLauncherNetworkOwnershipClaim[],
-  failOnOwnershipConflicts: boolean
+  failOnOwnershipConflicts: boolean,
+  supersedeClaims: ElectronLauncherNetworkOwnershipClaim[]
 ): StandaloneOwnershipClaimRegistration {
+  const expectedSupersessions = supersedeClaims.filter(
+    (row, index, rows) =>
+      Boolean(stringValue(row?.ownerId))
+      && row.ownerId !== claim.ownerId
+      && rows.findIndex((candidate) => candidate.ownerId === row.ownerId) === index
+  );
+  const requestedSupersessions = new Set(expectedSupersessions.map((row) => row.ownerId));
+  const supersededClaims = currentClaims.filter((row) => requestedSupersessions.has(row.ownerId));
+  const claimProductId = stringValue(claim.productId);
+  const currentSameOwner = currentClaims.find((row) => row.ownerId === claim.ownerId);
+  if (
+    currentSameOwner
+    && stringValue(currentSameOwner.productId) !== claimProductId
+  ) {
+    throw new Error(
+      `Cannot replace ownership claim ${claim.ownerId} from product `
+      + `${stringValue(currentSameOwner.productId) ?? 'unknown'} with ${claimProductId ?? 'unknown'}.`
+    );
+  }
+  const invalidSupersession = supersededClaims.find(
+    (row) => !claimProductId || stringValue(row.productId) !== claimProductId
+  );
+  if (invalidSupersession) {
+    throw new Error(
+      `Cannot supersede ownership claim ${invalidSupersession.ownerId} from product `
+      + `${stringValue(invalidSupersession.productId) ?? 'unknown'} with ${claimProductId ?? 'unknown'}.`
+    );
+  }
+  for (const expected of expectedSupersessions) {
+    const current = currentClaims.find((row) => row.ownerId === expected.ownerId);
+    if (!current || JSON.stringify(current) !== JSON.stringify(expected)) {
+      return rejectedStandaloneOwnershipRegistration(
+        currentClaims,
+        claim,
+        existingClaims,
+        `supersession-snapshot-changed:${expected.ownerId}`
+      );
+    }
+    if (!ownershipClaimResourcesCoveredBy(current, claim)) {
+      return rejectedStandaloneOwnershipRegistration(
+        currentClaims,
+        claim,
+        existingClaims,
+        `supersession-resources-not-covered:${expected.ownerId}`
+      );
+    }
+  }
+  const retainedClaims = currentClaims.filter(
+    (row) => row.ownerId !== claim.ownerId && !requestedSupersessions.has(row.ownerId)
+  );
   const candidateClaims = [
-    ...currentClaims.filter((row) => row.ownerId !== claim.ownerId),
+    ...retainedClaims,
     claim
   ];
   const registry = buildElectronLauncherNetworkOwnershipRegistry([
-    ...currentClaims.filter((row) => row.ownerId !== claim.ownerId),
+    ...retainedClaims,
     ...existingClaims,
     claim
   ]);
@@ -715,8 +778,57 @@ function standaloneOwnershipClaimRegistration(
   return {
     claimed,
     claims: claimed ? candidateClaims : currentClaims,
-    registry
+    registry,
+    supersededOwnerIds: claimed ? supersededClaims.map((row) => row.ownerId).sort() : [],
+    supersessionRejectedReason: null
   };
+}
+
+function rejectedStandaloneOwnershipRegistration(
+  currentClaims: ElectronLauncherNetworkOwnershipClaim[],
+  claim: ElectronLauncherNetworkOwnershipClaim,
+  existingClaims: ElectronLauncherNetworkOwnershipClaim[],
+  reason: string
+): StandaloneOwnershipClaimRegistration {
+  return {
+    claimed: false,
+    claims: currentClaims,
+    registry: buildElectronLauncherNetworkOwnershipRegistry([
+      ...currentClaims.filter((row) => row.ownerId !== claim.ownerId),
+      ...existingClaims,
+      claim
+    ]),
+    supersededOwnerIds: [],
+    supersessionRejectedReason: reason
+  };
+}
+
+function ownershipClaimResourcesCoveredBy(
+  previous: ElectronLauncherNetworkOwnershipClaim,
+  next: ElectronLauncherNetworkOwnershipClaim
+): boolean {
+  const previousRegistry = buildElectronLauncherNetworkOwnershipRegistry([previous]);
+  const nextRegistry = buildElectronLauncherNetworkOwnershipRegistry([next]);
+  for (const key of ['dnsHosts', 'dnsZones', 'routeCidrs'] as const) {
+    const nextKeys = new Set(nextRegistry[key].map((entry) => entry.key));
+    if (previousRegistry[key].some((entry) => !nextKeys.has(entry.key))) return false;
+  }
+  const nextRoutes = new Set(
+    nextRegistry.reverseProxyRoutes.map((entry) => ownershipReverseProxyResourceKey(entry))
+  );
+  return previousRegistry.reverseProxyRoutes.every(
+    (entry) => nextRoutes.has(ownershipReverseProxyResourceKey(entry))
+  );
+}
+
+function ownershipReverseProxyResourceKey(
+  entry: ElectronLauncherNetworkOwnershipRegistry['reverseProxyRoutes'][number]
+): string {
+  return JSON.stringify({
+    key: entry.key,
+    target: entry.target ?? null,
+    route: entry.route ?? null
+  });
 }
 
 function writeStandaloneOwnershipClaim(
@@ -725,8 +837,20 @@ function writeStandaloneOwnershipClaim(
 ): ElectronLauncherNetworkOwnershipClaim[] {
   const file = canonicalStandaloneOwnershipStatePath(statePath, true);
   return withStandaloneOwnershipLock(file, () => {
+    const currentClaims = readStandaloneOwnershipClaimsFromFile(file, true);
+    const currentSameOwner = currentClaims.find((row) => row.ownerId === claim.ownerId);
+    const claimProductId = stringValue(claim.productId);
+    if (
+      currentSameOwner
+      && stringValue(currentSameOwner.productId) !== claimProductId
+    ) {
+      throw new Error(
+        `Cannot replace ownership claim ${claim.ownerId} from product `
+        + `${stringValue(currentSameOwner.productId) ?? 'unknown'} with ${claimProductId ?? 'unknown'}.`
+      );
+    }
     const claims = [
-      ...readStandaloneOwnershipClaimsFromFile(file, true).filter((row) => row.ownerId !== claim.ownerId),
+      ...currentClaims.filter((row) => row.ownerId !== claim.ownerId),
       claim
     ];
     writeStandaloneOwnershipState(file, claims);

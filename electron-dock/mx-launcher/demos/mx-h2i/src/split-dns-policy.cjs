@@ -22,7 +22,30 @@ function resolverRootsCoverDomains(expectedDomains, resolverRoots) {
   );
 }
 
+function darwinSplitDnsStatusReady(status, expectedDomains) {
+  if (!Array.isArray(expectedDomains) || expectedDomains.length === 0) return true;
+  return status?.applied === true
+    && status?.verified === true
+    && status?.resolverApplied === true
+    && status?.systemResolverMode === 'dynamic'
+    && !status?.error
+    && !status?.resolverError
+    && resolverRootsCoverDomains(expectedDomains, status?.resolverDomains);
+}
+
+function invalidatePersistedDarwinSplitDnsProof(status, platform) {
+  if (!status || typeof status !== 'object' || platform !== 'darwin') return status;
+  return {
+    ...status,
+    // PAC and DNS relay verification is process-local: the listeners from the
+    // process that wrote this runtime snapshot no longer prove current health.
+    verified: false
+  };
+}
+
 module.exports = {
+  darwinSplitDnsStatusReady,
+  invalidatePersistedDarwinSplitDnsProof,
   resolverRootCoversDomain,
   resolverRootsCoverDomains
 };

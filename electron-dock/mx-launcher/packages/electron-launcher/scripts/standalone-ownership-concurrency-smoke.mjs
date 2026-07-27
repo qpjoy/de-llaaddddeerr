@@ -234,6 +234,158 @@ try {
     'a rejected reconnect claim must retain the previous live claim instead of replacing or releasing it'
   );
 
+  const supersessionStatePath = join(temporaryDirectory, 'supersession-ownership.json');
+  upsertElectronLauncherStandaloneOwnershipClaim({
+    ownerId: 'mx-h2i:old-install',
+    productId: 'mx-h2i',
+    instanceId: 'old-install',
+    state: 'active',
+    routeCidrs: ['10.89.0.0/16'],
+    metadata: { dataPlaneOwner: true }
+  }, supersessionStatePath);
+  const oldInstallClaim = readElectronLauncherStandaloneOwnershipState(supersessionStatePath).claims
+    .find((claim) => claim.ownerId === 'mx-h2i:old-install');
+  assert(oldInstallClaim);
+  upsertElectronLauncherStandaloneOwnershipClaim({
+    ownerId: 'luopan:compass',
+    productId: 'luopan',
+    instanceId: 'compass',
+    state: 'active',
+    routeCidrs: ['10.91.0.0/16'],
+    metadata: { dataPlaneOwner: true }
+  }, supersessionStatePath);
+  const adoptedSelfClaim = claimElectronLauncherStandaloneOwnershipClaim({
+    ownerId: 'mx-h2i:new-install',
+    productId: 'mx-h2i',
+    instanceId: 'new-install',
+    state: 'connecting',
+    routeCidrs: ['10.89.0.0/16'],
+    metadata: { dataPlaneOwner: true }
+  }, {
+    statePath: supersessionStatePath,
+    supersedeClaims: [oldInstallClaim]
+  });
+  assert.equal(adoptedSelfClaim.claimed, true);
+  assert.deepEqual(adoptedSelfClaim.supersededOwnerIds, ['mx-h2i:old-install']);
+  assert.deepEqual(
+    readElectronLauncherStandaloneOwnershipState(supersessionStatePath).claims
+      .map((claim) => claim.ownerId)
+      .sort(),
+    ['luopan:compass', 'mx-h2i:new-install'],
+    'same-product installation migration must atomically replace only the selected old owner'
+  );
+  assert.throws(
+    () => claimElectronLauncherStandaloneOwnershipClaim({
+      ownerId: 'mx-h2i:must-not-take-luopan',
+      productId: 'mx-h2i',
+      state: 'connecting',
+      routeCidrs: ['10.91.0.0/16']
+    }, {
+      statePath: supersessionStatePath,
+      supersedeClaims: [
+        readElectronLauncherStandaloneOwnershipState(supersessionStatePath).claims
+          .find((claim) => claim.ownerId === 'luopan:compass')
+      ]
+    }),
+    /Cannot supersede ownership claim luopan:compass/,
+    'an ownership migration must fail closed when asked to remove another product'
+  );
+  assert(
+    readElectronLauncherStandaloneOwnershipState(supersessionStatePath).claims.some(
+      (claim) => claim.ownerId === 'luopan:compass'
+    ),
+    'a rejected cross-product supersession must leave the other product untouched'
+  );
+
+  const casStatePath = join(temporaryDirectory, 'supersession-cas-ownership.json');
+  upsertElectronLauncherStandaloneOwnershipClaim({
+    ownerId: 'mx-h2i:cas-old',
+    productId: 'mx-h2i',
+    instanceId: 'cas-old',
+    state: 'active',
+    routeCidrs: ['10.89.0.0/16'],
+    metadata: { dataPlaneOwner: true },
+    updatedAt: '2026-07-27T00:00:00.000Z'
+  }, casStatePath);
+  const staleSnapshot = readElectronLauncherStandaloneOwnershipState(casStatePath).claims[0];
+  upsertElectronLauncherStandaloneOwnershipClaim({
+    ...staleSnapshot,
+    state: 'connecting',
+    updatedAt: '2026-07-27T00:00:01.000Z'
+  }, casStatePath);
+  const rejectedStaleSnapshot = claimElectronLauncherStandaloneOwnershipClaim({
+    ownerId: 'mx-h2i:cas-new',
+    productId: 'mx-h2i',
+    instanceId: 'cas-new',
+    state: 'connecting',
+    routeCidrs: ['10.89.0.0/16'],
+    metadata: { dataPlaneOwner: true }
+  }, {
+    statePath: casStatePath,
+    supersedeClaims: [staleSnapshot]
+  });
+  assert.equal(rejectedStaleSnapshot.claimed, false);
+  assert.match(rejectedStaleSnapshot.supersessionRejectedReason, /supersession-snapshot-changed/);
+  assert(
+    readElectronLauncherStandaloneOwnershipState(casStatePath).claims.some(
+      (claim) => claim.ownerId === 'mx-h2i:cas-old' && claim.state === 'connecting'
+    ),
+    'a refreshed old instance must survive a stale supersession snapshot'
+  );
+
+  const uncoveredStatePath = join(temporaryDirectory, 'supersession-resource-ownership.json');
+  upsertElectronLauncherStandaloneOwnershipClaim({
+    ownerId: 'mx-h2i:resource-old',
+    productId: 'mx-h2i',
+    instanceId: 'resource-old',
+    state: 'active',
+    dnsZones: ['mxinfo-inc.cn', 'legacy.internal.mx'],
+    routeCidrs: ['10.89.0.0/16'],
+    metadata: { dataPlaneOwner: true }
+  }, uncoveredStatePath);
+  const resourceSnapshot = readElectronLauncherStandaloneOwnershipState(uncoveredStatePath).claims[0];
+  const rejectedUncoveredResources = claimElectronLauncherStandaloneOwnershipClaim({
+    ownerId: 'mx-h2i:resource-new',
+    productId: 'mx-h2i',
+    instanceId: 'resource-new',
+    state: 'connecting',
+    dnsZones: ['mxinfo-inc.cn'],
+    routeCidrs: ['10.89.0.0/16'],
+    metadata: { dataPlaneOwner: true }
+  }, {
+    statePath: uncoveredStatePath,
+    supersedeClaims: [resourceSnapshot]
+  });
+  assert.equal(rejectedUncoveredResources.claimed, false);
+  assert.match(
+    rejectedUncoveredResources.supersessionRejectedReason,
+    /supersession-resources-not-covered/
+  );
+  assert(
+    readElectronLauncherStandaloneOwnershipState(uncoveredStatePath).claims.some(
+      (claim) => claim.ownerId === 'mx-h2i:resource-old'
+    ),
+    'same-product migration must not silently drop resources absent from the replacement claim'
+  );
+
+  const ownerCollisionStatePath = join(temporaryDirectory, 'owner-collision-ownership.json');
+  upsertElectronLauncherStandaloneOwnershipClaim({
+    ownerId: 'shared:collision',
+    productId: 'luopan',
+    state: 'active',
+    routeCidrs: ['10.91.0.0/16']
+  }, ownerCollisionStatePath);
+  assert.throws(
+    () => upsertElectronLauncherStandaloneOwnershipClaim({
+      ownerId: 'shared:collision',
+      productId: 'mx-h2i',
+      state: 'active',
+      routeCidrs: ['10.89.0.0/16']
+    }, ownerCollisionStatePath),
+    /Cannot replace ownership claim shared:collision from product luopan with mx-h2i/,
+    'ordinary upsert must not let an owner-id collision replace another product'
+  );
+
   const leftovers = (await readdir(temporaryDirectory)).filter(
     (name) => name.endsWith('.tmp') || name.endsWith('.lock') || name.endsWith('.recovery')
   );

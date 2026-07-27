@@ -11,8 +11,11 @@ const { execFile } = require('node:child_process');
 const { createHash, randomUUID } = require('node:crypto');
 const {
   DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS,
+  darwinSupersedableOwnershipOwnerIds,
+  isDarwinDynamicProxyEndpointRoute,
   retainedGuestRecoveryDecision,
   shouldRepairDarwinRetainedOwnership,
+  stableOwnershipInstanceId,
   wireGuardRecoveryGate,
   wireGuardRecoveryTurn
 } = require('./network-recovery-policy.cjs');
@@ -25,7 +28,14 @@ const {
   windowsSplitDnsPathReady,
   windowsSystemDnsDataPlaneReady
 } = require('./windows-network-readiness.cjs');
-const { resolverRootsCoverDomains } = require('./split-dns-policy.cjs');
+const {
+  darwinSplitDnsStatusReady,
+  invalidatePersistedDarwinSplitDnsProof,
+  resolverRootsCoverDomains
+} = require('./split-dns-policy.cjs');
+const {
+  reconcileRuntimeUpdateWithInstalledVersion
+} = require('./update-state-policy.cjs');
 const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: electronScreen, powerMonitor, net: electronNet, dialog, session: electronSession } = require('electron');
 
 loadDotEnvFiles();
@@ -731,10 +741,24 @@ function registerIpc() {
       if (guestProbe.superseded) return visibleRuntime();
       connectedGuestWasProbed = true;
     }
+    let retainedRecovery = null;
     if (!connectedGuestWasProbed && shouldAttemptRetainedWireGuardPreBootstrap(runtime.connection)) {
-      await recoverRetainedWireGuardBeforeBootstrap('employee-pre-bootstrap', {
+      retainedRecovery = await recoverRetainedWireGuardBeforeBootstrap('employee-pre-bootstrap', {
         allowPrivileged: shouldAllowPrivilegedPreBootstrapRecovery()
       });
+    }
+    if (retainedRecovery?.authorizationCanceled === true) {
+      runtime.feedback = {
+        tone: 'warning',
+        message: '已取消 WireGuard 修复授权；MX-H2I 已保留当前网络状态，不会继续员工认证或再次弹窗。'
+      };
+      touchRuntime('staff connect authorization canceled during retained repair');
+      await publishNetworkModeEvent('staff:connect', 'failed', {
+        reason: 'authorization-canceled',
+        transitionId
+      });
+      await saveAndBroadcast();
+      return visibleRuntime();
     }
     const guestFallback = runtime.connection?.mode === 'guest'
       && (connectionHasReadyNetworkProof(runtime.connection) || runtime.connection?.wireGuard?.active === true)
@@ -2426,7 +2450,7 @@ async function refreshSystemDomainProxyAfterNetworkChange(reason) {
   if (typeof systemDomainProxyManager.statusVerified === 'function') {
     const verified = await systemDomainProxyManager.statusVerified().catch(() => null);
     const withBrowserProof = await attachWindowsBrowserAccessProof(verified, reason);
-    if (withBrowserProof?.applied === true && windowsBrowserAccessReady(withBrowserProof)) {
+    if (withBrowserProof?.applied === true && systemDomainProxyConnectionReady(withBrowserProof)) {
       await recordSystemDomainProxyDiagnostics({
         ...withBrowserProof,
         reason,
@@ -2707,7 +2731,17 @@ async function ensureSystemDomainProxyForRuntimeOnce(reason = 'manual') {
       });
     }
     try {
-      const status = await systemDomainProxyManager.apply(policy);
+      let status = await systemDomainProxyManager.apply(policy);
+      if (
+        process.platform === 'darwin'
+        && status?.applied === true
+        && typeof systemDomainProxyManager.statusVerified === 'function'
+      ) {
+        status = {
+          ...await systemDomainProxyManager.statusVerified(),
+          reason
+        };
+      }
       lastSystemDomainProxyPolicySignature = policySignature;
       if (process.platform === 'win32' && pendingWindowsSystemProxyTakeoverSignature) {
         lastWindowsSystemProxyTakeoverSignature = pendingWindowsSystemProxyTakeoverSignature;
@@ -2927,11 +2961,29 @@ function windowsBrowserAccessReady(status) {
     && status?.browserAccess?.proofSessionId === WINDOWS_BROWSER_PROOF_SESSION_ID;
 }
 
+function systemDomainProxyConnectionReady(status) {
+  const domains = splitDnsDomains(runtime?.config);
+  if (process.platform === 'win32') return windowsBrowserAccessReady(status);
+  if (process.platform === 'darwin') {
+    return darwinSplitDnsStatusReady(status, domains);
+  }
+  return true;
+}
+
+function darwinSystemDomainProxyRepairEligible(connection = {}) {
+  return process.platform === 'darwin'
+    && connection?.state === 'tunnel-only'
+    && connection?.health?.wireGuard === 'ready'
+    && connection?.health?.internalApi === 'ready'
+    && standaloneOwnershipReady(connection);
+}
+
 function systemDomainProxyRuntimeEligible() {
   const connection = runtime?.connection || {};
   if (connection.state === 'connected') {
-    return process.platform !== 'win32' || standaloneOwnershipReady(connection);
+    return standaloneOwnershipReady(connection);
   }
+  if (darwinSystemDomainProxyRepairEligible(connection)) return true;
   if (process.platform !== 'win32' || connection.state !== 'tunnel-only') return false;
   return windowsBrowserPromotionPrerequisitesReady(connection);
 }
@@ -3124,7 +3176,18 @@ function assertNetworkTransitionCurrent(epoch) {
 async function completeExternalSystemDomainProxyApply(reason = 'external') {
   if (!systemDomainProxyManager?.completeExternalApply) return null;
   try {
-    const status = await systemDomainProxyManager.completeExternalApply(reason);
+    let status = await systemDomainProxyManager.completeExternalApply(reason);
+    if (
+      status?.applied === true
+      && typeof systemDomainProxyManager.statusVerified === 'function'
+    ) {
+      const verified = await systemDomainProxyManager.statusVerified();
+      status = {
+        ...verified,
+        reason,
+        externalApply: true
+      };
+    }
     if (status?.applied && !status?.error && !status?.resolverError) {
       lastSystemDomainProxyAuthorizationCanceledSignature = null;
     }
@@ -3226,7 +3289,7 @@ async function recordSystemDomainProxyDiagnostics(status, touchReason) {
   const proxySignature = systemDomainProxyStatusSignature(status);
   if (!proxySignature) return false;
   const previousState = runtime.connection?.state;
-  const browserReady = windowsBrowserAccessReady(status);
+  const browserReady = systemDomainProxyConnectionReady(status);
   const localEdgePrerequisitesReady = windowsLocalEdgePrerequisitesReady(runtime.connection);
   const browserPromotionPrerequisitesReady =
     windowsBrowserPromotionPrerequisitesReady(runtime.connection);
@@ -3235,7 +3298,7 @@ async function recordSystemDomainProxyDiagnostics(status, touchReason) {
   const systemDnsDegraded = process.platform === 'win32'
     && localEdgePrerequisitesReady
     && !systemDnsReady;
-  const signature = process.platform === 'win32'
+  const signature = ['win32', 'darwin'].includes(process.platform)
     ? `${proxySignature}|state=${previousState || 'none'}|systemDns=${systemDnsReady}|ownership=${standaloneOwnershipReady(runtime.connection)}|localEdge=${localEdgePrerequisitesReady}`
     : proxySignature;
   if (signature === lastSystemDomainProxySignature) return false;
@@ -3248,13 +3311,24 @@ async function recordSystemDomainProxyDiagnostics(status, touchReason) {
       platform: status.platform
     });
   }
-  const promote = process.platform === 'win32'
+  const promoteWindows = process.platform === 'win32'
     && previousState === 'tunnel-only'
     && browserReady
     && browserPromotionPrerequisitesReady;
-  const downgrade = process.platform === 'win32'
+  const promoteDarwin = process.platform === 'darwin'
+    && previousState === 'tunnel-only'
+    && browserReady
+    && runtime.connection?.health?.wireGuard === 'ready'
+    && runtime.connection?.health?.internalApi === 'ready'
+    && standaloneOwnershipReady(runtime.connection);
+  const downgradeWindows = process.platform === 'win32'
     && previousState === 'connected'
     && !browserReady;
+  const downgradeDarwin = process.platform === 'darwin'
+    && previousState === 'connected'
+    && !browserReady;
+  const promote = promoteWindows || promoteDarwin;
+  const downgrade = downgradeWindows || downgradeDarwin;
   const nextState = promote ? 'connected' : downgrade ? 'tunnel-only' : runtime.connection?.state;
   const browserFallback = process.platform === 'win32'
     ? windowsBrowserFallbackState({
@@ -3293,14 +3367,18 @@ async function recordSystemDomainProxyDiagnostics(status, touchReason) {
   if (promote) {
     runtime.feedback = {
       tone: 'success',
-      message: systemDnsDegraded
+      message: process.platform === 'darwin'
+        ? 'macOS dynamic split DNS 与本机 DNS relay 已重新验证，Internal 浏览器和系统解析路径恢复 ready。'
+        : systemDnsDegraded
         ? `Windows 浏览器已通过 ${status?.browserAccess?.proxy || localEdgeProxy()} 访问 Internal；浏览器路径 ready，系统 DNS 未通过，非 PAC 程序仍为 degraded。`
         : `Windows 浏览器已通过 ${status?.browserAccess?.proxy || localEdgeProxy()} 访问 Internal，完整网络已 ready。`
     };
   } else if (downgrade) {
     runtime.feedback = {
       tone: 'warning',
-      message: `Windows 浏览器 Internal 路径已失效，连接降级为 tunnel-only：${status?.browserAccess?.error || status?.error || 'PAC/local edge 未通过'}`
+      message: process.platform === 'darwin'
+        ? `macOS split DNS 实时验证失败，连接降级为 tunnel-only：${status?.resolverError || status?.error || 'dynamic resolver/local DNS relay 未通过'}`
+        : `Windows 浏览器 Internal 路径已失效，连接降级为 tunnel-only：${status?.browserAccess?.error || status?.error || 'PAC/local edge 未通过'}`
     };
   } else if (browserFallbackChanged && nextState === 'connected') {
     runtime.feedback = browserFallback.active
@@ -3322,7 +3400,9 @@ async function recordSystemDomainProxyDiagnostics(status, touchReason) {
       runtime.connection?.mode === 'employee' ? 'staff:connect' : 'visit:connect',
       promote ? 'connected' : 'failed',
       {
-        reason: promote ? 'windows-browser-path-ready' : 'windows-browser-path-lost',
+        reason: promote
+          ? `${process.platform}-domain-path-ready`
+          : `${process.platform}-domain-path-lost`,
         transitionId: makeRequestId('browser-path')
       }
     );
@@ -4144,7 +4224,7 @@ async function repairDarwinHostRoutesPrivileged(repairs, defaultRoute) {
   if (!gateway || net.isIP(gateway) !== 4 || isDarwinProxyFakeGateway(gateway)) {
     return { ok: false, error: 'physical IPv4 default gateway is unavailable' };
   }
-  const routes = arrayValue(repairs, []).filter((repair) => net.isIP(repair?.target?.address) === 4);
+  const routes = objectList(repairs).filter((repair) => net.isIP(repair?.target?.address) === 4);
   if (routes.length === 0) return { ok: false, error: 'no privileged route repair targets' };
   const commands = routes.map((repair) => {
     const address = repair.target.address;
@@ -4350,6 +4430,12 @@ function classifyDarwinEndpointRoute(route, defaultRoute) {
   const defaultGateway = nullableString(defaultRoute?.gateway);
   const defaultInterfaceName = nullableString(defaultRoute?.interfaceName);
   const defaultSourceAddress = nullableString(defaultRoute?.sourceAddress);
+  if (isDarwinDynamicProxyEndpointRoute({
+    gateway,
+    flags: [...flags]
+  })) {
+    return { stale: false, reason: 'proxy-tun-dynamic-route' };
+  }
   if (gateway && isDarwinProxyFakeGateway(gateway)) {
     return { stale: true, reason: `proxy-fake-gateway:${gateway}` };
   }
@@ -4872,13 +4958,12 @@ function compactSystemDomainProxyStatus(status) {
 }
 
 function systemDomainProxyOwnershipClaim(domains, reverseProxyRoutes) {
-  const installation = runtime?.installation || {};
   const connection = runtime?.connection || {};
   const productId = launcherProductId();
   return {
-    ownerId: `${productId}:${installation.installId || installation.deviceId || 'local'}`,
+    ownerId: standaloneOwnershipOwnerId(),
     productId,
-    instanceId: nullableString(installation.installId) || nullableString(installation.deviceId),
+    instanceId: standaloneOwnershipInstanceId(),
     displayName: launcherProductDisplayName(),
     state: connection.state === 'connecting' ? 'connecting' : 'active',
     priority: 100,
@@ -4905,11 +4990,44 @@ async function upsertStandaloneOwnershipForRoutePlan(
   try {
     const mod = await import('@qpjoy/electron-launcher/standalone-data-plane');
     const claim = mxH2iStandaloneOwnershipClaim(mod, routePlan, connection);
-    const ownershipState = mod.claimElectronLauncherStandaloneOwnershipClaim({
+    const nextClaim = {
       ...claim,
       state: ownerState,
       updatedAt: nowIso()
-    });
+    };
+    let ownershipState = mod.claimElectronLauncherStandaloneOwnershipClaim(nextClaim);
+    if (ownershipState?.claimed === false && process.platform === 'darwin') {
+      const proof = await darwinOwnershipSupersessionProof(reason);
+      const supersedeOwnerIds = darwinSupersedableOwnershipOwnerIds({
+        platform: process.platform,
+        productId: claim.productId,
+        currentOwnerId: claim.ownerId,
+        claims: ownershipState.claims,
+        conflicts: ownershipState.registry?.conflicts,
+        tunnelInactive: proof.tunnelInactive,
+        retainedDataPlaneProven: proof.retainedDataPlaneProven
+      });
+      if (supersedeOwnerIds.length > 0) {
+        const supersedeClaims = objectList(ownershipState.claims)
+          .filter((row) => supersedeOwnerIds.includes(row?.ownerId));
+        ownershipState = mod.claimElectronLauncherStandaloneOwnershipClaim(nextClaim, {
+          supersedeClaims
+        });
+        if (ownershipState.claimed === true) {
+          queueDiagnosticLog(
+            'warning',
+            'standalone-ownership.same-product-adopted',
+            'Recovered an orphaned MX-H2I ownership claim after installation identity changed.',
+            {
+              reason,
+              supersededOwnerIds: ownershipState.supersededOwnerIds,
+              ownerId: claim.ownerId,
+              proof
+            }
+          );
+        }
+      }
+    }
     return compactStandaloneOwnershipState(ownershipState, reason);
   } catch (err) {
     return {
@@ -4917,6 +5035,52 @@ async function upsertStandaloneOwnershipForRoutePlan(
       reason,
       error: errorMessage(err),
       updatedAt: nowIso()
+    };
+  }
+}
+
+async function darwinOwnershipSupersessionProof(reason) {
+  if (reason === 'darwin-retained-data-plane-recovery') {
+    return {
+      retainedDataPlaneProven: true,
+      tunnelInactive: false,
+      source: reason
+    };
+  }
+  if (reason !== 'connect-preflight') {
+    return {
+      retainedDataPlaneProven: false,
+      tunnelInactive: false,
+      source: reason
+    };
+  }
+  try {
+    const mod = await import('@qpjoy/electron-launcher/wireguard');
+    const status = mod.getLauncherWireGuardPeerStatus(wireGuardRuntimeOptions());
+    const launchDaemon = status?.launchDaemon;
+    return {
+      retainedDataPlaneProven: false,
+      tunnelInactive: status?.ok === true
+        && status?.active === false
+        && launchDaemon?.ok === true
+        && launchDaemon?.supported === true
+        && launchDaemon?.installed === false
+        && launchDaemon?.loaded === false
+        && launchDaemon?.running === false,
+      source: reason,
+      statusOk: status?.ok === true,
+      active: status?.active === true,
+      launchDaemonSupported: launchDaemon?.supported === true,
+      launchDaemonInstalled: launchDaemon?.installed === true,
+      launchDaemonLoaded: launchDaemon?.loaded === true,
+      launchDaemonRunning: launchDaemon?.running === true
+    };
+  } catch (err) {
+    return {
+      retainedDataPlaneProven: false,
+      tunnelInactive: false,
+      source: reason,
+      error: errorMessage(err)
     };
   }
 }
@@ -4941,7 +5105,7 @@ function mxH2iStandaloneOwnershipClaim(mod, routePlan, connection) {
   return mod.buildElectronLauncherStandaloneOwnershipClaim(routePlan, {
     ownerId: standaloneOwnershipOwnerId(),
     productId: launcherProductId(),
-    instanceId: nullableString(runtime?.installation?.installId) || nullableString(runtime?.installation?.deviceId),
+    instanceId: standaloneOwnershipInstanceId(),
     displayName: launcherProductDisplayName(),
     priority: 100,
     metadata: {
@@ -4968,8 +5132,12 @@ function productOwnershipRouteCidrs(routePlan, connection = {}) {
   return localIp ? [`${localIp}/32`] : [];
 }
 
+function standaloneOwnershipInstanceId() {
+  return stableOwnershipInstanceId(runtime?.installation || {});
+}
+
 function standaloneOwnershipOwnerId() {
-  return `${launcherProductId()}:${nullableString(runtime?.installation?.installId) || nullableString(runtime?.installation?.deviceId) || 'local'}`;
+  return `${launcherProductId()}:${standaloneOwnershipInstanceId() || 'local'}`;
 }
 
 function compactStandaloneOwnershipState(state, reason) {
@@ -4980,6 +5148,8 @@ function compactStandaloneOwnershipState(state, reason) {
     claimed: state?.claimed !== false,
     reason,
     statePath: nullableString(state?.statePath),
+    supersededOwnerIds: arrayValue(state?.supersededOwnerIds, []),
+    supersessionRejectedReason: nullableString(state?.supersessionRejectedReason),
     owners: Array.isArray(registry.owners)
       ? registry.owners.map((owner) => nullableString(owner?.ownerId)).filter(Boolean)
       : [],
@@ -5031,6 +5201,7 @@ function systemDomainProxyStatusSignature(status) {
   if (!status || typeof status !== 'object') return null;
   return JSON.stringify({
     applied: status.applied === true,
+    verified: status.verified === true,
     skipped: status.skipped === true,
     skipReason: nullableString(status.skipReason),
     pacUrl: nullableString(status.pacUrl),
@@ -5096,6 +5267,9 @@ async function maybeSkipSystemDomainProxyApply(reason, policySignature) {
   const status = typeof systemDomainProxyManager?.status === 'function'
     ? systemDomainProxyManager.status()
     : null;
+  const verified = shouldVerifySystemDomainProxyBeforeBackgroundSkip(reason)
+    ? await systemDomainProxyManager?.statusVerified?.().catch(() => null)
+    : null;
   if (!policyUnchanged && process.platform !== 'win32') return null;
   if (!policyUnchanged && (!status || typeof status !== 'object' || status.applied !== true)) return null;
   if (
@@ -5114,9 +5288,6 @@ async function maybeSkipSystemDomainProxyApply(reason, policySignature) {
     };
   }
   if (!status || typeof status !== 'object') return null;
-  const verified = shouldVerifySystemDomainProxyBeforeBackgroundSkip(reason)
-    ? await systemDomainProxyManager?.statusVerified?.().catch(() => null)
-    : null;
   if (verified && typeof verified === 'object') {
     if (policyUnchanged && systemDomainProxyStatusLooksApplied(verified)) {
       if (
@@ -5229,7 +5400,9 @@ function isBackgroundSystemDomainProxyReason(reason) {
 
 function shouldVerifySystemDomainProxyBeforeBackgroundSkip(reason) {
   if (process.platform === 'win32') return isBackgroundSystemDomainProxyReason(reason);
-  return process.platform === 'darwin' && String(reason || '') === 'route-refresh';
+  // A persisted Darwin state can outlive the in-process PAC/DNS listeners.
+  // Verify every background reuse before treating split DNS as connected.
+  return process.platform === 'darwin' && isBackgroundSystemDomainProxyReason(reason);
 }
 
 function systemDomainProxyStatusLooksApplied(status) {
@@ -5660,6 +5833,10 @@ async function loadRuntime() {
 async function normalizeRuntime(input) {
   const row = input && typeof input === 'object' ? input : {};
   const config = normalizeConfig(row.config);
+  const reconciledUpdate = reconcileRuntimeUpdateWithInstalledVersion(
+    row.update,
+    app.getVersion()
+  );
   return {
     config,
     installation: normalizeInstallation(row.installation),
@@ -5667,7 +5844,7 @@ async function normalizeRuntime(input) {
     connection: normalizeConnection(row.connection),
     identity: normalizeIdentity(row.identity),
     apps: normalizeApps(row.apps),
-    update: normalizeUpdate(row.update, config),
+    update: normalizeUpdate(reconciledUpdate, config),
     launcherContract: await launcherContract(config),
     window: normalizeWindowState(row.window),
     feedback: null,
@@ -5868,6 +6045,7 @@ function normalizeInstallation(input) {
   return {
     installId: nullableString(row.installId),
     deviceId: nullableString(row.deviceId),
+    ownershipInstanceId: stableOwnershipInstanceId(row),
     siteId: stringValue(row.siteId, 'domestic-main'),
     deviceLabel: nullableString(row.deviceLabel),
     keyPair: privateKey && publicKey ? { privateKey, publicKey } : null,
@@ -9832,7 +10010,7 @@ function normalizeUpdate(input, config) {
   const row = input && typeof input === 'object' ? input : {};
   return {
     status: stringValue(row.status, 'idle'),
-    currentVersion: stringValue(row.currentVersion, app.getVersion()),
+    currentVersion: app.getVersion(),
     latestVersion: stringValue(row.latestVersion, app.getVersion()),
     policy: stringValue(row.policy, 'launcher-managed'),
     channel: config.releaseChannel,
@@ -10128,7 +10306,7 @@ async function probeConnectedModeBeforeTransition(mode, reason, options = {}) {
   const systemDomainProxy = result.ready
     ? await ensureSystemDomainProxyForRuntime('manual-connect-guard')
     : null;
-  const ready = result.ready && windowsBrowserAccessReady(systemDomainProxy);
+  const ready = result.ready && systemDomainProxyConnectionReady(systemDomainProxy);
   runtime.connection = {
     ...current,
     state: ready ? result.state : result.ready ? 'tunnel-only' : result.state,
@@ -10198,16 +10376,21 @@ function connectionHasReadyNetworkProof(connection) {
 }
 
 function connectionHasReadyDataPlaneProof(connection) {
+  return connectionHasReadyOverlayProof(connection)
+    && connection?.health?.splitDns === 'ready'
+    && systemDomainProxyConnectionReady(connection?.diagnostics?.systemDomainProxy);
+}
+
+function connectionHasReadyOverlayProof(connection) {
+  return connectionHasReadyOverlayTransportProof(connection)
+    && standaloneOwnershipReady(connection);
+}
+
+function connectionHasReadyOverlayTransportProof(connection) {
   return connection?.health?.wireGuard === 'ready'
     && connection?.wireGuard?.active === true
     && connection?.diagnostics?.route?.ok === true
-    && connection?.diagnostics?.internalApi?.ok === true
-    && connection?.health?.splitDns === 'ready'
-    && (
-      process.platform !== 'win32'
-      || splitDnsDomains(runtime?.config).length === 0
-      || windowsBrowserAccessReady(connection?.diagnostics?.systemDomainProxy)
-    );
+    && connection?.diagnostics?.internalApi?.ok === true;
 }
 
 function idleHealth() {
@@ -10410,7 +10593,7 @@ function normalizeDiagnostics(input) {
       ? row.domesticRelayDiagnostics
       : null,
     systemDomainProxy: row.systemDomainProxy && typeof row.systemDomainProxy === 'object'
-      ? row.systemDomainProxy
+      ? invalidatePersistedDarwinSplitDnsProof(row.systemDomainProxy, process.platform)
       : null,
     standaloneOwnership: row.standaloneOwnership && typeof row.standaloneOwnership === 'object'
       ? row.standaloneOwnership
@@ -10572,9 +10755,12 @@ async function ensureInstallation() {
     keyPair = mod.createLauncherWireGuardKeyPair();
   }
   const now = nowIso();
+  const installId = current.installId || `inst_${productId}_${shortId()}`;
+  const deviceId = current.deviceId || `dev_${productId}_${shortId()}`;
   const installation = {
-    installId: current.installId || `inst_${productId}_${shortId()}`,
-    deviceId: current.deviceId || `dev_${productId}_${shortId()}`,
+    installId,
+    deviceId,
+    ownershipInstanceId: stableOwnershipInstanceId(current) || installId || deviceId,
     siteId: current.siteId,
     deviceLabel: current.deviceLabel || `${launcherProductDisplayName()} Desktop`,
     keyPair,
@@ -10755,7 +10941,7 @@ async function applyNetworkSession(session, options) {
     assertNetworkTransitionCurrent(options.lifecycleEpoch);
     const standaloneOwnership = wireGuardResult.diagnostics?.standaloneOwnershipRegistry || null;
     assertNetworkTransitionCurrent(options.lifecycleEpoch);
-    const browserReady = windowsBrowserAccessReady(systemDomainProxy);
+    const browserReady = systemDomainProxyConnectionReady(systemDomainProxy);
     const ownershipReady = standaloneOwnership?.ok === true;
     const connectionReady = postConnectReady && browserReady && ownershipReady;
     const browserFallback = process.platform === 'win32'
@@ -10826,7 +11012,9 @@ async function applyNetworkSession(session, options) {
         ? '其它流量保持 DIRECT。'
         : '其它流量回落到原系统代理。';
     const pacFeedback = systemDomainProxy?.applied
-      ? systemDomainProxy?.browserAccess?.ready
+      ? process.platform === 'darwin' && systemDomainProxyConnectionReady(systemDomainProxy)
+        ? ` macOS PAC、dynamic split DNS 与本机 DNS relay 已实时验证；${publicTrafficFeedback}${resolverFeedback}`
+        : systemDomainProxy?.browserAccess?.ready
         ? ` 系统 PAC 已将 Internal 域名接入本机 ${localEdgeProxy()}，浏览器 CONNECT 探测通过；${publicTrafficFeedback}${resolverFeedback}`
         : ` 系统 PAC 已写入，但浏览器 Internal 路径未通过：${systemDomainProxy?.browserAccess?.error || 'unknown'}。`
       : systemDomainProxy?.error
@@ -10837,12 +11025,17 @@ async function applyNetworkSession(session, options) {
     const systemDnsFeedback = systemDnsDegraded
       ? ' Windows 系统 DNS 仍受第三方 TUN/DoH 或上游 DNS 影响；浏览器已由 PAC/local edge 兜底，非 PAC 程序保持 degraded。'
       : '';
+    const domainPathError = process.platform === 'darwin'
+      ? systemDomainProxy?.resolverError || systemDomainProxy?.error || 'dynamic resolver/local DNS relay 未通过'
+      : systemDomainProxy?.browserAccess?.error || systemDomainProxy?.error || 'PAC/local edge 未通过';
     runtime.feedback = {
       tone: connectionReady ? 'success' : 'warning',
       message: connectionReady
         ? `${feedback} 客户端 WireGuard 已通过 ${wireGuardPathLabel(wireGuardResult.path)} 探测 Internal。${pacFeedback}${systemDnsFeedback}`
         : postConnectReady
-          ? `${feedback} WireGuard、Internal API 和 NRPT 已就绪，但 Windows 浏览器路径未 ready：${systemDomainProxy?.browserAccess?.error || systemDomainProxy?.error || 'PAC/local edge 未通过'}。${pacFeedback}${systemDnsFeedback}`
+          ? process.platform === 'darwin'
+            ? `${feedback} WireGuard 与 Internal API 已就绪，但 macOS split DNS 尚未实时验证：${domainPathError}。${pacFeedback}`
+            : `${feedback} WireGuard、Internal API 和 NRPT 已就绪，但 Windows 浏览器路径未 ready：${domainPathError}。${pacFeedback}${systemDnsFeedback}`
           : `${feedback} 已保留租约，但客户端 WireGuard 还未 ready：${wireGuardResult.message}`
     };
     touchRuntime(connectionReady
@@ -10877,7 +11070,7 @@ async function applyNetworkSession(session, options) {
         'failed',
         {
           reason: postConnectReady
-            ? systemDomainProxy?.browserAccess?.error || systemDomainProxy?.error || 'windows-browser-path-not-ready'
+            ? domainPathError
             : wireGuardResult.message,
           transitionId: options.transitionId
         }
@@ -11226,9 +11419,7 @@ async function probeWireGuardForConnection(input) {
       && (process.platform !== 'win32' || windowsDnsResolution?.ready === true);
     const systemDomainProxy = connection.diagnostics?.systemDomainProxy || null;
     const browserAccess = systemDomainProxy?.browserAccess || null;
-    const browserReady = process.platform !== 'win32'
-      || splitDnsDomains(runtime?.config).length === 0
-      || windowsBrowserAccessReady(systemDomainProxy);
+    const browserReady = systemDomainProxyConnectionReady(systemDomainProxy);
     const splitDnsReady = process.platform === 'win32'
       ? windowsSplitDnsPathReady({
           nrptReady: windowsNrptReadyForConnection(windowsNrpt),
@@ -11631,6 +11822,9 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
           && wireGuardResult.diagnostics?.windowsDnsResolution?.proof === 'system-dns-lookup'
           && wireGuardResult.diagnostics.windowsDnsResolution.ready !== true
           && !windowsBrowserAccessReady(connection.diagnostics?.systemDomainProxy)
+        ) || (
+          process.platform === 'darwin'
+          && !systemDomainProxyConnectionReady(connection.diagnostics?.systemDomainProxy)
         );
         const preserveConnected = !manual
           && connection.state === 'connected'
@@ -12748,13 +12942,19 @@ function retainedOverlayBootstrapBaseUrl(config) {
 function shouldPreferRetainedOverlayBootstrap(connection) {
   if (!connection) return false;
   if (!['connected', 'tunnel-only', 'connecting'].includes(connection.state)) return false;
-  return connectionHasReadyDataPlaneProof(connection);
+  // Bootstrap can use the already-proven Internal overlay while split DNS is
+  // or ownership registry is precisely the layer being repaired. This is a
+  // read-only transport decision; final connected readiness still gates both.
+  return connectionHasReadyOverlayTransportProof(connection);
 }
 
 function shouldAllowPrivilegedPreBootstrapRecovery() {
   const override = nullableString(process.env.MX_H2I_PREBOOTSTRAP_PRIVILEGED_RECOVERY);
   if (override) return !['0', 'false', 'no', 'off'].includes(override.toLowerCase());
-  return process.platform === 'win32';
+  // This path runs only after an explicit Connect/Login action. Background
+  // network and wake watchers continue to probe without privilege, while a
+  // foreground macOS repair may legitimately surface the system password UI.
+  return process.platform === 'win32' || process.platform === 'darwin';
 }
 
 function bootstrapResolveAttempts(candidate, config) {
@@ -13519,6 +13719,19 @@ function diagnosticBundleSummary(networkDiagnostics) {
       release: require('node:os').release(),
       arch: process.arch,
       packaged: app.isPackaged
+    },
+    update: {
+      runningVersion: app.getVersion(),
+      currentVersion: runtime?.update?.currentVersion || null,
+      latestVersion: runtime?.update?.latestVersion || null,
+      status: runtime?.update?.status || null,
+      updateAvailable: runtime?.update?.updateAvailable === true,
+      lastCheckedAt: runtime?.update?.lastCheckedAt || null
+    },
+    ownership: {
+      ownerId: standaloneOwnershipOwnerId(),
+      installationId: runtime?.installation?.installId || null,
+      ownershipInstanceId: standaloneOwnershipInstanceId()
     },
     connection: {
       state: connection.state,

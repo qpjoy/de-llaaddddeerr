@@ -6,8 +6,11 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const {
   DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS,
+  darwinSupersedableOwnershipOwnerIds,
+  isDarwinDynamicProxyEndpointRoute,
   retainedGuestRecoveryDecision,
   shouldRepairDarwinRetainedOwnership,
+  stableOwnershipInstanceId,
   wireGuardRecoveryGate,
   wireGuardRecoveryTurn
 } = require('../src/network-recovery-policy.cjs');
@@ -215,6 +218,88 @@ assert.equal(
   false,
   'a retained tunnel must not claim ownership without complete route and Internal API proof'
 );
+assert.equal(
+  shouldRepairDarwinRetainedOwnership({
+    ...retainedDataPlaneProof,
+    platform: 'darwin',
+    splitDnsReady: false
+  }),
+  true,
+  'a proven retained tunnel must recover its ownership before split DNS can be repaired'
+);
+assert.equal(
+  stableOwnershipInstanceId({
+    ownershipInstanceId: 'stable-owner',
+    installId: 'server-replaced-install',
+    deviceId: 'device'
+  }),
+  'stable-owner',
+  'server lease refreshes must not change the local cross-process ownership identity'
+);
+assert.equal(
+  stableOwnershipInstanceId({ installId: 'legacy-install', deviceId: 'device' }),
+  'legacy-install',
+  'an older runtime must migrate its existing installation identity once'
+);
+assert.equal(
+  isDarwinDynamicProxyEndpointRoute({
+    gateway: '198.18.0.1',
+    flags: ['UP', 'GATEWAY', 'HOST', 'DONE', 'WASCLONED', 'IFSCOPE']
+  }),
+  true,
+  'a Clash-generated cloned host route is live proxy state, not a stale static bypass'
+);
+assert.equal(
+  isDarwinDynamicProxyEndpointRoute({
+    gateway: '198.18.0.1',
+    flags: ['UP', 'GATEWAY', 'HOST', 'STATIC']
+  }),
+  false,
+  'a static fake-gateway host route remains eligible for explicit repair'
+);
+const staleMxOwner = {
+  ownerId: 'mx-h2i:old',
+  productId: 'mx-h2i',
+  metadata: { dataPlaneOwner: true }
+};
+const unrelatedLuopanOwner = {
+  ownerId: 'luopan:compass',
+  productId: 'luopan',
+  metadata: { dataPlaneOwner: true }
+};
+const selfConflict = [{
+  resource: 'route-cidr',
+  key: '10.89.0.0/16',
+  owners: ['mx-h2i:old', 'mx-h2i:new']
+}];
+assert.deepEqual(
+  darwinSupersedableOwnershipOwnerIds({
+    platform: 'darwin',
+    productId: 'mx-h2i',
+    currentOwnerId: 'mx-h2i:new',
+    claims: [staleMxOwner, unrelatedLuopanOwner],
+    conflicts: selfConflict,
+    tunnelInactive: true
+  }),
+  ['mx-h2i:old'],
+  'an inactive Darwin data plane may replace only the conflicting old claim from the same product'
+);
+assert.deepEqual(
+  darwinSupersedableOwnershipOwnerIds({
+    platform: 'darwin',
+    productId: 'mx-h2i',
+    currentOwnerId: 'mx-h2i:new',
+    claims: [staleMxOwner, unrelatedLuopanOwner],
+    conflicts: [{
+      resource: 'route-cidr',
+      key: '10.89.0.0/16 <> 10.91.0.0/16',
+      owners: ['mx-h2i:new', 'luopan:compass']
+    }],
+    tunnelInactive: true
+  }),
+  [],
+  'a real cross-product conflict must never be adopted away'
+);
 assert.ok(
   DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS > 90_000,
   'the client must outlive the server default SSH connect plus execution timeout'
@@ -253,6 +338,31 @@ assert.match(
   source,
   /shouldRepairDarwinRetainedOwnership\(\{[\s\S]*?upsertStandaloneOwnershipForRoutePlan\([\s\S]*?'darwin-retained-data-plane-recovery'/,
   'a proven retained macOS tunnel must atomically reconstruct its ownership claim'
+);
+assert.match(
+  source,
+  /'standalone-ownership\.same-product-adopted'[\s\S]*?supersededOwnerIds: ownershipState\.supersededOwnerIds/,
+  'same-product adoption must report the committed result without throwing after the atomic claim'
+);
+assert.match(
+  source,
+  /objectList\(repairs\)[\s\S]*?repair\?\.target\?\.address/,
+  'the privileged Darwin route helper must preserve repair objects instead of stringifying them'
+);
+assert.match(
+  source,
+  /function systemDomainProxyStatusSignature\(status\)[\s\S]*?verified: status\.verified === true/,
+  'verified Darwin split-DNS state must invalidate an older unverified UI signature'
+);
+assert.match(
+  source,
+  /process\.platform === 'darwin' && isBackgroundSystemDomainProxyReason\(reason\)/,
+  'Darwin must verify persisted PAC and split-DNS listeners before every background reuse'
+);
+assert.match(
+  source,
+  /function shouldPreferRetainedOverlayBootstrap\(connection\)[\s\S]*?return connectionHasReadyOverlayTransportProof\(connection\);/,
+  'a proven retained overlay must remain usable for bootstrap while split DNS or ownership is being repaired'
 );
 assert.match(
   source,
@@ -303,6 +413,14 @@ assert.match(
   handler,
   /retainedRecovery\?\.authorizationCanceled === true[\s\S]*reason: 'authorization-canceled'[\s\S]*return visibleRuntime\(\);/,
   'canceling retained repair must return without a second UAC attempt'
+);
+const staffHandlerStart = source.indexOf("ipcMain.handle('mx-h2i:login-employee'");
+const staffHandlerEnd = source.indexOf("ipcMain.handle('mx-h2i:disconnect'", staffHandlerStart);
+const staffHandler = source.slice(staffHandlerStart, staffHandlerEnd);
+assert.match(
+  staffHandler,
+  /retainedRecovery\?\.authorizationCanceled === true[\s\S]*reason: 'authorization-canceled'[\s\S]*return visibleRuntime\(\);/,
+  'canceling retained macOS repair must stop employee authentication and avoid a second password prompt'
 );
 
 const recoveryIndex = handler.indexOf("recoverRetainedWireGuardBeforeBootstrap('guest-pre-bootstrap'");

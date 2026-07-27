@@ -359,9 +359,11 @@ export async function connectLauncherWireGuardPeer(
     const status = await waitForLauncherWireGuardStatus(runtime, peer.configPath);
     const missingRoutes = Array.isArray(status?.missingRoutes) ? status.missingRoutes.length : 0;
     const ok = launchDaemon.ok === true && status?.active === true && missingRoutes === 0;
-    if (launchDaemon.ok || isDarwinAuthorizationCancelled(launchDaemon) || input.fallbackToAppManaged === false) {
+    const authorizationCanceled = isDarwinAuthorizationCancelled(launchDaemon);
+    if (launchDaemon.ok || authorizationCanceled || input.fallbackToAppManaged === false) {
       return {
         ok,
+        authorizationCanceled,
         action,
         peer,
         runtime,
@@ -599,9 +601,11 @@ export async function recoverLauncherWireGuardPeer(
     const nextStatus = await waitForLauncherWireGuardStatus(runtime, configPath);
     const nextMissingRouteCount = Array.isArray(nextStatus?.missingRoutes) ? nextStatus.missingRoutes.length : 0;
     const ok = launchDaemon.ok === true && nextStatus?.active === true && nextMissingRouteCount === 0;
-    if (launchDaemon.ok || isDarwinAuthorizationCancelled(launchDaemon) || input.fallbackToAppManaged === false) {
+    const authorizationCanceled = isDarwinAuthorizationCancelled(launchDaemon);
+    if (launchDaemon.ok || authorizationCanceled || input.fallbackToAppManaged === false) {
       return {
         ok,
+        authorizationCanceled,
         action: 'launchdaemon-recover',
         recoveryReason: input.reason ?? null,
         configPath,
