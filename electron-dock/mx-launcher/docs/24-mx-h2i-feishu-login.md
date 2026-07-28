@@ -227,8 +227,8 @@ User Center 管理、SDK users/roles/service-accounts 管理、Launcher Network 
 - Internal 进程只从 `MX_INTERNAL_OPS_TOKEN` 读取期望值；
 - 运维 HTTP 请求通过 `x-mx-ops-token` header 提交；
 - 变量未配置时受保护接口 fail closed，错误凭据也不会退化为只依赖网络隔离；
-- SDK `client_credentials` 当前把同一个值作为 `client_secret` 校验，它不是任意字符串，
-  也不是每个 service account 已经独立轮换的 secret；
+- 产品 SDK `client_credentials` 使用每个 service account 独立配置的 secret；只有内置
+  `svc_sdk_gateway` 暂时保留复用 Internal ops token 的兼容 fallback；
 - Admin UI 的 `Internal Ops Token` 密码框只保存在当前页面内存中，不写入
   `localStorage`、MX-H2I runtime 或构建产物；刷新/重启后必须重新输入。
 
@@ -512,7 +512,9 @@ capability。扩大飞书可用范围应在上述技术和网络验收全部完�
 | `MX_FEISHU_AUTHORIZE_URL` | 否 | `https://accounts.feishu.cn/open-apis/authen/v1/authorize` | 正常生产不要覆盖 |
 | `MX_FEISHU_TOKEN_URL` | 否 | `https://open.feishu.cn/open-apis/authen/v2/oauth/token` | 正常生产不要覆盖 |
 | `MX_FEISHU_USER_INFO_URL` | 否 | `https://open.feishu.cn/open-apis/authen/v1/user_info` | 正常生产不要覆盖 |
-| `MX_INTERNAL_OPS_TOKEN` | 是 | Secret，至少 32 字符 | Internal 管理 API、Admin UI 与 SDK `client_credentials` 的 bootstrap 运维凭据 |
+| `MX_INTERNAL_OPS_TOKEN` | 是 | Secret，至少 32 字符 | Internal 管理 API、Admin UI；仅内置 `svc_sdk_gateway` 保留 client_credentials 兼容 fallback |
+| `MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON` | 产品集成时是 | Secret JSON | serviceAccountId → 独立 client secret；K8s 从 `mx-sdk-service-account-secrets/secrets.json` 注入 |
+| `MX_SDK_SERVICE_ACCOUNT_SECRETS_FILE` | 否 | 文件路径 | 非 K8s 环境可从受保护文件读取同一 JSON；inline JSON 优先 |
 | `MX_LAUNCHER_NETWORK_LEGACY_UNAUTHENTICATED_USER_LEASES` | 否 | `0` | 仅供旧密码客户端短期迁移；生产默认关闭 |
 | `MX_LAUNCHER_NETWORK_HANDOVER_TTL_MS` | 否 | `300000` | 两阶段 peer handover 的服务端 deadline；过期后自动走 abort 对账 |
 | `MX_LAUNCHER_NETWORK_HANDOVER_RECONCILE_MS` | 否 | `30000` | 服务端扫描过期/`abort-pending` handover 的周期 |
@@ -549,27 +551,32 @@ Internal Deployment 还从独立 Secret `mx-internal-shadow/mx-internal-ops` 的
 
 以下相对路径命令均从 `electron-dock/mx-launcher` 目录执行。
 
-### 7.1 创建或轮换 Secret
+### 7.1 由正常 deploy 自动 ensure
 
-先确保 namespace 存在：
+把三项敏感值写入 Internal 主机上被 gitignore 的 `server/.env`，不要放在 shell 参数中：
 
-```bash
-kubectl apply -f deploy/k8s/internal-shadow/00-namespace.yaml
+```dotenv
+MX_FEISHU_APP_ID=<FEISHU_APP_ID>
+MX_FEISHU_APP_SECRET=<FEISHU_APP_SECRET>
+MX_FEISHU_ALLOWED_TENANT_KEYS=<TENANT_KEY_1>[,<TENANT_KEY_2>]
 ```
 
-使用占位符执行以下命令；不要把真实值写进文档或 Git：
+然后只运行正常部署：
 
 ```bash
-kubectl -n mx-internal-shadow create secret generic mx-feishu-oauth \
-  --from-literal=app-id='<FEISHU_APP_ID>' \
-  --from-literal=app-secret='<FEISHU_APP_SECRET>' \
-  --from-literal=tenant-keys='<TENANT_KEY_1>[,<TENANT_KEY_2>]' \
-  --dry-run=client -o yaml \
-  | kubectl apply -f -
+chmod 600 server/.env
+bash scripts/manage.sh ops internal-production deploy
 ```
 
-真实生产环境优先由现有 Secret Manager/受控终端注入，避免真实值进入 shell history。
-Secret 更新后必须重启 Deployment，因为 `valueFrom.secretKeyRef` 只在 Pod 创建时读取。
+脚本不会执行 `.env`，只读取白名单变量。调用进程 env 优先于文件；未配置的 key 保留
+`mx-feishu-oauth` 现值，因此只轮换 App Secret 也不会清空 App ID 或 tenant allowlist。
+合并后若三项仍不完整、tenant 为空或含通配符，整个 Secret 预检失败，并在任何 Internal
+Deployment 更新前停止。数据与受管元数据未变化时不写 Secret；发生变化时按 Secret 的
+非敏感 `resourceVersion` 自动触发并等待 API rollout。
+
+没有配置任何飞书项且集群没有该 Secret 时，部署仍可继续，飞书模块保持 fail closed。若由
+ExternalSecret/KMS 管理，`server/.env` 中不要填写飞书三项；deploy 会采用并严格检查已经
+物化的 Secret。
 
 只检查 key 名，不输出内容：
 
@@ -592,13 +599,14 @@ tenant-keys
 `mx-internal-ops`，顺序如下：
 
 1. 若调用环境显式提供 `MX_INTERNAL_OPS_TOKEN`，使用该值；
-2. 否则复用集群中现有 `mx-internal-ops/token`；
-3. 两者都不存在时，生成 32 随机字节的 base64url token。
+2. 否则读取 `server/.env` 中的同名值；
+3. 否则复用集群中现有 `mx-internal-ops/token`；
+4. 都不存在时，生成 32 随机字节的 base64url token。
 
 显式值少于 32 字符时部署会停止。无需自定义时不要在 shell history 中手写 token；让脚本
-生成并复用即可。需要轮换时，从 Secret Manager/受控环境注入新值后重新 deploy，并确保
-Deployment rollout 完成。`k8s down` 会删除该 Secret；下一次无显式值的 deploy 会生成新
-token，现有 Admin UI 页面和 service account 集成必须重新取值。
+生成并复用即可。需要轮换时，在受控的 `server/.env` 更新值后重新 deploy；脚本会自动
+触发 rollout。日常 `k8s down` 会保留该 Secret，避免 Admin UI 与内置兼容 service account
+无故失效；只有显式 rotation/purge 才应更换 token。
 
 只检查 Secret 是否存在和 key 名：
 
@@ -625,7 +633,8 @@ closed。这样 `internal-production deploy` 重放 ConfigMap 时不会清空已
 中的正式租户配置。固定 redirect URI 与自动建号开关由仓库 ConfigMap 管理，正式环境不
 需要部署后的临时 patch。
 
-Secret 或 ConfigMap 变化后重启并等待：
+标准 deploy 会按 Secret `resourceVersion` 自动触发并等待 rollout，无需再执行下面命令。只有绕过
+部署脚本、由外部 controller 直接更新 Secret/ConfigMap 时，才需要显式重启：
 
 ```bash
 kubectl -n mx-internal-shadow rollout restart deployment/mx-launcher-internal
@@ -705,8 +714,8 @@ vhost 配到现有 V1 owner 时必须逐项等价迁移，不能只写一条通�
 （限额分别为 60、25、10）；账号不存在、被禁用或密码错误统一返回
 `invalid credentials`，超限统一返回 `429`。原始 IP、账号和密码不存入 limiter state。
 `client_credentials` 仍复用同一路径，但只允许 Internal 控制面调用；经
-`domestic-edge` 的请求会在比较 `MX_INTERNAL_OPS_TOKEN` 前拒绝，避免把平台 bootstrap
-运维凭据暴露为公网撞库目标。
+`domestic-edge` 的请求会在比较任何 service account secret 前拒绝，避免把产品或平台
+凭据暴露为公网撞库目标。
 
 无论谁拥有 443，都必须以原域名校验证书、SNI 和 Host。Host Resolve/直连 IP 只是把拨号
 地址固定到 Domestic IP，客户端仍保留 `h2i.minsight-ai.com` 的 TLS SNI 与 HTTP Host，

@@ -8,6 +8,11 @@ launcher 从旧版本升级到新版本，例如 MX-H2I `2.0.1 -> 2.0.3`。客�
 同一套流程按 `productId + channel + platform + arch` 隔离，因此也可用于 Luopan 或其他
 standalone launcher。
 
+本文的 Admin/CLI 路径面向平台操作员。Luopan 或其他产品 CI 应使用产品隔离的
+[Release Center 开发者 API](./25-release-center-developer-api.md)：service account
+只获得 release scopes 和自己的 `allowedProductIds`，用户端仍使用既有 Consumer
+check/history/report/download 接口。
+
 ## 1. 发版模型
 
 一个可下载版本由两部分组成：
@@ -59,12 +64,15 @@ gitignore，不要提交；AccessKey 轮换后只更新该文件并重新运行�
 地址；客户端下载时先到 Internal，再 302 到一条短期 OSS 签名 URL。只有配置了公开读
 CDN 时才填写 public base URL。
 
-`internal-production deploy` 会在构建镜像后执行以下动作：
+`internal-production deploy` 会在构建镜像前先完成 Secret 预检，并在应用 workload 前执行：
 
-1. 只从 `server/.env` 提取 `MX_RELEASE_OSS_*`，不会把其他密码复制到 Secret；
-2. 校验 endpoint、bucket、必填凭据和 signed URL TTL；
-3. 幂等创建或更新 `mx-internal-shadow/mx-release-oss`；
-4. Secret 内容版本变化时触发 Internal Deployment rollout；
+1. 统一预检 `server/.env` 的 Secret 白名单；OSS materializer 只管理
+   `mx-release-oss` 中 8 个 `MX_RELEASE_OSS_*` key，不会混入其他凭据；
+2. 与已有 Secret 按显式 key 合并，保留省略项和 unknown data key，再校验 endpoint、
+   bucket、必填凭据和 signed URL TTL；
+3. 首次原子创建，更新时携带已观察到的 `resourceVersion` replace；并发修改会安全失败，
+   修复或确认后重跑；
+4. Secret 的非敏感 `resourceVersion` 变化时触发 Internal Deployment rollout；
 5. 全新集群中 Secret 不存在时也会由同一条 deploy 命令重新创建。
 
 正式部署仍只需：
@@ -80,9 +88,11 @@ bash scripts/manage.sh ops internal-production deploy
 
 `MX_RELEASE_OSS_SECRET_SOURCE` 支持：
 
-- `env`：生产推荐的当前落地；必须由 `server/.env` 提供完整配置，每次 deploy 都可恢复；
-- `auto`：有完整 `.env` 就同步，否则保留集群内已有 Secret；
-- `external`：等待 KMS/Vault controller 生成 `mx-release-oss`，部署脚本不覆盖；
+- `env`：声明式合并显式值；已有 Secret 时可只轮换一个 key。空的
+  `SECURITY_TOKEN/PUBLIC_BASE_URL` 表示显式清空；首次创建仍须提供四个必填值；
+- `auto`：非破坏性合并非空值，空白占位符和省略项保留集群现值；
+- `external`：等待 KMS/Vault controller 生成 `mx-release-oss`，部署脚本不覆盖，但会严格
+  校验 8 个已知 key；
 - `disabled`：部署脚本不创建、更新或删除 OSS Secret；若集群已有 Secret，Pod 仍可读取它。
 
 ## 2.1 Config Center / Secret Center 边界
@@ -125,21 +135,25 @@ Consumers:       只列实际读取它的 server/worker/app service account
 后台上传后使用固定布局：
 
 ```text
-<prefix>/<productId>/<channel>/<version>/<platform>/<arch>/<releaseId>/<fileName>
+<prefix>/<productId>/<channel>/<version>/<platform>/<arch>/<releaseId>/<sha256hex>/<fileName>
 ```
 
 示例：
 
 ```text
 mx-launcher/releases/mx-h2i/stable/2.0.3/darwin/universal/
-  mx-h2i-darwin-universal-2.0.3-20260722-123456/MX-H2I-2.0.3-mac-universal.dmg
+  mx-h2i-darwin-universal-2.0.3-20260722-123456/<sha256hex>/MX-H2I-2.0.3-mac-universal.dmg
 
 mx-launcher/releases/mx-h2i/stable/2.0.3/win32/x64/
-  mx-h2i-win32-x64-2.0.3-20260722-123501/MX-H2I-Setup-2.0.3.exe
+  mx-h2i-win32-x64-2.0.3-20260722-123501/<sha256hex>/MX-H2I-Setup-2.0.3.exe
 
-mx-launcher/releases/luopan/stable/0.1.1/darwin/arm64/
-  luopan-darwin-arm64-0.1.1-20260722-123600/Luopan-0.1.1-arm64.dmg
+mx-launcher/releases/luopan/shadow/0.1.1/darwin/arm64/
+  luopan-darwin-arm64-0.1.1-20260722-123600/<sha256hex>/Luopan-0.1.1-arm64.dmg
 ```
+
+`sha256hex` 由服务端读取上传内容后计算，使用完整 64 位十六进制摘要。这样同一
+product/version/releaseId/fileName 的不同内容会落到不同对象，不能覆盖已经通过 gate 的
+artifact；相同摘要对应相同内容寻址路径。
 
 OSS 控制台需要做的操作只有：
 
@@ -250,6 +264,10 @@ Architecture  x64
 
 ## 6. CLI 等价操作
 
+下面两个 MX-H2I 示例走平台 Admin 兼容路由，执行 shell 必须由 Secret Manager 注入
+`MX_INTERNAL_OPS_TOKEN`；脚本只把它放入 `x-mx-ops-token`，不会打印。产品开发者不要
+获得这个 token，应使用后面的 scoped client credentials。
+
 macOS universal：
 
 ```bash
@@ -285,17 +303,30 @@ pnpm --dir electron-dock/mx-launcher/server release:publish -- `
   --e2e-result passed
 ```
 
-Luopan 只需把 `--product` 和文件/版本替换为 Luopan：
+Luopan 当前固定使用 `channel=shadow`，而不是 MX-H2I 示例中的 `stable`。产品开发者
+应在受保护的 Internal CI 使用账号独立的 `client_credentials`；完整的 artifactId、
+定向验证、gate 和全量流程见 [docs/25](./25-release-center-developer-api.md)：
 
 ```bash
+export MX_RELEASE_CLIENT_ID=svc_luopan_release_ci
+# MX_RELEASE_CLIENT_SECRET 由 CI secret store 注入。
 pnpm --dir electron-dock/mx-launcher/server release:publish -- \
-  --base-url http://192.168.1.4:18090 \
-  --product luopan --kind installer --storage oss \
+  --base-url http://10.88.100.3:18090 \
+  --product luopan --kind installer \
   --platform darwin --arch arm64 \
   --artifact <Luopan-arm64.dmg> \
   --current-version 0.1.0 --version 0.1.1 \
-  --channel stable --e2e-result passed
+  --channel shadow --e2e-result running
 ```
+
+先由 CI/受控验证机完成 digest、签名、安装与启动 smoke，再用 approve scope 过定向
+gate；新 plan 的 gate 对外为 blocked（内部 E2E run 仍在 running），Consumer 也返回
+blocked。gate passed 后才让圈定的 Luopan 客户端真机升级并回报，再按 docs/25 建立
+全量计划。
+
+脚本默认只创建待验证 plan。若自动加 `--approve`，必须提供结构化
+`--approval-evidence <json-file>`；全量计划还必须加 `--confirm-full-rollout`。不要把
+client secret 放进命令行，CI 只通过 `MX_RELEASE_CLIENT_SECRET` 注入。
 
 ## 7. 客户端验收
 

@@ -10,6 +10,10 @@ const builtinProviders = await store.listSecretProviderConfigs();
 const builtinReferences = await store.listConfigSecretReferences();
 assert(builtinProviders.some((provider) => provider.providerId === 'secretprov_kubernetes_runtime'), 'missing builtin Kubernetes provider');
 assert(builtinReferences.some((reference) => reference.secretRefId === 'secretref_release_oss'), 'missing builtin release OSS reference');
+assert(
+  builtinReferences.some((reference) => reference.secretRefId === 'secretref_sdk_service_account_credentials'),
+  'missing builtin SDK service-account credential reference'
+);
 
 await controller.upsertSecretProvider({
   providerId: 'secretprov_alibaba_kms',

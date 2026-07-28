@@ -44,25 +44,57 @@ Compose 里环境变量都写在一个 service 下。K8s 中要拆开：
   `mx-internal-ops/token` 注入 `MX_INTERNAL_OPS_TOKEN`；调用方通过
   `x-mx-ops-token` header 提交，不能把它放入 ConfigMap。
 
-`manage.sh k8s apply internal-shadow` 会从本地环境变量生成数据库 Secret，不把密码写进
-git：
+正式 Internal 可以把所有受支持的敏感输入集中写在被 gitignore 的
+`server/.env`，然后只运行正常部署命令：
 
 ```bash
-PG_USER=mx_internal PG_PASSWORD=... PG_DB=mx_internal_shadow \
-  bash scripts/manage.sh k8s apply internal-shadow
+chmod 600 server/.env
+bash scripts/manage.sh ops internal-production deploy
 ```
 
-同一流程会在应用 Deployment 前创建或复用 `mx-internal-ops`：显式
-`MX_INTERNAL_OPS_TOKEN` 优先，其次复用现有 Secret；都不存在时生成 32 随机字节的
-base64url token。显式值至少 32 字符。日常重放 deploy 不会无故轮换现有值，但
-`k8s down` 会删除这个 Secret，下一次 deploy 会生成新值，Admin UI 与
-`client_credentials` 集成必须重新取值。不要把 token 写入命令行、Git 或部署日志。
+部署脚本只解析已知变量，不会 `source` 或执行 `.env`。调用进程中的同名环境变量优先于
+文件；文件中省略的值保留集群现有 key。文件存在时必须是 regular file，且 POSIX 权限不能
+向 group/other 开放（通常为 `0600`），否则 fail closed。统一输入不会把凭据合并成一个大
+Secret，运行时仍按权限和轮换边界物化为：
 
-只检查 Secret/key 是否存在（不输出值）：
+| K8s Secret | `server/.env` 输入 | ensure 行为 |
+| --- | --- | --- |
+| `mx-launcher-db` | `PG_USER`、`PG_PASSWORD`、`PG_DB` | 首次创建；已有值未配置时保留。现有数据库的身份/密码与显式值不一致时停止，不隐式轮换数据库 |
+| `mx-internal-ops` | `MX_INTERNAL_OPS_TOKEN` | 显式值至少 32 字符；省略则复用，首次没有时生成随机值 |
+| `mx-feishu-oauth` | `MX_FEISHU_APP_ID`、`MX_FEISHU_APP_SECRET`、`MX_FEISHU_ALLOWED_TENANT_KEYS` | 与现有 key 合并后必须三项完整；tenant allowlist 拒绝空值和通配符 |
+| `mx-sdk-service-account-secrets` | `MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON` | `secrets.json` 是完整 canonical map；配置时整体替换，绝不按账号自动 merge |
+| `mx-release-oss` | `MX_RELEASE_OSS_*` | 保留 `auto/env/external/disabled`；显式非空 key 与现值合并，未配置 key 和额外 data key 原样保留，最终严格校验 8 个已知 key。`env` 模式下空的 STS token/public URL 表示显式清空 |
+
+`DATABASE_HOST` 与编码后的 `DATABASE_URL` 由部署流程按实际 Postgres endpoint 维护，不需要
+手填。若 PostgreSQL PVC、同名保留型 PV，或 hostPath 中的
+`pgdata/PG_VERSION` / `pgdata/base` 存在、但 `mx-launcher-db` 丢失，脚本拒绝随机生成
+密码；必须恢复原 Secret，或在私有 `server/.env` 中同时提供原始 `PG_USER`、
+`PG_PASSWORD`、`PG_DB`。三项缺一仍 fail closed，否则保留的数据无法认证。所有
+本地配置和已有 Secret 契约会先整体校验，再 apply 任何 Secret；某一项错误会在 Migration
+Job 和 Internal Deployment 之前停止。Kubernetes 不提供跨多个 Secret 的事务，所以
+API/RBAC 故障仍可能造成部分 apply，但流程是幂等的，修复问题后可安全重跑。
+
+Secret 更新后，脚本会对其非敏感 `resourceVersion` 元组生成 rollout version，更新 Pod
+template annotation 并等待 rollout；Deployment 上不会暴露可供离线猜测的 Secret 内容
+摘要，也不再需要手工 `kubectl rollout restart`。`.env` 不会复制进镜像，部署日志、kubectl
+参数和状态摘要也不输出明文。可用 `MX_SERVER_ENV_FILE=/secure/path/internal.env` 覆盖
+默认文件路径。
+
+`k8s down` 会和 PVC 一起保留全部 runtime Secret；否则保留的 PostgreSQL 数据会与新生成
+密码失配，Internal ops 客户端也会无故失效。产品 service account 使用
+`mx-sdk-service-account-secrets/secrets.json` 中的账号独立 secret，不随
+`mx-internal-ops` 轮换。需要销毁数据或凭据时应走单独、显式的 purge/rotation 流程，不能
+把日常 `down` 当作清密钥操作。
+
+只检查所有 Secret 的 key 名（不输出值）：
 
 ```bash
-kubectl -n mx-internal-shadow get secret mx-internal-ops \
-  -o go-template='{{range $key, $_ := .data}}{{$key}}{{"\n"}}{{end}}'
+for name in mx-launcher-db mx-internal-ops mx-feishu-oauth \
+  mx-release-oss mx-sdk-service-account-secrets; do
+  kubectl -n mx-internal-shadow get secret "$name" \
+    -o go-template='{{.metadata.name}}{{": "}}{{range $key, $_ := .data}}{{$key}}{{" "}}{{end}}{{"\n"}}' \
+    2>/dev/null || true
+done
 ```
 
 Admin UI 侧栏的 `Internal Ops Token` 密码框只保存在当前页面会话；刷新或重启后清空。
@@ -490,6 +522,10 @@ containerd endpoint 下的 apiserver/etcd 最近日志以及 kubelet journal，�
 `--reinit` 会备份旧 `/etc/kubernetes` 和 `/var/lib/etcd` 到 `/data/mx-backup/<timestamp>`，
 停止 kubelet，执行 `kubeadm reset`，清理旧控制面监听端口和 CNI 残留，然后重新初始化。
 它不会删除 `/var/lib/mx-launcher`，因此 MX 的 hostPath/PVC 数据仍会被后续 deploy 复用。
+但 etcd 中的 K8s Secret 会随重建丢失：运行 `reinit-kubeadm` 前必须先把原始
+`PG_USER`、`PG_PASSWORD`、`PG_DB` 三项写入权限为 `0600` 的 `server/.env`（或通过同名
+进程 env 提供）。命令会在 reset 前验证三项完整；若旧 API/Secret 仍可读，还会核对三项
+与现值一致。后续 deploy 检测到旧 PGDATA 而没有完整恢复凭据时会停止，不会用随机密码覆盖。
 
 如果 `kubeadm init` 仍报 `Port-6443`、`Port-10259`、`Port-10257`、`Port-2379`
 或 `Port-2380` in use，说明 reset 后旧控制面静态 Pod 仍在监听。可以手动清掉这些旧监听再重试：

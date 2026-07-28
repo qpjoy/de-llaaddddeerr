@@ -2,7 +2,8 @@
 
 > Taking over Luopan for real product development? Start with
 > [HANDOFF.md](HANDOFF.md) — registered network values, hard boundaries,
-> npm/local dev modes, and acceptance criteria live there.
+> npm/local dev modes, and acceptance criteria live there. For CI publishing,
+> use the scoped [Release Center developer API](../../docs/25-release-center-developer-api.md).
 
 Luopan is a business Electron app demo for MX Launcher. It uses Quasar/Vue for
 the application shell and consumes `@qpjoy/electron-launcher` from Electron main
@@ -68,6 +69,15 @@ runtime fully synchronized, stores the returned YAML through the shared tunnel
 runtime, starts mihomo, and connects an isolated Electron test session to the
 local mixed proxy. The login token is kept in memory and is never copied into
 the subscription URL, SQLite record, renderer state, or `.env`.
+
+The desktop app is only a Release Consumer. It checks and reports through the
+existing product-VIP endpoints and must never contain a Publisher client secret.
+Runtime checks bind `productId=luopan`. Luopan CI publishes on `channel=shadow`; full installers use
+`componentId=luopan`, renderer updates use `componentId=luopan-renderer`, and
+the current package targets are macOS DMG, Windows NSIS EXE, and Linux
+AppImage. Artifact upload, targeted validation, gate approval, and full rollout
+are documented in
+[docs/25](../../docs/25-release-center-developer-api.md).
 
 The embedded **Home to Oversea** panel provides subscription refresh,
 start/stop, application-global/rule mode, subscription and rule inspection,

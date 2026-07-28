@@ -8,13 +8,14 @@ import { request as httpsRequest } from 'node:https';
 import { basename, extname, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 
-import { BadRequestException, Body, Controller, ForbiddenException, Get, Header, Inject, NotFoundException, Param, Post, Query, Req, Res, StreamableFile } from '@nestjs/common';
+import { BadRequestException, Body, Controller, ForbiddenException, Get, Header, Headers, HttpCode, Inject, NotFoundException, Param, Post, Query, Req, Res, StreamableFile, UnauthorizedException } from '@nestjs/common';
 
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
-import type { PlatformStore } from '../../store/platform-store.js';
+import { assertInternalOpsToken, INTERNAL_OPS_TOKEN_HEADER } from '../../lib/internal-ops-auth.js';
+import type { PlatformStore, PublisherReleasePlanInput } from '../../store/platform-store.js';
 import { normalizeReleaseArtifactKind } from '../../store/domain.js';
 import { PLATFORM_STORE } from '../../tokens.js';
-import type { ReleaseArtifactKind, ReleaseManagementE2eResult, ReleaseManagementPlan, ReleaseManagementPlanInput, ReleaseReportInput } from '../../types.js';
+import type { PlatformPrincipal, ReleaseArtifactKind, ReleaseManagementE2eResult, ReleaseManagementPlan, ReleaseManagementPlanInput, ReleaseReportInput } from '../../types.js';
 import { evaluateReleaseCheck, signReleaseCheckResult } from './release-check.js';
 import type { ReleaseCheckResult } from './release-check.js';
 
@@ -28,6 +29,7 @@ export class ReleaseController {
   }
 
   @Post('internal/v1/release/reports')
+  @HttpCode(200)
   async report(@Body() rawBody: unknown) {
     const body = asRecord(rawBody);
     const input: ReleaseReportInput = {
@@ -61,6 +63,7 @@ export class ReleaseController {
    * and rollout evaluation; clients no longer read the full plans list.
    */
   @Post('internal/v1/release/check')
+  @HttpCode(200)
   async checkRelease(@Body() rawBody: unknown) {
     const body = asRecord(rawBody);
     const installId = nullableString(body.installId);
@@ -73,6 +76,7 @@ export class ReleaseController {
     const result = releaseCheckWithNamedArtifactUrls(evaluateReleaseCheck(plans, {
       installId,
       userId: nullableString(body.userId),
+      productId: nullableString(body.productId),
       channel: nullableString(body.channel) ?? 'stable',
       platform: nullableString(body.platform),
       arch: normalizeReleaseArch(nullableString(body.arch)),
@@ -116,6 +120,216 @@ export class ReleaseController {
     return { releases };
   }
 
+  /**
+   * Stable, product-scoped publisher facade. Consumer check/history/download
+   * routes stay unchanged because installed applications use them before a
+   * developer/service-account session exists.
+   */
+  @Post('internal/v1/sdk/releases/artifacts')
+  @HttpCode(200)
+  async uploadSdkArtifact(
+    @Headers('authorization') authorization: string | undefined,
+    @Req() req: IncomingMessage,
+    @Query() rawQuery: Record<string, unknown>
+  ) {
+    const query = asRecord(rawQuery);
+    const productId = requiredReleaseProductId(query.productId);
+    const kind = requiredPublisherArtifactKind(query.kind);
+    const componentId = requiredReleaseComponentId(query.componentId, productId, kind);
+    const releaseId = requiredReleaseIdentifier(query.releaseId, 'releaseId', 160);
+    const version = requiredReleaseText(query.version, 'version');
+    const fileName = requiredReleaseText(query.fileName, 'fileName', 200);
+    const digest = normalizeSha256Digest(requiredReleaseText(query.digest, 'digest'));
+    if (!digest) {
+      throw new BadRequestException('digest must be 64 hexadecimal characters, optionally prefixed with sha256:');
+    }
+    await this.assertRegisteredReleaseProduct(productId);
+    await this.assertSdkReleaseAuthorization(authorization, ['sdk.release.publish'], productId);
+    await this.assertPublisherComponentNamespaceAvailable(productId);
+    return this.uploadArtifact(req, {
+      releaseId,
+      productId,
+      componentId,
+      kind,
+      version,
+      fileName,
+      digest,
+      channel: requiredReleaseChannel(query.channel),
+      platform: nullableString(query.platform),
+      arch: nullableString(query.arch),
+      // Publisher storage is an operator decision. A caller cannot redirect
+      // an upload to a different backend through a query parameter.
+      storage: null
+    }, true);
+  }
+
+  @Get('internal/v1/sdk/releases/artifacts/:artifactId')
+  async getSdkArtifact(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('artifactId') artifactId: string
+  ) {
+    const artifact = await readStoredArtifactMetadata(artifactId);
+    await this.assertSdkReleaseAuthorization(
+      authorization,
+      ['sdk.release.read', 'sdk.release.publish', 'sdk.release.approve'],
+      artifact.productId
+    );
+    return { artifact };
+  }
+
+  @Get('internal/v1/sdk/releases')
+  async listSdkManagementPlans(
+    @Headers('authorization') authorization: string | undefined,
+    @Query('productId') rawProductId?: string
+  ) {
+    const productId = requiredReleaseProductId(rawProductId);
+    await this.assertSdkReleaseAuthorization(
+      authorization,
+      ['sdk.release.read', 'sdk.release.publish', 'sdk.release.approve'],
+      productId
+    );
+    const plans = (await this.store.listReleaseManagementPlans())
+      .filter((plan) => releasePlanProductId(plan) === productId);
+    return { plans };
+  }
+
+  @Post('internal/v1/sdk/releases')
+  @HttpCode(200)
+  async createSdkManagementPlan(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    const body = asRecord(rawBody);
+    assertNoPublisherArtifactOverrides(body);
+    const artifactId = requiredReleaseText(body.artifactId, 'artifactId');
+    const currentVersion = requiredReleaseText(body.currentVersion, 'currentVersion');
+    const requestId = requiredReleaseText(body.requestId, 'requestId');
+    const artifact = await readStoredArtifactMetadata(artifactId);
+    await this.assertRegisteredReleaseProduct(artifact.productId);
+    const principal = await this.assertSdkReleaseAuthorization(
+      authorization,
+      ['sdk.release.publish'],
+      artifact.productId
+    );
+    const artifactKind = requiredPublisherArtifactKind(artifact.kind);
+    requiredReleaseComponentId(artifact.componentId, artifact.productId, artifactKind);
+    await this.assertPublisherComponentNamespaceAvailable(artifact.productId);
+    const requestedProductId = nullableString(body.productId);
+    if (requestedProductId && requestedProductId !== artifact.productId) {
+      throw new BadRequestException('productId does not match the uploaded artifact');
+    }
+    const requestedChannel = nullableString(body.channel);
+    if (requestedChannel && requestedChannel !== artifact.channel) {
+      throw new BadRequestException('channel does not match the uploaded artifact');
+    }
+    if (body.e2eResult !== undefined && body.e2eResult !== 'running') {
+      throw new BadRequestException('SDK publisher starts E2E validation and a blocked gate; use the approval endpoint to complete it');
+    }
+
+    const requestFingerprint = publisherRequestFingerprint(body, artifact, currentVersion);
+    const policy = publisherArtifactPolicy(artifactKind);
+    const input = toReleaseManagementPlanInput({
+      ...body,
+      releaseId: artifact.releaseId,
+      channel: artifact.channel,
+      productId: artifact.productId,
+      appId: artifact.productId,
+      launcherComponentId: artifact.componentId,
+      launcherUpdatePolicy: policy.updatePolicy,
+      launcherCurrentVersion: currentVersion,
+      launcherTargetVersion: artifact.version,
+      // Do not manufacture a second application/config update for a single
+      // uploaded artifact.
+      appComponentId: `${artifact.productId}-config`,
+      appUpdatePolicy: 'config-snapshot',
+      appCurrentVersion: currentVersion,
+      appTargetVersion: currentVersion,
+      artifactKind: artifact.kind,
+      artifactVersion: artifact.version,
+      artifactUrl: artifact.url,
+      artifactDigest: artifact.digest,
+      artifactSizeBytes: artifact.sizeBytes,
+      artifactPlatform: artifact.platform,
+      artifactArch: artifact.arch,
+      artifactFileName: artifact.fileName,
+      activationMode: policy.activationMode,
+      e2eResult: 'running',
+      createdBy: principal.principalId,
+      requestId,
+      publisherRequestFingerprint: requestFingerprint
+    }) as PublisherReleasePlanInput;
+    const result = await this.store.createPublisherReleaseManagementPlan(input);
+    if (result.outcome === 'conflict') {
+      throw new BadRequestException('requestId already exists with a different release request');
+    }
+    return { plan: result.plan, idempotent: result.outcome === 'replayed' };
+  }
+
+  @Get('internal/v1/sdk/releases/:planId')
+  async getSdkManagementPlan(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('planId') planId: string
+  ) {
+    const plan = await this.store.getReleaseManagementPlan(planId);
+    if (!plan) throw new NotFoundException('Release management plan not found');
+    await this.assertSdkReleaseAuthorization(
+      authorization,
+      ['sdk.release.read', 'sdk.release.publish', 'sdk.release.approve'],
+      releasePlanProductId(plan)
+    );
+    return { plan };
+  }
+
+  @Post('internal/v1/sdk/releases/:planId/gate')
+  @HttpCode(200)
+  async completeSdkManagementGate(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('planId') planId: string,
+    @Body() rawBody: unknown
+  ) {
+    const plan = await this.store.getReleaseManagementPlan(planId);
+    if (!plan) throw new NotFoundException('Release management plan not found');
+    const principal = await this.assertSdkReleaseAuthorization(
+      authorization,
+      ['sdk.release.approve'],
+      releasePlanProductId(plan)
+    );
+    const body = asRecord(rawBody);
+    const status = releaseManagementE2eResult(body.status ?? body.e2eResult);
+    const requestId = requiredReleaseText(body.requestId, 'requestId');
+    if (!status || status === 'running') {
+      throw new BadRequestException('gate status must be passed, failed, or blocked');
+    }
+    const currentVerdict = plan.test.gate.verdict;
+    const gateIsTerminal = currentVerdict === 'passed'
+      || currentVerdict === 'failed'
+      || plan.test.run.state === 'blocked';
+    if (gateIsTerminal) {
+      if (currentVerdict === status) return { plan };
+      throw new BadRequestException(
+        `release gate is terminal (${currentVerdict}); create a new plan for another validation attempt`
+      );
+    }
+    const evidence = asRecord(body.evidence);
+    assertSafePublisherGateEvidence(evidence);
+    try {
+      return {
+        plan: await this.store.completeReleaseManagementGate(planId, {
+          status,
+          message: nullableString(body.message),
+          evidence,
+          requestedBy: principal.principalId,
+          requestId
+        })
+      };
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('gate is terminal')) {
+        throw new BadRequestException(error.message);
+      }
+      throw error;
+    }
+  }
+
   @Get('internal/v1/release-management/plans')
   async listManagementPlans(@Req() req: IncomingMessage) {
     assertReleasePlansAccess(req);
@@ -123,12 +337,14 @@ export class ReleaseController {
   }
 
   @Post('internal/v1/release-management/plans')
-  async createManagementPlan(@Body() rawBody: unknown) {
+  async createManagementPlan(@Req() req: IncomingMessage, @Body() rawBody: unknown) {
+    assertReleaseManagementAccess(req);
     return { plan: await this.store.createReleaseManagementPlan(toReleaseManagementPlanInput(asRecord(rawBody))) };
   }
 
   @Get('internal/v1/release-management/plans/:planId')
-  async getManagementPlan(@Param('planId') planId: string) {
+  async getManagementPlan(@Req() req: IncomingMessage, @Param('planId') planId: string) {
+    assertReleaseManagementAccess(req);
     const plan = await this.store.getReleaseManagementPlan(planId);
     if (!plan) throw new NotFoundException('Release management plan not found');
     return { plan };
@@ -136,9 +352,11 @@ export class ReleaseController {
 
   @Post('internal/v1/release-management/plans/:planId/gate')
   async completeManagementGate(
+    @Req() req: IncomingMessage,
     @Param('planId') planId: string,
     @Body() rawBody: unknown
   ) {
+    assertReleaseManagementAccess(req);
     const body = asRecord(rawBody);
     const status = releaseManagementE2eResult(body.status ?? body.e2eResult) ?? 'passed';
     return {
@@ -155,8 +373,10 @@ export class ReleaseController {
   @Post('internal/v1/release-artifacts')
   async uploadArtifact(
     @Req() req: IncomingMessage,
-    @Query() rawQuery: Record<string, unknown>
+    @Query() rawQuery: Record<string, unknown>,
+    sdkPublisherAuthorized = false
   ) {
+    if (!sdkPublisherAuthorized) assertReleaseManagementAccess(req);
     const query = asRecord(rawQuery);
     const kind = normalizeReleaseArtifactKind(nullableString(query.kind) ?? 'app-installer');
     const version = nullableString(query.version) ?? '0.0.0';
@@ -198,9 +418,28 @@ export class ReleaseController {
         await rm(tempPath, { force: true });
         throw new BadRequestException('Release artifact storage=oss requires MX_RELEASE_OSS_* configuration');
       }
-      ossObjectKey = releaseOssObjectKey(oss, productId, channel, version, platform, arch, releaseId, fileName);
-      await putReleaseArtifactToOss(oss, ossObjectKey, tempPath, metadataContentType(req), uploaded.bytes);
-      await rm(tempPath, { force: true });
+      ossObjectKey = releaseOssObjectKey(
+        oss,
+        productId,
+        channel,
+        version,
+        platform,
+        arch,
+        releaseId,
+        uploaded.digest,
+        fileName
+      );
+      try {
+        await putReleaseArtifactToOss(
+          oss,
+          ossObjectKey,
+          tempPath,
+          metadataContentType(req),
+          uploaded.bytes
+        );
+      } finally {
+        await rm(tempPath, { force: true });
+      }
       publicUrl = releaseOssPublicUrl(oss, ossObjectKey);
     } else {
       await rm(artifactPath, { force: true });
@@ -246,7 +485,8 @@ export class ReleaseController {
   }
 
   @Get('internal/v1/release-artifacts/:artifactId')
-  async getArtifact(@Param('artifactId') artifactId: string) {
+  async getArtifact(@Req() req: IncomingMessage, @Param('artifactId') artifactId: string) {
+    assertReleaseManagementAccess(req);
     return { artifact: await readStoredArtifactMetadata(artifactId) };
   }
 
@@ -285,6 +525,226 @@ export class ReleaseController {
   ) {
     return this.downloadArtifact(artifactId, res);
   }
+
+  private async assertRegisteredReleaseProduct(productId: string): Promise<void> {
+    const app = await this.store.getAppCenterApp(productId);
+    if (!app || app.enabled === false) {
+      throw new BadRequestException(`Release product is not registered and enabled in AppCenter: ${productId}`);
+    }
+  }
+
+  private async assertPublisherComponentNamespaceAvailable(
+    productId: string
+  ): Promise<void> {
+    const reservedSuffixes = ['-renderer', '-config'];
+    const reservedSuffix = reservedSuffixes.find((suffix) => productId.endsWith(suffix));
+    if (reservedSuffix) {
+      throw new BadRequestException(
+        `Release Publisher productId cannot end with reserved suffix ${reservedSuffix}`
+      );
+    }
+    for (const suffix of reservedSuffixes) {
+      const derivedComponentId = `${productId}${suffix}`;
+      const conflictingProduct = await this.store.getAppCenterApp(derivedComponentId);
+      if (conflictingProduct && conflictingProduct.enabled !== false) {
+        throw new BadRequestException(
+          `derived component namespace conflicts with registered product: ${derivedComponentId}`
+        );
+      }
+    }
+  }
+
+  private async assertSdkReleaseAuthorization(
+    authorization: string | undefined,
+    acceptedScopes: string[],
+    productId: string
+  ): Promise<PlatformPrincipal> {
+    const token = bearerToken(authorization);
+    if (!token || token.startsWith('mx-shadow-')) {
+      throw new UnauthorizedException('Active mx-sdk Bearer access token is required');
+    }
+    const auth = await this.store.introspectToken({ token, audience: 'mx-sdk' });
+    if (!auth.active || !auth.principal || (auth.tokenKind !== 'jwt' && auth.tokenKind !== 'service-token')) {
+      throw new UnauthorizedException('Bearer access token is not active');
+    }
+    const principal = auth.principal;
+    const currentTokenScopes = auth.scopes.filter((scope) => principal.scopes.includes(scope));
+    if (currentTokenScopes.includes('release.manage')) return principal;
+    if (!acceptedScopes.some((scope) => currentTokenScopes.includes(scope))) {
+      throw new ForbiddenException(`missing release scope: ${acceptedScopes.join(' or ')}`);
+    }
+    if (principal.kind !== 'service-account' || !principal.serviceAccountId) {
+      throw new ForbiddenException('Product-scoped release access requires a service account');
+    }
+    const serviceAccount = (await this.store.listUserCenterServiceAccounts())
+      .find((item) => item.status === 'active' && item.serviceAccountId === principal.serviceAccountId);
+    if (!serviceAccount?.allowedProductIds?.includes(productId)) {
+      throw new ForbiddenException(`service account cannot access release product: ${productId}`);
+    }
+    return principal;
+  }
+}
+
+function requiredReleaseProductId(value: unknown): string {
+  const productId = nullableString(value)?.toLowerCase();
+  if (!productId || productId.length > 120 || !/^[a-z0-9][a-z0-9._-]*$/.test(productId)) {
+    throw new BadRequestException('valid productId is required');
+  }
+  return productId;
+}
+
+function requiredReleaseComponentId(
+  value: unknown,
+  productId: string,
+  kind: 'app-installer' | 'renderer-ui'
+): string {
+  const componentId = nullableString(value)?.toLowerCase();
+  if (!componentId) throw new BadRequestException('componentId is required');
+  const expectedComponentId = kind === 'app-installer' ? productId : `${productId}-renderer`;
+  if (componentId !== expectedComponentId) {
+    throw new ForbiddenException(
+      `${kind} componentId for product ${productId} must be ${expectedComponentId}`
+    );
+  }
+  return componentId;
+}
+
+function requiredPublisherArtifactKind(value: unknown): 'app-installer' | 'renderer-ui' {
+  if (value === 'app-installer' || value === 'renderer-ui') return value;
+  throw new BadRequestException('Publisher artifact kind must be app-installer or renderer-ui');
+}
+
+function requiredReleaseText(value: unknown, field: string, maxLength = 160): string {
+  const text = nullableString(value);
+  if (!text) throw new BadRequestException(`${field} is required`);
+  if (text.length > maxLength) {
+    throw new BadRequestException(`${field} must be at most ${maxLength} characters`);
+  }
+  return text;
+}
+
+function requiredReleaseIdentifier(
+  value: unknown,
+  field: string,
+  maxLength: number
+): string {
+  const identifier = requiredReleaseText(value, field, maxLength);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(identifier)) {
+    throw new BadRequestException(
+      `${field} must start with an alphanumeric character and contain only letters, digits, dot, underscore, or hyphen`
+    );
+  }
+  return identifier;
+}
+
+function requiredReleaseChannel(value: unknown): string {
+  const channel = nullableString(value)?.toLowerCase() ?? 'stable';
+  return requiredReleaseIdentifier(channel, 'channel', 64).toLowerCase();
+}
+
+function assertSafePublisherGateEvidence(evidence: Record<string, unknown>): void {
+  const serialized = JSON.stringify(evidence);
+  if (Buffer.byteLength(serialized, 'utf8') > 32 * 1024) {
+    throw new BadRequestException('gate evidence must be at most 32 KiB');
+  }
+  const sensitiveKey = /secret|token|password|authorization|cookie|access[_-]?key|private[_-]?key|credential/i;
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 4) throw new BadRequestException('gate evidence nesting must be at most 4 levels');
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      if (sensitiveKey.test(key)) {
+        throw new BadRequestException(`gate evidence contains forbidden sensitive field: ${key}`);
+      }
+      visit(nested, depth + 1);
+    }
+  };
+  visit(evidence, 0);
+}
+
+function assertNoPublisherArtifactOverrides(body: Record<string, unknown>): void {
+  const forbiddenFields = [
+    'releaseId',
+    'appId',
+    'launcherComponentId',
+    'appComponentId',
+    'launcherUpdatePolicy',
+    'appUpdatePolicy',
+    'launcherTargetVersion',
+    'appTargetVersion',
+    'artifactKind',
+    'artifactVersion',
+    'artifactUrl',
+    'artifactDigest',
+    'artifactSignature',
+    'artifactSizeBytes',
+    'artifactPlatform',
+    'artifactArch',
+    'artifactFileName',
+    'activationMode',
+    'createdBy',
+    'requestedBy',
+    'publisherRequestFingerprint'
+  ].filter((field) => body[field] !== undefined);
+  if (forbiddenFields.length > 0) {
+    throw new BadRequestException(
+      `Release artifact identity is derived from artifactId; remove: ${forbiddenFields.join(', ')}`
+    );
+  }
+}
+
+function publisherArtifactPolicy(kind: ReleaseArtifactKind): {
+  updatePolicy: 'app-installer' | 'renderer-ui';
+  activationMode: 'installer-manual' | 'hot-auto';
+} {
+  if (kind === 'app-installer') {
+    return { updatePolicy: 'app-installer', activationMode: 'installer-manual' };
+  }
+  if (kind === 'renderer-ui') {
+    return { updatePolicy: 'renderer-ui', activationMode: 'hot-auto' };
+  }
+  throw new BadRequestException(`SDK publisher does not support artifact kind: ${kind}`);
+}
+
+function releasePlanProductId(plan: ReleaseManagementPlan): string {
+  return plan.productId?.trim()
+    || plan.components.launcher.componentId.split('-renderer')[0]
+    || plan.components.app.componentId;
+}
+
+function bearerToken(authorization?: string): string | null {
+  if (!authorization) return null;
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : null;
+}
+
+function publisherRequestFingerprint(
+  body: Record<string, unknown>,
+  artifact: StoredReleaseArtifactMetadata,
+  currentVersion: string
+): string {
+  const canonical = {
+    artifactId: artifact.artifactId,
+    artifactDigest: artifact.digest,
+    currentVersion,
+    installId: nullableString(body.installId),
+    userId: nullableString(body.userId),
+    releaseNotes: nullableString(body.releaseNotes),
+    rolloutStrategy: nullableString(body.rolloutStrategy),
+    rolloutPercentage: nullableNumber(body.rolloutPercentage),
+    rolloutSegment: nullableString(body.rolloutSegment),
+    rolloutRings: [...stringArray(body.rolloutRings)].sort(),
+    featureKeys: [...stringArray(body.featureKeys)].sort(),
+    targetUserIds: [...stringArray(body.targetUserIds)].sort(),
+    targetInstallIds: [...stringArray(body.targetInstallIds)].sort(),
+    suiteId: nullableString(body.suiteId),
+    topology: nullableString(body.topology),
+    sites: [...stringArray(body.sites)].sort()
+  };
+  return `sha256:${createHash('sha256').update(JSON.stringify(canonical)).digest('hex')}`;
 }
 
 function toReleaseManagementPlanInput(body: Record<string, unknown>): ReleaseManagementPlanInput {
@@ -326,7 +786,8 @@ function toReleaseManagementPlanInput(body: Record<string, unknown>): ReleaseMan
     sites: stringArray(body.sites),
     e2eResult: releaseManagementE2eResult(body.e2eResult),
     createdBy: nullableString(body.createdBy),
-    requestId: nullableString(body.requestId)
+    requestId: nullableString(body.requestId),
+    publisherRequestFingerprint: nullableString(body.publisherRequestFingerprint)
   };
 }
 
@@ -467,18 +928,38 @@ function releaseDecisionSecret(): string {
   return generated;
 }
 
-// The full plans list leaks unreleased versions and rollout intent; once
-// MX_RELEASE_PLANS_ADMIN_TOKEN is set, only Admin callers may read it and
-// clients must use POST /internal/v1/release/check. Unset keeps the legacy
-// open behavior for migration.
+// The full plans list leaks unreleased versions and rollout intent. Normal
+// deployments use the shared Internal ops guard; MX_RELEASE_PLANS_ADMIN_TOKEN
+// remains a migration fallback only when Internal ops auth is not configured.
+// Installed clients must use POST /internal/v1/release/check.
 function assertReleasePlansAccess(req: IncomingMessage): void {
+  if (nullableString(process.env.MX_INTERNAL_OPS_TOKEN)) {
+    assertInternalOpsToken(requestHeader(req, INTERNAL_OPS_TOKEN_HEADER));
+    return;
+  }
   const requiredToken = nullableString(process.env.MX_RELEASE_PLANS_ADMIN_TOKEN);
-  if (!requiredToken) return;
+  if (!requiredToken) {
+    if (process.env.NODE_ENV !== 'production') return;
+    assertInternalOpsToken(requestHeader(req, INTERNAL_OPS_TOKEN_HEADER));
+    return;
+  }
   const provided = req.headers['x-mx-admin-token'];
   const token = Array.isArray(provided) ? provided[0] : provided;
   if (token !== requiredToken) {
     throw new ForbiddenException('release plans listing is admin-only; clients must use POST /internal/v1/release/check');
   }
+}
+
+function assertReleaseManagementAccess(req: IncomingMessage): void {
+  if (!nullableString(process.env.MX_INTERNAL_OPS_TOKEN) && process.env.NODE_ENV !== 'production') {
+    return;
+  }
+  assertInternalOpsToken(requestHeader(req, INTERNAL_OPS_TOKEN_HEADER));
+}
+
+function requestHeader(req: IncomingMessage, name: string): string | undefined {
+  const value = req.headers[name.toLowerCase()];
+  return Array.isArray(value) ? value[0] : value;
 }
 
 function releaseManagementE2eResult(value: unknown): ReleaseManagementE2eResult | null {
@@ -780,6 +1261,7 @@ function releaseOssObjectKey(
   platform: string | null,
   arch: string | null,
   releaseId: string,
+  digest: string,
   fileName: string
 ): string {
   return [
@@ -790,18 +1272,23 @@ function releaseOssObjectKey(
     safePathPart(platform || 'all'),
     safePathPart(arch || 'universal'),
     safePathPart(releaseId),
+    safePathPart(digest.replace(/^sha256:/, '')),
     safeArtifactFileName(fileName)
   ].filter(Boolean).join('/');
 }
 
 function releaseArtifactId(productId: string, releaseId: string, kind: ReleaseArtifactKind, version: string, digest: string): string {
-  const digestPart = digest.replace(/^sha256:/, '').slice(0, 12);
+  const digestPart = digest.replace(/^sha256:/, '');
+  const identityPart = createHash('sha256')
+    .update(JSON.stringify([productId, releaseId, kind, version]))
+    .digest('hex')
+    .slice(0, 24);
   return [
     'artifact',
-    safePathPart(productId),
-    safePathPart(releaseId),
+    safePathPart(productId).slice(0, 64),
     safePathPart(kind),
-    safePathPart(version),
+    safePathPart(version).slice(0, 32),
+    identityPart,
     safePathPart(digestPart)
   ].join('_');
 }
@@ -854,7 +1341,8 @@ function safePathPart(value: string): string {
 function normalizeSha256Digest(value: string | null): string | null {
   const normalized = value?.trim().toLowerCase();
   if (!normalized) return null;
-  return normalized.startsWith('sha256:') ? normalized : `sha256:${normalized}`;
+  const hex = normalized.startsWith('sha256:') ? normalized.slice('sha256:'.length) : normalized;
+  return /^[a-f0-9]{64}$/.test(hex) ? `sha256:${hex}` : null;
 }
 
 function normalizeReleasePlatform(value: string | null): string | null {

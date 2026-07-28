@@ -208,8 +208,10 @@ Storage behavior:
 - CLI publish defaults to `storage=auto`: use OSS when configured, otherwise server storage.
 - Local server runs can put these values in `electron-dock/mx-launcher/server/.env`. Runtime
   environment variables and k8s Secrets take precedence over `.env` values.
-- `ops internal-production deploy` reads only `MX_RELEASE_OSS_*` from that file and materializes
-  `mx-internal-shadow/mx-release-oss`; the `.env` file is never copied into the image.
+- `ops internal-production deploy` parses only the documented Secret variable allowlist from that
+  file. OSS values materialize into `mx-internal-shadow/mx-release-oss`; DB, Internal ops, Feishu,
+  and SDK credentials remain in separate K8s Secrets. The file must be a private regular file
+  (`chmod 600 server/.env` on POSIX), and `.env` never enters the image.
 - Set `MX_RELEASE_ARTIFACT_STORE_DIR` on the server if Internal server storage needs a
   persistent mounted volume.
 - Set `MX_RELEASE_ARTIFACT_MAX_BYTES` to override the default 2 GiB upload limit.
@@ -228,7 +230,8 @@ MX_RELEASE_OSS_PUBLIC_BASE_URL=
 ```
 
 For Internal production, do not manually copy these values with `kubectl`. Put them in
-`server/.env`, then use the normal deployment command. It creates/updates the Secret before the
+`server/.env`, then use the normal deployment command. It merges only explicit values, validates
+the resulting canonical Secret, preserves unknown data keys, and creates/updates it before the
 Internal API rollout:
 
 ```bash
@@ -236,7 +239,8 @@ bash scripts/manage.sh ops internal-production deploy
 ```
 
 Use `MX_RELEASE_OSS_SECRET_SOURCE=external` only after a KMS/Vault materializer is installed. In
-that mode deploy waits for the external provider to create `mx-release-oss` and never overwrites it.
+that mode deploy first creates the namespace, waits for the provider to create `mx-release-oss`,
+strictly validates the eight known keys, and never overwrites it.
 
 If `MX_RELEASE_OSS_PUBLIC_BASE_URL` is set, release plans use the direct OSS/CDN URL. Without
 it, the plan uses the Internal download endpoint, which redirects to a short-lived OSS signed

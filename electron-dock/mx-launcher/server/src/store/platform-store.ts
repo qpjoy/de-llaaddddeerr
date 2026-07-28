@@ -140,6 +140,16 @@ import type {
 
 export type MaybePromise<T> = T | Promise<T>;
 
+export type PublisherReleasePlanInput = ReleaseManagementPlanInput & {
+  productId: string;
+  requestId: string;
+  publisherRequestFingerprint: string;
+};
+
+export type PublisherReleasePlanResult =
+  | { outcome: 'created' | 'replayed'; plan: ReleaseManagementPlan }
+  | { outcome: 'conflict'; planId: string };
+
 export interface PlatformOverview {
   environment: string;
   siteId: string;
@@ -324,6 +334,9 @@ export interface PlatformStore {
   requestPermission(input: PermissionRequestInput): MaybePromise<PermissionGrant>;
   createLauncherNetworkSnapshot(input: LauncherNetworkSnapshotInput): MaybePromise<LauncherNetworkSnapshot>;
   evaluateReleaseUpdate(input: ReleasePolicyInput): MaybePromise<ReleasePolicyDecision>;
+  createPublisherReleaseManagementPlan(
+    input: PublisherReleasePlanInput
+  ): MaybePromise<PublisherReleasePlanResult>;
   createReleaseManagementPlan(input: ReleaseManagementPlanInput): MaybePromise<ReleaseManagementPlan>;
   completeReleaseManagementGate(planId: string, input: ReleaseManagementGateInput): MaybePromise<ReleaseManagementPlan>;
   getReleaseManagementPlan(planId: string): MaybePromise<ReleaseManagementPlan | null>;

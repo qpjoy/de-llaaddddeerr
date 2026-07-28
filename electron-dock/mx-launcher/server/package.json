@@ -16,9 +16,11 @@
     "smoke:user-oversea-auth": "pnpm run build && node dist/scripts/user-oversea-auth-smoke.js",
     "smoke:user-lifecycle": "pnpm run build && node dist/scripts/user-lifecycle-smoke.js",
     "smoke:feishu-network": "pnpm run build && node dist/scripts/feishu-network-smoke.js",
-    "test:sdk-auth": "node --test --import tsx src/modules/sdk-gateway/feishu-auth.service.test.ts src/modules/sdk-gateway/sdk-gateway-rate-limit.test.ts src/modules/sdk-gateway/sdk-gateway-password.test.ts",
+    "test:sdk-auth": "node --test --import tsx src/modules/sdk-gateway/feishu-auth.service.test.ts src/modules/sdk-gateway/sdk-gateway-rate-limit.test.ts src/modules/sdk-gateway/sdk-gateway-password.test.ts src/modules/release/release-sdk-publisher.test.ts",
+    "test:k8s-secret-ensure": "node --test scripts/internal-k8s-secret-ensure.test.mjs scripts/release-oss-secret-env.test.mjs",
     "smoke:http": "node scripts/http-smoke.mjs",
     "smoke:release-center": "node scripts/release-center-smoke.mjs",
+    "smoke:release-publisher-postgres": "node --import tsx scripts/release-publisher-postgres-smoke.ts",
     "smoke:internal-dns-exposure": "node scripts/internal-dns-exposure-smoke.mjs",
     "smoke:site-slot-domestic-dns": "node scripts/site-slot-domestic-dns-artifact-smoke.mjs",
     "release:publish": "node scripts/release-center-publish.mjs"

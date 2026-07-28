@@ -1,6 +1,13 @@
 type JsonRecord = Record<string, unknown>;
 
-type AuthMode = 'public' | 'token-body' | 'bearer' | 'internal' | 'internal-bearer';
+type AuthMode =
+  | 'public'
+  | 'token-body'
+  | 'bearer'
+  | 'internal'
+  | 'internal-bearer'
+  | 'internal-consumer'
+  | 'ops-token';
 
 interface ApiOperation {
   tags: string[];
@@ -14,6 +21,7 @@ interface ApiOperation {
   'x-route-id'?: string;
   'x-accepted-scopes': string[];
   'x-mx-auth': string;
+  'x-mx-curl'?: string;
 }
 
 export interface ApiDocsDocument {
@@ -84,6 +92,7 @@ const serviceAccountExample = {
   displayName: 'Partner Portal',
   roleIds: ['mx-service-account'],
   scopes: ['sdk.identity.read', 'sdk.user.read', 'sdk.permission.request'],
+  allowedProductIds: [],
   status: 'active',
   createdAt: '2026-07-20T00:00:00.000Z'
 };
@@ -123,7 +132,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
   info: {
     title: 'MX Launcher Integration API',
     version: '2.0.0-shadow',
-    description: 'Internal-authoritative integration contract for MX-H2I, User Center, Permission Center and the SDK Gateway.'
+    description: 'Internal-authoritative integration contract for MX-H2I, User Center, Permission Center, Release Center and the SDK Gateway.'
   },
   servers: [
     { url: 'http://localhost:18090', description: 'Local or port-forwarded Internal API' },
@@ -134,6 +143,8 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
     { name: 'Authentication', description: 'OAuth-compatible token issuance and identity resolution.' },
     { name: 'User Center', description: 'Stable SDK-facing roles, users and service accounts.' },
     { name: 'Permission Center', description: 'AppCenter-aware permission grant evaluation.' },
+    { name: 'Release Consumer', description: 'Installed applications check, download, and report sanitized Release Center decisions.' },
+    { name: 'Release Publisher', description: 'Product-scoped CI and developer APIs for artifact upload, gated release creation, and approval.' },
     { name: 'Internal User Operations', description: 'Trusted Internal operations for import, Oversea entitlement and H2O runtime state.' }
   ],
   paths: {
@@ -175,7 +186,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       post: operation({
         tag: 'Authentication',
         summary: '获取用户或服务账号 token',
-        description: '支持 password 与 client_credentials。password access token 默认且最长有效 7 天，并可经可信 HTTPS bootstrap 调用；client_credentials 默认有效 1 小时且仅允许 Internal 控制面调用，经 Domestic edge 的请求会在 secret 比较前拒绝。两种 grant 都在凭据校验前执行 PostgreSQL 原子限速。用户凭据只由 Internal User Center 校验；不要在 Domestic 或业务应用保存密码副本。',
+        description: '支持 password 与 client_credentials。password access token 默认且最长有效 7 天，并可经可信 HTTPS bootstrap 调用；client_credentials 默认有效 1 小时且仅允许 Internal 控制面调用，经 Domestic edge 的请求会在 secret 比较前拒绝。开发者服务账号使用 Kubernetes Secret 中的账号独立 client secret；全局 Internal ops token 仅保留给内置 svc_sdk_gateway 的迁移兼容，禁止分发。两种 grant 都在凭据校验前执行 PostgreSQL 原子限速。',
         operationId: 'issueSdkToken',
         routeId: 'sdk.oauth.token',
         auth: 'public',
@@ -470,26 +481,34 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       get: operation({
         tag: 'User Center',
         summary: '列出服务账号',
-        description: '用于 server-to-server 集成。响应只包含账号元数据和 scopes，不包含 secret。',
+        description: 'Internal ops 管理接口，要求 x-mx-ops-token；响应只包含账号元数据、scopes 和产品范围，不包含 secret。',
         operationId: 'listSdkServiceAccounts',
         routeId: 'sdk.service_accounts.list',
-        scopes: ['sdk.user.read', 'rbac.manage'],
-        auth: 'bearer',
+        scopes: [],
+        auth: 'ops-token',
+        curl: 'curl -sS "$BASE/internal/v1/sdk/service-accounts" -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN"',
         response: { serviceAccounts: [serviceAccountExample] }
       }),
       post: operation({
         tag: 'User Center',
         summary: '创建服务账号',
-        description: '仅授予集成实际需要的最小 scopes。创建后通过 client_credentials 获取 token。',
+        description: 'Internal ops 管理接口，要求 x-mx-ops-token。仅授予集成实际需要的最小 scopes 与 allowedProductIds；创建后由 Secret Center 单独物化账号 secret，再通过 client_credentials 获取 token。',
         operationId: 'createSdkServiceAccount',
         routeId: 'sdk.service_accounts.create',
-        scopes: ['sdk.user.write', 'rbac.manage'],
-        auth: 'bearer',
+        scopes: [],
+        auth: 'ops-token',
+        curl: [
+          'curl -sS -X POST "$BASE/internal/v1/sdk/service-accounts" \\',
+          '  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN" \\',
+          '  -H "content-type: application/json" \\',
+          '  --data \'{"serviceAccountId":"svc_partner_portal","displayName":"Partner Portal","roleIds":["mx-service-account"],"scopes":["sdk.identity.read"],"allowedProductIds":[],"requestId":"service-account-create-001"}\''
+        ].join('\n'),
         request: {
           serviceAccountId: 'svc_partner_portal',
           displayName: 'Partner Portal',
           roleIds: ['mx-service-account'],
           scopes: ['sdk.identity.read', 'sdk.user.read', 'sdk.permission.request'],
+          allowedProductIds: [],
           requestId: 'service-account-create-001'
         },
         required: ['serviceAccountId'],
@@ -757,6 +776,315 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
           }
         }
       })
+    },
+    '/internal/v1/release/check': {
+      post: operation({
+        tag: 'Release Consumer',
+        summary: '检查当前安装可见的更新',
+        description: '应用运行时的稳定入口。服务端按 productId、installId/userId、channel、platform、arch、gate 与灰度规则返回单安装决策，不暴露完整发布计划。外部产品必须传 productId，避免派生组件名与其他产品碰撞。该接口用于登录前检查，因此不要求开发者 Bearer；installId/userId 是 rollout selector，不是安全身份，且只能经已建立的 Internal 产品网络访问。',
+        operationId: 'checkReleaseUpdate',
+        routeId: 'release.check',
+        auth: 'internal-consumer',
+        request: {
+          installId: 'install_luopan_01',
+          userId: 'usr_alice',
+          productId: 'luopan',
+          channel: 'shadow',
+          platform: 'darwin',
+          arch: 'arm64',
+          components: {
+            luopan: '0.1.0',
+            'luopan-renderer': '0.1.0'
+          }
+        },
+        required: ['installId', 'productId', 'components'],
+        response: {
+          status: 'update-available',
+          reason: 'matched a gated release',
+          planId: 'relplan_luopan_020_canary',
+          releaseId: 'luopan-installer-0.2.0',
+          decision: {
+            componentId: 'luopan',
+            currentVersion: '0.1.0',
+            targetVersion: '0.2.0',
+            updateMode: 'mandatory'
+          },
+          artifacts: [{
+            artifactId: 'artifact_luopan_020',
+            componentId: 'luopan',
+            version: '0.2.0',
+            kind: 'app-installer',
+            url: '/internal/v1/release-artifacts/artifact_luopan_020/download/Luopan-0.2.0-arm64.dmg',
+            digest: 'sha256:<digest>',
+            sizeBytes: 104857600,
+            platform: 'darwin',
+            arch: 'arm64',
+            activation: 'installer-manual'
+          }],
+          rollout: { matchedBy: 'target-list', bucket: 7 },
+          signedAt: '2026-07-28T00:00:00.000Z',
+          signature: {
+            algorithm: 'hmac-sha256',
+            keyId: 'release-decision-v1',
+            value: '<server-hmac>'
+          }
+        }
+      })
+    },
+    '/internal/v1/releases/history': {
+      get: operation({
+        tag: 'Release Consumer',
+        summary: '读取已通过 gate 的全量版本历史',
+        description: '只返回指定组件、通道、平台与架构下已经 gate=passed 且 rollout=100 的公开版本；不返回 canary audience 或未发布计划。',
+        operationId: 'listReleaseHistory',
+        routeId: 'release.history',
+        auth: 'internal-consumer',
+        parameters: [
+          queryParameter('componentId', 'luopan', true),
+          queryParameter('channel', 'shadow', false),
+          queryParameter('platform', 'darwin', false),
+          queryParameter('arch', 'arm64', false),
+          queryParameter('limit', 8, false)
+        ],
+        curl: 'curl -sS "$BASE/internal/v1/releases/history?componentId=luopan&channel=shadow&platform=darwin&arch=arm64&limit=8"',
+        response: {
+          releases: [{
+            releaseId: 'luopan-installer-0.2.0',
+            productId: 'luopan',
+            version: '0.2.0',
+            channel: 'shadow',
+            status: 'ready',
+            artifactKind: 'app-installer',
+            platform: 'darwin',
+            arch: 'arm64',
+            artifactDigest: 'sha256:<digest>',
+            gate: 'passed'
+          }]
+        }
+      })
+    },
+    '/internal/v1/release/reports': {
+      post: operation({
+        tag: 'Release Consumer',
+        summary: '上报更新执行结果',
+        description: '客户端在 downloaded、staged、installer-opened、installer-completed、failed 或 rollback 等阶段写入遥测。报告未绑定已认证身份，必须视为不可信 telemetry，不能单独作为审批证据；不得在 metadata 中放 token、密码或上游订阅。',
+        operationId: 'reportReleaseExecution',
+        routeId: 'release.report',
+        auth: 'internal-consumer',
+        request: {
+          installId: 'install_luopan_01',
+          status: 'installer-completed',
+          metadata: {
+            releaseId: 'luopan-installer-0.2.0',
+            componentId: 'luopan',
+            version: '0.2.0'
+          }
+        },
+        required: ['installId', 'status'],
+        response: {
+          auditEvent: {
+            eventId: 'audit_release_001',
+            eventType: 'release.report.received',
+            installId: 'install_luopan_01',
+            createdAt: '2026-07-28T00:00:00.000Z'
+          }
+        }
+      })
+    },
+    '/internal/v1/release-artifacts/{artifactId}/download/{fileName}': {
+      get: operation({
+        tag: 'Release Consumer',
+        summary: '下载并校验发布制品',
+        description: '使用 release/check 返回的 URL 下载。Internal PVC 返回二进制；私有 OSS 返回 302 到短期签名 URL。客户端必须同时校验 Content-Length/sizeBytes 与 sha256 digest。',
+        operationId: 'downloadReleaseArtifact',
+        routeId: 'release.artifact.download',
+        auth: 'internal-consumer',
+        pathParams: ['artifactId', 'fileName'],
+        response: '<binary artifact>',
+        responseContentType: 'application/octet-stream',
+        responseSchema: { type: 'string', format: 'binary' }
+      })
+    },
+    '/internal/v1/sdk/releases/artifacts': {
+      post: operation({
+        tag: 'Release Publisher',
+        summary: '上传产品发布制品',
+        description: '仅 product-scoped service account 可调用。body 是原始二进制；app-installer 的 componentId 必须精确等于 productId，renderer-ui 必须精确等于 productId-renderer。productId 不能以保留后缀 -renderer/-config 结尾，且两个派生组件名不能与已启用 AppCenter 产品冲突。storage 由平台配置决定，调用方不能选择；OSS 对象按完整 SHA-256 内容寻址。当前稳定开发者契约支持 app-installer 与 renderer-ui。',
+        operationId: 'uploadSdkReleaseArtifact',
+        routeId: 'sdk.release_artifacts.upload',
+        scopes: ['sdk.release.publish', 'release.manage'],
+        auth: 'internal-bearer',
+        parameters: [
+          queryParameter('productId', 'luopan', true, { pattern: '^[a-z0-9][a-z0-9._-]*$', maxLength: 120 }),
+          queryParameter('releaseId', 'luopan-installer-0.2.0', true, { pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$', maxLength: 160 }),
+          queryParameter('componentId', 'luopan', true),
+          queryParameter('kind', 'app-installer', true),
+          queryParameter('version', '0.2.0', true),
+          queryParameter('channel', 'shadow', false, { pattern: '^[a-z0-9][a-z0-9._-]*$', maxLength: 64 }),
+          queryParameter('platform', 'darwin', false),
+          queryParameter('arch', 'arm64', false),
+          queryParameter('fileName', 'Luopan-0.2.0-arm64.dmg', true),
+          queryParameter('digest', 'sha256:<digest>', true)
+        ],
+        request: '<binary artifact>',
+        requestContentType: 'application/octet-stream',
+        requestSchema: { type: 'string', format: 'binary' },
+        curl: [
+          'curl -sS -X POST "$BASE/internal/v1/sdk/releases/artifacts?productId=luopan&releaseId=luopan-installer-0.2.0&componentId=luopan&kind=app-installer&version=0.2.0&channel=shadow&platform=darwin&arch=arm64&fileName=Luopan-0.2.0-arm64.dmg&digest=sha256:$SHA256" \\',
+          '  -H "Authorization: Bearer $TOKEN" \\',
+          '  -H "content-type: application/octet-stream" \\',
+          '  --data-binary "@$ARTIFACT"'
+        ].join('\n'),
+        response: {
+          artifact: {
+            artifactId: 'artifact_luopan_app-installer_0.2.0_<identity>_<sha256hex>',
+            releaseId: 'luopan-installer-0.2.0',
+            productId: 'luopan',
+            componentId: 'luopan',
+            kind: 'app-installer',
+            version: '0.2.0',
+            digest: 'sha256:<digest>',
+            sizeBytes: 104857600,
+            platform: 'darwin',
+            arch: 'arm64',
+            fileName: 'Luopan-0.2.0-arm64.dmg',
+            storage: 'oss',
+            url: '/internal/v1/release-artifacts/<artifactId>/download/Luopan-0.2.0-arm64.dmg'
+          }
+        }
+      })
+    },
+    '/internal/v1/sdk/releases/artifacts/{artifactId}': {
+      get: operation({
+        tag: 'Release Publisher',
+        summary: '读取已上传制品元数据',
+        description: '只允许读取服务账号 allowedProductIds 中的制品。返回服务端登记的 digest、size、platform、arch 与下载引用。',
+        operationId: 'getSdkReleaseArtifact',
+        routeId: 'sdk.release_artifacts.get',
+        scopes: ['sdk.release.read', 'sdk.release.publish', 'sdk.release.approve', 'release.manage'],
+        auth: 'internal-bearer',
+        pathParams: ['artifactId'],
+        response: {
+          artifact: {
+            artifactId: 'artifact_luopan_020',
+            productId: 'luopan',
+            componentId: 'luopan',
+            version: '0.2.0',
+            digest: 'sha256:<digest>',
+            sizeBytes: 104857600,
+            platform: 'darwin',
+            arch: 'arm64'
+          }
+        }
+      })
+    },
+    '/internal/v1/sdk/releases': {
+      get: operation({
+        tag: 'Release Publisher',
+        summary: '列出当前产品发布计划',
+        description: 'productId 必填；服务端按 allowedProductIds 过滤，Luopan 发布者无法读取 MX-H2I 计划。',
+        operationId: 'listSdkReleases',
+        routeId: 'sdk.releases.list',
+        scopes: ['sdk.release.read', 'sdk.release.publish', 'sdk.release.approve', 'release.manage'],
+        auth: 'internal-bearer',
+        parameters: [queryParameter('productId', 'luopan', true)],
+        curl: 'curl -sS "$BASE/internal/v1/sdk/releases?productId=luopan" -H "Authorization: Bearer $TOKEN"',
+        response: {
+          plans: [{
+            planId: 'relplan_luopan_020_canary',
+            releaseId: 'luopan-installer-0.2.0',
+            productId: 'luopan',
+            channel: 'shadow',
+            requestId: 'luopan-0.2.0-canary-001',
+            rollout: { strategy: 'manual-ring', percentage: 0, audience: { installIds: ['install_canary'] } },
+            test: { gate: { verdict: 'blocked' } }
+          }]
+        }
+      }),
+      post: operation({
+        tag: 'Release Publisher',
+        summary: '从已上传制品创建 gated 发布',
+        description: '只接受平台 artifactId；releaseId、product、component、URL、digest、size、platform、arch 与 createdBy 均由服务端派生。requestId 必填并作为幂等键：相同请求返回原计划，内容变化返回 400。同一 artifactId 可用新的 requestId 创建 canary 与全量计划。新计划的 E2E run 为 running，对外 gate verdict 为 blocked，审批通过后才可消费。',
+        operationId: 'createSdkRelease',
+        routeId: 'sdk.releases.create',
+        scopes: ['sdk.release.publish', 'release.manage'],
+        auth: 'internal-bearer',
+        request: {
+          artifactId: 'artifact_luopan_020',
+          currentVersion: '0.1.0',
+          channel: 'shadow',
+          rolloutStrategy: 'manual-ring',
+          rolloutPercentage: 0,
+          targetInstallIds: ['install_canary'],
+          releaseNotes: 'Luopan 0.2.0 canary',
+          requestId: 'luopan-0.2.0-canary-001'
+        },
+        required: ['artifactId', 'currentVersion', 'requestId'],
+        response: {
+          plan: {
+            planId: 'relplan_luopan_020_canary',
+            releaseId: 'luopan-installer-0.2.0',
+            productId: 'luopan',
+            channel: 'shadow',
+            createdBy: 'service-account:svc_release_luopan',
+            requestId: 'luopan-0.2.0-canary-001',
+            artifacts: [{ componentId: 'luopan', digest: 'sha256:<digest>', activation: 'installer-manual' }],
+            test: { gate: { verdict: 'blocked' } }
+          },
+          idempotent: false
+        }
+      })
+    },
+    '/internal/v1/sdk/releases/{planId}': {
+      get: operation({
+        tag: 'Release Publisher',
+        summary: '读取单个发布计划',
+        description: '读取完整 gate、rollout、artifact 与决策证据；仍按服务账号 allowedProductIds 做产品隔离。',
+        operationId: 'getSdkRelease',
+        routeId: 'sdk.releases.get',
+        scopes: ['sdk.release.read', 'sdk.release.publish', 'sdk.release.approve', 'release.manage'],
+        auth: 'internal-bearer',
+        pathParams: ['planId'],
+        response: {
+          plan: {
+            planId: 'relplan_luopan_020_canary',
+            releaseId: 'luopan-installer-0.2.0',
+            productId: 'luopan',
+            test: { gate: { verdict: 'blocked' } },
+            decisions: { readyToPromote: false, requiresApproval: true }
+          }
+        }
+      })
+    },
+    '/internal/v1/sdk/releases/{planId}/gate': {
+      post: operation({
+        tag: 'Release Publisher',
+        summary: '完成发布验证 gate',
+        description: '需要独立 approve scope；status 只接受 passed、failed 或 blocked。requestedBy 不能由调用方伪造，服务端使用 Bearer principal。evidence 最大 32 KiB、嵌套最多 4 层，禁止 secret/token/password/credential 等敏感字段，也不要提交环境转储或原始日志。passed/failed 是终态，显式 blocked 也终止本次验证；相同终态重试返回原 plan，改变结果必须新建 plan。Postgres 按 plan 与 test run 事务串行审批。建议先以受控 CI/人工验证证据完成定向真机验证，再 passed；全量计划使用同一 artifactId 和新的 requestId 创建。',
+        operationId: 'completeSdkReleaseGate',
+        routeId: 'sdk.releases.gate',
+        scopes: ['sdk.release.approve', 'release.manage'],
+        auth: 'internal-bearer',
+        pathParams: ['planId'],
+        request: {
+          status: 'passed',
+          message: 'macOS arm64 canary passed',
+          evidence: {
+            installId: 'install_canary',
+            installerCompleted: true
+          },
+          requestId: 'luopan-0.2.0-canary-gate-001'
+        },
+        required: ['status', 'requestId'],
+        response: {
+          plan: {
+            planId: 'relplan_luopan_020_canary',
+            productId: 'luopan',
+            test: { gate: { verdict: 'passed' } },
+            decisions: { readyToPromote: true, requiresApproval: true }
+          }
+        }
+      })
     }
   },
   components: {
@@ -788,8 +1116,14 @@ interface OperationInput {
   scopes?: string[];
   auth: AuthMode;
   request?: unknown;
+  requestContentType?: string;
+  requestSchema?: JsonRecord;
   required?: string[];
   pathParams?: string[];
+  parameters?: JsonRecord[];
+  responseContentType?: string;
+  responseSchema?: JsonRecord;
+  curl?: string;
   response: unknown;
 }
 
@@ -803,7 +1137,7 @@ function operation(input: OperationInput): ApiOperation {
       ? [{ bearerAuth: [] }]
       : [],
     responses: {
-      '200': responseContent(input.response),
+      '200': responseContent(input.response, input.responseContentType, input.responseSchema),
       '400': {
         description: 'Invalid request',
         content: {
@@ -817,21 +1151,23 @@ function operation(input: OperationInput): ApiOperation {
     'x-mx-auth': authDescription(input.auth)
   };
   if (input.routeId) result['x-route-id'] = input.routeId;
-  if (input.pathParams?.length) {
-    result.parameters = input.pathParams.map((name) => ({
+  if (input.curl) result['x-mx-curl'] = input.curl;
+  const pathParameters = (input.pathParams ?? []).map((name) => ({
       name,
       in: 'path',
       required: true,
       schema: { type: 'string' }
-    }));
-  }
+  }));
+  const parameters = [...pathParameters, ...(input.parameters ?? [])];
+  if (parameters.length > 0) result.parameters = parameters;
   if (input.request !== undefined) {
+    const contentType = input.requestContentType ?? 'application/json';
     result.requestBody = {
       required: true,
       content: {
-        'application/json': {
-          schema: schemaFromExample(input.request, input.required),
-          example: input.request
+        [contentType]: {
+          schema: input.requestSchema ?? schemaFromExample(input.request, input.required),
+          ...(contentType === 'application/octet-stream' ? {} : { example: input.request })
         }
       }
     };
@@ -839,14 +1175,32 @@ function operation(input: OperationInput): ApiOperation {
   return result;
 }
 
-function responseContent(example: unknown): JsonRecord {
-  const contentType = typeof example === 'string' ? 'text/yaml' : 'application/json';
+function queryParameter(
+  name: string,
+  example: string | number,
+  required: boolean,
+  constraints: JsonRecord = {}
+): JsonRecord {
+  return {
+    name,
+    in: 'query',
+    required,
+    schema: {
+      type: typeof example === 'number' ? 'integer' : 'string',
+      example,
+      ...constraints
+    }
+  };
+}
+
+function responseContent(example: unknown, explicitContentType?: string, explicitSchema?: JsonRecord): JsonRecord {
+  const contentType = explicitContentType ?? (typeof example === 'string' ? 'text/yaml' : 'application/json');
   return {
     description: 'Successful response',
     content: {
       [contentType]: {
-        schema: schemaFromExample(example),
-        example
+        schema: explicitSchema ?? schemaFromExample(example),
+        ...(contentType === 'application/octet-stream' ? {} : { example })
       }
     }
   };
@@ -877,9 +1231,11 @@ function schemaFromExample(value: unknown, required?: string[]): JsonRecord {
 
 function authDescription(auth: AuthMode): string {
   if (auth === 'public') return '公开发现或登录入口；仍只应部署在受控网络。';
+  if (auth === 'internal-consumer') return '无需 Publisher 凭据；仅允许应用经已建立的 Internal 产品网络调用。';
   if (auth === 'token-body') return '在 JSON body 中传 token，接口会对 token 做实际校验。';
   if (auth === 'bearer') return '契约要求 Bearer 与 route scopes；V1 shadow 尚未对所有 SDK route 强制 header guard。';
   if (auth === 'internal-bearer') return 'Internal 网络 + 实际 Bearer 校验。';
+  if (auth === 'ops-token') return 'Internal 网络 + x-mx-ops-token；缺少或错误 token 会被拒绝。';
   return '仅 Internal/ops 网络；当前依赖网络隔离，禁止发布到公网。';
 }
 
@@ -928,14 +1284,14 @@ export function renderApiDocsHtml(document: ApiDocsDocument): string {
     '<header class="hero"><div class="hero-inner"><div class="brand">MX<span>H2I</span></div>',
     '<div class="hero-copy"><div class="badges"><span>V2 · Internal authority</span><span>OpenAPI ' + escapeHtml(document.openapi) + '</span><span>port 18090</span></div>',
     '<h1>MX Launcher<br>Integration API</h1>',
-    '<p>面向第三方系统的用户中心、权限中心与 SDK Gateway 交付文档。V2 配置和身份真相均在 Internal。</p>',
+    '<p>面向第三方系统的用户中心、权限中心、Release Center 与 SDK Gateway 交付文档。V2 配置和身份真相均在 Internal。</p>',
     '<div class="actions"><a class="primary" href="/docs/api/openapi.json" download>导出 OpenAPI JSON</a>',
     '<a href="/docs/api/mx-launcher-api.md">导出 Markdown</a><button type="button" id="print-doc">打印 / PDF</button></div></div></div></header>',
     '<div class="layout"><aside><label for="api-search">搜索 API</label><input id="api-search" type="search" placeholder="路径、用途、scope…">',
     '<nav>' + navigation + '</nav><div class="aside-note"><b>Base URL</b><code id="base-url">http://&lt;internal-host&gt;:18090</code></div></aside>',
     '<main><section class="overview">',
     '<article><span>01 · Authority</span><h3>V2 以 Internal 为中心</h3><p>用户、RBAC、权限、DNS 与 H2O 配置由 mx-launcher/server 管理。Domestic 只做代理、relay、缓存和观测转发。</p></article>',
-    '<article><span>02 · Integration</span><h3>第三方优先走 SDK Gateway</h3><p>稳定入口是 <code>/internal/v1/sdk/*</code>。<code>/internal/v1/user-center/*</code> 是受信任的运维面。</p></article>',
+    '<article><span>02 · Integration</span><h3>第三方优先走 SDK Gateway</h3><p>稳定入口是 <code>/internal/v1/sdk/*</code>，包括产品隔离的 Release Publisher；<code>/internal/v1/user-center/*</code> 是受信任的运维面。</p></article>',
     '<article><span>03 · Compatibility</span><h3>V1 HDO 保持在线</h3><p><code>electron-server /api/v1/hdo/*</code> 是兼容面，不应成为新系统依赖的目标契约。</p></article>',
     '</section>',
     '<section class="warning"><strong>部署边界</strong><p>18090 只能位于 Internal 网络或 Domestic relay 后。V1 shadow 尚未对全部 SDK route 强制 Bearer header guard；生产接入必须同时使用网络隔离，并在调用前按 routeId 做 access evaluate。</p></section>',
@@ -991,11 +1347,15 @@ function contentExample(content: JsonRecord): unknown {
 }
 
 function curlExample(method: string, path: string, operation: ApiOperation, request: unknown): string {
+  if (operation['x-mx-curl']) return operation['x-mx-curl'];
   const lines = ['curl -sS -X ' + method + ' \"$BASE' + path + '\"'];
   if (operation.security.length > 0) lines.push('  -H \"Authorization: Bearer $TOKEN\"');
   if (request !== undefined) {
-    lines.push('  -H \"content-type: application/json\"');
-    lines.push('  --data ' + shellQuote(pretty(request)));
+    const requestContentType = Object.keys((operation.requestBody?.content as JsonRecord | undefined) ?? {})[0]
+      ?? 'application/json';
+    lines.push('  -H \"content-type: ' + requestContentType + '\"');
+    if (requestContentType === 'application/octet-stream') lines.push('  --data-binary \"@$ARTIFACT\"');
+    else lines.push('  --data ' + shellQuote(pretty(request)));
   }
   return lines.join(' \\\n');
 }

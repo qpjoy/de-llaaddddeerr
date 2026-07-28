@@ -116,7 +116,9 @@ written to local storage or server configuration, and must be entered again
 after reload/restart. Kubernetes reads the server value from
 `mx-internal-shadow/mx-internal-ops`, key `token`; `manage.sh` reuses the
 existing Secret or creates a cryptographically random value before applying
-the Deployment.
+the Deployment. The standard Internal deploy reads a configured
+`MX_INTERNAL_OPS_TOKEN` from the process environment or gitignored
+`server/.env`, with the existing Secret as the next fallback.
 
 `POST /internal/v1/user-center/tokens/issue` is an Internal/ops bootstrap and
 smoke-test endpoint, not a public authentication endpoint. It requires the
@@ -124,11 +126,14 @@ dedicated `x-mx-ops-token` credential and must remain reachable only inside the
 trusted Internal/ops network; never publish it through Domestic, H, or another
 public ingress.
 
-The SDK `client_credentials` grant currently validates `client_secret` against
-the same `MX_INTERNAL_OPS_TOKEN`. An arbitrary placeholder such as
-`managed-by-internal` is not accepted. Treat this as the bootstrap credential
-for current service-account integrations, not as a claim that each service
-account already has an independently rotated secret.
+The SDK `client_credentials` grant validates product service accounts against
+the account-specific map in `MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON`. Kubernetes
+injects that value from
+`mx-internal-shadow/mx-sdk-service-account-secrets/secrets.json`; the standard
+deploy can ensure it from the complete canonical JSON map in `server/.env`.
+Only the built-in `svc_sdk_gateway` retains the legacy
+`MX_INTERNAL_OPS_TOKEN` fallback during migration. An arbitrary placeholder
+such as `managed-by-internal` is never accepted.
 
 `POST /internal/v1/config-center/snapshots/effective` and
 `POST /internal/v1/sdk/config/snapshot` issue the V1 signed policy snapshot.

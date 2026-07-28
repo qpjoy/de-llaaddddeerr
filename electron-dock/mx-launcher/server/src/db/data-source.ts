@@ -4,6 +4,7 @@ import { PlatformRecordEntity } from './entities.js';
 import { InitPlatformRecords1760000000000 } from './migrations/1760000000000-InitPlatformRecords.js';
 import { LauncherNetworkLeaseConstraints1760000000100 } from './migrations/1760000000100-LauncherNetworkLeaseConstraints.js';
 import { LauncherLeaseGeneration1760000000200 } from './migrations/1760000000200-LauncherLeaseGeneration.js';
+import { ReleasePublisherRequestConstraint1760000000300 } from './migrations/1760000000300-ReleasePublisherRequestConstraint.js';
 import type { RuntimeConfig } from '../types.js';
 
 export function createPlatformDataSource(config: RuntimeConfig): DataSource {
@@ -17,7 +18,8 @@ export function createPlatformDataSource(config: RuntimeConfig): DataSource {
     migrations: [
       InitPlatformRecords1760000000000,
       LauncherNetworkLeaseConstraints1760000000100,
-      LauncherLeaseGeneration1760000000200
+      LauncherLeaseGeneration1760000000200,
+      ReleasePublisherRequestConstraint1760000000300
     ],
     migrationsTableName: 'mx_schema_migrations',
     synchronize: false,

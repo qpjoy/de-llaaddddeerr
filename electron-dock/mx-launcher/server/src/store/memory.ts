@@ -114,7 +114,11 @@ import {
 } from './domain.js';
 import { applyGatewayNginxConfigToHostRunner } from './host-runner.js';
 import { applyCoreDnsConfigMapToKubernetes, applyGatewayConfigMapToKubernetes } from './kubernetes.js';
-import type { PlatformStore } from './platform-store.js';
+import type {
+  PlatformStore,
+  PublisherReleasePlanInput,
+  PublisherReleasePlanResult
+} from './platform-store.js';
 import {
   LEGACY_HDO_ALLOWED_APP_IDS,
   LEGACY_HDO_HOME_APP_ID,
@@ -1372,6 +1376,7 @@ export class MemoryStore implements PlatformStore {
         serviceAccountId: serviceAccount.serviceAccountId,
         roleIds: serviceAccount.roleIds,
         scopes: serviceAccount.scopes,
+        allowedProductIds: serviceAccount.allowedProductIds ?? [],
         status: serviceAccount.status
       }
     });
@@ -2898,6 +2903,23 @@ export class MemoryStore implements PlatformStore {
     };
   }
 
+  createPublisherReleaseManagementPlan(
+    input: PublisherReleasePlanInput
+  ): PublisherReleasePlanResult {
+    const existing = [...this.releaseManagementPlans.values()].find((plan) => (
+      plan.productId === input.productId && plan.requestId === input.requestId
+    ));
+    if (existing) {
+      return existing.publisherRequestFingerprint === input.publisherRequestFingerprint
+        ? { outcome: 'replayed', plan: existing }
+        : { outcome: 'conflict', planId: existing.planId };
+    }
+    return {
+      outcome: 'created',
+      plan: this.createReleaseManagementPlan(input)
+    };
+  }
+
   createReleaseManagementPlan(input: ReleaseManagementPlanInput): ReleaseManagementPlan {
     const releaseId = input.releaseId?.trim() || `rel_${randomUUID()}`;
     const channel = input.channel?.trim() || 'shadow';
@@ -2986,7 +3008,17 @@ export class MemoryStore implements PlatformStore {
   completeReleaseManagementGate(planId: string, input: ReleaseManagementGateInput): ReleaseManagementPlan {
     const plan = this.getReleaseManagementPlan(planId);
     if (!plan) throw new Error(`Unknown releaseManagementPlanId: ${planId}`);
-    const run = this.recordTestStep(plan.test.run.testRunId, {
+    const currentVerdict = plan.test.gate.verdict;
+    const gateIsTerminal = currentVerdict === 'passed'
+      || currentVerdict === 'failed'
+      || plan.test.run.state === 'blocked';
+    if (gateIsTerminal) {
+      if (currentVerdict === input.status) return plan;
+      throw new Error(
+        `Release management gate is terminal (${currentVerdict}); create a new plan`
+      );
+    }
+    const run = this.recordTestStepInternal(plan.test.run.testRunId, {
       caseId: 'release-gate:e2e',
       status: input.status,
       message: input.message ?? `release management E2E gate ${input.status}`,
@@ -2996,7 +3028,7 @@ export class MemoryStore implements PlatformStore {
         planId: plan.planId,
         ...(input.evidence ?? {})
       }
-    });
+    }, true);
     const gate = this.evaluateTestGate({
       gateId: plan.test.gate.gateId,
       releaseId: plan.releaseId,
@@ -3018,7 +3050,7 @@ export class MemoryStore implements PlatformStore {
       requestId: input.requestId ?? null,
       installId: updated.installId,
       userId: updated.userId,
-      productId: updated.components.launcher.componentId,
+      productId: updated.productId || updated.components.launcher.componentId,
       metadata: {
         planId: updated.planId,
         releaseId: updated.releaseId,
@@ -3075,8 +3107,27 @@ export class MemoryStore implements PlatformStore {
   }
 
   recordTestStep(runId: string, input: TestStepInput): TestRun {
+    return this.recordTestStepInternal(runId, input, false);
+  }
+
+  private recordTestStepInternal(
+    runId: string,
+    input: TestStepInput,
+    allowPublisherGate: boolean
+  ): TestRun {
     const run = this.testRuns.get(runId);
     if (!run) throw new Error(`Unknown testRunId: ${runId}`);
+    if (!allowPublisherGate) {
+      const publisherOwnsRun = [...this.releaseManagementPlans.values()].some((plan) => (
+        Boolean(plan.publisherRequestFingerprint?.trim())
+        && plan.test.run.testRunId === runId
+      ));
+      if (publisherOwnsRun) {
+        throw new Error(
+          'Publisher release test runs can only be completed through the release gate endpoint'
+        );
+      }
+    }
     const status = normalizeTestStatus(input.status);
     const step: TestStep = {
       stepId: `tstep_${randomUUID()}`,

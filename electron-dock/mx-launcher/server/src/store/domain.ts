@@ -561,6 +561,7 @@ export function createUserCenterServiceAccount(
     displayName: input.displayName?.trim() || serviceAccountId,
     roleIds: input.roleIds?.length ? input.roleIds : ['mx-service-account'],
     scopes: input.scopes ?? [],
+    allowedProductIds: uniqueAppIds(input.allowedProductIds ?? []),
     status: 'active',
     createdAt: now
   };
@@ -727,6 +728,17 @@ function gatewayRouteRequiredScopes(routeId: string): string[] {
   if (routeId.startsWith('sdk.dns.')) return ['sdk.dns.evaluate', 'network.dns.policy'];
   if (routeId === 'sdk.audit.write') return ['sdk.audit.write'];
   if (routeId === 'sdk.observability.logs') return ['sdk.observability.write', 'observability.write'];
+  if (
+    routeId === 'sdk.releases.list'
+    || routeId === 'sdk.releases.get'
+    || routeId === 'sdk.release_artifacts.get'
+  ) {
+    return ['sdk.release.read', 'sdk.release.publish', 'sdk.release.approve', 'release.manage'];
+  }
+  if (routeId === 'sdk.release_artifacts.upload' || routeId === 'sdk.releases.create') {
+    return ['sdk.release.publish', 'release.manage'];
+  }
+  if (routeId === 'sdk.releases.gate') return ['sdk.release.approve', 'release.manage'];
   return [];
 }
 
@@ -3402,6 +3414,54 @@ export function createSdkGatewayManifest(config: RuntimeConfig): SdkGatewayManif
       description: 'Renders or records a shadow sync for a CoreDNS ConfigMap manifest.'
     },
     {
+      routeId: 'sdk.releases.list',
+      path: '/internal/v1/sdk/releases',
+      upstreamModule: 'release-center',
+      audience: 'mx-sdk',
+      authRequired: true,
+      description: 'Lists product-scoped Release Center plans visible to the calling service account.'
+    },
+    {
+      routeId: 'sdk.releases.create',
+      path: '/internal/v1/sdk/releases',
+      upstreamModule: 'release-center',
+      audience: 'mx-sdk',
+      authRequired: true,
+      description: 'Creates a gated product release from an artifact previously uploaded by the same product publisher.'
+    },
+    {
+      routeId: 'sdk.releases.get',
+      path: '/internal/v1/sdk/releases/{planId}',
+      upstreamModule: 'release-center',
+      audience: 'mx-sdk',
+      authRequired: true,
+      description: 'Reads one product-scoped Release Center plan.'
+    },
+    {
+      routeId: 'sdk.releases.gate',
+      path: '/internal/v1/sdk/releases/{planId}/gate',
+      upstreamModule: 'release-center',
+      audience: 'mx-sdk',
+      authRequired: true,
+      description: 'Records an approval result for a product-scoped Release Center plan.'
+    },
+    {
+      routeId: 'sdk.release_artifacts.upload',
+      path: '/internal/v1/sdk/releases/artifacts',
+      upstreamModule: 'release-center',
+      audience: 'mx-sdk',
+      authRequired: true,
+      description: 'Uploads a product-scoped release artifact as a raw binary stream.'
+    },
+    {
+      routeId: 'sdk.release_artifacts.get',
+      path: '/internal/v1/sdk/releases/artifacts/{artifactId}',
+      upstreamModule: 'release-center',
+      audience: 'mx-sdk',
+      authRequired: true,
+      description: 'Reads metadata for a product-scoped release artifact.'
+    },
+    {
       routeId: 'sdk.audit.write',
       path: '/internal/v1/audit/events',
       upstreamModule: 'audit-center',
@@ -4384,6 +4444,8 @@ export function buildReleaseManagementPlan(
     installId: input.installId ?? null,
     userId: input.userId ?? null,
     createdBy: input.createdBy?.trim() || 'release-admin-shadow',
+    requestId: input.requestId?.trim() || null,
+    publisherRequestFingerprint: input.publisherRequestFingerprint?.trim() || null,
     components: {
       launcher: parts.launcherDecision,
       app: parts.appDecision
@@ -5175,20 +5237,36 @@ export function builtinSecretProviderConfigs(config: RuntimeConfig): SecretProvi
 }
 
 export function builtinConfigSecretReferences(config: RuntimeConfig): ConfigSecretReference[] {
-  return [buildConfigSecretReference(config, {
-    secretRefId: 'secretref_release_oss',
-    name: 'Release Center OSS',
-    providerId: 'secretprov_kubernetes_runtime',
-    remoteRef: 'mx-release-oss',
-    status: 'active',
-    consumerIds: ['release-center'],
-    exposure: 'signed-url',
-    versionStage: 'runtime',
-    rotationMode: 'manual',
-    targetNamespace: 'mx-internal-shadow',
-    targetSecretName: 'mx-release-oss',
-    requestedBy: 'builtin'
-  }, null)];
+  return [
+    buildConfigSecretReference(config, {
+      secretRefId: 'secretref_release_oss',
+      name: 'Release Center OSS',
+      providerId: 'secretprov_kubernetes_runtime',
+      remoteRef: 'mx-release-oss',
+      status: 'active',
+      consumerIds: ['release-center'],
+      exposure: 'signed-url',
+      versionStage: 'runtime',
+      rotationMode: 'manual',
+      targetNamespace: 'mx-internal-shadow',
+      targetSecretName: 'mx-release-oss',
+      requestedBy: 'builtin'
+    }, null),
+    buildConfigSecretReference(config, {
+      secretRefId: 'secretref_sdk_service_account_credentials',
+      name: 'SDK Service Account Credentials',
+      providerId: 'secretprov_kubernetes_runtime',
+      remoteRef: 'mx-sdk-service-account-secrets',
+      status: 'active',
+      consumerIds: ['sdk-gateway', 'release-center'],
+      exposure: 'internal-only',
+      versionStage: 'runtime',
+      rotationMode: 'manual',
+      targetNamespace: 'mx-internal-shadow',
+      targetSecretName: 'mx-sdk-service-account-secrets',
+      requestedBy: 'builtin'
+    }, null)
+  ];
 }
 
 export function buildSiteSlotExecutionRun(

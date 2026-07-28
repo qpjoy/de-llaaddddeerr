@@ -3793,12 +3793,16 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
     return /^\/internal\/v1\/user-center\/(?:roles|users|oversea-entitlements|service-accounts)$/.test(path)
       || /^\/internal\/v1\/user-center\/users\/[^/]+\/(?:oversea|h2o\/runtime-profile)$/.test(path)
       || /^\/internal\/v1\/sdk\/(?:roles|users|service-accounts)$/.test(path)
+      || /^\/internal\/v1\/release-management\/plans(?:\/[^/]+)?$/.test(path)
+      || /^\/internal\/v1\/release-artifacts\/[^/]+$/.test(path)
       || /^\/internal\/v1\/launcher-network\/leases(?:\/[^/]+)?$/.test(path);
   }
   if (verb === 'POST') {
     return /^\/internal\/v1\/user-center\/(?:bootstrap|users|users\/import|service-accounts|tokens\/issue)$/.test(path)
       || /^\/internal\/v1\/user-center\/users\/[^/]+\/(?:password|oversea|h2o\/runtime-profile|oversea\/sync-runtime)$/.test(path)
       || /^\/internal\/v1\/sdk\/(?:users|service-accounts)$/.test(path)
+      || /^\/internal\/v1\/release-management\/plans(?:\/[^/]+\/gate)?$/.test(path)
+      || path === '/internal/v1/release-artifacts'
       || /^\/internal\/v1\/launcher-network\/leases\/[^/]+\/(?:release|domestic-peer\/sync|domestic-relay\/diagnostics|internal-direct-peer\/sync)$/.test(path)
       || /^\/internal\/v1\/launcher-network\/(?:products\/[^/]+|mihomo\/sites\/[^/]+)$/.test(path);
   }
@@ -7179,10 +7183,16 @@ async function uploadReleaseArtifactFile(input, file) {
   if (input.platform) params.set('platform', input.platform);
   if (input.arch) params.set('arch', input.arch);
   const url = `${normalizedServerBase()}/internal/v1/release-artifacts?${params}`;
+  const requestUrl = new URL(url);
+  const opsToken = opsTokenForRequest(requestUrl, 'POST');
   const response = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': input.contentType },
-    body: file
+    headers: {
+      'content-type': input.contentType,
+      ...(opsToken ? { 'x-mx-ops-token': opsToken } : {})
+    },
+    body: file,
+    redirect: opsToken ? 'error' : 'follow'
   });
   const text = await response.text();
   let payload = null;

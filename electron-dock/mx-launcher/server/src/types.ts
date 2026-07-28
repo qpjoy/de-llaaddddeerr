@@ -809,6 +809,12 @@ export interface UserCenterServiceAccount {
   displayName: string;
   roleIds: string[];
   scopes: string[];
+  /**
+   * Resource boundary for product-scoped SDK routes such as Release Center.
+   * Records created before this field existed intentionally receive no
+   * product access until an operator updates them.
+   */
+  allowedProductIds?: string[];
   status: 'active' | 'disabled';
   createdAt: string;
 }
@@ -987,6 +993,7 @@ export interface CreateServiceAccountInput {
   displayName?: string | null;
   roleIds?: string[];
   scopes?: string[];
+  allowedProductIds?: string[];
   requestId?: string | null;
 }
 
@@ -3168,6 +3175,7 @@ export interface ReleaseManagementPlanInput {
   e2eResult?: ReleaseManagementE2eResult | null;
   createdBy?: string | null;
   requestId?: string | null;
+  publisherRequestFingerprint?: string | null;
 }
 
 export interface ReleaseManagementGateInput {
@@ -3188,6 +3196,9 @@ export interface ReleaseManagementPlan {
   installId: string | null;
   userId: string | null;
   createdBy: string;
+  /** SDK publisher idempotency key and canonical request fingerprint. */
+  requestId?: string | null;
+  publisherRequestFingerprint?: string | null;
   components: {
     launcher: ReleasePolicyDecision;
     app: ReleasePolicyDecision;

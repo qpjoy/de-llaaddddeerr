@@ -96,6 +96,8 @@ export interface ElectronLauncherReleasePlan {
 }
 
 export interface ElectronLauncherUpdateCheckInput {
+  /** Stable AppCenter product identity; external products should always set it. */
+  productId?: string | null;
   componentId: string;
   componentKind?: string;
   currentVersion: string;
@@ -132,6 +134,7 @@ export interface ElectronLauncherReleaseUpdaterOptions {
   baseUrl: string;
   fetchImpl?: FetchLike;
   reportInstallId?: string | null;
+  productId?: string | null;
 }
 
 export interface ElectronLauncherReleaseReportInput {
@@ -181,6 +184,7 @@ export function createElectronLauncherReleaseUpdater(options: ElectronLauncherRe
             {
               installId,
               userId: input.userId ?? null,
+              productId: input.productId ?? options.productId ?? null,
               channel: input.channel,
               platform: input.platform ?? null,
               arch: input.arch ?? null,

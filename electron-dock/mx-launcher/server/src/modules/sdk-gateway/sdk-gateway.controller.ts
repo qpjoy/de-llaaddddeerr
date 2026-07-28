@@ -1,3 +1,6 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+
 import {
   BadRequestException,
   Body,
@@ -298,18 +301,22 @@ export class SdkGatewayController {
       subjectLimit: SERVICE_SUBJECT_ATTEMPT_LIMIT,
       sourceSubjectLimit: SERVICE_SOURCE_SUBJECT_ATTEMPT_LIMIT
     });
-    assertInternalOpsToken(clientSecret);
     const serviceAccounts = await this.store.listUserCenterServiceAccounts();
     const serviceAccount = serviceAccounts.find((item) => item.status === 'active' && item.serviceAccountId === clientId);
-    if (!serviceAccount) throw new UnauthorizedException('service account is not active');
+    if (!serviceAccount || !serviceAccountClientSecretMatches(clientId, clientSecret)) {
+      throw new UnauthorizedException('invalid service account credentials');
+    }
     const issued = await this.store.issueUserCenterToken({
       subjectKind: 'service-account',
       subjectId: serviceAccount.serviceAccountId,
       audience: nullableString(body.audience) ?? 'mx-sdk',
       scopes: oauthScopes(body.scope, body.scopes),
-      ttlSeconds: numberValue(body.expires_in)
-        ?? numberValue(body.ttlSeconds)
-        ?? SERVICE_ACCOUNT_ACCESS_TOKEN_TTL_SECONDS,
+      ttlSeconds: Math.min(
+        numberValue(body.expires_in)
+          ?? numberValue(body.ttlSeconds)
+          ?? SERVICE_ACCOUNT_ACCESS_TOKEN_TTL_SECONDS,
+        SERVICE_ACCOUNT_ACCESS_TOKEN_TTL_SECONDS
+      ),
       requestId: nullableString(body.requestId)
     });
     const introspection = await this.store.introspectToken({
@@ -422,6 +429,7 @@ function toCreateServiceAccountInput(body: Record<string, unknown>): CreateServi
     displayName: nullableString(body.displayName),
     roleIds: stringArray(body.roleIds),
     scopes: stringArray(body.scopes),
+    allowedProductIds: stringArray(body.allowedProductIds),
     requestId: nullableString(body.requestId)
   };
 }
@@ -445,6 +453,57 @@ function bearerToken(authorization?: string): string | null {
   if (!authorization) return null;
   const match = authorization.match(/^Bearer\s+(.+)$/i);
   return match ? match[1].trim() : null;
+}
+
+/**
+ * Product publishers receive an account-specific secret from a Kubernetes
+ * Secret, never the platform-wide Internal ops token. The built-in gateway
+ * account keeps the legacy ops-token fallback so existing Internal automation
+ * remains compatible while it migrates.
+ */
+function serviceAccountClientSecretMatches(serviceAccountId: string, providedSecret: string): boolean {
+  const configuredSecret = serviceAccountSecrets()[serviceAccountId];
+  if (configuredSecret) return constantTimeSecretEqual(configuredSecret, providedSecret);
+  if (serviceAccountId !== 'svc_sdk_gateway') return false;
+  try {
+    assertInternalOpsToken(providedSecret);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function serviceAccountSecrets(): Record<string, string> {
+  const inline = process.env.MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON?.trim();
+  const file = process.env.MX_SDK_SERVICE_ACCOUNT_SECRETS_FILE?.trim();
+  const raw = inline || (file ? safelyReadTextFile(file) : '');
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.entries(parsed).reduce<Record<string, string>>((result, [key, value]) => {
+      const serviceAccountId = key.trim();
+      const secret = typeof value === 'string' ? value.trim() : '';
+      if (serviceAccountId && secret.length >= 32) result[serviceAccountId] = secret;
+      return result;
+    }, {});
+  } catch {
+    return {};
+  }
+}
+
+function safelyReadTextFile(path: string): string {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+function constantTimeSecretEqual(expected: string, actual: string): boolean {
+  const expectedDigest = createHash('sha256').update(expected).digest();
+  const actualDigest = createHash('sha256').update(actual).digest();
+  return timingSafeEqual(expectedDigest, actualDigest);
 }
 
 function oauthTokenResponse(

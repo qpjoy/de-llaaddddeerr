@@ -15,6 +15,7 @@ const releaseId = process.env.MX_INTERNAL_SHADOW_RELEASE_ID || `rel_internal_sha
 const outputDir = resolve(process.env.MX_INTERNAL_SHADOW_GATE_OUTPUT_DIR || join(serverRoot, 'artifacts', 'internal-shadow-gates'));
 const requireK8sFiles = process.env.MX_INTERNAL_SHADOW_GATE_REQUIRE_K8S_FILES === '1';
 const requireManualEvidence = process.env.MX_INTERNAL_SHADOW_REQUIRE_MANUAL_EVIDENCE === '1';
+const internalOpsToken = process.env.MX_INTERNAL_OPS_TOKEN?.trim() || '';
 
 mkdirSync(outputDir, { recursive: true });
 
@@ -282,9 +283,13 @@ async function recordStep(input) {
 }
 
 async function fetchJson(path, options = {}) {
+  const headers = {
+    ...(options.body ? { 'content-type': 'application/json' } : {}),
+    ...(internalOpsToken ? { 'x-mx-ops-token': internalOpsToken } : {})
+  };
   const response = await fetch(`${baseUrl}${path}`, {
     method: options.method || 'GET',
-    headers: options.body ? { 'content-type': 'application/json' } : undefined,
+    headers: Object.keys(headers).length > 0 ? headers : undefined,
     body: options.body ? JSON.stringify(options.body) : undefined
   });
   const text = await response.text();

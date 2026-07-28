@@ -116,7 +116,6 @@ spec:
             - -ec
             - |
               db_host="${DATABASE_HOST:-${MX_INTERNAL_POSTGRES_SERVICE_HOST:-mx-internal-postgres.mx-internal-shadow.svc.cluster.local}}"
-              export DATABASE_URL="postgres://${PG_USER}:${PG_PASSWORD}@${db_host}:5432/${PG_DB}"
               echo "starting internal api against ${db_host}:5432/${PG_DB}"
               exec node dist/src/index.js
           ports:
@@ -157,13 +156,11 @@ spec:
                 secretKeyRef:
                   name: mx-launcher-db
                   key: DATABASE_HOST
-                  optional: true
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: mx-launcher-db
                   key: DATABASE_URL
-                  optional: true
             - name: MX_FEISHU_APP_ID
               valueFrom:
                 secretKeyRef:
@@ -187,6 +184,12 @@ spec:
                 secretKeyRef:
                   name: mx-internal-ops
                   key: token
+            - name: MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: mx-sdk-service-account-secrets
+                  key: secrets.json
+                  optional: true
           startupProbe:
             httpGet:
               path: /healthz

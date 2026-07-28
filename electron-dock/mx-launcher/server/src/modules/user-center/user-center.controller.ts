@@ -612,6 +612,7 @@ function toCreateServiceAccountInput(body: Record<string, unknown>): CreateServi
     displayName: nullableString(body.displayName),
     roleIds: stringArray(body.roleIds),
     scopes: stringArray(body.scopes),
+    allowedProductIds: stringArray(body.allowedProductIds),
     requestId: nullableString(body.requestId)
   };
 }

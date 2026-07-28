@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -11,11 +11,39 @@ const workspaceRoot = resolve(serverRoot, '../../..');
 // launcher product. Component naming follows the launcher convention the
 // clients check against: installer plans target `<product>`, hot plans target
 // `<product>-renderer` (override with --component-id). Release matching is
-// componentId-based, so AppCenter registration is irrelevant here.
+// componentId-based. The scoped Publisher API additionally requires the
+// product to be registered and enabled in AppCenter.
 const product = safeProductId(args.product || process.env.MX_RELEASE_PRODUCT || 'mx-h2i');
 const isDefaultProduct = product === 'mx-h2i';
 const baseUrl = requiredArg('base-url', args.baseUrl || process.env.MX_RELEASE_BASE_URL || process.env.MX_SMOKE_BASE_URL)
   .replace(/\/+$/, '');
+if (args.accessToken) {
+  throw new Error('Do not pass --access-token on the command line; use MX_RELEASE_ACCESS_TOKEN');
+}
+let releaseAccessToken = optionalArg(process.env.MX_RELEASE_ACCESS_TOKEN);
+const releaseClientId = optionalArg(args.clientId || process.env.MX_RELEASE_CLIENT_ID);
+if (args.clientSecret) {
+  throw new Error('Do not pass --client-secret on the command line; use MX_RELEASE_CLIENT_SECRET from a CI secret store');
+}
+const releaseClientSecret = optionalArg(process.env.MX_RELEASE_CLIENT_SECRET);
+const releaseOpsToken = optionalArg(process.env.MX_INTERNAL_OPS_TOKEN);
+const approveRelease = boolArg(args.approve ?? process.env.MX_RELEASE_APPROVE, false);
+const releaseScopes = [
+  'sdk.release.publish',
+  'sdk.release.read',
+  ...(approveRelease ? ['sdk.release.approve'] : [])
+].join(' ');
+let authenticationMode = releaseAccessToken ? 'access-token' : releaseOpsToken ? 'internal-ops' : 'legacy-admin';
+if (!releaseAccessToken && (releaseClientId || releaseClientSecret)) {
+  if (!releaseClientId || !releaseClientSecret) {
+    throw new Error('--client-id and MX_RELEASE_CLIENT_SECRET are both required for client_credentials authentication');
+  }
+  releaseAccessToken = await exchangeReleaseAccessToken(releaseClientId, releaseClientSecret);
+  authenticationMode = 'client-credentials';
+}
+if (approveRelease && !releaseAccessToken) {
+  throw new Error('--approve requires --access-token or client_credentials authentication');
+}
 const artifactPathInput = requiredArg('artifact', args.artifact || process.env.MX_RELEASE_ARTIFACT);
 const artifactPath = await resolveArtifactPath(artifactPathInput);
 let artifactUrl = optionalArg(args.artifactUrl || process.env.MX_RELEASE_ARTIFACT_URL);
@@ -24,13 +52,20 @@ const channel = args.channel || process.env.MX_RELEASE_CHANNEL || 'stable';
 const currentVersion = args.currentVersion || process.env.MX_RELEASE_CURRENT_VERSION || '0.1.0';
 const kind = args.kind || process.env.MX_RELEASE_KIND || 'installer';
 const e2eResult = args.e2eResult || process.env.MX_RELEASE_E2E_RESULT || 'running';
+if (releaseAccessToken && e2eResult !== 'running') {
+  throw new Error('Scoped Publisher plans always start pending; use the gate endpoint or --approve with evidence after validation');
+}
 const storage = args.storage || process.env.MX_RELEASE_ARTIFACT_STORAGE || 'auto';
 const artifactPlatform = normalizePlatform(args.platform || process.env.MX_RELEASE_PLATFORM || (kind === 'hot' ? 'all' : process.platform));
 const artifactArch = normalizeArch(args.arch || process.env.MX_RELEASE_ARCH || (kind === 'hot' ? 'all' : process.arch));
-const runId = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
+const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, '')}_${randomBytes(4).toString('hex')}`;
 const releaseId = args.releaseId || (kind === 'hot'
   ? `${product}-hot-${version}-${runId}`
   : `${product}-installer-${version}-${runId}`);
+const planRequestId = optionalArg(args.requestId || process.env.MX_RELEASE_REQUEST_ID)
+  || `release-center-publish-${kind === 'hot' ? 'hot' : 'installer'}-${runId}`;
+const gateRequestId = optionalArg(args.gateRequestId || process.env.MX_RELEASE_GATE_REQUEST_ID)
+  || `${planRequestId}-gate`;
 const artifactKind = kind === 'hot' ? 'renderer-ui' : 'app-installer';
 const artifactComponentId = kind === 'hot' ? args.componentId || `${product}-renderer` : product;
 // Point-targeting (docs/19 §6.1): a one-user gray release is
@@ -39,13 +74,25 @@ const targetUserIds = listArg(args.targetUser ?? args.targetUsers, []);
 const targetInstallIds = listArg(args.targetInstall ?? args.targetInstalls, []);
 const hasExplicitTargets = targetUserIds.length > 0 || targetInstallIds.length > 0;
 const releaseNotes = optionalArg(args.notes ?? args.releaseNotes ?? process.env.MX_RELEASE_NOTES);
+const approvalEvidencePath = optionalArg(
+  args.approvalEvidence ?? process.env.MX_RELEASE_APPROVAL_EVIDENCE
+);
+const confirmFullRollout = boolArg(
+  args.confirmFullRollout ?? process.env.MX_RELEASE_CONFIRM_FULL_ROLLOUT,
+  false
+);
+const approvalEvidence = approveRelease
+  ? await readApprovalEvidence(approvalEvidencePath)
+  : null;
 
 const artifactStat = await stat(artifactPath);
 const digest = `sha256:${await sha256File(artifactPath)}`;
 let artifactSizeBytes = artifactStat.size;
 let uploadedArtifact = null;
 
-if (!artifactUrl || boolArg(args.uploadArtifact, false) || args.upload === 'internal') {
+// The scoped SDK publishing facade only accepts artifacts uploaded by the
+// authenticated principal. Legacy Admin mode retains external artifact URLs.
+if (releaseAccessToken || !artifactUrl || boolArg(args.uploadArtifact, false) || args.upload === 'internal') {
   uploadedArtifact = await uploadArtifact();
   artifactUrl = absoluteArtifactUrl(uploadedArtifact.artifact?.url || uploadedArtifact.artifact?.downloadPath);
   artifactSizeBytes = uploadedArtifact.artifact?.sizeBytes || artifactSizeBytes;
@@ -53,15 +100,74 @@ if (!artifactUrl || boolArg(args.uploadArtifact, false) || args.upload === 'inte
 
 if (!artifactUrl) throw new Error('Missing --artifact-url and artifact upload did not return a URL');
 
-const body = kind === 'hot' ? hotUpdateBody() : installerBody();
-const payload = await requestJson('/internal/v1/release-management/plans', {
+const body = releaseAccessToken
+  ? scopedReleaseBody(requiredResponseString(
+      'artifact.artifactId',
+      uploadedArtifact?.artifact?.artifactId
+    ))
+  : kind === 'hot'
+    ? hotUpdateBody()
+    : installerBody();
+const createPath = releaseAccessToken
+  ? '/internal/v1/sdk/releases'
+  : '/internal/v1/release-management/plans';
+const payload = await requestJson(createPath, {
   method: 'POST',
-  body
+  body,
+  accessToken: releaseAccessToken,
+  internalOps: !releaseAccessToken
 });
+let plan = releasePlanFromPayload(payload);
+let approval = null;
+if (approveRelease) {
+  const planId = requiredResponseString('plan.planId', plan?.planId);
+  const gateVerdict = plan?.test?.gate?.verdict;
+  const planHasTargets = Boolean(
+    plan?.rollout?.audience?.userIds?.length
+    || plan?.rollout?.audience?.installIds?.length
+  );
+  const planIsFullRollout = !planHasTargets
+    && plan?.rollout?.strategy === 'all'
+    && Number(plan?.rollout?.percentage) >= 100;
+  if (planIsFullRollout && !confirmFullRollout) {
+    throw new Error(
+      '--approve on an all/100% plan requires --confirm-full-rollout after canary evidence review'
+    );
+  }
+  if (confirmFullRollout && !planIsFullRollout) {
+    throw new Error('--confirm-full-rollout is only valid for an all/100% plan without targets');
+  }
+  // TestGateVerdict has no "running" value. Until the E2E step completes, a
+  // newly created plan evaluates to "blocked". Keep accepting "running" for
+  // compatibility with older/mocked servers.
+  if (gateVerdict && gateVerdict !== 'running' && gateVerdict !== 'blocked') {
+    throw new Error(`--approve requires a pending release gate, got ${gateVerdict}`);
+  }
+  approval = await requestJson(`/internal/v1/sdk/releases/${encodeURIComponent(planId)}/gate`, {
+    method: 'POST',
+    body: {
+      status: 'passed',
+      message: optionalArg(args.approvalMessage || process.env.MX_RELEASE_APPROVAL_MESSAGE)
+        || 'Approved by release-center-publish',
+      evidence: {
+        ...approvalEvidence,
+        artifactId: uploadedArtifact?.artifact?.artifactId || null,
+        artifactDigest: digest,
+        targetUserIds,
+        targetInstallIds,
+        fullRolloutConfirmed: planIsFullRollout && confirmFullRollout
+      },
+      requestId: gateRequestId
+    },
+    accessToken: releaseAccessToken
+  });
+  plan = releasePlanFromPayload(approval) || plan;
+}
 
 console.log(JSON.stringify({
   ok: true,
   baseUrl,
+  authentication: authenticationMode,
   artifact: {
     path: artifactPath,
     url: artifactUrl,
@@ -74,12 +180,13 @@ console.log(JSON.stringify({
     uploadArtifactId: uploadedArtifact?.artifact?.artifactId || null
   },
   plan: {
-    planId: payload.plan?.planId,
-    releaseId: payload.plan?.releaseId,
-    channel: payload.plan?.channel,
-    artifactKinds: payload.plan?.artifacts?.map((artifact) => artifact.kind) || [],
-    activation: payload.plan?.activation,
-    gate: payload.plan?.test?.gate?.verdict
+    planId: plan?.planId,
+    releaseId: plan?.releaseId,
+    channel: plan?.channel,
+    artifactKinds: plan?.artifacts?.map((artifact) => artifact.kind) || [],
+    activation: plan?.activation,
+    gate: plan?.test?.gate?.verdict,
+    approved: Boolean(approval)
   }
 }, null, 2));
 
@@ -116,7 +223,7 @@ function installerBody() {
     sites: listArg(args.sites, ['internal-main', 'domestic-main']),
     e2eResult,
     createdBy: args.createdBy || 'release-center-publish',
-    requestId: `release-center-publish-installer-${runId}`
+    requestId: planRequestId
   };
 }
 
@@ -155,7 +262,41 @@ function hotUpdateBody() {
     sites: listArg(args.sites, ['internal-main', 'domestic-main']),
     e2eResult,
     createdBy: args.createdBy || 'release-center-publish',
-    requestId: `release-center-publish-hot-${runId}`
+    requestId: planRequestId
+  };
+}
+
+function scopedReleaseBody(artifactId) {
+  const hotUpdate = kind === 'hot';
+  return {
+    artifactId,
+    currentVersion,
+    channel,
+    rolloutStrategy: args.rolloutStrategy || (hotUpdate
+      ? 'gray'
+      : hasExplicitTargets
+        ? 'manual-ring'
+        : 'all'),
+    rolloutPercentage: numberArg(
+      args.rolloutPercentage,
+      hotUpdate ? 10 : hasExplicitTargets ? 0 : 100
+    ),
+    rolloutRings: listArg(
+      args.rolloutRings,
+      hotUpdate ? ['internal-dogfood', 'canary', 'stable'] : ['internal-dogfood', 'stable']
+    ),
+    featureKeys: hotUpdate
+      ? listArg(args.featureKeys, [`${product}.release.hot-update`])
+      : [],
+    targetUserIds,
+    targetInstallIds,
+    releaseNotes,
+    suiteId: args.suiteId || `${product}-${hotUpdate ? 'hot' : 'installer'}-release`,
+    topology: args.topology || (isDefaultProduct
+      ? (hotUpdate ? 'h-d-i-hot-release' : 'h-d-i-installer-release')
+      : `${product}-${hotUpdate ? 'hot' : 'installer'}-release`),
+    sites: listArg(args.sites, ['internal-main', 'domestic-main']),
+    requestId: planRequestId
   };
 }
 
@@ -167,8 +308,15 @@ function parseArgs(argv) {
     if (!item.startsWith('--')) continue;
     const [rawKey, inlineValue] = item.slice(2).split('=');
     const key = rawKey.replace(/-([a-z])/g, (_, char) => char.toUpperCase());
-    parsed[key] = inlineValue ?? argv[index + 1];
-    if (inlineValue === undefined) index += 1;
+    const nextValue = argv[index + 1];
+    if (inlineValue !== undefined) {
+      parsed[key] = inlineValue;
+    } else if (nextValue !== undefined && !nextValue.startsWith('--')) {
+      parsed[key] = nextValue;
+      index += 1;
+    } else {
+      parsed[key] = true;
+    }
   }
   return parsed;
 }
@@ -202,7 +350,7 @@ function numberArg(value, fallback) {
 
 function safeProductId(value) {
   const normalized = String(value || '').trim().toLowerCase();
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(normalized)) {
+  if (!/^[a-z0-9][a-z0-9._-]*$/.test(normalized)) {
     throw new Error(`Invalid --product: ${value}`);
   }
   return normalized;
@@ -257,6 +405,30 @@ async function sha256File(path) {
   return hash.digest('hex');
 }
 
+async function readApprovalEvidence(pathValue) {
+  if (!pathValue) {
+    throw new Error(
+      '--approve requires --approval-evidence <json-file> (or MX_RELEASE_APPROVAL_EVIDENCE)'
+    );
+  }
+  const path = await resolveArtifactPath(pathValue);
+  let evidence;
+  try {
+    evidence = JSON.parse(await readFile(path, 'utf8'));
+  } catch {
+    throw new Error(`Approval evidence must be a readable JSON file: ${path}`);
+  }
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) {
+    throw new Error('Approval evidence must be a JSON object');
+  }
+  for (const field of ['artifactDigestVerified', 'osSignatureVerified', 'installSmokePassed']) {
+    if (evidence[field] !== true) {
+      throw new Error(`Approval evidence requires ${field}=true`);
+    }
+  }
+  return evidence;
+}
+
 async function uploadArtifact() {
   const params = new URLSearchParams({
     releaseId,
@@ -271,16 +443,24 @@ async function uploadArtifact() {
     ...(artifactPlatform ? { platform: artifactPlatform } : {}),
     ...(artifactArch ? { arch: artifactArch } : {})
   });
-  const response = await fetch(`${baseUrl}/internal/v1/release-artifacts?${params}`, {
+  const uploadPath = releaseAccessToken
+    ? '/internal/v1/sdk/releases/artifacts'
+    : '/internal/v1/release-artifacts';
+  const response = await fetch(`${baseUrl}${uploadPath}?${params}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/octet-stream' },
+    redirect: 'error',
+    headers: {
+      'content-type': 'application/octet-stream',
+      ...bearerHeaders(releaseAccessToken),
+      ...(!releaseAccessToken ? internalOpsHeaders() : {})
+    },
     body: createReadStream(artifactPath),
     duplex: 'half'
   });
   const text = await response.text();
-  const body = text ? JSON.parse(text) : null;
+  const body = parseResponseJson(text, uploadPath);
   if (!response.ok) {
-    throw new Error(`POST /internal/v1/release-artifacts failed ${response.status}: ${JSON.stringify(body)}`);
+    throw new Error(requestFailureMessage('POST', uploadPath, response.status, body));
   }
   return body;
 }
@@ -295,13 +475,80 @@ function absoluteArtifactUrl(value) {
 async function requestJson(path, options = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: options.method || 'GET',
-    headers: { 'content-type': 'application/json' },
+    redirect: 'error',
+    headers: {
+      'content-type': 'application/json',
+      ...bearerHeaders(options.accessToken),
+      ...(options.internalOps ? internalOpsHeaders() : {})
+    },
     body: options.body ? JSON.stringify(options.body) : undefined
   });
   const text = await response.text();
-  const body = text ? JSON.parse(text) : null;
+  const body = parseResponseJson(text, path);
   if (!response.ok) {
-    throw new Error(`${options.method || 'GET'} ${path} failed ${response.status}: ${JSON.stringify(body)}`);
+    throw new Error(requestFailureMessage(options.method || 'GET', path, response.status, body));
   }
   return body;
+}
+
+async function exchangeReleaseAccessToken(clientId, clientSecret) {
+  const payload = await requestJson('/internal/v1/sdk/oauth/token', {
+    method: 'POST',
+    body: {
+      grant_type: 'client_credentials',
+      client_id: clientId,
+      client_secret: clientSecret,
+      audience: 'mx-sdk',
+      scope: releaseScopes
+    }
+  });
+  return requiredResponseString(
+    'token.access_token',
+    payload?.token?.access_token || payload?.access_token
+  );
+}
+
+function bearerHeaders(accessToken) {
+  return accessToken ? { authorization: `Bearer ${accessToken}` } : {};
+}
+
+function internalOpsHeaders() {
+  return releaseOpsToken ? { 'x-mx-ops-token': releaseOpsToken } : {};
+}
+
+function releasePlanFromPayload(payload) {
+  return payload?.release || payload?.plan || null;
+}
+
+function requiredResponseString(name, value) {
+  const normalized = optionalArg(value);
+  if (normalized) return normalized;
+  throw new Error(`Release Center response is missing ${name}`);
+}
+
+function parseResponseJson(text, path) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`${path} returned a non-JSON response`);
+  }
+}
+
+function requestFailureMessage(method, path, status, body) {
+  const rawMessage = Array.isArray(body?.message)
+    ? body.message.join('; ')
+    : typeof body?.message === 'string'
+      ? body.message
+      : null;
+  const suffix = rawMessage ? `: ${redactCredentials(rawMessage)}` : '';
+  return `${method} ${path} failed ${status}${suffix}`;
+}
+
+function redactCredentials(value) {
+  let result = String(value);
+  for (const credential of [releaseAccessToken, releaseClientSecret, releaseOpsToken]) {
+    if (credential) result = result.split(credential).join('[redacted]');
+  }
+  return result;
 }

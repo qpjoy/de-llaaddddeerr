@@ -76,7 +76,6 @@ spec:
             - -ec
             - |
               db_host="${DATABASE_HOST:-${MX_INTERNAL_POSTGRES_SERVICE_HOST:-mx-internal-postgres.mx-internal-shadow.svc.cluster.local}}"
-              export DATABASE_URL="postgres://${PG_USER}:${PG_PASSWORD}@${db_host}:5432/${PG_DB}"
               echo "running migrations against ${db_host}:5432/${PG_DB}"
               exec node dist/src/migrate.js
           envFrom:

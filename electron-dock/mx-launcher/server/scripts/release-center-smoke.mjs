@@ -6,6 +6,7 @@ const baseUrl = (
   || process.env.MX_SMOKE_BASE_URL
   || 'http://127.0.0.1:18090'
 ).replace(/\/+$/, '');
+const internalOpsToken = process.env.MX_INTERNAL_OPS_TOKEN?.trim() || '';
 
 const stamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
 const runId = `${stamp}_${Math.random().toString(16).slice(2, 8)}`;
@@ -286,6 +287,7 @@ async function checkReleaseDecision(platform, arch, releaseId, extension) {
     method: 'POST',
     body: {
       installId: `release-smoke-${platform}-${arch}-${runId}`,
+      productId: 'mx-h2i',
       channel: 'smoke',
       platform,
       arch,
@@ -307,6 +309,7 @@ async function checkReleaseIsCurrentVersionSafe() {
     method: 'POST',
     body: {
       installId: `release-smoke-newer-${runId}`,
+      productId: 'mx-h2i',
       channel: 'smoke',
       platform: 'darwin',
       arch: 'arm64',
@@ -342,9 +345,13 @@ async function checkListIncludes(...planIds) {
 }
 
 async function requestJson(path, options = {}) {
+  const headers = {
+    ...(options.body ? { 'content-type': options.raw ? 'application/octet-stream' : 'application/json' } : {}),
+    ...(internalOpsToken ? { 'x-mx-ops-token': internalOpsToken } : {})
+  };
   const response = await fetch(`${baseUrl}${path}`, {
     method: options.method || 'GET',
-    headers: options.body ? { 'content-type': options.raw ? 'application/octet-stream' : 'application/json' } : undefined,
+    headers: Object.keys(headers).length > 0 ? headers : undefined,
     body: options.body ? options.raw ? options.body : JSON.stringify(options.body) : undefined
   });
   const text = await response.text();

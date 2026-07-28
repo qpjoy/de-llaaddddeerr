@@ -40,17 +40,17 @@ bash scripts/install-k8s-centos.sh \
 # 清理 /etc/cni/net.d、/run/flannel、/var/lib/cni、cni0、flannel.1
 # 重新 kubeadm init
 # 安装 Flannel，并把 Flannel Network patch 成 192.168.224.0/20
-# 它不会删除 /var/lib/mx-launcher，所以 MX 的 PVC/Postgres/site-slots 数据还会留着给后续 deploy 使用。
+# 它不会删除 /var/lib/mx-launcher，所以 MX 的 PVC/Postgres/site-slots 数据还会留着。
+# 但重建会清掉 etcd 中的 Secret；先把原始 PG_USER/PG_PASSWORD/PG_DB 三项写进
+# 权限为 0600 的 server/.env。reinit 会在 reset 前验证，缺任一项即停止。
 POD_CIDR=192.168.224.0/20 \
 SERVICE_CIDR=192.168.240.0/20 \
 K8S_FLANNEL_IMAGE_REPOSITORY=docker.io/flannel \
 bash scripts/install-k8s-centos.sh --advertise-address 192.168.1.4 --allow-cgroup-v1 --reinit
 
-# 不重启docker，只重启k8s
+# 不重启docker，只重启k8s。不要把数据库密码 export 到 shell history。
 export MX_K8S_APISERVER_ADVERTISE_ADDRESS=192.168.1.2
-export PG_USER=mx_internal
-export PG_PASSWORD=mx_internal
-export PG_DB=mx_internal_shadow
+chmod 600 server/.env
 
 bash scripts/manage.sh ops internal-production reinit-kubeadm
 # 另起一个终端，repair-cni
@@ -227,10 +227,12 @@ LUOPAN_SDK_TEST_MODE=0 pnpm dev
 LUOPAN_FORCE_STANDALONE_WG=1
 
 
-# 测试发版功能
-# 在 server/.env 填写 MX_RELEASE_OSS_SECRET_SOURCE=env 和完整 MX_RELEASE_OSS_*。
-# 正常 internal-production deploy 会创建/更新 mx-release-oss 并按版本触发 rollout，
-# 不再需要手工执行 kubectl create secret。
+# Internal Secret 与发版功能
+# 只在 gitignored 的 server/.env 填写所需变量；示例见 server/.env.example。
+# 正常 internal-production deploy 会先整体预检，再幂等 ensure DB/Internal ops/
+# Feishu OAuth/SDK service account/Release OSS Secret，并按非敏感 resourceVersion 触发 rollout。
+# 未配置项保留集群现值，不再需要逐个手工执行 kubectl create secret。
+chmod 600 server/.env
 bash scripts/manage.sh ops internal-production deploy
 
 # 打包

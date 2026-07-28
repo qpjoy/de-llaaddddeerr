@@ -907,7 +907,8 @@ function releaseUpdater(): ElectronLauncherReleaseUpdater {
     // In-tunnel VIP once connected; bootstrap URL before that, so the update
     // panel (and startup bookkeeping) works pre-connect too.
     baseUrl: effectiveApiBaseUrl(),
-    reportInstallId: state.installId
+    reportInstallId: state.installId,
+    productId: PRODUCT.productId
   });
 }
 
@@ -2167,6 +2168,7 @@ function registerIpc(): void {
       const checks: ElectronLauncherUpdateCheckResult[] = [];
       for (const componentId of [PRODUCT.release.componentId, `${PRODUCT.release.componentId}-renderer`]) {
         checks.push(await updater.check({
+          productId: PRODUCT.productId,
           componentId,
           currentVersion: app.getVersion(),
           channel: PRODUCT.release.channel,

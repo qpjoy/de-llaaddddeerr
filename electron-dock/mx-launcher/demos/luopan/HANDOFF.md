@@ -7,7 +7,8 @@
 总体设计见 [docs/19](../../docs/19-formal-delivery-npm-packaging-and-luopan-handoff.md)
 （交付方案）与 [docs/14](../../docs/14-mx-h2i-standalone-launcher-architecture.md)
 （共存与网络边界）。**开发指南（从零到验收的完整走读，先读这份）：
-[docs/20](../../docs/20-luopan-standalone-development-guide.md)。**
+[docs/20](../../docs/20-luopan-standalone-development-guide.md)。** Luopan CI 接入发版平台
+见 [docs/25](../../docs/25-release-center-developer-api.md)。
 
 ## 依赖
 
@@ -102,6 +103,25 @@ system TUN 抢 Internal WireGuard。登出和断开 Internal 都会停止代理�
 开发期修改 base URL 或 SDK test mode 会先清登录态、订阅、隔离 Session 和数据面；正式
 包则强制注册 VIP `10.88.100.3` 且关闭 SDK test mode。
 
+## Release Center 接入
+
+Luopan 客户端已经是 Release Consumer：通过产品 VIP 调现有 check/history/report/download
+接口；`release/check` 必须发送 `productId=luopan`。完整安装包使用
+`componentId=luopan`，renderer 热更新使用 `componentId=luopan-renderer`，两者 channel
+都是 `shadow`。
+
+Luopan 当前打包目标为 macOS DMG、Windows NSIS EXE 和 Linux AppImage；每个实际
+platform/arch 都要独立上传、建 plan 和验证。Publisher 不在 Electron 进程中实现，而在
+受保护的 Internal CI 中使用 `svc_luopan_release_ci` 一类 service account。账号应只有
+`sdk.release.read/publish/approve` 和 `allowedProductIds=["luopan"]`，经
+`client_credentials` 获取短期 token；账号独立 secret 不得进入本目录的 `.env` 或安装包。
+
+发版顺序固定为：上传 artifact → 用 `artifactId` 创建 `blocked`（待验证）定向 plan → CI/离线
+验签、安装与启动 smoke → approve 定向 gate → 圈定 Consumer 真机升级并上报 →
+复用 artifact、换新 `requestId` 建立并审批 `all / 100%` 新 plan。待验证 gate 对
+Consumer 返回 blocked，不得把它误报为可下载灰度。API、curl、secret 交付和排错见
+[docs/25](../../docs/25-release-center-developer-api.md)。
+
 ## 五条红线（验收会逐条检查）
 
 1. **路由只装自己的**：`routeCidrs` 仅含 `10.91.0.0/16` + `10.88.100.3/32`。不 adopt
@@ -111,7 +131,9 @@ system TUN 抢 Internal WireGuard。登出和断开 Internal 都会停止代理�
    PAC URL 设置。
 3. **不自建更新器、不带 native helper**：更新走
    `@qpjoy/electron-launcher` 的 release-updater（检查/上报）+
-   release-update-executor（下载/staged/激活/回滚），`componentId=luopan`。大版本
+   release-update-executor（下载/staged/激活/回滚），完整安装包
+   `componentId=luopan`、renderer `componentId=luopan-renderer`、channel 固定
+   `shadow`。大版本
    安装包由 Release Center 下发（installer-manual，永远手动确认），热更
    （npm artifact / 配置 / feature flag）自动生效。**本 demo 的
    `src-electron/electron-main.ts` 已带完整接线**（`luopan:check-updates` /
@@ -143,6 +165,8 @@ system TUN 抢 Internal WireGuard。登出和断开 Internal 都会停止代理�
 - [docs/20](../../docs/20-luopan-standalone-development-guide.md)：**Luopan 开发指南**——
   V2 MX-H2I 工作原理走读 + 照着开发 Luopan 的完整路线（含更新执行器接线逐段讲解、
   embed launcher 可选章节）。
+- [docs/25](../../docs/25-release-center-developer-api.md)：**Release Center 开发者 API**——
+  Consumer/Publisher 边界、Luopan service account、artifact/plan/gate 与全量发布流程。
 - `../mx-h2i`：standalone 全量参考（连接状态机、AppCenter host、更新检查 UI）。
   注意 main.cjs 里 AppCenter host / broker 属于**尚未下沉**的平台逻辑——遇到
   "demo 里有但包里没有"的能力，找平台方下沉，不要复制 main.cjs。

@@ -9788,6 +9788,7 @@ async function checkReleaseCenterUpdate(reason) {
       try {
         checks.push(await updater.check({
           ...target,
+          productId,
           currentVersion,
           channel: runtime.config.releaseChannel,
           installId: identity.installId,

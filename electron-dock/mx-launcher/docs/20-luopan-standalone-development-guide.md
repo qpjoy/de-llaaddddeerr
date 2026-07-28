@@ -13,7 +13,8 @@
 [docs/14](14-mx-h2i-standalone-launcher-architecture.md)（网络与共存的权威定义）→
 [docs/17](17-mx-h2i-release-center-update-system.md)（更新系统状态机）。
 [docs/19](19-formal-delivery-npm-packaging-and-luopan-handoff.md) 是平台侧交付方案，
-可以只看 §3（下沉原则）和 §4（共存矩阵）。
+可以只看 §3（下沉原则）和 §4（共存矩阵）。需要让 Luopan CI 自助发版时，再读
+[docs/25](25-release-center-developer-api.md)（产品隔离的 Publisher API 与接入流程）。
 
 一条贯穿全文的原则（docs/19 §3）：
 
@@ -245,17 +246,24 @@ Launcher network broker。
 
 四个角色，前两个在服务端、后两个在包里：
 
-1. **Release Center（server）**：Admin/CLI 建 plan（版本 + release notes + 目标
-   userIds/installIds + feature flags），过 gate 后对外可见。
+1. **Release Center（server）**：Admin/CLI 或产品受限的 Publisher API 建 plan
+   （版本 + release notes + 目标 userIds/installIds + feature flags），过 gate 后对外可见。
 2. **决策端点** `POST /internal/v1/release/check`：单 install 决策——targets 显式
    圈选优先，percentage 走 sticky 分桶 `sha256(componentId:channel:installId)%10000`，
    gate 未过返回 blocked；响应带 releaseNotes、featureFlags、`rollout.matchedBy`、
-   HMAC 签名。客户端**永远拿不到全量 plans**（旧端点已收敛 admin-only）。
+   HMAC 签名。Luopan 必须同时发送 `productId=luopan`，避免派生组件名与其他产品碰撞。
+   客户端**永远拿不到全量 plans**（旧端点已收敛 admin-only）。
 3. **release-updater（包）**：`check()` 打决策端点（老 server 自动 fallback legacy），
    `report()` 上报证据链。
 4. **release-update-executor（包）**：docs/17 状态机
    `idle→checking→downloading→verifying→staged→activating→reported`，按 artifact
    class 分四条管线：
+
+Publisher 和 Consumer 必须分离。Luopan CI 使用 service account 的
+`sdk.release.read/publish/approve` 和 `allowedProductIds=["luopan"]`，经
+`/internal/v1/sdk/releases*` 上传与审批；用户电脑仍只调用现有
+`release/check`、history、report 和 download URL。Publisher secret 不得进入
+Electron 包或 renderer。完整契约见 [docs/25](25-release-center-developer-api.md)。
 
 | artifact class | 激活方式 | 回滚 |
 | --- | --- | --- |
@@ -578,27 +586,37 @@ artifact 的 execution 状态（含 deferredReason/error），按钮四个对应
 
 ### 5.8 端到端自测（对着真实 server）
 
-复用 docs/18 Layer 6.6 的十分钟流程，把客户端换成 luopan：
+复用 docs/18 Layer 6.6 的十分钟流程，把客户端换成 luopan。产品开发者通过
+[docs/25](25-release-center-developer-api.md) 的 scoped Publisher API 发版；以下 CLI
+只是该 API 的便捷包装，应运行在受保护的 Internal CI，不在 Luopan 客户端运行：
 
-1. Admin → Release Center → Upload version：Type 选热更类（如 config/renderer），
-   Version 高于当前，`目标用户` 只填你自己的 userId，写两行 release notes →
-   Complete gate。CLI 等价（publish 脚本已支持 `--product`）：
+1. 平台方先提供 `svc_luopan_release_ci` 的账号独立 secret，并确保 scopes 包含
+   `sdk.release.read/publish/approve`、`allowedProductIds` 只含 `luopan`。上传热更
+   bundle，建立只圈自己 userId 的 `blocked`（待验证）计划。CLI 等价：
 
    ```sh
+   export MX_RELEASE_CLIENT_ID=svc_luopan_release_ci
+   # MX_RELEASE_CLIENT_SECRET 由 CI secret store 注入。
    pnpm --dir server release:publish -- \
-     --base-url <admin-url> --product luopan --kind hot \
+     --base-url http://10.88.100.3:18090 --product luopan --kind hot \
      --artifact <bundle> --version 0.1.1 --current-version 0.1.0 \
-     --channel shadow --target-user <你的 userId> --e2e-result passed
+     --channel shadow --target-user <你的 userId> --e2e-result running
    # installer 类：--kind installer --platform darwin|win32 \
    #   --arch x64|arm64|universal（component 自动为 luopan，artifactKind=app-installer）
    ```
-2. luopan 面板点检查更新 → 应显示 update-available + notes + `Matched by=指定用户`
+
+   新 plan 的 gate 对外为 blocked（内部 E2E run 仍在 running），Consumer 也返回
+   blocked。先由 CI/受控验证机对同一 artifact 做 digest、签名、安装和启动 smoke，
+   再由带 approve scope 的身份通过定向 gate；不要在创建时直接声称 passed。
+2. Luopan 面板点检查更新 → 应显示 update-available + notes + `Matched by=指定用户`
    → 点应用 → 面板出现 execution 结果（renderer 类会看到窗口 reload）。
 3. 换一个不在 targets 里的账号/installId 复查 → up-to-date，看不到计划信息。
 4. installer 类再走一遍：staged 后点"立即安装"→ OS 打开；装完重启 →
    事件流出现 `installer completed <old> -> <new>`。
 5. 服务端审计里按 installId 应能串出 `release-check → download-started →
    artifact-staged → artifact-applied / installer-completed` 完整链。
+6. 定向客户端证据通过后，复用同一个 `artifactId`、换新 `requestId` 建立并审批
+   `all / 100%` 的新计划；定向计划不会自动扩大 audience。
 
 ## 6. embed launcher（可选章节）
 

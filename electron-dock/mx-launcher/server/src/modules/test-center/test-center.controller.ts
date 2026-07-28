@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, NotFoundException, Param, Post } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Inject, NotFoundException, Param, Post } from '@nestjs/common';
 
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
 import { MX_H2I_PRODUCT_ID } from '../../store/domain.js';
@@ -36,14 +36,21 @@ export class TestCenterController {
   @Post('runs/:runId/steps')
   async recordStep(@Param('runId') runId: string, @Body() rawBody: unknown) {
     const body = asRecord(rawBody);
-    return {
-      run: await this.store.recordTestStep(runId, {
-        caseId: nullableString(body.caseId) ?? 'unknown',
-        status: nullableString(body.status) ?? 'passed',
-        message: nullableString(body.message),
-        evidence: asRecord(body.evidence)
-      })
-    };
+    try {
+      return {
+        run: await this.store.recordTestStep(runId, {
+          caseId: nullableString(body.caseId) ?? 'unknown',
+          status: nullableString(body.status) ?? 'passed',
+          message: nullableString(body.message),
+          evidence: asRecord(body.evidence)
+        })
+      };
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('release gate endpoint')) {
+        throw new BadRequestException(error.message);
+      }
+      throw error;
+    }
   }
 
   @Post('gates/evaluate')

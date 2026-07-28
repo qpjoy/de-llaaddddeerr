@@ -343,6 +343,53 @@ test('service-account OAuth requires the configured Internal ops credential', as
   }
 });
 
+test('publisher service-account OAuth uses an account-specific secret and filters requested scopes', async () => {
+  const config = feishuConfig();
+  const store = new MemoryStore(config);
+  await store.bootstrapUserCenter();
+  await store.createUserCenterServiceAccount({
+    serviceAccountId: 'svc_release_luopan',
+    displayName: 'Luopan Release Publisher',
+    scopes: ['sdk.release.read', 'sdk.release.publish'],
+    allowedProductIds: ['luopan']
+  });
+  const service = new FeishuAuthService(config, store, unexpectedFetch());
+  const controller = new SdkGatewayController(store, service);
+  const publisherSecret = 'luopan-publisher-secret-0000000000000000';
+  const previous = process.env.MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON;
+  process.env.MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON = JSON.stringify({
+    svc_release_luopan: publisherSecret
+  });
+  try {
+    await assert.rejects(
+      controller.token({
+        grant_type: 'client_credentials',
+        client_id: 'svc_release_luopan',
+        client_secret: process.env.MX_INTERNAL_OPS_TOKEN || 'global-ops-token-must-not-work'
+      }),
+      UnauthorizedException
+    );
+    const result = await controller.token({
+      grant_type: 'client_credentials',
+      client_id: 'svc_release_luopan',
+      client_secret: publisherSecret,
+      audience: 'mx-sdk',
+      scope: 'sdk.release.publish rbac.manage',
+      expires_in: 24 * 60 * 60
+    });
+    assert.match(result.token.access_token, /^mx-v1-/);
+    assert.equal(result.token.scope, 'sdk.release.publish');
+    assert.ok(result.token.expires_in <= 60 * 60);
+    assert.deepEqual(
+      (result.token.principal as { scopes?: string[] }).scopes,
+      ['sdk.release.publish']
+    );
+  } finally {
+    if (previous === undefined) delete process.env.MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON;
+    else process.env.MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON = previous;
+  }
+});
+
 function feishuConfig(): RuntimeConfig {
   return {
     ...loadConfig(),

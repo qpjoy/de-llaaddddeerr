@@ -46,8 +46,8 @@ http://<internal-host-or-10.88.88.88>:18090
 ## Auth Flow
 
 1. 用户使用 password/飞书流程获取 `mx-sdk` token；service account 使用
-   `POST /internal/v1/sdk/oauth/token` 的 `client_credentials`，其 `client_secret` 必须
-   等于服务端 `MX_INTERNAL_OPS_TOKEN`。
+   `POST /internal/v1/sdk/oauth/token` 的 `client_credentials`，其 `client_secret` 由
+   Internal 为该 service account 独立配置。
 2. 调用 `POST /internal/v1/sdk/gateway/access/evaluate` 判断 token 是否可调用某个
    `routeId`。
 3. 调用具体 SDK route。
@@ -71,6 +71,26 @@ key:       token
 token。Admin UI 的 `Internal Ops Token` 输入只存在当前页面会话，刷新/重启后清空。以下
 curl 示例假设受控 shell 已从 Secret Manager 加载 `MX_INTERNAL_OPS_TOKEN`；不要把实际值
 写入脚本、Git、CI 日志或聊天记录。
+
+`MX_INTERNAL_OPS_TOKEN` 只用于平台管理接口。产品 service account 的独立 secret 由
+`MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON`（或
+`MX_SDK_SERVICE_ACCOUNT_SECRETS_FILE`）提供；Kubernetes 当前把
+`mx-internal-shadow/mx-sdk-service-account-secrets` 的 `secrets.json` key 注入前者：
+
+```json
+{
+  "svc_external_system": "<至少 32 字符的随机 secret>"
+}
+```
+
+Kubernetes 正式环境把完整 JSON map 写入 gitignored 的 `server/.env`，正常执行
+`bash scripts/manage.sh ops internal-production deploy` 即可幂等 ensure Secret 并触发
+rollout；不要手工拼 `kubectl --from-literal`。变量缺失时保留现有 `secrets.json`，变量
+存在时整体替换，绝不按账号自动 merge。详见
+[`25-release-center-developer-api.md`](25-release-center-developer-api.md)。
+
+只有内置 `svc_sdk_gateway` 暂时保留使用 Internal ops token 的兼容 fallback。新集成必须
+使用账号独立 secret，不得把平台运维 token 交给产品开发者或产品 CI。
 
 ## Manifest
 
@@ -117,8 +137,8 @@ Service account 模式：
 ```bash
 jq -n '{
   grant_type: "client_credentials",
-  client_id: "svc_sdk_gateway",
-  client_secret: env.MX_INTERNAL_OPS_TOKEN,
+  client_id: env.MX_SDK_CLIENT_ID,
+  client_secret: env.MX_SDK_CLIENT_SECRET,
   scope: "sdk.identity.read sdk.user.read sdk.user.write sdk.permission.request",
   audience: "mx-sdk"
 }' | curl -sS "$BASE/internal/v1/sdk/oauth/token" \
@@ -127,11 +147,11 @@ jq -n '{
 ```
 
 client credentials access token 默认仍为 `3600` 秒（1 小时），不随 Electron 用户登录
-周期延长。当前 `client_secret` 直接校验平台级 `MX_INTERNAL_OPS_TOKEN`；它不是
-`managed-by-internal` 之类的占位字符串，也不是每个 service account 已有独立 secret。
-轮换 `mx-internal-ops` 后，service account 集成必须同步更新。`client_credentials` 只允许
-在 Internal 控制面调用；带受控 `X-MX-Forwarded-By: domestic-edge` 标记的公网请求会在
-比较 ops token 前拒绝。Internal 调用也受 5 分钟的 IP/client/IP+client 原子限速。
+周期延长。`client_secret` 必须匹配该 client ID 在上述 secret map 中的独立值；它不是
+`managed-by-internal` 之类的占位字符串。轮换某个账号的 secret 只更新该账号的 CI
+凭据。`client_credentials` 只允许在 Internal 控制面调用；带受控
+`X-MX-Forwarded-By: domestic-edge` 标记的公网请求会在比较 secret 前拒绝。Internal
+调用也受 5 分钟的 IP/client/IP+client 原子限速。
 
 ## Identity
 
@@ -342,9 +362,13 @@ curl -sS "$BASE/internal/v1/sdk/service-accounts" \
     "displayName": "External System",
     "roleIds": ["mx-service-account"],
     "scopes": ["sdk.identity.read", "sdk.user.read", "sdk.permission.request"],
+    "allowedProductIds": [],
     "requestId": "ext-svc-create-001"
   }'
 ```
+
+`allowedProductIds` 只约束产品级 SDK 资源。Release Publisher 的创建示例、独立 secret
+和最小权限见 [docs/25](./25-release-center-developer-api.md)。
 
 ## Permissions
 
@@ -381,5 +405,10 @@ curl -sS "$BASE/internal/v1/sdk/permissions/requests" \
 | `sdk.permissions.request` | `/internal/v1/sdk/permissions/requests` | `sdk.permission.request` or `permission.request` |
 | `sdk.config.snapshot` | `/internal/v1/sdk/config/snapshot` | `sdk.config.snapshot`, `sdk.identity.read`, or `auth.read` |
 | `sdk.dns.*` | `/internal/v1/sdk/dns/*` | `sdk.dns.evaluate` or `network.dns.policy` |
+| `sdk.releases.list/get` | `/internal/v1/sdk/releases[/{planId}]` | `sdk.release.read`, `sdk.release.publish`, `sdk.release.approve`, or `release.manage`；另校验 `allowedProductIds` |
+| `sdk.release_artifacts.get` | `/internal/v1/sdk/releases/artifacts/{artifactId}` | `sdk.release.read`, `sdk.release.publish`, `sdk.release.approve`, or `release.manage`；另校验 `allowedProductIds` |
+| `sdk.release_artifacts.upload` | `/internal/v1/sdk/releases/artifacts` | `sdk.release.publish` or `release.manage`；另校验 `allowedProductIds` |
+| `sdk.releases.create` | `/internal/v1/sdk/releases` | `sdk.release.publish` or `release.manage`；另校验 `allowedProductIds` |
+| `sdk.releases.gate` | `/internal/v1/sdk/releases/{planId}/gate` | `sdk.release.approve` or `release.manage`；另校验 `allowedProductIds` |
 | `sdk.audit.write` | `/internal/v1/audit/events` | `sdk.audit.write` |
 | `sdk.observability.logs` | `/internal/v1/observability/logs` | `sdk.observability.write` or `observability.write` |

@@ -13,6 +13,8 @@ import type { ReleaseManagementPlan, ReleasePolicyDecision } from '../../types.j
 export interface ReleaseCheckInput {
   installId: string;
   userId?: string | null;
+  /** Optional but required by external integrations to bind component names to one product. */
+  productId?: string | null;
   channel: string;
   platform?: string | null;
   arch?: string | null;
@@ -68,6 +70,7 @@ export function evaluateReleaseCheck(
   };
   const candidates = [...plans]
     .filter((plan) => plan.channel === input.channel)
+    .filter((plan) => !input.productId || plan.productId === input.productId)
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 
   for (const plan of candidates) {
@@ -155,6 +158,9 @@ function matchComponentDecision(
   const decisions = [plan.components?.launcher, plan.components?.app]
     .filter((decision): decision is ReleasePolicyDecision => Boolean(decision));
   for (const decision of decisions) {
+    // A plan component that was intentionally created as a no-op must not
+    // become an update later merely because a caller reports an older version.
+    if (!decision.updateAvailable) continue;
     const runningVersion = components[decision.componentId];
     if (runningVersion === undefined) continue;
     if (decision.targetVersion && isReleaseVersionNewer(decision.targetVersion, runningVersion)) {

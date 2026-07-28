@@ -16,14 +16,26 @@ shift || true
 say() { printf '▸ %s\n' "$*"; }
 die() { printf '✗ %s\n' "$*" >&2; exit 1; }
 
-MX_MANAGE_SENSITIVE_TEMP_FILE=""
-manage_cleanup_sensitive_temp_file() {
-  if [ -n "$MX_MANAGE_SENSITIVE_TEMP_FILE" ]; then
-    rm -f -- "$MX_MANAGE_SENSITIVE_TEMP_FILE"
-    MX_MANAGE_SENSITIVE_TEMP_FILE=""
+MX_MANAGE_SENSITIVE_TEMP_DIR=""
+manage_cleanup_sensitive_temp_dir() {
+  if [ -n "$MX_MANAGE_SENSITIVE_TEMP_DIR" ]; then
+    rm -f -- \
+      "$MX_MANAGE_SENSITIVE_TEMP_DIR/prepared.json" \
+      "$MX_MANAGE_SENSITIVE_TEMP_DIR/existing.json" \
+      "$MX_MANAGE_SENSITIVE_TEMP_DIR/kubectl.error"
+    rmdir -- "$MX_MANAGE_SENSITIVE_TEMP_DIR" 2>/dev/null || true
+    MX_MANAGE_SENSITIVE_TEMP_DIR=""
   fi
 }
-trap manage_cleanup_sensitive_temp_file EXIT
+
+manage_create_sensitive_temp_dir() {
+  local prefix="$1"
+  manage_cleanup_sensitive_temp_dir
+  MX_MANAGE_SENSITIVE_TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")"
+  chmod 700 "$MX_MANAGE_SENSITIVE_TEMP_DIR"
+}
+
+trap manage_cleanup_sensitive_temp_dir EXIT
 
 usage() {
   cat <<'EOF'
@@ -1466,26 +1478,27 @@ MX Launcher K8s deployment plan: $target
 Namespace: $ns
 
 Order:
-  1. Apply namespace.
-  2. Apply Internal API ServiceAccount.
-  3. Apply non-secret config ConfigMap.
-  4. Apply DNS control target namespace and baseline CoreDNS ConfigMap.
-  5. Create or update DB Secret from local env:
-     PG_USER, PG_PASSWORD, PG_DB, DATABASE_URL.
-  6. Materialize mx-release-oss from server/.env, or wait for its external provider.
-  7. Apply PostgreSQL Service + StatefulSet.
-  8. Apply CoreDNS ConfigMap writer RBAC.
-  9. Wait for PostgreSQL rollout.
-  10. Delete any previous migration Job, apply a fresh TypeORM migration Job,
+  1. Validate every configured server/.env Secret contract without changing K8s.
+  2. Apply namespace.
+  3. Apply Internal API ServiceAccount.
+  4. Apply non-secret config ConfigMap.
+  5. Apply DNS control target namespace and baseline CoreDNS ConfigMap.
+  6. Idempotently ensure DB, Internal ops, Feishu OAuth, and SDK service-account
+     Secrets. Missing env values preserve existing Secret keys.
+  7. Materialize mx-release-oss from server/.env, or wait for its external provider.
+  8. Apply PostgreSQL Service + StatefulSet.
+  9. Apply CoreDNS ConfigMap writer RBAC.
+  10. Wait for PostgreSQL rollout.
+  11. Delete any previous migration Job, apply a fresh TypeORM migration Job,
      and wait for completion.
-  11. Apply Internal API Deployment + Service and bind the OSS Secret version.
-  12. Wait for Internal API rollout.
-  13. Apply Internal Gateway DaemonSet.
-  14. Run HTTP smoke through a temporary kubectl port-forward or the gateway.
+  12. Apply Internal API Deployment + Service and bind runtime Secret versions.
+  13. Wait for Internal API rollout.
+  14. Apply Internal Gateway DaemonSet.
+  15. Run HTTP smoke through a temporary kubectl port-forward or the gateway.
 
 Data policy:
-  k8s down keeps the PostgreSQL PVC by default. Delete PVCs only with a
-  deliberate future purge action.
+  k8s down keeps the PostgreSQL PVC and runtime Secrets by default. Delete
+  data or credentials only with a deliberate future purge/rotation action.
   k8s reset-data truncates mx_platform_records only. It keeps schema
   migrations, the database, and the PVC, then restarts Internal API so
   built-in App Center/DNS records are seeded again.
@@ -1512,8 +1525,9 @@ Compose ports -> K8s Service
 
 Compose environment -> ConfigMap + Secret
   - Non-secret values such as MX_ENVIRONMENT and MX_SITE_ROLE live in ConfigMap.
-  - DATABASE_URL and PG_PASSWORD live in Secret. The script creates the Secret
-    from your shell env so credentials do not live in git.
+  - DATABASE_URL and PG_PASSWORD live in Secret. The script reads only known
+    keys from the gitignored server/.env (process env takes precedence), validates
+    all configured Secret contracts first, and preserves existing unconfigured keys.
 
 Docker healthcheck -> K8s probes
   - livenessProbe calls /healthz: is the process alive.
@@ -1556,65 +1570,131 @@ k8s_render() {
   cat "$dir"/45-internal-gateway.yaml
 }
 
-k8s_apply_db_secret() {
+release_oss_server_env_file() {
+  local env_file="${MX_SERVER_ENV_FILE:-$ROOT/server/.env}"
+  if [ -n "${MX_SERVER_ENV_FILE:-}" ] && [ ! -r "$env_file" ]; then
+    die "MX_SERVER_ENV_FILE is not readable: $env_file"
+  fi
+  printf '%s\n' "$env_file"
+}
+
+k8s_secret_bundle() {
+  local action="$1"
+  local ns="$2"
+  local env_file result status version changed_count
+  env_file="$(release_oss_server_env_file)"
+  if ! result="$(node "$ROOT/server/scripts/internal-k8s-secret-ensure.mjs" \
+    "$action" "$ns" "$env_file")"; then
+    return 1
+  fi
+  read -r status version changed_count <<<"$result"
+  [ "$status" = "ready" ] \
+    || die "unexpected Internal Secret ensure status: ${status:-empty}"
+  case "$version" in
+    sha256-[0-9a-f][0-9a-f]*) ;;
+    *) die "unexpected Internal Secret bundle version" ;;
+  esac
+  case "$changed_count" in
+    ''|*[!0-9]*) die "unexpected Internal Secret change count" ;;
+  esac
+  K8S_SECRET_BUNDLE_VERSION="$version"
+  K8S_SECRET_BUNDLE_CHANGED_COUNT="$changed_count"
+}
+
+k8s_validate_secret_bundle_env() {
+  k8s_secret_bundle validate-env "$1"
+}
+
+k8s_require_db_recovery_env() {
+  k8s_secret_bundle validate-db-recovery-env "$1"
+}
+
+k8s_preflight_secret_bundle() {
+  k8s_secret_bundle preflight "$1"
+}
+
+k8s_ensure_secret_bundle() {
   local ns="$1"
-  local pg_user="${PG_USER:-mx_internal}"
-  local pg_password="${PG_PASSWORD:-mx_internal}"
-  local pg_db="${PG_DB:-mx_internal_shadow}"
-  local database_host="${DATABASE_HOST:-mx-internal-postgres.${ns}.svc.cluster.local}"
-  local database_url="${DATABASE_URL:-postgres://${pg_user}:${pg_password}@${database_host}:5432/${pg_db}}"
-  kubectl -n "$ns" create secret generic mx-launcher-db \
-    --from-literal=PG_USER="$pg_user" \
-    --from-literal=PG_PASSWORD="$pg_password" \
-    --from-literal=PG_DB="$pg_db" \
-    --from-literal=DATABASE_HOST="$database_host" \
-    --from-literal=DATABASE_URL="$database_url" \
-    --dry-run=client -o yaml | kubectl apply --validate=false -f -
+  k8s_secret_bundle ensure "$ns"
+  if [ "${K8S_SECRET_BUNDLE_CHANGED_COUNT:-0}" = "0" ]; then
+    say "Internal Secret bundle is unchanged"
+  else
+    say "Internal Secret bundle updated (${K8S_SECRET_BUNDLE_CHANGED_COUNT} Secret resources)"
+  fi
+}
+
+k8s_apply_secret_bundle_rollout_version() {
+  local ns="$1"
+  local current_version
+  [ -n "${K8S_SECRET_BUNDLE_VERSION:-}" ] || return 0
+  current_version="$(kubectl -n "$ns" get deployment mx-launcher-internal \
+    -o go-template='{{index .spec.template.metadata.annotations "mx.qpjoy.com/runtime-secret-bundle-version"}}' \
+    2>/dev/null || true)"
+  [ "$current_version" != "$K8S_SECRET_BUNDLE_VERSION" ] || return 0
+  kubectl -n "$ns" patch deployment mx-launcher-internal --type=merge \
+    -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"mx.qpjoy.com/runtime-secret-bundle-version\":\"$K8S_SECRET_BUNDLE_VERSION\"}}}}}" \
+    >/dev/null
+  K8S_INTERNAL_API_RESTARTED=1
+  say "runtime Secret bundle version changed; Internal API rollout triggered"
 }
 
 k8s_internal_ops_token() {
   local ns="$1"
-  local existing
-  if [ -n "${MX_INTERNAL_OPS_TOKEN:-}" ]; then
-    printf '%s' "$MX_INTERNAL_OPS_TOKEN"
-    return
-  fi
-  existing="$(kubectl -n "$ns" get secret mx-internal-ops \
-    -o go-template='{{index .data "token" | base64decode}}' 2>/dev/null || true)"
-  if [ -n "$existing" ]; then
-    printf '%s' "$existing"
-    return
-  fi
-  node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("base64url"))'
-}
-
-k8s_apply_internal_ops_secret() {
-  local ns="$1"
   local token
-  token="$(k8s_internal_ops_token "$ns")"
-  [ "${#token}" -ge 32 ] || die "MX_INTERNAL_OPS_TOKEN must contain at least 32 characters"
-  kubectl -n "$ns" create secret generic mx-internal-ops \
-    --from-literal=token="$token" \
-    --dry-run=client -o yaml | kubectl apply --validate=false -f -
+  token="$(kubectl -n "$ns" get secret mx-internal-ops \
+    -o go-template='{{index .data "token" | base64decode}}' 2>/dev/null || true)"
+  [ "${#token}" -ge 32 ] || die "mx-internal-ops/token is missing or invalid; run the normal deploy first"
+  printf '%s' "$token"
 }
 
-k8s_internal_ops_secret_dry_run() {
+k8s_db_secret_value() {
   local ns="$1"
-  local token="${MX_INTERNAL_OPS_TOKEN:-mx-internal-ops-dry-run-token-000000000000}"
-  [ "${#token}" -ge 32 ] || die "MX_INTERNAL_OPS_TOKEN must contain at least 32 characters"
-  kubectl -n "$ns" create secret generic mx-internal-ops \
-    --from-literal=token="$token" \
-    --dry-run=client -o yaml >/dev/null
-}
-
-release_oss_server_env_file() {
-  printf '%s\n' "${MX_SERVER_ENV_FILE:-$ROOT/server/.env}"
+  local key="$2"
+  local value
+  case "$key" in
+    PG_USER|PG_DB) ;;
+    *) die "unsupported DB Secret identity key: $key" ;;
+  esac
+  value="$(kubectl -n "$ns" get secret mx-launcher-db \
+    -o "go-template={{index .data \"$key\" | base64decode}}" 2>/dev/null || true)"
+  [ -n "$value" ] || die "mx-launcher-db/$key is missing; run the normal deploy first"
+  printf '%s' "$value"
 }
 
 k8s_release_oss_secret_resource_version() {
   local ns="$1"
-  kubectl -n "$ns" get secret mx-release-oss \
-    -o jsonpath='{.metadata.resourceVersion}' 2>/dev/null || true
+  local resource_version
+  resource_version="$(kubectl -n "$ns" get secret mx-release-oss \
+    -o jsonpath='{.metadata.resourceVersion}' 2>/dev/null || true)"
+  [ -n "$resource_version" ] || die "mx-release-oss has no readable resourceVersion"
+  printf '%s' "$resource_version"
+}
+
+k8s_capture_release_oss_secret() {
+  local ns="$1"
+  local output_file="$2"
+  local error_file="${output_file%/*}/kubectl.error"
+  : >"$output_file"
+  chmod 600 "$output_file"
+  : >"$error_file"
+  chmod 600 "$error_file"
+  if kubectl -n "$ns" get secret mx-release-oss -o json \
+    >"$output_file" 2>"$error_file"; then
+    rm -f -- "$error_file"
+    return 0
+  fi
+  if grep -Eqi '\bNotFound\b|not found' "$error_file"; then
+    rm -f -- "$output_file" "$error_file"
+    return 1
+  fi
+  rm -f -- "$output_file" "$error_file"
+  die "kubectl could not read Secret mx-release-oss"
+}
+
+k8s_validate_release_oss_secret_file() {
+  local secret_file="$1"
+  node "$ROOT/server/scripts/release-oss-secret-env.mjs" \
+    validate-k8s-secret <"$secret_file" >/dev/null
 }
 
 k8s_wait_release_oss_secret() {
@@ -1632,13 +1712,29 @@ k8s_wait_release_oss_secret() {
 
 k8s_prepare_release_oss_secret() {
   local ns="$1"
-  local env_file prepared_file prepared status digest current_digest resource_version
+  local env_file prepared_file existing_file prepared status digest resource_version
+  local existing=0
   env_file="$(release_oss_server_env_file)"
-  prepared_file="$(mktemp "${TMPDIR:-/tmp}/mx-release-oss-secret.XXXXXX")"
-  MX_MANAGE_SENSITIVE_TEMP_FILE="$prepared_file"
+  manage_create_sensitive_temp_dir mx-release-oss-secret
+  prepared_file="$MX_MANAGE_SENSITIVE_TEMP_DIR/prepared.json"
+  existing_file="$MX_MANAGE_SENSITIVE_TEMP_DIR/existing.json"
+  : >"$prepared_file"
   chmod 600 "$prepared_file"
-  if ! prepared="$(node "$ROOT/server/scripts/release-oss-secret-env.mjs" prepare "$env_file" "$prepared_file")"; then
-    manage_cleanup_sensitive_temp_file
+  if k8s_capture_release_oss_secret "$ns" "$existing_file"; then
+    existing=1
+  fi
+  local -a prepare_args=(
+    "$ROOT/server/scripts/release-oss-secret-env.mjs"
+    prepare-k8s
+    "$env_file"
+    "$prepared_file"
+    "$ns"
+  )
+  if [ "$existing" = "1" ]; then
+    prepare_args+=("$existing_file")
+  fi
+  if ! prepared="$(node "${prepare_args[@]}")"; then
+    manage_cleanup_sensitive_temp_dir
     return 1
   fi
   read -r status digest <<<"$prepared"
@@ -1652,85 +1748,147 @@ k8s_prepare_release_oss_secret() {
     external)
       say "wait for externally managed release OSS secret"
       if ! k8s_wait_release_oss_secret "$ns"; then
-        manage_cleanup_sensitive_temp_file
+        manage_cleanup_sensitive_temp_dir
         die "mx-release-oss was not materialized; check the configured external Secret provider"
       fi
+      k8s_capture_release_oss_secret "$ns" "$existing_file" \
+        || die "mx-release-oss disappeared after external materialization"
+      k8s_validate_release_oss_secret_file "$existing_file"
       resource_version="$(k8s_release_oss_secret_resource_version "$ns")"
       K8S_RELEASE_OSS_SECRET_VERSION="rv-${resource_version}"
       ;;
     absent|required)
-      if kubectl -n "$ns" get secret mx-release-oss >/dev/null 2>&1; then
+      if k8s_capture_release_oss_secret "$ns" "$existing_file"; then
+        k8s_validate_release_oss_secret_file "$existing_file"
         say "keep existing release OSS secret because $env_file has no local OSS credentials"
         resource_version="$(k8s_release_oss_secret_resource_version "$ns")"
         K8S_RELEASE_OSS_SECRET_VERSION="rv-${resource_version}"
       elif [ "$status" = "required" ]; then
-        manage_cleanup_sensitive_temp_file
+        manage_cleanup_sensitive_temp_dir
         die "MX_RELEASE_ARTIFACT_STORAGE=oss requires either OSS values in $env_file or MX_RELEASE_OSS_SECRET_SOURCE=external"
       else
         say "release OSS is not configured; Release Center keeps server-storage fallback"
       fi
       ;;
+    unchanged)
+      say "release OSS secret is unchanged"
+      k8s_capture_release_oss_secret "$ns" "$existing_file" \
+        || die "mx-release-oss disappeared after validation"
+      k8s_validate_release_oss_secret_file "$existing_file"
+      resource_version="$(k8s_release_oss_secret_resource_version "$ns")"
+      K8S_RELEASE_OSS_SECRET_VERSION="rv-${resource_version}"
+      ;;
     ready)
-      current_digest="$(kubectl -n "$ns" get secret mx-release-oss \
-        -o go-template='{{index .metadata.annotations "mx.qpjoy.com/material-digest"}}' 2>/dev/null || true)"
-      if [ "$current_digest" = "$digest" ]; then
-        say "release OSS secret is unchanged"
+      if [ "$existing" = "1" ]; then
+        say "update release OSS secret from $env_file"
+        if ! kubectl -n "$ns" replace -f "$prepared_file" >/dev/null; then
+          manage_cleanup_sensitive_temp_dir
+          die "mx-release-oss changed concurrently or could not be replaced; inspect it and rerun deploy"
+        fi
       else
-        say "create/update release OSS secret from $env_file"
-        if ! kubectl -n "$ns" create secret generic mx-release-oss \
-          --from-env-file="$prepared_file" \
-          --dry-run=client -o yaml | kubectl apply --validate=false -f -; then
-          manage_cleanup_sensitive_temp_file
-          return 1
+        say "create release OSS secret from $env_file"
+        if ! kubectl -n "$ns" create -f "$prepared_file" >/dev/null; then
+          manage_cleanup_sensitive_temp_dir
+          die "mx-release-oss appeared concurrently or could not be created; inspect it and rerun deploy"
         fi
-        if ! kubectl -n "$ns" label secret mx-release-oss \
-          app.kubernetes.io/name=mx-release-oss \
-          app.kubernetes.io/part-of=mx-3ks \
-          mx.qpjoy.com/managed-by=mx-launcher \
-          --overwrite >/dev/null; then
-          manage_cleanup_sensitive_temp_file
-          return 1
-        fi
-        if ! kubectl -n "$ns" annotate secret mx-release-oss \
-          mx.qpjoy.com/source=server-env \
-          "mx.qpjoy.com/material-digest=$digest" \
-          --overwrite >/dev/null; then
-          manage_cleanup_sensitive_temp_file
-          return 1
-        fi
-        K8S_RELEASE_OSS_SECRET_CHANGED=1
       fi
-      K8S_RELEASE_OSS_SECRET_VERSION="sha256-${digest}"
+      K8S_RELEASE_OSS_SECRET_CHANGED=1
+      k8s_capture_release_oss_secret "$ns" "$existing_file" \
+        || die "mx-release-oss was not observed after materialization"
+      k8s_validate_release_oss_secret_file "$existing_file"
+      resource_version="$(k8s_release_oss_secret_resource_version "$ns")"
+      K8S_RELEASE_OSS_SECRET_VERSION="rv-${resource_version}"
       ;;
     *)
-      manage_cleanup_sensitive_temp_file
+      manage_cleanup_sensitive_temp_dir
       die "unexpected release OSS preparation status: $status"
       ;;
   esac
-  manage_cleanup_sensitive_temp_file
+  manage_cleanup_sensitive_temp_dir
 }
 
 k8s_release_oss_secret_dry_run() {
   local ns="$1"
-  local env_file prepared_file prepared status
+  local env_file status
   env_file="$(release_oss_server_env_file)"
-  prepared_file="$(mktemp "${TMPDIR:-/tmp}/mx-release-oss-secret-dry-run.XXXXXX")"
-  MX_MANAGE_SENSITIVE_TEMP_FILE="$prepared_file"
+  if ! status="$(node "$ROOT/server/scripts/release-oss-secret-env.mjs" \
+    validate-local "$env_file")"; then
+    return 1
+  fi
+  case "$status" in
+    disabled|external|absent|required|partial|ready) ;;
+    *) die "unexpected release OSS local validation status: ${status:-empty}" ;;
+  esac
+  : "$ns"
+}
+
+k8s_preflight_release_oss_secret() {
+  local ns="$1"
+  local env_file prepared_file existing_file prepared status
+  local existing=0
+  env_file="$(release_oss_server_env_file)"
+  manage_create_sensitive_temp_dir mx-release-oss-secret-preflight
+  prepared_file="$MX_MANAGE_SENSITIVE_TEMP_DIR/prepared.json"
+  existing_file="$MX_MANAGE_SENSITIVE_TEMP_DIR/existing.json"
+  : >"$prepared_file"
   chmod 600 "$prepared_file"
-  if ! prepared="$(node "$ROOT/server/scripts/release-oss-secret-env.mjs" prepare "$env_file" "$prepared_file")"; then
-    manage_cleanup_sensitive_temp_file
+  if k8s_capture_release_oss_secret "$ns" "$existing_file"; then
+    existing=1
+  fi
+  local -a prepare_args=(
+    "$ROOT/server/scripts/release-oss-secret-env.mjs"
+    prepare-k8s
+    "$env_file"
+    "$prepared_file"
+    "$ns"
+  )
+  if [ "$existing" = "1" ]; then
+    prepare_args+=("$existing_file")
+  fi
+  if ! prepared="$(node "${prepare_args[@]}")"; then
+    manage_cleanup_sensitive_temp_dir
     return 1
   fi
   read -r status _ <<<"$prepared"
-  if [ "$status" = "ready" ]; then
-    if ! kubectl -n "$ns" create secret generic mx-release-oss \
-      --from-env-file="$prepared_file" \
-      --dry-run=client -o yaml >/dev/null; then
-      manage_cleanup_sensitive_temp_file
-      return 1
-    fi
-  fi
-  manage_cleanup_sensitive_temp_file
+  case "$status" in
+    disabled) ;;
+    absent)
+      if k8s_capture_release_oss_secret "$ns" "$existing_file"; then
+        k8s_validate_release_oss_secret_file "$existing_file"
+      fi
+      ;;
+    external)
+      if ! k8s_wait_release_oss_secret "$ns"; then
+        manage_cleanup_sensitive_temp_dir
+        die "mx-release-oss was not materialized; check the configured external Secret provider"
+      fi
+      k8s_capture_release_oss_secret "$ns" "$existing_file" \
+        || die "mx-release-oss disappeared after external materialization"
+      k8s_validate_release_oss_secret_file "$existing_file"
+      ;;
+    required)
+      if ! k8s_capture_release_oss_secret "$ns" "$existing_file"; then
+        manage_cleanup_sensitive_temp_dir
+        die "MX_RELEASE_ARTIFACT_STORAGE=oss requires either OSS values in $env_file or MX_RELEASE_OSS_SECRET_SOURCE=external"
+      fi
+      k8s_validate_release_oss_secret_file "$existing_file"
+      ;;
+    ready)
+      if ! kubectl apply --dry-run=client --validate=false \
+        -f "$prepared_file" >/dev/null; then
+        manage_cleanup_sensitive_temp_dir
+        return 1
+      fi
+      ;;
+    unchanged)
+      k8s_validate_release_oss_secret_file "$existing_file"
+      ;;
+    *)
+      manage_cleanup_sensitive_temp_dir
+      die "unexpected release OSS preflight status: $status"
+      ;;
+  esac
+  manage_cleanup_sensitive_temp_dir
 }
 
 k8s_apply_release_oss_rollout_version() {
@@ -1746,22 +1904,6 @@ k8s_apply_release_oss_rollout_version() {
     >/dev/null
   K8S_INTERNAL_API_RESTARTED=1
   say "release OSS secret version changed; Internal API rollout triggered"
-}
-
-k8s_secret_dry_run() {
-  local ns="$1"
-  local pg_user="${PG_USER:-mx_internal}"
-  local pg_password="${PG_PASSWORD:-mx_internal}"
-  local pg_db="${PG_DB:-mx_internal_shadow}"
-  local database_host="${DATABASE_HOST:-mx-internal-postgres.${ns}.svc.cluster.local}"
-  local database_url="${DATABASE_URL:-postgres://${pg_user}:${pg_password}@${database_host}:5432/${pg_db}}"
-  kubectl -n "$ns" create secret generic mx-launcher-db \
-    --from-literal=PG_USER="$pg_user" \
-    --from-literal=PG_PASSWORD="$pg_password" \
-    --from-literal=PG_DB="$pg_db" \
-    --from-literal=DATABASE_HOST="$database_host" \
-    --from-literal=DATABASE_URL="$database_url" \
-    --dry-run=client -o yaml >/dev/null
 }
 
 k8s_postgres_diagnostics() {
@@ -2322,10 +2464,8 @@ k8s_dry_run() {
   kubectl apply --dry-run=client --validate=false -f "$dir/15-dns-control-target.yaml"
   say "dry-run local persistent volumes"
   kubectl apply --dry-run=client --validate=false -f "$dir/18-local-pv.yaml"
-  say "dry-run generated db secret"
-  k8s_secret_dry_run "$ns"
-  say "dry-run generated Internal ops secret"
-  k8s_internal_ops_secret_dry_run "$ns"
+  say "validate server/.env Secret contracts"
+  k8s_validate_secret_bundle_env "$ns"
   say "dry-run release OSS secret materialization"
   k8s_release_oss_secret_dry_run "$ns"
   say "dry-run postgres service/statefulset"
@@ -2351,13 +2491,20 @@ k8s_apply() {
   dir="$(k8s_manifest_dir "$target")"
   need_kubectl
   K8S_INTERNAL_API_RESTARTED=0
+  K8S_SECRET_BUNDLE_VERSION=""
+  K8S_SECRET_BUNDLE_CHANGED_COUNT=0
   [ -d "$dir" ] || die "missing k8s manifest directory: $dir"
   k8s_repair_kubeadm_endpoint
   k8s_repair_flannel_cni
   k8s_recover_cluster_dns
+  say "preflight server/.env Secret contracts"
+  k8s_preflight_secret_bundle "$ns"
+  k8s_release_oss_secret_dry_run "$ns"
 
   say "apply namespace"
   kubectl apply --validate=false -f "$dir/00-namespace.yaml"
+  say "preflight current release OSS Secret contract"
+  k8s_preflight_release_oss_secret "$ns"
   say "apply serviceaccount"
   kubectl apply --validate=false -f "$dir/05-serviceaccount.yaml"
   say "apply configmap"
@@ -2374,15 +2521,13 @@ k8s_apply() {
     die "internal coredns rollout failed"
   fi
   k8s_verify_internal_coredns_host_ports
+  say "ensure DB, Internal ops, Feishu OAuth, and SDK service-account Secrets"
+  k8s_ensure_secret_bundle "$ns"
+  say "materialize release OSS secret"
+  k8s_prepare_release_oss_secret "$ns"
   say "apply local persistent volumes"
   k8s_repair_internal_local_pvs
   kubectl apply --validate=false -f "$dir/18-local-pv.yaml"
-  say "create/update db secret from local env"
-  k8s_apply_db_secret "$ns"
-  say "create/update Internal ops secret"
-  k8s_apply_internal_ops_secret "$ns"
-  say "materialize release OSS secret"
-  k8s_prepare_release_oss_secret "$ns"
   say "apply postgres service/statefulset"
   kubectl apply --validate=false -f "$dir/20-postgres.yaml"
   say "apply coredns writer rbac"
@@ -2402,8 +2547,8 @@ k8s_apply() {
     k8s_postgres_diagnostics "$ns"
     die "postgres is not reachable from a cluster probe pod"
   fi
-  say "update db secret with postgres host: $K8S_SELECTED_POSTGRES_HOST"
-  DATABASE_HOST="$K8S_SELECTED_POSTGRES_HOST" k8s_apply_db_secret "$ns"
+  say "update DB Secret with postgres host: $K8S_SELECTED_POSTGRES_HOST"
+  DATABASE_HOST="$K8S_SELECTED_POSTGRES_HOST" k8s_ensure_secret_bundle "$ns"
 
   say "check node disk pressure before migration"
   if [ "${MX_K8S_IGNORE_DISK_PRESSURE:-0}" = "1" ]; then
@@ -2423,6 +2568,7 @@ k8s_apply() {
   say "apply internal api"
   kubectl apply --validate=false -f "$dir/40-internal-api.yaml"
   k8s_apply_release_oss_rollout_version "$ns"
+  k8s_apply_secret_bundle_rollout_version "$ns"
   if [ "$restart_rebuilt_internal_api" = "1" ] \
     && [ "${K8S_INTERNAL_API_RESTARTED:-0}" != "1" ]; then
     say "restart Internal API before rollout wait so the rebuilt local image is resolved"
@@ -2532,32 +2678,36 @@ k8s_readonly_probe() {
 
 k8s_db_summary() {
   local target="$1"
-  local ns
+  local ns pg_user pg_db
   ns="$(k8s_namespace "$target")"
   need_kubectl
+  pg_user="$(k8s_db_secret_value "$ns" PG_USER)"
+  pg_db="$(k8s_db_secret_value "$ns" PG_DB)"
   say "schema migrations"
   kubectl -n "$ns" exec statefulset/mx-internal-postgres -- \
-    psql -U "${PG_USER:-mx_internal}" -d "${PG_DB:-mx_internal_shadow}" \
+    psql -U "$pg_user" -d "$pg_db" \
     -c "select count(*) as migration_rows from mx_schema_migrations;"
   say "platform records by kind"
   kubectl -n "$ns" exec statefulset/mx-internal-postgres -- \
-    psql -U "${PG_USER:-mx_internal}" -d "${PG_DB:-mx_internal_shadow}" \
+    psql -U "$pg_user" -d "$pg_db" \
     -c "select kind, environment, count(*) from mx_platform_records group by kind, environment order by kind, environment;"
 }
 
 k8s_reset_data() {
   local target="$1"
-  local ns
+  local ns pg_user pg_db
   ns="$(k8s_namespace "$target")"
   if [ "${MX_K8S_SHADOW_CONFIRM_RESET:-}" != "1" ]; then
     die "Refusing to reset shadow data. Re-run with MX_K8S_SHADOW_CONFIRM_RESET=1 to truncate mx_platform_records."
   fi
   need_kubectl
+  pg_user="$(k8s_db_secret_value "$ns" PG_USER)"
+  pg_db="$(k8s_db_secret_value "$ns" PG_DB)"
   say "before reset"
   k8s_db_summary "$target"
   say "truncate mx_platform_records in namespace $ns"
   kubectl -n "$ns" exec statefulset/mx-internal-postgres -- \
-    psql -v ON_ERROR_STOP=1 -U "${PG_USER:-mx_internal}" -d "${PG_DB:-mx_internal_shadow}" \
+    psql -v ON_ERROR_STOP=1 -U "$pg_user" -d "$pg_db" \
     -c "truncate table mx_platform_records;"
   say "restart Internal API so built-in records are seeded again"
   k8s_restart_internal_api "$target"
@@ -2568,11 +2718,13 @@ k8s_reset_data() {
 k8s_cleanup_smoke_fixtures() {
   local target="$1"
   local mode="${2:-plan}"
-  local ns record_env legacy select_sql delete_sql
+  local ns record_env legacy select_sql delete_sql pg_user pg_db
   ns="$(k8s_namespace "$target")"
   record_env="${MX_K8S_RECORD_ENVIRONMENT:-shadow}"
   legacy="${MX_K8S_CLEANUP_LEGACY_OVERSEA_MAIN_SMOKE:-0}"
   need_kubectl
+  pg_user="$(k8s_db_secret_value "$ns" PG_USER)"
+  pg_db="$(k8s_db_secret_value "$ns" PG_DB)"
   select_sql="$(cat <<'SQL'
 WITH candidates AS (
   SELECT kind, id, environment, site_id, data
@@ -2663,13 +2815,13 @@ SQL
   say "smoke fixture cleanup candidates (env=$record_env, legacy-oversea-main=$legacy)"
   printf '%s\n' "$select_sql" | kubectl -n "$ns" exec -i statefulset/mx-internal-postgres -- \
     psql -v ON_ERROR_STOP=1 -v record_env="$record_env" -v legacy="$legacy" \
-      -U "${PG_USER:-mx_internal}" -d "${PG_DB:-mx_internal_shadow}"
+      -U "$pg_user" -d "$pg_db"
   case "$mode" in
     --apply|apply)
       say "delete smoke fixture records"
       printf '%s\n' "$delete_sql" | kubectl -n "$ns" exec -i statefulset/mx-internal-postgres -- \
         psql -v ON_ERROR_STOP=1 -v record_env="$record_env" -v legacy="$legacy" \
-          -U "${PG_USER:-mx_internal}" -d "${PG_DB:-mx_internal_shadow}"
+          -U "$pg_user" -d "$pg_db"
       ;;
     plan|dry-run|'')
       say "dry-run only. Re-run with --apply to delete listed smoke fixtures."
@@ -2829,12 +2981,10 @@ k8s_down() {
   kubectl delete -f "$dir/20-postgres.yaml" --ignore-not-found
   say "delete dns control target"
   kubectl delete -f "$dir/15-dns-control-target.yaml" --ignore-not-found
-  say "delete configmap and generated secret"
+  say "delete configmap and serviceaccount"
   kubectl delete -f "$dir/10-configmap.yaml" --ignore-not-found
   kubectl delete -f "$dir/05-serviceaccount.yaml" --ignore-not-found
-  kubectl -n "$ns" delete secret mx-launcher-db --ignore-not-found
-  kubectl -n "$ns" delete secret mx-internal-ops --ignore-not-found
-  say "namespace and PVC are kept for safe restart"
+  say "namespace, PVC, and runtime Secrets are kept for safe restart"
 }
 
 awx_shadow_namespace() {
@@ -5369,6 +5519,16 @@ ops_internal_production_reinit_kubeadm() {
   [ -n "$node_name" ] || node_name="mx-internal-server"
   configure_containerd="${MX_K8S_CONFIGURE_CONTAINERD:-0}"
   restart_runtime_after_cni="${MX_K8S_RESTART_RUNTIME_AFTER_CNI:-0}"
+  say "validate recoverable PostgreSQL credentials before kubeadm reinit"
+  k8s_require_db_recovery_env "$(k8s_namespace internal-shadow)"
+  if kubectl --request-timeout=5s -n "$(k8s_namespace internal-shadow)" \
+    get secret mx-launcher-db \
+    >/dev/null 2>&1; then
+    say "verify recovery credentials match the current database Secret"
+    k8s_preflight_secret_bundle "$(k8s_namespace internal-shadow)"
+  else
+    say "current database Secret is not readable; recovery values cannot be compared before reinit"
+  fi
   say "reinit kubeadm at $current_ip with node=$node_name"
   say "preserve /var/lib/mx-launcher; K8S_CONFIGURE_CONTAINERD=$configure_containerd K8S_RESTART_RUNTIME_AFTER_CNI=$restart_runtime_after_cni"
   K8S_APISERVER_ADVERTISE_ADDRESS="$current_ip" \
@@ -5436,6 +5596,9 @@ ops_internal_production() {
       ops_internal_production_plan
       k8s_repair_kubeadm_endpoint
       k8s_require_apiserver_ready
+      say "preflight server/.env and current K8s Secret state"
+      k8s_preflight_secret_bundle "$(k8s_namespace internal-shadow)"
+      k8s_release_oss_secret_dry_run "$(k8s_namespace internal-shadow)"
       say "build Internal image"
       MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT="${MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT:-1}"
       shadow_image_build

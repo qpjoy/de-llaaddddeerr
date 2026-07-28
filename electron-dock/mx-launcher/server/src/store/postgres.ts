@@ -260,7 +260,12 @@ import {
 } from './domain.js';
 import { applyGatewayNginxConfigToHostRunner } from './host-runner.js';
 import { applyCoreDnsConfigMapToKubernetes, applyGatewayConfigMapToKubernetes } from './kubernetes.js';
-import type { PlatformOverview, PlatformStore } from './platform-store.js';
+import type {
+  PlatformOverview,
+  PlatformStore,
+  PublisherReleasePlanInput,
+  PublisherReleasePlanResult
+} from './platform-store.js';
 import {
   LEGACY_HDO_ALLOWED_APP_IDS,
   LEGACY_HDO_HOME_APP_ID,
@@ -1521,6 +1526,7 @@ export class PostgresStore implements PlatformStore {
         serviceAccountId: serviceAccount.serviceAccountId,
         roleIds: serviceAccount.roleIds,
         scopes: serviceAccount.scopes,
+        allowedProductIds: serviceAccount.allowedProductIds ?? [],
         status: serviceAccount.status
       }
     });
@@ -2494,6 +2500,13 @@ export class PostgresStore implements PlatformStore {
   }
 
   async recordAudit(input: AuditEventInput): Promise<AuditEvent> {
+    return this.recordAuditTo(this.records, input);
+  }
+
+  private async recordAuditTo(
+    records: Repository<PlatformRecordRow>,
+    input: AuditEventInput
+  ): Promise<AuditEvent> {
     const row: AuditEvent = {
       eventId: `aud_${randomUUID()}`,
       eventType: input.eventType ?? 'unknown',
@@ -2512,7 +2525,7 @@ export class PostgresStore implements PlatformStore {
       metadata: input.metadata ?? null,
       createdAt: new Date().toISOString()
     };
-    await this.saveRecord('audit-event', row.eventId, row, row.siteId);
+    await this.saveRecordTo(records, 'audit-event', row.eventId, row, row.siteId);
     return row;
   }
 
@@ -3175,6 +3188,218 @@ export class PostgresStore implements PlatformStore {
     return decision;
   }
 
+  async createPublisherReleaseManagementPlan(
+    input: PublisherReleasePlanInput
+  ): Promise<PublisherReleasePlanResult> {
+    try {
+      return await this.dataSource.transaction(async (manager) => {
+        await manager.query(
+          'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+          [
+            `mx-launcher:${this.config.environment}:release-publisher:${input.productId}:${input.requestId}`
+          ]
+        );
+        const existing = await this.findPublisherReleaseManagementPlan(
+          manager,
+          input.productId,
+          input.requestId
+        );
+        if (existing) {
+          return existing.publisherRequestFingerprint === input.publisherRequestFingerprint
+            ? { outcome: 'replayed' as const, plan: existing }
+            : { outcome: 'conflict' as const, planId: existing.planId };
+        }
+        const records = manager.getRepository(PlatformRecordEntity);
+        const plan = await this.createPublisherReleaseManagementPlanTo(records, input);
+        return { outcome: 'created' as const, plan };
+      });
+    } catch (error) {
+      if (!isReleasePublisherRequestUniqueViolation(error)) throw error;
+      const existing = await this.findPublisherReleaseManagementPlan(
+        this.dataSource.manager,
+        input.productId,
+        input.requestId
+      );
+      if (!existing) throw error;
+      return existing.publisherRequestFingerprint === input.publisherRequestFingerprint
+        ? { outcome: 'replayed', plan: existing }
+        : { outcome: 'conflict', planId: existing.planId };
+    }
+  }
+
+  private async createPublisherReleaseManagementPlanTo(
+    records: Repository<PlatformRecordRow>,
+    input: PublisherReleasePlanInput
+  ): Promise<ReleaseManagementPlan> {
+    if ((input.e2eResult ?? 'running') !== 'running') {
+      throw new Error('Publisher release plans must start with a running E2E result');
+    }
+    const releaseId = input.releaseId?.trim() || `rel_${randomUUID()}`;
+    const channel = input.channel?.trim() || 'shadow';
+    const appId = input.appId?.trim() || input.productId;
+    const launcherUpdatePolicy = normalizeUpdatePolicy(input.launcherUpdatePolicy ?? 'app-installer');
+    const appUpdatePolicy = normalizeUpdatePolicy(input.appUpdatePolicy ?? 'config-snapshot');
+    const launcherDecision = releasePolicyDecisionForInput({
+      componentKind: launcherUpdatePolicy,
+      componentId: input.launcherComponentId?.trim() || input.productId,
+      currentVersion: input.launcherCurrentVersion?.trim() || '0.1.0',
+      targetVersion: input.launcherTargetVersion?.trim() || '0.1.1',
+      channel,
+      installId: input.installId,
+      userId: input.userId
+    });
+    const appDecision = releasePolicyDecisionForInput({
+      componentKind: appUpdatePolicy,
+      componentId: input.appComponentId?.trim() || appId,
+      currentVersion: input.appCurrentVersion?.trim() || '0.1.0',
+      targetVersion: input.appTargetVersion?.trim() || '0.1.1',
+      channel,
+      installId: input.installId,
+      userId: input.userId
+    });
+    for (const [decision, decisionInput] of [
+      [launcherDecision, {
+        channel,
+        installId: input.installId ?? null,
+        userId: input.userId ?? null
+      }],
+      [appDecision, {
+        channel,
+        installId: input.installId ?? null,
+        userId: input.userId ?? null
+      }]
+    ] as const) {
+      if (!decision.updateAvailable) continue;
+      await this.saveRecordTo(records, 'release-policy-decision', `relpol_${randomUUID()}`, {
+        ...decision,
+        ...decisionInput,
+        evaluatedAt: new Date().toISOString()
+      }, this.config.siteId);
+    }
+
+    const startedAt = new Date().toISOString();
+    const testRun: TestRun = {
+      testRunId: `trun_${randomUUID()}`,
+      suiteId: input.suiteId?.trim() || 'hdi-shadow-e2e',
+      productId: input.productId,
+      environment: this.config.environment,
+      topology: input.topology?.trim() || 'h-d-i-shadow',
+      sites: input.sites && input.sites.length > 0
+        ? input.sites
+        : ['internal-main', 'domestic-main'],
+      releaseId,
+      configSnapshotId: null,
+      installId: input.installId ?? null,
+      deviceId: null,
+      traceId: `trace_${randomUUID()}`,
+      state: 'running',
+      steps: [],
+      startedAt,
+      finishedAt: null
+    };
+    await this.saveRecordTo(
+      records,
+      'test-run',
+      testRun.testRunId,
+      testRun,
+      this.config.siteId
+    );
+    await this.recordAuditTo(records, {
+      eventType: 'test.run.created',
+      actorKind: 'test-center',
+      installId: testRun.installId,
+      deviceId: testRun.deviceId,
+      productId: testRun.productId,
+      traceId: testRun.traceId,
+      metadata: {
+        suiteId: testRun.suiteId,
+        topology: testRun.topology,
+        releaseId: testRun.releaseId
+      }
+    });
+
+    const gate: TestGateVerdict = {
+      gateId: `gate_${releaseId}_e2e`,
+      releaseId,
+      verdict: 'blocked',
+      requiredRuns: [testRun.testRunId],
+      evaluatedAt: new Date().toISOString(),
+      reason: 'at least one required run is not complete'
+    };
+    await this.saveRecordTo(
+      records,
+      'test-gate-verdict',
+      `${gate.gateId}:${gate.releaseId}:${randomUUID()}`,
+      gate,
+      this.config.siteId
+    );
+    await this.recordAuditTo(records, {
+      eventType: 'test.gate.evaluated',
+      actorKind: 'test-center',
+      requestId: gate.gateId,
+      metadata: {
+        gateId: gate.gateId,
+        releaseId: gate.releaseId,
+        verdict: gate.verdict,
+        requiredRuns: gate.requiredRuns,
+        evaluatedAt: gate.evaluatedAt,
+        reason: gate.reason
+      }
+    });
+
+    const plan = buildReleaseManagementPlan(this.config, { ...input, channel }, {
+      planId: `relplan_${randomUUID()}`,
+      releaseId,
+      launcherDecision,
+      appDecision,
+      testRun,
+      gate,
+      createdAt: new Date().toISOString()
+    });
+    await this.saveRecordTo(
+      records,
+      'release-management-plan',
+      plan.planId,
+      plan,
+      this.config.siteId
+    );
+    await this.recordAuditTo(records, {
+      eventType: 'release.management_plan.created',
+      actorKind: 'release-center',
+      requestId: input.requestId,
+      installId: plan.installId,
+      userId: plan.userId,
+      productId: input.productId,
+      metadata: {
+        planId: plan.planId,
+        releaseId: plan.releaseId,
+        channel: plan.channel,
+        gateVerdict: plan.test.gate.verdict,
+        readyToPromote: plan.decisions.readyToPromote,
+        nextActions: plan.decisions.nextActions
+      }
+    });
+    return plan;
+  }
+
+  private async findPublisherReleaseManagementPlan(
+    manager: EntityManager,
+    productId: string,
+    requestId: string
+  ): Promise<ReleaseManagementPlan | null> {
+    const rows = await manager.query(
+      `SELECT data
+       FROM mx_platform_records
+       WHERE kind = 'release-management-plan'
+         AND environment = $1
+         AND data->>'productId' = $2
+         AND data->>'requestId' = $3
+       LIMIT 1`,
+      [this.config.environment, productId, requestId]
+    ) as Array<{ data: ReleaseManagementPlan }>;
+    return rows[0]?.data ?? null;
+  }
+
   async createReleaseManagementPlan(input: ReleaseManagementPlanInput): Promise<ReleaseManagementPlan> {
     const releaseId = input.releaseId?.trim() || `rel_${randomUUID()}`;
     const channel = input.channel?.trim() || 'shadow';
@@ -3261,50 +3486,159 @@ export class PostgresStore implements PlatformStore {
   }
 
   async completeReleaseManagementGate(planId: string, input: ReleaseManagementGateInput): Promise<ReleaseManagementPlan> {
-    const plan = await this.getReleaseManagementPlan(planId);
-    if (!plan) throw new Error(`Unknown releaseManagementPlanId: ${planId}`);
-    const run = await this.recordTestStep(plan.test.run.testRunId, {
-      caseId: 'release-gate:e2e',
-      status: input.status,
-      message: input.message ?? `release management E2E gate ${input.status}`,
-      evidence: {
-        source: 'release-management-gate-action',
+    return this.dataSource.transaction(async (manager) => {
+      await manager.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [`mx-launcher:${this.config.environment}:release-gate:${planId}`]
+      );
+      const records = manager.getRepository(PlatformRecordEntity);
+      const planRow = await records.findOne({
+        where: {
+          kind: 'release-management-plan',
+          id: planId,
+          environment: this.config.environment
+        }
+      });
+      if (!planRow) throw new Error(`Unknown releaseManagementPlanId: ${planId}`);
+      const plan = planRow.data as unknown as ReleaseManagementPlan;
+      const currentVerdict = plan.test.gate.verdict;
+      const gateIsTerminal = currentVerdict === 'passed'
+        || currentVerdict === 'failed'
+        || plan.test.run.state === 'blocked';
+      if (gateIsTerminal) {
+        if (currentVerdict === input.status) return plan;
+        throw new Error(
+          `Release management gate is terminal (${currentVerdict}); create a new plan`
+        );
+      }
+
+      await manager.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [`mx-launcher:${this.config.environment}:release-test-run:${plan.test.run.testRunId}`]
+      );
+      const runRow = await records.findOne({
+        where: {
+          kind: 'test-run',
+          id: plan.test.run.testRunId,
+          environment: this.config.environment
+        }
+      });
+      if (!runRow) throw new Error(`Unknown testRunId: ${plan.test.run.testRunId}`);
+      const previousRun = runRow.data as unknown as TestRun;
+      const status = normalizeTestStatus(input.status);
+      const step: TestStep = {
+        stepId: `tstep_${randomUUID()}`,
+        caseId: 'release-gate:e2e',
+        status,
+        message: input.message ?? `release management E2E gate ${input.status}`,
+        evidence: {
+          source: 'release-management-gate-action',
+          releaseId: plan.releaseId,
+          planId: plan.planId,
+          ...(input.evidence ?? {})
+        },
+        createdAt: new Date().toISOString()
+      };
+      const run: TestRun = {
+        ...previousRun,
+        steps: [...previousRun.steps, step]
+      };
+      if (status === 'failed' || status === 'blocked') {
+        run.state = status;
+        run.finishedAt = step.createdAt;
+      } else if (run.steps.length > 0 && run.steps.every((item) => item.status === 'passed')) {
+        run.state = 'passed';
+        run.finishedAt = step.createdAt;
+      }
+      await this.saveRecordTo(records, 'test-run', run.testRunId, run, this.config.siteId);
+      await this.recordAuditTo(records, {
+        eventType: 'test.step.recorded',
+        actorKind: 'test-center',
+        installId: run.installId,
+        deviceId: run.deviceId,
+        productId: run.productId,
+        traceId: run.traceId,
+        metadata: {
+          testRunId: run.testRunId,
+          caseId: step.caseId,
+          status: step.status
+        }
+      });
+
+      const gate: TestGateVerdict = {
+        gateId: plan.test.gate.gateId,
         releaseId: plan.releaseId,
-        planId: plan.planId,
-        ...(input.evidence ?? {})
-      }
+        verdict: run.state === 'failed'
+          ? 'failed'
+          : run.state === 'blocked' || run.state === 'running'
+            ? 'blocked'
+            : 'passed',
+        requiredRuns: [run.testRunId],
+        evaluatedAt: new Date().toISOString(),
+        reason: run.state === 'failed'
+          ? 'at least one required run failed'
+          : run.state === 'blocked' || run.state === 'running'
+            ? 'at least one required run is not complete'
+            : 'all required runs passed'
+      };
+      await this.saveRecordTo(
+        records,
+        'test-gate-verdict',
+        `${gate.gateId}:${gate.releaseId}:${randomUUID()}`,
+        gate,
+        this.config.siteId
+      );
+      await this.recordAuditTo(records, {
+        eventType: 'test.gate.evaluated',
+        actorKind: 'test-center',
+        requestId: gate.gateId,
+        metadata: {
+          gateId: gate.gateId,
+          releaseId: gate.releaseId,
+          verdict: gate.verdict,
+          requiredRuns: gate.requiredRuns,
+          evaluatedAt: gate.evaluatedAt,
+          reason: gate.reason
+        }
+      });
+
+      const updated: ReleaseManagementPlan = {
+        ...plan,
+        test: {
+          ...plan.test,
+          run,
+          gate
+        },
+        decisions: buildReleaseManagementDecisions(
+          plan.components.launcher,
+          plan.components.app,
+          gate
+        )
+      };
+      await this.saveRecordTo(
+        records,
+        'release-management-plan',
+        updated.planId,
+        updated,
+        this.config.siteId
+      );
+      await this.recordAuditTo(records, {
+        eventType: 'release.management_gate.completed',
+        actorKind: 'release-center',
+        requestId: input.requestId ?? null,
+        installId: updated.installId,
+        userId: updated.userId,
+        productId: updated.productId || updated.components.launcher.componentId,
+        metadata: {
+          planId: updated.planId,
+          releaseId: updated.releaseId,
+          gateVerdict: updated.test.gate.verdict,
+          readyToPromote: updated.decisions.readyToPromote,
+          requestedBy: input.requestedBy ?? null
+        }
+      });
+      return updated;
     });
-    const gate = await this.evaluateTestGate({
-      gateId: plan.test.gate.gateId,
-      releaseId: plan.releaseId,
-      runIds: [run.testRunId]
-    });
-    const updated: ReleaseManagementPlan = {
-      ...plan,
-      test: {
-        ...plan.test,
-        run,
-        gate
-      },
-      decisions: buildReleaseManagementDecisions(plan.components.launcher, plan.components.app, gate)
-    };
-    await this.saveRecord('release-management-plan', updated.planId, updated, this.config.siteId);
-    await this.recordAudit({
-      eventType: 'release.management_gate.completed',
-      actorKind: 'release-center',
-      requestId: input.requestId ?? null,
-      installId: updated.installId,
-      userId: updated.userId,
-      productId: updated.components.launcher.componentId,
-      metadata: {
-        planId: updated.planId,
-        releaseId: updated.releaseId,
-        gateVerdict: updated.test.gate.verdict,
-        readyToPromote: updated.decisions.readyToPromote,
-        requestedBy: input.requestedBy ?? null
-      }
-    });
-    return updated;
   }
 
   async listReleaseManagementPlans(): Promise<ReleaseManagementPlan[]> {
@@ -3353,43 +3687,75 @@ export class PostgresStore implements PlatformStore {
   }
 
   async recordTestStep(runId: string, input: TestStepInput): Promise<TestRun> {
-    const run = await this.getTestRun(runId);
-    if (!run) throw new Error(`Unknown testRunId: ${runId}`);
-    const status = normalizeTestStatus(input.status);
-    const step: TestStep = {
-      stepId: `tstep_${randomUUID()}`,
-      caseId: input.caseId,
-      status,
-      message: input.message ?? null,
-      evidence: input.evidence ?? {},
-      createdAt: new Date().toISOString()
-    };
-    run.steps.push(step);
-    if (status === 'failed') {
-      run.state = 'failed';
-      run.finishedAt = step.createdAt;
-    } else if (status === 'blocked') {
-      run.state = 'blocked';
-      run.finishedAt = step.createdAt;
-    } else if (run.steps.length > 0 && run.steps.every((item) => item.status === 'passed')) {
-      run.state = 'passed';
-      run.finishedAt = step.createdAt;
-    }
-    await this.saveRecord('test-run', run.testRunId, run, this.config.siteId);
-    await this.recordAudit({
-      eventType: 'test.step.recorded',
-      actorKind: 'test-center',
-      installId: run.installId,
-      deviceId: run.deviceId,
-      productId: run.productId,
-      traceId: run.traceId,
-      metadata: {
-        testRunId: run.testRunId,
-        caseId: step.caseId,
-        status: step.status
+    return this.dataSource.transaction(async (manager) => {
+      await manager.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [`mx-launcher:${this.config.environment}:release-test-run:${runId}`]
+      );
+      const records = manager.getRepository(PlatformRecordEntity);
+      const runRow = await records.findOne({
+        where: {
+          kind: 'test-run',
+          id: runId,
+          environment: this.config.environment
+        }
+      });
+      if (!runRow) throw new Error(`Unknown testRunId: ${runId}`);
+      const publisherPlans = await manager.query(
+        `SELECT id
+         FROM mx_platform_records
+         WHERE kind = 'release-management-plan'
+           AND environment = $1
+           AND NULLIF(data->>'publisherRequestFingerprint', '') IS NOT NULL
+           AND data#>>'{test,run,testRunId}' = $2
+         LIMIT 1`,
+        [this.config.environment, runId]
+      ) as Array<{ id: string }>;
+      if (publisherPlans.length > 0) {
+        throw new Error(
+          'Publisher release test runs can only be completed through the release gate endpoint'
+        );
       }
+      const previousRun = runRow.data as unknown as TestRun;
+      const status = normalizeTestStatus(input.status);
+      const step: TestStep = {
+        stepId: `tstep_${randomUUID()}`,
+        caseId: input.caseId,
+        status,
+        message: input.message ?? null,
+        evidence: input.evidence ?? {},
+        createdAt: new Date().toISOString()
+      };
+      const run: TestRun = {
+        ...previousRun,
+        steps: [...previousRun.steps, step]
+      };
+      if (status === 'failed') {
+        run.state = 'failed';
+        run.finishedAt = step.createdAt;
+      } else if (status === 'blocked') {
+        run.state = 'blocked';
+        run.finishedAt = step.createdAt;
+      } else if (run.steps.length > 0 && run.steps.every((item) => item.status === 'passed')) {
+        run.state = 'passed';
+        run.finishedAt = step.createdAt;
+      }
+      await this.saveRecordTo(records, 'test-run', run.testRunId, run, this.config.siteId);
+      await this.recordAuditTo(records, {
+        eventType: 'test.step.recorded',
+        actorKind: 'test-center',
+        installId: run.installId,
+        deviceId: run.deviceId,
+        productId: run.productId,
+        traceId: run.traceId,
+        metadata: {
+          testRunId: run.testRunId,
+          caseId: step.caseId,
+          status: step.status
+        }
+      });
+      return run;
     });
-    return run;
   }
 
   async evaluateTestGate(input: TestGateInput): Promise<TestGateVerdict> {
@@ -4421,6 +4787,40 @@ export class PostgresStore implements PlatformStore {
       ? createServiceAccountPrincipalFromRecord(serviceAccount, roles)
       : null;
   }
+}
+
+function releasePolicyDecisionForInput(input: ReleasePolicyInput): ReleasePolicyDecision {
+  const componentKind = normalizeUpdatePolicy(input.componentKind);
+  if (input.currentVersion === input.targetVersion) {
+    return {
+      componentKind,
+      componentId: input.componentId,
+      currentVersion: input.currentVersion,
+      targetVersion: input.targetVersion,
+      updateAvailable: false,
+      updateMode: 'none',
+      canSkip: true,
+      canDefer: true,
+      requiresGate: false,
+      rollbackRequired: false,
+      reason: 'component is already at target version'
+    };
+  }
+  return {
+    componentKind,
+    componentId: input.componentId,
+    currentVersion: input.currentVersion,
+    targetVersion: input.targetVersion,
+    updateAvailable: true,
+    ...releasePolicyByKind(componentKind)
+  };
+}
+
+function isReleasePublisherRequestUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { code?: unknown; constraint?: unknown };
+  return candidate.code === '23505'
+    && candidate.constraint === 'uq_mx_release_publisher_request';
 }
 
 function resolveIssueAccountNames(input: SiteSlotAccessAccountIssueInput, siteId: string): string[] {
