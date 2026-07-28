@@ -1,29 +1,116 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
-import { Body, Controller, Get, Inject, NotFoundException, Param, Post } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Headers,
+  Inject,
+  NotFoundException,
+  Param,
+  Post,
+  UnauthorizedException
+} from '@nestjs/common';
+import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 
 import { asRecord, nullableString } from '../../lib/http.js';
-import { MX_H2I_PRODUCT_ID } from '../../store/domain.js';
+import { assertInternalOpsToken, internalOpsTokenMatches, INTERNAL_OPS_TOKEN_HEADER } from '../../lib/internal-ops-auth.js';
+import {
+  assertLauncherLeaseCapability,
+  launcherLeaseCapabilityMaterial,
+  launcherLeaseCapabilityMatches,
+  LAUNCHER_LEASE_CAPABILITY_HEADER,
+  mintLauncherLeaseCapability
+} from '../../lib/launcher-lease-auth.js';
+import {
+  launcherNetworkLeaseIsActive,
+  launcherNetworkLeaseMatchesProfile,
+  launcherNetworkLeaseProfile,
+  launcherNetworkLeaseProductId,
+  MX_H2I_PRODUCT_ID
+} from '../../store/domain.js';
 import type { PlatformStore } from '../../store/platform-store.js';
-import { PLATFORM_STORE } from '../../tokens.js';
-import type { LauncherNetworkLease, SiteSlotDomesticWireGuardSecret, SiteSlotPlan, SiteSlotSshProfile } from '../../types.js';
+import { PLATFORM_STORE, RUNTIME_CONFIG } from '../../tokens.js';
+import type { RuntimeConfig } from '../../types.js';
+import type {
+  LauncherNetworkHandover,
+  LauncherNetworkLease,
+  SiteSlotDomesticWireGuardSecret,
+  SiteSlotPlan,
+  SiteSlotSshProfile
+} from '../../types.js';
 
 const execFileAsync = promisify(execFile);
+const LAUNCHER_PEER_LEASE_CAPABILITY_HEADER = 'x-mx-peer-lease-capability';
+const NEW_LAUNCHER_LEASE_CAPABILITY_HEADER = 'x-mx-new-lease-capability';
 
 @Controller('internal/v1/launcher-network')
-export class LauncherNetworkController {
-  constructor(@Inject(PLATFORM_STORE) private readonly store: PlatformStore) {}
+export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy {
+  private handoverReconcileTimer: ReturnType<typeof setInterval> | null = null;
+  private handoverReconcileInFlight: Promise<void> | null = null;
+
+  constructor(
+    @Inject(PLATFORM_STORE) private readonly store: PlatformStore,
+    @Inject(RUNTIME_CONFIG) private readonly config: RuntimeConfig
+  ) {}
+
+  onModuleInit(): void {
+    const intervalMs = Math.max(1_000, this.config.launcherNetworkHandoverReconcileMs);
+    this.handoverReconcileTimer = setInterval(() => {
+      void this.reconcileExpiredHandovers();
+    }, intervalMs);
+    this.handoverReconcileTimer.unref?.();
+    void this.reconcileExpiredHandovers();
+  }
+
+  onModuleDestroy(): void {
+    if (this.handoverReconcileTimer) clearInterval(this.handoverReconcileTimer);
+    this.handoverReconcileTimer = null;
+  }
 
   @Post('snapshots')
-  async createSnapshot(@Body() rawBody: unknown) {
+  async createSnapshot(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() rawBody: unknown,
+    @Headers(LAUNCHER_LEASE_CAPABILITY_HEADER) leaseCapability?: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken?: string
+  ) {
     const body = asRecord(rawBody);
+    const leaseId = nullableString(body.leaseId);
+    if (!leaseId) {
+      throw new BadRequestException('Launcher snapshots require a previously enrolled leaseId');
+    }
+    const existingLease = leaseId ? await this.store.getLauncherNetworkLease(leaseId) : null;
+    const bodyLeaseProfile = nullableString(body.leaseProfile);
+    const existingLeaseProfile = existingLease
+      ? existingLease.leaseProfile ?? (existingLease.identityKind === 'user' ? 'employee' : 'anonymous')
+      : null;
+    if (existingLeaseProfile && bodyLeaseProfile && bodyLeaseProfile !== existingLeaseProfile) {
+      throw new UnauthorizedException('Launcher snapshot leaseProfile does not match the existing lease');
+    }
+    if (existingLease?.identityKind === 'anonymous' && !internalOpsTokenMatches(opsToken)) {
+      assertLauncherLeaseCapability(existingLease, leaseCapability);
+    }
+    const requestedUserId = nullableString(body.userId) ?? existingLease?.userId ?? null;
+    const requestedLeaseProfile = existingLeaseProfile ?? bodyLeaseProfile;
+    const auth = await authorizedLeaseIdentity(
+      this.store,
+      authorization,
+      requestedUserId,
+      requestedLeaseProfile,
+      existingLease?.identityKind === 'user' || Boolean(requestedUserId),
+      this.config.launcherNetworkLegacyUnauthenticatedUserLeasesEnabled
+    );
     return {
       snapshot: await this.store.createLauncherNetworkSnapshot({
+        leaseId,
         installId: nullableString(body.installId) ?? undefined,
         deviceId: nullableString(body.deviceId) ?? undefined,
         siteId: nullableString(body.siteId),
-        userId: nullableString(body.userId),
+        userId: auth.userId,
+        leaseProfile: auth.leaseProfile,
         publicKey: nullableString(body.publicKey),
         appId: nullableString(body.appId) ?? MX_H2I_PRODUCT_ID,
         launcherMode: launcherProductMode(nullableString(body.launcherMode)),
@@ -33,87 +120,313 @@ export class LauncherNetworkController {
   }
 
   @Post('enrollments')
-  async enrollLease(@Body() rawBody: unknown) {
+  async enrollLease(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() rawBody: unknown,
+    @Headers(LAUNCHER_LEASE_CAPABILITY_HEADER) leaseCapability?: string,
+    @Headers(NEW_LAUNCHER_LEASE_CAPABILITY_HEADER) newLeaseCapability?: string
+  ) {
     const body = asRecord(rawBody);
+    const requestedUserId = nullableString(body.userId);
+    const requestedIdentityKind = nullableString(body.identityKind);
+    const requestedInstallId = nullableString(body.installId);
+    const requestedDeviceId = nullableString(body.deviceId);
+    const requestedPublicKey = nullableString(body.publicKey);
+    const requestedProductId = launcherNetworkLeaseProductId(
+      nullableString(body.productId) ?? nullableString(body.appId)
+    );
+    const activeLeases = await this.store.listLauncherNetworkLeases();
+    const previousAnonymousLease = requestedInstallId
+      ? activeLeases.find((lease) => launcherNetworkLeaseIsActive(lease)
+        && lease.identityKind === 'anonymous'
+        && lease.productId === requestedProductId
+        && lease.installId === requestedInstallId)
+      : null;
+    const publicKeyLeases = requestedPublicKey
+      ? activeLeases.filter((lease) => launcherNetworkLeaseIsActive(lease)
+        && lease.publicKey === requestedPublicKey
+        && lease.leaseId !== previousAnonymousLease?.leaseId)
+      : [];
+    if (
+      previousAnonymousLease
+      && (
+        previousAnonymousLease.publicKey !== requestedPublicKey
+        || previousAnonymousLease.deviceId !== requestedDeviceId
+      )
+    ) {
+      throw new UnauthorizedException(
+        'Anonymous lease renewal requires the existing device and public key; key rotation needs a separate migration'
+      );
+    }
+    if (previousAnonymousLease?.capabilityDigest) {
+      assertLauncherLeaseCapability(previousAnonymousLease, leaseCapability);
+    }
+    const auth = await authorizedLeaseIdentity(
+      this.store,
+      authorization,
+      requestedUserId,
+      nullableString(body.leaseProfile),
+      requestedIdentityKind === 'user' || Boolean(requestedUserId),
+      this.config.launcherNetworkLegacyUnauthenticatedUserLeasesEnabled
+    );
+    const previousUserIdentityLease = auth.userId
+      ? activeLeases.find((lease) => (
+          launcherNetworkLeaseIsActive(lease)
+          && lease.identityKind === 'user'
+          && lease.productId === requestedProductId
+          && lease.installId === requestedInstallId
+          && lease.userId === auth.userId
+          && launcherNetworkLeaseProfile(lease.leaseProfile, lease.identityKind) === auth.leaseProfile
+        ))
+      : null;
+    if (
+      previousUserIdentityLease
+      && (
+        previousUserIdentityLease.deviceId !== requestedDeviceId
+        || previousUserIdentityLease.publicKey !== requestedPublicKey
+      )
+    ) {
+      throw new UnauthorizedException(
+        'User lease renewal requires the existing device and public key; key rotation needs a separate migration'
+      );
+    }
+    const legacyCapabilityClaimLeaseIds: string[] = [];
+    if (previousAnonymousLease && !previousAnonymousLease.capabilityDigest) {
+      legacyCapabilityClaimLeaseIds.push(previousAnonymousLease.leaseId);
+    }
+    for (const publicKeyLease of publicKeyLeases) {
+      if (launcherLeaseCapabilityMatches(publicKeyLease, leaseCapability)) continue;
+      const legacyUserClaimMatches = (
+        !publicKeyLease.capabilityDigest
+        && publicKeyLease.identityKind === 'user'
+        && Boolean(auth.userId)
+        && publicKeyLease.userId === auth.userId
+        && publicKeyLease.productId === requestedProductId
+        && publicKeyLease.installId === requestedInstallId
+        && publicKeyLease.deviceId === requestedDeviceId
+        && publicKeyLease.publicKey === requestedPublicKey
+      );
+      if (!legacyUserClaimMatches) {
+        throw new UnauthorizedException('This WireGuard public key is already bound to another active lease');
+      }
+      legacyCapabilityClaimLeaseIds.push(publicKeyLease.leaseId);
+    }
+    const ownedPublicKeyLeases = [
+      ...(previousAnonymousLease ? [previousAnonymousLease] : []),
+      ...publicKeyLeases
+    ].filter((lease) => (
+      lease.productId === requestedProductId
+      && lease.installId === requestedInstallId
+      && lease.deviceId === requestedDeviceId
+      && lease.publicKey === requestedPublicKey
+      && (
+        lease.identityKind === 'anonymous'
+        || (Boolean(auth.userId) && lease.userId === auth.userId)
+      )
+    ));
+    const product = await this.store.getLauncherProductNetwork(requestedProductId);
+    const existingReplacement = product
+      ? ownedPublicKeyLeases.find((lease) => (
+          launcherNetworkLeaseProfile(lease.leaseProfile, lease.identityKind) === auth.leaseProfile
+          && launcherNetworkLeaseMatchesProfile(product, auth.leaseProfile, lease)
+          && lease.replacementForLeaseId
+        ))
+      : null;
+    const invalidProfileLease = product
+      ? ownedPublicKeyLeases.find((lease) => (
+          launcherNetworkLeaseProfile(lease.leaseProfile, lease.identityKind) === auth.leaseProfile
+          && !launcherNetworkLeaseMatchesProfile(product, auth.leaseProfile, lease)
+        ))
+      : null;
+    const replacementForLeaseId = existingReplacement?.replacementForLeaseId
+      ?? invalidProfileLease?.leaseId
+      ?? null;
+    const capability = newLeaseCapability
+      ? launcherLeaseCapabilityMaterial(newLeaseCapability)
+      : mintLauncherLeaseCapability();
+    const capabilityExpiresAt = new Date(
+      Date.now() + 180 * 24 * 60 * 60 * 1000
+    ).toISOString();
+    const lease = await this.store.enrollLauncherNetworkLease({
+      appId: nullableString(body.appId),
+      productId: nullableString(body.productId),
+      mode: nullableString(body.mode),
+      identityKind: nullableString(body.identityKind),
+      leaseProfile: auth.leaseProfile,
+      installId: requestedInstallId,
+      deviceId: requestedDeviceId,
+      siteId: nullableString(body.siteId),
+      userId: auth.userId,
+      publicKey: requestedPublicKey,
+      deviceLabel: nullableString(body.deviceLabel),
+      platform: nullableString(body.platform),
+      requestedBy: nullableString(body.requestedBy),
+      requestId: nullableString(body.requestId),
+      sdkTestMode: body.sdkTestMode === true ? true : nullableString(body.sdkTestMode),
+      capabilityDigest: capability.digest,
+      capabilityVersion: capability.version,
+      capabilityExpiresAt,
+      legacyCapabilityClaimLeaseIds,
+      replacementForLeaseId
+    });
+    const handoverLeases = (await Promise.all(
+      ownedPublicKeyLeases
+        .filter((candidate) => candidate.leaseId !== lease.leaseId)
+        .map((candidate) => this.store.getLauncherNetworkLease(candidate.leaseId))
+    ))
+      .filter((candidate): candidate is LauncherNetworkLease => Boolean(
+        candidate
+        && launcherNetworkLeaseIsActive(candidate)
+        && launcherLeaseCapabilityMatches(candidate, capability.token)
+      ))
+      .map((candidate) => publicLauncherLease(candidate, capability.token));
+    const publicLease = publicLauncherLease(lease, capability.token);
+    const leaseResponse: typeof publicLease & {
+      handoverLeases?: Array<ReturnType<typeof publicLauncherLease>>;
+    } = handoverLeases.length > 0
+      ? { ...publicLease, handoverLeases }
+      : publicLease;
     return {
-      lease: await this.store.enrollLauncherNetworkLease({
-        appId: nullableString(body.appId),
-        productId: nullableString(body.productId),
-        mode: nullableString(body.mode),
-        identityKind: nullableString(body.identityKind),
-        installId: nullableString(body.installId),
-        deviceId: nullableString(body.deviceId),
-        siteId: nullableString(body.siteId),
-        userId: nullableString(body.userId),
-        publicKey: nullableString(body.publicKey),
-        deviceLabel: nullableString(body.deviceLabel),
-        platform: nullableString(body.platform),
-        requestedBy: nullableString(body.requestedBy),
-        requestId: nullableString(body.requestId),
-        sdkTestMode: body.sdkTestMode === true ? true : nullableString(body.sdkTestMode)
-      })
+      lease: leaseResponse
     };
   }
 
   @Get('leases')
-  async listLeases() {
+  async listLeases(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
+    assertInternalOpsToken(opsToken);
     return {
-      leases: await this.store.listLauncherNetworkLeases()
+      leases: (await this.store.listLauncherNetworkLeases()).map((lease) => publicLauncherLease(lease))
     };
   }
 
   @Get('leases/:leaseId')
-  async getLease(@Param('leaseId') leaseId: string) {
+  async getLease(
+    @Param('leaseId') leaseId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
+    assertInternalOpsToken(opsToken);
     const lease = await this.store.getLauncherNetworkLease(leaseId);
     if (!lease) throw new NotFoundException('Launcher network lease not found');
-    return { lease };
+    return { lease: publicLauncherLease(lease) };
   }
 
   @Post('leases/:leaseId/release')
-  async releaseLease(@Param('leaseId') leaseId: string, @Body() rawBody: unknown) {
+  async releaseLease(
+    @Param('leaseId') leaseId: string,
+    @Headers('authorization') authorization: string | undefined,
+    @Headers(LAUNCHER_LEASE_CAPABILITY_HEADER) leaseCapability: string | undefined,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
     const body = asRecord(rawBody);
+    const existing = await this.store.getLauncherNetworkLease(leaseId);
+    if (!existing) throw new NotFoundException('Launcher network lease not found');
+    if (!launcherNetworkLeaseIsActive(existing)) {
+      if (
+        !internalOpsTokenMatches(opsToken)
+        && !launcherLeaseCapabilityMatches(existing, leaseCapability, { allowReleased: true })
+      ) {
+        throw new UnauthorizedException('A valid launcher lease capability is required');
+      }
+      return { lease: publicLauncherLease(existing) };
+    }
+    const lease = await this.requireLeaseAccess(
+      leaseId,
+      authorization,
+      leaseCapability,
+      opsToken,
+      { allowInactiveUserCapability: true }
+    );
+    const released = await this.store.releaseLauncherNetworkLease(lease.leaseId, {
+      requestedBy: nullableString(body.requestedBy),
+      requestId: nullableString(body.requestId)
+    });
     return {
-      lease: await this.store.releaseLauncherNetworkLease(leaseId, {
-        requestedBy: nullableString(body.requestedBy),
-        requestId: nullableString(body.requestId)
-      })
+      lease: publicLauncherLease(released)
     };
   }
 
   @Post('leases/:leaseId/domestic-peer/sync')
-  async syncDomesticPeer(@Param('leaseId') leaseId: string, @Body() rawBody: unknown) {
+  async syncDomesticPeer(
+    @Param('leaseId') leaseId: string,
+    @Headers('authorization') authorization: string | undefined,
+    @Headers(LAUNCHER_LEASE_CAPABILITY_HEADER) leaseCapability: string | undefined,
+    @Headers(LAUNCHER_PEER_LEASE_CAPABILITY_HEADER) peerLeaseCapability: string | undefined,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
     const body = asRecord(rawBody);
-    const lease = await this.store.getLauncherNetworkLease(leaseId);
-    if (!lease) throw new NotFoundException('Launcher network lease not found');
+    const lease = await this.requireLeaseAccess(leaseId, authorization, leaseCapability, opsToken);
+    const handover = await this.resolvePeerHandover(
+      lease,
+      body,
+      authorization,
+      peerLeaseCapability,
+      opsToken,
+      'domestic'
+    );
     const domesticPeerSync = await syncDomesticRelayPeer(this.store, lease, {
       requestedBy: nullableString(body.requestedBy),
-      requestId: nullableString(body.requestId)
+      requestId: nullableString(body.requestId),
+      allowedIps: handover.allowedIps
     });
-    return { lease, domesticPeerSync };
+    await this.recordPeerHandoverResult(
+      handover,
+      'domestic',
+      launcherPeerSyncSucceeded(domesticPeerSync),
+      launcherPeerSyncError(domesticPeerSync)
+    );
+    return { lease: publicLauncherLease(lease), domesticPeerSync };
   }
 
   @Post('leases/:leaseId/domestic-relay/diagnostics')
-  async diagnoseDomesticRelay(@Param('leaseId') leaseId: string, @Body() rawBody: unknown) {
+  async diagnoseDomesticRelay(
+    @Param('leaseId') leaseId: string,
+    @Headers('authorization') authorization: string | undefined,
+    @Headers(LAUNCHER_LEASE_CAPABILITY_HEADER) leaseCapability: string | undefined,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
     const body = asRecord(rawBody);
-    const lease = await this.store.getLauncherNetworkLease(leaseId);
-    if (!lease) throw new NotFoundException('Launcher network lease not found');
+    const lease = await this.requireLeaseAccess(leaseId, authorization, leaseCapability, opsToken);
     const domesticRelayDiagnostics = await diagnoseDomesticRelayForLease(this.store, lease, {
       requestedBy: nullableString(body.requestedBy),
       requestId: nullableString(body.requestId)
     });
-    return { lease, domesticRelayDiagnostics };
+    return { lease: publicLauncherLease(lease), domesticRelayDiagnostics };
   }
 
   @Post('leases/:leaseId/internal-direct-peer/sync')
-  async syncInternalDirectPeer(@Param('leaseId') leaseId: string, @Body() rawBody: unknown) {
+  async syncInternalDirectPeer(
+    @Param('leaseId') leaseId: string,
+    @Headers('authorization') authorization: string | undefined,
+    @Headers(LAUNCHER_LEASE_CAPABILITY_HEADER) leaseCapability: string | undefined,
+    @Headers(LAUNCHER_PEER_LEASE_CAPABILITY_HEADER) peerLeaseCapability: string | undefined,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
     const body = asRecord(rawBody);
-    const lease = await this.store.getLauncherNetworkLease(leaseId);
-    if (!lease) throw new NotFoundException('Launcher network lease not found');
+    const lease = await this.requireLeaseAccess(leaseId, authorization, leaseCapability, opsToken);
+    const handover = await this.resolvePeerHandover(
+      lease,
+      body,
+      authorization,
+      peerLeaseCapability,
+      opsToken,
+      'internal'
+    );
     const internalDirectPeerSync = await syncInternalDirectPeerForLease(this.store, lease, {
       requestedBy: nullableString(body.requestedBy),
-      requestId: nullableString(body.requestId)
+      requestId: nullableString(body.requestId),
+      allowedIps: handover.allowedIps
     });
-    return { lease, internalDirectPeerSync };
+    await this.recordPeerHandoverResult(
+      handover,
+      'internal',
+      launcherPeerSyncSucceeded(internalDirectPeerSync),
+      launcherPeerSyncError(internalDirectPeerSync)
+    );
+    return { lease: publicLauncherLease(lease), internalDirectPeerSync };
   }
 
   @Get('products')
@@ -131,7 +444,12 @@ export class LauncherNetworkController {
   }
 
   @Post('products/:productId')
-  async upsertProductNetwork(@Param('productId') productId: string, @Body() rawBody: unknown) {
+  async upsertProductNetwork(
+    @Param('productId') productId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
     const body = asRecord(rawBody);
     return {
       product: await this.store.upsertLauncherProductNetwork({
@@ -146,9 +464,12 @@ export class LauncherNetworkController {
         dnsServer: nullableString(body.dnsServer),
         serviceVip: nullableString(body.serviceVip),
         userCidr: nullableString(body.userCidr),
+        feishuCidr: nullableString(body.feishuCidr),
         anonymousCidr: nullableString(body.anonymousCidr),
         userLeaseStart: nullableString(body.userLeaseStart),
         userLeaseEnd: nullableString(body.userLeaseEnd),
+        feishuLeaseStart: nullableString(body.feishuLeaseStart),
+        feishuLeaseEnd: nullableString(body.feishuLeaseEnd),
         anonymousLeaseStart: nullableString(body.anonymousLeaseStart),
         anonymousLeaseEnd: nullableString(body.anonymousLeaseEnd),
         defaultDomesticSiteId: nullableString(body.defaultDomesticSiteId),
@@ -179,7 +500,12 @@ export class LauncherNetworkController {
   }
 
   @Post('mihomo/sites/:siteId')
-  async upsertMihomoSite(@Param('siteId') siteId: string, @Body() rawBody: unknown) {
+  async upsertMihomoSite(
+    @Param('siteId') siteId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
     const body = asRecord(rawBody);
     return {
       site: await this.store.upsertLauncherNetworkMihomoSite({
@@ -194,6 +520,517 @@ export class LauncherNetworkController {
       })
     };
   }
+
+  private async requireLeaseAccess(
+    leaseId: string,
+    authorization: string | undefined,
+    leaseCapability: string | undefined,
+    opsToken: string | undefined,
+    options: {
+      allowInactiveUserCapability?: boolean;
+      allowReleasedCapability?: boolean;
+    } = {}
+  ): Promise<LauncherNetworkLease> {
+    const lease = await this.store.getLauncherNetworkLease(leaseId);
+    if (!lease) throw new NotFoundException('Launcher network lease not found');
+    if (!launcherNetworkLeaseIsActive(lease)) {
+      if (
+        options.allowReleasedCapability === true
+        && (
+          internalOpsTokenMatches(opsToken)
+          || launcherLeaseCapabilityMatches(lease, leaseCapability, { allowReleased: true })
+        )
+      ) {
+        return lease;
+      }
+      throw new UnauthorizedException('Launcher network lease is released or expired');
+    }
+    if (internalOpsTokenMatches(opsToken)) {
+      return lease;
+    }
+    if (launcherLeaseCapabilityMatches(lease, leaseCapability)) {
+      if (
+        lease.identityKind === 'user'
+        && lease.userId
+        && options.allowInactiveUserCapability !== true
+      ) {
+        const user = (await this.store.listUserCenterUsers())
+          .find((candidate) => candidate.userId === lease.userId);
+        if (!user || user.status !== 'active') {
+          throw new UnauthorizedException('Launcher lease user is disabled or no longer exists');
+        }
+      }
+      return lease;
+    }
+    if (lease.identityKind !== 'user' || !lease.userId) {
+      throw new UnauthorizedException('A valid launcher lease capability is required');
+    }
+    const token = bearerToken(authorization);
+    if (!token) throw new UnauthorizedException('A valid launcher user token or lease capability is required');
+    const introspection = await this.store.introspectToken({ token, audience: 'mx-sdk' });
+    if (
+      !introspection.active
+      || introspection.tokenKind === 'shadow-token'
+      || introspection.principal?.kind !== 'user'
+      || introspection.principal.userId !== lease.userId
+      || !['local-password', 'feishu'].includes(introspection.authProvider ?? '')
+    ) {
+      throw new UnauthorizedException('Launcher lease token is inactive or does not own this lease');
+    }
+    return lease;
+  }
+
+  private async resolvePeerHandover(
+    lease: LauncherNetworkLease,
+    body: Record<string, unknown>,
+    authorization: string | undefined,
+    peerLeaseCapability: string | undefined,
+    opsToken: string | undefined,
+    _peer: 'domestic' | 'internal'
+  ): Promise<{
+    phase: 'single' | 'prepare' | 'commit' | 'abort';
+    allowedIps: string[];
+    transition: LauncherNetworkHandover | null;
+  }> {
+    const phase = nullableString(body.handoverPhase);
+    const peerLeaseId = nullableString(body.peerLeaseId);
+    if (!phase && !peerLeaseId) {
+      const pendingTransition = (await this.store.listLauncherNetworkHandovers())
+        .find((candidate) => (
+          !launcherNetworkHandoverTerminal(candidate)
+          && (
+            candidate.oldLeaseId === lease.leaseId
+            || candidate.newLeaseId === lease.leaseId
+          )
+        ));
+      if (pendingTransition) {
+        throw new UnauthorizedException(
+          'Launcher peer sync requires the active persisted handover transition'
+        );
+      }
+      await this.assertCurrentLeaseGeneration(lease);
+      return { phase: 'single', allowedIps: [`${lease.leaseIp}/32`], transition: null };
+    }
+    const transitionId = nullableString(body.transitionId);
+    if (
+      !peerLeaseId
+      || !transitionId
+      || !/^[A-Za-z0-9._-]{8,160}$/.test(transitionId)
+      || !['prepare', 'commit', 'abort'].includes(phase ?? '')
+    ) {
+      throw new UnauthorizedException(
+        'A valid transitionId, peer handover phase, and peerLeaseId are required'
+      );
+    }
+    let transition = await this.store.getLauncherNetworkHandover(transitionId);
+    const peerLease = await this.requireLeaseAccess(
+      peerLeaseId,
+      authorization,
+      peerLeaseCapability,
+      opsToken,
+      {
+        allowReleasedCapability: Boolean(
+          transition && launcherNetworkHandoverTerminal(transition)
+        )
+      }
+    );
+    if (
+      peerLease.leaseId === lease.leaseId
+      || peerLease.productId !== lease.productId
+      || peerLease.installId !== lease.installId
+      || peerLease.deviceId !== lease.deviceId
+      || peerLease.domesticSiteId !== lease.domesticSiteId
+      || !peerLease.publicKey
+      || peerLease.publicKey !== lease.publicKey
+    ) {
+      throw new UnauthorizedException('Launcher peer handover leases do not belong to the same device and public key');
+    }
+    const resolvedPhase = phase as 'prepare' | 'commit' | 'abort';
+    const newLease = resolvedPhase === 'abort' ? peerLease : lease;
+    const oldLease = resolvedPhase === 'abort' ? lease : peerLease;
+    if (
+      (Number(newLease.generation) || 0) <= (Number(oldLease.generation) || 0)
+      || (newLease.replacementForLeaseId && newLease.replacementForLeaseId !== oldLease.leaseId)
+    ) {
+      throw new UnauthorizedException(
+        'Launcher peer handover direction does not match the newer lease generation'
+      );
+    }
+    if (transition?.status !== 'aborted') {
+      await this.assertCurrentLeaseGeneration(newLease);
+    }
+    const product = await this.store.getLauncherProductNetwork(newLease.productId);
+    const newLeaseProfile = launcherNetworkLeaseProfile(
+      newLease.leaseProfile,
+      newLease.identityKind
+    );
+    if (
+      !product
+      || !launcherNetworkLeaseMatchesProfile(product, newLeaseProfile, newLease)
+    ) {
+      throw new UnauthorizedException(
+        'Launcher peer handover target does not belong to its configured profile range'
+      );
+    }
+    if (resolvedPhase === 'prepare' && !transition) {
+      const deadlineAt = new Date(
+        Date.now() + Math.max(10_000, this.config.launcherNetworkHandoverTtlMs)
+      ).toISOString();
+      const peerRequirements = await this.launcherHandoverPeerRequirements(newLease);
+      try {
+        transition = await this.store.createLauncherNetworkHandover({
+          transitionId,
+          productId: newLease.productId,
+          installId: newLease.installId,
+          deviceId: newLease.deviceId,
+          publicKey: newLease.publicKey as string,
+          oldLeaseId: oldLease.leaseId,
+          newLeaseId: newLease.leaseId,
+          oldLeaseIp: oldLease.leaseIp,
+          newLeaseIp: newLease.leaseIp,
+          ...peerRequirements,
+          deadlineAt
+        });
+      } catch {
+        transition = await this.store.getLauncherNetworkHandover(transitionId);
+      }
+    }
+    if (!transition || !launcherNetworkHandoverMatchesLeases(transition, oldLease, newLease)) {
+      throw new UnauthorizedException(
+        'Launcher peer handover does not match a persisted transition'
+      );
+    }
+    if (
+      resolvedPhase !== 'abort'
+      && Date.parse(transition.deadlineAt) <= Date.now()
+    ) {
+      throw new UnauthorizedException(
+        'Launcher peer handover deadline expired and the transition is being aborted'
+      );
+    }
+    if (
+      (resolvedPhase === 'prepare'
+        && !['preparing', 'prepared'].includes(transition.status))
+      || (resolvedPhase === 'commit'
+        && !['prepared', 'commit-pending', 'committed'].includes(transition.status))
+      || (resolvedPhase === 'abort'
+        && !['preparing', 'prepared', 'commit-pending', 'abort-pending', 'aborted']
+          .includes(transition.status))
+    ) {
+      throw new UnauthorizedException(
+        `Launcher peer handover cannot ${resolvedPhase} from ${transition.status}`
+      );
+    }
+    return {
+      phase: resolvedPhase,
+      allowedIps: resolvedPhase === 'prepare'
+        ? [...new Set([`${peerLease.leaseIp}/32`, `${lease.leaseIp}/32`])]
+        : [`${lease.leaseIp}/32`],
+      transition
+    };
+  }
+
+  private async launcherHandoverPeerRequirements(
+    lease: LauncherNetworkLease
+  ): Promise<{ domesticRequired: boolean; internalRequired: boolean }> {
+    const secret = await this.store.getSiteSlotDomesticWireGuardSecret(
+      lease.domesticSiteId || lease.siteId
+    );
+    const internalRequired = Boolean(
+      secret?.internalDirectEnabled === true
+      && secret.internalDirectEndpoint
+      && secret.internalServicePublicKey
+    );
+    const domesticConfigured = Boolean(
+      secret?.publicEndpoint
+      && secret.domesticRelayPublicKey
+    );
+    return {
+      domesticRequired: domesticConfigured || !internalRequired,
+      internalRequired
+    };
+  }
+
+  private async recordPeerHandoverResult(
+    handover: {
+      phase: 'single' | 'prepare' | 'commit' | 'abort';
+      transition: LauncherNetworkHandover | null;
+    },
+    peer: 'domestic' | 'internal',
+    success: boolean,
+    error: string | null
+  ): Promise<void> {
+    if (handover.phase === 'single' || !handover.transition) return;
+    const transition = await this.store.advanceLauncherNetworkHandover({
+      transitionId: handover.transition.transitionId,
+      peer,
+      phase: handover.phase,
+      success,
+      error
+    });
+    await this.retireCompletedHandoverLease(transition);
+  }
+
+  async reconcileExpiredHandovers(
+    now = new Date(),
+    syncOverride?: (
+      handover: LauncherNetworkHandover,
+      oldLease: LauncherNetworkLease
+    ) => Promise<{
+      domesticPeerSync: { status?: string; execution?: string; error?: string };
+      internalPeerSync: { status?: string; execution?: string; error?: string };
+    }>
+  ): Promise<void> {
+    if (this.handoverReconcileInFlight) return this.handoverReconcileInFlight;
+    this.handoverReconcileInFlight = this.runExpiredHandoverReconciliation(now, syncOverride)
+      .finally(() => {
+        this.handoverReconcileInFlight = null;
+      });
+    return this.handoverReconcileInFlight;
+  }
+
+  private async runExpiredHandoverReconciliation(
+    now: Date,
+    syncOverride?: (
+      handover: LauncherNetworkHandover,
+      oldLease: LauncherNetworkLease
+    ) => Promise<{
+      domesticPeerSync: { status?: string; execution?: string; error?: string };
+      internalPeerSync: { status?: string; execution?: string; error?: string };
+    }>
+  ): Promise<void> {
+    const handovers = (await this.store.listLauncherNetworkHandovers())
+      .filter((handover) => (
+        handover.status === 'abort-pending'
+        || (
+          !launcherNetworkHandoverTerminal(handover)
+          && Date.parse(handover.deadlineAt) <= now.getTime()
+        )
+      ));
+    for (const handover of handovers) {
+      const oldLease = await this.store.getLauncherNetworkLease(handover.oldLeaseId);
+      const newLease = await this.store.getLauncherNetworkLease(handover.newLeaseId);
+      if (!oldLease || !newLease || !launcherNetworkLeaseIsActive(oldLease, now)) {
+        const error = 'Persisted launcher handover cannot abort because its old lease is unavailable';
+        await Promise.all([
+          this.store.advanceLauncherNetworkHandover({
+            transitionId: handover.transitionId,
+            peer: 'domestic',
+            phase: 'abort',
+            success: false,
+            error
+          }),
+          this.store.advanceLauncherNetworkHandover({
+            transitionId: handover.transitionId,
+            peer: 'internal',
+            phase: 'abort',
+            success: false,
+            error
+          })
+        ]);
+        continue;
+      }
+      const allowedIps = [`${oldLease.leaseIp}/32`];
+      let domesticPeerSync;
+      let internalPeerSync;
+      if (syncOverride) {
+        ({ domesticPeerSync, internalPeerSync } = await syncOverride(handover, oldLease));
+      } else {
+        const [domesticResult, internalResult] = await Promise.allSettled([
+          handover.domesticRequired === false
+            ? Promise.resolve({ status: 'skipped', execution: 'not-started' })
+            : syncDomesticRelayPeer(this.store, oldLease, {
+                requestedBy: 'launcher-handover-reconciler',
+                requestId: `${handover.transitionId}:deadline-abort:domestic`,
+                allowedIps
+              }),
+          handover.internalRequired === false
+            ? Promise.resolve({ status: 'skipped', execution: 'not-started' })
+            : syncInternalDirectPeerForLease(this.store, oldLease, {
+                requestedBy: 'launcher-handover-reconciler',
+                requestId: `${handover.transitionId}:deadline-abort:internal`,
+                allowedIps
+              })
+        ]);
+        domesticPeerSync = domesticResult.status === 'fulfilled'
+          ? domesticResult.value
+          : { status: 'failed', error: String(domesticResult.reason) };
+        internalPeerSync = internalResult.status === 'fulfilled'
+          ? internalResult.value
+          : { status: 'failed', error: String(internalResult.reason) };
+      }
+      await this.store.advanceLauncherNetworkHandover({
+        transitionId: handover.transitionId,
+        peer: 'domestic',
+        phase: 'abort',
+        success: launcherPeerSyncSucceeded(domesticPeerSync),
+        error: launcherPeerSyncError(domesticPeerSync)
+      });
+      const transition = await this.store.advanceLauncherNetworkHandover({
+        transitionId: handover.transitionId,
+        peer: 'internal',
+        phase: 'abort',
+        success: launcherPeerSyncSucceeded(internalPeerSync),
+        error: launcherPeerSyncError(internalPeerSync)
+      });
+      await this.retireCompletedHandoverLease(transition);
+    }
+  }
+
+  private async retireCompletedHandoverLease(
+    transition: LauncherNetworkHandover
+  ): Promise<void> {
+    if (!launcherNetworkHandoverTerminal(transition)) return;
+    const retiredLeaseId = transition.status === 'committed'
+      ? transition.oldLeaseId
+      : transition.newLeaseId;
+    const retiredLease = await this.store.getLauncherNetworkLease(retiredLeaseId);
+    if (!retiredLease || !launcherNetworkLeaseIsActive(retiredLease)) return;
+    await this.store.releaseLauncherNetworkLease(retiredLeaseId, {
+      requestedBy: 'launcher-network-handover',
+      requestId: `${transition.transitionId}:${transition.status}:retire`
+    });
+  }
+
+  private async assertCurrentLeaseGeneration(lease: LauncherNetworkLease): Promise<void> {
+    if (!lease.publicKey) return;
+    const candidates = (await this.store.listLauncherNetworkLeases(lease.productId))
+      .filter((candidate) => (
+        launcherNetworkLeaseIsActive(candidate)
+        && candidate.publicKey === lease.publicKey
+        && candidate.installId === lease.installId
+        && candidate.deviceId === lease.deviceId
+      ))
+      .sort((left, right) => (
+        (Number(right.generation) || 0) - (Number(left.generation) || 0)
+        || right.updatedAt.localeCompare(left.updatedAt)
+        || right.leaseId.localeCompare(left.leaseId)
+      ));
+    if (candidates[0]?.leaseId !== lease.leaseId) {
+      throw new UnauthorizedException(
+        'Launcher network lease was superseded by a newer lease for this device key'
+      );
+    }
+  }
+}
+
+function launcherNetworkHandoverTerminal(
+  handover: LauncherNetworkHandover
+): boolean {
+  return handover.status === 'committed' || handover.status === 'aborted';
+}
+
+function launcherNetworkHandoverMatchesLeases(
+  handover: LauncherNetworkHandover,
+  oldLease: LauncherNetworkLease,
+  newLease: LauncherNetworkLease
+): boolean {
+  return handover.productId === newLease.productId
+    && handover.installId === newLease.installId
+    && handover.deviceId === newLease.deviceId
+    && handover.publicKey === newLease.publicKey
+    && handover.oldLeaseId === oldLease.leaseId
+    && handover.newLeaseId === newLease.leaseId
+    && handover.oldLeaseIp === oldLease.leaseIp
+    && handover.newLeaseIp === newLease.leaseIp;
+}
+
+function launcherPeerSyncSucceeded(result: {
+  status?: string | null;
+  execution?: string | null;
+} | null | undefined): boolean {
+  return ['passed', 'skipped'].includes(result?.status ?? '')
+    || result?.execution === 'passed';
+}
+
+function launcherPeerSyncError(result: {
+  status?: string | null;
+  execution?: string | null;
+  error?: string | null;
+  message?: string | null;
+  failures?: unknown;
+} | null | undefined): string | null {
+  if (!result) return 'Launcher peer sync returned no result';
+  if (launcherPeerSyncSucceeded(result)) return null;
+  if (result.error) return result.error;
+  if (result.message) return result.message;
+  if (Array.isArray(result.failures)) return result.failures.map(String).join('; ');
+  return 'Launcher peer sync did not pass';
+}
+
+function publicLauncherLease(
+  lease: LauncherNetworkLease,
+  capability?: string
+): Omit<LauncherNetworkLease, 'capabilityDigest' | 'capabilityVersion' | 'capabilityExpiresAt'>
+  & { capability?: string } {
+  const {
+    capabilityDigest: _capabilityDigest,
+    capabilityVersion: _capabilityVersion,
+    capabilityExpiresAt: _capabilityExpiresAt,
+    ...safeLease
+  } = lease;
+  return capability ? { ...safeLease, capability } : safeLease;
+}
+
+async function authorizedLeaseIdentity(
+  store: PlatformStore,
+  authorization: string | undefined,
+  requestedUserId: string | null,
+  requestedLeaseProfile: string | null,
+  userLeaseRequested: boolean,
+  allowLegacyUnauthenticatedUserLease: boolean
+): Promise<{ userId: string | null; leaseProfile: 'employee' | 'feishu' | 'anonymous' }> {
+  if (!userLeaseRequested) {
+    return { userId: null, leaseProfile: 'anonymous' };
+  }
+  const token = bearerToken(authorization);
+  if (!token) {
+    if (requestedLeaseProfile === 'feishu') {
+      throw new UnauthorizedException('Feishu launcher leases require a Feishu-authenticated MX token');
+    }
+    if (!allowLegacyUnauthenticatedUserLease) {
+      throw new UnauthorizedException('Launcher employee leases require an active MX user token');
+    }
+    const requestedUser = requestedUserId
+      ? (await store.listUserCenterUsers()).find((user) => user.userId === requestedUserId)
+      : null;
+    if (
+      !requestedUser
+      || requestedUser.status !== 'active'
+      || requestedUser.credential.hasPassword !== true
+    ) {
+      throw new UnauthorizedException('Legacy launcher employee leases require an active password user');
+    }
+    return { userId: requestedUserId, leaseProfile: 'employee' };
+  }
+  const introspection = await store.introspectToken({ token, audience: 'mx-sdk' });
+  const tokenUserId = introspection.principal?.userId ?? null;
+  if (
+    !introspection.active
+    || introspection.tokenKind === 'shadow-token'
+    || introspection.principal?.kind !== 'user'
+    || !tokenUserId
+  ) {
+    throw new UnauthorizedException('Launcher user lease token is inactive or has no user principal');
+  }
+  if (requestedUserId && requestedUserId !== tokenUserId) {
+    throw new UnauthorizedException('Launcher user lease token subject does not match userId');
+  }
+  if (introspection.authProvider === 'feishu') {
+    return { userId: tokenUserId, leaseProfile: 'feishu' };
+  }
+  if (requestedLeaseProfile === 'feishu') {
+    throw new UnauthorizedException('Only a Feishu-authenticated MX token can select the Feishu lease pool');
+  }
+  if (introspection.authProvider === 'local-password') {
+    return { userId: tokenUserId, leaseProfile: 'employee' };
+  }
+  throw new UnauthorizedException('Launcher employee leases require a local-password or Feishu login token');
+}
+
+function bearerToken(authorization: string | undefined): string | null {
+  const match = authorization?.match(/^Bearer\s+(\S+)$/i);
+  return match?.[1] ?? null;
 }
 
 function launcherProductMode(value: string | null): 'standalone' | 'embed' | null {
@@ -210,7 +1047,7 @@ function numberValue(value: unknown): number | null {
 async function syncDomesticRelayPeer(
   store: PlatformStore,
   lease: LauncherNetworkLease,
-  input: { requestedBy?: string | null; requestId?: string | null }
+  input: { requestedBy?: string | null; requestId?: string | null; allowedIps?: string[] }
 ) {
   const checkedAt = new Date().toISOString();
   const plan = await latestDomesticPlan(store, lease.domesticSiteId || lease.siteId);
@@ -227,7 +1064,8 @@ async function syncDomesticRelayPeer(
     };
   }
 
-  const script = domesticRelayPeerSyncScript(lease.publicKey ?? '', `${lease.leaseIp}/32`);
+  const allowedIps = input.allowedIps?.length ? input.allowedIps : [`${lease.leaseIp}/32`];
+  const script = domesticRelayPeerSyncScript(lease.publicKey ?? '', allowedIps);
   const ssh = sshArgv(profile as SiteSlotSshProfile, script);
   try {
     const result = await execFileAsync('ssh', ssh, {
@@ -247,7 +1085,7 @@ async function syncDomesticRelayPeer(
       metadata: {
         leaseId: lease.leaseId,
         publicKey: lease.publicKey,
-        allowedIp: `${lease.leaseIp}/32`,
+        allowedIps,
         profileId: profile?.profileId ?? null,
         requestedBy: input.requestedBy ?? 'launcher-network'
       }
@@ -322,26 +1160,28 @@ function domesticRelayPeerSyncFailures(
   ];
 }
 
-function domesticRelayPeerSyncScript(publicKey: string, allowedIp: string): string {
-  const routeCidrs = domesticRelayRouteCidrsForAllowedIp(allowedIp);
+function domesticRelayPeerSyncScript(publicKey: string, allowedIps: string[]): string {
+  const normalizedAllowedIps = [...new Set(allowedIps)];
+  const allowedIpList = normalizedAllowedIps.join(',');
+  const routeCidrs = [...new Set(normalizedAllowedIps.flatMap(domesticRelayRouteCidrsForAllowedIp))];
   return [
     'set -eu',
     'printf "mx-launcher-domestic-peer-sync\\n"',
-    `allowed_ip=${shellQuote(allowedIp)}`,
+    `allowed_ips=${shellQuote(allowedIpList)}`,
     `relay_route_cidrs=${shellQuote(routeCidrs.join(' '))}`,
     'test -f /etc/wireguard/mx-domestic.conf',
     'if test -f /etc/wireguard/mx-internal-service-peer.conf; then echo "blocked: internal service peer private key must not be copied to Domestic"; exit 1; fi',
     'if ! command -v wg >/dev/null 2>&1; then echo "blocked: wg missing"; exit 1; fi',
     'wg show mx-domestic >/dev/null',
-    `wg set mx-domestic peer ${shellQuote(publicKey)} allowed-ips ${shellQuote(allowedIp)}`,
+    `wg set mx-domestic peer ${shellQuote(publicKey)} allowed-ips ${shellQuote(allowedIpList)}`,
     'ip link set up dev mx-domestic',
     'sysctl -w net.ipv4.ip_forward=1 >/dev/null || true',
     ...domesticRelayFirewallEnsureCommands(),
     'for route_cidr in $relay_route_cidrs; do ip route replace "$route_cidr" dev mx-domestic; done',
-    'ip route replace "$allowed_ip" dev mx-domestic || true',
+    'old_ifs="$IFS"; IFS=","; for allowed_ip in $allowed_ips; do ip route replace "$allowed_ip" dev mx-domestic || true; done; IFS="$old_ifs"',
     'if command -v wg-quick >/dev/null 2>&1; then wg-quick save mx-domestic || true; fi',
     `printf "peer=%s\\n" ${shellQuote(publicKey)}`,
-    `printf "allowed_ip=%s\\n" ${shellQuote(allowedIp)}`,
+    `printf "allowed_ips=%s\\n" ${shellQuote(allowedIpList)}`,
     'printf "relay_route_cidrs=%s\\n" "$relay_route_cidrs"',
     'ip route get "${allowed_ip%/*}" || true',
     `wg show mx-domestic allowed-ips | awk -v peer=${shellQuote(publicKey)} '$1 == peer { print "allowed " $0 }'`,
@@ -434,7 +1274,7 @@ async function diagnoseDomesticRelayForLease(
 async function syncInternalDirectPeerForLease(
   store: PlatformStore,
   lease: LauncherNetworkLease,
-  input: { requestedBy?: string | null; requestId?: string | null }
+  input: { requestedBy?: string | null; requestId?: string | null; allowedIps?: string[] }
 ) {
   const checkedAt = new Date().toISOString();
   const siteId = lease.domesticSiteId || lease.siteId;
@@ -453,6 +1293,7 @@ async function syncInternalDirectPeerForLease(
   }
 
   try {
+    const allowedIps = input.allowedIps?.length ? input.allowedIps : [`${lease.leaseIp}/32`];
     const payload = await postInternalServicePeerHostRunner('/internal-service-peer/direct-peer-sync', {
       siteId,
       planId: plan?.planId ?? null,
@@ -460,7 +1301,8 @@ async function syncInternalDirectPeerForLease(
       internalServiceIp: secret?.internalServiceIp ?? '10.88.88.88',
       leaseId: lease.leaseId,
       peerPublicKey: lease.publicKey,
-      peerAllowedIp: `${lease.leaseIp}/32`,
+      peerAllowedIp: allowedIps[0],
+      peerAllowedIps: allowedIps,
       requestedBy: input.requestedBy ?? 'launcher-network',
       requestId: input.requestId ?? null
     });
@@ -478,7 +1320,7 @@ async function syncInternalDirectPeerForLease(
       metadata: {
         leaseId: lease.leaseId,
         publicKey: lease.publicKey,
-        allowedIp: `${lease.leaseIp}/32`,
+        allowedIps,
         status: directPeerSync.status ?? null,
         requestedBy: input.requestedBy ?? 'launcher-network'
       }

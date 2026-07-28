@@ -175,7 +175,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       post: operation({
         tag: 'Authentication',
         summary: '获取用户或服务账号 token',
-        description: '支持 password 与 client_credentials。password access token 默认且最长有效 7 天；client_credentials 默认有效 1 小时。用户凭据只由 Internal User Center 校验；不要在 Domestic 或业务应用保存密码副本。服务账号 secret 的正式校验仍需在生产加固完成后启用。',
+        description: '支持 password 与 client_credentials。password access token 默认且最长有效 7 天，并可经可信 HTTPS bootstrap 调用；client_credentials 默认有效 1 小时且仅允许 Internal 控制面调用，经 Domestic edge 的请求会在 secret 比较前拒绝。两种 grant 都在凭据校验前执行 PostgreSQL 原子限速。用户凭据只由 Internal User Center 校验；不要在 Domestic 或业务应用保存密码副本。',
         operationId: 'issueSdkToken',
         routeId: 'sdk.oauth.token',
         auth: 'public',
@@ -199,6 +199,90 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
             audience: 'mx-sdk',
             subject: 'user:usr_partner_alice',
             principal: { kind: 'user', userId: 'usr_partner_alice', roles: ['mx-user'] },
+            expires_at: '2026-07-27T00:00:00.000Z'
+          }
+        }
+      })
+    },
+    '/internal/v1/sdk/oauth/feishu/config': {
+      get: operation({
+        tag: 'Authentication',
+        summary: '读取飞书登录公开配置',
+        description: '只返回 Electron 发起登录所需的公开配置与启用状态；不会返回 App Secret 或允许租户列表。enabled=false 时客户端应保持账号密码和访客登录可用。',
+        operationId: 'getFeishuOAuthConfig',
+        routeId: 'sdk.oauth.feishu.config',
+        auth: 'public',
+        response: {
+          config: {
+            enabled: true,
+            appId: 'cli_xxxxxxxxxxxxxxxx',
+            authorizeUrl: 'https://accounts.feishu.cn/open-apis/authen/v1/authorize',
+            redirectUris: ['http://127.0.0.1:17891/oauth/feishu/callback'],
+            autoProvision: true,
+            pkce: {
+              required: true,
+              codeChallengeMethod: 'S256',
+              localExchangeBinding: true,
+              providerVerification: 'requires-real-tenant-validation'
+            }
+          }
+        }
+      })
+    },
+    '/internal/v1/sdk/oauth/feishu/authorize': {
+      post: operation({
+        tag: 'Authentication',
+        summary: '生成飞书授权地址',
+        description: 'Internal 对 redirectUri 做精确 allowlist 校验，把客户端生成的 state 与 PKCE S256 challenge 写入飞书授权地址，并创建一个仅保存摘要、五分钟有效、可跨 Pod 原子消费的 exchangeHandle 事务。客户端仍必须在 loopback 回调时校验 state。',
+        operationId: 'createFeishuAuthorizationUrl',
+        routeId: 'sdk.oauth.feishu.authorize',
+        auth: 'public',
+        request: {
+          redirectUri: 'http://127.0.0.1:17891/oauth/feishu/callback',
+          state: '<random-state>',
+          codeChallenge: '<base64url-sha256-code-verifier>'
+        },
+        required: ['redirectUri', 'state', 'codeChallenge'],
+        response: {
+          authorizationUrl: 'https://accounts.feishu.cn/open-apis/authen/v1/authorize?...',
+          exchangeHandle: 'mxfx1.<opaque-random-value>'
+        }
+      })
+    },
+    '/internal/v1/sdk/oauth/feishu/token': {
+      post: operation({
+        tag: 'Authentication',
+        summary: '用飞书授权码换取 MX token',
+        description: 'Internal 先原子消费 exchangeHandle，并校验其绑定的 redirect URI 与 PKCE verifier，再使用 App Secret 和授权码向飞书换票，读取用户身份并校验 tenant allowlist。响应只返回 MX User Center token；飞书 access/refresh token 不返回且不持久化。飞书当前公开 v2 token 文档未明确声明 PKCE 字段，生产启用前仍须用真实租户证明错误 verifier 会被飞书上游拒绝。',
+        operationId: 'exchangeFeishuAuthorizationCode',
+        routeId: 'sdk.oauth.feishu.token',
+        auth: 'public',
+        request: {
+          code: '<one-time-authorization-code>',
+          redirectUri: 'http://127.0.0.1:17891/oauth/feishu/callback',
+          codeVerifier: '<pkce-code-verifier>',
+          exchangeHandle: 'mxfx1.<opaque-random-value>',
+          audience: 'mx-sdk',
+          scope: 'auth.read appcenter.read network.dns.policy oversea.subscription.ensure',
+          requestId: 'mx-h2i-feishu-001'
+        },
+        required: ['code', 'redirectUri', 'codeVerifier', 'exchangeHandle'],
+        response: {
+          token: {
+            access_token: '<mx-access-token>',
+            token_type: 'Bearer',
+            issued_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+            expires_in: 604800,
+            scope: 'auth.read appcenter.read network.dns.policy oversea.subscription.ensure',
+            issuer: 'mx-user-center:production',
+            audience: 'mx-sdk',
+            subject: 'user:usr_feishu_<deterministic-hash>',
+            principal: {
+              kind: 'user',
+              userId: 'usr_feishu_<deterministic-hash>',
+              roles: ['mx-user']
+            },
+            auth_provider: 'feishu',
             expires_at: '2026-07-27T00:00:00.000Z'
           }
         }
@@ -633,7 +717,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         type: 'http',
         scheme: 'bearer',
         bearerFormat: 'MX access token',
-        description: 'Token returned by POST /internal/v1/sdk/oauth/token.'
+        description: 'MX token returned by password/client_credentials or Feishu OAuth exchange; never use a Feishu upstream token here.'
       }
     }
   },

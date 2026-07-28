@@ -1560,11 +1560,17 @@ async function applyServicePeer(payload) {
 async function syncDirectPeer(payload) {
   const beforeStatus = await buildStatus(payload);
   const peerPublicKey = stringValue(payload.peerPublicKey, null);
-  const peerAllowedIp = stringValue(payload.peerAllowedIp, null);
+  const peerAllowedIps = [...new Set([
+    ...(Array.isArray(payload.peerAllowedIps) ? payload.peerAllowedIps : []),
+    payload.peerAllowedIp
+  ].map((value) => stringValue(value, null)).filter(Boolean))];
+  const peerAllowedIp = peerAllowedIps.join(', ');
   const leaseId = stringValue(payload.leaseId, null);
   const blockedReasons = [
     ...(!validWireGuardPublicKey(peerPublicKey) ? ['peerPublicKey is not a valid WireGuard public key'] : []),
-    ...(!validSingleHostCidr(peerAllowedIp) ? ['peerAllowedIp must be an IPv4 /32 CIDR'] : []),
+    ...(peerAllowedIps.length < 1 || peerAllowedIps.length > 2 || peerAllowedIps.some((value) => !validSingleHostCidr(value))
+      ? ['peerAllowedIps must contain one or two IPv4 /32 CIDRs']
+      : []),
     ...(!beforeStatus.artifacts?.runtimeConfigExists ? [`Internal service runtime config is missing: ${beforeStatus.artifacts?.runtimeConfigPath || beforeStatus.artifacts?.configPath || 'unknown'}`] : []),
     ...(!beforeStatus.wireGuardCore?.available ? ['WireGuard runtime is unavailable on the Internal runtime host'] : [])
   ];

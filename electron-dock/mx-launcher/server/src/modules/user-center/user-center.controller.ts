@@ -6,6 +6,11 @@ import { promisify } from 'node:util';
 import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Header, Headers, Inject, NotFoundException, Param, Post, UnauthorizedException } from '@nestjs/common';
 
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
+import {
+  assertInternalOpsToken,
+  internalOpsTokenMatches,
+  INTERNAL_OPS_TOKEN_HEADER
+} from '../../lib/internal-ops-auth.js';
 import { USER_OVERSEA_SUBSCRIPTION_SCOPE } from '../../store/domain.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
@@ -57,32 +62,48 @@ export class UserCenterController {
   }
 
   @Post('internal/v1/user-center/bootstrap')
-  async bootstrap() {
+  async bootstrap(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
+    assertInternalOpsToken(opsToken);
     return { userCenter: await this.store.bootstrapUserCenter() };
   }
 
   @Get('internal/v1/user-center/roles')
-  async roles() {
+  async roles(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
+    assertInternalOpsToken(opsToken);
     return { roles: await this.store.listUserCenterRoles() };
   }
 
   @Get('internal/v1/user-center/users')
-  async users() {
+  async users(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
+    assertInternalOpsToken(opsToken);
     return { users: await this.store.listUserCenterUsers() };
   }
 
   @Post('internal/v1/user-center/users')
-  async createUser(@Body() rawBody: unknown) {
+  async createUser(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
     return { user: await this.store.createUserCenterUser(toCreateUserInput(asRecord(rawBody))) };
   }
 
   @Post('internal/v1/user-center/users/import')
-  async importUsers(@Body() rawBody: unknown) {
+  async importUsers(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
     return { import: await this.store.importUserCenterUsers(toImportUsersInput(rawBody)) };
   }
 
   @Post('internal/v1/user-center/users/:userId/password')
-  async updateUserPassword(@Param('userId') userId: string, @Body() rawBody: unknown) {
+  async updateUserPassword(
+    @Param('userId') userId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
     try {
       return {
         password: await this.store.updateUserCenterPassword(toUserPasswordUpdateInput(userId, asRecord(rawBody)))
@@ -93,7 +114,12 @@ export class UserCenterController {
   }
 
   @Delete('internal/v1/user-center/users/:userId')
-  async deleteUser(@Param('userId') userId: string, @Body() rawBody: unknown) {
+  async deleteUser(
+    @Param('userId') userId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
     try {
       return {
         deletion: await this.store.deleteUserCenterUser(toUserDeleteInput(userId, asRecord(rawBody)))
@@ -104,18 +130,34 @@ export class UserCenterController {
   }
 
   @Get('internal/v1/user-center/oversea-entitlements')
-  async overseaEntitlements() {
+  async overseaEntitlements(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
+    assertInternalOpsToken(opsToken);
     return { entitlements: await this.store.listUserOverseaEntitlements() };
   }
 
   @Get('internal/v1/user-center/users/:userId/oversea')
-  async userOverseaEntitlement(@Param('userId') userId: string) {
+  async userOverseaEntitlement(
+    @Param('userId') userId: string,
+    @Headers('authorization') authorization: string | undefined,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
+    await this.assertUserOrOpsAuthorization(
+      userId,
+      authorization,
+      opsToken,
+      USER_OVERSEA_SUBSCRIPTION_SCOPE
+    );
     const entitlement = await this.store.getUserOverseaEntitlement(userId);
     return { entitlement };
   }
 
   @Post('internal/v1/user-center/users/:userId/oversea')
-  async upsertUserOverseaEntitlement(@Param('userId') userId: string, @Body() rawBody: unknown) {
+  async upsertUserOverseaEntitlement(
+    @Param('userId') userId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
     return {
       entitlement: await this.store.upsertUserOverseaEntitlement({
         ...toUserOverseaEntitlementInput(asRecord(rawBody)),
@@ -125,12 +167,23 @@ export class UserCenterController {
   }
 
   @Get('internal/v1/user-center/users/:userId/h2o/runtime-profile')
-  async userH2oRuntimeProfile(@Param('userId') userId: string) {
+  async userH2oRuntimeProfile(
+    @Param('userId') userId: string,
+    @Headers('authorization') authorization: string | undefined,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
+    await this.assertUserOrOpsAuthorization(userId, authorization, opsToken, 'auth.read');
     return { profile: await this.store.getUserH2oRuntimeProfile(userId, 'h2o') };
   }
 
   @Post('internal/v1/user-center/users/:userId/h2o/runtime-profile')
-  async upsertUserH2oRuntimeProfile(@Param('userId') userId: string, @Body() rawBody: unknown) {
+  async upsertUserH2oRuntimeProfile(
+    @Param('userId') userId: string,
+    @Headers('authorization') authorization: string | undefined,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    await this.assertUserOrOpsAuthorization(userId, authorization, opsToken, 'auth.read');
     return {
       profile: await this.store.upsertUserH2oRuntimeProfile({
         ...toUserH2oRuntimeProfileInput(asRecord(rawBody)),
@@ -203,7 +256,18 @@ export class UserCenterController {
   }
 
   @Post('internal/v1/user-center/users/:userId/oversea/sync-runtime')
-  async syncUserOverseaRuntime(@Param('userId') userId: string, @Body() rawBody: unknown) {
+  async syncUserOverseaRuntime(
+    @Param('userId') userId: string,
+    @Headers('authorization') authorization: string | undefined,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    await this.assertUserOrOpsAuthorization(
+      userId,
+      authorization,
+      opsToken,
+      USER_OVERSEA_SUBSCRIPTION_SCOPE
+    );
     return this.syncUserOverseaRuntimePayload(userId, asRecord(rawBody));
   }
 
@@ -281,6 +345,24 @@ export class UserCenterController {
   }
 
   private async assertUserOverseaAuthorization(userId: string, authorization?: string): Promise<void> {
+    return this.assertUserAuthorization(userId, authorization, USER_OVERSEA_SUBSCRIPTION_SCOPE);
+  }
+
+  private async assertUserOrOpsAuthorization(
+    userId: string,
+    authorization: string | undefined,
+    opsToken: string | undefined,
+    requiredScope: string
+  ): Promise<void> {
+    if (internalOpsTokenMatches(opsToken)) return;
+    await this.assertUserAuthorization(userId, authorization, requiredScope);
+  }
+
+  private async assertUserAuthorization(
+    userId: string,
+    authorization: string | undefined,
+    requiredScope: string
+  ): Promise<void> {
     const token = bearerToken(authorization);
     if (!token) throw new UnauthorizedException('Bearer access token is required');
     if (token.startsWith('mx-shadow-')) throw new UnauthorizedException('Shadow tokens cannot access user Oversea subscriptions');
@@ -298,25 +380,34 @@ export class UserCenterController {
     if (auth.principal.kind !== 'user' || auth.principal.userId !== userId) {
       throw new ForbiddenException('Bearer subject cannot access the requested Oversea user');
     }
-    if (!scopes.has(USER_OVERSEA_SUBSCRIPTION_SCOPE)) {
-      throw new ForbiddenException(`missing scope: ${USER_OVERSEA_SUBSCRIPTION_SCOPE}`);
+    if (!scopes.has(requiredScope)) {
+      throw new ForbiddenException(`missing scope: ${requiredScope}`);
     }
   }
 
   @Get('internal/v1/user-center/service-accounts')
-  async serviceAccounts() {
+  async serviceAccounts(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
+    assertInternalOpsToken(opsToken);
     return { serviceAccounts: await this.store.listUserCenterServiceAccounts() };
   }
 
   @Post('internal/v1/user-center/service-accounts')
-  async createServiceAccount(@Body() rawBody: unknown) {
+  async createServiceAccount(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
     return {
       serviceAccount: await this.store.createUserCenterServiceAccount(toCreateServiceAccountInput(asRecord(rawBody)))
     };
   }
 
   @Post('internal/v1/user-center/tokens/issue')
-  async issueToken(@Body() rawBody: unknown) {
+  async issueToken(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
     return { issued: await this.store.issueUserCenterToken(toIssueTokenInput(asRecord(rawBody))) };
   }
 

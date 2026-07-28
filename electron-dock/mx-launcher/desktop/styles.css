@@ -520,6 +520,10 @@ p {
   font-size: 13px;
 }
 
+.ops-token-field {
+  margin-top: 8px;
+}
+
 input,
 select {
   width: 100%;

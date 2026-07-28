@@ -11,6 +11,7 @@ const cliBaseUrl = process.argv.slice(2).find((arg) => arg !== '--');
 const baseUrl = (cliBaseUrl || process.env.MX_SMOKE_BASE_URL || 'http://127.0.0.1:18090').replace(/\/+$/, '');
 const expectK8sApply = process.env.MX_SMOKE_EXPECT_K8S_APPLY === '1';
 const remoteReadyOnly = process.env.MX_SMOKE_REMOTE_READY_ONLY === '1';
+const internalOpsToken = process.env.MX_INTERNAL_OPS_TOKEN?.trim() || '';
 const state = {};
 const shadowHomePublicKey = 'WvN2n3i6LXoJt1qX0lA2uP7cYy4rZs8mQb9dEfGhIjK=';
 const smokeHomePeerLeaseIp = '10.90.100.20';
@@ -2951,7 +2952,10 @@ for (const check of checks) {
   const requestBody = typeof check.body === 'function' ? check.body() : check.body;
   const response = await fetch(url, {
     method: check.method ?? 'GET',
-    headers: requestBody ? { 'content-type': 'application/json' } : undefined,
+    headers: {
+      ...(requestBody ? { 'content-type': 'application/json' } : {}),
+      ...(internalOpsToken ? { 'x-mx-ops-token': internalOpsToken } : {})
+    },
     body: requestBody ? JSON.stringify(requestBody) : undefined
   });
   const text = await response.text();

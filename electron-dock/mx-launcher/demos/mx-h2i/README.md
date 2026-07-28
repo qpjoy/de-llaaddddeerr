@@ -106,15 +106,21 @@ directory to `PATH` and fails early with a focused message if
 
 Bootstrap resolution can be selected with `MX_H2I_BOOTSTRAP_RESOLVE_MODE`:
 `env-first`, `dns-first`, `env-only`, or `dns-only`. Use the V2 bootstrap host
-`http://h2i.mxinfo-inc.cn:18090` when V1 HDO and V2 H2I DNS coexist. The current
-Domestic public host is `116.62.51.154`; older `121.43.253.179` / `121.43.254.179`
-runtime settings are treated as stale defaults. The bootstrap phase may use
-`MX_H2I_HOST_RESOLVE=h2i.mxinfo-inc.cn=116.62.51.154`
-to bypass public DNS; the client also auto-adds `http://116.62.51.154:18090`
-as a public bootstrap candidate when the Domestic relay host is unchanged. For
-direct-IP bootstrap, the HTTP `Host` stays on the gateway IP while
-`X-MX-Original-Host` / `X-MX-Bootstrap-Host` carry `h2i.mxinfo-inc.cn`, matching
-the V1/HDO public bootstrap flow. Use
+`https://h2i.minsight-ai.com`. The filed public suffix is intentionally not
+added to MX-H2I split DNS; `mxinfo-inc.cn` remains there for existing Internal
+names. The current Domestic public host is `116.62.51.154`; older
+`121.43.253.179` / `121.43.254.179` runtime settings are treated as stale
+defaults. The bootstrap phase may use
+`MX_H2I_HOST_RESOLVE=h2i.minsight-ai.com=116.62.51.154`
+to bypass public DNS and system-proxy selection; the client also auto-adds
+`https://116.62.51.154` as a transport candidate when the Domestic relay host
+is unchanged. For direct-IP HTTPS bootstrap, the connection still uses
+`h2i.minsight-ai.com` as TLS SNI and HTTP `Host`; certificate verification is
+never disabled. Packaged and production builds do not retain a bare public IP
+as the canonical bootstrap URL: the IP is only a dial target for the named
+HTTPS origin.
+`X-MX-Original-Host` / `X-MX-Bootstrap-Host` also carry the original authority.
+Use
 `MX_H2I_BOOTSTRAP_DNS_SERVERS=223.5.5.5,119.29.29.29`
 to resolve the bootstrap domain through an explicit resolver before dialing the
 resolved IP with the original Host header. `MX_H2I_BOOTSTRAP_DNS_SERVERS` must
@@ -123,6 +129,24 @@ host. If the Domestic public host is used as the direct bootstrap endpoint,
 prefer Host Resolve/env mode and leave `MX_H2I_BOOTSTRAP_DNS_SERVERS` empty
 unless that host also serves DNS on port 53. The connected WireGuard phase
 still relies on the launcher route plan and split DNS.
+
+Passwords, MX bearer tokens, and lease capabilities are accepted only over a
+normally validated HTTPS endpoint, loopback HTTP, or the exact Internal HTTP
+origin of an already live and re-probed WireGuard overlay. The legacy public
+`http://*:18090` listener is diagnostic/migration-only. Existing persisted
+`http://h2i.mxinfo-inc.cn:18090` and `http://api.mxinfo-inc.cn:18090` defaults
+and the exact former `https://h2i.mxinfo-inc.cn` default are migrated to
+`https://h2i.minsight-ai.com`. A custom path, non-default port, or custom
+Host Resolve target on the old hostname is preserved. Deploy the new Domestic
+TLS vhost before shipping this launcher build.
+That vhost must enforce the generated method-and-path bootstrap allowlist:
+health, Feishu safe config/token exchange, product lookup, enrollment/snapshot,
+and capability-protected lease operations only. Never proxy all of
+`/internal/*`, `/api/*`, or `/h2i/*`; doing so would expose Internal management
+surfaces such as Config Center and Admin through the public login hostname.
+The 443 owner must also overwrite untrusted inbound `X-Forwarded-For` with the
+socket client IP; the one-hop Internal trust-proxy setting assumes that value
+has already been cleaned at the public edge.
 
 When `dns-first` is selected, MX-H2I retries the bootstrap DNS resolver three
 times. If DNS still fails, the connection warns the user and temporarily falls
@@ -138,6 +162,18 @@ bootstrap path in isolation.
 The system path is intended to coexist with Clash/mihomo system proxy and TUN
 mode. Fake-IP or proxy TUN routes are not treated as H2I proof; the connected
 phase still requires the MX-H2I WireGuard route and Internal healthz.
+In `env-first` mode the pinned endpoint avoids Clash DNS and proxy selection,
+but a third-party TUN can still intercept or block the resulting IP route.
+The current macOS endpoint-route repair owns only stale MX-H2I routes, and the
+Windows/macOS physical endpoint bypass is owned by the installed WireGuard
+service. There is no safe demo-local ownership lifecycle for installing a
+privileged host route before the first WireGuard service exists, so MX-H2I
+does not leave an unowned `/32` route behind. For a first-ever login under a
+blocking TUN policy, configure Clash/mihomo `DIRECT` rules for
+`h2i.minsight-ai.com` and `116.62.51.154`, or temporarily disable that TUN
+policy. The Feishu callback listens only on `127.0.0.1`; before WireGuard is
+ready MX-H2I does not replace an existing system proxy/PAC, so that proxy must
+also keep loopback destinations direct.
 
 After WireGuard is ready, MX-H2I installs a standalone-owned system PAC that
 points Internal domains at the shared local edge `127.0.0.1:2053`. The same

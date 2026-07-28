@@ -107,8 +107,8 @@ spec:
         mx.qpjoy.com/component: dns-authority
         mx.qpjoy.com/environment: shadow
     spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
+      hostNetwork: false
+      dnsPolicy: ClusterFirst
       tolerations:
         - key: node-role.kubernetes.io/control-plane
           operator: Exists

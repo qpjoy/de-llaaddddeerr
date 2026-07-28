@@ -7,6 +7,16 @@ import { MemoryStore } from '../src/store/memory.js';
 const store = new MemoryStore(loadConfig());
 store.bootstrapUserCenter();
 const controller = new UserCenterController(store);
+const opsToken = 'user-lifecycle-smoke-internal-ops-token';
+process.env.MX_INTERNAL_OPS_TOKEN = opsToken;
+await assert.rejects(
+  controller.createUser(undefined, {
+    userId: 'usr_unauthorized_ops_smoke',
+    account: 'unauthorized-ops-smoke',
+    password: 'must-not-be-created'
+  }),
+  /valid Internal ops token/
+);
 
 store.createUserCenterUser({
   userId: 'usr_lifecycle_smoke',
@@ -28,7 +38,7 @@ assert.equal(store.verifyUserCenterPassword({
   password: 'old-lifecycle-password'
 }).ok, true);
 
-const passwordUpdate = await controller.updateUserPassword('usr_lifecycle_smoke', {
+const passwordUpdate = await controller.updateUserPassword('usr_lifecycle_smoke', opsToken, {
   password: 'new-lifecycle-password',
   requestedBy: 'smoke',
   requestId: 'lifecycle-password-update'
@@ -73,7 +83,7 @@ assert.equal(store.verifyUserCenterPassword({
   userId: 'usr_import_semantics_smoke',
   password: 'import-replacement-password'
 }).ok, true);
-await controller.deleteUser('usr_import_semantics_smoke', { requestedBy: 'smoke' });
+await controller.deleteUser('usr_import_semantics_smoke', opsToken, { requestedBy: 'smoke' });
 
 store.updateUserCenterPassword({
   userId: 'usr_demo_user',
@@ -98,7 +108,7 @@ assert.equal(store.verifyUserCenterPassword({
   userId: legacyUser.userId,
   password: 'legacy-user-updated-password'
 }).ok, true);
-await controller.deleteUser(legacyUser.userId, {
+await controller.deleteUser(legacyUser.userId, opsToken, {
   requestedBy: 'smoke',
   requestId: 'legacy-user-delete'
 });
@@ -119,7 +129,7 @@ store.upsertUserH2oRuntimeProfile({
   requestedBy: 'smoke'
 });
 
-const deletion = await controller.deleteUser('usr_lifecycle_smoke', {
+const deletion = await controller.deleteUser('usr_lifecycle_smoke', opsToken, {
   requestedBy: 'smoke',
   requestId: 'lifecycle-delete'
 });
@@ -129,9 +139,13 @@ assert.equal(deletion.deletion.deletedRecords.tokens, 1);
 assert.equal(deletion.deletion.deletedRecords.overseaEntitlements, 1);
 assert.equal(deletion.deletion.deletedRecords.h2oRuntimeProfiles, 1);
 assert.equal(store.listUserCenterUsers().some((user) => user.userId === 'usr_lifecycle_smoke'), false);
-await assert.rejects(controller.deleteUser('usr_demo_user', {}), /Built-in bootstrap user cannot be deleted/);
+await assert.rejects(
+  controller.deleteUser('usr_demo_user', opsToken, {}),
+  /Built-in bootstrap user cannot be deleted/
+);
 
 console.log('OK password update replaces the credential and revokes existing user tokens');
+console.log('OK User Center administration rejects requests without the Internal ops token');
 console.log('OK import preserves an omitted password and replaces an explicitly supplied password');
 console.log('OK bootstrap preserves an administrator-updated built-in password');
 console.log('OK bootstrap preserves and does not resurrect changed or deleted legacy users');

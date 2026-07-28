@@ -27,6 +27,17 @@ export interface RuntimeConfig {
   gatewayHostNginxConfigPath: string;
   gatewayHostNginxInternalApiUpstream: string | null;
   launcherNetworkSdkTestModeEnabled: boolean;
+  launcherNetworkLegacyUnauthenticatedUserLeasesEnabled: boolean;
+  launcherNetworkHandoverTtlMs: number;
+  launcherNetworkHandoverReconcileMs: number;
+  feishuAppId: string | null;
+  feishuAppSecret: string | null;
+  feishuAllowedTenantKeys: string[];
+  feishuRedirectUris: string[];
+  feishuAutoProvisionEnabled: boolean;
+  feishuAuthorizeUrl: string;
+  feishuTokenUrl: string;
+  feishuUserInfoUrl: string;
   gatewayAppPort: number;
   siteSlotSshKeyRoot: string;
 }
@@ -809,6 +820,7 @@ export interface UserCenterTokenRecord {
   subjectId: string;
   audience: string;
   scopes: string[];
+  authProvider?: string | null;
   issuer: string;
   issuedAt: string;
   expiresAt: string;
@@ -818,6 +830,22 @@ export interface UserCenterTokenRecord {
 export interface UserCenterIssuedToken {
   token: string;
   record: UserCenterTokenRecord;
+}
+
+export interface FeishuAuthorizationTransaction {
+  transactionId: string;
+  redirectUri: string;
+  codeChallenge: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface FeishuAuthorizationTransactionInput {
+  transactionId: string;
+  redirectUri: string;
+  codeChallenge: string;
+  createdAt: string;
+  expiresAt: string;
 }
 
 export interface UserCenterBootstrapResult {
@@ -967,6 +995,7 @@ export interface IssueTokenInput {
   subjectId: string;
   audience?: string | null;
   scopes?: string[];
+  authProvider?: string | null;
   ttlSeconds?: number | null;
   requestId?: string | null;
 }
@@ -1000,6 +1029,7 @@ export interface TokenIntrospectionResult {
   subject: string | null;
   principal: PlatformPrincipal | null;
   scopes: string[];
+  authProvider?: string | null;
   expiresAt: string | null;
   reason: string;
 }
@@ -1052,6 +1082,9 @@ export interface SdkGatewayManifest {
   sdk: {
     audience: string;
     oauthTokenUrl: string;
+    feishuConfigUrl: string;
+    feishuAuthorizeUrl: string;
+    feishuTokenUrl: string;
     tokenIntrospectionUrl: string;
     principalContextUrl: string;
     rolesUrl: string;
@@ -1335,6 +1368,7 @@ export interface SiteSlotDomesticRuntimeConfigInput {
   bootstrapProtocol?: string | null;
   bootstrapHost?: string | null;
   bootstrapPort?: number | null;
+  publicGatewayNetwork?: string | null;
   internalBaseUrl?: string | null;
   internalApiUpstream?: string | null;
   internalH2iUpstream?: string | null;
@@ -2110,10 +2144,12 @@ export interface PermissionGrant {
 }
 
 export interface LauncherNetworkSnapshotInput {
+  leaseId?: string | null;
   installId?: string;
   deviceId?: string;
   siteId?: string | null;
   userId?: string | null;
+  leaseProfile?: LauncherLeaseProfile | string | null;
   publicKey?: string | null;
   appId?: string;
   launcherMode?: LauncherProductMode | null;
@@ -2122,6 +2158,7 @@ export interface LauncherNetworkSnapshotInput {
 
 export type LauncherProductMode = 'standalone' | 'embed';
 export type LauncherIdentityKind = 'user' | 'anonymous';
+export type LauncherLeaseProfile = 'employee' | 'feishu' | 'anonymous';
 export type LauncherProductUpdatePolicy = 'launcher-managed' | 'app-managed' | 'host-managed';
 export type LauncherNetworkScope = 'owner' | 'broker-session';
 
@@ -2137,9 +2174,12 @@ export interface LauncherProductNetworkInput {
   dnsServer?: string | null;
   serviceVip?: string | null;
   userCidr?: string | null;
+  feishuCidr?: string | null;
   anonymousCidr?: string | null;
   userLeaseStart?: string | null;
   userLeaseEnd?: string | null;
+  feishuLeaseStart?: string | null;
+  feishuLeaseEnd?: string | null;
   anonymousLeaseStart?: string | null;
   anonymousLeaseEnd?: string | null;
   defaultDomesticSiteId?: string | null;
@@ -2166,9 +2206,12 @@ export interface LauncherProductNetwork {
   dnsServer: string;
   serviceVip: string;
   userCidr: string;
+  feishuCidr: string;
   anonymousCidr: string;
   userLeaseStart: string;
   userLeaseEnd: string;
+  feishuLeaseStart: string;
+  feishuLeaseEnd: string;
   anonymousLeaseStart: string;
   anonymousLeaseEnd: string;
   defaultDomesticSiteId: string;
@@ -2190,6 +2233,7 @@ export interface LauncherNetworkLeaseInput {
   productId?: string | null;
   mode?: LauncherProductMode | string | null;
   identityKind?: LauncherIdentityKind | string | null;
+  leaseProfile?: LauncherLeaseProfile | string | null;
   installId?: string | null;
   deviceId?: string | null;
   siteId?: string | null;
@@ -2200,6 +2244,12 @@ export interface LauncherNetworkLeaseInput {
   requestedBy?: string | null;
   requestId?: string | null;
   sdkTestMode?: boolean | string | null;
+  capabilityDigest?: string | null;
+  capabilityVersion?: number | null;
+  capabilityExpiresAt?: string | null;
+  generation?: number | null;
+  legacyCapabilityClaimLeaseIds?: string[];
+  replacementForLeaseId?: string | null;
 }
 
 export interface LauncherNetworkLeaseReleaseInput {
@@ -2214,6 +2264,7 @@ export interface LauncherNetworkLease {
   productId: string;
   launcherMode: LauncherProductMode;
   identityKind: LauncherIdentityKind;
+  leaseProfile: LauncherLeaseProfile;
   sequence: number;
   installId: string;
   deviceId: string;
@@ -2232,10 +2283,74 @@ export interface LauncherNetworkLease {
   status: 'active' | 'released';
   expiresAt: string;
   releasedAt: string | null;
+  capabilityDigest?: string | null;
+  capabilityVersion?: number | null;
+  capabilityExpiresAt?: string | null;
+  generation?: number | null;
+  replacementForLeaseId?: string | null;
   createdBy: string;
   createdAt: string;
   updatedBy: string;
   updatedAt: string;
+}
+
+export type LauncherNetworkHandoverStatus =
+  | 'preparing'
+  | 'prepared'
+  | 'commit-pending'
+  | 'abort-pending'
+  | 'committed'
+  | 'aborted';
+
+export type LauncherNetworkHandoverPeerPhase =
+  | 'pending'
+  | 'prepared'
+  | 'committed'
+  | 'aborted';
+
+export interface LauncherNetworkHandover {
+  transitionId: string;
+  environment: string;
+  productId: string;
+  installId: string;
+  deviceId: string;
+  publicKey: string;
+  oldLeaseId: string;
+  newLeaseId: string;
+  oldLeaseIp: string;
+  newLeaseIp: string;
+  status: LauncherNetworkHandoverStatus;
+  domesticRequired?: boolean;
+  internalRequired?: boolean;
+  domesticPhase: LauncherNetworkHandoverPeerPhase;
+  internalPhase: LauncherNetworkHandoverPeerPhase;
+  deadlineAt: string;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LauncherNetworkHandoverInput {
+  transitionId: string;
+  productId: string;
+  installId: string;
+  deviceId: string;
+  publicKey: string;
+  oldLeaseId: string;
+  newLeaseId: string;
+  oldLeaseIp: string;
+  newLeaseIp: string;
+  domesticRequired?: boolean;
+  internalRequired?: boolean;
+  deadlineAt: string;
+}
+
+export interface LauncherNetworkHandoverAdvanceInput {
+  transitionId: string;
+  peer: 'domestic' | 'internal';
+  phase: 'prepare' | 'commit' | 'abort';
+  success: boolean;
+  error?: string | null;
 }
 
 export interface LauncherNetworkSnapshot {
@@ -2250,6 +2365,7 @@ export interface LauncherNetworkSnapshot {
     productId: string;
     launcherMode: LauncherProductMode;
     identityKind: LauncherIdentityKind;
+    leaseProfile: LauncherLeaseProfile;
     cidr: string;
     leaseIp: string;
     relayMode: 'h2i';
@@ -2289,6 +2405,7 @@ export interface LauncherNetworkTopology {
     domesticGatewayIp: string;
     dnsServer: string;
     userCidr: string;
+    feishuCidr: string;
     anonymousCidr: string;
     updatePolicy: LauncherProductUpdatePolicy;
     rateLimitProfile: string;

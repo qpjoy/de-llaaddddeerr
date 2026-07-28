@@ -1,6 +1,17 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import {
+  advanceLauncherNetworkHandover,
+  buildLauncherNetworkHandover,
+  launcherNetworkHandoverIsTerminal
+} from '../lib/launcher-network-handover.js';
+import {
+  consumeFixedWindowRateLimit,
+  type AuthenticationRateLimitDecision,
+  type AuthenticationRateLimitInput,
+  type AuthenticationRateLimitState
+} from '../lib/auth-rate-limit.js';
+import {
   builtinAppCenterApps,
   builtinConfigSecretReferences,
   buildAppOnboardingDefaults,
@@ -9,6 +20,7 @@ import {
   buildAppCenterInstallation,
   builtinLauncherProductNetworks,
   buildLauncherProductNetwork,
+  assertLauncherProductLeaseIsolation,
   buildAwxProviderConfig,
   buildConfigSecretReference,
   buildReleaseManagementPlan,
@@ -25,6 +37,8 @@ import {
   nextAvailableLauncherNetworkLeaseSequence,
   launcherNetworkLeaseIsActive,
   launcherNetworkLeaseKey,
+  launcherNetworkLeaseMatchesProfile,
+  launcherNetworkLeaseProfile,
   releaseLauncherNetworkLease,
   buildSiteSlotAccessAccount,
   buildSiteSlotExecutionRun,
@@ -145,6 +159,8 @@ import type {
   DnsReverseProxyRouteInput,
   DnsZoneSnapshot,
   DnsZoneSnapshotInput,
+  FeishuAuthorizationTransaction,
+  FeishuAuthorizationTransactionInput,
   GatewayConfigMapApplyInput,
   GatewayConfigMapApplyResult,
   GatewayConfigMapSyncInput,
@@ -155,6 +171,9 @@ import type {
   ImportUserCenterUsersInput,
   ImportUserCenterUsersResult,
   IssueTokenInput,
+  LauncherNetworkHandover,
+  LauncherNetworkHandoverAdvanceInput,
+  LauncherNetworkHandoverInput,
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
   LauncherNetworkLeaseReleaseInput,
@@ -266,6 +285,8 @@ export class MemoryStore implements PlatformStore {
   private readonly launcherNetworkMihomoSites = new Map<string, LauncherNetworkMihomoSite>();
   private readonly launcherProductNetworks = new Map<string, LauncherProductNetwork>();
   private readonly launcherNetworkLeases = new Map<string, LauncherNetworkLease>();
+  private readonly launcherNetworkHandovers = new Map<string, LauncherNetworkHandover>();
+  private launcherNetworkLeaseGeneration = 0;
   private readonly runtimeFeaturePolicies = new Map<string, RuntimeFeaturePolicy>();
   private readonly awxProviderConfigs = new Map<string, AwxProviderConfig>();
   private readonly secretProviderConfigs = new Map<string, SecretProviderConfig>();
@@ -283,6 +304,11 @@ export class MemoryStore implements PlatformStore {
   private readonly userOverseaAccountSyncReports = new Map<string, UserOverseaAccountSyncReport>();
   private readonly serviceAccounts = new Map<string, UserCenterServiceAccount>();
   private readonly tokens = new Map<string, UserCenterTokenRecord>();
+  private readonly feishuAuthorizationTransactions = new Map<string, FeishuAuthorizationTransaction>();
+  private readonly authenticationRateLimits = new Map<
+    string,
+    AuthenticationRateLimitState & { resetAt: string }
+  >();
   private readonly dnsPolicies = new Map<string, DnsPolicy>();
   private readonly dnsReverseProxyRoutes = new Map<string, DnsReverseProxyRoute>();
   private readonly dnsZoneSnapshots = new Map<string, DnsZoneSnapshot>();
@@ -1017,6 +1043,50 @@ export class MemoryStore implements PlatformStore {
     };
   }
 
+  consumeAuthenticationRateLimits(
+    inputs: AuthenticationRateLimitInput[]
+  ): AuthenticationRateLimitDecision[] {
+    const now = new Date().toISOString();
+    const normalizedInputs = inputs.map((input) => ({
+      ...input,
+      bucketKey: input.bucketKey.trim(),
+      now: input.now ?? now
+    }));
+    const bucketKeys = normalizedInputs.map((input) => input.bucketKey);
+    if (new Set(bucketKeys).size !== bucketKeys.length) {
+      throw new Error('authentication rate-limit buckets must be unique within one consume operation');
+    }
+    if (this.authenticationRateLimits.size >= 10_000) {
+      const nowMs = Date.parse(now);
+      for (const [bucketKey, state] of this.authenticationRateLimits.entries()) {
+        if (Date.parse(state.resetAt) <= nowMs) this.authenticationRateLimits.delete(bucketKey);
+      }
+    }
+    const newBucketCount = bucketKeys.filter((bucketKey) => !this.authenticationRateLimits.has(bucketKey)).length;
+    const saturated = this.authenticationRateLimits.size + newBucketCount > 10_000;
+    const decisions = normalizedInputs.map((input) => {
+      const previous = this.authenticationRateLimits.get(input.bucketKey)
+        ?? (saturated
+          ? {
+              windowStartedAt: input.now ?? now,
+              count: input.limit,
+              resetAt: new Date(Date.parse(input.now ?? now) + input.windowSeconds * 1000).toISOString()
+            }
+          : null);
+      return consumeFixedWindowRateLimit(previous, input);
+    });
+    for (const [index, input] of normalizedInputs.entries()) {
+      const decision = decisions[index];
+      if (!decision || (saturated && !this.authenticationRateLimits.has(input.bucketKey))) continue;
+      this.authenticationRateLimits.set(input.bucketKey, {
+        windowStartedAt: decision.windowStartedAt,
+        count: decision.count,
+        resetAt: decision.resetAt
+      });
+    }
+    return decisions;
+  }
+
   private findUserCenterUserForInput(input: CreateUserInput): UserCenterUser | null {
     const userId = input.userId?.trim();
     if (userId && this.users.has(userId)) return this.users.get(userId) ?? null;
@@ -1028,7 +1098,7 @@ export class MemoryStore implements PlatformStore {
     const credential = this.userCredentials.get(user.userId) ?? null;
     return {
       ...user,
-      credential: userCredentialSummary(credential)
+      credential: userCredentialSummary(credential, user.profile.externalIds)
     };
   }
 
@@ -1332,10 +1402,37 @@ export class MemoryStore implements PlatformStore {
         subjectId: input.subjectId,
         audience: issued.record.audience,
         scopes: issued.record.scopes,
+        authProvider: issued.record.authProvider ?? null,
         expiresAt: issued.record.expiresAt
       }
     });
     return issued;
+  }
+
+  createFeishuAuthorizationTransaction(
+    input: FeishuAuthorizationTransactionInput
+  ): FeishuAuthorizationTransaction {
+    const now = Date.now();
+    for (const [transactionId, transaction] of this.feishuAuthorizationTransactions.entries()) {
+      if (Date.parse(transaction.expiresAt) <= now) {
+        this.feishuAuthorizationTransactions.delete(transactionId);
+      }
+    }
+    if (this.feishuAuthorizationTransactions.has(input.transactionId)) {
+      throw new Error('Feishu authorization transaction already exists');
+    }
+    const transaction = { ...input };
+    this.feishuAuthorizationTransactions.set(transaction.transactionId, transaction);
+    return transaction;
+  }
+
+  consumeFeishuAuthorizationTransaction(
+    transactionId: string
+  ): FeishuAuthorizationTransaction | null {
+    const transaction = this.feishuAuthorizationTransactions.get(transactionId) ?? null;
+    this.feishuAuthorizationTransactions.delete(transactionId);
+    if (!transaction || Date.parse(transaction.expiresAt) <= Date.now()) return null;
+    return transaction;
   }
 
   introspectToken(input: TokenIntrospectionInput): TokenIntrospectionResult {
@@ -1770,6 +1867,7 @@ export class MemoryStore implements PlatformStore {
   upsertLauncherProductNetwork(input: LauncherProductNetworkInput): LauncherProductNetwork {
     const previous = input.productId ? this.getLauncherProductNetwork(input.productId) : null;
     const product = buildLauncherProductNetwork(this.config, input, previous);
+    assertLauncherProductLeaseIsolation(product, this.listLauncherProductNetworks());
     if (product.mode === 'embed') {
       const channel = this.getLauncherProductNetwork(product.standaloneChannelProductId);
       if (!channel || channel.mode !== 'standalone' || !channel.enabled) {
@@ -1791,7 +1889,11 @@ export class MemoryStore implements PlatformStore {
         domesticGatewayIp: product.domesticGatewayIp,
         dnsServer: product.dnsServer,
         userCidr: product.userCidr,
+        feishuCidr: product.feishuCidr,
         anonymousCidr: product.anonymousCidr,
+        userLeaseRange: [product.userLeaseStart, product.userLeaseEnd],
+        feishuLeaseRange: [product.feishuLeaseStart, product.feishuLeaseEnd],
+        anonymousLeaseRange: [product.anonymousLeaseStart, product.anonymousLeaseEnd],
         updatePolicy: product.updatePolicy
       }
     });
@@ -1807,6 +1909,44 @@ export class MemoryStore implements PlatformStore {
 
   getLauncherNetworkLease(leaseId: string): LauncherNetworkLease | null {
     return this.launcherNetworkLeases.get(leaseId.trim()) ?? null;
+  }
+
+  listLauncherNetworkHandovers(): LauncherNetworkHandover[] {
+    return [...this.launcherNetworkHandovers.values()]
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
+  getLauncherNetworkHandover(transitionId: string): LauncherNetworkHandover | null {
+    return this.launcherNetworkHandovers.get(transitionId.trim()) ?? null;
+  }
+
+  createLauncherNetworkHandover(input: LauncherNetworkHandoverInput): LauncherNetworkHandover {
+    if (this.launcherNetworkHandovers.has(input.transitionId)) {
+      throw new Error('Launcher network handover transition already exists');
+    }
+    const conflicting = [...this.launcherNetworkHandovers.values()].find((handover) => (
+      !launcherNetworkHandoverIsTerminal(handover)
+      && handover.productId === input.productId
+      && handover.installId === input.installId
+      && handover.deviceId === input.deviceId
+      && handover.publicKey === input.publicKey
+    ));
+    if (conflicting) {
+      throw new Error(`Launcher network handover is already active: ${conflicting.transitionId}`);
+    }
+    const handover = buildLauncherNetworkHandover(this.config.environment, input);
+    this.launcherNetworkHandovers.set(handover.transitionId, handover);
+    return handover;
+  }
+
+  advanceLauncherNetworkHandover(
+    input: LauncherNetworkHandoverAdvanceInput
+  ): LauncherNetworkHandover {
+    const existing = this.getLauncherNetworkHandover(input.transitionId);
+    if (!existing) throw new Error('Launcher network handover transition not found');
+    const handover = advanceLauncherNetworkHandover(existing, input);
+    this.launcherNetworkHandovers.set(handover.transitionId, handover);
+    return handover;
   }
 
   enrollLauncherNetworkLease(input: LauncherNetworkLeaseInput): LauncherNetworkLease {
@@ -1837,26 +1977,108 @@ export class MemoryStore implements PlatformStore {
       const app = this.getAppCenterApp(appId);
       assertLauncherNetworkLeaseEntitlement(input, requestedProduct, product, app);
     }
+    const identityKind = input.identityKind === 'user' || input.userId?.trim() ? 'user' : 'anonymous';
+    const leaseProfile = launcherNetworkLeaseProfile(input.leaseProfile, identityKind);
     const normalizedInput: LauncherNetworkLeaseInput = {
       ...input,
       appId: input.appId || requestedProduct.productId,
       productId: product.productId,
       mode: product.mode,
-      identityKind: input.identityKind === 'user' || input.userId?.trim() ? 'user' : 'anonymous',
+      identityKind,
+      leaseProfile,
       installId,
       deviceId
     };
     const leaseKey = launcherNetworkLeaseKey(normalizedInput, product);
     const now = new Date();
-    const leases = [...this.launcherNetworkLeases.values()].filter((lease) => lease.productId === product.productId);
-    const previous = leases.find((lease) => lease.leaseKey === leaseKey && launcherNetworkLeaseIsActive(lease, now)) ?? null;
+    const allLeases = [...this.launcherNetworkLeases.values()];
+    const leases = allLeases.filter((lease) => lease.productId === product.productId);
+    const legacyCapabilityClaimLeaseIds = [...new Set(
+      normalizedInput.legacyCapabilityClaimLeaseIds?.map((leaseId) => leaseId.trim()).filter(Boolean) ?? []
+    )];
+    for (const leaseId of legacyCapabilityClaimLeaseIds) {
+      const legacyLease = allLeases.find((lease) => lease.leaseId === leaseId);
+      if (
+        !legacyLease
+        || !launcherNetworkLeaseIsActive(legacyLease, now)
+        || Boolean(legacyLease.capabilityDigest?.trim())
+        || legacyLease.productId !== product.productId
+        || legacyLease.installId !== installId
+        || legacyLease.deviceId !== deviceId
+        || legacyLease.publicKey !== normalizedInput.publicKey?.trim()
+        || (legacyLease.identityKind === 'user' && legacyLease.userId !== normalizedInput.userId)
+        || !normalizedInput.capabilityDigest?.trim()
+        || !normalizedInput.capabilityVersion
+        || !normalizedInput.capabilityExpiresAt?.trim()
+      ) {
+        throw new Error('Legacy launcher lease capability claim no longer matches this authenticated device');
+      }
+      const claimedLease: LauncherNetworkLease = {
+        ...legacyLease,
+        capabilityDigest: normalizedInput.capabilityDigest,
+        capabilityVersion: normalizedInput.capabilityVersion,
+        capabilityExpiresAt: normalizedInput.capabilityExpiresAt,
+        updatedBy: normalizedInput.requestedBy?.trim() || 'launcher-network-legacy-capability-claim',
+        updatedAt: new Date().toISOString()
+      };
+      this.launcherNetworkLeases.set(claimedLease.leaseId, claimedLease);
+      const allIndex = allLeases.findIndex((lease) => lease.leaseId === claimedLease.leaseId);
+      if (allIndex >= 0) allLeases[allIndex] = claimedLease;
+      const productIndex = leases.findIndex((lease) => lease.leaseId === claimedLease.leaseId);
+      if (productIndex >= 0) leases[productIndex] = claimedLease;
+    }
+    const publicKeyConflict = normalizedInput.publicKey?.trim()
+      ? allLeases.find((lease) => (
+          launcherNetworkLeaseIsActive(lease, now)
+          && lease.publicKey === normalizedInput.publicKey?.trim()
+          && (
+            lease.productId !== product.productId
+            || lease.installId !== installId
+            || lease.deviceId !== deviceId
+          )
+        ))
+      : null;
+    if (publicKeyConflict) {
+      throw new Error(`WireGuard publicKey is already owned by ${publicKeyConflict.installId}/${publicKeyConflict.deviceId}`);
+    }
+    const previous = leases.find((lease) => (
+      launcherNetworkLeaseIsActive(lease, now)
+      && launcherNetworkLeaseProfile(lease.leaseProfile, lease.identityKind) === leaseProfile
+      && launcherNetworkLeaseMatchesProfile(product, leaseProfile, lease)
+      && (
+        lease.leaseKey === leaseKey
+        || (
+          !lease.leaseProfile
+          && lease.identityKind === identityKind
+          && lease.installId === installId
+          && (identityKind === 'anonymous' || lease.userId === normalizedInput.userId)
+        )
+      )
+    )) ?? null;
+    if (
+      previous?.publicKey
+      && normalizedInput.publicKey?.trim()
+      && previous.publicKey !== normalizedInput.publicKey.trim()
+    ) {
+      throw new Error('Launcher lease public key rotation requires a separate migration');
+    }
     const sequence = previous?.sequence ?? nextAvailableLauncherNetworkLeaseSequence(
       product,
-      normalizedInput.identityKind === 'user' ? 'user' : 'anonymous',
+      leaseProfile,
       leases,
       now
     );
-    const lease = buildLauncherNetworkLease(this.config, normalizedInput, product, sequence, previous);
+    this.launcherNetworkLeaseGeneration = Math.max(
+      this.launcherNetworkLeaseGeneration,
+      ...leases.map((lease) => Number(lease.generation) || 0)
+    ) + 1;
+    const lease = buildLauncherNetworkLease(
+      this.config,
+      { ...normalizedInput, generation: this.launcherNetworkLeaseGeneration },
+      product,
+      sequence,
+      previous
+    );
     this.launcherNetworkLeases.set(lease.leaseId, lease);
     this.recordAudit({
       eventType: previous ? 'launcher_network.lease.refreshed' : 'launcher_network.lease.enrolled',
@@ -1872,6 +2094,7 @@ export class MemoryStore implements PlatformStore {
         leaseId: lease.leaseId,
         launcherMode: lease.launcherMode,
         identityKind: lease.identityKind,
+        leaseProfile: lease.leaseProfile,
         cidr: lease.cidr,
         serviceVip: lease.serviceVip,
         requestedProductId: requestedProduct.productId,
@@ -2507,11 +2730,51 @@ export class MemoryStore implements PlatformStore {
       : launcherNetworkProductIsStandaloneDefault(appId)
         ? 'standalone'
         : 'embed';
-    const mode = input.userId ? 'user' : 'guest';
-    const lease = this.enrollLauncherNetworkLease({
+    const requestedLease = input.leaseId?.trim()
+      ? this.getLauncherNetworkLease(input.leaseId)
+      : null;
+    if (input.leaseId?.trim() && (!requestedLease || !launcherNetworkLeaseIsActive(requestedLease))) {
+      throw new Error('Launcher network lease is missing or inactive');
+    }
+    if (requestedLease && requestedLease.productId !== appId) {
+      throw new Error('Launcher network lease product does not match snapshot appId');
+    }
+    const requestedLeaseProduct = requestedLease
+      ? this.getLauncherProductNetwork(requestedLease.productId)
+        ?? buildLauncherProductNetwork(this.config, {
+          productId: requestedLease.productId,
+          mode: requestedLease.launcherMode
+        }, null)
+      : null;
+    if (
+      requestedLease?.identityKind === 'user'
+      && requestedLease.userId !== input.userId?.trim()
+    ) {
+      throw new Error('Launcher network lease user does not match snapshot userId');
+    }
+    if (requestedLease) {
+      const storedLeaseProfile = requestedLease.leaseProfile
+        ?? (requestedLease.identityKind === 'user' ? 'employee' : 'anonymous');
+      const requestedLeaseProfile = launcherNetworkLeaseProfile(
+        input.leaseProfile,
+        requestedLease.identityKind
+      );
+      if (storedLeaseProfile !== requestedLeaseProfile) {
+        throw new Error('Launcher network lease profile does not match snapshot leaseProfile');
+      }
+      if (
+        requestedLeaseProduct
+        && !launcherNetworkLeaseMatchesProfile(requestedLeaseProduct, storedLeaseProfile, requestedLease)
+      ) {
+        throw new Error('Launcher network lease no longer belongs to its configured profile range; renew the lease');
+      }
+    }
+    const mode = requestedLease?.identityKind === 'user' || input.userId ? 'user' : 'guest';
+    const lease = requestedLease ?? this.enrollLauncherNetworkLease({
       productId: appId,
       mode: launcherMode,
       identityKind: mode === 'user' ? 'user' : 'anonymous',
+      leaseProfile: input.leaseProfile,
       installId: input.installId,
       deviceId: input.deviceId,
       siteId: input.siteId,
@@ -2525,6 +2788,8 @@ export class MemoryStore implements PlatformStore {
     const topology = buildLauncherNetworkTopology(this.config, {
       mode,
       leaseIp: lease.leaseIp,
+      leaseCidr: lease.cidr,
+      leaseProfile: lease.leaseProfile ?? (lease.identityKind === 'user' ? 'employee' : 'anonymous'),
       product,
       domesticSiteId: lease.domesticSiteId,
       publicKey: lease.publicKey
@@ -2555,8 +2820,9 @@ export class MemoryStore implements PlatformStore {
       overlayPolicy: {
         productId: product.productId,
         launcherMode: product.mode,
-        identityKind: mode === 'user' ? 'user' : 'anonymous',
-        cidr: mode === 'user' ? product.userCidr : product.anonymousCidr,
+        identityKind: lease.identityKind,
+        leaseProfile: lease.leaseProfile ?? (lease.identityKind === 'user' ? 'employee' : 'anonymous'),
+        cidr: lease.cidr,
         leaseIp: lease.leaseIp,
         relayMode: 'h2i'
       },

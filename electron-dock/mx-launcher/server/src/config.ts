@@ -80,6 +80,12 @@ function parseSinks(): ObservabilitySink[] {
   }
 }
 
+function stringListFromEnv(name: string): string[] {
+  const raw = process.env[name];
+  if (!raw?.trim()) return [];
+  return [...new Set(raw.split(/[,;\n]/).map((item) => item.trim()).filter(Boolean))];
+}
+
 export function loadConfig(): RuntimeConfig {
   const siteRole = siteRoleFromEnv();
   return {
@@ -108,6 +114,23 @@ export function loadConfig(): RuntimeConfig {
       ?? '/etc/nginx/conf.d/mx-gateway.generated.conf',
     gatewayHostNginxInternalApiUpstream: process.env.GATEWAY_HOST_NGINX_INTERNAL_API_UPSTREAM?.trim() || null,
     launcherNetworkSdkTestModeEnabled: boolFromEnv('MX_LAUNCHER_NETWORK_SDK_TEST_MODE', false),
+    launcherNetworkLegacyUnauthenticatedUserLeasesEnabled: boolFromEnv(
+      'MX_LAUNCHER_NETWORK_LEGACY_UNAUTHENTICATED_USER_LEASES',
+      false
+    ),
+    launcherNetworkHandoverTtlMs: intFromEnv('MX_LAUNCHER_NETWORK_HANDOVER_TTL_MS', 5 * 60 * 1000),
+    launcherNetworkHandoverReconcileMs: intFromEnv('MX_LAUNCHER_NETWORK_HANDOVER_RECONCILE_MS', 30 * 1000),
+    feishuAppId: process.env.MX_FEISHU_APP_ID?.trim() || null,
+    feishuAppSecret: process.env.MX_FEISHU_APP_SECRET?.trim() || null,
+    feishuAllowedTenantKeys: stringListFromEnv('MX_FEISHU_ALLOWED_TENANT_KEYS'),
+    feishuRedirectUris: stringListFromEnv('MX_FEISHU_REDIRECT_URIS'),
+    feishuAutoProvisionEnabled: boolFromEnv('MX_FEISHU_AUTO_PROVISION_ENABLED', true),
+    feishuAuthorizeUrl: process.env.MX_FEISHU_AUTHORIZE_URL?.trim()
+      || 'https://accounts.feishu.cn/open-apis/authen/v1/authorize',
+    feishuTokenUrl: process.env.MX_FEISHU_TOKEN_URL?.trim()
+      || 'https://open.feishu.cn/open-apis/authen/v2/oauth/token',
+    feishuUserInfoUrl: process.env.MX_FEISHU_USER_INFO_URL?.trim()
+      || 'https://open.feishu.cn/open-apis/authen/v1/user_info',
     gatewayAppPort: intFromEnv('GATEWAY_APP_PORT', 80),
     siteSlotSshKeyRoot: process.env.MX_SITE_SLOT_SSH_KEY_DIR ?? 'artifacts/ssh'
   };

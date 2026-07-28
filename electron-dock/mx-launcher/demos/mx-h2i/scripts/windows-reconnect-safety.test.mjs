@@ -417,8 +417,20 @@ assert.match(
 const staffHandlerStart = source.indexOf("ipcMain.handle('mx-h2i:login-employee'");
 const staffHandlerEnd = source.indexOf("ipcMain.handle('mx-h2i:disconnect'", staffHandlerStart);
 const staffHandler = source.slice(staffHandlerStart, staffHandlerEnd);
+const staffPromotionStart = source.indexOf('async function promoteEmployeeConnection');
+const staffPromotionEnd = source.indexOf('async function startFeishuLogin', staffPromotionStart);
+const staffPromotion = source.slice(staffPromotionStart, staffPromotionEnd);
+assert.ok(
+  staffPromotionStart >= 0 && staffPromotionEnd > staffPromotionStart,
+  'the shared employee promotion helper must exist'
+);
 assert.match(
   staffHandler,
+  /return promoteEmployeeConnection\(\{[\s\S]*provider: 'password'/,
+  'password login must use the shared employee promotion helper'
+);
+assert.match(
+  staffPromotion,
   /retainedRecovery\?\.authorizationCanceled === true[\s\S]*reason: 'authorization-canceled'[\s\S]*return visibleRuntime\(\);/,
   'canceling retained macOS repair must stop employee authentication and avoid a second password prompt'
 );

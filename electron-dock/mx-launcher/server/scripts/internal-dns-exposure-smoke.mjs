@@ -14,13 +14,18 @@ const manage = readFileSync(resolve(mxLauncherRoot, 'scripts/manage.sh'), 'utf8'
 
 assert.match(
   manifest,
-  /kind: Deployment[\s\S]*?name: mx-internal-coredns[\s\S]*?hostNetwork: true[\s\S]*?dnsPolicy: ClusterFirstWithHostNet/,
-  'Internal CoreDNS must own the node network that carries 10.88.88.88'
+  /kind: Deployment[\s\S]*?name: mx-internal-coredns[\s\S]*?name: coredns[\s\S]*?image: coredns\/coredns:1\.11\.3/,
+  'Internal CoreDNS must remain a dedicated authority deployment'
+);
+assert.doesNotMatch(
+  manifest,
+  /hostNetwork:\s*true/,
+  'Internal CoreDNS must not collide with host DNS listeners through hostNetwork'
 );
 assert.doesNotMatch(
   manifest,
   /hostPort:\s*53/,
-  'duplicate UDP/TCP containerPort 53 entries must not rely on strategic-merge hostPort'
+  'duplicate UDP/TCP containerPort 53 entries must not be managed by strategic apply'
 );
 assert.match(
   manifest,
@@ -44,8 +49,13 @@ assert.match(
 );
 assert.match(
   manage,
-  /\[ "\$host_network" = "true" \][\s\S]*?\[ -n "\$pod_ip" \] && \[ "\$pod_ip" = "\$host_ip" \]/,
-  'deploy must prove that the CoreDNS pod uses the host network'
+  /kubectl -n mx-dns patch deployment mx-internal-coredns --type=json[\s\S]*?"name":"dns-udp","containerPort":53,"hostIP":"10\.88\.88\.88","hostPort":53,"protocol":"UDP"[\s\S]*?"name":"dns-tcp","containerPort":53,"hostIP":"10\.88\.88\.88","hostPort":53,"protocol":"TCP"/,
+  'deploy must patch both protocol-specific host ports onto only the Internal overlay address'
+);
+assert.match(
+  manage,
+  /\[ "\$host_network" != "true" \][\s\S]*?grep -Fxq '10\.88\.88\.88\/53\/53\/UDP'[\s\S]*?grep -Fxq '10\.88\.88\.88\/53\/53\/TCP'/,
+  'deploy must verify pod networking, hostIP, hostPort, and both protocols'
 );
 assert.match(
   manage,
@@ -57,5 +67,10 @@ assert.match(
   /probe_server="\$\{MX_INTERNAL_DNS_PROBE_SERVER:-\$expected_ip\}"[\s\S]*?Internal overlay DNS address \$expected_ip is not assigned on this host/,
   'production verification must prove the real 10.88.88.88 overlay endpoint, not only the node IP'
 );
+assert.match(
+  manage,
+  /-o go-template='\{\{range \$key, \$value := \.spec\.selector\.matchLabels\}\}[\s\S]*?kubectl -n "\$ns" logs "\$pod" --all-containers --previous --tail=200/,
+  'rollout diagnostics must resolve workload pods and include previous crash logs'
+);
 
-console.log('Internal CoreDNS host-network UDP/TCP exposure smoke passed');
+console.log('Internal CoreDNS host-port UDP/TCP exposure smoke passed');

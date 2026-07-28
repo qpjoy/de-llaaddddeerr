@@ -15,6 +15,9 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const serverRoot = resolve(scriptDir, '..');
 const mxLauncherRoot = resolve(serverRoot, '..');
 const adminControllerPath = resolve(serverRoot, 'src/modules/admin/admin.controller.ts');
+const domainPath = resolve(serverRoot, 'src/store/domain.ts');
+const internalGatewayPath = resolve(mxLauncherRoot, 'deploy/k8s/internal-shadow/45-internal-gateway.yaml');
+const internalConfigPath = resolve(mxLauncherRoot, 'deploy/k8s/internal-shadow/10-configmap.yaml');
 const outputRoot = mkdtempSync(join(tmpdir(), 'mx-domestic-dns-artifact-smoke-'));
 const artifactRoot = join(outputRoot, 'domestic');
 const unpackRoot = join(outputRoot, 'unpacked');
@@ -41,6 +44,9 @@ try {
   assert.ok(services, 'domestic-services module is missing');
   assert.equal(services.metadata?.dnsBind, '10.88.0.1');
   assert.equal(services.metadata?.dnsPort, 53);
+  assert.equal(services.metadata?.bootstrapHost, 'h2i.minsight-ai.com');
+  assert.equal(services.metadata?.publicGatewayNetwork, 'compass-gateway_default');
+  assert.equal(services.metadata?.publicGatewayUpstream, 'http://mx-domestic-edge:8088');
   assert.equal(services.metadata?.internalDnsUpstream, '10.88.88.88:53');
 
   mkdirSync(unpackRoot);
@@ -52,6 +58,12 @@ try {
   ]);
 
   const compose = readFileSync(join(unpackRoot, 'docker-compose.yml'), 'utf8');
+  const publicGatewayCompose = readFileSync(
+    join(unpackRoot, 'docker-compose.public-gateway.yml'),
+    'utf8'
+  );
+  const caddyfile = readFileSync(join(unpackRoot, 'Caddyfile'), 'utf8');
+  const publicTlsCaddyfile = readFileSync(join(unpackRoot, 'Caddyfile.public-tls'), 'utf8');
   const corefile = readFileSync(join(unpackRoot, 'Corefile'), 'utf8');
   const envExample = readFileSync(join(unpackRoot, '.env.example'), 'utf8');
   const readme = readFileSync(join(unpackRoot, 'README.md'), 'utf8');
@@ -60,6 +72,83 @@ try {
 
   assert.match(compose, /\$\{MX_DOMESTIC_DNS_BIND:-10\.88\.0\.1\}:\$\{MX_DOMESTIC_DNS_PORT:-53\}:53\/udp/);
   assert.match(compose, /\$\{MX_DOMESTIC_DNS_BIND:-10\.88\.0\.1\}:\$\{MX_DOMESTIC_DNS_PORT:-53\}:53\/tcp/);
+  assert.match(compose, /\$\{MX_DOMESTIC_EDGE_BIND:-127\.0\.0\.1\}:\$\{MX_DOMESTIC_EDGE_PORT:-18090\}:8088\/tcp/);
+  assert.match(compose, /public-tls:[\s\S]*profiles:[\s\S]*- public-tls[\s\S]*\$\{MX_DOMESTIC_HTTPS_BIND:-0\.0\.0\.0\}:\$\{MX_DOMESTIC_HTTPS_PORT:-443\}:443\/tcp/);
+  assert.doesNotMatch(
+    compose,
+    /compass-gateway_default|public_gateway/,
+    'the default stack must remain runnable before the external Compass network exists'
+  );
+  assert.match(
+    publicGatewayCompose,
+    /domestic-edge:[\s\S]*public_gateway:[\s\S]*aliases:[\s\S]*- mx-domestic-edge/
+  );
+  assert.match(publicGatewayCompose, /external: true/);
+  assert.match(
+    publicGatewayCompose,
+    /name: \$\{MX_DOMESTIC_PUBLIC_GATEWAY_NETWORK:-compass-gateway_default\}/
+  );
+  assert.doesNotMatch(
+    compose,
+    /MX_DOMESTIC_HTTP_PORT/,
+    'the optional TLS owner must use TLS-ALPN on 443 and must not claim a V1-owned port 80'
+  );
+  assert.match(publicTlsCaddyfile, /\{\$MX_DOMESTIC_BOOTSTRAP_HOST:h2i\.minsight-ai\.com\}/);
+  assert.match(publicTlsCaddyfile, /disable_http_challenge/);
+  assert.match(
+    caddyfile,
+    /@publicFeishuConfig \{[\s\S]*?method GET[\s\S]*?path \/internal\/v1\/sdk\/oauth\/feishu\/config[\s\S]*?\}/
+  );
+  assert.match(
+    caddyfile,
+    /@publicLauncherProduct \{[\s\S]*?method GET[\s\S]*?path_regexp launcherProduct \^\/internal\/v1\/launcher-network\/products\/\[A-Za-z0-9\._-\]\+\$[\s\S]*?\}/
+  );
+  assert.match(
+    caddyfile,
+    /@publicClientPost \{[\s\S]*?method POST[\s\S]*?\/internal\/v1\/sdk\/oauth\/token[\s\S]*?\/internal\/v1\/sdk\/oauth\/feishu\/authorize[\s\S]*?\/internal\/v1\/sdk\/oauth\/feishu\/token[\s\S]*?\/internal\/v1\/launcher-network\/enrollments[\s\S]*?\/internal\/v1\/launcher-network\/snapshots[\s\S]*?\}/
+  );
+  assert.match(
+    caddyfile,
+    /@publicLeaseOperation \{[\s\S]*?method POST[\s\S]*?path_regexp launcherLeaseOperation \^\/internal\/v1\/launcher-network\/leases\/\[A-Za-z0-9\._-\]\+\/\(release\|domestic-peer\/sync\|internal-direct-peer\/sync\|domestic-relay\/diagnostics\)\$[\s\S]*?\}/
+  );
+  assert.match(
+    caddyfile,
+    /@blockedControlPlane path \/internal \/internal\/\* \/api \/api\/\* \/h2i \/h2i\/\*/
+  );
+  assert.match(caddyfile, /respond @blockedControlPlane "forbidden\\n" 403/);
+  assert.doesNotMatch(caddyfile, /handle_path \/api\/\*/);
+  assert.doesNotMatch(caddyfile, /handle_path \/h2i\/\*/);
+  assert.doesNotMatch(caddyfile, /handle \/internal\/\*/);
+  assert.doesNotMatch(caddyfile, /config-center/);
+  assert.equal(
+    [...caddyfile.matchAll(/^\s*header_up X-Forwarded-For \{http\.request\.header\.X-Forwarded-For\}\s*$/gm)].length,
+    5,
+    'the loopback edge must preserve the client IP value cleaned by the public TLS owner'
+  );
+
+  assert.match(
+    publicTlsCaddyfile,
+    /@publicHealth \{[\s\S]*?method GET[\s\S]*?path \/healthz \/bootstrap-healthz \/internal-healthz[\s\S]*?\}/
+  );
+  assert.match(publicTlsCaddyfile, /@publicFeishuConfig \{[\s\S]*?method GET/);
+  assert.match(publicTlsCaddyfile, /@publicLauncherProduct \{[\s\S]*?method GET/);
+  assert.match(publicTlsCaddyfile, /@publicClientPost \{[\s\S]*?method POST/);
+  assert.match(publicTlsCaddyfile, /@publicLeaseOperation \{[\s\S]*?method POST/);
+  assert.equal(
+    [...publicTlsCaddyfile.matchAll(/^\s*reverse_proxy domestic-edge:8088\s*\{$/gm)].length,
+    5,
+    'public TLS must proxy only health plus the four explicit client-bootstrap matcher groups'
+  );
+  assert.equal(
+    [...publicTlsCaddyfile.matchAll(/^\s*header_up X-Forwarded-For \{remote_host\}\s*$/gm)].length,
+    5,
+    'the public TLS owner must overwrite user-supplied forwarding headers with the socket client IP'
+  );
+  assert.match(publicTlsCaddyfile, /respond "not found\\n" 404/);
+  assert.doesNotMatch(publicTlsCaddyfile, /path \/internal\/\*/);
+  assert.doesNotMatch(publicTlsCaddyfile, /path \/api\/\*/);
+  assert.doesNotMatch(publicTlsCaddyfile, /path \/h2i\/\*/);
+  assert.doesNotMatch(publicTlsCaddyfile, /config-center/);
   assert.doesNotMatch(compose, /MX_DOMESTIC_DNS_BIND:-0\.0\.0\.0/);
   assert.doesNotMatch(compose, /MX_DOMESTIC_DNS_PORT:-50053/);
   assert.match(corefile, /^\s*forward \. 10\.88\.88\.88:53\s*$/m);
@@ -70,6 +159,10 @@ try {
   );
   assert.match(envExample, /^MX_DOMESTIC_DNS_BIND=10\.88\.0\.1$/m);
   assert.match(envExample, /^MX_DOMESTIC_DNS_PORT=53$/m);
+  assert.match(envExample, /^MX_DOMESTIC_EDGE_BIND=127\.0\.0\.1$/m);
+  assert.match(envExample, /^MX_DOMESTIC_BOOTSTRAP_HOST=h2i\.minsight-ai\.com$/m);
+  assert.match(envExample, /^MX_DOMESTIC_PUBLIC_GATEWAY_NETWORK=compass-gateway_default$/m);
+  assert.match(envExample, /^MX_DOMESTIC_HTTPS_PORT=443$/m);
   assert.doesNotMatch(envExample, /^MX_DOMESTIC_DNS_BIND=0\.0\.0\.0$/m);
   assert.doesNotMatch(envExample, /^MX_DOMESTIC_DNS_PORT=50053$/m);
   assert.match(readme, /CoreDNS edge cache on `10\.88\.0\.1:53`/);
@@ -77,10 +170,33 @@ try {
   assert.match(readme, /Internal lookups to the live authority on `10\.88\.88\.88:53`/);
   assert.match(manage, /DNS profile bind: \$\{MX_DOMESTIC_DNS_BIND:-10\.88\.0\.1\}:\$\{MX_DOMESTIC_DNS_PORT:-53\}/);
   assert.match(manage, /COMPOSE_PROFILES=dns compose up -d --force-recreate --no-deps dns-forwarder/);
+  assert.match(manage, /up-public-tls/);
+  assert.match(manage, /COMPOSE_PROFILES=public-tls compose up -d --force-recreate public-tls/);
+  assert.match(manage, /PUBLIC_GATEWAY_MARKER="\$STACK_DIR\/data\/public-gateway-enabled"/);
+  assert.match(
+    manage,
+    /docker compose -f docker-compose\.yml -f docker-compose\.public-gateway\.yml "\$@"/
+  );
+  assert.match(manage, /docker network inspect "\$network"/);
+  assert.match(manage, /touch "\$PUBLIC_GATEWAY_MARKER"/);
+  assert.match(
+    manage,
+    /stop_public_tls_fallback\(\)[\s\S]*COMPOSE_PROFILES=public-tls compose_public_gateway stop public-tls/
+  );
+  assert.match(
+    manage,
+    /start_domestic_edge\(\)[\s\S]*docker network inspect "\$network"[\s\S]*compose_public_gateway up -d "\$@" domestic-edge/
+  );
+  assert.match(manage, /official Compass public gateway is enabled; public-tls must not compete for TCP 443/);
+  assert.match(readme, /Compass nginx reaches this service at `http:\/\/mx-domestic-edge:8088`/);
+  assert.match(manage, /curl -fsS --connect-timeout 5 --max-time 20 "https:\/\/\$\{authority\}\/bootstrap-healthz"/);
   assert.doesNotMatch(manage, /MX_DOMESTIC_DNS_BIND:-0\.0\.0\.0/);
   assert.doesNotMatch(manage, /MX_DOMESTIC_DNS_PORT:-50053/);
 
   const adminController = readFileSync(adminControllerPath, 'utf8');
+  const domain = readFileSync(domainPath, 'utf8');
+  const internalGateway = readFileSync(internalGatewayPath, 'utf8');
+  const internalConfig = readFileSync(internalConfigPath, 'utf8');
   assert.match(
     adminController,
     /function domesticDnsEdgeCorefileContent[\s\S]*?'  forward \. 10\.88\.88\.88:53'/,
@@ -111,10 +227,50 @@ try {
     /dnsExpectedAnswer = '10\.88\.88\.88'/,
     'runtime config apply must prove that the V2 name is forwarded to Internal authority'
   );
+  assert.match(
+    adminController,
+    /const publicBootstrapUrl = new URL\(config\.edge\.publicBaseUrl\);[\s\S]*?const dnsProbeName = `\$\{publicBootstrapUrl\.hostname\}\.`;/,
+    'runtime config apply must probe the hostname selected by the Domestic runtime config'
+  );
+  assert.doesNotMatch(
+    adminController,
+    /const dnsProbeName = 'h2i\.mxinfo-inc\.cn\.'/,
+    'runtime config apply must not probe the retired public default unconditionally'
+  );
+  assert.match(
+    adminController,
+    /mx_public_https_verify\(\)[\s\S]*curl -fsS --connect-timeout 5 --max-time 15 "\$public_bootstrap_health_url"/,
+    'runtime apply must verify the real public HTTPS route with the system trust store'
+  );
   assert.doesNotMatch(
     adminController,
     /mx_dns_port_busy/,
     'a V1 listener on another WireGuard address must not suppress the V2 DNS service'
+  );
+  for (const [name, gatewaySource] of [
+    ['static Internal gateway', internalGateway],
+    ['runtime-rendered Internal gateway', domain]
+  ]) {
+    assert.match(
+      gatewaySource,
+      /remote_ip 10\.88\.0\.1[\s\S]*?header X-MX-Forwarded-By domestic-edge/,
+      `${name} must trust a cleaned forwarding header only from the Domestic WireGuard source`
+    );
+    assert.match(
+      gatewaySource,
+      /handle @domesticEdge \{[\s\S]*?header_up X-Forwarded-For \{http\.request\.header\.X-Forwarded-For\}/,
+      `${name} must preserve the public-edge-cleaned client IP`
+    );
+    assert.match(
+      gatewaySource,
+      /handle \{[\s\S]*?header_up X-Forwarded-For \{remote_host\}[\s\S]*?header_up -X-MX-Forwarded-By/,
+      `${name} must overwrite spoofed forwarding headers on direct Internal requests`
+    );
+  }
+  assert.match(
+    internalConfig,
+    /MX_HTTP_TRUST_PROXY_HOPS:\s*"1"/,
+    'the API must trust only its immediate Internal gateway after that gateway normalizes client IP'
   );
 
   console.log('OK coexistence DNS apply recreates and proves UDP/TCP 10.88.0.1:53 -> Internal 10.88.88.88:53');

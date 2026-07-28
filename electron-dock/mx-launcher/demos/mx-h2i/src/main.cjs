@@ -8,7 +8,7 @@ const dnsPromises = require('node:dns').promises;
 const net = require('node:net');
 const dgram = require('node:dgram');
 const { execFile } = require('node:child_process');
-const { createHash, randomUUID } = require('node:crypto');
+const { createHash, randomBytes, randomUUID, timingSafeEqual } = require('node:crypto');
 const {
   DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS,
   darwinSupersedableOwnershipOwnerIds,
@@ -36,7 +36,7 @@ const {
 const {
   reconcileRuntimeUpdateWithInstalledVersion
 } = require('./update-state-policy.cjs');
-const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: electronScreen, powerMonitor, net: electronNet, dialog, session: electronSession } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, screen: electronScreen, powerMonitor, net: electronNet, dialog, session: electronSession, safeStorage } = require('electron');
 
 loadDotEnvFiles();
 
@@ -62,10 +62,22 @@ const DEFAULT_LOCAL_EDGE_PORT = 2053;
 const DEFAULT_DOMESTIC_DNS_EDGE_PORT = 53;
 const DEFAULT_INTERNAL_DNS_EDGE_PORT = 53;
 const DEFAULT_INTERNAL_GATEWAY_APP_PORT = 80;
-const DEFAULT_BOOTSTRAP_HOST = 'h2i.mxinfo-inc.cn';
+const DEFAULT_BOOTSTRAP_HOST = 'h2i.minsight-ai.com';
+const LEGACY_DEFAULT_BOOTSTRAP_HOST = 'h2i.mxinfo-inc.cn';
 const DEFAULT_DOMESTIC_RELAY_HOST = '116.62.51.154';
 const STALE_DOMESTIC_RELAY_HOSTS = new Set(['121.43.253.179', '121.43.254.179']);
 const DEFAULT_SPLIT_DNS_DOMAINS = 'mx.cn mxinfo-inc.cn internal.mx corp.mx h2i.mx';
+const DEFAULT_FEISHU_CALLBACK_PORT = 17891;
+const FEISHU_CALLBACK_PATH = '/oauth/feishu/callback';
+const FEISHU_AUTH_TIMEOUT_MS = 5 * 60 * 1000;
+const FEISHU_OAUTH_SCOPE = 'auth.read appcenter.read network.dns.policy oversea.subscription.ensure';
+const EMPLOYEE_IDENTITY_BASE_SCOPES = [
+  'auth.read',
+  'appcenter.read',
+  'network.hdi.status',
+  'network.proxy.app',
+  'network.dns.policy'
+];
 const DARWIN_WIREGUARD_SERVICE_IDENTITY = {
   displayName: 'MX-H2I WireGuard',
   darwinLaunchDaemonLabelPrefix: 'com.qpjoy.mx-h2i.wireguard',
@@ -167,6 +179,7 @@ let appShutdownInFlight = null;
 let appShutdownRequested = false;
 let appShutdownCompleted = false;
 let appRelaunchRequested = false;
+let pendingFeishuLogin = null;
 
 const TOP_DOCK_Y = 0;
 const TOP_REVEAL_ZONE = 18;
@@ -204,9 +217,13 @@ if (gotSingleInstanceLock) {
       packaged: app.isPackaged
     });
     await initializeSystemDomainProxy();
-    await reconcileExistingWireGuardAfterStartup();
-    await refreshSystemDomainProxyForRuntime('app-startup');
-    startSystemDomainProxyRefreshWatcher();
+    const credentialStorageRecovery = await reconcileCredentialStorageFailureAfterStartup();
+    if (credentialStorageRecovery.blocked !== true) {
+      await reconcileExistingWireGuardAfterStartup();
+      await reconcilePendingNetworkHandoverAfterStartup();
+      await refreshSystemDomainProxyForRuntime('app-startup');
+      startSystemDomainProxyRefreshWatcher();
+    }
     scheduleNetworkEnvironmentDiagnostics('app-startup', {
       lookupTimeoutMs: NETWORK_DIAGNOSTIC_LOOKUP_TIMEOUT_MS
     });
@@ -222,7 +239,9 @@ if (gotSingleInstanceLock) {
       queueDiagnosticError('startup.update-bookkeeping', err);
     });
     startTopRevealWatcher();
-    startWireGuardRecoveryWatcher();
+    if (credentialStorageRecovery.blocked !== true) {
+      startWireGuardRecoveryWatcher();
+    }
     startNetworkChangeWatcher();
   });
 }
@@ -282,6 +301,7 @@ async function shutdownApplication() {
   queueDiagnosticLog('info', 'app.before-quit', 'MX-H2I is shutting down.', {
     relaunch: appRelaunchRequested
   });
+  clearPendingFeishuLogin('app-shutdown');
   stopNetworkChangeWatcher();
   stopWireGuardRecoveryWatcher();
   stopSystemDomainProxyRefreshWatcher();
@@ -715,14 +735,8 @@ function registerIpc() {
     }
   });
   ipcMain.handle('mx-h2i:login-employee', async (_event, input) => {
-    const connectOperation = beginWireGuardConnectOperation();
-    const lifecycleEpoch = networkMutationEpoch;
-    const transitionStartedAt = Date.now();
-    const transitionId = makeRequestId('staff-connect');
     const account = typeof input?.account === 'string' ? input.account.trim() : '';
     const password = typeof input?.password === 'string' ? input.password : '';
-    try {
-      assertNetworkTransitionCurrent(lifecycleEpoch);
     if (!account || !password) {
       runtime.feedback = {
         tone: 'danger',
@@ -730,151 +744,34 @@ function registerIpc() {
       };
       return visibleRuntime();
     }
-    const employeeEndpointRouteRepair = await repairDarwinEndpointRouteBeforeBootstrap('employee-pre-bootstrap');
-    if (employeeEndpointRouteRepair?.stale === true && employeeEndpointRouteRepair?.repaired !== true) {
-      await saveAndBroadcast();
-      return visibleRuntime();
-    }
-    let connectedGuestWasProbed = false;
-    if (runtime.connection?.mode === 'guest' && runtime.connection?.state === 'connected') {
-      const guestProbe = await probeConnectedModeBeforeTransition('guest', 'staff-connect-guest-fallback-guard');
-      if (guestProbe.superseded) return visibleRuntime();
-      connectedGuestWasProbed = true;
-    }
-    let retainedRecovery = null;
-    if (!connectedGuestWasProbed && shouldAttemptRetainedWireGuardPreBootstrap(runtime.connection)) {
-      retainedRecovery = await recoverRetainedWireGuardBeforeBootstrap('employee-pre-bootstrap', {
-        allowPrivileged: shouldAllowPrivilegedPreBootstrapRecovery()
-      });
-    }
-    if (retainedRecovery?.authorizationCanceled === true) {
+    if (pendingFeishuLogin) {
       runtime.feedback = {
         tone: 'warning',
-        message: '已取消 WireGuard 修复授权；MX-H2I 已保留当前网络状态，不会继续员工认证或再次弹窗。'
+        message: '飞书登录正在进行；请先完成或取消飞书登录，再使用员工账号密码。'
       };
-      touchRuntime('staff connect authorization canceled during retained repair');
-      await publishNetworkModeEvent('staff:connect', 'failed', {
-        reason: 'authorization-canceled',
-        transitionId
-      });
       await saveAndBroadcast();
       return visibleRuntime();
     }
-    const guestFallback = runtime.connection?.mode === 'guest'
-      && (connectionHasReadyNetworkProof(runtime.connection) || runtime.connection?.wireGuard?.active === true)
-      ? retainableConnectionSnapshot(runtime.connection)
-      : null;
-    const identityFallback = guestFallback ? runtime.identity : null;
-    const authFallback = guestFallback ? runtime.auth : null;
-    assertNetworkTransitionCurrent(lifecycleEpoch);
-    setConnecting('employee', { replacingGuest: Boolean(guestFallback) });
-    await publishNetworkModeEvent('staff:connect', 'connecting', {
-      reason: guestFallback ? 'visit-to-staff' : null,
-      transitionId
-    });
-    await saveAndBroadcast();
-    assertNetworkTransitionCurrent(lifecycleEpoch);
-    scheduleNetworkEnvironmentDiagnostics('employee-pre-connect', {
-      phase: 'bootstrap',
-      persist: false,
-      lookupTimeoutMs: NETWORK_DIAGNOSTIC_LOOKUP_TIMEOUT_MS
-    });
-    let authenticated = null;
-    let resolvedBootstrap = null;
-    let dataPlaneApplyStarted = false;
-    try {
-      const bootstrap = await resolveBootstrapEndpoint(runtime.config);
-      assertNetworkTransitionCurrent(lifecycleEpoch);
-      const baseUrl = bootstrap.baseUrl;
-      await applyResolvedBootstrapEndpoint(bootstrap);
-      assertNetworkTransitionCurrent(lifecycleEpoch);
-      const auth = await authenticateUserViaGateway(baseUrl, account, password, {
+    return promoteEmployeeConnection({
+      provider: 'password',
+      account,
+      requestTag: 'employee',
+      authenticate: (baseUrl, bootstrap) => authenticateUserViaGateway(baseUrl, account, password, {
         bootstrapResolveMode: bootstrap.resolveMode
-      });
-      assertNetworkTransitionCurrent(lifecycleEpoch);
-      authenticated = auth;
-      resolvedBootstrap = bootstrap;
-      if (guestFallback) {
-        runtime.feedback = {
-          tone: 'info',
-          message: '员工身份验证通过，正在申请员工 lease；访客网络会保持到员工通道 ready 后再自动释放。'
-        };
-        touchRuntime('employee authenticated; visit retained until staff ready');
-        await saveAndBroadcast();
-      }
-      const session = await connectLauncherNetwork({
-        identityKind: 'user',
-        userId: auth.user.userId,
-        requestTag: 'employee'
-      });
-      assertNetworkTransitionCurrent(lifecycleEpoch);
-      dataPlaneApplyStarted = true;
-      await applyNetworkSession(session, {
-        mode: 'employee',
-        subject: `user:${auth.user.userId}`,
-        routePolicy: 'user full',
-        identity: {
-          kind: 'user',
-          displayName: auth.user.displayName || displayNameFromAccount(account),
-          account: auth.user.email || account,
-          scopes: ['auth.read', 'appcenter.read', 'network.hdi.status', 'network.proxy.app', 'network.dns.policy']
-        },
-        auth,
-        feedback: '员工账号已绑定 Internal User Center，并续租固定 user IP。',
-        replacedMode: guestFallback ? 'guest' : null,
-        fallbackConnection: guestFallback,
-        fallbackIdentity: identityFallback,
-        fallbackAuth: authFallback,
-        lifecycleEpoch,
-        transitionId,
-        transitionStartedAt
-      });
-    } catch (err) {
-      if (isSupersededNetworkTransitionError(err)) return visibleRuntime();
-      if (guestFallback && !dataPlaneApplyStarted) {
-        runtime.connection = guestFallback;
-        runtime.identity = identityFallback;
-        runtime.auth = authFallback;
-        runtime.feedback = {
-          tone: 'danger',
-          message: `员工登录失败：${errorMessage(err)}；原访客网络保持连接。`
-        };
-        touchRuntime('staff connect failed; visit retained');
-      } else {
-        await applyConnectionError('员工登录失败', err);
-      }
-      await publishNetworkModeEvent('staff:connect', 'failed', {
-        reason: errorMessage(err),
-        transitionId
-      });
-    }
-    if (authenticated && resolvedBootstrap && runtime.connection?.mode === 'employee' && runtime.connection?.state === 'connected') {
-      try {
-        await hydrateH2oSystemSubscriptionsForUser({
-          userId: authenticated.user.userId,
-          baseUrl: resolvedBootstrap.baseUrl,
-          bootstrapResolveMode: resolvedBootstrap.resolveMode,
-          showInitializing: true
-        });
-      } catch (err) {
-        runtime.feedback = {
-          tone: 'warning',
-          message: `员工网络已连接，但 H2O 系统订阅刷新失败：${errorMessage(err)}`
-        };
-        touchRuntime('employee connected; h2o subscription refresh failed');
-      }
-    }
-    await saveAndBroadcast();
+      })
+    });
+  });
+  ipcMain.handle('mx-h2i:start-feishu-login', async () => {
+    await startFeishuLogin();
     return visibleRuntime();
-    } catch (err) {
-      if (isSupersededNetworkTransitionError(err)) return visibleRuntime();
-      throw err;
-    } finally {
-      connectOperation.finish();
-    }
+  });
+  ipcMain.handle('mx-h2i:cancel-feishu-login', async () => {
+    await cancelFeishuLogin('user-canceled');
+    return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:disconnect', async () => {
     if (wireGuardDisconnectInFlight) return visibleRuntime();
+    clearPendingFeishuLogin('network-disconnect');
     wireGuardDisconnectInFlight = true;
     networkMutationEpoch += 1;
     let disconnectedMode = runtime.connection?.mode === 'employee' ? 'employee' : 'guest';
@@ -1892,6 +1789,747 @@ function registerIpc() {
     maybeHideTopDock();
     return true;
   });
+}
+
+async function promoteEmployeeConnection(options = {}) {
+  const connectOperation = beginWireGuardConnectOperation();
+  const lifecycleEpoch = networkMutationEpoch;
+  const transitionStartedAt = Date.now();
+  const transitionId = makeRequestId(options.provider === 'feishu' ? 'feishu-staff-connect' : 'staff-connect');
+  const provider = options.provider === 'feishu' ? 'feishu' : 'password';
+  const providerLabel = provider === 'feishu' ? '飞书' : '员工账号';
+  const accountHint = nullableString(options.account);
+  try {
+    assertNetworkTransitionCurrent(lifecycleEpoch);
+    await ensureCredentialStorageRecoveryReady();
+    const employeeEndpointRouteRepair = await repairDarwinEndpointRouteBeforeBootstrap(
+      provider === 'feishu' ? 'feishu-pre-bootstrap' : 'employee-pre-bootstrap'
+    );
+    if (employeeEndpointRouteRepair?.stale === true && employeeEndpointRouteRepair?.repaired !== true) {
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
+    let connectedFallbackWasProbed = false;
+    if (runtime.connection?.state === 'connected') {
+      const guestProbe = await probeConnectedModeBeforeTransition(
+        runtime.connection.mode === 'employee' ? 'employee' : 'guest',
+        provider === 'feishu' ? 'feishu-connect-guest-fallback-guard' : 'staff-connect-guest-fallback-guard'
+      );
+      if (guestProbe.superseded) return visibleRuntime();
+      connectedFallbackWasProbed = true;
+    }
+    let retainedRecovery = null;
+    if (!connectedFallbackWasProbed && shouldAttemptRetainedWireGuardPreBootstrap(runtime.connection)) {
+      retainedRecovery = await recoverRetainedWireGuardBeforeBootstrap(
+        provider === 'feishu' ? 'feishu-pre-bootstrap' : 'employee-pre-bootstrap',
+        { allowPrivileged: shouldAllowPrivilegedPreBootstrapRecovery() }
+      );
+    }
+    if (retainedRecovery?.authorizationCanceled === true) {
+      runtime.feedback = {
+        tone: 'warning',
+        message: `已取消 WireGuard 修复授权；MX-H2I 已保留当前网络状态，不会继续${providerLabel}登录或再次弹窗。`
+      };
+      touchRuntime(`${provider} staff connect authorization canceled during retained repair`);
+      await publishNetworkModeEvent('staff:connect', 'failed', {
+        reason: 'authorization-canceled',
+        transitionId
+      });
+      await saveAndBroadcast();
+      return visibleRuntime();
+    }
+    const networkFallback =
+      (connectionHasReadyNetworkProof(runtime.connection) || runtime.connection?.wireGuard?.active === true)
+      ? retainableConnectionSnapshot(runtime.connection)
+      : null;
+    const guestFallback = networkFallback?.mode === 'guest' ? networkFallback : null;
+    const identityFallback = networkFallback ? runtime.identity : null;
+    const authFallback = networkFallback ? runtime.auth : null;
+    assertNetworkTransitionCurrent(lifecycleEpoch);
+    setConnecting('employee', {
+      replacingGuest: Boolean(guestFallback),
+      provider
+    });
+    await publishNetworkModeEvent('staff:connect', 'connecting', {
+      reason: guestFallback ? 'visit-to-staff' : provider === 'feishu' ? 'feishu-login' : null,
+      transitionId
+    });
+    await saveAndBroadcast();
+    assertNetworkTransitionCurrent(lifecycleEpoch);
+    scheduleNetworkEnvironmentDiagnostics(`${provider}-pre-connect`, {
+      phase: 'bootstrap',
+      persist: false,
+      lookupTimeoutMs: NETWORK_DIAGNOSTIC_LOOKUP_TIMEOUT_MS
+    });
+    let authenticated = options.auth || null;
+    let resolvedBootstrap = options.bootstrap || null;
+    let dataPlaneApplyStarted = false;
+    try {
+      const bootstrap = resolvedBootstrap || await resolveBootstrapEndpoint(runtime.config);
+      assertNetworkTransitionCurrent(lifecycleEpoch);
+      if (provider === 'feishu') {
+        assertSecureFeishuTransport(bootstrap, '员工网络切换');
+      }
+      await assertLiveSecureLauncherCapabilityTransport(
+        bootstrap,
+        provider === 'feishu' ? '飞书员工凭据传输' : '员工账号密码传输'
+      );
+      const baseUrl = bootstrap.baseUrl;
+      await applyResolvedBootstrapEndpoint(bootstrap);
+      assertNetworkTransitionCurrent(lifecycleEpoch);
+      const auth = authenticated || await options.authenticate?.(baseUrl, bootstrap);
+      if (!auth?.user?.userId || !auth?.accessToken) {
+        throw new Error(`${providerLabel}登录没有返回可用的 Internal user token。`);
+      }
+      assertNetworkTransitionCurrent(lifecycleEpoch);
+      authenticated = auth;
+      resolvedBootstrap = bootstrap;
+      const account = nullableString(auth.user.email)
+        || nullableString(auth.user.account)
+        || accountHint
+        || auth.user.userId;
+      if (guestFallback) {
+        runtime.feedback = {
+          tone: 'info',
+          message: `${providerLabel}身份验证通过，正在申请员工 lease 并切换系统网络；切换开始后将替换当前访客通道。`
+        };
+        touchRuntime(`${provider} authenticated; preparing visit-to-staff switch`);
+        await saveAndBroadcast();
+      }
+      const session = await connectLauncherNetwork({
+        identityKind: 'user',
+        userId: auth.user.userId,
+        leaseProfile: provider === 'feishu' ? 'feishu' : undefined,
+        accessToken: auth.accessToken,
+        authProvider: provider,
+        requestTag: provider === 'feishu' ? 'feishu-employee' : 'employee'
+      });
+      assertNetworkTransitionCurrent(lifecycleEpoch);
+      dataPlaneApplyStarted = true;
+      await applyNetworkSession(session, {
+        mode: 'employee',
+        subject: `user:${auth.user.userId}`,
+        routePolicy: 'user full',
+        identity: {
+          kind: 'user',
+          provider,
+          displayName: auth.user.displayName || displayNameFromAccount(account),
+          account,
+          scopes: [...new Set([
+            ...EMPLOYEE_IDENTITY_BASE_SCOPES,
+            ...(Array.isArray(auth.scopes) ? auth.scopes : [])
+          ])]
+        },
+        auth,
+        feedback: provider === 'feishu'
+          ? '飞书账号已绑定 Internal User Center，并续租飞书员工 IP。'
+          : '员工账号已绑定 Internal User Center，并续租固定 user IP。',
+        replacedMode: networkFallback?.mode || null,
+        fallbackConnection: networkFallback,
+        fallbackIdentity: identityFallback,
+        fallbackAuth: authFallback,
+        lifecycleEpoch,
+        transitionId,
+        transitionStartedAt
+      });
+    } catch (err) {
+      if (isSupersededNetworkTransitionError(err)) return visibleRuntime();
+      if (networkFallback && !dataPlaneApplyStarted) {
+        runtime.connection = networkFallback;
+        runtime.identity = identityFallback;
+        runtime.auth = authFallback;
+        runtime.feedback = {
+          tone: 'danger',
+          message: `${providerLabel}登录失败：${errorMessage(err)}；原有网络保持连接。`
+        };
+        touchRuntime(`${provider} staff connect failed; existing network retained`);
+      } else {
+        await applyConnectionError(`${providerLabel}登录失败`, err);
+      }
+      await publishNetworkModeEvent('staff:connect', 'failed', {
+        reason: errorMessage(err),
+        transitionId
+      });
+    }
+    if (authenticated && resolvedBootstrap && runtime.connection?.mode === 'employee' && runtime.connection?.state === 'connected') {
+      try {
+        await hydrateH2oSystemSubscriptionsForUser({
+          userId: authenticated.user.userId,
+          baseUrl: resolvedBootstrap.baseUrl,
+          bootstrapResolveMode: resolvedBootstrap.resolveMode,
+          showInitializing: true
+        });
+      } catch (err) {
+        runtime.feedback = {
+          tone: 'warning',
+          message: `员工网络已连接，但 H2O 系统订阅刷新失败：${errorMessage(err)}`
+        };
+        touchRuntime('employee connected; h2o subscription refresh failed');
+      }
+    }
+    await saveAndBroadcast();
+    return visibleRuntime();
+  } catch (err) {
+    if (isSupersededNetworkTransitionError(err)) return visibleRuntime();
+    throw err;
+  } finally {
+    connectOperation.finish();
+  }
+}
+
+async function startFeishuLogin() {
+  await ensureCredentialStorageRecoveryReady();
+  if (pendingFeishuLogin) {
+    runtime.feedback = {
+      tone: 'info',
+      message: '飞书登录已在浏览器中等待授权，请完成授权或取消当前登录。'
+    };
+    await saveAndBroadcast();
+    return;
+  }
+  const redirectUri = feishuRedirectUri();
+  const flow = {
+    id: makeRequestId('feishu-login'),
+    state: randomBytes(32).toString('base64url'),
+    codeVerifier: randomBytes(48).toString('base64url'),
+    exchangeHandle: null,
+    redirectUri,
+    stage: 'starting',
+    startedAt: nowIso(),
+    expiresAt: new Date(Date.now() + FEISHU_AUTH_TIMEOUT_MS).toISOString(),
+    server: null,
+    timeout: null,
+    callbackAccepted: false,
+    baseUrl: null,
+    bootstrapResolveMode: null
+  };
+  pendingFeishuLogin = flow;
+  try {
+    await listenForFeishuCallback(flow);
+    if (pendingFeishuLogin !== flow) return;
+    const bootstrap = await resolveBootstrapEndpoint(runtime.config);
+    if (pendingFeishuLogin !== flow) return;
+    assertSecureFeishuTransport(bootstrap, '授权初始化');
+    await applyResolvedBootstrapEndpoint(bootstrap);
+    if (pendingFeishuLogin !== flow) return;
+    flow.baseUrl = bootstrap.baseUrl;
+    flow.bootstrapResolveMode = bootstrap.resolveMode;
+    const payload = await requestJson(
+      joinApiUrl(bootstrap.baseUrl, '/internal/v1/sdk/oauth/feishu/authorize'),
+      {
+        method: 'POST',
+        timeoutMs: 10_000,
+        bootstrapResolveMode: bootstrap.resolveMode,
+        body: {
+          redirectUri,
+          state: flow.state,
+          codeChallenge: createHash('sha256').update(flow.codeVerifier).digest('base64url')
+        }
+      }
+    );
+    if (pendingFeishuLogin !== flow) return;
+    const authorizationUrl = nullableString(payload?.authorizationUrl);
+    const exchangeHandle = nullableString(payload?.exchangeHandle);
+    if (
+      !authorizationUrl
+      || !isSafeFeishuAuthorizationUrl(authorizationUrl)
+      || !/^mxfx1\.[A-Za-z0-9_-]{43}$/.test(exchangeHandle || '')
+    ) {
+      throw new Error('Internal 没有返回安全的飞书 HTTPS 授权地址。');
+    }
+    flow.exchangeHandle = exchangeHandle;
+    flow.stage = 'opening-browser';
+    runtime.feedback = {
+      tone: 'info',
+      message: guestPreservingFeishuMessage('正在打开系统浏览器进行飞书授权。')
+    };
+    touchRuntime('feishu authorization browser opening');
+    await saveAndBroadcast();
+    await shell.openExternal(authorizationUrl);
+    if (pendingFeishuLogin !== flow) return;
+    flow.stage = 'waiting-callback';
+    flow.timeout = setTimeout(() => {
+      void expireFeishuLogin(flow);
+    }, Math.max(1, Date.parse(flow.expiresAt) - Date.now()));
+    runtime.feedback = {
+      tone: 'info',
+      message: guestPreservingFeishuMessage('已打开系统浏览器，请在飞书完成授权；可随时返回 MX-H2I 取消。')
+    };
+    touchRuntime('feishu authorization waiting');
+    await saveAndBroadcast();
+  } catch (err) {
+    if (pendingFeishuLogin !== flow) return;
+    clearPendingFeishuLogin('start-failed', flow);
+    runtime.feedback = {
+      tone: 'danger',
+      message: guestPreservingFeishuMessage(`飞书登录启动失败：${errorMessage(err)}。`)
+    };
+    queueDiagnosticError('auth.feishu-start-failed', err);
+    touchRuntime('feishu authorization start failed');
+    await saveAndBroadcast();
+  }
+}
+
+function listenForFeishuCallback(flow) {
+  return new Promise((resolve, reject) => {
+    const callbackUrl = new URL(flow.redirectUri);
+    const server = http.createServer((request, response) => {
+      handleFeishuCallbackRequest(flow, request, response);
+    });
+    flow.server = server;
+    const fail = (err) => {
+      server.removeListener('listening', ready);
+      reject(err);
+    };
+    const ready = () => {
+      server.removeListener('error', fail);
+      server.on('error', (err) => {
+        queueDiagnosticError('auth.feishu-callback-server', err, {
+          port: callbackUrl.port
+        });
+      });
+      resolve();
+    };
+    server.once('error', fail);
+    server.once('listening', ready);
+    server.listen(Number(callbackUrl.port), '127.0.0.1');
+  });
+}
+
+function handleFeishuCallbackRequest(flow, request, response) {
+  if (request.method !== 'GET') {
+    writeFeishuCallbackResponse(response, 405, '请求方式不受支持', '请返回 MX-H2I 重新发起飞书登录。');
+    return;
+  }
+  let callback;
+  try {
+    callback = new URL(request.url || '/', flow.redirectUri);
+  } catch {
+    writeFeishuCallbackResponse(response, 400, '回调地址无效', '请返回 MX-H2I 重新发起飞书登录。');
+    return;
+  }
+  const expectedCallback = new URL(flow.redirectUri);
+  if (callback.origin !== expectedCallback.origin || callback.pathname !== FEISHU_CALLBACK_PATH) {
+    writeFeishuCallbackResponse(response, 404, '不是 MX-H2I 飞书回调', '此本地地址仅用于飞书登录。');
+    return;
+  }
+  if (pendingFeishuLogin !== flow) {
+    writeFeishuCallbackResponse(response, 410, '登录请求已结束', '可以关闭此页面并返回 MX-H2I。');
+    return;
+  }
+  if (flow.callbackAccepted) {
+    writeFeishuCallbackResponse(response, 410, '登录回调已处理', '可以关闭此页面并返回 MX-H2I。');
+    return;
+  }
+  const returnedState = nullableString(callback.searchParams.get('state'));
+  if (!returnedState || !secureStringEqual(returnedState, flow.state)) {
+    writeFeishuCallbackResponse(response, 400, '登录校验失败', 'state 不匹配；为保护账号，本次回调未被接受。');
+    queueDiagnosticLog('warning', 'auth.feishu-state-mismatch', 'Rejected a Feishu callback with mismatched state.');
+    return;
+  }
+  flow.callbackAccepted = true;
+  closeFeishuCallbackServer(flow);
+  if (flow.timeout) {
+    clearTimeout(flow.timeout);
+    flow.timeout = null;
+  }
+  const providerError = nullableString(callback.searchParams.get('error'));
+  if (providerError) {
+    writeFeishuCallbackResponse(response, 200, '飞书授权已取消', '访客网络保持连接，可以关闭此页面。');
+    void rejectFeishuCallback(flow, providerError);
+    return;
+  }
+  const code = feishuAuthorizationCodeFromRawUrl(request.url);
+  if (!code) {
+    writeFeishuCallbackResponse(response, 400, '飞书没有返回授权码', '请返回 MX-H2I 重新发起登录。');
+    void rejectFeishuCallback(flow, 'missing-code');
+    return;
+  }
+  flow.stage = 'exchanging-token';
+  writeFeishuCallbackResponse(response, 200, '飞书授权已完成', 'MX-H2I 正在验证身份并准备员工网络，可以关闭此页面。');
+  broadcastState();
+  void completeFeishuLogin(flow, code);
+}
+
+function feishuAuthorizationCodeFromRawUrl(rawUrl) {
+  if (typeof rawUrl !== 'string') return null;
+  const queryStart = rawUrl.indexOf('?');
+  if (queryStart < 0) return null;
+  const fragmentStart = rawUrl.indexOf('#', queryStart + 1);
+  const query = rawUrl.slice(queryStart + 1, fragmentStart < 0 ? undefined : fragmentStart);
+  let code = null;
+  for (const part of query.split('&')) {
+    const separator = part.indexOf('=');
+    const rawName = separator < 0 ? part : part.slice(0, separator);
+    const rawValue = separator < 0 ? '' : part.slice(separator + 1);
+    let name;
+    let value;
+    try {
+      name = decodeURIComponent(rawName);
+      value = decodeURIComponent(rawValue);
+    } catch {
+      return null;
+    }
+    if (name !== 'code') continue;
+    if (code !== null) return null;
+    code = value;
+  }
+  if (
+    typeof code !== 'string'
+    || !code
+    || code.length > 2048
+    || code.trim() !== code
+    || /[\u0000-\u001f\u007f]/.test(code)
+  ) {
+    return null;
+  }
+  return code;
+}
+
+async function completeFeishuLogin(flow, code) {
+  try {
+    await assertLiveSecureFeishuTransport({
+      baseUrl: flow.baseUrl,
+      resolveMode: flow.bootstrapResolveMode
+    }, '授权码交换');
+    const auth = await authenticateFeishuViaGateway(
+      flow.baseUrl,
+      code,
+      flow.redirectUri,
+      flow.codeVerifier,
+      flow.exchangeHandle,
+      {
+      bootstrapResolveMode: flow.bootstrapResolveMode
+      }
+    );
+    if (pendingFeishuLogin !== flow) return;
+    flow.codeVerifier = null;
+    flow.exchangeHandle = null;
+    flow.stage = 'connecting';
+    runtime.feedback = {
+      tone: 'info',
+      message: guestPreservingFeishuMessage('飞书身份验证通过，正在准备员工网络。')
+    };
+    touchRuntime('feishu authenticated; preparing staff promotion');
+    await saveAndBroadcast();
+    await promoteEmployeeConnection({
+      provider: 'feishu',
+      account: auth.user.email || auth.user.account || auth.user.userId,
+      auth,
+      bootstrap: {
+        baseUrl: flow.baseUrl,
+        resolveMode: flow.bootstrapResolveMode,
+        fallback: null,
+        preserveConfigBaseUrl: true
+      },
+      requestTag: 'feishu-employee'
+    });
+    if (pendingFeishuLogin === flow) {
+      clearPendingFeishuLogin('completed', flow);
+      broadcastState();
+    }
+  } catch (err) {
+    if (pendingFeishuLogin !== flow) return;
+    clearPendingFeishuLogin('token-exchange-failed', flow);
+    runtime.feedback = {
+      tone: 'danger',
+      message: guestPreservingFeishuMessage(`飞书登录失败：${errorMessage(err)}。`)
+    };
+    queueDiagnosticError('auth.feishu-login-failed', err);
+    touchRuntime('feishu login failed');
+    await saveAndBroadcast();
+  }
+}
+
+async function rejectFeishuCallback(flow, reason) {
+  if (pendingFeishuLogin !== flow) return;
+  clearPendingFeishuLogin('provider-rejected', flow);
+  runtime.feedback = {
+    tone: 'warning',
+    message: guestPreservingFeishuMessage(
+      reason === 'access_denied'
+        ? '已取消飞书授权。'
+        : `飞书授权未完成（${sanitizeFeishuReason(reason)}）。`
+    )
+  };
+  touchRuntime('feishu authorization rejected');
+  await saveAndBroadcast();
+}
+
+async function expireFeishuLogin(flow) {
+  if (pendingFeishuLogin !== flow) return;
+  clearPendingFeishuLogin('expired', flow);
+  runtime.feedback = {
+    tone: 'warning',
+    message: guestPreservingFeishuMessage('飞书登录等待超时，请重新发起授权。')
+  };
+  touchRuntime('feishu authorization expired');
+  await saveAndBroadcast();
+}
+
+async function cancelFeishuLogin(reason) {
+  const flow = pendingFeishuLogin;
+  if (!flow) {
+    runtime.feedback = {
+      tone: 'info',
+      message: '当前没有等待中的飞书登录。'
+    };
+    await saveAndBroadcast();
+    return;
+  }
+  if (flow.stage === 'connecting') {
+    runtime.feedback = {
+      tone: 'info',
+      message: '飞书身份已经验证，员工网络正在切换；此阶段请等待连接完成或取消系统授权。'
+    };
+    await saveAndBroadcast();
+    return;
+  }
+  clearPendingFeishuLogin(reason, flow);
+  runtime.feedback = {
+    tone: 'warning',
+    message: guestPreservingFeishuMessage('已取消飞书登录。')
+  };
+  touchRuntime('feishu login canceled');
+  await saveAndBroadcast();
+}
+
+function clearPendingFeishuLogin(reason, expectedFlow = null) {
+  const flow = pendingFeishuLogin;
+  if (!flow || (expectedFlow && flow !== expectedFlow)) return false;
+  pendingFeishuLogin = null;
+  flow.canceledReason = reason;
+  flow.codeVerifier = null;
+  flow.exchangeHandle = null;
+  if (flow.timeout) {
+    clearTimeout(flow.timeout);
+    flow.timeout = null;
+  }
+  closeFeishuCallbackServer(flow);
+  return true;
+}
+
+function closeFeishuCallbackServer(flow) {
+  const server = flow?.server;
+  flow.server = null;
+  if (!server) return;
+  try {
+    server.close();
+  } catch {
+    // The callback listener may already be closed after a completed request.
+  }
+}
+
+function writeFeishuCallbackResponse(response, statusCode, title, message) {
+  const html = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'" />
+  <title>MX-H2I 飞书登录</title>
+  <style>body{margin:0;background:#171922;color:#eef1f3;font:16px/1.6 system-ui,sans-serif;display:grid;min-height:100vh;place-items:center}.card{max-width:520px;margin:24px;padding:32px;border:1px solid #334057;border-radius:16px;background:#222633}h1{margin:0 0 12px;font-size:24px}p{margin:0;color:#aeb6c4}</style>
+</head>
+<body><main class="card"><h1>${escapeHtmlText(title)}</h1><p>${escapeHtmlText(message)}</p></main></body>
+</html>`;
+  response.writeHead(statusCode, {
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff'
+  });
+  response.end(html);
+}
+
+function visibleFeishuAuthFlow() {
+  const flow = pendingFeishuLogin;
+  if (!flow) return null;
+  return {
+    provider: 'feishu',
+    stage: flow.stage,
+    startedAt: flow.startedAt,
+    expiresAt: flow.expiresAt,
+    redirectUri: flow.redirectUri
+  };
+}
+
+function feishuRedirectUri() {
+  return `http://127.0.0.1:${feishuCallbackPort()}${FEISHU_CALLBACK_PATH}`;
+}
+
+function feishuCallbackPort() {
+  const raw = nullableString(process.env.MX_H2I_FEISHU_CALLBACK_PORT);
+  if (!raw) return DEFAULT_FEISHU_CALLBACK_PORT;
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    throw new Error('MX_H2I_FEISHU_CALLBACK_PORT 必须是 1024 到 65535 之间的端口。');
+  }
+  return port;
+}
+
+function isSafeFeishuAuthorizationUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:'
+      && url.hostname === 'accounts.feishu.cn'
+      && url.port === ''
+      && url.pathname === '/open-apis/authen/v1/authorize'
+      && url.username === ''
+      && url.password === ''
+      && url.hash === '';
+  } catch {
+    return false;
+  }
+}
+
+function assertSecureFeishuTransport(bootstrap, operation) {
+  const baseUrl = normalizeBaseUrl(
+    typeof bootstrap === 'string' ? bootstrap : bootstrap?.baseUrl
+  );
+  if (feishuTransportIsSecure(baseUrl)) return baseUrl;
+  const err = new Error(
+    `飞书${operation || '登录'}禁止通过明文 bootstrap 传输。请先连接已验证的访客 WireGuard，或为 Internal bootstrap 配置有效 HTTPS。`
+  );
+  err.code = 'MX_FEISHU_INSECURE_TRANSPORT';
+  throw err;
+}
+
+async function assertLiveSecureFeishuTransport(bootstrap, operation) {
+  const baseUrl = assertSecureFeishuTransport(bootstrap, operation);
+  const target = new URL(baseUrl);
+  const hostname = target.hostname.replace(/^\[|\]$/g, '');
+  if (
+    target.protocol === 'https:'
+    || hostname === '::1'
+    || (net.isIP(hostname) === 4 && hostname.startsWith('127.'))
+  ) {
+    return baseUrl;
+  }
+  const connection = runtime?.connection || {};
+  const routePlan = normalizeRoutePlan(connection.routePlan);
+  const probe = routePlan
+    ? await probeWireGuardForConnection({
+        connection,
+        routePlan,
+        internalBaseUrl: connection.internalBaseUrl
+      })
+    : null;
+  const liveOverlayReady = probe?.wireGuard?.active === true
+    && probe?.diagnostics?.route?.ok === true
+    && probe?.diagnostics?.internalApi?.ok === true;
+  if (liveOverlayReady) {
+    runtime.connection = {
+      ...connection,
+      wireGuard: probe.wireGuard,
+      health: {
+        ...connection.health,
+        wireGuard: 'ready',
+        internalApi: 'ready'
+      },
+      diagnostics: {
+        ...(connection.diagnostics || {}),
+        ...(probe.diagnostics || {}),
+        feishuTransportProbe: {
+          ok: true,
+          operation: operation || '登录',
+          updatedAt: nowIso()
+        },
+        updatedAt: nowIso()
+      }
+    };
+    return baseUrl;
+  }
+  const err = new Error(
+    `飞书${operation || '登录'}前的 WireGuard 实时复检未通过；授权码和登录令牌未发送。请恢复访客网络后重新授权。`
+  );
+  err.code = 'MX_FEISHU_OVERLAY_NOT_READY';
+  throw err;
+}
+
+async function assertLiveSecureLauncherCapabilityTransport(bootstrap, operation) {
+  const baseUrl = normalizeBaseUrl(
+    typeof bootstrap === 'string' ? bootstrap : bootstrap?.baseUrl
+  );
+  if (!feishuTransportIsSecure(baseUrl)) {
+    const err = new Error(
+      `Launcher ${operation || 'lease capability 传输'}禁止使用未验证的明文 bootstrap。请配置有效 HTTPS、使用 loopback，或先建立并实时验证 Internal overlay。`
+    );
+    err.code = 'MX_LAUNCHER_CAPABILITY_INSECURE_TRANSPORT';
+    throw err;
+  }
+  try {
+    return await assertLiveSecureFeishuTransport(bootstrap, operation || 'lease capability 传输');
+  } catch (cause) {
+    const err = new Error(
+      `Launcher ${operation || 'lease capability 传输'}前的 WireGuard 实时复检未通过；capability 与 bearer token 均未发送。`
+    );
+    err.code = 'MX_LAUNCHER_CAPABILITY_OVERLAY_NOT_READY';
+    err.cause = cause;
+    throw err;
+  }
+}
+
+function feishuTransportIsSecure(baseUrl) {
+  let target;
+  try {
+    target = new URL(baseUrl || '');
+  } catch {
+    return false;
+  }
+  if (target.username || target.password) return false;
+  if (target.protocol === 'https:') return true;
+  if (target.protocol !== 'http:') return false;
+  const hostname = target.hostname.replace(/^\[|\]$/g, '');
+  if (
+    hostname === '::1'
+    || (net.isIP(hostname) === 4 && hostname.startsWith('127.'))
+  ) {
+    return true;
+  }
+  const connection = runtime?.connection || {};
+  if (!connectionHasReadyOverlayTransportProof(connection)) return false;
+  const routePlan = normalizeRoutePlan(connection.routePlan);
+  if (!routePlan) return false;
+  let overlay;
+  try {
+    overlay = new URL(internalOverlayBaseUrl(
+      routePlan,
+      connection.internalBaseUrl || runtime?.config?.internalApiBaseUrl
+    ));
+  } catch {
+    return false;
+  }
+  return target.origin === overlay.origin;
+}
+
+function secureStringEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left || ''), 'utf8');
+  const rightBuffer = Buffer.from(String(right || ''), 'utf8');
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function guestPreservingFeishuMessage(message) {
+  const guestIp = runtime?.connection?.mode === 'guest'
+    && isRetainedConnectionState(runtime.connection?.state)
+    ? nullableString(runtime.connection.localIp)
+    : null;
+  return guestIp
+    ? `${message} 当前访客连接（${guestIp}）保持不变。`
+    : message;
+}
+
+function sanitizeFeishuReason(value) {
+  return String(value || 'unknown')
+    .replace(/[^a-z0-9._-]+/ig, '-')
+    .slice(0, 64) || 'unknown';
+}
+
+function escapeHtmlText(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function beginWindowDragSnapshot(inputDragId) {
@@ -4567,9 +5205,13 @@ function networkDiagnosticPhase() {
 
 function networkDiagnosticHost() {
   const routeHost = preferredReverseProxyDiagnosticHost();
+  const connectedInternalFallback = ['connected', 'tunnel-only'].includes(runtime?.connection?.state)
+    ? LEGACY_DEFAULT_BOOTSTRAP_HOST
+    : null;
   return firstHostname([
     process.env.MX_H2I_DNS_DIAGNOSTIC_HOST,
     routeHost,
+    connectedInternalFallback,
     process.env.MX_H2I_BOOTSTRAP_DOMAIN,
     process.env.MX_H2I_BOOTSTRAP_HOST,
     runtime?.config?.bootstrapApiBaseUrl,
@@ -5133,7 +5775,8 @@ function productOwnershipRouteCidrs(routePlan, connection = {}) {
 }
 
 function standaloneOwnershipInstanceId() {
-  return stableOwnershipInstanceId(runtime?.installation || {});
+  return stableOwnershipInstanceId(runtime?.installation || {})
+    || nullableString(runtime?.credentialStorageFailure?.ownershipInstanceId);
 }
 
 function standaloneOwnershipOwnerId() {
@@ -5820,7 +6463,7 @@ async function loadRuntime() {
   let loaded;
   try {
     const raw = await fs.readFile(runtimePath(), 'utf8');
-    loaded = await normalizeRuntime(JSON.parse(raw));
+    loaded = await normalizeRuntime(unprotectPersistedRuntime(JSON.parse(raw)));
   } catch {
     loaded = await normalizeRuntime({});
   }
@@ -5842,6 +6485,9 @@ async function normalizeRuntime(input) {
     installation: normalizeInstallation(row.installation),
     auth: normalizeAuth(row.auth),
     connection: normalizeConnection(row.connection),
+    credentialStorageFailure: normalizeCredentialStorageFailure(row.credentialStorageFailure),
+    leaseCapabilities: normalizeLeaseCapabilities(row.leaseCapabilities),
+    networkHandover: normalizePendingNetworkHandover(row.networkHandover),
     identity: normalizeIdentity(row.identity),
     apps: normalizeApps(row.apps),
     update: normalizeUpdate(reconciledUpdate, config),
@@ -5851,6 +6497,18 @@ async function normalizeRuntime(input) {
     networkEvent: normalizeNetworkModeEvent(row.networkEvent),
     activity: Array.isArray(row.activity) ? row.activity.slice(0, 8) : defaultActivity(),
     updatedAt: typeof row.updatedAt === 'string' ? row.updatedAt : nowIso()
+  };
+}
+
+function normalizeCredentialStorageFailure(input) {
+  const row = input && typeof input === 'object' ? input : null;
+  if (!row) return null;
+  return {
+    reason: nullableString(row.reason) || 'Persisted credentials could not be decrypted.',
+    detectedAt: nullableString(row.detectedAt) || nowIso(),
+    ownershipInstanceId: nullableString(row.ownershipInstanceId),
+    previousMode: row.previousMode === 'employee' ? 'employee' : 'guest',
+    previousLeaseIp: nullableString(row.previousLeaseIp)
   };
 }
 
@@ -5933,13 +6591,34 @@ function normalizeConfig(input) {
 function normalizeBootstrapApiBaseUrlConfig(value) {
   const normalized = normalizeBaseUrl(value) || DEFAULT_CONFIG.bootstrapApiBaseUrl;
   if (isLegacyDefaultBootstrapApiBaseUrl(normalized)) return DEFAULT_CONFIG.bootstrapApiBaseUrl;
+  if (productionBootstrapCanonicalRequired() && isBarePublicIpBootstrapBaseUrl(normalized)) {
+    return DEFAULT_CONFIG.bootstrapApiBaseUrl;
+  }
   return normalized;
 }
 
 function isLegacyDefaultBootstrapApiBaseUrl(value) {
   try {
     const parsed = new URL(normalizeBaseUrl(value) || '');
-    return parsed.hostname === 'api.mxinfo-inc.cn' && (parsed.port || '80') === '18090';
+    if (
+      parsed.username
+      || parsed.password
+      || parsed.pathname !== '/'
+      || parsed.search
+      || parsed.hash
+    ) {
+      return false;
+    }
+    if (
+      parsed.protocol === 'https:'
+      && parsed.hostname === LEGACY_DEFAULT_BOOTSTRAP_HOST
+      && !parsed.port
+    ) {
+      return true;
+    }
+    return parsed.protocol === 'http:'
+      && ['api.mxinfo-inc.cn', LEGACY_DEFAULT_BOOTSTRAP_HOST].includes(parsed.hostname)
+      && parsed.port === '18090';
   } catch {
     return false;
   }
@@ -5955,9 +6634,25 @@ function normalizeSdkGatewayBaseUrlConfig(value, bootstrapApiBaseUrl) {
 function isLegacyDefaultSdkGatewayBaseUrl(value) {
   try {
     const parsed = new URL(normalizeBaseUrl(value) || '');
-    return parsed.hostname === 'api.mxinfo-inc.cn'
-      && (parsed.port || '80') === '18090'
-      && parsed.pathname.replace(/\/+$/, '') === '/internal/v1/sdk';
+    if (
+      parsed.username
+      || parsed.password
+      || parsed.pathname.replace(/\/+$/, '') !== '/internal/v1/sdk'
+      || parsed.search
+      || parsed.hash
+    ) {
+      return false;
+    }
+    if (
+      parsed.protocol === 'https:'
+      && parsed.hostname === LEGACY_DEFAULT_BOOTSTRAP_HOST
+      && !parsed.port
+    ) {
+      return true;
+    }
+    return parsed.protocol === 'http:'
+      && ['api.mxinfo-inc.cn', LEGACY_DEFAULT_BOOTSTRAP_HOST].includes(parsed.hostname)
+      && parsed.port === '18090';
   } catch {
     return false;
   }
@@ -5977,6 +6672,7 @@ function normalizeHostResolveConfig(value, bootstrapApiBaseUrl, domesticRelayHos
     text = hostResolveHasStaleDomesticRelay(explicitDefault) ? '' : explicitDefault;
   }
   if (!shouldAutoBootstrapHostResolve(host)) return text || '';
+  text = migrateKnownLegacyDefaultHostResolve(text);
   if (!text) return `${host}=${domesticRelayHost}`;
   if (hostResolveMentionsHost(text, host)) return text;
   if (host === DEFAULT_BOOTSTRAP_HOST && hostResolveMentionsHost(text, 'api.mxinfo-inc.cn')) {
@@ -5987,6 +6683,44 @@ function normalizeHostResolveConfig(value, bootstrapApiBaseUrl, domesticRelayHos
     }
   }
   return uniqueValues([`${host}=${domesticRelayHost}`, text]).join(',');
+}
+
+function migrateKnownLegacyDefaultHostResolve(value) {
+  const text = nullableString(value);
+  if (!text) return '';
+  return uniqueValues(text
+    .split(/[,\n;]/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const separator = entry.includes('=') ? '=' : ':';
+      const index = entry.indexOf(separator);
+      if (index <= 0) return entry;
+      const host = entry.slice(0, index).trim().toLowerCase();
+      const target = parseHostResolveTarget(entry.slice(index + 1).trim());
+      if (
+        host !== LEGACY_DEFAULT_BOOTSTRAP_HOST
+        || target?.host !== DEFAULT_DOMESTIC_RELAY_HOST
+        || target.port
+      ) {
+        return entry;
+      }
+      return `${DEFAULT_BOOTSTRAP_HOST}=${DEFAULT_DOMESTIC_RELAY_HOST}`;
+    }))
+    .join(',');
+}
+
+function productionBootstrapCanonicalRequired() {
+  return app.isPackaged === true
+    || String(process.env.NODE_ENV || '').trim().toLowerCase() === 'production';
+}
+
+function isBarePublicIpBootstrapBaseUrl(value) {
+  try {
+    return isPublicIpv4Address(new URL(normalizeBaseUrl(value) || '').hostname);
+  } catch {
+    return false;
+  }
 }
 
 function hostResolveHasStaleDomesticRelay(value) {
@@ -6076,6 +6810,7 @@ function normalizeConnection(input) {
       subject: stringValue(row.subject, 'anonymousPrincipal:h2i-demo'),
       connectedAt: typeof row.connectedAt === 'string' ? row.connectedAt : nowIso(),
       leaseId: nullableString(row.leaseId),
+      leaseCapability: nullableString(row.leaseCapability),
       snapshotId: nullableString(row.snapshotId),
       productId: nullableString(row.productId),
       serviceVip: nullableString(row.serviceVip),
@@ -6110,6 +6845,158 @@ function normalizeConnection(input) {
   };
 }
 
+function normalizeLeaseCapabilities(input) {
+  const rows = input && typeof input === 'object' ? Object.values(input) : [];
+  return Object.fromEntries(rows
+    .filter((row) => row && typeof row === 'object')
+    .map((row) => ({
+      capabilityKey: nullableString(row.capabilityKey) || nullableString(row.leaseId),
+      leaseId: nullableString(row.leaseId),
+      capability: nullableString(row.capability),
+      productId: nullableString(row.productId),
+      identityKind: row.identityKind === 'user' ? 'user' : 'anonymous',
+      leaseProfile: ['employee', 'feishu', 'anonymous'].includes(row.leaseProfile)
+        ? row.leaseProfile
+        : row.identityKind === 'user' ? 'employee' : 'anonymous',
+      installId: nullableString(row.installId),
+      userId: nullableString(row.userId),
+      publicKey: nullableString(row.publicKey),
+      expiresAt: nullableString(row.expiresAt),
+      updatedAt: nullableString(row.updatedAt) || nowIso()
+    }))
+    .filter((row) => row.capabilityKey && row.capability)
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .slice(0, 16)
+    .map((row) => [row.capabilityKey, row]));
+}
+
+function normalizePendingNetworkHandover(input) {
+  const row = input && typeof input === 'object' ? input : null;
+  if (!row) return null;
+  const oldLeaseId = nullableString(row.oldLeaseId);
+  const newLeaseId = nullableString(row.newLeaseId);
+  if (!oldLeaseId || !newLeaseId || oldLeaseId === newLeaseId) return null;
+  return {
+    transitionId: nullableString(row.transitionId),
+    phase: ['preparing', 'prepared', 'commit-pending', 'abort-pending'].includes(row.phase)
+      ? row.phase
+      : 'preparing',
+    oldLeaseId,
+    newLeaseId,
+    oldConnection: row.oldConnection && typeof row.oldConnection === 'object'
+      ? visibleConnection(row.oldConnection)
+      : null,
+    newRoutePlan: normalizeRoutePlan(row.newRoutePlan),
+    bootstrapBaseUrl: normalizeBaseUrl(row.bootstrapBaseUrl),
+    bootstrapResolveMode: normalizeBootstrapResolveMode(row.bootstrapResolveMode),
+    startedAt: nullableString(row.startedAt) || nowIso(),
+    updatedAt: nullableString(row.updatedAt) || nowIso()
+  };
+}
+
+function rememberLeaseCapability(lease) {
+  const leaseId = nullableString(lease?.leaseId);
+  const capability = nullableString(lease?.capability);
+  if (!leaseId || !capability) return;
+  const previous = Object.fromEntries(Object.entries(runtime.leaseCapabilities || {})
+    .filter(([, record]) => (
+      record?.leaseId && record.leaseId !== leaseId
+        ? true
+        : record?.capability !== capability
+    )));
+  runtime.leaseCapabilities = normalizeLeaseCapabilities({
+    ...previous,
+    [leaseId]: {
+      capabilityKey: leaseId,
+      leaseId,
+      capability,
+      productId: nullableString(lease.productId),
+      identityKind: lease.identityKind === 'user' ? 'user' : 'anonymous',
+      leaseProfile: nullableString(lease.leaseProfile),
+      installId: nullableString(lease.installId),
+      userId: nullableString(lease.userId),
+      publicKey: nullableString(lease.publicKey),
+      expiresAt: nullableString(lease.expiresAt),
+      updatedAt: nowIso()
+    }
+  });
+}
+
+function forgetLeaseCapability(leaseId) {
+  const normalizedLeaseId = nullableString(leaseId);
+  if (!normalizedLeaseId) return;
+  runtime.leaseCapabilities = normalizeLeaseCapabilities(
+    Object.fromEntries(Object.entries(runtime.leaseCapabilities || {})
+      .filter(([key, record]) => (
+        key !== normalizedLeaseId
+        && record?.leaseId !== normalizedLeaseId
+      )))
+  );
+}
+
+function ensurePendingLeaseCapability(input) {
+  const requestedProfile = input.identityKind === 'user'
+    ? input.authProvider === 'feishu' ? 'feishu' : 'employee'
+    : 'anonymous';
+  const userId = nullableString(input.userId) || 'anonymous';
+  const capabilityKey = `pending:${launcherProductId()}:${requestedProfile}:${userId}`;
+  const existing = runtime.leaseCapabilities?.[capabilityKey];
+  if (existing?.capability) return existing.capability;
+  const capability = `mxlc1.${randomBytes(32).toString('base64url')}`;
+  runtime.leaseCapabilities = normalizeLeaseCapabilities({
+    ...(runtime.leaseCapabilities || {}),
+    [capabilityKey]: {
+      capabilityKey,
+      leaseId: null,
+      capability,
+      productId: launcherProductId(),
+      identityKind: input.identityKind === 'user' ? 'user' : 'anonymous',
+      leaseProfile: requestedProfile,
+      installId: nullableString(runtime.installation?.installId),
+      userId: nullableString(input.userId),
+      publicKey: nullableString(runtime.installation?.keyPair?.publicKey),
+      expiresAt: null,
+      updatedAt: nowIso()
+    }
+  });
+  return capability;
+}
+
+function leaseCapabilitiesForEnrollment(input) {
+  const installation = runtime.installation || {};
+  const installId = nullableString(installation.installId);
+  const publicKey = nullableString(installation.keyPair?.publicKey);
+  const records = Object.values(runtime.leaseCapabilities || {});
+  const relevant = records.filter((record) => (
+    record
+    && record.productId === launcherProductId()
+    && (!installId || record.installId === installId)
+    && (!publicKey || !record.publicKey || record.publicKey === publicKey)
+  ));
+  const requestedProfile = input.identityKind === 'user'
+    ? input.authProvider === 'feishu' ? 'feishu' : 'employee'
+    : 'anonymous';
+  return [...new Set([
+    nullableString(runtime.connection?.leaseCapability),
+    ...relevant
+      .sort((left, right) => {
+        const leftPriority = left.leaseProfile === requestedProfile ? 1 : 0;
+        const rightPriority = right.leaseProfile === requestedProfile ? 1 : 0;
+        return rightPriority - leftPriority || right.updatedAt.localeCompare(left.updatedAt);
+      })
+      .map((record) => nullableString(record.capability))
+  ].filter(Boolean))].slice(0, 16).join(',') || undefined;
+}
+
+function leaseAccessForLeaseId(leaseId) {
+  const normalizedLeaseId = nullableString(leaseId);
+  const record = normalizedLeaseId ? runtime.leaseCapabilities?.[normalizedLeaseId] : null;
+  const capability = nullableString(record?.capability);
+  return normalizedLeaseId && capability
+    ? { leaseId: normalizedLeaseId, capability }
+    : null;
+}
+
 function retainableConnectionSnapshot(connection) {
   if (!connection || typeof connection !== 'object') return null;
   if (isRetainedConnectionState(connection.state)) return connection;
@@ -6121,6 +7008,7 @@ function normalizeIdentity(input) {
   if (row.kind === 'user') {
     return {
       kind: 'user',
+      provider: row.provider === 'feishu' ? 'feishu' : 'password',
       displayName: stringValue(row.displayName, 'employee'),
       account: stringValue(row.account, 'employee@qpjoy.local'),
       scopes: arrayValue(row.scopes, ['auth.read', 'appcenter.read'])
@@ -6128,6 +7016,7 @@ function normalizeIdentity(input) {
   }
   return {
     kind: 'anonymous',
+    provider: null,
     displayName: 'Visitor',
     account: null,
     scopes: ['auth.read']
@@ -6146,7 +7035,8 @@ function normalizeAuth(input) {
     audience: nullableString(row.audience),
     subject: nullableString(row.subject),
     expiresAt: nullableString(row.expiresAt) || nullableString(row.expires_at),
-    scopes: arrayValue(row.scopes, typeof row.scope === 'string' ? row.scope.split(/\s+/) : [])
+    scopes: arrayValue(row.scopes, typeof row.scope === 'string' ? row.scope.split(/\s+/) : []),
+    provider: row.provider === 'feishu' || row.auth_provider === 'feishu' ? 'feishu' : 'password'
   };
 }
 
@@ -10261,6 +11151,7 @@ function idleConnection() {
     subject: null,
     connectedAt: null,
     leaseId: null,
+    leaseCapability: null,
     snapshotId: null,
     productId: null,
     serviceVip: null,
@@ -10629,6 +11520,7 @@ function connectedState(input) {
     subject: input.subject,
     connectedAt: input.connectedAt || nowIso(),
     leaseId: input.leaseId || null,
+    leaseCapability: nullableString(input.leaseCapability),
     snapshotId: input.snapshotId || null,
     productId: input.productId || launcherProductId(),
     serviceVip: input.serviceVip || null,
@@ -10648,28 +11540,40 @@ function connectedState(input) {
 
 function setConnecting(mode, options = {}) {
   const previous = retainableConnectionSnapshot(runtime.connection);
+  const employeeLabel = options.provider === 'feishu' ? '飞书员工身份' : '员工账号';
   runtime.connection = {
     ...(previous || idleConnection()),
     state: 'connecting',
-    mode
+    mode,
+    retainedMode: previous?.mode || null
   };
   runtime.feedback = {
     tone: 'info',
     message: mode === 'employee'
       ? options.replacingGuest
-        ? '正在验证员工账号；认证成功后将自动断开访客模式并切换员工网络。'
-        : '正在验证员工账号并刷新员工 lease。'
+        ? options.provider === 'feishu'
+          ? '飞书身份已验证，正在开始系统网络切换；当前访客通道将被替换。'
+          : '正在验证员工账号；认证失败或取消时保留访客连接，验证通过后开始系统网络切换。'
+        : `正在使用${employeeLabel}刷新员工 lease。`
       : '正在申请游客 relay lease。'
   };
   touchRuntime(mode === 'employee' ? 'employee connecting' : 'guest connecting');
 }
 
 async function connectLauncherNetwork(input) {
+  await ensureCredentialStorageRecoveryReady();
   const context = await launcherContext();
+  await assertLiveSecureLauncherCapabilityTransport(context.bootstrap, 'lease capability 传输');
   const requestTag = stringValue(input.requestTag, 'connect');
+  const newLeaseCapability = ensurePendingLeaseCapability(input);
+  await saveRuntime(runtime);
   const session = await context.launcher.connectNetwork({
     identityKind: input.identityKind,
     userId: input.userId || undefined,
+    leaseProfile: input.leaseProfile || undefined,
+    accessToken: input.accessToken || undefined,
+    leaseCapability: leaseCapabilitiesForEnrollment(input),
+    newLeaseCapability,
     installId: context.installation.installId,
     deviceId: context.installation.deviceId,
     siteId: context.installation.siteId,
@@ -10685,6 +11589,25 @@ async function connectLauncherNetwork(input) {
     ...session,
     bootstrapResolution: context.bootstrap
   };
+}
+
+async function ensureCredentialStorageRecoveryReady() {
+  if (runtime?.credentialStorageFailure) {
+    const recovery = await reconcileCredentialStorageFailureAfterStartup();
+    if (recovery.blocked === true) {
+      throw new Error(
+        recovery.message
+        || '安全存储失效后的本机网络清理尚未确认，当前连接被阻止。'
+      );
+    }
+    startSystemDomainProxyRefreshWatcher();
+    startWireGuardRecoveryWatcher();
+  }
+  if (!secureCredentialStorageAvailable()) {
+    const err = new Error('Electron safeStorage 不可用，不能安全保存 token、lease capability 或 WireGuard 私钥；已阻止建立网络。');
+    err.code = 'MX_SECURE_CREDENTIAL_STORAGE_UNAVAILABLE';
+    throw err;
+  }
 }
 
 async function recoverRetainedWireGuardBeforeBootstrap(reason, options = {}) {
@@ -10791,7 +11714,14 @@ async function ensureLauncherProduct(launcher, productId, productDisplayName) {
     mode: 'standalone',
     serviceVip: '10.88.100.1',
     userCidr: '10.89.0.0/16',
+    feishuCidr: '10.89.0.0/16',
     anonymousCidr: '10.89.0.0/16',
+    userLeaseStart: '10.89.0.1',
+    userLeaseEnd: '10.89.49.254',
+    feishuLeaseStart: '10.89.50.1',
+    feishuLeaseEnd: '10.89.99.254',
+    anonymousLeaseStart: '10.89.100.1',
+    anonymousLeaseEnd: '10.89.254.254',
     defaultDomesticSiteId: 'domestic-main',
     defaultOverseaSiteId: 'oversea-main',
     updatePolicy: 'launcher-managed',
@@ -10806,6 +11736,23 @@ async function applyNetworkSession(session, options) {
   const transitionStartedAt = Number.isFinite(options.transitionStartedAt) ? options.transitionStartedAt : Date.now();
   const applyStartedAt = Date.now();
   const lease = session.lease || {};
+  for (const handoverLease of arrayValue(lease.handoverLeases, [])) {
+    rememberLeaseCapability(handoverLease);
+  }
+  rememberLeaseCapability(lease);
+  const fallbackLeaseId = nullableString(options.fallbackConnection?.leaseId);
+  const recoveredFallbackLease = fallbackLeaseId
+    ? leaseAccessForLeaseId(fallbackLeaseId)
+    : null;
+  if (options.fallbackConnection && recoveredFallbackLease?.capability) {
+    options = {
+      ...options,
+      fallbackConnection: {
+        ...options.fallbackConnection,
+        leaseCapability: recoveredFallbackLease.capability
+      }
+    };
+  }
   const bootstrapResolution = normalizeBootstrapResolution(session.bootstrapResolution);
   const bootstrapResolveMode = bootstrapResolution?.resolveMode || runtime.config.bootstrapResolveMode;
   const bootstrapBaseUrl = bootstrapResolution?.baseUrl || runtime.config.bootstrapApiBaseUrl;
@@ -10813,6 +11760,14 @@ async function applyNetworkSession(session, options) {
     ? `${options.feedback} ${bootstrapResolution.fallback.message}`
     : options.feedback;
   const routePlan = normalizeRoutePlan(session.routePlan);
+    const fallbackLease = leaseAccessFromConnection(options.fallbackConnection);
+    const handoverOptions = fallbackLease && fallbackLease.leaseId !== lease.leaseId
+      ? {
+          handoverPhase: 'prepare',
+          peerLease: fallbackLease,
+          transitionId: options.transitionId
+        }
+      : {};
     const wireGuard = session.wireGuard || {};
     const privateKey = nullableString(wireGuard.privateKey) || runtime.installation?.keyPair?.privateKey;
     const publicKey = nullableString(wireGuard.publicKey) || runtime.installation?.keyPair?.publicKey || lease.publicKey;
@@ -10835,6 +11790,7 @@ async function applyNetworkSession(session, options) {
       routePolicy: options.routePolicy,
       subject: options.subject,
       leaseId: lease.leaseId,
+      leaseCapability: lease.capability,
       snapshotId: routePlan?.snapshotId || session.snapshot?.snapshotId,
       productId: routePlan?.productId || lease.productId,
       serviceVip: routePlan?.serviceVip || lease.serviceVip,
@@ -10847,6 +11803,20 @@ async function applyNetworkSession(session, options) {
       routePlan,
       health: leasedHealth()
     });
+    if (fallbackLease) {
+      runtime.networkHandover = normalizePendingNetworkHandover({
+        transitionId: options.transitionId,
+        phase: 'preparing',
+        oldLeaseId: fallbackLease.leaseId,
+        newLeaseId: lease.leaseId,
+        oldConnection: options.fallbackConnection,
+        newRoutePlan: routePlan,
+        bootstrapBaseUrl,
+        bootstrapResolveMode,
+        startedAt: nowIso(),
+        updatedAt: nowIso()
+      });
+    }
     runtime.identity = options.identity;
     runtime.auth = normalizeAuth(options.auth);
     runtime.feedback = {
@@ -10858,11 +11828,72 @@ async function applyNetworkSession(session, options) {
     assertNetworkTransitionCurrent(options.lifecycleEpoch);
 
     const preflightStartedAt = Date.now();
-    const [domesticPeerSync, internalDirectPeerSync, combinedSystemDomainProxy] = await Promise.all([
-      syncDomesticPeerForLease(lease, { bootstrapResolveMode, bootstrapBaseUrl }),
-      syncInternalDirectPeerForLease(lease, routePlan, { bootstrapResolveMode, bootstrapBaseUrl }),
+    const preflightResults = await Promise.allSettled([
+      syncDomesticPeerForLease(lease, { bootstrapResolveMode, bootstrapBaseUrl, ...handoverOptions }),
+      syncInternalDirectPeerForLease(lease, routePlan, { bootstrapResolveMode, bootstrapBaseUrl, ...handoverOptions }),
       prepareSystemDomainProxyForWireGuardInstall('pre-connect')
     ]);
+    const domesticPeerSync = preflightResults[0].status === 'fulfilled'
+      ? preflightResults[0].value
+      : { status: 'failed', message: errorMessage(preflightResults[0].reason) };
+    const internalDirectPeerSync = preflightResults[1].status === 'fulfilled'
+      ? preflightResults[1].value
+      : { status: 'failed', message: errorMessage(preflightResults[1].reason) };
+    const combinedSystemDomainProxy = preflightResults[2].status === 'fulfilled'
+      ? preflightResults[2].value
+      : null;
+    const preflightFailure = preflightResults.find((result) => result.status === 'rejected');
+    if (!fallbackLease && preflightFailure) {
+      throw preflightFailure.reason;
+    }
+    if (
+      fallbackLease
+      && (
+        preflightFailure
+        || !peerHandoverSyncsReady(domesticPeerSync, internalDirectPeerSync, routePlan)
+      )
+    ) {
+      const rollback = await syncPeerHandover(
+        fallbackLease,
+        lease,
+        'abort',
+        normalizeRoutePlan(options.fallbackConnection?.routePlan),
+        { bootstrapResolveMode, bootstrapBaseUrl, transitionId: options.transitionId }
+      );
+      runtime.networkHandover = rollback.ok
+        ? null
+        : {
+            ...runtime.networkHandover,
+            phase: 'abort-pending',
+            updatedAt: nowIso()
+          };
+      const fallbackProbe = rollback.ok && options.fallbackConnection?.routePlan
+        ? await probeWireGuardForConnection({
+            connection: options.fallbackConnection,
+            routePlan: normalizeRoutePlan(options.fallbackConnection.routePlan),
+            internalBaseUrl: options.fallbackConnection.internalBaseUrl
+          })
+        : null;
+      restoreFallbackConnectionAfterHandover(
+        options,
+        rollback,
+        fallbackProbe,
+        `切换预检未完成（Domestic=${domesticPeerSync?.status || 'unknown'}, Internal=${internalDirectPeerSync?.status || 'unknown'}, System=${preflightResults[2].status}）`
+      );
+      await publishNetworkModeEvent('staff:connect', 'failed', {
+        reason: 'peer-handover-prepare-failed',
+        transitionId: options.transitionId
+      });
+      await saveAndBroadcast();
+      return;
+    }
+    if (runtime.networkHandover) {
+      runtime.networkHandover = {
+        ...runtime.networkHandover,
+        phase: 'prepared',
+        updatedAt: nowIso()
+      };
+    }
     assertNetworkTransitionCurrent(options.lifecycleEpoch);
     const preflightFinishedAt = Date.now();
     runtime.feedback = {
@@ -10873,31 +11904,64 @@ async function applyNetworkSession(session, options) {
     await saveAndBroadcast();
 
     const wireGuardStartedAt = Date.now();
-    const wireGuardResult = await startWireGuardForSession({
-      routePlan,
-      privateKey,
-      internalBaseUrl: overlayInternalBaseUrl,
-      internalDirectPeerSync,
-      domesticPeerSync,
-      domesticRelayDiagnostics: null,
-      darwinExtraInstallShell: combinedSystemDomainProxy?.shell || null,
-      suppressWireGuardDns: shouldSuppressWireGuardDnsForSystemDomainProxy(combinedSystemDomainProxy)
-    });
+    let wireGuardResult;
+    try {
+      wireGuardResult = await startWireGuardForSession({
+        routePlan,
+        privateKey,
+        internalBaseUrl: overlayInternalBaseUrl,
+        internalDirectPeerSync,
+        domesticPeerSync,
+        domesticRelayDiagnostics: null,
+        darwinExtraInstallShell: combinedSystemDomainProxy?.shell || null,
+        suppressWireGuardDns: shouldSuppressWireGuardDnsForSystemDomainProxy(combinedSystemDomainProxy)
+      });
+    } catch (err) {
+      if (fallbackLease) {
+        const rollback = await syncPeerHandover(
+          fallbackLease,
+          lease,
+          'abort',
+          normalizeRoutePlan(options.fallbackConnection?.routePlan),
+          { bootstrapResolveMode, bootstrapBaseUrl, transitionId: options.transitionId }
+        ).catch(() => null);
+        runtime.networkHandover = rollback?.ok === true
+          ? null
+          : runtime.networkHandover
+            ? { ...runtime.networkHandover, phase: 'abort-pending', updatedAt: nowIso() }
+            : null;
+      }
+      throw err;
+    }
     assertNetworkTransitionCurrent(options.lifecycleEpoch);
     const wireGuardFinishedAt = Date.now();
     if (wireGuardResult.authorizationCanceled === true) {
-      if (options.fallbackConnection) {
-        runtime.connection = options.fallbackConnection;
-        runtime.identity = options.fallbackIdentity;
-        runtime.auth = options.fallbackAuth;
-        runtime.feedback = {
-          tone: 'warning',
-          message: '已取消员工网络切换；原访客网络保持连接。'
-        };
-        touchRuntime('staff authorization canceled; visit retained');
-      } else {
-        applyWireGuardAuthorizationCanceled(options, wireGuardResult);
-      }
+      const handoverRollback = fallbackLease
+        ? await syncPeerHandover(
+            fallbackLease,
+            lease,
+            'abort',
+            normalizeRoutePlan(options.fallbackConnection?.routePlan),
+            { bootstrapResolveMode, bootstrapBaseUrl, transitionId: options.transitionId }
+          )
+        : null;
+      runtime.networkHandover = handoverRollback?.ok === true
+        ? null
+        : runtime.networkHandover
+          ? {
+              ...runtime.networkHandover,
+              phase: 'abort-pending',
+              updatedAt: nowIso()
+            }
+          : null;
+      const fallbackProbe = fallbackLease && options.fallbackConnection?.routePlan
+        ? await probeWireGuardForConnection({
+            connection: options.fallbackConnection,
+            routePlan: normalizeRoutePlan(options.fallbackConnection.routePlan),
+            internalBaseUrl: options.fallbackConnection.internalBaseUrl
+          })
+        : null;
+      applyWireGuardAuthorizationCanceled(options, wireGuardResult, handoverRollback, fallbackProbe);
       await publishNetworkModeEvent(
         options.mode === 'employee' ? 'staff:connect' : 'visit:connect',
         'failed',
@@ -10920,6 +11984,24 @@ async function applyNetworkSession(session, options) {
       wireGuardReady: wireGuardResult.ready,
       connection: runtime.connection
     });
+    const handoverCommit = fallbackLease && postConnectReady
+      ? await syncPeerHandover(
+          lease,
+          fallbackLease,
+          'commit',
+          routePlan,
+          { bootstrapResolveMode, bootstrapBaseUrl, transitionId: options.transitionId }
+        )
+      : null;
+    if (handoverCommit) {
+      runtime.networkHandover = handoverCommit.ok
+        ? null
+        : {
+            ...runtime.networkHandover,
+            phase: 'commit-pending',
+            updatedAt: nowIso()
+          };
+    }
     if (postConnectReady) {
       wireGuardBackgroundProbeFailures = 0;
       lastWireGuardRecoveryFailureAt = 0;
@@ -10944,6 +12026,14 @@ async function applyNetworkSession(session, options) {
     const browserReady = systemDomainProxyConnectionReady(systemDomainProxy);
     const ownershipReady = standaloneOwnership?.ok === true;
     const connectionReady = postConnectReady && browserReady && ownershipReady;
+    const supersededLeaseRetirements = connectionReady
+      && (!handoverCommit || handoverCommit.ok)
+      ? await retireSupersededLocalLeases(lease, {
+          bootstrapResolveMode,
+          bootstrapBaseUrl,
+          transitionId: options.transitionId
+        })
+      : [];
     const browserFallback = process.platform === 'win32'
       ? windowsBrowserFallbackState({
           connection: runtime.connection,
@@ -10977,6 +12067,8 @@ async function applyNetworkSession(session, options) {
         : runtime.connection.health,
       diagnostics: {
         ...(runtime.connection.diagnostics || {}),
+        ...(handoverCommit ? { handoverCommit } : {}),
+        ...(supersededLeaseRetirements.length > 0 ? { supersededLeaseRetirements } : {}),
         ...(systemDomainProxy ? { systemDomainProxy } : {}),
         ...(standaloneOwnership ? { standaloneOwnership } : {}),
         ...(process.platform === 'win32'
@@ -11086,7 +12178,63 @@ async function applyNetworkSession(session, options) {
   });
 }
 
-function applyWireGuardAuthorizationCanceled(options, wireGuardResult) {
+function restoreFallbackConnectionAfterHandover(options, handoverRollback, fallbackProbe, reason) {
+  const fallbackReady = handoverRollback?.ok === true && fallbackProbe?.ready === true;
+  runtime.connection = {
+    ...options.fallbackConnection,
+    state: fallbackReady ? 'connected' : 'lease-only',
+    health: fallbackReady
+      ? fallbackProbe.health
+      : {
+          ...normalizeHealth(options.fallbackConnection.health, leasedHealth()),
+          wireGuard: 'stale',
+          internalApi: 'idle',
+          splitDns: 'stale'
+        },
+    wireGuard: fallbackProbe?.wireGuard || options.fallbackConnection.wireGuard,
+    diagnostics: {
+      ...(options.fallbackConnection.diagnostics || {}),
+      handoverRollback: {
+        ...handoverRollback,
+        reason,
+        fallbackReady,
+        updatedAt: nowIso()
+      },
+      updatedAt: nowIso()
+    }
+  };
+  runtime.identity = options.fallbackIdentity || normalizeIdentity(null);
+  runtime.auth = normalizeAuth(options.fallbackAuth);
+  runtime.feedback = {
+    tone: fallbackReady ? 'warning' : 'danger',
+    message: fallbackReady
+      ? `${reason}；远端 peer 已回滚并实测恢复原访客连接。`
+      : `${reason}；远端 peer 已尝试回滚，但原访客通道尚未重新验证，请重新连接。`
+  };
+  touchRuntime('employee handover rolled back to guest');
+}
+
+function applyWireGuardAuthorizationCanceled(options, wireGuardResult, handoverRollback = null, fallbackProbe = null) {
+  if (options.fallbackConnection) {
+    restoreFallbackConnectionAfterHandover(
+      options,
+      handoverRollback,
+      fallbackProbe,
+      '已取消系统授权'
+    );
+    runtime.connection = {
+      ...runtime.connection,
+      diagnostics: {
+        ...(runtime.connection.diagnostics || {}),
+        authorizationCanceled: {
+          ok: false,
+          message: wireGuardResult.message || '用户取消了系统授权。',
+          updatedAt: nowIso()
+        }
+      }
+    };
+    return;
+  }
   runtime.connection = {
     ...idleConnection(),
     mode: options.mode === 'employee' ? 'employee' : 'guest',
@@ -11566,6 +12714,292 @@ function launcherNetworkHealth(input) {
   };
 }
 
+function launcherLeaseAccessHeaders(lease) {
+  const headers = { ...appCenterCatalogHeaders() };
+  const capability = nullableString(lease?.capability) || nullableString(lease?.leaseCapability);
+  if (capability) headers['x-mx-lease-capability'] = capability;
+  return headers;
+}
+
+function leaseAccessFromConnection(connection) {
+  const leaseId = nullableString(connection?.leaseId);
+  const capability = nullableString(connection?.leaseCapability);
+  if (!leaseId || !capability) return null;
+  return { leaseId, capability };
+}
+
+async function syncPeerHandover(targetLease, peerLease, handoverPhase, routePlan, options = {}) {
+  const sharedOptions = {
+    ...options,
+    handoverPhase,
+    peerLease
+  };
+  const results = await Promise.allSettled([
+    syncDomesticPeerForLease(targetLease, sharedOptions),
+    syncInternalDirectPeerForLease(targetLease, routePlan, sharedOptions)
+  ]);
+  const domesticPeerSync = results[0].status === 'fulfilled'
+    ? results[0].value
+    : { status: 'failed', message: errorMessage(results[0].reason) };
+  const internalDirectPeerSync = results[1].status === 'fulfilled'
+    ? results[1].value
+    : { status: 'failed', message: errorMessage(results[1].reason) };
+  const peersReady = peerHandoverSyncsReady(
+    domesticPeerSync,
+    internalDirectPeerSync,
+    routePlan
+  );
+  const retirement = handoverPhase !== 'prepare' && peersReady
+    ? await releaseRetiredHandoverLease(peerLease, options)
+    : null;
+  return {
+    phase: handoverPhase,
+    ok: peersReady && (handoverPhase === 'prepare' || retirement?.ok === true),
+    domesticPeerSync,
+    internalDirectPeerSync,
+    retirement,
+    updatedAt: nowIso()
+  };
+}
+
+async function releaseRetiredHandoverLease(lease, options = {}) {
+  const leaseId = nullableString(lease?.leaseId);
+  if (!leaseId) {
+    return {
+      ok: false,
+      status: 'failed',
+      message: 'Retired handover lease is missing leaseId.',
+      updatedAt: nowIso()
+    };
+  }
+  try {
+    const baseUrl = normalizeBaseUrl(options.bootstrapBaseUrl) || runtime.config.bootstrapApiBaseUrl;
+    const payload = await requestJson(
+      joinApiUrl(
+        baseUrl,
+        `/internal/v1/launcher-network/leases/${encodeURIComponent(leaseId)}/release`
+      ),
+      {
+        method: 'POST',
+        headers: launcherLeaseAccessHeaders(lease),
+        body: {
+          requestedBy: REQUESTED_BY,
+          requestId: nullableString(options.transitionId)
+            ? `${options.transitionId}:retire:${leaseId}`
+            : makeRequestId('handover-lease-release')
+        },
+        timeoutMs: 10_000,
+        bootstrapResolveMode: options.bootstrapResolveMode || runtime.config.bootstrapResolveMode
+      }
+    );
+    const released = payload?.lease;
+    if (released?.status !== 'released') {
+      throw new Error('Internal did not confirm that the retired handover lease was released.');
+    }
+    forgetLeaseCapability(leaseId);
+    return {
+      ok: true,
+      status: 'released',
+      leaseId,
+      releasedAt: nullableString(released.releasedAt),
+      updatedAt: nowIso()
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 'failed',
+      leaseId,
+      message: errorMessage(err),
+      updatedAt: nowIso()
+    };
+  }
+}
+
+async function retireSupersededLocalLeases(currentLease, options = {}) {
+  const leaseId = nullableString(currentLease?.leaseId);
+  const productId = nullableString(currentLease?.productId) || launcherProductId();
+  const installId = nullableString(currentLease?.installId)
+    || nullableString(runtime.installation?.installId);
+  const publicKey = nullableString(currentLease?.publicKey)
+    || nullableString(runtime.installation?.keyPair?.publicKey);
+  if (!leaseId || !installId || !publicKey) return [];
+  const candidates = Object.values(runtime.leaseCapabilities || {})
+    .filter((record) => (
+      record?.leaseId
+      && record.leaseId !== leaseId
+      && record.productId === productId
+      && record.installId === installId
+      && record.publicKey === publicKey
+    ))
+    .map((record) => ({
+      leaseId: record.leaseId,
+      capability: record.capability
+    }));
+  const results = await Promise.all(candidates.map((candidate) => (
+    releaseRetiredHandoverLease(candidate, options)
+  )));
+  for (const result of results) {
+    if (result.ok) continue;
+    queueDiagnosticLog(
+      'warning',
+      'network.superseded-lease-retirement-pending',
+      'A superseded local launcher lease could not be retired and will be retried after a later connection.',
+      { leaseId: result.leaseId, message: result.message }
+    );
+  }
+  return results;
+}
+
+function peerHandoverSyncsReady(domesticPeerSync, internalDirectPeerSync, routePlan) {
+  const relayRequired = routePlanHasRelay(routePlan);
+  const directRequired = routePlanHasDirect(routePlan);
+  return (!relayRequired || domesticPeerSync?.status === 'passed')
+    && (!directRequired || internalDirectPeerSync?.status === 'passed')
+    && (relayRequired || directRequired);
+}
+
+async function reconcilePendingNetworkHandoverAfterStartup() {
+  const pending = normalizePendingNetworkHandover(runtime?.networkHandover);
+  if (!pending) return null;
+  const oldLease = leaseAccessForLeaseId(pending.oldLeaseId);
+  const newLease = leaseAccessForLeaseId(pending.newLeaseId);
+  if (!oldLease || !newLease) {
+    runtime.feedback = {
+      tone: 'danger',
+      message: '检测到未完成的网络身份切换，但本机安全存储缺少 lease capability；请由管理员清理远端双 IP peer 后重新连接。'
+    };
+    queueDiagnosticLog('error', 'network.handover-capability-missing', runtime.feedback.message, {
+      transitionId: pending.transitionId,
+      phase: pending.phase,
+      oldLeaseId: pending.oldLeaseId,
+      newLeaseId: pending.newLeaseId
+    });
+    await saveRuntime(runtime);
+    return null;
+  }
+
+  const currentRoutePlan = normalizeRoutePlan(runtime.connection?.routePlan || pending.newRoutePlan);
+  const oldRoutePlan = normalizeRoutePlan(pending.oldConnection?.routePlan);
+  const newRoutePlan = normalizeRoutePlan(pending.newRoutePlan || currentRoutePlan);
+  const oldLeaseIp = nullableString(oldRoutePlan?.leaseIp)
+    || nullableString(pending.oldConnection?.localIp);
+  const newLeaseIp = nullableString(newRoutePlan?.leaseIp);
+  let actualInterfaceIps = [];
+  let wireGuardStatus = null;
+  try {
+    const mod = await import('@qpjoy/electron-launcher/wireguard');
+    wireGuardStatus = mod.getLauncherWireGuardPeerStatus(wireGuardRuntimeOptions());
+    actualInterfaceIps = uniqueStrings(arrayValue(wireGuardStatus?.addresses, [])
+      .map((address) => nullableString(address)?.split('/')[0])
+      .filter(Boolean));
+  } catch (err) {
+    queueDiagnosticError('network.handover-recovery-address-probe-failed', err, {
+      transitionId: pending.transitionId
+    });
+  }
+  const actualUsesOldLease = Boolean(oldLeaseIp && actualInterfaceIps.includes(oldLeaseIp));
+  const actualUsesNewLease = Boolean(newLeaseIp && actualInterfaceIps.includes(newLeaseIp));
+  if (
+    !oldLeaseIp
+    || !newLeaseIp
+    || actualUsesOldLease === actualUsesNewLease
+  ) {
+    runtime.networkHandover = {
+      ...pending,
+      updatedAt: nowIso()
+    };
+    runtime.feedback = {
+      tone: 'danger',
+      message: '检测到未完成的网络身份切换，但无法从 WireGuard 实际接口地址唯一判断旧/新路径；已保留 pending，未自动 commit 或 abort。'
+    };
+    queueDiagnosticLog('error', 'network.handover-recovery-address-ambiguous', runtime.feedback.message, {
+      transitionId: pending.transitionId,
+      phase: pending.phase,
+      oldLeaseIp,
+      newLeaseIp,
+      actualInterfaceIps,
+      wireGuardActive: wireGuardStatus?.active === true
+    });
+    await saveRuntime(runtime);
+    return {
+      ok: false,
+      pending: true,
+      reason: 'wireguard-interface-address-ambiguous',
+      oldLeaseIp,
+      newLeaseIp,
+      actualInterfaceIps
+    };
+  }
+  const commit = actualUsesNewLease;
+  const targetLease = commit ? newLease : oldLease;
+  const peerLease = commit ? oldLease : newLease;
+  const targetRoutePlan = commit
+    ? newRoutePlan
+    : oldRoutePlan;
+  const result = await syncPeerHandover(
+    targetLease,
+    peerLease,
+    commit ? 'commit' : 'abort',
+    targetRoutePlan,
+    {
+      bootstrapBaseUrl: pending.bootstrapBaseUrl,
+      bootstrapResolveMode: pending.bootstrapResolveMode,
+      transitionId: pending.transitionId
+    }
+  );
+  if (result.ok) {
+    runtime.networkHandover = null;
+    if (!commit && pending.oldConnection) {
+      runtime.connection = {
+        ...pending.oldConnection,
+        state: 'lease-only',
+        health: {
+          ...normalizeHealth(pending.oldConnection.health, leasedHealth()),
+          wireGuard: 'stale',
+          internalApi: 'idle',
+          splitDns: 'stale'
+        },
+        diagnostics: {
+          ...(pending.oldConnection.diagnostics || {}),
+          handoverRecovery: result,
+          updatedAt: nowIso()
+        }
+      };
+    }
+  } else {
+    runtime.networkHandover = {
+      ...pending,
+      phase: commit ? 'commit-pending' : 'abort-pending',
+      updatedAt: nowIso()
+    };
+  }
+  queueDiagnosticLog(
+    result.ok ? 'info' : 'warning',
+    `network.handover-${commit ? 'commit' : 'abort'}-${result.ok ? 'completed' : 'pending'}`,
+    result.ok
+      ? `Pending network handover ${commit ? 'commit' : 'abort'} completed.`
+      : `Pending network handover ${commit ? 'commit' : 'abort'} remains degraded and will be retried.`,
+    { transitionId: pending.transitionId, result }
+  );
+  await saveRuntime(runtime);
+  return result;
+}
+
+function launcherPeerHandoverRequest(options = {}) {
+  const peerLeaseId = nullableString(options.peerLease?.leaseId);
+  const transitionId = nullableString(options.transitionId);
+  const handoverPhase = ['prepare', 'commit', 'abort'].includes(options.handoverPhase)
+    ? options.handoverPhase
+    : null;
+  if (!peerLeaseId || !handoverPhase || !transitionId) return { headers: {}, body: {} };
+  const peerCapability = nullableString(options.peerLease?.capability)
+    || nullableString(options.peerLease?.leaseCapability);
+  return {
+    headers: peerCapability ? { 'x-mx-peer-lease-capability': peerCapability } : {},
+    body: { transitionId, peerLeaseId, handoverPhase }
+  };
+}
+
 async function syncDomesticPeerForLease(lease, options = {}) {
   const leaseId = nullableString(lease?.leaseId);
   if (!leaseId) {
@@ -11578,11 +13012,14 @@ async function syncDomesticPeerForLease(lease, options = {}) {
   }
   try {
     const baseUrl = normalizeBaseUrl(options.bootstrapBaseUrl) || runtime.config.bootstrapApiBaseUrl;
+    const handover = launcherPeerHandoverRequest(options);
     const payload = await requestJson(joinApiUrl(baseUrl, `/internal/v1/launcher-network/leases/${encodeURIComponent(leaseId)}/domestic-peer/sync`), {
       method: 'POST',
+      headers: { ...launcherLeaseAccessHeaders(lease), ...handover.headers },
       body: {
         requestedBy: REQUESTED_BY,
-        requestId: makeRequestId('domestic-peer-sync')
+        requestId: makeRequestId('domestic-peer-sync'),
+        ...handover.body
       },
       timeoutMs: DEFAULT_DOMESTIC_PEER_SYNC_TIMEOUT_MS,
       bootstrapResolveMode: options.bootstrapResolveMode || runtime.config.bootstrapResolveMode
@@ -11626,11 +13063,14 @@ async function syncInternalDirectPeerForLease(lease, routePlan, options = {}) {
   }
   try {
     const baseUrl = normalizeBaseUrl(options.bootstrapBaseUrl) || runtime.config.bootstrapApiBaseUrl;
+    const handover = launcherPeerHandoverRequest(options);
     const payload = await requestJson(joinApiUrl(baseUrl, `/internal/v1/launcher-network/leases/${encodeURIComponent(leaseId)}/internal-direct-peer/sync`), {
       method: 'POST',
+      headers: { ...launcherLeaseAccessHeaders(lease), ...handover.headers },
       body: {
         requestedBy: REQUESTED_BY,
-        requestId: makeRequestId('internal-direct-peer-sync')
+        requestId: makeRequestId('internal-direct-peer-sync'),
+        ...handover.body
       },
       timeoutMs: 20000,
       bootstrapResolveMode: options.bootstrapResolveMode || runtime.config.bootstrapResolveMode
@@ -11666,6 +13106,7 @@ async function diagnoseDomesticRelayForLease(lease, options = {}) {
     const baseUrl = normalizeBaseUrl(options.bootstrapBaseUrl) || runtime.config.bootstrapApiBaseUrl;
     const payload = await requestJson(joinApiUrl(baseUrl, `/internal/v1/launcher-network/leases/${encodeURIComponent(leaseId)}/domestic-relay/diagnostics`), {
       method: 'POST',
+      headers: launcherLeaseAccessHeaders(lease),
       body: {
         requestedBy: REQUESTED_BY,
         requestId: makeRequestId('domestic-relay-diagnostics')
@@ -11715,9 +13156,13 @@ async function refreshWireGuardDiagnostics() {
     runtime.feedback = { tone: 'warning', message: '当前没有可诊断的 launcher lease。' };
     return;
   }
-  const domesticPeerSync = await syncDomesticPeerForLease({ leaseId: connection.leaseId });
-  const internalDirectPeerSync = await syncInternalDirectPeerForLease({ leaseId: connection.leaseId }, routePlan);
-  const domesticRelayDiagnostics = await diagnoseDomesticRelayForLease({ leaseId: connection.leaseId });
+  const leaseAccess = {
+    leaseId: connection.leaseId,
+    capability: connection.leaseCapability
+  };
+  const domesticPeerSync = await syncDomesticPeerForLease(leaseAccess);
+  const internalDirectPeerSync = await syncInternalDirectPeerForLease(leaseAccess, routePlan);
+  const domesticRelayDiagnostics = await diagnoseDomesticRelayForLease(leaseAccess);
   const wireGuardResult = await probeWireGuardForConnection({
     connection,
     routePlan,
@@ -11732,8 +13177,8 @@ async function refreshWireGuardDiagnostics() {
     health: wireGuardResult.health,
     wireGuard: wireGuardResult.wireGuard,
     domesticPeerSync,
-    diagnostics: wireGuardResult.diagnostics
-  };
+      diagnostics: wireGuardResult.diagnostics
+    };
   const browserFallbackActive =
     wireGuardResult.diagnostics?.windowsBrowserFallback?.active === true;
   runtime.feedback = {
@@ -11744,6 +13189,9 @@ async function refreshWireGuardDiagnostics() {
         : 'WireGuard 诊断通过，Domestic 和 Internal overlay 可达。'
       : `WireGuard 仍未 ready：${wireGuardResult.message}`
   };
+  if (runtime.networkHandover) {
+    await reconcilePendingNetworkHandoverAfterStartup();
+  }
   touchRuntime('wireguard diagnostics refreshed');
 }
 
@@ -11940,6 +13388,9 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
           touchRuntime(`wireguard probe warning: ${reason}`);
           await saveAndBroadcast();
         }
+        if (wireGuardResult.ready && runtime.networkHandover) {
+          await reconcilePendingNetworkHandoverAfterStartup();
+        }
         return {
           ok: true,
           skipped: true,
@@ -11986,6 +13437,9 @@ async function recoverWireGuardForRuntime(reason = 'manual', options = {}) {
       };
       touchRuntime(`wireguard recovered: ${reason}`);
       await saveAndBroadcast();
+      if (wireGuardResult.ready && runtime.networkHandover) {
+        await reconcilePendingNetworkHandoverAfterStartup();
+      }
       if (recovered?.ok === false || !wireGuardResult.ready) lastWireGuardRecoveryFailureAt = Date.now();
       else lastWireGuardRecoveryFailureAt = 0;
       return {
@@ -12108,6 +13562,141 @@ function wireGuardRuntimeIsActive(result) {
   return result?.status?.active === true
     || result?.launchDaemon?.running === true
     || result?.launchDaemon?.loaded === true;
+}
+
+async function reconcileCredentialStorageFailureAfterStartup() {
+  const failure = normalizeCredentialStorageFailure(runtime?.credentialStorageFailure);
+  if (!failure) return { ok: true, required: false };
+
+  let preliminarySystemDomainProxy = null;
+  let wireGuard = null;
+  let systemDomainProxy = null;
+  let standaloneOwnership = null;
+  try {
+    if (process.platform === 'win32') {
+      preliminarySystemDomainProxy = await disableSystemDomainProxyForRuntimeStrict(
+        'credential-storage-fail-closed-before-wireguard-stop',
+        2,
+        { keepLocalEdgeAlive: true }
+      );
+    }
+    const darwinRestoreScript = process.platform === 'darwin'
+      ? systemDomainProxyManager?.darwinRestoreScript?.() || null
+      : null;
+    wireGuard = await stopWireGuardForRuntime({
+      darwinExtraUninstallShell: darwinRestoreScript
+    });
+    const wireGuardStillActive = wireGuardRuntimeIsActive(wireGuard);
+    const wireGuardStopUnknown = process.platform !== 'win32'
+      && wireGuard?.ok === false
+      && typeof wireGuard?.status?.active !== 'boolean'
+      && !wireGuardStillActive;
+    if (
+      wireGuardStillActive
+      || wireGuardStopUnknown
+      || (process.platform === 'win32' && wireGuard?.cleanupReady !== true)
+    ) {
+      throw new Error(
+        wireGuard?.message
+        || wireGuard?.error
+        || 'Credential fail-closed could not verify WireGuard cleanup.'
+      );
+    }
+    systemDomainProxy = process.platform === 'darwin'
+      && darwinRestoreScript
+      && wireGuard?.launchDaemon
+      ? await completeExternalSystemDomainProxyRestore('credential-storage-fail-closed')
+      : await disableSystemDomainProxyForRuntimeStrict(
+          'credential-storage-fail-closed',
+          2
+        );
+    if (systemDomainProxy?.error || systemDomainProxy?.applied === true) {
+      throw new Error(
+        systemDomainProxy?.error
+        || 'Credential fail-closed could not verify PAC/split-DNS cleanup.'
+      );
+    }
+    standaloneOwnership = await releaseStandaloneOwnershipForRuntime(
+      'credential-storage-fail-closed'
+    );
+    if (standaloneOwnership?.error || standaloneOwnership?.ok === false) {
+      throw new Error(
+        standaloneOwnership?.error
+        || 'Credential fail-closed could not verify standalone ownership release.'
+      );
+    }
+  } catch (err) {
+    const message = errorMessage(err);
+    runtime.auth = null;
+    runtime.identity = null;
+    runtime.networkHandover = null;
+    runtime.connection = {
+      ...idleConnection(),
+      state: 'forbidden',
+      mode: failure.previousMode,
+      health: blockedHealth(),
+      diagnostics: {
+        credentialStorageFailure: {
+          ok: false,
+          cleanupRequired: true,
+          message,
+          preliminarySystemDomainProxy,
+          wireGuard,
+          systemDomainProxy,
+          standaloneOwnership,
+          updatedAt: nowIso()
+        },
+        updatedAt: nowIso()
+      }
+    };
+    runtime.feedback = {
+      tone: 'danger',
+      message: `安全存储不可用，旧网络凭据已作废；本机 WireGuard/PAC/ownership 清理尚未确认，已阻止恢复连接：${message}`
+    };
+    queueDiagnosticError('credential-storage.fail-closed-cleanup-pending', err, {
+      wireGuard,
+      systemDomainProxy,
+      standaloneOwnership
+    });
+    touchRuntime('credential storage fail-closed cleanup pending');
+    await saveRuntime(runtime);
+    return { ok: false, required: true, blocked: true, message };
+  }
+
+  runtime.credentialStorageFailure = null;
+  runtime.auth = null;
+  runtime.identity = null;
+  runtime.networkHandover = null;
+  runtime.leaseCapabilities = {};
+  runtime.connection = {
+    ...idleConnection(),
+    diagnostics: {
+      credentialStorageFailure: {
+        ok: true,
+        cleanupRequired: false,
+        message: '旧 WireGuard、PAC/split DNS 与 standalone ownership 已清理。',
+        preliminarySystemDomainProxy,
+        wireGuard,
+        systemDomainProxy,
+        standaloneOwnership,
+        updatedAt: nowIso()
+      },
+      updatedAt: nowIso()
+    }
+  };
+  runtime.feedback = {
+    tone: 'warning',
+    message: '安全存储中的旧凭据不可恢复，已完成本机网络清理并重置身份；请重新登录或连接访客网络。'
+  };
+  queueDiagnosticLog(
+    'warning',
+    'credential-storage.fail-closed-cleanup-complete',
+    runtime.feedback.message,
+    { wireGuard, systemDomainProxy, standaloneOwnership }
+  );
+  touchRuntime('credential storage fail-closed cleanup complete');
+  await saveRuntime(runtime);
+  return { ok: true, required: true, cleaned: true };
 }
 
 async function reconcileExistingWireGuardAfterStartup() {
@@ -12869,10 +14458,50 @@ async function authenticateUserViaGateway(baseUrl, account, password, requestOpt
       requestId: makeRequestId('oauth')
     }
   });
+  return gatewayUserAuth(tokenPayload, {
+    account,
+    fallbackProvider: 'password'
+  });
+}
+
+async function authenticateFeishuViaGateway(
+  baseUrl,
+  code,
+  redirectUri,
+  codeVerifier,
+  exchangeHandle,
+  requestOptions = {}
+) {
+  const tokenPayload = await requestJson(joinApiUrl(baseUrl, '/internal/v1/sdk/oauth/feishu/token'), {
+    method: 'POST',
+    timeoutMs: 10_000,
+    bootstrapResolveMode: requestOptions.bootstrapResolveMode,
+    body: {
+      code,
+      redirectUri,
+      codeVerifier,
+      exchangeHandle,
+      audience: 'mx-sdk',
+      scope: FEISHU_OAUTH_SCOPE,
+      requestId: makeRequestId('feishu-oauth')
+    }
+  });
+  const auth = gatewayUserAuth(tokenPayload);
+  if (auth.provider !== 'feishu') {
+    throw new Error('Internal 返回的 token 不是飞书身份。');
+  }
+  return auth;
+}
+
+function gatewayUserAuth(tokenPayload, options = {}) {
   const token = tokenPayload?.token || tokenPayload;
   const principal = token?.principal && typeof token.principal === 'object' ? token.principal : {};
   const userId = nullableString(principal.userId) || parseUserIdFromSubject(token?.subject);
   if (!userId) throw new Error('OAuth token 没有返回 user principal。');
+  const account = nullableString(principal.email)
+    || nullableString(principal.account)
+    || nullableString(options.account)
+    || userId;
   return {
     accessToken: token.access_token,
     tokenType: token.token_type,
@@ -12882,10 +14511,12 @@ async function authenticateUserViaGateway(baseUrl, account, password, requestOpt
     subject: token.subject,
     expiresAt: token.expires_at,
     scopes: typeof token.scope === 'string' ? token.scope.split(/\s+/).filter(Boolean) : [],
+    provider: nullableString(token.auth_provider) || nullableString(token.authProvider) || options.fallbackProvider || null,
     user: {
       userId,
       displayName: nullableString(principal.displayName) || displayNameFromAccount(account),
-      email: account.includes('@') ? account : null
+      account,
+      email: nullableString(principal.email) || (account.includes('@') ? account : null)
     }
   };
 }
@@ -13042,9 +14673,7 @@ function bootstrapPortCandidates(primaryPort, protocol) {
     ...parseBootstrapPortList(process.env.MX_H2I_BOOTSTRAP_PORTS),
     nullableString(process.env.MX_H2I_BOOTSTRAP_PORT),
     nullableString(primaryPort),
-    '18090',
-    '8088',
-    protocol === 'https' ? '443' : '80'
+    ...(protocol === 'https' ? ['443'] : ['18090', '8088', '80'])
   ].filter(Boolean))
     .map((port) => String(port).trim())
     .filter((port) => {
@@ -13069,17 +14698,18 @@ function defaultPublicBootstrapBaseUrl(config = {}) {
   if (!host) return null;
   const reference = normalizeBaseUrl(config?.bootstrapApiBaseUrl)
     || defaultBootstrapApiBaseUrl();
-  let protocol = 'http';
-  let port = nullableString(process.env.MX_H2I_BOOTSTRAP_PORT) || '18090';
+  let protocol = 'https';
+  let port = nullableString(process.env.MX_H2I_BOOTSTRAP_PORT);
   try {
     const parsed = new URL(reference);
     protocol = parsed.protocol.replace(/:$/, '') || protocol;
-    port = parsed.port || port;
+    port = parsed.port || port || (protocol === 'https' ? '' : '18090');
   } catch {
     // Keep the default public bootstrap shape.
   }
   const formattedHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
-  return `${protocol}://${formattedHost}${port ? `:${port}` : ''}`;
+  const defaultPort = protocol === 'https' ? '443' : '80';
+  return `${protocol}://${formattedHost}${port && port !== defaultPort ? `:${port}` : ''}`;
 }
 
 function bootstrapResolveFallback(requestedMode, resolveMode, failures) {
@@ -13655,7 +15285,7 @@ function diagnosticLogStatus() {
 
 function sanitizeDiagnosticValue(value, key = '', depth = 0) {
   if (value === undefined || value === null) return null;
-  if (/token|password|private.?key|secret|authorization|cookie/i.test(key)) return '[redacted]';
+  if (/token|password|private.?key|secret|capability|authorization|cookie|code.?verifier|exchange.?handle|authorization.?code|login.?ticket|^(?:code|ticket|state)$/i.test(key)) return '[redacted]';
   if (typeof value === 'string') return sanitizeDiagnosticText(value);
   if (typeof value === 'number' || typeof value === 'boolean') return value;
   if (depth >= 6) return '[truncated]';
@@ -13674,7 +15304,7 @@ function sanitizeDiagnosticValue(value, key = '', depth = 0) {
 function sanitizeDiagnosticText(value) {
   const text = String(value ?? '')
     .replace(/(authorization:\s*bearer\s+)[^\s]+/ig, '$1[redacted]')
-    .replace(/([?&](?:token|access_token|password|secret|key)=)[^&\s]+/ig, '$1[redacted]');
+    .replace(/([?&](?:token|access_token|password|secret|key|capability|code|authorization_code|ticket|code_verifier|exchange_handle|state)=)[^&\s]+/ig, '$1[redacted]');
   return text.length > 8000 ? `${text.slice(0, 7997)}...` : text;
 }
 
@@ -13914,12 +15544,31 @@ function diagnosticBundleReadme() {
 }
 
 function visibleRuntime(source = runtime) {
+  const {
+    leaseCapabilities: _leaseCapabilities,
+    encryptedLeaseCapabilities: _encryptedLeaseCapabilities,
+    networkHandover: _networkHandover,
+    ...safeSource
+  } = source;
   return {
-    ...source,
+    ...safeSource,
     installation: visibleInstallation(source.installation),
+    connection: visibleConnection(source.connection),
     auth: visibleAuth(source.auth),
+    authFlow: visibleFeishuAuthFlow(),
     diagnosticLog: diagnosticLogStatus()
   };
+}
+
+function visibleConnection(input) {
+  if (!input || typeof input !== 'object') return input;
+  const {
+    leaseCapability: _leaseCapability,
+    encryptedLeaseCapability: _encryptedLeaseCapability,
+    retainedMode: _retainedMode,
+    ...safe
+  } = input;
+  return safe;
 }
 
 function visibleInstallation(input) {
@@ -13945,7 +15594,8 @@ function visibleAuth(input) {
     audience: auth.audience,
     subject: auth.subject,
     expiresAt: auth.expiresAt,
-    scopes: auth.scopes
+    scopes: auth.scopes,
+    provider: auth.provider
   };
 }
 
@@ -13981,8 +15631,7 @@ async function publishNetworkModeEvent(name, phase, options = {}) {
 
 async function saveRuntime(next) {
   const persistable = persistableRuntime(next);
-  await fs.mkdir(path.dirname(runtimePath()), { recursive: true });
-  await fs.writeFile(runtimePath(), JSON.stringify(persistable, null, 2) + '\n', 'utf8');
+  await writePrivateJsonFile(runtimePath(), protectPersistedRuntime(persistable));
   await savePersistedH2oRuntime(persistable.apps?.h2o?.runtime);
   await maybeSnapshotAppsState(persistable.apps);
 }
@@ -13990,13 +15639,274 @@ async function saveRuntime(next) {
 function persistableRuntime(input) {
   const next = input && typeof input === 'object' ? { ...input } : {};
   if (next.connection?.state === 'connecting') {
-    next.connection = {
-      ...idleConnection(),
-      mode: next.connection.mode === 'employee' ? 'employee' : 'guest',
-      diagnostics: normalizeDiagnostics(next.connection.diagnostics)
-    };
+    const retainedMode = next.connection.retainedMode === 'employee' ? 'employee' : 'guest';
+    next.connection = next.connection.leaseId
+      ? {
+          ...next.connection,
+          state: 'lease-only',
+          mode: retainedMode
+        }
+      : {
+          ...idleConnection(),
+          mode: retainedMode,
+          diagnostics: normalizeDiagnostics(next.connection.diagnostics)
+        };
+    delete next.connection.retainedMode;
   }
   return next;
+}
+
+function protectPersistedRuntime(input) {
+  const next = input && typeof input === 'object' ? { ...input } : {};
+  const auth = normalizeAuth(next.auth);
+  const connection = next.connection && typeof next.connection === 'object'
+    ? { ...next.connection }
+    : null;
+  const installation = normalizeInstallation(next.installation);
+  const leaseCapabilities = normalizeLeaseCapabilities(next.leaseCapabilities);
+  const accessToken = nullableString(auth?.accessToken);
+  const leaseCapability = nullableString(connection?.leaseCapability);
+  const wireGuardPrivateKey = nullableString(installation.keyPair?.privateKey);
+  const hasLeaseCapabilities = Object.keys(leaseCapabilities).length > 0;
+  if (!accessToken && !leaseCapability && !hasLeaseCapabilities && !wireGuardPrivateKey) return next;
+  if (!secureCredentialStorageAvailable()) {
+    const failureReason = 'Electron safeStorage is unavailable or does not provide encrypted Linux storage';
+    return {
+      ...next,
+      auth: null,
+      identity: null,
+      connection: {
+        ...idleConnection(),
+        state: 'forbidden',
+        mode: connection?.mode === 'employee' ? 'employee' : 'guest',
+        diagnostics: {
+          credentialStorageFailure: {
+            ok: false,
+            cleanupRequired: true,
+            message: failureReason,
+            updatedAt: nowIso()
+          },
+          updatedAt: nowIso()
+        }
+      },
+      networkHandover: null,
+      installation: {
+        ...installation,
+        installId: null,
+        deviceId: null,
+        ownershipInstanceId: null,
+        keyPair: null
+      },
+      leaseCapabilities: {},
+      protectedCredentialStorageUnavailable: true,
+      credentialStorageFailure: {
+        reason: failureReason,
+        detectedAt: nowIso(),
+        ownershipInstanceId: stableOwnershipInstanceId(installation),
+        previousMode: connection?.mode === 'employee' ? 'employee' : 'guest',
+        previousLeaseIp: nullableString(connection?.localIp)
+      }
+    };
+  }
+  return {
+    ...next,
+    ...(auth ? { auth: {
+      ...auth,
+      accessToken: null,
+      ...(accessToken
+        ? { encryptedAccessToken: safeStorage.encryptString(accessToken).toString('base64') }
+        : {}),
+      tokenStorage: 'electron-safe-storage-v1'
+    } } : {}),
+    ...(connection ? { connection: {
+      ...connection,
+      leaseCapability: null,
+      ...(leaseCapability
+        ? { encryptedLeaseCapability: safeStorage.encryptString(leaseCapability).toString('base64') }
+        : {})
+    } } : {}),
+    installation: {
+      ...installation,
+      keyPair: installation.keyPair
+        ? { publicKey: installation.keyPair.publicKey, privateKey: null }
+        : null,
+      ...(wireGuardPrivateKey
+        ? { encryptedWireGuardPrivateKey: safeStorage.encryptString(wireGuardPrivateKey).toString('base64') }
+        : {})
+    },
+    leaseCapabilities: {},
+    ...(hasLeaseCapabilities
+      ? {
+          encryptedLeaseCapabilities: safeStorage
+            .encryptString(JSON.stringify(leaseCapabilities))
+            .toString('base64')
+        }
+      : {})
+  };
+}
+
+function unprotectPersistedRuntime(input) {
+  const next = input && typeof input === 'object' ? { ...input } : {};
+  const auth = next.auth && typeof next.auth === 'object' ? { ...next.auth } : null;
+  const connection = next.connection && typeof next.connection === 'object'
+    ? { ...next.connection }
+    : null;
+  const installation = next.installation && typeof next.installation === 'object'
+    ? { ...next.installation }
+    : null;
+  if (next.protectedCredentialStorageUnavailable === true) {
+    const failure = normalizeCredentialStorageFailure(
+      next.credentialStorageFailure || {
+        reason: 'Electron safeStorage was unavailable when runtime credentials were persisted.',
+        detectedAt: nowIso(),
+        ownershipInstanceId: stableOwnershipInstanceId(installation || {}),
+        previousMode: connection?.mode,
+        previousLeaseIp: connection?.localIp
+      }
+    );
+    return {
+      ...next,
+      auth: null,
+      identity: null,
+      connection: {
+        ...idleConnection(),
+        state: 'forbidden',
+        mode: failure.previousMode,
+        diagnostics: {
+          credentialStorageFailure: {
+            ok: false,
+            cleanupRequired: true,
+            message: failure.reason,
+            updatedAt: nowIso()
+          },
+          updatedAt: nowIso()
+        }
+      },
+      networkHandover: null,
+      leaseCapabilities: {},
+      encryptedLeaseCapabilities: null,
+      credentialStorageFailure: failure
+    };
+  }
+  let leaseCapabilities = normalizeLeaseCapabilities(next.leaseCapabilities);
+  if (
+    !auth?.encryptedAccessToken
+    && !connection?.encryptedLeaseCapability
+    && !installation?.encryptedWireGuardPrivateKey
+    && !next.encryptedLeaseCapabilities
+  ) return next;
+  try {
+    if (!secureCredentialStorageAvailable()) {
+      throw new Error('Electron safeStorage is unavailable or does not provide encrypted Linux storage');
+    }
+    if (auth?.encryptedAccessToken) {
+      auth.accessToken = safeStorage.decryptString(Buffer.from(auth.encryptedAccessToken, 'base64'));
+    }
+    if (connection?.encryptedLeaseCapability) {
+      connection.leaseCapability = safeStorage.decryptString(
+        Buffer.from(connection.encryptedLeaseCapability, 'base64')
+      );
+    }
+    if (installation?.encryptedWireGuardPrivateKey) {
+      installation.keyPair = {
+        privateKey: safeStorage.decryptString(
+          Buffer.from(installation.encryptedWireGuardPrivateKey, 'base64')
+        ),
+        publicKey: nullableString(installation.keyPair?.publicKey)
+          || nullableString(installation.publicKey)
+      };
+    }
+    if (next.encryptedLeaseCapabilities) {
+      leaseCapabilities = normalizeLeaseCapabilities(JSON.parse(
+        safeStorage.decryptString(Buffer.from(next.encryptedLeaseCapabilities, 'base64'))
+      ));
+    }
+  } catch (err) {
+    const failureReason = errorMessage(err);
+    queueDiagnosticLog('warning', 'auth.persisted-token-unavailable', 'Persisted credentials could not be decrypted; re-login or lease re-enrollment is required.', {
+      reason: failureReason
+    });
+    return {
+      ...next,
+      auth: null,
+      identity: null,
+      connection: {
+        ...idleConnection(),
+        state: 'forbidden',
+        mode: connection?.mode === 'employee' ? 'employee' : 'guest',
+        diagnostics: {
+          credentialStorageFailure: {
+            ok: false,
+            cleanupRequired: true,
+            message: failureReason,
+            updatedAt: nowIso()
+          },
+          updatedAt: nowIso()
+        }
+      },
+      networkHandover: null,
+      leaseCapabilities: {},
+      encryptedLeaseCapabilities: null,
+      credentialStorageFailure: {
+        reason: failureReason,
+        detectedAt: nowIso(),
+        ownershipInstanceId: stableOwnershipInstanceId(installation || {}),
+        previousMode: connection?.mode === 'employee' ? 'employee' : 'guest',
+        previousLeaseIp: nullableString(connection?.localIp)
+      },
+      ...(installation ? {
+        installation: {
+          ...installation,
+          installId: null,
+          deviceId: null,
+          ownershipInstanceId: null,
+          keyPair: null,
+          encryptedWireGuardPrivateKey: null
+        }
+      } : {})
+    };
+  }
+  if (auth) {
+    delete auth.encryptedAccessToken;
+    delete auth.tokenStorage;
+  }
+  if (connection) delete connection.encryptedLeaseCapability;
+  if (installation) delete installation.encryptedWireGuardPrivateKey;
+  delete next.encryptedLeaseCapabilities;
+  return {
+    ...next,
+    ...(auth ? { auth } : {}),
+    ...(connection ? { connection } : {}),
+    ...(installation ? { installation } : {}),
+    leaseCapabilities
+  };
+}
+
+function secureCredentialStorageAvailable() {
+  if (!safeStorage.isEncryptionAvailable()) return false;
+  if (process.platform !== 'linux') return true;
+  const backend = typeof safeStorage.getSelectedStorageBackend === 'function'
+    ? nullableString(safeStorage.getSelectedStorageBackend())
+    : null;
+  return Boolean(backend && backend !== 'basic_text');
+}
+
+async function writePrivateJsonFile(filePath, value) {
+  const directory = path.dirname(filePath);
+  const temporaryPath = `${filePath}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  try {
+    await fs.writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600
+    });
+    await fs.chmod(temporaryPath, 0o600);
+    await fs.rename(temporaryPath, filePath);
+    await fs.chmod(filePath, 0o600);
+  } catch (err) {
+    await fs.rm(temporaryPath, { force: true }).catch(() => {});
+    throw err;
+  }
 }
 
 async function loadPersistedH2oRuntime() {
@@ -14027,8 +15937,7 @@ async function savePersistedH2oRuntime(input) {
     startedAt: null,
     lastAppliedAt: current.lastAppliedAt
   };
-  await fs.mkdir(path.dirname(h2oRuntimeStorePath()), { recursive: true });
-  await fs.writeFile(h2oRuntimeStorePath(), JSON.stringify(store, null, 2) + '\n', 'utf8');
+  await writePrivateJsonFile(h2oRuntimeStorePath(), store);
 }
 
 // Apps 状态备份环：每次持久化时在 <userData>/state-backups/ 保留最近 STATE_BACKUP_LIMIT
@@ -14063,10 +15972,13 @@ async function maybeSnapshotAppsState(apps) {
     if (lastAppsBackupFingerprint === undefined) lastAppsBackupFingerprint = await latestAppsStateBackupFingerprint();
     if (fingerprint === lastAppsBackupFingerprint) return;
     const dir = stateBackupsDirPath();
-    await fs.mkdir(dir, { recursive: true });
     const createdAt = nowIso();
     const fileName = `apps-${createdAt.replace(/[:.]/g, '-')}.json`;
-    await fs.writeFile(path.join(dir, fileName), JSON.stringify({ kind: 'mx-h2i-apps-backup', createdAt, apps }, null, 2) + '\n', 'utf8');
+    await writePrivateJsonFile(path.join(dir, fileName), {
+      kind: 'mx-h2i-apps-backup',
+      createdAt,
+      apps
+    });
     lastAppsBackupFingerprint = fingerprint;
     await pruneAppsStateBackups();
   } catch (err) {
@@ -14341,23 +16253,35 @@ function displayNameForLauncherProductId(productId) {
 function defaultBootstrapApiBaseUrl() {
   const explicit = normalizeBaseUrl(process.env.MX_H2I_BOOTSTRAP_BASE_URL)
     || normalizeBaseUrl(process.env.MX_H2I_PUBLIC_BASE_URL);
-  if (explicit) return explicit;
-  const host = nullableString(process.env.MX_H2I_BOOTSTRAP_HOST)
-    || nullableString(process.env.MX_H2I_BOOTSTRAP_DOMAIN)
-    || DEFAULT_BOOTSTRAP_HOST;
-  const protocol = stringValue(process.env.MX_H2I_BOOTSTRAP_PROTOCOL, 'http').replace(/:$/, '');
-  const port = nullableString(process.env.MX_H2I_BOOTSTRAP_PORT) || '18090';
-  return `${protocol}://${host}${port ? `:${port}` : ''}`;
+  let candidate = explicit;
+  if (!candidate) {
+    const host = nullableString(process.env.MX_H2I_BOOTSTRAP_HOST)
+      || nullableString(process.env.MX_H2I_BOOTSTRAP_DOMAIN)
+      || DEFAULT_BOOTSTRAP_HOST;
+    const protocol = stringValue(process.env.MX_H2I_BOOTSTRAP_PROTOCOL, 'https').replace(/:$/, '');
+    const port = nullableString(process.env.MX_H2I_BOOTSTRAP_PORT)
+      || (protocol === 'https' ? '' : '18090');
+    const defaultPort = protocol === 'https' ? '443' : '80';
+    candidate = `${protocol}://${host}${port && port !== defaultPort ? `:${port}` : ''}`;
+  }
+  if (isLegacyDefaultBootstrapApiBaseUrl(candidate)) {
+    return `https://${DEFAULT_BOOTSTRAP_HOST}`;
+  }
+  if (productionBootstrapCanonicalRequired() && isBarePublicIpBootstrapBaseUrl(candidate)) {
+    return `https://${DEFAULT_BOOTSTRAP_HOST}`;
+  }
+  return candidate;
 }
 
 function defaultHostResolve() {
   const explicit = explicitDefaultHostResolve();
-  if (explicit) return explicit;
-  const host = nullableString(process.env.MX_H2I_BOOTSTRAP_HOST)
-    || nullableString(process.env.MX_H2I_BOOTSTRAP_DOMAIN)
-    || hostnameFromUrl(process.env.MX_H2I_BOOTSTRAP_BASE_URL)
-    || hostnameFromUrl(process.env.MX_H2I_PUBLIC_BASE_URL)
+  const host = hostnameFromUrl(defaultBootstrapApiBaseUrl())
     || DEFAULT_BOOTSTRAP_HOST;
+  if (explicit) {
+    return shouldAutoBootstrapHostResolve(host)
+      ? migrateKnownLegacyDefaultHostResolve(explicit)
+      : explicit;
+  }
   const ip = nullableString(process.env.MX_H2I_BOOTSTRAP_RESOLVE_IP)
     || nullableString(process.env.MX_H2I_BOOTSTRAP_IP);
   if (host && ip) return `${host}=${ip}`;
@@ -14553,14 +16477,15 @@ function directPublicBootstrapOverride(url, options = {}) {
   if (!originalHostHeader) return null;
   const original = new URL(parsed.toString());
   original.host = originalHostHeader;
+  const useTlsIdentity = parsed.protocol === 'https:';
   return {
     originalUrl: original.toString(),
     url: parsed.toString(),
-    hostHeader: parsed.host,
+    hostHeader: useTlsIdentity ? original.host : parsed.host,
     originalHostHeader,
     resolveMode,
     source: 'direct-public-bootstrap',
-    servername: undefined
+    servername: useTlsIdentity ? original.hostname : undefined
   };
 }
 
@@ -14590,11 +16515,8 @@ function bootstrapOriginalHostHeader(parsed) {
 function bootstrapOriginalHostname() {
   return [
     process.env.MX_H2I_BOOTSTRAP_ORIGINAL_HOST,
-    process.env.MX_H2I_BOOTSTRAP_HOST,
-    process.env.MX_H2I_BOOTSTRAP_DOMAIN,
-    hostnameFromUrl(process.env.MX_H2I_BOOTSTRAP_BASE_URL),
-    hostnameFromUrl(process.env.MX_H2I_PUBLIC_BASE_URL),
     hostnameFromUrl(runtime?.config?.bootstrapApiBaseUrl),
+    hostnameFromUrl(defaultBootstrapApiBaseUrl()),
     DEFAULT_BOOTSTRAP_HOST
   ].map(nullableString).find((host) => host && host !== 'localhost' && net.isIP(host) === 0) || null;
 }
@@ -14814,7 +16736,7 @@ function classifyConnectionError(err) {
     const host = publicHostFromUrl(runtime?.config?.bootstrapApiBaseUrl) || DEFAULT_BOOTSTRAP_HOST;
     return {
       state: 'network-unavailable',
-      message: `公网域名被备案/公网入口拦截，不是 Internal 权限拒绝。请保留 Bootstrap API 域名，并使用 Host Resolve ${host}=<正式 Domestic gateway IP>；客户端会连接该 IP，HTTP Host 使用 gateway IP，原始域名放在 X-Forwarded-Host/X-MX-Original-Host/X-MX-Bootstrap-Host。原始错误：${message}`
+      message: `公网域名被备案/公网入口拦截，不是 Internal 权限拒绝。请保留 Bootstrap API 域名，并使用 Host Resolve ${host}=<正式 Domestic gateway IP>；HTTPS 仅把该 IP 作为拨号目标，TLS SNI、HTTP Host 与证书校验仍使用原域名。原始错误：${message}`
     };
   }
   if (status === 403 || lower.includes('403 forbidden') || lower.includes('forbidden')) {

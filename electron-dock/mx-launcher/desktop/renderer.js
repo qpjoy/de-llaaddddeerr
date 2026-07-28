@@ -283,6 +283,7 @@ const state = {
 };
 
 let setupMonitorToken = 0;
+let opsTokenBinding = null;
 
 const overseaTerminalTemplates = {
   inspect: [
@@ -440,6 +441,7 @@ const h2oStatus = document.getElementById('h2o-status');
 const h2oNetwork = document.getElementById('h2o-network');
 const launcherFoundationOverview = document.getElementById('launcher-foundation-overview');
 const serverInput = document.getElementById('server-input');
+const opsTokenInput = document.getElementById('ops-token-input');
 const platformStatus = document.getElementById('platform-status');
 const appRefresh = document.getElementById('app-refresh');
 const adminRefresh = document.getElementById('admin-refresh');
@@ -628,9 +630,20 @@ if (appNavToggle) {
   });
 }
 
+serverInput.addEventListener('input', () => {
+  clearOpsTokenIfServerBaseChanged();
+});
+
 serverInput.addEventListener('change', () => {
+  clearOpsTokenIfServerBaseChanged();
   void persistConfig();
 });
+
+if (opsTokenInput) {
+  opsTokenInput.addEventListener('input', () => {
+    bindOpsTokenToCurrentServer();
+  });
+}
 
 appRefresh.addEventListener('click', () => {
   void refreshProducts();
@@ -840,9 +853,9 @@ window.addEventListener('keydown', (event) => {
 });
 
 async function boot() {
-  serverInput.value = normalizeServerBaseValue(serverInput.value || defaultServerBaseUrl());
+  setServerBaseInputValue(serverInput.value || defaultServerBaseUrl());
   const config = await api.getConfig();
-  serverInput.value = normalizeServerBaseValue(config.serverBaseUrl || serverInput.value || defaultServerBaseUrl());
+  setServerBaseInputValue(config.serverBaseUrl || serverInput.value || defaultServerBaseUrl());
   initTopologyScene();
   await refreshProducts();
   const status = await api.getStatus();
@@ -3706,15 +3719,28 @@ function awxActionBodyForExecution(action, body) {
 }
 
 async function fetchJson(path, options = {}) {
-  const base = normalizedServerBase();
+  const method = String(options.method || 'GET').toUpperCase();
   const body = options.body ? JSON.stringify(options.body) : undefined;
-  const url = `${base}${path}`;
+  let requestUrl;
+  try {
+    requestUrl = new URL(String(path || ''), `${normalizedServerBase()}/`);
+  } catch {
+    throw new Error('Admin API URL is invalid');
+  }
+  const headers = {
+    ...requestHeadersWithoutOpsToken(options.headers),
+    ...(body ? { 'content-type': 'application/json' } : {})
+  };
+  const opsToken = opsTokenForRequest(requestUrl, method);
+  if (opsToken) headers['x-mx-ops-token'] = opsToken;
+  const url = requestUrl.href;
   let response;
   try {
     response = await fetch(url, {
-      method: options.method || 'GET',
-      headers: body ? { 'content-type': 'application/json' } : undefined,
-      body
+      method,
+      headers: Object.keys(headers).length > 0 ? headers : undefined,
+      body,
+      redirect: opsToken ? 'error' : 'follow'
     });
   } catch (error) {
     throw new Error(`Admin API network error: ${url} (${error.message})`);
@@ -3730,6 +3756,113 @@ async function fetchJson(path, options = {}) {
     throw new Error(payload && payload.message ? payload.message : `HTTP ${response.status}`);
   }
   return payload;
+}
+
+function requestHeadersWithoutOpsToken(input) {
+  return Object.fromEntries(Object.entries(input || {})
+    .filter(([name]) => name.toLowerCase() !== 'x-mx-ops-token'));
+}
+
+function isOpsProtectedInternalRequest(target, method = 'GET') {
+  let url;
+  try {
+    url = target instanceof URL ? target : new URL(target);
+  } catch {
+    return false;
+  }
+  const verb = String(method || 'GET').toUpperCase();
+  const path = url.pathname;
+  if (verb === 'GET') {
+    return /^\/internal\/v1\/user-center\/(?:roles|users|oversea-entitlements|service-accounts)$/.test(path)
+      || /^\/internal\/v1\/user-center\/users\/[^/]+\/(?:oversea|h2o\/runtime-profile)$/.test(path)
+      || /^\/internal\/v1\/sdk\/(?:roles|users|service-accounts)$/.test(path)
+      || /^\/internal\/v1\/launcher-network\/leases(?:\/[^/]+)?$/.test(path);
+  }
+  if (verb === 'POST') {
+    return /^\/internal\/v1\/user-center\/(?:bootstrap|users|users\/import|service-accounts|tokens\/issue)$/.test(path)
+      || /^\/internal\/v1\/user-center\/users\/[^/]+\/(?:password|oversea|h2o\/runtime-profile|oversea\/sync-runtime)$/.test(path)
+      || /^\/internal\/v1\/sdk\/(?:users|service-accounts)$/.test(path)
+      || /^\/internal\/v1\/launcher-network\/leases\/[^/]+\/(?:release|domestic-peer\/sync|domestic-relay\/diagnostics|internal-direct-peer\/sync)$/.test(path)
+      || /^\/internal\/v1\/launcher-network\/(?:products\/[^/]+|mihomo\/sites\/[^/]+)$/.test(path);
+  }
+  return verb === 'DELETE'
+    && /^\/internal\/v1\/user-center\/users\/[^/]+$/.test(path);
+}
+
+function normalizedInternalServerEndpoint(value = serverInput.value) {
+  const base = normalizeServerBaseValue(value) || defaultServerBaseUrl();
+  try {
+    const url = new URL(base);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return { base, origin: url.origin };
+  } catch {
+    return null;
+  }
+}
+
+function clearOpsToken() {
+  if (opsTokenInput) opsTokenInput.value = '';
+  opsTokenBinding = null;
+}
+
+function bindOpsTokenToCurrentServer() {
+  const token = String(opsTokenInput?.value || '').trim();
+  if (!token) {
+    opsTokenBinding = null;
+    return;
+  }
+  const endpoint = normalizedInternalServerEndpoint();
+  if (!endpoint) {
+    clearOpsToken();
+    return;
+  }
+  opsTokenBinding = {
+    token,
+    serverBase: endpoint.base,
+    origin: endpoint.origin
+  };
+}
+
+function clearOpsTokenIfServerBaseChanged() {
+  const token = String(opsTokenInput?.value || '').trim();
+  if (!token && !opsTokenBinding) return false;
+  const endpoint = normalizedInternalServerEndpoint();
+  if (
+    !opsTokenBinding
+    || !endpoint
+    || endpoint.base !== opsTokenBinding.serverBase
+    || endpoint.origin !== opsTokenBinding.origin
+  ) {
+    clearOpsToken();
+    return true;
+  }
+  return false;
+}
+
+function opsTokenForRequest(requestUrl, method) {
+  const token = String(opsTokenInput?.value || '').trim();
+  const endpoint = normalizedInternalServerEndpoint();
+  if (
+    !token
+    || !opsTokenBinding
+    || token !== opsTokenBinding.token
+    || !endpoint
+    || endpoint.base !== opsTokenBinding.serverBase
+    || endpoint.origin !== opsTokenBinding.origin
+  ) {
+    if (token || opsTokenBinding) clearOpsToken();
+    return '';
+  }
+  if (requestUrl.origin !== opsTokenBinding.origin) return '';
+  return isOpsProtectedInternalRequest(requestUrl, method) ? token : '';
+}
+
+function setServerBaseInputValue(value) {
+  const next = normalizeServerBaseValue(value || defaultServerBaseUrl());
+  if (serverInput.value !== next) {
+    serverInput.value = next;
+    clearOpsTokenIfServerBaseChanged();
+  }
 }
 
 function normalizedServerBase() {
@@ -7671,9 +7804,12 @@ function relayProductNetworkShape(secondOctet) {
   const octet = normalizeProductSecondOctet(secondOctet);
   return {
     userCidr: `10.${octet}.0.0/16`,
+    feishuCidr: `10.${octet}.0.0/16`,
     anonymousCidr: `10.${octet}.0.0/16`,
     userLeaseStart: `10.${octet}.0.1`,
-    userLeaseEnd: `10.${octet}.99.254`,
+    userLeaseEnd: `10.${octet}.49.254`,
+    feishuLeaseStart: `10.${octet}.50.1`,
+    feishuLeaseEnd: `10.${octet}.99.254`,
     anonymousLeaseStart: `10.${octet}.100.1`,
     anonymousLeaseEnd: `10.${octet}.254.254`
   };
@@ -7882,9 +8018,12 @@ function relayProductNeedsUpsert(product, desired) {
     'domesticGatewayIp',
     'dnsServer',
     'userCidr',
+    'feishuCidr',
     'anonymousCidr',
     'userLeaseStart',
     'userLeaseEnd',
+    'feishuLeaseStart',
+    'feishuLeaseEnd',
     'anonymousLeaseStart',
     'anonymousLeaseEnd',
     'defaultDomesticSiteId'
@@ -7947,7 +8086,9 @@ function fallbackLauncherProduct(productId) {
       domesticGatewayIp: MX_DOMESTIC_RELAY_IP,
       dnsServer: MX_DOMESTIC_RELAY_IP,
       userLeaseStart: '10.89.0.1',
-      userLeaseEnd: '10.89.99.254',
+      userLeaseEnd: '10.89.49.254',
+      feishuLeaseStart: '10.89.50.1',
+      feishuLeaseEnd: '10.89.99.254',
       anonymousLeaseStart: '10.89.100.1',
       anonymousLeaseEnd: '10.89.254.254',
       defaultDomesticSiteId: 'domestic-main',
@@ -7965,7 +8106,9 @@ function fallbackLauncherProduct(productId) {
       domesticGatewayIp: MX_DOMESTIC_RELAY_IP,
       dnsServer: MX_DOMESTIC_RELAY_IP,
       userLeaseStart: '10.92.0.1',
-      userLeaseEnd: '10.92.99.254',
+      userLeaseEnd: '10.92.49.254',
+      feishuLeaseStart: '10.92.50.1',
+      feishuLeaseEnd: '10.92.99.254',
       anonymousLeaseStart: '10.92.100.1',
       anonymousLeaseEnd: '10.92.254.254',
       defaultDomesticSiteId: 'domestic-main',
@@ -7983,7 +8126,9 @@ function fallbackLauncherProduct(productId) {
       domesticGatewayIp: MX_DOMESTIC_RELAY_IP,
       dnsServer: MX_DOMESTIC_RELAY_IP,
       userLeaseStart: '10.90.0.1',
-      userLeaseEnd: '10.90.99.254',
+      userLeaseEnd: '10.90.49.254',
+      feishuLeaseStart: '10.90.50.1',
+      feishuLeaseEnd: '10.90.99.254',
       anonymousLeaseStart: '10.90.100.1',
       anonymousLeaseEnd: '10.90.254.254',
       defaultDomesticSiteId: 'domestic-main',
@@ -8001,6 +8146,8 @@ function fallbackLauncherProduct(productId) {
     dnsServer: MX_DOMESTIC_RELAY_IP,
     userLeaseStart: '',
     userLeaseEnd: '',
+    feishuLeaseStart: '',
+    feishuLeaseEnd: '',
     anonymousLeaseStart: '',
     anonymousLeaseEnd: '',
     defaultDomesticSiteId: 'domestic-main',
@@ -8933,7 +9080,8 @@ function renderAppStandaloneNetworkSection(draft, conflict) {
       <p>${conflict ? `10.${escapeHtml(secondOctet)}.* is already used by ${escapeHtml(conflict.displayName || conflict.productId)}.` : 'Only standalone launcher mode owns an IP segment. Embed apps inherit their selected channel.'}</p>
       ${knownUsage ? `<p class="app-network-known">Known segments: ${escapeHtml(knownUsage)}</p>` : ''}
       <div class="app-network-facts">
-        <span><strong>${escapeHtml(ranges.userLeaseStart)} - ${escapeHtml(ranges.userLeaseEnd)}</strong><small>login users</small></span>
+        <span><strong>${escapeHtml(ranges.userLeaseStart)} - ${escapeHtml(ranges.userLeaseEnd)}</strong><small>password employees</small></span>
+        <span><strong>${escapeHtml(ranges.feishuLeaseStart)} - ${escapeHtml(ranges.feishuLeaseEnd)}</strong><small>Feishu employees</small></span>
         <span><strong>${escapeHtml(ranges.anonymousLeaseStart)} - ${escapeHtml(ranges.anonymousLeaseEnd)}</strong><small>anonymous users</small></span>
         <span><strong>${escapeHtml(serviceVip)}</strong><small>service VIP</small></span>
         <span><strong>${escapeHtml(controlDefaults.internalControlIp)}</strong><small>control / DNS / proxy</small></span>
@@ -8958,7 +9106,8 @@ function renderAppEmbedNetworkSection(draft) {
         <span><strong>${escapeHtml(launcherProductDisplayName(channelId, channel))}</strong><small>channel owner</small></span>
         <span><strong>${escapeHtml(channel.serviceVip || '10.88.100.1')}</strong><small>channel service VIP</small></span>
         <span><strong>${escapeHtml(channel.internalControlIp || channel.serviceVip || '10.88.100.1')}</strong><small>control / DNS / proxy</small></span>
-        <span><strong>${escapeHtml(channel.userLeaseStart || '10.89.0.1')} - ${escapeHtml(channel.userLeaseEnd || '10.89.99.254')}</strong><small>login users</small></span>
+        <span><strong>${escapeHtml(channel.userLeaseStart || '10.89.0.1')} - ${escapeHtml(channel.userLeaseEnd || '10.89.49.254')}</strong><small>password employees</small></span>
+        <span><strong>${escapeHtml(channel.feishuLeaseStart || '10.89.50.1')} - ${escapeHtml(channel.feishuLeaseEnd || '10.89.99.254')}</strong><small>Feishu employees</small></span>
         <span><strong>${escapeHtml(channel.anonymousLeaseStart || '10.89.100.1')} - ${escapeHtml(channel.anonymousLeaseEnd || '10.89.254.254')}</strong><small>anonymous users</small></span>
       </div>
     </div>
@@ -9302,7 +9451,7 @@ function renderLauncherFoundationCard() {
         <p>MX-H2I is the default VPN app and owns the standalone channel. AppCenter, H2O, and custom embed apps reuse that channel without installing another TUN/WG/DNS owner.</p>
       </div>
       <div class="launcher-foundation-facts">
-        <span><strong>standalone</strong><small>${escapeHtml(launcherProductDisplayName(MX_H2I_PRODUCT_ID, mxH2i))} / ${escapeHtml(formatLeaseRange(mxH2i.userLeaseStart, mxH2i.userLeaseEnd))}</small></span>
+        <span><strong>standalone</strong><small>${escapeHtml(launcherProductDisplayName(MX_H2I_PRODUCT_ID, mxH2i))} / employee ${escapeHtml(formatLeaseRange(mxH2i.userLeaseStart, mxH2i.userLeaseEnd))} / Feishu ${escapeHtml(formatLeaseRange(mxH2i.feishuLeaseStart, mxH2i.feishuLeaseEnd))}</small></span>
         <span><strong>embed</strong><small>${escapeHtml(embedApps.map((app) => app.displayName || app.appId).join(' / ') || 'custom apps')} via MX-H2I</small></span>
         <span><strong>${escapeHtml(String(runtimeLeases.length))}</strong><small>runtime client leases</small></span>
         <span><strong>${escapeHtml(String(productCount))}</strong><small>registered products</small></span>
@@ -9384,7 +9533,8 @@ function renderSelectedAppDetail() {
           <span><strong>${escapeHtml(isBrokerSession ? 'broker-session' : 'owner')}</strong><small>network scope</small></span>
           <span><strong>${escapeHtml(serviceContext)}</strong><small>${escapeHtml(isBrokerSession ? 'service context' : 'service VIP')}</small></span>
           <span><strong>${escapeHtml(product?.internalControlIp || channelProduct?.internalControlIp || '10.88.88.88')}</strong><small>Internal</small></span>
-          <span><strong>${escapeHtml(formatLeaseRange(channelProduct?.userLeaseStart, channelProduct?.userLeaseEnd))}</strong><small>channel users</small></span>
+          <span><strong>${escapeHtml(formatLeaseRange(channelProduct?.userLeaseStart, channelProduct?.userLeaseEnd))}</strong><small>password employees</small></span>
+          <span><strong>${escapeHtml(formatLeaseRange(channelProduct?.feishuLeaseStart, channelProduct?.feishuLeaseEnd))}</strong><small>Feishu employees</small></span>
         </div>
       </section>
 
@@ -9467,7 +9617,7 @@ function renderSelectedAppDetail() {
           ${leases.slice(0, 4).map((lease) => `
             <article>
               <strong>${escapeHtml(lease.leaseIp || '-')}</strong>
-              <span>${escapeHtml(`${lease.identityKind || 'identity'} / ${lease.launcherMode || 'mode'} / ${lease.deviceLabel || lease.deviceId || '-'}`)}</span>
+              <span>${escapeHtml(`${lease.identityKind || 'identity'} / ${lease.leaseProfile || 'legacy-profile'} / ${lease.launcherMode || 'mode'} / ${lease.deviceLabel || lease.deviceId || '-'}`)}</span>
               <small>${escapeHtml(lease.leaseId || '-')}</small>
             </article>
           `).join('') || '<div class="empty-state">No Launcher client lease yet.</div>'}
@@ -10488,7 +10638,7 @@ function renderLauncherProductNetworksPanel() {
     launcherProductDisplayName(standaloneChannelProductIdForProduct(product), standaloneChannelProductForProduct(product)),
     product.mode === 'standalone' ? product.serviceVip || '-' : product.networkScope || 'broker-session',
     product.mode === 'standalone'
-      ? `${formatLeaseRange(product.userLeaseStart, product.userLeaseEnd)} / ${formatLeaseRange(product.anonymousLeaseStart, product.anonymousLeaseEnd)}`
+      ? `employee ${formatLeaseRange(product.userLeaseStart, product.userLeaseEnd)} / Feishu ${formatLeaseRange(product.feishuLeaseStart, product.feishuLeaseEnd)} / guest ${formatLeaseRange(product.anonymousLeaseStart, product.anonymousLeaseEnd)}`
       : 'uses launcher standalone peer',
     product.updatePolicy || '-'
   ]);
@@ -10504,7 +10654,7 @@ function renderLauncherProductNetworksPanel() {
       ${error ? `<div class="feedback error">${escapeHtml(error)}</div>` : ''}
       <div class="foundation-kpi-grid">
         ${renderFoundationKpi('Launcher Foundation', 'standalone / embed', 'network, auth, release, policy')}
-        ${renderFoundationKpi('MX-H2I VPN', formatLeaseRange(standalone?.userLeaseStart, standalone?.userLeaseEnd), standalone ? `${formatLeaseRange(standalone.anonymousLeaseStart, standalone.anonymousLeaseEnd)} anonymous` : 'launcher standalone 10.89')}
+        ${renderFoundationKpi('MX-H2I VPN', formatLeaseRange(standalone?.userLeaseStart, standalone?.userLeaseEnd), standalone ? `${formatLeaseRange(standalone.feishuLeaseStart, standalone.feishuLeaseEnd)} Feishu / ${formatLeaseRange(standalone.anonymousLeaseStart, standalone.anonymousLeaseEnd)} anonymous` : 'launcher standalone 10.89')}
         ${renderFoundationKpi('Embed Dependency', firstEmbedChannel ? launcherProductDisplayName(firstEmbedChannel.productId, firstEmbedChannel) : 'MX-H2I', 'embed products reuse channel context')}
         ${renderFoundationKpi('Internal', '10.88.88.88', 'fixed control-plane peer')}
       </div>
@@ -11607,7 +11757,7 @@ function renderRelayEnrollmentPanel(options = {}) {
       <div class="foundation-list">
         <article>
           <strong>${escapeHtml(leaseIp || '-')}</strong>
-          <span>${escapeHtml(lease ? `${lease.productId} / ${lease.identityKind} / ${lease.launcherMode}` : `${draft.productId} / ${draft.identityKind} / ${draft.mode}`)}</span>
+          <span>${escapeHtml(lease ? `${lease.productId} / ${lease.identityKind} / ${lease.leaseProfile || 'legacy-profile'} / ${lease.launcherMode}` : `${draft.productId} / ${draft.identityKind} / ${draft.mode}`)}</span>
           <small>${escapeHtml(lease?.leaseId || state.domesticPeerDraft.publicKey || draft.publicKey || '-')}</small>
         </article>
       </div>

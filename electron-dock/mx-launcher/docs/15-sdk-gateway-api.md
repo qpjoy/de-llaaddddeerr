@@ -18,9 +18,10 @@ http://<internal-host>:18090/docs/api/mx-launcher-api.md
 reverse proxy 到 mx-launcher server，因此不需要额外增加 gateway path；SDK Gateway
 manifest 的 `sdk.documentationUrl`、`sdk.openApiUrl`、`sdk.markdownUrl` 也可用于运行时发现。
 
-该入口属于 Internal/Domestic relay 网络面，不得直接暴露到公网。当前 V1 shadow 除用户
-Oversea 订阅接口外，尚未对全部 SDK route 强制 Bearer header guard；生产集成仍必须保留
-网络隔离，并先按 `routeId` 调用 access evaluate。
+该入口属于 Internal/Domestic relay 网络面，不得直接暴露到公网。用户调用使用 active
+`mx-sdk` Bearer；users/roles/service-accounts 等管理接口还要求 Internal 运维凭据
+`x-mx-ops-token`。仍有部分 V1 shadow SDK route 依赖 gateway access evaluate 而没有统一
+Bearer guard，因此生产集成必须继续保留网络隔离，并先按 `routeId` 调用 access evaluate。
 
 ## Base URL
 
@@ -44,13 +45,32 @@ http://<internal-host-or-10.88.88.88>:18090
 
 ## Auth Flow
 
-1. 调用 `POST /internal/v1/sdk/oauth/token` 获取 token。
+1. 用户使用 password/飞书流程获取 `mx-sdk` token；service account 使用
+   `POST /internal/v1/sdk/oauth/token` 的 `client_credentials`，其 `client_secret` 必须
+   等于服务端 `MX_INTERNAL_OPS_TOKEN`。
 2. 调用 `POST /internal/v1/sdk/gateway/access/evaluate` 判断 token 是否可调用某个
    `routeId`。
 3. 调用具体 SDK route。
 
 当前 V1 shadow 以 gateway manifest 和 access evaluate 作为稳定契约；后续会把
 Bearer header gate 收紧到每个 SDK route。
+
+### Internal ops bootstrap
+
+Internal 进程从 `MX_INTERNAL_OPS_TOKEN` 读取高权限 bootstrap 凭据；管理请求通过
+`x-mx-ops-token` header 传入。服务端未配置时受保护接口 fail closed，不能用任意
+`client_secret`、普通用户 token 或“只在内网”替代。Kubernetes 中的 source of truth 是：
+
+```text
+namespace: mx-internal-shadow
+Secret:    mx-internal-ops
+key:       token
+```
+
+`manage.sh` 会复用该 Secret；首次部署时若没有显式 `MX_INTERNAL_OPS_TOKEN`，会生成随机
+token。Admin UI 的 `Internal Ops Token` 输入只存在当前页面会话，刷新/重启后清空。以下
+curl 示例假设受控 shell 已从 Secret Manager 加载 `MX_INTERNAL_OPS_TOKEN`；不要把实际值
+写入脚本、Git、CI 日志或聊天记录。
 
 ## Manifest
 
@@ -86,22 +106,32 @@ MX-H2I、Luopan 和其他未显式传入更短 `expires_in` 的 standalone 都�
 实现 refresh token grant，token 到期、被撤销或用户修改密码后需要重新登录。修改默认值
 不会延长已经签发的 token，客户端应重新登录以获得新的 7 天 token。
 
+password grant 在执行同步密码哈希前，使用 PostgreSQL 原子固定窗口同时消费来源 IP、
+canonical user 和 IP+user 三类 SHA-256 bucket；窗口为 5 分钟，限额分别为 60、25、10。
+同一用户的 `userId`、account、email、display name 和 legacy alias 归入同一 user bucket，
+原始 IP、账号和密码不写入 limiter state。任一 bucket 超限统一返回 `429`，不存在、禁用和
+错误密码统一返回 `invalid credentials`。这份状态跨进程重启和 RollingUpdate 双 Pod 共享。
+
 Service account 模式：
 
 ```bash
-curl -sS "$BASE/internal/v1/sdk/oauth/token" \
+jq -n '{
+  grant_type: "client_credentials",
+  client_id: "svc_sdk_gateway",
+  client_secret: env.MX_INTERNAL_OPS_TOKEN,
+  scope: "sdk.identity.read sdk.user.read sdk.user.write sdk.permission.request",
+  audience: "mx-sdk"
+}' | curl -sS "$BASE/internal/v1/sdk/oauth/token" \
   -H 'content-type: application/json' \
-  -d '{
-    "grant_type": "client_credentials",
-    "client_id": "svc_sdk_gateway",
-    "client_secret": "managed-by-internal",
-    "scope": "sdk.identity.read sdk.user.read sdk.user.write sdk.permission.request",
-    "audience": "mx-sdk"
-  }'
+  --data-binary @-
 ```
 
 client credentials access token 默认仍为 `3600` 秒（1 小时），不随 Electron 用户登录
-周期延长。
+周期延长。当前 `client_secret` 直接校验平台级 `MX_INTERNAL_OPS_TOKEN`；它不是
+`managed-by-internal` 之类的占位字符串，也不是每个 service account 已有独立 secret。
+轮换 `mx-internal-ops` 后，service account 集成必须同步更新。`client_credentials` 只允许
+在 Internal 控制面调用；带受控 `X-MX-Forwarded-By: domestic-edge` 标记的公网请求会在
+比较 ops token 前拒绝。Internal 调用也受 5 分钟的 IP/client/IP+client 原子限速。
 
 ## Identity
 
@@ -138,13 +168,15 @@ curl -sS "$BASE/internal/v1/sdk/gateway/access/evaluate" \
 List roles:
 
 ```bash
-curl -sS "$BASE/internal/v1/sdk/roles"
+curl -sS "$BASE/internal/v1/sdk/roles" \
+  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN"
 ```
 
 List users:
 
 ```bash
-curl -sS "$BASE/internal/v1/sdk/users"
+curl -sS "$BASE/internal/v1/sdk/users" \
+  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN"
 ```
 
 Create user:
@@ -152,6 +184,7 @@ Create user:
 ```bash
 curl -sS "$BASE/internal/v1/sdk/users" \
   -H 'content-type: application/json' \
+  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN" \
   -d '{
     "account": "external-user",
     "email": "external-user@mx.local",
@@ -178,6 +211,7 @@ Internal User Center 还提供批量导入接口，供平台运维把旧 HDO 或
 ```bash
 curl -sS "$BASE/internal/v1/user-center/users/import" \
   -H 'content-type: application/json' \
+  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN" \
   -d '{
     "users": [
       {
@@ -207,6 +241,7 @@ profile、角色或应用权限：
 ```bash
 curl -sS "$BASE/internal/v1/user-center/users/usr_partner_alice/password" \
   -H 'content-type: application/json' \
+  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN" \
   -d '{"password":"new-password","requestedBy":"internal-admin"}'
 ```
 
@@ -217,6 +252,7 @@ seed 用户删除后会记录墓碑，Bootstrap 不会自动恢复：
 ```bash
 curl -sS -X DELETE "$BASE/internal/v1/user-center/users/usr_partner_alice" \
   -H 'content-type: application/json' \
+  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN" \
   -d '{"requestedBy":"internal-admin"}'
 ```
 
@@ -256,7 +292,8 @@ curl -sS "$BASE/internal/v1/app-center/apps?userId=usr_test&sourceAppId=luopan&i
 List service accounts:
 
 ```bash
-curl -sS "$BASE/internal/v1/sdk/service-accounts"
+curl -sS "$BASE/internal/v1/sdk/service-accounts" \
+  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN"
 ```
 
 Create service account:
@@ -264,6 +301,7 @@ Create service account:
 ```bash
 curl -sS "$BASE/internal/v1/sdk/service-accounts" \
   -H 'content-type: application/json' \
+  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN" \
   -d '{
     "serviceAccountId": "svc_external_system",
     "displayName": "External System",
@@ -294,7 +332,7 @@ curl -sS "$BASE/internal/v1/sdk/permissions/requests" \
 
 | routeId | Path | Accepted scopes |
 | --- | --- | --- |
-| `sdk.oauth.token` | `/internal/v1/sdk/oauth/token` | public token endpoint |
+| `sdk.oauth.token` | `/internal/v1/sdk/oauth/token` | password 可经可信 HTTPS bootstrap；client_credentials 仅限 Internal |
 | `sdk.identity.introspect` | `/internal/v1/sdk/identity/introspect` | `sdk.identity.read` or `auth.read` |
 | `sdk.identity.context` | `/internal/v1/sdk/identity/context` | `sdk.identity.read` or `auth.read` |
 | `sdk.gateway.access.evaluate` | `/internal/v1/sdk/gateway/access/evaluate` | `sdk.identity.read` |

@@ -14,7 +14,7 @@
     "dev": "quasar dev -m electron",
     "start": "pnpm dev",
     "typecheck": "vue-tsc --noEmit -p tsconfig.json",
-    "check": "node --check scripts/prepare-electron-native.mjs && pnpm run typecheck",
+    "check": "node --check scripts/prepare-electron-native.mjs && node scripts/launcher-network-capability.test.mjs && pnpm run typecheck",
     "prebuild": "pnpm run prepare:electron-native",
     "build": "quasar build -m electron --skip-pkg",
     "prepackage": "pnpm run prepare:electron-native",

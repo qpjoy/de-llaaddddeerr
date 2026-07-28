@@ -461,8 +461,19 @@ relay 或 Internal service peer 阻塞。完整 H2I 证明需要另一台 H 端�
 
 Domestic edge 对外端口和 Internal gateway 端口不要混用：
 
-- `18090` 是当前 V2 Domestic edge 对外 bootstrap 端口，容器内 Caddy 仍监听 `8088`；
-  Docker 端口映射为 `MX_DOMESTIC_EDGE_PORT:8088`，正式环境可以换成 `443`。
+- `443` 是 V2 正式公网 bootstrap 端口，必须由 official/Compass nginx 以
+  `h2i.minsight-ai.com` 的有效证书终止 TLS。Domestic bundle 默认只把容器 `8088`
+  映射到 `127.0.0.1:18090`；当外部
+  `${MX_DOMESTIC_PUBLIC_GATEWAY_NETWORK:-compass-gateway_default}` 已存在时，
+  `./manage.sh up` 会通过显式 compose override 持久加入该网络，Compass nginx 反代
+  `http://mx-domestic-edge:8088`。没有 Compass 的环境仍可启动基础 stack，不会因 external
+  network 缺失而失败。生产 Compass 主机不得启动 `public-tls` profile 抢占 443。
+- official/Compass nginx 不能把整个 `/internal/*`、`/api/*` 或 `/h2i/*` 反代到
+  Internal。公网 vhost 与 Domestic edge 必须同时按 HTTP method + 精确 path 收口：
+  `GET` 只放行三个 health、飞书 safe config 和单个 product 查询；`POST` 只放行
+  MX token/飞书 authorize/飞书 token、enrollment/snapshot，以及带安全 ID 的
+  `release`、peer sync 和 relay diagnostics。其它控制面路径在内层返回 `403`，公网层返回
+  `404`。尤其不能公开 Config Center、Admin、DNS、User Center 或 product 写接口。
 - `18090` 是 Internal gateway/k8s Service 端口，只应被 Internal 本机、Internal service peer
   或 Domestic edge 上游访问。
 - V1 HDO 的 `100.89.*:80` nginx 默认页和 `100.89.*:8080/login` OpenVPN UI 不是 V2 成功
@@ -494,13 +505,14 @@ Domestic runtime config 是 Internal 配置中心对象，默认 seed 为：
 ```json
 {
   "siteId": "domestic-main",
-  "edgeBind": "0.0.0.0",
+  "edgeBind": "127.0.0.1",
   "edgePort": 18090,
-  "bootstrapHost": "api.mxinfo-inc.cn",
-  "bootstrapPort": 18090,
+  "bootstrapProtocol": "https",
+  "bootstrapHost": "h2i.minsight-ai.com",
+  "bootstrapPort": 443,
   "internalApiUpstream": "http://10.88.88.88:18090",
   "internalH2iUpstream": "http://10.88.88.88:18090",
-  "dnsBind": "0.0.0.0",
+  "dnsBind": "10.88.0.1",
   "dnsPort": 53
 }
 ```
@@ -512,8 +524,8 @@ Admin 可以在 Internal 基础系统 / Config Center 里修改并 `Save & Apply
 Internal 也会把这个配置渲染成 Domestic bundle 的 `.env` 并通过 SSH runner 下发；
 Domestic 不需要单独登录，也不应该成为配置真相。
 
-正式 Domestic 没有 Docker Hub/registry egress 时，先使用 `Save Config` 只保存
-`http://<domestic-public-ip>:18090` 这样的 bootstrap 配置，再通过 Domestic plan 的
+正式 Domestic 没有 Docker Hub/registry egress 时，先使用 `Save Config` 保存
+`https://h2i.minsight-ai.com` bootstrap 配置，再通过 Domestic plan 的
 `Materialize Domestic WG`、preflight、runner/worker install-sync 路径下发 bundle。
 `Save & Apply` 是已安装 edge stack 的重启/刷新入口，会在 Domestic 侧执行
 `docker compose up`，需要目标机已有 `caddy:2.8.4-alpine` / `coredns/coredns:1.11.3`
@@ -527,36 +539,38 @@ Docker systemd proxy 环境和 Oversea hysteria2 订阅，而不是把它归因�
 开发和私有部署可以用 MX-H2I 客户端 `.env` 配置 bootstrap 域名和临时解析，不需要把公网 IP 写死进包体：
 
 ```dotenv
-MX_H2I_BOOTSTRAP_BASE_URL=http://h2i.mxinfo-inc.cn:18090
-MX_H2I_HOST_RESOLVE=h2i.mxinfo-inc.cn=116.62.51.154
+MX_H2I_BOOTSTRAP_BASE_URL=https://h2i.minsight-ai.com
+MX_H2I_HOST_RESOLVE=h2i.minsight-ai.com=116.62.51.154
 MX_H2I_BOOTSTRAP_RESOLVE_MODE=env-first
 # MX_H2I_BOOTSTRAP_DNS_SERVERS=<domestic-public-dns-resolver>:<dns-port>
 MX_H2I_INTERNAL_BASE_URL=http://10.88.88.88:18090
-MX_H2I_SPLIT_DNS_DOMAINS=mx.cn,mxinfo-inc.cn,h2i.mxinfo-inc.cn
+MX_H2I_SPLIT_DNS_DOMAINS=mx.cn,mxinfo-inc.cn,internal.mx,corp.mx,h2i.mx
 ```
 
-正式部署时，公网 DNS 可以把 `h2i.mxinfo-inc.cn` 解析到 Domestic 公网入口。当前入口为
+正式部署时，公网 DNS 可以把 `h2i.minsight-ai.com` 解析到 Domestic 公网入口。当前入口为
 `116.62.51.154`；`121.43.253.179` / `121.43.254.179` 只属于早期临时测试 Domestic，
-客户端启动时应迁移掉。连上 WG 后，
-Internal DNS/split DNS 可以把同一域名或内网服务域名解析到 Internal overlay IP。这样用户不需要
-手动填 IP，Admin 只需要管理公网解析、Internal DNS policy 和 routePlan。
+客户端启动时应迁移掉。连上 WG 后，`h2i.minsight-ai.com` 仍保持公网 bootstrap
+身份，不进入 MX-H2I split DNS；`*.mxinfo-inc.cn` 等现有内网域名继续由 Internal
+DNS/split DNS 解析到 overlay IP。这样用户不需要手动填 IP，Admin 只需要管理公网解析、
+Internal DNS policy 和 routePlan。
 H 端还没有建立 WG 时，不能依赖 `10.88.0.1` 或 `10.88.88.88` 解析 bootstrap 域名。
 这个阶段允许用 `MX_H2I_BOOTSTRAP_DNS_SERVERS=<domestic-public-dns-resolver>:<dns-port>` 指向
 Domestic 公网 DNS endpoint。这里的 `host:port` 只属于 MX-H2I bootstrap resolver，
 不进入 WireGuard profile；连上 WG 后仍回到 routePlan 的标准 53 DNS。
 如果公网 DNS 命中了云厂商备案/合规拦截页，H2I bootstrap 应使用 Host Resolve：配置
-`Bootstrap API=http://h2i.mxinfo-inc.cn:18090`，再配置
-`Host Resolve=h2i.mxinfo-inc.cn=<可达的 Domestic/Internal gateway IP>`。客户端实际拨号到
-该 IP，HTTP `Host` 使用 gateway IP，并通过 `X-Forwarded-Host` / `X-MX-Original-Host` / `X-MX-Bootstrap-Host`
-传递原始域名，避免公网备案层按 Host 拦截。
-V2 客户端还会把当前 Domestic 公网入口 `http://116.62.51.154:18090` 作为 public bootstrap
-候选，但仍通过 `X-MX-Original-Host` / `X-MX-Bootstrap-Host` 保留 `h2i.mxinfo-inc.cn` 的逻辑身份；
+`Bootstrap API=https://h2i.minsight-ai.com`，再配置
+`Host Resolve=h2i.minsight-ai.com=<可达的 Domestic/Internal gateway IP>`。客户端实际拨号到
+该 IP，但 TLS SNI 与 HTTP `Host` 仍是 `h2i.minsight-ai.com`，并通过
+`X-Forwarded-Host` / `X-MX-Original-Host` / `X-MX-Bootstrap-Host` 传递原始域名；
+不允许跳过证书校验。
+V2 客户端还会把当前 Domestic 公网入口 `https://116.62.51.154` 作为 public bootstrap
+拨号候选，但仍保留 `h2i.minsight-ai.com` 的证书身份和逻辑身份；
 V2 Domestic facade 应透传这些头给 Internal bootstrap API，再退回 `X-Forwarded-Host`。因此 V1 下线后，
-`116.62.51.154:18090` 可以只承载 V2 public bootstrap facade，首连不要求用户先开启 Clash/mihomo
+`116.62.51.154:443` 可以只承载 V2 public bootstrap facade，首连不要求用户先开启 Clash/mihomo
 TUN。
 `MX_H2I_BOOTSTRAP_DNS_SERVERS` 是 resolver 地址：只有当 `116.62.51.154:53` 真有
 Domestic DNS edge 在回答时，才应把它填成 `116.62.51.154`。如果 `116.62.51.154` 只是
-`h2i.mxinfo-inc.cn` 的公网 A 记录，应改用系统 DNS 或 `MX_H2I_HOST_RESOLVE`。
+`h2i.minsight-ai.com` 的公网 A 记录，应改用系统 DNS 或 `MX_H2I_HOST_RESOLVE`。
 若客户端选择 `dns-first` bootstrap，但显式 resolver 未启动、超时或中断，MX-H2I 应先做
 3 次 DNS 探测重试；仍不可用时在 UI 提示本次已降级，然后按 Host Resolve/env、系统默认网络/
 系统代理的顺序继续获取 lease。这个降级只用于 bootstrap，不应作为 H2I ready 证据；ready 仍以
@@ -608,8 +622,11 @@ V2 不应假设 TCP facade 会自动转发传统 DNS：UDP/53 与 HTTP/TCP rever
 Internal gateway `10.88.88.88`；更完整的生产形态是在 Domestic 部署 `dns-edge-cache`，
 由 Internal 同步 signed zone snapshot，Domestic 只做缓存/转发而不拥有 DNS 真相。当前推荐
 沿用标准 DNS 53 的稳定语义，而不是沿用 V1 HDO 的 zone 数据模型。Internal
-`mx-internal-coredns` 使用同一份 `mx-dns/coredns` ConfigMap，并通过 `hostNetwork`
-同时监听 Internal host 的 UDP/TCP `10.88.88.88:53`；重复部署只在 ConfigMap 不存在时
+`mx-internal-coredns` 使用同一份 `mx-dns/coredns` ConfigMap，在 Pod network 内监听
+UDP/TCP `:53`，再由协议独立的 UDP/TCP `hostPort: 53` 暴露到 Internal host 的
+`10.88.88.88:53`。两个 hostPort 由 JSON Patch 原子写入，避免 Kubernetes strategic
+merge 只保留一个相同 `containerPort`；CoreDNS 不使用 `hostNetwork`，避免与宿主机
+loopback DNS listener 争抢通配 `:53`。重复部署只在 ConfigMap 不存在时
 创建带 `h2i.mxinfo-inc.cn -> 10.88.88.88` 的 baseline，不能覆盖 Config Center 已应用的
 动态 zone；读取 ConfigMap 出现 RBAC/API/timeout 错误时必须中止，不能按“不存在”处理。
 生产 apply 还必须确认宿主机已拥有 `10.88.88.88`，并对该地址执行 UDP/TCP A 查询；只在
@@ -622,10 +639,10 @@ V2-only 域名查询能返回预期 product VIP，或同名冲突域名能通过
 拿到 V2 答案。routePlan 下发的 `dnsServer` 不带端口，WireGuard 原生 DNS、
 macOS CLI split DNS 和本机 edge 都按 UDP/TCP 53 查询；`50053` 只作为旧 snapshot/旧环境
 的显式兼容值，不再是 V2 默认链路。
-如果生产 DNS 还没有准备好，Domestic runtime 的 `bootstrapHost` 可以先使用 Domestic
-公网 IP，保持 `bootstrapProtocol=http`、`bootstrapPort=18090`，这与测试服 bootstrap
-路径一致。`api.mxinfo-inc.cn` 只是默认域名占位；未替换时会产生 warning，但不应该成为
-plan/preflight/apply 的阻断条件。
+如果生产 DNS、`h2i.minsight-ai.com` 证书或 443 vhost 尚未准备好，只能继续做不携带凭据的
+受控诊断，不能把 Domestic 公网 IP 与 HTTP 18090 当成正式 enrollment。Config Center 会
+阻止 `bootstrapProtocol!=https`、`bootstrapPort!=443`、IP/URL/含端口的
+`bootstrapHost`，避免无证书配置或 Caddyfile 注入进入 apply。
 
 Split DNS 的权威面放在 Internal K8s，而不是 Domestic：
 
@@ -913,14 +930,15 @@ H 端 bootstrap 路径：
 ```text
 MX-H2I before WG
 -> MX_H2I_BOOTSTRAP_DNS_SERVERS=<domestic-public-ip>:<dns-port>
--> 解析 h2i.mxinfo-inc.cn / bootstrapHost
--> http://h2i.mxinfo-inc.cn:18090 或 Host Resolve 到 Domestic public edge
+-> 解析 h2i.minsight-ai.com / bootstrapHost
+-> https://h2i.minsight-ai.com:443，必要时 Host Resolve 到 Domestic public IP
+-> 仍以 h2i.minsight-ai.com 做 TLS SNI/Host 并校验证书
 -> 获取 lease / routePlan
 ```
 
 如果本地已有保留 lease/routePlan 和 WireGuard config，Windows 用户点击连接时可以先做一次
 privileged pre-bootstrap recovery：拉起 retained WG tunnel 后，bootstrap 优先走
-`10.88.88.88` Internal overlay 刷新租约。这样重启后即使公网域名命中 ICP 页面、`116.*:18090`
+`10.88.88.88` Internal overlay 刷新租约。这样重启后即使公网域名命中 ICP 页面、`116.*:443`
 被本地网络拦截，或现场没有 V1 DNS 残留，也不需要依赖 Clash/mihomo TUN 才能恢复。Clash TUN
 打开时可能通过代理链路变相绕过公网备案/端口阻断，因此现象上“开 TUN 能连”；但这只能作为外联
 fallback，不应成为 MX-H2I bootstrap 的主路径。
@@ -961,11 +979,13 @@ V2-only 稳定期的解析优先级：
 3. 系统代理和域名厂商 DNS 只用于 bootstrap、未命中 split 的普通公网域名，或用户显式选择的
    fallback；不作为 V2 内网域名的权威答案来源。
 
-`h2i.mxinfo-inc.cn` 这类域名可以有双角色，但必须按连接状态切换：
+`h2i.minsight-ai.com` 是当前公网 bootstrap 身份；`h2i.mxinfo-inc.cn` 仍可作为历史
+Internal split-DNS 名称。只有精确匹配旧默认值 `h2i.mxinfo-inc.cn` 的持久化公网
+bootstrap 配置会迁移到新域名，不会泛化改写其它 `mxinfo-inc.cn` 内网名称：
 
-- `disconnected / before WG`：它是 bootstrap 域名，可以走系统 DNS、Clash/mihomo 代理、
+- `disconnected / before WG`：`h2i.minsight-ai.com` 是 bootstrap 域名，可以走系统 DNS、Clash/mihomo 代理、
   Domestic public DNS endpoint 或域名厂商 DNS，解析到公网 IP 用于拿 lease/routePlan。
-- `connected / H2I ready`：它是 V2 split 内网域名，必须优先解析到 `10.88.88.88`，再走
+- `connected / H2I ready`：命中的 V2 split 内网域名必须优先解析到 `10.88.88.88`，再走
   MX-H2I WG route。这个阶段不应因为 Internal DNS 暂时失败而静默落回 `116.*` 或
   `198.18.*`。
 - `disconnect / repair`：Windows 先进入 PAC 恢复阶段，同时保持 `2053` 存活。如果
@@ -1190,8 +1210,12 @@ MX-H2I：
 - Domestic gateway：`10.88.0.1`
 - Internal fixed peer：`10.88.88.88`
 - service VIP：`10.88.100.1`
-- user lease：`10.89.0.1 - 10.89.99.254`
+- employee user lease：`10.89.0.1 - 10.89.49.254`
+- Feishu user lease：`10.89.50.1 - 10.89.99.254`
 - anonymous lease：`10.89.100.1 - 10.89.254.254`
+
+飞书 OAuth、租户白名单和独立 lease pool 的配置、验收与故障处理见
+[24-mx-h2i-feishu-login.md](./24-mx-h2i-feishu-login.md)。
 
 AppCenter/H2O：
 

@@ -655,6 +655,8 @@ async function runAction(action, payload) {
       connectGuest: () => api.connectGuest(),
       disconnect: () => api.disconnect(),
       'login-employee': () => api.loginEmployee(payload),
+      'login-feishu': () => api.startFeishuLogin?.(),
+      'cancel-feishu-login': () => api.cancelFeishuLogin?.(),
       'save-config': () => api.saveConfig(payload),
       installAppCenter: () => api.installAppCenter(),
       enableH2o: () => api.enableH2o(),
@@ -759,6 +761,7 @@ function rememberEmployeeAccount(account) {
 }
 
 function syncEmployeeLoginDraftFromState() {
+  if (state?.identity?.provider === 'feishu') return;
   const account = state?.identity?.kind === 'user' ? String(state.identity.account || '').trim() : '';
   if (!account) return;
   rememberEmployeeAccount(account);
@@ -783,19 +786,36 @@ function isGuestConnectionActive() {
 
 function guestConnectionPrompt() {
   const ip = state?.connection?.localIp ? `（当前访客 IP：${state.connection.localIp}）` : '';
-  return `当前已连接访客模式${ip}。员工认证成功后会自动切换到员工网络；认证失败或取消授权时保留访客连接。`;
+  return `当前已连接访客模式${ip}。员工认证成功后会自动切换到员工网络；身份认证阶段失败、拒绝或取消时保留访客连接。`;
 }
 
 function isConnectionPending() {
   return state?.connection?.state === 'connecting'
     || busyAction === 'connectGuest'
-    || busyAction === 'login-employee';
+    || busyAction === 'login-employee'
+    || feishuAuthStage() === 'connecting';
 }
 
 function pendingConnectionLabel() {
   if (state?.connection?.state === 'lease-only') return '等待系统授权';
+  if (feishuAuthStage() === 'connecting') return '正在连接飞书员工模式';
   if (busyAction === 'login-employee') return '正在连接员工模式';
   return '等待连接中';
+}
+
+function feishuAuthFlow() {
+  const flow = state?.authFlow;
+  return flow?.provider === 'feishu' ? flow : null;
+}
+
+function feishuAuthStage() {
+  return String(feishuAuthFlow()?.stage || '');
+}
+
+function feishuAuthPending() {
+  return Boolean(feishuAuthFlow())
+    || busyAction === 'login-feishu'
+    || busyAction === 'cancel-feishu-login';
 }
 
 function isInternalConnected() {
@@ -952,33 +972,68 @@ function renderGuestConnect(connected, connecting, leaseOnly = false) {
 function renderEmployeeLogin(connecting) {
   const guestActive = isGuestConnectionActive();
   const loginPending = busyAction === 'login-employee';
+  const feishuFlow = feishuAuthFlow();
+  const feishuStage = feishuAuthStage();
+  const feishuPending = feishuAuthPending();
+  const feishuCancelable = Boolean(feishuFlow) && feishuStage !== 'connecting';
   const replacingGuest = guestActive || (
-    loginPending
+    (loginPending || feishuStage === 'connecting')
     && state.networkEvent?.name === 'staff:connect'
     && state.networkEvent?.reason === 'visit-to-staff'
   );
   const historyOptions = employeeAccountHistory
     .map((account) => `<option value="${escapeAttr(account)}"></option>`)
     .join('');
+  const transitionMessage = loginPending
+    ? (replacingGuest
+        ? '正在验证员工身份；认证失败或取消时保留访客连接，成功后开始系统网络切换。'
+        : '正在验证员工身份并建立员工网络。')
+    : feishuStage === 'connecting'
+      ? (replacingGuest
+          ? '飞书身份验证通过；正在切换员工网络，系统网络切换阶段会替换访客通道。'
+          : '飞书身份验证通过；正在建立员工网络。')
+      : feishuFlow
+        ? (guestActive
+            ? `正在等待飞书授权；当前访客 IP ${state.connection?.localIp || '保持中'} 不会被断开。`
+            : '已打开系统浏览器，正在等待飞书授权。')
+        : '';
+  const fieldsDisabled = loginPending || feishuPending;
+  const feishuAction = feishuCancelable ? 'cancel-feishu-login' : 'login-feishu';
+  const feishuDisabled = connecting
+    || loginPending
+    || feishuStage === 'connecting'
+    || busyAction === 'cancel-feishu-login';
+  const feishuLabel = busyAction === 'login-feishu'
+    ? '正在打开飞书'
+    : busyAction === 'cancel-feishu-login'
+      ? '正在取消飞书登录'
+      : feishuStage === 'connecting'
+        ? '正在切换飞书员工模式'
+        : feishuCancelable
+          ? '取消飞书登录'
+          : '使用飞书登录';
   return `
     <form class="login-panel" data-form-action="login-employee">
-      ${loginPending
-        ? `<div class="login-transition" role="status" aria-live="polite"><span class="login-transition-wave" aria-hidden="true"></span><span>${escapeHtml(replacingGuest ? '正在验证员工身份；认证成功后将自动接管访客网络。' : '正在验证员工身份并建立员工网络。')}</span></div>`
+      ${transitionMessage
+        ? `<div class="login-transition" role="status" aria-live="polite"><span class="login-transition-wave" aria-hidden="true"></span><span>${escapeHtml(transitionMessage)}</span></div>`
         : guestActive ? `<div class="login-notice">${escapeHtml(guestConnectionPrompt())}</div>` : ''}
       <label class="field">
         <span>账号</span>
-        <input name="account" data-employee-login-field="account" value="${escapeAttr(employeeLoginDraft.account)}" list="employee-account-history" autocomplete="username" placeholder="Username/Email/Phone" ${loginPending ? 'disabled' : ''} />
+        <input name="account" data-employee-login-field="account" value="${escapeAttr(employeeLoginDraft.account)}" list="employee-account-history" autocomplete="username" placeholder="Username/Email/Phone" ${fieldsDisabled ? 'disabled' : ''} />
         <datalist id="employee-account-history">${historyOptions}</datalist>
       </label>
       <label class="field">
         <span>密码</span>
-        <input name="password" data-employee-login-field="password" value="${escapeAttr(employeeLoginDraft.password)}" type="password" autocomplete="current-password" placeholder="Password" ${loginPending ? 'disabled' : ''} />
+        <input name="password" data-employee-login-field="password" value="${escapeAttr(employeeLoginDraft.password)}" type="password" autocomplete="current-password" placeholder="Password" ${fieldsDisabled ? 'disabled' : ''} />
       </label>
-      <button class="primary-button block-button" type="submit" aria-busy="${loginPending ? 'true' : 'false'}" ${connecting ? 'disabled' : ''}>
+      <button class="primary-button block-button" type="submit" aria-busy="${loginPending ? 'true' : 'false'}" ${connecting || feishuPending ? 'disabled' : ''}>
         ${loginPending ? (replacingGuest ? '正在切换员工模式' : '正在连接员工模式') : guestActive ? '登录并切换员工模式' : connecting ? '连接处理中' : '连接'}
       </button>
-      <button class="secondary-button block-button" type="button" data-action="${guestActive ? 'disconnect' : 'connectGuest'}" ${connecting ? 'disabled' : ''}>
-        ${guestActive ? '仅断开访客模式' : '使用飞书连接'}
+      <button class="secondary-button block-button" type="button" data-action="${feishuAction}" aria-busy="${feishuPending && !feishuCancelable ? 'true' : 'false'}" ${feishuDisabled ? 'disabled' : ''}>
+        ${escapeHtml(feishuLabel)}
+      </button>
+      <button class="secondary-button block-button" type="button" data-action="${guestActive ? 'disconnect' : 'connectGuest'}" ${connecting || feishuPending ? 'disabled' : ''}>
+        ${guestActive ? '仅断开访客模式' : '使用访客连接'}
       </button>
     </form>
   `;
@@ -1404,7 +1459,7 @@ function renderConfigForm() {
       </label>
       <label class="field">
         <span>Host Resolve</span>
-        <input name="hostResolve" value="${escapeAttr(config.hostResolve || '')}" placeholder="h2i.mxinfo-inc.cn=<gateway-ip>" />
+        <input name="hostResolve" value="${escapeAttr(config.hostResolve || '')}" placeholder="h2i.minsight-ai.com=<gateway-ip>" />
       </label>
       <label class="field">
         <span>Bootstrap DNS</span>
@@ -3213,8 +3268,14 @@ function compactText(value, limit = 90) {
 function connectionCaption() {
   const connection = state.connection || {};
   if (busyAction === 'disconnect') return '正在等待一次系统授权，以原子停止 WireGuard 并恢复 PAC / split DNS';
+  if (feishuAuthFlow() && feishuAuthStage() !== 'connecting') {
+    return connection.mode === 'guest' && connection.localIp
+      ? `${connection.localIp} / 等待飞书授权，访客连接保持中`
+      : '等待系统浏览器完成飞书授权';
+  }
   if (isConnectionPending()) {
     if (connection.state === 'lease-only') return `${connection.localIp || '已分配租约'} / 等待系统授权完成`;
+    if (feishuAuthStage() === 'connecting') return `${connection.localIp || '飞书员工网络'} / 正在切换员工通道`;
     if (busyAction === 'login-employee' && connection.mode === 'guest') return `${connection.localIp || '访客网络'} / 正在验证员工身份，访客连接保持中`;
     return '正在准备 WireGuard、DNS、PAC 和权限上下文';
   }
@@ -3276,12 +3337,12 @@ function mockH2oManagedSubscriptionUrl() {
 function createMockApi() {
   let mockState = {
     config: {
-      bootstrapApiBaseUrl: 'http://h2i.mxinfo-inc.cn:18090',
+      bootstrapApiBaseUrl: 'https://h2i.minsight-ai.com',
       internalApiBaseUrl: 'http://10.88.88.88:18090',
       domesticRelayHost: '116.62.51.154',
       domesticRelayPort: 51280,
-      sdkGatewayBaseUrl: 'http://h2i.mxinfo-inc.cn:18090/internal/v1/sdk',
-      hostResolve: '',
+      sdkGatewayBaseUrl: 'https://h2i.minsight-ai.com/internal/v1/sdk',
+      hostResolve: 'h2i.minsight-ai.com=116.62.51.154',
       bootstrapResolveMode: 'env-first',
       bootstrapDnsServers: '',
       routePathPreference: 'auto',
@@ -3308,6 +3369,7 @@ function createMockApi() {
     },
     identity: {
       kind: 'anonymous',
+      provider: null,
       displayName: 'Visitor',
       account: null,
       scopes: ['auth.read']
@@ -3469,6 +3531,7 @@ function createMockApi() {
         { at: new Date().toISOString(), level: 'warning', event: 'network.diagnostics-problem', message: 'Mock Windows NRPT global policy is disabled.' }
       ]
     },
+    authFlow: null,
     feedback: null,
     activity: [],
     updatedAt: new Date().toISOString()
@@ -3535,6 +3598,7 @@ function createMockApi() {
         },
         identity: {
           kind: 'user',
+          provider: 'password',
           displayName: String(input.account || 'employee').split('@')[0],
           account: input.account || 'employee@qpjoy.local',
           scopes: ['auth.read', 'appcenter.read', 'network.hdi.status']
@@ -3556,6 +3620,30 @@ function createMockApi() {
         feedback: null
       });
     },
+    startFeishuLogin: async () => commit({
+      authFlow: {
+        provider: 'feishu',
+        stage: 'waiting-callback',
+        startedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        redirectUri: 'http://127.0.0.1:17891/oauth/feishu/callback'
+      },
+      feedback: {
+        tone: 'info',
+        message: mockState.connection.mode === 'guest' && mockState.connection.localIp
+          ? `已打开系统浏览器，请在飞书完成授权。当前访客连接（${mockState.connection.localIp}）保持不变。`
+          : '已打开系统浏览器，请在飞书完成授权。'
+      }
+    }),
+    cancelFeishuLogin: async () => commit({
+      authFlow: null,
+      feedback: {
+        tone: 'warning',
+        message: mockState.connection.mode === 'guest' && mockState.connection.localIp
+          ? `已取消飞书登录。当前访客连接（${mockState.connection.localIp}）保持不变。`
+          : '已取消飞书登录。'
+      }
+    }),
     disconnect: async () => commit({
       connection: {
         ...mockState.connection,
@@ -3571,6 +3659,7 @@ function createMockApi() {
           appBroker: 'idle'
         }
       },
+      authFlow: null,
       feedback: { tone: 'info', message: '连接已断开。' }
     }),
     installAppCenter: async () => commit({
@@ -3890,7 +3979,9 @@ function createMockApi() {
           networkEnvironment: {
             reason: 'mock-repair',
             phase: mockState.connection.state === 'connected' ? 'connected' : 'disconnected',
-            host: 'h2i.mxinfo-inc.cn',
+            host: mockState.connection.state === 'connected'
+              ? 'h2i.mxinfo-inc.cn'
+              : 'h2i.minsight-ai.com',
             resolution: {
               state: mockState.connection.state === 'connected' ? 'expected-internal' : 'public',
               severity: 'ok',

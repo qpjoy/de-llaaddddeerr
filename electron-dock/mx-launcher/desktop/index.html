@@ -185,6 +185,11 @@
           <span>MX Server</span>
           <input id="server-input" placeholder="http://127.0.0.1:18090" />
         </label>
+        <label class="server-field ops-token-field">
+          <span>Internal Ops Token</span>
+          <input id="ops-token-input" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="session only" aria-describedby="ops-token-help" />
+          <small id="ops-token-help">Bound to the current MX Server origin; changing MX Server clears it.</small>
+        </label>
 
         <div class="sidebar-status">
           <span id="connection-state" class="state-chip">Ready</span>

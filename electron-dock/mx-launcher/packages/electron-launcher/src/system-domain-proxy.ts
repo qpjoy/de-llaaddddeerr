@@ -1467,6 +1467,9 @@ ${fallbackPacScript.replace(/^\uFEFF/, '').split(/\r?\n/).map((line) => `  ${lin
 ${previousPac}
 function FindProxyForURL(url, host) {
   var h = String(host || '').toLowerCase();
+  if (h === 'localhost' || h === '::1' || h === '[::1]' || h.slice(0, 4) === '127.') {
+    return 'DIRECT';
+  }
   var directCidrs = ${JSON.stringify(directCidrs)};
   if (isIpv4Literal(h)) {
     for (var j = 0; j < directCidrs.length; j++) {

@@ -1,5 +1,6 @@
 export type LauncherProductMode = 'standalone' | 'embed';
 export type LauncherIdentityKind = 'user' | 'anonymous';
+export type LauncherLeaseProfile = 'employee' | 'feishu' | 'anonymous';
 export type LauncherProductUpdatePolicy = 'launcher-managed' | 'app-managed' | 'host-managed';
 export type LauncherNetworkScope = 'owner' | 'broker-session';
 
@@ -247,10 +248,14 @@ export interface AnonymousEnrollment {
 }
 
 export interface LauncherNetworkSnapshotInput {
+  leaseId?: string | null;
+  leaseCapability?: string | null;
   installId?: string;
   deviceId?: string;
   siteId?: string | null;
   userId?: string | null;
+  leaseProfile?: LauncherLeaseProfile | string | null;
+  accessToken?: string | null;
   publicKey?: string | null;
   appId?: string;
   launcherMode?: LauncherProductMode | null;
@@ -262,6 +267,10 @@ export interface LauncherNetworkLeaseInput {
   productId?: string | null;
   mode?: LauncherProductMode | string | null;
   identityKind?: LauncherIdentityKind | string | null;
+  leaseProfile?: LauncherLeaseProfile | string | null;
+  accessToken?: string | null;
+  leaseCapability?: string | null;
+  newLeaseCapability?: string | null;
   installId?: string | null;
   deviceId?: string | null;
   siteId?: string | null;
@@ -294,9 +303,12 @@ export interface LauncherProductNetworkInput {
   dnsServer?: string | null;
   serviceVip?: string | null;
   userCidr?: string | null;
+  feishuCidr?: string | null;
   anonymousCidr?: string | null;
   userLeaseStart?: string | null;
   userLeaseEnd?: string | null;
+  feishuLeaseStart?: string | null;
+  feishuLeaseEnd?: string | null;
   anonymousLeaseStart?: string | null;
   anonymousLeaseEnd?: string | null;
   defaultDomesticSiteId?: string | null;
@@ -322,9 +334,12 @@ export interface LauncherProductNetwork {
   dnsServer: string;
   serviceVip: string;
   userCidr: string;
+  feishuCidr: string;
   anonymousCidr: string;
   userLeaseStart: string;
   userLeaseEnd: string;
+  feishuLeaseStart: string;
+  feishuLeaseEnd: string;
   anonymousLeaseStart: string;
   anonymousLeaseEnd: string;
   defaultDomesticSiteId: string;
@@ -344,10 +359,13 @@ export interface LauncherProductNetwork {
 export interface LauncherNetworkLease {
   leaseId: string;
   leaseKey: string;
+  capability?: string;
+  handoverLeases?: LauncherNetworkLease[];
   environment: string;
   productId: string;
   launcherMode: LauncherProductMode;
   identityKind: LauncherIdentityKind;
+  leaseProfile: LauncherLeaseProfile;
   sequence: number;
   installId: string;
   deviceId: string;
@@ -364,6 +382,9 @@ export interface LauncherNetworkLease {
   deviceLabel: string | null;
   platform: string | null;
   status: 'active';
+  expiresAt?: string;
+  releasedAt?: string | null;
+  replacementForLeaseId?: string | null;
   createdBy: string;
   createdAt: string;
   updatedBy: string;
@@ -382,6 +403,7 @@ export interface LauncherNetworkSnapshot {
     productId: string;
     launcherMode: LauncherProductMode;
     identityKind: LauncherIdentityKind;
+    leaseProfile: LauncherLeaseProfile;
     cidr: string;
     leaseIp: string;
     relayMode: 'h2i';
@@ -421,6 +443,7 @@ export interface LauncherNetworkTopology {
     domesticGatewayIp: string;
     dnsServer: string;
     userCidr: string;
+    feishuCidr: string;
     anonymousCidr: string;
     updatePolicy: LauncherProductUpdatePolicy;
     rateLimitProfile: string;
@@ -629,21 +652,25 @@ export function createLauncherClient(options: LauncherClientOptions): LauncherCl
     },
 
     async enrollLease(input) {
+      const { accessToken, leaseCapability, newLeaseCapability, ...leaseInput } = input;
       const payload = await requestJson<{ lease: LauncherNetworkLease }>(
         fetchImpl,
         joinUrl(baseUrl, '/internal/v1/launcher-network/enrollments'),
         'POST',
-        compactBody(input)
+        compactBody(leaseInput),
+        launcherLeaseHeaders(accessToken, leaseCapability, newLeaseCapability)
       );
       return payload.lease;
     },
 
     async createSnapshot(input) {
+      const { accessToken, leaseCapability, ...snapshotInput } = input;
       const payload = await requestJson<{ snapshot: LauncherNetworkSnapshot }>(
         fetchImpl,
         joinUrl(baseUrl, '/internal/v1/launcher-network/snapshots'),
         'POST',
-        compactBody(input)
+        compactBody(snapshotInput),
+        launcherLeaseHeaders(accessToken, leaseCapability)
       );
       return payload.snapshot;
     },
@@ -680,6 +707,10 @@ export async function createLauncherNetworkSession(
     productId,
     mode,
     identityKind: input.identityKind,
+    leaseProfile: input.leaseProfile,
+    accessToken: input.accessToken,
+    leaseCapability: input.leaseCapability,
+    newLeaseCapability: input.newLeaseCapability,
     installId: input.installId,
     deviceId: input.deviceId,
     siteId: input.siteId,
@@ -692,10 +723,14 @@ export async function createLauncherNetworkSession(
     sdkTestMode: input.sdkTestMode
   });
   const snapshot = await client.createSnapshot({
+    leaseId: lease.leaseId,
+    leaseCapability: lease.capability,
     installId: lease.installId,
     deviceId: lease.deviceId,
     siteId: lease.siteId,
     userId: lease.userId,
+    leaseProfile: lease.leaseProfile,
+    accessToken: input.accessToken,
     publicKey: wireGuard.publicKey,
     appId: lease.productId,
     launcherMode: lease.launcherMode,
@@ -1114,13 +1149,15 @@ async function requestJson<T>(
   fetchImpl: FetchLike,
   url: string,
   method: 'GET' | 'POST',
-  body?: Record<string, unknown>
+  body?: Record<string, unknown>,
+  extraHeaders: Record<string, string> = {}
 ): Promise<T> {
   const response = await fetchImpl(url, {
     method,
     headers: {
       accept: 'application/json',
-      ...(body ? { 'content-type': 'application/json' } : {})
+      ...(body ? { 'content-type': 'application/json' } : {}),
+      ...extraHeaders
     },
     ...(body ? { body: JSON.stringify(body) } : {})
   });
@@ -1133,6 +1170,24 @@ async function requestJson<T>(
   }
 
   return payload as T;
+}
+
+function bearerHeaders(accessToken: string | null | undefined): Record<string, string> {
+  const token = accessToken?.trim();
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
+
+function launcherLeaseHeaders(
+  accessToken: string | null | undefined,
+  leaseCapability: string | null | undefined,
+  newLeaseCapability?: string | null
+): Record<string, string> {
+  const headers = bearerHeaders(accessToken);
+  const capability = leaseCapability?.trim();
+  if (capability) headers['x-mx-lease-capability'] = capability;
+  const newCapability = newLeaseCapability?.trim();
+  if (newCapability) headers['x-mx-new-lease-capability'] = newCapability;
+  return headers;
 }
 
 function parseJsonPayload(text: string): unknown {

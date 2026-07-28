@@ -459,6 +459,16 @@ try {
         'HTTPS traffic must retain the live Clash HTTPS listener'
       );
       assert.equal(
+        evaluatePac(pac, 'http://127.0.0.1:17891/oauth/feishu/callback', '127.0.0.1'),
+        'DIRECT',
+        'the Feishu loopback callback must never enter the inherited static proxy'
+      );
+      assert.equal(
+        evaluatePac(pac, 'http://[::1]:17891/oauth/feishu/callback', '::1'),
+        'DIRECT',
+        'the IPv6 loopback callback must never enter the inherited static proxy'
+      );
+      assert.equal(
         evaluatePac(pac, 'http://public.example.test/', 'public.example.test'),
         `PROXY 127.0.0.1:${liveStaticHttpProxy.port}; DIRECT`,
         'HTTP traffic must retain the live Clash HTTP listener'
@@ -654,6 +664,11 @@ try {
         evaluatePac(pac, 'https://proxy.public.test/', 'proxy.public.test'),
         'PROXY 127.0.0.1:7899; DIRECT',
         'the wrapped PAC must preserve a public PROXY decision'
+      );
+      assert.equal(
+        evaluatePac(pac, 'http://localhost:17891/oauth/feishu/callback', 'localhost'),
+        'DIRECT',
+        'the Feishu loopback callback must take precedence over the wrapped PAC'
       );
       previousPac.setSource(`function FindProxyForURL(url, host) {
   if (host === 'updated.public.test') return 'PROXY 127.0.0.1:7900; DIRECT';

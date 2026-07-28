@@ -116,7 +116,8 @@ WireGuard、route、平台 resolver 和 PAC，embed 只通过 broker 消费结�
 | service VIP | `10.88.100.1` | `10.88.100.3` |
 | 迁移期兼容地址 | `10.88.88.88/32`、`10.88.0.1/32` | **无，禁止使用** |
 | internalBaseUrl | `http://10.88.100.1:18090`（迁移期 `10.88.88.88`） | `http://10.88.100.3:18090` |
-| 应用域名 | `h2i.mxinfo-inc.cn` | `luopan.mxinfo-inc.cn` |
+| Internal 应用域名 | `h2i.mxinfo-inc.cn` | `luopan.mxinfo-inc.cn` |
+| 公网 bootstrap | `h2i.minsight-ai.com` | 尚未定义 |
 
 VIP 是 Internal 把控制面/DNS/代理 materialize 给该产品 channel 的地址，是产品到
 Internal 的**唯一路由**。VIP 不跨产品复用；`10.88.88.88` 只属于 MX-H2I 的历史迁移，
@@ -423,7 +424,7 @@ demo 默认 **registered 模式**（`sdkTestMode=false`），工具栏 **Connect
 
 - **bootstrap 先有鸡还是先有蛋**：第一次 enroll 时 WG 还没起，`baseUrl` 必须是
   当下就可达的地址——同网/LAN 直达 server，或平台提供的公网 bootstrap 代理
-  （转发 enroll/lease/snapshot，参照 mx-h2i 的 `h2i.mxinfo-inc.cn` 模式）。连上
+  （转发 enroll/lease/snapshot，参照 mx-h2i 的 `h2i.minsight-ai.com` 公网 bootstrap 模式）。连上
   之后产品流量一律走自己的 VIP。
   这套语义已下沉进包（≥2.3.2）：`@qpjoy/electron-launcher/bootstrap` 提供
   `resolveElectronLauncherBootstrap`（候选 URL 顺序探测 `/healthz`，命中即钉住）、

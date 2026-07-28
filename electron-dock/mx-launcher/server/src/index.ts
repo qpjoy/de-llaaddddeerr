@@ -18,13 +18,28 @@ const app = await NestFactory.create<NestExpressApplication>(AppModule, {
 });
 const config = app.get<RuntimeConfig>(RUNTIME_CONFIG);
 const adminStaticDir = resolveAdminStaticDir();
+const trustProxyHops = positiveInteger(process.env.MX_HTTP_TRUST_PROXY_HOPS);
+if (trustProxyHops) {
+  const express = app.getHttpAdapter().getInstance() as {
+    set: (name: string, value: number) => void;
+  };
+  express.set('trust proxy', trustProxyHops);
+}
 
 app.useBodyParser('json', { limit: httpBodyLimit });
 app.useBodyParser('urlencoded', { limit: httpBodyLimit, extended: true });
 
 app.enableCors({
   origin: '*',
-  allowedHeaders: ['content-type', 'authorization', 'x-request-id'],
+  allowedHeaders: [
+    'content-type',
+    'authorization',
+    'x-request-id',
+    'x-mx-ops-token',
+    'x-mx-lease-capability',
+    'x-mx-peer-lease-capability',
+    'x-mx-new-lease-capability'
+  ],
   methods: ['GET', 'POST', 'OPTIONS']
 });
 
@@ -62,6 +77,7 @@ console.log(JSON.stringify({
   siteId: config.siteId,
   siteRole: config.siteRole,
   enabledModules: config.enabledModules,
+  trustProxyHops,
   httpBodyLimit,
   adminStaticDir,
   adminUrl: adminStaticDir ? `http://${config.host}:${config.port}/admin/` : null,
@@ -82,4 +98,9 @@ function resolveAdminStaticDir(): string | null {
     resolve(runtimeDir, '../../../desktop')
   ].filter((item): item is string => Boolean(item));
   return candidates.find((candidate) => existsSync(resolve(candidate, 'index.html'))) ?? null;
+}
+
+function positiveInteger(value: string | undefined): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 0;
 }

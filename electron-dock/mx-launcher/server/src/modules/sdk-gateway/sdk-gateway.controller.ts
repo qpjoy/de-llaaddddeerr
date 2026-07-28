@@ -1,18 +1,43 @@
-import { BadRequestException, Body, Controller, Get, Inject, Post, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpException,
+  HttpStatus,
+  Inject,
+  Ip,
+  Post,
+  UnauthorizedException
+} from '@nestjs/common';
 
+import { authenticationRateLimitBucketKey } from '../../lib/auth-rate-limit.js';
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
+import { assertInternalOpsToken, INTERNAL_OPS_TOKEN_HEADER } from '../../lib/internal-ops-auth.js';
 import { userMatchesLogin } from '../../store/domain.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
 import type { CreateServiceAccountInput, CreateUserInput, SdkGatewayAccessInput } from '../../types.js';
 import { toPrincipalInput, toTokenInput } from '../user-center/user-center.controller.js';
+import { FeishuAuthService } from './feishu-auth.service.js';
 
 const USER_ACCESS_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
 const SERVICE_ACCOUNT_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
+const OAUTH_RATE_LIMIT_WINDOW_SECONDS = 5 * 60;
+const PASSWORD_SOURCE_ATTEMPT_LIMIT = 60;
+const PASSWORD_SUBJECT_ATTEMPT_LIMIT = 25;
+const PASSWORD_SOURCE_SUBJECT_ATTEMPT_LIMIT = 10;
+const SERVICE_SOURCE_ATTEMPT_LIMIT = 30;
+const SERVICE_SUBJECT_ATTEMPT_LIMIT = 25;
+const SERVICE_SOURCE_SUBJECT_ATTEMPT_LIMIT = 10;
 
 @Controller()
 export class SdkGatewayController {
-  constructor(@Inject(PLATFORM_STORE) private readonly store: PlatformStore) {}
+  constructor(
+    @Inject(PLATFORM_STORE) private readonly store: PlatformStore,
+    private readonly feishuAuth: FeishuAuthService
+  ) {}
 
   @Get('internal/v1/sdk/gateway/manifest')
   async manifest() {
@@ -25,16 +50,55 @@ export class SdkGatewayController {
   }
 
   @Post('internal/v1/sdk/oauth/token')
-  async token(@Body() rawBody: unknown) {
+  async token(
+    @Body() rawBody: unknown,
+    @Ip() sourceIp?: string,
+    @Headers('x-mx-forwarded-by') forwardedBy?: string
+  ) {
     const body = asRecord(rawBody);
     const grantType = nullableString(body.grant_type) ?? nullableString(body.grantType) ?? 'password';
     if (grantType !== 'password' && grantType !== 'client_credentials') {
       throw new BadRequestException('Unsupported OAuth grant_type');
     }
     if (grantType === 'client_credentials') {
-      return this.issueServiceAccountToken(body);
+      if (forwardedBy?.trim().toLowerCase() === 'domestic-edge') {
+        throw new UnauthorizedException('client_credentials is restricted to the Internal control plane');
+      }
+      return this.issueServiceAccountToken(body, sourceIp);
     }
-    return this.issueUserToken(body);
+    return this.issueUserToken(body, sourceIp);
+  }
+
+  @Get('internal/v1/sdk/oauth/feishu/config')
+  feishuConfig() {
+    return { config: this.feishuAuth.publicConfig() };
+  }
+
+  @Post('internal/v1/sdk/oauth/feishu/authorize')
+  async feishuAuthorize(@Body() rawBody: unknown, @Ip() sourceIp?: string) {
+    const body = asRecord(rawBody);
+    return this.feishuAuth.authorize({
+      redirectUri: exactString(body.redirectUri),
+      state: exactString(body.state),
+      codeChallenge: exactString(body.codeChallenge),
+      sourceKey: sourceIp
+    });
+  }
+
+  @Post('internal/v1/sdk/oauth/feishu/token')
+  async feishuToken(@Body() rawBody: unknown, @Ip() sourceIp?: string) {
+    const body = asRecord(rawBody);
+    const result = await this.feishuAuth.exchange({
+      code: exactString(body.code),
+      redirectUri: exactString(body.redirectUri),
+      codeVerifier: exactString(body.codeVerifier),
+      exchangeHandle: exactString(body.exchangeHandle),
+      audience: nullableString(body.audience),
+      scopes: oauthScopes(body.scope, undefined),
+      requestId: nullableString(body.requestId),
+      sourceKey: sourceIp
+    });
+    return { token: oauthTokenResponse(result.issued, result.introspection) };
   }
 
   @Post('internal/v1/sdk/identity/context')
@@ -48,27 +112,38 @@ export class SdkGatewayController {
   }
 
   @Get('internal/v1/sdk/roles')
-  async roles() {
+  async roles(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
+    assertInternalOpsToken(opsToken);
     return { roles: await this.store.listUserCenterRoles() };
   }
 
   @Get('internal/v1/sdk/users')
-  async users() {
+  async users(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
+    assertInternalOpsToken(opsToken);
     return { users: await this.store.listUserCenterUsers() };
   }
 
   @Post('internal/v1/sdk/users')
-  async createUser(@Body() rawBody: unknown) {
+  async createUser(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
     return { user: await this.store.createUserCenterUser(toCreateUserInput(asRecord(rawBody))) };
   }
 
   @Get('internal/v1/sdk/service-accounts')
-  async serviceAccounts() {
+  async serviceAccounts(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
+    assertInternalOpsToken(opsToken);
     return { serviceAccounts: await this.store.listUserCenterServiceAccounts() };
   }
 
   @Post('internal/v1/sdk/service-accounts')
-  async createServiceAccount(@Body() rawBody: unknown) {
+  async createServiceAccount(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
     return {
       serviceAccount: await this.store.createUserCenterServiceAccount(toCreateServiceAccountInput(asRecord(rawBody)))
     };
@@ -90,13 +165,21 @@ export class SdkGatewayController {
     };
   }
 
-  private async issueUserToken(body: Record<string, unknown>) {
+  private async issueUserToken(body: Record<string, unknown>, sourceIp?: string) {
     const username = nullableString(body.username) ?? nullableString(body.account) ?? nullableString(body.email);
     const password = nullableString(body.password);
     if (!username || !password) throw new UnauthorizedException('username and password are required');
     const users = await this.store.listUserCenterUsers();
-    const user = users.find((item) => item.status === 'active' && userMatchesLogin(item, username));
-    if (!user) throw new UnauthorizedException('User Center account is not active');
+    const user = users.find((item) => userMatchesLogin(item, username));
+    await this.assertOAuthAttemptRateLimit({
+      grantType: 'password',
+      sourceIp,
+      subject: user?.userId ?? username,
+      sourceLimit: PASSWORD_SOURCE_ATTEMPT_LIMIT,
+      subjectLimit: PASSWORD_SUBJECT_ATTEMPT_LIMIT,
+      sourceSubjectLimit: PASSWORD_SOURCE_SUBJECT_ATTEMPT_LIMIT
+    });
+    if (!user || user.status !== 'active') throw new UnauthorizedException('invalid credentials');
     const verification = await this.store.verifyUserCenterPassword({
       userId: user.userId,
       password,
@@ -108,6 +191,7 @@ export class SdkGatewayController {
       subjectId: user.userId,
       audience: nullableString(body.audience) ?? 'mx-sdk',
       scopes: oauthScopes(body.scope, body.scopes),
+      authProvider: 'local-password',
       ttlSeconds: Math.min(
         numberValue(body.expires_in) ?? numberValue(body.ttlSeconds) ?? USER_ACCESS_TOKEN_TTL_SECONDS,
         USER_ACCESS_TOKEN_TTL_SECONDS
@@ -122,10 +206,19 @@ export class SdkGatewayController {
     return { token: oauthTokenResponse(issued, introspection) };
   }
 
-  private async issueServiceAccountToken(body: Record<string, unknown>) {
+  private async issueServiceAccountToken(body: Record<string, unknown>, sourceIp?: string) {
     const clientId = nullableString(body.client_id) ?? nullableString(body.clientId);
     const clientSecret = nullableString(body.client_secret) ?? nullableString(body.clientSecret);
     if (!clientId || !clientSecret) throw new UnauthorizedException('client_id and client_secret are required');
+    await this.assertOAuthAttemptRateLimit({
+      grantType: 'client-credentials',
+      sourceIp,
+      subject: clientId,
+      sourceLimit: SERVICE_SOURCE_ATTEMPT_LIMIT,
+      subjectLimit: SERVICE_SUBJECT_ATTEMPT_LIMIT,
+      sourceSubjectLimit: SERVICE_SOURCE_SUBJECT_ATTEMPT_LIMIT
+    });
+    assertInternalOpsToken(clientSecret);
     const serviceAccounts = await this.store.listUserCenterServiceAccounts();
     const serviceAccount = serviceAccounts.find((item) => item.status === 'active' && item.serviceAccountId === clientId);
     if (!serviceAccount) throw new UnauthorizedException('service account is not active');
@@ -145,6 +238,45 @@ export class SdkGatewayController {
       requestId: nullableString(body.requestId)
     });
     return { token: oauthTokenResponse(issued, introspection) };
+  }
+
+  private async assertOAuthAttemptRateLimit(input: {
+    grantType: 'password' | 'client-credentials';
+    sourceIp?: string;
+    subject: string;
+    sourceLimit: number;
+    subjectLimit: number;
+    sourceSubjectLimit: number;
+  }): Promise<void> {
+    const source = input.sourceIp?.trim() || 'unknown-source';
+    const subject = input.subject.trim().toLowerCase() || 'unknown-subject';
+    const decisions = await this.store.consumeAuthenticationRateLimits([
+      {
+        bucketKey: authenticationRateLimitBucketKey(`${input.grantType}-source`, source),
+        limit: input.sourceLimit,
+        windowSeconds: OAUTH_RATE_LIMIT_WINDOW_SECONDS
+      },
+      {
+        bucketKey: authenticationRateLimitBucketKey(`${input.grantType}-subject`, subject),
+        limit: input.subjectLimit,
+        windowSeconds: OAUTH_RATE_LIMIT_WINDOW_SECONDS
+      },
+      {
+        bucketKey: authenticationRateLimitBucketKey(
+          `${input.grantType}-source-subject`,
+          `${source}\n${subject}`
+        ),
+        limit: input.sourceSubjectLimit,
+        windowSeconds: OAUTH_RATE_LIMIT_WINDOW_SECONDS
+      }
+    ]);
+    const denied = decisions.filter((decision) => !decision.allowed);
+    if (denied.length === 0) return;
+    throw new HttpException({
+      statusCode: HttpStatus.TOO_MANY_REQUESTS,
+      message: 'Too many authentication attempts',
+      retryAfterSeconds: Math.max(...denied.map((decision) => decision.retryAfterSeconds))
+    }, HttpStatus.TOO_MANY_REQUESTS);
   }
 }
 
@@ -200,9 +332,13 @@ function numberValue(value: unknown): number | null {
   return Number.isFinite(raw) ? Math.max(60, Math.floor(raw)) : null;
 }
 
+function exactString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
 function oauthTokenResponse(
   issued: { token: string; record: { audience: string; scopes: string[]; expiresAt: string; issuer: string } },
-  introspection: { subject: string | null; principal: unknown }
+  introspection: { subject: string | null; principal: unknown; authProvider?: string | null }
 ) {
   const expiresMs = Date.parse(issued.record.expiresAt) - Date.now();
   return {
@@ -215,6 +351,7 @@ function oauthTokenResponse(
     audience: issued.record.audience,
     subject: introspection.subject,
     principal: introspection.principal,
+    auth_provider: introspection.authProvider ?? null,
     expires_at: issued.record.expiresAt
   };
 }

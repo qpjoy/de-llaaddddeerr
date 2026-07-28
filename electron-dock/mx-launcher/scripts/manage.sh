@@ -1572,6 +1572,41 @@ k8s_apply_db_secret() {
     --dry-run=client -o yaml | kubectl apply --validate=false -f -
 }
 
+k8s_internal_ops_token() {
+  local ns="$1"
+  local existing
+  if [ -n "${MX_INTERNAL_OPS_TOKEN:-}" ]; then
+    printf '%s' "$MX_INTERNAL_OPS_TOKEN"
+    return
+  fi
+  existing="$(kubectl -n "$ns" get secret mx-internal-ops \
+    -o go-template='{{index .data "token" | base64decode}}' 2>/dev/null || true)"
+  if [ -n "$existing" ]; then
+    printf '%s' "$existing"
+    return
+  fi
+  node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("base64url"))'
+}
+
+k8s_apply_internal_ops_secret() {
+  local ns="$1"
+  local token
+  token="$(k8s_internal_ops_token "$ns")"
+  [ "${#token}" -ge 32 ] || die "MX_INTERNAL_OPS_TOKEN must contain at least 32 characters"
+  kubectl -n "$ns" create secret generic mx-internal-ops \
+    --from-literal=token="$token" \
+    --dry-run=client -o yaml | kubectl apply --validate=false -f -
+}
+
+k8s_internal_ops_secret_dry_run() {
+  local ns="$1"
+  local token="${MX_INTERNAL_OPS_TOKEN:-mx-internal-ops-dry-run-token-000000000000}"
+  [ "${#token}" -ge 32 ] || die "MX_INTERNAL_OPS_TOKEN must contain at least 32 characters"
+  kubectl -n "$ns" create secret generic mx-internal-ops \
+    --from-literal=token="$token" \
+    --dry-run=client -o yaml >/dev/null
+}
+
 release_oss_server_env_file() {
   printf '%s\n' "${MX_SERVER_ENV_FILE:-$ROOT/server/.env}"
 }
@@ -2058,7 +2093,7 @@ k8s_workload_diagnostics() {
   say "$kind/$name diagnostics: workload"
   kubectl -n "$ns" get "$kind/$name" -o wide || true
   kubectl -n "$ns" describe "$kind/$name" || true
-  selector="$(kubectl -n "$ns" get "$kind/$name" -o jsonpath='{range $k,$v := .spec.selector.matchLabels}{$k}{"="}{$v}{","}{end}' 2>/dev/null | sed 's/,$//' || true)"
+  selector="$(kubectl -n "$ns" get "$kind/$name" -o go-template='{{range $key, $value := .spec.selector.matchLabels}}{{$key}}={{$value}},{{end}}' 2>/dev/null | sed 's/,$//' || true)"
   if [ -n "$selector" ]; then
     say "$kind/$name diagnostics: pods"
     kubectl -n "$ns" get pods -l "$selector" -o wide || true
@@ -2068,6 +2103,8 @@ k8s_workload_diagnostics() {
       kubectl -n "$ns" describe pod "$pod" || true
       say "$kind/$name diagnostics: logs $pod"
       kubectl -n "$ns" logs "$pod" --all-containers --tail=200 || true
+      say "$kind/$name diagnostics: previous logs $pod"
+      kubectl -n "$ns" logs "$pod" --all-containers --previous --tail=200 || true
     done
   fi
   say "$kind/$name diagnostics: recent namespace events"
@@ -2204,21 +2241,37 @@ k8s_apply_internal_dns_control_target() {
     -l 'mx.qpjoy.com/component=dns-authority'
 }
 
-k8s_verify_internal_coredns_host_network() {
-  local host_network pod_ip host_ip service_protocols
+k8s_patch_internal_coredns_host_ports() {
+  local container_name
+  container_name="$(kubectl -n mx-dns get deployment mx-internal-coredns \
+    -o jsonpath='{.spec.template.spec.containers[0].name}' 2>/dev/null || true)"
+  [ "$container_name" = "coredns" ] \
+    || die "internal coredns deployment first container is not coredns: ${container_name:-none}"
+  kubectl -n mx-dns patch deployment mx-internal-coredns --type=json \
+    -p='[{"op":"add","path":"/spec/template/spec/containers/0/ports","value":[{"name":"dns-udp","containerPort":53,"hostIP":"10.88.88.88","hostPort":53,"protocol":"UDP"},{"name":"dns-tcp","containerPort":53,"hostIP":"10.88.88.88","hostPort":53,"protocol":"TCP"}]}]'
+}
+
+k8s_verify_internal_coredns_host_ports() {
+  local host_network port_bindings pod_ip host_ip service_protocols
   local probe_server probe_host expected_ip udp_answers tcp_answers
   host_network="$(kubectl -n mx-dns get deployment mx-internal-coredns \
     -o jsonpath='{.spec.template.spec.hostNetwork}' 2>/dev/null || true)"
-  [ "$host_network" = "true" ] \
-    || die "internal coredns is not using the host network; 10.88.88.88:53 cannot be authoritative"
+  [ "$host_network" != "true" ] \
+    || die "internal coredns must use the pod network so host DNS listeners cannot collide with :53"
+  port_bindings="$(kubectl -n mx-dns get deployment mx-internal-coredns \
+    -o jsonpath='{range .spec.template.spec.containers[?(@.name=="coredns")].ports[*]}{.hostIP}{"/"}{.containerPort}{"/"}{.hostPort}{"/"}{.protocol}{"\n"}{end}' 2>/dev/null || true)"
+  printf '%s\n' "$port_bindings" | grep -Fxq '10.88.88.88/53/53/UDP' \
+    || die "internal coredns is missing UDP hostPort 53: ${port_bindings:-none}"
+  printf '%s\n' "$port_bindings" | grep -Fxq '10.88.88.88/53/53/TCP' \
+    || die "internal coredns is missing TCP hostPort 53: ${port_bindings:-none}"
   pod_ip="$(kubectl -n mx-dns get pods \
     -l app.kubernetes.io/name=mx-internal-coredns \
     -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)"
   host_ip="$(kubectl -n mx-dns get pods \
     -l app.kubernetes.io/name=mx-internal-coredns \
     -o jsonpath='{.items[0].status.hostIP}' 2>/dev/null || true)"
-  [ -n "$pod_ip" ] && [ "$pod_ip" = "$host_ip" ] \
-    || die "internal coredns host-network verification failed: podIP=${pod_ip:-none} hostIP=${host_ip:-none}"
+  [ -n "$pod_ip" ] && [ -n "$host_ip" ] \
+    || die "internal coredns pod/host IP verification failed: podIP=${pod_ip:-none} hostIP=${host_ip:-none}"
   service_protocols="$(kubectl -n mx-dns get service mx-internal-coredns \
     -o jsonpath='{range .spec.ports[*]}{.protocol}{" "}{end}' 2>/dev/null || true)"
   case " $service_protocols " in
@@ -2249,7 +2302,7 @@ k8s_verify_internal_coredns_host_network() {
   tcp_answers="$(dig +tcp +time=3 +tries=1 "@$probe_server" "$probe_host" A +short 2>/dev/null || true)"
   printf '%s\n' "$tcp_answers" | grep -Fxq "$expected_ip" \
     || die "internal coredns TCP answer is not ready: server=$probe_server host=$probe_host expected=$expected_ip answers=${tcp_answers:-none}; apply the current Config Center signed zone"
-  say "internal coredns owns node network DNS: podIP=$pod_ip hostIP=$host_ip UDP/TCP 53; $probe_host -> $expected_ip via $probe_server"
+  say "internal coredns host ports ready: podIP=$pod_ip hostIP=$host_ip UDP/TCP 53; $probe_host -> $expected_ip via $probe_server"
 }
 
 k8s_dry_run() {
@@ -2271,6 +2324,8 @@ k8s_dry_run() {
   kubectl apply --dry-run=client --validate=false -f "$dir/18-local-pv.yaml"
   say "dry-run generated db secret"
   k8s_secret_dry_run "$ns"
+  say "dry-run generated Internal ops secret"
+  k8s_internal_ops_secret_dry_run "$ns"
   say "dry-run release OSS secret materialization"
   k8s_release_oss_secret_dry_run "$ns"
   say "dry-run postgres service/statefulset"
@@ -2308,6 +2363,8 @@ k8s_apply() {
   kubectl apply --validate=false -f "$dir/10-configmap.yaml"
   say "apply dns control target"
   k8s_apply_internal_dns_control_target "$dir"
+  say "patch internal coredns UDP/TCP host ports"
+  k8s_patch_internal_coredns_host_ports
   k8s_cleanup_retired_internal_dns_edge
   k8s_restart_internal_coredns_if_unavailable
   say "wait internal coredns rollout"
@@ -2315,12 +2372,14 @@ k8s_apply() {
     k8s_workload_diagnostics mx-dns deployment mx-internal-coredns
     die "internal coredns rollout failed"
   fi
-  k8s_verify_internal_coredns_host_network
+  k8s_verify_internal_coredns_host_ports
   say "apply local persistent volumes"
   k8s_repair_internal_local_pvs
   kubectl apply --validate=false -f "$dir/18-local-pv.yaml"
   say "create/update db secret from local env"
   k8s_apply_db_secret "$ns"
+  say "create/update Internal ops secret"
+  k8s_apply_internal_ops_secret "$ns"
   say "materialize release OSS secret"
   k8s_prepare_release_oss_secret "$ns"
   say "apply postgres service/statefulset"
@@ -2618,15 +2677,16 @@ k8s_smoke() {
   local target="$1"
   local requested_port="${2:-18090}"
   local port
-  local ns pf_pid
+  local ns pf_pid ops_token
   ns="$(k8s_namespace "$target")"
+  ops_token="$(k8s_internal_ops_token "$ns")"
   port="$(k8s_smoke_port "$requested_port")"
   need_kubectl
   say "port-forward mx-launcher-internal on 127.0.0.1:${port}"
   kubectl -n "$ns" port-forward svc/mx-launcher-internal "$port:18090" >/tmp/mx-launcher-k8s-port-forward.log 2>&1 &
   pf_pid="$!"
   sleep 2
-  if ! (cd server && MX_SMOKE_EXPECT_K8S_APPLY=1 pnpm run smoke:http -- "http://127.0.0.1:${port}"); then
+  if ! (cd server && MX_INTERNAL_OPS_TOKEN="$ops_token" MX_SMOKE_EXPECT_K8S_APPLY=1 pnpm run smoke:http -- "http://127.0.0.1:${port}"); then
     kill "$pf_pid" 2>/dev/null || true
     wait "$pf_pid" 2>/dev/null || true
     die "k8s smoke failed; see /tmp/mx-launcher-k8s-port-forward.log"
@@ -2766,6 +2826,7 @@ k8s_down() {
   kubectl delete -f "$dir/10-configmap.yaml" --ignore-not-found
   kubectl delete -f "$dir/05-serviceaccount.yaml" --ignore-not-found
   kubectl -n "$ns" delete secret mx-launcher-db --ignore-not-found
+  kubectl -n "$ns" delete secret mx-internal-ops --ignore-not-found
   say "namespace and PVC are kept for safe restart"
 }
 

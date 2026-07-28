@@ -58,6 +58,7 @@ bash ../scripts/manage.sh smoke platform-kernel
 For local HTTP checks:
 
 ```bash
+export MX_INTERNAL_OPS_TOKEN="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("base64url"))')"
 HOST=127.0.0.1 pnpm start
 ```
 
@@ -81,6 +82,10 @@ The page is self-contained and provides `/docs/api/openapi.json` and
 `/docs/api/mx-launcher-api.md` exports. The SDK Gateway manifest publishes all
 three discovery paths.
 
+For routes described below as Internal management/bootstrap, include
+`x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN`. The generated local value is
+process/session-only; do not reuse it as a production credential.
+
 ### Authentication boundaries
 
 User-facing clients obtain an `mx-sdk` Bearer token from
@@ -95,12 +100,35 @@ and must include `oversea.subscription.ensure`. A cross-user Internal/Admin
 operation is allowed only when the token includes both `site-slot.manage` and
 `site-slot.execute`.
 
+Internal management bootstrap uses a separate static ops credential. The
+server reads it only from `MX_INTERNAL_OPS_TOKEN`; callers send the same value
+in the `x-mx-ops-token` header. A missing server value fails closed, and a
+missing or incorrect header is rejected. This guard currently covers User
+Center administration (bootstrap, role/user/service-account management and
+manual token issue), the corresponding SDK users/roles/service-accounts
+management routes, and Launcher Network lease inventory plus product/mihomo
+configuration routes. Keep the API on the trusted Internal network as a second
+boundary; the header does not make these routes suitable for public ingress.
+
+The Admin UI has an `Internal Ops Token` password field and attaches the header
+to its API calls. The value lives only in the current page session: it is not
+written to local storage or server configuration, and must be entered again
+after reload/restart. Kubernetes reads the server value from
+`mx-internal-shadow/mx-internal-ops`, key `token`; `manage.sh` reuses the
+existing Secret or creates a cryptographically random value before applying
+the Deployment.
+
 `POST /internal/v1/user-center/tokens/issue` is an Internal/ops bootstrap and
-smoke-test endpoint, not a public authentication endpoint. It must remain
-reachable only inside the trusted Internal/ops network and must never be
-published through Domestic, H, or other public ingress. Its current security
-boundary is network isolation; production hardening must add mTLS or a
-dedicated ops credential and then enforce that identity on the route.
+smoke-test endpoint, not a public authentication endpoint. It requires the
+dedicated `x-mx-ops-token` credential and must remain reachable only inside the
+trusted Internal/ops network; never publish it through Domestic, H, or another
+public ingress.
+
+The SDK `client_credentials` grant currently validates `client_secret` against
+the same `MX_INTERNAL_OPS_TOKEN`. An arbitrary placeholder such as
+`managed-by-internal` is not accepted. Treat this as the bootstrap credential
+for current service-account integrations, not as a claim that each service
+account already has an independently rotated secret.
 
 `POST /internal/v1/config-center/snapshots/effective` and
 `POST /internal/v1/sdk/config/snapshot` issue the V1 signed policy snapshot.

@@ -164,6 +164,29 @@ spec:
                   name: mx-launcher-db
                   key: DATABASE_URL
                   optional: true
+            - name: MX_FEISHU_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: mx-feishu-oauth
+                  key: app-id
+                  optional: true
+            - name: MX_FEISHU_APP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: mx-feishu-oauth
+                  key: app-secret
+                  optional: true
+            - name: MX_FEISHU_ALLOWED_TENANT_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: mx-feishu-oauth
+                  key: tenant-keys
+                  optional: true
+            - name: MX_INTERNAL_OPS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mx-internal-ops
+                  key: token
           startupProbe:
             httpGet:
               path: /healthz

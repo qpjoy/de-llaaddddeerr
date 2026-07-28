@@ -4,6 +4,17 @@ import type { DataSource, EntityManager, Repository } from 'typeorm';
 
 import { createPlatformDataSource } from '../db/data-source.js';
 import { PlatformRecordEntity, type PlatformRecordRow } from '../db/entities.js';
+import {
+  consumeFixedWindowRateLimit,
+  type AuthenticationRateLimitDecision,
+  type AuthenticationRateLimitInput,
+  type AuthenticationRateLimitState
+} from '../lib/auth-rate-limit.js';
+import {
+  advanceLauncherNetworkHandover,
+  buildLauncherNetworkHandover,
+  launcherNetworkHandoverIsTerminal
+} from '../lib/launcher-network-handover.js';
 import type {
   AnonymousEnrollment,
   AnonymousEnrollmentRequest,
@@ -40,6 +51,8 @@ import type {
   DnsReverseProxyRouteInput,
   DnsZoneSnapshot,
   DnsZoneSnapshotInput,
+  FeishuAuthorizationTransaction,
+  FeishuAuthorizationTransactionInput,
   GatewayConfigMapApplyInput,
   GatewayConfigMapApplyResult,
   GatewayConfigMapSyncInput,
@@ -50,6 +63,9 @@ import type {
   ImportUserCenterUsersInput,
   ImportUserCenterUsersResult,
   IssueTokenInput,
+  LauncherNetworkHandover,
+  LauncherNetworkHandoverAdvanceInput,
+  LauncherNetworkHandoverInput,
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
   LauncherNetworkLeaseReleaseInput,
@@ -149,6 +165,7 @@ import {
   buildAppCenterInstallation,
   builtinLauncherProductNetworks,
   buildLauncherProductNetwork,
+  assertLauncherProductLeaseIsolation,
   buildAwxProviderConfig,
   buildConfigSecretReference,
   buildReleaseManagementPlan,
@@ -167,6 +184,8 @@ import {
   nextAvailableLauncherNetworkLeaseSequence,
   launcherNetworkLeaseIsActive,
   launcherNetworkLeaseKey,
+  launcherNetworkLeaseMatchesProfile,
+  launcherNetworkLeaseProfile,
   releaseLauncherNetworkLease,
   buildReleaseManagementDecisions,
   buildSiteSlotAccessAccount,
@@ -269,6 +288,8 @@ type RecordKind =
   | 'user-oversea-account-sync-report'
   | 'iam-service-account'
   | 'iam-token'
+  | 'feishu-authorization-transaction'
+  | 'authentication-rate-limit'
   | 'dns-policy'
   | 'dns-reverse-proxy-route'
   | 'dns-zone-snapshot'
@@ -292,6 +313,7 @@ type RecordKind =
   | 'launcher-network-mihomo-site'
   | 'launcher-product-network'
   | 'launcher-network-lease'
+  | 'launcher-network-handover'
   | 'runtime-feature-policy'
   | 'awx-provider-config'
   | 'secret-provider-config'
@@ -1150,6 +1172,80 @@ export class PostgresStore implements PlatformStore {
     };
   }
 
+  async consumeAuthenticationRateLimits(
+    inputs: AuthenticationRateLimitInput[]
+  ): Promise<AuthenticationRateLimitDecision[]> {
+    if (inputs.length === 0) return [];
+    const now = new Date().toISOString();
+    const normalizedInputs = inputs.map((input) => ({
+      ...input,
+      bucketKey: input.bucketKey.trim(),
+      now: input.now ?? now
+    }));
+    const bucketKeys = normalizedInputs.map((input) => input.bucketKey);
+    if (new Set(bucketKeys).size !== bucketKeys.length) {
+      throw new Error('authentication rate-limit buckets must be unique within one consume operation');
+    }
+
+    return this.dataSource.transaction(async (manager) => {
+      for (const bucketKey of [...bucketKeys].sort()) {
+        await manager.query(
+          'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+          [`${this.config.environment}:authentication-rate-limit:${bucketKey}`]
+        );
+      }
+      const rows = await manager.query(
+        `SELECT id, data
+         FROM mx_platform_records
+         WHERE kind = 'authentication-rate-limit'
+           AND environment = $1
+           AND id = ANY($2::varchar[])
+         FOR UPDATE`,
+        [this.config.environment, bucketKeys]
+      ) as Array<{ id: string; data: AuthenticationRateLimitState }>;
+      const previousByBucket = new Map(rows.map((row) => [row.id, row.data]));
+      const decisions = normalizedInputs.map((input) => consumeFixedWindowRateLimit(
+        previousByBucket.get(input.bucketKey) ?? null,
+        input
+      ));
+
+      for (const [index, input] of normalizedInputs.entries()) {
+        const decision = decisions[index];
+        if (!decision) continue;
+        const state: AuthenticationRateLimitState = {
+          windowStartedAt: decision.windowStartedAt,
+          count: decision.count
+        };
+        await manager.query(
+          `INSERT INTO mx_platform_records (
+             kind, id, environment, site_id, data, created_at, updated_at
+           )
+           VALUES (
+             'authentication-rate-limit', $1, $2, $3, $4::jsonb, now(), now()
+           )
+           ON CONFLICT (kind, id, environment) DO UPDATE
+           SET data = EXCLUDED.data,
+               site_id = EXCLUDED.site_id,
+               updated_at = now()`,
+          [
+            input.bucketKey,
+            this.config.environment,
+            this.config.siteId,
+            JSON.stringify(state)
+          ]
+        );
+      }
+      await manager.query(
+        `DELETE FROM mx_platform_records
+         WHERE kind = 'authentication-rate-limit'
+           AND environment = $1
+           AND updated_at < now() - interval '1 day'`,
+        [this.config.environment]
+      );
+      return decisions;
+    });
+  }
+
   async listUserOverseaEntitlements(): Promise<UserOverseaEntitlement[]> {
     const entitlements = await this.listRecords<UserOverseaEntitlement>('user-oversea-entitlement');
     return (await Promise.all(entitlements.map((entitlement) => this.withUserOverseaRuntimeSync(entitlement))))
@@ -1455,10 +1551,60 @@ export class PostgresStore implements PlatformStore {
         subjectId: input.subjectId,
         audience: issued.record.audience,
         scopes: issued.record.scopes,
+        authProvider: issued.record.authProvider ?? null,
         expiresAt: issued.record.expiresAt
       }
     });
     return issued;
+  }
+
+  async createFeishuAuthorizationTransaction(
+    input: FeishuAuthorizationTransactionInput
+  ): Promise<FeishuAuthorizationTransaction> {
+    const rows = await this.dataSource.transaction(async (manager) => {
+      await manager.query(
+        `DELETE FROM mx_platform_records
+         WHERE kind = 'feishu-authorization-transaction'
+           AND environment = $1
+           AND NULLIF(data ->> 'expiresAt', '')::timestamptz <= now()`,
+        [this.config.environment]
+      );
+      return manager.query(
+        `INSERT INTO mx_platform_records (
+           kind, id, environment, site_id, data, created_at, updated_at
+         )
+         VALUES (
+           'feishu-authorization-transaction', $1, $2, $3, $4::jsonb, now(), now()
+         )
+         ON CONFLICT (kind, id, environment) DO NOTHING
+         RETURNING data`,
+        [
+          input.transactionId,
+          this.config.environment,
+          this.config.siteId,
+          JSON.stringify(input)
+        ]
+      ) as Promise<Array<{ data: FeishuAuthorizationTransaction }>>;
+    });
+    const transaction = rows[0]?.data;
+    if (!transaction) throw new Error('Feishu authorization transaction already exists');
+    return transaction;
+  }
+
+  async consumeFeishuAuthorizationTransaction(
+    transactionId: string
+  ): Promise<FeishuAuthorizationTransaction | null> {
+    const rows = await this.dataSource.query(
+      `DELETE FROM mx_platform_records
+       WHERE kind = 'feishu-authorization-transaction'
+         AND id = $1
+         AND environment = $2
+       RETURNING data`,
+      [transactionId, this.config.environment]
+    ) as Array<{ data: FeishuAuthorizationTransaction }>;
+    const transaction = rows[0]?.data ?? null;
+    if (!transaction || Date.parse(transaction.expiresAt) <= Date.now()) return null;
+    return transaction;
   }
 
   async introspectToken(input: TokenIntrospectionInput): Promise<TokenIntrospectionResult> {
@@ -1900,6 +2046,7 @@ export class PostgresStore implements PlatformStore {
   async upsertLauncherProductNetwork(input: LauncherProductNetworkInput): Promise<LauncherProductNetwork> {
     const previous = input.productId ? await this.getLauncherProductNetwork(input.productId) : null;
     const product = buildLauncherProductNetwork(this.config, input, previous);
+    assertLauncherProductLeaseIsolation(product, await this.listLauncherProductNetworks());
     if (product.mode === 'embed') {
       const channel = await this.getLauncherProductNetwork(product.standaloneChannelProductId);
       if (!channel || channel.mode !== 'standalone' || !channel.enabled) {
@@ -1918,7 +2065,11 @@ export class PostgresStore implements PlatformStore {
         standaloneChannelProductId: product.standaloneChannelProductId,
         serviceVip: product.serviceVip,
         userCidr: product.userCidr,
+        feishuCidr: product.feishuCidr,
         anonymousCidr: product.anonymousCidr,
+        userLeaseRange: [product.userLeaseStart, product.userLeaseEnd],
+        feishuLeaseRange: [product.feishuLeaseStart, product.feishuLeaseEnd],
+        anonymousLeaseRange: [product.anonymousLeaseStart, product.anonymousLeaseEnd],
         updatePolicy: product.updatePolicy
       }
     });
@@ -1935,6 +2086,91 @@ export class PostgresStore implements PlatformStore {
 
   async getLauncherNetworkLease(leaseId: string): Promise<LauncherNetworkLease | null> {
     return this.getRecord<LauncherNetworkLease>('launcher-network-lease', leaseId.trim());
+  }
+
+  async listLauncherNetworkHandovers(): Promise<LauncherNetworkHandover[]> {
+    const handovers = await this.listRecords<LauncherNetworkHandover>('launcher-network-handover');
+    return handovers.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
+  async getLauncherNetworkHandover(
+    transitionId: string
+  ): Promise<LauncherNetworkHandover | null> {
+    return this.getRecord<LauncherNetworkHandover>(
+      'launcher-network-handover',
+      transitionId.trim()
+    );
+  }
+
+  async createLauncherNetworkHandover(
+    input: LauncherNetworkHandoverInput
+  ): Promise<LauncherNetworkHandover> {
+    return this.dataSource.transaction(async (manager) => {
+      const records = manager.getRepository(PlatformRecordEntity);
+      await this.lockLauncherNetworkHandoverDevice(manager, input);
+      await this.lockLauncherNetworkHandover(manager, input.transitionId);
+      const existing = await records.findOne({
+        where: {
+          kind: 'launcher-network-handover',
+          id: input.transitionId,
+          environment: this.config.environment
+        }
+      });
+      if (existing) throw new Error('Launcher network handover transition already exists');
+      const conflicting = (
+        await this.listRecordsFrom<LauncherNetworkHandover>(
+          records,
+          'launcher-network-handover'
+        )
+      ).find((handover) => (
+        !launcherNetworkHandoverIsTerminal(handover)
+        && handover.productId === input.productId
+        && handover.installId === input.installId
+        && handover.deviceId === input.deviceId
+        && handover.publicKey === input.publicKey
+      ));
+      if (conflicting) {
+        throw new Error(`Launcher network handover is already active: ${conflicting.transitionId}`);
+      }
+      const handover = buildLauncherNetworkHandover(this.config.environment, input);
+      await this.saveRecordTo(
+        records,
+        'launcher-network-handover',
+        handover.transitionId,
+        handover,
+        this.config.siteId
+      );
+      return handover;
+    });
+  }
+
+  async advanceLauncherNetworkHandover(
+    input: LauncherNetworkHandoverAdvanceInput
+  ): Promise<LauncherNetworkHandover> {
+    return this.dataSource.transaction(async (manager) => {
+      const records = manager.getRepository(PlatformRecordEntity);
+      await this.lockLauncherNetworkHandover(manager, input.transitionId);
+      const row = await records.findOne({
+        where: {
+          kind: 'launcher-network-handover',
+          id: input.transitionId,
+          environment: this.config.environment
+        }
+      });
+      if (!row) throw new Error('Launcher network handover transition not found');
+      const handover = advanceLauncherNetworkHandover(
+        row.data as unknown as LauncherNetworkHandover,
+        input
+      );
+      await this.saveRecordTo(
+        records,
+        'launcher-network-handover',
+        handover.transitionId,
+        handover,
+        this.config.siteId
+      );
+      return handover;
+    });
   }
 
   async enrollLauncherNetworkLease(input: LauncherNetworkLeaseInput): Promise<LauncherNetworkLease> {
@@ -1965,24 +2201,69 @@ export class PostgresStore implements PlatformStore {
       const app = await this.getAppCenterApp(appId);
       assertLauncherNetworkLeaseEntitlement(input, requestedProduct, product, app);
     }
+    const identityKind = input.identityKind === 'user' || input.userId?.trim() ? 'user' : 'anonymous';
+    const leaseProfile = launcherNetworkLeaseProfile(input.leaseProfile, identityKind);
     const normalizedInput: LauncherNetworkLeaseInput = {
       ...input,
       appId: input.appId || requestedProduct.productId,
       productId: product.productId,
       mode: product.mode,
-      identityKind: input.identityKind === 'user' || input.userId?.trim() ? 'user' : 'anonymous',
+      identityKind,
+      leaseProfile,
       installId,
       deviceId
     };
     const allocation = await this.dataSource.transaction(async (manager) => {
       const records = manager.getRepository(PlatformRecordEntity);
-      const identityKind = normalizedInput.identityKind === 'user' ? 'user' : 'anonymous';
-      await this.lockLauncherNetworkLeasePool(manager, product.productId, identityKind);
+      await this.lockLauncherNetworkLeasePool(manager, product.productId, leaseProfile);
+      if (normalizedInput.publicKey?.trim()) {
+        await this.lockLauncherNetworkPublicKey(manager, normalizedInput.publicKey.trim());
+      }
       const leaseKey = launcherNetworkLeaseKey(normalizedInput, product);
       const now = new Date();
       const nowIso = now.toISOString();
-      const leases = (await this.listRecordsFrom<LauncherNetworkLease>(records, 'launcher-network-lease'))
-        .filter((lease) => lease.productId === product.productId);
+      const allLeases = await this.listRecordsFrom<LauncherNetworkLease>(records, 'launcher-network-lease');
+      const leases = allLeases.filter((lease) => lease.productId === product.productId);
+      const legacyCapabilityClaimLeaseIds = [...new Set(
+        normalizedInput.legacyCapabilityClaimLeaseIds?.map((leaseId) => leaseId.trim()).filter(Boolean) ?? []
+      )];
+      for (const leaseId of legacyCapabilityClaimLeaseIds) {
+        const legacyLease = allLeases.find((lease) => lease.leaseId === leaseId);
+        if (
+          !legacyLease
+          || !launcherNetworkLeaseIsActive(legacyLease, now)
+          || Boolean(legacyLease.capabilityDigest?.trim())
+          || legacyLease.productId !== product.productId
+          || legacyLease.installId !== installId
+          || legacyLease.deviceId !== deviceId
+          || legacyLease.publicKey !== normalizedInput.publicKey?.trim()
+          || (legacyLease.identityKind === 'user' && legacyLease.userId !== normalizedInput.userId)
+          || !normalizedInput.capabilityDigest?.trim()
+          || !normalizedInput.capabilityVersion
+          || !normalizedInput.capabilityExpiresAt?.trim()
+        ) {
+          throw new Error('Legacy launcher lease capability claim no longer matches this authenticated device');
+        }
+        const claimedLease: LauncherNetworkLease = {
+          ...legacyLease,
+          capabilityDigest: normalizedInput.capabilityDigest,
+          capabilityVersion: normalizedInput.capabilityVersion,
+          capabilityExpiresAt: normalizedInput.capabilityExpiresAt,
+          updatedBy: normalizedInput.requestedBy?.trim() || 'launcher-network-legacy-capability-claim',
+          updatedAt: nowIso
+        };
+        await this.saveRecordTo(
+          records,
+          'launcher-network-lease',
+          claimedLease.leaseId,
+          claimedLease,
+          claimedLease.siteId
+        );
+        const allIndex = allLeases.findIndex((lease) => lease.leaseId === claimedLease.leaseId);
+        if (allIndex >= 0) allLeases[allIndex] = claimedLease;
+        const productIndex = leases.findIndex((lease) => lease.leaseId === claimedLease.leaseId);
+        if (productIndex >= 0) leases[productIndex] = claimedLease;
+      }
       const expiredLeases = leases.filter((lease) => lease.status === 'active' && !launcherNetworkLeaseIsActive(lease, now));
       for (const expiredLease of expiredLeases) {
         const released = releaseLauncherNetworkLease(expiredLease, {
@@ -1991,16 +2272,64 @@ export class PostgresStore implements PlatformStore {
         }, nowIso);
         await this.saveRecordTo(records, 'launcher-network-lease', released.leaseId, released, released.siteId);
       }
-      const previous = leases.find((lease) => lease.leaseKey === leaseKey && launcherNetworkLeaseIsActive(lease, now)) ?? null;
+      const publicKeyConflict = normalizedInput.publicKey?.trim()
+        ? allLeases.find((lease) => (
+            launcherNetworkLeaseIsActive(lease, now)
+            && lease.publicKey === normalizedInput.publicKey?.trim()
+            && (
+              lease.productId !== product.productId
+              || lease.installId !== installId
+              || lease.deviceId !== deviceId
+            )
+          ))
+        : null;
+      if (publicKeyConflict) {
+        throw new Error(`WireGuard publicKey is already owned by ${publicKeyConflict.installId}/${publicKeyConflict.deviceId}`);
+      }
+      const previous = leases.find((lease) => (
+        launcherNetworkLeaseIsActive(lease, now)
+        && launcherNetworkLeaseProfile(lease.leaseProfile, lease.identityKind) === leaseProfile
+        && launcherNetworkLeaseMatchesProfile(product, leaseProfile, lease)
+        && (
+          lease.leaseKey === leaseKey
+          || (
+            !lease.leaseProfile
+            && lease.identityKind === identityKind
+            && lease.installId === installId
+            && (identityKind === 'anonymous' || lease.userId === normalizedInput.userId)
+          )
+        )
+      )) ?? null;
+      if (
+        previous?.publicKey
+        && normalizedInput.publicKey?.trim()
+        && previous.publicKey !== normalizedInput.publicKey.trim()
+      ) {
+        throw new Error('Launcher lease public key rotation requires a separate migration');
+      }
       const sequence = previous
         ? previous.sequence
         : nextAvailableLauncherNetworkLeaseSequence(
           product,
-          identityKind,
+          leaseProfile,
           leases,
           now
         );
-      const lease = buildLauncherNetworkLease(this.config, normalizedInput, product, sequence, previous, nowIso);
+      const generationRows = await manager.query(
+        `SELECT nextval('mx_launcher_lease_generation_seq')::text AS generation`
+      ) as Array<{ generation: string }>;
+      const generation = Number(generationRows[0]?.generation);
+      if (!Number.isSafeInteger(generation) || generation <= 0) {
+        throw new Error('Unable to allocate launcher lease generation');
+      }
+      const lease = buildLauncherNetworkLease(
+        this.config,
+        { ...normalizedInput, generation },
+        product,
+        sequence,
+        previous,
+        nowIso
+      );
       await this.saveRecordTo(records, 'launcher-network-lease', lease.leaseId, lease, lease.siteId);
       return { lease, previous };
     });
@@ -2019,6 +2348,7 @@ export class PostgresStore implements PlatformStore {
         leaseId: lease.leaseId,
         launcherMode: lease.launcherMode,
         identityKind: lease.identityKind,
+        leaseProfile: lease.leaseProfile,
         cidr: lease.cidr,
         serviceVip: lease.serviceVip,
         requestedProductId: requestedProduct.productId,
@@ -2669,11 +2999,51 @@ export class PostgresStore implements PlatformStore {
       : launcherNetworkProductIsStandaloneDefault(appId)
         ? 'standalone'
         : 'embed';
-    const mode = input.userId ? 'user' : 'guest';
-    const lease = await this.enrollLauncherNetworkLease({
+    const requestedLease = input.leaseId?.trim()
+      ? await this.getLauncherNetworkLease(input.leaseId)
+      : null;
+    if (input.leaseId?.trim() && (!requestedLease || !launcherNetworkLeaseIsActive(requestedLease))) {
+      throw new Error('Launcher network lease is missing or inactive');
+    }
+    if (requestedLease && requestedLease.productId !== appId) {
+      throw new Error('Launcher network lease product does not match snapshot appId');
+    }
+    const requestedLeaseProduct = requestedLease
+      ? await this.getLauncherProductNetwork(requestedLease.productId)
+        ?? buildLauncherProductNetwork(this.config, {
+          productId: requestedLease.productId,
+          mode: requestedLease.launcherMode
+        }, null)
+      : null;
+    if (
+      requestedLease?.identityKind === 'user'
+      && requestedLease.userId !== input.userId?.trim()
+    ) {
+      throw new Error('Launcher network lease user does not match snapshot userId');
+    }
+    if (requestedLease) {
+      const storedLeaseProfile = requestedLease.leaseProfile
+        ?? (requestedLease.identityKind === 'user' ? 'employee' : 'anonymous');
+      const requestedLeaseProfile = launcherNetworkLeaseProfile(
+        input.leaseProfile,
+        requestedLease.identityKind
+      );
+      if (storedLeaseProfile !== requestedLeaseProfile) {
+        throw new Error('Launcher network lease profile does not match snapshot leaseProfile');
+      }
+      if (
+        requestedLeaseProduct
+        && !launcherNetworkLeaseMatchesProfile(requestedLeaseProduct, storedLeaseProfile, requestedLease)
+      ) {
+        throw new Error('Launcher network lease no longer belongs to its configured profile range; renew the lease');
+      }
+    }
+    const mode = requestedLease?.identityKind === 'user' || input.userId ? 'user' : 'guest';
+    const lease = requestedLease ?? await this.enrollLauncherNetworkLease({
       productId: appId,
       mode: launcherMode,
       identityKind: mode === 'user' ? 'user' : 'anonymous',
+      leaseProfile: input.leaseProfile,
       installId: input.installId,
       deviceId: input.deviceId,
       siteId: input.siteId,
@@ -2687,6 +3057,8 @@ export class PostgresStore implements PlatformStore {
     const topology = buildLauncherNetworkTopology(this.config, {
       mode,
       leaseIp: lease.leaseIp,
+      leaseCidr: lease.cidr,
+      leaseProfile: lease.leaseProfile ?? (lease.identityKind === 'user' ? 'employee' : 'anonymous'),
       product,
       domesticSiteId: lease.domesticSiteId,
       publicKey: lease.publicKey
@@ -2717,8 +3089,9 @@ export class PostgresStore implements PlatformStore {
       overlayPolicy: {
         productId: product.productId,
         launcherMode: product.mode,
-        identityKind: mode === 'user' ? 'user' : 'anonymous',
-        cidr: mode === 'user' ? product.userCidr : product.anonymousCidr,
+        identityKind: lease.identityKind,
+        leaseProfile: lease.leaseProfile ?? (lease.identityKind === 'user' ? 'employee' : 'anonymous'),
+        cidr: lease.cidr,
         leaseIp: lease.leaseIp,
         relayMode: 'h2i'
       },
@@ -3727,11 +4100,58 @@ export class PostgresStore implements PlatformStore {
   }
 
   private async registerBuiltinProductNetworks(): Promise<void> {
-    await Promise.all(
-      builtinLauncherProductNetworks(this.config).map((product) => {
-        return this.saveRecord('launcher-product-network', product.productId, product, this.config.siteId);
-      })
-    );
+    for (const product of builtinLauncherProductNetworks(this.config)) {
+      const existing = await this.getRecord<LauncherProductNetwork>(
+        'launcher-product-network',
+        product.productId
+      );
+      if (!existing) {
+        await this.saveRecord(
+          'launcher-product-network',
+          product.productId,
+          product,
+          this.config.siteId
+        );
+        continue;
+      }
+      if (
+        existing.feishuCidr
+        && existing.feishuLeaseStart
+        && existing.feishuLeaseEnd
+      ) {
+        continue;
+      }
+      const migrated = buildLauncherProductNetwork(this.config, {
+        productId: existing.productId,
+        requestedBy: 'builtin-feishu-pool-migration'
+      }, existing);
+      await this.saveRecord(
+        'launcher-product-network',
+        migrated.productId,
+        migrated,
+        this.config.siteId
+      );
+    }
+    const persistedProducts = await this.listRecords<LauncherProductNetwork>('launcher-product-network');
+    for (const existing of persistedProducts) {
+      if (
+        existing.feishuCidr
+        && existing.feishuLeaseStart
+        && existing.feishuLeaseEnd
+      ) {
+        continue;
+      }
+      const migrated = buildLauncherProductNetwork(this.config, {
+        productId: existing.productId,
+        requestedBy: 'persisted-feishu-pool-migration'
+      }, existing);
+      await this.saveRecord(
+        'launcher-product-network',
+        migrated.productId,
+        migrated,
+        this.config.siteId
+      );
+    }
   }
 
   private async registerBuiltinDns(): Promise<void> {
@@ -3851,11 +4271,44 @@ export class PostgresStore implements PlatformStore {
   private async lockLauncherNetworkLeasePool(
     manager: EntityManager,
     productId: string,
-    identityKind: 'user' | 'anonymous'
+    leaseProfile: 'employee' | 'feishu' | 'anonymous'
   ): Promise<void> {
     await manager.query(
       'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
-      [`mx-launcher:${this.config.environment}:${productId}`, `launcher-network-lease:${identityKind}`]
+      [`mx-launcher:${this.config.environment}:${productId}`, `launcher-network-lease:${leaseProfile}`]
+    );
+  }
+
+  private async lockLauncherNetworkHandover(
+    manager: EntityManager,
+    transitionId: string
+  ): Promise<void> {
+    await manager.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+      [`mx-launcher:${this.config.environment}:handover`, transitionId]
+    );
+  }
+
+  private async lockLauncherNetworkHandoverDevice(
+    manager: EntityManager,
+    input: LauncherNetworkHandoverInput
+  ): Promise<void> {
+    await manager.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+      [
+        `mx-launcher:${this.config.environment}:handover-device`,
+        `${input.productId}:${input.installId}:${input.deviceId}:${input.publicKey}`
+      ]
+    );
+  }
+
+  private async lockLauncherNetworkPublicKey(
+    manager: EntityManager,
+    publicKey: string
+  ): Promise<void> {
+    await manager.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+      [`mx-launcher:${this.config.environment}`, `launcher-network-public-key:${publicKey}`]
     );
   }
 
@@ -3911,7 +4364,7 @@ export class PostgresStore implements PlatformStore {
     const credential = await this.getRecord<UserCenterUserCredential>('iam-user-credential', user.userId);
     return {
       ...user,
-      credential: userCredentialSummary(credential)
+      credential: userCredentialSummary(credential, user.profile.externalIds)
     };
   }
 

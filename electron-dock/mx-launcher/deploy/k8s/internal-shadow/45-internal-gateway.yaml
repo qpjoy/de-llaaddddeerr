@@ -20,7 +20,21 @@ data:
       header {
         X-MX-Gateway internal-k8s-host-gateway
       }
-      reverse_proxy mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090
+      @domesticEdge {
+        remote_ip 10.88.0.1
+        header X-MX-Forwarded-By domestic-edge
+      }
+      handle @domesticEdge {
+        reverse_proxy mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090 {
+          header_up X-Forwarded-For {http.request.header.X-Forwarded-For}
+        }
+      }
+      handle {
+        reverse_proxy mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090 {
+          header_up X-Forwarded-For {remote_host}
+          header_up -X-MX-Forwarded-By
+        }
+      }
     }
 
     # mx-gateway-optional-port-80:start

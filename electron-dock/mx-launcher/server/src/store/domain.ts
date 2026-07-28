@@ -50,6 +50,7 @@ import type {
   ImportUserCenterUserRow,
   ImportUserCenterUsersInput,
   IssueTokenInput,
+  LauncherLeaseProfile,
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
   LauncherNetworkLeaseReleaseInput,
@@ -277,6 +278,8 @@ export function createUserCenterUser(
     || input.username?.trim()
     || input.account?.trim()
     || account;
+  const profile = mergeUserProfile(previous?.profile, input);
+  const credentialSummary = credential ?? previous?.credential ?? emptyUserCredentialSummary();
   return {
     userId,
     tenantId: 'tenant_default',
@@ -286,8 +289,14 @@ export function createUserCenterUser(
     displayName,
     roleIds: input.roleIds?.length ? input.roleIds : ['mx-user'],
     status: input.status === 'disabled' ? 'disabled' : previous?.status ?? 'active',
-    profile: mergeUserProfile(previous?.profile, input),
-    credential: credential ?? previous?.credential ?? emptyUserCredentialSummary(),
+    profile,
+    credential: {
+      ...credentialSummary,
+      providers: [...new Set([
+        ...credentialSummary.providers,
+        ...(profile.externalIds.feishuSubject ? ['feishu'] : [])
+      ])]
+    },
     appAccess: mergeUserAppAccess(previous?.appAccess, input),
     createdAt: previous?.createdAt ?? now,
     updatedAt: now
@@ -302,14 +311,19 @@ export function emptyUserCredentialSummary(): UserCenterUserCredentialSummary {
   };
 }
 
-export function userCredentialSummary(credential: UserCenterUserCredential | null): UserCenterUserCredentialSummary {
-  return credential
-    ? {
-      hasPassword: true,
-      passwordUpdatedAt: credential.updatedAt,
-      providers: [credential.kind]
-    }
-    : emptyUserCredentialSummary();
+export function userCredentialSummary(
+  credential: UserCenterUserCredential | null,
+  externalIds: Record<string, string> = {}
+): UserCenterUserCredentialSummary {
+  const providers = [
+    ...(credential ? [credential.kind] : []),
+    ...(externalIds.feishuSubject ? ['feishu'] : [])
+  ];
+  return {
+    hasPassword: Boolean(credential),
+    passwordUpdatedAt: credential?.updatedAt ?? null,
+    providers: [...new Set(providers)]
+  };
 }
 
 export function emptyUserAppAccess(): UserCenterAppAccess {
@@ -567,6 +581,7 @@ export function createUserCenterTokenRecord(
     subjectId: input.subjectId,
     audience: input.audience?.trim() || 'mx-sdk',
     scopes: input.scopes ?? [],
+    authProvider: input.authProvider?.trim() || null,
     issuer: `mx-user-center:${config.environment}`,
     issuedAt,
     expiresAt: new Date(now.getTime() + ttlMs).toISOString(),
@@ -656,6 +671,7 @@ export function introspectUserCenterToken(
       scopes
     },
     scopes,
+    authProvider: record.authProvider ?? null,
     expiresAt: record.expiresAt,
     reason: 'token accepted by User Center V1 record'
   };
@@ -711,6 +727,8 @@ export const MX_H2I_PRODUCT_ID = 'mx-h2i';
 export const APP_CENTER_PRODUCT_ID = 'appcenter';
 export const LAUNCHER_FOUNDATION_PRODUCT_ID = 'launcher';
 export const MX_DEFAULT_APP_DNS_ZONE = 'mxinfo-inc.cn';
+const MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST = 'h2i.minsight-ai.com';
+const MX_LEGACY_PUBLIC_BOOTSTRAP_HOST = 'h2i.mxinfo-inc.cn';
 
 export function normalizeLauncherNetworkProductId(value?: string | null): string {
   const normalized = safeIdPart(value?.trim() || MX_H2I_PRODUCT_ID).toLowerCase();
@@ -1392,9 +1410,12 @@ export function buildAppOnboardingDefaults(
       dnsServer: productNetwork.dnsServer,
       serviceVip: productNetwork.serviceVip,
       userCidr: productNetwork.userCidr,
+      feishuCidr: productNetwork.feishuCidr,
       anonymousCidr: productNetwork.anonymousCidr,
       userLeaseStart: productNetwork.userLeaseStart,
       userLeaseEnd: productNetwork.userLeaseEnd,
+      feishuLeaseStart: productNetwork.feishuLeaseStart,
+      feishuLeaseEnd: productNetwork.feishuLeaseEnd,
       anonymousLeaseStart: productNetwork.anonymousLeaseStart,
       anonymousLeaseEnd: productNetwork.anonymousLeaseEnd,
       defaultDomesticSiteId: productNetwork.defaultDomesticSiteId,
@@ -1606,9 +1627,12 @@ export function builtinLauncherProductNetworks(config: RuntimeConfig): LauncherP
       productIndex: 0,
       serviceVip: '10.88.100.1',
       userCidr: '10.89.0.0/16',
+      feishuCidr: '10.89.0.0/16',
       anonymousCidr: '10.89.0.0/16',
       userLeaseStart: '10.89.0.1',
-      userLeaseEnd: '10.89.99.254',
+      userLeaseEnd: '10.89.49.254',
+      feishuLeaseStart: '10.89.50.1',
+      feishuLeaseEnd: '10.89.99.254',
       anonymousLeaseStart: '10.89.100.1',
       anonymousLeaseEnd: '10.89.254.254',
       updatePolicy: 'launcher-managed',
@@ -1626,9 +1650,12 @@ export function builtinLauncherProductNetworks(config: RuntimeConfig): LauncherP
       productIndex: 1,
       serviceVip: '10.88.100.9',
       userCidr: '10.92.0.0/16',
+      feishuCidr: '10.92.0.0/16',
       anonymousCidr: '10.92.0.0/16',
       userLeaseStart: '10.92.0.1',
-      userLeaseEnd: '10.92.99.254',
+      userLeaseEnd: '10.92.49.254',
+      feishuLeaseStart: '10.92.50.1',
+      feishuLeaseEnd: '10.92.99.254',
       anonymousLeaseStart: '10.92.100.1',
       anonymousLeaseEnd: '10.92.254.254',
       updatePolicy: 'launcher-managed',
@@ -1646,9 +1673,12 @@ export function builtinLauncherProductNetworks(config: RuntimeConfig): LauncherP
       productIndex: 2,
       serviceVip: '10.88.100.10',
       userCidr: '10.90.0.0/16',
+      feishuCidr: '10.90.0.0/16',
       anonymousCidr: '10.90.0.0/16',
       userLeaseStart: '10.90.0.1',
-      userLeaseEnd: '10.90.99.254',
+      userLeaseEnd: '10.90.49.254',
+      feishuLeaseStart: '10.90.50.1',
+      feishuLeaseEnd: '10.90.99.254',
       anonymousLeaseStart: '10.90.100.1',
       anonymousLeaseEnd: '10.90.254.254',
       updatePolicy: 'launcher-managed',
@@ -1692,6 +1722,40 @@ export function buildLauncherProductNetwork(
   const internalControlIp = validIpv4OrFallback(inputInternalControlIp, previousInternalControlIp || internalControlFallback);
   const domesticGatewayIp = validIpv4OrFallback(inputDomesticGatewayIp, previousDomesticGatewayIp || domesticGatewayFallback);
   const dnsServer = validIpv4OrFallback(inputDnsServer, previousDnsServer || dnsServerFallback);
+  const previousHasFeishuPool = Boolean(previous?.feishuLeaseStart && previous?.feishuLeaseEnd);
+  const leaseRanges = {
+    userLeaseStart: validIpv4OrFallback(
+      input.userLeaseStart,
+      (previousHasFeishuPool ? previous?.userLeaseStart : null) || defaults.userLeaseStart
+    ),
+    userLeaseEnd: validIpv4OrFallback(
+      input.userLeaseEnd,
+      (previousHasFeishuPool ? previous?.userLeaseEnd : null) || defaults.userLeaseEnd
+    ),
+    feishuLeaseStart: validIpv4OrFallback(
+      input.feishuLeaseStart,
+      previous?.feishuLeaseStart || defaults.feishuLeaseStart
+    ),
+    feishuLeaseEnd: validIpv4OrFallback(
+      input.feishuLeaseEnd,
+      previous?.feishuLeaseEnd || defaults.feishuLeaseEnd
+    ),
+    anonymousLeaseStart: validIpv4OrFallback(
+      input.anonymousLeaseStart,
+      previous?.anonymousLeaseStart || defaults.anonymousLeaseStart
+    ),
+    anonymousLeaseEnd: validIpv4OrFallback(
+      input.anonymousLeaseEnd,
+      previous?.anonymousLeaseEnd || defaults.anonymousLeaseEnd
+    )
+  };
+  assertDisjointLauncherLeaseRanges(leaseRanges);
+  const leaseCidrs = {
+    userCidr: input.userCidr?.trim() || previous?.userCidr || defaults.userCidr,
+    feishuCidr: input.feishuCidr?.trim() || previous?.feishuCidr || defaults.feishuCidr,
+    anonymousCidr: input.anonymousCidr?.trim() || previous?.anonymousCidr || defaults.anonymousCidr
+  };
+  assertLauncherLeaseRangesWithinCidrs(leaseCidrs, leaseRanges);
   return {
     productId,
     displayName: input.displayName?.trim() || previous?.displayName || defaults.displayName,
@@ -1704,12 +1768,8 @@ export function buildLauncherProductNetwork(
     domesticGatewayIp,
     dnsServer,
     serviceVip,
-    userCidr: input.userCidr?.trim() || previous?.userCidr || defaults.userCidr,
-    anonymousCidr: input.anonymousCidr?.trim() || previous?.anonymousCidr || defaults.anonymousCidr,
-    userLeaseStart: validIpv4OrFallback(input.userLeaseStart, previous?.userLeaseStart || defaults.userLeaseStart),
-    userLeaseEnd: validIpv4OrFallback(input.userLeaseEnd, previous?.userLeaseEnd || defaults.userLeaseEnd),
-    anonymousLeaseStart: validIpv4OrFallback(input.anonymousLeaseStart, previous?.anonymousLeaseStart || defaults.anonymousLeaseStart),
-    anonymousLeaseEnd: validIpv4OrFallback(input.anonymousLeaseEnd, previous?.anonymousLeaseEnd || defaults.anonymousLeaseEnd),
+    ...leaseCidrs,
+    ...leaseRanges,
     defaultDomesticSiteId: input.defaultDomesticSiteId?.trim() || previous?.defaultDomesticSiteId || 'domestic-main',
     defaultOverseaSiteId: input.defaultOverseaSiteId?.trim() || previous?.defaultOverseaSiteId || 'oversea-main',
     updatePolicy: launcherProductUpdatePolicy(input.updatePolicy ?? previous?.updatePolicy),
@@ -1727,19 +1787,32 @@ export function buildLauncherProductNetwork(
 
 export function launcherLeaseIpForProduct(
   product: LauncherProductNetwork,
-  identityKind: 'user' | 'anonymous',
+  leaseProfile: LauncherLeaseProfile,
   sequence: number
 ): string {
+  const range = launcherLeaseRangeForProduct(product, leaseProfile);
   return leaseIpFromRange(
-    identityKind === 'user' ? product.userLeaseStart : product.anonymousLeaseStart,
-    identityKind === 'user' ? product.userLeaseEnd : product.anonymousLeaseEnd,
+    range.start,
+    range.end,
     sequence
   );
 }
 
+export function launcherNetworkLeaseMatchesProfile(
+  product: LauncherProductNetwork,
+  leaseProfile: LauncherLeaseProfile,
+  lease: LauncherNetworkLease
+): boolean {
+  try {
+    return launcherLeaseIpForProduct(product, leaseProfile, lease.sequence) === lease.leaseIp;
+  } catch {
+    return false;
+  }
+}
+
 export function nextAvailableLauncherNetworkLeaseSequence(
   product: LauncherProductNetwork,
-  identityKind: 'user' | 'anonymous',
+  leaseProfile: LauncherLeaseProfile,
   leases: LauncherNetworkLease[],
   now = new Date()
 ): number {
@@ -1750,22 +1823,27 @@ export function nextAvailableLauncherNetworkLeaseSequence(
       .map((lease) => lease.leaseIp)
   );
   for (let sequence = 1; sequence < 65535; sequence += 1) {
-    const leaseIp = launcherLeaseIpForProduct(product, identityKind, sequence);
+    const leaseIp = launcherLeaseIpForProduct(product, leaseProfile, sequence);
     if (!activeIps.has(leaseIp)) return sequence;
   }
-  throw new Error(`Launcher network lease range exhausted: ${product.productId}:${identityKind}`);
+  throw new Error(`Launcher network lease range exhausted: ${product.productId}:${leaseProfile}`);
 }
 
 export function launcherNetworkLeaseKey(input: LauncherNetworkLeaseInput, product: LauncherProductNetwork): string {
   const identityKind = launcherNetworkIdentityKind(input.identityKind, input.userId);
+  const leaseProfile = launcherNetworkLeaseProfile(input.leaseProfile, identityKind);
   const mode = launcherProductMode(input.mode ?? product.mode);
   const principal = launcherNetworkLeasePrincipal(input, identityKind);
-  return [
+  const keyParts = [
     product.productId,
     mode,
     identityKind,
+    leaseProfile,
     principal
-  ].join(':');
+  ];
+  const replacementForLeaseId = input.replacementForLeaseId?.trim();
+  if (replacementForLeaseId) keyParts.push(`replacement:${replacementForLeaseId}`);
+  return keyParts.join(':');
 }
 
 export function launcherNetworkLeaseId(leaseKey: string): string {
@@ -1805,8 +1883,9 @@ export function buildLauncherNetworkLease(
   now = new Date().toISOString()
 ): LauncherNetworkLease {
   const identityKind = launcherNetworkIdentityKind(input.identityKind, input.userId);
+  const leaseProfile = launcherNetworkLeaseProfile(input.leaseProfile, identityKind);
   const launcherMode = launcherProductMode(input.mode ?? product.mode);
-  const leaseKey = launcherNetworkLeaseKey({ ...input, identityKind, mode: launcherMode }, product);
+  const leaseKey = launcherNetworkLeaseKey({ ...input, identityKind, leaseProfile, mode: launcherMode }, product);
   const updatedBy = input.requestedBy?.trim() || 'launcher-network';
   const installId = input.installId?.trim() || previous?.installId || 'install-unknown';
   const deviceId = input.deviceId?.trim() || previous?.deviceId || 'device-unknown';
@@ -1820,13 +1899,14 @@ export function buildLauncherNetworkLease(
     productId: product.productId,
     launcherMode,
     identityKind,
+    leaseProfile,
     sequence: previous?.sequence ?? Math.max(1, Math.floor(sequence)),
     installId,
     deviceId,
     siteId: input.siteId?.trim() || previous?.siteId || product.defaultDomesticSiteId,
     userId,
-    cidr: identityKind === 'user' ? product.userCidr : product.anonymousCidr,
-    leaseIp: previous?.leaseIp ?? launcherLeaseIpForProduct(product, identityKind, sequence),
+    cidr: launcherLeaseCidrForProduct(product, leaseProfile),
+    leaseIp: previous?.leaseIp ?? launcherLeaseIpForProduct(product, leaseProfile, sequence),
     serviceVip: product.serviceVip,
     internalControlIp: product.internalControlIp,
     domesticGatewayIp: product.domesticGatewayIp,
@@ -1838,6 +1918,13 @@ export function buildLauncherNetworkLease(
     status: 'active',
     expiresAt,
     releasedAt: null,
+    capabilityDigest: input.capabilityDigest?.trim() || previous?.capabilityDigest || null,
+    capabilityVersion: input.capabilityVersion ?? previous?.capabilityVersion ?? null,
+    capabilityExpiresAt: input.capabilityExpiresAt?.trim() || previous?.capabilityExpiresAt || expiresAt,
+    generation: Number.isSafeInteger(input.generation) && Number(input.generation) > 0
+      ? Number(input.generation)
+      : previous?.generation ?? 0,
+    replacementForLeaseId: input.replacementForLeaseId?.trim() || previous?.replacementForLeaseId || null,
     createdBy: previous?.createdBy ?? updatedBy,
     createdAt: previous?.createdAt ?? now,
     updatedBy,
@@ -2361,7 +2448,21 @@ function renderGatewayCaddyfile(config: RuntimeConfig, routes: DnsReverseProxyRo
     '  header {',
     '    X-MX-Gateway internal-k8s-host-gateway',
     '  }',
-    '  reverse_proxy mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090',
+    '  @domesticEdge {',
+    '    remote_ip 10.88.0.1',
+    '    header X-MX-Forwarded-By domestic-edge',
+    '  }',
+    '  handle @domesticEdge {',
+    '    reverse_proxy mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090 {',
+    '      header_up X-Forwarded-For {http.request.header.X-Forwarded-For}',
+    '    }',
+    '  }',
+    '  handle {',
+    '    reverse_proxy mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090 {',
+    '      header_up X-Forwarded-For {remote_host}',
+    '      header_up -X-MX-Forwarded-By',
+    '    }',
+    '  }',
     '}',
     '',
     ...appPorts.flatMap((port) => gatewayAppServerBlock(port, routes, port === appPort ? 'internal-app-gateway' : 'internal-app-gateway-fallback'))
@@ -2727,6 +2828,170 @@ function launcherNetworkIdentityKind(value: LauncherNetworkLeaseInput['identityK
   return 'anonymous';
 }
 
+export function launcherNetworkLeaseProfile(
+  value: LauncherNetworkLeaseInput['leaseProfile'],
+  identityKind: 'user' | 'anonymous'
+): LauncherLeaseProfile {
+  if (identityKind === 'anonymous') return 'anonymous';
+  return value === 'feishu' ? 'feishu' : 'employee';
+}
+
+function launcherLeaseRangeForProduct(
+  product: LauncherProductNetwork,
+  leaseProfile: LauncherLeaseProfile
+): { start: string; end: string } {
+  if (leaseProfile === 'feishu') {
+    return {
+      start: product.feishuLeaseStart,
+      end: product.feishuLeaseEnd
+    };
+  }
+  if (leaseProfile === 'employee') {
+    return {
+      start: product.userLeaseStart,
+      end: product.userLeaseEnd
+    };
+  }
+  return {
+    start: product.anonymousLeaseStart,
+    end: product.anonymousLeaseEnd
+  };
+}
+
+function assertDisjointLauncherLeaseRanges(ranges: {
+  userLeaseStart: string;
+  userLeaseEnd: string;
+  feishuLeaseStart: string;
+  feishuLeaseEnd: string;
+  anonymousLeaseStart: string;
+  anonymousLeaseEnd: string;
+}): void {
+  const userStart = ipv4ToNumber(ranges.userLeaseStart);
+  const userEnd = ipv4ToNumber(ranges.userLeaseEnd);
+  const feishuStart = ipv4ToNumber(ranges.feishuLeaseStart);
+  const feishuEnd = ipv4ToNumber(ranges.feishuLeaseEnd);
+  const anonymousStart = ipv4ToNumber(ranges.anonymousLeaseStart);
+  const anonymousEnd = ipv4ToNumber(ranges.anonymousLeaseEnd);
+  if (
+    userStart == null
+    || userEnd == null
+    || feishuStart == null
+    || feishuEnd == null
+    || anonymousStart == null
+    || anonymousEnd == null
+    || userStart > userEnd
+    || feishuStart > feishuEnd
+    || anonymousStart > anonymousEnd
+  ) {
+    throw new Error('Launcher lease profile ranges must use valid ascending IPv4 addresses');
+  }
+  if (userEnd >= feishuStart || feishuEnd >= anonymousStart) {
+    throw new Error('Launcher employee, Feishu, and anonymous lease ranges must not overlap');
+  }
+}
+
+export function assertLauncherProductLeaseIsolation(
+  candidate: LauncherProductNetwork,
+  existingProducts: LauncherProductNetwork[]
+): void {
+  if (candidate.mode !== 'standalone' || candidate.enabled === false) return;
+  const candidateRanges = launcherProductLeaseRanges(candidate);
+  for (const existing of existingProducts) {
+    if (
+      existing.productId === candidate.productId
+      || existing.mode !== 'standalone'
+      || existing.enabled === false
+    ) {
+      continue;
+    }
+    for (const candidateRange of candidateRanges) {
+      for (const existingRange of launcherProductLeaseRanges(existing)) {
+        if (candidateRange.start <= existingRange.end && existingRange.start <= candidateRange.end) {
+          throw new Error(
+            `Launcher product ${candidate.productId} lease range overlaps ${existing.productId}`
+          );
+        }
+      }
+    }
+  }
+}
+
+function launcherProductLeaseRanges(
+  product: LauncherProductNetwork
+): Array<{ start: number; end: number }> {
+  return [
+    [product.userLeaseStart, product.userLeaseEnd],
+    [product.feishuLeaseStart, product.feishuLeaseEnd],
+    [product.anonymousLeaseStart, product.anonymousLeaseEnd]
+  ].map(([startIp, endIp]) => {
+    const start = ipv4ToNumber(startIp);
+    const end = ipv4ToNumber(endIp);
+    if (start == null || end == null || start > end) {
+      throw new Error(`Launcher product ${product.productId} has an invalid lease range`);
+    }
+    return { start, end };
+  });
+}
+
+function assertLauncherLeaseRangesWithinCidrs(
+  cidrs: {
+    userCidr: string;
+    feishuCidr: string;
+    anonymousCidr: string;
+  },
+  ranges: {
+    userLeaseStart: string;
+    userLeaseEnd: string;
+    feishuLeaseStart: string;
+    feishuLeaseEnd: string;
+    anonymousLeaseStart: string;
+    anonymousLeaseEnd: string;
+  }
+): void {
+  const profiles = [
+    ['employee', cidrs.userCidr, ranges.userLeaseStart, ranges.userLeaseEnd],
+    ['Feishu', cidrs.feishuCidr, ranges.feishuLeaseStart, ranges.feishuLeaseEnd],
+    ['anonymous', cidrs.anonymousCidr, ranges.anonymousLeaseStart, ranges.anonymousLeaseEnd]
+  ] as const;
+  for (const [profile, cidr, startIp, endIp] of profiles) {
+    const bounds = ipv4CidrBounds(cidr);
+    const start = ipv4ToNumber(startIp);
+    const end = ipv4ToNumber(endIp);
+    if (
+      !bounds
+      || start == null
+      || end == null
+      || start < bounds.start
+      || end > bounds.end
+    ) {
+      throw new Error(`Launcher ${profile} lease range must be contained by its IPv4 CIDR`);
+    }
+  }
+}
+
+function ipv4CidrBounds(value: string): { start: number; end: number } | null {
+  const [addressText, prefixText, ...extra] = value.split('/');
+  if (extra.length || !addressText || !prefixText) return null;
+  const address = ipv4ToNumber(addressText);
+  const prefix = Number(prefixText);
+  if (address == null || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return null;
+  const size = 2 ** (32 - prefix);
+  const start = Math.floor(address / size) * size;
+  if (address !== start) return null;
+  return {
+    start,
+    end: start + size - 1
+  };
+}
+
+function launcherLeaseCidrForProduct(
+  product: LauncherProductNetwork,
+  leaseProfile: LauncherLeaseProfile
+): string {
+  if (leaseProfile === 'feishu') return product.feishuCidr;
+  return leaseProfile === 'employee' ? product.userCidr : product.anonymousCidr;
+}
+
 function launcherNetworkLeasePrincipal(input: LauncherNetworkLeaseInput, identityKind: 'user' | 'anonymous'): string {
   const installPrincipal = input.installId?.trim() || input.deviceId?.trim() || 'unknown';
   if (identityKind === 'user') {
@@ -2754,9 +3019,12 @@ function defaultLauncherProductNetworkShape(productId: string, mode: LauncherPro
       domesticGatewayIp: launcherNetworkProductUsesLegacyFoundation(productId) ? '10.88.0.1' : serviceVip,
       dnsServer: launcherNetworkProductUsesLegacyFoundation(productId) ? '10.88.0.1' : serviceVip,
       userCidr: `10.${secondOctet}.0.0/16`,
+      feishuCidr: `10.${secondOctet}.0.0/16`,
       anonymousCidr: `10.${secondOctet}.0.0/16`,
       userLeaseStart: `10.${secondOctet}.0.1`,
-      userLeaseEnd: `10.${secondOctet}.99.254`,
+      userLeaseEnd: `10.${secondOctet}.49.254`,
+      feishuLeaseStart: `10.${secondOctet}.50.1`,
+      feishuLeaseEnd: `10.${secondOctet}.99.254`,
       anonymousLeaseStart: `10.${secondOctet}.100.1`,
       anonymousLeaseEnd: `10.${secondOctet}.254.254`,
       rateLimitProfile: 'standalone-default'
@@ -2773,9 +3041,12 @@ function defaultLauncherProductNetworkShape(productId: string, mode: LauncherPro
     domesticGatewayIp: serviceVip,
     dnsServer: serviceVip,
     userCidr: `10.${secondOctet}.0.0/16`,
+    feishuCidr: `10.${secondOctet}.0.0/16`,
     anonymousCidr: `10.${secondOctet}.0.0/16`,
     userLeaseStart: `10.${secondOctet}.0.1`,
-    userLeaseEnd: `10.${secondOctet}.99.254`,
+    userLeaseEnd: `10.${secondOctet}.49.254`,
+    feishuLeaseStart: `10.${secondOctet}.50.1`,
+    feishuLeaseEnd: `10.${secondOctet}.99.254`,
     anonymousLeaseStart: `10.${secondOctet}.100.1`,
     anonymousLeaseEnd: `10.${secondOctet}.254.254`,
     rateLimitProfile: 'product-default'
@@ -2851,6 +3122,30 @@ export function createSdkGatewayManifest(config: RuntimeConfig): SdkGatewayManif
       audience: 'mx-sdk',
       authRequired: false,
       description: 'OAuth-compatible token endpoint backed by User Center JWT records.'
+    },
+    {
+      routeId: 'sdk.oauth.feishu.config',
+      path: '/internal/v1/sdk/oauth/feishu/config',
+      upstreamModule: 'sdk-gateway',
+      audience: 'mx-sdk',
+      authRequired: false,
+      description: 'Reports whether Feishu OAuth is safely configured for MX-H2I.'
+    },
+    {
+      routeId: 'sdk.oauth.feishu.authorize',
+      path: '/internal/v1/sdk/oauth/feishu/authorize',
+      upstreamModule: 'sdk-gateway',
+      audience: 'mx-sdk',
+      authRequired: false,
+      description: 'Builds an allowlisted Feishu authorization URL for a PKCE login attempt.'
+    },
+    {
+      routeId: 'sdk.oauth.feishu.token',
+      path: '/internal/v1/sdk/oauth/feishu/token',
+      upstreamModule: 'sdk-gateway',
+      audience: 'mx-sdk',
+      authRequired: false,
+      description: 'Exchanges a one-time Feishu authorization code for an MX User Center token.'
     },
     {
       routeId: 'sdk.identity.introspect',
@@ -2993,6 +3288,9 @@ export function createSdkGatewayManifest(config: RuntimeConfig): SdkGatewayManif
     sdk: {
       audience: 'mx-sdk',
       oauthTokenUrl: '/internal/v1/sdk/oauth/token',
+      feishuConfigUrl: '/internal/v1/sdk/oauth/feishu/config',
+      feishuAuthorizeUrl: '/internal/v1/sdk/oauth/feishu/authorize',
+      feishuTokenUrl: '/internal/v1/sdk/oauth/feishu/token',
       tokenIntrospectionUrl: '/internal/v1/sdk/identity/introspect',
       principalContextUrl: '/internal/v1/sdk/identity/context',
       rolesUrl: '/internal/v1/sdk/roles',
@@ -3296,6 +3594,8 @@ export function buildLauncherNetworkTopology(
   input: {
     mode: 'guest' | 'user';
     leaseIp: string;
+    leaseCidr?: string | null;
+    leaseProfile?: LauncherLeaseProfile | null;
     product: LauncherProductNetwork;
     domesticSiteId?: string | null;
     overseaSiteId?: string | null;
@@ -3306,11 +3606,15 @@ export function buildLauncherNetworkTopology(
   const internalBaseUrl = launcherProductInternalBaseUrl(config, product);
   const domesticSiteId = input.domesticSiteId?.trim() || product.defaultDomesticSiteId;
   const overseaSiteId = input.overseaSiteId?.trim() || product.defaultOverseaSiteId;
-  const cidr = input.mode === 'user' ? product.userCidr : product.anonymousCidr;
+  const cidr = input.leaseCidr?.trim()
+    || (input.leaseProfile === 'feishu'
+      ? product.feishuCidr
+      : input.mode === 'user' ? product.userCidr : product.anonymousCidr);
   const publicKey = input.publicKey?.trim() || null;
   const subscriptionBaseUrl = `${internalBaseUrl}/internal/v1/site-slots/${overseaSiteId}/subscriptions/hysteria2`;
   const productRouteCidrs = uniqueStrings([
     product.userCidr,
+    product.feishuCidr,
     product.anonymousCidr,
     `${product.serviceVip}/32`,
     `${product.internalControlIp}/32`,
@@ -3328,6 +3632,7 @@ export function buildLauncherNetworkTopology(
       domesticGatewayIp: product.domesticGatewayIp,
       dnsServer: product.dnsServer,
       userCidr: product.userCidr,
+      feishuCidr: product.feishuCidr,
       anonymousCidr: product.anonymousCidr,
       updatePolicy: product.updatePolicy,
       rateLimitProfile: product.rateLimitProfile,
@@ -4039,10 +4344,7 @@ export function buildSiteSlotPlan(
   const baseWarnings = siteSlotWarnings(kind, input, profile, profileMatches, host, rootAccess, networkMode);
   const sshProfileId = input.sshProfileId?.trim() || profile?.profileId || null;
   const domesticRuntimeConfig = kind === 'domestic'
-    ? input.domesticRuntimeConfig ?? buildSiteSlotDomesticRuntimeConfig(config, {
-        siteId,
-        bootstrapHost: bootstrapHostFromPlanHost(host)
-      }, null, createdAt)
+    ? input.domesticRuntimeConfig ?? buildSiteSlotDomesticRuntimeConfig(config, { siteId }, null, createdAt)
     : null;
   const hasOverseaCallbackInput = Object.prototype.hasOwnProperty.call(input, 'overseaCallbackBaseUrl');
   const runtimeInput = kind === 'oversea'
@@ -4298,11 +4600,25 @@ export function buildSiteSlotDomesticRuntimeConfig(
 ): SiteSlotDomesticRuntimeConfig {
   const siteId = input.siteId?.trim() || previous?.siteId || 'domestic-main';
   const status = input.status === 'paused' ? 'paused' : 'active';
-  const edgeBind = input.edgeBind?.trim() || previous?.edge.bind || '0.0.0.0';
+  const requestedEdgeBind = input.edgeBind?.trim() || previous?.edge.bind || '127.0.0.1';
+  const edgeBind = validIpv4Address(requestedEdgeBind) ? requestedEdgeBind : '127.0.0.1';
   const edgePort = positivePort(input.edgePort, previous?.edge.port, 18090);
-  const bootstrapProtocol = normalizeProtocol(input.bootstrapProtocol || previousBootstrapProtocol(previous) || 'http');
-  const bootstrapHost = input.bootstrapHost?.trim() || previousBootstrapHost(previous) || 'api.mxinfo-inc.cn';
-  const bootstrapPort = positivePort(input.bootstrapPort, previousBootstrapPort(previous), edgePort);
+  const bootstrapProtocol = normalizeProtocol(input.bootstrapProtocol || previousBootstrapProtocol(previous) || 'https');
+  const requestedBootstrapHost = input.bootstrapHost?.trim()
+    || previousBootstrapHost(previous)
+    || MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST;
+  const normalizedBootstrapHost = normalizePublicTlsDnsHostname(requestedBootstrapHost);
+  const usesLegacyBootstrapHost = normalizedBootstrapHost === MX_LEGACY_PUBLIC_BOOTSTRAP_HOST;
+  const bootstrapHost = usesLegacyBootstrapHost
+    ? MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST
+    : normalizedBootstrapHost || MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST;
+  const bootstrapPort = positivePort(input.bootstrapPort, previousBootstrapPort(previous), 443);
+  const requestedPublicGatewayNetwork = input.publicGatewayNetwork?.trim()
+    || previous?.env.MX_DOMESTIC_PUBLIC_GATEWAY_NETWORK
+    || 'compass-gateway_default';
+  const publicGatewayNetwork = validDockerNetworkName(requestedPublicGatewayNetwork)
+    ? requestedPublicGatewayNetwork
+    : 'compass-gateway_default';
   const internalBaseUrl = normalizeHttpUrl(input.internalBaseUrl || previous?.upstreams.internalBaseUrl || 'http://10.88.88.88:18090');
   const internalApi = normalizeHttpUrl(input.internalApiUpstream || previous?.upstreams.internalApi || internalBaseUrl);
   const internalH2i = normalizeHttpUrl(input.internalH2iUpstream || previous?.upstreams.internalH2i || internalBaseUrl);
@@ -4316,6 +4632,9 @@ export function buildSiteSlotDomesticRuntimeConfig(
     internalH2i,
     edgeBind,
     edgePort,
+    bootstrapHost,
+    bootstrapPort,
+    publicGatewayNetwork,
     dnsBind,
     dnsPort
   });
@@ -4323,10 +4642,27 @@ export function buildSiteSlotDomesticRuntimeConfig(
     ...(status === 'paused' ? ['blocked: Domestic runtime config is paused'] : []),
     ...(!isHttpUrl(internalApi) ? [`blocked: internalApiUpstream must be http(s): ${internalApi}`] : []),
     ...(!isHttpUrl(internalH2i) ? [`blocked: internalH2iUpstream must be http(s): ${internalH2i}`] : []),
+    ...(bootstrapProtocol !== 'https' ? ['blocked: public bootstrapProtocol must be https'] : []),
+    ...(!normalizedBootstrapHost
+      ? [`blocked: bootstrapHost must be one ASCII DNS hostname, not an IP, URL, port, or Caddyfile fragment: ${JSON.stringify(requestedBootstrapHost.slice(0, 120))}`]
+      : []),
+    ...(usesLegacyBootstrapHost
+      ? [`legacy-public-bootstrap-host: migrated ${MX_LEGACY_PUBLIC_BOOTSTRAP_HOST} to ${MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST}`]
+      : []),
+    ...(!validDockerNetworkName(requestedPublicGatewayNetwork)
+      ? [`blocked: publicGatewayNetwork must be one Docker network name: ${JSON.stringify(requestedPublicGatewayNetwork.slice(0, 120))}`]
+      : []),
+    ...(!validIpv4Address(requestedEdgeBind)
+      ? [`blocked: edgeBind must be one IPv4 address: ${JSON.stringify(requestedEdgeBind.slice(0, 64))}`]
+      : []),
+    ...(bootstrapPort !== 443 ? [`blocked: public bootstrapPort must be 443 for ACME and desktop trust; received ${bootstrapPort}`] : []),
+    ...(edgePort === 80 || edgePort === 443 ? [`blocked: legacy edgePort ${edgePort} conflicts with the public HTTP/HTTPS listeners`] : []),
     ...(edgeBind === '0.0.0.0' ? ['public-bind: Domestic edge listens on all interfaces; protect with cloud firewall/security group'] : []),
     ...(dnsBind === '0.0.0.0' ? [`dns-public-bind: Domestic DNS edge listens on UDP/TCP ${dnsPort}; restrict sources with firewall/security group`] : []),
     ...(dnsBind === '10.88.0.1' ? ['dns-wg-only: Domestic DNS edge is bound to WireGuard; clients cannot use it before WG is up'] : []),
-    ...(bootstrapHost === 'api.mxinfo-inc.cn' ? ['default-domain: update bootstrapHost when production DNS is ready'] : [])
+    ...(bootstrapHost === MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST
+      ? [`tls-domain: ensure public DNS points ${MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST} to this Domestic host before apply`]
+      : [])
   ];
   const digestSource = JSON.stringify({
     siteId,
@@ -4380,6 +4716,9 @@ function domesticRuntimeEnv(input: {
   internalH2i: string;
   edgeBind: string;
   edgePort: number;
+  bootstrapHost: string;
+  bootstrapPort: number;
+  publicGatewayNetwork: string;
   dnsBind: string;
   dnsPort: number;
 }): Record<string, string> {
@@ -4391,6 +4730,10 @@ function domesticRuntimeEnv(input: {
     MX_INTERNAL_H2I_UPSTREAM: input.internalH2i,
     MX_DOMESTIC_EDGE_BIND: input.edgeBind,
     MX_DOMESTIC_EDGE_PORT: String(input.edgePort),
+    MX_DOMESTIC_BOOTSTRAP_HOST: input.bootstrapHost,
+    MX_DOMESTIC_PUBLIC_GATEWAY_NETWORK: input.publicGatewayNetwork,
+    MX_DOMESTIC_HTTPS_BIND: '0.0.0.0',
+    MX_DOMESTIC_HTTPS_PORT: String(input.bootstrapPort),
     MX_DOMESTIC_DNS_BIND: input.dnsBind,
     MX_DOMESTIC_DNS_PORT: String(input.dnsPort)
   };
@@ -4403,6 +4746,32 @@ function positivePort(input: number | null | undefined, previous: number | undef
 
 function normalizeProtocol(value: string | null | undefined): 'http' | 'https' {
   return value?.replace(/:$/, '').toLowerCase() === 'https' ? 'https' : 'http';
+}
+
+function normalizePublicTlsDnsHostname(value: string | null | undefined): string | null {
+  const hostname = value?.trim().toLowerCase().replace(/\.$/, '') || '';
+  if (!hostname || hostname.length > 253 || isIpv4(hostname)) return null;
+  const labels = hostname.split('.');
+  if (labels.length < 2) return null;
+  if (!labels.every((label) => (
+    label.length > 0
+    && label.length <= 63
+    && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
+  ))) return null;
+  return hostname;
+}
+
+function validIpv4Address(value: string | null | undefined): boolean {
+  const parts = String(value || '').split('.');
+  return parts.length === 4 && parts.every((part) => (
+    /^(?:0|[1-9]\d{0,2})$/.test(part)
+    && Number(part) >= 0
+    && Number(part) <= 255
+  ));
+}
+
+function validDockerNetworkName(value: string | null | undefined): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/.test(value || '');
 }
 
 function defaultPortForProtocol(protocol: 'http' | 'https'): number {
@@ -4434,19 +4803,6 @@ function previousBootstrapPort(previous: SiteSlotDomesticRuntimeConfig | null): 
     return parsed.port ? Number(parsed.port) : defaultPortForProtocol(normalizeProtocol(parsed.protocol));
   } catch {
     return undefined;
-  }
-}
-
-function bootstrapHostFromPlanHost(host: string | null): string | null {
-  const value = host?.trim();
-  if (!value) return null;
-  const normalized = value.includes('://') ? value : `http://${value}`;
-  try {
-    return new URL(normalized).hostname || null;
-  } catch {
-    const authority = value.split('/')[0] ?? value;
-    const withoutUserInfo = authority.includes('@') ? authority.split('@').pop() ?? authority : authority;
-    return withoutUserInfo.replace(/:\d+$/, '').trim() || null;
   }
 }
 

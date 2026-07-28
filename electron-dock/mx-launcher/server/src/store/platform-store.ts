@@ -34,6 +34,8 @@ import type {
   DnsReverseProxyRouteInput,
   DnsZoneSnapshot,
   DnsZoneSnapshotInput,
+  FeishuAuthorizationTransaction,
+  FeishuAuthorizationTransactionInput,
   GatewayConfigMapApplyInput,
   GatewayConfigMapApplyResult,
   GatewayConfigMapSyncInput,
@@ -42,6 +44,9 @@ import type {
   GatewayRuntimeConfigInput,
   IdentityLinkRequest,
   IssueTokenInput,
+  LauncherNetworkHandover,
+  LauncherNetworkHandoverAdvanceInput,
+  LauncherNetworkHandoverInput,
   LauncherNetworkLease,
   LauncherNetworkLeaseInput,
   LauncherNetworkLeaseReleaseInput,
@@ -128,6 +133,10 @@ import type {
   TestRunInput,
   TestStepInput
 } from '../types.js';
+import type {
+  AuthenticationRateLimitDecision,
+  AuthenticationRateLimitInput
+} from '../lib/auth-rate-limit.js';
 
 export type MaybePromise<T> = T | Promise<T>;
 
@@ -216,6 +225,9 @@ export interface PlatformStore {
   updateUserCenterPassword(input: UserPasswordUpdateInput): MaybePromise<UserPasswordUpdateResult>;
   deleteUserCenterUser(input: UserCenterUserDeleteInput): MaybePromise<UserCenterUserDeleteResult>;
   verifyUserCenterPassword(input: UserPasswordVerificationInput): MaybePromise<UserPasswordVerificationResult>;
+  consumeAuthenticationRateLimits(
+    inputs: AuthenticationRateLimitInput[]
+  ): MaybePromise<AuthenticationRateLimitDecision[]>;
   listUserOverseaEntitlements(): MaybePromise<UserOverseaEntitlement[]>;
   getUserOverseaEntitlement(userId: string): MaybePromise<UserOverseaEntitlement | null>;
   upsertUserOverseaEntitlement(input: UserOverseaEntitlementInput): MaybePromise<UserOverseaEntitlement>;
@@ -226,6 +238,12 @@ export interface PlatformStore {
   upsertUserH2oRuntimeProfile(input: UserH2oRuntimeProfileInput): MaybePromise<UserH2oRuntimeProfile>;
   listUserCenterServiceAccounts(): MaybePromise<UserCenterServiceAccount[]>;
   createUserCenterServiceAccount(input: CreateServiceAccountInput): MaybePromise<UserCenterServiceAccount>;
+  createFeishuAuthorizationTransaction(
+    input: FeishuAuthorizationTransactionInput
+  ): MaybePromise<FeishuAuthorizationTransaction>;
+  consumeFeishuAuthorizationTransaction(
+    transactionId: string
+  ): MaybePromise<FeishuAuthorizationTransaction | null>;
   issueUserCenterToken(input: IssueTokenInput): MaybePromise<UserCenterIssuedToken>;
   introspectToken(input: TokenIntrospectionInput): MaybePromise<TokenIntrospectionResult>;
   resolvePrincipalContext(input: PrincipalContextInput): MaybePromise<PrincipalContext>;
@@ -262,6 +280,10 @@ export interface PlatformStore {
   getLauncherNetworkLease(leaseId: string): MaybePromise<LauncherNetworkLease | null>;
   enrollLauncherNetworkLease(input: LauncherNetworkLeaseInput): MaybePromise<LauncherNetworkLease>;
   releaseLauncherNetworkLease(leaseId: string, input?: LauncherNetworkLeaseReleaseInput): MaybePromise<LauncherNetworkLease>;
+  listLauncherNetworkHandovers(): MaybePromise<LauncherNetworkHandover[]>;
+  getLauncherNetworkHandover(transitionId: string): MaybePromise<LauncherNetworkHandover | null>;
+  createLauncherNetworkHandover(input: LauncherNetworkHandoverInput): MaybePromise<LauncherNetworkHandover>;
+  advanceLauncherNetworkHandover(input: LauncherNetworkHandoverAdvanceInput): MaybePromise<LauncherNetworkHandover>;
   renderHysteria2MihomoSubscription(siteId: string, username: string): MaybePromise<MihomoSubscriptionRender | null>;
   listRuntimeFeaturePolicies(featureKey?: string | null): MaybePromise<RuntimeFeaturePolicy[]>;
   getRuntimeFeaturePolicy(policyId: string): MaybePromise<RuntimeFeaturePolicy | null>;

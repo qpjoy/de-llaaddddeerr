@@ -40,14 +40,35 @@ Compose 里环境变量都写在一个 service 下。K8s 中要拆开：
   `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=1`、`SITE_SLOT_WORKER_REMOTE_SSH=1`、
   `SITE_SLOT_CONFIRM_REMOTE_EXECUTION=1`。这些 env 缺省即开启；可用
   `SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=0` 显式冻结 runner。
-- Secret 放 `PG_PASSWORD`、`DATABASE_URL` 这类敏感值。
+- Secret 放 `PG_PASSWORD`、`DATABASE_URL` 这类敏感值。Internal 管理 API 另用
+  `mx-internal-ops/token` 注入 `MX_INTERNAL_OPS_TOKEN`；调用方通过
+  `x-mx-ops-token` header 提交，不能把它放入 ConfigMap。
 
-`manage.sh k8s apply internal-shadow` 会从本地环境变量生成 Secret，不把密码写进 git：
+`manage.sh k8s apply internal-shadow` 会从本地环境变量生成数据库 Secret，不把密码写进
+git：
 
 ```bash
 PG_USER=mx_internal PG_PASSWORD=... PG_DB=mx_internal_shadow \
   bash scripts/manage.sh k8s apply internal-shadow
 ```
+
+同一流程会在应用 Deployment 前创建或复用 `mx-internal-ops`：显式
+`MX_INTERNAL_OPS_TOKEN` 优先，其次复用现有 Secret；都不存在时生成 32 随机字节的
+base64url token。显式值至少 32 字符。日常重放 deploy 不会无故轮换现有值，但
+`k8s down` 会删除这个 Secret，下一次 deploy 会生成新值，Admin UI 与
+`client_credentials` 集成必须重新取值。不要把 token 写入命令行、Git 或部署日志。
+
+只检查 Secret/key 是否存在（不输出值）：
+
+```bash
+kubectl -n mx-internal-shadow get secret mx-internal-ops \
+  -o go-template='{{range $key, $_ := .data}}{{$key}}{{"\n"}}{{end}}'
+```
+
+Admin UI 侧栏的 `Internal Ops Token` 密码框只保存在当前页面会话；刷新或重启后清空。
+授权人员确需取值时，应在不录屏、不共享的受控终端读取 `mx-internal-ops/token`，用完清理
+终端输出。飞书 App ID/Secret/tenant allowlist 使用独立的 `mx-feishu-oauth`，详见
+`docs/24-mx-h2i-feishu-login.md`，不得与平台 ops token 复用。
 
 ### StatefulSet 和 PVC
 
@@ -135,6 +156,11 @@ bash scripts/manage.sh k8s smoke internal-shadow
 CentOS/Ubuntu Internal K8s 上，DaemonSet 实际只运行一个 Pod；如果以后变成多节点，
 应给真正拥有 `mx-internal-svc` / `10.88.88.88` 的节点打 label，再把 gateway 约束到
 那台节点。
+
+这个 `18090` listener 是 Internal/WireGuard/LAN 控制面，不是 MX-H2I 首次登录的公网
+TLS 入口。访客、密码员工与飞书登录的 capability/凭据必须先到
+`https://h2i.minsight-ai.com:443` 的 Domestic edge，再由 Domestic 经 WireGuard 访问这里。
+不要为了满足公网 HTTPS 而给 Internal DaemonSet 抢占 443 或直接暴露 Internal API。
 
 如果现场 kube-proxy / Service VIP 转发异常，deploy 会像 Postgres 一样先从集群内探测
 `mx-launcher-internal` 的 ClusterIP；ClusterIP 不通但 Endpoint 可达时，会刷新
@@ -587,6 +613,9 @@ bash scripts/manage.sh ops internal-production gateway-smoke
 PostgreSQL / migration Job / Internal API / `mx-internal-gateway`，然后直接通过
 `http://127.0.0.1:18090` 跑 gateway smoke。若该机器有防火墙或云安全组，只允许可信
 Internal 管理网、Domestic relay 或 `mx-internal-svc` overlay 访问 TCP `18090`。
+该命令不会配置 Domestic 的 `h2i.minsight-ai.com` 证书/vhost；发布新版 MX-H2I 前还必须
+让 official/Compass nginx 持有 443，通过共享 Docker network 反代
+`mx-domestic-edge:8088`，并按 `docs/24-mx-h2i-feishu-login.md` 的公网 HTTPS 步骤实测。
 在 kubeadm/containerd 主机上，Docker 能下载镜像不代表 kubelet/containerd 也能下载。
 部署脚本会默认通过 Docker 拉取 `postgres:16-alpine`、`coredns/coredns:1.11.3`、
 `caddy:2.8.4-alpine`，再导入 containerd 的 `k8s.io` namespace，复用 Docker 已经可用的
@@ -700,6 +729,11 @@ baseline，读取失败时禁止覆盖。生产 apply 默认要求 Internal serv
 `10.88.88.88` 分配到宿主机，并直接验证该地址 UDP/TCP 53 都返回
 `h2i.mxinfo-inc.cn -> 10.88.88.88`。不拥有 overlay 地址的 local/dev 环境必须显式设置
 `MX_INTERNAL_DNS_PROBE_SERVER=<node-ip>`，不能让生产路径自动退化成 node-IP 假验证。
+CoreDNS 保持 Pod network，由部署脚本使用 JSON Patch 同时写入 UDP/TCP `hostPort: 53`；
+两个端口都固定 `hostIP: 10.88.88.88`，只在 Internal overlay 地址接收查询，不能省略
+`hostIP` 变成所有 LOCAL 地址上的递归 resolver。也不能改成监听通配 `:53` 的
+`hostNetwork`，否则既可能暴露 LAN/公网递归 DNS，也会与宿主机已有
+systemd-resolved、dnsmasq 或其它本机 DNS listener 冲突。
 
 HTTP smoke 在 K8s 模式下会设置 `MX_SMOKE_EXPECT_K8S_APPLY=1`，并调用
 `POST /internal/v1/dns/coredns/configmap/apply` 验证真实写入。Compose 本地模式不打开

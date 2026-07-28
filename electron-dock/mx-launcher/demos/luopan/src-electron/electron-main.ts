@@ -1,11 +1,11 @@
-import { app, BrowserWindow, ipcMain, nativeTheme, session, shell, type Session } from 'electron';
+import { app, BrowserWindow, ipcMain, nativeTheme, safeStorage, session, shell, type Session } from 'electron';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import * as path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -21,6 +21,7 @@ import {
   createElectronLauncher,
   createElectronLauncherReleaseUpdateExecutor,
   createElectronLauncherReleaseUpdater,
+  createLauncherWireGuardKeyPair,
   diagnoseElectronLauncherStandaloneDataPlane,
   ensureElectronLauncherUserOverseaSubscription,
   defineLauncherProduct,
@@ -37,6 +38,7 @@ import {
   type ElectronLauncherUpdateExecutionResult,
   type LauncherNetworkSession,
   type LauncherProductDefinition,
+  type LauncherWireGuardKeyPair,
   type StandaloneLauncher
 } from '@qpjoy/electron-launcher';
 import {
@@ -69,6 +71,7 @@ interface RuntimeConfig {
 interface RuntimeConnection {
   status: RuntimeStatus;
   bootstrapBaseUrl: string | null;
+  leaseId: string | null;
   leaseIp: string | null;
   serviceVip: string | null;
   dnsServer: string | null;
@@ -114,9 +117,9 @@ interface RuntimeUpdate {
   message: string | null;
 }
 
-// User Center identity (docs/15 SDK gateway). The access token stays in
-// memory only; the persisted identity is display metadata + the userId used
-// for the login-range lease and release targeting.
+// User Center identity (docs/15 SDK gateway). The access token is decrypted
+// only in Electron main memory and persisted inside the safeStorage vault;
+// renderer-visible identity contains display metadata only.
 interface RuntimeIdentity {
   kind: 'anonymous' | 'user';
   userId: string | null;
@@ -170,6 +173,53 @@ interface RuntimeState {
   events: string[];
 }
 
+type LuopanLeaseProfile = 'anonymous' | 'employee';
+
+interface RuntimeLeaseCredential {
+  credentialKey: string;
+  leaseId: string | null;
+  capability: string;
+  productId: string;
+  identityKind: 'anonymous' | 'user';
+  leaseProfile: LuopanLeaseProfile;
+  installId: string;
+  userId: string | null;
+  publicKey: string;
+  expiresAt: string | null;
+  updatedAt: string;
+}
+
+interface RuntimeCredentialVault {
+  accessToken: string | null;
+  wireGuardKeyPair: LauncherWireGuardKeyPair | null;
+  leaseCredentials: Record<string, RuntimeLeaseCredential>;
+}
+
+interface ProtectedCredentialVault {
+  storage: 'electron-safe-storage-v1';
+  ciphertext: string;
+}
+
+interface PendingLeaseCapability {
+  credentialKey: string;
+  capability: string;
+}
+
+interface ServerLeaseReleaseSummary {
+  released: string[];
+  failed: Array<{ leaseId: string; message: string }>;
+}
+
+interface LuopanDisconnectOptions {
+  requireServerRelease?: boolean;
+}
+
+type PersistedRuntimeState = Partial<RuntimeState> & {
+  protectedCredentials?: unknown;
+  credentialVaultVersion?: unknown;
+  legacyCredentialCleanupRequired?: unknown;
+};
+
 interface OverseaSessionContext {
   generation: number;
   userId: string;
@@ -207,6 +257,7 @@ const PRODUCT = defineLauncherProduct({
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = 'luopan-runtime.json';
+const CREDENTIAL_VAULT_VERSION = 1;
 const LUOPAN_REGISTERED_BASE_URL = 'http://10.88.100.3:18090';
 const OVERSEA_SUBSCRIPTION_NAME = 'System Oversea 默认订阅';
 const OVERSEA_SESSION_PARTITION = 'persist:luopan-oversea';
@@ -243,8 +294,12 @@ let shutdownComplete = false;
 let sessionOperation: Promise<unknown> = Promise.resolve();
 let runtimeSaveQueue: Promise<void> = Promise.resolve();
 let runtimeSaveSequence = 0;
-// In-memory only: never persisted, cleared on logout/restart.
+// Decrypted only in Electron main memory. saveRuntime() persists it solely
+// through safeStorage; renderers only receive tokenPresent metadata.
 let activeAccessToken: string | null = null;
+let credentialVault: RuntimeCredentialVault = emptyCredentialVault();
+let credentialStorageFailure: string | null = null;
+let legacyCredentialCleanupRequired = false;
 // Pinned by the last successful bootstrap resolution; serves every API call
 // made before the data plane is network-ready.
 let activeBootstrapBaseUrl: string | null = null;
@@ -295,6 +350,7 @@ function emptyConnection(): RuntimeConnection {
   return {
     status: 'idle',
     bootstrapBaseUrl: null,
+    leaseId: null,
     leaseIp: null,
     serviceVip: null,
     dnsServer: null,
@@ -303,6 +359,14 @@ function emptyConnection(): RuntimeConnection {
     dataPlane: null,
     message: 'Launcher adapter ready.',
     updatedAt: null
+  };
+}
+
+function emptyCredentialVault(): RuntimeCredentialVault {
+  return {
+    accessToken: null,
+    wireGuardKeyPair: null,
+    leaseCredentials: {}
   };
 }
 
@@ -376,17 +440,40 @@ async function loadRuntime(): Promise<RuntimeState> {
   };
   const file = runtimeStateFile();
   try {
-    const parsed = JSON.parse(await fs.readFile(file, 'utf8')) as Partial<RuntimeState>;
+    const parsed = JSON.parse(await fs.readFile(file, 'utf8')) as PersistedRuntimeState;
+    const hasProtectedCredentials = parsed.protectedCredentials !== undefined && parsed.protectedCredentials !== null;
+    legacyCredentialCleanupRequired = parsed.legacyCredentialCleanupRequired === true || (
+      !hasProtectedCredentials
+      && parsed.credentialVaultVersion !== CREDENTIAL_VAULT_VERSION
+      && Boolean(stringValue(parsed.installId) || stringValue(parsed.deviceId))
+    );
+    credentialVault = unprotectCredentialVault(parsed.protectedCredentials);
+    const persistedIdentity = normalizeIdentity(parsed.identity);
+    const identity = identityCanResume(persistedIdentity, credentialVault.accessToken)
+      ? persistedIdentity
+      : emptyIdentity();
+    activeAccessToken = identity.kind === 'user' ? credentialVault.accessToken : null;
+    if (!activeAccessToken) credentialVault.accessToken = null;
+    const connection = normalizeConnection(parsed.connection);
+    if (credentialStorageFailure) {
+      connection.status = 'error';
+      connection.message = `安全凭据存储不可用，已阻止网络续租：${credentialStorageFailure}`;
+      connection.updatedAt = new Date().toISOString();
+    } else if (legacyCredentialCleanupRequired) {
+      connection.status = 'error';
+      connection.message = '检测到旧版 Luopan 未保存 WireGuard key/capability；下次连接会先清理旧本地网络并轮换 install/device identity。';
+      connection.updatedAt = new Date().toISOString();
+    }
     return {
       installId: stringValue(parsed.installId) || fallback.installId,
       deviceId: stringValue(parsed.deviceId) || fallback.deviceId,
       // Explicit process/.env values are deployment configuration and win
       // over CONFIG-panel values persisted by an older app run.
       config: constrainRuntimeConfig(applyEnvironmentConfigOverrides(normalizeConfig(parsed.config, fallback.config))),
-      // Access tokens are memory-only, so persisted user metadata must never
-      // survive a process restart as an authenticated identity.
-      identity: emptyIdentity(),
-      connection: normalizeConnection(parsed.connection),
+      // User metadata resumes only when its access token was decrypted from
+      // Electron safeStorage and has not expired.
+      identity,
+      connection,
       oversea: normalizeOversea(parsed.oversea),
       update: normalizeUpdate(parsed.update),
       // Runtime events can contain user/site identifiers; a fresh process has
@@ -394,6 +481,10 @@ async function loadRuntime(): Promise<RuntimeState> {
       events: []
     };
   } catch {
+    credentialVault = emptyCredentialVault();
+    credentialStorageFailure = null;
+    legacyCredentialCleanupRequired = false;
+    activeAccessToken = null;
     return fallback;
   }
 }
@@ -401,7 +492,13 @@ async function loadRuntime(): Promise<RuntimeState> {
 async function saveRuntime(): Promise<void> {
   if (!runtime) return;
   const file = runtimeStateFile();
-  const snapshot = JSON.stringify(runtime, null, 2);
+  const protectedCredentials = protectCredentialVault(credentialVault);
+  const snapshot = JSON.stringify({
+    ...runtime,
+    credentialVaultVersion: CREDENTIAL_VAULT_VERSION,
+    legacyCredentialCleanupRequired,
+    ...(protectedCredentials ? { protectedCredentials } : {})
+  }, null, 2);
   const sequence = ++runtimeSaveSequence;
   const next = runtimeSaveQueue.catch(() => undefined).then(async () => {
     await fs.mkdir(app.getPath('userData'), { recursive: true });
@@ -427,6 +524,256 @@ function runtimeStateFile(): string {
   return path.join(app.getPath('userData'), STATE_FILE);
 }
 
+function secureCredentialStorageAvailable(): boolean {
+  if (!safeStorage.isEncryptionAvailable()) return false;
+  if (process.platform !== 'linux') return true;
+  const backend = typeof safeStorage.getSelectedStorageBackend === 'function'
+    ? stringValue(safeStorage.getSelectedStorageBackend())
+    : null;
+  return Boolean(backend && backend !== 'basic_text');
+}
+
+function ensureCredentialStorageReady(): void {
+  if (credentialStorageFailure) {
+    throw new Error(`安全凭据存储恢复失败：${credentialStorageFailure}。请备份诊断后删除 Luopan runtime 再重新登录。`);
+  }
+  if (!secureCredentialStorageAvailable()) {
+    throw new Error('Electron safeStorage 不可用或仅提供 Linux basic_text，已阻止保存 token、lease capability 和 WireGuard 私钥。');
+  }
+}
+
+function protectCredentialVault(input: RuntimeCredentialVault): ProtectedCredentialVault | null {
+  if (credentialStorageFailure) {
+    throw new Error(`Refusing to overwrite unreadable protected credentials: ${credentialStorageFailure}`);
+  }
+  const normalized = normalizeCredentialVault(input);
+  credentialVault = normalized;
+  const hasCredentials = Boolean(
+    normalized.accessToken
+    || normalized.wireGuardKeyPair?.privateKey
+    || Object.keys(normalized.leaseCredentials).length > 0
+  );
+  if (!hasCredentials) return null;
+  ensureCredentialStorageReady();
+  return {
+    storage: 'electron-safe-storage-v1',
+    ciphertext: safeStorage.encryptString(JSON.stringify(normalized)).toString('base64')
+  };
+}
+
+function unprotectCredentialVault(input: unknown): RuntimeCredentialVault {
+  credentialStorageFailure = null;
+  if (input === undefined || input === null) return emptyCredentialVault();
+  const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+  const ciphertext = stringValue(record.ciphertext);
+  if (record.storage !== 'electron-safe-storage-v1' || !ciphertext) {
+    credentialStorageFailure = 'runtime 中的加密凭据格式无效';
+    return emptyCredentialVault();
+  }
+  try {
+    if (!secureCredentialStorageAvailable()) {
+      throw new Error('Electron safeStorage 不可用或仅提供 Linux basic_text');
+    }
+    return normalizeCredentialVault(JSON.parse(
+      safeStorage.decryptString(Buffer.from(ciphertext, 'base64'))
+    ));
+  } catch (error) {
+    credentialStorageFailure = errorMessage(error);
+    return emptyCredentialVault();
+  }
+}
+
+function normalizeCredentialVault(input: unknown): RuntimeCredentialVault {
+  const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+  const keyPairRecord = record.wireGuardKeyPair && typeof record.wireGuardKeyPair === 'object'
+    ? record.wireGuardKeyPair as Record<string, unknown>
+    : {};
+  const privateKey = stringValue(keyPairRecord.privateKey);
+  const publicKey = stringValue(keyPairRecord.publicKey);
+  const rawCredentials = record.leaseCredentials && typeof record.leaseCredentials === 'object'
+    ? Object.values(record.leaseCredentials as Record<string, unknown>)
+    : [];
+  const leaseCredentials = Object.fromEntries(rawCredentials
+    .map(normalizeLeaseCredential)
+    .filter((item): item is RuntimeLeaseCredential => Boolean(item))
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .slice(0, 24)
+    .map((item) => [item.credentialKey, item]));
+  return {
+    accessToken: stringValue(record.accessToken),
+    wireGuardKeyPair: privateKey && publicKey ? { privateKey, publicKey } : null,
+    leaseCredentials
+  };
+}
+
+function normalizeLeaseCredential(input: unknown): RuntimeLeaseCredential | null {
+  const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+  const credentialKey = stringValue(record.credentialKey);
+  const capability = stringValue(record.capability);
+  const productId = stringValue(record.productId);
+  const installId = stringValue(record.installId);
+  const publicKey = stringValue(record.publicKey);
+  if (
+    !credentialKey
+    || !capability
+    || !/^mxlc1\.[A-Za-z0-9_-]{43}$/.test(capability)
+    || !productId
+    || !installId
+    || !publicKey
+  ) return null;
+  const identityKind = record.identityKind === 'user' ? 'user' : 'anonymous';
+  return {
+    credentialKey,
+    leaseId: stringValue(record.leaseId),
+    capability,
+    productId,
+    identityKind,
+    leaseProfile: identityKind === 'user' ? 'employee' : 'anonymous',
+    installId,
+    userId: identityKind === 'user' ? stringValue(record.userId) : null,
+    publicKey,
+    expiresAt: stringValue(record.expiresAt),
+    updatedAt: stringValue(record.updatedAt) || new Date(0).toISOString()
+  };
+}
+
+function identityCanResume(identity: RuntimeIdentity, accessToken: string | null): boolean {
+  if (identity.kind !== 'user' || !identity.userId || !accessToken) return false;
+  const expiresAt = identity.tokenExpiresAt ? Date.parse(identity.tokenExpiresAt) : Number.NaN;
+  return !Number.isFinite(expiresAt) || expiresAt > Date.now();
+}
+
+function ensureWireGuardKeyPair(): LauncherWireGuardKeyPair {
+  ensureCredentialStorageReady();
+  if (!credentialVault.wireGuardKeyPair) {
+    credentialVault.wireGuardKeyPair = createLauncherWireGuardKeyPair();
+  }
+  return credentialVault.wireGuardKeyPair;
+}
+
+function pendingLeaseCredentialKey(identityKind: 'anonymous' | 'user', userId: string | null): string {
+  const profile: LuopanLeaseProfile = identityKind === 'user' ? 'employee' : 'anonymous';
+  return `pending:${requireRuntime().config.productId}:${profile}:${userId || 'anonymous'}`;
+}
+
+function ensurePendingLeaseCapability(
+  identityKind: 'anonymous' | 'user',
+  userId: string | null
+): PendingLeaseCapability {
+  const state = requireRuntime();
+  const keyPair = ensureWireGuardKeyPair();
+  const credentialKey = pendingLeaseCredentialKey(identityKind, userId);
+  const existing = credentialVault.leaseCredentials[credentialKey];
+  if (existing?.capability) return { credentialKey, capability: existing.capability };
+  const capability = `mxlc1.${randomBytes(32).toString('base64url')}`;
+  credentialVault.leaseCredentials[credentialKey] = {
+    credentialKey,
+    leaseId: null,
+    capability,
+    productId: state.config.productId,
+    identityKind,
+    leaseProfile: identityKind === 'user' ? 'employee' : 'anonymous',
+    installId: state.installId,
+    userId,
+    publicKey: keyPair.publicKey,
+    expiresAt: null,
+    updatedAt: new Date().toISOString()
+  };
+  credentialVault = normalizeCredentialVault(credentialVault);
+  return { credentialKey, capability };
+}
+
+function leaseCapabilitiesForEnrollment(
+  identityKind: 'anonymous' | 'user',
+  userId: string | null
+): string | undefined {
+  const state = requireRuntime();
+  const publicKey = credentialVault.wireGuardKeyPair?.publicKey;
+  const profile: LuopanLeaseProfile = identityKind === 'user' ? 'employee' : 'anonymous';
+  const credentials = Object.values(credentialVault.leaseCredentials)
+    .filter((item) => (
+      item.productId === state.config.productId
+      && item.installId === state.installId
+      && (!publicKey || item.publicKey === publicKey)
+    ))
+    .sort((left, right) => {
+      const leftPriority = left.leaseProfile === profile && left.userId === userId ? 1 : 0;
+      const rightPriority = right.leaseProfile === profile && right.userId === userId ? 1 : 0;
+      return rightPriority - leftPriority || right.updatedAt.localeCompare(left.updatedAt);
+    });
+  const capabilities = [...new Set(credentials.map((item) => item.capability))].slice(0, 16);
+  return capabilities.length > 0 ? capabilities.join(',') : undefined;
+}
+
+function rememberLeaseCredential(
+  lease: LauncherNetworkSession['lease'],
+  pendingCredentialKey?: string
+): void {
+  const state = requireRuntime();
+  const leaseId = stringValue(lease.leaseId);
+  const fallbackCapability = pendingCredentialKey
+    ? credentialVault.leaseCredentials[pendingCredentialKey]?.capability
+    : null;
+  const capability = stringValue(lease.capability) || fallbackCapability;
+  const publicKey = stringValue(lease.publicKey) || credentialVault.wireGuardKeyPair?.publicKey || null;
+  if (!leaseId || !capability || !publicKey) {
+    throw new Error('Launcher enrollment did not return a persistable lease capability and public key.');
+  }
+  const retained = Object.fromEntries(Object.entries(credentialVault.leaseCredentials)
+    .filter(([key, item]) => (
+      key !== pendingCredentialKey
+      && item.leaseId !== leaseId
+    )));
+  retained[leaseId] = {
+    credentialKey: leaseId,
+    leaseId,
+    capability,
+    productId: stringValue(lease.productId) || state.config.productId,
+    identityKind: lease.identityKind === 'user' ? 'user' : 'anonymous',
+    leaseProfile: lease.identityKind === 'user' ? 'employee' : 'anonymous',
+    installId: stringValue(lease.installId) || state.installId,
+    userId: lease.identityKind === 'user' ? stringValue(lease.userId) : null,
+    publicKey,
+    expiresAt: stringValue(lease.expiresAt),
+    updatedAt: new Date().toISOString()
+  };
+  credentialVault.leaseCredentials = retained;
+  credentialVault = normalizeCredentialVault(credentialVault);
+}
+
+function forgetLeaseCredential(leaseId: string): void {
+  credentialVault.leaseCredentials = Object.fromEntries(
+    Object.entries(credentialVault.leaseCredentials)
+      .filter(([, item]) => item.leaseId !== leaseId)
+  );
+}
+
+function leaseCredentialForLeaseId(leaseId: string | null): RuntimeLeaseCredential | null {
+  if (!leaseId) return null;
+  return Object.values(credentialVault.leaseCredentials)
+    .find((item) => item.leaseId === leaseId) ?? null;
+}
+
+function hasReleasableLeaseCredentials(state = requireRuntime()): boolean {
+  return Object.values(credentialVault.leaseCredentials).some((item) => (
+    Boolean(item.leaseId)
+    && item.productId === state.config.productId
+    && item.installId === state.installId
+  ));
+}
+
+function completeLegacyCredentialMigration(): void {
+  if (!legacyCredentialCleanupRequired) return;
+  const state = requireRuntime();
+  state.installId = `luopan-inst-${randomUUID()}`;
+  state.deviceId = `luopan-dev-${randomUUID()}`;
+  credentialVault = emptyCredentialVault();
+  activeAccessToken = null;
+  state.identity = emptyIdentity();
+  legacyCredentialCleanupRequired = false;
+  pushEvent('legacy launcher identity rotated after local data-plane cleanup');
+}
+
 function visibleRuntime() {
   const state = requireRuntime();
   return {
@@ -436,6 +783,7 @@ function visibleRuntime() {
     launcherMode: PRODUCT.mode,
     installId: state.installId,
     deviceId: state.deviceId,
+    credentialMigrationRequired: legacyCredentialCleanupRequired,
     config: state.config,
     identity: { ...state.identity, tokenPresent: hasActiveUserIdentity(state) },
     connection: state.connection,
@@ -491,13 +839,17 @@ function requireRuntime(): RuntimeState {
 
 function launcherClient(): StandaloneLauncher {
   const state = requireRuntime();
+  const keyPair = credentialVault.wireGuardKeyPair;
   const launcher = createElectronLauncher({
     baseUrl: effectiveApiBaseUrl(),
     productId: state.config.productId,
     mode: 'standalone',
     installId: state.installId,
     deviceId: state.deviceId,
-    deviceLabel: state.config.deviceLabel
+    deviceLabel: state.config.deviceLabel,
+    keyPair: keyPair ?? undefined,
+    privateKey: keyPair?.privateKey,
+    publicKey: keyPair?.publicKey
   });
   if (launcher.mode !== 'standalone') {
     throw new Error('Luopan demo requires standalone launcher mode');
@@ -1068,6 +1420,7 @@ async function clearOverseaBrowserSession(): Promise<void> {
 async function invalidateOverseaIdentitySession(reason: string): Promise<void> {
   const flight = overseaReconcileFlight;
   activeAccessToken = null;
+  credentialVault.accessToken = null;
   overseaSessionGeneration += 1;
   overseaReadyContext = null;
   flight?.controller.abort();
@@ -1402,30 +1755,67 @@ function registerIpc(): void {
   ipcMain.handle('luopan:save-config', (_event, input) => runSessionExclusive(async () => {
     const state = requireRuntime();
     const current = state.config;
+    const previousBootstrapBaseUrl = activeBootstrapBaseUrl;
     const next = constrainRuntimeConfig(applyEnvironmentConfigOverrides(normalizeConfig(input, current)));
     const channelChanged = current.baseUrl !== next.baseUrl || current.sdkTestMode !== next.sdkTestMode;
     const bootstrapChanged = current.bootstrapUrls.join('\n') !== next.bootstrapUrls.join('\n');
+    const endpointChanged = channelChanged || bootstrapChanged;
     let cleanupError: string | null = null;
-    if (channelChanged) {
+    if (endpointChanged) {
       try {
-        await invalidateOverseaIdentitySession('config-channel-changed');
+        await invalidateOverseaIdentitySession('config-endpoint-changed');
       } catch (error) {
         cleanupError = errorMessage(error);
       }
       activeAccessToken = null;
+      credentialVault.accessToken = null;
       state.identity = emptyIdentity();
       state.events = [];
     }
-    state.config = next;
-    if (bootstrapChanged || channelChanged) activeBootstrapBaseUrl = null;
-    if (channelChanged && (state.connection.status !== 'idle' || activeSession)) {
+    if (endpointChanged && (
+      state.connection.status !== 'idle'
+      || activeSession
+      || hasReleasableLeaseCredentials(state)
+      || legacyCredentialCleanupRequired
+    )) {
       try {
-        await disconnectLuopanDataPlane('config-change');
+        // Release the old server lease through the old bootstrap/config
+        // entrance before switching channels. Otherwise a base-url change
+        // could send the authenticated release to the new environment and
+        // leave the old lease active.
+        const disconnected = await disconnectLuopanDataPlane('config-change', {
+          requireServerRelease: true
+        });
+        if (!disconnected) {
+          cleanupError = [
+            cleanupError,
+            state.connection.message || '旧连接尚未完成本地停止、服务端 lease 释放和安全持久化。'
+          ].filter(Boolean).join('; ');
+        }
       } catch (error) {
         cleanupError = [cleanupError, errorMessage(error)].filter(Boolean).join('; ');
       }
     }
-    if (channelChanged) {
+    if (endpointChanged && cleanupError) {
+      state.oversea = {
+        ...state.oversea,
+        status: 'error',
+        message: `连接配置未应用；旧入口仍保留，以便重试 lease 清理：${cleanupError}`
+      };
+      pushEvent(`runtime config rejected ${cleanupError}`);
+      await saveRuntime().catch((error) => {
+        pushEvent(`runtime config rejection persist failed ${errorMessage(error)}`);
+      });
+      broadcastRuntime();
+      return visibleRuntime();
+    }
+    state.config = next;
+    if (endpointChanged) {
+      activeBootstrapBaseUrl = null;
+      // Capabilities are scoped to the old endpoint. Successful strict
+      // cleanup removed real leases; discard any remaining pending token so
+      // it can never be sent to the newly configured origin.
+      credentialVault.leaseCredentials = {};
       state.oversea = {
         ...emptyOversea(),
         autoConnect: state.oversea.autoConnect,
@@ -1435,8 +1825,20 @@ function registerIpc(): void {
           : '连接配置已变更；请重新匿名 Connect Internal，再通过隧道内 VIP 登录。'
       };
     }
-    pushEvent('runtime config saved');
-    await saveRuntime();
+    try {
+      await saveRuntime();
+      pushEvent('runtime config saved');
+    } catch (error) {
+      state.config = current;
+      activeBootstrapBaseUrl = previousBootstrapBaseUrl;
+      state.oversea = {
+        ...state.oversea,
+        status: 'error',
+        message: `连接配置未应用，旧入口已恢复：${errorMessage(error)}`
+      };
+      pushEvent(`runtime config persist failed ${errorMessage(error)}`);
+      await saveRuntime().catch(() => undefined);
+    }
     broadcastRuntime();
     return visibleRuntime();
   }));
@@ -1476,6 +1878,7 @@ function registerIpc(): void {
     }
     let auth: Awaited<ReturnType<typeof authenticateLuopanUser>>;
     try {
+      ensureCredentialStorageReady();
       auth = await authenticateLuopanUser(account, password);
     } catch (error) {
       pushEvent(`login failed ${errorMessage(error)}`);
@@ -1486,6 +1889,7 @@ function registerIpc(): void {
     try {
       await invalidateOverseaIdentitySession('login-rotation');
       activeAccessToken = auth.accessToken;
+      credentialVault.accessToken = auth.accessToken;
       state.identity = {
         kind: 'user',
         userId: auth.userId,
@@ -1507,6 +1911,7 @@ function registerIpc(): void {
       pushEvent(`user login ${auth.userId}`);
     } catch (error) {
       activeAccessToken = null;
+      credentialVault.accessToken = null;
       state.identity = emptyIdentity();
       state.oversea = {
         ...emptyOversea(),
@@ -1538,6 +1943,7 @@ function registerIpc(): void {
       cleanupError = errorMessage(error);
     }
     activeAccessToken = null;
+    credentialVault.accessToken = null;
     state.identity = emptyIdentity();
     state.events = [];
     await disconnectLuopanDataPlane('logout');
@@ -1588,7 +1994,24 @@ function registerIpc(): void {
   ipcMain.handle('luopan:refresh-snapshot', () => runSessionExclusive(async () => {
     try {
       const state = requireRuntime();
+      const leaseCredential = leaseCredentialForLeaseId(
+        stringValue(activeSession?.lease.leaseId) || state.connection.leaseId
+      );
+      if (!leaseCredential?.leaseId) {
+        throw new Error('No active Luopan lease capability is available for snapshot refresh.');
+      }
+      if (leaseCredential.identityKind === 'user' && !hasActiveUserIdentity(state)) {
+        throw new Error('The user lease token expired; log in again before refreshing its snapshot.');
+      }
       const snapshot = await launcherClient().createSnapshot({
+        leaseId: leaseCredential.leaseId,
+        leaseCapability: leaseCredential.capability,
+        accessToken: leaseCredential.identityKind === 'user' ? activeAccessToken : undefined,
+        installId: state.installId,
+        deviceId: state.deviceId,
+        userId: leaseCredential.userId,
+        leaseProfile: leaseCredential.leaseProfile,
+        publicKey: leaseCredential.publicKey,
         requestId: `luopan-snapshot-${Date.now()}`
       });
       const routePlan = routePlanFromSnapshot(snapshot);
@@ -1781,8 +2204,84 @@ function registerIpc(): void {
   });
 }
 
-async function disconnectLuopanDataPlane(reason: 'manual' | 'logout' | 'config-change' | 'reset' | 'shutdown'): Promise<boolean> {
+async function releaseLuopanServerLeases(
+  sessionToRelease: LauncherNetworkSession | null
+): Promise<ServerLeaseReleaseSummary> {
   const state = requireRuntime();
+  const publicKey = credentialVault.wireGuardKeyPair?.publicKey;
+  const candidates = new Map<string, {
+    leaseId: string;
+    capability: string;
+    identityKind: 'anonymous' | 'user';
+  }>();
+  for (const credential of Object.values(credentialVault.leaseCredentials)) {
+    if (
+      !credential.leaseId
+      || credential.productId !== state.config.productId
+      || credential.installId !== state.installId
+      || (publicKey && credential.publicKey !== publicKey)
+    ) continue;
+    candidates.set(credential.leaseId, {
+      leaseId: credential.leaseId,
+      capability: credential.capability,
+      identityKind: credential.identityKind
+    });
+  }
+  const sessionLeaseId = stringValue(sessionToRelease?.lease.leaseId);
+  const sessionCapability = stringValue(sessionToRelease?.lease.capability);
+  if (sessionLeaseId && sessionCapability) {
+    candidates.set(sessionLeaseId, {
+      leaseId: sessionLeaseId,
+      capability: sessionCapability,
+      identityKind: sessionToRelease?.lease.identityKind === 'user' ? 'user' : 'anonymous'
+    });
+  }
+  if (candidates.size === 0) return { released: [], failed: [] };
+
+  const resolution = await ensureBootstrapResolved(!activeBootstrapBaseUrl);
+  if (resolution && !resolution.ok) {
+    return {
+      released: [],
+      failed: [...candidates.keys()].map((leaseId) => ({ leaseId, message: resolution.message }))
+    };
+  }
+
+  const results = await Promise.all([...candidates.values()].map(async (candidate) => {
+    try {
+      const payload = await postLauncherNetwork(
+        `/leases/${encodeURIComponent(candidate.leaseId)}/release`,
+        {
+          requestedBy: 'luopan-quasar-demo',
+          requestId: `luopan-release-${Date.now()}-${candidate.leaseId}`
+        },
+        candidate
+      );
+      const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+      const lease = record.lease && typeof record.lease === 'object'
+        ? record.lease as Record<string, unknown>
+        : {};
+      if (stringValue(lease.status) !== 'released') {
+        throw new Error('Internal did not confirm released status.');
+      }
+      forgetLeaseCredential(candidate.leaseId);
+      return { ok: true as const, leaseId: candidate.leaseId };
+    } catch (error) {
+      return { ok: false as const, leaseId: candidate.leaseId, message: errorMessage(error) };
+    }
+  }));
+  const released = results.filter((item) => item.ok).map((item) => item.leaseId);
+  const failed = results
+    .filter((item): item is Extract<typeof results[number], { ok: false }> => !item.ok)
+    .map((item) => ({ leaseId: item.leaseId, message: item.message }));
+  return { released, failed };
+}
+
+async function disconnectLuopanDataPlane(
+  reason: 'manual' | 'logout' | 'config-change' | 'reset' | 'shutdown',
+  options: LuopanDisconnectOptions = {}
+): Promise<boolean> {
+  const state = requireRuntime();
+  const legacyMigrationWasRequired = legacyCredentialCleanupRequired;
   const dataPlaneMode = currentLuopanDataPlaneMode();
   const sessionToStop = activeSession;
   const connectionToRestore = state.connection;
@@ -1801,14 +2300,26 @@ async function disconnectLuopanDataPlane(reason: 'manual' | 'logout' | 'config-c
   await deactivateOverseaTunnel().catch((error) => {
     pushEvent(`oversea stop before Internal disconnect failed ${errorMessage(error)}`);
   });
-  await setOversea({
+  const overseaAfterDisconnect: Partial<RuntimeOversea> = {
     status: hasActiveUserIdentity(state) ? 'waiting-internal' : 'waiting-login',
     lastProxyDecision: 'DIRECT',
     message: hasActiveUserIdentity(state)
       ? 'Internal 已断开；重新连接后会重新校验订阅并恢复 Oversea。'
       : 'Internal 已断开；请先重新连接，再通过隧道内 VIP 登录 User Center。'
-  });
+  };
+  try {
+    await setOversea(overseaAfterDisconnect);
+  } catch (error) {
+    // An unreadable safeStorage vault must stay untouched, but it must never
+    // prevent local WireGuard/routes from being removed.
+    state.oversea = { ...state.oversea, ...overseaAfterDisconnect };
+    pushEvent(`runtime persist skipped before data-plane stop ${errorMessage(error)}`);
+    broadcastRuntime();
+  }
   let stopped = false;
+  let serverReleaseComplete = true;
+  let persistenceComplete = true;
+  let releaseMessage: string | null = null;
   try {
     const result = dataPlaneMode === 'reuse'
       ? {
@@ -1829,6 +2340,23 @@ async function disconnectLuopanDataPlane(reason: 'manual' | 'logout' | 'config-c
     stopped = result.ok;
     if (stopped) {
       activeDataPlaneMode = null;
+      try {
+        const release = await releaseLuopanServerLeases(sessionToStop);
+        if (release.released.length > 0) {
+          pushEvent(`server lease released ${release.released.join(',')}`);
+        }
+        if (release.failed.length > 0) {
+          serverReleaseComplete = false;
+          const failures = release.failed.map((item) => `${item.leaseId}: ${item.message}`).join('; ');
+          releaseMessage = `本地网络已停止，但服务端 lease 暂未全部释放，将在后续操作重试：${failures}`;
+          pushEvent(`server lease release pending ${failures}`);
+        }
+      } catch (error) {
+        serverReleaseComplete = false;
+        releaseMessage = `本地网络已停止，但服务端 lease 释放失败，将在后续操作重试：${errorMessage(error)}`;
+        pushEvent(`server lease release pending ${errorMessage(error)}`);
+      }
+      completeLegacyCredentialMigration();
     } else {
       activeSession = sessionToStop;
     }
@@ -1836,7 +2364,7 @@ async function disconnectLuopanDataPlane(reason: 'manual' | 'logout' | 'config-c
       ...(result.ok ? emptyConnection() : connectionToRestore),
       status: result.ok ? 'idle' : 'error',
       bootstrapBaseUrl: activeBootstrapBaseUrl,
-      message: result.message,
+      message: releaseMessage ? `${result.message} ${releaseMessage}` : result.message,
       updatedAt: new Date().toISOString()
     };
     pushEvent(result.ok ? 'data-plane stopped' : `data-plane stop failed ${result.message}`);
@@ -1851,9 +2379,23 @@ async function disconnectLuopanDataPlane(reason: 'manual' | 'logout' | 'config-c
     };
     pushEvent(`data-plane stop failed ${errorMessage(error)}`);
   }
-  await saveRuntime();
+  try {
+    await saveRuntime();
+  } catch (error) {
+    persistenceComplete = false;
+    if (legacyMigrationWasRequired) legacyCredentialCleanupRequired = true;
+    const message = `运行状态未能持久化，但本地网络清理结果保持不变：${errorMessage(error)}`;
+    state.connection = {
+      ...state.connection,
+      message: [state.connection.message, message].filter(Boolean).join(' '),
+      updatedAt: new Date().toISOString()
+    };
+    pushEvent(`runtime persist skipped after data-plane stop ${errorMessage(error)}`);
+  }
   broadcastRuntime();
-  return stopped;
+  return stopped
+    && (!options.requireServerRelease || (serverReleaseComplete && persistenceComplete))
+    && (!legacyMigrationWasRequired || persistenceComplete);
 }
 
 // Step 1 of connecting into Internal: enroll a lease against the registered
@@ -1862,8 +2404,17 @@ async function disconnectLuopanDataPlane(reason: 'manual' | 'logout' | 'config-c
 // enabled + AppCenter app `luopan` enabled with launcher-network +
 // launcher-standalone capabilities.
 async function requestLuopanLease(): Promise<boolean> {
+  if (legacyCredentialCleanupRequired) {
+    const migrated = await disconnectLuopanDataPlane('reset');
+    if (!migrated) {
+      pushEvent('legacy launcher identity migration blocked by local cleanup or persistence failure');
+      return false;
+    }
+  }
   const state = requireRuntime();
   const loggedIn = hasActiveUserIdentity(state);
+  const identityKind = loggedIn ? 'user' as const : 'anonymous' as const;
+  const userId = loggedIn ? state.identity.userId : null;
   await setConnection({
     status: 'connecting',
     message: state.config.sdkTestMode
@@ -1880,16 +2431,35 @@ async function requestLuopanLease(): Promise<boolean> {
     if (resolution && !resolution.ok) {
       throw new Error(resolution.message);
     }
+    ensureCredentialStorageReady();
+    const keyPair = ensureWireGuardKeyPair();
+    const pendingCapability = ensurePendingLeaseCapability(identityKind, userId);
+    // Persist the key and next capability before the request. A crash after
+    // server enrollment can then safely retry/claim the same lease.
+    await saveRuntime();
+    const leaseCapability = leaseCapabilitiesForEnrollment(identityKind, userId);
     const session = await launcherClient().connectNetwork({
       // Logged-in users land in the user lease range, anonymous sessions in
       // the anonymous range (docs/20 §1.2). Same API, different identityKind.
-      identityKind: loggedIn ? 'user' : 'anonymous',
-      userId: loggedIn ? state.identity.userId : undefined,
+      identityKind,
+      leaseProfile: loggedIn ? 'employee' : 'anonymous',
+      userId: userId ?? undefined,
+      accessToken: loggedIn ? activeAccessToken : undefined,
+      leaseCapability,
+      newLeaseCapability: pendingCapability.capability,
+      keyPair,
+      privateKey: keyPair.privateKey,
+      publicKey: keyPair.publicKey,
       platform: 'quasar-electron',
       sdkTestMode: state.config.sdkTestMode,
       requestedBy: 'luopan-quasar-demo',
       requestId: `luopan-${Date.now()}`
     });
+    for (const handoverLease of session.lease.handoverLeases ?? []) {
+      rememberLeaseCredential(handoverLease);
+    }
+    rememberLeaseCredential(session.lease, pendingCapability.credentialKey);
+    await saveRuntime();
     activeSession = session;
     await applySession(session);
     pushEvent(`lease active ${session.lease.leaseIp}`);
@@ -1995,6 +2565,7 @@ async function applySession(session: LauncherNetworkSession): Promise<void> {
   });
   await setConnection({
     status: runtimeStatusForDataPlane(dataPlane),
+    leaseId: session.lease.leaseId,
     leaseIp: session.lease.leaseIp,
     serviceVip: session.lease.serviceVip,
     dnsServer: session.routePlan.dnsServer,
@@ -2211,23 +2782,33 @@ async function syncLeasePeers(session: LauncherNetworkSession): Promise<void> {
   await postLauncherNetwork(`/leases/${encodeURIComponent(leaseId)}/domestic-peer/sync`, {
     requestedBy: 'luopan-quasar-demo',
     requestId: `luopan-domestic-peer-${Date.now()}`
-  });
+  }, session.lease);
   try {
     await postLauncherNetwork(`/leases/${encodeURIComponent(leaseId)}/internal-direct-peer/sync`, {
       requestedBy: 'luopan-quasar-demo',
       requestId: `luopan-internal-direct-peer-${Date.now()}`
-    });
+    }, session.lease);
   } catch (error) {
     pushEvent(`internal direct sync skipped ${errorMessage(error)}`);
   }
 }
 
-async function postLauncherNetwork(pathname: string, body: Record<string, unknown>): Promise<unknown> {
+async function postLauncherNetwork(
+  pathname: string,
+  body: Record<string, unknown>,
+  lease?: Pick<LauncherNetworkSession['lease'], 'leaseId' | 'capability' | 'identityKind'>
+): Promise<unknown> {
   // Called during data-plane bring-up (pre-tunnel): must use the bootstrap URL.
+  const leaseCredential = leaseCredentialForLeaseId(stringValue(lease?.leaseId));
+  const capability = stringValue(lease?.capability) || leaseCredential?.capability || null;
+  const accessToken = lease?.identityKind === 'user' ? activeAccessToken : null;
   const response = await fetch(`${effectiveApiBaseUrl()}/internal/v1/launcher-network${pathname}`, {
     method: 'POST',
+    signal: AbortSignal.timeout(15_000),
     headers: {
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      ...(capability ? { 'x-mx-lease-capability': capability } : {}),
+      ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {})
     },
     body: JSON.stringify(body)
   });
@@ -2237,7 +2818,7 @@ async function postLauncherNetwork(pathname: string, body: Record<string, unknow
     const message = payload && typeof payload === 'object' && 'message' in payload
       ? String((payload as { message?: unknown }).message)
       : text || response.statusText;
-    throw new Error(`Launcher peer sync failed: ${response.status} ${message}`);
+    throw new Error(`Launcher network request failed: ${response.status} ${message}`);
   }
   return payload;
 }
@@ -2530,6 +3111,7 @@ function normalizeConnection(input: unknown): RuntimeConnection {
   return {
     status,
     bootstrapBaseUrl: stringValue(record.bootstrapBaseUrl),
+    leaseId: stringValue(record.leaseId),
     leaseIp,
     serviceVip: stringValue(record.serviceVip),
     dnsServer: stringValue(record.dnsServer),
@@ -2718,7 +3300,11 @@ async function shutdownLuopanApplication(): Promise<void> {
       overseaSession = null;
     }
   }
-  await runtimeSaveQueue;
+  await runtimeSaveQueue.catch((error) => {
+    // Local routes and privileged services are already stopped. A failed
+    // diagnostic/runtime write must not trap the app in before-quit.
+    console.warn('[luopan] final runtime state was not persisted:', errorMessage(error));
+  });
 }
 
 async function surfaceShutdownFailure(error: unknown): Promise<void> {
