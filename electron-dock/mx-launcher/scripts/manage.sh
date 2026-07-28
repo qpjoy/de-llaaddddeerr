@@ -2345,6 +2345,7 @@ k8s_dry_run() {
 
 k8s_apply() {
   local target="$1"
+  local restart_rebuilt_internal_api="${2:-0}"
   local ns dir
   ns="$(k8s_namespace "$target")"
   dir="$(k8s_manifest_dir "$target")"
@@ -2422,6 +2423,12 @@ k8s_apply() {
   say "apply internal api"
   kubectl apply --validate=false -f "$dir/40-internal-api.yaml"
   k8s_apply_release_oss_rollout_version "$ns"
+  if [ "$restart_rebuilt_internal_api" = "1" ] \
+    && [ "${K8S_INTERNAL_API_RESTARTED:-0}" != "1" ]; then
+    say "restart Internal API before rollout wait so the rebuilt local image is resolved"
+    kubectl -n "$ns" rollout restart deployment/mx-launcher-internal
+    K8S_INTERNAL_API_RESTARTED=1
+  fi
   say "wait internal api rollout"
   if ! k8s_rollout_status "$ns" deployment mx-launcher-internal 180s; then
     k8s_workload_diagnostics "$ns" deployment mx-launcher-internal
@@ -5178,9 +5185,9 @@ ops_k8s_shadow() {
       say "build image"
       shadow_image_build
       say "apply"
-      k8s_apply "$target"
+      k8s_apply "$target" 1
       if [ "${K8S_INTERNAL_API_RESTARTED:-0}" = "1" ]; then
-        say "Internal API already rolled out with the updated release OSS secret"
+        say "Internal API already rolled out for the rebuilt image or updated release OSS secret"
       else
         say "restart internal api for rebuilt local image"
         k8s_restart_internal_api "$target"
@@ -5437,9 +5444,9 @@ ops_internal_production() {
       k8s_preload_runtime_images
       k8s_require_apiserver_ready
       say "apply Internal K8s production stack"
-      k8s_apply internal-shadow
+      k8s_apply internal-shadow 1
       if [ "${K8S_INTERNAL_API_RESTARTED:-0}" = "1" ]; then
-        say "Internal API already rolled out with the updated release OSS secret"
+        say "Internal API already rolled out for the rebuilt image or updated release OSS secret"
       else
         say "restart Internal API for rebuilt image"
         k8s_restart_internal_api internal-shadow
