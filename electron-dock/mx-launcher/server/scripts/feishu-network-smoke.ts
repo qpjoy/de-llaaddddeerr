@@ -125,6 +125,29 @@ assert.equal(product.feishuLeaseStart, '10.89.50.1');
 assert.equal(product.feishuLeaseEnd, '10.89.99.254');
 assert.equal(product.anonymousLeaseStart, '10.89.100.1');
 assert.equal(product.anonymousLeaseEnd, '10.89.254.254');
+const legacyNarrowEmployeeProduct = {
+  ...product,
+  userCidr: '10.89.0.0/24',
+  userLeaseStart: '10.89.0.1',
+  userLeaseEnd: '10.89.0.254'
+} as Partial<typeof product>;
+delete legacyNarrowEmployeeProduct.feishuCidr;
+delete legacyNarrowEmployeeProduct.feishuLeaseStart;
+delete legacyNarrowEmployeeProduct.feishuLeaseEnd;
+const migratedLegacyNarrowEmployeeProduct = buildLauncherProductNetwork(
+  config,
+  {
+    productId: product.productId,
+    requestedBy: 'legacy-narrow-employee-migration-smoke'
+  },
+  legacyNarrowEmployeeProduct as typeof product
+);
+assert.equal(migratedLegacyNarrowEmployeeProduct.userCidr, '10.89.0.0/16');
+assert.equal(migratedLegacyNarrowEmployeeProduct.userLeaseStart, '10.89.0.1');
+assert.equal(migratedLegacyNarrowEmployeeProduct.userLeaseEnd, '10.89.49.254');
+assert.equal(migratedLegacyNarrowEmployeeProduct.feishuCidr, '10.89.0.0/16');
+assert.equal(migratedLegacyNarrowEmployeeProduct.feishuLeaseStart, '10.89.50.1');
+assert.equal(migratedLegacyNarrowEmployeeProduct.feishuLeaseEnd, '10.89.99.254');
 assert.throws(
   () => buildLauncherProductNetwork(loadConfig(), {
     productId: 'mx-h2i',

@@ -462,10 +462,20 @@ allowlist 不能替代飞书后台的应用可用范围。
 
 ### 5.5 获取 tenant key
 
-`tenant_key` 是飞书企业的稳定标识。应从已有企业集成、应用首次启用事件，或受控测试环境
-中的 `user_info` 响应取得，再写入生产 allowlist。不要从 Electron 输入或用户声明中接受
-tenant key，不要配置通配符。飞书对 tenant key 的说明见
-[获取访问凭证](https://open.feishu.cn/document/ukTMukTMukTM/uMTNz4yM1MjLzUzM)。
+`tenant_key` 是飞书企业的稳定标识，不是应用凭证，因此不会和 App ID、App Secret 一起
+显示在“凭证与基础信息”页面。`tenant-keys`（复数）是 MX-H2I Secret 中的 allowlist key；
+单企业自建应用通常只写一个飞书 `tenant_key`。
+
+优先在受控测试环境完成一次 OAuth，再从
+[`authen/v1/user_info`](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/authen-v1/authen/user_info)
+响应的 `data.tenant_key` 取得；该接口本身不要求额外 API scope。若必须在首次 OAuth 前
+取得，可先为应用开通并发布“获取企业信息”权限，再用自建应用 `tenant_access_token` 调用
+[`tenant/v2/tenant/query`](https://open.feishu.cn/document/server-docs/tenant-v2/query)，读取
+`data.tenant.tenant_key`。第二种方式会增加应用权限，不是当前登录流程的默认要求。
+
+不要把 App ID、`open_id`、企业名称或企业编号当作 tenant key，不要从 Electron 输入或
+用户声明中接受 tenant key，也不要配置通配符。飞书对 tenant key 的定义见
+[通用参数](https://open.feishu.cn/document/server-docs/api-call-guide/terminology?lang=zh-CN)。
 
 ### 5.6 上线协同顺序
 

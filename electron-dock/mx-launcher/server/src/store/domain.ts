@@ -1758,7 +1758,9 @@ export function buildLauncherProductNetwork(
   };
   assertDisjointLauncherLeaseRanges(leaseRanges);
   const leaseCidrs = {
-    userCidr: input.userCidr?.trim() || previous?.userCidr || defaults.userCidr,
+    userCidr: input.userCidr?.trim()
+      || (previousHasFeishuPool ? previous?.userCidr : null)
+      || defaults.userCidr,
     feishuCidr: input.feishuCidr?.trim() || previous?.feishuCidr || defaults.feishuCidr,
     anonymousCidr: input.anonymousCidr?.trim() || previous?.anonymousCidr || defaults.anonymousCidr
   };
