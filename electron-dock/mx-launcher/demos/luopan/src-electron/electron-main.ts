@@ -1934,6 +1934,66 @@ function registerIpc(): void {
     }
     return visibleRuntime();
   }));
+  ipcMain.handle('luopan:change-password', (_event, input) => runSessionExclusive(async () => {
+    const state = requireRuntime();
+    const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    const currentPassword = typeof record.currentPassword === 'string' ? record.currentPassword : '';
+    const newPassword = typeof record.newPassword === 'string' ? record.newPassword : '';
+    if (!currentPassword || !newPassword) {
+      pushEvent('password change rejected: current and new passwords are required');
+      await saveRuntime();
+      broadcastRuntime();
+      return visibleRuntime();
+    }
+    if (!hasActiveUserIdentity(state) || !activeAccessToken || !state.identity.userId) {
+      pushEvent('password change rejected: User Center login is required');
+      await saveRuntime();
+      broadcastRuntime();
+      return visibleRuntime();
+    }
+    if (state.connection.status !== 'network-ready') {
+      pushEvent('password change rejected: Internal data plane is not ready');
+      state.connection.message = '请先连接 Internal；改密只允许通过隧道内 VIP 发送。';
+      await saveRuntime();
+      broadcastRuntime();
+      return visibleRuntime();
+    }
+    try {
+      await assertLuopanSecureLoginChannel();
+      await requestLuopanOwnPasswordChange(activeAccessToken, currentPassword, newPassword);
+    } catch (error) {
+      pushEvent(`password change failed ${errorMessage(error)}`);
+      await saveRuntime();
+      broadcastRuntime();
+      return visibleRuntime();
+    }
+    let cleanupError: string | null = null;
+    try {
+      await invalidateOverseaIdentitySession('password-change');
+    } catch (error) {
+      cleanupError = errorMessage(error);
+    }
+    const mutableState: RuntimeState = state;
+    activeAccessToken = null;
+    credentialVault.accessToken = null;
+    mutableState.identity = emptyIdentity();
+    mutableState.events = [];
+    await disconnectLuopanDataPlane('password-change');
+    mutableState.oversea = {
+      ...emptyOversea(),
+      autoConnect: mutableState.oversea.autoConnect,
+      mode: mutableState.oversea.mode,
+      lastProxyDecision: 'DIRECT',
+      message: cleanupError
+        ? `密码已更新并退出登录；部分本地清理失败，请退出罗盘后重试：${cleanupError}`
+        : '密码已更新；旧 token 已撤销，请使用新密码重新登录 User Center。'
+    };
+    if (cleanupError) pushEvent(`password change cleanup failed ${cleanupError}`);
+    pushEvent('user password changed; local session cleared');
+    await saveRuntime();
+    broadcastRuntime();
+    return visibleRuntime();
+  }));
   ipcMain.handle('luopan:logout', () => runSessionExclusive(async () => {
     const state = requireRuntime();
     let cleanupError: string | null = null;
@@ -2277,7 +2337,7 @@ async function releaseLuopanServerLeases(
 }
 
 async function disconnectLuopanDataPlane(
-  reason: 'manual' | 'logout' | 'config-change' | 'reset' | 'shutdown',
+  reason: 'manual' | 'logout' | 'password-change' | 'config-change' | 'reset' | 'shutdown',
   options: LuopanDisconnectOptions = {}
 ): Promise<boolean> {
   const state = requireRuntime();
@@ -2907,6 +2967,32 @@ async function requestLuopanUserToken(account: string, password: string): Promis
     accessToken,
     expiresAt: stringValue(token.expires_at)
   };
+}
+
+async function requestLuopanOwnPasswordChange(
+  accessToken: string,
+  currentPassword: string,
+  newPassword: string
+): Promise<void> {
+  const response = await fetch(`${effectiveApiBaseUrl()}/internal/v1/sdk/users/me/password`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(20_000),
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`
+    },
+    body: JSON.stringify({
+      currentPassword,
+      newPassword,
+      requestId: `luopan-password-change-${Date.now()}`
+    })
+  });
+  const text = await response.text();
+  if (response.ok) return;
+  const payload = text ? safeJson(text) : null;
+  const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+  const message = stringValue(record.message) || text || response.statusText;
+  throw new Error(`User Center password change failed: ${response.status} ${message}`);
 }
 
 function legacyHdoMigrationBaseUrl(): string | null {

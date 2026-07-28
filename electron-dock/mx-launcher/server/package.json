@@ -16,7 +16,7 @@
     "smoke:user-oversea-auth": "pnpm run build && node dist/scripts/user-oversea-auth-smoke.js",
     "smoke:user-lifecycle": "pnpm run build && node dist/scripts/user-lifecycle-smoke.js",
     "smoke:feishu-network": "pnpm run build && node dist/scripts/feishu-network-smoke.js",
-    "test:sdk-auth": "node --test --import tsx src/modules/sdk-gateway/feishu-auth.service.test.ts src/modules/sdk-gateway/sdk-gateway-rate-limit.test.ts",
+    "test:sdk-auth": "node --test --import tsx src/modules/sdk-gateway/feishu-auth.service.test.ts src/modules/sdk-gateway/sdk-gateway-rate-limit.test.ts src/modules/sdk-gateway/sdk-gateway-password.test.ts",
     "smoke:http": "node scripts/http-smoke.mjs",
     "smoke:release-center": "node scripts/release-center-smoke.mjs",
     "smoke:internal-dns-exposure": "node scripts/internal-dns-exposure-smoke.mjs",

@@ -418,6 +418,54 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         response: { user: userExample }
       })
     },
+    '/internal/v1/sdk/users/me/password': {
+      post: operation({
+        tag: 'User Center',
+        summary: '当前登录用户修改自己的密码',
+        description: '登录用户自助改密接口。服务端从 active mx-sdk Bearer 解析 userId，校验 currentPassword 后更新本地密码并撤销该用户全部 active token；不能指定或修改其他用户。',
+        operationId: 'updateOwnSdkUserPassword',
+        routeId: 'sdk.users.password.self',
+        scopes: ['auth.read'],
+        auth: 'bearer',
+        request: {
+          currentPassword: '<current-password>',
+          newPassword: '<new-password>',
+          requestId: 'user-password-change-001'
+        },
+        required: ['currentPassword', 'newPassword'],
+        response: {
+          password: {
+            user: userExample,
+            tokensRevoked: 1,
+            updatedAt: '2026-07-20T00:00:00.000Z'
+          }
+        }
+      })
+    },
+    '/internal/v1/sdk/users/{userId}/password': {
+      post: operation({
+        tag: 'User Center',
+        summary: '通过 SDK Gateway 更新用户密码',
+        description: '供可信外部系统调用的稳定改密接口。调用方必须持有 active mx-sdk Bearer，并具备 sdk.user.write 或 rbac.manage；User Center 会重新生成 local-password credential，并撤销目标用户全部 active token。调用方身份从 token principal 写入审计，不接受 request body 冒充 requestedBy。',
+        operationId: 'updateSdkUserPassword',
+        routeId: 'sdk.users.password.update',
+        scopes: ['sdk.user.write', 'rbac.manage'],
+        auth: 'bearer',
+        pathParams: ['userId'],
+        request: {
+          password: '<new-password>',
+          requestId: 'partner-password-update-001'
+        },
+        required: ['password'],
+        response: {
+          password: {
+            user: userExample,
+            tokensRevoked: 2,
+            updatedAt: '2026-07-20T00:00:00.000Z'
+          }
+        }
+      })
+    },
     '/internal/v1/sdk/service-accounts': {
       get: operation({
         tag: 'User Center',

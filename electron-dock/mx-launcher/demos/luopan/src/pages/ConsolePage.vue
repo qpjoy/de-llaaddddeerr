@@ -244,6 +244,42 @@
                 <p v-if="runtime.identity.scopes.length" class="runtime-message">
                   scopes: {{ runtime.identity.scopes.join(' ') }}
                 </p>
+                <q-separator dark spaced />
+                <q-input
+                  v-model="passwordDraft.currentPassword"
+                  dark
+                  outlined
+                  dense
+                  type="password"
+                  autocomplete="current-password"
+                  label="当前密码"
+                />
+                <q-input
+                  v-model="passwordDraft.newPassword"
+                  dark
+                  outlined
+                  dense
+                  type="password"
+                  autocomplete="new-password"
+                  label="新密码"
+                />
+                <q-input
+                  v-model="passwordDraft.confirmPassword"
+                  dark
+                  outlined
+                  dense
+                  type="password"
+                  autocomplete="new-password"
+                  label="确认新密码"
+                  @keyup.enter="changePassword"
+                />
+                <q-btn
+                  color="primary"
+                  icon="password"
+                  :loading="passwordChanging"
+                  label="修改密码"
+                  @click="changePassword"
+                />
                 <q-btn outline color="grey-4" icon="logout" label="登出" @click="logout" />
               </template>
               <template v-else>
@@ -494,6 +530,8 @@ async function resetSession() {
 
 const loginDraft = reactive({ account: '', password: '' });
 const loggingIn = ref(false);
+const passwordDraft = reactive({ currentPassword: '', newPassword: '', confirmPassword: '' });
+const passwordChanging = ref(false);
 const updateBusy = ref(false);
 
 async function login() {
@@ -525,6 +563,35 @@ async function login() {
 async function logout() {
   const next = await window.luopanLauncher?.logout();
   if (next) applyRuntime(next);
+}
+
+async function changePassword() {
+  if (!passwordDraft.currentPassword || !passwordDraft.newPassword) {
+    $q.notify({ type: 'warning', message: '请输入当前密码和新密码。' });
+    return;
+  }
+  if (passwordDraft.newPassword !== passwordDraft.confirmPassword) {
+    $q.notify({ type: 'warning', message: '两次输入的新密码不一致。' });
+    return;
+  }
+  passwordChanging.value = true;
+  try {
+    const next = await window.luopanLauncher?.changePassword({
+      currentPassword: passwordDraft.currentPassword,
+      newPassword: passwordDraft.newPassword
+    });
+    if (next) applyRuntime(next);
+    if (next && next.identity.kind !== 'user') {
+      passwordDraft.currentPassword = '';
+      passwordDraft.newPassword = '';
+      passwordDraft.confirmPassword = '';
+      $q.notify({ type: 'positive', message: '密码已更新，旧 token 已撤销；请使用新密码重新登录。' });
+    } else {
+      $q.notify({ type: 'negative', message: next?.events[0] || '修改密码失败' });
+    }
+  } finally {
+    passwordChanging.value = false;
+  }
 }
 
 async function checkUpdates() {

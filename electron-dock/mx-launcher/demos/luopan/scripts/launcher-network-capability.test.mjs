@@ -96,6 +96,14 @@ assert.match(
   /activeAccessToken = auth\.accessToken;[\s\S]*credentialVault\.accessToken = auth\.accessToken;/,
   'password login must feed both the active user connect path and encrypted persistence'
 );
+const changePasswordSource = functionSource(mainSource, 'requestLuopanOwnPasswordChange');
+assert.match(changePasswordSource, /effectiveApiBaseUrl\(\).*\/internal\/v1\/sdk\/users\/me\/password/);
+assert.match(changePasswordSource, /Authorization: `Bearer \$\{accessToken\}`/);
+assert.match(
+  mainSource,
+  /ipcMain\.handle\('luopan:change-password'[\s\S]*requestLuopanOwnPasswordChange\(activeAccessToken, currentPassword, newPassword\)[\s\S]*credentialVault\.accessToken = null/,
+  'self-service password change must use the in-tunnel bearer path and clear the revoked local token'
+);
 
 const releaseSource = functionSource(mainSource, 'releaseLuopanServerLeases');
 assert.match(releaseSource, /\/release`/);

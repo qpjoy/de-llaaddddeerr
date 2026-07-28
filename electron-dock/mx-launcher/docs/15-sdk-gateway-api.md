@@ -206,6 +206,40 @@ curl -sS "$BASE/internal/v1/sdk/users" \
   }'
 ```
 
+可信外部系统更新单个用户密码时使用 SDK Gateway，不直接调用 User Center 运维路由。
+调用 token 必须具备 `sdk.user.write` 或 `rbac.manage`。改密成功会撤销目标用户全部 active
+token，用户需要用新密码重新登录：
+
+```bash
+curl -sS "$BASE/internal/v1/sdk/users/usr_partner_alice/password" \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "password": "new-password",
+    "requestId": "partner-password-update-001"
+  }'
+```
+
+服务端从 Bearer principal 记录实际调用方，忽略 body 中伪造的 `requestedBy`。普通
+`mx-user` token 没有用户写权限，不能借该接口修改自己或其他用户。
+
+登录用户从自身 User Center 修改密码时使用 `me` 路由。服务端从 Bearer 解析当前
+`userId`，校验旧密码，不接受 body 指定目标用户；成功后同样撤销该用户全部 active token：
+
+```bash
+curl -sS "$BASE/internal/v1/sdk/users/me/password" \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $USER_TOKEN" \
+  -d '{
+    "currentPassword": "old-password",
+    "newPassword": "new-password",
+    "requestId": "user-password-change-001"
+  }'
+```
+
+Luopan 的 User Center 使用这条自助路由作为 Launcher 集成测试面；改密成功后会清除本地
+登录态与 Oversea 用户会话，并要求使用新密码重新登录。
+
 Internal User Center 还提供批量导入接口，供平台运维把旧 HDO 或外部账号一次性导入：
 
 ```bash
@@ -236,7 +270,8 @@ curl -sS "$BASE/internal/v1/user-center/users/import" \
 撤销既有 token。
 
 用户资料保存、密码更新和删除是三个独立操作。更新密码会撤销该用户已有 token，但不会改变
-profile、角色或应用权限：
+profile、角色或应用权限。k8s Admin 的 User Center 用户抽屉使用这条运维接口；它要求
+当前 Internal origin 绑定的 session-only ops token：
 
 ```bash
 curl -sS "$BASE/internal/v1/user-center/users/usr_partner_alice/password" \
@@ -334,6 +369,8 @@ curl -sS "$BASE/internal/v1/sdk/permissions/requests" \
 | --- | --- | --- |
 | `sdk.oauth.token` | `/internal/v1/sdk/oauth/token` | password 可经可信 HTTPS bootstrap；client_credentials 仅限 Internal |
 | `sdk.identity.introspect` | `/internal/v1/sdk/identity/introspect` | `sdk.identity.read` or `auth.read` |
+| `sdk.users.password.self` | `/internal/v1/sdk/users/me/password` | active user Bearer + current password |
+| `sdk.users.password.update` | `/internal/v1/sdk/users/{userId}/password` | `sdk.user.write` or `rbac.manage` |
 | `sdk.identity.context` | `/internal/v1/sdk/identity/context` | `sdk.identity.read` or `auth.read` |
 | `sdk.gateway.access.evaluate` | `/internal/v1/sdk/gateway/access/evaluate` | `sdk.identity.read` |
 | `sdk.roles.list` | `/internal/v1/sdk/roles` | `sdk.user.read` or `rbac.manage` |

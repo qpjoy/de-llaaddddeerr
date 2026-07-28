@@ -47,6 +47,11 @@ through the in-tunnel VIP; the public bootstrap endpoint never receives an
 account, password, or bearer token. If a user-range lease is required, use
 **Disconnect → Connect Internal** once after login.
 
+After login, the User Center panel can change the current user's password. It
+verifies the current password through the same in-tunnel VIP, revokes every
+active token for that user, clears the local identity/Oversea session, and
+requires a new login.
+
 During the V1-to-V2 transition, an operator may explicitly set
 `LUOPAN_LEGACY_HDO_BASE_URL`. If V2 reports that an account is not active,
 Luopan validates the credentials once against that legacy HDO API, imports the

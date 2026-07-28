@@ -192,6 +192,10 @@ const state = {
     feedback: null,
     busy: false
   },
+  sdkGateway: {
+    manifest: null,
+    error: null
+  },
   releaseCenter: {
     filter: {
       search: '',
@@ -1031,7 +1035,8 @@ async function refreshAdmin() {
       secretCenterPayload,
       dnsPolicyPayload,
       dnsRoutesPayload,
-      gatewayRuntimePayload
+      gatewayRuntimePayload,
+      sdkGatewayPayload
     ] = await Promise.all([
       fetchJson('/internal/v1/admin/dashboard'),
       loadSshProfiles(),
@@ -1045,7 +1050,8 @@ async function refreshAdmin() {
       loadSecretCenter(),
       loadDnsPolicyCenter(),
       loadDnsReverseProxyRoutes(),
-      loadGatewayRuntimeConfig()
+      loadGatewayRuntimeConfig(),
+      loadSdkGatewayManifest()
     ]);
     state.dashboard = dashboard;
     state.sshProfiles = asArray(profilePayload.profiles);
@@ -1076,6 +1082,8 @@ async function refreshAdmin() {
     state.dnsCenter.routesError = dnsRoutesPayload.error || null;
     applyGatewayRuntimeConfig(gatewayRuntimePayload.config);
     state.dnsCenter.gatewayRuntimeError = gatewayRuntimePayload.error || null;
+    state.sdkGateway.manifest = sdkGatewayPayload.gateway || null;
+    state.sdkGateway.error = sdkGatewayPayload.error || null;
     renderAppCenterShell();
     state.awxRuntimePolicies = asArray(dashboard.runtimeFeaturePolicies);
     state.overseaOverview = overseaPayload.overview;
@@ -1371,6 +1379,15 @@ async function loadUserCenterOverview() {
     };
   } catch (error) {
     return { users: [], roles: [], overseaEntitlements: [], error: error.message };
+  }
+}
+
+async function loadSdkGatewayManifest() {
+  try {
+    const payload = await fetchJson('/internal/v1/sdk/gateway/manifest');
+    return { gateway: payload.gateway || null, error: null };
+  } catch (error) {
+    return { gateway: null, error: error.message };
   }
 }
 
@@ -10809,6 +10826,7 @@ function internalModuleBlueprint(moduleId, overview) {
 }
 
 function renderInternalModulePanel(moduleId, overview) {
+  if (moduleId === 'sdk-gateway') return renderSdkGatewayPanel(overview);
   const meta = internalSubsectionMeta[moduleId] || internalSubsectionMeta.overview;
   const blueprint = internalModuleBlueprint(moduleId, overview);
   return `
@@ -10845,6 +10863,68 @@ function renderInternalModulePanel(moduleId, overview) {
       ${renderFoundationRows(blueprint.actions.map((row) => [row[0], row[1], moduleId]))}
     </section>
   `;
+}
+
+function renderSdkGatewayPanel(overview) {
+  const manifest = state.sdkGateway.manifest;
+  const routes = asArray(manifest?.routes);
+  const selfPasswordRoute = routes.find((route) => route.routeId === 'sdk.users.password.self');
+  const passwordRoute = routes.find((route) => route.routeId === 'sdk.users.password.update');
+  const docs = manifest?.sdk || {};
+  const error = state.sdkGateway.error;
+  return `
+    <section class="foundation-panel foundation-wide">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>External API surface</h4>
+          <p>第三方系统从 route manifest 发现稳定 SDK 契约；User Center 内部表和运维路由不作为外部集成面。</p>
+        </div>
+        <span>${escapeHtml(String(routes.length || overview.sdkGatewayRoutes || 0))} routes</span>
+      </div>
+      <div class="sdk-gateway-actions">
+        <a class="primary-button sdk-gateway-link" href="${escapeHtml(sdkGatewayDocumentUrl(docs.documentationUrl || '/docs/api/'))}" target="_blank" rel="noreferrer">Open API Docs</a>
+        <a class="secondary-button sdk-gateway-link" href="${escapeHtml(sdkGatewayDocumentUrl(docs.openApiUrl || '/docs/api/openapi.json'))}" target="_blank" rel="noreferrer">OpenAPI JSON</a>
+        <a class="secondary-button sdk-gateway-link" href="${escapeHtml(sdkGatewayDocumentUrl(docs.markdownUrl || '/docs/api/mx-launcher-api.md'))}" target="_blank" rel="noreferrer">Markdown</a>
+      </div>
+      ${error ? `<div class="feedback error">${escapeHtml(error)}</div>` : ''}
+      ${selfPasswordRoute && passwordRoute ? `
+        <div class="feedback success">
+          Password APIs ready: self-service ${escapeHtml(selfPasswordRoute.path)} · trusted reset ${escapeHtml(passwordRoute.path)} · Bearer scope sdk.user.write / rbac.manage.
+        </div>
+      ` : '<div class="feedback warning">One or more password routes are not present in the current gateway manifest.</div>'}
+    </section>
+    <section class="foundation-panel foundation-wide">
+      <div class="foundation-panel-head">
+        <div>
+          <h4>Route manifest</h4>
+          <p>${escapeHtml(manifest ? `${manifest.gatewayId} / ${manifest.environment} / ${manifest.siteId}` : 'Gateway manifest is not loaded.')}</p>
+        </div>
+        <span>${escapeHtml(manifest?.sdk?.audience || 'mx-sdk')}</span>
+      </div>
+      <div class="foundation-table module-contract-table">
+        <article class="foundation-table-row is-header">
+          <strong>routeId</strong>
+          <span>Path / capability</span>
+          <small>Auth / owner</small>
+        </article>
+        ${routes.map((route) => `
+          <article class="foundation-table-row">
+            <strong>${escapeHtml(route.routeId || '-')}</strong>
+            <span><code>${escapeHtml(route.path || '-')}</code><br><small>${escapeHtml(route.description || '')}</small></span>
+            <small>${escapeHtml(route.authRequired === false ? 'public discovery' : `Bearer ${route.audience || 'mx-sdk'}`)} / ${escapeHtml(route.upstreamModule || '-')}</small>
+          </article>
+        `).join('') || '<div class="empty-state">No SDK Gateway routes loaded.</div>'}
+      </div>
+    </section>
+  `;
+}
+
+function sdkGatewayDocumentUrl(path) {
+  try {
+    return new URL(String(path || '/docs/api/'), `${normalizedServerBase()}/`).href;
+  } catch {
+    return '#';
+  }
 }
 
 function activeDnsPolicy() {

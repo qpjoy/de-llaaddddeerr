@@ -715,7 +715,14 @@ function gatewayRouteRequiredScopes(routeId: string): string[] {
   if (routeId === 'sdk.roles.list' || routeId === 'sdk.users.list' || routeId === 'sdk.service_accounts.list') {
     return ['sdk.user.read', 'rbac.manage'];
   }
-  if (routeId === 'sdk.users.create' || routeId === 'sdk.service_accounts.create') return ['sdk.user.write', 'rbac.manage'];
+  if (routeId === 'sdk.users.password.self') return ['auth.read'];
+  if (
+    routeId === 'sdk.users.create'
+    || routeId === 'sdk.users.password.update'
+    || routeId === 'sdk.service_accounts.create'
+  ) {
+    return ['sdk.user.write', 'rbac.manage'];
+  }
   if (routeId === 'sdk.permissions.request') return ['sdk.permission.request', 'permission.request'];
   if (routeId.startsWith('sdk.dns.')) return ['sdk.dns.evaluate', 'network.dns.policy'];
   if (routeId === 'sdk.audit.write') return ['sdk.audit.write'];
@@ -3196,6 +3203,22 @@ export function createSdkGatewayManifest(config: RuntimeConfig): SdkGatewayManif
       description: 'Creates or upserts a User Center user through the SDK Gateway.'
     },
     {
+      routeId: 'sdk.users.password.self',
+      path: '/internal/v1/sdk/users/me/password',
+      upstreamModule: 'user-center',
+      audience: 'mx-sdk',
+      authRequired: true,
+      description: 'Verifies the current local password, updates it, and revokes the signed-in user’s active tokens.'
+    },
+    {
+      routeId: 'sdk.users.password.update',
+      path: '/internal/v1/sdk/users/{userId}/password',
+      upstreamModule: 'user-center',
+      audience: 'mx-sdk',
+      authRequired: true,
+      description: 'Updates a User Center local password and revokes the user’s active tokens.'
+    },
+    {
       routeId: 'sdk.service_accounts.list',
       path: '/internal/v1/sdk/service-accounts',
       upstreamModule: 'user-center',
@@ -3295,6 +3318,8 @@ export function createSdkGatewayManifest(config: RuntimeConfig): SdkGatewayManif
       principalContextUrl: '/internal/v1/sdk/identity/context',
       rolesUrl: '/internal/v1/sdk/roles',
       usersUrl: '/internal/v1/sdk/users',
+      selfPasswordUrl: '/internal/v1/sdk/users/me/password',
+      userPasswordUrl: '/internal/v1/sdk/users/{userId}/password',
       serviceAccountsUrl: '/internal/v1/sdk/service-accounts',
       permissionsRequestUrl: '/internal/v1/sdk/permissions/requests',
       configSnapshotUrl: '/internal/v1/sdk/config/snapshot',

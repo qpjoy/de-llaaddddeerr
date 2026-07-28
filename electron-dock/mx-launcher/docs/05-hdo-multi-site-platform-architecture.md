@@ -225,6 +225,7 @@ flowchart LR
 | `GET /internal/v1/user-center/users` | Internal modules / ops | 查看用户 |
 | `POST /internal/v1/user-center/users` | Internal modules / ops | 创建或更新用户、profile、local password 和默认 Oversea entitlement |
 | `POST /internal/v1/user-center/users/import` | Internal modules / ops | 批量导入旧账号或外部系统账号，可带默认角色、组织和 Oversea provisioning |
+| `POST /internal/v1/user-center/users/:userId/password` | Internal Admin / ops | User Center 管理员重置本地密码并撤销该用户 active token |
 | `GET /internal/v1/user-center/oversea-entitlements` | Internal modules / ops | 查看用户到 Oversea site 的 entitlement 和 runtime sync 状态 |
 | `POST /internal/v1/user-center/users/:userId/oversea` | Internal modules / ops | 手动分配或关闭用户级 Oversea access |
 | `POST /internal/v1/user-center/users/:userId/oversea/sync-runtime` | Internal modules / ops | 把用户级 hysteria2/mihomo access 同步到选定 Oversea runtime |
@@ -238,6 +239,8 @@ flowchart LR
 | `GET /internal/v1/sdk/gateway/manifest` | SDK / 外部系统 | 读取统一网关能力、路由和 audience |
 | `POST /internal/v1/sdk/identity/introspect` | SDK / 外部系统 | 通过网关使用同一套 token introspection |
 | `POST /internal/v1/sdk/identity/context` | SDK / 外部系统 | 通过网关解析调用主体、绑定关系和可用路由 |
+| `POST /internal/v1/sdk/users/me/password` | Launcher / 登录用户 | 校验当前密码，只修改 Bearer 对应用户并撤销其 active token |
+| `POST /internal/v1/sdk/users/:userId/password` | SDK / 可信外部系统 | 使用 `sdk.user.write` 或 `rbac.manage` Bearer 更新密码并撤销目标用户 active token |
 | `POST /internal/v1/sdk/gateway/access/evaluate` | SDK / 外部系统 | 判断 token principal 是否允许调用某条 SDK Gateway route |
 
 V1 shadow 仍保留 `mx-shadow-*` token 前缀兼容，但真实路径优先查 User Center token

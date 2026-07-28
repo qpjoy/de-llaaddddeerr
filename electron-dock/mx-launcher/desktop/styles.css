@@ -3991,6 +3991,19 @@ select {
   white-space: nowrap;
 }
 
+.sdk-gateway-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sdk-gateway-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
 .foundation-module-groups {
   display: grid;
   gap: 12px;

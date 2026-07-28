@@ -137,6 +137,7 @@ export interface LuopanLauncherApi {
   getRuntime(): Promise<LuopanRuntimeState>;
   saveConfig(input: Partial<LuopanRuntimeConfig>): Promise<LuopanRuntimeState>;
   login(input: { account: string; password: string }): Promise<LuopanRuntimeState>;
+  changePassword(input: { currentPassword: string; newPassword: string }): Promise<LuopanRuntimeState>;
   logout(): Promise<LuopanRuntimeState>;
   connectTestMode(): Promise<LuopanRuntimeState>;
   connectInternal(): Promise<LuopanRuntimeState>;

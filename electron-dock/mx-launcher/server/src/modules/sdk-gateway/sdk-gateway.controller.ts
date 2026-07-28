@@ -2,12 +2,15 @@ import {
   BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Headers,
   HttpException,
   HttpStatus,
   Inject,
   Ip,
+  NotFoundException,
+  Param,
   Post,
   UnauthorizedException
 } from '@nestjs/common';
@@ -132,6 +135,83 @@ export class SdkGatewayController {
     return { user: await this.store.createUserCenterUser(toCreateUserInput(asRecord(rawBody))) };
   }
 
+  @Post('internal/v1/sdk/users/me/password')
+  async updateOwnPassword(
+    @Headers('authorization') authorization: string | undefined,
+    @Ip() sourceIp: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    const body = asRecord(rawBody);
+    const currentPassword = nullableString(body.currentPassword);
+    const newPassword = nullableString(body.newPassword);
+    if (!currentPassword || !newPassword) {
+      throw new BadRequestException('currentPassword and newPassword are required');
+    }
+    const auth = await this.assertActiveSdkBearer(
+      authorization,
+      nullableString(body.requestId)
+    );
+    const principal = auth.principal;
+    if (auth.tokenKind !== 'jwt' || principal.kind !== 'user' || !principal.userId) {
+      throw new ForbiddenException('Only an authenticated user can change their own password');
+    }
+    await this.assertOAuthAttemptRateLimit({
+      grantType: 'password-change',
+      sourceIp,
+      subject: principal.userId,
+      sourceLimit: PASSWORD_SOURCE_ATTEMPT_LIMIT,
+      subjectLimit: PASSWORD_SUBJECT_ATTEMPT_LIMIT,
+      sourceSubjectLimit: PASSWORD_SOURCE_SUBJECT_ATTEMPT_LIMIT
+    });
+    const verification = await this.store.verifyUserCenterPassword({
+      userId: principal.userId,
+      password: currentPassword,
+      requestId: nullableString(body.requestId)
+    });
+    if (!verification.ok) throw new UnauthorizedException('current password is invalid');
+    try {
+      return {
+        password: await this.store.updateUserCenterPassword({
+          userId: principal.userId,
+          password: newPassword,
+          requestedBy: principal.principalId,
+          requestId: nullableString(body.requestId)
+        })
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.startsWith('User not found:')) throw new NotFoundException(message);
+      throw new BadRequestException(message);
+    }
+  }
+
+  @Post('internal/v1/sdk/users/:userId/password')
+  async updateUserPassword(
+    @Param('userId') userId: string,
+    @Headers('authorization') authorization: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    const body = asRecord(rawBody);
+    const principal = await this.assertSdkUserWriteAuthorization(
+      authorization,
+      nullableString(body.requestId)
+    );
+    try {
+      return {
+        password: await this.store.updateUserCenterPassword({
+          userId,
+          password: nullableString(body.password),
+          requestedBy: principal.principalId,
+          requestId: nullableString(body.requestId)
+        })
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.startsWith('User not found:')) throw new NotFoundException(message);
+      throw new BadRequestException(message);
+    }
+  }
+
   @Get('internal/v1/sdk/service-accounts')
   async serviceAccounts(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
     assertInternalOpsToken(opsToken);
@@ -240,8 +320,33 @@ export class SdkGatewayController {
     return { token: oauthTokenResponse(issued, introspection) };
   }
 
+  private async assertSdkUserWriteAuthorization(authorization?: string, requestId?: string | null) {
+    const auth = await this.assertActiveSdkBearer(authorization, requestId);
+    if (!auth.scopes.some((scope) => scope === 'sdk.user.write' || scope === 'rbac.manage')) {
+      throw new ForbiddenException('missing scope: sdk.user.write or rbac.manage');
+    }
+    return auth.principal;
+  }
+
+  private async assertActiveSdkBearer(authorization?: string, requestId?: string | null) {
+    const token = bearerToken(authorization);
+    if (!token) throw new UnauthorizedException('Bearer access token is required');
+    if (token.startsWith('mx-shadow-')) {
+      throw new UnauthorizedException('Shadow tokens cannot update User Center passwords');
+    }
+    const auth = await this.store.introspectToken({
+      token,
+      audience: 'mx-sdk',
+      requestId: requestId ?? undefined
+    });
+    if (!auth.active || !auth.principal || (auth.tokenKind !== 'jwt' && auth.tokenKind !== 'service-token')) {
+      throw new UnauthorizedException('Bearer access token is not active');
+    }
+    return { ...auth, principal: auth.principal };
+  }
+
   private async assertOAuthAttemptRateLimit(input: {
-    grantType: 'password' | 'client-credentials';
+    grantType: 'password' | 'client-credentials' | 'password-change';
     sourceIp?: string;
     subject: string;
     sourceLimit: number;
@@ -334,6 +439,12 @@ function numberValue(value: unknown): number | null {
 
 function exactString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
+}
+
+function bearerToken(authorization?: string): string | null {
+  if (!authorization) return null;
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : null;
 }
 
 function oauthTokenResponse(

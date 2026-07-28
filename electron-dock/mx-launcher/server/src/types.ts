@@ -1089,6 +1089,8 @@ export interface SdkGatewayManifest {
     principalContextUrl: string;
     rolesUrl: string;
     usersUrl: string;
+    selfPasswordUrl: string;
+    userPasswordUrl: string;
     serviceAccountsUrl: string;
     permissionsRequestUrl: string;
     configSnapshotUrl: string;

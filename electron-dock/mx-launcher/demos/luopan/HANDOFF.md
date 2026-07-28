@@ -84,7 +84,8 @@ Reconcile、`mx-internal-svc` 语义、enroll 报错对照）见 docs/20 §4.5�
 用户中心：先匿名 **Connect Internal**，侧栏面板才允许 `luopan:login` 通过隧道内
 VIP 走 SDK gateway OAuth password grant（docs/15）。登录后下一次 Connect 才把 lease 切到登录段
 （`10.91.0.1-.99.254`）；检查更新立即携带 userId。access token 只留内存，登出或
-重启即失效。
+重启即失效。登录后的“修改密码”同样只走隧道内 VIP；成功后服务端撤销该用户所有
+active token，Luopan 清理本地身份与 Oversea 会话并要求重新登录。
 
 V1 迁移期可显式配置 `LUOPAN_LEGACY_HDO_BASE_URL`。仅当 V2 返回账号未激活/不存在的
 401 时，Luopan 才向 V1 HDO 验证同一组凭据；成功后经隧道内 VIP 导入 V2，角色固定为

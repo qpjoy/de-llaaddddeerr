@@ -4,6 +4,7 @@ const api = {
   getRuntime: () => ipcRenderer.invoke('luopan:get-runtime'),
   saveConfig: (input: unknown) => ipcRenderer.invoke('luopan:save-config', input),
   login: (input: { account: string; password: string }) => ipcRenderer.invoke('luopan:login', input),
+  changePassword: (input: { currentPassword: string; newPassword: string }) => ipcRenderer.invoke('luopan:change-password', input),
   logout: () => ipcRenderer.invoke('luopan:logout'),
   connectTestMode: () => ipcRenderer.invoke('luopan:connect-test-mode'),
   connectInternal: () => ipcRenderer.invoke('luopan:connect-internal'),
