@@ -148,6 +148,140 @@ assert.equal(migratedLegacyNarrowEmployeeProduct.userLeaseEnd, '10.89.49.254');
 assert.equal(migratedLegacyNarrowEmployeeProduct.feishuCidr, '10.89.0.0/16');
 assert.equal(migratedLegacyNarrowEmployeeProduct.feishuLeaseStart, '10.89.50.1');
 assert.equal(migratedLegacyNarrowEmployeeProduct.feishuLeaseEnd, '10.89.99.254');
+const partiallyMigratedLegacyProduct = {
+  ...product,
+  userLeaseEnd: '10.89.99.254'
+} as Partial<typeof product>;
+delete partiallyMigratedLegacyProduct.feishuCidr;
+const migratedPartiallyMigratedLegacyProduct = buildLauncherProductNetwork(
+  config,
+  {
+    productId: product.productId,
+    requestedBy: 'partially-migrated-feishu-pool-smoke'
+  },
+  partiallyMigratedLegacyProduct as typeof product
+);
+assert.equal(migratedPartiallyMigratedLegacyProduct.userCidr, '10.89.0.0/16');
+assert.equal(migratedPartiallyMigratedLegacyProduct.userLeaseStart, '10.89.0.1');
+assert.equal(migratedPartiallyMigratedLegacyProduct.userLeaseEnd, '10.89.49.254');
+assert.equal(migratedPartiallyMigratedLegacyProduct.feishuCidr, '10.89.0.0/16');
+assert.equal(migratedPartiallyMigratedLegacyProduct.feishuLeaseStart, '10.89.50.1');
+assert.equal(migratedPartiallyMigratedLegacyProduct.feishuLeaseEnd, '10.89.99.254');
+assert.equal(migratedPartiallyMigratedLegacyProduct.anonymousLeaseStart, '10.89.100.1');
+assert.equal(migratedPartiallyMigratedLegacyProduct.anonymousLeaseEnd, '10.89.254.254');
+const h2oProduct = store.getLauncherProductNetwork('h2o');
+assert.ok(h2oProduct);
+const legacyH2oProduct = {
+  ...h2oProduct,
+  userLeaseEnd: '10.90.99.254'
+} as Partial<typeof h2oProduct>;
+delete legacyH2oProduct.feishuCidr;
+delete legacyH2oProduct.feishuLeaseStart;
+delete legacyH2oProduct.feishuLeaseEnd;
+const migratedLegacyH2oProduct = buildLauncherProductNetwork(
+  config,
+  {
+    productId: h2oProduct.productId,
+    requestedBy: 'legacy-h2o-feishu-pool-smoke'
+  },
+  legacyH2oProduct as typeof h2oProduct
+);
+assert.equal(migratedLegacyH2oProduct.userCidr, '10.90.0.0/16');
+assert.equal(migratedLegacyH2oProduct.userLeaseEnd, '10.90.49.254');
+assert.equal(migratedLegacyH2oProduct.feishuCidr, '10.90.0.0/16');
+assert.equal(migratedLegacyH2oProduct.feishuLeaseStart, '10.90.50.1');
+assert.equal(migratedLegacyH2oProduct.feishuLeaseEnd, '10.90.99.254');
+assert.equal(migratedLegacyH2oProduct.anonymousLeaseStart, '10.90.100.1');
+const appCenterProduct = store.getLauncherProductNetwork('appcenter');
+assert.ok(appCenterProduct);
+const legacyAppCenterProduct = {
+  ...appCenterProduct,
+  userLeaseEnd: '10.92.99.254'
+} as Partial<typeof appCenterProduct>;
+delete legacyAppCenterProduct.feishuCidr;
+delete legacyAppCenterProduct.feishuLeaseStart;
+delete legacyAppCenterProduct.feishuLeaseEnd;
+const migratedLegacyAppCenterProduct = buildLauncherProductNetwork(
+  config,
+  {
+    productId: appCenterProduct.productId,
+    requestedBy: 'legacy-appcenter-feishu-pool-smoke'
+  },
+  legacyAppCenterProduct as typeof appCenterProduct
+);
+assert.equal(migratedLegacyAppCenterProduct.userCidr, '10.92.0.0/16');
+assert.equal(migratedLegacyAppCenterProduct.userLeaseEnd, '10.92.49.254');
+assert.equal(migratedLegacyAppCenterProduct.feishuCidr, '10.92.0.0/16');
+assert.equal(migratedLegacyAppCenterProduct.feishuLeaseStart, '10.92.50.1');
+assert.equal(migratedLegacyAppCenterProduct.feishuLeaseEnd, '10.92.99.254');
+assert.equal(migratedLegacyAppCenterProduct.anonymousLeaseStart, '10.92.100.1');
+const incorrectlyMigratedAppCenterProduct = {
+  ...appCenterProduct,
+  userCidr: '10.91.0.0/16',
+  feishuCidr: '10.91.0.0/16',
+  userLeaseStart: '10.91.0.1',
+  userLeaseEnd: '10.91.49.254',
+  feishuLeaseStart: '10.91.50.1',
+  feishuLeaseEnd: '10.91.99.254',
+  updatedBy: 'builtin-feishu-pool-migration'
+};
+const repairedAppCenterProduct = buildLauncherProductNetwork(
+  config,
+  {
+    productId: appCenterProduct.productId,
+    userCidr: appCenterProduct.userCidr,
+    feishuCidr: appCenterProduct.feishuCidr,
+    anonymousCidr: appCenterProduct.anonymousCidr,
+    userLeaseStart: appCenterProduct.userLeaseStart,
+    userLeaseEnd: appCenterProduct.userLeaseEnd,
+    feishuLeaseStart: appCenterProduct.feishuLeaseStart,
+    feishuLeaseEnd: appCenterProduct.feishuLeaseEnd,
+    anonymousLeaseStart: appCenterProduct.anonymousLeaseStart,
+    anonymousLeaseEnd: appCenterProduct.anonymousLeaseEnd,
+    requestedBy: 'builtin-feishu-pool-migration'
+  },
+  incorrectlyMigratedAppCenterProduct
+);
+assert.equal(repairedAppCenterProduct.userCidr, '10.92.0.0/16');
+assert.equal(repairedAppCenterProduct.feishuCidr, '10.92.0.0/16');
+assert.equal(repairedAppCenterProduct.anonymousCidr, '10.92.0.0/16');
+assert.equal(repairedAppCenterProduct.userLeaseStart, '10.92.0.1');
+assert.equal(repairedAppCenterProduct.userLeaseEnd, '10.92.49.254');
+assert.equal(repairedAppCenterProduct.feishuLeaseStart, '10.92.50.1');
+assert.equal(repairedAppCenterProduct.feishuLeaseEnd, '10.92.99.254');
+assert.equal(repairedAppCenterProduct.anonymousLeaseStart, '10.92.100.1');
+assert.equal(repairedAppCenterProduct.anonymousLeaseEnd, '10.92.254.254');
+const customLegacyProduct = {
+  ...h2oProduct,
+  productId: 'custom-legacy',
+  displayName: 'Custom Legacy',
+  productIndex: 5,
+  userCidr: '10.93.0.0/16',
+  anonymousCidr: '10.93.0.0/16',
+  userLeaseStart: '10.93.0.1',
+  userLeaseEnd: '10.93.99.254',
+  anonymousLeaseStart: '10.93.100.1',
+  anonymousLeaseEnd: '10.93.254.254'
+} as Partial<typeof h2oProduct>;
+delete customLegacyProduct.feishuCidr;
+delete customLegacyProduct.feishuLeaseStart;
+delete customLegacyProduct.feishuLeaseEnd;
+const migratedCustomLegacyProduct = buildLauncherProductNetwork(
+  config,
+  {
+    productId: customLegacyProduct.productId,
+    requestedBy: 'custom-legacy-feishu-pool-smoke'
+  },
+  customLegacyProduct as typeof h2oProduct
+);
+assert.equal(migratedCustomLegacyProduct.userCidr, '10.93.0.0/16');
+assert.equal(migratedCustomLegacyProduct.userLeaseStart, '10.93.0.1');
+assert.equal(migratedCustomLegacyProduct.userLeaseEnd, '10.93.49.254');
+assert.equal(migratedCustomLegacyProduct.feishuCidr, '10.93.0.0/16');
+assert.equal(migratedCustomLegacyProduct.feishuLeaseStart, '10.93.50.1');
+assert.equal(migratedCustomLegacyProduct.feishuLeaseEnd, '10.93.99.254');
+assert.equal(migratedCustomLegacyProduct.anonymousLeaseStart, '10.93.100.1');
+assert.equal(migratedCustomLegacyProduct.anonymousLeaseEnd, '10.93.254.254');
 assert.throws(
   () => buildLauncherProductNetwork(loadConfig(), {
     productId: 'mx-h2i',

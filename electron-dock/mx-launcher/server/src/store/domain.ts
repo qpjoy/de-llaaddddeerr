@@ -1697,6 +1697,86 @@ export function builtinLauncherProductNetworks(config: RuntimeConfig): LauncherP
   ];
 }
 
+function previousLauncherFeishuPoolFallback(
+  previous: LauncherProductNetwork | null
+): {
+  userCidr: string;
+  feishuCidr: string;
+  userLeaseStart: string;
+  userLeaseEnd: string;
+  feishuLeaseStart: string;
+  feishuLeaseEnd: string;
+} | null {
+  if (!previous) return null;
+  if (previous.feishuLeaseStart && previous.feishuLeaseEnd) {
+    const previousRanges = {
+      userLeaseStart: previous.userLeaseStart,
+      userLeaseEnd: previous.userLeaseEnd,
+      feishuLeaseStart: previous.feishuLeaseStart,
+      feishuLeaseEnd: previous.feishuLeaseEnd,
+      anonymousLeaseStart: previous.anonymousLeaseStart,
+      anonymousLeaseEnd: previous.anonymousLeaseEnd
+    };
+    try {
+      assertDisjointLauncherLeaseRanges(previousRanges);
+      return {
+        userCidr: previous.userCidr,
+        feishuCidr: previous.feishuCidr || previous.userCidr,
+        userLeaseStart: previous.userLeaseStart,
+        userLeaseEnd: previous.userLeaseEnd,
+        feishuLeaseStart: previous.feishuLeaseStart,
+        feishuLeaseEnd: previous.feishuLeaseEnd
+      };
+    } catch {
+      // A partially written Feishu pool may still overlap the legacy employee pool.
+    }
+  }
+  const userStart = ipv4ToNumber(previous.userLeaseStart);
+  const userEnd = ipv4ToNumber(previous.userLeaseEnd);
+  const anonymousStart = ipv4ToNumber(previous.anonymousLeaseStart);
+  const userCidrBounds = ipv4CidrBounds(previous.userCidr);
+  if (
+    userStart == null
+    || userEnd == null
+    || anonymousStart == null
+    || !userCidrBounds
+    || userStart < userCidrBounds.start
+    || userEnd > userCidrBounds.end
+    || Math.floor(userStart / 65536) !== Math.floor(userEnd / 65536)
+    || (userStart & 255) !== 1
+    || (userEnd & 255) !== 254
+  ) {
+    return null;
+  }
+  const firstThirdOctet = (userStart >>> 8) & 255;
+  const lastThirdOctet = (userEnd >>> 8) & 255;
+  const blockCount = lastThirdOctet - firstThirdOctet + 1;
+  if (blockCount < 2) return null;
+  const feishuFirstThirdOctet = firstThirdOctet + Math.floor(blockCount / 2);
+  const prefix = Math.floor(userStart / 65536) * 65536;
+  const migratedRanges = {
+    userLeaseStart: previous.userLeaseStart,
+    userLeaseEnd: numberToIpv4(prefix + ((feishuFirstThirdOctet - 1) * 256) + 254),
+    feishuLeaseStart: numberToIpv4(prefix + (feishuFirstThirdOctet * 256) + 1),
+    feishuLeaseEnd: previous.userLeaseEnd,
+    anonymousLeaseStart: previous.anonymousLeaseStart,
+    anonymousLeaseEnd: previous.anonymousLeaseEnd
+  };
+  try {
+    assertDisjointLauncherLeaseRanges(migratedRanges);
+  } catch {
+    return null;
+  }
+  return {
+    userCidr: previous.userCidr,
+    feishuCidr: previous.userCidr,
+    userLeaseStart: migratedRanges.userLeaseStart,
+    userLeaseEnd: migratedRanges.userLeaseEnd,
+    feishuLeaseStart: migratedRanges.feishuLeaseStart,
+    feishuLeaseEnd: migratedRanges.feishuLeaseEnd
+  };
+}
+
 export function buildLauncherProductNetwork(
   config: RuntimeConfig,
   input: LauncherProductNetworkInput,
@@ -1729,23 +1809,46 @@ export function buildLauncherProductNetwork(
   const internalControlIp = validIpv4OrFallback(inputInternalControlIp, previousInternalControlIp || internalControlFallback);
   const domesticGatewayIp = validIpv4OrFallback(inputDomesticGatewayIp, previousDomesticGatewayIp || domesticGatewayFallback);
   const dnsServer = validIpv4OrFallback(inputDnsServer, previousDnsServer || dnsServerFallback);
-  const previousHasFeishuPool = Boolean(previous?.feishuLeaseStart && previous?.feishuLeaseEnd);
+  const previousHasCompleteFeishuPool = Boolean(
+    previous?.feishuCidr
+    && previous?.feishuLeaseStart
+    && previous?.feishuLeaseEnd
+  );
+  const previousFeishuPoolFallback = previousHasCompleteFeishuPool
+    ? null
+    : previousLauncherFeishuPoolFallback(previous);
   const leaseRanges = {
     userLeaseStart: validIpv4OrFallback(
       input.userLeaseStart,
-      (previousHasFeishuPool ? previous?.userLeaseStart : null) || defaults.userLeaseStart
+      (
+        previousHasCompleteFeishuPool
+          ? previous?.userLeaseStart
+          : previousFeishuPoolFallback?.userLeaseStart
+      ) || defaults.userLeaseStart
     ),
     userLeaseEnd: validIpv4OrFallback(
       input.userLeaseEnd,
-      (previousHasFeishuPool ? previous?.userLeaseEnd : null) || defaults.userLeaseEnd
+      (
+        previousHasCompleteFeishuPool
+          ? previous?.userLeaseEnd
+          : previousFeishuPoolFallback?.userLeaseEnd
+      ) || defaults.userLeaseEnd
     ),
     feishuLeaseStart: validIpv4OrFallback(
       input.feishuLeaseStart,
-      previous?.feishuLeaseStart || defaults.feishuLeaseStart
+      (
+        previousHasCompleteFeishuPool
+          ? previous?.feishuLeaseStart
+          : previousFeishuPoolFallback?.feishuLeaseStart
+      ) || defaults.feishuLeaseStart
     ),
     feishuLeaseEnd: validIpv4OrFallback(
       input.feishuLeaseEnd,
-      previous?.feishuLeaseEnd || defaults.feishuLeaseEnd
+      (
+        previousHasCompleteFeishuPool
+          ? previous?.feishuLeaseEnd
+          : previousFeishuPoolFallback?.feishuLeaseEnd
+      ) || defaults.feishuLeaseEnd
     ),
     anonymousLeaseStart: validIpv4OrFallback(
       input.anonymousLeaseStart,
@@ -1759,9 +1862,19 @@ export function buildLauncherProductNetwork(
   assertDisjointLauncherLeaseRanges(leaseRanges);
   const leaseCidrs = {
     userCidr: input.userCidr?.trim()
-      || (previousHasFeishuPool ? previous?.userCidr : null)
+      || (
+        previousHasCompleteFeishuPool
+          ? previous?.userCidr
+          : previousFeishuPoolFallback?.userCidr
+      )
       || defaults.userCidr,
-    feishuCidr: input.feishuCidr?.trim() || previous?.feishuCidr || defaults.feishuCidr,
+    feishuCidr: input.feishuCidr?.trim()
+      || (
+        previousHasCompleteFeishuPool
+          ? previous?.feishuCidr
+          : previousFeishuPoolFallback?.feishuCidr
+      )
+      || defaults.feishuCidr,
     anonymousCidr: input.anonymousCidr?.trim() || previous?.anonymousCidr || defaults.anonymousCidr
   };
   assertLauncherLeaseRangesWithinCidrs(leaseCidrs, leaseRanges);
@@ -3040,7 +3153,11 @@ function defaultLauncherProductNetworkShape(productId: string, mode: LauncherPro
     };
   }
   const index = Math.max(0, Math.min(99, Math.floor(productIndex)));
-  const secondOctet = 90 + index;
+  const secondOctet = productId === APP_CENTER_PRODUCT_ID
+    ? 92
+    : productId === 'h2o'
+      ? 90
+      : 90 + index;
   const serviceOffset = 10 + (index % 200);
   const serviceVip = `10.88.100.${serviceOffset}`;
   return {

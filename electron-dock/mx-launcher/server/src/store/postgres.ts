@@ -4114,15 +4114,39 @@ export class PostgresStore implements PlatformStore {
         );
         continue;
       }
-      if (
+      const hasCompleteFeishuPool = Boolean(
         existing.feishuCidr
         && existing.feishuLeaseStart
         && existing.feishuLeaseEnd
-      ) {
+      );
+      const automatedPoolMigrationNeedsRepair = (
+        existing.updatedBy === 'builtin-feishu-pool-migration'
+        || existing.updatedBy === 'persisted-feishu-pool-migration'
+      ) && (
+        existing.userCidr !== product.userCidr
+        || existing.feishuCidr !== product.feishuCidr
+        || existing.anonymousCidr !== product.anonymousCidr
+        || existing.userLeaseStart !== product.userLeaseStart
+        || existing.userLeaseEnd !== product.userLeaseEnd
+        || existing.feishuLeaseStart !== product.feishuLeaseStart
+        || existing.feishuLeaseEnd !== product.feishuLeaseEnd
+        || existing.anonymousLeaseStart !== product.anonymousLeaseStart
+        || existing.anonymousLeaseEnd !== product.anonymousLeaseEnd
+      );
+      if (hasCompleteFeishuPool && !automatedPoolMigrationNeedsRepair) {
         continue;
       }
       const migrated = buildLauncherProductNetwork(this.config, {
         productId: existing.productId,
+        userCidr: product.userCidr,
+        feishuCidr: product.feishuCidr,
+        anonymousCidr: product.anonymousCidr,
+        userLeaseStart: product.userLeaseStart,
+        userLeaseEnd: product.userLeaseEnd,
+        feishuLeaseStart: product.feishuLeaseStart,
+        feishuLeaseEnd: product.feishuLeaseEnd,
+        anonymousLeaseStart: product.anonymousLeaseStart,
+        anonymousLeaseEnd: product.anonymousLeaseEnd,
         requestedBy: 'builtin-feishu-pool-migration'
       }, existing);
       await this.saveRecord(
@@ -4141,10 +4165,25 @@ export class PostgresStore implements PlatformStore {
       ) {
         continue;
       }
-      const migrated = buildLauncherProductNetwork(this.config, {
-        productId: existing.productId,
-        requestedBy: 'persisted-feishu-pool-migration'
-      }, existing);
+      let migrated: LauncherProductNetwork;
+      try {
+        migrated = buildLauncherProductNetwork(this.config, {
+          productId: existing.productId,
+          requestedBy: 'persisted-feishu-pool-migration'
+        }, existing);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const requiresOperatorPoolMigration = (
+          message === 'Launcher employee, Feishu, and anonymous lease ranges must not overlap'
+          || message === 'Launcher lease profile ranges must use valid ascending IPv4 addresses'
+          || /^Launcher (employee|Feishu|anonymous) lease range must be contained by its IPv4 CIDR$/.test(message)
+        );
+        if (!requiresOperatorPoolMigration) throw error;
+        console.warn(
+          `[mx-launcher] skipped automatic Feishu pool migration for ${existing.productId}: ${message}`
+        );
+        continue;
+      }
       await this.saveRecord(
         'launcher-product-network',
         migrated.productId,
