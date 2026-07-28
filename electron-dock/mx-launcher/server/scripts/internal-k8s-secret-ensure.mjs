@@ -47,6 +47,7 @@ const LAST_APPLIED_ANNOTATION = 'kubectl.kubernetes.io/last-applied-configuratio
 const DEFAULT_PG_USER = 'mx_internal';
 const DEFAULT_PG_DB = 'mx_internal_shadow';
 const MIN_SECRET_LENGTH = 32;
+const MAX_SECRET_LENGTH = 4096;
 const textDecoder = new TextDecoder('utf-8', { fatal: true });
 
 export function parseEnvFile(content) {
@@ -134,6 +135,9 @@ export function canonicalizeSdkServiceAccountSecrets(rawValue) {
     const serviceAccountSecret = rawSecret.trim();
     if (serviceAccountSecret.length < MIN_SECRET_LENGTH) {
       throw new Error(`MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON secret for ${safeIdentifier(serviceAccountId)} must contain at least ${MIN_SECRET_LENGTH} characters`);
+    }
+    if (serviceAccountSecret.length > MAX_SECRET_LENGTH) {
+      throw new Error(`MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON secret for ${safeIdentifier(serviceAccountId)} must contain at most ${MAX_SECRET_LENGTH} characters`);
     }
     if (/[\r\n\0]/.test(serviceAccountSecret)) {
       throw new Error(`MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON secret for ${safeIdentifier(serviceAccountId)} must be a single-line value`);
@@ -369,14 +373,6 @@ function planSdkSecret(namespace, environment, existingSecret) {
 
   if (!configuredKeys.has('MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON')) {
     if (!existingSecret) return null;
-    if (!existingData['secrets.json']) {
-      throw new Error('mx-sdk-service-account-secrets is incomplete; missing secrets.json');
-    }
-    const existingJson = decodeData(
-      existingData['secrets.json'],
-      'mx-sdk-service-account-secrets/secrets.json'
-    );
-    canonicalizeSdkServiceAccountSecrets(existingJson);
     return preserveSecret(
       namespace,
       'mx-sdk-service-account-secrets',

@@ -126,14 +126,16 @@ dedicated `x-mx-ops-token` credential and must remain reachable only inside the
 trusted Internal/ops network; never publish it through Domestic, H, or another
 public ingress.
 
-The SDK `client_credentials` grant validates product service accounts against
-the account-specific map in `MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON`. Kubernetes
-injects that value from
-`mx-internal-shadow/mx-sdk-service-account-secrets/secrets.json`; the standard
-deploy can ensure it from the complete canonical JSON map in `server/.env`.
-Only the built-in `svc_sdk_gateway` retains the legacy
-`MX_INTERNAL_OPS_TOKEN` fallback during migration. An arbitrary placeholder
-such as `managed-by-internal` is never accepted.
+The SDK `client_credentials` grant validates each product service account
+against its own scrypt verifier in PostgreSQL. AppCenter creates a
+product-scoped Release Publisher and returns the random client secret only
+once; later list/upsert calls expose metadata only. The old
+`MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON` and
+`mx-internal-shadow/mx-sdk-service-account-secrets/secrets.json` are accepted
+for one migration window only: startup imports a hash when the database has no
+credential and never overwrites an existing database credential. Normal
+deploys omit the map. Only the built-in `svc_sdk_gateway` retains the legacy
+`MX_INTERNAL_OPS_TOKEN` fallback during migration.
 
 `POST /internal/v1/config-center/snapshots/effective` and
 `POST /internal/v1/sdk/config/snapshot` issue the V1 signed policy snapshot.

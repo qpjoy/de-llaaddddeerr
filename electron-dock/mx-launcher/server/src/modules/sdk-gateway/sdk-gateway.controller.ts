@@ -7,6 +7,7 @@ import {
   Controller,
   ForbiddenException,
   Get,
+  Header,
   Headers,
   HttpException,
   HttpStatus,
@@ -24,7 +25,12 @@ import { assertInternalOpsToken, INTERNAL_OPS_TOKEN_HEADER } from '../../lib/int
 import { userMatchesLogin } from '../../store/domain.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
-import type { CreateServiceAccountInput, CreateUserInput, SdkGatewayAccessInput } from '../../types.js';
+import type {
+  CreateServiceAccountInput,
+  CreateUserInput,
+  SdkGatewayAccessInput,
+  UserCenterIssuedToken
+} from '../../types.js';
 import { toPrincipalInput, toTokenInput } from '../user-center/user-center.controller.js';
 import { FeishuAuthService } from './feishu-auth.service.js';
 
@@ -56,6 +62,7 @@ export class SdkGatewayController {
   }
 
   @Post('internal/v1/sdk/oauth/token')
+  @Header('Cache-Control', 'no-store')
   async token(
     @Body() rawBody: unknown,
     @Ip() sourceIp?: string,
@@ -92,6 +99,7 @@ export class SdkGatewayController {
   }
 
   @Post('internal/v1/sdk/oauth/feishu/token')
+  @Header('Cache-Control', 'no-store')
   async feishuToken(@Body() rawBody: unknown, @Ip() sourceIp?: string) {
     const body = asRecord(rawBody);
     const result = await this.feishuAuth.exchange({
@@ -218,18 +226,61 @@ export class SdkGatewayController {
   @Get('internal/v1/sdk/service-accounts')
   async serviceAccounts(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
     assertInternalOpsToken(opsToken);
-    return { serviceAccounts: await this.store.listUserCenterServiceAccounts() };
+    return {
+      serviceAccounts: await this.store.listUserCenterServiceAccounts(),
+      credentials: await this.store.listUserCenterServiceAccountCredentialStatuses()
+    };
   }
 
   @Post('internal/v1/sdk/service-accounts')
+  @Header('Cache-Control', 'no-store')
   async createServiceAccount(
     @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
     @Body() rawBody: unknown
   ) {
     assertInternalOpsToken(opsToken);
+    const input = toCreateServiceAccountInput(asRecord(rawBody));
+    const serviceAccount = await this.store.createUserCenterServiceAccount(input);
+    const status = await this.store.getUserCenterServiceAccountCredential(serviceAccount.serviceAccountId);
+    let credential = null;
+    if (!status) {
+      try {
+        credential = await this.store.issueUserCenterServiceAccountCredential({
+          serviceAccountId: serviceAccount.serviceAccountId,
+          requestedBy: 'sdk-gateway',
+          requestId: input.requestId
+        });
+      } catch (error) {
+        if (!serviceAccountCredentialAlreadyExists(error)) throw error;
+      }
+    }
     return {
-      serviceAccount: await this.store.createUserCenterServiceAccount(toCreateServiceAccountInput(asRecord(rawBody)))
+      serviceAccount,
+      credential
     };
+  }
+
+  @Post('internal/v1/sdk/service-accounts/:serviceAccountId/credentials/rotate')
+  @Header('Cache-Control', 'no-store')
+  async rotateServiceAccountCredential(
+    @Param('serviceAccountId') serviceAccountId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
+    const body = asRecord(rawBody);
+    try {
+      return {
+        credential: await this.store.issueUserCenterServiceAccountCredential({
+          serviceAccountId,
+          requestedBy: 'sdk-gateway',
+          requestId: nullableString(body.requestId),
+          rotate: true
+        })
+      };
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'Service account credential cannot be rotated');
+    }
   }
 
   @Post('internal/v1/sdk/permissions/requests')
@@ -303,22 +354,47 @@ export class SdkGatewayController {
     });
     const serviceAccounts = await this.store.listUserCenterServiceAccounts();
     const serviceAccount = serviceAccounts.find((item) => item.status === 'active' && item.serviceAccountId === clientId);
-    if (!serviceAccount || !serviceAccountClientSecretMatches(clientId, clientSecret)) {
+    const verification = serviceAccount
+      ? await this.store.verifyUserCenterServiceAccountCredential({
+        serviceAccountId: clientId,
+        clientSecret,
+        requestId: nullableString(body.requestId)
+      })
+      : null;
+    const legacyMatched = verification?.reason === 'credential-not-found'
+      && legacyServiceAccountClientSecretMatches(clientId, clientSecret);
+    if (!serviceAccount || (!verification?.ok && !legacyMatched)) {
       throw new UnauthorizedException('invalid service account credentials');
     }
-    const issued = await this.store.issueUserCenterToken({
-      subjectKind: 'service-account',
-      subjectId: serviceAccount.serviceAccountId,
-      audience: nullableString(body.audience) ?? 'mx-sdk',
-      scopes: oauthScopes(body.scope, body.scopes),
-      ttlSeconds: Math.min(
-        numberValue(body.expires_in)
-          ?? numberValue(body.ttlSeconds)
-          ?? SERVICE_ACCOUNT_ACCESS_TOKEN_TTL_SECONDS,
-        SERVICE_ACCOUNT_ACCESS_TOKEN_TTL_SECONDS
-      ),
-      requestId: nullableString(body.requestId)
-    });
+    let issued: UserCenterIssuedToken;
+    try {
+      issued = await this.store.issueUserCenterToken({
+        subjectKind: 'service-account',
+        subjectId: serviceAccount.serviceAccountId,
+        audience: nullableString(body.audience) ?? 'mx-sdk',
+        scopes: oauthScopes(body.scope, body.scopes),
+        ttlSeconds: Math.min(
+          numberValue(body.expires_in)
+            ?? numberValue(body.ttlSeconds)
+            ?? SERVICE_ACCOUNT_ACCESS_TOKEN_TTL_SECONDS,
+          SERVICE_ACCOUNT_ACCESS_TOKEN_TTL_SECONDS
+        ),
+        requestId: nullableString(body.requestId),
+        serviceAccountClientSecret: verification?.ok ? clientSecret : null,
+        serviceAccountCredentialVersion: verification?.ok
+          ? verification.credentialVersion
+          : legacyMatched ? 0 : null
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      if (
+        message === 'Service account credential changed during authentication'
+        || message.startsWith('Unknown token subject: service-account:')
+      ) {
+        throw new UnauthorizedException('invalid service account credentials');
+      }
+      throw error;
+    }
     const introspection = await this.store.introspectToken({
       token: issued.token,
       audience: issued.record.audience,
@@ -449,6 +525,10 @@ function exactString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
 }
 
+function serviceAccountCredentialAlreadyExists(error: unknown): boolean {
+  return String(error instanceof Error ? error.message : error).includes('credential already exists');
+}
+
 function bearerToken(authorization?: string): string | null {
   if (!authorization) return null;
   const match = authorization.match(/^Bearer\s+(.+)$/i);
@@ -456,12 +536,12 @@ function bearerToken(authorization?: string): string | null {
 }
 
 /**
- * Product publishers receive an account-specific secret from a Kubernetes
- * Secret, never the platform-wide Internal ops token. The built-in gateway
- * account keeps the legacy ops-token fallback so existing Internal automation
- * remains compatible while it migrates.
+ * One-version compatibility for credentials that have not yet been imported
+ * from the legacy Kubernetes Secret. Database credentials are checked first;
+ * the built-in gateway account also keeps the old ops-token fallback during
+ * the migration window.
  */
-function serviceAccountClientSecretMatches(serviceAccountId: string, providedSecret: string): boolean {
+function legacyServiceAccountClientSecretMatches(serviceAccountId: string, providedSecret: string): boolean {
   const configuredSecret = serviceAccountSecrets()[serviceAccountId];
   if (configuredSecret) return constantTimeSecretEqual(configuredSecret, providedSecret);
   if (serviceAccountId !== 'svc_sdk_gateway') return false;
@@ -484,7 +564,14 @@ function serviceAccountSecrets(): Record<string, string> {
     return Object.entries(parsed).reduce<Record<string, string>>((result, [key, value]) => {
       const serviceAccountId = key.trim();
       const secret = typeof value === 'string' ? value.trim() : '';
-      if (serviceAccountId && secret.length >= 32) result[serviceAccountId] = secret;
+      if (
+        serviceAccountId
+        && secret.length >= 32
+        && secret.length <= 4096
+        && !/[\r\n\0]/.test(secret)
+      ) {
+        result[serviceAccountId] = secret;
+      }
       return result;
     }, {});
   } catch {

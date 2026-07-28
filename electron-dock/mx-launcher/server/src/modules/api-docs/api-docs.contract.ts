@@ -97,6 +97,104 @@ const serviceAccountExample = {
   createdAt: '2026-07-20T00:00:00.000Z'
 };
 
+const serviceAccountCredentialStatusExample = {
+  credentialId: 'sacred_0123456789abcdef0123456789abcdef',
+  serviceAccountId: 'svc_partner_portal',
+  version: 1,
+  source: 'issued',
+  issuedAt: '2026-07-20T00:00:00.000Z',
+  updatedAt: '2026-07-20T00:00:00.000Z'
+};
+
+const issuedServiceAccountCredentialExample = {
+  clientId: 'svc_partner_portal',
+  clientSecret: 'mxsa1.<仅本次响应返回的随机值>',
+  credential: serviceAccountCredentialStatusExample
+};
+
+const appCenterAppExample = {
+  appId: 'luopan',
+  displayName: 'Luopan',
+  builtin: false,
+  systemOwned: false,
+  packageName: '@qpjoy/luopan-demo',
+  version: '0.1.0',
+  category: 'custom',
+  description: 'Luopan standalone Launcher application.',
+  launcherMode: 'standalone',
+  standaloneChannelProductId: 'luopan',
+  productNetworkId: 'luopan',
+  enabled: true,
+  channels: ['shadow', 'beta', 'stable'],
+  permissions: ['auth.read'],
+  requiredCapabilities: ['launcher-network', 'launcher-standalone'],
+  accessPolicy: {
+    defaultDecision: 'private',
+    allowAdmin: true,
+    allowRoles: [],
+    allowUserIds: [],
+    allowOrgIds: [],
+    allowRegisteredByAppIds: [],
+    allowHomeAppIds: [],
+    requirePermissionGrant: false
+  },
+  updatePolicy: 'app-managed'
+};
+
+const appCenterPublisherServiceAccountExample = {
+  ...serviceAccountExample,
+  serviceAccountId: 'svc_luopan_release_publisher',
+  displayName: 'Luopan Release Publisher',
+  roleIds: ['mx-release-publisher'],
+  scopes: ['sdk.release.read', 'sdk.release.publish'],
+  allowedProductIds: ['luopan']
+};
+
+const appCenterIssuedPublisherCredentialExample = {
+  ...issuedServiceAccountCredentialExample,
+  clientId: 'svc_luopan_release_publisher',
+  credential: {
+    ...serviceAccountCredentialStatusExample,
+    credentialId: 'sacred_0123456789abcdef0123456789abcdef',
+    serviceAccountId: 'svc_luopan_release_publisher'
+  }
+};
+
+const appCenterUpsertResponseExample = {
+  app: appCenterAppExample,
+  publisher: {
+    serviceAccount: appCenterPublisherServiceAccountExample,
+    credential: appCenterIssuedPublisherCredentialExample
+  }
+};
+
+const appCenterUpsertResponseSchema = {
+  type: 'object',
+  required: ['app', 'publisher'],
+  properties: {
+    app: schemaFromExample(appCenterAppExample),
+    publisher: {
+      oneOf: [{
+        type: 'object',
+        required: ['serviceAccount', 'credential'],
+        properties: {
+          serviceAccount: schemaFromExample(appCenterPublisherServiceAccountExample),
+          credential: {
+            oneOf: [
+              schemaFromExample(appCenterIssuedPublisherCredentialExample),
+              { type: 'null' }
+            ],
+            description: '首次签发时包含一次性 clientSecret；已有 credential 的幂等更新返回 null。'
+          }
+        }
+      }, {
+        type: 'null'
+      }],
+      description: 'enabled 应用返回 Publisher；disabled 应用返回 null。'
+    }
+  }
+};
+
 const entitlementExample = {
   entitlementId: 'uent_partner_alice',
   userId: 'usr_partner_alice',
@@ -142,6 +240,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
     { name: 'Discovery', description: 'Gateway discovery and route registry.' },
     { name: 'Authentication', description: 'OAuth-compatible token issuance and identity resolution.' },
     { name: 'User Center', description: 'Stable SDK-facing roles, users and service accounts.' },
+    { name: 'App Center Admin', description: 'Ops-token protected application provisioning and product-scoped Release Publisher issuance.' },
     { name: 'Permission Center', description: 'AppCenter-aware permission grant evaluation.' },
     { name: 'Release Consumer', description: 'Installed applications check, download, and report sanitized Release Center decisions.' },
     { name: 'Release Publisher', description: 'Product-scoped CI and developer APIs for artifact upload, gated release creation, and approval.' },
@@ -182,11 +281,78 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         }
       })
     },
+    '/internal/v1/app-center/apps': {
+      post: operation({
+        tag: 'App Center Admin',
+        summary: '创建 AppCenter 应用并签发 Release Publisher',
+        description: 'Internal ops 管理接口，要求 x-mx-ops-token。创建 enabled 应用时，平台自动 ensure 仅绑定该 appId 的 Release Publisher service account；账号尚无 credential 时只在本次响应返回一次明文 clientSecret。相同应用的幂等重试不会查询或轮换旧 secret，publisher.credential 返回 null。',
+        operationId: 'createAppCenterAppWithPublisher',
+        scopes: [],
+        auth: 'ops-token',
+        curl: [
+          'curl -sS -X POST "$BASE/internal/v1/app-center/apps" \\',
+          '  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN" \\',
+          '  -H "content-type: application/json" \\',
+          '  --data \'{"appId":"luopan","displayName":"Luopan","launcherMode":"standalone","enabled":true,"requestedBy":"internal-release-admin"}\''
+        ].join('\n'),
+        request: {
+          appId: 'luopan',
+          displayName: 'Luopan',
+          launcherMode: 'standalone',
+          enabled: true,
+          requestedBy: 'internal-release-admin'
+        },
+        required: ['appId'],
+        responseSchema: appCenterUpsertResponseSchema,
+        response: appCenterUpsertResponseExample
+      })
+    },
+    '/internal/v1/app-center/apps/{appId}': {
+      post: operation({
+        tag: 'App Center Admin',
+        summary: '幂等更新应用并补齐 Release Publisher credential',
+        description: 'Internal ops 管理接口，要求 x-mx-ops-token。appId 取自路径。新应用或尚无 credential 的旧应用会得到一次性 publisher.credential；已有 credential 的幂等更新保留数据库 verifier，并在同一响应结构中返回 publisher.credential=null。一次性响应丢失时必须调用 credential rotate 接口，不能查询旧值。',
+        operationId: 'upsertAppCenterAppWithPublisher',
+        scopes: [],
+        auth: 'ops-token',
+        pathParams: ['appId'],
+        curl: [
+          'curl -sS -X POST "$BASE/internal/v1/app-center/apps/luopan" \\',
+          '  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN" \\',
+          '  -H "content-type: application/json" \\',
+          '  --data \'{"displayName":"Luopan","launcherMode":"standalone","enabled":true,"requestedBy":"internal-release-admin"}\''
+        ].join('\n'),
+        request: {
+          displayName: 'Luopan',
+          launcherMode: 'standalone',
+          enabled: true,
+          requestedBy: 'internal-release-admin'
+        },
+        responseSchema: appCenterUpsertResponseSchema,
+        response: appCenterUpsertResponseExample
+      }),
+      delete: operation({
+        tag: 'App Center Admin',
+        summary: '删除应用并撤销自动 Release Publisher',
+        description: 'Internal ops 管理接口。删除非内置应用时会在同一数据库事务内禁用自动 Publisher、撤销其 active token 并删除 credential verifier；以后重建同一 appId 会签发全新的 secret，旧 secret 与旧 token 都不会恢复。',
+        operationId: 'deleteAppCenterAppAndPublisher',
+        scopes: [],
+        auth: 'ops-token',
+        pathParams: ['appId'],
+        curl: [
+          'curl -sS -X DELETE "$BASE/internal/v1/app-center/apps/luopan" \\',
+          '  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN"'
+        ].join('\n'),
+        response: {
+          deleted: true
+        }
+      })
+    },
     '/internal/v1/sdk/oauth/token': {
       post: operation({
         tag: 'Authentication',
         summary: '获取用户或服务账号 token',
-        description: '支持 password 与 client_credentials。password access token 默认且最长有效 7 天，并可经可信 HTTPS bootstrap 调用；client_credentials 默认有效 1 小时且仅允许 Internal 控制面调用，经 Domestic edge 的请求会在 secret 比较前拒绝。开发者服务账号使用 Kubernetes Secret 中的账号独立 client secret；全局 Internal ops token 仅保留给内置 svc_sdk_gateway 的迁移兼容，禁止分发。两种 grant 都在凭据校验前执行 PostgreSQL 原子限速。',
+        description: '支持 password 与 client_credentials。password access token 默认且最长有效 7 天，并可经可信 HTTPS bootstrap 调用；client_credentials 默认有效 1 小时且仅允许 Internal 控制面调用，经 Domestic edge 的请求会在 secret 比较前拒绝。开发者服务账号使用数据库中的 scrypt verifier 校验账号独立 client secret；明文只在创建或轮换时返回一次。全局 Internal ops token 仅保留给内置 svc_sdk_gateway 的迁移兼容，禁止分发。两种 grant 都在凭据校验前执行 PostgreSQL 原子限速。',
         operationId: 'issueSdkToken',
         routeId: 'sdk.oauth.token',
         auth: 'public',
@@ -483,18 +649,19 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         summary: '列出服务账号',
         description: 'Internal ops 管理接口，要求 x-mx-ops-token；响应只包含账号元数据、scopes 和产品范围，不包含 secret。',
         operationId: 'listSdkServiceAccounts',
-        routeId: 'sdk.service_accounts.list',
         scopes: [],
         auth: 'ops-token',
         curl: 'curl -sS "$BASE/internal/v1/sdk/service-accounts" -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN"',
-        response: { serviceAccounts: [serviceAccountExample] }
+        response: {
+          serviceAccounts: [serviceAccountExample],
+          credentials: [serviceAccountCredentialStatusExample]
+        }
       }),
       post: operation({
         tag: 'User Center',
         summary: '创建服务账号',
-        description: 'Internal ops 管理接口，要求 x-mx-ops-token。仅授予集成实际需要的最小 scopes 与 allowedProductIds；创建后由 Secret Center 单独物化账号 secret，再通过 client_credentials 获取 token。',
+        description: 'Internal ops 管理接口，要求 x-mx-ops-token。仅授予集成实际需要的最小 scopes 与 allowedProductIds。账号没有 credential 时会自动签发，并且明文 clientSecret 只在本次响应返回；幂等重试不会回显或轮换已有 secret。',
         operationId: 'createSdkServiceAccount',
-        routeId: 'sdk.service_accounts.create',
         scopes: [],
         auth: 'ops-token',
         curl: [
@@ -512,7 +679,39 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
           requestId: 'service-account-create-001'
         },
         required: ['serviceAccountId'],
-        response: { serviceAccount: serviceAccountExample }
+        response: {
+          serviceAccount: serviceAccountExample,
+          credential: issuedServiceAccountCredentialExample
+        }
+      })
+    },
+    '/internal/v1/sdk/service-accounts/{serviceAccountId}/credentials/rotate': {
+      post: operation({
+        tag: 'User Center',
+        summary: '轮换服务账号 client secret',
+        description: 'Internal ops 管理接口。生成新 secret、覆盖数据库中的 verifier，并只在本次响应返回明文；旧 secret 立即不能再换取 token。调用方必须同步更新对应应用的 CI/Vault。',
+        operationId: 'rotateSdkServiceAccountCredential',
+        scopes: [],
+        auth: 'ops-token',
+        pathParams: ['serviceAccountId'],
+        curl: [
+          'curl -sS -X POST "$BASE/internal/v1/sdk/service-accounts/svc_partner_portal/credentials/rotate" \\',
+          '  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN" \\',
+          '  -H "content-type: application/json" \\',
+          '  --data \'{"requestId":"service-account-rotate-001"}\''
+        ].join('\n'),
+        request: {
+          requestId: 'service-account-rotate-001'
+        },
+        response: {
+          credential: {
+            ...issuedServiceAccountCredentialExample,
+            credential: {
+              ...serviceAccountCredentialStatusExample,
+              version: 2
+            }
+          }
+        }
       })
     },
     '/internal/v1/sdk/permissions/requests': {

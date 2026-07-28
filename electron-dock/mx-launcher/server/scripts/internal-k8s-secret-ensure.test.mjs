@@ -265,7 +265,7 @@ test('unconfigured optional Secrets are validated where required but otherwise s
   );
 });
 
-test('malformed configured or existing SDK maps fail closed', () => {
+test('configured SDK maps are strict while omitted legacy Secrets are preserved without blocking deploy', () => {
   assert.throws(
     () => canonicalizeSdkServiceAccountSecrets('{"svc":"short"}'),
     /at least 32 characters/
@@ -277,7 +277,17 @@ test('malformed configured or existing SDK maps fail closed', () => {
     /invalid service account id/
   );
   assert.throws(
-    () => planInternalK8sSecrets({
+    () => canonicalizeSdkServiceAccountSecrets(JSON.stringify({
+      svc_too_long: 'x'.repeat(4097)
+    })),
+    /at most 4096 characters/
+  );
+  for (const legacyData of [
+    { 'secrets.json': '{not-json}' },
+    { 'operator-note': 'missing-the-runtime-key' }
+  ]) {
+    const legacy = secret('mx-sdk-service-account-secrets', legacyData);
+    const plan = planInternalK8sSecrets({
       namespace,
       environment: environment(''),
       existingSecrets: {
@@ -289,37 +299,12 @@ test('malformed configured or existing SDK maps fail closed', () => {
         'mx-internal-ops': secret('mx-internal-ops', {
           token: 'existing-ops-token-000000000000000000000'
         }),
-        'mx-sdk-service-account-secrets': secret(
-          'mx-sdk-service-account-secrets',
-          { 'secrets.json': '{not-json}' }
-        )
+        'mx-sdk-service-account-secrets': legacy
       },
       randomSecret: deterministicSecret
-    }),
-    /must be valid JSON/
-  );
-  assert.throws(
-    () => planInternalK8sSecrets({
-      namespace,
-      environment: environment(''),
-      existingSecrets: {
-        'mx-launcher-db': secret('mx-launcher-db', {
-          PG_USER: 'mx_internal',
-          PG_PASSWORD: 'db-password',
-          PG_DB: 'mx_internal_shadow'
-        }),
-        'mx-internal-ops': secret('mx-internal-ops', {
-          token: 'existing-ops-token-000000000000000000000'
-        }),
-        'mx-sdk-service-account-secrets': secret(
-          'mx-sdk-service-account-secrets',
-          { 'operator-note': 'missing-the-runtime-key' }
-        )
-      },
-      randomSecret: deterministicSecret
-    }),
-    /incomplete; missing secrets\.json/
-  );
+    });
+    assert.deepEqual(resource(plan, 'mx-sdk-service-account-secrets').data, legacy.data);
+  }
 });
 
 test('SDK map is canonical and replaces the whole account map', () => {

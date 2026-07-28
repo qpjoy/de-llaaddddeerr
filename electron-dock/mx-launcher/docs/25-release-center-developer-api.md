@@ -69,99 +69,158 @@ AppCenter 产品。平台必须在发放 service account 前完成冲突检查�
 
 ## 3. 平台方一次性开通
 
-### 3.1 创建产品受限 service account
+### 3.1 创建应用并领取一次性 Publisher credential
 
 这一步由平台管理员执行，Luopan 开发者不需要、也不应获得
-`MX_INTERNAL_OPS_TOKEN`：
+`MX_INTERNAL_OPS_TOKEN`。首次创建应用，或对尚无 credential 的旧应用执行一次幂等
+upsert，会自动 ensure 产品受限的 Publisher：
 
 ```bash
-curl -fsS "$INTERNAL_BASE/internal/v1/sdk/service-accounts" \
-  -H 'content-type: application/json' \
+PROVISION_JSON="$(
+  curl -fsS "$INTERNAL_BASE/internal/v1/app-center/apps/luopan" \
   -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN" \
+  -H 'content-type: application/json' \
   --data-binary '{
-    "serviceAccountId": "svc_luopan_release_ci",
-    "displayName": "Luopan Release CI",
-    "roleIds": ["mx-service-account"],
-    "scopes": [
-      "sdk.release.read",
-      "sdk.release.publish",
-      "sdk.release.approve"
-    ],
-    "allowedProductIds": ["luopan"],
-    "requestId": "luopan-release-ci-provision-v1"
+    "displayName": "Luopan",
+    "launcherMode": "standalone",
+    "requestedBy": "internal-release-admin"
   }'
+)"
 ```
 
-三个 scope 的含义：
+不要 `echo` 整个 `PROVISION_JSON`。首次签发时响应结构为：
+
+```json
+{
+  "app": {},
+  "publisher": {
+    "serviceAccount": {
+      "serviceAccountId": "svc_luopan_release_publisher",
+      "roleIds": ["mx-release-publisher"],
+      "scopes": ["sdk.release.read", "sdk.release.publish"],
+      "allowedProductIds": ["luopan"]
+    },
+    "credential": {
+      "clientId": "svc_luopan_release_publisher",
+      "clientSecret": "mxsa1.<仅本次响应可见>",
+      "credential": {
+        "credentialId": "<credential-id>",
+        "serviceAccountId": "svc_luopan_release_publisher",
+        "version": 1,
+        "source": "issued",
+        "issuedAt": "<timestamp>",
+        "updatedAt": "<timestamp>"
+      }
+    }
+  }
+}
+```
+
+立即把 `publisher.credential.clientSecret` 写入 Luopan 自己的 CI/Vault，然后清理本地
+响应和 shell 变量。后续重复相同 upsert 时 `publisher.credential` 为 `null`，不会查询
+或轮换现有 secret。若首次响应丢失，直接走下文显式轮换，原值无法恢复。
+
+平台先把应用 ID 转成小写，保留字母、数字、`.`、`_`、`-`，仅把其他字符归一为 `_`，
+再生成 `svc_<normalizedAppId>_release_publisher`。若最终 ID 会超过 160 字符，平台会
+稳定截断并附加 12 位 SHA-256 摘要，避免不同长 ID 冲突。例如 `mx-h2i` 对应
+`svc_mx-h2i_release_publisher`。Publisher 固定只获得：
 
 | scope | 能力 |
 | --- | --- |
 | `sdk.release.read` | 列出/读取本账号允许产品的 plan 和 artifact metadata |
 | `sdk.release.publish` | 上传允许产品的 artifact，并从该 artifact 创建 gate 为 `blocked`（待验证）的 plan |
-| `sdk.release.approve` | 将允许产品的待验证 plan gate 完成为 `passed/failed/blocked` |
 
 `allowedProductIds` 是第二层资源边界。只有 scope、产品 allowlist **同时**满足才允许操作。
 例如上面的账号即使把请求 body 改成 `productId=mx-h2i` 也会得到 `403`。旧 service
 account 没有 `allowedProductIds` 时默认无产品权限，必须由管理员显式补齐。
 `release.manage` 仅作为平台管理员的全局逃生 scope，可跨产品；不要授予产品 CI。
 
-简单团队可以把三个 scope 放在同一个 CI 账号；需要职责分离时，可以建立
-`svc_luopan_release_publisher`（read + publish）和
-`svc_luopan_release_approver`（read + approve），两者都只允许 `luopan`。
+审批默认使用独立账号，避免构建作业上传后自行批准：
 
-### 3.2 配置账号独立的 client secret
-
-Publisher 账号使用独立 secret，不复用平台级 Internal ops token。Internal API 当前从
-以下 K8s Secret 读取 service-account-to-secret JSON：
-
-```text
-namespace: mx-internal-shadow
-Secret:    mx-sdk-service-account-secrets
-key:       secrets.json
+```bash
+APPROVER_PROVISION_JSON="$(
+  curl -fsS "$INTERNAL_BASE/internal/v1/sdk/service-accounts" \
+    -H 'content-type: application/json' \
+    -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN" \
+    --data-binary '{
+      "serviceAccountId": "svc_luopan_release_approver",
+      "displayName": "Luopan Release Approver",
+      "roleIds": ["mx-release-approver"],
+      "scopes": ["sdk.release.read", "sdk.release.approve"],
+      "allowedProductIds": ["luopan"],
+      "requestId": "luopan-release-approver-provision-v1"
+    }'
+)"
 ```
 
-内容模型如下。`secrets.json` 是所有 SDK service account 的**完整 canonical map**，不是
-只包含本次新增账号的增量 patch：
+该接口返回 `{serviceAccount, credential}`，其中 `credential.clientSecret` 也只出现一次。
+把它写入与 Publisher 分离的审批 Secret Store。默认不要创建同时拥有
+`sdk.release.publish + sdk.release.approve` 的产品账号。
+
+### 3.2 数据库存储、轮换与旧 Secret 迁移
+
+Publisher/Approver 都不复用平台级 Internal ops token。服务端只在首次签发或显式轮换时
+返回 `mxsa1.<32-byte-base64url>` 明文；PostgreSQL credential record 只保存不可逆 scrypt
+hash、版本、来源和时间戳。列表、查询、应用幂等 upsert 都只返回安全摘要，不返回 hash 或
+旧明文。因此，增加新应用不需要编辑 `server/.env`、K8s Secret 或重启 Internal API。
+
+显式轮换单个账号：
+
+```bash
+ROTATE_JSON="$(
+  curl -fsS -X POST \
+    "$INTERNAL_BASE/internal/v1/sdk/service-accounts/svc_luopan_release_publisher/credentials/rotate" \
+    -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN"
+)"
+```
+
+`ROTATE_JSON.credential.clientSecret` 只在这次响应可见。先更新对应 CI/Vault，再让 CI
+重新获取短期 token；其他应用 credential、`mx-internal-ops` 和 API Deployment 都不需要
+改变。
+
+旧 `mx-sdk-service-account-secrets/secrets.json` 与
+`MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON` / `MX_SDK_SERVICE_ACCOUNT_SECRETS_FILE` 只保留
+一版迁移兼容。已有旧集成首次升级时，仍可把**完整旧 map**临时写入被 gitignore 的
+`server/.env`：
 
 ```json
 {
-  "svc_existing_integration": "<保留现有账号的 secret>",
-  "svc_luopan_release_ci": "<至少 32 字符的随机 secret>"
+  "svc_existing_integration": "<保留现有账号的原 secret>"
 }
 ```
 
-若暂未接 ExternalSecret，平台管理员在受控编辑器中把完整 map 写入被 gitignore 的
-`server/.env`。单引号只是 `.env` 的值边界，不会进入 JSON：
-
 ```dotenv
-MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON='{"svc_existing_integration":"<保留现有账号的 secret>","svc_luopan_release_ci":"<至少 32 字符的随机 secret>"}'
+MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON='{"svc_existing_integration":"<保留现有账号的原 secret>"}'
 ```
 
-先在 Secret Manager 或受限工作区合并并验证所有现有账号，再写入这个值。绝不能用只含
-Luopan 的示例覆盖线上 map。随后只运行正常部署：
+随后只运行一次正常部署：
 
 ```bash
 chmod 600 server/.env
 bash scripts/manage.sh ops internal-production deploy
 ```
 
-deploy 会在修改任何 Internal workload 前严格解析整个 JSON，拒绝数组、空账号 ID、非字符
-串或少于 32 字符的 secret；通过后幂等 ensure
-`mx-sdk-service-account-secrets/secrets.json` 并自动触发 rollout。文件和进程 env 都没有
-该变量时保留集群现有 key；变量存在时把它视为完整 canonical map，绝不与旧 JSON 按账号
-merge。部署日志、命令参数和状态摘要不会输出 secret。
+启动导入只处理数据库尚无 credential 的账号：旧明文会转成 hash；数据库已有任何
+credential 时保留数据库值，绝不覆盖或把明文写进日志。OAuth 优先校验数据库 credential；
+数据库已有记录后不会回退接受 map 中的另一个旧值。确认旧 CI 能正常取 token 后，先从
+`server/.env` 删除该变量，再显式删除只用于迁移的旧 K8s Secret：
 
-Config Center 中对应的内置引用是
-`secretref_sdk_service_account_credentials`，目标为
-`mx-internal-shadow/mx-sdk-service-account-secrets`；它只登记 provider、remote ref、
-consumer 和 K8s target，不在 Postgres 保存 secret 明文。生产上应由
-Secret Center/KMS/ExternalSecret 或受控部署流程根据这条引用物化 Secret。不要把 secret
-提交到 Git、写进 Luopan `.env`、打进 Electron 包或粘贴到发版日志。Secret 更新后让
-Internal API rollout，再由 CI 的 secret store 注入同一值；标准 deploy 已自动完成前一个
-rollout。
+```bash
+kubectl -n mx-internal-shadow delete secret mx-sdk-service-account-secrets
+```
 
-内置 `svc_sdk_gateway` 暂时保留旧 Internal ops secret 的兼容路径；第三方产品不得依赖
-这个兼容行为。
+仅从 `.env` 删除变量不会删除已有 Secret，因为日常 deploy 默认保留未配置的集群值。完成
+上述清理后，后续 deploy 才会完全不再物化旧 map。不要用该兼容入口添加新应用，也不要把
+secret 提交到 Git、写进 Luopan 应用 `.env`、打进 Electron 包或粘贴到发版日志。
+
+部署启动还会为已有的 enabled App 幂等补齐 Publisher service account 元数据，但不会在
+后台生成无人能接收的明文 secret。旧应用尚无 credential 时，由管理员对该 App 执行一次
+上节的幂等 upsert，领取一次性值即可。
+
+应用临时更新为 `enabled=false` 时，平台禁用自动 Publisher 并撤销其 active token，但保留
+credential；重新启用后原 CI secret 可换取新 token，旧 token 不会复活。删除非内置应用
+则会在同一数据库事务中禁用 Publisher、撤销 token 并删除 credential verifier；以后重建
+同一 `appId` 会签发全新 secret，旧 secret 与旧 token 都永久失效。
 
 ### 3.3 首次上线与数据库迁移
 
@@ -196,7 +255,8 @@ HAVING count(*) > 1;
 
 在备份基础上逐组核对 artifact、audience、gate 和 Consumer 证据，由平台负责人决定保留
 哪条记录并通过受审计的维护流程修复；migration 不会静默合并或删除计划。修复后重新运行
-完整 deploy。后续仅轮换账号 secret 时才只需要更新完整 canonical map 并 rollout API。
+完整 deploy。后续新增应用、签发或轮换账号 secret 都通过 API 完成，不需要编辑
+`server/.env`、更新完整 map 或 rollout API。
 
 ## 4. 获取短期 Publisher token
 
@@ -204,16 +264,16 @@ HAVING count(*) > 1;
 
 ```bash
 export BASE='http://10.88.100.3:18090'
-export RELEASE_CLIENT_ID='svc_luopan_release_ci'
+export RELEASE_CLIENT_ID='svc_luopan_release_publisher'
 # RELEASE_CLIENT_SECRET 必须由 CI secret store 作为已 export 的环境变量注入。
 
-TOKEN="$(
+PUBLISHER_TOKEN="$(
   jq -n '{
       grant_type: "client_credentials",
       client_id: env.RELEASE_CLIENT_ID,
       client_secret: env.RELEASE_CLIENT_SECRET,
       audience: "mx-sdk",
-      scope: "sdk.release.read sdk.release.publish sdk.release.approve"
+      scope: "sdk.release.read sdk.release.publish"
     }' |
   curl -fsS "$BASE/internal/v1/sdk/oauth/token" \
     -H 'content-type: application/json' \
@@ -230,7 +290,7 @@ token 默认且硬上限为 1 小时；即使请求更长的 `expires_in` 也会
 
 ```bash
 curl -fsS "$BASE/internal/v1/sdk/releases?productId=luopan" \
-  -H "authorization: Bearer $TOKEN" |
+  -H "authorization: Bearer $PUBLISHER_TOKEN" |
   jq
 ```
 
@@ -278,7 +338,7 @@ DIGEST="sha256:$(shasum -a 256 "$ARTIFACT" | awk '{print $1}')"
 UPLOAD_JSON="$(
   curl -fsS -X POST \
     "$BASE/internal/v1/sdk/releases/artifacts?productId=luopan&releaseId=$RELEASE_ID&kind=app-installer&version=$VERSION&componentId=luopan&fileName=$FILE_NAME&digest=$DIGEST&platform=darwin&arch=arm64&channel=shadow" \
-    -H "authorization: Bearer $TOKEN" \
+    -H "authorization: Bearer $PUBLISHER_TOKEN" \
     -H 'content-type: application/octet-stream' \
     --data-binary "@$ARTIFACT"
 )"
@@ -296,7 +356,7 @@ Linux CI 可把 `shasum -a 256` 换成 `sha256sum`。Windows/EXE 使用
 
 ```bash
 curl -fsS "$BASE/internal/v1/sdk/releases/artifacts/$ARTIFACT_ID" \
-  -H "authorization: Bearer $TOKEN" |
+  -H "authorization: Bearer $PUBLISHER_TOKEN" |
   jq '.artifact'
 ```
 
@@ -322,7 +382,7 @@ PLAN_JSON="$(
       requestId: "luopan-0.1.1-targeted-plan-001"
     }' |
   curl -fsS "$BASE/internal/v1/sdk/releases" \
-    -H "authorization: Bearer $TOKEN" \
+    -H "authorization: Bearer $PUBLISHER_TOKEN" \
     -H 'content-type: application/json' \
     --data-binary @-
 )"
@@ -360,7 +420,7 @@ Memory Store 在同一事件循环内原子执行，Postgres 在事务 advisory 
 
 ```bash
 curl -fsS "$BASE/internal/v1/sdk/releases/$PLAN_ID" \
-  -H "authorization: Bearer $TOKEN" |
+  -H "authorization: Bearer $PUBLISHER_TOKEN" |
   jq '.plan // .release'
 ```
 
@@ -393,11 +453,32 @@ running 阶段的验证由受控 CI/验证机使用刚构建的文件，或读�
 artifact URL 完成；不要为了让验证机调用 Publisher API 而把 service account secret
 复制过去。
 
+审批环境从自己的 Vault 注入独立凭据，并获取 Approver token：
+
+```bash
+export RELEASE_APPROVER_CLIENT_ID='svc_luopan_release_approver'
+# RELEASE_APPROVER_CLIENT_SECRET 只由审批环境的 Secret Store 注入。
+
+APPROVER_TOKEN="$(
+  jq -n '{
+      grant_type: "client_credentials",
+      client_id: env.RELEASE_APPROVER_CLIENT_ID,
+      client_secret: env.RELEASE_APPROVER_CLIENT_SECRET,
+      audience: "mx-sdk",
+      scope: "sdk.release.read sdk.release.approve"
+    }' |
+  curl -fsS "$BASE/internal/v1/sdk/oauth/token" \
+    -H 'content-type: application/json' \
+    --data-binary @- |
+  jq -er '.token.access_token // .access_token'
+)"
+```
+
 完成定向 gate：
 
 ```bash
 curl -fsS "$BASE/internal/v1/sdk/releases/$PLAN_ID/gate" \
-  -H "authorization: Bearer $TOKEN" \
+  -H "authorization: Bearer $APPROVER_TOKEN" \
   -H 'content-type: application/json' \
   --data-binary @- <<JSON
 {
@@ -427,7 +508,9 @@ Authorization、client secret、用户/上游 token、K8s Secret、完整环境�
 或带签名 query 的 OSS URL；原始日志放到权限受控的日志系统，在 evidence 中只记录
 不可变引用和 sha256。
 
-若使用 `release-center-publish.mjs --approve`，必须同时提供
+默认的分权流程不要给 Publisher 使用 `release-center-publish.mjs --approve`，而是按上面
+的 gate 调用交给 Approver。兼容旧的合并式 CI 确需使用 `--approve` 时，其账号必须显式
+同时拥有 publish/approve；并且必须提供
 `--approval-evidence <json-file>`，且 JSON 中
 `artifactDigestVerified`、`osSignatureVerified`、`installSmokePassed` 都为 `true`。
 非定向（全量）计划还必须显式传 `--confirm-full-rollout`。client secret 只从
@@ -453,7 +536,7 @@ FULL_PLAN_JSON="$(
       requestId: ("luopan-0.1.1-full-after-" + $targetedPlanId)
     }' |
   curl -fsS "$BASE/internal/v1/sdk/releases" \
-    -H "authorization: Bearer $TOKEN" \
+    -H "authorization: Bearer $PUBLISHER_TOKEN" \
     -H 'content-type: application/json' \
     --data-binary @-
 )"
@@ -463,7 +546,8 @@ FULL_PLAN_ID="$(jq -er '.plan.planId // .release.planId' <<<"$FULL_PLAN_JSON")"
 
 全量 plan 同样先得到 `blocked` gate；它复用同一个 `artifactId`，但必须使用新的
 `requestId`。审批人复核定向 plan 后，再调用同一个 gate endpoint
-把 `$FULL_PLAN_ID` 设为 `passed`，并把定向 `$PLAN_ID` 写入 `evidence`。当前 API 没有
+并使用 `$APPROVER_TOKEN` 把 `$FULL_PLAN_ID` 设为 `passed`，把定向 `$PLAN_ID` 写入
+`evidence`。当前 API 没有
 “原地扩大定向 audience”的接口；不要假设定向 plan 会自动变成全量。
 
 `release-center-publish.mjs` 是“上传本地文件并创建一个 plan”的 one-shot 包装，不提供
@@ -529,10 +613,10 @@ download URL 缓存成永久 OSS 地址。私有 OSS URL 可能是短期签名 U
 
 | 现象 | 检查项 |
 | --- | --- |
-| token 返回 `401 invalid service account credentials` | service account 是否 active；K8s JSON 是否包含完全一致的 client ID；secret 是否至少 32 字符；Internal API 是否已 rollout |
+| token 返回 `401 invalid service account credentials` | service account 是否 active；client ID 是否正确；CI/Vault 是否保存了首次签发或最近轮换的完整 `mxsa1.*` 值；旧账号是否已完成 DB credential 导入 |
 | token 提示仅限 Internal | 请求是否经过 Domestic 公网 edge；改为 Internal 地址或已 ready 的 Luopan 产品 VIP |
 | Publisher 返回 `401` | Bearer 是否缺失/过期、audience 是否为 `mx-sdk` |
-| Publisher 返回 `403` | token 是否有对应 read/publish/approve scope；`allowedProductIds` 是否含 `luopan`；artifact/plan 是否属于 Luopan |
+| Publisher/Approver 返回 `403` | token 是否分别有 read+publish 或 read+approve；`allowedProductIds` 是否含 `luopan`；artifact/plan 是否属于 Luopan |
 | upload 返回 `400` | required query 是否完整；ID 长度/字符是否合法；product 是否使用了保留后缀或派生组件是否撞到已启用产品；digest 是否匹配；`app-installer` 是否有 platform/arch；DMG/EXE/AppImage 扩展名与 platform 是否匹配 |
 | create 返回 artifact/channel 错误 | artifactId 是否来自本账号可访问的上传；不要覆盖 artifact 元数据；channel 省略或保持 `shadow` |
 | gate 是 `blocked` | 新 plan 等待验证时这是预期行为；先完成 CI/离线验证，再用带 `sdk.release.approve` 的 token 调 gate endpoint |
@@ -550,7 +634,7 @@ Luopan 之外的开发者按相同模型接入：
 
 1. 平台先注册 ProductNetwork/AppCenter，并确定唯一 `productId` 和小写 channel；检查
    `productId` 不使用保留的 `-renderer/-config` 后缀，两个派生组件也不与启用产品冲突；
-2. 平台创建独立 service account、独立 secret 和最小 `allowedProductIds`；
+2. 平台 upsert AppCenter 应用并把一次性 Publisher secret 写入该应用 CI/Vault；另建独立 Approver credential；
 3. 产品 CI 构建并完成 OS 签名/公证；Release Center 不替代构建、签名或 notarization；
 4. CI 计算 sha256，通过 scoped artifact endpoint 上传；
 5. CI 只用 `artifactId` 创建 `blocked`（待验证）定向 plan，并先做离线/CI artifact 验证；

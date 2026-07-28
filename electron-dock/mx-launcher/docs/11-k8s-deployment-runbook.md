@@ -44,8 +44,8 @@ Compose 里环境变量都写在一个 service 下。K8s 中要拆开：
   `mx-internal-ops/token` 注入 `MX_INTERNAL_OPS_TOKEN`；调用方通过
   `x-mx-ops-token` header 提交，不能把它放入 ConfigMap。
 
-正式 Internal 可以把所有受支持的敏感输入集中写在被 gitignore 的
-`server/.env`，然后只运行正常部署命令：
+正式 Internal 只需把本次首次创建或明确轮换的敏感输入写在被 gitignore 的
+`server/.env`，然后运行正常部署命令。已有健康集群通常不需要重复填写任何 Secret：
 
 ```bash
 chmod 600 server/.env
@@ -54,16 +54,35 @@ bash scripts/manage.sh ops internal-production deploy
 
 部署脚本只解析已知变量，不会 `source` 或执行 `.env`。调用进程中的同名环境变量优先于
 文件；文件中省略的值保留集群现有 key。文件存在时必须是 regular file，且 POSIX 权限不能
-向 group/other 开放（通常为 `0600`），否则 fail closed。统一输入不会把凭据合并成一个大
-Secret，运行时仍按权限和轮换边界物化为：
+向 group/other 开放（通常为 `0600`），否则 fail closed。不要为了让 deploy “完整”而把
+线上 Secret 抄回 `.env`。统一输入不会把凭据合并成一个大 Secret，运行时仍按权限和轮换
+边界物化为：
 
 | K8s Secret | `server/.env` 输入 | ensure 行为 |
 | --- | --- | --- |
 | `mx-launcher-db` | `PG_USER`、`PG_PASSWORD`、`PG_DB` | 首次创建；已有值未配置时保留。现有数据库的身份/密码与显式值不一致时停止，不隐式轮换数据库 |
 | `mx-internal-ops` | `MX_INTERNAL_OPS_TOKEN` | 显式值至少 32 字符；省略则复用，首次没有时生成随机值 |
 | `mx-feishu-oauth` | `MX_FEISHU_APP_ID`、`MX_FEISHU_APP_SECRET`、`MX_FEISHU_ALLOWED_TENANT_KEYS` | 与现有 key 合并后必须三项完整；tenant allowlist 拒绝空值和通配符 |
-| `mx-sdk-service-account-secrets` | `MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON` | `secrets.json` 是完整 canonical map；配置时整体替换，绝不按账号自动 merge |
+| `mx-sdk-service-account-secrets`（迁移兼容） | `MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON` | 仅用于把旧账号的完整 canonical map 一次性导入数据库；日常 deploy 省略。数据库已有 credential 时绝不覆盖 |
 | `mx-release-oss` | `MX_RELEASE_OSS_*` | 保留 `auto/env/external/disabled`；显式非空 key 与现值合并，未配置 key 和额外 data key 原样保留，最终严格校验 8 个已知 key。`env` 模式下空的 STS token/public URL 表示显式清空 |
+
+一个已有健康集群的最小 `server/.env` 可以只保留确实需要覆盖的构建参数，例如：
+
+```dotenv
+MX_SHADOW_NPM_REGISTRY=https://registry.npmmirror.com
+MX_RELEASE_OSS_SECRET_SOURCE=auto
+```
+
+应用 Publisher credential 不再要求运维逐个写 `.env`。首次创建或补齐 AppCenter 应用时，
+平台自动 ensure `svc_<appId>_release_publisher`，权限固定为
+`sdk.release.read + sdk.release.publish`，且只能访问该 `appId`。明文
+`clientSecret` 只在首次签发响应中返回一次，应立即写入该应用的 CI/Vault；PostgreSQL
+只保存不可逆 hash。审批凭据单独创建，只授予 `sdk.release.read + sdk.release.approve`，
+不与 Publisher 共用。
+
+未配置 `MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON` 时，deploy 只原样保留旧 SDK Secret，不再
+解析它或因为遗留格式阻塞正常发布；Internal API 启动时会跳过无效旧条目，并只导入数据库
+尚无 credential 的有效条目。显式提供迁移 JSON 时仍严格校验，避免把错误凭据写回集群。
 
 `DATABASE_HOST` 与编码后的 `DATABASE_URL` 由部署流程按实际 Postgres endpoint 维护，不需要
 手填。若 PostgreSQL PVC、同名保留型 PV，或 hostPath 中的
@@ -81,21 +100,30 @@ template annotation 并等待 rollout；Deployment 上不会暴露可供离线�
 默认文件路径。
 
 `k8s down` 会和 PVC 一起保留全部 runtime Secret；否则保留的 PostgreSQL 数据会与新生成
-密码失配，Internal ops 客户端也会无故失效。产品 service account 使用
-`mx-sdk-service-account-secrets/secrets.json` 中的账号独立 secret，不随
-`mx-internal-ops` 轮换。需要销毁数据或凭据时应走单独、显式的 purge/rotation 流程，不能
-把日常 `down` 当作清密钥操作。
+密码失配，Internal ops 客户端也会无故失效。产品 service account credential 保存在
+PostgreSQL 中且不随 `mx-internal-ops` 轮换；旧
+`mx-sdk-service-account-secrets/secrets.json` 只保留一版迁移兼容。需要销毁数据或凭据
+时应走单独、显式的 purge/rotation 流程，不能把日常 `down` 当作清密钥操作。
 
 只检查所有 Secret 的 key 名（不输出值）：
 
 ```bash
-for name in mx-launcher-db mx-internal-ops mx-feishu-oauth \
-  mx-release-oss mx-sdk-service-account-secrets; do
+for name in mx-launcher-db mx-internal-ops mx-feishu-oauth mx-release-oss; do
   kubectl -n mx-internal-shadow get secret "$name" \
     -o go-template='{{.metadata.name}}{{": "}}{{range $key, $_ := .data}}{{$key}}{{" "}}{{end}}{{"\n"}}' \
     2>/dev/null || true
 done
 ```
+
+若仍处于旧 SDK credential 迁移期，可把 `mx-sdk-service-account-secrets` 临时加回上述
+列表；新部署不要求该 Secret 存在。确认旧 credential 已导入数据库且 CI 能正常登录后，
+先删除 `.env` 中的 `MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON`，再执行：
+
+```bash
+kubectl -n mx-internal-shadow delete secret mx-sdk-service-account-secrets
+```
+
+只删 `.env` 变量不会删除已有 Secret，因为 deploy 默认保留未配置的集群值。
 
 Admin UI 侧栏的 `Internal Ops Token` 密码框只保存在当前页面会话；刷新或重启后清空。
 授权人员确需取值时，应在不录屏、不共享的受控终端读取 `mx-internal-ops/token`，用完清理

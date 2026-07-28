@@ -819,6 +819,42 @@ export interface UserCenterServiceAccount {
   createdAt: string;
 }
 
+/**
+ * Persisted client credential. The clear-text client secret is never stored;
+ * only its self-describing scrypt hash and rotation metadata are retained.
+ */
+export interface UserCenterServiceAccountCredential {
+  credentialId: string;
+  serviceAccountId: string;
+  kind: 'client-secret';
+  clientSecretHash: string;
+  version: number;
+  source: 'issued' | 'legacy-import';
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+/**
+ * Safe credential metadata returned by APIs. This deliberately contains
+ * neither the client secret nor its hash.
+ */
+export interface UserCenterServiceAccountCredentialStatus {
+  credentialId: string;
+  serviceAccountId: string;
+  version: number;
+  source: UserCenterServiceAccountCredential['source'];
+  issuedAt: string;
+  updatedAt: string;
+}
+
+export interface UserCenterIssuedServiceAccountCredential {
+  clientId: string;
+  clientSecret: string;
+  credential: UserCenterServiceAccountCredentialStatus;
+}
+
 export interface UserCenterTokenRecord {
   tokenId: string;
   tokenHash: string;
@@ -997,6 +1033,38 @@ export interface CreateServiceAccountInput {
   requestId?: string | null;
 }
 
+export interface IssueServiceAccountCredentialInput {
+  serviceAccountId?: string | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+  rotate?: boolean | null;
+}
+
+export interface VerifyServiceAccountCredentialInput {
+  serviceAccountId?: string | null;
+  clientSecret?: string | null;
+  requestId?: string | null;
+}
+
+export interface UserCenterServiceAccountCredentialVerificationResult {
+  serviceAccountId: string;
+  ok: boolean;
+  reason: 'accepted' | 'service-account-not-found' | 'service-account-disabled' | 'credential-not-found' | 'invalid-secret';
+  credentialVersion?: number | null;
+}
+
+export interface ImportLegacyServiceAccountCredentialInput {
+  serviceAccountId?: string | null;
+  clientSecret?: string | null;
+  requestedBy?: string | null;
+  requestId?: string | null;
+}
+
+export interface UserCenterServiceAccountCredentialImportResult {
+  outcome: 'imported' | 'preserved';
+  credential: UserCenterServiceAccountCredentialStatus;
+}
+
 export interface IssueTokenInput {
   subjectKind: 'user' | 'service-account';
   subjectId: string;
@@ -1005,6 +1073,12 @@ export interface IssueTokenInput {
   authProvider?: string | null;
   ttlSeconds?: number | null;
   requestId?: string | null;
+  /**
+   * Ephemeral proof used only to atomically re-check a service-account OAuth
+   * exchange while holding the credential lifecycle lock. Never persisted.
+   */
+  serviceAccountClientSecret?: string | null;
+  serviceAccountCredentialVersion?: number | null;
 }
 
 export type PrincipalKind = 'anonymous' | 'user' | 'service-account' | 'unknown';

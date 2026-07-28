@@ -343,22 +343,26 @@ test('service-account OAuth requires the configured Internal ops credential', as
   }
 });
 
-test('publisher service-account OAuth uses an account-specific secret and filters requested scopes', async () => {
+test('publisher service-account OAuth uses its database credential and filters requested scopes', async () => {
   const config = feishuConfig();
   const store = new MemoryStore(config);
   await store.bootstrapUserCenter();
   await store.createUserCenterServiceAccount({
     serviceAccountId: 'svc_release_luopan',
     displayName: 'Luopan Release Publisher',
+    roleIds: ['mx-release-publisher'],
     scopes: ['sdk.release.read', 'sdk.release.publish'],
     allowedProductIds: ['luopan']
   });
+  const issued = await store.issueUserCenterServiceAccountCredential({
+    serviceAccountId: 'svc_release_luopan',
+    requestedBy: 'test'
+  });
   const service = new FeishuAuthService(config, store, unexpectedFetch());
   const controller = new SdkGatewayController(store, service);
-  const publisherSecret = 'luopan-publisher-secret-0000000000000000';
   const previous = process.env.MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON;
   process.env.MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON = JSON.stringify({
-    svc_release_luopan: publisherSecret
+    svc_release_luopan: 'legacy-secret-must-not-bypass-database-credential'
   });
   try {
     await assert.rejects(
@@ -369,12 +373,20 @@ test('publisher service-account OAuth uses an account-specific secret and filter
       }),
       UnauthorizedException
     );
+    await assert.rejects(
+      controller.token({
+        grant_type: 'client_credentials',
+        client_id: 'svc_release_luopan',
+        client_secret: 'legacy-secret-must-not-bypass-database-credential'
+      }),
+      UnauthorizedException
+    );
     const result = await controller.token({
       grant_type: 'client_credentials',
       client_id: 'svc_release_luopan',
-      client_secret: publisherSecret,
+      client_secret: issued.clientSecret,
       audience: 'mx-sdk',
-      scope: 'sdk.release.publish rbac.manage',
+      scope: 'sdk.release.publish rbac.manage sdk.user.write',
       expires_in: 24 * 60 * 60
     });
     assert.match(result.token.access_token, /^mx-v1-/);

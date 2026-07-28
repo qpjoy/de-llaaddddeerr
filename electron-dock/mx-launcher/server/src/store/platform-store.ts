@@ -113,8 +113,14 @@ import type {
   UserCenterIssuedToken,
   ImportUserCenterUsersInput,
   ImportUserCenterUsersResult,
+  ImportLegacyServiceAccountCredentialInput,
+  IssueServiceAccountCredentialInput,
   UserCenterRole,
   UserCenterServiceAccount,
+  UserCenterServiceAccountCredentialImportResult,
+  UserCenterServiceAccountCredentialStatus,
+  UserCenterServiceAccountCredentialVerificationResult,
+  UserCenterIssuedServiceAccountCredential,
   UserCenterUserDeleteInput,
   UserCenterUserDeleteResult,
   UserCenterUser,
@@ -122,6 +128,7 @@ import type {
   UserPasswordUpdateResult,
   UserPasswordVerificationInput,
   UserPasswordVerificationResult,
+  VerifyServiceAccountCredentialInput,
   UserH2oRuntimeProfile,
   UserH2oRuntimeProfileInput,
   UserOverseaEntitlement,
@@ -248,6 +255,19 @@ export interface PlatformStore {
   upsertUserH2oRuntimeProfile(input: UserH2oRuntimeProfileInput): MaybePromise<UserH2oRuntimeProfile>;
   listUserCenterServiceAccounts(): MaybePromise<UserCenterServiceAccount[]>;
   createUserCenterServiceAccount(input: CreateServiceAccountInput): MaybePromise<UserCenterServiceAccount>;
+  listUserCenterServiceAccountCredentialStatuses(): MaybePromise<UserCenterServiceAccountCredentialStatus[]>;
+  getUserCenterServiceAccountCredential(
+    serviceAccountId: string
+  ): MaybePromise<UserCenterServiceAccountCredentialStatus | null>;
+  issueUserCenterServiceAccountCredential(
+    input: IssueServiceAccountCredentialInput
+  ): MaybePromise<UserCenterIssuedServiceAccountCredential>;
+  verifyUserCenterServiceAccountCredential(
+    input: VerifyServiceAccountCredentialInput
+  ): MaybePromise<UserCenterServiceAccountCredentialVerificationResult>;
+  importLegacyUserCenterServiceAccountCredential(
+    input: ImportLegacyServiceAccountCredentialInput
+  ): MaybePromise<UserCenterServiceAccountCredentialImportResult>;
   createFeishuAuthorizationTransaction(
     input: FeishuAuthorizationTransactionInput
   ): MaybePromise<FeishuAuthorizationTransaction>;

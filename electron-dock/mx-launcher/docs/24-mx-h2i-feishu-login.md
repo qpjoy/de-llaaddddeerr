@@ -513,8 +513,8 @@ capability。扩大飞书可用范围应在上述技术和网络验收全部完�
 | `MX_FEISHU_TOKEN_URL` | 否 | `https://open.feishu.cn/open-apis/authen/v2/oauth/token` | 正常生产不要覆盖 |
 | `MX_FEISHU_USER_INFO_URL` | 否 | `https://open.feishu.cn/open-apis/authen/v1/user_info` | 正常生产不要覆盖 |
 | `MX_INTERNAL_OPS_TOKEN` | 是 | Secret，至少 32 字符 | Internal 管理 API、Admin UI；仅内置 `svc_sdk_gateway` 保留 client_credentials 兼容 fallback |
-| `MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON` | 产品集成时是 | Secret JSON | serviceAccountId → 独立 client secret；K8s 从 `mx-sdk-service-account-secrets/secrets.json` 注入 |
-| `MX_SDK_SERVICE_ACCOUNT_SECRETS_FILE` | 否 | 文件路径 | 非 K8s 环境可从受保护文件读取同一 JSON；inline JSON 优先 |
+| `MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON` | 仅旧账号迁移时 | Secret JSON | 一版兼容输入：把旧 serviceAccountId → secret map 导入 PostgreSQL hash；新应用由 AppCenter 自动签发，日常 deploy 省略 |
+| `MX_SDK_SERVICE_ACCOUNT_SECRETS_FILE` | 仅旧账号迁移时 | 文件路径 | 非 K8s 迁移可从受保护文件读取同一旧 map；inline JSON 优先，迁移验证后删除 |
 | `MX_LAUNCHER_NETWORK_LEGACY_UNAUTHENTICATED_USER_LEASES` | 否 | `0` | 仅供旧密码客户端短期迁移；生产默认关闭 |
 | `MX_LAUNCHER_NETWORK_HANDOVER_TTL_MS` | 否 | `300000` | 两阶段 peer handover 的服务端 deadline；过期后自动走 abort 对账 |
 | `MX_LAUNCHER_NETWORK_HANDOVER_RECONCILE_MS` | 否 | `30000` | 服务端扫描过期/`abort-pending` handover 的周期 |

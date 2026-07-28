@@ -3801,13 +3801,18 @@ function isOpsProtectedInternalRequest(target, method = 'GET') {
     return /^\/internal\/v1\/user-center\/(?:bootstrap|users|users\/import|service-accounts|tokens\/issue)$/.test(path)
       || /^\/internal\/v1\/user-center\/users\/[^/]+\/(?:password|oversea|h2o\/runtime-profile|oversea\/sync-runtime)$/.test(path)
       || /^\/internal\/v1\/sdk\/(?:users|service-accounts)$/.test(path)
+      || /^\/internal\/v1\/sdk\/service-accounts\/[^/]+\/credentials\/rotate$/.test(path)
+      || /^\/internal\/v1\/app-center\/apps(?:\/[^/]+)?$/.test(path)
       || /^\/internal\/v1\/release-management\/plans(?:\/[^/]+\/gate)?$/.test(path)
       || path === '/internal/v1/release-artifacts'
       || /^\/internal\/v1\/launcher-network\/leases\/[^/]+\/(?:release|domestic-peer\/sync|domestic-relay\/diagnostics|internal-direct-peer\/sync)$/.test(path)
       || /^\/internal\/v1\/launcher-network\/(?:products\/[^/]+|mihomo\/sites\/[^/]+)$/.test(path);
   }
   return verb === 'DELETE'
-    && /^\/internal\/v1\/user-center\/users\/[^/]+$/.test(path);
+    && (
+      /^\/internal\/v1\/user-center\/users\/[^/]+$/.test(path)
+      || /^\/internal\/v1\/app-center\/apps\/[^/]+$/.test(path)
+    );
 }
 
 function normalizedInternalServerEndpoint(value = serverInput.value) {
@@ -9420,6 +9425,13 @@ async function saveAppCenterAppFromEditor(root) {
       method: 'POST',
       body
     });
+    const issuedCredential = payload.publisher?.credential;
+    if (issuedCredential?.clientId && issuedCredential?.clientSecret) {
+      window.prompt(
+        'Release Publisher credential（仅显示一次，请立即保存到 CI/Vault）',
+        `MX_RELEASE_CLIENT_ID=${issuedCredential.clientId}\nMX_RELEASE_CLIENT_SECRET=${issuedCredential.clientSecret}`
+      );
+    }
     savedDnsRoute = await syncLauncherAppDnsRoute({ ...draft, appId, launcherMode }, appId);
     const app = payload.app || body;
     state.appCenterApps = [

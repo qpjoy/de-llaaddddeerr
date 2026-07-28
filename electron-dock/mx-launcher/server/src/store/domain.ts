@@ -49,6 +49,7 @@ import type {
   GatewayRuntimeConfigInput,
   ImportUserCenterUserRow,
   ImportUserCenterUsersInput,
+  IssueServiceAccountCredentialInput,
   IssueTokenInput,
   LauncherLeaseProfile,
   LauncherNetworkLease,
@@ -124,6 +125,9 @@ import type {
   UserCenterOrg,
   UserCenterRole,
   UserCenterServiceAccount,
+  UserCenterServiceAccountCredential,
+  UserCenterServiceAccountCredentialStatus,
+  UserCenterIssuedServiceAccountCredential,
   UserCenterTenant,
   UserCenterTokenRecord,
   UserCenterUser,
@@ -212,6 +216,11 @@ const USER_PASSWORD_SCRYPT = {
   keyLength: 64
 };
 
+export const USER_CENTER_SERVICE_ACCOUNT_SECRET_PREFIX = 'mxsa1.';
+const USER_CENTER_SERVICE_ACCOUNT_SECRET_BYTES = 32;
+const USER_CENTER_SERVICE_ACCOUNT_SECRET_MIN_LENGTH = 32;
+const USER_CENTER_SERVICE_ACCOUNT_SECRET_MAX_LENGTH = 4096;
+
 export function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
@@ -234,6 +243,18 @@ export function builtinUserCenterRoles(now = new Date().toISOString()): UserCent
       roleId: 'mx-service-account',
       displayName: 'MX Service Account',
       scopes: SERVICE_ACCOUNT_SCOPES,
+      createdAt: now
+    },
+    {
+      roleId: 'mx-release-publisher',
+      displayName: 'MX Release Publisher',
+      scopes: ['sdk.release.read', 'sdk.release.publish'],
+      createdAt: now
+    },
+    {
+      roleId: 'mx-release-approver',
+      displayName: 'MX Release Approver',
+      scopes: ['sdk.release.read', 'sdk.release.approve'],
       createdAt: now
     },
     {
@@ -483,8 +504,16 @@ function mergeUserAppAccess(previous: UserCenterAppAccess | null | undefined, in
 }
 
 function hashUserCenterPassword(password: string): string {
+  return hashScryptValue(password);
+}
+
+function verifyUserCenterPasswordHash(password: string, encoded: string): boolean {
+  return verifyScryptValue(password, encoded);
+}
+
+function hashScryptValue(value: string): string {
   const salt = randomBytes(16).toString('base64url');
-  const hash = scryptSync(password, salt, USER_PASSWORD_SCRYPT.keyLength, {
+  const hash = scryptSync(value, salt, USER_PASSWORD_SCRYPT.keyLength, {
     N: USER_PASSWORD_SCRYPT.N,
     r: USER_PASSWORD_SCRYPT.r,
     p: USER_PASSWORD_SCRYPT.p
@@ -492,21 +521,41 @@ function hashUserCenterPassword(password: string): string {
   return `scrypt$N=${USER_PASSWORD_SCRYPT.N},r=${USER_PASSWORD_SCRYPT.r},p=${USER_PASSWORD_SCRYPT.p}$${salt}$${hash}`;
 }
 
-function verifyUserCenterPasswordHash(password: string, encoded: string): boolean {
-  const parts = encoded.split('$');
-  if (parts.length !== 4 || parts[0] !== 'scrypt') return false;
-  const params = Object.fromEntries(parts[1].split(',').map((item) => {
-    const [key, value] = item.split('=');
-    return [key, Number(value)];
-  }));
-  const salt = parts[2];
-  const expected = Buffer.from(parts[3], 'base64url');
-  const actual = scryptSync(password, salt, expected.length, {
-    N: Number(params.N) || USER_PASSWORD_SCRYPT.N,
-    r: Number(params.r) || USER_PASSWORD_SCRYPT.r,
-    p: Number(params.p) || USER_PASSWORD_SCRYPT.p
-  });
-  return expected.length === actual.length && timingSafeEqual(expected, actual);
+function verifyScryptValue(value: string, encoded: string): boolean {
+  try {
+    const parts = encoded.split('$');
+    if (parts.length !== 4 || parts[0] !== 'scrypt') return false;
+    const params = Object.fromEntries(parts[1].split(',').map((item) => {
+      const [key, parameterValue] = item.split('=');
+      return [key, Number(parameterValue)];
+    }));
+    const salt = parts[2];
+    const expected = Buffer.from(parts[3], 'base64url');
+    if (!salt || !expected.length) return false;
+    const actual = scryptSync(value, salt, expected.length, {
+      N: Number(params.N) || USER_PASSWORD_SCRYPT.N,
+      r: Number(params.r) || USER_PASSWORD_SCRYPT.r,
+      p: Number(params.p) || USER_PASSWORD_SCRYPT.p
+    });
+    return expected.length === actual.length && timingSafeEqual(expected, actual);
+  } catch {
+    return false;
+  }
+}
+
+function validateUserCenterServiceAccountSecret(clientSecret: string): void {
+  if (typeof clientSecret !== 'string' || !clientSecret) {
+    throw new Error('clientSecret is required');
+  }
+  if (clientSecret.length < USER_CENTER_SERVICE_ACCOUNT_SECRET_MIN_LENGTH) {
+    throw new Error(`clientSecret must contain at least ${USER_CENTER_SERVICE_ACCOUNT_SECRET_MIN_LENGTH} characters`);
+  }
+  if (clientSecret.length > USER_CENTER_SERVICE_ACCOUNT_SECRET_MAX_LENGTH) {
+    throw new Error(`clientSecret must contain at most ${USER_CENTER_SERVICE_ACCOUNT_SECRET_MAX_LENGTH} characters`);
+  }
+  if (/[\r\n\0]/.test(clientSecret)) {
+    throw new Error('clientSecret must be a single-line value');
+  }
 }
 
 function nullableTrimmed(value: unknown): string | null {
@@ -554,7 +603,13 @@ export function createUserCenterServiceAccount(
   input: CreateServiceAccountInput,
   now = new Date().toISOString()
 ): UserCenterServiceAccount {
-  const serviceAccountId = input.serviceAccountId?.trim() || 'svc_sdk_gateway';
+  const serviceAccountId = input.serviceAccountId?.trim() || '';
+  if (!serviceAccountId) throw new Error('serviceAccountId is required');
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(serviceAccountId)) {
+    throw new Error(
+      'serviceAccountId must be 1-160 characters and match [A-Za-z0-9][A-Za-z0-9_.:-]*'
+    );
+  }
   return {
     serviceAccountId,
     tenantId: 'tenant_default',
@@ -564,6 +619,122 @@ export function createUserCenterServiceAccount(
     allowedProductIds: uniqueAppIds(input.allowedProductIds ?? []),
     status: 'active',
     createdAt: now
+  };
+}
+
+export function appReleasePublisherServiceAccountId(appId: string): string {
+  const normalized = appId
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'app';
+  const suffix = '_release_publisher';
+  const maxAppIdLength = 160 - 'svc_'.length - suffix.length;
+  const bounded = normalized.length <= maxAppIdLength
+    ? normalized
+    : `${normalized.slice(0, maxAppIdLength - 13)}_${createHash('sha256').update(normalized).digest('hex').slice(0, 12)}`;
+  return `svc_${bounded}${suffix}`;
+}
+
+export function generateUserCenterServiceAccountSecret(): string {
+  return `${USER_CENTER_SERVICE_ACCOUNT_SECRET_PREFIX}${randomBytes(USER_CENTER_SERVICE_ACCOUNT_SECRET_BYTES).toString('base64url')}`;
+}
+
+export function userCenterServiceAccountCredentialId(serviceAccountId: string): string {
+  const normalizedServiceAccountId = serviceAccountId.trim();
+  if (!normalizedServiceAccountId) throw new Error('serviceAccountId is required');
+  return `sacred_${createHash('sha256').update(normalizedServiceAccountId).digest('hex').slice(0, 32)}`;
+}
+
+export function hashUserCenterServiceAccountSecret(clientSecret: string): string {
+  validateUserCenterServiceAccountSecret(clientSecret);
+  return hashScryptValue(clientSecret);
+}
+
+export function verifyUserCenterServiceAccountSecret(
+  clientSecret: string,
+  credential: UserCenterServiceAccountCredential | null
+): boolean {
+  if (
+    !credential
+    || credential.kind !== 'client-secret'
+    || typeof clientSecret !== 'string'
+    || clientSecret.length < USER_CENTER_SERVICE_ACCOUNT_SECRET_MIN_LENGTH
+    || clientSecret.length > USER_CENTER_SERVICE_ACCOUNT_SECRET_MAX_LENGTH
+    || /[\r\n]/.test(clientSecret)
+  ) {
+    return false;
+  }
+  return verifyScryptValue(clientSecret, credential.clientSecretHash);
+}
+
+export function createUserCenterServiceAccountCredential(
+  serviceAccountId: string,
+  clientSecret: string,
+  input: Pick<IssueServiceAccountCredentialInput, 'requestedBy'> & {
+    source?: UserCenterServiceAccountCredential['source'];
+  } = {},
+  previous: UserCenterServiceAccountCredential | null = null,
+  now = new Date().toISOString()
+): UserCenterServiceAccountCredential {
+  const normalizedServiceAccountId = serviceAccountId.trim();
+  if (!normalizedServiceAccountId) throw new Error('serviceAccountId is required');
+  const requestedBy = input.requestedBy?.trim() || 'user-center';
+  return {
+    credentialId: previous?.credentialId ?? userCenterServiceAccountCredentialId(normalizedServiceAccountId),
+    serviceAccountId: normalizedServiceAccountId,
+    kind: 'client-secret',
+    clientSecretHash: hashUserCenterServiceAccountSecret(clientSecret),
+    version: (previous?.version ?? 0) + 1,
+    source: input.source ?? 'issued',
+    createdBy: previous?.createdBy ?? requestedBy,
+    createdAt: previous?.createdAt ?? now,
+    updatedBy: requestedBy,
+    updatedAt: now
+  };
+}
+
+export function summarizeUserCenterServiceAccountCredential(
+  credential: UserCenterServiceAccountCredential
+): UserCenterServiceAccountCredentialStatus {
+  return {
+    credentialId: credential.credentialId,
+    serviceAccountId: credential.serviceAccountId,
+    version: credential.version,
+    source: credential.source,
+    issuedAt: credential.updatedAt,
+    updatedAt: credential.updatedAt
+  };
+}
+
+export function issueUserCenterServiceAccountCredential(
+  input: IssueServiceAccountCredentialInput,
+  previous: UserCenterServiceAccountCredential | null = null,
+  now = new Date().toISOString()
+): {
+  credential: UserCenterServiceAccountCredential;
+  issued: UserCenterIssuedServiceAccountCredential;
+} {
+  const serviceAccountId = input.serviceAccountId?.trim();
+  if (!serviceAccountId) throw new Error('serviceAccountId is required');
+  if (previous && input.rotate !== true) {
+    throw new Error(`Service account credential already exists: ${serviceAccountId}`);
+  }
+  const clientSecret = generateUserCenterServiceAccountSecret();
+  const credential = createUserCenterServiceAccountCredential(
+    serviceAccountId,
+    clientSecret,
+    input,
+    previous,
+    now
+  );
+  return {
+    credential,
+    issued: {
+      clientId: serviceAccountId,
+      clientSecret,
+      credential: summarizeUserCenterServiceAccountCredential(credential)
+    }
   };
 }
 
@@ -713,14 +884,13 @@ function gatewayRouteRequiredScopes(routeId: string): string[] {
   if (routeId === 'sdk.gateway.access.evaluate') return ['sdk.identity.read'];
   if (routeId === 'sdk.config.snapshot') return ['sdk.config.snapshot', 'sdk.identity.read', 'auth.read'];
   if (routeId.startsWith('sdk.identity.')) return ['sdk.identity.read', 'auth.read'];
-  if (routeId === 'sdk.roles.list' || routeId === 'sdk.users.list' || routeId === 'sdk.service_accounts.list') {
+  if (routeId === 'sdk.roles.list' || routeId === 'sdk.users.list') {
     return ['sdk.user.read', 'rbac.manage'];
   }
   if (routeId === 'sdk.users.password.self') return ['auth.read'];
   if (
     routeId === 'sdk.users.create'
     || routeId === 'sdk.users.password.update'
-    || routeId === 'sdk.service_accounts.create'
   ) {
     return ['sdk.user.write', 'rbac.manage'];
   }
@@ -3350,22 +3520,6 @@ export function createSdkGatewayManifest(config: RuntimeConfig): SdkGatewayManif
       description: 'Updates a User Center local password and revokes the user’s active tokens.'
     },
     {
-      routeId: 'sdk.service_accounts.list',
-      path: '/internal/v1/sdk/service-accounts',
-      upstreamModule: 'user-center',
-      audience: 'mx-sdk',
-      authRequired: true,
-      description: 'Lists service accounts that can call SDK Gateway routes.'
-    },
-    {
-      routeId: 'sdk.service_accounts.create',
-      path: '/internal/v1/sdk/service-accounts',
-      upstreamModule: 'user-center',
-      audience: 'mx-sdk',
-      authRequired: true,
-      description: 'Creates a service account and assigns SDK Gateway scopes.'
-    },
-    {
       routeId: 'sdk.permissions.request',
       path: '/internal/v1/sdk/permissions/requests',
       upstreamModule: 'permissions',
@@ -5254,13 +5408,13 @@ export function builtinConfigSecretReferences(config: RuntimeConfig): ConfigSecr
     }, null),
     buildConfigSecretReference(config, {
       secretRefId: 'secretref_sdk_service_account_credentials',
-      name: 'SDK Service Account Credentials',
+      name: 'Legacy SDK Service Account Credential Import',
       providerId: 'secretprov_kubernetes_runtime',
       remoteRef: 'mx-sdk-service-account-secrets',
-      status: 'active',
-      consumerIds: ['sdk-gateway', 'release-center'],
+      status: 'paused',
+      consumerIds: ['sdk-gateway-migration'],
       exposure: 'internal-only',
-      versionStage: 'runtime',
+      versionStage: 'legacy-migration',
       rotationMode: 'manual',
       targetNamespace: 'mx-internal-shadow',
       targetSecretName: 'mx-sdk-service-account-secrets',

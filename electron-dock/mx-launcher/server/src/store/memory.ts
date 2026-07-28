@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 import {
   advanceLauncherNetworkHandover,
@@ -14,6 +15,7 @@ import {
 import {
   builtinAppCenterApps,
   builtinConfigSecretReferences,
+  appReleasePublisherServiceAccountId,
   buildAppOnboardingDefaults,
   buildAppOnboardingTemplates,
   buildAppCenterApp,
@@ -66,6 +68,7 @@ import {
   createConfigPolicySnapshot,
   createSdkGatewayManifest,
   defaultSiteSlotAccessAccountNames,
+  createUserCenterServiceAccountCredential,
   createUserCenterUserCredential,
   createServiceAccountPrincipalFromRecord,
   createUserCenterServiceAccount,
@@ -89,6 +92,7 @@ import {
   normalizeTestStatus,
   normalizeLauncherNetworkMihomoSite,
   normalizeUpdatePolicy,
+  issueUserCenterServiceAccountCredential,
   siteSlotWorkerReportTlsFingerprint,
   releasePolicyByKind,
   renderHysteria2MihomoSubscription,
@@ -102,7 +106,9 @@ import {
   userMatchesLogin,
   userOverseaAccountName,
   userOverseaEntitlementId,
+  summarizeUserCenterServiceAccountCredential,
   verifyUserCenterCredential,
+  verifyUserCenterServiceAccountSecret,
   required,
   MX_H2I_PRODUCT_ID,
   assertLauncherNetworkLeaseEntitlement,
@@ -174,7 +180,9 @@ import type {
   IdentityLinkRequest,
   ImportUserCenterUsersInput,
   ImportUserCenterUsersResult,
+  ImportLegacyServiceAccountCredentialInput,
   IssueTokenInput,
+  IssueServiceAccountCredentialInput,
   LauncherNetworkHandover,
   LauncherNetworkHandoverAdvanceInput,
   LauncherNetworkHandoverInput,
@@ -245,6 +253,11 @@ import type {
   UserCenterOrg,
   UserCenterRole,
   UserCenterServiceAccount,
+  UserCenterServiceAccountCredential,
+  UserCenterServiceAccountCredentialImportResult,
+  UserCenterServiceAccountCredentialStatus,
+  UserCenterServiceAccountCredentialVerificationResult,
+  UserCenterIssuedServiceAccountCredential,
   UserCenterTenant,
   UserCenterTokenRecord,
   UserCenterUser,
@@ -256,6 +269,7 @@ import type {
   UserPasswordUpdateResult,
   UserPasswordVerificationInput,
   UserPasswordVerificationResult,
+  VerifyServiceAccountCredentialInput,
   UserH2oRuntimeProfile,
   UserH2oRuntimeProfileInput,
   UserOverseaEntitlement,
@@ -268,6 +282,38 @@ import type {
   TestStep,
   TestStepInput
 } from '../types.js';
+
+const APP_RELEASE_PUBLISHER_SCOPES = ['sdk.release.read', 'sdk.release.publish'];
+
+function configuredLegacyServiceAccountSecrets(): Array<[string, string]> {
+  const inline = process.env.MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON?.trim();
+  const file = process.env.MX_SDK_SERVICE_ACCOUNT_SECRETS_FILE?.trim();
+  let raw = inline || '';
+  if (!raw && file) {
+    try {
+      raw = readFileSync(file, 'utf8');
+    } catch {
+      return [];
+    }
+  }
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+    return Object.entries(parsed).flatMap(([key, value]) => {
+      const serviceAccountId = key.trim();
+      const clientSecret = typeof value === 'string' ? value.trim() : '';
+      return serviceAccountId
+        && clientSecret.length >= 32
+        && clientSecret.length <= 4096
+        && !/[\r\n\0]/.test(clientSecret)
+        ? [[serviceAccountId, clientSecret] as [string, string]]
+        : [];
+    });
+  } catch {
+    return [];
+  }
+}
 
 export class MemoryStore implements PlatformStore {
   private readonly sites = new Map<string, SiteHeartbeat>();
@@ -307,6 +353,7 @@ export class MemoryStore implements PlatformStore {
   private readonly userOverseaEntitlements = new Map<string, UserOverseaEntitlement>();
   private readonly userOverseaAccountSyncReports = new Map<string, UserOverseaAccountSyncReport>();
   private readonly serviceAccounts = new Map<string, UserCenterServiceAccount>();
+  private readonly serviceAccountCredentials = new Map<string, UserCenterServiceAccountCredential>();
   private readonly tokens = new Map<string, UserCenterTokenRecord>();
   private readonly feishuAuthorizationTransactions = new Map<string, FeishuAuthorizationTransaction>();
   private readonly authenticationRateLimits = new Map<
@@ -334,6 +381,7 @@ export class MemoryStore implements PlatformStore {
     this.registerBuiltinDns();
     this.registerBuiltinDomesticRuntimeConfigs();
     this.registerBuiltinSecretRegistry();
+    this.ensureEnabledAppPublisherServiceAccounts();
   }
 
   overview() {
@@ -824,6 +872,7 @@ export class MemoryStore implements PlatformStore {
       roleIds: ['mx-service-account'],
       requestId: 'bootstrap-user-center'
     });
+    this.importConfiguredLegacyServiceAccountCredentials();
     const legacySeedInput = legacyHdoUserCenterSeedInput();
     const legacyRowsToImport = legacySeedInput.users.flatMap((row) => {
       const seedUserInput = normalizeImportUserCenterRow(row, legacySeedInput);
@@ -1383,7 +1432,135 @@ export class MemoryStore implements PlatformStore {
     return serviceAccount;
   }
 
+  listUserCenterServiceAccountCredentialStatuses(): UserCenterServiceAccountCredentialStatus[] {
+    return [...this.serviceAccountCredentials.values()]
+      .map(summarizeUserCenterServiceAccountCredential)
+      .sort((a, b) => a.serviceAccountId.localeCompare(b.serviceAccountId));
+  }
+
+  getUserCenterServiceAccountCredential(
+    serviceAccountId: string
+  ): UserCenterServiceAccountCredentialStatus | null {
+    const credential = this.serviceAccountCredentials.get(serviceAccountId.trim());
+    return credential ? summarizeUserCenterServiceAccountCredential(credential) : null;
+  }
+
+  issueUserCenterServiceAccountCredential(
+    input: IssueServiceAccountCredentialInput
+  ): UserCenterIssuedServiceAccountCredential {
+    const serviceAccountId = input.serviceAccountId?.trim() || '';
+    const serviceAccount = this.serviceAccounts.get(serviceAccountId);
+    if (!serviceAccount) throw new Error(`Service account not found: ${serviceAccountId}`);
+    if (serviceAccount.status !== 'active') throw new Error(`Service account is disabled: ${serviceAccountId}`);
+    const previous = this.serviceAccountCredentials.get(serviceAccountId) ?? null;
+    const result = issueUserCenterServiceAccountCredential(
+      input,
+      previous
+    );
+    this.serviceAccountCredentials.set(serviceAccountId, result.credential);
+    this.revokeServiceAccountTokens(serviceAccountId);
+    this.recordAudit({
+      eventType: 'iam.service_account.credential.issued',
+      actorKind: 'user-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        serviceAccountId,
+        credentialId: result.credential.credentialId,
+        version: result.credential.version,
+        rotated: result.credential.version > 1,
+        requestedBy: input.requestedBy?.trim() || 'user-center'
+      }
+    });
+    return result.issued;
+  }
+
+  verifyUserCenterServiceAccountCredential(
+    input: VerifyServiceAccountCredentialInput
+  ): UserCenterServiceAccountCredentialVerificationResult {
+    const serviceAccountId = input.serviceAccountId?.trim() || '';
+    const serviceAccount = this.serviceAccounts.get(serviceAccountId);
+    if (!serviceAccount) {
+      return { serviceAccountId, ok: false, reason: 'service-account-not-found' };
+    }
+    if (serviceAccount.status !== 'active') {
+      return { serviceAccountId, ok: false, reason: 'service-account-disabled' };
+    }
+    const credential = this.serviceAccountCredentials.get(serviceAccountId) ?? null;
+    if (!credential) {
+      return { serviceAccountId, ok: false, reason: 'credential-not-found' };
+    }
+    const ok = verifyUserCenterServiceAccountSecret(input.clientSecret ?? '', credential);
+    return {
+      serviceAccountId,
+      ok,
+      reason: ok ? 'accepted' : 'invalid-secret',
+      credentialVersion: credential.version
+    };
+  }
+
+  importLegacyUserCenterServiceAccountCredential(
+    input: ImportLegacyServiceAccountCredentialInput
+  ): UserCenterServiceAccountCredentialImportResult {
+    const serviceAccountId = input.serviceAccountId?.trim() || '';
+    const clientSecret = input.clientSecret ?? '';
+    const serviceAccount = this.serviceAccounts.get(serviceAccountId);
+    if (!serviceAccount) throw new Error(`Service account not found: ${serviceAccountId}`);
+    if (serviceAccount.status !== 'active') {
+      throw new Error(`Service account is disabled: ${serviceAccountId}`);
+    }
+    const previous = this.serviceAccountCredentials.get(serviceAccountId) ?? null;
+    if (previous) {
+      return {
+        outcome: 'preserved',
+        credential: summarizeUserCenterServiceAccountCredential(previous)
+      };
+    }
+    const credential = createUserCenterServiceAccountCredential(
+      serviceAccountId,
+      clientSecret,
+      {
+        requestedBy: input.requestedBy?.trim() || 'legacy-secret-import',
+        source: 'legacy-import'
+      }
+    );
+    this.serviceAccountCredentials.set(serviceAccountId, credential);
+    this.recordAudit({
+      eventType: 'iam.service_account.credential.imported',
+      actorKind: 'user-center',
+      requestId: input.requestId ?? null,
+      metadata: {
+        serviceAccountId,
+        credentialId: credential.credentialId,
+        version: credential.version
+      }
+    });
+    return {
+      outcome: 'imported',
+      credential: summarizeUserCenterServiceAccountCredential(credential)
+    };
+  }
+
   issueUserCenterToken(input: IssueTokenInput): UserCenterIssuedToken {
+    const credential = input.subjectKind === 'service-account'
+      ? this.serviceAccountCredentials.get(input.subjectId) ?? null
+      : null;
+    if (
+      input.subjectKind === 'service-account'
+      && Number.isInteger(input.serviceAccountCredentialVersion)
+      && (credential?.version ?? 0) !== input.serviceAccountCredentialVersion
+    ) {
+      throw new Error('Service account credential changed during authentication');
+    }
+    if (
+      input.subjectKind === 'service-account'
+      && input.serviceAccountClientSecret
+      && !verifyUserCenterServiceAccountSecret(
+        input.serviceAccountClientSecret,
+        credential
+      )
+    ) {
+      throw new Error('Service account credential changed during authentication');
+    }
     const principal = this.principalForSubject(input.subjectKind, input.subjectId);
     if (!principal) {
       throw new Error(`Unknown token subject: ${input.subjectKind}:${input.subjectId}`);
@@ -2319,6 +2496,11 @@ export class MemoryStore implements PlatformStore {
     const appId = input.appId?.trim() || '';
     const previous = appId ? this.getAppCenterApp(appId) : null;
     const app = buildAppCenterApp(input, previous);
+    if (app.enabled !== false) {
+      this.ensureAppPublisherServiceAccount(app);
+    } else {
+      this.disableAppPublisherServiceAccount(app, false);
+    }
     this.appCatalog.set(app.appId, app);
     this.recordAudit({
       eventType: previous ? 'app-center.app.updated' : 'app-center.app.created',
@@ -2341,12 +2523,14 @@ export class MemoryStore implements PlatformStore {
       throw new Error('builtin AppCenter app cannot be deleted');
     }
     this.appCatalog.delete(app.appId);
+    const publisherRevoked = this.disableAppPublisherServiceAccount(app, true);
     this.recordAudit({
       eventType: 'app-center.app.deleted',
       actorKind: 'app-center',
       productId: app.appId,
       metadata: {
-        requestedBy: 'desktop-admin'
+        requestedBy: 'desktop-admin',
+        publisherRevoked
       }
     });
     return true;
@@ -3888,6 +4072,118 @@ export class MemoryStore implements PlatformStore {
         explicit: product.updatedBy !== 'builtin' || product.createdBy !== 'builtin'
       }))
       .filter((item) => item.siteId);
+  }
+
+  private ensureEnabledAppPublisherServiceAccounts(): void {
+    for (const app of this.appCatalog.values()) {
+      if (app.enabled === false) continue;
+      try {
+        this.ensureAppPublisherServiceAccount(app);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.startsWith('Release publisher service account collision:')) throw error;
+        console.warn(`[mx-launcher] skipped Release Publisher reconciliation for ${app.appId}: ${message}`);
+      }
+    }
+  }
+
+  private ensureAppPublisherServiceAccount(app: AppCenterApp): UserCenterServiceAccount {
+    const serviceAccountId = appReleasePublisherServiceAccountId(app.appId);
+    const previous = this.serviceAccounts.get(serviceAccountId);
+    if (!previous) {
+      return this.createUserCenterServiceAccount({
+        serviceAccountId,
+        displayName: `${app.displayName} Release Publisher`,
+        roleIds: ['mx-release-publisher'],
+        scopes: APP_RELEASE_PUBLISHER_SCOPES,
+        allowedProductIds: [app.appId],
+        requestId: 'app-release-publisher-reconcile'
+      });
+    }
+    if (
+      previous.allowedProductIds?.length !== 1
+      || previous.allowedProductIds[0] !== app.appId
+    ) {
+      throw new Error(`Release publisher service account collision: ${serviceAccountId}`);
+    }
+    const scopes = [...APP_RELEASE_PUBLISHER_SCOPES];
+    const roleIds = ['mx-release-publisher'];
+    if (
+      previous.scopes.length === scopes.length
+      && scopes.every((scope) => previous.scopes.includes(scope))
+      && previous.roleIds.length === roleIds.length
+      && previous.roleIds[0] === roleIds[0]
+      && previous.allowedProductIds?.length === 1
+      && previous.allowedProductIds[0] === app.appId
+      && previous.status === 'active'
+    ) {
+      return previous;
+    }
+    const reconciled: UserCenterServiceAccount = {
+      ...previous,
+      roleIds,
+      scopes,
+      allowedProductIds: [app.appId],
+      status: 'active'
+    };
+    this.serviceAccounts.set(serviceAccountId, reconciled);
+    return reconciled;
+  }
+
+  private disableAppPublisherServiceAccount(
+    app: AppCenterApp,
+    deleteCredential: boolean
+  ): boolean {
+    const serviceAccountId = appReleasePublisherServiceAccountId(app.appId);
+    const publisher = this.serviceAccounts.get(serviceAccountId);
+    if (
+      !publisher
+      || publisher.allowedProductIds?.length !== 1
+      || publisher.allowedProductIds[0] !== app.appId
+    ) {
+      return false;
+    }
+    this.serviceAccounts.set(serviceAccountId, { ...publisher, status: 'disabled' });
+    this.revokeServiceAccountTokens(serviceAccountId);
+    if (deleteCredential) this.serviceAccountCredentials.delete(serviceAccountId);
+    return true;
+  }
+
+  private revokeServiceAccountTokens(
+    serviceAccountId: string,
+    revokedAt = new Date().toISOString()
+  ): void {
+    for (const [tokenHash, token] of this.tokens.entries()) {
+      if (
+        token.subjectKind === 'service-account'
+        && token.subjectId === serviceAccountId
+        && !token.revokedAt
+      ) {
+        this.tokens.set(tokenHash, { ...token, revokedAt });
+      }
+    }
+  }
+
+  private importConfiguredLegacyServiceAccountCredentials(): void {
+    for (const [serviceAccountId, clientSecret] of configuredLegacyServiceAccountSecrets()) {
+      try {
+        this.importLegacyUserCenterServiceAccountCredential({
+          serviceAccountId,
+          clientSecret,
+          requestedBy: 'startup-legacy-secret-import',
+          requestId: 'startup-legacy-secret-import'
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (
+          !message.startsWith('Service account not found:')
+          && !message.startsWith('Service account is disabled:')
+        ) {
+          throw error;
+        }
+        console.warn(`[mx-launcher] skipped legacy credential import for ${serviceAccountId}: ${message}`);
+      }
+    }
   }
 
   private registerBuiltinApps(): void {

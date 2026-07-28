@@ -388,21 +388,42 @@ export class UserCenterController {
   @Get('internal/v1/user-center/service-accounts')
   async serviceAccounts(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
     assertInternalOpsToken(opsToken);
-    return { serviceAccounts: await this.store.listUserCenterServiceAccounts() };
+    return {
+      serviceAccounts: await this.store.listUserCenterServiceAccounts(),
+      credentials: await this.store.listUserCenterServiceAccountCredentialStatuses()
+    };
   }
 
   @Post('internal/v1/user-center/service-accounts')
+  @Header('Cache-Control', 'no-store')
   async createServiceAccount(
     @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
     @Body() rawBody: unknown
   ) {
     assertInternalOpsToken(opsToken);
+    const input = toCreateServiceAccountInput(asRecord(rawBody));
+    const serviceAccount = await this.store.createUserCenterServiceAccount(input);
+    const status = await this.store.getUserCenterServiceAccountCredential(serviceAccount.serviceAccountId);
+    let credential = null;
+    if (!status) {
+      try {
+        credential = await this.store.issueUserCenterServiceAccountCredential({
+          serviceAccountId: serviceAccount.serviceAccountId,
+          requestedBy: 'user-center',
+          requestId: input.requestId
+        });
+      } catch (error) {
+        if (!serviceAccountCredentialAlreadyExists(error)) throw error;
+      }
+    }
     return {
-      serviceAccount: await this.store.createUserCenterServiceAccount(toCreateServiceAccountInput(asRecord(rawBody)))
+      serviceAccount,
+      credential
     };
   }
 
   @Post('internal/v1/user-center/tokens/issue')
+  @Header('Cache-Control', 'no-store')
   async issueToken(
     @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
     @Body() rawBody: unknown
@@ -627,6 +648,10 @@ function toIssueTokenInput(body: Record<string, unknown>): IssueTokenInput {
     ttlSeconds: numberValue(body.ttlSeconds),
     requestId: nullableString(body.requestId)
   };
+}
+
+function serviceAccountCredentialAlreadyExists(error: unknown): boolean {
+  return String(error instanceof Error ? error.message : error).includes('credential already exists');
 }
 
 function numberValue(value: unknown): number | null {

@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 import type { DataSource, EntityManager, Repository } from 'typeorm';
 
@@ -62,7 +63,9 @@ import type {
   IdentityLinkRequest,
   ImportUserCenterUsersInput,
   ImportUserCenterUsersResult,
+  ImportLegacyServiceAccountCredentialInput,
   IssueTokenInput,
+  IssueServiceAccountCredentialInput,
   LauncherNetworkHandover,
   LauncherNetworkHandoverAdvanceInput,
   LauncherNetworkHandoverInput,
@@ -133,6 +136,11 @@ import type {
   UserCenterOrg,
   UserCenterRole,
   UserCenterServiceAccount,
+  UserCenterServiceAccountCredential,
+  UserCenterServiceAccountCredentialImportResult,
+  UserCenterServiceAccountCredentialStatus,
+  UserCenterServiceAccountCredentialVerificationResult,
+  UserCenterIssuedServiceAccountCredential,
   UserCenterTenant,
   UserCenterTokenRecord,
   UserCenterUser,
@@ -144,6 +152,7 @@ import type {
   UserPasswordUpdateResult,
   UserPasswordVerificationInput,
   UserPasswordVerificationResult,
+  VerifyServiceAccountCredentialInput,
   UserH2oRuntimeProfile,
   UserH2oRuntimeProfileInput,
   UserOverseaEntitlement,
@@ -188,6 +197,7 @@ import {
   launcherNetworkLeaseProfile,
   releaseLauncherNetworkLease,
   buildReleaseManagementDecisions,
+  appReleasePublisherServiceAccountId,
   buildSiteSlotAccessAccount,
   buildSiteSlotExecutionRun,
   buildSiteSlotPlan,
@@ -213,6 +223,7 @@ import {
   createConfigSnapshot,
   createSdkGatewayManifest,
   defaultSiteSlotAccessAccountNames,
+  createUserCenterServiceAccountCredential,
   createUserCenterUserCredential,
   createServiceAccountPrincipalFromRecord,
   createUserCenterServiceAccount,
@@ -235,6 +246,7 @@ import {
   normalizeTestStatus,
   normalizeLauncherNetworkMihomoSite,
   normalizeUpdatePolicy,
+  issueUserCenterServiceAccountCredential,
   siteSlotWorkerReportTlsFingerprint,
   releasePolicyByKind,
   renderHysteria2MihomoSubscription,
@@ -246,9 +258,12 @@ import {
   userH2oRuntimeProfileId,
   userCenterDeleteProtectionReason,
   userMatchesLogin,
+  userCenterServiceAccountCredentialId,
   userOverseaAccountName,
   userOverseaEntitlementId,
+  summarizeUserCenterServiceAccountCredential,
   verifyUserCenterCredential,
+  verifyUserCenterServiceAccountSecret,
   required,
   MX_H2I_PRODUCT_ID,
   assertLauncherNetworkLeaseEntitlement,
@@ -275,6 +290,38 @@ import {
   mergeUniqueUserCenterUsers
 } from './user-center-seed.js';
 
+const APP_RELEASE_PUBLISHER_SCOPES = ['sdk.release.read', 'sdk.release.publish'];
+
+function configuredLegacyServiceAccountSecrets(): Array<[string, string]> {
+  const inline = process.env.MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON?.trim();
+  const file = process.env.MX_SDK_SERVICE_ACCOUNT_SECRETS_FILE?.trim();
+  let raw = inline || '';
+  if (!raw && file) {
+    try {
+      raw = readFileSync(file, 'utf8');
+    } catch {
+      return [];
+    }
+  }
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+    return Object.entries(parsed).flatMap(([key, value]) => {
+      const serviceAccountId = key.trim();
+      const clientSecret = typeof value === 'string' ? value.trim() : '';
+      return serviceAccountId
+        && clientSecret.length >= 32
+        && clientSecret.length <= 4096
+        && !/[\r\n\0]/.test(clientSecret)
+        ? [[serviceAccountId, clientSecret] as [string, string]]
+        : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
 type RecordKind =
   | 'site-heartbeat'
   | 'anonymous-enrollment'
@@ -292,6 +339,7 @@ type RecordKind =
   | 'user-oversea-entitlement'
   | 'user-oversea-account-sync-report'
   | 'iam-service-account'
+  | 'iam-service-account-credential'
   | 'iam-token'
   | 'feishu-authorization-transaction'
   | 'authentication-rate-limit'
@@ -351,6 +399,8 @@ export class PostgresStore implements PlatformStore {
     await store.registerBuiltinDomesticRuntimeConfigs();
     await store.registerBuiltinSecretRegistry();
     await store.bootstrapUserCenter();
+    await store.ensureEnabledAppPublisherServiceAccounts();
+    await store.importConfiguredLegacyServiceAccountCredentials();
     return store;
   }
 
@@ -1533,7 +1583,183 @@ export class PostgresStore implements PlatformStore {
     return serviceAccount;
   }
 
+  async listUserCenterServiceAccountCredentialStatuses(): Promise<UserCenterServiceAccountCredentialStatus[]> {
+    return (await this.listRecords<UserCenterServiceAccountCredential>('iam-service-account-credential'))
+      .map(summarizeUserCenterServiceAccountCredential)
+      .sort((a, b) => a.serviceAccountId.localeCompare(b.serviceAccountId));
+  }
+
+  async getUserCenterServiceAccountCredential(
+    serviceAccountId: string
+  ): Promise<UserCenterServiceAccountCredentialStatus | null> {
+    const credential = await this.getServiceAccountCredentialRecord(serviceAccountId);
+    return credential ? summarizeUserCenterServiceAccountCredential(credential) : null;
+  }
+
+  async issueUserCenterServiceAccountCredential(
+    input: IssueServiceAccountCredentialInput
+  ): Promise<UserCenterIssuedServiceAccountCredential> {
+    const serviceAccountId = input.serviceAccountId?.trim() || '';
+    if (!serviceAccountId) throw new Error('serviceAccountId is required');
+    const result = await this.dataSource.transaction(async (manager) => {
+      await manager.query(
+        'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+        [`mx-launcher:${this.config.environment}:service-account-credential`, serviceAccountId]
+      );
+      const records = manager.getRepository(PlatformRecordEntity);
+      const serviceAccountRow = await records.findOne({
+        where: {
+          kind: 'iam-service-account',
+          id: serviceAccountId,
+          environment: this.config.environment
+        }
+      });
+      const serviceAccount = serviceAccountRow?.data as UserCenterServiceAccount | undefined;
+      if (!serviceAccount) throw new Error(`Service account not found: ${serviceAccountId}`);
+      if (serviceAccount.status !== 'active') throw new Error(`Service account is disabled: ${serviceAccountId}`);
+      const credentialId = userCenterServiceAccountCredentialId(serviceAccountId);
+      const credentialRow = await records.findOne({
+        where: {
+          kind: 'iam-service-account-credential',
+          id: credentialId,
+          environment: this.config.environment
+        }
+      });
+      const previous = credentialRow?.data as UserCenterServiceAccountCredential | undefined;
+      if (previous && previous.serviceAccountId !== serviceAccountId) {
+        throw new Error(`Service account credential id collision: ${credentialId}`);
+      }
+      const issued = issueUserCenterServiceAccountCredential(input, previous ?? null);
+      await this.saveRecordTo(
+        records,
+        'iam-service-account-credential',
+        issued.credential.credentialId,
+        issued.credential,
+        this.config.siteId
+      );
+      await this.revokeServiceAccountTokensTo(records, serviceAccountId);
+      await this.recordAuditTo(records, {
+        eventType: 'iam.service_account.credential.issued',
+        actorKind: 'user-center',
+        requestId: input.requestId ?? null,
+        metadata: {
+          serviceAccountId,
+          credentialId: issued.credential.credentialId,
+          version: issued.credential.version,
+          rotated: issued.credential.version > 1,
+          requestedBy: input.requestedBy?.trim() || 'user-center'
+        }
+      });
+      return issued;
+    });
+    return result.issued;
+  }
+
+  async verifyUserCenterServiceAccountCredential(
+    input: VerifyServiceAccountCredentialInput
+  ): Promise<UserCenterServiceAccountCredentialVerificationResult> {
+    const serviceAccountId = input.serviceAccountId?.trim() || '';
+    const serviceAccount = serviceAccountId
+      ? await this.getRecord<UserCenterServiceAccount>('iam-service-account', serviceAccountId)
+      : null;
+    if (!serviceAccount) {
+      return { serviceAccountId, ok: false, reason: 'service-account-not-found' };
+    }
+    if (serviceAccount.status !== 'active') {
+      return { serviceAccountId, ok: false, reason: 'service-account-disabled' };
+    }
+    const credential = await this.getServiceAccountCredentialRecord(serviceAccountId);
+    if (!credential) {
+      return { serviceAccountId, ok: false, reason: 'credential-not-found' };
+    }
+    const ok = verifyUserCenterServiceAccountSecret(input.clientSecret ?? '', credential);
+    return {
+      serviceAccountId,
+      ok,
+      reason: ok ? 'accepted' : 'invalid-secret',
+      credentialVersion: credential.version
+    };
+  }
+
+  async importLegacyUserCenterServiceAccountCredential(
+    input: ImportLegacyServiceAccountCredentialInput
+  ): Promise<UserCenterServiceAccountCredentialImportResult> {
+    const serviceAccountId = input.serviceAccountId?.trim() || '';
+    const clientSecret = input.clientSecret ?? '';
+    if (!serviceAccountId) throw new Error('serviceAccountId is required');
+    const result = await this.dataSource.transaction(async (manager) => {
+      await manager.query(
+        'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+        [`mx-launcher:${this.config.environment}:service-account-credential`, serviceAccountId]
+      );
+      const records = manager.getRepository(PlatformRecordEntity);
+      const serviceAccountRow = await records.findOne({
+        where: {
+          kind: 'iam-service-account',
+          id: serviceAccountId,
+          environment: this.config.environment
+        }
+      });
+      const serviceAccount = serviceAccountRow?.data as UserCenterServiceAccount | undefined;
+      if (!serviceAccount) throw new Error(`Service account not found: ${serviceAccountId}`);
+      if (serviceAccount.status !== 'active') {
+        throw new Error(`Service account is disabled: ${serviceAccountId}`);
+      }
+      const credentialId = userCenterServiceAccountCredentialId(serviceAccountId);
+      const credentialRow = await records.findOne({
+        where: {
+          kind: 'iam-service-account-credential',
+          id: credentialId,
+          environment: this.config.environment
+        }
+      });
+      const previous = credentialRow?.data as UserCenterServiceAccountCredential | undefined;
+      if (previous && previous.serviceAccountId !== serviceAccountId) {
+        throw new Error(`Service account credential id collision: ${credentialId}`);
+      }
+      if (previous) {
+        return {
+          outcome: 'preserved' as const,
+          credential: summarizeUserCenterServiceAccountCredential(previous)
+        };
+      }
+      const credential = createUserCenterServiceAccountCredential(
+        serviceAccountId,
+        clientSecret,
+        {
+          requestedBy: input.requestedBy?.trim() || 'legacy-secret-import',
+          source: 'legacy-import'
+        }
+      );
+      await this.saveRecordTo(
+        records,
+        'iam-service-account-credential',
+        credential.credentialId,
+        credential,
+        this.config.siteId
+      );
+      await this.recordAuditTo(records, {
+        eventType: 'iam.service_account.credential.imported',
+        actorKind: 'user-center',
+        requestId: input.requestId ?? null,
+        metadata: {
+          serviceAccountId,
+          credentialId: credential.credentialId,
+          version: credential.version
+        }
+      });
+      return {
+        outcome: 'imported' as const,
+        credential: summarizeUserCenterServiceAccountCredential(credential)
+      };
+    });
+    return result;
+  }
+
   async issueUserCenterToken(input: IssueTokenInput): Promise<UserCenterIssuedToken> {
+    if (input.subjectKind === 'service-account') {
+      return this.issueServiceAccountTokenWithLifecycleLock(input);
+    }
     const principal = await this.principalForSubject(input.subjectKind, input.subjectId);
     if (!principal) {
       throw new Error(`Unknown token subject: ${input.subjectKind}:${input.subjectId}`);
@@ -1562,6 +1788,89 @@ export class PostgresStore implements PlatformStore {
       }
     });
     return issued;
+  }
+
+  private async issueServiceAccountTokenWithLifecycleLock(
+    input: IssueTokenInput
+  ): Promise<UserCenterIssuedToken> {
+    return this.dataSource.transaction(async (manager) => {
+      await manager.query(
+        'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+        [`mx-launcher:${this.config.environment}:service-account-credential`, input.subjectId]
+      );
+      const records = manager.getRepository(PlatformRecordEntity);
+      const serviceAccountRow = await records.findOne({
+        where: {
+          kind: 'iam-service-account',
+          id: input.subjectId,
+          environment: this.config.environment
+        }
+      });
+      const serviceAccount = serviceAccountRow?.data as UserCenterServiceAccount | undefined;
+      if (!serviceAccount || serviceAccount.status !== 'active') {
+        throw new Error(`Unknown token subject: service-account:${input.subjectId}`);
+      }
+      if (
+        input.serviceAccountClientSecret
+        || Number.isInteger(input.serviceAccountCredentialVersion)
+      ) {
+        const credentialRow = await records.findOne({
+          where: {
+            kind: 'iam-service-account-credential',
+            id: userCenterServiceAccountCredentialId(input.subjectId),
+            environment: this.config.environment
+          }
+        });
+        const credential = credentialRow?.data as UserCenterServiceAccountCredential | undefined;
+        if (
+          Number.isInteger(input.serviceAccountCredentialVersion)
+          && (credential?.version ?? 0) !== input.serviceAccountCredentialVersion
+        ) {
+          throw new Error('Service account credential changed during authentication');
+        }
+        if (
+          input.serviceAccountClientSecret
+          && (
+            !credential
+            || credential.serviceAccountId !== input.subjectId
+            || !verifyUserCenterServiceAccountSecret(input.serviceAccountClientSecret, credential)
+          )
+        ) {
+          throw new Error('Service account credential changed during authentication');
+        }
+      }
+      const roles = await this.listRecordsFrom<UserCenterRole>(records, 'iam-role');
+      const principal = createServiceAccountPrincipalFromRecord(serviceAccount, roles);
+      const requestedScopes = input.scopes?.length ? input.scopes : principal.scopes;
+      const allowedScopes = requestedScopes.filter((scope) => principal.scopes.includes(scope));
+      const token = `mx-v1-${randomBytes(24).toString('base64url')}`;
+      const issued = createUserCenterTokenRecord(this.config, {
+        ...input,
+        scopes: allowedScopes
+      }, token);
+      await this.saveRecordTo(
+        records,
+        'iam-token',
+        issued.record.tokenHash,
+        issued.record,
+        this.config.siteId
+      );
+      await this.recordAuditTo(records, {
+        eventType: 'auth.token.issued',
+        actorKind: 'service-account',
+        requestId: input.requestId ?? null,
+        metadata: {
+          tokenId: issued.record.tokenId,
+          subjectKind: input.subjectKind,
+          subjectId: input.subjectId,
+          audience: issued.record.audience,
+          scopes: issued.record.scopes,
+          authProvider: issued.record.authProvider ?? null,
+          expiresAt: issued.record.expiresAt
+        }
+      });
+      return issued;
+    });
   }
 
   async createFeishuAuthorizationTransaction(
@@ -2585,41 +2894,66 @@ export class PostgresStore implements PlatformStore {
     const appId = input.appId?.trim() || '';
     const previous = appId ? await this.getAppCenterApp(appId) : null;
     const app = buildAppCenterApp(input, previous);
-    await this.saveRecord('app-center-app', app.appId, app, this.config.siteId);
-    await this.recordAudit({
-      eventType: previous ? 'app-center.app.updated' : 'app-center.app.created',
-      actorKind: 'app-center',
-      productId: app.appId,
-      metadata: {
-        requestedBy: input.requestedBy?.trim() || 'desktop-admin',
-        launcherMode: app.launcherMode,
-        standaloneChannelProductId: app.standaloneChannelProductId,
-        builtin: app.builtin
+    await this.dataSource.transaction(async (manager) => {
+      const records = manager.getRepository(PlatformRecordEntity);
+      if (app.enabled !== false) {
+        await this.ensureAppPublisherServiceAccountTo(manager, records, app);
+      } else {
+        await this.disableAppPublisherServiceAccountTo(manager, records, app, false);
       }
+      await this.saveRecordTo(records, 'app-center-app', app.appId, app, this.config.siteId);
+      await this.recordAuditTo(records, {
+        eventType: previous ? 'app-center.app.updated' : 'app-center.app.created',
+        actorKind: 'app-center',
+        productId: app.appId,
+        metadata: {
+          requestedBy: input.requestedBy?.trim() || 'desktop-admin',
+          launcherMode: app.launcherMode,
+          standaloneChannelProductId: app.standaloneChannelProductId,
+          builtin: app.builtin
+        }
+      });
     });
     return app;
   }
 
   async deleteAppCenterApp(appId: string): Promise<boolean> {
-    const app = await this.getAppCenterApp(appId);
-    if (!app) return false;
-    if (app.builtin || app.systemOwned) {
-      throw new Error('builtin AppCenter app cannot be deleted');
-    }
-    await this.records.delete({
-      kind: 'app-center-app',
-      id: app.appId,
-      environment: this.config.environment
-    });
-    await this.recordAudit({
-      eventType: 'app-center.app.deleted',
-      actorKind: 'app-center',
-      productId: app.appId,
-      metadata: {
-        requestedBy: 'desktop-admin'
+    return this.dataSource.transaction(async (manager) => {
+      const records = manager.getRepository(PlatformRecordEntity);
+      const appRow = await records.findOne({
+        where: {
+          kind: 'app-center-app',
+          id: appId,
+          environment: this.config.environment
+        }
+      });
+      const app = appRow?.data as AppCenterApp | undefined;
+      if (!app) return false;
+      if (app.builtin || app.systemOwned) {
+        throw new Error('builtin AppCenter app cannot be deleted');
       }
+      await records.delete({
+        kind: 'app-center-app',
+        id: app.appId,
+        environment: this.config.environment
+      });
+      const publisherRevoked = await this.disableAppPublisherServiceAccountTo(
+        manager,
+        records,
+        app,
+        true
+      );
+      await this.recordAuditTo(records, {
+        eventType: 'app-center.app.deleted',
+        actorKind: 'app-center',
+        productId: app.appId,
+        metadata: {
+          requestedBy: 'desktop-admin',
+          publisherRevoked
+        }
+      });
+      return true;
     });
-    return true;
   }
 
   async listAppCenterInstallations(input: AppCenterInstallationQuery = {}): Promise<AppCenterInstallation[]> {
@@ -4459,6 +4793,209 @@ export class PostgresStore implements PlatformStore {
     };
   }
 
+  private async ensureEnabledAppPublisherServiceAccounts(): Promise<void> {
+    const apps = await this.listRecords<AppCenterApp>('app-center-app');
+    for (const app of apps) {
+      if (app.enabled === false) continue;
+      try {
+        await this.ensureAppPublisherServiceAccount(app);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.startsWith('Release publisher service account collision:')) throw error;
+        console.warn(`[mx-launcher] skipped Release Publisher reconciliation for ${app.appId}: ${message}`);
+      }
+    }
+  }
+
+  private async ensureAppPublisherServiceAccount(app: AppCenterApp): Promise<UserCenterServiceAccount> {
+    return this.dataSource.transaction(async (manager) => (
+      this.ensureAppPublisherServiceAccountTo(
+        manager,
+        manager.getRepository(PlatformRecordEntity),
+        app
+      )
+    ));
+  }
+
+  private async ensureAppPublisherServiceAccountTo(
+    manager: EntityManager,
+    records: Repository<PlatformRecordRow>,
+    app: AppCenterApp
+  ): Promise<UserCenterServiceAccount> {
+    const serviceAccountId = appReleasePublisherServiceAccountId(app.appId);
+    await manager.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+      [`mx-launcher:${this.config.environment}:service-account-credential`, serviceAccountId]
+    );
+    const previousRow = await records.findOne({
+      where: {
+        kind: 'iam-service-account',
+        id: serviceAccountId,
+        environment: this.config.environment
+      }
+    });
+    const previous = previousRow?.data as UserCenterServiceAccount | undefined;
+    if (!previous) {
+      const serviceAccount = createUserCenterServiceAccount({
+        serviceAccountId,
+        displayName: `${app.displayName} Release Publisher`,
+        roleIds: ['mx-release-publisher'],
+        scopes: APP_RELEASE_PUBLISHER_SCOPES,
+        allowedProductIds: [app.appId],
+        requestId: 'app-release-publisher-reconcile'
+      });
+      await this.saveRecordTo(
+        records,
+        'iam-service-account',
+        serviceAccountId,
+        serviceAccount,
+        this.config.siteId
+      );
+      await this.recordAuditTo(records, {
+        eventType: 'iam.service_account.upserted',
+        actorKind: 'user-center',
+        requestId: 'app-release-publisher-reconcile',
+        metadata: {
+          serviceAccountId,
+          roleIds: serviceAccount.roleIds,
+          scopes: serviceAccount.scopes,
+          allowedProductIds: serviceAccount.allowedProductIds ?? [],
+          status: serviceAccount.status
+        }
+      });
+      return serviceAccount;
+    }
+    if (
+      previous.allowedProductIds?.length !== 1
+      || previous.allowedProductIds[0] !== app.appId
+    ) {
+      throw new Error(`Release publisher service account collision: ${serviceAccountId}`);
+    }
+    const scopes = [...APP_RELEASE_PUBLISHER_SCOPES];
+    const roleIds = ['mx-release-publisher'];
+    if (
+      previous.scopes.length === scopes.length
+      && scopes.every((scope) => previous.scopes.includes(scope))
+      && previous.roleIds.length === roleIds.length
+      && previous.roleIds[0] === roleIds[0]
+      && previous.allowedProductIds?.length === 1
+      && previous.allowedProductIds[0] === app.appId
+      && previous.status === 'active'
+    ) {
+      return previous;
+    }
+    const reconciled: UserCenterServiceAccount = {
+      ...previous,
+      roleIds,
+      scopes,
+      allowedProductIds: [app.appId],
+      status: 'active'
+    };
+    await this.saveRecordTo(
+      records,
+      'iam-service-account',
+      serviceAccountId,
+      reconciled,
+      this.config.siteId
+    );
+    return reconciled;
+  }
+
+  private async disableAppPublisherServiceAccountTo(
+    manager: EntityManager,
+    records: Repository<PlatformRecordRow>,
+    app: AppCenterApp,
+    deleteCredential: boolean
+  ): Promise<boolean> {
+    const serviceAccountId = appReleasePublisherServiceAccountId(app.appId);
+    await manager.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+      [`mx-launcher:${this.config.environment}:service-account-credential`, serviceAccountId]
+    );
+    const publisherRow = await records.findOne({
+      where: {
+        kind: 'iam-service-account',
+        id: serviceAccountId,
+        environment: this.config.environment
+      }
+    });
+    const publisher = publisherRow?.data as UserCenterServiceAccount | undefined;
+    if (
+      !publisher
+      || publisher.allowedProductIds?.length !== 1
+      || publisher.allowedProductIds[0] !== app.appId
+    ) {
+      return false;
+    }
+    await this.saveRecordTo(
+      records,
+      'iam-service-account',
+      serviceAccountId,
+      { ...publisher, status: 'disabled' },
+      this.config.siteId
+    );
+    await this.revokeServiceAccountTokensTo(records, serviceAccountId);
+    if (deleteCredential) {
+      await records.delete({
+        kind: 'iam-service-account-credential',
+        id: userCenterServiceAccountCredentialId(serviceAccountId),
+        environment: this.config.environment
+      });
+    }
+    return true;
+  }
+
+  private async revokeServiceAccountTokensTo(
+    records: Repository<PlatformRecordRow>,
+    serviceAccountId: string,
+    revokedAt = new Date().toISOString()
+  ): Promise<void> {
+    const tokenRows = await records.find({
+      where: {
+        kind: 'iam-token',
+        environment: this.config.environment
+      }
+    });
+    for (const row of tokenRows) {
+      const token = row.data as unknown as UserCenterTokenRecord;
+      if (
+        token.subjectKind === 'service-account'
+        && token.subjectId === serviceAccountId
+        && !token.revokedAt
+      ) {
+        await this.saveRecordTo(
+          records,
+          'iam-token',
+          row.id,
+          { ...token, revokedAt },
+          row.siteId
+        );
+      }
+    }
+  }
+
+  private async importConfiguredLegacyServiceAccountCredentials(): Promise<void> {
+    for (const [serviceAccountId, clientSecret] of configuredLegacyServiceAccountSecrets()) {
+      try {
+        await this.importLegacyUserCenterServiceAccountCredential({
+          serviceAccountId,
+          clientSecret,
+          requestedBy: 'startup-legacy-secret-import',
+          requestId: 'startup-legacy-secret-import'
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (
+          !message.startsWith('Service account not found:')
+          && !message.startsWith('Service account is disabled:')
+        ) {
+          throw error;
+        }
+        console.warn(`[mx-launcher] skipped legacy credential import for ${serviceAccountId}: ${message}`);
+      }
+    }
+  }
+
   private async registerBuiltinApps(): Promise<void> {
     await Promise.all(
       builtinAppCenterApps().map((app) => this.saveRecord('app-center-app', app.appId, app, this.config.siteId))
@@ -4615,6 +5152,18 @@ export class PostgresStore implements PlatformStore {
         environment: this.config.environment
       }
     });
+  }
+
+  private async getServiceAccountCredentialRecord(
+    serviceAccountId: string
+  ): Promise<UserCenterServiceAccountCredential | null> {
+    const normalizedServiceAccountId = serviceAccountId.trim();
+    if (!normalizedServiceAccountId) return null;
+    const credential = await this.getRecord<UserCenterServiceAccountCredential>(
+      'iam-service-account-credential',
+      userCenterServiceAccountCredentialId(normalizedServiceAccountId)
+    );
+    return credential?.serviceAccountId === normalizedServiceAccountId ? credential : null;
   }
 
   private async listRecords<T extends object>(kind: RecordKind): Promise<T[]> {

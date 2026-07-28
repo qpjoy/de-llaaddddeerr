@@ -19,9 +19,10 @@ reverse proxy 到 mx-launcher server，因此不需要额外增加 gateway path�
 manifest 的 `sdk.documentationUrl`、`sdk.openApiUrl`、`sdk.markdownUrl` 也可用于运行时发现。
 
 该入口属于 Internal/Domestic relay 网络面，不得直接暴露到公网。用户调用使用 active
-`mx-sdk` Bearer；users/roles/service-accounts 等管理接口还要求 Internal 运维凭据
-`x-mx-ops-token`。仍有部分 V1 shadow SDK route 依赖 gateway access evaluate 而没有统一
-Bearer guard，因此生产集成必须继续保留网络隔离，并先按 `routeId` 调用 access evaluate。
+`mx-sdk` Bearer；users/roles/service-accounts 管理接口以及 AppCenter 应用写入/删除还要求
+Internal 运维凭据 `x-mx-ops-token`。仍有部分 V1 shadow SDK route 依赖 gateway access
+evaluate 而没有统一 Bearer guard，因此生产集成必须继续保留网络隔离，并先按 `routeId`
+调用 access evaluate。
 
 ## Base URL
 
@@ -72,25 +73,26 @@ token。Admin UI 的 `Internal Ops Token` 输入只存在当前页面会话，�
 curl 示例假设受控 shell 已从 Secret Manager 加载 `MX_INTERNAL_OPS_TOKEN`；不要把实际值
 写入脚本、Git、CI 日志或聊天记录。
 
-`MX_INTERNAL_OPS_TOKEN` 只用于平台管理接口。产品 service account 的独立 secret 由
-`MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON`（或
-`MX_SDK_SERVICE_ACCOUNT_SECRETS_FILE`）提供；Kubernetes 当前把
-`mx-internal-shadow/mx-sdk-service-account-secrets` 的 `secrets.json` key 注入前者：
+`MX_INTERNAL_OPS_TOKEN` 只用于平台管理接口。新建 AppCenter 应用会自动 ensure 一个
+`svc_<appId>_release_publisher`；显式创建 service account 时也会在该账号尚无 credential
+时签发独立 `client_secret`。API 只在首次签发或显式轮换时返回一次明文，PostgreSQL 只保存
+不可逆 scrypt hash。调用方必须立即把明文写入对应应用的 CI/Vault；列表、查询和后续幂等
+upsert 都不会再次返回原值。
 
-```json
-{
-  "svc_external_system": "<至少 32 字符的随机 secret>"
-}
+旧 `MX_SDK_SERVICE_ACCOUNT_SECRETS_JSON` /
+`MX_SDK_SERVICE_ACCOUNT_SECRETS_FILE` 和
+`mx-sdk-service-account-secrets/secrets.json` 只保留一版迁移兼容：启动时仅把数据库中
+尚无 credential 的旧账号导入为 hash；数据库已有 credential 时绝不覆盖，OAuth 也不会
+回退接受 map 中的另一个旧值。正常 deploy
+不需要配置这两个变量，也不要求该 K8s Secret 存在。迁移输入仍必须是完整旧 map，迁移完成
+并验证所有 CI 后，先删除 `.env` 中的迁移变量，再显式执行：
+
+```bash
+kubectl -n mx-internal-shadow delete secret mx-sdk-service-account-secrets
 ```
 
-Kubernetes 正式环境把完整 JSON map 写入 gitignored 的 `server/.env`，正常执行
-`bash scripts/manage.sh ops internal-production deploy` 即可幂等 ensure Secret 并触发
-rollout；不要手工拼 `kubectl --from-literal`。变量缺失时保留现有 `secrets.json`，变量
-存在时整体替换，绝不按账号自动 merge。详见
-[`25-release-center-developer-api.md`](25-release-center-developer-api.md)。
-
-只有内置 `svc_sdk_gateway` 暂时保留使用 Internal ops token 的兼容 fallback。新集成必须
-使用账号独立 secret，不得把平台运维 token 交给产品开发者或产品 CI。
+仅删 `.env` 不会删除已有 Secret，因为 deploy 默认保留未配置的集群值。不得把平台运维
+token 交给产品开发者或产品 CI。
 
 ## Manifest
 
@@ -147,9 +149,10 @@ jq -n '{
 ```
 
 client credentials access token 默认仍为 `3600` 秒（1 小时），不随 Electron 用户登录
-周期延长。`client_secret` 必须匹配该 client ID 在上述 secret map 中的独立值；它不是
-`managed-by-internal` 之类的占位字符串。轮换某个账号的 secret 只更新该账号的 CI
-凭据。`client_credentials` 只允许在 Internal 控制面调用；带受控
+周期延长。`client_secret` 必须匹配该 client ID 在数据库中的独立 credential；它不是
+`managed-by-internal` 之类的占位字符串。轮换某个账号只更新该账号的 CI/Vault
+凭据，不需要修改 `server/.env` 或重新部署 API。`client_credentials` 只允许在 Internal
+控制面调用；带受控
 `X-MX-Forwarded-By: domestic-edge` 标记的公网请求会在比较 secret 前拒绝。Internal
 调用也受 5 分钟的 IP/client/IP+client 原子限速。
 
@@ -321,11 +324,11 @@ AppCenter 应用访问策略通过 app 记录保存。自定义应用不传策�
 ```bash
 curl -sS "$BASE/internal/v1/app-center/apps/luopan" \
   -H 'content-type: application/json' \
+  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN" \
   -d '{
     "appId": "luopan",
     "displayName": "Luopan",
-    "launcherMode": "embed",
-    "standaloneChannelProductId": "mx-h2i",
+    "launcherMode": "standalone",
     "accessPolicy": {
       "defaultDecision": "private",
       "allowAdmin": true,
@@ -337,6 +340,34 @@ curl -sS "$BASE/internal/v1/app-center/apps/luopan" \
     }
   }'
 ```
+
+首次创建应用（或为尚无 credential 的旧应用执行一次幂等 upsert）返回：
+
+```json
+{
+  "app": {},
+  "publisher": {
+    "serviceAccount": {},
+    "credential": {
+      "clientSecret": "<仅本次响应可见>"
+    }
+  }
+}
+```
+
+Publisher ID 会先把 `appId` 转成小写，保留字母、数字、`.`、`_`、`-`，仅把其他字符
+归一为 `_`。若最终 ID 会超过 160 字符，平台会稳定截断并附加 12 位 SHA-256 摘要，避免
+不同长 ID 冲突。因此 Luopan 是 `svc_luopan_release_publisher`，`mx-h2i` 则是
+`svc_mx-h2i_release_publisher`。该账号只绑定 `mx-release-publisher` 角色并只含
+`sdk.release.read`、
+`sdk.release.publish`，`allowedProductIds` 只含 `luopan`。立刻把
+`publisher.credential.clientSecret` 写入 Luopan CI/Vault；再次提交相同应用时
+`publisher.credential` 为 `null`，不会读取或轮换现有 secret。
+
+把应用更新为 `enabled=false` 会禁用自动 Publisher 并撤销其 active token，但保留
+credential，重新启用后 CI 可继续使用原 secret 获取新 token；被撤销的旧 token 不会复活。
+删除非内置应用则会同时禁用 Publisher、撤销 token 并删除 credential verifier；以后重建
+同一 `appId` 必须领取新的单次 secret。
 
 查询用户可见应用：
 
@@ -367,8 +398,21 @@ curl -sS "$BASE/internal/v1/sdk/service-accounts" \
   }'
 ```
 
+创建响应为 `{serviceAccount, credential}`；仅当账号原先没有 credential 时，
+`credential.clientSecret` 才包含一次性明文。相同请求幂等重放不会轮换。
 `allowedProductIds` 只约束产品级 SDK 资源。Release Publisher 的创建示例、独立 secret
 和最小权限见 [docs/25](./25-release-center-developer-api.md)。
+
+若一次性响应丢失或需要主动轮换，不能查询旧 secret；应在受控终端调用：
+
+```bash
+curl -sS -X POST \
+  "$BASE/internal/v1/sdk/service-accounts/svc_external_system/credentials/rotate" \
+  -H "x-mx-ops-token: $MX_INTERNAL_OPS_TOKEN"
+```
+
+响应 `{credential}` 中的 `credential.clientSecret` 同样只出现一次。先把新值写入该账号
+的 CI/Vault，再让新作业重新获取短期 token；其他应用 credential 不受影响。
 
 ## Permissions
 
@@ -400,8 +444,6 @@ curl -sS "$BASE/internal/v1/sdk/permissions/requests" \
 | `sdk.roles.list` | `/internal/v1/sdk/roles` | `sdk.user.read` or `rbac.manage` |
 | `sdk.users.list` | `/internal/v1/sdk/users` | `sdk.user.read` or `rbac.manage` |
 | `sdk.users.create` | `/internal/v1/sdk/users` | `sdk.user.write` or `rbac.manage` |
-| `sdk.service_accounts.list` | `/internal/v1/sdk/service-accounts` | `sdk.user.read` or `rbac.manage` |
-| `sdk.service_accounts.create` | `/internal/v1/sdk/service-accounts` | `sdk.user.write` or `rbac.manage` |
 | `sdk.permissions.request` | `/internal/v1/sdk/permissions/requests` | `sdk.permission.request` or `permission.request` |
 | `sdk.config.snapshot` | `/internal/v1/sdk/config/snapshot` | `sdk.config.snapshot`, `sdk.identity.read`, or `auth.read` |
 | `sdk.dns.*` | `/internal/v1/sdk/dns/*` | `sdk.dns.evaluate` or `network.dns.policy` |
@@ -412,3 +454,8 @@ curl -sS "$BASE/internal/v1/sdk/permissions/requests" \
 | `sdk.releases.gate` | `/internal/v1/sdk/releases/{planId}/gate` | `sdk.release.approve` or `release.manage`；另校验 `allowedProductIds` |
 | `sdk.audit.write` | `/internal/v1/audit/events` | `sdk.audit.write` |
 | `sdk.observability.logs` | `/internal/v1/observability/logs` | `sdk.observability.write` or `observability.write` |
+
+`GET/POST /internal/v1/sdk/service-accounts` 与
+`POST /internal/v1/sdk/service-accounts/{serviceAccountId}/credentials/rotate`
+属于 `x-mx-ops-token` 管理面，不接受产品 Bearer，也不会出现在 SDK Gateway manifest。
+它们仍记录在在线 API 文档中，供 Internal 管理员开通和轮换集成凭据。

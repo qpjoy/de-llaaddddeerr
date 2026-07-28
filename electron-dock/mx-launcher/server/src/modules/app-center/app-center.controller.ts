@@ -1,5 +1,7 @@
-import { BadRequestException, Body, Controller, Delete, Get, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, ConflictException, Controller, Delete, Get, Header, Headers, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
 
+import { assertInternalOpsToken, INTERNAL_OPS_TOKEN_HEADER } from '../../lib/internal-ops-auth.js';
+import { appReleasePublisherServiceAccountId } from '../../store/domain.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE } from '../../tokens.js';
 import type { AppCenterApp, AppCenterAppInput, AppCenterInstallation, AppCenterInstallationInput, AppOnboardingDefaultsInput } from '../../types.js';
@@ -57,13 +59,24 @@ export class AppCenterController {
   }
 
   @Post('apps')
-  async createApp(@Body() body: AppCenterAppInput) {
-    return { app: await this.store.upsertAppCenterApp(body || {}) };
+  @Header('Cache-Control', 'no-store')
+  async createApp(
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() body: AppCenterAppInput
+  ) {
+    assertInternalOpsToken(opsToken);
+    return this.upsertAppWithPublisher(body || {});
   }
 
   @Post('apps/:appId')
-  async upsertApp(@Param('appId') appId: string, @Body() body: AppCenterAppInput) {
-    return { app: await this.store.upsertAppCenterApp({ ...(body || {}), appId }) };
+  @Header('Cache-Control', 'no-store')
+  async upsertApp(
+    @Param('appId') appId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() body: AppCenterAppInput
+  ) {
+    assertInternalOpsToken(opsToken);
+    return this.upsertAppWithPublisher({ ...(body || {}), appId });
   }
 
   @Get('installations')
@@ -97,7 +110,11 @@ export class AppCenterController {
   }
 
   @Delete('apps/:appId')
-  async deleteApp(@Param('appId') appId: string) {
+  async deleteApp(
+    @Param('appId') appId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
+    assertInternalOpsToken(opsToken);
     try {
       const deleted = await this.store.deleteAppCenterApp(appId);
       if (!deleted) throw new NotFoundException('AppCenter app not found');
@@ -107,6 +124,70 @@ export class AppCenterController {
       throw new BadRequestException(error instanceof Error ? error.message : 'AppCenter app cannot be deleted');
     }
   }
+
+  private async upsertAppWithPublisher(input: AppCenterAppInput) {
+    let app: AppCenterApp;
+    try {
+      app = await this.store.upsertAppCenterApp(input);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'AppCenter app cannot be saved';
+      if (message.startsWith('Release publisher service account collision:')) {
+        throw new ConflictException(message);
+      }
+      throw new BadRequestException(message);
+    }
+    if (app.enabled === false) {
+      return { app, publisher: null };
+    }
+    const serviceAccountId = appReleasePublisherServiceAccountId(app.appId);
+    const existing = (await this.store.listUserCenterServiceAccounts())
+      .find((item) => item.serviceAccountId === serviceAccountId) ?? null;
+    if (
+      existing
+      && (
+        existing.allowedProductIds?.length !== 1
+        || existing.allowedProductIds[0] !== app.appId
+      )
+    ) {
+      throw new ConflictException(
+        `Release Publisher service account ${serviceAccountId} is already bound to another product`
+      );
+    }
+    const serviceAccount = existing ?? await this.store.createUserCenterServiceAccount({
+      serviceAccountId,
+      displayName: `${app.displayName} Release Publisher`,
+      roleIds: ['mx-release-publisher'],
+      scopes: ['sdk.release.read', 'sdk.release.publish'],
+      allowedProductIds: [app.appId],
+      requestId: input.requestedBy?.trim() || `app-center-publisher-${app.appId}`
+    });
+    const status = await this.store.getUserCenterServiceAccountCredential(serviceAccountId);
+    let credential = null;
+    if (!status) {
+      try {
+        credential = await this.store.issueUserCenterServiceAccountCredential({
+          serviceAccountId,
+          requestedBy: input.requestedBy?.trim() || 'app-center',
+          requestId: `app-center-publisher-credential-${app.appId}`
+        });
+      } catch (error) {
+        if (!serviceAccountCredentialAlreadyExists(error)) {
+          throw error;
+        }
+      }
+    }
+    return {
+      app,
+      publisher: {
+        serviceAccount,
+        credential
+      }
+    };
+  }
+}
+
+function serviceAccountCredentialAlreadyExists(error: unknown): boolean {
+  return String(error instanceof Error ? error.message : error).includes('credential already exists');
 }
 
 function nullableQuery(value: string | undefined): string | null {
