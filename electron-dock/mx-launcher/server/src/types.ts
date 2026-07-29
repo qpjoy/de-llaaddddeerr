@@ -1443,6 +1443,38 @@ export interface SiteSlotDomesticWireGuardSecret {
   updatedAt: string;
 }
 
+export type SiteSlotInternalServicePeerObservationStatus = 'passed' | 'ready' | 'blocked' | 'failed';
+export type SiteSlotInternalServicePeerObservationSource =
+  | 'site-slot.internal-service-peer.status'
+  | 'site-slot.internal-service-peer.apply'
+  | 'site-slot.internal-service-peer.host-runner.ensure';
+
+export interface SiteSlotInternalServicePeerObservationInput {
+  siteId: string;
+  planId: string;
+  materialDigest: string;
+  workerReportId?: string | null;
+  status: SiteSlotInternalServicePeerObservationStatus;
+  sourceAction: SiteSlotInternalServicePeerObservationSource;
+  blockedReasons?: string[] | null;
+  checkedAt?: string | null;
+  requestedBy?: string | null;
+}
+
+export interface SiteSlotInternalServicePeerObservation {
+  observationId: string;
+  siteId: string;
+  planId: string;
+  materialDigest: string;
+  workerReportId: string | null;
+  status: SiteSlotInternalServicePeerObservationStatus;
+  sourceAction: SiteSlotInternalServicePeerObservationSource;
+  blockedReasons: string[];
+  checkedAt: string | null;
+  recordedBy: string;
+  recordedAt: string;
+}
+
 export interface SiteSlotDomesticRuntimeConfigInput {
   siteId?: string | null;
   status?: 'active' | 'paused' | string | null;

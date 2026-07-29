@@ -87,6 +87,8 @@ import type {
   SiteSlotDomesticRuntimeConfigInput,
   SiteSlotDomesticWireGuardSecret,
   SiteSlotDomesticWireGuardSecretInput,
+  SiteSlotInternalServicePeerObservation,
+  SiteSlotInternalServicePeerObservationInput,
   SiteSlotAccessAccount,
   SiteSlotAccessAccountIssueInput,
   SiteSlotAccessAccountIssueResult,
@@ -294,6 +296,11 @@ export interface PlatformStore {
   listSiteSlotDomesticWireGuardSecrets(): MaybePromise<SiteSlotDomesticWireGuardSecret[]>;
   getSiteSlotDomesticWireGuardSecret(siteId: string): MaybePromise<SiteSlotDomesticWireGuardSecret | null>;
   upsertSiteSlotDomesticWireGuardSecret(input: SiteSlotDomesticWireGuardSecretInput): MaybePromise<SiteSlotDomesticWireGuardSecret>;
+  listSiteSlotInternalServicePeerObservations(planId?: string | null): MaybePromise<SiteSlotInternalServicePeerObservation[]>;
+  getSiteSlotInternalServicePeerObservation(planId: string): MaybePromise<SiteSlotInternalServicePeerObservation | null>;
+  upsertSiteSlotInternalServicePeerObservation(
+    input: SiteSlotInternalServicePeerObservationInput
+  ): MaybePromise<SiteSlotInternalServicePeerObservation>;
   listSiteSlotDomesticRuntimeConfigs(): MaybePromise<SiteSlotDomesticRuntimeConfig[]>;
   getSiteSlotDomesticRuntimeConfig(siteId: string): MaybePromise<SiteSlotDomesticRuntimeConfig | null>;
   upsertSiteSlotDomesticRuntimeConfig(input: SiteSlotDomesticRuntimeConfigInput): MaybePromise<SiteSlotDomesticRuntimeConfig>;

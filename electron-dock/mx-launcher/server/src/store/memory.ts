@@ -47,6 +47,7 @@ import {
   buildSiteSlotPlan,
   buildSiteSlotDomesticRuntimeConfig,
   buildSiteSlotDomesticWireGuardSecret,
+  buildSiteSlotInternalServicePeerObservation,
   buildSiteSlotRunnerSession,
   buildSiteSlotSshProfile,
   buildSiteSlotRollbackExecution,
@@ -227,6 +228,8 @@ import type {
   SiteSlotDomesticRuntimeConfigInput,
   SiteSlotDomesticWireGuardSecret,
   SiteSlotDomesticWireGuardSecretInput,
+  SiteSlotInternalServicePeerObservation,
+  SiteSlotInternalServicePeerObservationInput,
   SiteSlotKind,
   SiteSlotPlan,
   SiteSlotPlanInput,
@@ -331,6 +334,7 @@ export class MemoryStore implements PlatformStore {
   private readonly siteSlotSshProfiles = new Map<string, SiteSlotSshProfile>();
   private readonly siteSlotDomesticRuntimeConfigs = new Map<string, SiteSlotDomesticRuntimeConfig>();
   private readonly siteSlotDomesticWireGuardSecrets = new Map<string, SiteSlotDomesticWireGuardSecret>();
+  private readonly siteSlotInternalServicePeerObservations = new Map<string, SiteSlotInternalServicePeerObservation>();
   private readonly siteSlotAccessAccounts = new Map<string, SiteSlotAccessAccount>();
   private readonly launcherNetworkMihomoSites = new Map<string, LauncherNetworkMihomoSite>();
   private readonly launcherProductNetworks = new Map<string, LauncherProductNetwork>();
@@ -1957,6 +1961,38 @@ export class MemoryStore implements PlatformStore {
       }
     });
     return secret;
+  }
+
+  listSiteSlotInternalServicePeerObservations(planId?: string | null): SiteSlotInternalServicePeerObservation[] {
+    return [...this.siteSlotInternalServicePeerObservations.values()]
+      .filter((observation) => !planId || observation.planId === planId)
+      .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt));
+  }
+
+  getSiteSlotInternalServicePeerObservation(planId: string): SiteSlotInternalServicePeerObservation | null {
+    return this.siteSlotInternalServicePeerObservations.get(planId) ?? null;
+  }
+
+  upsertSiteSlotInternalServicePeerObservation(
+    input: SiteSlotInternalServicePeerObservationInput
+  ): SiteSlotInternalServicePeerObservation {
+    const observation = buildSiteSlotInternalServicePeerObservation(input);
+    const previous = this.siteSlotInternalServicePeerObservations.get(observation.planId) ?? null;
+    if (
+      previous?.checkedAt
+      && (!observation.checkedAt || observation.checkedAt.localeCompare(previous.checkedAt) < 0)
+    ) {
+      return previous;
+    }
+    this.siteSlotInternalServicePeerObservations.set(observation.planId, observation);
+    this.recordAudit({
+      eventType: 'site_slot.internal_service_peer.observed',
+      actorKind: 'admin-action',
+      siteId: observation.siteId,
+      requestId: null,
+      metadata: { ...observation }
+    });
+    return observation;
   }
 
   issueSiteSlotAccessAccounts(input: SiteSlotAccessAccountIssueInput): SiteSlotAccessAccountIssueResult {

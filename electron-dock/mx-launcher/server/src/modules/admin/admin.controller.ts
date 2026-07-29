@@ -20,6 +20,10 @@ import { runAwxApiLaunch } from './awx-api-launch.js';
 import { runAwxCredentialSync } from './awx-credential-sync.js';
 import { runAwxObjectSync } from './awx-object-sync.js';
 import {
+  internalServicePeerObservationClearsWarning,
+  internalServicePeerObservationInput
+} from './internal-service-peer-observation.js';
+import {
   AWX_CREDENTIAL_SYNC_FEATURE_KEY,
   AWX_LAUNCH_FEATURE_KEY,
   AWX_OBJECT_SYNC_FEATURE_KEY
@@ -56,6 +60,7 @@ import type {
   SiteSlotDomesticRuntimeConfigInput,
   SiteSlotDomesticWireGuardSecret,
   SiteSlotDomesticWireGuardSecretInput,
+  SiteSlotInternalServicePeerObservation,
   SiteSlotExecutionRun,
   SiteSlotExecutionMode,
   SiteSlotPlan,
@@ -1735,8 +1740,22 @@ export class AdminController {
       const siteId = match[1];
       const secret = await this.store.getSiteSlotDomesticWireGuardSecret(siteId);
       const plan = stringValue(body.planId) ? await this.store.getSiteSlotPlan(stringValue(body.planId) ?? '') : null;
+      const internalServicePeerRuntimeStatus = await adminInternalServicePeerRuntimeStatus(siteId, plan, secret, this.store);
+      const workerReport = await latestSiteSlotWorkerReportForPlan(this.store, plan);
+      const observationInput = internalServicePeerObservationInput(
+        actionId,
+        siteId,
+        plan,
+        secret,
+        internalServicePeerRuntimeStatus,
+        workerReport,
+        stringValue(body.requestedBy)
+      );
       return {
-        internalServicePeerRuntimeStatus: await adminInternalServicePeerRuntimeStatus(siteId, plan, secret, this.store),
+        internalServicePeerRuntimeStatus,
+        internalServicePeerObservation: observationInput
+          ? await this.store.upsertSiteSlotInternalServicePeerObservation(observationInput)
+          : null,
         secret: secret ? redactAdminDomesticWireGuardSecret(secret) : null
       };
     }
@@ -1747,9 +1766,22 @@ export class AdminController {
       const secret = await this.store.getSiteSlotDomesticWireGuardSecret(siteId);
       const plan = stringValue(body.planId) ? await this.store.getSiteSlotPlan(stringValue(body.planId) ?? '') : null;
       const internalServicePeerHostRunnerEnsure = await adminInternalServicePeerHostRunnerEnsureResult(siteId, plan, secret, body, this.store);
+      const workerReport = await latestSiteSlotWorkerReportForPlan(this.store, plan);
+      const observationInput = internalServicePeerObservationInput(
+        actionId,
+        siteId,
+        plan,
+        secret,
+        internalServicePeerHostRunnerEnsure.afterStatus,
+        workerReport,
+        stringValue(body.requestedBy)
+      );
       return {
         internalServicePeerHostRunnerEnsure,
         internalServicePeerRuntimeStatus: internalServicePeerHostRunnerEnsure.afterStatus ?? null,
+        internalServicePeerObservation: observationInput
+          ? await this.store.upsertSiteSlotInternalServicePeerObservation(observationInput)
+          : null,
         secret: secret ? redactAdminDomesticWireGuardSecret(secret) : null
       };
     }
@@ -1760,9 +1792,23 @@ export class AdminController {
       const secret = await this.store.getSiteSlotDomesticWireGuardSecret(siteId);
       const plan = stringValue(body.planId) ? await this.store.getSiteSlotPlan(stringValue(body.planId) ?? '') : null;
       const internalServicePeerApply = await adminInternalServicePeerApplyResult(siteId, plan, secret, body, this.store);
+      const internalServicePeerRuntimeStatus = internalServicePeerApply.afterStatus ?? internalServicePeerApply.beforeStatus;
+      const workerReport = await latestSiteSlotWorkerReportForPlan(this.store, plan);
+      const observationInput = internalServicePeerObservationInput(
+        actionId,
+        siteId,
+        plan,
+        secret,
+        internalServicePeerRuntimeStatus,
+        workerReport,
+        stringValue(body.requestedBy)
+      );
       return {
         internalServicePeerApply,
-        internalServicePeerRuntimeStatus: internalServicePeerApply.afterStatus ?? internalServicePeerApply.beforeStatus,
+        internalServicePeerRuntimeStatus,
+        internalServicePeerObservation: observationInput
+          ? await this.store.upsertSiteSlotInternalServicePeerObservation(observationInput)
+          : null,
         secret: secret ? redactAdminDomesticWireGuardSecret(secret) : null
       };
     }
@@ -2428,7 +2474,17 @@ export class AdminController {
   }
 
   private async buildSiteSlotPipelines(actionPolicy: AdminActionPolicy, planId?: string | null): Promise<AdminSiteSlotPipeline[]> {
-    const [plans, executions, runnerSessions, workerJobs, workerReports, rollbackExecutions, rollbackReports, domesticWgSecrets] = await Promise.all([
+    const [
+      plans,
+      executions,
+      runnerSessions,
+      workerJobs,
+      workerReports,
+      rollbackExecutions,
+      rollbackReports,
+      domesticWgSecrets,
+      internalServicePeerObservations
+    ] = await Promise.all([
       this.store.listSiteSlotPlans(),
       this.store.listSiteSlotExecutions(),
       this.store.listSiteSlotRunnerSessions(),
@@ -2436,7 +2492,8 @@ export class AdminController {
       this.store.listSiteSlotWorkerReports(),
       this.store.listSiteSlotRollbackExecutions(),
       this.store.listSiteSlotRollbackReports(),
-      this.store.listSiteSlotDomesticWireGuardSecrets()
+      this.store.listSiteSlotDomesticWireGuardSecrets(),
+      this.store.listSiteSlotInternalServicePeerObservations()
     ]);
     return plans
       .filter((plan) => !planId || plan.planId === planId)
@@ -2449,6 +2506,7 @@ export class AdminController {
         rollbackExecutions.filter((execution) => execution.planId === plan.planId),
         rollbackReports.filter((report) => report.planId === plan.planId),
         domesticWgSecrets.find((secret) => secret.siteId === plan.siteId) ?? null,
+        internalServicePeerObservations.find((observation) => observation.planId === plan.planId) ?? null,
         actionPolicy
       ))
       .sort((a, b) => b.summary.latestUpdatedAt.localeCompare(a.summary.latestUpdatedAt));
@@ -2464,12 +2522,18 @@ function buildPipeline(
   rollbackExecutions: SiteSlotRollbackExecution[],
   rollbackReports: SiteSlotRollbackReport[],
   domesticWgSecret: SiteSlotDomesticWireGuardSecret | null,
+  internalServicePeerObservation: SiteSlotInternalServicePeerObservation | null,
   actionPolicy: AdminActionPolicy
 ): AdminSiteSlotPipeline {
   const timeline = buildTimeline(plan, executions, runnerSessions, workerJobs, workerReports, rollbackExecutions, rollbackReports);
   const latest = timeline[timeline.length - 1] ?? null;
   const failureSummary = latestWorkerReportFailureSummary(workerReports);
-  const domesticPostInstallGate = domesticPostInstallInternalGate(plan, workerReports, domesticWgSecret);
+  const domesticPostInstallGate = domesticPostInstallInternalGate(
+    plan,
+    workerReports,
+    domesticWgSecret,
+    internalServicePeerObservation
+  );
   const warnings = uniqueStrings([
     ...domesticPostInstallGate.warnings,
     ...plan.warnings,
@@ -4449,6 +4513,8 @@ async function internalServicePeerHostRunnerPayload(
     siteId,
     planId: plan?.planId ?? null,
     interfaceName: INTERNAL_SERVICE_PEER_INTERFACE,
+    expectedInternalServicePublicKey: secret?.internalServicePublicKey ?? null,
+    expectedDomesticRelayPublicKey: secret?.domesticRelayPublicKey ?? null,
     domesticGatewayIp: secret?.domesticGatewayIp ?? '10.88.0.1',
     internalServiceIp: secret?.internalServiceIp ?? '10.88.88.88',
     apiRuntime: {
@@ -4658,6 +4724,36 @@ async function adminInternalServicePeerRuntimeStatus(
   const wgShow = tools.wg.available
     ? await runLocalCommand(tools.wg.path ?? 'wg', ['show', interfaceName], 3000)
     : null;
+  const livePublicKeyProbe = tools.wg.available
+    ? await runLocalCommand(tools.wg.path ?? 'wg', ['show', interfaceName, 'public-key'], 3000)
+    : null;
+  const livePublicKeyCandidate = livePublicKeyProbe?.status === 'passed'
+    ? livePublicKeyProbe.stdout.trim()
+    : '';
+  const livePublicKey = validWireGuardPublicKey(livePublicKeyCandidate)
+    ? livePublicKeyCandidate
+    : null;
+  const livePeerPublicKeysProbe = tools.wg.available
+    ? await runLocalCommand(tools.wg.path ?? 'wg', ['show', interfaceName, 'peers'], 3000)
+    : null;
+  const livePeerPublicKeys = livePeerPublicKeysProbe?.status === 'passed'
+    ? livePeerPublicKeysProbe.stdout
+      .split(/\s+/)
+      .map((value) => value.trim())
+      .filter(validWireGuardPublicKey)
+    : [];
+  const expectedPublicKey = secret?.internalServicePublicKey && validWireGuardPublicKey(secret.internalServicePublicKey)
+    ? secret.internalServicePublicKey
+    : null;
+  const publicKeyMatchesExpected = expectedPublicKey
+    ? livePublicKey === expectedPublicKey
+    : null;
+  const expectedPeerPublicKey = secret?.domesticRelayPublicKey && validWireGuardPublicKey(secret.domesticRelayPublicKey)
+    ? secret.domesticRelayPublicKey
+    : null;
+  const peerPublicKeyMatchesExpected = expectedPeerPublicKey
+    ? livePeerPublicKeys.includes(expectedPeerPublicKey)
+    : null;
   const latestHandshakes = tools.wg.available
     ? await runLocalCommand(tools.wg.path ?? 'wg', ['show', interfaceName, 'latest-handshakes'], 3000)
     : null;
@@ -4691,6 +4787,18 @@ async function adminInternalServicePeerRuntimeStatus(
     ...(!artifacts.applyScriptExists ? [`Internal service peer apply script is missing: ${paths.applyScriptPath}`] : []),
     ...(!tools.wg.available ? ['wg is missing on the current host'] : []),
     ...(!tools.wgQuick.available ? ['wg-quick is missing on the current host'] : []),
+    ...(interfaceReady && expectedPublicKey && !livePublicKey
+      ? ['Active Internal WireGuard public key could not be verified']
+      : []),
+    ...(interfaceReady && publicKeyMatchesExpected === false
+      ? ['Active Internal WireGuard public key does not match the current Config Center key']
+      : []),
+    ...(interfaceReady && expectedPeerPublicKey && livePeerPublicKeys.length === 0
+      ? ['Active Internal WireGuard peer public key could not be verified']
+      : []),
+    ...(interfaceReady && peerPublicKeyMatchesExpected === false
+      ? ['Active Internal WireGuard peer does not match the current Domestic relay key']
+      : []),
     ...(interfaceReady && linkReady && !userRelayRouteReady
       ? [`Internal return route to 10.89.0.0/16 is not on ${domesticRouteInterface ?? interfaceName}; route to ${userRelayProbeIp} is on ${userRelayRouteInterface ?? 'unknown'}`]
       : [])
@@ -4720,6 +4828,16 @@ async function adminInternalServicePeerRuntimeStatus(
     artifacts,
     interface: {
       name: interfaceName,
+      publicKey: livePublicKey,
+      publicKeySource: livePublicKey ? 'wg-show-public-key' : null,
+      livePublicKey,
+      expectedPublicKey,
+      publicKeyMatchesExpected,
+      livePublicKeyProbe,
+      livePeerPublicKeys,
+      expectedPeerPublicKey,
+      peerPublicKeyMatchesExpected,
+      livePeerPublicKeysProbe,
       wgShow,
       latestHandshakes,
       handshake
@@ -6152,11 +6270,10 @@ function domesticRelayPublicKeyFromReadOutput(stdout: string | null | undefined)
 }
 
 function internalServicePublicKeyFromRuntimeStatus(status: unknown): string | null {
-  const interfacePublicKey = stringValue(asRecord(asRecord(status).interface).publicKey);
-  if (interfacePublicKey && validWireGuardPublicKey(interfacePublicKey)) return interfacePublicKey;
-  const corePublicKey = stringValue(asRecord(asRecord(status).wireGuardCore).publicKey);
-  if (corePublicKey && validWireGuardPublicKey(corePublicKey)) return corePublicKey;
-  const wgShow = asRecord(asRecord(asRecord(status).interface).wgShow);
+  const iface = asRecord(asRecord(status).interface);
+  const livePublicKey = stringValue(iface.livePublicKey);
+  if (livePublicKey && validWireGuardPublicKey(livePublicKey)) return livePublicKey;
+  const wgShow = asRecord(iface.wgShow);
   const stdout = stringValue(wgShow.stdout);
   const fromShow = interfacePublicKeyFromWireGuardShow(stdout);
   if (fromShow) return fromShow;
@@ -6639,7 +6756,8 @@ interface DomesticPostInstallInternalGate {
 function domesticPostInstallInternalGate(
   plan: SiteSlotPlan,
   workerReports: SiteSlotWorkerReport[],
-  secret: SiteSlotDomesticWireGuardSecret | null
+  secret: SiteSlotDomesticWireGuardSecret | null,
+  observation: SiteSlotInternalServicePeerObservation | null
 ): DomesticPostInstallInternalGate {
   const empty = { blocked: false, warnings: [], nextActions: [] };
   if (plan.kind !== 'domestic') return empty;
@@ -6658,6 +6776,7 @@ function domesticPostInstallInternalGate(
     || text.includes('no route to host')
     || text.includes('destination address required');
   if (!hasInternalReachabilityWarning) return empty;
+  if (internalServicePeerObservationClearsWarning(plan, report, secret, observation)) return empty;
   const internalIp = secret?.internalServiceIp || '10.88.88.88';
   const internalPort = domesticRuntimePortFromPlan(plan);
   const endpoint = secret?.publicEndpoint
@@ -7512,6 +7631,16 @@ function tcpConnectProbe(host: string | null | undefined, port: number | null | 
 
 function latestByCreatedAt<T extends { createdAt: string }>(items: T[]): T | null {
   return sortByCreatedAt(items).at(-1) ?? null;
+}
+
+async function latestSiteSlotWorkerReportForPlan(
+  store: PlatformStore,
+  plan: SiteSlotPlan | null
+): Promise<SiteSlotWorkerReport | null> {
+  if (!plan) return null;
+  return latestByCreatedAt(
+    (await store.listSiteSlotWorkerReports()).filter((report) => report.planId === plan.planId)
+  );
 }
 
 function latestByUpdatedAt<T extends { updatedAt: string }>(items: T[]): T | null {

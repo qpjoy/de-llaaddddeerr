@@ -13932,6 +13932,13 @@ function setupActionBlockedMessage(payload) {
       ? `Remote SSH Gate blocked: ${gateFailures.join('; ')}`
       : 'Remote SSH Gate blocked. Review gate evidence before continuing.';
   }
+  const internalPeerRuntime = payload?.internalServicePeerRuntimeStatus;
+  if (internalPeerRuntime?.status && internalPeerRuntime.status !== 'passed') {
+    const reasons = asArray(internalPeerRuntime.blockedReasons);
+    return reasons.length
+      ? `Internal service peer verification is ${internalPeerRuntime.status}: ${reasons.join('; ')}`
+      : `Internal service peer verification is ${internalPeerRuntime.status}; no install or restart was performed.`;
+  }
   const blockedResult = [
     payload?.readOnlyProbe,
     payload?.workerHandoff,
@@ -13942,12 +13949,20 @@ function setupActionBlockedMessage(payload) {
     payload?.relayPeerPlan,
     payload?.relayPeerAppend,
     payload?.relayPeerAppendSsh,
+    payload?.internalServicePeerRuntimeStatus,
+    payload?.internalServicePeerApply,
+    payload?.internalServicePeerHostRunnerEnsure,
     payload?.awxCredentialSync,
     payload?.awxObjectSync,
     payload?.awxLaunch
-  ].find((item) => item?.status === 'blocked');
+  ].find((item) => item?.status === 'blocked' || item?.status === 'failed');
   if (!blockedResult) return '';
   const reasons = asArray(blockedResult.blockedReasons);
+  if (blockedResult.status === 'failed') {
+    return reasons.length
+      ? `Action failed: ${reasons.join('; ')}`
+      : 'Action failed. Review action evidence before continuing.';
+  }
   return reasons.length
     ? `Action blocked: ${reasons.join('; ')}`
     : 'Action blocked. Review action evidence before continuing.';

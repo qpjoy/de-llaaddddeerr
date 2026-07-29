@@ -103,6 +103,8 @@ import type {
   SiteSlotDomesticRuntimeConfigInput,
   SiteSlotDomesticWireGuardSecret,
   SiteSlotDomesticWireGuardSecretInput,
+  SiteSlotInternalServicePeerObservation,
+  SiteSlotInternalServicePeerObservationInput,
   SiteSlotRunnerSession,
   SiteSlotRunnerStartInput,
   SiteSlotSshProfile,
@@ -4945,6 +4947,33 @@ export function buildSiteSlotDomesticWireGuardSecret(
     createdAt: previous?.createdAt ?? now,
     updatedBy,
     updatedAt: now
+  };
+}
+
+export function buildSiteSlotInternalServicePeerObservation(
+  input: SiteSlotInternalServicePeerObservationInput,
+  now = new Date().toISOString()
+): SiteSlotInternalServicePeerObservation {
+  const siteId = input.siteId.trim();
+  const planId = input.planId.trim();
+  const materialDigest = input.materialDigest.trim();
+  if (!siteId || !planId || !materialDigest) {
+    throw new Error('siteId, planId, and materialDigest are required for Internal service peer observations');
+  }
+  const checkedAt = input.checkedAt?.trim() || null;
+  const checkedAtMs = checkedAt ? Date.parse(checkedAt) : NaN;
+  return {
+    observationId: `internalpeerobs_${safeIdPart(planId)}`,
+    siteId,
+    planId,
+    materialDigest,
+    workerReportId: input.workerReportId?.trim() || null,
+    status: input.status,
+    sourceAction: input.sourceAction,
+    blockedReasons: uniqueStrings(input.blockedReasons ?? []).slice(0, 20).map((reason) => reason.slice(0, 600)),
+    checkedAt: Number.isFinite(checkedAtMs) ? new Date(checkedAtMs).toISOString() : null,
+    recordedBy: input.requestedBy?.trim() || 'admin-action',
+    recordedAt: now
   };
 }
 

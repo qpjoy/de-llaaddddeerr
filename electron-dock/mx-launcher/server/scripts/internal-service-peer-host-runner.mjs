@@ -1165,6 +1165,50 @@ async function buildStatus(payload) {
         )
       : await runCommand(wireGuardProbeCommand, ['show', wireGuardProbeName], 3000)
     : null;
+  const livePublicKeyProbe = wireGuardProbeCommand
+    ? skipWireGuardProbe
+      ? wireGuardCliProbeSkippedResult(
+          wireGuardProbeCommand,
+          ['show', wireGuardProbeName, 'public-key'],
+          'macOS userspace WireGuard requires elevated access for wg show public-key'
+        )
+      : await runCommand(wireGuardProbeCommand, ['show', wireGuardProbeName, 'public-key'], 3000)
+    : null;
+  const livePublicKeyCandidate = livePublicKeyProbe?.status === 'passed'
+    ? String(livePublicKeyProbe.stdout || '').trim()
+    : '';
+  const livePublicKey = validWireGuardPublicKey(livePublicKeyCandidate)
+    ? livePublicKeyCandidate
+    : null;
+  const livePeerPublicKeysProbe = wireGuardProbeCommand
+    ? skipWireGuardProbe
+      ? wireGuardCliProbeSkippedResult(
+          wireGuardProbeCommand,
+          ['show', wireGuardProbeName, 'peers'],
+          'macOS userspace WireGuard requires elevated access for wg show peers'
+        )
+      : await runCommand(wireGuardProbeCommand, ['show', wireGuardProbeName, 'peers'], 3000)
+    : null;
+  const livePeerPublicKeys = livePeerPublicKeysProbe?.status === 'passed'
+    ? String(livePeerPublicKeysProbe.stdout || '')
+      .split(/\s+/)
+      .map((value) => value.trim())
+      .filter(validWireGuardPublicKey)
+    : [];
+  const expectedPublicKeyCandidate = stringValue(payload.expectedInternalServicePublicKey, null);
+  const expectedPublicKey = validWireGuardPublicKey(expectedPublicKeyCandidate)
+    ? expectedPublicKeyCandidate
+    : null;
+  const publicKeyMatchesExpected = expectedPublicKey
+    ? livePublicKey === expectedPublicKey
+    : null;
+  const expectedPeerPublicKeyCandidate = stringValue(payload.expectedDomesticRelayPublicKey, null);
+  const expectedPeerPublicKey = validWireGuardPublicKey(expectedPeerPublicKeyCandidate)
+    ? expectedPeerPublicKeyCandidate
+    : null;
+  const peerPublicKeyMatchesExpected = expectedPeerPublicKey
+    ? livePeerPublicKeys.includes(expectedPeerPublicKey)
+    : null;
   const directListener = wireGuardDirectListenerStatus(configReadiness, wgShow, wireGuardProbeName);
   const latestHandshakes = wireGuardProbeCommand
     ? skipWireGuardProbe
@@ -1199,13 +1243,25 @@ async function buildStatus(payload) {
     ...(internalEgress.status === 'blocked' ? internalEgress.blockedReasons : []),
     ...internalServicePeerApplyBackendBlockedReasons(applyBackend, tools, wireGuardCore)
   ];
-  const blockedReasons = [
-    ...installBlockedReasons,
-    ...(directListener.status === 'blocked' ? directListener.blockedReasons : [])
-  ];
   const coreTunnelReady = wireGuardCore.tunnel?.active === true
     && (!Array.isArray(wireGuardCore.tunnel?.missingRoutes) || wireGuardCore.tunnel.missingRoutes.length === 0);
   const interfaceReady = wgShow?.status === 'passed' || coreTunnelReady;
+  const blockedReasons = [
+    ...installBlockedReasons,
+    ...(directListener.status === 'blocked' ? directListener.blockedReasons : []),
+    ...(interfaceReady && expectedPublicKey && !livePublicKey
+      ? ['Active Internal WireGuard public key could not be verified']
+      : []),
+    ...(interfaceReady && publicKeyMatchesExpected === false
+      ? ['Active Internal WireGuard public key does not match the current Config Center key']
+      : []),
+    ...(interfaceReady && expectedPeerPublicKey && livePeerPublicKeys.length === 0
+      ? ['Active Internal WireGuard peer public key could not be verified']
+      : []),
+    ...(interfaceReady && peerPublicKeyMatchesExpected === false
+      ? ['Active Internal WireGuard peer does not match the current Domestic relay key']
+      : [])
+  ];
   const linkReady = handshake.status === 'passed' || domesticGatewayPing?.status === 'passed';
   const healthReady = internalHealthz.status === 'passed'
     && serviceVipHealthz.every((probe) => probe.status === 'passed');
@@ -1259,8 +1315,17 @@ async function buildStatus(payload) {
     interface: {
       name: interfaceName,
       realName: wireGuardProbeName,
-      publicKey: wireGuardCore.publicKey || null,
-      publicKeySource: wireGuardCore.publicKeySource || null,
+      publicKey: livePublicKey,
+      publicKeySource: livePublicKey ? 'wg-show-public-key' : null,
+      livePublicKey,
+      configuredPublicKey: wireGuardCore.publicKey || null,
+      expectedPublicKey,
+      publicKeyMatchesExpected,
+      livePublicKeyProbe,
+      livePeerPublicKeys,
+      expectedPeerPublicKey,
+      peerPublicKeyMatchesExpected,
+      livePeerPublicKeysProbe,
       wgShow,
       latestHandshakes,
       handshake

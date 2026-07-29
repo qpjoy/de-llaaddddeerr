@@ -19,6 +19,7 @@
     "test:sdk-auth": "node --test --import tsx src/modules/app-center/app-center-credential.test.ts src/modules/sdk-gateway/feishu-auth.service.test.ts src/modules/sdk-gateway/sdk-gateway-rate-limit.test.ts src/modules/sdk-gateway/sdk-gateway-password.test.ts src/modules/release/release-sdk-publisher.test.ts",
     "test:k8s-secret-ensure": "node --test scripts/internal-k8s-secret-ensure.test.mjs scripts/release-oss-secret-env.test.mjs",
     "test:site-slot-worker": "node --test scripts/site-slot-worker-run.test.mjs",
+    "test:internal-service-peer-observation": "node --test --import tsx src/modules/admin/internal-service-peer-observation.test.ts",
     "smoke:http": "node scripts/http-smoke.mjs",
     "smoke:release-center": "node scripts/release-center-smoke.mjs",
     "smoke:release-publisher-postgres": "node --import tsx scripts/release-publisher-postgres-smoke.ts",

@@ -21,6 +21,28 @@ Internal 负责配置真相、Admin、Config Center、site-slot artifacts，以�
 如果只看到 Domestic worker report `passed`，不能代表 Internal service peer 已经安装。
 Admin 必须继续显示 Internal Service Peer 状态，直到 handshake 和 healthz 通过。
 
+## 已有稳定链路的复核边界
+
+`New 2.0 Plan` 和默认的 `Materialize Domestic WG` 会复用 `domestic-main` 中已有且格式有效的
+Domestic / Internal keypair。默认 action body 是 `rotateRelayKey=false`、
+`rotateInternalServiceKey=false`、`confirmRotate=false`；只有显式进入 Rotate 流程并确认后
+才允许换 key。
+
+已有 `mx-domestic` / `mx-internal-svc` 正常握手时：
+
+- `Internal Service Peer Status` 可以同步待检查的 artifact 到 host-runner 工作目录并读取
+  runtime 状态，但不会执行 apply、`wg-quick` 或 `systemctl restart`。这里的同步只更新待检文件，
+  不会把文件加载进正在运行的接口。
+- `Internal Service Peer Handoff` 只返回 handoff 命令，不在宿主机执行。
+- `Install / Restart` / `Apply` 才会修改 Internal runtime；不需要为了让 UI 变绿而点击。
+- `Ensure K8s Host Runner` 会创建或更新 runner Service/DaemonSet，也不属于只读检查。
+
+Status 会读取正在运行的接口公钥和 peer 公钥，并与 Config Center 当前 Internal / Domestic
+公钥比较。结果以
+`siteId + planId + WG materialDigest + workerReportId` 保存为健康证据；只有状态为 `passed`、
+运行中公钥一致、并明确绑定当前 warning worker report 的证据才能解除 blocked。创建新 plan、
+轮换 key，或出现更新的 reachability warning 后都必须重新验证，旧证据不会被误复用。
+
 ## 这次失败的根因
 
 ### 1. Domestic relay 已创建，但 Internal peer 没有安装
@@ -175,7 +197,8 @@ ExecStart=/usr/local/lib/qpjoy/hdo/bin/wg-quick up mx-internal-svc
 2. 打开 Internal Service Peer，确认 Execution Target 是 `host-runner`。
 3. 确认 `config key` 是 `config key ready`，没有 placeholder/invalid key。
 4. 确认 `wg runtime`、`core wg`、`core wg-quick` 可用。
-5. 点击 `Install / Restart`，再 `Refresh Status`。
+5. 如果 Status 已经 `passed`，直接完成复核，不执行 Install / Restart；只有明确显示
+   interface/config 缺失时才审批 `Install / Restart`，然后再 Refresh Status。
 6. Internal 上确认：
 
 ```bash

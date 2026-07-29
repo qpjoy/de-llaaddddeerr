@@ -112,6 +112,8 @@ import type {
   SiteSlotDomesticRuntimeConfigInput,
   SiteSlotDomesticWireGuardSecret,
   SiteSlotDomesticWireGuardSecretInput,
+  SiteSlotInternalServicePeerObservation,
+  SiteSlotInternalServicePeerObservationInput,
   SiteSlotPlan,
   SiteSlotPlanInput,
   SiteSlotRollbackExecution,
@@ -203,6 +205,7 @@ import {
   buildSiteSlotPlan,
   buildSiteSlotDomesticRuntimeConfig,
   buildSiteSlotDomesticWireGuardSecret,
+  buildSiteSlotInternalServicePeerObservation,
   buildSiteSlotRunnerSession,
   buildSiteSlotSshProfile,
   buildSiteSlotRollbackExecution,
@@ -362,6 +365,7 @@ type RecordKind =
   | 'site-slot-ssh-profile'
   | 'site-slot-domestic-runtime-config'
   | 'site-slot-domestic-wg-secret'
+  | 'site-slot-internal-service-peer-observation'
   | 'site-slot-access-account'
   | 'launcher-network-mihomo-site'
   | 'launcher-product-network'
@@ -2268,6 +2272,69 @@ export class PostgresStore implements PlatformStore {
       }
     });
     return secret;
+  }
+
+  async listSiteSlotInternalServicePeerObservations(
+    planId?: string | null
+  ): Promise<SiteSlotInternalServicePeerObservation[]> {
+    const observations = await this.listRecords<SiteSlotInternalServicePeerObservation>(
+      'site-slot-internal-service-peer-observation'
+    );
+    return observations
+      .filter((observation) => !planId || observation.planId === planId)
+      .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt));
+  }
+
+  async getSiteSlotInternalServicePeerObservation(
+    planId: string
+  ): Promise<SiteSlotInternalServicePeerObservation | null> {
+    return this.getRecord<SiteSlotInternalServicePeerObservation>(
+      'site-slot-internal-service-peer-observation',
+      planId
+    );
+  }
+
+  async upsertSiteSlotInternalServicePeerObservation(
+    input: SiteSlotInternalServicePeerObservationInput
+  ): Promise<SiteSlotInternalServicePeerObservation> {
+    const observation = buildSiteSlotInternalServicePeerObservation(input);
+    const rows = await this.dataSource.query(
+      `INSERT INTO mx_platform_records (
+         kind, id, environment, site_id, data, created_at, updated_at
+       )
+       VALUES (
+         'site-slot-internal-service-peer-observation', $1, $2, $3, $4::jsonb, now(), now()
+       )
+       ON CONFLICT (kind, id, environment) DO UPDATE
+       SET data = EXCLUDED.data,
+           site_id = EXCLUDED.site_id,
+           updated_at = now()
+       WHERE (mx_platform_records.data->>'checkedAt') IS NULL
+          OR (
+            (EXCLUDED.data->>'checkedAt') IS NOT NULL
+            AND (EXCLUDED.data->>'checkedAt') >= (mx_platform_records.data->>'checkedAt')
+          )
+       RETURNING data`,
+      [
+        observation.planId,
+        this.config.environment,
+        observation.siteId,
+        JSON.stringify(observation)
+      ]
+    ) as Array<{ data: SiteSlotInternalServicePeerObservation }>;
+    const persisted = rows[0]?.data
+      ?? await this.getSiteSlotInternalServicePeerObservation(observation.planId)
+      ?? observation;
+    if (persisted.recordedAt === observation.recordedAt) {
+      await this.recordAudit({
+        eventType: 'site_slot.internal_service_peer.observed',
+        actorKind: 'admin-action',
+        siteId: observation.siteId,
+        requestId: null,
+        metadata: { ...observation }
+      });
+    }
+    return persisted;
   }
 
   async issueSiteSlotAccessAccounts(input: SiteSlotAccessAccountIssueInput): Promise<SiteSlotAccessAccountIssueResult> {
