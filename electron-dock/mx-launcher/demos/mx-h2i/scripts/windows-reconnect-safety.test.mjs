@@ -406,6 +406,11 @@ assert.match(
   /browserFallbackChanged[\s\S]*?reason !== 'interval'[\s\S]*?\|\| browserFallbackChanged/,
   'an unchanged PAC signature must still persist Clash TUN system-DNS fallback transitions'
 );
+assert.match(
+  source,
+  /const allowWarnings = options\.allowWarnings !== false[\s\S]*?&& !wireGuardDisconnectInFlight[\s\S]*?&& !appShutdownRequested;[\s\S]*?if \(!allowWarnings\) \{[\s\S]*?return;[\s\S]*?\}/,
+  'background, disconnect, and shutdown route refresh failures must stay quiet'
+);
 const handlerStart = source.indexOf("ipcMain.handle('mx-h2i:connect-guest'");
 const handlerEnd = source.indexOf("ipcMain.handle('mx-h2i:login-employee'", handlerStart);
 assert.ok(handlerStart >= 0 && handlerEnd > handlerStart, 'guest connect handler must exist');

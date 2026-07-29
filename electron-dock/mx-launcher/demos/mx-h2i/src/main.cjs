@@ -6428,8 +6428,13 @@ async function systemPacReverseProxyRoutes(options = {}) {
 function warnSystemPacReverseProxyRoutesUnavailable(prefix, failures, options = {}) {
   if (!failures.length) return;
   const now = Date.now();
-  const allowWarnings = options.allowWarnings !== false;
-  if (!allowWarnings && now - lastSystemPacReverseProxyRoutesWarningAt < SYSTEM_DOMAIN_PROXY_ROUTE_WARNING_MS) {
+  const allowWarnings = options.allowWarnings !== false
+    && !wireGuardDisconnectInFlight
+    && !appShutdownRequested;
+  if (!allowWarnings) {
+    return;
+  }
+  if (now - lastSystemPacReverseProxyRoutesWarningAt < SYSTEM_DOMAIN_PROXY_ROUTE_WARNING_MS) {
     return;
   }
   lastSystemPacReverseProxyRoutesWarningAt = now;
