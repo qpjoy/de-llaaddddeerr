@@ -6,7 +6,16 @@ function windowsLocalEdgePrerequisitesReady(connection = {}) {
 
 function windowsSystemDnsDataPlaneReady(connection = {}) {
   return windowsLocalEdgePrerequisitesReady(connection)
-    && connection?.diagnostics?.windowsDnsResolution?.ready === true;
+    && (
+      connection?.diagnostics?.windowsDnsResolution?.ready === true
+      || windowsSystemDnsProofSkipped(connection)
+    );
+}
+
+function windowsSystemDnsProofSkipped(connection = {}) {
+  const resolution = connection?.diagnostics?.windowsDnsResolution;
+  return resolution?.skipped === true
+    && resolution?.skipReason === 'split-dns-diagnostic-host-missing';
 }
 
 function standaloneOwnershipReady(connection = {}) {
@@ -62,5 +71,6 @@ module.exports = {
   windowsBrowserPromotionPrerequisitesReady,
   windowsLocalEdgePrerequisitesReady,
   windowsSplitDnsPathReady,
-  windowsSystemDnsDataPlaneReady
+  windowsSystemDnsDataPlaneReady,
+  windowsSystemDnsProofSkipped
 };

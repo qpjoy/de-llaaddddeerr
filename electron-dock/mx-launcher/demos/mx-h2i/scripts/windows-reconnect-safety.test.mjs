@@ -21,7 +21,8 @@ const {
   windowsBrowserPromotionPrerequisitesReady,
   windowsLocalEdgePrerequisitesReady,
   windowsSplitDnsPathReady,
-  windowsSystemDnsDataPlaneReady
+  windowsSystemDnsDataPlaneReady,
+  windowsSystemDnsProofSkipped
 } = require('../src/windows-network-readiness.cjs');
 
 const clashTunDnsDegradedConnection = {
@@ -47,6 +48,27 @@ assert.equal(
   windowsSystemDnsDataPlaneReady(clashTunDnsDegradedConnection),
   false,
   'a public or Clash fake-IP system DNS answer remains explicitly degraded'
+);
+const noDiagnosticHostConnection = {
+  ...clashTunDnsDegradedConnection,
+  diagnostics: {
+    ...clashTunDnsDegradedConnection.diagnostics,
+    windowsDnsResolution: {
+      ready: false,
+      skipped: true,
+      skipReason: 'split-dns-diagnostic-host-missing'
+    }
+  }
+};
+assert.equal(
+  windowsSystemDnsProofSkipped(noDiagnosticHostConnection),
+  true,
+  'missing Windows split-DNS diagnostic hosts are an explicit proof skip'
+);
+assert.equal(
+  windowsSystemDnsDataPlaneReady(noDiagnosticHostConnection),
+  true,
+  'a missing diagnostic host must not degrade an otherwise ready Windows data plane'
 );
 assert.equal(
   standaloneOwnershipReady(clashTunDnsDegradedConnection),

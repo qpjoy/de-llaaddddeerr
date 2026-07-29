@@ -183,6 +183,8 @@ let appShutdownCompleted = false;
 let appRelaunchRequested = false;
 let pendingFeishuLogin = null;
 
+const WINDOWS_SPLIT_DNS_DIAGNOSTIC_HOST_MISSING = 'split-dns-diagnostic-host-missing';
+
 const TOP_DOCK_Y = 0;
 const TOP_REVEAL_ZONE = 18;
 const TOP_ANIMATION_STEPS = 24;
@@ -3518,7 +3520,7 @@ async function attachWindowsBrowserAccessProof(status, reason = 'manual') {
         reason
       };
   const domains = splitDnsDomains(runtime?.config);
-  const host = windowsSplitDnsDiagnosticHost(domains);
+  const host = windowsSplitDnsDiagnosticHost(domains, base.reverseProxyRoutes);
   if (domains.length === 0) {
     return {
       ...base,
@@ -3537,7 +3539,29 @@ async function attachWindowsBrowserAccessProof(status, reason = 'manual') {
       }
     };
   }
-  if (!host || base.applied !== true || typeof systemDomainProxyManager?.probeBrowserAccess !== 'function') {
+  if (!host) {
+    const pacApplied = base.applied === true;
+    return {
+      ...base,
+      browserReady: pacApplied,
+      browserAccess: {
+        supported: Boolean(systemDomainProxyManager),
+        ready: pacApplied,
+        host: null,
+        port: null,
+        pacApplied,
+        proxyReachable: false,
+        skipped: true,
+        skipReason: WINDOWS_SPLIT_DNS_DIAGNOSTIC_HOST_MISSING,
+        proofSessionId: WINDOWS_BROWSER_PROOF_SESSION_ID,
+        checkedAt: nowIso(),
+        error: pacApplied
+          ? null
+          : base.error || 'Windows Internal 浏览器 PAC 尚未应用。'
+      }
+    };
+  }
+  if (base.applied !== true || typeof systemDomainProxyManager?.probeBrowserAccess !== 'function') {
     return {
       ...base,
       browserReady: false,
@@ -3550,10 +3574,7 @@ async function attachWindowsBrowserAccessProof(status, reason = 'manual') {
         proxyReachable: false,
         proofSessionId: WINDOWS_BROWSER_PROOF_SESSION_ID,
         checkedAt: nowIso(),
-        error: base.error
-          || (!host
-            ? '没有位于当前 split-DNS namespace 内的浏览器诊断主机。'
-            : 'Windows Internal 浏览器 PAC 尚未应用。')
+        error: base.error || 'Windows Internal 浏览器 PAC 尚未应用。'
       }
     };
   }
@@ -3686,6 +3707,12 @@ function windowsBrowserAccessReady(status) {
     && status?.browserReady === true
     && status?.browserAccess?.ready === true
     && status?.browserAccess?.proofSessionId === WINDOWS_BROWSER_PROOF_SESSION_ID;
+}
+
+function windowsBrowserAccessProofSkipped(status) {
+  return process.platform === 'win32'
+    && status?.browserAccess?.skipped === true
+    && status?.browserAccess?.skipReason === WINDOWS_SPLIT_DNS_DIAGNOSTIC_HOST_MISSING;
 }
 
 function systemDomainProxyConnectionReady(status) {
@@ -4092,10 +4119,13 @@ async function recordSystemDomainProxyDiagnostics(status, touchReason) {
     }
   };
   if (promote) {
+    const browserProofSkipped = windowsBrowserAccessProofSkipped(status);
     runtime.feedback = {
       tone: 'success',
       message: process.platform === 'darwin'
         ? 'macOS dynamic split DNS 与本机 DNS relay 已重新验证，Internal 浏览器和系统解析路径恢复 ready。'
+        : browserProofSkipped
+        ? 'Windows WireGuard、Internal API、NRPT 与系统 PAC 已 ready；当前没有 split-DNS 域名诊断主机，已跳过浏览器 CONNECT 证明。'
         : systemDnsDegraded
         ? `Windows 浏览器已通过 ${status?.browserAccess?.proxy || localEdgeProxy()} 访问 Internal；浏览器路径 ready，系统 DNS 未通过，非 PAC 程序仍为 degraded。`
         : `Windows 浏览器已通过 ${status?.browserAccess?.proxy || localEdgeProxy()} 访问 Internal，完整网络已 ready。`
@@ -5380,18 +5410,6 @@ async function probeWindowsSplitDnsResolution(routePlanInput, windowsNrpt) {
     };
   }
   const host = windowsSplitDnsDiagnosticHost(domains);
-  if (!host) {
-    return {
-      host: null,
-      state: 'invalid-host',
-      severity: 'error',
-      ok: false,
-      ready: false,
-      skipped: false,
-      message: '没有位于当前 split-DNS namespace 内的可诊断主机，不能证明 Windows 系统解析已切到 Internal。',
-      updatedAt: nowIso()
-    };
-  }
   if (!windowsNrptReadyForConnection(windowsNrpt)) {
     return {
       host,
@@ -5402,12 +5420,27 @@ async function probeWindowsSplitDnsResolution(routePlanInput, windowsNrpt) {
       skipped: true,
       skipReason: windowsNrpt?.state || 'nrpt-not-ready',
       message: 'Windows NRPT 元数据尚未 ready；已记录 Internal DNS 直查和默认解析，仅跳过 Node 端到端 ready 证明。',
-      proofLayers: await collectWindowsDnsProofLayers({
-        host,
-        routePlan,
-        windowsNrpt,
-        nodeSkipReason: 'nrpt-not-ready'
-      }),
+      proofLayers: host
+        ? await collectWindowsDnsProofLayers({
+            host,
+            routePlan,
+            windowsNrpt,
+            nodeSkipReason: 'nrpt-not-ready'
+          })
+        : null,
+      updatedAt: nowIso()
+    };
+  }
+  if (!host) {
+    return {
+      host: null,
+      state: 'proof-skipped',
+      severity: 'warning',
+      ok: true,
+      ready: true,
+      skipped: true,
+      skipReason: WINDOWS_SPLIT_DNS_DIAGNOSTIC_HOST_MISSING,
+      message: '没有位于当前 split-DNS namespace 内的可诊断主机；已跳过 Windows 系统 DNS 端到端证明。',
       updatedAt: nowIso()
     };
   }
@@ -5456,9 +5489,16 @@ async function probeWindowsSplitDnsResolution(routePlanInput, windowsNrpt) {
   };
 }
 
-function windowsSplitDnsDiagnosticHost(domains) {
+function windowsSplitDnsDiagnosticHost(domains, reverseProxyRoutes = null) {
+  const routeHosts = [
+    ...arrayValue(Array.isArray(reverseProxyRoutes)
+      ? reverseProxyRoutes.map((route) => nullableString(route?.host))
+      : [], []),
+    preferredReverseProxyDiagnosticHost()
+  ].filter(Boolean);
   const candidates = [
     process.env.MX_H2I_DNS_DIAGNOSTIC_HOST,
+    ...routeHosts,
     runtime?.config?.bootstrapApiBaseUrl,
     DEFAULT_BOOTSTRAP_HOST,
     runtime?.config?.internalApiBaseUrl
@@ -12369,9 +12409,12 @@ async function applyNetworkSession(session, options) {
       : process.platform === 'win32'
         ? '其它流量保持 DIRECT。'
         : '其它流量回落到原系统代理。';
+    const browserProofSkipped = windowsBrowserAccessProofSkipped(systemDomainProxy);
     const pacFeedback = systemDomainProxy?.applied
       ? process.platform === 'darwin' && systemDomainProxyConnectionReady(systemDomainProxy)
         ? ` macOS PAC、dynamic split DNS 与本机 DNS relay 已实时验证；${publicTrafficFeedback}${resolverFeedback}`
+        : browserProofSkipped
+        ? ` 系统 PAC 已写入；当前没有 split-DNS 域名诊断主机，已跳过浏览器 CONNECT 证明。${publicTrafficFeedback}${resolverFeedback}`
         : systemDomainProxy?.browserAccess?.ready
         ? ` 系统 PAC 已将 Internal 域名接入本机 ${localEdgeProxy()}，浏览器 CONNECT 探测通过；${publicTrafficFeedback}${resolverFeedback}`
         : ` 系统 PAC 已写入，但浏览器 Internal 路径未通过：${systemDomainProxy?.browserAccess?.error || 'unknown'}。`
