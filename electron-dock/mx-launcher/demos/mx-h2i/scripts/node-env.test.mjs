@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import { cleanElectronNodeEnv } from './node-env.mjs';
 
@@ -26,5 +28,18 @@ assert.equal(
 
 const nonWindows = cleanElectronNodeEnv({ Path: '/custom/bin' }, 'darwin');
 assert.equal(nonWindows.Path, '/custom/bin');
+
+const packageJson = JSON.parse(readFileSync(
+  fileURLToPath(new URL('../package.json', import.meta.url)),
+  'utf8'
+));
+assert.match(
+  packageJson.scripts.dev,
+  /node scripts\/run-clean-env\.mjs node scripts\/dev-mode\.mjs local/
+);
+assert.match(
+  packageJson.scripts.dev,
+  /node scripts\/run-clean-env\.mjs node scripts\/run-electron-dev\.mjs/
+);
 
 console.log('node-env tests passed');

@@ -65,6 +65,11 @@ assert.match(startSource, /\/internal\/v1\/sdk\/oauth\/feishu\/authorize/);
 assert.match(startSource, /redirectUri,[\s\S]*state: flow\.state,[\s\S]*codeChallenge:/);
 assert.match(
   startSource,
+  /exchangeHandleVersion: 'mxfx2'/,
+  'new MX-H2I clients must explicitly request the signed exchangeHandle format while old clients stay on mxfx1'
+);
+assert.match(
+  startSource,
   /resolveBootstrapEndpoint\(runtime\.config,\s*\{\s*requireSecureTransport:\s*true\s*\}\)/,
   'Feishu authorization must not select a reachable plaintext fallback'
 );
@@ -123,6 +128,15 @@ for (const unsafeAuthorizationUrl of [
   assert.equal(isSafeAuthorizationUrl(unsafeAuthorizationUrl), false, unsafeAuthorizationUrl);
 }
 
+const isSafeExchangeHandle = Function(
+  `${functionSource(mainSource, 'isSafeFeishuExchangeHandle')}; return isSafeFeishuExchangeHandle;`
+)();
+assert.equal(isSafeExchangeHandle(`mxfx1.${'a'.repeat(43)}`), true);
+assert.equal(isSafeExchangeHandle(`mxfx2.${'b'.repeat(80)}.${'c'.repeat(43)}`), true);
+assert.equal(isSafeExchangeHandle(`mxfx2.${'b'.repeat(80)}.${'c'.repeat(42)}`), false);
+assert.equal(isSafeExchangeHandle(`mxfx2.${'b'.repeat(1801)}.${'c'.repeat(43)}`), false);
+assert.equal(isSafeExchangeHandle('https://evil.example/handle'), false);
+
 const tokenSource = functionSource(mainSource, 'authenticateFeishuViaGateway');
 assert.match(tokenSource, /\/internal\/v1\/sdk\/oauth\/feishu\/token/);
 assert.match(tokenSource, /code,[\s\S]*redirectUri,[\s\S]*codeVerifier,[\s\S]*exchangeHandle,[\s\S]*audience: 'mx-sdk',[\s\S]*scope: FEISHU_OAUTH_SCOPE/);
@@ -132,10 +146,26 @@ assert.doesNotMatch(
   /fallbackProvider:\s*'feishu'/,
   'the desktop must verify auth_provider from the token instead of inventing it'
 );
+const completeFeishuLoginSource = functionSource(mainSource, 'completeFeishuLogin');
 assert.match(
-  functionSource(mainSource, 'completeFeishuLogin'),
+  completeFeishuLoginSource,
   /await assertLiveSecureFeishuTransport\([\s\S]*'授权码交换'\)[\s\S]*authenticateFeishuViaGateway/,
   'the authorization code and PKCE verifier must pass a live transport check before exchange'
+);
+assert.match(
+  completeFeishuLoginSource,
+  /isFeishuAuthorizationTransactionMissingError\(err\)[\s\S]*clearPendingFeishuLogin\('token-transaction-missing', flow\)[\s\S]*请重新点击“使用飞书登录”发起新的授权/,
+  'an expired or consumed exchangeHandle should end the current authorization flow instead of leaving MX-H2I waiting'
+);
+assert.doesNotMatch(
+  completeFeishuLoginSource,
+  /startFeishuLogin\(\{ retryOnTransactionMissing:/,
+  'a stale callback must not silently create a second browser authorization flow'
+);
+assert.match(
+  functionSource(mainSource, 'feishuTokenExchangeFailureMessage'),
+  /127\.0\.0\.1 回调地址是正确的/,
+  'the user-facing error must not imply that the loopback redirect URI is misconfigured'
 );
 assert.match(
   functionSource(mainSource, 'promoteEmployeeConnection'),
@@ -824,6 +854,49 @@ const publicKeyConflictClassification = classifyConnectionError({
 assert.equal(publicKeyConflictClassification.state, 'forbidden');
 assert.match(publicKeyConflictClassification.message, /不是 Domestic 443 或 Internal 网络不可达/);
 assert.match(publicKeyConflictClassification.message, /release 旧租约/);
+const isLauncherPublicKeyConflictError = Function(
+  'errorMessage',
+  `${functionSource(mainSource, 'isLauncherPublicKeyConflictError')}; return isLauncherPublicKeyConflictError;`
+)((err) => err.message || '');
+assert.equal(
+  isLauncherPublicKeyConflictError({
+    status: 401,
+    message: 'This WireGuard public key is already bound to another active lease'
+  }),
+  true
+);
+assert.equal(
+  isLauncherPublicKeyConflictError({
+    status: 401,
+    message: 'valid launcher lease capability required'
+  }),
+  false,
+  'only the public-key conflict may trigger local identity rotation'
+);
+const identityRepairSource = functionSource(mainSource, 'connectLauncherNetworkWithLocalIdentityRepair');
+assert.match(identityRepairSource, /isLauncherPublicKeyConflictError\(err\)/);
+assert.match(identityRepairSource, /rotateLocalLauncherIdentity\('public-key-conflict-auto-repair'\)/);
+assert.match(identityRepairSource, /requestTag:\s*`\$\{stringValue\(input\.requestTag, 'connect'\)\}-identity-repair`/);
+assert.match(identityRepairSource, /preservePreviousOnRetryFailure === true/);
+assert.match(identityRepairSource, /runtime\.installation = previousRuntime\.installation/);
+assert.match(
+  mainSource,
+  /connectLauncherNetworkWithLocalIdentityRepair\(\{[\s\S]*requestTag: provider === 'feishu' \? 'feishu-employee' : 'employee'[\s\S]*preservePreviousOnRetryFailure: Boolean\(networkFallback\)/,
+  'staff promotion must roll back local identity when retry repair cannot obtain a new lease'
+);
+const identityRotationSource = functionSource(mainSource, 'rotateLocalLauncherIdentity');
+assert.match(identityRotationSource, /createLauncherWireGuardKeyPair\(\)/);
+assert.match(identityRotationSource, /installId = `inst_\$\{productId\}_/);
+assert.match(identityRotationSource, /deviceId = `dev_\$\{productId\}_/);
+assert.match(identityRotationSource, /runtime\.leaseCapabilities = normalizeLeaseCapabilities/);
+assert.match(identityRotationSource, /runtime\.connection = \{\s*\.\.\.idleConnection\(\)/);
+assert.match(mainSource, /ipcMain\.handle\('mx-h2i:reset-local-network-identity'/);
+assert.match(
+  preloadSource,
+  /resetLocalNetworkIdentity: \(\) => ipcRenderer\.invoke\('mx-h2i:reset-local-network-identity'\)/
+);
+assert.match(rendererSource, /data-action="resetLocalNetworkIdentity">清理旧连接/);
+assert.doesNotMatch(rendererSource, /data-action="disconnect">清理旧连接/);
 
 const retainedRuntime = {
   connection: {

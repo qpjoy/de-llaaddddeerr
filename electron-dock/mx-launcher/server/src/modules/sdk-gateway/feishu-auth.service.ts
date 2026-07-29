@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import {
   BadGatewayException,
@@ -31,6 +31,8 @@ const PKCE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const PKCE_VERIFIER_PATTERN = /^[A-Za-z0-9\-._~]{43,128}$/;
 const STATE_PATTERN = /^[A-Za-z0-9\-._~]{16,512}$/;
 const FEISHU_ID_PATTERN = /^[A-Za-z0-9_-]{1,160}$/;
+const FEISHU_EXCHANGE_HANDLE_V1_PATTERN = /^mxfx1\.[A-Za-z0-9_-]{43}$/;
+const FEISHU_EXCHANGE_HANDLE_V2_PATTERN = /^mxfx2\.([A-Za-z0-9_-]{32,1800})\.([A-Za-z0-9_-]{43})$/;
 
 export type FeishuFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -38,6 +40,7 @@ export interface FeishuAuthorizeInput {
   redirectUri?: string | null;
   state?: string | null;
   codeChallenge?: string | null;
+  exchangeHandleVersion?: string | null;
   sourceKey?: string | null;
 }
 
@@ -108,14 +111,27 @@ export class FeishuAuthService {
       throw new ServiceUnavailableException('Feishu OAuth authorization endpoint is invalid');
     }
     await this.assertSourceRateLimit('authorize', input.sourceKey, FEISHU_AUTHORIZE_LIMIT_PER_SOURCE);
-    const exchangeHandle = `mxfx1.${randomBytes(32).toString('base64url')}`;
     const createdAt = new Date();
+    const expiresAt = new Date(createdAt.getTime() + FEISHU_AUTH_TRANSACTION_TTL_MS);
+    const transactionPayload = {
+      transactionId: randomBytes(32).toString('base64url'),
+      redirectUri,
+      codeChallenge,
+      createdAt: createdAt.toISOString(),
+      expiresAt: expiresAt.toISOString()
+    };
+    const exchangeHandle = input.exchangeHandleVersion === 'mxfx2'
+      ? createFeishuExchangeHandle(
+        this.requireConfiguredValue(this.config.feishuAppSecret),
+        transactionPayload
+      )
+      : `mxfx1.${transactionPayload.transactionId}`;
     await this.store.createFeishuAuthorizationTransaction({
       transactionId: feishuTransactionKey(exchangeHandle),
       redirectUri,
       codeChallenge,
-      createdAt: createdAt.toISOString(),
-      expiresAt: new Date(createdAt.getTime() + FEISHU_AUTH_TRANSACTION_TTL_MS).toISOString()
+      createdAt: transactionPayload.createdAt,
+      expiresAt: transactionPayload.expiresAt
     });
     return { authorizationUrl, exchangeHandle };
   }
@@ -184,21 +200,33 @@ export class FeishuAuthService {
     redirectUri: string,
     codeVerifier: string
   ): Promise<void> {
-    const handle = requireMatchingString(
-      rawHandle,
-      'exchangeHandle',
-      /^mxfx1\.[A-Za-z0-9_-]{43}$/
-    );
+    const handle = requireFeishuExchangeHandle(rawHandle);
     const key = feishuTransactionKey(handle);
+    const signedTransaction = verifyFeishuExchangeHandle(
+      this.requireConfiguredValue(this.config.feishuAppSecret),
+      handle
+    );
     const transaction = await this.store.consumeFeishuAuthorizationTransaction(key);
     if (!transaction) {
+      if (!signedTransaction || Date.parse(signedTransaction.expiresAt) <= Date.now()) {
+        throw new UnauthorizedException('Feishu authorization transaction is missing, expired, or already consumed');
+      }
+      this.assertTransactionMatchesCallback(signedTransaction, redirectUri, codeVerifier);
+      return;
+    }
+    if (transaction.consumedAt) {
       throw new UnauthorizedException('Feishu authorization transaction is missing, expired, or already consumed');
     }
+    this.assertTransactionMatchesCallback(transaction, redirectUri, codeVerifier);
+  }
+
+  private assertTransactionMatchesCallback(
+    transaction: { redirectUri: string; codeChallenge: string },
+    redirectUri: string,
+    codeVerifier: string
+  ): void {
     const actualChallenge = createHash('sha256').update(codeVerifier).digest('base64url');
-    if (
-      transaction.redirectUri !== redirectUri
-      || !secureStringEqual(transaction.codeChallenge, actualChallenge)
-    ) {
+    if (transaction.redirectUri !== redirectUri || !secureStringEqual(transaction.codeChallenge, actualChallenge)) {
       throw new UnauthorizedException('Feishu authorization transaction does not match the callback');
     }
   }
@@ -433,6 +461,80 @@ function feishuTransactionKey(handle: string): string {
     .update('mx-feishu-exchange-handle-v1\0')
     .update(handle)
     .digest('hex');
+}
+
+function createFeishuExchangeHandle(
+  appSecret: string,
+  payload: {
+    transactionId: string;
+    redirectUri: string;
+    codeChallenge: string;
+    createdAt: string;
+    expiresAt: string;
+  }
+): string {
+  const payloadSegment = Buffer.from(JSON.stringify({ v: 2, ...payload }), 'utf8').toString('base64url');
+  return `mxfx2.${payloadSegment}.${signFeishuExchangeHandle(appSecret, payloadSegment)}`;
+}
+
+function requireFeishuExchangeHandle(value: string | null | undefined): string {
+  const handle = requireOpaqueString(value, 'exchangeHandle', 2_048);
+  if (FEISHU_EXCHANGE_HANDLE_V1_PATTERN.test(handle) || FEISHU_EXCHANGE_HANDLE_V2_PATTERN.test(handle)) {
+    return handle;
+  }
+  throw new BadRequestException('exchangeHandle is invalid');
+}
+
+function verifyFeishuExchangeHandle(
+  appSecret: string,
+  handle: string
+): {
+  transactionId: string;
+  redirectUri: string;
+  codeChallenge: string;
+  createdAt: string;
+  expiresAt: string;
+} | null {
+  const match = FEISHU_EXCHANGE_HANDLE_V2_PATTERN.exec(handle);
+  if (!match) return null;
+  const payloadSegment = match[1];
+  const signature = match[2];
+  if (!payloadSegment || !signature || !secureStringEqual(signature, signFeishuExchangeHandle(appSecret, payloadSegment))) {
+    return null;
+  }
+  let payload: Record<string, unknown>;
+  try {
+    payload = recordValue(JSON.parse(Buffer.from(payloadSegment, 'base64url').toString('utf8')));
+  } catch {
+    return null;
+  }
+  if (payload.v !== 2) return null;
+  const transactionId = stringValue(payload.transactionId);
+  const redirectUri = stringValue(payload.redirectUri);
+  const codeChallenge = stringValue(payload.codeChallenge);
+  const createdAt = stringValue(payload.createdAt);
+  const expiresAt = stringValue(payload.expiresAt);
+  if (
+    !transactionId
+    || !redirectUri
+    || !codeChallenge
+    || !createdAt
+    || !expiresAt
+    || !/^[A-Za-z0-9_-]{43}$/.test(transactionId)
+    || !PKCE_CHALLENGE_PATTERN.test(codeChallenge)
+    || !Number.isFinite(Date.parse(createdAt))
+    || !Number.isFinite(Date.parse(expiresAt))
+  ) {
+    return null;
+  }
+  return { transactionId, redirectUri, codeChallenge, createdAt, expiresAt };
+}
+
+function signFeishuExchangeHandle(appSecret: string, payloadSegment: string): string {
+  return createHmac('sha256', appSecret)
+    .update('mx-feishu-exchange-handle-v2\0')
+    .update(payloadSegment)
+    .digest('base64url');
 }
 
 function secureStringEqual(left: string, right: string): boolean {

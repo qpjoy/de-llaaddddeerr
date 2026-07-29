@@ -1913,17 +1913,44 @@ export class PostgresStore implements PlatformStore {
   async consumeFeishuAuthorizationTransaction(
     transactionId: string
   ): Promise<FeishuAuthorizationTransaction | null> {
-    const rows = await this.dataSource.query(
-      `DELETE FROM mx_platform_records
-       WHERE kind = 'feishu-authorization-transaction'
-         AND id = $1
-         AND environment = $2
-       RETURNING data`,
-      [transactionId, this.config.environment]
-    ) as Array<{ data: FeishuAuthorizationTransaction }>;
-    const transaction = rows[0]?.data ?? null;
-    if (!transaction || Date.parse(transaction.expiresAt) <= Date.now()) return null;
-    return transaction;
+    return this.dataSource.transaction(async (manager) => {
+      const rows = await manager.query(
+        `SELECT data
+         FROM mx_platform_records
+         WHERE kind = 'feishu-authorization-transaction'
+           AND id = $1
+           AND environment = $2
+         FOR UPDATE`,
+        [transactionId, this.config.environment]
+      ) as Array<{ data: FeishuAuthorizationTransaction }>;
+      const transaction = rows[0]?.data ?? null;
+      if (!transaction) return null;
+      if (Date.parse(transaction.expiresAt) <= Date.now()) {
+        await manager.query(
+          `DELETE FROM mx_platform_records
+           WHERE kind = 'feishu-authorization-transaction'
+             AND id = $1
+             AND environment = $2`,
+          [transactionId, this.config.environment]
+        );
+        return null;
+      }
+      if (transaction.consumedAt) return transaction;
+      await manager.query(
+        `UPDATE mx_platform_records
+         SET data = data || $3::jsonb,
+             updated_at = now()
+         WHERE kind = 'feishu-authorization-transaction'
+           AND id = $1
+           AND environment = $2`,
+        [
+          transactionId,
+          this.config.environment,
+          JSON.stringify({ consumedAt: new Date().toISOString() })
+        ]
+      );
+      return transaction;
+    });
   }
 
   async introspectToken(input: TokenIntrospectionInput): Promise<TokenIntrospectionResult> {

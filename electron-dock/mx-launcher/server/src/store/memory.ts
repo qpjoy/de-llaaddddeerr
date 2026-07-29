@@ -1616,8 +1616,16 @@ export class MemoryStore implements PlatformStore {
     transactionId: string
   ): FeishuAuthorizationTransaction | null {
     const transaction = this.feishuAuthorizationTransactions.get(transactionId) ?? null;
-    this.feishuAuthorizationTransactions.delete(transactionId);
-    if (!transaction || Date.parse(transaction.expiresAt) <= Date.now()) return null;
+    if (!transaction) return null;
+    if (Date.parse(transaction.expiresAt) <= Date.now()) {
+      this.feishuAuthorizationTransactions.delete(transactionId);
+      return null;
+    }
+    if (transaction.consumedAt) return { ...transaction };
+    this.feishuAuthorizationTransactions.set(transactionId, {
+      ...transaction,
+      consumedAt: new Date().toISOString()
+    });
     return transaction;
   }
 

@@ -880,6 +880,7 @@ export interface FeishuAuthorizationTransaction {
   codeChallenge: string;
   createdAt: string;
   expiresAt: string;
+  consumedAt?: string | null;
 }
 
 export interface FeishuAuthorizationTransactionInput {

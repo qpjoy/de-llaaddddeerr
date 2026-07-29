@@ -94,6 +94,7 @@ export class SdkGatewayController {
       redirectUri: exactString(body.redirectUri),
       state: exactString(body.state),
       codeChallenge: exactString(body.codeChallenge),
+      exchangeHandleVersion: exactString(body.exchangeHandleVersion),
       sourceKey: sourceIp
     });
   }

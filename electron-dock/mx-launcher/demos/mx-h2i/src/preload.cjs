@@ -9,6 +9,7 @@ const api = {
   startFeishuLogin: () => ipcRenderer.invoke('mx-h2i:start-feishu-login'),
   cancelFeishuLogin: () => ipcRenderer.invoke('mx-h2i:cancel-feishu-login'),
   disconnect: () => ipcRenderer.invoke('mx-h2i:disconnect'),
+  resetLocalNetworkIdentity: () => ipcRenderer.invoke('mx-h2i:reset-local-network-identity'),
   installAppCenter: () => ipcRenderer.invoke('mx-h2i:install-appcenter'),
   enableH2o: () => ipcRenderer.invoke('mx-h2i:enable-h2o'),
   launchH2o: () => ipcRenderer.invoke('mx-h2i:launch-h2o'),

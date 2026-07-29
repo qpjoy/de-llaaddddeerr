@@ -51,6 +51,14 @@ test('Feishu authorization config and URL enforce exact redirect and S256 PKCE',
   assert.equal(url.searchParams.get('code_challenge'), CODE_CHALLENGE);
   assert.equal(url.searchParams.get('code_challenge_method'), 'S256');
 
+  const signedHandleResult = await controller.feishuAuthorize({
+    redirectUri: REDIRECT_URI,
+    state: `${STATE}_signed`,
+    codeChallenge: CODE_CHALLENGE,
+    exchangeHandleVersion: 'mxfx2'
+  });
+  assert.match(signedHandleResult.exchangeHandle, /^mxfx2\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/);
+
   await assert.rejects(
     controller.feishuAuthorize({
       redirectUri: `${REDIRECT_URI}/`,
@@ -157,6 +165,52 @@ test('Feishu token exchange provisions an isolated user and returns only an inte
     }),
     UnauthorizedException
   );
+  assert.equal(upstream.calls.length, 2);
+});
+
+test('Feishu token exchange validates a signed handle when the transaction store is not shared', async () => {
+  const config = feishuConfig();
+  const authorizerStore = new MemoryStore(config);
+  await authorizerStore.bootstrapUserCenter();
+  const authorizer = new FeishuAuthService(config, authorizerStore, unexpectedFetch());
+  const authorization = await authorizer.authorize({
+    redirectUri: REDIRECT_URI,
+    state: `${STATE}_split_store`,
+    codeChallenge: CODE_CHALLENGE,
+    exchangeHandleVersion: 'mxfx2'
+  });
+  assert.match(authorization.exchangeHandle, /^mxfx2\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/);
+
+  const exchangeStore = new MemoryStore(config);
+  await exchangeStore.bootstrapUserCenter();
+  const upstream = sequenceFetch([
+    {
+      code: 0,
+      access_token: 'split-store-feishu-access-token'
+    },
+    {
+      code: 0,
+      data: {
+        tenant_key: 'tenant_allowed',
+        open_id: 'ou_split_store_user',
+        name: 'Split Store User'
+      }
+    }
+  ]);
+  const exchanger = new FeishuAuthService(config, exchangeStore, upstream.fetch);
+
+  const result = await exchanger.exchange({
+    code: 'split-store-authorization-code',
+    redirectUri: REDIRECT_URI,
+    codeVerifier: CODE_VERIFIER,
+    exchangeHandle: authorization.exchangeHandle,
+    audience: 'mx-sdk',
+    scopes: ['auth.read'],
+    requestId: 'req-feishu-split-store'
+  });
+
+  assert.equal(result.introspection.authProvider, 'feishu');
+  assert.ok(result.introspection.principal?.userId?.startsWith('usr_feishu_'));
   assert.equal(upstream.calls.length, 2);
 });
 

@@ -13,14 +13,18 @@ MX-H2I 的飞书登录使用 OAuth 2.0 authorization code flow，并采用以下
   `http://127.0.0.1:17891/oauth/feishu/callback` 启动一次性 loopback listener。
 - Electron 为每次登录生成新的密码学随机 `state` 和 `code_verifier`，
   `code_challenge_method` 固定为 `S256`。Internal 还返回单次 `exchangeHandle`，把
-  redirect URI 与 S256 challenge 绑定到五分钟有效的服务端事务。
+  redirect URI 与 S256 challenge 绑定到五分钟有效的服务端事务；新版 `mxfx2`
+  handle 额外携带服务端签名，作为公网入口或 rollout 期间 store 暂不可见的兜底校验。
+  MX-H2I 新客户端会在 authorize 请求中显式发送 `exchangeHandleVersion=mxfx2`；
+  未发送该字段的老客户端继续获得 `mxfx1`，避免 server 先升级时破坏兼容。
 - Internal 根据 App ID、固定 redirect URI、state 和 code challenge 构造飞书 HTTPS
   授权 URL；Electron 只通过系统默认浏览器打开该 URL，不在 Electron `BrowserWindow`
   中承载飞书登录页。
 - 飞书把一次性 authorization code 回调给 Electron loopback listener。Electron
   先验证请求方法、固定 path 和 state，再把 code、原 redirect URI 与 PKCE verifier
-  以及 `exchangeHandle` 交给 Internal。Internal 只保存 handle 摘要，并在共享 store 中
-  持久化事务；token exchange 时先原子删除再校验，因此跨 Pod 也只能消费一次。
+  以及 `exchangeHandle` 交给 Internal。Internal 优先在共享 store 中按 handle 摘要
+  原子标记消费，因此正常部署下跨 Pod 也只能消费一次；若记录因入口路由/rollout
+  暂不可见，则使用签名 handle 校验 redirect URI、S256 challenge 和过期时间后继续。
 - Internal 持有 App Secret，调用飞书 v2 token endpoint，再以飞书
   `user_access_token` 调用 `user_info`；飞书 App Secret、`user_access_token` 和
   `refresh_token` 都不会返回 Electron。
@@ -55,13 +59,18 @@ server 的 PKCE 校验。飞书 2026-03-04 的公开文档已声明 authorize �
    ```
 
 4. Internal 只在飞书配置完整、redirect URI 命中服务端 allowlist、tenant allowlist
-   非空时返回授权 URL 与不透明 `exchangeHandle`；服务端把 handle 摘要、redirect URI、
-   S256 challenge 和过期时间持久化到共享 store。
+   非空时返回授权 URL 与 `exchangeHandle`。新版客户端请求 `mxfx2` 时返回签名 handle；
+   老客户端仍返回 `mxfx1`。服务端同时把 handle 摘要、redirect URI、S256 challenge
+   和过期时间持久化到共享 store。
    Electron 还会在发送任何飞书 code、PKCE verifier 或 MX bearer 前执行传输门禁：只允许
    HTTPS、IP literal loopback，或当前已经通过 WireGuard route + Internal API 探测的
    overlay origin；不会降级到公网明文 HTTP。
 5. Electron 校验返回值为 HTTPS URL，再以 `shell.openExternal()` 打开系统浏览器。
-6. 用户在飞书同意或拒绝授权。
+   这里使用系统浏览器是桌面 OAuth 的预期行为；Chrome、Edge 或默认浏览器里的飞书
+   登录态只决定飞书当前展示/授权哪个账号，不参与 MX-H2I 的本地会话安全。MX-H2I 依靠
+   state、PKCE verifier、`exchangeHandle` 和 loopback code 绑定本次交易。
+6. 用户在飞书同意或拒绝授权。若浏览器当前登录了错误的飞书账号，应在飞书授权页切换账号
+   或换浏览器 Profile；Internal 仍会按 tenant allowlist 与 User Center 映射做最终校验。
 7. 飞书重定向到固定 loopback：
 
    ```text
@@ -83,7 +92,8 @@ server 的 PKCE 校验。飞书 2026-03-04 的公开文档已声明 authorize �
    ```
 
    请求同时携带 code、原 redirect URI、verifier 与 `exchangeHandle`。
-10. Internal 原子消费 `exchangeHandle`，校验绑定的 redirect URI 和 S256 verifier 后调用：
+10. Internal 优先原子消费 `exchangeHandle` 对应的共享 store 事务；如果事务记录不可见，
+    则校验新版签名 handle。两条路径都会校验绑定的 redirect URI 和 S256 verifier，之后调用：
 
     ```text
     POST https://open.feishu.cn/open-apis/authen/v2/oauth/token
@@ -245,11 +255,14 @@ User Center 管理、SDK users/roles/service-accounts 管理、Launcher Network 
 
 Internal 的 `exchangeHandle + S256` 提供的是可确认的本地安全属性：
 
-- handle 本身是随机不透明值，store 只记录其摘要；
+- `mxfx2` handle 携带服务端签名 payload，store 仍只按完整 handle 摘要索引，不保存明文
+  飞书 code、verifier 或 access token；
 - transaction 绑定 redirect URI 与 S256 challenge，五分钟过期；
-- PostgreSQL 下通过 `DELETE ... RETURNING` 原子消费，多个 Pod 不能重复兑换；本地 memory
+- PostgreSQL 下通过行锁与 `consumedAt` 标记原子消费，多个 Pod 不能重复兑换；本地 memory
   store 只用于单进程开发/测试；
 - verifier 或 redirect URI 不匹配也会消耗 transaction，防止猜测与重放。
+- 当共享 store 暂不可见时，签名 handle 兜底仍能验证 redirect、PKCE challenge 和过期时间；
+  replay 最终还会被飞书一次性 code 拒绝，但这不替代生产环境修复 Postgres/路由一致性。
 
 这能阻止没有当前 handle/verifier 的请求借用 Internal exchange API。飞书当前
 [浏览器网页接入指南](https://open.feishu.cn/document/sso/web-application-end-user-consent/guide)
@@ -391,7 +404,9 @@ bearer secret 发给当前 Bootstrap。
   不能仅凭 install/device ID 或公开的 WireGuard public key 自动接管。客户端在身份切换
   后仍保留已释放 lease 的加密 capability，以便之后安全切回原 profile；capability 确实
   丢失时，保持现有可用 tunnel 或 pending/降级状态，并进入受控恢复或完整轮换
-  installation/device/key。
+  installation/device/key。新版 MX-H2I 客户端遇到 “WireGuard public key is already
+  bound to another active lease” 时，可自动轮换一次本机 installation/device/key 并重试，
+  仅用于让当前设备重新拿新 lease；不会接管、释放或覆盖旧 active lease。
 
 运维恢复顺序为：
 
@@ -861,8 +876,9 @@ curl -fsS http://127.0.0.1:18090/internal/v1/sdk/oauth/feishu/config | jq
   `x-mx-new-lease-capability` 不经过公网明文 HTTP。没有 HTTPS 时不得用“先连访客”绕过。
 - redirect URI 精确为固定 loopback，没有尾部 `/`。
 - tenant allowlist 只包含预期企业，不为空、不含通配符。
-- authorize transaction 写入共享 store、只保存 handle 摘要，过期与原子单次消费已在
-  多 Pod/PostgreSQL 环境验证。
+- authorize transaction 写入共享 store、按 handle 摘要索引，过期与 `consumedAt`
+  原子标记已在多 Pod/PostgreSQL 环境验证；同时确认 `mxfx2` 签名 handle 兜底不会泄露
+  飞书 code、verifier 或 access token。
 - 真实飞书租户已证明正确 verifier 成功、错误 verifier 由飞书 v2 上游拒绝；若没有这项
   证据，发布记录必须标注“飞书 PKCE 生产联调未验收”，不能把文档支持等同于现场成功。
 - `MX_LAUNCHER_NETWORK_LEGACY_UNAUTHENTICATED_USER_LEASES=0`，员工地址池不能靠伪造
@@ -906,7 +922,8 @@ curl -fsS http://127.0.0.1:18090/internal/v1/sdk/oauth/feishu/config | jq
 - 在 MX-H2I 点击取消：loopback listener 关闭，访客连接保持。
 - 五分钟内未完成：本地 flow 超时，旧回调不能再使用。
 - 修改 callback state：返回校验失败，不请求 Internal token endpoint。
-- 重放相同 `exchangeHandle`：Internal 在调用飞书前拒绝；重放已换票的 code：飞书拒绝。
+- 重放相同 `exchangeHandle`：共享 store 正常时 Internal 在调用飞书前拒绝；若 store
+  暂不可见，重放已换票的 code 仍由飞书上游拒绝。
 - 用错误 verifier 调 Internal：本地 transaction 被消费并拒绝；另用 fresh code 的受控
   staging 测试确认错误 verifier 也确实被飞书上游拒绝，不能把本地拒绝混作上游证据。
 - 使用不在 allowlist 的企业账号：Internal 拒绝，不创建 user、不分配 lease。
@@ -941,8 +958,9 @@ lsof -nP -iTCP:17891 -sTCP:LISTEN
 | `redirect_uri unmatch` 或 token `20071` | 飞书后台、authorize、token exchange、Electron 四处 URI 不一致 | 精确比较 scheme、`127.0.0.1`、`17891`、path 和尾部斜杠 |
 | 本地报 `EADDRINUSE` | 17891 被其他进程占用或上次异常实例未退出 | 用 `lsof` 找 owner，结束冲突进程后重新发起；不改随机端口 |
 | Windows 报 runtime JSON `rename ... EPERM/EACCES/EBUSY` | 重复实例、安全软件、索引器或短暂文件锁占用本地状态文件 | 先完全退出 tray 和所有 MX-H2I 进程并检查安全软件；新版会串行写入并有限重试，H2O 派生 mirror 失败不再误判为后端不可达 |
+| 浏览器显示“登录请求已结束”，但 MX-H2I 仍在等待授权 | 旧标签页、旧 callback 或此前异常自动重试留下了已非当前 pending flow 的回调 | 关闭该浏览器页，返回 MX-H2I；新版不会暗中自动创建第二条授权 flow，若本次交易失效会退出等待态并要求重新点击“使用飞书登录” |
 | state 校验失败 | 旧标签页、并发登录、伪造回调或应用已重启 | 关闭旧页面，从 MX-H2I 重新开始完整登录 |
-| Internal 报 transaction missing/mismatch | handle 已用/过期，或 redirect/verifier 不匹配；失败校验也会原子消费 | 不重试旧 handle/code，从 MX-H2I 新建完整授权；检查共享 store 与多 Pod 时钟 |
+| Internal 报 transaction missing/mismatch | handle 已用/过期，redirect/verifier 不匹配；旧 `mxfx1` 客户端/服务端还会在 Internal API 重启、多 Pod 未共用 Postgres 或公网路由分裂时出现刚授权即 missing | 不重试旧 handle/code，从 MX-H2I 新建完整授权；连续出现时先确认 Internal 与客户端均已升级到支持 `mxfx2` 签名 handle，再检查 Postgres、Pod rollout 与公网路径 |
 | 飞书 `20003`、`20004`、`20065` | code 无效、超过五分钟或已使用 | 重新授权；不要重试原 code |
 | 飞书 `20002` | App ID 与 App Secret 不匹配 | 轮换/修正 Kubernetes Secret 并 rollout |
 | 飞书 `20010` | 用户不在应用使用范围或版本未发布 | 修改飞书后台可用范围，重新发布并等待管理员审批 |

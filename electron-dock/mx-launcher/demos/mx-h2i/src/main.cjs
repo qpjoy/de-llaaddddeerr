@@ -698,7 +698,7 @@ function registerIpc() {
       lookupTimeoutMs: NETWORK_DIAGNOSTIC_LOOKUP_TIMEOUT_MS
     });
     try {
-      const session = await connectLauncherNetwork({
+      const session = await connectLauncherNetworkWithLocalIdentityRepair({
         identityKind: 'anonymous',
         requestTag: 'guest'
       });
@@ -1065,6 +1065,52 @@ function registerIpc() {
     } finally {
       wireGuardDisconnectInFlight = false;
     }
+  });
+  ipcMain.handle('mx-h2i:reset-local-network-identity', async () => {
+    if (wireGuardDisconnectInFlight) return visibleRuntime();
+    clearPendingFeishuLogin('local-identity-reset');
+    networkMutationEpoch += 1;
+    const previousMode = runtime.connection?.mode === 'employee' ? 'employee' : 'guest';
+    const previousIp = nullableString(runtime.connection?.localIp);
+    try {
+      await drainWireGuardConnectOperations();
+      await drainWireGuardRecoveryOperation();
+      const standaloneOwnership = await releaseStandaloneOwnershipForRuntime('local-identity-reset');
+      const systemDomainProxy = await disableSystemDomainProxyForRuntime('local-identity-reset');
+      const rotation = await rotateLocalLauncherIdentity('manual-clear-old-connection', {
+        diagnostics: {
+          standaloneOwnership,
+          systemDomainProxy
+        }
+      });
+      runtime.feedback = {
+        tone: 'success',
+        message: '已清理旧连接，并轮换本机 installation、device 和 WireGuard 密钥；请重新连接以申请新的租约。'
+      };
+      queueDiagnosticLog('info', 'network.local-identity-reset', runtime.feedback.message, {
+        previousMode,
+        previousIp,
+        ...rotation
+      });
+      touchRuntime('local network identity reset');
+      await publishNetworkModeEvent(
+        previousMode === 'employee' ? 'staff:disconnect' : 'visit:disconnect',
+        'disconnected',
+        { leaseIp: previousIp, reason: 'local-identity-reset' }
+      );
+    } catch (err) {
+      runtime.feedback = {
+        tone: 'danger',
+        message: `清理旧连接失败：${errorMessage(err)}`
+      };
+      queueDiagnosticError('network.local-identity-reset-failed', err, {
+        previousMode,
+        previousIp
+      });
+      touchRuntime('local network identity reset failed');
+    }
+    await saveAndBroadcast();
+    return visibleRuntime();
   });
   ipcMain.handle('mx-h2i:install-appcenter', async () => {
     if (runtime.connection.state !== 'connected') {
@@ -1900,13 +1946,15 @@ async function promoteEmployeeConnection(options = {}) {
         touchRuntime(`${provider} authenticated; preparing visit-to-staff switch`);
         await saveAndBroadcast();
       }
-      const session = await connectLauncherNetwork({
+      const session = await connectLauncherNetworkWithLocalIdentityRepair({
         identityKind: 'user',
         userId: auth.user.userId,
         leaseProfile: provider === 'feishu' ? 'feishu' : undefined,
         accessToken: auth.accessToken,
         authProvider: provider,
         requestTag: provider === 'feishu' ? 'feishu-employee' : 'employee'
+      }, {
+        preservePreviousOnRetryFailure: Boolean(networkFallback)
       });
       assertNetworkTransitionCurrent(lifecycleEpoch);
       dataPlaneApplyStarted = true;
@@ -2030,7 +2078,8 @@ async function startFeishuLogin() {
         body: {
           redirectUri,
           state: flow.state,
-          codeChallenge: createHash('sha256').update(flow.codeVerifier).digest('base64url')
+          codeChallenge: createHash('sha256').update(flow.codeVerifier).digest('base64url'),
+          exchangeHandleVersion: 'mxfx2'
         }
       }
     );
@@ -2040,7 +2089,7 @@ async function startFeishuLogin() {
     if (
       !authorizationUrl
       || !isSafeFeishuAuthorizationUrl(authorizationUrl)
-      || !/^mxfx1\.[A-Za-z0-9_-]{43}$/.test(exchangeHandle || '')
+      || !isSafeFeishuExchangeHandle(exchangeHandle)
     ) {
       throw new Error('Internal 没有返回安全的飞书 HTTPS 授权地址。');
     }
@@ -2237,15 +2286,42 @@ async function completeFeishuLogin(flow, code) {
     }
   } catch (err) {
     if (pendingFeishuLogin !== flow) return;
+    if (isFeishuAuthorizationTransactionMissingError(err)) {
+      clearPendingFeishuLogin('token-transaction-missing', flow);
+      runtime.feedback = {
+        tone: 'danger',
+        message: guestPreservingFeishuMessage(`飞书登录失败：${feishuTokenExchangeFailureMessage(err)}。请重新点击“使用飞书登录”发起新的授权。`)
+      };
+      queueDiagnosticError('auth.feishu-transaction-missing', err, {
+        flowId: flow.id,
+        stage: flow.stage
+      });
+      touchRuntime('feishu transaction missing');
+      await saveAndBroadcast();
+      return;
+    }
     clearPendingFeishuLogin('token-exchange-failed', flow);
     runtime.feedback = {
       tone: 'danger',
-      message: guestPreservingFeishuMessage(`飞书登录失败：${errorMessage(err)}。`)
+      message: guestPreservingFeishuMessage(`飞书登录失败：${feishuTokenExchangeFailureMessage(err)}。`)
     };
     queueDiagnosticError('auth.feishu-login-failed', err);
     touchRuntime('feishu login failed');
     await saveAndBroadcast();
   }
+}
+
+function isFeishuAuthorizationTransactionMissingError(err) {
+  return errorMessage(err)
+    .toLowerCase()
+    .includes('feishu authorization transaction is missing, expired, or already consumed');
+}
+
+function feishuTokenExchangeFailureMessage(err) {
+  const message = errorMessage(err);
+  return isFeishuAuthorizationTransactionMissingError(err)
+    ? `${message}；本机 127.0.0.1 回调地址是正确的，请重新点击“使用飞书登录”。如果连续出现，请检查 Internal API 是否部署最新版本并使用同一个 Postgres 存储飞书授权交易。`
+    : message;
 }
 
 async function rejectFeishuCallback(flow, reason) {
@@ -2386,6 +2462,12 @@ function isSafeFeishuAuthorizationUrl(value) {
   } catch {
     return false;
   }
+}
+
+function isSafeFeishuExchangeHandle(value) {
+  if (typeof value !== 'string' || value.length > 2048) return false;
+  return /^mxfx1\.[A-Za-z0-9_-]{43}$/.test(value)
+    || /^mxfx2\.[A-Za-z0-9_-]{32,1800}\.[A-Za-z0-9_-]{43}$/.test(value);
 }
 
 function assertSecureFeishuTransport(bootstrap, operation) {
@@ -11626,6 +11708,53 @@ async function connectLauncherNetwork(input) {
   };
 }
 
+async function connectLauncherNetworkWithLocalIdentityRepair(input, options = {}) {
+  try {
+    return await connectLauncherNetwork(input);
+  } catch (err) {
+    if (!isLauncherPublicKeyConflictError(err)) throw err;
+    const previousRuntime = {
+      installation: runtime.installation,
+      leaseCapabilities: runtime.leaseCapabilities,
+      connection: runtime.connection,
+      identity: runtime.identity,
+      auth: runtime.auth,
+      networkHandover: runtime.networkHandover
+    };
+    const rotation = await rotateLocalLauncherIdentity('public-key-conflict-auto-repair');
+    runtime.feedback = {
+      tone: 'info',
+      message: '检测到本机 WireGuard 公钥仍被旧 active lease 占用，已自动轮换本机 installation 与 WireGuard 密钥并重试一次。'
+    };
+    queueDiagnosticError('network.public-key-conflict-before-repair', err, rotation);
+    touchRuntime('local identity rotated after public key conflict');
+    await saveAndBroadcast();
+    try {
+      return await connectLauncherNetwork({
+        ...input,
+        requestTag: `${stringValue(input.requestTag, 'connect')}-identity-repair`
+      });
+    } catch (retryErr) {
+      if (options.preservePreviousOnRetryFailure === true) {
+        runtime.installation = previousRuntime.installation;
+        runtime.leaseCapabilities = previousRuntime.leaseCapabilities;
+        runtime.connection = previousRuntime.connection;
+        runtime.identity = previousRuntime.identity;
+        runtime.auth = previousRuntime.auth;
+        runtime.networkHandover = previousRuntime.networkHandover;
+        touchRuntime('local identity repair rolled back after retry failure');
+      }
+      throw retryErr;
+    }
+  }
+}
+
+function isLauncherPublicKeyConflictError(err) {
+  const status = Number(err?.status || err?.statusCode || err?.payload?.statusCode || 0);
+  return status === 401
+    && errorMessage(err).toLowerCase().includes('wireguard public key is already bound to another active lease');
+}
+
 async function ensureCredentialStorageRecoveryReady() {
   if (runtime?.credentialStorageFailure) {
     const recovery = await reconcileCredentialStorageFailureAfterStartup();
@@ -11731,6 +11860,75 @@ async function ensureInstallation() {
   };
   runtime.installation = installation;
   return installation;
+}
+
+async function rotateLocalLauncherIdentity(reason, options = {}) {
+  const current = normalizeInstallation(runtime.installation);
+  const productId = launcherProductId().replace(/[^a-z0-9]+/g, '_');
+  const normalizedProductId = launcherProductId();
+  const mod = await import('@qpjoy/electron-launcher');
+  const keyPair = mod.createLauncherWireGuardKeyPair();
+  const now = nowIso();
+  const installId = `inst_${productId}_${shortId()}`;
+  const deviceId = `dev_${productId}_${shortId()}`;
+  const previousInstallId = nullableString(current.installId);
+  const previousDeviceId = nullableString(current.deviceId);
+  const previousPublicKey = nullableString(current.keyPair?.publicKey);
+  const previousConnection = retainableConnectionSnapshot(runtime.connection);
+  runtime.installation = normalizeInstallation({
+    installId,
+    deviceId,
+    ownershipInstanceId: installId,
+    siteId: current.siteId,
+    deviceLabel: current.deviceLabel || `${launcherProductDisplayName()} Desktop`,
+    deviceModel: await detectDeviceModel(),
+    osVersion: os.release(),
+    appVersion: app.getVersion(),
+    keyPair,
+    createdAt: now,
+    updatedAt: now
+  });
+  runtime.leaseCapabilities = normalizeLeaseCapabilities(
+    Object.fromEntries(Object.entries(runtime.leaseCapabilities || {})
+      .filter(([key, record]) => !(
+        record?.productId === normalizedProductId
+        && (
+          record.installId === previousInstallId
+          || record.publicKey === previousPublicKey
+          || key.startsWith(`pending:${normalizedProductId}:${previousInstallId || ''}:`)
+        )
+      )))
+  );
+  runtime.networkHandover = null;
+  runtime.connection = {
+    ...idleConnection(),
+    mode: previousConnection?.mode || runtime.connection?.mode || 'guest',
+    diagnostics: {
+      ...(previousConnection?.diagnostics || {}),
+      localIdentityRepair: {
+        ok: true,
+        reason,
+        previousInstallId,
+        previousDeviceId,
+        previousPublicKey,
+        nextInstallId: installId,
+        nextDeviceId: deviceId,
+        diagnostics: options.diagnostics || null,
+        updatedAt: now
+      },
+      updatedAt: now
+    }
+  };
+  runtime.identity = normalizeIdentity(null);
+  runtime.auth = null;
+  return {
+    reason,
+    previousInstallId,
+    previousDeviceId,
+    previousPublicKey,
+    nextInstallId: installId,
+    nextDeviceId: deviceId
+  };
 }
 
 async function detectDeviceModel() {

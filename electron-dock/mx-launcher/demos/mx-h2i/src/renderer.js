@@ -654,6 +654,7 @@ async function runAction(action, payload) {
     const handlers = {
       connectGuest: () => api.connectGuest(),
       disconnect: () => api.disconnect(),
+      resetLocalNetworkIdentity: () => api.resetLocalNetworkIdentity?.(),
       'login-employee': () => api.loginEmployee(payload),
       'login-feishu': () => api.startFeishuLogin?.(),
       'cancel-feishu-login': () => api.cancelFeishuLogin?.(),
@@ -968,7 +969,7 @@ function renderGuestConnect(connected, connecting, leaseOnly = false) {
         <button class="text-button" type="button" data-action="select-mode" data-mode="employee">员工登录</button>
         ${renderCheckUpdatesButton('text-button')}
         <button class="text-button" type="button" data-action="show-advanced">高级选项</button>
-        ${retainedGuest ? '<button class="text-button" type="button" data-action="disconnect">清理旧连接</button>' : ''}
+        ${retainedGuest ? '<button class="text-button" type="button" data-action="resetLocalNetworkIdentity">清理旧连接</button>' : ''}
       </div>
     </section>
   `;
@@ -3666,6 +3667,32 @@ function createMockApi() {
       },
       authFlow: null,
       feedback: { tone: 'info', message: '连接已断开。' }
+    }),
+    resetLocalNetworkIdentity: async () => commit({
+      connection: {
+        ...mockState.connection,
+        state: 'idle',
+        localIp: null,
+        routePolicy: 'none',
+        subject: null,
+        diagnostics: {
+          ...(mockState.connection?.diagnostics || {}),
+          localIdentityRepair: {
+            ok: true,
+            reason: 'mock-local-identity-reset',
+            updatedAt: new Date().toISOString()
+          }
+        },
+        health: {
+          wireGuard: 'idle',
+          domesticRelay: 'idle',
+          internalApi: 'idle',
+          splitDns: 'idle',
+          appBroker: 'idle'
+        }
+      },
+      authFlow: null,
+      feedback: { tone: 'success', message: '已清理旧连接并轮换本机网络身份。' }
     }),
     installAppCenter: async () => commit({
       apps: {

@@ -410,19 +410,20 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       post: operation({
         tag: 'Authentication',
         summary: '生成飞书授权地址',
-        description: 'Internal 对 redirectUri 做精确 allowlist 校验，把客户端生成的 state 与 PKCE S256 challenge 写入飞书授权地址，并创建一个仅保存摘要、五分钟有效、可跨 Pod 原子消费的 exchangeHandle 事务。客户端仍必须在 loopback 回调时校验 state。',
+        description: 'Internal 对 redirectUri 做精确 allowlist 校验，把客户端生成的 state 与 PKCE S256 challenge 写入飞书授权地址，并创建五分钟有效的 exchangeHandle。新版客户端可传 exchangeHandleVersion=mxfx2 请求服务端签名 handle；未传时保持 mxfx1 兼容。Internal 仍优先在共享 store 中原子消费，用于挡重放，store 临时不可见时可用签名 handle 完成本地 redirect/PKCE/过期校验。客户端仍必须在 loopback 回调时校验 state。',
         operationId: 'createFeishuAuthorizationUrl',
         routeId: 'sdk.oauth.feishu.authorize',
         auth: 'public',
         request: {
           redirectUri: 'http://127.0.0.1:17891/oauth/feishu/callback',
           state: '<random-state>',
-          codeChallenge: '<base64url-sha256-code-verifier>'
+          codeChallenge: '<base64url-sha256-code-verifier>',
+          exchangeHandleVersion: 'mxfx2'
         },
         required: ['redirectUri', 'state', 'codeChallenge'],
         response: {
           authorizationUrl: 'https://accounts.feishu.cn/open-apis/authen/v1/authorize?...',
-          exchangeHandle: 'mxfx1.<opaque-random-value>'
+          exchangeHandle: 'mxfx2.<signed-payload>.<signature>'
         }
       })
     },
@@ -430,7 +431,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
       post: operation({
         tag: 'Authentication',
         summary: '用飞书授权码换取 MX token',
-        description: 'Internal 先原子消费 exchangeHandle，并校验其绑定的 redirect URI 与 PKCE verifier，再使用 App Secret 和授权码向飞书换票，读取用户身份并校验 tenant allowlist。响应只返回 MX User Center token；飞书 access/refresh token 不返回且不持久化。飞书当前公开 v2 token 文档未明确声明 PKCE 字段，生产启用前仍须用真实租户证明错误 verifier 会被飞书上游拒绝。',
+        description: 'Internal 先尝试原子消费 exchangeHandle 的共享 store 记录，并校验其绑定的 redirect URI 与 PKCE verifier；如果记录在部署/路由切换期间不可见，则校验新版签名 handle 中的 redirect、challenge 与过期时间。随后使用 App Secret 和授权码向飞书换票，读取用户身份并校验 tenant allowlist。响应只返回 MX User Center token；飞书 access/refresh token 不返回且不持久化。飞书当前公开 v2 token 文档未明确声明 PKCE 字段，生产启用前仍须用真实租户证明错误 verifier 会被飞书上游拒绝。',
         operationId: 'exchangeFeishuAuthorizationCode',
         routeId: 'sdk.oauth.feishu.token',
         auth: 'public',
@@ -438,7 +439,7 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
           code: '<one-time-authorization-code>',
           redirectUri: 'http://127.0.0.1:17891/oauth/feishu/callback',
           codeVerifier: '<pkce-code-verifier>',
-          exchangeHandle: 'mxfx1.<opaque-random-value>',
+          exchangeHandle: 'mxfx2.<signed-payload>.<signature>',
           audience: 'mx-sdk',
           scope: 'auth.read appcenter.read network.dns.policy oversea.subscription.ensure',
           requestId: 'mx-h2i-feishu-001'
