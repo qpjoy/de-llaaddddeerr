@@ -30,6 +30,30 @@ assert.equal(
 );
 assert.equal(domesticTlsRuntime.env.MX_DOMESTIC_HTTPS_BIND, '0.0.0.0');
 assert.equal(domesticTlsRuntime.env.MX_DOMESTIC_HTTPS_PORT, '443');
+const dualListenerDomesticRuntime = buildSiteSlotDomesticRuntimeConfig(config, {
+  siteId: 'domestic-main',
+  edgeBind: '0.0.0.0',
+  edgePort: 18090,
+  bootstrapProtocol: 'https',
+  bootstrapHost: 'h2i.minsight-ai.com',
+  bootstrapPort: 443
+}, null);
+assert.equal(dualListenerDomesticRuntime.edge.bind, '0.0.0.0');
+assert.equal(dualListenerDomesticRuntime.edge.port, 18090);
+assert.equal(dualListenerDomesticRuntime.edge.publicBaseUrl, 'https://h2i.minsight-ai.com');
+assert.equal(dualListenerDomesticRuntime.env.MX_DOMESTIC_EDGE_BIND, '0.0.0.0');
+assert.equal(dualListenerDomesticRuntime.env.MX_DOMESTIC_EDGE_PORT, '18090');
+assert.equal(dualListenerDomesticRuntime.env.MX_DOMESTIC_HTTPS_BIND, '0.0.0.0');
+assert.equal(dualListenerDomesticRuntime.env.MX_DOMESTIC_HTTPS_PORT, '443');
+assert.ok(
+  dualListenerDomesticRuntime.warnings.includes(
+    'public-bind: Domestic edge listens on all interfaces; protect with cloud firewall/security group'
+  )
+);
+assert.ok(
+  dualListenerDomesticRuntime.warnings.every((warning) => !warning.startsWith('blocked:')),
+  'explicit legacy listener compatibility must not block the canonical HTTPS bootstrap'
+);
 const migratedLegacyDomesticTlsRuntime = buildSiteSlotDomesticRuntimeConfig(config, {
   siteId: 'domestic-main',
   bootstrapHost: 'h2i.mxinfo-inc.cn'

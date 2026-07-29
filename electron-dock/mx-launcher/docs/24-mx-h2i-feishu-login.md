@@ -186,6 +186,11 @@ code/verifier、账号密码、MX bearer 或 lease capability。首次访客 enr
 发送；因此“先用公网明文 HTTP 连访客，再走访客 WireGuard 登录飞书”不是生产可用的
 bootstrap 方案。loopback HTTP 仅限本机开发。
 
+Admin 将这两类入口显示为独立字段：`Protocol / Bootstrap Host / Bootstrap Port` 固定描述
+canonical 公网 HTTPS；`Legacy / Diagnostic Edge Bind / Port` 只描述旧版本兼容或诊断
+listener。已有部署可在迁移窗口保留 `0.0.0.0:18090`，新配置默认
+`127.0.0.1:18090`；无论哪种情况，新版三种登录都不能把该 HTTP listener 视为安全传输。
+
 生产应先为公开 bootstrap 提供并校验证书有效的 HTTPS：首次访客 enrollment 经 HTTPS
 完成，访客 WireGuard ready 后，后续敏感请求可以继续走 HTTPS 或已验证的 Internal
 overlay。不能通过关闭客户端门禁、去掉 capability 或在 HTTP 中发送 bearer 来绕过该要求。

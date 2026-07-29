@@ -9,6 +9,7 @@ const MX_INTERNAL_DNS_IP = '10.88.88.88';
 const MX_DOMESTIC_RELAY_IP = '10.88.0.1';
 const MX_LOCAL_EDGE_DNS = '127.0.0.1:2053';
 const MX_DEFAULT_APP_DNS_ZONE = 'mxinfo-inc.cn';
+const MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST = 'h2i.minsight-ai.com';
 const INTERNAL_PEER_STATUS_AUTO_REFRESH_MS = 30000;
 
 function isLocalStaticAdminBaseUrl(value) {
@@ -10392,19 +10393,19 @@ function renderDomesticRuntimeConfigPanel() {
         </label>
         <label class="form-field">
           <span>Bootstrap Host</span>
-          <input data-domestic-runtime-field="bootstrapHost" autocomplete="off" value="${escapeHtml(bootstrap.host)}" placeholder="api.mxinfo-inc.cn" />
+          <input data-domestic-runtime-field="bootstrapHost" autocomplete="off" value="${escapeHtml(bootstrap.host)}" placeholder="${MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST}" />
         </label>
         <label class="form-field compact-field">
           <span>Bootstrap Port</span>
           <input data-domestic-runtime-field="bootstrapPort" inputmode="numeric" type="number" min="1" max="65535" value="${escapeHtml(String(bootstrap.port))}" />
         </label>
         <label class="form-field">
-          <span>Edge Bind</span>
-          <input data-domestic-runtime-field="edgeBind" autocomplete="off" value="${escapeHtml(config.edge?.bind || '0.0.0.0')}" />
+          <span>Legacy / Diagnostic Edge Bind</span>
+          <input data-domestic-runtime-field="edgeBind" autocomplete="off" value="${escapeHtml(config.edge?.bind || '127.0.0.1')}" />
         </label>
         <label class="form-field compact-field">
-          <span>Edge Port</span>
-          <input data-domestic-runtime-field="edgePort" inputmode="numeric" type="number" min="1" max="65535" value="${escapeHtml(String(config.edge?.port || bootstrap.port || 18090))}" />
+          <span>Legacy / Diagnostic Edge Port</span>
+          <input data-domestic-runtime-field="edgePort" inputmode="numeric" type="number" min="1" max="65535" value="${escapeHtml(String(config.edge?.port || 18090))}" />
         </label>
         <label class="form-field wide-field">
           <span>Internal Base URL</span>
@@ -10420,21 +10421,21 @@ function renderDomesticRuntimeConfigPanel() {
         </label>
         <label class="form-field">
           <span>DNS Bind</span>
-          <input data-domestic-runtime-field="dnsBind" autocomplete="off" value="${escapeHtml(config.dns?.bind || '0.0.0.0')}" />
+          <input data-domestic-runtime-field="dnsBind" autocomplete="off" value="${escapeHtml(config.dns?.bind || '10.88.0.1')}" />
         </label>
         <label class="form-field compact-field">
           <span>DNS Port</span>
-          <input data-domestic-runtime-field="dnsPort" inputmode="numeric" type="number" min="1" max="65535" value="${escapeHtml(String(config.dns?.port || 50053))}" />
+          <input data-domestic-runtime-field="dnsPort" inputmode="numeric" type="number" min="1" max="65535" value="${escapeHtml(String(config.dns?.port || 53))}" />
         </label>
       </div>
       <div class="foundation-list domestic-runtime-summary">
         <article>
-          <strong>${escapeHtml(publicUrl)}</strong>
-          <span>H 端启动入口；旧端口客户端重启后会按同域名候选端口重新探测。</span>
-          <small>${escapeHtml(config.edge?.bind || '0.0.0.0')}:${escapeHtml(String(config.edge?.port || bootstrap.port || '-'))} -> ${escapeHtml(config.upstreams?.internalApi || '-')}</small>
+          <strong data-domestic-runtime-public-summary>${escapeHtml(publicUrl)}</strong>
+          <span data-domestic-runtime-public-summary-label>${escapeHtml(domesticRuntimeBootstrapSummaryLabel(bootstrap))}</span>
+          <small data-domestic-runtime-edge-summary>Legacy / diagnostic edge: ${escapeHtml(config.edge?.bind || '127.0.0.1')}:${escapeHtml(String(config.edge?.port || 18090))} -> ${escapeHtml(config.upstreams?.internalApi || '-')}</small>
         </article>
         <article>
-          <strong>${escapeHtml(config.dns?.bind || '0.0.0.0')}:${escapeHtml(String(config.dns?.port || 50053))}</strong>
+          <strong>${escapeHtml(config.dns?.bind || '10.88.0.1')}:${escapeHtml(String(config.dns?.port || 53))}</strong>
           <span>Domestic DNS cache / split DNS edge</span>
           <small>Internal authority remains the source of truth.</small>
         </article>
@@ -10458,14 +10459,13 @@ function domesticRuntimeConfigForRender() {
 }
 
 function domesticRuntimeDefaultConfig(siteId = 'domestic-main') {
-  const bootstrapHost = domesticRuntimeDefaultBootstrapHost(siteId);
   return {
     siteId,
     status: 'active',
     edge: {
-      bind: '0.0.0.0',
+      bind: '127.0.0.1',
       port: 18090,
-      publicBaseUrl: `http://${bootstrapHost}:18090`
+      publicBaseUrl: `https://${MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST}`
     },
     upstreams: {
       internalBaseUrl: 'http://10.88.88.88:18090',
@@ -10481,54 +10481,42 @@ function domesticRuntimeDefaultConfig(siteId = 'domestic-main') {
   };
 }
 
-function domesticRuntimeDefaultBootstrapHost(siteId = 'domestic-main') {
-  const pipeline = asArray(state.dashboard?.siteSlotPipelines)
-    .filter((item) => item.kind === 'domestic' && item.siteId === siteId)
-    .sort((left, right) => String(right.latestUpdatedAt || '').localeCompare(String(left.latestUpdatedAt || '')))[0] || null;
-  const profile = inspectorSshProfile('domestic', siteId);
-  return normalizeBootstrapHost(pipeline?.host || profile?.host) || 'api.mxinfo-inc.cn';
-}
-
-function normalizeBootstrapHost(value) {
-  const text = String(value || '').trim();
-  if (!text) return '';
-  const normalized = text.includes('://') ? text : `http://${text}`;
-  try {
-    return new URL(normalized).hostname || '';
-  } catch {
-    const authority = text.split('/')[0] || text;
-    const withoutUserInfo = authority.includes('@') ? authority.split('@').pop() || authority : authority;
-    return withoutUserInfo.replace(/:\d+$/, '').trim();
-  }
-}
-
 function domesticRuntimeBootstrapParts(config) {
   const edge = config?.edge || {};
-  const fallbackHost = domesticRuntimeDefaultBootstrapHost(config?.siteId || selectedDomesticSiteId() || 'domestic-main');
   try {
     const parsed = new URL(edge.publicBaseUrl);
     const protocol = parsed.protocol.replace(/:$/, '') === 'https' ? 'https' : 'http';
     const port = Number(parsed.port || (protocol === 'https' ? 443 : 80));
     return {
       protocol,
-      host: parsed.hostname || fallbackHost,
+      host: parsed.hostname || MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST,
       port: Number.isFinite(port) ? port : (edge.port || 18090)
     };
   } catch {
     return {
-      protocol: 'http',
-      host: fallbackHost,
-      port: edge.port || 18090
+      protocol: 'https',
+      host: MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST,
+      port: 443
     };
   }
 }
 
 function domesticRuntimePublicUrl(input) {
   const protocol = input.protocol === 'https' ? 'https' : 'http';
-  const host = input.host || 'api.mxinfo-inc.cn';
+  const host = input.host || MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST;
   const port = positiveNumberOrNull(input.port) || (protocol === 'https' ? 443 : 80);
   const isDefault = (protocol === 'https' && port === 443) || (protocol === 'http' && port === 80);
   return `${protocol}://${host}${isDefault ? '' : `:${port}`}`;
+}
+
+function domesticRuntimeBootstrapSummaryLabel(input) {
+  const protocol = input?.protocol === 'https' ? 'https' : 'http';
+  const host = String(input?.host || '').trim().toLowerCase();
+  const port = positiveNumberOrNull(input?.port) || (protocol === 'https' ? 443 : 80);
+  if (protocol === 'https' && host === MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST && port === 443) {
+    return 'Canonical HTTPS bootstrap (current form draft)';
+  }
+  return `Non-canonical bootstrap draft; expected https://${MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST}`;
 }
 
 function renderDomesticRuntimeApplyResult(apply) {
@@ -10563,24 +10551,47 @@ function bindDomesticRuntimeControls(root) {
   if (save) save.addEventListener('click', () => void saveDomesticRuntimeConfigFromAdmin({ apply: false, root }));
   const apply = root.querySelector('[data-domestic-runtime-apply]');
   if (apply) apply.addEventListener('click', () => void saveDomesticRuntimeConfigFromAdmin({ apply: true, root }));
+  for (const field of root.querySelectorAll('[data-domestic-runtime-field]')) {
+    if (field === siteSelect) continue;
+    field.addEventListener(field.tagName === 'SELECT' ? 'change' : 'input', () => {
+      refreshDomesticRuntimeDraftSummary(root);
+    });
+  }
+}
+
+function refreshDomesticRuntimeDraftSummary(root = foundationGrid) {
+  const draft = domesticRuntimeFormPayload(root);
+  const bootstrap = {
+    protocol: draft.bootstrapProtocol,
+    host: draft.bootstrapHost,
+    port: draft.bootstrapPort
+  };
+  const publicSummary = root.querySelector('[data-domestic-runtime-public-summary]');
+  const publicSummaryLabel = root.querySelector('[data-domestic-runtime-public-summary-label]');
+  const edgeSummary = root.querySelector('[data-domestic-runtime-edge-summary]');
+  if (publicSummary) publicSummary.textContent = domesticRuntimePublicUrl(bootstrap);
+  if (publicSummaryLabel) publicSummaryLabel.textContent = domesticRuntimeBootstrapSummaryLabel(bootstrap);
+  if (edgeSummary) {
+    edgeSummary.textContent = `Legacy / diagnostic edge: ${draft.edgeBind || '127.0.0.1'}:${draft.edgePort || 18090} -> ${draft.internalApiUpstream}`;
+  }
 }
 
 function domesticRuntimeFormPayload(root = foundationGrid) {
   const value = (field) => root.querySelector(`[data-domestic-runtime-field="${field}"]`)?.value?.trim() || '';
   const siteId = value('siteId') || state.domesticRuntime.selectedSiteId || selectedDomesticSiteId() || 'domestic-main';
-  const bootstrapHost = value('bootstrapHost') || domesticRuntimeDefaultBootstrapHost(siteId);
+  const bootstrapHost = value('bootstrapHost') || MX_DEFAULT_PUBLIC_BOOTSTRAP_HOST;
   return {
     siteId,
     status: value('status') === 'paused' ? 'paused' : 'active',
-    edgeBind: value('edgeBind') || '0.0.0.0',
+    edgeBind: value('edgeBind') || '127.0.0.1',
     edgePort: positiveNumberOrNull(value('edgePort')),
     bootstrapProtocol: value('bootstrapProtocol') === 'https' ? 'https' : 'http',
-    bootstrapHost: bootstrapHost || 'api.mxinfo-inc.cn',
+    bootstrapHost,
     bootstrapPort: positiveNumberOrNull(value('bootstrapPort')),
     internalBaseUrl: value('internalBaseUrl') || 'http://10.88.88.88:18090',
     internalApiUpstream: value('internalApiUpstream') || value('internalBaseUrl') || 'http://10.88.88.88:18090',
     internalH2iUpstream: value('internalH2iUpstream') || value('internalBaseUrl') || 'http://10.88.88.88:18090',
-    dnsBind: value('dnsBind') || '0.0.0.0',
+    dnsBind: value('dnsBind') || '10.88.0.1',
     dnsPort: positiveNumberOrNull(value('dnsPort')),
     requestedBy: 'desktop-admin',
     requestId: `desktop-domestic-runtime-${Date.now()}`

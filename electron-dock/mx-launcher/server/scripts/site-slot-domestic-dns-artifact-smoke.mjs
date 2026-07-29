@@ -225,17 +225,32 @@ try {
   assert.match(
     adminController,
     /dnsExpectedAnswer = '10\.88\.88\.88'/,
-    'runtime config apply must prove that the V2 name is forwarded to Internal authority'
+    'runtime config apply must prove that the Internal authority returns its gateway address'
   );
   assert.match(
     adminController,
-    /const publicBootstrapUrl = new URL\(config\.edge\.publicBaseUrl\);[\s\S]*?const dnsProbeName = `\$\{publicBootstrapUrl\.hostname\}\.`;/,
-    'runtime config apply must probe the hostname selected by the Domestic runtime config'
+    /const dnsProbeName = 'gateway\.internal\.mx\.';/,
+    'runtime config apply must probe an Internal authoritative name over UDP and TCP'
+  );
+  assert.doesNotMatch(
+    adminController,
+    /const dnsProbeName = `\$\{publicBootstrapUrl\.hostname\}\.`;/,
+    'the DNS probe must not require the public bootstrap hostname to resolve to an Internal address'
+  );
+  assert.match(
+    adminController,
+    /const publicBootstrapUrl = new URL\(config\.edge\.publicBaseUrl\);[\s\S]*?const publicBootstrapHealthUrl = `\$\{publicBootstrapUrl\.origin\}\/bootstrap-healthz`;/,
+    'the public HTTPS probe must continue to use the configured bootstrap origin'
   );
   assert.doesNotMatch(
     adminController,
     /const dnsProbeName = 'h2i\.mxinfo-inc\.cn\.'/,
     'runtime config apply must not probe the retired public default unconditionally'
+  );
+  assert.match(
+    domain,
+    /dnsRecordForTarget\('gateway\.internal\.mx', apiTarget, 'internal-service'\)/,
+    'the fixed runtime DNS probe name must be present in the Internal authoritative zone'
   );
   assert.match(
     adminController,
@@ -273,7 +288,7 @@ try {
     'the API must trust only its immediate Internal gateway after that gateway normalizes client IP'
   );
 
-  console.log('OK coexistence DNS apply recreates and proves UDP/TCP 10.88.0.1:53 -> Internal 10.88.88.88:53');
+  console.log('OK coexistence DNS apply proves gateway.internal.mx over UDP/TCP and public bootstrap over HTTPS');
 } finally {
   rmSync(outputRoot, { recursive: true, force: true });
 }

@@ -5928,7 +5928,7 @@ function domesticRuntimeConfigApplyScript(config: SiteSlotDomesticRuntimeConfig)
   const dnsBind = coreDnsBindHost(config.dns.bind);
   const dnsPort = String(config.dns.port || 53);
   const publicBootstrapUrl = new URL(config.edge.publicBaseUrl);
-  const dnsProbeName = `${publicBootstrapUrl.hostname}.`;
+  const dnsProbeName = 'gateway.internal.mx.';
   const dnsExpectedAnswer = '10.88.88.88';
   const publicBootstrapHealthUrl = `${publicBootstrapUrl.origin}/bootstrap-healthz`;
   const caddyfileBase64 = Buffer.from(domesticServicesCaddyfileContent()).toString('base64');

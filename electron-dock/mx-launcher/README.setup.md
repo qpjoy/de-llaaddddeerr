@@ -259,3 +259,9 @@ pkill -TERM -f "$HOME/Library/Application Support/MX-H2I/h2o/mihomo-tunnel/bin/m
 # Subscriptions
 POST /internal/v1/user-center/users/{userId}/oversea/ensure-subscription
 ```
+
+```bash
+# 获取操作internal ops token
+kubectl -n mx-internal-shadow get secret mx-internal-ops \
+  -o go-template='{{index .data "token" | base64decode}}{{"\n"}}'
+```

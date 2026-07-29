@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "electron .",
     "build": "pnpm run typecheck && pnpm run check",
-    "check": "node --check main.cjs && node --check preload.cjs && node --check renderer.js && node --check scripts/after-sign.mjs && node --check scripts/check-package-contract.mjs && node --check scripts/verify-signatures.mjs && node scripts/check-package-contract.mjs",
+    "check": "node --check main.cjs && node --check preload.cjs && node --check renderer.js && node --check scripts/after-sign.mjs && node --check scripts/check-package-contract.mjs && node --check scripts/verify-signatures.mjs && node --check scripts/domestic-runtime-config.test.mjs && node scripts/check-package-contract.mjs && node scripts/domestic-runtime-config.test.mjs",
     "desktop:check": "node --check main.cjs && node --check preload.cjs && node --check renderer.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "package:mac:dmg": "pnpm run build && electron-builder --mac dmg --universal",

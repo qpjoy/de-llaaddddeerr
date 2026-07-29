@@ -517,12 +517,23 @@ Domestic runtime config 是 Internal 配置中心对象，默认 seed 为：
 }
 ```
 
+Admin 中 `Protocol / Bootstrap Host / Bootstrap Port` 表示公网 TLS 身份；
+`Legacy / Diagnostic Edge Bind / Port` 表示独立的旧客户端或诊断 listener。新配置默认只
+绑定 `127.0.0.1:18090`；迁移期可显式保留 `0.0.0.0:18090`，同时继续使用
+`https://h2i.minsight-ai.com:443` 作为 canonical bootstrap。两组字段不能互相替代，
+Domestic SSH Profile 的公网 IP 也不能作为 TLS Bootstrap Host。
+
 Admin 可以在 Internal 基础系统 / Config Center 里修改并 `Save & Apply`，或通过
 `site-slot.domestic-runtime-config.upsert` / `site-slot.domestic-runtime-config.apply` 执行。
 保存只更新 Internal 配置中心；Apply 会通过 Domestic SSH Profile 写入
 `/opt/mx/current/domestic/.env` 并重启 Domestic edge stack。创建 Domestic plan 时，
 Internal 也会把这个配置渲染成 Domestic bundle 的 `.env` 并通过 SSH runner 下发；
 Domestic 不需要单独登录，也不应该成为配置真相。
+
+Apply 分别验证公网 `h2i.minsight-ai.com/bootstrap-healthz` 的系统信任证书，以及
+Domestic `10.88.0.1:53` 转发到 Internal 权威记录
+`gateway.internal.mx -> 10.88.88.88`。公网 bootstrap 域名不作为 Internal DNS 探针，
+也不要求在 split DNS 中改写为 Internal 地址。
 
 正式 Domestic 没有 Docker Hub/registry egress 时，先使用 `Save Config` 保存
 `https://h2i.minsight-ai.com` bootstrap 配置，再通过 Domestic plan 的
