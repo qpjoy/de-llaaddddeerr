@@ -4197,6 +4197,10 @@ function selectedOrActivePipelineForCurrentDeployment(pipelines) {
   const selected = state.selectedPlanId
     ? asArray(pipelines).find((pipeline) => pipeline.kind === kind && pipeline.planId === state.selectedPlanId)
     : null;
+  const active = activePipelineForCurrentDeployment(pipelines);
+  if (shouldReplaceSelectedHistoryPipeline(selected, active)) {
+    return active;
+  }
   const preferredSite = preferredDeploymentSite(deploymentSites(pipelines, kind), kind);
   if (
     selected
@@ -4204,7 +4208,18 @@ function selectedOrActivePipelineForCurrentDeployment(pipelines) {
   ) {
     return selected;
   }
-  return activePipelineForCurrentDeployment(pipelines);
+  return active;
+}
+
+function shouldReplaceSelectedHistoryPipeline(selected, active) {
+  return Boolean(
+    selected
+    && active
+    && selected.planId !== active.planId
+    && selected.siteId === active.siteId
+    && isFailedOrRollbackPipeline(selected)
+    && !isFailedOrRollbackPipeline(active)
+  );
 }
 
 function deploymentPipelineKind(kind = state.deploymentKind) {
@@ -4265,15 +4280,24 @@ function deploymentSites(pipelines, kind) {
 
 function chooseOperationalPipeline(pipelines) {
   const items = asArray(pipelines);
-  const actionable = items.filter((pipeline) => {
+  const latestPassed = latestPipeline(
+    items.filter((pipeline) => pipeline.health === 'passed' && !isRollbackPipeline(pipeline))
+  );
+  const candidates = latestPassed
+    ? items.filter((pipeline) => {
+      return pipeline.planId === latestPassed.planId
+        || String(pipeline.latestUpdatedAt || '').localeCompare(String(latestPassed.latestUpdatedAt || '')) > 0;
+    })
+    : items;
+  const actionable = candidates.filter((pipeline) => {
     const actions = asArray(pipeline.actionHints);
     return actions.some((action) => action.allowed) && !isFailedOrRollbackPipeline(pipeline);
   });
-  const openDeployment = items.filter((pipeline) => {
+  const openDeployment = candidates.filter((pipeline) => {
     return !isRollbackPipeline(pipeline) && !['passed', 'failed', 'rollback'].includes(pipeline.health);
   });
-  const passedDeployment = items.filter((pipeline) => pipeline.health === 'passed' && !isRollbackPipeline(pipeline));
-  const nonRollback = items.filter((pipeline) => !isRollbackPipeline(pipeline));
+  const passedDeployment = candidates.filter((pipeline) => pipeline.health === 'passed' && !isRollbackPipeline(pipeline));
+  const nonRollback = candidates.filter((pipeline) => !isRollbackPipeline(pipeline));
   const preferred = actionable.length
     ? actionable
     : openDeployment.length
@@ -13889,17 +13913,17 @@ async function continueSetupRun() {
 
     const result = await executeSelectedAction({ openEvidence: false, monitor: false });
     if (!result?.ok) {
-      pushSetupRunStep(action, 'failed', result?.error?.message || 'Action failed.');
+      replaceLatestSetupRunStep(action.actionId, 'failed', result?.error?.message || 'Action failed.');
       stopSetupRun(result?.error?.message || 'Action failed.', 'failed');
       return;
     }
     const blockedMessage = setupActionBlockedMessage(result.payload || {});
     if (blockedMessage) {
-      pushSetupRunStep(action, 'blocked', blockedMessage);
+      replaceLatestSetupRunStep(action.actionId, 'blocked', blockedMessage);
       stopSetupRun(blockedMessage, 'blocked');
       return;
     }
-    pushSetupRunStep(action, 'passed', summarizeActionPayload(action, result.payload || {}));
+    replaceLatestSetupRunStep(action.actionId, 'passed', summarizeActionPayload(action, result.payload || {}));
     state.setupRun.message = 'Refreshing pipeline state...';
     renderSetupGuidance(state.currentPipeline, state.currentActions);
     await delay(650);
